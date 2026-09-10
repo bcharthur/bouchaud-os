@@ -183,6 +183,19 @@ pub fn stall_ipi_observe(rip: u64, interrupted_user: bool) {
     STALL_IPI_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Interruptions de quantum recues par ce coeur depuis l'amorcage.
+///
+/// C'est le compteur du handler de replanification, incremente avec le numero
+/// de coeur REEL. Un coeur dont il ne bouge pas ne recoit rien : ni IPI, ni
+/// timer local. C'est la seule facon de distinguer un coeur en ligne d'un
+/// coeur qui participe.
+pub fn quantums_recus(cpu: usize) -> u64 {
+    if cpu >= STALL_IPI_COUNT.len() {
+        return 0;
+    }
+    STALL_IPI_COUNT[cpu].load(Ordering::Acquire)
+}
+
 pub fn stall_ipi_bkl_result(acquired: bool) {
     let cpu = local_cpu();
     if acquired {

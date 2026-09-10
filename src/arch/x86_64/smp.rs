@@ -31,6 +31,9 @@ const X2APIC_EOI: u32 = 0x80B;
 const X2APIC_SVR: u32 = 0x80F;
 const X2APIC_ICR: u32 = 0x830;
 const X2APIC_LVT_TIMER: u32 = 0x832;
+const X2APIC_TIMER_INITIAL: u32 = 0x838;
+const X2APIC_TIMER_CURRENT: u32 = 0x839;
+const X2APIC_TIMER_DIVIDE: u32 = 0x83E;
 const IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 const LAPIC_EOI: usize = 0xB0;
@@ -38,6 +41,41 @@ const LAPIC_SVR: usize = 0xF0;
 const LAPIC_ICR_LOW: usize = 0x300;
 const LAPIC_ICR_HIGH: usize = 0x310;
 const LAPIC_LVT_TIMER: usize = 0x320;
+const LAPIC_TIMER_INITIAL: usize = 0x380;
+const LAPIC_TIMER_CURRENT: usize = 0x390;
+const LAPIC_TIMER_DIVIDE: usize = 0x3E0;
+
+/// Diviseur du timer local : seize.
+///
+/// Un diviseur de un ferait deborder le compteur trente-deux bits pendant la
+/// calibration sur un bus rapide ; seize laisse une marge confortable sans
+/// rendre le quantum granuleux.
+const LAPIC_DIVISEUR_16: u32 = 0b0011;
+
+/// Bit de masquage d'une entree LVT.
+const LVT_MASQUE: u32 = 1 << 16;
+/// Mode periodique : bits 18:17 = 01.
+const LVT_PERIODIQUE: u32 = 1 << 17;
+/// Mode TSC-deadline : bits 18:17 = 10.
+const LVT_TSC_DEADLINE: u32 = 2 << 17;
+
+/// Comment le quantum local est arme sur CE coeur.
+///
+/// 0 = aucun, 1 = TSC-deadline, 2 = LAPIC periodique.
+static MODE_TIMER_LOCAL: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+const MODE_AUCUN: u8 = 0;
+const MODE_TSC_DEADLINE: u8 = 1;
+const MODE_LAPIC_PERIODIQUE: u8 = 2;
+
+/// Compte initial du timer local, calibre une fois par le premier coeur.
+///
+/// La frequence du bus APIC est la meme pour tous les coeurs d'un paquet : la
+/// calibrer par coeur multiplierait un travail identique par seize, et chaque
+/// calibration coute une fenetre d'attente.
+static LAPIC_COMPTE_QUANTUM: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static LAPIC_HZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 const TRAMPOLINE_PHYS: u64 = 0x8000;
 const MAILBOX_PHYS: u64 = 0x9000;
@@ -322,41 +360,223 @@ fn tsc_deadline_supported() -> bool {
     __cpuid(1).ecx & (1 << 24) != 0 && crate::kernel::timer::tsc_hz().is_some()
 }
 
-/// Programme un quantum local TSC-deadline. Chaque CPU rearme son propre
-/// timer; aucun broadcast BSP n'est requis dans ce mode.
-fn init_local_scheduler_timer() -> bool {
-    if !tsc_deadline_supported() {
-        return false;
+/// Ecrit un registre du timer local, quel que soit le mode APIC.
+unsafe fn timer_local_ecrit(x2: bool, lapic: *mut u8, msr: u32, offset: usize, valeur: u32) {
+    if x2 {
+        usermode::write_msr(msr, valeur as u64);
+    } else {
+        lapic_write(lapic, offset, valeur);
+    }
+}
+
+/// Lit le compteur courant du timer local.
+unsafe fn timer_local_courant(x2: bool, lapic: *mut u8) -> u32 {
+    if x2 {
+        usermode::read_msr(X2APIC_TIMER_CURRENT) as u32
+    } else {
+        lapic_read(lapic, LAPIC_TIMER_CURRENT)
+    }
+}
+
+/// Mesure la frequence du timer local en la comparant au TSC.
+///
+/// # Pourquoi contre le TSC et pas contre le PIT
+///
+/// Le PIT n'existe que sur un coeur -- c'est tout le probleme qu'on corrige
+/// ici. Le TSC, lui, est lisible depuis n'importe quel coeur et sa frequence
+/// est deja etablie au demarrage (`BOUCHAUD_TSC_EARLY_CALIBRATION_OK`).
+///
+/// Le timer est MASQUE pendant la mesure : une interruption de quantum au
+/// milieu d'une calibration fausserait la calibration ET arriverait avant que
+/// l'ordonnanceur ne soit pret a la recevoir.
+fn calibre_timer_local() -> Option<u32> {
+    let tsc_hz = crate::kernel::timer::tsc_hz()?;
+    // Dix millisecondes : assez long pour que la granularite du diviseur
+    // disparaisse, assez court pour ne pas retarder l'amorcage.
+    let cycles_fenetre = tsc_hz / 100;
+    if cycles_fenetre == 0 {
+        return None;
     }
     unsafe {
         let (x2, lapic) = local_apic();
-        let lvt = RESCHEDULE_VECTOR as u32 | (2 << 17); // mode TSC deadline
-        if x2 {
-            usermode::write_msr(X2APIC_LVT_TIMER, lvt as u64);
-        } else {
-            lapic_write(lapic, LAPIC_LVT_TIMER, lvt);
+        timer_local_ecrit(x2, lapic, X2APIC_TIMER_DIVIDE, LAPIC_TIMER_DIVIDE, LAPIC_DIVISEUR_16);
+        timer_local_ecrit(
+            x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER,
+            RESCHEDULE_VECTOR as u32 | LVT_MASQUE,
+        );
+        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, u32::MAX);
+
+        let depart = crate::arch::x86_64::cpu::rdtsc();
+        while crate::arch::x86_64::cpu::rdtsc().wrapping_sub(depart) < cycles_fenetre {
+            core::hint::spin_loop();
         }
+        let reste = timer_local_courant(x2, lapic);
+        let ecoule_tsc = crate::arch::x86_64::cpu::rdtsc().wrapping_sub(depart);
+        // Arreter le compteur : un timer laisse libre continuerait de decompter
+        // jusqu'a zero et leverait une interruption hors quantum.
+        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, 0);
+
+        let tics = u32::MAX.wrapping_sub(reste) as u64;
+        // Un compteur qui n'a pas bouge veut dire que le timer local ne compte
+        // pas. Deviner une frequence a partir de zero armerait un quantum au
+        // hasard : mieux vaut rendre None et rester sur le repli.
+        if tics == 0 || ecoule_tsc == 0 {
+            return None;
+        }
+        let hz = tics.saturating_mul(tsc_hz) / ecoule_tsc;
+        LAPIC_HZ.store(hz, Ordering::Relaxed);
+        let compte = hz.saturating_mul(SCHED_QUANTUM_TICKS) / 1000;
+        u32::try_from(compte.max(1)).ok()
     }
-    arm_local_scheduler_timer();
+}
+
+/// Programme le quantum local de CE coeur.
+///
+/// # LE DEFAUT QUE CECI CORRIGE, MESURE SUR LA MACHINE DE REFERENCE
+///
+/// Seul le mode TSC-deadline etait implemente. Or TSC-deadline est une
+/// fonctionnalite Intel : `CPUID.1:ECX[24]`. Le TRIGKEY porte un Ryzen 7
+/// 5800H -- `BOUCHAUD_HWPROBE_CPU vendor=AuthenticAMD logical=16` -- qui ne
+/// l'expose pas.
+///
+/// Consequence : `init_local_scheduler_timer` rendait faux, AUCUN coeur
+/// n'avait de timer local, et le seul battement du systeme restait le PIT, qui
+/// est une source unique routee vers un seul coeur. L'enregistreur de vol
+/// physique ne contient que des evenements de `cpu=0`, et les compteurs de
+/// tick le confirment a chaque echantillon : `timer0` avance de deux mille a
+/// treize mille, `timer1`, `timer2` et `timer3` restent a zero.
+///
+/// Quinze coeurs sur seize etaient donc en ligne, comptes dans
+/// `SMP4_AP_STARTED count=15`, et incapables de preempter quoi que ce soit.
+///
+/// # Le repli
+///
+/// Le mode PERIODIQUE du timer LAPIC existe depuis le Pentium et n'a jamais
+/// ete propre a un fondeur. Il se rearme tout seul : c'est meme plus simple
+/// que TSC-deadline, qui exige une reecriture du MSR a chaque interruption.
+fn init_local_scheduler_timer() -> bool {
+    // TSC-deadline d'abord quand il existe : il derive du TSC, donc il ne
+    // depend d'aucune frequence de bus a calibrer.
+    if tsc_deadline_supported() {
+        unsafe {
+            let (x2, lapic) = local_apic();
+            let lvt = RESCHEDULE_VECTOR as u32 | LVT_TSC_DEADLINE;
+            timer_local_ecrit(x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER, lvt);
+        }
+        MODE_TIMER_LOCAL.store(MODE_TSC_DEADLINE, Ordering::Release);
+        arm_local_scheduler_timer();
+        return true;
+    }
+
+    // Sinon le mode periodique. Le compte est calibre UNE fois : la frequence
+    // du bus APIC est la meme pour tous les coeurs d'un paquet.
+    let mut compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+    if compte == 0 {
+        let Some(mesure) = calibre_timer_local() else { return false };
+        LAPIC_COMPTE_QUANTUM.store(mesure, Ordering::Release);
+        compte = mesure;
+    }
+    unsafe {
+        let (x2, lapic) = local_apic();
+        timer_local_ecrit(x2, lapic, X2APIC_TIMER_DIVIDE, LAPIC_TIMER_DIVIDE, LAPIC_DIVISEUR_16);
+        timer_local_ecrit(
+            x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER,
+            RESCHEDULE_VECTOR as u32 | LVT_PERIODIQUE,
+        );
+        // L'ecriture du compte initial DEMARRE le timer : elle vient en
+        // dernier, une fois le vecteur et le mode en place.
+        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
+    }
+    MODE_TIMER_LOCAL.store(MODE_LAPIC_PERIODIQUE, Ordering::Release);
     true
 }
 
 pub fn arm_local_scheduler_timer() {
-    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) && !tsc_deadline_supported() {
-        return;
+    // EN MODE PERIODIQUE, IL N'Y A RIEN A REARMER, ET SURTOUT RIEN A ECRIRE.
+    //
+    // `IA32_TSC_DEADLINE` n'existe pas sur un processeur sans TSC-deadline :
+    // l'ecrire y leve une faute de protection generale. Le mode doit donc
+    // decider AVANT toute ecriture, et non le seul drapeau « un timer local
+    // est actif ».
+    match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
+        MODE_LAPIC_PERIODIQUE => {}
+        MODE_TSC_DEADLINE => {
+            if let Some(hz) = crate::kernel::timer::tsc_hz() {
+                let delta = (hz as u128)
+                    .saturating_mul(SCHED_QUANTUM_TICKS as u128)
+                    .div_ceil(1000)
+                    .min(u64::MAX as u128) as u64;
+                unsafe {
+                    usermode::write_msr(
+                        IA32_TSC_DEADLINE,
+                        crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1)),
+                    );
+                }
+            }
+        }
+        _ => {}
     }
-    if let Some(hz) = crate::kernel::timer::tsc_hz() {
-        let delta = (hz as u128)
-            .saturating_mul(SCHED_QUANTUM_TICKS as u128)
-            .div_ceil(1000)
-            .min(u64::MAX as u128) as u64;
-        unsafe {
-            usermode::write_msr(
-                IA32_TSC_DEADLINE,
-                crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1)),
-            );
+}
+
+/// Le mode de quantum local de ce coeur, pour le diagnostic.
+pub fn mode_timer_local() -> &'static str {
+    match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
+        MODE_TSC_DEADLINE => "tsc-deadline",
+        MODE_LAPIC_PERIODIQUE => "lapic-periodique",
+        _ => "aucun",
+    }
+}
+
+/// Frequence mesuree du timer local, en hertz. Zero en mode TSC-deadline.
+pub fn lapic_hz() -> u64 {
+    LAPIC_HZ.load(Ordering::Relaxed)
+}
+
+/// Combien de coeurs battent VRAIMENT, mesure et non deduite.
+///
+/// # Pourquoi une mesure et pas un compte
+///
+/// `schedulable_cpus()` dit combien de coeurs sont en ligne. Il ne dit pas
+/// combien en recoivent une interruption de quantum, et la difference n'est
+/// pas theorique : sur la machine de reference, seize coeurs etaient en ligne
+/// et un seul battait, parce que le seul timer implemente -- TSC-deadline --
+/// est une fonctionnalite Intel absente d'un Ryzen.
+///
+/// Un coeur qui ne recoit rien ne preempte rien : il ne peut executer que ce
+/// qu'il prend volontairement, et une tache qui s'y endort ne se reveille pas.
+/// Le compter comme disponible est un mensonge que rien ne contredit.
+///
+/// La mesure prend deux releves separes par `fenetre_ms` et rend, pour chaque
+/// coeur, le nombre d'interruptions de quantum recues entre les deux.
+pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
+    let coeurs = schedulable_cpus().min(MAX_CPUS);
+    let mut avant = [0u64; MAX_CPUS];
+    for cpu in 0..coeurs {
+        avant[cpu] = crate::kernel::task::quantums_recus(cpu);
+    }
+    let echeance = crate::kernel::timer::monotonic_ns()
+        .saturating_add(fenetre_ms.saturating_mul(1_000_000));
+    // Une attente bornee et non un sommeil : la mesure doit valoir depuis
+    // n'importe quel contexte, y compris l'amorcage ou aucune tache n'existe.
+    crate::kernel::timer::attente_bornee(fenetre_ms.saturating_add(50), || {
+        crate::kernel::timer::monotonic_ns() >= echeance
+    });
+    let mut battants = 0usize;
+    for cpu in 0..coeurs {
+        let delta = crate::kernel::task::quantums_recus(cpu).saturating_sub(avant[cpu]);
+        crate::serial_println!(
+            "BOUCHAUD_SMP_BATTEMENT cpu={} quantums={} fenetre_ms={} bat={}",
+            cpu, delta, fenetre_ms, (delta > 0) as u8,
+        );
+        if delta > 0 {
+            battants += 1;
         }
     }
+    crate::serial_println!(
+        "BOUCHAUD_SMP_BATTEMENT_BILAN battants={} en_ligne={} mode={}",
+        battants, coeurs, mode_timer_local(),
+    );
+    (battants, coeurs)
 }
 
 pub fn local_scheduler_timer_enabled() -> bool {
@@ -532,14 +752,45 @@ pub fn enable_scheduler() {
         LOCAL_SCHED_TIMER.store(true, Ordering::Release);
     }
     SCHEDULER_ENABLED.store(true, Ordering::Release);
-    if !local_scheduler_timer_enabled() {
-        broadcast_reschedule();
-    }
+    // LE COUP DE POUCE EST TOUJOURS NECESSAIRE, MEME AVEC UN TIMER LOCAL.
+    //
+    // Il ne l'etait qu'en l'absence de timer local, et c'etait un verrou
+    // d'amorcage que rien ne signalait.
+    //
+    // Un AP attend `SCHEDULER_ENABLED` en `hlt` -- il ne scrute pas, il dort.
+    // Il n'arme SON timer local qu'apres etre sorti de cette attente. Tant
+    // qu'aucune interruption ne le reveille, il ne sort pas ; et sans etre
+    // sorti, il n'a pas de timer pour se reveiller. Le timer local ne peut
+    // donc pas s'amorcer tout seul.
+    //
+    // La mesure le montrait sans ambiguite : quarante-neuf quantums sur le
+    // coeur zero en deux cents millisecondes, zero sur les trois autres, avec
+    // un timer pourtant declare actif.
+    //
+    // Un seul reveil suffit : ensuite chaque coeur bat de lui-meme.
+    broadcast_reschedule();
+    crate::serial_println!(
+        "BOUCHAUD_SMP_TIMER_LOCAL mode={} lapic_hz={} compte={} coeurs={}",
+        mode_timer_local(),
+        lapic_hz(),
+        LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire),
+        schedulable_cpus(),
+    );
     dmesg::log_fmt(format_args!(
         "SMP_NG2_SCHEDULER online={} mode=thread-load-balance+work-steal quantum={}ms",
         schedulable_cpus(),
         SCHED_QUANTUM_TICKS
     ));
+    // LA PREUVE, TOUT DE SUITE, ET PAS LA PROMESSE.
+    //
+    // Programmer un timer local ne prouve pas qu'il se declenche. La mesure
+    // coute deux cents millisecondes une seule fois a l'amorcage, et elle est
+    // la difference entre « seize coeurs en ligne » et « seize coeurs qui
+    // battent » -- deux affirmations que la machine de reference a montre
+    // etre distinctes.
+    if schedulable_cpus() > 1 {
+        let _ = mesure_battement_par_coeur(200);
+    }
 }
 
 pub fn init_probe() {
