@@ -17,6 +17,15 @@ if python3 tools/exec/fabrique-hello-exe.py "$SORTIE/bo-hello.exe" >/dev/null 2>
     export BO_HELLO_EXE="$SORTIE/bo-hello.exe"
 fi
 
+# Une table GPT ecrite par un outil qui ne partage AUCUNE ligne avec le noyau.
+# Un aller-retour ecriture/lecture dans le meme code reproduit ses propres
+# fautes de format des deux cotes et passe ; seule une table produite par
+# quelqu'un d'autre attrape l'ordre mixte d'un GUID ou une somme calculee sur
+# un champ qu'on a oublie de mettre a zero.
+if python3 tools/ci/fabrique-disque-gpt.py "$SORTIE/disque-gpt.img" --mio 64 >/dev/null 2>&1; then
+    export BO_DISQUE_GPT="$SORTIE/disque-gpt.img"
+fi
+
 echecs=0
 total=0
 for source in $(find tools -name 'test_*.rs' | sort); do

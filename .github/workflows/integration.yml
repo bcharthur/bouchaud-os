@@ -194,6 +194,37 @@ jobs:
           path: qemu-smoke.log
           if-no-files-found: warn
 
+  nvme-gpt:
+    name: qemu / nvme + gpt
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # Le pilote NVMe n'etait execute NULLE PART : `bouchaud_nvme_args`
+      # existait sans appelant, et aucune campagne n'attachait de disque. Le
+      # seul endroit ou il tournait etait la machine physique, ou il a
+      # double-faute. Ce scenario lui donne un disque, une vraie table GPT
+      # ecrite par un outil independant, et exige que la premiere lecture
+      # reelle parte et revienne.
+      - name: NVMe + GPT + montage
+        run: tools/ci/run_nvme_gpt.sh image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-nvme-gpt
+          path: target/nvme-gpt-ci/nvme-gpt.log
+          if-no-files-found: warn
+
   system-health:
     name: qemu / system health
     needs: [gate, kernel-build]
@@ -395,7 +426,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -403,6 +434,7 @@ jobs:
           ENABLED: ${{ needs.gate.outputs.run }}
           KERNEL: ${{ needs.kernel-build.result }}
           BOOT: ${{ needs.qemu-smoke.result }}
+          NVME: ${{ needs.nvme-gpt.result }}
           HEALTH: ${{ needs.system-health.result }}
           PRIMITIVES: ${{ needs.os-primitives.result }}
           MM: ${{ needs.mm-ng6.result }}
@@ -416,7 +448,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -426,7 +458,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -435,7 +467,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK
