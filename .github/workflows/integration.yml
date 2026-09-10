@@ -236,11 +236,22 @@ jobs:
         run: |
           BOUCHAUD_MACHINE=q35 tools/ci/run_nvme_gpt.sh \
             image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt-q35.log
+      # PROFONDEUR ANNONCEE CONTRE PROFONDEUR ATTEINTE.
+      #
+      # Partitionner les ressources DMA rend une profondeur superieure a un
+      # possible. Seul un appelant concurrent la rend atteinte -- et le journal
+      # du sondage GPT montrait huit commandes d'affilee toutes sur
+      # `emplacement=0`. Cette etape lance de vrais lecteurs simultanes et
+      # echoue si la profondeur retombe a un, ou si un emplacement fuit.
+      - name: Profondeur de file reellement atteinte
+        run: tools/ci/run_nvme_parallele.sh image/bootimage-bouchaud-os.bin target/nvme-parallele-ci/nvme-parallele.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-nvme-gpt
-          path: target/nvme-gpt-ci/*.log
+          path: |
+            target/nvme-gpt-ci/*.log
+            target/nvme-parallele-ci/*.log
           if-no-files-found: warn
 
   system-health:

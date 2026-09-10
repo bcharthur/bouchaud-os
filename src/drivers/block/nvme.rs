@@ -51,7 +51,7 @@
 
 use alloc::vec;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, PciDevice};
 use crate::drivers::bloc::{self, Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
@@ -394,9 +394,11 @@ impl Etat {
 //   * `FILES_ES` protege les FILES -- poser une entree de soumission, sonner,
 //     drainer les achevements. Chaque prise dure quelques dizaines
 //     d'instructions et ne contient AUCUNE attente.
-//   * `ES_OCCUPE` serialise les commandes entre elles et protege le tampon de
-//     rebond, qui est unique. Ce n'est pas un verrou a interruptions masquees :
-//     celui qui attend son tour le fait interruptions ACTIVES.
+//   * `EMPLACEMENTS_LIBRES` distribue les ressources DMA. Chaque emplacement
+//     porte SON tampon de rebond et SA page de liste PRP : deux commandes
+//     simultanees ne partagent rien. Ce n'est pas un verrou a interruptions
+//     masquees : celui qui attend un emplacement le fait interruptions
+//     ACTIVES, et draine les achevements pendant ce temps.
 //
 // L'attente de l'achevement se fait donc hors de tout verrou a interruptions
 // masquees. Le systeme continue de vivre pendant qu'un disque reflechit.
@@ -427,12 +429,111 @@ unsafe impl Send for FilesEs {}
 
 static FILES_ES: SpinLockIrq<Option<FilesEs>> = SpinLockIrq::new(None);
 
-/// Une commande d'entree-sortie est-elle en cours ?
+/// Combien de commandes d'entree-sortie peuvent voler ensemble.
 ///
-/// Le tampon de rebond est unique : deux transferts simultanes se marcheraient
-/// dessus. Ce jeton les serialise SANS masquer les interruptions, ce qu'un
-/// verrou tournant a interruptions masquees ne peut pas faire.
-static ES_OCCUPE: AtomicBool = AtomicBool::new(false);
+/// # Pourquoi ce nombre existe, et pourquoi il n'etait pas la
+///
+/// La premiere version serialisait TOUTES les entrees-sorties derriere un
+/// jeton unique, parce que le tampon de rebond etait unique. La profondeur
+/// effective valait donc un, quoi qu'en dise la taille des files : soixante-
+/// quatre entrees de soumission pour une seule commande utile.
+///
+/// Annoncer une profondeur superieure en partageant un tampon non partitionne
+/// aurait ete pire que de ne rien annoncer : deux commandes se seraient
+/// ecrasees l'une l'autre. Chaque emplacement porte donc SES ressources --
+/// son tampon de rebond, sa page de liste PRP -- et rien n'est partage.
+const EMPLACEMENTS_ES: usize = 4;
+
+/// Les ressources DMA d'un emplacement. Rien n'est partage avec un autre.
+#[derive(Clone, Copy)]
+struct Emplacement {
+    rebond_phys: u64,
+    rebond_virt: *mut u8,
+    liste_phys: u64,
+    liste_virt: *mut u8,
+}
+
+unsafe impl Send for Emplacement {}
+
+static EMPLACEMENTS: SpinLockIrq<Option<[Emplacement; EMPLACEMENTS_ES]>> =
+    SpinLockIrq::new(None);
+
+/// Masque des emplacements LIBRES. Bit a un = disponible.
+///
+/// Un masque atomique plutot qu'un verrou : la prise et le rendu sont deux
+/// instructions, sur le chemin le plus chaud du pilote, et rien d'autre n'a
+/// besoin d'etre serialise avec eux.
+static EMPLACEMENTS_LIBRES: AtomicU32 = AtomicU32::new(0);
+
+/// Entrees-sorties refusees faute d'emplacement libre.
+static ATTENTES_EMPLACEMENT: AtomicU64 = AtomicU64::new(0);
+
+/// Profondeur maximale reellement atteinte. Une profondeur annoncee que la
+/// machine n'atteint jamais est une profondeur imaginaire.
+static PROFONDEUR_MAX: AtomicU32 = AtomicU32::new(0);
+
+/// Alloue les ressources DMA de tous les emplacements.
+///
+/// Chaque emplacement recoit SON tampon de rebond et SA page de liste PRP.
+/// Rien n'est partage : c'est ce qui rend la profondeur superieure a un
+/// legitime plutot qu'annoncee.
+fn alloue_les_emplacements() -> Option<[Emplacement; EMPLACEMENTS_ES]> {
+    let mut places = [Emplacement {
+        rebond_phys: 0,
+        rebond_virt: core::ptr::null_mut(),
+        liste_phys: 0,
+        liste_virt: core::ptr::null_mut(),
+    }; EMPLACEMENTS_ES];
+    for place in places.iter_mut() {
+        let (rebond_phys, rebond_virt) = memory::alloc_dma(REBOND_OCTETS)?;
+        let (liste_phys, liste_virt) = memory::alloc_dma(PAGE)?;
+        *place = Emplacement { rebond_phys, rebond_virt, liste_phys, liste_virt };
+    }
+    Some(places)
+}
+
+/// Prend un emplacement libre, interruptions ACTIVES.
+///
+/// Rend son indice, ou `None` sur echeance. Un emplacement retenu par une
+/// commande abandonnee n'est PAS dans le masque : la quarantaine est par
+/// emplacement, et une commande lente n'arrete plus les autres.
+fn prend_un_emplacement(limite_ms: u64) -> Option<usize> {
+    let mut pris = usize::MAX;
+    let obtenu = crate::kernel::timer::attente_bornee(limite_ms, || {
+        let libres = EMPLACEMENTS_LIBRES.load(Ordering::Acquire);
+        if libres == 0 {
+            // Personne ne rendra son emplacement si les achevements ne sont
+            // pas draines : c'est ici que les commandes en vol se terminent.
+            draine_les_achevements();
+            return false;
+        }
+        let indice = libres.trailing_zeros() as usize;
+        let bit = 1u32 << indice;
+        if EMPLACEMENTS_LIBRES
+            .compare_exchange_weak(libres, libres & !bit, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            pris = indice;
+            return true;
+        }
+        false
+    });
+    if !obtenu {
+        ATTENTES_EMPLACEMENT.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    // Profondeur atteinte : le nombre d'emplacements pris a cet instant.
+    let occupes = EMPLACEMENTS_ES as u32
+        - EMPLACEMENTS_LIBRES.load(Ordering::Relaxed).count_ones();
+    PROFONDEUR_MAX.fetch_max(occupes, Ordering::Relaxed);
+    Some(pris)
+}
+
+/// Rend un emplacement au pot.
+#[inline]
+fn rend_un_emplacement(indice: usize) {
+    EMPLACEMENTS_LIBRES.fetch_or(1u32 << indice, Ordering::Release);
+}
 
 /// Le cycle de vie des commandes d'entree-sortie.
 ///
@@ -482,6 +583,8 @@ struct ContexteEs {
     taille_bloc: usize,
     blocs: u64,
     transfert_max: usize,
+    /// L'emplacement dont proviennent les adresses ci-dessous.
+    emplacement: u8,
     rebond_phys: u64,
     rebond_virt: *mut u8,
     liste_phys: u64,
@@ -489,7 +592,14 @@ struct ContexteEs {
 }
 
 /// Lit la configuration, verrou pris quelques instructions.
-fn contexte_es() -> Option<ContexteEs> {
+fn contexte_es(emplacement: usize) -> Option<ContexteEs> {
+    // Les ressources DMA d'abord : elles appartiennent a l'emplacement, pas a
+    // la configuration. Les lire ici garantit qu'un contexte ne peut pas
+    // porter les adresses d'un autre emplacement.
+    let place = {
+        let garde = EMPLACEMENTS.lock();
+        *garde.as_ref()?.get(emplacement)?
+    };
     let garde = ETAT.lock();
     let e = garde.as_ref()?;
     if e.nsid == 0 || e.format.taille_bloc == 0 {
@@ -500,10 +610,11 @@ fn contexte_es() -> Option<ContexteEs> {
         taille_bloc: e.format.taille_bloc,
         blocs: e.blocs,
         transfert_max: e.transfert_max,
-        rebond_phys: e.rebond_phys,
-        rebond_virt: e.rebond_virt,
-        liste_phys: e.liste_phys,
-        liste_virt: e.liste_virt,
+        emplacement: emplacement as u8,
+        rebond_phys: place.rebond_phys,
+        rebond_virt: place.rebond_virt,
+        liste_phys: place.liste_phys,
+        liste_virt: place.liste_virt,
     })
 }
 
@@ -511,47 +622,43 @@ fn contexte_es() -> Option<ContexteEs> {
 ///
 /// Rend `false` sur echeance : mieux vaut une erreur rendue a l'appelant qu'une
 /// attente sans fin sur un pilote bloque.
-fn prend_le_jeton(limite_ms: u64) -> bool {
-    let pris = crate::kernel::timer::attente_bornee(limite_ms, || {
-        ES_OCCUPE
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    });
-    if !pris {
-        return false;
-    }
-    // Le jeton ne suffit pas. Une commande abandonnee sur echeance est
+fn prend_le_jeton(limite_ms: u64) -> Option<usize> {
+    let emplacement = prend_un_emplacement(limite_ms)?;
+    // L'emplacement ne suffit pas. Une commande abandonnee sur echeance est
     // toujours la, du point de vue du controleur : il peut ecrire dans le
-    // tampon de rebond a n'importe quel moment. Le rendre a une nouvelle
-    // entree-sortie serait autoriser une corruption silencieuse -- et pour
-    // une ecriture, ce serait autoriser le controleur a relire un tampon
-    // qu'on aurait deja remplace, donc a poser sur le disque des octets qui
-    // n'appartiennent pas au bloc demande.
+    // tampon de CET emplacement a n'importe quel moment. Le rendre a une
+    // nouvelle entree-sortie serait autoriser une corruption silencieuse --
+    // et pour une ecriture, ce serait autoriser le controleur a relire un
+    // tampon qu'on aurait deja remplace, donc a poser sur le disque des
+    // octets qui n'appartiennent pas au bloc demande.
     //
     // On laisse une derniere chance a l'achevement tardif d'arriver : c'est le
     // seul evenement qui leve une quarantaine sans reinitialiser le
     // controleur.
-    if !tampon_disponible() {
+    if !tampon_disponible(emplacement) {
         let libere = crate::kernel::timer::attente_bornee(LIMITE_QUARANTAINE_MS, || {
             draine_les_achevements();
-            tampon_disponible()
+            tampon_disponible(emplacement)
         });
         if !libere {
             REFUS_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
             crate::serial_println!(
-                "NVME_IO_QUARANTAINE commandes={} consequence=entree-sortie-refusee",
+                "NVME_IO_QUARANTAINE emplacement={} commandes={} consequence=entree-sortie-refusee",
+                emplacement,
                 quarantaine_es()
             );
-            rend_le_jeton();
-            return false;
+            // L'emplacement N'EST PAS rendu : il reste retenu par la commande
+            // abandonnee. Le rendre au masque le proposerait a la requete
+            // suivante, qui se ferait ecraser par le meme achevement tardif.
+            return None;
         }
     }
-    true
+    Some(emplacement)
 }
 
 #[inline]
-fn rend_le_jeton() {
-    ES_OCCUPE.store(false, Ordering::Release);
+fn rend_le_jeton(emplacement: usize) {
+    rend_un_emplacement(emplacement);
 }
 
 /// Recolte l'achevement d'un identifiant, verrou pris le temps d'un appel.
@@ -568,9 +675,10 @@ fn recolte_es(cid: u16) -> Option<(u8, u8)> {
     SUIVI.lock().recolte(cid)
 }
 
-/// Met un identifiant en quarantaine. Rend faux s'il s'etait acheve entre-temps.
+/// Met un identifiant en quarantaine. Rend l'emplacement retenu, ou `None` si
+/// la commande s'etait achevee entre-temps.
 #[inline]
-fn expire_es(cid: u16) -> bool {
+fn expire_es(cid: u16) -> Option<u8> {
     SUIVI.lock().expire(cid)
 }
 
@@ -580,10 +688,13 @@ fn quarantaine_es() -> u16 {
     SUIVI.lock().quarantaine()
 }
 
-/// Le tampon de rebond est-il libre de toute commande abandonnee ?
+/// Le tampon de CET emplacement est-il libre de toute commande abandonnee ?
+///
+/// La question est posee par emplacement, et non pour le pilote entier : une
+/// commande lente sur un emplacement ne doit pas arreter les trois autres.
 #[inline]
-fn tampon_disponible() -> bool {
-    SUIVI.lock().tampon_disponible()
+fn tampon_disponible(emplacement: usize) -> bool {
+    !SUIVI.lock().emplacement_en_quarantaine(emplacement as u8)
 }
 
 /// Un identifiant d'entree-sortie libre, ou `None`.
@@ -592,8 +703,8 @@ fn tampon_disponible() -> bool {
 /// retiennent -- est le comportement correct. Une entree-sortie refusee se
 /// voit et se compte ; une entree-sortie qui reutilise un identifiant encore
 /// vivant rend a son appelant un tampon que personne n'a rempli.
-fn cid_es() -> Option<u16> {
-    SUIVI.lock().alloue()
+fn cid_es(emplacement: u8) -> Option<u16> {
+    SUIVI.lock().alloue(emplacement)
 }
 
 
@@ -649,8 +760,16 @@ fn draine_les_achevements() -> usize {
     for &(cid, type_statut, code_statut) in &lot[..lus] {
         match suivi.range(cid, type_statut, code_statut) {
             Verdict::Attendu => {}
-            Verdict::Tardif => {
+            Verdict::Tardif { emplacement } => {
+                // Le controleur vient de prouver qu'il en a fini avec le
+                // tampon de cet emplacement : il retourne au pot ICI, et
+                // nulle part ailleurs.
                 TARDIFS.fetch_add(1, Ordering::Relaxed);
+                rend_un_emplacement(emplacement as usize);
+                crate::serial_println!(
+                    "NVME_IO_TARDIF cid={} emplacement={} consequence=emplacement-rendu",
+                    cid, emplacement,
+                );
             }
             verdict => {
                 REJETES.fetch_add(1, Ordering::Relaxed);
@@ -698,7 +817,7 @@ fn soumet_es(sqe: &Sqe) -> Result<(), &'static str> {
 /// Emet une commande d'entree-sortie et attend son achevement, interruptions
 /// ACTIVES pendant l'attente.
 ///
-/// L'appelant doit tenir le jeton [`ES_OCCUPE`].
+/// L'appelant doit tenir un emplacement.
 fn emet_es(sqe: &Sqe, limite_ms: u64) -> Result<(), &'static str> {
     let cid = ((sqe[0] >> 16) & 0xFFFF) as u16;
     soumet_es(sqe)?;
@@ -736,7 +855,7 @@ fn emet_es(sqe: &Sqe, limite_ms: u64) -> Result<(), &'static str> {
         // son tampon. `expire` rend faux si l'achevement s'est range pendant
         // qu'on decidait d'abandonner -- la course existe, et la perdre
         // couterait un resultat valide.
-        if !expire_es(cid) {
+        if expire_es(cid).is_none() {
             if let Some(vu) = recolte_es(cid) {
                 statut = vu;
                 crate::serial_println!("NVME_IO_DELAI_RATTRAPE cid={}", cid);
@@ -832,7 +951,7 @@ unsafe fn prp_es(ctx: &ContexteEs, octets: usize) -> (u64, u64, &'static str) {
     }
 }
 
-/// Un transfert d'un seul lot, jeton tenu.
+/// Un transfert d'un seul lot, emplacement tenu.
 unsafe fn transfert_es(
     ctx: &ContexteEs,
     ecriture: bool,
@@ -844,7 +963,7 @@ unsafe fn transfert_es(
     // Pas d'identifiant libre : le pot est retenu par des quarantaines. Refuser
     // est le seul comportement correct -- reutiliser un identifiant encore
     // vivant ferait rendre a l'appelant l'achevement d'une autre commande.
-    let Some(cid) = cid_es() else { return Err("identifiants-epuises") };
+    let Some(cid) = cid_es(ctx.emplacement) else { return Err("identifiants-epuises") };
     if releve_detaille() {
         crate::serial_println!(
             "NVME_IO_PRP_READY cid={} plan={} prp1={:#x} prp2={:#x} octets={} rebond_phys={:#x} rebond_virt={:#x}",
@@ -1082,7 +1201,10 @@ impl PiloteBloc for PiloteNvme {
             Some(e) => Descripteur {
                 taille_bloc: e.format.taille_bloc,
                 blocs: e.blocs,
-                profondeur_file: 1,
+                // La profondeur ANNONCEE est celle qu'on peut reellement
+                // servir : un emplacement porte ses propres ressources DMA,
+                // et rien n'est partage entre deux commandes en vol.
+                profondeur_file: EMPLACEMENTS_ES,
                 vidange_reelle: e.vidange_reelle,
                 nom: "nvme0",
             },
@@ -1132,27 +1254,36 @@ impl PiloteNvme {
         if hors_service() {
             return Achevement::Absent;
         }
-        let Some(ctx) = contexte_es() else { return Achevement::Absent };
+        // L'EMPLACEMENT D'ABORD, LE CONTEXTE ENSUITE.
+        //
+        // L'ordre n'est pas indifferent : le contexte porte les adresses DMA
+        // de SON emplacement. Le construire avant de savoir lequel on aura
+        // reviendrait a lire les tampons d'un emplacement qu'on ne tient pas.
+        //
+        // La prise se fait interruptions ACTIVES, et draine les achevements
+        // pendant l'attente : celui qui patiente fait avancer les autres.
+        let Some(emplacement) = prend_le_jeton(LIMITE_JETON_MS) else {
+            OCCUPES.fetch_add(1, Ordering::Relaxed);
+            return Achevement::Erreur;
+        };
+        let Some(ctx) = contexte_es(emplacement) else {
+            rend_le_jeton(emplacement);
+            return Achevement::Absent;
+        };
         let octets_appelant = match source {
             Some(donnees) => donnees.len(),
             None => tampon.len(),
         };
         if !bornes_valides_ctx(&ctx, requete.lba, requete.blocs, octets_appelant) {
+            rend_le_jeton(emplacement);
             return Achevement::Erreur;
         }
         if releve_detaille() {
             crate::serial_println!(
-                "NVME_IO_READ_ENTER ecriture={} lba={} blocs={} taille_bloc={} nsid={} total_blocs={} transfert_max={}",
+                "NVME_IO_READ_ENTER ecriture={} lba={} blocs={} taille_bloc={} nsid={} total_blocs={} transfert_max={} emplacement={}",
                 ecriture as u8, requete.lba, requete.blocs, ctx.taille_bloc,
-                ctx.nsid, ctx.blocs, ctx.transfert_max,
+                ctx.nsid, ctx.blocs, ctx.transfert_max, emplacement,
             );
-        }
-
-        // Le jeton, interruptions ACTIVES : celui qui attend son tour laisse
-        // vivre le reste de la machine.
-        if !prend_le_jeton(LIMITE_JETON_MS) {
-            OCCUPES.fetch_add(1, Ordering::Relaxed);
-            return Achevement::Erreur;
         }
 
         let taille = ctx.taille_bloc;
@@ -1176,9 +1307,12 @@ impl PiloteNvme {
                 if let Err(raison) =
                     transfert_es(&ctx, ecriture, requete.lba + faits as u64, lot as u32)
                 {
-                    rend_le_jeton();
+                    // Sur echeance, l'emplacement N'EST PAS rendu : il est en
+                    // quarantaine, et seul l'achevement tardif le liberera.
                     if raison == "delai" {
                         note_delai_es();
+                    } else {
+                        rend_le_jeton(emplacement);
                     }
                     return if faits == 0 {
                         Achevement::Erreur
@@ -1210,7 +1344,7 @@ impl PiloteNvme {
             }
             faits += lot;
         }
-        rend_le_jeton();
+        rend_le_jeton(emplacement);
         if faits == 0 {
             return Achevement::Erreur;
         }
@@ -1233,18 +1367,25 @@ impl PiloteNvme {
         if hors_service() {
             return Achevement::Absent;
         }
-        let Some(ctx) = contexte_es() else { return Achevement::Absent };
-        if !prend_le_jeton(LIMITE_JETON_MS) {
+        let Some(emplacement) = prend_le_jeton(LIMITE_JETON_MS) else {
             OCCUPES.fetch_add(1, Ordering::Relaxed);
             return Achevement::Erreur;
-        }
-        let Some(cid) = cid_es() else {
-            rend_le_jeton();
+        };
+        let Some(ctx) = contexte_es(emplacement) else {
+            rend_le_jeton(emplacement);
+            return Achevement::Absent;
+        };
+        let Some(cid) = cid_es(ctx.emplacement) else {
+            rend_le_jeton(emplacement);
             return Achevement::Erreur;
         };
         let sqe = commande_vidange(cid, ctx.nsid);
         let resultat = emet_es(&sqe, LIMITE_VIDANGE_MS);
-        rend_le_jeton();
+        // Une vidange qui expire laisse elle aussi son emplacement en
+        // quarantaine : le controleur n'a rien annule.
+        if resultat.as_ref().err().copied() != Some("delai") {
+            rend_le_jeton(emplacement);
+        }
         match resultat {
             Ok(_) => {
                 note_reussite_es();
@@ -1307,6 +1448,23 @@ pub fn bring_up() -> bool {
             // Un appelant qui verrait le volume enregistre avant que les files
             // existent emettrait une commande dans le vide. L'ordre inverse ne
             // coute rien et ferme la fenetre.
+            // LES EMPLACEMENTS AVANT TOUT LE RESTE.
+            //
+            // Sans eux, `prend_le_jeton` trouve un masque vide et toute
+            // entree-sortie echoue sur echeance. Leur echec est donc FATAL
+            // pour la mise en service, et non silencieux : mieux vaut un
+            // disque declare absent qu'un disque declare pret qui refuse
+            // chaque lecture au bout de quatre secondes.
+            let Some(places) = alloue_les_emplacements() else {
+                crate::serial_println!(
+                    "BOUCHAUD_NVME_HORS_SERVICE raison=dma-emplacements emplacements={}",
+                    EMPLACEMENTS_ES
+                );
+                HORS_SERVICE.store(true, Ordering::Release);
+                return false;
+            };
+            *EMPLACEMENTS.lock() = Some(places);
+            EMPLACEMENTS_LIBRES.store((1u32 << EMPLACEMENTS_ES) - 1, Ordering::Release);
             *FILES_ES.lock() = Some(files);
             *ETAT.lock() = Some(etat);
             bloc::enregistre(VOLUME_INTERNE, &PILOTE);
@@ -1323,6 +1481,12 @@ pub fn bring_up() -> bool {
                 vidange as u8,
                 transfert,
                 core::str::from_utf8(&modele).unwrap_or("?").trim_end()
+            );
+            crate::serial_println!(
+                "BOUCHAUD_NVME_EMPLACEMENTS nombre={} rebond_octets={} total_dma={}",
+                EMPLACEMENTS_ES,
+                REBOND_OCTETS,
+                EMPLACEMENTS_ES * (REBOND_OCTETS + PAGE),
             );
             crate::kernel::dmesg::log("nvme: disque interne pret");
             true
@@ -1430,6 +1594,140 @@ refus_quarantaine={} cqe_rejetes={} cqe_tardifs={}",
         REJETES.load(Ordering::Relaxed),
         TARDIFS.load(Ordering::Relaxed),
     );
+    // LA PROFONDEUR ATTEINTE, PAS LA PROFONDEUR ANNONCEE.
+    //
+    // Un pilote qui declare quatre emplacements et n'en occupe jamais deux a
+    // une profondeur effective de un. La seule facon de le savoir est de
+    // mesurer le maximum reellement observe.
+    crate::serial_println!(
+        "[NVME-FILE] emplacements={} libres={} profondeur_max={} attentes={}",
+        EMPLACEMENTS_ES,
+        EMPLACEMENTS_LIBRES.load(Ordering::Relaxed).count_ones(),
+        PROFONDEUR_MAX.load(Ordering::Relaxed),
+        ATTENTES_EMPLACEMENT.load(Ordering::Relaxed),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sonde de concurrence
+// ---------------------------------------------------------------------------
+
+/// Combien de lecteurs la sonde lance.
+const SONDE_LECTEURS: usize = 4;
+/// Lectures par lecteur.
+const SONDE_LECTURES: u64 = 8;
+
+/// Lecteurs encore vivants.
+static SONDE_RESTANTS: AtomicU32 = AtomicU32::new(0);
+/// Lectures reussies, tous lecteurs confondus.
+static SONDE_REUSSIES: AtomicU64 = AtomicU64::new(0);
+/// Lectures echouees.
+static SONDE_ECHECS: AtomicU64 = AtomicU64::new(0);
+/// Prochain bloc a lire. Chaque lecteur en prend un different.
+static SONDE_PROCHAIN: AtomicU64 = AtomicU64::new(0);
+
+fn sonde_lecteur() -> ! {
+    let mut tampon = [0u8; 512];
+    for _ in 0..SONDE_LECTURES {
+        // Des blocs DISTINCTS : deux lecteurs qui liraient le meme bloc
+        // pourraient reussir en se partageant un cache imaginaire. Ceux-ci
+        // n'en ont pas, mais la question ne doit pas se poser.
+        let lba = SONDE_PROCHAIN.fetch_add(1, Ordering::Relaxed) % 1024;
+        let requete = Requete::lecture(lba, 1);
+        match PILOTE.soumet(requete, &mut tampon) {
+            Achevement::Fait(_) => {
+                SONDE_REUSSIES.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                SONDE_ECHECS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    SONDE_RESTANTS.fetch_sub(1, Ordering::Release);
+    crate::kernel::task::exit_current(0)
+}
+
+/// Emet des lectures depuis PLUSIEURS taches, et mesure la profondeur atteinte.
+///
+/// # Pourquoi cette sonde existe
+///
+/// Partitionner les ressources DMA par emplacement rend une profondeur
+/// superieure a un POSSIBLE et SURE. Elle ne la rend pas ATTEINTE : le seul
+/// appelant du pilote, le sondage GPT, est sequentiel, et le journal le
+/// montrait sans ambiguite -- huit commandes, toutes sur `emplacement=0`.
+///
+/// Une profondeur annoncee que rien n'exerce est une profondeur imaginaire.
+/// Cette sonde lance de vrais lecteurs, sur de vrais blocs distincts, et
+/// publie le maximum reellement observe. Si le pilote ne sait pas servir deux
+/// commandes ensemble, `profondeur_max` restera a un et le dira.
+pub fn sonde_parallele() {
+    if !present() || hors_service() {
+        crate::serial_println!("NVME_PARALLELE_ABSENT");
+        return;
+    }
+    PROFONDEUR_MAX.store(0, Ordering::Relaxed);
+    SONDE_REUSSIES.store(0, Ordering::Relaxed);
+    SONDE_ECHECS.store(0, Ordering::Relaxed);
+    SONDE_RESTANTS.store(SONDE_LECTEURS as u32, Ordering::Release);
+
+    let mut lances = 0usize;
+    for _ in 0..SONDE_LECTEURS {
+        if crate::kernel::task::spawn_noyau(sonde_lecteur, "nvme-sonde") {
+            lances += 1;
+        } else {
+            SONDE_RESTANTS.fetch_sub(1, Ordering::Release);
+        }
+    }
+    if lances == 0 {
+        crate::serial_println!("NVME_PARALLELE_ECHEC raison=aucune-tache-creee");
+        return;
+    }
+
+    let fini = crate::kernel::timer::attente_bornee(30_000, || {
+        SONDE_RESTANTS.load(Ordering::Acquire) == 0
+    });
+
+    let (emplacements, libres, profondeur, attentes) = file_stats();
+    crate::serial_println!(
+        "NVME_PARALLELE lecteurs={} fini={} reussies={} echecs={} \
+emplacements={} libres={} profondeur_max={} attentes={}",
+        lances,
+        fini as u8,
+        SONDE_REUSSIES.load(Ordering::Relaxed),
+        SONDE_ECHECS.load(Ordering::Relaxed),
+        emplacements,
+        libres,
+        profondeur,
+        attentes,
+    );
+    if !fini {
+        crate::serial_println!("NVME_PARALLELE_ECHEC raison=echeance");
+        return;
+    }
+    if SONDE_ECHECS.load(Ordering::Relaxed) != 0 {
+        crate::serial_println!("NVME_PARALLELE_ECHEC raison=lecture-refusee");
+        return;
+    }
+    if profondeur < 2 {
+        // Ce n'est PAS une reussite. Les ressources sont partitionnees, mais
+        // rien ne les a exercees ensemble : la profondeur effective vaut un.
+        crate::serial_println!(
+            "NVME_PARALLELE_SEQUENTIEL profondeur_max={} attendu=>=2",
+            profondeur
+        );
+        return;
+    }
+    crate::serial_println!("NVME_PARALLELE_OK profondeur_max={}", profondeur);
+}
+
+/// Emplacements totaux, libres, profondeur maximale atteinte, attentes.
+pub fn file_stats() -> (usize, u32, u32, u64) {
+    (
+        EMPLACEMENTS_ES,
+        EMPLACEMENTS_LIBRES.load(Ordering::Relaxed).count_ones(),
+        PROFONDEUR_MAX.load(Ordering::Relaxed),
+        ATTENTES_EMPLACEMENT.load(Ordering::Relaxed),
+    )
 }
 
 /// Commandes en vol, en quarantaine, et achevements refuses.

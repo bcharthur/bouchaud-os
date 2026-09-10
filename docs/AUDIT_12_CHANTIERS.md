@@ -146,7 +146,7 @@ code qui passait deja toutes ses barrieres :
 | 2 | Scheduler NG + preemption | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (equilibrage effectif : le fil de montage elu par un AP) |
 | 3 | Memoire NG | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`MM_NG6_OK`) |
 | 4 | Compositeur ring 3 reel | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NATIVE_IPC_RUNTIME_OK`, ring 3, ce lot) |
-| 5 | FS / E-S moderne | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NVME_GPT_OK` sur i440fx ET q35, ce lot) |
+| 5 | FS / E-S moderne | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NVME_GPT_OK` i440fx + q35 ; `NVME_PARALLELE_SCENARIO_OK` profondeur 4, ce lot) |
 | 6 | Architecture de securite | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`SECURITY_RUNTIME_OK`, refus en anneau 3) |
 | 7 | ABI Bouchaud + IPC natif | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NATIVE_IPC_RUNTIME_OK`, ce lot) |
 | 8 | Ladybird reellement utilisable | IMPLEMENTATION PARTIELLE | EXECUTE EN HOTE (campagne native non reproduite ici) |
@@ -264,13 +264,41 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   soumission, tete absurde, reinitialisation pendant quarantaine, course
   echeance/achevement), `test_nvme_decodage.rs`, `verifie-nvme.py`
   (deux regles nouvelles).
+* **La profondeur de file, mesuree et non annoncee.** Les ressources DMA sont
+  desormais partitionnees : chaque emplacement porte SON tampon de rebond et
+  SA page de liste PRP, et la quarantaine est PAR EMPLACEMENT -- une commande
+  lente n'arrete plus les autres.
+
+  Partitionner rend une profondeur superieure a un POSSIBLE. Cela ne la rend
+  pas ATTEINTE, et le journal le disait sans ambiguite : quatre emplacements
+  alloues, puis huit commandes d'affilee **toutes sur `emplacement=0`**, parce
+  que le seul appelant -- le sondage GPT -- est sequentiel.
+
+  `nvme-parallele` lance donc quatre lecteurs reels sur des blocs distincts :
+
+  | Passage | Lecteurs | Reussies | Echecs | Libres a la fin | Profondeur atteinte |
+  |---|---|---|---|---|---|
+  | 1 | 4 | 32 | 0 | 3 | **4** |
+  | 2 | 4 | 32 | 0 | 4 | 2 |
+  | 3 | 4 | 32 | 0 | 4 | 2 |
+
+  Verdict : `NVME_PARALLELE_SCENARIO_OK profondeur_max=4`. Le `libres=3` du
+  premier passage n'est pas une fuite : c'est le fil de montage qui tenait
+  encore un emplacement — donc une concurrence reelle entre taches. Les
+  passages suivants repartent d'un pot plein, ce que le scenario EXIGE : une
+  fuite d'un emplacement par passage ne se verrait pas sur un seul essai et
+  bloquerait le pilote au quatrieme.
+
+  Le descripteur de la couche bloc annonce maintenant `EMPLACEMENTS_ES` et
+  non plus la constante 1.
 * **Mesure** : sonde IDE sur q35 : **20 s → 0 s**. Profondeur de file
-  effective : **1**.
-* **Ce qui manque** : la profondeur reste 1, avec un tampon de rebond unique
-  et non partitionne. Le contrat d'entree-sortie est desormais CORRECT
-  (quarantaine, rejets, tete de soumission lue, CSTS interroge) mais pas
-  encore CONCURRENT : pas de MSI/MSI-X, pas de ressources DMA par
-  emplacement. Pas d'extents, pas de commit A/B.
+  atteinte : **4** sur 4 emplacements, 540 672 octets de DMA.
+* **Ce qui manque** : l'achevement reste **scrute**, pas notifie : ni MSI, ni
+  MSI-X. L'attente rend la main a l'ordonnanceur, donc elle ne monopolise plus
+  un coeur, mais chaque attente repasse par un drainage actif. Pas d'extents,
+  pas de commit A/B, pas d'E/S asynchrone au-dessus (la couche bloc reste
+  synchrone : c'est elle, et non le pilote, qui limite desormais la
+  concurrence a ce que les appelants demandent).
 
 ### 6 — Architecture de securite
 
@@ -374,7 +402,7 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   sur la branche. Localement : `QEMU_SMOKE_OK`, `SYSTEM_HEALTH_OK`,
   `USB_ARBRE_OK`, `USB_BRANCHEMENT_OK`, `USB_STOCKAGE_OK`, `MM_NG6_OK`,
   `OS_PRIMITIVES_OK`, `SECURITY_RUNTIME_OK`, `NATIVE_IPC_RUNTIME_OK`,
-  `NVME_GPT_OK` (×2).
+  `NVME_GPT_OK` (×2), `NVME_PARALLELE_SCENARIO_OK`.
 * **Test** : **79 garde-fous**, 67 suites Rust hote, 5 C++, 16 fiabilite
   Python.
 * **Mesure** : chaque regle ajoutee ce lot est verifiee PAR MUTATION — huit

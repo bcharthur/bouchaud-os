@@ -25,8 +25,8 @@ use suivi::*;
 #[test]
 fn une_echeance_ne_rend_pas_l_identifiant_au_pot() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().expect("premier identifiant");
-    assert!(s.expire(cid));
+    let cid = s.alloue(0).expect("premier identifiant");
+    assert_eq!(s.expire(cid), Some(0));
     assert_eq!(
         s.etat_de(cid),
         Some(EtatCid::Quarantaine),
@@ -40,13 +40,13 @@ fn une_echeance_ne_rend_pas_l_identifiant_au_pot() {
 #[test]
 fn un_identifiant_en_quarantaine_n_est_jamais_reattribue() {
     let mut s = Suivi::neuf();
-    let victime = s.alloue().unwrap();
-    assert!(s.expire(victime));
+    let victime = s.alloue(0).unwrap();
+    assert_eq!(s.expire(victime), Some(0));
 
     // On epuise tout le domaine. Si la quarantaine etait ignoree, le tour
     // complet redonnerait forcement l'identifiant abandonne.
     let mut vus = Vec::new();
-    while let Some(cid) = s.alloue() {
+    while let Some(cid) = s.alloue(0) {
         assert_ne!(
             cid, victime,
             "l'identifiant {} est en quarantaine : le reattribuer ferait \
@@ -66,13 +66,13 @@ fn un_identifiant_en_quarantaine_n_est_jamais_reattribue() {
 #[test]
 fn l_achevement_tardif_leve_la_quarantaine_et_rien_d_autre() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
-    assert!(s.expire(cid));
+    let cid = s.alloue(0).unwrap();
+    assert_eq!(s.expire(cid), Some(0));
     assert_eq!(s.quarantaine(), 1);
 
     // L'achevement finit par arriver. C'est la PREUVE que le controleur en a
     // fini avec le tampon : c'est exactement la que la quarantaine se leve.
-    assert_eq!(s.range(cid, 0, 0), Verdict::Tardif);
+    assert!(matches!(s.range(cid, 0, 0), Verdict::Tardif { .. }));
     assert_eq!(s.quarantaine(), 0);
     assert_eq!(s.etat_de(cid), Some(EtatCid::Libre));
     assert_eq!(s.tardifs, 1);
@@ -88,14 +88,14 @@ fn l_achevement_tardif_leve_la_quarantaine_et_rien_d_autre() {
 #[test]
 fn echeance_puis_achevement_tardif_puis_reemission() {
     let mut s = Suivi::neuf();
-    let premier = s.alloue().unwrap();
-    assert!(s.expire(premier));
-    assert_eq!(s.range(premier, 0, 0), Verdict::Tardif);
+    let premier = s.alloue(0).unwrap();
+    assert_eq!(s.expire(premier), Some(0));
+    assert!(matches!(s.range(premier, 0, 0), Verdict::Tardif { .. }));
 
     // Une fois la quarantaine levee, l'identifiant redevient utilisable.
     let mut retrouve = false;
     for _ in 0..CID_MAX {
-        let cid = s.alloue().unwrap();
+        let cid = s.alloue(0).unwrap();
         if cid == premier {
             retrouve = true;
             break;
@@ -118,7 +118,7 @@ fn un_achevement_pour_un_identifiant_jamais_emis_est_rejete() {
 #[test]
 fn un_second_achevement_pour_le_meme_identifiant_est_rejete() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
+    let cid = s.alloue(0).unwrap();
     assert_eq!(s.range(cid, 0, 0), Verdict::Attendu);
     assert_eq!(
         s.range(cid, 0, 0),
@@ -140,7 +140,7 @@ fn un_identifiant_hors_domaine_n_est_pas_replie_par_modulo() {
     let cid44 = {
         let mut trouve = None;
         for _ in 0..CID_MAX {
-            let c = s.alloue().unwrap();
+            let c = s.alloue(0).unwrap();
             if c == 44 {
                 trouve = Some(c);
                 break;
@@ -172,8 +172,8 @@ fn un_achevement_zero_est_rejete() {
 #[test]
 fn un_achevement_d_avant_la_reinitialisation_est_dit_perime() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
-    assert!(s.expire(cid));
+    let cid = s.alloue(0).unwrap();
+    assert_eq!(s.expire(cid), Some(0));
     s.reinitialise();
     assert_eq!(s.quarantaine(), 0, "un controleur remis a zero a perdu ses files");
     assert_eq!(
@@ -192,9 +192,9 @@ fn un_achevement_d_avant_la_reinitialisation_est_dit_perime() {
 #[test]
 fn des_achevements_dans_le_desordre_vont_chacun_a_leur_emetteur() {
     let mut s = Suivi::neuf();
-    let a = s.alloue().unwrap();
-    let b = s.alloue().unwrap();
-    let c = s.alloue().unwrap();
+    let a = s.alloue(0).unwrap();
+    let b = s.alloue(0).unwrap();
+    let c = s.alloue(0).unwrap();
     assert_eq!(s.en_vol(), 3);
 
     // Le controleur acheve dans l'ordre c, a, b, avec trois statuts distincts.
@@ -211,7 +211,7 @@ fn des_achevements_dans_le_desordre_vont_chacun_a_leur_emetteur() {
 #[test]
 fn une_erreur_de_statut_est_transmise_telle_quelle() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
+    let cid = s.alloue(0).unwrap();
     // Type 2 (media), code 0x81 (unrecovered read error).
     assert_eq!(s.range(cid, 2, 0x81), Verdict::Attendu);
     assert_eq!(
@@ -226,13 +226,13 @@ fn une_erreur_de_statut_est_transmise_telle_quelle() {
 fn le_pot_s_epuise_proprement_au_lieu_de_reattribuer() {
     let mut s = Suivi::neuf();
     let mut n = 0;
-    while s.alloue().is_some() {
+    while s.alloue(0).is_some() {
         n += 1;
         assert!(n <= CID_MAX, "le pot ne doit pas boucler");
     }
     assert_eq!(n, CID_MAX - 1, "tout le domaine sauf le zero reserve");
     assert_eq!(
-        s.alloue(),
+        s.alloue(0),
         None,
         "refuser une entree-sortie vaut mieux que d'en corrompre une autre"
     );
@@ -320,7 +320,7 @@ fn le_bouclage_de_la_soumission_conserve_le_compte_de_places() {
 fn la_reinitialisation_rend_tout_le_domaine() {
     let mut s = Suivi::neuf();
     for _ in 0..10 {
-        let cid = s.alloue().unwrap();
+        let cid = s.alloue(0).unwrap();
         s.expire(cid);
     }
     assert_eq!(s.quarantaine(), 10);
@@ -330,7 +330,7 @@ fn la_reinitialisation_rend_tout_le_domaine() {
     assert_eq!(s.en_vol(), 0);
     assert_ne!(s.epoque(), epoque, "l'epoque doit avancer, sinon les tardifs se confondent");
     let mut n = 0;
-    while s.alloue().is_some() {
+    while s.alloue(0).is_some() {
         n += 1;
     }
     assert_eq!(n, CID_MAX - 1, "tout le domaine est rendu");
@@ -340,7 +340,7 @@ fn la_reinitialisation_rend_tout_le_domaine() {
 fn une_reinitialisation_a_vide_ne_casse_rien() {
     let mut s = Suivi::neuf();
     s.reinitialise();
-    let cid = s.alloue().expect("le pot est intact");
+    let cid = s.alloue(0).expect("le pot est intact");
     assert_eq!(s.range(cid, 0, 0), Verdict::Attendu);
     assert_eq!(s.recolte(cid), Some((0, 0)));
 }
@@ -352,11 +352,11 @@ fn une_reinitialisation_a_vide_ne_casse_rien() {
 #[test]
 fn un_achevement_arrive_juste_avant_l_echeance_n_est_pas_perdu() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
+    let cid = s.alloue(0).unwrap();
     // L'achevement se range pendant que l'emetteur decide d'abandonner.
     assert_eq!(s.range(cid, 0, 0), Verdict::Attendu);
     assert!(
-        !s.expire(cid),
+        s.expire(cid).is_none(),
         "la course existe : traiter en echeance une commande achevee perdrait \
          un resultat valide et mettrait en quarantaine un tampon libre"
     );
@@ -367,7 +367,7 @@ fn un_achevement_arrive_juste_avant_l_echeance_n_est_pas_perdu() {
 #[test]
 fn recolter_une_commande_encore_en_vol_ne_rend_rien() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
+    let cid = s.alloue(0).unwrap();
     assert_eq!(
         s.recolte(cid),
         None,
@@ -386,14 +386,14 @@ fn le_tampon_n_est_pas_disponible_tant_qu_une_quarantaine_tient() {
     let mut s = Suivi::neuf();
     assert!(s.tampon_disponible(), "rien en vol : le tampon est libre");
 
-    let cid = s.alloue().unwrap();
+    let cid = s.alloue(0).unwrap();
     assert!(
         s.tampon_disponible(),
         "une commande en vol tient le tampon par le jeton d'entree-sortie, \
          pas par la quarantaine : les deux mecanismes sont distincts"
     );
 
-    assert!(s.expire(cid));
+    assert_eq!(s.expire(cid), Some(0));
     assert!(
         !s.tampon_disponible(),
         "la commande est abandonnee, mais le controleur, lui, n'a rien annule : \
@@ -401,7 +401,7 @@ fn le_tampon_n_est_pas_disponible_tant_qu_une_quarantaine_tient() {
          tampon de la commande SUIVANTE"
     );
 
-    assert_eq!(s.range(cid, 0, 0), Verdict::Tardif);
+    assert!(matches!(s.range(cid, 0, 0), Verdict::Tardif { .. }));
     assert!(
         s.tampon_disponible(),
         "l'achevement tardif est la preuve que le controleur en a fini"
@@ -411,26 +411,26 @@ fn le_tampon_n_est_pas_disponible_tant_qu_une_quarantaine_tient() {
 #[test]
 fn plusieurs_quarantaines_retiennent_le_tampon_jusqu_a_la_derniere() {
     let mut s = Suivi::neuf();
-    let a = s.alloue().unwrap();
-    let b = s.alloue().unwrap();
-    assert!(s.expire(a));
-    assert!(s.expire(b));
+    let a = s.alloue(0).unwrap();
+    let b = s.alloue(0).unwrap();
+    assert_eq!(s.expire(a), Some(0));
+    assert_eq!(s.expire(b), Some(0));
     assert!(!s.tampon_disponible());
-    assert_eq!(s.range(a, 0, 0), Verdict::Tardif);
+    assert!(matches!(s.range(a, 0, 0), Verdict::Tardif { .. }));
     assert!(
         !s.tampon_disponible(),
         "une seule des deux commandes a rendu son tampon ; l'autre est toujours \
          susceptible d'ecrire"
     );
-    assert_eq!(s.range(b, 0, 0), Verdict::Tardif);
+    assert!(matches!(s.range(b, 0, 0), Verdict::Tardif { .. }));
     assert!(s.tampon_disponible());
 }
 
 #[test]
 fn la_reinitialisation_rend_le_tampon_sans_achevement() {
     let mut s = Suivi::neuf();
-    let cid = s.alloue().unwrap();
-    assert!(s.expire(cid));
+    let cid = s.alloue(0).unwrap();
+    assert_eq!(s.expire(cid), Some(0));
     assert!(!s.tampon_disponible());
     s.reinitialise();
     assert!(
@@ -438,4 +438,112 @@ fn la_reinitialisation_rend_le_tampon_sans_achevement() {
         "un controleur remis a zero a perdu ses files : c'est le SECOND \
          evenement, et le dernier, qui leve une quarantaine"
     );
+}
+
+// ---------------------------------------------------------------------------
+// La quarantaine est PAR EMPLACEMENT, et c'est tout l'interet.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn une_commande_lente_n_arrete_que_son_emplacement() {
+    let mut s = Suivi::neuf();
+    let lent = s.alloue(0).unwrap();
+    let autre = s.alloue(1).unwrap();
+
+    assert_eq!(s.expire(lent), Some(0));
+    assert!(
+        s.emplacement_en_quarantaine(0),
+        "l'emplacement de la commande abandonnee est retenu"
+    );
+    assert!(
+        !s.emplacement_en_quarantaine(1),
+        "une commande lente sur un emplacement ne doit PAS arreter les autres ; \
+         c'est exactement ce que faisait le jeton unique, ou une seule echeance \
+         suspendait toutes les entrees-sorties du disque"
+    );
+    assert!(!s.emplacement_en_quarantaine(2));
+    assert!(!s.emplacement_en_quarantaine(3));
+
+    // L'autre commande s'acheve normalement, sans rien savoir de la premiere.
+    assert_eq!(s.range(autre, 0, 0), Verdict::Attendu);
+    assert_eq!(s.recolte(autre), Some((0, 0)));
+}
+
+#[test]
+fn l_achevement_tardif_nomme_l_emplacement_qu_il_libere() {
+    let mut s = Suivi::neuf();
+    let cid = s.alloue(2).unwrap();
+    assert_eq!(s.expire(cid), Some(2));
+    assert!(s.emplacement_en_quarantaine(2));
+
+    match s.range(cid, 0, 0) {
+        Verdict::Tardif { emplacement } => assert_eq!(
+            emplacement, 2,
+            "le verdict PORTE l'emplacement : le demander apres coup rendrait \
+             celui d'une autre commande, l'identifiant etant deja revenu au pot"
+        ),
+        autre => panic!("attendu Tardif, obtenu {:?}", autre),
+    }
+    assert!(!s.emplacement_en_quarantaine(2));
+}
+
+#[test]
+fn deux_quarantaines_sur_le_meme_emplacement_le_retiennent_toutes_deux() {
+    let mut s = Suivi::neuf();
+    let a = s.alloue(1).unwrap();
+    let b = s.alloue(1).unwrap();
+    assert_eq!(s.expire(a), Some(1));
+    assert_eq!(s.expire(b), Some(1));
+    assert!(s.emplacement_en_quarantaine(1));
+
+    assert!(matches!(s.range(a, 0, 0), Verdict::Tardif { emplacement: 1 }));
+    assert!(
+        s.emplacement_en_quarantaine(1),
+        "une seule des deux a rendu son tampon ; l'autre peut toujours ecrire"
+    );
+    assert!(matches!(s.range(b, 0, 0), Verdict::Tardif { emplacement: 1 }));
+    assert!(!s.emplacement_en_quarantaine(1));
+}
+
+#[test]
+fn plusieurs_commandes_en_vol_sur_des_emplacements_distincts() {
+    let mut s = Suivi::neuf();
+    let mut cids = Vec::new();
+    for emplacement in 0..4u8 {
+        cids.push((emplacement, s.alloue(emplacement).unwrap()));
+    }
+    assert_eq!(s.en_vol(), 4, "quatre commandes volent ensemble");
+
+    // Achevements dans le desordre, chacun avec un statut distinct.
+    for (emplacement, cid) in cids.iter().rev() {
+        assert_eq!(s.range(*cid, 0, *emplacement), Verdict::Attendu);
+    }
+    for (emplacement, cid) in &cids {
+        assert_eq!(
+            s.recolte(*cid),
+            Some((0, *emplacement)),
+            "chaque emplacement recupere SON statut"
+        );
+    }
+    assert_eq!(s.en_vol(), 0);
+}
+
+#[test]
+fn la_reinitialisation_libere_tous_les_emplacements() {
+    let mut s = Suivi::neuf();
+    for emplacement in 0..4u8 {
+        let cid = s.alloue(emplacement).unwrap();
+        assert_eq!(s.expire(cid), Some(emplacement));
+    }
+    for emplacement in 0..4u8 {
+        assert!(s.emplacement_en_quarantaine(emplacement));
+    }
+    s.reinitialise();
+    for emplacement in 0..4u8 {
+        assert!(
+            !s.emplacement_en_quarantaine(emplacement),
+            "un controleur remis a zero a perdu ses files : plus aucun tampon \
+             n'est menace"
+        );
+    }
 }

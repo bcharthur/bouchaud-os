@@ -52,7 +52,12 @@ pub enum Verdict {
     /// Il appartient a une commande abandonnee sur echeance. On l'avale, et la
     /// quarantaine se leve : le controleur vient de prouver qu'il en a fini
     /// avec le tampon.
-    Tardif,
+    ///
+    /// L'emplacement est PORTE par le verdict, et non lu apres coup : entre le
+    /// rangement et une seconde question, l'identifiant est deja retourne au
+    /// pot et peut avoir ete reattribue. Rendre alors l'emplacement d'une
+    /// autre commande le rendrait deux fois.
+    Tardif { emplacement: u8 },
     /// Identifiant jamais emis, ou deja recolte. Rejete.
     Inconnu,
     /// Identifiant emis avant une reinitialisation du controleur. Rejete.
@@ -72,6 +77,13 @@ pub struct Suivi {
     epoque: u16,
     /// Statut range, en attente de recolte : bits 7:0 le code, 10:8 le type.
     statut: [u16; CID_MAX],
+    /// Emplacement de ressources DMA que cette commande occupe.
+    ///
+    /// Sans lui, une echeance ne saurait pas QUEL tampon elle met en
+    /// quarantaine, et il faudrait mettre en quarantaine le pilote entier --
+    /// ce que faisait la premiere version, ou une seule commande lente
+    /// arretait toutes les entrees-sorties.
+    emplacement: [u8; CID_MAX],
     /// Ou reprendre la recherche d'un identifiant libre.
     curseur: u16,
     en_vol: u16,
@@ -91,6 +103,7 @@ impl Suivi {
             epoque_cid: [0; CID_MAX],
             epoque: 1,
             statut: [0; CID_MAX],
+            emplacement: [0; CID_MAX],
             curseur: 1,
             en_vol: 0,
             quarantaine: 0,
@@ -136,7 +149,7 @@ impl Suivi {
     /// identifiants en quarantaine : c'est tout l'interet de l'etat. Rendre
     /// `None` quand il n'en reste plus est le comportement correct -- mieux
     /// vaut refuser une entree-sortie que d'en corrompre une autre.
-    pub fn alloue(&mut self) -> Option<u16> {
+    pub fn alloue(&mut self, emplacement: u8) -> Option<u16> {
         let domaine = CID_MAX as u16;
         for pas in 0..(domaine - 1) {
             let cid = ((self.curseur - 1 + pas) % (domaine - 1)) + 1;
@@ -145,6 +158,7 @@ impl Suivi {
                 self.etat[cid as usize] = EtatCid::EnVol;
                 self.epoque_cid[cid as usize] = self.epoque;
                 self.statut[cid as usize] = 0;
+                self.emplacement[cid as usize] = emplacement;
                 self.en_vol += 1;
                 return Some(cid);
             }
@@ -176,7 +190,7 @@ impl Suivi {
                 self.etat[index] = EtatCid::Libre;
                 self.quarantaine -= 1;
                 self.tardifs += 1;
-                Verdict::Tardif
+                Verdict::Tardif { emplacement: self.emplacement[index] }
             }
             EtatCid::Acheve => {
                 self.rejets_double += 1;
@@ -211,21 +225,38 @@ impl Suivi {
 
     /// L'emetteur abandonne l'attente : l'identifiant passe en quarantaine.
     ///
-    /// Rend `false` si la commande s'etait achevee entre-temps -- la course
-    /// existe, et la traiter comme une echeance perdrait un achevement valide.
-    pub fn expire(&mut self, cid: u16) -> bool {
+    /// Rend l'emplacement mis en quarantaine, ou `None` si la commande s'etait
+    /// achevee entre-temps -- la course existe, et la traiter comme une
+    /// echeance perdrait un achevement valide.
+    pub fn expire(&mut self, cid: u16) -> Option<u8> {
         if cid == 0 || (cid as usize) >= CID_MAX {
-            return false;
+            return None;
         }
         let index = cid as usize;
         if self.etat[index] != EtatCid::EnVol {
-            return false;
+            return None;
         }
         self.etat[index] = EtatCid::Quarantaine;
         self.en_vol -= 1;
         self.quarantaine += 1;
         self.echeances += 1;
-        true
+        Some(self.emplacement[index])
+    }
+
+    /// Cet emplacement est-il retenu par une commande abandonnee ?
+    ///
+    /// C'est la question PAR EMPLACEMENT que `tampon_disponible` posait pour
+    /// le pilote entier. La difference compte : une commande lente sur un
+    /// emplacement ne doit pas arreter les trois autres.
+    pub fn emplacement_en_quarantaine(&self, emplacement: u8) -> bool {
+        for index in 1..CID_MAX {
+            if self.etat[index] == EtatCid::Quarantaine
+                && self.emplacement[index] == emplacement
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Le controleur a ete reinitialise : plus rien n'est en vol.

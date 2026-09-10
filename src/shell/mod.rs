@@ -214,7 +214,7 @@ pub const COMMANDS: &[&str] = &[
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
-    "smoltest",
+    "smoltest", "nvme-parallele",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
@@ -866,6 +866,11 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
         "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
         "smoltest" => { crate::net::smoltest_cmd(argc, &argv); 0 }
+        // Emet des lectures NVMe depuis PLUSIEURS taches et publie la
+        // profondeur de file reellement atteinte. Partitionner les ressources
+        // DMA rend une profondeur superieure a un possible ; seul un appelant
+        // concurrent la rend atteinte.
+        "nvme-parallele" => { crate::drivers::nvme::sonde_parallele(); 0 }
         "tls-selftest" => { crate::net::tls::selftest(); 0 }
         "expr-selftest" => { c::expr_selftest(); 0 }
         "wasm" => c::wasm(argc, &argv, *cwd),

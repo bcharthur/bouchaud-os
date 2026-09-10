@@ -490,10 +490,15 @@ def regle_attente_sans_verrou(pilote, fautes):
                 "nvme.rs : transfere reprend le verrou de configuration ; "
                 "l'attente redevient une attente interruptions masquees."
             )
-        if "contexte_es()" not in transfere:
+        # `contexte_es(emplacement)` et non `contexte_es()` : le contexte porte
+        # les adresses DMA de SON emplacement. Exiger l'argument verifie du
+        # meme coup qu'il ne peut pas porter celles d'un autre.
+        if "contexte_es(emplacement)" not in transfere:
             fautes.append(
                 "nvme.rs : transfere ne lit plus la configuration par "
-                "contexte_es ; rien ne garantit plus que le verrou soit rendu."
+                "`contexte_es(emplacement)` ; soit le verrou n'est plus rendu, "
+                "soit le contexte porte les adresses d'un emplacement qu'on ne "
+                "tient pas."
             )
 
     emet = corps(pilote, "fn emet_es(")
@@ -632,11 +637,14 @@ def regle_quarantaine(pilote, suivi, test_suivi, fautes):
     if jeton is None:
         fautes.append("nvme.rs : le jeton d'entree-sortie a disparu.")
     else:
-        if "tampon_disponible()" not in jeton:
+        # La question se pose PAR EMPLACEMENT depuis que les ressources sont
+        # partitionnees : `tampon_disponible(emplacement)`. Une version sans
+        # argument voudrait dire que la quarantaine est redevenue globale.
+        if "tampon_disponible(emplacement)" not in jeton:
             fautes.append(
-                "nvme.rs : le jeton d'entree-sortie ne demande plus si le tampon "
-                "de rebond est libre ; il le rendrait a une nouvelle commande "
-                "alors que le controleur peut encore y ecrire."
+                "nvme.rs : la prise d'emplacement ne demande plus si le tampon "
+                "de CET emplacement est libre ; il le rendrait a une nouvelle "
+                "commande alors que le controleur peut encore y ecrire."
             )
         if "REFUS_QUARANTAINE" not in jeton:
             fautes.append(
@@ -695,6 +703,105 @@ def regle_quarantaine(pilote, suivi, test_suivi, fautes):
             )
 
 
+def regle_profondeur_reelle(pilote, suivi, test_suivi, fautes):
+    """Une profondeur superieure a un exige des ressources DMA PAR EMPLACEMENT.
+
+    # Le defaut que cette regle existe pour empecher
+
+    Le pilote serialisait toutes les entrees-sorties derriere un jeton unique,
+    parce que le tampon de rebond etait unique. La profondeur effective valait
+    un, quoi qu'en disent les soixante-quatre entrees de la file de soumission.
+
+    Annoncer davantage en partageant un tampon non partitionne serait pire que
+    de ne rien annoncer : deux commandes s'ecraseraient l'une l'autre, et la
+    couche bloc croirait pouvoir en emettre quatre.
+
+    # Ce qui est verifie
+
+    Que chaque emplacement porte SES ressources ; que la profondeur annoncee
+    dans le descripteur soit celle des emplacements et non une constante ; que
+    la quarantaine soit PAR EMPLACEMENT -- une commande lente ne doit pas
+    arreter les autres --, et que tout cela soit prouve cote hote.
+    """
+    if "EMPLACEMENTS_ES" not in pilote:
+        fautes.append(
+            "nvme.rs : les emplacements d'entree-sortie ont disparu ; le tampon "
+            "de rebond redevient unique et la profondeur retombe a un."
+        )
+        return
+
+    place = corps(pilote, "struct Emplacement {")
+    if place is None:
+        fautes.append("nvme.rs : la structure d'emplacement a disparu.")
+    else:
+        for champ in ("rebond_phys", "rebond_virt", "liste_phys", "liste_virt"):
+            if champ not in place:
+                fautes.append(
+                    "nvme.rs : un emplacement ne porte plus `%s` ; deux commandes "
+                    "simultanees repartageraient cette ressource." % champ
+                )
+
+    alloue = corps(pilote, "fn alloue_les_emplacements()")
+    if alloue is None or "for place in places.iter_mut()" not in alloue:
+        fautes.append(
+            "nvme.rs : les ressources ne sont plus allouees par emplacement ; "
+            "un `alloc_dma` unique recopie dans quatre cases donnerait quatre "
+            "emplacements pointant sur le MEME tampon."
+        )
+
+    descripteur = corps(pilote, "fn descripteur(&self)")
+    if descripteur is None:
+        fautes.append("nvme.rs : le descripteur de la couche bloc a disparu.")
+    elif "profondeur_file: EMPLACEMENTS_ES" not in descripteur:
+        fautes.append(
+            "nvme.rs : la profondeur annoncee a la couche bloc n'est plus celle "
+            "des emplacements. Une profondeur annoncee qu'on ne peut pas servir "
+            "est un mensonge que rien ne contredit."
+        )
+
+    quarantaine = corps(suivi, "pub fn emplacement_en_quarantaine(&self")
+    if quarantaine is None or "self.emplacement[index] == emplacement" not in quarantaine:
+        fautes.append(
+            "suivi.rs : la quarantaine n'est plus par emplacement ; une seule "
+            "commande lente suspendrait de nouveau toutes les entrees-sorties."
+        )
+
+    if "Verdict::Tardif { emplacement" not in suivi:
+        fautes.append(
+            "suivi.rs : le verdict tardif ne porte plus l'emplacement libere. "
+            "Le demander apres coup rendrait celui d'une AUTRE commande, "
+            "l'identifiant etant deja retourne au pot."
+        )
+
+    if "PROFONDEUR_MAX" not in pilote:
+        fautes.append(
+            "nvme.rs : la profondeur reellement atteinte n'est plus mesuree ; "
+            "seule la profondeur annoncee resterait, et rien ne la contredirait."
+        )
+
+    sonde = corps(pilote, "pub fn sonde_parallele()")
+    if sonde is None:
+        fautes.append(
+            "nvme.rs : la sonde de concurrence a disparu ; plus rien n'exerce "
+            "deux emplacements ensemble."
+        )
+    elif "NVME_PARALLELE_SEQUENTIEL" not in sonde:
+        fautes.append(
+            "nvme.rs : la sonde ne distingue plus une profondeur atteinte d'une "
+            "profondeur annoncee ; elle rendrait vert un pilote sequentiel."
+        )
+
+    for nom in (
+        "une_commande_lente_n_arrete_que_son_emplacement",
+        "l_achevement_tardif_nomme_l_emplacement_qu_il_libere",
+        "plusieurs_commandes_en_vol_sur_des_emplacements_distincts",
+    ):
+        if nom not in test_suivi:
+            fautes.append(
+                "test_nvme_suivi.rs : le cas « %s » a disparu." % nom
+            )
+
+
 def regle_tete_de_soumission(pilote, suivi, fautes):
     """La tete que le controleur publie est LUE, et la file refuse de deborder.
 
@@ -750,6 +857,7 @@ def main():
     regle_phase(pilote, decodage, suivi, fautes)
     regle_quarantaine(pilote, suivi, test_suivi, fautes)
     regle_tete_de_soumission(pilote, suivi, fautes)
+    regle_profondeur_reelle(pilote, suivi, test_suivi, fautes)
     regle_interruption_non_armee(decodage, fautes)
     regle_tampon_de_rebond(pilote, fautes)
     regle_preuve_hote(test, fautes)
@@ -764,7 +872,7 @@ def main():
         "deux pages, taille de bloc lue sur le disque, bornes des deux cotes, "
         "attente hors de tout verrou a interruptions masquees, releve "
         "d'entree-sortie complet, echeance mise en quarantaine et non rendue "
-        "au pot, tete de soumission lue"
+        "au pot, tete de soumission lue, ressources DMA par emplacement"
     )
     return 0
 
