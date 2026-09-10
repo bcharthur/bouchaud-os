@@ -177,6 +177,19 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // fichiers peut alors parler a un VOLUME plutot qu'a une nappe, et un
     // pilote NVMe s'ajoutera en s'enregistrant, sans qu'un appelant change.
     drivers::ata_bloc::installe();
+    // LE DISQUE INTERNE NE DEPEND PAS DU MICROLOGICIEL QUI NOUS A DEMARRES.
+    //
+    // Le NVMe n'etait mis en service que sur le chemin UEFI du bureau de
+    // reference. Un demarrage BIOS -- celui de TOUTES les campagnes QEMU --
+    // n'initialisait donc jamais le pilote. Il n'etait execute que sur la
+    // machine physique, ou il a double-faute : un pilote qui ne tourne que la
+    // ou l'on ne peut pas l'observer n'a pas de preuve, il a des temoignages.
+    //
+    // Le montage de la partition est DEMANDE, pas fait : il part dans son
+    // propre fil une fois le bureau peint. Voir `installation::differe_le_montage`.
+    if drivers::nvme::bring_up() {
+        platform::pc::installation::differe_le_montage();
+    }
     fs::tar::mount_data_disk();
     // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
     // un fichier persistant doit pouvoir remplacer celui que l'archive depose,
