@@ -51,7 +51,7 @@
 
 use alloc::vec;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, PciDevice};
 use crate::drivers::bloc::{self, Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
@@ -59,6 +59,13 @@ use crate::kernel::memory;
 use crate::kernel::sync::SpinLockIrq;
 
 include!("nvme/decodage.rs");
+
+// Le cycle de vie d'une commande -- attribution, quarantaine sur echeance,
+// rejet d'un achevement qui n'appartient a personne, arithmetique des deux
+// anneaux -- vit dans `nvme/suivi.rs`, sans un seul acces materiel, et est
+// mis a l'epreuve par `tools/platform/test_nvme_suivi.rs` avec les sequences
+// que le materiel ne produit qu'une fois.
+include!("nvme/suivi.rs");
 
 /// Taille de page programmee dans `CC.MPS`. On reste sur 4 Kio : c'est la
 /// taille minimale que tout controleur accepte, et celle de la pagination.
@@ -107,6 +114,12 @@ const DELAIS_AVANT_HORS_SERVICE: u64 = 2;
 /// systeme de fichiers pour toujours.
 const LIMITE_JETON_MS: u64 = 4_000;
 
+/// Combien de temps laisser a un achevement tardif avant de refuser l'entree.
+///
+/// Court : au-dela, l'achevement n'arrivera probablement plus, et faire
+/// patienter l'appelant ne fait que reporter le meme refus.
+const LIMITE_QUARANTAINE_MS: u64 = 500;
+
 /// Volume attribue au disque interne.
 pub const VOLUME_INTERNE: Volume = Volume(2);
 
@@ -130,10 +143,13 @@ struct File {
     /// Adresse physique de la meme zone.
     phys: u64,
     entrees: u32,
-    /// Prochaine entree a ecrire (soumission) ou a lire (achevement).
-    tete: u32,
-    /// Phase attendue d'une file d'achevement. Elle bascule a chaque tour.
-    phase: bool,
+    /// L'arithmetique de l'anneau d'achevement : index et phase.
+    anneau: AnneauAchevement,
+    /// Celle de l'anneau de soumission : queue publiee et tete du controleur.
+    ///
+    /// Les deux vivent dans la meme structure parce que les files admin et
+    /// d'entree-sortie partagent ce type ; seul le champ pertinent sert.
+    soumission: AnneauSoumission,
     /// Decalage de la sonnette dans le BAR0.
     sonnette: usize,
 }
@@ -219,28 +235,46 @@ fn attend(limite_ms: u64, predicat: impl FnMut() -> bool) -> bool {
 fn alloue_file(entrees: u32, taille_entree: usize, sonnette: usize) -> Option<File> {
     let octets = (entrees as usize * taille_entree).max(PAGE);
     let (phys, virt) = memory::alloc_dma(octets)?;
-    Some(File { virt, phys, entrees, tete: 0, phase: true, sonnette })
+    Some(File {
+        virt,
+        phys,
+        entrees,
+        anneau: AnneauAchevement::neuf(entrees),
+        soumission: AnneauSoumission::neuf(entrees),
+        sonnette,
+    })
 }
 
 impl File {
-    /// Ecrit une commande a la tete de la file et avance la tete.
-    unsafe fn pose(&mut self, sqe: &Sqe) {
-        let emplacement = self.virt.add(self.tete as usize * TAILLE_SQE) as *mut u32;
+    /// Ecrit une commande dans la file de soumission et avance la queue.
+    ///
+    /// Rend `false` si le controleur n'a pas encore consomme assez d'entrees :
+    /// ecrire quand meme ecraserait une commande qu'il n'a pas lue. Le cas ne
+    /// se presente pas a profondeur un, et c'est precisement pourquoi il faut
+    /// le traiter maintenant plutot que le decouvrir plus tard.
+    unsafe fn pose(&mut self, sqe: &Sqe) -> bool {
+        let Some(index) = self.soumission.pose() else { return false };
+        let emplacement = self.virt.add(index as usize * TAILLE_SQE) as *mut u32;
         for (i, mot) in sqe.iter().enumerate() {
             write_volatile(emplacement.add(i), *mot);
         }
-        self.tete = (self.tete + 1) % self.entrees;
+        true
+    }
+
+    /// La valeur a publier a la sonnette de soumission.
+    fn queue_sq(&self) -> u32 {
+        self.soumission.queue
     }
 
     /// Lit l'entree d'achevement courante, si sa phase est celle attendue.
     unsafe fn achevement(&self) -> Option<EntreeAchevement> {
-        let emplacement = self.virt.add(self.tete as usize * TAILLE_CQE) as *const u32;
+        let emplacement = self.virt.add(self.anneau.tete as usize * TAILLE_CQE) as *const u32;
         let mut brut = [0u32; 4];
         // Le mot 3 porte la phase : le lire EN PREMIER, puis relire le reste,
         // garantit qu'on ne decode pas une entree a moitie ecrite.
         brut[3] = read_volatile(emplacement.add(3));
         let decode = decode_achevement(brut);
-        if decode.phase != self.phase {
+        if !self.anneau.est_neuve(decode.phase) {
             return None;
         }
         fence(Ordering::Acquire);
@@ -252,11 +286,7 @@ impl File {
 
     /// Avance la tete d'une file d'achevement, en basculant la phase au tour.
     fn avance(&mut self) {
-        self.tete += 1;
-        if self.tete == self.entrees {
-            self.tete = 0;
-            self.phase = !self.phase;
-        }
+        self.anneau.avance();
     }
 }
 
@@ -283,12 +313,15 @@ unsafe fn emet(
     limite_ms: u64,
 ) -> Result<EntreeAchevement, &'static str> {
     let attendu = ((sqe[0] >> 16) & 0xFFFF) as u16;
-    sq.pose(sqe);
-    sonne(base, sq.sonnette, sq.tete);
+    if !sq.pose(sqe) {
+        return Err("soumission-pleine");
+    }
+    sonne(base, sq.sonnette, sq.queue_sq());
 
     let mut resultat: Option<EntreeAchevement> = None;
     let obtenu = attend(limite_ms, || {
         if let Some(a) = cq.achevement() {
+            sq.soumission.tete_vue(a.tete_sq);
             if a.identifiant == attendu {
                 resultat = Some(a);
                 return true;
@@ -297,7 +330,7 @@ unsafe fn emet(
             // precedente dont on n'attendait plus rien. L'avaler evite que la
             // file se bloque dessus.
             cq.avance();
-            ecrit32(base, cq.sonnette, cq.tete);
+            ecrit32(base, cq.sonnette, cq.anneau.tete);
         }
         false
     });
@@ -307,7 +340,7 @@ unsafe fn emet(
         return Err("delai");
     }
     cq.avance();
-    sonne(base, cq.sonnette, cq.tete);
+    sonne(base, cq.sonnette, cq.anneau.tete);
 
     let a = resultat.ok_or("achevement-absent")?;
     if !a.reussi() {
@@ -401,15 +434,27 @@ static FILES_ES: SpinLockIrq<Option<FilesEs>> = SpinLockIrq::new(None);
 /// verrou tournant a interruptions masquees ne peut pas faire.
 static ES_OCCUPE: AtomicBool = AtomicBool::new(false);
 
-/// Achevements recus, par identifiant. Zero veut dire « rien encore ».
+/// Le cycle de vie des commandes d'entree-sortie.
 ///
-/// Le mot porte : bit 0 la presence, bits 15:8 le type de statut, bits 23:16
-/// le code. Un seul mot atomique par identifiant suffit, et evite un verrou de
-/// plus sur le chemin le plus chaud du pilote.
-static ACHEVEMENTS: [AtomicU32; CID_ES_MAX] = [const { AtomicU32::new(0) }; CID_ES_MAX];
+/// Il a remplace un tableau d'atomiques indexe par `identifiant % 256`. Ce
+/// tableau avait deux trous que rien n'attrapait au banc :
+///
+///   * une echeance depassee rendait l'identifiant au pot alors que le
+///     controleur, lui, n'avait rien annule et pouvait encore ecrire dans le
+///     tampon de rebond ;
+///   * un achevement portant un identifiant jamais emis etait plie par modulo
+///     sur le domaine suivi, ou il satisfaisait un attendant.
+///
+/// Le verrou n'englobe JAMAIS une attente : il est pris pour attribuer, pour
+/// ranger, pour recolter, chaque fois quelques dizaines d'instructions.
+static SUIVI: SpinLockIrq<Suivi> = SpinLockIrq::new(Suivi::neuf());
 
-/// Prochain identifiant d'entree-sortie.
-static PROCHAIN_CID_ES: AtomicU32 = AtomicU32::new(1);
+/// Achevements ranges pour un identifiant que plus personne n'attend.
+static TARDIFS: AtomicU64 = AtomicU64::new(0);
+/// Achevements refuses : inconnu, perime, double, hors domaine.
+static REJETES: AtomicU64 = AtomicU64::new(0);
+/// Entrees-sorties refusees parce qu'une quarantaine tenait encore le tampon.
+static REFUS_QUARANTAINE: AtomicU64 = AtomicU64::new(0);
 
 /// Commandes d'entree-sortie dont le releve detaille a ete publie.
 ///
@@ -467,11 +512,41 @@ fn contexte_es() -> Option<ContexteEs> {
 /// Rend `false` sur echeance : mieux vaut une erreur rendue a l'appelant qu'une
 /// attente sans fin sur un pilote bloque.
 fn prend_le_jeton(limite_ms: u64) -> bool {
-    crate::kernel::timer::attente_bornee(limite_ms, || {
+    let pris = crate::kernel::timer::attente_bornee(limite_ms, || {
         ES_OCCUPE
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-    })
+    });
+    if !pris {
+        return false;
+    }
+    // Le jeton ne suffit pas. Une commande abandonnee sur echeance est
+    // toujours la, du point de vue du controleur : il peut ecrire dans le
+    // tampon de rebond a n'importe quel moment. Le rendre a une nouvelle
+    // entree-sortie serait autoriser une corruption silencieuse -- et pour
+    // une ecriture, ce serait autoriser le controleur a relire un tampon
+    // qu'on aurait deja remplace, donc a poser sur le disque des octets qui
+    // n'appartiennent pas au bloc demande.
+    //
+    // On laisse une derniere chance a l'achevement tardif d'arriver : c'est le
+    // seul evenement qui leve une quarantaine sans reinitialiser le
+    // controleur.
+    if !tampon_disponible() {
+        let libere = crate::kernel::timer::attente_bornee(LIMITE_QUARANTAINE_MS, || {
+            draine_les_achevements();
+            tampon_disponible()
+        });
+        if !libere {
+            REFUS_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!(
+                "NVME_IO_QUARANTAINE commandes={} consequence=entree-sortie-refusee",
+                quarantaine_es()
+            );
+            rend_le_jeton();
+            return false;
+        }
+    }
+    true
 }
 
 #[inline]
@@ -479,47 +554,123 @@ fn rend_le_jeton() {
     ES_OCCUPE.store(false, Ordering::Release);
 }
 
-/// Un identifiant d'entree-sortie libre.
-fn cid_es() -> u16 {
-    let brut = PROCHAIN_CID_ES.fetch_add(1, Ordering::Relaxed);
-    // Zero reste libre : un identifiant nul dans un achevement inattendu est
-    // le signe d'une entree jamais ecrite, et le distinguer aide.
-    let cid = (brut % (CID_ES_MAX as u32 - 1)) as u16 + 1;
-    // La case est remise a zero AVANT la soumission : un achevement en retard
-    // portant cet identifiant serait sinon pris pour le notre, et le transfert
-    // rendrait un tampon que personne n'a rempli.
-    ACHEVEMENTS[cid as usize].store(0, Ordering::Release);
-    cid
-}
-
-#[inline]
-fn range_achevement(a: &EntreeAchevement) {
-    let index = (a.identifiant as usize) % CID_ES_MAX;
-    let mot = 1u32 | ((a.type_statut as u32) << 8) | ((a.code_statut as u32) << 16);
-    ACHEVEMENTS[index].store(mot, Ordering::Release);
-}
-
-/// Vide la file d'achevement dans le tableau, verrou pris le temps de le faire.
+/// Recolte l'achevement d'un identifiant, verrou pris le temps d'un appel.
 ///
-/// Rend le nombre d'achevements ranges. La sonnette n'est touchee QU'UNE fois,
-/// avec la tete finale : sonner par achevement multiplierait les ecritures
-/// registre sans rien apprendre au controleur.
+/// # Pourquoi une fonction pour une ligne
+///
+/// Le point d'attente ne doit tenir aucun verrou. En Rust, une garde placee
+/// dans le scrutateur d'un `if let` vit jusqu'a la FIN du corps -- ce qui
+/// suffirait a faire vivre ce verrou a travers une decision. La sortir dans
+/// une fonction rend la duree de vie de la garde impossible a rallonger par
+/// accident, et laisse `emet_es` litteralement sans `.lock()`.
+#[inline]
+fn recolte_es(cid: u16) -> Option<(u8, u8)> {
+    SUIVI.lock().recolte(cid)
+}
+
+/// Met un identifiant en quarantaine. Rend faux s'il s'etait acheve entre-temps.
+#[inline]
+fn expire_es(cid: u16) -> bool {
+    SUIVI.lock().expire(cid)
+}
+
+/// Combien de commandes abandonnees retiennent encore le tampon de rebond.
+#[inline]
+fn quarantaine_es() -> u16 {
+    SUIVI.lock().quarantaine()
+}
+
+/// Le tampon de rebond est-il libre de toute commande abandonnee ?
+#[inline]
+fn tampon_disponible() -> bool {
+    SUIVI.lock().tampon_disponible()
+}
+
+/// Un identifiant d'entree-sortie libre, ou `None`.
+///
+/// Rendre `None` quand le pot est vide -- parce que des quarantaines le
+/// retiennent -- est le comportement correct. Une entree-sortie refusee se
+/// voit et se compte ; une entree-sortie qui reutilise un identifiant encore
+/// vivant rend a son appelant un tampon que personne n'a rempli.
+fn cid_es() -> Option<u16> {
+    SUIVI.lock().alloue()
+}
+
+
+/// Achevements lus en un seul passage sur la file.
+///
+/// Borne volontaire : le tableau vit sur la pile noyau, dont le budget est
+/// verifie par `tools/verifie-pile-noyau-profondeur.py`. Seize entrees de
+/// vingt octets font trois cent vingt octets, et il suffit de reboucler pour
+/// vider une file plus pleine.
+const LOT_ACHEVEMENTS: usize = 16;
+
+/// Vide la file d'achevement, puis range ce qu'on en a tire.
+///
+/// # Pourquoi deux temps
+///
+/// Le verrou des files et celui du suivi ne sont JAMAIS tenus ensemble. Les
+/// imbriquer creerait une arete d'ordre entre deux verrous que le reste du
+/// pilote prend separement, et c'est exactement le genre d'arete qu'un
+/// interblocage attend. Les achevements passent donc par la pile.
+///
+/// La sonnette n'est touchee QU'UNE fois, avec la tete finale : sonner par
+/// achevement multiplierait les ecritures registre sans rien apprendre au
+/// controleur.
 fn draine_les_achevements() -> usize {
-    let mut garde = FILES_ES.lock();
-    let Some(files) = garde.as_mut() else { return 0 };
-    let mut ranges = 0usize;
-    // La file d'achevement est bornee : on ne peut pas en lire plus d'entrees
-    // qu'elle n'en contient sans avoir fait un tour complet.
-    for _ in 0..files.cq.entrees {
-        let Some(a) = (unsafe { files.cq.achevement() }) else { break };
-        range_achevement(&a);
-        files.cq.avance();
-        ranges += 1;
+    let mut lot = [(0u16, 0u8, 0u8); LOT_ACHEVEMENTS];
+    let mut lus = 0usize;
+    let mut tete_sq: Option<u16> = None;
+    {
+        let mut garde = FILES_ES.lock();
+        let Some(files) = garde.as_mut() else { return 0 };
+        while lus < LOT_ACHEVEMENTS {
+            let Some(a) = (unsafe { files.cq.achevement() }) else { break };
+            lot[lus] = (a.identifiant, a.type_statut, a.code_statut);
+            // La tete de soumission que le controleur publie dans CHAQUE
+            // achevement est la seule facon de savoir combien de places
+            // restent dans la file de soumission.
+            tete_sq = Some(a.tete_sq);
+            files.cq.avance();
+            lus += 1;
+        }
+        if lus != 0 {
+            if let Some(tete) = tete_sq {
+                files.sq.soumission.tete_vue(tete);
+            }
+            unsafe { sonne(files.base, files.cq.sonnette, files.cq.anneau.tete) };
+        }
     }
-    if ranges != 0 {
-        unsafe { sonne(files.base, files.cq.sonnette, files.cq.tete) };
+
+    if lus == 0 {
+        return 0;
     }
-    ranges
+    let mut suivi = SUIVI.lock();
+    for &(cid, type_statut, code_statut) in &lot[..lus] {
+        match suivi.range(cid, type_statut, code_statut) {
+            Verdict::Attendu => {}
+            Verdict::Tardif => {
+                TARDIFS.fetch_add(1, Ordering::Relaxed);
+            }
+            verdict => {
+                REJETES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "NVME_IO_CQE_REJETE cid={} type={} code={} raison={}",
+                    cid,
+                    type_statut,
+                    code_statut,
+                    match verdict {
+                        Verdict::Inconnu => "inconnu",
+                        Verdict::Perime => "perime",
+                        Verdict::Double => "double",
+                        Verdict::HorsDomaine => "hors-domaine",
+                        _ => "?",
+                    }
+                );
+            }
+        }
+    }
+    lus
 }
 
 /// Pose une commande d'entree-sortie et sonne. Verrou pris quelques
@@ -528,14 +679,18 @@ fn soumet_es(sqe: &Sqe) -> Result<(), &'static str> {
     let mut garde = FILES_ES.lock();
     let Some(files) = garde.as_mut() else { return Err("files-absentes") };
     unsafe {
-        files.sq.pose(sqe);
+        if !files.sq.pose(sqe) {
+            // Le controleur n'a pas consomme assez d'entrees : poser quand
+            // meme ecraserait une commande qu'il n'a pas encore lue.
+            return Err("soumission-pleine");
+        }
         if releve_detaille() {
             crate::serial_println!(
                 "NVME_IO_DOORBELL sonnette={:#x} valeur={} base={:#x} sq_phys={:#x}",
-                files.sq.sonnette, files.sq.tete, files.base, files.sq.phys,
+                files.sq.sonnette, files.sq.queue_sq(), files.base, files.sq.phys,
             );
         }
-        sonne(files.base, files.sq.sonnette, files.sq.tete);
+        sonne(files.base, files.sq.sonnette, files.sq.queue_sq());
     }
     Ok(())
 }
@@ -548,35 +703,97 @@ fn emet_es(sqe: &Sqe, limite_ms: u64) -> Result<(), &'static str> {
     let cid = ((sqe[0] >> 16) & 0xFFFF) as u16;
     soumet_es(sqe)?;
 
-    let index = (cid as usize) % CID_ES_MAX;
-    let mut mot = 0u32;
+    let mut statut = (0u8, 0u8);
     let obtenu = crate::kernel::timer::attente_bornee(limite_ms, || {
-        // La case d'abord : un autre attendant a pu ranger notre achevement.
-        let vu = ACHEVEMENTS[index].load(Ordering::Acquire);
-        if vu & 1 != 0 {
-            mot = vu;
+        // Le suivi d'abord : un autre attendant a pu ranger notre achevement.
+        if let Some(vu) = recolte_es(cid) {
+            statut = vu;
             return true;
         }
         draine_les_achevements();
-        let vu = ACHEVEMENTS[index].load(Ordering::Acquire);
-        if vu & 1 != 0 {
-            mot = vu;
+        if let Some(vu) = recolte_es(cid) {
+            statut = vu;
             return true;
+        }
+        // Rendre la main. Attendre un disque en tournant sur un coeur pendant
+        // deux secondes prive la machine d'un seizieme de sa capacite pour
+        // n'apprendre strictement rien de plus.
+        //
+        // La condition n'est pas une precaution de style : ce chemin est aussi
+        // emprunte pendant la mise en service, avant que l'ordonnanceur ne
+        // tourne et avant que les interruptions ne soient armees. Y appeler
+        // `schedule()` reviendrait a commuter vers une tache qui n'existe pas.
+        if peut_ceder_le_processeur() {
+            crate::kernel::task::yield_now();
         }
         false
     });
 
     if !obtenu {
         DELAIS.fetch_add(1, Ordering::Relaxed);
+        // L'identifiant passe en QUARANTAINE, il ne retourne pas au pot. La
+        // commande n'est pas annulee : le controleur peut encore ecrire dans
+        // son tampon. `expire` rend faux si l'achevement s'est range pendant
+        // qu'on decidait d'abandonner -- la course existe, et la perdre
+        // couterait un resultat valide.
+        if !expire_es(cid) {
+            if let Some(vu) = recolte_es(cid) {
+                statut = vu;
+                crate::serial_println!("NVME_IO_DELAI_RATTRAPE cid={}", cid);
+                return verdict_statut(cid, statut);
+            }
+        }
+        let fatal = controleur_en_panne();
         crate::serial_println!(
-            "NVME_IO_DELAI cid={} limite_ms={}",
-            cid, limite_ms,
+            "NVME_IO_DELAI cid={} limite_ms={} quarantaine={} csts_fatal={}",
+            cid,
+            limite_ms,
+            quarantaine_es(),
+            fatal as u8,
         );
+        if fatal {
+            // Un controleur qui a leve CFS ne repondra plus a rien. Continuer
+            // a lui parler ne produit que des echeances de deux secondes, une
+            // par appel, jusqu'a ce que la machine paraisse figee.
+            HORS_SERVICE.store(true, Ordering::Release);
+            crate::serial_println!(
+                "BOUCHAUD_NVME_HORS_SERVICE raison=csts-cfs cid={}",
+                cid
+            );
+        }
         return Err("delai");
     }
 
-    let type_statut = ((mot >> 8) & 0xFF) as u8;
-    let code_statut = ((mot >> 16) & 0xFF) as u8;
+    verdict_statut(cid, statut)
+}
+
+/// Peut-on rendre la main a l'ordonnanceur depuis ce point d'attente ?
+///
+/// Une seule condition a verifier ici : les interruptions. Sans elles, aucun
+/// timer ne nous reveillera -- commuter serait s'endormir pour toujours -- et
+/// l'ordonnanceur le refuse d'ailleurs par assertion. Le cas « pas encore de
+/// tache courante », lui, est deja traite par `schedule()`, qui rend la main
+/// sans rien commuter : ce chemin est emprunte pendant la mise en service,
+/// avant que l'ordonnanceur ne tourne.
+#[inline]
+fn peut_ceder_le_processeur() -> bool {
+    crate::arch::x86_64::cpu::interrupts_enabled()
+}
+
+/// Le controleur a-t-il leve son bit d'etat fatal ?
+///
+/// Question posee au MATERIEL, pas a un compteur d'echeances. Un disque lent
+/// et un disque mort produisent le meme delai vu de l'appelant ; seul `CSTS`
+/// les distingue.
+fn controleur_en_panne() -> bool {
+    let garde = FILES_ES.lock();
+    let Some(files) = garde.as_ref() else { return false };
+    panne_fatale(unsafe { lit32(files.base, registre::CSTS) })
+}
+
+/// Transforme un statut recolte en resultat.
+fn verdict_statut(cid: u16, statut: (u8, u8)) -> Result<(), &'static str> {
+    let (type_statut, code_statut) = statut;
     if releve_detaille() {
         crate::serial_println!(
             "NVME_IO_CQE_OK cid={} type={} code={}",
@@ -624,7 +841,10 @@ unsafe fn transfert_es(
 ) -> Result<(), &'static str> {
     let octets = blocs as usize * ctx.taille_bloc;
     let (prp1, prp2, plan) = prp_es(ctx, octets);
-    let cid = cid_es();
+    // Pas d'identifiant libre : le pot est retenu par des quarantaines. Refuser
+    // est le seul comportement correct -- reutiliser un identifiant encore
+    // vivant ferait rendre a l'appelant l'achevement d'une autre commande.
+    let Some(cid) = cid_es() else { return Err("identifiants-epuises") };
     if releve_detaille() {
         crate::serial_println!(
             "NVME_IO_PRP_READY cid={} plan={} prp1={:#x} prp2={:#x} octets={} rebond_phys={:#x} rebond_virt={:#x}",
@@ -1018,7 +1238,10 @@ impl PiloteNvme {
             OCCUPES.fetch_add(1, Ordering::Relaxed);
             return Achevement::Erreur;
         }
-        let cid = cid_es();
+        let Some(cid) = cid_es() else {
+            rend_le_jeton();
+            return Achevement::Erreur;
+        };
         let sqe = commande_vidange(cid, ctx.nsid);
         let resultat = emet_es(&sqe, LIMITE_VIDANGE_MS);
         rend_le_jeton();
@@ -1182,6 +1405,46 @@ pub fn log_stats() {
         OCCUPES.load(Ordering::Relaxed),
         HORS_SERVICE.load(Ordering::Acquire) as u8,
     );
+    // Ce qui manquait a la ligne precedente : ce que le pilote a REFUSE. Un
+    // compteur d'erreurs a zero pendant que la quarantaine retient le tampon
+    // decrit une machine saine qui ne lit plus rien.
+    let (en_vol, quarantaine, echeances, tardifs_suivi, rejets) = {
+        let g = SUIVI.lock();
+        (
+            g.en_vol(),
+            g.quarantaine(),
+            g.echeances,
+            g.tardifs,
+            g.rejets_inconnu + g.rejets_perime + g.rejets_double + g.rejets_hors_domaine,
+        )
+    };
+    crate::serial_println!(
+        "[NVME-SUIVI] en_vol={} quarantaine={} echeances={} tardifs={} rejets={} \
+refus_quarantaine={} cqe_rejetes={} cqe_tardifs={}",
+        en_vol,
+        quarantaine,
+        echeances,
+        tardifs_suivi,
+        rejets,
+        REFUS_QUARANTAINE.load(Ordering::Relaxed),
+        REJETES.load(Ordering::Relaxed),
+        TARDIFS.load(Ordering::Relaxed),
+    );
+}
+
+/// Commandes en vol, en quarantaine, et achevements refuses.
+///
+/// Publie pour que la BLACKBOX et les garde-fous puissent lire l'etat du
+/// pilote sans passer par le port serie.
+pub fn suivi_stats() -> (u16, u16, u32, u32, u32) {
+    let g = SUIVI.lock();
+    (
+        g.en_vol(),
+        g.quarantaine(),
+        g.echeances,
+        g.tardifs,
+        g.rejets_inconnu + g.rejets_perime + g.rejets_double + g.rejets_hors_domaine,
+    )
 }
 
 /// Requetes refusees faute d'avoir obtenu le jeton d'entree-sortie.

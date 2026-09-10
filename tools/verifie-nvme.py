@@ -18,6 +18,8 @@ RACINE = Path(__file__).resolve().parents[1]
 PILOTE = RACINE / "src/drivers/block/nvme.rs"
 DECODAGE = RACINE / "src/drivers/block/nvme/decodage.rs"
 TEST = RACINE / "tools/platform/test_nvme_decodage.rs"
+SUIVI = RACINE / "src/drivers/block/nvme/suivi.rs"
+TEST_SUIVI = RACINE / "tools/platform/test_nvme_suivi.rs"
 MINUTERIE = RACINE / "src/kernel/time/timer.rs"
 
 
@@ -334,28 +336,46 @@ def regle_attente_hors_irq(pilote, minuterie, fautes):
         )
 
 
-def regle_phase(pilote, decodage, fautes):
+def regle_phase(pilote, decodage, suivi, fautes):
     """Un achevement se reconnait a sa PHASE, pas a un contenu non nul.
 
     La file d'achevement n'est jamais remise a zero : c'est le bit de phase,
     qui alterne a chaque tour, qui distingue une entree neuve d'une ancienne.
     Un pilote qui teste « non nul » relit indefiniment le dernier achevement.
+
+    # Ou vit cette arithmetique
+
+    Elle a quitte `nvme.rs` pour `nvme/suivi.rs`, qui ne touche aucun registre
+    et que `tools/platform/test_nvme_suivi.rs` fait boucler sur trois tours.
+    La regle suit le code : elle exige que le filtre soit APPLIQUE dans le
+    pilote, et que la bascule soit ECRITE dans le module qui la porte. Elle
+    n'admet pas que le pilote decide de la phase lui-meme -- ce serait revenir
+    a une logique que personne ne peut faire boucler en test.
     """
     if "pub phase: bool" not in decodage:
         fautes.append("decodage.rs : l'entree d'achevement n'expose plus sa phase.")
+
     bloc = corps(pilote, "unsafe fn achevement(&self)")
     if bloc is None:
         fautes.append("nvme.rs : la lecture d'un achevement a disparu.")
-        return
-    if "self.phase" not in bloc:
+    elif "est_neuve(" not in bloc:
         fautes.append(
             "nvme.rs : l'achevement n'est plus filtre par la phase attendue."
         )
-    avance = corps(pilote, "fn avance(&mut self)")
-    if avance is None or "!self.phase" not in avance:
+
+    avance = corps(suivi, "pub fn avance(&mut self)")
+    if avance is None:
+        fautes.append("suivi.rs : l'avancee de la file d'achevement a disparu.")
+    elif "!self.phase" not in avance:
         fautes.append(
-            "nvme.rs : la phase ne bascule plus au tour de la file ; a partir "
+            "suivi.rs : la phase ne bascule plus au tour de la file ; a partir "
             "du deuxieme tour, aucun achevement ne sera reconnu."
+        )
+
+    neuve = corps(suivi, "pub fn est_neuve(&self")
+    if neuve is None or "self.phase" not in neuve:
+        fautes.append(
+            "suivi.rs : le filtre de phase ne compare plus a la phase attendue."
         )
 
 
@@ -539,9 +559,171 @@ def regle_releve_entree_sortie(pilote, fautes):
             )
 
 
+def regle_quarantaine(pilote, suivi, test_suivi, fautes):
+    """Une echeance depassee met la commande en QUARANTAINE, elle ne la libere pas.
+
+    # Le defaut que cette regle existe pour empecher de revenir
+
+    L'ancien chemin rendait l'identifiant au pot des qu'il cessait d'attendre,
+    et rendait le tampon de rebond a l'entree-sortie suivante. Or une echeance
+    ne dit RIEN au controleur : la commande reste la sienne, et il peut ecrire
+    dans ce tampon a n'importe quel moment ulterieur.
+
+    Deux corruptions en decoulaient, aucune observable au banc :
+
+      * en lecture, le controleur ecrasait le tampon d'une commande qui n'a
+        rien a voir, et l'appelant recevait les octets d'un autre bloc ;
+      * en ecriture, le controleur relisait un tampon deja remplace, et posait
+        sur le disque des octets qui n'appartenaient pas au bloc demande ;
+
+    et par-dessus, l'identifiant reattribue faisait prendre l'achevement de
+    l'ancienne commande pour celui de la nouvelle.
+
+    # Ce qui est verifie
+
+    Que la quarantaine existe, qu'elle ne se leve que sur l'achevement tardif
+    ou la reinitialisation, que le pilote la consulte AVANT de rendre le
+    tampon, qu'un identifiant hors domaine ne soit pas replie par modulo, et
+    que tout cela soit prouve par injection cote hote.
+    """
+    if "Quarantaine" not in suivi:
+        fautes.append(
+            "suivi.rs : l'etat de quarantaine a disparu ; une echeance rendrait "
+            "de nouveau au pot un identifiant dont le controleur se sert encore."
+        )
+        return
+
+    expire = corps(suivi, "pub fn expire(&mut self")
+    if expire is None:
+        fautes.append("suivi.rs : la mise en quarantaine a disparu.")
+    elif "EtatCid::Quarantaine" not in expire:
+        fautes.append(
+            "suivi.rs : expire ne met plus en quarantaine ; c'est exactement le "
+            "defaut que cette regle refuse."
+        )
+
+    alloue = corps(suivi, "pub fn alloue(&mut self")
+    if alloue is None or "EtatCid::Libre" not in alloue:
+        fautes.append(
+            "suivi.rs : l'attribution ne filtre plus sur l'etat libre ; un "
+            "identifiant en quarantaine redeviendrait attribuable."
+        )
+
+    range_ = corps(suivi, "pub fn range(&mut self")
+    if range_ is None:
+        fautes.append("suivi.rs : le rangement d'un achevement a disparu.")
+    else:
+        if "% CID_MAX" in range_ or "% CID_ES_MAX" in range_:
+            fautes.append(
+                "suivi.rs : un identifiant hors domaine est replie par modulo ; "
+                "il fabriquerait un achevement pour une commande bien vivante."
+            )
+        if "HorsDomaine" not in range_:
+            fautes.append(
+                "suivi.rs : un identifiant hors domaine n'est plus rejete."
+            )
+        if "Verdict::Double" not in range_:
+            fautes.append(
+                "suivi.rs : un second achevement pour le meme identifiant n'est "
+                "plus rejete ; il ecraserait le statut range."
+            )
+
+    jeton = corps(pilote, "fn prend_le_jeton(")
+    if jeton is None:
+        fautes.append("nvme.rs : le jeton d'entree-sortie a disparu.")
+    else:
+        if "tampon_disponible()" not in jeton:
+            fautes.append(
+                "nvme.rs : le jeton d'entree-sortie ne demande plus si le tampon "
+                "de rebond est libre ; il le rendrait a une nouvelle commande "
+                "alors que le controleur peut encore y ecrire."
+            )
+        if "REFUS_QUARANTAINE" not in jeton:
+            fautes.append(
+                "nvme.rs : le refus pour cause de quarantaine n'est plus compte ; "
+                "un disque qui cesse de servir passerait pour un disque au repos."
+            )
+        # Neutraliser la condition en la remplacant par une constante est la
+        # facon la plus courte de faire disparaitre la garde sans toucher au
+        # reste. La regle la refuse explicitement.
+        for mort in ("if false", "if true"):
+            if mort in jeton:
+                fautes.append(
+                    "nvme.rs : prend_le_jeton contient une condition constante "
+                    "(« %s ») ; une garde qui ne peut pas se declencher n'est "
+                    "pas une garde." % mort
+                )
+    disponible = corps(suivi, "pub fn tampon_disponible(&self)")
+    if disponible is None or "self.quarantaine" not in disponible:
+        fautes.append(
+            "suivi.rs : la disponibilite du tampon ne depend plus de la "
+            "quarantaine."
+        )
+
+    emet = corps(pilote, "fn emet_es(")
+    if emet is not None and "expire_es(" not in emet:
+        fautes.append(
+            "nvme.rs : l'echeance ne met plus l'identifiant en quarantaine."
+        )
+
+    # Le controleur doit etre INTERROGE, pas devine.
+    if "controleur_en_panne()" not in pilote or "registre::CSTS" not in pilote:
+        fautes.append(
+            "nvme.rs : l'echeance ne demande plus au controleur s'il est en "
+            "panne ; un disque mort et un disque lent redeviennent "
+            "indiscernables, a deux secondes par appel."
+        )
+
+    attendus = (
+        "une_echeance_ne_rend_pas_l_identifiant_au_pot",
+        "un_identifiant_en_quarantaine_n_est_jamais_reattribue",
+        "l_achevement_tardif_leve_la_quarantaine_et_rien_d_autre",
+        "un_identifiant_hors_domaine_n_est_pas_replie_par_modulo",
+        "un_second_achevement_pour_le_meme_identifiant_est_rejete",
+        "des_achevements_dans_le_desordre_vont_chacun_a_leur_emetteur",
+        "la_phase_de_la_file_d_achevement_s_inverse_au_bouclage",
+        "la_file_de_soumission_refuse_d_ecraser_une_commande_non_lue",
+        "un_achevement_arrive_juste_avant_l_echeance_n_est_pas_perdu",
+        "un_achevement_d_avant_la_reinitialisation_est_dit_perime",
+        "le_tampon_n_est_pas_disponible_tant_qu_une_quarantaine_tient",
+    )
+    for nom in attendus:
+        if nom not in test_suivi:
+            fautes.append(
+                "test_nvme_suivi.rs : le cas « %s » a disparu ; le contrat "
+                "d'achevement redevient une affirmation." % nom
+            )
+
+
+def regle_tete_de_soumission(pilote, suivi, fautes):
+    """La tete que le controleur publie est LUE, et la file refuse de deborder.
+
+    Chaque achevement porte la tete de la file de soumission telle que le
+    controleur la voit. Un pilote qui ne la lit pas ne sait pas combien de
+    places restent : a profondeur un le probleme ne se voit pas, et c'est
+    precisement pourquoi il faut le traiter avant d'y toucher.
+    """
+    if "tete_vue(" not in pilote:
+        fautes.append(
+            "nvme.rs : la tete de soumission publiee par le controleur n'est "
+            "plus lue ; la file de soumission n'a plus de compte de places."
+        )
+    pose = corps(suivi, "pub fn pose(&mut self)")
+    if pose is None or "places()" not in pose:
+        fautes.append(
+            "suivi.rs : la file de soumission ne verifie plus ses places ; "
+            "elle ecraserait une commande que le controleur n'a pas lue."
+        )
+    soumet = corps(pilote, "fn soumet_es(")
+    if soumet is None or "soumission-pleine" not in soumet:
+        fautes.append(
+            "nvme.rs : soumet_es ne refuse plus une file pleine."
+        )
+
+
 def main():
     fautes = []
-    for chemin in (PILOTE, DECODAGE, TEST, MINUTERIE):
+    for chemin in (PILOTE, DECODAGE, TEST, MINUTERIE, SUIVI, TEST_SUIVI):
         if not chemin.exists():
             fautes.append("fichier absent : %s" % chemin.relative_to(RACINE).as_posix())
     if fautes:
@@ -553,6 +735,8 @@ def main():
     decodage = sans_commentaires(DECODAGE.read_text(encoding="utf-8"))
     test = TEST.read_text(encoding="utf-8")
     minuterie = sans_commentaires(MINUTERIE.read_text(encoding="utf-8"))
+    suivi = sans_commentaires(SUIVI.read_text(encoding="utf-8"))
+    test_suivi = TEST_SUIVI.read_text(encoding="utf-8")
 
     regle_foulee_sonnette(pilote, decodage, fautes)
     regle_blocs_decales(decodage, fautes)
@@ -563,7 +747,9 @@ def main():
     regle_attente_hors_irq(pilote, minuterie, fautes)
     regle_attente_sans_verrou(pilote, fautes)
     regle_releve_entree_sortie(pilote, fautes)
-    regle_phase(pilote, decodage, fautes)
+    regle_phase(pilote, decodage, suivi, fautes)
+    regle_quarantaine(pilote, suivi, test_suivi, fautes)
+    regle_tete_de_soumission(pilote, suivi, fautes)
     regle_interruption_non_armee(decodage, fautes)
     regle_tampon_de_rebond(pilote, fautes)
     regle_preuve_hote(test, fautes)
@@ -577,7 +763,8 @@ def main():
         "nvme : foulee lue dans CAP, NLB decale de un, liste PRP au-dela de "
         "deux pages, taille de bloc lue sur le disque, bornes des deux cotes, "
         "attente hors de tout verrou a interruptions masquees, releve "
-        "d'entree-sortie complet"
+        "d'entree-sortie complet, echeance mise en quarantaine et non rendue "
+        "au pot, tete de soumission lue"
     )
     return 0
 
