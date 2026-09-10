@@ -278,3 +278,122 @@ pub fn blocs_par_transfert(tampon_octets: usize, taille_bloc: u32) -> u16 {
     let par_tampon = tampon_octets / taille_bloc as usize;
     par_tampon.min(u16::MAX as usize) as u16
 }
+
+// --- Trouver l'interface de stockage dans un descripteur de configuration ----
+
+/// Classe d'interface « stockage de masse ».
+pub const CLASSE_STOCKAGE: u8 = 0x08;
+/// Sous-classe « SCSI transparent ».
+pub const SOUS_CLASSE_SCSI: u8 = 0x06;
+/// Protocole « Bulk-Only Transport ».
+pub const PROTOCOLE_BOT: u8 = 0x50;
+/// Attribut d'un point de terminaison BULK, bits 1:0 de `bmAttributes`.
+pub const ATTRIBUT_BULK: u8 = 0x02;
+
+/// Ce qu'il faut savoir d'une cle USB pour lui parler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InterfaceStockage {
+    pub configuration: u8,
+    pub interface: u8,
+    /// Adresse du point de terminaison BULK IN, bit 7 compris.
+    pub entree: u8,
+    pub entree_mps: u16,
+    /// Adresse du point de terminaison BULK OUT.
+    pub sortie: u8,
+    pub sortie_mps: u16,
+}
+
+/// Cherche l'interface BOT/SCSI et SES DEUX points de terminaison bulk.
+///
+/// # Pourquoi les deux, et pourquoi dans la meme interface
+///
+/// Le transport Bulk-Only en demande exactement deux : la commande part par le
+/// OUT, la reponse revient par le IN. Un pilote qui en trouve un seul ne peut
+/// rien faire -- il enverrait une commande dont il ne lira jamais le statut, et
+/// le peripherique resterait bloque a attendre qu'on vienne chercher sa
+/// reponse.
+///
+/// Les points de terminaison qui SUIVENT une interface lui appartiennent :
+/// c'est la regle du descripteur de configuration, et c'est pourquoi la
+/// recherche est un automate a etat et non un filtre. Prendre le premier bulk
+/// IN du descripteur, sans regarder a quelle interface il appartient, marche
+/// sur une cle qui n'a qu'une interface et casse sur un lecteur de cartes
+/// multi-fonctions.
+///
+/// Les reglages ALTERNATIFS sont ignores (`bAlternateSetting != 0`) : les
+/// utiliser demanderait un `SET_INTERFACE` que ce pilote n'emet pas, et
+/// prendre leurs points de terminaison en croyant parler au reglage zero est
+/// la facon la plus sure de sonner une cloche qui ne repondra pas.
+pub fn trouve_interface_stockage(bytes: &[u8]) -> Option<InterfaceStockage> {
+    if bytes.len() < 9 || bytes[1] != 2 {
+        return None;
+    }
+    let mut trouvee = InterfaceStockage { configuration: bytes[5], ..Default::default() };
+    let mut dans_la_bonne_interface = false;
+    let mut offset = 0usize;
+
+    while offset + 2 <= bytes.len() {
+        let len = bytes[offset] as usize;
+        let genre = bytes[offset + 1];
+        if len < 2 || offset + len > bytes.len() {
+            break;
+        }
+        match genre {
+            // Descripteur d'interface.
+            4 if len >= 9 => {
+                let alternatif = bytes[offset + 3];
+                let classe = bytes[offset + 5];
+                let sous_classe = bytes[offset + 6];
+                let protocole = bytes[offset + 7];
+                dans_la_bonne_interface = alternatif == 0
+                    && classe == CLASSE_STOCKAGE
+                    && sous_classe == SOUS_CLASSE_SCSI
+                    && protocole == PROTOCOLE_BOT;
+                if dans_la_bonne_interface {
+                    trouvee.interface = bytes[offset + 2];
+                    // Une seconde interface de stockage recommence a zero : ce
+                    // qui a ete trouve sous la precedente ne lui appartient pas.
+                    trouvee.entree = 0;
+                    trouvee.sortie = 0;
+                }
+            }
+            // Descripteur de point de terminaison.
+            5 if len >= 7 && dans_la_bonne_interface => {
+                let adresse = bytes[offset + 2];
+                let attributs = bytes[offset + 3] & 0x03;
+                let mps = u16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]) & 0x07ff;
+                if attributs != ATTRIBUT_BULK || adresse & 0x0f == 0 || mps == 0 {
+                    offset += len;
+                    continue;
+                }
+                if adresse & 0x80 != 0 {
+                    if trouvee.entree == 0 {
+                        trouvee.entree = adresse;
+                        trouvee.entree_mps = mps;
+                    }
+                } else if trouvee.sortie == 0 {
+                    trouvee.sortie = adresse;
+                    trouvee.sortie_mps = mps;
+                }
+                if trouvee.entree != 0 && trouvee.sortie != 0 {
+                    return Some(trouvee);
+                }
+            }
+            _ => {}
+        }
+        offset += len;
+    }
+    None
+}
+
+/// Le numero de point de terminaison (DCI xHCI) d'une adresse USB.
+///
+/// xHCI numerote les contextes de point de terminaison a partir de un, IN et
+/// OUT separes : `dci = numero * 2 + (entree ? 1 : 0)`. EP0 vaut un et
+/// n'apparait pas ici. Se tromper d'un fait sonner la cloche d'un autre point
+/// de terminaison -- le plus souvent celui du sens oppose, qui ne repond jamais.
+pub fn dci_pour(adresse: u8) -> u8 {
+    let numero = adresse & 0x0f;
+    let entree = adresse & 0x80 != 0;
+    numero.saturating_mul(2).saturating_add(if entree { 1 } else { 0 })
+}

@@ -245,3 +245,145 @@ fn le_transfert_est_borne_par_le_tampon_et_par_le_champ() {
     assert_eq!(blocs_par_transfert(usize::MAX, 512), u16::MAX);
     assert_eq!(blocs_par_transfert(4096, 0), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Trouver l'interface de stockage dans un descripteur de configuration
+// ---------------------------------------------------------------------------
+
+/// Assemble un descripteur de configuration a partir de morceaux.
+fn configuration(valeur: u8, morceaux: &[&[u8]]) -> Vec<u8> {
+    let corps: Vec<u8> = morceaux.iter().flat_map(|m| m.iter().copied()).collect();
+    let total = 9 + corps.len();
+    let mut out = vec![
+        9,
+        2,
+        (total & 0xff) as u8,
+        (total >> 8) as u8,
+        1,
+        valeur,
+        0,
+        0x80,
+        50,
+    ];
+    out.extend_from_slice(&corps);
+    out
+}
+
+fn interface(numero: u8, alternatif: u8, classe: u8, sous_classe: u8, protocole: u8) -> Vec<u8> {
+    vec![9, 4, numero, alternatif, 2, classe, sous_classe, protocole, 0]
+}
+
+fn point(adresse: u8, attributs: u8, mps: u16) -> Vec<u8> {
+    vec![7, 5, adresse, attributs, (mps & 0xff) as u8, (mps >> 8) as u8, 0]
+}
+
+#[test]
+fn l_interface_bot_scsi_est_trouvee_avec_ses_deux_points() {
+    let config = configuration(
+        1,
+        &[
+            &interface(0, 0, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT),
+            &point(0x81, ATTRIBUT_BULK, 512),
+            &point(0x02, ATTRIBUT_BULK, 512),
+        ],
+    );
+    let trouvee = trouve_interface_stockage(&config).expect("interface de stockage");
+    assert_eq!(trouvee.configuration, 1);
+    assert_eq!(trouvee.interface, 0);
+    assert_eq!(trouvee.entree, 0x81);
+    assert_eq!(trouvee.sortie, 0x02);
+    assert_eq!(trouvee.entree_mps, 512);
+}
+
+/// Les points de terminaison qui suivent une interface LUI APPARTIENNENT.
+///
+/// Prendre le premier bulk du descripteur sans regarder a quelle interface il
+/// appartient marche sur une cle qui n'a qu'une interface, et fait sonner la
+/// cloche d'une autre fonction sur un lecteur de cartes multi-fonctions.
+#[test]
+fn les_points_d_une_autre_interface_ne_sont_pas_pris() {
+    let config = configuration(
+        1,
+        &[
+            // Une fonction quelconque, avec des bulk qui ne sont pas a nous.
+            &interface(0, 0, 0xFF, 0x00, 0x00),
+            &point(0x81, ATTRIBUT_BULK, 512),
+            &point(0x01, ATTRIBUT_BULK, 512),
+            // La vraie, plus loin.
+            &interface(1, 0, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT),
+            &point(0x82, ATTRIBUT_BULK, 512),
+            &point(0x03, ATTRIBUT_BULK, 512),
+        ],
+    );
+    let trouvee = trouve_interface_stockage(&config).expect("interface de stockage");
+    assert_eq!(trouvee.interface, 1);
+    assert_eq!(trouvee.entree, 0x82);
+    assert_eq!(trouvee.sortie, 0x03);
+}
+
+/// Un reglage ALTERNATIF n'est pas celui qui est actif sans `SET_INTERFACE`.
+#[test]
+fn un_reglage_alternatif_est_ignore() {
+    let config = configuration(
+        1,
+        &[
+            &interface(0, 1, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT),
+            &point(0x81, ATTRIBUT_BULK, 512),
+            &point(0x02, ATTRIBUT_BULK, 512),
+        ],
+    );
+    assert!(trouve_interface_stockage(&config).is_none());
+}
+
+/// Un point INTERRUPT n'est pas un point BULK, et le transport BOT n'en veut
+/// pas : c'est ainsi que se distingue une cle d'un peripherique CBI.
+#[test]
+fn un_point_interrupt_ne_remplace_pas_un_bulk() {
+    let config = configuration(
+        1,
+        &[
+            &interface(0, 0, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT),
+            &point(0x81, ATTRIBUT_BULK, 512),
+            &point(0x82, 0x03, 8),
+        ],
+    );
+    // Le OUT manque : rien a faire d'une moitie de transport.
+    assert!(trouve_interface_stockage(&config).is_none());
+}
+
+/// Un descripteur tronque ou incoherent ne doit pas faire lire au-dela.
+#[test]
+fn un_descripteur_menteur_ne_fait_pas_sortir_du_tampon() {
+    let mut config = configuration(
+        1,
+        &[
+            &interface(0, 0, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT),
+            &point(0x81, ATTRIBUT_BULK, 512),
+            &point(0x02, ATTRIBUT_BULK, 512),
+        ],
+    );
+    // Une longueur de descripteur qui deborde du tampon.
+    config[9] = 250;
+    assert!(trouve_interface_stockage(&config).is_none());
+
+    // Une longueur nulle ferait une boucle sans fin ; elle doit arreter la
+    // marche, pas la faire tourner.
+    let mut boucle = configuration(1, &[&interface(0, 0, CLASSE_STOCKAGE, SOUS_CLASSE_SCSI, PROTOCOLE_BOT)]);
+    boucle[9] = 0;
+    assert!(trouve_interface_stockage(&boucle).is_none());
+
+    assert!(trouve_interface_stockage(&[]).is_none());
+    assert!(trouve_interface_stockage(&[9, 1, 0, 0, 0, 0, 0, 0, 0]).is_none());
+}
+
+/// La numerotation xHCI des contextes : `numero * 2 + entree`.
+///
+/// Se tromper d'un fait sonner la cloche du sens oppose, qui ne repond jamais.
+#[test]
+fn le_dci_suit_la_numerotation_xhci() {
+    assert_eq!(dci_pour(0x81), 3);
+    assert_eq!(dci_pour(0x01), 2);
+    assert_eq!(dci_pour(0x82), 5);
+    assert_eq!(dci_pour(0x02), 4);
+    assert_eq!(dci_pour(0x8F), 31);
+}

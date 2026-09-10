@@ -10,9 +10,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 use core::ptr::{copy_nonoverlapping, read_volatile, write_bytes, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::pci::{self, PciDevice};
+use crate::drivers::bloc::{Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
 use crate::kernel::memory;
 
 const USBCMD_RUN: u32 = 1 << 0;
@@ -53,15 +54,37 @@ const CMD_DISABLE_SLOT: u32 = 10;
 const CMD_ADDRESS_DEVICE: u32 = 11;
 const CMD_CONFIGURE_ENDPOINT: u32 = 12;
 const CMD_EVALUATE_CONTEXT: u32 = 13;
+const CMD_RESET_ENDPOINT: u32 = 14;
+const CMD_SET_TR_DEQUEUE: u32 = 16;
 const EVT_TRANSFER: u32 = 32;
 const EVT_COMMAND_COMPLETION: u32 = 33;
 const EVT_PORT_STATUS_CHANGE: u32 = 34;
 
 const CC_SUCCESS: u8 = 1;
 const CC_SHORT_PACKET: u8 = 13;
+/// Le peripherique a refuse la commande et a bloque le point de terminaison.
+/// Ce n'est PAS une panne : le transport BOT s'en sert pour dire « commande
+/// impossible », et un pilote qui traite un STALL comme une panne perd une cle
+/// parfaitement saine des la premiere commande facultative.
+const CC_STALL: u8 = 6;
 
 const MAX_PORTS_PER_CONTROLLER: usize = 32;
 const MAX_HID_ENDPOINTS_PER_CONTROLLER: usize = 16;
+/// Supports de masse suivis par controleur.
+const MAX_STOCKAGE_PAR_CONTROLEUR: usize = 2;
+/// Tampon de donnees d'un support, en octets.
+///
+/// Soixante-quatre kibioctets, soit cent-vingt-huit blocs de 512 : assez pour
+/// que le cout d'un aller-retour BOT -- trois transferts et deux attentes
+/// d'evenement -- soit amorti, et assez petit pour que l'arene DMA en porte
+/// deux sans se fragmenter.
+const TAMPON_STOCKAGE: usize = 64 * 1024;
+/// Essais de `TEST UNIT READY` avant d'abandonner un support.
+///
+/// Une cle qui vient d'etre branchee repond « pas prete » plusieurs fois de
+/// suite pendant qu'elle monte en puissance. Abandonner au premier refus rend
+/// le montage dependant du hasard.
+const ESSAIS_UNITE_PRETE: usize = 20;
 /// Temps maximal accorde a la reinitialisation d'un port de concentrateur.
 ///
 /// Bornee, et c'est le point : un port qui ne sort jamais de reinitialisation
@@ -109,7 +132,20 @@ mod hid;
 #[path = "concentrateur/decodage.rs"]
 mod concentrateur;
 
-include!("blackbox_storage.rs"); // BOUCHAUD_TRIGKEY_BLACKBOX_V1
+// Le protocole du stockage de masse -- enveloppes CBW/CSW, blocs de commande
+// SCSI, recherche de l'interface BOT dans le descripteur de configuration --
+// est de l'octet pur. Il vit a part et une machine le relit : une cle qui
+// repond de travers ne se fabrique pas sur commande.
+//
+// Il est partage par les DEUX consommateurs du stockage de masse : le
+// enregistreur de vol (`blackbox_storage.rs`) et le pilote de volume
+// (`PiloteUsbStockage`). Le declarer deux fois compilerait le meme fichier
+// deux fois dans le meme module, avec deux jeux de constantes qui pourraient
+// diverger sans que rien ne le dise.
+#[path = "stockage/decodage.rs"]
+mod stockage;
+
+include!("blackbox_storage.rs"); // BOUCHAUD_TRIGKEY_BLACKBOX_V2
 
 use concentrateur::CLASSE_CONCENTRATEUR;
 
@@ -276,6 +312,59 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     clavier: hid::EtatClavier { modificateurs: 0, touches: [0; 6] },
 };
 
+/// Un point de terminaison BULK et son anneau de transfert.
+#[derive(Clone, Copy)]
+struct PointBulk {
+    dci: u8,
+    /// Adresse USB du point, bit 7 compris. Le `CLEAR_FEATURE(ENDPOINT_HALT)`
+    /// la demande, et elle ne se retrouve pas depuis le DCI : la division par
+    /// deux perd le sens.
+    adresse: u8,
+    ring: ProducerRing,
+}
+
+const POINT_BULK_VIDE: PointBulk = PointBulk { dci: 0, adresse: 0, ring: EMPTY_RING };
+
+/// Un support de masse USB, tel que le transport Bulk-Only le voit.
+#[derive(Clone, Copy)]
+struct Stockage {
+    actif: bool,
+    slot_id: u8,
+    interface: u8,
+    entree: PointBulk,
+    sortie: PointBulk,
+    /// Tampon de donnees, partage par les lectures et les ecritures.
+    donnees_phys: u64,
+    donnees_virt: usize,
+    /// Tampon des enveloppes CBW et CSW. Separe du tampon de donnees : les
+    /// trois transferts d'une commande BOT sont distincts, et faire porter le
+    /// CSW par la fin du tampon de donnees ecraserait le dernier bloc lu.
+    enveloppe_phys: u64,
+    enveloppe_virt: usize,
+    /// Etiquette du prochain CBW. Elle IDENTIFIE la reponse : un CSW dont
+    /// l'etiquette ne correspond pas repond a une commande precedente.
+    etiquette: u32,
+    taille_bloc: u32,
+    blocs: u64,
+    amovible: bool,
+}
+
+const STOCKAGE_VIDE: Stockage = Stockage {
+    actif: false,
+    slot_id: 0,
+    interface: 0,
+    entree: POINT_BULK_VIDE,
+    sortie: POINT_BULK_VIDE,
+    donnees_phys: 0,
+    donnees_virt: 0,
+    enveloppe_phys: 0,
+    enveloppe_virt: 0,
+    etiquette: 1,
+    taille_bloc: 0,
+    blocs: 0,
+    amovible: false,
+};
+
 struct Controller {
     dev: PciDevice,
     base: usize,
@@ -295,6 +384,8 @@ struct Controller {
     dcbaa_virt: usize,
     blackbox_storage: Option<BlackboxStorage>,
     hids: [HidEndpoint; MAX_HID_ENDPOINTS_PER_CONTROLLER],
+    stockages: [Stockage; MAX_STOCKAGE_PAR_CONTROLEUR],
+    stockage_count: usize,
     // UN RAPPORT DE CLAVIER N'EST PAS UN EVENEMENT QU'ON JETTE.
     //
     // L'anneau d'evenements est unique : les achevements de commande, les
@@ -880,6 +971,20 @@ fn fill_endpoint_context(ctx: usize, ep_type: u8, max_packet: u16, interval: u8,
     }
 }
 
+/// Le plus grand DCI deja declare dans le contexte de slot.
+///
+/// # Pourquoi on ne repart pas de un
+///
+/// « Context Entries » borne les points de terminaison que le controleur
+/// considere comme existants. Un peripherique composite -- stockage ET clavier
+/// dans la meme configuration -- est configure en DEUX commandes, et la
+/// seconde recalculait ce champ a partir de ses seuls points. Elle le faisait
+/// donc DESCENDRE, et les points de la premiere disparaissaient : la cle etait
+/// montee, puis cessait de repondre des que le clavier etait configure.
+fn dci_deja_declare(slot_ctx: usize) -> u8 {
+    unsafe { ((ctx_r32(slot_ctx, 0) >> 27) & 0x1f) as u8 }
+}
+
 fn clear_input(device: &Device) {
     unsafe { write_bytes(device.in_ctx_virt as *mut u8, 0, 4096) };
 }
@@ -1361,7 +1466,7 @@ fn configure_hids(
     }
 
     let mut add_flags = 1u32; // Slot Context
-    let mut highest_dci = 1u8;
+    let mut highest_dci = dci_deja_declare(slot_out).max(1);
     let base_index = controller.hid_count;
     let mut installed = 0usize;
 
@@ -1995,6 +2100,13 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
     };
     let blackbox_descriptor = parse_blackbox_storage_descriptor(config_slice);
     let (configuration_value, hid_count) = parse_hid_descriptors(config_slice, &mut descriptors);
+    // LE DESCRIPTEUR EST LU MAINTENANT, PAS PLUS TARD.
+    //
+    // `config_slice` designe le tampon de controle du peripherique, que le
+    // PROCHAIN transfert de controle reecrira. Le lire apres un
+    // `SET_CONFIGURATION` chercherait l'interface de stockage dans la reponse
+    // d'une autre requete.
+    let interface_stockage = stockage::trouve_interface_stockage(config_slice);
     let genre_hid = descriptors[..hid_count]
         .iter()
         .map(|d| d.kind)
@@ -2028,64 +2140,103 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         controller.devices[device.slot_id as usize] = Some(device);
     }
 
-    // BOUCHAUD_TRIGKEY_BLACKBOX_V1
-    // Une interface Mass Storage n'est conservee comme cible d'ecriture que
-    // si SON PROPRE disque contient la partition GPT BOUCHAUD-BLACKBOX.
-    let mut configuration_posee = false;
-    if let Some(storage_descriptor) = blackbox_descriptor {
-        if configuration_value != 0 {
-            match set_configuration(controller, &mut device, configuration_value) {
-                Ok(()) => {
-                    wait_ms(10);
-                    configuration_posee = true;
-                    match configure_blackbox_storage(controller, &mut device, storage_descriptor) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            crate::serial_println!(
-                                "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause=partition-absente-ou-support-incompatible",
-                                device.slot_id
-                            );
-                        }
-                        Err(error) => {
-                            crate::serial_println!(
-                                "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause={}",
-                                device.slot_id,
-                                error
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    crate::serial_println!(
-                        "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause=set-configuration:{}",
-                        device.slot_id,
-                        error
-                    );
-                }
-            }
-        }
-    }
-
-    if hid_count == 0 || configuration_value == 0 {
+    // DEUX CONSOMMATEURS POUR UN MEME PERIPHERIQUE, ET UN SEUL PEUT L'AVOIR.
+    //
+    // L'enregistreur de vol reclame une cle dont le disque porte la partition
+    // `BOUCHAUD-BLACKBOX` ; le pilote de volume reclame n'importe quelle
+    // interface BOT/SCSI. Sur la meme cle, ce sont LES MEMES points de
+    // terminaison : les configurer deux fois creerait deux anneaux pour un
+    // seul DCI, et le second ecraserait le premier sans que rien ne le dise.
+    //
+    // L'enregistreur passe donc en premier -- c'est la ligne de vie du
+    // diagnostic physique, et il ne prend que les cles qui portent SA
+    // partition. Ce qu'il n'a pas pris revient au pilote de volume.
+    //
+    // La configuration est posee UNE fois, avant les deux : un peripherique
+    // composite doit garder toutes ses moities, et un second
+    // `SET_CONFIGURATION` reinitialiserait ce que le premier vient d'etablir.
+    let veut_stockage = interface_stockage.is_some();
+    let veut_blackbox = blackbox_descriptor.is_some();
+    if (hid_count == 0 && !veut_stockage && !veut_blackbox) || configuration_value == 0 {
+        // L'enumeration est verte, mais il n'y a rien a piloter ici.
         if (device.slot_id as usize) < controller.devices.len() {
             controller.devices[device.slot_id as usize] = Some(device);
         }
         return;
     }
 
-    if !configuration_posee {
-        if let Err(error) = set_configuration(controller, &mut device, configuration_value) {
-            crate::serial_println!(
-                "BOUCHAUD_HID_CONFIG_FAIL port={} phase=set-configuration error={}",
-                port,
-                error
-            );
-            if (device.slot_id as usize) < controller.devices.len() {
-                controller.devices[device.slot_id as usize] = Some(device);
-            }
-            return;
+    if let Err(error) = set_configuration(controller, &mut device, configuration_value) {
+        crate::serial_println!(
+            "BOUCHAUD_HID_CONFIG_FAIL port={} phase=set-configuration error={}",
+            port,
+            error
+        );
+        if (device.slot_id as usize) < controller.devices.len() {
+            controller.devices[device.slot_id as usize] = Some(device);
         }
-        wait_ms(10);
+        return;
+    }
+    wait_ms(10);
+
+    // BOUCHAUD_TRIGKEY_BLACKBOX_V2
+    // Une interface Mass Storage n'est conservee comme cible d'ecriture que si
+    // SON PROPRE disque contient la partition GPT BOUCHAUD-BLACKBOX.
+    let mut pris_par_la_blackbox = false;
+    if let Some(storage_descriptor) = blackbox_descriptor {
+        match configure_blackbox_storage(controller, &mut device, storage_descriptor) {
+            Ok(true) => pris_par_la_blackbox = true,
+            Ok(false) => {
+                crate::serial_println!(
+                    "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause=partition-absente-ou-support-incompatible",
+                    device.slot_id
+                );
+            }
+            Err(error) => {
+                crate::serial_println!(
+                    "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause={}",
+                    device.slot_id,
+                    error
+                );
+            }
+        }
+    }
+
+    // UN SUPPORT DE MASSE N'EST PAS UN HID, ET C'EST TOUT CE QUI LES SEPARE.
+    //
+    // Le peripherique etait enumere, il apparaissait dans `lsusb`, et il ne
+    // servait a rien : le pilote ne savait armer qu'un point INTERRUPT IN. Une
+    // cle USB demande deux points BULK, dans les deux sens.
+    if let Some(iface) = interface_stockage {
+        if pris_par_la_blackbox {
+            crate::serial_println!(
+                "BOUCHAUD_USB_STOCKAGE_CEDE slot={} raison=enregistreur-de-vol",
+                device.slot_id
+            );
+        } else {
+            match configure_stockage(controller, &mut device, &iface) {
+                Ok(index) => {
+                    if let Err(erreur) = demarre_stockage(controller, &mut device, index) {
+                        crate::serial_println!(
+                            "BOUCHAUD_USB_STOCKAGE_ECHEC port={} phase=demarrage error={}",
+                            port, erreur,
+                        );
+                    }
+                }
+                Err(erreur) => {
+                    crate::serial_println!(
+                        "BOUCHAUD_USB_STOCKAGE_ECHEC port={} phase=configure-endpoint error={}",
+                        port, erreur,
+                    );
+                }
+            }
+        }
+    }
+
+    if hid_count == 0 {
+        if (device.slot_id as usize) < controller.devices.len() {
+            controller.devices[device.slot_id as usize] = Some(device);
+        }
+        return;
     }
 
     match configure_hids(controller, &mut device, &mut descriptors[..hid_count]) {
@@ -2140,6 +2291,32 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
         }
         index += 1;
     }
+    // LE STOCKAGE AUSSI SE DEBRANCHE.
+    //
+    // Un support laisse derriere lui deux anneaux, un tampon de donnees de
+    // soixante-quatre kibioctets et un tampon d'enveloppe. Ne pas les rendre
+    // epuise l'arene DMA en quelques branchements -- et l'entree survivante
+    // dans la table ferait ecrire la prochaine lecture dans les anneaux d'un
+    // peripherique qui n'est plus la.
+    let mut index = 0usize;
+    while index < controller.stockage_count {
+        if controller.stockages[index].slot_id == slot {
+            let st = controller.stockages[index];
+            memory::free_dma(st.entree.ring.phys, RING_BYTES);
+            memory::free_dma(st.sortie.ring.phys, RING_BYTES);
+            memory::free_dma(st.donnees_phys, TAMPON_STOCKAGE);
+            memory::free_dma(st.enveloppe_phys, 4096);
+            let dernier = controller.stockage_count - 1;
+            controller.stockages[index] = controller.stockages[dernier];
+            controller.stockages[dernier] = STOCKAGE_VIDE;
+            controller.stockage_count = dernier;
+            retires += 1;
+            crate::serial_println!("BOUCHAUD_USB_STOCKAGE_RETIRE slot={}", slot);
+            continue;
+        }
+        index += 1;
+    }
+
     let mut noeud = 0usize;
     while noeud < controller.compte_noeuds {
         let appartient = controller.arbre[noeud]
@@ -2554,6 +2731,8 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
             compte_noeuds: 0,
             hid_count: 0,
             devices: [None; MAX_RUNTIME_DEVICES],
+            stockages: [STOCKAGE_VIDE; MAX_STOCKAGE_PAR_CONTROLEUR],
+            stockage_count: 0,
             connected_ports: 0,
             enabled_ports: 0,
             usb_devices: 0,
@@ -2767,6 +2946,780 @@ fn push_ps2(code: u8, extended: bool, pressed: bool) {
 
 
 
+
+// ---------------------------------------------------------------------------
+// Le transport BULK, et le stockage de masse qui s'en sert
+// ---------------------------------------------------------------------------
+//
+// # Ce qui manquait
+//
+// Le pilote ne savait armer qu'un seul genre de point de terminaison : INTERRUPT
+// IN, celui des claviers et des souris. Un point BULK ne s'arme pas de la meme
+// facon -- il n'a pas d'intervalle, il n'est pas ré-arme en boucle, et il va
+// dans les DEUX sens --, et sans lui aucune cle USB n'est lisible : le
+// peripherique est enumere, il apparait dans `lsusb`, et il ne sert a rien.
+//
+// # Pourquoi le meme anneau, et pourquoi deux
+//
+// Un point de terminaison a SON anneau de transfert. Le transport Bulk-Only
+// envoie la commande par le point OUT et lit la reponse par le point IN : deux
+// anneaux, deux cloches, deux evenements d'achevement. Les confondre revient a
+// sonner pour un sens et attendre l'autre, ce qui n'echoue pas -- cela attend.
+//
+// # Le STALL n'est pas une panne
+//
+// Le transport BOT s'en sert pour dire « commande impossible ». Un
+// `REQUEST SENSE` apres un STALL est NORMAL. Ce qui n'est pas normal, c'est de
+// continuer sans avoir debloque le point : le peripherique refuse alors tout,
+// et le pilote conclut que la cle est morte. La recuperation a donc deux
+// moities, et les deux comptent -- `Reset Endpoint` du cote de l'hote,
+// `CLEAR_FEATURE(ENDPOINT_HALT)` du cote du peripherique.
+
+/// Supports de masse trouves.
+static STOCKAGES_TROUVES: AtomicUsize = AtomicUsize::new(0);
+/// Supports montes, c'est-a-dire dont la capacite est connue.
+static STOCKAGES_PRETS: AtomicUsize = AtomicUsize::new(0);
+static BULK_TRANSFERTS: AtomicUsize = AtomicUsize::new(0);
+static BULK_OCTETS: AtomicU64 = AtomicU64::new(0);
+static BULK_STALLS: AtomicUsize = AtomicUsize::new(0);
+static BULK_RECUPERATIONS: AtomicUsize = AtomicUsize::new(0);
+static BULK_ECHECS: AtomicUsize = AtomicUsize::new(0);
+static BOT_REINITIALISATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Transferts ou le controleur et le peripherique ne comptent pas pareil.
+///
+/// Non nul veut dire qu'un des deux ment, et le pilote prend le plus petit des
+/// deux. Sans ce compteur, ce desaccord serait invisible.
+static BULK_DESACCORDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Prepare le contexte des deux points BULK et les fait configurer.
+///
+/// Le contexte d'entree est reconstruit depuis le contexte de SORTIE, comme
+/// pour les HID : le contexte de slot courant porte deja l'adresse, la vitesse
+/// et la chaine de route, et le reecrire a la main serait une occasion de plus
+/// de se tromper.
+fn configure_stockage(
+    controller: &mut Controller,
+    device: &mut Device,
+    iface: &stockage::InterfaceStockage,
+) -> Result<usize, &'static str> {
+    if controller.stockage_count >= MAX_STOCKAGE_PAR_CONTROLEUR {
+        return Err("table-stockage-pleine");
+    }
+    let dci_in = stockage::dci_pour(iface.entree);
+    let dci_out = stockage::dci_pour(iface.sortie);
+    if dci_in < 2 || dci_in >= 32 || dci_out < 2 || dci_out >= 32 {
+        return Err("dci-hors-bornes");
+    }
+
+    let Some(ring_in) = alloc_producer_ring() else {
+        return Err("dma-anneau-in");
+    };
+    let Some(ring_out) = alloc_producer_ring() else {
+        memory::free_dma(ring_in.phys, RING_BYTES);
+        return Err("dma-anneau-out");
+    };
+    let Some((donnees_phys, donnees_virt)) = alloc_zeroed(TAMPON_STOCKAGE) else {
+        memory::free_dma(ring_in.phys, RING_BYTES);
+        memory::free_dma(ring_out.phys, RING_BYTES);
+        return Err("dma-tampon-donnees");
+    };
+    let Some((enveloppe_phys, enveloppe_virt)) = alloc_zeroed(4096) else {
+        memory::free_dma(ring_in.phys, RING_BYTES);
+        memory::free_dma(ring_out.phys, RING_BYTES);
+        memory::free_dma(donnees_phys, TAMPON_STOCKAGE);
+        return Err("dma-tampon-enveloppe");
+    };
+
+    clear_input(device);
+    let slot_out = context_ptr(device.out_ctx_virt, controller.context_size, 0);
+    let slot_in = context_ptr(device.in_ctx_virt, controller.context_size, 1);
+    unsafe {
+        copy_nonoverlapping(slot_out as *const u8, slot_in as *mut u8, controller.context_size);
+    }
+
+    // Type 6 : Bulk IN. Type 2 : Bulk OUT. L'intervalle ne veut rien dire pour
+    // du bulk -- il est asynchrone --, et le mettre a autre chose que zero
+    // ferait reserver de la bande passante periodique qui n'existe pas.
+    fill_endpoint_context(
+        context_ptr(device.in_ctx_virt, controller.context_size, dci_in as usize + 1),
+        6,
+        iface.entree_mps,
+        0,
+        &ring_in,
+    );
+    fill_endpoint_context(
+        context_ptr(device.in_ctx_virt, controller.context_size, dci_out as usize + 1),
+        2,
+        iface.sortie_mps,
+        0,
+        &ring_out,
+    );
+
+    let add_flags = 1u32 | (1u32 << dci_in) | (1u32 << dci_out);
+    let highest_dci = dci_in.max(dci_out).max(dci_deja_declare(slot_out));
+    unsafe {
+        write_volatile((device.in_ctx_virt + 4) as *mut u32, add_flags);
+        let dw0 = ctx_r32(slot_in, 0);
+        ctx_w32(slot_in, 0, (dw0 & !(0x1f << 27)) | ((highest_dci as u32) << 27));
+    }
+
+    if let Err(erreur) = command(
+        controller,
+        device.in_ctx_phys,
+        CMD_CONFIGURE_ENDPOINT,
+        device.slot_id,
+    ) {
+        memory::free_dma(ring_in.phys, RING_BYTES);
+        memory::free_dma(ring_out.phys, RING_BYTES);
+        memory::free_dma(donnees_phys, TAMPON_STOCKAGE);
+        memory::free_dma(enveloppe_phys, 4096);
+        return Err(erreur);
+    }
+
+    let index = controller.stockage_count;
+    controller.stockages[index] = Stockage {
+        actif: true,
+        slot_id: device.slot_id,
+        interface: iface.interface,
+        entree: PointBulk { dci: dci_in, adresse: iface.entree, ring: ring_in },
+        sortie: PointBulk { dci: dci_out, adresse: iface.sortie, ring: ring_out },
+        donnees_phys,
+        donnees_virt,
+        enveloppe_phys,
+        enveloppe_virt,
+        etiquette: 1,
+        taille_bloc: 0,
+        blocs: 0,
+        amovible: false,
+    };
+    controller.stockage_count = index + 1;
+    STOCKAGES_TROUVES.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_TROUVE slot={} if={} in={:#04x}/dci{} out={:#04x}/dci{} mps={}",
+        device.slot_id, iface.interface, iface.entree, dci_in, iface.sortie, dci_out,
+        iface.entree_mps,
+    );
+    Ok(index)
+}
+
+/// Un transfert BULK : un seul TRB Normal, une cloche, un evenement.
+///
+/// Rend le nombre d'octets REELLEMENT transferes. Un peripherique qui en donne
+/// moins que demande le dit dans le residu de l'evenement, et le pilote qui
+/// rend la taille demandee croit avoir un secteur entier alors qu'il en a la
+/// moitie -- l'autre moitie etant ce que le tampon contenait avant.
+fn bulk_transfert(
+    controller: &mut Controller,
+    index: usize,
+    entree: bool,
+    phys: u64,
+    octets: usize,
+) -> Result<usize, &'static str> {
+    if octets == 0 || octets > TAMPON_STOCKAGE {
+        return Err("bulk-longueur");
+    }
+    let (slot, dci) = {
+        let st = &mut controller.stockages[index];
+        let point = if entree { &mut st.entree } else { &mut st.sortie };
+        ring_push(
+            &mut point.ring,
+            Trb {
+                parameter: phys,
+                status: octets as u32,
+                // ISP autant que IOC : un paquet court est la reponse NORMALE
+                // d'un peripherique qui a moins a donner, et sans ISP il
+                // n'arriverait aucun evenement -- le transfert attendrait son
+                // echeance pour rien.
+                control: (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP,
+            },
+        );
+        (st.slot_id, point.dci)
+    };
+    fence(Ordering::SeqCst);
+    ring_doorbell(controller, slot, dci);
+
+    let event = wait_event(controller, EVT_TRANSFER, Some(slot), Some(dci))
+        .ok_or("bulk-echeance")?;
+    let cc = completion_code(event.status);
+    let residu = (event.status & 0x00ff_ffff) as usize;
+    if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+        BULK_TRANSFERTS.fetch_add(1, Ordering::Relaxed);
+        let transferes = octets.saturating_sub(residu.min(octets));
+        BULK_OCTETS.fetch_add(transferes as u64, Ordering::Relaxed);
+        return Ok(transferes);
+    }
+    if cc == CC_STALL {
+        BULK_STALLS.fetch_add(1, Ordering::Relaxed);
+        return Err("bulk-stall");
+    }
+    BULK_ECHECS.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_USB_BULK_ECHEC slot={} dci={} cc={} status={:#010x} octets={}",
+        slot, dci, cc, event.status, octets,
+    );
+    Err("bulk-erreur")
+}
+
+/// Debloque un point de terminaison arrete par un STALL.
+///
+/// Les DEUX moities comptent. `Reset Endpoint` remet l'etat cote HOTE ; sans
+/// `CLEAR_FEATURE(ENDPOINT_HALT)`, le PERIPHERIQUE refuse encore tout, et le
+/// pilote conclut que la cle est morte alors qu'elle attend qu'on la debloque.
+/// L'inverse est aussi vrai : effacer le halt sans reinitialiser le point
+/// laisse le controleur refuser les TRB suivants.
+fn recupere_point_bulk(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+    entree: bool,
+) -> bool {
+    let (slot, dci, adresse) = {
+        let st = &controller.stockages[index];
+        let point = if entree { &st.entree } else { &st.sortie };
+        (st.slot_id, point.dci, point.adresse)
+    };
+
+    let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+    if command_raw(controller, 0, controle).is_err() {
+        return false;
+    }
+
+    // L'anneau repart de son debut. Le controleur reprendra a l'adresse qu'on
+    // lui donne avec DCS a un ; les TRB deja consommes portent l'ancien cycle
+    // et ne seront pas repris.
+    let phys = {
+        let st = &mut controller.stockages[index];
+        let point = if entree { &mut st.entree } else { &mut st.sortie };
+        point.ring.index = 0;
+        point.ring.cycle = 1;
+        unsafe { prepare_link(&point.ring, 1) };
+        point.ring.phys
+    };
+    let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+    if command_raw(controller, phys | 1, controle).is_err() {
+        return false;
+    }
+
+    // CLEAR_FEATURE(ENDPOINT_HALT) : destinataire « point de terminaison »
+    // (0x02), fonctionnalite zero, index = adresse du point.
+    let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
+    if control_transfer(controller, device, setup, 0, false).is_err() {
+        return false;
+    }
+    BULK_RECUPERATIONS.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_RECUPERE slot={} dci={} ep={:#04x}",
+        slot, dci, adresse,
+    );
+    true
+}
+
+/// La procedure de reprise du transport BOT, dans l'ordre que la specification
+/// impose.
+///
+/// Reinitialisation de classe, PUIS deblocage des deux points. L'inverse ne
+/// marche pas : la reinitialisation remet le peripherique en attente d'un
+/// nouveau CBW, et c'est seulement apres qu'il accepte de voir ses points
+/// debloques.
+fn reinitialisation_bot(controller: &mut Controller, device: &mut Device, index: usize) -> bool {
+    let interface = controller.stockages[index].interface;
+    BOT_REINITIALISATIONS.fetch_add(1, Ordering::Relaxed);
+    // 0x21 : hote vers peripherique, type classe, destinataire interface.
+    // 0xFF : Bulk-Only Mass Storage Reset.
+    let setup = setup_packet(0x21, 0xFF, 0, interface as u16, 0);
+    if control_transfer(controller, device, setup, 0, false).is_err() {
+        crate::serial_println!(
+            "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC slot={} if={}",
+            controller.stockages[index].slot_id, interface,
+        );
+        return false;
+    }
+    let entree = recupere_point_bulk(controller, device, index, true);
+    let sortie = recupere_point_bulk(controller, device, index, false);
+    entree && sortie
+}
+
+/// Une commande du transport Bulk-Only : CBW, donnees, CSW.
+///
+/// Rend le nombre d'octets de la phase de donnees reellement transferes.
+fn bot_commande(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+    cdb: &[u8],
+    vers_hote: bool,
+    octets: u32,
+) -> Result<usize, &'static str> {
+    if octets as usize > TAMPON_STOCKAGE {
+        return Err("bot-trop-long");
+    }
+    let (etiquette, enveloppe_virt, enveloppe_phys, donnees_phys) = {
+        let st = &mut controller.stockages[index];
+        let etiquette = st.etiquette;
+        // L'etiquette CHANGE a chaque commande : c'est elle qui distingue la
+        // reponse a celle-ci de la reponse a la precedente. Une etiquette fixe
+        // rendrait la verification du CSW sans objet.
+        st.etiquette = st.etiquette.wrapping_add(1);
+        (etiquette, st.enveloppe_virt, st.enveloppe_phys, st.donnees_phys)
+    };
+
+    let mut cbw = [0u8; stockage::CBW_OCTETS];
+    if !stockage::encode_cbw(&mut cbw, etiquette, octets, vers_hote, 0, cdb) {
+        return Err("bot-cbw-impossible");
+    }
+    unsafe {
+        copy_nonoverlapping(cbw.as_ptr(), enveloppe_virt as *mut u8, stockage::CBW_OCTETS);
+    }
+
+    // Phase de commande.
+    bulk_transfert(controller, index, false, enveloppe_phys, stockage::CBW_OCTETS)?;
+
+    // Phase de donnees. Un STALL ici est prevu par le protocole : le
+    // peripherique refuse les donnees et attend qu'on vienne lire son CSW. On
+    // debloque le point et on continue, au lieu de declarer la cle perdue.
+    let mut transferes = octets as usize;
+    if octets != 0 {
+        match bulk_transfert(controller, index, vers_hote, donnees_phys, octets as usize) {
+            Ok(n) => transferes = n,
+            Err("bulk-stall") => {
+                // Le peripherique refuse les donnees et attend qu'on vienne
+                // lire son CSW : rien n'a ete transfere.
+                transferes = 0;
+                if !recupere_point_bulk(controller, device, index, vers_hote) {
+                    return Err("bot-stall-non-recupere");
+                }
+            }
+            Err(erreur) => return Err(erreur),
+        }
+    }
+
+    // Phase de statut. Un STALL ici aussi est prevu : la specification demande
+    // de debloquer et de RELIRE une fois. Deux STALL de suite veulent dire que
+    // le peripherique ne suit plus le protocole, et c'est la reprise complete.
+    let csw_phys = enveloppe_phys + stockage::CBW_OCTETS as u64;
+    let csw_virt = enveloppe_virt + stockage::CBW_OCTETS;
+    let lu = match bulk_transfert(controller, index, true, csw_phys, stockage::CSW_OCTETS) {
+        Ok(n) => n,
+        Err("bulk-stall") => {
+            if !recupere_point_bulk(controller, device, index, true) {
+                return Err("bot-csw-non-recupere");
+            }
+            bulk_transfert(controller, index, true, csw_phys, stockage::CSW_OCTETS)
+                .map_err(|_| "bot-csw-illisible")?
+        }
+        Err(erreur) => return Err(erreur),
+    };
+    // Un CSW tronque n'est pas un CSW abime : c'est autre chose. Le decoder
+    // sur un tampon a moitie rempli lirait un residu et un statut inventes,
+    // dont l'un des deux dirait « tout va bien ».
+    if lu < stockage::CSW_OCTETS {
+        reinitialisation_bot(controller, device, index);
+        return Err("bot-csw-tronque");
+    }
+
+    let brut = unsafe { core::slice::from_raw_parts(csw_virt as *const u8, stockage::CSW_OCTETS) };
+    let Some(csw) = stockage::decode_csw(brut) else {
+        reinitialisation_bot(controller, device, index);
+        return Err("bot-csw-invalide");
+    };
+    if !stockage::transfert_complet(&csw, etiquette) {
+        if csw.statut == stockage::StatutCsw::ErreurDePhase {
+            // Erreur de phase : le peripherique et l'hote ne sont plus d'accord
+            // sur l'etat du transport. Rien d'autre que la reprise complete ne
+            // les remet d'accord.
+            reinitialisation_bot(controller, device, index);
+            return Err("bot-erreur-de-phase");
+        }
+        return Err("bot-commande-echouee");
+    }
+
+    // DEUX COMPTES, ET LE PLUS PETIT GAGNE.
+    //
+    // Le controleur dit combien d'octets il a REELLEMENT deplaces ; le CSW dit
+    // combien le PERIPHERIQUE croit en avoir donnes. Ils devraient s'accorder.
+    // Quand ils ne s'accordent pas, prendre celui du peripherique ferait rendre
+    // a l'appelant des octets que le tampon contenait AVANT le transfert -- la
+    // moitie d'un secteur, et l'autre moitie d'un secteur d'avant.
+    let dit_par_le_peripherique = stockage::octets_transferes(&csw, octets) as usize;
+    if dit_par_le_peripherique != transferes {
+        BULK_DESACCORDS.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(dit_par_le_peripherique.min(transferes))
+}
+
+/// Interroge un support fraichement configure : prete, quel genre, quelle
+/// capacite.
+fn demarre_stockage(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+) -> Result<(), &'static str> {
+    // `TEST UNIT READY` echoue tant que le support monte en puissance ; c'est
+    // la reponse NORMALE d'une cle qu'on vient de brancher. Le refus se
+    // constate sur la duree, pas sur le premier essai.
+    let mut prete = false;
+    for _ in 0..ESSAIS_UNITE_PRETE {
+        let cdb = stockage::cdb_test_unite_prete();
+        if bot_commande(controller, device, index, &cdb, true, 0).is_ok() {
+            prete = true;
+            break;
+        }
+        // Le sens : une unite qui n'est pas prete l'explique, et la demander
+        // est ce qui efface la condition d'erreur en attente. Sans cela,
+        // certaines cles repondent en erreur a TOUT ce qui suit.
+        let sens = stockage::cdb_demande_sens(18);
+        let _ = bot_commande(controller, device, index, &sens, true, 18);
+        wait_ms(50);
+    }
+    if !prete {
+        return Err("unite-jamais-prete");
+    }
+
+    let cdb = stockage::cdb_interroge(36);
+    let lu = bot_commande(controller, device, index, &cdb, true, 36)?;
+    let brut = unsafe {
+        core::slice::from_raw_parts(controller.stockages[index].donnees_virt as *const u8, lu)
+    };
+    let interrogation = stockage::decode_interrogation(brut).ok_or("interrogation-invalide")?;
+    if !stockage::support_utilisable(&interrogation) {
+        return Err("support-non-bloc");
+    }
+    controller.stockages[index].amovible = interrogation.amovible;
+
+    let cdb = stockage::cdb_lit_capacite();
+    let lu = bot_commande(controller, device, index, &cdb, true, 8)?;
+    let brut = unsafe {
+        core::slice::from_raw_parts(controller.stockages[index].donnees_virt as *const u8, lu)
+    };
+    let capacite = stockage::decode_capacite(brut).ok_or("capacite-invalide")?;
+    let st = &mut controller.stockages[index];
+    st.taille_bloc = capacite.taille_bloc;
+    st.blocs = capacite.blocs();
+    let (taille_bloc, blocs, slot_id, amovible) = (st.taille_bloc, st.blocs, st.slot_id, st.amovible);
+    STOCKAGES_PRETS.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_PRET slot={} blocs={} taille_bloc={} octets={} amovible={}",
+        slot_id, blocs, taille_bloc, capacite.octets(), amovible as u8,
+    );
+    // LE VOLUME EST PUBLIE ICI, ET C'EST CE QUI FAIT DE CE PILOTE UN PILOTE.
+    //
+    // Sans enregistrement, la pile BOT n'aurait pour appelant que le test qui
+    // la prouve. Enregistree, la cle devient lisible par FAT32, par le
+    // decoupage GPT et par la persistance sans qu'aucun des trois ne change.
+    publie_le_volume_usb(taille_bloc, blocs);
+    Ok(())
+}
+
+/// Lit ou ecrit des blocs, en decoupant selon le tampon.
+///
+/// `READ (10)` compte les blocs sur seize bits et le tampon en porte
+/// cent-vingt-huit : la boucle est donc bornee par le tampon, jamais par le
+/// champ. Elle rend le nombre de blocs REELLEMENT transferes -- un transfert
+/// partiel se dit, il ne s'arrondit pas.
+fn stockage_transfere(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+    ecriture: bool,
+    lba: u64,
+    blocs: usize,
+    tampon: &mut [u8],
+    source: Option<&[u8]>,
+) -> usize {
+    let (taille_bloc, total_blocs, donnees_virt) = {
+        let st = &controller.stockages[index];
+        (st.taille_bloc, st.blocs, st.donnees_virt)
+    };
+    if taille_bloc == 0 || blocs == 0 {
+        return 0;
+    }
+    // Un LBA hors bornes n'est pas une panne du support : c'est une erreur
+    // d'appelant, et la laisser partir couterait un aller-retour materiel pour
+    // recevoir une erreur moins claire.
+    match lba.checked_add(blocs as u64) {
+        Some(fin) if fin <= total_blocs => {}
+        _ => return 0,
+    }
+    if lba > u32::MAX as u64 {
+        // `READ (10)` adresse sur trente-deux bits. Au-dela il faut `READ (16)`,
+        // que ce pilote n'emet pas -- et servir l'adresse tronquee lirait le
+        // mauvais secteur en silence.
+        return 0;
+    }
+
+    let par_transfert = stockage::blocs_par_transfert(TAMPON_STOCKAGE, taille_bloc) as usize;
+    if par_transfert == 0 {
+        return 0;
+    }
+    let octets_bloc = taille_bloc as usize;
+    let mut faits = 0usize;
+    while faits < blocs {
+        let lot = (blocs - faits).min(par_transfert);
+        let octets = lot * octets_bloc;
+        let decalage = faits * octets_bloc;
+        if ecriture {
+            let Some(donnees) = source else { return faits };
+            if decalage + octets > donnees.len() {
+                return faits;
+            }
+            unsafe {
+                copy_nonoverlapping(
+                    donnees.as_ptr().add(decalage),
+                    donnees_virt as *mut u8,
+                    octets,
+                );
+            }
+        }
+        let cdb = stockage::cdb_transfert_10(ecriture, (lba + faits as u64) as u32, lot as u16);
+        let resultat = bot_commande(controller, device, index, &cdb, !ecriture, octets as u32);
+        let transferes = match resultat {
+            Ok(n) => n,
+            Err(erreur) => {
+                crate::serial_println!(
+                    "BOUCHAUD_USB_STOCKAGE_IO_ECHEC ecriture={} lba={} blocs={} erreur={}",
+                    ecriture as u8, lba + faits as u64, lot, erreur,
+                );
+                return faits;
+            }
+        };
+        if !ecriture {
+            if decalage + transferes > tampon.len() {
+                return faits;
+            }
+            unsafe {
+                copy_nonoverlapping(
+                    donnees_virt as *const u8,
+                    tampon.as_mut_ptr().add(decalage),
+                    transferes,
+                );
+            }
+        }
+        // Un transfert partiel s'arrete la ou il s'est arrete. Compter le lot
+        // entier ferait croire a des blocs qui n'ont pas ete lus.
+        let blocs_faits = transferes / octets_bloc;
+        faits += blocs_faits;
+        if blocs_faits != lot {
+            break;
+        }
+    }
+    faits
+}
+
+
+// ---------------------------------------------------------------------------
+// Le support USB derriere la couche bloc generique
+// ---------------------------------------------------------------------------
+//
+// # Pourquoi un pilote de la couche bloc, et pas une fonction de lecture
+//
+// « Une fonctionnalite n'est pas faite si elle existe sans appelant reel. »
+// Une pile BOT qui exposerait `lit_secteur()` n'aurait pour appelant que le
+// test qui la prouve : le systeme de fichiers, lui, parle a un VOLUME. En
+// s'enregistrant comme `PiloteBloc`, la cle devient lisible par FAT32, par le
+// decoupage GPT et par la persistance sans qu'aucun de ces trois ne change.
+//
+// # Le verrou, et pourquoi il est celui du pilote USB
+//
+// Le transport BOT est synchrone : trois transferts et deux attentes
+// d'evenement par commande. Il se sert du MEME anneau d'evenements que la
+// scrutation HID, et deux fils qui le liraient en meme temps se voleraient
+// leurs achevements. `RUNTIME_BUSY` est deja ce verrou-la ; en prendre un
+// second n'ajouterait qu'un ordre de plus a respecter.
+//
+// # Ce que le descripteur ne demande PAS au verrou
+//
+// La capacite est publiee dans deux atomiques au moment du montage. Le
+// systeme de fichiers demande le descripteur bien plus souvent qu'il ne lit,
+// et le lui faire payer une attente sur le verrou du pilote USB ferait
+// dependre la reactivite de l'interface du trafic disque.
+
+/// Volume attribue au premier support USB monte. Le disque interne prend
+/// deja `Volume(2)`.
+pub const VOLUME_USB: Volume = Volume(3);
+
+/// Capacite publiee, pour que `descripteur()` ne prenne aucun verrou.
+static USB_BLOCS: AtomicU64 = AtomicU64::new(0);
+static USB_TAILLE_BLOC: AtomicUsize = AtomicUsize::new(0);
+/// Requetes refusees parce que le pilote USB etait occupe.
+static USB_OCCUPE: AtomicUsize = AtomicUsize::new(0);
+
+/// Tours de garde avant d'abandonner l'attente du verrou du pilote USB.
+///
+/// Une commande BOT dure quelques millisecondes. Attendre sans limite ferait
+/// d'un pilote USB bloque un systeme de fichiers bloque ; rendre `Erreur`
+/// apres une attente bornee laisse l'appelant decider.
+const ATTENTE_RUNTIME: usize = 50_000_000;
+
+/// Prend le pilote USB pour la duree d'une operation.
+fn avec_le_pilote_usb<R>(action: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
+    let mut tours = 0usize;
+    while RUNTIME_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        tours += 1;
+        if tours >= ATTENTE_RUNTIME {
+            USB_OCCUPE.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+    let resultat = unsafe {
+        #[allow(static_mut_refs)]
+        RUNTIME.as_mut().map(action)
+    };
+    RUNTIME_BUSY.store(false, Ordering::Release);
+    resultat
+}
+
+/// Le premier support pret, s'il y en a un.
+fn premier_support(runtime: &mut Runtime) -> Option<(usize, usize)> {
+    for (ic, controleur) in runtime.controllers.iter().enumerate() {
+        for index in 0..controleur.stockage_count {
+            let st = &controleur.stockages[index];
+            if st.actif && st.taille_bloc != 0 && st.blocs != 0 {
+                return Some((ic, index));
+            }
+        }
+    }
+    None
+}
+
+/// Publie la capacite du premier support pret, et enregistre le volume.
+fn publie_le_volume_usb(taille_bloc: u32, blocs: u64) {
+    USB_TAILLE_BLOC.store(taille_bloc as usize, Ordering::Release);
+    USB_BLOCS.store(blocs, Ordering::Release);
+    crate::drivers::bloc::enregistre(VOLUME_USB, &PILOTE_USB);
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_VOLUME volume={} blocs={} taille_bloc={} mio={}",
+        VOLUME_USB.indice(),
+        blocs,
+        taille_bloc,
+        blocs.saturating_mul(taille_bloc as u64) / (1024 * 1024),
+    );
+}
+
+pub struct PiloteUsbStockage;
+static PILOTE_USB: PiloteUsbStockage = PiloteUsbStockage;
+
+impl PiloteUsbStockage {
+    /// Le corps commun aux deux sens : trouver le support, sortir son
+    /// peripherique de la table, transferer, le remettre.
+    ///
+    /// Le peripherique est SORTI parce que `bot_commande` a besoin du
+    /// controleur et du peripherique en meme temps, et que le second vit dans
+    /// le premier. Le remettre est obligatoire : l'anneau de controle a avance,
+    /// et la copie que l'on tient est la seule a jour.
+    fn transfere(
+        &self,
+        ecriture: bool,
+        lba: u64,
+        blocs: usize,
+        tampon: &mut [u8],
+        source: Option<&[u8]>,
+    ) -> Achevement {
+        let resultat = avec_le_pilote_usb(|runtime| {
+            let Some((ic, index)) = premier_support(runtime) else {
+                return Achevement::Absent;
+            };
+            let controleur = &mut runtime.controllers[ic];
+            let slot = controleur.stockages[index].slot_id as usize;
+            if slot >= controleur.devices.len() {
+                return Achevement::Erreur;
+            }
+            let Some(mut device) = controleur.devices[slot].take() else {
+                return Achevement::Erreur;
+            };
+            let faits = stockage_transfere(
+                controleur, &mut device, index, ecriture, lba, blocs, tampon, source,
+            );
+            controleur.devices[slot] = Some(device);
+            if faits == blocs {
+                Achevement::Fait(faits)
+            } else {
+                Achevement::Erreur
+            }
+        });
+        resultat.unwrap_or(Achevement::Erreur)
+    }
+}
+
+impl PiloteBloc for PiloteUsbStockage {
+    fn descripteur(&self) -> Descripteur {
+        Descripteur {
+            taille_bloc: USB_TAILLE_BLOC.load(Ordering::Acquire).max(1),
+            blocs: USB_BLOCS.load(Ordering::Acquire),
+            // Le transport BOT est strictement sequentiel : une commande, sa
+            // reponse, puis la suivante. Declarer plus laisserait croire a un
+            // parallelisme que le protocole interdit.
+            profondeur_file: 1,
+            // Le pilote n'emet pas `SYNCHRONIZE CACHE`. Le declarer faux est le
+            // seul choix honnete : une cle avec un cache d'ecriture peut avoir
+            // accepte une ecriture sans l'avoir posee.
+            vidange_reelle: false,
+            nom: "usb-bot",
+        }
+    }
+
+    fn soumet(&self, requete: Requete, tampon: &mut [u8]) -> Achevement {
+        match requete.genre {
+            Genre::Lecture => self.transfere(false, requete.lba, requete.blocs, tampon, None),
+            // Une ecriture par ce chemin n'a pas de donnees a poser : c'est une
+            // erreur d'appelant, pas une panne du support.
+            Genre::Ecriture => Achevement::Erreur,
+            Genre::Vidange => Achevement::Fait(0),
+        }
+    }
+
+    fn soumet_ecriture(&self, requete: Requete, donnees: &[u8]) -> Achevement {
+        match requete.genre {
+            Genre::Ecriture => {
+                let mut vide: [u8; 0] = [];
+                self.transfere(true, requete.lba, requete.blocs, &mut vide, Some(donnees))
+            }
+            Genre::Lecture => Achevement::Erreur,
+            Genre::Vidange => Achevement::Fait(0),
+        }
+    }
+}
+
+/// Supports trouves, supports prets, transferts bulk, octets, stalls,
+/// recuperations, reprises BOT, echecs, desaccords, refus pour cause d'occupe.
+pub fn stockage_stats() -> (usize, usize, usize, u64, usize, usize, usize, usize, usize, usize) {
+    (
+        STOCKAGES_TROUVES.load(Ordering::Relaxed),
+        STOCKAGES_PRETS.load(Ordering::Relaxed),
+        BULK_TRANSFERTS.load(Ordering::Relaxed),
+        BULK_OCTETS.load(Ordering::Relaxed),
+        BULK_STALLS.load(Ordering::Relaxed),
+        BULK_RECUPERATIONS.load(Ordering::Relaxed),
+        BOT_REINITIALISATIONS.load(Ordering::Relaxed),
+        BULK_ECHECS.load(Ordering::Relaxed),
+        BULK_DESACCORDS.load(Ordering::Relaxed),
+        USB_OCCUPE.load(Ordering::Relaxed),
+    )
+}
+
+/// Un support USB est-il monte et lisible ?
+pub fn stockage_pret() -> bool {
+    USB_BLOCS.load(Ordering::Acquire) != 0
+}
+
+pub fn log_stockage() {
+    let (trouves, prets, transferts, octets, stalls, recuperations, reprises, echecs, desaccords, occupes) =
+        stockage_stats();
+    if trouves == 0 {
+        return;
+    }
+    crate::serial_println!(
+        "[USB-STOCKAGE] trouves={} prets={} blocs={} taille_bloc={} transferts={} octets={} \
+         stalls={} recuperations={} reprises_bot={} echecs={} desaccords={} occupes={}",
+        trouves, prets,
+        USB_BLOCS.load(Ordering::Relaxed),
+        USB_TAILLE_BLOC.load(Ordering::Relaxed),
+        transferts, octets, stalls, recuperations, reprises, echecs, desaccords, occupes,
+    );
+}
 
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -3156,6 +4109,30 @@ pub fn lsusb(attente_ms: u64) {
             }
         }
     }
+    // Le support de masse fait partie de l'arbre : « la cle est-elle vue ? »
+    // et « la cle est-elle LISIBLE ? » sont deux questions differentes, et la
+    // seconde ne se lit nulle part ailleurs. Sur une machine sans console
+    // serie -- le cas du Reference Device -- la reponse doit etre a l'ECRAN.
+    let (trouves, prets, transferts, octets, stalls, _rec, _rep, echecs, _des, _occ) =
+        stockage_stats();
+    if trouves != 0 {
+        let blocs = USB_BLOCS.load(Ordering::Relaxed);
+        let taille = USB_TAILLE_BLOC.load(Ordering::Relaxed);
+        crate::println!(
+            "stockage USB : {} trouve(s), {} pret(s), volume {} = {} Mio ({} blocs de {} o)",
+            trouves,
+            prets,
+            VOLUME_USB.indice(),
+            blocs.saturating_mul(taille as u64) / (1024 * 1024),
+            blocs,
+            taille,
+        );
+        crate::println!(
+            "               {} transfert(s) bulk, {} octet(s), {} stall(s), {} echec(s)",
+            transferts, octets, stalls, echecs,
+        );
+    }
+    log_stockage();
     RUNTIME_BUSY.store(false, Ordering::Release);
     if total == 0 {
         crate::println!("lsusb: aucun peripherique USB enumere");

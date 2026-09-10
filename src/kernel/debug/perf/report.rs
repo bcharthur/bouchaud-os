@@ -42,4 +42,8 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
     crate::kernel::frame_cache::log_stats();
     crate::kernel::memory_pressure::log_stats();
     crate::kernel::clean_page_cache::log_ng_stats();
+    // Le stockage USB ne dit rien tant qu'aucun support n'a ete trouve : une
+    // ligne vide a chaque rapport rendrait la trace serie illisible sur une
+    // machine qui n'a pas de cle branchee.
+    crate::drivers::xhci_active::log_stockage();
 }
