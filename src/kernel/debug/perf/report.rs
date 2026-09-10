@@ -49,4 +49,10 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
     // Le disque interne : `occupes` non nul chiffre la contention du tampon de
     // rebond unique, et c'est l'argument pour en avoir plusieurs.
     crate::drivers::nvme::log_stats();
+    // Une persistance demandee et jamais montee ne doit pas etre silencieuse :
+    // c'est le seul endroit ou un systeme sous pression le dit.
+    let refuses = crate::platform::pc::installation::montages_refuses();
+    if refuses != 0 {
+        crate::serial_println!("[PERSISTANCE] montages_refuses={}", refuses);
+    }
 }

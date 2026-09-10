@@ -666,21 +666,36 @@ pub fn montage_differe_en_attente() -> bool {
 /// # Ce que l'appel en ligne coutait au bureau
 ///
 /// Le montage etait appele depuis la boucle de trames du compositeur, sur SA
-/// pile et dans SON quantum. Tout ce que le disque fait, le bureau le subissait
-/// donc : une commande lente est une trame perdue, une faute dans le chemin de
-/// stockage est un bureau mort, et la profondeur de pile du montage s'ajoutait
-/// a celle du compositeur -- qui est deja la plus longue chaine du systeme.
+/// pile et dans SON quantum. Tout ce que fait le disque, le bureau le subissait
+/// donc : une commande lente est une trame perdue, et la profondeur de pile du
+/// montage s'ajoutait a celle du compositeur -- qui est deja la plus longue
+/// chaine du systeme.
 ///
 /// Rien de tout cela n'est necessaire. Le montage n'a aucun resultat que la
 /// trame en cours attende : il enregistre un volume, et le systeme de fichiers
 /// le trouvera quand il regardera.
 ///
-/// # Le repli, et pourquoi il existe
+/// # IL N'Y A PAS DE REPLI EN LIGNE, ET C'EST DELIBERE
 ///
-/// Si le fil ne peut pas etre cree -- table des processus pleine, memoire
-/// epuisee --, le montage est fait SUR PLACE. Perdre la persistance parce
-/// qu'on n'a pas pu creer une tache serait un mauvais echange : le travail en
-/// ligne est ce qu'on faisait hier, il fonctionne, il est seulement moins bon.
+/// La premiere version retombait sur un montage SYNCHRONE quand le fil ne
+/// pouvait pas etre cree. C'etait exactement le mauvais echange.
+///
+/// Ne pas pouvoir creer une tache veut dire : memoire sous pression, table des
+/// processus pleine, systeme deja degrade. C'est le PIRE moment pour remettre
+/// une operation disque potentiellement longue sur le fil graphique -- celui
+/// qui doit continuer a repondre justement parce que le reste va mal.
+///
+/// Le comportement est donc : le compositeur continue, la persistance reste
+/// non montee, et l'etat degrade est DIT. Un montage qu'on n'a pas fait se
+/// rattrape ; un bureau qu'on a fige pendant que la machine manquait de
+/// memoire, non.
+///
+/// # Ce que cette separation protege, et ce qu'elle ne protege PAS
+///
+/// Elle protege la LATENCE et la PILE du compositeur. Elle ne protege pas le
+/// noyau d'une faute fatale : un `#DF` en anneau zero dans le fil de montage
+/// tue le systeme entier, exactement comme dans le bureau. Deplacer une faute
+/// noyau d'un fil vers un autre ne l'isole pas.
 pub fn lance_le_montage_differe() -> bool {
     if !montage_differe_en_attente() {
         return false;
@@ -689,10 +704,28 @@ pub fn lance_le_montage_differe() -> bool {
         crate::serial_println!("BOUCHAUD_NVME_PERSISTENCE_FIL_LANCE");
         return true;
     }
+    // Le drapeau n'est PAS consomme : `execute_le_montage_differe` ne l'a pas
+    // vu. Une reprise ulterieure depuis un service reste donc possible, et
+    // c'est ce que dit `montage_differe_en_attente()`.
+    MONTAGES_REFUSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::serial_println!(
-        "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE raison=tache-non-creee consequence=montage-en-ligne"
+        "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE raison=tache-non-creee \
+         consequence=persistance-non-montee etat=degrade"
     );
-    execute_le_montage_differe()
+    false
+}
+
+/// Tentatives de lancement du fil de montage refusees.
+///
+/// Non nul veut dire que la persistance n'est pas montee ALORS QU'ELLE ETAIT
+/// DEMANDEE. Sans ce compteur, un systeme sous pression perdrait sa
+/// persistance en silence.
+static MONTAGES_REFUSES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Lancements du fil de montage refuses, pour le diagnostic.
+pub fn montages_refuses() -> u64 {
+    MONTAGES_REFUSES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Le corps du fil de montage.

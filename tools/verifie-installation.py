@@ -432,10 +432,14 @@ def regle_montage_differe(stage2, install, bureau, fautes):
                 "propre fil ; le compositeur reprend sur sa pile et dans son "
                 "quantum tout ce que fait le disque."
             )
-        if "execute_le_montage_differe()" not in lance:
+        # Le REPLI EN LIGNE a ete supprime, et il ne doit pas revenir : voir
+        # `tools/verifie-montage-hors-compositeur.py`, qui porte cette regle et
+        # explique pourquoi un systeme qui ne peut plus creer de tache est
+        # precisement celui qu'il ne faut pas figer sur son fil graphique.
+        if "MONTAGES_REFUSES" not in lance:
             fautes.append(
-                "installation.rs : le repli en ligne a disparu ; un fil qu'on "
-                "ne peut pas creer ferait perdre la persistance en silence."
+                "installation.rs : un refus de lancement n'est plus compte ; la "
+                "persistance disparaitrait en silence sous pression memoire."
             )
 
 
