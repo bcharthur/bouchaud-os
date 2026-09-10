@@ -407,11 +407,36 @@ def regle_montage_differe(stage2, install, bureau, fautes):
                 "persistance."
             )
 
-    if "execute_le_montage_differe()" not in bureau:
+    # Le bureau DECLENCHE le montage ; il ne l'execute plus lui-meme.
+    #
+    # `lance_le_montage_differe` cree un fil noyau et rend la main. C'est la
+    # meme propriete -- « demande, donc fait » -- obtenue sans que le
+    # compositeur porte le travail sur sa pile et dans son quantum. Exiger
+    # l'appel EN LIGNE reviendrait a interdire cette separation.
+    if "lance_le_montage_differe()" not in bureau:
         fautes.append(
-            "window_manager.rs : le bureau n'execute plus le montage differe ; "
+            "window_manager.rs : le bureau ne declenche plus le montage differe ; "
             "il serait demande et jamais fait."
         )
+
+    lance = corps(install, "pub fn lance_le_montage_differe(")
+    if lance is None:
+        fautes.append(
+            "installation.rs : lance_le_montage_differe() a disparu ; le bureau "
+            "n'a plus de point de declenchement."
+        )
+    else:
+        if "spawn_noyau" not in lance:
+            fautes.append(
+                "installation.rs : le montage differe ne part plus dans son "
+                "propre fil ; le compositeur reprend sur sa pile et dans son "
+                "quantum tout ce que fait le disque."
+            )
+        if "execute_le_montage_differe()" not in lance:
+            fautes.append(
+                "installation.rs : le repli en ligne a disparu ; un fil qu'on "
+                "ne peut pas creer ferait perdre la persistance en silence."
+            )
 
 
 def regle_verification_externe(fautes):

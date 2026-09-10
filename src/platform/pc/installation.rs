@@ -661,6 +661,46 @@ pub fn montage_differe_en_attente() -> bool {
         && !MONTAGE_TENTE.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Lance le montage differe DANS SON PROPRE FIL, et rend la main aussitot.
+///
+/// # Ce que l'appel en ligne coutait au bureau
+///
+/// Le montage etait appele depuis la boucle de trames du compositeur, sur SA
+/// pile et dans SON quantum. Tout ce que le disque fait, le bureau le subissait
+/// donc : une commande lente est une trame perdue, une faute dans le chemin de
+/// stockage est un bureau mort, et la profondeur de pile du montage s'ajoutait
+/// a celle du compositeur -- qui est deja la plus longue chaine du systeme.
+///
+/// Rien de tout cela n'est necessaire. Le montage n'a aucun resultat que la
+/// trame en cours attende : il enregistre un volume, et le systeme de fichiers
+/// le trouvera quand il regardera.
+///
+/// # Le repli, et pourquoi il existe
+///
+/// Si le fil ne peut pas etre cree -- table des processus pleine, memoire
+/// epuisee --, le montage est fait SUR PLACE. Perdre la persistance parce
+/// qu'on n'a pas pu creer une tache serait un mauvais echange : le travail en
+/// ligne est ce qu'on faisait hier, il fonctionne, il est seulement moins bon.
+pub fn lance_le_montage_differe() -> bool {
+    if !montage_differe_en_attente() {
+        return false;
+    }
+    if crate::kernel::task::spawn_noyau(fil_de_montage, "montage") {
+        crate::serial_println!("BOUCHAUD_NVME_PERSISTENCE_FIL_LANCE");
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE raison=tache-non-creee consequence=montage-en-ligne"
+    );
+    execute_le_montage_differe()
+}
+
+/// Le corps du fil de montage.
+fn fil_de_montage() -> ! {
+    execute_le_montage_differe();
+    crate::kernel::task::exit_current(0)
+}
+
 /// Execute le montage differe, une seule fois.
 ///
 /// Rend `true` quand une partition systeme a ete montee. Rend `false` dans

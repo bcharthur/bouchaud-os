@@ -540,9 +540,11 @@ fn boucle() {
     while !quit {
         tours = tours.saturating_add(1);
         // Le bureau est peint depuis deux tours : la persistance peut etre
-        // tentee. Une seule fois, et bornee par le pilote bloc.
+        // tentee. Dans SON PROPRE FIL -- ce qui suit ne doit rien attendre du
+        // disque, et une faute dans le chemin de stockage ne doit pas emporter
+        // le compositeur avec elle.
         if tours == 3 {
-            crate::platform::pc::installation::execute_le_montage_differe();
+            crate::platform::pc::installation::lance_le_montage_differe();
         }
         // BOUCHAUD_GUI_EVENT_DRIVEN_V1
         //
