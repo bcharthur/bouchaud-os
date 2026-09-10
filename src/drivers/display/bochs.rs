@@ -254,6 +254,9 @@ fn firmware_encode_pixel(fb: FirmwareFramebuffer, rgb: u32) -> Option<u32> {
 }
 
 fn present_firmware_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
+    let _blackbox_present = crate::kernel::blackbox::gfx_present(
+        x, y, rect_width, rect_height,
+    ); // BOUCHAUD_TRIGKEY_BLACKBOX_V1
     let Some(fb) = firmware_fb() else { return; };
     if userland_owns_display() {
         REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);

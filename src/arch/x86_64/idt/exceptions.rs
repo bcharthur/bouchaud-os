@@ -179,6 +179,13 @@ extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, code:
     releve_faute_fatale("DOUBLE FAULT", &stack, code);
     smp::arrete_les_autres_cpu();
     serial_println!("*** KERNEL PANIC *** double faute, cpu={}", cpu);
+    crate::kernel::blackbox::fatal_best_effort(
+        cpu,
+        8,
+        stack.instruction_pointer.as_u64(),
+        stack.stack_pointer.as_u64(),
+        code,
+    ); // BOUCHAUD_TRIGKEY_BLACKBOX_V1
     arret_definitif();
 }
 

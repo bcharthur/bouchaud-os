@@ -109,6 +109,8 @@ mod hid;
 #[path = "concentrateur/decodage.rs"]
 mod concentrateur;
 
+include!("blackbox_storage.rs"); // BOUCHAUD_TRIGKEY_BLACKBOX_V1
+
 use concentrateur::CLASSE_CONCENTRATEUR;
 
 // BOUCHAUD_XHCI_HID_TRANSPORT_V33
@@ -291,6 +293,7 @@ struct Controller {
     events: EventRing,
     dcbaa_phys: u64,
     dcbaa_virt: usize,
+    blackbox_storage: Option<BlackboxStorage>,
     hids: [HidEndpoint; MAX_HID_ENDPOINTS_PER_CONTROLLER],
     // UN RAPPORT DE CLAVIER N'EST PAS UN EVENEMENT QU'ON JETTE.
     //
@@ -1990,6 +1993,7 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
     let config_slice = unsafe {
         core::slice::from_raw_parts(device.control_virt as *const u8, config_len)
     };
+    let blackbox_descriptor = parse_blackbox_storage_descriptor(config_slice);
     let (configuration_value, hid_count) = parse_hid_descriptors(config_slice, &mut descriptors);
     let genre_hid = descriptors[..hid_count]
         .iter()
@@ -2024,23 +2028,65 @@ fn enumerate_device(controller: &mut Controller, chemin: Chemin, file: &mut File
         controller.devices[device.slot_id as usize] = Some(device);
     }
 
-    if hid_count == 0 || configuration_value == 0 {
-        // Device enumeration is green, but there is no HID endpoint to own.
-        return;
+    // BOUCHAUD_TRIGKEY_BLACKBOX_V1
+    // Une interface Mass Storage n'est conservee comme cible d'ecriture que
+    // si SON PROPRE disque contient la partition GPT BOUCHAUD-BLACKBOX.
+    let mut configuration_posee = false;
+    if let Some(storage_descriptor) = blackbox_descriptor {
+        if configuration_value != 0 {
+            match set_configuration(controller, &mut device, configuration_value) {
+                Ok(()) => {
+                    wait_ms(10);
+                    configuration_posee = true;
+                    match configure_blackbox_storage(controller, &mut device, storage_descriptor) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            crate::serial_println!(
+                                "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause=partition-absente-ou-support-incompatible",
+                                device.slot_id
+                            );
+                        }
+                        Err(error) => {
+                            crate::serial_println!(
+                                "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause={}",
+                                device.slot_id,
+                                error
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    crate::serial_println!(
+                        "BOUCHAUD_BLACKBOX_USB_SKIP slot={} cause=set-configuration:{}",
+                        device.slot_id,
+                        error
+                    );
+                }
+            }
+        }
     }
 
-    if let Err(error) = set_configuration(controller, &mut device, configuration_value) {
-        crate::serial_println!(
-            "BOUCHAUD_HID_CONFIG_FAIL port={} phase=set-configuration error={}",
-            port,
-            error
-        );
+    if hid_count == 0 || configuration_value == 0 {
         if (device.slot_id as usize) < controller.devices.len() {
             controller.devices[device.slot_id as usize] = Some(device);
         }
         return;
     }
-    wait_ms(10);
+
+    if !configuration_posee {
+        if let Err(error) = set_configuration(controller, &mut device, configuration_value) {
+            crate::serial_println!(
+                "BOUCHAUD_HID_CONFIG_FAIL port={} phase=set-configuration error={}",
+                port,
+                error
+            );
+            if (device.slot_id as usize) < controller.devices.len() {
+                controller.devices[device.slot_id as usize] = Some(device);
+            }
+            return;
+        }
+        wait_ms(10);
+    }
 
     match configure_hids(controller, &mut device, &mut descriptors[..hid_count]) {
         Ok(installed) => {
@@ -2108,6 +2154,8 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
         }
         noeud += 1;
     }
+    // Le recorder USB possede ses propres rings Bulk.
+    retire_blackbox_storage(controller, slot);
     // Le slot est rendu au controleur AVANT la memoire : il ne doit plus
     // pouvoir ecrire dans des contextes qu'on vient de rendre a l'arene.
     disable_slot(controller, slot);
@@ -2497,6 +2545,7 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
             events,
             dcbaa_phys,
             dcbaa_virt,
+            blackbox_storage: None,
             hids: [EMPTY_HID_ENDPOINT; MAX_HID_ENDPOINTS_PER_CONTROLLER],
             differes: [Trb { parameter: 0, status: 0, control: 0 }; EVENEMENTS_DIFFERES],
             differes_len: 0,
@@ -2866,6 +2915,7 @@ static DERNIERE_SCRUTATION_PORTS_NS: core::sync::atomic::AtomicU64 =
 pub fn poll() {
     let hid = hid_polling();
     if !hid && !surveille_branchements() {
+        crate::kernel::blackbox::poll();
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
@@ -2961,6 +3011,7 @@ pub fn poll() {
         }
     }
     RUNTIME_BUSY.store(false, Ordering::Release);
+    crate::kernel::blackbox::poll();
 }
 
 /// Nom lisible d'une vitesse xHCI.
@@ -3157,6 +3208,9 @@ pub fn bring_up() -> ActiveSummary {
     HID_CONTROL_REPORTS.store(0, Ordering::Release);
     HID_CONTROL_FAILS.store(0, Ordering::Release);
     CONTROLLERS.store(0, Ordering::Release);
+    BLACKBOX_STORAGE_READY.store(false, Ordering::Release);
+    BLACKBOX_WRITES.store(0, Ordering::Release);
+    BLACKBOX_FAILURES.store(0, Ordering::Release);
     unsafe { RUNTIME = None };
 
     let mut devices = Vec::<PciDevice>::new();
