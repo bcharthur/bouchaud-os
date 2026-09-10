@@ -121,6 +121,32 @@ pub fn record(ns: u64, interactive: bool) {
     }
 }
 
+/// Efface tous les echantillons.
+///
+/// # Pourquoi cela existe
+///
+/// Les compteurs sont globaux et vivent depuis l'amorcage. Une sonde qui
+/// mesurerait sans effacer melangerait sa charge au bruit du demarrage --
+/// pendant lequel une poignee de taches se reveillent sur une machine vide,
+/// avec des latences que rien ne represente. Comparer deux classes exige que
+/// les echantillons des deux viennent de la MEME periode.
+pub fn remise_a_zero() {
+    COUNT.store(0, Ordering::Relaxed);
+    SUM_NS.store(0, Ordering::Relaxed);
+    MAX_NS.store(0, Ordering::Relaxed);
+    INTERACTIVE_COUNT.store(0, Ordering::Relaxed);
+    INTERACTIVE_MAX_NS.store(0, Ordering::Relaxed);
+    for compteur in [&B_LT_100US, &B_LT_500US, &B_LT_2MS, &B_LT_8MS, &B_LT_16MS, &B_GE_16MS] {
+        compteur.store(0, Ordering::Relaxed);
+    }
+    for classe_ordo in 0..CLASSES_ORDONNANCEMENT {
+        MAX_PAR_CLASSE[classe_ordo].store(0, Ordering::Relaxed);
+        for case in HISTOGRAMME[classe_ordo].iter() {
+            case.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Les centiles d'une classe d'ordonnancement, lus a froid.
 ///
 /// L'histogramme peut bouger pendant la lecture : le total est donc calcule

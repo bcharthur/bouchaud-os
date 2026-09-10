@@ -168,6 +168,7 @@ Write-Host "--- MARQUEURS ATTENDUS (console serie / diagnostic) ---" -Foreground
     "NVME_IO_CQE_OK                           l'achevement revient",
     "NVME_IO_COPY_END                         les octets arrivent chez l'appelant",
     "BOUCHAUD_INSTALL_SYSTEME_MONTE           la partition Bouchaud est montee",
+    "BOUCHAUD_USB_HID_FIL_LANCE               l'entree quitte la boucle de trames",
     "BOUCHAUD_USB_STOCKAGE_TROUVE             points Bulk IN/OUT configures",
     "BOUCHAUD_USB_STOCKAGE_PRET               READ CAPACITY a repondu",
     "BOUCHAUD_USB_STOCKAGE_VOLUME             la cle est publiee sous la couche bloc",
@@ -188,7 +189,8 @@ Write-Host "--- MARQUEURS QUI DOIVENT RESTER ABSENTS ---" -ForegroundColor Cyan
     "NVME_IO_CQE_REJETE                       achevement inconnu, perime, double ou hors domaine",
     "BOUCHAUD_USB_BULK_ECHEC                  un transfert Bulk a echoue",
     "BOUCHAUD_USB_STOCKAGE_IO_ECHEC           lecture ou ecriture refusee par la cle",
-    "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC       reinitialisation Bulk-Only sans effet"
+    "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC       reinitialisation Bulk-Only sans effet",
+    "BOUCHAUD_USB_HID_FIL_REFUSE              l'entree est restee dans la boucle de trames"
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
