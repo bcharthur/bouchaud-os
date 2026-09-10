@@ -237,9 +237,6 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // eu lieu (`montage_differe_en_attente`), et rattrape le cas ou la tache
     // n'a pas pu etre creee a cet instant precis.
     platform::pc::installation::lance_le_montage_differe();
-    // Voir la note d'amorcage equivalente dans `stage2.rs` : l'entree ne doit
-    // pas dependre de la cadence du rendu.
-    drivers::xhci_active::demarre_le_fil_hid();
 
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.

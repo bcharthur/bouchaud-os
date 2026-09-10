@@ -281,17 +281,6 @@ pub fn run(mut first: Box<Task>) -> i32 {
 /// decide alors -- faire le travail sur place vaut souvent mieux que ne pas le
 /// faire du tout, et c'est a lui de le savoir.
 pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
-    spawn_noyau_priorite(entree, nom, Priorite::Normale)
-}
-
-/// Lance un travailleur noyau avec une priorite CHOISIE.
-///
-/// `spawn_noyau` fixe `Normale`, et c'est le bon defaut pour un travail de
-/// fond. Mais une priorite qui n'est jamais demandee autrement que par defaut
-/// ne peut pas etre mise a l'epreuve : sans deux classes reellement en
-/// concurrence, rien ne dit si `Interactive` change une decision ou n'est
-/// qu'une etiquette.
-pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
     // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
     //
     // `run_noyau` en prend un parce qu'il COMMUTE : il touche l'etat du coeur
@@ -315,7 +304,7 @@ pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) ->
     //
     // Interactive la mettrait a egalite avec le bureau, qu'elle est justement
     // censee cesser de deranger. Un travail de fond est un travail de fond.
-    task.priorite.range(priorite);
+    task.priorite.range(Priorite::Normale);
     // MIGRABLE, PARCE QU'UN TRAVAILLEUR DE FOND N'A PAS DE COEUR A LUI.
     //
     // `register` epingle par defaut toute tache noyau au coeur zero. Pour un
