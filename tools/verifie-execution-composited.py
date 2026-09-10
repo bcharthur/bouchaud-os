@@ -31,11 +31,12 @@ RACINE = Path(__file__).resolve().parents[1]
 SERVICE = RACINE / "userland/services/composited/composited-slice.c"
 HARNAIS = RACINE / "tools/ci/run_native_ipc_probe.sh"
 IMAGE = RACINE / "tools/native/make_native_ipc_probe_image.py"
+CONSTRUCTION = RACINE / "userland/services/composited/build.sh"
 
 
 def main() -> int:
     fautes = []
-    for chemin in (SERVICE, HARNAIS, IMAGE):
+    for chemin in (SERVICE, HARNAIS, IMAGE, CONSTRUCTION):
         if not chemin.exists():
             print("  - fichier absent : %s" % chemin.relative_to(RACINE).as_posix())
             return 1
@@ -43,6 +44,61 @@ def main() -> int:
     service = SERVICE.read_text(encoding="utf-8")
     harnais = HARNAIS.read_text(encoding="utf-8")
     image = IMAGE.read_text(encoding="utf-8")
+    construction_brute = CONSTRUCTION.read_text(encoding="utf-8")
+    # Les commentaires de ce script EXPLIQUENT les deux defauts, en les nommant.
+    # Une regle qui lirait le fichier entier se declencherait sur sa propre
+    # explication -- et la facon la plus rapide de la faire taire serait
+    # d'effacer l'explication. On ne regarde donc que les commandes.
+    construction = "\n".join(
+        ligne for ligne in construction_brute.splitlines()
+        if not ligne.lstrip().startswith("#")
+    )
+
+    # DEUX DEFAUTS QUI ONT EMPECHE CE SERVICE DE S'EXECUTER, ET LEURS GARDES.
+    #
+    # Les quatre maillons ci-dessous etaient TOUS verts pendant que le service
+    # mourait au chargement, puis a sa quatrieme etape. Un garde-fou qui verifie
+    # qu'un binaire est construit et lance ne dit rien de ce qui se passe une
+    # fois qu'il est lance.
+    #
+    # 1. L'edition de liens produisait UN segment RWE (`-n`, plus
+    #    `--no-warn-rwx-segments` pour faire taire l'avertissement). Le noyau le
+    #    refusait au titre de W^X, et il avait raison.
+    if " -static -n" in construction or " -n " in construction:
+        fautes.append(
+            "composited/build.sh : `-n` (nmagic) est revenu ; il fusionne code et "
+            "donnees dans un unique segment RWE, que le noyau refuse au titre de W^X."
+        )
+    if "--no-warn-rwx-segments" in construction:
+        fautes.append(
+            "composited/build.sh : `--no-warn-rwx-segments` fait taire l'avertissement "
+            "qui disait exactement ce qui n'allait pas. Corriger le segment, pas "
+            "l'avertissement."
+        )
+    if "separate-code" not in construction:
+        fautes.append(
+            "composited/build.sh : `-z separate-code` a disparu ; rien ne garantit "
+            "plus que le code et les donnees vivent dans des segments distincts."
+        )
+    if "RWE" not in construction:
+        fautes.append(
+            "composited/build.sh : la construction ne verifie plus ce qu'elle a "
+            "produit. Un binaire refuse au chargement doit echouer a la "
+            "construction, pas trois minutes plus tard sous la forme d'un marqueur "
+            "manquant qui n'explique rien."
+        )
+
+    # 2. `_start` etait une fonction C ordinaire. Le noyau SAUTE a l'entree avec
+    #    une pile alignee sur seize octets ; une fonction C suppose qu'un `call`
+    #    vient d'empiler une adresse de retour. Le decalage de huit octets tuait
+    #    le processus au premier `movaps` emis par le compilateur.
+    if "andq $-16, %rsp" not in service:
+        fautes.append(
+            "composited-slice.c : `_start` ne realigne plus la pile. L'entree d'un "
+            "processus n'est pas un appel de fonction : sans realignement, la "
+            "premiere instruction qui exige seize octets -- un `movaps` de "
+            "compilateur, par exemple -- leve une faute de protection generale."
+        )
 
     if "userland/services/composited" not in harnais:
         fautes.append(
