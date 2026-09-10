@@ -287,6 +287,19 @@ struct HidEndpoint {
     buffer_len: usize,
     /// L'etat du clavier entre deux rapports, tenu par le decodeur pur.
     clavier: hid::EtatClavier,
+    /// Evenements de transfert recus par CE point de terminaison.
+    ///
+    /// # Pourquoi il ne peut pas etre global
+    ///
+    /// Le compteur l'etait, et le repli EP0 s'eteignait des qu'UN periphérique
+    /// produisait un evenement. Sur la machine de reference, la souris en a
+    /// produit 556 et le clavier 6 : la souris coupait le repli, et le
+    /// clavier -- muet en Interrupt-IN -- se retrouvait sans aucun transport.
+    ///
+    /// Un compteur par point de terminaison fait exactement l'inverse de
+    /// masquer le probleme : il NOMME le peripherique qui ne repond pas, au
+    /// lieu de laisser croire que tout va bien parce qu'un autre repond.
+    evenements: u32,
 }
 
 const EMPTY_RING: ProducerRing = ProducerRing {
@@ -297,6 +310,7 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 };
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
+    evenements: 0,
     active: false,
     slot_id: 0,
     dci: 0,
@@ -1522,6 +1536,7 @@ fn configure_hids(
         add_flags |= 1u32 << dci;
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
+            evenements: 0,
             active: false,
             slot_id: device.slot_id,
             dci,
@@ -2797,6 +2812,15 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     HID_TRANSFER_EVENTS.fetch_add(1, Ordering::Relaxed);
     let slot = event_slot(event);
     let dci = event_dci(event);
+    // Le compteur PAR point de terminaison : c'est lui qui decide du repli,
+    // et le compteur global ne sert plus qu'au diagnostic.
+    for index in 0..controller.hid_count {
+        let ep = &mut controller.hids[index];
+        if ep.active && ep.slot_id == slot && ep.dci == dci {
+            ep.evenements = ep.evenements.saturating_add(1);
+            break;
+        }
+    }
     let cc = completion_code(event.status);
     let Some(index) = (0..controller.hid_count).find(|&index| {
         let ep = &controller.hids[index];
@@ -2928,10 +2952,28 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
     // class GET_REPORT request over EP0 as a compatibility bridge. HID 1.11
     // requires GET_REPORT support on HID devices; this path is deliberately a
     // fallback, not the long-term periodic transport.
-    if HID_TRANSFER_EVENTS.load(Ordering::Acquire) != 0 || poll_no < 32 || (poll_no & 1) != 0 {
+    // LA DECISION EST PAR PERIPHERIQUE, ET C'EST TOUT LE CORRECTIF.
+    //
+    // La condition portait sur un compteur GLOBAL : le repli s'eteignait des
+    // qu'UN periphérique produisait un evenement de transfert. Sur la machine
+    // de reference, la souris en a produit 556 et le clavier 6 -- la souris
+    // coupait le repli, et le clavier, muet en Interrupt-IN, se retrouvait
+    // sans aucun transport. Le journal physique le dit sans ambiguite :
+    // `BOUCHAUD_HID_CONTROL_FALLBACK_GREEN kind=keyboard` une seule fois, puis
+    // 556 rapports de souris et plus un seul du clavier.
+    //
+    // Le repli reste ce qu'il doit etre : un pont de compatibilite pour les
+    // peripheriques qui ne repondent pas en Interrupt-IN, et rien d'autre. Un
+    // peripherique qui repond n'y passe jamais. La difference est qu'un
+    // peripherique muet n'est plus prive de secours parce que son voisin,
+    // lui, va bien.
+    if poll_no < 32 || (poll_no & 1) != 0 {
         return;
     }
     for index in 0..controller.hid_count {
+        if controller.hids[index].evenements != 0 {
+            continue;
+        }
         let _ = control_get_report(controller, index);
     }
 }
@@ -3817,6 +3859,30 @@ pub fn hid_ready() -> bool {
     hid_keyboards() != 0 && hid_mice() != 0
 }
 
+/// Publie, PAR peripherique, s'il repond en Interrupt-IN.
+///
+/// Le repli EP0 existe pour qu'un peripherique muet reste utilisable. Il ne
+/// doit pas rendre ce mutisme invisible : sans cette ligne, un clavier servi
+/// uniquement par le repli ressemble a un clavier qui marche.
+pub fn log_hid_transports() {
+    unsafe {
+        let Some(runtime) = RUNTIME.as_ref() else { return };
+        for controller in runtime.controllers.iter() {
+            for index in 0..controller.hid_count {
+                let ep = &controller.hids[index];
+                if !ep.active {
+                    continue;
+                }
+                crate::serial_println!(
+                    "BOUCHAUD_HID_TRANSPORT slot={} dci={} kind={} evenements={} transport={}",
+                    ep.slot_id, ep.dci, ep.kind, ep.evenements,
+                    if ep.evenements != 0 { "interrupt-in" } else { "repli-ep0" },
+                );
+            }
+        }
+    }
+}
+
 pub fn hid_control_fallback_stats() -> (usize, usize, usize) {
     (
         HID_CONTROL_POLLS.load(Ordering::Acquire),
@@ -3873,6 +3939,97 @@ const PERIODE_SCRUTATION_PORTS_MS: u64 = 200;
 
 static DERNIERE_SCRUTATION_PORTS_NS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Le fil d'entree
+// ---------------------------------------------------------------------------
+
+/// Le fil de scrutation tourne-t-il ?
+static FIL_HID_ACTIF: AtomicBool = AtomicBool::new(false);
+/// Tours du fil. Non nul veut dire qu'il vit vraiment.
+static FIL_HID_TOURS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Le fil d'entree a-t-il pris la scrutation en charge ?
+pub fn fil_hid_actif() -> bool {
+    FIL_HID_ACTIF.load(Ordering::Acquire)
+}
+
+/// Tours effectues par le fil d'entree.
+pub fn fil_hid_tours() -> u64 {
+    FIL_HID_TOURS.load(Ordering::Relaxed)
+}
+
+fn fil_hid() -> ! {
+    loop {
+        FIL_HID_TOURS.fetch_add(1, Ordering::Relaxed);
+        poll();
+        // UN TICK, SOIT UNE MILLISECONDE.
+        //
+        // C'est la cadence d'une souris USB rapide. Scruter plus vite ne
+        // gagnerait rien -- le peripherique ne produit pas plus -- et
+        // couterait un coeur ; scruter plus lentement se sentirait au
+        // pointeur.
+        crate::kernel::task::sleep_ticks(1);
+    }
+}
+
+/// Sort la scrutation des entrees de la boucle de trames du compositeur.
+///
+/// # LE DEFAUT, MESURE SUR LA MACHINE DE REFERENCE
+///
+/// `poll()` etait appele depuis la boucle de trames, et de nulle part
+/// ailleurs. L'entree etait donc lue A LA CADENCE DU RENDU : une trame longue
+/// ne ralentissait pas le pointeur, elle l'ARRETAIT.
+///
+/// L'enregistreur de vol du TRIGKEY le montre sans interpretation. Pendant les
+/// cinq premieres secondes du bureau -- chargement des polices --, le journal
+/// porte `FPS: 0` puis `FPS: 1`, et la souris n'etait lue qu'une fois par
+/// seconde. Sur toute la session, 3 581 scrutations en 14,7 secondes : deux
+/// cent quarante par seconde en moyenne, mais reparties selon le rendu et non
+/// selon le temps.
+///
+/// Rien dans la scrutation n'appartient au rendu. Elle lit des registres et
+/// des anneaux d'evenements ; la trame en cours n'attend aucun de ses
+/// resultats.
+///
+/// # POURQUOI CE FIL N'EST PAS MIGRABLE
+///
+/// Le contraire de ce qu'on ferait d'instinct, et la raison est physique.
+///
+/// Sur le TRIGKEY, seize coeurs sont en ligne -- `SMP4_AP_STARTED count=15`,
+/// `online=16` -- et l'enregistreur de vol ne contient QUE des evenements de
+/// `cpu=0`. Les compteurs de tick le confirment a chaque echantillon :
+/// `timer0` avance de deux mille a treize mille, `timer1`, `timer2` et
+/// `timer3` restent a zero.
+///
+/// Le PIT est une source unique, routee vers un seul coeur, et aucun timer
+/// LAPIC par coeur n'est arme. Une tache placee sur un coeur secondaire n'y
+/// serait donc jamais preemptee, et son `sleep_ticks` n'y serait jamais
+/// echu : elle s'endormirait pour de bon.
+///
+/// Le fil reste donc sur le coeur zero, ou le tick existe. Il y partage le
+/// processeur avec le compositeur, mais il en est desormais INDEPENDANT :
+/// c'est le tick qui l'elit, pas la fin d'une trame.
+pub fn demarre_le_fil_hid() -> bool {
+    if FIL_HID_ACTIF.load(Ordering::Acquire) {
+        return true;
+    }
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_hid,
+        "usb-hid",
+        crate::kernel::task::Priorite::Interactive,
+    ) {
+        FIL_HID_ACTIF.store(true, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_USB_HID_FIL_LANCE periode_ms=1 priorite=interactive");
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_USB_HID_FIL_REFUSE raison=tache-non-creee \
+consequence=scrutation-reste-dans-la-boucle-de-trames"
+    );
+    false
+}
 
 pub fn poll() {
     let hid = hid_polling();

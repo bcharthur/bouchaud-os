@@ -93,11 +93,63 @@ pub fn exit_current(code: i32) -> ! {
     // BSP : conserve la semantique historique des lancements synchrones et du
     // desktop, mais ne choisit que des taches affinees CPU0.
     let cur = current_index_raw();
+
+    // SANS LANCEMENT SYNCHRONE EN COURS, IL N'Y A RIEN A ATTENDRE.
+    //
+    // La boucle ci-dessous existe pour qu'un `run` synchrone reprenne la main
+    // quand SA racine est finie. Une tache qui se termine hors de ce cadre --
+    // un travailleur de fond, une sonde -- n'a personne a faire revenir : elle
+    // doit se comporter comme sur un coeur secondaire, commuter et rendre la
+    // main.
+    //
+    // Sans cette sortie, une telle tache attendait que TOUTES les autres
+    // soient zombie. Un travailleur perpetuel rendait cette attente infinie,
+    // et le garde-fou de trente secondes ne se declenchait pas : il rearme son
+    // compteur des qu'une tache est executable. La troisieme sonde NVMe d'une
+    // meme session ne rendait plus son verdict, sans qu'aucune ligne ne le
+    // dise.
+    if racine == 0 {
+        commute_sortie_definitive_si_possible(cur, 0);
+        switch_to_kernel();
+    }
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
     loop {
-        commute_sortie_definitive_si_possible(cur, 0);
+        // LE TEST DE SORTIE VIENT AVANT LA COMMUTATION, ET C'EST NECESSAIRE.
+        //
+        // `commute_sortie_definitive_si_possible` part vers toute tache
+        // executable. Un travailleur perpetuel en est une : la commutation a
+        // lieu, et le reste de la boucle -- y compris le test ci-dessous --
+        // n'est jamais atteint. On ne revient pas d'un fil qui ne finit pas.
+        //
+        // Teste d'abord, on sort quand il faut sortir ; teste apres, on part
+        // ailleurs juste avant de constater qu'on aurait du s'arreter.
         if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
+        // UN LANCEMENT SYNCHRONE ATTEND SA RACINE, PAS L'EXTINCTION DU SYSTEME.
+        //
+        // La condition ci-dessus -- « toutes les taches sont zombie » -- etait
+        // la seule. Elle a tenu tant qu'aucune tache noyau ne survivait a un
+        // programme : le fil de montage NVMe meurt, le bureau est lui-meme la
+        // racine. Un travailleur PERPETUEL la rend infranchissable.
+        //
+        // Le garde-fou de trente secondes ne rattrapait rien : il rearme son
+        // compteur des qu'une tache est executable, et un travailleur qui se
+        // reveille toutes les millisecondes l'est en permanence. La machine
+        // tournait a vide sans jamais rendre la main -- cent soixante-cinq
+        // secondes observees, `AUTORUN DEBUT` pour derniere ligne.
+        //
+        // Ce que `run` attend est la fin de SA racine. Le bloc de sortie plus
+        // haut a deja marque zombie tout ce qui en descend ; il ne reste donc
+        // a verifier que cela. Ce qui vit a cote et n'en descend pas ne
+        // regarde pas ce lancement.
+        if racine != 0
+            && tasks().iter().all(|t| {
+                t.state == TaskState::Zombie || !descend_de(t.process.pid, racine)
+            })
+        {
+            break;
+        }
+        commute_sortie_definitive_si_possible(cur, 0);
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
             crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
             for task in tasks().iter() {
@@ -251,10 +303,23 @@ pub fn run(mut first: Box<Task>) -> i32 {
         (process.lifecycle.lock().exit_code, process.pid)
     };
     reap();
-    for stale in processes().iter() {
-        crate::kernel::process::kill(stale.pid);
+    // LE MENAGE EMPORTE LA SESSION, PAS LE SYSTEME.
+    //
+    // Ces trois lignes tuaient TOUS les processus et vidaient la table --
+    // travailleurs noyau compris. Tant que le seul lancement synchrone etait
+    // suivi d'un retour au shell, la difference ne se voyait pas ; elle se
+    // voit des qu'un service doit survivre a l'execution d'un programme.
+    //
+    // Un `exec` depuis le shell ne doit pas arreter le fil d'entree, ni le fil
+    // de montage : ils n'appartiennent pas a la session qu'on ferme.
+    let condamnes: alloc::vec::Vec<u32> = processes()
+        .iter()
+        .filter(|p| p.pid == racine || descend_de(p.pid, racine))
+        .map(|p| p.pid)
+        .collect();
+    for condamne in condamnes {
+        crate::kernel::process::kill(condamne);
     }
-    PROCESSES.lock().clear();
     crate::kernel::process::kill(pid);
     code
 }
@@ -281,6 +346,17 @@ pub fn run(mut first: Box<Task>) -> i32 {
 /// decide alors -- faire le travail sur place vaut souvent mieux que ne pas le
 /// faire du tout, et c'est a lui de le savoir.
 pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
+    spawn_noyau_priorite(entree, nom, Priorite::Normale)
+}
+
+/// Lance un travailleur noyau avec une priorite CHOISIE.
+///
+/// `spawn_noyau` fixe `Normale`, et c'est le bon defaut pour un travail de
+/// fond. Mais une priorite qui n'est jamais demandee autrement que par defaut
+/// ne peut pas etre mise a l'epreuve : sans deux classes reellement en
+/// concurrence, rien ne dit si `Interactive` change une decision ou n'est
+/// qu'une etiquette.
+pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
     // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
     //
     // `run_noyau` en prend un parce qu'il COMMUTE : il touche l'etat du coeur
@@ -304,7 +380,7 @@ pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
     //
     // Interactive la mettrait a egalite avec le bureau, qu'elle est justement
     // censee cesser de deranger. Un travail de fond est un travail de fond.
-    task.priorite.range(Priorite::Normale);
+    task.priorite.range(priorite);
     // MIGRABLE, PARCE QU'UN TRAVAILLEUR DE FOND N'A PAS DE COEUR A LUI.
     //
     // `register` epingle par defaut toute tache noyau au coeur zero. Pour un

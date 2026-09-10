@@ -85,8 +85,21 @@ def main() -> int:
         "sorties definitives detachees avant switch":
             lifecycle.count("abandonne_bkl_avant_sortie_definitive();") == 2
             and "fn abandonne_bkl_avant_sortie_definitive()" in ordonnanceur,
+        # QUATRE SITES, ET LE COMPTE EXACT EST LA REGLE.
+        #
+        # Trois jusqu'ici : le coeur secondaire, la boucle d'attente du BSP, et
+        # la reprise apres cette boucle. Un quatrieme a ete ajoute : la sortie
+        # immediate d'une tache qui se termine SANS lancement synchrone en
+        # cours -- un travailleur de fond n'a personne a faire revenir, et
+        # attendre que toutes les taches soient zombie le faisait tourner sans
+        # fin des qu'un service perpetuel existait.
+        #
+        # Le compte reste EXACT et non « au moins » : c'est ce qui oblige a
+        # relire cette regle quand une sortie est ajoutee, au lieu de laisser
+        # un site s'installer sans que personne ne verifie qu'il passe bien par
+        # la porte locale.
         "sorties definitives sous porte locale":
-            lifecycle.count("commute_sortie_definitive_si_possible(") == 3
+            lifecycle.count("commute_sortie_definitive_si_possible(") == 4
             and "switch_to(" not in lifecycle
             and debut_sortie >= 0
             and fin_sortie > debut_sortie

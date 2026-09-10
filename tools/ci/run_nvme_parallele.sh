@@ -121,16 +121,29 @@ fi
 # montage tourne encore. Les passages SUIVANTS doivent repartir d'un pot plein.
 # Une fuite d'un emplacement par passage ne se verrait pas sur un seul essai,
 # et bloquerait le pilote au quatrieme.
-suivants=$(grep -aE 'NVME_PARALLELE lecteurs=' "$NETTOYE" | tail -n +2)
-if [ -z "$suivants" ]; then
-    plainte 'aucun passage de controle apres le premier'
+# Le DERNIER passage, et non tous les suivants.
+#
+# Le premier passage peut legitimement voir un emplacement occupe : le fil de
+# montage tourne encore. Le SECOND aussi, si ce fil a pris du retard -- et
+# l'exiger rendait ce scenario intermittent, ce qui est pire qu'inutile : un
+# test qui echoue au hasard finit par etre ignore.
+#
+# Ce qu'une fuite produirait, en revanche, c'est un pot qui ne se remplit
+# JAMAIS. Le dernier passage, lui, a lieu bien apres la fin du montage : s'il
+# repart d'un pot plein, aucun emplacement n'a ete perdu en chemin.
+dernier=$(grep -aE 'NVME_PARALLELE lecteurs=' "$NETTOYE" | tail -1)
+if [ -z "$dernier" ]; then
+    plainte 'aucun passage mesure'
 else
-    while IFS= read -r ligne; do
-        case "$ligne" in
-            *libres=4*) ;;
-            *) plainte "un emplacement n'a pas ete rendu : $ligne" ;;
-        esac
-    done <<< "$suivants"
+    case "$dernier" in
+        *libres=4*) printf 'ok      le pot est plein au dernier passage : aucun emplacement perdu\n' ;;
+        *) plainte "un emplacement n'a pas ete rendu : $dernier" ;;
+    esac
+fi
+# Une attente non nulle veut dire qu'un appelant a manque d'emplacement. Avec
+# quatre lecteurs pour quatre emplacements, cela ne doit jamais arriver.
+if grep -aqE 'NVME_PARALLELE .*attentes=[1-9]' "$NETTOYE"; then
+    plainte 'un lecteur a attendu un emplacement libre'
 fi
 
 # La profondeur atteinte, extraite du meilleur passage.

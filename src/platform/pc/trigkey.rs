@@ -121,6 +121,10 @@ pub fn hwinfo() {
 
     // --- USB --------------------------------------------------------------
     crate::drivers::xhci_active::log_stockage();
+    // Par peripherique : lequel repond en Interrupt-IN, lequel est servi par le
+    // repli EP0. Un clavier servi par le repli ressemble a un clavier qui
+    // marche, et c'est exactement ce qu'il ne faut pas laisser croire.
+    crate::drivers::xhci_active::log_hid_transports();
     crate::serial_println!("H10_HWINFO_FIN");
 }
 
