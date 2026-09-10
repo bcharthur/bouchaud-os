@@ -51,7 +51,7 @@
 
 use alloc::vec;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, PciDevice};
 use crate::drivers::bloc::{self, Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
@@ -100,6 +100,13 @@ const LIMITE_VIDANGE_MS: u64 = 5_000;
 /// Nombre de delais consecutifs apres lequel le disque est mis hors service.
 const DELAIS_AVANT_HORS_SERVICE: u64 = 2;
 
+/// Attente maximale du jeton d'entree-sortie, en millisecondes.
+///
+/// Elle est prise interruptions ACTIVES : la machine vit pendant ce temps.
+/// La borner reste necessaire -- un pilote bloque ne doit pas bloquer le
+/// systeme de fichiers pour toujours.
+const LIMITE_JETON_MS: u64 = 4_000;
+
 /// Volume attribue au disque interne.
 pub const VOLUME_INTERNE: Volume = Volume(2);
 
@@ -113,6 +120,8 @@ static DELAIS: AtomicU64 = AtomicU64::new(0);
 static DELAIS_SUITE: AtomicU64 = AtomicU64::new(0);
 /// Le disque a-t-il ete retire du service apres des delais repetes ?
 static HORS_SERVICE: AtomicBool = AtomicBool::new(false);
+/// Requetes refusees parce que le pilote etait deja occupe trop longtemps.
+static OCCUPES: AtomicU64 = AtomicU64::new(0);
 
 /// Une file, vue du pilote.
 struct File {
@@ -138,8 +147,6 @@ struct Etat {
     caps: Capacites,
     admin_sq: File,
     admin_cq: File,
-    es_sq: File,
-    es_cq: File,
     /// Tampon de rebond : virtuel, physique.
     rebond_virt: *mut u8,
     rebond_phys: u64,
@@ -328,40 +335,312 @@ impl Etat {
         emet(self.base, &mut self.admin_sq, &mut self.admin_cq, sqe, limite_ms)
     }
 
-    unsafe fn es(&mut self, sqe: &Sqe, limite_ms: u64) -> Result<EntreeAchevement, &'static str> {
-        emet(self.base, &mut self.es_sq, &mut self.es_cq, sqe, limite_ms)
+}
+
+// ---------------------------------------------------------------------------
+// Le chemin d'entree-sortie : hors du gros verrou, interruptions ACTIVES
+// ---------------------------------------------------------------------------
+//
+// # Ce que l'ancien chemin faisait, et pourquoi c'etait une panne
+//
+// `PiloteNvme::soumet` prenait `ETAT` -- un `SpinLockIrq` -- et le gardait
+// pendant TOUT le transfert, attente comprise. Les interruptions restaient
+// donc masquees jusqu'a deux secondes par commande : pas de tick, pas de
+// scrutation xHCI, pas de clavier, pas de souris, pas de trame. Un disque un
+// peu lent devenait un gel indiscernable d'un plantage, et le probe GPT emet
+// des dizaines de commandes.
+//
+// Pire : pendant ce temps, les autres coeurs qui attendent un renvoi de TLB ou
+// le meme verrou attendent aussi. Une seule commande lente arretait la machine
+// entiere.
+//
+// # Les trois portees, separees
+//
+//   * `ETAT` protege la CONFIGURATION -- geometrie, format, namespace. Elle est
+//     lue une fois par transfert, en quelques instructions.
+//   * `FILES_ES` protege les FILES -- poser une entree de soumission, sonner,
+//     drainer les achevements. Chaque prise dure quelques dizaines
+//     d'instructions et ne contient AUCUNE attente.
+//   * `ES_OCCUPE` serialise les commandes entre elles et protege le tampon de
+//     rebond, qui est unique. Ce n'est pas un verrou a interruptions masquees :
+//     celui qui attend son tour le fait interruptions ACTIVES.
+//
+// L'attente de l'achevement se fait donc hors de tout verrou a interruptions
+// masquees. Le systeme continue de vivre pendant qu'un disque reflechit.
+//
+// # Pourquoi un tableau d'achevements
+//
+// Celui qui attend draine la file d'achevement lui-meme, et peut y trouver
+// l'achevement d'une AUTRE commande -- une commande abandonnee sur delai, dont
+// la reponse arrive en retard. La jeter ferait boucler son proprietaire pour
+// toujours ; le ranger par identifiant le lui rend, et permet demain plusieurs
+// commandes en vol.
+
+/// Identifiants de commande d'entree-sortie. Le tableau d'achevements est
+/// indexe par cet identifiant, et il doit tenir en memoire statique.
+const CID_ES_MAX: usize = 256;
+
+/// Les files d'entree-sortie et le registre de base.
+///
+/// Elles vivent HORS d'`Etat` pour que leur verrou puisse etre pris et rendu
+/// sans toucher a la configuration -- et surtout sans englober une attente.
+struct FilesEs {
+    base: usize,
+    sq: File,
+    cq: File,
+}
+
+unsafe impl Send for FilesEs {}
+
+static FILES_ES: SpinLockIrq<Option<FilesEs>> = SpinLockIrq::new(None);
+
+/// Une commande d'entree-sortie est-elle en cours ?
+///
+/// Le tampon de rebond est unique : deux transferts simultanes se marcheraient
+/// dessus. Ce jeton les serialise SANS masquer les interruptions, ce qu'un
+/// verrou tournant a interruptions masquees ne peut pas faire.
+static ES_OCCUPE: AtomicBool = AtomicBool::new(false);
+
+/// Achevements recus, par identifiant. Zero veut dire « rien encore ».
+///
+/// Le mot porte : bit 0 la presence, bits 15:8 le type de statut, bits 23:16
+/// le code. Un seul mot atomique par identifiant suffit, et evite un verrou de
+/// plus sur le chemin le plus chaud du pilote.
+static ACHEVEMENTS: [AtomicU32; CID_ES_MAX] = [const { AtomicU32::new(0) }; CID_ES_MAX];
+
+/// Prochain identifiant d'entree-sortie.
+static PROCHAIN_CID_ES: AtomicU32 = AtomicU32::new(1);
+
+/// Commandes d'entree-sortie dont le releve detaille a ete publie.
+///
+/// Le releve coute cher : huit lignes sur un port serie a 115200 bauds font
+/// quelques millisecondes. Les premieres commandes sont celles qui echouent
+/// quand quelque chose ne va pas -- c'est la PREMIERE lecture reelle qui a
+/// double-faute sur la machine de reference --, et les suivantes n'apprennent
+/// rien de plus. Au-dela du plafond, seules les erreurs parlent.
+static RELEVES_ES: AtomicU64 = AtomicU64::new(0);
+const RELEVES_ES_MAX: u64 = 8;
+
+/// Ce releve doit-il etre publie ?
+#[inline]
+fn releve_detaille() -> bool {
+    RELEVES_ES.load(Ordering::Relaxed) < RELEVES_ES_MAX
+}
+
+/// Ce qu'une commande d'entree-sortie a besoin de savoir de la configuration.
+///
+/// Copie UNE fois sous `ETAT`, puis utilisee sans lui. Les adresses des
+/// tampons ne changent pas de toute la vie du pilote.
+#[derive(Clone, Copy)]
+struct ContexteEs {
+    nsid: u32,
+    taille_bloc: usize,
+    blocs: u64,
+    transfert_max: usize,
+    rebond_phys: u64,
+    rebond_virt: *mut u8,
+    liste_phys: u64,
+    liste_virt: *mut u8,
+}
+
+/// Lit la configuration, verrou pris quelques instructions.
+fn contexte_es() -> Option<ContexteEs> {
+    let garde = ETAT.lock();
+    let e = garde.as_ref()?;
+    if e.nsid == 0 || e.format.taille_bloc == 0 {
+        return None;
+    }
+    Some(ContexteEs {
+        nsid: e.nsid,
+        taille_bloc: e.format.taille_bloc,
+        blocs: e.blocs,
+        transfert_max: e.transfert_max,
+        rebond_phys: e.rebond_phys,
+        rebond_virt: e.rebond_virt,
+        liste_phys: e.liste_phys,
+        liste_virt: e.liste_virt,
+    })
+}
+
+/// Prend le jeton d'entree-sortie, interruptions ACTIVES.
+///
+/// Rend `false` sur echeance : mieux vaut une erreur rendue a l'appelant qu'une
+/// attente sans fin sur un pilote bloque.
+fn prend_le_jeton(limite_ms: u64) -> bool {
+    crate::kernel::timer::attente_bornee(limite_ms, || {
+        ES_OCCUPE
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    })
+}
+
+#[inline]
+fn rend_le_jeton() {
+    ES_OCCUPE.store(false, Ordering::Release);
+}
+
+/// Un identifiant d'entree-sortie libre.
+fn cid_es() -> u16 {
+    let brut = PROCHAIN_CID_ES.fetch_add(1, Ordering::Relaxed);
+    // Zero reste libre : un identifiant nul dans un achevement inattendu est
+    // le signe d'une entree jamais ecrite, et le distinguer aide.
+    let cid = (brut % (CID_ES_MAX as u32 - 1)) as u16 + 1;
+    // La case est remise a zero AVANT la soumission : un achevement en retard
+    // portant cet identifiant serait sinon pris pour le notre, et le transfert
+    // rendrait un tampon que personne n'a rempli.
+    ACHEVEMENTS[cid as usize].store(0, Ordering::Release);
+    cid
+}
+
+#[inline]
+fn range_achevement(a: &EntreeAchevement) {
+    let index = (a.identifiant as usize) % CID_ES_MAX;
+    let mot = 1u32 | ((a.type_statut as u32) << 8) | ((a.code_statut as u32) << 16);
+    ACHEVEMENTS[index].store(mot, Ordering::Release);
+}
+
+/// Vide la file d'achevement dans le tableau, verrou pris le temps de le faire.
+///
+/// Rend le nombre d'achevements ranges. La sonnette n'est touchee QU'UNE fois,
+/// avec la tete finale : sonner par achevement multiplierait les ecritures
+/// registre sans rien apprendre au controleur.
+fn draine_les_achevements() -> usize {
+    let mut garde = FILES_ES.lock();
+    let Some(files) = garde.as_mut() else { return 0 };
+    let mut ranges = 0usize;
+    // La file d'achevement est bornee : on ne peut pas en lire plus d'entrees
+    // qu'elle n'en contient sans avoir fait un tour complet.
+    for _ in 0..files.cq.entrees {
+        let Some(a) = (unsafe { files.cq.achevement() }) else { break };
+        range_achevement(&a);
+        files.cq.avance();
+        ranges += 1;
+    }
+    if ranges != 0 {
+        unsafe { sonne(files.base, files.cq.sonnette, files.cq.tete) };
+    }
+    ranges
+}
+
+/// Pose une commande d'entree-sortie et sonne. Verrou pris quelques
+/// instructions, JAMAIS pendant une attente.
+fn soumet_es(sqe: &Sqe) -> Result<(), &'static str> {
+    let mut garde = FILES_ES.lock();
+    let Some(files) = garde.as_mut() else { return Err("files-absentes") };
+    unsafe {
+        files.sq.pose(sqe);
+        if releve_detaille() {
+            crate::serial_println!(
+                "NVME_IO_DOORBELL sonnette={:#x} valeur={} base={:#x} sq_phys={:#x}",
+                files.sq.sonnette, files.sq.tete, files.base, files.sq.phys,
+            );
+        }
+        sonne(files.base, files.sq.sonnette, files.sq.tete);
+    }
+    Ok(())
+}
+
+/// Emet une commande d'entree-sortie et attend son achevement, interruptions
+/// ACTIVES pendant l'attente.
+///
+/// L'appelant doit tenir le jeton [`ES_OCCUPE`].
+fn emet_es(sqe: &Sqe, limite_ms: u64) -> Result<(), &'static str> {
+    let cid = ((sqe[0] >> 16) & 0xFFFF) as u16;
+    soumet_es(sqe)?;
+
+    let index = (cid as usize) % CID_ES_MAX;
+    let mut mot = 0u32;
+    let obtenu = crate::kernel::timer::attente_bornee(limite_ms, || {
+        // La case d'abord : un autre attendant a pu ranger notre achevement.
+        let vu = ACHEVEMENTS[index].load(Ordering::Acquire);
+        if vu & 1 != 0 {
+            mot = vu;
+            return true;
+        }
+        draine_les_achevements();
+        let vu = ACHEVEMENTS[index].load(Ordering::Acquire);
+        if vu & 1 != 0 {
+            mot = vu;
+            return true;
+        }
+        false
+    });
+
+    if !obtenu {
+        DELAIS.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!(
+            "NVME_IO_DELAI cid={} limite_ms={}",
+            cid, limite_ms,
+        );
+        return Err("delai");
     }
 
-    /// Prepare `PRP1`/`PRP2` pour un transfert depuis le tampon de rebond.
-    unsafe fn prp(&self, octets: usize) -> (u64, u64) {
-        match plan_prp(self.rebond_phys, octets, PAGE) {
-            Prp::UnePage { prp1 } => (prp1, 0),
-            Prp::DeuxPages { prp1, prp2 } => (prp1, prp2),
-            Prp::Liste { prp1, entrees } => {
-                let liste = self.liste_virt as *mut u64;
-                let maximum = PAGE / 8;
-                let n = entrees.min(maximum);
-                for i in 0..n {
-                    write_volatile(liste.add(i), page_de_la_liste(prp1, i, PAGE));
-                }
-                (prp1, self.liste_phys)
+    let type_statut = ((mot >> 8) & 0xFF) as u8;
+    let code_statut = ((mot >> 16) & 0xFF) as u8;
+    if releve_detaille() {
+        crate::serial_println!(
+            "NVME_IO_CQE_OK cid={} type={} code={}",
+            cid, type_statut, code_statut,
+        );
+    }
+    if type_statut != 0 || code_statut != 0 {
+        ERREURS.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_NVME_STATUT type={} code={} cid={}",
+            type_statut, code_statut, cid,
+        );
+        return Err("statut");
+    }
+    Ok(())
+}
+
+/// Prepare `PRP1`/`PRP2` pour un transfert depuis le tampon de rebond.
+///
+/// Hors d'`Etat` : le contexte porte deja les deux adresses, et prendre le
+/// verrou de configuration pour lire deux nombres qu'on a deja serait un
+/// verrou de plus sur le chemin chaud.
+unsafe fn prp_es(ctx: &ContexteEs, octets: usize) -> (u64, u64, &'static str) {
+    match plan_prp(ctx.rebond_phys, octets, PAGE) {
+        Prp::UnePage { prp1 } => (prp1, 0, "une-page"),
+        Prp::DeuxPages { prp1, prp2 } => (prp1, prp2, "deux-pages"),
+        Prp::Liste { prp1, entrees } => {
+            let liste = ctx.liste_virt as *mut u64;
+            let maximum = PAGE / 8;
+            let n = entrees.min(maximum);
+            for i in 0..n {
+                write_volatile(liste.add(i), page_de_la_liste(prp1, i, PAGE));
             }
+            (prp1, ctx.liste_phys, "liste")
         }
     }
+}
 
-    /// Un transfert d'un seul coup, borne a `transfert_max`.
-    unsafe fn transfert(
-        &mut self,
-        ecriture: bool,
-        lba: u64,
-        blocs: u32,
-    ) -> Result<(), &'static str> {
-        let octets = blocs as usize * self.format.taille_bloc;
-        let (prp1, prp2) = self.prp(octets);
-        let id = self.identifiant();
-        let sqe = commande_transfert(ecriture, id, self.nsid, lba, blocs, prp1, prp2);
-        self.es(&sqe, LIMITE_ES_MS).map(|_| ())
+/// Un transfert d'un seul lot, jeton tenu.
+unsafe fn transfert_es(
+    ctx: &ContexteEs,
+    ecriture: bool,
+    lba: u64,
+    blocs: u32,
+) -> Result<(), &'static str> {
+    let octets = blocs as usize * ctx.taille_bloc;
+    let (prp1, prp2, plan) = prp_es(ctx, octets);
+    let cid = cid_es();
+    if releve_detaille() {
+        crate::serial_println!(
+            "NVME_IO_PRP_READY cid={} plan={} prp1={:#x} prp2={:#x} octets={} rebond_phys={:#x} rebond_virt={:#x}",
+            cid, plan, prp1, prp2, octets, ctx.rebond_phys, ctx.rebond_virt as usize,
+        );
     }
+    let sqe = commande_transfert(ecriture, cid, ctx.nsid, lba, blocs, prp1, prp2);
+    if releve_detaille() {
+        crate::serial_println!(
+            "NVME_IO_SQE_READY cid={} nsid={} lba={} nlb={} opcode={} dw10={:#x} dw11={:#x} dw12={:#x}",
+            cid, ctx.nsid, lba, blocs.saturating_sub(1), sqe[0] & 0xFF,
+            sqe[10], sqe[11], sqe[12],
+        );
+        RELEVES_ES.fetch_add(1, Ordering::Relaxed);
+    }
+    emet_es(&sqe, LIMITE_ES_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +693,7 @@ fn champ_ascii(source: &[u8], decalage: usize, taille: usize) -> [u8; 40] {
     sortie
 }
 
-fn initialise(dev: PciDevice) -> Result<Etat, &'static str> {
+fn initialise(dev: PciDevice) -> Result<(Etat, FilesEs), &'static str> {
     let bar = pci::bar_decode(&dev, 0);
     let physique = bar.adresse();
     if physique == 0 {
@@ -466,8 +745,6 @@ fn initialise(dev: PciDevice) -> Result<Etat, &'static str> {
         caps,
         admin_sq,
         admin_cq,
-        es_sq,
-        es_cq,
         rebond_virt,
         rebond_phys,
         liste_virt,
@@ -508,13 +785,11 @@ fn initialise(dev: PciDevice) -> Result<Etat, &'static str> {
         let _ = etat.admin(&sqe, 5_000);
 
         let id = etat.identifiant();
-        let base_cq = etat.es_cq.phys;
-        let sqe = commande_cree_cq(id, FILE_ES, etat.es_cq.entrees, base_cq);
+        let sqe = commande_cree_cq(id, FILE_ES, es_cq.entrees, es_cq.phys);
         etat.admin(&sqe, 5_000)?;
 
         let id = etat.identifiant();
-        let base_sq = etat.es_sq.phys;
-        let sqe = commande_cree_sq(id, FILE_ES, etat.es_sq.entrees, base_sq, FILE_ES);
+        let sqe = commande_cree_sq(id, FILE_ES, es_sq.entrees, es_sq.phys, FILE_ES);
         etat.admin(&sqe, 5_000)?;
     }
 
@@ -566,7 +841,7 @@ fn initialise(dev: PciDevice) -> Result<Etat, &'static str> {
     }
     // Le tampon de rebond borne le transfert autant que MDTS.
     etat.transfert_max = etat.transfert_max.min(REBOND_OCTETS);
-    Ok(etat)
+    Ok((etat, FilesEs { base, sq: es_sq, cq: es_cq }))
 }
 
 // ---------------------------------------------------------------------------
@@ -599,125 +874,185 @@ impl PiloteBloc for PiloteNvme {
         if requete.genre != Genre::Lecture {
             return Achevement::Erreur;
         }
-        // Le controle vient AVANT le verrou. Prendre `ETAT` masque les
-        // interruptions ; le prendre pour constater qu'on ne s'en servira pas
-        // arreterait la machine le temps de ne rien faire.
-        if hors_service() {
-            return Achevement::Absent;
-        }
-        let mut garde = ETAT.lock();
-        let Some(etat) = garde.as_mut() else { return Achevement::Absent };
-        let taille = etat.format.taille_bloc;
-        if !bornes_valides(etat, requete.lba, requete.blocs, tampon.len(), taille) {
-            return Achevement::Erreur;
-        }
-
-        let mut faits = 0usize;
-        while faits < requete.blocs {
-            let lot = ((etat.transfert_max / taille).max(1)).min(requete.blocs - faits);
-            let octets = lot * taille;
-            unsafe {
-                if let Err(raison) = etat.transfert(false, requete.lba + faits as u64, lot as u32)
-                {
-                    if raison == "delai" {
-                        note_delai_es();
-                    }
-                    return if faits == 0 { Achevement::Erreur } else { Achevement::Fait(faits) };
-                }
-                core::ptr::copy_nonoverlapping(
-                    etat.rebond_virt,
-                    tampon.as_mut_ptr().add(faits * taille),
-                    octets,
-                );
-            }
-            faits += lot;
-        }
-        note_reussite_es();
-        LECTURES.fetch_add(faits as u64, Ordering::Relaxed);
-        Achevement::Fait(faits)
+        self.transfere(false, requete, tampon, None)
     }
 
     fn soumet_ecriture(&self, requete: Requete, donnees: &[u8]) -> Achevement {
+        match requete.genre {
+            Genre::Vidange => self.vidange(),
+            Genre::Ecriture => {
+                let mut vide: [u8; 0] = [];
+                self.transfere(true, requete, &mut vide, Some(donnees))
+            }
+            Genre::Lecture => Achevement::Erreur,
+        }
+    }
+}
+
+impl PiloteNvme {
+    /// Un transfert complet, DECOUPE en lots et sans verrou pendant l'attente.
+    ///
+    /// # L'ordre des trois portees
+    ///
+    /// La configuration est lue d'abord, verrou rendu aussitot. Le jeton
+    /// d'entree-sortie est pris ensuite, interruptions ACTIVES. Ce n'est
+    /// qu'une fois le jeton tenu que les files sont touchees, et chaque prise
+    /// de leur verrou dure quelques dizaines d'instructions.
+    ///
+    /// Aucune de ces trois portees ne contient d'attente. C'est la difference
+    /// avec l'ancien chemin, qui gardait `ETAT` -- interruptions masquees --
+    /// pendant les deux secondes que le disque pouvait prendre.
+    fn transfere(
+        &self,
+        ecriture: bool,
+        requete: Requete,
+        tampon: &mut [u8],
+        source: Option<&[u8]>,
+    ) -> Achevement {
         if hors_service() {
             return Achevement::Absent;
         }
-        let mut garde = ETAT.lock();
-        let Some(etat) = garde.as_mut() else { return Achevement::Absent };
-
-        if requete.genre == Genre::Vidange {
-            // Un controleur sans cache volatil n'a rien a vider : emettre la
-            // commande quand meme serait correct, mais rendre `Fait` sans elle
-            // serait mentir a `api::bloc`, qui croise ce resultat avec
-            // `vidange_reelle` pour dire a l'appelant s'il a une barriere.
-            let id = etat.identifiant();
-            let nsid = etat.nsid;
-            let sqe = commande_vidange(id, nsid);
-            return match unsafe { etat.es(&sqe, LIMITE_VIDANGE_MS) } {
-                Ok(_) => {
-                    note_reussite_es();
-                    VIDANGES.fetch_add(1, Ordering::Relaxed);
-                    Achevement::Fait(0)
-                }
-                Err(raison) => {
-                    if raison == "delai" {
-                        note_delai_es();
-                    }
-                    Achevement::Erreur
-                }
-            };
+        let Some(ctx) = contexte_es() else { return Achevement::Absent };
+        let octets_appelant = match source {
+            Some(donnees) => donnees.len(),
+            None => tampon.len(),
+        };
+        if !bornes_valides_ctx(&ctx, requete.lba, requete.blocs, octets_appelant) {
+            return Achevement::Erreur;
         }
-        if requete.genre != Genre::Ecriture {
+        if releve_detaille() {
+            crate::serial_println!(
+                "NVME_IO_READ_ENTER ecriture={} lba={} blocs={} taille_bloc={} nsid={} total_blocs={} transfert_max={}",
+                ecriture as u8, requete.lba, requete.blocs, ctx.taille_bloc,
+                ctx.nsid, ctx.blocs, ctx.transfert_max,
+            );
+        }
+
+        // Le jeton, interruptions ACTIVES : celui qui attend son tour laisse
+        // vivre le reste de la machine.
+        if !prend_le_jeton(LIMITE_JETON_MS) {
+            OCCUPES.fetch_add(1, Ordering::Relaxed);
             return Achevement::Erreur;
         }
 
-        let taille = etat.format.taille_bloc;
-        if !bornes_valides(etat, requete.lba, requete.blocs, donnees.len(), taille) {
-            return Achevement::Erreur;
-        }
-
+        let taille = ctx.taille_bloc;
         let mut faits = 0usize;
         while faits < requete.blocs {
-            let lot = ((etat.transfert_max / taille).max(1)).min(requete.blocs - faits);
+            let lot = ((ctx.transfert_max / taille).max(1)).min(requete.blocs - faits);
             let octets = lot * taille;
+            let decalage = faits * taille;
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    donnees.as_ptr().add(faits * taille),
-                    etat.rebond_virt,
-                    octets,
-                );
-                if let Err(raison) = etat.transfert(true, requete.lba + faits as u64, lot as u32) {
+                if ecriture {
+                    let Some(donnees) = source else { break };
+                    if decalage + octets > donnees.len() {
+                        break;
+                    }
+                    core::ptr::copy_nonoverlapping(
+                        donnees.as_ptr().add(decalage),
+                        ctx.rebond_virt,
+                        octets,
+                    );
+                }
+                if let Err(raison) =
+                    transfert_es(&ctx, ecriture, requete.lba + faits as u64, lot as u32)
+                {
+                    rend_le_jeton();
                     if raison == "delai" {
                         note_delai_es();
                     }
-                    return if faits == 0 { Achevement::Erreur } else { Achevement::Fait(faits) };
+                    return if faits == 0 {
+                        Achevement::Erreur
+                    } else {
+                        Achevement::Fait(faits)
+                    };
+                }
+                if !ecriture {
+                    if decalage + octets > tampon.len() {
+                        break;
+                    }
+                    if releve_detaille() {
+                        crate::serial_println!(
+                            "NVME_IO_COPY_BEGIN de={:#x} vers={:#x} octets={}",
+                            ctx.rebond_virt as usize,
+                            tampon.as_ptr() as usize + decalage,
+                            octets,
+                        );
+                    }
+                    core::ptr::copy_nonoverlapping(
+                        ctx.rebond_virt,
+                        tampon.as_mut_ptr().add(decalage),
+                        octets,
+                    );
+                    if releve_detaille() {
+                        crate::serial_println!("NVME_IO_COPY_END octets={}", octets);
+                    }
                 }
             }
             faits += lot;
         }
+        rend_le_jeton();
+        if faits == 0 {
+            return Achevement::Erreur;
+        }
         note_reussite_es();
-        ECRITURES.fetch_add(faits as u64, Ordering::Relaxed);
+        if ecriture {
+            ECRITURES.fetch_add(faits as u64, Ordering::Relaxed);
+        } else {
+            LECTURES.fetch_add(faits as u64, Ordering::Relaxed);
+        }
         Achevement::Fait(faits)
+    }
+
+    /// Une vidange de cache.
+    ///
+    /// Un controleur sans cache volatil n'a rien a vider : emettre la commande
+    /// quand meme serait correct, mais rendre `Fait` sans elle serait mentir a
+    /// `api::bloc`, qui croise ce resultat avec `vidange_reelle` pour dire a
+    /// l'appelant s'il a une barriere.
+    fn vidange(&self) -> Achevement {
+        if hors_service() {
+            return Achevement::Absent;
+        }
+        let Some(ctx) = contexte_es() else { return Achevement::Absent };
+        if !prend_le_jeton(LIMITE_JETON_MS) {
+            OCCUPES.fetch_add(1, Ordering::Relaxed);
+            return Achevement::Erreur;
+        }
+        let cid = cid_es();
+        let sqe = commande_vidange(cid, ctx.nsid);
+        let resultat = emet_es(&sqe, LIMITE_VIDANGE_MS);
+        rend_le_jeton();
+        match resultat {
+            Ok(_) => {
+                note_reussite_es();
+                VIDANGES.fetch_add(1, Ordering::Relaxed);
+                Achevement::Fait(0)
+            }
+            Err(raison) => {
+                if raison == "delai" {
+                    note_delai_es();
+                }
+                Achevement::Erreur
+            }
+        }
     }
 }
 
-/// La requete tient-elle dans le disque ET dans le tampon de l'appelant ?
-///
-/// Les deux controles comptent, et pour des raisons differentes. Hors du
-/// disque, le controleur refuserait -- proprement. Hors du tampon, c'est nous
-/// qui ecririons au-dela, et personne ne refuserait rien.
-fn bornes_valides(etat: &Etat, lba: u64, blocs: usize, octets: usize, taille: usize) -> bool {
-    if blocs == 0 {
+/// La requete tient-elle dans le volume, et le tampon dans la requete ?
+fn bornes_valides_ctx(ctx: &ContexteEs, lba: u64, blocs: usize, octets: usize) -> bool {
+    if blocs == 0 || ctx.taille_bloc == 0 {
         return false;
     }
     let Some(fin) = lba.checked_add(blocs as u64) else { return false };
-    if fin > etat.blocs {
+    if fin > ctx.blocs {
         return false;
     }
-    match blocs.checked_mul(taille) {
+    match blocs.checked_mul(ctx.taille_bloc) {
         Some(besoin) => besoin <= octets,
         None => false,
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Entree publique
@@ -737,12 +1072,19 @@ pub fn bring_up() -> bool {
         return false;
     };
     match initialise(dev) {
-        Ok(etat) => {
+        Ok((etat, files)) => {
             let taille = etat.format.taille_bloc;
             let blocs = etat.blocs;
             let modele = etat.modele;
             let vidange = etat.vidange_reelle;
             let transfert = etat.transfert_max;
+            // LES FILES AVANT LA CONFIGURATION, ET LA CONFIGURATION AVANT
+            // L'ENREGISTREMENT.
+            //
+            // Un appelant qui verrait le volume enregistre avant que les files
+            // existent emettrait une commande dans le vide. L'ordre inverse ne
+            // coute rien et ferme la fenetre.
+            *FILES_ES.lock() = Some(files);
             *ETAT.lock() = Some(etat);
             bloc::enregistre(VOLUME_INTERNE, &PILOTE);
             PRESENT.store(true, Ordering::Release);
@@ -823,6 +1165,32 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
         ERREURS.load(Ordering::Relaxed),
         DELAIS.load(Ordering::Relaxed),
     )
+}
+
+/// Publie l'etat du disque interne sur le port serie.
+///
+/// Muet tant qu'aucun controleur n'a ete trouve : une ligne vide a chaque
+/// rapport rendrait la trace illisible sur une machine sans NVMe.
+pub fn log_stats() {
+    if !PRESENT.load(Ordering::Acquire) {
+        return;
+    }
+    let (lectures, ecritures, vidanges, erreurs, delais) = stats();
+    crate::serial_println!(
+        "[NVME] lectures={} ecritures={} vidanges={} erreurs={} delais={} occupes={} hors_service={}",
+        lectures, ecritures, vidanges, erreurs, delais,
+        OCCUPES.load(Ordering::Relaxed),
+        HORS_SERVICE.load(Ordering::Acquire) as u8,
+    );
+}
+
+/// Requetes refusees faute d'avoir obtenu le jeton d'entree-sortie.
+///
+/// Non nul veut dire que le pilote est reste occupe plus longtemps que
+/// `LIMITE_JETON_MS`. C'est la mesure de la contention du tampon de rebond
+/// unique, et donc l'argument chiffre pour en avoir plusieurs.
+pub fn occupes() -> u64 {
+    OCCUPES.load(Ordering::Relaxed)
 }
 
 /// Capacite du disque interne en blocs et taille de bloc.

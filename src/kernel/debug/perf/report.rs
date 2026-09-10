@@ -46,4 +46,7 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
     // ligne vide a chaque rapport rendrait la trace serie illisible sur une
     // machine qui n'a pas de cle branchee.
     crate::drivers::xhci_active::log_stockage();
+    // Le disque interne : `occupes` non nul chiffre la contention du tampon de
+    // rebond unique, et c'est l'argument pour en avoir plusieurs.
+    crate::drivers::nvme::log_stats();
 }

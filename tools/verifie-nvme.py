@@ -183,7 +183,7 @@ def regle_liste_prp(decodage, pilote, fautes):
             "decodage.rs : plan_prp ne derive plus le decalage de l'adresse "
             "reelle ; un tampon non aligne basculera dans le mauvais cas."
         )
-    prp = corps(pilote, "unsafe fn prp(&self, octets: usize)")
+    prp = corps(pilote, "unsafe fn prp_es(ctx: &ContexteEs, octets: usize)")
     if prp is None:
         fautes.append("nvme.rs : la preparation des PRP a disparu.")
     elif "Prp::Liste" not in prp or "liste_phys" not in prp:
@@ -238,26 +238,31 @@ def regle_bornes(pilote, fautes):
     Hors du disque, le controleur refuserait proprement. Hors du tampon, c'est
     nous qui ecrivons au-dela, et personne ne refuse rien.
     """
-    bloc = corps(pilote, "fn bornes_valides(")
+    bloc = corps(pilote, "fn bornes_valides_ctx(")
     if bloc is None:
         fautes.append("nvme.rs : le controle de bornes a disparu.")
         return
-    if "etat.blocs" not in bloc:
-        fautes.append("nvme.rs : bornes_valides ne borne plus par le disque.")
+    if "ctx.blocs" not in bloc:
+        fautes.append("nvme.rs : bornes_valides_ctx ne borne plus par le disque.")
     if "octets" not in bloc:
         fautes.append(
-            "nvme.rs : bornes_valides ne borne plus par le tampon de "
+            "nvme.rs : bornes_valides_ctx ne borne plus par le tampon de "
             "l'appelant ; un depassement ecrira dans la memoire du noyau."
         )
     if "checked_add" not in bloc or "checked_mul" not in bloc:
         fautes.append(
-            "nvme.rs : bornes_valides calcule sans garde de debordement ; un "
+            "nvme.rs : bornes_valides_ctx calcule sans garde de debordement ; un "
             "LBA proche du maximum repasserait sous la capacite."
         )
-    for nom in ("fn soumet(", "fn soumet_ecriture("):
-        corps_soumet = corps(pilote, nom)
-        if corps_soumet is None or "bornes_valides" not in corps_soumet:
-            fautes.append("nvme.rs : %s ne verifie plus ses bornes." % nom)
+    # Les deux entrees publiques delegent a `transfere`, qui est l'endroit ou
+    # les bornes se verifient. Chercher la verification dans `soumet` la
+    # trouverait absente et accuserait a tort ; la chercher dans `transfere`
+    # verifie la propriete la ou elle vit.
+    corps_transfere = corps(pilote, "fn transfere(")
+    if corps_transfere is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    elif "bornes_valides_ctx" not in corps_transfere:
+        fautes.append("nvme.rs : transfere ne verifie plus ses bornes.")
 
 
 def regle_vidange_honnete(pilote, fautes):
@@ -406,12 +411,13 @@ def regle_tampon_de_rebond(pilote, fautes):
             "nvme.rs : le tampon de rebond DMA a disparu ; le pilote deduit "
             "desormais une adresse physique d'un pointeur qu'il n'a pas alloue."
         )
-    for nom in ("fn soumet(", "fn soumet_ecriture("):
-        bloc = corps(pilote, nom)
-        if bloc is None:
-            continue
-        if "rebond_virt" not in bloc and "Vidange" not in bloc:
-            fautes.append("nvme.rs : %s ne passe plus par le tampon de rebond." % nom)
+    bloc = corps(pilote, "fn transfere(")
+    if bloc is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    elif "rebond_virt" not in bloc:
+        fautes.append(
+            "nvme.rs : transfere ne passe plus par le tampon de rebond."
+        )
 
 
 def regle_preuve_hote(test, fautes):
@@ -426,6 +432,110 @@ def regle_preuve_hote(test, fautes):
         if attendu not in test:
             fautes.append(
                 "test_nvme_decodage.rs : la preuve « %s » a disparu." % attendu
+            )
+
+
+def regle_attente_sans_verrou(pilote, fautes):
+    """L'attente d'une entree-sortie ne se fait sous AUCUN verrou a
+    interruptions masquees.
+
+    # Le defaut que cette regle existe pour empecher de revenir
+
+    `soumet` prenait `ETAT` -- un `SpinLockIrq` -- et le gardait pendant TOUT
+    le transfert, attente comprise. Les interruptions restaient donc masquees
+    jusqu'a deux secondes par commande : ni tick, ni scrutation USB, ni
+    clavier, ni souris, ni trame. Un disque un peu lent devenait un gel
+    indiscernable d'un plantage, et le probe GPT emet des dizaines de
+    commandes.
+
+    Les autres coeurs payaient aussi : un renvoi de TLB emis pendant cette
+    fenetre attendait qu'elle se ferme.
+
+    # Ce qui est verifie
+
+    Trois portees, et aucune ne contient d'attente :
+
+      * `transfere` ne prend pas `ETAT` -- il lit la configuration par
+        `contexte_es`, qui rend le verrou avant de rendre la main ;
+      * `emet_es`, qui attend, ne prend aucun verrou lui-meme ;
+      * `soumet_es` et `draine_les_achevements`, qui prennent `FILES_ES`,
+        n'attendent pas.
+    """
+    transfere = corps(pilote, "fn transfere(")
+    if transfere is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    else:
+        if "ETAT.lock()" in transfere:
+            fautes.append(
+                "nvme.rs : transfere reprend le verrou de configuration ; "
+                "l'attente redevient une attente interruptions masquees."
+            )
+        if "contexte_es()" not in transfere:
+            fautes.append(
+                "nvme.rs : transfere ne lit plus la configuration par "
+                "contexte_es ; rien ne garantit plus que le verrou soit rendu."
+            )
+
+    emet = corps(pilote, "fn emet_es(")
+    if emet is None:
+        fautes.append("nvme.rs : l'emission d'entree-sortie a disparu.")
+    else:
+        if "attente_bornee" not in emet:
+            fautes.append(
+                "nvme.rs : emet_es n'attend plus de facon bornee."
+            )
+        if ".lock()" in emet:
+            fautes.append(
+                "nvme.rs : emet_es prend un verrou alors qu'il attend ; "
+                "c'est exactement le defaut que cette regle refuse."
+            )
+
+    for nom in ("fn soumet_es(", "fn draine_les_achevements("):
+        bloc = corps(pilote, nom)
+        if bloc is None:
+            fautes.append("nvme.rs : %s a disparu." % nom)
+            continue
+        if "attente_bornee" in bloc:
+            fautes.append(
+                "nvme.rs : %s attend en tenant le verrou des files." % nom
+            )
+
+    jeton = corps(pilote, "fn prend_le_jeton(")
+    if jeton is None:
+        fautes.append(
+            "nvme.rs : le jeton d'entree-sortie a disparu ; deux transferts "
+            "simultanes se partageraient le tampon de rebond."
+        )
+    elif "attente_bornee" not in jeton:
+        fautes.append(
+            "nvme.rs : l'attente du jeton n'est plus bornee ; un pilote bloque "
+            "bloquerait le systeme de fichiers pour toujours."
+        )
+
+
+def regle_releve_entree_sortie(pilote, fautes):
+    """Le chemin d'entree-sortie publie de quoi diagnostiquer une panne
+    physique.
+
+    Une premiere lecture qui double-faute sur une machine qu'on n'a pas ne
+    laisse RIEN derriere elle si le pilote est muet : ni l'identifiant, ni les
+    PRP, ni la sonnette ecrite, ni l'endroit exact ou il s'est arrete. Chaque
+    marqueur est publie AVANT l'operation qu'il nomme -- c'est ce qui fait que
+    le dernier marqueur imprime dit ou la machine est morte.
+    """
+    for marqueur in (
+        "NVME_IO_READ_ENTER",
+        "NVME_IO_PRP_READY",
+        "NVME_IO_SQE_READY",
+        "NVME_IO_DOORBELL",
+        "NVME_IO_CQE_OK",
+        "NVME_IO_COPY_BEGIN",
+        "NVME_IO_COPY_END",
+    ):
+        if marqueur not in pilote:
+            fautes.append(
+                "nvme.rs : le marqueur %s a disparu ; une panne physique sur "
+                "ce chemin redevient muette." % marqueur
             )
 
 
@@ -451,6 +561,8 @@ def main():
     regle_bornes(pilote, fautes)
     regle_vidange_honnete(pilote, fautes)
     regle_attente_hors_irq(pilote, minuterie, fautes)
+    regle_attente_sans_verrou(pilote, fautes)
+    regle_releve_entree_sortie(pilote, fautes)
     regle_phase(pilote, decodage, fautes)
     regle_interruption_non_armee(decodage, fautes)
     regle_tampon_de_rebond(pilote, fautes)
@@ -463,7 +575,9 @@ def main():
         return 1
     print(
         "nvme : foulee lue dans CAP, NLB decale de un, liste PRP au-dela de "
-        "deux pages, taille de bloc lue sur le disque, bornes des deux cotes"
+        "deux pages, taille de bloc lue sur le disque, bornes des deux cotes, "
+        "attente hors de tout verrou a interruptions masquees, releve "
+        "d'entree-sortie complet"
     )
     return 0
 
