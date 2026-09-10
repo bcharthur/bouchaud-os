@@ -305,6 +305,19 @@ pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
     // Interactive la mettrait a egalite avec le bureau, qu'elle est justement
     // censee cesser de deranger. Un travail de fond est un travail de fond.
     task.priorite.range(Priorite::Normale);
+    // MIGRABLE, PARCE QU'UN TRAVAILLEUR DE FOND N'A PAS DE COEUR A LUI.
+    //
+    // `register` epingle par defaut toute tache noyau au coeur zero. Pour un
+    // travail de fond, cette regle produit exactement l'inverse de ce qu'on
+    // veut : la tache est creee, enregistree, visible -- et jamais elue, des
+    // que le coeur zero n'est pas lui-meme dans l'ordonnanceur. Le fil de
+    // montage l'a montre sur un demarrage sans bureau : `on=-1`, trois coeurs
+    // au repos a cote, et rien.
+    //
+    // Rien dans un travailleur lance par cette fonction ne depend du coeur
+    // zero : il n'a ni pile heritee, ni etat local de coeur, ni contexte
+    // d'appelant. Il se declare donc migrable.
+    task.migrable = true;
     register(task);
     true
 }

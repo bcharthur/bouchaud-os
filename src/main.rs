@@ -219,6 +219,25 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // ni le tas ni les structures historiques.
     arch::x86_64::smp::enable_scheduler();
 
+    // LA PERSISTANCE NE DEPEND PAS DU BUREAU GRAPHIQUE.
+    //
+    // Le montage differe n'avait qu'un seul declencheur : la troisieme trame
+    // du compositeur. Un demarrage sans bureau -- celui du shell interactif,
+    // celui de toutes les campagnes QEMU en mode serie -- armait donc le
+    // drapeau et ne le consommait JAMAIS. Le journal disait
+    // `BOUCHAUD_NVME_PERSISTENCE_DEFERRED`, puis plus rien, indefiniment.
+    //
+    // Le defaut n'est pas seulement un scenario de campagne muet : sur une
+    // machine ou le bureau ne demarre pas, la persistance restait absente
+    // sans qu'aucune ligne ne dise pourquoi.
+    //
+    // Le lancement appartient donc a l'amorcage, ici, des que l'ordonnanceur
+    // peut faire tourner une tache -- et pas une trame plus tard. L'appel du
+    // compositeur reste en place : il ne fait plus rien quand celui-ci a deja
+    // eu lieu (`montage_differe_en_attente`), et rattrape le cas ou la tache
+    // n'a pas pu etre creee a cet instant precis.
+    platform::pc::installation::lance_le_montage_differe();
+
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.
     kernel::autorun::run_if_present();

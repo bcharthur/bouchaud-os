@@ -382,6 +382,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
         crate::arch::x86_64::smp::discovered_cpus(),
     );
 
+    // Le montage differe part ICI, et non a la troisieme trame du bureau : il
+    // n'a aucun resultat que le premier rendu attende, et le faire dependre du
+    // compositeur le rendait absent partout ou le compositeur ne demarre pas.
+    // Voir la note d'amorcage equivalente dans `main.rs`.
+    crate::platform::pc::installation::lance_le_montage_differe();
+
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
     point_de_controle("bureau");
