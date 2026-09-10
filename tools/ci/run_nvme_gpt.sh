@@ -27,10 +27,19 @@
 # ligne avec le noyau : ce que le noyau relit est donc une table produite par
 # quelqu'un d'autre.
 #
-# # Pourquoi q35
+# # Sur quelle machine
 #
-# NVMe n'existe pas sur i440fx. La plateforme de reference du chantier 10 est
-# q35, et c'est ici qu'elle sert vraiment.
+# `BOUCHAUD_MACHINE` decide, et le defaut est celle qui DEMARRE.
+#
+# Le premier essai forcait q35, plateforme de reference du chantier 10. Il a
+# rendu un journal serie entierement VIDE apres trois minutes : le noyau n'y
+# demarre pas encore. C'est une information utile -- elle est rapportee telle
+# quelle -- et ce n'est pas une raison pour que le pilote NVMe reste sans
+# aucune preuve d'execution en attendant.
+#
+# Le peripherique `nvme` de QEMU s'attache aussi au bus d'i440fx : il y perd
+# ses fonctions PCIe, pas sa capacite a servir des blocs. Le pilote y est donc
+# exerce entierement.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/ci/plateforme.sh
@@ -44,8 +53,7 @@ mkdir -p "$(dirname "$LOG")"
 
 python3 tools/ci/fabrique-disque-gpt.py "$DISQUE" --mio 64 || exit 1
 
-# NVMe demande q35, quel que soit le defaut de la plateforme.
-export BOUCHAUD_MACHINE=q35
+export BOUCHAUD_MACHINE=${BOUCHAUD_MACHINE:-pc}
 bouchaud_profil_resume
 
 echo "=== QEMU NVMe + GPT ==="
@@ -55,7 +63,7 @@ qemu-system-x86_64 \
   $(bouchaud_nvme_args "$DISQUE") \
   -m 4096 -smp 4 -cpu max -display none -no-reboot \
   -audiodev none,id=muet \
-  -serial file:"$LOG" &
+  -serial file:"$LOG" 2> "$LOG.qemu" &
 PID=$!
 
 FATAL='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|panicked at|SpinLock recursive acquisition'
@@ -80,9 +88,36 @@ sleep 1
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 
+octets=$(stat -c '%s' "$LOG" 2>/dev/null || echo 0)
+echo "journal serie : $octets octets"
+
+# UN JOURNAL VIDE N'EST PAS UN PILOTE MUET : C'EST UNE MACHINE QUI N'A PAS
+# DEMARRE.
+#
+# Les deux se lisent pareil dans une liste de marqueurs absents -- huit lignes
+# « marqueur obligatoire absent » qui accusent le pilote NVMe alors que le
+# noyau n'a jamais rien ecrit. Les distinguer est ce qui evite de chercher un
+# defaut de stockage la ou il n'y a pas de demarrage.
+if [ "$octets" -eq 0 ]; then
+  echo "ECHEC : AUCUNE sortie serie. Le noyau n'a pas demarre sur cette machine." >&2
+  echo "        machine=$BOUCHAUD_MACHINE" >&2
+  echo "--- ce que QEMU a dit ---" >&2
+  cat "$LOG.qemu" >&2 2>/dev/null || true
+  echo "--- fin ---" >&2
+  exit 1
+fi
+
+echo "--- premieres lignes ---"
+head -c 2000 "$LOG" || true
+echo
 echo "--- releve NVMe ---"
 grep -aE 'BOUCHAUD_NVME|NVME_IO_|BOUCHAUD_INSTALL|\[NVME\]' "$LOG" | tail -n 60 || true
 echo "--- fin du releve ---"
+if [ -s "$LOG.qemu" ]; then
+  echo "--- QEMU (stderr) ---"
+  head -c 2000 "$LOG.qemu"
+  echo
+fi
 
 echecs=0
 
