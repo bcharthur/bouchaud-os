@@ -168,7 +168,9 @@ Write-Host "--- MARQUEURS ATTENDUS (console serie / diagnostic) ---" -Foreground
     "NVME_IO_CQE_OK                           l'achevement revient",
     "NVME_IO_COPY_END                         les octets arrivent chez l'appelant",
     "BOUCHAUD_INSTALL_SYSTEME_MONTE           la partition Bouchaud est montee",
-    "BOUCHAUD_USB_STOCKAGE_PRET               une cle USB est lisible",
+    "BOUCHAUD_USB_STOCKAGE_TROUVE             points Bulk IN/OUT configures",
+    "BOUCHAUD_USB_STOCKAGE_PRET               READ CAPACITY a repondu",
+    "BOUCHAUD_USB_STOCKAGE_VOLUME             la cle est publiee sous la couche bloc",
     "BOUCHAUD_TRIGKEY_RTL8168_DETECTED        carte reseau vue (cable branche)",
     "BOUCHAUD_TRIGKEY_RTL8168_LINK_UP         lien Ethernet monte"
 ) | ForEach-Object { Write-Host "  $_" }
@@ -181,7 +183,55 @@ Write-Host "--- MARQUEURS QUI DOIVENT RESTER ABSENTS ---" -ForegroundColor Cyan
     "BOUCHAUD_PILE_NOYAU_DEBORDEE             pile noyau entree dans sa page de garde",
     "BOUCHAUD_NVME_HORS_SERVICE               le NVMe a ete mis en quarantaine",
     "NVME_IO_DELAI                            une commande n'a pas ete achevee a temps",
-    "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE     le fil de montage n'a pas pu etre cree"
+    "BOUCHAUD_NVME_PERSISTENCE_FIL_REFUSE     le fil de montage n'a pas pu etre cree",
+    "NVME_IO_QUARANTAINE                      une commande abandonnee retient le tampon",
+    "NVME_IO_CQE_REJETE                       achevement inconnu, perime, double ou hors domaine",
+    "BOUCHAUD_USB_BULK_ECHEC                  un transfert Bulk a echoue",
+    "BOUCHAUD_USB_STOCKAGE_IO_ECHEC           lecture ou ecriture refusee par la cle",
+    "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC       reinitialisation Bulk-Only sans effet"
+) | ForEach-Object { Write-Host "  $_" }
+
+Write-Host ""
+Write-Host "--- DEUX LIGNES DE BILAN A RELEVER AVANT D'ETEINDRE ---" -ForegroundColor Cyan
+@(
+    "[NVME]        lectures / ecritures / erreurs / delais / occupes / hors_service",
+    "[NVME-SUIVI]  en_vol / quarantaine / echeances / tardifs / rejets",
+    "",
+    "  quarantaine non nul = une commande abandonnee sur echeance tient encore",
+    "  le tampon de rebond ; les entrees-sorties suivantes sont REFUSEES, et",
+    "  c'est voulu -- la reutiliser corromprait le tampon. Un compteur",
+    "  d'erreurs a zero pendant que la quarantaine tient decrit une machine",
+    "  saine qui ne lit plus rien.",
+    "",
+    "  rejets non nul = le controleur a envoye un achevement qui n'appartient",
+    "  a aucune commande vivante. Chaque cas est nomme dans NVME_IO_CQE_REJETE."
+) | ForEach-Object { Write-Host "  $_" }
+
+Write-Host ""
+Write-Host "--- SCENARIO USB PHYSIQUE (a faire APRES l'arrivee au bureau) ---" -ForegroundColor Cyan
+@(
+    "Ce que QEMU ne peut pas prouver : une vraie cle repond lentement, cale,",
+    "renvoie des paquets courts et des STALL, et se deconnecte quand on la",
+    "retire. La campagne `run_usb_stockage.sh` couvre le cas conforme ; celui-ci",
+    "couvre le reste.",
+    "",
+    "  1. demarrer, attendre le bureau, NE RIEN brancher d'autre",
+    "  2. brancher une SECONDE cle USB (pas celle de demarrage)",
+    "  3. relever  BOUCHAUD_USB_STOCKAGE_TROUVE  puis  _PRET  puis  _VOLUME",
+    "     -> _PRET porte blocs= et taille_bloc= : ce sont les valeurs rendues",
+    "        par READ CAPACITY. Les comparer a la taille reelle de la cle.",
+    "        Une cle en 4 Kio logiques rendra taille_bloc=4096 : c'est le cas",
+    "        qui n'a jamais ete exerce.",
+    "  4. la retirer SANS rien fermer",
+    "     -> BOUCHAUD_USB_STOCKAGE_RETIRE doit apparaitre, et le systeme",
+    "        continuer. Un gel ici est un defaut de deconnexion.",
+    "  5. la rebrancher, sur LE MEME port",
+    "     -> _TROUVE / _PRET / _VOLUME doivent revenir. Le slot peut changer.",
+    "  6. la rebrancher sur un AUTRE port",
+    "  7. relever [NVME-SUIVI] et les compteurs de stockage avant d'eteindre",
+    "",
+    "A renvoyer : les lignes BOUCHAUD_USB_* dans l'ordre, la taille reelle de",
+    "la cle, et le fichier de l'enregistreur de vol s'il a ete ecrit."
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
