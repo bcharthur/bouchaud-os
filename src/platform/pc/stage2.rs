@@ -388,6 +388,17 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Voir la note d'amorcage equivalente dans `main.rs`.
     crate::platform::pc::installation::lance_le_montage_differe();
 
+    // LE MODE DE SECOURS EST CONSULTE ICI, ET NULLE PART AILLEURS.
+    //
+    // Un bureau qui ne demarre pas laisse une machine sans aucun moyen de dire
+    // pourquoi : ni journal lisible, ni commande a taper. La console, elle,
+    // suffit a lancer `hwtest` et a relever un `bootlog`.
+    if crate::platform::pc::trigkey::secours_demande() {
+        crate::serial_println!("BOUCHAUD_STAGE2_SAFE_MODE bureau=non-lance console=texte");
+        crate::drivers::vga::set_serial_mirror(true);
+        crate::shell::run();
+    }
+
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
     point_de_controle("bureau");

@@ -214,7 +214,8 @@ pub const COMMANDS: &[&str] = &[
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
-    "smoltest", "nvme-parallele",
+    "smoltest",
+    "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode", "nvme-parallele",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
@@ -866,6 +867,15 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
         "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
         "smoltest" => { crate::net::smoltest_cmd(argc, &argv); 0 }
+
+        // H10 -- la machine de reference et sa preuve.
+        "hwinfo" => { crate::platform::pc::trigkey::hwinfo(); 0 }
+        "hwtest" => { crate::platform::pc::trigkey::hwtest(); 0 }
+        "bootlog" => { crate::platform::pc::trigkey::bootlog(); 0 }
+        "nvmetest" => { crate::platform::pc::trigkey::nvmetest(); 0 }
+        "disktest" => { crate::platform::pc::trigkey::disktest(argc, &argv); 0 }
+        "persist-test" => { crate::platform::pc::trigkey::persist_test(argc, &argv); 0 }
+        "safe-mode" => { crate::platform::pc::trigkey::safe_mode(argc, &argv); 0 }
         // Emet des lectures NVMe depuis PLUSIEURS taches et publie la
         // profondeur de file reellement atteinte. Partitionner les ressources
         // DMA rend une profondeur superieure a un possible ; seul un appelant

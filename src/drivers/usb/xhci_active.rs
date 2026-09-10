@@ -3847,6 +3847,15 @@ pub fn hid_transport_stats() -> (usize, usize, usize, usize, usize, usize, usize
 /// clavier, puis en brancher un. Gater la surveillance sur la presence d'un
 /// HID rendrait le branchement a chaud inoperant precisement quand on en a
 /// besoin.
+/// Combien de controleurs xHCI ont ete mis en service.
+///
+/// Zero veut dire qu'il n'y a pas de bus USB a interroger : ce n'est PAS la
+/// meme chose qu'un bus present sur lequel rien ne repond, et confondre les
+/// deux ferait echouer un essai pour une absence de materiel.
+pub fn controleurs() -> usize {
+    CONTROLLERS.load(Ordering::Acquire)
+}
+
 pub fn surveille_branchements() -> bool {
     ACTIVE.load(Ordering::Acquire) && CONTROLLERS.load(Ordering::Acquire) != 0
 }

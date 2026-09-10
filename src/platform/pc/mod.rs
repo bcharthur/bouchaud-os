@@ -11,5 +11,7 @@ pub mod acpi_probe;
 pub mod hardware_probe;
 pub mod hardware_facts;
 pub mod installation;
+// H10 : l'outillage de preuve de la machine de reference.
+pub mod trigkey;
 pub mod physical_diag;
 pub mod ecran_faute;
