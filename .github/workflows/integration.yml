@@ -194,6 +194,66 @@ jobs:
           path: qemu-smoke.log
           if-no-files-found: warn
 
+  nvme-gpt:
+    name: qemu / nvme + gpt
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # Le pilote NVMe n'etait execute NULLE PART : `bouchaud_nvme_args`
+      # existait sans appelant, et aucune campagne n'attachait de disque. Le
+      # seul endroit ou il tournait etait la machine physique, ou il a
+      # double-faute. Ce scenario lui donne un disque, une vraie table GPT
+      # ecrite par un outil independant, et exige que la premiere lecture
+      # reelle parte et revienne.
+      - name: NVMe + GPT + montage (i440fx)
+        run: |
+          BOUCHAUD_MACHINE=pc tools/ci/run_nvme_gpt.sh \
+            image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt-pc.log
+      # LA MACHINE DE REFERENCE EST UNE TOPOLOGIE PCIe, PAS UN BUS PARTAGE.
+      #
+      # Le premier essai de ce scenario avait conclu que le noyau « ne demarre
+      # pas encore sur q35 » a partir d'un journal serie vide. C'ETAIT FAUX,
+      # et la mesure l'a montre : sur q35 le noyau demarre entierement,
+      # jusqu'a l'ordonnanceur, exactement comme sur i440fx. Le journal etait
+      # vide parce que le montage differe n'etait jamais declenche, pas parce
+      # que le noyau se taisait.
+      #
+      # Les deux machines tournent donc, et separement : une reussite sur
+      # i440fx ne dit rien de la topologie PCIe, qui est celle du materiel de
+      # reference.
+      - name: NVMe + GPT + montage (q35, topologie PCIe)
+        run: |
+          BOUCHAUD_MACHINE=q35 tools/ci/run_nvme_gpt.sh \
+            image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt-q35.log
+      # PROFONDEUR ANNONCEE CONTRE PROFONDEUR ATTEINTE.
+      #
+      # Partitionner les ressources DMA rend une profondeur superieure a un
+      # possible. Seul un appelant concurrent la rend atteinte -- et le journal
+      # du sondage GPT montrait huit commandes d'affilee toutes sur
+      # `emplacement=0`. Cette etape lance de vrais lecteurs simultanes et
+      # echoue si la profondeur retombe a un, ou si un emplacement fuit.
+      - name: Profondeur de file reellement atteinte
+        run: tools/ci/run_nvme_parallele.sh image/bootimage-bouchaud-os.bin target/nvme-parallele-ci/nvme-parallele.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-nvme-gpt
+          path: |
+            target/nvme-gpt-ci/*.log
+            target/nvme-parallele-ci/*.log
+          if-no-files-found: warn
+
   system-health:
     name: qemu / system health
     needs: [gate, kernel-build]
@@ -392,10 +452,41 @@ jobs:
           path: usb-branchement.log
           if-no-files-found: warn
 
+  usb-stockage:
+    name: qemu / stockage usb (bulk-only)
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # `xhci_active.rs` porte ~1000 lignes de transport Bulk-Only et de
+      # commandes SCSI. Aucune campagne ne branchait de peripherique de
+      # stockage : elles n'etaient executees NULLE PART. Une preuve de
+      # decodage hote ne couvre pas ce chemin -- un CSW se decode a la table,
+      # mais un CSW qui n'arrive jamais faute de point de terminaison
+      # configure ne se voit qu'a l'execution.
+      - name: Cle USB, transport Bulk, READ CAPACITY
+        run: tools/ci/run_usb_stockage.sh image/bootimage-bouchaud-os.bin target/usb-stockage-ci/usb-stockage.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-usb-stockage
+          path: target/usb-stockage-ci/usb-stockage.log
+          if-no-files-found: warn
+
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement, usb-stockage]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -403,6 +494,7 @@ jobs:
           ENABLED: ${{ needs.gate.outputs.run }}
           KERNEL: ${{ needs.kernel-build.result }}
           BOOT: ${{ needs.qemu-smoke.result }}
+          NVME: ${{ needs.nvme-gpt.result }}
           HEALTH: ${{ needs.system-health.result }}
           PRIMITIVES: ${{ needs.os-primitives.result }}
           MM: ${{ needs.mm-ng6.result }}
@@ -410,13 +502,14 @@ jobs:
           DNS: ${{ needs.dns-udp.result }}
           USB: ${{ needs.usb-arbre.result }}
           PLUG: ${{ needs.usb-branchement.result }}
+          STOCK: ${{ needs.usb-stockage.result }}
         run: |
           if [ "$ENABLED" != true ]; then
             echo 'INTEGRATION NON DEMANDEE : aucune suite QEMU n a tourne.'
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG" stockage "$STOCK"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -426,7 +519,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG" "$STOCK"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -435,7 +528,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG" "$STOCK"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

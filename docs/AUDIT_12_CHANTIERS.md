@@ -37,13 +37,399 @@ lui fait confiance.
 | Appels hors gros verrou | **81** |
 | Appels encore sous gros verrou | **78** |
 | Fichiers portant un point sur de preemption | **4** |
-| Garde-fous d'architecture | **57** |
-| Suites de test hote | **66** |
+| Garde-fous d'architecture | **60** |
+| Suites de test hote | **67** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
 
 Regenerer : `python3 tools/mesure-chantiers.py --ecris`
+
+## Le double fault physique : ce qui est prouve, et ce qui ne l'est pas
+
+La BLACKBOX a capture, sur le TRIGKEY :
+
+    DOUBLE FAULT  vector=8  cpu=0  task=desktop  RIP=0x80012ed45c
+
+Le dernier marqueur normal avant la faute est
+`BOUCHAUD_NVME_PERSISTENCE_PROBE_BEGIN`. Le chemin execute est donc :
+
+    desktop -> montage differe -> monte_le_systeme_installe -> gpt::lit_table
+            -> Support::lit(LBA 1) -> couche bloc -> PiloteNvme
+            -> premiere entree-sortie NVMe reelle
+
+### Ce qui est prouve
+
+Un debordement de pile CERTAIN a ete trouve et corrige ailleurs :
+`net::transport::tcp::fetch` posait sa file de retransmission -- environ
+quatre-vingt-treize kibioctets -- sur une pile noyau de soixante-quatre. La
+mesure est reproductible (`tools/mesure-pile-noyau.py`) : trame de 99 320
+octets, pire chaine de 119 888 octets, pile utilisable de 61 440.
+
+Ce defaut est reel et sa correction etait necessaire. Il aurait produit un
+double fault des le premier telechargement, donc des le premier chargement de
+page dans Ladybird.
+
+### Ce qui n'est PAS prouve
+
+**Il n'explique pas le double fault capture.** Le chemin execute au moment de
+la faute etait celui du stockage, pas celui du reseau : `tcp::fetch` n'y
+apparait a aucun etage. La chaine du montage mesure 10 592 octets, tres en
+deca de la pile disponible -- ce n'est pas un debordement.
+
+Le defaut physique NVMe reste donc **ouvert**. Ce qui a ete fait autour de lui :
+
+  * l'attente d'entree-sortie a quitte l'IRQ-off (elle bloquait la machine
+    entiere jusqu'a deux secondes par commande) ;
+  * huit marqueurs `NVME_IO_*` publient chaque etape AVANT de l'executer, donc
+    le dernier marqueur imprime nommera l'etape atteinte ;
+  * le pilote est desormais mis en service quel que soit le micrologiciel, et
+    un scenario QEMU l'exerce avec un vrai disque et une vraie table GPT.
+
+La confirmation demande un essai sur le TRIGKEY, avec l'image et le manifeste
+produits par `tools/reference/IMAGE-TRIGKEY.ps1`.
+
+### Pourquoi une adresse ne se resout pas contre le HEAD
+
+`0x80012ed45c` resolu contre deux constructions differentes de ce depot donne
+`keyboard::read_into` dans l'une et `shell::commands::find_rec` dans l'autre.
+Aucune des deux n'est la reponse : entre deux commits l'editeur de liens
+deplace tout, et une fonction innocente prend la place de la coupable.
+
+`tools/reference/symbolise-blackbox.py` REFUSE de repondre si la somme du noyau
+qu'on lui donne ne correspond pas au manifeste ecrit a la construction de
+l'image. Une reponse rendue est une reponse sur le bon binaire, ou il n'y a pas
+de reponse.
+
+## Bilan par contrat — statut reel, code, preuve, test, mesure, manque
+
+Date : 10 septembre 2026. Base : `claude/integration-checkpoint-0d015c7`,
+descendante directe du checkpoint physique `0d015c7`.
+
+**Les six niveaux de preuve**, du plus faible au plus fort. Ils ne sont pas
+interchangeables, et le tableau ne les melange jamais :
+
+| Niveau | Ce que cela etablit |
+|---|---|
+| NON COMMENCE | Rien de ce qui compte n'est ecrit. |
+| IMPLEMENTATION PARTIELLE | Du code existe. Un fichier qui existe n'est pas une preuve. |
+| EXECUTE EN HOTE | Une suite hote traverse la logique. Elle ne traverse aucun materiel. |
+| EXECUTE QEMU | Le chemin s'execute sur un noyau reel, machine emulee. |
+| EXECUTE TRIGKEY | Le chemin s'execute sur le materiel de reference. |
+| TERMINE | Le chemin de production par defaut EST celui-la, et une preuve echoue s'il cesse de l'etre. |
+
+Ce qui n'est PAS une preuve, et ce qui a ete refuse comme telle pendant ce
+lot : un fichier source qui existe ; un marqueur qui existe ; un test qui ne
+traverse pas le runtime ; une fonction jamais appelee ; une compilation
+reussie ; un backend QEMU presente comme une preuve TRIGKEY.
+
+Ce lot a produit trois demonstrations directes de cette regle, chacune sur du
+code qui passait deja toutes ses barrieres :
+
+* `composited-slice` etait **construit, place dans l'image, lance par
+  l'autorun**, et son garde-fou verifiait les quatre maillons. Il mourait au
+  chargement (W^X), puis a sa quatrieme etape (pile desalignee). Quatre
+  maillons verts, zero execution.
+* Le fil de montage NVMe etait **cree, enregistre, visible dans
+  `[SMP-TASK]`**. Il n'etait elu par aucun coeur : `aff=0x1`, `on=-1`.
+* Le noyau « ne demarrait pas sur q35 » selon un journal serie vide. Il y
+  demarrait entierement depuis le debut. « Aucune sortie » est un symptome,
+  pas un diagnostic.
+
+---
+
+### Tableau des douze
+
+| # | Contrat | Statut reel | Preuve d'execution la plus forte |
+|---|---|---|---|
+| 1 | Noyau reellement concurrent | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`QEMU_SMOKE_OK`, lockdep a zero violation) |
+| 2 | Scheduler NG + preemption | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (equilibrage effectif : le fil de montage elu par un AP) |
+| 3 | Memoire NG | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`MM_NG6_OK`) |
+| 4 | Compositeur ring 3 reel | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NATIVE_IPC_RUNTIME_OK`, ring 3, ce lot) |
+| 5 | FS / E-S moderne | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NVME_GPT_OK` i440fx + q35 ; `NVME_PARALLELE_SCENARIO_OK` profondeur 4, ce lot) |
+| 6 | Architecture de securite | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`SECURITY_RUNTIME_OK`, refus en anneau 3) |
+| 7 | ABI Bouchaud + IPC natif | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NATIVE_IPC_RUNTIME_OK`, ce lot) |
+| 8 | Ladybird reellement utilisable | IMPLEMENTATION PARTIELLE | EXECUTE EN HOTE (campagne native non reproduite ici) |
+| 9 | Reseau NG | IMPLEMENTATION PARTIELLE | EXECUTE EN HOTE (retransmission, RTO) |
+| 10 | Plateforme materielle de reference | IMPLEMENTATION PARTIELLE | EXECUTE QEMU aux deux topologies + USB Bulk (`USB_STOCKAGE_OK`, ce lot) ; TRIGKEY en attente |
+| 11 | Fiabilite / CI / release | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (79 garde-fous, 67 suites, 3 workflows verts) |
+| 12 | Polish produit | NON COMMENCE | — |
+
+**Aucun contrat n'est TERMINE.** Aucun n'atteint EXECUTE TRIGKEY sur cette
+branche : le materiel n'a pas ete sollicite depuis le checkpoint.
+
+---
+
+### 1 — Noyau reellement concurrent
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : `nvme.rs` — l'attente d'entree-sortie rend la main
+  a l'ordonnanceur au lieu de tourner sur un coeur ; les trois acces au suivi
+  sont sortis en fonctions d'une ligne pour qu'aucune garde ne vive a travers
+  une attente ; les verrous des files et du suivi ne sont jamais tenus
+  ensemble, pour ne pas creer d'arete d'ordre.
+* **Preuve d'execution** : `QEMU_SMOKE_OK`, lockdep a zero violation sur
+  quatre coeurs.
+* **Test** : `test_nvme_suivi.rs` (23 cas) ; `verifie-ordre-verrous.py`,
+  `verifie-rangs-verrous.py`, `verifie-nvme.py` (regle « emet_es ne prend
+  aucun verrou », NON assouplie ce lot).
+* **Mesure** : 159 appels systeme aiguilles, **81 hors gros verrou**, 78
+  encore dessous.
+* **Ce qui manque** : sockets, `openat`/coeur FS, `ioctl`, signaux, `clone`,
+  `execve` restent sous le gros verrou. Aucune campagne ne mesure encore la
+  contention par domaine sous charge reelle.
+
+### 2 — Scheduler NG + preemption noyau
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : `tache.rs`, `creation.rs`, `lifecycle.rs` — une
+  tache noyau peut se DECLARER migrable. `register` epinglait toute tache
+  noyau au coeur zero, sans exception et sans le dire.
+* **Preuve d'execution** : le fil de montage, cree sur le coeur zero pendant
+  que celui-ci tenait la boucle interactive hors de l'ordonnanceur, est
+  desormais elu par un autre coeur et mene une chaine d'entrees-sorties NVMe
+  jusqu'a `BOUCHAUD_INSTALL_SYSTEME_MONTE`. Avant : `on=-1`, indefiniment.
+* **Test** : `test_runqueue_ng`, `test_scheduler_sans_bkl`,
+  `verifie-ordonnanceur-sans-bkl.py`, `verifie-preemption.py`.
+* **Mesure** : 4 fichiers portant un point sur de preemption ; quantum 4 ms,
+  4 coeurs, vol de travail actif (`SMP_NG2_SCHEDULER`).
+* **Ce qui manque** : preemption depuis l'IRQ seulement, pas de points surs,
+  pas de tickless. Aucune mesure de latence reveil→execution. Le defaut
+  d'epinglage des taches noyau historiques n'a PAS ete change : seules les
+  taches de fond se declarent migrables.
+
+### 3 — Memoire NG
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : aucun.
+* **Preuve d'execution** : `MM_NG6_OK` ; au demarrage,
+  `BOUCHAUD_TAS_PAGES_PRET base=0x18002579000 pages=371957
+  max_contigu=4194304` et `BOUCHAUD_TAS_BACKING compagnon=pages`.
+* **Test** : `test_tas_pages` (12 cas), `test_compagnon`.
+* **Mesure** : plus grand bloc contigu 4 MiB (ordre 10) ; repli LockedHeap
+  64 MiB.
+* **Ou atterrit reellement `Box<[SegmentEnVol]>`** — la question posee, et sa
+  reponse mesuree plutot que supposee :
+
+  | Grandeur | Valeur |
+  |---|---|
+  | `size_of::<SegmentEnVol>()` | 1 496 octets (alignement 8) |
+  | File de `SEGMENTS_MAX` = 64 | **95 744 octets, soit 93 Kio** |
+  | Pages necessaires | 24 |
+  | Classe de tas | au-dela de `CLASS_SIZES` (max 1 024) → **allocation GRANDE** |
+  | Chemin effectif | `NgHeap::alloue_grande` → `pages_tas::alloue` (compagnon) |
+  | Ordre servi | 5, soit 32 pages = 128 Kio |
+  | Fragmentation interne | 32 Kio par connexion (25 %) |
+  | Plus grand ordre du compagnon | 10 (4 Mio) — la demande est donc **servie**, jamais renvoyee au repli |
+
+  **Le debordement de pile n'a pas ete echange contre une contention
+  globale.** Le verrou du compagnon `pages_tas` est bien global, mais il
+  n'est pris qu'a la CREATION d'une connexion, pas par segment ni par
+  paquet : ce n'est pas un chemin chaud. Ce qui reste a payer est la
+  fragmentation — 32 Kio perdus par connexion, parce que 24 pages sont
+  servies par un bloc de 32.
+* **Ce qui manque** : la fragmentation ci-dessus n'est pas mesuree SOUS
+  CHARGE, avec plusieurs dizaines de connexions simultanees ouvertes par
+  Ladybird. `LockedHeap` reste le fond de secours ; pas de slab, pas de
+  recuperation sous pression memoire mesuree.
+
+### 4 — Compositeur ring 3 reel
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU **pour la
+  premiere fois**.
+* **Code modifie ce lot** : `composited/build.sh` (segments separes, echec de
+  construction sur RWE), `composited-slice.c` (realignement de pile a
+  l'entree), `verifie-execution-composited.py` (cinq regles nouvelles).
+* **Preuve d'execution** : `NATIVE_IPC_RUNTIME_OK`. Dix-huit assertions en
+  anneau trois, dont l'attenuation des droits refusee au client :
+  `le client NE PEUT PAS multiplier la capacite`, `ni la repasser a un tiers`.
+* **Test** : `verifie-execution-composited.py`, verifie par trois mutations.
+* **Mesure** : quatre segments ELF R / R+X / R / RW, contre un seul RWE avant.
+* **Ce qui manque** : **le bureau reel n'a pas migre**. Le compositeur noyau
+  reste le chemin par defaut ; ce qui vient d'etre prouve est un tranchant
+  vertical, pas le produit.
+
+### 5 — FS / E-S moderne
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU aux deux
+  topologies.
+* **Code modifie ce lot** : `nvme/suivi.rs` (nouveau), `nvme.rs`,
+  `block/ata.rs`, `main.rs`, `stage2.rs`.
+* **Preuve d'execution** : `NVME_GPT_OK` sur i440fx **et** q35, sur une table
+  GPT ecrite par un outil qui ne partage aucune ligne avec le noyau ; huit
+  commandes reelles relevees pas a pas jusqu'a
+  `BOUCHAUD_INSTALL_SYSTEME_MONTE premier=34 blocs=131005`.
+* **Test** : `test_nvme_suivi.rs` (23 cas d'injection : achevement tardif,
+  identifiant deja recolte, desordre, bouclage de phase, bouclage de
+  soumission, tete absurde, reinitialisation pendant quarantaine, course
+  echeance/achevement), `test_nvme_decodage.rs`, `verifie-nvme.py`
+  (deux regles nouvelles).
+* **La profondeur de file, mesuree et non annoncee.** Les ressources DMA sont
+  desormais partitionnees : chaque emplacement porte SON tampon de rebond et
+  SA page de liste PRP, et la quarantaine est PAR EMPLACEMENT -- une commande
+  lente n'arrete plus les autres.
+
+  Partitionner rend une profondeur superieure a un POSSIBLE. Cela ne la rend
+  pas ATTEINTE, et le journal le disait sans ambiguite : quatre emplacements
+  alloues, puis huit commandes d'affilee **toutes sur `emplacement=0`**, parce
+  que le seul appelant -- le sondage GPT -- est sequentiel.
+
+  `nvme-parallele` lance donc quatre lecteurs reels sur des blocs distincts :
+
+  | Passage | Lecteurs | Reussies | Echecs | Libres a la fin | Profondeur atteinte |
+  |---|---|---|---|---|---|
+  | 1 | 4 | 32 | 0 | 3 | **4** |
+  | 2 | 4 | 32 | 0 | 4 | 2 |
+  | 3 | 4 | 32 | 0 | 4 | 2 |
+
+  Verdict : `NVME_PARALLELE_SCENARIO_OK profondeur_max=4`. Le `libres=3` du
+  premier passage n'est pas une fuite : c'est le fil de montage qui tenait
+  encore un emplacement — donc une concurrence reelle entre taches. Les
+  passages suivants repartent d'un pot plein, ce que le scenario EXIGE : une
+  fuite d'un emplacement par passage ne se verrait pas sur un seul essai et
+  bloquerait le pilote au quatrieme.
+
+  Le descripteur de la couche bloc annonce maintenant `EMPLACEMENTS_ES` et
+  non plus la constante 1.
+* **Mesure** : sonde IDE sur q35 : **20 s → 0 s**. Profondeur de file
+  atteinte : **4** sur 4 emplacements, 540 672 octets de DMA.
+* **Ce qui manque** : l'achevement reste **scrute**, pas notifie : ni MSI, ni
+  MSI-X. L'attente rend la main a l'ordonnanceur, donc elle ne monopolise plus
+  un coeur, mais chaque attente repasse par un drainage actif. Pas d'extents,
+  pas de commit A/B, pas d'E/S asynchrone au-dessus (la couche bloc reste
+  synchrone : c'est elle, et non le pilote, qui limite desormais la
+  concurrence a ce que les appelants demandent).
+
+### 6 — Architecture de securite
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : indirectement — la politique W^X n'a pas bouge
+  d'une ligne ; c'est le binaire fautif qui a ete corrige. C'est le bon sens
+  de la correction.
+* **Preuve d'execution** : `SECURITY_RUNTIME_OK` avec des refus observes en
+  anneau trois : `RAW_SOCKET_DENIED`, `SIGNAL_DENIED`,
+  `THREAD_SIGNAL_DENIED`, `NNP_OK`, `NATIVE_SHM_LIMIT_OK`, `JIT_DENIED`, et
+  treize lignes `[SECURITY-DENY]` nominatives.
+* **Test** : `verifie-wx.py`, `verifie-motdepasse.py`, `tools/security/**`.
+* **Mesure** : W^X applique au chargement ELF : **oui**. Canari de pile
+  noyau : **oui**.
+* **Ce qui manque** : pas d'ASLR, pas de sandbox pour un WebContent
+  compromis, pas de test negatif partant d'un WebContent reellement pris.
+
+### 7 — ABI Bouchaud + IPC natif
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : `composited-slice.c` (voir contrat 4).
+* **Preuve d'execution** : `NATIVE_IPC_RUNTIME_OK` — un composant produit
+  utilise l'ABI native de bout en bout, en anneau trois, sans libc.
+* **Test** : `verifie-abi-native.py`, `verifie-execution-composited.py`.
+* **Mesure** : dix-huit assertions natives franchies ; zero appel Linux dans
+  le tranchant.
+* **Ce qui manque** : Linux reste la personnalite dominante du systeme. Un
+  seul composant produit parle l'ABI native.
+
+### 8 — Ladybird reellement utilisable
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE.
+* **Code modifie ce lot** : aucun.
+* **Preuve d'execution** : EXECUTE EN HOTE uniquement. La campagne
+  `run_ladybird_browser_host.sh` exige un repertoire de binaires Ladybird
+  natifs prealablement construits ; cette session ne les a pas produits et ne
+  peut donc pas rapporter de verdict. **Ce n'est pas un echec constate, c'est
+  une absence de mesure**, et le tableau le dit.
+* **Test** : suites C++ hote (calques, degat partiel, nom de fichier, url,
+  zoom) — 5/5.
+* **Mesure** : aucune sur cette branche.
+* **Ce qui manque** : scenario complet reel, sandbox, WPT.
+
+### 9 — Reseau NG
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee hote.
+* **Code modifie ce lot** : aucun. Le correctif de debordement de pile TCP est
+  celui du lot precedent, integre ici.
+* **Preuve d'execution** : `test_tcp_retransmission` ; au demarrage,
+  `net: eth0 10.0.2.15 gw 10.0.2.2`.
+* **Test** : `test_tcp_retransmission`, `test_rendezvous`.
+* **Mesure** : trame `tcp::fetch` **99 320 → 4 120 octets** ; pire chaine
+  compositeur **119 888 → 39 912** pour 61 440 utilisables.
+* **Ce qui manque** : aucune charge reelle sous Ladybird. Pas d'IPv6, pas de
+  zero-copie. Les sockets restent sous le gros verrou.
+
+### 10 — Plateforme materielle de reference
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE. **Aucune preuve TRIGKEY sur
+  cette branche.**
+* **Code modifie ce lot** : `block/ata.rs`, `integration.yml`,
+  `run_nvme_gpt.sh`.
+* **Preuve d'execution** : les deux topologies QEMU rendent `NVME_GPT_OK`.
+  q35 — la topologie PCIe, celle du materiel de reference — est desormais un
+  niveau de preuve distinct en CI, et non plus une plateforme faussement
+  accusee.
+* **Test** : `verifie-matrice-materielle.py`, `verifie-entree-trigkey.py`,
+  `verifie-branchement-usb.py`, `verifie-concentrateurs-usb.py`.
+* **Mesure** : demarrage q35 ampute de **20 secondes**.
+* **USB Bulk-Only : de « code qui existe » a EXECUTE QEMU.** Les ~1000 lignes
+  de transport Bulk et de commandes SCSI de `xhci_active.rs` n'etaient
+  executees NULLE PART -- aucune campagne ne branchait de peripherique de
+  stockage. `run_usb_stockage.sh` en attache un, et la chaine passe :
+
+  | Etape | Preuve |
+  |---|---|
+  | Controleur demarre, port remis a zero | `BOUCHAUD_XHCI_CONTROLLER_ACTIVE_OK` |
+  | Peripherique adresse et enumere | `BOUCHAUD_USB_ADDRESS_OK`, `BOUCHAUD_USB_ENUM_OK` |
+  | Arbitrage de l'enregistreur de vol | `BOUCHAUD_BLACKBOX_USB_SKIP` — il LIT la table par-dessus le Bulk, n'y trouve pas la sienne, et CEDE |
+  | Points Bulk IN/OUT configures | `in=0x81/dci3 out=0x02/dci4 mps=1024` |
+  | READ CAPACITY | `blocs=131072 taille_bloc=512` — la geometrie REELLE, comparee a la taille du fichier et non a une constante du noyau |
+  | Volume publie | `BOUCHAUD_USB_STOCKAGE_VOLUME volume=3 mio=64` |
+
+  Verdict : `USB_STOCKAGE_OK`. **Ce n'est pas une validation physique.** QEMU
+  emule un peripherique conforme ; une vraie cle repond lentement, cale, se
+  deconnecte, renvoie des paquets courts et des STALL. Rien de tout cela n'est
+  couvert.
+* **Ce qui manque** : **tout ce qui touche le TRIGKEY**. Le double fault
+  physique capture reste OUVERT et non explique. Le transport Bulk n'a jamais
+  rencontre de vraie cle : ni paquet court, ni STALL, ni
+  CLEAR_FEATURE(ENDPOINT_HALT), ni deconnexion en cours de commande, ni
+  rebranchement, ni secteur logique de 4 Kio. Ni audio, ni Wi-Fi, ni suspend.
+
+### 11 — Fiabilite / CI / release engineering
+
+* **Statut reel** : IMPLEMENTATION PARTIELLE, executee QEMU.
+* **Code modifie ce lot** : `verifie-nvme.py` (+2 regles),
+  `verifie-execution-composited.py` (+5 regles), `integration.yml` (q35),
+  `composited/build.sh` (echec de construction sur RWE).
+* **Preuve d'execution** : CI Fast, Integration et Reliability V3 **vertes**
+  sur la branche. Localement : `QEMU_SMOKE_OK`, `SYSTEM_HEALTH_OK`,
+  `USB_ARBRE_OK`, `USB_BRANCHEMENT_OK`, `USB_STOCKAGE_OK`, `MM_NG6_OK`,
+  `OS_PRIMITIVES_OK`, `SECURITY_RUNTIME_OK`, `NATIVE_IPC_RUNTIME_OK`,
+  `NVME_GPT_OK` (×2), `NVME_PARALLELE_SCENARIO_OK`.
+* **Test** : **79 garde-fous**, 67 suites Rust hote, 5 C++, 16 fiabilite
+  Python.
+* **Mesure** : chaque regle ajoutee ce lot est verifiee PAR MUTATION — huit
+  mutations distinctes, huit detections.
+* **Ce qui manque** : `main` n'est toujours pas protege. Aucune campagne
+  n'exerce les budgets de contention. Le fuzzing porte sur un seul objet.
+
+### 12 — Polish produit
+
+* **Statut reel** : NON COMMENCE.
+* **Code modifie ce lot** : aucun.
+* **Preuve d'execution** : `OS_PRIMITIVES_OK` couvre les primitives systeme,
+  pas le polish.
+* **Ce qui manque** : HiDPI, IME, accessibilite, glisser-deposer, mise a jour
+  atomique.
+
+---
+
+### Ce que ce bilan ne dit pas
+
+Il ne dit pas que le systeme marche sur le TRIGKEY. Depuis le checkpoint
+`0d015c7`, aucune image n'a ete flashee et aucun demarrage physique n'a ete
+observe. Tout ce qui porte ici « EXECUTE QEMU » est une preuve sur machine
+emulee, et la machine emulee n'a jamais double-faute.
+
+
+---
 
 ## Tableau d'ensemble
 

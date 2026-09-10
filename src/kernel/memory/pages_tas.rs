@@ -169,6 +169,14 @@ pub fn configure_ok() -> bool {
     CONFIGURE.load(Ordering::Acquire)
 }
 
+/// Premiere adresse distribuable du terrain du compagnon.
+///
+/// C9 l'utilise pour calculer la dalle relativement a l'origine du terrain.
+#[inline]
+pub fn base() -> usize {
+    BASE.load(Ordering::Acquire)
+}
+
 /// Cette adresse a-t-elle ete servie par CE module ?
 ///
 /// C'est la regle qui route les liberations. Un bloc rendu apres le

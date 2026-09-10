@@ -18,6 +18,8 @@ RACINE = Path(__file__).resolve().parents[1]
 PILOTE = RACINE / "src/drivers/block/nvme.rs"
 DECODAGE = RACINE / "src/drivers/block/nvme/decodage.rs"
 TEST = RACINE / "tools/platform/test_nvme_decodage.rs"
+SUIVI = RACINE / "src/drivers/block/nvme/suivi.rs"
+TEST_SUIVI = RACINE / "tools/platform/test_nvme_suivi.rs"
 MINUTERIE = RACINE / "src/kernel/time/timer.rs"
 
 
@@ -183,7 +185,7 @@ def regle_liste_prp(decodage, pilote, fautes):
             "decodage.rs : plan_prp ne derive plus le decalage de l'adresse "
             "reelle ; un tampon non aligne basculera dans le mauvais cas."
         )
-    prp = corps(pilote, "unsafe fn prp(&self, octets: usize)")
+    prp = corps(pilote, "unsafe fn prp_es(ctx: &ContexteEs, octets: usize)")
     if prp is None:
         fautes.append("nvme.rs : la preparation des PRP a disparu.")
     elif "Prp::Liste" not in prp or "liste_phys" not in prp:
@@ -238,26 +240,31 @@ def regle_bornes(pilote, fautes):
     Hors du disque, le controleur refuserait proprement. Hors du tampon, c'est
     nous qui ecrivons au-dela, et personne ne refuse rien.
     """
-    bloc = corps(pilote, "fn bornes_valides(")
+    bloc = corps(pilote, "fn bornes_valides_ctx(")
     if bloc is None:
         fautes.append("nvme.rs : le controle de bornes a disparu.")
         return
-    if "etat.blocs" not in bloc:
-        fautes.append("nvme.rs : bornes_valides ne borne plus par le disque.")
+    if "ctx.blocs" not in bloc:
+        fautes.append("nvme.rs : bornes_valides_ctx ne borne plus par le disque.")
     if "octets" not in bloc:
         fautes.append(
-            "nvme.rs : bornes_valides ne borne plus par le tampon de "
+            "nvme.rs : bornes_valides_ctx ne borne plus par le tampon de "
             "l'appelant ; un depassement ecrira dans la memoire du noyau."
         )
     if "checked_add" not in bloc or "checked_mul" not in bloc:
         fautes.append(
-            "nvme.rs : bornes_valides calcule sans garde de debordement ; un "
+            "nvme.rs : bornes_valides_ctx calcule sans garde de debordement ; un "
             "LBA proche du maximum repasserait sous la capacite."
         )
-    for nom in ("fn soumet(", "fn soumet_ecriture("):
-        corps_soumet = corps(pilote, nom)
-        if corps_soumet is None or "bornes_valides" not in corps_soumet:
-            fautes.append("nvme.rs : %s ne verifie plus ses bornes." % nom)
+    # Les deux entrees publiques delegent a `transfere`, qui est l'endroit ou
+    # les bornes se verifient. Chercher la verification dans `soumet` la
+    # trouverait absente et accuserait a tort ; la chercher dans `transfere`
+    # verifie la propriete la ou elle vit.
+    corps_transfere = corps(pilote, "fn transfere(")
+    if corps_transfere is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    elif "bornes_valides_ctx" not in corps_transfere:
+        fautes.append("nvme.rs : transfere ne verifie plus ses bornes.")
 
 
 def regle_vidange_honnete(pilote, fautes):
@@ -329,28 +336,46 @@ def regle_attente_hors_irq(pilote, minuterie, fautes):
         )
 
 
-def regle_phase(pilote, decodage, fautes):
+def regle_phase(pilote, decodage, suivi, fautes):
     """Un achevement se reconnait a sa PHASE, pas a un contenu non nul.
 
     La file d'achevement n'est jamais remise a zero : c'est le bit de phase,
     qui alterne a chaque tour, qui distingue une entree neuve d'une ancienne.
     Un pilote qui teste « non nul » relit indefiniment le dernier achevement.
+
+    # Ou vit cette arithmetique
+
+    Elle a quitte `nvme.rs` pour `nvme/suivi.rs`, qui ne touche aucun registre
+    et que `tools/platform/test_nvme_suivi.rs` fait boucler sur trois tours.
+    La regle suit le code : elle exige que le filtre soit APPLIQUE dans le
+    pilote, et que la bascule soit ECRITE dans le module qui la porte. Elle
+    n'admet pas que le pilote decide de la phase lui-meme -- ce serait revenir
+    a une logique que personne ne peut faire boucler en test.
     """
     if "pub phase: bool" not in decodage:
         fautes.append("decodage.rs : l'entree d'achevement n'expose plus sa phase.")
+
     bloc = corps(pilote, "unsafe fn achevement(&self)")
     if bloc is None:
         fautes.append("nvme.rs : la lecture d'un achevement a disparu.")
-        return
-    if "self.phase" not in bloc:
+    elif "est_neuve(" not in bloc:
         fautes.append(
             "nvme.rs : l'achevement n'est plus filtre par la phase attendue."
         )
-    avance = corps(pilote, "fn avance(&mut self)")
-    if avance is None or "!self.phase" not in avance:
+
+    avance = corps(suivi, "pub fn avance(&mut self)")
+    if avance is None:
+        fautes.append("suivi.rs : l'avancee de la file d'achevement a disparu.")
+    elif "!self.phase" not in avance:
         fautes.append(
-            "nvme.rs : la phase ne bascule plus au tour de la file ; a partir "
+            "suivi.rs : la phase ne bascule plus au tour de la file ; a partir "
             "du deuxieme tour, aucun achevement ne sera reconnu."
+        )
+
+    neuve = corps(suivi, "pub fn est_neuve(&self")
+    if neuve is None or "self.phase" not in neuve:
+        fautes.append(
+            "suivi.rs : le filtre de phase ne compare plus a la phase attendue."
         )
 
 
@@ -406,12 +431,13 @@ def regle_tampon_de_rebond(pilote, fautes):
             "nvme.rs : le tampon de rebond DMA a disparu ; le pilote deduit "
             "desormais une adresse physique d'un pointeur qu'il n'a pas alloue."
         )
-    for nom in ("fn soumet(", "fn soumet_ecriture("):
-        bloc = corps(pilote, nom)
-        if bloc is None:
-            continue
-        if "rebond_virt" not in bloc and "Vidange" not in bloc:
-            fautes.append("nvme.rs : %s ne passe plus par le tampon de rebond." % nom)
+    bloc = corps(pilote, "fn transfere(")
+    if bloc is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    elif "rebond_virt" not in bloc:
+        fautes.append(
+            "nvme.rs : transfere ne passe plus par le tampon de rebond."
+        )
 
 
 def regle_preuve_hote(test, fautes):
@@ -429,9 +455,382 @@ def regle_preuve_hote(test, fautes):
             )
 
 
+def regle_attente_sans_verrou(pilote, fautes):
+    """L'attente d'une entree-sortie ne se fait sous AUCUN verrou a
+    interruptions masquees.
+
+    # Le defaut que cette regle existe pour empecher de revenir
+
+    `soumet` prenait `ETAT` -- un `SpinLockIrq` -- et le gardait pendant TOUT
+    le transfert, attente comprise. Les interruptions restaient donc masquees
+    jusqu'a deux secondes par commande : ni tick, ni scrutation USB, ni
+    clavier, ni souris, ni trame. Un disque un peu lent devenait un gel
+    indiscernable d'un plantage, et le probe GPT emet des dizaines de
+    commandes.
+
+    Les autres coeurs payaient aussi : un renvoi de TLB emis pendant cette
+    fenetre attendait qu'elle se ferme.
+
+    # Ce qui est verifie
+
+    Trois portees, et aucune ne contient d'attente :
+
+      * `transfere` ne prend pas `ETAT` -- il lit la configuration par
+        `contexte_es`, qui rend le verrou avant de rendre la main ;
+      * `emet_es`, qui attend, ne prend aucun verrou lui-meme ;
+      * `soumet_es` et `draine_les_achevements`, qui prennent `FILES_ES`,
+        n'attendent pas.
+    """
+    transfere = corps(pilote, "fn transfere(")
+    if transfere is None:
+        fautes.append("nvme.rs : le chemin de transfert a disparu.")
+    else:
+        if "ETAT.lock()" in transfere:
+            fautes.append(
+                "nvme.rs : transfere reprend le verrou de configuration ; "
+                "l'attente redevient une attente interruptions masquees."
+            )
+        # `contexte_es(emplacement)` et non `contexte_es()` : le contexte porte
+        # les adresses DMA de SON emplacement. Exiger l'argument verifie du
+        # meme coup qu'il ne peut pas porter celles d'un autre.
+        if "contexte_es(emplacement)" not in transfere:
+            fautes.append(
+                "nvme.rs : transfere ne lit plus la configuration par "
+                "`contexte_es(emplacement)` ; soit le verrou n'est plus rendu, "
+                "soit le contexte porte les adresses d'un emplacement qu'on ne "
+                "tient pas."
+            )
+
+    emet = corps(pilote, "fn emet_es(")
+    if emet is None:
+        fautes.append("nvme.rs : l'emission d'entree-sortie a disparu.")
+    else:
+        if "attente_bornee" not in emet:
+            fautes.append(
+                "nvme.rs : emet_es n'attend plus de facon bornee."
+            )
+        if ".lock()" in emet:
+            fautes.append(
+                "nvme.rs : emet_es prend un verrou alors qu'il attend ; "
+                "c'est exactement le defaut que cette regle refuse."
+            )
+
+    for nom in ("fn soumet_es(", "fn draine_les_achevements("):
+        bloc = corps(pilote, nom)
+        if bloc is None:
+            fautes.append("nvme.rs : %s a disparu." % nom)
+            continue
+        if "attente_bornee" in bloc:
+            fautes.append(
+                "nvme.rs : %s attend en tenant le verrou des files." % nom
+            )
+
+    jeton = corps(pilote, "fn prend_le_jeton(")
+    if jeton is None:
+        fautes.append(
+            "nvme.rs : le jeton d'entree-sortie a disparu ; deux transferts "
+            "simultanes se partageraient le tampon de rebond."
+        )
+    elif "attente_bornee" not in jeton:
+        fautes.append(
+            "nvme.rs : l'attente du jeton n'est plus bornee ; un pilote bloque "
+            "bloquerait le systeme de fichiers pour toujours."
+        )
+
+
+def regle_releve_entree_sortie(pilote, fautes):
+    """Le chemin d'entree-sortie publie de quoi diagnostiquer une panne
+    physique.
+
+    Une premiere lecture qui double-faute sur une machine qu'on n'a pas ne
+    laisse RIEN derriere elle si le pilote est muet : ni l'identifiant, ni les
+    PRP, ni la sonnette ecrite, ni l'endroit exact ou il s'est arrete. Chaque
+    marqueur est publie AVANT l'operation qu'il nomme -- c'est ce qui fait que
+    le dernier marqueur imprime dit ou la machine est morte.
+    """
+    for marqueur in (
+        "NVME_IO_READ_ENTER",
+        "NVME_IO_PRP_READY",
+        "NVME_IO_SQE_READY",
+        "NVME_IO_DOORBELL",
+        "NVME_IO_CQE_OK",
+        "NVME_IO_COPY_BEGIN",
+        "NVME_IO_COPY_END",
+    ):
+        if marqueur not in pilote:
+            fautes.append(
+                "nvme.rs : le marqueur %s a disparu ; une panne physique sur "
+                "ce chemin redevient muette." % marqueur
+            )
+
+
+def regle_quarantaine(pilote, suivi, test_suivi, fautes):
+    """Une echeance depassee met la commande en QUARANTAINE, elle ne la libere pas.
+
+    # Le defaut que cette regle existe pour empecher de revenir
+
+    L'ancien chemin rendait l'identifiant au pot des qu'il cessait d'attendre,
+    et rendait le tampon de rebond a l'entree-sortie suivante. Or une echeance
+    ne dit RIEN au controleur : la commande reste la sienne, et il peut ecrire
+    dans ce tampon a n'importe quel moment ulterieur.
+
+    Deux corruptions en decoulaient, aucune observable au banc :
+
+      * en lecture, le controleur ecrasait le tampon d'une commande qui n'a
+        rien a voir, et l'appelant recevait les octets d'un autre bloc ;
+      * en ecriture, le controleur relisait un tampon deja remplace, et posait
+        sur le disque des octets qui n'appartenaient pas au bloc demande ;
+
+    et par-dessus, l'identifiant reattribue faisait prendre l'achevement de
+    l'ancienne commande pour celui de la nouvelle.
+
+    # Ce qui est verifie
+
+    Que la quarantaine existe, qu'elle ne se leve que sur l'achevement tardif
+    ou la reinitialisation, que le pilote la consulte AVANT de rendre le
+    tampon, qu'un identifiant hors domaine ne soit pas replie par modulo, et
+    que tout cela soit prouve par injection cote hote.
+    """
+    if "Quarantaine" not in suivi:
+        fautes.append(
+            "suivi.rs : l'etat de quarantaine a disparu ; une echeance rendrait "
+            "de nouveau au pot un identifiant dont le controleur se sert encore."
+        )
+        return
+
+    expire = corps(suivi, "pub fn expire(&mut self")
+    if expire is None:
+        fautes.append("suivi.rs : la mise en quarantaine a disparu.")
+    elif "EtatCid::Quarantaine" not in expire:
+        fautes.append(
+            "suivi.rs : expire ne met plus en quarantaine ; c'est exactement le "
+            "defaut que cette regle refuse."
+        )
+
+    alloue = corps(suivi, "pub fn alloue(&mut self")
+    if alloue is None or "EtatCid::Libre" not in alloue:
+        fautes.append(
+            "suivi.rs : l'attribution ne filtre plus sur l'etat libre ; un "
+            "identifiant en quarantaine redeviendrait attribuable."
+        )
+
+    range_ = corps(suivi, "pub fn range(&mut self")
+    if range_ is None:
+        fautes.append("suivi.rs : le rangement d'un achevement a disparu.")
+    else:
+        if "% CID_MAX" in range_ or "% CID_ES_MAX" in range_:
+            fautes.append(
+                "suivi.rs : un identifiant hors domaine est replie par modulo ; "
+                "il fabriquerait un achevement pour une commande bien vivante."
+            )
+        if "HorsDomaine" not in range_:
+            fautes.append(
+                "suivi.rs : un identifiant hors domaine n'est plus rejete."
+            )
+        if "Verdict::Double" not in range_:
+            fautes.append(
+                "suivi.rs : un second achevement pour le meme identifiant n'est "
+                "plus rejete ; il ecraserait le statut range."
+            )
+
+    jeton = corps(pilote, "fn prend_le_jeton(")
+    if jeton is None:
+        fautes.append("nvme.rs : le jeton d'entree-sortie a disparu.")
+    else:
+        # La question se pose PAR EMPLACEMENT depuis que les ressources sont
+        # partitionnees : `tampon_disponible(emplacement)`. Une version sans
+        # argument voudrait dire que la quarantaine est redevenue globale.
+        if "tampon_disponible(emplacement)" not in jeton:
+            fautes.append(
+                "nvme.rs : la prise d'emplacement ne demande plus si le tampon "
+                "de CET emplacement est libre ; il le rendrait a une nouvelle "
+                "commande alors que le controleur peut encore y ecrire."
+            )
+        if "REFUS_QUARANTAINE" not in jeton:
+            fautes.append(
+                "nvme.rs : le refus pour cause de quarantaine n'est plus compte ; "
+                "un disque qui cesse de servir passerait pour un disque au repos."
+            )
+        # Neutraliser la condition en la remplacant par une constante est la
+        # facon la plus courte de faire disparaitre la garde sans toucher au
+        # reste. La regle la refuse explicitement.
+        for mort in ("if false", "if true"):
+            if mort in jeton:
+                fautes.append(
+                    "nvme.rs : prend_le_jeton contient une condition constante "
+                    "(« %s ») ; une garde qui ne peut pas se declencher n'est "
+                    "pas une garde." % mort
+                )
+    disponible = corps(suivi, "pub fn tampon_disponible(&self)")
+    if disponible is None or "self.quarantaine" not in disponible:
+        fautes.append(
+            "suivi.rs : la disponibilite du tampon ne depend plus de la "
+            "quarantaine."
+        )
+
+    emet = corps(pilote, "fn emet_es(")
+    if emet is not None and "expire_es(" not in emet:
+        fautes.append(
+            "nvme.rs : l'echeance ne met plus l'identifiant en quarantaine."
+        )
+
+    # Le controleur doit etre INTERROGE, pas devine.
+    if "controleur_en_panne()" not in pilote or "registre::CSTS" not in pilote:
+        fautes.append(
+            "nvme.rs : l'echeance ne demande plus au controleur s'il est en "
+            "panne ; un disque mort et un disque lent redeviennent "
+            "indiscernables, a deux secondes par appel."
+        )
+
+    attendus = (
+        "une_echeance_ne_rend_pas_l_identifiant_au_pot",
+        "un_identifiant_en_quarantaine_n_est_jamais_reattribue",
+        "l_achevement_tardif_leve_la_quarantaine_et_rien_d_autre",
+        "un_identifiant_hors_domaine_n_est_pas_replie_par_modulo",
+        "un_second_achevement_pour_le_meme_identifiant_est_rejete",
+        "des_achevements_dans_le_desordre_vont_chacun_a_leur_emetteur",
+        "la_phase_de_la_file_d_achevement_s_inverse_au_bouclage",
+        "la_file_de_soumission_refuse_d_ecraser_une_commande_non_lue",
+        "un_achevement_arrive_juste_avant_l_echeance_n_est_pas_perdu",
+        "un_achevement_d_avant_la_reinitialisation_est_dit_perime",
+        "le_tampon_n_est_pas_disponible_tant_qu_une_quarantaine_tient",
+    )
+    for nom in attendus:
+        if nom not in test_suivi:
+            fautes.append(
+                "test_nvme_suivi.rs : le cas « %s » a disparu ; le contrat "
+                "d'achevement redevient une affirmation." % nom
+            )
+
+
+def regle_profondeur_reelle(pilote, suivi, test_suivi, fautes):
+    """Une profondeur superieure a un exige des ressources DMA PAR EMPLACEMENT.
+
+    # Le defaut que cette regle existe pour empecher
+
+    Le pilote serialisait toutes les entrees-sorties derriere un jeton unique,
+    parce que le tampon de rebond etait unique. La profondeur effective valait
+    un, quoi qu'en disent les soixante-quatre entrees de la file de soumission.
+
+    Annoncer davantage en partageant un tampon non partitionne serait pire que
+    de ne rien annoncer : deux commandes s'ecraseraient l'une l'autre, et la
+    couche bloc croirait pouvoir en emettre quatre.
+
+    # Ce qui est verifie
+
+    Que chaque emplacement porte SES ressources ; que la profondeur annoncee
+    dans le descripteur soit celle des emplacements et non une constante ; que
+    la quarantaine soit PAR EMPLACEMENT -- une commande lente ne doit pas
+    arreter les autres --, et que tout cela soit prouve cote hote.
+    """
+    if "EMPLACEMENTS_ES" not in pilote:
+        fautes.append(
+            "nvme.rs : les emplacements d'entree-sortie ont disparu ; le tampon "
+            "de rebond redevient unique et la profondeur retombe a un."
+        )
+        return
+
+    place = corps(pilote, "struct Emplacement {")
+    if place is None:
+        fautes.append("nvme.rs : la structure d'emplacement a disparu.")
+    else:
+        for champ in ("rebond_phys", "rebond_virt", "liste_phys", "liste_virt"):
+            if champ not in place:
+                fautes.append(
+                    "nvme.rs : un emplacement ne porte plus `%s` ; deux commandes "
+                    "simultanees repartageraient cette ressource." % champ
+                )
+
+    alloue = corps(pilote, "fn alloue_les_emplacements()")
+    if alloue is None or "for place in places.iter_mut()" not in alloue:
+        fautes.append(
+            "nvme.rs : les ressources ne sont plus allouees par emplacement ; "
+            "un `alloc_dma` unique recopie dans quatre cases donnerait quatre "
+            "emplacements pointant sur le MEME tampon."
+        )
+
+    descripteur = corps(pilote, "fn descripteur(&self)")
+    if descripteur is None:
+        fautes.append("nvme.rs : le descripteur de la couche bloc a disparu.")
+    elif "profondeur_file: EMPLACEMENTS_ES" not in descripteur:
+        fautes.append(
+            "nvme.rs : la profondeur annoncee a la couche bloc n'est plus celle "
+            "des emplacements. Une profondeur annoncee qu'on ne peut pas servir "
+            "est un mensonge que rien ne contredit."
+        )
+
+    quarantaine = corps(suivi, "pub fn emplacement_en_quarantaine(&self")
+    if quarantaine is None or "self.emplacement[index] == emplacement" not in quarantaine:
+        fautes.append(
+            "suivi.rs : la quarantaine n'est plus par emplacement ; une seule "
+            "commande lente suspendrait de nouveau toutes les entrees-sorties."
+        )
+
+    if "Verdict::Tardif { emplacement" not in suivi:
+        fautes.append(
+            "suivi.rs : le verdict tardif ne porte plus l'emplacement libere. "
+            "Le demander apres coup rendrait celui d'une AUTRE commande, "
+            "l'identifiant etant deja retourne au pot."
+        )
+
+    if "PROFONDEUR_MAX" not in pilote:
+        fautes.append(
+            "nvme.rs : la profondeur reellement atteinte n'est plus mesuree ; "
+            "seule la profondeur annoncee resterait, et rien ne la contredirait."
+        )
+
+    sonde = corps(pilote, "pub fn sonde_parallele()")
+    if sonde is None:
+        fautes.append(
+            "nvme.rs : la sonde de concurrence a disparu ; plus rien n'exerce "
+            "deux emplacements ensemble."
+        )
+    elif "NVME_PARALLELE_SEQUENTIEL" not in sonde:
+        fautes.append(
+            "nvme.rs : la sonde ne distingue plus une profondeur atteinte d'une "
+            "profondeur annoncee ; elle rendrait vert un pilote sequentiel."
+        )
+
+    for nom in (
+        "une_commande_lente_n_arrete_que_son_emplacement",
+        "l_achevement_tardif_nomme_l_emplacement_qu_il_libere",
+        "plusieurs_commandes_en_vol_sur_des_emplacements_distincts",
+    ):
+        if nom not in test_suivi:
+            fautes.append(
+                "test_nvme_suivi.rs : le cas « %s » a disparu." % nom
+            )
+
+
+def regle_tete_de_soumission(pilote, suivi, fautes):
+    """La tete que le controleur publie est LUE, et la file refuse de deborder.
+
+    Chaque achevement porte la tete de la file de soumission telle que le
+    controleur la voit. Un pilote qui ne la lit pas ne sait pas combien de
+    places restent : a profondeur un le probleme ne se voit pas, et c'est
+    precisement pourquoi il faut le traiter avant d'y toucher.
+    """
+    if "tete_vue(" not in pilote:
+        fautes.append(
+            "nvme.rs : la tete de soumission publiee par le controleur n'est "
+            "plus lue ; la file de soumission n'a plus de compte de places."
+        )
+    pose = corps(suivi, "pub fn pose(&mut self)")
+    if pose is None or "places()" not in pose:
+        fautes.append(
+            "suivi.rs : la file de soumission ne verifie plus ses places ; "
+            "elle ecraserait une commande que le controleur n'a pas lue."
+        )
+    soumet = corps(pilote, "fn soumet_es(")
+    if soumet is None or "soumission-pleine" not in soumet:
+        fautes.append(
+            "nvme.rs : soumet_es ne refuse plus une file pleine."
+        )
+
+
 def main():
     fautes = []
-    for chemin in (PILOTE, DECODAGE, TEST, MINUTERIE):
+    for chemin in (PILOTE, DECODAGE, TEST, MINUTERIE, SUIVI, TEST_SUIVI):
         if not chemin.exists():
             fautes.append("fichier absent : %s" % chemin.relative_to(RACINE).as_posix())
     if fautes:
@@ -443,6 +842,8 @@ def main():
     decodage = sans_commentaires(DECODAGE.read_text(encoding="utf-8"))
     test = TEST.read_text(encoding="utf-8")
     minuterie = sans_commentaires(MINUTERIE.read_text(encoding="utf-8"))
+    suivi = sans_commentaires(SUIVI.read_text(encoding="utf-8"))
+    test_suivi = TEST_SUIVI.read_text(encoding="utf-8")
 
     regle_foulee_sonnette(pilote, decodage, fautes)
     regle_blocs_decales(decodage, fautes)
@@ -451,7 +852,12 @@ def main():
     regle_bornes(pilote, fautes)
     regle_vidange_honnete(pilote, fautes)
     regle_attente_hors_irq(pilote, minuterie, fautes)
-    regle_phase(pilote, decodage, fautes)
+    regle_attente_sans_verrou(pilote, fautes)
+    regle_releve_entree_sortie(pilote, fautes)
+    regle_phase(pilote, decodage, suivi, fautes)
+    regle_quarantaine(pilote, suivi, test_suivi, fautes)
+    regle_tete_de_soumission(pilote, suivi, fautes)
+    regle_profondeur_reelle(pilote, suivi, test_suivi, fautes)
     regle_interruption_non_armee(decodage, fautes)
     regle_tampon_de_rebond(pilote, fautes)
     regle_preuve_hote(test, fautes)
@@ -463,7 +869,10 @@ def main():
         return 1
     print(
         "nvme : foulee lue dans CAP, NLB decale de un, liste PRP au-dela de "
-        "deux pages, taille de bloc lue sur le disque, bornes des deux cotes"
+        "deux pages, taille de bloc lue sur le disque, bornes des deux cotes, "
+        "attente hors de tout verrou a interruptions masquees, releve "
+        "d'entree-sortie complet, echeance mise en quarantaine et non rendue "
+        "au pot, tete de soumission lue, ressources DMA par emplacement"
     )
     return 0
 

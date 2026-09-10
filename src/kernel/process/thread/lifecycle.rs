@@ -259,6 +259,80 @@ pub fn run(mut first: Box<Task>) -> i32 {
     code
 }
 
+/// Lance un fil noyau et rend la main AUSSITOT.
+///
+/// # Pourquoi `run_noyau` ne suffisait pas
+///
+/// `run_noyau` commute VERS la tache et ne revient qu'a sa mort : c'est ce
+/// qu'il faut pour le bureau, qui est le fil principal, et c'est inutilisable
+/// pour tout le reste. Le montage du disque interne etait donc appele EN LIGNE
+/// depuis la boucle de trames du compositeur -- sur SA pile, dans SON quantum.
+///
+/// Les consequences etaient toutes du meme genre : ce que fait le disque, le
+/// bureau le subit. Une commande lente est une trame perdue ; une faute dans le
+/// chemin de stockage est un bureau mort ; et la profondeur de pile du montage
+/// s'ajoute a celle du compositeur, qui est deja la plus longue chaine du
+/// systeme.
+///
+/// Une tache lancee ici a SA pile, SON quantum et SA priorite. Le bureau ne la
+/// voit plus.
+///
+/// Rend `false` si le processus ou la tache n'ont pas pu etre crees. L'appelant
+/// decide alors -- faire le travail sur place vaut souvent mieux que ne pas le
+/// faire du tout, et c'est a lui de le savoir.
+pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
+    spawn_noyau_priorite(entree, nom, Priorite::Normale)
+}
+
+/// Lance un travailleur noyau avec une priorite CHOISIE.
+///
+/// `spawn_noyau` fixe `Normale`, et c'est le bon defaut pour un travail de
+/// fond. Mais une priorite qui n'est jamais demandee autrement que par defaut
+/// ne peut pas etre mise a l'epreuve : sans deux classes reellement en
+/// concurrence, rien ne dit si `Interactive` change une decision ou n'est
+/// qu'une etiquette.
+pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
+    // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
+    //
+    // `run_noyau` en prend un parce qu'il COMMUTE : il touche l'etat du coeur
+    // courant, la tache courante et la pile noyau du moment. Lancer une tache
+    // ne touche rien de tout cela.
+    //
+    // `new_process` se protege par ses propres verrous -- l'espace
+    // d'adressage, la table des processus, les champs du descripteur -- et
+    // `register` prend ce qu'il lui faut. Une tache non enregistree n'est
+    // visible de personne : il n'y a rien a serialiser entre les deux.
+    //
+    // Le garde-fou des budgets compte les sites du gros verrou par
+    // sous-systeme, et il a refuse ce lot tant que celui-ci en ajoutait un
+    // quatrieme au domaine Processus. Il avait raison : un site rajoute dans
+    // un sous-systeme qu'on allege annule le travail sans echouer a aucun test.
+    let Some(process) = new_process(nom, 0) else {
+        return false;
+    };
+    let mut task = Task::new_kernel(process, entree);
+    // NORMALE, ET C'EST LE POINT.
+    //
+    // Interactive la mettrait a egalite avec le bureau, qu'elle est justement
+    // censee cesser de deranger. Un travail de fond est un travail de fond.
+    task.priorite.range(priorite);
+    // MIGRABLE, PARCE QU'UN TRAVAILLEUR DE FOND N'A PAS DE COEUR A LUI.
+    //
+    // `register` epingle par defaut toute tache noyau au coeur zero. Pour un
+    // travail de fond, cette regle produit exactement l'inverse de ce qu'on
+    // veut : la tache est creee, enregistree, visible -- et jamais elue, des
+    // que le coeur zero n'est pas lui-meme dans l'ordonnanceur. Le fil de
+    // montage l'a montre sur un demarrage sans bureau : `on=-1`, trois coeurs
+    // au repos a cote, et rien.
+    //
+    // Rien dans un travailleur lance par cette fonction ne depend du coeur
+    // zero : il n'a ni pile heritee, ni etat local de coeur, ni contexte
+    // d'appelant. Il se declare donc migrable.
+    task.migrable = true;
+    register(task);
+    true
+}
+
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();

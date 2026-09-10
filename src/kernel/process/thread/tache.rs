@@ -70,6 +70,17 @@ pub struct Task {
     pub fresh: bool,
     pub ticks_cpu: EcheanceAtomique,
     pub noyau: bool,
+    /// Cette tache noyau peut-elle etre executee par un autre coeur que le zero ?
+    ///
+    /// Faux par defaut, et ce defaut n'est pas de la prudence de facade : les
+    /// taches noyau historiques -- le bureau au premier rang -- supposent le
+    /// coeur zero, et leur affinite est ecrite en dur a l'enregistrement.
+    ///
+    /// Le mettre a vrai est une DECLARATION : ce travail ne depend d'aucun
+    /// etat propre au coeur zero. Un travailleur ainsi marque peut etre pris
+    /// par n'importe quel coeur en ligne, ce qui est la seule facon qu'il ait
+    /// de tourner quand le coeur zero n'est pas, lui, dans l'ordonnanceur.
+    pub migrable: bool,
     entree_noyau: Option<fn() -> !>,
 }
 

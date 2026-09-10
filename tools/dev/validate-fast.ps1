@@ -89,6 +89,7 @@ try {
     Invoke-RustTest "cout des frames possedees" "tools\smp\test_pages_possedees.rs"
     Invoke-RustTest "RSS incremental et grappes MM" "tools\smp\test_rss_incremental.rs"
     Invoke-RustTest "cache de pages propres" "tools\smp\test_cache_pages.rs"
+    Invoke-RustTest "tas par pages + dalles C9" "tools\smp\test_tas_pages.rs" -SingleThread
     Invoke-RustTest "discipline du gros verrou" "tools\smp\test_discipline_bkl.rs"
     Invoke-RustTest "ordre des verrous du cache" "tools\smp\test_ordre_verrous.rs"
 

@@ -19,6 +19,8 @@ pub mod frame_cache;
 pub mod memory_pressure;
 #[path = "debug/dmesg.rs"]
 pub mod dmesg;
+#[path = "debug/blackbox.rs"]
+pub mod blackbox; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
 #[path = "process/elf.rs"]
 pub mod elf;
 #[path = "process/loader/mod.rs"]
@@ -39,6 +41,8 @@ pub mod compagnon;
 pub mod dma_compagnon;
 #[path = "memory/pages_tas.rs"]
 pub mod pages_tas;
+#[path = "memory/dalles_tas.rs"]
+pub mod dalles_tas;
 #[path = "memory/arene_dma.rs"]
 pub mod arene_dma;
 pub mod input;

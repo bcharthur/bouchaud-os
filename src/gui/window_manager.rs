@@ -540,9 +540,11 @@ fn boucle() {
     while !quit {
         tours = tours.saturating_add(1);
         // Le bureau est peint depuis deux tours : la persistance peut etre
-        // tentee. Une seule fois, et bornee par le pilote bloc.
+        // tentee. Dans SON PROPRE FIL -- ce qui suit ne doit rien attendre du
+        // disque, et une faute dans le chemin de stockage ne doit pas emporter
+        // le compositeur avec elle.
         if tours == 3 {
-            crate::platform::pc::installation::execute_le_montage_differe();
+            crate::platform::pc::installation::lance_le_montage_differe();
         }
         // BOUCHAUD_GUI_EVENT_DRIVEN_V1
         //
@@ -555,7 +557,22 @@ fn boucle() {
         reveil::note_tour();
         task::note_wm_heartbeat();
         // BOUCHAUD_XHCI_HID_POLL_V3: polling bootstrap, remplace plus tard par MSI-X.
-        crate::drivers::xhci_active::poll();
+        //
+        // L'ENTREE N'EST PLUS LUE A LA CADENCE DU RENDU.
+        //
+        // Cet appel etait le SEUL : une trame longue n'arrivait donc pas a
+        // ralentir le pointeur, elle l'arretait. Sur la machine de reference,
+        // les cinq premieres secondes du bureau tournaient a une trame par
+        // seconde -- et la souris etait lue une fois par seconde avec elles.
+        //
+        // Le fil d'entree scrute maintenant toutes les millisecondes, elu par
+        // le tick et non par la fin d'une trame. Cet appel ne subsiste que
+        // pour le cas ou le fil n'a pas pu etre cree : `poll()` est borne, ne
+        // bloque pas, et se protege deja de la reentrance -- le remettre ici
+        // ne fige rien, contrairement a un montage de disque.
+        if !crate::drivers::xhci_active::fil_hid_actif() {
+            crate::drivers::xhci_active::poll();
+        }
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----

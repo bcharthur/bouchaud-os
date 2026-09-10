@@ -177,6 +177,19 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // fichiers peut alors parler a un VOLUME plutot qu'a une nappe, et un
     // pilote NVMe s'ajoutera en s'enregistrant, sans qu'un appelant change.
     drivers::ata_bloc::installe();
+    // LE DISQUE INTERNE NE DEPEND PAS DU MICROLOGICIEL QUI NOUS A DEMARRES.
+    //
+    // Le NVMe n'etait mis en service que sur le chemin UEFI du bureau de
+    // reference. Un demarrage BIOS -- celui de TOUTES les campagnes QEMU --
+    // n'initialisait donc jamais le pilote. Il n'etait execute que sur la
+    // machine physique, ou il a double-faute : un pilote qui ne tourne que la
+    // ou l'on ne peut pas l'observer n'a pas de preuve, il a des temoignages.
+    //
+    // Le montage de la partition est DEMANDE, pas fait : il part dans son
+    // propre fil une fois le bureau peint. Voir `installation::differe_le_montage`.
+    if drivers::nvme::bring_up() {
+        platform::pc::installation::differe_le_montage();
+    }
     fs::tar::mount_data_disk();
     // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
     // un fichier persistant doit pouvoir remplacer celui que l'archive depose,
@@ -205,6 +218,28 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // qu'aucune tache n'est enregistree ils restent en HLT et ne touchent
     // ni le tas ni les structures historiques.
     arch::x86_64::smp::enable_scheduler();
+
+    // LA PERSISTANCE NE DEPEND PAS DU BUREAU GRAPHIQUE.
+    //
+    // Le montage differe n'avait qu'un seul declencheur : la troisieme trame
+    // du compositeur. Un demarrage sans bureau -- celui du shell interactif,
+    // celui de toutes les campagnes QEMU en mode serie -- armait donc le
+    // drapeau et ne le consommait JAMAIS. Le journal disait
+    // `BOUCHAUD_NVME_PERSISTENCE_DEFERRED`, puis plus rien, indefiniment.
+    //
+    // Le defaut n'est pas seulement un scenario de campagne muet : sur une
+    // machine ou le bureau ne demarre pas, la persistance restait absente
+    // sans qu'aucune ligne ne dise pourquoi.
+    //
+    // Le lancement appartient donc a l'amorcage, ici, des que l'ordonnanceur
+    // peut faire tourner une tache -- et pas une trame plus tard. L'appel du
+    // compositeur reste en place : il ne fait plus rien quand celui-ci a deja
+    // eu lieu (`montage_differe_en_attente`), et rattrape le cas ou la tache
+    // n'a pas pu etre creee a cet instant precis.
+    platform::pc::installation::lance_le_montage_differe();
+    // Voir la note d'amorcage equivalente dans `stage2.rs` : l'entree ne doit
+    // pas dependre de la cadence du rendu.
+    drivers::xhci_active::demarre_le_fil_hid();
 
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.

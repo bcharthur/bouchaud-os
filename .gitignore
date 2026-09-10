@@ -142,3 +142,44 @@ tools/ladybird/certs/cacert.pem
 /scenario-m9/usr/libexec/ladybird/WebContent
 /scenario-m9/usr/libexec/ladybird/WebDriver
 /scenario-m9/usr/libexec/ladybird/WebWorker
+
+# ============================================================
+# Sorties des campagnes QEMU lancees a la main
+# ============================================================
+#
+# Les scenarios de `tools/ci/run_*.sh` ecrivent leurs images, leurs scenarios
+# et leurs rapports A LA RACINE du depot. En CI cela n'a aucune consequence --
+# le poste est jete apres le run --, mais quiconque reproduit une campagne en
+# local se retrouve avec une dizaine d'artefacts non suivis, dont des images de
+# plusieurs dizaines de mebioctets. Le risque n'est pas le desordre : c'est
+# qu'un `git add -A` les emporte.
+#
+# Tous sont REGENERABLES par le script nomme en regard. Aucun n'est une source.
+#
+# La campagne ajoutee dans ce lot, `run_usb_stockage.sh`, ecrit sous `target/`
+# et n'a donc rien a declarer ici : c'est la bonne habitude pour les suivantes.
+
+# run_system_health.sh
+/health-report.json
+/health-scenario/
+/health.img
+# run_mm_ng6.sh
+/mm-ng6.img
+/mmstress
+/mmstress.readelf.txt
+/mmstress.sha256
+/scenario/
+# run_os_primitives.sh
+/primitives.img
+/scenario-primitives/
+# run_usb_arbre.sh
+/usb-arbre.img
+/usb-arbre-scenario/
+# run_usb_branchement.sh
+/usb-branchement.img
+/usb-branchement-scenario/
+# run_ladybird_browser_host.sh
+/scenario-browser-host/
+/ladybird-browser-host.img
+# run_native_ipc_probe.sh (l'image vit sous target/, le scenario non)
+/scenario-native-ipc/

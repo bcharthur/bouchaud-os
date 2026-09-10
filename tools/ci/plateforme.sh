@@ -56,17 +56,26 @@ bouchaud_machine_args() {
     esac
 }
 
-# Un disque NVMe, quand le profil le permet.
+# Un disque NVMe.
 #
-# NVMe n'existe pas sur i440fx : le demander y ferait echouer QEMU au lancement,
-# ce qui se lirait comme une regression du noyau alors que c'est la machine qui
-# ne sait pas.
+# # Ce que cette fonction refusait, et qui la rendait inutilisable
+#
+# Elle ne rendait un disque que sur q35, au motif que « NVMe n'existe pas sur
+# i440fx ». C'etait faux : le peripherique `nvme` de QEMU est un peripherique
+# PCI, et il s'attache aussi bien au bus hérité d'i440fx -- il y perd ses
+# fonctions PCIe, pas sa capacite a servir des blocs.
+#
+# La consequence de cette croyance etait qu'aucune campagne n'attachait de
+# disque, puisque toutes tournent sur `pc` : la fonction n'avait aucun appelant
+# et le pilote NVMe n'etait execute NULLE PART. Une restriction inventee avait
+# donc supprime la seule preuve d'execution possible.
+#
+# Le disque est desormais rendu quelle que soit la machine. Celui qui veut
+# eprouver le chemin PCIe demande q35 ; celui qui veut eprouver le PILOTE prend
+# la machine qui demarre.
 bouchaud_nvme_args() {
     local image=$1
-    case "$BOUCHAUD_MACHINE" in
-        q35) printf '%s' "-drive format=raw,file=$image,if=none,id=nvm0 -device nvme,serial=bouchaud0,drive=nvm0" ;;
-        *) printf '%s' "" ;;
-    esac
+    printf '%s' "-drive format=raw,file=$image,if=none,id=nvm0 -device nvme,serial=bouchaud0,drive=nvm0"
 }
 
 bouchaud_profil_resume() {

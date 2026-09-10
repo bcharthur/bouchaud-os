@@ -51,6 +51,7 @@ impl Task {
             fresh: true,
             ticks_cpu: EcheanceAtomique::neuf(0),
             noyau: false,
+            migrable: false,
             entree_noyau: None,
         });
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);
@@ -272,10 +273,29 @@ fn publish_ready(index: usize) {
 pub fn register(mut task: Box<Task>) -> usize {
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     let _kernel = smp_lock::enter();
-    if task.noyau {
+    if task.noyau && !task.migrable {
+        // Les taches noyau historiques supposent le coeur zero, et rien ne
+        // dit qu'elles y survivraient ailleurs. Le defaut reste donc leur
+        // comportement d'avant, a la lettre.
         task.affinity_mask = 1;
         task.runq_cpu.range(0);
         task.last_cpu.range(0);
+    } else if task.noyau {
+        // UN TRAVAILLEUR NOYAU EPINGLE AU COEUR ZERO NE TOURNE PAS SI LE
+        // COEUR ZERO N'EST PAS DANS L'ORDONNANCEUR.
+        //
+        // C'est exactement ce qui arrivait au fil de montage sur un demarrage
+        // sans bureau : la tache etait creee, enregistree, visible dans
+        // `[SMP-TASK]` avec `on=-1`, et n'etait jamais elue. Le coeur zero
+        // tenait la boucle interactive hors de toute tache ; les trois autres
+        // coeurs, eux, tournaient a vide, interdits de la prendre par un
+        // masque d'affinite valant un.
+        //
+        // Une tache qui se declare migrable est donc placee comme n'importe
+        // quelle autre : sur le coeur le moins charge parmi ceux en ligne.
+        task.affinity_mask = online_affinity_mask();
+        task.runq_cpu.range(choose_runq_cpu(task.affinity_mask));
+        task.last_cpu.range(u8::MAX);
     } else {
         if task.affinity_mask == 0 {
             task.affinity_mask = online_affinity_mask();

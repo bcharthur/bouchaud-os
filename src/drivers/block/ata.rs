@@ -126,7 +126,13 @@ fn wait_not_busy() -> bool {
     let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut tours = 0u64;
     loop {
-        if unsafe { inb(STATUS) } & ST_BUSY == 0 {
+        let status = unsafe { inb(STATUS) };
+        // Le bus s'est mis a flotter : le controleur a disparu du bus, ou n'y
+        // a jamais ete. Attendre cinq secondes n'y changera rien.
+        if status == 0xFF {
+            return false;
+        }
+        if status & ST_BUSY == 0 {
             return true;
         }
         tours += 1;
@@ -152,6 +158,9 @@ fn wait_data_ready() -> bool {
     let mut tours = 0u64;
     loop {
         let status = unsafe { inb(STATUS) };
+        if status == 0xFF {
+            return false;
+        }
         if status & (ST_ERR | ST_DF) != 0 {
             return false;
         }
@@ -229,8 +238,41 @@ fn etat_controleur() -> (u8, u8) {
 }
 
 /// Interroge un disque par IDENTIFY et renvoie sa taille en secteurs.
+/// Le bus flotte-t-il, faute de quiconque pour le tenir ?
+///
+/// # Ce que cette question a coute de ne pas etre posee
+///
+/// Un statut a zero veut dire « ce port existe, aucun disque dessus ». Un
+/// statut a 0xFF veut dire tout autre chose : PERSONNE ne tient les lignes.
+/// Il n'y a pas de controleur du tout -- c'est le cas d'une machine q35, qui
+/// n'a pas d'IDE herite.
+///
+/// Le pilote ne distinguait pas les deux. Sur q35, il emettait donc IDENTIFY
+/// dans le vide, puis attendait la fin d'une occupation que rien ne
+/// terminerait jamais : cinq secondes de budget, deux attentes par disque,
+/// deux disques. VINGT SECONDES de demarrage immobile, mesurees dans le
+/// journal serie entre `sysroot:` et `ata:`, sur une machine qui n'a aucun
+/// disque IDE a trouver.
+///
+/// Une ligne haute est une reponse immediate, et elle etait la depuis le
+/// debut.
+#[inline]
+fn bus_flottant() -> bool {
+    unsafe { inb(STATUS) == 0xFF }
+}
+
 fn identify(drive: Drive) -> u64 {
+    // AVANT toute ecriture : si personne ne tient le bus, il n'y a rien a
+    // selectionner et rien a attendre.
+    if bus_flottant() {
+        return 0;
+    }
     select(drive);
+    // Et apres la selection : le disque choisi peut etre absent alors que
+    // l'autre repond.
+    if bus_flottant() {
+        return 0;
+    }
     unsafe {
         outb(SECTOR_COUNT, 0);
         outb(LBA_LOW, 0);

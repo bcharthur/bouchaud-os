@@ -19,6 +19,8 @@
 //! d'une vraie horloge est un test qui echoue un jour sur dix et qu'on finit
 //! par desactiver.
 
+extern crate alloc;
+
 #[path = "../../src/net/transport/retransmission.rs"]
 mod retransmission;
 

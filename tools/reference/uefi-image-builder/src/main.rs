@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 const MIB: u64 = 1024 * 1024;
 const FAT_MIN_HEADROOM: u64 = 64 * MIB;
+const BLACKBOX_PARTITION_BYTES: u64 = 32 * MIB; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
 
 fn round_up_mib(value: u64) -> u64 { ((value + MIB - 1) / MIB) * MIB }
 
@@ -77,7 +78,10 @@ fn create_large_uefi_fat(
 fn create_gpt_disk(fat_image: &Path, output: &Path) -> Result<(), Box<dyn Error>> {
     let mut disk = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(output)?;
     let partition_size = fs::metadata(fat_image)?.len();
-    let disk_size = partition_size.checked_add(1024 * 64).ok_or("taille GPT overflow")?;
+    let disk_size = partition_size
+        .checked_add(BLACKBOX_PARTITION_BYTES)
+        .and_then(|v| v.checked_add(1024 * 128))
+        .ok_or("taille GPT/BLACKBOX overflow")?;
     disk.set_len(disk_size)?;
     let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from((disk_size / 512) - 1).unwrap_or(0xFF_FF_FF_FF));
     mbr.overwrite_lba0(&mut disk)?;
@@ -85,8 +89,22 @@ fn create_gpt_disk(fat_image: &Path, output: &Path) -> Result<(), Box<dyn Error>
     let mut table = gpt::GptConfig::new().writable(true).initialized(false).logical_block_size(block_size).create_from_device(Box::new(&mut disk), None)?;
     table.update_partitions(Default::default())?;
     let id = table.add_partition("boot", partition_size, gpt::partition_types::EFI, 0, None)?;
+    let blackbox_id = table.add_partition(
+        "BOUCHAUD-BLACKBOX",
+        BLACKBOX_PARTITION_BYTES,
+        gpt::partition_types::LINUX_FS,
+        0,
+        None,
+    )?;
     let partition = table.partitions().get(&id).ok_or_else(|| io::Error::new(io::ErrorKind::Other, "partition EFI absente apres creation"))?;
     let start = partition.bytes_start(block_size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("offset partition EFI invalide: {e:?}")))?;
+    let blackbox = table.partitions().get(&blackbox_id).ok_or_else(|| io::Error::new(io::ErrorKind::Other, "partition BLACKBOX absente apres creation"))?;
+    println!(
+        "BOUCHAUD_BLACKBOX_PARTITION first_lba={} last_lba={} bytes={}",
+        blackbox.first_lba,
+        blackbox.last_lba,
+        (blackbox.last_lba - blackbox.first_lba + 1) * 512,
+    );
     table.write()?;
     disk.seek(io::SeekFrom::Start(start))?;
     io::copy(&mut File::open(fat_image)?, &mut disk)?;

@@ -214,7 +214,7 @@ pub const COMMANDS: &[&str] = &[
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
-    "smoltest",
+    "smoltest", "nvme-parallele", "sched-latence",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
@@ -866,6 +866,18 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
         "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
         "smoltest" => { crate::net::smoltest_cmd(argc, &argv); 0 }
+        // Emet des lectures NVMe depuis PLUSIEURS taches et publie la
+        // profondeur de file reellement atteinte. Partitionner les ressources
+        // DMA rend une profondeur superieure a un possible ; seul un appelant
+        // concurrent la rend atteinte.
+        "nvme-parallele" => { crate::drivers::nvme::sonde_parallele(); 0 }
+        // Met les deux classes d'ordonnancement en concurrence reelle et
+        // compare leurs centiles. Une priorite ne se voit que sous contention.
+        "sched-latence" => {
+            let bruleurs = if argc >= 2 { argv[1].parse::<usize>().unwrap_or(8) } else { 8 };
+            crate::kernel::scheduler::sonde_latence::execute_avec(bruleurs);
+            0
+        }
         "tls-selftest" => { crate::net::tls::selftest(); 0 }
         "expr-selftest" => { c::expr_selftest(); 0 }
         "wasm" => c::wasm(argc, &argv, *cwd),

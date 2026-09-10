@@ -36,12 +36,33 @@
 //! pas encore. La file d'emission est ce qui rend cette suite possible ; la
 //! faire sans elle serait un reglage, pas un algorithme.
 //!
-//! # Sans allocation
+//! # Sans allocation PAR PAQUET, et sur le TAS et non la pile
 //!
-//! La file est un tableau de taille fixe. Une pile reseau qui alloue par
-//! paquet alloue depuis un gestionnaire d'interruption, et une allocation qui
-//! descend dans le backing global y coute plus cher que le paquet ne rapporte.
+//! Une pile reseau qui alloue par paquet alloue depuis un gestionnaire
+//! d'interruption, et une allocation qui descend dans le backing global y coute
+//! plus cher que le paquet ne rapporte. La file reste donc de taille fixe et
+//! n'alloue rien apres l'ouverture de la connexion.
+//!
+//! Elle vit en revanche sur le TAS, et cette correction n'est pas cosmetique.
+//! `SEGMENTS_MAX` segments de `CHARGE_MAX` octets font quatre-vingt-treize
+//! kibioctets. Tant que la file etait un tableau EN LIGNE, `Emission` faisait
+//! cette taille, et `tcp::fetch` -- qui en pose une sur sa pile -- reservait
+//! une trame de quatre-vingt-dix-sept kibioctets.
+//!
+//! La pile noyau d'une tache en fait SOIXANTE-QUATRE. Le prologue de `fetch`
+//! sortait donc `RSP` de la pile AVANT d'executer la moindre instruction du
+//! corps, puis la remise a zero de la file ecrivait trente kibioctets dans ce
+//! qui precede la pile en memoire. Le symptome est un DOUBLE FAULT : la
+//! premiere faute survient sur une pile qui n'existe plus, et le processeur ne
+//! peut plus empiler de quoi la traiter.
+//!
+//! Une seule allocation, a l'ouverture de la connexion, suffit a l'eviter.
+//! `tools/mesure-pile-noyau.py` mesure la trame et le refuse si elle revient.
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Segments en vol suivis simultanement.
@@ -125,7 +146,10 @@ pub enum Expiration {
 
 /// L'etat d'emission d'une connexion.
 pub struct Emission {
-    file: [SegmentEnVol; SEGMENTS_MAX],
+    /// La file, sur le TAS. Voir l'en-tete du module : en ligne, elle faisait
+    /// d'`Emission` un objet de quatre-vingt-treize kibioctets, et de toute
+    /// pile qui en portait une une pile debordee.
+    file: Box<[SegmentEnVol]>,
     /// Plus petit numero de sequence non acquitte.
     pub snd_una: u32,
     /// Prochain numero de sequence a emettre.
@@ -157,9 +181,13 @@ impl Default for Emission {
 }
 
 impl Emission {
-    pub const fn neuve(isn: u32) -> Self {
+    /// Ouvre un etat d'emission.
+    ///
+    /// N'est plus `const` : la file est allouee. C'est l'unique allocation de
+    /// toute la vie de la connexion -- le chemin par paquet n'en fait aucune.
+    pub fn neuve(isn: u32) -> Self {
         Self {
-            file: [SegmentEnVol::vide(); SEGMENTS_MAX],
+            file: vec![SegmentEnVol::vide(); SEGMENTS_MAX].into_boxed_slice(),
             snd_una: isn,
             snd_nxt: isn,
             srtt_ms: 0,

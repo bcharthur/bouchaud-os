@@ -42,4 +42,17 @@ pub fn browser_report(pid: u32, silence_ms: u64) {
     crate::kernel::frame_cache::log_stats();
     crate::kernel::memory_pressure::log_stats();
     crate::kernel::clean_page_cache::log_ng_stats();
+    // Le stockage USB ne dit rien tant qu'aucun support n'a ete trouve : une
+    // ligne vide a chaque rapport rendrait la trace serie illisible sur une
+    // machine qui n'a pas de cle branchee.
+    crate::drivers::xhci_active::log_stockage();
+    // Le disque interne : `occupes` non nul chiffre la contention du tampon de
+    // rebond unique, et c'est l'argument pour en avoir plusieurs.
+    crate::drivers::nvme::log_stats();
+    // Une persistance demandee et jamais montee ne doit pas etre silencieuse :
+    // c'est le seul endroit ou un systeme sous pression le dit.
+    let refuses = crate::platform::pc::installation::montages_refuses();
+    if refuses != 0 {
+        crate::serial_println!("[PERSISTANCE] montages_refuses={}", refuses);
+    }
 }

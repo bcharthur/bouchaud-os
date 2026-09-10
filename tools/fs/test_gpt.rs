@@ -472,3 +472,109 @@ fn un_disque_vierge_n_a_pas_de_table() {
     let mut disque = Disque::neuf(1000, 512);
     assert_eq!(lit_table(&mut disque), Err(Erreur::TableAbsente));
 }
+
+// ---------------------------------------------------------------------------
+// La table ecrite par un OUTIL QUI NE PARTAGE PAS CE CODE
+// ---------------------------------------------------------------------------
+//
+// Les cas precedents ecrivent puis relisent avec le meme code. Ils prouvent que
+// ce code est d'accord avec lui-meme -- ce qui n'est pas rien, mais ce qui
+// laisse passer TOUTES les fautes de format : l'ordre mixte des octets d'un
+// GUID, la somme calculee sur une en-tete dont le champ de somme n'a pas ete
+// mis a zero, l'en-tete de secours placee au mauvais bloc. Un aller-retour dans
+// le meme code les reproduit a l'identique des deux cotes, et le test passe.
+//
+// `tools/ci/fabrique-disque-gpt.py` ecrit la meme table SANS partager une ligne
+// avec le noyau. Ce qui est relu ici est donc une table produite par quelqu'un
+// d'autre : c'est exactement la situation d'un disque partitionne par un outil
+// tiers, et c'est le seul cas qui puisse attraper ces fautes-la.
+//
+// L'image est fabriquee par `run_host_tests.sh`, qui publie son chemin dans
+// `BO_DISQUE_GPT`. Sans elle le cas est SAUTE et le dit : un cas qui reussit
+// silencieusement quand son entree manque ne prouve plus rien.
+
+/// Le disque fabrique par l'outil independant, s'il est la.
+fn disque_independant() -> Option<Disque> {
+    let chemin = std::env::var("BO_DISQUE_GPT").ok()?;
+    let octets = std::fs::read(&chemin).ok()?;
+    if octets.is_empty() {
+        return None;
+    }
+    Some(Disque {
+        taille_bloc: 512,
+        octets,
+        vidanges: 0,
+        refuse: Vec::new(),
+    })
+}
+
+#[test]
+fn une_table_ecrite_par_un_autre_outil_est_lue_correctement() {
+    let Some(mut disque) = disque_independant() else {
+        eprintln!(
+            "SAUTE : BO_DISQUE_GPT absent. Fabriquer l'image avec \
+             `python3 tools/ci/fabrique-disque-gpt.py <chemin>` et exporter la \
+             variable, comme le fait tools/ci/run_host_tests.sh."
+        );
+        return;
+    };
+
+    let (partitions, degradee) = lit_table(&mut disque).expect("table GPT lisible");
+    assert!(
+        !degradee,
+        "l'en-tete primaire n'a pas ete acceptee : la somme de controle ou sa \
+         position ne correspondent pas a ce qu'un outil tiers ecrit"
+    );
+    let systeme = partitions
+        .iter()
+        .find(|p| p.type_guid == TYPE_SYSTEME_BOUCHAUD)
+        .expect(
+            "la partition Bouchaud n'a pas ete reconnue : l'ordre mixte des \
+             octets du GUID differe entre l'ecrivain et le lecteur",
+        );
+    assert!(
+        systeme.premier >= 34,
+        "la partition commence a {}, avant la fin de la table",
+        systeme.premier
+    );
+    assert!(
+        systeme.dernier > systeme.premier,
+        "la partition est vide ou inversee : {}..{}",
+        systeme.premier,
+        systeme.dernier
+    );
+    assert!(
+        systeme.blocs() > 1000,
+        "la partition ne fait que {} blocs",
+        systeme.blocs()
+    );
+}
+
+/// L'en-tete de SECOURS de l'outil independant est lisible elle aussi.
+///
+/// C'est la moitie qu'on oublie : elle vit au DERNIER bloc, sa table est
+/// ailleurs, et ses champs `mon_lba`/`autre_lba` sont echanges. Une
+/// implementation qui recopie l'en-tete primaire telle quelle produit un
+/// secours que personne ne peut utiliser -- et personne ne s'en apercoit tant
+/// que le primaire tient.
+#[test]
+fn le_secours_ecrit_par_un_autre_outil_est_utilisable() {
+    let Some(mut disque) = disque_independant() else {
+        eprintln!("SAUTE : BO_DISQUE_GPT absent.");
+        return;
+    };
+    // Le primaire est efface : seul le secours peut encore repondre.
+    let taille = disque.taille_bloc();
+    let vide = vec![0u8; taille];
+    assert!(disque.ecrit(1, &vide));
+
+    let (partitions, degradee) =
+        lit_table(&mut disque).expect("le secours doit prendre le relais");
+    assert!(degradee, "la lecture par le secours doit se declarer degradee");
+    assert!(
+        partitions
+            .iter()
+            .any(|p| p.type_guid == TYPE_SYSTEME_BOUCHAUD),
+        "le secours ne decrit pas la meme partition que le primaire"
+    );
+}

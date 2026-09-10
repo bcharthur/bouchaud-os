@@ -60,7 +60,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use linked_list_allocator::LockedHeap;
 use crate::arch::x86_64::smp;
 use crate::kernel::magasin::{self, Depot, Magasin, LOT};
-use crate::kernel::pages_tas;
+use crate::kernel::{dalles_tas, pages_tas};
 use x86_64::instructions::interrupts;
 
 pub const BOOTSTRAP_SIZE: usize = 8 * 1024 * 1024;
@@ -496,9 +496,7 @@ unsafe fn deverse_vers_depot(index: usize, size: usize) -> Option<Magasin> {
 /// la classe 1024 ne donnerait que quatre blocs, soit une descente tous les
 /// quatre objets ; `LOT` blocs en donnent seize, comme un magasin.
 const fn taille_dalle(taille: usize) -> usize {
-    let brut = taille * LOT;
-    let pages = (brut + pages_tas::PAGE - 1) / pages_tas::PAGE;
-    if pages == 0 { pages_tas::PAGE } else { pages * pages_tas::PAGE }
+    dalles_tas::taille_dalle(taille, LOT)
 }
 
 /// Prend une dalle au compagnon et la decoupe entierement dans la classe.
@@ -521,6 +519,10 @@ unsafe fn decoupe_une_dalle(index: usize, taille: usize) -> *mut u8 {
     DALLES.fetch_add(1, Ordering::Relaxed);
     DALLES_OCTETS.fetch_add(octets, Ordering::Relaxed);
     let blocs = octets / taille;
+
+    // C9.1 : enregistrer avant de publier les blocs libres.
+    let _ = dalles_tas::enregistre(base, taille, octets);
+
     interrupts::without_interrupts(|| {
         let cache = &CACHES[cpu_index()].classes[index];
         // La chaine se construit A REBOURS et se RACCORDE a ce qui est deja la.
@@ -720,6 +722,8 @@ unsafe impl GlobalAlloc for NgHeap {
         };
         if bloc.is_null() {
             signale_oom(layout);
+        } else if let Some((_, taille)) = class_for(layout) {
+            dalles_tas::note_allocation(bloc as usize, taille, LOT);
         }
         bloc
     }
@@ -744,6 +748,9 @@ unsafe impl GlobalAlloc for NgHeap {
         }
         match class_for(layout) {
             Some((index, taille)) => {
+                // Le passage a zero est seulement un candidat en C9.1.
+                let _candidate_vide =
+                    dalles_tas::note_liberation(ptr as usize, taille, LOT);
                 if CACHE_READY.load(Ordering::Acquire) {
                     self.libere_classe(index, taille, ptr);
                 } else {
@@ -929,9 +936,20 @@ pub struct NgStats {
     pub oom: u64,
     /// La plus grande allocation contigue encore possible.
     pub plus_grand_contigu: usize,
+    /// C9.1 : registre des dalles et objets encore vivants.
+    pub dalles_suivies: u64,
+    pub dalles_vides: usize,
+    pub objets_dalles_vivants: usize,
+    pub candidats_dalles_vides: u64,
+    pub dalles_tracking_manques: u64,
+    pub dalles_tracking_saturations: u64,
+    pub dalles_tracking_sous_flux: u64,
+    pub dalles_tracking_surallocations: u64,
+    pub dalles_tracking_max_probe: usize,
 }
 
 pub fn ng_stats() -> NgStats {
+    let dalles = dalles_tas::stats();
     let mut reserve_blocs = 0usize;
     let mut reserve_octets = 0usize;
     for (index, taille) in CLASS_SIZES.iter().enumerate() {
@@ -958,6 +976,15 @@ pub fn ng_stats() -> NgStats {
         abandons_amorcage: ABANDONS_AMORCAGE.load(Ordering::Relaxed),
         oom: OOM.load(Ordering::Relaxed),
         plus_grand_contigu: pages_tas::plus_grand_contigu(),
+        dalles_suivies: dalles.enregistrees,
+        dalles_vides: dalles.dalles_vides,
+        objets_dalles_vivants: dalles.objets_vivants,
+        candidats_dalles_vides: dalles.candidats_vides,
+        dalles_tracking_manques: dalles.manques,
+        dalles_tracking_saturations: dalles.saturations,
+        dalles_tracking_sous_flux: dalles.sous_flux,
+        dalles_tracking_surallocations: dalles.surallocations,
+        dalles_tracking_max_probe: dalles.max_probe,
     }
 }
 
@@ -976,6 +1003,7 @@ pub fn log_ng_stats() {
         s.plus_grand_contigu
     );
     pages_tas::log_stats();
+    dalles_tas::log_stats();
     for (index, taille) in CLASS_SIZES.iter().enumerate() {
         let d = DEPOTS[index].compteurs();
         let r = &RESERVES[index];

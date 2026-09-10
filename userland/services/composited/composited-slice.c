@@ -388,7 +388,38 @@ int principal(void)
     return 1;
 }
 
+/* L'ENTREE D'UN PROCESSUS N'EST PAS UN APPEL DE FONCTION.
+ *
+ * Le noyau SAUTE ici avec une pile alignee sur seize octets. Une fonction C,
+ * elle, est compilee en supposant qu'un `call` vient d'empiler une adresse de
+ * retour -- donc que `rsp` vaut huit modulo seize a son entree. Ecrire `_start`
+ * en C ordinaire decale ainsi TOUT le reste de huit octets.
+ *
+ * Le decalage ne se voit nulle part jusqu'a la premiere instruction qui exige
+ * vraiment l'alignement. Ici, c'etait un `movaps %xmm0,0x60(%rsp)` emis par le
+ * compilateur pour initialiser une structure locale :
+ *
+ *     faute de protection generale en ring 3 : rip=0x4000004012b7
+ *                                              rsp=0x5ffbfffff5b8
+ *
+ * 0x5b8 + 0x60 = 0x618, soit huit modulo seize. `movaps` sur une adresse non
+ * alignee leve un #GP, et le processus mourait apres trois etapes reussies.
+ *
+ * `native-ipc-ring3-probe` avait deja ce motif, et pour cette raison. On le
+ * reprend a l'identique : realigner explicitement, puis appeler.
+ */
 void _start(void)
+{
+    __asm__ volatile(
+        "andq $-16, %rsp\n\t"
+        "call demarre\n\t"
+        "ud2\n\t"
+    );
+}
+
+/* Appelee par `_start` avec une pile conforme a l'ABI. */
+void demarre(void);
+void demarre(void)
 {
     int code = principal();
     sys6(231, (u64)code, 0, 0, 0, 0, 0); /* exit_group */
