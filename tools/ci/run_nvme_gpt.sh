@@ -29,17 +29,29 @@
 #
 # # Sur quelle machine
 #
-# `BOUCHAUD_MACHINE` decide, et le defaut est celle qui DEMARRE.
+# `BOUCHAUD_MACHINE` decide, et LES DEUX tournent en campagne.
 #
-# Le premier essai forcait q35, plateforme de reference du chantier 10. Il a
-# rendu un journal serie entierement VIDE apres trois minutes : le noyau n'y
-# demarre pas encore. C'est une information utile -- elle est rapportee telle
-# quelle -- et ce n'est pas une raison pour que le pilote NVMe reste sans
-# aucune preuve d'execution en attendant.
+# UNE CONCLUSION PRECEDENTE ETAIT FAUSSE, ET LA MESURE L'A CORRIGEE.
 #
-# Le peripherique `nvme` de QEMU s'attache aussi au bus d'i440fx : il y perd
-# ses fonctions PCIe, pas sa capacite a servir des blocs. Le pilote y est donc
-# exerce entierement.
+# Le premier essai forcait q35 et rendait un journal serie vide. On en avait
+# conclu que « le noyau n'y demarre pas encore ». C'est faux. Lance a la main,
+# le noyau demarre entierement sur q35 -- table de pages, GDT, IDT, PCI, APIC,
+# quatre coeurs en ligne, ordonnanceur -- exactement comme sur i440fx, et emet
+# huit kilooctets de journal.
+#
+# Le journal du SCENARIO etait vide pour une tout autre raison : le montage
+# differe n'avait qu'un declencheur, la troisieme trame du compositeur, qui ne
+# vient jamais sur un demarrage en mode serie. Le defaut n'etait ni dans q35,
+# ni dans l'amorcage : il etait dans le declenchement du montage.
+#
+# La lecon vaut d'etre ecrite : « aucune sortie » n'est un symptome, pas un
+# diagnostic. Le prendre pour un diagnostic a fait accuser une plateforme
+# entiere pendant un lot complet.
+#
+# Les deux machines tournent donc separement. Le peripherique `nvme` de QEMU
+# s'attache au bus d'i440fx comme au bus PCIe de q35 ; une reussite sur le
+# premier ne dit rien de la topologie du second, qui est celle du materiel de
+# reference.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/ci/plateforme.sh

@@ -199,7 +199,7 @@ jobs:
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - name: QEMU
@@ -216,13 +216,31 @@ jobs:
       # double-faute. Ce scenario lui donne un disque, une vraie table GPT
       # ecrite par un outil independant, et exige que la premiere lecture
       # reelle parte et revienne.
-      - name: NVMe + GPT + montage
-        run: tools/ci/run_nvme_gpt.sh image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt.log
+      - name: NVMe + GPT + montage (i440fx)
+        run: |
+          BOUCHAUD_MACHINE=pc tools/ci/run_nvme_gpt.sh \
+            image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt-pc.log
+      # LA MACHINE DE REFERENCE EST UNE TOPOLOGIE PCIe, PAS UN BUS PARTAGE.
+      #
+      # Le premier essai de ce scenario avait conclu que le noyau « ne demarre
+      # pas encore sur q35 » a partir d'un journal serie vide. C'ETAIT FAUX,
+      # et la mesure l'a montre : sur q35 le noyau demarre entierement,
+      # jusqu'a l'ordonnanceur, exactement comme sur i440fx. Le journal etait
+      # vide parce que le montage differe n'etait jamais declenche, pas parce
+      # que le noyau se taisait.
+      #
+      # Les deux machines tournent donc, et separement : une reussite sur
+      # i440fx ne dit rien de la topologie PCIe, qui est celle du materiel de
+      # reference.
+      - name: NVMe + GPT + montage (q35, topologie PCIe)
+        run: |
+          BOUCHAUD_MACHINE=q35 tools/ci/run_nvme_gpt.sh \
+            image/bootimage-bouchaud-os.bin target/nvme-gpt-ci/nvme-gpt-q35.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-nvme-gpt
-          path: target/nvme-gpt-ci/nvme-gpt.log
+          path: target/nvme-gpt-ci/*.log
           if-no-files-found: warn
 
   system-health:
