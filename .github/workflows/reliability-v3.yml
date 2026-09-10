@@ -52,6 +52,32 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: reliability-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            reliability-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      # LE NOYAU AVANT LES GARDE-FOUS, ET C'EST OBLIGATOIRE.
+      #
+      # `verifie-pile-noyau-profondeur.py` LIT un binaire : il somme les
+      # prologues le long du graphe d'appels. Sans noyau construit il n'a rien
+      # a analyser, et ce job le lancait avant toute compilation -- 77/78.
+      #
+      # Le rendre permissif en l'absence de binaire aurait rendu vert un
+      # garde-fou qui ne verifie rien, ce qui est pire que rouge. Le noyau est
+      # donc construit ici, dans le MEME profil que l'artefact livre : le
+      # bootimage sort de `target/x86_64-bouchaud_os/debug/`, et une analyse
+      # faite sur un binaire `release` ne dirait rien de ce qui est flashe --
+      # l'inlining y change les trames.
+      - name: Construire le noyau analyse par les garde-fous
+        run: cargo build
       - name: Architecture + host properties
         run: |
           tools/ci/run_architecture_guards.sh
