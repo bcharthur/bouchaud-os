@@ -151,7 +151,7 @@ code qui passait deja toutes ses barrieres :
 | 7 | ABI Bouchaud + IPC natif | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (`NATIVE_IPC_RUNTIME_OK`, ce lot) |
 | 8 | Ladybird reellement utilisable | IMPLEMENTATION PARTIELLE | EXECUTE EN HOTE (campagne native non reproduite ici) |
 | 9 | Reseau NG | IMPLEMENTATION PARTIELLE | EXECUTE EN HOTE (retransmission, RTO) |
-| 10 | Plateforme materielle de reference | IMPLEMENTATION PARTIELLE | EXECUTE QEMU aux deux topologies ; TRIGKEY en attente |
+| 10 | Plateforme materielle de reference | IMPLEMENTATION PARTIELLE | EXECUTE QEMU aux deux topologies + USB Bulk (`USB_STOCKAGE_OK`, ce lot) ; TRIGKEY en attente |
 | 11 | Fiabilite / CI / release | IMPLEMENTATION PARTIELLE | EXECUTE QEMU (79 garde-fous, 67 suites, 3 workflows verts) |
 | 12 | Polish produit | NON COMMENCE | — |
 
@@ -340,9 +340,29 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
 * **Test** : `verifie-matrice-materielle.py`, `verifie-entree-trigkey.py`,
   `verifie-branchement-usb.py`, `verifie-concentrateurs-usb.py`.
 * **Mesure** : demarrage q35 ampute de **20 secondes**.
+* **USB Bulk-Only : de « code qui existe » a EXECUTE QEMU.** Les ~1000 lignes
+  de transport Bulk et de commandes SCSI de `xhci_active.rs` n'etaient
+  executees NULLE PART -- aucune campagne ne branchait de peripherique de
+  stockage. `run_usb_stockage.sh` en attache un, et la chaine passe :
+
+  | Etape | Preuve |
+  |---|---|
+  | Controleur demarre, port remis a zero | `BOUCHAUD_XHCI_CONTROLLER_ACTIVE_OK` |
+  | Peripherique adresse et enumere | `BOUCHAUD_USB_ADDRESS_OK`, `BOUCHAUD_USB_ENUM_OK` |
+  | Arbitrage de l'enregistreur de vol | `BOUCHAUD_BLACKBOX_USB_SKIP` — il LIT la table par-dessus le Bulk, n'y trouve pas la sienne, et CEDE |
+  | Points Bulk IN/OUT configures | `in=0x81/dci3 out=0x02/dci4 mps=1024` |
+  | READ CAPACITY | `blocs=131072 taille_bloc=512` — la geometrie REELLE, comparee a la taille du fichier et non a une constante du noyau |
+  | Volume publie | `BOUCHAUD_USB_STOCKAGE_VOLUME volume=3 mio=64` |
+
+  Verdict : `USB_STOCKAGE_OK`. **Ce n'est pas une validation physique.** QEMU
+  emule un peripherique conforme ; une vraie cle repond lentement, cale, se
+  deconnecte, renvoie des paquets courts et des STALL. Rien de tout cela n'est
+  couvert.
 * **Ce qui manque** : **tout ce qui touche le TRIGKEY**. Le double fault
-  physique capture reste OUVERT et non explique. USB Bulk / stockage de masse
-  n'a jamais ete exerce sur du materiel. Ni audio, ni Wi-Fi, ni suspend.
+  physique capture reste OUVERT et non explique. Le transport Bulk n'a jamais
+  rencontre de vraie cle : ni paquet court, ni STALL, ni
+  CLEAR_FEATURE(ENDPOINT_HALT), ni deconnexion en cours de commande, ni
+  rebranchement, ni secteur logique de 4 Kio. Ni audio, ni Wi-Fi, ni suspend.
 
 ### 11 — Fiabilite / CI / release engineering
 
@@ -352,8 +372,9 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   `composited/build.sh` (echec de construction sur RWE).
 * **Preuve d'execution** : CI Fast, Integration et Reliability V3 **vertes**
   sur la branche. Localement : `QEMU_SMOKE_OK`, `SYSTEM_HEALTH_OK`,
-  `USB_ARBRE_OK`, `USB_BRANCHEMENT_OK`, `MM_NG6_OK`, `OS_PRIMITIVES_OK`,
-  `SECURITY_RUNTIME_OK`, `NATIVE_IPC_RUNTIME_OK`, `NVME_GPT_OK` (×2).
+  `USB_ARBRE_OK`, `USB_BRANCHEMENT_OK`, `USB_STOCKAGE_OK`, `MM_NG6_OK`,
+  `OS_PRIMITIVES_OK`, `SECURITY_RUNTIME_OK`, `NATIVE_IPC_RUNTIME_OK`,
+  `NVME_GPT_OK` (×2).
 * **Test** : **79 garde-fous**, 67 suites Rust hote, 5 C++, 16 fiabilite
   Python.
 * **Mesure** : chaque regle ajoutee ce lot est verifiee PAR MUTATION — huit
