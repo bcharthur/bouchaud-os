@@ -111,7 +111,31 @@ def regle_surveillance_sans_hid(xhci, wm, fautes):
     if bloc is None:
         fautes.append("xhci_active.rs : poll() a disparu.")
         return
-    sortie = re.search(r"if\s+([^{]*?)\s*\{\s*return;", bloc)
+    # LA CONDITION, PAS LA MISE EN PAGE.
+    #
+    # La forme precedente exigeait `{ return;` colle a l'accolade. Elle est
+    # devenue rouge le jour ou une ligne utile -- la scrutation de
+    # l'enregistreur de vol -- s'est glissee avant le `return`, alors que la
+    # propriete verifiee, elle, n'avait pas bouge d'un caractere.
+    #
+    # Un garde-fou qui accuse une mise en page apprend surtout a etre ignore.
+    # On cherche donc le premier `if` dont le BLOC contient un `return;`, et on
+    # regarde sa CONDITION.
+    sortie = None
+    for candidat in re.finditer(r"if\s+([^{\n]*?)\s*\{", bloc):
+        debut = bloc.index("{", candidat.start())
+        profondeur = 0
+        for i in range(debut, len(bloc)):
+            if bloc[i] == "{":
+                profondeur += 1
+            elif bloc[i] == "}":
+                profondeur -= 1
+                if profondeur == 0:
+                    if "return;" in bloc[debut:i]:
+                        sortie = candidat
+                    break
+        if sortie is not None:
+            break
     if sortie is None:
         fautes.append(
             "xhci_active.rs : la condition de sortie de poll() est "

@@ -81,6 +81,56 @@ $Duree = [int]((Get-Date) - $Debut).TotalSeconds
 $Octets = (Get-Item -LiteralPath $Sortie).Length
 $Sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $Sortie).Hash
 
+# --- 2 bis. Le noyau EXACT voyage avec l'image ------------------------------
+#
+# Un RIP releve par la BLACKBOX ne veut rien dire sans le binaire qui l'a
+# produit. Le resoudre contre un autre noyau rend une reponse -- et c'est
+# presque toujours la mauvaise, parce qu'entre deux constructions l'editeur de
+# liens deplace tout. Une fonction innocente prend la place de la coupable.
+#
+# L'ELF non strip, sa somme et les parametres de construction sont donc
+# conserves A COTE de l'image, dans un manifeste que
+# `tools/reference/symbolise-blackbox.py` lit et VERIFIE avant de repondre.
+$Noyau = Join-Path $RepoRoot "target\x86_64-bouchaud_os_uefi\debug\bouchaud-os"
+if (-not (Test-Path -LiteralPath $Noyau -PathType Leaf)) {
+    $Noyau = Join-Path $RepoRoot "target\x86_64-bouchaud_os\debug\bouchaud-os"
+}
+$NoyauCopie = "$Sortie.kernel.elf"
+$Manifeste = "$Sortie.manifeste.json"
+$ShaNoyau = ""
+if (Test-Path -LiteralPath $Noyau -PathType Leaf) {
+    Copy-Item -LiteralPath $Noyau -Destination $NoyauCopie -Force
+    $ShaNoyau = (Get-FileHash -Algorithm SHA256 -LiteralPath $NoyauCopie).Hash.ToLower()
+    $Toolchain = (& rustc --version) -join ""
+    $Infos = [ordered]@{
+        commit = $Etiquette
+        branche = $Branche
+        arbre_propre = (-not [bool]$Sale)
+        date = (Get-Date).ToUniversalTime().ToString("o")
+        image = [ordered]@{
+            chemin = $Sortie
+            octets = $Octets
+            sha256 = $Sha.ToLower()
+        }
+        noyau = [ordered]@{
+            chemin = $NoyauCopie
+            source = $Noyau
+            sha256 = $ShaNoyau
+            base = "0x8000000000"
+            strip = $false
+        }
+        construction = [ordered]@{
+            cible = "targets/x86_64-bouchaud_os_uefi.json"
+            profil = "dev"
+            fonctionnalites = "uefi-boot,reference-bringup,reference-desktop"
+            toolchain = $Toolchain
+        }
+    }
+    $Infos | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Manifeste -Encoding ASCII
+} else {
+    Write-Host "AVERTISSEMENT: ELF noyau introuvable, pas de manifeste de symbolisation." -ForegroundColor Yellow
+}
+
 # --- 3. Ce qu'il faut savoir avant de flasher --------------------------------
 Write-Host ""
 Write-Host "=====================================================================" -ForegroundColor Green
@@ -91,6 +141,11 @@ Write-Host "IMAGE         = $Sortie"
 Write-Host "OCTETS        = $Octets  ($([math]::Round($Octets / 1MB, 1)) Mio)"
 Write-Host "SHA256        = $Sha" -ForegroundColor Green
 Write-Host "DUREE         = ${Duree}s"
+if ($ShaNoyau) {
+    Write-Host "NOYAU ELF     = $NoyauCopie"
+    Write-Host "NOYAU SHA256  = $ShaNoyau"
+    Write-Host "MANIFESTE     = $Manifeste"
+}
 Write-Host ""
 Write-Host "FLASH : Rufus -> Selection de demarrage -> cette image -> mode DD." -ForegroundColor Yellow
 Write-Host "        Secure Boot desactive, Boot Override sur la cle UEFI." -ForegroundColor Yellow
@@ -142,5 +197,12 @@ Write-Host "--- SI L'ECRAN DE FAUTE APPARAIT, RELEVER CES LIGNES ---" -Foregroun
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
-Write-Host "Une photo de l'ecran de faute suffit : tout y est." -ForegroundColor Yellow
+Write-Host "--- SYMBOLISER UN RIP RELEVE ---" -ForegroundColor Cyan
+Write-Host "  python3 tools/reference/symbolise-blackbox.py <RIP> --manifeste `"$Manifeste`""
+Write-Host "  L'outil REFUSE de repondre si le noyau ne correspond pas au manifeste :"
+Write-Host "  entre deux constructions l'editeur de liens deplace tout, et une reponse"
+Write-Host "  rendue sur le mauvais binaire ressemble a une reponse juste."
+Write-Host ""
+Write-Host "Une photo de l'ecran de faute suffit pour le premier diagnostic ;" -ForegroundColor Yellow
+Write-Host "le manifeste ci-dessus est ce qui permet d'aller jusqu'a la ligne." -ForegroundColor Yellow
 Write-Host "BOUCHAUD_IMAGE_TRIGKEY_PRETE commit=$Etiquette sha256=$Sha" -ForegroundColor Green

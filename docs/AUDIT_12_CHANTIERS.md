@@ -37,13 +37,69 @@ lui fait confiance.
 | Appels hors gros verrou | **81** |
 | Appels encore sous gros verrou | **78** |
 | Fichiers portant un point sur de preemption | **4** |
-| Garde-fous d'architecture | **57** |
+| Garde-fous d'architecture | **59** |
 | Suites de test hote | **66** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
 
 Regenerer : `python3 tools/mesure-chantiers.py --ecris`
+
+## Le double fault physique : ce qui est prouve, et ce qui ne l'est pas
+
+La BLACKBOX a capture, sur le TRIGKEY :
+
+    DOUBLE FAULT  vector=8  cpu=0  task=desktop  RIP=0x80012ed45c
+
+Le dernier marqueur normal avant la faute est
+`BOUCHAUD_NVME_PERSISTENCE_PROBE_BEGIN`. Le chemin execute est donc :
+
+    desktop -> montage differe -> monte_le_systeme_installe -> gpt::lit_table
+            -> Support::lit(LBA 1) -> couche bloc -> PiloteNvme
+            -> premiere entree-sortie NVMe reelle
+
+### Ce qui est prouve
+
+Un debordement de pile CERTAIN a ete trouve et corrige ailleurs :
+`net::transport::tcp::fetch` posait sa file de retransmission -- environ
+quatre-vingt-treize kibioctets -- sur une pile noyau de soixante-quatre. La
+mesure est reproductible (`tools/mesure-pile-noyau.py`) : trame de 99 320
+octets, pire chaine de 119 888 octets, pile utilisable de 61 440.
+
+Ce defaut est reel et sa correction etait necessaire. Il aurait produit un
+double fault des le premier telechargement, donc des le premier chargement de
+page dans Ladybird.
+
+### Ce qui n'est PAS prouve
+
+**Il n'explique pas le double fault capture.** Le chemin execute au moment de
+la faute etait celui du stockage, pas celui du reseau : `tcp::fetch` n'y
+apparait a aucun etage. La chaine du montage mesure 10 592 octets, tres en
+deca de la pile disponible -- ce n'est pas un debordement.
+
+Le defaut physique NVMe reste donc **ouvert**. Ce qui a ete fait autour de lui :
+
+  * l'attente d'entree-sortie a quitte l'IRQ-off (elle bloquait la machine
+    entiere jusqu'a deux secondes par commande) ;
+  * huit marqueurs `NVME_IO_*` publient chaque etape AVANT de l'executer, donc
+    le dernier marqueur imprime nommera l'etape atteinte ;
+  * le pilote est desormais mis en service quel que soit le micrologiciel, et
+    un scenario QEMU l'exerce avec un vrai disque et une vraie table GPT.
+
+La confirmation demande un essai sur le TRIGKEY, avec l'image et le manifeste
+produits par `tools/reference/IMAGE-TRIGKEY.ps1`.
+
+### Pourquoi une adresse ne se resout pas contre le HEAD
+
+`0x80012ed45c` resolu contre deux constructions differentes de ce depot donne
+`keyboard::read_into` dans l'une et `shell::commands::find_rec` dans l'autre.
+Aucune des deux n'est la reponse : entre deux commits l'editeur de liens
+deplace tout, et une fonction innocente prend la place de la coupable.
+
+`tools/reference/symbolise-blackbox.py` REFUSE de repondre si la somme du noyau
+qu'on lui donne ne correspond pas au manifeste ecrit a la construction de
+l'image. Une reponse rendue est une reponse sur le bon binaire, ou il n'y a pas
+de reponse.
 
 ## Tableau d'ensemble
 
