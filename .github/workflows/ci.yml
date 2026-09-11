@@ -17,7 +17,7 @@ on:
       # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
       # `main` ni sa protection.
   push:
-    branches: [main, 'claude/**']
+    branches: [main, 'claude/**', 'feat/**']
   workflow_dispatch:
 
 permissions:

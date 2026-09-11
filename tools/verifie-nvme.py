@@ -785,11 +785,38 @@ def regle_profondeur_reelle(pilote, suivi, test_suivi, fautes):
             "nvme.rs : la sonde de concurrence a disparu ; plus rien n'exerce "
             "deux emplacements ensemble."
         )
-    elif "NVME_PARALLELE_SEQUENTIEL" not in sonde:
-        fautes.append(
-            "nvme.rs : la sonde ne distingue plus une profondeur atteinte d'une "
-            "profondeur annoncee ; elle rendrait vert un pilote sequentiel."
-        )
+    else:
+        # LA SONDE MESURE, LE SCENARIO JUGE.
+        #
+        # Une lecture NVMe emulee dure quelques microsecondes : le premier
+        # lecteur peut finir ses huit lectures avant que le quatrieme ne soit
+        # elu, et un passage isole tombe alors a une commande en vol sur un
+        # pilote qui sait pourtant en servir quatre. La sonde publie donc ce
+        # qu'elle a VU, passage par passage, et `run_nvme_parallele.sh` conclut
+        # sur l'ensemble : si AUCUN passage n'atteint deux, le pilote est
+        # sequentiel.
+        #
+        # Ce qu'il faut garder ici, c'est que le releve existe et qu'il soit
+        # DERIVE DE LA MESURE. Une chaine constante rendrait vert un pilote
+        # sequentiel sans qu'aucune ligne ne change.
+        if "chevauchement=" not in sonde:
+            fautes.append(
+                "nvme.rs : la sonde ne publie plus le chevauchement observe ; "
+                "elle ne distinguerait plus une profondeur ATTEINTE d'une "
+                "profondeur ANNONCEE, et rendrait vert un pilote sequentiel."
+            )
+        elif "profondeur >= 2" not in sonde:
+            fautes.append(
+                "nvme.rs : le chevauchement publie n'est plus derive de la "
+                "profondeur mesuree. Une etiquette constante dirait « observe » "
+                "sur un pilote qui ne sert qu'une commande a la fois."
+            )
+        if "aucun-sur-ce-passage" not in sonde:
+            fautes.append(
+                "nvme.rs : la sonde ne sait plus dire qu'un passage n'a rien vu. "
+                "Une sonde qui ne peut pas rendre de verdict negatif n'en rend "
+                "aucun."
+            )
 
     for nom in (
         "une_commande_lente_n_arrete_que_son_emplacement",

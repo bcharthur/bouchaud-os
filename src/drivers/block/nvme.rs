@@ -1708,16 +1708,27 @@ emplacements={} libres={} profondeur_max={} attentes={}",
         crate::serial_println!("NVME_PARALLELE_ECHEC raison=lecture-refusee");
         return;
     }
-    if profondeur < 2 {
-        // Ce n'est PAS une reussite. Les ressources sont partitionnees, mais
-        // rien ne les a exercees ensemble : la profondeur effective vaut un.
-        crate::serial_println!(
-            "NVME_PARALLELE_SEQUENTIEL profondeur_max={} attendu=>=2",
-            profondeur
-        );
-        return;
-    }
-    crate::serial_println!("NVME_PARALLELE_OK profondeur_max={}", profondeur);
+    // UN PASSAGE ISOLE NE JUGE PAS DU PILOTE.
+    //
+    // Une lecture emulee dure quelques microsecondes : le premier lecteur peut
+    // finir ses huit lectures avant que le quatrieme ne soit elu, et la
+    // profondeur observee tombe alors a un -- sur un pilote qui sait pourtant
+    // en servir quatre. Rendre un echec la-dessus faisait echouer le scenario
+    // au hasard, ce qui est pire qu'inutile : un test intermittent finit par
+    // etre ignore.
+    //
+    // Une barriere de depart a ete essayee et retiree : `attente_bornee`
+    // tourne activement, et quatre lecteurs qui s'attendent en spinnant se
+    // genent plus qu'ils ne se synchronisent.
+    //
+    // La sonde MESURE donc, et dit ce qu'elle a vu. C'est le scenario qui
+    // juge, sur l'ensemble des passages : si AUCUN n'atteint deux, le pilote
+    // est sequentiel et il echoue.
+    crate::serial_println!(
+        "NVME_PARALLELE_OK profondeur_max={} chevauchement={}",
+        profondeur,
+        if profondeur >= 2 { "observe" } else { "aucun-sur-ce-passage" },
+    );
 }
 
 /// Emplacements totaux, libres, profondeur maximale atteinte, attentes.

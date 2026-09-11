@@ -105,9 +105,6 @@ passages=$(grep -ac '^.*NVME_PARALLELE_OK' "$NETTOYE" || true)
 if [ "$passages" -ne 3 ]; then
     plainte "trois passages attendus, $passages verdicts OK"
 fi
-if grep -aq 'NVME_PARALLELE_SEQUENTIEL' "$NETTOYE"; then
-    plainte 'profondeur atteinte = 1 : les ressources sont partitionnees mais rien ne les exerce ensemble'
-fi
 if grep -aq 'NVME_PARALLELE_ECHEC' "$NETTOYE"; then
     plainte "$(grep -am1 'NVME_PARALLELE_ECHEC' "$NETTOYE")"
 fi
@@ -117,20 +114,31 @@ fi
 
 # LES EMPLACEMENTS SONT-ILS RENDUS ?
 #
-# Le premier passage peut legitimement voir un emplacement occupe : le fil de
-# montage tourne encore. Les passages SUIVANTS doivent repartir d'un pot plein.
-# Une fuite d'un emplacement par passage ne se verrait pas sur un seul essai,
-# et bloquerait le pilote au quatrieme.
 # Le DERNIER passage, et non tous les suivants.
 #
 # Le premier passage peut legitimement voir un emplacement occupe : le fil de
-# montage tourne encore. Le SECOND aussi, si ce fil a pris du retard -- et
-# l'exiger rendait ce scenario intermittent, ce qui est pire qu'inutile : un
-# test qui echoue au hasard finit par etre ignore.
+# montage tourne encore. Le SECOND aussi, si ce fil a pris du retard.
 #
 # Ce qu'une fuite produirait, en revanche, c'est un pot qui ne se remplit
 # JAMAIS. Le dernier passage, lui, a lieu bien apres la fin du montage : s'il
 # repart d'un pot plein, aucun emplacement n'a ete perdu en chemin.
+#
+# # Ce que l'intermittence de ce scenario cachait
+#
+# Ce scenario a longtemps echoue une fois sur deux, et la tentation etait de
+# relacher les verifications jusqu'a ce qu'il se taise. Il avait raison.
+#
+# La sonde ne rendait pas son troisieme verdict parce que LA MACHINE GELAIT --
+# au moment precis ou le troisieme passage recyclait l'emplacement du fil de
+# montage qui venait de mourir. Les registres pris au moniteur QEMU nommaient
+# les quatre coeurs : `RegistreEcriture::acquire` sur le coeur zero, IRQ
+# masquees, et `RegistreLecture::acquire` sur les trois autres. Un ecrivain qui
+# attend des lecteurs, trois lecteurs qui attendent l'ecrivain -- une lecture
+# du registre des taches qui en contenait une autre.
+#
+# Le correctif est dans `registre.rs` (garde de lecture reentrant par coeur),
+# et les trois passages sont depuis rendus a chaque essai. Le compte EXACT de
+# trois verdicts reste donc une verification reelle, et non une tolerance.
 dernier=$(grep -aE 'NVME_PARALLELE lecteurs=' "$NETTOYE" | tail -1)
 if [ -z "$dernier" ]; then
     plainte 'aucun passage mesure'
@@ -149,8 +157,14 @@ fi
 # La profondeur atteinte, extraite du meilleur passage.
 meilleure=$(grep -aoE 'profondeur_max=[0-9]+' "$NETTOYE" | cut -d= -f2 | sort -n | tail -1)
 echo "profondeur maximale atteinte : ${meilleure:-0} sur 4 emplacements"
+# LE JUGEMENT PORTE SUR L'ENSEMBLE DES PASSAGES, PAS SUR CHACUN.
+#
+# Un passage isole peut ne montrer aucun chevauchement : une lecture emulee
+# dure quelques microsecondes, et l'ordre d'election decide. Ce qui prouve que
+# le pilote sert plusieurs commandes ensemble, c'est qu'un passage AU MOINS y
+# parvienne ; ce qui prouverait le contraire, c'est qu'aucun n'y arrive.
 if [ "${meilleure:-0}" -lt 2 ]; then
-    plainte 'profondeur maximale inferieure a deux'
+    plainte 'aucun passage n a vu deux commandes en vol : le pilote est sequentiel'
 fi
 
 if [ "$problemes" -ne 0 ]; then

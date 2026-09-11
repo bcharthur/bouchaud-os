@@ -90,13 +90,38 @@ struct Garde<'a> {
     tache: *mut Tache,
 }
 
+// PROFONDEUR DE LECTURE, PAR FIL.
+//
+// Le noyau la tient par COEUR : un garde de lecture n'y traverse jamais un
+// changement de contexte -- `preempt_from_irq` ne commute que si le timer a
+// interrompu du code ring 3, et les points de commutation volontaires n'en
+// tiennent aucun. Sur l'hote, le fil est l'analogue fidele du coeur.
+//
+// Une seule instance de registre existe dans le noyau ; ce modele n'en tient
+// donc qu'un a la fois par fil, comme lui.
+thread_local! {
+    static PROFONDEUR_LECTURE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct Lecture<'a> {
     registre: &'a Registre,
 }
 
 impl Drop for Lecture<'_> {
     fn drop(&mut self) {
-        self.registre.lecteurs.fetch_sub(1, Ordering::Release);
+        // Le compte global ne retombe qu'au DERNIER garde du fil : c'est lui
+        // qui rend la quiescence a l'ecrivain. Le rendre a chaque garde
+        // laisserait le recycleur ecraser une tache sous la reference encore
+        // tenue par le niveau exterieur.
+        let dernier = PROFONDEUR_LECTURE.with(|p| {
+            let profondeur = p.get();
+            assert!(profondeur > 0, "relachement d'une lecture non tenue");
+            p.set(profondeur - 1);
+            profondeur == 1
+        });
+        if dernier {
+            self.registre.lecteurs.fetch_sub(1, Ordering::Release);
+        }
     }
 }
 
@@ -154,11 +179,35 @@ impl Registre {
         }
     }
 
+    /// Prend une lecture. REENTRANTE : un niveau imbrique n'attend pas.
+    ///
+    /// Sans ce court-circuit, le rendez-vous se referme sur lui-meme : le
+    /// garde exterieur maintient le compte a un, l'ecrivain ne repart donc
+    /// jamais, et le garde interieur attend un drapeau qui ne tombera plus.
+    /// `le_recyclage_survit_a_une_lecture_imbriquee` le demontre.
+    ///
+    /// Sauter l'attente au niveau imbrique est legitime : si ce fil tient deja
+    /// un garde, le compte n'est pas nul, donc aucun ecrivain n'est ENTRE dans
+    /// sa section critique. Il ne peut qu'attendre -- et c'est ce qu'on le
+    /// laisse faire, jusqu'au dernier garde de ce fil.
     fn lecture(&self) -> Lecture<'_> {
+        let imbriquee = PROFONDEUR_LECTURE.with(|p| {
+            let profondeur = p.get();
+            if profondeur > 0 {
+                p.set(profondeur + 1);
+                true
+            } else {
+                false
+            }
+        });
+        if imbriquee {
+            return Lecture { registre: self };
+        }
         loop {
             while self.ecrivain.load(Ordering::Acquire) { std::hint::spin_loop(); }
             self.lecteurs.fetch_add(1, Ordering::AcqRel);
             if !self.ecrivain.load(Ordering::Acquire) {
+                PROFONDEUR_LECTURE.with(|p| p.set(1));
                 return Lecture { registre: self };
             }
             self.lecteurs.fetch_sub(1, Ordering::Release);
@@ -609,5 +658,129 @@ fn sans_generation_l_aba_reapparait() {
     assert!(
         registre.reveille(ancien),
         "un ancien ticket a reveille une tache qui ne l'attendait pas",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L'interblocage du rendez-vous, et ce qui le ferme
+// ---------------------------------------------------------------------------
+
+/// Le recycleur repart-il pendant qu'un lecteur en prend un SECOND ?
+///
+/// # Le defaut, pris au moniteur QEMU
+///
+/// Le rendez-vous est a PRIORITE ECRIVAIN : l'ecrivain publie son drapeau puis
+/// attend zero lecteur ; un lecteur qui voit le drapeau attend sans se
+/// compter. Correct tant qu'un lecteur n'en prend qu'un a la fois -- et
+/// referme sur elle-meme des qu'il en prend un second, son propre garde
+/// exterieur retenant le compte que l'ecrivain attend.
+///
+/// Le scenario `nvme-parallele` gelait une fois sur deux, au troisieme
+/// passage, a l'instant ou `registre_ajoute` recyclait l'emplacement du fil de
+/// montage qui venait de mourir. Les quatre coeurs etaient nommes :
+/// `RegistreEcriture::acquire` sur le coeur zero, IRQ masquees, et
+/// `RegistreLecture::acquire` sur les trois autres.
+///
+/// # Ce que ce test etablit
+///
+/// Que la prise imbriquee aboutit, et que le recycleur aboutit ensuite. Sans
+/// la reentrance, ce test NE TERMINE PAS : c'est pourquoi il porte sa propre
+/// echeance plutot que de s'en remettre a celle du lanceur, qui ne dirait pas
+/// lequel des tests a gele.
+#[test]
+fn le_recyclage_survit_a_une_lecture_imbriquee() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (fini, attente) = mpsc::channel::<&'static str>();
+    std::thread::spawn(move || {
+        let registre = Arc::new(Registre::neuf());
+        let premier = registre.ajoute(1).unwrap();
+        registre.tache_id(premier).unwrap().etat.store(ZOMBIE, Ordering::Release);
+
+        // Le lecteur tient un garde, et signale qu'il le tient.
+        let (tenu, prevenu) = mpsc::channel::<()>();
+        let (relache, permission) = mpsc::channel::<()>();
+        let lecteur = {
+            let registre = Arc::clone(&registre);
+            std::thread::spawn(move || {
+                let exterieur = registre.lecture();
+                tenu.send(()).unwrap();
+                // Le recycleur a le temps de publier son drapeau.
+                permission.recv().unwrap();
+                // ET MAINTENANT LE SECOND GARDE. C'est ici que l'ancienne
+                // discipline s'immobilisait : le drapeau est leve, et c'est le
+                // garde exterieur de CE fil qui empeche l'ecrivain de le
+                // baisser.
+                let interieur = registre.lecture();
+                drop(interieur);
+                drop(exterieur);
+            })
+        };
+        prevenu.recv().unwrap();
+
+        // Le recycleur part pendant que le lecteur tient son garde.
+        let recycleur = {
+            let registre = Arc::clone(&registre);
+            std::thread::spawn(move || {
+                registre.ajoute(2).expect("le registre a de la place")
+            })
+        };
+        // Laisse le drapeau se publier avant d'autoriser la prise imbriquee.
+        std::thread::sleep(Duration::from_millis(20));
+        relache.send(()).unwrap();
+
+        lecteur.join().unwrap();
+        let neuf = recycleur.join().unwrap();
+        assert_eq!(
+            neuf.emplacement, premier.emplacement,
+            "le recycleur devait reprendre l'emplacement de la tache morte",
+        );
+        fini.send("ok").unwrap();
+    });
+
+    attente
+        .recv_timeout(Duration::from_secs(10))
+        .expect(
+            "INTERBLOCAGE : le recycleur attend un lecteur qui attend le \
+             recycleur. C'est le gel observe sur nvme-parallele -- la prise \
+             imbriquee doit court-circuiter l'attente du drapeau.",
+        );
+}
+
+/// La reentrance n'a-t-elle pas ouvert le recycleur sous une reference vivante ?
+///
+/// Le court-circuit serait sans valeur s'il rendait la quiescence trop tot :
+/// l'ecrivain ecraserait alors une tache que le niveau exterieur lit encore.
+/// Le compte global ne doit retomber qu'au DERNIER garde du fil.
+#[test]
+fn une_lecture_imbriquee_ne_rend_pas_la_quiescence() {
+    let registre = Registre::neuf();
+    assert_eq!(registre.lecteurs.load(Ordering::Acquire), 0);
+
+    let exterieur = registre.lecture();
+    assert_eq!(
+        registre.lecteurs.load(Ordering::Acquire), 1,
+        "le premier garde doit se compter",
+    );
+
+    let interieur = registre.lecture();
+    assert_eq!(
+        registre.lecteurs.load(Ordering::Acquire), 1,
+        "le garde imbrique ne doit PAS se recompter : le fil figure deja au \
+         compte, et l'y mettre deux fois rendrait la sortie asymetrique",
+    );
+
+    drop(interieur);
+    assert_eq!(
+        registre.lecteurs.load(Ordering::Acquire), 1,
+        "relacher le niveau imbrique ne rend pas la quiescence : le niveau \
+         exterieur tient encore une reference, et le recycleur l'ecraserait",
+    );
+
+    drop(exterieur);
+    assert_eq!(
+        registre.lecteurs.load(Ordering::Acquire), 0,
+        "le dernier garde du fil rend la quiescence",
     );
 }

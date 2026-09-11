@@ -167,6 +167,43 @@ Releve du 10 septembre 2026, session `20260910222310672` :
   cinq secondes au demarrage du bureau. Diagnostic confirme ; le remede a ete
   **retire** parce qu'il cassait le demarrage des programmes utilisateur.
 
+### Un gel SMP, trouve sous QEMU et non sur la machine
+
+Le TRIGKEY gelait ; le scenario `nvme-parallele` gelait aussi, une fois sur
+deux, sous QEMU. C'etait le meme genre de defaut, et celui-la a pu etre pris
+sur le fait.
+
+Les registres captures au moniteur QEMU a l'instant du gel nommaient les quatre
+coeurs :
+
+```
+CPU#0  RegistreEcriture::acquire   registre.rs:171   IF=0
+CPU#1  RegistreLecture::acquire    registre.rs:136
+CPU#2  RegistreLecture::acquire    registre.rs:136
+CPU#3  RegistreLecture::acquire    registre.rs:136
+```
+
+Un ecrivain qui attend la quiescence des lecteurs, trois lecteurs qui attendent
+que l'ecrivain lache son drapeau. Le rendez-vous du registre des taches est a
+priorite ecrivain : il se referme sur lui-meme des qu'un lecteur en prend un
+SECOND en tenant deja le premier -- son propre garde exterieur retient le
+compte que l'ecrivain attend. Et l'imbrication n'etait pas isolee :
+`wake_sleepers` tient une vue du registre et appelle `publish_ready`, qui en
+reprend une ; `preempt_from_irq` fait de meme avec
+`registre_pointeur_ordonnanceur`.
+
+Le declencheur etait le recyclage d'un emplacement -- ce qui n'arrive qu'apres
+la mort d'une tache, donc rarement au demarrage et de plus en plus souvent
+ensuite.
+
+**Corrige** : le garde de lecture est desormais reentrant par coeur
+(`registre.rs`), garde par `tools/verifie-registre-lecture-reentrante.py` et
+par deux cas hote dont l'un ne termine pas sans le correctif. **Mesure sous
+QEMU** : `nvme-parallele` rend ses trois verdicts six fois sur six, contre une
+fois sur deux avant. **Non valide sur TRIGKEY** : rien ne dit que c'etait LE
+gel observe sur la machine, seulement que c'en etait un, reel, et du meme
+genre.
+
 ---
 
 ## 7. Valider en local
@@ -236,6 +273,9 @@ manifeste. Le manifeste est ce qui permet de resoudre une adresse en
 - Le refus d'ecriture hors partition Bouchaud, **verifie dans les deux sens**.
 - Le timer local par coeur, mode periodique, avec mesure du battement.
 - Le mode de secours, active et desactive.
+- **Le gel du rendez-vous du registre des taches** (§6) : reproduit au moniteur
+  QEMU, corrige, et six essais consecutifs de `nvme-parallele` contre une
+  reussite sur deux avant.
 
 ### Implemente, NON TESTE sur TRIGKEY
 - **Tout ce qui precede.** Aucun essai physique n'a ete conduit avec cet
@@ -248,10 +288,13 @@ manifeste. Le manifeste est ce qui permet de resoudre une adresse en
   absente des disques QEMU utilises, et `--pose` y rend `code=-1`.
 
 ### Risques restants
-- **Le gel du bureau n'est pas corrige.** Son diagnostic est etabli — l'entree
-  lue a la cadence du rendu — et le remede a ete retire parce qu'il cassait le
-  demarrage des programmes utilisateur. Le defaut sous-jacent, une tache noyau
-  perpetuelle qui interfere avec `exec`, reste **ouvert**.
+- **Le gel du bureau n'est pas prouve corrige SUR LA MACHINE.** Deux causes
+  distinctes ont ete trouvees et fermees depuis : la boucle de sortie de
+  `task::run` qui n'atteignait plus son test d'arret en presence d'un
+  travailleur perpetuel, et le rendez-vous non reentrant du registre des taches
+  (§6). Les deux sont reproduites et corrigees SOUS QEMU. Rien ne dit que
+  l'une des deux etait le gel observe sur le TRIGKEY : cela reste **a valider
+  physiquement**, et c'est le point 2 de la sequence du §8.
 - **Le clavier passe par le repli EP0.** Sur la session physique, `kbd=6` contre
   `mouse=556` : l'Interrupt-IN du clavier ne remonte quasiment rien, et le repli
   le masque au lieu de l'expliquer.

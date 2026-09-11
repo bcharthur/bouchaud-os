@@ -1,0 +1,38 @@
+cd C:\Users\Arthur\RustroverProjects\bouchaud-os
+
+$Archive = "C:\Users\Arthur\RustroverProjects\bouchaud-os-local-archive-20260910-181901"
+$Parser  = Join-Path $Archive "tools\reference\extract-blackbox.py"
+
+Write-Host "PARSER =" $Parser
+Test-Path $Parser
+
+$Disk = Get-Disk -Number 2
+$Disk | Format-List Number,FriendlyName,BusType,Size
+
+if ($Disk.BusType -ne "USB") {
+    throw "STOP : le disque 2 n'est pas USB."
+}
+
+$Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$Out = "C:\Users\Arthur\RustroverProjects\bouchaud-os\target\blackbox-extract-$Stamp"
+
+python $Parser `
+    --disk "\\.\PhysicalDrive2" `
+    --output $Out
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Extraction BLACKBOX en echec."
+}
+
+$Zip = "$Out.zip"
+
+Compress-Archive `
+    -Path "$Out\*" `
+    -DestinationPath $Zip `
+    -Force
+
+Write-Host ""
+Write-Host "BLACKBOX OK :" -ForegroundColor Green
+Write-Host $Out
+Write-Host "ZIP :" -ForegroundColor Green
+Write-Host $Zip
