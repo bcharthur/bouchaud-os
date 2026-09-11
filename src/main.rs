@@ -241,6 +241,11 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // pas dependre de la cadence du rendu.
     drivers::xhci_active::demarre_le_fil_hid();
 
+    // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
+    // USB par transferts synchrones, et ce cout n'a rien a faire sur le
+    // chemin de l'entree.
+    drivers::xhci_active::demarre_le_fil_blackbox();
+
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.
     kernel::autorun::run_if_present();

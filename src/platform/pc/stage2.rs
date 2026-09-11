@@ -406,6 +406,11 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // polices, la plus lente -- se passe encore sans souris.
     crate::drivers::xhci_active::demarre_le_fil_hid();
 
+    // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
+    // USB par transferts synchrones, et ce cout n'a rien a faire sur le
+    // chemin de l'entree.
+    crate::drivers::xhci_active::demarre_le_fil_blackbox();
+
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
     point_de_controle("bureau");

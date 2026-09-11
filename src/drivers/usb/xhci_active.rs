@@ -110,7 +110,46 @@ const EVENEMENTS_DIFFERES: usize = 16;
 /// boucle de dessin. En faire plusieurs d'affilee ferait sauter l'image.
 const BRANCHEMENTS_PAR_TOUR: usize = 1;
 const MAX_RUNTIME_DEVICES: usize = 32;
-const WAIT_SPINS: usize = 30_000_000;
+// UNE ATTENTE SE BORNE EN TEMPS, PAS EN NOMBRE DE TOURS.
+//
+// # Ce que trente millions de tours coutaient sur la machine de reference
+//
+// `WAIT_SPINS` valait 30 000 000. Un tour est une instruction `pause`, qui
+// coute une trentaine de cycles sur un Zen 3 : l'attente complete valait donc
+// environ un milliard de cycles, soit **330 ms** sur le Ryzen 7 5800H du
+// TRIGKEY a 3,194 GHz.
+//
+// Ce n'etait pas theorique. `poll_control_fallback` emet un `GET_REPORT` sur
+// EP0, un tour sur deux, pour CHAQUE point de terminaison muet en
+// Interrupt-IN. Le recepteur Logitech du TRIGKEY expose une interface
+// vendeur (`if=2 subclass=0 protocol=0`) qui n'a aucune raison d'y repondre :
+// une attente non aboutie par tour de scrutation.
+//
+// L'enregistreur de vol mesure le resultat sans interpretation :
+//
+//     hid polls=3.19/s     une scrutation toutes les 313 ms
+//     330 ms attendus, 313 ms mesures
+//
+// Tout ce qui depend de l'entree -- le pointeur, les frappes, et le
+// compositeur qui n'est reveille que par elles -- avancait donc a 3 Hz. C'est
+// ce que « inutilisable » voulait dire.
+//
+// # Pourquoi le temps et non les tours
+//
+// Un compte de tours ne dit rien : la meme constante vaut 30 ms sur une
+// machine et 330 ms sur une autre, selon le cout d'un `pause`. Une borne en
+// nanosecondes vaut ce qu'elle annonce, partout.
+//
+// Deux budgets, parce que deux usages :
+//
+//   * l'enumeration et les commandes du controleur sont rares et doivent
+//     tolerer un peripherique lent ;
+//   * la scrutation tourne mille fois par seconde et ne doit RIEN tolerer :
+//     un peripherique HID repond a `GET_REPORT` en quelques microsecondes, et
+//     celui qui ne repond pas en quatre millisecondes ne repondra pas.
+const BUDGET_ATTENTE_NS: u64 = 500_000_000;
+/// Budget d'une attente sur le chemin de scrutation. Voir ci-dessus.
+const BUDGET_SCRUTATION_NS: u64 = 4_000_000;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTED: AtomicUsize = AtomicUsize::new(0);
@@ -300,6 +339,22 @@ struct HidEndpoint {
     /// masquer le probleme : il NOMME le peripherique qui ne repond pas, au
     /// lieu de laisser croire que tout va bien parce qu'un autre repond.
     evenements: u32,
+    /// Echecs consecutifs du repli EP0 sur CE point de terminaison.
+    echecs_repli: u8,
+    /// Instant avant lequel le repli ne sera pas retente sur ce point.
+    ///
+    /// # Pourquoi une quarantaine, et pas un simple compteur
+    ///
+    /// Un point de terminaison qui ne repond pas a `GET_REPORT` ne va pas se
+    /// mettre a repondre au tour suivant. Le redemander mille fois par seconde
+    /// ne le reveille pas : cela paie son echeance mille fois par seconde, et
+    /// c'est tout le systeme qui ralentit -- le recepteur Logitech du TRIGKEY
+    /// expose une interface vendeur qui n'a jamais eu de raison de repondre.
+    ///
+    /// Le repli reste un pont de compatibilite : il est RETENTE, mais une fois
+    /// par seconde, pas cinq cents. Un peripherique qui se met a repondre est
+    /// donc repris, et celui qui reste muet ne coute plus rien.
+    repli_muet_jusqu_a_ns: u64,
 }
 
 const EMPTY_RING: ProducerRing = ProducerRing {
@@ -310,6 +365,8 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 };
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
+    echecs_repli: 0,
+    repli_muet_jusqu_a_ns: 0,
     evenements: 0,
     active: false,
     slot_id: 0,
@@ -571,13 +628,23 @@ unsafe fn w64(base: usize, off: usize, value: u64) {
 }
 
 fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
-    for _ in 0..WAIT_SPINS {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut tours = 0u32;
+    loop {
         if predicate() {
             return true;
         }
+        tours = tours.wrapping_add(1);
+        // L'horloge se relit tous les 256 tours. La lire a chaque tour
+        // couterait plus cher que l'attente qu'elle borne.
+        if tours & 0xff == 0
+            && crate::kernel::timer::monotonic_ns().saturating_sub(debut)
+                >= BUDGET_ATTENTE_NS
+        {
+            return false;
+        }
         core::hint::spin_loop();
     }
-    false
 }
 
 fn wait_ms(ms: u64) {
@@ -822,7 +889,24 @@ fn differe(controller: &mut Controller, event: Trb) {
 }
 
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
-    for _ in 0..WAIT_SPINS {
+    wait_event_budget(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
+}
+
+/// Attend un evenement, au plus `budget_ns`.
+///
+/// Le budget est un ARGUMENT et non une constante : le chemin de scrutation
+/// n'a pas la meme patience que l'enumeration, et confondre les deux est
+/// exactement ce qui rendait la machine de reference inutilisable.
+fn wait_event_budget(
+    controller: &mut Controller,
+    wanted_type: u32,
+    slot: Option<u8>,
+    dci: Option<u8>,
+    budget_ns: u64,
+) -> Option<Trb> {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut tours = 0u32;
+    loop {
         if let Some(event) = next_event(controller) {
             let ty = trb_type(event.control);
             if ty == EVT_PORT_STATUS_CHANGE {
@@ -846,9 +930,14 @@ fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, d
                 differe(controller, event);
             }
         }
+        tours = tours.wrapping_add(1);
+        if tours & 0xff == 0
+            && crate::kernel::timer::monotonic_ns().saturating_sub(debut) >= budget_ns
+        {
+            return None;
+        }
         core::hint::spin_loop();
     }
-    None
 }
 
 /// Numero de port porte par un evenement de changement d'etat de port.
@@ -1085,6 +1174,7 @@ fn control_transfer(
     setup: u64,
     data_len: usize,
     data_in: bool,
+    budget_ns: u64,
 ) -> Result<usize, &'static str> {
     if data_len > 4096 {
         return Err("control-buffer-too-small");
@@ -1132,11 +1222,12 @@ fn control_transfer(
     );
     ring_doorbell(controller, device.slot_id, 1);
 
-    let event = wait_event(
+    let event = wait_event_budget(
         controller,
         EVT_TRANSFER,
         Some(device.slot_id),
         Some(1),
+        budget_ns,
     )
     .ok_or("control-transfer-timeout")?;
     let cc = completion_code(event.status);
@@ -1166,7 +1257,7 @@ fn get_descriptor(
         0,
         length as u16,
     );
-    control_transfer(controller, device, setup, length, true)
+    control_transfer(controller, device, setup, length, true, BUDGET_ATTENTE_NS)
 }
 
 fn evaluate_ep0_mps(controller: &mut Controller, device: &mut Device, mps: u16) -> Result<(), &'static str> {
@@ -1201,13 +1292,13 @@ fn evaluate_ep0_mps(controller: &mut Controller, device: &mut Device, mps: u16) 
 
 fn set_configuration(controller: &mut Controller, device: &mut Device, value: u8) -> Result<(), &'static str> {
     let setup = setup_packet(0x00, 9, value as u16, 0, 0);
-    let _ = control_transfer(controller, device, setup, 0, false)?;
+    let _ = control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS)?;
     Ok(())
 }
 
 fn set_boot_protocol(controller: &mut Controller, device: &mut Device, interface: u8) -> bool {
     let setup = setup_packet(0x21, 0x0b, 0, interface as u16, 0);
-    control_transfer(controller, device, setup, 0, false).is_ok()
+    control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_ok()
 }
 
 fn set_idle(controller: &mut Controller, device: &mut Device, interface: u8) {
@@ -1215,7 +1306,7 @@ fn set_idle(controller: &mut Controller, device: &mut Device, interface: u8) {
     // for state changes, but several real devices only start cleanly after the
     // host has completed the class initialization sequence used by PC stacks.
     let setup = setup_packet(0x21, 0x0a, 0, interface as u16, 0);
-    let _ = control_transfer(controller, device, setup, 0, false);
+    let _ = control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS);
 }
 
 fn hid_item_value(bytes: &[u8]) -> u32 {
@@ -1311,7 +1402,7 @@ fn get_hid_report_descriptor(
         interface as u16,
         length as u16,
     );
-    control_transfer(controller, device, setup, length, true)
+    control_transfer(controller, device, setup, length, true, BUDGET_ATTENTE_NS)
 }
 
 fn enrich_hid_descriptor(
@@ -1536,6 +1627,8 @@ fn configure_hids(
         add_flags |= 1u32 << dci;
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
+            echecs_repli: 0,
+            repli_muet_jusqu_a_ns: 0,
             evenements: 0,
             active: false,
             slot_id: device.slot_id,
@@ -1748,6 +1841,7 @@ fn etat_port_concentrateur(
         concentrateur::requete_etat_port(port),
         4,
         true,
+        BUDGET_ATTENTE_NS,
     )
     .ok()?;
     if recu < 4 {
@@ -1776,6 +1870,7 @@ fn efface_changements(
                 concentrateur::requete_efface_port(fonctionnalite, port),
                 0,
                 false,
+                BUDGET_ATTENTE_NS,
             );
         }
     }
@@ -1799,6 +1894,7 @@ fn reinitialise_port_concentrateur(
         concentrateur::requete_pose_port(concentrateur::PORT_REINITIALISATION, port),
         0,
         false,
+        BUDGET_ATTENTE_NS,
     )
     .is_err()
     {
@@ -1852,6 +1948,7 @@ fn traverse_concentrateur(
         concentrateur::requete_descripteur(superspeed, longueur as u16),
         longueur,
         true,
+        BUDGET_ATTENTE_NS,
     )?;
     let octets = unsafe { core::slice::from_raw_parts(device.control_virt as *const u8, recu) };
     let Some(descripteur) = concentrateur::descripteur(octets) else {
@@ -1888,6 +1985,7 @@ fn traverse_concentrateur(
             concentrateur::requete_pose_port(concentrateur::PORT_ALIMENTATION, port),
             0,
             false,
+            BUDGET_ATTENTE_NS,
         );
     }
     wait_ms(descripteur.delai_alimentation_ms.max(20).min(600) as u64);
@@ -2907,7 +3005,15 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
         length as u16,
     );
     HID_CONTROL_POLLS.fetch_add(1, Ordering::Relaxed);
-    let result = control_transfer(controller, &mut device, setup, length, true);
+    // LE BUDGET COURT, ET C'EST TOUT LE CORRECTIF.
+    //
+    // Ce transfert est sur le chemin de scrutation : il s'execute un tour
+    // sur deux, pour chaque point de terminaison muet. Lui laisser la
+    // patience de l'enumeration revenait a payer une echeance de 330 ms
+    // par tour, et c'est ce qui rendait le TRIGKEY inutilisable.
+    let result = control_transfer(
+        controller, &mut device, setup, length, true, BUDGET_SCRUTATION_NS,
+    );
     controller.devices[endpoint.slot_id as usize] = Some(device);
     let received = match result {
         Ok(received) if received != 0 => received.min(length),
@@ -2970,13 +3076,50 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
     if poll_no < 32 || (poll_no & 1) != 0 {
         return;
     }
+    let maintenant = crate::kernel::timer::monotonic_ns();
     for index in 0..controller.hid_count {
         if controller.hids[index].evenements != 0 {
             continue;
         }
-        let _ = control_get_report(controller, index);
+        // UN POINT MUET EST EN QUARANTAINE, PAS INTERROGE MILLE FOIS.
+        if maintenant < controller.hids[index].repli_muet_jusqu_a_ns {
+            continue;
+        }
+        if control_get_report(controller, index) {
+            controller.hids[index].echecs_repli = 0;
+        } else {
+            {
+                let ep = &mut controller.hids[index];
+                ep.echecs_repli = ep.echecs_repli.saturating_add(1);
+                if ep.echecs_repli >= ECHECS_AVANT_QUARANTAINE {
+                    ep.repli_muet_jusqu_a_ns =
+                        maintenant.saturating_add(QUARANTAINE_REPLI_NS);
+                    let (slot, dci, echecs) = (ep.slot_id, ep.dci, ep.echecs_repli);
+                    REPLIS_EN_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
+                    crate::serial_println!(
+                        "BOUCHAUD_HID_REPLI_QUARANTAINE slot={} dci={} echecs={} \
+reprise_dans_ms={}",
+                        slot,
+                        dci,
+                        echecs,
+                        QUARANTAINE_REPLI_NS / 1_000_000,
+                    );
+                }
+            }
+        }
     }
 }
+
+/// Echecs consecutifs du repli EP0 avant sa mise en quarantaine.
+const ECHECS_AVANT_QUARANTAINE: u8 = 2;
+/// Duree de la quarantaine du repli EP0 d'un point de terminaison muet.
+///
+/// Une seconde : assez pour que le cout devienne negligeable devant les mille
+/// scrutations de cette seconde, assez court pour qu'un peripherique qui se
+/// reveille soit repris sans que l'utilisateur le remarque.
+const QUARANTAINE_REPLI_NS: u64 = 1_000_000_000;
+/// Points de terminaison mis en quarantaine, pour le diagnostic.
+static REPLIS_EN_QUARANTAINE: AtomicUsize = AtomicUsize::new(0);
 
 fn push_ps2(code: u8, extended: bool, pressed: bool) {
     if extended {
@@ -3245,7 +3388,7 @@ fn recupere_point_bulk(
     // CLEAR_FEATURE(ENDPOINT_HALT) : destinataire « point de terminaison »
     // (0x02), fonctionnalite zero, index = adresse du point.
     let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
-    if control_transfer(controller, device, setup, 0, false).is_err() {
+    if control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_err() {
         return false;
     }
     BULK_RECUPERATIONS.fetch_add(1, Ordering::Relaxed);
@@ -3269,7 +3412,7 @@ fn reinitialisation_bot(controller: &mut Controller, device: &mut Device, index:
     // 0x21 : hote vers peripherique, type classe, destinataire interface.
     // 0xFF : Bulk-Only Mass Storage Reset.
     let setup = setup_packet(0x21, 0xFF, 0, interface as u16, 0);
-    if control_transfer(controller, device, setup, 0, false).is_err() {
+    if control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_err() {
         crate::serial_println!(
             "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC slot={} if={}",
             controller.stockages[index].slot_id, interface,
@@ -4011,6 +4154,65 @@ fn fil_hid() -> ! {
 /// Le fil reste donc sur le coeur zero, ou le tick existe. Il y partage le
 /// processeur avec le compositeur, mais il en est desormais INDEPENDANT :
 /// c'est le tick qui l'elit, pas la fin d'une trame.
+/// L'ENREGISTREUR DE VOL N'EST PAS SUR LE CHEMIN DE L'ENTREE.
+///
+/// # Ce qu'il coutait a l'entree
+///
+/// `poll()` -- la fonction que le fil d'entree appelle mille fois par seconde
+/// -- se terminait par `blackbox::poll()`. Toutes les 250 ms, celui-ci ecrit
+/// plusieurs enregistrements sur la cle USB, par transferts Bulk SYNCHRONES.
+/// Sur le TRIGKEY, la cle de demarrage EST la cible de l'enregistreur : chaque
+/// scrutation d'entree payait donc l'enregistreur.
+///
+/// Rien de tout cela ne se voyait sous QEMU : sans cle cible,
+/// `blackbox_storage_ready()` est faux et la fonction sort immediatement. Le
+/// defaut n'existait que sur la machine, ce qui est la pire facon d'exister.
+///
+/// # Pourquoi un fil separe est SUR
+///
+/// `blackbox_append_record` prend deja `RUNTIME_BUSY` par echange compare, et
+/// SAUTE l'enregistrement s'il est occupe -- le compteur `bb_busy_skips`
+/// existait avant ce lot. L'appeler depuis un autre fil ne cree donc aucune
+/// concurrence nouvelle : au pire un enregistrement est saute, et il est
+/// compte.
+///
+/// La cadence est de vingt millisecondes ; `blackbox::poll()` se limite
+/// lui-meme a 250 ms, et n'ecrit donc pas plus qu'avant.
+fn fil_blackbox() -> ! {
+    loop {
+        crate::kernel::blackbox::poll();
+        crate::kernel::task::sleep_ticks(20);
+    }
+}
+
+/// Lance le fil de l'enregistreur de vol.
+pub fn demarre_le_fil_blackbox() -> bool {
+    if FIL_BLACKBOX_ACTIF.load(Ordering::Acquire) {
+        return true;
+    }
+    // NORMALE, et non Interactive : l'enregistreur n'a aucune latence a
+    // defendre. Il ecrit ce qui s'est passe, il ne fait pas partie de ce qui
+    // se passe.
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_blackbox,
+        "blackbox",
+        crate::kernel::task::Priorite::Normale,
+    ) {
+        FIL_BLACKBOX_ACTIF.store(true, Ordering::Release);
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_FIL_LANCE periode_ms=20 priorite=normale"
+        );
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_FIL_REFUSE raison=tache-non-creee \
+consequence=enregistreur-muet"
+    );
+    false
+}
+
+static FIL_BLACKBOX_ACTIF: AtomicBool = AtomicBool::new(false);
+
 pub fn demarre_le_fil_hid() -> bool {
     if FIL_HID_ACTIF.load(Ordering::Acquire) {
         return true;
@@ -4034,7 +4236,6 @@ consequence=scrutation-reste-dans-la-boucle-de-trames"
 pub fn poll() {
     let hid = hid_polling();
     if !hid && !surveille_branchements() {
-        crate::kernel::blackbox::poll();
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
@@ -4130,7 +4331,6 @@ pub fn poll() {
         }
     }
     RUNTIME_BUSY.store(false, Ordering::Release);
-    crate::kernel::blackbox::poll();
 }
 
 /// Nom lisible d'une vitesse xHCI.

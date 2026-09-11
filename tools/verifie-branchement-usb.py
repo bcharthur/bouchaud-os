@@ -169,9 +169,18 @@ def regle_rapports_non_perdus(xhci, fautes):
     croisement etait evite en armant les extremites plus tard -- le branchement
     a chaud rend le croisement NORMAL, et cette parade ne marche plus.
     """
-    bloc = corps(xhci, "fn wait_event(")
+    # LA REGLE SUIT LE CORPS, PAS LE NOM.
+    #
+    # `wait_event` n'est plus qu'une enveloppe qui fixe le budget par defaut :
+    # l'attente elle-meme vit dans `wait_event_budget`, depuis que le chemin de
+    # scrutation a recu son propre budget court. Chercher l'invariant dans
+    # l'enveloppe le declarait absent alors qu'il avait seulement demenage --
+    # et une regle qui accuse a tort finit par etre eteinte.
+    bloc = corps(xhci, "fn wait_event_budget(")
     if bloc is None:
-        fautes.append("xhci_active.rs : wait_event a disparu.")
+        bloc = corps(xhci, "fn wait_event(")
+    if bloc is None:
+        fautes.append("xhci_active.rs : l'attente d'evenement a disparu.")
         return
     if "differe(controller, event)" not in bloc:
         fautes.append(
