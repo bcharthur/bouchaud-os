@@ -200,7 +200,15 @@ ensuite.
 (`registre.rs`), garde par `tools/verifie-registre-lecture-reentrante.py` et
 par deux cas hote dont l'un ne termine pas sans le correctif. **Mesure sous
 QEMU** : `nvme-parallele` rend ses trois verdicts six fois sur six, contre une
-fois sur deux avant. **Non valide sur TRIGKEY** : rien ne dit que c'etait LE
+fois sur deux avant.
+
+Le declencheur etant le RECYCLAGE d'un emplacement, la preuve la plus forte est
+un brassage de taches soutenu. Une session unique enchainant quatre
+`nvme-parallele` et trois `sched-latence` -- dont un a douze bruleurs sur
+quatre coeurs, soit une soixantaine de taches creees et recyclees -- rend ses
+sept verdicts, atteint `CHURN_FIN` et s'eteint proprement. Avant le correctif,
+trois passages de la seule sonde NVMe suffisaient a figer la machine une fois
+sur deux. **Non valide sur TRIGKEY** : rien ne dit que c'etait LE
 gel observe sur la machine, seulement que c'en etait un, reel, et du meme
 genre.
 
