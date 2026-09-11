@@ -14,6 +14,7 @@ pub use crate::drivers::gfx::{
     set_clip, reset_clip, pixels_dessines, pixels_texte, clip_rect, decoupe_touche,
     note_pixels_dessines,
     dernier_present_rect, lfb_present_generation, trace_present,
+    debit_framebuffer_mio_s,
     height, width,
     HEIGHT, WIDTH,
     C_BLACK, C_BLUE, C_CYAN, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,

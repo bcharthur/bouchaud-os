@@ -7,6 +7,7 @@
 pub mod ports;
 pub mod cpu;
 pub mod cpu_local; // BOUCHAUD_SMP_NG1_CPU_FOUNDATION
+pub mod pat; // BOUCHAUD_PAT_ECRITURE_COMBINEE_V1
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;

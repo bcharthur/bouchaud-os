@@ -132,6 +132,15 @@ pub const PTE_ACCESSED: u64 = 1 << 5;
 pub const PTE_DIRTY: u64 = 1 << 6;
 pub const PTE_HUGE: u64 = 1 << 7;
 pub const PTE_NO_EXEC: u64 = 1 << 63;
+/// Bit `PAT` d'une entree de QUATRE KIBIOCTETS.
+///
+/// Il partage sa position avec `PTE_HUGE`, et ce n'est pas une collision : au
+/// niveau feuille, la taille n'a plus a etre decrite, et le bit sept y designe
+/// la table PAT. Les deux constantes existent separement parce que confondre
+/// « grande page » et « type memoire » ne se remarquerait qu'a l'execution.
+pub const PTE_PAT_PETITE_PAGE: u64 = 1 << 7;
+/// Bit `PAT` d'une entree de DEUX MEBIOCTETS.
+pub const PTE_PAT_GRANDE_PAGE: u64 = 1 << 12;
 
 // Les bits 9..11 d'une PTE x86-64 sont reserves au logiciel. Bouchaud y
 // conserve la classe RSS de chaque mapping. Ce petit tag rend le compte
@@ -460,6 +469,99 @@ pub fn identity_map_kernel_page(virt_phys: u64) -> bool {
     table[leaf] = page | PTE_PRESENT | PTE_WRITE;
     flush(page);
     true
+}
+
+/// Passe une plage PHYSIQUE en ecriture combinee, dans la fenetre physique.
+///
+/// # Pourquoi cette fonction existe
+///
+/// Le framebuffer est une fenetre PCIe : le micrologiciel la decrit comme non
+/// cachable dans ses MTRR, et il a raison pour des registres. Un framebuffer
+/// n'en est pas un -- l'ordre des pixels n'importe pas, et personne ne relit
+/// un pixel -- mais rien ne le disait au processeur.
+///
+/// Le cout, mesure sur la machine de reference : 8,3 Mo en 75 ms, soit
+/// 110 Mo/s, quand la memoire normale en fait dix a vingt mille. Chaque trame
+/// plein ecran coutait soixante-quinze millisecondes.
+///
+/// # Ce qu'elle change, et ce qu'elle refuse de changer
+///
+/// Elle pose le bit `PAT` sur les entrees qui couvrent la plage, ce qui les
+/// fait designer l'entree quatre de la table -- celle que
+/// `arch::x86_64::pat` a reprogrammee en ecriture combinee. Le type effectif
+/// devient alors ECRITURE COMBINEE (Intel Vol. 3, combinaison MTRR non
+/// cachable + PAT ecriture combinee).
+///
+/// Elle REFUSE une page d'un gibioctet. Une telle page couvre bien plus que le
+/// framebuffer : la passer en ecriture combinee emporterait avec elle des
+/// registres de peripherique voisins, dont l'ordre des ecritures est le seul
+/// contrat. Mieux vaut un ecran lent qu'un pilote qui ecrit dans le desordre.
+///
+/// Prend l'adresse VIRTUELLE de la plage, celle par laquelle le noyau y ecrit.
+///
+/// Rend le nombre de pages effectivement changees, ou une raison.
+pub fn passe_en_ecriture_combinee(virt_base: u64, octets: u64) -> Result<usize, &'static str> {
+    if octets == 0 {
+        return Err("plage vide");
+    }
+    let root = unsafe { KERNEL_PML4 };
+    if root == 0 {
+        return Err("table noyau absente");
+    }
+
+    // L'ADRESSE VIRTUELLE, ET PAS LA PHYSIQUE.
+    //
+    // Le framebuffer du micrologiciel n'est PAS dans la fenetre physique. Sur
+    // la machine de reference, le GOP est a 0x18000000000 quand la fenetre
+    // physique commence a 0x28000000000 : le chargeur le mappe a part. Calculer
+    // `offset + physique` aurait donc pointe ailleurs -- et change le type
+    // memoire de pages qui n'avaient rien demande.
+    let debut = virt_base & !(PAGE_SIZE - 1);
+    let fin = virt_base.saturating_add(octets);
+    let mut changees = 0usize;
+    let mut page = debut;
+    while page < fin {
+        let virt = page;
+        let mut table = table_at(root);
+        let mut pas = PAGE_SIZE;
+        let mut atteint = false;
+        for niveau in (1..4).rev() {
+            let decalage = 12 + 9 * niveau;
+            let index = ((virt >> decalage) & 0x1FF) as usize;
+            let entree = table[index];
+            if entree & PTE_PRESENT == 0 {
+                return Err("page absente de la table noyau");
+            }
+            if entree & PTE_HUGE != 0 {
+                let portee = 1u64 << decalage;
+                if portee > 2 * 1024 * 1024 {
+                    // Un gibioctet : voir la note ci-dessus.
+                    return Err("page trop large, refus de l'etendre a des registres voisins");
+                }
+                // Sur une grande page, le bit PAT est le douzieme, et non le
+                // septieme : le septieme y designe deja la taille.
+                table[index] = entree | PTE_PAT_GRANDE_PAGE;
+                flush(virt);
+                pas = portee;
+                atteint = true;
+                changees += 1;
+                break;
+            }
+            table = table_at(entree & ADDR_MASK);
+        }
+        if !atteint {
+            let feuille = ((virt >> 12) & 0x1FF) as usize;
+            let entree = table[feuille];
+            if entree & PTE_PRESENT == 0 {
+                return Err("page absente de la table noyau");
+            }
+            table[feuille] = entree | PTE_PAT_PETITE_PAGE;
+            flush(virt);
+            changees += 1;
+        }
+        page = page.saturating_add(pas);
+    }
+    Ok(changees)
 }
 
 /// Une adresse est-elle dans le creneau utilisateur ?

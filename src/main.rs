@@ -129,6 +129,19 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
 
+    // LA PAT ICI, ET PAS DANS `arch::init`.
+    //
+    // Sur la machine de reference -- UEFI, `reference-desktop` --, `stage2::run`
+    // est appele quelques lignes plus bas et NE REND JAMAIS LA MAIN :
+    // `arch::x86_64::init()` n'est donc jamais atteint. La configuration y
+    // vivait, et le releve le disait sans que je le lise -- `coeurs_pat=0`,
+    // `pat=0x0007040600070406`, soit la valeur de sortie d'usine.
+    //
+    // Elle vit desormais au seul endroit que TOUS les chemins traversent :
+    // apres la pagination, qui est tout ce dont elle a besoin, et avant le
+    // premier pixel.
+    arch::x86_64::pat::configure_ce_coeur();
+
     // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
     // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.
     if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {

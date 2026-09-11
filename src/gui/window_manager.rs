@@ -1209,10 +1209,12 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (px, py, pw, ph) = fb::dernier_present_rect();
     let maintenant_ns = crate::kernel::timer::monotonic_ns();
     crate::serial_println!(
-        "[GUI-PRESENT] present_calls={} lfb_copies={} lfb_pixels={} \
+        "[GUI-PRESENT] debit_mio_s={} present_calls={} lfb_copies={} lfb_pixels={} \
          backbuffer_generation={} refused_userland={} refused_backbuffer={} \
          refused_lfb={} refused_empty_rect={} last_present_rect={},{},{},{} \
          last_present_ns={} since_last_present_ms={}",
+        // LE DEBIT, qui dit si le framebuffer est combinable ou non.
+        crate::drivers::gfx::debit_framebuffer_mio_s(),
         demandes, copies, pixels_lfb,
         fb::pixels_dessines(),
         userland, tampon, lfb, vide,

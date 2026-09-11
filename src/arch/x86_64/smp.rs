@@ -937,6 +937,7 @@ fn log_cpu_topology() {
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn bouchaud_ap_entry() -> ! {
+    use crate::arch::x86_64::pat;
     // The trampoline has already selected a bootstrap stack. From this point on
     // hardware APIC identity is translated once into a dense Bouchaud CpuId.
     let cpu_id = match cpu_local::register_current_ap() {
@@ -947,6 +948,10 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
     };
     let cpu = cpu_id.as_usize();
 
+    // La PAT est par coeur : celui-ci reprogramme la sienne, sans quoi il
+    // verrait le framebuffer non cachable la ou les autres le voient
+    // combinable -- et une trame dessinee par lui couterait cent fois plus.
+    pat::configure_ce_coeur();
     gdt::init_ap(cpu);
     idt::load_ap();
     usermode::init_ap(cpu);
