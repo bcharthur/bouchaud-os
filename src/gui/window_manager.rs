@@ -1209,12 +1209,21 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (px, py, pw, ph) = fb::dernier_present_rect();
     let maintenant_ns = crate::kernel::timer::monotonic_ns();
     crate::serial_println!(
-        "[GUI-PRESENT] debit_mio_s={} present_calls={} lfb_copies={} lfb_pixels={} \
+        "[GUI-PRESENT] debit_mio_s={} pat_coeurs={}/{} present_calls={} lfb_copies={} lfb_pixels={} \
          backbuffer_generation={} refused_userland={} refused_backbuffer={} \
          refused_lfb={} refused_empty_rect={} last_present_rect={},{},{},{} \
          last_present_ns={} since_last_present_ms={}",
         // LE DEBIT, qui dit si le framebuffer est combinable ou non.
         crate::drivers::gfx::debit_framebuffer_mio_s(),
+        // ET LE COMPTE DE COEURS, qui dit s'il l'est POUR TOUS.
+        //
+        // La PAT est par coeur. Un coeur oublie verrait la meme page non
+        // cachable la ou les autres la voient combinable -- et le manuel
+        // declare INDEFINI le melange de types memoire pour une meme page.
+        // Le compte etait releve avant le demarrage des coeurs secondaires,
+        // donc il ne prouvait rien.
+        crate::arch::x86_64::pat::coeurs_configures(),
+        crate::arch::x86_64::smp::schedulable_cpus(),
         demandes, copies, pixels_lfb,
         fb::pixels_dessines(),
         userland, tampon, lfb, vide,
@@ -1728,6 +1737,17 @@ fn handle_click(
         if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
+                // ARRETER LA MACHINE, ET PAS SEULEMENT LE BUREAU.
+                //
+                // `Quitter` rend la main au shell ; ces deux-la ferment la
+                // session pour de bon, apres avoir ecrit sur la cle ce que la
+                // session a produit. Elles ne reviennent jamais.
+                else if kind == window::KIND_ETEINDRE {
+                    crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK);
+                }
+                else if kind == window::KIND_REDEMARRER {
+                    crate::kernel::power::reboot();
+                }
                 else if kind == window::KIND_NAVIGATEUR {
                     lance_navigateur(wins, home, degats);
                     fenetre_ouverte = true;

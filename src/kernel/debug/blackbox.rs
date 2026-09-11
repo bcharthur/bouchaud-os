@@ -440,6 +440,65 @@ pub fn poll() {
     }
 }
 
+/// Vide l'enregistreur de vol AVANT une extinction volontaire.
+///
+/// # Pourquoi cette fonction existe
+///
+/// Les trois premieres sessions physiques ont toutes fini au bouton
+/// d'alimentation, et l'archive extraite ne contenait a chaque fois que les
+/// premieres dizaines de secondes. Non parce que l'enregistreur tombait, mais
+/// parce qu'une coupure brutale n'a personne pour ecrire ce qui reste.
+///
+/// Ce sont precisement les dernieres secondes qu'on cherche : celles ou la
+/// machine s'est degradee. L'enregistreur voyait tout sauf ce qu'on lui
+/// demandait.
+///
+/// Une extinction par le menu passe donc par ici, et ecrit :
+///
+///   * les evenements de vol encore en memoire ;
+///   * le journal serie qui n'a pas encore ete pose ;
+///   * un dernier echantillon, et un dernier releve memoire ;
+///   * une marque de fin, qui distingue une session CLOSE d'une session
+///     coupee -- sans elle, on ne sait pas si le silence est la fin ou une
+///     panne.
+pub fn vide_avant_extinction(raison: &str) {
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={} \
+consequence=les-dernieres-secondes-ne-seront-pas-relues",
+            raison,
+        );
+        return;
+    }
+    let maintenant = now_ns();
+
+    // Le vol d'abord : c'est le plus volatil, et le plus precis.
+    for _ in 0..8 {
+        flush_flight(maintenant);
+    }
+    flush_serial(maintenant, true);
+    sample(maintenant);
+    memory_sample(maintenant);
+
+    let mut marque = Text::new();
+    let _ = write!(
+        &mut marque,
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V1 FIN raison={} boot_id={} ts_ns={} records={}\n",
+        raison,
+        boot_id(),
+        maintenant,
+        RECORD_SEQ.load(Ordering::Relaxed),
+    );
+    let _ = append(KIND_MARKER, marque.as_bytes(), maintenant, crate::drivers::serial::trace_total_bytes());
+    flush_serial(maintenant, true);
+    crate::drivers::xhci_active::blackbox_force_sync();
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_FIN raison={} records={}",
+        raison,
+        RECORD_SEQ.load(Ordering::Relaxed),
+    );
+}
+
 pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) {
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         return;

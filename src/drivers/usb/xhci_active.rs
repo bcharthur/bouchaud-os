@@ -214,6 +214,12 @@ static DEBRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
+/// Code d'achevement du DERNIER transfert de controle echoue.
+///
+/// Sans lui, le repli ne peut pas distinguer « ce transfert n'est pas passe »
+/// de « ce peripherique ne repondra jamais » -- et il appliquait la meme peine
+/// aux deux.
+static DERNIER_CODE_CONTROLE: AtomicUsize = AtomicUsize::new(0);
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_BUSY: AtomicBool = AtomicBool::new(false);
 static mut RUNTIME: Option<Runtime> = None;
@@ -1235,13 +1241,19 @@ fn control_transfer(
         Some(1),
         budget_ns,
     )
-    .ok_or("control-transfer-timeout")?;
+    .ok_or_else(|| {
+        // Une echeance n'a pas de code d'achevement : le peripherique n'a rien
+        // rendu du tout. C'est le cas qui merite la quarantaine longue.
+        DERNIER_CODE_CONTROLE.store(0, Ordering::Relaxed);
+        "control-transfer-timeout"
+    })?;
     let cc = completion_code(event.status);
     if cc != CC_SUCCESS && cc != CC_SHORT_PACKET {
         crate::serial_println!(
             "BOUCHAUD_USB_CONTROL_FAIL slot={} ep=1 cc={} setup={:#018x} len={} status={:#010x}",
             device.slot_id, cc, setup, data_len, event.status
         );
+        DERNIER_CODE_CONTROLE.store(cc as usize, Ordering::Relaxed);
         return Err("control-transfer-error");
     }
     CONTROL_OK.fetch_add(1, Ordering::Relaxed);
@@ -3092,11 +3104,24 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
         if maintenant < controller.hids[index].repli_muet_jusqu_a_ns {
             continue;
         }
-        if control_get_report(controller, index) {
+        // UNE ERREUR TRANSITOIRE N'EST PAS UN PERIPHERIQUE MUET.
+        //
+        // On distingue les deux avant de decider de la peine : un transfert qui
+        // n'est pas passe se retente dans vingt millisecondes, un peripherique
+        // qui ne repond pas attend une seconde.
+        let avant = HID_CONTROL_FAILS.load(Ordering::Relaxed);
+        let repond = control_get_report(controller, index);
+        let transitoire = !repond
+            && HID_CONTROL_FAILS.load(Ordering::Relaxed) != avant
+            && DERNIER_CODE_CONTROLE.load(Ordering::Relaxed) == CC_ERREUR_TRANSACTION as usize;
+        if repond {
             // Le point s'est remis a repondre : il sort de quarantaine, et sa
             // prochaine rechute sera annoncee de nouveau.
             controller.hids[index].echecs_repli = 0;
             controller.hids[index].quarantaine_annoncee = false;
+        } else if transitoire {
+            let ep = &mut controller.hids[index];
+            ep.repli_muet_jusqu_a_ns = maintenant.saturating_add(QUARANTAINE_TRANSITOIRE_NS);
         } else {
             {
                 let ep = &mut controller.hids[index];
@@ -3145,6 +3170,28 @@ const ECHECS_AVANT_QUARANTAINE: u8 = 2;
 /// scrutations de cette seconde, assez court pour qu'un peripherique qui se
 /// reveille soit repris sans que l'utilisateur le remarque.
 const QUARANTAINE_REPLI_NS: u64 = 1_000_000_000;
+/// Quarantaine apres une erreur TRANSITOIRE.
+///
+/// # Pourquoi deux durees et pas une
+///
+/// La quarantaine existe pour un peripherique qui ne repondra JAMAIS -- une
+/// interface vendeur qui n'implemente pas `GET_REPORT`. Une seconde y est le
+/// bon prix : le cout devient negligeable, et la reprise reste imperceptible.
+///
+/// Une erreur de transaction n'a rien a voir. Elle dit que CE transfert-la
+/// n'est pas passe : un cable, un concentrateur, un peripherique qu'on vient
+/// de rebrancher, ou un anneau qu'on n'a pas servi assez vite. Le releve
+/// physique le montre a l'instant ou Ladybird demarre -- `cc=4` sur deux
+/// points de terminaison qui fonctionnaient jusque-la.
+///
+/// Leur appliquer la quarantaine longue punit un peripherique sain pour un
+/// incident passager, et c'est ce que l'utilisateur a senti apres avoir
+/// rebranche sa souris : « lent, elle se teleporte ». Vingt millisecondes
+/// suffisent a ne pas boucler dessus, et se reprennent sans qu'on le voie.
+const QUARANTAINE_TRANSITOIRE_NS: u64 = 20_000_000;
+/// Erreur de transaction USB : le transfert n'est pas passe, le peripherique
+/// n'a rien refuse.
+const CC_ERREUR_TRANSACTION: u8 = 4;
 /// Points de terminaison mis en quarantaine, pour le diagnostic.
 static REPLIS_EN_QUARANTAINE: AtomicUsize = AtomicUsize::new(0);
 

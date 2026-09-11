@@ -38,6 +38,17 @@ const VBOX_SHUTDOWN: u16 = 0x4004;
 pub fn shutdown(code: u8) -> ! {
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
 
+    // L'ENREGISTREUR DE VOL EN PREMIER, ET AVANT LA PERSISTANCE.
+    //
+    // Les trois premieres sessions physiques ont fini au bouton
+    // d'alimentation, et chaque archive s'arretait aux premieres dizaines de
+    // secondes -- celles ou tout allait bien. Ce sont les dernieres qu'on
+    // cherche.
+    //
+    // Avant la persistance, parce que celle-ci peut echouer et qu'un echec ne
+    // doit pas emporter le releve qui l'explique.
+    crate::kernel::blackbox::vide_avant_extinction("extinction");
+
     // La zone persistante n'atteint le disque que sur `fsync` explicite. Un
     // programme qui ecrit sous /persist et se contente de fermer son fichier --
     // ce que fait la plupart du code, et notamment le telechargement d'un
@@ -71,6 +82,68 @@ pub fn shutdown(code: u8) -> ! {
         outw(QEMU_ACPI_SHUTDOWN, 0x2000);
         outw(BOCHS_SHUTDOWN, 0x2000);
         outw(VBOX_SHUTDOWN, 0x3400);
+    }
+    halt()
+}
+
+/// Registre de reinitialisation PCI, present sur tout chipset moderne.
+const RESET_PCI: u16 = 0xCF9;
+/// Port de commande du controleur clavier 8042, qui sait aussi reinitialiser.
+const CMD_8042: u16 = 0x64;
+
+/// Redemarre la machine.
+///
+/// # Trois voies, de la plus propre a la plus brutale
+///
+/// 1. Le registre `0xCF9` : c'est la voie du chipset, celle qu'utilisent les
+///    systemes modernes. `0x02` arme, `0x06` declenche une reinitialisation
+///    complete.
+/// 2. Le controleur clavier 8042 : la voie historique du PC, encore emulee
+///    partout. Elle demande d'attendre que son tampon d'entree soit vide,
+///    faute de quoi la commande est perdue en silence.
+/// 3. Une IDT vide : le processeur ne trouve plus de gestionnaire, ne trouve
+///    pas non plus de double faute, et se reinitialise. C'est laid, c'est
+///    documente, et cela ne rate pas.
+///
+/// L'enregistreur de vol est vide AVANT, comme a l'extinction : un
+/// redemarrage est une fin de session comme une autre.
+pub fn reboot() -> ! {
+    crate::serial_println!("[kernel] redemarrage demande");
+    crate::kernel::blackbox::vide_avant_extinction("redemarrage");
+    match crate::fs::persistance::synchronise() {
+        -1 => crate::serial_println!(
+            "[kernel] persistance: ECHEC de l'ecriture au redemarrage, /persist n'est pas a jour"
+        ),
+        ecrits => crate::serial_println!(
+            "[kernel] persistance: {} fichier(s) ecrit(s) au redemarrage",
+            ecrits
+        ),
+    }
+
+    x86_64::instructions::interrupts::disable();
+    unsafe {
+        // 1. Le chipset.
+        outb(RESET_PCI, 0x02);
+        outb(RESET_PCI, 0x06);
+
+        // 2. Le 8042. Son tampon d'entree doit etre vide, sinon la commande
+        //    est jetee sans rien dire.
+        for _ in 0..100_000 {
+            if crate::arch::x86_64::ports::inb(CMD_8042) & 0x02 == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        outb(CMD_8042, 0xFE);
+    }
+
+    // 3. Une IDT vide : sans gestionnaire ni double faute, le processeur se
+    //    reinitialise. Dernier recours, et il aboutit toujours.
+    crate::serial_println!("[kernel] redemarrage: repli sur la reinitialisation par IDT vide");
+    unsafe {
+        let idt_vide: [u8; 10] = [0; 10];
+        core::arch::asm!("lidt [{}]", in(reg) idt_vide.as_ptr(), options(nostack));
+        core::arch::asm!("int3", options(nostack));
     }
     halt()
 }

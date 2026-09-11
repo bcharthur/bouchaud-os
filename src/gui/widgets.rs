@@ -897,7 +897,19 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     // en surbrillance derriere le pointeur.
     let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
-    let sep_idx = MENU.len() - 1; // index de "Quitter"
+    // LE SEPARATEUR SE DESIGNE PAR SON LIBELLE, PAS PAR SA POSITION.
+    //
+    // Il valait `MENU.len() - 1`, avec le commentaire « index de Quitter ».
+    // C'etait vrai quand Quitter fermait la liste ; l'ajout de Redemarrer et
+    // Eteindre l'a fait designer la derniere entree, et le trait a glisse d'un
+    // cran sans que rien ne le dise.
+    //
+    // La table le dit deja d'elle-meme : « le `kind` est explicite et non
+    // deduit de la position ». Le separateur suit la meme regle.
+    let sep_idx = MENU
+        .iter()
+        .position(|(libelle, _)| *libelle == "Quitter")
+        .unwrap_or(MENU.len());
     let bande = crate::gui::disposition::BANDE_ACCENT as usize;
 
     for (i, (item, _kind)) in MENU.iter().enumerate() {

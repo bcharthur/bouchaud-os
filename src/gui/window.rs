@@ -108,12 +108,30 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-pub(crate) const MENU: [(&str, usize); 8] = [
+pub(crate) const MENU: [(&str, usize); 10] = [
     ("Ladybird", KIND_NAVIGATEUR),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3),
     ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
     ("Quitter", usize::MAX),
+    ("Redemarrer", KIND_REDEMARRER),
+    ("Eteindre", KIND_ETEINDRE),
 ];
+
+/// Redemarrer la machine.
+///
+/// # Pourquoi ces deux entrees existent
+///
+/// Sans elles, la seule facon d'arreter la machine etait le bouton
+/// d'alimentation -- et une coupure brutale n'a personne pour ecrire ce qui
+/// reste. Les trois premieres sessions physiques se sont ainsi terminees, et
+/// chaque archive extraite s'arretait aux premieres dizaines de secondes :
+/// celles ou tout allait bien. Ce sont les dernieres qu'on cherche.
+///
+/// Une extinction par le menu vide l'enregistreur de vol et la persistance
+/// avant de couper. Elle ferme la session au lieu de l'interrompre.
+pub(crate) const KIND_REDEMARRER: usize = usize::MAX - 1;
+/// Eteindre la machine. Voir [`KIND_REDEMARRER`].
+pub(crate) const KIND_ETEINDRE: usize = usize::MAX - 2;
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
 pub(crate) const ICONS: [(&str, usize); 5] = [
