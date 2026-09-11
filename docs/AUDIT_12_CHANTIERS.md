@@ -208,8 +208,19 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   `verifie-ordonnanceur-sans-bkl.py`, `verifie-preemption.py`.
 * **Mesure** : 4 fichiers portant un point sur de preemption ; quantum 4 ms,
   4 coeurs, vol de travail actif (`SMP_NG2_SCHEDULER`).
+* **Defaut introduit et corrige dans ce lot** : le vecteur de reschedule
+  echantillonnait le temps processeur SANS garde d'inactivite. Tant qu'il ne
+  servait qu'aux IPI, c'etait sans consequence ; depuis que le timer local y
+  tire a chaque quantum, il imputait un quantum entier a la tache endormie sur
+  un coeur arrete. `dns-probe` CAS 3 le mesure en comparant deux horloges :
+  `cpu_ms=5025` pour `mur_ms=5002`. C'est la barriere GitHub qui l'a attrape,
+  pas la barriere locale -- le scenario DNS n'etait pas dans le balayage que je
+  faisais ici. Corrige, garde par `verifie-timer-par-coeur.py` (deux mutations,
+  deux attrapees).
 * **Ce qui manque** : preemption depuis l'IRQ seulement, pas de points surs,
-  pas de tickless. Aucune mesure de latence reveil→execution. Le defaut
+  pas de tickless -- et le tickless a maintenant un COUT MESURE : un coeur au
+  repos se reveille a chaque quantum, et une attente bloquante de cinq secondes
+  consomme ~350 ms de processeur contre 1 ms au PIT seul. Le defaut
   d'epinglage des taches noyau historiques n'a PAS ete change : seules les
   taches de fond se declarent migrables.
 

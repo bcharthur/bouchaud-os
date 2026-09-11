@@ -34,11 +34,13 @@ inconditionnel, et que le battement soit MESURE et non deduit du compte de
 coeurs en ligne.
 """
 
+import re
 import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 SMP = RACINE / "src/arch/x86_64/smp.rs"
+RESCHEDULE = RACINE / "src/arch/x86_64/idt/reschedule.rs"
 
 
 def sans_commentaires(texte):
@@ -125,6 +127,43 @@ def main():
                 "« en ligne » n'a jamais voulu dire « bat »."
             )
 
+    # UN COEUR QUI DORT NE CONSOMME LE TEMPS DE PERSONNE.
+    #
+    # Le vecteur de reschedule ne servait qu'aux IPI, rares et toujours envoyes
+    # a un coeur qu'on veut voir travailler. Depuis que le timer local y tire a
+    # chaque quantum, il atteint aussi un coeur arrete sur `hlt` -- et il
+    # imputait alors `SCHED_QUANTUM_TICKS` a la tache installee, qui dort dans
+    # un appel bloquant.
+    #
+    # Quatre millisecondes imputees par quatre millisecondes ecoulees : une
+    # attente de cinq secondes sans rien faire se comptait cinq secondes de
+    # processeur. `dns-probe` CAS 3 l'a mesure -- `cpu_ms=5025` pour
+    # `mur_ms=5002` -- et c'est la barriere GitHub qui l'a attrape, pas la
+    # barriere locale.
+    if not RESCHEDULE.exists():
+        fautes.append("fichier absent : src/arch/x86_64/idt/reschedule.rs")
+    else:
+        resched = sans_commentaires(RESCHEDULE.read_text(encoding="utf-8"))
+        if "echantillonne_quantum" not in resched:
+            fautes.append(
+                "reschedule.rs : l'echantillonnage du quantum a disparu ; le "
+                "temps processeur des taches ne serait plus compte sur les "
+                "coeurs cadences par le timer local."
+            )
+        elif "is_idle" not in resched:
+            fautes.append(
+                "reschedule.rs : l'echantillonnage du quantum n'est plus garde "
+                "par l'inactivite du coeur. Le timer local tire aussi sur un "
+                "coeur arrete sur `hlt` : il imputerait un quantum entier a la "
+                "tache qui y dort, et une attente bloquante se compterait "
+                "comme du calcul. Le handler du PIT pose la meme garde."
+            )
+        elif re.search(r"if\s+(?:true|false)\b", resched):
+            fautes.append(
+                "reschedule.rs : une condition figee autour de "
+                "l'echantillonnage du quantum."
+            )
+
     mesure = corps(smp, "pub fn mesure_battement_par_coeur(")
     if mesure is None:
         fautes.append("smp.rs : la mesure du battement a disparu.")
@@ -147,7 +186,8 @@ def main():
         return 1
     print(
         "timer par coeur : repli periodique calibre, mode consulte avant tout "
-        "MSR, coup de pouce inconditionnel, battement mesure par coeur"
+        "MSR, coup de pouce inconditionnel, battement mesure par coeur, "
+        "quantum non impute a un coeur qui dort"
     )
     return 0
 

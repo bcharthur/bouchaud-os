@@ -309,6 +309,14 @@ manifeste. Le manifeste est ce qui permet de resoudre une adresse en
 - **La calibration du timer local** est faite une fois, sur un coeur, et
   supposee valable pour tous. Vrai pour les coeurs d'un meme paquet ; non
   verifie sur une machine multi-paquets.
+- **Le timer local est PERIODIQUE, donc arme en permanence.** Un coeur au repos
+  se reveille a chaque quantum pour constater qu'il n'a rien a faire. Le cout
+  se mesure : une attente bloquante de cinq secondes consomme environ 350 ms de
+  processeur, contre 1 ms quand seul le PIT battait. C'est le prix du battement
+  par coeur, et il se paiera en chaleur et en batterie sur les seize coeurs du
+  TRIGKEY. Le retirer demande un timer a un coup (tickless), qui est un
+  chantier a part -- un coeur qui desarme son timer et manque un reveil ne se
+  reveille plus, et c'est exactement le verrou d'amorcage deja rencontre ici.
 - **`disktest --ecriture` ecrit sur le dernier bloc de la partition.** Si un
   systeme de fichiers y placait des donnees, elles seraient reposees a
   l'identique — mais une coupure entre l'ecriture et la restauration les
