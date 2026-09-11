@@ -1327,13 +1327,20 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     );
 
     crate::serial_println!(
-        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} polling={}",
+        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} \
+polling={} scrutations_par_s={} replis_en_quarantaine={}",
         crate::drivers::xhci_active::is_active() as u8,
         crate::drivers::xhci_active::connected_ports(),
         crate::drivers::xhci_active::usb_devices(),
         crate::drivers::xhci_active::hid_keyboards(),
         crate::drivers::xhci_active::hid_mice(),
         crate::drivers::xhci_active::hid_polling() as u8,
+        // LE CHIFFRE QUI A NOMME LE DEFAUT.
+        //
+        // Il valait 3 sur la machine de reference, et il a fallu extraire
+        // l'enregistreur de vol pour le lire. Il se lit maintenant ici.
+        crate::drivers::xhci_active::cadence_scrutation(),
+        crate::drivers::xhci_active::replis_en_quarantaine(),
     );
     if crate::drivers::xhci_active::hid_ready() {
         crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");

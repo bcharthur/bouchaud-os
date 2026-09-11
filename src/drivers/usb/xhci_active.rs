@@ -4213,6 +4213,50 @@ consequence=enregistreur-muet"
 
 static FIL_BLACKBOX_ACTIF: AtomicBool = AtomicBool::new(false);
 
+/// Instant du dernier releve de cadence, et compte de scrutations a cet instant.
+static CADENCE_NS: AtomicU64 = AtomicU64::new(0);
+static CADENCE_POLLS: AtomicUsize = AtomicUsize::new(0);
+/// Derniere cadence de scrutation observee, en scrutations par seconde.
+static CADENCE_PAR_SECONDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Scrutations par seconde, MESUREES.
+///
+/// # Pourquoi ce chiffre est publie
+///
+/// C'est celui qui a nomme le defaut. Sur la machine de reference il valait
+/// 3,19 -- le fil d'entree demandait une milliseconde entre deux tours et en
+/// mettait 313, parce qu'une attente non aboutie coutait 330 ms. Rien a
+/// l'ecran ne le disait ; il a fallu extraire l'enregistreur de vol et lire
+/// `samples.log` pour le voir.
+///
+/// Un chiffre qu'on ne peut lire qu'en demontant la machine n'est pas un
+/// diagnostic. Celui-ci sort maintenant dans le journal, a cote de l'etat des
+/// peripheriques, et se lit sans rien demonter.
+pub fn cadence_scrutation() -> usize {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let precedent_ns = CADENCE_NS.load(Ordering::Relaxed);
+    let ecoule = maintenant.saturating_sub(precedent_ns);
+    if precedent_ns == 0 || ecoule >= 1_000_000_000 {
+        let polls = HID_POLLS.load(Ordering::Relaxed);
+        if precedent_ns != 0 && ecoule != 0 {
+            let delta = polls.saturating_sub(CADENCE_POLLS.load(Ordering::Relaxed));
+            let par_seconde = (delta as u64)
+                .saturating_mul(1_000_000_000)
+                .checked_div(ecoule)
+                .unwrap_or(0);
+            CADENCE_PAR_SECONDE.store(par_seconde as usize, Ordering::Relaxed);
+        }
+        CADENCE_NS.store(maintenant, Ordering::Relaxed);
+        CADENCE_POLLS.store(polls, Ordering::Relaxed);
+    }
+    CADENCE_PAR_SECONDE.load(Ordering::Relaxed)
+}
+
+/// Points de terminaison ecartes par la quarantaine du repli EP0.
+pub fn replis_en_quarantaine() -> usize {
+    REPLIS_EN_QUARANTAINE.load(Ordering::Relaxed)
+}
+
 pub fn demarre_le_fil_hid() -> bool {
     if FIL_HID_ACTIF.load(Ordering::Acquire) {
         return true;
