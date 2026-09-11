@@ -341,6 +341,11 @@ struct HidEndpoint {
     evenements: u32,
     /// Echecs consecutifs du repli EP0 sur CE point de terminaison.
     echecs_repli: u8,
+    /// L'entree en quarantaine de ce point a-t-elle deja ete annoncee ?
+    ///
+    /// La quarantaine se REPOSE a chaque reprise ratee ; l'annoncer a chaque
+    /// fois reviendrait a inonder le journal pour dire ce qui n'a pas change.
+    quarantaine_annoncee: bool,
     /// Instant avant lequel le repli ne sera pas retente sur ce point.
     ///
     /// # Pourquoi une quarantaine, et pas un simple compteur
@@ -366,6 +371,7 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     echecs_repli: 0,
+    quarantaine_annoncee: false,
     repli_muet_jusqu_a_ns: 0,
     evenements: 0,
     active: false,
@@ -1628,6 +1634,7 @@ fn configure_hids(
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
             echecs_repli: 0,
+            quarantaine_annoncee: false,
             repli_muet_jusqu_a_ns: 0,
             evenements: 0,
             active: false,
@@ -3086,7 +3093,10 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
             continue;
         }
         if control_get_report(controller, index) {
+            // Le point s'est remis a repondre : il sort de quarantaine, et sa
+            // prochaine rechute sera annoncee de nouveau.
             controller.hids[index].echecs_repli = 0;
+            controller.hids[index].quarantaine_annoncee = false;
         } else {
             {
                 let ep = &mut controller.hids[index];
@@ -3094,16 +3104,33 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
                 if ep.echecs_repli >= ECHECS_AVANT_QUARANTAINE {
                     ep.repli_muet_jusqu_a_ns =
                         maintenant.saturating_add(QUARANTAINE_REPLI_NS);
-                    let (slot, dci, echecs) = (ep.slot_id, ep.dci, ep.echecs_repli);
-                    REPLIS_EN_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
-                    crate::serial_println!(
-                        "BOUCHAUD_HID_REPLI_QUARANTAINE slot={} dci={} echecs={} \
+                    // UNE FOIS, A L'ENTREE EN QUARANTAINE, ET PAS A CHAQUE
+                    // REPRISE.
+                    //
+                    // La quarantaine est RETENTEE chaque seconde -- c'est ce
+                    // qui fait d'elle un pont et non une condamnation. Mais
+                    // une interface vendeur ne se met jamais a repondre : la
+                    // reprise echoue, la quarantaine se repose, et la ligne
+                    // se reimprimait. Deux lignes par seconde et pour
+                    // toujours, sur un journal serie dont le budget est
+                    // borne : le bruit finissait par chasser tout le reste.
+                    //
+                    // L'ETAT COURANT se lit ailleurs, et sans bruit :
+                    // `replis_en_quarantaine` sort dans `[USB-HID-V3]`, a
+                    // cadence de diagnostic.
+                    if !ep.quarantaine_annoncee {
+                        ep.quarantaine_annoncee = true;
+                        let (slot, dci, echecs) = (ep.slot_id, ep.dci, ep.echecs_repli);
+                        REPLIS_EN_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
+                        crate::serial_println!(
+                            "BOUCHAUD_HID_REPLI_QUARANTAINE slot={} dci={} echecs={} \
 reprise_dans_ms={}",
-                        slot,
-                        dci,
-                        echecs,
-                        QUARANTAINE_REPLI_NS / 1_000_000,
-                    );
+                            slot,
+                            dci,
+                            echecs,
+                            QUARANTAINE_REPLI_NS / 1_000_000,
+                        );
+                    }
                 }
             }
         }
