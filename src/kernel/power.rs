@@ -5,11 +5,14 @@
 //! aucun code de retour a interpreter. C'est la brique qui manque a
 //! [`crate::kernel::autorun`].
 //!
-//! Aucun des ports utilises ici n'est standard PC ; ce sont des conventions
-//! d'emulateurs, essayees dans l'ordre du plus specifique au plus general. Une
-//! vraie extinction ACPI demanderait de lire les tables ACPI, d'y trouver le
-//! bloc PM1a et la valeur SLP_TYP du systeme — beaucoup de code pour un noyau
-//! qui, aujourd'hui, ne tourne que sous emulation.
+//! Les ports `0xF4`, `0x604`, `0xB004` et `0x4004` ne sont pas standard PC :
+//! ce sont des conventions d'emulateurs, essayees dans l'ordre du plus
+//! specifique au plus general. Elles ne coupent RIEN sur une machine reelle.
+//!
+//! La vraie extinction vit dans [`crate::kernel::acpi_s5`] : bloc PM1 de la
+//! FADT et valeurs `SLP_TYP` de l'objet `\_S5_` du DSDT. Elle est tentee en
+//! dernier, une fois que les conventions d'emulateur ont montre qu'elles
+//! n'avaient rien coupe.
 
 use crate::arch::x86_64::ports::{outb, outw};
 
@@ -83,6 +86,24 @@ pub fn shutdown(code: u8) -> ! {
         outw(BOCHS_SHUTDOWN, 0x2000);
         outw(VBOX_SHUTDOWN, 0x3400);
     }
+
+    // LA VRAIE EXTINCTION, EN DERNIER ET SUR LE MATERIEL REEL.
+    //
+    // Les quatre ecritures ci-dessus sont des conventions d'EMULATEUR. Aucune
+    // n'existe sur la machine de reference : choisir « Eteindre » y figeait
+    // l'ecran sans couper le courant, et il fallait tenir le bouton
+    // d'alimentation -- ce qui emporte le releve de vol qu'on venait d'ecrire.
+    //
+    // En dernier parce que sous QEMU les conventions ci-dessus ont deja coupe,
+    // et que sur une vraie machine elles n'ont rien fait du tout.
+    if crate::kernel::acpi_s5::eteint() {
+        // `eteint` ne rend la main que sur echec : ce chemin n'est pas atteint.
+        halt()
+    }
+    crate::serial_println!(
+        "[kernel] extinction: aucune voie n'a coupe le courant (acpi={})",
+        crate::kernel::acpi_s5::disponible() as u8,
+    );
     halt()
 }
 

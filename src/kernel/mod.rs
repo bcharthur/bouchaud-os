@@ -6,6 +6,8 @@
 
 #[path = "../compat/linux/mod.rs"]
 pub mod abi;
+/// Extinction ACPI reelle (bloc PM1 + objet `\_S5_` du DSDT).
+pub mod acpi_s5;
 pub mod autorun;
 #[path = "navigateur/mod.rs"]
 pub mod navigateur;

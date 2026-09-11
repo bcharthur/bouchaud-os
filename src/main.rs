@@ -142,6 +142,15 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // premier pixel.
     arch::x86_64::pat::configure_ce_coeur();
 
+    // L'EXTINCTION SE PREPARE AU DEMARRAGE, PAS AU MOMENT DE COUPER.
+    //
+    // Chercher le RSDP, la FADT puis `\_S5_` alors que le systeme est deja en
+    // train de s'arreter, c'est parcourir la memoire physique au pire moment.
+    // Ici, la pagination est prete, rien n'a encore d'effet de bord, et le
+    // releve de vol portera la preuve que la machine SAIT s'eteindre -- bien
+    // avant qu'on le lui demande.
+    kernel::acpi_s5::prepare(boot_info);
+
     // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
     // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.
     if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {

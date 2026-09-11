@@ -297,6 +297,12 @@ struct HidDescriptor {
     subclass: u8,
     protocol: u8,
     kind: u8, // 1 keyboard, 2 mouse, 0 unknown HID
+    /// Le descripteur de RAPPORT de cette interface a-t-il ete lu et classe ?
+    ///
+    /// Il fait autorite : il enumere les usages que l'interface publie. Quand
+    /// il a parle, le repli aveugle de `install_hid_endpoints` n'a plus rien
+    /// a deviner -- et surtout, il ne doit PAS contredire ce qu'il dit.
+    classe_par_rapport: bool,
     report_len: u16,
     report_id: u8,
     endpoint_address: u8,
@@ -309,6 +315,7 @@ const EMPTY_HID_DESCRIPTOR: HidDescriptor = HidDescriptor {
     subclass: 0,
     protocol: 0,
     kind: 0,
+    classe_par_rapport: false,
     report_len: 0,
     report_id: 0,
     endpoint_address: 0,
@@ -324,6 +331,12 @@ struct HidEndpoint {
     interface: u8,
     protocol: u8,
     kind: u8,
+    /// Source de boutons reservee a CE point de terminaison, ou `usize::MAX`.
+    ///
+    /// L'etat global des boutons est l'union des sources : sans identite
+    /// propre, un rapport « rien d'enfonce » d'une interface au repos effacait
+    /// le bouton maintenu sur une autre. Voir `mouse/etat.rs`.
+    source_souris: usize,
     report_id: u8,
     max_packet: u16,
     ring: ProducerRing,
@@ -386,6 +399,7 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     interface: 0,
     protocol: 0,
     kind: 0,
+    source_souris: usize::MAX,
     report_id: 0,
     max_packet: 0,
     ring: EMPTY_RING,
@@ -900,6 +914,21 @@ fn differe(controller: &mut Controller, event: Trb) {
     controller.differes_len = index + 1;
 }
 
+/// Traite et vide la file des evenements mis de cote, dans l'ordre d'arrivee.
+///
+/// L'ORDRE EST LA RAISON D'ETRE DE LA FILE : deux frappes traitees a l'envers,
+/// c'est une touche relachee avant d'etre appuyee, donc une touche qui reste
+/// enfoncee. Elle est donc videe du plus ancien au plus recent, et jamais
+/// partiellement.
+fn traite_differes(controller: &mut Controller) {
+    let differes = controller.differes_len;
+    controller.differes_len = 0;
+    for index in 0..differes {
+        let event = controller.differes[index];
+        process_hid_event(controller, event);
+    }
+}
+
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
     wait_event_budget(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
 }
@@ -940,6 +969,28 @@ fn wait_event_budget(
             // FRAPPE. Le jeter la perd, et rien ne le dit.
             if ty == EVT_TRANSFER {
                 differe(controller, event);
+                // BOUCHAUD_USB_ENTREE_PENDANT_STOCKAGE_V1
+                //
+                // ET IL N'EST PAS NON PLUS A FAIRE ATTENDRE.
+                //
+                // Mis de cote, ce rapport n'etait traite qu'au tour de
+                // scrutation SUIVANT -- c'est-a-dire une fois le verrou du
+                // pilote rendu. Or une commande de stockage tient ce verrou
+                // pendant trois transferts et deux attentes, chacune bornee a
+                // un demi-seconde : une cle qui repond mal gelait l'entree
+                // pendant plus d'une seconde.
+                //
+                // C'est la forme exacte de ce que l'utilisateur a decrit en
+                // ouvrant le navigateur : « FPS 2 » avec le processeur a 22 %,
+                // et « la souris met trop de temps a se deplacer (multiple
+                // freeze) ». La machine n'etait pas saturee, elle ATTENDAIT.
+                //
+                // Le traitement a lieu ici, dans l'ordre d'arrivee, parce
+                // qu'il est sur : `process_hid_event` decode un rapport et
+                // rearme son extremite. Il n'emet aucun transfert et n'attend
+                // aucun evenement, donc il ne peut pas reentrer dans l'attente
+                // qui l'appelle.
+                traite_differes(controller);
             }
         }
         tours = tours.wrapping_add(1);
@@ -1452,6 +1503,9 @@ fn enrich_hid_descriptor(
                 let (kind, report_id) = classify_hid_report_descriptor(bytes);
                 if descriptor.kind == 0 { descriptor.kind = kind; }
                 descriptor.report_id = report_id;
+                // Le descripteur a parle, y compris quand il dit « ni clavier
+                // ni souris » : c'est un verdict, pas une absence de verdict.
+                descriptor.classe_par_rapport = true;
                 crate::serial_println!(
                     "BOUCHAUD_HID_REPORT_DESC slot={} if={} subclass={} protocol={} kind={} report_id={} bytes={}",
                     device.slot_id, descriptor.interface, descriptor.subclass,
@@ -1527,6 +1581,7 @@ fn parse_hid_descriptors(bytes: &[u8], output: &mut [HidDescriptor]) -> (u8, usi
                         subclass: current_subclass,
                         protocol: current_protocol,
                         kind,
+                        classe_par_rapport: false,
                         report_len: current_report_len,
                         report_id: 0,
                         endpoint_address: address,
@@ -1595,11 +1650,29 @@ fn configure_hids(
 
     for descriptor in descriptors.iter().take(wanted) {
         let mut kind = descriptor.kind;
-        if kind == 0 && descriptor.max_packet >= 3 && descriptor.protocol != 1 {
-            // Pragmatic physical fallback: an otherwise-unclassified HID IN
-            // interface on this lab machine is treated as a mouse candidate.
-            // This keeps vendor/report-protocol mice usable while the full HID
-            // usage parser grows, without ever stealing a known keyboard.
+        // BOUCHAUD_HID_REPLI_SOURIS_V2
+        //
+        // CE QUE CE REPLI FAISAIT DE TROP
+        // -------------------------------
+        // Il promouvait en souris TOUTE interface HID d'entree non classee,
+        // meme celle dont le descripteur de rapport venait d'etre lu et
+        // repondait « ni clavier ni souris ». Sur la machine de reference,
+        // l'interface VENDEUR d'un recepteur sans fil passait ainsi pour une
+        // souris : ses notifications (etat de pile, association) etaient
+        // relues comme des boutons et un deplacement.
+        //
+        // Deux degats, tous deux rapportes : le curseur se TELEPORTAIT (des
+        // octets de protocole lus comme dx/dy) et le bouton VACILLAIT, ce qui
+        // rendait tout glissement de fenetre impossible.
+        //
+        // Le repli ne parle donc plus que lorsque le descripteur de rapport
+        // s'est TU -- illisible ou absent. C'est bien un repli : la ou on ne
+        // sait rien, une souris presumee vaut mieux qu'un peripherique perdu.
+        if kind == 0
+            && !descriptor.classe_par_rapport
+            && descriptor.max_packet >= 3
+            && descriptor.protocol != 1
+        {
             kind = 2;
             crate::serial_println!(
                 "BOUCHAUD_HID_HEURISTIC_MOUSE if={} subclass={} protocol={} ep={:#04x}",
@@ -1655,6 +1728,11 @@ fn configure_hids(
             interface: descriptor.interface,
             protocol: descriptor.protocol,
             kind,
+            source_souris: if kind == 2 {
+                crate::drivers::mouse::reserve_source_souris()
+            } else {
+                usize::MAX
+            },
             report_id: descriptor.report_id,
             max_packet: descriptor.max_packet,
             ring,
@@ -1663,6 +1741,19 @@ fn configure_hids(
             buffer_len,
             clavier: hid::EtatClavier { modificateurs: 0, touches: [0; 6] },
         };
+        if kind == 2 {
+            // La source est la PREUVE que deux « souris » ne s'ecrasent plus.
+            // Sans cette ligne, le releve de vol ne dirait que `souris=3`, ce
+            // qui etait deja vrai quand elles partageaient le meme etat.
+            crate::serial_println!(
+                "BOUCHAUD_HID_SOURCE_SOURIS slot={} if={} ep={:#04x} source={} classe_par_rapport={}",
+                device.slot_id,
+                descriptor.interface,
+                descriptor.endpoint_address,
+                controller.hids[base_index + installed].source_souris,
+                descriptor.classe_par_rapport as u8,
+            );
+        }
         installed += 1;
     }
 
@@ -2414,6 +2505,12 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
             // composite en a deux.
             memory::free_dma(controller.hids[index].ring.phys, RING_BYTES);
             memory::free_dma(controller.hids[index].buffer_phys, 4096);
+            // La source de boutons AUSSI se rend. Un debranchement bouton
+            // enfonce laisserait sinon le bureau croire le bouton maintenu
+            // pour toujours, et la source ne reviendrait jamais au tableau.
+            crate::drivers::mouse::libere_source_souris(
+                controller.hids[index].source_souris,
+            );
             let dernier = controller.hid_count - 1;
             controller.hids[index] = controller.hids[dernier];
             controller.hids[dernier] = EMPTY_HID_ENDPOINT;
@@ -2920,7 +3017,7 @@ fn process_mouse_report(endpoint: &HidEndpoint, data: &[u8]) -> bool {
         return false;
     };
     crate::drivers::mouse::inject_usb_report(
-        souris.boutons, souris.dx, souris.dy, souris.roue,
+        endpoint.source_souris, souris.boutons, souris.dx, souris.dy, souris.roue,
     );
     true
 }
@@ -4388,12 +4485,7 @@ pub fn poll() {
                 // Ils sont ARRIVES AVANT ceux qui sont encore dans l'anneau :
                 // les traiter apres inverserait l'ordre des frappes, et une
                 // touche relachee avant d'etre appuyee reste enfoncee.
-                let differes = controller.differes_len;
-                controller.differes_len = 0;
-                for index in 0..differes {
-                    let event = controller.differes[index];
-                    process_hid_event(controller, event);
-                }
+                traite_differes(controller);
                 for _ in 0..MAX_EVENTS_PER_POLL {
                     let Some(event) = next_event(controller) else { break };
                     match trb_type(event.control) {

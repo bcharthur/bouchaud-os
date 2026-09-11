@@ -95,4 +95,14 @@ impl DoubleClickDetector {
         self.last = if double { None } else { Some((id, button, point, now_ms)) };
         double
     }
+
+    /// Oublie l'appui precedent : le suivant repartira de zero.
+    ///
+    /// Un appui qui a servi a TIRER une fenetre n'est pas la premiere moitie
+    /// d'un double-clic. Sans cet oubli, relacher apres un deplacement puis
+    /// reappuyer au meme endroit basculait le plein ecran -- exactement ce
+    /// que l'utilisateur venait d'eviter en deplacant la fenetre a la main.
+    pub fn oublie(&mut self) {
+        self.last = None;
+    }
 }

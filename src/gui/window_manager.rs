@@ -493,6 +493,8 @@ fn boucle() {
     let mut menu_open = false;
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
+    // Position du pointeur a l'appui qui a ouvert le glissement en cours.
+    let mut depart_glissement = (0i32, 0i32);
     let mut spawn_n = 0i32;
     // (icon_idx, offset_x_from_icon, offset_y_from_icon, start_mx, start_my)
     let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
@@ -655,7 +657,17 @@ fn boucle() {
         let my = myu as i32;
         let wheel = mouse::take_wheel();
         let left = mouse::left_down();
-        let click = left && !prev_left;
+        // BOUCHAUD_GUI_FRONT_PENDANT_GLISSEMENT_V1
+        //
+        // Un front montant alors qu'un glissement est DEJA ouvert ne peut pas
+        // etre un nouvel appui : le glissement ne survit pas au relachement,
+        // il est repris juste en dessous. Si le bureau voit malgre tout le
+        // bouton remonter, c'est son ETAT qui a vacille -- pas la main de
+        // l'utilisateur. Le compter pour un clic rearmait le detecteur de
+        // double-clic a chaque tour, et maintenir une barre de titre basculait
+        // le plein ecran au lieu de deplacer la fenetre.
+        let glissement_en_cours = drag.is_some() || icon_drag.is_some();
+        let click = left && !prev_left && !glissement_en_cours;
         let release = !left && prev_left;
         prev_left = left;
         // La position part au client quand le curseur bouge **ou** quand un
@@ -747,6 +759,17 @@ fn boucle() {
         } else {
             let ended_drag = drag.take();
             if release {
+                // Un appui qui a servi a TIRER n'ouvre pas un double-clic.
+                // Sans cet oubli, relacher une fenetre deplacee puis
+                // reappuyer sur sa barre de titre la basculait en plein ecran.
+                if ended_drag.is_some() {
+                    let bouge = (mx - depart_glissement.0)
+                        .abs()
+                        .max((my - depart_glissement.1).abs());
+                    if bouge > crate::gui::windowing::DoubleClickDetector::MAX_DISTANCE {
+                        title_clicks.oublie();
+                    }
+                }
                 if matches!(ended_drag, Some(Drag::Move(..))) {
                     if let Some(window) = wins.last_mut() {
                         let before = cadre_fenetre(window);
@@ -802,8 +825,12 @@ fn boucle() {
                 "BOUCHAUD_STAGE2_CLICK_DISPATCHED x={} y={} buttons={:#x}",
                 mx, my, crate::drivers::mouse::buttons(),
             );
+            let sans_glissement = drag.is_none();
             handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
                 &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
+            if sans_glissement && drag.is_some() {
+                depart_glissement = (mx, my);
+            }
             sale = true;
         }
         if wheel != 0 {

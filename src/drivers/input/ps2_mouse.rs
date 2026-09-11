@@ -2,7 +2,7 @@
 //!
 //! Les fragments restent dans le même module `drivers::mouse` via `include!`.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 use x86_64::instructions::interrupts;
 

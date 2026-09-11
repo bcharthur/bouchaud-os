@@ -121,6 +121,35 @@ def main():
                 "passe. Un budget ignore est pire qu'absent."
             )
 
+        # --- 2 bis. l'entree ne fait pas la queue derriere le stockage -------
+        #
+        # Une commande de stockage tient le verrou du pilote pendant trois
+        # transferts et deux attentes, chacune bornee a un demi-seconde. Tant
+        # que les rapports HID arrives pendant ce temps n'etaient que MIS DE
+        # COTE, ils n'etaient traites qu'au tour de scrutation suivant : plus
+        # d'une seconde de gel de l'entree par commande qui repond mal.
+        #
+        # C'est ce que la machine de reference montrait en ouvrant le
+        # navigateur -- « FPS 2 » avec le processeur a 22 %, et une souris qui
+        # « met trop de temps a se deplacer ». Elle n'etait pas saturee : elle
+        # attendait.
+        if "traite_differes(controller)" not in attente:
+            fautes.append(
+                "xhci_active.rs : un rapport HID arrive pendant une attente "
+                "n'est plus traite sur place. Il attendrait la fin de la "
+                "commande de stockage qui tient le pilote, et l'entree gelerait "
+                "le temps d'un transfert -- jusqu'a une seconde par commande."
+            )
+        else:
+            mise_de_cote = attente.find("differe(controller, event)")
+            traitement = attente.find("traite_differes(controller)")
+            if mise_de_cote < 0 or traitement < mise_de_cote:
+                fautes.append(
+                    "xhci_active.rs : l'attente traite la file AVANT d'y "
+                    "ajouter l'evenement qu'elle vient de lire ; celui-ci "
+                    "attendrait un tour de plus."
+                )
+
     # --- 3. le repli met les muets en quarantaine ----------------------------
     repli = corps(source, "fn poll_control_fallback(")
     if repli is None:
