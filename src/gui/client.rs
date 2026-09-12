@@ -543,7 +543,35 @@ impl Client {
         self.jauge.en_cours() || self.jauge.visible() != visible_avant
     }
 
-    const PATIENCE_MS: u64 = 6000;
+    /// Delai avant de conclure qu'un client ne parle pas le protocole.
+    ///
+    /// # Ce que ce delai coute a l'utilisateur
+    ///
+    /// Tant qu'il court, le compositeur ne recopie PAS la surface du client :
+    /// il attend d'y etre invite. Une fenetre dont le client ne parlera jamais
+    /// reste donc vide pendant toute cette duree.
+    ///
+    /// Il valait six secondes, et le releve physique du 12 septembre 2026 les
+    /// montre une par une : la fenetre du navigateur s'ouvre a 14:52:46, et il
+    /// faut attendre 14:52:52 et la ligne « muet apres 6 s » pour que le
+    /// premier pixel du navigateur atteigne l'ecran. Six secondes de fenetre
+    /// vide a chaque lancement, alors que `BROWSER_HOST_INITIALIZED` tombe
+    /// dans la SECONDE qui suit l'`execve` sur cette machine.
+    ///
+    /// # Pourquoi le raccourcir ne casse rien
+    ///
+    /// Le verdict de silence est REVISABLE, et c'est tout le propos de
+    /// `VerdictProtocole` : un client qui se met a parler apres coup fait
+    /// gagner `actif`, `muet` retombe, et la recomposition au rythme fixe
+    /// s'arrete -- avec une ligne de journal pour le dire. Le seul cout d'un
+    /// verdict rendu trop tot est donc quelques recopies de surface avant la
+    /// revision, et une recopie coute desormais moins d'une milliseconde
+    /// depuis que le framebuffer est ecrit en combine.
+    ///
+    /// Une seconde et demie laisse a un client bavard largement le temps de
+    /// dire bonjour -- c'est son premier message, envoye des la connexion --
+    /// et rend quatre secondes et demie a chaque ouverture de fenetre.
+    const PATIENCE_MS: u64 = 1500;
 
     pub fn verifie_silence(&mut self) -> bool {
         if self.verdict.protocole_actif()
@@ -557,9 +585,9 @@ impl Client {
             return false;
         }
         crate::kernel::dmesg::log_fmt(format_args!(
-            "gui: client pid={} muet apres {} s — composition au rythme fixe",
+            "gui: client pid={} muet apres {} ms — composition au rythme fixe",
             self.pid,
-            Self::PATIENCE_MS / 1000
+            Self::PATIENCE_MS
         ));
         self.verdict.declare_muet();
         self.jauge.abandonne_demarrage();

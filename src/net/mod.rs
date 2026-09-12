@@ -38,6 +38,7 @@ use crate::drivers::vga::{self, COLOR_CYAN, COLOR_GREEN, COLOR_YELLOW, COLOR_DEF
 use alloc::format;
 use alloc::string::String;
 use crate::net::ipv4::Ipv4Addr;
+use core::sync::atomic::AtomicBool;
 
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
@@ -157,6 +158,164 @@ fn demarre_interne() -> Demarrage {
         None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
         None => Demarrage::SansBail,
     }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_NET_VEILLEUR_DE_LIEN_V1
+// ---------------------------------------------------------------------------
+
+/// Periode de relecture de l'etat du lien, en millisecondes.
+///
+/// Une seconde : un cable qu'on branche est vu dans la seconde, et le cout est
+/// une lecture de registre par seconde.
+const PERIODE_LIEN_MS: u64 = 1_000;
+
+/// Attente entre la montee du lien et la premiere reprise DHCP.
+///
+/// Dix secondes. `negocie()` attend lui-meme plusieurs secondes ; l'enchainer
+/// sans pause tiendrait le reseau occupe en permanence pour un serveur qui,
+/// le plus souvent, n'existe pas.
+const PERIODE_DHCP_MS: u64 = 10_000;
+
+/// Plafond de l'attente entre deux reprises DHCP.
+///
+/// L'attente DOUBLE a chaque echec jusqu'a ce plafond. Un reseau cable sans
+/// serveur DHCP -- un commutateur de laboratoire, une liaison directe -- est
+/// une situation durable : la retenter toutes les dix secondes pendant des
+/// heures est du bruit, et ne trouvera rien de plus qu'a la centieme fois.
+/// Une minute reste assez court pour qu'un serveur qui demarre soit vu.
+const PLAFOND_DHCP_MS: u64 = 60_000;
+
+static VEILLEUR_LANCE: AtomicBool = AtomicBool::new(false);
+
+/// Relit l'etat du lien et reconfigure quand il change.
+///
+/// # LE DEFAUT QUE CE FIL CORRIGE
+///
+/// `demarre()` etait appele UNE fois, et son verdict etait definitif. Le
+/// releve physique du 12 septembre finit ainsi :
+///
+/// ```text
+/// BOUCHAUD_TRIGKEY_RTL8168_DRIVER_OK mac=b0:41:6f:09:70:a1
+/// BOUCHAUD_TRIGKEY_RTL8168_LINK_DOWN
+/// net: lo actif ; eth0 initialisee, lien bas
+/// ```
+///
+/// La carte est reconnue, le pilote fonctionne, et le lien est bas au moment
+/// precis ou on regarde -- trois secondes apres la mise sous tension, ce qui
+/// est court pour une autonegociation cuivre gigabit, et plus court encore
+/// que le temps de brancher un cable. Apres quoi plus personne ne regardait :
+/// la machine restait hors ligne pour la duree de la session, et le
+/// navigateur repondait « Unable to resolve host » a toutes les pages.
+///
+/// Le fil ne fabrique aucune configuration : il ne fait que refaire ce que
+/// `demarre()` fait, quand l'etat du materiel a change.
+fn veilleur_de_lien() -> ! {
+    let mut lien_precedent = e1000::link_up();
+    let mut prochain_dhcp_ms = 0u64;
+    let mut attente_dhcp_ms = PERIODE_DHCP_MS;
+    loop {
+        crate::kernel::task::sleep_ticks(
+            crate::kernel::timer::ms_to_ticks(PERIODE_LIEN_MS),
+        );
+        let lien = e1000::link_up();
+        let etat = etat_demarrage();
+
+        if lien != lien_precedent {
+            lien_precedent = lien;
+            crate::serial_println!(
+                "BOUCHAUD_NET_LIEN etat={} ancien_verdict={}",
+                if lien { "UP" } else { "DOWN" },
+                nom_demarrage(etat),
+            );
+            if !lien {
+                // Le cable part : on ne garde pas une configuration qui ne
+                // mene plus nulle part, sinon chaque requete part dans le vide
+                // et attend son echeance.
+                unsafe { DEMARRAGE = Demarrage::LienBas; }
+                crate::kernel::dmesg::log("net: eth0 lien tombe");
+                continue;
+            }
+            // Le lien monte : on retente tout de suite, et la montee remet
+            // l'attente a son plancher -- c'est un evenement neuf, pas la
+            // suite de la serie d'echecs precedente.
+            prochain_dhcp_ms = 0;
+            attente_dhcp_ms = PERIODE_DHCP_MS;
+        }
+
+        if !lien || matches!(etat, Demarrage::SansCarte | Demarrage::CarteRefusee) {
+            continue;
+        }
+        if matches!(etat, Demarrage::Pret | Demarrage::SansBail) {
+            continue;
+        }
+        let maintenant = crate::kernel::timer::monotonic_ms();
+        if maintenant < prochain_dhcp_ms {
+            continue;
+        }
+        prochain_dhcp_ms = maintenant.saturating_add(attente_dhcp_ms);
+        let nouvel_etat = match dhcp::negocie() {
+            Some(_) => Demarrage::Pret,
+            None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
+            None => Demarrage::SansBail,
+        };
+        if matches!(nouvel_etat, Demarrage::Pret) {
+            attente_dhcp_ms = PERIODE_DHCP_MS;
+        } else {
+            attente_dhcp_ms = attente_dhcp_ms.saturating_mul(2).min(PLAFOND_DHCP_MS);
+        }
+        if nouvel_etat as u8 != etat as u8 {
+            unsafe { DEMARRAGE = nouvel_etat; }
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "net: eth0 {} gw {} dns {} — {}",
+                ipv4::format_addr(&our_ip()),
+                ipv4::format_addr(&gateway()),
+                ipv4::format_addr(&dns_server()),
+                nom_demarrage(nouvel_etat),
+            ));
+            crate::serial_println!(
+                "BOUCHAUD_NET_RECONFIGURE verdict={}",
+                nom_demarrage(nouvel_etat),
+            );
+        }
+    }
+}
+
+/// Le verdict courant, en un mot, pour les releves periodiques.
+pub fn nom_verdict() -> &'static str {
+    nom_demarrage(etat_demarrage())
+}
+
+fn nom_demarrage(etat: Demarrage) -> &'static str {
+    match etat {
+        Demarrage::SansCarte => "sans-carte",
+        Demarrage::CarteRefusee => "carte-refusee",
+        Demarrage::LienBas => "lien-bas",
+        Demarrage::SansBail => "sans-bail",
+        Demarrage::SansConfiguration => "sans-configuration",
+        Demarrage::Pret => "pret",
+    }
+}
+
+/// Lance le veilleur de lien. Sans effet si une carte manque.
+pub fn demarre_le_veilleur_de_lien() -> bool {
+    if VEILLEUR_LANCE.load(core::sync::atomic::Ordering::Acquire) {
+        return true;
+    }
+    if matches!(etat_demarrage(), Demarrage::SansCarte | Demarrage::CarteRefusee) {
+        // Rien a veiller : pas de carte, ou une carte que personne ne pilote.
+        return false;
+    }
+    if crate::kernel::task::spawn_noyau_priorite(
+        veilleur_de_lien,
+        "net-lien",
+        crate::kernel::task::Priorite::Normale,
+    ) {
+        VEILLEUR_LANCE.store(true, core::sync::atomic::Ordering::Release);
+        crate::serial_println!("BOUCHAUD_NET_VEILLEUR_LANCE periode_ms={}", PERIODE_LIEN_MS);
+        return true;
+    }
+    false
 }
 
 /// Active l'interface eth0 (initialise le driver e1000).

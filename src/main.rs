@@ -230,6 +230,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // demarre doit avoir son reseau en service, comme il a son clavier.
     // `net::demarre` n'echoue jamais — voir sa documentation.
     net::demarre();
+
+    // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
+    //
+    // Sur la machine de reference, l'autonegociation cuivre n'avait pas fini
+    // trois secondes apres la mise sous tension : le verdict « lien bas »
+    // etait definitif, et le navigateur repondait « Unable to resolve host »
+    // pour le reste de la session.
+    net::demarre_le_veilleur_de_lien();
     kernel::dmesg::log("shell: initialise");
 
     // 5. Banniere d'accueil.
@@ -262,6 +270,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // Voir la note d'amorcage equivalente dans `stage2.rs` : l'entree ne doit
     // pas dependre de la cadence du rendu.
     drivers::xhci_active::demarre_le_fil_hid();
+
+    // LE PONT EP0 SUR SON PROPRE FIL.
+    //
+    // Un peripherique muet en Interrupt-IN -- le clavier de la machine de
+    // reference -- n'a pas d'autre transport que `GET_REPORT`, et ce transfert
+    // est synchrone. Le laisser dans la boucle de scrutation ramenait celle-ci
+    // de mille tours par seconde a cent soixante-six.
+    drivers::xhci_active::demarre_le_fil_repli_ep0();
 
     // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
     // USB par transferts synchrones, et ce cout n'a rien a faire sur le

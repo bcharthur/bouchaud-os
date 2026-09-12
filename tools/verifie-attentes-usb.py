@@ -151,9 +151,9 @@ def main():
                 )
 
     # --- 3. le repli met les muets en quarantaine ----------------------------
-    repli = corps(source, "fn poll_control_fallback(")
+    repli = corps(source, "fn repli_ep0_un_point(")
     if repli is None:
-        fautes.append("xhci_active.rs : poll_control_fallback a disparu.")
+        fautes.append("xhci_active.rs : repli_ep0_un_point a disparu.")
     else:
         # LA CONSULTATION, ET PAS SEULEMENT LE NOM.
         #
@@ -185,6 +185,54 @@ def main():
                 "xhci_active.rs : le `GET_REPORT` du repli n'utilise plus le "
                 "budget de scrutation ; il reprendrait la patience de "
                 "l'enumeration sur un chemin parcouru mille fois par seconde."
+            )
+
+        # --- 3 bis. UN SEUL POINT PAR TOUR ----------------------------------
+        #
+        # Le releve physique du 12 septembre chiffre ce que couta l'inverse :
+        # `polls=11065` en soixante-douze secondes, soit CENT SOIXANTE-SIX
+        # tours par seconde la ou `sleep_ticks(1)` en vise mille. Le repli
+        # servait cinq points muets d'affilee, chacun un transfert de controle
+        # synchrone, le verrou du pilote tenu du debut a la fin.
+        #
+        # La souris tombait a quatre-vingts hertz -- douze millisecondes de
+        # grain --, ce que l'utilisateur decrit comme « elle met trop de temps
+        # a se deplacer ».
+        if "return Some(index);" not in repli:
+            fautes.append(
+                "xhci_active.rs : le repli EP0 ne rend plus la main apres UN "
+                "point servi. Il enchaine de nouveau les transferts de "
+                "controle synchrones, et la scrutation retombe de mille tours "
+                "par seconde a cent soixante-six."
+            )
+        if "GRACE_INTERRUPT_NS" not in repli:
+            fautes.append(
+                "xhci_active.rs : un point fraichement arme n'a plus de delai "
+                "de grace. Un peripherique sain branche a chaud basculerait "
+                "sur le transport lent avant d'avoir eu sa chance en "
+                "Interrupt-IN."
+            )
+
+        # --- 3 ter. ET HORS DE LA BOUCLE DE SCRUTATION ----------------------
+        scrutation = corps(source, "pub fn poll()")
+        if scrutation is not None and "repli_ep0_un_point(" in scrutation:
+            fautes.append(
+                "xhci_active.rs : le repli EP0 est de retour DANS `poll()`. "
+                "C'est la boucle a mille tours par seconde : un transfert de "
+                "controle synchrone n'y a pas sa place, et c'est exactement "
+                "ce qui la ramenait a cent soixante-six."
+            )
+        fil = corps(source, "fn fil_repli_ep0()")
+        if fil is None:
+            fautes.append(
+                "xhci_active.rs : le fil du repli EP0 a disparu. Un clavier "
+                "muet en Interrupt-IN -- celui de la machine de reference -- "
+                "n'a plus aucun transport."
+            )
+        elif "sleep_ticks" not in fil:
+            fautes.append(
+                "xhci_active.rs : le fil du repli EP0 ne dort plus ; il "
+                "tiendrait le verrou du pilote en continu."
             )
 
     # --- 4. l'enregistreur de vol n'est pas sur le chemin d'entree -----------

@@ -35,8 +35,40 @@ pub const DELAI_VEILLE_MS: u64 = 500;
 /// Pleine réactivité après interaction avec un client muet.
 pub const REACTIVITE_MUETTE_MS: u64 = 600;
 
-/// Filet de sécurité d'un client muet au repos.
-pub const REPOS_MUET_MS: u64 = 200;
+/// Cadence de recomposition d'un client muet au repos.
+///
+/// # Pourquoi 200 ms n'etait plus le bon prix
+///
+/// Cette valeur a ete choisie quand une presentation plein ecran coutait
+/// SOIXANTE-QUINZE millisecondes : le framebuffer du micrologiciel etait
+/// decrit non cachable par les MTRR, et le bureau y ecrivait a cent dix
+/// megaoctets par seconde. Cinq recompositions par seconde etaient alors tout
+/// ce qu'on pouvait se permettre.
+///
+/// Le releve physique du 12 septembre 2026, depuis que les pages du
+/// framebuffer sont en ecriture combinee, chiffre la meme operation :
+///
+/// ```text
+///   1262 presentations,  mediane 0,00 ms,  p99 2,38 ms,  max 2,50 ms
+///   temps total presente : 0,2 s sur 72 s de session
+/// ```
+///
+/// Deux ordres de grandeur. A trente hertz, la recopie d'une surface de
+/// 1918x950 et sa presentation tiennent dans quelques pour cent d'UN coeur,
+/// sur une machine qui en a seize et qui en utilise neuf pour cent.
+///
+/// # Ce que cela change pour l'utilisateur
+///
+/// Un client qui n'annonce pas ses trames -- le navigateur, faute de parler le
+/// protocole -- etait affiche a cinq images par seconde des qu'on cessait de
+/// bouger la souris. Une page qui charge, une animation, un curseur de saisie
+/// qui clignote : tout cela avancait par a-coups de deux cents millisecondes.
+/// C'est ce que l'utilisateur decrit comme « extremement lent ».
+///
+/// Trente-trois millisecondes, soit trente images par seconde au repos, et
+/// toujours soixante pendant les six cents millisecondes qui suivent une
+/// entree.
+pub const REPOS_MUET_MS: u64 = 33;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Etat {

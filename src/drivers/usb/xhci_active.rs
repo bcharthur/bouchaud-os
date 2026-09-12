@@ -358,6 +358,15 @@ struct HidEndpoint {
     /// masquer le probleme : il NOMME le peripherique qui ne repond pas, au
     /// lieu de laisser croire que tout va bien parce qu'un autre repond.
     evenements: u32,
+    /// Instant ou ce point a ete arme pour la premiere fois.
+    ///
+    /// Le repli EP0 lui laisse un DELAI DE GRACE : un point qui vient d'etre
+    /// arme n'a pas encore eu l'occasion de produire un evenement, et le
+    /// doubler d'un `GET_REPORT` synchrone le condamnerait au pont avant
+    /// meme de l'avoir essaye. L'ancien code exprimait la meme idee par un
+    /// compteur global de tours (`poll_no < 32`), qui ne disait rien d'un
+    /// peripherique branche a chaud une minute apres le demarrage.
+    arme_depuis_ns: u64,
     /// Echecs consecutifs du repli EP0 sur CE point de terminaison.
     echecs_repli: u8,
     /// L'entree en quarantaine de ce point a-t-elle deja ete annoncee ?
@@ -389,6 +398,7 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 };
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
+    arme_depuis_ns: 0,
     echecs_repli: 0,
     quarantaine_annoncee: false,
     repli_muet_jusqu_a_ns: 0,
@@ -1718,6 +1728,7 @@ fn configure_hids(
         add_flags |= 1u32 << dci;
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
+            arme_depuis_ns: 0,
             echecs_repli: 0,
             quarantaine_annoncee: false,
             repli_muet_jusqu_a_ns: 0,
@@ -1804,10 +1815,12 @@ fn configure_hids(
     }
     wait_ms(10);
 
+    let arme_a = crate::kernel::timer::monotonic_ns();
     for index in base_index..base_index + installed {
         // Arm only after every port on this controller has finished control
         // enumeration, so interrupt events cannot steal command/control events.
         controller.hids[index].active = true;
+        controller.hids[index].arme_depuis_ns = arme_a;
     }
     controller.hid_count += installed;
     Ok(installed)
@@ -3168,7 +3181,33 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
     accepted
 }
 
-fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
+/// Sert AU PLUS UN point de terminaison muet, a partir de `depart`.
+///
+/// Rend l'indice servi, pour que le tour suivant reparte du point d'apres :
+/// sans ce curseur, le premier point muet du tableau serait le seul jamais
+/// interroge.
+///
+/// # Pourquoi un seul, et pourquoi hors de la scrutation
+///
+/// `control_get_report` est un transfert de controle SYNCHRONE. Le releve
+/// physique du 12 septembre le chiffre : la boucle de scrutation annoncait
+/// `polls=11065` en soixante-douze secondes, soit CENT SOIXANTE-SIX tours par
+/// seconde la ou son `sleep_ticks(1)` en vise mille. Les cinq sixiemes du
+/// temps partaient dans les `GET_REPORT` de cinq points muets, enchaines dans
+/// le meme tour et le verrou du pilote tenu du debut a la fin.
+///
+/// La souris etait donc echantillonnee a quatre-vingts hertz -- douze
+/// millisecondes de grain -- et c'est cela que l'utilisateur decrit comme
+/// « elle met trop de temps a se deplacer ».
+///
+/// Le repli vit desormais sur son propre fil (`fil_repli_ep0`), un point par
+/// tour, le verrou pris et rendu a chaque fois. Le drainage garde ses mille
+/// tours par seconde, et les rapports qui arrivent PENDANT un `GET_REPORT`
+/// sont traites sur place (`traite_differes`).
+fn repli_ep0_un_point(controller: &mut Controller, depart: usize) -> Option<usize> {
+    if controller.hid_count == 0 {
+        return None;
+    }
     // Interrupt-IN remains the preferred path. If the physical controller has
     // produced no endpoint Transfer Event after initial arming, use the HID
     // class GET_REPORT request over EP0 as a compatibility bridge. HID 1.11
@@ -3189,12 +3228,24 @@ fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
     // peripherique qui repond n'y passe jamais. La difference est qu'un
     // peripherique muet n'est plus prive de secours parce que son voisin,
     // lui, va bien.
-    if poll_no < 32 || (poll_no & 1) != 0 {
-        return;
-    }
     let maintenant = crate::kernel::timer::monotonic_ns();
-    for index in 0..controller.hid_count {
+    let total = controller.hid_count;
+    for decalage in 0..total {
+        let index = (depart + decalage) % total;
         if controller.hids[index].evenements != 0 {
+            continue;
+        }
+        // UN POINT QU'ON VIENT D'ARMER N'EST PAS UN POINT MUET.
+        //
+        // Il lui faut le temps de produire son premier evenement. Sans ce
+        // delai, le pont EP0 se declencherait sur tout peripherique a
+        // l'instant meme de son branchement, et un peripherique parfaitement
+        // sain finirait sur le transport lent.
+        if maintenant
+            < controller.hids[index]
+                .arme_depuis_ns
+                .saturating_add(GRACE_INTERRUPT_NS)
+        {
             continue;
         }
         // UN POINT MUET EST EN QUARANTAINE, PAS INTERROGE MILLE FOIS.
@@ -3256,8 +3307,24 @@ reprise_dans_ms={}",
                 }
             }
         }
+        // UN SEUL POINT PAR TOUR, ET C'EST TOUT L'INTERET DE CETTE BOUCLE.
+        //
+        // `control_get_report` est un transfert de controle SYNCHRONE : trois
+        // etapes et une attente, le verrou du pilote tenu du debut a la fin.
+        // En servir cinq d'affilee, c'est tenir ce verrou plusieurs
+        // millisecondes -- et c'est ce qui ramenait la scrutation de mille
+        // tours par seconde a cent soixante-six sur la machine de reference.
+        return Some(index);
     }
+    None
 }
+
+/// Delai laisse a un point fraichement arme avant de lui proposer le pont EP0.
+///
+/// Deux cents millisecondes : le temps qu'un peripherique produise son premier
+/// rapport en Interrupt-IN. En dessous, un peripherique sain branche a chaud
+/// serait bascule sur le transport lent avant d'avoir eu sa chance.
+const GRACE_INTERRUPT_NS: u64 = 200_000_000;
 
 /// Echecs consecutifs du repli EP0 avant sa mise en quarantaine.
 const ECHECS_AVANT_QUARANTAINE: u8 = 2;
@@ -4288,6 +4355,114 @@ fn fil_hid() -> ! {
     }
 }
 
+static FIL_REPLI_ACTIF: AtomicBool = AtomicBool::new(false);
+static REPLI_CURSEUR: AtomicUsize = AtomicUsize::new(0);
+static REPLI_TOURS: AtomicU64 = AtomicU64::new(0);
+static REPLI_SERVIS: AtomicU64 = AtomicU64::new(0);
+
+/// Tours et points servis par le fil du repli EP0.
+pub fn repli_ep0_compteurs() -> (u64, u64) {
+    (
+        REPLI_TOURS.load(Ordering::Relaxed),
+        REPLI_SERVIS.load(Ordering::Relaxed),
+    )
+}
+
+/// Sert un point muet, verrou pris puis RENDU.
+///
+/// Le verrou est le meme que celui de la scrutation, et c'est voulu : deux
+/// fils qui liraient l'anneau d'evenements en meme temps se voleraient leurs
+/// achevements. Ce qui change, c'est la DUREE de sa tenue -- un transfert de
+/// controle, pas cinq.
+fn repli_ep0_un_tour() -> bool {
+    if RUNTIME_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return false;
+    }
+    // LE CURSEUR TOURNE SUR LES DEUX AXES.
+    //
+    // Il choisit le controleur de depart ET le point de depart dans ce
+    // controleur. La machine de reference en a DEUX ; sans rotation, le
+    // premier aurait toujours la main, et un clavier branche sur le second ne
+    // recevrait jamais son pont.
+    let curseur = REPLI_CURSEUR.load(Ordering::Relaxed);
+    let mut servi = false;
+    unsafe {
+        #[allow(static_mut_refs)]
+        if let Some(runtime) = RUNTIME.as_mut() {
+            let nombre = runtime.controllers.len();
+            for decalage in 0..nombre {
+                let ic = (curseur + decalage) % nombre;
+                if repli_ep0_un_point(&mut runtime.controllers[ic], curseur).is_some() {
+                    REPLI_CURSEUR.store(curseur.wrapping_add(1), Ordering::Relaxed);
+                    REPLI_SERVIS.fetch_add(1, Ordering::Relaxed);
+                    servi = true;
+                    break;
+                }
+            }
+        }
+    }
+    RUNTIME_BUSY.store(false, Ordering::Release);
+    servi
+}
+
+/// Le pont EP0, sur son propre fil.
+///
+/// # CE QUE CE FIL RETIRE DE LA BOUCLE D'ENTREE
+///
+/// Le repli vivait DANS `poll()`, un tour sur deux, et servait tous les points
+/// muets d'affilee. Chacun coute un transfert de controle synchrone, le verrou
+/// du pilote tenu du debut a la fin. Le releve du 12 septembre le chiffre :
+/// `polls=11065` en soixante-douze secondes -- cent soixante-six tours par
+/// seconde la ou `sleep_ticks(1)` en vise mille.
+///
+/// La souris etait donc lue a quatre-vingts hertz, douze millisecondes de
+/// grain, et c'est cela qu'on sent comme « elle met trop de temps a se
+/// deplacer ».
+///
+/// # Pourquoi il ne rend pas le repli moins bon
+///
+/// Il sert UN point par tour et dort un tick. Avec deux points muets -- un
+/// clavier et une interface qui ne repond jamais -- chacun est interroge cinq
+/// cents fois par seconde, soit quatre fois plus souvent qu'avant. Ce n'est
+/// pas un compromis : c'est le meme travail, sorti du chemin ou il coutait
+/// cher.
+fn fil_repli_ep0() -> ! {
+    loop {
+        REPLI_TOURS.fetch_add(1, Ordering::Relaxed);
+        repli_ep0_un_tour();
+        crate::kernel::task::sleep_ticks(1);
+    }
+}
+
+/// Lance le fil du repli EP0.
+pub fn demarre_le_fil_repli_ep0() -> bool {
+    if FIL_REPLI_ACTIF.load(Ordering::Acquire) {
+        return true;
+    }
+    // Interactive : ce fil porte des frappes et des mouvements de pointeur
+    // pour tout peripherique muet en Interrupt-IN. Sur la machine de
+    // reference, le clavier N'A PAS d'autre transport.
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_repli_ep0,
+        "usb-repli",
+        crate::kernel::task::Priorite::Interactive,
+    ) {
+        FIL_REPLI_ACTIF.store(true, Ordering::Release);
+        crate::serial_println!(
+            "BOUCHAUD_USB_REPLI_FIL_LANCE periode_ms=1 priorite=interactive"
+        );
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_USB_REPLI_FIL_REFUSE raison=tache-non-creee \
+consequence=clavier-muet-sans-transport"
+    );
+    false
+}
+
 /// Sort la scrutation des entrees de la boucle de trames du compositeur.
 ///
 /// # LE DEFAUT, MESURE SUR LA MACHINE DE REFERENCE
@@ -4528,7 +4703,6 @@ pub fn poll() {
                         }
                     }
                 }
-                poll_control_fallback(controller, poll_no);
             }
             if changement_hid {
                 recompte_les_hid(runtime);

@@ -287,6 +287,14 @@ pub fn run(boot: &'static BootInfo) -> ! {
     );
 
     let _network_state = crate::net::demarre();
+
+    // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
+    //
+    // Sur la machine de reference, l'autonegociation cuivre n'avait pas fini
+    // trois secondes apres la mise sous tension : le verdict « lien bas »
+    // etait definitif, et le navigateur repondait « Unable to resolve host »
+    // pour le reste de la session.
+    crate::net::demarre_le_veilleur_de_lien();
     point_de_controle("reseau");
 
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
@@ -405,6 +413,14 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // main : sinon la premiere seconde du bureau -- celle du chargement des
     // polices, la plus lente -- se passe encore sans souris.
     crate::drivers::xhci_active::demarre_le_fil_hid();
+
+    // LE PONT EP0 SUR SON PROPRE FIL.
+    //
+    // Un peripherique muet en Interrupt-IN -- le clavier de la machine de
+    // reference -- n'a pas d'autre transport que `GET_REPORT`, et ce transfert
+    // est synchrone. Le laisser dans la boucle de scrutation ramenait celle-ci
+    // de mille tours par seconde a cent soixante-six.
+    crate::drivers::xhci_active::demarre_le_fil_repli_ep0();
 
     // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
     // USB par transferts synchrones, et ce cout n'a rien a faire sur le

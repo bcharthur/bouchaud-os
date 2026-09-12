@@ -1366,7 +1366,7 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
 
     crate::serial_println!(
         "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} \
-polling={} scrutations_par_s={} replis_en_quarantaine={}",
+polling={} scrutations_par_s={} replis_en_quarantaine={} repli_tours={} repli_servis={}",
         crate::drivers::xhci_active::is_active() as u8,
         crate::drivers::xhci_active::connected_ports(),
         crate::drivers::xhci_active::usb_devices(),
@@ -1379,6 +1379,14 @@ polling={} scrutations_par_s={} replis_en_quarantaine={}",
         // l'enregistreur de vol pour le lire. Il se lit maintenant ici.
         crate::drivers::xhci_active::cadence_scrutation(),
         crate::drivers::xhci_active::replis_en_quarantaine(),
+        // LE PONT EP0 A SON PROPRE FIL : ces deux chiffres le disent.
+        //
+        // `repli_tours` doit suivre la milliseconde, et `repli_servis` rester
+        // tres en dessous -- un point servi par tour au plus. S'ils se
+        // rejoignent, c'est que tous les points sont muets et que le pont
+        // porte toute l'entree ; s'ils tombent tous les deux, le fil est mort.
+        crate::drivers::xhci_active::repli_ep0_compteurs().0,
+        crate::drivers::xhci_active::repli_ep0_compteurs().1,
     );
     if crate::drivers::xhci_active::hid_ready() {
         crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");

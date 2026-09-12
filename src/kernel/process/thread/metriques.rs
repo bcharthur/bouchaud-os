@@ -198,6 +198,21 @@ anomalies={}/{}/{} proprietaire={}{}",
         tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils,
         poignees, syn_rtx, rtt_min, rtt_moyen, rtt_max,
     ));
+    // L'ETAT DU LIEN, A CHAQUE RELEVE ET PAS SEULEMENT AU DEMARRAGE.
+    //
+    // Le releve physique du 12 septembre 2026 disait `LINK_DOWN` une fois, a
+    // la cinquieme seconde, et plus rien ensuite. Il a fallu relire le
+    // journal de boot pour comprendre pourquoi le navigateur repondait
+    // « Unable to resolve host » cinq minutes plus tard. Cette ligne repond a
+    // la question la ou on la pose.
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[NET-LIEN] verdict={} lien={} ip={} gw={} dns={}",
+        crate::net::nom_verdict(),
+        crate::drivers::e1000::link_up() as u8,
+        crate::net::ipv4::format_addr(&crate::net::our_ip()),
+        crate::net::ipv4::format_addr(&crate::net::gateway()),
+        crate::net::ipv4::format_addr(&crate::net::dns_server()),
+    ));
     let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",
