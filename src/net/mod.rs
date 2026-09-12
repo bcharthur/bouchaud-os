@@ -161,6 +161,84 @@ fn demarre_interne() -> Demarrage {
 }
 
 // ---------------------------------------------------------------------------
+// BOUCHAUD_NET_IDENTITE_V1 : de QUEL reseau s'agit-il ?
+// ---------------------------------------------------------------------------
+//
+// Un cable n'a pas de SSID. Le seul nom qu'un reseau filaire se donne est
+// celui que son serveur DHCP annonce dans l'option 15 -- « fritz.box »,
+// « home », « lan ». Il etait DEJA demande dans la liste des parametres
+// souhaites ; personne ne lisait la reponse.
+//
+// A defaut de nom, le sous-reseau en tient lieu : « 192.168.1.0/24 » identifie
+// le reseau aussi surement, et c'est ce qu'affichent les outils quand le
+// serveur ne nomme rien.
+
+/// Longueur maximale du nom de reseau retenu.
+const NOM_RESEAU_MAX: usize = 63;
+static mut NOM_RESEAU: [u8; NOM_RESEAU_MAX] = [0; NOM_RESEAU_MAX];
+static mut NOM_RESEAU_LEN: usize = 0;
+static mut MASQUE: Ipv4Addr = [0, 0, 0, 0];
+
+/// Retient ce que le bail DHCP a appris sur l'identite du reseau.
+pub fn pose_identite_reseau(domaine: &[u8], masque: Ipv4Addr) {
+    unsafe {
+        let n = domaine.len().min(NOM_RESEAU_MAX);
+        NOM_RESEAU[..n].copy_from_slice(&domaine[..n]);
+        NOM_RESEAU_LEN = n;
+        MASQUE = masque;
+    }
+}
+
+/// Oublie l'identite du reseau : le lien est tombe, elle ne vaut plus rien.
+pub fn oublie_identite_reseau() {
+    unsafe {
+        NOM_RESEAU_LEN = 0;
+        MASQUE = [0, 0, 0, 0];
+    }
+}
+
+/// Le nom du reseau, tel qu'on peut l'afficher.
+///
+/// Dans l'ordre : le domaine annonce par DHCP, sinon le sous-reseau, sinon la
+/// passerelle, sinon rien. On ne FABRIQUE jamais un nom : « hors ligne » se lit
+/// a l'etat du lien, pas a une chaine vide.
+pub fn nom_reseau() -> String {
+    unsafe {
+        if NOM_RESEAU_LEN != 0 {
+            if let Ok(nom) = core::str::from_utf8(&NOM_RESEAU[..NOM_RESEAU_LEN]) {
+                return String::from(nom);
+            }
+        }
+        let ip = our_ip();
+        // La longueur de prefixe et l'adresse de reseau viennent du module pur
+        // du client DHCP, celui que la suite hote met a l'epreuve. Les
+        // recopier ici en ferait deux versions a corriger.
+        if let Some(prefixe) = dhcp::options::longueur_prefixe(MASQUE) {
+            let reseau = dhcp::options::adresse_reseau(ip, MASQUE);
+            return format!("{}/{}", ipv4::format_addr(&reseau), prefixe);
+        }
+        if ip != [0, 0, 0, 0] {
+            return ipv4::format_addr(&ip);
+        }
+    }
+    String::new()
+}
+
+/// Le reseau est-il utilisable pour joindre l'exterieur, a cet instant ?
+///
+/// `external_enabled()` repond sur le VERDICT de demarrage ; celle-ci repond
+/// sur l'etat courant, lien compris. C'est ce que doit montrer une icone.
+pub fn connecte() -> bool {
+    matches!(etat_demarrage(), Demarrage::Pret | Demarrage::SansBail)
+        && e1000::link_up()
+}
+
+/// L'interface physique est-elle presente et pilotee ?
+pub fn carte_presente() -> bool {
+    !matches!(etat_demarrage(), Demarrage::SansCarte | Demarrage::CarteRefusee)
+}
+
+// ---------------------------------------------------------------------------
 // BOUCHAUD_NET_VEILLEUR_DE_LIEN_V1
 // ---------------------------------------------------------------------------
 
@@ -233,6 +311,7 @@ fn veilleur_de_lien() -> ! {
                 // mene plus nulle part, sinon chaque requete part dans le vide
                 // et attend son echeance.
                 unsafe { DEMARRAGE = Demarrage::LienBas; }
+                oublie_identite_reseau();
                 crate::kernel::dmesg::log("net: eth0 lien tombe");
                 continue;
             }

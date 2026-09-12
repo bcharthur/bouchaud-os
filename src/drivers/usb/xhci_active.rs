@@ -4526,8 +4526,19 @@ consequence=clavier-muet-sans-transport"
 /// lui-meme a 250 ms, et n'ecrit donc pas plus qu'avant.
 fn fil_blackbox() -> ! {
     loop {
-        crate::kernel::blackbox::poll();
-        crate::kernel::task::sleep_ticks(20);
+        // UNE FENETRE RENDUE SE REPREND TOUT DE SUITE.
+        //
+        // `poll()` rend vrai quand il a du renoncer faute d'avoir pu prendre
+        // le pilote -- le systeme de fichiers travaillait sur la cle. Attendre
+        // alors vingt millisecondes de plus, c'est laisser filer la trace
+        // exactement au moment ou elle devient interessante : les trois
+        // archives physiques s'arretent toutes a l'instant ou le navigateur
+        // demarre et se met a ecrire.
+        if crate::kernel::blackbox::poll() {
+            crate::kernel::task::sleep_ticks(1);
+        } else {
+            crate::kernel::task::sleep_ticks(20);
+        }
     }
 }
 

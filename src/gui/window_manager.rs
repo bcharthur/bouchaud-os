@@ -613,6 +613,15 @@ fn boucle() {
                         envoie_touche(client, evenement);
                         TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                         derniere_entree = maintenant;
+                        // BOUCHAUD_GUI_FRAPPE_EST_UNE_ENTREE_V1
+                        //
+                        // La souris notait l'entree au veilleur, le clavier
+                        // non. Une session de SAISIE -- taper une adresse dans
+                        // le navigateur, precisement le cas qu'on cherche a
+                        // mesurer -- etait donc comptee comme un bureau au
+                        // repos, et la telemetrie mentait sur le seul moment
+                        // qui nous interesse.
+                        note_entree_bureau(&mut veilleur, maintenant);
                     }
                 }
                 continue;
@@ -635,6 +644,7 @@ fn boucle() {
                     envoie_touche(client, evenement);
                     TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                     derniere_entree = maintenant;
+                    note_entree_bureau(&mut veilleur, maintenant);
                     continue;
                 }
                 // Application du noyau : c'est le bureau qui la dessine, donc

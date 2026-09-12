@@ -8,66 +8,8 @@ use crate::drivers::e1000;
 use crate::net::ipv4::Ipv4Addr;
 use crate::net::{self, ethernet, ipv4, udp};
 
-const COOKIE: [u8; 4] = [99, 130, 83, 99];
-
-#[derive(Default, Clone, Copy)]
-struct Lease {
-    msg_type: u8,
-    your_ip: Ipv4Addr,
-    server_id: Ipv4Addr,
-    router: Ipv4Addr,
-    dns: Ipv4Addr,
-}
-
-/// Construit un message DHCP (BOOTREQUEST). Renvoie la longueur (>= 300).
-fn build_msg(buf: &mut [u8], xid: u32, mac: [u8; 6], msg_type: u8,
-             req_ip: Option<Ipv4Addr>, server_id: Option<Ipv4Addr>) -> usize {
-    for b in buf[..300].iter_mut() { *b = 0; }
-    buf[0] = 1;            // op = BOOTREQUEST
-    buf[1] = 1;            // htype = Ethernet
-    buf[2] = 6;            // hlen
-    buf[4..8].copy_from_slice(&xid.to_be_bytes());
-    buf[10] = 0x80;        // flags : broadcast (on n'a pas encore d'IP)
-    buf[28..34].copy_from_slice(&mac);
-    buf[236..240].copy_from_slice(&COOKIE);
-
-    let mut p = 240;
-    buf[p] = 53; buf[p + 1] = 1; buf[p + 2] = msg_type; p += 3;
-    if let Some(ip) = req_ip {
-        buf[p] = 50; buf[p + 1] = 4; buf[p + 2..p + 6].copy_from_slice(&ip); p += 6;
-    }
-    if let Some(sid) = server_id {
-        buf[p] = 54; buf[p + 1] = 4; buf[p + 2..p + 6].copy_from_slice(&sid); p += 6;
-    }
-    buf[p] = 55; buf[p + 1] = 4; buf[p + 2] = 1; buf[p + 3] = 3; buf[p + 4] = 6; buf[p + 5] = 15; p += 6;
-    buf[p] = 255; p += 1; // fin des options
-    if p < 300 { 300 } else { p }
-}
-
-/// Analyse une reponse DHCP (yiaddr + options utiles).
-fn parse_reply(buf: &[u8]) -> Option<Lease> {
-    if buf.len() < 240 || buf[236..240] != COOKIE { return None; }
-    let mut lease = Lease::default();
-    lease.your_ip = [buf[16], buf[17], buf[18], buf[19]];
-    let mut p = 240;
-    while p + 1 < buf.len() {
-        let code = buf[p];
-        if code == 255 { break; }
-        if code == 0 { p += 1; continue; }
-        let len = buf[p + 1] as usize;
-        let data = p + 2;
-        if data + len > buf.len() { break; }
-        match code {
-            53 if len >= 1 => lease.msg_type = buf[data],
-            54 if len >= 4 => lease.server_id = [buf[data], buf[data + 1], buf[data + 2], buf[data + 3]],
-            3 if len >= 4 => lease.router = [buf[data], buf[data + 1], buf[data + 2], buf[data + 3]],
-            6 if len >= 4 => lease.dns = [buf[data], buf[data + 1], buf[data + 2], buf[data + 3]],
-            _ => {}
-        }
-        p = data + len;
-    }
-    Some(lease)
-}
+pub mod options;
+use options::{build_msg, parse_reply, Lease, LONGUEUR_DOMAINE};
 
 /// Emet un message DHCP en diffusion (broadcast L2 + IP).
 fn send(mac: [u8; 6], msg: &[u8]) -> bool {
@@ -187,6 +129,7 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     let gateway = if ack.router == [0, 0, 0, 0] { net::gateway() } else { ack.router };
     let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
     net::set_config(ack.your_ip, gateway, dns);
+    net::pose_identite_reseau(&ack.domaine[..ack.domaine_len], ack.masque);
     Some(Bail { ip: ack.your_ip, gateway, dns })
 }
 
@@ -222,6 +165,7 @@ pub fn run() {
     let gw = if ack.router == [0, 0, 0, 0] { net::gateway() } else { ack.router };
     let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
     net::set_config(ack.your_ip, gw, dns);
+    net::pose_identite_reseau(&ack.domaine[..ack.domaine_len], ack.masque);
 
     crate::print!("DHCP: bail obtenu  inet "); ipv4::print_addr(&ack.your_ip);
     crate::print!("  gw "); ipv4::print_addr(&gw);

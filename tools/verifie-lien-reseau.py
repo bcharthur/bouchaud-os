@@ -39,6 +39,7 @@ RACINE = Path(__file__).resolve().parents[1]
 NET = RACINE / "src/net/mod.rs"
 STAGE2 = RACINE / "src/platform/pc/stage2.rs"
 MAIN = RACINE / "src/main.rs"
+WIDGETS = RACINE / "src/gui/widgets.rs"
 
 
 def sans_commentaires(texte):
@@ -67,7 +68,7 @@ def corps(source, entete):
 
 def main():
     fautes = []
-    for chemin in (NET, STAGE2, MAIN):
+    for chemin in (NET, STAGE2, MAIN, WIDGETS):
         if not chemin.exists():
             print("  - fichier absent : %s" % chemin)
             return 1
@@ -148,6 +149,74 @@ def main():
                 "demarrage." % nom
             )
 
+    # --- L'INDICATEUR, ET CE QU'IL N'A PAS LE DROIT DE MONTRER ---------------
+    #
+    # Un indicateur reseau qui ment est pire qu'absent : il fait chercher la
+    # panne ailleurs. Les trois regles qui suivent disent qu'il lit l'etat
+    # COURANT, qu'il ne fabrique pas de nom, et que l'etat se lit autrement
+    # que par la couleur.
+    widgets = sans_commentaires(WIDGETS.read_text(encoding="utf-8"))
+    if "fn dessine_reseau(" not in widgets:
+        fautes.append(
+            "widgets.rs : l'indicateur reseau a disparu de la barre du haut."
+        )
+    if "crate::net::connecte()" not in widgets:
+        fautes.append(
+            "widgets.rs : l'indicateur ne lit plus l'etat COURANT du lien. Le "
+            "verdict de demarrage ne dit pas si le cable est branche a cet "
+            "instant, et une icone verte sur un cable debranche fait chercher "
+            "la panne ailleurs."
+        )
+    etat = corps(widgets, "pub fn libelle_reseau(")
+    if etat is None:
+        fautes.append("widgets.rs : le libelle de l'indicateur a disparu.")
+    elif "nom_reseau()" not in etat:
+        fautes.append(
+            "widgets.rs : le libelle n'affiche plus le nom du reseau."
+        )
+    dessin = corps(widgets, "fn dessine_reseau(")
+    if dessin is None or "if etat != EtatReseau::Connecte" not in dessin:
+        fautes.append(
+            "widgets.rs : l'etat deconnecte ne se distingue plus autrement que "
+            "par la couleur. Un ecran mal regle, ou un daltonien, ne verrait "
+            "aucune difference -- la barre oblique est ce qui rend l'etat "
+            "lisible sans elle."
+        )
+    nom = corps(net, "pub fn nom_reseau()")
+    if nom is None:
+        fautes.append("net/mod.rs : `nom_reseau` a disparu.")
+    else:
+        if "NOM_RESEAU[..NOM_RESEAU_LEN]" not in nom:
+            fautes.append(
+                "net/mod.rs : `nom_reseau` ne rend plus le nom que le serveur "
+                "DHCP a annonce ; il rend autre chose, et l'indicateur nomme "
+                "un reseau que personne n'a nomme."
+            )
+        if 'String::from("' in nom:
+            fautes.append(
+                "net/mod.rs : `nom_reseau` rend un nom ECRIT DANS LE CODE. Un "
+                "nom de reseau vient du serveur DHCP ou du sous-reseau, jamais "
+                "d'une constante : une constante nomme un reseau que personne "
+                "n'a identifie."
+            )
+        if "String::new()" not in nom:
+            fautes.append(
+                "net/mod.rs : `nom_reseau` FABRIQUE un nom quand il n'en "
+                "connait aucun. Un nom invente vaut moins que rien : il fait "
+                "croire a un reseau qu'on a identifie."
+            )
+        if "options::longueur_prefixe" not in nom:
+            fautes.append(
+                "net/mod.rs : le sous-reseau de repli n'est plus calcule par "
+                "le module pur du client DHCP -- celui que la suite hote met a "
+                "l'epreuve. Une seconde copie serait une seconde a corriger."
+            )
+    if veilleur is None or "oublie_identite_reseau()" not in veilleur:
+        fautes.append(
+            "net/mod.rs : le nom du reseau survit a la chute du lien. "
+            "L'indicateur nommerait un reseau qu'on ne joint plus."
+        )
+
     if fautes:
         print("lien reseau : %d probleme(s)\n" % len(fautes))
         for f in fautes:
@@ -156,7 +225,8 @@ def main():
     print(
         "lien reseau : veille bornee, reprise DHCP a la montee, verdict "
         "redescendu a la chute, aucune adresse QEMU fabriquee sur materiel "
-        "reel, veilleur lance sur les deux chemins de demarrage"
+        "reel, veilleur lance sur les deux chemins de demarrage, indicateur "
+        "lie a l'etat courant et sans nom invente"
     )
     return 0
 

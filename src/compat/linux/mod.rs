@@ -766,6 +766,14 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
 /// l'autre reculerait a chaque migration.
 static EPOCH_SECONDS: AtomicU64 = AtomicU64::new(0);
 static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+// L'ANCRE NANOSECONDE, POSEE AU MEME INSTANT QUE L'ANCRE EN TICKS.
+//
+// Les deux horloges du noyau ne sont pas la meme : `ticks()` compte les IRQ0
+// du PIT, `monotonic_ns()` lit le TSC. Sous charge, le PIT prend du retard --
+// c'est precisement pour cela que l'horloge monotone ne s'appuie pas sur lui.
+// Convertir l'ancre en ticks vers des nanosecondes ferait donc AVANCER
+// l'horloge murale de tout le retard accumule par le PIT.
+static EPOCH_MONO_NS: AtomicU64 = AtomicU64::new(0);
 static EPOCH_POSEE: AtomicU8 = AtomicU8::new(0);
 
 /// Lit la RTC et la convertit en secondes depuis l'epoch Unix.
@@ -799,6 +807,7 @@ pub fn realtime_ms() -> u64 {
         {
             EPOCH_SECONDS.store(seconds, Ordering::Relaxed);
             EPOCH_TICKS.store(now_ticks, Ordering::Relaxed);
+            EPOCH_MONO_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
             EPOCH_POSEE.store(2, Ordering::Release);
         }
         while EPOCH_POSEE.load(Ordering::Acquire) != 2 {
@@ -809,6 +818,23 @@ pub fn realtime_ms() -> u64 {
     let base_ticks = EPOCH_TICKS.load(Ordering::Relaxed);
     let elapsed_ticks = now_ticks.saturating_sub(base_ticks);
     base_seconds * 1000 + elapsed_ticks * 1000 / crate::kernel::timer::TICKS_PER_SECOND
+}
+
+/// Horloge murale en NANOSECONDES depuis l'epoch Unix.
+///
+/// `realtime_ms` compte en ticks, donc par millisecondes. Cette version ancre
+/// la meme seconde RTC sur l'horloge monotone nanoseconde, qui est lue au TSC.
+/// C'est ce qu'attend `clock_gettime` : un `timespec` dont le champ des
+/// nanosecondes veut dire quelque chose.
+pub fn realtime_ns() -> u64 {
+    // Pose l'ancre si ce n'est pas deja fait, par le meme chemin.
+    let _ = realtime_ms();
+    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
+    let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed);
+    let ecoule_ns = crate::kernel::timer::monotonic_ns().saturating_sub(base_ns);
+    base_seconds
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ecoule_ns)
 }
 
 /// Secondes depuis l'epoch Unix.
@@ -842,23 +868,44 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
     //
     // Le noyau compte deja, par echantillonnage a chaque IRQ0. Il suffisait de
     // le dire a l'espace utilisateur.
-    let ms = match clock {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ms(),
+    // BOUCHAUD_HORLOGE_NANOSECONDE_V1
+    //
+    // LA MILLISECONDE ETAIT UN PLANCHER, ET ELLE SE VOYAIT
+    //
+    // Cet appel calculait un nombre de MILLISECONDES puis le rendait comme un
+    // `timespec` : le champ des nanosecondes etait donc toujours un multiple
+    // d'un million, et l'horloge avancait par marches d'une milliseconde.
+    //
+    // Une boucle d'evenements qui mesure une duree ecoulee y lit zero pour
+    // tout ce qui dure moins d'une milliseconde -- et une boucle qui attend
+    // que le temps avance y tourne a vide pendant toute la marche. Le releve
+    // physique du 12 septembre montre exactement cela : `WebContent` a
+    // `cpu_pct=21` avec `ctx_delta=3` -- vingt et un pour cent de processeur
+    // pour TROIS changements de contexte en trente secondes. Un processus qui
+    // travaille change de contexte ; celui-la tournait sur place.
+    //
+    // L'horloge monotone du noyau est lue au TSC et a toute la resolution
+    // qu'il faut. Il suffisait de ne pas la jeter.
+    let ns = match clock {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => realtime_ns(),
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // Seule branche de cet appel qui parcourt la table des taches.
             // Elle prenait le gros verrou pour cela ; elle n'en a plus besoin :
             // le registre se lit sans verrou, et `ticks_cpu` est atomique comme
             // les autres champs qu'un CPU ecrit et qu'un autre lit.
             let pid = crate::kernel::task::current_process().pid;
-            crate::kernel::task::cpu_time_ms(pid)
+            // Le temps PROCESSEUR est compte par echantillonnage a chaque
+            // IRQ0 : sa granularite est la milliseconde, et pretendre le
+            // contraire serait inventer des chiffres.
+            crate::kernel::task::cpu_time_ms(pid).saturating_mul(1_000_000)
         }
-        _ => crate::kernel::timer::monotonic_ms(),
+        _ => crate::kernel::timer::monotonic_ns(),
     };
     if out == 0 {
         return -errno::EFAULT;
     }
-    let seconds = ms / 1000;
-    let nanos = (ms % 1000) * 1_000_000;
+    let seconds = ns / 1_000_000_000;
+    let nanos = ns % 1_000_000_000;
     if !user_write(out, &seconds.to_le_bytes()) || !user_write(out + 8, &nanos.to_le_bytes()) {
         return -errno::EFAULT;
     }
@@ -866,13 +913,29 @@ fn sys_clock_gettime(clock: i32, out: u64) -> i64 {
 }
 
 /// Lit un `struct timespec` utilisateur et le convertit en millisecondes.
+///
+/// # UNE DUREE DEMANDEE N'EST JAMAIS ARRONDIE A ZERO
+///
+/// La division tronquait : `nanosleep(500 us)` rendait zero milliseconde,
+/// `dors_ms(0)` rendait la main sans dormir, et un programme qui s'endort en
+/// boucle pour quelques centaines de microsecondes tournait a plein regime
+/// sans jamais changer de contexte. C'est la signature relevee sur la machine
+/// le 12 septembre : `WebContent cpu_pct=21 ctx_delta=3`.
+///
+/// C'est aussi une faute de contrat : POSIX garantit qu'un sommeil dure AU
+/// MOINS ce qu'on a demande. Rendre la main immediatement dort moins que
+/// demande ; arrondir au tick superieur dort un peu plus, ce qui est permis.
 fn timespec_ms(addr: u64) -> Option<u64> {
     if addr == 0 {
         return None;
     }
     let seconds = user_read_u64(addr)?;
     let nanos = user_read_u64(addr + 8)?;
-    Some(seconds.saturating_mul(1000) + nanos / 1_000_000)
+    let total_ns = seconds.saturating_mul(1_000_000_000).saturating_add(nanos);
+    if total_ns == 0 {
+        return Some(0);
+    }
+    Some(total_ns.div_ceil(1_000_000).max(1))
 }
 
 /// `nanosleep` : la duree demandee est toujours **relative**.
