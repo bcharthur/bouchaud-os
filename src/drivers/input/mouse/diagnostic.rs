@@ -46,3 +46,12 @@ pub fn log_diagnostic() {
         WHEEL_DELTA.load(Ordering::Acquire),
     );
 }
+
+/// Une souris PS/2 a-t-elle repondu a la demande d'identite ?
+///
+/// Faux ne veut pas dire « pas encore sondee » : cela veut dire que le 8042 a
+/// repondu autre chose qu'une identite de souris, et donc qu'il n'y en a pas.
+/// IRQ12 reste alors masquee -- voir `BOUCHAUD_PS2_IDENTITE_AVANT_IRQ_V1`.
+pub fn ps2_presente() -> bool {
+    PRESENTE.load(Ordering::Acquire)
+}

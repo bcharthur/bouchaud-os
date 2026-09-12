@@ -1521,6 +1521,32 @@ fn enrich_hid_descriptor(
                     device.slot_id, descriptor.interface, descriptor.subclass,
                     descriptor.protocol, descriptor.kind, descriptor.report_id, received,
                 );
+                // LES OCTETS, ET PAS SEULEMENT LE VERDICT.
+                //
+                // Le 18 septembre, ce meme descripteur -- cinquante octets,
+                // `report_id=1` -- a ete classe « ni clavier ni souris », et la
+                // souris de la machine a disparu. Sans les octets, il n'y a
+                // aucun moyen de savoir si c'est le peripherique qui ment ou le
+                // classeur qui se trompe. Quarante-huit octets suffisent a
+                // couvrir l'en-tete d'un descripteur de souris, et le journal
+                // ne les ecrit qu'une fois par interface.
+                let vus = received.min(48);
+                let mut ligne = [0u8; 48 * 3];
+                let mut ecrits = 0usize;
+                for octet in bytes.iter().take(vus) {
+                    const CHIFFRES: &[u8; 16] = b"0123456789abcdef";
+                    ligne[ecrits] = CHIFFRES[(octet >> 4) as usize];
+                    ligne[ecrits + 1] = CHIFFRES[(octet & 0x0f) as usize];
+                    ligne[ecrits + 2] = b' ';
+                    ecrits += 3;
+                }
+                crate::serial_println!(
+                    "BOUCHAUD_HID_REPORT_OCTETS slot={} if={} vus={} {}",
+                    device.slot_id,
+                    descriptor.interface,
+                    vus,
+                    core::str::from_utf8(&ligne[..ecrits]).unwrap_or("?"),
+                );
             }
             _ => {
                 crate::serial_println!(
@@ -1657,6 +1683,7 @@ fn configure_hids(
     let mut highest_dci = dci_deja_declare(slot_out).max(1);
     let base_index = controller.hid_count;
     let mut installed = 0usize;
+
 
     for descriptor in descriptors.iter().take(wanted) {
         let mut kind = descriptor.kind;

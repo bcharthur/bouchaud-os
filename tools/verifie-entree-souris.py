@@ -45,6 +45,7 @@ PAQUET = RACINE / "src/drivers/input/mouse/paquet.rs"
 XHCI = RACINE / "src/drivers/usb/xhci_active.rs"
 BUREAU = RACINE / "src/gui/window_manager.rs"
 DETECTEUR = RACINE / "src/gui/windowing/hit_test.rs"
+PS2 = RACINE / "src/drivers/input/mouse/ps2.rs"
 
 
 def sans_commentaires(texte):
@@ -165,6 +166,58 @@ def main():
             "l'appui precedent."
         )
 
+    # --- ON N'ARME PAS L'IRQ D'UN PERIPHERIQUE QUI N'EST PAS LA --------------
+    #
+    # Une souris PS/2 repond a la demande d'identite par 0x00, 0x03 ou 0x04.
+    # La machine de reference a repondu 0xFE -- « RESEND » : un 8042 emule par
+    # le micrologiciel, sans souris derriere. IRQ12 etait demasquee quand meme,
+    # et la machine est morte sur une double faute dans la seconde qui a suivi
+    # (releve du 12 septembre 18:40, vecteur 0x8, tache `desktop`).
+    #
+    # Aucun demarrage precedent n'etait passe par la : ce repli ne s'arme que
+    # lorsqu'aucune souris USB n'a ete reconnue.
+    ps2 = sans_commentaires(PS2.read_text(encoding="utf-8"))
+    init = None
+    if "pub fn init()" in ps2:
+        debut = ps2.index("pub fn init()")
+        init = ps2[debut:]
+    if init is None:
+        fautes.append("ps2.rs : `init` a disparu.")
+    else:
+        if "matches!(id, ID_STANDARD | ID_MOLETTE | ID_CINQ_BOUTONS)" not in init:
+            fautes.append(
+                "ps2.rs : l'identite rendue par le 8042 n'est plus verifiee. "
+                "Une souris PS/2 repond 0x00, 0x03 ou 0x04 ; tout le reste dit "
+                "qu'il n'y a pas de souris."
+            )
+        # LA REGLE : IRQ12 sous condition, IRQ1 sans condition.
+        ligne12 = [l for l in init.splitlines() if "unmask_irq(12)" in l]
+        if not ligne12:
+            fautes.append("ps2.rs : IRQ12 n'est plus demasquee du tout.")
+        else:
+            avant = init[: init.index(ligne12[0])]
+            queue = avant.rstrip().splitlines()
+            if not queue or "if presente" not in queue[-1]:
+                fautes.append(
+                    "ps2.rs : IRQ12 est de nouveau demasquee sans condition. "
+                    "Armer une ligne d'interruption pour un peripherique absent "
+                    "n'apporte rien, et sur la machine de reference cela a tue "
+                    "le noyau."
+                )
+        if "unmask_irq(1)" not in init:
+            fautes.append(
+                "ps2.rs : IRQ1 n'est plus demasquee. Le clavier n'a rien a voir "
+                "avec l'identite de la souris : sa ligne doit etre armee quoi "
+                "qu'il arrive."
+            )
+
+    if "BOUCHAUD_HID_REPORT_OCTETS" not in xhci:
+        fautes.append(
+            "xhci_active.rs : les octets du descripteur de rapport ne sont "
+            "plus journalises. Sans eux, un mauvais classement ne peut pas "
+            "etre distingue d'un peripherique qui ment."
+        )
+
     if fautes:
         print("entree souris : %d probleme(s)\n" % len(fautes))
         for f in fautes:
@@ -174,7 +227,8 @@ def main():
         "entree souris : boutons par source et unis, source rendue au "
         "debranchement, repli aveugle soumis au descripteur de rapport, front "
         "montant ignore pendant un glissement, double-clic oublie apres un "
-        "deplacement"
+        "deplacement, IRQ12 armee seulement pour une souris qui repond, et les "
+        "octets du descripteur de rapport journalises"
     )
     return 0
 

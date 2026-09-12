@@ -7,6 +7,11 @@ static MX: AtomicI32 = AtomicI32::new(0);
 static MY: AtomicI32 = AtomicI32::new(0);
 static BTN: AtomicU8 = AtomicU8::new(0);
 static HAS_WHEEL: AtomicBool = AtomicBool::new(false);
+/// Une souris PS/2 a-t-elle REPONDU a la demande d'identite ?
+///
+/// Faux ne veut pas dire « pas encore sondee » : cela veut dire que le 8042 a
+/// repondu autre chose qu'une identite de souris, et donc qu'il n'y en a pas.
+static PRESENTE: AtomicBool = AtomicBool::new(false);
 static WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
 
 // BOUCHAUD_SOURIS_BOUTONS_PAR_SOURCE_V1

@@ -481,10 +481,25 @@ fn boucle() {
         // preciser laquelle ne permettait pas de distinguer un bureau qui a un
         // clavier et pas de souris d'un bureau qui a les deux.
         let legacy_clavier = crate::platform::pc::stage2::legacy_ps2_clavier();
+        // AUCUN POINTEUR EST UN ETAT, ET IL DOIT SE LIRE.
+        //
+        // Le 12 septembre a 18:40, un controleur xHCI n'a pas rendu sa souris,
+        // le repli PS/2 s'est arme sur un 8042 qui n'en avait pas non plus, et
+        // la machine est morte. Le bureau survit desormais sans pointeur -- le
+        // clavier suffit a l'utiliser -- mais encore faut-il que le releve le
+        // DISE, au lieu d'annoncer « souris=ps2 » sur une machine qui n'en a
+        // aucune.
+        let souris = if !legacy_souris {
+            "usb"
+        } else if crate::drivers::mouse::ps2_presente() {
+            "ps2"
+        } else {
+            "aucune"
+        };
         crate::serial_println!(
             "BOUCHAUD_STAGE2_INPUT_READY clavier={} souris={}",
             if legacy_clavier { "ps2" } else { "usb" },
-            if legacy_souris { "ps2" } else { "usb" },
+            souris,
         );
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
