@@ -163,12 +163,34 @@ impl Client {
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
             chemin, pid, largeur_px, hauteur_px
         ));
+        // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
+        //
+        // Le releve du 13 septembre montre les deux instants :
+        //
+        //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
+        //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
+        //
+        // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
+        // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
+        // sa vie, et a repondu « Unable to resolve host » sur une machine dont
+        // le reseau marchait.
+        //
+        // La cadence de reprise DHCP a ete resserree pour que ce creneau se
+        // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
+        // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
+        // resolveur non configure, au lieu de laisser chercher la panne dans
+        // le navigateur.
+        let pret = matches!(
+            crate::net::etat_demarrage(),
+            crate::net::Demarrage::Pret,
+        );
         crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={}",
+            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
             pid,
             crate::net::ipv4::format_addr(&crate::net::dns_server()),
             crate::net::nom_verdict(),
             crate::net::connecte() as u8,
+            if pret { "configure" } else { "NON-CONFIGURE" },
         );
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le

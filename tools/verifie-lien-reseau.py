@@ -94,7 +94,7 @@ def main():
                 "net/mod.rs : le veilleur ne dort plus entre deux lectures ; "
                 "il brulerait un coeur pour lire un registre."
             )
-        if "dhcp::negocie()" not in veilleur:
+        if "dhcp::negocie_avant(" not in veilleur:
             fautes.append(
                 "net/mod.rs : le veilleur ne retente plus la configuration "
                 "quand le lien monte. Voir le lien monter sans rien en faire "
@@ -136,12 +136,46 @@ def main():
     m = re.search(r"const PERIODE_DHCP_MS: u64 = ([0-9_]+);", net)
     if m is None:
         fautes.append("net/mod.rs : la periode de reprise DHCP n'est plus lisible.")
+    else:
+        periode = int(m.group(1).replace("_", ""))
+        if periode < 1_000:
+            fautes.append(
+                "net/mod.rs : les tentatives DHCP s'enchainent sans pause. "
+                "`negocie` attend lui-meme plusieurs secondes : les relancer "
+                "sans repit tiendrait le reseau occupe en permanence."
+            )
+        # ET SURTOUT PAS TROP LONG.
+        #
+        # Le releve du 13 septembre : lien monte a 23:59:02, configuration
+        # obtenue a 00:00:05 -- trente et une secondes, parce que la premiere
+        # reprise attendait dix secondes puis doublait. Le navigateur a ete
+        # lance entre les deux et a garde le resolveur de QEMU pour toute sa
+        # vie. Une premiere requete perdue juste apres une montee de lien est
+        # NORMALE : le commutateur en face vient d'allumer son port.
+        if periode > 3_000:
+            fautes.append(
+                "net/mod.rs : la premiere reprise DHCP attend plus de trois "
+                "secondes apres une montee de lien. Le navigateur lance "
+                "pendant ce creneau garde un resolveur inutilisable pour "
+                "toute sa vie -- c'est ce qui est arrive le 13 septembre."
+            )
+
+    m = re.search(r"const BUDGET_DHCP_VEILLEUR_MS: u64 = ([0-9_]+);", net)
+    if m is None:
+        fautes.append(
+            "net/mod.rs : le veilleur n'a plus de budget DHCP propre ; il "
+            "reprendrait celui du demarrage, taille pour ne pas retarder le "
+            "bureau et bien trop court pour un vrai serveur."
+        )
     elif int(m.group(1).replace("_", "")) < 2_000:
         fautes.append(
-            "net/mod.rs : les tentatives DHCP s'enchainent sans pause. "
-            "`negocie()` attend lui-meme plusieurs secondes : les relancer "
-            "sans repit tiendrait le reseau occupe en permanence pour un "
-            "serveur qui, le plus souvent, n'existe pas."
+            "net/mod.rs : le budget DHCP du veilleur est retombe sous deux "
+            "secondes. Ce fil ne retarde rien : lui refuser le temps de "
+            "recevoir une reponse n'economise que des echecs."
+        )
+    if "negocie_avant(BUDGET_DHCP_VEILLEUR_MS)" not in net:
+        fautes.append(
+            "net/mod.rs : le veilleur n'utilise plus son budget propre."
         )
 
     for chemin, nom in ((STAGE2, "stage2.rs"), (MAIN, "main.rs")):

@@ -4459,10 +4459,34 @@ fn repli_ep0_un_tour() -> bool {
 fn fil_repli_ep0() -> ! {
     loop {
         REPLI_TOURS.fetch_add(1, Ordering::Relaxed);
-        repli_ep0_un_tour();
-        crate::kernel::task::sleep_ticks(1);
+        // RIEN A SERVIR N'EST PAS UNE RAISON DE RECOMMENCER TOUT DE SUITE.
+        //
+        // `repli_ep0_un_tour` prend le verrou du pilote pour DECIDER qu'il n'y
+        // a rien a faire, puis le rend. A mille tours par seconde, cela fait
+        // mille prises de verrou par seconde pour rien -- et chacune est une
+        // prise que le drainage HID et l'enregistreur de vol n'ont pas.
+        //
+        // Le releve du 13 septembre le chiffre : `usb-repli cpu_pct=30` alors
+        // que le clavier etait passe en Interrupt-IN et qu'il n'y avait donc
+        // plus un seul point muet a servir. Trente pour cent d'un coeur, et
+        // surtout une contention permanente sur le verrou qui ramenait la
+        // scrutation de mille tours par seconde a deux cent cinquante.
+        //
+        // Quand tous les points repondent en Interrupt-IN -- le cas normal --
+        // le pont n'a rien a faire et se contente de verifier vingt fois par
+        // seconde. Un point qui se tait est alors repris en cinquante
+        // millisecondes au pire, ce qui ne se sent pas ; et tant qu'il y a
+        // quelque chose a servir, la cadence remonte a la milliseconde.
+        if repli_ep0_un_tour() {
+            crate::kernel::task::sleep_ticks(1);
+        } else {
+            crate::kernel::task::sleep_ticks(PAUSE_REPLI_OISIF_TICKS);
+        }
     }
 }
+
+/// Pause du pont EP0 quand il n'a rien a servir, en ticks (millisecondes).
+const PAUSE_REPLI_OISIF_TICKS: u64 = 50;
 
 /// Lance le fil du repli EP0.
 pub fn demarre_le_fil_repli_ep0() -> bool {

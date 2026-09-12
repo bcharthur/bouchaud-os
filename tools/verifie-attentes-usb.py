@@ -234,6 +234,24 @@ def main():
                 "xhci_active.rs : le fil du repli EP0 ne dort plus ; il "
                 "tiendrait le verrou du pilote en continu."
             )
+        elif "PAUSE_REPLI_OISIF_TICKS" not in fil:
+            # RIEN A SERVIR N'EST PAS UNE RAISON DE RECOMMENCER TOUT DE SUITE.
+            #
+            # Le pont prend le verrou du pilote pour DECIDER qu'il n'y a rien
+            # a faire, puis le rend. A mille tours par seconde, cela fait mille
+            # prises de verrou par seconde pour rien -- et chacune est une
+            # prise que le drainage HID et l'enregistreur de vol n'ont pas.
+            #
+            # Le releve du 13 septembre le chiffre : `usb-repli cpu_pct=30`
+            # alors que le clavier etait passe en Interrupt-IN et qu'il n'y
+            # avait plus un seul point muet a servir.
+            fautes.append(
+                "xhci_active.rs : le pont EP0 ne ralentit plus quand il n'a "
+                "rien a servir. Il reprend le verrou du pilote mille fois par "
+                "seconde pour constater qu'il n'y a rien a faire, et cette "
+                "contention ramene la scrutation HID de mille tours par "
+                "seconde a deux cent cinquante."
+            )
 
     # --- 4. l'enregistreur de vol n'est pas sur le chemin d'entree -----------
     scrutation = corps(source, "pub fn poll()")

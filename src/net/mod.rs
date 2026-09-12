@@ -286,12 +286,37 @@ const PERIODE_LIEN_MS: u64 = 1_000;
 /// indefiniment.
 const PERIODE_AUTONEGOCIATION_MS: u64 = 4_000;
 
-/// Attente entre la montee du lien et la premiere reprise DHCP.
+/// Attente avant la PREMIERE reprise DHCP apres une montee de lien.
 ///
-/// Dix secondes. `negocie()` attend lui-meme plusieurs secondes ; l'enchainer
-/// sans pause tiendrait le reseau occupe en permanence pour un serveur qui,
-/// le plus souvent, n'existe pas.
-const PERIODE_DHCP_MS: u64 = 10_000;
+/// # Pourquoi dix secondes etaient beaucoup trop
+///
+/// Le releve du 13 septembre 00:00 montre la sequence complete :
+///
+/// ```text
+/// 23:59:02  lien UP 1000 Mb/s duplex complet -> DHCP echoue
+/// 23:59:34  lien UP (rebranchement)          -> DHCP echoue
+/// 23:59:42  navigateur lance, dns=10.0.2.3   -> about:error
+/// 00:00:05  eth0 192.168.1.97 gw 192.168.1.254 dns 192.168.1.254 -- pret
+/// ```
+///
+/// Le reseau FONCTIONNE. Il a simplement mis trente et une secondes a se
+/// configurer, parce que les reprises etaient espacees de dix secondes qui
+/// doublaient, et que l'utilisateur a clique sur le navigateur entre-temps.
+///
+/// Une premiere requete perdue juste apres une montee de lien est NORMALE :
+/// le commutateur en face vient d'allumer son port et n'apprend les adresses
+/// qu'apres une seconde ou deux. Deux secondes, c'est le temps qu'il faut
+/// pour retenter une fois que le lien porte vraiment du trafic.
+const PERIODE_DHCP_MS: u64 = 2_000;
+
+/// Budget laisse au serveur DHCP par le veilleur, par etape.
+///
+/// Sept cents millisecondes suffisent AU DEMARRAGE, ou l'enjeu est de ne pas
+/// retarder le bureau pour un reseau qui n'existe peut-etre pas. Ici l'enjeu
+/// est l'inverse : le lien vient de monter, il y a de bonnes chances qu'un
+/// serveur reponde, et ce fil ne retarde rien. Quatre secondes, c'est ce que
+/// la commande `dhcp` tapee a la main accorde deja.
+const BUDGET_DHCP_VEILLEUR_MS: u64 = 4_000;
 
 /// Plafond de l'attente entre deux reprises DHCP.
 ///
@@ -390,7 +415,7 @@ fn veilleur_de_lien() -> ! {
             continue;
         }
         prochain_dhcp_ms = maintenant.saturating_add(attente_dhcp_ms);
-        let nouvel_etat = match dhcp::negocie() {
+        let nouvel_etat = match dhcp::negocie_avant(BUDGET_DHCP_VEILLEUR_MS) {
             Some(_) => Demarrage::Pret,
             None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
             None => Demarrage::SansBail,

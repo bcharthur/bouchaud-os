@@ -322,7 +322,13 @@ req("BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK" in stage2,
     "marqueur runtime Ladybird absent")
 for token in (
     'set_exported_for_boot("BOUCHAUD_M9", "1")',
-    'set_exported_for_boot("BOUCHAUD_M9_URL", "https://example.com/")',
+    # `example.com` servait a prouver qu'une page se charge : six lignes, sans
+    # script, sans image, sans redirection. Il n'a plus rien a prouver, et il
+    # ne dit rien a quelqu'un qui ouvre un navigateur pour s'en servir. La
+    # forme `www.` plutot que `google.com` evite une redirection, donc un
+    # endroit de moins ou une premiere mise en service peut echouer sans qu'on
+    # sache lequel des deux sauts a manque.
+    'set_exported_for_boot("BOUCHAUD_M9_URL", "https://www.google.com/")',
     'set_exported_for_boot("BOUCHAUD_M11", "1")',
     'set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1")',
 ):
