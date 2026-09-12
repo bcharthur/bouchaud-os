@@ -108,6 +108,14 @@ use politique::PERIODE_RELEVE_MS;
 /// ce qu'une telle page reste visiblement vivante, et divise par douze le cout
 /// que payait le repos.
 
+/// Silence de l'enregistreur de vol au-dela duquel le compositeur ecrit a sa
+/// place, en nanosecondes.
+///
+/// Deux secondes. L'enregistreur ecrit quatre fois par seconde quand tout va
+/// bien : deux secondes de silence ne sont pas une pause, c'est un fil qui ne
+/// tourne plus.
+const SILENCE_ENREGISTREUR_NS: u64 = 2_000_000_000;
+
 fn plein_ecran() -> Rect {
     Rect::neuf(0, 0, fb::width() as u32, fb::height() as u32)
 }
@@ -575,6 +583,18 @@ fn boucle() {
         if !crate::drivers::xhci_active::fil_hid_actif() {
             crate::drivers::xhci_active::poll();
         }
+        // LE FILET DE L'ENREGISTREUR DE VOL.
+        //
+        // Les trois archives physiques s'arretent a l'instant ou le navigateur
+        // demarre, sans une seule erreur d'ecriture : l'enregistreur n'avait
+        // pas echoue, il n'etait plus elu. Sa priorite a ete relevee ; ce
+        // filet couvre le cas ou ce ne serait pas la seule cause.
+        //
+        // Le compositeur, lui, tourne toujours -- c'est la boucle qui dessine.
+        // `filet_de_securite` ne fait rien tant que l'enregistreur ecrit, et
+        // `poll()` abandonne si le pilote USB est pris : il ne peut donc pas
+        // allonger une trame.
+        crate::kernel::blackbox::filet_de_securite(SILENCE_ENREGISTREUR_NS);
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----

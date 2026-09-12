@@ -15,6 +15,9 @@ pub mod navigateur;
 pub mod clean_page_cache;
 #[path = "memory/readahead.rs"]
 pub mod readahead;
+/// Prechauffage du cache de pages propres pour le navigateur.
+#[path = "memory/prechauffage.rs"]
+pub mod prechauffage;
 #[path = "memory/frame_cache.rs"]
 pub mod frame_cache;
 #[path = "memory/pressure.rs"]

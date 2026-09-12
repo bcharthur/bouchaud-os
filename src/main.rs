@@ -284,6 +284,13 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // chemin de l'entree.
     drivers::xhci_active::demarre_le_fil_blackbox();
 
+    // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
+    //
+    // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
+    // change entre les deux, c'est le cache de pages propres. Ce fil le
+    // remplit une fois, trois secondes apres le bureau, et se tait.
+    kernel::prechauffage::demarre();
+
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.
     kernel::autorun::run_if_present();

@@ -224,6 +224,28 @@ pub fn nom_reseau() -> String {
     String::new()
 }
 
+/// Ce que le lien vaut, a cet instant.
+///
+/// Un cable n'a pas de force de signal : sa QUALITE se lit a trois choses --
+/// la vitesse negociee, le duplex, et les trames que la carte a laissees
+/// tomber faute de tampon. Un lien a l'alternat sur du cuivre moderne signale
+/// presque toujours une negociation ratee d'un cote, et les collisions y
+/// divisent le debit utile.
+pub struct QualiteLien {
+    pub vitesse_mbps: u32,
+    pub duplex_complet: bool,
+    pub trames_perdues: u32,
+}
+
+/// Lit la qualite du lien courant.
+pub fn qualite_lien() -> QualiteLien {
+    QualiteLien {
+        vitesse_mbps: e1000::vitesse_mbps(),
+        duplex_complet: e1000::duplex_complet(),
+        trames_perdues: e1000::trames_perdues(),
+    }
+}
+
 /// Le reseau est-il utilisable pour joindre l'exterieur, a cet instant ?
 ///
 /// `external_enabled()` repond sur le VERDICT de demarrage ; celle-ci repond
@@ -247,6 +269,22 @@ pub fn carte_presente() -> bool {
 /// Une seconde : un cable qu'on branche est vu dans la seconde, et le cout est
 /// une lecture de registre par seconde.
 const PERIODE_LIEN_MS: u64 = 1_000;
+
+/// Periode de relance de l'autonegociation quand le lien est bas.
+///
+/// # Pourquoi il faut la RELANCER, et pas seulement attendre
+///
+/// Le pilote lisait l'etat du lien et n'ecrivait jamais dans le PHY. Sur la
+/// machine de reference, brancher le cable APRES le demarrage ne montait rien :
+/// le PHY restait dans l'etat ou la reinitialisation du controleur l'avait
+/// laisse, sans negociation en cours, et le bit de lien n'est monte a aucun
+/// moment de la session -- le releve du 12 septembre 17:55 ne contient pas une
+/// seule ligne `NET_LIEN etat=UP`.
+///
+/// Quatre secondes : une autonegociation cuivre gigabit dure une a trois
+/// secondes, et la relancer avant qu'elle ait fini la recommencerait
+/// indefiniment.
+const PERIODE_AUTONEGOCIATION_MS: u64 = 4_000;
 
 /// Attente entre la montee du lien et la premiere reprise DHCP.
 ///
@@ -292,6 +330,7 @@ fn veilleur_de_lien() -> ! {
     let mut lien_precedent = e1000::link_up();
     let mut prochain_dhcp_ms = 0u64;
     let mut attente_dhcp_ms = PERIODE_DHCP_MS;
+    let mut prochaine_negociation_ms = 0u64;
     loop {
         crate::kernel::task::sleep_ticks(
             crate::kernel::timer::ms_to_ticks(PERIODE_LIEN_MS),
@@ -320,9 +359,27 @@ fn veilleur_de_lien() -> ! {
             // suite de la serie d'echecs precedente.
             prochain_dhcp_ms = 0;
             attente_dhcp_ms = PERIODE_DHCP_MS;
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "net: eth0 lien UP {} Mb/s duplex {}",
+                e1000::vitesse_mbps(),
+                if e1000::duplex_complet() { "complet" } else { "alternat" },
+            ));
         }
 
-        if !lien || matches!(etat, Demarrage::SansCarte | Demarrage::CarteRefusee) {
+        if matches!(etat, Demarrage::SansCarte | Demarrage::CarteRefusee) {
+            continue;
+        }
+        if !lien {
+            // LE CABLE QU'ON VIENT DE BRANCHER DEMANDE UNE NEGOCIATION.
+            //
+            // Regarder le bit de lien sans jamais rien demander au PHY, c'est
+            // attendre un evenement que personne ne declenche.
+            let maintenant = crate::kernel::timer::monotonic_ms();
+            if maintenant >= prochaine_negociation_ms {
+                prochaine_negociation_ms =
+                    maintenant.saturating_add(PERIODE_AUTONEGOCIATION_MS);
+                e1000::reveille_le_lien();
+            }
             continue;
         }
         if matches!(etat, Demarrage::Pret | Demarrage::SansBail) {

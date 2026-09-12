@@ -266,20 +266,48 @@ fn draw_topbar() {
     fb::draw_text_prop(x, ligne, &stats,
         crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
 
-    // Horloge, a droite.
+    // BOUCHAUD_GUI_BARRE_HAUTE_UNE_SEULE_MISE_EN_PAGE_V1
+    //
+    // CE QUI SE CHEVAUCHAIT
+    //
+    // La barre etait peinte a DEUX endroits : ici, puis `widgets_v15` qui
+    // reposait un rectangle de fond et le compteur de trames par-dessus, a une
+    // marge droite ECRITE EN DUR (104 px). Chaque element ajoute a droite
+    // tombait dessous, et l'indicateur reseau y a fini decoupe -- la photo du
+    // 12 septembre montre « FPS: 0 necte 17:58:53 », c'est-a-dire la fin de
+    // « Deconnecte » sous le compteur.
+    //
+    // Il n'y a plus qu'une mise en page, et elle avance de la DROITE vers la
+    // gauche : chaque element prend la largeur qu'il occupe reellement, et le
+    // suivant commence ou celui-ci s'arrete. Rien ne peut plus se recouvrir,
+    // quelle que soit la longueur d'un nom de reseau.
+    let mut droite = fb::width().saturating_sub(window::MARGE_BARRE as usize * 2 + 2);
+
     let dt = rtc::now();
     let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
     let largeur = fb::text_width(&heure, CORPS_BARRE, true);
-    let x_horloge = fb::width() - largeur - window::MARGE_BARRE as usize * 2 - 2;
-    fb::draw_text_prop(x_horloge, ligne, &heure,
+    droite = droite.saturating_sub(largeur);
+    fb::draw_text_prop(droite, ligne, &heure,
         crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
 
-    // Reseau, juste a gauche de l'horloge.
-    dessine_reseau(x_horloge.saturating_sub(ECART_RESEAU_HORLOGE), ligne);
+    // Trames utiles du compositeur.
+    let snapshot = crate::gui::frame_clock::snapshot();
+    let fps = if snapshot.active {
+        format!("FPS:{:3}", snapshot.fps_arrondi())
+    } else {
+        format!("FPS: --")
+    };
+    let largeur = fb::text_width(&fps, CORPS_BARRE - 1.0, false);
+    droite = droite.saturating_sub(largeur + ECART_ELEMENTS);
+    fb::draw_text_prop(droite, ligne, &fps,
+        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
+
+    // Reseau.
+    dessine_reseau(droite.saturating_sub(ECART_ELEMENTS), ligne);
 }
 
-/// Ecart entre l'indicateur reseau et l'horloge, en pixels.
-const ECART_RESEAU_HORLOGE: usize = 14;
+/// Ecart entre deux elements de la partie droite de la barre, en pixels.
+const ECART_ELEMENTS: usize = 14;
 /// Largeur de la prise dessinee.
 const LARGEUR_PRISE: usize = 13;
 /// Hauteur de la prise dessinee.
@@ -319,11 +347,40 @@ pub fn etat_reseau() -> EtatReseau {
 pub fn libelle_reseau(etat: EtatReseau) -> String {
     match etat {
         EtatReseau::SansCarte => String::from("Pas de carte"),
-        EtatReseau::Deconnecte => String::from("Deconnecte"),
+        EtatReseau::Deconnecte => String::from("Ethernet deconnecte"),
         EtatReseau::Connecte => {
             let nom = crate::net::nom_reseau();
-            if nom.is_empty() { String::from("Connecte") } else { nom }
+            let qualite = crate::net::qualite_lien();
+            let debit = debit_lisible(qualite.vitesse_mbps);
+            let base = if nom.is_empty() { String::from("Ethernet") } else { nom };
+            if debit.is_empty() {
+                base
+            } else if qualite.duplex_complet {
+                format!("{} - {}", base, debit)
+            } else {
+                // L'ALTERNAT SE DIT, ET NE SE DEVINE PAS.
+                //
+                // Sur du cuivre moderne, un lien a l'alternat signale presque
+                // toujours une negociation ratee d'un cote. Les collisions y
+                // divisent le debit utile, et le chiffre de vitesse seul
+                // laisserait croire a une liaison saine.
+                format!("{} - {} alternat", base, debit)
+            }
         }
+    }
+}
+
+/// Le debit negocie, ecrit comme on l'ecrit. Vide quand on ne le connait pas.
+///
+/// Un zero signifierait « zero megabit », ce qui est faux : il signifie « ce
+/// pilote ne sait pas le lire ». Une chaine vide ne raconte rien, et c'est
+/// exactement ce qu'il faut dire.
+fn debit_lisible(mbps: u32) -> String {
+    match mbps {
+        0 => String::new(),
+        1000 => String::from("1 Gb/s"),
+        2500 => String::from("2,5 Gb/s"),
+        _ => format!("{} Mb/s", mbps),
     }
 }
 
@@ -337,7 +394,20 @@ pub fn libelle_reseau(etat: EtatReseau) -> String {
 fn dessine_reseau(droite: usize, ligne: usize) {
     let etat = etat_reseau();
     let libelle = libelle_reseau(etat);
+    // UN LIEN MONTE N'EST PAS FORCEMENT UN LIEN SAIN.
+    //
+    // L'alternat, ou dix megabits sur un port gigabit, sont des liens qui
+    // fonctionnent mal. Les peindre en vert comme un gigabit duplex integral
+    // ferait chercher la lenteur ailleurs.
+    let degrade = matches!(etat, EtatReseau::Connecte) && {
+        let q = crate::net::qualite_lien();
+        !q.duplex_complet || (q.vitesse_mbps != 0 && q.vitesse_mbps < 100)
+    };
     let (couleur, couleur_texte) = match etat {
+        EtatReseau::Connecte if degrade => (
+            crate::gui::theme::COLOR_WARNING,
+            crate::gui::theme::COLOR_TEXT_PRIMARY,
+        ),
         EtatReseau::Connecte => (
             crate::gui::theme::COLOR_SUCCESS,
             crate::gui::theme::COLOR_TEXT_PRIMARY,

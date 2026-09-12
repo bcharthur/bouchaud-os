@@ -40,6 +40,9 @@ NET = RACINE / "src/net/mod.rs"
 STAGE2 = RACINE / "src/platform/pc/stage2.rs"
 MAIN = RACINE / "src/main.rs"
 WIDGETS = RACINE / "src/gui/widgets.rs"
+V15 = RACINE / "src/gui/widgets_v15.rs"
+RTL = RACINE / "src/drivers/network/rtl8168.rs"
+CLIENT = RACINE / "src/gui/client.rs"
 
 
 def sans_commentaires(texte):
@@ -68,7 +71,7 @@ def corps(source, entete):
 
 def main():
     fautes = []
-    for chemin in (NET, STAGE2, MAIN, WIDGETS):
+    for chemin in (NET, STAGE2, MAIN, WIDGETS, V15, RTL, CLIENT):
         if not chemin.exists():
             print("  - fichier absent : %s" % chemin)
             return 1
@@ -217,6 +220,148 @@ def main():
             "L'indicateur nommerait un reseau qu'on ne joint plus."
         )
 
+    # --- LE PHY : LE LIRE NE SUFFIT PAS, IL FAUT LUI PARLER -----------------
+    #
+    # Le pilote LISAIT `PHYstatus` et n'ecrivait jamais dans le PHY. Sur la
+    # machine de reference, brancher le cable APRES le demarrage ne montait
+    # rien : le releve du 12 septembre 17:55 ne contient pas une seule ligne
+    # `NET_LIEN etat=UP`, alors que l'utilisateur avait branche le RJ45.
+    rtl = sans_commentaires(RTL.read_text(encoding="utf-8"))
+    if "fn relance_autonegociation(" not in rtl:
+        fautes.append(
+            "rtl8168.rs : plus personne ne relance l'autonegociation. Le lien "
+            "ne monte que si les deux extremites negocient : regarder le bit "
+            "de lien sans rien demander au PHY, c'est attendre un evenement "
+            "que personne ne declenche."
+        )
+    negociation = corps(rtl, "unsafe fn relance_autonegociation(")
+    if negociation is not None:
+        if "BMCR_VEILLE" not in negociation:
+            fautes.append(
+                "rtl8168.rs : le PHY n'est plus reveille avant la "
+                "negociation. Un PHY en veille ne voit pas le cable, quoi "
+                "qu'on lui annonce ensuite."
+            )
+        if "MII_BMCR" not in negociation:
+            fautes.append(
+                "rtl8168.rs : la relance n'ecrit plus dans BMCR ; rien ne "
+                "declenche la negociation."
+            )
+    for nom, fonction, echec in (
+        ("mdio_lit", "unsafe fn mdio_lit(", "None"),
+        ("mdio_ecrit", "unsafe fn mdio_ecrit(", "false"),
+    ):
+        bloc = corps(rtl, fonction)
+        if bloc is None:
+            fautes.append("rtl8168.rs : `%s` a disparu." % nom)
+            continue
+        if "MDIO_TOURS" not in bloc:
+            fautes.append(
+                "rtl8168.rs : `%s` n'est plus bornee. Un controleur muet "
+                "figerait le demarrage." % nom
+            )
+        # L'ECHEANCE DOIT ECHOUER, et non reussir en silence : une ecriture
+        # MDIO qui se declare faite sans l'etre ferait croire a une
+        # negociation lancee, et le lien ne monterait jamais sans que rien ne
+        # le dise.
+        dernier = [l.strip() for l in bloc.rstrip().rstrip("}").rstrip().splitlines() if l.strip()]
+        if not dernier or dernier[-1] != echec:
+            fautes.append(
+                "rtl8168.rs : `%s` ne rend plus un echec quand son echeance "
+                "expire. Une operation MDIO qui se declare faite sans l'etre "
+                "ferait croire a une negociation lancee." % nom
+            )
+    if "e1000::reveille_le_lien()" not in net:
+        fautes.append(
+            "net/mod.rs : le veilleur ne relance plus la negociation quand le "
+            "lien est bas. Un cable branche apres le demarrage ne serait "
+            "jamais vu."
+        )
+
+    # --- L'INDICATEUR DIT LA VITESSE, ET DISTINGUE UN LIEN DEGRADE ----------
+    if "qualite_lien()" not in widgets:
+        fautes.append(
+            "widgets.rs : l'indicateur n'affiche plus la qualite du lien. Un "
+            "lien a l'alternat, ou negocie a dix megabits sur un port gigabit, "
+            "fonctionne MAL et se lirait comme un lien sain."
+        )
+    if "COLOR_WARNING" not in widgets:
+        fautes.append(
+            "widgets.rs : un lien degrade est de nouveau peint comme un lien "
+            "sain. La lenteur se chercherait ailleurs."
+        )
+    degrade = None
+    for ligne in widgets.splitlines():
+        if "let degrade" in ligne:
+            degrade = ligne
+            break
+    bloc_degrade = ""
+    if degrade is not None:
+        debut = widgets.index(degrade)
+        bloc_degrade = widgets[debut:debut + 400]
+    if degrade is None \
+            or "matches!(etat, EtatReseau::Connecte)" not in degrade \
+            or "duplex_complet" not in bloc_degrade \
+            or "vitesse_mbps" not in bloc_degrade:
+        fautes.append(
+            "widgets.rs : la degradation du lien ne se juge plus sur le "
+            "duplex ET la vitesse. Ce sont les deux seules choses qu'un lien "
+            "cuivre dit de sa qualite."
+        )
+
+    # --- UNE SEULE MISE EN PAGE POUR LA BARRE DU HAUT ----------------------
+    #
+    # La barre etait peinte a deux endroits, la seconde fois a une marge droite
+    # ecrite en dur. La photo du 12 septembre montre le resultat :
+    # « FPS: 0 necte 17:58:53 » -- la fin de « Deconnecte » sous le compteur.
+    v15 = sans_commentaires(V15.read_text(encoding="utf-8"))
+    for interdit, quoi in (
+        ("fill_rect_rgb", "un rectangle de fond"),
+        ("draw_text_prop", "du texte"),
+        ("104", "une marge droite ecrite en dur"),
+    ):
+        if interdit in v15:
+            fautes.append(
+                "widgets_v15.rs : la facade repeint %s par-dessus la barre. "
+                "Deux mises en page pour une seule barre, et tout element "
+                "ajoute a droite finit dessous." % quoi
+            )
+    topbar = corps(widgets, "fn draw_topbar()")
+    if topbar is None or "let mut droite" not in topbar \
+            or topbar.count("droite = droite.saturating_sub") < 2:
+        fautes.append(
+            "widgets.rs : la barre du haut ne se remplit plus de la droite "
+            "vers la gauche. Sans ce curseur, la largeur de chaque element "
+            "redevient une constante, et un nom de reseau un peu long "
+            "recouvre son voisin."
+        )
+    if topbar is not None and "frame_clock::snapshot()" not in topbar:
+        fautes.append(
+            "widgets.rs : le compteur de trames n'est plus dans la mise en "
+            "page unique ; il reviendra se poser par-dessus."
+        )
+
+    # --- LE NAVIGATEUR DOIT RECEVOIR LE VRAI RESOLVEUR ---------------------
+    #
+    # Son hote a une valeur de repli ecrite en dur -- `10.0.2.3`, le resolveur
+    # du NAT de QEMU -- et personne ne lui disait jamais autre chose. Chaque
+    # releve physique contient « Setting DNS server to 10.0.2.3:53 » suivi de
+    # « Unable to resolve host » pour toutes les pages.
+    client = sans_commentaires(CLIENT.read_text(encoding="utf-8"))
+    if "BOUCHAUD_DNS_SERVER=" not in client:
+        fautes.append(
+            "client.rs : le navigateur n'apprend plus quel resolveur utiliser. "
+            "Il retomberait sur `10.0.2.3`, l'adresse du NAT de QEMU, qui ne "
+            "mene nulle part sur une machine reelle."
+        )
+    else:
+        debut = client.index("BOUCHAUD_DNS_SERVER=")
+        if "dns_server()" not in client[debut:debut + 200]:
+            fautes.append(
+                "client.rs : le resolveur passe au navigateur n'est plus celui "
+                "du noyau ; une constante y remplacerait le bail DHCP."
+            )
+
     if fautes:
         print("lien reseau : %d probleme(s)\n" % len(fautes))
         for f in fautes:
@@ -225,8 +370,10 @@ def main():
     print(
         "lien reseau : veille bornee, reprise DHCP a la montee, verdict "
         "redescendu a la chute, aucune adresse QEMU fabriquee sur materiel "
-        "reel, veilleur lance sur les deux chemins de demarrage, indicateur "
-        "lie a l'etat courant et sans nom invente"
+        "reel, veilleur lance sur les deux chemins de demarrage, "
+        "autonegociation relancee et bornee, indicateur lie a l'etat courant, "
+        "sans nom invente, qualite du lien dite, et une seule mise en page "
+        "pour la barre du haut"
     )
     return 0
 

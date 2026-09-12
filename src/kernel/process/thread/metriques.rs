@@ -205,13 +205,28 @@ anomalies={}/{}/{} proprietaire={}{}",
     // journal de boot pour comprendre pourquoi le navigateur repondait
     // « Unable to resolve host » cinq minutes plus tard. Cette ligne repond a
     // la question la ou on la pose.
+    let qualite = crate::net::qualite_lien();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[NET-LIEN] verdict={} lien={} ip={} gw={} dns={}",
+        "[NET-LIEN] verdict={} lien={} vitesse_mbps={} duplex={} trames_perdues={} \
+nom={} ip={} gw={} dns={}",
         crate::net::nom_verdict(),
         crate::drivers::e1000::link_up() as u8,
+        qualite.vitesse_mbps,
+        if qualite.duplex_complet { "complet" } else { "alternat" },
+        qualite.trames_perdues,
+        crate::net::nom_reseau(),
         crate::net::ipv4::format_addr(&crate::net::our_ip()),
         crate::net::ipv4::format_addr(&crate::net::gateway()),
         crate::net::ipv4::format_addr(&crate::net::dns_server()),
+    ));
+    let (pages_chaudes, fichiers_chauds, prechauffage_ns) =
+        crate::kernel::prechauffage::compteurs();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[PRECHAUFFAGE] termine={} fichiers={} pages={} duree_ms={}",
+        crate::kernel::prechauffage::termine() as u8,
+        fichiers_chauds,
+        pages_chaudes,
+        prechauffage_ns / 1_000_000,
     ));
     let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
     crate::kernel::dmesg::log_fmt(format_args!(

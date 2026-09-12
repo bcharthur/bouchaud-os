@@ -4547,17 +4547,33 @@ pub fn demarre_le_fil_blackbox() -> bool {
     if FIL_BLACKBOX_ACTIF.load(Ordering::Acquire) {
         return true;
     }
-    // NORMALE, et non Interactive : l'enregistreur n'a aucune latence a
-    // defendre. Il ecrit ce qui s'est passe, il ne fait pas partie de ce qui
-    // se passe.
+    // INTERACTIVE, ET NON NORMALE -- ET LE RAISONNEMENT D'AVANT ETAIT FAUX.
+    //
+    // Il disait : « l'enregistreur n'a aucune latence a defendre, il ecrit ce
+    // qui s'est passe, il ne fait pas partie de ce qui se passe ». Vrai sur un
+    // systeme au repos. Faux des que quelque chose arrive -- et c'est
+    // precisement alors qu'on le lit.
+    //
+    // L'archive du 12 septembre 17:55 s'arrete a la seconde 29,028, au milieu
+    // d'un tour de scrutation : deux enregistrements de vol ecrits, puis plus
+    // rien, alors que le bureau tournait a soixante-deux trames par seconde et
+    // que l'utilisateur s'en est servi deux minutes de plus. L'enregistreur
+    // n'a pas echoue -- `bb_failures=0` jusqu'au dernier echantillon --, il
+    // n'a plus ete elu. Le navigateur venait de creer vingt taches de priorite
+    // Normale, et le releve de charge montre un equilibrage qui refuse
+    // presque tout (`rej_bal` par dizaines de milliers).
+    //
+    // Il dort vingt millisecondes entre deux tours : le promouvoir ne coute
+    // rien a personne, et lui rend la seule chose dont il a besoin -- etre
+    // elu de temps en temps.
     if crate::kernel::task::spawn_noyau_priorite(
         fil_blackbox,
         "blackbox",
-        crate::kernel::task::Priorite::Normale,
+        crate::kernel::task::Priorite::Interactive,
     ) {
         FIL_BLACKBOX_ACTIF.store(true, Ordering::Release);
         crate::serial_println!(
-            "BOUCHAUD_BLACKBOX_FIL_LANCE periode_ms=20 priorite=normale"
+            "BOUCHAUD_BLACKBOX_FIL_LANCE periode_ms=20 priorite=interactive"
         );
         return true;
     }

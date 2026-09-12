@@ -427,6 +427,13 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // chemin de l'entree.
     crate::drivers::xhci_active::demarre_le_fil_blackbox();
 
+    // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
+    //
+    // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
+    // change entre les deux, c'est le cache de pages propres. Ce fil le
+    // remplit une fois, trois secondes apres le bureau, et se tait.
+    crate::kernel::prechauffage::demarre();
+
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
     point_de_controle("bureau");

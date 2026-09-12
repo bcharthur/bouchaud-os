@@ -9,42 +9,20 @@ mod legacy;
 
 pub(crate) use legacy::*;
 
-use alloc::format;
-use crate::gui::framebuffer as fb;
 
-/// Barre superieure + FPS utiles du compositeur.
+/// Barre superieure.
+///
+/// # Ce que cette facade ne fait PLUS
+///
+/// Elle reposait ici un rectangle de fond et le compteur de trames, a une
+/// marge droite ecrite en dur. La barre etait donc peinte a deux endroits, et
+/// tout element ajoute a droite par `widgets::draw_topbar` finissait dessous :
+/// la photo du 12 septembre montre « FPS: 0 necte 17:58:53 », soit la fin de
+/// « Deconnecte » recouverte par le compteur.
+///
+/// Le compteur vit maintenant dans la mise en page unique de la barre, qui
+/// avance de la droite vers la gauche et ou chaque element prend la largeur
+/// qu'il occupe reellement.
 pub(crate) fn draw_barre_haute() {
     legacy::draw_barre_haute();
-
-    let snapshot = crate::gui::frame_clock::snapshot();
-    let valeur = if snapshot.active {
-        format!("FPS:{:3}", snapshot.fps_arrondi())
-    } else {
-        format!("FPS: --")
-    };
-
-    // A gauche de l'horloge. Pas de jauge rouge a 0 FPS : sur un bureau
-    // immobile, zero trame utile est justement le comportement event-driven
-    // desire. L'indicateur est donc neutre, purement metrique.
-    const CORPS: f32 = 12.0;
-    let largeur = fb::text_width(&valeur, CORPS, false);
-    let marge_droite = 104usize;
-    let x = fb::width().saturating_sub(marge_droite + largeur + 18);
-    let y = 8usize;
-
-    fb::fill_rect_rgb(
-        x.saturating_sub(7),
-        4,
-        largeur + 14,
-        22,
-        crate::gui::theme::COLOR_SURFACE,
-    );
-    fb::draw_text_prop(
-        x,
-        y,
-        &valeur,
-        crate::gui::theme::COLOR_TEXT_SECONDARY,
-        CORPS,
-        false,
-    );
 }

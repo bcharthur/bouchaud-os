@@ -236,6 +236,34 @@ pub fn init() -> bool {
 }
 
 /// Lien physique etabli ?
+/// Vitesse negociee du lien, en megabits par seconde. Zero si le lien est bas.
+///
+/// Seul le pilote RTL8168 la rend aujourd'hui : l'e1000 emule de QEMU annonce
+/// toujours un gigabit, et l'inventer serait un chiffre faux plutot qu'une
+/// absence de chiffre.
+pub fn vitesse_mbps() -> u32 {
+    if rtl8168::is_ready() { return rtl8168::vitesse_mbps(); }
+    0
+}
+
+/// Le lien est-il en duplex integral ?
+pub fn duplex_complet() -> bool {
+    if rtl8168::is_ready() { return rtl8168::duplex_complet(); }
+    link_up()
+}
+
+/// Trames perdues faute de tampon, compteur materiel.
+pub fn trames_perdues() -> u32 {
+    if rtl8168::is_ready() { return rtl8168::trames_perdues(); }
+    0
+}
+
+/// Demande au PHY de relancer son autonegociation.
+pub fn reveille_le_lien() -> bool {
+    if rtl8168::is_ready() { return rtl8168::reveille_le_lien(); }
+    false
+}
+
 pub fn link_up() -> bool {
     if rtl8168::is_ready() { return rtl8168::link_up(); }
     unsafe {

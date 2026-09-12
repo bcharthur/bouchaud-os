@@ -380,7 +380,7 @@ fn sample(ts_ns: u64) {
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
-            "bb_busy_skips={} bb_fenetres_rendues={} bb_last_ok_ns={}\n"
+            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={}\n"
         ),
         ts_ns, cpu, rsp, here,
         task, syscall, phase, site, aux,
@@ -397,7 +397,8 @@ fn sample(ts_ns: u64) {
         TIMER_ENTERS[3].load(Ordering::Relaxed), TIMER_EXITS[3].load(Ordering::Relaxed),
         polls, events, reports, kbd, mouse, hid_errors, rearms, kicks,
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
-        bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed), bb_last_ok_ns,
+        bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
+        FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -501,6 +502,51 @@ pub fn poll() -> bool {
     }
     false
 }
+
+/// Depuis quand l'enregistreur n'a-t-il rien ecrit, en nanosecondes ?
+///
+/// Rend zero tant qu'il n'a jamais rien ecrit -- il n'a alors rien a expliquer.
+pub fn silence_ns() -> u64 {
+    let (_, _, _, _, _, dernier_ok) =
+        crate::drivers::xhci_active::blackbox_storage_extended_counters();
+    if dernier_ok == 0 {
+        return 0;
+    }
+    crate::kernel::timer::monotonic_ns().saturating_sub(dernier_ok)
+}
+
+/// Filet de securite : ecrire depuis un autre fil quand le notre ne tourne plus.
+///
+/// # Pourquoi un filet, et pas seulement une priorite
+///
+/// L'archive du 12 septembre 17:55 s'arrete au milieu d'un tour de
+/// scrutation, `bb_failures=0`, alors que le bureau tournait a soixante-deux
+/// trames par seconde. L'enregistreur n'avait pas echoue : il n'etait plus
+/// elu. Promouvoir son fil en Interactive corrige la cause la plus probable ;
+/// ce filet couvre le cas ou elle ne serait pas la seule.
+///
+/// L'appelant est le compositeur, qui tourne toujours. `poll()` est borne et
+/// ne bloque pas -- il abandonne si le pilote USB est pris --, donc cet appel
+/// ne peut pas figer une trame.
+pub fn filet_de_securite(seuil_ns: u64) -> bool {
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        return false;
+    }
+    let silence = silence_ns();
+    if silence < seuil_ns {
+        return false;
+    }
+    FILETS.fetch_add(1, Ordering::Relaxed);
+    poll();
+    true
+}
+
+/// Nombre de fois ou un autre fil a du ecrire a la place de l'enregistreur.
+pub fn filets() -> u64 {
+    FILETS.load(Ordering::Relaxed)
+}
+
+static FILETS: AtomicU64 = AtomicU64::new(0);
 
 /// Fenetres de scrutation rendues parce que le pilote USB etait pris.
 ///

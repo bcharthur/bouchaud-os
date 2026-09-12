@@ -132,6 +132,25 @@ impl Client {
                     largeur_px, hauteur_px
                 ),
                 "QT_QPA_FB_DISABLE_INPUT=1".to_string(),
+                // BOUCHAUD_NAVIGATEUR_RESOLVEUR_REEL_V1
+                //
+                // LE NAVIGATEUR INTERROGEAIT UN RESOLVEUR QUI N'EXISTE PAS
+                //
+                // Son hote a une valeur de repli ecrite en dur -- `10.0.2.3`,
+                // le resolveur du NAT de QEMU --, et personne ne lui disait
+                // jamais autre chose. Le releve physique le montre a chaque
+                // session : « Setting DNS server to 10.0.2.3:53 », sur une
+                // machine ou cette adresse ne mene nulle part, suivi de
+                // « Unable to resolve host » pour toutes les pages.
+                //
+                // La variable est lue AU LANCEMENT : elle porte donc le
+                // resolveur que le bail DHCP a rendu, s'il y en a eu un, et la
+                // valeur compilee sinon -- c'est-a-dire exactement ce que le
+                // repli aurait donne. On ne peut rien perdre a la poser.
+                alloc::format!(
+                    "BOUCHAUD_DNS_SERVER={}",
+                    crate::net::ipv4::format_addr(&crate::net::dns_server()),
+                ),
             ]
         };
 
@@ -144,6 +163,13 @@ impl Client {
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
             chemin, pid, largeur_px, hauteur_px
         ));
+        crate::serial_println!(
+            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={}",
+            pid,
+            crate::net::ipv4::format_addr(&crate::net::dns_server()),
+            crate::net::nom_verdict(),
+            crate::net::connecte() as u8,
+        );
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le
         // lancement du MEME instant, sinon les deux durees de demarrage
