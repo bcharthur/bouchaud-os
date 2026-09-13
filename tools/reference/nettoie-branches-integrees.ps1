@@ -16,11 +16,14 @@ $Branches = @(
     "temp"
 )
 foreach ($Branche in $Branches) {
-    $Sha = & git rev-parse --verify "refs/remotes/origin/$Branche" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    & git show-ref --verify --quiet "refs/remotes/origin/$Branche"
+    if ($LASTEXITCODE -eq 1) {
         Write-Host "Deja absente : $Branche"
         continue
     }
+    if ($LASTEXITCODE -ne 0) { throw "Lecture de la reference impossible : $Branche" }
+    $Sha = & git rev-parse --verify "refs/remotes/origin/$Branche"
+    if ($LASTEXITCODE -ne 0) { throw "SHA introuvable : $Branche" }
     $Sha = $Sha.Trim()
     & git merge-base --is-ancestor $Sha origin/main
     if ($LASTEXITCODE -ne 0) { throw "Travail non integre dans main : $Branche. Suppression refusee." }
