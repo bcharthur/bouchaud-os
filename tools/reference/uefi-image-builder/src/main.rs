@@ -146,7 +146,7 @@ fn create_large_ramdisk_image(image: &UefiBoot, ramdisk: &Path, preboot_shim: Op
 fn configuration(min: Option<(u64, u64)>, avec_shim: bool) -> BootConfig {
     let mut config = BootConfig::default();
     config.serial_logging = false;
-    config.frame_buffer_logging = true;
+    config.frame_buffer_logging = false; // diagnostics remain in kernel serial/blackbox
     if let Some((width, height)) = min {
         if width != 0 && height != 0 && !avec_shim {
             config.frame_buffer.minimum_framebuffer_width = Some(width as _);

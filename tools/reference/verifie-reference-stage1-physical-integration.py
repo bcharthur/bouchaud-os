@@ -15,7 +15,7 @@ g=read("src/platform/pc/reference_gop.rs")
 req("x86_64-bouchaud_os_uefi.json" in b,"build UEFI n'utilise pas le target dedie")
 req("verifie-reference-uefi-elf.py" in b,"verification ET_DYN absente")
 req("config.serial_logging = false;" in ib,"serial bootloader doit etre OFF")
-req("config.frame_buffer_logging = true;" in ib,"framebuffer logging bootloader doit etre ON")
+req("config.frame_buffer_logging = false;" in ib,"le demarrage graphique ne doit pas afficher les INFO du chargeur")
 for token in ("BOUCHAUD_STAGE1_PHYSICAL_INTEGRATION_V1","render_dashboard_compact","render_dashboard_tiny","render_dashboard_wide","Allocator-tracked","Dynamic VMM","logical reported / 1 active","Installed RAM not queried in Stage 1"):
     req(token in g,f"token integration absent: {token}")
 print("REFERENCE_STAGE1_PHYSICAL_INTEGRATION_GUARD_OK")

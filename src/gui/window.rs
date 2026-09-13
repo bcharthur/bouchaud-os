@@ -108,9 +108,9 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-pub(crate) const MENU: [(&str, usize); 10] = [
+pub(crate) const MENU: [(&str, usize); 11] = [
     ("Ladybird", KIND_NAVIGATEUR),
-    ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3),
+    ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3), ("Services", KIND_SERVICES),
     ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
     ("Quitter", usize::MAX),
     ("Redemarrer", KIND_REDEMARRER),
@@ -134,18 +134,21 @@ pub(crate) const KIND_REDEMARRER: usize = usize::MAX - 1;
 pub(crate) const KIND_ETEINDRE: usize = usize::MAX - 2;
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 5] = [
+pub(crate) const ICONS: [(&str, usize); 6] = [
     ("Ladybird", KIND_NAVIGATEUR),
-    ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5),
+    ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5), ("Services", KIND_SERVICES),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 5] = [
-    (16, 42), (16, 132), (16, 222), (16, 312), (16, 402),
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 6] = [
+    (16, 42), (16, 132), (16, 222), (16, 312), (16, 402), (106, 42),
 ];
 
 /// Etat applicatif porte par une fenetre.
+pub(crate) const KIND_SERVICES: usize = 7;
+
 pub(crate) enum App {
+    Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, scroll: i32, selected: Option<usize> },
     Calc { expr: String },
@@ -415,6 +418,8 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() }),
+        KIND_SERVICES => Win::new("Services".to_string(), x, y, 660, 350,
+            crate::gui::windowing::WindowFlags::STANDARD, App::Services),
         KIND_JOURNAL => Win::new("Journal — TOUT".to_string(), x, y, 760, 460,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Journal { state: crate::gui::apps::journal::JournalState::neuf() }),

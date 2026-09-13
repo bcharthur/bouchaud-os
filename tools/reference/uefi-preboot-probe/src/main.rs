@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use core::time::Duration;
+
 use uefi::boot::LoadImageSource;
 use uefi::fs::FileSystem;
 use uefi::proto::console::gop::GraphicsOutput;
@@ -83,15 +83,6 @@ fn run() -> uefi::Result {
     let fs_proto = boot::get_image_file_system(boot::image_handle())?;
     let mut fs = FileSystem::new(fs_proto);
     let _ = fs.write(cstr16!("\\BOUCHAUD-PREBOOT.TXT"), report.as_bytes());
-
-    uefi::println!("Bouchaud OS - TRIGKEY preboot probe");
-    uefi::println!("EDID native: {}", native.map(|(w,h)| alloc::format!("{}x{}",w,h)).unwrap_or_else(|| String::from("unavailable")));
-    uefi::println!("GOP selected: {}x{}", cw, ch);
-    uefi::println!("Firmware keyboard handles: {}", keyboard_count);
-    uefi::println!("Firmware pointer handles: {}", pointer_count);
-    uefi::println!("Report: \\BOUCHAUD-PREBOOT.TXT");
-    uefi::println!("Chainloading Bouchaud kernel in 2 seconds...");
-    boot::stall(Duration::from_secs(2));
 
     let loader = match fs.read(cstr16!("\\EFI\\BOOT\\BOUCHAUD-LOADER.EFI")) {
         Ok(bytes) => bytes,

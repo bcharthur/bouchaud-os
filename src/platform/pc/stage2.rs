@@ -71,6 +71,7 @@ fn prepare_ram_persist() -> bool {
 /// arrete APRES le bring-up NVMe et AVANT l'entree ».
 fn point_de_controle(nom: &str) {
     super::ecran_faute::point(nom);
+    super::reference_gop::boot_step();
 }
 
 pub fn run(boot: &'static BootInfo) -> ! {
@@ -88,7 +89,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
     // Stage 2 et le blocage est necessairement apres ce point.
-    let _ = super::reference_gop::render_stage1(boot, framebuffer);
+    super::reference_gop::boot_begin(framebuffer);
     crate::serial_println!("BOUCHAUD_TRIGKEY_STAGE2_EARLY_GOP_OK");
 
     if !crate::drivers::gfx::install_firmware_framebuffer(framebuffer) {
@@ -439,7 +440,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
     // change entre les deux, c'est le cache de pages propres. Ce fil le
     // remplit une fois, trois secondes apres le bureau, et se tait.
-    crate::kernel::prechauffage::demarre();
+    // Ladybird services now start after the first desktop frame. Their actual
+    // working set populates the cache; no competing speculative scan.
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");

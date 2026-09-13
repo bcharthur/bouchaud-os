@@ -80,7 +80,9 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustc --version
       - name: Compiler le noyau
-        run: cargo build
+        run: |
+          cargo build
+          cargo build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features uefi-boot,reference-desktop
 
       # Clippy n'est PAS un controle de style ici : les 220 avertissements de
       # confort ne font rien echouer. Ce qui echoue, ce sont ses lints

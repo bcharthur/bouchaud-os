@@ -18,10 +18,16 @@ client = root / 'Services/RequestServer/ConnectionFromClient.cpp'
 (root / 'Services/RequestServer/BouchaudResolver.h').write_bytes(
     (local / 'network/BouchaudResolver.h').read_bytes())
 insert(client, '#include <AK/IDAllocator.h>', '#include "BouchaudResolver.h"\n#include <cstdlib>\n#include <AK/IDAllocator.h>', '#include "BouchaudResolver.h"')
+# Upgrade an already prepared V1 tree without stacking a second DNS gate.
+data = client.read_text()
+if 'BOUCHAUD_LIVE_DNS_V1' in data:
+    data = data.replace('if (getenv("BOUCHAUD_BROWSER_HOST")) {',
+        'if (getenv("BOUCHAUD_BROWSER_HOST") && (url.scheme() == "http"sv || url.scheme() == "https"sv)) {')
+    client.write_text(data.replace('BOUCHAUD_LIVE_DNS_V1', 'BOUCHAUD_LIVE_DNS_V2'))
 anchor = '    note_event_tick("ipc-start-request"sv);'
 insert(client, anchor, '''#if defined(BOUCHAUD_PORT)
-    // BOUCHAUD_LIVE_DNS_V1: envp is a launch-time snapshot; DHCP is not.
-    if (getenv("BOUCHAUD_BROWSER_HOST")) {
+    // BOUCHAUD_LIVE_DNS_V2: envp is a launch-time snapshot; DHCP is not.
+    if (getenv("BOUCHAUD_BROWSER_HOST") && (url.scheme() == "http"sv || url.scheme() == "https"sv)) {
         char dns[16] {};
         if (!BouchaudResolver::read(dns)) {
             warnln("[ladybird-bouchaud] BROWSER_NETWORK_NOT_READY id={}", request_id);
@@ -35,7 +41,7 @@ insert(client, anchor, '''#if defined(BOUCHAUD_PORT)
         }
     }
 #endif
-''' + anchor, 'BOUCHAUD_LIVE_DNS_V1')
+''' + anchor, 'BOUCHAUD_LIVE_DNS_V2')
 
 main = root / 'Services/WebContent/main.cpp'
 for anchor, phase in [

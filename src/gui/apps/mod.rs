@@ -11,6 +11,7 @@ pub mod file_explorer;
 pub mod journal;
 pub mod rustpad;
 pub mod system_info;
+pub mod services;
 pub mod terminal;
 
 use crate::gui::event::Key;
@@ -84,6 +85,10 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
 // ── Souris : clic ─────────────────────────────────────────────────────────────
 
 pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
+    if matches!(w.app, App::Services) {
+        services::click(mx - w.x - 3, my - w.y - TITLE_H - 2);
+        return;
+    }
     let win_w = w.w;
     let win_h = w.h;
     let bx    = (w.x + 3).max(0) as usize;
@@ -201,6 +206,7 @@ pub(crate) fn draw_app(w: &Win) {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, scroll, selected } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
+        App::Services                       => services::draw(bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
         App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
         App::Journal { state }              => journal::draw(state, bx, by, bw, bh),

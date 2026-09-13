@@ -41,6 +41,7 @@ pub struct Client {
     vers_client: Arc<SpinLock<Canal>>,
     vers_wm: Arc<SpinLock<Canal>>,
     tampon: Vec<u8>,
+    touches_attente: crate::gui::key_queue::KeyQueue,
     degat: Rect,
     serie: u32,
     verdict: VerdictProtocole,
@@ -210,6 +211,7 @@ impl Client {
             vers_client,
             vers_wm,
             tampon: Vec::new(),
+            touches_attente: crate::gui::key_queue::KeyQueue::new(),
             degat: Rect::default(),
             serie: 0,
             verdict: VerdictProtocole::neuf(),
@@ -270,6 +272,7 @@ impl Client {
     }
 
     pub fn envoie_configuration(&mut self, focus: bool) {
+        task::pose_priorite_de(self.pid, if focus { Priorite::Interactive } else { Priorite::Normale });
         // La taille LOGIQUE, et non l'allocation : c'est la zone utile
         // courante que le client doit mettre en page. L'allocation, elle, a
         // ete annoncee une fois par `Surface` -- avec le pas, qui ne bouge
@@ -397,7 +400,17 @@ impl Client {
             appui: appui as u32,
         }
         .encode();
-        self.envoie(Genre::Key, &charge);
+        // Preserve press/release order under temporary IPC backpressure.
+        self.vide_touches();
+        if !self.touches_attente.push(charge) {
+            self.evenements_perdus += 1;
+            crate::serial_println!("BOUCHAUD_KEY_QUEUE_FULL pid={}", self.pid);
+            // A lost release would leave the page with a stuck key. Close the
+            // unhealthy session rather than silently continue with corrupt input.
+            self.fermeture_demandee = true;
+            return;
+        }
+        self.vide_touches();
     }
 
     pub fn demande_fermeture(&mut self) {
@@ -406,7 +419,17 @@ impl Client {
         self.fermeture_demandee = true;
     }
 
+    fn vide_touches(&mut self) {
+        while let Some(charge) = self.touches_attente.front() {
+            // Do not count backpressure retries as dropped input.
+            let room = { let c = self.vers_client.lock(); c.lecteurs != 0 && c.place() >= proto::message(Genre::Key, 0, &charge).len() };
+            if !room || !self.envoie(Genre::Key, &charge) { break; }
+            self.touches_attente.delivered();
+        }
+    }
+
     pub fn pompe(&mut self) -> bool {
+        self.vide_touches();
         {
             let mut canal = self.vers_wm.lock();
             if !canal.octets.is_empty() {
@@ -722,6 +745,7 @@ impl Client {
     /// regle expliquee dans `gui::presse_papiers` : un programme en
     /// arriere-plan ne voit jamais passer ce que l'utilisateur copie ailleurs.
     pub fn synchronise_presse_papiers(&mut self, focus: bool) {
+        if self.a_le_focus != focus { self.envoie_configuration(focus); }
         self.a_le_focus = focus;
         if !focus {
             return;
@@ -755,6 +779,7 @@ impl Client {
     }
 
     pub fn termine(&mut self) {
+        if crate::gui::services::racine() == self.pid { crate::gui::services::enregistre(0); }
         let arbre = task::arbre_de(self.pid);
         for pid in &arbre {
             task::tue_processus(*pid, 0);

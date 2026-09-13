@@ -25,7 +25,10 @@
 //!   - `client` : session (processus, surface, canal) d'un client.
 
 pub mod apps;
+pub mod services;
+pub mod power_screen;
 pub mod client;
+pub mod key_queue;
 pub mod chaine;
 pub mod degats;
 pub mod disposition;
