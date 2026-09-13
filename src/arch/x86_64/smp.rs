@@ -867,6 +867,12 @@ pub fn init_probe() {
 
     dmesg::log("SMP4_STAGE bootstrap-identity-ok");
 
+    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_ACTIVATION_V2
+    // IMPORTANT: declarer le type de guard ne suffit pas. Il doit etre
+    // instancie ici pour maintenir IRQ0 / reschedule hors de la fenetre
+    // LAPIC + INIT/SIPI jusqu'a la fin de init_probe().
+    let _bootstrap_guard = SmpBootstrapGuard::enter();
+
     unsafe {
         enable_local_apic();
         dmesg::log("SMP4_STAGE lapic-enabled");
