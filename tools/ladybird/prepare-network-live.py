@@ -63,3 +63,15 @@ insert(client, '    set_option(CURLMOPT_SOCKETFUNCTION, &on_socket_callback);', 
     set_option(CURLMOPT_MAX_TOTAL_CONNECTIONS, 16L);
 #endif
     set_option(CURLMOPT_SOCKETFUNCTION, &on_socket_callback);''', 'BOUCHAUD_CONNECTION_BUDGET_V1')
+
+# Route diagnostics only AFTER all structural patches consumed their anchors.
+# Earlier routing broke input ownership and platform-complete preparation.
+def route_diagnostics(root):
+    for relative in ("Services/BouchaudBrowserHost/main.cpp",
+                     "Services/WebContent/ConnectionFromClient.cpp"):
+        path = root / relative
+        data = path.read_text()
+        path.write_text(data.replace('outln("[ladybird-bouchaud] BROWSER_HOST_',
+                                     'warnln("[ladybird-bouchaud] BROWSER_HOST_'))
+
+route_diagnostics(root)

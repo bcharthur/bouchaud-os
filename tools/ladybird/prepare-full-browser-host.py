@@ -141,7 +141,7 @@ public:
         // demarrage du processus. Cette ligne-ci prouve que `initialize()` est
         // alle au bout -- chemins de ressources, magasins SQL, services --
         // juste avant d'entrer dans la boucle d'evenements.
-        warnln("[ladybird-bouchaud] BROWSER_HOST_INITIALIZED");
+        outln("[ladybird-bouchaud] BROWSER_HOST_INITIALIZED");
         return execute();
     }
 
@@ -274,12 +274,12 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     Vector<StringView> strings;
     auto host_arguments = make_arguments(arguments, argv, strings);
 
-    warnln("[ladybird-bouchaud] BROWSER_HOST_START architecture=WebView::Application");
-    warnln("[ladybird-bouchaud] BROWSER_HOST_VIEWPORT {}x{}", width, height);
-    warnln("[ladybird-bouchaud] BROWSER_HOST_URL {}", url);
-    warnln("[ladybird-bouchaud] BROWSER_HOST_PATHS runtime=/tmp/ladybird-runtime data=/tmp/ladybird-data cache=/tmp/ladybird-cache resources=/usr/share/ladybird");
-    warnln("[ladybird-bouchaud] BROWSER_HOST_STORAGE sql=disabled upstream-jars=in-memory");
-    warnln("[ladybird-bouchaud] BROWSER_HOST_SERVICES RequestServer ImageDecoder Compositor WebContent WebWorker:on-demand");
+    outln("[ladybird-bouchaud] BROWSER_HOST_START architecture=WebView::Application");
+    outln("[ladybird-bouchaud] BROWSER_HOST_VIEWPORT {}x{}", width, height);
+    outln("[ladybird-bouchaud] BROWSER_HOST_URL {}", url);
+    outln("[ladybird-bouchaud] BROWSER_HOST_PATHS runtime=/tmp/ladybird-runtime data=/tmp/ladybird-data cache=/tmp/ladybird-cache resources=/usr/share/ladybird");
+    outln("[ladybird-bouchaud] BROWSER_HOST_STORAGE sql=disabled upstream-jars=in-memory");
+    outln("[ladybird-bouchaud] BROWSER_HOST_SERVICES RequestServer ImageDecoder Compositor WebContent WebWorker:on-demand");
 
     // Trois etapes distinctes, et chacune se dit. Au run 32427953935 le
     // processus s'est tu apres `window.close()` sans que rien ne permette de
@@ -291,14 +291,14 @@ ErrorOr<int> ladybird_main(Main::Arguments)
         BouchaudBrowserApplication application;
         auto resultat = application.run(host_arguments);
         if (resultat.is_error()) {
-            warnln("[ladybird-bouchaud] BROWSER_HOST_EXIT erreur");
+            outln("[ladybird-bouchaud] BROWSER_HOST_EXIT erreur");
             warnln("BouchaudBrowserHost: {}", resultat.error());
             return resultat.release_error();
         }
         code = resultat.value();
-        warnln("[ladybird-bouchaud] BROWSER_HOST_EXIT boucle_quittee code={}", code);
+        outln("[ladybird-bouchaud] BROWSER_HOST_EXIT boucle_quittee code={}", code);
     }
-    warnln("[ladybird-bouchaud] BROWSER_HOST_ARRET services fermes");
+    outln("[ladybird-bouchaud] BROWSER_HOST_ARRET services fermes");
     return code;
 }
 ''')
@@ -664,7 +664,7 @@ new_init = '''void ConnectionFromClient::initialize(u64 initial_page_id, Web::HT
         BouchaudChrome::ajoute_onglet(initial_page_id, url_de_depart, true);
         BouchaudChrome::set_committed_url(initial_page_id, url_de_depart);
         bouchaud_m11_start();
-        warnln("[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED page={}", initial_page_id);
+        outln("[ladybird-bouchaud] BROWSER_HOST_M11_ATTACHED page={}", initial_page_id);
     }
 #endif
 }'''
