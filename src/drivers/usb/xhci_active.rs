@@ -16,6 +16,9 @@ use crate::arch::x86_64::pci::{self, PciDevice};
 use crate::drivers::bloc::{Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
 use crate::kernel::memory;
 
+#[path = "xhci_policy.rs"]
+mod politique_xhci;
+
 const USBCMD_RUN: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
 const USBSTS_HCH: u32 = 1 << 0;
@@ -419,6 +422,9 @@ struct HidEndpoint {
     /// refusait d'aider precisement le peripherique qui avait prouve qu'il
     /// marchait.
     interrupt_in_casse: bool,
+    diagnostic_initial: bool,
+    /// Adresse du seul TD en vol ; rejette les achevements anciens.
+    trb_attendu: u64,
     /// Periode declaree par le peripherique pour ce point, en nanosecondes.
     ///
     /// # Pourquoi le pont doit la RESPECTER
@@ -470,6 +476,8 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     dernier_evenement_ns: 0,
     reprises_silence: 0,
     interrupt_in_casse: false,
+            diagnostic_initial: false,
+            trb_attendu: 0,
     echecs_repli: 0,
     quarantaine_annoncee: false,
     periode_repli_ns: PERIODE_REPLI_DEFAUT_NS,
@@ -771,10 +779,7 @@ fn wait_ms(ms: u64) {
 }
 
 fn max_scratchpads(hcs2: u32) -> usize {
-    // xHCI HCSPARAMS2: Max Scratchpad Buffers Hi = 31:27, Lo = 25:21.
-    let hi = ((hcs2 >> 27) & 0x1f) as usize;
-    let lo = ((hcs2 >> 21) & 0x1f) as usize;
-    (hi << 5) | lo
+    politique_xhci::max_scratchpads(hcs2)
 }
 
 /// Decalage de `USBLEGCTLSTS` depuis la capacite de support hérite.
@@ -1879,6 +1884,8 @@ fn configure_hids(
             dernier_evenement_ns: 0,
             reprises_silence: 0,
             interrupt_in_casse: false,
+            diagnostic_initial: false,
+            trb_attendu: 0,
             echecs_repli: 0,
             quarantaine_annoncee: false,
             periode_repli_ns: periode_repli_ns(device.speed, descriptor.interval),
@@ -1983,13 +1990,13 @@ fn configure_hids(
 }
 
 fn arm_hid_endpoint(controller: &mut Controller, index: usize) {
-    if index >= controller.hids.len() {
+    if index >= controller.hids.len() || controller.hids[index].trb_attendu != 0 {
         return;
     }
     let (slot, dci) = {
         let endpoint = &mut controller.hids[index];
         unsafe { write_bytes(endpoint.buffer_virt as *mut u8, 0, endpoint.buffer_len) };
-        ring_push(
+        endpoint.trb_attendu = ring_push(
             &mut endpoint.ring,
             Trb {
                 parameter: endpoint.buffer_phys,
@@ -3195,32 +3202,24 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     HID_TRANSFER_EVENTS.fetch_add(1, Ordering::Relaxed);
     let slot = event_slot(event);
     let dci = event_dci(event);
-    // Le compteur PAR point de terminaison : c'est lui qui decide du repli,
-    // et le compteur global ne sert plus qu'au diagnostic.
-    for index in 0..controller.hid_count {
-        let ep = &mut controller.hids[index];
-        if ep.active && ep.slot_id == slot && ep.dci == dci {
-            ep.evenements = ep.evenements.saturating_add(1);
-            // Le point reparle : le chien de garde repart de zero, et le pont
-            // EP0 lui rend la place.
-            ep.dernier_evenement_ns = crate::kernel::timer::monotonic_ns();
-            ep.reprises_silence = 0;
-            ep.interrupt_in_casse = false;
-            break;
-        }
-    }
     let cc = completion_code(event.status);
     let Some(index) = (0..controller.hid_count).find(|&index| {
         let ep = &controller.hids[index];
         ep.active && ep.slot_id == slot && ep.dci == dci
-    }) else {
-        crate::serial_println!(
-            "BOUCHAUD_HID_EVENT_UNMATCHED slot={} dci={} cc={} status={:#010x}",
-            slot, dci, cc, event.status,
-        );
+    }) else { return; };
+    // Un achevement abandonne pendant une reprise ne consomme pas le nouveau
+    // TD et ne doit surtout pas en poser un deuxieme sur le meme tampon DMA.
+    let ep = &mut controller.hids[index];
+    if ep.trb_attendu == 0 || event.parameter != ep.trb_attendu {
         return;
-    };
-
+    }
+    ep.trb_attendu = 0;
+    ep.evenements = ep.evenements.saturating_add(1);
+    if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+        ep.dernier_evenement_ns = crate::kernel::timer::monotonic_ns();
+        ep.reprises_silence = 0;
+        ep.interrupt_in_casse = false;
+    }
     let buffer_len = controller.hids[index].buffer_len;
     let residual = (event.status & 0x00ff_ffff) as usize;
     let actual = buffer_len.saturating_sub(residual.min(buffer_len));
@@ -3273,10 +3272,15 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
         }
     }
 
-    // A completed TD is consumed whatever its status. Keep one receive TD
-    // outstanding so the input path survives shorts and transient transaction
-    // errors without requiring an interrupt-driven producer yet.
-    arm_hid_endpoint(controller, index);
+    // Un Stall arrete l'endpoint. Y ajouter des TD sans Reset Endpoint ne
+    // le relance pas ; le chien de garde s'en charge hors de cette fonction
+    // (celle-ci peut etre appelee depuis une attente de commande).
+    if cc == CC_SUCCESS || cc == CC_SHORT_PACKET
+        || matches!(etat_point_hid(controller, index), Some((EP_ETAT_RUNNING, _)))
+    {
+        arm_hid_endpoint(controller, index);
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -3290,17 +3294,9 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
 // les deux sont identiques -- et c'est pour cela que le silence de dix-neuf
 // secondes du 13 septembre n'a alerte personne.
 //
-// Le CONTEXTE que le controleur tient a jour les separe sans ambiguite :
-//
-// * son etat dit si le point tourne encore (`Running`), ou s'il est arrete,
-//   bloque, ou en erreur ;
-// * son pointeur de defilement dit si le controleur a encore quelque chose a
-//   lire. Le pilote garde TOUJOURS un TD en attente : si le pointeur de
-//   defilement a rattrape notre pointeur d'ecriture, l'anneau est vide, et
-//   c'est qu'un achevement s'est perdu.
-//
-// Une souris au repos est `Running` avec un TD en attente. Elle ne declenche
-// donc jamais rien ici, et c'est la propriete qui rend ce chien de garde sur.
+// L'etat Halted/Stopped/Error justifie une reprise. En Running le dequeue
+// de sortie peut etre ancien : seul l'achevement du TD attendu autorise le
+// prochain armement, jamais l'egalite de deux pointeurs observes.
 
 /// Etats d'un point de terminaison dans son contexte de sortie (xHCI 1.2).
 const EP_ETAT_RUNNING: u32 = 1;
@@ -3315,15 +3311,14 @@ const SILENCE_HID_NS: u64 = 300_000_000;
 
 /// Reprises tentees avant de declarer le transport Interrupt-IN hors service.
 ///
-/// Bornees, parce que chaque reprise pose un TD de plus : sans borne, un
-/// calcul de pointeur faux remplirait l'anneau de TD jamais consommes.
+/// Bornees pour ne pas monopoliser le pilote sur un peripherique en panne.
 const REPRISES_SILENCE_MAX: u8 = 3;
 
 /// Patience accordee a une commande de reprise.
 ///
 /// Vingt millisecondes : une commande xHCI qui aboutit le fait en
-/// microsecondes, et ce chemin tient le verrou du pilote. Trois tentatives
-/// ratees coutent donc soixante millisecondes, pas une seconde et demie.
+/// microsecondes, et ce chemin tient le verrou du pilote. Chaque commande
+/// dispose de ce budget ; une reprise complete peut en emettre trois.
 const BUDGET_REPRISE_NS: u64 = 20_000_000;
 
 /// Lit l'etat et le pointeur de defilement d'un point, tels que le controleur
@@ -3343,31 +3338,33 @@ fn etat_point_hid(controller: &Controller, index: usize) -> Option<(u32, u64)> {
 
 /// Remet en marche un point de terminaison HID arrete.
 ///
-/// Meme sequence que pour le stockage, moins le `CLEAR_FEATURE` : un point
-/// d'interruption HID qui s'arrete n'est presque jamais bloque cote
-/// peripherique, et une requete de classe de plus sur un recepteur qui refuse
-/// deja `SET_IDLE` ne ferait qu'ajouter une echeance.
+/// En Halted : CLEAR_FEATURE(ENDPOINT_HALT), Reset Endpoint, puis
+/// Set TR Dequeue Pointer. Aucun changement d'anneau sur un endpoint Running.
 fn recupere_point_hid(controller: &mut Controller, index: usize, etat: u32) -> bool {
     let (slot, dci) = (controller.hids[index].slot_id, controller.hids[index].dci);
     if etat == EP_ETAT_HALTED {
+        // Lever aussi le halt USB du peripherique, pas seulement l'etat xHC.
+        let Some(mut device) = controller.devices[slot as usize] else { return false; };
+        let setup = setup_packet(0x02, 0x01, 0, u16::from((dci / 2) | 0x80), 0);
+        let resultat = control_transfer(controller, &mut device, setup, 0, false, BUDGET_REPRISE_NS);
+        controller.devices[slot as usize] = Some(device);
+        if resultat.is_err() { return false; }
+
         let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
         if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
             return false;
         }
     }
-    // L'anneau repart de son debut : les TRB deja consommes portent l'ancien
-    // cycle et ne seront pas repris.
-    let phys = {
-        let ring = &mut controller.hids[index].ring;
-        ring.index = 0;
-        ring.cycle = 1;
-        unsafe { prepare_link(ring, 1) };
-        ring.phys
-    };
+    // Repartir du prochain emplacement producteur avec SON cycle. Remettre
+    // index=0/cycle=1 sans effacer l'anneau republiait les anciens TRB et
+    // permettait plusieurs DMA concurrents sur le meme tampon de rapport.
+    let ring = &controller.hids[index].ring;
+    let pointeur = ring.phys + (ring.index * TRB_SIZE) as u64 | ring.cycle as u64;
     let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
-    if command_raw_budget(controller, phys | 1, controle, BUDGET_REPRISE_NS).is_err() {
+    if command_raw_budget(controller, pointeur, controle, BUDGET_REPRISE_NS).is_err() {
         return false;
     }
+    controller.hids[index].trb_attendu = 0;
     arm_hid_endpoint(controller, index);
     HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
     true
@@ -3378,8 +3375,8 @@ fn veille_points_hid(controller: &mut Controller) {
     let maintenant = crate::kernel::timer::monotonic_ns();
     for index in 0..controller.hid_count {
         let ep = controller.hids[index];
-        // Un point qui n'a JAMAIS parle releve du pont EP0, pas d'ici.
-        if !ep.active || ep.evenements == 0 {
+        // Un point arrete avant son premier rapport a aussi besoin de reprise.
+        if !ep.active {
             continue;
         }
         if maintenant.saturating_sub(ep.dernier_evenement_ns) < SILENCE_HID_NS {
@@ -3388,11 +3385,24 @@ fn veille_points_hid(controller: &mut Controller) {
         let Some((etat, defilement)) = etat_point_hid(controller, index) else {
             continue;
         };
+        if !ep.diagnostic_initial {
+            controller.hids[index].diagnostic_initial = true;
+            crate::serial_println!(
+                "BOUCHAUD_HID_TRANSPORT_INITIAL slot={} dci={} etat={} deq={:#x} attendu={:#x} evenements={} usbsts={:#x}",
+                ep.slot_id, ep.dci, etat, defilement, ep.trb_attendu, ep.evenements,
+                unsafe { r32(controller.op, 0x04) },
+            );
+        }
         let ecriture = ep.ring.phys + (ep.ring.index * TRB_SIZE) as u64;
         let file_vide = defilement == ecriture;
         // LA SEULE CONDITION QUI DISTINGUE LE REPOS DE LA PANNE.
         if etat == EP_ETAT_RUNNING && !file_vide {
             continue; // souris immobile : tout va bien
+        }
+        // Le dequeue du contexte Running peut etre un instantane ancien.
+        // L'egalite ci-dessus ne justifie pas de dupliquer le TD en vol.
+        if !politique_xhci::recuperable(etat) {
+            continue;
         }
         if ep.reprises_silence >= REPRISES_SILENCE_MAX {
             if !ep.interrupt_in_casse {
@@ -3417,14 +3427,7 @@ fn veille_points_hid(controller: &mut Controller) {
         }
         controller.hids[index].reprises_silence = ep.reprises_silence.saturating_add(1);
         HID_REPRISES.fetch_add(1, Ordering::Relaxed);
-        if etat != EP_ETAT_RUNNING {
-            recupere_point_hid(controller, index, etat);
-        } else {
-            // `Running` et file vide : un achevement s'est perdu. Reposer un
-            // TD suffit, et ne coute rien de plus qu'un rearmement ordinaire.
-            arm_hid_endpoint(controller, index);
-            HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
-        }
+        recupere_point_hid(controller, index, etat);
     }
 }
 

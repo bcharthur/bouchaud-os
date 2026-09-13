@@ -303,7 +303,7 @@ void ConnectionFromClient::bouchaud_m11_start()
         // et le premier `set_viewport` tomberait sur rien.
         Web::HTML::LocalTraversableNavigable::create_a_fresh_top_level_traversable(
             client.page(), URL::about_blank());
-        client.set_maximum_frames_per_second(30.0);
+        client.set_maximum_frames_per_second(60.0);
         outln("[ladybird-bouchaud] M11_TAB_CREATED page={}", nouveau);
         return nouveau;
     };
@@ -327,13 +327,11 @@ void ConnectionFromClient::bouchaud_m11_start()
         };
     }
 
-    // Bouchaud n'ordonnance que sur le processeur d'amorcage : chaque trame
-    // est prise au moteur, pas ajoutee a cote. Trente par seconde suffisent a
-    // un defilement fluide et laissent la moitie du cœur au reste — analyse,
-    // script, reseau. C'est LibWeb qui fait respecter ce plafond, dans
-    // `PageClient::request_frame()`.
+    // Le profil SMP physique dispose maintenant de seize processeurs logiques.
+    // Autoriser 60 Hz sans demander de repeint sur une page inchangee ; la
+    // cadence effective reste bornee par le cout de layout/peinture CPU.
     if (auto page = this->page(page_id()); page.has_value())
-        page->set_maximum_frames_per_second(30.0);
+        page->set_maximum_frames_per_second(60.0);
 
     // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Ce
     // minuteur ne demande plus de trame de page — il lit les entrees et
@@ -344,6 +342,7 @@ void ConnectionFromClient::bouchaud_m11_start()
     });
     m_bouchaud_gui_timer->start();
 
+    outln("[ladybird-bouchaud] M11_INTERACTIVE_TRANSPORT_READY fps_cap=60 output=nonblocking");
     outln("[ladybird-bouchaud] M11_READY toolbar={} viewport_height={}",
         BouchaudChrome::toolbar_height, BouchaudChrome::viewport_height());
 }

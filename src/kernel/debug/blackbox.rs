@@ -380,7 +380,8 @@ fn sample(ts_ns: u64) {
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
-            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={}\n"
+            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={} " ,
+            "wm_tours={} wm_entrees={} wm_trames={}\n"
         ),
         ts_ns, cpu, rsp, here,
         task, syscall, phase, site, aux,
@@ -399,6 +400,8 @@ fn sample(ts_ns: u64) {
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
         bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
         FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
+        crate::gui::reveil::tours(), crate::gui::reveil::entrees(),
+        crate::gui::reveil::trames_composees(),
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }

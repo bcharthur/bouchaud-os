@@ -3,6 +3,10 @@
 Date : 8 septembre 2026. Base : `claude/bouchaud-os-modernization-f9zj01`,
 apres l'integration NVMe / GPT / ESP / installateur.
 
+Actualisation du 13 septembre : [bilan Trigkey et fluidite](TRIGKEY_FLUIDITE_2026-09-13.md).
+Les sections narratives suivantes conservent les observations du checkpoint du
+8 septembre. Le bloc de mesures ci-dessous est recalcule sur le code courant.
+
 ## Comment lire ce document
 
 **Aucun etat n'est declaratif.** Chaque ligne renvoie a un artefact qu'on peut
@@ -16,8 +20,8 @@ preuve executable porte 🔵 ou ⚪, jamais ✅.
 | 🔵 | Chantier engage : une tranche verticale existe, le chemin par defaut reste l'ancien. |
 | ⚪ | Rien de ce qui compte n'est ecrit. |
 
-L'inventaire actuel : **68 garde-fous**, **59 suites de tests hote Rust**,
-5 suites C++, 12 tests de fiabilite Python, ~88 000 lignes de noyau.
+L'inventaire de ce checkpoint etait de 68 garde-fous et 59 suites Rust hote.
+Pour les mesures courantes, utiliser le bloc genere et le bilan du 13 septembre.
 
 ## Mesures — recalculees sur le code, jamais recopiees
 
@@ -38,7 +42,7 @@ lui fait confiance.
 | Appels encore sous gros verrou | **78** |
 | Fichiers portant un point sur de preemption | **4** |
 | Garde-fous d'architecture | **72** |
-| Suites de test hote | **69** |
+| Suites de test hote | **70** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->

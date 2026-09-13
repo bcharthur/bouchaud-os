@@ -1174,30 +1174,16 @@ fn boucle() {
         // doit suivre le curseur ». Ce serait une attente active : sans paquet
         // PS/2, le curseur n'a pas bouge, et il n'y a donc rien a suivre. Le
         // moindre mouvement produit un paquet, donc un signal, donc un reveil.
-        match politique::prochaine_echeance(&etat) {
+        match politique::avec_scrutation_usb(
+            politique::prochaine_echeance(&etat), maintenant,
+            crate::drivers::xhci_active::fil_hid_actif(),
+            crate::drivers::xhci_active::hid_polling(),
+            crate::drivers::xhci_active::surveille_branchements(),
+        ) {
             // Echeance deja atteinte : reboucler tout de suite plutot que de
             // payer deux changements de contexte pour un sommeil nul.
             Some(date) if date <= maintenant => {}
             Some(date) => {
-                // Sans interruption xHCI V3, le polling HID impose une petite
-                // echeance. Le bureau reste evenementiel hors presence HID USB.
-                let date = if crate::drivers::xhci_active::hid_polling() {
-                    date.min(maintenant.saturating_add(2))
-                } else if crate::drivers::xhci_active::surveille_branchements() {
-                    // AUCUN HID USB, MAIS UN CONTROLEUR QUI EN ATTEND UN.
-                    //
-                    // C'est le cas du branchement a chaud : demarrer sans
-                    // clavier puis en brancher un. Sans cette borne le bureau
-                    // dort jusqu'a trente secondes, et le clavier parait mort
-                    // pendant tout ce temps -- l'utilisateur le debranche et
-                    // le rebranche, ce qui ne change rien.
-                    //
-                    // Un quart de seconde : personne ne le mesure, et cela ne
-                    // coute que huit lectures de registre par reveil.
-                    date.min(maintenant.saturating_add(250))
-                } else {
-                    date
-                };
                 let attente_ns = date
                     .saturating_sub(maintenant)
                     .saturating_mul(1_000_000);
