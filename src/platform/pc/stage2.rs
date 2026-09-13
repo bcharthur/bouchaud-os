@@ -294,7 +294,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // trois secondes apres la mise sous tension : le verdict « lien bas »
     // etait definitif, et le navigateur repondait « Unable to resolve host »
     // pour le reste de la session.
-    crate::net::demarre_le_veilleur_de_lien();
+    crate::serial_println!("BOUCHAUD_NET_VEILLEUR_DIFFERE raison=smp-bootstrap");
     point_de_controle("reseau");
 
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
@@ -400,6 +400,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
         crate::arch::x86_64::smp::schedulable_cpus(),
         crate::arch::x86_64::smp::discovered_cpus(),
     );
+    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
+    // Le veilleur reseau est une tache noyau recurrente. Il demarre seulement
+    // apres le cablage SMP, afin de ne pas publier/reveiller `net-lien` pendant
+    // la fenetre INIT/SIPI qui a declenche la double faute Trigkey.
+    crate::net::demarre_le_veilleur_de_lien();
+    crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
 
     // Le montage differe part ICI, et non a la troisieme trame du bureau : il
     // n'a aucun resultat que le premier rendu attende, et le faire dependre du

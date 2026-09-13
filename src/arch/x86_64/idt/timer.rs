@@ -23,6 +23,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 3);
 
+    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
+    // Aucun reveil, watchdog ou preemption pendant INIT/SIPI : cette fenetre
+    // doit rester strictement materielle, sinon CPU0 peut rentrer dans le
+    // scheduler sur une pile de boot pendant que les AP ne sont pas stables.
+    if smp::bootstrap_in_progress() {
+        crate::kernel::blackbox::timer_stage(blackbox_cpu, 99);
+        return;
+    }
+
     crate::kernel::task::note_rip_timer(
         stack.instruction_pointer.as_u64(),
         interrupted_user,
