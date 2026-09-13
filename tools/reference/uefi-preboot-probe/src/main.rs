@@ -8,7 +8,7 @@ use core::fmt::Write as _;
 
 use uefi::boot::LoadImageSource;
 use uefi::fs::FileSystem;
-use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::console::gop::{GraphicsOutput, BltOp, BltPixel};
 use uefi::proto::console::pointer::Pointer;
 use uefi::proto::console::text::Input;
 use uefi::proto::device_path::LoadedImageDevicePath;
@@ -78,6 +78,14 @@ fn run() -> uefi::Result {
     let _ = writeln!(report, "firmware.pointer_handles={}", pointer_count);
     let _ = writeln!(report, "firmware.keyboard_handles={}", keyboard_count);
     let _ = writeln!(report, "note=written before ExitBootServices; kernel xHCI report follows after handoff");
+    // Keep a quiet brand screen while the loader reads the kernel/ramdisk.
+    let _ = gop.blt(BltOp::VideoFill { color: BltPixel::new(13,17,23), dest: (0,0), dims: (cw,ch) });
+    if cw >= 160 && ch >= 160 {
+        let (x,y) = ((cw-80)/2, (ch-110)/2);
+        for (dx,dy,w,h) in [(0,0,12,72),(12,0,42,12),(12,30,42,12),(12,60,42,12),(54,8,12,24),(54,38,12,26)] {
+            let _ = gop.blt(BltOp::VideoFill { color: BltPixel::new(68,168,255), dest: (x+dx,y+dy), dims: (w,h) });
+        }
+    }
     drop(gop);
 
     let fs_proto = boot::get_image_file_system(boot::image_handle())?;

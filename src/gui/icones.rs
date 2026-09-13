@@ -128,6 +128,16 @@ fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
 /// Ne dessine rien si l'image manque : une icone absente vaut mieux qu'un
 /// carre gris, et le fond du bureau est deja peint dessous.
 pub fn dessine(index: usize, x: usize, y: usize, cote: usize) {
+    if index == 5 {
+        // Services: three blue server trays, with live-status lights.
+        let unit = (cote/12).max(1);
+        for row in 0..3 {
+            crate::gui::framebuffer::fill_rect_rgb(x+unit, y+unit+row*unit*3, unit*10, unit*2, 0x2563eb);
+            crate::gui::framebuffer::fill_rect_rgb(x+unit*2, y+unit+row*unit*3, unit, unit, 0x5bda8b);
+            crate::gui::framebuffer::fill_rect_rgb(x+unit*5, y+unit+row*unit*3, unit*4, unit, 0x93c5fd);
+        }
+        return;
+    }
     let Some(prete) = prepare(index, cote) else { return };
     // BOUCHAUD_GFX_CULLING_AMONT_V1 : rien a composer si la trame ne presente
     // pas un pixel de l'icone.
@@ -157,6 +167,7 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
         0 => Some(2), // Terminal
         1 => Some(3), // Fichiers
         5 => Some(4), // Rustpad
+        crate::gui::window::KIND_SERVICES => Some(5),
         _ => None,
     }
 }
@@ -174,6 +185,7 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Terminal { .. } => 2,
         App::Files { .. } => 3,
         App::Rustpad { .. } => 4,
-        App::Services | App::Monitor | App::Journal { .. } => return None,
+        App::Services => 5,
+        App::Monitor | App::Journal { .. } => return None,
     })
 }

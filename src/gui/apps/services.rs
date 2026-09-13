@@ -34,9 +34,14 @@ pub(crate) fn draw(bx: usize, by: usize, bw: usize, bh: usize) {
         fb::draw_text(bx+12, y, crate::gui::window::clip(&line, bw.saturating_sub(24)/8), fb::C_WHITE);
         y += 24;
     }
-    if y+32 < by+bh {
+    if y+64 < by+bh {
         fb::draw_text(bx+12, y+8, "En cours = processus vivant, pas une page chargee.", fb::C_GRAY);
         let net = format!("Reseau : {}", crate::net::nom_verdict());
         fb::draw_text(bx+12, y+24, &net, fb::C_CYAN);
+        let (cpu, rss, sampled) = services::usage();
+        let stats = if sampled == 0 || root == 0 { alloc::string::String::from("Mesures : en attente / session arretee") }
+            else { format!("CPU {}% (100%=1 coeur)  Somme RSS {} Mio", cpu, rss/(1024*1024)) };
+        fb::draw_text(bx+12, y+40, &stats, fb::C_WHITE);
+        fb::draw_text(bx+12, y+56, "Releve 5 s ; RSS partagee comptee par processus.", fb::C_GRAY);
     }
 }

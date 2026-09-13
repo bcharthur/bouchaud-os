@@ -26,4 +26,8 @@ pub fn progress(label: &str, phase: usize) {
 }
 pub fn finish(ok: bool) {
     progress(if ok { "Journaux sauvegardes. Extinction..." } else { "Sauvegarde incomplete : consulter les logs" }, 7);
+    // An error must remain readable before power is removed.
+    if !ok && ACTIVE.load(Ordering::Acquire) && crate::kernel::task::try_current().is_some() {
+        crate::kernel::task::sleep_ticks(2_000);
+    }
 }

@@ -596,8 +596,10 @@ pub fn vide_avant_extinction(raison: &str) -> bool {
     // saving. Never chase that moving tail indefinitely.
     let flight_target = FLIGHT_WRITE.load(Ordering::Acquire);
     let serial_target = crate::drivers::serial::trace_total_bytes();
+    let deadline = maintenant.saturating_add(5_000_000_000);
     let mut drained = false;
     for step in 0..256 {
+        if now_ns() >= deadline { break; }
         flush_flight(maintenant);
         flush_serial(maintenant, false);
         crate::gui::power_screen::progress("Enregistrement des journaux", step);
@@ -613,11 +615,13 @@ pub fn vide_avant_extinction(raison: &str) -> bool {
         raison, boot_id(), maintenant, drained as u8);
     let mut marked = false;
     for _ in 0..16 {
+        if now_ns() >= deadline { break; }
         if append(KIND_MARKER, marque.as_bytes(), maintenant, serial_target) { marked = true; break; }
         if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
     }
     let mut synced = false;
     for step in 0..16 {
+        if now_ns() >= deadline { break; }
         crate::gui::power_screen::progress("Synchronisation de la cle USB", step);
         if crate::drivers::xhci_active::blackbox_force_sync() { synced = true; break; }
         if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }

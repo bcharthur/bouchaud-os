@@ -1330,6 +1330,7 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     crate::gui::reveil::publie();
 
     let (mesures, total) = task::mesure_processus();
+    crate::gui::services::observe(&mesures, total);
     if total > 0 {
         let mut ligne = String::new();
         let sample_ns = crate::kernel::timer::monotonic_ns();

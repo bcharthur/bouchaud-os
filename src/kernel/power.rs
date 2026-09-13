@@ -51,7 +51,7 @@ pub fn shutdown(code: u8) -> ! {
     // Avant la persistance, parce que celle-ci peut echouer et qu'un echec ne
     // doit pas emporter le releve qui l'explique.
     crate::gui::services::arrete();
-    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("extinction");
+    let _ = crate::kernel::blackbox::vide_avant_extinction("extinction");
     crate::gui::power_screen::progress("Enregistrement des fichiers", 4);
 
     // La zone persistante n'atteint le disque que sur `fsync` explicite. Un
@@ -81,6 +81,8 @@ pub fn shutdown(code: u8) -> ! {
             ecrits
         ),
     }
+    // Persist the result of the filesystem flush as well.
+    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
     crate::gui::power_screen::finish(logs_ok && persisted >= 0);
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
@@ -135,7 +137,7 @@ const CMD_8042: u16 = 0x64;
 pub fn reboot() -> ! {
     crate::serial_println!("[kernel] redemarrage demande");
     crate::gui::services::arrete();
-    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("redemarrage");
+    let _ = crate::kernel::blackbox::vide_avant_extinction("redemarrage");
     crate::gui::power_screen::progress("Enregistrement des fichiers", 4);
     let persisted = crate::fs::persistance::synchronise();
     match persisted {
@@ -148,6 +150,7 @@ pub fn reboot() -> ! {
         ),
     }
 
+    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
     crate::gui::power_screen::finish(logs_ok && persisted >= 0);
     x86_64::instructions::interrupts::disable();
     unsafe {
