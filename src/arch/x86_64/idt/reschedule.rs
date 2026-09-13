@@ -5,6 +5,11 @@
 
 extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFrame) {
     let _gs = GsGuard::enter(&stack);
+    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
+    if smp::bootstrap_in_progress() {
+        smp::eoi_local();
+        return;
+    }
     let interrupted_user = from_user(&stack);
     crate::kernel::task::stall_ipi_observe(
         stack.instruction_pointer.as_u64(),

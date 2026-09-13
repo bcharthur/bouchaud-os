@@ -118,6 +118,52 @@ static ONLINE_MASK: AtomicUsize = AtomicUsize::new(1);
 static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
 static LOCAL_SCHED_TIMER: AtomicBool = AtomicBool::new(false);
 
+// BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
+//
+// Le crash physique Trigkey apparaissait juste apres `SMP4_STAGE sipi-1` :
+// le BSP avait deja IRQ0 actif, le reseau venait de publier `net-lien`, puis
+// la fenetre INIT/SIPI laissait le timer entrer dans le chemin reveil/scheduler
+// alors que les AP etaient encore entre trampoline, pile bootstrap et etat CPU
+// incomplet. Un RSP ring0 hors pile noyau finissait en double faute.
+//
+// Pendant cette fenetre, le noyau ne doit faire qu'une chose : demarrer les AP.
+// Pas de tick scheduler, pas de flush waitqueue, pas de reschedule IPI traite.
+static SMP_BOOTSTRAP_GUARD: AtomicBool = AtomicBool::new(false);
+
+pub fn bootstrap_in_progress() -> bool {
+    SMP_BOOTSTRAP_GUARD.load(Ordering::Acquire)
+}
+
+struct SmpBootstrapGuard {
+    interrupts_were_enabled: bool,
+}
+
+impl SmpBootstrapGuard {
+    fn enter() -> Self {
+        let interrupts_were_enabled = x86_64::instructions::interrupts::are_enabled();
+        x86_64::instructions::interrupts::disable();
+        SMP_BOOTSTRAP_GUARD.store(true, Ordering::Release);
+        crate::serial_println!(
+            "SMP_BOOT_GUARD_ENTER irq=off previous_irq={}",
+            interrupts_were_enabled as u8,
+        );
+        Self { interrupts_were_enabled }
+    }
+}
+
+impl Drop for SmpBootstrapGuard {
+    fn drop(&mut self) {
+        SMP_BOOTSTRAP_GUARD.store(false, Ordering::Release);
+        crate::serial_println!(
+            "SMP_BOOT_GUARD_EXIT irq=restored previous_irq={}",
+            self.interrupts_were_enabled as u8,
+        );
+        if self.interrupts_were_enabled {
+            x86_64::instructions::interrupts::enable();
+        }
+    }
+}
+
 // BOUCHAUD_SMP_NG3_TLB_SHOOTDOWN_V2
 // Une slot par CPU emetteur remplace la mailbox globale NG2. Un CPU ne peut
 // avoir qu'un shootdown synchrone en vol (le noyau n'est pas preemptible), mais
@@ -821,6 +867,12 @@ pub fn init_probe() {
 
     dmesg::log("SMP4_STAGE bootstrap-identity-ok");
 
+    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_ACTIVATION_V2
+    // IMPORTANT: declarer le type de guard ne suffit pas. Il doit etre
+    // instancie ici pour maintenir IRQ0 / reschedule hors de la fenetre
+    // LAPIC + INIT/SIPI jusqu'a la fin de init_probe().
+    let _bootstrap_guard = SmpBootstrapGuard::enter();
+
     unsafe {
         enable_local_apic();
         dmesg::log("SMP4_STAGE lapic-enabled");
@@ -873,6 +925,12 @@ pub fn init_probe() {
             let top = (base + AP_STACK_SIZE as u64) & !0xF;
             write_volatile(mailbox.add(0x20 + cpu * 8) as *mut u64, top);
         }
+        crate::serial_println!(
+            "SMP_AP_STACK_TABLE_OK count={} first_top={:#x} last_top={:#x}",
+            MAX_CPUS,
+            read_volatile(mailbox.add(0x20) as *const u64),
+            read_volatile(mailbox.add(0x20 + (MAX_CPUS - 1) * 8) as *const u64),
+        );
 
         // INIT assert/deassert puis deux SIPI. Les marqueurs restent cote
         // BSP: ils permettent de distinguer un crash AP d'un probleme LAPIC.
