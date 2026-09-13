@@ -162,17 +162,41 @@ def main():
         # suppression du test : le champ restait NOMME plus bas, la ou la
         # quarantaine est POSEE. Une quarantaine qu'on pose sans jamais la lire
         # ne quarantaine rien.
-        consulte = re.search(
-            r"maintenant\s*<\s*controller\.hids\[[^\]]+\]\.repli_muet_jusqu_a_ns",
-            repli,
-        )
+        #
+        # La regle porte donc sur la LECTURE du champ et sur l'existence d'une
+        # comparaison a l'horloge, et non sur la forme exacte de l'expression :
+        # les trois echeances d'un point -- delai de grace, quarantaine,
+        # periode declaree -- se replient legitimement en une seule.
+        def lu(champ):
+            return re.search(r"\.%s\b(?!\s*=[^=])" % champ, repli) is not None
+
+        compare = re.search(r"maintenant\s*<\s*\w", repli) is not None
         pose = "repli_muet_jusqu_a_ns =" in repli
-        if not consulte:
+        if not (compare and lu("repli_muet_jusqu_a_ns")):
             fautes.append(
                 "xhci_active.rs : le repli EP0 ne CONSULTE plus la quarantaine. "
                 "Un point de terminaison muet redeviendrait interroge cinq "
                 "cents fois par seconde, et chaque interrogation coute son "
                 "echeance."
+            )
+        # LA PERIODE DECLAREE EST LA DEUXIEME MOITIE DE LA REGLE.
+        #
+        # La quarantaine ne couvre QUE les points muets. Le releve du
+        # 13 septembre 00:36 montre l'autre moitie du probleme :
+        # `repli_tours=79632 repli_servis=79357` -- 99,7 % des tours servent
+        # quelque chose --, avec `usb-repli cpu_pct=39..44`. Un point qui
+        # REPOND remettait son compteur d'echecs a zero et repartait au tour
+        # suivant, a la milliseconde, pour un peripherique qui ne produit un
+        # rapport neuf que toutes les huit millisecondes. Sept transferts sur
+        # huit ne rapportaient rien et tenaient le verrou du pilote : c'est ce
+        # qui se sent comme une souris qui traine.
+        if not (compare and lu("prochain_repli_ns")):
+            fautes.append(
+                "xhci_active.rs : le repli EP0 n'attend plus la periode "
+                "declaree par le peripherique. Un point qui REPOND serait de "
+                "nouveau interrogé mille fois par seconde -- huit fois plus "
+                "souvent qu'il n'a quelque chose a dire -- et sa contention "
+                "sur le verrou du pilote se sent au pointeur."
             )
         if not pose:
             fautes.append(

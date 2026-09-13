@@ -226,6 +226,26 @@ const DESC_LS: u32 = 1 << 28;
 const DESC_RX_ERROR: u32 = (1 << 22) | (1 << 21) | (1 << 20) | (1 << 19);
 const DESC_LEN_MASK: u32 = 0x3FFF;
 
+/// Longueur minimale d'une trame Ethernet, FCS exclu (IEEE 802.3).
+///
+/// # LA TRAME LA PLUS COURTE QU'ON EMET EST CELLE QUI ECHOUAIT
+///
+/// Une requete ARP fait 14 + 28 = 42 octets. La norme exige 60 octets avant
+/// le FCS : en dessous, la trame est un « runt » que le commutateur d'en face
+/// jette. Le bourrage n'etait fait ni ici ni par l'appelant, et il n'est pas
+/// garanti par le controleur -- le pilote r8169 de Linux appelle
+/// `skb_padto(skb, ETH_ZLEN)` avant d'armer le descripteur, precisement parce
+/// qu'on ne peut pas compter dessus.
+///
+/// Le releve du 13 septembre montre exactement cette signature : DHCP, qui
+/// est en diffusion mais fait plus de trois cents octets, fonctionne et pose
+/// le bail ; ARP, qui fait quarante-deux octets, n'obtient jamais de reponse ;
+/// et tout l'unicast -- donc toute requete DNS, donc toute page -- echoue
+/// derriere lui avec `parti=false`.
+///
+/// C'est la seule trame de moins de soixante octets que la pile emette.
+const TRAME_MIN: usize = 60;
+
 const N_RX: usize = 64;
 const N_TX: usize = 16;
 const BUF_SIZE: usize = 2048;
@@ -245,6 +265,8 @@ static mut TX_BUFFER_P: u64 = 0;
 static mut RX_CUR: usize = 0;
 static mut TX_CUR: usize = 0;
 static mut TX_RING_FULL: u64 = 0;
+/// Trames jetees parce que le controleur les a marquees en erreur.
+static mut RX_ABIMEES: u64 = 0;
 
 #[inline]
 unsafe fn read8(offset: u32) -> u8 {
@@ -323,6 +345,11 @@ pub fn mac() -> [u8; 6] {
 
 pub fn tx_anneau_plein() -> u64 {
     unsafe { TX_RING_FULL }
+}
+
+/// Trames recues en erreur et jetees par le pilote.
+pub fn rx_abimees() -> u64 {
+    unsafe { RX_ABIMEES }
 }
 
 pub fn init_with_device(device: &PciDevice) -> bool {
@@ -565,6 +592,13 @@ pub fn send(frame: &[u8]) -> bool {
 
         let destination = TX_BUFFER_V.add(index * BUF_SIZE);
         core::ptr::copy_nonoverlapping(frame.as_ptr(), destination, frame.len());
+        // Bourrage a soixante octets : voir `TRAME_MIN`. Des zeros, parce que
+        // le contenu du remplissage n'a pas de sens et ne doit pas laisser
+        // filtrer ce que le tampon DMA contenait au tour precedent.
+        let longueur = frame.len().max(TRAME_MIN).min(BUF_SIZE);
+        if longueur > frame.len() {
+            core::ptr::write_bytes(destination.add(frame.len()), 0, longueur - frame.len());
+        }
 
         let eor = if index + 1 == N_TX { DESC_EOR } else { 0 };
         desc_write64(
@@ -579,7 +613,7 @@ pub fn send(frame: &[u8]) -> bool {
             TX_RING,
             index,
             0,
-            DESC_OWN | DESC_FS | DESC_LS | eor | frame.len() as u32,
+            DESC_OWN | DESC_FS | DESC_LS | eor | longueur as u32,
         );
         compiler_fence(Ordering::Release);
         write8(REG_TX_POLL, TX_POLL_NPQ);
@@ -588,43 +622,68 @@ pub fn send(frame: &[u8]) -> bool {
     }
 }
 
+/// Retire une trame de l'anneau de reception.
+///
+/// # `None` veut dire « plus rien », et seulement cela
+///
+/// La premiere version rendait `None` dans DEUX cas differents : l'anneau est
+/// vide, et la trame lue est abimee. Or tous les appelants lisent `None` comme
+/// « plus rien a lire » et arretent leur drainage : une seule trame en erreur
+/// -- une collision, un cable en cours de branchement -- suspendait donc la
+/// lecture de tout ce qui la suivait dans l'anneau jusqu'au passage suivant.
+/// Sur une resolution ARP, qui ecoute une fenetre bornee, cela suffit a perdre
+/// la reponse et a conclure que le voisin est muet.
+///
+/// La trame abimee est desormais jetee ICI, sans rendre la main : la boucle
+/// continue jusqu'a une trame bonne ou un anneau reellement vide. Elle est
+/// comptee, parce qu'un compteur qui monte dit quelque chose du cable.
 pub fn receive(out: &mut [u8]) -> Option<usize> {
     unsafe {
         if !READY {
             return None;
         }
 
-        let index = RX_CUR;
-        let status = desc_read32(RX_RING, index, 0);
-        if status & DESC_OWN != 0 {
-            return None;
+        // Bornee par la taille de l'anneau : on ne peut pas jeter plus de
+        // trames qu'il n'en contient, et la borne EXISTE pour qu'un anneau
+        // entierement abime ne retienne pas l'appelant.
+        for _ in 0..N_RX {
+            let index = RX_CUR;
+            let status = desc_read32(RX_RING, index, 0);
+            if status & DESC_OWN != 0 {
+                return None;
+            }
+
+            compiler_fence(Ordering::Acquire);
+            let raw_len = (status & DESC_LEN_MASK) as usize;
+            let good = status & DESC_RX_ERROR == 0 && raw_len >= 4 && raw_len <= BUF_SIZE;
+            let payload_len = raw_len.saturating_sub(4); // RTL8168 livre aussi le FCS.
+            let copied = if good {
+                let n = payload_len.min(out.len());
+                let source = RX_BUFFER_V.add(index * BUF_SIZE);
+                core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
+                Some(n)
+            } else {
+                RX_ABIMEES = RX_ABIMEES.saturating_add(1);
+                None
+            };
+
+            let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
+            desc_write64(
+                RX_RING,
+                index,
+                8,
+                RX_BUFFER_P + (index * BUF_SIZE) as u64,
+            );
+            desc_write32(RX_RING, index, 4, 0);
+            compiler_fence(Ordering::Release);
+            desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
+            RX_CUR = (index + 1) % N_RX;
+
+            if let Some(n) = copied {
+                return Some(n);
+            }
         }
-
-        compiler_fence(Ordering::Acquire);
-        let raw_len = (status & DESC_LEN_MASK) as usize;
-        let good = status & DESC_RX_ERROR == 0 && raw_len >= 4 && raw_len <= BUF_SIZE;
-        let payload_len = raw_len.saturating_sub(4); // RTL8168 livre aussi le FCS.
-        let copied = if good {
-            let n = payload_len.min(out.len());
-            let source = RX_BUFFER_V.add(index * BUF_SIZE);
-            core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
-            Some(n)
-        } else {
-            None
-        };
-
-        let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
-        desc_write64(
-            RX_RING,
-            index,
-            8,
-            RX_BUFFER_P + (index * BUF_SIZE) as u64,
-        );
-        desc_write32(RX_RING, index, 4, 0);
-        compiler_fence(Ordering::Release);
-        desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
-        RX_CUR = (index + 1) % N_RX;
-        copied
+        None
     }
 }
 

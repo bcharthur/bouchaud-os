@@ -374,6 +374,29 @@ struct HidEndpoint {
     /// La quarantaine se REPOSE a chaque reprise ratee ; l'annoncer a chaque
     /// fois reviendrait a inonder le journal pour dire ce qui n'a pas change.
     quarantaine_annoncee: bool,
+    /// Periode declaree par le peripherique pour ce point, en nanosecondes.
+    ///
+    /// # Pourquoi le pont doit la RESPECTER
+    ///
+    /// Un point de terminaison Interrupt-IN annonce `bInterval` : la cadence a
+    /// laquelle il a QUELQUE CHOSE a dire. Une souris USB pleine vitesse
+    /// annonce couramment 8 ou 10 ms, un clavier 10 ms. L'interroger plus vite
+    /// que cela ne produit pas un rapport de plus : cela repaie un transfert
+    /// de controle synchrone, verrou du pilote tenu, pour relire le meme
+    /// rapport.
+    ///
+    /// Le releve du 13 septembre 00:36 le chiffre : `repli_tours=79632
+    /// repli_servis=79357`, soit 99,7 % des tours « servis », et
+    /// `usb-repli cpu_pct=39..44`. Le pont tournait a la milliseconde pour un
+    /// peripherique qui parle a 125 Hz -- huit fois trop --, et cette
+    /// contention sur le verrou du pilote est exactement ce qui se sent comme
+    /// une souris qui traine.
+    ///
+    /// La pause d'oisivete ne pouvait pas corriger cela : un point QUI REPOND
+    /// est un point servi, donc jamais oisif.
+    periode_repli_ns: u64,
+    /// Instant du prochain `GET_REPORT` autorise sur ce point.
+    prochain_repli_ns: u64,
     /// Instant avant lequel le repli ne sera pas retente sur ce point.
     ///
     /// # Pourquoi une quarantaine, et pas un simple compteur
@@ -401,6 +424,8 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     arme_depuis_ns: 0,
     echecs_repli: 0,
     quarantaine_annoncee: false,
+    periode_repli_ns: PERIODE_REPLI_DEFAUT_NS,
+    prochain_repli_ns: 0,
     repli_muet_jusqu_a_ns: 0,
     evenements: 0,
     active: false,
@@ -1637,6 +1662,36 @@ fn parse_hid_descriptors(bytes: &[u8], output: &mut [HidDescriptor]) -> (u8, usi
     (configuration_value, count)
 }
 
+/// Periode du pont EP0 quand le peripherique n'annonce rien d'exploitable.
+///
+/// Huit millisecondes : la cadence d'une souris USB pleine vitesse ordinaire
+/// (125 Hz). Assez rapide pour que le pointeur reste fluide, assez lente pour
+/// que le transfert de controle synchrone ne monopolise pas le verrou.
+const PERIODE_REPLI_DEFAUT_NS: u64 = 8_000_000;
+/// Plancher : on ne redemande jamais plus vite qu'une milliseconde.
+const PERIODE_REPLI_MIN_NS: u64 = 1_000_000;
+/// Plafond : un point qui annonce une seconde reste interroge a la cadence
+/// d'un peripherique d'interface humaine, sinon le pont ne serait plus un pont.
+const PERIODE_REPLI_MAX_NS: u64 = 32_000_000;
+
+/// Periode a laquelle le pont EP0 doit interroger ce point, en nanosecondes.
+///
+/// Basse/pleine vitesse : `bInterval` est deja en millisecondes.
+/// Haute/super vitesse : `bInterval` est un exposant, la periode vaut
+/// `2^(bInterval-1)` micro-trames de 125 us.
+fn periode_repli_ns(speed: u8, usb_interval: u8) -> u64 {
+    if usb_interval == 0 {
+        return PERIODE_REPLI_DEFAUT_NS;
+    }
+    let ns = if speed == 3 || speed >= 4 {
+        let exposant = u32::from(usb_interval).clamp(1, 16) - 1;
+        125_000u64.saturating_mul(1u64 << exposant.min(20))
+    } else {
+        u64::from(usb_interval).saturating_mul(1_000_000)
+    };
+    ns.clamp(PERIODE_REPLI_MIN_NS, PERIODE_REPLI_MAX_NS)
+}
+
 fn xhci_interval(speed: u8, usb_interval: u8) -> u8 {
     if speed >= 3 {
         // High/Super: xHCI stores bInterval-1.
@@ -1758,6 +1813,8 @@ fn configure_hids(
             arme_depuis_ns: 0,
             echecs_repli: 0,
             quarantaine_annoncee: false,
+            periode_repli_ns: periode_repli_ns(device.speed, descriptor.interval),
+            prochain_repli_ns: 0,
             repli_muet_jusqu_a_ns: 0,
             evenements: 0,
             active: false,
@@ -3231,7 +3288,11 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
 /// tour, le verrou pris et rendu a chaque fois. Le drainage garde ses mille
 /// tours par seconde, et les rapports qui arrivent PENDANT un `GET_REPORT`
 /// sont traites sur place (`traite_differes`).
-fn repli_ep0_un_point(controller: &mut Controller, depart: usize) -> Option<usize> {
+fn repli_ep0_un_point(
+    controller: &mut Controller,
+    depart: usize,
+    echeance_min: &mut u64,
+) -> Option<usize> {
     if controller.hid_count == 0 {
         return None;
     }
@@ -3268,15 +3329,32 @@ fn repli_ep0_un_point(controller: &mut Controller, depart: usize) -> Option<usiz
         // delai, le pont EP0 se declencherait sur tout peripherique a
         // l'instant meme de son branchement, et un peripherique parfaitement
         // sain finirait sur le transport lent.
-        if maintenant
-            < controller.hids[index]
-                .arme_depuis_ns
+        // LES TROIS ECHEANCES D'UN POINT, EN UNE SEULE.
+        //
+        // * le delai de grace : un point qu'on vient d'armer n'est pas muet ;
+        // * la quarantaine : un point qui ne repond pas n'est pas interroge
+        //   mille fois par seconde ;
+        // * la periode declaree : UN POINT QUI REPOND n'est pas un point a
+        //   interroger sans fin. La quarantaine ne couvrait que les muets ; un
+        //   point qui repond remettait son compteur d'echecs a zero et
+        //   repartait au tour suivant, a la milliseconde. Le releve du
+        //   13 septembre le chiffre : `repli_tours=79632 repli_servis=79357`
+        //   pour un peripherique qui ne produit un rapport neuf que toutes les
+        //   huit millisecondes -- sept transferts sur huit ne rapportaient rien
+        //   et tenaient le verrou du pilote.
+        //
+        // La plus lointaine des trois commande, et on RETIENT la plus proche
+        // de tous les points : c'est elle qui dit au fil combien de temps il
+        // peut dormir, au lieu de se reveiller mille fois pour rien.
+        let du_a = {
+            let ep = &controller.hids[index];
+            ep.arme_depuis_ns
                 .saturating_add(GRACE_INTERRUPT_NS)
-        {
-            continue;
-        }
-        // UN POINT MUET EST EN QUARANTAINE, PAS INTERROGE MILLE FOIS.
-        if maintenant < controller.hids[index].repli_muet_jusqu_a_ns {
+                .max(ep.repli_muet_jusqu_a_ns)
+                .max(ep.prochain_repli_ns)
+        };
+        if maintenant < du_a {
+            *echeance_min = (*echeance_min).min(du_a);
             continue;
         }
         // UNE ERREUR TRANSITOIRE N'EST PAS UN PERIPHERIQUE MUET.
@@ -3285,6 +3363,8 @@ fn repli_ep0_un_point(controller: &mut Controller, depart: usize) -> Option<usiz
         // n'est pas passe se retente dans vingt millisecondes, un peripherique
         // qui ne repond pas attend une seconde.
         let avant = HID_CONTROL_FAILS.load(Ordering::Relaxed);
+        controller.hids[index].prochain_repli_ns =
+            maintenant.saturating_add(controller.hids[index].periode_repli_ns);
         let repond = control_get_report(controller, index);
         let transitoire = !repond
             && HID_CONTROL_FAILS.load(Ordering::Relaxed) != avant
@@ -4401,12 +4481,12 @@ pub fn repli_ep0_compteurs() -> (u64, u64) {
 /// fils qui liraient l'anneau d'evenements en meme temps se voleraient leurs
 /// achevements. Ce qui change, c'est la DUREE de sa tenue -- un transfert de
 /// controle, pas cinq.
-fn repli_ep0_un_tour() -> bool {
+fn repli_ep0_un_tour() -> TourRepli {
     if RUNTIME_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
-        return false;
+        return TourRepli::Occupe;
     }
     // LE CURSEUR TOURNE SUR LES DEUX AXES.
     //
@@ -4416,13 +4496,16 @@ fn repli_ep0_un_tour() -> bool {
     // recevrait jamais son pont.
     let curseur = REPLI_CURSEUR.load(Ordering::Relaxed);
     let mut servi = false;
+    let mut echeance = u64::MAX;
     unsafe {
         #[allow(static_mut_refs)]
         if let Some(runtime) = RUNTIME.as_mut() {
             let nombre = runtime.controllers.len();
             for decalage in 0..nombre {
                 let ic = (curseur + decalage) % nombre;
-                if repli_ep0_un_point(&mut runtime.controllers[ic], curseur).is_some() {
+                if repli_ep0_un_point(&mut runtime.controllers[ic], curseur, &mut echeance)
+                    .is_some()
+                {
                     REPLI_CURSEUR.store(curseur.wrapping_add(1), Ordering::Relaxed);
                     REPLI_SERVIS.fetch_add(1, Ordering::Relaxed);
                     servi = true;
@@ -4432,7 +4515,22 @@ fn repli_ep0_un_tour() -> bool {
         }
     }
     RUNTIME_BUSY.store(false, Ordering::Release);
-    servi
+    if servi {
+        TourRepli::Servi
+    } else {
+        TourRepli::Attente(echeance)
+    }
+}
+
+/// Ce qu'un tour du pont EP0 a donne.
+enum TourRepli {
+    /// Un point a ete servi. Le suivant peut l'etre tout de suite.
+    Servi,
+    /// Le verrou du pilote est pris par la scrutation : on repasse vite.
+    Occupe,
+    /// Rien a servir maintenant. Porte l'instant du prochain point du,
+    /// `u64::MAX` quand aucun point ne demande le pont.
+    Attente(u64),
 }
 
 /// Le pont EP0, sur son propre fil.
@@ -4477,10 +4575,30 @@ fn fil_repli_ep0() -> ! {
         // seconde. Un point qui se tait est alors repris en cinquante
         // millisecondes au pire, ce qui ne se sent pas ; et tant qu'il y a
         // quelque chose a servir, la cadence remonte a la milliseconde.
-        if repli_ep0_un_tour() {
-            crate::kernel::task::sleep_ticks(1);
-        } else {
-            crate::kernel::task::sleep_ticks(PAUSE_REPLI_OISIF_TICKS);
+        //
+        // DORMIR JUSQU'A CE QU'IL Y AIT QUELQUE CHOSE A FAIRE.
+        //
+        // La pause d'oisivete ne suffisait pas : elle ne se declenchait que
+        // lorsqu'il n'y avait RIEN a servir, et un point qui repond est un
+        // point servi. Le fil tournait donc a la milliseconde des qu'un seul
+        // peripherique passait par le pont -- `usb-repli cpu_pct=39..44` sur
+        // le releve du 13 septembre. Maintenant le tour dit QUAND le prochain
+        // point sera du, et le fil dort jusque-la.
+        match repli_ep0_un_tour() {
+            TourRepli::Servi => crate::kernel::task::sleep_ticks(1),
+            // Le verrou appartient a la scrutation : elle en a plus besoin que
+            // nous, et un tick suffit a la laisser finir.
+            TourRepli::Occupe => crate::kernel::task::sleep_ticks(1),
+            TourRepli::Attente(echeance) => {
+                let maintenant = crate::kernel::timer::monotonic_ns();
+                let attente_ms = echeance
+                    .saturating_sub(maintenant)
+                    .saturating_add(999_999)
+                    / 1_000_000;
+                crate::kernel::task::sleep_ticks(
+                    attente_ms.clamp(1, PAUSE_REPLI_OISIF_TICKS),
+                );
+            }
         }
     }
 }

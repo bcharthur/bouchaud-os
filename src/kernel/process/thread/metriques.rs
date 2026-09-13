@@ -219,6 +219,21 @@ nom={} ip={} gw={} dns={}",
         crate::net::ipv4::format_addr(&crate::net::gateway()),
         crate::net::ipv4::format_addr(&crate::net::dns_server()),
     ));
+    // CE QUE LE ROUTAGE DE RECEPTION A VU.
+    //
+    // Une resolution ARP qui echoue rend le reseau inutilisable pour tout ce
+    // qui est unicast -- donc pour toute page -- alors que le lien est a
+    // 1000 Mb/s et que le bail DHCP est pose. C'est exactement ce qui s'est
+    // passe le 13 septembre, et il a fallu remonter un `parti=false` a travers
+    // quatre couches pour le nommer. Ces six nombres repondent directement.
+    let (routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis) =
+        crate::net::compteurs_routage();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[NET-ROUTAGE] trames={} arp={} dhcp={} arp_resolus={} arp_echoues={} arp_non_emis={} tx_anneau_plein={} rx_abimees={}",
+        routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis,
+        crate::drivers::e1000::tx_anneau_plein(),
+        crate::drivers::rtl8168::rx_abimees(),
+    ));
     let (pages_chaudes, fichiers_chauds, prechauffage_ns) =
         crate::kernel::prechauffage::compteurs();
     crate::kernel::dmesg::log_fmt(format_args!(

@@ -54,7 +54,7 @@ pub const ATTENTE_DEMARRAGE_MS: u64 = 700;
 /// boucle qui rendait le demarrage lent ici et rapide ailleurs, sans que le
 /// code ne dise laquelle des deux etait voulue.
 fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; 1024];
     let debut = crate::kernel::timer::monotonic_ms();
     let limite = debut.saturating_add(budget_ms);
     let mut fallback_spins = 0usize;
@@ -63,24 +63,34 @@ fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
         && fallback_spins < 10_000_000
     {
         fallback_spins = fallback_spins.saturating_add(1);
-        let n = match e1000::receive(&mut buf) { Some(n) => n, None => continue };
-        let h = match ethernet::parse_header(&buf[..n]) { Some(h) => h, None => continue };
-        if h.ethertype != ethernet::ETHERTYPE_IPV4 { continue; }
-        let iph = match ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) { Some(i) => i, None => continue };
-        if iph.proto != ipv4::PROTO_UDP { continue; }
-        let uoff = ethernet::HEADER_LEN + iph.header_len;
-        if uoff + 8 > n { continue; }
-        let u = match udp::parse(&buf[uoff..n]) { Some(u) => u, None => continue };
-        if u.dst_port != 68 { continue; }
-        let doff = uoff + u.payload_off;
-        if doff + 8 > n { continue; }
-        // verifie xid + BOOTREPLY
-        if buf[doff] != 2 { continue; }
-        let rxid = u32::from_be_bytes([buf[doff + 4], buf[doff + 5], buf[doff + 6], buf[doff + 7]]);
-        if rxid != xid { continue; }
-        if let Some(l) = parse_reply(&buf[doff..n]) {
-            if want_type == 0 || l.msg_type == want_type {
-                return Some(l);
+
+        // Faire tourner le routage commun, puis relever NOTRE boite.
+        //
+        // La version precedente lisait la carte elle-meme et jetait toute
+        // trame qui n'etait pas une reponse DHCP. Comme le veilleur de lien
+        // tient cette boucle quatre secondes d'affilee, elle detruisait les
+        // reponses ARP que le reste du systeme attendait au meme instant --
+        // et une reponse ARP n'est jamais retransmise. C'est la deuxieme
+        // moitie du `parti=false` observe sur la resolution DNS.
+        if net::draine_anneau() == 0 {
+            net::attente_cedante();
+        }
+        while let Some(n) = net::prend_dhcp(&mut buf) {
+            if n < 8 {
+                continue;
+            }
+            // verifie xid + BOOTREPLY
+            if buf[0] != 2 {
+                continue;
+            }
+            let rxid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            if rxid != xid {
+                continue;
+            }
+            if let Some(l) = parse_reply(&buf[..n]) {
+                if want_type == 0 || l.msg_type == want_type {
+                    return Some(l);
+                }
             }
         }
     }
