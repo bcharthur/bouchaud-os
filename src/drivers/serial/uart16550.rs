@@ -10,7 +10,7 @@
 //!   formateur série.
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
 const COM1: u16 = 0x3F8;
@@ -235,15 +235,52 @@ impl fmt::Write for SerialPort {
 }
 
 /// Implémentation derrière `serial_print!` / `serial_println!`.
+/// Jeton d'emission d'une ligne serie.
+///
+/// # Le defaut qu'il corrige
+///
+/// `_print` formatait dans un tampon local puis le vidait sans aucune
+/// serialisation. Deux ecrivains simultanes -- un fil de service et le shell,
+/// ou deux coeurs -- entrelacaient leurs octets, prefixe de journal compris :
+///
+///     raison=pas-de-par[00:21titi:17on-boucha][ 25ud%:  0%:  1
+///
+/// Une ligne de diagnostic entrelacee est une ligne PERDUE. Elle a fait echouer
+/// un garde-fou qui avait pourtant raison, et elle rendrait inexploitable un
+/// releve d'essai physique -- ce pour quoi la console serie existe.
+static EMISSION: AtomicBool = AtomicBool::new(false);
+
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     if !is_ready() {
         return;
     }
 
+    // Le formatage se fait HORS du jeton : il peut etre long, et rien ne
+    // l'oblige a etre serialise. Seule l'EMISSION doit l'etre.
     let mut sortie = TamponFormat::neuf();
     let _ = sortie.write_fmt(args);
+
+    // Attente BORNEE, et emission quand meme si le jeton ne se libere pas.
+    //
+    // Le port serie sert aussi aux paniques et aux gestionnaires
+    // d'interruption. Y attendre sans fin transformerait une console en
+    // interblocage, et une ligne entrelacee vaut infiniment mieux qu'une
+    // machine qui se tait.
+    let mut tours = 0u32;
+    while EMISSION
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        tours += 1;
+        if tours > 100_000 {
+            sortie.vide();
+            return;
+        }
+        core::hint::spin_loop();
+    }
     sortie.vide();
+    EMISSION.store(false, Ordering::Release);
 }
 
 impl fmt::Write for SerialBrut {

@@ -10,7 +10,45 @@
 use core::ptr::{read_volatile, write_volatile};
 use crate::arch::x86_64::pci;
 use crate::drivers::rtl8168;
+use crate::kernel::sync::SpinLockIrq;
 use crate::kernel::{dmesg, memory};
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_NIC_ANNEAUX_SERIALISES_V1 : un seul appelant a la fois sur l'anneau
+// ---------------------------------------------------------------------------
+//
+// ## Le defaut
+//
+// `RX_CUR` et `TX_CUR` sont des `static mut` sans la moindre synchronisation,
+// ici comme dans le pilote RTL8168, et la carte a CINQ consommateurs
+// concurrents : `arp_resolve`, `poll_ip`, `dhcp::recv_avant`, la commande
+// `ping`, et le pont smoltcp. Ils ne tournent pas tous sous le meme verrou :
+// `pump_udp` prend le domaine Reseau du gros verrou, `sendto` ne le prend pas
+// du tout, et le veilleur de lien est un fil noyau independant.
+//
+// Deux appelants qui lisent le meme index se partagent donc le meme
+// descripteur : le premier copie le tampon pendant que le second le rend a la
+// carte, qui peut y ecrire une nouvelle trame au milieu de la copie. Cote
+// emission, deux appelants ecrivent la meme case et une des deux trames ne
+// part jamais -- ce qui, sur une requete ARP en diffusion sans retransmission
+// de protocole, se lit exactement comme un voisin muet.
+//
+// ## Pourquoi ce verrou est admissible sur un chemin chaud
+//
+// Il ne serialise pas la pile : il serialise LA CARTE, qui n'a de toute facon
+// qu'une file d'emission et une file de reception. Sa section critique est une
+// copie memoire bornee par la taille d'une trame -- quelques microsecondes --
+// et les deux sens ont leur propre verrou, si bien qu'une emission n'attend
+// jamais une reception.
+//
+// Interruptions masquees : sans cela, une preemption au milieu de la section
+// critique laisserait le verrou pris par une tache qui ne tourne plus, et le
+// premier appelant suivant sur le meme processeur tournerait pour toujours.
+
+/// Un seul emetteur a la fois sur l'anneau TX.
+static ANNEAU_TX: SpinLockIrq<()> = SpinLockIrq::new(());
+/// Un seul recepteur a la fois sur l'anneau RX.
+static ANNEAU_RX: SpinLockIrq<()> = SpinLockIrq::new(());
 
 // Registres e1000 (offsets en octets).
 const REG_CTRL: u32 = 0x0000;
@@ -33,6 +71,9 @@ const REG_TDT: u32 = 0x3818;
 const REG_RAL0: u32 = 0x5400;
 const REG_RAH0: u32 = 0x5404;
 const REG_MTA: u32 = 0x5200;
+
+/// Longueur minimale d'une trame Ethernet, FCS exclu (IEEE 802.3).
+const TRAME_MIN_ETHERNET: usize = 60;
 
 const N_RX: usize = 64; // Google peut envoyer un burst de segments TLS; 16 etait trop juste.
 const N_TX: usize = 16;
@@ -236,6 +277,34 @@ pub fn init() -> bool {
 }
 
 /// Lien physique etabli ?
+/// Vitesse negociee du lien, en megabits par seconde. Zero si le lien est bas.
+///
+/// Seul le pilote RTL8168 la rend aujourd'hui : l'e1000 emule de QEMU annonce
+/// toujours un gigabit, et l'inventer serait un chiffre faux plutot qu'une
+/// absence de chiffre.
+pub fn vitesse_mbps() -> u32 {
+    if rtl8168::is_ready() { return rtl8168::vitesse_mbps(); }
+    0
+}
+
+/// Le lien est-il en duplex integral ?
+pub fn duplex_complet() -> bool {
+    if rtl8168::is_ready() { return rtl8168::duplex_complet(); }
+    link_up()
+}
+
+/// Trames perdues faute de tampon, compteur materiel.
+pub fn trames_perdues() -> u32 {
+    if rtl8168::is_ready() { return rtl8168::trames_perdues(); }
+    0
+}
+
+/// Demande au PHY de relancer son autonegociation.
+pub fn reveille_le_lien() -> bool {
+    if rtl8168::is_ready() { return rtl8168::reveille_le_lien(); }
+    false
+}
+
 pub fn link_up() -> bool {
     if rtl8168::is_ready() { return rtl8168::link_up(); }
     unsafe {
@@ -246,6 +315,7 @@ pub fn link_up() -> bool {
 
 /// Emet une trame Ethernet complete. Renvoie false si non prete/trop grande.
 pub fn send(frame: &[u8]) -> bool {
+    let _anneau = ANNEAU_TX.lock();
     if rtl8168::is_ready() { return rtl8168::send(frame); }
     unsafe {
         if !READY || frame.is_empty() || frame.len() > BUF { return false; }
@@ -279,8 +349,16 @@ pub fn send(frame: &[u8]) -> bool {
         // Copie la trame dans le tampon DMA de ce descripteur.
         let dst = TX_BUF_V.add(i * BUF);
         core::ptr::copy_nonoverlapping(frame.as_ptr(), dst, frame.len());
+        // Bourrage a la longueur minimale 802.3 : une requete ARP fait
+        // quarante-deux octets, et une trame plus courte que soixante est un
+        // « runt » qu'un commutateur jette. Voir `rtl8168::TRAME_MIN` pour le
+        // defaut que cela corrige sur la machine de reference.
+        let longueur = frame.len().max(TRAME_MIN_ETHERNET).min(BUF);
+        if longueur > frame.len() {
+            core::ptr::write_bytes(dst.add(frame.len()), 0, longueur - frame.len());
+        }
         desc_set_u64(TX_RING, i, 0, TX_BUF_P + (i * BUF) as u64);
-        desc_set_u16(TX_RING, i, 8, frame.len() as u16); // length
+        desc_set_u16(TX_RING, i, 8, longueur as u16); // length
         desc_set_u8(TX_RING, i, 11, 0x1 | 0x2 | 0x8);     // cmd: EOP|IFCS|RS
         desc_set_u8(TX_RING, i, 12, 0);                   // status
         TX_CUR = (i + 1) % N_TX;
@@ -292,6 +370,7 @@ pub fn send(frame: &[u8]) -> bool {
 
 /// Tente de recevoir une trame ; copie dans `out`, renvoie sa longueur.
 pub fn receive(out: &mut [u8]) -> Option<usize> {
+    let _anneau = ANNEAU_RX.lock();
     if rtl8168::is_ready() { return rtl8168::receive(out); }
     unsafe {
         if !READY { return None; }

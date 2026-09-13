@@ -165,6 +165,35 @@ pub fn install_firmware_framebuffer(info: crate::boot::FramebufferInfo) -> bool 
     // Invariant Stage 2 final : le repere GUI EST le repere GOP.
     set_canvas_size(native_width, native_height);
     FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
+
+    // LE FRAMEBUFFER PASSE EN ECRITURE COMBINEE.
+    //
+    // Le micrologiciel decrit cette fenetre comme non cachable, et il a raison
+    // pour des registres. Ce n'en est pas : l'ordre des pixels n'importe pas,
+    // et personne ne relit un pixel. Sans cette bascule, chaque ecriture part
+    // en transaction isolee -- 110 Mo/s mesures sur la machine de reference,
+    // soit soixante-quinze millisecondes par trame plein ecran.
+    //
+    // Un echec n'est pas fatal : l'ecran reste lent, et le dit.
+    match crate::kernel::vmm::passe_en_ecriture_combinee(info.address, info.byte_len as u64) {
+        Ok(pages) => crate::serial_println!(
+            "BOUCHAUD_GOP_ECRITURE_COMBINEE pages={} adresse={:#x} octets={} \
+coeurs_pat={} pat={:#018x}",
+            pages,
+            info.address,
+            info.byte_len,
+            crate::arch::x86_64::pat::coeurs_configures(),
+            // La valeur BRUTE : un compteur peut mentir par omission, seize
+            // octets de MSR ne mentent pas.
+            crate::arch::x86_64::pat::valeur_brute(),
+        ),
+        Err(raison) => crate::serial_println!(
+            "BOUCHAUD_GOP_ECRITURE_COMBINEE_REFUSEE raison={} adresse={:#x} \
+consequence=chaque-trame-plein-ecran-coute-son-debit-non-cache",
+            raison,
+            info.address,
+        ),
+    }
     true
 }
 
@@ -263,6 +292,7 @@ fn present_firmware_rect(x: usize, y: usize, rect_width: usize, rect_height: usi
         return;
     }
 
+    let debut_copie = crate::kernel::timer::monotonic_ns();
     let canvas_width = width();
     let canvas_height = height();
     if fb.width != canvas_width || fb.height != canvas_height {
@@ -316,6 +346,19 @@ fn present_firmware_rect(x: usize, y: usize, rect_width: usize, rect_height: usi
         }
     }
 
+    // LA BARRIERE, SANS LAQUELLE L'ECRITURE COMBINEE SE RETOURNE CONTRE NOUS.
+    //
+    // En ecriture combinee, les ecritures restent dans les tampons du
+    // processeur et partent groupees, quand il le decide. C'est precisement ce
+    // qui fait passer une trame plein ecran de soixante-quinze millisecondes a
+    // quelques-unes -- et c'est aussi ce qui rend une trame invisible tant que
+    // les tampons n'ont pas ete vides.
+    //
+    // `sfence` les vide. Il coute quelques dizaines de cycles, une fois par
+    // presentation, contre huit megaoctets qu'il rend visibles.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+
     // Le readback est un invariant d'initialisation, pas une taxe par damage.
     // Une fois un pixel CPU->GOP relu correctement, les presentations suivantes
     // gardent le chemin chaud sans lecture MMIO supplementaire.
@@ -327,6 +370,10 @@ fn present_firmware_rect(x: usize, y: usize, rect_width: usize, rect_height: usi
         FIRMWARE_PRESENT_OK.store((observed == Some(expected)) as usize, Ordering::Release);
     }
 
+    NANOS_DANS_PRESENT.fetch_add(
+        crate::kernel::timer::monotonic_ns().saturating_sub(debut_copie),
+        Ordering::Relaxed,
+    );
     PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
     PIXELS_COPIES_LFB.fetch_add((count * rows) as u64, Ordering::Relaxed);
     DERNIER_PRESENT_RECT.store(empaquete_rect(x, y, count, rows), Ordering::Relaxed);
@@ -423,6 +470,39 @@ pub fn lfb_phys() -> Option<u64> {
     }
     Some(phys)
 }
+
+/// Debit MESURE vers le framebuffer, en mebioctets par seconde.
+///
+/// # Pourquoi ce chiffre est publie
+///
+/// C'est lui qui nomme le defaut, et il est le seul a le faire. Sur la machine
+/// de reference il valait environ cent dix : huit megaoctets en soixante-quinze
+/// millisecondes, pour une trame plein ecran. La memoire normale du meme
+/// processeur en fait dix a vingt MILLE.
+///
+/// Un bureau qui ne redessine qu'un curseur ne montre rien de cette lenteur ;
+/// elle devient brutale des qu'une fenetre est agrandie. Le chiffre, lui, la
+/// dit tout le temps.
+///
+/// Ce qu'on attend : quelques milliers apres la bascule en ecriture combinee,
+/// une centaine sans elle.
+pub fn debit_framebuffer_mio_s() -> u64 {
+    let octets = PIXELS_COPIES_LFB.load(Ordering::Relaxed)
+        .saturating_mul(core::mem::size_of::<u32>() as u64);
+    let ns = NANOS_DANS_PRESENT.load(Ordering::Relaxed);
+    if ns == 0 {
+        return 0;
+    }
+    octets
+        .saturating_mul(1_000_000_000)
+        .checked_div(ns)
+        .unwrap_or(0)
+        / (1024 * 1024)
+}
+
+/// Nanosecondes passees DANS les copies vers le framebuffer.
+static NANOS_DANS_PRESENT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Resolution courante du framebuffer (largeur, hauteur) en pixels.
 pub fn resolution() -> (usize, usize) {
@@ -779,6 +859,7 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
         REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    let debut_copie = crate::kernel::timer::monotonic_ns();
     let buf = back();
     if buf.is_empty() {
         REFUS_TAMPON.fetch_add(1, Ordering::Relaxed);
@@ -820,6 +901,23 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
             }
         }
     }
+    // LA BARRIERE, SANS LAQUELLE L'ECRITURE COMBINEE SE RETOURNE CONTRE NOUS.
+    //
+    // En ecriture combinee, les ecritures restent dans les tampons du
+    // processeur et partent groupees, quand il le decide. C'est precisement ce
+    // qui fait passer une trame plein ecran de soixante-quinze millisecondes a
+    // quelques-unes -- et c'est aussi ce qui rend une trame invisible tant que
+    // les tampons n'ont pas ete vides.
+    //
+    // `sfence` les vide. Il coute quelques dizaines de cycles, une fois par
+    // presentation, contre huit megaoctets qu'il rend visibles.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+
+    NANOS_DANS_PRESENT.fetch_add(
+        crate::kernel::timer::monotonic_ns().saturating_sub(debut_copie),
+        Ordering::Relaxed,
+    );
     // Ici, et seulement ici, des pixels ont atteint l'ecran.
     PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
     PIXELS_COPIES_LFB.fetch_add((count * (y1 - y)) as u64, Ordering::Relaxed);

@@ -127,20 +127,118 @@ static LONGUEUR: AtomicUsize = AtomicUsize::new(0);
 static LECTEURS: AtomicUsize = AtomicUsize::new(0);
 static ECRIVAIN: AtomicBool = AtomicBool::new(false);
 
+/// PROFONDEUR DE LECTURE PAR COEUR.
+///
+/// # L'interblocage que ce compteur ferme
+///
+/// Le rendez-vous de quiescence est un verrou lecteur/ecrivain a PRIORITE
+/// ECRIVAIN : l'ecrivain publie son drapeau, puis attend que le compte de
+/// lecteurs retombe a zero ; un lecteur qui voit le drapeau attend, sans se
+/// compter.
+///
+/// Cette discipline est correcte tant qu'un lecteur n'en prend qu'un a la
+/// fois. Elle se referme sur elle-meme des qu'un lecteur en prend un SECOND
+/// alors qu'il tient deja le premier : son propre garde exterieur maintient le
+/// compte a un, l'ecrivain ne repart donc jamais, et le garde interieur attend
+/// un drapeau qui ne tombera plus. Les deux coeurs s'immobilisent, et rien ne
+/// le dit -- la machine se tait, simplement.
+///
+/// Ce n'etait pas une hypothese. Sur la sonde `nvme-parallele`, le troisieme
+/// passage recyclait l'emplacement du fil de montage, qui venait de mourir :
+/// `registre_ajoute` prenait le rendez-vous d'ecriture pendant que les autres
+/// coeurs etaient dans l'ordonnanceur. Les registres pris au moniteur QEMU au
+/// moment du gel le montraient sans ambiguite -- coeur 0 dans
+/// `RegistreEcriture::acquire`, IRQ masquees ; coeurs 1, 2 et 3 dans
+/// `RegistreLecture::acquire`, tous les trois.
+///
+/// Et l'imbrication n'est pas une maladresse isolee : `wake_sleepers` tient
+/// une vue du registre et appelle `publish_ready`, qui en reprend une. La
+/// fermer site par site serait a refaire a chaque nouvel appelant. Elle se
+/// ferme donc ICI, dans la structure.
+///
+/// # Pourquoi c'est sur
+///
+/// Un garde imbrique ne retouche pas le compte global : le coeur y figure deja
+/// pour un. L'exclusion vis-a-vis de l'ecrivain est donc intacte -- il attend
+/// toujours zero, et zero veut toujours dire « plus aucune reference ».
+///
+/// Et sauter l'attente du drapeau est legitime au niveau imbrique : si ce coeur
+/// tient un garde, le compte n'est pas nul, donc aucun ecrivain n'est ENTRE
+/// dans sa section critique. Il ne peut qu'attendre -- et c'est precisement ce
+/// qu'on le laisse faire, jusqu'a ce que le dernier garde de ce coeur tombe.
+///
+/// # Ce que ce compteur suppose
+///
+/// Qu'un garde de lecture ne traverse pas un changement de contexte. C'est le
+/// cas : le noyau n'est pas preemptible en son sein -- `preempt_from_irq` ne
+/// commute que si le timer a interrompu du code ring 3 --, et les points de
+/// commutation volontaires n'en tiennent aucun. `RegistreEcriture::acquire`
+/// verifie d'ailleurs qu'aucun garde local n'est tenu : un appelant qui
+/// recyclerait un emplacement en tenant une lecture s'interbloquerait avec
+/// lui-meme, et il vaut mieux qu'il l'apprenne par un panic que par un silence.
+
+/// # Ce que cela coute, dit franchement
+///
+/// Chaque prise et chaque relachement ajoutent un masquage d'interruptions et
+/// une lecture de l'identite du coeur, laquelle passe par `GS_BASE`. Sur le
+/// chemin d'election, qui prend plusieurs gardes par commutation, c'est un
+/// cout reel et non nul.
+///
+/// Il est paye volontiers : la version sans lui immobilisait quatre coeurs une
+/// fois sur deux, et une machine qui se tait n'a pas de latence a defendre.
+static PROFONDEUR_LECTURE: [AtomicUsize; MAX_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// Profondeur de lecture tenue par le coeur courant.
+#[inline]
+fn profondeur_lecture_locale() -> usize {
+    PROFONDEUR_LECTURE[local_cpu()].load(Ordering::Relaxed)
+}
+
 struct RegistreLecture;
 
 impl RegistreLecture {
     #[inline]
     fn acquire() -> Self {
         loop {
-            while ECRIVAIN.load(Ordering::Acquire) {
-                core::hint::spin_loop();
+            // LES DEUX COMPTES BOUGENT ENSEMBLE, IRQ MASQUEES.
+            //
+            // Sans ce masquage, un handler tombant entre l'incrementation
+            // globale et la pose de la profondeur locale se croirait au
+            // premier niveau et reprendrait le protocole complet : il
+            // attendrait le drapeau que le compte de l'interrompu retient.
+            // C'est le meme interblocage, reduit a quelques instructions.
+            //
+            // L'ATTENTE, elle, reste hors du masquage : la boucle rend la main
+            // aux interruptions a chaque tour. Un rendez-vous d'ecriture dure
+            // le temps d'un remplacement de tache, mais il n'y a aucune raison
+            // de l'attendre IRQ fermees.
+            let irq = interrupts::are_enabled();
+            interrupts::disable();
+            let cpu = local_cpu();
+            let profondeur = PROFONDEUR_LECTURE[cpu].load(Ordering::Relaxed);
+            let pris = if profondeur > 0 {
+                PROFONDEUR_LECTURE[cpu].store(profondeur + 1, Ordering::Relaxed);
+                true
+            } else if ECRIVAIN.load(Ordering::Acquire) {
+                false
+            } else {
+                LECTEURS.fetch_add(1, Ordering::AcqRel);
+                if ECRIVAIN.load(Ordering::Acquire) {
+                    LECTEURS.fetch_sub(1, Ordering::Release);
+                    false
+                } else {
+                    PROFONDEUR_LECTURE[cpu].store(1, Ordering::Relaxed);
+                    true
+                }
+            };
+            if irq {
+                interrupts::enable();
             }
-            LECTEURS.fetch_add(1, Ordering::AcqRel);
-            if !ECRIVAIN.load(Ordering::Acquire) {
+            if pris {
                 return Self;
             }
-            LECTEURS.fetch_sub(1, Ordering::Release);
+            core::hint::spin_loop();
         }
     }
 }
@@ -148,7 +246,23 @@ impl RegistreLecture {
 impl Drop for RegistreLecture {
     #[inline]
     fn drop(&mut self) {
-        LECTEURS.fetch_sub(1, Ordering::Release);
+        let irq = interrupts::are_enabled();
+        interrupts::disable();
+        let cpu = local_cpu();
+        let profondeur = PROFONDEUR_LECTURE[cpu].load(Ordering::Relaxed);
+        debug_assert!(
+            profondeur > 0,
+            "registre: relachement d'une lecture que ce coeur ne tient pas",
+        );
+        PROFONDEUR_LECTURE[cpu].store(profondeur.saturating_sub(1), Ordering::Relaxed);
+        // Le compte global ne retombe qu'au DERNIER garde du coeur : c'est lui
+        // qui rend la quiescence a l'ecrivain.
+        if profondeur <= 1 {
+            LECTEURS.fetch_sub(1, Ordering::Release);
+        }
+        if irq {
+            interrupts::enable();
+        }
     }
 }
 
@@ -158,6 +272,17 @@ struct RegistreEcriture {
 
 impl RegistreEcriture {
     fn acquire() -> Self {
+        // UN RECYCLEUR QUI TIENT UNE LECTURE S'ATTEND LUI-MEME.
+        //
+        // L'attente ci-dessous porte sur le compte GLOBAL des lecteurs, celui
+        // de ce coeur compris. Prendre le rendez-vous d'ecriture en tenant un
+        // garde de lecture est donc un interblocage certain -- et muet, faute
+        // de quoi que ce soit pour le dire. Il se dit ici.
+        debug_assert_eq!(
+            profondeur_lecture_locale(),
+            0,
+            "registre: rendez-vous d'ecriture pris en tenant une lecture",
+        );
         // Masquer AVANT de publier l'ecrivain : un handler local ne peut pas
         // interrompre le recycleur puis attendre ce meme recycleur.
         let restaure_irq = interrupts::are_enabled();

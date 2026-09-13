@@ -174,19 +174,54 @@ fn boot_id() -> u64 {
 }
 
 #[inline]
-fn next_record_seq() -> u64 {
-    RECORD_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+// BOUCHAUD_BLACKBOX_NUMERO_NON_CONSOMME_V1
+//
+// LE DEFAUT QUE CECI CORRIGE
+//
+// Le numero d'enregistrement etait tire AVANT l'ecriture, et perdu avec elle
+// quand le pilote USB etait occupe. L'archive du 12 septembre le montre trou
+// par trou : 84 enregistrements presents pour 127 numeros emis, et
+// `bb_busy_skips=49` -- les deux chiffres se repondent.
+//
+// Un numero consomme pour rien n'est pas seulement un enregistrement perdu :
+// c'est un trou qu'on ne peut pas distinguer d'un enregistrement corrompu a
+// la relecture. Le numero n'est desormais valide que si l'ecriture a eu lieu.
+fn peek_record_seq() -> u64 {
+    RECORD_SEQ.load(Ordering::Acquire).wrapping_add(1)
 }
 
+fn commit_record_seq(seq: u64) {
+    let _ = RECORD_SEQ.compare_exchange(
+        seq.wrapping_sub(1),
+        seq,
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    );
+}
+
+/// Vrai si le dernier `append` a ete SAUTE faute d'avoir pu prendre le pilote.
+///
+/// C'est ce drapeau qui empeche une fenetre de scrutation d'etre consommee
+/// pour rien : voir `poll`.
+static DERNIER_SAUT_OCCUPE: AtomicBool = AtomicBool::new(false);
+static SAUTS_DE_FENETRE: AtomicU64 = AtomicU64::new(0);
+
 fn append(kind: u16, payload: &[u8], ts_ns: u64, trace_end: usize) -> bool {
-    crate::drivers::xhci_active::blackbox_append_record(
+    let seq = peek_record_seq();
+    let ok = crate::drivers::xhci_active::blackbox_append_record(
         kind,
         boot_id(),
-        next_record_seq(),
+        seq,
         ts_ns,
         trace_end as u64,
         payload,
-    )
+    );
+    if ok {
+        commit_record_seq(seq);
+    } else {
+        DERNIER_SAUT_OCCUPE.store(true, Ordering::Release);
+    }
+    ok
 }
 
 struct Text {
@@ -345,7 +380,7 @@ fn sample(ts_ns: u64) {
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
-            "bb_busy_skips={} bb_last_ok_ns={}\n"
+            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={}\n"
         ),
         ts_ns, cpu, rsp, here,
         task, syscall, phase, site, aux,
@@ -362,7 +397,8 @@ fn sample(ts_ns: u64) {
         TIMER_ENTERS[3].load(Ordering::Relaxed), TIMER_EXITS[3].load(Ordering::Relaxed),
         polls, events, reports, kbd, mouse, hid_errors, rearms, kicks,
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
-        bb_busy_skips, bb_last_ok_ns,
+        bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
+        FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -394,21 +430,26 @@ fn memory_sample(ts_ns: u64) {
     let _ = append(KIND_MEMORY, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
 
-pub fn poll() {
+/// Ecrit ce qui doit l'etre. Rend vrai si le pilote USB l'a fait renoncer.
+///
+/// L'appelant s'en sert pour retenter VITE plutot qu'au quart de seconde
+/// suivant : voir `fil_blackbox`.
+pub fn poll() -> bool {
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
-        return;
+        return false;
     }
     let now = now_ns();
     let previous = LAST_POLL_NS.load(Ordering::Relaxed);
     if previous != 0 && now.saturating_sub(previous) < POLL_NS {
-        return;
+        return false;
     }
     if LAST_POLL_NS
         .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return;
+        return false;
     }
+    DERNIER_SAUT_OCCUPE.store(false, Ordering::Release);
 
     if !STARTED.load(Ordering::Acquire) {
         let mut msg = Text::new();
@@ -438,6 +479,141 @@ pub fn poll() {
         LAST_MEMORY_NS.store(now, Ordering::Relaxed);
         memory_sample(now);
     }
+
+    // UNE FENETRE PERDUE N'EST PAS UNE FENETRE UTILISEE.
+    //
+    // `LAST_POLL_NS` est pose EN ENTREE, avant la moindre ecriture. Quand
+    // celles-ci sont toutes sautees -- le pilote USB tenu par le systeme de
+    // fichiers --, la fenetre de deux cent cinquante millisecondes a bien ete
+    // consommee, et l'enregistreur attend le quart de seconde suivant pour
+    // retenter. Si le pilote reste pris, il ne reprend jamais.
+    //
+    // C'est exactement ce que montrent les trois archives physiques :
+    // l'enregistrement s'arrete net a l'instant ou le navigateur demarre et
+    // se met a travailler sur la cle, et plus rien n'arrive ensuite -- alors
+    // que la souris, elle, continue parfaitement.
+    //
+    // Rendre la fenetre fait retenter le tour suivant du fil, vingt
+    // millisecondes plus tard, au lieu de deux cent cinquante.
+    if DERNIER_SAUT_OCCUPE.swap(false, Ordering::AcqRel) {
+        LAST_POLL_NS.store(previous, Ordering::Release);
+        SAUTS_DE_FENETRE.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Depuis quand l'enregistreur n'a-t-il rien ecrit, en nanosecondes ?
+///
+/// Rend zero tant qu'il n'a jamais rien ecrit -- il n'a alors rien a expliquer.
+pub fn silence_ns() -> u64 {
+    let (_, _, _, _, _, dernier_ok) =
+        crate::drivers::xhci_active::blackbox_storage_extended_counters();
+    if dernier_ok == 0 {
+        return 0;
+    }
+    crate::kernel::timer::monotonic_ns().saturating_sub(dernier_ok)
+}
+
+/// Filet de securite : ecrire depuis un autre fil quand le notre ne tourne plus.
+///
+/// # Pourquoi un filet, et pas seulement une priorite
+///
+/// L'archive du 12 septembre 17:55 s'arrete au milieu d'un tour de
+/// scrutation, `bb_failures=0`, alors que le bureau tournait a soixante-deux
+/// trames par seconde. L'enregistreur n'avait pas echoue : il n'etait plus
+/// elu. Promouvoir son fil en Interactive corrige la cause la plus probable ;
+/// ce filet couvre le cas ou elle ne serait pas la seule.
+///
+/// L'appelant est le compositeur, qui tourne toujours. `poll()` est borne et
+/// ne bloque pas -- il abandonne si le pilote USB est pris --, donc cet appel
+/// ne peut pas figer une trame.
+pub fn filet_de_securite(seuil_ns: u64) -> bool {
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        return false;
+    }
+    let silence = silence_ns();
+    if silence < seuil_ns {
+        return false;
+    }
+    FILETS.fetch_add(1, Ordering::Relaxed);
+    poll();
+    true
+}
+
+/// Nombre de fois ou un autre fil a du ecrire a la place de l'enregistreur.
+pub fn filets() -> u64 {
+    FILETS.load(Ordering::Relaxed)
+}
+
+static FILETS: AtomicU64 = AtomicU64::new(0);
+
+/// Fenetres de scrutation rendues parce que le pilote USB etait pris.
+///
+/// Zero veut dire que l'enregistreur n'a jamais eu a se battre pour ecrire.
+/// Un chiffre qui monte dit que le systeme de fichiers occupe la cle -- et
+/// c'est ce chiffre, et non le silence, qui doit apparaitre dans le releve.
+pub fn sauts_de_fenetre() -> u64 {
+    SAUTS_DE_FENETRE.load(Ordering::Relaxed)
+}
+
+/// Vide l'enregistreur de vol AVANT une extinction volontaire.
+///
+/// # Pourquoi cette fonction existe
+///
+/// Les trois premieres sessions physiques ont toutes fini au bouton
+/// d'alimentation, et l'archive extraite ne contenait a chaque fois que les
+/// premieres dizaines de secondes. Non parce que l'enregistreur tombait, mais
+/// parce qu'une coupure brutale n'a personne pour ecrire ce qui reste.
+///
+/// Ce sont precisement les dernieres secondes qu'on cherche : celles ou la
+/// machine s'est degradee. L'enregistreur voyait tout sauf ce qu'on lui
+/// demandait.
+///
+/// Une extinction par le menu passe donc par ici, et ecrit :
+///
+///   * les evenements de vol encore en memoire ;
+///   * le journal serie qui n'a pas encore ete pose ;
+///   * un dernier echantillon, et un dernier releve memoire ;
+///   * une marque de fin, qui distingue une session CLOSE d'une session
+///     coupee -- sans elle, on ne sait pas si le silence est la fin ou une
+///     panne.
+pub fn vide_avant_extinction(raison: &str) {
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={} \
+consequence=les-dernieres-secondes-ne-seront-pas-relues",
+            raison,
+        );
+        return;
+    }
+    let maintenant = now_ns();
+
+    // Le vol d'abord : c'est le plus volatil, et le plus precis.
+    for _ in 0..8 {
+        flush_flight(maintenant);
+    }
+    flush_serial(maintenant, true);
+    sample(maintenant);
+    memory_sample(maintenant);
+
+    let mut marque = Text::new();
+    let _ = write!(
+        &mut marque,
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V1 FIN raison={} boot_id={} ts_ns={} records={}\n",
+        raison,
+        boot_id(),
+        maintenant,
+        RECORD_SEQ.load(Ordering::Relaxed),
+    );
+    let _ = append(KIND_MARKER, marque.as_bytes(), maintenant, crate::drivers::serial::trace_total_bytes());
+    flush_serial(maintenant, true);
+    crate::drivers::xhci_active::blackbox_force_sync();
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_FIN raison={} records={}",
+        raison,
+        RECORD_SEQ.load(Ordering::Relaxed),
+    );
 }
 
 pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) {

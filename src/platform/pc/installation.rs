@@ -609,6 +609,7 @@ pub fn monte_le_systeme_installe() -> bool {
     };
     SYSTEME.pose(systeme.premier, systeme.blocs());
     bloc::enregistre(Volume::DONNEES, &SYSTEME);
+    SYSTEME_MONTE.store(true, core::sync::atomic::Ordering::Release);
     crate::serial_println!(
         "BOUCHAUD_INSTALL_SYSTEME_MONTE premier={} blocs={}",
         systeme.premier,
@@ -620,6 +621,31 @@ pub fn monte_le_systeme_installe() -> bool {
 // ---------------------------------------------------------------------------
 // Le montage DIFFERE
 // ---------------------------------------------------------------------------
+
+/// La partition Bouchaud est-elle montee sur `Volume::DONNEES` ?
+///
+/// # Pourquoi la question ne peut pas se poser autrement
+///
+/// `bloc::present(Volume::DONNEES)` ne repond PAS a cette question. Le pilote
+/// ATA enregistre lui aussi son disque esclave sur ce meme volume, a
+/// l'amorcage et sans condition. Un volume present ne dit donc rien de ce
+/// qu'il porte.
+///
+/// La distinction n'est pas academique : une commande d'ecriture qui se fierait
+/// a `present()` ecrirait sur le disque de la machine en croyant ecrire dans
+/// une partition dediee. Le scenario H10 l'a montre sur un disque vierge --
+/// l'ecriture avait lieu, a un LBA calcule sur une partition qui n'existait
+/// pas.
+///
+/// Ce drapeau n'est pose que par le montage reussi d'une partition portant le
+/// GUID de type Bouchaud.
+static SYSTEME_MONTE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// La partition Bouchaud est-elle montee ?
+pub fn systeme_monte() -> bool {
+    SYSTEME_MONTE.load(core::sync::atomic::Ordering::Acquire)
+}
 
 /// Un montage a-t-il ete demande, et pas encore tente ?
 static MONTAGE_DEMANDE: core::sync::atomic::AtomicBool =

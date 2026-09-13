@@ -266,12 +266,213 @@ fn draw_topbar() {
     fb::draw_text_prop(x, ligne, &stats,
         crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
 
-    // Horloge, a droite.
+    // BOUCHAUD_GUI_BARRE_HAUTE_UNE_SEULE_MISE_EN_PAGE_V1
+    //
+    // CE QUI SE CHEVAUCHAIT
+    //
+    // La barre etait peinte a DEUX endroits : ici, puis `widgets_v15` qui
+    // reposait un rectangle de fond et le compteur de trames par-dessus, a une
+    // marge droite ECRITE EN DUR (104 px). Chaque element ajoute a droite
+    // tombait dessous, et l'indicateur reseau y a fini decoupe -- la photo du
+    // 12 septembre montre « FPS: 0 necte 17:58:53 », c'est-a-dire la fin de
+    // « Deconnecte » sous le compteur.
+    //
+    // Il n'y a plus qu'une mise en page, et elle avance de la DROITE vers la
+    // gauche : chaque element prend la largeur qu'il occupe reellement, et le
+    // suivant commence ou celui-ci s'arrete. Rien ne peut plus se recouvrir,
+    // quelle que soit la longueur d'un nom de reseau.
+    let mut droite = fb::width().saturating_sub(window::MARGE_BARRE as usize * 2 + 2);
+
     let dt = rtc::now();
     let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
     let largeur = fb::text_width(&heure, CORPS_BARRE, true);
-    fb::draw_text_prop(fb::width() - largeur - window::MARGE_BARRE as usize * 2 - 2,
-        ligne, &heure, crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+    droite = droite.saturating_sub(largeur);
+    fb::draw_text_prop(droite, ligne, &heure,
+        crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+
+    // Trames utiles du compositeur.
+    let snapshot = crate::gui::frame_clock::snapshot();
+    let fps = if snapshot.active {
+        format!("FPS:{:3}", snapshot.fps_arrondi())
+    } else {
+        format!("FPS: --")
+    };
+    let largeur = fb::text_width(&fps, CORPS_BARRE - 1.0, false);
+    droite = droite.saturating_sub(largeur + ECART_ELEMENTS);
+    fb::draw_text_prop(droite, ligne, &fps,
+        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
+
+    // Reseau.
+    dessine_reseau(droite.saturating_sub(ECART_ELEMENTS), ligne);
+}
+
+/// Ecart entre deux elements de la partie droite de la barre, en pixels.
+const ECART_ELEMENTS: usize = 14;
+/// Largeur de la prise dessinee.
+const LARGEUR_PRISE: usize = 13;
+/// Hauteur de la prise dessinee.
+const HAUTEUR_PRISE: usize = 9;
+
+/// Ce que l'indicateur reseau doit montrer, a cet instant.
+///
+/// Separe du dessin parce que c'est la seule moitie qui se raisonne : trois
+/// etats, et une regle pour chacun. Le dessin, lui, n'a pas d'opinion.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EtatReseau {
+    /// Aucune carte, ou une carte que personne ne pilote.
+    SansCarte,
+    /// Carte prete, mais rien au bout du cable -- ou pas de cable.
+    Deconnecte,
+    /// Lien monte et configuration obtenue.
+    Connecte,
+}
+
+/// L'etat courant, lu une seule fois par trame.
+pub fn etat_reseau() -> EtatReseau {
+    if !crate::net::carte_presente() {
+        EtatReseau::SansCarte
+    } else if crate::net::connecte() {
+        EtatReseau::Connecte
+    } else {
+        EtatReseau::Deconnecte
+    }
+}
+
+/// Le libelle qui accompagne l'icone.
+///
+/// Un reseau filaire n'a pas de SSID : son nom est celui que le serveur DHCP
+/// annonce (option 15), a defaut son sous-reseau. Quand il n'y a rien a
+/// nommer, l'etat se dit en toutes lettres plutot que par une chaine vide,
+/// qui laisserait croire a un defaut d'affichage.
+pub fn libelle_reseau(etat: EtatReseau) -> String {
+    match etat {
+        EtatReseau::SansCarte => String::from("Pas de carte"),
+        EtatReseau::Deconnecte => String::from("Ethernet deconnecte"),
+        EtatReseau::Connecte => {
+            let nom = crate::net::nom_reseau();
+            let qualite = crate::net::qualite_lien();
+            let debit = debit_lisible(qualite.vitesse_mbps);
+            let base = if nom.is_empty() { String::from("Ethernet") } else { nom };
+            if debit.is_empty() {
+                base
+            } else if qualite.duplex_complet {
+                format!("{} - {}", base, debit)
+            } else {
+                // L'ALTERNAT SE DIT, ET NE SE DEVINE PAS.
+                //
+                // Sur du cuivre moderne, un lien a l'alternat signale presque
+                // toujours une negociation ratee d'un cote. Les collisions y
+                // divisent le debit utile, et le chiffre de vitesse seul
+                // laisserait croire a une liaison saine.
+                format!("{} - {} alternat", base, debit)
+            }
+        }
+    }
+}
+
+/// Le debit negocie, ecrit comme on l'ecrit. Vide quand on ne le connait pas.
+///
+/// Un zero signifierait « zero megabit », ce qui est faux : il signifie « ce
+/// pilote ne sait pas le lire ». Une chaine vide ne raconte rien, et c'est
+/// exactement ce qu'il faut dire.
+fn debit_lisible(mbps: u32) -> String {
+    match mbps {
+        0 => String::new(),
+        1000 => String::from("1 Gb/s"),
+        2500 => String::from("2,5 Gb/s"),
+        _ => format!("{} Mb/s", mbps),
+    }
+}
+
+/// Dessine la prise et son libelle, le libelle se terminant en `droite`.
+///
+/// # Pourquoi une prise et non des barres de signal
+///
+/// Des barres disent une FORCE de signal, que le cuivre n'a pas : un lien
+/// Ethernet est monte ou ne l'est pas. Montrer trois barres sur cinq pour une
+/// liaison gigabit parfaite serait une information fausse.
+fn dessine_reseau(droite: usize, ligne: usize) {
+    let etat = etat_reseau();
+    let libelle = libelle_reseau(etat);
+    // UN LIEN MONTE N'EST PAS FORCEMENT UN LIEN SAIN.
+    //
+    // L'alternat, ou dix megabits sur un port gigabit, sont des liens qui
+    // fonctionnent mal. Les peindre en vert comme un gigabit duplex integral
+    // ferait chercher la lenteur ailleurs.
+    let degrade = matches!(etat, EtatReseau::Connecte) && {
+        let q = crate::net::qualite_lien();
+        !q.duplex_complet || (q.vitesse_mbps != 0 && q.vitesse_mbps < 100)
+    };
+    let (couleur, couleur_texte) = match etat {
+        EtatReseau::Connecte if degrade => (
+            crate::gui::theme::COLOR_WARNING,
+            crate::gui::theme::COLOR_TEXT_PRIMARY,
+        ),
+        EtatReseau::Connecte => (
+            crate::gui::theme::COLOR_SUCCESS,
+            crate::gui::theme::COLOR_TEXT_PRIMARY,
+        ),
+        EtatReseau::Deconnecte => (
+            crate::gui::theme::COLOR_DANGER,
+            crate::gui::theme::COLOR_TEXT_SECONDARY,
+        ),
+        EtatReseau::SansCarte => (
+            crate::gui::theme::COLOR_BORDER,
+            crate::gui::theme::COLOR_TEXT_SECONDARY,
+        ),
+    };
+
+    let largeur_texte = fb::text_width(&libelle, CORPS_BARRE - 1.0, false);
+    let x_texte = droite.saturating_sub(largeur_texte);
+    let x_prise = x_texte.saturating_sub(LARGEUR_PRISE + 5);
+    // Centrer la prise sur la hauteur de la ligne de texte.
+    let y = ligne + (CORPS_BARRE as usize).saturating_sub(HAUTEUR_PRISE) / 2 + 1;
+
+    // Le corps de la prise : un rectangle plein, puis deux ergots en haut,
+    // comme un connecteur RJ45 vu de face.
+    fb::fill_rect_rgb(x_prise, y + 2, LARGEUR_PRISE, HAUTEUR_PRISE - 2, couleur);
+    fb::fill_rect_rgb(x_prise + 3, y, LARGEUR_PRISE - 6, 2, couleur);
+    // Les quatre contacts, creuses dans le corps.
+    let mut contact = 0usize;
+    while contact < 4 {
+        fb::fill_rect_rgb(
+            x_prise + 2 + contact * 3,
+            y + 4,
+            1,
+            HAUTEUR_PRISE - 6,
+            crate::gui::theme::COLOR_BACKGROUND,
+        );
+        contact += 1;
+    }
+    // Deconnecte : une barre oblique sur la prise, pour que l'etat se lise
+    // sans dependre de la couleur -- un ecran mal regle, ou un daltonien,
+    // doivent voir la difference.
+    if etat != EtatReseau::Connecte {
+        let mut pas = 0usize;
+        while pas < LARGEUR_PRISE {
+            let py = y + (pas * HAUTEUR_PRISE) / LARGEUR_PRISE;
+            fb::fill_rect_rgb(
+                x_prise + LARGEUR_PRISE - 1 - pas,
+                py,
+                2,
+                2,
+                crate::gui::theme::COLOR_TEXT_PRIMARY,
+            );
+            pas += 1;
+        }
+    }
+
+    fb::draw_text_prop(x_texte, ligne, &libelle, couleur_texte, CORPS_BARRE - 1.0, false);
+}
+
+/// Largeur totale occupee par l'indicateur reseau, libelle compris.
+///
+/// Le compositeur en a besoin pour invalider la bonne bande : l'indicateur
+/// change de largeur quand le nom du reseau change, et n'invalider que la
+/// largeur courante laisserait la trainee de l'ancien nom a l'ecran.
+pub fn largeur_reseau() -> usize {
+    let libelle = libelle_reseau(etat_reseau());
+    fb::text_width(&libelle, CORPS_BARRE - 1.0, false) + LARGEUR_PRISE + 5
 }
 
 fn sys_stats_str() -> String {
@@ -897,7 +1098,19 @@ pub(crate) fn draw_menu(mx: i32, my: i32) {
     // en surbrillance derriere le pointeur.
     let hover_row: Option<usize> = window::ligne_menu_survolee(mx, my);
 
-    let sep_idx = MENU.len() - 1; // index de "Quitter"
+    // LE SEPARATEUR SE DESIGNE PAR SON LIBELLE, PAS PAR SA POSITION.
+    //
+    // Il valait `MENU.len() - 1`, avec le commentaire « index de Quitter ».
+    // C'etait vrai quand Quitter fermait la liste ; l'ajout de Redemarrer et
+    // Eteindre l'a fait designer la derniere entree, et le trait a glisse d'un
+    // cran sans que rien ne le dise.
+    //
+    // La table le dit deja d'elle-meme : « le `kind` est explicite et non
+    // deduit de la position ». Le separateur suit la meme regle.
+    let sep_idx = MENU
+        .iter()
+        .position(|(libelle, _)| *libelle == "Quitter")
+        .unwrap_or(MENU.len());
     let bande = crate::gui::disposition::BANDE_ACCENT as usize;
 
     for (i, (item, _kind)) in MENU.iter().enumerate() {

@@ -9,6 +9,11 @@ pub const COLOR_DANGER:u32=0xe05252;
 // C13 : la jauge de chargement achevee. Un vert doit se distinguer de l'accent
 // sans crier : la barre reste visible quatre secondes apres la fin.
 pub const COLOR_SUCCESS:u32=0x3fb950;
+// Un etat qui FONCTIONNE MAL, par opposition a un etat qui ne fonctionne pas.
+// Un lien reseau monte a l'alternat, ou negocie a dix megabits sur un port
+// gigabit, n'est ni vert ni rouge : il marche, et il marche mal. Le peindre
+// comme un lien sain ferait chercher la lenteur ailleurs.
+pub const COLOR_WARNING:u32=0xd29922;
 pub const RADIUS_SM:u32=4; pub const RADIUS_MD:u32=7;
 pub const RADIUS_WINDOW:u32=crate::gui::windowing::WINDOW_RADIUS;
 pub const SPACE_4:u32=4; pub const SPACE_8:u32=8; pub const SPACE_12:u32=12; pub const SPACE_16:u32=16;

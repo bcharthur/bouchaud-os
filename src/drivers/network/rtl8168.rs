@@ -44,6 +44,171 @@ const TX_POLL_NPQ: u8 = 0x40;
 const CFG9346_UNLOCK: u8 = 0xC0;
 const CFG9346_LOCK: u8 = 0x00;
 const PHY_LINK_STATUS: u8 = 0x02;
+/// Bits de vitesse et de duplex du registre `PHYstatus` (0x6C).
+const PHY_DUPLEX_COMPLET: u8 = 0x01;
+const PHY_10M: u8 = 0x04;
+const PHY_100M: u8 = 0x08;
+const PHY_1000M: u8 = 0x10;
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_RTL8168_AUTONEGOCIATION_V1 : parler au PHY, et pas seulement le lire
+// ---------------------------------------------------------------------------
+//
+// Le pilote LISAIT `PHYstatus` et n'ecrivait jamais dans le PHY. Sur la
+// machine de reference, brancher le cable APRES le demarrage ne montait pas le
+// lien : le PHY restait dans l'etat ou la reinitialisation du controleur
+// l'avait laisse, sans autonegociation en cours, et le bit de lien ne montait
+// donc jamais.
+//
+// `PHYAR` (0x60) est la fenetre MDIO du controleur : bit 31 arme l'operation
+// (1 = ecriture), bits 16..20 le numero de registre, bits 0..15 la valeur.
+// Le controleur efface le bit 31 quand une ecriture est finie, et le pose
+// quand une lecture est prete.
+
+/// Fenetre MDIO du controleur.
+const REG_PHYAR: u32 = 0x60;
+/// Bit d'armement d'une ECRITURE dans `PHYAR`.
+const PHYAR_ECRITURE: u32 = 1 << 31;
+
+/// Registre de controle du PHY (BMCR, IEEE 802.3 clause 22).
+const MII_BMCR: u32 = 0x00;
+/// Ce que nous annonçons en 10/100 (ANAR).
+const MII_ANAR: u32 = 0x04;
+/// Ce que nous annonçons en gigabit (GBCR).
+const MII_GBCR: u32 = 0x09;
+
+/// BMCR : relancer l'autonegociation.
+const BMCR_RELANCE: u16 = 1 << 9;
+/// BMCR : autonegociation activee.
+const BMCR_AUTONEGOCIATION: u16 = 1 << 12;
+/// BMCR : PHY en veille. Un PHY endormi ne voit jamais le cable.
+const BMCR_VEILLE: u16 = 1 << 11;
+
+/// ANAR : 10/100, half et full, plus le selecteur 802.3.
+const ANAR_10_100: u16 = 0x01E1;
+/// GBCR : 1000 half et full.
+const GBCR_1000: u16 = 0x0300;
+
+/// Tours d'attente d'une operation MDIO.
+///
+/// Le manuel donne vingt microsecondes par acces ; mille tours de lecture d'un
+/// registre memoire mappe en couvrent largement plus, et la borne EXISTE pour
+/// qu'un controleur muet ne fige pas le demarrage.
+const MDIO_TOURS: usize = 20_000;
+
+unsafe fn mdio_ecrit(registre: u32, valeur: u16) -> bool {
+    write32(
+        REG_PHYAR,
+        PHYAR_ECRITURE | ((registre & 0x1f) << 16) | valeur as u32,
+    );
+    for _ in 0..MDIO_TOURS {
+        if read32(REG_PHYAR) & PHYAR_ECRITURE == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+unsafe fn mdio_lit(registre: u32) -> Option<u16> {
+    write32(REG_PHYAR, (registre & 0x1f) << 16);
+    for _ in 0..MDIO_TOURS {
+        let etat = read32(REG_PHYAR);
+        if etat & PHYAR_ECRITURE != 0 {
+            return Some((etat & 0xffff) as u16);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+/// Reveille le PHY et relance son autonegociation.
+///
+/// Sans elle, un cable branche apres le demarrage n'etait jamais vu : le lien
+/// ne monte que si les deux extremites negocient, et personne ne le demandait
+/// de ce cote.
+unsafe fn relance_autonegociation() -> bool {
+    let Some(bmcr) = mdio_lit(MII_BMCR) else {
+        crate::serial_println!("BOUCHAUD_TRIGKEY_RTL8168_MDIO_MUET");
+        return false;
+    };
+    // Un PHY en veille ne voit pas le cable, quoi qu'on lui annonce ensuite.
+    if bmcr & BMCR_VEILLE != 0 {
+        let _ = mdio_ecrit(MII_BMCR, bmcr & !BMCR_VEILLE);
+    }
+    let _ = mdio_ecrit(MII_ANAR, ANAR_10_100);
+    let _ = mdio_ecrit(MII_GBCR, GBCR_1000);
+    let ok = mdio_ecrit(MII_BMCR, BMCR_AUTONEGOCIATION | BMCR_RELANCE);
+    crate::serial_println!(
+        "BOUCHAUD_TRIGKEY_RTL8168_AUTONEG bmcr_avant={:#06x} relance={}",
+        bmcr,
+        ok as u8,
+    );
+    ok
+}
+
+/// Relance l'autonegociation depuis l'exterieur du pilote.
+///
+/// Le veilleur de lien s'en sert quand le lien est bas depuis un moment : un
+/// cable qu'on vient de brancher demande une negociation, et la demander deux
+/// fois ne coute que quatre acces MDIO.
+pub fn reveille_le_lien() -> bool {
+    unsafe {
+        if !READY {
+            return false;
+        }
+        relance_autonegociation()
+    }
+}
+
+/// Vitesse negociee, en megabits par seconde. Zero si le lien est bas.
+pub fn vitesse_mbps() -> u32 {
+    unsafe {
+        if !READY {
+            return 0;
+        }
+        let etat = read8(REG_PHY_STATUS);
+        if etat & PHY_LINK_STATUS == 0 {
+            return 0;
+        }
+        if etat & PHY_1000M != 0 {
+            1000
+        } else if etat & PHY_100M != 0 {
+            100
+        } else if etat & PHY_10M != 0 {
+            10
+        } else {
+            0
+        }
+    }
+}
+
+/// Le lien est-il en duplex integral ?
+///
+/// Un lien a l'alternat (half duplex) sur du cuivre moderne signale presque
+/// toujours une negociation ratee d'un cote : les collisions y divisent le
+/// debit utile. C'est un signe de QUALITE, pas seulement de vitesse.
+pub fn duplex_complet() -> bool {
+    unsafe {
+        READY
+            && read8(REG_PHY_STATUS) & PHY_LINK_STATUS != 0
+            && read8(REG_PHY_STATUS) & PHY_DUPLEX_COMPLET != 0
+    }
+}
+
+/// Trames que la carte a laissees tomber faute de tampon libre.
+///
+/// Compteur materiel `RxMissed` (0x4C). Il ne bouge pas sur un reseau sain ;
+/// s'il monte, le systeme ne relit pas assez vite et des paquets sont perdus
+/// avant meme d'atteindre la pile.
+pub fn trames_perdues() -> u32 {
+    unsafe {
+        if !READY {
+            return 0;
+        }
+        read32(REG_RX_MISSED)
+    }
+}
 
 const ACCEPT_BROADCAST: u32 = 0x08;
 const ACCEPT_MULTICAST: u32 = 0x04;
@@ -60,6 +225,26 @@ const DESC_FS: u32 = 1 << 29;
 const DESC_LS: u32 = 1 << 28;
 const DESC_RX_ERROR: u32 = (1 << 22) | (1 << 21) | (1 << 20) | (1 << 19);
 const DESC_LEN_MASK: u32 = 0x3FFF;
+
+/// Longueur minimale d'une trame Ethernet, FCS exclu (IEEE 802.3).
+///
+/// # LA TRAME LA PLUS COURTE QU'ON EMET EST CELLE QUI ECHOUAIT
+///
+/// Une requete ARP fait 14 + 28 = 42 octets. La norme exige 60 octets avant
+/// le FCS : en dessous, la trame est un « runt » que le commutateur d'en face
+/// jette. Le bourrage n'etait fait ni ici ni par l'appelant, et il n'est pas
+/// garanti par le controleur -- le pilote r8169 de Linux appelle
+/// `skb_padto(skb, ETH_ZLEN)` avant d'armer le descripteur, precisement parce
+/// qu'on ne peut pas compter dessus.
+///
+/// Le releve du 13 septembre montre exactement cette signature : DHCP, qui
+/// est en diffusion mais fait plus de trois cents octets, fonctionne et pose
+/// le bail ; ARP, qui fait quarante-deux octets, n'obtient jamais de reponse ;
+/// et tout l'unicast -- donc toute requete DNS, donc toute page -- echoue
+/// derriere lui avec `parti=false`.
+///
+/// C'est la seule trame de moins de soixante octets que la pile emette.
+const TRAME_MIN: usize = 60;
 
 const N_RX: usize = 64;
 const N_TX: usize = 16;
@@ -80,6 +265,8 @@ static mut TX_BUFFER_P: u64 = 0;
 static mut RX_CUR: usize = 0;
 static mut TX_CUR: usize = 0;
 static mut TX_RING_FULL: u64 = 0;
+/// Trames jetees parce que le controleur les a marquees en erreur.
+static mut RX_ABIMEES: u64 = 0;
 
 #[inline]
 unsafe fn read8(offset: u32) -> u8 {
@@ -158,6 +345,11 @@ pub fn mac() -> [u8; 6] {
 
 pub fn tx_anneau_plein() -> u64 {
     unsafe { TX_RING_FULL }
+}
+
+/// Trames recues en erreur et jetees par le pilote.
+pub fn rx_abimees() -> u64 {
+    unsafe { RX_ABIMEES }
 }
 
 pub fn init_with_device(device: &PciDevice) -> bool {
@@ -334,6 +526,12 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         "BOUCHAUD_TRIGKEY_RTL8168_DRIVER_OK mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         m[0], m[1], m[2], m[3], m[4], m[5],
     );
+    // LE PHY D'ABORD, L'ATTENTE ENSUITE.
+    //
+    // Attendre un lien sans avoir demande de negociation, c'est attendre pour
+    // rien : le lien ne monte que si les deux extremites negocient.
+    unsafe { relance_autonegociation(); }
+
     // Une autonegociation cuivre gigabit prend couramment plus d'une seconde.
     // `net::demarre()` teste le lien juste apres `init()`, donc on lui laisse
     // une fenetre BORNEE avant de conclure que le cable est debranche.
@@ -360,7 +558,11 @@ pub fn init_with_device(device: &PciDevice) -> bool {
     }
 
     if link_up() {
-        crate::serial_println!("BOUCHAUD_TRIGKEY_RTL8168_LINK_UP");
+        crate::serial_println!(
+            "BOUCHAUD_TRIGKEY_RTL8168_LINK_UP vitesse_mbps={} duplex={}",
+            vitesse_mbps(),
+            if duplex_complet() { "complet" } else { "alternat" },
+        );
     } else {
         crate::serial_println!("BOUCHAUD_TRIGKEY_RTL8168_LINK_DOWN");
     }
@@ -390,6 +592,13 @@ pub fn send(frame: &[u8]) -> bool {
 
         let destination = TX_BUFFER_V.add(index * BUF_SIZE);
         core::ptr::copy_nonoverlapping(frame.as_ptr(), destination, frame.len());
+        // Bourrage a soixante octets : voir `TRAME_MIN`. Des zeros, parce que
+        // le contenu du remplissage n'a pas de sens et ne doit pas laisser
+        // filtrer ce que le tampon DMA contenait au tour precedent.
+        let longueur = frame.len().max(TRAME_MIN).min(BUF_SIZE);
+        if longueur > frame.len() {
+            core::ptr::write_bytes(destination.add(frame.len()), 0, longueur - frame.len());
+        }
 
         let eor = if index + 1 == N_TX { DESC_EOR } else { 0 };
         desc_write64(
@@ -404,7 +613,7 @@ pub fn send(frame: &[u8]) -> bool {
             TX_RING,
             index,
             0,
-            DESC_OWN | DESC_FS | DESC_LS | eor | frame.len() as u32,
+            DESC_OWN | DESC_FS | DESC_LS | eor | longueur as u32,
         );
         compiler_fence(Ordering::Release);
         write8(REG_TX_POLL, TX_POLL_NPQ);
@@ -413,43 +622,68 @@ pub fn send(frame: &[u8]) -> bool {
     }
 }
 
+/// Retire une trame de l'anneau de reception.
+///
+/// # `None` veut dire « plus rien », et seulement cela
+///
+/// La premiere version rendait `None` dans DEUX cas differents : l'anneau est
+/// vide, et la trame lue est abimee. Or tous les appelants lisent `None` comme
+/// « plus rien a lire » et arretent leur drainage : une seule trame en erreur
+/// -- une collision, un cable en cours de branchement -- suspendait donc la
+/// lecture de tout ce qui la suivait dans l'anneau jusqu'au passage suivant.
+/// Sur une resolution ARP, qui ecoute une fenetre bornee, cela suffit a perdre
+/// la reponse et a conclure que le voisin est muet.
+///
+/// La trame abimee est desormais jetee ICI, sans rendre la main : la boucle
+/// continue jusqu'a une trame bonne ou un anneau reellement vide. Elle est
+/// comptee, parce qu'un compteur qui monte dit quelque chose du cable.
 pub fn receive(out: &mut [u8]) -> Option<usize> {
     unsafe {
         if !READY {
             return None;
         }
 
-        let index = RX_CUR;
-        let status = desc_read32(RX_RING, index, 0);
-        if status & DESC_OWN != 0 {
-            return None;
+        // Bornee par la taille de l'anneau : on ne peut pas jeter plus de
+        // trames qu'il n'en contient, et la borne EXISTE pour qu'un anneau
+        // entierement abime ne retienne pas l'appelant.
+        for _ in 0..N_RX {
+            let index = RX_CUR;
+            let status = desc_read32(RX_RING, index, 0);
+            if status & DESC_OWN != 0 {
+                return None;
+            }
+
+            compiler_fence(Ordering::Acquire);
+            let raw_len = (status & DESC_LEN_MASK) as usize;
+            let good = status & DESC_RX_ERROR == 0 && raw_len >= 4 && raw_len <= BUF_SIZE;
+            let payload_len = raw_len.saturating_sub(4); // RTL8168 livre aussi le FCS.
+            let copied = if good {
+                let n = payload_len.min(out.len());
+                let source = RX_BUFFER_V.add(index * BUF_SIZE);
+                core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
+                Some(n)
+            } else {
+                RX_ABIMEES = RX_ABIMEES.saturating_add(1);
+                None
+            };
+
+            let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
+            desc_write64(
+                RX_RING,
+                index,
+                8,
+                RX_BUFFER_P + (index * BUF_SIZE) as u64,
+            );
+            desc_write32(RX_RING, index, 4, 0);
+            compiler_fence(Ordering::Release);
+            desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
+            RX_CUR = (index + 1) % N_RX;
+
+            if let Some(n) = copied {
+                return Some(n);
+            }
         }
-
-        compiler_fence(Ordering::Acquire);
-        let raw_len = (status & DESC_LEN_MASK) as usize;
-        let good = status & DESC_RX_ERROR == 0 && raw_len >= 4 && raw_len <= BUF_SIZE;
-        let payload_len = raw_len.saturating_sub(4); // RTL8168 livre aussi le FCS.
-        let copied = if good {
-            let n = payload_len.min(out.len());
-            let source = RX_BUFFER_V.add(index * BUF_SIZE);
-            core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
-            Some(n)
-        } else {
-            None
-        };
-
-        let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
-        desc_write64(
-            RX_RING,
-            index,
-            8,
-            RX_BUFFER_P + (index * BUF_SIZE) as u64,
-        );
-        desc_write32(RX_RING, index, 4, 0);
-        compiler_fence(Ordering::Release);
-        desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
-        RX_CUR = (index + 1) % N_RX;
-        copied
+        None
     }
 }
 

@@ -4,7 +4,14 @@ import py_compile, re, sys
 root=Path(__file__).resolve().parents[2]
 required={
     "src/gui/frame_clock.rs":["[FRAME-PERF]","useful_gap_max_ms","fps_arrondi"],
-    "src/gui/widgets_v15.rs":["FPS:{:3}","legacy::draw_barre_haute"],
+    # Le compteur de trames a quitte la facade pour la mise en page UNIQUE de
+    # la barre du haut. Il y etait repose par-dessus, a une marge droite ecrite
+    # en dur, et tout element ajoute a droite finissait dessous : la photo du
+    # 12 septembre montre « FPS: 0 necte 17:58:53 », soit la fin de
+    # « Deconnecte » recouverte par le compteur. La facade ne doit donc plus
+    # rien peindre elle-meme -- c'est ce que la seconde entree verifie.
+    "src/gui/widgets.rs":["FPS:{:3}","frame_clock::snapshot()"],
+    "src/gui/widgets_v15.rs":["legacy::draw_barre_haute"],
     "src/gui/mod.rs":["widgets_v15.rs","pub mod frame_clock"],
     "src/kernel/debug/journal.rs":["[FPS:","trames utiles"],
     "tools/ladybird/chrome/modernise-v15.py":["draw_browser_text","draw_svg_icon","BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING","target_link_libraries(webcontentservice PRIVATE skia)"],

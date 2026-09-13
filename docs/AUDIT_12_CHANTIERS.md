@@ -37,8 +37,8 @@ lui fait confiance.
 | Appels hors gros verrou | **81** |
 | Appels encore sous gros verrou | **78** |
 | Fichiers portant un point sur de preemption | **4** |
-| Garde-fous d'architecture | **60** |
-| Suites de test hote | **67** |
+| Garde-fous d'architecture | **72** |
+| Suites de test hote | **69** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
@@ -168,11 +168,26 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   sont sortis en fonctions d'une ligne pour qu'aucune garde ne vive a travers
   une attente ; les verrous des files et du suivi ne sont jamais tenus
   ensemble, pour ne pas creer d'arete d'ordre.
+* **Interblocage ferme ce lot** : `registre.rs` — le rendez-vous de quiescence
+  du registre des taches est a priorite ecrivain, et se refermait sur lui-meme
+  des qu'un lecteur en prenait un SECOND en tenant deja le premier. Le scenario
+  `nvme-parallele` gelait une fois sur deux, au passage qui recycle
+  l'emplacement d'une tache morte. Les registres pris au moniteur QEMU nomment
+  les quatre coeurs : `RegistreEcriture::acquire` sur le coeur zero, IRQ
+  masquees, `RegistreLecture::acquire` sur les trois autres. Le garde de
+  lecture est desormais REENTRANT par coeur ; l'imbrication etait structurelle
+  (`wake_sleepers` → `publish_ready`, `preempt_from_irq` →
+  `registre_pointeur_ordonnanceur`) et la fermer site par site aurait ete a
+  refaire a chaque nouvel appelant.
 * **Preuve d'execution** : `QEMU_SMOKE_OK`, lockdep a zero violation sur
-  quatre coeurs.
-* **Test** : `test_nvme_suivi.rs` (23 cas) ; `verifie-ordre-verrous.py`,
-  `verifie-rangs-verrous.py`, `verifie-nvme.py` (regle « emet_es ne prend
-  aucun verrou », NON assouplie ce lot).
+  quatre coeurs ; `nvme-parallele` rend ses trois verdicts six essais sur six,
+  contre un sur deux avant le correctif.
+* **Test** : `test_nvme_suivi.rs` (23 cas) ; `test_registre.rs` — deux cas
+  ajoutes, dont `le_recyclage_survit_a_une_lecture_imbriquee`, qui NE TERMINE
+  PAS sans le correctif (falsifie : echec sur son echeance de dix secondes) ;
+  `verifie-ordre-verrous.py`, `verifie-rangs-verrous.py`, `verifie-nvme.py`
+  (regle « emet_es ne prend aucun verrou », NON assouplie ce lot),
+  `verifie-registre-lecture-reentrante.py` (six mutations, toutes attrapees).
 * **Mesure** : 159 appels systeme aiguilles, **81 hors gros verrou**, 78
   encore dessous.
 * **Ce qui manque** : sockets, `openat`/coeur FS, `ioctl`, signaux, `clone`,
@@ -193,8 +208,19 @@ branche : le materiel n'a pas ete sollicite depuis le checkpoint.
   `verifie-ordonnanceur-sans-bkl.py`, `verifie-preemption.py`.
 * **Mesure** : 4 fichiers portant un point sur de preemption ; quantum 4 ms,
   4 coeurs, vol de travail actif (`SMP_NG2_SCHEDULER`).
+* **Defaut introduit et corrige dans ce lot** : le vecteur de reschedule
+  echantillonnait le temps processeur SANS garde d'inactivite. Tant qu'il ne
+  servait qu'aux IPI, c'etait sans consequence ; depuis que le timer local y
+  tire a chaque quantum, il imputait un quantum entier a la tache endormie sur
+  un coeur arrete. `dns-probe` CAS 3 le mesure en comparant deux horloges :
+  `cpu_ms=5025` pour `mur_ms=5002`. C'est la barriere GitHub qui l'a attrape,
+  pas la barriere locale -- le scenario DNS n'etait pas dans le balayage que je
+  faisais ici. Corrige, garde par `verifie-timer-par-coeur.py` (deux mutations,
+  deux attrapees).
 * **Ce qui manque** : preemption depuis l'IRQ seulement, pas de points surs,
-  pas de tickless. Aucune mesure de latence reveil→execution. Le defaut
+  pas de tickless -- et le tickless a maintenant un COUT MESURE : un coeur au
+  repos se reveille a chaque quantum, et une attente bloquante de cinq secondes
+  consomme ~350 ms de processeur contre 1 ms au PIT seul. Le defaut
   d'epinglage des taches noyau historiques n'a PAS ete change : seules les
   taches de fond se declarent migrables.
 

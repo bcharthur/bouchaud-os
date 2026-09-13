@@ -169,9 +169,18 @@ def regle_rapports_non_perdus(xhci, fautes):
     croisement etait evite en armant les extremites plus tard -- le branchement
     a chaud rend le croisement NORMAL, et cette parade ne marche plus.
     """
-    bloc = corps(xhci, "fn wait_event(")
+    # LA REGLE SUIT LE CORPS, PAS LE NOM.
+    #
+    # `wait_event` n'est plus qu'une enveloppe qui fixe le budget par defaut :
+    # l'attente elle-meme vit dans `wait_event_budget`, depuis que le chemin de
+    # scrutation a recu son propre budget court. Chercher l'invariant dans
+    # l'enveloppe le declarait absent alors qu'il avait seulement demenage --
+    # et une regle qui accuse a tort finit par etre eteinte.
+    bloc = corps(xhci, "fn wait_event_budget(")
     if bloc is None:
-        fautes.append("xhci_active.rs : wait_event a disparu.")
+        bloc = corps(xhci, "fn wait_event(")
+    if bloc is None:
+        fautes.append("xhci_active.rs : l'attente d'evenement a disparu.")
         return
     if "differe(controller, event)" not in bloc:
         fautes.append(
@@ -202,7 +211,35 @@ def regle_rapports_non_perdus(xhci, fautes):
     poll = corps(xhci, "pub fn poll()")
     if poll is None:
         return
-    if "differes_len" not in poll:
+    vidage = corps(xhci, "fn traite_differes(")
+    if vidage is None:
+        fautes.append(
+            "xhci_active.rs : `traite_differes` a disparu. Les evenements mis "
+            "de cote s'accumuleraient jusqu'a saturer le tampon, et toutes "
+            "les frappes suivantes seraient perdues."
+        )
+    else:
+        if "differes_len = 0" not in vidage:
+            fautes.append(
+                "xhci_active.rs : `traite_differes` ne VIDE plus la file ; "
+                "chaque tour rejouerait les memes rapports."
+            )
+        if "process_hid_event" not in vidage:
+            fautes.append(
+                "xhci_active.rs : `traite_differes` ne traite plus les "
+                "evenements mis de cote, il se contente de les jeter."
+            )
+        # L'ORDRE D'ARRIVEE, dans le vidage lui-meme : deux frappes traitees a
+        # l'envers, c'est une touche relachee avant d'etre appuyee, donc une
+        # touche qui reste enfoncee.
+        if "for index in 0..differes" not in vidage:
+            fautes.append(
+                "xhci_active.rs : `traite_differes` ne parcourt plus la file "
+                "du plus ancien au plus recent ; l'ordre des frappes "
+                "s'inverse, et une touche relachee avant d'etre appuyee reste "
+                "enfoncee."
+            )
+    if "traite_differes(controller)" not in poll:
         fautes.append(
             "xhci_active.rs : poll() ne vide plus les evenements mis de cote ; "
             "ils s'accumuleraient jusqu'a saturer le tampon, et toutes les "
@@ -210,9 +247,8 @@ def regle_rapports_non_perdus(xhci, fautes):
         )
     else:
         # L'ORDRE : les differes sont ARRIVES AVANT ceux de l'anneau. Les
-        # traiter apres inverserait les frappes, et une touche relachee avant
-        # d'etre appuyee reste enfoncee.
-        avant = poll.find("differes_len")
+        # traiter apres inverserait les frappes.
+        avant = poll.find("traite_differes(controller)")
         apres = poll.find("next_event(controller)")
         if avant < 0 or apres < 0 or avant > apres:
             fautes.append(

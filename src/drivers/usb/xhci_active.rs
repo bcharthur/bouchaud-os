@@ -110,7 +110,46 @@ const EVENEMENTS_DIFFERES: usize = 16;
 /// boucle de dessin. En faire plusieurs d'affilee ferait sauter l'image.
 const BRANCHEMENTS_PAR_TOUR: usize = 1;
 const MAX_RUNTIME_DEVICES: usize = 32;
-const WAIT_SPINS: usize = 30_000_000;
+// UNE ATTENTE SE BORNE EN TEMPS, PAS EN NOMBRE DE TOURS.
+//
+// # Ce que trente millions de tours coutaient sur la machine de reference
+//
+// `WAIT_SPINS` valait 30 000 000. Un tour est une instruction `pause`, qui
+// coute une trentaine de cycles sur un Zen 3 : l'attente complete valait donc
+// environ un milliard de cycles, soit **330 ms** sur le Ryzen 7 5800H du
+// TRIGKEY a 3,194 GHz.
+//
+// Ce n'etait pas theorique. `poll_control_fallback` emet un `GET_REPORT` sur
+// EP0, un tour sur deux, pour CHAQUE point de terminaison muet en
+// Interrupt-IN. Le recepteur Logitech du TRIGKEY expose une interface
+// vendeur (`if=2 subclass=0 protocol=0`) qui n'a aucune raison d'y repondre :
+// une attente non aboutie par tour de scrutation.
+//
+// L'enregistreur de vol mesure le resultat sans interpretation :
+//
+//     hid polls=3.19/s     une scrutation toutes les 313 ms
+//     330 ms attendus, 313 ms mesures
+//
+// Tout ce qui depend de l'entree -- le pointeur, les frappes, et le
+// compositeur qui n'est reveille que par elles -- avancait donc a 3 Hz. C'est
+// ce que « inutilisable » voulait dire.
+//
+// # Pourquoi le temps et non les tours
+//
+// Un compte de tours ne dit rien : la meme constante vaut 30 ms sur une
+// machine et 330 ms sur une autre, selon le cout d'un `pause`. Une borne en
+// nanosecondes vaut ce qu'elle annonce, partout.
+//
+// Deux budgets, parce que deux usages :
+//
+//   * l'enumeration et les commandes du controleur sont rares et doivent
+//     tolerer un peripherique lent ;
+//   * la scrutation tourne mille fois par seconde et ne doit RIEN tolerer :
+//     un peripherique HID repond a `GET_REPORT` en quelques microsecondes, et
+//     celui qui ne repond pas en quatre millisecondes ne repondra pas.
+const BUDGET_ATTENTE_NS: u64 = 500_000_000;
+/// Budget d'une attente sur le chemin de scrutation. Voir ci-dessus.
+const BUDGET_SCRUTATION_NS: u64 = 4_000_000;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTED: AtomicUsize = AtomicUsize::new(0);
@@ -168,6 +207,24 @@ static CONCENTRATEURS_ECHOUES: AtomicUsize = AtomicUsize::new(0);
 static PERIPHERIQUES_DERRIERE: AtomicUsize = AtomicUsize::new(0);
 /// Evenements qu'on n'a pas pu mettre de cote -- donc des frappes perdues.
 static EVENEMENTS_PERDUS: AtomicUsize = AtomicUsize::new(0);
+/// Reprises tentees par le chien de garde des points HID.
+static HID_REPRISES: AtomicUsize = AtomicUsize::new(0);
+/// Reprises qui ont effectivement repose un TD.
+static HID_REPRISES_REUSSIES: AtomicUsize = AtomicUsize::new(0);
+/// Points dont le transport Interrupt-IN a ete declare hors service.
+static HID_TRANSPORTS_CASSES: AtomicUsize = AtomicUsize::new(0);
+
+/// Ce que le chien de garde des points HID a fait.
+///
+/// `(reprises, reussies, transports_hors_service, evenements_perdus)`.
+pub fn chien_de_garde_hid() -> (usize, usize, usize, usize) {
+    (
+        HID_REPRISES.load(Ordering::Relaxed),
+        HID_REPRISES_REUSSIES.load(Ordering::Relaxed),
+        HID_TRANSPORTS_CASSES.load(Ordering::Relaxed),
+        EVENEMENTS_PERDUS.load(Ordering::Relaxed),
+    )
+}
 /// Peripheriques branches apres le demarrage.
 static BRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
 /// Peripheriques debranches apres le demarrage.
@@ -175,6 +232,12 @@ static DEBRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_POLLS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
+/// Code d'achevement du DERNIER transfert de controle echoue.
+///
+/// Sans lui, le repli ne peut pas distinguer « ce transfert n'est pas passe »
+/// de « ce peripherique ne repondra jamais » -- et il appliquait la meme peine
+/// aux deux.
+static DERNIER_CODE_CONTROLE: AtomicUsize = AtomicUsize::new(0);
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_BUSY: AtomicBool = AtomicBool::new(false);
 static mut RUNTIME: Option<Runtime> = None;
@@ -252,6 +315,12 @@ struct HidDescriptor {
     subclass: u8,
     protocol: u8,
     kind: u8, // 1 keyboard, 2 mouse, 0 unknown HID
+    /// Le descripteur de RAPPORT de cette interface a-t-il ete lu et classe ?
+    ///
+    /// Il fait autorite : il enumere les usages que l'interface publie. Quand
+    /// il a parle, le repli aveugle de `install_hid_endpoints` n'a plus rien
+    /// a deviner -- et surtout, il ne doit PAS contredire ce qu'il dit.
+    classe_par_rapport: bool,
     report_len: u16,
     report_id: u8,
     endpoint_address: u8,
@@ -264,6 +333,7 @@ const EMPTY_HID_DESCRIPTOR: HidDescriptor = HidDescriptor {
     subclass: 0,
     protocol: 0,
     kind: 0,
+    classe_par_rapport: false,
     report_len: 0,
     report_id: 0,
     endpoint_address: 0,
@@ -279,6 +349,12 @@ struct HidEndpoint {
     interface: u8,
     protocol: u8,
     kind: u8,
+    /// Source de boutons reservee a CE point de terminaison, ou `usize::MAX`.
+    ///
+    /// L'etat global des boutons est l'union des sources : sans identite
+    /// propre, un rapport « rien d'enfonce » d'une interface au repos effacait
+    /// le bouton maintenu sur une autre. Voir `mouse/etat.rs`.
+    source_souris: usize,
     report_id: u8,
     max_packet: u16,
     ring: ProducerRing,
@@ -287,6 +363,99 @@ struct HidEndpoint {
     buffer_len: usize,
     /// L'etat du clavier entre deux rapports, tenu par le decodeur pur.
     clavier: hid::EtatClavier,
+    /// Evenements de transfert recus par CE point de terminaison.
+    ///
+    /// # Pourquoi il ne peut pas etre global
+    ///
+    /// Le compteur l'etait, et le repli EP0 s'eteignait des qu'UN periphérique
+    /// produisait un evenement. Sur la machine de reference, la souris en a
+    /// produit 556 et le clavier 6 : la souris coupait le repli, et le
+    /// clavier -- muet en Interrupt-IN -- se retrouvait sans aucun transport.
+    ///
+    /// Un compteur par point de terminaison fait exactement l'inverse de
+    /// masquer le probleme : il NOMME le peripherique qui ne repond pas, au
+    /// lieu de laisser croire que tout va bien parce qu'un autre repond.
+    evenements: u32,
+    /// Instant ou ce point a ete arme pour la premiere fois.
+    ///
+    /// Le repli EP0 lui laisse un DELAI DE GRACE : un point qui vient d'etre
+    /// arme n'a pas encore eu l'occasion de produire un evenement, et le
+    /// doubler d'un `GET_REPORT` synchrone le condamnerait au pont avant
+    /// meme de l'avoir essaye. L'ancien code exprimait la meme idee par un
+    /// compteur global de tours (`poll_no < 32`), qui ne disait rien d'un
+    /// peripherique branche a chaud une minute apres le demarrage.
+    arme_depuis_ns: u64,
+    /// Echecs consecutifs du repli EP0 sur CE point de terminaison.
+    echecs_repli: u8,
+    /// L'entree en quarantaine de ce point a-t-elle deja ete annoncee ?
+    ///
+    /// La quarantaine se REPOSE a chaque reprise ratee ; l'annoncer a chaque
+    /// fois reviendrait a inonder le journal pour dire ce qui n'a pas change.
+    quarantaine_annoncee: bool,
+    /// Instant du dernier evenement de transfert recu sur ce point.
+    ///
+    /// # LE DEFAUT QUE CE CHAMP NOMME
+    ///
+    /// Releve du 13 septembre 11:24 : la souris produit 692 evenements
+    /// Interrupt-IN entre la sixieme et la dix-neuvieme seconde, puis PLUS
+    /// RIEN -- pendant les dix-neuf secondes que l'enregistreur couvre encore,
+    /// et pendant les quatre minutes d'utilisation qui ont suivi. Le pointeur
+    /// etait mort, et l'utilisateur n'a meme pas pu cliquer sur « eteindre ».
+    ///
+    /// Personne ne venait a son secours : le pont EP0 ne s'occupe QUE des
+    /// points qui n'ont jamais parle (`evenements == 0`), et un point qui a
+    /// parle puis s'est tu n'entrait dans aucun cas. La cloche de relance --
+    /// un coup de sonnette tous les cent vingt-huit tours -- etait bien tiree,
+    /// `kicks` le montre, et elle ne ramenait rien : une sonnette ne reveille
+    /// pas un point de terminaison ARRETE.
+    dernier_evenement_ns: u64,
+    /// Reprises tentees par le chien de garde depuis le dernier evenement.
+    reprises_silence: u8,
+    /// Le transport Interrupt-IN de ce point est-il declare hors service ?
+    ///
+    /// Pose par le chien de garde quand ses reprises ont echoue, efface des
+    /// que le point reparle. C'est ce drapeau qui autorise le pont EP0 a
+    /// prendre le relais d'un point qui FONCTIONNAIT : sans lui, le pont
+    /// refusait d'aider precisement le peripherique qui avait prouve qu'il
+    /// marchait.
+    interrupt_in_casse: bool,
+    /// Periode declaree par le peripherique pour ce point, en nanosecondes.
+    ///
+    /// # Pourquoi le pont doit la RESPECTER
+    ///
+    /// Un point de terminaison Interrupt-IN annonce `bInterval` : la cadence a
+    /// laquelle il a QUELQUE CHOSE a dire. Une souris USB pleine vitesse
+    /// annonce couramment 8 ou 10 ms, un clavier 10 ms. L'interroger plus vite
+    /// que cela ne produit pas un rapport de plus : cela repaie un transfert
+    /// de controle synchrone, verrou du pilote tenu, pour relire le meme
+    /// rapport.
+    ///
+    /// Le releve du 13 septembre 00:36 le chiffre : `repli_tours=79632
+    /// repli_servis=79357`, soit 99,7 % des tours « servis », et
+    /// `usb-repli cpu_pct=39..44`. Le pont tournait a la milliseconde pour un
+    /// peripherique qui parle a 125 Hz -- huit fois trop --, et cette
+    /// contention sur le verrou du pilote est exactement ce qui se sent comme
+    /// une souris qui traine.
+    ///
+    /// La pause d'oisivete ne pouvait pas corriger cela : un point QUI REPOND
+    /// est un point servi, donc jamais oisif.
+    periode_repli_ns: u64,
+    /// Instant du prochain `GET_REPORT` autorise sur ce point.
+    prochain_repli_ns: u64,
+    /// Instant avant lequel le repli ne sera pas retente sur ce point.
+    ///
+    /// # Pourquoi une quarantaine, et pas un simple compteur
+    ///
+    /// Un point de terminaison qui ne repond pas a `GET_REPORT` ne va pas se
+    /// mettre a repondre au tour suivant. Le redemander mille fois par seconde
+    /// ne le reveille pas : cela paie son echeance mille fois par seconde, et
+    /// c'est tout le systeme qui ralentit -- le recepteur Logitech du TRIGKEY
+    /// expose une interface vendeur qui n'a jamais eu de raison de repondre.
+    ///
+    /// Le repli reste un pont de compatibilite : il est RETENTE, mais une fois
+    /// par seconde, pas cinq cents. Un peripherique qui se met a repondre est
+    /// donc repris, et celui qui reste muet ne coute plus rien.
+    repli_muet_jusqu_a_ns: u64,
 }
 
 const EMPTY_RING: ProducerRing = ProducerRing {
@@ -297,12 +466,23 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 };
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
+    arme_depuis_ns: 0,
+    dernier_evenement_ns: 0,
+    reprises_silence: 0,
+    interrupt_in_casse: false,
+    echecs_repli: 0,
+    quarantaine_annoncee: false,
+    periode_repli_ns: PERIODE_REPLI_DEFAUT_NS,
+    prochain_repli_ns: 0,
+    repli_muet_jusqu_a_ns: 0,
+    evenements: 0,
     active: false,
     slot_id: 0,
     dci: 0,
     interface: 0,
     protocol: 0,
     kind: 0,
+    source_souris: usize::MAX,
     report_id: 0,
     max_packet: 0,
     ring: EMPTY_RING,
@@ -557,13 +737,23 @@ unsafe fn w64(base: usize, off: usize, value: u64) {
 }
 
 fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
-    for _ in 0..WAIT_SPINS {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut tours = 0u32;
+    loop {
         if predicate() {
             return true;
         }
+        tours = tours.wrapping_add(1);
+        // L'horloge se relit tous les 256 tours. La lire a chaque tour
+        // couterait plus cher que l'attente qu'elle borne.
+        if tours & 0xff == 0
+            && crate::kernel::timer::monotonic_ns().saturating_sub(debut)
+                >= BUDGET_ATTENTE_NS
+        {
+            return false;
+        }
         core::hint::spin_loop();
     }
-    false
 }
 
 fn wait_ms(ms: u64) {
@@ -807,8 +997,40 @@ fn differe(controller: &mut Controller, event: Trb) {
     controller.differes_len = index + 1;
 }
 
+/// Traite et vide la file des evenements mis de cote, dans l'ordre d'arrivee.
+///
+/// L'ORDRE EST LA RAISON D'ETRE DE LA FILE : deux frappes traitees a l'envers,
+/// c'est une touche relachee avant d'etre appuyee, donc une touche qui reste
+/// enfoncee. Elle est donc videe du plus ancien au plus recent, et jamais
+/// partiellement.
+fn traite_differes(controller: &mut Controller) {
+    let differes = controller.differes_len;
+    controller.differes_len = 0;
+    for index in 0..differes {
+        let event = controller.differes[index];
+        process_hid_event(controller, event);
+    }
+}
+
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
-    for _ in 0..WAIT_SPINS {
+    wait_event_budget(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
+}
+
+/// Attend un evenement, au plus `budget_ns`.
+///
+/// Le budget est un ARGUMENT et non une constante : le chemin de scrutation
+/// n'a pas la meme patience que l'enumeration, et confondre les deux est
+/// exactement ce qui rendait la machine de reference inutilisable.
+fn wait_event_budget(
+    controller: &mut Controller,
+    wanted_type: u32,
+    slot: Option<u8>,
+    dci: Option<u8>,
+    budget_ns: u64,
+) -> Option<Trb> {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut tours = 0u32;
+    loop {
         if let Some(event) = next_event(controller) {
             let ty = trb_type(event.control);
             if ty == EVT_PORT_STATUS_CHANGE {
@@ -830,11 +1052,38 @@ fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, d
             // FRAPPE. Le jeter la perd, et rien ne le dit.
             if ty == EVT_TRANSFER {
                 differe(controller, event);
+                // BOUCHAUD_USB_ENTREE_PENDANT_STOCKAGE_V1
+                //
+                // ET IL N'EST PAS NON PLUS A FAIRE ATTENDRE.
+                //
+                // Mis de cote, ce rapport n'etait traite qu'au tour de
+                // scrutation SUIVANT -- c'est-a-dire une fois le verrou du
+                // pilote rendu. Or une commande de stockage tient ce verrou
+                // pendant trois transferts et deux attentes, chacune bornee a
+                // un demi-seconde : une cle qui repond mal gelait l'entree
+                // pendant plus d'une seconde.
+                //
+                // C'est la forme exacte de ce que l'utilisateur a decrit en
+                // ouvrant le navigateur : « FPS 2 » avec le processeur a 22 %,
+                // et « la souris met trop de temps a se deplacer (multiple
+                // freeze) ». La machine n'etait pas saturee, elle ATTENDAIT.
+                //
+                // Le traitement a lieu ici, dans l'ordre d'arrivee, parce
+                // qu'il est sur : `process_hid_event` decode un rapport et
+                // rearme son extremite. Il n'emet aucun transfert et n'attend
+                // aucun evenement, donc il ne peut pas reentrer dans l'attente
+                // qui l'appelle.
+                traite_differes(controller);
             }
+        }
+        tours = tours.wrapping_add(1);
+        if tours & 0xff == 0
+            && crate::kernel::timer::monotonic_ns().saturating_sub(debut) >= budget_ns
+        {
+            return None;
         }
         core::hint::spin_loop();
     }
-    None
 }
 
 /// Numero de port porte par un evenement de changement d'etat de port.
@@ -858,12 +1107,29 @@ fn ring_doorbell(controller: &Controller, slot: u8, target: u8) {
 }
 
 fn command_raw(controller: &mut Controller, parameter: u64, control: u32) -> Result<Trb, &'static str> {
+    command_raw_budget(controller, parameter, control, BUDGET_ATTENTE_NS)
+}
+
+/// `command_raw`, avec une patience explicite.
+///
+/// L'enumeration peut attendre une demi-seconde ; le chien de garde des
+/// points HID, non. Il tourne dans la boucle de scrutation, verrou du pilote
+/// tenu : lui laisser la patience de l'enumeration ferait de chaque tentative
+/// de reprise ratee un demi-seconde d'entree gelee -- exactement le mal qu'il
+/// est cense guerir. Une commande xHCI qui aboutit le fait en microsecondes.
+fn command_raw_budget(
+    controller: &mut Controller,
+    parameter: u64,
+    control: u32,
+    budget_ns: u64,
+) -> Result<Trb, &'static str> {
     let pointer = ring_push(
         &mut controller.command,
         Trb { parameter, status: 0, control },
     );
     ring_doorbell(controller, 0, 0);
-    let event = wait_event(controller, EVT_COMMAND_COMPLETION, None, None).ok_or("command-timeout")?;
+    let event = wait_event_budget(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
+        .ok_or("command-timeout")?;
     if event.parameter & !0xf != pointer & !0xf {
         // Command completions are ordered. A mismatched pointer means the event
         // stream is no longer the one we submitted; fail closed.
@@ -1071,6 +1337,7 @@ fn control_transfer(
     setup: u64,
     data_len: usize,
     data_in: bool,
+    budget_ns: u64,
 ) -> Result<usize, &'static str> {
     if data_len > 4096 {
         return Err("control-buffer-too-small");
@@ -1118,19 +1385,26 @@ fn control_transfer(
     );
     ring_doorbell(controller, device.slot_id, 1);
 
-    let event = wait_event(
+    let event = wait_event_budget(
         controller,
         EVT_TRANSFER,
         Some(device.slot_id),
         Some(1),
+        budget_ns,
     )
-    .ok_or("control-transfer-timeout")?;
+    .ok_or_else(|| {
+        // Une echeance n'a pas de code d'achevement : le peripherique n'a rien
+        // rendu du tout. C'est le cas qui merite la quarantaine longue.
+        DERNIER_CODE_CONTROLE.store(0, Ordering::Relaxed);
+        "control-transfer-timeout"
+    })?;
     let cc = completion_code(event.status);
     if cc != CC_SUCCESS && cc != CC_SHORT_PACKET {
         crate::serial_println!(
             "BOUCHAUD_USB_CONTROL_FAIL slot={} ep=1 cc={} setup={:#018x} len={} status={:#010x}",
             device.slot_id, cc, setup, data_len, event.status
         );
+        DERNIER_CODE_CONTROLE.store(cc as usize, Ordering::Relaxed);
         return Err("control-transfer-error");
     }
     CONTROL_OK.fetch_add(1, Ordering::Relaxed);
@@ -1152,7 +1426,7 @@ fn get_descriptor(
         0,
         length as u16,
     );
-    control_transfer(controller, device, setup, length, true)
+    control_transfer(controller, device, setup, length, true, BUDGET_ATTENTE_NS)
 }
 
 fn evaluate_ep0_mps(controller: &mut Controller, device: &mut Device, mps: u16) -> Result<(), &'static str> {
@@ -1187,13 +1461,13 @@ fn evaluate_ep0_mps(controller: &mut Controller, device: &mut Device, mps: u16) 
 
 fn set_configuration(controller: &mut Controller, device: &mut Device, value: u8) -> Result<(), &'static str> {
     let setup = setup_packet(0x00, 9, value as u16, 0, 0);
-    let _ = control_transfer(controller, device, setup, 0, false)?;
+    let _ = control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS)?;
     Ok(())
 }
 
 fn set_boot_protocol(controller: &mut Controller, device: &mut Device, interface: u8) -> bool {
     let setup = setup_packet(0x21, 0x0b, 0, interface as u16, 0);
-    control_transfer(controller, device, setup, 0, false).is_ok()
+    control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_ok()
 }
 
 fn set_idle(controller: &mut Controller, device: &mut Device, interface: u8) {
@@ -1201,7 +1475,7 @@ fn set_idle(controller: &mut Controller, device: &mut Device, interface: u8) {
     // for state changes, but several real devices only start cleanly after the
     // host has completed the class initialization sequence used by PC stacks.
     let setup = setup_packet(0x21, 0x0a, 0, interface as u16, 0);
-    let _ = control_transfer(controller, device, setup, 0, false);
+    let _ = control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS);
 }
 
 fn hid_item_value(bytes: &[u8]) -> u32 {
@@ -1297,7 +1571,7 @@ fn get_hid_report_descriptor(
         interface as u16,
         length as u16,
     );
-    control_transfer(controller, device, setup, length, true)
+    control_transfer(controller, device, setup, length, true, BUDGET_ATTENTE_NS)
 }
 
 fn enrich_hid_descriptor(
@@ -1329,10 +1603,39 @@ fn enrich_hid_descriptor(
                 let (kind, report_id) = classify_hid_report_descriptor(bytes);
                 if descriptor.kind == 0 { descriptor.kind = kind; }
                 descriptor.report_id = report_id;
+                // Le descripteur a parle, y compris quand il dit « ni clavier
+                // ni souris » : c'est un verdict, pas une absence de verdict.
+                descriptor.classe_par_rapport = true;
                 crate::serial_println!(
                     "BOUCHAUD_HID_REPORT_DESC slot={} if={} subclass={} protocol={} kind={} report_id={} bytes={}",
                     device.slot_id, descriptor.interface, descriptor.subclass,
                     descriptor.protocol, descriptor.kind, descriptor.report_id, received,
+                );
+                // LES OCTETS, ET PAS SEULEMENT LE VERDICT.
+                //
+                // Le 18 septembre, ce meme descripteur -- cinquante octets,
+                // `report_id=1` -- a ete classe « ni clavier ni souris », et la
+                // souris de la machine a disparu. Sans les octets, il n'y a
+                // aucun moyen de savoir si c'est le peripherique qui ment ou le
+                // classeur qui se trompe. Quarante-huit octets suffisent a
+                // couvrir l'en-tete d'un descripteur de souris, et le journal
+                // ne les ecrit qu'une fois par interface.
+                let vus = received.min(48);
+                let mut ligne = [0u8; 48 * 3];
+                let mut ecrits = 0usize;
+                for octet in bytes.iter().take(vus) {
+                    const CHIFFRES: &[u8; 16] = b"0123456789abcdef";
+                    ligne[ecrits] = CHIFFRES[(octet >> 4) as usize];
+                    ligne[ecrits + 1] = CHIFFRES[(octet & 0x0f) as usize];
+                    ligne[ecrits + 2] = b' ';
+                    ecrits += 3;
+                }
+                crate::serial_println!(
+                    "BOUCHAUD_HID_REPORT_OCTETS slot={} if={} vus={} {}",
+                    device.slot_id,
+                    descriptor.interface,
+                    vus,
+                    core::str::from_utf8(&ligne[..ecrits]).unwrap_or("?"),
                 );
             }
             _ => {
@@ -1404,6 +1707,7 @@ fn parse_hid_descriptors(bytes: &[u8], output: &mut [HidDescriptor]) -> (u8, usi
                         subclass: current_subclass,
                         protocol: current_protocol,
                         kind,
+                        classe_par_rapport: false,
                         report_len: current_report_len,
                         report_id: 0,
                         endpoint_address: address,
@@ -1421,6 +1725,36 @@ fn parse_hid_descriptors(bytes: &[u8], output: &mut [HidDescriptor]) -> (u8, usi
         offset += len;
     }
     (configuration_value, count)
+}
+
+/// Periode du pont EP0 quand le peripherique n'annonce rien d'exploitable.
+///
+/// Huit millisecondes : la cadence d'une souris USB pleine vitesse ordinaire
+/// (125 Hz). Assez rapide pour que le pointeur reste fluide, assez lente pour
+/// que le transfert de controle synchrone ne monopolise pas le verrou.
+const PERIODE_REPLI_DEFAUT_NS: u64 = 8_000_000;
+/// Plancher : on ne redemande jamais plus vite qu'une milliseconde.
+const PERIODE_REPLI_MIN_NS: u64 = 1_000_000;
+/// Plafond : un point qui annonce une seconde reste interroge a la cadence
+/// d'un peripherique d'interface humaine, sinon le pont ne serait plus un pont.
+const PERIODE_REPLI_MAX_NS: u64 = 32_000_000;
+
+/// Periode a laquelle le pont EP0 doit interroger ce point, en nanosecondes.
+///
+/// Basse/pleine vitesse : `bInterval` est deja en millisecondes.
+/// Haute/super vitesse : `bInterval` est un exposant, la periode vaut
+/// `2^(bInterval-1)` micro-trames de 125 us.
+fn periode_repli_ns(speed: u8, usb_interval: u8) -> u64 {
+    if usb_interval == 0 {
+        return PERIODE_REPLI_DEFAUT_NS;
+    }
+    let ns = if speed == 3 || speed >= 4 {
+        let exposant = u32::from(usb_interval).clamp(1, 16) - 1;
+        125_000u64.saturating_mul(1u64 << exposant.min(20))
+    } else {
+        u64::from(usb_interval).saturating_mul(1_000_000)
+    };
+    ns.clamp(PERIODE_REPLI_MIN_NS, PERIODE_REPLI_MAX_NS)
 }
 
 fn xhci_interval(speed: u8, usb_interval: u8) -> u8 {
@@ -1470,13 +1804,32 @@ fn configure_hids(
     let base_index = controller.hid_count;
     let mut installed = 0usize;
 
+
     for descriptor in descriptors.iter().take(wanted) {
         let mut kind = descriptor.kind;
-        if kind == 0 && descriptor.max_packet >= 3 && descriptor.protocol != 1 {
-            // Pragmatic physical fallback: an otherwise-unclassified HID IN
-            // interface on this lab machine is treated as a mouse candidate.
-            // This keeps vendor/report-protocol mice usable while the full HID
-            // usage parser grows, without ever stealing a known keyboard.
+        // BOUCHAUD_HID_REPLI_SOURIS_V2
+        //
+        // CE QUE CE REPLI FAISAIT DE TROP
+        // -------------------------------
+        // Il promouvait en souris TOUTE interface HID d'entree non classee,
+        // meme celle dont le descripteur de rapport venait d'etre lu et
+        // repondait « ni clavier ni souris ». Sur la machine de reference,
+        // l'interface VENDEUR d'un recepteur sans fil passait ainsi pour une
+        // souris : ses notifications (etat de pile, association) etaient
+        // relues comme des boutons et un deplacement.
+        //
+        // Deux degats, tous deux rapportes : le curseur se TELEPORTAIT (des
+        // octets de protocole lus comme dx/dy) et le bouton VACILLAIT, ce qui
+        // rendait tout glissement de fenetre impossible.
+        //
+        // Le repli ne parle donc plus que lorsque le descripteur de rapport
+        // s'est TU -- illisible ou absent. C'est bien un repli : la ou on ne
+        // sait rien, une souris presumee vaut mieux qu'un peripherique perdu.
+        if kind == 0
+            && !descriptor.classe_par_rapport
+            && descriptor.max_packet >= 3
+            && descriptor.protocol != 1
+        {
             kind = 2;
             crate::serial_println!(
                 "BOUCHAUD_HID_HEURISTIC_MOUSE if={} subclass={} protocol={} ep={:#04x}",
@@ -1522,12 +1875,27 @@ fn configure_hids(
         add_flags |= 1u32 << dci;
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
+            arme_depuis_ns: 0,
+            dernier_evenement_ns: 0,
+            reprises_silence: 0,
+            interrupt_in_casse: false,
+            echecs_repli: 0,
+            quarantaine_annoncee: false,
+            periode_repli_ns: periode_repli_ns(device.speed, descriptor.interval),
+            prochain_repli_ns: 0,
+            repli_muet_jusqu_a_ns: 0,
+            evenements: 0,
             active: false,
             slot_id: device.slot_id,
             dci,
             interface: descriptor.interface,
             protocol: descriptor.protocol,
             kind,
+            source_souris: if kind == 2 {
+                crate::drivers::mouse::reserve_source_souris()
+            } else {
+                usize::MAX
+            },
             report_id: descriptor.report_id,
             max_packet: descriptor.max_packet,
             ring,
@@ -1536,6 +1904,19 @@ fn configure_hids(
             buffer_len,
             clavier: hid::EtatClavier { modificateurs: 0, touches: [0; 6] },
         };
+        if kind == 2 {
+            // La source est la PREUVE que deux « souris » ne s'ecrasent plus.
+            // Sans cette ligne, le releve de vol ne dirait que `souris=3`, ce
+            // qui etait deja vrai quand elles partageaient le meme etat.
+            crate::serial_println!(
+                "BOUCHAUD_HID_SOURCE_SOURIS slot={} if={} ep={:#04x} source={} classe_par_rapport={}",
+                device.slot_id,
+                descriptor.interface,
+                descriptor.endpoint_address,
+                controller.hids[base_index + installed].source_souris,
+                descriptor.classe_par_rapport as u8,
+            );
+        }
         installed += 1;
     }
 
@@ -1586,10 +1967,16 @@ fn configure_hids(
     }
     wait_ms(10);
 
+    let arme_a = crate::kernel::timer::monotonic_ns();
     for index in base_index..base_index + installed {
         // Arm only after every port on this controller has finished control
         // enumeration, so interrupt events cannot steal command/control events.
         controller.hids[index].active = true;
+        controller.hids[index].arme_depuis_ns = arme_a;
+        // Un point qu'on vient d'armer n'a pas « cesse » de parler : sans
+        // cette date, le chien de garde le declarerait muet des sa premiere
+        // seconde d'existence.
+        controller.hids[index].dernier_evenement_ns = arme_a;
     }
     controller.hid_count += installed;
     Ok(installed)
@@ -1733,6 +2120,7 @@ fn etat_port_concentrateur(
         concentrateur::requete_etat_port(port),
         4,
         true,
+        BUDGET_ATTENTE_NS,
     )
     .ok()?;
     if recu < 4 {
@@ -1761,6 +2149,7 @@ fn efface_changements(
                 concentrateur::requete_efface_port(fonctionnalite, port),
                 0,
                 false,
+                BUDGET_ATTENTE_NS,
             );
         }
     }
@@ -1784,6 +2173,7 @@ fn reinitialise_port_concentrateur(
         concentrateur::requete_pose_port(concentrateur::PORT_REINITIALISATION, port),
         0,
         false,
+        BUDGET_ATTENTE_NS,
     )
     .is_err()
     {
@@ -1837,6 +2227,7 @@ fn traverse_concentrateur(
         concentrateur::requete_descripteur(superspeed, longueur as u16),
         longueur,
         true,
+        BUDGET_ATTENTE_NS,
     )?;
     let octets = unsafe { core::slice::from_raw_parts(device.control_virt as *const u8, recu) };
     let Some(descripteur) = concentrateur::descripteur(octets) else {
@@ -1873,6 +2264,7 @@ fn traverse_concentrateur(
             concentrateur::requete_pose_port(concentrateur::PORT_ALIMENTATION, port),
             0,
             false,
+            BUDGET_ATTENTE_NS,
         );
     }
     wait_ms(descripteur.delai_alimentation_ms.max(20).min(600) as u64);
@@ -2282,6 +2674,12 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
             // composite en a deux.
             memory::free_dma(controller.hids[index].ring.phys, RING_BYTES);
             memory::free_dma(controller.hids[index].buffer_phys, 4096);
+            // La source de boutons AUSSI se rend. Un debranchement bouton
+            // enfonce laisserait sinon le bureau croire le bouton maintenu
+            // pour toujours, et la source ne reviendrait jamais au tableau.
+            crate::drivers::mouse::libere_source_souris(
+                controller.hids[index].source_souris,
+            );
             let dernier = controller.hid_count - 1;
             controller.hids[index] = controller.hids[dernier];
             controller.hids[dernier] = EMPTY_HID_ENDPOINT;
@@ -2788,7 +3186,7 @@ fn process_mouse_report(endpoint: &HidEndpoint, data: &[u8]) -> bool {
         return false;
     };
     crate::drivers::mouse::inject_usb_report(
-        souris.boutons, souris.dx, souris.dy, souris.roue,
+        endpoint.source_souris, souris.boutons, souris.dx, souris.dy, souris.roue,
     );
     true
 }
@@ -2797,6 +3195,20 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     HID_TRANSFER_EVENTS.fetch_add(1, Ordering::Relaxed);
     let slot = event_slot(event);
     let dci = event_dci(event);
+    // Le compteur PAR point de terminaison : c'est lui qui decide du repli,
+    // et le compteur global ne sert plus qu'au diagnostic.
+    for index in 0..controller.hid_count {
+        let ep = &mut controller.hids[index];
+        if ep.active && ep.slot_id == slot && ep.dci == dci {
+            ep.evenements = ep.evenements.saturating_add(1);
+            // Le point reparle : le chien de garde repart de zero, et le pont
+            // EP0 lui rend la place.
+            ep.dernier_evenement_ns = crate::kernel::timer::monotonic_ns();
+            ep.reprises_silence = 0;
+            ep.interrupt_in_casse = false;
+            break;
+        }
+    }
     let cc = completion_code(event.status);
     let Some(index) = (0..controller.hid_count).find(|&index| {
         let ep = &controller.hids[index];
@@ -2867,6 +3279,155 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     arm_hid_endpoint(controller, index);
 }
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_HID_CHIEN_DE_GARDE_V1 : un point qui s'est tu n'est pas un point au repos
+// ---------------------------------------------------------------------------
+//
+// ## Ce qu'on ne pouvait pas distinguer, et qui change tout
+//
+// Une souris qu'on ne bouge pas ne produit aucun evenement. Une souris dont
+// le point de terminaison est ARRETE non plus. Vu du compteur d'evenements,
+// les deux sont identiques -- et c'est pour cela que le silence de dix-neuf
+// secondes du 13 septembre n'a alerte personne.
+//
+// Le CONTEXTE que le controleur tient a jour les separe sans ambiguite :
+//
+// * son etat dit si le point tourne encore (`Running`), ou s'il est arrete,
+//   bloque, ou en erreur ;
+// * son pointeur de defilement dit si le controleur a encore quelque chose a
+//   lire. Le pilote garde TOUJOURS un TD en attente : si le pointeur de
+//   defilement a rattrape notre pointeur d'ecriture, l'anneau est vide, et
+//   c'est qu'un achevement s'est perdu.
+//
+// Une souris au repos est `Running` avec un TD en attente. Elle ne declenche
+// donc jamais rien ici, et c'est la propriete qui rend ce chien de garde sur.
+
+/// Etats d'un point de terminaison dans son contexte de sortie (xHCI 1.2).
+const EP_ETAT_RUNNING: u32 = 1;
+const EP_ETAT_HALTED: u32 = 2;
+
+/// Silence au-dela duquel on VERIFIE l'etat du point.
+///
+/// Trois cents millisecondes : bien plus que la periode de n'importe quel
+/// peripherique d'interface humaine, et assez court pour qu'une reprise ne se
+/// sente pas. La verification ne coute que deux lectures de memoire.
+const SILENCE_HID_NS: u64 = 300_000_000;
+
+/// Reprises tentees avant de declarer le transport Interrupt-IN hors service.
+///
+/// Bornees, parce que chaque reprise pose un TD de plus : sans borne, un
+/// calcul de pointeur faux remplirait l'anneau de TD jamais consommes.
+const REPRISES_SILENCE_MAX: u8 = 3;
+
+/// Patience accordee a une commande de reprise.
+///
+/// Vingt millisecondes : une commande xHCI qui aboutit le fait en
+/// microsecondes, et ce chemin tient le verrou du pilote. Trois tentatives
+/// ratees coutent donc soixante millisecondes, pas une seconde et demie.
+const BUDGET_REPRISE_NS: u64 = 20_000_000;
+
+/// Lit l'etat et le pointeur de defilement d'un point, tels que le controleur
+/// les publie dans le contexte de sortie du peripherique.
+fn etat_point_hid(controller: &Controller, index: usize) -> Option<(u32, u64)> {
+    let ep = controller.hids[index];
+    let slot = ep.slot_id as usize;
+    if slot >= controller.devices.len() {
+        return None;
+    }
+    let device = controller.devices[slot]?;
+    let out_ctx = context_ptr(device.out_ctx_virt, controller.context_size, ep.dci as usize);
+    let etat = unsafe { ctx_r32(out_ctx, 0) & 0x7 };
+    let defilement = unsafe { read_volatile((out_ctx + 8) as *const u64) } & !0xf;
+    Some((etat, defilement))
+}
+
+/// Remet en marche un point de terminaison HID arrete.
+///
+/// Meme sequence que pour le stockage, moins le `CLEAR_FEATURE` : un point
+/// d'interruption HID qui s'arrete n'est presque jamais bloque cote
+/// peripherique, et une requete de classe de plus sur un recepteur qui refuse
+/// deja `SET_IDLE` ne ferait qu'ajouter une echeance.
+fn recupere_point_hid(controller: &mut Controller, index: usize, etat: u32) -> bool {
+    let (slot, dci) = (controller.hids[index].slot_id, controller.hids[index].dci);
+    if etat == EP_ETAT_HALTED {
+        let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+        if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
+            return false;
+        }
+    }
+    // L'anneau repart de son debut : les TRB deja consommes portent l'ancien
+    // cycle et ne seront pas repris.
+    let phys = {
+        let ring = &mut controller.hids[index].ring;
+        ring.index = 0;
+        ring.cycle = 1;
+        unsafe { prepare_link(ring, 1) };
+        ring.phys
+    };
+    let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+    if command_raw_budget(controller, phys | 1, controle, BUDGET_REPRISE_NS).is_err() {
+        return false;
+    }
+    arm_hid_endpoint(controller, index);
+    HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Verifie les points qui ont parle puis se sont tus, et les remet en marche.
+fn veille_points_hid(controller: &mut Controller) {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    for index in 0..controller.hid_count {
+        let ep = controller.hids[index];
+        // Un point qui n'a JAMAIS parle releve du pont EP0, pas d'ici.
+        if !ep.active || ep.evenements == 0 {
+            continue;
+        }
+        if maintenant.saturating_sub(ep.dernier_evenement_ns) < SILENCE_HID_NS {
+            continue;
+        }
+        let Some((etat, defilement)) = etat_point_hid(controller, index) else {
+            continue;
+        };
+        let ecriture = ep.ring.phys + (ep.ring.index * TRB_SIZE) as u64;
+        let file_vide = defilement == ecriture;
+        // LA SEULE CONDITION QUI DISTINGUE LE REPOS DE LA PANNE.
+        if etat == EP_ETAT_RUNNING && !file_vide {
+            continue; // souris immobile : tout va bien
+        }
+        if ep.reprises_silence >= REPRISES_SILENCE_MAX {
+            if !ep.interrupt_in_casse {
+                controller.hids[index].interrupt_in_casse = true;
+                HID_TRANSPORTS_CASSES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "BOUCHAUD_HID_INTERRUPT_HORS_SERVICE slot={} dci={} etat={} file_vide={} silence_ms={} evenements={} pont_ep0=1",
+                    ep.slot_id, ep.dci, etat, file_vide as u8,
+                    maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
+                    ep.evenements,
+                );
+            }
+            continue;
+        }
+        if ep.reprises_silence == 0 {
+            crate::serial_println!(
+                "BOUCHAUD_HID_POINT_MUET slot={} dci={} etat={} file_vide={} silence_ms={} evenements={}",
+                ep.slot_id, ep.dci, etat, file_vide as u8,
+                maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
+                ep.evenements,
+            );
+        }
+        controller.hids[index].reprises_silence = ep.reprises_silence.saturating_add(1);
+        HID_REPRISES.fetch_add(1, Ordering::Relaxed);
+        if etat != EP_ETAT_RUNNING {
+            recupere_point_hid(controller, index, etat);
+        } else {
+            // `Running` et file vide : un achevement s'est perdu. Reposer un
+            // TD suffit, et ne coute rien de plus qu'un rearmement ordinaire.
+            arm_hid_endpoint(controller, index);
+            HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> bool {
     if endpoint_index >= controller.hid_count { return false; }
     let endpoint = controller.hids[endpoint_index];
@@ -2883,7 +3444,15 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
         length as u16,
     );
     HID_CONTROL_POLLS.fetch_add(1, Ordering::Relaxed);
-    let result = control_transfer(controller, &mut device, setup, length, true);
+    // LE BUDGET COURT, ET C'EST TOUT LE CORRECTIF.
+    //
+    // Ce transfert est sur le chemin de scrutation : il s'execute un tour
+    // sur deux, pour chaque point de terminaison muet. Lui laisser la
+    // patience de l'enumeration revenait a payer une echeance de 330 ms
+    // par tour, et c'est ce qui rendait le TRIGKEY inutilisable.
+    let result = control_transfer(
+        controller, &mut device, setup, length, true, BUDGET_SCRUTATION_NS,
+    );
     controller.devices[endpoint.slot_id as usize] = Some(device);
     let received = match result {
         Ok(received) if received != 0 => received.min(length),
@@ -2922,19 +3491,215 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
     accepted
 }
 
-fn poll_control_fallback(controller: &mut Controller, poll_no: usize) {
+/// Sert AU PLUS UN point de terminaison muet, a partir de `depart`.
+///
+/// Rend l'indice servi, pour que le tour suivant reparte du point d'apres :
+/// sans ce curseur, le premier point muet du tableau serait le seul jamais
+/// interroge.
+///
+/// # Pourquoi un seul, et pourquoi hors de la scrutation
+///
+/// `control_get_report` est un transfert de controle SYNCHRONE. Le releve
+/// physique du 12 septembre le chiffre : la boucle de scrutation annoncait
+/// `polls=11065` en soixante-douze secondes, soit CENT SOIXANTE-SIX tours par
+/// seconde la ou son `sleep_ticks(1)` en vise mille. Les cinq sixiemes du
+/// temps partaient dans les `GET_REPORT` de cinq points muets, enchaines dans
+/// le meme tour et le verrou du pilote tenu du debut a la fin.
+///
+/// La souris etait donc echantillonnee a quatre-vingts hertz -- douze
+/// millisecondes de grain -- et c'est cela que l'utilisateur decrit comme
+/// « elle met trop de temps a se deplacer ».
+///
+/// Le repli vit desormais sur son propre fil (`fil_repli_ep0`), un point par
+/// tour, le verrou pris et rendu a chaque fois. Le drainage garde ses mille
+/// tours par seconde, et les rapports qui arrivent PENDANT un `GET_REPORT`
+/// sont traites sur place (`traite_differes`).
+fn repli_ep0_un_point(
+    controller: &mut Controller,
+    depart: usize,
+    echeance_min: &mut u64,
+) -> Option<usize> {
+    if controller.hid_count == 0 {
+        return None;
+    }
     // Interrupt-IN remains the preferred path. If the physical controller has
     // produced no endpoint Transfer Event after initial arming, use the HID
     // class GET_REPORT request over EP0 as a compatibility bridge. HID 1.11
     // requires GET_REPORT support on HID devices; this path is deliberately a
     // fallback, not the long-term periodic transport.
-    if HID_TRANSFER_EVENTS.load(Ordering::Acquire) != 0 || poll_no < 32 || (poll_no & 1) != 0 {
-        return;
+    // LA DECISION EST PAR PERIPHERIQUE, ET C'EST TOUT LE CORRECTIF.
+    //
+    // La condition portait sur un compteur GLOBAL : le repli s'eteignait des
+    // qu'UN periphérique produisait un evenement de transfert. Sur la machine
+    // de reference, la souris en a produit 556 et le clavier 6 -- la souris
+    // coupait le repli, et le clavier, muet en Interrupt-IN, se retrouvait
+    // sans aucun transport. Le journal physique le dit sans ambiguite :
+    // `BOUCHAUD_HID_CONTROL_FALLBACK_GREEN kind=keyboard` une seule fois, puis
+    // 556 rapports de souris et plus un seul du clavier.
+    //
+    // Le repli reste ce qu'il doit etre : un pont de compatibilite pour les
+    // peripheriques qui ne repondent pas en Interrupt-IN, et rien d'autre. Un
+    // peripherique qui repond n'y passe jamais. La difference est qu'un
+    // peripherique muet n'est plus prive de secours parce que son voisin,
+    // lui, va bien.
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let total = controller.hid_count;
+    for decalage in 0..total {
+        let index = (depart + decalage) % total;
+        // UN POINT QUI A PARLE PUIS S'EST TU A DROIT AU PONT, LUI AUSSI.
+        //
+        // La condition portait sur le seul compteur d'evenements : le pont
+        // refusait donc d'aider precisement le peripherique qui avait PROUVE
+        // qu'il fonctionnait, et le pointeur restait mort pour le reste de la
+        // session. Le chien de garde tente d'abord la reparation ; il ne pose
+        // `interrupt_in_casse` que lorsqu'elle a echoue.
+        if controller.hids[index].evenements != 0
+            && !controller.hids[index].interrupt_in_casse
+        {
+            continue;
+        }
+        // UN POINT QU'ON VIENT D'ARMER N'EST PAS UN POINT MUET.
+        //
+        // Il lui faut le temps de produire son premier evenement. Sans ce
+        // delai, le pont EP0 se declencherait sur tout peripherique a
+        // l'instant meme de son branchement, et un peripherique parfaitement
+        // sain finirait sur le transport lent.
+        // LES TROIS ECHEANCES D'UN POINT, EN UNE SEULE.
+        //
+        // * le delai de grace : un point qu'on vient d'armer n'est pas muet ;
+        // * la quarantaine : un point qui ne repond pas n'est pas interroge
+        //   mille fois par seconde ;
+        // * la periode declaree : UN POINT QUI REPOND n'est pas un point a
+        //   interroger sans fin. La quarantaine ne couvrait que les muets ; un
+        //   point qui repond remettait son compteur d'echecs a zero et
+        //   repartait au tour suivant, a la milliseconde. Le releve du
+        //   13 septembre le chiffre : `repli_tours=79632 repli_servis=79357`
+        //   pour un peripherique qui ne produit un rapport neuf que toutes les
+        //   huit millisecondes -- sept transferts sur huit ne rapportaient rien
+        //   et tenaient le verrou du pilote.
+        //
+        // La plus lointaine des trois commande, et on RETIENT la plus proche
+        // de tous les points : c'est elle qui dit au fil combien de temps il
+        // peut dormir, au lieu de se reveiller mille fois pour rien.
+        let du_a = {
+            let ep = &controller.hids[index];
+            ep.arme_depuis_ns
+                .saturating_add(GRACE_INTERRUPT_NS)
+                .max(ep.repli_muet_jusqu_a_ns)
+                .max(ep.prochain_repli_ns)
+        };
+        if maintenant < du_a {
+            *echeance_min = (*echeance_min).min(du_a);
+            continue;
+        }
+        // UNE ERREUR TRANSITOIRE N'EST PAS UN PERIPHERIQUE MUET.
+        //
+        // On distingue les deux avant de decider de la peine : un transfert qui
+        // n'est pas passe se retente dans vingt millisecondes, un peripherique
+        // qui ne repond pas attend une seconde.
+        let avant = HID_CONTROL_FAILS.load(Ordering::Relaxed);
+        controller.hids[index].prochain_repli_ns =
+            maintenant.saturating_add(controller.hids[index].periode_repli_ns);
+        let repond = control_get_report(controller, index);
+        let transitoire = !repond
+            && HID_CONTROL_FAILS.load(Ordering::Relaxed) != avant
+            && DERNIER_CODE_CONTROLE.load(Ordering::Relaxed) == CC_ERREUR_TRANSACTION as usize;
+        if repond {
+            // Le point s'est remis a repondre : il sort de quarantaine, et sa
+            // prochaine rechute sera annoncee de nouveau.
+            controller.hids[index].echecs_repli = 0;
+            controller.hids[index].quarantaine_annoncee = false;
+        } else if transitoire {
+            let ep = &mut controller.hids[index];
+            ep.repli_muet_jusqu_a_ns = maintenant.saturating_add(QUARANTAINE_TRANSITOIRE_NS);
+        } else {
+            {
+                let ep = &mut controller.hids[index];
+                ep.echecs_repli = ep.echecs_repli.saturating_add(1);
+                if ep.echecs_repli >= ECHECS_AVANT_QUARANTAINE {
+                    ep.repli_muet_jusqu_a_ns =
+                        maintenant.saturating_add(QUARANTAINE_REPLI_NS);
+                    // UNE FOIS, A L'ENTREE EN QUARANTAINE, ET PAS A CHAQUE
+                    // REPRISE.
+                    //
+                    // La quarantaine est RETENTEE chaque seconde -- c'est ce
+                    // qui fait d'elle un pont et non une condamnation. Mais
+                    // une interface vendeur ne se met jamais a repondre : la
+                    // reprise echoue, la quarantaine se repose, et la ligne
+                    // se reimprimait. Deux lignes par seconde et pour
+                    // toujours, sur un journal serie dont le budget est
+                    // borne : le bruit finissait par chasser tout le reste.
+                    //
+                    // L'ETAT COURANT se lit ailleurs, et sans bruit :
+                    // `replis_en_quarantaine` sort dans `[USB-HID-V3]`, a
+                    // cadence de diagnostic.
+                    if !ep.quarantaine_annoncee {
+                        ep.quarantaine_annoncee = true;
+                        let (slot, dci, echecs) = (ep.slot_id, ep.dci, ep.echecs_repli);
+                        REPLIS_EN_QUARANTAINE.fetch_add(1, Ordering::Relaxed);
+                        crate::serial_println!(
+                            "BOUCHAUD_HID_REPLI_QUARANTAINE slot={} dci={} echecs={} \
+reprise_dans_ms={}",
+                            slot,
+                            dci,
+                            echecs,
+                            QUARANTAINE_REPLI_NS / 1_000_000,
+                        );
+                    }
+                }
+            }
+        }
+        // UN SEUL POINT PAR TOUR, ET C'EST TOUT L'INTERET DE CETTE BOUCLE.
+        //
+        // `control_get_report` est un transfert de controle SYNCHRONE : trois
+        // etapes et une attente, le verrou du pilote tenu du debut a la fin.
+        // En servir cinq d'affilee, c'est tenir ce verrou plusieurs
+        // millisecondes -- et c'est ce qui ramenait la scrutation de mille
+        // tours par seconde a cent soixante-six sur la machine de reference.
+        return Some(index);
     }
-    for index in 0..controller.hid_count {
-        let _ = control_get_report(controller, index);
-    }
+    None
 }
+
+/// Delai laisse a un point fraichement arme avant de lui proposer le pont EP0.
+///
+/// Deux cents millisecondes : le temps qu'un peripherique produise son premier
+/// rapport en Interrupt-IN. En dessous, un peripherique sain branche a chaud
+/// serait bascule sur le transport lent avant d'avoir eu sa chance.
+const GRACE_INTERRUPT_NS: u64 = 200_000_000;
+
+/// Echecs consecutifs du repli EP0 avant sa mise en quarantaine.
+const ECHECS_AVANT_QUARANTAINE: u8 = 2;
+/// Duree de la quarantaine du repli EP0 d'un point de terminaison muet.
+///
+/// Une seconde : assez pour que le cout devienne negligeable devant les mille
+/// scrutations de cette seconde, assez court pour qu'un peripherique qui se
+/// reveille soit repris sans que l'utilisateur le remarque.
+const QUARANTAINE_REPLI_NS: u64 = 1_000_000_000;
+/// Quarantaine apres une erreur TRANSITOIRE.
+///
+/// # Pourquoi deux durees et pas une
+///
+/// La quarantaine existe pour un peripherique qui ne repondra JAMAIS -- une
+/// interface vendeur qui n'implemente pas `GET_REPORT`. Une seconde y est le
+/// bon prix : le cout devient negligeable, et la reprise reste imperceptible.
+///
+/// Une erreur de transaction n'a rien a voir. Elle dit que CE transfert-la
+/// n'est pas passe : un cable, un concentrateur, un peripherique qu'on vient
+/// de rebrancher, ou un anneau qu'on n'a pas servi assez vite. Le releve
+/// physique le montre a l'instant ou Ladybird demarre -- `cc=4` sur deux
+/// points de terminaison qui fonctionnaient jusque-la.
+///
+/// Leur appliquer la quarantaine longue punit un peripherique sain pour un
+/// incident passager, et c'est ce que l'utilisateur a senti apres avoir
+/// rebranche sa souris : « lent, elle se teleporte ». Vingt millisecondes
+/// suffisent a ne pas boucler dessus, et se reprennent sans qu'on le voie.
+const QUARANTAINE_TRANSITOIRE_NS: u64 = 20_000_000;
+/// Erreur de transaction USB : le transfert n'est pas passe, le peripherique
+/// n'a rien refuse.
+const CC_ERREUR_TRANSACTION: u8 = 4;
+/// Points de terminaison mis en quarantaine, pour le diagnostic.
+static REPLIS_EN_QUARANTAINE: AtomicUsize = AtomicUsize::new(0);
 
 fn push_ps2(code: u8, extended: bool, pressed: bool) {
     if extended {
@@ -3203,7 +3968,7 @@ fn recupere_point_bulk(
     // CLEAR_FEATURE(ENDPOINT_HALT) : destinataire « point de terminaison »
     // (0x02), fonctionnalite zero, index = adresse du point.
     let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
-    if control_transfer(controller, device, setup, 0, false).is_err() {
+    if control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_err() {
         return false;
     }
     BULK_RECUPERATIONS.fetch_add(1, Ordering::Relaxed);
@@ -3227,7 +3992,7 @@ fn reinitialisation_bot(controller: &mut Controller, device: &mut Device, index:
     // 0x21 : hote vers peripherique, type classe, destinataire interface.
     // 0xFF : Bulk-Only Mass Storage Reset.
     let setup = setup_packet(0x21, 0xFF, 0, interface as u16, 0);
-    if control_transfer(controller, device, setup, 0, false).is_err() {
+    if control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_err() {
         crate::serial_println!(
             "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC slot={} if={}",
             controller.stockages[index].slot_id, interface,
@@ -3817,6 +4582,30 @@ pub fn hid_ready() -> bool {
     hid_keyboards() != 0 && hid_mice() != 0
 }
 
+/// Publie, PAR peripherique, s'il repond en Interrupt-IN.
+///
+/// Le repli EP0 existe pour qu'un peripherique muet reste utilisable. Il ne
+/// doit pas rendre ce mutisme invisible : sans cette ligne, un clavier servi
+/// uniquement par le repli ressemble a un clavier qui marche.
+pub fn log_hid_transports() {
+    unsafe {
+        let Some(runtime) = RUNTIME.as_ref() else { return };
+        for controller in runtime.controllers.iter() {
+            for index in 0..controller.hid_count {
+                let ep = &controller.hids[index];
+                if !ep.active {
+                    continue;
+                }
+                crate::serial_println!(
+                    "BOUCHAUD_HID_TRANSPORT slot={} dci={} kind={} evenements={} transport={}",
+                    ep.slot_id, ep.dci, ep.kind, ep.evenements,
+                    if ep.evenements != 0 { "interrupt-in" } else { "repli-ep0" },
+                );
+            }
+        }
+    }
+}
+
 pub fn hid_control_fallback_stats() -> (usize, usize, usize) {
     (
         HID_CONTROL_POLLS.load(Ordering::Acquire),
@@ -3847,6 +4636,15 @@ pub fn hid_transport_stats() -> (usize, usize, usize, usize, usize, usize, usize
 /// clavier, puis en brancher un. Gater la surveillance sur la presence d'un
 /// HID rendrait le branchement a chaud inoperant precisement quand on en a
 /// besoin.
+/// Combien de controleurs xHCI ont ete mis en service.
+///
+/// Zero veut dire qu'il n'y a pas de bus USB a interroger : ce n'est PAS la
+/// meme chose qu'un bus present sur lequel rien ne repond, et confondre les
+/// deux ferait echouer un essai pour une absence de materiel.
+pub fn controleurs() -> usize {
+    CONTROLLERS.load(Ordering::Acquire)
+}
+
 pub fn surveille_branchements() -> bool {
     ACTIVE.load(Ordering::Acquire) && CONTROLLERS.load(Ordering::Acquire) != 0
 }
@@ -3899,6 +4697,176 @@ fn fil_hid() -> ! {
     }
 }
 
+static FIL_REPLI_ACTIF: AtomicBool = AtomicBool::new(false);
+static REPLI_CURSEUR: AtomicUsize = AtomicUsize::new(0);
+static REPLI_TOURS: AtomicU64 = AtomicU64::new(0);
+static REPLI_SERVIS: AtomicU64 = AtomicU64::new(0);
+
+/// Tours et points servis par le fil du repli EP0.
+pub fn repli_ep0_compteurs() -> (u64, u64) {
+    (
+        REPLI_TOURS.load(Ordering::Relaxed),
+        REPLI_SERVIS.load(Ordering::Relaxed),
+    )
+}
+
+/// Sert un point muet, verrou pris puis RENDU.
+///
+/// Le verrou est le meme que celui de la scrutation, et c'est voulu : deux
+/// fils qui liraient l'anneau d'evenements en meme temps se voleraient leurs
+/// achevements. Ce qui change, c'est la DUREE de sa tenue -- un transfert de
+/// controle, pas cinq.
+fn repli_ep0_un_tour() -> TourRepli {
+    if RUNTIME_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return TourRepli::Occupe;
+    }
+    // LE CURSEUR TOURNE SUR LES DEUX AXES.
+    //
+    // Il choisit le controleur de depart ET le point de depart dans ce
+    // controleur. La machine de reference en a DEUX ; sans rotation, le
+    // premier aurait toujours la main, et un clavier branche sur le second ne
+    // recevrait jamais son pont.
+    let curseur = REPLI_CURSEUR.load(Ordering::Relaxed);
+    let mut servi = false;
+    let mut echeance = u64::MAX;
+    unsafe {
+        #[allow(static_mut_refs)]
+        if let Some(runtime) = RUNTIME.as_mut() {
+            let nombre = runtime.controllers.len();
+            for decalage in 0..nombre {
+                let ic = (curseur + decalage) % nombre;
+                if repli_ep0_un_point(&mut runtime.controllers[ic], curseur, &mut echeance)
+                    .is_some()
+                {
+                    REPLI_CURSEUR.store(curseur.wrapping_add(1), Ordering::Relaxed);
+                    REPLI_SERVIS.fetch_add(1, Ordering::Relaxed);
+                    servi = true;
+                    break;
+                }
+            }
+        }
+    }
+    RUNTIME_BUSY.store(false, Ordering::Release);
+    if servi {
+        TourRepli::Servi
+    } else {
+        TourRepli::Attente(echeance)
+    }
+}
+
+/// Ce qu'un tour du pont EP0 a donne.
+enum TourRepli {
+    /// Un point a ete servi. Le suivant peut l'etre tout de suite.
+    Servi,
+    /// Le verrou du pilote est pris par la scrutation : on repasse vite.
+    Occupe,
+    /// Rien a servir maintenant. Porte l'instant du prochain point du,
+    /// `u64::MAX` quand aucun point ne demande le pont.
+    Attente(u64),
+}
+
+/// Le pont EP0, sur son propre fil.
+///
+/// # CE QUE CE FIL RETIRE DE LA BOUCLE D'ENTREE
+///
+/// Le repli vivait DANS `poll()`, un tour sur deux, et servait tous les points
+/// muets d'affilee. Chacun coute un transfert de controle synchrone, le verrou
+/// du pilote tenu du debut a la fin. Le releve du 12 septembre le chiffre :
+/// `polls=11065` en soixante-douze secondes -- cent soixante-six tours par
+/// seconde la ou `sleep_ticks(1)` en vise mille.
+///
+/// La souris etait donc lue a quatre-vingts hertz, douze millisecondes de
+/// grain, et c'est cela qu'on sent comme « elle met trop de temps a se
+/// deplacer ».
+///
+/// # Pourquoi il ne rend pas le repli moins bon
+///
+/// Il sert UN point par tour et dort un tick. Avec deux points muets -- un
+/// clavier et une interface qui ne repond jamais -- chacun est interroge cinq
+/// cents fois par seconde, soit quatre fois plus souvent qu'avant. Ce n'est
+/// pas un compromis : c'est le meme travail, sorti du chemin ou il coutait
+/// cher.
+fn fil_repli_ep0() -> ! {
+    loop {
+        REPLI_TOURS.fetch_add(1, Ordering::Relaxed);
+        // RIEN A SERVIR N'EST PAS UNE RAISON DE RECOMMENCER TOUT DE SUITE.
+        //
+        // `repli_ep0_un_tour` prend le verrou du pilote pour DECIDER qu'il n'y
+        // a rien a faire, puis le rend. A mille tours par seconde, cela fait
+        // mille prises de verrou par seconde pour rien -- et chacune est une
+        // prise que le drainage HID et l'enregistreur de vol n'ont pas.
+        //
+        // Le releve du 13 septembre le chiffre : `usb-repli cpu_pct=30` alors
+        // que le clavier etait passe en Interrupt-IN et qu'il n'y avait donc
+        // plus un seul point muet a servir. Trente pour cent d'un coeur, et
+        // surtout une contention permanente sur le verrou qui ramenait la
+        // scrutation de mille tours par seconde a deux cent cinquante.
+        //
+        // Quand tous les points repondent en Interrupt-IN -- le cas normal --
+        // le pont n'a rien a faire et se contente de verifier vingt fois par
+        // seconde. Un point qui se tait est alors repris en cinquante
+        // millisecondes au pire, ce qui ne se sent pas ; et tant qu'il y a
+        // quelque chose a servir, la cadence remonte a la milliseconde.
+        //
+        // DORMIR JUSQU'A CE QU'IL Y AIT QUELQUE CHOSE A FAIRE.
+        //
+        // La pause d'oisivete ne suffisait pas : elle ne se declenchait que
+        // lorsqu'il n'y avait RIEN a servir, et un point qui repond est un
+        // point servi. Le fil tournait donc a la milliseconde des qu'un seul
+        // peripherique passait par le pont -- `usb-repli cpu_pct=39..44` sur
+        // le releve du 13 septembre. Maintenant le tour dit QUAND le prochain
+        // point sera du, et le fil dort jusque-la.
+        match repli_ep0_un_tour() {
+            TourRepli::Servi => crate::kernel::task::sleep_ticks(1),
+            // Le verrou appartient a la scrutation : elle en a plus besoin que
+            // nous, et un tick suffit a la laisser finir.
+            TourRepli::Occupe => crate::kernel::task::sleep_ticks(1),
+            TourRepli::Attente(echeance) => {
+                let maintenant = crate::kernel::timer::monotonic_ns();
+                let attente_ms = echeance
+                    .saturating_sub(maintenant)
+                    .saturating_add(999_999)
+                    / 1_000_000;
+                crate::kernel::task::sleep_ticks(
+                    attente_ms.clamp(1, PAUSE_REPLI_OISIF_TICKS),
+                );
+            }
+        }
+    }
+}
+
+/// Pause du pont EP0 quand il n'a rien a servir, en ticks (millisecondes).
+const PAUSE_REPLI_OISIF_TICKS: u64 = 50;
+
+/// Lance le fil du repli EP0.
+pub fn demarre_le_fil_repli_ep0() -> bool {
+    if FIL_REPLI_ACTIF.load(Ordering::Acquire) {
+        return true;
+    }
+    // Interactive : ce fil porte des frappes et des mouvements de pointeur
+    // pour tout peripherique muet en Interrupt-IN. Sur la machine de
+    // reference, le clavier N'A PAS d'autre transport.
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_repli_ep0,
+        "usb-repli",
+        crate::kernel::task::Priorite::Interactive,
+    ) {
+        FIL_REPLI_ACTIF.store(true, Ordering::Release);
+        crate::serial_println!(
+            "BOUCHAUD_USB_REPLI_FIL_LANCE periode_ms=1 priorite=interactive"
+        );
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_USB_REPLI_FIL_REFUSE raison=tache-non-creee \
+consequence=clavier-muet-sans-transport"
+    );
+    false
+}
+
 /// Sort la scrutation des entrees de la boucle de trames du compositeur.
 ///
 /// # LE DEFAUT, MESURE SUR LA MACHINE DE REFERENCE
@@ -3936,6 +4904,136 @@ fn fil_hid() -> ! {
 /// Le fil reste donc sur le coeur zero, ou le tick existe. Il y partage le
 /// processeur avec le compositeur, mais il en est desormais INDEPENDANT :
 /// c'est le tick qui l'elit, pas la fin d'une trame.
+/// L'ENREGISTREUR DE VOL N'EST PAS SUR LE CHEMIN DE L'ENTREE.
+///
+/// # Ce qu'il coutait a l'entree
+///
+/// `poll()` -- la fonction que le fil d'entree appelle mille fois par seconde
+/// -- se terminait par `blackbox::poll()`. Toutes les 250 ms, celui-ci ecrit
+/// plusieurs enregistrements sur la cle USB, par transferts Bulk SYNCHRONES.
+/// Sur le TRIGKEY, la cle de demarrage EST la cible de l'enregistreur : chaque
+/// scrutation d'entree payait donc l'enregistreur.
+///
+/// Rien de tout cela ne se voyait sous QEMU : sans cle cible,
+/// `blackbox_storage_ready()` est faux et la fonction sort immediatement. Le
+/// defaut n'existait que sur la machine, ce qui est la pire facon d'exister.
+///
+/// # Pourquoi un fil separe est SUR
+///
+/// `blackbox_append_record` prend deja `RUNTIME_BUSY` par echange compare, et
+/// SAUTE l'enregistrement s'il est occupe -- le compteur `bb_busy_skips`
+/// existait avant ce lot. L'appeler depuis un autre fil ne cree donc aucune
+/// concurrence nouvelle : au pire un enregistrement est saute, et il est
+/// compte.
+///
+/// La cadence est de vingt millisecondes ; `blackbox::poll()` se limite
+/// lui-meme a 250 ms, et n'ecrit donc pas plus qu'avant.
+fn fil_blackbox() -> ! {
+    loop {
+        // UNE FENETRE RENDUE SE REPREND TOUT DE SUITE.
+        //
+        // `poll()` rend vrai quand il a du renoncer faute d'avoir pu prendre
+        // le pilote -- le systeme de fichiers travaillait sur la cle. Attendre
+        // alors vingt millisecondes de plus, c'est laisser filer la trace
+        // exactement au moment ou elle devient interessante : les trois
+        // archives physiques s'arretent toutes a l'instant ou le navigateur
+        // demarre et se met a ecrire.
+        if crate::kernel::blackbox::poll() {
+            crate::kernel::task::sleep_ticks(1);
+        } else {
+            crate::kernel::task::sleep_ticks(20);
+        }
+    }
+}
+
+/// Lance le fil de l'enregistreur de vol.
+pub fn demarre_le_fil_blackbox() -> bool {
+    if FIL_BLACKBOX_ACTIF.load(Ordering::Acquire) {
+        return true;
+    }
+    // INTERACTIVE, ET NON NORMALE -- ET LE RAISONNEMENT D'AVANT ETAIT FAUX.
+    //
+    // Il disait : « l'enregistreur n'a aucune latence a defendre, il ecrit ce
+    // qui s'est passe, il ne fait pas partie de ce qui se passe ». Vrai sur un
+    // systeme au repos. Faux des que quelque chose arrive -- et c'est
+    // precisement alors qu'on le lit.
+    //
+    // L'archive du 12 septembre 17:55 s'arrete a la seconde 29,028, au milieu
+    // d'un tour de scrutation : deux enregistrements de vol ecrits, puis plus
+    // rien, alors que le bureau tournait a soixante-deux trames par seconde et
+    // que l'utilisateur s'en est servi deux minutes de plus. L'enregistreur
+    // n'a pas echoue -- `bb_failures=0` jusqu'au dernier echantillon --, il
+    // n'a plus ete elu. Le navigateur venait de creer vingt taches de priorite
+    // Normale, et le releve de charge montre un equilibrage qui refuse
+    // presque tout (`rej_bal` par dizaines de milliers).
+    //
+    // Il dort vingt millisecondes entre deux tours : le promouvoir ne coute
+    // rien a personne, et lui rend la seule chose dont il a besoin -- etre
+    // elu de temps en temps.
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_blackbox,
+        "blackbox",
+        crate::kernel::task::Priorite::Interactive,
+    ) {
+        FIL_BLACKBOX_ACTIF.store(true, Ordering::Release);
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_FIL_LANCE periode_ms=20 priorite=interactive"
+        );
+        return true;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_FIL_REFUSE raison=tache-non-creee \
+consequence=enregistreur-muet"
+    );
+    false
+}
+
+static FIL_BLACKBOX_ACTIF: AtomicBool = AtomicBool::new(false);
+
+/// Instant du dernier releve de cadence, et compte de scrutations a cet instant.
+static CADENCE_NS: AtomicU64 = AtomicU64::new(0);
+static CADENCE_POLLS: AtomicUsize = AtomicUsize::new(0);
+/// Derniere cadence de scrutation observee, en scrutations par seconde.
+static CADENCE_PAR_SECONDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Scrutations par seconde, MESUREES.
+///
+/// # Pourquoi ce chiffre est publie
+///
+/// C'est celui qui a nomme le defaut. Sur la machine de reference il valait
+/// 3,19 -- le fil d'entree demandait une milliseconde entre deux tours et en
+/// mettait 313, parce qu'une attente non aboutie coutait 330 ms. Rien a
+/// l'ecran ne le disait ; il a fallu extraire l'enregistreur de vol et lire
+/// `samples.log` pour le voir.
+///
+/// Un chiffre qu'on ne peut lire qu'en demontant la machine n'est pas un
+/// diagnostic. Celui-ci sort maintenant dans le journal, a cote de l'etat des
+/// peripheriques, et se lit sans rien demonter.
+pub fn cadence_scrutation() -> usize {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let precedent_ns = CADENCE_NS.load(Ordering::Relaxed);
+    let ecoule = maintenant.saturating_sub(precedent_ns);
+    if precedent_ns == 0 || ecoule >= 1_000_000_000 {
+        let polls = HID_POLLS.load(Ordering::Relaxed);
+        if precedent_ns != 0 && ecoule != 0 {
+            let delta = polls.saturating_sub(CADENCE_POLLS.load(Ordering::Relaxed));
+            let par_seconde = (delta as u64)
+                .saturating_mul(1_000_000_000)
+                .checked_div(ecoule)
+                .unwrap_or(0);
+            CADENCE_PAR_SECONDE.store(par_seconde as usize, Ordering::Relaxed);
+        }
+        CADENCE_NS.store(maintenant, Ordering::Relaxed);
+        CADENCE_POLLS.store(polls, Ordering::Relaxed);
+    }
+    CADENCE_PAR_SECONDE.load(Ordering::Relaxed)
+}
+
+/// Points de terminaison ecartes par la quarantaine du repli EP0.
+pub fn replis_en_quarantaine() -> usize {
+    REPLIS_EN_QUARANTAINE.load(Ordering::Relaxed)
+}
+
 pub fn demarre_le_fil_hid() -> bool {
     if FIL_HID_ACTIF.load(Ordering::Acquire) {
         return true;
@@ -3959,7 +5057,6 @@ consequence=scrutation-reste-dans-la-boucle-de-trames"
 pub fn poll() {
     let hid = hid_polling();
     if !hid && !surveille_branchements() {
-        crate::kernel::blackbox::poll();
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
@@ -3994,12 +5091,7 @@ pub fn poll() {
                 // Ils sont ARRIVES AVANT ceux qui sont encore dans l'anneau :
                 // les traiter apres inverserait l'ordre des frappes, et une
                 // touche relachee avant d'etre appuyee reste enfoncee.
-                let differes = controller.differes_len;
-                controller.differes_len = 0;
-                for index in 0..differes {
-                    let event = controller.differes[index];
-                    process_hid_event(controller, event);
-                }
+                traite_differes(controller);
                 for _ in 0..MAX_EVENTS_PER_POLL {
                     let Some(event) = next_event(controller) else { break };
                     match trb_type(event.control) {
@@ -4041,8 +5133,15 @@ pub fn poll() {
                             HID_KICKS.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    // LA SONNETTE NE REVEILLE PAS UN POINT ARRETE.
+                    //
+                    // Le releve du 13 septembre montre `kicks` qui monte
+                    // regulierement pendant que la souris est morte : on
+                    // sonnait a la porte d'un point de terminaison qui n'etait
+                    // plus en marche. Le chien de garde regarde l'etat au lieu
+                    // d'esperer, et remet le point en route.
+                    veille_points_hid(controller);
                 }
-                poll_control_fallback(controller, poll_no);
             }
             if changement_hid {
                 recompte_les_hid(runtime);
@@ -4055,7 +5154,6 @@ pub fn poll() {
         }
     }
     RUNTIME_BUSY.store(false, Ordering::Release);
-    crate::kernel::blackbox::poll();
 }
 
 /// Nom lisible d'une vitesse xHCI.

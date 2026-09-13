@@ -108,6 +108,14 @@ use politique::PERIODE_RELEVE_MS;
 /// ce qu'une telle page reste visiblement vivante, et divise par douze le cout
 /// que payait le repos.
 
+/// Silence de l'enregistreur de vol au-dela duquel le compositeur ecrit a sa
+/// place, en nanosecondes.
+///
+/// Deux secondes. L'enregistreur ecrit quatre fois par seconde quand tout va
+/// bien : deux secondes de silence ne sont pas une pause, c'est un fil qui ne
+/// tourne plus.
+const SILENCE_ENREGISTREUR_NS: u64 = 2_000_000_000;
+
 fn plein_ecran() -> Rect {
     Rect::neuf(0, 0, fb::width() as u32, fb::height() as u32)
 }
@@ -473,10 +481,25 @@ fn boucle() {
         // preciser laquelle ne permettait pas de distinguer un bureau qui a un
         // clavier et pas de souris d'un bureau qui a les deux.
         let legacy_clavier = crate::platform::pc::stage2::legacy_ps2_clavier();
+        // AUCUN POINTEUR EST UN ETAT, ET IL DOIT SE LIRE.
+        //
+        // Le 12 septembre a 18:40, un controleur xHCI n'a pas rendu sa souris,
+        // le repli PS/2 s'est arme sur un 8042 qui n'en avait pas non plus, et
+        // la machine est morte. Le bureau survit desormais sans pointeur -- le
+        // clavier suffit a l'utiliser -- mais encore faut-il que le releve le
+        // DISE, au lieu d'annoncer « souris=ps2 » sur une machine qui n'en a
+        // aucune.
+        let souris = if !legacy_souris {
+            "usb"
+        } else if crate::drivers::mouse::ps2_presente() {
+            "ps2"
+        } else {
+            "aucune"
+        };
         crate::serial_println!(
             "BOUCHAUD_STAGE2_INPUT_READY clavier={} souris={}",
             if legacy_clavier { "ps2" } else { "usb" },
-            if legacy_souris { "ps2" } else { "usb" },
+            souris,
         );
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
@@ -493,6 +516,8 @@ fn boucle() {
     let mut menu_open = false;
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
+    // Position du pointeur a l'appui qui a ouvert le glissement en cours.
+    let mut depart_glissement = (0i32, 0i32);
     let mut spawn_n = 0i32;
     // (icon_idx, offset_x_from_icon, offset_y_from_icon, start_mx, start_my)
     let mut icon_drag: Option<(usize, i32, i32, i32, i32)> = None;
@@ -573,6 +598,18 @@ fn boucle() {
         if !crate::drivers::xhci_active::fil_hid_actif() {
             crate::drivers::xhci_active::poll();
         }
+        // LE FILET DE L'ENREGISTREUR DE VOL.
+        //
+        // Les trois archives physiques s'arretent a l'instant ou le navigateur
+        // demarre, sans une seule erreur d'ecriture : l'enregistreur n'avait
+        // pas echoue, il n'etait plus elu. Sa priorite a ete relevee ; ce
+        // filet couvre le cas ou ce ne serait pas la seule cause.
+        //
+        // Le compositeur, lui, tourne toujours -- c'est la boucle qui dessine.
+        // `filet_de_securite` ne fait rien tant que l'enregistreur ecrit, et
+        // `poll()` abandonne si le pilote USB est pris : il ne peut donc pas
+        // allonger une trame.
+        crate::kernel::blackbox::filet_de_securite(SILENCE_ENREGISTREUR_NS);
         let maintenant = crate::kernel::timer::monotonic_ms();
 
         // ---- Clavier (non bloquant) ----
@@ -611,6 +648,15 @@ fn boucle() {
                         envoie_touche(client, evenement);
                         TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                         derniere_entree = maintenant;
+                        // BOUCHAUD_GUI_FRAPPE_EST_UNE_ENTREE_V1
+                        //
+                        // La souris notait l'entree au veilleur, le clavier
+                        // non. Une session de SAISIE -- taper une adresse dans
+                        // le navigateur, precisement le cas qu'on cherche a
+                        // mesurer -- etait donc comptee comme un bureau au
+                        // repos, et la telemetrie mentait sur le seul moment
+                        // qui nous interesse.
+                        note_entree_bureau(&mut veilleur, maintenant);
                     }
                 }
                 continue;
@@ -633,6 +679,7 @@ fn boucle() {
                     envoie_touche(client, evenement);
                     TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                     derniere_entree = maintenant;
+                    note_entree_bureau(&mut veilleur, maintenant);
                     continue;
                 }
                 // Application du noyau : c'est le bureau qui la dessine, donc
@@ -655,7 +702,17 @@ fn boucle() {
         let my = myu as i32;
         let wheel = mouse::take_wheel();
         let left = mouse::left_down();
-        let click = left && !prev_left;
+        // BOUCHAUD_GUI_FRONT_PENDANT_GLISSEMENT_V1
+        //
+        // Un front montant alors qu'un glissement est DEJA ouvert ne peut pas
+        // etre un nouvel appui : le glissement ne survit pas au relachement,
+        // il est repris juste en dessous. Si le bureau voit malgre tout le
+        // bouton remonter, c'est son ETAT qui a vacille -- pas la main de
+        // l'utilisateur. Le compter pour un clic rearmait le detecteur de
+        // double-clic a chaque tour, et maintenir une barre de titre basculait
+        // le plein ecran au lieu de deplacer la fenetre.
+        let glissement_en_cours = drag.is_some() || icon_drag.is_some();
+        let click = left && !prev_left && !glissement_en_cours;
         let release = !left && prev_left;
         prev_left = left;
         // La position part au client quand le curseur bouge **ou** quand un
@@ -747,6 +804,17 @@ fn boucle() {
         } else {
             let ended_drag = drag.take();
             if release {
+                // Un appui qui a servi a TIRER n'ouvre pas un double-clic.
+                // Sans cet oubli, relacher une fenetre deplacee puis
+                // reappuyer sur sa barre de titre la basculait en plein ecran.
+                if ended_drag.is_some() {
+                    let bouge = (mx - depart_glissement.0)
+                        .abs()
+                        .max((my - depart_glissement.1).abs());
+                    if bouge > crate::gui::windowing::DoubleClickDetector::MAX_DISTANCE {
+                        title_clicks.oublie();
+                    }
+                }
                 if matches!(ended_drag, Some(Drag::Move(..))) {
                     if let Some(window) = wins.last_mut() {
                         let before = cadre_fenetre(window);
@@ -802,8 +870,12 @@ fn boucle() {
                 "BOUCHAUD_STAGE2_CLICK_DISPATCHED x={} y={} buttons={:#x}",
                 mx, my, crate::drivers::mouse::buttons(),
             );
+            let sans_glissement = drag.is_none();
             handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
                 &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
+            if sans_glissement && drag.is_some() {
+                depart_glissement = (mx, my);
+            }
             sale = true;
         }
         if wheel != 0 {
@@ -1209,10 +1281,21 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (px, py, pw, ph) = fb::dernier_present_rect();
     let maintenant_ns = crate::kernel::timer::monotonic_ns();
     crate::serial_println!(
-        "[GUI-PRESENT] present_calls={} lfb_copies={} lfb_pixels={} \
+        "[GUI-PRESENT] debit_mio_s={} pat_coeurs={}/{} present_calls={} lfb_copies={} lfb_pixels={} \
          backbuffer_generation={} refused_userland={} refused_backbuffer={} \
          refused_lfb={} refused_empty_rect={} last_present_rect={},{},{},{} \
          last_present_ns={} since_last_present_ms={}",
+        // LE DEBIT, qui dit si le framebuffer est combinable ou non.
+        crate::drivers::gfx::debit_framebuffer_mio_s(),
+        // ET LE COMPTE DE COEURS, qui dit s'il l'est POUR TOUS.
+        //
+        // La PAT est par coeur. Un coeur oublie verrait la meme page non
+        // cachable la ou les autres la voient combinable -- et le manuel
+        // declare INDEFINI le melange de types memoire pour une meme page.
+        // Le compte etait releve avant le demarrage des coeurs secondaires,
+        // donc il ne prouvait rien.
+        crate::arch::x86_64::pat::coeurs_configures(),
+        crate::arch::x86_64::smp::schedulable_cpus(),
         demandes, copies, pixels_lfb,
         fb::pixels_dessines(),
         userland, tampon, lfb, vide,
@@ -1327,13 +1410,45 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     );
 
     crate::serial_println!(
-        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} polling={}",
+        "[USB-HID-V3] xhci={} ports={} devices={} keyboards={} mice={} \
+polling={} scrutations_par_s={} replis_en_quarantaine={} repli_tours={} repli_servis={}",
         crate::drivers::xhci_active::is_active() as u8,
         crate::drivers::xhci_active::connected_ports(),
         crate::drivers::xhci_active::usb_devices(),
         crate::drivers::xhci_active::hid_keyboards(),
         crate::drivers::xhci_active::hid_mice(),
         crate::drivers::xhci_active::hid_polling() as u8,
+        // LE CHIFFRE QUI A NOMME LE DEFAUT.
+        //
+        // Il valait 3 sur la machine de reference, et il a fallu extraire
+        // l'enregistreur de vol pour le lire. Il se lit maintenant ici.
+        crate::drivers::xhci_active::cadence_scrutation(),
+        crate::drivers::xhci_active::replis_en_quarantaine(),
+        // LE PONT EP0 A SON PROPRE FIL : ces deux chiffres le disent.
+        //
+        // `repli_tours` doit suivre la milliseconde, et `repli_servis` rester
+        // tres en dessous -- un point servi par tour au plus. S'ils se
+        // rejoignent, c'est que tous les points sont muets et que le pont
+        // porte toute l'entree ; s'ils tombent tous les deux, le fil est mort.
+        crate::drivers::xhci_active::repli_ep0_compteurs().0,
+        crate::drivers::xhci_active::repli_ep0_compteurs().1,
+    );
+
+    // LE CHIEN DE GARDE DES POINTS HID.
+    //
+    // Le releve du 13 septembre montre une souris qui produit 692 evenements
+    // puis se tait pour le reste de la session, sans que rien ne le dise :
+    // vu du compteur d'evenements, une souris immobile et une souris morte se
+    // ressemblent trait pour trait. Ces quatre nombres les separent.
+    // `hors_service` a zero et `reprises` a zero : tout va bien. `reprises`
+    // qui monte : un point s'arrete et on le remet en route. `hors_service`
+    // non nul : le transport Interrupt-IN d'un peripherique est perdu et
+    // c'est le pont EP0 qui le porte.
+    let (reprises, reussies, hors_service, evenements_perdus) =
+        crate::drivers::xhci_active::chien_de_garde_hid();
+    crate::serial_println!(
+        "[USB-HID-VEILLE] reprises={} reussies={} hors_service={} evenements_perdus={}",
+        reprises, reussies, hors_service, evenements_perdus,
     );
     if crate::drivers::xhci_active::hid_ready() {
         crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");
@@ -1719,6 +1834,17 @@ fn handle_click(
         if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
                 if kind == usize::MAX { *quit = true; }
+                // ARRETER LA MACHINE, ET PAS SEULEMENT LE BUREAU.
+                //
+                // `Quitter` rend la main au shell ; ces deux-la ferment la
+                // session pour de bon, apres avoir ecrit sur la cle ce que la
+                // session a produit. Elles ne reviennent jamais.
+                else if kind == window::KIND_ETEINDRE {
+                    crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK);
+                }
+                else if kind == window::KIND_REDEMARRER {
+                    crate::kernel::power::reboot();
+                }
                 else if kind == window::KIND_NAVIGATEUR {
                     lance_navigateur(wins, home, degats);
                     fenetre_ouverte = true;

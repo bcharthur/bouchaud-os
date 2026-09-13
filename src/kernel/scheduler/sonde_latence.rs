@@ -19,6 +19,25 @@
 // Elle mesure une machine emulee, sur une charge synthetique. Elle ne dit rien
 // des latences sous Ladybird, ni sur le materiel de reference.
 
+// # CE QU'ELLE REND AUJOURD'HUI, ET QUI N'EST PAS VERT
+//
+// Sur quatre coeurs emules avec huit bruleurs, elle rend
+// `SCHED_LATENCE_ECHEC raison=echeance-dormeurs` : les dormeurs n'achevent pas
+// leurs quarante cycles en trente secondes, et seize echantillons sur cent
+// soixante sont releves. Ce n'est pas une panne de la sonde -- c'est ce
+// qu'elle est faite pour voir, et elle le voit : sous contention, un dormeur
+// de classe Normale n'est pratiquement plus reveille.
+//
+// La sonde reste donc ici, et AUCUNE barriere ne l'execute : un scenario qui
+// la lancerait serait rouge en permanence, et un scenario rouge en permanence
+// finit par etre eteint. Elle est un instrument de diagnostic, pas un test.
+//
+// Elle a par ailleurs longtemps IMMOBILISE la machine, et cela a ete impute a
+// tort a ses huit bruleurs. La cause etait ailleurs : le rendez-vous non
+// reentrant du registre des taches (`registre.rs`), que la creation et le
+// recyclage massifs de taches declenchaient. Depuis ce correctif, la sonde va
+// jusqu'a son verdict et la machine s'eteint proprement.
+
 use crate::kernel::scheduler::latency;
 use crate::kernel::task::{spawn_noyau_priorite, Priorite};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

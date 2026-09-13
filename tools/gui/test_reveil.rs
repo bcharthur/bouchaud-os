@@ -587,3 +587,36 @@ fn la_jauge_ne_retarde_jamais_une_trame_en_attente() {
     assert!(PERIODE_TRAME_MS < PERIODE_JAUGE_MS);
     assert_eq!(duree_sommeil_ms(&etat), Some(PERIODE_TRAME_MS));
 }
+
+/// Un client muet au repos doit rester VISIBLEMENT anime.
+///
+/// # Ce que cette borne protege
+///
+/// `REPOS_MUET_MS` a valu deux cents millisecondes -- cinq images par seconde.
+/// Ce chiffre avait ete choisi quand une presentation plein ecran coutait
+/// soixante-quinze millisecondes, parce que le framebuffer du micrologiciel
+/// etait decrit non cachable par les MTRR. Depuis que ses pages sont en
+/// ecriture combinee, le releve physique du 12 septembre 2026 mesure une
+/// mediane de 0,00 ms et un maximum de 2,50 ms sur 1262 presentations.
+///
+/// Le navigateur ne parle pas le protocole : il EST ce client muet. A cinq
+/// images par seconde, une page qui charge avance par a-coups de deux cents
+/// millisecondes, et c'est ce que l'utilisateur decrit comme « extremement
+/// lent ». Remonter cette borne sans remesurer le cout d'une presentation
+/// referait exactement ce compromis-la.
+#[test]
+fn un_client_muet_au_repos_reste_anime() {
+    assert!(
+        REPOS_MUET_MS <= 50,
+        "au repos, un client muet doit etre recompose au moins vingt fois par \
+         seconde ; {} ms n'en donne que {}",
+        REPOS_MUET_MS,
+        1000 / REPOS_MUET_MS.max(1),
+    );
+    // Et jamais plus vite que la periode de trame : recopier deux fois entre
+    // deux presentations serait du travail que personne ne verrait.
+    assert!(
+        REPOS_MUET_MS >= PERIODE_TRAME_MS,
+        "le repos ne peut pas etre plus rapide que la cadence de trame"
+    );
+}

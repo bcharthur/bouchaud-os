@@ -129,6 +129,28 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     //    fournit les frames et le creneau d'adressage du ring 3.
     kernel::vmm::init();
 
+    // LA PAT ICI, ET PAS DANS `arch::init`.
+    //
+    // Sur la machine de reference -- UEFI, `reference-desktop` --, `stage2::run`
+    // est appele quelques lignes plus bas et NE REND JAMAIS LA MAIN :
+    // `arch::x86_64::init()` n'est donc jamais atteint. La configuration y
+    // vivait, et le releve le disait sans que je le lise -- `coeurs_pat=0`,
+    // `pat=0x0007040600070406`, soit la valeur de sortie d'usine.
+    //
+    // Elle vit desormais au seul endroit que TOUS les chemins traversent :
+    // apres la pagination, qui est tout ce dont elle a besoin, et avant le
+    // premier pixel.
+    arch::x86_64::pat::configure_ce_coeur();
+
+    // L'EXTINCTION SE PREPARE AU DEMARRAGE, PAS AU MOMENT DE COUPER.
+    //
+    // Chercher le RSDP, la FADT puis `\_S5_` alors que le systeme est deja en
+    // train de s'arreter, c'est parcourir la memoire physique au pire moment.
+    // Ici, la pagination est prete, rien n'a encore d'effet de bord, et le
+    // releve de vol portera la preuve que la machine SAIT s'eteindre -- bien
+    // avant qu'on le lui demande.
+    kernel::acpi_s5::prepare(boot_info);
+
     // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
     // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.
     if reference_bringup && boot_info.firmware == boot::FirmwareKind::Uefi {
@@ -208,6 +230,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // demarre doit avoir son reseau en service, comme il a son clavier.
     // `net::demarre` n'echoue jamais — voir sa documentation.
     net::demarre();
+
+    // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
+    //
+    // Sur la machine de reference, l'autonegociation cuivre n'avait pas fini
+    // trois secondes apres la mise sous tension : le verdict « lien bas »
+    // etait definitif, et le navigateur repondait « Unable to resolve host »
+    // pour le reste de la session.
+    net::demarre_le_veilleur_de_lien();
     kernel::dmesg::log("shell: initialise");
 
     // 5. Banniere d'accueil.
@@ -240,6 +270,26 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // Voir la note d'amorcage equivalente dans `stage2.rs` : l'entree ne doit
     // pas dependre de la cadence du rendu.
     drivers::xhci_active::demarre_le_fil_hid();
+
+    // LE PONT EP0 SUR SON PROPRE FIL.
+    //
+    // Un peripherique muet en Interrupt-IN -- le clavier de la machine de
+    // reference -- n'a pas d'autre transport que `GET_REPORT`, et ce transfert
+    // est synchrone. Le laisser dans la boucle de scrutation ramenait celle-ci
+    // de mille tours par seconde a cent soixante-six.
+    drivers::xhci_active::demarre_le_fil_repli_ep0();
+
+    // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
+    // USB par transferts synchrones, et ce cout n'a rien a faire sur le
+    // chemin de l'entree.
+    drivers::xhci_active::demarre_le_fil_blackbox();
+
+    // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
+    //
+    // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
+    // change entre les deux, c'est le cache de pages propres. Ce fil le
+    // remplit une fois, trois secondes apres le bureau, et se tait.
+    kernel::prechauffage::demarre();
 
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.

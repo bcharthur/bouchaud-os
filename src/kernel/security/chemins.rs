@@ -145,6 +145,19 @@ fn lecture_commune(path: &str) -> bool {
         || sous_arbre(path, "/tmp")
         || sous_arbre(path, "/var/tmp")
         || sous_arbre(path, "/proc/self")
+        // `/proc/sys/vm` et `/proc/sys/kernel` : le noyau les PUBLIE pour les
+        // allocateurs (`sysroot.rs` les cree en 0444), puis le bac a sable en
+        // refusait la lecture. Le releve physique du 12 septembre montre le
+        // resultat : trois `SECURITY-DENY ... path=/proc/sys/vm/overcommit_memory`
+        // a chaque lancement du navigateur, un par processus.
+        //
+        // Ce sont des valeurs de configuration fixes -- `0`, `65530`,
+        // `6.1.0-bouchaud` -- que la moindre machine Linux rend a tout le
+        // monde. Les deux sous-arbres sont NOMMES plutot que `/proc/sys`
+        // entier : un `/proc/sys` futur qui porterait quelque chose de
+        // sensible ne serait pas accorde par accident.
+        || sous_arbre(path, "/proc/sys/vm")
+        || sous_arbre(path, "/proc/sys/kernel")
         || sous_arbre(path, "/dev/shm")
         || path == "/dev/null"
         || path == "/dev/zero"

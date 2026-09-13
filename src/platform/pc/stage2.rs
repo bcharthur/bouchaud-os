@@ -287,13 +287,32 @@ pub fn run(boot: &'static BootInfo) -> ! {
     );
 
     let _network_state = crate::net::demarre();
+
+    // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
+    //
+    // Sur la machine de reference, l'autonegociation cuivre n'avait pas fini
+    // trois secondes apres la mise sous tension : le verdict « lien bas »
+    // etait definitif, et le navigateur repondait « Unable to resolve host »
+    // pour le reste de la session.
+    crate::net::demarre_le_veilleur_de_lien();
     point_de_controle("reseau");
 
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
     // directement dans le bureau, donc il doit fournir le meme contrat avant
     // que l'utilisateur double-clique sur Ladybird.
     crate::shell::set_exported_for_boot("BOUCHAUD_M9", "1");
-    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "https://example.com/");
+    // LA PAGE D'ACCUEIL.
+    //
+    // `example.com` servait a prouver qu'une page se charge : c'est un
+    // document de six lignes, sans script, sans image, sans redirection. Il
+    // n'a plus rien a prouver -- et il ne dit rien a quelqu'un qui ouvre un
+    // navigateur pour s'en servir.
+    //
+    // `www.google.com` plutot que `google.com` : la forme courte repond par
+    // une redirection, et un saut de plus est un endroit de plus ou une
+    // premiere mise en service peut echouer sans qu'on sache lequel des deux
+    // a manque.
+    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "https://www.google.com/");
     crate::shell::set_exported_for_boot("BOUCHAUD_M11", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");
@@ -337,7 +356,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
 
     if browser_present && data_mounted && network_ready {
         crate::serial_println!(
-            "BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK url=https://example.com/"
+            "BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK url=https://www.google.com/"
         );
     } else {
         crate::serial_println!(
@@ -388,12 +407,43 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Voir la note d'amorcage equivalente dans `main.rs`.
     crate::platform::pc::installation::lance_le_montage_differe();
 
+    // LE MODE DE SECOURS EST CONSULTE ICI, ET NULLE PART AILLEURS.
+    //
+    // Un bureau qui ne demarre pas laisse une machine sans aucun moyen de dire
+    // pourquoi : ni journal lisible, ni commande a taper. La console, elle,
+    // suffit a lancer `hwtest` et a relever un `bootlog`.
+    if crate::platform::pc::trigkey::secours_demande() {
+        crate::serial_println!("BOUCHAUD_STAGE2_SAFE_MODE bureau=non-lance console=texte");
+        crate::drivers::vga::set_serial_mirror(true);
+        crate::shell::run();
+    }
+
     // L'ENTREE AVANT LE BUREAU.
     //
     // Le fil de scrutation doit exister AVANT que le compositeur ne prenne la
     // main : sinon la premiere seconde du bureau -- celle du chargement des
     // polices, la plus lente -- se passe encore sans souris.
     crate::drivers::xhci_active::demarre_le_fil_hid();
+
+    // LE PONT EP0 SUR SON PROPRE FIL.
+    //
+    // Un peripherique muet en Interrupt-IN -- le clavier de la machine de
+    // reference -- n'a pas d'autre transport que `GET_REPORT`, et ce transfert
+    // est synchrone. Le laisser dans la boucle de scrutation ramenait celle-ci
+    // de mille tours par seconde a cent soixante-six.
+    crate::drivers::xhci_active::demarre_le_fil_repli_ep0();
+
+    // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
+    // USB par transferts synchrones, et ce cout n'a rien a faire sur le
+    // chemin de l'entree.
+    crate::drivers::xhci_active::demarre_le_fil_blackbox();
+
+    // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
+    //
+    // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
+    // change entre les deux, c'est le cache de pages propres. Ce fil le
+    // remplit une fois, trois secondes apres le bureau, et se tait.
+    crate::kernel::prechauffage::demarre();
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");

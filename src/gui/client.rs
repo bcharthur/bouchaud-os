@@ -132,6 +132,25 @@ impl Client {
                     largeur_px, hauteur_px
                 ),
                 "QT_QPA_FB_DISABLE_INPUT=1".to_string(),
+                // BOUCHAUD_NAVIGATEUR_RESOLVEUR_REEL_V1
+                //
+                // LE NAVIGATEUR INTERROGEAIT UN RESOLVEUR QUI N'EXISTE PAS
+                //
+                // Son hote a une valeur de repli ecrite en dur -- `10.0.2.3`,
+                // le resolveur du NAT de QEMU --, et personne ne lui disait
+                // jamais autre chose. Le releve physique le montre a chaque
+                // session : « Setting DNS server to 10.0.2.3:53 », sur une
+                // machine ou cette adresse ne mene nulle part, suivi de
+                // « Unable to resolve host » pour toutes les pages.
+                //
+                // La variable est lue AU LANCEMENT : elle porte donc le
+                // resolveur que le bail DHCP a rendu, s'il y en a eu un, et la
+                // valeur compilee sinon -- c'est-a-dire exactement ce que le
+                // repli aurait donne. On ne peut rien perdre a la poser.
+                alloc::format!(
+                    "BOUCHAUD_DNS_SERVER={}",
+                    crate::net::ipv4::format_addr(&crate::net::dns_server()),
+                ),
             ]
         };
 
@@ -144,6 +163,35 @@ impl Client {
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
             chemin, pid, largeur_px, hauteur_px
         ));
+        // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
+        //
+        // Le releve du 13 septembre montre les deux instants :
+        //
+        //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
+        //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
+        //
+        // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
+        // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
+        // sa vie, et a repondu « Unable to resolve host » sur une machine dont
+        // le reseau marchait.
+        //
+        // La cadence de reprise DHCP a ete resserree pour que ce creneau se
+        // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
+        // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
+        // resolveur non configure, au lieu de laisser chercher la panne dans
+        // le navigateur.
+        let pret = matches!(
+            crate::net::etat_demarrage(),
+            crate::net::Demarrage::Pret,
+        );
+        crate::serial_println!(
+            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
+            pid,
+            crate::net::ipv4::format_addr(&crate::net::dns_server()),
+            crate::net::nom_verdict(),
+            crate::net::connecte() as u8,
+            if pret { "configure" } else { "NON-CONFIGURE" },
+        );
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le
         // lancement du MEME instant, sinon les deux durees de demarrage
@@ -543,7 +591,35 @@ impl Client {
         self.jauge.en_cours() || self.jauge.visible() != visible_avant
     }
 
-    const PATIENCE_MS: u64 = 6000;
+    /// Delai avant de conclure qu'un client ne parle pas le protocole.
+    ///
+    /// # Ce que ce delai coute a l'utilisateur
+    ///
+    /// Tant qu'il court, le compositeur ne recopie PAS la surface du client :
+    /// il attend d'y etre invite. Une fenetre dont le client ne parlera jamais
+    /// reste donc vide pendant toute cette duree.
+    ///
+    /// Il valait six secondes, et le releve physique du 12 septembre 2026 les
+    /// montre une par une : la fenetre du navigateur s'ouvre a 14:52:46, et il
+    /// faut attendre 14:52:52 et la ligne « muet apres 6 s » pour que le
+    /// premier pixel du navigateur atteigne l'ecran. Six secondes de fenetre
+    /// vide a chaque lancement, alors que `BROWSER_HOST_INITIALIZED` tombe
+    /// dans la SECONDE qui suit l'`execve` sur cette machine.
+    ///
+    /// # Pourquoi le raccourcir ne casse rien
+    ///
+    /// Le verdict de silence est REVISABLE, et c'est tout le propos de
+    /// `VerdictProtocole` : un client qui se met a parler apres coup fait
+    /// gagner `actif`, `muet` retombe, et la recomposition au rythme fixe
+    /// s'arrete -- avec une ligne de journal pour le dire. Le seul cout d'un
+    /// verdict rendu trop tot est donc quelques recopies de surface avant la
+    /// revision, et une recopie coute desormais moins d'une milliseconde
+    /// depuis que le framebuffer est ecrit en combine.
+    ///
+    /// Une seconde et demie laisse a un client bavard largement le temps de
+    /// dire bonjour -- c'est son premier message, envoye des la connexion --
+    /// et rend quatre secondes et demie a chaque ouverture de fenetre.
+    const PATIENCE_MS: u64 = 1500;
 
     pub fn verifie_silence(&mut self) -> bool {
         if self.verdict.protocole_actif()
@@ -557,9 +633,9 @@ impl Client {
             return false;
         }
         crate::kernel::dmesg::log_fmt(format_args!(
-            "gui: client pid={} muet apres {} s — composition au rythme fixe",
+            "gui: client pid={} muet apres {} ms — composition au rythme fixe",
             self.pid,
-            Self::PATIENCE_MS / 1000
+            Self::PATIENCE_MS
         ));
         self.verdict.declare_muet();
         self.jauge.abandonne_demarrage();

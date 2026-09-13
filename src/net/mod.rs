@@ -38,6 +38,8 @@ use crate::drivers::vga::{self, COLOR_CYAN, COLOR_GREEN, COLOR_YELLOW, COLOR_DEF
 use alloc::format;
 use alloc::string::String;
 use crate::net::ipv4::Ipv4Addr;
+use crate::kernel::sync::SpinLockIrq;
+use core::sync::atomic::AtomicBool;
 
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
@@ -57,6 +59,10 @@ pub fn dns_server() -> Ipv4Addr { unsafe { DNS_IP } }
 /// Applique une configuration reseau (ex. obtenue par DHCP). Invalide le cache ARP.
 pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
     unsafe { OUR_IP = ip; GW_IP = gw; DNS_IP = dns; GW_MAC = None; }
+    // Une adresse materielle apprise avant la configuration ne vaut plus rien,
+    // et une entree NEGATIVE posee pendant qu'on etait mal configure ferait
+    // echouer les deux premieres secondes d'un reseau desormais correct.
+    oublie_voisins();
 }
 
 /// Indique si une interface routable vers l'exterieur est active.
@@ -159,6 +165,326 @@ fn demarre_interne() -> Demarrage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_NET_IDENTITE_V1 : de QUEL reseau s'agit-il ?
+// ---------------------------------------------------------------------------
+//
+// Un cable n'a pas de SSID. Le seul nom qu'un reseau filaire se donne est
+// celui que son serveur DHCP annonce dans l'option 15 -- « fritz.box »,
+// « home », « lan ». Il etait DEJA demande dans la liste des parametres
+// souhaites ; personne ne lisait la reponse.
+//
+// A defaut de nom, le sous-reseau en tient lieu : « 192.168.1.0/24 » identifie
+// le reseau aussi surement, et c'est ce qu'affichent les outils quand le
+// serveur ne nomme rien.
+
+/// Longueur maximale du nom de reseau retenu.
+const NOM_RESEAU_MAX: usize = 63;
+static mut NOM_RESEAU: [u8; NOM_RESEAU_MAX] = [0; NOM_RESEAU_MAX];
+static mut NOM_RESEAU_LEN: usize = 0;
+static mut MASQUE: Ipv4Addr = [0, 0, 0, 0];
+
+/// Retient ce que le bail DHCP a appris sur l'identite du reseau.
+pub fn pose_identite_reseau(domaine: &[u8], masque: Ipv4Addr) {
+    unsafe {
+        let n = domaine.len().min(NOM_RESEAU_MAX);
+        NOM_RESEAU[..n].copy_from_slice(&domaine[..n]);
+        NOM_RESEAU_LEN = n;
+        MASQUE = masque;
+    }
+}
+
+/// Oublie l'identite du reseau : le lien est tombe, elle ne vaut plus rien.
+pub fn oublie_identite_reseau() {
+    unsafe {
+        NOM_RESEAU_LEN = 0;
+        MASQUE = [0, 0, 0, 0];
+    }
+}
+
+/// Le nom du reseau, tel qu'on peut l'afficher.
+///
+/// Dans l'ordre : le domaine annonce par DHCP, sinon le sous-reseau, sinon la
+/// passerelle, sinon rien. On ne FABRIQUE jamais un nom : « hors ligne » se lit
+/// a l'etat du lien, pas a une chaine vide.
+pub fn nom_reseau() -> String {
+    unsafe {
+        if NOM_RESEAU_LEN != 0 {
+            if let Ok(nom) = core::str::from_utf8(&NOM_RESEAU[..NOM_RESEAU_LEN]) {
+                return String::from(nom);
+            }
+        }
+        let ip = our_ip();
+        // La longueur de prefixe et l'adresse de reseau viennent du module pur
+        // du client DHCP, celui que la suite hote met a l'epreuve. Les
+        // recopier ici en ferait deux versions a corriger.
+        if let Some(prefixe) = dhcp::options::longueur_prefixe(MASQUE) {
+            let reseau = dhcp::options::adresse_reseau(ip, MASQUE);
+            return format!("{}/{}", ipv4::format_addr(&reseau), prefixe);
+        }
+        if ip != [0, 0, 0, 0] {
+            return ipv4::format_addr(&ip);
+        }
+    }
+    String::new()
+}
+
+/// Ce que le lien vaut, a cet instant.
+///
+/// Un cable n'a pas de force de signal : sa QUALITE se lit a trois choses --
+/// la vitesse negociee, le duplex, et les trames que la carte a laissees
+/// tomber faute de tampon. Un lien a l'alternat sur du cuivre moderne signale
+/// presque toujours une negociation ratee d'un cote, et les collisions y
+/// divisent le debit utile.
+pub struct QualiteLien {
+    pub vitesse_mbps: u32,
+    pub duplex_complet: bool,
+    pub trames_perdues: u32,
+}
+
+/// Lit la qualite du lien courant.
+pub fn qualite_lien() -> QualiteLien {
+    QualiteLien {
+        vitesse_mbps: e1000::vitesse_mbps(),
+        duplex_complet: e1000::duplex_complet(),
+        trames_perdues: e1000::trames_perdues(),
+    }
+}
+
+/// Le reseau est-il utilisable pour joindre l'exterieur, a cet instant ?
+///
+/// `external_enabled()` repond sur le VERDICT de demarrage ; celle-ci repond
+/// sur l'etat courant, lien compris. C'est ce que doit montrer une icone.
+pub fn connecte() -> bool {
+    matches!(etat_demarrage(), Demarrage::Pret | Demarrage::SansBail)
+        && e1000::link_up()
+}
+
+/// L'interface physique est-elle presente et pilotee ?
+pub fn carte_presente() -> bool {
+    !matches!(etat_demarrage(), Demarrage::SansCarte | Demarrage::CarteRefusee)
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_NET_VEILLEUR_DE_LIEN_V1
+// ---------------------------------------------------------------------------
+
+/// Periode de relecture de l'etat du lien, en millisecondes.
+///
+/// Une seconde : un cable qu'on branche est vu dans la seconde, et le cout est
+/// une lecture de registre par seconde.
+const PERIODE_LIEN_MS: u64 = 1_000;
+
+/// Periode de relance de l'autonegociation quand le lien est bas.
+///
+/// # Pourquoi il faut la RELANCER, et pas seulement attendre
+///
+/// Le pilote lisait l'etat du lien et n'ecrivait jamais dans le PHY. Sur la
+/// machine de reference, brancher le cable APRES le demarrage ne montait rien :
+/// le PHY restait dans l'etat ou la reinitialisation du controleur l'avait
+/// laisse, sans negociation en cours, et le bit de lien n'est monte a aucun
+/// moment de la session -- le releve du 12 septembre 17:55 ne contient pas une
+/// seule ligne `NET_LIEN etat=UP`.
+///
+/// Quatre secondes : une autonegociation cuivre gigabit dure une a trois
+/// secondes, et la relancer avant qu'elle ait fini la recommencerait
+/// indefiniment.
+const PERIODE_AUTONEGOCIATION_MS: u64 = 4_000;
+
+/// Attente avant la PREMIERE reprise DHCP apres une montee de lien.
+///
+/// # Pourquoi dix secondes etaient beaucoup trop
+///
+/// Le releve du 13 septembre 00:00 montre la sequence complete :
+///
+/// ```text
+/// 23:59:02  lien UP 1000 Mb/s duplex complet -> DHCP echoue
+/// 23:59:34  lien UP (rebranchement)          -> DHCP echoue
+/// 23:59:42  navigateur lance, dns=10.0.2.3   -> about:error
+/// 00:00:05  eth0 192.168.1.97 gw 192.168.1.254 dns 192.168.1.254 -- pret
+/// ```
+///
+/// Le reseau FONCTIONNE. Il a simplement mis trente et une secondes a se
+/// configurer, parce que les reprises etaient espacees de dix secondes qui
+/// doublaient, et que l'utilisateur a clique sur le navigateur entre-temps.
+///
+/// Une premiere requete perdue juste apres une montee de lien est NORMALE :
+/// le commutateur en face vient d'allumer son port et n'apprend les adresses
+/// qu'apres une seconde ou deux. Deux secondes, c'est le temps qu'il faut
+/// pour retenter une fois que le lien porte vraiment du trafic.
+const PERIODE_DHCP_MS: u64 = 2_000;
+
+/// Budget laisse au serveur DHCP par le veilleur, par etape.
+///
+/// Sept cents millisecondes suffisent AU DEMARRAGE, ou l'enjeu est de ne pas
+/// retarder le bureau pour un reseau qui n'existe peut-etre pas. Ici l'enjeu
+/// est l'inverse : le lien vient de monter, il y a de bonnes chances qu'un
+/// serveur reponde, et ce fil ne retarde rien. Quatre secondes, c'est ce que
+/// la commande `dhcp` tapee a la main accorde deja.
+const BUDGET_DHCP_VEILLEUR_MS: u64 = 4_000;
+
+/// Plafond de l'attente entre deux reprises DHCP.
+///
+/// L'attente DOUBLE a chaque echec jusqu'a ce plafond. Un reseau cable sans
+/// serveur DHCP -- un commutateur de laboratoire, une liaison directe -- est
+/// une situation durable : la retenter toutes les dix secondes pendant des
+/// heures est du bruit, et ne trouvera rien de plus qu'a la centieme fois.
+/// Une minute reste assez court pour qu'un serveur qui demarre soit vu.
+const PLAFOND_DHCP_MS: u64 = 60_000;
+
+static VEILLEUR_LANCE: AtomicBool = AtomicBool::new(false);
+
+/// Relit l'etat du lien et reconfigure quand il change.
+///
+/// # LE DEFAUT QUE CE FIL CORRIGE
+///
+/// `demarre()` etait appele UNE fois, et son verdict etait definitif. Le
+/// releve physique du 12 septembre finit ainsi :
+///
+/// ```text
+/// BOUCHAUD_TRIGKEY_RTL8168_DRIVER_OK mac=b0:41:6f:09:70:a1
+/// BOUCHAUD_TRIGKEY_RTL8168_LINK_DOWN
+/// net: lo actif ; eth0 initialisee, lien bas
+/// ```
+///
+/// La carte est reconnue, le pilote fonctionne, et le lien est bas au moment
+/// precis ou on regarde -- trois secondes apres la mise sous tension, ce qui
+/// est court pour une autonegociation cuivre gigabit, et plus court encore
+/// que le temps de brancher un cable. Apres quoi plus personne ne regardait :
+/// la machine restait hors ligne pour la duree de la session, et le
+/// navigateur repondait « Unable to resolve host » a toutes les pages.
+///
+/// Le fil ne fabrique aucune configuration : il ne fait que refaire ce que
+/// `demarre()` fait, quand l'etat du materiel a change.
+fn veilleur_de_lien() -> ! {
+    let mut lien_precedent = e1000::link_up();
+    let mut prochain_dhcp_ms = 0u64;
+    let mut attente_dhcp_ms = PERIODE_DHCP_MS;
+    let mut prochaine_negociation_ms = 0u64;
+    loop {
+        crate::kernel::task::sleep_ticks(
+            crate::kernel::timer::ms_to_ticks(PERIODE_LIEN_MS),
+        );
+        let lien = e1000::link_up();
+        let etat = etat_demarrage();
+
+        if lien != lien_precedent {
+            lien_precedent = lien;
+            crate::serial_println!(
+                "BOUCHAUD_NET_LIEN etat={} ancien_verdict={}",
+                if lien { "UP" } else { "DOWN" },
+                nom_demarrage(etat),
+            );
+            if !lien {
+                // Le cable part : on ne garde pas une configuration qui ne
+                // mene plus nulle part, sinon chaque requete part dans le vide
+                // et attend son echeance.
+                unsafe { DEMARRAGE = Demarrage::LienBas; }
+                oublie_identite_reseau();
+                oublie_voisins();
+                crate::kernel::dmesg::log("net: eth0 lien tombe");
+                continue;
+            }
+            // Le lien monte : on retente tout de suite, et la montee remet
+            // l'attente a son plancher -- c'est un evenement neuf, pas la
+            // suite de la serie d'echecs precedente.
+            prochain_dhcp_ms = 0;
+            attente_dhcp_ms = PERIODE_DHCP_MS;
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "net: eth0 lien UP {} Mb/s duplex {}",
+                e1000::vitesse_mbps(),
+                if e1000::duplex_complet() { "complet" } else { "alternat" },
+            ));
+        }
+
+        if matches!(etat, Demarrage::SansCarte | Demarrage::CarteRefusee) {
+            continue;
+        }
+        if !lien {
+            // LE CABLE QU'ON VIENT DE BRANCHER DEMANDE UNE NEGOCIATION.
+            //
+            // Regarder le bit de lien sans jamais rien demander au PHY, c'est
+            // attendre un evenement que personne ne declenche.
+            let maintenant = crate::kernel::timer::monotonic_ms();
+            if maintenant >= prochaine_negociation_ms {
+                prochaine_negociation_ms =
+                    maintenant.saturating_add(PERIODE_AUTONEGOCIATION_MS);
+                e1000::reveille_le_lien();
+            }
+            continue;
+        }
+        if matches!(etat, Demarrage::Pret | Demarrage::SansBail) {
+            continue;
+        }
+        let maintenant = crate::kernel::timer::monotonic_ms();
+        if maintenant < prochain_dhcp_ms {
+            continue;
+        }
+        prochain_dhcp_ms = maintenant.saturating_add(attente_dhcp_ms);
+        let nouvel_etat = match dhcp::negocie_avant(BUDGET_DHCP_VEILLEUR_MS) {
+            Some(_) => Demarrage::Pret,
+            None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
+            None => Demarrage::SansBail,
+        };
+        if matches!(nouvel_etat, Demarrage::Pret) {
+            attente_dhcp_ms = PERIODE_DHCP_MS;
+        } else {
+            attente_dhcp_ms = attente_dhcp_ms.saturating_mul(2).min(PLAFOND_DHCP_MS);
+        }
+        if nouvel_etat as u8 != etat as u8 {
+            unsafe { DEMARRAGE = nouvel_etat; }
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "net: eth0 {} gw {} dns {} — {}",
+                ipv4::format_addr(&our_ip()),
+                ipv4::format_addr(&gateway()),
+                ipv4::format_addr(&dns_server()),
+                nom_demarrage(nouvel_etat),
+            ));
+            crate::serial_println!(
+                "BOUCHAUD_NET_RECONFIGURE verdict={}",
+                nom_demarrage(nouvel_etat),
+            );
+        }
+    }
+}
+
+/// Le verdict courant, en un mot, pour les releves periodiques.
+pub fn nom_verdict() -> &'static str {
+    nom_demarrage(etat_demarrage())
+}
+
+fn nom_demarrage(etat: Demarrage) -> &'static str {
+    match etat {
+        Demarrage::SansCarte => "sans-carte",
+        Demarrage::CarteRefusee => "carte-refusee",
+        Demarrage::LienBas => "lien-bas",
+        Demarrage::SansBail => "sans-bail",
+        Demarrage::SansConfiguration => "sans-configuration",
+        Demarrage::Pret => "pret",
+    }
+}
+
+/// Lance le veilleur de lien. Sans effet si une carte manque.
+pub fn demarre_le_veilleur_de_lien() -> bool {
+    if VEILLEUR_LANCE.load(core::sync::atomic::Ordering::Acquire) {
+        return true;
+    }
+    if matches!(etat_demarrage(), Demarrage::SansCarte | Demarrage::CarteRefusee) {
+        // Rien a veiller : pas de carte, ou une carte que personne ne pilote.
+        return false;
+    }
+    if crate::kernel::task::spawn_noyau_priorite(
+        veilleur_de_lien,
+        "net-lien",
+        crate::kernel::task::Priorite::Normale,
+    ) {
+        VEILLEUR_LANCE.store(true, core::sync::atomic::Ordering::Release);
+        crate::serial_println!("BOUCHAUD_NET_VEILLEUR_LANCE periode_ms={}", PERIODE_LIEN_MS);
+        return true;
+    }
+    false
+}
+
 /// Active l'interface eth0 (initialise le driver e1000).
 pub fn ifup() {
     if e1000::init() {
@@ -241,6 +567,85 @@ const ARP_TTL_MS: u64 = 60_000;
 /// repaie pas a chaque paquet.
 const ARP_TTL_NEGATIF_MS: u64 = 2_000;
 
+// ===========================================================================
+// BOUCHAUD_NET_RECEPTION_UNIQUE_V1 : une carte, un seul lecteur, rien de jete
+// ===========================================================================
+//
+// ## Le defaut, tel que le releve du 13 septembre le montre
+//
+// ```text
+// M17_UDP_TX dst=192.168.1.254:53 src_port=49185 octets=29 parti=false
+// M9_RS_STATE id=0 DNSLookup -> Error
+// WebContent: Failed load of "https://example.com/", Unable to resolve host
+// ```
+//
+// Le lien est a 1000 Mb/s duplex complet, le bail DHCP est pose, le resolveur
+// est le bon : et AUCUNE requete DNS ne part. `parti=false` vient de
+// `hop_mac`, qui vient de `arp_resolve`, qui n'a jamais vu la reponse de la
+// passerelle. DHCP fonctionnait parce qu'il est en DIFFUSION -- il ne demande
+// aucune resolution ; tout le reste, qui est en unicast, echouait.
+//
+// ## Pourquoi ARP ne pouvait pas aboutir
+//
+// La carte avait CINQ lecteurs concurrents -- `arp_resolve`, `poll_ip`,
+// `dhcp::recv_avant`, `ping`, le pont smoltcp -- et chacun JETAIT ce qui ne
+// l'interessait pas :
+//
+// * `arp_resolve` jetait toute trame non-ARP : la reponse DNS qu'un autre fil
+//   attendait mourait la ;
+// * `dhcp::recv_avant` jetait toute trame non-DHCP : la reponse ARP qu'un
+//   autre fil attendait mourait la ;
+// * `poll_ip` mettait de cote les paquets IP des autres, mais lui non plus ne
+//   partageait rien avec les deux precedents.
+//
+// Une reponse ARP est unique : il n'y en a pas de retransmission de protocole.
+// Il suffit donc qu'un autre lecteur la sorte de l'anneau une seule fois pour
+// que la resolution echoue -- et qu'elle echoue POUR DE BON, puisque l'echec
+// est mis en cache.
+//
+// ## Ce que cette version fait
+//
+// Un seul point sort les trames de la carte : `draine_verrouille`. Il ROUTE
+// chaque trame vers celui a qui elle appartient -- cache ARP, boite DHCP,
+// file IP par protocole -- et n'en jette aucune. Tous les attendeurs lisent
+// ensuite leur propre boite. Personne ne mange le courrier d'un autre.
+//
+// Le verrou masque les interruptions : sans cela une preemption au milieu du
+// routage laisserait le verrou pris par une tache qui ne tourne plus. Sa
+// section critique est bornee par `TRAMES_PAR_PASSAGE`.
+
+/// Le verrou de la reception : etat partage de la pile ET anneau de la carte.
+///
+/// Il protege le cache ARP, la file des paquets mis de cote et la boite DHCP.
+/// Avant lui, `sendto` (sans gros verrou) et `pump_udp` (sous le domaine
+/// Reseau du gros verrou) modifiaient les memes `Vec` depuis deux processeurs.
+static VERROU_RECEPTION: SpinLockIrq<()> = SpinLockIrq::new(());
+
+// Ce que le routage a vu, pour que le prochain releve physique puisse DIRE si
+// la resolution marche au lieu de laisser deviner. Des compteurs relaches :
+// ils ne commandent rien, ils racontent.
+use core::sync::atomic::{AtomicU64, Ordering as OrdreCompteur};
+static TRAMES_ROUTEES: AtomicU64 = AtomicU64::new(0);
+static TRAMES_ARP: AtomicU64 = AtomicU64::new(0);
+static TRAMES_DHCP: AtomicU64 = AtomicU64::new(0);
+static ARP_RESOLUS: AtomicU64 = AtomicU64::new(0);
+static ARP_ECHOUES: AtomicU64 = AtomicU64::new(0);
+static ARP_NON_EMIS: AtomicU64 = AtomicU64::new(0);
+
+/// Ce que le routage de reception a vu depuis le demarrage.
+///
+/// `(trames, arp, dhcp, arp_resolus, arp_echoues, arp_non_emis)`.
+pub fn compteurs_routage() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        TRAMES_ROUTEES.load(OrdreCompteur::Relaxed),
+        TRAMES_ARP.load(OrdreCompteur::Relaxed),
+        TRAMES_DHCP.load(OrdreCompteur::Relaxed),
+        ARP_RESOLUS.load(OrdreCompteur::Relaxed),
+        ARP_ECHOUES.load(OrdreCompteur::Relaxed),
+        ARP_NON_EMIS.load(OrdreCompteur::Relaxed),
+    )
+}
+
 fn cache_arp() -> &'static mut alloc::vec::Vec<EntreeArp> {
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(CACHE_ARP);
@@ -251,11 +656,11 @@ fn cache_arp() -> &'static mut alloc::vec::Vec<EntreeArp> {
     }
 }
 
-/// Ce que l'on sait de `ip`.
+/// Ce que l'on sait de `ip`, **le verrou de reception etant tenu**.
 ///
 /// `None` : rien (ou l'entree a expire). `Some(None)` : on sait qu'il ne
 /// repond pas. `Some(Some(mac))` : on connait son adresse.
-fn arp_cache_lit(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
+fn arp_cache_lit_verrouille(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
     let maintenant = crate::kernel::timer::monotonic_ms();
     let file = cache_arp();
     file.retain(|e| {
@@ -265,7 +670,13 @@ fn arp_cache_lit(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
     file.iter().find(|e| e.ip == ip).map(|e| e.mac)
 }
 
-fn arp_cache_pose(ip: Ipv4Addr, mac: Option<[u8; 6]>) {
+/// Ce que l'on sait de `ip`. Prend le verrou de reception.
+fn arp_cache_lit(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
+    let _garde = VERROU_RECEPTION.lock();
+    arp_cache_lit_verrouille(ip)
+}
+
+fn arp_cache_pose_verrouille(ip: Ipv4Addr, mac: Option<[u8; 6]>) {
     let file = cache_arp();
     file.retain(|e| e.ip != ip);
     if file.len() >= ARP_CACHE_MAX {
@@ -274,15 +685,44 @@ fn arp_cache_pose(ip: Ipv4Addr, mac: Option<[u8; 6]>) {
     file.push(EntreeArp { ip, mac, pose_a: crate::kernel::timer::monotonic_ms() });
 }
 
+fn arp_cache_pose(ip: Ipv4Addr, mac: Option<[u8; 6]>) {
+    let _garde = VERROU_RECEPTION.lock();
+    arp_cache_pose_verrouille(ip, mac);
+}
+
+/// Retient qu'un voisin n'a pas repondu -- **sans ecraser une reussite**.
+///
+/// `arp_resolve` pose son echec a la fin de sa fenetre d'ecoute. Entre-temps,
+/// le routage peut avoir appris la bonne adresse depuis une trame que ce
+/// fil-ci n'a pas regardee. Poser l'echec sans regarder transformerait une
+/// resolution reussie en voisin muet pour deux secondes, a chaque fois.
+fn arp_cache_pose_echec(ip: Ipv4Addr) {
+    let _garde = VERROU_RECEPTION.lock();
+    if matches!(arp_cache_lit_verrouille(ip), Some(Some(_))) {
+        return;
+    }
+    arp_cache_pose_verrouille(ip, None);
+}
+
+/// Oublie tous les voisins connus.
+///
+/// Appele quand la configuration change ou que le lien tombe : une adresse
+/// materielle apprise sur un reseau ne vaut rien sur un autre, et une entree
+/// NEGATIVE survivrait a la reparation de ce qui l'a causee.
+pub fn oublie_voisins() {
+    let _garde = VERROU_RECEPTION.lock();
+    cache_arp().clear();
+}
+
 /// Enregistre ce qu'une trame ARP nous apprend, quelle qu'elle soit.
 ///
 /// Une requete comme une reponse portent `sender_ip`/`sender_mac` : un voisin
 /// qui nous parle se presente, et c'est gratuit a retenir. C'est aussi ce qui
 /// referme la boucle du chemin non bloquant : la requete partie sans attendre
-/// trouvera sa reponse ici, au prochain passage de `poll_ip`.
+/// trouvera sa reponse ici, au prochain passage du routage.
 fn arp_apprend(paquet: &arp::Packet) {
     if paquet.sender_ip != [0, 0, 0, 0] {
-        arp_cache_pose(paquet.sender_ip, Some(paquet.sender_mac));
+        arp_cache_pose_verrouille(paquet.sender_ip, Some(paquet.sender_mac));
     }
 }
 
@@ -305,74 +745,95 @@ fn arp_apprend(paquet: &arp::Packet) {
 /// (`TcpConn::pump`, appele sous le verrou du socket) n'attend JAMAIS : il
 /// passe par [`send_ip_immediat`].
 pub(crate) fn attente_cedante() {
-    if crate::kernel::task::in_user_task()
-        && crate::kernel::smp_lock::held_by_current_cpu()
-    {
+    // CEDER DES QU'IL Y A QUELQU'UN A QUI CEDER.
+    //
+    // La condition exigeait en plus que le gros verrou soit tenu. Elle datait
+    // du temps ou `sleep_ticks` l'exigeait lui-meme ; ce n'est plus vrai --
+    // `sleep_ticks` releve la profondeur d'entree, quelle qu'elle soit, et
+    // « zero est une profondeur comme une autre ». La consequence etait que
+    // TOUS les chemins hors gros verrou tournaient a plein processeur pendant
+    // leur attente : `sendto` pendant sa resolution ARP (jusqu'a deux
+    // secondes), le client DHCP du veilleur de lien (quatre secondes par
+    // etape), la commande `ping`. Autant de temps vole a l'interface.
+    //
+    // `in_user_task` dit exactement ce qu'il faut savoir ici : une tache est
+    // ordonnancee sur ce processeur, donc il y a quelqu'un a qui rendre la
+    // main. Pendant l'initialisation du demarrage, il n'y a personne, et on
+    // tourne -- ce qui est correct, et borne par l'echeance de l'appelant.
+    if crate::kernel::task::in_user_task() {
         crate::kernel::task::sleep_ticks(1);
     } else {
         core::hint::spin_loop();
     }
 }
 
+/// Resout l'adresse materielle de `target`, en attendant au plus
+/// `ARP_TENTATIVES * ARP_ECOUTE_MS`.
+///
+/// # Ce fil ne lit plus la carte lui-meme
+///
+/// La version precedente vidait l'anneau a son propre compte et jetait toute
+/// trame non-ARP. Deux consequences, toutes deux observees :
+///
+/// 1. elle detruisait la reponse DNS qu'un autre fil attendait ;
+/// 2. elle ratait sa propre reponse ARP des qu'un AUTRE lecteur -- le client
+///    DHCP du veilleur de lien, le `pump_udp` d'un `recvfrom` -- l'avait
+///    sortie de l'anneau avant elle, ce qui arrive d'autant plus surement que
+///    la reponse ARP est unique et jamais retransmise.
+///
+/// Desormais elle pose sa question, fait tourner le ROUTAGE commun, et
+/// surveille le cache : peu importe quel fil a sorti la reponse de l'anneau,
+/// elle y sera.
 fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
-    let mac = e1000::mac();
-    let mut arp_buf = [0u8; arp::PACKET_LEN];
-    arp::build(&mut arp_buf, arp::OP_REQUEST, mac, our_ip(), [0; 6], target)?;
-    let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
-    let flen = ethernet::build_frame(&mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf)?;
-
-    let mut buf = [0u8; 2048];
     // Site 70 : cette attente est la seule du noyau qui se compte en secondes.
     // La marquer permet a la jauge de tenue maximale du BKL de la NOMMER au
     // lieu de rendre un nombre orphelin.
     crate::kernel::task::stall_site_set(70, u64::from(target[3]));
     for _tentative in 0..ARP_TENTATIVES {
-        e1000::send(&frame[..flen]);
-        let echeance = crate::kernel::timer::monotonic_ms() + ARP_ECOUTE_MS;
-        // Attente serree et **bornee dans le temps**. On ne cede pas le
-        // processeur ici : `arp_resolve` est appele depuis les couches basses
-        // de la pile, y compris pendant l'initialisation, ou ceder n'aurait pas
-        // le meme sens partout. Le cout reste borne a deux secondes au pire, et
-        // il n'est paye qu'a la premiere sortie vers un voisin inconnu.
-        while crate::kernel::timer::monotonic_ms() < echeance {
-            let n = match e1000::receive(&mut buf) {
-                Some(n) => n,
-                None => {
-                    // Rien sur l'anneau : ceder, et surtout ne pas garder le
-                    // gros verrou pendant ce temps-la.
-                    attente_cedante();
-                    continue;
-                }
-            };
-            if n < ethernet::HEADER_LEN + arp::PACKET_LEN {
+        // ON VERIFIE QUE LA QUESTION EST PARTIE.
+        //
+        // `e1000::send` rend `false` quand l'anneau d'emission est plein, et
+        // personne ne regardait : on attendait alors cinq cents millisecondes
+        // la reponse a une question jamais posee. Draîner libere des
+        // descripteurs et laisse une seconde chance.
+        if !arp_demande_sans_attendre(target) {
+            draine_anneau();
+            if !arp_demande_sans_attendre(target) {
+                ARP_NON_EMIS.fetch_add(1, OrdreCompteur::Relaxed);
+                attente_cedante();
                 continue;
             }
-            let header = match ethernet::parse_header(&buf[..n]) {
-                Some(h) if h.ethertype == ethernet::ETHERTYPE_ARP => h,
-                _ => continue,
-            };
-            let _ = header;
-            let paquet = match arp::parse(&buf[ethernet::HEADER_LEN..n]) {
-                Some(p) => p,
-                None => continue,
-            };
-            arp_apprend(&paquet);
-            if paquet.op == arp::OP_REPLY && paquet.sender_ip == target {
-                crate::kernel::task::stall_site_clear();
-                return Some(paquet.sender_mac);
+        }
+        let echeance = crate::kernel::timer::monotonic_ms() + ARP_ECOUTE_MS;
+        while crate::kernel::timer::monotonic_ms() < echeance {
+            // Le routage commun apprend TOUTE trame ARP, requete comme
+            // reponse, d'ou qu'elle vienne.
+            if draine_anneau() == 0 {
+                // Rien sur l'anneau : ceder, et surtout ne pas garder le gros
+                // verrou pendant ce temps-la.
+                attente_cedante();
             }
-            // Le pair nous interroge en meme temps qu'on l'interroge : c'est le
-            // cas normal d'une premiere prise de contact, et ne pas repondre ici
-            // ferait echouer sa moitie de la resolution.
-            if paquet.op == arp::OP_REQUEST {
-                repond_arp(&buf[..n]);
+            if let Some(Some(mac)) = arp_cache_lit(target) {
+                crate::kernel::task::stall_site_clear();
+                ARP_RESOLUS.fetch_add(1, OrdreCompteur::Relaxed);
+                return Some(mac);
             }
         }
     }
     crate::kernel::task::stall_site_clear();
+    ARP_ECHOUES.fetch_add(1, OrdreCompteur::Relaxed);
+    crate::serial_println!(
+        "BOUCHAUD_NET_ARP_ECHEC cible={}.{}.{}.{} tentatives={} ecoute_ms={} \
+trames_routees={} trames_arp={}",
+        target[0], target[1], target[2], target[3],
+        ARP_TENTATIVES,
+        ARP_ECOUTE_MS,
+        TRAMES_ROUTEES.load(OrdreCompteur::Relaxed),
+        TRAMES_ARP.load(OrdreCompteur::Relaxed),
+    );
     // Retenir l'echec : c'est ce qui empeche les deux secondes de se repayer au
-    // paquet suivant.
-    arp_cache_pose(target, None);
+    // paquet suivant. Jamais au prix d'une reussite concurrente.
+    arp_cache_pose_echec(target);
     None
 }
 
@@ -400,9 +861,28 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
     }
 }
 
-/// Meme reseau /24 que eth0 ?
+/// `ip` est-elle sur NOTRE reseau, au sens du masque que DHCP a donne ?
+///
+/// # Pourquoi le /24 code en dur etait un defaut
+///
+/// La fonction supposait que tout reseau tient dans un /24. Le bail DHCP
+/// porte pourtant son masque (option 1), il est deja lu et deja retenu dans
+/// `MASQUE` -- personne ne s'en servait pour router. Sur un /16 domestique ou
+/// un /22 d'entreprise, chaque voisin hors des 254 premieres adresses etait
+/// donc envoye a la passerelle, qui le renvoyait sur le meme cable : au mieux
+/// un aller-retour inutile, au pire un voisin injoignable si la passerelle ne
+/// fait pas de redirection.
+///
+/// Sans masque connu -- avant le bail, ou sur une configuration statique de
+/// repli -- on retombe sur le /24, qui est ce que la version precedente
+/// faisait toujours.
 fn same_subnet(ip: &Ipv4Addr) -> bool {
-    ip[0] == our_ip()[0] && ip[1] == our_ip()[1] && ip[2] == our_ip()[2]
+    let nous = our_ip();
+    let masque = unsafe { MASQUE };
+    if masque == [0, 0, 0, 0] {
+        return ip[0] == nous[0] && ip[1] == nous[1] && ip[2] == nous[2];
+    }
+    (0..4).all(|i| ip[i] & masque[i] == nous[i] & masque[i])
 }
 
 static mut IP_ID: u16 = 0x4000;
@@ -429,7 +909,9 @@ fn hop_mac(dst: &Ipv4Addr, bloquant: bool) -> Option<[u8; 6]> {
     }
 
     if !bloquant {
-        arp_demande_sans_attendre(cible);
+        // Une seule requete, et on rend la main : la reponse sera apprise par
+        // le routage commun, et l'appelant retentera au tour suivant.
+        let _ = arp_demande_sans_attendre(cible);
         return None;
     }
 
@@ -443,17 +925,24 @@ fn hop_mac(dst: &Ipv4Addr, bloquant: bool) -> Option<[u8; 6]> {
 /// La reponse sera apprise par `arp_apprend`, appele sur chaque trame ARP que
 /// `poll_ip` sort de la carte. L'appelant retentera au tour suivant : un accuse
 /// TCP est cumulatif, un datagramme perdu est retransmis.
-fn arp_demande_sans_attendre(target: Ipv4Addr) {
+///
+/// Rend `true` si la trame est REELLEMENT partie. L'ancienne version rendait
+/// `()` et ignorait le verdict de `e1000::send` : une requete restee dans un
+/// anneau plein etait alors indiscernable d'une requete a laquelle personne
+/// n'a repondu, et l'appelant attendait une reponse a une question jamais
+/// posee.
+fn arp_demande_sans_attendre(target: Ipv4Addr) -> bool {
     let mac = e1000::mac();
     let mut arp_buf = [0u8; arp::PACKET_LEN];
     if arp::build(&mut arp_buf, arp::OP_REQUEST, mac, our_ip(), [0; 6], target).is_none() {
-        return;
+        return false;
     }
     let mut frame = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
-    if let Some(flen) = ethernet::build_frame(
+    match ethernet::build_frame(
         &mut frame, ethernet::BROADCAST, mac, ethernet::ETHERTYPE_ARP, &arp_buf,
     ) {
-        e1000::send(&frame[..flen]);
+        Some(flen) => e1000::send(&frame[..flen]),
+        None => false,
     }
 }
 
@@ -494,38 +983,37 @@ fn envoie(dst: Ipv4Addr, proto: u8, payload: &[u8], bloquant: bool) -> bool {
 /// l'oublie et cesse de nous router les paquets. Un petit transfert se termine
 /// avant l'echeance, un gros non — d'ou un defaut qui n'apparaissait que sur
 /// les gros fichiers, et jamais sur une page.
-fn repond_arp(trame: &[u8]) -> bool {
-    let entete = match ethernet::parse_header(trame) {
-        Some(h) => h,
-        None => return false,
-    };
-    if entete.ethertype != ethernet::ETHERTYPE_ARP {
-        return false;
-    }
+fn traite_arp(trame: &[u8]) {
     let paquet = match arp::parse(&trame[ethernet::HEADER_LEN..]) {
         Some(p) => p,
-        None => return false,
+        None => return,
     };
     // Toute trame ARP nous apprend qui est son emetteur, requete comme reponse.
     // C'est ce qui referme la boucle du chemin non bloquant.
     arp_apprend(&paquet);
     if paquet.op != arp::OP_REQUEST || paquet.target_ip != our_ip() {
-        return true; // c'est de l'ARP, mais pas pour nous : deja consomme
+        return; // c'est de l'ARP, mais pas pour nous
     }
 
     let mac = e1000::mac();
     let mut reponse = [0u8; arp::PACKET_LEN];
     if arp::build(&mut reponse, arp::OP_REPLY, mac, our_ip(),
                   paquet.sender_mac, paquet.sender_ip).is_none() {
-        return true;
+        return;
     }
     let mut sortie = [0u8; ethernet::HEADER_LEN + arp::PACKET_LEN];
     if let Some(longueur) = ethernet::build_frame(
         &mut sortie, paquet.sender_mac, mac, ethernet::ETHERTYPE_ARP, &reponse) {
         e1000::send(&sortie[..longueur]);
     }
-    true
 }
+
+/// Attente d'une reponse a un echo ICMP, en millisecondes.
+///
+/// Une duree, et non trois millions de tours de boucle : un nombre de tours
+/// vaut une seconde ici et trente seconde ailleurs, ce qui est exactement le
+/// defaut deja corrige dans l'ecoute ARP et dans `recvfrom`.
+const PING_ATTENTE_MS: u64 = 1_000;
 
 /// Nombre de trames examinees par appel.
 ///
@@ -616,6 +1104,169 @@ fn reclame_en_attente(
     Some((paquet.src, m))
 }
 
+// ---------------------------------------------------------------------------
+// La boite aux lettres du client DHCP
+// ---------------------------------------------------------------------------
+//
+// Une reponse DHCP arrive AVANT qu'on ait une adresse : elle est adressee a
+// 255.255.255.255, et `poll_ip` ne saurait a qui la rendre. Elle a donc sa
+// propre boite, que seul le client DHCP releve. Sans elle, le client devrait
+// relire la carte lui-meme -- et c'est exactement ce qui lui faisait jeter les
+// reponses ARP que les autres fils attendaient.
+
+/// Reponses DHCP sorties de l'anneau et pas encore relevees.
+static mut BOITE_DHCP: Option<alloc::vec::Vec<(alloc::vec::Vec<u8>, u64)>> = None;
+/// Une negociation DORA n'a que deux reponses en vol ; quatre laissent la
+/// place a une relance sans jamais faire grossir la memoire.
+const BOITE_DHCP_MAX: usize = 4;
+/// Au-dela, la reponse concerne une negociation abandonnee depuis longtemps.
+const BOITE_DHCP_AGE_MS: u64 = 10_000;
+
+fn boite_dhcp() -> &'static mut alloc::vec::Vec<(alloc::vec::Vec<u8>, u64)> {
+    unsafe {
+        let slot = &mut *core::ptr::addr_of_mut!(BOITE_DHCP);
+        slot.get_or_insert_with(alloc::vec::Vec::new)
+    }
+}
+
+fn depose_dhcp_verrouille(charge: &[u8]) {
+    let boite = boite_dhcp();
+    if boite.len() >= BOITE_DHCP_MAX {
+        boite.remove(0);
+    }
+    boite.push((charge.to_vec(), crate::kernel::timer::monotonic_ms()));
+}
+
+/// Releve la plus ancienne reponse DHCP en attente.
+///
+/// Purge au passage ce qui a trop vieilli : une reponse a une negociation
+/// abandonnee ne vaut rien, et son `xid` ne correspondra de toute facon plus.
+pub(crate) fn prend_dhcp(out: &mut [u8]) -> Option<usize> {
+    let _garde = VERROU_RECEPTION.lock();
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let boite = boite_dhcp();
+    boite.retain(|(_, pose_a)| maintenant.wrapping_sub(*pose_a) < BOITE_DHCP_AGE_MS);
+    if boite.is_empty() {
+        return None;
+    }
+    let (charge, _) = boite.remove(0);
+    let n = charge.len().min(out.len());
+    out[..n].copy_from_slice(&charge[..n]);
+    Some(n)
+}
+
+// ---------------------------------------------------------------------------
+// Le routage : LE seul endroit qui sort une trame de la carte
+// ---------------------------------------------------------------------------
+
+/// Sort les trames de la carte et donne chacune a qui elle appartient.
+///
+/// Rend le nombre de trames traitees. Zero veut dire que l'anneau est vide a
+/// cet instant -- et seulement cela, depuis que le pilote ne confond plus une
+/// trame abimee avec une absence de trafic.
+pub(crate) fn draine_anneau() -> usize {
+    let _garde = VERROU_RECEPTION.lock();
+    draine_verrouille()
+}
+
+fn draine_verrouille() -> usize {
+    let mut buf = [0u8; 2048];
+    let mut traitees = 0usize;
+    for _ in 0..TRAMES_PAR_PASSAGE {
+        let n = match e1000::receive(&mut buf) {
+            Some(n) => n,
+            None => break, // plus rien a lire
+        };
+        traitees += 1;
+        TRAMES_ROUTEES.fetch_add(1, OrdreCompteur::Relaxed);
+        route_trame(&buf[..n]);
+    }
+    traitees
+}
+
+/// Donne UNE trame a qui de droit. Ne jette que ce que personne n'attend.
+fn route_trame(trame: &[u8]) {
+    let entete = match ethernet::parse_header(trame) {
+        Some(h) => h,
+        None => return,
+    };
+    match entete.ethertype {
+        // L'ARP passe avant tout : c'est du service de lien, il ne doit jamais
+        // etre jete au motif qu'on attendait autre chose.
+        ethernet::ETHERTYPE_ARP => {
+            TRAMES_ARP.fetch_add(1, OrdreCompteur::Relaxed);
+            traite_arp(trame)
+        }
+        ethernet::ETHERTYPE_IPV4 => route_ipv4(trame),
+        // IPv6, VLAN, controle de flux : la pile ne les traite pas, et les
+        // retenir ne ferait que remplir la file pour personne.
+        _ => {}
+    }
+}
+
+fn route_ipv4(trame: &[u8]) {
+    let n = trame.len();
+    let iph = match ipv4::parse_header(&trame[ethernet::HEADER_LEN..n]) {
+        Some(h) => h,
+        None => return,
+    };
+    let debut = ethernet::HEADER_LEN + iph.header_len;
+    let fin = ethernet::HEADER_LEN + iph.total_len;
+    if debut > fin || fin > n {
+        return;
+    }
+    let charge = &trame[debut..fin];
+
+    // Le bail DHCP arrive avant qu'on ait une adresse, en diffusion : aucun
+    // appelant de `poll_ip` ne le reclamera jamais. Il a sa propre boite.
+    if iph.proto == ipv4::PROTO_UDP {
+        if let Some(u) = udp::parse(charge) {
+            if u.dst_port == 68 {
+                let fin_utile = u.payload_off.saturating_add(u.payload_len);
+                if fin_utile <= charge.len() {
+                    TRAMES_DHCP.fetch_add(1, OrdreCompteur::Relaxed);
+                    depose_dhcp_verrouille(&charge[u.payload_off..fin_utile]);
+                }
+                return;
+            }
+        }
+    }
+
+    // PAS POUR NOUS : ON NE LE GARDE PAS.
+    //
+    // La carte accepte le multicast (`MAR0` tout a un) et la diffusion : sur
+    // un reseau domestique ordinaire, cela veut dire un flux continu de mDNS,
+    // de SSDP et d'annonces diverses. Depuis que TOUT le trafic IP passe par
+    // la file d'attente, retenir ces paquets-la remplirait une file bornee de
+    // courrier que personne ne reclamera jamais -- et le plus ancien part en
+    // premier, donc ce serait la reponse DNS qu'on attend qui sortirait.
+    if !pour_nous(&iph.dst) {
+        return;
+    }
+
+    depose_en_attente_verrouille(iph.proto, iph.src, charge);
+}
+
+/// Ce datagramme nous est-il adresse ?
+///
+/// Notre adresse, la diffusion generale, la diffusion dirigee de notre
+/// sous-reseau. Avant le bail, on ne sait pas encore qui on est : on accepte
+/// tout, parce que refuser reviendrait a ne jamais pouvoir se configurer.
+fn pour_nous(dst: &Ipv4Addr) -> bool {
+    let nous = our_ip();
+    if nous == [0, 0, 0, 0] || *dst == nous || *dst == [255, 255, 255, 255] {
+        return true;
+    }
+    let masque = unsafe { MASQUE };
+    if masque == [0, 0, 0, 0] {
+        // Sans masque connu, on ne sait pas calculer la diffusion dirigee :
+        // seul le /24 de repli est sur, et c'est ce que faisait le routage
+        // avant qu'un masque soit lu.
+        return dst[0] == nous[0] && dst[1] == nous[1] && dst[2] == nous[2];
+    }
+    (0..4).all(|i| dst[i] | masque[i] == 255 && dst[i] & masque[i] == nous[i] & masque[i])
+}
+
 /// Met de cote un paquet destine a un autre appelant.
 ///
 /// Publie au niveau du module : la couche transport en a besoin elle aussi. Un
@@ -624,6 +1275,11 @@ fn reclame_en_attente(
 /// l'anneau — le jeter reintroduirait, entre deux connexions vers le meme
 /// serveur, exactement le defaut que cette file corrige entre protocoles.
 pub(crate) fn depose_en_attente(proto: u8, src: Ipv4Addr, charge: &[u8]) {
+    let _garde = VERROU_RECEPTION.lock();
+    depose_en_attente_verrouille(proto, src, charge);
+}
+
+fn depose_en_attente_verrouille(proto: u8, src: Ipv4Addr, charge: &[u8]) {
     let file = file_en_attente();
     if file.len() >= ATTENTE_MAX {
         file.remove(0);
@@ -636,46 +1292,22 @@ pub(crate) fn depose_en_attente(proto: u8, src: Ipv4Addr, charge: &[u8]) {
     });
 }
 
+/// Rend le prochain paquet `proto` (et source optionnelle) qui nous est arrive.
+///
+/// Non bloquant. Le tout premier geste est de regarder ce que le routage a
+/// deja mis de cote ; ensuite seulement on fait tourner le routage, qui vide
+/// l'anneau et range TOUT ce qu'il y trouve.
 pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -> Option<(Ipv4Addr, usize)> {
+    let _garde = VERROU_RECEPTION.lock();
     // Ce qu'un autre appelant a sorti de l'anneau pour nous passe avant la
     // carte : c'est deja arrive, le rendre plus tard n'aurait aucun sens.
     if let Some(trouve) = reclame_en_attente(proto, src_filter, out) {
         return Some(trouve);
     }
-
-    let mut buf = [0u8; 2048];
-    for _ in 0..TRAMES_PAR_PASSAGE {
-        let n = match e1000::receive(&mut buf) {
-            Some(n) => n,
-            None => return None, // plus rien a lire
-        };
-        // L'ARP passe avant tout : c'est du service de lien, il ne doit jamais
-        // etre jete au motif qu'on attendait autre chose.
-        if repond_arp(&buf[..n]) {
-            continue;
-        }
-        let h = match ethernet::parse_header(&buf[..n]) { Some(h) => h, None => continue };
-        if h.ethertype != ethernet::ETHERTYPE_IPV4 { continue; }
-        let iph = match ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) {
-            Some(h) => h, None => continue,
-        };
-        let start = ethernet::HEADER_LEN + iph.header_len;
-        let end = ethernet::HEADER_LEN + iph.total_len;
-        if start > end || end > n { continue; }
-
-        // Pas pour nous : on le met de cote pour celui qui l'attend, au lieu de
-        // l'abandonner. Voir `PaquetEnAttente`.
-        if iph.proto != proto || src_filter.is_some_and(|s| iph.src != s) {
-            depose_en_attente(iph.proto, iph.src, &buf[start..end]);
-            continue;
-        }
-
-        let len = end - start;
-        let m = len.min(out.len());
-        out[..m].copy_from_slice(&buf[start..start + m]);
-        return Some((iph.src, m));
+    if draine_verrouille() == 0 {
+        return None;
     }
-    None
+    reclame_en_attente(proto, src_filter, out)
 }
 
 // ── Cache DNS (nom -> IPv4) ───────────────────────────────────────────────────
@@ -707,6 +1339,13 @@ fn dns_cache_put(name: &str, ip: Ipv4Addr) {
     }
 }
 
+/// Attente d'une reponse DNS par tentative, en millisecondes.
+///
+/// Un resolveur local repond en quelques millisecondes ; deux secondes
+/// couvrent largement un resolveur distant, et trois tentatives donnent six
+/// secondes au pire -- ce qui reste sous le delai d'un navigateur.
+const DNS_ATTENTE_MS: u64 = 2_000;
+
 /// Resout un nom d'hote en IPv4 via DNS (None en cas d'echec/timeout).
 pub fn resolve(name: &str) -> Option<Ipv4Addr> {
     // Deja une IP ?
@@ -726,12 +1365,25 @@ pub fn resolve(name: &str) -> Option<Ipv4Addr> {
         let ulen = udp::build(&mut udp_buf, 0xC000, 53, &q[..qlen])?;
         send_ip(dns_server(), ipv4::PROTO_UDP, &udp_buf[..ulen]);
 
-        for _ in 0..2_500_000u32 {
-            if let Some((_src, n)) = poll_ip(ipv4::PROTO_UDP, Some(dns_server()), &mut payload) {
-                if let Some(u) = udp::parse(&payload[..n]) {
-                    if u.dst_port == 0xC000 {
-                        let off = u.payload_off;
-                        if let Some(ip) = dns::parse_response(&payload[off..off + u.payload_len], id) {
+        // UNE ECHEANCE, ET NON DEUX MILLIONS ET DEMI DE TOURS.
+        //
+        // Un nombre de tours ne mesure rien : il vaut une seconde ici et
+        // trente ailleurs. C'est la meme faute que celle deja corrigee dans
+        // l'ecoute ARP et dans `recvfrom` -- et ici elle tournait a plein
+        // processeur, sans jamais rendre la main.
+        let echeance = crate::kernel::timer::monotonic_ms() + DNS_ATTENTE_MS;
+        while crate::kernel::timer::monotonic_ms() < echeance {
+            let recu = poll_ip(ipv4::PROTO_UDP, Some(dns_server()), &mut payload);
+            let n = match recu {
+                Some((_src, n)) => n,
+                None => { attente_cedante(); continue; }
+            };
+            if let Some(u) = udp::parse(&payload[..n]) {
+                if u.dst_port == 0xC000 {
+                    let off = u.payload_off;
+                    let fin = off.saturating_add(u.payload_len);
+                    if fin <= n {
+                        if let Some(ip) = dns::parse_response(&payload[off..fin], id) {
                             dns_cache_put(name, ip);
                             return Some(ip);
                         }
@@ -1184,29 +1836,26 @@ fn ping_remote(target: Ipv4Addr) {
         sent += 1;
 
         // Attend l'echo reply correspondant.
+        //
+        // Par le routage commun, et non en lisant la carte : une commande de
+        // diagnostic ne doit pas detruire la reponse DNS que le navigateur
+        // attend au meme instant.
         let mut buf = [0u8; 2048];
         let mut got = false;
-        for _ in 0..3_000_000u32 {
-            if let Some(n) = e1000::receive(&mut buf) {
-                if let Some(h) = ethernet::parse_header(&buf[..n]) {
-                    if h.ethertype == ethernet::ETHERTYPE_IPV4 {
-                        if let Some(iph) = ipv4::parse_header(&buf[ethernet::HEADER_LEN..n]) {
-                            if iph.proto == ipv4::PROTO_ICMP && iph.src == target {
-                                let off = ethernet::HEADER_LEN + iph.header_len;
-                                if off < n {
-                                    if let Some(m) = icmp::parse(&buf[off..n]) {
-                                        if m.msg_type == icmp::ECHO_REPLY && m.id == id && m.seq == seq {
-                                            recv += 1;
-                                            crate::print!("reponse de "); ipv4::print_addr(&target);
-                                            println!(" : icmp_seq={} ttl=64", seq);
-                                            got = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+        let echeance = crate::kernel::timer::monotonic_ms() + PING_ATTENTE_MS;
+        while crate::kernel::timer::monotonic_ms() < echeance {
+            let recu = poll_ip(ipv4::PROTO_ICMP, Some(target), &mut buf);
+            let n = match recu {
+                Some((_, n)) => n,
+                None => { attente_cedante(); continue; }
+            };
+            if let Some(m) = icmp::parse(&buf[..n]) {
+                if m.msg_type == icmp::ECHO_REPLY && m.id == id && m.seq == seq {
+                    recv += 1;
+                    crate::print!("reponse de "); ipv4::print_addr(&target);
+                    println!(" : icmp_seq={} ttl=64", seq);
+                    got = true;
+                    break;
                 }
             }
         }
