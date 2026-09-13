@@ -8,7 +8,7 @@ Ce script modifie uniquement :
 - src/arch/x86_64/idt/reschedule.rs
 - src/platform/pc/stage2.rs
 
-Il crée une sauvegarde dans .patch-backup/ avant modification.
+Il cree une sauvegarde dans .patch-backup/ avant modification.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -86,7 +86,7 @@ foreach ($f in $files) {
 }
 
 # 1) SMP bootstrap guard : pendant INIT/SIPI, le BSP ne doit pas prendre IRQ0,
-# réveiller des files, ni replanifier sur une pile de boot non stabilisée.
+# reveiller des files, ni replanifier sur une pile de boot non stabilisee.
 $smpPath = "src/arch/x86_64/smp.rs"
 $smpNeedle = @'
 static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
