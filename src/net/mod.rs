@@ -125,6 +125,7 @@ pub fn etat_demarrage() -> Demarrage { unsafe { DEMARRAGE } }
 pub fn demarre() -> Demarrage {
     let etat = demarre_interne();
     unsafe { DEMARRAGE = etat; }
+    crate::kernel::sysroot::refresh_resolver();
     let ligne = match etat {
         Demarrage::SansCarte => String::from("net: lo 127.0.0.1 actif ; aucune carte reseau"),
         Demarrage::CarteRefusee => String::from("net: lo actif ; carte presente mais non geree"),
@@ -380,6 +381,7 @@ fn veilleur_de_lien() -> ! {
                 // mene plus nulle part, sinon chaque requete part dans le vide
                 // et attend son echeance.
                 unsafe { DEMARRAGE = Demarrage::LienBas; }
+                crate::kernel::sysroot::refresh_resolver();
                 oublie_identite_reseau();
                 oublie_voisins();
                 crate::kernel::dmesg::log("net: eth0 lien tombe");
@@ -433,6 +435,7 @@ fn veilleur_de_lien() -> ! {
         }
         if nouvel_etat as u8 != etat as u8 {
             unsafe { DEMARRAGE = nouvel_etat; }
+            crate::kernel::sysroot::refresh_resolver();
             crate::kernel::dmesg::log_fmt(format_args!(
                 "net: eth0 {} gw {} dns {} — {}",
                 ipv4::format_addr(&our_ip()),

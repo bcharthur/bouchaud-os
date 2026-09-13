@@ -44,6 +44,7 @@ python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
 python3 tools/ladybird/prepare-platform-complete.py "$SRC"
+python3 tools/ladybird/prepare-network-live.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.
@@ -326,6 +327,7 @@ fi
 # repertoire de polices qu'on vient d'y copier, et les deux doivent arriver
 # ensemble sur le disque Bouchaud. Voir tools/ladybird/fontconfig/fonts.conf.
 mkdir -p "$OUT/resources/fontconfig"
+cp -f "$ROOT/tools/ladybird/start.html" "$OUT/resources/bouchaud-start.html"
 cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
 
 # Le DWARF des runtimes n'a aucun lecteur dans Bouchaud OS.

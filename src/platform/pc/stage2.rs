@@ -301,18 +301,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // directement dans le bureau, donc il doit fournir le meme contrat avant
     // que l'utilisateur double-clique sur Ladybird.
     crate::shell::set_exported_for_boot("BOUCHAUD_M9", "1");
-    // LA PAGE D'ACCUEIL.
-    //
-    // `example.com` servait a prouver qu'une page se charge : c'est un
-    // document de six lignes, sans script, sans image, sans redirection. Il
-    // n'a plus rien a prouver -- et il ne dit rien a quelqu'un qui ouvre un
-    // navigateur pour s'en servir.
-    //
-    // `www.google.com` plutot que `google.com` : la forme courte repond par
-    // une redirection, et un saut de plus est un endroit de plus ou une
-    // premiere mise en service peut echouer sans qu'on sache lequel des deux
-    // a manque.
-    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "https://www.google.com/");
+    // Une page locale ne depend ni du DHCP ni d'un moteur distant au lancement.
+    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "file:///usr/share/ladybird/bouchaud-start.html");
     crate::shell::set_exported_for_boot("BOUCHAUD_M11", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");

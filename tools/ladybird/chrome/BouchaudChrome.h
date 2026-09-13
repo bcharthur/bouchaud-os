@@ -1047,7 +1047,7 @@ inline void send_handshake()
     static constexpr char default_title[] = "Ladybird";
     send_message(Genre::SetTitle, default_title, sizeof(default_title) - 1);
     s.handshake_done = true;
-    outln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
+    warnln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
 }
 
 inline void send_title()
@@ -2480,7 +2480,7 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     // premier affichage qui n'affiche rien.
     if (!s.frame_seen && painted > 0) {
         s.frame_seen = true;
-        outln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
+        warnln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
             painted, s.surface_width, page_height);
     }
     return true;
@@ -4615,7 +4615,7 @@ inline void initialize_from_environment()
             fcntl(s.gui_fd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    outln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
+    warnln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
 
     // Le magasin est relu ICI, une fois, avant la premiere navigation : la
