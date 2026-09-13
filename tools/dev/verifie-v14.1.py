@@ -44,7 +44,8 @@ for forbidden in ('SpinLock', 'Mutex', 'alloc::', 'Vec<', 'String'):
         sys.exit(3)
 
 policy = (root/'src/gui/politique.rs').read_text(encoding='utf-8')
-if 'pub const PERIODE_TRAME_MS: u64 = 16;' not in policy:
-    print('V14.1 note: PERIODE_TRAME_MS is no longer 16 ms; verify target_hz semantics')
+if 'pub const PERIODE_TRAME_MS: u64 =' not in policy:
+    print('V14.1: PERIODE_TRAME_MS a disparu de la politique de composition')
+    sys.exit(3)
 
 print('V14.1 FPS/Hz telemetry contracts: OK')

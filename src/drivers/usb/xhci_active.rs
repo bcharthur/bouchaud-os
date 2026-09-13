@@ -207,6 +207,24 @@ static CONCENTRATEURS_ECHOUES: AtomicUsize = AtomicUsize::new(0);
 static PERIPHERIQUES_DERRIERE: AtomicUsize = AtomicUsize::new(0);
 /// Evenements qu'on n'a pas pu mettre de cote -- donc des frappes perdues.
 static EVENEMENTS_PERDUS: AtomicUsize = AtomicUsize::new(0);
+/// Reprises tentees par le chien de garde des points HID.
+static HID_REPRISES: AtomicUsize = AtomicUsize::new(0);
+/// Reprises qui ont effectivement repose un TD.
+static HID_REPRISES_REUSSIES: AtomicUsize = AtomicUsize::new(0);
+/// Points dont le transport Interrupt-IN a ete declare hors service.
+static HID_TRANSPORTS_CASSES: AtomicUsize = AtomicUsize::new(0);
+
+/// Ce que le chien de garde des points HID a fait.
+///
+/// `(reprises, reussies, transports_hors_service, evenements_perdus)`.
+pub fn chien_de_garde_hid() -> (usize, usize, usize, usize) {
+    (
+        HID_REPRISES.load(Ordering::Relaxed),
+        HID_REPRISES_REUSSIES.load(Ordering::Relaxed),
+        HID_TRANSPORTS_CASSES.load(Ordering::Relaxed),
+        EVENEMENTS_PERDUS.load(Ordering::Relaxed),
+    )
+}
 /// Peripheriques branches apres le demarrage.
 static BRANCHEMENTS: AtomicUsize = AtomicUsize::new(0);
 /// Peripheriques debranches apres le demarrage.
@@ -374,6 +392,33 @@ struct HidEndpoint {
     /// La quarantaine se REPOSE a chaque reprise ratee ; l'annoncer a chaque
     /// fois reviendrait a inonder le journal pour dire ce qui n'a pas change.
     quarantaine_annoncee: bool,
+    /// Instant du dernier evenement de transfert recu sur ce point.
+    ///
+    /// # LE DEFAUT QUE CE CHAMP NOMME
+    ///
+    /// Releve du 13 septembre 11:24 : la souris produit 692 evenements
+    /// Interrupt-IN entre la sixieme et la dix-neuvieme seconde, puis PLUS
+    /// RIEN -- pendant les dix-neuf secondes que l'enregistreur couvre encore,
+    /// et pendant les quatre minutes d'utilisation qui ont suivi. Le pointeur
+    /// etait mort, et l'utilisateur n'a meme pas pu cliquer sur « eteindre ».
+    ///
+    /// Personne ne venait a son secours : le pont EP0 ne s'occupe QUE des
+    /// points qui n'ont jamais parle (`evenements == 0`), et un point qui a
+    /// parle puis s'est tu n'entrait dans aucun cas. La cloche de relance --
+    /// un coup de sonnette tous les cent vingt-huit tours -- etait bien tiree,
+    /// `kicks` le montre, et elle ne ramenait rien : une sonnette ne reveille
+    /// pas un point de terminaison ARRETE.
+    dernier_evenement_ns: u64,
+    /// Reprises tentees par le chien de garde depuis le dernier evenement.
+    reprises_silence: u8,
+    /// Le transport Interrupt-IN de ce point est-il declare hors service ?
+    ///
+    /// Pose par le chien de garde quand ses reprises ont echoue, efface des
+    /// que le point reparle. C'est ce drapeau qui autorise le pont EP0 a
+    /// prendre le relais d'un point qui FONCTIONNAIT : sans lui, le pont
+    /// refusait d'aider precisement le peripherique qui avait prouve qu'il
+    /// marchait.
+    interrupt_in_casse: bool,
     /// Periode declaree par le peripherique pour ce point, en nanosecondes.
     ///
     /// # Pourquoi le pont doit la RESPECTER
@@ -422,6 +467,9 @@ const EMPTY_RING: ProducerRing = ProducerRing {
 
 const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     arme_depuis_ns: 0,
+    dernier_evenement_ns: 0,
+    reprises_silence: 0,
+    interrupt_in_casse: false,
     echecs_repli: 0,
     quarantaine_annoncee: false,
     periode_repli_ns: PERIODE_REPLI_DEFAUT_NS,
@@ -1059,12 +1107,29 @@ fn ring_doorbell(controller: &Controller, slot: u8, target: u8) {
 }
 
 fn command_raw(controller: &mut Controller, parameter: u64, control: u32) -> Result<Trb, &'static str> {
+    command_raw_budget(controller, parameter, control, BUDGET_ATTENTE_NS)
+}
+
+/// `command_raw`, avec une patience explicite.
+///
+/// L'enumeration peut attendre une demi-seconde ; le chien de garde des
+/// points HID, non. Il tourne dans la boucle de scrutation, verrou du pilote
+/// tenu : lui laisser la patience de l'enumeration ferait de chaque tentative
+/// de reprise ratee un demi-seconde d'entree gelee -- exactement le mal qu'il
+/// est cense guerir. Une commande xHCI qui aboutit le fait en microsecondes.
+fn command_raw_budget(
+    controller: &mut Controller,
+    parameter: u64,
+    control: u32,
+    budget_ns: u64,
+) -> Result<Trb, &'static str> {
     let pointer = ring_push(
         &mut controller.command,
         Trb { parameter, status: 0, control },
     );
     ring_doorbell(controller, 0, 0);
-    let event = wait_event(controller, EVT_COMMAND_COMPLETION, None, None).ok_or("command-timeout")?;
+    let event = wait_event_budget(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
+        .ok_or("command-timeout")?;
     if event.parameter & !0xf != pointer & !0xf {
         // Command completions are ordered. A mismatched pointer means the event
         // stream is no longer the one we submitted; fail closed.
@@ -1811,6 +1876,9 @@ fn configure_hids(
         highest_dci = highest_dci.max(dci);
         controller.hids[base_index + installed] = HidEndpoint {
             arme_depuis_ns: 0,
+            dernier_evenement_ns: 0,
+            reprises_silence: 0,
+            interrupt_in_casse: false,
             echecs_repli: 0,
             quarantaine_annoncee: false,
             periode_repli_ns: periode_repli_ns(device.speed, descriptor.interval),
@@ -1905,6 +1973,10 @@ fn configure_hids(
         // enumeration, so interrupt events cannot steal command/control events.
         controller.hids[index].active = true;
         controller.hids[index].arme_depuis_ns = arme_a;
+        // Un point qu'on vient d'armer n'a pas « cesse » de parler : sans
+        // cette date, le chien de garde le declarerait muet des sa premiere
+        // seconde d'existence.
+        controller.hids[index].dernier_evenement_ns = arme_a;
     }
     controller.hid_count += installed;
     Ok(installed)
@@ -3129,6 +3201,11 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
         let ep = &mut controller.hids[index];
         if ep.active && ep.slot_id == slot && ep.dci == dci {
             ep.evenements = ep.evenements.saturating_add(1);
+            // Le point reparle : le chien de garde repart de zero, et le pont
+            // EP0 lui rend la place.
+            ep.dernier_evenement_ns = crate::kernel::timer::monotonic_ns();
+            ep.reprises_silence = 0;
+            ep.interrupt_in_casse = false;
             break;
         }
     }
@@ -3200,6 +3277,155 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     // outstanding so the input path survives shorts and transient transaction
     // errors without requiring an interrupt-driven producer yet.
     arm_hid_endpoint(controller, index);
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_HID_CHIEN_DE_GARDE_V1 : un point qui s'est tu n'est pas un point au repos
+// ---------------------------------------------------------------------------
+//
+// ## Ce qu'on ne pouvait pas distinguer, et qui change tout
+//
+// Une souris qu'on ne bouge pas ne produit aucun evenement. Une souris dont
+// le point de terminaison est ARRETE non plus. Vu du compteur d'evenements,
+// les deux sont identiques -- et c'est pour cela que le silence de dix-neuf
+// secondes du 13 septembre n'a alerte personne.
+//
+// Le CONTEXTE que le controleur tient a jour les separe sans ambiguite :
+//
+// * son etat dit si le point tourne encore (`Running`), ou s'il est arrete,
+//   bloque, ou en erreur ;
+// * son pointeur de defilement dit si le controleur a encore quelque chose a
+//   lire. Le pilote garde TOUJOURS un TD en attente : si le pointeur de
+//   defilement a rattrape notre pointeur d'ecriture, l'anneau est vide, et
+//   c'est qu'un achevement s'est perdu.
+//
+// Une souris au repos est `Running` avec un TD en attente. Elle ne declenche
+// donc jamais rien ici, et c'est la propriete qui rend ce chien de garde sur.
+
+/// Etats d'un point de terminaison dans son contexte de sortie (xHCI 1.2).
+const EP_ETAT_RUNNING: u32 = 1;
+const EP_ETAT_HALTED: u32 = 2;
+
+/// Silence au-dela duquel on VERIFIE l'etat du point.
+///
+/// Trois cents millisecondes : bien plus que la periode de n'importe quel
+/// peripherique d'interface humaine, et assez court pour qu'une reprise ne se
+/// sente pas. La verification ne coute que deux lectures de memoire.
+const SILENCE_HID_NS: u64 = 300_000_000;
+
+/// Reprises tentees avant de declarer le transport Interrupt-IN hors service.
+///
+/// Bornees, parce que chaque reprise pose un TD de plus : sans borne, un
+/// calcul de pointeur faux remplirait l'anneau de TD jamais consommes.
+const REPRISES_SILENCE_MAX: u8 = 3;
+
+/// Patience accordee a une commande de reprise.
+///
+/// Vingt millisecondes : une commande xHCI qui aboutit le fait en
+/// microsecondes, et ce chemin tient le verrou du pilote. Trois tentatives
+/// ratees coutent donc soixante millisecondes, pas une seconde et demie.
+const BUDGET_REPRISE_NS: u64 = 20_000_000;
+
+/// Lit l'etat et le pointeur de defilement d'un point, tels que le controleur
+/// les publie dans le contexte de sortie du peripherique.
+fn etat_point_hid(controller: &Controller, index: usize) -> Option<(u32, u64)> {
+    let ep = controller.hids[index];
+    let slot = ep.slot_id as usize;
+    if slot >= controller.devices.len() {
+        return None;
+    }
+    let device = controller.devices[slot]?;
+    let out_ctx = context_ptr(device.out_ctx_virt, controller.context_size, ep.dci as usize);
+    let etat = unsafe { ctx_r32(out_ctx, 0) & 0x7 };
+    let defilement = unsafe { read_volatile((out_ctx + 8) as *const u64) } & !0xf;
+    Some((etat, defilement))
+}
+
+/// Remet en marche un point de terminaison HID arrete.
+///
+/// Meme sequence que pour le stockage, moins le `CLEAR_FEATURE` : un point
+/// d'interruption HID qui s'arrete n'est presque jamais bloque cote
+/// peripherique, et une requete de classe de plus sur un recepteur qui refuse
+/// deja `SET_IDLE` ne ferait qu'ajouter une echeance.
+fn recupere_point_hid(controller: &mut Controller, index: usize, etat: u32) -> bool {
+    let (slot, dci) = (controller.hids[index].slot_id, controller.hids[index].dci);
+    if etat == EP_ETAT_HALTED {
+        let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+        if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
+            return false;
+        }
+    }
+    // L'anneau repart de son debut : les TRB deja consommes portent l'ancien
+    // cycle et ne seront pas repris.
+    let phys = {
+        let ring = &mut controller.hids[index].ring;
+        ring.index = 0;
+        ring.cycle = 1;
+        unsafe { prepare_link(ring, 1) };
+        ring.phys
+    };
+    let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+    if command_raw_budget(controller, phys | 1, controle, BUDGET_REPRISE_NS).is_err() {
+        return false;
+    }
+    arm_hid_endpoint(controller, index);
+    HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Verifie les points qui ont parle puis se sont tus, et les remet en marche.
+fn veille_points_hid(controller: &mut Controller) {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    for index in 0..controller.hid_count {
+        let ep = controller.hids[index];
+        // Un point qui n'a JAMAIS parle releve du pont EP0, pas d'ici.
+        if !ep.active || ep.evenements == 0 {
+            continue;
+        }
+        if maintenant.saturating_sub(ep.dernier_evenement_ns) < SILENCE_HID_NS {
+            continue;
+        }
+        let Some((etat, defilement)) = etat_point_hid(controller, index) else {
+            continue;
+        };
+        let ecriture = ep.ring.phys + (ep.ring.index * TRB_SIZE) as u64;
+        let file_vide = defilement == ecriture;
+        // LA SEULE CONDITION QUI DISTINGUE LE REPOS DE LA PANNE.
+        if etat == EP_ETAT_RUNNING && !file_vide {
+            continue; // souris immobile : tout va bien
+        }
+        if ep.reprises_silence >= REPRISES_SILENCE_MAX {
+            if !ep.interrupt_in_casse {
+                controller.hids[index].interrupt_in_casse = true;
+                HID_TRANSPORTS_CASSES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "BOUCHAUD_HID_INTERRUPT_HORS_SERVICE slot={} dci={} etat={} file_vide={} silence_ms={} evenements={} pont_ep0=1",
+                    ep.slot_id, ep.dci, etat, file_vide as u8,
+                    maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
+                    ep.evenements,
+                );
+            }
+            continue;
+        }
+        if ep.reprises_silence == 0 {
+            crate::serial_println!(
+                "BOUCHAUD_HID_POINT_MUET slot={} dci={} etat={} file_vide={} silence_ms={} evenements={}",
+                ep.slot_id, ep.dci, etat, file_vide as u8,
+                maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
+                ep.evenements,
+            );
+        }
+        controller.hids[index].reprises_silence = ep.reprises_silence.saturating_add(1);
+        HID_REPRISES.fetch_add(1, Ordering::Relaxed);
+        if etat != EP_ETAT_RUNNING {
+            recupere_point_hid(controller, index, etat);
+        } else {
+            // `Running` et file vide : un achevement s'est perdu. Reposer un
+            // TD suffit, et ne coute rien de plus qu'un rearmement ordinaire.
+            arm_hid_endpoint(controller, index);
+            HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> bool {
@@ -3320,7 +3546,16 @@ fn repli_ep0_un_point(
     let total = controller.hid_count;
     for decalage in 0..total {
         let index = (depart + decalage) % total;
-        if controller.hids[index].evenements != 0 {
+        // UN POINT QUI A PARLE PUIS S'EST TU A DROIT AU PONT, LUI AUSSI.
+        //
+        // La condition portait sur le seul compteur d'evenements : le pont
+        // refusait donc d'aider precisement le peripherique qui avait PROUVE
+        // qu'il fonctionnait, et le pointeur restait mort pour le reste de la
+        // session. Le chien de garde tente d'abord la reparation ; il ne pose
+        // `interrupt_in_casse` que lorsqu'elle a echoue.
+        if controller.hids[index].evenements != 0
+            && !controller.hids[index].interrupt_in_casse
+        {
             continue;
         }
         // UN POINT QU'ON VIENT D'ARMER N'EST PAS UN POINT MUET.
@@ -4898,6 +5133,14 @@ pub fn poll() {
                             HID_KICKS.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    // LA SONNETTE NE REVEILLE PAS UN POINT ARRETE.
+                    //
+                    // Le releve du 13 septembre montre `kicks` qui monte
+                    // regulierement pendant que la souris est morte : on
+                    // sonnait a la porte d'un point de terminaison qui n'etait
+                    // plus en marche. Le chien de garde regarde l'etat au lieu
+                    // d'esperer, et remet le point en route.
+                    veille_points_hid(controller);
                 }
             }
             if changement_hid {

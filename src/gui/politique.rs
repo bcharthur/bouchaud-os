@@ -4,7 +4,25 @@
 //! bureau sont calculées à partir de dates et de booléens.
 
 /// Période minimale entre deux trames composées, en millisecondes.
-pub const PERIODE_TRAME_MS: u64 = 16;
+///
+/// # Pourquoi huit, et non seize
+///
+/// Seize millisecondes plafonnaient le bureau à soixante-deux images par
+/// seconde : même en bougeant la souris sans arrêt, le compositeur refusait
+/// de composer plus vite, et le relevé physique le montre — le journal de vol
+/// du 13 septembre ne contient qu'un réveil de composition toutes les seize
+/// millisecondes, pas un de plus.
+///
+/// Depuis que les pages du framebuffer sont en écriture combinée, une
+/// présentation coûte une médiane de 0,00 ms et un p99 de 2,38 ms pour les
+/// rectangles endommagés réels (41 000 pixels en moyenne, et non deux
+/// millions). Le plafond n'était plus une protection, seulement un plafond.
+///
+/// Huit millisecondes, soit cent vingt images par seconde **quand il y a
+/// quelque chose à dessiner**. Au repos, le compositeur continue de dormir :
+/// composer une image identique à la précédente cent vingt fois par seconde
+/// ne se voit pas et chauffe la machine.
+pub const PERIODE_TRAME_MS: u64 = 8;
 
 /// Rafraîchissement de l'horloge/indicateurs visibles.
 pub const PERIODE_HORLOGE_MS: u64 = 1000;
@@ -65,10 +83,19 @@ pub const REACTIVITE_MUETTE_MS: u64 = 600;
 /// qui clignote : tout cela avancait par a-coups de deux cents millisecondes.
 /// C'est ce que l'utilisateur decrit comme « extremement lent ».
 ///
-/// Trente-trois millisecondes, soit trente images par seconde au repos, et
-/// toujours soixante pendant les six cents millisecondes qui suivent une
-/// entree.
-pub const REPOS_MUET_MS: u64 = 33;
+/// # Ou en est-on, et pourquoi seize et non huit
+///
+/// La recomposition aveugle recopie la fenetre ENTIERE, faute de savoir ce
+/// qui a change dedans : 1918x950 en quatre octets, soit 7,3 Mio par image.
+/// A cent vingt hertz cela represente 875 Mio/s, pres de la moitie du debit
+/// mesure vers le framebuffer -- payes en permanence, pour un navigateur qui
+/// ne dit toujours pas ce qu'il redessine.
+///
+/// Seize millisecondes, soit soixante images par seconde au repos (deux fois
+/// plus qu'avant), et cent vingt pendant les six cents millisecondes qui
+/// suivent une entree, ou le plafond de trame s'applique seul. Le jour ou le
+/// navigateur parlera le protocole, cette constante n'aura plus d'objet.
+pub const REPOS_MUET_MS: u64 = 16;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Etat {

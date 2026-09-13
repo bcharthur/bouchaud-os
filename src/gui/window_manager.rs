@@ -1433,6 +1433,23 @@ polling={} scrutations_par_s={} replis_en_quarantaine={} repli_tours={} repli_se
         crate::drivers::xhci_active::repli_ep0_compteurs().0,
         crate::drivers::xhci_active::repli_ep0_compteurs().1,
     );
+
+    // LE CHIEN DE GARDE DES POINTS HID.
+    //
+    // Le releve du 13 septembre montre une souris qui produit 692 evenements
+    // puis se tait pour le reste de la session, sans que rien ne le dise :
+    // vu du compteur d'evenements, une souris immobile et une souris morte se
+    // ressemblent trait pour trait. Ces quatre nombres les separent.
+    // `hors_service` a zero et `reprises` a zero : tout va bien. `reprises`
+    // qui monte : un point s'arrete et on le remet en route. `hors_service`
+    // non nul : le transport Interrupt-IN d'un peripherique est perdu et
+    // c'est le pont EP0 qui le porte.
+    let (reprises, reussies, hors_service, evenements_perdus) =
+        crate::drivers::xhci_active::chien_de_garde_hid();
+    crate::serial_println!(
+        "[USB-HID-VEILLE] reprises={} reussies={} hors_service={} evenements_perdus={}",
+        reprises, reussies, hors_service, evenements_perdus,
+    );
     if crate::drivers::xhci_active::hid_ready() {
         crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");
     }
