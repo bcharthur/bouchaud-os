@@ -603,26 +603,19 @@ pub fn render_stage1(
     })
 }
 
-// Boot progress is driven by completed milestones; no artificial delay or font rasterization.
-static BOOT_FRAME: crate::kernel::sync::SpinLock<Option<FramebufferInfo>> = crate::kernel::sync::SpinLock::new(None);
-static BOOT_PHASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+// This draw happens exactly once, before the normal display driver takes
+// ownership.  Boot checkpoints deliberately never touch the framebuffer:
+ // they may run with interrupts disabled or on the firmware bootstrap stack.
 pub fn boot_begin(info: FramebufferInfo) {
     if validate(info).is_err() { return; }
     fill_rect(info, 0, 0, info.width, info.height, BG);
-    let x = info.width.saturating_sub(80)/2;
-    let y = info.height.saturating_sub(110)/2;
+    let x = info.width.saturating_sub(80) / 2;
+    let y = info.height.saturating_sub(110) / 2;
     // Geometric B, using the same blue accent as the desktop.
-    for (dx,dy,w,h) in [(0,0,12,72),(12,0,42,12),(12,30,42,12),(12,60,42,12),(54,8,12,24),(54,38,12,26)] {
-        fill_rect(info, x+dx, y+dy, w, h, ACCENT);
+    for (dx, dy, width, height) in [
+        (0, 0, 12, 72), (12, 0, 42, 12), (12, 30, 42, 12),
+        (12, 60, 42, 12), (54, 8, 12, 24), (54, 38, 12, 26),
+    ] {
+        fill_rect(info, x + dx, y + dy, width, height, ACCENT);
     }
-    *BOOT_FRAME.lock() = Some(info);
-    BOOT_PHASE.store(0, core::sync::atomic::Ordering::Release);
-    boot_step();
-}
-pub fn boot_step() {
-    let Some(info) = *BOOT_FRAME.lock() else { return; };
-    let phase = BOOT_PHASE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let x = info.width.saturating_sub(120)/2;
-    let y = info.height/2+65;
-    for i in 0..8 { fill_rect(info, x+i*16, y, 8, 4, if i as usize == phase%8 { ACCENT } else { BORDER }); }
 }

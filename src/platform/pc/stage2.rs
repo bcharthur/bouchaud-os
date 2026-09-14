@@ -70,8 +70,10 @@ fn prepare_ram_persist() -> bool {
 /// entre « le systeme s'est arrete quelque part » et « le systeme s'est
 /// arrete APRES le bring-up NVMe et AVANT l'entree ».
 fn point_de_controle(nom: &str) {
+    // A checkpoint must remain safe with interrupts disabled and before the
+    // scheduler owns the current stack.  Drawing here caused a double fault
+    // on the Trigkey immediately after the network checkpoint.
     super::ecran_faute::point(nom);
-    super::reference_gop::boot_step();
 }
 
 pub fn run(boot: &'static BootInfo) -> ! {

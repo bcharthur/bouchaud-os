@@ -17,11 +17,13 @@
 //!
 //! Ce module est appele depuis un gestionnaire d'exception, parfois apres une
 //! double faute. Il n'a donc le droit ni d'allouer, ni de prendre un verrou,
-//! ni de rasteriser une police vectorielle -- un `Font::from_bytes` sur ce
+//! ni d'initialiser un rasteriseur TTF -- un `Font::from_bytes` sur ce
 //! chemin transformerait une faute diagnosticable en triple faute muette.
 //!
-//! Il n'utilise que : des atomiques, la police bitmap 8x8 deja embarquee, et
-//! des ecritures volatiles dans le framebuffer.
+//! Les glyphes DejaVu Sans sont donc rasterises et anticreneles a la
+//! compilation, puis inclus comme atlas alpha immuables. Le chemin de faute
+//! n'utilise que des atomiques, ces octets statiques et des ecritures
+//! volatiles dans le framebuffer.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -162,23 +164,68 @@ unsafe fn remplit(x0: u32, y0: u32, largeur: u32, hauteur: u32, couleur: u32) {
     }
 }
 
-/// Dessine un caractere ASCII a l'echelle demandee.
+// Atlas DejaVu Sans generes par build.rs. Chaque entree couvre les 95
+// caracteres ASCII imprimables dans une cellule fixe 8s x 10s.
+const FAULT_FONT_1: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-1.bin"));
+const FAULT_FONT_2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-2.bin"));
+const FAULT_FONT_3: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-3.bin"));
+const FAULT_FONT_4: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-4.bin"));
+const FAULT_FONT_5: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-5.bin"));
+const FAULT_FONT_6: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-font-6.bin"));
+
+#[inline]
+fn atlas_faute(echelle: u32) -> (&'static [u8], usize) {
+    match echelle.clamp(1, 6) {
+        1 => (FAULT_FONT_1, 1),
+        2 => (FAULT_FONT_2, 2),
+        3 => (FAULT_FONT_3, 3),
+        4 => (FAULT_FONT_4, 4),
+        5 => (FAULT_FONT_5, 5),
+        _ => (FAULT_FONT_6, 6),
+    }
+}
+
+#[inline]
+unsafe fn lit_pixel(x: u32, y: u32) -> u32 {
+    let base = FB_ADRESSE.load(Ordering::Relaxed);
+    let bpp = FB_BPP.load(Ordering::Relaxed);
+    let foulee = FB_FOULEE.load(Ordering::Relaxed);
+    if bpp < 3 || x >= FB_LARGEUR.load(Ordering::Relaxed) || y >= FB_HAUTEUR.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let decalage = y as usize * foulee as usize * bpp as usize + x as usize * bpp as usize;
+    if decalage + bpp as usize > FB_OCTETS.load(Ordering::Relaxed) { return 0; }
+    let pixel = (base as *const u8).add(decalage);
+    let a = core::ptr::read_volatile(pixel) as u32;
+    let b = core::ptr::read_volatile(pixel.add(1)) as u32;
+    let c = core::ptr::read_volatile(pixel.add(2)) as u32;
+    if FB_BGR.load(Ordering::Relaxed) { (c << 16) | (b << 8) | a } else { (a << 16) | (b << 8) | c }
+}
+
+#[inline]
+unsafe fn pose_pixel_alpha(x: u32, y: u32, couleur: u32, alpha: u8) {
+    if alpha == 0 { return; }
+    if alpha == 255 { pose_pixel(x, y, couleur); return; }
+    let fond = lit_pixel(x, y);
+    let a = alpha as u32;
+    let inv = 255 - a;
+    let melange = |decalage: u32| {
+        ((((couleur >> decalage) & 0xff) * a + ((fond >> decalage) & 0xff) * inv + 127) / 255) & 0xff
+    };
+    pose_pixel(x, y, (melange(16) << 16) | (melange(8) << 8) | melange(0));
+}
+
+/// Dessine un caractere ASCII DejaVu Sans sans allocation ni verrou.
 unsafe fn glyphe(x: u32, y: u32, c: u8, echelle: u32, couleur: u32) {
-    let motif = crate::drivers::gfx::font::glyph(c);
-    for (ligne, bits) in motif.iter().enumerate() {
-        for colonne in 0..8u32 {
-            if bits & (1 << colonne) == 0 {
-                continue;
-            }
-            for dy in 0..echelle {
-                for dx in 0..echelle {
-                    pose_pixel(
-                        x + colonne * echelle + dx,
-                        y + ligne as u32 * echelle + dy,
-                        couleur,
-                    );
-                }
-            }
+    let (atlas, scale) = atlas_faute(echelle);
+    let ascii = if (32..=126).contains(&c) { c } else { b'?' };
+    let largeur = 8 * scale;
+    let hauteur = 10 * scale;
+    let base = (ascii - 32) as usize * largeur * hauteur;
+    for ligne in 0..hauteur {
+        for colonne in 0..largeur {
+            let alpha = atlas[base + ligne * largeur + colonne];
+            pose_pixel_alpha(x + colonne as u32, y + ligne as u32, couleur, alpha);
         }
     }
 }
@@ -271,12 +318,11 @@ pub fn affiche(
         // peu fausse, c'est une valeur qui n'a jamais pu etre une adresse.
         if !canonique(rsp) {
             texte(fin + 8 * echelle, y, "NON CANONIQUE", echelle, TITRE);
-        } else if !dans_le_tas(rsp) {
-            // TOUTES les piles noyau sont allouees dans le tas. Un `RSP` hors
-            // de ces bornes n'est donc pas une pile trop pleine : c'est une
-            // adresse qui n'a jamais ete une pile, et cela separe « la pile a
-            // deborde » de « quelque chose a ecrase RSP ».
-            texte(fin + 8 * echelle, y, "HORS TAS NOYAU", echelle, TITRE);
+        } else if crate::kernel::task::identite_pour_faute().is_some() && !dans_le_tas(rsp) {
+            // Apres installation d'une tache, ses piles sont dans le tas.
+            // Avant le scheduler, le chargeur UEFI fournit legitimement une
+            // pile d'amorcage hors tas : ne pas la signaler comme corruption.
+            texte(fin + 8 * echelle, y, "HORS PILE DE TACHE", echelle, TITRE);
         }
         y += pas;
 
@@ -459,12 +505,19 @@ fn dessine_trace(marge: u32, mut y: u32, largeur: u32, hauteur: u32, echelle: u3
 
         let mut colonne = 0usize;
         let mut restantes = lignes;
+        let mut sequence_ansi = false;
         for sequence in depart..fin {
             if restantes == 0 {
                 break;
             }
             let octet = crate::drivers::serial::trace_octet(sequence);
+            if sequence_ansi {
+                // CSI/ANSI se termine sur un octet final 0x40..=0x7e.
+                if (0x40..=0x7e).contains(&octet) { sequence_ansi = false; }
+                continue;
+            }
             match octet {
+                0x1b => sequence_ansi = true,
                 b'\n' => {
                     y += pas;
                     colonne = 0;

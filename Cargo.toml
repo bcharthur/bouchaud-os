@@ -29,6 +29,9 @@ fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] 
 # HashMap no_std.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
 
+[build-dependencies]
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # Dépendances du backend x86_64 uniquement. Elles ne doivent pas contaminer
 # le futur graphe de compilation AArch64.

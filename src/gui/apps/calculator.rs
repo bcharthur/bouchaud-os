@@ -1,6 +1,6 @@
 //! Application Calculatrice native.
 //!
-//! Interface dessinee au pixel (affichage + grille de touches), evaluation des
+//! Interface native anticrenelee (affichage + grille de touches), evaluation des
 //! expressions par le moteur de langage embarque de l'OS (`gui::js`). Demontre
 //! le systeme d'execution d'applications : une appl native qui delegue le calcul
 //! a l'interpreteur JavaScript integre.
@@ -109,14 +109,14 @@ pub(crate) fn draw(expr: &str, bx: usize, by: usize, bw: usize, bh: usize) {
     fb::fill_rect_rgb(bx + PAD as usize, by + PAD as usize,
                       bw.saturating_sub(2 * PAD as usize), (DISP_H - PAD) as usize, DISP_BG);
     let shown = if expr.is_empty() { "0" } else { expr };
-    // Choisit une echelle qui tient dans la largeur de l'affichage.
-    let inner_w = bwi - 2 * PAD - 8;
-    let mut scale = 3usize;
-    while scale > 1 && (shown.chars().count() as i32) * 8 * scale as i32 > inner_w { scale -= 1; }
-    let tw = (shown.chars().count() as i32) * 8 * scale as i32;
+    // Choisit une taille TrueType qui tient dans la largeur de l'affichage.
+    let inner_w = (bwi - 2 * PAD - 8).max(1) as usize;
+    let mut taille = 24.0;
+    while taille > 14.0 && fb::text_width(shown, taille, false) > inner_w { taille -= 1.0; }
+    let tw = fb::text_width(shown, taille, false) as i32;
     let tx = (bxi + bwi - PAD - 4 - tw).max(bxi + PAD + 2);
-    let ty = byi + (DISP_H - PAD - 8 * scale as i32) / 2 + 1;
-    fb::draw_text_rgb(tx.max(0) as usize, ty.max(0) as usize, shown, DISP_FG, scale);
+    let ty = byi + (DISP_H - PAD - taille as i32) / 2;
+    fb::draw_text_prop(tx.max(0) as usize, ty.max(0) as usize, shown, DISP_FG, taille, false);
 
     // Touches.
     for (i, label) in KEYS.iter().enumerate() {
@@ -129,10 +129,10 @@ pub(crate) fn draw(expr: &str, bx: usize, by: usize, bw: usize, bh: usize) {
         fb::fill_rect_rgb(x as usize, y as usize, w as usize, h as usize, bg);
         frame(x, y, w, h, 0x55585c);
         let glyph = if *label == "<" { "<x" } else { *label };
-        let sc = 2usize;
-        let gw = glyph.chars().count() as i32 * 8 * sc as i32;
+        let taille = 17.0;
+        let gw = fb::text_width(glyph, taille, true) as i32;
         let gx = x + (w - gw) / 2;
-        let gy = y + (h - 8 * sc as i32) / 2;
-        fb::draw_text_rgb(gx.max(0) as usize, gy.max(0) as usize, glyph, fg, sc);
+        let gy = y + (h - taille as i32) / 2;
+        fb::draw_text_prop(gx.max(0) as usize, gy.max(0) as usize, glyph, fg, taille, true);
     }
 }

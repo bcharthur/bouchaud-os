@@ -984,11 +984,11 @@ pub fn draw_text_rgb(x: usize, y: usize, s: &str, rgb_color: u32, scale: usize) 
 /// Retourne la position X finale.
 pub fn draw_text_prop(x: usize, y: usize, s: &str, rgb_color: u32, px: f32, bold: bool) -> usize {
     use crate::gui::font as ftf;
-    if !ftf::draw_text(x as i32, y as i32, s, rgb_color, px as i32, bold) {
-        for (i, ch) in s.chars().enumerate() {
-            draw_char_bmp(x + i * 8, y, ch as u8, 1);
-        }
-    }
+    // La police DejaVu Sans est embarquee et possede deux rasteriseurs
+    // anticreneles. Ne jamais substituer silencieusement la police bitmap :
+    // un echec total doit rester visible dans les diagnostics, pas degrader
+    // l'interface en glyphes 8x8.
+    let _ = ftf::draw_text(x as i32, y as i32, s, rgb_color, px as i32, bold);
     x + ftf::text_width(s, px as i32) as usize
 }
 
