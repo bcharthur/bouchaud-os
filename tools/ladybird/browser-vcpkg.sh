@@ -25,25 +25,21 @@ FONTCONFIG_FETCH_REF=2.17.1
 say(){ printf '\033[1;36m%s\033[0m\n' "$*"; }
 ok(){ printf '\033[32m%s\033[0m\n' "$*"; }
 
-if [ ! -x "$VCPKG/vcpkg" ]; then
-    say "vcpkg M6 absent : amorcage"
-    ./tools/ladybird/build-vcpkg-gfx.sh
+# Bootstrap the package manager only. The old M6 helper also built a second
+# Skia/fontconfig graph before the actual browser manifest was installed.
+if [ ! -d "$VCPKG/.git" ]; then
+    git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$VCPKG"
 fi
-
-# M6 amorce volontairement vcpkg avec un clone shallow (`--depth 1`) pour
-# construire seulement Skia. Le navigateur complet utilise en revanche le
-# mode manifeste/versioning de vcpkg : le registre builtin reference des arbres
-# Git historiques. Un depot shallow peut connaitre le commit baseline tout en
-# ne possedant pas ces objets.
 if [ "$(git -C "$VCPKG" rev-parse --is-shallow-repository)" = "true" ]; then
-    say "vcpkg : conversion du clone shallow en historique complet"
     git -C "$VCPKG" fetch -q --unshallow origin
-else
-    git -C "$VCPKG" fetch -q origin
 fi
-
-git -C "$VCPKG" fetch -q origin "$BASELINE"
+if ! git -C "$VCPKG" cat-file -e "$BASELINE^{commit}" 2>/dev/null; then
+    git -C "$VCPKG" fetch -q origin "$BASELINE"
+fi
 git -C "$VCPKG" checkout -q --detach "$BASELINE"
+if [ ! -x "$VCPKG/vcpkg" ]; then
+    "$VCPKG/bootstrap-vcpkg.sh" -disableMetrics
+fi
 mkdir -p "$MANIFEST" "$DOWNLOADS"
 
 ./tools/ladybird/fetch.sh
@@ -120,7 +116,7 @@ INSTALL_STAMP="$INSTALLED/.bouchaud-inputs.sha256"
 INPUT_FINGERPRINT=$(
     {
         printf '%s\n' "$BASELINE"
-        sha256sum "$MANIFEST/vcpkg.json"
+        sha256sum "$MANIFEST/vcpkg.json" "$ROOT/tools/ladybird/triplets/x64-linux.cmake"
         find "$LOCAL_OVERLAY_PORTS" "$OVERLAY_PORTS" -type f -print0 \
             | sort -z | xargs -0 sha256sum
     } | sha256sum | cut -d' ' -f1
@@ -167,6 +163,7 @@ while :; do
         --x-install-root="$INSTALLED" \
         --overlay-ports="$LOCAL_OVERLAY_PORTS" \
         --overlay-ports="$OVERLAY_PORTS" \
+        --overlay-triplets="$ROOT/tools/ladybird/triplets" \
         --triplet x64-linux \
         --clean-buildtrees-after-build \
         --clean-packages-after-build

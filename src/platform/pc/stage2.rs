@@ -70,6 +70,9 @@ fn prepare_ram_persist() -> bool {
 /// entre « le systeme s'est arrete quelque part » et « le systeme s'est
 /// arrete APRES le bring-up NVMe et AVANT l'entree ».
 fn point_de_controle(nom: &str) {
+    // A checkpoint must remain safe with interrupts disabled and before the
+    // scheduler owns the current stack.  Drawing here caused a double fault
+    // on the Trigkey immediately after the network checkpoint.
     super::ecran_faute::point(nom);
 }
 
@@ -88,7 +91,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
     // Stage 2 et le blocage est necessairement apres ce point.
-    let _ = super::reference_gop::render_stage1(boot, framebuffer);
+    super::reference_gop::boot_begin(framebuffer);
     crate::serial_println!("BOUCHAUD_TRIGKEY_STAGE2_EARLY_GOP_OK");
 
     if !crate::drivers::gfx::install_firmware_framebuffer(framebuffer) {
@@ -301,18 +304,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // directement dans le bureau, donc il doit fournir le meme contrat avant
     // que l'utilisateur double-clique sur Ladybird.
     crate::shell::set_exported_for_boot("BOUCHAUD_M9", "1");
-    // LA PAGE D'ACCUEIL.
-    //
-    // `example.com` servait a prouver qu'une page se charge : c'est un
-    // document de six lignes, sans script, sans image, sans redirection. Il
-    // n'a plus rien a prouver -- et il ne dit rien a quelqu'un qui ouvre un
-    // navigateur pour s'en servir.
-    //
-    // `www.google.com` plutot que `google.com` : la forme courte repond par
-    // une redirection, et un saut de plus est un endroit de plus ou une
-    // premiere mise en service peut echouer sans qu'on sache lequel des deux
-    // a manque.
-    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "https://www.google.com/");
+    // Une page locale ne depend ni du DHCP ni d'un moteur distant au lancement.
+    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "file:///usr/share/ladybird/bouchaud-start.html");
     crate::shell::set_exported_for_boot("BOUCHAUD_M11", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");
@@ -449,7 +442,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
     // change entre les deux, c'est le cache de pages propres. Ce fil le
     // remplit une fois, trois secondes apres le bureau, et se tait.
-    crate::kernel::prechauffage::demarre();
+    // Ladybird services now start after the first desktop frame. Their actual
+    // working set populates the cache; no competing speculative scan.
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");

@@ -165,10 +165,25 @@ unsafe fn garde_entamee(base: u64) -> usize {
 fn amorce_pile(task: &mut Task, trampoline: extern "C" fn() -> !, rflags: u64) {
     unsafe {
         let mut sp = task.kstack_top as *mut u64;
+
+        // SysV x86-64 exige RSP % 16 == 8 a l'entree d'une fonction : l'appel
+        // normal a deja empile une adresse de retour. `switch_context` finit
+        // par `ret` vers le trampoline ; la case de bourrage reservee ici
+        // reproduit donc cette adresse de retour fictive au sommet de pile.
+        //
+        // Sans elle, le premier fil noyau entrait avec RSP % 16 == 0. Le
+        // Trigkey tombait alors en #GP puis en double faute au point `bureau`.
+        sp = sp.sub(1); *sp = 0; // adresse de retour fictive apres le trampoline
         sp = sp.sub(1); *sp = trampoline as *const () as usize as u64;
         sp = sp.sub(1); *sp = rflags;
         for _ in 0..6 { sp = sp.sub(1); *sp = 0; }
         task.ctx.rsp = sp as u64;
+
+        debug_assert_eq!(
+            (task.ctx.rsp + 8 * 8) & 0xF,
+            8,
+            "pile initiale: alignement ABI invalide"
+        );
     }
 }
 

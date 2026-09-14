@@ -50,7 +50,9 @@ pub fn shutdown(code: u8) -> ! {
     //
     // Avant la persistance, parce que celle-ci peut echouer et qu'un echec ne
     // doit pas emporter le releve qui l'explique.
-    crate::kernel::blackbox::vide_avant_extinction("extinction");
+    crate::gui::services::arrete();
+    let _ = crate::kernel::blackbox::vide_avant_extinction("extinction");
+    crate::gui::power_screen::progress("Enregistrement des fichiers", 4);
 
     // La zone persistante n'atteint le disque que sur `fsync` explicite. Un
     // programme qui ecrit sous /persist et se contente de fermer son fichier --
@@ -69,7 +71,8 @@ pub fn shutdown(code: u8) -> ! {
     // message qui a fait chercher la cause de « disk I/O error » ailleurs
     // pendant plusieurs runs. La ligne dit maintenant ce qui s'est passe ; la
     // raison precise, elle, est deja journalisee par `synchronise`.
-    match crate::fs::persistance::synchronise() {
+    let persisted = crate::fs::persistance::synchronise();
+    match persisted {
         -1 => crate::serial_println!(
             "[kernel] persistance: ECHEC de l'ecriture a l'extinction, /persist n'est pas a jour"
         ),
@@ -78,6 +81,9 @@ pub fn shutdown(code: u8) -> ! {
             ecrits
         ),
     }
+    // Persist the result of the filesystem flush as well.
+    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
+    crate::gui::power_screen::finish(logs_ok && persisted >= 0);
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.
@@ -130,8 +136,11 @@ const CMD_8042: u16 = 0x64;
 /// redemarrage est une fin de session comme une autre.
 pub fn reboot() -> ! {
     crate::serial_println!("[kernel] redemarrage demande");
-    crate::kernel::blackbox::vide_avant_extinction("redemarrage");
-    match crate::fs::persistance::synchronise() {
+    crate::gui::services::arrete();
+    let _ = crate::kernel::blackbox::vide_avant_extinction("redemarrage");
+    crate::gui::power_screen::progress("Enregistrement des fichiers", 4);
+    let persisted = crate::fs::persistance::synchronise();
+    match persisted {
         -1 => crate::serial_println!(
             "[kernel] persistance: ECHEC de l'ecriture au redemarrage, /persist n'est pas a jour"
         ),
@@ -141,6 +150,8 @@ pub fn reboot() -> ! {
         ),
     }
 
+    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
+    crate::gui::power_screen::finish(logs_ok && persisted >= 0);
     x86_64::instructions::interrupts::disable();
     unsafe {
         // 1. Le chipset.

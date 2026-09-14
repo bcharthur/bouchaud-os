@@ -292,11 +292,12 @@ fn blackbox_write_blocks(
     Ok(())
 }
 
-fn blackbox_sync_cache(controller: &mut Controller, storage: &mut BlackboxStorage) {
+fn blackbox_sync_cache(controller: &mut Controller, storage: &mut BlackboxStorage) -> bool {
     let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut empty = [0u8; 0];
-    let _ = blackbox_bot(controller, storage, &cdb, &mut empty, false);
-    storage.since_sync = 0;
+    let ok = blackbox_bot(controller, storage, &cdb, &mut empty, false).is_ok();
+    if ok { storage.since_sync = 0; }
+    ok
 }
 
 fn le_u32(data: &[u8], off: usize) -> u32 {
@@ -704,21 +705,24 @@ pub fn blackbox_append_record(
     ok
 }
 
-pub fn blackbox_force_sync() {
+pub fn blackbox_force_sync() -> bool {
     if !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     if RUNTIME_BUSY.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        return;
+        return false;
     }
+    let mut synced = false;
+    let mut failed = false;
     unsafe {
         if let Some(runtime) = RUNTIME.as_mut() {
             for controller in runtime.controllers.iter_mut() {
                 let Some(mut storage) = controller.blackbox_storage.take() else { continue; };
-                blackbox_sync_cache(controller, &mut storage);
+                if blackbox_sync_cache(controller, &mut storage) { synced = true; } else { failed = true; }
                 controller.blackbox_storage = Some(storage);
             }
         }
     }
     RUNTIME_BUSY.store(false, Ordering::Release);
+    synced && !failed
 }

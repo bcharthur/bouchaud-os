@@ -1,6 +1,11 @@
 # Bouchaud OS — Current Status
 
-Dernière mise à jour : 3 septembre 2026
+Dernière mise à jour : 13 septembre 2026
+
+**Point actuel Trigkey :** voir [le bilan mesure du 13 septembre](docs/TRIGKEY_FLUIDITE_2026-09-13.md).
+Le dernier ZIP prouve UEFI, 16 CPU/timers et configuration Ethernet ; il ne
+prouve ni reception souris ni navigation. Les tableaux historiques ci-dessous
+restent des checkpoints dates, pas une validation physique de toutes les fonctions.
 
 Ce document sépare le code présent, les validations hors cible et les résultats
 observés sur la cible. La vision ne constitue jamais une preuve d'exécution.

@@ -5,10 +5,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
-use core::time::Duration;
+
 use uefi::boot::LoadImageSource;
 use uefi::fs::FileSystem;
-use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::console::pointer::Pointer;
 use uefi::proto::console::text::Input;
 use uefi::proto::device_path::LoadedImageDevicePath;
@@ -36,6 +36,63 @@ fn edid_native(edid: &[u8]) -> Option<(usize, usize)> {
     let h = d[2] as usize | (((d[4] >> 4) as usize) << 8);
     let v = d[5] as usize | (((d[7] >> 4) as usize) << 8);
     (h != 0 && v != 0).then_some((h, v))
+}
+
+#[inline]
+fn dans_ellipse(x: i32, y: i32, cx: i32, cy: i32, rx: i32, ry: i32) -> bool {
+    let dx = (x - cx) as i64;
+    let dy = (y - cy) as i64;
+    dx * dx * ry as i64 * ry as i64 + dy * dy * rx as i64 * rx as i64
+        <= rx as i64 * rx as i64 * ry as i64 * ry as i64
+}
+
+#[inline]
+fn dans_arrondi(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
+    if x < x0 || y < y0 || x >= x1 || y >= y1 { return false; }
+    let cx = x.clamp(x0 + rayon, x1 - rayon - 1);
+    let cy = y.clamp(y0 + rayon, y1 - rayon - 1);
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= rayon * rayon
+}
+
+fn logo_alpha(px: usize, py: usize, taille: usize) -> u8 {
+    let mut couverture = 0u16;
+    for sy in 0..4usize {
+        for sx in 0..4usize {
+            let nx = ((px * 4 + sx) * 1024 / (taille * 4).max(1)) as i32;
+            let ny = ((py * 4 + sy) * 1024 / (taille * 4).max(1)) as i32;
+            let hampe = dans_arrondi(nx, ny, 145, 70, 345, 950, 72);
+            let haut = nx >= 260
+                && dans_ellipse(nx, ny, 455, 315, 345, 245)
+                && !dans_ellipse(nx, ny, 465, 315, 155, 105);
+            let bas = nx >= 260
+                && dans_ellipse(nx, ny, 475, 710, 380, 275)
+                && !dans_ellipse(nx, ny, 485, 710, 175, 125);
+            if hampe || haut || bas { couverture += 1; }
+        }
+    }
+    (couverture * 255 / 16) as u8
+}
+
+fn logo_lisse(taille: usize) -> Vec<BltPixel> {
+    const FOND: (u8, u8, u8) = (13, 17, 23);
+    const BLEU: (u8, u8, u8) = (68, 168, 255);
+    let mut pixels = Vec::with_capacity(taille * taille);
+    for y in 0..taille {
+        for x in 0..taille {
+            let a = logo_alpha(x, y, taille) as u16;
+            let melange = |fond: u8, avant: u8| -> u8 {
+                ((avant as u16 * a + fond as u16 * (255 - a) + 127) / 255) as u8
+            };
+            pixels.push(BltPixel::new(
+                melange(FOND.0, BLEU.0),
+                melange(FOND.1, BLEU.1),
+                melange(FOND.2, BLEU.2),
+            ));
+        }
+    }
+    pixels
 }
 
 fn run() -> uefi::Result {
@@ -78,20 +135,23 @@ fn run() -> uefi::Result {
     let _ = writeln!(report, "firmware.pointer_handles={}", pointer_count);
     let _ = writeln!(report, "firmware.keyboard_handles={}", keyboard_count);
     let _ = writeln!(report, "note=written before ExitBootServices; kernel xHCI report follows after handoff");
+    // Keep a quiet brand screen while the loader reads the kernel/ramdisk.
+    let _ = gop.blt(BltOp::VideoFill { color: BltPixel::new(13,17,23), dest: (0,0), dims: (cw,ch) });
+    if cw >= 160 && ch >= 160 {
+        let taille = 128usize;
+        let logo = logo_lisse(taille);
+        let _ = gop.blt(BltOp::BufferToVideo {
+            buffer: &logo,
+            src: BltRegion::Full,
+            dest: ((cw - taille) / 2, (ch - taille) / 2),
+            dims: (taille, taille),
+        });
+    }
     drop(gop);
 
     let fs_proto = boot::get_image_file_system(boot::image_handle())?;
     let mut fs = FileSystem::new(fs_proto);
     let _ = fs.write(cstr16!("\\BOUCHAUD-PREBOOT.TXT"), report.as_bytes());
-
-    uefi::println!("Bouchaud OS - TRIGKEY preboot probe");
-    uefi::println!("EDID native: {}", native.map(|(w,h)| alloc::format!("{}x{}",w,h)).unwrap_or_else(|| String::from("unavailable")));
-    uefi::println!("GOP selected: {}x{}", cw, ch);
-    uefi::println!("Firmware keyboard handles: {}", keyboard_count);
-    uefi::println!("Firmware pointer handles: {}", pointer_count);
-    uefi::println!("Report: \\BOUCHAUD-PREBOOT.TXT");
-    uefi::println!("Chainloading Bouchaud kernel in 2 seconds...");
-    boot::stall(Duration::from_secs(2));
 
     let loader = match fs.read(cstr16!("\\EFI\\BOOT\\BOUCHAUD-LOADER.EFI")) {
         Ok(bytes) => bytes,

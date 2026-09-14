@@ -194,6 +194,21 @@ fn install_sys() {
     mkdir_path("/sys/class/input");
 }
 
+/// Publie le DNS courant apres DHCP, y compris si le navigateur tourne deja.
+/// Une configuration physique absente ne doit pas exposer le DNS de QEMU.
+pub fn refresh_resolver() {
+    let etc = mkdir_path("/etc");
+    if etc == 0 { return; }
+    let content = if matches!(crate::net::etat_demarrage(),
+        crate::net::Demarrage::Pret | crate::net::Demarrage::SansBail) {
+        let dns = crate::net::dns_server();
+        format!("nameserver {}.{}.{}.{}\n", dns[0], dns[1], dns[2], dns[3])
+    } else {
+        format!("# Bouchaud: network not configured\n")
+    };
+    write_file(etc, "resolv.conf", &content, 0o644);
+}
+
 /// `/etc` : les fichiers que la libc consulte pour resoudre noms et locales.
 fn install_etc() {
     let etc = mkdir_path("/etc");
@@ -202,10 +217,7 @@ fn install_etc() {
     }
     write_file(etc, "hostname", "bouchaud\n", 0o644);
     write_file(etc, "hosts", "127.0.0.1\tlocalhost bouchaud\n", 0o644);
-    // Le serveur reellement configure, et non une adresse en dur : une libc
-    // fait sa resolution elle-meme, par ce fichier.
-    let dns = crate::net::dns_server();
-    write_file(etc, "resolv.conf", &format!("nameserver {}.{}.{}.{}\n", dns[0], dns[1], dns[2], dns[3]), 0o644);
+    refresh_resolver();
     write_file(etc, "passwd", "root:x:0:0:root:/:/bin/sh\nguest:x:1000:1000:guest:/home/guest:/bin/sh\n", 0o644);
     write_file(etc, "group", "root:x:0:\nguest:x:1000:\n", 0o644);
     write_file(etc, "localtime", "", 0o644);

@@ -137,11 +137,14 @@ def main():
                 "chargees, et ce sont celles ou l'utilisateur regarde l'ecran."
             )
 
-    # 5. IL EST LANCE SUR LES DEUX CHEMINS DE DEMARRAGE.
-    for chemin, nom in ((STAGE2, "stage2.rs"), (MAIN, "main.rs")):
-        texte = sans_commentaires(chemin.read_text(encoding="utf-8"))
-        if "prechauffage::demarre()" not in texte:
-            fautes.append("%s : le prechauffage n'est plus lance." % nom)
+    # Legacy uses page prefetch; Stage2 starts the actual supervised session.
+    if "prechauffage::demarre()" not in sans_commentaires(MAIN.read_text(encoding="utf-8")):
+        fautes.append("main.rs : le prechauffage legacy n'est plus lance.")
+    if "prechauffage::demarre()" in sans_commentaires(STAGE2.read_text(encoding="utf-8")):
+        fautes.append("stage2.rs : scan speculatif concurrent du demarrage des services.")
+    wm = (RACINE / "src/gui/window_manager.rs").read_text(encoding="utf-8")
+    if "services_initialises" not in wm or "derniere_trame != 0" not in wm:
+        fautes.append("Stage2 : services non differes apres le premier rendu.")
 
     if fautes:
         print("prechauffage : %d probleme(s)\n" % len(fautes))
@@ -151,7 +154,7 @@ def main():
     print(
         "prechauffage : aucun processus lance, pages prises et rendues, "
         "plafond sous la capacite du cache, main rendue entre les tranches, "
-        "verrou du systeme de fichiers relache, lance sur les deux chemins"
+        "verrou du systeme de fichiers relache, cache legacy, session differee sur Stage2"
     )
     return 0
 

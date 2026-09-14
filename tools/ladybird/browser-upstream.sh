@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 LB="$ROOT/third_party/ladybird"
-SRC="$ROOT/third_party/ladybird-browser-src"
+FINAL_SRC="$ROOT/third_party/ladybird-browser-src"
+SRC="$ROOT/third_party/ladybird-browser-prepared"
 BUILD="$ROOT/third_party/build-ladybird-browser-bouchaud"
 VCPKG_INSTALLED_ROOT="$ROOT/third_party/vcpkg-browser-installed"
 VCPKG_TRIPLET="x64-linux"
@@ -43,6 +44,20 @@ python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
 python3 tools/ladybird/prepare-platform-complete.py "$SRC"
+python3 tools/ladybird/prepare-network-live.py "$SRC"
+
+# Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
+# content. Ninja can reuse its dependency graph without hiding changed headers.
+# --checksum is required: equal length/mtime is not proof of equal content.
+if [ ! -e "$FINAL_SRC/.git" ]; then
+    git clone --shared --no-checkout "$LB" "$FINAL_SRC"
+fi
+# Update metadata/index only; checkout/reset --hard would touch every source.
+git -C "$FINAL_SRC" fetch --quiet "$LB" HEAD
+git -C "$FINAL_SRC" reset --mixed --quiet FETCH_HEAD
+rsync -a --no-times --checksum --delete --exclude=.git "$SRC/" "$FINAL_SRC/"
+git -C "$LB" worktree remove --force "$SRC"
+SRC="$FINAL_SRC"
 
 # Le chrome M11 seul, avec les avertissements d'upstream, avant d'engager les
 # quinze minutes du build. Les fautes qu'il attrape sont des avertissements
@@ -269,7 +284,9 @@ say "== build WebContent + services =="
 # invalid-constexpr est temporairement demote de -Werror ci-dessus : le run #30
 # montre que ce diagnostic Clang touche AK::Optional<Utf16String> dans l'upstream
 # epingle. Il reste visible comme warning, sans couper la traversee Ninja.
-cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- -k 0
+cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" \
+    --target WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost \
+    -- -k 0
 
 # ImageDecoder n'est plus facultatif : c'est lui qui installe
 # `Web::Platform::ImageCodecPlugin` dans WebContent, et sans greffon la
@@ -284,14 +301,6 @@ cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebContent -- 
 # `main.cpp` n'ouvre un contexte que si `--force-cpu-painting` est absent. Le
 # construire ici donne sa taille reelle a l'etape suivante, qui devra decider
 # de l'embarquer ou non dans un disque deja proche de son plafond.
-for target in RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
-    if ninja -C "$BUILD" -t targets all 2>/dev/null | grep -q "^${target}:"; then
-        cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target "$target" -- -k 0
-    elif [ "$target" = "ImageDecoder" ]; then
-        echo "ERREUR: la cible ImageDecoder a disparu de l'arbre Ladybird" >&2
-        exit 1
-    fi
-done
 
 OUT="$ROOT/third_party/native-browser-bouchaud"
 rm -rf "$OUT"
@@ -318,6 +327,7 @@ fi
 # repertoire de polices qu'on vient d'y copier, et les deux doivent arriver
 # ensemble sur le disque Bouchaud. Voir tools/ladybird/fontconfig/fonts.conf.
 mkdir -p "$OUT/resources/fontconfig"
+cp -f "$ROOT/tools/ladybird/start.html" "$OUT/resources/bouchaud-start.html"
 cp -f "$ROOT/tools/ladybird/fontconfig/fonts.conf" "$OUT/resources/fontconfig/fonts.conf"
 
 # Le DWARF des runtimes n'a aucun lecteur dans Bouchaud OS.

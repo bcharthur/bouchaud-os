@@ -176,3 +176,17 @@ pub fn doit_rafraichir_horloge(etat: &Etat) -> bool {
 pub fn duree_sommeil_ms(etat: &Etat) -> Option<u64> {
     prochaine_echeance(etat).map(|date| date.saturating_sub(etat.maintenant_ms))
 }
+
+/// La scrutation appartient au fil USB quand il existe. Le bureau est reveille
+/// par les rapports, sans minuterie concurrente a 2 ms. En cas d'echec de
+/// creation du fil, conserver les echeances de secours, meme sans autre timer.
+pub fn avec_scrutation_usb(
+    date: Option<u64>, maintenant: u64, fil_actif: bool, hid: bool, ports: bool,
+) -> Option<u64> {
+    let periode = if fil_actif { None } else if hid { Some(2) }
+        else if ports { Some(250) } else { None };
+    match periode {
+        Some(ms) => Some(date.unwrap_or(u64::MAX).min(maintenant.saturating_add(ms))),
+        None => date,
+    }
+}

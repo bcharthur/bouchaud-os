@@ -60,6 +60,7 @@ static BOOT_ID: AtomicU64 = AtomicU64::new(0);
 static RECORD_SEQ: AtomicU64 = AtomicU64::new(0);
 static LAST_TRACE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+static STOPPING: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_POLL_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_SAMPLE_NS: AtomicU64 = AtomicU64::new(0);
@@ -380,7 +381,8 @@ fn sample(ts_ns: u64) {
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
-            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={}\n"
+            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={} " ,
+            "wm_tours={} wm_entrees={} wm_trames={}\n"
         ),
         ts_ns, cpu, rsp, here,
         task, syscall, phase, site, aux,
@@ -399,6 +401,8 @@ fn sample(ts_ns: u64) {
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
         bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
         FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
+        crate::gui::reveil::tours(), crate::gui::reveil::entrees(),
+        crate::gui::reveil::trames_composees(),
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -435,6 +439,7 @@ fn memory_sample(ts_ns: u64) {
 /// L'appelant s'en sert pour retenter VITE plutot qu'au quart de seconde
 /// suivant : voir `fil_blackbox`.
 pub fn poll() -> bool {
+    if STOPPING.load(Ordering::Acquire) { return false; }
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         return false;
     }
@@ -578,42 +583,53 @@ pub fn sauts_de_fenetre() -> u64 {
 ///   * une marque de fin, qui distingue une session CLOSE d'une session
 ///     coupee -- sans elle, on ne sait pas si le silence est la fin ou une
 ///     panne.
-pub fn vide_avant_extinction(raison: &str) {
+pub fn vide_avant_extinction(raison: &str) -> bool {
+    STOPPING.store(true, Ordering::Release);
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
-        crate::serial_println!(
-            "BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={} \
-consequence=les-dernieres-secondes-ne-seront-pas-relues",
-            raison,
-        );
-        return;
+        crate::serial_println!("BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={}", raison);
+        return false;
     }
     let maintenant = now_ns();
-
-    // Le vol d'abord : c'est le plus volatil, et le plus precis.
-    for _ in 0..8 {
-        flush_flight(maintenant);
-    }
-    flush_serial(maintenant, true);
     sample(maintenant);
     memory_sample(maintenant);
-
+    // Snapshot a finite target: timer/presentation events keep arriving while
+    // saving. Never chase that moving tail indefinitely.
+    let flight_target = FLIGHT_WRITE.load(Ordering::Acquire);
+    let serial_target = crate::drivers::serial::trace_total_bytes();
+    let deadline = maintenant.saturating_add(5_000_000_000);
+    let mut drained = false;
+    for step in 0..256 {
+        if now_ns() >= deadline { break; }
+        flush_flight(maintenant);
+        flush_serial(maintenant, false);
+        crate::gui::power_screen::progress("Enregistrement des journaux", step);
+        if FLIGHT_FLUSHED.load(Ordering::Acquire) >= flight_target
+            && LAST_TRACE_SEQ.load(Ordering::Acquire) >= serial_target {
+            drained = true; break;
+        }
+        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
+    }
     let mut marque = Text::new();
-    let _ = write!(
-        &mut marque,
-        "BOUCHAUD_TRIGKEY_BLACKBOX_V1 FIN raison={} boot_id={} ts_ns={} records={}\n",
-        raison,
-        boot_id(),
-        maintenant,
-        RECORD_SEQ.load(Ordering::Relaxed),
-    );
-    let _ = append(KIND_MARKER, marque.as_bytes(), maintenant, crate::drivers::serial::trace_total_bytes());
-    flush_serial(maintenant, true);
-    crate::drivers::xhci_active::blackbox_force_sync();
-    crate::serial_println!(
-        "BOUCHAUD_BLACKBOX_FIN raison={} records={}",
-        raison,
-        RECORD_SEQ.load(Ordering::Relaxed),
-    );
+    let _ = write!(&mut marque,
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V1 FIN raison={} boot_id={} ts_ns={} drained={}\n",
+        raison, boot_id(), maintenant, drained as u8);
+    let mut marked = false;
+    for _ in 0..16 {
+        if now_ns() >= deadline { break; }
+        if append(KIND_MARKER, marque.as_bytes(), maintenant, serial_target) { marked = true; break; }
+        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
+    }
+    let mut synced = false;
+    for step in 0..16 {
+        if now_ns() >= deadline { break; }
+        crate::gui::power_screen::progress("Synchronisation de la cle USB", step);
+        if crate::drivers::xhci_active::blackbox_force_sync() { synced = true; break; }
+        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
+    }
+    let ok = drained && marked && synced;
+    crate::serial_println!("BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={}",
+        raison, drained as u8, marked as u8, synced as u8, ok as u8);
+    ok
 }
 
 pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) {

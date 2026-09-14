@@ -125,24 +125,25 @@ pub(crate) fn draw(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize
     if bw < 20 || bh < 20 { return; }
 
     // ── Barre d'outils ──────────────────────────────────────────────────────
-    let tb_h = 11usize;
+    let tb_h = 28usize;
     fb::fill_rect_rgb(bx, by, bw, tb_h, BG_TOOLBAR);
 
     // Bouton Run ▶
-    let btn_w = 50usize;
-    let btn_x = bx + 2;
-    let btn_y = by + 1;
-    fb::fill_rect_rgb(btn_x, btn_y, btn_w, 9, C_RUN_BTN);
-    fb::draw_text_rgb(btn_x + 2, btn_y + 1, "Tab=Run", C_RUN_LBL, 1);
+    let btn_w = 78usize;
+    let btn_x = bx + 4;
+    let btn_y = by + 3;
+    fb::fill_rect_rgb(btn_x, btn_y, btn_w, 22, C_RUN_BTN);
+    fb::draw_text_prop(btn_x + 8, btn_y + 3, "Tab = Run", C_RUN_LBL, 13.0, true);
 
     // Bouton Reset
-    let rst_x = btn_x + btn_w + 4;
-    fb::fill_rect_rgb(rst_x, btn_y, 42, 9, C_RESET);
-    fb::draw_text_rgb(rst_x + 2, btn_y + 1, "C=Reset", C_DEFAULT, 1);
+    let rst_x = btn_x + btn_w + 6;
+    fb::fill_rect_rgb(rst_x, btn_y, 76, 22, C_RESET);
+    fb::draw_text_prop(rst_x + 8, btn_y + 3, "C = Reset", C_DEFAULT, 13.0, false);
 
     // Label mode
-    let mode_lbl = if st.mode == RustpadMode::Edit { "[ EDIT ]" } else { "[ OUT  ]" };
-    fb::draw_text_rgb(bx + bw - mode_lbl.len() * 8 - 2, btn_y + 1, mode_lbl, C_COMMENT, 1);
+    let mode_lbl = if st.mode == RustpadMode::Edit { "EDITION" } else { "SORTIE" };
+    let mode_w = fb::text_width(mode_lbl, 13.0, true);
+    fb::draw_text_prop(bx + bw.saturating_sub(mode_w + 10), btn_y + 3, mode_lbl, C_COMMENT, 13.0, true);
 
     // Séparateur
     let sep_y = by + tb_h;
@@ -161,11 +162,11 @@ pub(crate) fn draw(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize
 fn draw_editor(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
     fb::fill_rect_rgb(bx, by, bw, bh, BG_CODE);
 
-    let char_h = 8usize;
-    let line_num_w = 28usize;   // largeur des numéros de ligne (3 chiffres + espace)
+    let char_h = 17usize;
+    let line_num_w = 46usize;
     let code_x = bx + line_num_w;
     let code_w = bw.saturating_sub(line_num_w);
-    let cols = code_w / 8;
+    let cols = (code_w / 7).max(1);
 
     let visible_lines = bh / char_h;
     let scroll = st.scroll.max(0) as usize;
@@ -180,7 +181,7 @@ fn draw_editor(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
         // Numéro de ligne
         if line_idx < 9999 {
             let num_str = fmt_line_num(line_idx + 1);
-            fb::draw_text_rgb(bx + 2, yy, &num_str, C_LINE_NUM, 1);
+            fb::draw_text_prop(bx + 4, yy, &num_str, C_LINE_NUM, 13.0, false);
         }
 
         // Contenu
@@ -197,8 +198,9 @@ fn draw_editor(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
 
         // Curseur sur la dernière ligne
         if line_idx == st.code_lines.len() {
-            let cx = code_x + (line.len().min(cols - 1)) * 8;
-            fb::fill_rect_rgb(cx, yy, 2, 7, C_CURSOR);
+            let visible = crate::gui::window::clip(line, cols.saturating_sub(1));
+            let cx = code_x + fb::text_width(visible, 13.0, false);
+            fb::fill_rect_rgb(cx, yy + 1, 2, 14, C_CURSOR);
         }
     }
 }
@@ -206,13 +208,13 @@ fn draw_editor(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
 fn draw_output(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
     fb::fill_rect_rgb(bx, by, bw, bh, BG_OUTPUT);
 
-    let char_h = 8usize;
-    let cols = bw / 8;
+    let char_h = 17usize;
+    let cols = (bw / 7).max(1);
     let visible = bh / char_h;
     let scroll = st.scroll.max(0) as usize;
 
     // En-tête
-    fb::draw_text_rgb(bx + 2, by + 1, "-- Sortie du programme --", C_COMMENT, 1);
+    fb::draw_text_prop(bx + 4, by + 1, "Sortie du programme", C_COMMENT, 13.0, true);
     let content_y = by + char_h + 2;
     let visible = visible.saturating_sub(2);
 
@@ -225,12 +227,12 @@ fn draw_output(st: &RustpadState, bx: usize, by: usize, bw: usize, bh: usize) {
         let line = &st.output[idx];
         let col = if line.starts_with("Erreur") { C_ERROR } else { color };
         let clipped = if line.len() > cols { &line[..cols] } else { line.as_str() };
-        fb::draw_text_rgb(bx + 2, yy, clipped, col, 1);
+        fb::draw_text_prop(bx + 4, yy, clipped, col, 13.0, false);
     }
 
     // Indicateur "Entrée = retour à l'édition"
-    let hint_y = by + bh.saturating_sub(9);
-    fb::draw_text_rgb(bx + 2, hint_y, "Entree=retour edition", C_COMMENT, 1);
+    let hint_y = by + bh.saturating_sub(18);
+    fb::draw_text_prop(bx + 4, hint_y, "Entree = retour a l'edition", C_COMMENT, 13.0, false);
 }
 
 // ─── Coloration syntaxique ────────────────────────────────────────────────────
@@ -241,12 +243,12 @@ fn draw_highlighted_line(line: &str, x: usize, y: usize, cols: usize) {
     let mut i = 0usize;
     let mut cx = x;
 
-    while i < n && (cx - x) / 8 < cols {
+    while i < n && (cx - x) / 7 < cols {
         // Commentaire //
         if i + 1 < b.len() && b[i] == b'/' && b[i+1] == b'/' {
             let rest = &line[i..];
-            let trunc = rest.len().min((cols - (cx - x) / 8) * 4);
-            fb::draw_text_rgb(cx, y, &rest[..trunc.min(rest.len())], C_COMMENT, 1);
+            let trunc = rest.len().min((cols - (cx - x) / 7) * 4);
+            fb::draw_text_prop(cx, y, &rest[..trunc.min(rest.len())], C_COMMENT, 13.0, false);
             break;
         }
         // Chaîne littérale
@@ -255,9 +257,8 @@ fn draw_highlighted_line(line: &str, x: usize, y: usize, cols: usize) {
             while i < b.len() && (b[i] != b'"' || (i > 0 && b[i-1] == b'\\')) { i += 1; }
             if i < b.len() { i += 1; }
             let s = &line[start..i.min(line.len())];
-            let trunc = s.len().min((cols - (cx - x) / 8) * 4);
-            fb::draw_text_rgb(cx, y, &s[..trunc.min(s.len())], C_STRING, 1);
-            cx += trunc * 8;
+            let trunc = s.len().min((cols - (cx - x) / 7) * 4);
+            cx = fb::draw_text_prop(cx, y, &s[..trunc.min(s.len())], C_STRING, 13.0, false);
             continue;
         }
         // Identifiant / mot-clé / macro
@@ -269,9 +270,8 @@ fn draw_highlighted_line(line: &str, x: usize, y: usize, cols: usize) {
             let word = &line[start..i.min(line.len())];
             let color = if is_macro { C_MACRO }
                 else { keyword_color(if is_macro { &word[..word.len()-1] } else { word }) };
-            let trunc = word.len().min((cols - (cx - x) / 8) * 4);
-            fb::draw_text_rgb(cx, y, &word[..trunc.min(word.len())], color, 1);
-            cx += trunc * 8;
+            let trunc = word.len().min((cols - (cx - x) / 7) * 4);
+            cx = fb::draw_text_prop(cx, y, &word[..trunc.min(word.len())], color, 13.0, false);
             continue;
         }
         // Nombre
@@ -279,17 +279,15 @@ fn draw_highlighted_line(line: &str, x: usize, y: usize, cols: usize) {
             let start = i;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') { i += 1; }
             let word = &line[start..i.min(line.len())];
-            let trunc = word.len().min((cols - (cx - x) / 8) * 4);
-            fb::draw_text_rgb(cx, y, &word[..trunc.min(word.len())], C_NUMBER, 1);
-            cx += trunc * 8;
+            let trunc = word.len().min((cols - (cx - x) / 7) * 4);
+            cx = fb::draw_text_prop(cx, y, &word[..trunc.min(word.len())], C_NUMBER, 13.0, false);
             continue;
         }
         // Caractère quelconque
         let ch = b[i] as char;
         let mut tmp = [0u8; 4];
         let s = ch.encode_utf8(&mut tmp);
-        fb::draw_text_rgb(cx, y, s, C_DEFAULT, 1);
-        cx += 8;
+        cx = fb::draw_text_prop(cx, y, s, C_DEFAULT, 13.0, false);
         i += 1;
     }
 }

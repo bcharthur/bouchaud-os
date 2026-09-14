@@ -9,9 +9,9 @@ if [ "$TARGET" != "--cible" ]; then
 fi
 
 printf '\033[1;36m=== Ladybird natif complet / Bouchaud ===\033[0m\n'
+python3 tools/verifie-chain-ladybird.py
 ./tools/ladybird/fetch.sh
 ./tools/ladybird/build-libweb-gen.sh
-./tools/ladybird/browser-vcpkg.sh
 ./tools/ladybird/browser-upstream.sh
 ./tools/ladybird/webcontent-qemu-bootstrap.sh
 

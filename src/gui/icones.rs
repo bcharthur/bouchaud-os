@@ -11,8 +11,9 @@
 //!
 //! Quatre PNG fabriques par `tools/assets/fabrique-icones.py` -- du code
 //! lisible, revu comme le reste, et qui les refait a l'octet pres -- plus le
-//! VRAI logo de Ladybird, pris a son depot. Le bureau execute Ladybird ; il
-//! doit afficher sa marque, pas une coccinelle approchee.
+//! vrai logo de Ladybird, pris a son depot. L'icone Services est une forme
+//! vectorielle rendue par surechantillonnage 4x4 : ses arrondis restent nets
+//! a 18 comme a 56 pixels.
 //!
 //! # Pourquoi un cache
 //!
@@ -123,11 +124,76 @@ fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
     sortie
 }
 
+#[inline]
+fn dans_rectangle_arrondi(px: i32, py: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
+    if px < x0 || py < y0 || px >= x1 || py >= y1 { return false; }
+    let cx = px.clamp(x0 + rayon, x1 - rayon - 1);
+    let cy = py.clamp(y0 + rayon, y1 - rayon - 1);
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= rayon * rayon
+}
+
+#[inline]
+fn couverture_services(px: usize, py: usize, cote: usize, forme: u8) -> u8 {
+    let mut touches = 0u16;
+    // Seize echantillons donnent des bords reguliers sans conserver de
+    // bitmap ni faire dependre l'icone de sa taille finale.
+    for sy in 0..4 {
+        for sx in 0..4 {
+            let nx = ((px * 4 + sx) * 1024 / (cote * 4).max(1)) as i32;
+            let ny = ((py * 4 + sy) * 1024 / (cote * 4).max(1)) as i32;
+            let dedans = match forme {
+                0 => (0..3).any(|rangee| {
+                    let haut = 170 + rangee * 245;
+                    dans_rectangle_arrondi(nx, ny, 120, haut, 904, haut + 180, 54)
+                }),
+                1 => (0..3).any(|rangee| {
+                    let haut = 170 + rangee * 245;
+                    dans_rectangle_arrondi(nx, ny, 330, haut + 69, 745, haut + 111, 18)
+                }),
+                _ => (0..3).any(|rangee| {
+                    let haut = 170 + rangee * 245;
+                    let dx = nx - 220;
+                    let dy = ny - (haut + 90);
+                    dx * dx + dy * dy <= 34 * 34
+                }),
+            };
+            if dedans { touches += 1; }
+        }
+    }
+    (touches * 255 / 16) as u8
+}
+
+fn dessine_services_vectoriel(x: usize, y: usize, cote: usize) {
+    if cote == 0 { return; }
+    for py in 0..cote {
+        for px in 0..cote {
+            let corps = couverture_services(px, py, cote, 0);
+            if corps != 0 {
+                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0x2563eb, corps);
+            }
+            let fente = couverture_services(px, py, cote, 1);
+            if fente != 0 {
+                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0xdbeafe, fente);
+            }
+            let voyant = couverture_services(px, py, cote, 2);
+            if voyant != 0 {
+                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0x5bda8b, voyant);
+            }
+        }
+    }
+}
+
 /// Pose l'icone `index`, coin superieur gauche en `(x, y)`.
 ///
 /// Ne dessine rien si l'image manque : une icone absente vaut mieux qu'un
 /// carre gris, et le fond du bureau est deja peint dessous.
 pub fn dessine(index: usize, x: usize, y: usize, cote: usize) {
+    if index == 5 {
+        dessine_services_vectoriel(x, y, cote);
+        return;
+    }
     let Some(prete) = prepare(index, cote) else { return };
     // BOUCHAUD_GFX_CULLING_AMONT_V1 : rien a composer si la trame ne presente
     // pas un pixel de l'icone.
@@ -157,6 +223,7 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
         0 => Some(2), // Terminal
         1 => Some(3), // Fichiers
         5 => Some(4), // Rustpad
+        crate::gui::window::KIND_SERVICES => Some(5),
         _ => None,
     }
 }
@@ -174,6 +241,7 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Terminal { .. } => 2,
         App::Files { .. } => 3,
         App::Rustpad { .. } => 4,
+        App::Services => 5,
         App::Monitor | App::Journal { .. } => return None,
     })
 }

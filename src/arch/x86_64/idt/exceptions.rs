@@ -54,7 +54,9 @@ fn vecteur_du_nom(nom: &str) -> u8 {
 
 /// `CR2` ne veut dire quelque chose que pour une faute de page.
 fn cr2_si_faute_de_page(nom: &str) -> Option<u64> {
-    if nom == "PAGE FAULT" {
+    if nom == "PAGE FAULT" || nom == "DOUBLE FAULT" {
+        // Dans une double faute CR2 n'est qu'un indice : s'il a change juste
+        // avant l'echec de livraison, il designe souvent la premiere #PF.
         Some(x86_64::registers::control::Cr2::read().as_u64())
     } else {
         None
@@ -236,10 +238,14 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
         cr2,
         stack.cpu_flags
     );
+    crate::platform::pc::ecran_faute::sort_exception_resolue();
     crate::kernel::task::exit_group(139)
 }
 
 extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame, code: u64) {
+    crate::platform::pc::ecran_faute::entre_exception(
+        13, stack.instruction_pointer.as_u64(), code, None,
+    );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. Le gros verrou y reste legitime -- il n'y a plus de
@@ -257,6 +263,9 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
+    crate::platform::pc::ecran_faute::entre_exception(
+        6, stack.instruction_pointer.as_u64(), 0, None,
+    );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. Le gros verrou y reste legitime -- il n'y a plus de
@@ -274,6 +283,9 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
+    crate::platform::pc::ecran_faute::entre_exception(
+        0, stack.instruction_pointer.as_u64(), 0, None,
+    );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. Le gros verrou y reste legitime -- il n'y a plus de
@@ -291,6 +303,9 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code: u64) {
+    crate::platform::pc::ecran_faute::entre_exception(
+        12, stack.instruction_pointer.as_u64(), code, None,
+    );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. Le gros verrou y reste legitime -- il n'y a plus de
@@ -313,6 +328,9 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     let _gs = GsGuard::enter(&stack);
     let addr = x86_64::registers::control::Cr2::read();
+    crate::platform::pc::ecran_faute::entre_exception(
+        14, stack.instruction_pointer.as_u64(), code.bits(), Some(addr.as_u64()),
+    );
     let _site = crate::kernel::task::SiteIrq::enter(20, addr.as_u64());
     crate::kernel::task::stall_pf_begin(addr.as_u64());
 
@@ -348,6 +366,7 @@ extern "x86-interrupt" fn page_fault_handler(
             // verrou sur le chemin NORMAL d'une faute de page resolue, c'est-a-
             // dire a chaque page peuplee a la demande.
             crate::kernel::task::retire_current_if_zombie();
+            crate::platform::pc::ecran_faute::sort_exception_resolue();
             return;
         }
 

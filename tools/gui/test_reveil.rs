@@ -620,3 +620,17 @@ fn un_client_muet_au_repos_reste_anime() {
         "le repos ne peut pas etre plus rapide que la cadence de trame"
     );
 }
+
+#[test]
+fn fil_usb_ne_force_pas_le_bureau_a_scruter() {
+    assert_eq!(politique::avec_scrutation_usb(Some(1500), 1000, true, true, true), Some(1500));
+    assert_eq!(politique::avec_scrutation_usb(None, 1000, true, true, true), None);
+}
+
+#[test]
+fn scrutation_de_secours_garde_les_echeances_et_les_ports() {
+    assert_eq!(politique::avec_scrutation_usb(None, 1000, false, true, true), Some(1002));
+    assert_eq!(politique::avec_scrutation_usb(None, 1000, false, false, true), Some(1250));
+    assert_eq!(politique::avec_scrutation_usb(Some(1001), 1000, false, true, true), Some(1001));
+    assert_eq!(politique::avec_scrutation_usb(None, 1000, false, false, false), None);
+}

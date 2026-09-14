@@ -403,6 +403,7 @@ pub fn run() {
 
 /// Corps du fil noyau du bureau.
 fn fil_bureau() -> ! {
+    crate::platform::pc::ecran_faute::point_silencieux("bureau-entree");
     #[cfg(feature = "reference-desktop")]
     crate::serial_println!("BOUCHAUD_STAGE2_DESKTOP_TASK_ENTER");
 
@@ -464,6 +465,7 @@ mod modificateur {
 
 fn boucle() {
     fb::enter();
+    crate::platform::pc::ecran_faute::point_silencieux("bureau-framebuffer");
 
     // La souris PS/2 suit SA propre decision : une machine dont le clavier USB
     // est reconnu et la souris non doit garder un pointeur, et une machine
@@ -538,9 +540,13 @@ fn boucle() {
     // passe par le meme chemin que tout le monde : c'est ce qui rend la regle
     // verifiable au lieu d'etre une habitude.
     {
+        #[cfg(not(feature = "reference-desktop"))]
         let fenetre = make_app(0, home, &mut spawn_n);
+        #[cfg(not(feature = "reference-desktop"))]
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
+    let debut_services = crate::kernel::timer::monotonic_ms();
+    let mut services_initialises = !cfg!(feature = "reference-desktop");
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -991,6 +997,34 @@ fn boucle() {
             sale = true;
         }
 
+        // One boot attempt, after the desktop has actually rendered. No crash loop.
+        if !services_initialises && derniere_trame != 0
+            && maintenant.saturating_sub(debut_services) >= 500 {
+            services_initialises = true;
+            if !wins.iter().any(window::est_client) {
+                crate::gui::services::demande(crate::gui::services::DEMARRER);
+            }
+        }
+        let service_action = crate::gui::services::prend_commande();
+        if service_action == crate::gui::services::ARRETER {
+            for w in wins.iter_mut() {
+                if let App::Navigateur { client } = &mut w.app { client.termine(); }
+            }
+            wins.retain(|w| !window::est_client(w));
+            crate::gui::services::arrete();
+            degats.tout(); sale = true;
+        } else if service_action == crate::gui::services::DEMARRER
+            && !wins.iter().any(window::est_client) {
+            lance_navigateur(&mut wins, home, &mut degats);
+            if let Some(w) = wins.last_mut() {
+                if let App::Navigateur { client } = &mut w.app {
+                    client.envoie_configuration(false);
+                    w.min = true;
+                }
+            }
+            sale = true;
+        }
+
         // ---- Rendu ----
         // L'horloge est la SEULE animation permanente du bureau : elle change
         // sans que rien puisse l'annoncer. Voir `politique::PERIODE_HORLOGE_MS`.
@@ -1000,6 +1034,9 @@ fn boucle() {
         let mut horloge_seule = false;
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
+            for w in wins.iter().filter(|w| !w.min && matches!(w.app, App::Services | App::Monitor)) {
+                degats.ajoute(Origine::Client, window::zone_utile(w));
+            }
             horloge_seule = !sale;
             sale = true; // horloge, charge CPU, memoire : ils bougent seuls
             // BOUCHAUD_GUI_TOPBAR_DAMAGE_V1 : la barre du HAUT. Voir
@@ -1174,30 +1211,16 @@ fn boucle() {
         // doit suivre le curseur ». Ce serait une attente active : sans paquet
         // PS/2, le curseur n'a pas bouge, et il n'y a donc rien a suivre. Le
         // moindre mouvement produit un paquet, donc un signal, donc un reveil.
-        match politique::prochaine_echeance(&etat) {
+        match politique::avec_scrutation_usb(
+            politique::prochaine_echeance(&etat), maintenant,
+            crate::drivers::xhci_active::fil_hid_actif(),
+            crate::drivers::xhci_active::hid_polling(),
+            crate::drivers::xhci_active::surveille_branchements(),
+        ) {
             // Echeance deja atteinte : reboucler tout de suite plutot que de
             // payer deux changements de contexte pour un sommeil nul.
             Some(date) if date <= maintenant => {}
             Some(date) => {
-                // Sans interruption xHCI V3, le polling HID impose une petite
-                // echeance. Le bureau reste evenementiel hors presence HID USB.
-                let date = if crate::drivers::xhci_active::hid_polling() {
-                    date.min(maintenant.saturating_add(2))
-                } else if crate::drivers::xhci_active::surveille_branchements() {
-                    // AUCUN HID USB, MAIS UN CONTROLEUR QUI EN ATTEND UN.
-                    //
-                    // C'est le cas du branchement a chaud : demarrer sans
-                    // clavier puis en brancher un. Sans cette borne le bureau
-                    // dort jusqu'a trente secondes, et le clavier parait mort
-                    // pendant tout ce temps -- l'utilisateur le debranche et
-                    // le rebranche, ce qui ne change rien.
-                    //
-                    // Un quart de seconde : personne ne le mesure, et cela ne
-                    // coute que huit lectures de registre par reveil.
-                    date.min(maintenant.saturating_add(250))
-                } else {
-                    date
-                };
                 let attente_ns = date
                     .saturating_sub(maintenant)
                     .saturating_mul(1_000_000);
@@ -1309,6 +1332,7 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     crate::gui::reveil::publie();
 
     let (mesures, total) = task::mesure_processus();
+    crate::gui::services::observe(&mesures, total);
     if total > 0 {
         let mut ligne = String::new();
         let sample_ns = crate::kernel::timer::monotonic_ns();
@@ -1663,11 +1687,13 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     ) {
         Ok(client) => client,
         Err(message) => {
+            crate::gui::services::echec();
             crate::kernel::dmesg::log_fmt(format_args!("gui: navigateur : {}", message));
             return;
         }
     };
 
+    crate::gui::services::enregistre(client.pid);
     #[cfg(feature = "reference-desktop")]
     crate::serial_println!(
         "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
@@ -1840,9 +1866,11 @@ fn handle_click(
                 // session pour de bon, apres avoir ecrit sur la cle ce que la
                 // session a produit. Elles ne reviennent jamais.
                 else if kind == window::KIND_ETEINDRE {
+                    crate::gui::power_screen::begin();
                     crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK);
                 }
                 else if kind == window::KIND_REDEMARRER {
+                    crate::gui::power_screen::begin();
                     crate::kernel::power::reboot();
                 }
                 else if kind == window::KIND_NAVIGATEUR {

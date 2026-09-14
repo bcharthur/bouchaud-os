@@ -41,6 +41,7 @@
  */
 
 #pragma once
+#include "BouchaudSortie.h"
 
 // Atlas de glyphes DejaVu, genere par tools/ladybird/chrome/fabrique-atlas.py.
 // C'est de la donnee : ce fichier ne gagne aucune dependance de dessin.
@@ -589,6 +590,8 @@ inline bool Champ::applique(u32 code, u32 code_point)
 // ----------------------------------------------------------------------------
 
 struct State {
+    BouchaudTransport::Sortie<> sortie_gui;
+    bool trame_a_republier { false };
     // Descripteurs et geometrie fournis par le gestionnaire de fenetres.
     int gui_fd { -1 };
     int surface_fd { -1 };
@@ -964,13 +967,17 @@ inline int environment_int(char const* name, int fallback)
 // Protocole GUI — ecriture
 // ----------------------------------------------------------------------------
 
-/// Ecrit un message d'un seul bloc, en-tete et charge ensemble.
-///
-/// `docs/GUI_USERLAND_PROTOCOL.md` §5 : deux `write()` separes peuvent laisser
-/// le compositeur devant un en-tete dont la charge n'arrive jamais. Le
-/// descripteur etant passe en non bloquant pour la lecture, `EAGAIN` est
-/// possible a l'ecriture ; on reessaie brievement puis on abandonne le message
-/// plutot que de bloquer la boucle d'evenements du moteur.
+// Le timer GUI reprend les messages apres EAGAIN, sans endormir LibWeb.
+inline bool flush_gui_output()
+{
+    auto& s = state();
+    if (s.gui_fd < 0)
+        return false;
+    return s.sortie_gui.vide([&](auto const* octets, size_t taille) {
+        return write(s.gui_fd, octets, taille);
+    });
+}
+
 inline bool send_message(u16 kind, void const* payload, u32 payload_size)
 {
     auto& s = state();
@@ -1005,24 +1012,13 @@ inline bool send_message(u16 kind, void const* payload, u32 payload_size)
         memcpy(message + header_size, payload, payload_size);
 
     auto message_size = header_size + static_cast<size_t>(payload_size);
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        auto written = write(s.gui_fd, message, message_size);
-        if (written < 0 && errno == EINTR)
-            continue;
-        if (written < 0 && errno == EAGAIN) {
-            usleep(1000);
-            continue;
-        }
-        if (written < 0)
-            return false;
-        if (static_cast<size_t>(written) != message_size) {
-            errno = EIO;
-            return false;
-        }
-        return true;
+    if (!flush_gui_output())
+        return false;
+    if (!s.sortie_gui.ajoute(message, message_size)) {
+        errno = EAGAIN;
+        return false;
     }
-    errno = EAGAIN;
-    return false;
+    return flush_gui_output();
 }
 
 inline void send_handshake()
@@ -1051,7 +1047,7 @@ inline void send_handshake()
     static constexpr char default_title[] = "Ladybird";
     send_message(Genre::SetTitle, default_title, sizeof(default_title) - 1);
     s.handshake_done = true;
-    outln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
+    warnln("[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK");
 }
 
 inline void send_title()
@@ -1111,6 +1107,8 @@ inline void log_render_stats_if_due()
 inline void send_frame_ready(DamageRect damage)
 {
     auto& s = state();
+    if (s.trame_a_republier)
+        damage = { 0, 0, s.surface_width, s.surface_height };
     // Ne jamais publier un rectangle hors surface, meme si une future taille
     // de toolbar devient dynamique.
     damage.x = clamp(damage.x, 0, s.surface_width);
@@ -1133,8 +1131,13 @@ inline void send_frame_ready(DamageRect damage)
     put32(frame + 12, static_cast<u32>(damage.y));
     put32(frame + 16, static_cast<u32>(damage.width));
     put32(frame + 20, static_cast<u32>(damage.height));
-    if (!send_message(Genre::FrameReady, frame, sizeof(frame)))
-        warnln("[ladybird-bouchaud] M11_FRAME_READY_FAILED errno={}", errno);
+    if (!send_message(Genre::FrameReady, frame, sizeof(frame))) {
+        // La surface contient deja les pixels. Conserver une invalidation
+        // complete jusqu'au prochain tour evite de perdre un degat partiel.
+        s.trame_a_republier = true;
+        return;
+    }
+    s.trame_a_republier = false;
     ++s.published_frames;
     log_render_stats_if_due();
     // BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
@@ -2477,7 +2480,7 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     // premier affichage qui n'affiche rien.
     if (!s.frame_seen && painted > 0) {
         s.frame_seen = true;
-        outln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
+        warnln("[ladybird-bouchaud] M11_FIRST_FRAME pixels={} viewport={}x{}",
             painted, s.surface_width, page_height);
     }
     return true;
@@ -4539,6 +4542,10 @@ inline void wheel_handled_and_capture_requested(int result)
 /// decide qu'il fallait repeindre. Voir tools/ladybird/prepare-repaint.py.
 inline void tick()
 {
+    flush_gui_output();
+    send_handshake();
+    if (state().trame_a_republier)
+        send_frame_ready({ 0, 0, state().surface_width, state().surface_height });
     drain();
 
     auto& s = state();
@@ -4608,7 +4615,7 @@ inline void initialize_from_environment()
             fcntl(s.gui_fd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    outln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
+    warnln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
 
     // Le magasin est relu ICI, une fois, avant la premiere navigation : la

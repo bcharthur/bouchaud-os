@@ -296,21 +296,25 @@ def regle_reveil_pendant_la_scrutation(wm, fautes):
     # presence du mot ailleurs dans le fichier : `hid_polling` peut y figurer
     # pour tout autre chose, et une regle par presence resterait verte.
     echeance = re.search(
-        r"match politique::prochaine_echeance\(&etat\) \{(.*?)\n        \}",
+        r"match politique::avec_scrutation_usb\(\s*"
+        r"politique::prochaine_echeance\(&etat\), maintenant,\s*"
+        r"crate::drivers::xhci_active::fil_hid_actif\(\),\s*"
+        r"crate::drivers::xhci_active::hid_polling\(\),\s*"
+        r"crate::drivers::xhci_active::surveille_branchements\(\),\s*\) \{",
         wm,
-        re.S,
     )
     if echeance is None:
         fautes.append(
-            "window_manager.rs : la decision de sommeil du bureau est "
-            "introuvable ; la regle ne peut plus rien dire."
+            "window_manager.rs : la decision de sommeil doit utiliser la "
+            "politique USB avec l'etat du fil, des HID et des ports."
         )
-    elif "hid_polling()" not in echeance.group(1):
-        fautes.append(
-            "window_manager.rs : le sommeil du bureau n'est plus borne quand "
-            "l'entree est scrutee ; une frappe ne reveillerait rien, et le "
-            "clavier paraitrait mort."
-        )
+    politique = (RACINE / "src/gui/politique.rs").read_text(encoding="utf-8")
+    tests = (RACINE / "tools/gui/test_reveil.rs").read_text(encoding="utf-8")
+    if "pub fn avec_scrutation_usb(" not in politique or any(nom not in tests for nom in (
+        "fil_usb_ne_force_pas_le_bureau_a_scruter",
+        "scrutation_de_secours_garde_les_echeances_et_les_ports",
+    )):
+        fautes.append("politique USB ou tests des echeances de secours absents")
 
 
 def regle_preuves(test, fautes):

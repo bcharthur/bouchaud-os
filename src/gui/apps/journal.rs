@@ -192,12 +192,12 @@ fn brut_capacite() -> usize {
 
 /// Lignes de texte qui tiennent dans le corps de la fenetre.
 fn lignes_visibles(bh: usize) -> usize {
-    // Deux lignes d'en-tete, une de pied.
-    (bh / 10).saturating_sub(3).max(1)
+    // Deux lignes d'en-tete, une de pied, en DejaVu Sans 13 px.
+    (bh / 16).saturating_sub(3).max(1)
 }
 
 pub(crate) fn draw(st: &JournalState, bx: usize, by: usize, bw: usize, bh: usize) {
-    let cols = bw / 8;
+    let cols = bw / 7;
     let visibles = lignes_visibles(bh);
     let retenues = st.retenues();
     // `usize::MAX` veut dire « la fin », pose par une recapture. Le borner ici
@@ -205,7 +205,7 @@ pub(crate) fn draw(st: &JournalState, bx: usize, by: usize, bw: usize, bh: usize
     let depart = st.scroll.min(retenues.saturating_sub(visibles));
 
     let mut yy = by;
-    fb::draw_text(
+    fb::draw_text_prop(
         bx,
         yy,
         clip(
@@ -218,57 +218,62 @@ pub(crate) fn draw(st: &JournalState, bx: usize, by: usize, bw: usize, bh: usize
             ),
             cols,
         ),
-        fb::C_YELLOW,
+        0xf5be4a,
+        13.0,
+        true,
     );
-    yy += 10;
-    fb::draw_text(
+    yy += 16;
+    fb::draw_text_prop(
         bx,
         yy,
         clip("F filtre   R recapture   fleches/PgUp/PgDn/Origine/Fin defilent", cols),
-        fb::C_CYAN,
+        0x67d5e8,
+        13.0,
+        false,
     );
-    yy += 10;
+    yy += 16;
 
     let mut rang = 0usize;
     let mut dessinees = 0usize;
     for ligne in st.lignes.iter() {
-        if !st.filtre.retient(&ligne.majuscule) {
-            continue;
-        }
+        if !st.filtre.retient(&ligne.majuscule) { continue; }
         if rang < depart {
             rang += 1;
             continue;
         }
-        if dessinees >= visibles {
-            break;
-        }
-        // La couleur porte le sens : ce qui a echoue doit sauter aux yeux dans
-        // une page de texte monochrome.
+        if dessinees >= visibles { break; }
         let couleur = if ligne.majuscule.contains("FAULT")
             || ligne.majuscule.contains("PANIC")
             || ligne.majuscule.contains("_FAIL")
             || ligne.majuscule.contains("HORS_SERVICE")
         {
-            fb::C_RED
+            0xff6b6b
         } else if ligne.majuscule.contains("_OK")
             || ligne.majuscule.contains("_GREEN")
             || ligne.majuscule.contains("_READY")
             || ligne.majuscule.contains("PRET")
         {
-            fb::C_GREEN
+            0x5bda8b
         } else if ligne.majuscule.contains("BOUCHAUD_") {
-            fb::C_WHITE
+            0xeff3f8
         } else {
-            fb::C_GRAY
+            0x9da8b8
         };
-        fb::draw_text(bx, yy, clip(&ligne.texte, cols), couleur);
-        yy += 10;
+        fb::draw_text_prop(bx, yy, clip(&ligne.texte, cols), couleur, 13.0, false);
+        yy += 16;
         rang += 1;
         dessinees += 1;
     }
 
     if dessinees == 0 {
-        fb::draw_text(bx, yy, clip("(aucune ligne ne passe ce filtre)", cols), fb::C_GRAY);
+        fb::draw_text_prop(
+            bx,
+            yy,
+            clip("(aucune ligne ne passe ce filtre)", cols),
+            0x9da8b8,
+            13.0,
+            false,
+        );
     }
 }
 

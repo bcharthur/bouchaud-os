@@ -20,9 +20,17 @@ if(-not (Test-Path -LiteralPath $Ramdisk -PathType Leaf)){ Fail "ladybird-browse
 if($LASTEXITCODE -ne 0){ Fail "ladybird-browser.img invalide" }
 if(-not $Output){ $Output=Join-Path $RepoRoot "target\reference\bouchaud-trigkey-stage2-ladybird.img" }
 Write-Host "TRIGKEY_GOP_MIN_REQUEST=${MinWidth}x${MinHeight}"
+# Build the real preboot entry point incrementally so its branding ships in this image.
+$ShimTarget = Join-Path $RepoRoot "target\reference\preboot-target"
+$ShimManifest = Join-Path $RepoRoot "tools\reference\uefi-preboot-probe\Cargo.toml"
+& cargo build --manifest-path "$ShimManifest" --target x86_64-unknown-uefi --target-dir "$ShimTarget"
+if ($LASTEXITCODE -ne 0) { Fail "compilation preboot UEFI en echec" }
+$PrebootShim = Join-Path $ShimTarget "x86_64-unknown-uefi\debug\bouchaud-uefi-preboot-probe.efi"
+if (-not (Test-Path -LiteralPath $PrebootShim -PathType Leaf)) { Fail "preboot UEFI compile introuvable" }
 & ".\tools\reference\build-reference-stage2.ps1" `
     -Output $Output `
     -Ramdisk $Ramdisk `
+    -PrebootShim $PrebootShim `
     -MinWidth $MinWidth `
     -MinHeight $MinHeight
 if($LASTEXITCODE -ne 0){ exit $LASTEXITCODE }

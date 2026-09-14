@@ -7,11 +7,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub(crate) const TOOLBAR_H: usize = 16;
-pub(crate) const STATUS_H:  usize = 10;
-pub(crate) const ICON_COL_W: usize = 72;
-pub(crate) const ICON_ROW_H: usize = 52;
-pub(crate) const ICON_SIZE:  usize = 32;
+pub(crate) const TOOLBAR_H: usize = 32;
+pub(crate) const STATUS_H:  usize = 24;
+pub(crate) const ICON_COL_W: usize = 96;
+pub(crate) const ICON_ROW_H: usize = 82;
+pub(crate) const ICON_SIZE:  usize = 48;
 
 /// Dessine l'explorateur dans la zone (bx, by, bw, bh).
 pub(crate) fn draw(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: usize, bw: usize, bh: usize) {
@@ -48,7 +48,7 @@ pub(crate) fn draw(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, 
         fb::fill_rect_rgb(bx, status_y, bw, 1, 0xaaaaaa);
         let count = count_entries(cur);
         let status = format!("  {} element{}", count, if count != 1 { "s" } else { "" });
-        fb::draw_text_rgb(bx + 2, status_y + 1, &status, 0x333333, 1);
+        fb::draw_text_prop(bx + 8, status_y + 4, &status, 0x333333, 13.0, false);
     }
 }
 
@@ -56,35 +56,40 @@ fn draw_toolbar(cur: usize, _scroll: i32, bx: usize, by: usize, bw: usize) {
     fb::fill_rect_rgb(bx, by, bw, TOOLBAR_H, 0xf0f0f0);
     fb::fill_rect_rgb(bx, by + TOOLBAR_H, bw, 1, 0xaaaaaa);
 
-    // Boutons ← → ↑
-    draw_btn(bx + 2, by + 2, 12, 11, "<", 0x555555);
-    draw_btn(bx + 16, by + 2, 12, 11, ">", 0x555555);
-    draw_btn(bx + 30, by + 2, 12, 11, "^", 0x555555);
+    // Navigation : glyphes DejaVu Sans centres dans de vrais boutons.
+    draw_btn(bx + 6, by + 5, 22, 22, "<", 0x444444);
+    draw_btn(bx + 32, by + 5, 22, 22, ">", 0x444444);
+    draw_btn(bx + 58, by + 5, 22, 22, "^", 0x444444);
 
-    // Chemin courant
     let fs = ramfs::fs();
     let path = ramfs::path_string(&fs, cur);
-    let px = bx + 46;
-    let pw = bw.saturating_sub(50);
-    fb::fill_rect_rgb(px, by + 3, pw, 10, 0xffffff);
-    fb::fill_rect_rgb(px, by + 3, pw, 10, 0xffffff);
-    // thin border
-    fb::fill_rect_rgb(px, by + 3, pw, 1, 0xaaaaaa);
-    fb::fill_rect_rgb(px, by + 12, pw, 1, 0xaaaaaa);
-    fb::fill_rect_rgb(px, by + 3, 1, 10, 0xaaaaaa);
-    fb::fill_rect_rgb(px + pw - 1, by + 3, 1, 10, 0xaaaaaa);
-    let max_chars = pw / 6;
-    fb::draw_text_rgb(px + 2, by + 4, clip(&path, max_chars), 0x222222, 1);
+    let px = bx + 88;
+    let pw = bw.saturating_sub(96);
+    fb::fill_rect_rgb(px, by + 5, pw, 22, 0xffffff);
+    fb::fill_rect_rgb(px, by + 5, pw, 1, 0xaaaaaa);
+    fb::fill_rect_rgb(px, by + 26, pw, 1, 0xaaaaaa);
+    fb::fill_rect_rgb(px, by + 5, 1, 22, 0xaaaaaa);
+    fb::fill_rect_rgb(px + pw.saturating_sub(1), by + 5, 1, 22, 0xaaaaaa);
+    let max_chars = pw / 7;
+    fb::draw_text_prop(px + 6, by + 8, clip(&path, max_chars), 0x222222, 13.0, false);
 }
 
 fn draw_btn(x: usize, y: usize, w: usize, h: usize, label: &str, color: u32) {
-    fb::fill_rect_rgb(x, y, w, h, 0xdddddd);
+    fb::fill_rect_rgb(x, y, w, h, 0xe5e7eb);
     fb::fill_rect_rgb(x, y, w, 1, 0xffffff);
     fb::fill_rect_rgb(x, y, 1, h, 0xffffff);
-    fb::fill_rect_rgb(x, y + h - 1, w, 1, 0x888888);
-    fb::fill_rect_rgb(x + w - 1, y, 1, h, 0x888888);
-    let lx = x + (w - label.len() * 6) / 2;
-    fb::draw_text_rgb(lx, y + 2, label, color, 1);
+    fb::fill_rect_rgb(x, y + h - 1, w, 1, 0x9ca3af);
+    fb::fill_rect_rgb(x + w - 1, y, 1, h, 0x9ca3af);
+    let taille = 14.0;
+    let largeur = fb::text_width(label, taille, true);
+    fb::draw_text_prop(
+        x + w.saturating_sub(largeur) / 2,
+        y + h.saturating_sub(taille as usize) / 2,
+        label,
+        color,
+        taille,
+        true,
+    );
 }
 
 fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: usize, bw: usize, bh: usize) {
@@ -117,22 +122,14 @@ fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: us
         let cellule_x = bx + col * ICON_COL_W;
         let cellule_y = by + row * ICON_ROW_H;
 
-        // Le libelle est centre sur la cellule mais n'y est PAS contraint :
-        // `draw_text_rgb` avance de huit pixels par caractere, et onze
-        // caracteres font 88 pixels pour une cellule de 72. Il faut donc
-        // connaitre son rectangle reel AVANT de decider si la cellule est
-        // visible -- sinon une cellule ecartee emporterait la moitie de libelle
-        // qu'elle pose chez sa voisine.
-        //
-        // La largeur venait d'etre calculee a six pixels par caractere : le
-        // libelle etait donc decentre vers la droite d'un pixel par caractere.
-        const AVANCE: usize = 8;
-        const HAUTEUR_LIBELLE: usize = 8;
-        let max_chars = (ICON_COL_W - 4) / 6;
+        // Le libelle DejaVu Sans est mesure avant le culling afin de centrer
+        // son rectangle reel et de conserver ses bords anticreneles.
+        const HAUTEUR_LIBELLE: usize = 16;
+        let max_chars = (ICON_COL_W - 8) / 7;
         let display = clip(name, max_chars);
-        let tw = display.chars().count() * AVANCE;
-        let tx = cellule_x + (ICON_COL_W.saturating_sub(tw)) / 2;
-        let ty = iy + ICON_SIZE + 2;
+        let tw = fb::text_width(display, 13.0, false);
+        let tx = cellule_x + ICON_COL_W.saturating_sub(tw) / 2;
+        let ty = iy + ICON_SIZE + 5;
 
         // BOUCHAUD_GFX_CULLING_AMONT_V1 : une cellule hors du degat ne coute
         // plus que son tour de boucle -- ni icone rasterisee, ni libelle pose
@@ -155,51 +152,67 @@ fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: us
             draw_file_icon(ix + (ICON_COL_W - 8 - ICON_SIZE) / 2, iy, ICON_SIZE);
         }
 
-        fb::draw_text_rgb(tx, ty, display, 0x222222, 1);
+        fb::draw_text_prop(tx, ty, display, 0x222222, 13.0, false);
+    }
+}
+
+#[inline]
+fn dans_arrondi(px: i32, py: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
+    if px < x0 || py < y0 || px >= x1 || py >= y1 { return false; }
+    let cx = px.clamp(x0 + rayon, x1 - rayon - 1);
+    let cy = py.clamp(y0 + rayon, y1 - rayon - 1);
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= rayon * rayon
+}
+
+fn couverture_icone(px: usize, py: usize, size: usize, forme: u8) -> u8 {
+    let mut compte = 0u16;
+    for sy in 0..2 {
+        for sx in 0..2 {
+            let nx = ((px * 2 + sx) * 1024 / (size * 2).max(1)) as i32;
+            let ny = ((py * 2 + sy) * 1024 / (size * 2).max(1)) as i32;
+            let dedans = match forme {
+                // Dossier : languette + corps arrondi.
+                0 => dans_arrondi(nx, ny, 70, 260, 954, 910, 72)
+                    || dans_arrondi(nx, ny, 90, 150, 535, 420, 62),
+                1 => dans_arrondi(nx, ny, 110, 320, 914, 405, 36),
+                // Fichier, pli et lignes internes.
+                2 => dans_arrondi(nx, ny, 175, 70, 835, 950, 58)
+                    && !(nx > 630 && ny < 275 && nx - ny > 545),
+                3 => nx >= 630 && nx <= 835 && ny >= 70 && ny <= 275
+                    && nx - 630 >= ny - 70,
+                _ => (0..4).any(|ligne| {
+                    let haut = 430 + ligne * 105;
+                    dans_arrondi(nx, ny, 285, haut, if ligne == 3 { 650 } else { 735 }, haut + 34, 17)
+                }),
+            };
+            if dedans { compte += 1; }
+        }
+    }
+    (compte * 255 / 4) as u8
+}
+
+fn pose_forme_icone(x: usize, y: usize, size: usize, forme: u8, couleur: u32) {
+    for py in 0..size {
+        for px in 0..size {
+            let alpha = couverture_icone(px, py, size, forme);
+            if alpha != 0 { fb::blend_rgb(x + px, y + py, couleur, alpha); }
+        }
     }
 }
 
 fn draw_folder_icon(x: usize, y: usize, size: usize) {
-    // Tab
-    fb::fill_rect_rgb(x, y + size / 5, size / 2, size / 8, 0xf9ab00);
-    fb::fill_rect_rgb(x, y + size / 5, size / 2, 1, 0xffd04f);
-    // Body
-    let body_y = y + size / 5 + size / 8 - 1;
-    let body_h = size - size / 5 - size / 8;
-    fb::fill_rect_rgb(x, body_y, size, body_h, 0xf9ab00);
-    fb::fill_rect_rgb(x, body_y, size, 2, 0xffd04f);
-    fb::fill_rect_rgb(x, body_y + body_h - 3, size, 3, 0xc87b00);
-    // Paper lines inside
-    fb::fill_rect_rgb(x + size / 8, body_y + 4, size * 3 / 4, 2, 0xffffff80 & 0xffffffu32);
-    fb::fill_rect_rgb(x + size / 8, body_y + 4, size * 3 / 4, 1, 0xffd88a);
-    fb::fill_rect_rgb(x + size / 8, body_y + 8, size / 2, 1, 0xffd88a);
+    pose_forme_icone(x, y, size, 0, 0xf2a900);
+    pose_forme_icone(x, y, size, 1, 0xffd166);
 }
 
 fn draw_file_icon(x: usize, y: usize, size: usize) {
-    let fold = size / 4;
-    let w = size * 3 / 4;
-    // White page body
-    fb::fill_rect_rgb(x, y, w, size, 0xffffff);
-    // Folded corner (grey triangle approximation)
-    fb::fill_rect_rgb(x + w - fold, y, fold, fold, 0xdddddd);
-    for i in 0..fold {
-        fb::fill_rect_rgb(x + w - fold + i, y + i, fold - i, 1, 0xcccccc);
-    }
-    // Page outline
-    fb::fill_rect_rgb(x, y, w, 1, 0x888888);
-    fb::fill_rect_rgb(x, y + size - 1, w, 1, 0x888888);
-    fb::fill_rect_rgb(x, y, 1, size, 0x888888);
-    fb::fill_rect_rgb(x + w - 1, y + fold, 1, size - fold, 0x888888);
-    fb::fill_rect_rgb(x + w - fold, y + fold, fold, 1, 0x888888);
-    // Text lines
-    let line_x = x + 3;
-    let line_w = w.saturating_sub(6);
-    for row in 0..4usize {
-        let ly = y + fold + 2 + row * 4;
-        if ly + 1 >= y + size { break; }
-        let lw = if row == 3 { line_w * 2 / 3 } else { line_w };
-        fb::fill_rect_rgb(line_x, ly, lw, 1, 0xbbbbbb);
-    }
+    // Une ombre douce detache la page du fond blanc.
+    pose_forme_icone(x + 1, y + 1, size, 2, 0xb8c0cc);
+    pose_forme_icone(x, y, size, 2, 0xffffff);
+    pose_forme_icone(x, y, size, 3, 0xd8dee8);
+    pose_forme_icone(x, y, size, 4, 0x7d8a9b);
 }
 
 fn count_entries(cur: usize) -> usize {
@@ -223,9 +236,9 @@ pub(crate) fn toolbar_hit(bx: usize, by: usize, mx: i32, my: i32) -> ToolbarActi
     let x = mx as usize;
     let y = my as usize;
     if y < by || y >= by + TOOLBAR_H { return ToolbarAction::None; }
-    if x >= bx + 2  && x < bx + 14  { return ToolbarAction::Back; }
-    if x >= bx + 16 && x < bx + 28  { return ToolbarAction::Forward; }
-    if x >= bx + 30 && x < bx + 42  { return ToolbarAction::Up; }
+    if x >= bx + 6  && x < bx + 28  { return ToolbarAction::Back; }
+    if x >= bx + 32 && x < bx + 54  { return ToolbarAction::Forward; }
+    if x >= bx + 58 && x < bx + 80  { return ToolbarAction::Up; }
     ToolbarAction::None
 }
 

@@ -541,7 +541,7 @@ substitute(
             // pas d'hote.
             auto const nouveau = BouchaudChrome::prochaine_page();
             auto& nouvelle = m_owner.create_page(nouveau, m_owner.allocate_navigable_id());
-            nouvelle.set_maximum_frames_per_second(30.0);
+            nouvelle.set_maximum_frames_per_second(60.0);
             // `ActivateTab::No` veut dire « ouvre derriere » : c'est ce que
             // demande un `target=_blank` avec Ctrl, et l'honorer est la
             // difference entre un navigateur et une fenetre qui saute.
