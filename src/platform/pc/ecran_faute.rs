@@ -81,18 +81,25 @@ static POINTS_FRANCHIS: AtomicU32 = AtomicU32::new(0);
 /// le chemin de faute ne doit jamais dereferencer un pointeur dont il ne peut
 /// pas prouver la validite, et une paire (pointeur, longueur) lue en deux
 /// temps peut se lire dechiree.
-pub fn point(nom: &str) {
+fn memorise_point(nom: &str) {
     let octets = nom.as_bytes();
     let n = octets.len().min(POINT_MAX);
-    // La longueur passe a zero d'abord : un lecteur concurrent voit alors un
-    // point vide, jamais un melange de deux noms.
     POINT_LONGUEUR.store(0, Ordering::Release);
     for i in 0..n {
         POINT_TEXTE[i].store(octets[i], Ordering::Relaxed);
     }
     POINT_LONGUEUR.store(n, Ordering::Release);
     POINTS_FRANCHIS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn point(nom: &str) {
+    memorise_point(nom);
     crate::serial_println!("BOUCHAUD_BOOT_POINT {}", nom);
+}
+
+/// Jalon utilisable au milieu d'une commutation de pile : atomiques seulement.
+pub fn point_silencieux(nom: &str) {
+    memorise_point(nom);
 }
 
 fn ecrit_dernier_point(mut sortie: impl FnMut(u8)) {
@@ -108,6 +115,58 @@ fn ecrit_dernier_point(mut sortie: impl FnMut(u8)) {
     }
 }
 
+/// Le dernier jalon est-il exactement `nom` ?
+fn dernier_point_est(nom: &str) -> bool {
+    let octets = nom.as_bytes();
+    let n = POINT_LONGUEUR.load(Ordering::Acquire).min(POINT_MAX);
+    if n != octets.len() { return false; }
+    (0..n).all(|i| POINT_TEXTE[i].load(Ordering::Relaxed) == octets[i])
+}
+
+// Premiere exception entree avant une eventuelle double faute. Les donnees
+// sont publiees avant le vecteur, qui sert de drapeau Release/Acquire.
+const AUCUNE_EXCEPTION: u8 = 0xFF;
+static PREMIERE_RESERVEE: AtomicBool = AtomicBool::new(false);
+static PREMIER_VECTEUR: AtomicU8 = AtomicU8::new(AUCUNE_EXCEPTION);
+static PREMIER_RIP: AtomicU64 = AtomicU64::new(0);
+static PREMIER_CODE: AtomicU64 = AtomicU64::new(0);
+static PREMIER_CR2: AtomicU64 = AtomicU64::new(0);
+static PREMIER_CR2_VALIDE: AtomicBool = AtomicBool::new(false);
+
+pub fn entre_exception(vecteur: u8, rip: u64, code: u64, cr2: Option<u64>) {
+    if PREMIERE_RESERVEE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    PREMIER_RIP.store(rip, Ordering::Relaxed);
+    PREMIER_CODE.store(code, Ordering::Relaxed);
+    if let Some(adresse) = cr2 {
+        PREMIER_CR2.store(adresse, Ordering::Relaxed);
+        PREMIER_CR2_VALIDE.store(true, Ordering::Relaxed);
+    }
+    PREMIER_VECTEUR.store(vecteur, Ordering::Release);
+}
+
+/// Une faute de page resolue n'est plus une exception active.
+pub fn sort_exception_resolue() {
+    PREMIER_VECTEUR.store(AUCUNE_EXCEPTION, Ordering::Release);
+    PREMIER_CR2_VALIDE.store(false, Ordering::Relaxed);
+    PREMIERE_RESERVEE.store(false, Ordering::Release);
+}
+
+fn premiere_exception_lue() -> (u8, u64, u64, Option<u64>) {
+    let vecteur = PREMIER_VECTEUR.load(Ordering::Acquire);
+    (
+        vecteur,
+        PREMIER_RIP.load(Ordering::Relaxed),
+        PREMIER_CODE.load(Ordering::Relaxed),
+        PREMIER_CR2_VALIDE.load(Ordering::Relaxed)
+            .then(|| PREMIER_CR2.load(Ordering::Relaxed)),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Dessin
 // ---------------------------------------------------------------------------
@@ -118,6 +177,7 @@ const TITRE: u32 = 0x00FF_6B6B;
 const TEXTE: u32 = 0x00EF_F3F8;
 const ETIQUETTE: u32 = 0x009D_A8B8;
 const MUTED: u32 = 0x0078_8496;
+const WARN: u32 = 0x00F5_BE4A;
 
 /// Lignes de trace noyau affichees sous le releve, au plus.
 const TRACE_LIGNES: usize = 12;
@@ -278,20 +338,24 @@ pub fn affiche(
     cs: u64,
     ss: u64,
 ) {
-    if !ecran_disponible() {
-        return;
-    }
-    if DEJA_AFFICHE.swap(true, Ordering::AcqRel) {
+    if !ecran_disponible() || DEJA_AFFICHE.swap(true, Ordering::AcqRel) {
         return;
     }
 
     let largeur = FB_LARGEUR.load(Ordering::Acquire);
     let hauteur = FB_HAUTEUR.load(Ordering::Acquire);
-    // Une echelle par tranche de 640 pixels : lisible en 800x600 comme en
-    // 1920x1080, sans calcul de mise en page.
-    let echelle = (largeur / 640).clamp(1, 3);
-    let marge = 16 * echelle;
+    // A 1080p, 16 px suffit et laisse plus de vingt lignes au diagnostic.
+    let echelle = (largeur / 960).clamp(1, 2);
+    let marge = 12 * echelle;
     let pas = 12 * echelle;
+    let x = marge + 18 * 8 * echelle;
+    let tache = crate::kernel::task::identite_pour_faute();
+    let nom_tache = if tache.is_some() {
+        crate::kernel::task::nom_pour_faute()
+    } else {
+        "<aucune>"
+    };
+    let premiere = premiere_exception_lue();
 
     unsafe {
         remplit(0, 0, largeur, hauteur, FOND);
@@ -302,131 +366,145 @@ pub fn affiche(
         texte(marge, y, "BOUCHAUD KERNEL FAULT", echelle * 2, TITRE);
         y += 20 * echelle + pas;
 
-        texte(marge, y, "VECTEUR   ", echelle, ETIQUETTE);
-        let x = marge + 10 * 8 * echelle;
+        texte(marge, y, "VECTEUR", echelle, ETIQUETTE);
         let fin = hexa(x, y, vecteur as u64, echelle, TEXTE);
         texte(fin + 8 * echelle, y, nom, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "RIP       ", echelle, ETIQUETTE);
+        texte(marge, y, "RIP", echelle, ETIQUETTE);
         hexa(x, y, rip, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "RSP       ", echelle, ETIQUETTE);
+        texte(marge, y, "RSP", echelle, ETIQUETTE);
         let fin = hexa(x, y, rsp, echelle, TEXTE);
-        // CANONIQUE ou non : une adresse non canonique n'est pas une pile un
-        // peu fausse, c'est une valeur qui n'a jamais pu etre une adresse.
         if !canonique(rsp) {
             texte(fin + 8 * echelle, y, "NON CANONIQUE", echelle, TITRE);
-        } else if crate::kernel::task::identite_pour_faute().is_some() && !dans_le_tas(rsp) {
-            // Apres installation d'une tache, ses piles sont dans le tas.
-            // Avant le scheduler, le chargeur UEFI fournit legitimement une
-            // pile d'amorcage hors tas : ne pas la signaler comme corruption.
-            texte(fin + 8 * echelle, y, "HORS PILE DE TACHE", echelle, TITRE);
+        } else if let Some((_, _, _, sommet, base, _)) = tache {
+            texte(
+                fin + 8 * echelle,
+                y,
+                if rsp >= base && rsp <= sommet { "DANS PILE" } else { "HORS PILE" },
+                echelle,
+                if rsp >= base && rsp <= sommet { TEXTE } else { TITRE },
+            );
         }
         y += pas;
 
-        // CS ET SS TRANCHENT L'ENQUETE EN DEUX.
-        //
-        // Les deux bits de poids faible de CS portent l'anneau. Anneau 0, la
-        // faute est dans le noyau -- debordement de pile, commutation de
-        // contexte, corruption. Anneau 3, un processus utilisateur avait une
-        // pile impossible et c'est la LIVRAISON de sa faute qui a echoue.
-        // Ce sont deux enquetes qui n'ont rien a voir, et sans ces deux
-        // registres il fallait deviner laquelle mener.
-        texte(marge, y, "CS / SS   ", echelle, ETIQUETTE);
+        texte(marge, y, "RSP MOD16", echelle, ETIQUETTE);
+        hexa(x, y, rsp & 0xF, echelle, if rsp & 0xF == 8 { TEXTE } else { WARN });
+        y += pas;
+
+        texte(marge, y, "CS / SS", echelle, ETIQUETTE);
         let fin = hexa(x, y, cs, echelle, TEXTE);
         let fin = texte(fin + 8 * echelle, y, "/", echelle, ETIQUETTE);
         hexa(fin + 8 * echelle, y, ss, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "ANNEAU    ", echelle, ETIQUETTE);
+        texte(marge, y, "ANNEAU", echelle, ETIQUETTE);
         let fin = hexa(x, y, cs & 3, echelle, TEXTE);
-        texte(
-            fin + 8 * echelle,
-            y,
-            if cs & 3 == 3 { "UTILISATEUR" } else { "NOYAU" },
-            echelle,
-            TEXTE,
-        );
+        texte(fin + 8 * echelle, y, if cs & 3 == 3 { "UTILISATEUR" } else { "NOYAU" }, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "RFLAGS    ", echelle, ETIQUETTE);
+        texte(marge, y, "RFLAGS", echelle, ETIQUETTE);
         hexa(x, y, rflags, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "CODE      ", echelle, ETIQUETTE);
+        texte(marge, y, "CODE", echelle, ETIQUETTE);
         hexa(x, y, code, echelle, TEXTE);
         y += pas;
 
-        texte(marge, y, "CR2       ", echelle, ETIQUETTE);
+        texte(marge, y, if vecteur == 8 { "CR2 (INDICE)" } else { "CR2" }, echelle, ETIQUETTE);
         match cr2 {
-            Some(adresse) => {
-                hexa(x, y, adresse, echelle, TEXTE);
-            }
-            None => {
-                texte(x, y, "-", echelle, ETIQUETTE);
-            }
+            Some(adresse) => { hexa(x, y, adresse, echelle, TEXTE); }
+            None => { texte(x, y, "-", echelle, ETIQUETTE); }
         }
         y += pas;
 
-        texte(marge, y, "CPU       ", echelle, ETIQUETTE);
+        texte(marge, y, "CPU", echelle, ETIQUETTE);
         hexa(x, y, crate::arch::x86_64::smp::cpu_index() as u64, echelle, TEXTE);
+        y += pas;
+
+        texte(marge, y, "TACHE", echelle, ETIQUETTE);
+        if let Some((index, pid, tid, _, _, in_kernel)) = tache {
+            let fin = hexa(x, y, index as u64, echelle, TEXTE);
+            let fin = texte(fin + 8 * echelle, y, "PID", echelle, ETIQUETTE);
+            let fin = hexa(fin + 8 * echelle, y, pid as u64, echelle, TEXTE);
+            let fin = texte(fin + 8 * echelle, y, "TID", echelle, ETIQUETTE);
+            let fin = hexa(fin + 8 * echelle, y, tid as u64, echelle, TEXTE);
+            texte(fin + 8 * echelle, y, if in_kernel { "KERNEL" } else { "USER" }, echelle, TEXTE);
+        } else {
+            texte(x, y, "<aucune>", echelle, ETIQUETTE);
+        }
+        y += pas;
+
+        texte(marge, y, "NOM TACHE", echelle, ETIQUETTE);
+        texte(x, y, nom_tache, echelle, TEXTE);
+        y += pas;
+
+        if let Some((_, _, _, sommet, base, _)) = tache {
+            texte(marge, y, "PILE BASE", echelle, ETIQUETTE);
+            hexa(x, y, base, echelle, TEXTE);
+            y += pas;
+            texte(marge, y, "PILE SOMMET", echelle, ETIQUETTE);
+            hexa(x, y, sommet, echelle, TEXTE);
+            y += pas;
+            texte(marge, y, "PILE LIBRE", echelle, ETIQUETTE);
+            hexa(x, y, rsp.saturating_sub(base), echelle, TEXTE);
+            y += pas;
+        }
+
+        texte(marge, y, "EXCEPTION INITIALE", echelle, ETIQUETTE);
+        if premiere.0 == AUCUNE_EXCEPTION {
+            texte(x, y, "<non entree dans un gestionnaire>", echelle, ETIQUETTE);
+        } else {
+            let fin = hexa(x, y, premiere.0 as u64, echelle, TITRE);
+            texte(fin + 8 * echelle, y, "AVANT DOUBLE FAUTE", echelle, TITRE);
+        }
+        y += pas;
+        if premiere.0 != AUCUNE_EXCEPTION {
+            texte(marge, y, "RIP INITIAL", echelle, ETIQUETTE);
+            hexa(x, y, premiere.1, echelle, TEXTE);
+            y += pas;
+            texte(marge, y, "CODE INITIAL", echelle, ETIQUETTE);
+            hexa(x, y, premiere.2, echelle, TEXTE);
+            if let Some(adresse) = premiere.3 {
+                let fin = texte(x + 20 * 8 * echelle, y, "CR2", echelle, ETIQUETTE);
+                hexa(fin + 8 * echelle, y, adresse, echelle, TEXTE);
+            }
+            y += pas;
+        }
+
+        texte(marge, y, "PISTE PRINCIPALE", echelle, ETIQUETTE);
+        let piste = if vecteur != 8 {
+            "EXCEPTION FATALE DIRECTE"
+        } else if premiere.0 != AUCUNE_EXCEPTION {
+            "LE GESTIONNAIRE INITIAL A REFAUTE"
+        } else if dernier_point_est("run-noyau-switch") || dernier_point_est("fil-noyau-trampoline") {
+            "CADRE INITIAL / ALIGNEMENT DE PILE"
+        } else {
+            "LIVRAISON D'EXCEPTION IMPOSSIBLE"
+        };
+        texte(x, y, piste, echelle, TITRE);
         y += pas + pas;
 
-        texte(marge, y, "DERNIER POINT DE DEMARRAGE", echelle, ETIQUETTE);
-        y += pas;
-        let mut curseur = marge;
+        texte(marge, y, "DERNIER POINT", echelle, ETIQUETTE);
+        let mut curseur = x;
         ecrit_dernier_point(|octet| {
             glyphe(curseur, y, octet, echelle, TEXTE);
             curseur += 8 * echelle;
         });
         y += pas;
-        texte(marge, y, "POINTS FRANCHIS ", echelle, ETIQUETTE);
-        hexa(
-            marge + 16 * 8 * echelle,
-            y,
-            POINTS_FRANCHIS.load(Ordering::Relaxed) as u64,
-            echelle,
-            TEXTE,
-        );
-        y += pas;
 
-        // Un lien refuse est la preuve d'un usage-apres-liberation. S'il est
-        // non nul, la piste n'est plus a chercher : la liste libre du tas a ete
-        // reecrite par quelqu'un qui avait deja rendu sa memoire.
+        texte(marge, y, "POINTS / REFUS / PILES", echelle, ETIQUETTE);
+        let fin = hexa(x, y, POINTS_FRANCHIS.load(Ordering::Relaxed) as u64, echelle, TEXTE);
         let refuses = crate::kernel::heap::liens_refuses();
-        texte(marge, y, "LIENS REFUSES   ", echelle, ETIQUETTE);
+        let fin = hexa(fin + 8 * echelle, y, refuses, echelle, if refuses == 0 { TEXTE } else { TITRE });
         hexa(
-            marge + 16 * 8 * echelle,
+            fin + 8 * echelle,
             y,
-            refuses,
+            crate::kernel::task::piles_corrompues(),
             echelle,
-            if refuses == 0 { TEXTE } else { TITRE },
-        );
-        y += pas;
-
-        // Le second champ qui designe une cause au lieu de la faire chercher.
-        // Non nul, une pile noyau a deborde : le canari pose a son pied a
-        // bouge, et `RSP` n'a pas ete ecrase par un tiers -- il est sorti tout
-        // seul, par le bas.
-        let piles = crate::kernel::task::piles_corrompues();
-        texte(marge, y, "PILES DEBORDEES ", echelle, ETIQUETTE);
-        hexa(
-            marge + 16 * 8 * echelle,
-            y,
-            piles,
-            echelle,
-            if piles == 0 { TEXTE } else { TITRE },
-        );
-        y += pas + pas;
-
-        texte(
-            marge,
-            y,
-            "LA MACHINE EST ARRETEE. COUPEZ L'ALIMENTATION POUR REDEMARRER.",
-            echelle,
-            ETIQUETTE,
+            if crate::kernel::task::piles_corrompues() == 0 { TEXTE } else { TITRE },
         );
         y += pas + pas;
 
@@ -505,19 +583,23 @@ fn dessine_trace(marge: u32, mut y: u32, largeur: u32, hauteur: u32, echelle: u3
 
         let mut colonne = 0usize;
         let mut restantes = lignes;
-        let mut sequence_ansi = false;
+        let mut etat_ansi = 0u8;
         for sequence in depart..fin {
-            if restantes == 0 {
-                break;
-            }
+            if restantes == 0 { break; }
             let octet = crate::drivers::serial::trace_octet(sequence);
-            if sequence_ansi {
-                // CSI/ANSI se termine sur un octet final 0x40..=0x7e.
-                if (0x40..=0x7e).contains(&octet) { sequence_ansi = false; }
-                continue;
+            match etat_ansi {
+                1 => {
+                    etat_ansi = if octet == b'[' { 2 } else { 0 };
+                    continue;
+                }
+                2 => {
+                    if (0x40..=0x7e).contains(&octet) { etat_ansi = 0; }
+                    continue;
+                }
+                _ => {}
             }
             match octet {
-                0x1b => sequence_ansi = true,
+                0x1b => etat_ansi = 1,
                 b'\n' => {
                     y += pas;
                     colonne = 0;
@@ -557,7 +639,7 @@ pub fn affiche_panique(fichier: &str, ligne: u32) {
 
     let largeur = FB_LARGEUR.load(Ordering::Acquire);
     let hauteur = FB_HAUTEUR.load(Ordering::Acquire);
-    let echelle = (largeur / 640).clamp(1, 3);
+    let echelle = (largeur / 960).clamp(1, 2);
     let marge = 16 * echelle;
     let pas = 12 * echelle;
 

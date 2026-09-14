@@ -21,6 +21,7 @@ extern "C" fn task_trampoline() -> ! {
 }
 
 extern "C" fn kernel_task_trampoline() -> ! {
+    crate::platform::pc::ecran_faute::point_silencieux("fil-noyau-trampoline");
     complete_switch_handoff();
     let entree = {
         let mut task = current_exclusif();

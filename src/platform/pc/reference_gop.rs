@@ -603,19 +603,61 @@ pub fn render_stage1(
     })
 }
 
+#[inline]
+fn dans_ellipse(x: i32, y: i32, cx: i32, cy: i32, rx: i32, ry: i32) -> bool {
+    let dx = (x - cx) as i64;
+    let dy = (y - cy) as i64;
+    dx * dx * ry as i64 * ry as i64 + dy * dy * rx as i64 * rx as i64
+        <= rx as i64 * rx as i64 * ry as i64 * ry as i64
+}
+
+#[inline]
+fn dans_arrondi_logo(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
+    if x < x0 || y < y0 || x >= x1 || y >= y1 { return false; }
+    let cx = x.clamp(x0 + rayon, x1 - rayon - 1);
+    let cy = y.clamp(y0 + rayon, y1 - rayon - 1);
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= rayon * rayon
+}
+
+fn logo_alpha(px: u32, py: u32, taille: u32) -> u8 {
+    let mut couverture = 0u16;
+    for sy in 0..4u32 {
+        for sx in 0..4u32 {
+            let nx = ((px * 4 + sx) * 1024 / (taille * 4).max(1)) as i32;
+            let ny = ((py * 4 + sy) * 1024 / (taille * 4).max(1)) as i32;
+            let hampe = dans_arrondi_logo(nx, ny, 145, 70, 345, 950, 72);
+            let haut = nx >= 260
+                && dans_ellipse(nx, ny, 455, 315, 345, 245)
+                && !dans_ellipse(nx, ny, 465, 315, 155, 105);
+            let bas = nx >= 260
+                && dans_ellipse(nx, ny, 475, 710, 380, 275)
+                && !dans_ellipse(nx, ny, 485, 710, 175, 125);
+            if hampe || haut || bas { couverture += 1; }
+        }
+    }
+    (couverture * 255 / 16) as u8
+}
+
+fn draw_boot_logo(info: FramebufferInfo, x: u32, y: u32, taille: u32) {
+    for py in 0..taille {
+        for px in 0..taille {
+            let alpha = logo_alpha(px, py, taille);
+            if alpha != 0 {
+                let _ = blend_rgb(info, x + px, y + py, ACCENT, alpha);
+            }
+        }
+    }
+}
+
 // This draw happens exactly once, before the normal display driver takes
-// ownership.  Boot checkpoints deliberately never touch the framebuffer:
- // they may run with interrupts disabled or on the firmware bootstrap stack.
+// ownership. Boot checkpoints deliberately never touch the framebuffer.
 pub fn boot_begin(info: FramebufferInfo) {
     if validate(info).is_err() { return; }
     fill_rect(info, 0, 0, info.width, info.height, BG);
-    let x = info.width.saturating_sub(80) / 2;
-    let y = info.height.saturating_sub(110) / 2;
-    // Geometric B, using the same blue accent as the desktop.
-    for (dx, dy, width, height) in [
-        (0, 0, 12, 72), (12, 0, 42, 12), (12, 30, 42, 12),
-        (12, 60, 42, 12), (54, 8, 12, 24), (54, 38, 12, 26),
-    ] {
-        fill_rect(info, x + dx, y + dy, width, height, ACCENT);
-    }
+    let taille = 128u32.min(info.width).min(info.height);
+    let x = info.width.saturating_sub(taille) / 2;
+    let y = info.height.saturating_sub(taille) / 2;
+    draw_boot_logo(info, x, y, taille);
 }

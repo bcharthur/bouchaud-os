@@ -35,8 +35,12 @@ if "FAULT_FONT_6" not in faute or 'include_bytes!(concat!(env!("OUT_DIR")' not i
     erreurs.append("ecran_faute.rs: atlas TrueType statique absent")
 if "gfx::font::glyph" in faute:
     erreurs.append("ecran_faute.rs: retour a la police bitmap 8x8")
-if "sequence_ansi" not in faute:
-    erreurs.append("ecran_faute.rs: les sequences ANSI pollueraient le diagnostic")
+if "etat_ansi" not in faute or "sequence_ansi" in faute:
+    erreurs.append("ecran_faute.rs: analyseur CSI/ANSI incomplet")
+if "EXCEPTION INITIALE" not in faute or "PISTE PRINCIPALE" not in faute:
+    erreurs.append("ecran_faute.rs: diagnostic causal incomplet")
+if "point_silencieux" not in faute:
+    erreurs.append("ecran_faute.rs: jalons de commutation absents")
 
 build = (ROOT / "build.rs").read_text(encoding="utf-8")
 if "DejaVuSans.ttf" not in build or "font.rasterize" not in build:
@@ -53,6 +57,20 @@ if "couverture_services" not in icones or "blend_rgb" not in icones:
 explorateur = (ROOT / "src/gui/apps/file_explorer.rs").read_text(encoding="utf-8")
 if "couverture_icone" not in explorateur or "blend_rgb" not in explorateur:
     erreurs.append("file_explorer.rs: icones fichier/dossier encore pixelisees")
+
+creation = (ROOT / "src/kernel/process/thread/creation.rs").read_text(encoding="utf-8")
+if "adresse de retour fictive" not in creation or "(task.ctx.rsp + 8 * 8) & 0xF" not in creation:
+    erreurs.append("creation.rs: pile initiale sans alignement ABI SysV")
+
+exceptions = (ROOT / "src/arch/x86_64/idt/exceptions.rs").read_text(encoding="utf-8")
+if exceptions.count("entre_exception") < 5 or "sort_exception_resolue" not in exceptions:
+    erreurs.append("exceptions.rs: premiere exception non memorisee")
+
+gop = (ROOT / "src/platform/pc/reference_gop.rs").read_text(encoding="utf-8")
+preboot = (ROOT / "tools/reference/uefi-preboot-probe/src/main.rs").read_text(encoding="utf-8")
+for relatif, source in (("reference_gop.rs", gop), ("uefi-preboot-probe", preboot)):
+    if "logo_alpha" not in source or "(0,0,12,72)" in source.replace(" ", ""):
+        erreurs.append(f"{relatif}: logo de demarrage non vectoriel/lisse")
 
 if erreurs:
     raise SystemExit("\n".join(erreurs))

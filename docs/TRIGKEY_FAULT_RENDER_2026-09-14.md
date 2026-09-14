@@ -39,3 +39,27 @@ visibles des anciens rectangles au pixel.
 4. Vérifier les contours de glyphes et d'icônes aux tailles normale et petite.
 5. En cas de faute, photographier l'écran complet : les dernières lignes ne
    doivent plus contenir de séquences `[90m` ou caractères `?` parasites.
+
+## Deuxieme demarrage physique
+
+Le second essai atteint `bureau` (11 points franchis) puis tombe en double
+faute avec un RSP termine par `0x850`. Ce jalon se trouve juste avant
+`task::run_noyau`, qui fabrique le premier cadre de pile du bureau.
+
+L'ancien cadre consommait exactement huit mots entre `ctx.rsp` et l'entree du
+trampoline. Avec un sommet aligne a 16 octets, le trampoline commencait donc
+avec `RSP % 16 == 0`, en contradiction avec l'ABI SysV x86-64 qui exige 8 a
+l'entree d'une fonction. Une case de retour fictive est maintenant reservee :
+apres les sept restaurations et le `ret`, le trampoline commence a
+`RSP % 16 == 8`.
+
+Des jalons sans journalisation couvrent desormais la creation de pile,
+l'installation de la tache, le switch, le trampoline, l'entree du bureau et la
+prise du framebuffer. Le panneau de faute montre aussi la tache, PID/TID, les
+bornes de pile, l'alignement, la premiere exception eventuelle et une piste
+principale. L'analyseur ANSI distingue maintenant correctement `ESC [` des
+octets finaux CSI.
+
+Le B du prechargeur UEFI et celui du noyau ne sont plus six rectangles. Ils
+utilisent la meme forme vectorielle, echantillonnee en 4x4 puis melangee au
+fond avant affichage.

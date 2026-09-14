@@ -403,6 +403,7 @@ pub fn run() {
 
 /// Corps du fil noyau du bureau.
 fn fil_bureau() -> ! {
+    crate::platform::pc::ecran_faute::point_silencieux("bureau-entree");
     #[cfg(feature = "reference-desktop")]
     crate::serial_println!("BOUCHAUD_STAGE2_DESKTOP_TASK_ENTER");
 
@@ -464,6 +465,7 @@ mod modificateur {
 
 fn boucle() {
     fb::enter();
+    crate::platform::pc::ecran_faute::point_silencieux("bureau-framebuffer");
 
     // La souris PS/2 suit SA propre decision : une machine dont le clavier USB
     // est reconnu et la souris non doit garder un pointeur, et une machine

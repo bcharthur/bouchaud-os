@@ -289,8 +289,10 @@ pub fn run(mut first: Box<Task>) -> i32 {
     };
     set_current_index(index);
     unsafe { install(&mut *to_ptr); }
+    crate::platform::pc::ecran_faute::point_silencieux("run-noyau-installe");
     let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
     let depth = smp_lock::suspend_for_schedule();
+    crate::platform::pc::ecran_faute::point_silencieux("run-noyau-switch");
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
     smp_lock::resume_after_schedule(depth);
     complete_switch_handoff();
@@ -410,6 +412,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         None => return -1,
     };
     let mut task = Task::new_kernel(process.clone(), entree);
+    crate::platform::pc::ecran_faute::point_silencieux("run-noyau-pile-creee");
     task.priorite.range(Priorite::Interactive);
     task.affinity_mask = 1;
     task.runq_cpu.range(0);
