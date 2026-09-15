@@ -249,7 +249,13 @@ Write-Host "--- MARQUEURS ATTENDUS (console serie / diagnostic) ---" -Foreground
     "SMP4_AP_STARTED count=15 expected=15     les quinze AP ont demarre",
     "SMP_HANDOFF_AFTER_FIRST_IRQ              la PREMIERE interruption apres la frontiere",
     "SMP_NG2_SCHEDULER                        le scheduler SMP est active",
-    "[IRQ-IMPREVUES]                          parasites PIC/LAPIC et portes IDT absentes"
+    "[IRQ-IMPREVUES]                          parasites PIC/LAPIC et portes IDT absentes",
+    "BOUCHAUD_BOOT_POINT <etape> t_ms= delta_ms=   ou part le temps d amorcage",
+    "BOUCHAUD_TRIGKEY_BLACKBOX_V1 START ... com1=  ce que le demarrage avait deja produit",
+    "[SYSCALL-TOP]                            a quoi un processus brule un coeur",
+    "[USB-HID-POINT]                          un etat par point de terminaison HID",
+    "[USB-HID-TEMOINS]                        les temoins du clavier (la LED)",
+    "cpus ts_ns= cpu0=[...]                   les seize coeurs, pas quatre"
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
@@ -296,6 +302,44 @@ Write-Host "--- LA FRONTIERE SMP : CE QU'ON CHERCHE CE COUP-CI ---" -ForegroundC
     "",
     "  idt_absentes doit valoir ZERO. Un parasite PIC/LAPIC non nul est",
     "  normal sur un vrai PC -- c'est precisement ce que QEMU ne produit pas."
+) | ForEach-Object { Write-Host "  $_" }
+
+Write-Host ""
+Write-Host "--- CE QUE LE LOT DU 15 SEPTEMBRE AJOUTE A RELEVER ---" -ForegroundColor Cyan
+@(
+    "TROIS QUESTIONS SE DECIDENT SUR CES CHIFFRES, ET SUR AUCUN RAISONNEMENT.",
+    "",
+    "1. LE CLAVIER",
+    "   [USB-HID-POINT] ... genre=clavier ... etat= evenements= quarantaine=",
+    "     etat=Running avec un TRB en attente et evenements=0 est un clavier",
+    "     au repos LEGITIME. Arrete, en quarantaine ou jamais arme est un",
+    "     defaut, et la ligne dit lequel.",
+    "   [USB-HID-TEMOINS] poses= refuses= sondes_ep0_utiles=",
+    "     poses>0 prouve que le chemin de controle atteint l'interface. Si la",
+    "     LED VerrNum s'allume a l'allumage, la reponse est visible sans",
+    "     ouvrir l'archive.",
+    "",
+    "2. LA LENTEUR DE LADYBIRD",
+    "   [SYSCALL-TOP] window_ns= <nom>=<appels>/eagain=<n> ...",
+    "     Le premier nom de la liste est ce que la machine fait vraiment.",
+    "     Un eagain proche du nombre d'appels designe une attente active :",
+    "     le processus interroge quelque chose qui ne repond jamais.",
+    "   [PROC-SAMPLE] name=WebContent cpu_pct= ctx_delta=",
+    "     A lire EN REGARD de la ligne precedente, pas toute seule.",
+    "   BOUCHAUD_BOOT_POINT bureau / bureau-premiere-trame /",
+    "   navigateur-demande / navigateur-lance",
+    "     Ou part la fin du demarrage, etape par etape, en millisecondes.",
+    "",
+    "3. LE JOURNAL LUI-MEME",
+    "   sample ... serial_perdus= serial_retard= com1=",
+    "     serial_perdus=0 est la SEULE valeur qui autorise a lire l'archive",
+    "     comme un recit complet. Tout le reste dit combien il en manque.",
+    "   BOUCHAUD_TRIGKEY_BLACKBOX_V1 START ... arriere= capacite= com1=",
+    "     arriere < capacite veut dire qu'aucune ligne anterieure a",
+    "     l'enumeration USB n'a ete perdue.",
+    "     com1=bus-flottant dirait que cette machine n'a pas de port serie --",
+    "     et que chaque octet de journal etait jusqu'ici paye a un port",
+    "     absent."
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
