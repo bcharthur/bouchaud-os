@@ -303,6 +303,45 @@ fn flush_flight(ts_ns: u64) {
     }
 }
 
+// BOUCHAUD_DRAIN_SERIE_PAR_RETARD_V1
+//
+// LE DEFAUT QUE CECI CORRIGE
+//
+// Le drain ecrivait UN enregistrement par fenetre de scrutation : quatre mille
+// trente-deux octets toutes les deux cent cinquante millisecondes, soit seize
+// kilooctets par seconde, quoi qu'il y ait a poser.
+//
+// Ce plafond n'a jamais ete choisi en regard de ce que le noyau produit. Un
+// seul releve periodique du gestionnaire de fenetres fait dix-huit mille
+// quatre cent vingt-six octets : il faut plus d'une seconde pour le poser, et
+// pendant cette seconde le noyau continue d'ecrire. Le retard ne se resorbe
+// jamais tout seul, il attend la prochaine accalmie -- et une session qui
+// n'en a pas perd son journal par le debut, silencieusement.
+//
+// Le nombre d'enregistrements est desormais tire du RETARD REEL, pas d'une
+// constante. Le budget reste borne : au plus `RECORDS_MAX_PAR_FENETRE`, et
+// l'ecriture s'arrete des que le pilote USB refuse -- c'est lui, et non un
+// compteur, qui dit quand il faut rendre la main.
+const RECORDS_MAX_PAR_FENETRE: usize = 32;
+
+/// Octets de journal perdus : ecrases dans le tambour avant d'etre poses.
+///
+/// Zero est la seule valeur qui autorise a lire le journal comme un recit
+/// complet. Tout le reste dit combien il en manque, et c'est pourquoi ce
+/// chiffre appartient a l'echantillon et pas seulement a une marque isolee.
+static SERIAL_PERDUS: AtomicU64 = AtomicU64::new(0);
+/// Retard du drain a la derniere fenetre, en octets.
+static SERIAL_RETARD: AtomicU64 = AtomicU64::new(0);
+
+/// Perte cumulee et retard courant du journal serie.
+pub fn journal_serie() -> (u64, u64, u64) {
+    (
+        SERIAL_PERDUS.load(Ordering::Relaxed),
+        SERIAL_RETARD.load(Ordering::Relaxed),
+        crate::drivers::serial::trace_total_bytes() as u64,
+    )
+}
+
 fn flush_serial(ts_ns: u64, emergency: bool) {
     let (ring_start, ring_end) = crate::drivers::serial::trace_bornes();
     if ring_end == 0 {
@@ -314,25 +353,36 @@ fn flush_serial(ts_ns: u64, emergency: bool) {
         next = ring_start;
     }
     if next < ring_start {
+        let perdus = ring_start.saturating_sub(next);
+        SERIAL_PERDUS.fetch_add(perdus as u64, Ordering::Relaxed);
         let mut gap = Text::new();
         let _ = write!(
             &mut gap,
-            "BLACKBOX_SERIAL_GAP lost={} old={} new={}\n",
-            ring_start.saturating_sub(next),
+            "BLACKBOX_SERIAL_GAP lost={} old={} new={} cumul={} capacite={}\n",
+            perdus,
             next,
             ring_start,
+            SERIAL_PERDUS.load(Ordering::Relaxed),
+            crate::drivers::serial::trace_capacite(),
         );
         let _ = append(KIND_MARKER, gap.as_bytes(), ts_ns, ring_end);
         next = ring_start;
     }
+
+    SERIAL_RETARD.store(ring_end.saturating_sub(next) as u64, Ordering::Relaxed);
 
     if emergency {
         let keep = PAYLOAD_MAX.saturating_mul(8);
         next = next.max(ring_end.saturating_sub(keep));
     }
 
-    let max_records = if emergency { 8 } else { 1 };
-    for _ in 0..max_records {
+    // Ce que le retard demande, borne par ce qu'une fenetre peut tenir.
+    let attendus = ring_end
+        .saturating_sub(next)
+        .div_ceil(PAYLOAD_MAX)
+        .max(1)
+        .min(RECORDS_MAX_PAR_FENETRE);
+    for _ in 0..attendus {
         if next >= ring_end {
             break;
         }
@@ -347,6 +397,7 @@ fn flush_serial(ts_ns: u64, emergency: bool) {
         next += n;
         LAST_TRACE_SEQ.store(next, Ordering::Release);
     }
+    SERIAL_RETARD.store(ring_end.saturating_sub(next.min(ring_end)) as u64, Ordering::Relaxed);
 }
 
 fn sample(ts_ns: u64) {
@@ -368,6 +419,7 @@ fn sample(ts_ns: u64) {
         crate::drivers::xhci_active::hid_transport_stats();
     let (bb_writes, bb_failures, bb_consecutive, bb_last_error, bb_busy_skips, bb_last_ok_ns) =
         crate::drivers::xhci_active::blackbox_storage_extended_counters();
+    let (perdus, retard, produit) = journal_serie();
 
     let _ = write!(
         &mut out,
@@ -382,6 +434,7 @@ fn sample(ts_ns: u64) {
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
             "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={} " ,
+            "serial_perdus={} serial_retard={} serial_produit={} serial_capacite={} com1={} ",
             "wm_tours={} wm_entrees={} wm_trames={}\n"
         ),
         ts_ns, cpu, rsp, here,
@@ -401,10 +454,59 @@ fn sample(ts_ns: u64) {
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
         bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
         FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
+        perdus, retard, produit, crate::drivers::serial::trace_capacite(),
+        crate::drivers::serial::presence_com1().nom(),
         crate::gui::reveil::tours(), crate::gui::reveil::entrees(),
         crate::gui::reveil::trames_composees(),
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+    echantillon_par_cpu(ts_ns);
+}
+
+// BOUCHAUD_ECHANTILLON_TOUS_LES_COEURS_V1
+//
+// L'echantillon ci-dessus decrit quatre coeurs. La TRIGKEY en a seize, et
+// c'est justement sur les douze autres que se logent les figements qu'on
+// cherche : un timer qui ne revient pas, une tache prete sur un coeur que
+// personne ne regarde. Un releve qui s'arrete a `timer3` ne peut pas les
+// voir, et son silence ressemble a une machine saine.
+//
+// Ce releve-ci suit `schedulable_cpus()`. Il est pose separement pour que la
+// ligne d'echantillon garde sa forme -- les outils d'analyse existants la
+// lisent -- et pour qu'aucun des deux ne puisse depasser la charge utile.
+fn echantillon_par_cpu(ts_ns: u64) {
+    let cpus = crate::arch::x86_64::smp::schedulable_cpus().min(MAX_CPUS);
+    let mut cpu = 0usize;
+    while cpu < cpus {
+        let mut out = Text::new();
+        let _ = write!(&mut out, "cpus ts_ns={}", ts_ns);
+        let mut poses = 0usize;
+        // Huit coeurs par enregistrement : une ligne reste lisible, et la
+        // charge utile ne peut pas deborder quels que soient les RIP.
+        while cpu < cpus && poses < 8 {
+            let (utilisateur, noyau) = crate::kernel::task::rips_timer(cpu);
+            let _ = write!(
+                &mut out,
+                " cpu{}=[en_ligne={} rip_u={:#x} rip_k={:#x} stage={} enters={} exits={}]",
+                cpu,
+                crate::arch::x86_64::smp::is_online(cpu) as u8,
+                utilisateur,
+                noyau,
+                TIMER_STAGE[cpu].load(Ordering::Acquire),
+                TIMER_ENTERS[cpu].load(Ordering::Relaxed),
+                TIMER_EXITS[cpu].load(Ordering::Relaxed),
+            );
+            cpu += 1;
+            poses += 1;
+        }
+        let _ = write!(&mut out, "\n");
+        let _ = append(
+            KIND_SAMPLE,
+            out.as_bytes(),
+            ts_ns,
+            crate::drivers::serial::trace_total_bytes(),
+        );
+    }
 }
 
 fn memory_sample(ts_ns: u64) {
@@ -457,12 +559,29 @@ pub fn poll() -> bool {
     DERNIER_SAUT_OCCUPE.store(false, Ordering::Release);
 
     if !STARTED.load(Ordering::Acquire) {
+        // CE QUE LE DEMARRAGE A DEJA COUTE AVANT QU'ON SACHE ECRIRE.
+        //
+        // L'enregistreur ne sait poser un octet qu'une fois la cle USB
+        // enumeree. Tout ce que le noyau a imprime avant -- carte memoire,
+        // ACPI, demarrage des coeurs, PCI, NVMe -- n'existe que dans le
+        // tambour, et n'y survit que s'il y tient.
+        //
+        // `arriere=` dit combien d'octets attendaient a cette seconde-la, et
+        // `capacite=` ce que le tambour peut retenir. Tant que le premier
+        // reste sous le second, aucune ligne de demarrage n'a ete perdue --
+        // et c'est une chose qui se LIT, au lieu de se supposer.
+        let (debut_tambour, fin_tambour) = crate::drivers::serial::trace_bornes();
         let mut msg = Text::new();
         let _ = write!(
             &mut msg,
-            "BOUCHAUD_TRIGKEY_BLACKBOX_V1 START boot_id={} ts_ns={}\n",
+            "BOUCHAUD_TRIGKEY_BLACKBOX_V1 START boot_id={} ts_ns={} arriere={} produit={} capacite={} perdu_avant_demarrage={} com1={}\n",
             boot_id(),
             now,
+            fin_tambour.saturating_sub(debut_tambour),
+            fin_tambour,
+            crate::drivers::serial::trace_capacite(),
+            fin_tambour.saturating_sub(fin_tambour.min(crate::drivers::serial::trace_capacite())),
+            crate::drivers::serial::presence_com1().nom(),
         );
         if append(KIND_MARKER, msg.as_bytes(), now, crate::drivers::serial::trace_total_bytes()) {
             STARTED.store(true, Ordering::Release);

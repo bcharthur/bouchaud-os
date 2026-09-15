@@ -13,6 +13,16 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
+#[path = "sonde.rs"]
+pub mod sonde;
+
+/// Verdict de la sonde, encode : 0 bus flottant, 1 muet, 2 present.
+///
+/// Avant la sonde, la valeur est 2 : tant qu'on n'a pas demande, on ecrit.
+/// Un demarrage qui echouerait AVANT `init()` garde ainsi la sortie serie
+/// qu'il a toujours eue sous QEMU.
+static PRESENCE: AtomicU8 = AtomicU8::new(2);
+
 const COM1: u16 = 0x3F8;
 const PROFONDEUR_FIFO: usize = 16;
 const FORMAT_BUFFER_SIZE: usize = 2048;
@@ -21,7 +31,22 @@ const FORMAT_BUFFER_SIZE: usize = 2048;
 // A mini-PC rarely exposes COM1. Keep the serial stream, but mirror the most
 // recent bytes into a bounded atomic ring so the GOP diagnostic screen can show
 // exactly the same xHCI/SMP markers after ExitBootServices.
-const TRACE_BYTES: usize = 64 * 1024;
+// BOUCHAUD_TAMBOUR_SERIE_1MIO_V1
+//
+// Soixante-quatre kilooctets, c'etait moins qu'UN demarrage. Le scenario
+// `run_os_primitives`, sans bureau ni navigateur, produit 75 852 octets de
+// journal ; un releve periodique du gestionnaire de fenetres en fait 18 426 a
+// lui seul. L'enregistreur de vol ne sait ecrire qu'une fois la cle USB
+// enumeree, c'est-a-dire APRES la partie du demarrage qu'on cherche le plus
+// souvent a relire -- carte memoire, ACPI, demarrage des coeurs, PCI.
+//
+// Ce qui manquait aux archives n'etait donc pas de la verbosite : c'etait de
+// la PLACE pour la garder jusqu'a ce que quelqu'un sache l'ecrire.
+//
+// Un mebioctet tient seize demarrages. Il coute un mebioctet de `.bss` sur
+// une machine qui en a trente-deux mille, et rien du tout dans l'image : le
+// tampon est entierement a zero.
+const TRACE_BYTES: usize = 1024 * 1024;
 static TRACE_WRITE: AtomicUsize = AtomicUsize::new(0);
 static TRACE: [AtomicU8; TRACE_BYTES] = [const { AtomicU8::new(0) }; TRACE_BYTES];
 
@@ -104,6 +129,38 @@ pub fn init() {
         outb(COM1 + 4, 0x0B);
         INITIALISED = true;
     }
+    let verdict = sonde_com1();
+    PRESENCE.store(verdict as u8, Ordering::Release);
+}
+
+/// Interroge COM1 : y a-t-il un 16550 derriere ce port ?
+///
+/// La sonde laisse le controleur dans l'etat ou elle l'a trouve (MCR a 0x0B,
+/// mode normal). Le verdict lui-meme est pris par [`sonde::verdict`], qui ne
+/// touche a rien et se verifie sur l'hote.
+fn sonde_com1() -> sonde::Presence {
+    unsafe {
+        let lsr = inb(COM1 + 5);
+        let iir = inb(COM1 + 2);
+        outb(COM1 + 4, 0x1E); // boucle locale, RTS/DTR/OUT1/OUT2
+        outb(COM1, sonde::MOTIF_BOUCLAGE);
+        let echo = inb(COM1);
+        outb(COM1 + 4, 0x0B); // retour au mode normal
+        sonde::verdict(lsr, iir, echo, sonde::MOTIF_BOUCLAGE)
+    }
+}
+
+/// Ce que la sonde a conclu au demarrage.
+pub fn presence_com1() -> sonde::Presence {
+    sonde::depuis_octet(PRESENCE.load(Ordering::Acquire))
+}
+
+/// Capacite du tambour de trace, en octets.
+///
+/// L'enregistreur en a besoin pour dire de combien il est en retard AVANT
+/// d'avoir perdu quoi que ce soit.
+pub fn trace_capacite() -> usize {
+    TRACE_BYTES
 }
 
 pub fn is_ready() -> bool {
@@ -131,6 +188,22 @@ fn write_lot(octets: &[u8]) {
     // Capture at the actual UART sink so prefixes and payload remain in the
     // same order as the bytes emitted on COM1.
     trace_capture(octets);
+
+    // LE TAMBOUR N'EST PAS CONDITIONNEL, LE PORT L'EST.
+    //
+    // Sans COM1, la boucle ci-dessous coute une attente de THRE et seize
+    // `outb` par lot de seize octets, pour une destination que personne ne
+    // decode. Un releve periodique de dix-huit kilooctets, c'est mille cent
+    // cinquante attentes : la verbosite devenait une taxe sur la machine
+    // qu'elle devait decrire.
+    //
+    // Le tambour, lui, est ecrit dans tous les cas. C'est lui que
+    // l'enregistreur de vol pose sur la cle USB, et c'est donc lui -- et non
+    // COM1 -- qui porte le journal physique.
+    if !presence_com1().ecrire() {
+        return;
+    }
+
     let mut pose = 0usize;
     while pose < octets.len() {
         attends_place();
