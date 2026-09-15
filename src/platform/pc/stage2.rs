@@ -444,13 +444,24 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // chemin de l'entree.
     crate::drivers::xhci_active::demarre_le_fil_blackbox();
 
-    // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
+    // POURQUOI `prechauffage::demarre()` N'EST PAS APPELE ICI.
     //
-    // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui
-    // change entre les deux, c'est le cache de pages propres. Ce fil le
-    // remplit une fois, trois secondes apres le bureau, et se tait.
-    // Ladybird services now start after the first desktop frame. Their actual
-    // working set populates the cache; no competing speculative scan.
+    // `main.rs` le lance, et ce chemin-ci ne le lance pas. Ce n'est PAS un
+    // oubli, et la question se repose a chaque relecture -- d'ou cette note.
+    //
+    // Sur la machine de reference, le navigateur demarre TOUT SEUL cinq cents
+    // millisecondes apres la premiere trame du bureau, en icone : voir
+    // `window_manager`, `services_initialises`. Son vrai jeu de travail
+    // remplit donc le cache de pages propres de lui-meme, et tout de suite.
+    //
+    // Un prechauffage speculatif lance en plus ne ferait pas double emploi :
+    // il ferait CONCURRENCE. Le cache de pages propres retient au plus seize
+    // mille trois cent quatre-vingt-quatre pages, et les deux remplissages
+    // viseraient les memes binaires -- celui qui arrive en second chasserait
+    // ce que le premier vient de charger.
+    //
+    // Si le demarrage automatique du navigateur disparaissait, ce raisonnement
+    // tomberait avec lui et l'appel devrait revenir.
 
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");

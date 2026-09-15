@@ -1002,6 +1002,7 @@ fn boucle() {
             && maintenant.saturating_sub(debut_services) >= 500 {
             services_initialises = true;
             if !wins.iter().any(window::est_client) {
+                crate::platform::pc::ecran_faute::point("navigateur-demande");
                 crate::gui::services::demande(crate::gui::services::DEMARRER);
             }
         }
@@ -1022,6 +1023,7 @@ fn boucle() {
                     w.min = true;
                 }
             }
+            crate::platform::pc::ecran_faute::point("navigateur-lance");
             sale = true;
         }
 
@@ -1117,6 +1119,21 @@ fn boucle() {
                 reveil::note_trame(horloge_seule);
             }
 
+            // LE DEMARRAGE NE S'ARRETE PAS AU BUREAU.
+            //
+            // L'ecran de demarrage se ferme a `bureau`, parce qu'y laisser une
+            // barre de progression la repeindrait par-dessus les fenetres.
+            // Mais l'attente de l'utilisateur, elle, continue : la premiere
+            // trame, puis le demarrage du navigateur cinq cents millisecondes
+            // plus tard. Sans marqueur, ce temps-la n'appartenait a aucune
+            // etape et « le demarrage est trop long » restait sans adresse.
+            //
+            // `point` n'ecrit plus a l'ecran une fois l'ecran ferme ; il ne
+            // fait que poser la ligne `BOUCHAUD_BOOT_POINT` avec son
+            // `delta_ms`. La chronologie va donc jusqu'au navigateur.
+            if derniere_trame == 0 {
+                crate::platform::pc::ecran_faute::point("bureau-premiere-trame");
+            }
             derniere_trame = maintenant;
             sale = false;
             degats.efface();
