@@ -1344,10 +1344,56 @@ fn control_transfer(
     data_in: bool,
     budget_ns: u64,
 ) -> Result<usize, &'static str> {
+    control_transfer_interne(controller, device, setup, data_len, data_in, &[], budget_ns)
+}
+
+/// Transfert de controle SORTANT, avec sa charge utile.
+///
+/// `control_transfer` efface le tampon avant d'emettre : un appelant ne peut
+/// donc pas le remplir d'avance. Cette variante ecrit la charge APRES
+/// l'effacement, ce qui est la seule facon d'envoyer quoi que ce soit au
+/// peripherique -- un rapport de sortie HID, par exemple.
+fn control_transfer_sortant(
+    controller: &mut Controller,
+    device: &mut Device,
+    setup: u64,
+    charge: &[u8],
+    budget_ns: u64,
+) -> Result<usize, &'static str> {
+    control_transfer_interne(
+        controller,
+        device,
+        setup,
+        charge.len(),
+        false,
+        charge,
+        budget_ns,
+    )
+}
+
+fn control_transfer_interne(
+    controller: &mut Controller,
+    device: &mut Device,
+    setup: u64,
+    data_len: usize,
+    data_in: bool,
+    charge_sortante: &[u8],
+    budget_ns: u64,
+) -> Result<usize, &'static str> {
     if data_len > 4096 {
         return Err("control-buffer-too-small");
     }
     unsafe { write_bytes(device.control_virt as *mut u8, 0, data_len) };
+    if !charge_sortante.is_empty() {
+        let n = charge_sortante.len().min(data_len);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                charge_sortante.as_ptr(),
+                device.control_virt as *mut u8,
+                n,
+            );
+        }
+    }
 
     let trt = if data_len == 0 {
         0
@@ -1473,6 +1519,84 @@ fn set_configuration(controller: &mut Controller, device: &mut Device, value: u8
 fn set_boot_protocol(controller: &mut Controller, device: &mut Device, interface: u8) -> bool {
     let setup = setup_packet(0x21, 0x0b, 0, interface as u16, 0);
     control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_HID_TEMOINS_CLAVIER_V1 : le clavier a une voie de RETOUR
+// ---------------------------------------------------------------------------
+//
+// Le pilote ne savait que LIRE un clavier. Aucun `SET_REPORT` n'etait jamais
+// emis, donc aucun temoin ne s'allumait -- et l'utilisateur l'a remarque avant
+// nous : « la LED habituellement allumee sur le clavier n'etait pas allumee ».
+//
+// Ce n'est pas qu'un confort. C'est le SEUL signal visible, sans console
+// serie, qui distingue « le clavier est configure et ecoute l'hote » de « le
+// clavier est enumere mais mort ». Un temoin qui s'allume prouve que le
+// chemin de controle atteint l'interface clavier ; un temoin qui reste eteint
+// dit que l'enumeration a menti.
+
+/// Rapport de sortie HID d'un clavier d'amorcage : un octet de temoins.
+const TEMOIN_VERR_NUM: u8 = 1 << 0;
+const TEMOIN_VERR_MAJ: u8 = 1 << 1;
+const TEMOIN_ARRET_DEFIL: u8 = 1 << 2;
+
+/// Rapports EP0 qui se decodent, entree produite ou non.
+///
+/// A comparer avec `HID_KEYBOARD_REPORTS` : un ecart durable veut dire que le
+/// pont interroge un clavier qui repond correctement et ne dit jamais rien --
+/// exactement l'etat du 15 septembre, que les compteurs d'alors presentaient
+/// comme un transport vert.
+static HID_CONTROL_SONDES_UTILES: AtomicUsize = AtomicUsize::new(0);
+
+static TEMOINS_POSES: AtomicUsize = AtomicUsize::new(0);
+static TEMOINS_REFUSES: AtomicUsize = AtomicUsize::new(0);
+
+/// Temoins allumes / refuses depuis le demarrage.
+pub fn temoins_clavier() -> (usize, usize) {
+    (
+        TEMOINS_POSES.load(Ordering::Relaxed),
+        TEMOINS_REFUSES.load(Ordering::Relaxed),
+    )
+}
+
+/// Rapports EP0 decodes, toutes entrees confondues.
+pub fn sondes_ep0_utiles() -> usize {
+    HID_CONTROL_SONDES_UTILES.load(Ordering::Relaxed)
+}
+
+/// Allume les temoins d'un clavier d'amorcage.
+///
+/// `SET_REPORT` de classe : destinataire interface (0x21), requete 0x09,
+/// `wValue = (type << 8) | report_id` avec type 2 = Output, un octet de
+/// donnees. HID 1.11 section 7.2.2.
+fn set_temoins_clavier(
+    controller: &mut Controller,
+    device: &mut Device,
+    interface: u8,
+    temoins: u8,
+) -> bool {
+    let setup = setup_packet(0x21, 0x09, 2u16 << 8, interface as u16, 1);
+    let ok = control_transfer_sortant(
+        controller,
+        device,
+        setup,
+        &[temoins],
+        BUDGET_ATTENTE_NS,
+    )
+    .is_ok();
+    if ok {
+        TEMOINS_POSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        TEMOINS_REFUSES.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::serial_println!(
+        "BOUCHAUD_HID_TEMOINS slot={} if={} temoins={:#04x} pose={}",
+        device.slot_id,
+        interface,
+        temoins,
+        ok as u8,
+    );
+    ok
 }
 
 fn set_idle(controller: &mut Controller, device: &mut Device, interface: u8) {
@@ -1971,6 +2095,15 @@ fn configure_hids(
             );
         }
         set_idle(controller, device, interface);
+        // LE TEMOIN EST UNE PREUVE, PAS UNE DECORATION.
+        //
+        // Sur un clavier d'amorcage, allumer le verrouillage numerique est le
+        // seul signe VISIBLE, sans console serie, que le chemin de controle
+        // atteint reellement l'interface clavier. Un temoin eteint apres
+        // l'enumeration veut dire que l'enumeration a menti.
+        if controller.hids[index].kind == 1 {
+            set_temoins_clavier(controller, device, interface, TEMOIN_VERR_NUM);
+        }
     }
     wait_ms(10);
 
@@ -3171,7 +3304,43 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
 /// evenements vivent dans `hid::decodage`, qui ne touche rien et que
 /// `tools/platform/test_hid.rs` met a l'epreuve touche par touche. Ici il ne
 /// reste que la remise a la pile d'entree.
-fn process_keyboard_report(endpoint: &mut HidEndpoint, data: &[u8]) -> bool {
+// BOUCHAUD_HID_ACCEPTE_VS_ENTREE_V1
+//
+// « Accepte » voulait dire « analyse sans erreur ». Un clavier au repos rend
+// un rapport parfaitement valide ou aucune touche n'est enfoncee : il etait
+// donc compte comme accepte, et `BOUCHAUD_HID_CONTROL_FALLBACK_GREEN
+// kind=keyboard` s'imprimait sur ce rapport VIDE.
+//
+// Le releve du 15 septembre montre ce mensonge en entier : le pont EP0
+// interroge un clavier soixante-quinze fois par seconde, `kbd=4535` monte
+// regulierement, le vert est affiche -- et `[GUI-COMPOSITOR-SOURCES]
+// clavier=0` dit qu'aucune touche n'a jamais atteint le bureau.
+//
+// Les deux notions sont desormais separees, parce qu'elles servent a deux
+// choses differentes :
+//
+//   `Analyse`  le transfert a abouti et le rapport se decode. C'est ce qui
+//              decide de la quarantaine : un clavier au repos ne doit PAS
+//              etre mis en quarantaine, il fonctionne.
+//   `Entree`   le rapport a produit au moins un evenement. C'est ce qui a le
+//              droit d'annoncer qu'un transport porte reellement l'entree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Refuse,
+    Analyse,
+    Entree,
+}
+
+impl Verdict {
+    fn analyse(&self) -> bool {
+        !matches!(self, Verdict::Refuse)
+    }
+    fn entree(&self) -> bool {
+        matches!(self, Verdict::Entree)
+    }
+}
+
+fn process_keyboard_report(endpoint: &mut HidEndpoint, data: &[u8]) -> Verdict {
     let mut sortie = [hid::Evenement { code: 0, etendu: false, appui: false };
         hid::EVENEMENTS_MAX];
     let Some(n) = hid::evenements_clavier(
@@ -3180,22 +3349,37 @@ fn process_keyboard_report(endpoint: &mut HidEndpoint, data: &[u8]) -> bool {
         data,
         &mut sortie,
     ) else {
-        return false;
+        return Verdict::Refuse;
     };
     for evenement in sortie.iter().take(n) {
         push_ps2(evenement.code, evenement.etendu, evenement.appui);
     }
-    true
+    if n == 0 {
+        Verdict::Analyse
+    } else {
+        Verdict::Entree
+    }
 }
 
-fn process_mouse_report(endpoint: &HidEndpoint, data: &[u8]) -> bool {
+fn process_mouse_report(endpoint: &HidEndpoint, data: &[u8]) -> Verdict {
     let Some(souris) = hid::decode_souris(endpoint.report_id, data) else {
-        return false;
+        return Verdict::Refuse;
     };
+    // Une souris immobile, boutons relaches, rend un rapport valide et vide.
+    // Comme pour le clavier, cela prouve que le transport marche, pas qu'une
+    // entree a ete produite.
+    let entree = souris.dx != 0
+        || souris.dy != 0
+        || souris.roue != 0
+        || souris.boutons != 0;
     crate::drivers::mouse::inject_usb_report(
         endpoint.source_souris, souris.boutons, souris.dx, souris.dy, souris.roue,
     );
-    true
+    if entree {
+        Verdict::Entree
+    } else {
+        Verdict::Analyse
+    }
 }
 
 fn process_hid_event(controller: &mut Controller, event: Trb) {
@@ -3231,30 +3415,48 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
             )
         };
         HID_REPORTS.fetch_add(1, Ordering::Relaxed);
-        let accepted = match controller.hids[index].kind {
+        // LE VERT N'APPARTIENT QU'A UNE ENTREE REELLE.
+        //
+        // Il s'imprimait sur le premier rapport ANALYSE, donc sur le premier
+        // rapport vide -- un clavier au repos suffisait a l'obtenir. Le
+        // releve du 15 septembre affiche ce vert pendant que
+        // `[GUI-COMPOSITOR-SOURCES] clavier=0` dit qu'aucune touche n'a
+        // jamais atteint le bureau.
+        let verdict = match controller.hids[index].kind {
             1 => {
-                let ok = process_keyboard_report(&mut controller.hids[index], data);
-                if ok {
+                let verdict = process_keyboard_report(&mut controller.hids[index], data);
+                if verdict.entree() {
                     let previous = HID_KEYBOARD_REPORTS.fetch_add(1, Ordering::Relaxed);
                     if previous == 0 {
                         crate::serial_println!("BOUCHAUD_HID_KEYBOARD_INPUT_GREEN slot={} dci={}", slot, dci);
                     }
                 }
-                ok
+                verdict
             }
             2 => {
-                let ok = process_mouse_report(&controller.hids[index], data);
-                if ok {
+                let verdict = process_mouse_report(&controller.hids[index], data);
+                if verdict.entree() {
                     let previous = HID_MOUSE_REPORTS.fetch_add(1, Ordering::Relaxed);
                     if previous == 0 {
                         crate::serial_println!("BOUCHAUD_HID_MOUSE_INPUT_GREEN slot={} dci={}", slot, dci);
                     }
                 }
-                ok
+                verdict
             }
+            _ => Verdict::Refuse,
+        };
+        let accepted = verdict.analyse();
+        // LES OCTETS D'UN CLAVIER VALENT CEUX D'UNE SOURIS.
+        //
+        // La borne globale a seize rapports est atteinte en une seconde par la
+        // souris seule : un clavier branche ensuite n'imprimait donc JAMAIS
+        // un octet. C'est exactement ce qui manquait au releve du
+        // 15 septembre pour dire si le clavier envoyait quelque chose.
+        let borne = match controller.hids[index].kind {
+            1 => HID_KEYBOARD_REPORTS.load(Ordering::Relaxed) <= 16,
             _ => false,
         };
-        if HID_REPORTS.load(Ordering::Relaxed) <= 16 {
+        if borne || HID_REPORTS.load(Ordering::Relaxed) <= 16 {
             crate::serial_println!(
                 "BOUCHAUD_HID_REPORT slot={} dci={} kind={} cc={} actual={} accepted={} b0={:#04x} b1={:#04x} b2={:#04x} b3={:#04x}",
                 slot, dci, controller.hids[index].kind, cc, actual, accepted as u8,
@@ -3431,6 +3633,94 @@ fn veille_points_hid(controller: &mut Controller) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_HID_RELEVE_PAR_POINT_V1 : un clavier muet doit DIRE pourquoi
+// ---------------------------------------------------------------------------
+//
+// Le releve du 15 septembre contient tout ce qu'il faut pour savoir que le
+// clavier ne marche pas, et rien pour savoir POURQUOI :
+//
+//     [USB-HID-V3] keyboards=2 mice=1 replis_en_quarantaine=2
+//     [GUI-COMPOSITOR-SOURCES] clavier=0 souris=1462
+//     events=1463 reports=1463 mouse=1463        <- tout vient de la souris
+//
+// Deux claviers enumeres, zero rapport. Les compteurs sont GLOBAUX : ils
+// additionnent des points de terminaison qui n'ont pas le meme sort, et la
+// somme cache le cas. Sur le meme peripherique Logitech, le point souris
+// (dci 5) fonctionne et le point clavier (dci 3) non -- c'est la comparaison
+// qui nomme le defaut, et elle etait impossible a faire.
+//
+// Cette ligne sort UN etat par point de terminaison, a la cadence des
+// releves. Elle ne calcule rien qu'on ne puisse lire sans verrou.
+
+/// Etat complet d'un point HID, tel que le releve physique doit le montrer.
+pub struct ReleveHid {
+    pub slot: u8,
+    pub dci: u8,
+    pub genre: u8,
+    pub interface: u8,
+    pub protocole: u8,
+    pub max_paquet: u16,
+    pub periode_ms: u64,
+    pub evenements: u32,
+    pub silence_ms: u64,
+    pub etat_contexte: u32,
+    pub defilement: u64,
+    pub trb_attendu: u64,
+    pub en_quarantaine: bool,
+    pub interrupt_casse: bool,
+    pub echecs_repli: u8,
+}
+
+/// Parcourt les points HID de tous les controleurs.
+///
+/// `visite` est appelee sous le verrou du pilote : elle doit etre courte et ne
+/// rien emettre vers le materiel.
+pub fn pour_chaque_point_hid(mut visite: impl FnMut(ReleveHid)) {
+    if RUNTIME_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    unsafe {
+        #[allow(static_mut_refs)]
+        if let Some(runtime) = RUNTIME.as_mut() {
+            for controleur in runtime.controllers.iter_mut() {
+                for index in 0..controleur.hid_count {
+                    let ep = controleur.hids[index];
+                    if !ep.active {
+                        continue;
+                    }
+                    let (etat, defilement) =
+                        etat_point_hid(controleur, index).unwrap_or((0, 0));
+                    visite(ReleveHid {
+                        slot: ep.slot_id,
+                        dci: ep.dci,
+                        genre: ep.kind,
+                        interface: ep.interface,
+                        protocole: ep.protocol,
+                        max_paquet: ep.max_packet,
+                        periode_ms: ep.periode_repli_ns / 1_000_000,
+                        evenements: ep.evenements,
+                        silence_ms: maintenant
+                            .saturating_sub(ep.dernier_evenement_ns)
+                            / 1_000_000,
+                        etat_contexte: etat,
+                        defilement,
+                        trb_attendu: ep.trb_attendu,
+                        en_quarantaine: maintenant < ep.repli_muet_jusqu_a_ns,
+                        interrupt_casse: ep.interrupt_in_casse,
+                        echecs_repli: ep.echecs_repli,
+                    });
+                }
+            }
+        }
+    }
+    RUNTIME_BUSY.store(false, Ordering::Release);
+}
+
 fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> bool {
     if endpoint_index >= controller.hid_count { return false; }
     let endpoint = controller.hids[endpoint_index];
@@ -3468,12 +3758,16 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
     let data = unsafe {
         core::slice::from_raw_parts(device.control_virt as *const u8, received)
     };
-    let accepted = match controller.hids[endpoint_index].kind {
+    let verdict = match controller.hids[endpoint_index].kind {
         1 => process_keyboard_report(&mut controller.hids[endpoint_index], data),
         2 => process_mouse_report(&controller.hids[endpoint_index], data),
-        _ => false,
+        _ => Verdict::Refuse,
     };
-    if accepted {
+    // Le pont EP0 a REPONDU des que le rapport se decode : c'est cela qui
+    // decide de la quarantaine, et un clavier au repos ne doit jamais y
+    // entrer. Mais il n'a PORTE une entree que s'il a produit un evenement,
+    // et c'est cela seul qui a le droit d'annoncer un transport vert.
+    if verdict.entree() {
         let previous = HID_CONTROL_REPORTS.fetch_add(1, Ordering::Relaxed);
         match controller.hids[endpoint_index].kind {
             1 => {
@@ -3491,7 +3785,10 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
             _ => {}
         }
     }
-    accepted
+    if verdict.analyse() {
+        HID_CONTROL_SONDES_UTILES.fetch_add(1, Ordering::Relaxed);
+    }
+    verdict.analyse()
 }
 
 /// Sert AU PLUS UN point de terminaison muet, a partir de `depart`.

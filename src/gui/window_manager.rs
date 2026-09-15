@@ -1474,6 +1474,51 @@ polling={} scrutations_par_s={} replis_en_quarantaine={} repli_tours={} repli_se
         "[USB-HID-VEILLE] reprises={} reussies={} hors_service={} evenements_perdus={}",
         reprises, reussies, hors_service, evenements_perdus,
     );
+
+    // UN ETAT PAR POINT DE TERMINAISON.
+    //
+    // Les compteurs globaux additionnent des points qui n'ont pas le meme
+    // sort. Le releve du 15 septembre annonce `keyboards=2 mice=1` et
+    // `clavier=0` : deux claviers enumeres, zero touche. Sur le MEME
+    // peripherique, le point souris marchait et le point clavier non -- la
+    // somme cachait exactement le fait qui nomme le defaut.
+    //
+    // Lecture : `evenements=0` avec `etat=1` et `deq == attendu` veut dire que
+    // le controleur n'a jamais consomme notre TD. Un clavier au repos est dans
+    // cet etat legitimement (il NAK tant qu'aucune touche n'est frappee) ;
+    // un clavier sur lequel on tape ne devrait pas y rester.
+    let (temoins_poses, temoins_refuses) =
+        crate::drivers::xhci_active::temoins_clavier();
+    crate::serial_println!(
+        "[USB-HID-TEMOINS] poses={} refuses={} sondes_ep0_utiles={}",
+        temoins_poses,
+        temoins_refuses,
+        crate::drivers::xhci_active::sondes_ep0_utiles(),
+    );
+    crate::drivers::xhci_active::pour_chaque_point_hid(|point| {
+        crate::serial_println!(
+            "[USB-HID-POINT] slot={} dci={} genre={} if={} proto={} mps={} periode_ms={} evenements={} silence_ms={} etat={} deq={:#x} attendu={:#x} quarantaine={} interrupt_casse={} echecs={}",
+            point.slot,
+            point.dci,
+            match point.genre {
+                1 => "clavier",
+                2 => "souris",
+                _ => "autre",
+            },
+            point.interface,
+            point.protocole,
+            point.max_paquet,
+            point.periode_ms,
+            point.evenements,
+            point.silence_ms,
+            point.etat_contexte,
+            point.defilement,
+            point.trb_attendu,
+            point.en_quarantaine as u8,
+            point.interrupt_casse as u8,
+            point.echecs_repli,
+        );
+    });
     if crate::drivers::xhci_active::hid_ready() {
         crate::serial_println!("BOUCHAUD_INPUT_GREEN keyboard=1 mouse=1");
     }
