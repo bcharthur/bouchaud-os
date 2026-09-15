@@ -38,6 +38,8 @@ Trois vecteurs non peuplés etaient atteignables a cet instant precis :
 4. Les parasites du 8259 CONSULTENT l'ISR au lieu d'acquitter a l'aveugle.
 5. La frontiere SMP est photographiee avant la restauration de l'IF.
 6. L'ecran de faute n'accuse plus une pile d'amorcage d'etre corrompue.
+7. IRQ0 et l'IPI de replanification restent SANS TACHE tant que le scheduler
+   n'est pas active.
 """
 
 import re
@@ -50,6 +52,8 @@ IMPREVUS = RACINE / "src/arch/x86_64/idt/imprevus.rs"
 POLITIQUE = RACINE / "src/arch/x86_64/idt/politique_vecteurs.rs"
 SMP = RACINE / "src/arch/x86_64/smp.rs"
 ECRAN = RACINE / "src/platform/pc/ecran_faute.rs"
+TIMER = RACINE / "src/arch/x86_64/idt/timer.rs"
+RESCHEDULE = RACINE / "src/arch/x86_64/idt/reschedule.rs"
 
 
 def corps(source, entete):
@@ -72,7 +76,7 @@ def corps(source, entete):
 
 def main():
     fautes = []
-    for chemin in (IDT, IMPREVUS, POLITIQUE, SMP, ECRAN):
+    for chemin in (IDT, IMPREVUS, POLITIQUE, SMP, ECRAN, TIMER, RESCHEDULE):
         if not chemin.exists():
             print("  - fichier absent : %s" % chemin)
             return 1
@@ -231,6 +235,69 @@ def main():
             "capturee avant la double faute."
         )
 
+    # --- 7. IRQ0 reste une horloge tant que le scheduler dort ---------------
+    #
+    # LA REGLE LA PLUS IMPORTANTE DE CE FICHIER.
+    #
+    # `bootstrap_in_progress` tombe dans `Drop for SmpBootstrapGuard`, juste
+    # AVANT le `sti`, alors que `scheduler_enabled` est encore faux et
+    # qu'aucune tache n'est installee. Un handler qui ne teste que le premier
+    # drapeau entre donc dans le chemin complet -- reveils, watchdog,
+    # comptabilite de tache, preemption -- dans un etat ou `CURRENT` n'existe
+    # pas. C'est la frontiere exacte ou le releve du 14 septembre place sa
+    # double faute, `task=<aucune>`.
+    for chemin, nom, entete in (
+        (TIMER, "timer.rs", "fn timer_interrupt_handler("),
+        (RESCHEDULE, "reschedule.rs", "fn reschedule_interrupt_handler("),
+    ):
+        source = chemin.read_text(encoding="utf-8")
+        bloc = corps(source, entete)
+        if bloc is None:
+            fautes.append("%s : %s a disparu." % (nom, entete))
+            continue
+        if "timer_runtime_pret(" not in bloc:
+            fautes.append(
+                "%s : la frontiere pre-scheduler a disparu. Le handler "
+                "redeviendrait dependant du seul `bootstrap_in_progress()`, "
+                "qui tombe AVANT l'activation du scheduler et AVANT qu'une "
+                "tache existe." % nom
+            )
+            continue
+        # Le seul test toléré sur `bootstrap_in_progress` est celui qui passe
+        # par la decision commune : un test nu reintroduirait le defaut.
+        nu = re.search(
+            r"if\s+!?\s*smp::bootstrap_in_progress\(\)\s*\{", bloc
+        )
+        if nu is not None:
+            fautes.append(
+                "%s : un test nu sur `bootstrap_in_progress()` est revenu. La "
+                "decision doit passer par `timer_runtime_pret`, qui consulte "
+                "AUSSI `scheduler_enabled`." % nom
+            )
+        # La barriere doit preceder tout ce qui suppose une tache.
+        rang = bloc.find("timer_runtime_pret(")
+        for apres, quoi in (
+            ("note_rip_timer", "le releve de RIP par tache"),
+            ("flush_interface_irq", "le vidage des reveils"),
+            ("watchdog_from_timer", "le watchdog"),
+            ("echantillonne_tache_bsp", "l'echantillonnage de tache"),
+            ("stall_ipi_observe", "l'observation de blocage"),
+        ):
+            position = bloc.find(apres)
+            if position >= 0 and position < rang:
+                fautes.append(
+                    "%s : %s s'execute AVANT la frontiere pre-scheduler. Il "
+                    "suppose une tache courante, qui n'existe pas encore."
+                    % (nom, quoi)
+                )
+
+    politique_pure = POLITIQUE.read_text(encoding="utf-8")
+    if "fn timer_runtime_pret(" not in politique_pure:
+        fautes.append(
+            "politique_vecteurs.rs : la decision du timer n'est plus une "
+            "fonction pure ; elle cesserait d'etre verifiable sur l'hote."
+        )
+
     if fautes:
         print("vecteurs imprevus : %d probleme(s)" % len(fautes))
         for faute in fautes:
@@ -239,7 +306,8 @@ def main():
 
     print(
         "vecteurs imprevus : #NP decode, parasites PIC/LAPIC servis selon l'ISR, "
-        "frontiere SMP photographiee, ecran de faute honnete"
+        "frontiere SMP photographiee, ecran de faute honnete, IRQ0 sans tache "
+        "avant le scheduler"
     )
     return 0
 

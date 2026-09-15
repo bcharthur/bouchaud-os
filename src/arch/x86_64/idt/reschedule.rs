@@ -6,8 +6,16 @@
 extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFrame) {
     smp::note_premiere_irq(smp::RESCHEDULE_VECTOR, stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
-    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
-    if smp::bootstrap_in_progress() {
+    // BOUCHAUD_TIMER_DEUX_MODES_V1
+    //
+    // Meme frontiere que pour IRQ0, et pour la meme raison : tout ce qui suit
+    // suppose une tache courante. Un IPI de replanification arrive avant
+    // l'activation du scheduler n'a rien a replanifier -- il ne doit
+    // qu'acquitter.
+    if !politique_vecteurs::timer_runtime_pret(
+        smp::bootstrap_in_progress(),
+        smp::scheduler_enabled(),
+    ) {
         smp::eoi_local();
         return;
     }

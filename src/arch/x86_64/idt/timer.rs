@@ -24,11 +24,43 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 3);
 
-    // BOUCHAUD_SMP_BOOTSTRAP_GUARD_V1
-    // Aucun reveil, watchdog ou preemption pendant INIT/SIPI : cette fenetre
-    // doit rester strictement materielle, sinon CPU0 peut rentrer dans le
-    // scheduler sur une pile de boot pendant que les AP ne sont pas stables.
-    if smp::bootstrap_in_progress() {
+    // =======================================================================
+    // BOUCHAUD_TIMER_DEUX_MODES_V1 : la frontiere du contrat d'IRQ0
+    // =======================================================================
+    //
+    // MODE AMORCAGE -- au-dessus de cette ligne :
+    //     horloge, comptabilite atomique, fin d'interruption. Rien d'autre.
+    //     Aucun appel ne suppose une tache courante.
+    //
+    // MODE RUNTIME -- au-dessous :
+    //     reveils, watchdog, echantillonnage de tache, preemption,
+    //     ordonnancement. Tout cela suppose que `CURRENT` existe.
+    //
+    // Le passage de l'un a l'autre est `smp::enable_scheduler()`, et lui seul.
+    //
+    // # LE DEFAUT QUE CETTE LIGNE CORRIGE
+    //
+    // Le test ne portait que sur `bootstrap_in_progress()`. Or ce drapeau
+    // tombe dans `Drop for SmpBootstrapGuard`, JUSTE AVANT le `sti` -- alors
+    // que `scheduler_enabled` est encore faux et qu'aucune tache n'est
+    // installee sur le BSP. La toute premiere IRQ0 apres la restauration de
+    // l'IF entrait donc dans le chemin complet, dans un etat ou `CURRENT`
+    // n'existe pas : c'est exactement la frontiere ou le releve physique du
+    // 14 septembre place sa double faute, `task=<aucune>`.
+    //
+    // Les deux drapeaux sont desormais consultes ensemble, et la barriere est
+    // placee aussi tot que possible : tout ce qui la precede a ete verifie
+    // ligne a ligne comme ne touchant que des atomiques.
+    //
+    // `account_timer_tick` RESTE au-dessus, et ce n'est pas un oubli : sa
+    // lecture a montre qu'il ne manipule que des compteurs atomiques et les
+    // drapeaux d'inactivite par CPU -- il ne dereference aucune tache. Le
+    // laisser au-dessus garde une comptabilite de temps juste pendant tout
+    // l'amorcage.
+    if !politique_vecteurs::timer_runtime_pret(
+        smp::bootstrap_in_progress(),
+        smp::scheduler_enabled(),
+    ) {
         crate::kernel::blackbox::timer_stage(blackbox_cpu, 99);
         return;
     }
