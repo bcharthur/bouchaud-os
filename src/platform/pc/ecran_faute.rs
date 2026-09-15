@@ -92,10 +92,214 @@ fn memorise_point(nom: &str) {
     POINTS_FRANCHIS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Instant du point de controle precedent, en millisecondes depuis l'amorcage.
+static POINT_PRECEDENT_MS: AtomicU64 = AtomicU64::new(0);
+
 pub fn point(nom: &str) {
     memorise_point(nom);
-    crate::serial_println!("BOUCHAUD_BOOT_POINT {}", nom);
+    // LE TEMPS DE CHAQUE ETAPE, PAS SEULEMENT SON NOM.
+    //
+    // « Le demarrage est trop long » ne se corrige pas sans savoir OU part le
+    // temps. Le marqueur ne portait que le nom de l'etape : deux relevés
+    // successifs ne pouvaient pas etre compares, et aucune etape ne pouvait
+    // etre accusee. `t_ms` situe l'etape dans l'amorcage, `delta_ms` dit ce
+    // qu'elle a coute.
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let precedent = POINT_PRECEDENT_MS.swap(maintenant, Ordering::AcqRel);
+    crate::serial_println!(
+        "BOUCHAUD_BOOT_POINT {} t_ms={} delta_ms={}",
+        nom,
+        maintenant,
+        maintenant.saturating_sub(precedent),
+    );
+    demarrage_etape(nom, maintenant);
 }
+
+// ===========================================================================
+// BOUCHAUD_ECRAN_DEMARRAGE_V1 : dire ce qui se passe, au lieu d'un logo fige
+// ===========================================================================
+//
+// Le demarrage n'affichait qu'un « B » bleu centre et immobile pendant tout
+// l'amorcage. Devant un ecran fige, on ne peut ni savoir si la machine
+// travaille, ni savoir OU elle est lente -- et c'est precisement la question
+// posee : « le demarrage est trop long ».
+//
+// L'ecran d'extinction dit ce qu'il fait : un titre, une barre, une ligne
+// d'etat. Voici le meme, au demarrage.
+//
+// # POURQUOI CE RENDU-CI ET PAS CELUI DU TABLEAU DE BORD
+//
+// Le depot garde la trace d'une tentative precedente, dans
+// `stage2::point_de_controle` :
+//
+//     « Drawing here caused a double fault on the Trigkey immediately after
+//       the network checkpoint. »
+//
+// Dessiner au point de controle avec le rendu TrueType demande d'analyser une
+// police -- donc d'ALLOUER et de descendre profond dans la pile --, a un
+// instant ou les interruptions peuvent etre masquees et ou la pile d'amorcage
+// fait quatre-vingts kilo-octets.
+//
+// Le rendu utilise ici est celui de l'ecran de FAUTE : un atlas pre-construit
+// a la compilation, aucune allocation, aucun verrou, des ecritures volatiles
+// et des atomiques. C'est, par construction, le seul chemin d'affichage dont
+// on sait qu'il tient pendant une double faute -- donc a n'importe quel moment
+// de l'amorcage.
+
+/// Largeur de la zone d'etat, en pixels.
+const DEMARRAGE_LARGEUR: u32 = 560;
+/// Segments de la barre de progression.
+const DEMARRAGE_SEGMENTS: u32 = 16;
+/// Etapes d'un demarrage nominal.
+///
+/// La barre est une ESTIMATION, pas une mesure. Depasser le compte ne la fait
+/// pas reculer : elle sature. Une barre qui stagne a la fin est honnete ; une
+/// barre qui repart a zero ment.
+const DEMARRAGE_ETAPES: u32 = 16;
+
+static DEMARRAGE_ACTIF: AtomicBool = AtomicBool::new(false);
+static DEMARRAGE_ETAPE: AtomicU32 = AtomicU32::new(0);
+
+/// Ouvre l'ecran de demarrage. Le framebuffer doit deja etre installe.
+pub fn demarrage_ouvre() {
+    if FB_ADRESSE.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    DEMARRAGE_ACTIF.store(true, Ordering::Release);
+    DEMARRAGE_ETAPE.store(0, Ordering::Release);
+    let largeur = FB_LARGEUR.load(Ordering::Relaxed);
+    let hauteur = FB_HAUTEUR.load(Ordering::Relaxed);
+    let echelle = echelle_pour(largeur);
+    unsafe {
+        remplit(0, 0, largeur, hauteur, FOND_DEMARRAGE);
+        let titre = "BOUCHAUD OS";
+        let largeur_titre = titre.len() as u32 * 8 * echelle * 2;
+        texte(
+            largeur.saturating_sub(largeur_titre) / 2,
+            hauteur / 2 - 96,
+            titre,
+            echelle * 2,
+            TEXTE,
+        );
+    }
+}
+
+/// Ferme l'ecran de demarrage : le bureau prend la main.
+///
+/// Sans cela, un point de controle tardif -- il en reste apres l'arrivee au
+/// bureau -- repeindrait une barre de progression par-dessus les fenetres.
+pub fn demarrage_ferme() {
+    DEMARRAGE_ACTIF.store(false, Ordering::Release);
+}
+
+/// Avance d'une etape et nomme ce qui commence.
+///
+/// Sans effet tant que l'ecran n'est pas ouvert, et sans effet une fois qu'il
+/// est ferme.
+pub fn demarrage_etape(libelle: &str, maintenant_ms: u64) {
+    if !DEMARRAGE_ACTIF.load(Ordering::Acquire) {
+        return;
+    }
+    if FB_ADRESSE.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let etape = DEMARRAGE_ETAPE.fetch_add(1, Ordering::AcqRel) + 1;
+    let largeur = FB_LARGEUR.load(Ordering::Relaxed);
+    let hauteur = FB_HAUTEUR.load(Ordering::Relaxed);
+    let echelle = echelle_pour(largeur);
+    let zone = DEMARRAGE_LARGEUR * echelle / 2;
+    let x = largeur.saturating_sub(zone) / 2;
+    let y = hauteur / 2;
+
+    unsafe {
+        // Effacer AVANT d'ecrire : une etape au nom court laisserait sinon
+        // trainer la fin de la precedente, et l'ecran mentirait par
+        // superposition.
+        remplit(x, y, zone, 24 * echelle, FOND_DEMARRAGE);
+
+        let mut nom = [0u8; 48];
+        let n = libelle.len().min(nom.len());
+        nom[..n].copy_from_slice(&libelle.as_bytes()[..n]);
+        let Ok(libelle) = core::str::from_utf8(&nom[..n]) else { return };
+        let largeur_libelle = n as u32 * 8 * echelle;
+        texte(
+            x + zone.saturating_sub(largeur_libelle) / 2,
+            y,
+            libelle,
+            echelle,
+            ETIQUETTE,
+        );
+
+        let atteints = etape.min(DEMARRAGE_ETAPES) * DEMARRAGE_SEGMENTS / DEMARRAGE_ETAPES;
+        let pas = zone / DEMARRAGE_SEGMENTS;
+        let plein = pas.saturating_sub(4 * echelle).max(1);
+        for i in 0..DEMARRAGE_SEGMENTS {
+            let couleur = if i < atteints { ACCENT_DEMARRAGE } else { BARRE_DEMARRAGE };
+            remplit(x + i * pas, y + 16 * echelle, plein, 2 * echelle, couleur);
+        }
+
+        // LE TEMPS ECOULE, EN BAS, COMME A L'EXTINCTION.
+        //
+        // Il transforme « c'est long » en un nombre, et il le fait pendant
+        // l'attente plutot qu'apres coup dans un journal.
+        let bas = FB_HAUTEUR.load(Ordering::Relaxed).saturating_sub(24 * echelle);
+        remplit(0, bas, FB_LARGEUR.load(Ordering::Relaxed), 12 * echelle, FOND_DEMARRAGE);
+        let mut tampon = [0u8; 24];
+        let n = ecris_secondes(&mut tampon, maintenant_ms);
+        if let Ok(duree) = core::str::from_utf8(&tampon[..n]) {
+            texte(x, bas, duree, echelle, BARRE_TEXTE);
+        }
+    }
+}
+
+/// Ecrit « 12.3 s » sans allouer ni formater.
+fn ecris_secondes(sortie: &mut [u8], ms: u64) -> usize {
+    let secondes = ms / 1000;
+    let dixiemes = (ms % 1000) / 100;
+    let mut chiffres = [0u8; 20];
+    let mut n = 0;
+    let mut reste = secondes;
+    if reste == 0 {
+        chiffres[0] = b'0';
+        n = 1;
+    }
+    while reste > 0 && n < chiffres.len() {
+        chiffres[n] = b'0' + (reste % 10) as u8;
+        reste /= 10;
+        n += 1;
+    }
+    let mut ecrit = 0;
+    for i in (0..n).rev() {
+        if ecrit < sortie.len() {
+            sortie[ecrit] = chiffres[i];
+            ecrit += 1;
+        }
+    }
+    for octet in [b'.', b'0' + dixiemes as u8, b' ', b's'] {
+        if ecrit < sortie.len() {
+            sortie[ecrit] = octet;
+            ecrit += 1;
+        }
+    }
+    ecrit
+}
+
+/// Une echelle lisible quelle que soit la definition de l'ecran.
+fn echelle_pour(largeur: u32) -> u32 {
+    if largeur >= 2560 {
+        3
+    } else if largeur >= 1280 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Palette de l'ecran de demarrage : celle du bureau, pas celle des fautes.
+const FOND_DEMARRAGE: u32 = 0x000D_1117;
+const ACCENT_DEMARRAGE: u32 = 0x0044_A8FF;
+const BARRE_DEMARRAGE: u32 = 0x002B_323F;
+const BARRE_TEXTE: u32 = 0x006B_7686;
 
 /// Jalon utilisable au milieu d'une commutation de pile : atomiques seulement.
 pub fn point_silencieux(nom: &str) {

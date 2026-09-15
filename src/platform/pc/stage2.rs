@@ -91,7 +91,14 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
     // Stage 2 et le blocage est necessairement apres ce point.
+    // L'ECRAN DE DEMARRAGE REMPLACE LE LOGO FIGE.
+    //
+    // `boot_begin` peint le fond et le « B » ; `demarrage_ouvre` reprend la
+    // main juste apres avec le titre et la barre, et chaque point de controle
+    // l'avance. Voir `ecran_faute::demarrage_ouvre` pour la raison du choix du
+    // moteur de rendu.
     super::reference_gop::boot_begin(framebuffer);
+    super::ecran_faute::demarrage_ouvre();
     crate::serial_println!("BOUCHAUD_TRIGKEY_STAGE2_EARLY_GOP_OK");
 
     if !crate::drivers::gfx::install_firmware_framebuffer(framebuffer) {
@@ -448,6 +455,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Vrai desktop -> vrai window_manager -> vrai handle_click.
     crate::serial_println!("[STAGE2] entering real Bouchaud window manager");
     point_de_controle("bureau");
+    // L'ECRAN DE DEMARRAGE S'ARRETE ICI, ET PAS PLUS TARD.
+    //
+    // Des points de controle existent encore apres l'arrivee au bureau ; les
+    // laisser peindre repeindrait une barre de progression par-dessus les
+    // fenetres.
+    super::ecran_faute::demarrage_ferme();
     crate::gui::desktop::run();
 
     crate::serial_println!("[STAGE2] window manager exited");
