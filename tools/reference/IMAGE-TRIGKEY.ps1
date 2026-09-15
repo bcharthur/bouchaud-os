@@ -22,11 +22,27 @@
 .PARAMETER ForceLadybird
     Reconstruit le disque memoire Ladybird au lieu de reprendre celui qui est
     deja la. Long.
+
+.PARAMETER LadybirdDepuis
+    Racine d'un AUTRE arbre de travail d'ou reprendre `ladybird-browser.img`.
+
+    Un worktree fraichement cree ne contient aucun artefact Ladybird : ils ne
+    sont pas suivis par Git, et ils pesent plus d'un gigaoctet. Sans cette
+    option, essayer de construire une image depuis un worktree envoie
+    reconstruire tout Ladybird -- une heure -- pour un lot qui ne touche que
+    le noyau.
+
+    L'image Ladybird ne depend QUE du code du navigateur. Tant qu'un lot ne
+    modifie ni `tools/ladybird/` ni les services C++, celle de l'arbre voisin
+    est exactement la bonne. Elle est verifiee avant d'etre reprise.
+
+        .\tools\reference\IMAGE-TRIGKEY.ps1 -LadybirdDepuis ..\bouchaud-os
 #>
 [CmdletBinding()]
 param(
     [switch]$QuandMeme,
-    [switch]$ForceLadybird
+    [switch]$ForceLadybird,
+    [string]$LadybirdDepuis
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +84,61 @@ if ($Sale) {
 Write-Host "BRANCHE = $Branche"
 Write-Host "COMMIT  = $Etiquette"
 Write-Host ""
+
+# --- 1 bis. Reprendre l'image Ladybird d'un arbre voisin ---------------------
+#
+# `prepare-reference-ladybird.ps1` court-circuite toute sa chaine quand
+# `ladybird-browser.img` existe a la racine ET se verifie. Copier ce seul
+# fichier suffit donc : ni `native-browser-m9`, ni `scenario-stage2-ladybird`,
+# ni la moindre recompilation C++.
+if ($LadybirdDepuis) {
+    if ($ForceLadybird) {
+        Fail "-LadybirdDepuis et -ForceLadybird se contredisent : l'un reprend, l'autre reconstruit."
+    }
+    $Voisin = $null
+    try {
+        $Voisin = (Resolve-Path -LiteralPath $LadybirdDepuis -ErrorAction Stop).Path
+    } catch {
+        Fail "arbre voisin introuvable : $LadybirdDepuis"
+    }
+    if ($Voisin -eq $RepoRoot) {
+        Fail "-LadybirdDepuis designe cet arbre-ci : il n'y a rien a reprendre."
+    }
+    $Source = Join-Path $Voisin "ladybird-browser.img"
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        Fail (
+            "ladybird-browser.img absent de $Voisin. Construis-la une fois " +
+            "dans cet arbre-la (.\run.ps1 -Ladybird), puis reviens ici."
+        )
+    }
+    $Cible = Join-Path $RepoRoot "ladybird-browser.img"
+    $Reprendre = $true
+    if (Test-Path -LiteralPath $Cible -PathType Leaf) {
+        $A = (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash
+        $B = (Get-FileHash -Algorithm SHA256 -LiteralPath $Cible).Hash
+        if ($A -eq $B) {
+            Write-Host "Ladybird : image deja identique a celle de $Voisin." -ForegroundColor Green
+            $Reprendre = $false
+        }
+    }
+    if ($Reprendre) {
+        Write-Host "Ladybird : reprise de $Source" -ForegroundColor Cyan
+        Copy-Item -LiteralPath $Source -Destination $Cible -Force
+    }
+    # VERIFIER AVANT DE S'EN SERVIR. Une image reprise d'un autre arbre peut
+    # dater d'une generation de services que ce noyau ne sait plus lancer ;
+    # le dire ici coute une seconde, le decouvrir sur la machine coute un
+    # flash et un deplacement.
+    & python (Join-Path $RepoRoot "tools\reference\verify-reference-ladybird-image.py") $Cible
+    if ($LASTEXITCODE -ne 0) {
+        Fail (
+            "l'image Ladybird reprise de $Voisin ne se verifie pas. Reconstruis-la " +
+            "la-bas, ou relance ici avec -ForceLadybird."
+        )
+    }
+    Write-Host "Ladybird : image reprise et verifiee." -ForegroundColor Green
+    Write-Host ""
+}
 
 # --- 2. Construction --------------------------------------------------------
 $Sortie = Join-Path $RepoRoot "target\reference\bouchaud-trigkey-stage2-ladybird.img"

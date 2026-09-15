@@ -46,8 +46,12 @@ $Required = @(
 
 if (-not (Test-Path -LiteralPath $Native -PathType Container)) {
     Fail (
-        "native-browser-m9 absent. Le plus simple est de lancer le pipeline Ladybird " +
-        "habituel une fois (.\run.ps1 -Ladybird), puis relancer ce script."
+        "native-browser-m9 absent. Deux voies : si un AUTRE arbre de travail " +
+        "possede deja ladybird-browser.img -- c'est le cas d'un worktree cree " +
+        "a cote de l'arbre principal --, reprends-la avec " +
+        "IMAGE-TRIGKEY.ps1 -LadybirdDepuis <cet-autre-arbre>, ce qui evite " +
+        "une reconstruction complete. Sinon, lance le pipeline Ladybird " +
+        "habituel une fois (.\run.ps1 -Ladybird), puis relance ce script."
     )
 }
 
