@@ -200,6 +200,18 @@ fn photographie_avant_sti() {
     let (masque_maitre, masque_esclave) =
         crate::arch::x86_64::interrupts::mask_snapshot();
     let svr = unsafe { lit_svr_local() };
+    // ARMER ICI, ET PAS AU DEMARRAGE.
+    //
+    // Une premiere version posait le drapeau a la construction : il etait
+    // alors consomme par la toute premiere IRQ du boot -- celle qui suit le
+    // `sti` de `interrupts::init()`, des centaines de millisecondes plus tot.
+    // Le marqueur decrivait donc une frontiere que personne ne cherchait.
+    // Verifie sous QEMU : il annoncait le vecteur 0x20 AVANT meme que
+    // `SMP_HANDOFF_BEFORE_STI` soit imprime.
+    //
+    // C'est la premiere interruption apres CETTE frontiere qui nous
+    // interesse, et elle seule.
+    PREMIERE_IRQ_VUE.store(false, Ordering::Release);
     crate::serial_println!(
         "SMP_HANDOFF_BEFORE_STI pic_maitre={:#04x} pic_esclave={:#04x} if={} \
 scheduler_enabled={} bootstrap={} lapic_svr={:#x} cpus_en_ligne={}",

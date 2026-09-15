@@ -212,6 +212,20 @@ def main():
             )
     if "SMP_HANDOFF_BEFORE_STI" not in smp or "SMP_HANDOFF_AFTER_FIRST_IRQ" not in smp:
         fautes.append("smp.rs : les marqueurs de frontiere SMP ont disparu.")
+    # LE DRAPEAU DOIT ETRE ARME A LA FRONTIERE.
+    #
+    # Arme a la construction, il est consomme par la toute premiere IRQ du
+    # boot -- celle du `sti` de `interrupts::init()` -- et le marqueur decrit
+    # alors une frontiere que personne ne cherche. Observe sous QEMU.
+    photo = corps(smp, "fn photographie_avant_sti(")
+    if photo is None:
+        fautes.append("smp.rs : la photographie de frontiere a disparu.")
+    elif "PREMIERE_IRQ_VUE.store(false" not in photo:
+        fautes.append(
+            "smp.rs : le releve de premiere interruption n'est plus arme A LA "
+            "FRONTIERE. Il decrirait la premiere IRQ du boot entier au lieu de "
+            "celle qui suit la remise en service des interruptions."
+        )
     premiere = corps(smp, "pub fn note_premiere_irq(")
     if premiere is None:
         fautes.append("smp.rs : le releve de la premiere interruption a disparu.")
