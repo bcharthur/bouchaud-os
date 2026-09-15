@@ -173,7 +173,12 @@ Write-Host "--- MARQUEURS ATTENDUS (console serie / diagnostic) ---" -Foreground
     "BOUCHAUD_USB_STOCKAGE_PRET               READ CAPACITY a repondu",
     "BOUCHAUD_USB_STOCKAGE_VOLUME             la cle est publiee sous la couche bloc",
     "BOUCHAUD_TRIGKEY_RTL8168_DETECTED        carte reseau vue (cable branche)",
-    "BOUCHAUD_TRIGKEY_RTL8168_LINK_UP         lien Ethernet monte"
+    "BOUCHAUD_TRIGKEY_RTL8168_LINK_UP         lien Ethernet monte",
+    "SMP_HANDOFF_BEFORE_STI                   etat juste AVANT la remise en service des IRQ",
+    "SMP4_AP_STARTED count=15 expected=15     les quinze AP ont demarre",
+    "SMP_HANDOFF_AFTER_FIRST_IRQ              la PREMIERE interruption apres la frontiere",
+    "SMP_NG2_SCHEDULER                        le scheduler SMP est active",
+    "[IRQ-IMPREVUES]                          parasites PIC/LAPIC et portes IDT absentes"
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
@@ -190,7 +195,36 @@ Write-Host "--- MARQUEURS QUI DOIVENT RESTER ABSENTS ---" -ForegroundColor Cyan
     "BOUCHAUD_USB_BULK_ECHEC                  un transfert Bulk a echoue",
     "BOUCHAUD_USB_STOCKAGE_IO_ECHEC           lecture ou ecriture refusee par la cle",
     "BOUCHAUD_USB_STOCKAGE_REINIT_ECHEC       reinitialisation Bulk-Only sans effet",
-    "BOUCHAUD_USB_HID_FIL_REFUSE              l'entree est restee dans la boucle de trames"
+    "BOUCHAUD_USB_HID_FIL_REFUSE              l'entree est restee dans la boucle de trames",
+    "BOUCHAUD_IDT_NOT_PRESENT_TEMPETE         un vecteur non servi est livre en boucle",
+    "BOUCHAUD_SEGMENT_ABSENT                  #NP qui ne designe pas l'IDT : vraie faute de segment"
+) | ForEach-Object { Write-Host "  $_" }
+
+Write-Host ""
+Write-Host "--- LA FRONTIERE SMP : CE QU'ON CHERCHE CE COUP-CI ---" -ForegroundColor Cyan
+@(
+    "Le releve du 14 septembre meurt en double faute juste apres",
+    "SMP_BOOT_GUARD_EXIT, sans dire quel vecteur etait demande. Trois lignes",
+    "repondent maintenant, et il faut les relever DANS CET ORDRE :",
+    "",
+    "  1. SMP_HANDOFF_BEFORE_STI ... pic_maitre= pic_esclave= lapic_svr=",
+    "     L'etat dans lequel la premiere interruption va etre livree.",
+    "",
+    "  2. SMP_HANDOFF_AFTER_FIRST_IRQ vector=0xNN ...",
+    "     ABSENTE = la machine est morte AVANT de servir la moindre",
+    "     interruption. PRESENTE = on sait laquelle, et la frontiere est",
+    "     franchie.",
+    "",
+    "  3. BOUCHAUD_IDT_NOT_PRESENT vector=0xNN error=... (si elle apparait)",
+    "     Le processeur NOMME la porte absente. C'est la reponse que les",
+    "     essais precedents ne pouvaient pas donner.",
+    "",
+    "Puis, sur le bureau, dans le releve periodique :",
+    "  [IRQ-IMPREVUES] pic_irq7_spurious= pic_irq15_spurious= lapic_spurious=",
+    "                  idt_absentes=",
+    "",
+    "  idt_absentes doit valoir ZERO. Un parasite PIC/LAPIC non nul est",
+    "  normal sur un vrai PC -- c'est precisement ce que QEMU ne produit pas."
 ) | ForEach-Object { Write-Host "  $_" }
 
 Write-Host ""
