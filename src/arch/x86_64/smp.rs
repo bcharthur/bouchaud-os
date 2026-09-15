@@ -158,10 +158,95 @@ impl Drop for SmpBootstrapGuard {
             "SMP_BOOT_GUARD_EXIT irq=restored previous_irq={}",
             self.interrupts_were_enabled as u8,
         );
+        // L'ORDRE EST ICI, ET IL EST DOCUMENTE.
+        //
+        // `SMP_BOOTSTRAP_GUARD` tombe AVANT le `sti`. La toute premiere
+        // interruption apres cette ligne voit donc deja
+        // `bootstrap_in_progress() == false` -- alors que `scheduler_enabled`
+        // est encore faux et qu'aucune tache n'est installee sur le BSP.
+        //
+        // Ce lot ne deplace pas le `sti` : il rend le timer indifferent a
+        // cette subtilite (voir `politique_vecteurs::timer_runtime_pret`) et
+        // il PHOTOGRAPHIE l'etat juste avant, pour que la premiere
+        // interruption cesse d'etre une inconnue.
+        photographie_avant_sti();
         if self.interrupts_were_enabled {
             x86_64::instructions::interrupts::enable();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_SMP_HANDOFF_V1 : la frontiere la plus mal connue du demarrage
+// ---------------------------------------------------------------------------
+//
+// La derniere ligne normale du releve physique du 14 septembre est
+// `SMP_BOOT_GUARD_EXIT`, et la suivante est une double faute. Entre les deux il
+// y a exactement une instruction -- `sti` -- et une interruption dont on ne
+// savait rien : ni sa source, ni son vecteur, ni si elle a seulement ete
+// livree.
+//
+// Les deux marqueurs ci-dessous encadrent cette instruction. Ils sont
+// ONE-SHOT : un booleen atomique, pas une trace par tick.
+
+static PREMIERE_IRQ_VUE: AtomicBool = AtomicBool::new(false);
+
+/// Photographie early-safe de l'etat juste avant la restauration de l'IF.
+///
+/// Aucune allocation, aucun verrou, aucune tache supposee. Lire les masques du
+/// PIC coute deux `inb` ; lire le SVR du LAPIC une lecture memoire mappee ou un
+/// MSR. Rien de tout cela ne perturbe la machine.
+fn photographie_avant_sti() {
+    let (masque_maitre, masque_esclave) =
+        crate::arch::x86_64::interrupts::mask_snapshot();
+    let svr = unsafe { lit_svr_local() };
+    crate::serial_println!(
+        "SMP_HANDOFF_BEFORE_STI pic_maitre={:#04x} pic_esclave={:#04x} if={} \
+scheduler_enabled={} bootstrap={} lapic_svr={:#x} cpus_en_ligne={}",
+        masque_maitre,
+        masque_esclave,
+        x86_64::instructions::interrupts::are_enabled() as u8,
+        scheduler_enabled() as u8,
+        bootstrap_in_progress() as u8,
+        svr,
+        ONLINE_CPUS.load(Ordering::Acquire),
+    );
+}
+
+/// Le vecteur de spurious que le SVR programme, et son bit d'activation.
+unsafe fn lit_svr_local() -> u32 {
+    let (x2, lapic) = local_apic();
+    if x2 {
+        usermode::read_msr(X2APIC_SVR) as u32
+    } else {
+        lapic_read(lapic, LAPIC_SVR)
+    }
+}
+
+/// Nomme la PREMIERE interruption livree apres la frontiere, puis se tait.
+///
+/// Appele depuis chaque gestionnaire installe. Le premier qui arrive gagne ;
+/// tous les autres ne paient qu'un `load` relaxe.
+pub fn note_premiere_irq(vecteur: u8, rip: u64, rsp: u64) {
+    if PREMIERE_IRQ_VUE.load(Ordering::Relaxed) {
+        return;
+    }
+    if PREMIERE_IRQ_VUE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    crate::serial_println!(
+        "SMP_HANDOFF_AFTER_FIRST_IRQ vector={:#04x} rip={:#x} rsp={:#x} cpu={} \
+scheduler_enabled={} bootstrap={}",
+        vecteur,
+        rip,
+        rsp,
+        cpu_index(),
+        scheduler_enabled() as u8,
+        bootstrap_in_progress() as u8,
+    );
 }
 
 // BOUCHAUD_SMP_NG3_TLB_SHOOTDOWN_V2

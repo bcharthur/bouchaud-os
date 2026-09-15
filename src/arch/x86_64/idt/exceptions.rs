@@ -393,6 +393,7 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 extern "x86-interrupt" fn tlb_shootdown_interrupt_handler(stack: InterruptStackFrame) {
+    smp::note_premiere_irq(smp::TLB_SHOOTDOWN_VECTOR, stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
     smp::handle_tlb_shootdown();
 }

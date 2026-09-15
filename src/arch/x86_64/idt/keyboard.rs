@@ -1,4 +1,5 @@
 extern "x86-interrupt" fn keyboard_interrupt_handler(stack: InterruptStackFrame) {
+    smp::note_premiere_irq(InterruptIndex::Keyboard.as_u8(), stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
     let interrupted_user = from_user(&stack);
 

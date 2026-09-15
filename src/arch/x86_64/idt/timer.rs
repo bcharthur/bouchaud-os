@@ -7,6 +7,7 @@
 // fluide, tandis que les scans/diagnostics lourds sont exclus du hard IRQ BSP
 // lorsque plusieurs CPU sont réellement disponibles.
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
+    smp::note_premiere_irq(InterruptIndex::Timer.as_u8(), stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
     let interrupted_user = from_user(&stack);
     let blackbox_cpu = crate::arch::x86_64::usermode::cpu_index();

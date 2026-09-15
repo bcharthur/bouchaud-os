@@ -387,6 +387,26 @@ pub fn affiche(
                 echelle,
                 if rsp >= base && rsp <= sommet { TEXTE } else { TITRE },
             );
+        } else {
+            // AUCUNE TACHE : DIRE CE QU'ON SAIT, ET RIEN DE PLUS.
+            //
+            // Le noyau ne connait au runtime que les bornes des piles de
+            // taches. La pile d'amorcage est allouee par le chargeur
+            // `bootloader_api`, qui ne transmet ni sa base ni son sommet :
+            // inventer une borne donnerait une precision que personne n'a
+            // mesuree. « Hors piles taches » est exact ; « pile corrompue »
+            // ne l'est pas, et le releve du 14 septembre l'a prouve -- deux
+            // fautes successives y donnent `0x10000014d50` et
+            // `0x10000014d70`, trente-deux octets d'ecart, soit deux
+            // profondeurs d'appel de la MEME pile parfaitement valide.
+            let fin = texte(
+                fin + 8 * echelle,
+                y,
+                "HORS PILES TACHES",
+                echelle,
+                ETIQUETTE,
+            );
+            texte(fin + 8 * echelle, y, "(amorcage probable)", echelle, ETIQUETTE);
         }
         y += pas;
 
@@ -450,6 +470,26 @@ pub fn affiche(
             y += pas;
             texte(marge, y, "PILE LIBRE", echelle, ETIQUETTE);
             hexa(x, y, rsp.saturating_sub(base), echelle, TEXTE);
+            y += pas;
+        }
+
+        // LA PORTE ABSENTE, SI LE PROCESSEUR L'A NOMMEE.
+        //
+        // Un #NP sur porte IDT absente est le SEUL mecanisme qui dit quel
+        // vecteur a ete demande. Tant qu'il n'etait pas installe, une porte
+        // manquante se lisait « DOUBLE FAULT » sans autre information.
+        if let Some((vecteur_absent, code_np, rip_np, rsp_np)) =
+            crate::arch::x86_64::idt::premiere_porte_absente()
+        {
+            texte(marge, y, "PORTE IDT ABSENTE", echelle, ETIQUETTE);
+            let fin = hexa(x, y, vecteur_absent as u64, echelle, TITRE);
+            let fin = texte(fin + 8 * echelle, y, "CODE", echelle, ETIQUETTE);
+            hexa(fin + 8 * echelle, y, code_np, echelle, TEXTE);
+            y += pas;
+            texte(marge, y, "RIP #NP", echelle, ETIQUETTE);
+            let fin = hexa(x, y, rip_np, echelle, TEXTE);
+            let fin = texte(fin + 8 * echelle, y, "RSP", echelle, ETIQUETTE);
+            hexa(fin + 8 * echelle, y, rsp_np, echelle, TEXTE);
             y += pas;
         }
 
@@ -518,19 +558,6 @@ pub fn affiche(
 /// regle ne peut PAS etre une adresse : le processeur la refuse avant meme de
 /// consulter la pagination. Le dire nommement evite de chercher une page
 /// manquante pour une valeur qui n'a jamais designe de page.
-/// L'adresse tombe-t-elle dans l'arene du tas noyau ?
-///
-/// Les piles noyau des taches sont des allocations de 64 Kio du tas. La
-/// question n'a de sens que si l'arene est connue ; tant qu'elle ne l'est pas,
-/// on ne conclut rien plutot que de crier au loup.
-fn dans_le_tas(adresse: u64) -> bool {
-    let (debut, fin) = crate::kernel::heap::arene_bornes();
-    if debut == fin {
-        return true;
-    }
-    adresse >= debut as u64 && adresse < fin as u64
-}
-
 fn canonique(adresse: u64) -> bool {
     let haut = adresse >> 47;
     haut == 0 || haut == 0x1FFFF

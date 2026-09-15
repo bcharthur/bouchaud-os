@@ -205,6 +205,19 @@ anomalies={}/{}/{} proprietaire={}{}",
     // journal de boot pour comprendre pourquoi le navigateur repondait
     // « Unable to resolve host » cinq minutes plus tard. Cette ligne repond a
     // la question la ou on la pose.
+    // CE QUE LE PROCESSEUR A PRODUIT SANS QU'ON LE DEMANDE.
+    //
+    // Les parasites du 8259 et du LAPIC existent sur tout x86 physique et sont
+    // quasi absents de QEMU : c'est exactement le genre d'ecart qui fait
+    // qu'une image verte en emulation tombe sur la machine. `idt_absentes`
+    // doit rester a zero -- une porte manquante veut dire qu'un vecteur est
+    // livre sans que personne le serve.
+    let (irq7_p, irq7_r, irq15_p, irq15_r, lapic_p, idt_absentes) =
+        crate::arch::x86_64::idt::compteurs_imprevus();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[IRQ-IMPREVUES] pic_irq7_spurious={} pic_irq7_reelles={} pic_irq15_spurious={} pic_irq15_reelles={} lapic_spurious={} idt_absentes={}",
+        irq7_p, irq7_r, irq15_p, irq15_r, lapic_p, idt_absentes,
+    ));
     let qualite = crate::net::qualite_lien();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[NET-LIEN] verdict={} lien={} vitesse_mbps={} duplex={} trames_perdues={} \

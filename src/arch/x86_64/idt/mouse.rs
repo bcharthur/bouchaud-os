@@ -4,6 +4,7 @@
 // Decode/publish atomically, EOI, return. The PIT flushes the GUI wake later
 // after a successful non-blocking BKL try_enter().
 extern "x86-interrupt" fn mouse_interrupt_handler(stack: InterruptStackFrame) {
+    smp::note_premiere_irq(InterruptIndex::Mouse.as_u8(), stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
 
     mouse::irq_note_enter();

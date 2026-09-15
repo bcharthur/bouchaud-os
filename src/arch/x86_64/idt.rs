@@ -4,8 +4,12 @@
 use x86_64::structures::idt::{
     InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
 };
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::arch::x86_64::{gdt, ports, smp, usermode};
+use crate::arch::x86_64::interrupts::{PIC_1_OFFSET, PIC_2_OFFSET};
+
+/// Decisions pures sur les vecteurs imprevus, verifiables sur l'hote.
+pub mod politique_vecteurs;
 use crate::arch::x86_64::interrupts::{notify_end_of_interrupt, InterruptIndex};
 use crate::drivers::{keyboard, mouse};
 use crate::kernel::{dmesg, timer};
@@ -37,10 +41,13 @@ pub fn init() {
         IDT[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         IDT[InterruptIndex::Mouse.as_usize()].set_handler_fn(mouse_interrupt_handler);
         IDT[InterruptIndex::AtaPrimary.as_usize()].set_handler_fn(ata_primary_handler);
-        IDT[InterruptIndex::AtaSecondary.as_usize()].set_handler_fn(ata_secondary_handler);
         IDT[smp::RESCHEDULE_VECTOR as usize].set_handler_fn(reschedule_interrupt_handler);
         IDT[smp::PANIC_STOP_VECTOR as usize].set_handler_fn(panic_stop_handler);
         IDT[smp::TLB_SHOOTDOWN_VECTOR as usize].set_handler_fn(tlb_shootdown_interrupt_handler);
+        // Les vecteurs qu'un x86 physique produit sans qu'on les demande :
+        // #NP (porte absente), les deux parasites du 8259 et celui du LAPIC.
+        // Voir `idt/imprevus.rs` pour ce que leur absence coutait.
+        installe_vecteurs_imprevus(&mut *core::ptr::addr_of_mut!(IDT));
         IDT.load();
         READY = true;
     }
@@ -60,6 +67,10 @@ pub fn trigger_breakpoint() {
 // Exceptions, fautes et TLB restent dans le même module Rust `idt`,
 // mais vivent désormais dans un fragment dédié.
 include!("idt/exceptions.rs");
+
+// BOUCHAUD_IDT_VECTEURS_IMPREVUS_V1
+// #NP, parasites PIC/LAPIC : ce que le processeur produit sans qu'on demande.
+include!("idt/imprevus.rs");
 
 // BOUCHAUD_PREEMPT_IRQ_V8
 //
