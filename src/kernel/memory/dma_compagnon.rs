@@ -65,6 +65,23 @@ struct Etat {
     /// Premiere adresse distribuable (apres le bitmap).
     base: u64,
     blocs: usize,
+    // BOUCHAUD_DMA_SEMENCES_V1
+    //
+    // UNE ALIMENTATION N'EST PAS UNE LIBERATION
+    //
+    // Alimenter le compagnon au demarrage, c'est appeler `rend` pour chaque
+    // bloc aligne de la region -- exactement l'operation d'une liberation. Le
+    // compteur `liberations` les additionnait donc toutes les deux.
+    //
+    // Le releve physique du 15 septembre portait `allocations=65
+    // liberations=16`. Seize liberations pour soixante-cinq allocations se
+    // lisait « presque rien n'est rendu ». En verite ces seize-la etaient les
+    // seize blocs de l'ALIMENTATION, et le nombre de vraies liberations etait
+    // zero -- ce qui est une tout autre affirmation, et la bonne.
+    //
+    // Le compagnon ne peut pas faire la difference : c'est la meme operation.
+    // L'appelant, lui, sait a quel moment il a fini de semer.
+    semences: u64,
 }
 
 // Le bitmap et les blocs vivent dans la region DMA, jamais partages autrement
@@ -146,7 +163,8 @@ pub fn configure(debut: u64, fin: u64) -> bool {
     // de le tenir a son tour, et l'ordre entre les deux verrous n'est ecrit
     // nulle part.
     let plus_grand = allocateur.plus_grand_ordre().unwrap_or(0);
-    *ETAT.lock() = Some(Etat { compagnon: allocateur, terrain, base, blocs });
+    let semences = allocateur.statistiques().liberations;
+    *ETAT.lock() = Some(Etat { compagnon: allocateur, terrain, base, blocs, semences });
     CONFIGURE.store(true, Ordering::Release);
     crate::serial_println!(
         "[MEM-NG-COMPAGNON] base={:#x} blocs={} bitmap_pages={} plus_grand_ordre={} max_contigu={}",
@@ -252,8 +270,15 @@ pub fn etat() -> crate::kernel::arene_dma::EtatDma {
         regions: e.compagnon.plus_grand_ordre().unwrap_or(0) as u64,
         pic: PIC.load(Ordering::Relaxed),
         allocations: stats.allocations,
-        liberations: stats.liberations,
-        reutilisations: stats.fusions,
+        // Les `rend` de l'alimentation sont retires : `liberations` doit dire
+        // ce que le SYSTEME a rendu, pas ce que le demarrage a seme.
+        liberations: stats.liberations.saturating_sub(e.semences),
+        // `reutilisations` etait une COPIE de `fusions`. Un compagnon qui rend
+        // seize blocs dont aucun jumeau n'est libre ne fusionne rien, et
+        // affichait donc zero alors qu'il avait remis les seize blocs dans ses
+        // listes. Le releve du 15 septembre s'est lu « l'arene ne recycle
+        // jamais » sur ce zero-la, et c'etait faux.
+        reutilisations: stats.reemplois,
         fusions: stats.fusions,
         debordements: 0,
         echecs: stats.echecs + ECHECS.load(Ordering::Relaxed),

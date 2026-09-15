@@ -54,26 +54,64 @@ cause.
 
 ---
 
-## Les trois defauts reels
+## Les defauts reels
 
-### 1. L'arene DMA ne recycle rien
+### 1. ~~L'arene DMA ne recycle rien~~ -- ACCUSATION RETIREE
 
 ```
 [MEM-NG-DMA] total=33542144 utilise=1118208 rendu=32423936
              allocations=65 liberations=16 reutilisations=0 fusions=0
 ```
 
-Seize liberations, **zero reutilisation, zero fusion**. Chaque region rendue
-est perdue pour de bon : l'arene de 32 Mio ne se remplit que dans un sens.
+**Ce verdict etait faux, et c'est le compteur qui mentait.**
 
-Consequence pratique : chaque branchement a chaud d'un peripherique USB
-consomme de la DMA qui ne reviendra jamais. Sur une session courte cela ne se
-voit pas ; sur une session longue avec des branchements repetes, l'arene
-s'epuise et l'enumeration echoue sans que rien ne l'annonce -- `echecs=0`
-aujourd'hui parce qu'on n'a pas encore atteint le fond.
+Ce releve a d'abord ete lu « seize liberations, zero reutilisation : chaque
+region rendue est perdue pour de bon ». La lecture du code dit autre chose.
+Sur cette machine, l'arene DMA est servie par l'allocateur compagnon, et
+`dma_compagnon::etat()` remplissait le champ ainsi :
 
-**Non corrige dans ce lot.** C'est une reecriture d'allocateur qui demande ses
-propres tests.
+```rust
+reutilisations: stats.fusions,
+```
+
+`reutilisations` etait une COPIE de `fusions`. Or un allocateur compagnon
+fusionne uniquement quand le JUMEAU du bloc rendu est libre au meme instant :
+seize blocs rendus dont aucun jumeau n'est libre ne produisent aucune fusion,
+et affichaient donc `reutilisations=0` -- alors que les seize blocs etaient
+bel et bien revenus dans les listes, prets a resservir.
+
+C'est exactement la meme faute que le « HORS TAS NOYAU » de l'ecran de faute :
+une etiquette qui ne decrit pas ce qu'elle contient, et une enquete envoyee
+dans la mauvaise direction.
+
+**Corrige dans ce lot**, et pas en supprimant le chiffre. Le compagnon porte
+desormais un compteur `reemplois` qui mesure ce que son nom dit : une
+allocation servie depuis de la memoire DEJA SORTIE au moins une fois.
+L'alimentation du demarrage passe par `rend` et jamais par `prend`, donc la
+memoire donnee au boot n'est pas comptee comme un reemploi la premiere fois
+qu'on la sert -- c'est cette distinction qui en fait une preuve de recyclage
+plutot qu'un decompte d'allocations.
+
+Sept tests hote le couvrent (`tools/platform/test_compagnon.rs`), dont
+celui qui reproduit precisement le cas du releve : seize blocs sortis, seize
+rendus, seize repris, **seize reemplois quel que soit le nombre de fusions**.
+
+**Le meme releve cachait un second compteur trompeur.** Alimenter le compagnon
+au demarrage, c'est appeler `rend` pour chaque bloc aligne de la region --
+exactement l'operation d'une liberation. `liberations` additionnait donc les
+deux. Les seize liberations de ce releve etaient les seize blocs de
+l'ALIMENTATION : le nombre de vraies liberations etait **zero**.
+
+C'est une tout autre affirmation, et la bonne. « Seize regions rendues ne
+resservent jamais » est un defaut d'allocateur ; « rien n'a encore ete rendu »
+est un fait sur la session, qui n'accuse personne. Le compte des semences est
+desormais retire du releve, et une verification en QEMU le confirme :
+`allocations=4 liberations=0` la ou la meme machine affichait
+`allocations=4 liberations=16`.
+
+Ce qui reste vrai : `[MEM-NG-DMA]` doit etre surveille sur la duree. La preuve
+d'une fuite n'est pas `reutilisations=0` mais `utilise` qui ne redescend
+jamais apres un debranchement.
 
 ### 2. Le disque ne recoit jamais rien
 
@@ -159,6 +197,24 @@ d'une attente active : le processus ne travaille pas, il tourne en rond sur
 quelque chose qui n'arrive jamais. C'est la premiere piste a suivre pour la
 lenteur de Ladybird, avant toute optimisation de rendu.
 
+Ce n'est pas la premiere fois. La note de `sys_clock_gettime` raconte une
+correction precedente sur exactement la meme signature -- `cpu_pct=21
+ctx_delta=3` au releve du 12 septembre --, apres laquelle le chiffre est monte
+a 76. Deviner une deuxieme fois serait deviner deux fois.
+
+Le lot de ce jour ajoute donc la mesure qui manquait :
+
+```
+[SYSCALL-TOP] window_ns= appels= distincts= cumul= <nom>=<appels>/eagain=<n> ...
+```
+
+Le noyau comptait deja chaque appel systeme par numero. Ce compte n'etait
+lisible que par la commande interactive `syscalls` -- c'est-a-dire au clavier,
+sur une machine dont le clavier est precisement ce qu'on cherche a reparer.
+Il sort desormais avec le releve periodique, en DELTAS de fenetre, et les
+reponses `EAGAIN` sont comptees a part : une attente active ne se reconnait
+pas a l'appel qu'elle emet mais a sa reponse.
+
 ---
 
 ## Ce que le prochain releve apportera
@@ -169,4 +225,24 @@ Les lots de ce jour ajoutent :
 - `[USB-HID-POINT]` -- un etat par point de terminaison HID ;
 - `[USB-HID-TEMOINS]` -- les temoins du clavier, seul signe visible que le
   chemin de controle atteint l'interface ;
-- `[IRQ-IMPREVUES]` -- parasites PIC/LAPIC et portes absentes.
+- `[IRQ-IMPREVUES]` -- parasites PIC/LAPIC et portes absentes ;
+- `[SYSCALL-TOP]` -- a quoi un processus brule un coeur ;
+- `sample ... serial_perdus= serial_retard= com1=` -- si l'archive qu'on lit
+  est complete, et si cette machine a seulement un port serie ;
+- `BOUCHAUD_TRIGKEY_BLACKBOX_V1 START ... arriere= capacite=` -- ce que le
+  demarrage avait deja produit quand l'enregistreur a su ecrire ;
+- `cpus ts_ns= cpu0=[...] ... cpu15=[...]` -- les seize coeurs, la ou le
+  releve n'en decrivait que quatre.
+
+Trois questions se decideront sur ces chiffres, et sur aucun raisonnement :
+
+1. **Le clavier.** `[USB-HID-POINT]` pour dci 3 dira si le point de
+   terminaison est `Running` avec un TRB en attente et `evenements=0` -- un
+   clavier au repos legitime -- ou s'il est arrete, en quarantaine, ou jamais
+   arme. `[USB-HID-TEMOINS] poses=` dira si le chemin de controle atteint
+   l'interface : une LED qui s'allume est la preuve qu'il l'atteint.
+2. **La lenteur.** `[SYSCALL-TOP]` nommera l'appel que `WebContent` emet en
+   boucle, et `eagain=` dira s'il attend quelque chose qui n'arrive jamais.
+3. **Le journal lui-meme.** `serial_perdus=0` est la seule valeur qui autorise
+   a lire l'archive comme un recit complet ; `com1=bus-flottant` dirait que
+   chaque octet de journal etait jusqu'ici paye a un port absent.

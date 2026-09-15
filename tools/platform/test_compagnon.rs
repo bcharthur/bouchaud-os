@@ -467,3 +467,159 @@ fn les_statistiques_comptent_ce_qui_est_arrive() {
     assert!(apres.divisions > depart.divisions);
     assert_eq!(apres.blocs, blocs);
 }
+
+// ---------------------------------------------------------------------------
+// Reemplois : la preuve de recyclage que `fusions` ne donne pas
+// ---------------------------------------------------------------------------
+//
+// Le releve physique du 15 septembre 2026 disait
+// `liberations=16 reutilisations=0 fusions=0`, et cela s'est lu « l'arene ne
+// recycle jamais ». C'etait faux : `reutilisations` etait une copie de
+// `fusions`, et un allocateur peut tout recycler sans jamais fusionner.
+
+#[test]
+fn l_alimentation_du_demarrage_ne_compte_aucun_reemploi() {
+    // La zone entiere est donnee par `rend`. Rien n'est encore sorti : un
+    // compteur qui grimperait ici mesurerait des allocations, pas du recyclage.
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        assert!(a.rend(&mut terrain, bloc, ordre));
+    }
+    assert_eq!(a.statistiques().reemplois, 0);
+}
+
+#[test]
+fn la_premiere_sortie_d_un_bloc_n_est_pas_un_reemploi() {
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        a.rend(&mut terrain, bloc, ordre);
+    }
+    for _ in 0..8 {
+        assert!(a.prend(&mut terrain, 0).is_some());
+    }
+    assert_eq!(a.statistiques().reemplois, 0);
+}
+
+#[test]
+fn reprendre_un_bloc_rendu_compte_un_reemploi() {
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        a.rend(&mut terrain, bloc, ordre);
+    }
+    let bloc = a.prend(&mut terrain, 0).unwrap();
+    assert_eq!(a.statistiques().reemplois, 0);
+    assert!(a.rend(&mut terrain, bloc, 0));
+    assert!(a.prend(&mut terrain, 0).is_some());
+    assert_eq!(a.statistiques().reemplois, 1);
+}
+
+#[test]
+fn le_recyclage_se_compte_meme_quand_rien_ne_fusionne() {
+    // LE CAS QUI A PRODUIT LA FAUSSE ACCUSATION.
+    //
+    // Seize blocs sortis, puis seize rendus, dont aucun n'a son jumeau libre
+    // au moment ou il revient : le compteur de fusions peut rester bas, et le
+    // recyclage n'en est pas moins reel. C'est `reemplois` qui doit le dire.
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        a.rend(&mut terrain, bloc, ordre);
+    }
+    let sortis: Vec<usize> = (0..16).map(|_| a.prend(&mut terrain, 0).unwrap()).collect();
+    for bloc in &sortis {
+        assert!(a.rend(&mut terrain, *bloc, 0));
+    }
+    let avant = a.statistiques().reemplois;
+    for _ in 0..16 {
+        assert!(a.prend(&mut terrain, 0).is_some());
+    }
+    let apres = a.statistiques();
+    assert_eq!(
+        apres.reemplois - avant,
+        16,
+        "seize blocs rendus puis repris : seize reemplois, quel que soit \
+         le nombre de fusions ({})",
+        apres.fusions
+    );
+}
+
+#[test]
+fn une_moitie_haute_issue_d_un_bloc_deja_sorti_compte_aussi() {
+    // Le piege d'un marquage limite au premier bloc : servir la moitie HAUTE
+    // d'un bloc d'ordre 1 deja sorti est un reemploi, et ne serait pas compte
+    // si l'on ne regardait que le bloc de tete.
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        a.rend(&mut terrain, bloc, ordre);
+    }
+    let gros = a.prend(&mut terrain, 1).unwrap();
+    assert_eq!(a.statistiques().reemplois, 0);
+    assert!(a.rend(&mut terrain, gros, 1));
+    // Deux demandes d'ordre 0 : la division rend les deux moities du meme
+    // bloc, et les deux sont de la memoire deja sortie.
+    let bas = a.prend(&mut terrain, 0).unwrap();
+    let haut = a.prend(&mut terrain, 0).unwrap();
+    assert_ne!(bas, haut);
+    assert_eq!(
+        a.statistiques().reemplois,
+        2,
+        "les deux moities d'un bloc deja sorti sont des reemplois"
+    );
+}
+
+#[test]
+fn le_bitmap_reserve_la_place_du_plan_des_reemplois() {
+    // Un bitmap dimensionne sans le plan supplementaire ferait ecrire le
+    // marquage par-dessus le dernier plan de liberte -- une corruption
+    // silencieuse de l'allocateur, pas un test rouge.
+    let blocs = 64;
+    let mots = mots_bitmap(blocs);
+    let mut court = vec![0u64; mots - 1];
+    assert!(
+        Compagnon::neuf(blocs, &mut court).is_none(),
+        "un bitmap trop court doit etre refuse"
+    );
+    let mut juste = vec![0u64; mots];
+    assert!(Compagnon::neuf(blocs, &mut juste).is_some());
+}
+
+#[test]
+fn une_division_rend_toujours_la_moitie_basse() {
+    // CE QUE CE TEST PROTEGE
+    //
+    // `etendue_servie` teste TOUTE l'etendue d'un bloc, pas seulement son
+    // premier bloc elementaire. Sous la politique actuelle -- une division
+    // rend la moitie basse et empile la haute -- les deux formes donnent le
+    // meme resultat, et aucune mutation ne peut les distinguer : la moitie
+    // haute n'est jamais servie avant la basse, donc le premier bloc d'une
+    // etendue marquee est toujours marque lui aussi.
+    //
+    // L'equivalence tient a CETTE politique. Rendre la moitie haute la
+    // romprait, et la forme simplifiee sous-compterait alors les reemplois
+    // sans qu'aucun chiffre ne devienne absurde. Ce test epingle donc
+    // l'hypothese plutot que de laisser la version generale passer pour du
+    // zele.
+    let blocs = 64;
+    let (mut bitmap, mut terrain, morceaux) = zone(blocs);
+    let mut a = Compagnon::neuf(blocs, &mut bitmap).unwrap();
+    for (bloc, ordre) in morceaux {
+        a.rend(&mut terrain, bloc, ordre);
+    }
+    let gros = a.prend(&mut terrain, 2).unwrap();
+    assert!(a.rend(&mut terrain, gros, 2));
+    let petit = a.prend(&mut terrain, 0).unwrap();
+    assert_eq!(
+        petit, gros,
+        "la division doit rendre la moitie BASSE : le bloc d'ordre 0 servi \
+         depuis un bloc d'ordre 2 doit commencer a la meme adresse"
+    );
+}

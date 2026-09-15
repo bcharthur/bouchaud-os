@@ -122,7 +122,9 @@ pub const fn ordre_pour(blocs: usize) -> usize {
 /// mais leur donner la meme place a tous evite une arithmetique de decalage
 /// dont chaque erreur ferait lire l'etat d'un autre ordre.
 pub const fn mots_bitmap(blocs: usize) -> usize {
-    ORDRES * ((blocs + 63) / 64)
+    // ORDRES plans de « ce bloc est libre a cet ordre », plus UN plan de
+    // « ce bloc a deja ete servi ». Voir `reemplois`.
+    (ORDRES + 1) * ((blocs + 63) / 64)
 }
 
 /// L'allocateur.
@@ -146,6 +148,29 @@ pub struct Compagnon<'a> {
     divisions: u64,
     fusions: u64,
     echecs: u64,
+    // BOUCHAUD_COMPAGNON_REEMPLOIS_V1
+    //
+    // CE QUE `fusions` NE DIT PAS
+    //
+    // Le releve physique du 15 septembre 2026 portait
+    // `[MEM-NG-DMA] liberations=16 reutilisations=0 fusions=0`, et cela a ete
+    // lu comme « l'arene ne recycle jamais, chaque branchement USB fuit ».
+    // C'etait faux. `reutilisations` etait, dans le chemin compagnon, une
+    // COPIE de `fusions` : un allocateur compagnon qui rend seize blocs dont
+    // aucun jumeau n'est libre ne fusionne rien, et affichait donc zero alors
+    // qu'il avait bel et bien remis les seize blocs dans ses listes.
+    //
+    // Un compteur dont le nom ne decrit pas ce qu'il contient ne se corrige
+    // pas en le divisant par deux : il retire toute valeur aux autres chiffres
+    // du meme releve. Celui-ci mesure ce que son nom dit -- une allocation
+    // servie depuis de la memoire DEJA SORTIE au moins une fois --, et il le
+    // mesure exactement.
+    //
+    // L'amorcage passe par `rend`, jamais par `prend` : la memoire donnee au
+    // demarrage n'est donc pas comptee comme un reemploi la premiere fois
+    // qu'on la sert. C'est la distinction qui fait de ce chiffre une preuve de
+    // recyclage et non un decompte d'allocations.
+    reemplois: u64,
 }
 
 impl<'a> Compagnon<'a> {
@@ -170,6 +195,7 @@ impl<'a> Compagnon<'a> {
             divisions: 0,
             fusions: 0,
             echecs: 0,
+            reemplois: 0,
         })
     }
 
@@ -195,6 +221,61 @@ impl<'a> Compagnon<'a> {
             self.libre[mot] |= masque;
         } else {
             self.libre[mot] &= !masque;
+        }
+    }
+
+    /// Premier mot et masque du plan « deja servi » pour un bloc.
+    ///
+    /// Ce plan est range APRES les `ORDRES` plans de liberte, d'ou l'index.
+    #[inline]
+    fn position_servi(&self, bloc: usize) -> (usize, u64) {
+        let mot = ORDRES * self.mots_par_ordre + bloc / 64;
+        (mot, 1u64 << (bloc % 64))
+    }
+
+    /// L'un des blocs elementaires de cette etendue a-t-il deja ete servi ?
+    ///
+    /// L'etendue, et pas seulement son premier bloc : une moitie haute issue
+    /// de la division d'un bloc deja sorti est, elle aussi, de la memoire
+    /// revenue. Ne tester que le premier bloc sous-compterait exactement les
+    /// reemplois qui passent par une division.
+    fn etendue_servie(&self, bloc: usize, ordre: usize) -> bool {
+        let fin = (bloc + (1usize << ordre)).min(self.blocs);
+        let mut courant = bloc;
+        while courant < fin {
+            let (mot, _) = self.position_servi(courant);
+            let debut_bit = courant % 64;
+            let restant = fin - courant;
+            let largeur = restant.min(64 - debut_bit);
+            let masque = if largeur == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << largeur) - 1) << debut_bit
+            };
+            if self.libre[mot] & masque != 0 {
+                return true;
+            }
+            courant += largeur;
+        }
+        false
+    }
+
+    /// Marque toute l'etendue comme sortie au moins une fois.
+    fn marque_etendue_servie(&mut self, bloc: usize, ordre: usize) {
+        let fin = (bloc + (1usize << ordre)).min(self.blocs);
+        let mut courant = bloc;
+        while courant < fin {
+            let (mot, _) = self.position_servi(courant);
+            let debut_bit = courant % 64;
+            let restant = fin - courant;
+            let largeur = restant.min(64 - debut_bit);
+            let masque = if largeur == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << largeur) - 1) << debut_bit
+            };
+            self.libre[mot] |= masque;
+            courant += largeur;
         }
     }
 
@@ -325,6 +406,11 @@ impl<'a> Compagnon<'a> {
             self.divisions += 1;
         }
 
+        if self.etendue_servie(bloc, ordre) {
+            self.reemplois += 1;
+        }
+        self.marque_etendue_servie(bloc, ordre);
+
         self.disponibles -= 1usize << ordre;
         self.allocations += 1;
         Some(bloc)
@@ -374,6 +460,7 @@ impl<'a> Compagnon<'a> {
             divisions: self.divisions,
             fusions: self.fusions,
             echecs: self.echecs,
+            reemplois: self.reemplois,
         }
     }
 }
@@ -387,4 +474,10 @@ pub struct Statistiques {
     pub divisions: u64,
     pub fusions: u64,
     pub echecs: u64,
+    /// Allocations servies depuis de la memoire deja sortie au moins une fois.
+    ///
+    /// C'est la preuve de recyclage que `fusions` ne donne pas : un
+    /// allocateur peut tout recycler sans jamais fusionner, si aucun jumeau
+    /// n'est libre au moment des liberations.
+    pub reemplois: u64,
 }
