@@ -11,7 +11,7 @@ required=[
  "src/kernel/process/thread/diagnostic_stall.rs",
  "tools/perf/run-ladybird-v14.ps1",
  "tools/perf/analyse-v14.py",
- "V14-SOURCE.patch",
+ "docs/historique/notes/V14-SOURCE.patch",
 ]
 for rel in required:
  p=root/rel
@@ -30,9 +30,12 @@ stall=(root/'src/kernel/process/thread/diagnostic_stall.rs').read_text(encoding=
 assert 'snapshot_period = 5 * crate::kernel::timer::TICKS_PER_SECOND' in stall
 metrics=(root/'src/kernel/process/thread/metriques.rs').read_text(encoding='utf-8')
 assert '[MM-CLUSTER]' in metrics and 'periode_rapport = 10 *' in metrics
-patch=(root/'V14-SOURCE.patch').read_text(encoding='utf-8')
+# Le correctif de reference a rejoint docs/historique/notes/ lors du
+# rangement de la racine. Le CONTRAT ne change pas : les memes jetons
+# doivent s'y trouver, seule l'adresse a bouge.
+patch=(root/'docs/historique/notes/V14-SOURCE.patch').read_text(encoding='utf-8')
 for token in ('nr::WRITE','nr::WRITEV','nr::MUNMAP','nr::MADVISE','MAX_RECLAIMABLE_PAGES','READAHEAD_MID'):
  if token not in patch: raise SystemExit(f"V14 source patch missing token: {token}")
 py_compile.compile(str(root/'tools/perf/analyse-v14.py'), doraise=True)
 print('V14 structure + performance contracts: OK')
-print('Then: git apply --check .\\V14-SOURCE.patch')
+print('Then: git apply --check docs/historique/notes/V14-SOURCE.patch')

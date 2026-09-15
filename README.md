@@ -106,8 +106,34 @@ userland/
 └── apps/
 
 targets/                  # cibles rustc bare-metal
-scripts & tools/           # build, santé, Ladybird, perf
+
+tools/
+├── ci/                   # barrière locale, scénarios QEMU, build
+├── reference/            # image Trigkey, blackbox, symbolisation
+├── ladybird/             # pipeline navigateur
+├── dev/ perf/ gui/ net/ fs/ platform/   # suites hôte et gardes ciblés
+├── verifie-*.py          # garde-fous d'architecture (découverte auto)
+└── historique/           # scripts de lot d'une époque, conservés non actifs
+
+docs/
+├── *.md                  # documentation vivante
+└── historique/           # notes, manifestes et correctifs de lot archivés
 ```
+
+### La racine reste courte, et c'est une règle
+
+Cent quarante-sept fichiers vivaient à la racine, dont soixante-cinq notes de
+lot (`BOUCHAUD-V13.2-COMPILE-FIX.md`, `*-MANIFEST.json`, `VERIFY-*.ps1`…)
+référencées par rien. Elles racontent l'histoire du projet et méritaient d'être
+gardées — mais pas à l'entrée.
+
+Elles ont été **déplacées, pas supprimées** : `docs/historique/` pour les notes
+et manifestes, `tools/historique/` pour les scripts de lot. Un `git log
+--follow` les retrouve, et la racine tient désormais en treize fichiers.
+
+Un garde-fou dont le contrat pointait vers un de ces fichiers a été **reciblé**
+sur sa nouvelle adresse, pas désactivé : le contrat ne change pas, seule
+l'adresse bouge.
 
 Pendant la transition, certains anciens chemins Rust (`kernel::fd`,
 `drivers::e1000`, etc.) restent valides via des façades `#[path]`. C'est
@@ -193,6 +219,21 @@ Documents utiles :
 - `docs/architecture/AARCH64_RASPBERRY.md` — cible ARM/Raspberry ;
 - `docs/architecture/MULTIPLATFORM_FOUNDATION.md` — règles de la refonte ;
 - `docs/ladybird/MASTER_PLAN.md` — intégration Ladybird.
+
+## Matériel de référence : TRIGKEY
+
+Le banc physique est un **TRIGKEY Speed S5** (Ryzen 7, 16 CPU logiques, NVMe
+interne, RTL8168, boot UEFI depuis une clé USB).
+
+Ce que la machine a réellement exercé, et l'état de chaque chemin, est tenu à
+jour dans `docs/TRIGKEY_AUDIT_2026-09-15.md` — avec, pour chaque verdict, le
+chiffre du relevé physique qui le prouve. Un chemin qui a réussi **une fois**
+n'y est jamais présenté comme stable.
+
+La procédure d'image et de flash est dans `tools/reference/IMAGE-TRIGKEY.ps1`,
+qui refuse de construire sur un arbre modifié et publie le commit, le SHA256 de
+l'image et le manifeste de symbolisation — sans lesquels aucun RIP relevé par
+la blackbox ne veut dire quoi que ce soit.
 
 ## Licence
 

@@ -1,7 +1,7 @@
 # V14 — Critères d'acceptation
 
 - `cargo check` et `cargo bootimage` passent.
-- `tools/verifie-verrouillage.py` passe après application de `V14-SOURCE.patch`.
+- `tools/verifie-verrouillage.py` passe après application de `docs/historique/notes/V14-SOURCE.patch`.
 - `WAITQ-DETACHED depth_violations=0` reste vrai.
 - `[MM-CLUSTER] mapped` devient non nul sur Ladybird.
 - `WRITE` ne doit plus être l'owner BKL d'une faute `site_tenue=212`.

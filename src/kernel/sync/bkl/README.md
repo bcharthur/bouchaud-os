@@ -50,4 +50,4 @@ n'est modifié.
 
 ## V4 diagnostic
 
-Voir `BKL-V4-DIAGNOSTIC.txt` à la racine du patch.
+Voir `docs/historique/notes/BKL-V4-DIAGNOSTIC.txt`.
