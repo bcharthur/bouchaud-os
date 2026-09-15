@@ -179,6 +179,12 @@ anomalies={}/{}/{} proprietaire={}{}",
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
+    // CE QUE FAIT UN PROCESSUS QUI TOURNE SANS AVANCER.
+    //
+    // `[PROC-SAMPLE] cpu_pct=76 ctx_delta=4` designe une attente active sans
+    // la nommer. Ce classement la nomme : le numero d'appel le plus emis sur
+    // la fenetre, et combien de fois il a repondu « rien pour l'instant ».
+    crate::kernel::abi::log_profil_appels(crate::kernel::timer::monotonic_ns());
     log_files_execution();
     crate::kernel::heap::log_ng_stats();
     crate::kernel::memory::log_dma_stats();

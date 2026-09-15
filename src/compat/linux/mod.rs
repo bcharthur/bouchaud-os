@@ -25,6 +25,7 @@ pub mod mem;
 pub mod net;
 pub mod nr;
 pub mod proc;
+pub mod profil;
 pub mod verrous;
 
 use alloc::string::String;
@@ -109,6 +110,54 @@ pub fn syscall_count() -> u64 {
     SYSCALL_COUNT.load(Ordering::Relaxed)
 }
 
+/// Compte cumule d'un numero d'appel systeme depuis le demarrage.
+///
+/// Le dernier index vaut « hors table » : tout numero au-dela de la table y
+/// est compte, plutot que d'etre perdu.
+pub fn appels_du_numero(numero: usize) -> u32 {
+    SYSCALL_HITS[numero.min(SYSCALL_HITS_LEN - 1)].load(Ordering::Relaxed)
+}
+
+/// Les appels systeme les plus emis depuis le dernier releve.
+///
+/// # Pourquoi cette ligne existe
+///
+/// `[PROC-SAMPLE] name=WebContent cpu_pct=76 ctx_delta=4` dit qu'un processus
+/// brule les trois quarts d'un coeur sans jamais changer de contexte. Il ne
+/// dit pas A QUOI. Le noyau comptait deja chaque appel par numero, mais ce
+/// compte n'etait lisible que par la commande interactive `syscalls` -- c'est
+/// a dire au clavier, sur une machine dont le clavier ne repond pas.
+///
+/// Le releve ci-dessous porte des DELTAS : le cumul depuis le demarrage est
+/// domine par le demarrage, et un navigateur qui se met a tourner en rond au
+/// bout de deux minutes n'y deplace pas le classement.
+pub fn log_profil_appels(maintenant_ns: u64) {
+    let mut chauds = [profil::Chaud { numero: 0, appels: 0, eagain: 0 }; 12];
+    let (poses, total) = profil::plus_chauds(&mut chauds, appels_du_numero);
+    let fenetre_ns = profil::ferme_fenetre(maintenant_ns);
+    if poses == 0 {
+        return;
+    }
+    let mut ligne = alloc::string::String::from("[SYSCALL-TOP]");
+    let _ = core::fmt::Write::write_fmt(
+        &mut ligne,
+        format_args!(
+            " window_ns={} appels={} distincts={} cumul={}",
+            fenetre_ns, total, poses, syscall_count(),
+        ),
+    );
+    for chaud in &chauds[..poses] {
+        let _ = core::fmt::Write::write_fmt(
+            &mut ligne,
+            format_args!(
+                " {}={}/eagain={}",
+                nr::name(chaud.numero), chaud.appels, chaud.eagain,
+            ),
+        );
+    }
+    crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
+}
+
 /// Dernier numero d'appel systeme non implemente (0 si aucun).
 pub fn last_unknown() -> u64 {
     LAST_UNKNOWN.load(Ordering::Relaxed)
@@ -120,6 +169,14 @@ pub fn handle(frame: &mut TrapFrame) {
     let (number, args) = frame.syscall_args();
     SYSCALL_HITS[(number as usize).min(SYSCALL_HITS_LEN - 1)].fetch_add(1, Ordering::Relaxed);
     let result = dispatch(number, args, frame);
+    // UNE BOUCLE D'ATTENTE ACTIVE SE RECONNAIT A SA REPONSE, PAS A SON APPEL.
+    //
+    // `lire` emis un million de fois ne dit pas s'il y a du travail. `lire`
+    // emis un million de fois dont 999 998 `EAGAIN` le dit : le processus
+    // interroge un descripteur qui n'a rien, et recommence.
+    if result == -errno::EAGAIN {
+        profil::note_eagain(number);
+    }
     match trace_mode() {
         Trace::Aucune => {}
         Trace::Tous => {
