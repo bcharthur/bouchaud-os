@@ -53,6 +53,17 @@ const INJECTION_DONNEES_S: u64 = 30;
 const INJECTION_STATUT_S: u64 = 45;
 const INJECTION_VERROU_S: u64 = 60;
 
+/// Les pannes artificielles sont-elles armees ?
+///
+/// Le banc d'endurance mesure une DUREE, pas une reprise : il tourne sans
+/// volume de charge, donc sans trafic pour consommer les pannes, et celles-ci
+/// tomberaient sur le vidage final -- ou elles mesureraient la reprise au lieu
+/// de l'endurance. Deux bancs, deux questions, un seul module.
+pub const INJECTIONS_ARMEES: bool = match option_env!("BOUCHAUD_BANC_INJECTIONS") {
+    Some(v) => !matches!(v.as_bytes(), b"0" | b"non" | b"off"),
+    None => true,
+};
+
 static BLOCS_LUS: AtomicU64 = AtomicU64::new(0);
 static LECTURES: AtomicU64 = AtomicU64::new(0);
 static ECHECS: AtomicU64 = AtomicU64::new(0);
@@ -66,8 +77,9 @@ static CHARGE_ARRETEE: core::sync::atomic::AtomicBool =
 /// Lance le banc : un fil de charge, un fil d'arbitrage.
 pub fn demarre() {
     crate::serial_println!(
-        "BOUCHAUD_BANC_IO_DEPART secondes={} injections_s={},{},{}",
-        SECONDES, INJECTION_DONNEES_S, INJECTION_STATUT_S, INJECTION_VERROU_S,
+        "BOUCHAUD_BANC_IO_DEPART secondes={} injections={} injections_s={},{},{}",
+        SECONDES, INJECTIONS_ARMEES as u8,
+        INJECTION_DONNEES_S, INJECTION_STATUT_S, INJECTION_VERROU_S,
     );
     crate::kernel::task::spawn_noyau(fil_charge, "banc-io-charge");
     crate::kernel::task::spawn_noyau(fil_arbitre, "banc-io-arbitre");
@@ -123,17 +135,17 @@ fn fil_arbitre() -> ! {
     let mut verrou = false;
     loop {
         let ecoule = crate::kernel::timer::monotonic_ns().saturating_sub(depart);
-        if !donnees && ecoule >= INJECTION_DONNEES_S * NS {
+        if !donnees && INJECTIONS_ARMEES && ecoule >= INJECTION_DONNEES_S * NS {
             donnees = true;
             usb::arme_injection(usb::INJECTE_ECHEANCE_DONNEES);
             crate::serial_println!("BOUCHAUD_BANC_IO_INJECTION quoi=donnees ecoule_s={}", ecoule / NS);
         }
-        if !statut && ecoule >= INJECTION_STATUT_S * NS {
+        if !statut && INJECTIONS_ARMEES && ecoule >= INJECTION_STATUT_S * NS {
             statut = true;
             usb::arme_injection(usb::INJECTE_ECHEANCE_STATUT);
             crate::serial_println!("BOUCHAUD_BANC_IO_INJECTION quoi=statut ecoule_s={}", ecoule / NS);
         }
-        if !verrou && ecoule >= INJECTION_VERROU_S * NS {
+        if !verrou && INJECTIONS_ARMEES && ecoule >= INJECTION_VERROU_S * NS {
             verrou = true;
             usb::arme_injection(usb::INJECTE_VERROU_TENU);
             crate::serial_println!("BOUCHAUD_BANC_IO_INJECTION quoi=verrou ecoule_s={}", ecoule / NS);

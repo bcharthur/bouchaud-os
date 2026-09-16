@@ -12,6 +12,19 @@
 # vraie GPT nommee BOUCHAUD-BLACKBOX. Il exige ensuite que l'archive couvre au
 # moins la duree demandee, DEBUT ET FIN relus par le parser officiel.
 #
+# # Pourquoi il eteint desormais la machine
+#
+# L'enregistreur ne touche plus le support pendant le runtime : produire une
+# trace est purement memoire, et la persistance n'a lieu qu'a l'extinction
+# VOLONTAIRE. Couper QEMU au bout de N secondes, comme le faisait ce banc,
+# laisserait donc le tambour intact en RAM -- c'est-a-dire une archive vide.
+#
+# Le drapeau `banc-io` fournit l'extinction programmee. Les pannes
+# artificielles, elles, sont DESARMEES ici : ce banc mesure une duree, pas une
+# reprise, et il tourne sans volume de charge -- les pannes tomberaient sur le
+# vidage final, ou elles mesureraient autre chose que ce qu'on demande.
+# La reprise, c'est `run_trigkey_ladybird_io_stress.sh`.
+#
 #     tools/ci/run_blackbox_endurance.sh [secondes]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -21,9 +34,10 @@ MINIMUM=${BLACKBOX_COUVERTURE_MIN:-60}
 TRAVAIL=$(mktemp -d)
 trap 'rm -rf "$TRAVAIL"' EXIT
 
-echo "=== noyau UEFI stage2 ==="
+echo "=== noyau UEFI stage2 + extinction programmee (${SECONDES}s) ==="
+BOUCHAUD_BANC_SECONDES="$SECONDES" BOUCHAUD_BANC_INJECTIONS=0 \
 cargo +nightly-2026-06-01 build --target targets/x86_64-bouchaud_os_uefi.json \
-  --no-default-features --features uefi-boot,reference-bringup,reference-desktop || exit 1
+  --no-default-features --features uefi-boot,reference-bringup,reference-desktop,banc-io || exit 1
 NOYAU=target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
 
 echo "=== image amorcable ==="
@@ -39,7 +53,7 @@ python3 tools/reference/fabrique-disque-blackbox.py "$TRAVAIL/cle.img" --mio 64 
 
 echo "=== QEMU ${SECONDES}s, 4 coeurs ==="
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$TRAVAIL/vars.fd"
-timeout $((SECONDES + 20)) qemu-system-x86_64 \
+timeout $((SECONDES + 120)) qemu-system-x86_64 \
   -machine q35 -m 4096 -smp 4 -display none -no-reboot \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,unit=1,file="$TRAVAIL/vars.fd" \
@@ -77,8 +91,13 @@ print(f"BLACKBOX_DERNIER_S={horodatages[-1]/1e9:.2f}")
 print(f"BLACKBOX_COUVERTURE_S={couverture:.1f}")
 # DEBUT **ET** FIN. Une archive qui ne garde que la fin perdrait l'amorcage,
 # une qui ne garde que le debut perdrait le blocage : les deux sont exiges.
-if not (sdir / "markers.log").read_text(errors="replace").strip():
+marques = (sdir / "markers.log").read_text(errors="replace")
+if "START boot_id=" not in marques:
     sys.exit("marque de DEBUT absente : le debut de session n'a pas ete relu")
+if "FIN raison=" not in marques:
+    sys.exit("marque de FIN absente : le silence ne se distingue pas d'une coupure")
+if "draine=1" not in marques:
+    sys.exit("la marque de FIN dit que le drainage n'est pas alle au bout")
 if couverture < minimum:
     sys.exit(f"couverture {couverture:.1f}s < {minimum}s exiges")
 print("BOUCHAUD_BLACKBOX_ENDURANCE_OK")
