@@ -547,6 +547,8 @@ fn boucle() {
     }
     let debut_services = crate::kernel::timer::monotonic_ms();
     let mut services_initialises = !cfg!(feature = "reference-desktop");
+    let mut derniere_decision_navigateur =
+        crate::gui::demarrage_navigateur::Decision::LaisserLeBureauSePoser;
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -998,12 +1000,51 @@ fn boucle() {
         }
 
         // One boot attempt, after the desktop has actually rendered. No crash loop.
-        if !services_initialises && derniere_trame != 0
-            && maintenant.saturating_sub(debut_services) >= 500 {
-            services_initialises = true;
-            if !wins.iter().any(window::est_client) {
-                crate::platform::pc::ecran_faute::point("navigateur-demande");
-                crate::gui::services::demande(crate::gui::services::DEMARRER);
+        //
+        // BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V1
+        //
+        // Le seul critere etait le temps : cinq cents millisecondes apres la
+        // premiere trame. Le releve du 16 septembre montre ce que cela donne
+        // sur la machine :
+        //
+        //     t=5799 ms  bureau-premiere-trame
+        //     t~6500 ms  le lien Ethernet monte (autonegociation cuivre)
+        //     t=6799 ms  navigateur-demande -- resolveur=NON-CONFIGURE
+        //
+        // Trois cents millisecondes apres la montee du lien, donc avant tout
+        // bail DHCP. Le navigateur lit son resolveur UNE FOIS, a l'exec, et le
+        // garde pour la vie : la session entiere se passe ensuite sans DNS, et
+        // la panne parait venir du navigateur.
+        //
+        // L'attente est BORNEE et ne bloque rien : la boucle continue de
+        // dessiner, on se contente de ne pas encore demander le lancement.
+        // Lien bas, on n'attend pas -- un bail ne peut pas venir, et la page
+        // locale n'a besoin de personne.
+        if !services_initialises && derniere_trame != 0 {
+            let decision = crate::gui::demarrage_navigateur::decide(
+                maintenant.saturating_sub(debut_services),
+                crate::net::connecte(),
+                matches!(crate::net::etat_demarrage(), crate::net::Demarrage::Pret),
+                crate::gui::demarrage_navigateur::REPOS_BUREAU_MS,
+                crate::gui::demarrage_navigateur::ATTENTE_MAXIMALE_MS,
+            );
+            // Aux TRANSITIONS seulement : une ligne par tour de compositeur
+            // noierait le releve a soixante par seconde.
+            if decision != derniere_decision_navigateur {
+                derniere_decision_navigateur = decision;
+                crate::serial_println!(
+                    "BOUCHAUD_NAVIGATEUR_DEPART decision={} t_ms={} lien={}",
+                    decision.nom(),
+                    maintenant.saturating_sub(debut_services),
+                    crate::net::connecte() as u8,
+                );
+            }
+            if decision.lance() {
+                services_initialises = true;
+                if !wins.iter().any(window::est_client) {
+                    crate::platform::pc::ecran_faute::point("navigateur-demande");
+                    crate::gui::services::demande(crate::gui::services::DEMARRER);
+                }
             }
         }
         let service_action = crate::gui::services::prend_commande();

@@ -389,8 +389,27 @@ def main():
             "mene nulle part sur une machine reelle."
         )
     else:
+        # LE BAIL PASSE MAINTENANT PAR `net::resolveur::choisis`.
+        #
+        # Cette garde exigeait `dns_server()` litteralement a cote de
+        # `BOUCHAUD_DNS_SERVER=`. L'intention -- « le bail DHCP, pas une
+        # constante » -- reste la bonne ; le chemin a change. `choisis` prend
+        # le bail EN PREMIER et ne retombe sur la valeur compilee qu'a defaut
+        # de bail ET de passerelle, ce que `verifie-resolveur-navigateur.py`
+        # verifie branche par branche.
+        #
+        # Ce qui reste interdit ici, et c'est le fond du defaut du 13
+        # septembre, c'est une ADRESSE ECRITE EN DUR a cet endroit.
         debut = client.index("BOUCHAUD_DNS_SERVER=")
-        if "dns_server()" not in client[debut:debut + 200]:
+        fenetre = client[debut:debut + 300]
+        import re as _re
+        if _re.search(r"\b\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\b", fenetre):
+            fautes.append(
+                "client.rs : une adresse IPv4 est ecrite en dur a cote de "
+                "BOUCHAUD_DNS_SERVER=. C'est exactement ce qui a fait partir "
+                "le navigateur avec 10.0.2.3 sur une machine reelle."
+            )
+        if "resolveur_choisi" not in fenetre and "dns_server()" not in fenetre:
             fautes.append(
                 "client.rs : le resolveur passe au navigateur n'est plus celui "
                 "du noyau ; une constante y remplacerait le bail DHCP."

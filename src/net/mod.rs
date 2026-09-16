@@ -15,6 +15,8 @@
 //! UDP/TCP reels) ; DNS/DHCP, HTTP/1.1+2, TLS 1.3 fonctionnels.
 
 // Couches OSI.
+/// Choix du resolveur DNS remis au navigateur, pur : voir `resolveur.rs`.
+pub mod resolveur;
 pub mod link;
 pub mod internet;
 pub mod transport;
@@ -48,6 +50,15 @@ pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
 static mut OUR_IP: Ipv4Addr = [10, 0, 2, 15];
 static mut GW_IP: Ipv4Addr = [10, 0, 2, 2];
 static mut DNS_IP: Ipv4Addr = [10, 0, 2, 3];
+
+/// La valeur COMPILEE du resolveur, telle qu'elle vaut avant tout bail.
+///
+/// C'est le resolveur du NAT de QEMU. Il est juste la, et faux a peu pres
+/// partout ailleurs -- notamment sur la machine de reference, ou il a fait
+/// repondre « Unable to resolve host » a toutes les pages pendant que le
+/// reseau, lui, fonctionnait. `net::resolveur` ne s'en sert qu'en dernier
+/// recours, et le DIT quand il le fait.
+pub const DNS_COMPILE: Ipv4Addr = [10, 0, 2, 3];
 
 /// Adresse IPv4 d'eth0.
 pub fn our_ip() -> Ipv4Addr { unsafe { OUR_IP } }

@@ -27,6 +27,9 @@
 pub mod apps;
 /// Geometrie de dessin partagee, pure et totale : voir `geometrie.rs`.
 pub mod geometrie;
+/// Quand lancer le navigateur apres la premiere trame, pur : voir
+/// `demarrage_navigateur.rs`.
+pub mod demarrage_navigateur;
 pub mod services;
 pub mod power_screen;
 pub mod client;

@@ -105,6 +105,11 @@ impl Client {
         };
 
         let argv = alloc::vec![chemin.to_string()];
+        let (resolveur_choisi, resolveur_source) = crate::net::resolveur::choisis(
+            crate::net::dns_server(),
+            crate::net::gateway(),
+            crate::net::DNS_COMPILE,
+        );
         let base = crate::kernel::exec::shell_environment();
 
         let surface_node = surface.node;
@@ -148,9 +153,14 @@ impl Client {
                 // resolveur que le bail DHCP a rendu, s'il y en a eu un, et la
                 // valeur compilee sinon -- c'est-a-dire exactement ce que le
                 // repli aurait donne. On ne peut rien perdre a la poser.
+                // LE BAIL, PUIS LA PASSERELLE, PUIS SEULEMENT LA VALEUR
+                // COMPILEE. Celle-ci vaut `10.0.2.3` -- le resolveur du NAT
+                // de QEMU --, juste sous QEMU et fausse partout ailleurs. La
+                // passerelle, elle, existe reellement sur ce reseau-ci et
+                // resout sur a peu pres toutes les box. Voir `net::resolveur`.
                 alloc::format!(
                     "BOUCHAUD_DNS_SERVER={}",
-                    crate::net::ipv4::format_addr(&crate::net::dns_server()),
+                    crate::net::ipv4::format_addr(&resolveur_choisi),
                 ),
             ]
         };
@@ -188,10 +198,22 @@ impl Client {
         crate::serial_println!(
             "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
             pid,
-            crate::net::ipv4::format_addr(&crate::net::dns_server()),
+            crate::net::ipv4::format_addr(&resolveur_choisi),
             crate::net::nom_verdict(),
             crate::net::connecte() as u8,
             if pret { "configure" } else { "NON-CONFIGURE" },
+        );
+        // D'OU vient l'adresse, et pas seulement laquelle. « dns=10.0.2.3 »
+        // ne disait pas si le bail l'avait donnee ou si c'etait le repli
+        // compile -- or c'est toute la difference entre un reseau qui repond
+        // et un reseau qu'on n'a pas attendu.
+        crate::serial_println!(
+            "BOUCHAUD_NAVIGATEUR_RESOLVEUR pid={} adresse={} source={} bail={} passerelle={}",
+            pid,
+            crate::net::ipv4::format_addr(&resolveur_choisi),
+            resolveur_source.nom(),
+            crate::net::ipv4::format_addr(&crate::net::dns_server()),
+            crate::net::ipv4::format_addr(&crate::net::gateway()),
         );
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le
