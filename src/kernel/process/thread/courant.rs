@@ -3,6 +3,23 @@ fn set_current_index(index: usize) {
     CURRENT[local_cpu()].store(index, Ordering::Release);
 }
 
+/// Ce coeur execute-t-il precisement cette tache ?
+///
+/// `CURRENT[cpu]` est l'AUTORITE : c'est ce que le scheduler y a installe.
+/// `Task::on_cpu` n'est qu'une trace laissee par la tache elle-meme, et elle
+/// peut survivre a son proprietaire.
+#[inline]
+pub(crate) fn cpu_execute(cpu: usize, index: usize) -> bool {
+    cpu < CURRENT.len() && CURRENT[cpu].load(Ordering::Acquire) == index
+}
+
+/// L'emplacement de la tache que ce coeur execute, ou `NO_TASK`.
+#[inline]
+pub(crate) fn courant_du_coeur(cpu: usize) -> usize {
+    if cpu >= CURRENT.len() { return NO_TASK; }
+    CURRENT[cpu].load(Ordering::Acquire)
+}
+
 #[inline]
 fn set_current_is_kernel(value: bool) {
     CURRENT_IS_KERNEL[local_cpu()].store(value, Ordering::Release);

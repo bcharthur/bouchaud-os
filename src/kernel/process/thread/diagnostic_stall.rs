@@ -847,7 +847,7 @@ sommeils_abandonnes={} rip={:#x} rip_noyau={:#x} tlb_seq={} tlb_cibles={:#x} tlb
             .and_then(|id| crate::arch::x86_64::cpu_local::local(id).file_contient(identite.en_mot()));
         crate::serial_println!(
             "[SCHED-TACHE] tid={} slot={} gen={} etat={:?} on_cpu={} rq={} en_file={:?} \
-cle_attente={} echeance={}",
+cle_attente={} echeance={} commute={} courant_du_coeur={}",
             tache.tid,
             identite.emplacement(),
             identite.generation(),
@@ -857,6 +857,25 @@ cle_attente={} echeance={}",
             en_file,
             tache.wait_queue_key.charge(),
             tache.wake_deadline_ns.charge(),
+            // LES DEUX CHAMPS QUI SEPARENT DEUX CORRECTIFS OPPOSES.
+            //
+            // `Ready`, `on_cpu=N`, hors de toute file : deux lectures
+            // possibles, et une seule est vraie.
+            //
+            //   * `commute=1` -- une passation est EN COURS ; c'est la pile
+            //     entrante qui rendra `on_cpu`, et l'etat est legitime ;
+            //   * `commute=0` et `courant_du_coeur` different de cette tache
+            //     -- personne ne rendra `on_cpu`, la trace est morte, et
+            //     `publish_ready` refusera la tache pour toujours.
+            //
+            // Sans eux, la premiere tentative de correctif a vise le second
+            // cas et n'a jamais rien repare : la branche ne s'est pas
+            // declenchee une seule fois sur soixante-douze secondes.
+            tache.switching_out.charge() as u8,
+            {
+                let occupe = tache.on_cpu.charge();
+                if occupe >= 0 { courant_du_coeur(occupe as usize) as i64 } else { -1 }
+            },
         );
     }
 }
