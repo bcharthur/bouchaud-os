@@ -4,6 +4,23 @@
 
 use crate::boot::{BootInfo, FirmwareKind};
 
+// BOUCHAUD_PAGE_ACCUEIL_UN_SEUL_CHEMIN_V1
+//
+// Le chemin de la page d'accueil existait en TROIS exemplaires qui devaient
+// s'accorder sans que rien ne le verifie : la chaine exportee ici, la copie
+// faite par tools/reference/prepare-reference-ladybird.ps1, et l'entree
+// attendue par tools/reference/verify-reference-ladybird-image.py. Les deux
+// dernieres ne la connaissaient tout simplement pas, et le navigateur s'est
+// ouvert sur une page absente.
+//
+// Cote noyau il n'y a plus qu'une constante, et le chemin dans l'image se
+// deduit de l'URL par construction. tools/verifie-page-accueil-navigateur.py
+// verifie que les trois s'accordent encore.
+/// Chemin de la page d'accueil dans le systeme de fichiers du guest.
+const CHEMIN_ACCUEIL: &str = "/usr/share/ladybird/bouchaud-start.html";
+/// La meme page, telle que le navigateur la demande.
+const URL_ACCUEIL: &str = "file:///usr/share/ladybird/bouchaud-start.html";
+
 // DEUX DRAPEAUX, ET NON UN.
 //
 // Un seul drapeau force a choisir entre « tout le PS/2 » et « rien ». Une
@@ -312,7 +329,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // que l'utilisateur double-clique sur Ladybird.
     crate::shell::set_exported_for_boot("BOUCHAUD_M9", "1");
     // Une page locale ne depend ni du DHCP ni d'un moteur distant au lancement.
-    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", "file:///usr/share/ladybird/bouchaud-start.html");
+    crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", URL_ACCUEIL);
     crate::shell::set_exported_for_boot("BOUCHAUD_M11", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");
@@ -329,9 +346,12 @@ pub fn run(boot: &'static BootInfo) -> ! {
 
     crate::serial_println!("BOUCHAUD_STAGE2_LADYBIRD_RAMONLY_ENV_OK");
 
-    let browser_present = {
+    let (browser_present, page_accueil_presente) = {
         let fs = crate::fs::ramfs::fs();
-        fs.resolve("/bo-navigateur", 0).is_some()
+        (
+            fs.resolve("/bo-navigateur", 0).is_some(),
+            fs.resolve(CHEMIN_ACCUEIL, 0).is_some(),
+        )
     };
     let data_mounted = crate::fs::tar::mounted().is_some();
     let network_ready = crate::net::external_enabled();
@@ -352,11 +372,35 @@ pub fn run(boot: &'static BootInfo) -> ! {
         "BOUCHAUD_STAGE2_LIVE persist=ram montage_differe={}",
         crate::platform::pc::installation::montage_differe_en_attente() as u8,
     );
+    // BOUCHAUD_PAGE_ACCUEIL_ANNONCEE_AU_DEMARRAGE_V1
+    //
+    // La page d'accueil a manque a l'image pendant toute une session sans que
+    // l'amorcage en dise un mot : le defaut ne s'est annonce que 83 s plus
+    // tard, dans le journal de WebContent, sous la forme d'un « errno=2 »
+    // precede de 9,4 s de recherche. Le noyau peut le savoir en une
+    // resolution de chemin, avant meme de lancer le navigateur. Il le dit.
+    crate::serial_println!(
+        "BOUCHAUD_STAGE2_PAGE_ACCUEIL presente={} chemin={}",
+        page_accueil_presente as u8,
+        CHEMIN_ACCUEIL,
+    );
+    if !page_accueil_presente {
+        crate::serial_println!(
+            "BOUCHAUD_STAGE2_PAGE_ACCUEIL_ABSENTE url={} remede=prepare-reference-ladybird.ps1",
+            URL_ACCUEIL,
+        );
+    }
+
     crate::serial_println!("BOUCHAUD_STAGE2_WM_RUNTIME_READY");
 
     if browser_present && data_mounted && network_ready {
+        // L'URL annoncee ici est celle qu'on EXPORTE, pas une adresse de
+        // demonstration. Elle disait « https://www.google.com/ » alors que
+        // BOUCHAUD_M9_URL portait la page locale : le journal d'amorcage
+        // contredisait le BROWSER_HOST_URL imprime trois secondes plus loin.
         crate::serial_println!(
-            "BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK url=https://www.google.com/"
+            "BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK url={}",
+            URL_ACCUEIL,
         );
     } else {
         crate::serial_println!(

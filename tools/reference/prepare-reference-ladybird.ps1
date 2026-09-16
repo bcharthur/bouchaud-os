@@ -129,6 +129,30 @@ Copy-Item `
     -Destination (Join-Path $FontconfigTarget "fonts.conf") `
     -Force
 
+# BOUCHAUD_PAGE_ACCUEIL_DEPUIS_LE_DEPOT_V1
+#
+# La page d'accueil est a NOUS, pas au navigateur. tools/ladybird/start.html
+# n'etait installee que par tools/ladybird/browser-upstream.sh, donc seulement
+# par la reconstruction integrale de Ladybird (des heures). L'artefact publie
+# par la CI est construit sur `main`, ou start.html n'a jamais ete poussee :
+# son resources/ ne pouvait pas la contenir, et Stage 2 ouvrait quand meme
+# file:///usr/share/ladybird/bouchaud-start.html. Resultat a l'ecran :
+# "Load failed: No such file or directory (errno=2)", 9,4 s apres le
+# lancement -- un navigateur parfaitement fonctionnel, sur une page absente.
+#
+# fonts.conf et le bundle CA, juste en dessous, ont deja ce traitement pour
+# exactement la meme raison. La page d'accueil le rejoint : elle est copiee
+# APRES resources/, donc le depot fait autorite sur notre propre fichier quel
+# que soit l'age de l'artefact.
+$PageAccueil = Join-Path $RepoRoot "tools\ladybird\start.html"
+if (-not (Test-Path -LiteralPath $PageAccueil -PathType Leaf)) {
+    Fail "page d'accueil Ladybird absente: $PageAccueil"
+}
+Copy-Item `
+    -LiteralPath $PageAccueil `
+    -Destination (Join-Path $Share "bouchaud-start.html") `
+    -Force
+
 $CA = Join-Path $RepoRoot "tools\ladybird\certs\cacert.pem"
 if (-not (Test-Path -LiteralPath $CA -PathType Leaf)) {
     Fail "bundle CA Ladybird absent: $CA"

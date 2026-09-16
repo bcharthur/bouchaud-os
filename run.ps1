@@ -832,6 +832,47 @@ if ($LadybirdMode) {
 
 
     # =========================================================================
+    # Page d'accueil
+    #
+    # BOUCHAUD_PAGE_ACCUEIL_DEPOT_FAIT_FOI_V1
+    #
+    # Meme lecon que le fonts.conf juste au-dessus, apprise une seconde fois le
+    # 16 septembre 2026, et cette fois-ci sur un ecran : le navigateur s'est
+    # ouvert sur "No such file or directory (errno=2)" apres 9,4 s de
+    # recherche.
+    #
+    # tools/ladybird/start.html n'etait installee que par
+    # tools/ladybird/browser-upstream.sh, donc par la seule reconstruction
+    # integrale. L'artefact publie par la CI est construit sur `main`, ou la
+    # page n'avait jamais ete poussee : son resources/ ne pouvait pas la
+    # contenir, et Stage 2 en exportait quand meme l'URL.
+    #
+    # Le depot fait foi, et la copie a lieu APRES resources/.
+    # =========================================================================
+
+    $StartPageSource = Join-Path `
+        $RepoRoot `
+        "tools\ladybird\start.html"
+
+    if (Test-Path -LiteralPath $StartPageSource -PathType Leaf) {
+
+        Copy-Item `
+            $StartPageSource `
+            (Join-Path $LadybirdShare "bouchaud-start.html") `
+            -Force
+
+        Write-Host `
+            "Accueil    : page du depot installee (bouchaud-start.html)" `
+            -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host `
+            "Accueil    : start.html absent du depot, le navigateur ouvrira une page d'erreur" `
+            -ForegroundColor Yellow
+    }
+
+
+    # =========================================================================
     # Certificats publics pour HTTPS Internet
     # =========================================================================
 

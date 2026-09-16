@@ -17,6 +17,23 @@ REQUIRED_FILES = {
     "usr/libexec/ladybird/webcontent-bootstrap",
     "etc/ssl/certs/ca-certificates.crt",
     "usr/share/ladybird/fontconfig/fonts.conf",
+    # BOUCHAUD_PAGE_ACCUEIL_DANS_IMAGE_V1
+    #
+    # Stage 2 lance le navigateur sur
+    # file:///usr/share/ladybird/bouchaud-start.html. Cette page est a NOUS
+    # -- tools/ladybird/start.html -- mais elle n'etait installee que par
+    # tools/ladybird/browser-upstream.sh, c'est-a-dire uniquement par la
+    # reconstruction integrale du navigateur. L'artefact que la CI publie
+    # est construit sur `main`, ou la page n'a jamais ete poussee : le
+    # navigateur s'ouvrait donc sur « No such file or directory (errno=2) »,
+    # apres 9,4 s passees a la chercher.
+    #
+    # Ce n'est pas qu'une garde. `prepare-reference-ladybird.ps1` REUTILISE
+    # une ladybird-browser.img existante des que ce verificateur la declare
+    # valide : sans cette entree, une image deja fabriquee sans page
+    # d'accueil survivait a la correction et l'utilisateur ne voyait aucun
+    # changement.
+    "usr/share/ladybird/bouchaud-start.html",
 }
 
 EXECUTABLES = {

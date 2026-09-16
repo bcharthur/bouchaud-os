@@ -320,10 +320,19 @@ req("BOUCHAUD_STAGE2_NATIVE_VIEWPORT_OK" in stage2,
     "marqueur viewport natif absent")
 req("BOUCHAUD_STAGE2_LADYBIRD_RUNTIME_OK" in stage2,
     "marqueur runtime Ladybird absent")
+req("BOUCHAUD_STAGE2_PAGE_ACCUEIL" in stage2,
+    "annonce de la page d'accueil absente")
+req("BOUCHAUD_STAGE2_PAGE_ACCUEIL_ABSENTE" in stage2,
+    "alerte page d'accueil manquante absente")
 for token in (
     'set_exported_for_boot("BOUCHAUD_M9", "1")',
     # Le lancement doit rester possible sans reseau; la recherche est explicite.
-    'set_exported_for_boot("BOUCHAUD_M9_URL", "file:///usr/share/ladybird/bouchaud-start.html")',
+    # L'URL litterale a quitte l'appel pour une constante : c'est elle qu'on
+    # verifie maintenant, et elle sert AUSSI a constater la presence du fichier
+    # au demarrage, ce que l'appel seul ne permettait pas.
+    'set_exported_for_boot("BOUCHAUD_M9_URL", URL_ACCUEIL)',
+    'const URL_ACCUEIL: &str = "file:///usr/share/ladybird/bouchaud-start.html";',
+    'const CHEMIN_ACCUEIL: &str = "/usr/share/ladybird/bouchaud-start.html";',
     'set_exported_for_boot("BOUCHAUD_M11", "1")',
     'set_exported_for_boot("BOUCHAUD_BROWSER_HOST", "1")',
 ):
