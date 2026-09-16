@@ -15,3 +15,6 @@ pub mod installation;
 pub mod trigkey;
 pub mod physical_diag;
 pub mod ecran_faute;
+/// Banc de charge d'entree-sortie, derriere son drapeau : voir `banc_io.rs`.
+#[cfg(feature = "banc-io")]
+pub mod banc_io;

@@ -194,10 +194,17 @@ pub fn shutdown(code: u8) -> ! {
     // Persist the result of the filesystem flush as well.
     let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
     let complet = vidage.complet() && persisted >= 0;
-    crate::gui::power_screen::finish(complet);
+    // LE DETAIL AVANT LA PAUSE, ET C'EST L'ORDRE QUI COMPTE.
+    //
+    // `finish(false)` s'arrete deux secondes pour laisser lire l'echec. Appele
+    // AVANT le detail, ces deux secondes affichaient « Sauvegarde incomplete »
+    // seul -- puis le detail apparaissait juste avant que le courant ne soit
+    // coupe, c'est-a-dire jamais. C'est exactement ce que montre la photo de
+    // l'ecran d'extinction du 16 septembre : le titre, et rien dessous.
     if !complet {
         rapporte_echec(&vidage, persisted as i64);
     }
+    crate::gui::power_screen::finish(complet);
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.
@@ -266,10 +273,17 @@ pub fn reboot() -> ! {
 
     let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
     let complet = vidage.complet() && persisted >= 0;
-    crate::gui::power_screen::finish(complet);
+    // LE DETAIL AVANT LA PAUSE, ET C'EST L'ORDRE QUI COMPTE.
+    //
+    // `finish(false)` s'arrete deux secondes pour laisser lire l'echec. Appele
+    // AVANT le detail, ces deux secondes affichaient « Sauvegarde incomplete »
+    // seul -- puis le detail apparaissait juste avant que le courant ne soit
+    // coupe, c'est-a-dire jamais. C'est exactement ce que montre la photo de
+    // l'ecran d'extinction du 16 septembre : le titre, et rien dessous.
     if !complet {
         rapporte_echec(&vidage, persisted as i64);
     }
+    crate::gui::power_screen::finish(complet);
     x86_64::instructions::interrupts::disable();
     unsafe {
         // 1. Le chipset.

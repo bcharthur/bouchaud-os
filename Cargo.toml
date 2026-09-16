@@ -12,6 +12,13 @@ legacy-boot = ["dep:bootloader"]
 uefi-boot = ["dep:bootloader_api"]
 reference-bringup = []
 reference-desktop = ["reference-bringup"]
+# BANC DE CHARGE D'ENTREE-SORTIE.
+#
+# Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la
+# machine a la fin. Rien de tout cela n'a sa place dans une image livree, et un
+# reglage a l'execution laisserait la possibilite de l'armer par accident. Voir
+# `platform/pc/banc_io.rs` et `tools/ci/run_trigkey_ladybird_io_stress.sh`.
+banc-io = []
 
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
