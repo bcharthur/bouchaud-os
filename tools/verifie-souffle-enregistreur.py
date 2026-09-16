@@ -185,6 +185,60 @@ def main():
                 "l'absence."
             )
 
+    # BOUCHAUD_ARCHIVE_SUFFISANTE_V1
+    #
+    # L'archive du 16 septembre ne portait ni l'etat du lien, ni le bail, ni
+    # les trames par seconde, ni le pire a-coup, ni l'etat du disque. Tout
+    # cela existait dans le noyau, dispersé dans des compteurs qu'aucun
+    # enregistrement ne transportait : il a fallu recouper la console serie
+    # pour retrouver la montee du lien Ethernet.
+    if blackbox is not None:
+        code = code_seul(blackbox)
+        if "fn etat_systeme" not in code:
+            fautes.append(
+                "blackbox.rs : la ligne `etat` a disparu. L'archive ne dirait "
+                "plus si le lien etait monte, si le bail etait la, a combien "
+                "de trames tournait le bureau, ni si le disque repondait."
+            )
+        for champ, pourquoi in (
+            ("reseau={}", "l'etat du demarrage reseau"),
+            ("lien={}", "l'etat du lien Ethernet"),
+            ("dns=", "le resolveur reellement en vigueur"),
+            ("fps={}", "les trames par seconde"),
+            ("ecart_max_ms={}", "le PIRE a-coup -- une moyenne de soixante "
+                                "trames avec un trou d'une seconde et demie se "
+                                "lit « fluide », et c'est pourtant le trou "
+                                "qu'on voit a l'ecran"),
+            ("disque_stalls={}", "les blocages du disque"),
+            ("equite_hid_sauts={}", "la famine du clavier, qui est ce qui le "
+                                    "fait passer pour deconnecte"),
+        ):
+            if champ not in code:
+                fautes.append(
+                    "blackbox.rs : la ligne `etat` ne porte plus `%s` -- %s."
+                    % (champ, pourquoi)
+                )
+        # Le genre doit rester celui que l'extracteur connait.
+        #
+        # LA FENETRE DOIT S'ARRETER A LA FONCTION. Une borne fixe de quatre
+        # mille caracteres debordait sur `echantillon_par_cpu`, qui appelle
+        # elle aussi `append(KIND_SAMPLE, ...)` : changer le genre DANS
+        # `etat_systeme` passait la garde grace au voisin.
+        i_etat = code.find("fn etat_systeme")
+        corps_etat = ""
+        if i_etat != -1:
+            suite = code[i_etat:]
+            fin = suite.find("\nfn ", 1)
+            corps_etat = suite if fin == -1 else suite[:fin]
+        if i_etat != -1 and "KIND_SAMPLE" not in corps_etat:
+            fautes.append(
+                "blackbox.rs : la ligne `etat` n'est plus un KIND_SAMPLE. "
+                "L'extracteur qui produit samples.log ne connait que les "
+                "genres existants ; un genre neuf verrait sa charge utile "
+                "perdue et n'apparaitrait que comme un numero dans "
+                "records.json."
+            )
+
     if test is not None and test.count("#[test]") < 8:
         fautes.append(
             "test_souffle.rs : moins de huit cas. Les regles couvertes -- "

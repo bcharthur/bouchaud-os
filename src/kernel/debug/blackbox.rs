@@ -505,6 +505,86 @@ fn sample(ts_ns: u64) {
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
     echantillon_par_cpu(ts_ns);
+    etat_systeme(ts_ns);
+}
+
+// ===========================================================================
+// BOUCHAUD_ETAT_SYSTEME_V1 : ce qui marche, ce qui ne marche pas, et a quel prix
+// ===========================================================================
+//
+// L'echantillon precedent decrit le NOYAU : piles, verrous, timers, HID. Il
+// ne dit rien de ce qu'on demande d'abord a une archive quand la machine a
+// mal tourne -- le lien Ethernet etait-il monte ? le bail etait-il la ? a
+// combien de trames par seconde tournait le bureau ? quel a ete le pire
+// a-coup ? le disque repondait-il ?
+//
+// Tout cela existait dans le noyau, dispersé dans des compteurs qu'aucun
+// enregistrement ne portait. Le releve du 16 septembre a ete lu sans, et il a
+// fallu recouper la console serie pour retrouver la montee du lien.
+//
+// UNE LIGNE SEPAREE, ET LE MEME GENRE D'ENREGISTREMENT.
+//
+// Le genre reste `KIND_SAMPLE` : l'extracteur qui produit `samples.log` le
+// connait deja, et un genre neuf verrait sa charge utile perdue -- il
+// n'apparaitrait que comme un numero dans `records.json`. La ligne est
+// separee pour ne pas approcher `PAYLOAD_MAX` et pour que les outils qui
+// lisent `sample ` gardent leur format, exactement comme `cpus `.
+fn etat_systeme(ts_ns: u64) {
+    let mut out = Text::new();
+
+    let demarrage = match crate::net::etat_demarrage() {
+        crate::net::Demarrage::SansCarte => "sans-carte",
+        crate::net::Demarrage::CarteRefusee => "carte-refusee",
+        crate::net::Demarrage::LienBas => "lien-bas",
+        crate::net::Demarrage::SansBail => "sans-bail",
+        crate::net::Demarrage::SansConfiguration => "sans-configuration",
+        crate::net::Demarrage::Pret => "pret",
+    };
+    let ip = crate::net::our_ip();
+    let gw = crate::net::gateway();
+    let dns = crate::net::dns_server();
+
+    let trames = crate::gui::frame_clock::snapshot();
+    let (_, _, bulk_transferts, bulk_octets, bulk_stalls, _, _, bulk_echecs, _, bulk_occupes) =
+        crate::drivers::xhci_active::stockage_stats();
+    let (hid_sauts, hid_cessions, enr_sauts, enr_cessions) =
+        crate::drivers::xhci_active::equite_stats();
+
+    let _ = write!(
+        &mut out,
+        concat!(
+            // L'HEURE MURALE SE RECONSTRUIT : `boot_id` de la marque START
+            // porte la date du demarrage (AAAAMMJJhhmmssmmm), et `ts_ns` le
+            // temps ecoule depuis. Les deux ensemble datent chaque ligne sans
+            // lire la RTC quatre fois par seconde -- sa lecture attend la fin
+            // d'une mise a jour CMOS, et ce n'est pas une attente qu'on veut
+            // dans le chemin de diagnostic.
+            "etat ts_ns={} ",
+            "reseau={} lien={} externe={} ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{} ",
+            "trames_actives={} fps={} trames_utiles={} ecart_max_ms={} depuis_trame_ms={} ",
+            "disque_transferts={} disque_octets={} disque_stalls={} disque_echecs={} disque_occupe={} ",
+            "equite_hid_sauts={} equite_hid_cessions={} ",
+            "equite_enregistreur_sauts={} equite_enregistreur_cessions={}\n"
+        ),
+        ts_ns,
+        demarrage,
+        crate::net::connecte() as u8,
+        crate::net::external_enabled() as u8,
+        ip[0], ip[1], ip[2], ip[3],
+        gw[0], gw[1], gw[2], gw[3],
+        dns[0], dns[1], dns[2], dns[3],
+        trames.active as u8,
+        trames.fps_arrondi(),
+        trames.frames_useful,
+        // LE PIRE A-COUP, PAS LA MOYENNE. Une moyenne de soixante trames par
+        // seconde avec un trou d'une seconde et demie se lit « fluide » ;
+        // c'est pourtant le trou qu'on voit a l'ecran.
+        trames.useful_gap_max_ms,
+        trames.since_useful_ms,
+        bulk_transferts, bulk_octets, bulk_stalls, bulk_echecs, bulk_occupes,
+        hid_sauts, hid_cessions, enr_sauts, enr_cessions,
+    );
+    let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
 
 // BOUCHAUD_ECHANTILLON_TOUS_LES_COEURS_V1
