@@ -31,8 +31,12 @@ cd "$(dirname "$0")/../.."
 
 SECONDES=${1:-90}
 MINIMUM=${BLACKBOX_COUVERTURE_MIN:-60}
-TRAVAIL=$(mktemp -d)
-trap 'rm -rf "$TRAVAIL"' EXIT
+TRAVAIL=${BANC_TRAVAIL:-$(mktemp -d)}
+mkdir -p "$TRAVAIL"
+# `BANC_TRAVAIL=/chemin` garde les artefacts : image, cle, journal serie et
+# archive extraite. C'est ce qu'on veut quand le banc echoue -- et c'est
+# exactement ce qui manquait aux trois sessions physiques.
+if [ -z "${BANC_TRAVAIL:-}" ]; then trap 'rm -rf "$TRAVAIL"' EXIT; fi
 
 echo "=== noyau UEFI stage2 + extinction programmee (${SECONDES}s) ==="
 BOUCHAUD_BANC_SECONDES="$SECONDES" BOUCHAUD_BANC_INJECTIONS=0 \

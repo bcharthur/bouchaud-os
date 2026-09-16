@@ -614,9 +614,11 @@ fn boucle() {
         // filet couvre le cas ou ce ne serait pas la seule cause.
         //
         // Le compositeur, lui, tourne toujours -- c'est la boucle qui dessine.
-        // `filet_de_securite` ne fait rien tant que l'enregistreur ecrit, et
-        // `poll()` abandonne si le pilote USB est pris : il ne peut donc pas
-        // allonger une trame.
+        // `filet_de_securite` ne fait rien tant que l'enregistreur produit, et
+        // depuis V3 `poll()` ne touche que la memoire -- deux increments
+        // atomiques, une copie, une publication. Il ne peut donc pas allonger
+        // une trame, meme quand le support est perdu : c'etait la seule
+        // reserve qui pesait sur cet appel.
         crate::kernel::blackbox::filet_de_securite(SILENCE_ENREGISTREUR_NS);
         let maintenant = crate::kernel::timer::monotonic_ms();
 
