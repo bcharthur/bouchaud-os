@@ -1,10 +1,39 @@
 param(
-    [ValidateRange(512, 4096)]
+    [ValidateRange(512, 16384)]
     [int]$RamMiB = 1024,
     [ValidateRange(0, 8192)]
     [int]$MinWidth = 0,
     [ValidateRange(0, 4320)]
-    [int]$MinHeight = 0
+    [int]$MinHeight = 0,
+
+    # CE QUE QEMU NE TESTAIT PAS, ET QUI EST PRECISEMENT CE QUI CASSE.
+    #
+    # Ce script tournait en `-smp 1`, sans xHCI et sans NVMe. Sur cette forme :
+    #
+    #   SMP4_AP_STARTED count=0 reason=single-vcpu
+    #   BOUCHAUD_HWPROBE_XHCI absent
+    #   BOUCHAUD_NVME_ABSENT
+    #
+    # Autrement dit, ni la frontiere SMP -- celle qui a double-faute sur la
+    # machine de reference --, ni le chemin USB HID -- celui du clavier muet --,
+    # ni le disque. QEMU validait une image qui ne partageait presque rien avec
+    # ce qui allait tourner.
+    #
+    # `-CommeTrigkey` donne a QEMU la FORME de la machine de reference : seize
+    # coeurs, un controleur xHCI avec clavier et souris USB, un NVMe et une
+    # carte reseau. Verifie : `SMP4_AP_STARTED count=15 expected=15`,
+    # `BOUCHAUD_STAGE2_ENTREE_DECIDEE claviers_usb=1 ps2_clavier=0`,
+    # `BOUCHAUD_NVME_GREEN`, et les deux marqueurs de frontiere dans l'ordre
+    # avec le meme `rsp=0x18000014d50` que le releve physique.
+    #
+    # CE QUE CE PROFIL NE REPRODUIT PAS, et il faut le dire : le processeur
+    # reste emule, le controleur xHCI est celui de QEMU et non l'AMD de la
+    # TRIGKEY, et le clavier USB de QEMU n'est pas un recepteur Logitech
+    # unifie. Une forme proche n'est pas la meme machine.
+    [switch]$CommeTrigkey,
+
+    [ValidateRange(1, 64)]
+    [int]$Coeurs = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,20 +102,68 @@ Write-Host "Test: Demarrer puis double-clic Calculatrice/Fichiers/Rustpad."
 Write-Host "Clic recu => BOUCHAUD_STAGE2_CLICK_DISPATCHED ..."
 Write-Host ""
 
+if ($CommeTrigkey) {
+    if ($Coeurs -eq 0) { $Coeurs = 16 }
+    if ($RamMiB -lt 4096) { $RamMiB = 4096 }
+}
+elseif ($Coeurs -eq 0) {
+    $Coeurs = 1
+}
+
 $Args = @(
     "-machine", "q35",
     "-m", "$RamMiB",
-    "-smp", "1",
+    "-smp", "$Coeurs",
     "-accel", "tcg",
     "-cpu", "max",
     "-drive", "if=pflash,format=raw,unit=0,file=$OvmfCode,readonly=on",
     "-drive", "if=pflash,format=raw,unit=1,file=$OvmfVars,snapshot=on",
     "-drive", "format=raw,file=$Image",
     "-serial", "stdio",
-    "-net", "none",
     "-no-reboot",
     "-no-shutdown"
 )
+
+if ($CommeTrigkey) {
+    $Nvme = Join-Path $RepoRoot "target\reference\trigkey-nvme.img"
+    if (-not (Test-Path -LiteralPath $Nvme -PathType Leaf)) {
+        $Qemu = Split-Path -Parent $QemuExe
+        $QemuImg = Join-Path $Qemu "qemu-img.exe"
+        if (-not (Test-Path -LiteralPath $QemuImg -PathType Leaf)) {
+            Fail "qemu-img introuvable a cote de qemu-system-x86_64 : $QemuImg"
+        }
+        & $QemuImg create -f raw $Nvme 256M | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "creation du disque NVMe en echec" }
+    }
+    $Args += @(
+        "-drive", "id=nv,file=$Nvme,format=raw,if=none",
+        "-device", "nvme,drive=nv,serial=BOUCHAUDTRIGKEY",
+        "-device", "qemu-xhci,id=xhci",
+        "-device", "usb-kbd,bus=xhci.0",
+        "-device", "usb-mouse,bus=xhci.0",
+        "-netdev", "user,id=net0",
+        "-device", "e1000,netdev=net0"
+    )
+
+    Write-Host ""
+    Write-Host "--- FORME TRIGKEY : ce qui devient testable ---" -ForegroundColor Cyan
+    @(
+        "SMP4_AP_STARTED count=15 expected=15    les quinze AP demarrent",
+        "SMP_HANDOFF_BEFORE_STI ... cpus_en_ligne=16",
+        "SMP_HANDOFF_AFTER_FIRST_IRQ vector=0x20 les deux, DANS CET ORDRE",
+        "BOUCHAUD_STAGE2_ENTREE_DECIDEE claviers_usb=1 ps2_clavier=0",
+        "BOUCHAUD_NVME_GREEN                     le disque repond",
+        "[USB-HID-POINT] genre=clavier evenements= doit MONTER quand on tape",
+        "",
+        "Ce profil ne reproduit PAS la machine : processeur emule, xHCI de",
+        "QEMU et non l'AMD de la TRIGKEY, clavier USB simple et non un",
+        "recepteur Logitech unifie. Une forme proche n'est pas la meme machine."
+    ) | ForEach-Object { Write-Host "  $_" }
+    Write-Host ""
+}
+else {
+    $Args += @("-net", "none")
+}
 
 & $QemuExe @Args
 exit $LASTEXITCODE

@@ -162,6 +162,46 @@ releve serait une erreur de lecture.
 
 ---
 
+## Le clavier : le chemin HID generique est HORS DE CAUSE
+
+*Ajout du 16 septembre 2026.*
+
+QEMU tournait jusqu'ici a un seul coeur, sans xHCI et sans NVMe : ni la
+frontiere SMP, ni le chemin USB HID, ni le disque n'etaient exerces. Une image
+verte en emulation ne partageait presque rien avec celle qui tourne ici.
+
+Avec la forme de la machine -- seize coeurs, xHCI, clavier et souris USB,
+NVMe -- le journal QEMU devient :
+
+```
+SMP4_AP_STARTED count=15 expected=15
+SMP_HANDOFF_BEFORE_STI ... cpus_en_ligne=16
+SMP_HANDOFF_AFTER_FIRST_IRQ vector=0x20 rsp=0x18000014d50
+BOUCHAUD_STAGE2_ENTREE_DECIDEE claviers_usb=1 souris_usb=1 ps2_clavier=0
+BOUCHAUD_NVME_GREEN bdf=00:02.0 blocs=524288
+```
+
+Le meme vecteur et le meme RSP que le releve physique.
+
+**Seize frappes injectees par le moniteur QEMU donnent :**
+
+```
+[USB-HID-POINT] slot=1 dci=3 genre=clavier ... evenements=32
+                deq=0x770b6200 attendu=0x770b6200 quarantaine=0 echecs=0
+[GUI-COMPOSITOR-SOURCES] clavier=32 souris=2
+```
+
+Trente-deux evenements pour seize touches -- appui et relachement --, le
+pointeur de file qui avance, et les frappes qui atteignent le compositeur.
+
+**Le chemin HID generique fonctionne donc de bout en bout.** Ce qui reste
+suspect sur la machine est ce que QEMU ne reproduit PAS : le recepteur
+Logitech unifie, qui expose clavier et souris sur un meme peripherique, et le
+controleur xHCI d'AMD. C'est un retrecissement, pas une reponse -- mais il
+retire de la liste la moitie du code qu'on soupconnait.
+
+---
+
 ## L'entree : la souris marche, le clavier non
 
 ```
