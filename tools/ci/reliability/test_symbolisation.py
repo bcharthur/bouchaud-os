@@ -132,3 +132,79 @@ class Symbolisation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LecteurElfAutonome(unittest.TestCase):
+    """Le repli qui repond quand la machine n'a ni addr2line ni nm.
+
+    Le 16 septembre, l'outil a rendu ceci sur le poste de l'utilisateur :
+
+        0x8001392340  ->  +0x1392340
+            <inconnu>
+            ??:0
+
+    Il n'avait pas echoue a trouver le symbole : il n'avait AUCUN outil pour
+    chercher. `addr2line` et `nm` viennent des binutils ou de LLVM, absents
+    d'un poste Windows ordinaire. L'outil degradait en silence vers
+    « inconnu », ce qui ressemble a « cette adresse n'a pas de symbole » --
+    une reponse, et fausse. Une adresse non resolue bloquait une enquete
+    entiere.
+    """
+
+    def setUp(self):
+        self.noyau = noyau_disponible()
+        if self.noyau is None:
+            self.skipTest("aucun noyau construit")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sym", OUTIL)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_la_table_des_symboles_se_lit_sans_outil_externe(self):
+        symboles = self.m.symboles_elf(self.noyau)
+        self.assertGreater(len(symboles), 100,
+                           "un noyau porte des milliers de fonctions")
+        adresses = [s[0] for s in symboles]
+        self.assertEqual(adresses, sorted(adresses), "la table doit etre triee")
+
+    def test_une_adresse_dans_une_fonction_la_nomme(self):
+        symboles = self.m.symboles_elf(self.noyau)
+        adresse, taille, _ = next(s for s in symboles if s[1] > 8)
+        trouve = self.m.cherche_symbole(symboles, adresse + 4)
+        self.assertIsNotNone(trouve)
+        self.assertIn("+0x4", trouve[0])
+
+    def test_une_adresse_hors_de_toute_fonction_ne_ment_pas(self):
+        """Rendre « le dernier symbole avant » designerait n'importe quoi.
+
+        La taille du symbole est dans l'ELF ; s'en servir evite d'attribuer
+        du bourrage inter-sections a la fonction qui le precede.
+        """
+        symboles = self.m.symboles_elf(self.noyau)
+        derniere, taille, _ = symboles[-1]
+        self.assertIsNone(
+            self.m.cherche_symbole(symboles, derniere + taille + 0x100_000))
+
+    def test_le_nom_rendu_est_lisible(self):
+        """Un nom mangle est juste et inutilisable dans une enquete."""
+        symboles = self.m.symboles_elf(self.noyau)
+        mangles = [s for s in symboles if s[2].startswith("_R") and s[1] > 8]
+        if not mangles:
+            self.skipTest("aucun symbole mangle v0 dans ce noyau")
+        adresse, _, _ = mangles[0]
+        nom = self.m.cherche_symbole(symboles, adresse)[0]
+        self.assertFalse(nom.startswith("_R"), "le nom doit etre demangle")
+        self.assertIn("::", nom, "un chemin Rust porte des separateurs")
+
+    def test_le_prefixe_de_caisse_ne_fuit_pas_dans_le_nom(self):
+        """`Cs<empreinte>_` contient des chiffres.
+
+        Les lire comme une longueur de composant decoupait n'importe ou et
+        produisait des prefixes parasites du genre `ObZ1v::_11bou::`.
+        """
+        self.assertEqual(
+            self.m.demangle("_RNvNtNtCsjLR5ObZ1vZ6_11bouchaud_os2fs11persistance5monte"),
+            "bouchaud_os::fs::persistance::monte")
+
+    def test_un_nom_non_mangle_passe_tel_quel(self):
+        self.assertEqual(self.m.demangle("memcpy"), "memcpy")
