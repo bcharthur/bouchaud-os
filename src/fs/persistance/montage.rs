@@ -107,7 +107,7 @@ pub fn monte() -> usize {
                 == secteurs as usize
             {
                 tampon.truncate(taille);
-                if depose(racine, &chemin, &tampon) {
+                if depose_sous_garde(&mut systeme, racine, &chemin, &tampon) {
                     restaures += 1;
                 }
             }

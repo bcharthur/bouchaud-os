@@ -72,8 +72,37 @@ fn collecte_sous_garde(
 }
 
 /// Cree (dossiers compris) puis remplit un fichier sous `/persist`.
-fn depose(racine: usize, chemin: &str, contenu: &[u8]) -> bool {
-    let mut systeme = fs();
+///
+/// BOUCHAUD_DEPOSE_SOUS_GARDE_V1
+///
+/// Cette fonction prenait le verrou RAMFS elle-meme. Son unique appelant --
+/// `montage::monte` -- le tenait deja, et le noyau mourait au premier fichier
+/// restaure :
+///
+/// ```text
+/// *** KERNEL PANIC *** cpu=0
+/// panicked at src/fs/ramfs.rs:198:8:
+/// LOCKDEP inversion cpu=0 held_rank=50 acquiring=vfs(50)
+/// ```
+///
+/// C'est la MEME faute que celle notee en tete de ce fichier pour
+/// `rassemble` : une fonction qui reprend un verrou que son appelant tient
+/// deja. Elle avait ete corrigee la et pas ici, parce qu'aucun demarrage de
+/// QEMU n'atteignait cette branche -- `hda` faisait zero secteur et
+/// `persistance: disque trop petit, zone absente` arretait tout avant. Le
+/// premier demarrage avec l'image Ladybird, ou `hda` fait quatre-vingts
+/// mebioctets, l'a trouvee tout de suite.
+///
+/// Elle emprunte donc le `FileSystem` deja protege, comme
+/// `collecte_sous_garde`. Le suffixe est celui du module : il DIT que le
+/// verrou est tenu ailleurs, et un appelant qui ne le tient pas ne compile
+/// pas.
+fn depose_sous_garde(
+    systeme: &mut crate::fs::ramfs::FileSystem,
+    racine: usize,
+    chemin: &str,
+    contenu: &[u8],
+) -> bool {
     let mut parent = racine;
     let mut morceaux = chemin.split('/').filter(|m| !m.is_empty()).peekable();
 
