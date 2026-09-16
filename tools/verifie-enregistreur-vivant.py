@@ -19,16 +19,31 @@ taches de priorite Normale, la sienne.
 C'est le pire moment possible pour perdre la trace : c'est exactement celui
 qu'on cherche a comprendre.
 
+# Ce que V3 change a ce garde-fou
+
+Les deux premieres proprietes defendaient une PARADE : le numero non consomme
+et la fenetre rendue existaient parce que `append` pouvait echouer a cause du
+peripherique. Depuis le tambour RAM, il ne le peut plus -- et une parade qui
+protege d'un defaut supprime protege de rien.
+
+Elles sont remplacees par la propriete qui les rend inutiles, et qui est plus
+forte : poser un enregistrement NE PEUT PAS echouer autrement que par une
+charge utile trop grande, qui est un defaut de l'appelant. Les deux dernieres,
+elles, restent : le fil peut toujours cesser d'etre elu.
+
 # Les quatre proprietes verifiees ici
 
-1. Un numero d'enregistrement n'est consomme que si l'ecriture a eu lieu.
-   Sinon un saut devient un trou qu'on ne distingue pas d'une corruption.
-2. Une fenetre de scrutation qui n'a rien pu ecrire est RENDUE, et le tour
-   suivant arrive vingt fois plus vite.
+1. Un numero d'enregistrement reserve est TOUJOURS publie. Le seul refus a
+   lieu AVANT la reservation, sur une charge utile trop grande -- donc sans
+   trouer la numerotation.
+2. La cadence de l'enregistreur ne depend plus d'aucun peripherique : ni
+   `poll` ni son fil ne consultent l'etat du support pour decider quand
+   repasser.
 3. Le fil de l'enregistreur est Interactive : il dort entre deux tours, le
    promouvoir ne coute rien, et cela lui rend la seule chose dont il a besoin.
-4. Un filet : si l'enregistreur se tait quand meme, le compositeur ecrit a sa
-   place -- il tourne toujours, et l'ecriture est bornee et non bloquante.
+4. Un filet : si l'enregistreur se tait quand meme, le compositeur produit a
+   sa place -- il tourne toujours, et la production est bornee et non
+   bloquante.
 """
 
 import re
@@ -76,43 +91,60 @@ def main():
     xhci = sans_commentaires(XHCI.read_text(encoding="utf-8"))
     wm = sans_commentaires(WM.read_text(encoding="utf-8"))
 
-    # 1. LE NUMERO N'EST VALIDE QUE SI L'ECRITURE A EU LIEU.
+    # 1. UN NUMERO RESERVE EST TOUJOURS PUBLIE.
     ajout = corps(bb, "fn append(")
     if ajout is None:
         fautes.append("blackbox.rs : `append` a disparu.")
     else:
-        if "peek_record_seq()" not in ajout or "commit_record_seq(" not in ajout:
+        if "BOBINE.reserve(" not in ajout or "BOBINE.publie(" not in ajout:
             fautes.append(
-                "blackbox.rs : le numero d'enregistrement est de nouveau "
-                "consomme AVANT l'ecriture. Un saut devient alors un trou "
-                "qu'on ne distingue pas d'une corruption a la relecture."
+                "blackbox.rs : `append` ne reserve plus puis ne publie plus "
+                "dans le tambour RAM. Ce sont les deux moities de la "
+                "publication atomique."
             )
-        if "DERNIER_SAUT_OCCUPE" not in ajout:
+        # ENTRE LA RESERVATION ET LA PUBLICATION, AUCUNE SORTIE.
+        #
+        # Un `return` glisse entre les deux consommerait un numero sans jamais
+        # le publier -- et ce trou serait indistinguable, a la relecture, d'un
+        # enregistrement corrompu. C'est exactement le defaut que la
+        # numerotation differee corrigeait en V2 ; il n'a disparu que parce
+        # que ce chemin est desormais droit.
+        # LA FENETRE COMMENCE APRES LE REFUS, PAS APRES LA RESERVATION.
+        #
+        # `let Some(r) = reserve(..) else { return false; };` contient un
+        # `return` qui est TEXTUELLEMENT apres la reservation et LOGIQUEMENT
+        # avant : a cet instant, aucun numero n'a ete consomme. Prendre la
+        # reservation pour borne se declenchait donc sur le code correct --
+        # une garde qui crie sur ce qu'elle defend ne defend rien.
+        refus = ajout.find("};", ajout.find("BOBINE.reserve("))
+        entre = ajout[refus : ajout.find("BOBINE.publie(")]
+        if "return" in entre or "?" in entre:
             fautes.append(
-                "blackbox.rs : un saut n'est plus signale ; la fenetre de "
-                "scrutation sera consommee pour rien."
+                "blackbox.rs : `append` peut sortir entre la reservation et la "
+                "publication. Le numero serait consomme sans etre publie, et "
+                "le trou ne se distinguerait pas d'une corruption."
             )
 
-    # 2. LA FENETRE PERDUE EST RENDUE.
+    # 2. LA CADENCE NE DEPEND PLUS D'AUCUN PERIPHERIQUE.
     scrutation = corps(bb, "pub fn poll()")
     if scrutation is None:
         fautes.append("blackbox.rs : `poll` a disparu.")
-    else:
-        if "LAST_POLL_NS.store(previous" not in scrutation:
-            fautes.append(
-                "blackbox.rs : une fenetre de scrutation qui n'a rien pu "
-                "ecrire est de nouveau consommee. L'enregistreur attendrait le "
-                "quart de seconde suivant, et si le pilote reste pris il ne "
-                "reprendrait jamais."
-            )
+    elif "blackbox_storage_ready" in scrutation or "vidange(" in scrutation:
+        fautes.append(
+            "blackbox.rs : `poll` consulte de nouveau le support. Sa cadence "
+            "redeviendrait celle du peripherique qu'il observe -- et c'est "
+            "precisement ce qui rendait l'arret des trois archives physiques "
+            "indechiffrable."
+        )
     fil = corps(xhci, "fn fil_blackbox()")
     if fil is None:
         fautes.append("xhci_active.rs : le fil de l'enregistreur a disparu.")
-    elif "sleep_ticks(1)" not in fil:
+    elif len(re.findall(r"sleep_ticks\(", fil)) != 1:
         fautes.append(
-            "xhci_active.rs : le fil ne retente plus VITE apres une fenetre "
-            "rendue ; il laisse filer la trace au moment ou elle devient "
-            "interessante."
+            "xhci_active.rs : le fil de l'enregistreur a de nouveau deux "
+            "cadences. Il n'en a plus besoin : rien ne peut plus le faire "
+            "renoncer, et une cadence variable ferait croire le contraire a la "
+            "relecture."
         )
 
     # 3. IL EST INTERACTIVE.
@@ -177,10 +209,9 @@ def main():
             print("  - %s\n" % f)
         return 1
     print(
-        "enregistreur vivant : numero non consomme sur saut, fenetre rendue et "
-        "reprise rapide, fil Interactive, filet arme par le compositeur avec "
-        "un seuil raisonnable"
-    )
+        "enregistreur vivant : numero toujours publie, cadence independante "
+        "du support, fil Interactive, filet arme par le compositeur avec un "
+        "seuil raisonnable")
     return 0
 
 

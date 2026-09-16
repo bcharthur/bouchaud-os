@@ -115,7 +115,9 @@ def main():
 
     # 2. Les deux issues sont notees, au seul point d'ecriture.
     if blackbox is not None:
-        if not re.search(r"note_souffle\(ok,", code_seul(blackbox)):
+        if not re.search(r"note_souffle\(true,", code_seul(blackbox)) or not re.search(
+            r"note_souffle\(false,", code_seul(blackbox)
+        ):
             fautes.append(
                 "blackbox.rs : `append` ne note plus les deux issues. Ne "
                 "compter que les echecs perdrait la date du dernier succes, "

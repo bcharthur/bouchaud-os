@@ -1,13 +1,49 @@
-//! Flight recorder persistant pour le bring-up physique TRIGKEY.
+//! Flight recorder pour le bring-up physique TRIGKEY.
 //!
-//! BOUCHAUD_TRIGKEY_BLACKBOX_V2
+//! BOUCHAUD_TRIGKEY_BLACKBOX_V3
 //!
-//! Le chemin normal ne touche jamais le NVMe interne. Les donnees sont
-//! ecrites dans la partition GPT brute `BOUCHAUD-BLACKBOX` de la cle USB
-//! Stage2, via le transport xHCI Bulk-Only ajoute dans `xhci_active`.
+//! # Ce que V3 change, et pourquoi
+//!
+//! V2 ecrivait PHYSIQUEMENT un enregistrement de quatre kibioctets sur la cle
+//! USB a chaque appel d'`append` : prise du verrou du pilote xHCI, trois
+//! transferts Bulk synchrones, deux attentes d'evenement bornees a une
+//! demi-seconde chacune. Le chemin du diagnostic passait donc par le
+//! peripherique meme dont il devait expliquer la defaillance.
+//!
+//! Les trois archives physiques disent la meme chose : l'enregistrement
+//! s'arrete entre 7,3 s et 8,2 s, a l'instant ou les services du navigateur
+//! commencent a lire la cle d'amorcage. Toutes les causes candidates ont ete
+//! mesurees et eliminees -- tambour plein (73 enregistrements sur 8192),
+//! echec d'ecriture (`bb_failures=0`), famine du verrou
+//! (`equite_enregistreur_sauts=0`), support retire (jamais), ecrasement
+//! (`first_seq=1`), extracteur, architecture, nombre de coeurs. Ce qui
+//! restait etait la FORME du chemin.
+//!
+//! V3 separe les deux roles :
+//!
+//!   * PRODUIRE est desormais purement memoire -- deux increments atomiques,
+//!     une copie, une publication. Aucune allocation, aucun verrou, aucun
+//!     acces xHCI, aucune attente. Voir `kernel::bobine`.
+//!   * PERSISTER n'a lieu qu'a l'extinction volontaire, par lots contigus.
+//!
+//! Une panne du support ne coute plus que les octets qu'on n'a pas pu poser.
+//! Elle ne peut plus couter la trace elle-meme.
+//!
+//! # Pourquoi AUCUNE ecriture periodique, et pas « moins d'ecritures »
+//!
+//! C'est une experience A/B explicite, pas une optimisation. Tant qu'une
+//! ecriture USB periodique subsiste sur le chemin du diagnostic, un
+//! enregistrement qui s'arrete reste ambigu : est-ce l'enregistreur, ou le
+//! support ? En supprimant l'ecriture pendant le runtime, un arret ne peut
+//! plus venir que du producteur -- et c'est la premiere fois que ce silence
+//! devient une reponse. Ne pas retablir la persistance periodique avant que
+//! cette validation physique ait eu lieu.
 
+use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+use crate::kernel::bobine::{self, Bobine};
 
 pub const KIND_SERIAL: u16 = 1;
 pub const KIND_SAMPLE: u16 = 2;
@@ -174,38 +210,76 @@ fn boot_id() -> u64 {
     }
 }
 
+// ===========================================================================
+// BOUCHAUD_TAMBOUR_RAM_V1 : produire et persister ne sont plus le meme geste
+// ===========================================================================
+//
+// Le tambour vit en `.bss` : huit mebioctets et des poussieres, jamais
+// alloues, jamais liberes, disponibles avant le premier `println!`. C'est
+// exactement ce qu'il faut a un enregistreur qui doit survivre a la panne de
+// l'allocateur autant qu'a celle du support.
+//
+// La discipline d'index -- reservation, publication, relecture, perte -- vit
+// dans `kernel::bobine`, qui est PUR et qu'une machine hote met a l'epreuve.
+// Ici il ne reste que ce qu'aucune machine hote ne peut faire : la copie.
+
+/// Le tambour d'octets. Ecrit par plusieurs producteurs a des positions
+/// DISJOINTES -- c'est `Bobine::reserve` qui le garantit --, relu par un seul
+/// consommateur.
+struct Tambour(UnsafeCell<[u8; bobine::OCTETS]>);
+
+// SUR PARCE QUE LES POSITIONS SONT DISJOINTES.
+//
+// Deux producteurs n'obtiennent jamais la meme tranche : `reserve` decoupe
+// l'anneau par `fetch_add`. Le seul chevauchement possible est celui d'un
+// producteur qui rattrape un lecteur apres un tour complet, et c'est
+// precisement ce que la double verification du numero, dans `bobine::lis`,
+// detecte et compte.
+unsafe impl Sync for Tambour {}
+
+static TAMBOUR: Tambour = Tambour(UnsafeCell::new([0; bobine::OCTETS]));
+static BOBINE: Bobine = Bobine::neuve();
+
+/// Copie une charge utile a la place qui lui a ete reservee.
 #[inline]
-// BOUCHAUD_BLACKBOX_NUMERO_NON_CONSOMME_V1
-//
-// LE DEFAUT QUE CECI CORRIGE
-//
-// Le numero d'enregistrement etait tire AVANT l'ecriture, et perdu avec elle
-// quand le pilote USB etait occupe. L'archive du 12 septembre le montre trou
-// par trou : 84 enregistrements presents pour 127 numeros emis, et
-// `bb_busy_skips=49` -- les deux chiffres se repondent.
-//
-// Un numero consomme pour rien n'est pas seulement un enregistrement perdu :
-// c'est un trou qu'on ne peut pas distinguer d'un enregistrement corrompu a
-// la relecture. Le numero n'est desormais valide que si l'ecriture a eu lieu.
-fn peek_record_seq() -> u64 {
-    RECORD_SEQ.load(Ordering::Acquire).wrapping_add(1)
+fn copie_dans_le_tambour(r: &bobine::Reservation, payload: &[u8]) {
+    let (depart, premiere, seconde) = r.tranches();
+    unsafe {
+        let base = TAMBOUR.0.get() as *mut u8;
+        core::ptr::copy_nonoverlapping(payload.as_ptr(), base.add(depart), premiere);
+        if seconde != 0 {
+            core::ptr::copy_nonoverlapping(payload.as_ptr().add(premiere), base, seconde);
+        }
+    }
 }
 
-fn commit_record_seq(seq: u64) {
-    let _ = RECORD_SEQ.compare_exchange(
-        seq.wrapping_sub(1),
-        seq,
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    );
+/// Relit une charge utile du tambour. Rend le nombre d'octets copies.
+fn lit_du_tambour(d: &bobine::Descripteur, sortie: &mut [u8]) -> usize {
+    let (depart, premiere, seconde) = d.tranches();
+    if sortie.len() < d.longueur {
+        return 0;
+    }
+    unsafe {
+        let base = TAMBOUR.0.get() as *const u8;
+        core::ptr::copy_nonoverlapping(base.add(depart), sortie.as_mut_ptr(), premiere);
+        if seconde != 0 {
+            core::ptr::copy_nonoverlapping(base, sortie.as_mut_ptr().add(premiere), seconde);
+        }
+    }
+    d.longueur
 }
 
-/// Vrai si le dernier `append` a ete SAUTE faute d'avoir pu prendre le pilote.
-///
-/// C'est ce drapeau qui empeche une fenetre de scrutation d'etre consommee
-/// pour rien : voir `poll`.
-static DERNIER_SAUT_OCCUPE: AtomicBool = AtomicBool::new(false);
-static SAUTS_DE_FENETRE: AtomicU64 = AtomicU64::new(0);
+/// Etat du tambour RAM, pour le releve et pour l'ecran d'extinction.
+pub fn tambour() -> bobine::Etat {
+    BOBINE.etat()
+}
+
+/// Curseur de vidage : le prochain numero que le support n'a pas encore vu.
+static PROCHAIN_A_POSER: AtomicU64 = AtomicU64::new(1);
+/// Enregistrements que le vidage a trouves deja ecrases.
+static VIDAGE_MANQUANTS: AtomicU64 = AtomicU64::new(0);
+/// Lots physiques ecrits sur le support.
+static VIDAGE_LOTS: AtomicU64 = AtomicU64::new(0);
 
 // ===========================================================================
 // BOUCHAUD_DERNIER_SOUFFLE_V1 : l'enregistreur consigne sa propre mort
@@ -217,22 +291,9 @@ static SAUTS_DE_FENETRE: AtomicU64 = AtomicU64::new(0);
 // echantillon ecrit, `bb_failures=0 bb_busy_skips=0 bb_filets=0`.
 //
 // Ces trois zeros ne disent PAS que tout allait bien. Ils disent qu'a 7,047 s
-// tout allait encore bien. Tout ce qui s'est passe ensuite -- le clavier qui
-// lache, la charge, l'extinction -- devait etre raconte par des compteurs qui
-// ne voyagent que dans un enregistrement... qu'il fallait justement pouvoir
-// ecrire.
-//
-// C'est un piege circulaire : l'instrumentation ne peut pas rapporter sa
-// propre mort. Tant qu'il tient, aucune correction de l'enregistreur n'est
-// verifiable, parce qu'un echec produit exactement le meme silence qu'avant.
-//
-// Cet etat-ci vit en RAM, ne depend d'aucun peripherique, et survit a la perte
-// complete de la cle USB. Il est relu a l'extinction et AFFICHE A L'ECRAN --
-// le seul endroit qui reste quand le journal est precisement ce qu'on n'a pas
-// pu sauver.
-
-/// L'etat de survie, tenu par `kernel::souffle` -- pur, et donc verifiable
-/// sur machine hote, ce que la machine cible ne permet justement pas.
+// tout allait encore bien. C'est un piege circulaire : l'instrumentation ne
+// peut pas rapporter sa propre mort. Cet etat-ci vit en RAM, ne depend
+// d'aucun peripherique, et survit a la perte complete de la cle USB.
 static SOUFFLE: crate::kernel::souffle::Souffle =
     crate::kernel::souffle::Souffle::neuf();
 
@@ -241,7 +302,7 @@ pub fn souffle() -> crate::kernel::souffle::Etat {
     SOUFFLE.etat(crate::kernel::timer::monotonic_ns())
 }
 
-/// Enregistre l'issue d'une tentative d'ecriture.
+/// Enregistre l'issue d'une tentative de pose.
 fn note_souffle(ok: bool, kind: u16, seq: u64, ts_ns: u64) {
     if ok {
         SOUFFLE.succes(ts_ns);
@@ -250,23 +311,30 @@ fn note_souffle(ok: bool, kind: u16, seq: u64, ts_ns: u64) {
     }
 }
 
+/// Pose un enregistrement DANS LA MEMOIRE. Jamais sur le support.
+///
+/// # Ce que cette fonction ne fait plus
+///
+/// Elle ne prend aucun verrou, n'emet aucun transfert USB, n'attend aucun
+/// evenement et ne peut pas echouer a cause d'un peripherique. Le seul echec
+/// possible est une charge utile plus grande que le format ne le permet, et
+/// c'est un defaut de l'appelant, pas une panne.
+///
+/// # Pourquoi c'est la correction, et pas une optimisation
+///
+/// Un diagnostic qui depend du peripherique qu'il observe ne peut pas
+/// rapporter la panne de ce peripherique. Tant que `append` ecrivait sur la
+/// cle, l'arret de l'archive a 7,6 s avait deux explications indiscernables
+/// -- l'enregistreur, ou la cle -- et aucune mesure ne pouvait les separer.
 fn append(kind: u16, payload: &[u8], ts_ns: u64, trace_end: usize) -> bool {
-    let seq = peek_record_seq();
-    let ok = crate::drivers::xhci_active::blackbox_append_record(
-        kind,
-        boot_id(),
-        seq,
-        ts_ns,
-        trace_end as u64,
-        payload,
-    );
-    note_souffle(ok, kind, seq, ts_ns);
-    if ok {
-        commit_record_seq(seq);
-    } else {
-        DERNIER_SAUT_OCCUPE.store(true, Ordering::Release);
-    }
-    ok
+    let Some(reservation) = BOBINE.reserve(payload.len()) else {
+        note_souffle(false, kind, 0, ts_ns);
+        return false;
+    };
+    copie_dans_le_tambour(&reservation, payload);
+    BOBINE.publie(&reservation, kind, ts_ns, trace_end as u64);
+    note_souffle(true, kind, reservation.seq, ts_ns);
+    true
 }
 
 struct Text {
@@ -463,6 +531,9 @@ fn sample(ts_ns: u64) {
         crate::drivers::xhci_active::hid_transport_stats();
     let (bb_writes, bb_failures, bb_consecutive, bb_last_error, bb_busy_skips, bb_last_ok_ns) =
         crate::drivers::xhci_active::blackbox_storage_extended_counters();
+    let (hid_ecart_max, hid_dernier) = crate::drivers::xhci_active::ecart_scrutation_hid();
+    let tambour = BOBINE.etat();
+    let verrou = crate::drivers::xhci_active::etat_du_verrou();
     let (perdus, retard, produit) = journal_serie();
 
     let _ = write!(
@@ -476,8 +547,25 @@ fn sample(ts_ns: u64) {
             "timer2={:#x}/{:#x}/stage{}/{}:{} ",
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
+            "hid_ecart_max_ms={} hid_dernier_ns={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
-            "bb_busy_skips={} bb_fenetres_rendues={} bb_filets={} bb_last_ok_ns={} " ,
+            "bb_busy_skips={} bb_filets={} bb_last_ok_ns={} ",
+            // LE TAMBOUR RAM, DANS CHAQUE ECHANTILLON.
+            //
+            // C'est la mesure du critere d'acceptation A : `tambour_poses`
+            // qui monte pendant cent vingt secondes de charge dit que
+            // l'enregistreur n'a pas cesse, et `tambour_ecrases` dit
+            // exactement ce qui manquera a la relecture. Les deux ensemble
+            // remplacent la question « l'archive s'est-elle arretee ? » par
+            // un chiffre.
+            "tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} tambour_refuses={} ",
+            "tambour_octets_vifs={} ",
+            // QUI TIENT LE PILOTE, ET COMBIEN DE TEMPS AU PIRE.
+            //
+            // « Le verrou etait pris » n'est pas un diagnostic. « Le systeme
+            // de fichiers l'a tenu 480 ms » en est un.
+            "verrou={} verrou_tenue_ns={} verrou_tenue_max_ns={} verrou_pire={} ",
+            "verrou_prises={} verrou_contentions={} verrou_expirations={} ",
             "serial_perdus={} serial_retard={} serial_produit={} serial_capacite={} com1={} ",
             "wm_tours={} wm_entrees={} wm_trames={}\n"
         ),
@@ -495,9 +583,14 @@ fn sample(ts_ns: u64) {
         t3, k3, TIMER_STAGE[3].load(Ordering::Acquire),
         TIMER_ENTERS[3].load(Ordering::Relaxed), TIMER_EXITS[3].load(Ordering::Relaxed),
         polls, events, reports, kbd, mouse, hid_errors, rearms, kicks,
+        hid_ecart_max / 1_000_000, hid_dernier,
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
-        bb_busy_skips, SAUTS_DE_FENETRE.load(Ordering::Relaxed),
-        FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
+        bb_busy_skips, FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
+        tambour.reserves, tambour.poses, tambour.ecrases, tambour.perdus, tambour.refuses,
+        tambour.octets_vifs,
+        verrou.proprietaire.nom(), verrou.tenue_courante_ns,
+        verrou.tenue_max_ns, verrou.tenue_max_proprietaire.nom(),
+        verrou.prises, verrou.contentions, verrou.expirations,
         perdus, retard, produit, crate::drivers::serial::trace_capacite(),
         crate::drivers::serial::presence_com1().nom(),
         crate::gui::reveil::tours(), crate::gui::reveil::entrees(),
@@ -549,6 +642,7 @@ fn etat_systeme(ts_ns: u64) {
         crate::drivers::xhci_active::stockage_stats();
     let (hid_sauts, hid_cessions, enr_sauts, enr_cessions) =
         crate::drivers::xhci_active::equite_stats();
+    let bot = crate::drivers::xhci_active::releve_bot();
 
     let _ = write!(
         &mut out,
@@ -564,7 +658,15 @@ fn etat_systeme(ts_ns: u64) {
             "trames_actives={} fps={} trames_utiles={} ecart_max_ms={} depuis_trame_ms={} ",
             "disque_transferts={} disque_octets={} disque_stalls={} disque_echecs={} disque_occupe={} ",
             "equite_hid_sauts={} equite_hid_cessions={} ",
-            "equite_enregistreur_sauts={} equite_enregistreur_cessions={}\n"
+            "equite_enregistreur_sauts={} equite_enregistreur_cessions={} ",
+            // L'ETAT DU TRANSPORT DE MASSE, PAS SEULEMENT SES ECHECS.
+            //
+            // Un support hors service et un support qu'on n'a jamais
+            // sollicite produisaient le meme silence. `bot=` les separe, et
+            // `bot_refus=` dit combien d'appelants ont ete econduits.
+            "bot={} bot_phase={} bot_echeances={} bot_reprises={} ",
+            "bot_reprises_reussies={} bot_reprises_echouees={} ",
+            "bot_refus={} bot_slot={} bot_dci={}\n"
         ),
         ts_ns,
         demarrage,
@@ -583,6 +685,9 @@ fn etat_systeme(ts_ns: u64) {
         trames.since_useful_ms,
         bulk_transferts, bulk_octets, bulk_stalls, bulk_echecs, bulk_occupes,
         hid_sauts, hid_cessions, enr_sauts, enr_cessions,
+        bot.etat.nom(), bot.derniere_phase.nom(), bot.echeances, bot.reprises,
+        bot.reprises_reussies, bot.reprises_echouees,
+        bot.refus, bot.dernier_slot, bot.dernier_dci,
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -680,13 +785,26 @@ fn memory_sample(ts_ns: u64) {
     let _ = append(KIND_MEMORY, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
 
-/// Ecrit ce qui doit l'etre. Rend vrai si le pilote USB l'a fait renoncer.
+/// Produit ce qu'il y a a produire. Rend toujours `false`.
 ///
-/// L'appelant s'en sert pour retenter VITE plutot qu'au quart de seconde
-/// suivant : voir `fil_blackbox`.
+/// # Ce que cette fonction ne fait plus
+///
+/// Elle ne consulte plus `blackbox_storage_ready()`, ne vide plus le journal
+/// serie, ne vide plus l'enregistreur de vol et n'ecrit plus une seule fois
+/// sur la cle. Elle pose des echantillons EN MEMOIRE, et rien d'autre.
+///
+/// Le journal serie et les evenements de vol vivent deja, chacun, dans leur
+/// propre anneau RAM. Les recopier dans le tambour pendant la session aurait
+/// coute -- pour rien -- la place des echantillons, qui sont les seuls dont
+/// personne d'autre ne garde de copie. Ils sont convertis en enregistrements
+/// a l'extinction, quand la place n'est plus disputee.
+///
+/// Le `bool` de retour disait « le pilote USB m'a fait renoncer, reessaie
+/// vite ». Plus rien ne peut faire renoncer cette fonction ; il reste `false`
+/// pour ne pas casser `fil_blackbox`, dont la cadence n'a plus de raison de
+/// varier.
 pub fn poll() -> bool {
-    if STOPPING.load(Ordering::Acquire) { return false; }
-    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+    if STOPPING.load(Ordering::Acquire) {
         return false;
     }
     let now = now_ns();
@@ -700,25 +818,25 @@ pub fn poll() -> bool {
     {
         return false;
     }
-    DERNIER_SAUT_OCCUPE.store(false, Ordering::Release);
 
-    if !STARTED.load(Ordering::Acquire) {
-        // CE QUE LE DEMARRAGE A DEJA COUTE AVANT QU'ON SACHE ECRIRE.
+    if !STARTED.swap(true, Ordering::AcqRel) {
+        // CE QUE LE DEMARRAGE A DEJA COUTE AVANT LA PREMIERE MARQUE.
         //
-        // L'enregistreur ne sait poser un octet qu'une fois la cle USB
-        // enumeree. Tout ce que le noyau a imprime avant -- carte memoire,
-        // ACPI, demarrage des coeurs, PCI, NVMe -- n'existe que dans le
-        // tambour, et n'y survit que s'il y tient.
+        // `arriere=` dit combien d'octets de journal attendaient a cette
+        // seconde-la, et `capacite=` ce que le tambour serie peut retenir.
+        // Tant que le premier reste sous le second, aucune ligne de demarrage
+        // n'a ete perdue -- et c'est une chose qui se LIT, au lieu de se
+        // supposer.
         //
-        // `arriere=` dit combien d'octets attendaient a cette seconde-la, et
-        // `capacite=` ce que le tambour peut retenir. Tant que le premier
-        // reste sous le second, aucune ligne de demarrage n'a ete perdue --
-        // et c'est une chose qui se LIT, au lieu de se supposer.
+        // La marque part maintenant sans attendre la cle : c'est tout
+        // l'interet du tambour RAM. Sur les trois archives physiques, elle
+        // n'etait posee qu'une fois la cle enumeree, et tout ce qui precedait
+        // n'existait que si le tambour serie le retenait encore.
         let (debut_tambour, fin_tambour) = crate::drivers::serial::trace_bornes();
         let mut msg = Text::new();
         let _ = write!(
             &mut msg,
-            "BOUCHAUD_TRIGKEY_BLACKBOX_V1 START boot_id={} ts_ns={} arriere={} produit={} capacite={} perdu_avant_demarrage={} com1={}\n",
+            "BOUCHAUD_TRIGKEY_BLACKBOX_V3 START boot_id={} ts_ns={} arriere={} produit={} capacite={} perdu_avant_demarrage={} com1={} tambour_descripteurs={} tambour_octets={}\n",
             boot_id(),
             now,
             fin_tambour.saturating_sub(debut_tambour),
@@ -726,15 +844,13 @@ pub fn poll() -> bool {
             crate::drivers::serial::trace_capacite(),
             fin_tambour.saturating_sub(fin_tambour.min(crate::drivers::serial::trace_capacite())),
             crate::drivers::serial::presence_com1().nom(),
+            bobine::DESCRIPTEURS,
+            bobine::OCTETS,
         );
-        if append(KIND_MARKER, msg.as_bytes(), now, crate::drivers::serial::trace_total_bytes()) {
-            STARTED.store(true, Ordering::Release);
+        if !append(KIND_MARKER, msg.as_bytes(), now, crate::drivers::serial::trace_total_bytes()) {
+            STARTED.store(false, Ordering::Release);
         }
     }
-
-    flush_flight(now);
-    flush_flight(now);
-    flush_serial(now, false);
 
     let last_sample = LAST_SAMPLE_NS.load(Ordering::Relaxed);
     if last_sample == 0 || now.saturating_sub(last_sample) >= SAMPLE_NS {
@@ -748,42 +864,213 @@ pub fn poll() -> bool {
         memory_sample(now);
     }
 
-    // UNE FENETRE PERDUE N'EST PAS UNE FENETRE UTILISEE.
-    //
-    // `LAST_POLL_NS` est pose EN ENTREE, avant la moindre ecriture. Quand
-    // celles-ci sont toutes sautees -- le pilote USB tenu par le systeme de
-    // fichiers --, la fenetre de deux cent cinquante millisecondes a bien ete
-    // consommee, et l'enregistreur attend le quart de seconde suivant pour
-    // retenter. Si le pilote reste pris, il ne reprend jamais.
-    //
-    // C'est exactement ce que montrent les trois archives physiques :
-    // l'enregistrement s'arrete net a l'instant ou le navigateur demarre et
-    // se met a travailler sur la cle, et plus rien n'arrive ensuite -- alors
-    // que la souris, elle, continue parfaitement.
-    //
-    // Rendre la fenetre fait retenter le tour suivant du fil, vingt
-    // millisecondes plus tard, au lieu de deux cent cinquante.
-    if DERNIER_SAUT_OCCUPE.swap(false, Ordering::AcqRel) {
-        LAST_POLL_NS.store(previous, Ordering::Release);
-        SAUTS_DE_FENETRE.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
     false
 }
 
-/// Depuis quand l'enregistreur n'a-t-il rien ecrit, en nanosecondes ?
-///
-/// Rend zero tant qu'il n'a jamais rien ecrit -- il n'a alors rien a expliquer.
-pub fn silence_ns() -> u64 {
-    let (_, _, _, _, _, dernier_ok) =
-        crate::drivers::xhci_active::blackbox_storage_extended_counters();
-    if dernier_ok == 0 {
-        return 0;
-    }
-    crate::kernel::timer::monotonic_ns().saturating_sub(dernier_ok)
+// ===========================================================================
+// BOUCHAUD_VIDAGE_PAR_LOTS_V1 : la cle n'est sollicitee qu'a l'extinction
+// ===========================================================================
+//
+// # Pourquoi par lots
+//
+// Une commande BOT, c'est trois transferts Bulk et deux attentes d'evenement,
+// quelle que soit la quantite de donnees. Ecrire un enregistrement de quatre
+// kibioctets par commande paie donc le protocole seize fois plus cher que
+// necessaire : le tampon DMA de l'enregistreur en fait soixante-quatre.
+//
+// Au vidage final il peut y avoir deux mille enregistrements a poser. A une
+// commande chacun, c'est deux mille allers-retours -- et l'ecran d'extinction
+// reste plusieurs secondes sur « Enregistrement des journaux ». Par lots de
+// seize, c'est cent vingt-cinq.
+//
+// # Le seul decoupage impose
+//
+// L'emplacement d'un enregistrement sur le support est `numero % places`. Des
+// numeros consecutifs donnent donc des emplacements consecutifs, SAUF au tour
+// de l'anneau du support. Le lot se coupe la, et seulement la.
+
+/// Enregistrements par lot : le tampon DMA de l'enregistreur en tient
+/// soixante-quatre kibioctets, soit seize enregistrements de quatre.
+pub const ENREGISTREMENTS_PAR_LOT: usize = 16;
+
+/// Ce qu'un vidage a donne.
+#[derive(Clone, Copy, Default)]
+pub struct Bilan {
+    /// Enregistrements effectivement poses sur le support.
+    pub poses: u64,
+    /// Enregistrements que le tambour avait deja ecrases.
+    pub manquants: u64,
+    /// Reste-t-il quelque chose a poser ?
+    pub reste: bool,
 }
 
-/// Filet de securite : ecrire depuis un autre fil quand le notre ne tourne plus.
+/// Vide le tambour vers le support, par lots contigus.
+///
+/// Rend le bilan. N'ecrit rien et rend un bilan vide si le support n'est pas
+/// la : une machine sans cle blackbox produit une trace RAM parfaitement
+/// valide, simplement non persistee -- et c'est exactement ce qu'on veut
+/// pouvoir dire.
+pub fn vidange(echeance_ns: u64) -> Bilan {
+    let mut bilan = Bilan::default();
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        bilan.reste = PROCHAIN_A_POSER.load(Ordering::Acquire) <= BOBINE.dernier();
+        return bilan;
+    }
+
+    loop {
+        if now_ns() >= echeance_ns {
+            break;
+        }
+        let debut_lot = PROCHAIN_A_POSER.load(Ordering::Acquire).max(BOBINE.plus_ancien());
+        let dernier = BOBINE.dernier();
+        if debut_lot > dernier {
+            break;
+        }
+
+        // LE CURSEUR N'AVANCE QUE SUR CE QUI A ETE POSE.
+        //
+        // La premiere version avancait `PROCHAIN_A_POSER` sur tout ce que le
+        // rappel avait DISTRIBUE, y compris quand le pilote n'ecrivait rien.
+        // Un seul lot rate coutait donc seize enregistrements, silencieusement
+        // -- et le banc l'a montre : mille quatre cent cinquante-cinq
+        // enregistrements en memoire, mille cent trente-six sur la cle, et pas
+        // un mot sur les trois cent dix-neuf manquants.
+        //
+        // Les numeros distribues sont retenus ; le curseur se pose sur le
+        // DERNIER REELLEMENT ECRIT, et pas un de plus.
+        let mut suivant = debut_lot;
+        let mut manquants = 0u64;
+        let mut distribues = [0u64; ENREGISTREMENTS_PAR_LOT];
+        let mut combien = 0usize;
+        let poses = crate::drivers::xhci_active::blackbox_vidange_lot(
+            ENREGISTREMENTS_PAR_LOT,
+            |zone| {
+                while suivant <= dernier {
+                    let seq = suivant;
+                    suivant += 1;
+                    let Some(d) = BOBINE.lis(seq) else {
+                        manquants += 1;
+                        continue;
+                    };
+                    let mut charge = [0u8; PAYLOAD_MAX];
+                    let n = lit_du_tambour(&d, &mut charge);
+                    if n != d.longueur {
+                        manquants += 1;
+                        continue;
+                    }
+                    if !encadre(zone, &d, &charge[..n]) {
+                        manquants += 1;
+                        continue;
+                    }
+                    if combien < distribues.len() {
+                        distribues[combien] = seq;
+                        combien += 1;
+                    }
+                    return Some(seq);
+                }
+                None
+            },
+        );
+
+        if poses == 0 {
+            if combien == 0 {
+                // Le rappel n'a rien eu a distribuer : il ne reste que des
+                // enregistrements ecrases. Le curseur peut avancer, sinon on
+                // retenterait les memes indefiniment.
+                VIDAGE_MANQUANTS.fetch_add(manquants, Ordering::Relaxed);
+                bilan.manquants += manquants;
+                PROCHAIN_A_POSER.store(suivant, Ordering::Release);
+            }
+            // Le pilote n'a rien ecrit : le curseur NE BOUGE PAS, et ces
+            // enregistrements repasseront au tour suivant.
+            break;
+        }
+
+        VIDAGE_MANQUANTS.fetch_add(manquants, Ordering::Relaxed);
+        bilan.manquants += manquants;
+        PROCHAIN_A_POSER.store(
+            distribues[poses.min(combien) - 1].saturating_add(1),
+            Ordering::Release,
+        );
+        VIDAGE_LOTS.fetch_add(1, Ordering::Relaxed);
+        BOBINE.note_vidange(poses as u64, distribues[poses.min(combien) - 1]);
+        bilan.poses += poses as u64;
+    }
+
+    bilan.reste = PROCHAIN_A_POSER.load(Ordering::Acquire) <= BOBINE.dernier();
+    bilan
+}
+
+/// Ecrit l'en-tete du format persistant devant la charge utile.
+///
+/// L'en-tete est construit ICI, dans le tampon DMA du pilote, et non copie
+/// depuis un tampon intermediaire : le vidage final deplace jusqu'a huit
+/// mebioctets, et une copie de plus se paierait a chaque enregistrement.
+fn encadre(zone: &mut [u8], d: &bobine::Descripteur, charge: &[u8]) -> bool {
+    if zone.len() < ENTETE_OCTETS + charge.len() {
+        return false;
+    }
+    for octet in zone.iter_mut() {
+        *octet = 0;
+    }
+    zone[0..8].copy_from_slice(MAGIE);
+    zone[8..10].copy_from_slice(&VERSION_FORMAT.to_le_bytes());
+    zone[10..12].copy_from_slice(&d.genre.to_le_bytes());
+    zone[12..16].copy_from_slice(&(ENTETE_OCTETS as u32).to_le_bytes());
+    zone[16..24].copy_from_slice(&boot_id().to_le_bytes());
+    zone[24..32].copy_from_slice(&d.seq.to_le_bytes());
+    zone[32..40].copy_from_slice(&d.ts_ns.to_le_bytes());
+    zone[40..44].copy_from_slice(&(charge.len() as u32).to_le_bytes());
+    zone[44..48].copy_from_slice(&crc32(charge).to_le_bytes());
+    zone[48..56].copy_from_slice(&d.fin_trace.to_le_bytes());
+    zone[ENTETE_OCTETS..ENTETE_OCTETS + charge.len()].copy_from_slice(charge);
+    true
+}
+
+/// `BOUBBX01`, la signature du format persistant. Voir
+/// `tools/reference/extract-blackbox.py`, qui la relit.
+const MAGIE: &[u8; 8] = b"BOUBBX01";
+const VERSION_FORMAT: u16 = 1;
+const ENTETE_OCTETS: usize = 64;
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Depuis quand l'enregistreur n'a-t-il rien POSE, en nanosecondes ?
+///
+/// Rend zero tant qu'il n'a jamais rien pose -- il n'a alors rien a
+/// expliquer.
+///
+/// # Ce que ce chiffre mesure maintenant
+///
+/// Il mesurait la derniere ECRITURE REUSSIE SUR LA CLE. Il melait donc deux
+/// pannes : un enregistreur qui ne tourne plus, et un support qui ne repond
+/// plus. Les trois archives physiques ont ete lues avec cette ambiguite, et
+/// c'est elle qui a coute trois hypotheses fausses.
+///
+/// Il mesure desormais la derniere POSE EN MEMOIRE. Il ne dit plus rien du
+/// support -- et c'est le point : le support a ses propres compteurs, et la
+/// question « l'enregistreur tourne-t-il encore ? » a enfin une reponse qui
+/// ne depend que de l'enregistreur.
+pub fn silence_ns() -> u64 {
+    let etat = souffle();
+    if etat.dernier_ok_ns == 0 {
+        return 0;
+    }
+    etat.silence_ms.saturating_mul(1_000_000)
+}
+
+/// Filet de securite : produire depuis un autre fil quand le notre ne tourne
+/// plus.
 ///
 /// # Pourquoi un filet, et pas seulement une priorite
 ///
@@ -793,13 +1080,10 @@ pub fn silence_ns() -> u64 {
 /// elu. Promouvoir son fil en Interactive corrige la cause la plus probable ;
 /// ce filet couvre le cas ou elle ne serait pas la seule.
 ///
-/// L'appelant est le compositeur, qui tourne toujours. `poll()` est borne et
-/// ne bloque pas -- il abandonne si le pilote USB est pris --, donc cet appel
-/// ne peut pas figer une trame.
+/// L'appelant est le compositeur, qui tourne toujours. Depuis V3, `poll()` ne
+/// touche que la memoire : cet appel coute une copie et deux atomiques, et ne
+/// peut donc plus figer une trame meme si le support est perdu.
 pub fn filet_de_securite(seuil_ns: u64) -> bool {
-    if !crate::drivers::xhci_active::blackbox_storage_ready() {
-        return false;
-    }
     let silence = silence_ns();
     if silence < seuil_ns {
         return false;
@@ -809,20 +1093,25 @@ pub fn filet_de_securite(seuil_ns: u64) -> bool {
     true
 }
 
-/// Nombre de fois ou un autre fil a du ecrire a la place de l'enregistreur.
+/// Nombre de fois ou un autre fil a du produire a la place de l'enregistreur.
 pub fn filets() -> u64 {
     FILETS.load(Ordering::Relaxed)
 }
 
 static FILETS: AtomicU64 = AtomicU64::new(0);
 
-/// Fenetres de scrutation rendues parce que le pilote USB etait pris.
+/// Lots physiques poses, et enregistrements que le tambour avait deja
+/// ecrases quand le vidage est passe.
 ///
-/// Zero veut dire que l'enregistreur n'a jamais eu a se battre pour ecrire.
-/// Un chiffre qui monte dit que le systeme de fichiers occupe la cle -- et
-/// c'est ce chiffre, et non le silence, qui doit apparaitre dans le releve.
-pub fn sauts_de_fenetre() -> u64 {
-    SAUTS_DE_FENETRE.load(Ordering::Relaxed)
+/// Zero ecrase veut dire que la trace persistee est un recit COMPLET. Tout
+/// autre chiffre dit exactement combien il en manque -- ce qu'aucune archive
+/// des trois sessions physiques n'a jamais su dire.
+pub fn vidage_compteurs() -> (u64, u64, u64) {
+    (
+        VIDAGE_LOTS.load(Ordering::Relaxed),
+        VIDAGE_MANQUANTS.load(Ordering::Relaxed),
+        PROCHAIN_A_POSER.load(Ordering::Acquire),
+    )
 }
 
 /// Vide l'enregistreur de vol AVANT une extinction volontaire.
@@ -871,78 +1160,197 @@ impl Vidage {
 }
 
 pub fn vide_avant_extinction(raison: &str) -> Vidage {
+    // ARRETER LA PRODUCTION AVANT DE VIDER, ET DANS CET ORDRE.
+    //
+    // `poll()` continue d'ajouter des echantillons tant qu'il tourne. Vider
+    // en meme temps qu'on produit, c'est courir apres une queue qui avance :
+    // le vidage ne se terminerait qu'a la faveur d'un hasard d'ordonnancement.
     STOPPING.store(true, Ordering::Release);
-    if !crate::drivers::xhci_active::blackbox_storage_ready() {
-        crate::serial_println!("BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={}", raison);
-        return Vidage { support: false, draine: false, marque: false, synchronise: false };
-    }
     let maintenant = now_ns();
+    let echeance = maintenant.saturating_add(BUDGET_EXTINCTION_NS);
+
+    // Un dernier releve AVANT tout le reste : c'est celui qui porte l'etat au
+    // moment ou l'utilisateur a demande l'extinction, et c'est souvent le seul
+    // qu'on vienne chercher.
     sample(maintenant);
     memory_sample(maintenant);
-    // Snapshot a finite target: timer/presentation events keep arriving while
-    // saving. Never chase that moving tail indefinitely.
-    let flight_target = FLIGHT_WRITE.load(Ordering::Acquire);
-    let serial_target = crate::drivers::serial::trace_total_bytes();
-    let deadline = maintenant.saturating_add(5_000_000_000);
-    let mut drained = false;
-    for step in 0..256 {
-        if now_ns() >= deadline { break; }
-        flush_flight(maintenant);
-        flush_serial(maintenant, false);
-        crate::gui::power_screen::progress("Enregistrement des journaux", step);
-        if FLIGHT_FLUSHED.load(Ordering::Acquire) >= flight_target
-            && LAST_TRACE_SEQ.load(Ordering::Acquire) >= serial_target {
-            drained = true; break;
-        }
-        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
+
+    let support = crate::drivers::xhci_active::blackbox_storage_ready();
+    if !support {
+        let etat = BOBINE.etat();
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={} tambour_poses={} tambour_ecrases={}",
+            raison, etat.poses, etat.ecrases,
+        );
+        return Vidage {
+            support: false,
+            draine: false,
+            marque: false,
+            synchronise: false,
+        };
     }
-    let mut marque = Text::new();
-    let _ = write!(&mut marque,
-        "BOUCHAUD_TRIGKEY_BLACKBOX_V1 FIN raison={} boot_id={} ts_ns={} drained={}\n",
-        raison, boot_id(), maintenant, drained as u8);
-    let mut marked = false;
-    for _ in 0..16 {
-        if now_ns() >= deadline { break; }
-        if append(KIND_MARKER, marque.as_bytes(), maintenant, serial_target) { marked = true; break; }
-        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
-    }
-    let mut synced = false;
-    for step in 0..16 {
-        if now_ns() >= deadline { break; }
-        crate::gui::power_screen::progress("Synchronisation de la cle USB", step);
-        if crate::drivers::xhci_active::blackbox_force_sync() { synced = true; break; }
-        if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
-    }
-    let ok = drained && marked && synced;
-    // L'ETAT DE L'ENREGISTREUR PART AVEC LE VERDICT.
+
+    // ORDRE : LE TAMBOUR D'ABORD, LES ANNEAUX ENSUITE.
     //
-    // Les compteurs de la couche USB disent si la cle repond ; le souffle dit
-    // depuis quand l'enregistreur n'ecrit plus. Les deux ensemble distinguent
-    // « la cle vient de tomber » de « elle etait perdue depuis vingt minutes
-    // et personne ne l'a dit ».
+    // Le journal serie et les evenements de vol representent plus d'un
+    // mebioctet a convertir en enregistrements. Les convertir AVANT de vider
+    // le tambour ferait ecraser les plus anciens echantillons -- c'est-a-dire
+    // le debut de la session, precisement ce qu'aucune des trois archives
+    // physiques n'a jamais contenu. Convertis apres, ils passent par un
+    // tambour vide, et rien n'est chasse.
+    let mut bilan = vidange(echeance);
+    crate::gui::power_screen::progress("Enregistrement des journaux", 0);
+
+    // Les evenements de vol, par paquets, en vidant entre chaque paquet.
+    let cible_vol = FLIGHT_WRITE.load(Ordering::Acquire);
+    let mut etape = 1usize;
+    while now_ns() < echeance && FLIGHT_FLUSHED.load(Ordering::Acquire) < cible_vol {
+        let avant = FLIGHT_FLUSHED.load(Ordering::Acquire);
+        for _ in 0..ENREGISTREMENTS_PAR_LOT {
+            flush_flight(maintenant);
+            if FLIGHT_FLUSHED.load(Ordering::Acquire) >= cible_vol {
+                break;
+            }
+        }
+        let tour = vidange(echeance);
+        bilan.poses += tour.poses;
+        bilan.manquants += tour.manquants;
+        crate::gui::power_screen::progress("Enregistrement des journaux", etape);
+        etape += 1;
+        if FLIGHT_FLUSHED.load(Ordering::Acquire) == avant {
+            // Aucun progres : les evenements restants n'ont jamais ete
+            // publies. Insister ne les fera pas apparaitre.
+            break;
+        }
+    }
+
+    // Le journal serie, de la meme facon.
+    let cible_serie = crate::drivers::serial::trace_total_bytes();
+    while now_ns() < echeance && LAST_TRACE_SEQ.load(Ordering::Acquire) < cible_serie {
+        let avant = LAST_TRACE_SEQ.load(Ordering::Acquire);
+        flush_serial(maintenant, false);
+        let tour = vidange(echeance);
+        bilan.poses += tour.poses;
+        bilan.manquants += tour.manquants;
+        crate::gui::power_screen::progress("Enregistrement des journaux", etape);
+        etape += 1;
+        if LAST_TRACE_SEQ.load(Ordering::Acquire) == avant {
+            break;
+        }
+    }
+
+    let draine = FLIGHT_FLUSHED.load(Ordering::Acquire) >= cible_vol
+        && LAST_TRACE_SEQ.load(Ordering::Acquire) >= cible_serie
+        && !vidange(echeance).reste;
+
+    // LA MARQUE DE FIN PART EN DERNIER, ET ELLE PORTE LE BILAN.
+    //
+    // Sans elle, un silence est indistinguable d'une coupure. Avec le bilan
+    // du tambour dedans, elle dit aussi COMBIEN il manque -- ce qui distingue
+    // une archive complete d'une archive amputee, sans avoir a recouper les
+    // numeros a la relecture.
+    let etat = BOBINE.etat();
+    let mut marque = Text::new();
+    let _ = write!(
+        &mut marque,
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V3 FIN raison={} boot_id={} ts_ns={} draine={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} tambour_refuses={} vidage_poses={} vidage_manquants={} vidage_lots={}\n",
+        raison, boot_id(), maintenant, draine as u8,
+        etat.reserves, etat.poses, etat.ecrases, etat.perdus, etat.refuses,
+        bilan.poses, bilan.manquants, VIDAGE_LOTS.load(Ordering::Relaxed),
+    );
+    let mut marked = false;
+    if append(KIND_MARKER, marque.as_bytes(), maintenant, cible_serie) {
+        // L'echeance de la marque est SEPAREE, et plus genereuse : une
+        // archive sans marque de fin ne se distingue pas d'une coupure
+        // brutale, et c'est la distinction qu'on paie le plus cher a perdre.
+        let echeance_marque = now_ns().saturating_add(BUDGET_MARQUE_NS);
+        marked = vidange(echeance_marque).poses != 0 || !vidange(echeance_marque).reste;
+    }
+
+    let mut synced = false;
+    for pas in 0..16 {
+        if now_ns() >= echeance.saturating_add(BUDGET_MARQUE_NS) {
+            break;
+        }
+        crate::gui::power_screen::progress("Synchronisation de la cle USB", pas);
+        if crate::drivers::xhci_active::blackbox_force_sync() {
+            synced = true;
+            break;
+        }
+        if crate::kernel::task::try_current().is_some() {
+            crate::kernel::task::sleep_ticks(1);
+        }
+    }
+
+    let ok = draine && marked && synced;
     let souffle = souffle();
+    let verrou = crate::drivers::xhci_active::etat_du_verrou();
+    let bot = crate::drivers::xhci_active::releve_bot();
     crate::serial_println!(
-        "BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={} poses={} echecs={} serie={} pire_serie={} dernier_ok_ns={} silence_ms={} perdu_genre={} perdu_seq={}",
-        raison, drained as u8, marked as u8, synced as u8, ok as u8,
+        "BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={} poses={} echecs={} serie={} pire_serie={} dernier_ok_ns={} silence_ms={} tambour_reserves={} tambour_ecrases={} tambour_perdus={} vidage_poses={} vidage_manquants={} verrou={} verrou_tenue_max_ns={} bot={} bot_reprises={}",
+        raison, draine as u8, marked as u8, synced as u8, ok as u8,
         souffle.poses, souffle.echecs, souffle.serie, souffle.pire_serie,
         souffle.dernier_ok_ns, souffle.silence_ms,
-        souffle.dernier_genre, souffle.derniere_seq,
+        etat.reserves, etat.ecrases, etat.perdus, bilan.poses, bilan.manquants,
+        verrou.proprietaire.nom(), verrou.tenue_max_ns,
+        bot.etat.nom(), bot.reprises,
     );
-    Vidage { support: true, draine: drained, marque: marked, synchronise: synced }
+    Vidage {
+        support: true,
+        draine,
+        marque: marked,
+        synchronise: synced,
+    }
 }
 
+/// Budget total du vidage final, hors marque de fin.
+///
+/// Douze secondes. C'est long, et c'est assume : un vidage final porte
+/// jusqu'a deux mille enregistrements, et cinq secondes n'y suffisaient pas
+/// -- le banc s'arretait a mille cent trente-six sur mille quatre cent
+/// cinquante-cinq, sans marque de fin, c'est-a-dire avec une archive qu'on ne
+/// peut pas distinguer d'une coupure.
+///
+/// L'ecran d'extinction affiche sa progression a chaque lot : ce n'est pas un
+/// figement, et cela se voit.
+const BUDGET_EXTINCTION_NS: u64 = 12_000_000_000;
+/// Budget SUPPLEMENTAIRE reserve a la marque de fin et a la synchronisation.
+const BUDGET_MARQUE_NS: u64 = 1_500_000_000;
+
+/// Ce qu'on peut encore sauver quand le noyau vient de tomber.
+///
+/// # Le budget est BORNE, et c'est la regle
+///
+/// Un chemin fatal qui attend sans limite ne rend pas la trace : il remplace
+/// une panne diagnosticable par une machine figee sur un ecran noir. La pose
+/// en memoire, elle, ne peut pas echouer -- elle a lieu d'abord, et c'est
+/// elle qui compte. Le vidage vers la cle est un BONUS, tente au mieux, et
+/// abandonne des que le budget est epuise.
 pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) {
+    let now = now_ns();
+    let mut out = Text::new();
+    let etat = BOBINE.etat();
+    let _ = write!(
+        &mut out,
+        "FATAL cpu={} vector={} rip={:#x} rsp={:#x} code={:#x} ts_ns={} tambour_reserves={} tambour_ecrases={} tambour_perdus={}\n",
+        cpu, vector, rip, rsp, code, now, etat.reserves, etat.ecrases, etat.perdus,
+    );
+    // EN MEMOIRE D'ABORD, TOUJOURS.
+    let _ = append(KIND_FATAL, out.as_bytes(), now, crate::drivers::serial::trace_total_bytes());
+    flush_serial(now, true);
+
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         return;
     }
-    let now = now_ns();
-    let mut out = Text::new();
-    let _ = write!(
-        &mut out,
-        "FATAL cpu={} vector={} rip={:#x} rsp={:#x} code={:#x} ts_ns={}\n",
-        cpu, vector, rip, rsp, code, now,
-    );
-    let _ = append(KIND_FATAL, out.as_bytes(), now, crate::drivers::serial::trace_total_bytes());
-    flush_serial(now, true);
+    let echeance = now.saturating_add(BUDGET_FATAL_NS);
+    while now_ns() < echeance {
+        if !vidange(echeance).reste {
+            break;
+        }
+    }
     crate::drivers::xhci_active::blackbox_force_sync();
 }
+
+/// Budget du vidage d'urgence. Deux secondes : assez pour poser quelques
+/// centaines d'enregistrements, trop peu pour ressembler a un figement.
+const BUDGET_FATAL_NS: u64 = 2_000_000_000;

@@ -28,6 +28,8 @@ pub mod dmesg;
 pub mod blackbox; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
 #[path = "debug/souffle.rs"]
 pub mod souffle; // etat de survie de l'enregistreur
+#[path = "debug/bobine.rs"]
+pub mod bobine; // tambour RAM de l'enregistreur, pur
 #[path = "process/elf.rs"]
 pub mod elf;
 #[path = "process/loader/mod.rs"]
