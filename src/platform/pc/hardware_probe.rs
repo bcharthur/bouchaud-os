@@ -37,17 +37,62 @@ fn driver_binding(dev: &crate::arch::x86_64::pci::PciDevice) -> &'static str {
     }
 }
 
-fn time_progress_probe() -> (u64, u64, bool) {
+// BOUCHAUD_SONDE_TEMPS_PAR_ACCORD_V1
+//
+// LE VERDICT ETAIT UN « OU », ET UN OU EXCUSE UNE HORLOGE MORTE
+//
+// Cette sonde rendait `dt != 0 || dm != 0` : il suffisait qu'UNE des deux
+// horloges bouge pour annoncer `progress=1`. Une horloge arretee passait, et
+// deux horloges en desaccord passaient aussi.
+//
+// Releve du 16 septembre 2026, meme image, deux machines :
+//
+//   BOUCHAUD_HWPROBE_TIMER progress=1 ticks_delta=90 ms_delta=90   (saine)
+//   BOUCHAUD_HWPROBE_TIMER progress=1 ticks_delta=23 ms_delta=14   (fausse)
+//
+// Soixante-quatre pour cent d'ecart, annonces verts. La machine fautive
+// portait aussi `tsc_mhz=43989` et `lapic_hz=888654262`, contre 2096 et
+// 62433112 sur l'autre : sa base de temps etait fausse d'un ordre de
+// grandeur, et son horloge monotone avancait dix fois trop lentement.
+//
+// Ce n'est pas cosmetique. `monotonic_ms` porte
+// `BOUCHAUD_BOOT_POINT ... t_ms= delta_ms=`, le releve periodique et les
+// echeances de l'ordonnanceur. Une base fausse rend faux tout ce qui s'y
+// adosse -- et la seule ligne censee l'annoncer disait vert.
+//
+// La decision elle-meme vit dans `kernel::accord_horloges`, qui est pur et
+// verifie sur l'hote.
+fn time_progress_probe() -> (u64, u64, crate::kernel::accord_horloges::Accord) {
+    use crate::kernel::accord_horloges::{accord, Accord, FENETRE_MINIMALE};
+
     let before_ticks = crate::kernel::timer::ticks();
     let before_ms = crate::kernel::timer::monotonic_ms();
-    for _ in 0..500_000usize {
-        core::hint::spin_loop();
+
+    // UNE FENETRE ASSEZ LONGUE POUR CONCLURE, ET BORNEE QUAND MEME.
+    //
+    // Cinq cent mille tours de boucle vide donnaient quatre-vingt-dix
+    // millisecondes sur une machine et quatorze sur une autre. Sous huit tics,
+    // un ecart d'une unite pese plus de douze pour cent et le verdict devient
+    // « fenetre trop courte » -- honnete, mais inutile.
+    //
+    // On tourne donc jusqu'a avoir de quoi juger, avec un plafond : sur une
+    // machine dont IRQ0 est MORTE, la condition d'arret n'arrive jamais, et
+    // c'est precisement la panne qu'on cherche a nommer. Le plafond rend la
+    // main, et le verdict dit « une seule avance ».
+    let mut tours = 0usize;
+    loop {
+        for _ in 0..500_000usize {
+            core::hint::spin_loop();
+        }
+        tours += 1;
+        let dt = crate::kernel::timer::ticks().wrapping_sub(before_ticks);
+        let dm = crate::kernel::timer::monotonic_ms().wrapping_sub(before_ms);
+        if (dt >= FENETRE_MINIMALE && dm >= FENETRE_MINIMALE) || tours >= 16 {
+            let verdict = accord(dt, dm);
+            debug_assert!(verdict != Accord::FenetreTropCourte || tours >= 16);
+            return (dt, dm, verdict);
+        }
     }
-    let after_ticks = crate::kernel::timer::ticks();
-    let after_ms = crate::kernel::timer::monotonic_ms();
-    let dt = after_ticks.wrapping_sub(before_ticks);
-    let dm = after_ms.wrapping_sub(before_ms);
-    (dt, dm, dt != 0 || dm != 0)
 }
 
 pub fn run(boot: &'static BootInfo, framebuffer: FramebufferInfo) {
@@ -60,7 +105,8 @@ pub fn run(boot: &'static BootInfo, framebuffer: FramebufferInfo) {
     }
     let xhci = crate::drivers::xhci_probe::probe();
     let xhci_active = crate::drivers::xhci_active::bring_up();
-    let (tick_delta, ms_delta, time_progress) = time_progress_probe();
+    let (tick_delta, ms_delta, accord) = time_progress_probe();
+    let time_progress = accord.fiable();
     crate::platform::pc::hardware_facts::install_base(
         boot, framebuffer, metrics.logical_cpus_reported, time_progress, acpi.hpet.is_some(),
     );
@@ -240,9 +286,29 @@ Writing them to the boot USB requires xHCI + USB Mass Storage.\n";
         crate::serial_println!("BOUCHAUD_HWPROBE_XHCI absent");
     }
     crate::serial_println!(
-        "BOUCHAUD_HWPROBE_TIMER progress={} ticks_delta={} ms_delta={}",
-        time_progress as u8, tick_delta, ms_delta
+        "BOUCHAUD_HWPROBE_TIMER progress={} accord={} ticks_delta={} ms_delta={} tolerance_pct={}",
+        time_progress as u8,
+        accord.nom(),
+        tick_delta,
+        ms_delta,
+        crate::kernel::accord_horloges::TOLERANCE_POURCENT,
     );
+    // UNE BASE DE TEMPS FAUSSE NE SE LIT PAS ENTRE LES LIGNES.
+    //
+    // Tout ce qui se mesure ensuite -- chronologie d'amorcage, releve
+    // periodique, echeances -- s'adosse a cette base. Si elle est fausse, il
+    // faut que la trace le CRIE, pas qu'elle laisse deduire l'ordre de
+    // grandeur en comparant deux machines.
+    if !time_progress {
+        crate::serial_println!(
+            "BOUCHAUD_HORLOGE_INCOHERENTE verdict={} ticks_delta={} ms_delta={} \
+tsc_mhz={} -- t_ms= et delta_ms= ne sont PAS fiables sur cette machine",
+            accord.nom(),
+            tick_delta,
+            ms_delta,
+            metrics.tsc_mhz.unwrap_or(0),
+        );
+    }
     crate::serial_println!(
         "BOUCHAUD_DIAGNOSTICS_RAMFS_READY ok={} path=/diagnostics",
         ok as u8

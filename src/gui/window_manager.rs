@@ -1023,7 +1023,26 @@ fn boucle() {
                     w.min = true;
                 }
             }
-            crate::platform::pc::ecran_faute::point("navigateur-lance");
+            // LE DERNIER POINT DE LA CHRONOLOGIE, ET IL DIT LE RESULTAT.
+            //
+            // `navigateur-demande` dit qu'on a demande ; celui-ci dit ce qu'on
+            // a obtenu. Une fenetre cliente presente veut dire que le
+            // navigateur a demarre ; son absence veut dire qu'il a echoue --
+            // binaire manquant, par exemple -- et la chronologie doit le
+            // porter plutot que d'annoncer un lancement qui n'a pas eu lieu.
+            //
+            // Dans les deux cas l'amorcage est FINI : ce qui suit -- un clic
+            // sur « Demarrer Ladybird », un relancement -- appartient a la vie
+            // du systeme. Sans cette fermeture, chaque clic reposait un point
+            // d'amorcage, ecrasait le `delta_ms` du suivant et faisait accuser
+            // « navigateur-lance » par l'ecran de faute des heures plus tard.
+            let demarre = wins.iter().any(window::est_client);
+            crate::platform::pc::ecran_faute::point(if demarre {
+                "navigateur-lance"
+            } else {
+                "navigateur-echec"
+            });
+            crate::platform::pc::ecran_faute::amorcage_clos();
             sale = true;
         }
 

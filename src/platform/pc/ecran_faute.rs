@@ -95,7 +95,46 @@ fn memorise_point(nom: &str) {
 /// Instant du point de controle precedent, en millisecondes depuis l'amorcage.
 static POINT_PRECEDENT_MS: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_CHRONOLOGIE_CLOSE_V1
+//
+// UN POINT D'AMORCAGE QUI REFIRE N'EST PAS UN POINT D'AMORCAGE
+//
+// Releve du 16 septembre 2026, QEMU Stage 2. L'utilisateur clique plusieurs
+// fois sur « Demarrer Ladybird » dans la fenetre Services :
+//
+//   BOUCHAUD_BOOT_POINT navigateur-lance t_ms=5972 delta_ms=4683
+//   BOUCHAUD_BOOT_POINT navigateur-lance t_ms=6092 delta_ms=120
+//   BOUCHAUD_BOOT_POINT navigateur-lance t_ms=6105 delta_ms=13
+//   ...
+//
+// Deux degats, et aucun n'est cosmetique :
+//
+//   * `POINT_PRECEDENT_MS` est ecrase a chaque fois, donc le `delta_ms` du
+//     point SUIVANT ne mesure plus une etape d'amorcage mais l'intervalle
+//     entre deux clics ;
+//   * `memorise_point` ecrase le dernier point franchi, celui que l'ecran de
+//     faute affiche. Une faute noyau deux heures plus tard aurait accuse
+//     « navigateur-lance » d'etre l'etape ou le systeme s'est arrete.
+//
+// L'amorcage a une fin. Elle est posee explicitement par
+// [`amorcage_clos`], et apres elle `point` ne prend plus rien : ce qui suit
+// appartient a la vie du systeme, pas a son demarrage.
+static AMORCAGE_CLOS: AtomicBool = AtomicBool::new(false);
+
+/// Ferme la chronologie d'amorcage. Tout `point` ulterieur est refuse.
+pub fn amorcage_clos() {
+    AMORCAGE_CLOS.store(true, Ordering::Release);
+}
+
+/// La chronologie d'amorcage est-elle close ?
+pub fn amorcage_est_clos() -> bool {
+    AMORCAGE_CLOS.load(Ordering::Acquire)
+}
+
 pub fn point(nom: &str) {
+    if AMORCAGE_CLOS.load(Ordering::Acquire) {
+        return;
+    }
     memorise_point(nom);
     // LE TEMPS DE CHAQUE ETAPE, PAS SEULEMENT SON NOM.
     //

@@ -80,6 +80,8 @@ pub mod syscall;
 pub mod sysroot;
 #[path = "process/thread.rs"]
 pub mod task;
+#[path = "time/accord.rs"]
+pub mod accord_horloges;
 #[path = "time/timer.rs"]
 pub mod timer;
 #[path = "memory/vma.rs"]
