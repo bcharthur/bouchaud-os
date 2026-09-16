@@ -1023,7 +1023,14 @@ fn boucle() {
         if !services_initialises && derniere_trame != 0 {
             let decision = crate::gui::demarrage_navigateur::decide(
                 maintenant.saturating_sub(debut_services),
-                crate::net::connecte(),
+                // Un bail peut encore arriver tant qu'il y a une carte
+                // utilisable. Le lien qui n'est pas ENCORE monte n'est pas une
+                // absence de cable : l'autonegociation cuivre dure trois
+                // secondes.
+                !matches!(
+                    crate::net::etat_demarrage(),
+                    crate::net::Demarrage::SansCarte | crate::net::Demarrage::CarteRefusee,
+                ),
                 matches!(crate::net::etat_demarrage(), crate::net::Demarrage::Pret),
                 crate::gui::demarrage_navigateur::REPOS_BUREAU_MS,
                 crate::gui::demarrage_navigateur::ATTENTE_MAXIMALE_MS,

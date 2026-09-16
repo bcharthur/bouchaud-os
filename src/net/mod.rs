@@ -67,9 +67,36 @@ pub fn gateway() -> Ipv4Addr { unsafe { GW_IP } }
 /// Serveur DNS configure.
 pub fn dns_server() -> Ipv4Addr { unsafe { DNS_IP } }
 
+// BOUCHAUD_BAIL_REELLEMENT_OBTENU_V1
+//
+// `dns_server()` rend `DNS_IP`, qui vaut la CONSTANTE COMPILEE tant qu'aucun
+// bail n'est arrive. Rien ne distinguait donc « le DHCP a rendu 10.0.2.3 » de
+// « aucun DHCP n'a repondu, voici la valeur d'usine » -- ce sont les memes
+// octets.
+//
+// Le releve du 16 septembre 18:31 l'a montre en une ligne :
+//
+//     BOUCHAUD_NAVIGATEUR_RESOLVEUR adresse=10.0.2.3 source=bail-dhcp
+//                                   bail=10.0.2.3 passerelle=10.0.2.2
+//
+// `source=bail-dhcp` sur une machine physique qui n'avait recu aucun bail.
+// Le choix bail -> passerelle -> compile etait juste ; l'entree qu'on lui
+// donnait ne l'etait pas, et il ne pouvait donc jamais descendre d'un cran.
+static BAIL_OBTENU: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Un bail DHCP a-t-il REELLEMENT ete obtenu depuis l'amorcage ?
+///
+/// C'est la seule question qui distingue une configuration de la valeur
+/// d'usine, puisque les deux peuvent porter les memes octets.
+pub fn bail_obtenu() -> bool {
+    BAIL_OBTENU.load(core::sync::atomic::Ordering::Acquire)
+}
+
 /// Applique une configuration reseau (ex. obtenue par DHCP). Invalide le cache ARP.
 pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
     unsafe { OUR_IP = ip; GW_IP = gw; DNS_IP = dns; GW_MAC = None; }
+    BAIL_OBTENU.store(true, core::sync::atomic::Ordering::Release);
     // Une adresse materielle apprise avant la configuration ne vaut plus rien,
     // et une entree NEGATIVE posee pendant qu'on etait mal configure ferait
     // echouer les deux premieres secondes d'un reseau desormais correct.

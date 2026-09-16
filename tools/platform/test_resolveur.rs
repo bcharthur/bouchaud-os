@@ -97,3 +97,24 @@ fn les_noms_de_source_sont_ceux_du_journal() {
     assert_eq!(Source::Compile.nom(), "compile");
     assert_eq!(Source::Aucun.nom(), "aucun");
 }
+
+#[test]
+fn sans_bail_on_ne_presente_pas_la_valeur_dusine_comme_un_bail() {
+    // LE DEFAUT DU 16 SEPTEMBRE 18:31 :
+    //
+    //     BOUCHAUD_NAVIGATEUR_RESOLVEUR adresse=10.0.2.3 source=bail-dhcp
+    //                                   bail=10.0.2.3 passerelle=10.0.2.2
+    //
+    // `source=bail-dhcp` sur une machine physique qui n'avait recu AUCUN
+    // bail. La regle de choix etait juste ; l'entree ne l'etait pas :
+    // `dns_server()` rend la constante compilee tant qu'aucun bail n'arrive,
+    // donc « le bail » valait toujours quelque chose et le repli ne pouvait
+    // jamais se declencher.
+    //
+    // L'appelant doit passer zero quand aucun bail n'a ete obtenu. La source
+    // dit alors la verite, et c'est elle qui aurait nomme le defaut.
+    let (a, s) = choisis(RIEN, RIEN, COMPILE);
+    assert_eq!(a, COMPILE);
+    assert_eq!(s, Source::Compile, "la source doit AVOUER le repli");
+    assert_ne!(s, Source::Bail);
+}

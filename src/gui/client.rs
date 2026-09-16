@@ -105,9 +105,16 @@ impl Client {
         };
 
         let argv = alloc::vec![chemin.to_string()];
+        // NE PRESENTER COMME BAIL QUE CE QUI EST UN BAIL.
+        //
+        // `dns_server()` et `gateway()` rendent les constantes compilees tant
+        // qu'aucun bail n'est arrive. Les passer telles quelles faisait choisir
+        // `source=bail-dhcp` sur une machine qui n'avait recu aucun bail, et
+        // le repli sur la passerelle ne pouvait jamais se declencher.
+        let bail = crate::net::bail_obtenu();
         let (resolveur_choisi, resolveur_source) = crate::net::resolveur::choisis(
-            crate::net::dns_server(),
-            crate::net::gateway(),
+            if bail { crate::net::dns_server() } else { [0, 0, 0, 0] },
+            if bail { crate::net::gateway() } else { [0, 0, 0, 0] },
             crate::net::DNS_COMPILE,
         );
         let base = crate::kernel::exec::shell_environment();
@@ -214,6 +221,13 @@ impl Client {
             resolveur_source.nom(),
             crate::net::ipv4::format_addr(&crate::net::dns_server()),
             crate::net::ipv4::format_addr(&crate::net::gateway()),
+        );
+        // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
+        // sont identiques avec et sans DHCP.
+        crate::serial_println!(
+            "BOUCHAUD_NAVIGATEUR_BAIL obtenu={} etat={}",
+            bail as u8,
+            crate::net::nom_verdict(),
         );
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le

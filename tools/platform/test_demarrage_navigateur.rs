@@ -9,8 +9,8 @@ mod demarrage;
 
 use demarrage::{decide, Decision, ATTENTE_MAXIMALE_MS, REPOS_BUREAU_MS};
 
-fn d(ms: u64, lien: bool, pret: bool) -> Decision {
-    decide(ms, lien, pret, REPOS_BUREAU_MS, ATTENTE_MAXIMALE_MS)
+fn d(ms: u64, bail_possible: bool, pret: bool) -> Decision {
+    decide(ms, bail_possible, pret, REPOS_BUREAU_MS, ATTENTE_MAXIMALE_MS)
 }
 
 #[test]
@@ -93,4 +93,29 @@ fn les_noms_de_decision_sont_ceux_du_journal() {
     assert_eq!(Decision::LancerReseauPret.nom(), "reseau-pret");
     assert_eq!(Decision::LancerSansReseau.nom(), "sans-reseau");
     assert_eq!(Decision::LancerDelaiEcoule.nom(), "delai-ecoule");
+}
+
+#[test]
+fn un_lien_qui_monte_encore_n_est_pas_une_absence_de_carte() {
+    // LE DEFAUT DU 16 SEPTEMBRE 18:31, EN UNE LIGNE DE JOURNAL :
+    //
+    //     BOUCHAUD_NAVIGATEUR_DEPART decision=sans-reseau t_ms=1322 lien=0
+    //
+    // « Sans reseau » sur une machine dont le cable etait branche et dont le
+    // lien est monte a 1 Gbit/s quelques secondes plus tard. Le parametre
+    // valait `net::connecte()`, faux pendant les ~3 s d'autonegociation
+    // cuivre -- et le lire comme « pas de cable » supprimait exactement
+    // l'attente qu'on venait d'ajouter.
+    //
+    // Ce que le parametre signifie maintenant : un bail peut-il ENCORE
+    // arriver. Carte presente, lien pas encore monte => oui.
+    assert_eq!(d(1_322, true, false), Decision::AttendreLeResolveur);
+    assert!(!d(1_322, true, false).lance());
+}
+
+#[test]
+fn sans_carte_du_tout_on_ne_perd_pas_huit_secondes() {
+    // Le seul cas ou plus aucun bail ne peut arriver.
+    assert_eq!(d(600, false, false), Decision::LancerSansReseau);
+    assert_eq!(d(60_000, false, false), Decision::LancerSansReseau);
 }

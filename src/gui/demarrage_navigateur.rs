@@ -38,7 +38,7 @@ pub enum Decision {
     AttendreLeResolveur = 1,
     /// Resolveur configure : c'est le bon moment.
     LancerReseauPret = 2,
-    /// Aucun lien : attendre ne rapporterait rien.
+    /// Aucune carte : attendre ne rapporterait rien.
     LancerSansReseau = 3,
     /// Le lien est la mais le bail ne vient pas. On n'attend pas plus.
     LancerDelaiEcoule = 4,
@@ -74,7 +74,23 @@ pub const ATTENTE_MAXIMALE_MS: u64 = 8_000;
 
 pub fn decide(
     depuis_premiere_trame_ms: u64,
-    lien: bool,
+    // BOUCHAUD_LIEN_BAS_N_EST_PAS_SANS_CABLE_V1
+    //
+    // Ce parametre etait `lien: bool`, lu depuis `net::connecte()`. Le releve
+    // du 16 septembre 18:31 montre ce que cela donne :
+    //
+    //     BOUCHAUD_NAVIGATEUR_DEPART decision=sans-reseau t_ms=1322 lien=0
+    //
+    // « Sans reseau » sur une machine dont le cable etait branche et dont le
+    // lien est monte quelques secondes plus tard a 1 Gbit/s. L'autonegociation
+    // cuivre prend environ trois secondes : pendant ce temps `connecte()` est
+    // faux, et le lire comme « pas de cable » supprimait exactement l'attente
+    // qu'on venait d'ajouter.
+    //
+    // Ce qu'il faut savoir n'est pas « le lien est-il monte MAINTENANT », mais
+    // « un bail peut-il encore arriver ». Seule l'absence de carte -- ou une
+    // carte refusee -- repond non.
+    bail_possible: bool,
     resolveur_pret: bool,
     repos_ms: u64,
     attente_maximale_ms: u64,
@@ -85,9 +101,9 @@ pub fn decide(
     if resolveur_pret {
         return Decision::LancerReseauPret;
     }
-    // L'ORDRE COMPTE. Tester le delai avant le lien ferait attendre huit
-    // secondes une machine sans cable, pour un bail qui ne peut pas arriver.
-    if !lien {
+    // L'ORDRE COMPTE. Tester le delai avant la carte ferait attendre huit
+    // secondes une machine sans carte, pour un bail qui ne peut pas arriver.
+    if !bail_possible {
         return Decision::LancerSansReseau;
     }
     if depuis_premiere_trame_ms >= attente_maximale_ms {

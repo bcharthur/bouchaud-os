@@ -144,7 +144,9 @@ def main():
                 "demarrage_navigateur.rs : l'attente n'est plus bornee. Un "
                 "reseau sans serveur DHCP retiendrait le bureau indefiniment."
             )
-        i_lien = code.find("if !lien")
+        # Le parametre s'appelle desormais `bail_possible` : « le lien
+        # est-il monte » etait la mauvaise question, et le mauvais nom.
+        i_lien = code.find("if !bail_possible")
         # ANCRER SUR LA COMPARAISON, PAS SUR LE NOM. `attente_maximale_ms`
         # apparait d'abord dans la LISTE DE PARAMETRES, donc toujours avant le
         # test du lien : la premiere version de cette garde se declenchait sur
@@ -152,23 +154,50 @@ def main():
         i_delai = code.find(">= attente_maximale_ms")
         if i_lien == -1:
             fautes.append(
-                "demarrage_navigateur.rs : le lien n'est plus consulte ; une "
-                "machine sans cable attendrait un bail qui ne peut pas venir."
+                "demarrage_navigateur.rs : la possibilite d'un bail n'est "
+                "plus consultee ; une machine sans carte attendrait un bail "
+                "qui ne peut pas venir."
             )
         elif i_delai != -1 and i_lien > i_delai:
             fautes.append(
-                "demarrage_navigateur.rs : le delai est teste AVANT le lien. "
-                "Une machine hors reseau attendrait le delai complet, et le "
-                "journal dirait « delai ecoule » la ou il n'y avait pas de cable."
+                "demarrage_navigateur.rs : le delai est teste AVANT la "
+                "possibilite d'un bail. Une machine sans carte attendrait le "
+                "delai complet, et le journal dirait « delai ecoule » la ou il "
+                "n'y avait pas de carte du tout."
             )
 
     # 3 et 5. Le cablage.
-    if wm is not None and "demarrage_navigateur::decide(" not in code_seul(wm):
-        fautes.append(
-            "window_manager.rs : le lancement ne consulte plus l'etat du "
-            "reseau. Il repartirait sur le seul critere du temps, qui est "
-            "exactement ce qui a produit le defaut."
-        )
+    if wm is not None:
+        code = code_seul(wm)
+        if "demarrage_navigateur::decide(" not in code:
+            fautes.append(
+                "window_manager.rs : le lancement ne consulte plus l'etat du "
+                "reseau. Il repartirait sur le seul critere du temps, qui est "
+                "exactement ce qui a produit le defaut."
+            )
+        else:
+            # BOUCHAUD_LIEN_BAS_N_EST_PAS_SANS_CABLE_V1
+            #
+            # `net::connecte()` est faux pendant les ~3 s d'autonegociation
+            # cuivre. Le lire comme « pas de cable » supprime exactement
+            # l'attente qu'on vient d'ajouter : le journal du 16 septembre
+            # 18:31 dit `decision=sans-reseau lien=0` sur une machine dont le
+            # lien monte a 1 Gbit/s trois secondes plus tard.
+            i = code.index("demarrage_navigateur::decide(")
+            appel = code[i:i + 800]
+            if "connecte()" in appel:
+                fautes.append(
+                    "window_manager.rs : la decision de lancement lit de "
+                    "nouveau `net::connecte()`. Ce drapeau est faux pendant "
+                    "l'autonegociation cuivre : la question n'est pas « le "
+                    "lien est-il monte » mais « un bail peut-il encore "
+                    "arriver », a quoi seule l'absence de carte repond non."
+                )
+            if "SansCarte" not in appel:
+                fautes.append(
+                    "window_manager.rs : la decision ne distingue plus "
+                    "l'absence de CARTE d'un lien qui monte encore."
+                )
 
     if client is not None:
         code = code_seul(client)
@@ -176,6 +205,22 @@ def main():
             fautes.append(
                 "client.rs : le resolveur n'est plus choisi ; `dns_server()` "
                 "seul rend la valeur compilee quand aucun bail n'est arrive."
+            )
+        # BOUCHAUD_ENTREE_DU_CHOIX_V1
+        #
+        # La regle de choix etait juste, l'ENTREE ne l'etait pas :
+        # `dns_server()` rend la constante compilee tant qu'aucun bail n'est
+        # arrive, donc « le bail » valait toujours quelque chose et le repli
+        # sur la passerelle ne pouvait jamais se declencher. Le journal du
+        # 16 septembre 18:31 disait `source=bail-dhcp bail=10.0.2.3` sur une
+        # machine qui n'avait recu aucun bail.
+        if "bail_obtenu()" not in code:
+            fautes.append(
+                "client.rs : le resolveur n'est plus conditionne a un bail "
+                "REELLEMENT obtenu. `dns_server()` rend la constante compilee "
+                "en l'absence de bail : presentee comme « le bail », elle fait "
+                "choisir source=bail-dhcp sur une machine qui n'a rien recu, "
+                "et le repli sur la passerelle devient inatteignable."
             )
         if "BOUCHAUD_NAVIGATEUR_RESOLVEUR" not in code:
             fautes.append(
