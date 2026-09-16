@@ -133,3 +133,21 @@ fn le_silence_ne_recule_pas_sur_une_horloge_qui_saute() {
     // `saturating_sub` rend zero plutot qu'un nombre absurde.
     assert_eq!(s.etat(4_000 * MS).silence_ms, 0);
 }
+
+#[test]
+fn un_echec_a_l_instant_zero_est_date_quand_meme() {
+    // ZERO EST UN HORODATAGE LEGITIME. S'en servir comme marqueur d'absence
+    // rendait indatable une panne survenue a `monotonic_ns() == 0` : le
+    // `compare_exchange(0, 0)` reussissait sans rien changer. Le defaut a ete
+    // trouve dans `equite_pilote`, ou il faisait echouer un test ; il etait
+    // ici aussi, latent, exactement sous la meme forme.
+    let s = Souffle::neuf();
+    s.echec(0, 3, 1);
+    let e = s.etat(10 * MS);
+    assert_eq!(e.serie, 1, "l'echec est compte");
+    assert_eq!(e.echecs, 1);
+    // Une deuxieme panne ne doit pas REDATER la serie : c'est le premier qui
+    // compte, meme quand ce premier vaut zero.
+    s.echec(5 * MS, 3, 2);
+    assert_eq!(s.etat(10 * MS).premier_echec_ns, 0);
+}

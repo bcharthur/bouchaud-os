@@ -653,8 +653,16 @@ pub fn blackbox_append_record(
     }
     if RUNTIME_BUSY.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         BLACKBOX_BUSY_SKIPS.fetch_add(1, Ordering::Relaxed);
+        // RENONCER UNE FOIS EST NORMAL, RENONCER TOUJOURS NE L'EST PAS.
+        //
+        // C'est ici que l'archive du 16 septembre s'est arretee : le systeme
+        // de fichiers lisait le navigateur sur la MEME cle, tenait le verrou
+        // en continu, et ce `return false` s'executait sans fin. Passe un
+        // seuil, on reclame le passage ; `avec_le_pilote_usb` le cede.
+        super::xhci_active::enregistreur_a_saute(crate::kernel::timer::monotonic_ns());
         return false;
     }
+    super::xhci_active::enregistreur_a_reussi();
 
     let mut ok = false;
     unsafe {

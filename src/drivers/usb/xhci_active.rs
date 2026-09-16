@@ -243,6 +243,52 @@ static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
 static DERNIER_CODE_CONTROLE: AtomicUsize = AtomicUsize::new(0);
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_BUSY: AtomicBool = AtomicBool::new(false);
+
+// BOUCHAUD_EQUITE_PILOTE_USB_V1
+//
+// La scrutation HID et l'enregistreur de vol tentent une prise INSTANTANEE de
+// `RUNTIME_BUSY` et renoncent s'il est pris. Le systeme de fichiers, lui,
+// attend jusqu'a cinquante millions de tours. Quand le navigateur lit ses
+// quatre cents mebioctets sur la cle d'amorcage, il tient donc le verrou
+// presque en continu -- et les deux autres renoncent indefiniment.
+//
+// C'est la cause COMMUNE des deux symptomes du 16 septembre : le clavier qui
+// « se deconnecte » des qu'on tape dans Ladybird, et l'archive qui s'arrete a
+// 7,30 s, a l'instant ou les services demarrent. Ni l'un ni l'autre n'etait
+// en panne : tous deux etaient affames, par la meme cause, au meme instant.
+//
+// Passe un seuil, l'affame reclame le passage et le systeme de fichiers le
+// lui cede -- de maniere bornee des deux cotes. Voir `drivers::equite_pilote`.
+static EQUITE_HID: crate::drivers::equite_pilote::Equite =
+    crate::drivers::equite_pilote::Equite::neuve();
+static EQUITE_ENREGISTREUR: crate::drivers::equite_pilote::Equite =
+    crate::drivers::equite_pilote::Equite::neuve();
+
+/// Compteurs d'equite, pour le releve : sauts en cours et cessions obtenues.
+pub fn equite_stats() -> (u64, u64, u64, u64) {
+    (
+        EQUITE_HID.sauts(),
+        EQUITE_HID.cessions(),
+        EQUITE_ENREGISTREUR.sauts(),
+        EQUITE_ENREGISTREUR.cessions(),
+    )
+}
+
+/// Un consommateur prioritaire reclame-t-il le pilote ?
+pub fn priorite_reclamee() -> bool {
+    EQUITE_HID.reclame() || EQUITE_ENREGISTREUR.reclame()
+}
+
+/// L'enregistreur a renonce faute d'avoir pu prendre le pilote.
+pub fn enregistreur_a_saute(maintenant_ns: u64) {
+    use crate::drivers::equite_pilote as eq;
+    EQUITE_ENREGISTREUR.saut(maintenant_ns, eq::SAUTS_AVANT_PRIORITE, eq::FAMINE_AVANT_PRIORITE_NS);
+}
+
+/// L'enregistreur a pu ecrire.
+pub fn enregistreur_a_reussi() {
+    EQUITE_ENREGISTREUR.succes();
+}
 static mut RUNTIME: Option<Runtime> = None;
 
 #[derive(Clone, Debug)]
@@ -4617,6 +4663,33 @@ const ATTENTE_RUNTIME: usize = 50_000_000;
 
 /// Prend le pilote USB pour la duree d'une operation.
 fn avec_le_pilote_usb<R>(action: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
+    // CEDER AVANT DE PRENDRE.
+    //
+    // Le systeme de fichiers peut attendre ; la scrutation du clavier et
+    // l'enregistreur de vol, non -- ils renoncent. Sans cette cession, un
+    // flux de lecture soutenu les affame tous les deux en continu, ce qui a
+    // coute un clavier « deconnecte » et une archive tronquee le meme jour.
+    //
+    // La cession est BORNEE : un consommateur qui reclame sans jamais aboutir
+    // -- pilote en panne, peripherique parti -- ne doit pas bloquer le
+    // systeme de fichiers. Mieux vaut une trace trouee qu'un disque fige.
+    {
+        use crate::drivers::equite_pilote as eq;
+        let debut = crate::kernel::timer::monotonic_ns();
+        let mut cede = false;
+        while eq::cede_encore(
+            priorite_reclamee(),
+            crate::kernel::timer::monotonic_ns().saturating_sub(debut),
+            eq::CESSION_MAXIMALE_NS,
+        ) {
+            cede = true;
+            core::hint::spin_loop();
+        }
+        if cede {
+            EQUITE_HID.note_cession();
+            EQUITE_ENREGISTREUR.note_cession();
+        }
+    }
     let mut tours = 0usize;
     while RUNTIME_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -5364,8 +5437,21 @@ pub fn poll() {
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        // LE CLAVIER NE SE DECONNECTE PAS : ON L'AFFAME.
+        //
+        // Renoncer ici, c'est ne pas lire les rapports HID de ce tour. Une
+        // fois, personne ne le voit. En continu -- ce que produit le systeme
+        // de fichiers pendant que le navigateur charge --, l'utilisateur ne
+        // peut plus taper, et le peripherique parait perdu.
+        use crate::drivers::equite_pilote as eq;
+        EQUITE_HID.saut(
+            crate::kernel::timer::monotonic_ns(),
+            eq::SAUTS_AVANT_PRIORITE,
+            eq::FAMINE_AVANT_PRIORITE_NS,
+        );
         return;
     }
+    EQUITE_HID.succes();
 
     // L'heure de la prochaine relecture des ports, decidee UNE fois pour tous
     // les controleurs : la calculer par controleur ferait scruter le second

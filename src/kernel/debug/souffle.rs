@@ -25,6 +25,14 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// Sentinelle de « pas encore date ».
+///
+/// Meme raison qu'a `drivers::equite_pilote` : zero est un horodatage
+/// legitime, et s'en servir comme marqueur d'absence rend indatable un echec
+/// survenu a `monotonic_ns() == 0`. Le defaut a ete trouve la-bas par un test,
+/// puis corrige ICI AUSSI -- il y etait, latent, exactement sous la meme forme.
+const JAMAIS: u64 = u64::MAX;
+
 /// Compteurs de survie. Un seul exemplaire par systeme, mais la structure
 /// reste instanciable pour que les tests n'aient pas a se partager un etat.
 pub struct Souffle {
@@ -70,7 +78,7 @@ impl Souffle {
             serie: AtomicU64::new(0),
             pire_serie: AtomicU64::new(0),
             dernier_ok_ns: AtomicU64::new(0),
-            premier_echec_ns: AtomicU64::new(0),
+            premier_echec_ns: AtomicU64::new(JAMAIS),
             dernier_genre: AtomicU64::new(0),
             derniere_seq: AtomicU64::new(0),
         }
@@ -81,7 +89,7 @@ impl Souffle {
         self.poses.fetch_add(1, Ordering::Relaxed);
         self.dernier_ok_ns.store(ts_ns, Ordering::Release);
         self.serie.store(0, Ordering::Relaxed);
-        self.premier_echec_ns.store(0, Ordering::Relaxed);
+        self.premier_echec_ns.store(JAMAIS, Ordering::Relaxed);
     }
 
     /// Un enregistrement est perdu.
@@ -97,7 +105,7 @@ impl Souffle {
         // Le PREMIER echec de la serie, pas le dernier : c'est lui qui date
         // le debut du silence, et donc l'evenement qui l'a cause.
         let _ = self.premier_echec_ns.compare_exchange(
-            0, ts_ns, Ordering::AcqRel, Ordering::Relaxed,
+            JAMAIS, ts_ns, Ordering::AcqRel, Ordering::Relaxed,
         );
     }
 
@@ -109,7 +117,13 @@ impl Souffle {
             serie: self.serie.load(Ordering::Relaxed),
             pire_serie: self.pire_serie.load(Ordering::Relaxed),
             dernier_ok_ns,
-            premier_echec_ns: self.premier_echec_ns.load(Ordering::Relaxed),
+            // Hors du module, « aucun echec en cours » se lit toujours zero :
+            // la sentinelle est un detail interne. `serie` leve l'ambiguite
+            // d'un echec survenu a l'instant zero.
+            premier_echec_ns: match self.premier_echec_ns.load(Ordering::Relaxed) {
+                JAMAIS => 0,
+                date => date,
+            },
             dernier_genre: self.dernier_genre.load(Ordering::Relaxed),
             derniere_seq: self.derniere_seq.load(Ordering::Relaxed),
             // Tant que rien n'a jamais ete pose, il n'y a pas de silence a

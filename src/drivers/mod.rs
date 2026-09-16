@@ -27,6 +27,9 @@ pub mod e1000;
 pub mod rtl8168;
 #[path = "usb/xhci_probe.rs"]
 pub mod xhci_probe;
+/// Equite d'acces au pilote USB, pure : voir `usb/equite_pilote.rs`.
+#[path = "usb/equite_pilote.rs"]
+pub mod equite_pilote;
 #[path = "usb/xhci_active.rs"]
 pub mod xhci_active;
 #[path = "display/bochs.rs"]
