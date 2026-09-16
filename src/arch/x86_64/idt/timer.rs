@@ -86,9 +86,27 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
         }
     }
 
-    if !balanced_bsp {
-        crate::kernel::task::stall_probe_from_timer();
-    }
+    // BOUCHAUD_SONDES_QUI_NE_TOURNENT_NULLE_PART_V1
+    //
+    // Cet appel etait garde par `!balanced_bsp`, c'est-a-dire saute des que le
+    // coeur zero n'est pas seul. L'intention -- sortir les diagnostics lourds
+    // du hard IRQ du BSP quand d'autres coeurs sont disponibles -- suppose que
+    // QUELQU'UN D'AUTRE les execute. Personne ne le fait : IRQ0 n'est livree
+    // qu'au BSP, et aucun chemin AP n'appelle cette sonde. Sur toute machine a
+    // plus d'un coeur, elle ne tournait donc NULLE PART.
+    //
+    // Consequence, mesuree sur le releve TRIGKEY du 16 septembre : zero ligne
+    // `[SMP-SNAPSHOT]`, `[SCHED-FILE]` et `[SCHED-TACHE]` sur seize coeurs en
+    // ligne -- precisement les trois sondes dont le commentaire de
+    // `signale_etat_ordonnancement` dit qu'elles sont les seules a distinguer
+    // « la tache est en file et son coeur dort » de « la tache attend quelque
+    // chose qui ne vient pas ».
+    //
+    // Le cout etait deja borne PAR LA SONDE : elle rend la main en trois
+    // instructions 999 tics sur 1000, et n'imprime qu'une fois par periode.
+    // Limiter par la frequence est le bon controle ; ne jamais appeler ne l'est
+    // pas.
+    crate::kernel::task::stall_probe_from_timer();
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 4);
 
     let mut preempt_now = false;
@@ -103,14 +121,25 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
 
         crate::kernel::blackbox::timer_stage(blackbox_cpu, 6);
 
-        if !balanced_bsp {
-            if !idle {
-                crate::kernel::task::echantillonne_tache_bsp();
-            }
-            crate::kernel::blackbox::timer_stage(blackbox_cpu, 7);
-
-            crate::kernel::task::watchdog_from_timer();
+        // L'ECHANTILLONNAGE RESTE GARDE, LE CHIEN DE GARDE NON.
+        //
+        // `echantillonne_tache_bsp` compte le temps CPU de la tache courante.
+        // En SMP, le coeur zero recoit AUSSI les interruptions de quantum, et
+        // `reschedule.rs` y appelle `echantillonne_quantum` : compter les deux
+        // doublerait la comptabilite du BSP. Cette garde-ci est donc juste.
+        //
+        // `watchdog_from_timer` n'a rien a voir avec la comptabilite : il
+        // surveille le battement du bureau et crie quand il s'arrete. Le
+        // garder derriere la meme condition l'a desactive sur toute machine a
+        // plus d'un coeur -- c'est-a-dire sur la machine de reference, et
+        // exactement pendant le blocage qu'il existe pour nommer. Il coute
+        // deux lectures atomiques par tic et n'imprime qu'une fois toutes les
+        // dix secondes.
+        if !balanced_bsp && !idle {
+            crate::kernel::task::echantillonne_tache_bsp();
         }
+        crate::kernel::blackbox::timer_stage(blackbox_cpu, 7);
+        crate::kernel::task::watchdog_from_timer();
 
         crate::kernel::blackbox::timer_stage(blackbox_cpu, 8);
 
