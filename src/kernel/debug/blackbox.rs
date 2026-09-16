@@ -207,6 +207,49 @@ fn commit_record_seq(seq: u64) {
 static DERNIER_SAUT_OCCUPE: AtomicBool = AtomicBool::new(false);
 static SAUTS_DE_FENETRE: AtomicU64 = AtomicU64::new(0);
 
+// ===========================================================================
+// BOUCHAUD_DERNIER_SOUFFLE_V1 : l'enregistreur consigne sa propre mort
+// ===========================================================================
+//
+// L'archive du 16 septembre couvre 1,07 s a 7,30 s. La machine a tourne vingt
+// minutes. Cinquante-trois enregistrements sur huit mille cent quatre-vingt-
+// douze emplacements, `fatal.log` vide, aucune marque de FIN -- et, au dernier
+// echantillon ecrit, `bb_failures=0 bb_busy_skips=0 bb_filets=0`.
+//
+// Ces trois zeros ne disent PAS que tout allait bien. Ils disent qu'a 7,047 s
+// tout allait encore bien. Tout ce qui s'est passe ensuite -- le clavier qui
+// lache, la charge, l'extinction -- devait etre raconte par des compteurs qui
+// ne voyagent que dans un enregistrement... qu'il fallait justement pouvoir
+// ecrire.
+//
+// C'est un piege circulaire : l'instrumentation ne peut pas rapporter sa
+// propre mort. Tant qu'il tient, aucune correction de l'enregistreur n'est
+// verifiable, parce qu'un echec produit exactement le meme silence qu'avant.
+//
+// Cet etat-ci vit en RAM, ne depend d'aucun peripherique, et survit a la perte
+// complete de la cle USB. Il est relu a l'extinction et AFFICHE A L'ECRAN --
+// le seul endroit qui reste quand le journal est precisement ce qu'on n'a pas
+// pu sauver.
+
+/// L'etat de survie, tenu par `kernel::souffle` -- pur, et donc verifiable
+/// sur machine hote, ce que la machine cible ne permet justement pas.
+static SOUFFLE: crate::kernel::souffle::Souffle =
+    crate::kernel::souffle::Souffle::neuf();
+
+/// Lit l'etat de l'enregistreur sans toucher au moindre peripherique.
+pub fn souffle() -> crate::kernel::souffle::Etat {
+    SOUFFLE.etat(crate::kernel::timer::monotonic_ns())
+}
+
+/// Enregistre l'issue d'une tentative d'ecriture.
+fn note_souffle(ok: bool, kind: u16, seq: u64, ts_ns: u64) {
+    if ok {
+        SOUFFLE.succes(ts_ns);
+    } else {
+        SOUFFLE.echec(ts_ns, kind as u64, seq);
+    }
+}
+
 fn append(kind: u16, payload: &[u8], ts_ns: u64, trace_end: usize) -> bool {
     let seq = peek_record_seq();
     let ok = crate::drivers::xhci_active::blackbox_append_record(
@@ -217,6 +260,7 @@ fn append(kind: u16, payload: &[u8], ts_ns: u64, trace_end: usize) -> bool {
         trace_end as u64,
         payload,
     );
+    note_souffle(ok, kind, seq, ts_ns);
     if ok {
         commit_record_seq(seq);
     } else {
@@ -474,6 +518,25 @@ fn sample(ts_ns: u64) {
 // Ce releve-ci suit `schedulable_cpus()`. Il est pose separement pour que la
 // ligne d'echantillon garde sa forme -- les outils d'analyse existants la
 // lisent -- et pour qu'aucun des deux ne puisse depasser la charge utile.
+//
+// BOUCHAUD_ENTERS_NE_MESURE_QUE_LE_BSP_V1
+//
+// `enters`/`exits` viennent de `TIMER_ENTERS`, alimente par le SEUL handler
+// d'IRQ0 -- le PIT, que seul le processeur d'amorcage recoit. Sur les quinze
+// autres coeurs ils valent donc zero en permanence, y compris quand ces
+// coeurs travaillent : ils battent au timer LAPIC local, qui passe par un
+// autre vecteur.
+//
+// Lu sans le savoir, l'echantillon du 16 septembre ressemblait trait pour
+// trait a quinze coeurs morts -- `en_ligne=1 rip_u=0x0 enters=0` --, et c'est
+// exactement la lecture qui en a ete faite. Le meme demarrage imprimait
+// pourtant `BOUCHAUD_SMP_BATTEMENT cpu=0..15 bat=1`.
+//
+// `quantums` est ce compteur-la : `STALL_IPI_COUNT`, incremente par le
+// handler de replanification avec le numero de coeur REEL. C'est la seule
+// valeur de cette ligne qui distingue un coeur en ligne d'un coeur qui
+// PARTICIPE, et elle voyage desormais avec les deux autres pour qu'aucune
+// lecture ne puisse plus conclure de leur zero.
 fn echantillon_par_cpu(ts_ns: u64) {
     let cpus = crate::arch::x86_64::smp::schedulable_cpus().min(MAX_CPUS);
     let mut cpu = 0usize;
@@ -487,7 +550,7 @@ fn echantillon_par_cpu(ts_ns: u64) {
             let (utilisateur, noyau) = crate::kernel::task::rips_timer(cpu);
             let _ = write!(
                 &mut out,
-                " cpu{}=[en_ligne={} rip_u={:#x} rip_k={:#x} stage={} enters={} exits={}]",
+                " cpu{}=[en_ligne={} rip_u={:#x} rip_k={:#x} stage={} enters={} exits={} quantums={}]",
                 cpu,
                 crate::arch::x86_64::smp::is_online(cpu) as u8,
                 utilisateur,
@@ -495,6 +558,7 @@ fn echantillon_par_cpu(ts_ns: u64) {
                 TIMER_STAGE[cpu].load(Ordering::Acquire),
                 TIMER_ENTERS[cpu].load(Ordering::Relaxed),
                 TIMER_EXITS[cpu].load(Ordering::Relaxed),
+                crate::kernel::task::quantums_recus(cpu),
             );
             cpu += 1;
             poses += 1;
@@ -702,11 +766,35 @@ pub fn sauts_de_fenetre() -> u64 {
 ///   * une marque de fin, qui distingue une session CLOSE d'une session
 ///     coupee -- sans elle, on ne sait pas si le silence est la fin ou une
 ///     panne.
-pub fn vide_avant_extinction(raison: &str) -> bool {
+/// Issue detaillee d'un vidage final.
+///
+/// Un `bool` perdait l'information a l'instant precis ou elle devenait utile :
+/// « incomplet » ne dit pas si le journal n'a pas pu etre draine, si la marque
+/// de fin n'est pas passee, ou si seule la synchronisation a manque -- trois
+/// pannes de trois couches differentes, avec trois remedes differents.
+pub struct Vidage {
+    /// Le support repondait-il seulement ?
+    pub support: bool,
+    /// Le journal serie et l'enregistreur de vol ont-ils ete vides ?
+    pub draine: bool,
+    /// La marque de FIN est-elle posee ? Sans elle, un silence est
+    /// indistinguable d'une coupure.
+    pub marque: bool,
+    /// La cle a-t-elle confirme l'ecriture ?
+    pub synchronise: bool,
+}
+
+impl Vidage {
+    pub fn complet(&self) -> bool {
+        self.support && self.draine && self.marque && self.synchronise
+    }
+}
+
+pub fn vide_avant_extinction(raison: &str) -> Vidage {
     STOPPING.store(true, Ordering::Release);
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         crate::serial_println!("BOUCHAUD_BLACKBOX_FIN_SANS_SUPPORT raison={}", raison);
-        return false;
+        return Vidage { support: false, draine: false, marque: false, synchronise: false };
     }
     let maintenant = now_ns();
     sample(maintenant);
@@ -746,9 +834,21 @@ pub fn vide_avant_extinction(raison: &str) -> bool {
         if crate::kernel::task::try_current().is_some() { crate::kernel::task::sleep_ticks(1); }
     }
     let ok = drained && marked && synced;
-    crate::serial_println!("BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={}",
-        raison, drained as u8, marked as u8, synced as u8, ok as u8);
-    ok
+    // L'ETAT DE L'ENREGISTREUR PART AVEC LE VERDICT.
+    //
+    // Les compteurs de la couche USB disent si la cle repond ; le souffle dit
+    // depuis quand l'enregistreur n'ecrit plus. Les deux ensemble distinguent
+    // « la cle vient de tomber » de « elle etait perdue depuis vingt minutes
+    // et personne ne l'a dit ».
+    let souffle = souffle();
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={} poses={} echecs={} serie={} pire_serie={} dernier_ok_ns={} silence_ms={} perdu_genre={} perdu_seq={}",
+        raison, drained as u8, marked as u8, synced as u8, ok as u8,
+        souffle.poses, souffle.echecs, souffle.serie, souffle.pire_serie,
+        souffle.dernier_ok_ns, souffle.silence_ms,
+        souffle.dernier_genre, souffle.derniere_seq,
+    );
+    Vidage { support: true, draine: drained, marque: marked, synchronise: synced }
 }
 
 pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) {

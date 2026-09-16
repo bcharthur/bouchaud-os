@@ -38,6 +38,116 @@ const VBOX_SHUTDOWN: u16 = 0x4004;
 /// `code` n'est lu que par le peripherique de test de QEMU : c'est par lui que
 /// le lanceur de sondes apprend si le scenario a reussi. Les autres voies
 /// eteignent sans rien rapporter.
+// ===========================================================================
+// BOUCHAUD_RAPPORT_EXTINCTION_V1 : dire ce qui a echoue, pendant qu'on le sait
+// ===========================================================================
+//
+// L'extinction ne peut plus renvoyer vers un journal : c'est ce journal-la
+// qui vient d'echouer. Les lignes ci-dessous sont donc composees ICI, a partir
+// de compteurs qui vivent en RAM, et peintes a l'ecran avant la coupure.
+//
+// Aucune allocation : l'allocateur est un des sous-systemes qui peuvent avoir
+// lache, et un rapport de panne qui a besoin du tas ne sort pas quand le tas
+// est le probleme.
+struct Ligne {
+    octets: [u8; 96],
+    n: usize,
+}
+
+impl Ligne {
+    const fn neuve() -> Self {
+        Self { octets: [0; 96], n: 0 }
+    }
+    fn texte(&self) -> &str {
+        // Tout ce qu'on ecrit est ASCII ; la coupure ne peut pas tomber au
+        // milieu d'un caractere. En cas de doute on rend une chaine vide
+        // plutot que de paniquer dans le chemin d'extinction.
+        core::str::from_utf8(&self.octets[..self.n]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for Ligne {
+    fn write_str(&mut self, texte: &str) -> core::fmt::Result {
+        let source = texte.as_bytes();
+        let place = self.octets.len().saturating_sub(self.n);
+        let pris = place.min(source.len());
+        self.octets[self.n..self.n + pris].copy_from_slice(&source[..pris]);
+        self.n += pris;
+        // Une ligne tronquee vaut mieux qu'un rapport absent : on ne remonte
+        // pas l'erreur, on ecrit ce qui tient.
+        Ok(())
+    }
+}
+
+/// Compose et affiche le detail d'une sauvegarde incomplete.
+fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
+    use core::fmt::Write as _;
+    let souffle = crate::kernel::blackbox::souffle();
+    let (ecritures, echecs, consecutifs, derniere_erreur, sautes, dernier_ok_ns) =
+        crate::drivers::xhci_active::blackbox_storage_extended_counters();
+    let (trouves, prets, transferts, _octets, stalls, _rec, _rep, bulk_echecs, _des, occupes) =
+        crate::drivers::xhci_active::stockage_stats();
+
+    let mut couche = Ligne::neuve();
+    let _ = write!(
+        couche,
+        "COUCHE     : enregistreur de vol -> cle USB (supports {}/{} prets)",
+        prets, trouves,
+    );
+    let mut etape = Ligne::neuve();
+    let _ = write!(
+        etape,
+        "ETAPE      : support={} draine={} marque={} sync={}",
+        vidage.support as u8, vidage.draine as u8,
+        vidage.marque as u8, vidage.synchronise as u8,
+    );
+    let mut support = Ligne::neuve();
+    let _ = write!(
+        support,
+        "SUPPORT    : ecritures={} echecs={} consecutifs={} err={:#x} sautes_occupe={}",
+        ecritures, echecs, consecutifs, derniere_erreur, sautes,
+    );
+    let mut bulk = Ligne::neuve();
+    let _ = write!(
+        bulk,
+        "BULK USB   : {} transfert(s) {} stall(s) {} echec(s) {} refus_occupe",
+        transferts, stalls, bulk_echecs, occupes,
+    );
+    let mut dernier = Ligne::neuve();
+    let _ = write!(
+        dernier,
+        "DERNIER OK : t={} ms  poses={}  silence={} ms",
+        dernier_ok_ns / 1_000_000, souffle.poses, souffle.silence_ms,
+    );
+    let mut serie = Ligne::neuve();
+    let _ = write!(
+        serie,
+        "PERTES     : {} echec(s), serie={} (pire={}), perdu genre={} seq={}",
+        souffle.echecs, souffle.serie, souffle.pire_serie,
+        souffle.dernier_genre, souffle.derniere_seq,
+    );
+    let mut persist = Ligne::neuve();
+    if persisted < 0 {
+        let _ = write!(persist, "PERSIST    : ECHEC d ecriture, /persist n est PAS a jour");
+    } else {
+        let _ = write!(persist, "PERSIST    : {} fichier(s) ecrit(s)", persisted);
+    }
+
+    // La meme chose part sur la console serie : quand elle existe, elle est
+    // relue plus confortablement qu'une photo d'ecran.
+    for ligne in [&couche, &etape, &support, &bulk, &dernier, &serie, &persist] {
+        crate::serial_println!("BOUCHAUD_EXTINCTION_RAPPORT {}", ligne.texte());
+    }
+
+    crate::gui::power_screen::detail_echec(
+        "SAUVEGARDE INCOMPLETE",
+        &[
+            couche.texte(), etape.texte(), support.texte(), bulk.texte(),
+            dernier.texte(), serie.texte(), persist.texte(),
+        ],
+    );
+}
+
 pub fn shutdown(code: u8) -> ! {
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
 
@@ -82,8 +192,12 @@ pub fn shutdown(code: u8) -> ! {
         ),
     }
     // Persist the result of the filesystem flush as well.
-    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
-    crate::gui::power_screen::finish(logs_ok && persisted >= 0);
+    let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
+    let complet = vidage.complet() && persisted >= 0;
+    crate::gui::power_screen::finish(complet);
+    if !complet {
+        rapporte_echec(&vidage, persisted as i64);
+    }
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.
@@ -150,8 +264,12 @@ pub fn reboot() -> ! {
         ),
     }
 
-    let logs_ok = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
-    crate::gui::power_screen::finish(logs_ok && persisted >= 0);
+    let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
+    let complet = vidage.complet() && persisted >= 0;
+    crate::gui::power_screen::finish(complet);
+    if !complet {
+        rapporte_echec(&vidage, persisted as i64);
+    }
     x86_64::instructions::interrupts::disable();
     unsafe {
         // 1. Le chipset.

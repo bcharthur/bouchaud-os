@@ -26,6 +26,8 @@ pub mod memory_pressure;
 pub mod dmesg;
 #[path = "debug/blackbox.rs"]
 pub mod blackbox; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
+#[path = "debug/souffle.rs"]
+pub mod souffle; // etat de survie de l'enregistreur
 #[path = "process/elf.rs"]
 pub mod elf;
 #[path = "process/loader/mod.rs"]
