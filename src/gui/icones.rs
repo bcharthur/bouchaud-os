@@ -124,15 +124,17 @@ fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
     sortie
 }
 
-#[inline]
-fn dans_rectangle_arrondi(px: i32, py: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
-    if px < x0 || py < y0 || px >= x1 || py >= y1 { return false; }
-    let cx = px.clamp(x0 + rayon, x1 - rayon - 1);
-    let cy = py.clamp(y0 + rayon, y1 - rayon - 1);
-    let dx = px - cx;
-    let dy = py - cy;
-    dx * dx + dy * dy <= rayon * rayon
-}
+// TROISIEME COPIE DE LA MEME PRIMITIVE, RETIREE ELLE AUSSI.
+//
+// Ses constantes ne paniquaient pas -- rayon 54 sur une boite de 180, rayon 18
+// sur une boite de 42 -- mais elle portait le meme
+// `clamp(x0 + rayon, x1 - rayon - 1)` qui a tue le gestionnaire de fichiers le
+// 16 septembre 2026. Une forme dont on change un chiffre, et la panique
+// revient dans un fichier ou personne ne la cherche.
+//
+// Le rayon effectif est identique ici : 54 et 18 tiennent tous deux dans leur
+// boite, donc le rendu ne change pas d'un pixel.
+use crate::gui::geometrie::dans_arrondi as dans_rectangle_arrondi;
 
 #[inline]
 fn couverture_services(px: usize, py: usize, cote: usize, forme: u8) -> u8 {

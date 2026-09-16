@@ -611,15 +611,17 @@ fn dans_ellipse(x: i32, y: i32, cx: i32, cy: i32, rx: i32, ry: i32) -> bool {
         <= rx as i64 * rx as i64 * ry as i64 * ry as i64
 }
 
-#[inline]
-fn dans_arrondi_logo(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
-    if x < x0 || y < y0 || x >= x1 || y >= y1 { return false; }
-    let cx = x.clamp(x0 + rayon, x1 - rayon - 1);
-    let cy = y.clamp(y0 + rayon, y1 - rayon - 1);
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= rayon * rayon
-}
+// LA MEME PRIMITIVE QUE LE BUREAU, ET DESORMAIS LE MEME CODE.
+//
+// Cette copie-ci n'a jamais panique, parce que son unique appelant lui donne
+// une boite de 200 sur 880 pour un rayon de 72. Elle le pouvait : le
+// `clamp(x0 + rayon, x1 - rayon - 1)` qu'elle portait est exactement celui qui
+// a tue le gestionnaire de fichiers le 16 septembre 2026.
+//
+// Ici la panique serait pire qu'ailleurs : ce logo est peint avant l'ecran de
+// faute, avant l'enregistreur de vol, avant tout ce qui sait dire ce qui s'est
+// passe. Une machine muette, et rien pour l'expliquer.
+use crate::gui::geometrie::dans_arrondi as dans_arrondi_logo;
 
 fn logo_alpha(px: u32, py: u32, taille: u32) -> u8 {
     let mut couverture = 0u16;

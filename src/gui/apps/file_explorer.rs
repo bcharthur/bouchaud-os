@@ -156,15 +156,18 @@ fn draw_grid(cur: usize, scroll: i32, selected: Option<usize>, bx: usize, by: us
     }
 }
 
-#[inline]
-fn dans_arrondi(px: i32, py: i32, x0: i32, y0: i32, x1: i32, y1: i32, rayon: i32) -> bool {
-    if px < x0 || py < y0 || px >= x1 || py >= y1 { return false; }
-    let cx = px.clamp(x0 + rayon, x1 - rayon - 1);
-    let cy = py.clamp(y0 + rayon, y1 - rayon - 1);
-    let dx = px - cx;
-    let dy = py - cy;
-    dx * dx + dy * dy <= rayon * rayon
-}
+// LA COPIE LOCALE A ETE RETIREE, PAS DEPLACEE PAR COMMODITE.
+//
+// Elle paniquait : `min > max. min = 447, max = 446`, releve le 16 septembre
+// 2026 en ouvrant cette fenetre. Une boite de 34 de haut avec un rayon de 17
+// -- la ligne interne de l'icone de fichier, juste en dessous -- rendait
+// `clamp(haut + 17, haut + 16)`. Tout fichier affiche tuait le noyau.
+//
+// `gui::geometrie::dans_arrondi` borne le rayon a la moitie de la boite et
+// devient totale. La meme primitive existait aussi dans `reference_gop`, pour
+// le logo de demarrage, qui est peint AVANT que quoi que ce soit sache
+// rapporter une faute.
+use crate::gui::geometrie::dans_arrondi;
 
 fn couverture_icone(px: usize, py: usize, size: usize, forme: u8) -> u8 {
     let mut compte = 0u16;

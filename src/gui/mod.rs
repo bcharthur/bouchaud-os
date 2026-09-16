@@ -25,6 +25,8 @@
 //!   - `client` : session (processus, surface, canal) d'un client.
 
 pub mod apps;
+/// Geometrie de dessin partagee, pure et totale : voir `geometrie.rs`.
+pub mod geometrie;
 pub mod services;
 pub mod power_screen;
 pub mod client;
