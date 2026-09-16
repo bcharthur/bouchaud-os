@@ -1,5 +1,10 @@
 # Documentation historique
 
+> A ne pas confondre avec `docs/historique/`, qui garde les PIECES DE TRAVAIL
+> d'un chantier -- manifestes de lot, notes de session, transcriptions. Ici ce
+> sont d'anciennes DOCUMENTATIONS, redigées pour etre lues, et encore
+> referencees depuis la documentation courante et depuis le code.
+
 **Rien dans ce dossier ne decrit l'etat actuel du projet.**
 
 Ces documents disaient vrai a leur date. Plusieurs ne disent plus vrai
