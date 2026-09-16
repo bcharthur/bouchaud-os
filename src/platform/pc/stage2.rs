@@ -108,12 +108,16 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
     // Stage 2 et le blocage est necessairement apres ce point.
-    // L'ECRAN DE DEMARRAGE REMPLACE LE LOGO FIGE.
+    // L'ECRAN DE DEMARRAGE, ET PLUS AUCUN LOGO.
     //
-    // `boot_begin` peint le fond et le « B » ; `demarrage_ouvre` reprend la
-    // main juste apres avec le titre et la barre, et chaque point de controle
-    // l'avance. Voir `ecran_faute::demarrage_ouvre` pour la raison du choix du
-    // moteur de rendu.
+    // `boot_begin` ne peint plus que le fond ; `demarrage_ouvre` y installe le
+    // titre et la barre, et chaque point de controle l'avance. Voir
+    // `ecran_faute::demarrage_ouvre` pour la raison du choix du moteur de
+    // rendu, et `reference_gop::boot_begin` pour celle du retrait du logo.
+    //
+    // Le prechargeur UEFI porte le MEME ecran depuis
+    // tools/reference/uefi-preboot-probe : c'est lui qu'on voit en premier, et
+    // c'est lui qui affichait le « B » que ce lot retire.
     super::reference_gop::boot_begin(framebuffer);
     super::ecran_faute::demarrage_ouvre();
     crate::serial_println!("BOUCHAUD_TRIGKEY_STAGE2_EARLY_GOP_OK");

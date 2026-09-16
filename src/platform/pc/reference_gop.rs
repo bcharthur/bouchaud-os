@@ -618,48 +618,19 @@ fn dans_ellipse(x: i32, y: i32, cx: i32, cy: i32, rx: i32, ry: i32) -> bool {
 // `clamp(x0 + rayon, x1 - rayon - 1)` qu'elle portait est exactement celui qui
 // a tue le gestionnaire de fichiers le 16 septembre 2026.
 //
-// Ici la panique serait pire qu'ailleurs : ce logo est peint avant l'ecran de
-// faute, avant l'enregistreur de vol, avant tout ce qui sait dire ce qui s'est
-// passe. Une machine muette, et rien pour l'expliquer.
-use crate::gui::geometrie::dans_arrondi as dans_arrondi_logo;
-
-fn logo_alpha(px: u32, py: u32, taille: u32) -> u8 {
-    let mut couverture = 0u16;
-    for sy in 0..4u32 {
-        for sx in 0..4u32 {
-            let nx = ((px * 4 + sx) * 1024 / (taille * 4).max(1)) as i32;
-            let ny = ((py * 4 + sy) * 1024 / (taille * 4).max(1)) as i32;
-            let hampe = dans_arrondi_logo(nx, ny, 145, 70, 345, 950, 72);
-            let haut = nx >= 260
-                && dans_ellipse(nx, ny, 455, 315, 345, 245)
-                && !dans_ellipse(nx, ny, 465, 315, 155, 105);
-            let bas = nx >= 260
-                && dans_ellipse(nx, ny, 475, 710, 380, 275)
-                && !dans_ellipse(nx, ny, 485, 710, 175, 125);
-            if hampe || haut || bas { couverture += 1; }
-        }
-    }
-    (couverture * 255 / 16) as u8
-}
-
-fn draw_boot_logo(info: FramebufferInfo, x: u32, y: u32, taille: u32) {
-    for py in 0..taille {
-        for px in 0..taille {
-            let alpha = logo_alpha(px, py, taille);
-            if alpha != 0 {
-                let _ = blend_rgb(info, x + px, y + py, ACCENT, alpha);
-            }
-        }
-    }
-}
-
-// This draw happens exactly once, before the normal display driver takes
-// ownership. Boot checkpoints deliberately never touch the framebuffer.
+// BOUCHAUD_PLUS_DE_LOGO_FIGE_V1
+//
+// Cette fonction peignait un « B » bleu au centre. `demarrage_ouvre()` le
+// recouvrait aussitot -- les deux appels se suivent dans `stage2::run` -- donc
+// le logo ne coutait qu'un aller-retour inutile sur le framebuffer... TANT QUE
+// `demarrage_ouvre()` peint. Il sort sans rien faire si le framebuffer de
+// l'ecran de faute n'est pas encore installe, et le « B » redevenait alors
+// l'ecran definitif de l'amorcage.
+//
+// Un logo qu'on efface immediatement n'a aucune raison d'etre dessine, et un
+// logo qui peut survivre a son remplacant est un piege. Il ne reste que le
+// fond, sur lequel l'ecran de demarrage s'installe.
 pub fn boot_begin(info: FramebufferInfo) {
     if validate(info).is_err() { return; }
     fill_rect(info, 0, 0, info.width, info.height, BG);
-    let taille = 128u32.min(info.width).min(info.height);
-    let x = info.width.saturating_sub(taille) / 2;
-    let y = info.height.saturating_sub(taille) / 2;
-    draw_boot_logo(info, x, y, taille);
 }
