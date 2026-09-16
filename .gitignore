@@ -2,6 +2,14 @@
 # Les outils d'image sont des applications Rust autonomes : leur arbre de
 # construction n'a rien a faire dans le depot.
 tools/reference/uefi-image-builder/target/
+tools/reference/uefi-preboot-probe/target/
+# Leurs DEUX verrous sont suivis, eux, et c'est delibere : ces crates
+# produisent des binaires qui PARTENT DANS L'IMAGE AMORCABLE. Un verrou suivi
+# fige les versions, donc deux machines fabriquent le meme shim UEFI. La
+# sonde python-wasm, juste en dessous, n'expedie rien et garde l'exception
+# inverse. Voir tools/verifie-arbre-propre-apres-construction.py : sans verrou
+# suivi NI ignore, cargo recree le fichier a chaque build et IMAGE-TRIGKEY.ps1
+# refuse ensuite de construire sur un arbre qu'il croit modifie.
 # Cette sonde est une application Rust autonome. Cargo regenere son verrou a
 # chaque build; seule la chaine principale verrouille ses dependances ici.
 tools/python-wasm/Cargo.lock
