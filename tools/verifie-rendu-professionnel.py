@@ -87,18 +87,33 @@ for relatif, source in (("reference_gop.rs", gop), ("uefi-preboot-probe", preboo
             "demarrage (titre, barre, ligne d'etat) le remplace."
         )
 
-# Le prechargeur doit porter l'ecran, pas seulement avoir perdu le logo.
+# BOUCHAUD_AUCUNE_POLICE_BITMAP_AU_PREBOOT_V1
+#
+# Cette garde a exige successivement deux choses opposees, et les deux
+# etaient mauvaises : d'abord un logo lisse, puis un ecran de progression
+# dessine avec une police BITMAP 8x8 -- la seule rendable avant
+# ExitBootServices, faute de rasteriseur TrueType.
+#
+# Verdict de l'utilisateur, sans appel : « des caracteres de polices en
+# pixels [...] non ca c'est non ». Et il a raison au-dela de l'esthetique :
+# le noyau a un atlas TrueType pre-rasterise, son ecran de demarrage est
+# deja beau, et le faire preceder d'une version pixelisee du MEME ecran
+# n'ajoute rien tout en abimant ce qu'on voit en premier.
+#
+# Ce qui est exige maintenant : le prechargeur ne dessine AUCUN texte. Le
+# premier texte de la machine est celui du noyau, dans sa vraie police.
 for jeton, pourquoi in (
-    ('"BOUCHAUD OS"', "le titre"),
-    ("const SEGMENTS", "la barre de progression"),
-    ("fn etape(", "l'avancee etape par etape"),
-    ("fn bas(", "la ligne d'information du bas"),
+    ("const POLICE", "une table de police bitmap"),
+    ("fn glyphe(", "un rendu de glyphe"),
+    ("fn texte(", "un rendu de texte"),
+    ("BltRegion", "un transfert de tampon, dont un rendu de texte a besoin"),
 ):
-    if jeton not in preboot:
+    if jeton in preboot:
         erreurs.append(
-            f"uefi-preboot-probe: {pourquoi} a disparu de l'ecran de "
-            "demarrage. C'est le PREMIER ecran que la machine affiche, "
-            "et celui qui couvre la phase la plus lente."
+            f"uefi-preboot-probe: {pourquoi} est revenu. Avant "
+            "ExitBootServices il n'y a pas de rasteriseur TrueType : tout "
+            "texte dessine ici sera pixelise, et precedera le bel ecran du "
+            "noyau au lieu de l'annoncer."
         )
 
 # La palette doit rester celle du noyau : un ecart de teinte au passage de
@@ -107,12 +122,11 @@ faute = (ROOT / "src/platform/pc/ecran_faute.rs").read_text(encoding="utf-8")
 for teinte, nom in (("0D_1117", "fond"), ("0044_A8FF", "accent"), ("002B_323F", "barre")):
     if teinte.replace("_", "") not in faute.replace("_", ""):
         erreurs.append(f"ecran_faute.rs: la teinte de {nom} a change")
-for teinte, nom in (("0x0D, 0x11, 0x17", "fond"), ("0x44, 0xA8, 0xFF", "accent"), ("0x2B, 0x32, 0x3F", "barre")):
-    if teinte not in preboot:
-        erreurs.append(
-            f"uefi-preboot-probe: la teinte de {nom} ne correspond plus a "
-            "celle du noyau ; le passage de relais clignoterait."
-        )
+if "0x0D, 0x11, 0x17" not in preboot:
+    erreurs.append(
+        "uefi-preboot-probe: la teinte de fond ne correspond plus a celle du "
+        "noyau ; le passage de relais clignoterait au milieu de l'amorcage."
+    )
 
 if erreurs:
     raise SystemExit("\n".join(erreurs))
