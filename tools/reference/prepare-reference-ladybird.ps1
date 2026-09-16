@@ -46,12 +46,19 @@ $Required = @(
 
 if (-not (Test-Path -LiteralPath $Native -PathType Container)) {
     Fail (
-        "native-browser-m9 absent. Deux voies : si un AUTRE arbre de travail " +
-        "possede deja ladybird-browser.img -- c'est le cas d'un worktree cree " +
-        "a cote de l'arbre principal --, reprends-la avec " +
-        "IMAGE-TRIGKEY.ps1 -LadybirdDepuis <cet-autre-arbre>, ce qui evite " +
-        "une reconstruction complete. Sinon, lance le pipeline Ladybird " +
-        "habituel une fois (.\run.ps1 -Ladybird), puis relance ce script."
+        "native-browser-m9 absent. Trois voies, de la plus rapide a la plus " +
+        "longue :`n" +
+        "  1. .\tools\reference\recupere-navigateur-ci.ps1`n" +
+        "     Recupere l'artefact que la CI a deja construit ET verifie " +
+        "(environ 430 Mio, quelques minutes). C'est la voie normale.`n" +
+        "  2. Si un AUTRE arbre de travail possede deja " +
+        "ladybird-browser.img -- c'est le cas d'un worktree cree a cote de " +
+        "l'arbre principal --, reprends-la avec " +
+        "IMAGE-TRIGKEY.ps1 -LadybirdDepuis <cet-autre-arbre>.`n" +
+        "  3. .\run.ps1 -Ladybird : reconstruire Ladybird de bout en bout. " +
+        "vcpkg (Skia, ICU, HarfBuzz) puis LibWeb et les services : des heures " +
+        "et plusieurs dizaines de gibioctets. A ne faire que si les deux " +
+        "premieres voies sont fermees."
     )
 }
 
