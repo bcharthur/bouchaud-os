@@ -30,6 +30,12 @@ pub mod xhci_probe;
 /// Equite d'acces au pilote USB, pure : voir `usb/equite_pilote.rs`.
 #[path = "usb/equite_pilote.rs"]
 pub mod equite_pilote;
+/// Qui tient le pilote xHCI, pur : voir `usb/proprietaire_runtime.rs`.
+#[path = "usb/proprietaire_runtime.rs"]
+pub mod proprietaire_runtime;
+/// Etat du transport Bulk-Only, pur : voir `usb/reprise_bot.rs`.
+#[path = "usb/reprise_bot.rs"]
+pub mod reprise_bot;
 #[path = "usb/xhci_active.rs"]
 pub mod xhci_active;
 #[path = "display/bochs.rs"]

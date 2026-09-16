@@ -284,6 +284,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // chemin de l'entree.
     drivers::xhci_active::demarre_le_fil_blackbox();
 
+    // LE BRING-UP EST FINI : LES BUDGETS PASSENT EN MODE RUNTIME.
+    //
+    // Jusqu'ici, une cle lente avait le droit de prendre une demi-seconde par
+    // transfert -- personne n'attendait devant l'ecran. A partir de la, le
+    // clavier et la souris attendent, et une commande de stockage qui traine
+    // se voit a l'ecran. Voir `budget_bot`.
+    drivers::xhci_active::bring_up_termine();
+
     // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
     //
     // « Sur le deuxieme demarrage Ladybird a demarre bien plus vite » : ce qui

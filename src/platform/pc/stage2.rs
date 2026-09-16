@@ -492,6 +492,22 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // chemin de l'entree.
     crate::drivers::xhci_active::demarre_le_fil_blackbox();
 
+    // LE BRING-UP EST FINI : LES BUDGETS PASSENT EN MODE RUNTIME.
+    //
+    // Jusqu'ici, une cle lente avait le droit de prendre une demi-seconde par
+    // transfert -- personne n'attendait devant l'ecran. A partir de la, le
+    // clavier et la souris attendent, et une commande de stockage qui traine
+    // se voit a l'ecran. Voir `budget_bot`.
+    crate::drivers::xhci_active::bring_up_termine();
+
+    // LE BANC DE CHARGE, S'IL A ETE COMPILE.
+    //
+    // Il part APRES `bring_up_termine` : lancer une charge de lecture pendant
+    // que les budgets sont encore ceux de l'enumeration mesurerait un pilote
+    // qui n'est pas celui qui tourne devant l'utilisateur.
+    #[cfg(feature = "banc-io")]
+    crate::platform::pc::banc_io::demarre();
+
     // POURQUOI `prechauffage::demarre()` N'EST PAS APPELE ICI.
     //
     // `main.rs` le lance, et ce chemin-ci ne le lance pas. Ce n'est PAS un

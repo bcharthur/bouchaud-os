@@ -208,7 +208,7 @@ pub const COMMANDS: &[&str] = &[
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
-    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "ping", "ifconfig",
+    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "usbetat", "usbfault", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
@@ -852,6 +852,86 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 0
             };
             crate::drivers::xhci_active::lsusb(attente);
+            0
+        }
+
+        // QUI TIENT LE PILOTE, ET DANS QUEL ETAT EST LE TRANSPORT DE MASSE.
+        //
+        // « Le clavier ne repond plus » a deux causes qui se ressemblent a
+        // l'ecran et rien d'autre ne les separe : le verrou du pilote tenu par
+        // quelqu'un d'autre, et un transport de masse en reprise. Ces deux
+        // lignes les distinguent sans archive et sans console serie.
+        "usbetat" => {
+            let v = crate::drivers::xhci_active::etat_du_verrou();
+            crate::println!(
+                "verrou : {} depuis {} ms | pire {} ms ({}) | prises {} contentions {} expirations {}",
+                v.proprietaire.nom(),
+                v.tenue_courante_ns / 1_000_000,
+                v.tenue_max_ns / 1_000_000,
+                v.tenue_max_proprietaire.nom(),
+                v.prises, v.contentions, v.expirations,
+            );
+            let b = crate::drivers::xhci_active::releve_bot();
+            crate::println!(
+                "transport BOT : {} phase {} | echeances {} reprises {} ({} ok, {} ko) | refus {} | slot {} dci {}",
+                b.etat.nom(), b.derniere_phase.nom(), b.echeances, b.reprises,
+                b.reprises_reussies, b.reprises_echouees, b.refus,
+                b.dernier_slot, b.dernier_dci,
+            );
+            let t = crate::kernel::blackbox::tambour();
+            let (lots, manquants, prochain) = crate::kernel::blackbox::vidage_compteurs();
+            crate::println!(
+                "tambour : {} reserves, {} poses, {} ecrases, {} refuses, {} octets vifs",
+                t.reserves, t.poses, t.ecrases, t.refuses, t.octets_vifs,
+            );
+            crate::println!(
+                "vidage : {} lots, {} manquants, prochain {}",
+                lots, manquants, prochain,
+            );
+            let (masque, consommees) = crate::drivers::xhci_active::injections();
+            if masque != 0 || consommees != 0 {
+                crate::println!("injections : masque {:#x}, {} consommee(s)", masque, consommees);
+            }
+            0
+        }
+
+        // ARMER UNE PANNE ARTIFICIELLE.
+        //
+        // Les trois pannes qui comptent -- une commande de stockage qui
+        // expire, un CSW qui n'arrive pas, un verrou deja tenu -- ne se
+        // fabriquent pas sur commande avec une vraie cle. Elles sont pourtant
+        // exactement ce qu'il faut prouver : qu'une echeance de stockage NE
+        // TUE NI le clavier NI l'ordonnanceur.
+        //
+        // Chaque bit est consomme a la premiere occasion : une injection
+        // permanente ne prouverait rien de plus et empecherait de verifier la
+        // reprise.
+        "usbfault" => {
+            if argc < 2 {
+                crate::println!("usbfault <donnees|statut|verrou|tout>");
+                crate::println!("  donnees : la prochaine phase de donnees BOT expire");
+                crate::println!("  statut  : le prochain CSW n'arrive pas");
+                crate::println!("  verrou  : la prochaine prise du pilote est refusee");
+                return 1;
+            }
+            use crate::drivers::xhci_active as usb;
+            let masque = match argv[1] {
+                "donnees" => usb::INJECTE_ECHEANCE_DONNEES,
+                "statut" => usb::INJECTE_ECHEANCE_STATUT,
+                "verrou" => usb::INJECTE_VERROU_TENU,
+                "tout" => {
+                    usb::INJECTE_ECHEANCE_DONNEES
+                        | usb::INJECTE_ECHEANCE_STATUT
+                        | usb::INJECTE_VERROU_TENU
+                }
+                autre => {
+                    crate::println!("usbfault: panne inconnue « {} »", autre);
+                    return 1;
+                }
+            };
+            let arme = usb::arme_injection(masque);
+            crate::println!("BOUCHAUD_USB_INJECTION_ARMEE masque={:#x}", arme);
+            crate::serial_println!("BOUCHAUD_USB_INJECTION_ARMEE masque={:#x}", arme);
             0
         }
 

@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 use core::ptr::{copy_nonoverlapping, read_volatile, write_bytes, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::pci::{self, PciDevice};
 use crate::drivers::bloc::{Achevement, Descripteur, Genre, PiloteBloc, Requete, Volume};
@@ -58,6 +58,22 @@ const CMD_ADDRESS_DEVICE: u32 = 11;
 const CMD_CONFIGURE_ENDPOINT: u32 = 12;
 const CMD_EVALUATE_CONTEXT: u32 = 13;
 const CMD_RESET_ENDPOINT: u32 = 14;
+/// Arrete un point de terminaison EN MARCHE et vide le TD en cours.
+///
+/// # Pourquoi cette commande manquait, et ce qu'elle corrige
+///
+/// `Reset Endpoint` ne s'applique qu'a un point ARRETE (Halted). Sur un point
+/// encore en marche -- ce qu'est un point dont le transfert vient d'expirer,
+/// puisque le controleur n'a rien rendu --, le controleur repond « Context
+/// State Error » et la reprise echoue. C'est exactement ce que le banc a
+/// montre : trois tentatives, trois echecs, transport hors service, et pas un
+/// enregistrement pose.
+///
+/// Un TD abandonne se vide par `Stop Endpoint`, puis `Set TR Dequeue Pointer`.
+/// Confondre les deux commandes, c'est croire qu'on a purge l'anneau alors
+/// qu'on n'a rien fait -- et laisser revenir l'achevement tardif qu'on voulait
+/// justement jeter.
+const CMD_STOP_ENDPOINT: u32 = 15;
 const CMD_SET_TR_DEQUEUE: u32 = 16;
 const EVT_TRANSFER: u32 = 32;
 const EVT_COMMAND_COMPLETION: u32 = 33;
@@ -150,9 +166,74 @@ const MAX_RUNTIME_DEVICES: usize = 32;
 //   * la scrutation tourne mille fois par seconde et ne doit RIEN tolerer :
 //     un peripherique HID repond a `GET_REPORT` en quelques microsecondes, et
 //     celui qui ne repond pas en quatre millisecondes ne repondra pas.
-const BUDGET_ATTENTE_NS: u64 = 500_000_000;
-/// Budget d'une attente sur le chemin de scrutation. Voir ci-dessus.
+// BOUCHAUD_BUDGETS_SEPARES_V1
+//
+// TROIS BUDGETS, PARCE QUE TROIS CHEMINS QUI N'ONT PAS LA MEME PATIENCE.
+//
+// Un seul budget de cinq cents millisecondes servait partout. C'est la
+// patience d'un bring-up -- ou une cle qui se reveille a le droit de prendre
+// son temps, ou l'utilisateur regarde un ecran de demarrage, ou rien d'autre
+// ne tourne. Appliquee au runtime, elle veut dire qu'une commande de stockage
+// qui echoue tient le verrou du pilote pendant une demi-seconde par transfert
+// -- trois par commande --, et que le clavier saute mille cinq cents tours de
+// scrutation. C'est la forme exacte de ce qui a ete decrit en ouvrant le
+// navigateur : « la souris met trop de temps a se deplacer », « FPS 2 » avec
+// le processeur a 22 %. La machine n'etait pas saturee, elle ATTENDAIT.
+//
+// RACCOURCIR NE SUFFIT PAS -- ET SEUL, C'EST PIRE.
+//
+// Abandonner une attente laisse un TD poste sur l'anneau : le peripherique
+// peut l'achever plus tard, et son evenement sera pris pour la reponse de la
+// commande suivante. Abandonner plus tot, c'est abandonner plus souvent, donc
+// empoisonner plus souvent. Ces budgets courts ne sont SURS que parce que
+// `drivers::reprise_bot` purge ce que l'abandon laisse derriere lui, et
+// refuse toute entree-sortie nouvelle avant de l'avoir fait.
+
+/// Budget de l'enumeration et des commandes du controleur.
+///
+/// Cinq cents millisecondes, et c'est acceptable ICI et nulle part ailleurs :
+/// ces chemins sont rares, ils tournent avant que l'utilisateur n'ait la main,
+/// et un peripherique lent a le droit d'y etre lent.
+const BUDGET_ENUMERATION_NS: u64 = 500_000_000;
+/// Budget d'une attente sur le chemin de scrutation HID.
+///
+/// Un peripherique HID repond a `GET_REPORT` en quelques microsecondes ; celui
+/// qui ne repond pas en quatre millisecondes ne repondra pas.
 const BUDGET_SCRUTATION_NS: u64 = 4_000_000;
+/// Budget d'un transfert Bulk du transport de masse, APRES le bring-up.
+///
+/// Soixante millisecondes : une cle USB haute vitesse rend soixante-quatre
+/// kibioctets en moins de cinq. Au-dela, ce n'est plus une cle lente, c'est
+/// une cle qui ne repond pas -- et la reponse est la reprise, pas l'attente.
+const BUDGET_RUNTIME_BOT_NS: u64 = 60_000_000;
+
+/// Le bring-up est-il termine ?
+///
+/// Pose une fois, quand l'interface prend la main. Avant : la patience de
+/// l'enumeration. Apres : celle du runtime.
+static BRING_UP_TERMINE: AtomicBool = AtomicBool::new(false);
+
+/// Declare le bring-up termine. Les budgets passent en mode runtime.
+pub fn bring_up_termine() {
+    if !BRING_UP_TERMINE.swap(true, Ordering::AcqRel) {
+        crate::serial_println!(
+            "BOUCHAUD_USB_BUDGETS_RUNTIME bot_ns={} scrutation_ns={} enumeration_ns={}",
+            BUDGET_RUNTIME_BOT_NS, BUDGET_SCRUTATION_NS, BUDGET_ENUMERATION_NS,
+        );
+    }
+}
+
+/// Budget d'un transfert du transport de masse, selon la phase du systeme.
+fn budget_bot() -> u64 {
+    if BRING_UP_TERMINE.load(Ordering::Acquire) {
+        BUDGET_RUNTIME_BOT_NS
+    } else {
+        BUDGET_ENUMERATION_NS
+    }
+}
+
+/// Alias historique : l'enumeration et les commandes du controleur.
+const BUDGET_ATTENTE_NS: u64 = BUDGET_ENUMERATION_NS;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTED: AtomicUsize = AtomicUsize::new(0);
@@ -243,6 +324,271 @@ static HID_CONTROL_FAILS: AtomicUsize = AtomicUsize::new(0);
 static DERNIER_CODE_CONTROLE: AtomicUsize = AtomicUsize::new(0);
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_BUSY: AtomicBool = AtomicBool::new(false);
+
+// ===========================================================================
+// BOUCHAUD_JETON_DU_PILOTE_V1 : le verrou se rend tout seul
+// ===========================================================================
+//
+// # Le defaut que ceci corrige
+//
+// `RUNTIME_BUSY` etait pris et rendu A LA MAIN, sur six chemins differents.
+// Entre la prise et le `store(false)`, chacun de ces chemins contient des
+// `return` : celui qui ne trouve pas de runtime, celui qui ne trouve pas de
+// support, celui dont le slot est hors table. Chaque `return` oublie etait un
+// controleur tenu POUR TOUJOURS -- et la machine paraissait alors avoir perdu
+// son clavier, son stockage et son enregistreur d'un seul coup, sans qu'aucun
+// compteur ne dise pourquoi.
+//
+// Ce lot raccourcit les budgets d'attente, donc multiplie les sorties
+// anticipees. Le faire sans supprimer cette classe de defaut aurait ete
+// echanger une attente trop longue contre un verrou perdu.
+//
+// # Ce que le jeton garantit
+//
+// Le verrou n'est plus rendu par une instruction qu'on peut oublier, mais par
+// `Drop`, que le compilateur pose sur TOUS les chemins de sortie -- `return`,
+// `?`, deroulement. Il n'existe plus de facon d'ecrire un chemin qui tienne le
+// controleur apres etre sorti.
+//
+// La comptabilite -- qui, depuis quand, combien de fois, au pire combien de
+// temps -- vit dans `drivers::proprietaire_runtime`, qui est PUR et qu'une
+// machine hote met a l'epreuve.
+
+use crate::drivers::proprietaire_runtime::{Proprietaire, Registre};
+
+static VERROU: Registre = Registre::neuf();
+
+/// Le droit de toucher au pilote xHCI, rendu par `Drop`.
+///
+/// Il ne se construit que par `prends_le_pilote` ou `attends_le_pilote`, et il
+/// n'expose aucun moyen de le rendre a la main : oublier de rendre le verrou
+/// n'est plus une faute qu'on puisse commettre.
+struct Jeton;
+
+impl Drop for Jeton {
+    fn drop(&mut self) {
+        VERROU.note_liberation(crate::kernel::timer::monotonic_ns());
+        RUNTIME_BUSY.store(false, Ordering::Release);
+    }
+}
+
+/// Prend le pilote SANS attendre. `None` s'il est deja pris.
+///
+/// C'est la prise des chemins qui ne peuvent pas attendre : la scrutation HID
+/// tourne mille fois par seconde, et le pont EP0 la suit.
+fn prends_le_pilote(qui: Proprietaire) -> Option<Jeton> {
+    if injecte(INJECTE_VERROU_TENU) {
+        VERROU.note_contention();
+        return None;
+    }
+    if RUNTIME_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        VERROU.note_contention();
+        return None;
+    }
+    VERROU.note_prise(qui, crate::kernel::timer::monotonic_ns());
+    Some(Jeton)
+}
+
+/// Prend le pilote, au plus `budget_ns`. `None` si le budget expire.
+///
+/// L'attente est BORNEE EN TEMPS et non en tours : la meme constante de tours
+/// vaut trente millisecondes sur une machine et trois cents sur une autre,
+/// selon le cout d'un `pause`. Une borne en nanosecondes vaut ce qu'elle
+/// annonce, partout -- et c'est elle qu'on peut confronter au budget d'un
+/// transfert.
+fn attends_le_pilote(qui: Proprietaire, budget_ns: u64) -> Option<Jeton> {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut premier = true;
+    loop {
+        if RUNTIME_BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            VERROU.note_prise(qui, crate::kernel::timer::monotonic_ns());
+            return Some(Jeton);
+        }
+        if premier {
+            VERROU.note_contention();
+            premier = false;
+        }
+        if crate::kernel::timer::monotonic_ns().saturating_sub(debut) >= budget_ns {
+            VERROU.note_expiration();
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Qui tient le pilote, depuis quand, et combien de temps au pire.
+pub fn etat_du_verrou() -> crate::drivers::proprietaire_runtime::Etat {
+    VERROU.etat(crate::kernel::timer::monotonic_ns())
+}
+
+// BOUCHAUD_ECART_DE_SCRUTATION_HID_V1
+//
+// # Ce que ce chiffre repond, et que rien d'autre ne repondait
+//
+// « Le clavier est deconnecte quand je tape dans Ladybird » et « le clavier a
+// saute quelques tours » produisent le meme compteur de rapports. Ce qui les
+// separe, c'est le PIRE ECART entre deux tours servis : quarante
+// millisecondes ne se sentent pas, quinze cents se sentent comme une panne.
+//
+// C'est la mesure du critere d'acceptation B : une echeance de stockage
+// injectee ne doit pas faire monter cet ecart au-dela de ce qu'un
+// utilisateur percoit.
+static DERNIER_POLL_SERVI_NS: AtomicU64 = AtomicU64::new(0);
+static ECART_POLL_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
+fn note_poll_servi(maintenant_ns: u64) {
+    let precedent = DERNIER_POLL_SERVI_NS.swap(maintenant_ns, Ordering::AcqRel);
+    if precedent == 0 {
+        return;
+    }
+    let ecart = maintenant_ns.saturating_sub(precedent);
+    ECART_POLL_MAX_NS.fetch_max(ecart, Ordering::Relaxed);
+}
+
+/// Pire ecart entre deux tours de scrutation HID servis, et le dernier.
+pub fn ecart_scrutation_hid() -> (u64, u64) {
+    (
+        ECART_POLL_MAX_NS.load(Ordering::Relaxed),
+        DERNIER_POLL_SERVI_NS.load(Ordering::Relaxed),
+    )
+}
+
+// ===========================================================================
+// BOUCHAUD_ETAT_DU_TRANSPORT_BOT_V1
+// ===========================================================================
+//
+// Le transport de masse a desormais un etat, et c'est lui -- et non l'espoir
+// -- qui decide si une commande a le droit de partir. Voir
+// `drivers::reprise_bot`, qui est pur et teste sur l'hote.
+
+static TRANSPORT_BOT: crate::drivers::reprise_bot::Transport =
+    crate::drivers::reprise_bot::Transport::neuf();
+
+/// Etat du transport Bulk-Only, pour le releve.
+pub fn releve_bot() -> crate::drivers::reprise_bot::Releve {
+    TRANSPORT_BOT.releve()
+}
+
+/// Remet le transport de masse en etat, sans attendre qu'on lui demande une
+/// entree-sortie.
+///
+/// # Pourquoi une reparation qui ne sert personne
+///
+/// La reprise avait lieu au debut de la commande SUIVANTE. Un transport qui
+/// expire sur sa derniere commande restait donc en reprise indefiniment --
+/// jusqu'a ce que quelqu'un redemande quelque chose. Tant que personne ne
+/// demandait rien, l'etat lu par un releve, par `usbetat` ou par l'ecran
+/// d'extinction disait « reprise » sur une machine dont le materiel etait
+/// parfaitement sain.
+///
+/// Ce n'est pas qu'un probleme d'affichage : c'est le dernier etat qu'une
+/// archive porte, et il ferait chercher une panne de stockage la ou il n'y en
+/// a pas.
+///
+/// Rend vrai si le transport est `Pret` en sortant. Ne bloque pas : la prise
+/// du verrou est instantanee, et un echec veut simplement dire « plus tard ».
+pub fn repare_le_transport_bot() -> bool {
+    use crate::drivers::reprise_bot::Etat;
+    match TRANSPORT_BOT.etat() {
+        Etat::Pret => return true,
+        Etat::HorsService => return false,
+        Etat::Reprise => {}
+    }
+    let Some(_jeton) = prends_le_pilote(Proprietaire::VidageBlackbox) else {
+        return false;
+    };
+    unsafe {
+        #[allow(static_mut_refs)]
+        let Some(runtime) = RUNTIME.as_mut() else {
+            return false;
+        };
+        for ic in 0..runtime.controllers.len() {
+            // Le support de l'enregistreur d'abord : c'est lui qui porte la
+            // trace, et sa reprise est la moins couteuse.
+            if let Some(mut storage) = runtime.controllers[ic].blackbox_storage.take() {
+                let ok = blackbox_reprend_le_transport(&mut runtime.controllers[ic], &mut storage);
+                runtime.controllers[ic].blackbox_storage = Some(storage);
+                if ok {
+                    return true;
+                }
+            }
+            let controleur = &mut runtime.controllers[ic];
+            for index in 0..controleur.stockage_count {
+                if !controleur.stockages[index].actif {
+                    continue;
+                }
+                let slot = controleur.stockages[index].slot_id as usize;
+                if slot >= controleur.devices.len() {
+                    continue;
+                }
+                let Some(mut device) = controleur.devices[slot].take() else {
+                    continue;
+                };
+                let ok = reprise_bot_complete(controleur, &mut device, index);
+                controleur.devices[slot] = Some(device);
+                if ok {
+                    return true;
+                }
+            }
+        }
+    }
+    TRANSPORT_BOT.etat() == Etat::Pret
+}
+
+// ===========================================================================
+// BOUCHAUD_INJECTION_DE_PANNE_USB_V1
+// ===========================================================================
+//
+// # Pourquoi une injection, et pas un test de plus
+//
+// Les trois pannes qui comptent -- une commande de stockage qui expire, un
+// CSW qui n'arrive pas, un verrou deja tenu -- ne se fabriquent pas sur
+// commande avec une vraie cle. Elles sont pourtant exactement ce qu'il faut
+// prouver : qu'une echeance de stockage NE TUE NI le clavier NI
+// l'ordonnanceur, et que le verrou revient toujours a `Aucun`.
+//
+// Le masque est a zero par defaut et n'est pose que par la commande
+// `usbfault`, qui n'existe que pour le banc. Chaque bit est CONSOMME a la
+// premiere occasion : une injection permanente ne prouverait rien de plus et
+// empecherait de verifier la reprise.
+
+/// Prochaine phase de donnees BOT : echeance forcee.
+pub const INJECTE_ECHEANCE_DONNEES: u32 = 1 << 0;
+/// Prochaine phase de statut BOT : echeance forcee.
+pub const INJECTE_ECHEANCE_STATUT: u32 = 1 << 1;
+/// Prochaine prise du verrou : refusee comme si un autre le tenait.
+pub const INJECTE_VERROU_TENU: u32 = 1 << 2;
+
+static INJECTIONS: AtomicU32 = AtomicU32::new(0);
+static INJECTIONS_CONSOMMEES: AtomicU64 = AtomicU64::new(0);
+
+/// Arme des pannes artificielles. Rend le masque resultant.
+pub fn arme_injection(masque: u32) -> u32 {
+    INJECTIONS.fetch_or(masque, Ordering::AcqRel) | masque
+}
+
+/// Consomme un bit d'injection s'il est arme.
+fn injecte(bit: u32) -> bool {
+    if INJECTIONS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+        return false;
+    }
+    INJECTIONS_CONSOMMEES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Masque arme et nombre d'injections consommees.
+pub fn injections() -> (u32, u64) {
+    (
+        INJECTIONS.load(Ordering::Relaxed),
+        INJECTIONS_CONSOMMEES.load(Ordering::Relaxed),
+    )
+}
 
 // BOUCHAUD_EQUITE_PILOTE_USB_V1
 //
@@ -3550,6 +3896,18 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
 const EP_ETAT_RUNNING: u32 = 1;
 const EP_ETAT_HALTED: u32 = 2;
 
+/// Etat d'un point de terminaison quelconque, lu dans le contexte du
+/// peripherique.
+///
+/// C'est ce que la reprise doit consulter AVANT de choisir sa commande : un
+/// point arrete se reinitialise, un point en marche s'arrete. Le meme geste
+/// sur l'autre etat echoue -- et une reprise qui echoue laisse le transport
+/// hors service alors que le materiel etait recuperable.
+fn etat_du_point(controller: &Controller, device: &Device, dci: u8) -> u32 {
+    let ctx = context_ptr(device.out_ctx_virt, controller.context_size, dci as usize);
+    unsafe { ctx_r32(ctx, 0) & 0x7 }
+}
+
 /// Silence au-dela duquel on VERIFIE l'etat du point.
 ///
 /// Trois cents millisecondes : bien plus que la periode de n'importe quel
@@ -3723,12 +4081,9 @@ pub struct ReleveHid {
 /// `visite` est appelee sous le verrou du pilote : elle doit etre courte et ne
 /// rien emettre vers le materiel.
 pub fn pour_chaque_point_hid(mut visite: impl FnMut(ReleveHid)) {
-    if RUNTIME_BUSY
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_jeton) = prends_le_pilote(Proprietaire::Diagnostic) else {
         return;
-    }
+    };
     let maintenant = crate::kernel::timer::monotonic_ns();
     unsafe {
         #[allow(static_mut_refs)]
@@ -3764,7 +4119,6 @@ pub fn pour_chaque_point_hid(mut visite: impl FnMut(ReleveHid)) {
             }
         }
     }
-    RUNTIME_BUSY.store(false, Ordering::Release);
 }
 
 fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> bool {
@@ -4249,8 +4603,21 @@ fn bulk_transfert(
     fence(Ordering::SeqCst);
     ring_doorbell(controller, slot, dci);
 
-    let event = wait_event(controller, EVT_TRANSFER, Some(slot), Some(dci))
-        .ok_or("bulk-echeance")?;
+    // LE BUDGET DU RUNTIME, PAS CELUI DE L'ENUMERATION.
+    //
+    // Ce transfert tient le verrou du pilote, et il y en a trois par commande
+    // BOT. A cinq cents millisecondes chacun, une cle qui ne repond pas gelait
+    // l'entree pendant une seconde et demie -- « la souris met trop de temps a
+    // se deplacer », « FPS 2 » avec le processeur a 22 %. La machine n'etait
+    // pas saturee, elle ATTENDAIT.
+    let event = wait_event_budget(
+        controller,
+        EVT_TRANSFER,
+        Some(slot),
+        Some(dci),
+        budget_bot(),
+    )
+    .ok_or("bulk-echeance")?;
     let cc = completion_code(event.status);
     let residu = (event.status & 0x00ff_ffff) as usize;
     if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
@@ -4290,9 +4657,35 @@ fn recupere_point_bulk(
         (st.slot_id, point.dci, point.adresse)
     };
 
-    let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
-    if command_raw(controller, 0, controle).is_err() {
-        return false;
+    // LA COMMANDE DEPEND DE L'ETAT DU POINT, ET C'EST TOUT LE CORRECTIF.
+    //
+    // `Reset Endpoint` ne s'applique qu'a un point ARRETE. Sur un point encore
+    // en marche -- ce qu'est un point dont le transfert vient d'expirer,
+    // puisque le controleur n'a rien rendu --, il repond « Context State
+    // Error » et la reprise echoue. Un TD abandonne se vide par
+    // `Stop Endpoint`, pas par `Reset Endpoint`.
+    //
+    // Cette distinction n'existait pas tant que le budget d'attente valait une
+    // demi-seconde partout : la seule facon d'arriver ici etait un STALL, et
+    // un STALL arrete vraiment le point. Avec un budget de runtime, l'echeance
+    // devient le cas COURANT -- et le cas courant n'etait pas traite.
+    let etat = etat_du_point(controller, device, dci);
+    match etat {
+        EP_ETAT_HALTED => {
+            let controle =
+                (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw(controller, 0, controle).is_err() {
+                return false;
+            }
+        }
+        EP_ETAT_RUNNING => {
+            let controle =
+                (CMD_STOP_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw(controller, 0, controle).is_err() {
+                return false;
+            }
+        }
+        _ => {}
     }
 
     // L'anneau repart de son debut. Le controleur reprendra a l'adresse qu'on
@@ -4312,10 +4705,14 @@ fn recupere_point_bulk(
     }
 
     // CLEAR_FEATURE(ENDPOINT_HALT) : destinataire « point de terminaison »
-    // (0x02), fonctionnalite zero, index = adresse du point.
-    let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
-    if control_transfer(controller, device, setup, 0, false, BUDGET_ATTENTE_NS).is_err() {
-        return false;
+    // (0x02), fonctionnalite zero, index = adresse du point. Il n'a de sens
+    // que si le PERIPHERIQUE tenait le point pour bloque ; l'emettre sur un
+    // point qui ne l'etait pas ferait echouer une reprise deja aboutie.
+    if etat == EP_ETAT_HALTED {
+        let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
+        if control_transfer(controller, device, setup, 0, false, BUDGET_ENUMERATION_NS).is_err() {
+            return false;
+        }
     }
     BULK_RECUPERATIONS.fetch_add(1, Ordering::Relaxed);
     crate::serial_println!(
@@ -4361,6 +4758,126 @@ fn bot_commande(
     vers_hote: bool,
     octets: u32,
 ) -> Result<usize, &'static str> {
+    // AUCUNE ENTREE-SORTIE NOUVELLE AVANT LA REPRISE.
+    //
+    // C'est la regle qui rend les budgets courts surs. Une commande qui part
+    // sur un transport dont la precedente a expire prendrait l'achevement
+    // tardif du TD abandonne pour le sien -- et rendrait alors le contenu d'un
+    // autre secteur, avec un CSW valide. C'est la seule classe de defaut de ce
+    // pilote qui puisse corrompre des donnees SANS rien signaler.
+    if !TRANSPORT_BOT.autorise_es() {
+        // La reprise est tentee ICI, sous le verrou deja tenu par l'appelant,
+        // et une seule fois par commande : boucler tiendrait le pilote pendant
+        // que le clavier attend.
+        if !reprise_bot_complete(controller, device, index) {
+            return Err("bot-hors-service");
+        }
+    }
+    let resultat = bot_commande_une_fois(controller, device, index, cdb, vers_hote, octets);
+    let Err(erreur) = resultat else {
+        TRANSPORT_BOT.sort_de_phase();
+        return resultat;
+    };
+
+    // UNE ECHEANCE SUIVIE D'UNE REPRISE REUSSIE EST UN TRANSITOIRE.
+    //
+    // Borner la latence, c'est abandonner plus tot -- donc plus souvent. Si
+    // chaque abandon remontait en erreur a l'appelant, le systeme de fichiers
+    // echouerait une lecture sur dix : le banc en a compte huit cent quatre-
+    // vingt sur huit mille quatre cents, toutes recuperees, toutes rendues en
+    // erreur. C'est echanger une attente trop longue contre une panne.
+    //
+    // La reprise a rendu le materiel coherent : le TD abandonne est jete, le
+    // peripherique attend un CBW neuf. Rejouer la commande une fois est donc
+    // sur, et borne -- une seule fois, jamais deux, sinon un support qui
+    // repond systematiquement de travers tiendrait le verrou sans fin.
+    if !TRANSPORT_BOT.autorise_es() && !reprise_bot_complete(controller, device, index) {
+        return Err(erreur);
+    }
+    let resultat = bot_commande_une_fois(controller, device, index, cdb, vers_hote, octets);
+    if resultat.is_ok() {
+        TRANSPORT_BOT.sort_de_phase();
+        BOT_REPRISES_UTILES.fetch_add(1, Ordering::Relaxed);
+    }
+    resultat
+}
+
+/// Commandes qui ont abouti APRES une reprise.
+///
+/// Ce chiffre separe deux situations que le compte de reprises confond : un
+/// support qui bafouille et se rattrape, et un support qui echoue vraiment.
+static BOT_REPRISES_UTILES: AtomicU64 = AtomicU64::new(0);
+
+/// Commandes rejouees avec succes apres une reprise.
+pub fn bot_reprises_utiles() -> u64 {
+    BOT_REPRISES_UTILES.load(Ordering::Relaxed)
+}
+
+/// Execute la procedure de reprise et met l'etat a jour.
+///
+/// Rend vrai quand le materiel est de nouveau coherent. Rend faux sans rien
+/// attendre quand le transport est hors service : c'est ce refus immediat qui
+/// protege le clavier d'un support mort.
+fn reprise_bot_complete(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+) -> bool {
+    use crate::drivers::reprise_bot::Etat;
+    if TRANSPORT_BOT.etat() == Etat::HorsService {
+        return false;
+    }
+    if !TRANSPORT_BOT.commence_reprise() {
+        return TRANSPORT_BOT.etat() == Etat::Pret;
+    }
+    // LES DEUX MOITIES, DANS L'ORDRE QUE LA SPECIFICATION IMPOSE.
+    //
+    // `reinitialisation_bot` fait la reinitialisation de classe PUIS le
+    // deblocage des deux points -- ce qui repose aussi le pointeur de file de
+    // chaque anneau, et donc jette le TD qu'une echeance avait laisse. C'est
+    // precisement ce qu'il faut : sans cette remise a zero, l'achevement
+    // tardif reviendrait quand meme.
+    if reinitialisation_bot(controller, device, index) {
+        TRANSPORT_BOT.reprise_reussie();
+        crate::serial_println!(
+            "BOUCHAUD_USB_BOT_REPRISE_OK slot={} index={}",
+            controller.stockages[index].slot_id, index,
+        );
+        return true;
+    }
+    let etat = TRANSPORT_BOT.reprise_echouee();
+    crate::serial_println!(
+        "BOUCHAUD_USB_BOT_REPRISE_ECHEC slot={} index={} etat={}",
+        controller.stockages[index].slot_id, index, etat.nom(),
+    );
+    false
+}
+
+fn bot_commande_une_fois(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+    cdb: &[u8],
+    vers_hote: bool,
+    octets: u32,
+) -> Result<usize, &'static str> {
+    use crate::drivers::reprise_bot::{Incident, Phase};
+    let (slot_courant, dci_courant) = {
+        let st = &controller.stockages[index];
+        (st.slot_id, st.sortie.dci)
+    };
+    /// Note un incident et rend le motif inchange.
+    macro_rules! incident {
+        ($quoi:expr, $motif:expr) => {{
+            TRANSPORT_BOT.incident(
+                $quoi,
+                slot_courant,
+                dci_courant,
+                crate::kernel::timer::monotonic_ns(),
+            );
+            return Err($motif);
+        }};
+    }
     if octets as usize > TAMPON_STOCKAGE {
         return Err("bot-trop-long");
     }
@@ -4383,24 +4900,36 @@ fn bot_commande(
     }
 
     // Phase de commande.
-    bulk_transfert(controller, index, false, enveloppe_phys, stockage::CBW_OCTETS)?;
+    TRANSPORT_BOT.entre_en_phase(Phase::Commande);
+    if let Err(erreur) = bulk_transfert(controller, index, false, enveloppe_phys, stockage::CBW_OCTETS) {
+        if erreur == "bulk-echeance" {
+            incident!(Incident::Echeance, "bot-cbw-echeance");
+        }
+        incident!(Incident::PointArrete, erreur);
+    }
 
     // Phase de donnees. Un STALL ici est prevu par le protocole : le
     // peripherique refuse les donnees et attend qu'on vienne lire son CSW. On
     // debloque le point et on continue, au lieu de declarer la cle perdue.
     let mut transferes = octets as usize;
     if octets != 0 {
+        TRANSPORT_BOT.entre_en_phase(Phase::Donnees);
+        if injecte(INJECTE_ECHEANCE_DONNEES) {
+            incident!(Incident::Echeance, "bot-injection-donnees");
+        }
         match bulk_transfert(controller, index, vers_hote, donnees_phys, octets as usize) {
             Ok(n) => transferes = n,
             Err("bulk-stall") => {
                 // Le peripherique refuse les donnees et attend qu'on vienne
-                // lire son CSW : rien n'a ete transfere.
+                // lire son CSW : rien n'a ete transfere. C'est PREVU par le
+                // protocole, et ce n'est donc pas un incident de transport.
                 transferes = 0;
                 if !recupere_point_bulk(controller, device, index, vers_hote) {
-                    return Err("bot-stall-non-recupere");
+                    incident!(Incident::PointArrete, "bot-stall-non-recupere");
                 }
             }
-            Err(erreur) => return Err(erreur),
+            Err("bulk-echeance") => incident!(Incident::Echeance, "bot-donnees-echeance"),
+            Err(erreur) => incident!(Incident::PointArrete, erreur),
         }
     }
 
@@ -4409,38 +4938,50 @@ fn bot_commande(
     // le peripherique ne suit plus le protocole, et c'est la reprise complete.
     let csw_phys = enveloppe_phys + stockage::CBW_OCTETS as u64;
     let csw_virt = enveloppe_virt + stockage::CBW_OCTETS;
+    TRANSPORT_BOT.entre_en_phase(Phase::Statut);
+    if injecte(INJECTE_ECHEANCE_STATUT) {
+        incident!(Incident::Echeance, "bot-injection-statut");
+    }
     let lu = match bulk_transfert(controller, index, true, csw_phys, stockage::CSW_OCTETS) {
         Ok(n) => n,
         Err("bulk-stall") => {
             if !recupere_point_bulk(controller, device, index, true) {
-                return Err("bot-csw-non-recupere");
+                incident!(Incident::PointArrete, "bot-csw-non-recupere");
             }
-            bulk_transfert(controller, index, true, csw_phys, stockage::CSW_OCTETS)
-                .map_err(|_| "bot-csw-illisible")?
+            match bulk_transfert(controller, index, true, csw_phys, stockage::CSW_OCTETS) {
+                Ok(n) => n,
+                Err("bulk-echeance") => incident!(Incident::Echeance, "bot-csw-echeance"),
+                Err(_) => incident!(Incident::StatutInvalide, "bot-csw-illisible"),
+            }
         }
-        Err(erreur) => return Err(erreur),
+        Err("bulk-echeance") => incident!(Incident::Echeance, "bot-csw-echeance"),
+        Err(erreur) => incident!(Incident::PointArrete, erreur),
     };
     // Un CSW tronque n'est pas un CSW abime : c'est autre chose. Le decoder
     // sur un tampon a moitie rempli lirait un residu et un statut inventes,
     // dont l'un des deux dirait « tout va bien ».
     if lu < stockage::CSW_OCTETS {
-        reinitialisation_bot(controller, device, index);
-        return Err("bot-csw-tronque");
+        incident!(Incident::StatutInvalide, "bot-csw-tronque");
     }
 
     let brut = unsafe { core::slice::from_raw_parts(csw_virt as *const u8, stockage::CSW_OCTETS) };
     let Some(csw) = stockage::decode_csw(brut) else {
-        reinitialisation_bot(controller, device, index);
-        return Err("bot-csw-invalide");
+        incident!(Incident::StatutInvalide, "bot-csw-invalide");
     };
     if !stockage::transfert_complet(&csw, etiquette) {
         if csw.statut == stockage::StatutCsw::ErreurDePhase {
             // Erreur de phase : le peripherique et l'hote ne sont plus d'accord
             // sur l'etat du transport. Rien d'autre que la reprise complete ne
-            // les remet d'accord.
-            reinitialisation_bot(controller, device, index);
-            return Err("bot-erreur-de-phase");
+            // les remet d'accord -- et elle a lieu AVANT la commande suivante,
+            // pas ici : la faire sous une commande en cours reentrerait dans le
+            // transport qu'on essaie de reparer.
+            incident!(Incident::PhaseIncoherente, "bot-erreur-de-phase");
         }
+        // UNE COMMANDE REFUSEE N'EST PAS UN TRANSPORT CASSE.
+        //
+        // `TEST UNIT READY` sur une unite qui monte en puissance repond
+        // exactement comme ceci, plusieurs fois de suite, et c'est normal.
+        // Passer en reprise ici condamnerait chaque cle lente au demarrage.
         return Err("bot-commande-echouee");
     }
 
@@ -4508,6 +5049,10 @@ fn demarre_stockage(
     st.blocs = capacite.blocs();
     let (taille_bloc, blocs, slot_id, amovible) = (st.taille_bloc, st.blocs, st.slot_id, st.amovible);
     STOCKAGES_PRETS.fetch_add(1, Ordering::Relaxed);
+    // Le support vient de repondre a `INQUIRY` et `READ CAPACITY` : le
+    // transport est coherent, quoi qu'il ait fallu traverser pour en arriver
+    // la. Les compteurs d'histoire, eux, survivent.
+    TRANSPORT_BOT.remet_a_neuf();
     crate::serial_println!(
         "BOUCHAUD_USB_STOCKAGE_PRET slot={} blocs={} taille_bloc={} octets={} amovible={}",
         slot_id, blocs, taille_bloc, capacite.octets(), amovible as u8,
@@ -4654,12 +5199,20 @@ static USB_TAILLE_BLOC: AtomicUsize = AtomicUsize::new(0);
 /// Requetes refusees parce que le pilote USB etait occupe.
 static USB_OCCUPE: AtomicUsize = AtomicUsize::new(0);
 
-/// Tours de garde avant d'abandonner l'attente du verrou du pilote USB.
+/// Attente maximale du verrou du pilote, pour le systeme de fichiers.
 ///
-/// Une commande BOT dure quelques millisecondes. Attendre sans limite ferait
-/// d'un pilote USB bloque un systeme de fichiers bloque ; rendre `Erreur`
-/// apres une attente bornee laisse l'appelant decider.
-const ATTENTE_RUNTIME: usize = 50_000_000;
+/// # Pourquoi en nanosecondes, et plus en tours
+///
+/// C'etaient cinquante millions de TOURS de `pause`. Un tour ne dure pas la
+/// meme chose sur deux machines : la meme constante vaut trente millisecondes
+/// sur l'une et plus de trois cents sur l'autre. Une borne en nanosecondes
+/// vaut ce qu'elle annonce, partout -- et surtout, elle se compare aux
+/// budgets des transferts qu'elle doit couvrir.
+///
+/// Deux cents millisecondes : trois commandes BOT au budget runtime, de quoi
+/// laisser passer une lecture en cours sans jamais faire d'un pilote bloque un
+/// systeme de fichiers bloque.
+const ATTENTE_RUNTIME_NS: u64 = 200_000_000;
 
 /// Prend le pilote USB pour la duree d'une operation.
 fn avec_le_pilote_usb<R>(action: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
@@ -4690,24 +5243,15 @@ fn avec_le_pilote_usb<R>(action: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
             EQUITE_ENREGISTREUR.note_cession();
         }
     }
-    let mut tours = 0usize;
-    while RUNTIME_BUSY
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        tours += 1;
-        if tours >= ATTENTE_RUNTIME {
-            USB_OCCUPE.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-        core::hint::spin_loop();
-    }
-    let resultat = unsafe {
+    let Some(_jeton) = attends_le_pilote(Proprietaire::SystemeDeFichiers, ATTENTE_RUNTIME_NS)
+    else {
+        USB_OCCUPE.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    unsafe {
         #[allow(static_mut_refs)]
         RUNTIME.as_mut().map(action)
-    };
-    RUNTIME_BUSY.store(false, Ordering::Release);
-    resultat
+    }
 }
 
 /// Le premier support pret, s'il y en a un.
@@ -5090,12 +5634,9 @@ pub fn repli_ep0_compteurs() -> (u64, u64) {
 /// achevements. Ce qui change, c'est la DUREE de sa tenue -- un transfert de
 /// controle, pas cinq.
 fn repli_ep0_un_tour() -> TourRepli {
-    if RUNTIME_BUSY
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_jeton) = prends_le_pilote(Proprietaire::ReplieHid) else {
         return TourRepli::Occupe;
-    }
+    };
     // LE CURSEUR TOURNE SUR LES DEUX AXES.
     //
     // Il choisit le controleur de depart ET le point de depart dans ce
@@ -5122,7 +5663,6 @@ fn repli_ep0_un_tour() -> TourRepli {
             }
         }
     }
-    RUNTIME_BUSY.store(false, Ordering::Release);
     if servi {
         TourRepli::Servi
     } else {
@@ -5279,43 +5819,35 @@ consequence=clavier-muet-sans-transport"
 /// c'est le tick qui l'elit, pas la fin d'une trame.
 /// L'ENREGISTREUR DE VOL N'EST PAS SUR LE CHEMIN DE L'ENTREE.
 ///
-/// # Ce qu'il coutait a l'entree
+/// # Ce qu'il coutait a l'entree, et ce qu'il ne coute plus
 ///
 /// `poll()` -- la fonction que le fil d'entree appelle mille fois par seconde
-/// -- se terminait par `blackbox::poll()`. Toutes les 250 ms, celui-ci ecrit
-/// plusieurs enregistrements sur la cle USB, par transferts Bulk SYNCHRONES.
-/// Sur le TRIGKEY, la cle de demarrage EST la cible de l'enregistreur : chaque
-/// scrutation d'entree payait donc l'enregistreur.
+/// -- se terminait par `blackbox::poll()`. Toutes les 250 ms, celui-ci
+/// ecrivait plusieurs enregistrements sur la cle USB, par transferts Bulk
+/// SYNCHRONES. Sur le TRIGKEY, la cle de demarrage EST la cible de
+/// l'enregistreur : chaque scrutation d'entree payait donc l'enregistreur.
 ///
 /// Rien de tout cela ne se voyait sous QEMU : sans cle cible,
-/// `blackbox_storage_ready()` est faux et la fonction sort immediatement. Le
-/// defaut n'existait que sur la machine, ce qui est la pire facon d'exister.
+/// `blackbox_storage_ready()` etait faux et la fonction sortait
+/// immediatement. Le defaut n'existait que sur la machine, ce qui est la pire
+/// facon d'exister.
 ///
-/// # Pourquoi un fil separe est SUR
-///
-/// `blackbox_append_record` prend deja `RUNTIME_BUSY` par echange compare, et
-/// SAUTE l'enregistrement s'il est occupe -- le compteur `bb_busy_skips`
-/// existait avant ce lot. L'appeler depuis un autre fil ne cree donc aucune
-/// concurrence nouvelle : au pire un enregistrement est saute, et il est
-/// compte.
-///
-/// La cadence est de vingt millisecondes ; `blackbox::poll()` se limite
-/// lui-meme a 250 ms, et n'ecrit donc pas plus qu'avant.
+/// Depuis V3, `blackbox::poll()` ne touche plus que la memoire. Ce fil ne
+/// prend plus aucun verrou, n'emet plus aucun transfert, et ne peut plus
+/// renoncer. Il reste un fil separe pour une raison qui subsiste : le
+/// compositeur ne doit pas payer le formatage de quatre echantillons toutes
+/// les 250 ms, si peu qu'il coute.
 fn fil_blackbox() -> ! {
     loop {
-        // UNE FENETRE RENDUE SE REPREND TOUT DE SUITE.
+        // LA CADENCE NE VARIE PLUS, PARCE QUE RIEN NE PEUT PLUS LA FAIRE
+        // RENONCER.
         //
-        // `poll()` rend vrai quand il a du renoncer faute d'avoir pu prendre
-        // le pilote -- le systeme de fichiers travaillait sur la cle. Attendre
-        // alors vingt millisecondes de plus, c'est laisser filer la trace
-        // exactement au moment ou elle devient interessante : les trois
-        // archives physiques s'arretent toutes a l'instant ou le navigateur
-        // demarre et se met a ecrire.
-        if crate::kernel::blackbox::poll() {
-            crate::kernel::task::sleep_ticks(1);
-        } else {
-            crate::kernel::task::sleep_ticks(20);
-        }
+        // `poll()` rendait vrai quand le pilote USB l'avait fait renoncer, et
+        // ce fil repassait alors au tour suivant plutot qu'au vingtieme. Depuis
+        // V3, `poll()` ne touche que la memoire : il ne renonce jamais, et la
+        // fenetre qu'il consomme est toujours celle qu'il annonce.
+        crate::kernel::blackbox::poll();
+        crate::kernel::task::sleep_ticks(20);
     }
 }
 
@@ -5433,10 +5965,7 @@ pub fn poll() {
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
-    if RUNTIME_BUSY
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_jeton) = prends_le_pilote(Proprietaire::Hid) else {
         // LE CLAVIER NE SE DECONNECTE PAS : ON L'AFFAME.
         //
         // Renoncer ici, c'est ne pas lire les rapports HID de ce tour. Une
@@ -5450,8 +5979,9 @@ pub fn poll() {
             eq::FAMINE_AVANT_PRIORITE_NS,
         );
         return;
-    }
+    };
     EQUITE_HID.succes();
+    note_poll_servi(crate::kernel::timer::monotonic_ns());
 
     // L'heure de la prochaine relecture des ports, decidee UNE fois pour tous
     // les controleurs : la calculer par controleur ferait scruter le second
@@ -5539,7 +6069,6 @@ pub fn poll() {
             }
         }
     }
-    RUNTIME_BUSY.store(false, Ordering::Release);
 }
 
 /// Nom lisible d'une vitesse xHCI.
@@ -5646,7 +6175,8 @@ pub fn lsusb(attente_ms: u64) {
         DERNIERE_SCRUTATION_PORTS_NS.store(0, Ordering::Relaxed);
         poll();
     }
-    if RUNTIME_BUSY.swap(true, Ordering::Acquire) {
+    let jeton = prends_le_pilote(Proprietaire::Diagnostic);
+    if jeton.is_none() {
         crate::println!("lsusb: enumeration en cours, reessayer");
         return;
     }
@@ -5708,7 +6238,7 @@ pub fn lsusb(attente_ms: u64) {
         );
     }
     log_stockage();
-    RUNTIME_BUSY.store(false, Ordering::Release);
+    drop(jeton);
     if total == 0 {
         crate::println!("lsusb: aucun peripherique USB enumere");
     }

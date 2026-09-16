@@ -15,7 +15,31 @@ const BLACKBOX_HEADER_BYTES: usize = 64;
 const BLACKBOX_PAYLOAD_MAX: usize = BLACKBOX_RECORD_BYTES - BLACKBOX_HEADER_BYTES;
 const BLACKBOX_RECORD_MAGIC: &[u8; 8] = b"BOUBBX01";
 const BLACKBOX_RECORD_VERSION: u16 = 1;
-const BLACKBOX_DMA_BYTES: usize = 64 * 1024;
+// BOUCHAUD_VIDAGE_PAR_LOTS_V1
+//
+// # Deux zones, et pourquoi elles ne peuvent plus partager l'offset zero
+//
+// Le tampon DMA servait a la fois d'enveloppe -- CBW puis CSW -- et de zone
+// de donnees, toutes deux a l'offset zero. Cela marchait tant qu'on posait un
+// enregistrement a la fois : l'enveloppe part, PUIS les donnees sont copiees.
+//
+// Un lot se construit autrement. Les enregistrements sont formates DIRECTEMENT
+// dans la zone DMA -- c'est ce qui evite une copie par enregistrement sur les
+// huit mebioctets d'un vidage final --, et ils y sont deja quand le CBW doit
+// partir. Les deux zones sont donc separees, et c'est cette separation qui
+// rend le lot possible.
+const BLACKBOX_ENVELOPPE_OCTETS: usize = 4096;
+/// Zone de donnees : seize enregistrements de quatre kibioctets.
+const BLACKBOX_DONNEES_MAX: usize = 64 * 1024;
+const BLACKBOX_DMA_BYTES: usize = BLACKBOX_ENVELOPPE_OCTETS + BLACKBOX_DONNEES_MAX;
+/// Enregistrements par lot : ce que la zone de donnees peut tenir.
+const BLACKBOX_RECORDS_PAR_LOT: usize = BLACKBOX_DONNEES_MAX / BLACKBOX_RECORD_BYTES;
+/// Attente maximale du verrou du pilote pour un lot de vidage.
+///
+/// Deux cents millisecondes, comme le systeme de fichiers : le vidage n'a lieu
+/// qu'a l'extinction, ou son budget total est de cinq secondes, et il n'y a
+/// personne dont la latence souffrirait de cette attente.
+const ATTENTE_VIDAGE_NS: u64 = 200_000_000;
 const BLACKBOX_SCAN_GPT_ENTRIES: usize = 16;
 const BLACKBOX_SYNC_EVERY: u32 = 64;
 const BLACKBOX_KIND_FATAL: u16 = 9;
@@ -153,12 +177,13 @@ fn blackbox_bulk_transfer(
     controller: &mut Controller,
     storage: &mut BlackboxStorage,
     input: bool,
+    offset: usize,
     len: usize,
 ) -> Result<usize, &'static str> {
     if len == 0 {
         return Ok(0);
     }
-    if len > storage.buffer_len {
+    if offset.saturating_add(len) > storage.buffer_len {
         return Err("blackbox-dma-buffer-too-small");
     }
     let (dci, ring) = if input {
@@ -170,16 +195,30 @@ fn blackbox_bulk_transfer(
     ring_push(
         ring,
         Trb {
-            parameter: storage.buffer_phys,
+            parameter: storage.buffer_phys + offset as u64,
             status: len as u32,
             control: (TRB_NORMAL << 10) | TRB_IOC | if input { TRB_ISP } else { 0 },
         },
     );
     ring_doorbell(controller, storage.slot_id, dci);
 
-    let event = wait_event(controller, EVT_TRANSFER, Some(storage.slot_id), Some(dci))
-        .ok_or("blackbox-bulk-timeout")?;
+    // LE BUDGET DU RUNTIME, PAS CELUI DE L'ENUMERATION.
+    //
+    // Ce transfert tient le verrou du pilote. Lui laisser une demi-seconde,
+    // c'est faire sauter au clavier cinq cents tours de scrutation pour une
+    // cle qui ne repond pas. Voir `budget_bot`.
+    let event = wait_event_budget(
+        controller,
+        EVT_TRANSFER,
+        Some(storage.slot_id),
+        Some(dci),
+        budget_bot(),
+    )
+    .ok_or("blackbox-bulk-timeout")?;
     let cc = completion_code(event.status);
+    if cc == CC_STALL {
+        return Err("blackbox-bulk-stall");
+    }
     if cc != CC_SUCCESS && cc != CC_SHORT_PACKET {
         return Err("blackbox-bulk-status");
     }
@@ -187,6 +226,133 @@ fn blackbox_bulk_transfer(
     Ok(len.saturating_sub(residual.min(len)))
 }
 
+/// Une commande BOT sur le support de l'enregistreur.
+///
+/// `longueur` est la taille de la phase de donnees, DEJA en place dans la
+/// zone de donnees du tampon DMA pour une ecriture, a y relire pour une
+/// lecture. Le lot final ne passe donc pas par un tampon intermediaire.
+fn blackbox_bot_en_place(
+    controller: &mut Controller,
+    storage: &mut BlackboxStorage,
+    cdb: &[u8],
+    longueur: usize,
+    data_in: bool,
+) -> Result<usize, &'static str> {
+    use crate::drivers::reprise_bot::{Incident, Phase};
+
+    if longueur > BLACKBOX_DONNEES_MAX {
+        return Err("blackbox-bot-data-too-large");
+    }
+    // AUCUNE ENTREE-SORTIE AVANT QUE LA REPRISE N'AIT EU LIEU.
+    //
+    // C'est la regle qui rend les budgets courts surs : une commande qui part
+    // sur un transport dont la precedente a expire prendrait l'achevement
+    // tardif du TD abandonne pour le sien.
+    if !TRANSPORT_BOT.autorise_es() {
+        return Err("blackbox-bot-refuse");
+    }
+
+    storage.tag = storage.tag.wrapping_add(1).max(1);
+    let tag = storage.tag;
+    let mut cbw = [0u8; stockage_blackbox::CBW_OCTETS];
+    if !stockage_blackbox::encode_cbw(&mut cbw, tag, longueur as u32, data_in, 0, cdb) {
+        return Err("blackbox-cbw");
+    }
+
+    unsafe {
+        copy_nonoverlapping(cbw.as_ptr(), storage.buffer_virt as *mut u8, cbw.len());
+    }
+    TRANSPORT_BOT.entre_en_phase(Phase::Commande);
+    match blackbox_bulk_transfer(controller, storage, false, 0, cbw.len()) {
+        Ok(n) if n == cbw.len() => {}
+        Ok(_) => return Err(blackbox_incident(storage, Incident::StatutInvalide, "blackbox-cbw-short")),
+        Err("blackbox-bulk-timeout") => {
+            return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-cbw-timeout"))
+        }
+        Err(e) => return Err(blackbox_incident(storage, Incident::PointArrete, e)),
+    }
+
+    let mut actual = 0usize;
+    if longueur != 0 {
+        TRANSPORT_BOT.entre_en_phase(Phase::Donnees);
+        if injecte(INJECTE_ECHEANCE_DONNEES) {
+            return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-injection-donnees"));
+        }
+        match blackbox_bulk_transfer(
+            controller,
+            storage,
+            data_in,
+            BLACKBOX_ENVELOPPE_OCTETS,
+            longueur,
+        ) {
+            Ok(n) => actual = n,
+            Err("blackbox-bulk-timeout") => {
+                return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-data-timeout"))
+            }
+            Err(e) => return Err(blackbox_incident(storage, Incident::PointArrete, e)),
+        }
+    }
+
+    unsafe {
+        write_bytes(storage.buffer_virt as *mut u8, 0, stockage_blackbox::CSW_OCTETS);
+    }
+    TRANSPORT_BOT.entre_en_phase(Phase::Statut);
+    if injecte(INJECTE_ECHEANCE_STATUT) {
+        return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-injection-statut"));
+    }
+    let got = match blackbox_bulk_transfer(
+        controller,
+        storage,
+        true,
+        0,
+        stockage_blackbox::CSW_OCTETS,
+    ) {
+        Ok(n) => n,
+        Err("blackbox-bulk-timeout") => {
+            return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-csw-timeout"))
+        }
+        Err(e) => return Err(blackbox_incident(storage, Incident::PointArrete, e)),
+    };
+    if got != stockage_blackbox::CSW_OCTETS {
+        return Err(blackbox_incident(storage, Incident::StatutInvalide, "blackbox-csw-short"));
+    }
+    let csw_bytes = unsafe {
+        core::slice::from_raw_parts(storage.buffer_virt as *const u8, stockage_blackbox::CSW_OCTETS)
+    };
+    let Some(csw) = stockage_blackbox::decode_csw(csw_bytes) else {
+        return Err(blackbox_incident(storage, Incident::StatutInvalide, "blackbox-csw-invalid"));
+    };
+    if !stockage_blackbox::transfert_complet(&csw, tag) {
+        if csw.statut == stockage_blackbox::StatutCsw::ErreurDePhase {
+            return Err(blackbox_incident(storage, Incident::PhaseIncoherente, "blackbox-csw-phase"));
+        }
+        TRANSPORT_BOT.sort_de_phase();
+        return Err("blackbox-csw-failure");
+    }
+    TRANSPORT_BOT.sort_de_phase();
+    Ok(if longueur == 0 { 0 } else { actual })
+}
+
+/// Note un incident sur le transport et rend le motif, inchange.
+///
+/// Le passage en reprise a lieu ICI plutot que chez l'appelant pour qu'il n'y
+/// ait aucun chemin d'erreur qui laisse le transport en `Pret`.
+fn blackbox_incident(
+    storage: &BlackboxStorage,
+    quoi: crate::drivers::reprise_bot::Incident,
+    motif: &'static str,
+) -> &'static str {
+    TRANSPORT_BOT.incident(
+        quoi,
+        storage.slot_id,
+        storage.dci_out,
+        crate::kernel::timer::monotonic_ns(),
+    );
+    motif
+}
+
+/// Compatibilite : une commande BOT dont les donnees vivent dans un tampon
+/// de l'appelant. Utilisee par le bring-up, qui lit de petites structures.
 fn blackbox_bot(
     controller: &mut Controller,
     storage: &mut BlackboxStorage,
@@ -194,58 +360,29 @@ fn blackbox_bot(
     data: &mut [u8],
     data_in: bool,
 ) -> Result<usize, &'static str> {
-    if data.len() > storage.buffer_len {
+    if data.len() > BLACKBOX_DONNEES_MAX {
         return Err("blackbox-bot-data-too-large");
     }
-
-    storage.tag = storage.tag.wrapping_add(1).max(1);
-    let tag = storage.tag;
-    let mut cbw = [0u8; stockage_blackbox::CBW_OCTETS];
-    if !stockage_blackbox::encode_cbw(&mut cbw, tag, data.len() as u32, data_in, 0, cdb) {
-        return Err("blackbox-cbw");
-    }
-
-    unsafe {
-        copy_nonoverlapping(cbw.as_ptr(), storage.buffer_virt as *mut u8, cbw.len());
-    }
-    if blackbox_bulk_transfer(controller, storage, false, cbw.len())? != cbw.len() {
-        return Err("blackbox-cbw-short");
-    }
-
-    let mut actual = 0usize;
-    if !data.is_empty() {
-        if !data_in {
-            unsafe {
-                copy_nonoverlapping(data.as_ptr(), storage.buffer_virt as *mut u8, data.len());
-            }
-        }
-        actual = blackbox_bulk_transfer(controller, storage, data_in, data.len())?;
-        if data_in && actual != 0 {
-            unsafe {
-                copy_nonoverlapping(
-                    storage.buffer_virt as *const u8,
-                    data.as_mut_ptr(),
-                    actual.min(data.len()),
-                );
-            }
+    if !data_in && !data.is_empty() {
+        unsafe {
+            copy_nonoverlapping(
+                data.as_ptr(),
+                (storage.buffer_virt + BLACKBOX_ENVELOPPE_OCTETS) as *mut u8,
+                data.len(),
+            );
         }
     }
-
-    unsafe {
-        write_bytes(storage.buffer_virt as *mut u8, 0, stockage_blackbox::CSW_OCTETS);
+    let actual = blackbox_bot_en_place(controller, storage, cdb, data.len(), data_in)?;
+    if data_in && actual != 0 {
+        unsafe {
+            copy_nonoverlapping(
+                (storage.buffer_virt + BLACKBOX_ENVELOPPE_OCTETS) as *const u8,
+                data.as_mut_ptr(),
+                actual.min(data.len()),
+            );
+        }
     }
-    let got = blackbox_bulk_transfer(controller, storage, true, stockage_blackbox::CSW_OCTETS)?;
-    if got != stockage_blackbox::CSW_OCTETS {
-        return Err("blackbox-csw-short");
-    }
-    let csw_bytes = unsafe {
-        core::slice::from_raw_parts(storage.buffer_virt as *const u8, stockage_blackbox::CSW_OCTETS)
-    };
-    let csw = stockage_blackbox::decode_csw(csw_bytes).ok_or("blackbox-csw-invalid")?;
-    if !stockage_blackbox::transfert_complet(&csw, tag) {
-        return Err("blackbox-csw-failure");
-    }
-    Ok(if data.is_empty() { 0 } else { actual })
+    Ok(actual)
 }
 
 fn blackbox_read_blocks(
@@ -259,7 +396,7 @@ fn blackbox_read_blocks(
         return Err("blackbox-read-address");
     }
     let bytes = blocks as usize * storage.block_size as usize;
-    if out.len() != bytes || bytes > storage.buffer_len {
+    if out.len() != bytes || bytes > BLACKBOX_DONNEES_MAX {
         return Err("blackbox-read-size");
     }
     let cdb = stockage_blackbox::cdb_transfert_10(false, lba as u32, blocks);
@@ -281,7 +418,7 @@ fn blackbox_write_blocks(
         return Err("blackbox-write-address");
     }
     let bytes = blocks as usize * storage.block_size as usize;
-    if data.len() != bytes || bytes > storage.buffer_len {
+    if data.len() != bytes || bytes > BLACKBOX_DONNEES_MAX {
         return Err("blackbox-write-size");
     }
     let cdb = stockage_blackbox::cdb_transfert_10(true, lba as u32, blocks);
@@ -511,6 +648,12 @@ fn configure_blackbox_storage(
                 storage.partition_blocks,
             );
             controller.blackbox_storage = Some(storage);
+            // UN SUPPORT NEUF REPART D'UN TRANSPORT NEUF.
+            //
+            // Sans cela, un support retire puis rebranche resterait hors
+            // service pour le reste de la session -- et un debranchement
+            // accidentel couterait l'enregistreur jusqu'au redemarrage.
+            TRANSPORT_BOT.remet_a_neuf();
             BLACKBOX_STORAGE_READY.store(true, Ordering::Release);
             Ok(true)
         }
@@ -550,71 +693,38 @@ fn blackbox_error_code(error: &'static str) -> u64 {
     }
 }
 
-fn blackbox_crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn put_u16(out: &mut [u8], off: usize, value: u16) {
-    out[off..off + 2].copy_from_slice(&value.to_le_bytes());
-}
-fn put_u32(out: &mut [u8], off: usize, value: u32) {
-    out[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-fn put_u64(out: &mut [u8], off: usize, value: u64) {
-    out[off..off + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn blackbox_write_record(
+/// Ecrit un lot d'enregistrements CONTIGUS, deja formates dans la zone de
+/// donnees du tampon DMA.
+///
+/// Une commande BOT, c'est trois transferts et deux attentes, quelle que soit
+/// la quantite de donnees. Poser seize enregistrements en une commande au lieu
+/// de seize paie le protocole une fois au lieu de seize -- et c'est ce qui
+/// fait tenir un vidage final de huit mebioctets dans le budget d'un ecran
+/// d'extinction.
+fn blackbox_write_lot(
     controller: &mut Controller,
     storage: &mut BlackboxStorage,
-    kind: u16,
-    boot_id: u64,
-    sequence: u64,
-    ts_ns: u64,
-    trace_end: u64,
-    payload: &[u8],
+    lba: u64,
+    records: usize,
 ) -> Result<(), &'static str> {
-    if storage.disabled || payload.len() > BLACKBOX_PAYLOAD_MAX {
-        return Err("blackbox-disabled-or-payload");
+    if records == 0 {
+        return Ok(());
     }
-    let record_blocks = (BLACKBOX_RECORD_BYTES / 512) as u64;
-    let slots = storage.partition_blocks / record_blocks;
-    if slots == 0 {
-        return Err("blackbox-no-slots");
+    if storage.block_size != 512 || lba > u32::MAX as u64 {
+        return Err("blackbox-write-address");
     }
-
-    let mut record = [0u8; BLACKBOX_RECORD_BYTES];
-    record[0..8].copy_from_slice(BLACKBOX_RECORD_MAGIC);
-    put_u16(&mut record, 8, BLACKBOX_RECORD_VERSION);
-    put_u16(&mut record, 10, kind);
-    put_u32(&mut record, 12, BLACKBOX_HEADER_BYTES as u32);
-    put_u64(&mut record, 16, boot_id);
-    put_u64(&mut record, 24, sequence);
-    put_u64(&mut record, 32, ts_ns);
-    put_u32(&mut record, 40, payload.len() as u32);
-    put_u32(&mut record, 44, blackbox_crc32(payload));
-    put_u64(&mut record, 48, trace_end);
-    put_u32(&mut record, 56, 0);
-    put_u32(&mut record, 60, 0);
-    record[BLACKBOX_HEADER_BYTES..BLACKBOX_HEADER_BYTES + payload.len()].copy_from_slice(payload);
-
-    let slot = sequence % slots;
-    let lba = storage.partition_first.saturating_add(slot.saturating_mul(record_blocks));
-    blackbox_write_blocks(controller, storage, lba, record_blocks as u16, &mut record)?;
-
-    BLACKBOX_WRITES.fetch_add(1, Ordering::Relaxed);
-    storage.since_sync = storage.since_sync.saturating_add(1);
-    if kind == BLACKBOX_KIND_FATAL || storage.since_sync >= BLACKBOX_SYNC_EVERY {
-        blackbox_sync_cache(controller, storage);
+    let blocks = records * (BLACKBOX_RECORD_BYTES / 512);
+    let bytes = blocks * 512;
+    if bytes > BLACKBOX_DONNEES_MAX || blocks > u16::MAX as usize {
+        return Err("blackbox-write-size");
     }
+    let cdb = stockage_blackbox::cdb_transfert_10(true, lba as u32, blocks as u16);
+    let got = blackbox_bot_en_place(controller, storage, &cdb, bytes, false)?;
+    if got != bytes {
+        return Err("blackbox-write-short");
+    }
+    BLACKBOX_WRITES.fetch_add(records as u64, Ordering::Relaxed);
+    storage.since_sync = storage.since_sync.saturating_add(records as u32);
     Ok(())
 }
 
@@ -640,86 +750,374 @@ pub fn blackbox_storage_extended_counters() -> (u64, u64, u64, u64, u64, u64) {
     )
 }
 
-pub fn blackbox_append_record(
-    kind: u16,
-    boot_id: u64,
-    sequence: u64,
-    ts_ns: u64,
-    trace_end: u64,
-    payload: &[u8],
-) -> bool {
-    if payload.len() > BLACKBOX_PAYLOAD_MAX || !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
-        return false;
+/// Vide un lot d'enregistrements du tambour RAM vers le support.
+///
+/// `fournit` remplit une zone de quatre kibioctets avec l'image COMPLETE d'un
+/// enregistrement -- en-tete et charge utile -- et rend son numero. Rendre
+/// `None` termine le lot. La zone qu'elle recoit est DIRECTEMENT le tampon
+/// DMA : un vidage final deplace jusqu'a huit mebioctets, et une copie
+/// intermediaire se paierait a chaque enregistrement.
+///
+/// Rend le nombre d'enregistrements effectivement poses.
+///
+/// # Ce que cette fonction remplace
+///
+/// `blackbox_append_record`, qui ecrivait UN enregistrement par appel, verrou
+/// pris et rendu a chaque fois, depuis le chemin chaud de l'enregistreur.
+/// C'est ce chemin-la qui est supprime : le pilote n'est plus sollicite que
+/// par le vidage, et le vidage n'a lieu qu'a l'extinction.
+pub fn blackbox_vidange_lot(
+    maximum: usize,
+    mut fournit: impl FnMut(&mut [u8]) -> Option<u64>,
+) -> usize {
+    if !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
+        return 0;
     }
-    if RUNTIME_BUSY.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    let maximum = maximum.min(BLACKBOX_RECORDS_PAR_LOT);
+    if maximum == 0 {
+        return 0;
+    }
+    // LE VIDAGE ATTEND, PARCE QU'IL PEUT ATTENDRE -- ET QUE LUI SEUL LE PEUT.
+    //
+    // Une prise INSTANTANEE etait juste tant que le vidage avait lieu quatre
+    // fois par seconde : renoncer coutait un quart de seconde. Depuis V3, il
+    // n'a plus lieu qu'a l'extinction, et renoncer y coute TOUTE LA TRACE.
+    //
+    // Le banc l'a montre net : le fil de charge lisait encore le volume
+    // pendant l'extinction, le verrou n'etait jamais libre a l'instant precis
+    // ou le vidage passait, `sautes_occupe=21`, `ecritures=0` -- mille sept
+    // cent vingt-cinq enregistrements parfaitement poses en RAM, et pas un
+    // seul sur la cle.
+    //
+    // La reclamation d'equite part AVANT l'attente : c'est elle qui fait
+    // ceder `avec_le_pilote_usb`, et sans elle une lecture soutenue garde le
+    // verrou presque en continu.
+    super::xhci_active::enregistreur_a_saute(crate::kernel::timer::monotonic_ns());
+    let Some(_jeton) = attends_le_pilote(Proprietaire::VidageBlackbox, ATTENTE_VIDAGE_NS) else {
         BLACKBOX_BUSY_SKIPS.fetch_add(1, Ordering::Relaxed);
-        // RENONCER UNE FOIS EST NORMAL, RENONCER TOUJOURS NE L'EST PAS.
-        //
-        // C'est ici que l'archive du 16 septembre s'est arretee : le systeme
-        // de fichiers lisait le navigateur sur la MEME cle, tenait le verrou
-        // en continu, et ce `return false` s'executait sans fin. Passe un
-        // seuil, on reclame le passage ; `avec_le_pilote_usb` le cede.
-        super::xhci_active::enregistreur_a_saute(crate::kernel::timer::monotonic_ns());
-        return false;
-    }
+        return 0;
+    };
     super::xhci_active::enregistreur_a_reussi();
 
-    let mut ok = false;
+    let mut poses = 0usize;
     unsafe {
-        if let Some(runtime) = RUNTIME.as_mut() {
-            for controller in runtime.controllers.iter_mut() {
-                let Some(mut storage) = controller.blackbox_storage.take() else { continue; };
-                // `disabled` est reserve a un futur retrait materiel explicite.
-                // Une erreur de transport transitoire ne desactive plus le recorder.
-                let result = blackbox_write_record(
-                    controller, &mut storage, kind, boot_id, sequence, ts_ns, trace_end, payload,
-                );
-                match result {
-                    Ok(()) => {
-                        ok = true;
-                        BLACKBOX_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
-                        BLACKBOX_LAST_ERROR.store(0, Ordering::Relaxed);
-                        BLACKBOX_LAST_OK_NS.store(ts_ns, Ordering::Relaxed);
-                    }
-                    Err(error) => {
-                        let total = BLACKBOX_FAILURES.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-                        let consecutive = BLACKBOX_CONSECUTIVE_FAILURES
-                            .fetch_add(1, Ordering::Relaxed)
-                            .wrapping_add(1);
-                        let code = blackbox_error_code(error);
-                        BLACKBOX_LAST_ERROR.store(code, Ordering::Relaxed);
-
-                        // V1 coupait definitivement le recorder apres trois erreurs,
-                        // ce qui rendait precisement la panne du recorder invisible.
-                        // V2 reste fail-open et retente au prochain poll. Les logs
-                        // persistants pourront reprendre des que le transport revient.
-                        if total <= 4 || total.is_power_of_two() {
-                            crate::serial_println!(
-                                "BOUCHAUD_BLACKBOX_WRITE_FAIL total={} consecutive={} code={} error={}",
-                                total,
-                                consecutive,
-                                code,
-                                error,
-                            );
-                        }
-                    }
-                }
-                controller.blackbox_storage = Some(storage);
-                if ok { break; }
+        #[allow(static_mut_refs)]
+        let Some(runtime) = RUNTIME.as_mut() else {
+            return 0;
+        };
+        for controller in runtime.controllers.iter_mut() {
+            let Some(mut storage) = controller.blackbox_storage.take() else {
+                continue;
+            };
+            poses = blackbox_vidange_un_support(controller, &mut storage, maximum, &mut fournit);
+            controller.blackbox_storage = Some(storage);
+            if poses != 0 {
+                break;
             }
         }
     }
-    RUNTIME_BUSY.store(false, Ordering::Release);
-    ok
+    poses
+}
+
+/// Reprend le transport du support de l'enregistreur.
+///
+/// Meme procedure que pour le volume : reinitialisation de classe, PUIS
+/// deblocage des deux points -- l'inverse ne marche pas, car la
+/// reinitialisation remet le peripherique en attente d'un CBW neuf et c'est
+/// seulement apres qu'il accepte de voir ses points debloques.
+///
+/// Reposer le pointeur de file de chaque anneau est ce qui JETTE le TD qu'une
+/// echeance avait laisse : sans cela, l'achevement tardif reviendrait et
+/// serait pris pour la reponse de la commande suivante.
+fn blackbox_reprend_le_transport(
+    controller: &mut Controller,
+    storage: &mut BlackboxStorage,
+) -> bool {
+    use crate::drivers::reprise_bot::Etat;
+    if TRANSPORT_BOT.etat() == Etat::HorsService {
+        return false;
+    }
+    if !TRANSPORT_BOT.commence_reprise() {
+        return TRANSPORT_BOT.etat() == Etat::Pret;
+    }
+    let slot = storage.slot_id as usize;
+    if slot >= controller.devices.len() {
+        TRANSPORT_BOT.reprise_echouee();
+        return false;
+    }
+    let Some(mut device) = controller.devices[slot].take() else {
+        TRANSPORT_BOT.reprise_echouee();
+        return false;
+    };
+
+    // 0x21 : hote vers peripherique, type classe, destinataire interface.
+    // 0xFF : Bulk-Only Mass Storage Reset.
+    let setup = setup_packet(0x21, 0xFF, 0, storage.interface as u16, 0);
+    let mut ok = control_transfer(
+        controller,
+        &mut device,
+        setup,
+        0,
+        false,
+        BUDGET_ENUMERATION_NS,
+    )
+    .is_ok();
+    ok &= blackbox_debloque_point(controller, &mut device, storage, true);
+    ok &= blackbox_debloque_point(controller, &mut device, storage, false);
+    controller.devices[slot] = Some(device);
+
+    if ok {
+        TRANSPORT_BOT.reprise_reussie();
+        crate::serial_println!("BOUCHAUD_BLACKBOX_BOT_REPRISE_OK slot={}", storage.slot_id);
+        return true;
+    }
+    let etat = TRANSPORT_BOT.reprise_echouee();
+    crate::serial_println!(
+        "BOUCHAUD_BLACKBOX_BOT_REPRISE_ECHEC slot={} etat={}",
+        storage.slot_id, etat.nom(),
+    );
+    false
+}
+
+/// Remet un point bulk de l'enregistreur dans un etat coherent.
+///
+/// # La commande depend de l'ETAT, et c'est tout le correctif
+///
+/// `Reset Endpoint` ne s'applique qu'a un point ARRETE. Sur un point encore en
+/// marche -- ce qu'est un point dont le transfert vient d'expirer, puisque le
+/// controleur n'a rien rendu --, il repond « Context State Error » et la
+/// reprise echoue. Le banc l'a montre net : trois tentatives, trois echecs,
+/// transport hors service, et pas un seul enregistrement pose.
+///
+/// Lire l'etat AVANT de choisir la commande est la difference entre une
+/// reprise qui repare et une reprise qui condamne.
+fn blackbox_debloque_point(
+    controller: &mut Controller,
+    device: &mut Device,
+    storage: &mut BlackboxStorage,
+    entree: bool,
+) -> bool {
+    let dci = if entree { storage.dci_in } else { storage.dci_out };
+    let slot = storage.slot_id;
+    let etat = etat_du_point(controller, device, dci);
+
+    match etat {
+        EP_ETAT_HALTED => {
+            let controle =
+                (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw(controller, 0, controle).is_err() {
+                return false;
+            }
+        }
+        EP_ETAT_RUNNING => {
+            // LE TD ABANDONNE SE VIDE ICI, ET NULLE PART AILLEURS.
+            //
+            // Sans cet arret, le peripherique peut achever plus tard le
+            // transfert qu'on a abandonne, et son evenement serait pris pour
+            // la reponse de la commande suivante -- qui rendrait alors le
+            // contenu d'un autre secteur avec un statut valide.
+            let controle =
+                (CMD_STOP_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw(controller, 0, controle).is_err() {
+                return false;
+            }
+        }
+        // Desactive ou deja arrete : rien a defaire, le pointeur de file
+        // suffit.
+        _ => {}
+    }
+
+    // L'anneau repart de son debut. Les TRB deja consommes -- et celui qu'une
+    // echeance a laisse -- portent l'ancien cycle et ne seront pas repris.
+    let ring = if entree {
+        &mut storage.ring_in
+    } else {
+        &mut storage.ring_out
+    };
+    ring.index = 0;
+    ring.cycle = 1;
+    unsafe { prepare_link(ring, 1) };
+    let phys = ring.phys;
+    let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+    if command_raw(controller, phys | 1, controle).is_err() {
+        return false;
+    }
+
+    // CLEAR_FEATURE(ENDPOINT_HALT) n'a de sens que si le PERIPHERIQUE tenait
+    // le point pour bloque. L'emettre sur un point qui ne l'etait pas est au
+    // mieux inutile, au pire refuse -- et ce refus ferait echouer une reprise
+    // qui avait deja abouti.
+    if etat != EP_ETAT_HALTED {
+        return true;
+    }
+    // Destinataire « point de terminaison », index = adresse du point. Le
+    // numero se deduit du DCI : impair = entree, numero = `dci / 2`.
+    let adresse = if entree { 0x80 | (dci >> 1) } else { dci >> 1 };
+    let setup = setup_packet(0x02, 1, 0, adresse as u16, 0);
+    control_transfer(controller, device, setup, 0, false, BUDGET_ENUMERATION_NS).is_ok()
+}
+
+fn blackbox_vidange_un_support(
+    controller: &mut Controller,
+    storage: &mut BlackboxStorage,
+    maximum: usize,
+    fournit: &mut impl FnMut(&mut [u8]) -> Option<u64>,
+) -> usize {
+    let record_blocks = (BLACKBOX_RECORD_BYTES / 512) as u64;
+    let places = storage.partition_blocks / record_blocks;
+    if places == 0 || storage.disabled {
+        return 0;
+    }
+    // Le transport doit etre coherent AVANT le premier octet du lot : le
+    // formatage des enregistrements ecrit dans le tampon DMA, et le faire
+    // pour une commande qui sera refusee couterait seize copies pour rien.
+    if !TRANSPORT_BOT.autorise_es() && !blackbox_reprend_le_transport(controller, storage) {
+        return 0;
+    }
+
+    let base = storage.buffer_virt + BLACKBOX_ENVELOPPE_OCTETS;
+    let mut lot = 0usize;
+    let mut place_debut = 0u64;
+    let mut place_suivante = 0u64;
+
+    loop {
+        if lot >= maximum {
+            break;
+        }
+        let zone = unsafe {
+            core::slice::from_raw_parts_mut(
+                (base + lot * BLACKBOX_RECORD_BYTES) as *mut u8,
+                BLACKBOX_RECORD_BYTES,
+            )
+        };
+        let Some(seq) = fournit(zone) else { break };
+        let place = seq % places;
+        if lot == 0 {
+            place_debut = place;
+            place_suivante = place + 1;
+            lot = 1;
+            continue;
+        }
+        // LE SEUL DECOUPAGE IMPOSE : LE TOUR DE L'ANNEAU DU SUPPORT.
+        //
+        // Des numeros consecutifs donnent des emplacements consecutifs, sauf
+        // quand `numero % places` repasse par zero. Ecrire le lot entier au
+        // premier LBA ecraserait alors des enregistrements qui n'ont rien a
+        // voir -- et la relecture y verrait des sommes de controle valides sur
+        // des charges utiles depareillees, ce qui est pire qu'un trou.
+        if place != place_suivante {
+            let lba = storage
+                .partition_first
+                .saturating_add(place_debut.saturating_mul(record_blocks));
+            if !blackbox_ecris_lot_avec_reprise(controller, storage, lba, lot) {
+                return 0;
+            }
+            // L'enregistrement qu'on vient de recevoir ouvre le lot suivant.
+            unsafe {
+                core::ptr::copy(
+                    (base + lot * BLACKBOX_RECORD_BYTES) as *const u8,
+                    base as *mut u8,
+                    BLACKBOX_RECORD_BYTES,
+                );
+            }
+            let lba = storage
+                .partition_first
+                .saturating_add(place.saturating_mul(record_blocks));
+            if !blackbox_ecris_lot_avec_reprise(controller, storage, lba, 1) {
+                return lot;
+            }
+            return lot + 1;
+        }
+        place_suivante = place + 1;
+        lot += 1;
+    }
+
+    if lot == 0 {
+        return 0;
+    }
+    let lba = storage
+        .partition_first
+        .saturating_add(place_debut.saturating_mul(record_blocks));
+    if !blackbox_ecris_lot_avec_reprise(controller, storage, lba, lot) {
+        return 0;
+    }
+    if storage.since_sync >= BLACKBOX_SYNC_EVERY {
+        blackbox_sync_cache(controller, storage);
+    }
+    lot
+}
+
+/// Ecrit un lot, et le rejoue UNE FOIS si une reprise a rendu le materiel
+/// coherent.
+///
+/// # Pourquoi le rejeu appartient au vidage, et pas a l'appelant
+///
+/// Borner la latence d'un transfert, c'est abandonner plus tot -- donc plus
+/// souvent. Si chaque abandon remontait en erreur, un lot rate coutait seize
+/// enregistrements ET arretait le vidage : le banc a mesure mille cent
+/// trente-six enregistrements poses sur mille quatre cent cinquante-cinq, sans
+/// marque de fin, c'est-a-dire une archive indistinguable d'une coupure.
+///
+/// La reprise a jete le TD abandonne et remis le peripherique en attente d'un
+/// CBW neuf. Rejouer est donc sur, et borne a une seule fois : un support qui
+/// repond systematiquement de travers ne doit pas tenir le verrou sans fin.
+fn blackbox_ecris_lot_avec_reprise(
+    controller: &mut Controller,
+    storage: &mut BlackboxStorage,
+    lba: u64,
+    records: usize,
+) -> bool {
+    if blackbox_note(blackbox_write_lot(controller, storage, lba, records)).is_ok() {
+        return true;
+    }
+    if !TRANSPORT_BOT.autorise_es() && !blackbox_reprend_le_transport(controller, storage) {
+        return false;
+    }
+    blackbox_note(blackbox_write_lot(controller, storage, lba, records)).is_ok()
+}
+
+/// Compte l'issue d'une ecriture et la rend telle quelle.
+fn blackbox_note(resultat: Result<(), &'static str>) -> Result<(), &'static str> {
+    match resultat {
+        Ok(()) => {
+            BLACKBOX_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+            BLACKBOX_LAST_ERROR.store(0, Ordering::Relaxed);
+            BLACKBOX_LAST_OK_NS.store(
+                crate::kernel::timer::monotonic_ns(),
+                Ordering::Relaxed,
+            );
+            Ok(())
+        }
+        Err(erreur) => {
+            let total = BLACKBOX_FAILURES.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            let consecutif = BLACKBOX_CONSECUTIVE_FAILURES
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            let code = blackbox_error_code(erreur);
+            BLACKBOX_LAST_ERROR.store(code, Ordering::Relaxed);
+            // FAIL-OPEN : une erreur de transport ne coupe pas l'enregistreur.
+            // V1 le coupait apres trois erreurs, ce qui rendait precisement la
+            // panne invisible.
+            if total <= 4 || total.is_power_of_two() {
+                crate::serial_println!(
+                    "BOUCHAUD_BLACKBOX_WRITE_FAIL total={} consecutive={} code={} error={}",
+                    total, consecutif, code, erreur,
+                );
+            }
+            Err(erreur)
+        }
+    }
 }
 
 pub fn blackbox_force_sync() -> bool {
     if !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
         return false;
     }
-    if RUNTIME_BUSY.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    super::xhci_active::enregistreur_a_saute(crate::kernel::timer::monotonic_ns());
+    let Some(_jeton) = attends_le_pilote(Proprietaire::VidageBlackbox, ATTENTE_VIDAGE_NS) else {
         return false;
-    }
+    };
+    super::xhci_active::enregistreur_a_reussi();
     let mut synced = false;
     let mut failed = false;
     unsafe {
@@ -731,6 +1129,5 @@ pub fn blackbox_force_sync() -> bool {
             }
         }
     }
-    RUNTIME_BUSY.store(false, Ordering::Release);
     synced && !failed
 }
