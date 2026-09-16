@@ -148,6 +148,32 @@ def main():
             "Une alarme qui sonne a chaque tic ne se lit plus."
         )
 
+    # 4. La cadence doit suivre le COUT REEL, pas une constante.
+    stall_code = code_seul(STALL.read_text(encoding="utf-8"))
+    i = stall_code.find("snapshot_period")
+    if i == -1:
+        fautes.append(
+            "diagnostic_stall.rs : la cadence des instantanes a disparu."
+        )
+    else:
+        fenetre = stall_code[i:i + 500]
+        if "presence_com1" not in fenetre:
+            fautes.append(
+                "diagnostic_stall.rs : la cadence des instantanes ne depend "
+                "plus du port serie. Cinq secondes se justifient quand chaque "
+                "octet part par entree-sortie emulee ; sur une machine sans "
+                "COM1 -- `com1=bus-flottant`, ce que dit le releve physique -- "
+                "les lignes tombent dans le tambour RAM et ne coutent rien. "
+                "Le releve du 16 septembre 20:08 s'arrete a 7,87 s : la sonde "
+                "n'a parle QU'UNE fois, et l'instantane suivant serait tombe "
+                "trois secondes trop tard."
+            )
+        if not re.search(r"\bTICKS_PER_SECOND\b[^*]*\}", fenetre):
+            fautes.append(
+                "diagnostic_stall.rs : la branche rapide ne vaut plus une "
+                "seconde ; une cadence plus lente que la panne ne la voit pas."
+            )
+
     # 3. L'exception assumee.
     if "echantillonne_tache_bsp" in timer and "balanced_bsp" not in timer:
         fautes.append(

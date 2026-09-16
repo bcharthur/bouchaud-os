@@ -27,7 +27,16 @@ assert 'RA_START_AFTER: u64 = 2' in policy and 'RA_MAX_PAGES: u64 = 16' in polic
 fault=(root/'src/kernel/process/thread/faute_memoire.rs').read_text(encoding='utf-8')
 assert 'include!("faute_cluster.rs")' in fault and 'fault_cluster_after_clean' in fault
 stall=(root/'src/kernel/process/thread/diagnostic_stall.rs').read_text(encoding='utf-8')
-assert 'snapshot_period = 5 * crate::kernel::timer::TICKS_PER_SECOND' in stall
+# V14 exigeait la constante `5 * TICKS_PER_SECOND`. Le CONTRAT qu'elle
+# protegeait -- ne pas noyer une entree-sortie serie emulee sous TCG -- ne
+# change pas : il ne s'applique plus qu'au cas ou un COM1 existe REELLEMENT.
+# Sans port, les lignes tombent dans le tambour RAM et ne coutent rien ; cinq
+# secondes y etaient une seule chance de voir, et le releve physique du
+# 16 septembre 20:08, arrete a 7,87 s, n'en a eu qu'une.
+assert '5 * crate::kernel::timer::TICKS_PER_SECOND' in stall, \
+    "la cadence lente a disparu : une entree-sortie serie emulee serait noyee"
+assert 'presence_com1' in stall, \
+    "la cadence ne depend plus du port : elle est lente partout, ou couteuse partout"
 metrics=(root/'src/kernel/process/thread/metriques.rs').read_text(encoding='utf-8')
 assert '[MM-CLUSTER]' in metrics and 'periode_rapport = 10 *' in metrics
 # Le correctif de reference a rejoint docs/historique/notes/ lors du

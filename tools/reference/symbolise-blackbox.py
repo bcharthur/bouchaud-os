@@ -117,7 +117,13 @@ def symboles_elf(chemin: Path):
         ))
 
     SHT_SYMTAB, SHT_DYNSYM = 2, 11
-    STT_FUNC = 2
+    # LES OBJETS AUSSI, PAS SEULEMENT LES FONCTIONS.
+    #
+    # Une `cle_attente` relevee par `[SCHED-TACHE]` est l'ADRESSE d'un objet
+    # d'attente -- une file, une source de reveil --, pas une instruction. Ne
+    # garder que STT_FUNC rendait donc « inconnu » sur exactement la valeur
+    # qu'on cherche a nommer quand une tache est bloquee.
+    STT_FUNC, STT_OBJECT = 2, 1
     trouves = []
     for section in sections:
         if section["type"] not in (SHT_SYMTAB, SHT_DYNSYM):
@@ -133,7 +139,7 @@ def symboles_elf(chemin: Path):
             info = donnees[base + 4]
             valeur = entier(base + 8, 8)
             taille = entier(base + 16, 8)
-            if (info & 0xF) != STT_FUNC or valeur == 0:
+            if (info & 0xF) not in (STT_FUNC, STT_OBJECT) or valeur == 0:
                 continue
             debut = deb_ch + nom_off
             if debut >= fin_ch:

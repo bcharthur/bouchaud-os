@@ -484,7 +484,31 @@ pub fn stall_probe_from_timer() {
     // V14: the probe still executes every second so a continuous BKL hold is
     // detected with the same latency, but healthy snapshots are printed only
     // every five seconds. Serial I/O is extremely expensive under TCG.
-    let snapshot_period = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+    //
+    // BOUCHAUD_CADENCE_SELON_LE_PORT_V1
+    //
+    // Cinq secondes, c'etait une seule chance de voir. Le releve physique du
+    // 16 septembre 20:08 s'arrete a 7,87 s : la sonde n'a eu le temps de
+    // parler qu'UNE fois, a t=5 s, et l'instantane suivant -- celui qui aurait
+    // montre l'etat JUSTE AVANT l'arret -- serait tombe a t=10 s, trois
+    // secondes trop tard. Une cadence de diagnostic plus lente que la panne
+    // qu'elle observe ne la voit jamais.
+    //
+    // Le cout depend du PORT, et lui seul. Avec un COM1 reel, chaque octet
+    // part par entree-sortie emulee : sous TCG c'est ruineux, et les cinq
+    // secondes se justifient. Sur la machine de reference il n'y a PAS de port
+    // serie -- le releve le dit lui-meme, `com1=bus-flottant` -- et les lignes
+    // tombent dans le tambour RAM d'un mebioctet, dont le meme releve montre
+    // qu'il etait rempli a 54 Ko avec `serial_perdus=0`. Y ecrire cinq fois
+    // plus souvent ne coute rien et rend cinq fois plus de vues.
+    // `ecrire()` est le predicat que le pilote utilise deja pour decider
+    // s'il pousse un octet sur le port. Sa negation est exactement « les
+    // lignes ne coutent qu'une ecriture en RAM ».
+    let snapshot_period = if !crate::drivers::serial::presence_com1().ecrire() {
+        crate::kernel::timer::TICKS_PER_SECOND
+    } else {
+        5 * crate::kernel::timer::TICKS_PER_SECOND
+    };
     if !bloque && now % snapshot_period != 0 {
         return;
     }
