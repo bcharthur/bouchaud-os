@@ -305,6 +305,35 @@ def main():
                     % (nom, quoi)
                 )
 
+    # --- La sonde de premiere IRQ ne parle que si une frontiere existe -------
+    #
+    # Partie a `false` -- armee des l'initialisation statique -- elle etait
+    # consommee par la toute premiere IRQ du demarrage, meme sur un chemin ou
+    # la garde d'amorcage SMP ne tourne jamais (une seule vCPU). La ligne
+    # SMP_HANDOFF_AFTER_FIRST_IRQ sortait alors SANS son BEFORE_STI, et
+    # decrivait une frontiere inexistante avec deux zeros qui se lisaient comme
+    # une frontiere franchie.
+    if not re.search(
+        r"static PREMIERE_IRQ_VUE: AtomicBool = AtomicBool::new\(true\);", smp
+    ):
+        fautes.append(
+            "smp.rs : `PREMIERE_IRQ_VUE` ne part plus DESARMEE. Armee des "
+            "l'initialisation statique, elle est consommee par la premiere IRQ "
+            "du demarrage : sur un chemin sans garde d'amorcage -- QEMU a une "
+            "seule vCPU --, SMP_HANDOFF_AFTER_FIRST_IRQ sort sans son "
+            "BEFORE_STI et annonce une frontiere qui n'existe pas. Jamais l'un "
+            "sans l'autre."
+        )
+    photo = corps(smp, "fn photographie_avant_sti(")
+    if photo is None:
+        fautes.append("smp.rs : `photographie_avant_sti` introuvable.")
+    elif "PREMIERE_IRQ_VUE.store(false" not in photo:
+        fautes.append(
+            "smp.rs : `photographie_avant_sti` n'arme plus la sonde de premiere "
+            "IRQ. Elle resterait muette, et la frontiere ne serait plus "
+            "observee du tout."
+        )
+
     politique_pure = POLITIQUE.read_text(encoding="utf-8")
     if "fn timer_runtime_pret(" not in politique_pure:
         fautes.append(

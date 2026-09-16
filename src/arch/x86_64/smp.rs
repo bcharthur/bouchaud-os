@@ -189,7 +189,31 @@ impl Drop for SmpBootstrapGuard {
 // Les deux marqueurs ci-dessous encadrent cette instruction. Ils sont
 // ONE-SHOT : un booleen atomique, pas une trace par tick.
 
-static PREMIERE_IRQ_VUE: AtomicBool = AtomicBool::new(false);
+// BOUCHAUD_SONDE_PREMIERE_IRQ_DESARMEE_AU_DEPART_V1
+//
+// `true` VEUT DIRE « RIEN A RAPPORTER », ET C'EST L'ETAT DE DEPART.
+//
+// La sonde partait a `false`, c'est-a-dire ARMEE des l'initialisation
+// statique. Sur un chemin ou la garde d'amorcage SMP ne tourne jamais -- une
+// seule vCPU, ce que fait `run-reference-stage2.ps1` avec `-smp 1` --
+// `photographie_avant_sti()` n'est jamais appelee, et pourtant la toute
+// premiere IRQ du demarrage consommait la sonde :
+//
+//   SMP_HANDOFF_AFTER_FIRST_IRQ vector=0x20 ... scheduler_enabled=0 bootstrap=0
+//
+// sans aucun `SMP_HANDOFF_BEFORE_STI` avant elle. La ligne annoncait la
+// premiere interruption apres une frontiere QUI N'EXISTE PAS sur ce chemin,
+// et ses deux zeros se lisaient comme une frontiere franchie.
+//
+// Un correctif precedent avait deja deplace l'armement dans
+// `photographie_avant_sti()` pour la meme raison ; il ne couvrait que le cas
+// ou cette fonction tourne. L'etat de depart doit dire la meme chose :
+// tant que personne n'a photographie de frontiere, il n'y a pas de « premiere
+// interruption apres » a rapporter.
+//
+// Consequence, et c'est celle qu'on veut : pas de BEFORE_STI, pas de
+// AFTER_FIRST_IRQ. Jamais l'un sans l'autre.
+static PREMIERE_IRQ_VUE: AtomicBool = AtomicBool::new(true);
 
 /// Photographie early-safe de l'etat juste avant la restauration de l'IF.
 ///
