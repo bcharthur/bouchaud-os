@@ -265,7 +265,36 @@ use std::sync::Once;
 const ARENE: usize = 64 * 1024 * 1024;
 
 /// Le plus grand bloc contigu du compagnon : 2^10 pages.
-const PLUS_GRAND_BLOC: usize = 1024 * pages_tas::PAGE;
+/// Le plus grand bloc que le compagnon sait servir, DERIVE de son ordre
+/// maximal et non recopie.
+///
+/// La valeur etait ecrite en dur -- mille vingt-quatre pages, quatre
+/// mebioctets. Le 17 septembre 2026, la machine de reference a paniqué sur
+/// `memory allocation of 4591616 bytes failed` avec quatre gibioctets et demi
+/// libres : la borne etait trop basse. En la relevant, ces epreuves se sont
+/// mises a echouer -- elles defendaient un chiffre, pas une regle.
+/// Le plus grand bloc que le compagnon sait servir DANS CETTE ARENE.
+///
+/// Deux bornes, et c'est la plus petite qui commande : l'ordre maximal du
+/// compagnon, et la taille de l'arene de test. Ecrire la valeur en dur --
+/// mille vingt-quatre pages, quatre mebioctets -- defendait un chiffre et non
+/// une regle, et ces epreuves se sont mises a echouer le jour ou le chiffre a
+/// du changer : le 17 septembre 2026, apres
+/// `memory allocation of 4591616 bytes failed` avec quatre gibioctets et demi
+/// libres.
+///
+/// L'arene de test fait soixante-quatre mebioctets, dont une part va au repli :
+/// le compagnon n'en voit qu'une fraction, et c'est elle qui plafonne ici. La
+/// borne d'ORDRE, elle, est mise a l'epreuve par `test_compagnon.rs`, qui n'a
+/// pas d'arene a nourrir.
+const PLUS_GRAND_BLOC: usize = {
+    let par_ordre = (1usize << (compagnon_prod::ORDRES - 1)) * pages_tas::PAGE;
+    // Le compagnon recoit l'arene moins le repli, et le repli vaut au plus un
+    // huitieme. Un quart de l'arene tient donc largement dans ce qu'il gere,
+    // quelle que soit l'evolution du partage.
+    let par_arene = ARENE / 4;
+    if par_ordre < par_arene { par_ordre } else { par_arene }
+};
 
 static PRET: Once = Once::new();
 /// Deux blocs alloues AVANT le basculement, donc dans le tableau d'amorcage.
@@ -420,40 +449,69 @@ fn les_blocs_de_classe_sortent_des_pages_du_compagnon() {
 #[test]
 fn le_compagnon_refuse_ce_qu_il_ne_peut_pas_couvrir() {
     tas_pret();
+    // LA BORNE REELLE SE DEMANDE, ELLE NE SE RECOPIE PAS.
+    //
+    // Elle depend de l'ordre maximal ET de ce qui reste dans l'arene. Ecrire
+    // un chiffre ici defendait la valeur d'hier : ces epreuves ont echoue le
+    // jour ou il a fallu relever la borne, apres
+    // `memory allocation of 4591616 bytes failed` avec 4,58 Gio libres.
+    //
+    // La saturation d'ordre elle-meme -- `ordre_pour` qui rend le dernier
+    // ordre sans le dire -- est mise a l'epreuve par `test_compagnon.rs`, qui
+    // n'a pas d'arene a nourrir et peut donc l'isoler.
+    let servable = pages_tas::plus_grand_contigu();
+    assert!(servable >= 8 * 1024 * 1024, "l'arene de test doit offrir au moins un tampon de trame, pas {}", servable);
     assert!(
-        pages_tas::alloue(PLUS_GRAND_BLOC + 1).is_none(),
-        "le compagnon a servi une demande d'une page de plus que son plus grand bloc"
+        pages_tas::alloue(servable * 2).is_none(),
+        "le compagnon a servi le double de ce qu'il annonce pouvoir servir"
     );
-    assert!(
-        pages_tas::alloue(8 * 1024 * 1024).is_none(),
-        "le compagnon a servi huit mebioctets -- la taille d'un tampon 1920x1080x32"
-    );
-    // Ce qu'il peut couvrir, il le sert et le reprend.
-    let bloc = pages_tas::alloue(PLUS_GRAND_BLOC)
-        .expect("le compagnon doit servir son plus grand bloc");
-    unsafe { core::ptr::write_bytes(bloc as *mut u8, 0x11, PLUS_GRAND_BLOC) };
-    pages_tas::libere(bloc, PLUS_GRAND_BLOC);
+    // UN TAMPON DE TRAME DOIT PASSER, ET C'EST LE CHANGEMENT.
+    //
+    // Cette epreuve exigeait l'inverse : que huit mebioctets soient REFUSES.
+    // C'est ce refus-la qui a fait tomber la machine au lancement du
+    // navigateur. Un tampon 1920x1080x32 fait huit mebioctets, et le noyau doit
+    // savoir le servir.
+    let trame = 1920 * 1080 * 4;
+    let bloc = pages_tas::alloue(trame)
+        .expect("un tampon de trame 1920x1080x32 doit etre servable");
+    unsafe { core::ptr::write_bytes(bloc as *mut u8, 0x22, trame) };
+    pages_tas::libere(bloc, trame);
+    // Ce qu'il ANNONCE pouvoir couvrir, il le sert et le reprend.
+    let bloc = pages_tas::alloue(servable)
+        .expect("le compagnon doit servir ce qu'il annonce");
+    unsafe { core::ptr::write_bytes(bloc as *mut u8, 0x11, servable) };
+    pages_tas::libere(bloc, servable);
 }
 
-/// Une demande plus grande que le plus grand bloc part au repli, et le repli
-/// la sert entierement.
+/// Une demande dont l'ALIGNEMENT depasse la page part au repli.
 ///
-/// C'est le role qui reste au `LockedHeap` : la RECUPERATION. Le supprimer
-/// rendrait ces demandes impossibles.
+/// # Ce que ce cas defendait, et ce qu'il defend maintenant
+///
+/// Il exigeait qu'une demande plus grande que quatre mebioctets parte au
+/// repli, parce que le compagnon ne savait pas la servir. C'est ce refus qui a
+/// fait paniquer la machine de reference le 17 septembre 2026 --
+/// `memory allocation of 4591616 bytes failed`, avec 4,58 Gio libres -- et la
+/// borne a ete relevee a cent vingt-huit mebioctets.
+///
+/// Le repli ne sert donc plus les grandes TAILLES : le compagnon les prend
+/// toutes. Le role qui lui reste, et que rien d'autre ne couvre, est
+/// l'ALIGNEMENT : `alloue_grande` ne passe par les pages que si l'alignement
+/// demande tient dans une page.
 #[test]
-fn une_demande_trop_grande_pour_le_compagnon_est_servie_par_le_repli() {
+fn une_demande_trop_alignee_pour_les_pages_est_servie_par_le_repli() {
     tas_pret();
     let avant = heap::ng_stats();
-    let taille = PLUS_GRAND_BLOC + 64 * 1024;
-    let (bloc, layout) = alloue(taille, 8);
+    // Deux fois la page : au-dela de ce que l'allocateur de pages garantit.
+    let taille = 3 * pages_tas::PAGE;
+    let (bloc, layout) = alloue(taille, 2 * pages_tas::PAGE);
     assert!(
         !pages_tas::nous_appartient(bloc as usize),
-        "le compagnon a servi une demande qu'il ne peut pas couvrir"
+        "le compagnon a servi une demande dont il ne garantit pas l'alignement"
     );
     // Ecrire TOUTE la demande : si un bloc trop petit avait ete rendu, cette
-    // ecriture depasserait, et le compagnon rendrait ensuite des pages dont le
-    // chainage a ete ecrase.
+    // ecriture depasserait.
     unsafe { core::ptr::write_bytes(bloc, 0x77, taille) };
+    assert_eq!(bloc as usize % (2 * pages_tas::PAGE), 0, "alignement non tenu");
     let apres = heap::ng_stats();
     assert_eq!(apres.grandes_par_repli, avant.grandes_par_repli + 1);
     assert_eq!(apres.backing_allocs, avant.backing_allocs + 1);

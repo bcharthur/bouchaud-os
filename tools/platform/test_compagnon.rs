@@ -623,3 +623,76 @@ fn une_division_rend_toujours_la_moitie_basse() {
          depuis un bloc d'ordre 2 doit commencer a la meme adresse"
     );
 }
+
+// ===========================================================================
+// LA BORNE, ET CE QU'ELLE A COUTE
+// ===========================================================================
+
+#[test]
+fn le_compagnon_sert_une_allocation_de_plus_de_quatre_mebioctets() {
+    // LE DEFAUT QUE CECI DEFEND
+    //
+    // `ORDRES` valait onze -- quatre mebioctets au plus -- et son commentaire
+    // disait « les demandes de plus de quatre mebioctets contigus sont
+    // rares ». La machine de reference a repondu le 17 septembre 2026 par une
+    // panique noyau au lancement du navigateur :
+    //
+    //     memory allocation of 4591616 bytes failed
+    //     heap_libre=4 916 015 456
+    //
+    // Quatre mebioctets et demi demandes, quatre gibioctets et demi libres, un
+    // refus. « Rare » ne veut pas dire « jamais », et une allocation rare qui
+    // fait tomber la machine coute plus cher que toutes les frequentes
+    // reunies.
+    const PAGE: usize = 4096;
+    let demandes = 4_591_616usize; // l'octet pres, celui de la panique
+    let pages = demandes.div_ceil(PAGE);
+    let ordre = ordre_pour(pages);
+    assert!(
+        (1usize << ordre) >= pages,
+        "l'ordre {} couvre {} pages, il en faut {} -- c'est le refus du 17 septembre",
+        ordre,
+        1usize << ordre,
+        pages
+    );
+}
+
+#[test]
+fn la_borne_couvre_les_tampons_de_trame_courants() {
+    // Le commentaire d'origine citait lui-meme le cas : « un tampon de trame
+    // 1920x1080x32 fait huit mebioctets et aurait touche ce cas au premier
+    // rendu ». Il le citait pour expliquer le refus, pas pour le corriger.
+    const PAGE: usize = 4096;
+    for (nom, octets) in [
+        ("1920x1080x32", 1920usize * 1080 * 4),
+        ("2560x1440x32", 2560usize * 1440 * 4),
+        ("3840x2160x32", 3840usize * 2160 * 4),
+    ] {
+        let pages = octets.div_ceil(PAGE);
+        let ordre = ordre_pour(pages);
+        assert!(
+            (1usize << ordre) >= pages,
+            "{} ({} octets) n'est plus servable : ordre {} pour {} pages",
+            nom,
+            octets,
+            ordre,
+            pages
+        );
+    }
+}
+
+#[test]
+fn au_dela_de_la_borne_le_refus_reste_franc() {
+    // Saturer SANS le dire ferait rendre un bloc trop court, et l'appelant
+    // ecrirait au-dela. Le refus est la bonne reponse ; c'est la borne qui
+    // devait monter, pas la franchise qui devait baisser.
+    const PAGE: usize = 4096;
+    let enorme = 1024usize * 1024 * 1024; // un gibioctet
+    let pages = enorme.div_ceil(PAGE);
+    let ordre = ordre_pour(pages);
+    assert!(
+        (1usize << ordre) < pages,
+        "une demande d'un gibioctet doit encore etre refusee franchement"
+    );
+    assert_eq!(ordre, ORDRES - 1, "et la saturation doit se faire au dernier ordre");
+}

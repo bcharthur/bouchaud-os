@@ -796,12 +796,22 @@ fn memory_sample(ts_ns: u64) {
     // pouvait donc pas voir venir sa saturation, ni meme dire apres coup s'il
     // en restait.
     let (heap_utilise, heap_libre, heap_total) = crate::kernel::heap::stats();
+    let (_, _, _, _, pages_refus, _) = crate::kernel::pages_tas::stats();
+    let plus_grand_contigu = crate::kernel::pages_tas::plus_grand_contigu();
     let mut out = Text::new();
     let _ = write!(
         &mut out,
         concat!(
             "memory ts_ns={} frames_used={} frames_total={} ",
             "heap_utilise={} heap_libre={} heap_total={} ",
+            // CE QUE `heap_libre` NE DIT PAS.
+            //
+            // La panique du 17 septembre a refuse 4,38 Mio avec 4,58 Gio
+            // libres : le tas avait la place, l'allocateur de pages ne savait
+            // pas la servir d'un seul tenant. `pages_refus` compte ces refus,
+            // et `plus_grand_contigu` dit la plus grande demande encore
+            // servable -- c'est elle qui echoue en premier, pas le total.
+            "pages_refus={} plus_grand_contigu={} ",
             "dalles={} vides={} vivants={} candidats={} manques={} saturations={} ",
             "sous_flux={} surallocations={} max_probe={}\n"
         ),
@@ -811,6 +821,8 @@ fn memory_sample(ts_ns: u64) {
         heap_utilise,
         heap_libre,
         heap_total,
+        pages_refus,
+        plus_grand_contigu,
         d.enregistrees,
         d.dalles_vides,
         d.objets_vivants,
@@ -1442,10 +1454,14 @@ pub fn panique(cpu: usize, fichier: &str, ligne: u32, message: &str) {
     // aucun des compteurs ci-dessus n'y repond : ils decrivent les dalles et
     // les frames physiques, pas l'arene du tas. `heap_libre` la ferme.
     let (heap_utilise, heap_libre, heap_total) = crate::kernel::heap::stats();
+    let (_, _, _, _, pages_refus, _) = crate::kernel::pages_tas::stats();
+    let plus_grand_contigu = crate::kernel::pages_tas::plus_grand_contigu();
     let _ = write!(
         &mut out,
-        "PANIC_TAS heap_utilise={} heap_libre={} heap_total={} frames_used={} frames_total={} dalles={} vivants={} manques={} saturations={} sous_flux={} surallocations={}\n",
+        "PANIC_TAS heap_utilise={} heap_libre={} heap_total={} \
+pages_refus={} plus_grand_contigu={} frames_used={} frames_total={} dalles={} vivants={} manques={} saturations={} sous_flux={} surallocations={}\n",
         heap_utilise, heap_libre, heap_total,
+        pages_refus, plus_grand_contigu,
         frames_used, frames_total, d.enregistrees, d.objets_vivants,
         d.manques, d.saturations, d.sous_flux, d.surallocations,
     );

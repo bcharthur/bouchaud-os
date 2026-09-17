@@ -51,13 +51,39 @@
 #![allow(dead_code)]
 
 /// Ordre maximal. L'ordre `k` couvre `2^k` blocs elementaires ; avec des pages
-/// de 4 Kio, l'ordre 10 est un bloc de 4 Mio.
+/// de 4 Kio, l'ordre 15 est un bloc de 128 Mio.
 ///
-/// Au-dela, la fusion coute plus qu'elle ne rend : les demandes de plus de
-/// quatre mebioctets contigus sont rares, et les servir depuis un ordre
-/// superieur immobiliserait de gros blocs pour les rares fois ou l'on en a
-/// besoin.
-pub const ORDRES: usize = 11;
+/// # Ce que la valeur precedente a coute
+///
+/// Elle valait onze, soit quatre mebioctets au plus, et son commentaire
+/// disait : « les demandes de plus de quatre mebioctets contigus sont rares ».
+/// La machine de reference a repondu le 17 septembre 2026, par une panique
+/// noyau au lancement du navigateur :
+///
+///     memory allocation of 4591616 bytes failed
+///     heap_utilise=118 181 536  heap_libre=4 916 015 456
+///
+/// Quatre mebioctets et demi demandes, quatre GIBIOCTETS ET DEMI libres, et
+/// un refus. `ordre_pour` saturait a dix, `alloue` constatait que mille vingt-
+/// quatre pages ne couvrent pas les mille cent vingt et une demandees, et
+/// rendait `None` -- correctement, d'ailleurs : servir un bloc trop court
+/// aurait laisse l'appelant ecrire au-dela.
+///
+/// Le defaut n'etait pas le refus, il etait la BORNE. « Rare » ne veut pas
+/// dire « jamais », et une allocation rare qui fait tomber la machine coute
+/// plus cher que toutes les allocations frequentes reunies.
+///
+/// # Ce que seize coute
+///
+/// Le bitmap vaut `(ORDRES + 1)` plans de un bit par page. Sur le tas de
+/// 4,69 Gio de la machine de reference il passe de 1,76 a 2,49 mebioctets :
+/// sept cent trente kibioctets pour ne plus refuser ce que le tas a mille
+/// fois en reserve.
+///
+/// Au-dela de cent vingt-huit mebioctets d'un coup, `alloue` refuse toujours
+/// -- et c'est voulu : un refus compte et lisible vaut mieux qu'un bloc trop
+/// court rendu en silence.
+pub const ORDRES: usize = 16;
 
 /// Marque de fin de liste. Zero serait un numero de bloc valide.
 pub const AUCUN: usize = usize::MAX;
