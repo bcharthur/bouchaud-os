@@ -789,17 +789,28 @@ fn echantillon_par_cpu(ts_ns: u64) {
 fn memory_sample(ts_ns: u64) {
     let d = crate::kernel::dalles_tas::stats();
     let (frames_used, frames_total) = crate::kernel::vmm::frame_stats_relaxed();
+    // LE TAS, SUIVI DANS LE TEMPS.
+    //
+    // La panique du 17 septembre est une allocation refusee. Ce releve
+    // decrivait les dalles et les frames physiques, jamais l'arene : on ne
+    // pouvait donc pas voir venir sa saturation, ni meme dire apres coup s'il
+    // en restait.
+    let (heap_utilise, heap_libre, heap_total) = crate::kernel::heap::stats();
     let mut out = Text::new();
     let _ = write!(
         &mut out,
         concat!(
             "memory ts_ns={} frames_used={} frames_total={} ",
+            "heap_utilise={} heap_libre={} heap_total={} ",
             "dalles={} vides={} vivants={} candidats={} manques={} saturations={} ",
             "sous_flux={} surallocations={} max_probe={}\n"
         ),
         ts_ns,
         frames_used,
         frames_total,
+        heap_utilise,
+        heap_libre,
+        heap_total,
         d.enregistrees,
         d.dalles_vides,
         d.objets_vivants,
@@ -1383,3 +1394,76 @@ pub fn fatal_best_effort(cpu: usize, vector: u8, rip: u64, rsp: u64, code: u64) 
 /// Budget du vidage d'urgence. Deux secondes : assez pour poser quelques
 /// centaines d'enregistrements, trop peu pour ressembler a un figement.
 const BUDGET_FATAL_NS: u64 = 2_000_000_000;
+
+/// Ce qu'une panique noyau doit laisser derriere elle.
+///
+/// # Pourquoi cette fonction existe
+///
+/// La panique du 17 septembre -- une allocation refusee au lancement du
+/// navigateur -- n'a laisse que huit lignes a l'ecran. Tout le reste partait
+/// sur COM1, que la machine de reference n'a pas, et l'archive ne contenait
+/// pas un mot de la session : le handler de panique n'ecrivait rien ici.
+///
+/// Quatre sessions passees a rendre l'enregistreur increvable, et le seul
+/// evenement qu'il devait absolument retenir ne lui etait jamais confie.
+///
+/// # L'ordre, et pourquoi il est celui-la
+///
+/// La pose EN MEMOIRE d'abord : elle ne peut pas echouer, elle n'alloue rien,
+/// elle ne touche aucun peripherique. Le journal serie ensuite, converti
+/// depuis son propre anneau. Le vidage vers la cle en dernier, borne -- une
+/// panique qui attendrait sans fin remplacerait un diagnostic par un ecran
+/// noir.
+pub fn panique(cpu: usize, fichier: &str, ligne: u32, message: &str) {
+    let now = now_ns();
+    let etat = BOBINE.etat();
+    let souffle = souffle();
+    let mut out = Text::new();
+    let _ = write!(
+        &mut out,
+        "PANIC cpu={} fichier={} ligne={} ts_ns={} message={}\n",
+        cpu, fichier, ligne, now, message,
+    );
+    let _ = write!(
+        &mut out,
+        "PANIC_ETAT tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} silence_ms={} derniere_seq={}\n",
+        etat.reserves, etat.poses, etat.ecrases, etat.perdus,
+        souffle.silence_ms, souffle.derniere_seq,
+    );
+    // CE QUE LE TAS AVAIT ENCORE, PUISQUE C'EST LUI QUI A REFUSE.
+    //
+    // Une panique d'allocation sans l'etat du tas laisse la meme question
+    // ouverte qu'un ecran vide : manquait-il un octet ou un mebioctet ?
+    let d = crate::kernel::dalles_tas::stats();
+    let (frames_used, frames_total) = crate::kernel::vmm::frame_stats_relaxed();
+    // CE QUI RESTAIT, ET PAS SEULEMENT CE QUI ETAIT PRIS.
+    //
+    // « Il manquait combien ? » est LA question d'une allocation refusee, et
+    // aucun des compteurs ci-dessus n'y repond : ils decrivent les dalles et
+    // les frames physiques, pas l'arene du tas. `heap_libre` la ferme.
+    let (heap_utilise, heap_libre, heap_total) = crate::kernel::heap::stats();
+    let _ = write!(
+        &mut out,
+        "PANIC_TAS heap_utilise={} heap_libre={} heap_total={} frames_used={} frames_total={} dalles={} vivants={} manques={} saturations={} sous_flux={} surallocations={}\n",
+        heap_utilise, heap_libre, heap_total,
+        frames_used, frames_total, d.enregistrees, d.objets_vivants,
+        d.manques, d.saturations, d.sous_flux, d.surallocations,
+    );
+    let _ = append(KIND_FATAL, out.as_bytes(), now, crate::drivers::serial::trace_total_bytes());
+
+    // Le journal serie porte tout le releve de panique qui vient d'etre
+    // imprime -- sur une machine sans COM1, c'est la SEULE copie.
+    STOPPING.store(false, Ordering::Release);
+    flush_serial(now, true);
+
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        return;
+    }
+    let echeance = now.saturating_add(BUDGET_FATAL_NS);
+    while now_ns() < echeance {
+        if !vidange(echeance).reste {
+            break;
+        }
+    }
+    crate::drivers::xhci_active::blackbox_force_sync();
+}

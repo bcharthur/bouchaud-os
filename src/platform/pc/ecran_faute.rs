@@ -899,7 +899,7 @@ fn dessine_trace(marge: u32, mut y: u32, largeur: u32, hauteur: u32, echelle: u3
 /// Il n'y a pas de registres a montrer ici : le contexte utile est le lieu de
 /// la panique et l'etape de demarrage franchie. Afficher un `RIP` a zero pour
 /// remplir la mise en page serait pire que de ne rien afficher.
-pub fn affiche_panique(fichier: &str, ligne: u32) {
+pub fn affiche_panique(fichier: &str, ligne: u32, message: Option<&str>) {
     if !ecran_disponible() {
         return;
     }
@@ -952,12 +952,35 @@ pub fn affiche_panique(fichier: &str, ligne: u32) {
         });
         y += pas + pas;
 
-        texte(
-            marge,
-            y,
-            "LE DETAIL COMPLET EST SUR COM1.",
-            echelle,
-            ETIQUETTE,
-        );
+        // LA LIGNE DU MESSAGE, QUI EST SOUVENT LA REPONSE.
+        //
+        // La panique du 17 septembre pointait `library/alloc/src/alloc.rs`
+        // ligne 0x23D : une allocation refusee. Le message de Rust porte la
+        // TAILLE demandee -- et il partait sur COM1, c'est-a-dire nulle part
+        // sur cette machine. Le chiffre le plus utile de l'ecran manquait.
+        if let Some(message) = message {
+            let colonnes = ((largeur.saturating_sub(2 * marge)) / (8 * echelle)) as usize;
+            let court = if message.len() > colonnes {
+                &message[..colonnes]
+            } else {
+                message
+            };
+            texte(marge, y, court, echelle, TEXTE);
+            y += pas + pas;
+        }
+
+        // OU EST LE DETAIL, SELON CE QUE CETTE MACHINE A VRAIMENT.
+        //
+        // « LE DETAIL COMPLET EST SUR COM1 » envoyait chercher la reponse sur
+        // un port que la machine de reference n'a pas. C'est la meme faute que
+        // « /persist n'est PAS a jour » sur une machine sans zone de
+        // persistance : annoncer un endroit qui n'existe pas fait perdre le
+        // temps de l'enquete, et parfois l'enquete elle-meme.
+        let ou = if crate::drivers::serial::presence_com1().ecrire() {
+            "LE DETAIL COMPLET EST SUR COM1 ET DANS LA BLACKBOX."
+        } else {
+            "PAS DE COM1 : LE DETAIL EST DANS LA BLACKBOX DE LA CLE USB."
+        };
+        texte(marge, y, ou, echelle, ETIQUETTE);
     }
 }

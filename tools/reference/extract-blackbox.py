@@ -12,29 +12,121 @@ PART_NAME = "BOUCHAUD-BLACKBOX"
 KIND_NAMES = {1:"serial",2:"sample",3:"marker",4:"flight",5:"memory",9:"fatal"}
 EVENT_NAMES = {1:"timer-enter",2:"timer-exit",10:"gfx-enter",11:"gfx-exit"}
 
-def read_exact(f, offset, size):
-    """Lecture brute alignee secteurs pour Windows PhysicalDrive."""
-    if offset < 0 or size < 0:
-        raise ValueError("offset/size negatifs")
-    if size == 0:
-        return b""
+class LecteurBrut:
+    """Lecture d'un disque brut, y compris un `\\\\.\\PhysicalDriveN` Windows.
 
-    aligned_start = (offset // SECTOR) * SECTOR
-    aligned_end = ((offset + size + SECTOR - 1) // SECTOR) * SECTOR
-    aligned_size = aligned_end - aligned_start
+    # Le defaut que ceci corrige
 
-    f.seek(aligned_start)
-    data = f.read(aligned_size)
-    if len(data) != aligned_size:
-        raise RuntimeError(
-            f"lecture courte offset={aligned_start} wanted={aligned_size} got={len(data)}"
-        )
+    L'extraction a echoue sur `OSError: [Errno 22] Invalid argument` en plein
+    parcours des emplacements, apres avoir pourtant lu la table GPT. Windows
+    n'autorise l'acces brut a un disque que par lectures ALIGNEES sur la taille
+    de secteur PHYSIQUE, qui vaut 4096 sur les supports 4Kn -- et la partition
+    BLACKBOX commence a un LBA dont l'octet de depart, 1 659 913 216, n'est pas
+    multiple de 4096.
 
-    begin = offset - aligned_start
-    return data[begin:begin + size]
+    Ce n'etait pas un detail d'outillage : c'est l'outil qui rend la trace
+    lisible, et il venait de refuser la seule archive contenant une panique
+    noyau. Un extracteur qui plante fait perdre exactement ce que l'
+    enregistreur a passe quatre sessions a savoir garder.
 
-def parse_gpt_partition(f):
-    hdr = read_exact(f, SECTOR, SECTOR)
+    # Ce que cette classe garantit
+
+      * l'alignement est DECOUVERT, pas suppose : 512 d'abord, 4096 ensuite ;
+      * les lectures se font par blocs d'un mebioctet, gardes en cache -- le
+        parcours est sequentiel, et huit mille lectures de quatre kibioctets
+        deviennent trente-deux lectures ;
+      * une zone illisible est SAUTEE et comptee, jamais levee. Une archive
+        amputee vaut infiniment mieux qu'une exception.
+    """
+
+    BLOC = 1 << 20
+
+    def __init__(self, fichier):
+        self.f = fichier
+        self.alignement = SECTOR
+        self.cache_debut = None
+        self.cache = b""
+        self.zones_illisibles = 0
+        self._decouvre_alignement()
+
+    def _decouvre_alignement(self):
+        """Le plus petit alignement que le disque accepte reellement."""
+        for essai in (SECTOR, 4096):
+            try:
+                self.f.seek(0)
+                if len(self.f.read(essai)) == essai:
+                    self.alignement = essai
+                    if essai != SECTOR:
+                        print(f"BLACKBOX alignement={essai} (secteur physique)")
+                    return
+            except OSError:
+                continue
+        # Aucun des deux n'a repondu : on garde 512 et on laissera la lecture
+        # signaler zone par zone, plutot que de refuser toute l'archive ici.
+        print("BLACKBOX ATTENTION: alignement indetermine, lecture au mieux")
+
+    def _charge(self, debut):
+        """Charge le bloc alignes contenant `debut`. Rend False s'il resiste."""
+        pas = max(self.alignement, SECTOR)
+        aligne = (debut // pas) * pas
+        if self.cache_debut == aligne:
+            return True
+        taille = self.BLOC
+        while taille >= pas:
+            try:
+                self.f.seek(aligne)
+                data = self.f.read(taille)
+            except OSError:
+                taille //= 2
+                continue
+            if not data:
+                break
+            self.cache_debut = aligne
+            self.cache = data
+            return True
+        self.cache_debut = None
+        self.cache = b""
+        return False
+
+    def lit(self, offset, size):
+        """Rend `size` octets, ou `None` si la zone est illisible."""
+        if offset < 0 or size < 0:
+            raise ValueError("offset/size negatifs")
+        if size == 0:
+            return b""
+        out = bytearray()
+        reste = size
+        curseur = offset
+        while reste:
+            if not self._charge(curseur):
+                self.zones_illisibles += 1
+                return None
+            dans_bloc = curseur - self.cache_debut
+            if dans_bloc >= len(self.cache):
+                self.zones_illisibles += 1
+                return None
+            morceau = self.cache[dans_bloc:dans_bloc + reste]
+            if not morceau:
+                self.zones_illisibles += 1
+                return None
+            out.extend(morceau)
+            curseur += len(morceau)
+            reste -= len(morceau)
+        return bytes(out)
+
+    def exige(self, offset, size):
+        """Comme `lit`, mais leve : reserve a la table GPT, sans laquelle il
+        n'y a rien a extraire du tout."""
+        data = self.lit(offset, size)
+        if data is None or len(data) != size:
+            raise RuntimeError(
+                f"lecture impossible offset={offset} taille={size} "
+                f"(alignement={self.alignement})"
+            )
+        return data
+
+def parse_gpt_partition(lecteur):
+    hdr = lecteur.exige(SECTOR, SECTOR)
     if hdr[:8] != b"EFI PART":
         raise RuntimeError("GPT primaire absente")
     entries_lba = struct.unpack_from("<Q", hdr, 72)[0]
@@ -43,7 +135,7 @@ def parse_gpt_partition(f):
     if entry_size < 128 or entry_size > 4096:
         raise RuntimeError(f"taille entree GPT invalide: {entry_size}")
     for i in range(entries_count):
-        raw = read_exact(f, entries_lba*SECTOR + i*entry_size, entry_size)
+        raw = lecteur.exige(entries_lba*SECTOR + i*entry_size, entry_size)
         if raw[:16] == b"\0"*16:
             continue
         first = struct.unpack_from("<Q", raw, 32)[0]
@@ -94,20 +186,32 @@ def session_dir_name(boot_id):
 def extract(source, output):
     output.mkdir(parents=True, exist_ok=True)
     with open(source, "rb", buffering=0) as f:
-        first,last,name=parse_gpt_partition(f)
+        lecteur=LecteurBrut(f)
+        first,last,name=parse_gpt_partition(lecteur)
         part_offset=first*SECTOR
         part_bytes=(last-first+1)*SECTOR
         slots=part_bytes//RECORD
         print(f"BLACKBOX partition={name} first_lba={first} last_lba={last} bytes={part_bytes} slots={slots}")
         records=[]
         bad=0
+        illisibles=0
         for slot in range(slots):
-            raw=read_exact(f, part_offset+slot*RECORD, RECORD)
+            raw=lecteur.lit(part_offset+slot*RECORD, RECORD)
+            if raw is None:
+                # UNE ZONE QUI RESISTE NE DOIT PAS EMPORTER L'ARCHIVE.
+                #
+                # C'est ce qui s'est passe le 17 septembre : une seule lecture
+                # refusee par Windows, une exception, et la trace d'une panique
+                # noyau perdue pour rien.
+                illisibles+=1
+                continue
             rec=parse_record(raw,slot)
             if rec is None:
                 if raw[:8]==MAGIC: bad+=1
                 continue
             records.append(rec)
+        if illisibles:
+            print(f"BLACKBOX ATTENTION: {illisibles} emplacement(s) illisible(s) sur {slots}")
 
     sessions={}
     for rec in records:
@@ -115,7 +219,8 @@ def extract(source, output):
 
     manifest=dict(source=source, partition_first_lba=first, partition_last_lba=last,
                   partition_bytes=part_bytes, record_slots=slots,
-                  valid_records=len(records), invalid_magic_or_crc_records=bad, sessions=[])
+                  valid_records=len(records), invalid_magic_or_crc_records=bad,
+                  unreadable_slots=illisibles, sessions=[])
 
     for boot_id in sorted(sessions):
         recs=sorted(sessions[boot_id], key=lambda r:r["seq"])
