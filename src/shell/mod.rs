@@ -213,7 +213,7 @@ pub const COMMANDS: &[&str] = &[
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
-    "ifup", "arping", "ethinfo", "nslookup", "http", "https", "tls-selftest", "tls",
+    "ifup", "arping", "ethinfo", "netetat", "netdiag", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode",
     "git", "rustc", "cargo", "rust-selftest",
@@ -986,6 +986,13 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "ifup" => { crate::net::ifup(); 0 }
         "arping" => { crate::net::arping(argc, &argv); 0 }
         "ethinfo" => { crate::drivers::e1000::print_info(); 0 }
+        // L'ETAT DE LA CARTE, ET SA DUREE DE VIE.
+        //
+        // `netetat` repond a « que fait la carte maintenant » ; `netdiag`
+        // repond a « tiendra-t-elle trois minutes », ce qu'aucune commande ne
+        // savait demander avant le releve du 17 septembre.
+        "netetat" => { crate::net::diagnostic::netetat(); 0 }
+        "netdiag" => { crate::net::diagnostic::netdiag(argc, &argv); 0 }
         "dns" | "nslookup" => { crate::net::dns_cmd(argc, &argv); 0 }
         "wget" | "curl" | "http" | "https" => { crate::net::wget_cmd(argc, &argv); 0 }
         "smoltest" => { crate::net::smoltest_cmd(argc, &argv); 0 }
