@@ -9,7 +9,7 @@ HEADER = 64
 MAGIC = b"BOUBBX01"
 PART_NAME = "BOUCHAUD-BLACKBOX"
 
-KIND_NAMES = {1:"serial",2:"sample",3:"marker",4:"flight",5:"memory",9:"fatal"}
+KIND_NAMES = {1:"serial",2:"sample",3:"marker",4:"flight",5:"memory",6:"network",7:"service",9:"fatal"}
 EVENT_NAMES = {1:"timer-enter",2:"timer-exit",10:"gfx-enter",11:"gfx-exit"}
 
 class LecteurBrut:
@@ -226,7 +226,7 @@ def extract(source, output):
         recs=sorted(sessions[boot_id], key=lambda r:r["seq"])
         sdir=output/session_dir_name(boot_id)
         sdir.mkdir(parents=True, exist_ok=True)
-        serial=bytearray(); samples=[]; memory=[]; markers=[]; fatal=[]; flight=[]
+        serial=bytearray(); samples=[]; memory=[]; markers=[]; fatal=[]; flight=[]; network=[]; services=[]
         for r in recs:
             p=r["payload"]
             if r["kind"]==1: serial.extend(p)
@@ -234,10 +234,24 @@ def extract(source, output):
             elif r["kind"]==3: markers.append(p.decode("utf-8",errors="replace"))
             elif r["kind"]==4: flight.extend(decode_flight(p))
             elif r["kind"]==5: memory.append(p.decode("utf-8",errors="replace"))
+            elif r["kind"]==6: network.append(p.decode("utf-8",errors="replace"))
+            elif r["kind"]==7: services.append(p.decode("utf-8",errors="replace"))
             elif r["kind"]==9: fatal.append(p.decode("utf-8",errors="replace"))
         (sdir/"serial.log").write_bytes(serial)
         (sdir/"samples.log").write_text("".join(samples),encoding="utf-8")
         (sdir/"memory.log").write_text("".join(memory),encoding="utf-8")
+        # L'ETAT DE LA CARTE, RELISIBLE APRES COUP.
+        #
+        # Le releve du 17 septembre a ete extrait sans une seule occurrence de
+        # `rx_cur`, `chip_cmd` ou `xid` : l'instantane vivait dans `netetat`, et
+        # nulle part dans ce qui se relit une fois la machine eteinte.
+        (sdir/"network.log").write_text("".join(network),encoding="utf-8")
+        # LES EVENEMENTS QUI PERMETTENT DE REJOUER UNE PANNE.
+        #
+        # Ethernet pret -> DHCP pret -> DNS pret -> RX degrade -> ARP en echec
+        # -> navigation en echec. Cette suite-la est exactement ce qui
+        # manquait, et elle doit se relire seule, sans etre noyee.
+        (sdir/"services.log").write_text("".join(services),encoding="utf-8")
         (sdir/"markers.log").write_text("".join(markers),encoding="utf-8")
         (sdir/"fatal.log").write_text("".join(fatal),encoding="utf-8")
         with (sdir/"flight.csv").open("w",newline="",encoding="utf-8") as fp:
@@ -251,7 +265,18 @@ def extract(source, output):
             boot_id=boot_id,directory=sdir.name,records=len(recs),
             first_seq=recs[0]["seq"] if recs else None,last_seq=recs[-1]["seq"] if recs else None,
             fatal_records=sum(1 for r in recs if r["kind"]==9),
-            serial_bytes=len(serial),flight_events=len(flight)
+            network_records=len(network),
+            service_records=len(services),
+            latency_spikes=sum(1 for l in "".join(services).splitlines() if l.startswith("pic_reveil")),
+            serial_bytes=len(serial),flight_events=len(flight),
+            # LA VERSION DU NOYAU QUI A PRODUIT CETTE ARCHIVE.
+            #
+            # Le releve du 17 septembre a ete lu comme s'il venait du commit
+            # qu'on croyait avoir flashe. Il venait d'un autre : ni `netetat`,
+            # ni `xid`, ni `chip_cmd` n'existaient dans ce binaire, et il a
+            # fallu compter les occurrences d'un champ pour s'en rendre compte.
+            # Une archive doit DIRE de quel noyau elle sort.
+            build=prochaine_marque(markers, "BOUCHAUD_BUILD"),
         ))
     manifest["sessions"].sort(key=lambda x:x["boot_id"])
     (output/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
@@ -264,6 +289,20 @@ def extract(source, output):
         print(f"OK: {len(records)} records, {len(manifest['sessions'])} session(s), latest={latest['directory']}")
     else:
         print("ATTENTION: aucun record BLACKBOX valide trouve")
+
+def prochaine_marque(markers, prefixe):
+    """La premiere marque portant ce prefixe, ou None.
+
+    Les marques sont des lignes completes ; on rend ce qui suit le prefixe,
+    debarrasse de ses espaces, pour que le manifeste porte l'identite du
+    binaire sans qu'on ait a ouvrir un fichier de plus.
+    """
+    for ligne in "".join(markers).splitlines():
+        place = ligne.find(prefixe)
+        if place >= 0:
+            return ligne[place + len(prefixe):].strip()
+    return None
+
 
 def main():
     ap=argparse.ArgumentParser()

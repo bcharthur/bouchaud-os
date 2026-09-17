@@ -5783,6 +5783,17 @@ fn fil_hid() -> ! {
         // T1 : premiere instruction utile du tour.
         let t1 = crate::kernel::timer::monotonic_ns();
         CHRONO.note_reveil(echeance, t1);
+        // LE PIC EST DATE, LE MAXIMUM NE L'EST PAS.
+        //
+        // `hid_wake_to_run_max_us` valait 12 179 860 sur le releve physique du
+        // 17 septembre, et ne disait ni quand, ni pendant quelle phase, ni sur
+        // quel coeur. L'evenement, lui, repond aux trois -- et il ne sort
+        // qu'aux pics : un journal par reveil ne mesurerait plus que lui-meme.
+        crate::kernel::services::pic_reveil(
+            t1.saturating_sub(echeance) / 1_000,
+            echeance,
+            t1,
+        );
         poll_mesure(t1);
         // T0 DU TOUR SUIVANT, calcule par la MEME fonction que `sleep_ticks`
         // arme -- recopier la formule ici mentirait le jour ou la cadence du

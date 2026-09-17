@@ -1063,6 +1063,7 @@ intr_status={:#06x} desc_materiel={} desc_processeur={} invariant={}",
         return false;
     }
 
+    crate::kernel::services::etat("net.rtl8168", crate::kernel::services::Etat::Reprise);
     crate::serial_println!(
         "BOUCHAUD_NET_RTL8168_REPRISE degre={} chip_cmd={:#04x} intr_status={:#06x} \
 desc_materiel={} desc_processeur={} rx_cur={} invariant={} rx_paquets={}",
@@ -1120,6 +1121,7 @@ pub fn demande_reparation_si_arretee() -> bool {
             return false;
         }
         REPARATION_DEMANDEE.store(true, Ordering::Release);
+        crate::kernel::services::erreur("net.rtl8168", "rx-silencieux");
         true
     }
 }

@@ -50,6 +50,23 @@ pub const KIND_SAMPLE: u16 = 2;
 pub const KIND_MARKER: u16 = 3;
 pub const KIND_FLIGHT: u16 = 4;
 pub const KIND_MEMORY: u16 = 5;
+// BOUCHAUD_NET_RELEVE_PERSISTANT_V1
+//
+// L'ETAT DE LA CARTE DOIT SURVIVRE A L'ARCHIVE, PAS SEULEMENT A L'ECRAN.
+//
+// Le releve du 17 septembre a ete extrait sans une seule occurrence de
+// `rx_cur`, `chip_cmd`, `intr_status` ou `xid` : l'instantane existait dans
+// `netetat`, et nulle part dans ce qui se relit apres coup. Un diagnostic qui
+// ne vit que sur l'ecran de la machine ne sert a rien une fois la machine
+// eteinte.
+pub const KIND_NETWORK: u16 = 6;
+/// Evenements de service et pics de latence.
+///
+/// Un genre A PART, et non des marques : ce sont les lignes qui permettent de
+/// REJOUER une panne -- Ethernet pret, DHCP pret, RX degrade, ARP en echec,
+/// navigation en echec -- et elles doivent se relire seules, sans etre noyees
+/// dans le reste.
+pub const KIND_SERVICE: u16 = 7;
 pub const KIND_FATAL: u16 = 9;
 
 const PAYLOAD_MAX: usize = 4032;
@@ -57,9 +74,39 @@ const FLIGHT_SLOTS: usize = 8192;
 const FLIGHT_EVENT_BYTES: usize = 32;
 const FLIGHT_EVENTS_PER_RECORD: usize = PAYLOAD_MAX / FLIGHT_EVENT_BYTES;
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_IDENTITE_DU_BINAIRE_V1 : une archive doit dire d'ou elle sort
+// ---------------------------------------------------------------------------
+//
+// Le releve physique du 17 septembre a ete lu comme s'il venait du commit
+// qu'on croyait avoir flashe. Il venait d'un autre : ni `netetat`, ni `xid`,
+// ni `chip_cmd` n'existaient dans ce binaire. Il a fallu compter les
+// occurrences d'un champ dans l'archive pour s'en apercevoir, apres avoir
+// cherche une panne dans du code qui n'avait jamais tourne.
+//
+// Deux identifiants, et les deux servent :
+//
+//   * `commit` vient de l'environnement de compilation quand il existe. Il est
+//     exact, et absent des constructions faites a la main ;
+//   * `lot` est une liste de CAPACITES compilees. Elle ne peut pas etre
+//     absente, et elle repond directement a la seule question qui compte
+//     devant une archive : « le correctif est-il DANS cette image ? »
+pub const BUILD_COMMIT: &str = match option_env!("BOUCHAUD_BUILD_COMMIT") {
+    Some(v) => v,
+    None => "inconnu",
+};
+
+/// Les lots presents dans ce binaire, du plus ancien au plus recent.
+///
+/// Une ligne par passe. Ajouter la sienne est le prix d'entree : sans elle, le
+/// prochain releve ne dira pas si le correctif y etait.
+pub const BUILD_LOTS: &str = "reveil-cible,rtl8168-rx-vivant,rx-ingress-unique";
+
 const POLL_NS: u64 = 250_000_000;
 const SAMPLE_NS: u64 = 250_000_000;
 const MEMORY_NS: u64 = 1_000_000_000;
+/// Periode du releve reseau. Une ligne par seconde, compacte.
+const NETWORK_NS: u64 = 1_000_000_000;
 
 const EVT_TIMER_ENTER: u16 = 1;
 const EVT_TIMER_EXIT: u16 = 2;
@@ -101,6 +148,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_POLL_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_SAMPLE_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_MEMORY_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_NETWORK_NS: AtomicU64 = AtomicU64::new(0);
 
 const MAX_CPUS: usize = 64;
 static TIMER_STAGE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -853,6 +901,121 @@ fn memory_sample(ts_ns: u64) {
     let _ = append(KIND_MEMORY, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
 
+/// L'etat du controleur reseau, une ligne par seconde.
+///
+/// # Ce que cette ligne repond, et que rien ne repondait
+///
+/// `trames=104 puis plus rien` ne permet pas de choisir entre quatre pannes :
+/// moteur arrete, anneau sature, descripteurs desynchronises, carte disparue
+/// du bus. Chacune se lit ici, et le releve physique n'a plus a etre devine :
+///
+///   * `chip_cmd` porte `RxEnb` et `RxBufEmpty` -- moteur arrete ou non ;
+///   * `desc_nic`/`desc_cpu` disent qui possede l'anneau -- sature ou non ;
+///   * `invariant` dit si le materiel et nous parlons encore du meme objet ;
+///   * `intr_status` a `0xffff` dit une carte absente du bus.
+fn network_sample(ts_ns: u64) {
+    let nic = crate::drivers::rtl8168::releve();
+    let (routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis) =
+        crate::net::compteurs_routage();
+    let smol = crate::net::compteurs_smoltcp();
+    let mut out = Text::new();
+    let _ = write!(
+        &mut out,
+        concat!(
+            "nic ts_ns={} xid={:#05x} gen={} lien={} vitesse_mbps={} duplex={} ",
+            "rx_cur={} tx_cur={} rx_packets={} rx_bytes={} tx_packets={} tx_bytes={} ",
+            "rx_last_ns={} tx_last_ns={} desc_nic={} desc_cpu={} desc_courant={:#010x} ",
+            "chip_cmd={:#04x} intr_status={:#06x} rx_missed={} ",
+            "isr_lectures={} isr_rx_ok={} isr_rx_err={} isr_rx_overflow={} ",
+            "isr_rx_fifo_over={} isr_tx_err={} isr_link_chg={} isr_sys_err={} isr_absente={} ",
+            "rearms={} recoveries={} recovery_failures={} abandonnees={} abimees={} tx_plein={} ",
+            "invariant={} ",
+            // LE ROUTAGE, SUR LA MEME LIGNE QUE LA CARTE.
+            //
+            // Une carte qui recoit et un routage fige designent un tout autre
+            // defaut qu'une carte muette. Les separer obligeait a recoller deux
+            // lignes de deux sources a la main.
+            "routees={} arp_vues={} dhcp_vues={} arp_ok={} arp_ko={} arp_non_emis={} ",
+            // LA FILE SMOLTCP : qui consomme, et ce qui se perd.
+            "smol_abonnee={} smol_posees={} smol_retirees={} smol_perdues={} smol_max={}\n"
+        ),
+        ts_ns, nic.xid, nic.generation,
+        crate::drivers::e1000::link_up() as u8,
+        crate::drivers::e1000::vitesse_mbps(),
+        crate::drivers::e1000::duplex_complet() as u8,
+        nic.rx_cur, nic.tx_cur,
+        nic.rx_paquets, nic.rx_octets, nic.tx_paquets, nic.tx_octets,
+        nic.rx_dernier_ns, nic.tx_dernier_ns,
+        nic.rx_desc_materiel, nic.rx_desc_processeur, nic.rx_desc_courant,
+        nic.chip_cmd, nic.intr_status, nic.rx_missed,
+        nic.isr_lectures, nic.isr_rx_ok, nic.isr_rx_err, nic.isr_rx_overflow,
+        nic.isr_rx_fifo_over, nic.isr_tx_err, nic.isr_link_chg,
+        nic.isr_system_error, nic.isr_carte_absente,
+        nic.rx_rearmements, nic.rx_reprises, nic.rx_reprises_echouees,
+        nic.rx_abandonnees, nic.rx_abimees, nic.tx_anneau_plein,
+        nic.invariant.unwrap_or("intact"),
+        routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis,
+        crate::net::smoltcp_abonnee() as u8,
+        smol.posees, smol.retirees, smol.perdues_pleine, smol.occupation_max,
+    );
+    let _ = append(KIND_NETWORK, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+}
+
+/// Un changement d'etat de service. Emis SEULEMENT quand l'etat change.
+///
+/// Un service qui reste actif sans erreur pendant cinq minutes n'ecrit rien :
+/// c'est ce qui evite que l'observatoire refasse ce que le diagnostic
+/// d'ordonnancement a fait a l'archive du 17 septembre -- effacer le
+/// demarrage pour decrire un systeme qui va bien.
+pub fn service_evenement(
+    ts_ns: u64,
+    id: &str,
+    etat: &str,
+    duree_ms: u64,
+    erreurs: u32,
+    reprises: u32,
+    raison: &str,
+) {
+    let mut out = Text::new();
+    let _ = write!(
+        &mut out,
+        "service ts_ns={} id={} etat={} duree_ms={} erreurs={} reprises={} raison={}\n",
+        ts_ns, id, etat, duree_ms, erreurs, reprises, raison,
+    );
+    let _ = append(KIND_SERVICE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+}
+
+/// Un reveil qui a trop attendu son processeur.
+///
+/// # Ce que cet enregistrement ajoute a `hid_wake_to_run_max_us`
+///
+/// Le maximum cumule disait `12 179 860` us et ne datait rien : ni quand, ni
+/// pendant quelle phase, ni sur quel coeur. Celui-ci repond aux trois, et il
+/// ne sort qu'aux pics -- pas a chaque reveil.
+pub fn pic_reveil(
+    ts_ns: u64,
+    echeance_ns: u64,
+    delta_us: u64,
+    cpu: u32,
+    file: u32,
+    noyau: bool,
+    bkl: u32,
+    phase: &str,
+) {
+    let mut out = Text::new();
+    let _ = write!(
+        &mut out,
+        "pic_reveil ts_ns={} echeance_ns={} delta_us={} cpu={} runqueue={} \
+tache_noyau={} bkl_owner={} phase={}\n",
+        ts_ns, echeance_ns, delta_us, cpu, file, noyau as u8, bkl, phase,
+    );
+    let _ = append(KIND_SERVICE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+    crate::serial_println!(
+        "HID_LATENCY_SPIKE delta_us={} cpu={} runqueue={} tache_noyau={} bkl_owner={} phase={}",
+        delta_us, cpu, file, noyau as u8, bkl, phase,
+    );
+}
+
 /// Produit ce qu'il y a a produire. Rend toujours `false`.
 ///
 /// # Ce que cette fonction ne fait plus
@@ -904,9 +1067,11 @@ pub fn poll() -> bool {
         let mut msg = Text::new();
         let _ = write!(
             &mut msg,
-            "BOUCHAUD_TRIGKEY_BLACKBOX_V3 START boot_id={} ts_ns={} arriere={} produit={} capacite={} perdu_avant_demarrage={} com1={} tambour_descripteurs={} tambour_octets={}\n",
+            "BOUCHAUD_TRIGKEY_BLACKBOX_V3 START boot_id={} ts_ns={} BOUCHAUD_BUILD commit={} lot={} arriere={} produit={} capacite={} perdu_avant_demarrage={} com1={} tambour_descripteurs={} tambour_octets={}\n",
             boot_id(),
             now,
+            BUILD_COMMIT,
+            BUILD_LOTS,
             fin_tambour.saturating_sub(debut_tambour),
             fin_tambour,
             crate::drivers::serial::trace_capacite(),
@@ -930,6 +1095,12 @@ pub fn poll() -> bool {
     if last_memory == 0 || now.saturating_sub(last_memory) >= MEMORY_NS {
         LAST_MEMORY_NS.store(now, Ordering::Relaxed);
         memory_sample(now);
+    }
+
+    let last_network = LAST_NETWORK_NS.load(Ordering::Relaxed);
+    if last_network == 0 || now.saturating_sub(last_network) >= NETWORK_NS {
+        LAST_NETWORK_NS.store(now, Ordering::Relaxed);
+        network_sample(now);
     }
 
     false
@@ -1242,6 +1413,7 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
     // qu'on vienne chercher.
     sample(maintenant);
     memory_sample(maintenant);
+    network_sample(maintenant);
 
     let support = crate::drivers::xhci_active::blackbox_storage_ready();
     if !support {

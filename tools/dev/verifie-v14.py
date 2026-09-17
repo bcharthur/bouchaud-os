@@ -27,16 +27,39 @@ assert 'RA_START_AFTER: u64 = 2' in policy and 'RA_MAX_PAGES: u64 = 16' in polic
 fault=(root/'src/kernel/process/thread/faute_memoire.rs').read_text(encoding='utf-8')
 assert 'include!("faute_cluster.rs")' in fault and 'fault_cluster_after_clean' in fault
 stall=(root/'src/kernel/process/thread/diagnostic_stall.rs').read_text(encoding='utf-8')
-# V14 exigeait la constante `5 * TICKS_PER_SECOND`. Le CONTRAT qu'elle
-# protegeait -- ne pas noyer une entree-sortie serie emulee sous TCG -- ne
-# change pas : il ne s'applique plus qu'au cas ou un COM1 existe REELLEMENT.
-# Sans port, les lignes tombent dans le tambour RAM et ne coutent rien ; cinq
-# secondes y etaient une seule chance de voir, et le releve physique du
-# 16 septembre 20:08, arrete a 7,87 s, n'en a eu qu'une.
-assert '5 * crate::kernel::timer::TICKS_PER_SECOND' in stall, \
-    "la cadence lente a disparu : une entree-sortie serie emulee serait noyee"
-assert 'presence_com1' in stall, \
-    "la cadence ne depend plus du port : elle est lente partout, ou couteuse partout"
+# V14 exigeait la constante `5 * TICKS_PER_SECOND`, puis une cadence qui
+# dependait de la presence d'un COM1. Le CONTRAT qu'elles protegeaient -- ne
+# pas noyer le journal sous un diagnostic periodique -- ne change pas ; ce qui
+# change, c'est qu'il ne suffisait plus.
+#
+# Le releve physique du 17 septembre, 769 s d'activite, montre ou menait la
+# cadence rapide « qui ne coute rien » sur une machine sans port serie :
+#
+#     capacite ~1 MiB, produit ~10,4 MiB
+#     tambour_reserves=12736 ecrases=4544 perdus=4209
+#     premier enregistrement survivant : seq=4546, t~287 s
+#
+# Tout le demarrage efface par le diagnostic lui-meme. Le contrat devient donc
+# plus fort, et il ne depend plus du port : en regime NORMAL, un resume d'une
+# ligne, et rien de plus ; l'etat complet ne sort que sur ANOMALIE.
+import re as _re
+periode = _re.search(
+    r'periode_resume\s*=\s*(\d+)\s*\*\s*crate::kernel::timer::TICKS_PER_SECOND',
+    stall,
+)
+assert periode is not None, \
+    "la cadence du regime normal n'est plus une constante lisible"
+assert int(periode.group(1)) >= 5, \
+    "le regime normal imprime plus souvent que toutes les cinq secondes : " \
+    "le diagnostic effacerait de nouveau ce qu'il doit expliquer"
+assert 'fn resume_ordonnancement()' in stall, \
+    "le resume compact a disparu : il ne resterait que le silence ou le deluge"
+# L'ETAT COMPLET NE DOIT PAS ETRE PERIODIQUE. C'est lui qui produisait 2150
+# lignes `[SCHED-TACHE]` et 1232 `[SCHED-FILE]` par mebioctet de trace.
+appel = stall.find('signale_etat_ordonnancement();')
+garde = stall.rfind('if complet {', 0, appel)
+assert garde != -1 and appel - garde < 300, \
+    "l'etat complet de l'ordonnancement est redevenu periodique"
 metrics=(root/'src/kernel/process/thread/metriques.rs').read_text(encoding='utf-8')
 assert '[MM-CLUSTER]' in metrics and 'periode_rapport = 10 *' in metrics
 # Le correctif de reference a rejoint docs/historique/notes/ lors du

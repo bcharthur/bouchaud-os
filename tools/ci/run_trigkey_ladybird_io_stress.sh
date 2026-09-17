@@ -101,6 +101,7 @@ if [ "$CHARGE_CPU" -gt 0 ] && [ "$CHARGE_CPU" -gt "$COEURS_HOTE" ]; then
 fi
 BOUCHAUD_BANC_SECONDES="$SECONDES" \
 BOUCHAUD_BANC_CHARGE_CPU="$CHARGE_CPU" \
+BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD 2>/dev/null || echo inconnu)" \
 cargo +nightly-2026-06-01 build --target targets/x86_64-bouchaud_os_uefi.json \
   --no-default-features --features uefi-boot,reference-bringup,reference-desktop,banc-io || exit 1
 NOYAU=target/x86_64-bouchaud_os_uefi/debug/bouchaud-os

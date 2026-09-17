@@ -24,6 +24,10 @@ pub mod frame_cache;
 pub mod memory_pressure;
 #[path = "debug/dmesg.rs"]
 pub mod dmesg;
+/// L'observatoire : UNE source de verite pour le demarrage, l'interface et la
+/// boite noire. Voir `services/mod.rs`.
+#[path = "services/mod.rs"]
+pub mod services;
 #[path = "debug/blackbox.rs"]
 pub mod blackbox; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
 #[path = "debug/souffle.rs"]

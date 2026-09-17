@@ -12,6 +12,7 @@ if ! command -v cargo-bootimage >/dev/null 2>&1; then
   cargo install bootimage --locked
 fi
 
+BOUCHAUD_BUILD_COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo inconnu) \
 cargo bootimage
 BOOT="target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin"
 test -s "$BOOT"

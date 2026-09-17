@@ -68,6 +68,15 @@ pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 // Les fragments restent dans CE module via include! : API, statiques privées,
 // visibilité et ordre lexical sont conservés.
 
+/// Demande l'etat complet de l'ordonnancement, au titre d'une latence.
+///
+/// La sonde n'imprime plus son etat complet a chaque seconde : c'est ce qui
+/// effacait le demarrage de l'archive. Elle le fait sur demande, et un pic de
+/// reveil est exactement l'occasion qui le justifie.
+pub fn demande_dump_ordonnancement_latence() {
+    demande_dump_ordonnancement(RaisonDump::LatenceHid);
+}
+
 include!("thread/modeles.rs");
 include!("thread/faute_memoire.rs");
 include!("thread/processus.rs");

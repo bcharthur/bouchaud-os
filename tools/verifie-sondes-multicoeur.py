@@ -148,31 +148,57 @@ def main():
             "Une alarme qui sonne a chaque tic ne se lit plus."
         )
 
-    # 4. La cadence doit suivre le COUT REEL, pas une constante.
+    # 4. DEUX REGIMES : un resume en continu, l'etat complet sur anomalie.
+    #
+    # La regle precedente exigeait que la cadence suive le COUT du port serie :
+    # cinq secondes avec un COM1 reel, une seconde sans, puisque les lignes
+    # tombaient alors dans un tambour RAM « qui ne coute rien ».
+    #
+    # Le releve physique du 17 septembre, 769 s d'activite, montre ce que cela
+    # coutait vraiment :
+    #
+    #     capacite ~1 MiB, produit ~10,4 MiB
+    #     tambour_reserves=12736 ecrases=4544 perdus=4209
+    #     premier enregistrement survivant : seq=4546, t~287 s
+    #
+    # Sur le seul mebioctet survivant, ces sondes avaient produit 2150 lignes
+    # `[SCHED-TACHE]` et 1232 `[SCHED-FILE]` -- 87 % de la trace -- pour
+    # decrire un systeme qui allait bien, et le demarrage qu'on cherchait avait
+    # ete efface. Le cout d'une trace n'est pas seulement le temps qu'elle
+    # prend : c'est aussi la place qu'elle vole a ce qui compte.
     stall_code = code_seul(STALL.read_text(encoding="utf-8"))
-    i = stall_code.find("snapshot_period")
-    if i == -1:
+    periode = re.search(
+        r"periode_resume\s*=\s*(\d+)\s*\*\s*crate::kernel::timer::TICKS_PER_SECOND",
+        stall_code,
+    )
+    if periode is None:
         fautes.append(
-            "diagnostic_stall.rs : la cadence des instantanes a disparu."
+            "diagnostic_stall.rs : la cadence du regime normal a disparu."
         )
-    else:
-        fenetre = stall_code[i:i + 500]
-        if "presence_com1" not in fenetre:
-            fautes.append(
-                "diagnostic_stall.rs : la cadence des instantanes ne depend "
-                "plus du port serie. Cinq secondes se justifient quand chaque "
-                "octet part par entree-sortie emulee ; sur une machine sans "
-                "COM1 -- `com1=bus-flottant`, ce que dit le releve physique -- "
-                "les lignes tombent dans le tambour RAM et ne coutent rien. "
-                "Le releve du 16 septembre 20:08 s'arrete a 7,87 s : la sonde "
-                "n'a parle QU'UNE fois, et l'instantane suivant serait tombe "
-                "trois secondes trop tard."
-            )
-        if not re.search(r"\bTICKS_PER_SECOND\b[^*]*\}", fenetre):
-            fautes.append(
-                "diagnostic_stall.rs : la branche rapide ne vaut plus une "
-                "seconde ; une cadence plus lente que la panne ne la voit pas."
-            )
+    elif int(periode.group(1)) < 5:
+        fautes.append(
+            "diagnostic_stall.rs : le regime normal imprime plus souvent que "
+            "toutes les cinq secondes. Le diagnostic effacerait de nouveau le "
+            "demarrage qu'il doit expliquer."
+        )
+    if "fn resume_ordonnancement()" not in stall_code:
+        fautes.append(
+            "diagnostic_stall.rs : le resume compact a disparu. Il ne "
+            "resterait que le silence ou le deluge."
+        )
+    appel = stall_code.find("signale_etat_ordonnancement();")
+    garde = stall_code.rfind("if complet {", 0, appel) if appel != -1 else -1
+    if appel == -1 or garde == -1 or appel - garde > 300:
+        fautes.append(
+            "diagnostic_stall.rs : l'etat complet de l'ordonnancement est "
+            "redevenu periodique. C'est lui qui produisait 87 % de la trace."
+        )
+    if "RAISON_DUMP" not in stall_code:
+        fautes.append(
+            "diagnostic_stall.rs : plus aucune anomalie ne peut demander "
+            "l'etat complet. Le regime normal deviendrait le seul regime, et "
+            "un pic de latence ne serait plus explique par rien."
+        )
 
     # 3. L'exception assumee.
     if "echantillonne_tache_bsp" in timer and "balanced_bsp" not in timer:

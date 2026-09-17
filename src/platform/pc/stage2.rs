@@ -317,7 +317,28 @@ pub fn run(boot: &'static BootInfo) -> ! {
         (souris_usb == 0) as u8,
     );
 
+    // L'OBSERVATOIRE EST DECLARE AVANT LE RESEAU, pas apres : c'est lui qui
+    // doit porter la phase « Ethernet en cours de configuration », et une
+    // phase declaree apres coup ne date rien.
+    crate::kernel::services::declare_arbre();
+    crate::kernel::services::phase("net");
     let _network_state = crate::net::demarre();
+    crate::kernel::services::etat(
+        "net.rtl8168",
+        if crate::drivers::e1000::is_ready() {
+            crate::kernel::services::Etat::Actif
+        } else {
+            crate::kernel::services::Etat::Panne
+        },
+    );
+    crate::kernel::services::etat(
+        "net.lien",
+        if crate::drivers::e1000::link_up() {
+            crate::kernel::services::Etat::Actif
+        } else {
+            crate::kernel::services::Etat::Attente
+        },
+    );
 
     // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
     //

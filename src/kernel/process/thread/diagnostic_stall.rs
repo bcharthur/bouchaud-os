@@ -504,12 +504,37 @@ pub fn stall_probe_from_timer() {
     // `ecrire()` est le predicat que le pilote utilise deja pour decider
     // s'il pousse un octet sur le port. Sa negation est exactement « les
     // lignes ne coutent qu'une ecriture en RAM ».
-    let snapshot_period = if !crate::drivers::serial::presence_com1().ecrire() {
-        crate::kernel::timer::TICKS_PER_SECOND
-    } else {
-        5 * crate::kernel::timer::TICKS_PER_SECOND
-    };
-    if !bloque && now % snapshot_period != 0 {
+    // BOUCHAUD_DIAGNOSTIC_QUI_N_EFFACE_PAS_LE_BOOT_V1
+    //
+    // LE RAISONNEMENT CI-DESSUS ETAIT JUSTE POUR UNE MACHINE QUI VIT HUIT
+    // SECONDES. IL EST FAUX POUR UNE QUI EN VIT SEPT CENTS.
+    //
+    // « Y ecrire cinq fois plus souvent ne coute rien » supposait que le
+    // tambour RAM d'un mebioctet ne serait jamais rempli. Le releve physique
+    // du 17 septembre, 769 s d'activite, dit le contraire :
+    //
+    //     capacite ~1 MiB, produit ~10,4 MiB
+    //     tambour_reserves=12736 ecrases=4544 perdus=4209
+    //     premier enregistrement survivant : seq=4546, t~287 s
+    //
+    // Toute la phase de demarrage -- celle qu'on cherchait -- avait ete
+    // effacee par le diagnostic lui-meme. Sur ces sept cents secondes, ces
+    // sondes ont produit 2150 lignes `[SCHED-TACHE]` et 1232 `[SCHED-FILE]`
+    // pour le seul MEBIOCTET qui a survecu : quatre-vingt-sept pour cent de
+    // la trace, pour decrire un systeme qui allait bien.
+    //
+    // Un diagnostic qui efface ce qu'il doit expliquer n'est pas un
+    // diagnostic. Deux regimes, desormais :
+    //
+    //   * NORMAL -- un resume d'UNE ligne toutes les trente secondes ;
+    //   * ANOMALIE -- l'etat complet, immediatement, et seulement alors.
+    //
+    // L'EVALUATION, elle, reste a la seconde : `bloque` se detecte avec la
+    // meme latence qu'avant. C'est l'IMPRESSION qui change, pas la vigilance.
+    let demande = RAISON_DUMP.swap(RaisonDump::Aucune as u8, Ordering::AcqRel);
+    let complet = bloque || demande != RaisonDump::Aucune as u8;
+    let periode_resume = 30 * crate::kernel::timer::TICKS_PER_SECOND;
+    if !complet && now % periode_resume != 0 {
         return;
     }
 
@@ -534,7 +559,15 @@ pub fn stall_probe_from_timer() {
     );
 
     signale_taches_orphelines();
-    signale_etat_ordonnancement();
+    if complet {
+        crate::serial_println!(
+            "[SCHED-DUMP] raison={} -- etat complet ci-dessous",
+            nom_raison(demande, bloque),
+        );
+        signale_etat_ordonnancement();
+    } else {
+        resume_ordonnancement();
+    }
 
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
@@ -813,6 +846,99 @@ suite : elle ne sera jamais elue",
 // Aucune sonde existante ne les distingue : `[SMP-TASK]` ne sort qu'a la
 // CREATION, et l'instantane ne montre que les CPU. On imprime donc l'etat
 // reel de chaque tache vivante, et la longueur de chaque file.
+/// Pourquoi l'etat complet de l'ordonnancement a ete demande.
+///
+/// L'ordre EST la priorite : `fetch_max` retient la raison la plus grave
+/// quand plusieurs tombent dans la meme seconde.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RaisonDump {
+    Aucune = 0,
+    /// Une commande l'a demande.
+    Manuelle = 1,
+    /// La reception reseau ne progresse plus.
+    ReceptionReseau = 2,
+    /// Un reveil sensible a la latence a depasse sa borne.
+    LatenceHid = 3,
+    /// Une faute.
+    Fatal = 4,
+}
+
+static RAISON_DUMP: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Demande l'etat complet de l'ordonnancement au prochain passage de la sonde.
+///
+/// # Pourquoi une DEMANDE et non une impression directe
+///
+/// L'appelant est souvent dans un contexte ou il ne peut pas se permettre
+/// trente lignes de trace : une interruption, un chemin de reception, un
+/// gestionnaire de faute. La sonde, elle, s'execute deja a un endroit sur et
+/// une fois par seconde. Poser un drapeau coute une ecriture atomique.
+pub fn demande_dump_ordonnancement(raison: RaisonDump) {
+    RAISON_DUMP.fetch_max(raison as u8, Ordering::AcqRel);
+}
+
+fn nom_raison(code: u8, bloque: bool) -> &'static str {
+    if code == RaisonDump::Fatal as u8 {
+        "fatal"
+    } else if code == RaisonDump::LatenceHid as u8 {
+        "latence-hid"
+    } else if code == RaisonDump::ReceptionReseau as u8 {
+        "reception-reseau"
+    } else if code == RaisonDump::Manuelle as u8 {
+        "manuelle"
+    } else if bloque {
+        "blocage-verrou"
+    } else {
+        "inconnue"
+    }
+}
+
+/// Le regime NORMAL : une ligne, toutes les trente secondes.
+///
+/// Elle porte ce qui permet de dire « rien d'anormal » sans decrire chaque
+/// coeur et chaque tache : combien de coeurs dorment, ce qui attend dans les
+/// files, et combien de taches vivent dans quel etat. Si l'un de ces nombres
+/// surprend, l'etat complet se demande -- par `sched-dump`, ou par une
+/// anomalie qui l'aura demande toute seule.
+fn resume_ordonnancement() {
+    let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
+    let mut au_repos = 0usize;
+    let mut en_file = 0usize;
+    for cpu in 0..coeurs {
+        if cpu::is_idle(cpu) {
+            au_repos += 1;
+        }
+        if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+            en_file += crate::arch::x86_64::cpu_local::local(id).run_queue_len();
+        }
+    }
+    let mut vivantes = 0usize;
+    let mut pretes = 0usize;
+    let mut bloquees = 0usize;
+    let mut sur_coeur = 0usize;
+    for emplacement in 0..registre_longueur() {
+        let Some(identite) = registre_id(emplacement) else { continue };
+        let Some(tache) = registre_tache_id(identite) else { continue };
+        if tache.state == TaskState::Zombie {
+            continue;
+        }
+        vivantes += 1;
+        match tache.state.charge() {
+            TaskState::Ready => pretes += 1,
+            TaskState::Blocked => bloquees += 1,
+            _ => {}
+        }
+        if tache.on_cpu.charge() >= 0 {
+            sur_coeur += 1;
+        }
+    }
+    crate::serial_println!(
+        "[SCHED-RESUME] coeurs={} au_repos={} en_file={} taches={} pretes={} bloquees={} sur_coeur={}",
+        coeurs, au_repos, en_file, vivantes, pretes, bloquees, sur_coeur,
+    );
+}
+
 fn signale_etat_ordonnancement() {
     let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
     for cpu in 0..coeurs {

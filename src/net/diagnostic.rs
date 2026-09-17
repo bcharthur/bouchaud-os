@@ -287,11 +287,149 @@ xid={:#05x} generation={} invariant={} arp_ttl_ms={} verdict={}",
     );
 }
 
+/// `services` : l'arborescence de l'observatoire, sur l'ecran de la machine.
+///
+/// # Ce que cette commande remplace
+///
+/// Devant une panne, il fallait deduire a la main si elle venait du RTL8168,
+/// d'ARP, de DNS, de TCP, du `RequestServer` ou de l'ordonnanceur -- en
+/// recollant des compteurs qui vivent a quatre endroits et ne se datent pas
+/// entre eux. Ici l'arbre est celui du registre, et le registre est la seule
+/// source : l'ecran de demarrage et la boite noire lisent le meme.
+pub fn services(argc: usize, argv: &[&str; 12]) {
+    use crate::kernel::services;
+
+    if argc > 1 && argv[1] == "errors" {
+        let mut trouve = false;
+        services::parcours(|e| {
+            if e.erreurs == 0 && !e.etat.problematique() {
+                return;
+            }
+            trouve = true;
+            crate::println!(
+                "  {:<22} {:<10} {} erreur(s), {} reprise(s), raison {}",
+                e.id.texte(),
+                e.etat.nom(),
+                e.erreurs,
+                e.reprises,
+                if e.raison.est_vide() { "-" } else { e.raison.texte() },
+            );
+        });
+        if !trouve {
+            crate::println!("services : aucune erreur enregistree.");
+        }
+        return;
+    }
+
+    if argc > 1 {
+        // `services <id>` : le detail d'un seul.
+        let cible = argv[1];
+        let mut trouve = false;
+        services::parcours(|e| {
+            if !e.id.egale(cible) {
+                return;
+            }
+            trouve = true;
+            crate::println!("{} ({})", e.id.texte(), e.genre.nom());
+            crate::println!("  etat        : {}", e.etat.nom());
+            crate::println!("  parent      : {}", if e.parent.est_vide() { "-" } else { e.parent.texte() });
+            match e.duree_demarrage_ms() {
+                Some(ms) => crate::println!("  demarrage   : {} ms", ms),
+                // UNE VALEUR INCONNUE EST « N/A », ET PAS ZERO. Zero est une
+                // mesure ; l'absence de mesure n'en est pas une.
+                None => crate::println!("  demarrage   : N/A"),
+            }
+            crate::println!(
+                "  activite    : derniere {} ns | succes {} ns | erreur {} ns",
+                e.derniere_activite_ns, e.dernier_succes_ns, e.derniere_erreur_ns,
+            );
+            crate::println!(
+                "  compteurs   : {} erreur(s), {} reprise(s), {} redemarrage(s)",
+                e.erreurs, e.reprises, e.redemarrages,
+            );
+            if !e.raison.est_vide() {
+                crate::println!("  raison      : {}", e.raison.texte());
+            }
+        });
+        if !trouve {
+            crate::println!("services : « {} » inconnu.", cible);
+        }
+        return;
+    }
+
+    // L'arbre, sur deux niveaux : les groupes puis leurs enfants.
+    let compteurs = services::compteurs();
+    crate::println!(
+        "services : {} enregistres, {} transitions, {} evenements{}",
+        compteurs.enregistres,
+        compteurs.transitions,
+        compteurs.evenements,
+        if compteurs.refuses != 0 { " (registre plein !)" } else { "" },
+    );
+    let mut groupes: [crate::kernel::services::registre::Id; 8] =
+        [crate::kernel::services::registre::Id::vide(); 8];
+    let mut nb_groupes = 0usize;
+    services::parcours(|e| {
+        if e.parent.est_vide() && nb_groupes < groupes.len() {
+            groupes[nb_groupes] = e.id;
+            nb_groupes += 1;
+        }
+    });
+    for groupe in groupes.iter().take(nb_groupes) {
+        crate::println!("  {}", groupe.texte());
+        services::parcours(|e| {
+            if !e.parent.egale(groupe.texte()) {
+                return;
+            }
+            crate::println!(
+                "    {:<20} {:<10} {:<10} {}",
+                e.id.texte(),
+                e.genre.nom(),
+                e.etat.nom(),
+                match e.duree_demarrage_ms() {
+                    Some(ms) => {
+                        let mut t = crate::alloc::string::String::new();
+                        use core::fmt::Write;
+                        let _ = write!(&mut t, "pret en {} ms", ms);
+                        t
+                    }
+                    None => crate::alloc::string::String::from("N/A"),
+                },
+            );
+        });
+    }
+    if let Some((id, etat, raison, _)) = services::pire() {
+        crate::println!(
+            "verdict : {} en {} ({})",
+            id.texte(),
+            etat.nom(),
+            if raison.est_vide() { "-" } else { raison.texte() },
+        );
+    } else {
+        crate::println!("verdict : rien de degrade.");
+    }
+    let (vus, ecrits, pire_us) = services::compteurs_pics();
+    crate::println!(
+        "pics de reveil : {} vus, {} enregistres, pire {} us",
+        vus, ecrits, pire_us,
+    );
+}
+
 /// `netetat` : l'etat du pilote reseau, tout de suite, sans banc.
 ///
 /// C'est la reponse a « que fait la carte MAINTENANT », et elle tient sur
 /// l'ecran de la machine sans archive a extraire.
 pub fn netetat() {
+    // L'IDENTITE DU BINAIRE EN PREMIER.
+    //
+    // La session du 17 septembre a cherche une panne dans du code qui n'etait
+    // pas dans l'image testee. Cette ligne-la coute six mots et supprime la
+    // question.
+    crate::println!(
+        "binaire : commit {} | lots {}",
+        crate::kernel::blackbox::BUILD_COMMIT,
+        crate::kernel::blackbox::BUILD_LOTS,
+    );
     let nic = crate::drivers::rtl8168::releve();
     let qualite = net::qualite_lien();
     crate::println!(
