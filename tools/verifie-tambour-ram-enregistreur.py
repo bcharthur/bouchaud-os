@@ -46,6 +46,18 @@ peripherique qu'il observe ne peut pas rapporter la panne de ce peripherique.
    qu'un trou.
 8. La suite hote existe et confronte le compteur de perte a la formule
    fermee.
+9. CHAQUE motif d'echec a un code. L'ecran d'extinction de la session
+   physique du 17 septembre affichait `err=0xff` : le motif etait tombe dans
+   le `_` du filtre, parce que les motifs introduits avec la reprise BOT
+   n'avaient pas ete ajoutes a la table. Le chiffre le plus important de
+   l'ecran ne designait rien, et il a fallu retrouver la reponse dans le
+   journal serie -- qui, cette fois, existait.
+10. Un STALL en phase de donnees n'est PAS traite comme une panne de
+   transport. La specification Bulk-Only est explicite : le peripherique qui
+   refuse la phase de donnees arrete son point et attend qu'on vienne lire
+   son CSW. Le traiter comme un transport casse a coute cinquante
+   reinitialisations de classe completes sur la session physique, et c'est ce
+   cout qui a empeche le vidage final d'aller au bout.
 """
 
 import re
@@ -243,6 +255,77 @@ def main():
                 "C'est le chemin par enregistrement, verrou pris et rendu a "
                 "chaque fois, depuis le chemin chaud -- exactement ce que ce "
                 "lot supprime."
+            )
+
+    # 9. Aucun motif d'echec ne tombe dans le `_`.
+    if stockage is not None:
+        pur = code_seul(stockage)
+        table = corps(pur, "fn blackbox_error_code(error: &'static str) -> u64 {")
+        if table is None:
+            fautes.append("blackbox_storage.rs : la table des codes d'echec a disparu.")
+        else:
+            # Les motifs sont cherches dans le FICHIER, la table exclue : un
+            # motif qui ne figure que dans la table n'est plus emis, et c'est
+            # sans consequence.
+            hors_table = pur.replace(table, "")
+            motifs = set(re.findall(r'"(blackbox-[a-z-]+)"', hors_table))
+            codes = set(re.findall(r'"(blackbox-[a-z-]+)" =>', table))
+            manquants = sorted(motifs - codes)
+            if manquants:
+                fautes.append(
+                    "blackbox_storage.rs : %d motif(s) d'echec sans code -- ils "
+                    "tomberaient dans le `_` et s'afficheraient `err=0xff` a "
+                    "l'extinction, exactement comme le 17 septembre : %s"
+                    % (len(manquants), ", ".join(manquants))
+                )
+
+        # 10. Le STALL de la phase de donnees suit le protocole.
+        donnees = corps(pur, "fn blackbox_bot_en_place(")
+        # LE MOTIF EXACT, ARME COMPRIS.
+        #
+        # Chercher `"blackbox-bulk-stall" =>` ne trouvait rien : dans le code
+        # l'arme s'ecrit `Err("blackbox-bulk-stall") =>`, avec la parenthese
+        # entre les deux. La garde criait donc sur le code qu'elle defend.
+        if donnees is not None and 'Err("blackbox-bulk-stall")' not in donnees:
+            fautes.append(
+                "blackbox_storage.rs : un STALL en phase de donnees redevient "
+                "une panne de transport. La specification Bulk-Only dit que le "
+                "peripherique qui refuse les donnees ARRETE son point et attend "
+                "qu'on lise son CSW : debloquer suffit. Le confondre avec un "
+                "transport casse a coute cinquante reinitialisations de classe "
+                "sur la session physique, et le vidage final n'est pas alle au "
+                "bout."
+            )
+
+    # 11. Le recul du lot ne repond qu'a un refus de TAILLE.
+    if stockage is not None:
+        pur = code_seul(stockage)
+        ecriture = corps(pur, "fn blackbox_ecris_lot_avec_reprise(")
+        # CHAQUE recul doit etre garde, pas seulement l'un d'eux.
+        #
+        # Chercher le nom de la condition laissait passer la suppression d'UN
+        # des deux tests : l'autre gardait le nom vivant, et la garde se
+        # taisait sur exactement la regression qu'elle existe pour attraper.
+        non_gardes = 0
+        if ecriture is not None:
+            lignes = ecriture.splitlines()
+            for i, ligne in enumerate(lignes):
+                if "lot_recule()" not in ligne:
+                    continue
+                precedentes = [l.strip() for l in lignes[:i] if l.strip()]
+                if not precedentes or "refus_de_taille" not in precedentes[-1]:
+                    non_gardes += 1
+        if ecriture is not None and (non_gardes or "refus_de_taille" not in ecriture):
+            fautes.append(
+                "blackbox_storage.rs : le lot recule sur n'importe quel echec. "
+                "Une echeance ne dit RIEN de la taille -- elle dit que le "
+                "peripherique n'a pas repondu a temps. Sous QEMU, ou treize "
+                "cents echeances viennent de l'ordonnancement de l'hote, le lot "
+                "tombe a un enregistrement et n'y remonte jamais : le vidage "
+                "devient seize fois plus lent et n'aboutit plus. Les deux "
+                "machines le disent chacune a leur facon -- la TRIGKEY a "
+                "cinquante STALL et zero echeance, QEMU treize cents echeances "
+                "et zero STALL."
             )
 
     # 8. La suite hote confronte le compteur a la formule.

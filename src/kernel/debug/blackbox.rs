@@ -643,6 +643,7 @@ fn etat_systeme(ts_ns: u64) {
     let (hid_sauts, hid_cessions, enr_sauts, enr_cessions) =
         crate::drivers::xhci_active::equite_stats();
     let bot = crate::drivers::xhci_active::releve_bot();
+    let (stalls_bb, reculs_bb, lot_bb) = crate::drivers::xhci_active::blackbox_lot_stats();
 
     let _ = write!(
         &mut out,
@@ -666,7 +667,15 @@ fn etat_systeme(ts_ns: u64) {
             // `bot_refus=` dit combien d'appelants ont ete econduits.
             "bot={} bot_phase={} bot_echeances={} bot_reprises={} ",
             "bot_reprises_reussies={} bot_reprises_echouees={} ",
-            "bot_refus={} bot_slot={} bot_dci={}\n"
+            "bot_refus={} bot_slot={} bot_dci={} ",
+            // CE QUE LA CLEF A ACCEPTE, ET CE QU'ELLE A REFUSE.
+            //
+            // `bb_stalls` compte les phases de donnees que la clef a arretees
+            // -- prevu par le protocole, et sans rapport avec un transport
+            // casse. `bb_lot` dit la taille qu'elle tolere reellement, et
+            // `bb_reculs` combien de fois il a fallu la reduire. Aucune
+            // constante ne dirait cela.
+            "bb_stalls={} bb_reculs={} bb_lot={}\n"
         ),
         ts_ns,
         demarrage,
@@ -688,6 +697,7 @@ fn etat_systeme(ts_ns: u64) {
         bot.etat.nom(), bot.derniere_phase.nom(), bot.echeances, bot.reprises,
         bot.reprises_reussies, bot.reprises_echouees,
         bot.refus, bot.dernier_slot, bot.dernier_dci,
+        stalls_bb, reculs_bb, lot_bb,
     );
     let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -1286,6 +1296,7 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
     let souffle = souffle();
     let verrou = crate::drivers::xhci_active::etat_du_verrou();
     let bot = crate::drivers::xhci_active::releve_bot();
+    let (stalls_bb, reculs_bb, lot_bb) = crate::drivers::xhci_active::blackbox_lot_stats();
     crate::serial_println!(
         "BOUCHAUD_BLACKBOX_FIN raison={} drained={} marker={} sync={} ok={} poses={} echecs={} serie={} pire_serie={} dernier_ok_ns={} silence_ms={} tambour_reserves={} tambour_ecrases={} tambour_perdus={} vidage_poses={} vidage_manquants={} verrou={} verrou_tenue_max_ns={} bot={} bot_reprises={}",
         raison, draine as u8, marked as u8, synced as u8, ok as u8,

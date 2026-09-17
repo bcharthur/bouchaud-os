@@ -34,6 +34,84 @@ const BLACKBOX_DONNEES_MAX: usize = 64 * 1024;
 const BLACKBOX_DMA_BYTES: usize = BLACKBOX_ENVELOPPE_OCTETS + BLACKBOX_DONNEES_MAX;
 /// Enregistrements par lot : ce que la zone de donnees peut tenir.
 const BLACKBOX_RECORDS_PAR_LOT: usize = BLACKBOX_DONNEES_MAX / BLACKBOX_RECORD_BYTES;
+// BOUCHAUD_LOT_QUI_RECULE_V1
+//
+// # Ce que la session physique a montre
+//
+// Cinquante commandes d'ecriture sur environ deux cent quatre-vingts ont ete
+// refusees par la clef -- un STALL sur dix-sept pour cent des lots de
+// soixante-quatre kibioctets. Le transport n'etait pas casse : chaque
+// deblocage reussissait. C'est la TAILLE du transfert que la clef refusait.
+//
+// Soixante-quatre kibioctets, c'est exactement la longueur maximale d'un TRB
+// Normal. Toutes les clefs ne la servent pas, et celle-ci ne la sert pas
+// toujours.
+//
+// # Pourquoi reculer plutot que choisir une taille prudente
+//
+// Une constante plus basse ferait payer a TOUTES les machines le defaut
+// d'une seule, et ne dirait rien : on ne saurait jamais si la grande taille
+// passait. Le lot commence donc au maximum, RECULE de moitie a chaque refus,
+// et remonte apres une serie de succes. Le compteur de reculs dit ce que la
+// clef a accepte, ce qu'aucune constante ne dirait.
+const BLACKBOX_LOT_MINIMUM: usize = 1;
+/// Succes consecutifs avant de retenter une taille double.
+///
+/// Seize, et non soixante-quatre : un vidage final compte environ trois cents
+/// lots. A soixante-quatre, une clef qui refuse une fois au debut resterait a
+/// la taille reduite pour tout le vidage -- on paierait le refus bien plus
+/// cher que ce qu'il a coute.
+const BLACKBOX_SUCCES_AVANT_REMONTEE: u32 = 16;
+
+/// Taille de lot courante, jamais plus que ce que l'appelant demande.
+fn lot_courant(demande: usize) -> usize {
+    demande
+        .min(BLACKBOX_LOT.load(Ordering::Acquire))
+        .max(BLACKBOX_LOT_MINIMUM)
+}
+
+/// La clef a refuse : le lot recule de moitie.
+fn lot_recule() {
+    let courant = BLACKBOX_LOT.load(Ordering::Acquire);
+    let reduit = (courant / 2).max(BLACKBOX_LOT_MINIMUM);
+    if reduit != courant {
+        BLACKBOX_LOT.store(reduit, Ordering::Release);
+        BLACKBOX_RECULS.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_BLACKBOX_LOT_RECULE de={} a={} stalls={}",
+            courant, reduit, BLACKBOX_STALLS.load(Ordering::Relaxed),
+        );
+    }
+    BLACKBOX_SUCCES.store(0, Ordering::Relaxed);
+}
+
+/// La clef a accepte : au bout d'une serie, on retente plus grand.
+fn lot_avance() {
+    let courant = BLACKBOX_LOT.load(Ordering::Acquire);
+    if courant >= BLACKBOX_RECORDS_PAR_LOT {
+        return;
+    }
+    if BLACKBOX_SUCCES.fetch_add(1, Ordering::AcqRel) + 1 < BLACKBOX_SUCCES_AVANT_REMONTEE {
+        return;
+    }
+    BLACKBOX_SUCCES.store(0, Ordering::Relaxed);
+    let double = (courant * 2).min(BLACKBOX_RECORDS_PAR_LOT);
+    BLACKBOX_LOT.store(double, Ordering::Release);
+    crate::serial_println!("BOUCHAUD_BLACKBOX_LOT_REMONTE de={} a={}", courant, double);
+}
+
+static BLACKBOX_SUCCES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Points arretes, reculs de lot, et taille de lot courante.
+pub fn blackbox_lot_stats() -> (u64, u64, usize) {
+    (
+        BLACKBOX_STALLS.load(Ordering::Relaxed),
+        BLACKBOX_RECULS.load(Ordering::Relaxed),
+        BLACKBOX_LOT.load(Ordering::Acquire),
+    )
+}
+
 /// Attente maximale du verrou du pilote pour un lot de vidage.
 ///
 /// Deux cents millisecondes, comme le systeme de fichiers : le vidage n'a lieu
@@ -57,6 +135,19 @@ static BLACKBOX_LAST_ERROR: core::sync::atomic::AtomicU64 =
 static BLACKBOX_BUSY_SKIPS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 static BLACKBOX_LAST_OK_NS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// Points arretes par la clef en phase de donnees, et debloques sans reprise.
+///
+/// Ce compteur separe ce que la reinitialisation de classe confondait : une
+/// clef qui refuse un transfert et attend qu'on lise son statut n'est PAS un
+/// transport casse.
+static BLACKBOX_STALLS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// Enregistrements par lot, reduits quand la clef refuse. Voir `lot_courant`.
+static BLACKBOX_LOT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(BLACKBOX_RECORDS_PAR_LOT);
+/// Reculs de la taille de lot.
+static BLACKBOX_RECULS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Default)]
@@ -288,6 +379,53 @@ fn blackbox_bot_en_place(
             Ok(n) => actual = n,
             Err("blackbox-bulk-timeout") => {
                 return Err(blackbox_incident(storage, Incident::Echeance, "blackbox-data-timeout"))
+            }
+            // UN STALL EN PHASE DE DONNEES EST PREVU PAR LE PROTOCOLE.
+            //
+            // # Ce que le traiter comme une panne a coute
+            //
+            // La session physique du 17 septembre compte cinquante echecs
+            // d'ecriture, tous `blackbox-bulk-stall`, et autant de
+            // reinitialisations de classe complete -- alors que la clef ne
+            // demandait qu'a etre debloquee. C'est ce cout-la qui a empeche le
+            // vidage final d'aller au bout : `draine=0`, pas de marque de FIN,
+            // vingt-huit enregistrements laisses en memoire.
+            //
+            // La specification Bulk-Only est explicite : le peripherique qui
+            // refuse la phase de donnees ARRETE son point et attend qu'on
+            // vienne lire son CSW. Debloquer le point puis lire le statut est
+            // la reponse ; la reinitialisation de classe est ce qu'on garde
+            // pour un desaccord de phase, qui est autre chose.
+            //
+            // Le chemin du volume traitait deja ce cas correctement. Seul
+            // celui de l'enregistreur ne le faisait pas.
+            Err("blackbox-bulk-stall") => {
+                BLACKBOX_STALLS.fetch_add(1, Ordering::Relaxed);
+                actual = 0;
+                let slot = storage.slot_id as usize;
+                let debloque = if slot < controller.devices.len() {
+                    match controller.devices[slot].take() {
+                        Some(mut device) => {
+                            let ok =
+                                blackbox_debloque_point(controller, &mut device, storage, data_in);
+                            controller.devices[slot] = Some(device);
+                            ok
+                        }
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                if !debloque {
+                    return Err(blackbox_incident(
+                        storage,
+                        Incident::PointArrete,
+                        "blackbox-bulk-stall",
+                    ));
+                }
+                // Le CSW reste a lire : c'est lui qui dit POURQUOI la clef a
+                // refuse, et le laisser dans le tuyau desynchroniserait la
+                // commande suivante.
             }
             Err(e) => return Err(blackbox_incident(storage, Incident::PointArrete, e)),
         }
@@ -674,8 +812,21 @@ fn retire_blackbox_storage(controller: &mut Controller, slot: u8) {
     }
 }
 
+/// Le code qui voyage dans l'archive pour chaque motif d'echec.
+///
+/// # Ce que l'absence d'un code a coute
+///
+/// L'ecran d'extinction de la session physique affichait `err=0xff` : le
+/// motif etait tombe dans le `_` du filtre. Les motifs introduits avec la
+/// reprise BOT -- et le STALL, qui est le seul a s'etre produit -- n'avaient
+/// pas ete ajoutes ici. Le chiffre le plus important de l'ecran ne designait
+/// donc rien, et il a fallu retrouver la reponse dans le journal serie.
+///
+/// Un code par motif, et une garde qui verifie qu'il n'en manque aucun :
+/// c'est la seule facon de ne pas refaire ce trou au prochain motif ajoute.
 fn blackbox_error_code(error: &'static str) -> u64 {
     match error {
+        // Transport : ce que le materiel a repondu.
         "blackbox-bulk-timeout" => 1,
         "blackbox-bulk-status" => 2,
         "blackbox-cbw-short" => 3,
@@ -689,9 +840,31 @@ fn blackbox_error_code(error: &'static str) -> u64 {
         "blackbox-cbw" => 11,
         "blackbox-disabled-or-payload" => 12,
         "blackbox-no-slots" => 13,
+        // Ajoutes avec la reprise BOT. Leur absence ici est ce qui a rendu
+        // `err=0xff` illisible sur l'ecran d'extinction physique.
+        "blackbox-bulk-stall" => 14,
+        "blackbox-bot-refuse" => 15,
+        "blackbox-cbw-timeout" => 16,
+        "blackbox-data-timeout" => 17,
+        "blackbox-csw-timeout" => 18,
+        "blackbox-csw-phase" => 19,
+        "blackbox-dma-buffer-too-small" => 20,
+        // Lecture : le meme transport, dans l'autre sens.
+        "blackbox-read-address" => 21,
+        "blackbox-read-short" => 22,
+        "blackbox-read-size" => 23,
+        // Configuration : le support n'a jamais pu etre arme.
+        "blackbox-ring-in" => 24,
+        "blackbox-ring-out" => 25,
+        "blackbox-buffer" => 26,
+        // Pannes artificielles du banc. Elles portent un code pour qu'une
+        // archive de banc ne se lise pas comme une archive de panne reelle.
+        "blackbox-injection-donnees" => 30,
+        "blackbox-injection-statut" => 31,
         _ => 255,
     }
 }
+
 
 /// Ecrit un lot d'enregistrements CONTIGUS, deja formates dans la zone de
 /// donnees du tampon DMA.
@@ -773,7 +946,7 @@ pub fn blackbox_vidange_lot(
     if !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
         return 0;
     }
-    let maximum = maximum.min(BLACKBOX_RECORDS_PAR_LOT);
+    let maximum = lot_courant(maximum.min(BLACKBOX_RECORDS_PAR_LOT));
     if maximum == 0 {
         return 0;
     }
@@ -1072,8 +1245,39 @@ fn blackbox_ecris_lot_avec_reprise(
     lba: u64,
     records: usize,
 ) -> bool {
-    if blackbox_note(blackbox_write_lot(controller, storage, lba, records)).is_ok() {
+    // SEUL UN REFUS DE TAILLE FAIT RECULER LE LOT.
+    //
+    // # Le defaut que ceci corrige, attrape par le banc
+    //
+    // La premiere version reculait sur TOUT echec, echeance comprise. Or une
+    // echeance ne dit rien de la taille : elle dit que le peripherique n'a pas
+    // repondu a temps. Sous QEMU, ou seize processeurs virtuels en attente
+    // active se font deordonnancer et produisent treize cents echeances, le
+    // lot tombait a un enregistrement en quelques secondes et n'y remontait
+    // jamais. Le vidage devenait seize fois plus lent et n'allait plus au
+    // bout : vingt-huit secondes d'archive au lieu de cent vingt-neuf, pas de
+    // marque de FIN, journal serie vide.
+    //
+    // Les deux machines le disent chacune a leur facon, et c'est ce qui rend
+    // la distinction incontournable : la TRIGKEY a cinquante STALL et ZERO
+    // echeance ; QEMU a treize cents echeances et ZERO STALL. Deux signaux
+    // differents, deux reponses differentes.
+    let avant = BLACKBOX_STALLS.load(Ordering::Relaxed);
+    let resultat = blackbox_note(blackbox_write_lot(controller, storage, lba, records));
+    let refus_de_taille = BLACKBOX_STALLS.load(Ordering::Relaxed) != avant;
+    if resultat.is_ok() {
+        // Un STALL suivi d'un deblocage rend une commande REUSSIE, mais il a
+        // coute un aller-retour de controle. C'est le refus qu'il faut
+        // compter, pas l'echec.
+        if refus_de_taille {
+            lot_recule();
+        } else {
+            lot_avance();
+        }
         return true;
+    }
+    if refus_de_taille {
+        lot_recule();
     }
     if !TRANSPORT_BOT.autorise_es() && !blackbox_reprend_le_transport(controller, storage) {
         return false;

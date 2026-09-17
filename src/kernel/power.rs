@@ -113,6 +113,19 @@ fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
         "BULK USB   : {} transfert(s) {} stall(s) {} echec(s) {} refus_occupe",
         transferts, stalls, bulk_echecs, occupes,
     );
+    // LA CLEF DE L'ENREGISTREUR A SES PROPRES CHIFFRES.
+    //
+    // La ligne ci-dessus decrit le VOLUME, qui sur la machine de reference est
+    // cede a l'enregistreur et affiche donc des zeros. Celle-ci decrit la clef
+    // que l'enregistreur vient d'essayer d'ecrire -- la seule qui compte quand
+    // la sauvegarde echoue.
+    let (stalls_bb, reculs_bb, lot_bb) = crate::drivers::xhci_active::blackbox_lot_stats();
+    let mut clef = Ligne::neuve();
+    let _ = write!(
+        clef,
+        "CLE BB     : {} arret(s) de point, {} recul(s), lot={} enregistrements",
+        stalls_bb, reculs_bb, lot_bb,
+    );
     let mut dernier = Ligne::neuve();
     let _ = write!(
         dernier,
@@ -135,7 +148,7 @@ fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
 
     // La meme chose part sur la console serie : quand elle existe, elle est
     // relue plus confortablement qu'une photo d'ecran.
-    for ligne in [&couche, &etape, &support, &bulk, &dernier, &serie, &persist] {
+    for ligne in [&couche, &etape, &support, &bulk, &clef, &dernier, &serie, &persist] {
         crate::serial_println!("BOUCHAUD_EXTINCTION_RAPPORT {}", ligne.texte());
     }
 
@@ -143,7 +156,7 @@ fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
         "SAUVEGARDE INCOMPLETE",
         &[
             couche.texte(), etape.texte(), support.texte(), bulk.texte(),
-            dernier.texte(), serie.texte(), persist.texte(),
+            clef.texte(), dernier.texte(), serie.texte(), persist.texte(),
         ],
     );
 }
