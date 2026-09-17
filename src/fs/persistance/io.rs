@@ -1,9 +1,27 @@
 // Disk I/O for an immutable transaction snapshot. Runs at BKL depth 0.
 
 fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
+    // AUCUNE ZONE N'EST PAS UN ECHEC D'ECRITURE.
+    //
+    // # Ce que la confusion a coute
+    //
+    // L'ecran d'extinction de la session physique du 17 septembre titrait
+    // « Sauvegarde incomplete » sur une archive PARFAITE -- `draine=1
+    // marque=1 sync=1`, quatre mille cinq cents enregistrements poses, zero
+    // perdu. Le seul echec etait cette ligne, et elle disait « ECHEC d
+    // ecriture, /persist n'est PAS a jour » sur une machine qui n'a
+    // simplement pas de zone de persistance : le Stage 2 a cle unique n'en
+    // demande aucune, et le dit lui-meme.
+    //
+    // Annoncer une panne la ou il n'y a rien a ecrire, c'est envoyer chercher
+    // un defaut qui n'existe pas -- et, pire ici, faire douter d'une trace qui
+    // etait intacte.
     let base = match debut() {
         Some(base) => base,
-        None => { oublie_le_disque(); return -1; }
+        None => {
+            oublie_le_disque();
+            return SANS_ZONE;
+        }
     };
     if entrees.len() > ENTREES_MAX { oublie_le_disque(); return -1; }
 

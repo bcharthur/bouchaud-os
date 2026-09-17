@@ -140,7 +140,12 @@ fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
         souffle.dernier_genre, souffle.derniere_seq,
     );
     let mut persist = Ligne::neuve();
-    if persisted < 0 {
+    if persisted == crate::fs::persistance::SANS_ZONE {
+        // « Rien a ecrire » et « je n'ai pas pu ecrire » demandent deux
+        // enquetes differentes. Les confondre a fait titrer « Sauvegarde
+        // incomplete » sur une archive intacte.
+        let _ = write!(persist, "PERSIST    : aucune zone sur cette machine, rien a ecrire");
+    } else if persisted < 0 {
         let _ = write!(persist, "PERSIST    : ECHEC d ecriture, /persist n est PAS a jour");
     } else {
         let _ = write!(persist, "PERSIST    : {} fichier(s) ecrit(s)", persisted);
@@ -196,6 +201,9 @@ pub fn shutdown(code: u8) -> ! {
     // raison precise, elle, est deja journalisee par `synchronise`.
     let persisted = crate::fs::persistance::synchronise();
     match persisted {
+        crate::fs::persistance::SANS_ZONE => crate::serial_println!(
+            "[kernel] persistance: aucune zone sur cette machine, rien a ecrire"
+        ),
         -1 => crate::serial_println!(
             "[kernel] persistance: ECHEC de l'ecriture a l'extinction, /persist n'est pas a jour"
         ),
@@ -206,7 +214,17 @@ pub fn shutdown(code: u8) -> ! {
     }
     // Persist the result of the filesystem flush as well.
     let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-extinction");
-    let complet = vidage.complet() && persisted >= 0;
+    // UNE MACHINE SANS ZONE DE PERSISTANCE N'A RIEN RATE.
+    //
+    // La session physique du 17 septembre a titre « Sauvegarde incomplete »
+    // sur une archive PARFAITE : `draine=1 marque=1 sync=1`, quatre mille cinq
+    // cents enregistrements poses, zero perdu, zero manquant. Le seul « echec »
+    // etait l'absence de zone /persist sur un Stage 2 a cle unique -- qui n'en
+    // demande aucune, et qui le dit lui-meme au demarrage.
+    //
+    // Le titre le plus visible de l'extinction faisait donc douter de la seule
+    // chose qui avait parfaitement marche.
+    let complet = vidage.complet() && persisted >= crate::fs::persistance::SANS_ZONE;
     // LE DETAIL AVANT LA PAUSE, ET C'EST L'ORDRE QUI COMPTE.
     //
     // `finish(false)` s'arrete deux secondes pour laisser lire l'echec. Appele
@@ -275,6 +293,9 @@ pub fn reboot() -> ! {
     crate::gui::power_screen::progress("Enregistrement des fichiers", 4);
     let persisted = crate::fs::persistance::synchronise();
     match persisted {
+        crate::fs::persistance::SANS_ZONE => crate::serial_println!(
+            "[kernel] persistance: aucune zone sur cette machine, rien a ecrire"
+        ),
         -1 => crate::serial_println!(
             "[kernel] persistance: ECHEC de l'ecriture au redemarrage, /persist n'est pas a jour"
         ),
@@ -285,7 +306,17 @@ pub fn reboot() -> ! {
     }
 
     let vidage = crate::kernel::blackbox::vide_avant_extinction("fin-redemarrage");
-    let complet = vidage.complet() && persisted >= 0;
+    // UNE MACHINE SANS ZONE DE PERSISTANCE N'A RIEN RATE.
+    //
+    // La session physique du 17 septembre a titre « Sauvegarde incomplete »
+    // sur une archive PARFAITE : `draine=1 marque=1 sync=1`, quatre mille cinq
+    // cents enregistrements poses, zero perdu, zero manquant. Le seul « echec »
+    // etait l'absence de zone /persist sur un Stage 2 a cle unique -- qui n'en
+    // demande aucune, et qui le dit lui-meme au demarrage.
+    //
+    // Le titre le plus visible de l'extinction faisait donc douter de la seule
+    // chose qui avait parfaitement marche.
+    let complet = vidage.complet() && persisted >= crate::fs::persistance::SANS_ZONE;
     // LE DETAIL AVANT LA PAUSE, ET C'EST L'ORDRE QUI COMPTE.
     //
     // `finish(false)` s'arrete deux secondes pour laisser lire l'echec. Appele

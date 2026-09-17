@@ -6,6 +6,18 @@
 // entre elles. Le verrou global n'ajoutait rien, et il le tenait pendant tout
 // le rassemblement.
 
+/// Rendu par `synchronise` quand la machine n'a AUCUNE zone de persistance.
+///
+/// Ce n'est pas une panne : le Stage 2 a cle unique ne demande aucun stockage
+/// writable, et le declarer en echec ferait chercher un defaut inexistant.
+/// `-1` reste reserve a une zone qui EXISTE et dont l'ecriture a echoue.
+pub const SANS_ZONE: i64 = -2;
+
+/// Vrai quand une zone de persistance existe sur cette machine.
+pub fn zone_disponible() -> bool {
+    debut().is_some()
+}
+
 pub fn synchronise() -> i64 {
     TX_CALLS.fetch_add(1, Ordering::Relaxed);
     let total_start = crate::kernel::timer::monotonic_ns();
