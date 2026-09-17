@@ -811,9 +811,14 @@ pub fn blackbox_vidange_lot(
             };
             poses = blackbox_vidange_un_support(controller, &mut storage, maximum, &mut fournit);
             controller.blackbox_storage = Some(storage);
-            if poses != 0 {
-                break;
-            }
+            // UN SEUL SUPPORT EST SOLLICITE PAR APPEL, MEME S'IL ECHOUE.
+            //
+            // Passer au controleur suivant apres un echec ferait redistribuer
+            // le rappel : les enregistrements deja pris par le premier support
+            // seraient consommes sans etre ecrits, et le curseur de vidage ne
+            // pourrait plus dire lesquels manquent. Un support qui refuse
+            // repasse au tour suivant, entier.
+            break;
         }
     }
     poses
