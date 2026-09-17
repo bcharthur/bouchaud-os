@@ -36,7 +36,21 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 SECONDES=${1:-120}
-ECART_HID_MAX_MS=${BANC_ECART_HID_MAX_MS:-1000}
+# TOLERANCE DE L'EMULATEUR, ET NON OBJECTIF.
+#
+# Seize processeurs virtuels qui tournent en attente active sur un hote moins
+# pourvu se font deordonnancer : l'horloge murale avance pendant que le
+# processeur invite n'execute rien. Ce plafond est une propriete de l'HOTE et
+# ne dit rien du pilote -- il n'existe que pour attraper une regression
+# grossiere sous QEMU.
+#
+# L'OBJECTIF PRODUIT est tout autre, et il se mesure sur la machine reelle :
+# `hid_poll_gap_max_ms` <= 30 ms, et tout ce qui depasse 50 ms est un defaut.
+# Ces deux seuils-la vivent avec la mesure, dans `xhci_active.rs`, pour que
+# `usbetat` rende sur la machine le meme verdict que ce banc. Le banc les
+# PUBLIE et les commente ; il ne les impose pas sous QEMU, ou ils ne
+# mesureraient que l'ordonnancement de l'hote.
+ECART_HID_TOLERANCE_QEMU_MS=${BANC_ECART_HID_MAX_MS:-1000}
 TRAVAIL=${BANC_TRAVAIL:-$(mktemp -d)}
 mkdir -p "$TRAVAIL"
 # `BANC_TRAVAIL=/chemin` garde les artefacts : image, cle, journal serie et
@@ -137,12 +151,12 @@ echo "=== extraction par le parser OFFICIEL du depot ==="
 python3 tools/reference/extract-blackbox.py --image "$TRAVAIL/cle.img" \
     --output "$TRAVAIL/archive" || exit 1
 
-python3 - "$TRAVAIL/archive" "$SECONDES" "$ECART_HID_MAX_MS" "$VERDICT" <<'PY'
+python3 - "$TRAVAIL/archive" "$SECONDES" "$ECART_HID_TOLERANCE_QEMU_MS" "$VERDICT" <<'PY'
 import json, pathlib, re, sys
 
 racine = pathlib.Path(sys.argv[1])
 duree = int(sys.argv[2])
-ecart_max_permis = int(sys.argv[3])
+tolerance_qemu_ms = int(sys.argv[3])
 verdict = dict(
     partie.split("=", 1)
     for partie in sys.argv[4].split()
@@ -224,11 +238,31 @@ exige(perdus == 0, f"A : {perdus} enregistrement(s) perdu(s) avant d'atteindre l
 # --- B : les echeances injectees n'ont tue ni le HID ni l'ordonnanceur ------
 consommees = entier("injections_consommees")
 exige(consommees >= 3, f"B : {consommees} injection(s) consommee(s) sur 3 armees")
+# LE PIRE ECART DE SCRUTATION HID : LA METRIQUE, SON VERDICT, SES SEUILS.
+#
+# Publiee separement du plafond de l'emulateur, parce que ce sont deux choses
+# differentes : le plafond attrape une regression grossiere sous QEMU ; le
+# verdict est celui du PRODUIT, et c'est lui qu'il faut lire sur la TRIGKEY.
 ecart = entier("hid_poll_gap_max_ms")
+verdict_hid = verdict.get("hid_poll_gap_verdict", "?")
+cible_ms = entier("hid_poll_gap_cible_ms")
+defaut_ms = entier("hid_poll_gap_defaut_ms")
 print(f"BANC_HID_ECART_MAX_MS={ecart}")
+print(f"BANC_HID_VERDICT={verdict_hid}")
+print(f"BANC_HID_CIBLE_MS={cible_ms} BANC_HID_DEFAUT_MS={defaut_ms}")
+if ecart > defaut_ms > 0:
+    print(
+        f"NOTE  critere PRODUIT non tenu sous QEMU : {ecart} ms > {defaut_ms} ms. "
+        "Attendu ici -- seize processeurs virtuels en attente active sur un hote "
+        "moins pourvu se font deordonnancer, et l'horloge murale avance pendant "
+        "qu'ils n'executent rien. Ce chiffre ne vaut QUE mesure sur la machine "
+        "reelle, ou les seize coeurs existent."
+    )
 exige(
-    ecart <= ecart_max_permis,
-    f"B : pire ecart de scrutation HID {ecart} ms > {ecart_max_permis} ms",
+    ecart <= tolerance_qemu_ms,
+    f"B : pire ecart de scrutation HID {ecart} ms > {tolerance_qemu_ms} ms de "
+    "tolerance emulateur -- ce n'est plus l'ordonnancement de l'hote, c'est "
+    "une regression",
 )
 exige(
     verdict.get("bot_etat") == "pret",
@@ -301,5 +335,13 @@ if echecs:
     for echec in echecs:
         print(f"ECHEC {echec}")
     sys.exit(f"{len(echecs)} critere(s) non tenu(s)")
+print("")
+print("--- METRIQUE PHYSIQUE A RELIRE SUR LA TRIGKEY ---")
+print(f"hid_poll_gap_max_ms = {ecart}  ({verdict_hid})")
+print(f"  cible produit   : <= {cible_ms} ms")
+print(f"  defaut produit  : >  {defaut_ms} ms")
+print(f"  tolerance QEMU  : <= {tolerance_qemu_ms} ms (ordonnancement de l'hote)")
+print("  sur la machine  : `usbetat` rend le meme verdict, sans archive")
+print("")
 print("BOUCHAUD_TRIGKEY_IO_STRESS_OK")
 PY

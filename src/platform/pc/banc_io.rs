@@ -198,7 +198,8 @@ fn verdict(depart: u64) {
     let (_, injections_consommees) = crate::drivers::xhci_active::injections();
     crate::serial_println!(
         "BOUCHAUD_BANC_IO_VERDICT ecoule_s={} lectures={} blocs_lus={} echecs_lecture={} \
-hid_poll_gap_max_ms={} runtime_owner={} runtime_max_hold_ns={} runtime_max_owner={} \
+hid_poll_gap_max_ms={} hid_poll_gap_verdict={} hid_poll_gap_cible_ms={} hid_poll_gap_defaut_ms={} \
+runtime_owner={} runtime_max_hold_ns={} runtime_max_owner={} \
 runtime_acquisitions={} runtime_contentions={} runtime_timeouts={} \
 blackbox_ram_records={} blackbox_ram_overwrites={} blackbox_ram_lost={} blackbox_ram_refuses={} \
 bot_etat={} bot_timeouts={} bot_recoveries={} bot_recovery_success={} bot_recovery_failure={} \
@@ -208,6 +209,9 @@ bot_refus={} bot_rejouees={} injections_consommees={} wm_heartbeat={} wm_frames=
         BLOCS_LUS.load(Ordering::Relaxed),
         ECHECS.load(Ordering::Relaxed),
         ecart_max / 1_000_000,
+        crate::drivers::xhci_active::verdict_ecart_hid(ecart_max / 1_000_000),
+        crate::drivers::xhci_active::ECART_HID_CIBLE_MS,
+        crate::drivers::xhci_active::ECART_HID_DEFAUT_MS,
         verrou.proprietaire.nom(),
         verrou.tenue_max_ns,
         verrou.tenue_max_proprietaire.nom(),

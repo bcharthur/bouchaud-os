@@ -51,7 +51,20 @@ use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 pub const PAYLOAD_MAX: usize = 4032;
 
 /// Nombre d'enregistrements que le tambour retient.
-pub const DESCRIPTEURS: usize = 2048;
+///
+/// # Pourquoi huit mille et non deux mille
+///
+/// Le banc pose environ seize enregistrements par seconde sous charge : deux
+/// mille couvraient deux minutes, et l'essai physique doit en durer
+/// plusieurs. Au-dela de la capacite, le tambour ne cesse pas -- il ecrase
+/// les plus anciens, et le compte le dit --, mais une session qui ecrase a
+/// perdu son debut, c'est-a-dire l'amorcage.
+///
+/// Huit mille descripteurs donnent environ trente et un mebioctets de
+/// tambour et de l'ordre de huit minutes de charge soutenue. C'est de la
+/// memoire `.bss` : jamais allouee, jamais liberee, disponible avant le
+/// premier `println!`.
+pub const DESCRIPTEURS: usize = 8192;
 
 /// Taille de l'anneau d'octets. Voir l'invariant ci-dessus : cette valeur
 /// n'est pas un reglage, elle est DERIVEE, et la depasser vers le bas

@@ -46,6 +46,37 @@ fn l_invariant_supprime_la_seconde_cause_de_perte() {
 }
 
 #[test]
+fn le_tambour_couvre_plusieurs_minutes_de_charge_soutenue() {
+    // CE QUE CETTE EPREUVE DEFEND, ET QU'AUCUN COMMENTAIRE NE DEFEND
+    //
+    // La capacite n'est pas un reglage libre : c'est ce qui decide combien de
+    // temps un essai physique peut durer avant que le debut de la session ne
+    // soit ecrase. Deux mille descripteurs couvraient deux minutes ; l'essai
+    // doit en durer plusieurs.
+    //
+    // Le banc pose de l'ordre de seize enregistrements par seconde sous
+    // charge. On exige de quoi tenir cinq minutes a cette cadence, et une
+    // taille de tambour restant dans l'ordre de grandeur annonce -- un
+    // tambour qui doublerait en silence couterait de la memoire a une machine
+    // qui n'en a pas forcement.
+    const PAR_SECONDE: usize = 16;
+    const MINUTES_EXIGEES: usize = 5;
+    assert!(
+        DESCRIPTEURS >= PAR_SECONDE * 60 * MINUTES_EXIGEES,
+        "{} descripteurs ne couvrent pas {} minutes a {} enregistrements/s",
+        DESCRIPTEURS,
+        MINUTES_EXIGEES,
+        PAR_SECONDE,
+    );
+    let mio = OCTETS / (1024 * 1024);
+    assert!(
+        (24..=40).contains(&mio),
+        "le tambour fait {} Mio, hors de l'ordre de grandeur annonce",
+        mio,
+    );
+}
+
+#[test]
 fn un_enregistrement_pose_se_relit_a_l_identique() {
     let b = Bobine::neuve();
     let mut m = memoire();

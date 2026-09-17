@@ -28,6 +28,13 @@ verdicts trompeurs pendant sa propre mise au point :
 6. Le drapeau `banc-io` reste une option de compilation. Il lit le volume en
    boucle et ETEINT la machine : un reglage a l'execution laisserait la
    possibilite de l'armer par accident sur une image livree.
+7. Le plafond de l'emulateur et le critere PRODUIT restent DISTINCTS. Le
+   premier est une propriete de l'hote -- seize processeurs virtuels en
+   attente active se font deordonnancer, et l'horloge murale avance pendant
+   qu'ils n'executent rien. Le second se mesure sur la machine reelle :
+   `hid_poll_gap_max_ms` <= 30 ms, et tout ce qui depasse 50 ms est un
+   defaut. Les confondre ferait passer pour un objectif atteint un chiffre
+   qui ne mesure que l'emulateur.
 """
 
 import re
@@ -109,6 +116,51 @@ def main():
             )
         if "run_trigkey_ladybird_io_stress" in banc and "BOUCHAUD_TRIGKEY_IO_STRESS_OK" not in banc:
             fautes.append("le banc n'emet plus son verdict final.")
+
+    # 7. Le plafond de l'emulateur n'est pas l'objectif produit.
+    if banc is not None:
+        if "ECART_HID_TOLERANCE_QEMU_MS" not in banc:
+            fautes.append(
+                "le banc ne distingue plus la tolerance de l'emulateur du "
+                "critere produit. Seize processeurs virtuels en attente active "
+                "sur un hote moins pourvu se font deordonnancer : ce plafond "
+                "est une propriete de l'HOTE et ne dit rien du pilote. "
+                "L'objectif se mesure sur la machine reelle."
+            )
+        for jeton in ("BANC_HID_VERDICT", "BANC_HID_CIBLE_MS", "BANC_HID_DEFAUT_MS"):
+            if jeton not in banc:
+                fautes.append(
+                    "le banc ne publie plus `%s`. La metrique physique doit "
+                    "etre lisible avec SON verdict et SES seuils, sinon elle "
+                    "sera relue avec ceux de l'emulateur." % jeton
+                )
+    xhci = RACINE / "src/drivers/usb/xhci_active.rs"
+    if xhci.exists():
+        source = xhci.read_text(encoding="utf-8")
+        cible = re.search(r"pub const ECART_HID_CIBLE_MS: u64 = (\d+);", source)
+        defaut = re.search(r"pub const ECART_HID_DEFAUT_MS: u64 = (\d+);", source)
+        if cible is None or defaut is None:
+            fautes.append(
+                "xhci_active.rs : les seuils produit du pire ecart de "
+                "scrutation HID ont disparu. Ils vivent avec la mesure pour "
+                "qu'une lecture sur la machine -- `usbetat`, sans archive et "
+                "sans console serie -- rende le meme verdict que le banc."
+            )
+        else:
+            if int(cible.group(1)) > 30:
+                fautes.append(
+                    "xhci_active.rs : la cible du pire ecart de scrutation HID "
+                    "est passee a %s ms. Le critere produit est 30 ms ; "
+                    "l'assouplir revient a declarer acceptable ce que "
+                    "l'utilisateur decrit comme un clavier deconnecte."
+                    % cible.group(1)
+                )
+            if int(defaut.group(1)) > 50:
+                fautes.append(
+                    "xhci_active.rs : le seuil de defaut du pire ecart de "
+                    "scrutation HID est passe a %s ms, au-dela des 50 ms du "
+                    "critere produit." % defaut.group(1)
+                )
 
     # 6. Le drapeau reste une option de compilation.
     if cargo is not None and not re.search(r"^banc-io = \[\]", cargo, re.M):

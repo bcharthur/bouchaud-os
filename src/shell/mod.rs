@@ -871,6 +871,21 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 v.tenue_max_proprietaire.nom(),
                 v.prises, v.contentions, v.expirations,
             );
+            // LA METRIQUE PHYSIQUE, SUR LA MACHINE, SANS ARCHIVE.
+            //
+            // C'est le chiffre qui dit si le clavier tient sa cadence. Sur la
+            // machine reelle le critere est <= 30 ms ; au-dela de 50 ms, c'est
+            // le defaut que l'utilisateur decrit comme « le clavier est
+            // deconnecte ».
+            let (ecart_ns, _) = crate::drivers::xhci_active::ecart_scrutation_hid();
+            let ecart_ms = ecart_ns / 1_000_000;
+            crate::println!(
+                "scrutation HID : pire ecart {} ms -> {} (cible <= {} ms, defaut > {} ms)",
+                ecart_ms,
+                crate::drivers::xhci_active::verdict_ecart_hid(ecart_ms),
+                crate::drivers::xhci_active::ECART_HID_CIBLE_MS,
+                crate::drivers::xhci_active::ECART_HID_DEFAUT_MS,
+            );
             let b = crate::drivers::xhci_active::releve_bot();
             crate::println!(
                 "transport BOT : {} phase {} | echeances {} reprises {} ({} ok, {} ko) | refus {} | slot {} dci {}",

@@ -442,6 +442,40 @@ pub fn etat_du_verrou() -> crate::drivers::proprietaire_runtime::Etat {
 static DERNIER_POLL_SERVI_NS: AtomicU64 = AtomicU64::new(0);
 static ECART_POLL_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
+// LES SEUILS SONT CEUX DU PRODUIT, PAS CEUX DE L'EMULATEUR.
+//
+// Le banc QEMU tolere beaucoup plus large, et pour une raison qui ne dit rien
+// du pilote : seize processeurs virtuels qui tournent en attente active sur
+// un hote moins pourvu se font deordonnancer, et l'horloge murale avance
+// pendant que le processeur invite n'execute rien. Cette tolerance-la est une
+// propriete de l'hote.
+//
+// Ce qui suit est le critere PRODUIT, mesure sur la machine reelle, ou les
+// seize coeurs existent :
+//
+//   * jusqu'a 30 ms : la scrutation tient sa cadence, rien ne se sent ;
+//   * de 30 a 50 ms : degrade -- un a-coup commence a se voir au pointeur ;
+//   * au-dela de 50 ms : DEFAUT. C'est le domaine ou l'utilisateur dit « le
+//     clavier est deconnecte » et « la souris met trop de temps a se
+//     deplacer ».
+//
+// Ils vivent ici, avec la mesure, pour qu'une lecture sur la machine -- par
+// `usbetat`, sans archive et sans console serie -- rende le meme verdict que
+// le banc.
+pub const ECART_HID_CIBLE_MS: u64 = 30;
+pub const ECART_HID_DEFAUT_MS: u64 = 50;
+
+/// Le verdict PRODUIT du pire ecart de scrutation, en un mot.
+pub fn verdict_ecart_hid(ecart_ms: u64) -> &'static str {
+    if ecart_ms <= ECART_HID_CIBLE_MS {
+        "cible"
+    } else if ecart_ms <= ECART_HID_DEFAUT_MS {
+        "degrade"
+    } else {
+        "defaut"
+    }
+}
+
 fn note_poll_servi(maintenant_ns: u64) {
     let precedent = DERNIER_POLL_SERVI_NS.swap(maintenant_ns, Ordering::AcqRel);
     if precedent == 0 {
