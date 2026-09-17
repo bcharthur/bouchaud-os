@@ -297,9 +297,11 @@ xid={:#05x} generation={} invariant={} arp_ttl_ms={} verdict={}",
 /// entre eux. Ici l'arbre est celui du registre, et le registre est la seule
 /// source : l'ecran de demarrage et la boite noire lisent le meme.
 pub fn services(argc: usize, argv: &[&str; 12]) {
-    use crate::kernel::services;
+    use crate::kernel::services::{self, vue};
 
-    if argc > 1 && argv[1] == "errors" {
+    let sous = if argc > 1 { argv[1] } else { "tree" };
+
+    if sous == "errors" {
         let mut trouve = false;
         services::parcours(|e| {
             if e.erreurs == 0 && !e.etat.problematique() {
@@ -307,9 +309,9 @@ pub fn services(argc: usize, argv: &[&str; 12]) {
             }
             trouve = true;
             crate::println!(
-                "  {:<22} {:<10} {} erreur(s), {} reprise(s), raison {}",
+                "  {:<28} {:<10} {} erreur(s), {} reprise(s), raison {}",
                 e.id.texte(),
-                e.etat.nom(),
+                vue::etat_affiche(e.etat),
                 e.erreurs,
                 e.reprises,
                 if e.raison.est_vide() { "-" } else { e.raison.texte() },
@@ -321,18 +323,20 @@ pub fn services(argc: usize, argv: &[&str; 12]) {
         return;
     }
 
-    if argc > 1 {
+    if sous != "tree" && sous != "top" {
         // `services <id>` : le detail d'un seul.
-        let cible = argv[1];
         let mut trouve = false;
         services::parcours(|e| {
-            if !e.id.egale(cible) {
+            if !e.id.egale(sous) {
                 return;
             }
             trouve = true;
             crate::println!("{} ({})", e.id.texte(), e.genre.nom());
-            crate::println!("  etat        : {}", e.etat.nom());
-            crate::println!("  parent      : {}", if e.parent.est_vide() { "-" } else { e.parent.texte() });
+            crate::println!("  etat        : {}", vue::etat_affiche(e.etat));
+            crate::println!(
+                "  parent      : {}",
+                if e.parent.est_vide() { "-" } else { e.parent.texte() }
+            );
             match e.duree_demarrage_ms() {
                 Some(ms) => crate::println!("  demarrage   : {} ms", ms),
                 // UNE VALEUR INCONNUE EST « N/A », ET PAS ZERO. Zero est une
@@ -340,9 +344,30 @@ pub fn services(argc: usize, argv: &[&str; 12]) {
                 None => crate::println!("  demarrage   : N/A"),
             }
             crate::println!(
-                "  activite    : derniere {} ns | succes {} ns | erreur {} ns",
-                e.derniere_activite_ns, e.dernier_succes_ns, e.derniere_erreur_ns,
+                "  cpu         : {}",
+                match e.kpi.cpu_pour_mille {
+                    Some(pm) => alloc::format!("{}.{}%", pm / 10, pm % 10),
+                    None => alloc::string::String::from("N/A"),
+                }
             );
+            crate::println!(
+                "  memoire     : rss {} | vss {}",
+                match e.kpi.rss_octets { Some(o) => alloc::format!("{} o", o), None => alloc::string::String::from("N/A") },
+                match e.kpi.vss_octets { Some(o) => alloc::format!("{} o", o), None => alloc::string::String::from("N/A") },
+            );
+            crate::println!(
+                "  reseau      : rx {} | tx {}",
+                match e.kpi.rx_octets { Some(o) => alloc::format!("{} o", o), None => alloc::string::String::from("N/A") },
+                match e.kpi.tx_octets { Some(o) => alloc::format!("{} o", o), None => alloc::string::String::from("N/A") },
+            );
+            crate::println!(
+                "  latence     : {} (max {})",
+                match e.kpi.latence_us { Some(us) => alloc::format!("{} us", us), None => alloc::string::String::from("N/A") },
+                match e.kpi.latence_max_us { Some(us) => alloc::format!("{} us", us), None => alloc::string::String::from("N/A") },
+            );
+            if let Some(pid) = e.kpi.pid {
+                crate::println!("  pid         : {}", pid);
+            }
             crate::println!(
                 "  compteurs   : {} erreur(s), {} reprise(s), {} redemarrage(s)",
                 e.erreurs, e.reprises, e.redemarrages,
@@ -352,57 +377,83 @@ pub fn services(argc: usize, argv: &[&str; 12]) {
             }
         });
         if !trouve {
-            crate::println!("services : « {} » inconnu.", cible);
+            crate::println!("services : « {} » inconnu.", sous);
         }
         return;
     }
 
-    // L'arbre, sur deux niveaux : les groupes puis leurs enfants.
+    // L'ARBRE, PAR LE MEME MODELE QUE LA FENETRE.
+    //
+    // `services tree` doit ressembler a ce que l'interface affiche -- pas a
+    // une seconde arborescence qui divergerait le jour ou l'une des deux
+    // change.
+    //
+    // Le tampon vient de l'atelier commun : `SERVICES_MAX` entrees et autant
+    // de lignes sur la pile du shell, c'etait quatre-vingt-dix kilo-octets
+    // pour une pile noyau de trente mille.
+    services::avec_atelier(|atelier| {
+        let n = atelier.connues;
+        let atelier = &mut *atelier;
+        let visibles =
+            vue::lignes(&atelier.entrees[..n], &vue::Replies::neuf(), &mut atelier.lignes);
+        imprime_l_arbre(&atelier.lignes, visibles);
+    });
+}
+
+/// Imprime l'arbre deja construit.
+///
+/// Separee pour que la tranche vienne de l'atelier sans en recopier le contenu
+/// sur la pile.
+fn imprime_l_arbre(lignes: &[crate::kernel::services::vue::Ligne], visibles: usize) {
+    use crate::kernel::services::{self, vue};
+
     let compteurs = services::compteurs();
     crate::println!(
-        "services : {} enregistres, {} transitions, {} evenements{}",
+        "services : {} enregistres, {} visibles, {} transitions, {} evenements{}",
         compteurs.enregistres,
+        visibles,
         compteurs.transitions,
         compteurs.evenements,
         if compteurs.refuses != 0 { " (registre plein !)" } else { "" },
     );
-    let mut groupes: [crate::kernel::services::registre::Id; 8] =
-        [crate::kernel::services::registre::Id::vide(); 8];
-    let mut nb_groupes = 0usize;
-    services::parcours(|e| {
-        if e.parent.est_vide() && nb_groupes < groupes.len() {
-            groupes[nb_groupes] = e.id;
-            nb_groupes += 1;
+    for ligne in lignes.iter().take(visibles) {
+        let e = &ligne.entree;
+        let mut indent = alloc::string::String::new();
+        for _ in 0..ligne.profondeur {
+            indent.push_str("  ");
         }
-    });
-    for groupe in groupes.iter().take(nb_groupes) {
-        crate::println!("  {}", groupe.texte());
-        services::parcours(|e| {
-            if !e.parent.egale(groupe.texte()) {
-                return;
-            }
+        if matches!(e.genre, crate::kernel::services::Genre::Groupe) {
+            // Le meme etat reporte que dans la fenetre : une ligne de commande
+            // qui dirait autre chose que l'ecran ferait douter des deux.
             crate::println!(
-                "    {:<20} {:<10} {:<10} {}",
-                e.id.texte(),
-                e.genre.nom(),
-                e.etat.nom(),
-                match e.duree_demarrage_ms() {
-                    Some(ms) => {
-                        let mut t = crate::alloc::string::String::new();
-                        use core::fmt::Write;
-                        let _ = write!(&mut t, "pret en {} ms", ms);
-                        t
-                    }
-                    None => crate::alloc::string::String::from("N/A"),
-                },
+                "  {}{:<24} {}",
+                indent,
+                ligne.libelle(),
+                vue::etat_affiche(ligne.etat_effectif),
             );
-        });
+            continue;
+        }
+        crate::println!(
+            "  {}{:<24} {:<10} cpu {:<7} ram {:<9} err {}",
+            indent,
+            ligne.libelle(),
+            vue::etat_affiche(e.etat),
+            match e.kpi.cpu_pour_mille {
+                Some(pm) => alloc::format!("{}.{}%", pm / 10, pm % 10),
+                None => alloc::string::String::from("N/A"),
+            },
+            match e.kpi.rss_octets {
+                Some(o) => alloc::format!("{} Kio", o / 1024),
+                None => alloc::string::String::from("N/A"),
+            },
+            e.erreurs,
+        );
     }
     if let Some((id, etat, raison, _)) = services::pire() {
         crate::println!(
             "verdict : {} en {} ({})",
             id.texte(),
-            etat.nom(),
+            vue::etat_affiche(etat),
             if raison.est_vide() { "-" } else { raison.texte() },
         );
     } else {

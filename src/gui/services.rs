@@ -28,7 +28,26 @@ pub fn arrete() {
 static CPU: AtomicU64 = AtomicU64::new(0);
 static RSS: AtomicU64 = AtomicU64::new(0);
 static SAMPLE_MS: AtomicU64 = AtomicU64::new(0);
+/// Le nom de processus Ladybird correspondant a chaque service du registre.
+///
+/// # Ce tableau ne definit PLUS le contenu de la fenetre
+///
+/// Il le faisait : la vue Services parcourait cette liste et n'affichait
+/// qu'elle -- six lignes, et rien du systeme ni du reseau. Il ne sert plus
+/// qu'a une chose, la bonne : traduire un nom de processus en identifiant de
+/// service, pour que les mesures CPU et RSS aillent alimenter le registre.
+/// C'est le registre, et lui seul, qui decide ce que la fenetre montre.
+const PROCESSUS_VERS_SERVICE: [(&str, &str); 6] = [
+    ("BouchaudBrowserHost", "browser.host"),
+    ("RequestServer", "browser.request_server"),
+    ("WebContent", "browser.web_content"),
+    ("ImageDecoder", "browser.image_decoder"),
+    ("WebWorker", "browser.web_worker"),
+    ("Compositor", "browser.compositor"),
+];
+
 pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
+    use crate::kernel::services::{self, registre::Kpi, Etat};
     let root = racine();
     let mut ticks = 0u64;
     let mut rss = 0u64;
@@ -41,6 +60,49 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
     CPU.store(if window == 0 { 0 } else { ticks.saturating_mul(100)/window }, Ordering::Relaxed);
     RSS.store(rss, Ordering::Relaxed);
     SAMPLE_MS.store(crate::kernel::timer::monotonic_ms(), Ordering::Release);
+
+    // LES MESURES REJOIGNENT LE REGISTRE, au lieu de rester ici.
+    //
+    // Le releve existait deja -- cinq secondes, une seule passe sur les
+    // processus. Il alimentait une fenetre qui ne montrait que Ladybird ; il
+    // alimente maintenant les noeuds `browser.*` du registre, que la fenetre,
+    // la ligne de commande et la boite noire lisent toutes les trois.
+    for (nom, service) in PROCESSUS_VERS_SERVICE {
+        let mut vu = false;
+        for row in rows {
+            if root != 0 && row.resource_group_id != root && row.pid != root {
+                continue;
+            }
+            let base = row.nom.rsplit('/').next().unwrap_or(&row.nom);
+            let correspond = base == nom || (nom == "BouchaudBrowserHost" && row.pid == root);
+            if !correspond {
+                continue;
+            }
+            vu = true;
+            services::kpi(
+                service,
+                Kpi {
+                    cpu_pour_mille: Some(if window == 0 {
+                        0
+                    } else {
+                        (row.ticks.saturating_mul(1000) / window) as u32
+                    }),
+                    rss_octets: Some(row.rss_octets),
+                    vss_octets: Some(row.vss_octets),
+                    pid: Some(row.pid),
+                    ..Kpi::default()
+                },
+            );
+            services::etat(service, Etat::Actif);
+            break;
+        }
+        if !vu {
+            // ARRETE, ET TOUJOURS DANS L'ARBRE. Un `WebWorker` a la demande
+            // doit se lire « arrete », pas disparaitre.
+            services::kpi(service, Kpi::default());
+            services::etat(service, Etat::Arrete);
+        }
+    }
 }
 pub fn usage() -> (u64, u64, u64) {
     let sample = SAMPLE_MS.load(Ordering::Acquire);

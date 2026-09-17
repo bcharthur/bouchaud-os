@@ -339,7 +339,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::kernel::services::phase("net");
     let _network_state = crate::net::demarre();
     crate::kernel::services::etat(
-        "net.rtl8168",
+        crate::kernel::services::carte_active(),
         if crate::drivers::e1000::is_ready() {
             crate::kernel::services::Etat::Actif
         } else {
@@ -347,7 +347,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
         },
     );
     crate::kernel::services::etat(
-        "net.lien",
+        "net.link",
         if crate::drivers::e1000::link_up() {
             crate::kernel::services::Etat::Actif
         } else {
@@ -490,7 +490,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // la fenetre INIT/SIPI qui a declenche la double faute Trigkey.
     crate::net::demarre_le_veilleur_de_lien();
     crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
-    crate::kernel::services::etat("net.lien", crate::kernel::services::Etat::Actif);
+    crate::kernel::services::etat("net.link", crate::kernel::services::Etat::Actif);
     crate::kernel::services::phase("sys.graphique");
 
     // Le montage differe part ICI, et non a la troisieme trame du bureau : il

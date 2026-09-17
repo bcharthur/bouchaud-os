@@ -245,7 +245,7 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     kernel::services::phase("net");
     net::demarre();
     kernel::services::etat(
-        "net.rtl8168",
+        kernel::services::carte_active(),
         if drivers::e1000::is_ready() {
             kernel::services::Etat::Actif
         } else {
@@ -261,7 +261,7 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // pour le reste de la session.
     net::demarre_le_veilleur_de_lien();
     kernel::services::etat(
-        "net.lien",
+        "net.link",
         if drivers::e1000::link_up() {
             kernel::services::Etat::Actif
         } else {

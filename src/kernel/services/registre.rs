@@ -36,12 +36,26 @@
 /// Nombre de services que le registre peut porter.
 ///
 /// Borne fixe : un registre qui alloue dans un noyau, c'est une panne memoire
-/// en sursis. Trente-deux couvre la pile actuelle avec de la marge, et le
-/// depassement se COMPTE au lieu de se perdre.
-pub const SERVICES_MAX: usize = 32;
+/// en sursis. Le depassement se COMPTE au lieu de se perdre.
+///
+/// # Pourquoi cent vingt-huit, et pas trente-deux
+///
+/// Trente-deux suffisait a la poignee de services que la premiere version
+/// declarait. La topologie reelle -- systeme, reseau, navigateur, avec leurs
+/// sous-arbres et la chaine de navigation -- en compte soixante-sept. Une
+/// borne trop courte aurait tronque l'arbre EN SILENCE, et fait disparaitre de
+/// la vue le service qu'on y cherche.
+///
+/// Cent vingt-huit entrees, c'est la topologie complete et de la marge pour
+/// deux fois ce qu'elle contient aujourd'hui.
+pub const SERVICES_MAX: usize = 128;
 
-/// Longueur maximale d'un identifiant de service (`net.rtl8168`).
-pub const ID_MAX: usize = 24;
+/// Longueur maximale d'un identifiant de service.
+///
+/// Le plus long de la topologie est `browser.navigation.download`, vingt-sept
+/// caracteres. Trente-deux laisse de quoi nommer sans tronquer -- et un
+/// identifiant tronque ne se retrouve plus dans l'archive.
+pub const ID_MAX: usize = 32;
 
 /// L'etat normalise d'un service. L'ordre va du plus sain au plus grave.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -176,6 +190,29 @@ impl Id {
     }
 }
 
+/// Les indicateurs qu'un service PEUT publier.
+///
+/// # `None` n'est pas zero
+///
+/// Un protocole n'a pas de memoire residente ; une carte reseau n'a pas de
+/// PID. Afficher zero pour ces cases-la serait une mesure inventee, et une
+/// mesure inventee se lit comme une vraie. `None` s'affiche « N/A », et cela
+/// veut dire ce que cela dit : personne ne mesure ceci.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Kpi {
+    pub cpu_pour_mille: Option<u32>,
+    pub rss_octets: Option<u64>,
+    pub vss_octets: Option<u64>,
+    pub disque_lu: Option<u64>,
+    pub disque_ecrit: Option<u64>,
+    pub rx_octets: Option<u64>,
+    pub tx_octets: Option<u64>,
+    pub latence_us: Option<u64>,
+    pub latence_max_us: Option<u64>,
+    pub operations: Option<u64>,
+    pub pid: Option<u32>,
+}
+
 /// Une entree du registre.
 #[derive(Clone, Copy)]
 pub struct Entree {
@@ -195,10 +232,12 @@ pub struct Entree {
     pub erreurs: u32,
     /// Derniere raison connue d'un etat degrade ou en panne.
     pub raison: Id,
+    /// Ce que ce service publie, quand il publie quelque chose.
+    pub kpi: Kpi,
 }
 
 impl Entree {
-    const fn vide() -> Self {
+    pub const fn vide() -> Self {
         Self {
             id: Id::vide(),
             parent: Id::vide(),
@@ -213,6 +252,19 @@ impl Entree {
             reprises: 0,
             erreurs: 0,
             raison: Id::vide(),
+            kpi: Kpi {
+                cpu_pour_mille: None,
+                rss_octets: None,
+                vss_octets: None,
+                disque_lu: None,
+                disque_ecrit: None,
+                rx_octets: None,
+                tx_octets: None,
+                latence_us: None,
+                latence_max_us: None,
+                operations: None,
+                pid: None,
+            },
         }
     }
 
@@ -359,15 +411,39 @@ impl Registre {
         }
     }
 
-    /// Note une erreur et sa raison.
-    pub fn erreur(&mut self, id: &str, raison: &str, maintenant_ns: u64) {
+    /// Publie les indicateurs d'un service.
+    ///
+    /// Les champs a `None` dans `kpi` EFFACENT ce qui etait publie : un
+    /// service qui cesse de mesurer doit afficher « N/A », et non le dernier
+    /// chiffre qu'il a connu -- une valeur perimee se lit comme une valeur
+    /// vivante.
+    pub fn kpi(&mut self, id: &str, kpi: Kpi, maintenant_ns: u64) {
         if let Some(place) = self.place(id) {
+            self.entrees[place].kpi = kpi;
+            self.entrees[place].derniere_activite_ns = maintenant_ns;
+        }
+    }
+
+    /// Note une erreur et sa raison, et DEGRADE le service.
+    ///
+    /// Rend `true` si un evenement doit etre emis.
+    ///
+    /// # Pourquoi la degradation est ici et non chez l'appelant
+    ///
+    /// « Une erreur degrade le service » est une POLITIQUE, et une politique
+    /// qui vit dans la couche noyau n'est verifiable qu'en demarrant la
+    /// machine. Un appelant qui oublierait de degrader laisserait le service
+    /// « actif » avec trois erreurs au compteur -- et c'est exactement la
+    /// ligne qu'on regarde quand une page ne charge pas.
+    pub fn erreur(&mut self, id: &str, raison: &str, maintenant_ns: u64) -> bool {
+        let Some(place) = self.place(id) else { return false };
+        {
             let entree = &mut self.entrees[place];
             entree.erreurs = entree.erreurs.saturating_add(1);
             entree.derniere_erreur_ns = maintenant_ns;
-            entree.derniere_activite_ns = maintenant_ns;
             entree.raison = Id::depuis(raison);
         }
+        self.etat(id, Etat::Degrade, maintenant_ns)
     }
 
     pub fn lis(&self, id: &str) -> Option<&Entree> {
@@ -399,6 +475,110 @@ impl Registre {
             .filter(|e| e.etat.problematique())
             .max_by_key(|e| e.etat)
     }
+}
+
+// ---------------------------------------------------------------------------
+// La topologie : elle EXISTE avant toute activite
+// ---------------------------------------------------------------------------
+
+/// L'arborescence complete, declaree d'un bloc au demarrage.
+///
+/// # Pourquoi tout declarer d'avance
+///
+/// Un registre qui ne contiendrait que les composants ayant deja publie
+/// quelque chose ferait disparaitre de la vue ceux qui se taisent -- et un
+/// composant qui se tait est exactement celui qu'on vient y chercher. Un
+/// `WebWorker` arrete, un DHCP au repos, un TLS en attente, un HTTP/2 jamais
+/// sollicite doivent apparaitre, avec leur etat.
+///
+/// L'ORDRE DE CE TABLEAU EST L'ORDRE D'AFFICHAGE. Trier par nom mettrait
+/// `net.arp` avant `net.ethernet` et ferait apparaitre ARP au-dessus de la
+/// couche qui le porte.
+pub const TOPOLOGIE: &[(&str, &str, Genre)] = &[
+    // --- Systeme ---------------------------------------------------------
+    ("sys", "", Genre::Groupe),
+    ("sys.scheduler", "sys", Genre::Noyau),
+    ("sys.memory", "sys", Genre::Groupe),
+    ("sys.memory.physical", "sys.memory", Genre::Noyau),
+    ("sys.memory.heap", "sys.memory", Genre::Noyau),
+    ("sys.memory.buddy", "sys.memory", Genre::Noyau),
+    ("sys.storage", "sys", Genre::Groupe),
+    ("sys.storage.usb", "sys.storage", Genre::Pilote),
+    ("sys.storage.nvme", "sys.storage", Genre::Pilote),
+    ("sys.storage.ramfs", "sys.storage", Genre::Service),
+    ("sys.storage.fs", "sys.storage", Genre::Service),
+    ("sys.usb", "sys", Genre::Groupe),
+    ("sys.usb.xhci", "sys.usb", Genre::Pilote),
+    ("sys.usb.keyboard", "sys.usb", Genre::Pilote),
+    ("sys.usb.mouse", "sys.usb", Genre::Pilote),
+    ("sys.usb.bot", "sys.usb", Genre::Pilote),
+    ("sys.graphics", "sys", Genre::Groupe),
+    ("sys.graphics.desktop", "sys.graphics", Genre::Service),
+    ("sys.graphics.wm", "sys.graphics", Genre::Service),
+    ("sys.graphics.present", "sys.graphics", Genre::Etape),
+    ("sys.diag", "sys", Genre::Groupe),
+    ("sys.diag.blackbox", "sys.diag", Genre::Service),
+    ("sys.diag.serial", "sys.diag", Genre::Pilote),
+    // --- Reseau ----------------------------------------------------------
+    ("net", "", Genre::Groupe),
+    ("net.nic", "net", Genre::Groupe),
+    ("net.nic.rtl8168", "net.nic", Genre::Pilote),
+    ("net.nic.e1000", "net.nic", Genre::Pilote),
+    ("net.l2", "net", Genre::Groupe),
+    ("net.ethernet", "net.l2", Genre::Protocole),
+    ("net.arp", "net.l2", Genre::Protocole),
+    ("net.config", "net", Genre::Groupe),
+    ("net.link", "net.config", Genre::Service),
+    ("net.dhcp", "net.config", Genre::Protocole),
+    ("net.dns", "net.config", Genre::Protocole),
+    ("net.l3", "net", Genre::Groupe),
+    ("net.ipv4", "net.l3", Genre::Protocole),
+    ("net.icmp", "net.l3", Genre::Protocole),
+    ("net.l4", "net", Genre::Groupe),
+    ("net.udp", "net.l4", Genre::Protocole),
+    ("net.tcp", "net.l4", Genre::Protocole),
+    ("net.security", "net", Genre::Groupe),
+    ("net.tls", "net.security", Genre::Protocole),
+    ("net.application", "net", Genre::Groupe),
+    ("net.http1", "net.application", Genre::Protocole),
+    ("net.http2", "net.application", Genre::Protocole),
+    ("net.hpack", "net.application", Genre::Protocole),
+    ("net.gzip", "net.application", Genre::Protocole),
+    ("net.brotli", "net.application", Genre::Protocole),
+    // --- Navigateur ------------------------------------------------------
+    ("browser", "", Genre::Groupe),
+    ("browser.host", "browser", Genre::Processus),
+    ("browser.request_server", "browser", Genre::Processus),
+    ("browser.web_content", "browser", Genre::Processus),
+    ("browser.image_decoder", "browser", Genre::Processus),
+    ("browser.web_worker", "browser", Genre::Processus),
+    ("browser.compositor", "browser", Genre::Processus),
+    ("browser.navigation", "browser", Genre::Groupe),
+    ("browser.navigation.url", "browser.navigation", Genre::Etape),
+    ("browser.navigation.dns", "browser.navigation", Genre::Etape),
+    ("browser.navigation.tcp", "browser.navigation", Genre::Etape),
+    ("browser.navigation.tls", "browser.navigation", Genre::Etape),
+    ("browser.navigation.http", "browser.navigation", Genre::Etape),
+    ("browser.navigation.download", "browser.navigation", Genre::Etape),
+    ("browser.navigation.decode", "browser.navigation", Genre::Etape),
+    ("browser.navigation.html", "browser.navigation", Genre::Etape),
+    ("browser.navigation.css", "browser.navigation", Genre::Etape),
+    ("browser.navigation.layout", "browser.navigation", Genre::Etape),
+    ("browser.navigation.paint", "browser.navigation", Genre::Etape),
+    ("browser.navigation.present", "browser.navigation", Genre::Etape),
+];
+
+/// Declare toute la topologie. Rend le nombre d'entrees REFUSEES.
+///
+/// Un refus non nul veut dire que la borne est trop courte et que l'arbre est
+/// tronque -- c'est-a-dire qu'un service a disparu de la vue sans un mot. Le
+/// test `topologie_complete_enregistrable` echoue dessus.
+pub fn declare_topologie(registre: &mut Registre) -> u64 {
+    let avant = registre.compteurs().refuses;
+    for (id, parent, genre) in TOPOLOGIE {
+        registre.declare(id, parent, *genre);
+    }
+    registre.compteurs().refuses - avant
 }
 
 // ---------------------------------------------------------------------------

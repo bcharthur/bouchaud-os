@@ -385,6 +385,22 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     // graphique, avec sa Surface partagee et son canal GUI, sans simuler de clic
     // souris en CI. En cas d'echec on retombe sur le terminal pour garder un
     // bureau diagnostic visible.
+    // LE MEME CHEMIN QUE LE CLIC SUR L'ICONE, pas une fenetre a part.
+    //
+    // La preuve d'acceptation de la vue Services est une CAPTURE : il faut
+    // donc pouvoir l'ouvrir sans simuler un clic souris en CI. On detourne la
+    // premiere fenetre vers `KIND_SERVICES` -- c'est `make_app` qui la
+    // construit, exactement comme le clic sur l'icone du bureau, et la fenetre
+    // obtenue est la meme a l'octet pres.
+    let kind = if n == 0
+        && crate::shell::exported()
+            .iter()
+            .any(|entry| entry == "BO_AUTOSTART_SERVICES=1")
+    {
+        KIND_SERVICES
+    } else {
+        kind
+    };
     if kind == 0 && autostart_browser_requested(n == 0) {
         crate::kernel::perf::browser_click();
         match crate::gui::client::Client::lance(
@@ -418,7 +434,11 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() }),
-        KIND_SERVICES => Win::new("Services".to_string(), x, y, 660, 350,
+        // L'ARBRE NE TENAIT PAS. La premiere capture montrait « Navigateur »
+        // hors de l'ecran et les colonnes de droite coupees par le bord : une
+        // fenetre dimensionnee pour six lignes Ladybird ne montre pas une
+        // pile de soixante-sept services.
+        KIND_SERVICES => Win::new("Services".to_string(), x, y, 900, 560,
             crate::gui::windowing::WindowFlags::STANDARD, App::Services),
         KIND_JOURNAL => Win::new("Journal — TOUT".to_string(), x, y, 760, 460,
             crate::gui::windowing::WindowFlags::STANDARD,

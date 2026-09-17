@@ -1419,6 +1419,13 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
 
     let (mesures, total) = task::mesure_processus();
     crate::gui::services::observe(&mesures, total);
+    // LES INDICATEURS DU REGISTRE, AU MEME RYTHME QUE LE RELEVE EXISTANT.
+    //
+    // Aucune mesure neuve n'est prise ici : la publication RASSEMBLE sous des
+    // identifiants communs des compteurs qui existaient deja, chacun chez son
+    // sous-systeme. C'est ce qui permet a la fenetre, a la ligne de commande
+    // et a la boite noire de lire le meme chiffre.
+    crate::kernel::services::publie_les_indicateurs();
     if total > 0 {
         let mut ligne = String::new();
         let sample_ns = crate::kernel::timer::monotonic_ns();
