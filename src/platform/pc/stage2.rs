@@ -105,6 +105,24 @@ pub fn run(boot: &'static BootInfo) -> ! {
     super::ecran_faute::installe_framebuffer(framebuffer);
     point_de_controle("stage2-entree");
 
+    // L'IDENTITE DU BINAIRE, EN CLAIR, AVANT TOUT LE RESTE.
+    //
+    // La session du 17 septembre a cherche une panne dans du code qui n'etait
+    // pas dans l'image testee : `netetat` repondait « commande inconnue » et
+    // l'archive ne portait aucun des champs ajoutes. Il a fallu compter les
+    // occurrences d'un champ pour s'en apercevoir. Cette ligne-la coute six
+    // mots et supprime la question, sur la liaison serie comme dans l'archive.
+    crate::serial_println!(
+        "BOUCHAUD_BUILD commit={} lot={}",
+        crate::kernel::blackbox::BUILD_COMMIT,
+        crate::kernel::blackbox::BUILD_LOTS,
+    );
+    // L'OBSERVATOIRE EXISTE DES L'ENTREE, et non au moment du reseau : une
+    // phase declaree apres coup ne date rien, et le pic de reveil de douze
+    // secondes du releve physique est tombe AVANT que le reseau ne demarre.
+    crate::kernel::services::declare_arbre();
+    crate::kernel::services::phase("sys");
+
     // Breadcrumb physique : reutilise le renderer GOP du Stage 1 deja
     // prouve sur le TRIGKEY. Si cet ecran apparait, le noyau a bien atteint
     // Stage 2 et le blocage est necessairement apres ce point.
@@ -220,6 +238,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // /diagnostics avant les pilotes reseau/USB actifs.
     crate::platform::pc::hardware_probe::run(boot, framebuffer);
     point_de_controle("hardware-probe-xhci");
+    crate::kernel::services::phase("sys.usb");
 
     // Le disque interne. C'est lui, et rien d'autre, qui separe un systeme
     // LIVE d'un systeme INSTALLE : tant que le NVMe n'etait pas pilote, aucune
@@ -317,10 +336,6 @@ pub fn run(boot: &'static BootInfo) -> ! {
         (souris_usb == 0) as u8,
     );
 
-    // L'OBSERVATOIRE EST DECLARE AVANT LE RESEAU, pas apres : c'est lui qui
-    // doit porter la phase « Ethernet en cours de configuration », et une
-    // phase declaree apres coup ne date rien.
-    crate::kernel::services::declare_arbre();
     crate::kernel::services::phase("net");
     let _network_state = crate::net::demarre();
     crate::kernel::services::etat(
@@ -475,6 +490,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // la fenetre INIT/SIPI qui a declenche la double faute Trigkey.
     crate::net::demarre_le_veilleur_de_lien();
     crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
+    crate::kernel::services::etat("net.lien", crate::kernel::services::Etat::Actif);
+    crate::kernel::services::phase("sys.graphique");
 
     // Le montage differe part ICI, et non a la troisieme trame du bureau : il
     // n'a aucun resultat que le premier rendu attende, et le faire dependre du

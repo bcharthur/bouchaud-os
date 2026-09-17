@@ -90,6 +90,19 @@ fn uefi_boot_entry(api: &'static mut bootloader_api::BootInfo) -> ! {
 fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // 1. Sorties de base : serie d'abord (pour tracer le boot), puis VGA.
     drivers::serial::init();
+    // L'IDENTITE DU BINAIRE, EN CLAIR, AVANT TOUT LE RESTE.
+    //
+    // La session du 17 septembre a cherche une panne dans du code qui n'etait
+    // pas dans l'image testee. Cette ligne-la coute six mots et supprime la
+    // question -- sur les DEUX chemins d'amorcage, sans quoi le chemin BIOS
+    // que QEMU emprunte ne verifierait jamais ce que le chemin UEFI livre.
+    crate::serial_println!(
+        "BOUCHAUD_BUILD commit={} lot={}",
+        kernel::blackbox::BUILD_COMMIT,
+        kernel::blackbox::BUILD_LOTS,
+    );
+    kernel::services::declare_arbre();
+    kernel::services::phase("sys");
     if boot_info.firmware == boot::FirmwareKind::Uefi {
         crate::serial_println!("BOUCHAUD_UEFI_ENTRY_OK");
     }
@@ -229,7 +242,16 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // avant de pouvoir ouvrir une page : un systeme dont l'interface graphique
     // demarre doit avoir son reseau en service, comme il a son clavier.
     // `net::demarre` n'echoue jamais — voir sa documentation.
+    kernel::services::phase("net");
     net::demarre();
+    kernel::services::etat(
+        "net.rtl8168",
+        if drivers::e1000::is_ready() {
+            kernel::services::Etat::Actif
+        } else {
+            kernel::services::Etat::Panne
+        },
+    );
 
     // LE LIEN SE VEILLE, IL NE SE CONSTATE PAS UNE FOIS.
     //
@@ -238,6 +260,15 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // etait definitif, et le navigateur repondait « Unable to resolve host »
     // pour le reste de la session.
     net::demarre_le_veilleur_de_lien();
+    kernel::services::etat(
+        "net.lien",
+        if drivers::e1000::link_up() {
+            kernel::services::Etat::Actif
+        } else {
+            kernel::services::Etat::Attente
+        },
+    );
+    kernel::services::phase("sys.graphique");
     kernel::dmesg::log("shell: initialise");
 
     // 5. Banniere d'accueil.
