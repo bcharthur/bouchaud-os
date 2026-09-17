@@ -30,7 +30,32 @@ fn now_ms() -> i64 {
 /// Ouvre une connexion TCP vers `dst:port`, envoie `request`, accumule la
 /// reponse dans `out`. Timeout global de 15s. Renvoie `true` si au moins un
 /// octet de reponse a ete recu.
+/// Ouvre la file smoltcp le temps d'une requete, et la referme quoi qu'il
+/// arrive.
+///
+/// `fetch` a une dizaine de sorties -- echecs de connexion, echeances, erreurs
+/// de socket. Poser la fermeture a la main sur chacune, c'est la perdre a la
+/// premiere oubliee : la file resterait ouverte et le routage recopierait
+/// chaque trame recue, pour personne, jusqu'au prochain demarrage.
+struct AbonnementSmoltcp;
+
+impl AbonnementSmoltcp {
+    fn ouvre() -> Self {
+        crate::net::abonne_smoltcp();
+        Self
+    }
+}
+
+impl Drop for AbonnementSmoltcp {
+    fn drop(&mut self) {
+        crate::net::desabonne_smoltcp();
+    }
+}
+
 pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> bool {
+    // L'abonnement d'abord : une trame recue avant lui serait routee par la
+    // pile maison et jamais recopiee ici.
+    let _abonnement = AbonnementSmoltcp::ouvre();
     let mut device = E1000Device;
     let mac = crate::drivers::e1000::mac();
     let hw = HardwareAddress::Ethernet(EthernetAddress(mac));

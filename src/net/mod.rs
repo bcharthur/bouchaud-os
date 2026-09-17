@@ -20,6 +20,8 @@ pub mod resolveur;
 pub mod link;
 pub mod internet;
 pub mod transport;
+/// La file de trames d'un consommateur, PURE : voir `net/file_trames.rs`.
+pub mod file_trames;
 /// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la
 /// duree. Voir `net/diagnostic.rs`.
 pub mod diagnostic;
@@ -720,6 +722,90 @@ static VERROU_RECEPTION: SpinLockIrq<()> = SpinLockIrq::new(());
 // la resolution marche au lieu de laisser deviner. Des compteurs relaches :
 // ils ne commandent rien, ils racontent.
 use core::sync::atomic::{AtomicU64, Ordering as OrdreCompteur};
+// ---------------------------------------------------------------------------
+// BOUCHAUD_NET_INGRESS_UNIQUE_V1 : UNE seule fonction lit la carte
+// ---------------------------------------------------------------------------
+//
+// DEUX consommateurs lisaient l'anneau du RTL8168 : le routage maison, ici, et
+// le peripherique `smoltcp` (`E1000Device::receive`). Le commentaire de tete de
+// `smol_device.rs` le disait deja -- « les deux ne doivent JAMAIS tourner en
+// meme temps » -- et rien ne l'empechait.
+//
+// Ce n'est pas seulement une course memoire. C'est une question de PROPRIETE
+// DES PAQUETS. Une trame retiree de la carte par l'un n'existe plus pour
+// l'autre, et une reponse ARP ne se retransmet pas : il suffit que le
+// peripherique smoltcp la prenne pendant qu'une requete Ladybird tourne pour
+// que la resolution maison echoue, et qu'elle echoue POUR DE BON puisque
+// l'echec est mis en cache.
+//
+// Le releve TRIGKEY du 17 septembre en porte la signature exacte : pendant
+// trente secondes, Ladybird vivant et le lien a un gigabit,
+//
+//     [NET-ROUTAGE] trames=100 arp=13 dhcp=2 arp_resolus=1 arp_echoues=0
+//     [NET-TCP]     poignees=0 echantillons_rtt=0 syn_retransmis=0
+//
+// ne bouge plus d'un seul compteur.
+//
+// Desormais `draine_verrouille` est le SEUL lecteur physique, et `route_trame`
+// repartit : cache ARP, boite DHCP, files IPv4 -- et une COPIE dans la file
+// smoltcp quand une pile smoltcp est en cours.
+//
+// UNE COPIE, ET NON UN SOUS-ENSEMBLE. `smoltcp` tient sa propre table de
+// voisins : lui cacher les reponses ARP le rendrait muet. Il lui faut le meme
+// flux que la pile maison.
+static mut FILE_SMOLTCP: file_trames::FileTrames = file_trames::FileTrames::neuve();
+
+/// La file smoltcp, LE VERROU DE RECEPTION ETANT TENU.
+#[allow(static_mut_refs)]
+fn file_smoltcp() -> &'static mut file_trames::FileTrames {
+    unsafe { &mut *core::ptr::addr_of_mut!(FILE_SMOLTCP) }
+}
+
+/// Ouvre la file smoltcp. Tant qu'elle est fermee, le routage ne recopie rien.
+///
+/// L'abonnement EXISTE pour que le cas courant -- aucune pile smoltcp en cours
+/// -- ne paie pas une copie de trame par paquet recu.
+pub fn abonne_smoltcp() {
+    let _garde = VERROU_RECEPTION.lock();
+    file_smoltcp().abonne();
+}
+
+/// Ferme la file smoltcp et jette ce qu'elle retenait.
+pub fn desabonne_smoltcp() {
+    let _garde = VERROU_RECEPTION.lock();
+    file_smoltcp().desabonne();
+}
+
+/// Retire une trame pour smoltcp. Draine la carte si la file est vide.
+///
+/// C'est le SEUL point d'entree du peripherique smoltcp. Il ne touche plus au
+/// materiel : il consomme une file logicielle alimentee par l'ingress unique.
+pub fn retire_trame_smoltcp(sortie: &mut [u8]) -> Option<usize> {
+    {
+        let _garde = VERROU_RECEPTION.lock();
+        if let Some(n) = file_smoltcp().retire(sortie) {
+            return Some(n);
+        }
+    }
+    // File vide : faire tourner l'ingress une fois, puis relire. Le drainage
+    // prend le meme verrou -- on l'a donc rendu avant.
+    draine_anneau();
+    let _garde = VERROU_RECEPTION.lock();
+    file_smoltcp().retire(sortie)
+}
+
+/// Une pile smoltcp est-elle en cours ?
+pub fn smoltcp_abonnee() -> bool {
+    let _garde = VERROU_RECEPTION.lock();
+    file_smoltcp().abonnee()
+}
+
+/// Ce que la file smoltcp a vu passer.
+pub fn compteurs_smoltcp() -> file_trames::Compteurs {
+    let _garde = VERROU_RECEPTION.lock();
+    file_smoltcp().compteurs()
+}
+
 static TRAMES_ROUTEES: AtomicU64 = AtomicU64::new(0);
 static TRAMES_ARP: AtomicU64 = AtomicU64::new(0);
 static TRAMES_DHCP: AtomicU64 = AtomicU64::new(0);
@@ -951,12 +1037,18 @@ fn arp_resolve(target: Ipv4Addr) -> Option<[u8; 6]> {
             if let Some(Some(mac)) = arp_cache_lit(target) {
                 crate::kernel::task::stall_site_clear();
                 ARP_RESOLUS.fetch_add(1, OrdreCompteur::Relaxed);
+                crate::kernel::services::succes("net.arp");
+                crate::kernel::services::etat(
+                    "net.arp",
+                    crate::kernel::services::Etat::Actif,
+                );
                 return Some(mac);
             }
         }
     }
     crate::kernel::task::stall_site_clear();
     ARP_ECHOUES.fetch_add(1, OrdreCompteur::Relaxed);
+    crate::kernel::services::erreur("net.arp", "pas-de-reponse");
     crate::serial_println!(
         "BOUCHAUD_NET_ARP_ECHEC cible={}.{}.{}.{} tentatives={} ecoute_ms={} \
 trames_routees={} trames_arp={}",
@@ -1347,6 +1439,15 @@ fn draine_verrouille() -> usize {
 
 /// Donne UNE trame a qui de droit. Ne jette que ce que personne n'attend.
 fn route_trame(trame: &[u8]) {
+    // LA COPIE SMOLTCP PASSE AVANT L'ANALYSE, ET AVANT TOUT REJET.
+    //
+    // Le routage maison jette ce qu'il ne sait pas traiter -- IPv6, VLAN,
+    // controle de flux -- et une trame jetee ici serait perdue pour smoltcp
+    // aussi. La copie se fait donc sur le flux BRUT, avant le moindre tri :
+    // smoltcp doit voir ce que la carte a recu, pas ce que notre pile en a
+    // retenu.
+    file_smoltcp().pose(trame);
+
     let entete = match ethernet::parse_header(trame) {
         Some(h) => h,
         None => return,
