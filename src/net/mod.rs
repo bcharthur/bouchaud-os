@@ -1322,6 +1322,15 @@ pub(crate) fn draine_anneau() -> usize {
 }
 
 fn draine_verrouille() -> usize {
+    // LA REPARATION A LIEU ICI, ET NULLE PART AILLEURS.
+    //
+    // C'est le seul chemin qui sorte des trames de la carte en tenant
+    // `VERROU_RECEPTION`. Le peripherique smoltcp lit l'anneau sans ce verrou,
+    // et le veilleur de lien ne le tient pas non plus : ni l'un ni l'autre ne
+    // doit reconstruire un anneau qu'un autre coeur est peut-etre en train de
+    // lire. Tous deux se contentent de poser un drapeau ; c'est ici qu'il est
+    // servi.
+    e1000::repare_si_demande();
     let mut buf = [0u8; 2048];
     let mut traitees = 0usize;
     for _ in 0..TRAMES_PAR_PASSAGE {

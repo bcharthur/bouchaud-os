@@ -877,19 +877,9 @@ unsafe fn maintenance_isr() -> u16 {
 /// PCIe. Une milliseconde laisse mille occasions par seconde de voir un moteur
 /// tomber.
 unsafe fn maintenance_anneau_vide() {
-    // LA DEMANDE PASSE AVANT LA BORNE DE FREQUENCE.
-    //
-    // Une reparation demandee par le veilleur ne doit pas attendre la
-    // milliseconde suivante pour etre servie : la borne existe pour epargner
-    // des acces MMIO, pas pour retarder une reprise.
-    let demandee = REPARATION_DEMANDEE.swap(false, Ordering::AcqRel);
-
     let maintenant = crate::kernel::timer::monotonic_ns();
     let precedent = MAINTENANCE_DERNIERE_NS.load(Ordering::Relaxed);
-    if !demandee
-        && precedent != 0
-        && maintenant.saturating_sub(precedent) < MAINTENANCE_PERIODE_NS
-    {
+    if precedent != 0 && maintenant.saturating_sub(precedent) < MAINTENANCE_PERIODE_NS {
         return;
     }
     MAINTENANCE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
@@ -902,9 +892,35 @@ unsafe fn maintenance_anneau_vide() {
     // rendre : dans les deux cas il n'ecrira plus rien, et rien ne le
     // redemarrera tout seul. Il n'y a aucune raison d'attendre trois secondes
     // de silence pour agir sur un signe aussi explicite.
-    if demandee || anneau::moteur_rx_a_relancer(read8(REG_CHIP_CMD)) {
+    //
+    // MAIS ON N'AGIT PAS ICI. `receive` est aussi appelee par le peripherique
+    // smoltcp, qui ne tient pas le verrou de reception : y reconstruire
+    // l'anneau serait la course que ce verrou existe pour fermer. On ARME, et
+    // `repare_si_demande` -- appelee par le seul drainage verrouille -- agit.
+    if anneau::moteur_rx_a_relancer(read8(REG_CHIP_CMD)) {
+        REPARATION_DEMANDEE.store(true, Ordering::Release);
+    }
+}
+
+/// Execute une reparation armee. LE SEUL APPELANT DE `repare_reception`.
+///
+/// # Pourquoi un seul point, et pourquoi celui-la
+///
+/// Reconstruire l'anneau, c'est le reecrire en entier et remettre `RX_CUR` a
+/// zero. Deux chemins sortent des trames de la carte : le drainage
+/// verrouille, qui tient `VERROU_RECEPTION`, et le peripherique smoltcp, qui
+/// ne le tient pas. Laisser la reparation partir du second -- ou du veilleur
+/// de lien -- reouvrirait exactement la course que ce verrou ferme.
+///
+/// Cette fonction est donc appelee depuis le drainage verrouille, et de la
+/// seulement. Tout le reste se contente de poser le drapeau.
+pub fn repare_si_demande() -> bool {
+    unsafe {
+        if !READY || !REPARATION_DEMANDEE.swap(false, Ordering::AcqRel) {
+            return false;
+        }
         let avant = RX_PAQUETS.load(Ordering::Relaxed);
-        repare_reception();
+        let ok = repare_reception();
         // Une reprise qui ne fait rien repartir compte : c'est elle qui fait
         // monter d'un barreau au tour suivant.
         if RX_PAQUETS.load(Ordering::Relaxed) == avant {
@@ -912,6 +928,7 @@ unsafe fn maintenance_anneau_vide() {
         } else {
             REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
         }
+        ok
     }
 }
 

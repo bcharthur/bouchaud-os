@@ -134,6 +134,11 @@ pub fn demande_reparation_si_arretee() -> bool {
     rtl8168::is_ready() && rtl8168::demande_reparation_si_arretee()
 }
 
+/// Execute une reparation armee. A n'appeler que sous le verrou de reception.
+pub fn repare_si_demande() -> bool {
+    rtl8168::is_ready() && rtl8168::repare_si_demande()
+}
+
 pub fn using_rtl8168() -> bool {
     rtl8168::is_ready()
 }

@@ -305,12 +305,22 @@ def main():
         # exactement ce que ce verrou interdit : « un seul point sort les
         # trames de la carte ».
         appels = pur.count("repare_reception()")
-        # Une declaration, un appel : celui de `maintenance_anneau_vide`.
+        # Une declaration, un appel : celui de `repare_si_demande`.
         if appels > 2:
             fautes.append(
                 "rtl8168.rs : `repare_reception` est appelee depuis plus d'un "
-                "endroit. Elle ne doit l'etre que depuis le chemin de "
-                "drainage, qui tient le verrou de reception."
+                "endroit. Elle ne doit l'etre que par `repare_si_demande`, que "
+                "seul le drainage verrouille appelle."
+            )
+        vide = corps(pur, "unsafe fn maintenance_anneau_vide() {")
+        if vide is None:
+            fautes.append("rtl8168.rs : `maintenance_anneau_vide` est introuvable.")
+        elif "repare_reception" in vide:
+            fautes.append(
+                "rtl8168.rs : le passage a vide repare lui-meme. `receive` est "
+                "aussi appelee par le peripherique smoltcp, qui ne tient pas le "
+                "verrou de reception : y reconstruire l'anneau rouvrirait la "
+                "course que ce verrou ferme."
             )
         demande = corps(pur, "pub fn demande_reparation_si_arretee() -> bool {")
         if demande is None:
@@ -331,6 +341,19 @@ def main():
                     "rtl8168.rs : le veilleur de lien repare lui-meme. La "
                     "reparation doit avoir lieu sous le verrou du drainage."
                 )
+
+    # ------------------------- la reparation doit avoir UN executant, et locke
+    if mod is not None:
+        drainage = corps(code_seul(mod), "fn draine_verrouille() -> usize {")
+        if drainage is None:
+            fautes.append("net/mod.rs : `draine_verrouille` est introuvable.")
+        elif "repare_si_demande()" not in drainage:
+            fautes.append(
+                "net/mod.rs : le drainage verrouille n'execute plus les "
+                "reparations armees. Personne d'autre n'a le droit de le faire "
+                "-- le veilleur de lien et le peripherique smoltcp ne tiennent "
+                "pas le verrou --, et une reception morte le resterait."
+            )
 
     anneau = lit(ANNEAU, fautes)
     if anneau is not None:
