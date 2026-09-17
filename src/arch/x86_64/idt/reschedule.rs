@@ -30,6 +30,7 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     }
 
     let mut preempt_now = false;
+    let mut preempt_ciblee = false;
     {
         let _site = crate::kernel::task::SiteIrq::enter(30, 0);
         crate::kernel::task::stall_site_set(31, 0);
@@ -65,11 +66,39 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
                 preempt_now = true;
             } else if !crate::kernel::task::current_is_kernel_task() {
                 crate::kernel::task::request_deferred_preempt();
+            } else if crate::kernel::scheduler::preempt::accorde_preemption_noyau() {
+                // BOUCHAUD_P0_REVEIL_CIBLE_V1 -- LA DEUXIEME EXCLUSION
+                //
+                // Cette branche n'existait pas. Quand l'IPI interrompait une
+                // tache NOYAU, le gestionnaire ne faisait RIEN : ni
+                // commutation, ni meme demande differee. Le reveil tombait,
+                // sans compteur et sans trace.
+                //
+                // Il ne suffisait pas de poser `request_deferred_preempt` :
+                // un fil noyau n'atteint aucun point sur -- les huit sites
+                // existants sont tous sur le chemin des appels systeme --, et
+                // la demande serait restee pendante pour toujours.
+                //
+                // `accorde_preemption_noyau` n'ouvre ce chemin que pour une
+                // demande CIBLEE, posee par la politique de reveil pour une
+                // tache qui declare `latency_sensitive` et qui est restee sous
+                // son budget, et seulement quand le contexte est verifie sur :
+                // aucun verrou, aucune section rangee, aucune IRQ imbriquee.
+                //
+                // `preempt_from_irq` ne lit rien de la tache sortante que
+                // `switch_to` ne lise aussi. Commuter un fil noyau depuis une
+                // IRQ, ces conditions verifiees, est la MEME operation que le
+                // `schedule()` qu'il appelle lui-meme a chaque milliseconde
+                // dans `sleep_ticks`.
+                preempt_now = true;
+                preempt_ciblee = true;
+            } else {
+                crate::kernel::task::request_deferred_preempt();
             }
         }
     }
 
     if preempt_now {
-        dispatch_irq_preempt(PREEMPT_SOURCE_RESCHEDULE);
+        dispatch_irq_preempt(PREEMPT_SOURCE_RESCHEDULE, preempt_ciblee);
     }
 }

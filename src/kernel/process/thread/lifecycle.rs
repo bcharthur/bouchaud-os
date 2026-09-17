@@ -358,7 +358,44 @@ pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
 /// ne peut pas etre mise a l'epreuve : sans deux classes reellement en
 /// concurrence, rien ne dit si `Interactive` change une decision ou n'est
 /// qu'une etiquette.
+/// Lance un travailleur noyau SENSIBLE A LA LATENCE.
+///
+/// # Ce que cette propriete donne, et ce qu'elle ne donne pas
+///
+/// Elle NE DONNE PAS une priorite permanente. `Priorite::Interactive` dit
+/// « sers-moi avant le fond de file quand nous sommes tous deux prets » ;
+/// `latency_sensitive` dit autre chose : « le delai entre mon reveil et mon
+/// election doit rester court ». Les deux sont orthogonaux, et c'est le second
+/// qui manquait -- une tache interactive publiee sur un coeur occupe par un
+/// fil noyau n'avait, avant ce lot, aucun chemin vers le processeur.
+///
+/// Concretement, la tache obtient :
+///
+///   * un PLACEMENT au reveil : le coeur qui la servira le plus tot, un coeur
+///     au repos de preference ;
+///   * le droit de COUPER l'occupant du coeur choisi, fil noyau compris.
+///
+/// Les deux sont bornes par `scheduler::reveil::BUDGET_ACTIVATION_NS` : une
+/// activation qui depasse la borne desarme le privilege jusqu'a ce que la
+/// suivante repasse dessous. FAIBLE BUDGET, FORTE EXIGENCE DE REVEIL.
+///
+/// Le scheduler ne connait AUCUN nom de tache. L'entree USB la demande
+/// aujourd'hui ; l'audio, le compositeur et tout service temps reel souple la
+/// demanderont par le meme appel.
+pub fn spawn_noyau_sensible(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
+    spawn_noyau_interne(entree, nom, priorite, true)
+}
+
 pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
+    spawn_noyau_interne(entree, nom, priorite, false)
+}
+
+fn spawn_noyau_interne(
+    entree: fn() -> !,
+    nom: &str,
+    priorite: Priorite,
+    latency_sensitive: bool,
+) -> bool {
     // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
     //
     // `run_noyau` en prend un parce qu'il COMMUTE : il touche l'etat du coeur
@@ -396,6 +433,7 @@ pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) ->
     // zero : il n'a ni pile heritee, ni etat local de coeur, ni contexte
     // d'appelant. Il se declare donc migrable.
     task.migrable = true;
+    task.latency_sensitive.range(latency_sensitive);
     register(task);
     true
 }

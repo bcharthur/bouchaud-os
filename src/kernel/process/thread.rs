@@ -54,6 +54,12 @@ use crate::kernel::vmm::AddressSpace;
 use crate::kernel::sync::{SpinLock, SpinLockGuard, SpinLockIrq};
 use crate::kernel::sync::{RankedSpinLock, RankedSpinLockGuard};
 use crate::kernel::sync::lockdep::LockClass;
+// BOUCHAUD_P0_REVEIL_CIBLE_V1 : la politique de reveil est un module PUR, et
+// ces alias disent d'ou elle vient sans allonger chaque site d'appel.
+use crate::kernel::scheduler::reveil::{
+    Classe as ReveilClasse, Coeur as ReveilCoeur, Decision as ReveilDecision,
+    Reveille as ReveilTache, Selection as ReveilSelection,
+};
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 
 // BOUCHAUD_FINAL_V11C_DEEP_FRAGMENTATION

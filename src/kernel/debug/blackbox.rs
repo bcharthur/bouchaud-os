@@ -535,6 +535,7 @@ fn sample(ts_ns: u64) {
     let chrono = crate::drivers::xhci_active::chrono_hid();
     let tambour = BOBINE.etat();
     let verrou = crate::drivers::xhci_active::etat_du_verrou();
+    let reveil = crate::kernel::scheduler::preempt::stats_reveil();
     let (perdus, retard, produit) = journal_serie();
 
     let _ = write!(
@@ -559,6 +560,19 @@ fn sample(ts_ns: u64) {
             "hid_poll_body_max_us={} hid_responsable={} ",
             "hid_lock_fail_total={} hid_lock_fail_streak_max={} ",
             "hid_lock_fail_owner=[{},{},{},{},{},{},{}] hid_tours={} ",
+            // LE REVEIL, ET CE QU'IL A FALLU POUR L'OBTENIR.
+            //
+            // `hid_wake_to_run_max_us` dit COMBIEN une tache sensible a
+            // attendu. Ces compteurs-ci disent POURQUOI elle ne l'a pas
+            // attendu davantage : combien de fois le coeur choisi dormait
+            // (`reveil_immediats`), combien de fois il a fallu couper son
+            // occupant (`reveil_cibles`), et combien de ces coupes ont ete
+            // REFUSEES faute de contexte sur (`reveil_refus`). Un refus qui
+            // grimpe sans que l'attente bouge est normal -- le balayage de
+            // quantum reessaie ; un refus qui grimpe AVEC l'attente designe
+            // un verrou tenu trop longtemps, et le nomme.
+            "reveil_immediats={} reveil_cibles={} reveil_differes={} reveil_en_file={} ",
+            "reveil_ipi={} reveil_preempt_noyau={} reveil_refus={} reveil_deplaces={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
             "bb_busy_skips={} bb_filets={} bb_last_ok_ns={} ",
             // LE TAMBOUR RAM, DANS CHAQUE ECHANTILLON.
@@ -602,6 +616,9 @@ fn sample(ts_ns: u64) {
         chrono.lock_fail_owner[2], chrono.lock_fail_owner[3],
         chrono.lock_fail_owner[4], chrono.lock_fail_owner[5],
         chrono.lock_fail_owner[6], chrono.tours,
+        reveil.immediats, reveil.cibles, reveil.differes, reveil.en_file,
+        reveil.ipi_envoyes, reveil.preemptions_noyau, reveil.preemptions_noyau_refusees,
+        reveil.placements_deplaces,
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
         bb_busy_skips, FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
         tambour.reserves, tambour.poses, tambour.ecrases, tambour.perdus, tambour.refuses,

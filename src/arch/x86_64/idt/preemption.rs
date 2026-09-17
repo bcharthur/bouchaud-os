@@ -52,20 +52,42 @@ fn preempt_source_name(source: u8) -> &'static str {
     }
 }
 
+// BOUCHAUD_P0_REVEIL_CIBLE_V1
+//
+// Nombre de commutations directes effectuees sur le BSP au titre d'une demande
+// CIBLEE, c'est-a-dire malgre le report diagnostic V8.
+static PREEMPT_IRQ_BSP_CIBLEES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// IDT-owned boundary around task::preempt_from_irq().
 ///
 /// Important: a direct call can switch stacks and only return when the
 /// *preempted* IRQ continuation is scheduled again. Therefore `continuation_ns`
 /// is not a BKL hold duration. The BKL code must be read separately. What this
 /// lifetime tells us is whether an IRQ continuation is still outstanding.
+///
+/// `force` : cette commutation sert une demande CIBLEE.
+///
+/// Le report V8 du BSP repond a une question precise -- la preemption directe
+/// d'une tache UTILISATEUR depuis une IRQ materielle sur le coeur zero est-elle
+/// la source des figements ? -- et son commentaire dit lui-meme qu'il n'est
+/// pas la politique finale. Une demande ciblee n'est pas ce cas : elle ne
+/// concerne qu'un fil noyau, elle a deja traverse `preemption_noyau_sure`, et
+/// la refuser sur le coeur zero rouvrirait exactement le trou que ce lot
+/// ferme -- un fil noyau sur le BSP n'atteint aucun point sur et ne cede
+/// jamais.
 #[inline]
-fn dispatch_irq_preempt(source: u8) {
+fn dispatch_irq_preempt(source: u8, force: bool) {
     use core::sync::atomic::Ordering;
 
     PREEMPT_IRQ_REQUESTS.fetch_add(1, Ordering::Relaxed);
     let cpu = crate::arch::x86_64::cpu::hardware_cpu_index();
 
-    if cpu == 0 && BSP_DEFER_DIRECT_IRQ_PREEMPT_V8 {
+    if force && cpu == 0 {
+        PREEMPT_IRQ_BSP_CIBLEES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if cpu == 0 && BSP_DEFER_DIRECT_IRQ_PREEMPT_V8 && !force {
         PREEMPT_IRQ_BSP_DEFERRED.fetch_add(1, Ordering::Relaxed);
         crate::kernel::task::request_deferred_preempt();
 
@@ -105,8 +127,9 @@ pub fn log_preempt_irq_diagnostic() {
     let provenance = crate::kernel::smp_lock::stall_probe_provenance();
 
     crate::serial_println!(
-        "[PREEMPT-IRQ] bsp_defer={} requests={} direct={}/{} bsp_deferred={} site_clears={} continuation_max_ns={} bkl_owner={} bkl_cpu={} bkl_site={} bkl_kind={}",
+        "[PREEMPT-IRQ] bsp_defer={} bsp_ciblees={} requests={} direct={}/{} bsp_deferred={} site_clears={} continuation_max_ns={} bkl_owner={} bkl_cpu={} bkl_site={} bkl_kind={}",
         BSP_DEFER_DIRECT_IRQ_PREEMPT_V8 as u8,
+        PREEMPT_IRQ_BSP_CIBLEES.load(Ordering::Relaxed),
         PREEMPT_IRQ_REQUESTS.load(Ordering::Relaxed),
         PREEMPT_IRQ_DIRECT_CALLS.load(Ordering::Relaxed),
         PREEMPT_IRQ_DIRECT_RETURNS.load(Ordering::Relaxed),

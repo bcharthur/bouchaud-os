@@ -64,6 +64,36 @@ pub const INJECTIONS_ARMEES: bool = match option_env!("BOUCHAUD_BANC_INJECTIONS"
     None => true,
 };
 
+/// BOUCHAUD_P0_REVEIL_CIBLE_V1 -- LA CHARGE QUI MANQUAIT
+///
+/// Nombre de fils NOYAU de calcul qui ne rendent jamais la main.
+///
+/// # Pourquoi ce banc n'a jamais vu le defaut d'ordonnancement
+///
+/// Le banc precedent tourne avec deux fils et seize coeurs virtuels : chaque
+/// tache possede un coeur, ne se bloque jamais derriere une autre, et
+/// `publish_ready` n'est appele qu'une poignee de fois en deux minutes. La
+/// campagne du 17 septembre le dit en chiffres -- cinq reveils immediats pour
+/// cent vingt secondes. Une machine ou personne ne se dispute un coeur ne peut
+/// pas reproduire une attente de six secondes pour obtenir un coeur.
+///
+/// Ces fils-la fabriquent la situation physique : autant de calculs noyau que
+/// de coeurs, de classe `Interactive`, qui n'appellent JAMAIS `schedule()`.
+/// C'est exactement ce que le releve TRIGKEY montre autour de `usb-hid`.
+///
+/// Zero par defaut : le banc d'endurance mesure une duree, pas une latence, et
+/// n'a rien a faire de seize fils qui tournent.
+pub const FILS_CPU: usize = match option_env!("BOUCHAUD_BANC_CHARGE_CPU") {
+    Some(v) => match usize::from_str_radix(v, 10) {
+        Ok(n) if n <= 64 => n,
+        _ => 0,
+    },
+    None => 0,
+};
+
+static TOURS_CPU: AtomicU64 = AtomicU64::new(0);
+static FILS_CPU_VIVANTS: AtomicU64 = AtomicU64::new(0);
+
 static BLOCS_LUS: AtomicU64 = AtomicU64::new(0);
 static LECTURES: AtomicU64 = AtomicU64::new(0);
 static ECHECS: AtomicU64 = AtomicU64::new(0);
@@ -82,7 +112,57 @@ pub fn demarre() {
         INJECTION_DONNEES_S, INJECTION_STATUT_S, INJECTION_VERROU_S,
     );
     crate::kernel::task::spawn_noyau(fil_charge, "banc-io-charge");
-    crate::kernel::task::spawn_noyau(fil_arbitre, "banc-io-arbitre");
+    // L'ARBITRE EST SENSIBLE A LA LATENCE, ET CE N'EST PAS UN ARTIFICE.
+    //
+    // Il se reveille une fois par periode pour lire une horloge et armer une
+    // panne : quelques microsecondes de budget, et une exigence de reveil
+    // stricte -- un arbitre qui se reveille avec six secondes de retard arme
+    // ses pannes au mauvais moment et n'eteint jamais la machine.
+    //
+    // C'est aussi ce qui rend le banc CONCLUANT quand `FILS_CPU` occupe tous
+    // les coeurs : sans cette propriete, l'arbitre subirait exactement la
+    // famine qu'on mesure, et le banc ne rendrait aucun verdict du tout.
+    // Deux taches sensibles en meme temps mettent de surcroit a l'epreuve la
+    // tranche minimale qui les empeche de se couper l'une l'autre.
+    crate::kernel::task::spawn_noyau_sensible(
+        fil_arbitre,
+        "banc-io-arbitre",
+        crate::kernel::task::Priorite::Interactive,
+    );
+    for _ in 0..FILS_CPU {
+        if crate::kernel::task::spawn_noyau_priorite(
+            fil_cpu,
+            "banc-io-cpu",
+            crate::kernel::task::Priorite::Interactive,
+        ) {
+            FILS_CPU_VIVANTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Un calcul noyau qui ne rend JAMAIS la main.
+///
+/// Il n'appelle ni `sleep_ticks`, ni `schedule`, ni rien qui cede : c'est le
+/// point. Avant ce lot, un tel fil rendait son coeur inatteignable -- aucun
+/// IPI de publication (le coeur ne dort pas), aucun IPI de quantum (le masque
+/// exclut les fils noyau), aucun point sur (il n'y en a pas dans un fil
+/// noyau), aucun voleur (la pression ne comptait que le fond de file).
+fn fil_cpu() -> ! {
+    let mut graine: u64 = 0x9E37_79B9_7F4A_7C15;
+    loop {
+        // Un bloc de calcul, puis une lecture atomique. Pas de `sleep_ticks` :
+        // ce fil doit ETRE le probleme, pas le contourner.
+        for _ in 0..4096 {
+            graine = graine
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            core::hint::black_box(graine);
+        }
+        TOURS_CPU.fetch_add(1, Ordering::Relaxed);
+        if ARRET_DEMANDE.load(Ordering::Acquire) {
+            crate::kernel::task::sleep_ticks(1000);
+        }
+    }
 }
 
 /// Lit le volume USB en boucle, comme le chargeur du navigateur.
@@ -198,12 +278,17 @@ fn verdict(depart: u64) {
     let tambour = crate::kernel::blackbox::tambour();
     let trames = crate::gui::frame_clock::snapshot();
     let (_, injections_consommees) = crate::drivers::xhci_active::injections();
+    let reveil = crate::kernel::scheduler::preempt::stats_reveil();
     crate::serial_println!(
         "BOUCHAUD_BANC_IO_VERDICT ecoule_s={} lectures={} blocs_lus={} echecs_lecture={} \
 hid_poll_gap_max_ms={} hid_poll_gap_verdict={} hid_poll_gap_cible_ms={} hid_poll_gap_defaut_ms={} \
-hid_wake_to_run_max_us={} hid_run_to_lock_max_us={} hid_lock_starve_max_us={} hid_poll_body_max_us={} hid_responsable={} \
+hid_wake_to_run_max_us={} hid_wake_verdict={} hid_wake_cible_us={} hid_wake_defaut_us={} \
+hid_run_to_lock_max_us={} hid_lock_starve_max_us={} hid_poll_body_max_us={} hid_responsable={} \
 hid_lock_fail_total={} hid_lock_fail_streak_max={} hid_lock_fail_owner_fs={} hid_lock_fail_owner_repli={} \
 tourniquet_reservations={} tourniquet_refus={} tourniquet_expirations={} \
+charge_cpu_fils={} charge_cpu_tours={} \
+reveil_immediats={} reveil_cibles={} reveil_differes={} reveil_ipi={} \
+reveil_preempt_noyau={} reveil_refus={} reveil_deplaces={} \
 runtime_owner={} runtime_max_hold_ns={} runtime_max_owner={} \
 runtime_acquisitions={} runtime_contentions={} runtime_timeouts={} \
 blackbox_ram_records={} blackbox_ram_overwrites={} blackbox_ram_lost={} blackbox_ram_refuses={} \
@@ -217,11 +302,20 @@ bot_refus={} bot_rejouees={} injections_consommees={} wm_heartbeat={} wm_frames=
         crate::drivers::xhci_active::verdict_ecart_hid(ecart_max / 1_000_000),
         crate::drivers::xhci_active::ECART_HID_CIBLE_MS,
         crate::drivers::xhci_active::ECART_HID_DEFAUT_MS,
-        chrono.wake_to_run_max_us, chrono.run_to_lock_max_us,
+        chrono.wake_to_run_max_us,
+        crate::drivers::xhci_active::verdict_reveil_hid(chrono.wake_to_run_max_us),
+        crate::drivers::xhci_active::REVEIL_HID_CIBLE_US,
+        crate::drivers::xhci_active::REVEIL_HID_DEFAUT_US,
+        chrono.run_to_lock_max_us,
         chrono.lock_starve_max_us, chrono.poll_body_max_us, chrono.responsable(),
         chrono.lock_fail_total, chrono.lock_fail_streak_max,
         chrono.lock_fail_owner[3], chrono.lock_fail_owner[2],
         tourniquet.0, tourniquet.1, tourniquet.2,
+        FILS_CPU_VIVANTS.load(Ordering::Relaxed),
+        TOURS_CPU.load(Ordering::Relaxed),
+        reveil.immediats, reveil.cibles, reveil.differes, reveil.ipi_envoyes,
+        reveil.preemptions_noyau, reveil.preemptions_noyau_refusees,
+        reveil.placements_deplaces,
         verrou.proprietaire.nom(),
         verrou.tenue_max_ns,
         verrou.tenue_max_proprietaire.nom(),

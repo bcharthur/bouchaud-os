@@ -152,6 +152,26 @@ pub struct CpuLocal {
     need_resched: AtomicBool,
     irq_depth: AtomicU32,
     preempt_count: AtomicU32,
+    // BOUCHAUD_P0_REVEIL_CIBLE_V1
+    //
+    // VERROUS TOURNANTS SIMPLES TENUS PAR CE COEUR.
+    //
+    // `SpinLock` ne masque pas les interruptions et ne s'annonce pas a
+    // `lockdep` : rien, dans l'etat du coeur, ne disait qu'il en tenait un.
+    // Cela n'a jamais eu d'importance tant qu'aucune IRQ ne pouvait commuter
+    // un fil noyau -- ce qui vient de changer.
+    //
+    // Preempter un porteur de verrou tournant simple est un INTERBLOCAGE : la
+    // tache entrante qui demande le meme verrou tourne sur ce coeur, la
+    // sortante est prete mais n'a plus de coeur pour rendre le verrou, et
+    // l'attente est active, donc sans fin.
+    //
+    // Ce compteur n'est pas `preempt_count` : celui-la a une assertion de
+    // sous-depassement et une semantique que d'autres chemins possedent deja.
+    // Celui-ci se rend sur le coeur ou il a ete pris -- le verrou garde son
+    // proprietaire -- et sa soustraction sature. Une derive ne peut donc ni
+    // paniquer ni rendre un coeur definitivement impreemptible.
+    verrous_simples: AtomicU32,
 // BOUCHAUD_C2_FILE_O1_V1
     //
     // POURQUOI PLUS AUCUN VERROU ICI
@@ -210,6 +230,7 @@ impl CpuLocal {
             need_resched: AtomicBool::new(false),
             irq_depth: AtomicU32::new(0),
             preempt_count: AtomicU32::new(0),
+            verrous_simples: AtomicU32::new(0),
             run_queue: FileCpu::neuve(),
             context_switches: AtomicU64::new(0),
             migrations: AtomicU64::new(0),
@@ -263,6 +284,23 @@ impl CpuLocal {
 
     pub fn preempt_count(&self) -> u32 {
         self.preempt_count.load(Ordering::Relaxed)
+    }
+
+    pub fn verrou_simple_pris(&self) {
+        self.verrous_simples.fetch_add(1, Ordering::Release);
+    }
+
+    /// Soustraction SATURANTE : voir le commentaire du champ.
+    pub fn verrou_simple_rendu(&self) {
+        let _ = self.verrous_simples.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+
+    pub fn verrous_simples(&self) -> u32 {
+        self.verrous_simples.load(Ordering::Acquire)
     }
 
     /// Met une IDENTITE en file, dans la bande donnee.
@@ -334,6 +372,12 @@ impl CpuLocal {
     pub fn pression_volable(&self) -> usize {
         self.run_queue.pression_volable()
     }
+
+    /// Les deux bandes en attente : (interactives, normales).
+    pub fn attente_file(&self) -> (usize, usize) {
+        self.run_queue.attente()
+    }
+
 
     pub fn compteurs_file(&self) -> CompteursFile {
         self.run_queue.compteurs()

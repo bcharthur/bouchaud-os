@@ -185,6 +185,16 @@ impl<T: ?Sized> SpinLock<T> {
             cpu
         );
 
+        // LA MARQUE EST POSEE AVANT LA PRISE, ET C'EST L'ORDRE QUI COMPTE.
+        //
+        // La poser apres laisserait une fenetre d'une instruction ou le verrou
+        // est tenu et le coeur encore declare preemptible -- assez pour une
+        // IRQ, qui est precisement ce contre quoi elle protege. La poser avant
+        // rend un coeur QUI TOURNE non preemptible : c'est sans danger, il ne
+        // detient rien, et cela ne coute qu'un report d'un quantum a une
+        // demande ciblee qui le viserait.
+        marque_verrou_simple_pris(cpu);
+
         let verrou = self as *const Self as *const () as usize;
         let mut tours = 0u32;
         let mut signale_publie = false;
@@ -234,6 +244,7 @@ impl<T: ?Sized> SpinLock<T> {
             return None;
         }
 
+        marque_verrou_simple_pris(cpu);
         if self
             .locked
             .compare_exchange(
@@ -244,6 +255,7 @@ impl<T: ?Sized> SpinLock<T> {
             )
             .is_err()
         {
+            marque_verrou_simple_rendu(cpu);
             return None;
         }
 
@@ -279,10 +291,42 @@ impl<T: ?Sized> DerefMut for SpinLockGuard<'_, T> {
     }
 }
 
+/// BOUCHAUD_P0_REVEIL_CIBLE_V1
+///
+/// UN COEUR QUI TIENT UN VERROU TOURNANT SIMPLE NE PEUT PAS ETRE PREEMPTE.
+///
+/// `SpinLock` ne masque pas les interruptions et ne s'annonce pas a `lockdep` :
+/// rien ne disait, depuis l'etat du coeur, qu'il en tenait un. Cela n'avait
+/// aucune importance tant qu'aucune interruption ne pouvait commuter un fil
+/// noyau. La preemption ciblee du reveil vient d'ouvrir ce chemin, et sans ce
+/// compteur elle pourrait couper un porteur de verrou : la tache entrante
+/// demanderait le meme verrou, tournerait dessus SUR CE COEUR, et la sortante
+/// serait prete sans coeur pour le rendre. Une attente active, donc sans fin.
+///
+/// Le compteur est rendu sur le coeur ou il a ete pris -- `owner_cpu` le dit --
+/// et non sur le coeur courant : une tache qui aurait migre entre les deux ne
+/// peut pas laisser un coeur marque pour toujours.
+#[inline]
+fn marque_verrou_simple_pris(cpu: usize) {
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+        crate::arch::x86_64::cpu_local::local(id).verrou_simple_pris();
+    }
+}
+
+#[inline]
+fn marque_verrou_simple_rendu(cpu: usize) {
+    if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) {
+        crate::arch::x86_64::cpu_local::local(id).verrou_simple_rendu();
+    }
+}
+
 impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.owner_cpu.store(NO_OWNER, Ordering::Relaxed);
+        let proprietaire = self.lock.owner_cpu.swap(NO_OWNER, Ordering::Relaxed);
         self.lock.locked.store(false, Ordering::Release);
+        if proprietaire != NO_OWNER {
+            marque_verrou_simple_rendu(proprietaire);
+        }
     }
 }
 

@@ -893,6 +893,20 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 k.wake_to_run_max_us, k.run_to_lock_max_us, k.lock_starve_max_us, k.poll_body_max_us,
                 k.responsable(),
             );
+            // LE CRITERE D'ACCEPTATION DE L'ORDONNANCEUR, SUR LA MACHINE.
+            crate::println!(
+                "  reveil->tour : {} us -> {} (cible <= {} us, defaut > {} us)",
+                k.wake_to_run_max_us,
+                crate::drivers::xhci_active::verdict_reveil_hid(k.wake_to_run_max_us),
+                crate::drivers::xhci_active::REVEIL_HID_CIBLE_US,
+                crate::drivers::xhci_active::REVEIL_HID_DEFAUT_US,
+            );
+            let r = crate::kernel::scheduler::preempt::stats_reveil();
+            crate::println!(
+                "  reveils : {} immediats, {} cibles ({} preemptions noyau, {} refus), {} differes, {} deplaces",
+                r.immediats, r.cibles, r.preemptions_noyau, r.preemptions_noyau_refusees,
+                r.differes, r.placements_deplaces,
+            );
             crate::println!(
                 "  verrou refuse {} fois (pire serie {}) sur {} tours | par proprietaire : hid {} repli {} fs {} bb {} enum {} diag {}",
                 k.lock_fail_total, k.lock_fail_streak_max, k.tours,

@@ -340,8 +340,20 @@ fn l_assertion_de_recursion_du_verrou_tournant_reste_en_place() {
         "l'assertion de recursion ne doit jamais etre retiree pour faire taire \
          un panic : elle est le seul temoin de ce genre de faute"
     );
+    // LA PROPRIETE, PAS LA FORME DE L'APPEL.
+    //
+    // Le relachement lit desormais le proprietaire avant de l'effacer -- un
+    // `swap` et non un `store` --, parce que la marque « ce coeur tient un
+    // verrou tournant simple » doit etre rendue au coeur qui l'a POSEE, et non
+    // au coeur courant : une tache qui aurait migre entre les deux laisserait
+    // sinon un coeur marque pour toujours, donc impreemptible.
+    //
+    // Ce que ce test defend est inchange : le proprietaire est efface au
+    // relachement, sans quoi l'assertion de recursion produirait des faux
+    // positifs sur deux prises sequentielles.
     assert!(
-        SOURCE.contains("self.lock.owner_cpu.store(NO_OWNER"),
+        SOURCE.contains("self.lock.owner_cpu.store(NO_OWNER")
+            || SOURCE.contains("self.lock.owner_cpu.swap(NO_OWNER"),
         "le proprietaire doit etre efface au relachement, sinon l'assertion \
          produirait des faux positifs sur deux prises sequentielles"
     );

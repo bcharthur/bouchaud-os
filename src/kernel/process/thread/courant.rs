@@ -25,6 +25,40 @@ fn set_current_is_kernel(value: bool) {
     CURRENT_IS_KERNEL[local_cpu()].store(value, Ordering::Release);
 }
 
+/// Publie le profil de la tache que ce coeur vient d'installer.
+#[inline]
+fn set_current_profil(sensible: bool, interactive: bool, depuis_ns: u64) {
+    let cpu = local_cpu();
+    CURRENT_SENSIBLE[cpu].store(sensible, Ordering::Release);
+    CURRENT_INTERACTIVE[cpu].store(interactive, Ordering::Release);
+    CURRENT_DEPUIS_NS[cpu].store(depuis_ns, Ordering::Release);
+}
+
+/// Ce coeur n'execute plus de tache.
+#[inline]
+fn efface_current_profil() {
+    let cpu = local_cpu();
+    CURRENT_SENSIBLE[cpu].store(false, Ordering::Release);
+    CURRENT_INTERACTIVE[cpu].store(false, Ordering::Release);
+    CURRENT_DEPUIS_NS[cpu].store(0, Ordering::Release);
+}
+
+/// L'occupant d'un coeur, vu depuis n'importe quel autre : sensible a la
+/// latence, interactif, et depuis quand il tient le coeur.
+///
+/// Trois lectures atomiques. AUCUN acces a la table des taches : ce chemin
+/// s'execute aussi depuis une IRQ, sur un coeur qui n'est pas celui-la.
+pub fn profil_occupant(cpu: usize) -> (bool, bool, u64) {
+    if cpu >= MAX_CPUS {
+        return (false, false, 0);
+    }
+    (
+        CURRENT_SENSIBLE[cpu].load(Ordering::Acquire),
+        CURRENT_INTERACTIVE[cpu].load(Ordering::Acquire),
+        CURRENT_DEPUIS_NS[cpu].load(Ordering::Acquire),
+    )
+}
+
 #[inline]
 fn kernel_ctx() -> &'static mut Context {
     unsafe { &mut KERNEL_CTX[local_cpu()] }
@@ -315,6 +349,20 @@ pub fn in_user_task() -> bool {
 /// The BSP timer reads only atomics here, before any BKL attempt.
 /// Idle CPUs and kernel threads are excluded. A user task temporarily inside a
 /// syscall remains included so it can still receive its periodic quantum.
+///
+/// BOUCHAUD_P0_REVEIL_CIBLE_V1 -- LE TROU QUE CETTE EXCLUSION OUVRAIT
+///
+/// « Les fils noyau sont exclus » etait la troisieme des trois exclusions qui
+/// laissaient une tache prete sans aucun chemin vers le processeur : un coeur
+/// occupe par un fil noyau ne recevait jamais d'IPI periodique, donc ne
+/// reexaminait jamais son `need_resched`.
+///
+/// L'exclusion reste -- un fil noyau qui travaille seul n'a aucune raison
+/// d'etre interrompu quatre fois par seconde --, mais elle ne s'applique plus
+/// aux coeurs ou une DEMANDE CIBLEE est pendante. Le masque en gagne un
+/// pendant exactement le temps qu'une tache sensible y attend, et c'est ce qui
+/// donne a une preemption refusee -- verrou tenu au moment de l'IPI -- une
+/// seconde chance au quantum suivant plutot qu'a la prochaine publication.
 pub fn running_user_cpu_mask() -> u64 {
     let online = smp::schedulable_cpus().min(MAX_CPUS).min(64);
     let mut mask = 0u64;
@@ -329,7 +377,7 @@ pub fn running_user_cpu_mask() -> u64 {
         cpu += 1;
     }
 
-    mask
+    mask | crate::kernel::scheduler::preempt::masque_cible()
 }
 
 /// Tache courante du CPU local.

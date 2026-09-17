@@ -52,6 +52,8 @@ impl Task {
             ticks_cpu: EcheanceAtomique::neuf(0),
             noyau: false,
             migrable: false,
+            latency_sensitive: DrapeauAtomique::neuf(false),
+            budget_reveil_ns: EcheanceAtomique::neuf(0),
             entree_noyau: None,
         });
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);
@@ -212,11 +214,24 @@ fn queue_pressure(cpu_id: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Ce qu'un voleur peut prendre a ce CPU sans deplacer une tache interactive.
+/// Ce qu'un voleur peut prendre a ce CPU.
+///
+/// BOUCHAUD_P0_REVEIL_CIBLE_V1 : les DEUX bandes, et non la normale seule.
+///
+/// La regle precedente -- « ne jamais rendre un coeur candidat pour une tache
+/// interactive, une migration lui couterait sa reponse » -- protege un cas qui
+/// n'existe que si la tache finit par etre elue. Une interactive derriere un
+/// fil noyau ne l'est pas : elle a attendu 6,78 s sur le releve TRIGKEY. Le
+/// cache froid d'une migration se compte en microsecondes.
+///
+/// `FileCpu::vole` sert toujours la bande NORMALE en premier : le travail de
+/// fond reste ce qui se deplace le mieux. Seule la condition d'etre EXAMINE
+/// change.
 fn pression_volable(cpu_id: usize) -> usize {
-    crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
-        .map(|id| crate::arch::x86_64::cpu_local::local(id).pression_volable())
-        .unwrap_or(0)
+    let (interactives, normales) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu_id)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+        .unwrap_or((0, 0));
+    crate::kernel::scheduler::reveil::pression_de_secours(interactives, normales)
 }
 
 fn choose_runq_cpu(mask: u64) -> u8 {
@@ -238,23 +253,109 @@ fn choose_runq_cpu(mask: u64) -> u8 {
     best_cpu as u8
 }
 
-/// Publish a Ready task exactly once to its owning physical runqueue.
-/// P0-NG1 additionally timestamps the ready edge and requests a safe-point on
-/// the target CPU. The target IPI is still sent only when that CPU is idle; a
-/// running CPU consumes `need_resched` at its next safe kernel boundary.
+/// L'etat d'un coeur pour la politique de reveil, en lectures ATOMIQUES.
+///
+/// Aucun acces a la table des taches : ce chemin s'execute aussi depuis une
+/// IRQ, sur un coeur qui n'est pas celui qu'on interroge.
+fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> ReveilCoeur {
+    let en_ligne = cpu < smp::schedulable_cpus().min(MAX_CPUS);
+    let (sensible, interactive, depuis_ns) = crate::kernel::task::profil_occupant(cpu);
+    let (attente_interactive, attente_normale) =
+        crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+            .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+            .unwrap_or((0, 0));
+    ReveilCoeur {
+        en_ligne,
+        autorise: cpu < 64 && masque_affinite & (1u64 << cpu) != 0,
+        inactif: cpu::is_idle(cpu),
+        occupant_sensible: sensible,
+        occupant_classe: if interactive { ReveilClasse::Interactive } else { ReveilClasse::Normale },
+        residence_ns: if depuis_ns == 0 { 0 } else { maintenant_ns.saturating_sub(depuis_ns) },
+        attente_interactive,
+        attente_normale,
+    }
+}
+
+/// Publie une tache prete, exactement une fois, dans une runqueue physique.
+///
+/// # BOUCHAUD_P0_REVEIL_CIBLE_V1 -- ce que cette fonction faisait, et ce que
+/// cela coutait
+///
+/// Elle posait la tache sur son COEUR PRECEDENT, quelle que soit sa charge, et
+/// n'envoyait l'IPI de replanification que si ce coeur DORMAIT. Un coeur
+/// occupe ne recevait qu'un `need_resched` differe -- lequel n'est servi par
+/// AUCUN des trois mecanismes du systeme quand l'occupant est une tache noyau
+/// (cf. `scheduler::reveil`). Aucun voleur ne venait non plus : la pression
+/// volable ne comptait que la bande normale.
+///
+/// Releve TRIGKEY : `hid_wake_to_run_max_us = 6782927`, pour un corps de
+/// scrutation de 162 us et une prise de verrou de 2 us.
+///
+/// Trois changements, dans cet ordre de preference :
+///
+///   1. LE PLACEMENT. Une tache qui declare `latency_sensitive` est posee sur
+///      le coeur qui la servira le plus tot -- un coeur au repos si la machine
+///      en a un, et sur seize coeurs elle en a presque toujours. Cela ne coute
+///      une commutation a personne.
+///   2. LA DECISION. L'etat du coeur est relu APRES la mise en file et APRES
+///      la barriere -- l'ordre du motif croise n'est pas touche -- et la
+///      politique dit alors s'il faut un IPI, une demande ciblee, ou rien.
+///   3. LA DEMANDE CIBLEE. Elle seule ouvre la preemption d'un fil noyau, et
+///      seulement pour une tache sensible restee sous son budget.
 fn publish_ready(index: usize) {
     if index >= tasks().len() || tasks()[index].state != TaskState::Ready
         || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
     { return; }
 
+    let maintenant = crate::kernel::timer::monotonic_ns();
     if tasks()[index].ready_since_ns == 0 {
-        tasks()[index].ready_since_ns.range(crate::kernel::timer::monotonic_ns());
+        tasks()[index].ready_since_ns.range(maintenant);
     }
-    let target = if allowed_on(&tasks()[index], tasks()[index].runq_cpu.charge() as usize) {
-        tasks()[index].runq_cpu.charge() as usize
+
+    // LE BUDGET EST LU ET REMIS A ZERO ICI, ET NULLE PART AILLEURS.
+    //
+    // Sa valeur au moment d'une publication est donc exactement ce que
+    // l'activation PRECEDENTE a consomme. Une tache periodique qui fait 162 us
+    // par tour reste sous la borne ; une tache qui se met a calculer la
+    // depasse et perd son privilege des le tour suivant. Aucun crochet a poser
+    // sur les chemins de blocage : le point de lecture est le point de remise
+    // a zero.
+    let reveille = ReveilTache {
+        classe: match tasks()[index].priorite.charge() {
+            Priorite::Interactive => ReveilClasse::Interactive,
+            Priorite::Normale => ReveilClasse::Normale,
+        },
+        sensible: tasks()[index].latency_sensitive.charge(),
+        consomme_ns: tasks()[index].budget_reveil_ns.echange(0),
+    };
+
+    let precedent = tasks()[index].runq_cpu.charge() as usize;
+    let historique = if allowed_on(&tasks()[index], precedent) {
+        precedent
     } else {
         choose_runq_cpu(tasks()[index].affinity_mask) as usize
     };
+
+    let target = if reveille.privilegiee() {
+        let masque = tasks()[index].affinity_mask;
+        let en_ligne = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+        let mut selection = ReveilSelection::neuve(precedent, true);
+        for cpu_id in 0..en_ligne {
+            selection.propose(cpu_id, &etat_coeur_reveil(cpu_id, masque, maintenant));
+        }
+        match selection.retenu() {
+            Some(choisi) => {
+                if choisi != historique {
+                    crate::kernel::scheduler::preempt::note_placement_deplace();
+                }
+                choisi
+            }
+            None => historique,
+        }
+    } else {
+        historique
+    };
+
     tasks()[index].runq_cpu.range(target as u8);
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
         // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
@@ -270,7 +371,11 @@ fn publish_ready(index: usize) {
             Priorite::Normale => crate::kernel::scheduler::runqueue::Bande::Normale,
         };
         crate::arch::x86_64::cpu_local::local(id).enqueue_bande(identite.en_mot(), bande);
-        crate::kernel::scheduler::preempt::request_cpu(target);
+    } else {
+        // Coeur inadressable : la tache reste en file logique, personne a
+        // prevenir.
+        crate::kernel::scheduler::preempt::note_reveil_en_file();
+        return;
     }
     // Seconde moitie du motif croise (voir `idle_enter`). La mise en file
     // ci-dessus se termine par une liberation de verrou -- une simple ecriture
@@ -281,8 +386,46 @@ fn publish_ready(index: usize) {
     //
     // Une lecture SeqCst ne suffirait pas : sur x86 elle reste un `mov` et ne
     // vide pas le tampon d'ecriture. Il faut la barriere.
+    //
+    // LA DECISION SE PREND APRES CETTE BARRIERE, ET C'EST TOUT L'ENJEU. Le
+    // choix du coeur, lui, a pu etre fait sur un etat perime -- au pire il
+    // pose la tache sur un coeur qui vient de se charger, ce qui coute une
+    // election. L'IPI, lui, ne peut pas etre decide sur un etat perime : c'est
+    // la moitie du motif croise. Ou bien nous lisons ici `is_idle` vrai et
+    // nous envoyons l'IPI, ou bien le coeur qui s'endort relit notre file dans
+    // `commit_scheduler_idle` et renonce a dormir. Au moins l'un des deux voit
+    // l'autre ; aucun reveil ne se perd.
     core::sync::atomic::fence(Ordering::SeqCst);
-    if cpu::is_idle(target) { smp::reschedule_cpu(target); }
+
+    let etat = etat_coeur_reveil(target, u64::MAX, crate::kernel::timer::monotonic_ns());
+    match crate::kernel::scheduler::reveil::decide(&etat, &reveille) {
+        ReveilDecision::ReveilImmediat => {
+            crate::kernel::scheduler::preempt::request_cpu(target);
+            crate::kernel::scheduler::preempt::note_reveil_immediat();
+            crate::kernel::scheduler::preempt::note_ipi_reveil();
+            smp::reschedule_cpu(target);
+        }
+        ReveilDecision::PreemptionCiblee => {
+            crate::kernel::scheduler::preempt::demande_ciblee(target);
+            crate::kernel::scheduler::preempt::note_reveil_cible();
+            crate::kernel::scheduler::preempt::note_ipi_reveil();
+            smp::reschedule_cpu(target);
+        }
+        ReveilDecision::DemandeDifferee => {
+            crate::kernel::scheduler::preempt::request_cpu(target);
+            crate::kernel::scheduler::preempt::note_reveil_differe();
+            // Le comportement historique, INCHANGE : un coeur qui vient de
+            // s'endormir entre la mise en file et ici recoit quand meme son
+            // IPI. C'est la relecture, pas la decision, qui ferme la course.
+            if etat.inactif {
+                crate::kernel::scheduler::preempt::note_ipi_reveil();
+                smp::reschedule_cpu(target);
+            }
+        }
+        ReveilDecision::MiseEnFile => {
+            crate::kernel::scheduler::preempt::note_reveil_en_file();
+        }
+    }
 }
 
 pub fn register(mut task: Box<Task>) -> usize {

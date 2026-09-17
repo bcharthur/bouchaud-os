@@ -42,6 +42,17 @@ fn account_until(task: &Task, now: u64) {
             .saturating_add(elapsed)
             / 8,
     );
+    // BOUCHAUD_P0_REVEIL_CIBLE_V1 : le budget d'activation.
+    //
+    // Une somme, pas une moyenne : la moyenne glissante ci-dessus repond a
+    // « cette tache est-elle couteuse en general », le budget repond a « cette
+    // activation-ci a-t-elle depasse la borne ». Un fil d'entree periodique
+    // qui fait 162 us par tour ne doit pas perdre son privilege parce qu'un
+    // tour, une fois, a coute davantage. `publish_ready` le lit et le remet a
+    // zero : sa valeur est donc toujours celle de l'activation qui vient de
+    // s'achever.
+    task.budget_reveil_ns
+        .range(task.budget_reveil_ns.charge().saturating_add(elapsed));
     // `in_kernel` doit survivre a un changement de contexte AU MILIEU d'un
     // appel systeme : une tache qui se bloque dans un `futex` repart du cote
     // noyau. On le range donc dans la tache au repli, et `mark_task_running` le

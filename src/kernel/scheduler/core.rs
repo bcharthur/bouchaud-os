@@ -11,6 +11,7 @@
 
 pub mod latency;
 pub mod preempt;
+pub mod reveil;
 pub mod runqueue;
 pub mod equilibrage;
 pub mod sonde_latence;

@@ -121,6 +121,21 @@ static NEXT_TID: AtomicU32 = AtomicU32::new(100);
 static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static CURRENT_IS_KERNEL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+// BOUCHAUD_P0_REVEIL_CIBLE_V1
+//
+// LE PROFIL DE L'OCCUPANT, EN ATOMIQUES PAR COEUR
+//
+// `publish_ready` doit savoir QUI occupe le coeur d'accueil pour decider s'il
+// faut le couper. Lire `tasks()[CURRENT[cible]]` depuis un autre coeur
+// reviendrait a dereferencer la tache d'autrui pendant qu'elle commute --
+// exactement ce que `running_user_cpu_mask` evite deja, et pour la meme
+// raison : ce chemin s'execute aussi depuis une IRQ.
+//
+// Trois atomiques ecrites a l'installation suffisent, et elles sont ecrites
+// par le coeur qui installe, donc sans course avec lui-meme.
+static CURRENT_SENSIBLE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static CURRENT_INTERACTIVE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static CURRENT_DEPUIS_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static TOURS_INTERACTIFS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static RUNQ_STEALS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static CPU_MIGRATIONS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];

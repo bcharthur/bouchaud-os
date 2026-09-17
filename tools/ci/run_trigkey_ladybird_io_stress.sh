@@ -59,7 +59,21 @@ mkdir -p "$TRAVAIL"
 if [ -z "${BANC_TRAVAIL:-}" ]; then trap 'rm -rf "$TRAVAIL"' EXIT; fi
 
 echo "=== noyau UEFI stage2 + banc de charge (${SECONDES}s) ==="
+# LA CHARGE PROCESSEUR, ET POURQUOI ELLE EST NEUVE ICI
+#
+# Le banc tournait avec deux fils sur seize coeurs virtuels : chaque tache
+# possedait un coeur et ne se disputait rien. La campagne du 17 septembre le
+# dit en chiffres -- cinq reveils immediats pour cent vingt secondes. Une
+# machine ou personne n'attend un coeur ne peut pas reproduire une attente de
+# six secondes pour en obtenir un, et c'est pourquoi ce banc a laisse passer
+# le defaut d'ordonnancement que la TRIGKEY a montre.
+#
+# `BOUCHAUD_BANC_CHARGE_CPU` lance autant de fils NOYAU de calcul que de
+# coeurs. Ils ne rendent jamais la main : ni `sleep_ticks`, ni `schedule`.
+# C'est exactement la situation du releve physique autour de `usb-hid`.
+CHARGE_CPU=${BANC_CHARGE_CPU:-16}
 BOUCHAUD_BANC_SECONDES="$SECONDES" \
+BOUCHAUD_BANC_CHARGE_CPU="$CHARGE_CPU" \
 cargo +nightly-2026-06-01 build --target targets/x86_64-bouchaud_os_uefi.json \
   --no-default-features --features uefi-boot,reference-bringup,reference-desktop,banc-io || exit 1
 NOYAU=target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
@@ -264,6 +278,66 @@ exige(
     "tolerance emulateur -- ce n'est plus l'ordonnancement de l'hote, c'est "
     "une regression",
 )
+# --- B bis : LE REVEIL D'UNE TACHE SENSIBLE, SOUS CHARGE REELLE ------------
+#
+# Le critere d'acceptation du lot « reveil cible ». Il est separe du pire
+# ecart de scrutation parce qu'ils ne mesurent pas la meme chose : l'ecart
+# couvre reveil + verrou + corps, et sous QEMU le verrou domine tout. Ce
+# chiffre-ci ne couvre que le delai entre l'echeance d'un fil sensible et son
+# election -- la seule part dont l'ordonnanceur reponde, et celle a qui le
+# releve TRIGKEY imputait 6 782 927 us sur 6 783 000.
+fils_cpu = entier("charge_cpu_fils")
+tours_cpu = entier("charge_cpu_tours")
+reveil_max_us = entier("hid_wake_to_run_max_us")
+print(f"BANC_CHARGE_CPU_FILS={fils_cpu} BANC_CHARGE_CPU_TOURS={tours_cpu}")
+corps_max_us = entier("hid_poll_body_max_us")
+print(f"BANC_HID_WAKE_TO_RUN_MAX_US={reveil_max_us}")
+print(f"BANC_HID_WAKE_VERDICT={verdict.get('hid_wake_verdict', '?')}")
+if fils_cpu > 0 and reveil_max_us > 50_000:
+    # LA MESURE QUI DIT SI LE CHIFFRE EST DE NOUS OU DE L'HOTE.
+    #
+    # `hid_poll_body_max_us` chronometre un corps de scrutation qui ne dort
+    # jamais et n'attend rien : 162 us sur la TRIGKEY. S'il se compte ici en
+    # dizaines de millisecondes, c'est que le processeur invite a ete ARRETE au
+    # milieu -- et alors le reveil mesure la meme chose. Seize vCPU en attente
+    # active sur un hote qui en a moins se font deordonnancer par centaines de
+    # millisecondes, et l'horloge murale du guest avance pendant ce temps.
+    print(
+        f"NOTE  reveil -> election {reveil_max_us} us sous {fils_cpu} fils de calcul. "
+        f"Le corps de scrutation lui-meme monte a {corps_max_us} us ici, contre "
+        "162 us mesurees sur la TRIGKEY : le processeur invite est arrete au "
+        "milieu d'un travail qui n'attend rien. Ce chiffre mesure donc l'hote, "
+        "pas l'ordonnanceur. La borne imposee ci-dessous (1 s) n'attrape qu'un "
+        "retour du defaut -- une attente qui se compte en secondes."
+    )
+print(
+    "BANC_REVEIL immediats={} cibles={} differes={} preempt_noyau={} refus={} deplaces={}".format(
+        entier("reveil_immediats"), entier("reveil_cibles"), entier("reveil_differes"),
+        entier("reveil_preempt_noyau"), entier("reveil_refus"), entier("reveil_deplaces"),
+    )
+)
+if fils_cpu > 0:
+    # LA CHARGE A VRAIMENT TOURNE. Sans cela, mesurer un reveil rapide ne
+    # prouverait rien : il n'y aurait eu personne a preempter.
+    exige(tours_cpu > 0, "B bis : la charge processeur n'a pas tourne")
+    # AUCUNE FAMINE DES TACHES NORMALES. Le fil de charge d'entree-sortie est
+    # une tache ordinaire, et il doit avoir continue a lire pendant que les
+    # fils sensibles coupaient les calculs.
+    exige(
+        entier("lectures") > 0,
+        "B bis : le fil de charge d'entree-sortie n'a plus ete elu -- le "
+        "privilege de latence affame les taches normales",
+    )
+    # LE CRITERE. Sous QEMU les seize coeurs virtuels se font deordonnancer
+    # par l'hote, donc la borne est LARGE : elle n'attrape qu'un retour du
+    # defaut -- une attente qui se compte en secondes, pas en millisecondes.
+    exige(
+        reveil_max_us <= 1_000_000,
+        f"B bis : reveil -> election {reveil_max_us} us sous charge. Le defaut "
+        "TRIGKEY valait 6 782 927 us ; au-dela d'une seconde sous QEMU, le "
+        "chemin de reveil est de nouveau ferme.",
+    )
+
 exige(
     verdict.get("bot_etat") == "pret",
     f"B : le transport BOT a fini en « {verdict.get('bot_etat')} » au lieu de « pret »",

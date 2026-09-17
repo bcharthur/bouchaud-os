@@ -498,6 +498,19 @@ impl FileCpu {
         self.bandes[1].longueur()
     }
 
+    /// Les deux bandes, separement : interactives en attente, normales en
+    /// attente. La tache que le coeur EXECUTE n'y figure pas -- elle a quitte
+    /// la file au moment d'etre elue.
+    ///
+    /// La REGLE qui decide quoi en faire vit dans `scheduler::reveil`, et non
+    /// ici : ce module ne fait pas de politique, il compte. C'est aussi ce qui
+    /// le garde compilable seul, sans le reste du noyau, pour ses tests hote.
+    #[inline]
+    pub fn attente(&self) -> (usize, usize) {
+        (self.bandes[0].longueur(), self.bandes[1].longueur())
+    }
+
+
     #[inline]
     pub fn est_vide(&self) -> bool {
         self.longueur() == 0

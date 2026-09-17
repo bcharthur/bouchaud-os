@@ -86,6 +86,11 @@ fn install(task: &mut Task) {
     verifie_le_canari(task);
     unsafe {
         set_current_is_kernel(task.noyau);
+        set_current_profil(
+            task.latency_sensitive.charge(),
+            task.priorite.charge() == Priorite::Interactive,
+            crate::kernel::timer::monotonic_ns(),
+        );
         *CURRENT_PROCESS[local_cpu()].lock() = if task.noyau { None } else { Some(Arc::clone(&task.process)) };
         if !task.noyau {
             debug_assert_eq!(
@@ -152,6 +157,15 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
             crate::arch::x86_64::cpu_local::local(id).note_migration();
         }
     }
+    // BOUCHAUD_P0_REVEIL_CIBLE_V1
+    //
+    // La demande ciblee a obtenu ce qu'elle voulait : une election sur ce
+    // coeur. Elle est rendue ICI et non au moment ou elle est accordee, pour
+    // qu'un refus -- verrou tenu, IRQ imbriquee -- laisse la demande pendante
+    // et que le balayage de quantum la reexpedie. La rendre au refus rendrait
+    // la tache invisible jusqu'a son prochain reveil, qui n'arrivera pas :
+    // elle attend d'etre elue pour se rendormir.
+    crate::kernel::scheduler::preempt::rend_demande_ciblee();
     task.last_cpu.range(cpu_id as u8);
     task.runq_cpu.range(cpu_id as u8);
     task.switching_out.range(false);

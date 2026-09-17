@@ -110,6 +110,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 4);
 
     let mut preempt_now = false;
+    let mut preempt_ciblee = false;
     {
         let _site = crate::kernel::task::SiteIrq::enter(60, 0);
         crate::kernel::task::stall_site_set(61, 0);
@@ -149,6 +150,17 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
             } else if !crate::kernel::task::current_is_kernel_task() {
                 crate::kernel::scheduler::preempt::request_local();
                 crate::kernel::task::request_deferred_preempt();
+            } else if crate::kernel::scheduler::preempt::accorde_preemption_noyau() {
+                // BOUCHAUD_P0_REVEIL_CIBLE_V1
+                //
+                // Le coeur zero ne recoit pas l'IPI qu'il envoie aux autres :
+                // sans cette branche, un fil noyau sur le BSP resterait le
+                // seul endroit du systeme ou une demande ciblee ne serait
+                // jamais servie. C'est aussi la seconde chance des demandes
+                // refusees sur les AP -- verrou tenu au moment de l'IPI --,
+                // puisque `masque_cible` remet leur coeur dans le balayage.
+                preempt_now = true;
+                preempt_ciblee = true;
             }
         }
     }
@@ -156,6 +168,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 9);
 
     if preempt_now {
-        dispatch_irq_preempt(PREEMPT_SOURCE_TIMER);
+        dispatch_irq_preempt(PREEMPT_SOURCE_TIMER, preempt_ciblee);
     }
 }

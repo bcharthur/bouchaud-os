@@ -81,6 +81,27 @@ pub struct Task {
     /// par n'importe quel coeur en ligne, ce qui est la seule facon qu'il ait
     /// de tourner quand le coeur zero n'est pas, lui, dans l'ordonnanceur.
     pub migrable: bool,
+    /// BOUCHAUD_P0_REVEIL_CIBLE_V1
+    ///
+    /// Cette tache exige-t-elle une LATENCE DE REVEIL courte ?
+    ///
+    /// C'est une PROPRIETE declaree, et non un nom reconnu par
+    /// l'ordonnanceur. Le fil `usb-hid` la porte aujourd'hui ; l'audio, le
+    /// compositeur et tout service temps reel souple la demanderont de la
+    /// meme facon, sans qu'une seule ligne du scheduler ait a connaitre leur
+    /// existence.
+    ///
+    /// Elle ne donne PAS une priorite permanente. Elle donne un placement au
+    /// reveil et le droit de couper un occupant -- l'un et l'autre bornes par
+    /// `scheduler::reveil::BUDGET_ACTIVATION_NS`, que la tache perd des
+    /// qu'elle se met a calculer.
+    pub latency_sensitive: DrapeauAtomique,
+    /// Temps processeur consomme depuis le dernier reveil.
+    ///
+    /// Lu et remis a zero par `publish_ready` : sa valeur au moment d'une
+    /// publication est donc exactement ce que l'activation PRECEDENTE a
+    /// consomme. C'est le budget qui desarme le privilege.
+    pub budget_reveil_ns: EcheanceAtomique,
     entree_noyau: Option<fn() -> !>,
 }
 

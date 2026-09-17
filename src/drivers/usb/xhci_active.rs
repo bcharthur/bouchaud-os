@@ -544,6 +544,37 @@ pub fn verdict_ecart_hid(ecart_ms: u64) -> &'static str {
     }
 }
 
+// BOUCHAUD_P0_REVEIL_CIBLE_V1 : LE CRITERE D'ACCEPTATION, SEPARE DE L'ECART
+//
+// `ECART_HID_*` juge la boucle ENTIERE : reveil, verrou, corps. C'est ce que
+// l'utilisateur ressent, et cela reste la mesure produit.
+//
+// Ces bornes-ci ne jugent qu'UNE des trois parts : le delai entre l'echeance
+// d'un fil sensible et son election. Elle est separee parce que c'est la seule
+// dont l'ordonnanceur reponde, et que le releve TRIGKEY lui a impute 6 782 927
+// des 6 783 000 us de son pire ecart. La confondre avec le total, c'est perdre
+// la seule mesure qui dise si ce lot a fonctionne.
+/// La cible : au-dessous, le reveil ne se voit pas.
+pub const REVEIL_HID_CIBLE_US: u64 = 10_000;
+/// Le critere produit : au-dessous, la machine est utilisable.
+pub const REVEIL_HID_CONFORME_US: u64 = 30_000;
+/// Au-dela, c'est un defaut -- ce que l'utilisateur decrit comme « la souris
+/// saute ».
+pub const REVEIL_HID_DEFAUT_US: u64 = 50_000;
+
+/// Le verdict du pire delai reveil -> election d'un fil sensible.
+pub fn verdict_reveil_hid(wake_to_run_us: u64) -> &'static str {
+    if wake_to_run_us <= REVEIL_HID_CIBLE_US {
+        "cible"
+    } else if wake_to_run_us <= REVEIL_HID_CONFORME_US {
+        "conforme"
+    } else if wake_to_run_us <= REVEIL_HID_DEFAUT_US {
+        "degrade"
+    } else {
+        "defaut"
+    }
+}
+
 fn note_poll_servi(maintenant_ns: u64) {
     let precedent = DERNIER_POLL_SERVI_NS.swap(maintenant_ns, Ordering::AcqRel);
     if precedent == 0 {
@@ -6096,13 +6127,22 @@ pub fn demarre_le_fil_hid() -> bool {
     if FIL_HID_ACTIF.load(Ordering::Acquire) {
         return true;
     }
-    if crate::kernel::task::spawn_noyau_priorite(
+    // LATENCE, ET NON PRIORITE.
+    //
+    // Le fil etait deja `Interactive`, et c'est ce qui a rendu le defaut si
+    // difficile a voir : la classe etait la bonne, la file etait la bonne, et
+    // la tache attendait quand meme 6,78 s. `Interactive` ordonne la file ;
+    // `latency_sensitive` ordonne le REVEIL. C'est la seconde propriete qui
+    // manquait, et elle se declare ici, pas dans l'ordonnanceur.
+    if crate::kernel::task::spawn_noyau_sensible(
         fil_hid,
         "usb-hid",
         crate::kernel::task::Priorite::Interactive,
     ) {
         FIL_HID_ACTIF.store(true, Ordering::Release);
-        crate::serial_println!("BOUCHAUD_USB_HID_FIL_LANCE periode_ms=1 priorite=interactive");
+        crate::serial_println!(
+            "BOUCHAUD_USB_HID_FIL_LANCE periode_ms=1 priorite=interactive latency_sensitive=1"
+        );
         return true;
     }
     crate::serial_println!(

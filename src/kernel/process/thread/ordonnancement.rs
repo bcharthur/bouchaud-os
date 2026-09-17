@@ -506,6 +506,7 @@ fn switch_to_kernel() -> ! {
     set_current_index(NO_TASK);
     clear_current_process_local();
     set_current_is_kernel(false);
+    efface_current_profil();
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
     let target_rsp = kernel_ctx().rsp;
@@ -523,6 +524,7 @@ pub fn secondary_cpu_loop() -> ! {
     set_current_index(NO_TASK);
     clear_current_process_local();
     set_current_is_kernel(false);
+    efface_current_profil();
     usermode::per_cpu().current = 0;
 
     loop {
@@ -568,6 +570,7 @@ pub fn secondary_cpu_loop() -> ! {
             set_current_index(NO_TASK);
             clear_current_process_local();
             set_current_is_kernel(false);
+            efface_current_profil();
             usermode::per_cpu().current = 0;
             stall_site_set(55, 0);
             crate::kernel::vmm::activate_kernel();
