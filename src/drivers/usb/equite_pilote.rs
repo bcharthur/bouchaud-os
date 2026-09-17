@@ -149,3 +149,120 @@ pub fn cede_encore(
 ) -> bool {
     reclame && attendu_ns < cession_maximale_ns
 }
+
+// ===========================================================================
+// BOUCHAUD_TOURNIQUET_V1 : ceder n'est pas laisser passer
+// ===========================================================================
+//
+// # Ce que la cession ne faisait pas
+//
+// `cede_encore` fait ATTENDRE le systeme de fichiers avant qu'il ne prenne le
+// verrou. Mais rien ne l'empeche de le reprendre aussitot apres : deux
+// lecteurs qui se relaient laissent des creneaux d'une microseconde, et la
+// scrutation HID -- qui tente une prise INSTANTANEE et renonce -- ne tombe
+// jamais dedans.
+//
+// Le banc le chiffre : trente-six refus consecutifs, cent quarante-quatre
+// millisecondes de famine pour un ecart mesure de cent quarante-sept. La
+// cession existait, elle etait active, et elle n'a rien change -- parce que
+// c'est une politesse, pas une barriere.
+//
+// # La barriere
+//
+// Quand la scrutation reclame, les autres consommateurs ne peuvent plus
+// ACQUERIR. Celui qui tient deja le verrou le garde -- on ne preempte pas une
+// commande en cours, ce qui laisserait un transfert a moitie fait --, mais il
+// sera le dernier avant que la scrutation ne passe.
+//
+// # Bornee, et dans les deux sens
+//
+// Une reservation qui ne s'eteint pas transforme une famine du clavier en
+// blocage du stockage. Elle tombe donc de deux facons : des que la scrutation
+// a eu son tour, et au bout de `reservation_maximale_ns` si elle ne l'a pas
+// eu -- un fil HID mort ne doit pas emporter le disque avec lui.
+
+/// Duree maximale d'une reservation de passage, en nanosecondes.
+///
+/// Cinquante millisecondes : c'est le seuil au-dela duquel un ecart de
+/// scrutation devient un defaut produit. Une reservation qui durerait plus
+/// longtemps ne protegerait plus rien qu'on cherche a protéger.
+pub const RESERVATION_MAXIMALE_NS: u64 = 50_000_000;
+
+/// Qui passe devant, quand la scrutation a trop attendu.
+pub struct Tourniquet {
+    /// Instant de la reclamation en cours. `JAMAIS` quand le passage est
+    /// libre -- zero est un instant valide et ne peut pas servir de drapeau.
+    depuis_ns: AtomicU64,
+    reservations: AtomicU64,
+    refus_donnes: AtomicU64,
+    expirations: AtomicU64,
+}
+
+impl Tourniquet {
+    pub const fn neuf() -> Self {
+        Self {
+            depuis_ns: AtomicU64::new(JAMAIS),
+            reservations: AtomicU64::new(0),
+            refus_donnes: AtomicU64::new(0),
+            expirations: AtomicU64::new(0),
+        }
+    }
+
+    /// La scrutation reclame le passage.
+    ///
+    /// La premiere reclamation date la reservation ; les suivantes ne la
+    /// rajeunissent pas, sinon une famine continue repousserait son propre
+    /// expiration et la borne ne serait jamais atteinte.
+    pub fn reclame(&self, maintenant_ns: u64) {
+        if self
+            .depuis_ns
+            .compare_exchange(JAMAIS, maintenant_ns, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.reservations.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// La scrutation a eu son tour : le passage se rouvre.
+    pub fn libere(&self) {
+        self.depuis_ns.store(JAMAIS, Ordering::Release);
+    }
+
+    /// Un autre consommateur doit-il renoncer a prendre le verrou ?
+    ///
+    /// Rend faux -- et leve la reservation -- quand elle a dure plus que la
+    /// borne : la scrutation n'a pas su en profiter, et le stockage ne doit
+    /// pas payer indefiniment pour elle.
+    pub fn doit_ceder(&self, maintenant_ns: u64, maximale_ns: u64) -> bool {
+        let depuis = self.depuis_ns.load(Ordering::Acquire);
+        if depuis == JAMAIS {
+            return false;
+        }
+        if maintenant_ns.saturating_sub(depuis) >= maximale_ns {
+            if self
+                .depuis_ns
+                .compare_exchange(depuis, JAMAIS, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.expirations.fetch_add(1, Ordering::Relaxed);
+            }
+            return false;
+        }
+        self.refus_donnes.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Une reservation est-elle en cours ?
+    pub fn reserve(&self) -> bool {
+        self.depuis_ns.load(Ordering::Acquire) != JAMAIS
+    }
+
+    /// `(reservations, refus donnes aux autres, expirations)`.
+    pub fn compteurs(&self) -> (u64, u64, u64) {
+        (
+            self.reservations.load(Ordering::Relaxed),
+            self.refus_donnes.load(Ordering::Relaxed),
+            self.expirations.load(Ordering::Relaxed),
+        )
+    }
+}

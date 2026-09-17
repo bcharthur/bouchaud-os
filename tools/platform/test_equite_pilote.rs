@@ -142,3 +142,104 @@ fn une_famine_qui_commence_a_l_instant_zero_est_datee() {
     );
     assert!(e.reclame());
 }
+
+// ===========================================================================
+// Le tourniquet : ceder n'est pas laisser passer
+// ===========================================================================
+
+use equite::{Tourniquet, RESERVATION_MAXIMALE_NS};
+
+#[test]
+fn un_tourniquet_neuf_ne_bloque_personne() {
+    let t = Tourniquet::neuf();
+    assert!(!t.reserve());
+    assert!(!t.doit_ceder(0, RESERVATION_MAXIMALE_NS));
+    assert!(!t.doit_ceder(10_000 * MS, RESERVATION_MAXIMALE_NS));
+}
+
+#[test]
+fn une_reclamation_ferme_le_passage_aux_autres() {
+    // LE DEFAUT QUE CECI CORRIGE
+    //
+    // `cede_encore` faisait ATTENDRE le systeme de fichiers avant de prendre
+    // le verrou -- et rien ne l'empechait de le reprendre juste apres. Le banc
+    // a mesure trente-six refus consecutifs pour la scrutation HID et cent
+    // quarante-quatre millisecondes de famine, cession active.
+    let t = Tourniquet::neuf();
+    t.reclame(100 * MS);
+    assert!(t.reserve());
+    assert!(t.doit_ceder(101 * MS, RESERVATION_MAXIMALE_NS));
+    assert!(t.doit_ceder(140 * MS, RESERVATION_MAXIMALE_NS));
+}
+
+#[test]
+fn le_passage_se_rouvre_des_que_la_scrutation_a_eu_son_tour() {
+    let t = Tourniquet::neuf();
+    t.reclame(100 * MS);
+    t.libere();
+    assert!(!t.reserve());
+    assert!(!t.doit_ceder(101 * MS, RESERVATION_MAXIMALE_NS));
+}
+
+#[test]
+fn une_reservation_qui_traine_expire_et_rend_le_disque() {
+    // Une reservation qui ne s'eteint pas transforme une famine du clavier en
+    // blocage du stockage. Un fil HID mort ne doit pas emporter le disque.
+    let t = Tourniquet::neuf();
+    t.reclame(100 * MS);
+    assert!(t.doit_ceder(149 * MS, RESERVATION_MAXIMALE_NS));
+    assert!(
+        !t.doit_ceder(151 * MS, RESERVATION_MAXIMALE_NS),
+        "au-dela de la borne, le passage se rouvre tout seul"
+    );
+    assert!(!t.reserve(), "et la reservation est bien levee");
+    assert_eq!(t.compteurs().2, 1, "l'expiration se compte");
+}
+
+#[test]
+fn une_famine_continue_ne_repousse_pas_sa_propre_expiration() {
+    // Si chaque reclamation rajeunissait la reservation, une scrutation
+    // affamee en continu la garderait ouverte pour toujours -- et la borne ne
+    // serait jamais atteinte.
+    let t = Tourniquet::neuf();
+    t.reclame(100 * MS);
+    for i in 1..40 {
+        t.reclame((100 + i * 4) as u64 * MS);
+    }
+    assert!(
+        !t.doit_ceder(151 * MS, RESERVATION_MAXIMALE_NS),
+        "la reservation date du PREMIER appel, pas du dernier"
+    );
+}
+
+#[test]
+fn les_reservations_se_comptent_une_seule_fois_par_serie() {
+    let t = Tourniquet::neuf();
+    t.reclame(10 * MS);
+    t.reclame(11 * MS);
+    t.reclame(12 * MS);
+    assert_eq!(t.compteurs().0, 1);
+    t.libere();
+    t.reclame(20 * MS);
+    assert_eq!(t.compteurs().0, 2);
+}
+
+#[test]
+fn les_refus_opposes_aux_autres_se_comptent() {
+    // Sans ce chiffre, on ne sait pas si le tourniquet a servi ou s'il n'a
+    // jamais eu l'occasion de s'ouvrir.
+    let t = Tourniquet::neuf();
+    t.reclame(0);
+    for _ in 0..5 {
+        assert!(t.doit_ceder(1 * MS, RESERVATION_MAXIMALE_NS));
+    }
+    assert_eq!(t.compteurs().1, 5);
+}
+
+#[test]
+fn la_borne_est_celle_du_seuil_de_defaut_produit() {
+    // Cinquante millisecondes : au-dela, un ecart de scrutation est un defaut
+    // produit. Une reservation plus longue ne protegerait plus ce qu'elle est
+    // censee protéger.
+    assert_eq!(RESERVATION_MAXIMALE_NS, 50 * MS);
+}

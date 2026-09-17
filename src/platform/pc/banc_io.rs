@@ -192,6 +192,8 @@ fn verdict(depart: u64) {
     let ecoule = crate::kernel::timer::monotonic_ns().saturating_sub(depart);
     let (ecart_max, _) = crate::drivers::xhci_active::ecart_scrutation_hid();
     let verrou = crate::drivers::xhci_active::etat_du_verrou();
+    let chrono = crate::drivers::xhci_active::chrono_hid();
+    let tourniquet = crate::drivers::xhci_active::tourniquet_compteurs();
     let bot = crate::drivers::xhci_active::releve_bot();
     let tambour = crate::kernel::blackbox::tambour();
     let trames = crate::gui::frame_clock::snapshot();
@@ -199,6 +201,9 @@ fn verdict(depart: u64) {
     crate::serial_println!(
         "BOUCHAUD_BANC_IO_VERDICT ecoule_s={} lectures={} blocs_lus={} echecs_lecture={} \
 hid_poll_gap_max_ms={} hid_poll_gap_verdict={} hid_poll_gap_cible_ms={} hid_poll_gap_defaut_ms={} \
+hid_wake_to_run_max_us={} hid_run_to_lock_max_us={} hid_lock_starve_max_us={} hid_poll_body_max_us={} hid_responsable={} \
+hid_lock_fail_total={} hid_lock_fail_streak_max={} hid_lock_fail_owner_fs={} hid_lock_fail_owner_repli={} \
+tourniquet_reservations={} tourniquet_refus={} tourniquet_expirations={} \
 runtime_owner={} runtime_max_hold_ns={} runtime_max_owner={} \
 runtime_acquisitions={} runtime_contentions={} runtime_timeouts={} \
 blackbox_ram_records={} blackbox_ram_overwrites={} blackbox_ram_lost={} blackbox_ram_refuses={} \
@@ -212,6 +217,11 @@ bot_refus={} bot_rejouees={} injections_consommees={} wm_heartbeat={} wm_frames=
         crate::drivers::xhci_active::verdict_ecart_hid(ecart_max / 1_000_000),
         crate::drivers::xhci_active::ECART_HID_CIBLE_MS,
         crate::drivers::xhci_active::ECART_HID_DEFAUT_MS,
+        chrono.wake_to_run_max_us, chrono.run_to_lock_max_us,
+        chrono.lock_starve_max_us, chrono.poll_body_max_us, chrono.responsable(),
+        chrono.lock_fail_total, chrono.lock_fail_streak_max,
+        chrono.lock_fail_owner[3], chrono.lock_fail_owner[2],
+        tourniquet.0, tourniquet.1, tourniquet.2,
         verrou.proprietaire.nom(),
         verrou.tenue_max_ns,
         verrou.tenue_max_proprietaire.nom(),

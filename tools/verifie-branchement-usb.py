@@ -15,6 +15,14 @@ les rapports HID pendant l'enumeration, et rendre ce qu'un debranchement
 libere.
 """
 
+# L'ANCRE EST `poll_interne`, ET NON `poll`.
+#
+# `pub fn poll()` n'est plus qu'une facade : le corps -- drainage de
+# l'anneau, changements de port, branchement a chaud -- vit dans
+# `poll_interne`, que la facade et la variante chronometree appellent toutes
+# deux. Ancrer sur la facade rendait un corps d'une ligne, et les cinq regles
+# de ce fichier se declaraient violees d'un coup.
+
 import re
 import sys
 from pathlib import Path
@@ -107,7 +115,7 @@ def regle_surveillance_sans_hid(xhci, wm, fautes):
     demarrer sans clavier, puis en brancher un. Gater la surveillance sur
     `hid_polling()` la rend inoperante precisement quand on en a besoin.
     """
-    bloc = corps(xhci, "pub fn poll()")
+    bloc = corps(xhci, "fn poll_interne(")
     if bloc is None:
         fautes.append("xhci_active.rs : poll() a disparu.")
         return
@@ -208,7 +216,7 @@ def regle_rapports_non_perdus(xhci, fautes):
                 "xhci_active.rs : un debordement du tampon ne se compte plus ; "
                 "des frappes disparaitraient sans laisser de trace."
             )
-    poll = corps(xhci, "pub fn poll()")
+    poll = corps(xhci, "fn poll_interne(")
     if poll is None:
         return
     vidage = corps(xhci, "fn traite_differes(")
@@ -264,7 +272,7 @@ def regle_enumeration_hors_boucle(xhci, fautes):
     Enumerer emet des transferts de controle, qui attendent leurs propres
     evenements sur l'anneau qu'on est en train de drainer.
     """
-    poll = corps(xhci, "pub fn poll()")
+    poll = corps(xhci, "fn poll_interne(")
     if poll is None:
         return
     if "ports_a_traiter" not in poll:

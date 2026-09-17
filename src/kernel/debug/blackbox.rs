@@ -532,6 +532,7 @@ fn sample(ts_ns: u64) {
     let (bb_writes, bb_failures, bb_consecutive, bb_last_error, bb_busy_skips, bb_last_ok_ns) =
         crate::drivers::xhci_active::blackbox_storage_extended_counters();
     let (hid_ecart_max, hid_dernier) = crate::drivers::xhci_active::ecart_scrutation_hid();
+    let chrono = crate::drivers::xhci_active::chrono_hid();
     let tambour = BOBINE.etat();
     let verrou = crate::drivers::xhci_active::etat_du_verrou();
     let (perdus, retard, produit) = journal_serie();
@@ -548,6 +549,16 @@ fn sample(ts_ns: u64) {
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
             "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
             "hid_ecart_max_ms={} hid_dernier_ns={} ",
+            // OU EST PASSE CE TEMPS, ET PAS SEULEMENT COMBIEN.
+            //
+            // Les trois intervalles se suivent : echeance -> reprise (l'
+            // ordonnanceur), reprise -> verrou (le verrou), verrou -> sortie
+            // (le chemin HID). Leur somme est l'ecart ci-dessus, donc aucun
+            // ne peut se cacher derriere les autres.
+            "hid_wake_to_run_max_us={} hid_run_to_lock_max_us={} hid_lock_starve_max_us={} ",
+            "hid_poll_body_max_us={} hid_responsable={} ",
+            "hid_lock_fail_total={} hid_lock_fail_streak_max={} ",
+            "hid_lock_fail_owner=[{},{},{},{},{},{},{}] hid_tours={} ",
             "bb_writes={} bb_failures={} bb_consecutive={} bb_last_error={} ",
             "bb_busy_skips={} bb_filets={} bb_last_ok_ns={} ",
             // LE TAMBOUR RAM, DANS CHAQUE ECHANTILLON.
@@ -584,6 +595,13 @@ fn sample(ts_ns: u64) {
         TIMER_ENTERS[3].load(Ordering::Relaxed), TIMER_EXITS[3].load(Ordering::Relaxed),
         polls, events, reports, kbd, mouse, hid_errors, rearms, kicks,
         hid_ecart_max / 1_000_000, hid_dernier,
+        chrono.wake_to_run_max_us, chrono.run_to_lock_max_us,
+        chrono.lock_starve_max_us, chrono.poll_body_max_us, chrono.responsable(),
+        chrono.lock_fail_total, chrono.lock_fail_streak_max,
+        chrono.lock_fail_owner[0], chrono.lock_fail_owner[1],
+        chrono.lock_fail_owner[2], chrono.lock_fail_owner[3],
+        chrono.lock_fail_owner[4], chrono.lock_fail_owner[5],
+        chrono.lock_fail_owner[6], chrono.tours,
         bb_writes, bb_failures, bb_consecutive, bb_last_error,
         bb_busy_skips, FILETS.load(Ordering::Relaxed), bb_last_ok_ns,
         tambour.reserves, tambour.poses, tambour.ecrases, tambour.perdus, tambour.refuses,

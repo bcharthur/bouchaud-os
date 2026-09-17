@@ -358,6 +358,31 @@ use crate::drivers::proprietaire_runtime::{Proprietaire, Registre};
 
 static VERROU: Registre = Registre::neuf();
 
+// BOUCHAUD_TOURNIQUET_V1 : la cession etait une politesse, pas une barriere.
+//
+// Mesure du banc, avant ce lot : trente-six refus consecutifs pour la
+// scrutation HID, cent quarante-quatre millisecondes de famine, sur un ecart
+// total de cent quarante-sept. Quatre-vingt-dix pour cent de ces refus venaient
+// du systeme de fichiers.
+//
+// `cede_encore` faisait bien attendre le systeme de fichiers AVANT de prendre
+// le verrou -- et rien ne l'empechait de le reprendre juste apres. Deux
+// lecteurs qui se relaient ne laissent que des creneaux d'une microseconde, et
+// la scrutation, qui tente une prise INSTANTANEE, n'y tombe jamais.
+//
+// Le tourniquet ferme l'acquisition aux autres tant que la scrutation n'a pas
+// eu son tour. Il ne preempte rien : celui qui tient deja le verrou le garde
+// -- interrompre une commande BOT en cours laisserait un transfert a moitie
+// fait --, mais il sera le dernier avant le passage de la scrutation.
+static TOURNIQUET: crate::drivers::equite_pilote::Tourniquet =
+    crate::drivers::equite_pilote::Tourniquet::neuf();
+
+/// Reservations de passage, refus opposes aux autres consommateurs, et
+/// reservations expirees faute d'avoir ete utilisees.
+pub fn tourniquet_compteurs() -> (u64, u64, u64) {
+    TOURNIQUET.compteurs()
+}
+
 /// Le droit de toucher au pilote xHCI, rendu par `Drop`.
 ///
 /// Il ne se construit que par `prends_le_pilote` ou `attends_le_pilote`, et il
@@ -381,6 +406,20 @@ fn prends_le_pilote(qui: Proprietaire) -> Option<Jeton> {
         VERROU.note_contention();
         return None;
     }
+    // LE PASSAGE RESERVE SE RESPECTE AVANT MEME D'ESSAYER.
+    //
+    // Tenter l'echange compare puis le rendre laisserait une fenetre ou le
+    // verrou est pris par quelqu'un qui allait le rendre : la scrutation, qui
+    // tente au meme instant, echouerait quand meme. On ne tente pas.
+    if qui != Proprietaire::Hid
+        && TOURNIQUET.doit_ceder(
+            crate::kernel::timer::monotonic_ns(),
+            crate::drivers::equite_pilote::RESERVATION_MAXIMALE_NS,
+        )
+    {
+        VERROU.note_contention();
+        return None;
+    }
     if RUNTIME_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -389,6 +428,10 @@ fn prends_le_pilote(qui: Proprietaire) -> Option<Jeton> {
         return None;
     }
     VERROU.note_prise(qui, crate::kernel::timer::monotonic_ns());
+    if qui == Proprietaire::Hid {
+        // La scrutation a eu son tour : le passage se rouvre immediatement.
+        TOURNIQUET.libere();
+    }
     Some(Jeton)
 }
 
@@ -403,6 +446,31 @@ fn attends_le_pilote(qui: Proprietaire, budget_ns: u64) -> Option<Jeton> {
     let debut = crate::kernel::timer::monotonic_ns();
     let mut premier = true;
     loop {
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        // MEME BARRIERE POUR LE CONSOMMATEUR PATIENT.
+        //
+        // C'est lui que le banc a mesure a quatre-vingt-dix pour cent des
+        // refus opposes a la scrutation : le systeme de fichiers attend le
+        // verrou en continu, et son attente PREND le verrou des qu'il se
+        // libere. Sans cette barriere ici, le tourniquet ne protegerait de
+        // rien du tout.
+        if qui != Proprietaire::Hid
+            && TOURNIQUET.doit_ceder(
+                maintenant,
+                crate::drivers::equite_pilote::RESERVATION_MAXIMALE_NS,
+            )
+        {
+            if premier {
+                VERROU.note_contention();
+                premier = false;
+            }
+            if maintenant.saturating_sub(debut) >= budget_ns {
+                VERROU.note_expiration();
+                return None;
+            }
+            core::hint::spin_loop();
+            continue;
+        }
         if RUNTIME_BUSY
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
@@ -483,6 +551,43 @@ fn note_poll_servi(maintenant_ns: u64) {
     }
     let ecart = maintenant_ns.saturating_sub(precedent);
     ECART_POLL_MAX_NS.fetch_max(ecart, Ordering::Relaxed);
+}
+
+// BOUCHAUD_CHRONO_HID_V1 : l'ecart designe UN responsable, pas trois
+//
+// `ecart_scrutation_hid` dit COMBIEN de temps la scrutation a saute. Il ne dit
+// pas OU ce temps est passe, et la session physique du 17 septembre l'a paye :
+// un pic de 638 ms, et trois causes qui l'expliquaient aussi bien --
+// l'ordonnanceur, le verrou, le corps de la scrutation.
+//
+// `note_poll_servi` n'etait appele qu'APRES l'acquisition du verrou : tout ce
+// qui precede etait dans le meme sac. Le chrono decoupe ce sac en trois, et
+// chaque part accuse exactement un responsable.
+static CHRONO: crate::drivers::chrono_hid::ChronoHid =
+    crate::drivers::chrono_hid::ChronoHid::neuf();
+
+/// Ou est passe le temps de la scrutation HID.
+pub fn chrono_hid() -> crate::drivers::chrono_hid::Releve {
+    CHRONO.releve()
+}
+
+/// Mesure T3 a la SORTIE, quel que soit le chemin emprunte.
+///
+/// Le corps de la scrutation a plusieurs sorties, et il en gagnera d'autres.
+/// Poser la mesure a la main sur chacune, c'est la perdre a la premiere
+/// oubliee -- exactement la classe de defaut que le jeton du verrou a
+/// supprimee. `Drop` est pose par le compilateur sur toutes.
+struct CorpsMesure {
+    debut: u64,
+    actif: bool,
+}
+
+impl Drop for CorpsMesure {
+    fn drop(&mut self) {
+        if self.actif {
+            CHRONO.note_corps(self.debut, crate::kernel::timer::monotonic_ns());
+        }
+    }
 }
 
 /// Pire ecart entre deux tours de scrutation HID servis, et le dernier.
@@ -5635,9 +5740,23 @@ pub fn fil_hid_tours() -> u64 {
 }
 
 fn fil_hid() -> ! {
+    // T0 DU PREMIER TOUR : l'echeance qu'on n'a pas encore armee.
+    //
+    // Le premier tour n'a pas dormi, donc il n'a aucun retard a expliquer.
+    // Poser son echeance a « maintenant » lui donne un retard de zero, ce qui
+    // est vrai ; la poser a zero lui donnerait le temps ecoule depuis le
+    // demarrage, qui deviendrait le maximum de la session pour toujours.
+    let mut echeance = crate::kernel::timer::monotonic_ns();
     loop {
         FIL_HID_TOURS.fetch_add(1, Ordering::Relaxed);
-        poll();
+        // T1 : premiere instruction utile du tour.
+        let t1 = crate::kernel::timer::monotonic_ns();
+        CHRONO.note_reveil(echeance, t1);
+        poll_mesure(t1);
+        // T0 DU TOUR SUIVANT, calcule par la MEME fonction que `sleep_ticks`
+        // arme -- recopier la formule ici mentirait le jour ou la cadence du
+        // timer change, et le mensonge accuserait l'ordonnanceur.
+        echeance = crate::kernel::task::echeance_pour(1);
         // UN TICK, SOIT UNE MILLISECONDE.
         //
         // C'est la cadence d'une souris USB rapide. Scruter plus vite ne
@@ -5993,13 +6112,39 @@ consequence=scrutation-reste-dans-la-boucle-de-trames"
     false
 }
 
+/// La scrutation, sans mesure. C'est l'entree des appelants occasionnels --
+/// le compositeur, le diagnostic physique, `lsusb`.
 pub fn poll() {
+    poll_interne(None)
+}
+
+/// La scrutation du FIL HID, chronometree.
+///
+/// La mesure est reservee a ce chemin-la : le compositeur appelle aussi
+/// `poll()`, et melanger les deux ferait attribuer au fil HID des attentes
+/// qui ne sont pas les siennes.
+fn poll_mesure(t1_ns: u64) {
+    poll_interne(Some(t1_ns))
+}
+
+fn poll_interne(mesure: Option<u64>) {
     let hid = hid_polling();
     if !hid && !surveille_branchements() {
         return;
     }
     HID_POLLS.fetch_add(1, Ordering::Relaxed);
     let Some(_jeton) = prends_le_pilote(Proprietaire::Hid) else {
+        if mesure.is_some() {
+            // QUI TENAIT LE VERROU, ET PAS SEULEMENT QU'IL ETAIT PRIS.
+            //
+            // Le proprietaire est lu APRES le refus : il a pu changer entre
+            // les deux. C'est une indication et non une preuve -- mais sur une
+            // serie, celui qui revient est bien celui qui tient.
+            CHRONO.note_echec_verrou(
+                etat_du_verrou().proprietaire.code(),
+                crate::kernel::timer::monotonic_ns(),
+            );
+        }
         // LE CLAVIER NE SE DECONNECTE PAS : ON L'AFFAME.
         //
         // Renoncer ici, c'est ne pas lire les rapports HID de ce tour. Une
@@ -6007,15 +6152,32 @@ pub fn poll() {
         // de fichiers pendant que le navigateur charge --, l'utilisateur ne
         // peut plus taper, et le peripherique parait perdu.
         use crate::drivers::equite_pilote as eq;
-        EQUITE_HID.saut(
-            crate::kernel::timer::monotonic_ns(),
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        if EQUITE_HID.saut(
+            maintenant,
             eq::SAUTS_AVANT_PRIORITE,
             eq::FAMINE_AVANT_PRIORITE_NS,
-        );
+        ) {
+            // HUIT REFUS, OU DEUX CENTS MILLISECONDES DE FAMINE.
+            //
+            // Reclamer des le premier refus serait trop : un refus isole coute
+            // quatre millisecondes et arrive normalement. Huit refus font
+            // trente-deux millisecondes -- juste au-dela de la cible produit,
+            // et c'est exactement la que la reservation doit s'ouvrir.
+            TOURNIQUET.reclame(maintenant);
+        }
         return;
     };
     EQUITE_HID.succes();
-    note_poll_servi(crate::kernel::timer::monotonic_ns());
+    // T2 : le pilote est en main.
+    let t2 = crate::kernel::timer::monotonic_ns();
+    note_poll_servi(t2);
+    if let Some(t1) = mesure {
+        CHRONO.note_verrou_pris(t1, t2);
+    }
+    // T3 est pris a la sortie, quel que soit le chemin emprunte : c'est le
+    // role de ce garde, que le compilateur pose sur toutes les sorties.
+    let _corps = CorpsMesure { debut: t2, actif: mesure.is_some() };
 
     // L'heure de la prochaine relecture des ports, decidee UNE fois pour tous
     // les controleurs : la calculer par controleur ferait scruter le second

@@ -886,6 +886,19 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 crate::drivers::xhci_active::ECART_HID_CIBLE_MS,
                 crate::drivers::xhci_active::ECART_HID_DEFAUT_MS,
             );
+            // OU EST PASSE LE TEMPS, ET DONC QUI CORRIGER.
+            let k = crate::drivers::xhci_active::chrono_hid();
+            crate::println!(
+                "  ou : reveil->tour {} us | tour->verrou {} us | famine {} us | corps {} us -> {}",
+                k.wake_to_run_max_us, k.run_to_lock_max_us, k.lock_starve_max_us, k.poll_body_max_us,
+                k.responsable(),
+            );
+            crate::println!(
+                "  verrou refuse {} fois (pire serie {}) sur {} tours | par proprietaire : hid {} repli {} fs {} bb {} enum {} diag {}",
+                k.lock_fail_total, k.lock_fail_streak_max, k.tours,
+                k.lock_fail_owner[1], k.lock_fail_owner[2], k.lock_fail_owner[3],
+                k.lock_fail_owner[4], k.lock_fail_owner[5], k.lock_fail_owner[6],
+            );
             let b = crate::drivers::xhci_active::releve_bot();
             crate::println!(
                 "transport BOT : {} phase {} | echeances {} reprises {} ({} ok, {} ko) | refus {} | slot {} dci {}",

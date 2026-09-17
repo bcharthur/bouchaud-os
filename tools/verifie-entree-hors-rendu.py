@@ -80,7 +80,11 @@ def main():
             "du rendu."
         )
     else:
-        if "poll()" not in fil:
+        # `poll_mesure` EST la scrutation : c'est la variante chronometree, la
+        # seule que ce fil appelle. Chercher `poll()` tout court cherchait la
+        # facade, que le fil n'appelle plus depuis qu'il mesure ou passe son
+        # temps.
+        if "poll_mesure(" not in fil and "poll()" not in fil:
             fautes.append("xhci_active.rs : le fil d'entree ne scrute plus.")
         if "sleep_ticks" not in fil:
             fautes.append(

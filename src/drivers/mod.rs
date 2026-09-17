@@ -36,6 +36,10 @@ pub mod proprietaire_runtime;
 /// Etat du transport Bulk-Only, pur : voir `usb/reprise_bot.rs`.
 #[path = "usb/reprise_bot.rs"]
 pub mod reprise_bot;
+/// Ou passe le temps entre deux tours de scrutation HID, pur : voir
+/// `usb/chrono_hid.rs`.
+#[path = "usb/chrono_hid.rs"]
+pub mod chrono_hid;
 #[path = "usb/xhci_active.rs"]
 pub mod xhci_active;
 #[path = "display/bochs.rs"]

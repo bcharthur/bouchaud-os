@@ -91,12 +91,29 @@ pub fn attends_un_tick() {
 /// qui tenait le verrou le retrouve ; un appelant qui n'en avait pas n'en
 /// gagne pas. Zero est une profondeur comme une autre, et c'est desormais la
 /// plus courante.
+/// L'echeance qu'un `sleep_ticks(ticks)` armerait s'il etait appele
+/// maintenant.
+///
+/// # Pourquoi cette fonction existe
+///
+/// Mesurer le retard de reveil d'une tache demande de connaitre l'instant ou
+/// elle DEVAIT repartir. Recopier la formule chez l'appelant marcherait
+/// aujourd'hui et mentirait le jour ou la cadence du timer change -- et le
+/// mensonge accuserait l'ordonnanceur d'un retard qui n'existe pas.
+///
+/// Elle ne change aucun comportement : `sleep_ticks` l'appelle, et c'est la
+/// seule definition de l'echeance.
+pub fn echeance_pour(ticks: u64) -> u64 {
+    let duration_ns = ticks
+        .max(1)
+        .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
+    crate::kernel::timer::monotonic_ns().saturating_add(duration_ns)
+}
+
 pub fn sleep_ticks(ticks: u64) {
     // BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1 : voir `verifie_profondeur_rendue`.
     let profondeur_entree = smp_lock::profondeur_locale();
-    let duration_ns = ticks.max(1)
-        .saturating_mul(1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND);
-    let deadline = crate::kernel::timer::monotonic_ns().saturating_add(duration_ns);
+    let deadline = echeance_pour(ticks);
     {
         let task = current();
         task.wake_deadline_ns.range(deadline);
