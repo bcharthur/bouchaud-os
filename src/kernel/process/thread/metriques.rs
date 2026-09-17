@@ -253,6 +253,35 @@ nom={} ip={} gw={} dns={}",
         crate::drivers::e1000::tx_anneau_plein(),
         crate::drivers::rtl8168::rx_abimees(),
     ));
+    // BOUCHAUD_RTL8168_RX_VIVANT_V1 : L'ETAT DU MOTEUR, PAS SEULEMENT SON BILAN.
+    //
+    // `trames=104` puis plus rien ne permet PAS de choisir entre quatre
+    // pannes : moteur arrete, anneau sature, descripteurs desynchronises,
+    // carte disparue du bus. Ces nombres-ci tranchent sans qu'on ait a
+    // deviner, et ils tiennent en une ligne.
+    let nic = crate::drivers::rtl8168::releve();
+    if nic.xid != 0 || nic.rx_paquets != 0 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[NET-RTL8168] xid={:#05x} gen={} chip_cmd={:#04x} intr_status={:#06x} \
+rx_cur={} tx_cur={} rx_paquets={} rx_octets={} tx_paquets={} tx_octets={} \
+rx_dernier_ns={} tx_dernier_ns={} desc_materiel={} desc_processeur={} desc_courant={:#010x} \
+rx_missed={} isr_lectures={} isr_rx_ok={} isr_rx_err={} isr_rx_overflow={} \
+isr_rx_fifo_over={} isr_tx_err={} isr_link_chg={} isr_sys_err={} isr_absente={} \
+rx_rearmements={} rx_reprises={} rx_reprises_echouees={} rx_abandonnees={} invariant={}",
+            nic.xid, nic.generation, nic.chip_cmd, nic.intr_status,
+            nic.rx_cur, nic.tx_cur,
+            nic.rx_paquets, nic.rx_octets, nic.tx_paquets, nic.tx_octets,
+            nic.rx_dernier_ns, nic.tx_dernier_ns,
+            nic.rx_desc_materiel, nic.rx_desc_processeur, nic.rx_desc_courant,
+            nic.rx_missed,
+            nic.isr_lectures, nic.isr_rx_ok, nic.isr_rx_err, nic.isr_rx_overflow,
+            nic.isr_rx_fifo_over, nic.isr_tx_err, nic.isr_link_chg,
+            nic.isr_system_error, nic.isr_carte_absente,
+            nic.rx_rearmements, nic.rx_reprises, nic.rx_reprises_echouees,
+            nic.rx_abandonnees,
+            nic.invariant.unwrap_or("intact"),
+        ));
+    }
     let (pages_chaudes, fichiers_chauds, prechauffage_ns) =
         crate::kernel::prechauffage::compteurs();
     crate::kernel::dmesg::log_fmt(format_args!(

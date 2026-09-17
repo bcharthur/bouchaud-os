@@ -126,6 +126,14 @@ fn supported_network_device() -> Option<pci::PciDevice> {
     realtek.or(intel_qemu)
 }
 
+/// La reception est-elle arretee ? Si oui, arme une reparation.
+///
+/// Sans objet pour l'e1000 de QEMU, qui n'a pas ce mode de panne : son moteur
+/// ne s'arrete pas tout seul.
+pub fn demande_reparation_si_arretee() -> bool {
+    rtl8168::is_ready() && rtl8168::demande_reparation_si_arretee()
+}
+
 pub fn using_rtl8168() -> bool {
     rtl8168::is_ready()
 }

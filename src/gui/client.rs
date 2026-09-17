@@ -115,7 +115,10 @@ impl Client {
         let (resolveur_choisi, resolveur_source) = crate::net::resolveur::choisis(
             if bail { crate::net::dns_server() } else { [0, 0, 0, 0] },
             if bail { crate::net::gateway() } else { [0, 0, 0, 0] },
-            crate::net::DNS_COMPILE,
+            // ZERO SUR UNE CARTE REELLE : le resolveur compile est celui du
+            // NAT de QEMU, et le remettre au navigateur sur la machine de
+            // reference lui fait attendre un delai d'attente par page.
+            crate::net::resolveur_compile(),
         );
         let base = crate::kernel::exec::shell_environment();
 

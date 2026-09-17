@@ -20,6 +20,9 @@ pub mod resolveur;
 pub mod link;
 pub mod internet;
 pub mod transport;
+/// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la
+/// duree. Voir `net/diagnostic.rs`.
+pub mod diagnostic;
 pub mod security;
 pub mod encoding;
 pub mod application;
@@ -46,19 +49,63 @@ use core::sync::atomic::AtomicBool;
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
 
-// Configuration eth0 (par defaut statique SLIRP ; DHCP peut la remplacer).
-static mut OUR_IP: Ipv4Addr = [10, 0, 2, 15];
-static mut GW_IP: Ipv4Addr = [10, 0, 2, 2];
-static mut DNS_IP: Ipv4Addr = [10, 0, 2, 3];
-
-/// La valeur COMPILEE du resolveur, telle qu'elle vaut avant tout bail.
+/// LA PRESOMPTION SLIRP, ET SON SEUL DOMAINE DE VALIDITE.
 ///
-/// C'est le resolveur du NAT de QEMU. Il est juste la, et faux a peu pres
-/// partout ailleurs -- notamment sur la machine de reference, ou il a fait
-/// repondre « Unable to resolve host » a toutes les pages pendant que le
-/// reseau, lui, fonctionnait. `net::resolveur` ne s'en sert qu'en dernier
-/// recours, et le DIT quand il le fait.
-pub const DNS_COMPILE: Ipv4Addr = [10, 0, 2, 3];
+/// Ces trois adresses sont la configuration d'usine du NAT de QEMU. Elles sont
+/// justes la, et fausses partout ailleurs. Elles vivent dans un module nomme
+/// pour qu'on ne puisse pas les ecrire ailleurs par distraction : le garde-fou
+/// `verifie-reseau-sans-triche.py` les interdit dans tout le reste de la pile.
+///
+/// # Ce qu'elles ont coute
+///
+/// Sur la machine de reference, `10.0.2.3` a fait repondre « Unable to resolve
+/// host » a toutes les pages pendant que le reseau fonctionnait. Une adresse
+/// qui ne mene nulle part vaut moins que pas d'adresse du tout : sans
+/// resolveur, le navigateur le DIT ; avec un faux, il attend un delai
+/// d'attente et accuse le reseau.
+mod presomption_slirp {
+    use super::Ipv4Addr;
+    pub const IP: Ipv4Addr = [10, 0, 2, 15];
+    pub const PASSERELLE: Ipv4Addr = [10, 0, 2, 2];
+    pub const RESOLVEUR: Ipv4Addr = [10, 0, 2, 3];
+}
+
+// Configuration eth0 : presomption SLIRP au depart, que DHCP remplace, et que
+// `oublie_la_presomption_slirp` efface sur une carte reelle.
+static mut OUR_IP: Ipv4Addr = presomption_slirp::IP;
+static mut GW_IP: Ipv4Addr = presomption_slirp::PASSERELLE;
+static mut DNS_IP: Ipv4Addr = presomption_slirp::RESOLVEUR;
+
+/// Le resolveur COMPILE, ou RIEN sur une carte reelle.
+///
+/// `net::resolveur` range le bail avant la passerelle avant la valeur
+/// compilee. Ce dernier rang n'a de sens que sous l'emulateur : sur une carte
+/// physique il designe une machine qui n'existe pas, et le navigateur passe
+/// alors son temps a attendre des delais.
+///
+/// Rendre zero ici fait descendre `choisis` jusqu'a `Source::Aucun`, qui est
+/// la verite : nous n'avons pas de resolveur, et il vaut mieux le dire.
+pub fn resolveur_compile() -> Ipv4Addr {
+    if e1000::using_rtl8168() {
+        [0, 0, 0, 0]
+    } else {
+        presomption_slirp::RESOLVEUR
+    }
+}
+
+/// Efface la presomption SLIRP de la configuration vivante.
+///
+/// Appelee quand la carte est REELLE et qu'aucun bail n'est arrive. Garder
+/// `10.0.2.2` comme passerelle ferait resoudre par ARP une adresse qui
+/// n'existe pas sur ce reseau -- quatre tentatives, deux secondes, et un echec
+/// mis en cache, a chaque paquet sortant.
+fn oublie_la_presomption_slirp() {
+    unsafe {
+        if OUR_IP == presomption_slirp::IP { OUR_IP = [0, 0, 0, 0]; }
+        if GW_IP == presomption_slirp::PASSERELLE { GW_IP = [0, 0, 0, 0]; }
+        if DNS_IP == presomption_slirp::RESOLVEUR { DNS_IP = [0, 0, 0, 0]; }
+    }
+}
 
 /// Adresse IPv4 d'eth0.
 pub fn our_ip() -> Ipv4Addr { unsafe { OUR_IP } }
@@ -199,7 +246,13 @@ fn demarre_interne() -> Demarrage {
         // 10.0.2.x est une convention SLIRP QEMU, pas une configuration
         // universelle. Sur le RTL8168 physique, un DHCP absent signifie
         // simplement "hors ligne" jusqu'a configuration manuelle.
-        None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
+        None if e1000::using_rtl8168() => {
+            // CARTE REELLE, AUCUN BAIL : la configuration d'usine de QEMU
+            // n'est pas une configuration, c'est une adresse qui n'existe pas
+            // sur ce cable.
+            oublie_la_presomption_slirp();
+            Demarrage::SansConfiguration
+        }
         None => Demarrage::SansBail,
     }
 }
@@ -405,6 +458,7 @@ fn veilleur_de_lien() -> ! {
             crate::kernel::timer::ms_to_ticks(PERIODE_LIEN_MS),
         );
         let lien = e1000::link_up();
+        verifie_la_reception();
         let etat = etat_demarrage();
 
         if lien != lien_precedent {
@@ -743,6 +797,46 @@ fn arp_cache_pose_echec(ip: Ipv4Addr) {
         return;
     }
     arp_cache_pose_verrouille(ip, None);
+}
+
+/// Oublie UN voisin, et lui seul.
+///
+/// # Pourquoi cela existe, et pourquoi ce n'est pas de la triche
+///
+/// La duree de vie d'une entree ARP positive est d'une minute. Un banc qui
+/// resout la passerelle sans rien oublier ne mesurerait donc qu'une seule
+/// resolution suivie de cent quatre-vingts lectures de cache : il repondrait
+/// « oui » a une question qu'il n'a pas posee.
+///
+/// Oublier volontairement avant chaque tour est ce qui rend la mesure REELLE :
+/// chaque tour part d'un cache vide pour cette adresse-la, emet une vraie
+/// requete, et attend une vraie reponse. C'est l'inverse d'allonger la duree
+/// de vie -- celle-la cacherait une reception morte, celle-ci l'expose.
+pub fn oublie_voisin(ip: Ipv4Addr) {
+    let _garde = VERROU_RECEPTION.lock();
+    cache_arp().retain(|e| e.ip != ip);
+}
+
+/// Ce que le cache sait de `ip`, sans rien demander au reseau.
+///
+/// `None` : rien en cache. `Some(None)` : un voisin connu pour muet.
+pub fn voisin_en_cache(ip: Ipv4Addr) -> Option<Option<[u8; 6]>> {
+    arp_cache_lit(ip)
+}
+
+/// Resout une adresse materielle, en emettant si necessaire.
+pub fn resout_voisin(ip: Ipv4Addr) -> Option<[u8; 6]> {
+    arp_resolve(ip)
+}
+
+/// Duree de vie d'une entree ARP positive, en millisecondes.
+///
+/// Publiee pour que le banc puisse l'AFFIRMER plutot que la supposer : un
+/// correctif qui la porterait a l'infini pour masquer une reception morte
+/// serait vu par un test, et non decouvert six semaines plus tard sur un autre
+/// reseau.
+pub fn arp_ttl_ms() -> u64 {
+    ARP_TTL_MS
 }
 
 /// Oublie tous les voisins connus.
@@ -1205,6 +1299,23 @@ pub(crate) fn prend_dhcp(out: &mut [u8]) -> Option<usize> {
 /// Rend le nombre de trames traitees. Zero veut dire que l'anneau est vide a
 /// cet instant -- et seulement cela, depuis que le pilote ne confond plus une
 /// trame abimee avec une absence de trafic.
+/// LA RECEPTION EST UN ETAT DE LIEN, ELLE AUSSI.
+///
+/// Le veilleur regardait le bit de lien et rien d'autre. Sur le releve du
+/// 17 septembre ce bit est reste a UN, a mille megabits, en duplex integral,
+/// pendant que plus une seule trame n'entrait. Un lien qui porte bien et ne
+/// recoit plus rien est une panne, et personne ne la regardait.
+///
+/// L'examen est borne en frequence par le pilote, et il ne fait RIEN tant que
+/// la reception progresse. Quand il arme une reparation, c'est ce drainage-ci
+/// qui l'execute -- sous `VERROU_RECEPTION`, comme tout ce qui touche a
+/// l'anneau de la carte.
+pub fn verifie_la_reception() {
+    if e1000::demande_reparation_si_arretee() {
+        draine_anneau();
+    }
+}
+
 pub(crate) fn draine_anneau() -> usize {
     let _garde = VERROU_RECEPTION.lock();
     draine_verrouille()

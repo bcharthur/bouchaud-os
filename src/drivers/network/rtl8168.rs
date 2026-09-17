@@ -11,9 +11,10 @@
 //! utilisable hors ligne.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
+use crate::drivers::anneau_rx as anneau;
 use crate::kernel::{dmesg, memory};
 
 pub const VENDOR_REALTEK: u16 = 0x10EC;
@@ -37,9 +38,9 @@ const REG_CPLUS_CMD: u32 = 0xE0;
 const REG_RX_DESC_LOW: u32 = 0xE4;
 const REG_RX_DESC_HIGH: u32 = 0xE8;
 
-const CMD_RESET: u8 = 0x10;
-const CMD_RX_ENABLE: u8 = 0x08;
-const CMD_TX_ENABLE: u8 = 0x04;
+const CMD_RESET: u8 = anneau::cmd::RESET;
+const CMD_RX_ENABLE: u8 = anneau::cmd::RX_ENB;
+const CMD_TX_ENABLE: u8 = anneau::cmd::TX_ENB;
 const TX_POLL_NPQ: u8 = 0x40;
 const CFG9346_UNLOCK: u8 = 0xC0;
 const CFG9346_LOCK: u8 = 0x00;
@@ -210,21 +211,16 @@ pub fn trames_perdues() -> u32 {
     }
 }
 
-const ACCEPT_BROADCAST: u32 = 0x08;
-const ACCEPT_MULTICAST: u32 = 0x04;
-const ACCEPT_MY_PHYS: u32 = 0x02;
-const RX_FIFO_THRESH: u32 = 7 << 13;
-const RX_DMA_BURST: u32 = 7 << 8;
+/// Les bits d'acceptation, ecrits EN DERNIER comme `rtl_set_rx_mode`.
+const ACCEPTATION: u32 =
+    anneau::ACCEPTE_DIFFUSION | anneau::ACCEPTE_MULTIDIFFUSION | anneau::ACCEPTE_MA_MAC;
 const TX_DMA_BURST: u32 = 7 << 8;
 const TX_INTERFRAME_GAP: u32 = 3 << 24;
-const CPLUS_PCIDAC: u16 = 1 << 4;
 
-const DESC_OWN: u32 = 1 << 31;
-const DESC_EOR: u32 = 1 << 30;
-const DESC_FS: u32 = 1 << 29;
-const DESC_LS: u32 = 1 << 28;
-const DESC_RX_ERROR: u32 = (1 << 22) | (1 << 21) | (1 << 20) | (1 << 19);
-const DESC_LEN_MASK: u32 = 0x3FFF;
+const DESC_OWN: u32 = anneau::OWN;
+const DESC_EOR: u32 = anneau::EOR;
+const DESC_FS: u32 = anneau::FS;
+const DESC_LS: u32 = anneau::LS;
 
 /// Longueur minimale d'une trame Ethernet, FCS exclu (IEEE 802.3).
 ///
@@ -246,9 +242,9 @@ const DESC_LEN_MASK: u32 = 0x3FFF;
 /// C'est la seule trame de moins de soixante octets que la pile emette.
 const TRAME_MIN: usize = 60;
 
-const N_RX: usize = 64;
+const N_RX: usize = anneau::DESCRIPTEURS;
 const N_TX: usize = 16;
-const BUF_SIZE: usize = 2048;
+const BUF_SIZE: usize = anneau::TAILLE_TAMPON as usize;
 const DESC_SIZE: usize = 16;
 const RESET_SPINS: usize = 1_000_000;
 const LINK_WAIT_MS: u64 = 3_000;
@@ -257,6 +253,9 @@ static mut MMIO: u64 = 0;
 static mut READY: bool = false;
 static mut MAC: [u8; 6] = [0; 6];
 static mut RX_RING: *mut u8 = core::ptr::null_mut();
+/// Adresse PHYSIQUE de l'anneau RX. Sans elle, reconstruire l'anneau ne peut
+/// pas reprogrammer le controleur, et le pointeur interne resterait desyncrone.
+static mut RX_RING_P: u64 = 0;
 static mut TX_RING: *mut u8 = core::ptr::null_mut();
 static mut RX_BUFFER_V: *mut u8 = core::ptr::null_mut();
 static mut RX_BUFFER_P: u64 = 0;
@@ -267,6 +266,164 @@ static mut TX_CUR: usize = 0;
 static mut TX_RING_FULL: u64 = 0;
 /// Trames jetees parce que le controleur les a marquees en erreur.
 static mut RX_ABIMEES: u64 = 0;
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_RTL8168_RX_VIVANT_V1 : le releve, et rien qu'un releve
+// ---------------------------------------------------------------------------
+//
+// Le releve physique du 17 septembre dit « trames=104 » puis plus rien, et il
+// ne permet PAS de choisir entre quatre pannes differentes : moteur arrete,
+// anneau sature, descripteurs desynchronises, ou carte disparue du bus. Le
+// prochain releve doit trancher sans qu'on ait a deviner.
+//
+// Ce sont des compteurs et des instantanes. AUCUN journal par paquet : un
+// pilote qui imprime a chaque trame ne mesure plus que lui-meme.
+static RX_PAQUETS: AtomicU64 = AtomicU64::new(0);
+static RX_OCTETS: AtomicU64 = AtomicU64::new(0);
+static TX_PAQUETS: AtomicU64 = AtomicU64::new(0);
+static TX_OCTETS: AtomicU64 = AtomicU64::new(0);
+static RX_DERNIER_NS: AtomicU64 = AtomicU64::new(0);
+static TX_DERNIER_NS: AtomicU64 = AtomicU64::new(0);
+static TX_PREMIER_NS: AtomicU64 = AtomicU64::new(0);
+
+static ISR_LECTURES: AtomicU64 = AtomicU64::new(0);
+static ISR_RX_OK: AtomicU64 = AtomicU64::new(0);
+static ISR_RX_ERR: AtomicU64 = AtomicU64::new(0);
+static ISR_RX_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+static ISR_RX_FIFO_OVER: AtomicU64 = AtomicU64::new(0);
+static ISR_TX_ERR: AtomicU64 = AtomicU64::new(0);
+static ISR_LINK_CHG: AtomicU64 = AtomicU64::new(0);
+static ISR_SYSTEM_ERROR: AtomicU64 = AtomicU64::new(0);
+static ISR_CARTE_ABSENTE: AtomicU64 = AtomicU64::new(0);
+
+static RX_REARMEMENTS: AtomicU64 = AtomicU64::new(0);
+static RX_REPRISES: AtomicU64 = AtomicU64::new(0);
+static RX_REPRISES_ECHOUEES: AtomicU64 = AtomicU64::new(0);
+static RX_ABANDONNEES: AtomicU64 = AtomicU64::new(0);
+static REPRISE_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
+static REPRISES_SANS_EFFET: AtomicU32 = AtomicU32::new(0);
+static MAINTENANCE_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
+static SANTE_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_RTL8168_RX_VIVANT_V1 : LA REPARATION SE FAIT SUR LE CHEMIN DE
+// RECEPTION, ET NULLE PART AILLEURS.
+//
+// Reconstruire l'anneau, c'est le reecrire en entier et remettre `RX_CUR` a
+// zero. Le faire depuis le veilleur de lien pendant que `receive` lit un
+// descripteur serait exactement la course que `VERROU_RECEPTION` existe pour
+// fermer : « un seul point sort les trames de la carte ».
+//
+// Le veilleur ne fait donc que DEMANDER ; la reparation a lieu au prochain
+// passage du drainage, sous le verrou de celui-ci.
+static REPARATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
+/// Identifiant de revision lu dans `TxConfig`, et la generation qui en decoule.
+static XID: AtomicU32 = AtomicU32::new(0);
+static mut GENERATION: anneau::Generation = anneau::Generation::Inconnue;
+
+/// Periode minimale entre deux maintenances de statut, en nanosecondes.
+///
+/// Une maintenance coute deux acces MMIO. La scrutation ARP appelle le
+/// drainage en boucle serree pendant cinq cents millisecondes : sans borne,
+/// nous passerions ce temps a lire un registre. Une milliseconde laisse mille
+/// occasions par seconde de voir un moteur tomber, ce qui est tres au-dela du
+/// besoin.
+const MAINTENANCE_PERIODE_NS: u64 = 1_000_000;
+
+/// Periode minimale entre deux examens de sante complets.
+const SANTE_PERIODE_NS: u64 = 500_000_000;
+
+/// L'instantane du pilote, pour `netetat` et la blackbox.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Releve {
+    pub rx_cur: u32,
+    pub tx_cur: u32,
+    pub rx_paquets: u64,
+    pub rx_octets: u64,
+    pub tx_paquets: u64,
+    pub tx_octets: u64,
+    pub rx_dernier_ns: u64,
+    pub tx_dernier_ns: u64,
+    pub rx_desc_materiel: u32,
+    pub rx_desc_processeur: u32,
+    pub rx_desc_courant: u32,
+    pub chip_cmd: u8,
+    pub intr_status: u16,
+    pub rx_missed: u32,
+    pub isr_lectures: u64,
+    pub isr_rx_ok: u64,
+    pub isr_rx_err: u64,
+    pub isr_rx_overflow: u64,
+    pub isr_rx_fifo_over: u64,
+    pub isr_tx_err: u64,
+    pub isr_link_chg: u64,
+    pub isr_system_error: u64,
+    pub isr_carte_absente: u64,
+    pub rx_rearmements: u64,
+    pub rx_reprises: u64,
+    pub rx_reprises_echouees: u64,
+    pub rx_abandonnees: u64,
+    pub rx_abimees: u64,
+    pub tx_anneau_plein: u64,
+    pub xid: u32,
+    pub generation: &'static str,
+    pub invariant: Option<&'static str>,
+}
+
+/// L'etat du pilote, en une lecture. Sans effet de bord sur le materiel.
+pub fn releve() -> Releve {
+    unsafe {
+        if !READY {
+            return Releve::default();
+        }
+        let recensement = anneau::recense(N_RX, |i| desc_read32(RX_RING, i, 0));
+        Releve {
+            rx_cur: RX_CUR as u32,
+            tx_cur: TX_CUR as u32,
+            rx_paquets: RX_PAQUETS.load(Ordering::Relaxed),
+            rx_octets: RX_OCTETS.load(Ordering::Relaxed),
+            tx_paquets: TX_PAQUETS.load(Ordering::Relaxed),
+            tx_octets: TX_OCTETS.load(Ordering::Relaxed),
+            rx_dernier_ns: RX_DERNIER_NS.load(Ordering::Relaxed),
+            tx_dernier_ns: TX_DERNIER_NS.load(Ordering::Relaxed),
+            rx_desc_materiel: recensement.materiel as u32,
+            rx_desc_processeur: recensement.processeur as u32,
+            rx_desc_courant: desc_read32(RX_RING, RX_CUR, 0),
+            chip_cmd: read8(REG_CHIP_CMD),
+            // LECTURE SEULE : `releve` n'acquitte rien. Un diagnostic qui
+            // modifie ce qu'il observe efface la panne qu'il doit nommer.
+            intr_status: read16(REG_INTR_STATUS),
+            rx_missed: read32(REG_RX_MISSED),
+            isr_lectures: ISR_LECTURES.load(Ordering::Relaxed),
+            isr_rx_ok: ISR_RX_OK.load(Ordering::Relaxed),
+            isr_rx_err: ISR_RX_ERR.load(Ordering::Relaxed),
+            isr_rx_overflow: ISR_RX_OVERFLOW.load(Ordering::Relaxed),
+            isr_rx_fifo_over: ISR_RX_FIFO_OVER.load(Ordering::Relaxed),
+            isr_tx_err: ISR_TX_ERR.load(Ordering::Relaxed),
+            isr_link_chg: ISR_LINK_CHG.load(Ordering::Relaxed),
+            isr_system_error: ISR_SYSTEM_ERROR.load(Ordering::Relaxed),
+            isr_carte_absente: ISR_CARTE_ABSENTE.load(Ordering::Relaxed),
+            rx_rearmements: RX_REARMEMENTS.load(Ordering::Relaxed),
+            rx_reprises: RX_REPRISES.load(Ordering::Relaxed),
+            rx_reprises_echouees: RX_REPRISES_ECHOUEES.load(Ordering::Relaxed),
+            rx_abandonnees: RX_ABANDONNEES.load(Ordering::Relaxed),
+            rx_abimees: RX_ABIMEES,
+            tx_anneau_plein: TX_RING_FULL,
+            xid: XID.load(Ordering::Relaxed),
+            generation: anneau::nom(GENERATION),
+            invariant: invariant_anneau(),
+        }
+    }
+}
+
+/// L'invariant de l'anneau RX, lu sur le materiel.
+unsafe fn invariant_anneau() -> Option<&'static str> {
+    anneau::invariant_casse(
+        N_RX,
+        RX_BUFFER_P,
+        anneau::TAILLE_TAMPON,
+        |i| desc_read32(RX_RING, i, 0),
+        |i| read_volatile(RX_RING.add(i * DESC_SIZE + 8) as *const u64),
+    )
+}
 
 #[inline]
 unsafe fn read8(offset: u32) -> u8 {
@@ -452,6 +609,7 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         };
 
         RX_RING = rx_ring_v;
+        RX_RING_P = rx_ring_p;
         TX_RING = tx_ring_v;
         RX_BUFFER_P = rx_buffer_p;
         RX_BUFFER_V = rx_buffer_v;
@@ -461,14 +619,18 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         TX_CUR = 0;
 
         for index in 0..N_RX {
-            let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
-            desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
             desc_write32(RX_RING, index, 4, 0);
             desc_write64(
                 RX_RING,
                 index,
                 8,
-                rx_buffer_p + (index * BUF_SIZE) as u64,
+                anneau::adresse_tampon(rx_buffer_p, index, anneau::TAILLE_TAMPON),
+            );
+            desc_write32(
+                RX_RING,
+                index,
+                0,
+                anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
             );
         }
         for index in 0..N_TX {
@@ -483,25 +645,33 @@ pub fn init_with_device(device: &PciDevice) -> bool {
             );
         }
 
-        // Les anneaux peuvent vivre au-dessus de 4 Gio dans l'arene DMA.
-        // RTL8168 sait les adresser en 64 bits via PCIDAC + registres HIGH.
+        // LA REVISION DU SILICIUM D'ABORD : elle decide `RxConfig`.
+        //
+        // `TxConfig` porte l'identifiant de revision, et `rtl8169_init_one` le
+        // lit exactement ainsi. Le pilote ecrivait jusqu'ici le meme `RxConfig`
+        // pour toute la famille -- celui d'un RTL8169 de 2003.
+        let identifiant = anneau::xid(read32(REG_TX_CONFIG));
+        let generation = anneau::generation(identifiant);
+        XID.store(identifiant, Ordering::Relaxed);
+        GENERATION = generation;
+
+        // `CPlusCmd` : on ne GARDE que ce que Linux garde.
+        //
+        // La version precedente posait `PCIDAC` pour adresser des anneaux
+        // au-dessus de quatre gibioctets. Ce n'est pas ainsi qu'un RTL8168 y
+        // accede -- les registres `*DescAddrHigh` ci-dessous portent les bits
+        // hauts -- et `rtl_init_one` efface ce bit sur toute la famille.
         write8(REG_CFG9346, CFG9346_UNLOCK);
-        write16(REG_CPLUS_CMD, read16(REG_CPLUS_CMD) | CPLUS_PCIDAC);
-        write16(REG_RX_MAX_SIZE, (BUF_SIZE - 1) as u16);
+        write16(REG_CPLUS_CMD, anneau::cplus_cmd(read16(REG_CPLUS_CMD)));
+        // La taille MAXIMALE acceptee, et non la taille moins un : une trame
+        // de exactement `BUF_SIZE` octets tient dans le tampon.
+        write16(REG_RX_MAX_SIZE, BUF_SIZE as u16);
 
         write32(REG_TX_DESC_LOW, tx_ring_p as u32);
         write32(REG_TX_DESC_HIGH, (tx_ring_p >> 32) as u32);
         write32(REG_RX_DESC_LOW, rx_ring_p as u32);
         write32(REG_RX_DESC_HIGH, (rx_ring_p >> 32) as u32);
 
-        write32(
-            REG_RX_CONFIG,
-            RX_FIFO_THRESH
-                | RX_DMA_BURST
-                | ACCEPT_BROADCAST
-                | ACCEPT_MULTICAST
-                | ACCEPT_MY_PHYS,
-        );
         write32(REG_TX_CONFIG, TX_DMA_BURST | TX_INTERFRAME_GAP);
         write32(REG_MAR0, 0xFFFF_FFFF);
         write32(REG_MAR0 + 4, 0xFFFF_FFFF);
@@ -510,7 +680,17 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         write16(REG_INTR_STATUS, 0xFFFF);
 
         compiler_fence(Ordering::Release);
+        // L'ORDRE DE `rtl_hw_start` : moteurs d'abord, `RxConfig` ensuite, et
+        // les bits d'acceptation EN DERNIER (`rtl_set_rx_mode`). Programmer
+        // `RxConfig` apres avoir arme les moteurs est ce que fait la
+        // reference, et melanger l'acceptation dans la meme ecriture la ferait
+        // perdre a chaque reprogrammation.
         write8(REG_CHIP_CMD, CMD_TX_ENABLE | CMD_RX_ENABLE);
+        write32(REG_RX_CONFIG, anneau::rx_config(generation));
+        write32(
+            REG_RX_CONFIG,
+            (read32(REG_RX_CONFIG) & !anneau::MASQUE_ACCEPTATION) | ACCEPTATION,
+        );
         write8(REG_CFG9346, CFG9346_LOCK);
 
         READY = true;
@@ -518,13 +698,25 @@ pub fn init_with_device(device: &PciDevice) -> bool {
 
     let m = mac();
     let raw_version = unsafe { read32(REG_TX_CONFIG) };
+    let identifiant = XID.load(Ordering::Relaxed);
+    let (generation, rxcfg, chip) = unsafe {
+        (anneau::nom(GENERATION), read32(REG_RX_CONFIG), read8(REG_CHIP_CMD))
+    };
     dmesg::log_fmt(format_args!(
-        "rtl8168: initialise MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} txcfg={:#010x}",
-        m[0], m[1], m[2], m[3], m[4], m[5], raw_version,
+        "rtl8168: initialise MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} txcfg={:#010x} xid={:#05x} {}",
+        m[0], m[1], m[2], m[3], m[4], m[5], raw_version, identifiant, generation,
     ));
+    // LA REVISION DANS LE RELEVE, ET PAS SEULEMENT AU DEMARRAGE.
+    //
+    // Cette ligne-la partait sur la liaison serie huit minutes avant la
+    // capture du releve physique du 17 septembre : l'anneau de trace l'avait
+    // deja ecrasee, et la revision du silicium -- donc le bon `RxConfig` --
+    // etait la seule chose que l'archive ne disait pas. `netetat` la porte
+    // desormais aussi.
     crate::serial_println!(
-        "BOUCHAUD_TRIGKEY_RTL8168_DRIVER_OK mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5],
+        "BOUCHAUD_TRIGKEY_RTL8168_DRIVER_OK mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} \
+xid={:#05x} generation={} rxcfg={:#010x} chip_cmd={:#04x}",
+        m[0], m[1], m[2], m[3], m[4], m[5], identifiant, generation, rxcfg, chip,
     );
     // LE PHY D'ABORD, L'ATTENTE ENSUITE.
     //
@@ -617,7 +809,300 @@ pub fn send(frame: &[u8]) -> bool {
         );
         compiler_fence(Ordering::Release);
         write8(REG_TX_POLL, TX_POLL_NPQ);
-        TX_CUR = (index + 1) % N_TX;
+        TX_CUR = anneau::suivant(index, N_TX);
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        TX_PAQUETS.fetch_add(1, Ordering::Relaxed);
+        TX_OCTETS.fetch_add(longueur as u64, Ordering::Relaxed);
+        TX_DERNIER_NS.store(maintenant, Ordering::Relaxed);
+        // Le PREMIER instant d'emission, et lui seul, sert de reference quand
+        // rien n'a jamais ete recu. Voir `anneau_rx::Sante::tx_premier_ns`.
+        let _ = TX_PREMIER_NS.compare_exchange(
+            0,
+            maintenant,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_RTL8168_RX_VIVANT_V1 : la maintenance d'un pilote qui SCRUTE
+// ---------------------------------------------------------------------------
+
+/// Lit `IntrStatus`, compte ce qu'il porte, et l'acquitte.
+///
+/// # Le trou que cette fonction bouche
+///
+/// `IntrStatus` n'etait acquitte qu'a l'initialisation. Le pilote scrute, le
+/// masque d'interruption est nul, et personne n'a jamais relu ce registre
+/// ensuite : tout ce que le controleur y a signale pendant des heures --
+/// debordement de file, plus de descripteur, erreur systeme -- etait invisible
+/// ET restait verrouille.
+///
+/// U-Boot, qui scrute lui aussi, fait exactement cela dans `rtl_recv_common`,
+/// et le fait DANS la branche ou le descripteur courant porte encore `OWN` --
+/// c'est-a-dire au moment precis ou la reception semble vide. C'est la que
+/// nous l'appelons.
+///
+/// Rend le statut LU (avant acquittement), ou zero.
+unsafe fn maintenance_isr() -> u16 {
+    let status = read16(REG_INTR_STATUS);
+    ISR_LECTURES.fetch_add(1, Ordering::Relaxed);
+    if anneau::carte_absente(status) {
+        ISR_CARTE_ABSENTE.fetch_add(1, Ordering::Relaxed);
+        return 0;
+    }
+    if status == 0 {
+        return 0;
+    }
+    if status & anneau::isr::RX_OK != 0 { ISR_RX_OK.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::RX_ERR != 0 { ISR_RX_ERR.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::RX_OVERFLOW != 0 { ISR_RX_OVERFLOW.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::RX_FIFO_OVER != 0 { ISR_RX_FIFO_OVER.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::TX_ERR != 0 { ISR_TX_ERR.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::LINK_CHG != 0 { ISR_LINK_CHG.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::SYS_ERR != 0 { ISR_SYSTEM_ERROR.fetch_add(1, Ordering::Relaxed); }
+    let a_ecrire = anneau::a_acquitter(status);
+    if a_ecrire != 0 {
+        write16(REG_INTR_STATUS, a_ecrire);
+    }
+    status
+}
+
+/// La maintenance du passage a vide, bornee en frequence.
+///
+/// La scrutation ARP appelle le drainage en boucle serree pendant cinq cents
+/// millisecondes. Sans borne, nous passerions ce temps a lire un registre
+/// PCIe. Une milliseconde laisse mille occasions par seconde de voir un moteur
+/// tomber.
+unsafe fn maintenance_anneau_vide() {
+    // LA DEMANDE PASSE AVANT LA BORNE DE FREQUENCE.
+    //
+    // Une reparation demandee par le veilleur ne doit pas attendre la
+    // milliseconde suivante pour etre servie : la borne existe pour epargner
+    // des acces MMIO, pas pour retarder une reprise.
+    let demandee = REPARATION_DEMANDEE.swap(false, Ordering::AcqRel);
+
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let precedent = MAINTENANCE_DERNIERE_NS.load(Ordering::Relaxed);
+    if !demandee
+        && precedent != 0
+        && maintenant.saturating_sub(precedent) < MAINTENANCE_PERIODE_NS
+    {
+        return;
+    }
+    MAINTENANCE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
+
+    maintenance_isr();
+
+    // LE CONTROLEUR DIT LUI-MEME QUE SON MOTEUR EST TOMBE.
+    //
+    // `RxEnb` a zero, ou `RxBufEmpty` pose alors que nous venons de tout lui
+    // rendre : dans les deux cas il n'ecrira plus rien, et rien ne le
+    // redemarrera tout seul. Il n'y a aucune raison d'attendre trois secondes
+    // de silence pour agir sur un signe aussi explicite.
+    if demandee || anneau::moteur_rx_a_relancer(read8(REG_CHIP_CMD)) {
+        let avant = RX_PAQUETS.load(Ordering::Relaxed);
+        repare_reception();
+        // Une reprise qui ne fait rien repartir compte : c'est elle qui fait
+        // monter d'un barreau au tour suivant.
+        if RX_PAQUETS.load(Ordering::Relaxed) == avant {
+            REPRISES_SANS_EFFET.fetch_add(1, Ordering::Relaxed);
+        } else {
+            REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Rend au materiel tous les descripteurs que le processeur retient.
+///
+/// Les trames non drainees qui s'y trouvaient sont PERDUES, et comptees comme
+/// telles : une trame que personne n'a lue en trois secondes n'interesse plus
+/// personne, et la garder bloquerait l'anneau pour de bon.
+unsafe fn rearme_descripteurs_retenus() -> u64 {
+    let mut rendus = 0u64;
+    for index in 0..N_RX {
+        if desc_read32(RX_RING, index, 0) & DESC_OWN != 0 {
+            continue;
+        }
+        desc_write64(RX_RING, index, 8, anneau::adresse_tampon(
+            RX_BUFFER_P,
+            index,
+            anneau::TAILLE_TAMPON,
+        ));
+        desc_write32(RX_RING, index, 4, 0);
+        compiler_fence(Ordering::Release);
+        desc_write32(
+            RX_RING,
+            index,
+            0,
+            anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
+        );
+        rendus += 1;
+    }
+    RX_REARMEMENTS.fetch_add(rendus, Ordering::Relaxed);
+    rendus
+}
+
+/// Reconstruit l'anneau de reception et repositionne le materiel dessus.
+unsafe fn reconstruit_anneau() {
+    // Le materiel ne doit pas ecrire pendant qu'on deplace ce qu'il lit.
+    write8(REG_CHIP_CMD, read8(REG_CHIP_CMD) & !CMD_RX_ENABLE);
+    for index in 0..N_RX {
+        desc_write32(RX_RING, index, 4, 0);
+        desc_write64(RX_RING, index, 8, anneau::adresse_tampon(
+            RX_BUFFER_P,
+            index,
+            anneau::TAILLE_TAMPON,
+        ));
+        desc_write32(
+            RX_RING,
+            index,
+            0,
+            anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
+        );
+    }
+    RX_CUR = 0;
+    compiler_fence(Ordering::Release);
+    // Reecrire la base remet le pointeur interne du controleur au debut : nos
+    // deux curseurs repartent du meme descripteur.
+    write32(REG_RX_DESC_LOW, RX_RING_P as u32);
+    write32(REG_RX_DESC_HIGH, (RX_RING_P >> 32) as u32);
+    compiler_fence(Ordering::Release);
+    write8(REG_CHIP_CMD, CMD_TX_ENABLE | CMD_RX_ENABLE);
+}
+
+/// L'echelle de reprise, du moins invasif au plus invasif.
+///
+/// # Ne pas couper le lien pour une anomalie de reception
+///
+/// Une reinitialisation complete rend l'interface muette, fait retomber le
+/// lien et oblige a refaire DHCP. Elle est au dernier barreau, et on n'y monte
+/// qu'apres que les precedents ont echoue -- `anneau_rx::degre` encode la
+/// regle, et un test hote la contredit sans demarrer la machine.
+unsafe fn repare_reception() -> bool {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    // UNE REPRISE COUTE DES TRAMES, ET UNE LIGNE DE TRACE.
+    //
+    // Le chemin qui repond a `RxBufEmpty` est examine mille fois par seconde.
+    // Sans cette borne, une puce qui poserait ce bit en permanence ferait
+    // mille reprises et mille lignes par seconde : la trace deviendrait
+    // illisible au moment precis ou elle doit servir, et l'anneau serait
+    // reconstruit sans jamais laisser au moteur le temps de montrer qu'il est
+    // reparti.
+    let precedente = REPRISE_DERNIERE_NS.load(Ordering::Relaxed);
+    if precedente != 0
+        && maintenant.saturating_sub(precedente) < anneau::REPOS_ENTRE_REPRISES_NS
+    {
+        return true;
+    }
+    REPRISE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
+    RX_REPRISES.fetch_add(1, Ordering::Relaxed);
+
+    let paquets_avant = RX_PAQUETS.load(Ordering::Relaxed);
+    let recensement = anneau::recense(N_RX, |i| desc_read32(RX_RING, i, 0));
+    let invariant = invariant_anneau();
+    let chip = read8(REG_CHIP_CMD);
+    let degre = anneau::degre(
+        invariant,
+        recensement,
+        chip,
+        REPRISES_SANS_EFFET.load(Ordering::Relaxed),
+    );
+
+    // 1 et 2 : drainer ce qui reste et acquitter les statuts. Toujours.
+    let status = maintenance_isr();
+
+    // 3 : rendre au materiel les descripteurs que nous retenons.
+    if degre >= anneau::Degre::Rearme {
+        RX_ABANDONNEES.fetch_add(rearme_descripteurs_retenus(), Ordering::Relaxed);
+    }
+
+    // 4 et 5 : verifier `RxEnb`, et relancer LE MOTEUR SEUL.
+    if degre >= anneau::Degre::RelanceRx {
+        write8(REG_CHIP_CMD, CMD_TX_ENABLE | CMD_RX_ENABLE);
+    }
+
+    // 6 : reconstruire l'anneau, seulement si son invariant est casse.
+    if degre >= anneau::Degre::ReconstruitAnneau {
+        reconstruit_anneau();
+    }
+
+    // 7 : reinitialiser la carte, en dernier recours seulement.
+    if degre >= anneau::Degre::ReinitialiseCarte {
+        READY = false;
+        MMIO = 0;
+        RX_REPRISES_ECHOUEES.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_NET_RTL8168_REPRISE degre=reinitialise chip_cmd={:#04x} \
+intr_status={:#06x} desc_materiel={} desc_processeur={} invariant={}",
+            chip,
+            status,
+            recensement.materiel,
+            recensement.processeur,
+            invariant.unwrap_or("intact"),
+        );
+        return false;
+    }
+
+    crate::serial_println!(
+        "BOUCHAUD_NET_RTL8168_REPRISE degre={} chip_cmd={:#04x} intr_status={:#06x} \
+desc_materiel={} desc_processeur={} rx_cur={} invariant={} rx_paquets={}",
+        match degre {
+            anneau::Degre::Draine => "draine",
+            anneau::Degre::Rearme => "rearme",
+            anneau::Degre::RelanceRx => "relance-rx",
+            anneau::Degre::ReconstruitAnneau => "reconstruit-anneau",
+            anneau::Degre::ReinitialiseCarte => "reinitialise",
+        },
+        chip,
+        status,
+        recensement.materiel,
+        recensement.processeur,
+        RX_CUR,
+        invariant.unwrap_or("intact"),
+        paquets_avant,
+    );
+    true
+}
+
+/// La reception est-elle arretee ? Si oui, ARME une reparation.
+///
+/// # Cette fonction ne touche pas au materiel, et c'est voulu
+///
+/// Elle est appelee par le veilleur de lien, qui ne tient pas le verrou de
+/// reception. Reconstruire l'anneau depuis la, pendant que `receive` lit un
+/// descripteur, serait exactement la course que ce verrou existe pour fermer.
+///
+/// Elle ne fait donc que poser un drapeau. La reparation a lieu au prochain
+/// passage du drainage, sous le verrou de celui-ci -- et l'appelant declenche
+/// ce passage juste apres.
+///
+/// Rend `true` quand une reparation vient d'etre armee.
+pub fn demande_reparation_si_arretee() -> bool {
+    unsafe {
+        if !READY {
+            return false;
+        }
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let precedent = SANTE_DERNIERE_NS.load(Ordering::Relaxed);
+        if precedent != 0 && maintenant.saturating_sub(precedent) < SANTE_PERIODE_NS {
+            return false;
+        }
+        SANTE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
+
+        let sante = anneau::Sante {
+            lien: link_up(),
+            rx_dernier_ns: RX_DERNIER_NS.load(Ordering::Relaxed),
+            tx_dernier_ns: TX_DERNIER_NS.load(Ordering::Relaxed),
+            tx_premier_ns: TX_PREMIER_NS.load(Ordering::Relaxed),
+            reprise_derniere_ns: REPRISE_DERNIERE_NS.load(Ordering::Relaxed),
+        };
+        if !anneau::reception_arretee(&sante, maintenant) {
+            return false;
+        }
+        REPARATION_DEMANDEE.store(true, Ordering::Release);
         true
     }
 }
@@ -649,37 +1134,56 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
         for _ in 0..N_RX {
             let index = RX_CUR;
             let status = desc_read32(RX_RING, index, 0);
-            if status & DESC_OWN != 0 {
-                return None;
-            }
-
             compiler_fence(Ordering::Acquire);
-            let raw_len = (status & DESC_LEN_MASK) as usize;
-            let good = status & DESC_RX_ERROR == 0 && raw_len >= 4 && raw_len <= BUF_SIZE;
-            let payload_len = raw_len.saturating_sub(4); // RTL8168 livre aussi le FCS.
-            let copied = if good {
-                let n = payload_len.min(out.len());
-                let source = RX_BUFFER_V.add(index * BUF_SIZE);
-                core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
-                Some(n)
-            } else {
-                RX_ABIMEES = RX_ABIMEES.saturating_add(1);
-                None
+
+            let copied = match anneau::examine(status, anneau::TAILLE_TAMPON) {
+                anneau::Verdict::Materiel => {
+                    // ICI, ET NULLE PART AILLEURS.
+                    //
+                    // C'est le point ou U-Boot fait sa maintenance de
+                    // scrutation : le descripteur courant porte encore `OWN`,
+                    // la reception semble vide, et c'est le seul instant ou
+                    // relire `IntrStatus` ne coute rien. Un moteur tombe se
+                    // voit la, et pas une trame plus tard.
+                    maintenance_anneau_vide();
+                    return None;
+                }
+                anneau::Verdict::Bonne(longueur) => {
+                    let n = longueur.min(out.len());
+                    let source = RX_BUFFER_V.add(index * BUF_SIZE);
+                    core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), n);
+                    Some(n)
+                }
+                anneau::Verdict::Abimee => {
+                    RX_ABIMEES = RX_ABIMEES.saturating_add(1);
+                    None
+                }
             };
 
-            let eor = if index + 1 == N_RX { DESC_EOR } else { 0 };
             desc_write64(
                 RX_RING,
                 index,
                 8,
-                RX_BUFFER_P + (index * BUF_SIZE) as u64,
+                anneau::adresse_tampon(RX_BUFFER_P, index, anneau::TAILLE_TAMPON),
             );
             desc_write32(RX_RING, index, 4, 0);
             compiler_fence(Ordering::Release);
-            desc_write32(RX_RING, index, 0, DESC_OWN | eor | BUF_SIZE as u32);
-            RX_CUR = (index + 1) % N_RX;
+            desc_write32(
+                RX_RING,
+                index,
+                0,
+                anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
+            );
+            RX_REARMEMENTS.fetch_add(1, Ordering::Relaxed);
+            RX_CUR = anneau::suivant(index, N_RX);
 
             if let Some(n) = copied {
+                RX_PAQUETS.fetch_add(1, Ordering::Relaxed);
+                RX_OCTETS.fetch_add(n as u64, Ordering::Relaxed);
+                RX_DERNIER_NS.store(
+                    crate::kernel::timer::monotonic_ns(),
+                    Ordering::Relaxed,
+                );
                 return Some(n);
             }
         }

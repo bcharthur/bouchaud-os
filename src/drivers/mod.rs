@@ -21,6 +21,11 @@ pub mod disk;
 pub mod nvme;
 #[path = "api/display.rs"]
 pub mod display;
+/// Discipline de l'anneau de reception RTL8168, PURE : voir
+/// `network/anneau_rx.rs`. Aucun acces materiel, donc verifiable par un test
+/// hote sans demarrer la machine.
+#[path = "network/anneau_rx.rs"]
+pub mod anneau_rx;
 #[path = "network/e1000.rs"]
 pub mod e1000;
 #[path = "network/rtl8168.rs"]
