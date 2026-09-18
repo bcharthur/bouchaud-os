@@ -59,6 +59,8 @@ FACADE = RACINE / "src/kernel/services/mod.rs"
 
 SIGNATURE_DRAW = "pub(crate) fn draw(bx: usize, by: usize, bw: usize, bh: usize) {"
 SIGNATURE_ATELIER = "pub fn avec_atelier<R>(travail: impl FnOnce(&mut Atelier) -> R) -> R {"
+SIGNATURE_ACTION = "fn action_de(id: &str) -> Option<(&'static str, bool)> {"
+SIGNATURE_BARRE = "fn peins_la_barre(bx: usize, by: usize, bw: usize, etat: &mut EtatVue) {"
 
 # Les six lignes de la photo. Un peintre qui les nomme est retombe dans le
 # defaut : ces noms appartiennent au publicateur.
@@ -271,12 +273,56 @@ def main():
     #
     # Les colonnes de la pile. Une fenetre qui n'affiche qu'un etat ne dit
     # toujours pas pourquoi une page ne charge pas.
-    for colonne in ["COL_ETAT", "COL_CPU", "COL_RAM", "COL_RESEAU", "COL_LATENCE"]:
-        if colonne not in peintre:
+    for colonne in ["etat", "cpu", "ram", "disque", "reseau", "latence", "erreurs", "raison"]:
+        if ("cols.%s" % colonne) not in peintre:
             fautes.append(
-                "src/gui/apps/services.rs n'a plus de colonne `%s` : la "
-                "fenetre a perdu une mesure de la pile." % colonne
+                "src/gui/apps/services.rs n'affiche plus la colonne « %s » : "
+                "la fenetre a perdu une mesure de la pile." % colonne
             )
+
+    # ------------------------------------------------------------------ 6
+    #
+    # LES ACTIONS SONT CONTEXTUELLES.
+    #
+    # « Demarrer Ladybird / Arreter Ladybird » occupait la premiere ligne
+    # d'une fenetre qui surveille l'ordonnanceur, la memoire, l'USB et la pile
+    # reseau. Un moniteur systeme dont l'en-tete pilote une application est un
+    # panneau d'application deguise -- c'est de la que cette fenetre vient, et
+    # c'est la qu'elle retournerait sans une regle.
+    corps_action = corps(peintre, SIGNATURE_ACTION)
+    if corps_action is None:
+        fautes.append(
+            "`%s` est introuvable : l'action contextuelle a disparu, et rien "
+            "n'empeche plus un bouton fixe en tete de fenetre."
+            % SIGNATURE_ACTION
+        )
+    elif "starts_with" not in corps_action:
+        fautes.append(
+            "`action_de` ne regarde plus a QUI l'action s'applique : une "
+            "action qui ne depend pas de la selection est un bouton fixe."
+        )
+    corps_barre = corps(peintre, SIGNATURE_BARRE)
+    if corps_barre is None:
+        fautes.append("`%s` est introuvable." % SIGNATURE_BARRE)
+    elif "selection" not in corps_barre:
+        fautes.append(
+            "la barre de la fenetre Services dessine une action sans "
+            "consulter la selection : les boutons Ladybird sont revenus en "
+            "en-tete fixe."
+        )
+
+    # ------------------------------------------------------------------ 7
+    #
+    # UNE CELLULE VIDE SE TAIT, ET NE MENT PAS.
+    #
+    # Ni « N/A » repete cent fois -- une colonne entiere de « N/A » ne se lit
+    # plus --, ni un zero, qui est une mesure.
+    if '"N/A"' in peintre:
+        fautes.append(
+            "src/gui/apps/services.rs affiche encore « N/A » : une colonne "
+            "entiere de « N/A » ne se lit plus, et le jour ou une vraie "
+            "valeur y apparait l'oeil la saute aussi."
+        )
 
     if fautes:
         print("FENETRE SERVICES : %d manquement(s)" % len(fautes))

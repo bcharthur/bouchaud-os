@@ -38,6 +38,9 @@
 
 #[path = "registre.rs"]
 pub mod registre;
+/// Le pipeline de navigation : a quelle etape une page bloque.
+#[path = "navigation.rs"]
+pub mod navigation;
 /// Le modele VISIBLE de la fenetre Services, pur : voir `services/vue.rs`.
 #[path = "vue.rs"]
 pub mod vue;
@@ -160,6 +163,21 @@ pub fn etat(id: &str, nouvel_etat: Etat) {
     let evenement = {
         let mut r = REGISTRE.lock();
         r.etat(id, nouvel_etat, maintenant_ns)
+    };
+    if evenement {
+        emet_evenement(id, nouvel_etat, maintenant_ns);
+    }
+}
+
+/// Change l'etat d'un service ET dit pourquoi.
+///
+/// « Attente » sans raison oblige a deviner ce qui est attendu, et on devine
+/// toujours le jour ou l'on n'a pas le temps.
+pub fn etat_car(id: &str, nouvel_etat: Etat, raison: &str) {
+    let maintenant_ns = maintenant();
+    let evenement = {
+        let mut r = REGISTRE.lock();
+        r.etat_avec_raison(id, nouvel_etat, raison, maintenant_ns)
     };
     if evenement {
         emet_evenement(id, nouvel_etat, maintenant_ns);
@@ -296,18 +314,82 @@ pub fn publie_les_indicateurs() {
             ..Kpi::default()
         }
     };
+    // CINQ COUCHES, CINQ REPONSES DISTINCTES.
+    //
+    // La photo du 18 septembre montre « Ethernet deconnecte » dans la barre du
+    // haut pendant que la fenetre affiche « rtl8168 Actif, 5 Kio/1 Kio ». Les
+    // deux disaient vrai et se contredisaient : le cable porte, des octets
+    // circulent, ET aucune adresse IPv4 n'a ete obtenue -- sur materiel reel
+    // on ne fabrique jamais les adresses SLIRP de QEMU.
+    //
+    // Le defaut n'etait pas la mesure, c'etait le mot : un seul « connecte »
+    // recouvrait cinq questions qui ont chacune leur reponse.
+    //
+    //   carte detectee   -> net.nic
+    //   pilote actif     -> net.nic.<modele>
+    //   lien physique    -> net.link
+    //   configuration IP -> net.config (dhcp, dns)
+    //   connectivite     -> net.ipv4
+    //
+    // Chacune porte sa RAISON. « Attente » sans raison oblige a deviner.
+    let carte_absente = !carte_prete;
     if carte_prete {
         kpi(carte, releve);
         // `Reprise` est pose par le pilote lui-meme et ne doit pas etre efface
         // ici : une reprise en cours est plus grave qu'un lien qui porte.
         if !matches!(etat_de(carte), Etat::Reprise | Etat::Degrade) {
-            etat(carte, if lien { Etat::Actif } else { Etat::Attente });
+            let qualite = crate::net::qualite_lien();
+            if lien {
+                etat_car(carte, Etat::Actif, "pilote en service");
+            } else if qualite.vitesse_mbps == 0 {
+                etat_car(carte, Etat::Attente, "lien bas");
+            } else {
+                etat_car(carte, Etat::Attente, "autonegociation");
+            }
         }
     } else {
-        etat(carte, Etat::Panne);
+        etat_car(carte, Etat::Panne, "carte non pilotee");
     }
-    etat("net.link", if lien { Etat::Actif } else { Etat::Attente });
-    etat("net.ethernet", if lien { Etat::Actif } else { Etat::Repos });
+    // L'AUTRE CARTE N'EST PAS EN PANNE : ELLE N'EST PAS LA.
+    let absente = if crate::drivers::e1000::using_rtl8168() {
+        "net.nic.e1000"
+    } else {
+        "net.nic.rtl8168"
+    };
+    etat_car(absente, Etat::Indisponible, "absente de ce materiel");
+
+    // Le lien physique, avec ce qu'il vaut.
+    let qualite = crate::net::qualite_lien();
+    if carte_absente {
+        etat_car("net.link", Etat::Indisponible, "aucune carte");
+    } else if lien {
+        let raison = if qualite.vitesse_mbps == 0 {
+            "lien monte"
+        } else if qualite.duplex_complet {
+            "duplex complet"
+        } else {
+            "semi-duplex"
+        };
+        etat_car("net.link", Etat::Actif, raison);
+        kpi(
+            "net.link",
+            Kpi {
+                operations: if qualite.vitesse_mbps == 0 {
+                    None
+                } else {
+                    Some(qualite.vitesse_mbps as u64)
+                },
+                ..Kpi::default()
+            },
+        );
+    } else {
+        etat_car("net.link", Etat::Attente, "pas de cable");
+    }
+    etat_car(
+        "net.ethernet",
+        if lien { Etat::Actif } else { Etat::Attente },
+        if lien { "trames echangees" } else { "lien bas" },
+    );
 
     // --- ce que le routage a vu -----------------------------------------
     let (routees, arp_vues, dhcp_vues, arp_ok, _arp_ko, _) =
@@ -319,12 +401,16 @@ pub fn publie_les_indicateurs() {
             ..Kpi::default()
         },
     );
-    if routees != 0 {
-        etat("net.ipv4", Etat::Actif);
-    } else if crate::net::our_ip() != [0, 0, 0, 0] {
+    // LA CONNECTIVITE EFFECTIVE, distincte du lien et de la configuration.
+    let adresse = crate::net::our_ip();
+    if adresse == [0, 0, 0, 0] {
+        etat_car("net.ipv4", Etat::Attente, "aucune adresse");
+    } else if routees != 0 {
+        etat_car("net.ipv4", Etat::Actif, "trafic route");
+    } else {
         // Une adresse est posee et la pile repond, mais le routage maison n'a
         // rien route : c'est le cas nominal quand smoltcp porte le trafic.
-        etat("net.ipv4", Etat::Repos);
+        etat_car("net.ipv4", Etat::Repos, "adresse posee");
     }
     kpi(
         "net.arp",
@@ -333,8 +419,14 @@ pub fn publie_les_indicateurs() {
             ..Kpi::default()
         },
     );
-    if arp_vues != 0 && etat_de("net.arp") == Etat::Inconnu {
-        etat("net.arp", Etat::Actif);
+    if arp_vues == 0 {
+        etat_car(
+            "net.arp",
+            if lien { Etat::Repos } else { Etat::Indisponible },
+            if lien { "aucune resolution" } else { "lien bas" },
+        );
+    } else if etat_de("net.arp") != Etat::Degrade {
+        etat_car("net.arp", Etat::Actif, "voisins resolus");
     }
     kpi(
         "net.dhcp",
@@ -343,22 +435,25 @@ pub fn publie_les_indicateurs() {
             ..Kpi::default()
         },
     );
+    // Le bail se lit sur le BAIL, pas sur le nombre de trames DHCP vues par le
+    // routage maison : sous QEMU c'est smoltcp qui mene l'echange, le compteur
+    // maison reste a zero, et la ligne restait muette avec une adresse
+    // affichee dans la barre du haut.
     if crate::net::bail_obtenu() {
-        // Le bail est pose ; le client se tait jusqu'au renouvellement.
-        //
-        // Le bail se lit sur le BAIL, pas sur le nombre de trames DHCP vues
-        // par le routage maison : sous QEMU c'est smoltcp qui mene l'echange,
-        // le compteur maison reste a zero, et la ligne restait « N/A » avec
-        // une adresse affichee dans la barre du haut.
-        etat("net.dhcp", Etat::Repos);
-    } else if lien {
-        etat("net.dhcp", Etat::Attente);
+        etat_car("net.dhcp", Etat::Repos, "bail obtenu");
+    } else if !lien {
+        etat_car("net.dhcp", Etat::Attente, "lien bas");
+    } else {
+        // LE CAS DE LA TRIGKEY. Le cable porte, le serveur ne repond pas.
+        etat_car("net.dhcp", Etat::Attente, "aucun bail");
     }
 
     // --- la resolution de noms, et le transport -------------------------
     let resolveur = crate::net::dns_server();
-    if resolveur != [0, 0, 0, 0] && etat_de("net.dns") == Etat::Inconnu {
-        etat("net.dns", Etat::Repos);
+    if resolveur == [0, 0, 0, 0] {
+        etat_car("net.dns", Etat::Attente, "aucun resolveur");
+    } else if etat_de("net.dns") != Etat::Degrade {
+        etat_car("net.dns", Etat::Repos, "resolveur configure");
     }
     let (poignees, _syn_rtx, _rtt_min, rtt_max, rtt_moyen) =
         crate::net::transport::retransmission::stats_poignee();
@@ -374,9 +469,33 @@ pub fn publie_les_indicateurs() {
         },
     );
     if poignees != 0 {
-        etat("net.tcp", Etat::Actif);
-    } else if lien {
-        etat("net.tcp", Etat::Repos);
+        etat_car("net.tcp", Etat::Actif, "connexions etablies");
+    } else if adresse == [0, 0, 0, 0] {
+        etat_car("net.tcp", Etat::Indisponible, "sans adresse IPv4");
+    } else {
+        etat_car("net.tcp", Etat::Repos, "aucune connexion");
+    }
+    // UDP, TLS et les protocoles applicatifs suivent le meme prerequis : sans
+    // adresse, ils ne peuvent rien faire, et « Indisponible » le dit mieux
+    // qu'une colonne vide.
+    let sans_ip = adresse == [0, 0, 0, 0];
+    for protocole in ["net.udp", "net.icmp"] {
+        if etat_de(protocole) == Etat::Inconnu || sans_ip {
+            etat_car(
+                protocole,
+                if sans_ip { Etat::Indisponible } else { Etat::Repos },
+                if sans_ip { "sans adresse IPv4" } else { "aucun trafic" },
+            );
+        }
+    }
+    for protocole in ["net.tls", "net.http1", "net.http2", "net.hpack", "net.gzip", "net.brotli"] {
+        if etat_de(protocole) == Etat::Inconnu {
+            etat_car(
+                protocole,
+                Etat::Indisponible,
+                if sans_ip { "sans adresse IPv4" } else { "aucune session" },
+            );
+        }
     }
 
     // --- l'ordonnanceur et la memoire ------------------------------------
@@ -388,13 +507,175 @@ pub fn publie_les_indicateurs() {
             ..Kpi::default()
         },
     );
-    etat("sys.scheduler", Etat::Actif);
-    let (heap_utilise, _libre, _total) = crate::kernel::heap::stats();
+    let coeurs = crate::arch::x86_64::smp::schedulable_cpus().max(1);
+    etat_car("sys.scheduler", Etat::Actif, "charge de la machine");
+    kpi(
+        "sys.scheduler",
+        Kpi {
+            cpu_pour_mille: Some(crate::kernel::timer::cpu_load_pct() as u32 * 10),
+            operations: Some(coeurs as u64),
+            latence_max_us: if pire_pic_us == 0 { None } else { Some(pire_pic_us) },
+            ..Kpi::default()
+        },
+    );
+
+    // LA MEMOIRE. Le tas mesure ; le physique et le compagnon ne sont pas
+    // instrumentes, et le disent au lieu de rester muets.
+    let (heap_utilise, _libre, heap_total) = crate::kernel::heap::stats();
     kpi("sys.memory.heap", Kpi { rss_octets: Some(heap_utilise as u64), ..Kpi::default() });
-    etat("sys.memory.heap", Etat::Actif);
-    etat("sys.diag.blackbox", Etat::Actif);
-    etat("sys.graphics.wm", Etat::Actif);
-    etat("sys.graphics.desktop", Etat::Actif);
+    etat_car("sys.memory.heap", Etat::Actif, "tas noyau");
+    // LA COLONNE « RAM » VEUT DIRE « CONSOMMEE ».
+    //
+    // La premiere version y publiait la RAM installee et la reserve du tas :
+    // la ligne `sys` affichait alors 1,4 Gio en additionnant une capacite et
+    // une consommation. Deux grandeurs differentes dans une meme colonne
+    // donnent une somme qui ne veut rien dire -- et qui se lit comme si le
+    // systeme mangeait un gigaoctet et demi.
+    //
+    // Une capacite se dit donc dans la RAISON, ou elle n'est additionnee avec
+    // rien.
+    let ram = crate::platform::pc::hardware_facts::usable_ram_bytes();
+    etat_car("sys.memory.physical", Etat::Actif, &gio(ram));
+    etat_car("sys.memory.buddy", Etat::Actif, &mio(heap_total as u64));
+
+    // LE STOCKAGE.
+    let noeuds = crate::fs::ramfs::used_nodes_relaxed();
+    kpi("sys.storage.ramfs", Kpi { operations: Some(noeuds as u64), ..Kpi::default() });
+    etat_car("sys.storage.ramfs", Etat::Actif, "systeme de fichiers en RAM");
+    etat_car("sys.storage.fs", Etat::Actif, "monte");
+    etat_car("sys.storage.nvme", Etat::Indisponible, "aucun disque NVMe");
+
+    // L'USB. C'est la que « Indisponible » se distingue d'une panne : sous
+    // QEMU il n'y a pas de xHCI, et ce n'est pas un defaut.
+    use crate::platform::pc::hardware_facts as materiel;
+    if materiel::xhci_active() {
+        let ports = materiel::xhci_connected_ports();
+        kpi("sys.usb.xhci", Kpi { operations: Some(ports as u64), ..Kpi::default() });
+        etat_car("sys.usb.xhci", Etat::Actif, "controleur en service");
+        let claviers = crate::drivers::xhci_active::hid_keyboards();
+        let souris = crate::drivers::xhci_active::hid_mice();
+        etat_car(
+            "sys.usb.keyboard",
+            if claviers == 0 { Etat::Attente } else { Etat::Actif },
+            if claviers == 0 { "aucun clavier" } else { "clavier present" },
+        );
+        etat_car(
+            "sys.usb.mouse",
+            if souris == 0 { Etat::Attente } else { Etat::Actif },
+            if souris == 0 { "aucune souris" } else { "souris presente" },
+        );
+        kpi("sys.usb.keyboard", Kpi { operations: Some(claviers as u64), ..Kpi::default() });
+        kpi("sys.usb.mouse", Kpi { operations: Some(souris as u64), ..Kpi::default() });
+    } else if materiel::xhci_present() {
+        etat_car("sys.usb.xhci", Etat::Demarrage, "enumeration en cours");
+    } else {
+        for usb in ["sys.usb.xhci", "sys.usb.keyboard", "sys.usb.mouse", "sys.usb.bot"] {
+            etat_car(usb, Etat::Indisponible, "aucun controleur xHCI");
+        }
+        etat_car("sys.storage.usb", Etat::Indisponible, "aucun controleur xHCI");
+    }
+
+    // --- LE PIPELINE DE NAVIGATION ---------------------------------------
+    //
+    // Douze etapes, et pour chacune : son etat, sa duree, ses octets. C'est la
+    // reponse a « a quelle etape la page bloque ».
+    publie_la_navigation();
+
+    // LE GRAPHIQUE ET LE DIAGNOSTIC.
+    etat_car("sys.diag.blackbox", Etat::Actif, "archive armee");
+    etat_car("sys.diag.serial", Etat::Actif, "trace noyau");
+    etat_car("sys.graphics.wm", Etat::Actif, "compositeur");
+    etat_car("sys.graphics.desktop", Etat::Actif, "bureau");
+    etat_car("sys.graphics.present", Etat::Actif, "presentation a l'ecran");
+}
+
+/// Reporte l'etat du pipeline de navigation dans le registre.
+///
+/// # Les six etapes que le noyau ne voit pas
+///
+/// Le decodage, l'analyse HTML et CSS, la mise en page, la peinture et la
+/// presentation sont du code d'anneau 3, dans `WebContent`. Aucun appel
+/// systeme ne les traverse, donc aucune mesure honnete n'en sort d'ici.
+///
+/// Elles se declarent `Indisponible` AVEC LEUR RAISON, et non vides : une
+/// case vide laisse croire que l'etape n'a pas eu lieu, ou qu'elle attend.
+/// « non instrumente (anneau 3) » dit ou ne pas chercher.
+fn publie_la_navigation() {
+    use navigation::{Etape, ETAPES};
+    use registre::Kpi;
+    let Some((url, url_len, etapes, debut_ns, fin_ns)) = navigation::instantane() else {
+        // Aucune navigation depuis le demarrage : la chaine attend, elle n'a
+        // pas echoue.
+        for rang in 0..ETAPES {
+            let Some(etape) = Etape::depuis_rang(rang) else { continue };
+            if etat_de(etape.service()) == Etat::Inconnu {
+                etat_car(etape.service(), Etat::Repos, "aucune navigation");
+            }
+        }
+        return;
+    };
+
+    let adresse = core::str::from_utf8(&url[..url_len]).unwrap_or("?");
+    for rang in 0..ETAPES {
+        let Some(etape) = Etape::depuis_rang(rang) else { continue };
+        let mesure = etapes[rang];
+        if !etape.observable() {
+            etat_car(etape.service(), Etat::Indisponible, "non instrumente (anneau 3)");
+            continue;
+        }
+        let raison = match mesure.etat {
+            Etat::Panne => "echec",
+            Etat::Demarrage => "en cours",
+            Etat::Indisponible => "sans objet",
+            Etat::Actif => "termine",
+            _ => "en attente",
+        };
+        let etat_publie = match mesure.etat {
+            // Une etape reussie n'est pas « active » : elle est FAITE. La
+            // montrer active ferait croire a un travail en cours.
+            Etat::Actif => Etat::Repos,
+            autre => autre,
+        };
+        etat_car(etape.service(), etat_publie, raison);
+        kpi(
+            etape.service(),
+            Kpi {
+                latence_us: if mesure.duree_us == 0 { None } else { Some(mesure.duree_us) },
+                rx_octets: if mesure.octets == 0 { None } else { Some(mesure.octets) },
+                ..Kpi::default()
+            },
+        );
+    }
+
+    // LE GROUPE PORTE L'URL. C'est la premiere chose qu'on veut lire.
+    let duree_us = if fin_ns != 0 && debut_ns != 0 {
+        fin_ns.saturating_sub(debut_ns) / 1_000
+    } else {
+        0
+    };
+    etat_car(
+        "browser.navigation",
+        if fin_ns == 0 { Etat::Demarrage } else { Etat::Repos },
+        adresse,
+    );
+    kpi(
+        "browser.navigation",
+        Kpi {
+            latence_us: if duree_us == 0 { None } else { Some(duree_us) },
+            operations: Some(navigation::compteur()),
+            ..Kpi::default()
+        },
+    );
+}
+
+/// Une capacite en gibioctets, pour une raison.
+fn gio(octets: u64) -> alloc::string::String {
+    alloc::format!("{} Gio installes", octets / (1024 * 1024 * 1024))
+}
+
+/// Une reserve en mebioctets, pour une raison.
+fn mio(octets: u64) -> alloc::string::String {
+    alloc::format!("{} Mio de reserve", octets / (1024 * 1024))
 }
 
 /// L'etat courant d'un service, ou `Inconnu`.

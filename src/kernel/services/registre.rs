@@ -79,6 +79,17 @@ pub enum Etat {
     Arrete = 7,
     /// En panne.
     Panne = 8,
+    /// LE PREREQUIS N'EST PAS LA.
+    ///
+    /// A distinguer d'`Inconnu`, qui veut dire « personne n'a rien publie »,
+    /// et de `Panne`, qui veut dire « cela devrait marcher et cela ne marche
+    /// pas ». `Indisponible` dit : ce composant ne peut pas fonctionner ici,
+    /// et ce n'est la faute de personne -- la carte e1000 sur une machine
+    /// equipee d'un RTL8168, TLS tant qu'aucune socket n'est ouverte.
+    ///
+    /// La difference compte a l'ecran : une panne appelle une enquete, une
+    /// indisponibilite appelle un prerequis.
+    Indisponible = 9,
 }
 
 impl Etat {
@@ -93,6 +104,7 @@ impl Etat {
             Etat::Reprise => "reprise",
             Etat::Arrete => "arrete",
             Etat::Panne => "panne",
+            Etat::Indisponible => "indisponible",
         }
     }
 
@@ -230,8 +242,18 @@ pub struct Entree {
     pub redemarrages: u32,
     pub reprises: u32,
     pub erreurs: u32,
-    /// Derniere raison connue d'un etat degrade ou en panne.
+    /// Derniere raison connue de l'etat courant.
+    ///
+    /// Plus seulement des pannes : « sans bail », « 1 Gb/s duplex complet »,
+    /// « aucune socket ouverte ». Un etat sans raison oblige a deviner, et on
+    /// devine toujours le jour ou l'on n'a pas le temps.
     pub raison: Id,
+    /// Instant du dernier CHANGEMENT d'etat.
+    ///
+    /// `derniere_activite_ns` bouge a chaque publication, meme quand rien ne
+    /// change ; celle-ci ne bouge que sur une transition. C'est elle qui
+    /// repond a « depuis quand ? ».
+    pub derniere_transition_ns: u64,
     /// Ce que ce service publie, quand il publie quelque chose.
     pub kpi: Kpi,
 }
@@ -252,6 +274,7 @@ impl Entree {
             reprises: 0,
             erreurs: 0,
             raison: Id::vide(),
+            derniere_transition_ns: 0,
             kpi: Kpi {
                 cpu_pour_mille: None,
                 rss_octets: None,
@@ -354,6 +377,28 @@ impl Registre {
     /// service qui reste actif sans erreur pendant cinq minutes n'ecrit rien :
     /// c'est ce qui evite que la boite noire efface le demarrage pour decrire
     /// un systeme qui va bien.
+    /// Pose un etat ET la raison qui l'explique.
+    ///
+    /// La raison survit tant que l'etat ne change pas : reposer le meme etat
+    /// sans raison (une publication periodique) n'efface pas celle qui avait
+    /// ete donnee. Sinon « sans bail » disparaitrait a la seconde suivante et
+    /// la fenetre afficherait « Attente » sans jamais dire de quoi.
+    pub fn etat_avec_raison(
+        &mut self,
+        id: &str,
+        etat: Etat,
+        raison: &str,
+        maintenant_ns: u64,
+    ) -> bool {
+        let evenement = self.etat(id, etat, maintenant_ns);
+        if let Some(place) = self.place(id) {
+            if !raison.is_empty() {
+                self.entrees[place].raison = Id::depuis(raison);
+            }
+        }
+        evenement
+    }
+
     pub fn etat(&mut self, id: &str, etat: Etat, maintenant_ns: u64) -> bool {
         let Some(place) = self.place(id) else { return false };
         let entree = &mut self.entrees[place];
@@ -383,6 +428,7 @@ impl Registre {
             entree.reprises = entree.reprises.saturating_add(1);
         }
         entree.etat = etat;
+        entree.derniere_transition_ns = maintenant_ns;
 
         // CE QUI MERITE UNE LIGNE, ET CE QUI N'EN MERITE PAS.
         //
@@ -494,6 +540,62 @@ impl Registre {
 /// L'ORDRE DE CE TABLEAU EST L'ORDRE D'AFFICHAGE. Trier par nom mettrait
 /// `net.arp` avant `net.ethernet` et ferait apparaitre ARP au-dessus de la
 /// couche qui le porte.
+/// LE PREREQUIS D'UN SERVICE : ce qui doit marcher AVANT lui.
+///
+/// # Pourquoi une table a part
+///
+/// « Ce qui attend un prerequis » est la question la plus frequente devant
+/// une pile qui ne repond pas. L'arbre de la topologie dit la
+/// RESPONSABILITE -- `net.dns` vit sous `net.config` --, pas la DEPENDANCE :
+/// DNS n'attend pas `net.config`, il attend une adresse IP et une route.
+/// Melanger les deux relations dans un seul parent obligerait a choisir
+/// laquelle on perd.
+///
+/// La chaine se lit donc ici, et le panneau de detail la suit jusqu'a la
+/// premiere case qui ne va pas.
+pub const PREREQUIS: &[(&str, &str)] = &[
+    // Le reseau, de bas en haut.
+    ("net.link", "net.nic"),
+    ("net.ethernet", "net.link"),
+    ("net.arp", "net.ethernet"),
+    ("net.dhcp", "net.ethernet"),
+    ("net.ipv4", "net.dhcp"),
+    ("net.icmp", "net.ipv4"),
+    ("net.dns", "net.ipv4"),
+    ("net.udp", "net.ipv4"),
+    ("net.tcp", "net.ipv4"),
+    ("net.tls", "net.tcp"),
+    ("net.http1", "net.tcp"),
+    ("net.http2", "net.tls"),
+    ("net.hpack", "net.http2"),
+    ("net.gzip", "net.http1"),
+    ("net.brotli", "net.http1"),
+    // Le navigateur.
+    ("browser.request_server", "browser.host"),
+    ("browser.web_content", "browser.host"),
+    ("browser.image_decoder", "browser.host"),
+    ("browser.web_worker", "browser.host"),
+    ("browser.compositor", "browser.host"),
+    // La navigation, etape par etape : chacune attend la precedente.
+    ("browser.navigation.url", "browser.request_server"),
+    ("browser.navigation.dns", "browser.navigation.url"),
+    ("browser.navigation.tcp", "browser.navigation.dns"),
+    ("browser.navigation.tls", "browser.navigation.tcp"),
+    ("browser.navigation.http", "browser.navigation.tls"),
+    ("browser.navigation.download", "browser.navigation.http"),
+    ("browser.navigation.decode", "browser.navigation.download"),
+    ("browser.navigation.html", "browser.navigation.decode"),
+    ("browser.navigation.css", "browser.navigation.html"),
+    ("browser.navigation.layout", "browser.navigation.css"),
+    ("browser.navigation.paint", "browser.navigation.layout"),
+    ("browser.navigation.present", "browser.navigation.paint"),
+];
+
+/// Le prerequis declare d'un service, s'il en a un.
+pub fn prerequis(id: &str) -> Option<&'static str> {
+    PREREQUIS.iter().find(|(qui, _)| *qui == id).map(|(_, quoi)| *quoi)
+}
+
 pub const TOPOLOGIE: &[(&str, &str, Genre)] = &[
     // --- Systeme ---------------------------------------------------------
     ("sys", "", Genre::Groupe),

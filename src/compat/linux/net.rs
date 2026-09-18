@@ -254,6 +254,20 @@ pub fn sys_connect(fd: i32, addr: u64, len: usize) -> i64 {
             if state.lock().conn.is_some() {
                 return -errno::EISCONN;
             }
+            // LE SEUL ENDROIT OU LE NOYAU VOIT NAVIGUER LE NAVIGATEUR.
+            //
+            // `net::fetch_document` est le chemin NOYAU -- wget, pip, git. Le
+            // navigateur, lui, vit en anneau 3 et ouvre ses connexions par
+            // cet appel systeme. Sans cette sonde, le pipeline de navigation
+            // resterait vide precisement pendant qu'on navigue.
+            //
+            // L'URL n'existe pas ici : le noyau voit une adresse et un port,
+            // pas un nom de page. On inscrit donc ce qu'on voit -- et rien de
+            // plus.
+            let observe = navigation_du_navigateur();
+            if observe {
+                nav_debute_depuis_socket(ip, port);
+            }
             // La poignee de main est synchrone : la pile est pilotee par
             // interrogation, il n'y a personne d'autre pour la faire avancer.
             match TcpConn::connect(ip, port) {
@@ -261,12 +275,68 @@ pub fn sys_connect(fd: i32, addr: u64, len: usize) -> i64 {
                     let mut borrowed = state.lock();
                     borrowed.conn = Some(conn);
                     borrowed.peer = Some((ip, port));
+                    if observe {
+                        nav_tcp_ouvert(port);
+                    }
                     0
                 }
-                None => -errno::ECONNREFUSED,
+                None => {
+                    if observe {
+                        nav_tcp_echoue();
+                    }
+                    -errno::ECONNREFUSED
+                }
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Le pipeline de navigation, vu depuis les appels systeme
+// ---------------------------------------------------------------------------
+
+/// L'appelant appartient-il au navigateur ?
+///
+/// Un `connect` vient de n'importe quel programme d'anneau 3. Attribuer la
+/// navigation a tous ferait remonter `wget` ou un outil de paquets dans la
+/// chaine du navigateur, et la fenetre Services designerait la mauvaise
+/// etape.
+fn navigation_du_navigateur() -> bool {
+    let pid = crate::kernel::native::handle::current_pid();
+    crate::kernel::navigateur::supervision::etat(pid).is_some()
+}
+
+/// Une connexion sortante commence : c'est le debut observable d'une
+/// navigation, faute d'URL.
+fn nav_debute_depuis_socket(ip: [u8; 4], port: u16) {
+    use crate::kernel::services::navigation::{self, Etape};
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let mut etiquette = alloc::format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port);
+    etiquette.truncate(navigation::URL_MAX);
+    navigation::debute(&etiquette, maintenant);
+    // Le nom a deja ete resolu ailleurs -- ou n'avait pas a l'etre : le noyau
+    // recoit une adresse. On ne pretend pas avoir mesure la resolution.
+    navigation::saute(Etape::Dns, "adresse fournie par l'appelant", maintenant);
+    navigation::entre(Etape::Tcp, maintenant);
+}
+
+fn nav_tcp_ouvert(port: u16) {
+    use crate::kernel::services::navigation::{self, Etape};
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    navigation::reussit(Etape::Tcp, 0, maintenant);
+    if port == 443 {
+        // La poignee TLS se joue en anneau 3, dans le navigateur : on sait
+        // qu'elle commence, on ne sait pas comment elle finit.
+        navigation::entre(Etape::Tls, maintenant);
+    } else {
+        navigation::saute(Etape::Tls, "port en clair", maintenant);
+        navigation::entre(Etape::Http, maintenant);
+    }
+}
+
+fn nav_tcp_echoue() {
+    use crate::kernel::services::navigation::{self, Etape};
+    navigation::echoue(Etape::Tcp, crate::kernel::timer::monotonic_ns());
 }
 
 /// `bind` : n'a de sens ici que pour fixer le port source d'un socket UDP.

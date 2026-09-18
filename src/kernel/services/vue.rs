@@ -24,7 +24,7 @@
 //!
 //! Le rendu, lui, ne fait que dessiner ce que ce module a decide.
 
-use super::registre::{Entree, Etat, Genre, Id, SERVICES_MAX};
+use super::registre::{Entree, Etat, Genre, Id, Kpi, SERVICES_MAX};
 
 /// Les trois racines, dans l'ordre d'affichage.
 ///
@@ -52,6 +52,20 @@ pub struct Ligne {
     /// va mal. Ce n'est pas une mesure inventee -- c'est une mesure REPORTEE,
     /// et elle designe toujours un service reel plus bas.
     pub etat_effectif: Etat,
+    /// Les indicateurs MONTRES : les siens pour une feuille, la somme de ses
+    /// descendants pour un groupe.
+    pub kpi_effectif: Kpi,
+    /// Les erreurs montrees, meme regle.
+    pub erreurs_effectives: u32,
+    /// La raison MONTREE, et le service qui la fournit.
+    ///
+    /// Pour une feuille, la sienne et elle-meme. Pour un groupe, celle de son
+    /// descendant le plus grave -- avec son nom, pour savoir ou regarder.
+    pub raison_effective: Id,
+    pub raison_source: Id,
+    /// Ce noeud est-il un regroupement ? Le peintre s'en sert pour distinguer
+    /// une branche d'une feuille sans reinterpreter le genre.
+    pub est_un_noeud: bool,
 }
 
 impl Ligne {
@@ -66,6 +80,23 @@ impl Ligne {
             a_des_enfants: false,
             deploye: false,
             etat_effectif: Etat::Inconnu,
+            kpi_effectif: Kpi {
+                cpu_pour_mille: None,
+                rss_octets: None,
+                vss_octets: None,
+                disque_lu: None,
+                disque_ecrit: None,
+                rx_octets: None,
+                tx_octets: None,
+                latence_us: None,
+                latence_max_us: None,
+                operations: None,
+                pid: None,
+            },
+            erreurs_effectives: 0,
+            raison_effective: Id::vide(),
+            raison_source: Id::vide(),
+            est_un_noeud: false,
         }
     }
 
@@ -251,14 +282,18 @@ pub fn lignes(entrees: &[Entree], replies: &Replies, sortie: &mut [Ligne]) -> us
 pub fn gravite(etat: Etat) -> u8 {
     match etat {
         Etat::Inconnu => 0,
-        Etat::Actif => 1,
-        Etat::Repos => 2,
-        Etat::Attente => 3,
-        Etat::Demarrage => 4,
-        Etat::Arrete => 5,
-        Etat::Reprise => 6,
-        Etat::Degrade => 7,
-        Etat::Panne => 8,
+        // Un prerequis absent est ATTENDU. Il passe avant « actif » dans
+        // l'ordre de remontee, mais il n'alarme pas : une branche entiere
+        // indisponible ne doit pas teindre son parent en rouge.
+        Etat::Indisponible => 1,
+        Etat::Actif => 2,
+        Etat::Repos => 3,
+        Etat::Attente => 4,
+        Etat::Demarrage => 5,
+        Etat::Arrete => 6,
+        Etat::Reprise => 7,
+        Etat::Degrade => 8,
+        Etat::Panne => 9,
     }
 }
 
@@ -282,7 +317,120 @@ pub fn etat_agrege(entrees: &[Entree], id: &str) -> Etat {
     pire
 }
 
-fn a_des_enfants(entrees: &[Entree], id: &str) -> bool {
+/// La RAISON qu'un groupe reporte : celle du descendant le plus grave.
+///
+/// # Pourquoi un groupe doit parler
+///
+/// Un arbre replie n'affiche que des entetes. Si l'entete porte l'etat sans
+/// la raison, on lit « net : Attente » et il faut ouvrir sept sous-arbres
+/// pour apprendre que le serveur DHCP ne repond pas. La raison remonte avec
+/// l'etat, sans quoi la remontee ne sert qu'a moitie.
+///
+/// Elle remonte AVEC son service d'origine : « config : aucun bail » dit d'ou
+/// vient la reponse, et ou aller regarder.
+pub fn raison_agregee(entrees: &[Entree], id: &str) -> Option<(Id, Id)> {
+    let mut pire: Option<(u8, Id, Id)> = None;
+    parcourt_feuilles(entrees, id, &mut |feuille: &Entree| {
+        if feuille.raison.est_vide() {
+            return;
+        }
+        let g = gravite(feuille.etat);
+        if pire.map(|(p, _, _)| g > p).unwrap_or(true) {
+            pire = Some((g, feuille.id, feuille.raison));
+        }
+    });
+    pire.map(|(_, qui, quoi)| (qui, quoi))
+}
+
+fn parcourt_feuilles(entrees: &[Entree], id: &str, vu: &mut impl FnMut(&Entree)) {
+    for enfant in entrees.iter().filter(|e| e.parent.egale(id)) {
+        let texte = enfant.id.texte();
+        if a_des_enfants(entrees, texte) {
+            parcourt_feuilles(entrees, texte, vu);
+        } else {
+            vu(enfant);
+        }
+    }
+}
+
+/// Les indicateurs qu'un groupe REPORTE : la somme de ce que ses feuilles
+/// mesurent.
+///
+/// # Pourquoi un groupe doit chiffrer
+///
+/// Une ligne `browser` muette, au-dessus de six processus qui affichent
+/// chacun leur CPU, oblige a additionner de tete pour repondre a « qu'est-ce
+/// qui mange le processeur ». La somme est exactement ce qu'on vient
+/// chercher, et la machine sait la faire.
+///
+/// Les regles ne sont pas les memes selon la grandeur :
+///
+/// - CPU, memoire, disque, reseau, operations, erreurs : on ADDITIONNE.
+/// - Latence : on garde le MAXIMUM. Additionner des latences produirait un
+///   nombre qui ne correspond a aucune attente reelle.
+/// - PID : rien. Un groupe n'est pas un processus, et lui en preter un
+///   enverrait chercher un fil qui n'existe pas.
+///
+/// Un groupe dont aucune feuille ne mesure rien rend un `Kpi` vide, donc des
+/// tirets -- et non des zeros, qui se liraient comme une mesure.
+pub fn kpi_agrege(entrees: &[Entree], id: &str) -> Kpi {
+    let mut total = Kpi::default();
+    cumule(entrees, id, &mut total);
+    total
+}
+
+fn cumule(entrees: &[Entree], id: &str, total: &mut Kpi) {
+    for enfant in entrees.iter().filter(|e| e.parent.egale(id)) {
+        let texte = enfant.id.texte();
+        if a_des_enfants(entrees, texte) {
+            cumule(entrees, texte, total);
+        } else {
+            ajoute(total, &enfant.kpi);
+        }
+    }
+}
+
+fn somme(total: &mut Option<u64>, part: Option<u64>) {
+    if let Some(v) = part {
+        *total = Some(total.unwrap_or(0).saturating_add(v));
+    }
+}
+
+fn ajoute(total: &mut Kpi, part: &Kpi) {
+    if let Some(v) = part.cpu_pour_mille {
+        total.cpu_pour_mille = Some(total.cpu_pour_mille.unwrap_or(0).saturating_add(v));
+    }
+    somme(&mut total.rss_octets, part.rss_octets);
+    somme(&mut total.vss_octets, part.vss_octets);
+    somme(&mut total.disque_lu, part.disque_lu);
+    somme(&mut total.disque_ecrit, part.disque_ecrit);
+    somme(&mut total.rx_octets, part.rx_octets);
+    somme(&mut total.tx_octets, part.tx_octets);
+    somme(&mut total.operations, part.operations);
+    // La latence ne s'additionne pas : la pire attente reste la pire attente.
+    if let Some(v) = part.latence_us {
+        total.latence_us = Some(total.latence_us.unwrap_or(0).max(v));
+    }
+    if let Some(v) = part.latence_max_us {
+        total.latence_max_us = Some(total.latence_max_us.unwrap_or(0).max(v));
+    }
+}
+
+/// Les erreurs portees par un sous-arbre.
+pub fn erreurs_agregees(entrees: &[Entree], id: &str) -> u32 {
+    let mut total = 0u32;
+    for enfant in entrees.iter().filter(|e| e.parent.egale(id)) {
+        let texte = enfant.id.texte();
+        total = total.saturating_add(if a_des_enfants(entrees, texte) {
+            erreurs_agregees(entrees, texte)
+        } else {
+            enfant.erreurs
+        });
+    }
+    total
+}
+
+pub fn a_des_enfants(entrees: &[Entree], id: &str) -> bool {
     entrees.iter().any(|e| e.parent.egale(id))
 }
 
@@ -302,10 +450,26 @@ fn pousse(
     }
     let enfants = a_des_enfants(entrees, id);
     let deploye = replies.deploye(id);
-    let etat_effectif = if enfants && matches!(entree.genre, Genre::Groupe) {
-        etat_agrege(entrees, id)
+    let noeud = enfants && matches!(entree.genre, Genre::Groupe);
+    let (etat_effectif, kpi_effectif, erreurs_effectives) = if noeud {
+        (
+            etat_agrege(entrees, id),
+            kpi_agrege(entrees, id),
+            erreurs_agregees(entrees, id),
+        )
     } else {
-        entree.etat
+        (entree.etat, entree.kpi, entree.erreurs)
+    };
+    let (raison_effective, raison_source) = if noeud {
+        // Une raison n'est remontee que si elle explique l'etat remonte :
+        // afficher « aucun bail » a cote d'un « Actif » ferait chercher un
+        // probleme la ou il n'y en a plus.
+        match raison_agregee(entrees, id) {
+            Some((qui, quoi)) if gravite(etat_effectif) > gravite(Etat::Actif) => (quoi, qui),
+            _ => (Id::vide(), Id::vide()),
+        }
+    } else {
+        (entree.raison, entree.id)
     };
     sortie[n] = Ligne {
         entree: *entree,
@@ -313,6 +477,11 @@ fn pousse(
         a_des_enfants: enfants,
         deploye,
         etat_effectif,
+        kpi_effectif,
+        erreurs_effectives,
+        raison_effective,
+        raison_source,
+        est_un_noeud: noeud,
     };
     n += 1;
     if !enfants || !deploye {
@@ -337,7 +506,10 @@ fn pousse(
 /// Le libelle d'etat affiche, en francais court.
 pub fn etat_affiche(etat: Etat) -> &'static str {
     match etat {
-        Etat::Inconnu => "N/A",
+        // PAS « N/A ». Une colonne entiere de « N/A » ne se lit plus : l'oeil
+        // la saute, et le jour ou une vraie valeur y apparait il la saute
+        // aussi. Un tiret dit « rien a dire ici » sans occuper le regard.
+        Etat::Inconnu => TIRET,
         Etat::Demarrage => "Demarrage",
         Etat::Actif => "Actif",
         Etat::Repos => "Repos",
@@ -345,9 +517,15 @@ pub fn etat_affiche(etat: Etat) -> &'static str {
         Etat::Degrade => "Degrade",
         Etat::Reprise => "Reprise",
         Etat::Arrete => "Arrete",
-        Etat::Panne => "Panne",
+        // « Panne » decrit la machine ; « Erreur » decrit ce qu'on vient
+        // chercher. Le registre garde son nom interne.
+        Etat::Panne => "Erreur",
+        Etat::Indisponible => "Indisponible",
     }
 }
+
+/// Ce qu'on ecrit dans une cellule que personne ne mesure.
+pub const TIRET: &str = "\u{2014}";
 
 /// La couleur d'un etat. Sobre : ce tableau doit rester lisible, pas decoratif.
 pub fn couleur_etat(etat: Etat) -> u32 {
@@ -362,7 +540,9 @@ pub fn couleur_etat(etat: Etat) -> u32 {
         Etat::Reprise => 0xd9c25b,
         Etat::Arrete => 0x6b7280,
         Etat::Panne => 0xd96b6b,
-        Etat::Inconnu => 0x6b7280,
+        // Gris sourd : present dans l'arbre, sans rien exiger de personne.
+        Etat::Indisponible => 0x5d6472,
+        Etat::Inconnu => 0x454c5a,
     }
 }
 

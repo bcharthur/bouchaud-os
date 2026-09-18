@@ -31,11 +31,11 @@ mod services {
 }
 
 use services::registre::{
-    declare_topologie, Etat, Genre, Kpi, Registre, SERVICES_MAX, TOPOLOGIE,
+    declare_topologie, prerequis, Etat, Genre, Kpi, Registre, PREREQUIS, SERVICES_MAX, TOPOLOGIE,
 };
 use services::vue::{
-    couleur_etat, etat_affiche, etat_agrege, gravite, lignes, porte_un_pid, repli_par_defaut,
-    Ligne, Replies, RACINES,
+    couleur_etat, etat_affiche, etat_agrege, gravite, kpi_agrege, lignes, porte_un_pid,
+    raison_agregee, repli_par_defaut, Ligne, Replies, RACINES, TIRET,
 };
 
 fn registre_complet() -> Registre {
@@ -273,13 +273,17 @@ fn un_protocole_n_a_pas_de_pid() {
 }
 
 #[test]
-fn une_mesure_absente_s_affiche_n_a_et_jamais_zero() {
+fn une_mesure_absente_s_affiche_en_tiret_et_jamais_zero() {
     let mut r = registre_complet();
     // Un protocole ne publie ni memoire residente ni PID.
     let dns = r.lis("net.dns").unwrap();
     assert_eq!(dns.kpi.rss_octets, None);
     assert_eq!(dns.kpi.pid, None);
-    assert_eq!(etat_affiche(Etat::Inconnu), "N/A");
+    // UN TIRET, PAS « N/A ». Une colonne entiere de « N/A » ne se lit plus :
+    // l'oeil la saute, et le jour ou une vraie valeur y apparait il la saute
+    // aussi. Ce qui compte n'a pas change : ce n'est JAMAIS un zero.
+    assert_eq!(etat_affiche(Etat::Inconnu), TIRET);
+    assert_ne!(etat_affiche(Etat::Inconnu), "0");
 
     // Publier une latence n'invente pas une memoire.
     r.kpi(
@@ -503,11 +507,112 @@ fn un_arret_ne_masque_pas_une_degradation() {
 }
 
 #[test]
-fn un_groupe_sans_mesure_reste_n_a() {
+fn un_groupe_sans_mesure_ne_s_invente_pas_un_etat() {
     // Rien n'a ete publie : le groupe n'invente pas un « Actif ».
     let r = registre_complet();
     assert_eq!(etat_agrege(r.entrees(), "net.l2"), Etat::Inconnu);
-    assert_eq!(etat_affiche(etat_agrege(r.entrees(), "net.l2")), "N/A");
+    assert_eq!(etat_affiche(etat_agrege(r.entrees(), "net.l2")), TIRET);
+}
+
+#[test]
+fn indisponible_n_est_ni_inconnu_ni_une_panne() {
+    // Les trois se ressemblent et ne veulent pas dire la meme chose :
+    //   Inconnu       personne n'a rien publie
+    //   Indisponible  le prerequis n'est pas la, et ce n'est la faute de rien
+    //   Panne         cela devrait marcher et cela ne marche pas
+    //
+    // Un prerequis absent ne doit PAS teindre son parent comme une panne :
+    // sous QEMU il n'y a pas de xHCI, et « sys » n'est pas en panne pour
+    // autant.
+    assert!(gravite(Etat::Indisponible) < gravite(Etat::Panne));
+    assert!(gravite(Etat::Indisponible) < gravite(Etat::Actif));
+    assert!(gravite(Etat::Indisponible) > gravite(Etat::Inconnu));
+    assert_eq!(etat_affiche(Etat::Indisponible), "Indisponible");
+    assert_eq!(etat_affiche(Etat::Panne), "Erreur");
+
+    let mut r = registre_complet();
+    r.etat("sys.usb.xhci", Etat::Indisponible, 1_000);
+    r.etat("sys.scheduler", Etat::Actif, 1_000);
+    assert_eq!(etat_agrege(r.entrees(), "sys"), Etat::Actif);
+}
+
+#[test]
+fn un_noeud_additionne_ce_que_ses_feuilles_mesurent() {
+    // « Quel sous-systeme consomme quoi » ne doit pas demander une addition
+    // de tete au-dessus de six processus.
+    let mut r = registre_complet();
+    r.kpi("browser.host", Kpi { cpu_pour_mille: Some(13), rss_octets: Some(41 << 20), ..Kpi::default() }, 1_000);
+    r.kpi("browser.web_content", Kpi { cpu_pour_mille: Some(999), rss_octets: Some(42 << 20), ..Kpi::default() }, 1_000);
+    let total = kpi_agrege(r.entrees(), "browser");
+    assert_eq!(total.cpu_pour_mille, Some(1012));
+    assert_eq!(total.rss_octets, Some((41 + 42) << 20));
+    // Le PID ne s'agrege pas : un groupe n'est pas un processus.
+    assert_eq!(total.pid, None);
+}
+
+#[test]
+fn une_latence_ne_s_additionne_pas() {
+    // Additionner des latences produirait un nombre qui ne correspond a
+    // aucune attente reelle. La pire attente reste la pire attente.
+    let mut r = registre_complet();
+    r.kpi("net.dns", Kpi { latence_us: Some(2_000), ..Kpi::default() }, 1_000);
+    r.kpi("net.link", Kpi { latence_us: Some(5_000), ..Kpi::default() }, 1_000);
+    assert_eq!(kpi_agrege(r.entrees(), "net").latence_us, Some(5_000));
+}
+
+#[test]
+fn un_noeud_remonte_la_raison_de_son_pire_descendant() {
+    // Un arbre replie qui porte l'etat sans la raison oblige a ouvrir sept
+    // sous-arbres pour apprendre que le serveur DHCP ne repond pas.
+    let mut r = registre_complet();
+    r.etat_avec_raison("net.link", Etat::Actif, "duplex complet", 1_000);
+    r.etat_avec_raison("net.dhcp", Etat::Attente, "aucun bail", 1_000);
+    let (qui, quoi) = raison_agregee(r.entrees(), "net.config").expect("une raison doit remonter");
+    assert!(qui.egale("net.dhcp"), "elle doit nommer sa source");
+    assert_eq!(quoi.texte(), "aucun bail");
+}
+
+#[test]
+fn une_raison_survit_a_une_republication_du_meme_etat() {
+    // La publication tourne a 1 Hz. Si reposer le meme etat effacait la
+    // raison, « aucun bail » disparaitrait a la seconde suivante.
+    let mut r = registre_complet();
+    r.etat_avec_raison("net.dhcp", Etat::Attente, "aucun bail", 1_000);
+    r.etat(&"net.dhcp", Etat::Attente, 2_000);
+    assert_eq!(r.lis("net.dhcp").unwrap().raison.texte(), "aucun bail");
+}
+
+#[test]
+fn une_transition_se_date() {
+    // « Depuis quand ? » n'a de reponse que si le changement est date. Une
+    // republication du meme etat ne doit PAS remettre le compteur a zero.
+    let mut r = registre_complet();
+    r.etat("net.tcp", Etat::Actif, 5_000);
+    assert_eq!(r.lis("net.tcp").unwrap().derniere_transition_ns, 5_000);
+    r.etat("net.tcp", Etat::Actif, 9_000);
+    assert_eq!(r.lis("net.tcp").unwrap().derniere_transition_ns, 5_000);
+    r.etat("net.tcp", Etat::Degrade, 12_000);
+    assert_eq!(r.lis("net.tcp").unwrap().derniere_transition_ns, 12_000);
+}
+
+#[test]
+fn la_chaine_de_prerequis_mene_du_navigateur_a_la_carte() {
+    // « A quelle etape ca bloque » se remonte de maillon en maillon.
+    let mut courant = "browser.navigation.http";
+    let mut vus = Vec::new();
+    for _ in 0..12 {
+        let Some(avant) = prerequis(courant) else { break };
+        vus.push(avant);
+        courant = avant;
+    }
+    for attendu in ["browser.navigation.tls", "browser.navigation.tcp", "browser.navigation.dns"] {
+        assert!(vus.contains(&attendu), "« {attendu} » manque a la chaine");
+    }
+    // Et tout prerequis declare doit exister dans la topologie.
+    for (qui, quoi) in PREREQUIS {
+        assert!(TOPOLOGIE.iter().any(|(id, _, _)| id == qui), "« {qui} » inconnu");
+        assert!(TOPOLOGIE.iter().any(|(id, _, _)| id == quoi), "« {quoi} » inconnu");
+    }
 }
 
 #[test]

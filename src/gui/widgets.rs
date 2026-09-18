@@ -323,6 +323,17 @@ pub enum EtatReseau {
     SansCarte,
     /// Carte prete, mais rien au bout du cable -- ou pas de cable.
     Deconnecte,
+    /// LE CABLE PORTE, MAIS IL N'Y A PAS D'ADRESSE.
+    ///
+    /// Sur la TRIGKEY, la barre affichait « Ethernet deconnecte » pendant que
+    /// la fenetre Services montrait « rtl8168 Actif » avec des octets qui
+    /// circulaient. Les deux disaient vrai : le lien est monte ET aucune
+    /// adresse IPv4 n'a ete obtenue -- sur materiel reel on ne fabrique
+    /// jamais les adresses SLIRP de QEMU.
+    ///
+    /// Un seul mot recouvrait deux situations qui n'appellent pas le meme
+    /// geste : verifier un cable, ou chercher un serveur DHCP.
+    SansAdresse,
     /// Lien monte et configuration obtenue.
     Connecte,
 }
@@ -333,6 +344,14 @@ pub fn etat_reseau() -> EtatReseau {
         EtatReseau::SansCarte
     } else if crate::net::connecte() {
         EtatReseau::Connecte
+    } else if crate::net::qualite_lien().vitesse_mbps != 0
+        || matches!(
+            crate::net::etat_demarrage(),
+            crate::net::Demarrage::SansConfiguration | crate::net::Demarrage::SansBail
+        )
+    {
+        // Le lien porte ; c'est la configuration qui manque.
+        EtatReseau::SansAdresse
     } else {
         EtatReseau::Deconnecte
     }
@@ -348,6 +367,7 @@ pub fn libelle_reseau(etat: EtatReseau) -> String {
     match etat {
         EtatReseau::SansCarte => String::from("Pas de carte"),
         EtatReseau::Deconnecte => String::from("Ethernet deconnecte"),
+        EtatReseau::SansAdresse => String::from("Ethernet sans adresse IP"),
         EtatReseau::Connecte => {
             let nom = crate::net::nom_reseau();
             let qualite = crate::net::qualite_lien();
@@ -415,6 +435,13 @@ fn dessine_reseau(droite: usize, ligne: usize) {
         EtatReseau::Deconnecte => (
             crate::gui::theme::COLOR_DANGER,
             crate::gui::theme::COLOR_TEXT_SECONDARY,
+        ),
+        // Le lien porte : ce n'est pas une panne, c'est une configuration
+        // qui manque. L'orange appelle un serveur DHCP, le rouge appellerait
+        // un cable.
+        EtatReseau::SansAdresse => (
+            crate::gui::theme::COLOR_WARNING,
+            crate::gui::theme::COLOR_TEXT_PRIMARY,
         ),
         EtatReseau::SansCarte => (
             crate::gui::theme::COLOR_BORDER,

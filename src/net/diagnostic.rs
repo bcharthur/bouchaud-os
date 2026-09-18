@@ -426,15 +426,16 @@ fn imprime_l_arbre(lignes: &[crate::kernel::services::vue::Ligne], visibles: usi
             // Le meme etat reporte que dans la fenetre : une ligne de commande
             // qui dirait autre chose que l'ecran ferait douter des deux.
             crate::println!(
-                "  {}{:<24} {}",
+                "  {}{:<24} {:<14} {}",
                 indent,
                 ligne.libelle(),
                 vue::etat_affiche(ligne.etat_effectif),
+                ligne.raison_effective.texte(),
             );
             continue;
         }
         crate::println!(
-            "  {}{:<24} {:<10} cpu {:<7} ram {:<9} err {}",
+            "  {}{:<24} {:<14} cpu {:<7} ram {:<9} err {:<4} {}",
             indent,
             ligne.libelle(),
             vue::etat_affiche(e.etat),
@@ -447,6 +448,7 @@ fn imprime_l_arbre(lignes: &[crate::kernel::services::vue::Ligne], visibles: usi
                 None => alloc::string::String::from("N/A"),
             },
             e.erreurs,
+            e.raison.texte(),
         );
     }
     if let Some((id, etat, raison, _)) = services::pire() {

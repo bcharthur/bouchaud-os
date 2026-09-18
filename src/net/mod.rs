@@ -1693,9 +1693,18 @@ pub fn fetch_document(url: &str) -> Document {
     let ms = || crate::kernel::timer::cycles_to_ms(crate::kernel::timer::cycles_since_boot().wrapping_sub(t0));
     let mut banner: alloc::vec::Vec<String> = alloc::vec::Vec::new();
 
+    // LE PIPELINE DE NAVIGATION COMMENCE ICI.
+    //
+    // Chaque etape se declare en entrant et en sortant : la fenetre Services
+    // montre alors laquelle a echoue, au lieu de douze lignes vides.
+    use crate::kernel::services::navigation::{self, Etape};
+    let horloge = || crate::kernel::timer::monotonic_ns();
+    navigation::debute(url, horloge());
+
     if !e1000::is_ready() && !e1000::init() {
         crate::dlog!(Cat::Err, "reseau indisponible (ifup) pour {}", url);
         banner.push("reseau indisponible (lance 'ifup')".to_string());
+        navigation::echoue(Etape::Tcp, horloge());
         return Document { banner, final_url: url.to_string(), content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
     }
 
@@ -1703,12 +1712,27 @@ pub fn fetch_document(url: &str) -> Document {
     for hop in 0..8u32 {
         let (scheme, hostname, port, path) = split_url(&current);
         let (mut b, raw) = if scheme == "https" {
+            // La resolution, le raccordement et la poignee vivent dans
+            // `https_fetch` : on ne peut pas les separer d'ici sans le
+            // reecrire. On date donc l'ensemble sur TLS, et on le dit.
+            navigation::entre(Etape::Dns, horloge());
+            navigation::entre(Etape::Tcp, horloge());
+            navigation::entre(Etape::Tls, horloge());
             let r = tls::https_fetch(&hostname, port, &path);
+            if r.raw.is_empty() {
+                navigation::echoue(Etape::Tls, horloge());
+            } else {
+                navigation::reussit(Etape::Dns, 0, horloge());
+                navigation::reussit(Etape::Tcp, 0, horloge());
+                navigation::reussit(Etape::Tls, 0, horloge());
+                navigation::reussit(Etape::Http, r.raw.len() as u64, horloge());
+            }
             (r.banner, r.raw)
         } else {
+            navigation::entre(Etape::Dns, horloge());
             let ip = match resolve(&hostname) {
-                Some(ip) => ip,
-                None => { crate::dlog!(Cat::Err, "DNS echec {} ({}Mc, {}ms)", hostname, mc(), ms()); banner.push(format!("DNS: echec pour {}", hostname)); return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }; }
+                Some(ip) => { navigation::reussit(Etape::Dns, 0, horloge()); ip }
+                None => { navigation::echoue(Etape::Dns, horloge()); crate::dlog!(Cat::Err, "DNS echec {} ({}Mc, {}ms)", hostname, mc(), ms()); banner.push(format!("DNS: echec pour {}", hostname)); return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false }; }
             };
             let req = http::build_get(&hostname, &path);
             let mut resp: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -1718,14 +1742,22 @@ pub fn fetch_document(url: &str) -> Document {
             // les gros transferts (retransmissions au RTO -> ~250 s pour 44 Ko) ;
             // smoltcp fait le meme transfert en < 1 s. Repli sur la pile maison
             // si smoltcp echoue (robustesse).
+            navigation::entre(Etape::Tcp, horloge());
             if !transport::smol_tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
                 resp.clear();
                 if !tcp::fetch(ip, port, req.as_bytes(), &mut resp) {
+                    navigation::echoue(Etape::Tcp, horloge());
                     crate::dlog!(Cat::Err, "TCP echec {}:{} ({}Mc, {}ms)", hostname, port, mc(), ms());
                     banner.push(format!("connexion TCP echouee vers {}:{}", hostname, port));
                     return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
                 }
             }
+            navigation::reussit(Etape::Tcp, 0, horloge());
+            // En clair : pas de poignee TLS a franchir. Le dire, plutot que
+            // laisser la case vide -- une etape sautee n'est pas une etape qui
+            // a echoue.
+            navigation::saute(Etape::Tls, "http en clair", horloge());
+            navigation::reussit(Etape::Http, resp.len() as u64, horloge());
             (alloc::vec::Vec::new(), resp)
         };
         // Diagnostic TLS / handshake : remonte les lignes du sous-systeme.
@@ -1755,12 +1787,18 @@ pub fn fetch_document(url: &str) -> Document {
                 crate::dlog!(Cat::Net, "{} {} {} {}o {} {}Mc ({}ms)", scheme, r.status_code, hostname,
                     r.body.len(), if is_html { "html" } else { ct.as_str() }, mc(), ms());
                 banner.push(r.status_line.clone());
+                // Le corps est la : le telechargement a abouti. Les etapes
+                // suivantes -- decodage, HTML, CSS, mise en page, peinture --
+                // vivent en anneau 3 et ne traversent aucun appel systeme.
+                navigation::reussit(Etape::Telechargement, r.body.len() as u64, horloge());
+                navigation::termine(horloge());
                 return Document { banner, final_url: current, content_type: ct, body: r.body, is_html, ok: true };
             }
             None => {
                 let mut status = String::new();
                 for &c in raw.iter().take_while(|&&c| c != b'\r' && c != b'\n') { status.push(c as char); }
                 crate::dlog!(Cat::Warn, "reponse HTTP illisible {} : {}", hostname, status);
+                navigation::echoue(Etape::Telechargement, horloge());
                 banner.push(status);
                 return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
             }
