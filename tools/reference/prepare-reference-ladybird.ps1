@@ -153,10 +153,35 @@ Copy-Item `
     -Destination (Join-Path $Share "bouchaud-start.html") `
     -Force
 
+# BOUCHAUD_CA_BUNDLE_AUTO_V1
+# Le bundle CA est volontairement local et ignore par Git. S'il manque,
+# le fabriquer depuis le magasin de certificats racine Windows (ou, a defaut,
+# depuis les racines DER versionnees du noyau) avant de construire l'image.
 $CA = Join-Path $RepoRoot "tools\ladybird\certs\cacert.pem"
+$CABuilder = Join-Path $RepoRoot "tools\ladybird\certs\fabrique-bundle.ps1"
+
 if (-not (Test-Path -LiteralPath $CA -PathType Leaf)) {
-    Fail "bundle CA Ladybird absent: $CA"
+    if (-not (Test-Path -LiteralPath $CABuilder -PathType Leaf)) {
+        Fail "generateur de bundle CA Ladybird absent: $CABuilder"
+    }
+
+    Write-Host "Ladybird : bundle CA absent, generation locale..." -ForegroundColor Yellow
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $CABuilder
+    if ($LASTEXITCODE -ne 0) {
+        Fail "generation du bundle CA Ladybird en echec"
+    }
 }
+
+if (-not (Test-Path -LiteralPath $CA -PathType Leaf)) {
+    Fail "bundle CA Ladybird toujours absent apres generation: $CA"
+}
+
+$CaInfo = Get-Item -LiteralPath $CA
+if ($CaInfo.Length -lt 1024) {
+    Fail "bundle CA Ladybird anormalement petit: $($CaInfo.Length) octets"
+}
+Write-Host ("Ladybird : bundle CA pret ({0} octets)" -f $CaInfo.Length) -ForegroundColor Green
+
 $CertTarget = Join-Path $Scenario "etc\ssl\certs"
 New-Item -ItemType Directory -Path $CertTarget -Force | Out-Null
 Copy-Item `

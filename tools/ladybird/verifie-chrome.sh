@@ -34,6 +34,24 @@ grep -q 'BOUCHAUD_V16_PATH_FONT_ALIAS' "$SRC/Libraries/LibGfx/Font/PathFontProvi
 #
 # Elle ne peut pas faire echouer la barriere pour une raison d'outillage :
 # sans clang, elle le dit et passe.
+# BOUCHAUD_M11_PAGE_ID_CAPTURE_GUARD
+#
+# `page_id` est une lambda locale qui relit l'onglet actif. Le callback
+# on_nouvel_onglet est enrichi plus tard par le page-registry/BrowserHost et
+# appelle alors page_id(). Une capture `[this]` seule compile jusqu'au tout
+# dernier objet WebContent avant d'echouer. Verifier le RESULTAT final ici.
+CONNECTION="$SRC/Services/WebContent/ConnectionFromClient.cpp"
+if grep -Fq 'M11_TAB_HOST_' "$CONNECTION"; then
+    if grep -Fq 'chrome.on_nouvel_onglet = [this]() -> u64 {' "$CONNECTION"; then
+        echo 'M11: on_nouvel_onglet utilise page_id sans le capturer' >&2
+        exit 1
+    fi
+    if ! grep -Fq 'chrome.on_nouvel_onglet = [this, page_id]() -> u64 {' "$CONNECTION"; then
+        echo 'M11: capture page_id attendue dans on_nouvel_onglet' >&2
+        exit 1
+    fi
+fi
+
 ./tools/ladybird/verifie-syntaxe-chrome.sh "$SRC"
 
 printf '\033[32m%s\033[0m\n' 'chrome V16: DejaVu/FreeType + SVG + loading indicator OK'

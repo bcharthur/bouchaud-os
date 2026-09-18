@@ -598,18 +598,24 @@ if input_ack_new not in data:
     page_cpp.write_text(data)
 
 
-# `prepare-console.py` a installe la sortie serie sous BOUCHAUD_M9. Comme le
-# BrowserHost n'a pas besoin d'activer le bootstrap M9, on etend uniquement
-# cette condition d'observabilite au nouveau mode.
+# `prepare-console.py` installe aujourd'hui la sortie serie sous le test M9
+# direct. Une ancienne revision a aussi produit une variante qui excluait le
+# BrowserHost. Accepter les deux garde le preparateur compatible avec les caches
+# locaux/CI tout en conservant une erreur franche si le contrat derive vraiment.
 data = page_cpp.read_text()
-console_old = """    if (bouchaud_m9_enabled() && getenv("BOUCHAUD_BROWSER_HOST") == nullptr) {
+console_prepare = """    if (bouchaud_m9_enabled()) {
+        console_output.output.visit("""
+console_legacy = """    if (bouchaud_m9_enabled() && getenv("BOUCHAUD_BROWSER_HOST") == nullptr) {
         console_output.output.visit("""
 console_new = """    if (bouchaud_m9_enabled() || getenv("BOUCHAUD_BROWSER_HOST") != nullptr) {
         console_output.output.visit("""
 if console_new not in data:
-    if console_old not in data:
+    for console_old in (console_prepare, console_legacy):
+        if console_old in data:
+            page_cpp.write_text(data.replace(console_old, console_new, 1))
+            break
+    else:
         raise SystemExit("BrowserHost: passerelle console prepare-console introuvable")
-    page_cpp.write_text(data.replace(console_old, console_new, 1))
 
 
 # 6. Le vrai Compositor est actif uniquement en mode BrowserHost.

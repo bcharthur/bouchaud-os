@@ -12,12 +12,34 @@ if (-not (Test-Path (Join-Path $RepoRoot 'tools\ladybird\native-browser-final.sh
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { throw 'WSL absent.' }
 $WslArgs = @()
 if ($Distribution) { $WslArgs = @('-d', $Distribution) }
+$GitCommand = Get-Command git -ErrorAction Stop
+$GitDirRaw = (& $GitCommand.Source -C $RepoRoot rev-parse --absolute-git-dir | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $GitDirRaw) {
+    throw 'Impossible de resoudre le vrai git-dir du checkout courant.'
+}
+$GitDir = (Resolve-Path -LiteralPath $GitDirRaw).Path
+
+$GitCommonDirRaw = (& $GitCommand.Source -C $RepoRoot rev-parse --path-format=absolute --git-common-dir | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $GitCommonDirRaw) {
+    throw 'Impossible de resoudre le git common-dir du checkout courant.'
+}
+$GitCommonDir = (Resolve-Path -LiteralPath $GitCommonDirRaw).Path
+
 $Repo64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($RepoRoot))
+$GitDir64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($GitDir))
+$GitCommonDir64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($GitCommonDir))
 $Script = @'
 #!/usr/bin/env bash
 set -euo pipefail
 WINDOWS=$(printf '%s' '__REPO64__' | base64 -d)
+WINDOWS_GIT_DIR=$(printf '%s' '__GITDIR64__' | base64 -d)
+WINDOWS_GIT_COMMON_DIR=$(printf '%s' '__GITCOMMON64__' | base64 -d)
 SOURCE=$(wslpath -a -u "$WINDOWS")
+SOURCE_GIT_DIR=$(wslpath -a -u "$WINDOWS_GIT_DIR")
+SOURCE_COMMON_GIT_DIR=$(wslpath -a -u "$WINDOWS_GIT_COMMON_DIR")
+[ -f "$SOURCE_GIT_DIR/HEAD" ] || { echo "git-dir WSL introuvable: $SOURCE_GIT_DIR"; exit 1; }
+[ -f "$SOURCE_COMMON_GIT_DIR/HEAD" ] || { echo "git common-dir WSL introuvable: $SOURCE_COMMON_GIT_DIR"; exit 1; }
+SOURCE_HEAD=$(git --git-dir="$SOURCE_GIT_DIR" --work-tree="$SOURCE" rev-parse --verify HEAD)
 REQUESTED_JOBS=__JOBS__
 [ "$(id -u)" -ne 0 ] || { echo 'Lancer WSL avec le compte arthur, pas root.'; exit 1; }
 . /etc/os-release
@@ -100,17 +122,26 @@ FREE_KB=$(df -Pk "$BASE" | awk 'END {print $4}')
 echo "WSL : $MEM_MB Mio RAM, $BO_JOBS compilations simultanees, dossier $BUILD"
 # This copy is managed exclusively by this script. Preserve build caches.
 if [ ! -d "$BUILD/.git" ]; then
-    git clone --no-hardlinks --no-checkout "$SOURCE" "$BUILD"
+    mkdir -p "$BUILD"
+    git -C "$BUILD" init --quiet
 fi
-git -C "$BUILD" fetch --quiet "$SOURCE" HEAD
+git -C "$BUILD" fetch --quiet "$SOURCE_COMMON_GIT_DIR" "$SOURCE_HEAD"
 git -C "$BUILD" reset --mixed --quiet FETCH_HEAD
-python3 - "$SOURCE" "$BUILD" <<'PY'
+python3 - "$SOURCE" "$SOURCE_GIT_DIR" "$BUILD" <<'PY'
 import filecmp, json, os, shutil, subprocess, sys
 from pathlib import Path
-source, dest = map(Path, sys.argv[1:])
+source, source_git_dir, dest = map(Path, sys.argv[1:])
 state = dest / '.git/bouchaud-synced.json'
 previous = set(json.loads(state.read_text())) if state.exists() else set()
-raw = subprocess.check_output(['git', '-C', str(source), 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--exclude=native-browser-m9.previous-*', '--exclude=.ladybird-local-export.*', '--exclude=.ladybird-local-export-path'])
+raw = subprocess.check_output([
+    'git',
+    f'--git-dir={source_git_dir}',
+    f'--work-tree={source}',
+    'ls-files', '-z', '--cached', '--others', '--exclude-standard',
+    '--exclude=native-browser-m9.previous-*',
+    '--exclude=.ladybird-local-export.*',
+    '--exclude=.ladybird-local-export-path',
+])
 current = set()
 for raw_name in raw.split(b'\0'):
     if not raw_name:
@@ -181,7 +212,7 @@ printf '%s\n' "$(basename "$STAGING")" > "$SOURCE/.ladybird-local-export-path"
 echo "LADYBIRD_LOCAL_OK : $((SECONDS-START)) secondes"
 echo 'Compilation et verification terminees; export Windows en attente.'
 '@
-$Script = $Script.Replace('__REPO64__', $Repo64).Replace('__JOBS__', [string]$Jobs)
+$Script = $Script.Replace('__REPO64__', $Repo64).Replace('__GITDIR64__', $GitDir64).Replace('__GITCOMMON64__', $GitCommonDir64).Replace('__JOBS__', [string]$Jobs)
 $Temp = [IO.Path]::GetTempFileName()
 try {
     [IO.File]::WriteAllText($Temp, $Script.Replace("`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))

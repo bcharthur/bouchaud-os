@@ -294,7 +294,7 @@ void ConnectionFromClient::bouchaud_m11_start()
     // depuis toujours -- il les indexe par identifiant --, et `create_page` en
     // fabrique une. Ce qui manquait, c'est que personne n'en demandait une
     // seconde : le chrome connaissait la page 1, en dur.
-    chrome.on_nouvel_onglet = [this]() -> u64 {
+    chrome.on_nouvel_onglet = [this, page_id]() -> u64 {
         auto const nouveau = BouchaudChrome::prochaine_page();
         auto& client = page_host().create_page(nouveau, page_host().allocate_navigable_id());
         // Un onglet ouvert par l'utilisateur porte un document : c'est ce qui

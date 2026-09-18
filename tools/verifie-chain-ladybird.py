@@ -3,13 +3,40 @@
 import ast
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'tools/ladybird'
 producer = ast.parse((SCRIPTS / 'prepare-full-browser-host.py').read_text())
+console = ast.parse((SCRIPTS / 'prepare-console.py').read_text())
 owner = ast.parse((SCRIPTS / 'prepare-m11-input-ownership.py').read_text())
 network = ast.parse((SCRIPTS / 'prepare-network-live.py').read_text())
+
+
+def assigned_literal(tree, name):
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f'Production literal {name} not located')
+
+
+# Contract check: the output produced by prepare-console.py must be accepted by
+# prepare-full-browser-host.py. This runs before fetch/vcpkg/the Ladybird build,
+# so an anchor drift fails in seconds instead of after the expensive setup.
+console_remplacement = assigned_literal(console, 'remplacement')
+console_prepare = assigned_literal(producer, 'console_prepare')
+console_legacy = assigned_literal(producer, 'console_legacy')
+console_new = assigned_literal(producer, 'console_new')
+patched_console = console_remplacement
+if console_new not in patched_console:
+    for candidate in (console_prepare, console_legacy):
+        if candidate in patched_console:
+            patched_console = patched_console.replace(candidate, console_new, 1)
+            break
+assert console_new in patched_console, 'prepare-console -> BrowserHost console contract drifted'
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
@@ -40,7 +67,7 @@ with tempfile.TemporaryDirectory() as temporary:
     exec(code, scope)
     assert connection.read_text() == once, 'Ownership is not idempotent'
     for _ in range(2):
-        subprocess.run(['python3', str(SCRIPTS / 'prepare-platform-complete.py'), str(root)], check=True, capture_output=True)
+        subprocess.run([sys.executable, str(SCRIPTS / 'prepare-platform-complete.py'), str(root)], check=True, capture_output=True)
     router = next(n for n in network.body if isinstance(n, ast.FunctionDef) and n.name == 'route_diagnostics')
     exec(compile(ast.Module(body=[router], type_ignores=[]), '<production routing>', 'exec'), scope)
     scope['route_diagnostics'](root)

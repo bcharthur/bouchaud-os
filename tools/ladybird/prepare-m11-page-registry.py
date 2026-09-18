@@ -59,9 +59,9 @@ def replace_between(data: str, start_marker: str, end_marker: str, replacement: 
 connection = connection_cpp.read_text()
 manual_marker = "[ladybird-bouchaud] M11_TAB_HOST_REGISTERED"
 if manual_marker not in connection:
-    start = "    chrome.on_nouvel_onglet = [this]() -> u64 {"
+    start = "    chrome.on_nouvel_onglet = [this, page_id]() -> u64 {"
     end = "\n\n    chrome.on_fermer_onglet = [this](u64 ferme) {"
-    replacement = r'''    chrome.on_nouvel_onglet = [this]() -> u64 {
+    replacement = r'''    chrome.on_nouvel_onglet = [this, page_id]() -> u64 {
         if (getenv("BOUCHAUD_BROWSER_HOST") != nullptr) {
             auto response = send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(
                 page_id(), Web::HTML::ActivateTab::Yes, Web::HTML::WebViewHints {});
