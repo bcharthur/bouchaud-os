@@ -20,6 +20,8 @@ pub mod resolveur;
 pub mod link;
 pub mod internet;
 pub mod transport;
+/// L'echelle de la reponse DNS : voir `sonde_dns.rs`.
+pub mod sonde_dns;
 /// La file de trames d'un consommateur, PURE : voir `net/file_trames.rs`.
 pub mod file_trames;
 /// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la
@@ -1352,6 +1354,13 @@ fn reclame_en_attente(
         p.proto == proto && src_filter.map_or(true, |s| p.src == s)
     })?;
     let paquet = file.remove(position);
+    if paquet.proto == ipv4::PROTO_UDP {
+        if let Some(u) = udp::parse(&paquet.charge) {
+            if sonde_dns::concerne(u.src_port, u.dst_port) {
+                sonde_dns::note(sonde_dns::Barreau::SortiDeFile);
+            }
+        }
+    }
     let m = paquet.charge.len().min(out.len());
     out[..m].copy_from_slice(&paquet.charge[..m]);
     Some((paquet.src, m))
@@ -1505,6 +1514,24 @@ fn route_ipv4(trame: &[u8]) {
     }
     let charge = &trame[debut..fin];
 
+    // L'ECHELLE DE LA SONDE DNS.
+    //
+    // Trois barreaux ici : la trame porte de l'IPv4 avec un port 53, son
+    // en-tete IPv4 a ete lu, son en-tete UDP a ete lu. Le premier barreau nul
+    // dont le predecesseur ne l'est pas nomme l'etage fautif.
+    if iph.proto == ipv4::PROTO_UDP {
+        if let Some(u) = udp::parse(charge) {
+            if sonde_dns::concerne(u.src_port, u.dst_port) {
+                sonde_dns::note(sonde_dns::Barreau::RxEthernet);
+                sonde_dns::note(sonde_dns::Barreau::RxIpv4);
+                sonde_dns::note(sonde_dns::Barreau::RxUdp);
+                let entete_brut =
+                    &trame[ethernet::HEADER_LEN..ethernet::HEADER_LEN + iph.header_len];
+                decris_la_reponse_dns(&iph, &u, entete_brut, charge);
+            }
+        }
+    }
+
     // Le bail DHCP arrive avant qu'on ait une adresse, en diffusion : aucun
     // appelant de `poll_ip` ne le reclamera jamais. Il a sa propre boite.
     if iph.proto == ipv4::PROTO_UDP {
@@ -1532,7 +1559,61 @@ fn route_ipv4(trame: &[u8]) {
         return;
     }
 
+    if iph.proto == ipv4::PROTO_UDP {
+        if let Some(u) = udp::parse(charge) {
+            if sonde_dns::concerne(u.src_port, u.dst_port) {
+                sonde_dns::note(sonde_dns::Barreau::MisEnFile);
+            }
+        }
+    }
     depose_en_attente_verrouille(iph.proto, iph.src, charge);
+}
+
+/// Decrit la PREMIERE reponse DNS vue, avec ses sommes de controle.
+///
+/// # Pourquoi les sommes comptent ici
+///
+/// Si la reponse arrive mais qu'une somme est fausse, ce n'est pas la meme
+/// panne que si elle n'arrive pas : cela accuse le calcul de somme d'un
+/// intermediaire, ou notre lecture de l'en-tete. Les deux verdicts envoient
+/// chercher a des endroits opposes, et une seule ligne suffit a trancher.
+fn decris_la_reponse_dns(iph: &ipv4::Header, u: &udp::Header, entete_brut: &[u8], charge: &[u8]) {
+    let ipv4_juste = ipv4::somme_juste(entete_brut);
+    let (udp_juste, udp_absente) = udp::somme_verdict(&iph.src, &iph.dst, charge);
+    let mut sommes = 0u32;
+    if ipv4_juste {
+        sommes |= sonde_dns::SOMME_IPV4_JUSTE;
+    }
+    if udp_juste {
+        sommes |= sonde_dns::SOMME_UDP_JUSTE;
+    }
+    if udp_absente {
+        sommes |= sonde_dns::SOMME_UDP_ABSENTE;
+    }
+    if sonde_dns::decris_une_fois(
+        iph.src,
+        iph.dst,
+        u.src_port,
+        u.dst_port,
+        u.payload_len as u16,
+        sommes,
+    ) {
+        crate::serial_println!(
+            "BOUCHAUD_DNS53_REPONSE src={}.{}.{}.{}:{} dst={}.{}.{}.{}:{} \
+longueur={} somme_ipv4={} somme_udp={}",
+            iph.src[0], iph.src[1], iph.src[2], iph.src[3], u.src_port,
+            iph.dst[0], iph.dst[1], iph.dst[2], iph.dst[3], u.dst_port,
+            u.payload_len,
+            if ipv4_juste { "juste" } else { "FAUSSE" },
+            if udp_absente {
+                "absente"
+            } else if udp_juste {
+                "juste"
+            } else {
+                "FAUSSE"
+            },
+        );
+    }
 }
 
 /// Ce datagramme nous est-il adresse ?

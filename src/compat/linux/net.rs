@@ -545,12 +545,19 @@ fn livre_datagramme(
 
     let trace = trace_dns(entete.src_port, entete.dst_port);
     let connecte_trouve = connecte.is_some();
+    let suivi = crate::net::sonde_dns::concerne(entete.src_port, entete.dst_port);
+    if suivi && (connecte.is_some() || lie.is_some()) {
+        crate::net::sonde_dns::note(crate::net::sonde_dns::Barreau::SocketTrouve);
+    }
 
     match connecte.or(lie) {
         Some(destination) => match destination.try_lock() {
             Some(mut etat) => {
                 etat.datagrams
                     .push((source, entete.src_port, donnees.to_vec()));
+                if suivi {
+                    crate::net::sonde_dns::note(crate::net::sonde_dns::Barreau::SocketLivre);
+                }
                 if trace {
                     crate::serial_println!(
                         "[ladybird-bouchaud] M17_UDP_LIVRE src={}.{}.{}.{}:{} vers_port={} octets={} connecte={}",
@@ -562,6 +569,9 @@ fn livre_datagramme(
             // Le socket destinataire est deja emprunte : c'est celui qui nous a
             // appeles. Le datagramme est perdu, et il faut que cela se voie.
             None => {
+                if suivi {
+                    crate::net::sonde_dns::note(crate::net::sonde_dns::Barreau::SocketOccupe);
+                }
                 if trace {
                     crate::serial_println!(
                         "[ladybird-bouchaud] M17_UDP_PERDU_EMPRUNTE vers_port={} octets={}",
@@ -769,8 +779,14 @@ pub fn sys_recvfrom(
                 }
             }
             let datagram = state.lock().datagrams.pop();
+            let port_local = state.lock().local_port;
             match datagram {
                 None => {
+                    if port_local != 0 {
+                        crate::net::sonde_dns::note(
+                            crate::net::sonde_dns::Barreau::RecvVide,
+                        );
+                    }
                     if nonblocking {
                         -errno::EAGAIN
                     } else {
@@ -778,6 +794,11 @@ pub fn sys_recvfrom(
                     }
                 }
                 Some((source, port, data)) => {
+                    if crate::net::sonde_dns::concerne(port, port_local) {
+                        crate::net::sonde_dns::note(
+                            crate::net::sonde_dns::Barreau::RecvSucces,
+                        );
+                    }
                     let size = core::cmp::min(len, data.len());
                     if !user_write(buffer, &data[..size]) {
                         return -errno::EFAULT;
@@ -1248,7 +1269,14 @@ pub fn socket_readable(state: &Arc<SpinLock<SocketState>>) -> bool {
             if state.lock().datagrams.is_empty() {
                 pump_udp(state);
             }
-            !state.lock().datagrams.is_empty()
+            let pret = !state.lock().datagrams.is_empty();
+            // LE BARREAU `poll` : livre, mais la boucle d'evenements le
+            // voit-elle ? C'est ce qui distingue « le reseau est casse » de
+            // « le reseau marche et RequestServer ne se reveille pas ».
+            if pret && state.lock().local_port != 0 {
+                crate::net::sonde_dns::note(crate::net::sonde_dns::Barreau::PollPret);
+            }
+            pret
         }
     }
 }

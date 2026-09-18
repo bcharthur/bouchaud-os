@@ -213,7 +213,7 @@ pub const COMMANDS: &[&str] = &[
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
-    "ifup", "arping", "ethinfo", "netetat", "netdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
+    "ifup", "arping", "ethinfo", "netetat", "netdiag", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode",
     "git", "rustc", "cargo", "rust-selftest",
@@ -993,6 +993,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // savait demander avant le releve du 17 septembre.
         "netetat" => { crate::net::diagnostic::netetat(); 0 }
         "netdiag" => { crate::net::diagnostic::netdiag(argc, &argv); 0 }
+        "dnsdiag" => { crate::net::diagnostic::dnsdiag(argc, &argv); 0 }
         // L'OBSERVATOIRE. Une seule source, trois consommateurs : cette
         // commande, l'ecran de demarrage et la boite noire.
         "services" => { crate::net::diagnostic::services(argc, &argv); 0 }

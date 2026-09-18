@@ -52,7 +52,13 @@ clang -static -nostdlib -ffreestanding -fno-stack-protector -fno-pie \
       -o "$SORTIE/scenario/dns-probe" tools/userland/dns-probe.c
 chmod 755 "$SORTIE/scenario/dns-probe"
 
-printf 'uname\nifconfig\nexec /dns-probe\n' > "$SORTIE/scenario/autorun"
+# LA SONDE, PUIS L'ECHELLE.
+#
+# `exec` remplacait le shell : la sonde finissait, et personne ne pouvait plus
+# demander les compteurs. Or ce sont EUX qui disent a quel etage un datagramme
+# se perd -- et les quatre derniers barreaux (socket, poll, recv) ne sont
+# franchis que par le chemin d'anneau 3 que cette sonde vient d'exercer.
+printf 'uname\nifconfig\n/dns-probe\ndnsdiag\n' > "$SORTIE/scenario/autorun"
 
 info "== disque =="
 (cd tools/userland && IMAGE="$SORTIE/dns.img" ./mkdisk.sh "$SORTIE/scenario") >/dev/null
@@ -76,6 +82,9 @@ sed -i 's/\x1b\[[0-9;]*m//g' "$JOURNAL"
 
 echo
 grep -a 'dns-probe' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\] //' || true
+
+info "== l'echelle dns53, apres le chemin socket =="
+grep -a 'dns53_\|verdict (' "$JOURNAL" | sed 's/\x1b\[[0-9;]*m//g' | sed 's/^.*\] //' || true
 echo
 
 echecs=0

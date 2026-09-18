@@ -536,3 +536,154 @@ pub fn netetat() {
         routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis, net::arp_ttl_ms(),
     );
 }
+
+// ===========================================================================
+// `dnsdiag` : LE MEME CHEMIN QUE LE NAVIGATEUR, SANS LE NAVIGATEUR
+// ===========================================================================
+
+/// Envoie une requete DNS par le chemin EXACT du navigateur, et rend compte.
+///
+/// # Pourquoi cette commande existe
+///
+/// L'archive du 24 septembre montre la requete qui part -- `M17_UDP_TX
+/// dst=192.168.1.254:53 parti=true` -- et aucune reponse livree. Deux causes
+/// possibles, qui n'appellent pas du tout la meme correction :
+///
+///  1. la pile reseau du noyau ne rend pas la reponse ;
+///  2. elle la rend, et c'est la boucle d'evenements du `RequestServer` qui
+///     ne la voit pas.
+///
+/// Tant que le seul client est Ladybird, on ne peut pas trancher : son
+/// `EventLoop`, son `poll`, ses trois processus et son ordonnancement sont
+/// dans le chemin. Cette commande retire tout cela et ne garde que ce que le
+/// navigateur utilise VRAIMENT du noyau : un socket UDP, `sendto`, `poll`,
+/// `recvfrom`.
+///
+/// # DEUX CHEMINS, ET ILS NE SONT PAS LE MEME
+///
+/// Le premier passage sous QEMU l'a montre tout de suite : trois resolutions
+/// reussies, et `dns53_socket_match = 0`. La raison est que `net::resolve`
+/// est le resolveur DU NOYAU -- celui de `wget`, de `pip`, de `git` -- et
+/// qu'il interroge `poll_ip` DIRECTEMENT, sans jamais passer par un socket.
+///
+/// Le navigateur, lui, vit en anneau 3 : il ouvre un socket, `sendto`,
+/// `poll`, `recvfrom`, et c'est `livre_datagramme` qui doit le servir. Les
+/// quatre derniers barreaux de l'echelle n'appartiennent qu'a ce chemin-la.
+///
+/// Un `dnsdiag` qui n'exercerait que le resolveur noyau declarerait donc le
+/// DNS reparé en laissant intact tout ce qui echoue chez Ladybird. Cette
+/// commande annonce donc ce qu'elle mesure, et la sonde d'anneau 3
+/// (`tools/userland/dns-probe.c`, lancee par `tools/net/verifie-dns.sh`)
+/// couvre l'autre moitie.
+///
+/// Si le chemin noyau recoit et que Ladybird non, le defaut est au-dessus du
+/// socket. Si aucun des deux ne recoit, il est dans la pile -- et l'echelle
+/// `dns53_*` dit a quel etage.
+pub fn dnsdiag(argc: usize, argv: &[&str; 12]) {
+    use crate::net::sonde_dns::{self, Barreau};
+
+    let noms: [&str; 3] = if argc > 1 {
+        [argv[1], "", ""]
+    } else {
+        // Les trois noms du critere de recette.
+        ["example.com", "wikipedia.org", "google.com"]
+    };
+
+    let resolveur = crate::net::dns_server();
+    crate::println!(
+        "dnsdiag : resolveur {}.{}.{}.{}  interface {}.{}.{}.{}",
+        resolveur[0], resolveur[1], resolveur[2], resolveur[3],
+        crate::net::our_ip()[0], crate::net::our_ip()[1],
+        crate::net::our_ip()[2], crate::net::our_ip()[3],
+    );
+    if resolveur == [0, 0, 0, 0] {
+        crate::println!("dnsdiag : aucun resolveur configure — rien a interroger.");
+        return;
+    }
+
+    let avant: [u64; sonde_dns::BARREAUX] = core::array::from_fn(|rang| {
+        Barreau::depuis_rang(rang).map(sonde_dns::compte).unwrap_or(0)
+    });
+
+    let mut reussites = 0usize;
+    let mut tentatives = 0usize;
+    for nom in noms.iter().filter(|n| !n.is_empty()) {
+        tentatives += 1;
+        let debut = crate::kernel::timer::monotonic_ms();
+        match crate::net::resolve(nom) {
+            Some(ip) => {
+                reussites += 1;
+                crate::println!(
+                    "  {:<16} -> {}.{}.{}.{}  ({} ms)",
+                    nom, ip[0], ip[1], ip[2], ip[3],
+                    crate::kernel::timer::monotonic_ms().saturating_sub(debut),
+                );
+            }
+            None => {
+                crate::println!(
+                    "  {:<16} -> ECHEC  ({} ms)",
+                    nom,
+                    crate::kernel::timer::monotonic_ms().saturating_sub(debut),
+                );
+            }
+        }
+    }
+
+    // L'ECHELLE, EN DELTA : ce que CETTE execution a franchi.
+    crate::println!(
+        "dnsdiag : chemin NOYAU (poll_ip direct). Le chemin SOCKET du \
+navigateur se mesure avec tools/net/verifie-dns.sh"
+    );
+    // DEUX COLONNES : ce que CE test a franchi, et le total depuis le
+    // demarrage.
+    //
+    // Le total compte, parce que les quatre derniers barreaux -- socket,
+    // poll, recv -- ne sont franchis que par l'anneau 3. Une sonde lancee
+    // avant cette commande les a peut-etre deja franchis, et n'afficher que
+    // le delta les montrerait a zero alors qu'ils viennent de passer.
+    crate::println!("dnsdiag : etages            ce test / total");
+    for rang in 0..sonde_dns::BARREAUX {
+        let Some(barreau) = Barreau::depuis_rang(rang) else { continue };
+        let total = sonde_dns::compte(barreau);
+        let delta = total.saturating_sub(avant[rang]);
+        crate::println!("  {:<24} {:>7} / {}", barreau.nom(), delta, total);
+    }
+    if let Some((src, dst, sp, dp, longueur, sommes)) = sonde_dns::detail() {
+        crate::println!(
+            "  premiere reponse : {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} {} o  ipv4={} udp={}",
+            src[0], src[1], src[2], src[3], sp,
+            dst[0], dst[1], dst[2], dst[3], dp, longueur,
+            if sommes & sonde_dns::SOMME_IPV4_JUSTE != 0 { "juste" } else { "FAUSSE" },
+            if sommes & sonde_dns::SOMME_UDP_ABSENTE != 0 {
+                "absente"
+            } else if sommes & sonde_dns::SOMME_UDP_JUSTE != 0 {
+                "juste"
+            } else {
+                "FAUSSE"
+            },
+        );
+    }
+    // LE VERDICT NE VAUT QUE POUR LES BARREAUX QUE CE CHEMIN TRAVERSE.
+    //
+    // Les quatre derniers -- socket, poll, recv -- n'appartiennent qu'a
+    // l'anneau 3. Les declarer fautifs ici accuserait le socket d'une panne
+    // que ce test n'a meme pas exercee.
+    let jusqu_a_la_file: [u64; sonde_dns::BARREAUX] = {
+        let mut c = sonde_dns::releve();
+        for rang in (sonde_dns::Barreau::SocketTrouve as usize)..sonde_dns::BARREAUX {
+            c[rang] = u64::MAX;
+        }
+        c
+    };
+    crate::println!("  verdict (chemin noyau) : {}", sonde_dns::verdict_de(&jusqu_a_la_file));
+    crate::println!("  verdict (chaine complete) : {}", sonde_dns::verdict());
+    crate::println!(
+        "dnsdiag : {}/{} resolutions",
+        reussites, tentatives,
+    );
+    // LA LIGNE QUE L'ARCHIVE RETIENDRA.
+    crate::serial_println!(
+        "BOUCHAUD_DNSDIAG chemin=noyau reussites={} tentatives={} verdict={}",
+        reussites, tentatives, sonde_dns::verdict(),
+    );
+}

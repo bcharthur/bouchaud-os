@@ -105,6 +105,22 @@ pub fn build_packet(buf: &mut [u8], src: Ipv4Addr, dst: Ipv4Addr, proto: u8, ide
     Some(total)
 }
 
+/// La somme de controle de cet en-tete est-elle juste ?
+///
+/// La somme d'un en-tete correct, recalculee en incluant le champ de somme
+/// lui-meme, vaut zero. C'est la seule facon de verifier sans reconstruire
+/// l'en-tete, et elle ne demande aucune allocation.
+///
+/// Une somme fausse et un datagramme absent ne sont pas la meme panne : la
+/// premiere accuse un intermediaire ou notre lecture, le second accuse le
+/// chemin. Les deux envoient chercher a des endroits opposes.
+pub fn somme_juste(entete_brut: &[u8]) -> bool {
+    if entete_brut.len() < HEADER_LEN {
+        return false;
+    }
+    checksum(entete_brut) == 0
+}
+
 /// En-tete IPv4 decode.
 pub struct Header {
     pub src: Ipv4Addr,

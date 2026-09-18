@@ -919,6 +919,7 @@ fn network_sample(ts_ns: u64) {
         crate::net::compteurs_routage();
     let smol = crate::net::compteurs_smoltcp();
     let dora = crate::net::application::dhcp::compteurs();
+    let dns53 = crate::net::sonde_dns::compte;
     let mut out = Text::new();
     let _ = write!(
         &mut out,
@@ -962,7 +963,14 @@ fn network_sample(ts_ns: u64) {
             "rx_ring_laps_cpu={} rx_desc_returned_lap1={} rx_desc_returned_lap2={} ",
             "rx_desc_rearmed_lap1={} rx_desc_reused_lap2={} rx_ok_without_progress={} ",
             // PRESENCE, ATTACHEMENT, SERVICE : trois faits, pas un booleen.
-            "nic_present={} nic_bound={} nic_state={} nic_resets={} nic_resets_ok={}\n"
+            "nic_present={} nic_bound={} nic_state={} nic_resets={} nic_resets_ok={} ",
+            // L'ECHELLE DE LA REPONSE DNS. Le premier barreau nul dont le
+            // predecesseur ne l'est pas nomme l'etage qui laisse tomber le
+            // datagramme -- et `dns53_verdict` le dit en toutes lettres.
+            "dns53_rx_ethernet={} dns53_rx_ipv4={} dns53_rx_udp={} ",
+            "dns53_queued_ip={} dns53_dequeued_ip={} dns53_socket_match={} ",
+            "dns53_socket_busy={} dns53_socket_delivered={} dns53_poll_ready={} ",
+            "dns53_recv_success={} dns53_recv_eagain={} dns53_verdict={}\n"
         ),
         ts_ns, nic.xid, nic.generation,
         crate::drivers::e1000::link_up() as u8,
@@ -995,6 +1003,18 @@ fn network_sample(ts_ns: u64) {
         crate::drivers::rtl8168::attache() as u8,
         crate::drivers::rtl8168::etat_pilote().nom(),
         nic.reinitialisations, nic.reinitialisations_ok,
+        dns53(crate::net::sonde_dns::Barreau::RxEthernet),
+        dns53(crate::net::sonde_dns::Barreau::RxIpv4),
+        dns53(crate::net::sonde_dns::Barreau::RxUdp),
+        dns53(crate::net::sonde_dns::Barreau::MisEnFile),
+        dns53(crate::net::sonde_dns::Barreau::SortiDeFile),
+        dns53(crate::net::sonde_dns::Barreau::SocketTrouve),
+        dns53(crate::net::sonde_dns::Barreau::SocketOccupe),
+        dns53(crate::net::sonde_dns::Barreau::SocketLivre),
+        dns53(crate::net::sonde_dns::Barreau::PollPret),
+        dns53(crate::net::sonde_dns::Barreau::RecvSucces),
+        dns53(crate::net::sonde_dns::Barreau::RecvVide),
+        crate::net::sonde_dns::verdict(),
     );
     let _ = append(KIND_NETWORK, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }

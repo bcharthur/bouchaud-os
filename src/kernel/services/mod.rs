@@ -478,11 +478,39 @@ pub fn publie_les_indicateurs() {
     }
 
     // --- la resolution de noms, et le transport -------------------------
+    // QUATRE ETATS DISTINCTS POUR LE DNS.
+    //
+    // « resolveur configure » donnait l'impression que la resolution avait ete
+    // validee. Le releve du 24 septembre montre le contraire : le resolveur
+    // est bien configure -- 192.168.1.254, obtenu par bail --, la requete
+    // part, et aucune reponse ne revient. La ligne disait vrai et laissait
+    // croire le contraire.
+    //
+    //   configure     on sait a qui demander, on n'a rien demande
+    //   requete emise on a demande, rien n'est encore revenu
+    //   operationnel  une reponse est arrivee jusqu'au socket
+    //   en erreur     des requetes partent, aucune ne revient
+    use crate::net::sonde_dns::{compte, Barreau};
     let resolveur = crate::net::dns_server();
+    let emises = compte(Barreau::RxEthernet);
+    let recues = compte(Barreau::SocketLivre) + compte(Barreau::RecvSucces);
+    kpi(
+        "net.dns",
+        Kpi {
+            operations: if emises == 0 { None } else { Some(emises) },
+            ..Kpi::default()
+        },
+    );
     if resolveur == [0, 0, 0, 0] {
         etat_car("net.dns", Etat::Attente, "aucun resolveur");
-    } else if etat_de("net.dns") != Etat::Degrade {
-        etat_car("net.dns", Etat::Repos, "resolveur configure");
+    } else if recues != 0 {
+        etat_car("net.dns", Etat::Actif, "resolution operationnelle");
+    } else if emises != 0 {
+        // DES REQUETES PARTENT ET RIEN NE REVIENT. C'est une panne, et elle
+        // doit se voir comme telle -- pas comme un service au repos.
+        etat_car("net.dns", Etat::Degrade, "aucune reponse recue");
+    } else {
+        etat_car("net.dns", Etat::Repos, "configure, aucune requete");
     }
     let (poignees, _syn_rtx, _rtt_min, rtt_max, rtt_moyen) =
         crate::net::transport::retransmission::stats_poignee();
