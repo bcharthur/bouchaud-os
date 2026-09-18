@@ -22,6 +22,29 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_LOT");
 
+    // ET SI PERSONNE NE POSE LA VARIABLE, ON LA TROUVE SOI-MEME.
+    //
+    // Deux archives physiques de suite portent « commit=inconnu » alors que
+    // l'image venait d'un commit connu : le tampon dependait de ce que
+    // l'appelant veuille bien exporter, et un `cargo build` a la main ne le
+    // veut jamais. Une archive qui ignore de quel binaire elle vient ne
+    // prouve rien -- c'est tout l'objet du tampon.
+    //
+    // `rustc-env` pose la variable POUR la compilation, donc `option_env!` la
+    // voit quelle que soit la facon dont le noyau a ete construit.
+    if env::var_os("BOUCHAUD_BUILD_COMMIT").is_none() {
+        if let Some(commit) = commit_git() {
+            println!("cargo:rustc-env=BOUCHAUD_BUILD_COMMIT={commit}");
+        }
+    }
+    // Le tampon suit le HEAD : sans cela, deux commits d'affilee donneraient
+    // la meme valeur.
+    for chemin in [".git/HEAD", ".git/refs/heads"] {
+        if std::path::Path::new(chemin).exists() {
+            println!("cargo:rerun-if-changed={chemin}");
+        }
+    }
+
     let bytes = fs::read(FONT_PATH).expect("read bundled DejaVu Sans");
     let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
         .expect("parse bundled DejaVu Sans");
@@ -54,5 +77,26 @@ fn main() {
 
         fs::write(output.join(format!("fault-font-{scale}.bin")), atlas)
             .expect("write exception font atlas");
+    }
+}
+
+/// Le commit court, lu depuis git au moment de la construction.
+///
+/// Rend `None` hors d'un depot : une archive sans tampon vaut mieux qu'un
+/// tampon faux.
+fn commit_git() -> Option<String> {
+    let sortie = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()?;
+    if !sortie.status.success() {
+        return None;
+    }
+    let texte = String::from_utf8(sortie.stdout).ok()?;
+    let texte = texte.trim().to_string();
+    if texte.is_empty() {
+        None
+    } else {
+        Some(texte)
     }
 }

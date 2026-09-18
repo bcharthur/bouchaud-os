@@ -266,7 +266,16 @@ const PUBLICATION_NS: u64 = 1_000_000_000;
 /// chercher la panne dans le mauvais pilote. Celle qui est absente reste
 /// `Inconnu`, donc « N/A » -- ce qui est exactement vrai.
 pub fn carte_active() -> &'static str {
-    if crate::drivers::e1000::using_rtl8168() {
+    // LE MODELE VIENT DU BUS PCI, PAS DE L'ETAT DU PILOTE.
+    //
+    // `using_rtl8168()` rend `rtl8168::is_ready()`. Apres la reprise de degre
+    // quatre du 18 septembre, ce booleen est tombe a faux -- et la fenetre
+    // Services a bascule d'un coup sur la e1000, annoncant « rtl8168 absente
+    // de ce materiel » pour une puce soudee, et « e1000 Erreur, carte non
+    // pilotee » pour une carte qui n'a jamais existe sur cette machine.
+    //
+    // Une carte ne change pas de modele parce que son pilote a renonce.
+    if crate::drivers::rtl8168::presente() {
         "net.nic.rtl8168"
     } else {
         "net.nic.e1000"
@@ -333,30 +342,39 @@ pub fn publie_les_indicateurs() {
     //
     // Chacune porte sa RAISON. « Attente » sans raison oblige a deviner.
     let carte_absente = !carte_prete;
-    if carte_prete {
-        kpi(carte, releve);
-        // `Reprise` est pose par le pilote lui-meme et ne doit pas etre efface
-        // ici : une reprise en cours est plus grave qu'un lien qui porte.
-        if !matches!(etat_de(carte), Etat::Reprise | Etat::Degrade) {
-            let qualite = crate::net::qualite_lien();
-            if lien {
-                etat_car(carte, Etat::Actif, "pilote en service");
-            } else if qualite.vitesse_mbps == 0 {
-                etat_car(carte, Etat::Attente, "lien bas");
-            } else {
-                etat_car(carte, Etat::Attente, "autonegociation");
-            }
+    let _ = carte_absente;
+    // QUATRE FAITS, QUATRE REPONSES : presence, attachement, service, lien.
+    //
+    // La photo du 18 septembre melangeait les quatre dans un booleen, et
+    // designait le mauvais composant au pire moment.
+    if crate::drivers::rtl8168::presente() {
+        let pilote = crate::drivers::rtl8168::etat_pilote();
+        let (mot, raison) = crate::drivers::etat_pilote::resume(pilote, lien);
+        let etat_publie = match mot {
+            "actif" => Etat::Actif,
+            "attente" => Etat::Attente,
+            "demarrage" => Etat::Demarrage,
+            "reprise" => Etat::Reprise,
+            "panne" => Etat::Panne,
+            _ => Etat::Indisponible,
+        };
+        etat_car("net.nic.rtl8168", etat_publie, raison);
+        if pilote.en_service() {
+            kpi("net.nic.rtl8168", releve);
         }
     } else {
-        etat_car(carte, Etat::Panne, "carte non pilotee");
+        etat_car("net.nic.rtl8168", Etat::Indisponible, "absente de ce materiel");
     }
-    // L'AUTRE CARTE N'EST PAS EN PANNE : ELLE N'EST PAS LA.
-    let absente = if crate::drivers::e1000::using_rtl8168() {
-        "net.nic.e1000"
+    // LA e1000 DE QEMU N'EST PAS SUR LA TRIGKEY. Elle ne peut donc pas y etre
+    // « en panne » : elle est absente, et c'est tout ce qu'on en sait.
+    if crate::drivers::rtl8168::presente() {
+        etat_car("net.nic.e1000", Etat::Indisponible, "absente de ce materiel");
+    } else if carte_prete {
+        etat_car("net.nic.e1000", Etat::Actif, "pilote en service");
+        kpi("net.nic.e1000", releve);
     } else {
-        "net.nic.rtl8168"
-    };
-    etat_car(absente, Etat::Indisponible, "absente de ce materiel");
+        etat_car("net.nic.e1000", Etat::Indisponible, "absente de ce materiel");
+    }
 
     // Le lien physique, avec ce qu'il vaut.
     let qualite = crate::net::qualite_lien();
@@ -554,7 +572,37 @@ pub fn publie_les_indicateurs() {
     kpi("sys.storage.ramfs", Kpi { operations: Some(noeuds as u64), ..Kpi::default() });
     etat_car("sys.storage.ramfs", Etat::Actif, "systeme de fichiers en RAM");
     etat_car("sys.storage.fs", Etat::Actif, "monte");
-    etat_car("sys.storage.nvme", Etat::Indisponible, "aucun disque NVMe");
+    // LE DISQUE REEL, ET NON UNE CONSTANTE.
+    //
+    // Cette ligne annoncait « aucun disque NVMe » en dur. Le releve du
+    // 18 septembre contient au meme instant :
+    //
+    //     BOUCHAUD_NVME_GREEN modele=KINGSTON OM8SEP4512N-A0 mio=488386
+    //     NVME_IO_CQE_OK  NVME_IO_COPY_END
+    //
+    // Le pilote fonctionne ; c'est la publication qui mentait. Un moniteur qui
+    // declare absent un disque en service fait chercher la panne ailleurs.
+    let (lectures, ecritures, _vidanges, erreurs_nvme, delais) =
+        crate::drivers::nvme::stats();
+    if crate::drivers::nvme::present() {
+        etat_car("sys.storage.nvme", Etat::Actif, "disque interne");
+        kpi(
+            "sys.storage.nvme",
+            Kpi {
+                disque_lu: if lectures == 0 { None } else { Some(lectures) },
+                disque_ecrit: if ecritures == 0 { None } else { Some(ecritures) },
+                operations: Some(lectures.saturating_add(ecritures)),
+                ..Kpi::default()
+            },
+        );
+        if erreurs_nvme != 0 || delais != 0 {
+            etat_car("sys.storage.nvme", Etat::Degrade, "erreurs d'entree-sortie");
+        }
+    } else if crate::drivers::nvme::hors_service() {
+        etat_car("sys.storage.nvme", Etat::Panne, "retire du service");
+    } else {
+        etat_car("sys.storage.nvme", Etat::Indisponible, "aucun disque NVMe");
+    }
 
     // L'USB. C'est la que « Indisponible » se distingue d'une panne : sous
     // QEMU il n'y a pas de xHCI, et ce n'est pas un defaut.

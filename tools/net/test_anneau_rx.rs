@@ -26,7 +26,9 @@ mod anneau;
 use anneau::{
     a_acquitter, adresse_tampon, carte_absente, cmd, cplus_cmd, degre, eor_pour, examine,
     generation, invariant_casse, isr, moteur_rx_a_relancer, nom, opts1_rendu, recense,
-    reception_arretee, rx_config, suivant, xid, Degre, Generation, Recensement, Sante,
+    config2_sans_clkreq, config5_sans_aspm, coupe_les_economies,
+    misc_chemin_rx_ouvert, reception_arretee, rx_config, suivant, xid, Degre, Generation,
+    Recensement, Sante,
     SILENCE_RX_NS,
     Verdict, DESCRIPTEURS, EOR, ERR_CRC, ERR_RES, ERR_RUNT, ERR_RWT, MASQUE_LONGUEUR, OCTETS_FCS,
     OWN, RX128_INT_EN, RX_DMA_BURST, RX_EARLY_OFF, RX_FIFO_THRESH_HISTORIQUE, RX_MULTI_EN,
@@ -760,4 +762,49 @@ fn une_emission_plus_ancienne_que_la_reception_n_accuse_rien() {
         reprise_derniere_ns: 0,
     };
     assert!(!reception_arretee(&sante, 50 * SEC));
+}
+
+// ===========================================================================
+// LES REGLAGES 8168h (XID 0x541)
+//
+// Audit contre `rtl_hw_start_8168h_1` : le pilote programmait RxConfig,
+// CPlusCmd, les adresses d'anneaux et les filtres, et RIEN des economies
+// d'energie. ASPM et CLKREQ laissent le lien PCIe descendre en L1 quand il
+// est calme ; le MAC continue alors de lever `RxOK` sur ses propres tampons
+// pendant que son moteur DMA n'atteint plus la memoire de l'hote.
+// ===========================================================================
+
+#[test]
+fn le_xid_physique_est_bien_un_8168h() {
+    // Le releve donne `xid=0x541`. Ce n'est pas un RTL8168 « generique ».
+    assert_eq!(generation(0x541), Generation::ReceptionDifferee);
+    assert!(coupe_les_economies(generation(0x541)));
+}
+
+#[test]
+fn les_economies_d_energie_sont_coupees_sur_8168h() {
+    // Chaque bit, un par un : on n'efface QUE ce qu'on a decide d'effacer.
+    assert_eq!(config2_sans_clkreq(0xFF), 0xFF & !(1 << 7));
+    assert_eq!(config5_sans_aspm(0xFF), 0xFF & !1);
+    assert_eq!(misc_chemin_rx_ouvert(0xFFFF_FFFF), 0xFFFF_FFFF & !((1 << 19) | (1 << 14) | (1 << 13)));
+}
+
+#[test]
+fn couper_les_economies_ne_touche_a_rien_d_autre() {
+    // Un registre deja propre ne doit pas changer : ces fonctions effacent,
+    // elles n'imposent pas une valeur.
+    assert_eq!(config2_sans_clkreq(0x00), 0x00);
+    assert_eq!(config5_sans_aspm(0x00), 0x00);
+    assert_eq!(misc_chemin_rx_ouvert(0x0000_0000), 0x0000_0000);
+    // Et les bits voisins survivent.
+    assert_eq!(config2_sans_clkreq(0b0111_1111), 0b0111_1111);
+    assert_eq!(config5_sans_aspm(0b1111_1110), 0b1111_1110);
+}
+
+#[test]
+fn une_carte_plus_ancienne_garde_ses_reglages() {
+    // On n'ajoute un reglage que pour la generation qui le demande : toucher
+    // Config2/Config5 sur un RTL8169 de 2003 serait une modification non
+    // justifiee par le releve.
+    assert!(!coupe_les_economies(Generation::Historique));
 }

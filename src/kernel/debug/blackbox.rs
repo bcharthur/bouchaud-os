@@ -956,7 +956,13 @@ fn network_sample(ts_ns: u64) {
             // la negociation s'arretait : pas d'offre, offre au mauvais xid,
             // ou REQUEST sans ACK. Trois pannes, trois enquetes.
             "discover_sent={} offer_seen={} request_sent={} ack_seen={} ",
-            "last_xid={:#010x} dhcp_retry={} dhcp_stage={}\n"
+            "last_xid={:#010x} dhcp_retry={} dhcp_stage={} ",
+            // LES TOURS D'ANNEAU. Un premier tour reussi ne prouve rien : le
+            // releve du 18 septembre en montre exactement un, puis plus rien.
+            "rx_ring_laps_cpu={} rx_desc_returned_lap1={} rx_desc_returned_lap2={} ",
+            "rx_desc_rearmed_lap1={} rx_desc_reused_lap2={} rx_ok_without_progress={} ",
+            // PRESENCE, ATTACHEMENT, SERVICE : trois faits, pas un booleen.
+            "nic_present={} nic_bound={} nic_state={} nic_resets={} nic_resets_ok={}\n"
         ),
         ts_ns, nic.xid, nic.generation,
         crate::drivers::e1000::link_up() as u8,
@@ -983,6 +989,12 @@ fn network_sample(ts_ns: u64) {
         nic.tx_dernier_termine_ns, nic.tx_desc_possedes,
         dora.discover_envoyes, dora.offres_vues, dora.requests_envoyes, dora.acks_vus,
         dora.dernier_xid, dora.tentatives, dora.derniere_etape.nom(),
+        nic.rx_tours_cpu, nic.rx_rendus_tour1, nic.rx_rendus_tour2,
+        nic.rx_rearmes_tour1, nic.rx_reutilises_tour2, nic.rx_ok_sans_progres,
+        crate::drivers::rtl8168::presente() as u8,
+        crate::drivers::rtl8168::attache() as u8,
+        crate::drivers::rtl8168::etat_pilote().nom(),
+        nic.reinitialisations, nic.reinitialisations_ok,
     );
     let _ = append(KIND_NETWORK, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }

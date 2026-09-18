@@ -171,6 +171,64 @@ fn configure_dma(debut: u64, fin: u64) {
 
 /// Alloue un bloc DMA (aligne page, mis a zero). Renvoie (adresse physique,
 /// pointeur virtuel). `None` si l'arene est epuisee.
+// ---------------------------------------------------------------------------
+// BARRIERES DMA
+// ---------------------------------------------------------------------------
+//
+// # Pourquoi une API, et pas un `compiler_fence` disperse
+//
+// Le pilote RTL8168 rendait ses descripteurs ainsi :
+//
+// ```text
+// buf_addr ; opts2 = 0 ; compiler_fence(Release) ; opts1 = OWN | EOR | taille
+// ```
+//
+// `compiler_fence` n'est PAS une barriere DMA : il interdit au compilateur de
+// reordonner, et rien de plus. Il ne dit rien au processeur, ni au pont PCIe.
+// Le nom seul entretenait la confusion, et une regle qu'on ne peut pas nommer
+// ne se verifie pas.
+//
+// # Ce que le contrat x86_64 garantit VRAIMENT
+//
+// Sur x86_64, le modele memoire est TSO : deux ecritures normales en memoire
+// cacheable ne sont jamais reordonnees entre elles telles que les voit un
+// observateur coherent, et le DMA PCIe est coherent avec les caches (les
+// transactions sont snoopees). Pour l'ordre « tampon d'abord, propriete
+// ensuite », `compiler_fence` SUFFIT donc a la correction -- a condition que
+// les deux ecritures soient des ecritures memoire ordinaires.
+//
+// Ce n'est plus vrai des que la memoire est write-combining, ou que l'on
+// melange une ecriture MMIO a la sequence : le write-combining n'ordonne
+// rien, et c'est exactement ce que ces fonctions rendent explicite.
+//
+// Elles portent donc le contrat, meme quand elles compilent en presque rien :
+// le jour ou un anneau sera pose en memoire write-combining, ou le portage
+// visera une architecture faiblement ordonnee, l'endroit a corriger sera
+// celui-ci, et non trente `compiler_fence` disperses.
+
+/// Barriere d'ECRITURE avant de ceder un tampon au materiel.
+///
+/// Garantit que tout ce qui a ete ecrit avant est visible du peripherique
+/// avant ce qui est ecrit apres -- typiquement l'adresse et la longueur avant
+/// le bit de propriete.
+#[inline(always)]
+pub fn dma_wmb() {
+    // `sfence` ordonne aussi les ecritures write-combining, que le modele TSO
+    // ne couvre pas. Son cout est negligeable devant une transaction PCIe.
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+}
+
+/// Barriere de LECTURE avant d'exploiter un tampon rendu par le materiel.
+///
+/// Garantit que la lecture du bit de propriete precede celle du contenu : on
+/// ne lit pas un tampon dont on n'a pas encore constate qu'il nous appartient.
+#[inline(always)]
+pub fn dma_rmb() {
+    unsafe { core::arch::asm!("lfence", options(nostack, preserves_flags)) };
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+}
+
 pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
     // Interruptions masquees : l'arene est atteignable depuis l'initialisation
     // d'un pilote comme depuis un gestionnaire, et son verrou est un verrou

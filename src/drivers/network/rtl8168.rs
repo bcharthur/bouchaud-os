@@ -32,6 +32,12 @@ const REG_TX_CONFIG: u32 = 0x40;
 const REG_RX_CONFIG: u32 = 0x44;
 const REG_RX_MISSED: u32 = 0x4C;
 const REG_CFG9346: u32 = 0x50;
+/// `Config2` : porte le bit d'autorisation `CLKREQ`.
+const REG_CONFIG2: u32 = 0x53;
+/// `Config5` : porte le bit d'autorisation ASPM.
+const REG_CONFIG5: u32 = 0x56;
+/// `MISC` : porte `RXDV_GATE` et les etats L2/L3 du lien PCIe.
+const REG_MISC: u32 = 0x00F0;
 const REG_PHY_STATUS: u32 = 0x6C;
 const REG_RX_MAX_SIZE: u32 = 0xDA;
 const REG_CPLUS_CMD: u32 = 0xE0;
@@ -256,6 +262,7 @@ static mut RX_RING: *mut u8 = core::ptr::null_mut();
 /// Adresse PHYSIQUE de l'anneau RX. Sans elle, reconstruire l'anneau ne peut
 /// pas reprogrammer le controleur, et le pointeur interne resterait desyncrone.
 static mut RX_RING_P: u64 = 0;
+static mut TX_RING_P: u64 = 0;
 static mut TX_RING: *mut u8 = core::ptr::null_mut();
 static mut RX_BUFFER_V: *mut u8 = core::ptr::null_mut();
 static mut RX_BUFFER_P: u64 = 0;
@@ -363,6 +370,82 @@ static TX_DERNIER_TERMINE_NS: AtomicU64 = AtomicU64::new(0);
 /// Interruptions `TxOK` vues.
 static ISR_TX_OK: AtomicU64 = AtomicU64::new(0);
 
+/// L'IDENTITE PCI DE LA CARTE, RETENUE POUR TOUJOURS.
+///
+/// Une reprise de degre quatre doit pouvoir reprogrammer la puce. Elle ne le
+/// peut que si l'on a garde de quoi la retrouver : son BAR, et son adresse
+/// sur le bus. L'ancienne version effacait `MMIO` -- apres quoi plus rien ne
+/// savait ou etait la carte, et le pilote ne pouvait que se declarer absent.
+static mut BAR_PHYSIQUE: u64 = 0;
+static mut PCI_BUS: u8 = 0;
+static mut PCI_SLOT: u8 = 0;
+static mut PCI_FONCTION: u8 = 0;
+/// La carte a-t-elle ete VUE sur le bus ? Ne redevient jamais faux.
+static VUE_SUR_LE_BUS: AtomicBool = AtomicBool::new(false);
+/// L'etat du pilote, au sens de `etat_pilote::Etat`.
+static ETAT_PILOTE: AtomicU64 = AtomicU64::new(0);
+/// Reinitialisations tentees, et reussies.
+static REINITIALISATIONS: AtomicU64 = AtomicU64::new(0);
+static REINITIALISATIONS_OK: AtomicU64 = AtomicU64::new(0);
+
+/// LES TOURS D'ANNEAU, ET CE QUI SE PASSE AU SECOND.
+///
+/// # Le fait le plus important du releve du 18 septembre
+///
+/// ```text
+/// rx_packets  0 -> 4 -> ... -> 62 -> 64      puis 64 pour toujours
+/// rx_cur      0 -> 4 -> ... -> 62 -> 0       puis 0 pour toujours
+/// ```
+///
+/// Soixante-quatre trames, soixante-quatre descripteurs : EXACTEMENT UN TOUR.
+/// Le processeur repasse a l'indice zero, et le materiel ne remplit plus
+/// jamais un descripteur -- alors qu'il les possede tous les soixante-quatre
+/// et qu'il continue de signaler `RxOK`.
+///
+/// Un premier tour reussi ne prouve donc RIEN : c'est precisement ce que
+/// faisait toute la campagne precedente. Ces compteurs distinguent le premier
+/// tour du second, seul le second etant une preuve que l'anneau CIRCULE.
+static RX_TOURS_CPU: AtomicU64 = AtomicU64::new(0);
+/// Descripteurs rendus par le materiel pendant le premier tour, puis apres.
+static RX_RENDUS_TOUR1: AtomicU64 = AtomicU64::new(0);
+static RX_RENDUS_TOUR2: AtomicU64 = AtomicU64::new(0);
+/// Descripteurs rearmes pendant le premier tour, et REUTILISES ensuite.
+static RX_REARMES_TOUR1: AtomicU64 = AtomicU64::new(0);
+static RX_REUTILISES_TOUR2: AtomicU64 = AtomicU64::new(0);
+
+/// `RxOK` a progresse SANS que la reception progresse.
+///
+/// # Pourquoi l'ancien compteur mentait
+///
+/// `rx_ok_sans_desc` comptait un `RxOK` vu alors que le descripteur courant
+/// portait encore `OWN`. Or c'est l'etat NORMAL d'un anneau au repos : le
+/// releve montre `rx_packets=4` avec `rx_ok_sans_desc=3` pendant que la
+/// reception fonctionne parfaitement. Un compteur d'anomalie qui monte en
+/// marche nominale ne sert a rien.
+///
+/// La vraie anomalie demande trois choses ENSEMBLE, sur une fenetre bornee :
+/// `RxOK` a progresse, `rx_packets` n'a pas bouge, et aucun descripteur n'est
+/// revenu au processeur.
+static RX_OK_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
+/// Temoins de la derniere fenetre d'observation.
+static TEMOIN_ISR_RX_OK: AtomicU64 = AtomicU64::new(0);
+static TEMOIN_RX_PAQUETS: AtomicU64 = AtomicU64::new(0);
+static TEMOIN_OWN_RENDUS: AtomicU64 = AtomicU64::new(0);
+static TEMOIN_FENETRE_NS: AtomicU64 = AtomicU64::new(0);
+/// Duree de la fenetre d'observation du progres, en nanosecondes.
+const FENETRE_PROGRES_NS: u64 = 1_000_000_000;
+
+/// LE VERDICT D'UNE REPRISE, RENDU APRES COUP.
+///
+/// On n'escalade que sur une PREUVE d'absence de progres : la reception n'a
+/// pas avance, et aucun descripteur n'est revenu, alors qu'on a laisse a la
+/// carte une fenetre bornee pour le montrer.
+static VERDICT_ATTENDU_DEPUIS: AtomicU64 = AtomicU64::new(0);
+static VERDICT_PAQUETS_AVANT: AtomicU64 = AtomicU64::new(0);
+static VERDICT_RENDUS_AVANT: AtomicU64 = AtomicU64::new(0);
+/// Fenetre laissee a une reprise pour faire ses preuves.
+const FENETRE_VERDICT_NS: u64 = 3_000_000_000;
+
 static REPARATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
 /// Identifiant de revision lu dans `TxConfig`, et la generation qui en decoule.
 static XID: AtomicU32 = AtomicU32::new(0);
@@ -430,6 +513,18 @@ pub struct Releve {
     pub tx_ok_isr: u64,
     pub tx_dernier_termine_ns: u64,
     pub tx_desc_possedes: u32,
+    /// Les tours d'anneau : seul le SECOND prouve que l'anneau circule.
+    pub rx_tours_cpu: u64,
+    pub rx_rendus_tour1: u64,
+    pub rx_rendus_tour2: u64,
+    pub rx_rearmes_tour1: u64,
+    pub rx_reutilises_tour2: u64,
+    /// `RxOK` monte, reception figee, aucun descripteur rendu.
+    pub rx_ok_sans_progres: u64,
+    /// L'etat du pilote : presence, attachement, service.
+    pub pilote: u8,
+    pub reinitialisations: u64,
+    pub reinitialisations_ok: u64,
 }
 
 /// L'etat du pilote, en une lecture. Sans effet de bord sur le materiel.
@@ -487,6 +582,15 @@ pub fn releve() -> Releve {
             tx_ok_isr: ISR_TX_OK.load(Ordering::Relaxed),
             tx_dernier_termine_ns: TX_DERNIER_TERMINE_NS.load(Ordering::Relaxed),
             tx_desc_possedes: tx_descripteurs_possedes(),
+            rx_tours_cpu: RX_TOURS_CPU.load(Ordering::Relaxed),
+            rx_rendus_tour1: RX_RENDUS_TOUR1.load(Ordering::Relaxed),
+            rx_rendus_tour2: RX_RENDUS_TOUR2.load(Ordering::Relaxed),
+            rx_rearmes_tour1: RX_REARMES_TOUR1.load(Ordering::Relaxed),
+            rx_reutilises_tour2: RX_REUTILISES_TOUR2.load(Ordering::Relaxed),
+            rx_ok_sans_progres: RX_OK_SANS_PROGRES.load(Ordering::Relaxed),
+            pilote: etat_pilote() as u8,
+            reinitialisations: REINITIALISATIONS.load(Ordering::Relaxed),
+            reinitialisations_ok: REINITIALISATIONS_OK.load(Ordering::Relaxed),
         }
     }
 }
@@ -533,6 +637,10 @@ unsafe fn write32(offset: u32, value: u32) {
 }
 
 #[inline]
+unsafe fn desc_read64(ring: *mut u8, index: usize, offset: usize) -> u64 {
+    core::ptr::read_volatile(ring.add(index * DESC_SIZE + offset) as *const u64)
+}
+
 unsafe fn desc_read32(ring: *mut u8, index: usize, offset: usize) -> u32 {
     read_volatile(ring.add(index * DESC_SIZE + offset) as *const u32)
 }
@@ -618,6 +726,18 @@ pub fn init_with_device(device: &PciDevice) -> bool {
     pci::enable_bus_master(device);
 
     unsafe {
+        // L'IDENTITE D'ABORD, ET POUR TOUJOURS.
+        //
+        // Sans elle, une reprise de degre quatre n'a aucun moyen de retrouver
+        // la carte : c'est pour cela que l'ancienne version ne pouvait que se
+        // declarer absente.
+        BAR_PHYSIQUE = bar;
+        PCI_BUS = device.bus;
+        PCI_SLOT = device.slot;
+        PCI_FONCTION = device.func;
+        VUE_SUR_LE_BUS.store(true, Ordering::Relaxed);
+        pose_etat(crate::drivers::etat_pilote::Etat::Detecte);
+
         MMIO = memory::phys_offset().wrapping_add(bar);
 
         // Arrete Rx/Tx puis reinitialise le MAC. Boucle bornee : un controleur
@@ -652,6 +772,11 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         }
         MAC = detected_mac;
 
+        // LES ANNEAUX NE S'ALLOUENT QU'UNE FOIS.
+        //
+        // Une reprise qui reallouerait ses anneaux DMA a chaque tentative
+        // finirait par epuiser la memoire basse -- et une carte qui tombe
+        // toutes les minutes tombe souvent.
         let (rx_ring_p, rx_ring_v) = match memory::alloc_dma(N_RX * DESC_SIZE) {
             Some(pair) => pair,
             None => {
@@ -688,6 +813,7 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         RX_RING = rx_ring_v;
         RX_RING_P = rx_ring_p;
         TX_RING = tx_ring_v;
+        TX_RING_P = tx_ring_p;
         RX_BUFFER_P = rx_buffer_p;
         RX_BUFFER_V = rx_buffer_v;
         TX_BUFFER_P = tx_buffer_p;
@@ -722,6 +848,101 @@ pub fn init_with_device(device: &PciDevice) -> bool {
             );
         }
 
+        pose_etat(crate::drivers::etat_pilote::Etat::Lie);
+    }
+
+    if !unsafe { programme_le_materiel() } {
+        pose_etat(crate::drivers::etat_pilote::Etat::Echec);
+        return false;
+    }
+
+    let m = mac();
+    let raw_version = unsafe { read32(REG_TX_CONFIG) };
+    let identifiant = XID.load(Ordering::Relaxed);
+    let (generation, rxcfg, chip) = unsafe {
+        (anneau::nom(GENERATION), read32(REG_RX_CONFIG), read8(REG_CHIP_CMD))
+    };
+    dmesg::log_fmt(format_args!(
+        "rtl8168: initialise MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} txcfg={:#010x} xid={:#05x} {}",
+        m[0], m[1], m[2], m[3], m[4], m[5], raw_version, identifiant, generation,
+    ));
+    let _ = (rxcfg, chip);
+    true
+}
+
+/// PROGRAMME LE MATERIEL, SANS RIEN REALLOUER.
+///
+/// # Pourquoi cette fonction existe
+///
+/// La reprise de degre quatre faisait ceci :
+///
+/// ```text
+/// READY = false;
+/// MMIO = 0;
+/// return false;
+/// ```
+///
+/// Ce n'est pas une reinitialisation, c'est une desactivation definitive du
+/// pilote. Le releve du 18 septembre le montre a la seconde pres : a t=83,3 s
+/// tous les compteurs retombent a zero, `chip_cmd` passe de `0x0c` a `0x00`,
+/// et la fenetre Services annonce une carte « absente de ce materiel » --
+/// une carte soudee, qui venait de recevoir soixante-quatre trames.
+///
+/// Une vraie reinitialisation garde l'identite PCI, reutilise les anneaux
+/// deja alloues, et remet la puce en service. Elle peut echouer ; elle ne
+/// doit jamais faire disparaitre le materiel.
+unsafe fn programme_le_materiel() -> bool {
+    if BAR_PHYSIQUE == 0 {
+        return false;
+    }
+    MMIO = memory::phys_offset().wrapping_add(BAR_PHYSIQUE);
+
+    // Arrete Rx/Tx, puis reinitialise le MAC.
+    write8(REG_CHIP_CMD, 0);
+    write16(REG_INTR_MASK, 0);
+    write16(REG_INTR_STATUS, 0xFFFF);
+    write8(REG_CHIP_CMD, CMD_RESET);
+    let mut reset_ok = false;
+    for _ in 0..RESET_SPINS {
+        if read8(REG_CHIP_CMD) & CMD_RESET == 0 {
+            reset_ok = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !reset_ok {
+        dmesg::log("rtl8168: reset timeout");
+        return false;
+    }
+
+    // LES ANNEAUX SONT REMIS A NEUF, PAS REALLOUES.
+    RX_CUR = 0;
+    TX_CUR = 0;
+    for index in 0..N_RX {
+        desc_write32(RX_RING, index, 4, 0);
+        desc_write64(
+            RX_RING,
+            index,
+            8,
+            anneau::adresse_tampon(RX_BUFFER_P, index, anneau::TAILLE_TAMPON),
+        );
+        desc_write32(
+            RX_RING,
+            index,
+            0,
+            anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
+        );
+    }
+    for index in 0..N_TX {
+        let eor = if index + 1 == N_TX { DESC_EOR } else { 0 };
+        desc_write32(TX_RING, index, 0, eor);
+        desc_write32(TX_RING, index, 4, 0);
+        desc_write64(TX_RING, index, 8, TX_BUFFER_P + (index * BUF_SIZE) as u64);
+    }
+    // La barriere DMA : les descripteurs doivent etre visibles AVANT que les
+    // moteurs ne partent. Voir `memory::dma_wmb`.
+    memory::dma_wmb();
+
         // LA REVISION DU SILICIUM D'ABORD : elle decide `RxConfig`.
         //
         // `TxConfig` porte l'identifiant de revision, et `rtl8169_init_one` le
@@ -739,15 +960,48 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         // accede -- les registres `*DescAddrHigh` ci-dessous portent les bits
         // hauts -- et `rtl_init_one` efface ce bit sur toute la famille.
         write8(REG_CFG9346, CFG9346_UNLOCK);
+
+        // LES ECONOMIES D'ENERGIE DU 8168h, COUPEES AVANT DE DEMARRER.
+        //
+        // ASPM et CLKREQ laissent le lien PCIe descendre en L1 quand il est
+        // calme. Le MAC continue alors de recevoir et de lever `RxOK` -- il a
+        // ses propres tampons -- pendant que son moteur DMA ne peut plus
+        // atteindre la memoire de l'hote.
+        //
+        // C'est exactement la signature du releve du 18 septembre : un tour
+        // d'anneau pendant que le trafic est soutenu, puis plus un descripteur
+        // rendu, `RxEnb` toujours arme, `RxMissed` a zero, aucune erreur.
+        //
+        // `rtl_hw_start_8168h_1` coupe les deux avant de demarrer le
+        // materiel. On ne fait que desactiver des economies d'energie : ni le
+        // format des descripteurs ni le protocole ne changent.
+        if anneau::coupe_les_economies(GENERATION) {
+            write8(REG_CONFIG2, anneau::config2_sans_clkreq(read8(REG_CONFIG2)));
+            write8(REG_CONFIG5, anneau::config5_sans_aspm(read8(REG_CONFIG5)));
+            // `RXDV_GATE` coupe l'alimentation du chemin de reception, et
+            // L2/L3 laisse le lien PCIe s'endormir plus bas encore.
+            write32(REG_MISC, anneau::misc_chemin_rx_ouvert(read32(REG_MISC)));
+            crate::serial_println!(
+                "BOUCHAUD_NET_RTL8168_ECONOMIES_COUPEES config2={:#04x} config5={:#04x} misc={:#010x}",
+                read8(REG_CONFIG2),
+                read8(REG_CONFIG5),
+                read32(REG_MISC),
+            );
+        }
+
         write16(REG_CPLUS_CMD, anneau::cplus_cmd(read16(REG_CPLUS_CMD)));
         // La taille MAXIMALE acceptee, et non la taille moins un : une trame
         // de exactement `BUF_SIZE` octets tient dans le tampon.
         write16(REG_RX_MAX_SIZE, BUF_SIZE as u16);
 
-        write32(REG_TX_DESC_LOW, tx_ring_p as u32);
-        write32(REG_TX_DESC_HIGH, (tx_ring_p >> 32) as u32);
-        write32(REG_RX_DESC_LOW, rx_ring_p as u32);
-        write32(REG_RX_DESC_HIGH, (rx_ring_p >> 32) as u32);
+        // LES BITS HAUTS COMPTENT. Un anneau au-dela de quatre gibioctets
+        // n'est adressable que si `*DescAddrHigh` porte sa moitie haute ; les
+        // ecrire systematiquement evite d'avoir a se demander ou l'allocateur
+        // a bien voulu poser les anneaux.
+        write32(REG_TX_DESC_LOW, TX_RING_P as u32);
+        write32(REG_TX_DESC_HIGH, (TX_RING_P >> 32) as u32);
+        write32(REG_RX_DESC_LOW, RX_RING_P as u32);
+        write32(REG_RX_DESC_HIGH, (RX_RING_P >> 32) as u32);
 
         write32(REG_TX_CONFIG, TX_DMA_BURST | TX_INTERFRAME_GAP);
         write32(REG_MAR0, 0xFFFF_FFFF);
@@ -770,8 +1024,7 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         );
         write8(REG_CFG9346, CFG9346_LOCK);
 
-        READY = true;
-    }
+    pose_etat(crate::drivers::etat_pilote::Etat::Pret);
 
     let m = mac();
     let raw_version = unsafe { read32(REG_TX_CONFIG) };
@@ -836,6 +1089,60 @@ xid={:#05x} generation={} rxcfg={:#010x} chip_cmd={:#04x}",
         crate::serial_println!("BOUCHAUD_TRIGKEY_RTL8168_LINK_DOWN");
     }
     true
+}
+
+/// L'etat du pilote : presence, attachement, service -- quatre faits.
+pub fn etat_pilote() -> crate::drivers::etat_pilote::Etat {
+    use crate::drivers::etat_pilote::Etat;
+    match ETAT_PILOTE.load(Ordering::Relaxed) {
+        1 => Etat::Detecte,
+        2 => Etat::Lie,
+        3 => Etat::Pret,
+        4 => Etat::Reprise,
+        5 => Etat::Echec,
+        _ => Etat::Absent,
+    }
+}
+
+/// Pose l'etat du pilote, en refusant les transitions interdites.
+///
+/// La seule qui compte vraiment : RIEN ne ramene a `Absent`. C'est celle que
+/// l'ancienne reprise de degre quatre effectuait, et qui faisait disparaitre
+/// une carte soudee du rapport.
+fn pose_etat(vers: crate::drivers::etat_pilote::Etat) {
+    use crate::drivers::etat_pilote::{transition_permise, Etat};
+    let depuis = etat_pilote();
+    if !transition_permise(depuis, vers) {
+        crate::serial_println!(
+            "BOUCHAUD_NET_RTL8168_ETAT_REFUSE depuis={} vers={}",
+            depuis.nom(),
+            vers.nom(),
+        );
+        return;
+    }
+    if depuis != vers {
+        crate::serial_println!(
+            "BOUCHAUD_NET_RTL8168_ETAT depuis={} vers={}",
+            depuis.nom(),
+            vers.nom(),
+        );
+    }
+    ETAT_PILOTE.store(vers as u64, Ordering::Relaxed);
+    unsafe {
+        READY = matches!(vers, Etat::Pret);
+    }
+}
+
+/// La puce est-elle sur le bus ? Independant de l'etat du pilote.
+///
+/// Une carte soudee ne s'en va pas parce que notre code a renonce.
+pub fn presente() -> bool {
+    VUE_SUR_LE_BUS.load(Ordering::Relaxed)
+}
+
+/// Un pilote est-il attache a cette puce ?
+pub fn attache() -> bool {
+    etat_pilote().attache()
 }
 
 pub fn link_up() -> bool {
@@ -991,6 +1298,94 @@ unsafe fn moissonne_les_emissions() {
     }
 }
 
+/// CAPTURE LE PASSAGE 63 -> 0, UNE SEULE FOIS PAR TOUR, ET AU PLUS DEUX TOURS.
+///
+/// # Ce qu'on cherche a savoir
+///
+/// Au premier bouclage, le processeur a rearme les soixante-quatre
+/// descripteurs et les rend tous au materiel. Le releve du 18 septembre dit
+/// qu'a partir de la, le materiel n'en remplit plus aucun -- tout en
+/// continuant a signaler `RxOK`, sans `RxMissed`, sans erreur, et avec
+/// `RxEnb` toujours arme.
+///
+/// Trois explications restent ouvertes : le materiel a quitte notre anneau,
+/// il lit un anneau different de celui que nous ecrivons, ou il attend
+/// quelque chose que nous ne lui donnons pas. Les registres ci-dessous les
+/// separent -- et il faut les lire AU MOMENT du bouclage, pas trente secondes
+/// apres.
+///
+/// Deux lignes en tout pour une session : pas un journal par paquet.
+unsafe fn capture_le_bouclage(tour: u64, dernier_index: usize) {
+    if tour > 2 {
+        return;
+    }
+    let desc63 = desc_read32(RX_RING, dernier_index, 0);
+    let desc0 = desc_read32(RX_RING, 0, 0);
+    let adresse0 = desc_read64(RX_RING, 0, 8);
+    crate::serial_println!(
+        "BOUCHAUD_NET_RTL8168_BOUCLAGE tour={} index={} desc_dernier_apres={:#010x} \
+desc0={:#010x} desc0_dma={:#018x} anneau_dma={:#018x} \
+rx_desc_low={:#010x} rx_desc_high={:#010x} chip_cmd={:#04x} rx_config={:#010x} \
+cplus_cmd={:#06x} intr_status={:#06x} intr_mask={:#06x} rx_missed={} rx_max={} \
+rx_paquets={} own_rendus={}",
+        tour,
+        dernier_index,
+        desc63,
+        desc0,
+        adresse0,
+        RX_RING_P,
+        read32(REG_RX_DESC_LOW),
+        read32(REG_RX_DESC_HIGH),
+        read8(REG_CHIP_CMD),
+        read32(REG_RX_CONFIG),
+        read16(REG_CPLUS_CMD),
+        read16(REG_INTR_STATUS),
+        read16(REG_INTR_MASK),
+        read32(REG_RX_MISSED),
+        read16(REG_RX_MAX_SIZE),
+        RX_PAQUETS.load(Ordering::Relaxed),
+        RX_OWN_RENDUS.load(Ordering::Relaxed),
+    );
+}
+
+/// `RxOK` A-T-IL PROGRESSE SANS QUE LA RECEPTION PROGRESSE ?
+///
+/// Les trois conditions ensemble, sur une fenetre d'une seconde :
+///
+/// 1. `RxOK` a monte ;
+/// 2. `rx_packets` n'a pas bouge ;
+/// 3. aucun descripteur n'est revenu au processeur.
+///
+/// C'est cela, un `RxOK` sterile. L'ancien compteur ne verifiait que « le
+/// descripteur courant porte `OWN` », qui est l'etat normal d'un anneau au
+/// repos : il montait a trois pendant que la reception fonctionnait.
+unsafe fn juge_le_progres(maintenant: u64) {
+    let precedent = TEMOIN_FENETRE_NS.load(Ordering::Relaxed);
+    if precedent == 0 {
+        TEMOIN_FENETRE_NS.store(maintenant, Ordering::Relaxed);
+        TEMOIN_ISR_RX_OK.store(ISR_RX_OK.load(Ordering::Relaxed), Ordering::Relaxed);
+        TEMOIN_RX_PAQUETS.store(RX_PAQUETS.load(Ordering::Relaxed), Ordering::Relaxed);
+        TEMOIN_OWN_RENDUS.store(RX_OWN_RENDUS.load(Ordering::Relaxed), Ordering::Relaxed);
+        return;
+    }
+    if maintenant.saturating_sub(precedent) < FENETRE_PROGRES_NS {
+        return;
+    }
+    let rx_ok = ISR_RX_OK.load(Ordering::Relaxed);
+    let paquets = RX_PAQUETS.load(Ordering::Relaxed);
+    let rendus = RX_OWN_RENDUS.load(Ordering::Relaxed);
+    if rx_ok > TEMOIN_ISR_RX_OK.load(Ordering::Relaxed)
+        && paquets == TEMOIN_RX_PAQUETS.load(Ordering::Relaxed)
+        && rendus == TEMOIN_OWN_RENDUS.load(Ordering::Relaxed)
+    {
+        RX_OK_SANS_PROGRES.fetch_add(1, Ordering::Relaxed);
+    }
+    TEMOIN_FENETRE_NS.store(maintenant, Ordering::Relaxed);
+    TEMOIN_ISR_RX_OK.store(rx_ok, Ordering::Relaxed);
+    TEMOIN_RX_PAQUETS.store(paquets, Ordering::Relaxed);
+    TEMOIN_OWN_RENDUS.store(rendus, Ordering::Relaxed);
+}
+
 /// La maintenance du passage a vide, bornee en frequence.
 ///
 /// La scrutation ARP appelle le drainage en boucle serree pendant cinq cents
@@ -1018,6 +1413,7 @@ unsafe fn maintenance_anneau_vide() {
     if status & anneau::isr::RX_OK != 0 {
         RX_OK_SANS_DESCRIPTEUR.fetch_add(1, Ordering::Relaxed);
     }
+    juge_le_progres(maintenant);
 
     // LE CONTROLEUR DIT LUI-MEME QUE SON MOTEUR EST TOMBE.
     //
@@ -1052,16 +1448,28 @@ pub fn repare_si_demande() -> bool {
         if !READY || !REPARATION_DEMANDEE.swap(false, Ordering::AcqRel) {
             return false;
         }
-        let avant = RX_PAQUETS.load(Ordering::Relaxed);
+        // LE VERDICT D'UNE REPRISE NE SE REND PAS DANS LA MILLISECONDE.
+        //
+        // L'ancienne version comparait `rx_packets` juste avant et juste
+        // apres l'appel. Aucune trame ne peut arriver dans cet intervalle :
+        // le compteur « reprises sans effet » montait donc a chaque tentative,
+        // quelle qu'elle soit, et l'escalade se faisait au NOMBRE d'appels et
+        // non a l'echec. Le releve du 18 septembre le montre : deux drainages
+        // -- qui ne pouvaient rien changer, les soixante-quatre descripteurs
+        // etant deja rendus au materiel -- puis reconstruction, puis
+        // reinitialisation, en six secondes.
+        //
+        // On note donc un verdict EN ATTENTE, et on le rend a la passe
+        // suivante, quand la fenetre d'observation est ecoulee.
+        rend_le_verdict_en_attente();
         REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
         let ok = repare_reception();
-        // Une reprise qui ne fait rien repartir compte : c'est elle qui fait
-        // monter d'un barreau au tour suivant.
-        if RX_PAQUETS.load(Ordering::Relaxed) == avant {
-            REPRISES_SANS_EFFET.fetch_add(1, Ordering::Relaxed);
-        } else {
-            REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
-        }
+        VERDICT_ATTENDU_DEPUIS.store(
+            crate::kernel::timer::monotonic_ns(),
+            Ordering::Relaxed,
+        );
+        VERDICT_PAQUETS_AVANT.store(RX_PAQUETS.load(Ordering::Relaxed), Ordering::Relaxed);
+        VERDICT_RENDUS_AVANT.store(RX_OWN_RENDUS.load(Ordering::Relaxed), Ordering::Relaxed);
         ok
     }
 }
@@ -1183,19 +1591,46 @@ unsafe fn repare_reception() -> bool {
 
     // 7 : reinitialiser la carte, en dernier recours seulement.
     if degre >= anneau::Degre::ReinitialiseCarte {
-        READY = false;
-        MMIO = 0;
-        RX_REPRISES_ECHOUEES.fetch_add(1, Ordering::Relaxed);
+        // UNE REINITIALISATION, PAS UNE DESACTIVATION.
+        //
+        // L'ancienne version posait `READY = false` et `MMIO = 0`, puis
+        // rendait faux. Le releve du 18 septembre en montre l'effet a la
+        // seconde pres : a t=83,3 s tous les compteurs retombent a zero,
+        // `chip_cmd` passe de `0x0c` a `0x00`, et la fenetre Services annonce
+        // « rtl8168 absente de ce materiel » -- pour une puce soudee qui
+        // venait de recevoir soixante-quatre trames.
+        //
+        // On reprogramme la puce avec les anneaux DEJA alloues, on relance la
+        // negociation, et on garde l'identite PCI quoi qu'il arrive.
+        REINITIALISATIONS.fetch_add(1, Ordering::Relaxed);
+        pose_etat(crate::drivers::etat_pilote::Etat::Reprise);
+        let remise_en_service = programme_le_materiel();
+        if remise_en_service {
+            relance_autonegociation();
+            REINITIALISATIONS_OK.fetch_add(1, Ordering::Relaxed);
+            // `programme_le_materiel` a deja pose `Pret`.
+            crate::kernel::services::etat(
+                "net.nic.rtl8168",
+                crate::kernel::services::Etat::Reprise,
+            );
+        } else {
+            // La puce est toujours la, le pilote toujours attache : il ne rend
+            // simplement plus de service. JAMAIS « absente ».
+            pose_etat(crate::drivers::etat_pilote::Etat::Echec);
+            RX_REPRISES_ECHOUEES.fetch_add(1, Ordering::Relaxed);
+        }
         crate::serial_println!(
-            "BOUCHAUD_NET_RTL8168_REPRISE degre=reinitialise chip_cmd={:#04x} \
-intr_status={:#06x} desc_materiel={} desc_processeur={} invariant={}",
+            "BOUCHAUD_NET_RTL8168_REPRISE degre=reinitialise remise_en_service={} \
+etat={} chip_cmd={:#04x} intr_status={:#06x} desc_materiel={} desc_processeur={} invariant={}",
+            remise_en_service as u8,
+            etat_pilote().nom(),
             chip,
             status,
             recensement.materiel,
             recensement.processeur,
             invariant.unwrap_or("intact"),
         );
-        return false;
+        return remise_en_service;
     }
 
     crate::kernel::services::etat("net.nic.rtl8168", crate::kernel::services::Etat::Reprise);
@@ -1218,6 +1653,40 @@ desc_materiel={} desc_processeur={} rx_cur={} invariant={} rx_paquets={}",
         paquets_avant,
     );
     true
+}
+
+/// Rend le verdict de la reprise precedente, si sa fenetre est ecoulee.
+///
+/// C'est ici, et nulle part ailleurs, que `REPRISES_SANS_EFFET` bouge : une
+/// reprise qui n'a rien fait repartir fait monter d'un barreau, une reprise
+/// qui a remis la reception en route remet le compteur a zero.
+unsafe fn rend_le_verdict_en_attente() {
+    let depuis = VERDICT_ATTENDU_DEPUIS.load(Ordering::Relaxed);
+    if depuis == 0 {
+        return;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    if maintenant.saturating_sub(depuis) < FENETRE_VERDICT_NS {
+        // Trop tot pour juger : on ne compte rien, et surtout on n'escalade
+        // pas.
+        return;
+    }
+    VERDICT_ATTENDU_DEPUIS.store(0, Ordering::Relaxed);
+    let paquets = RX_PAQUETS.load(Ordering::Relaxed);
+    let rendus = RX_OWN_RENDUS.load(Ordering::Relaxed);
+    let progres = paquets > VERDICT_PAQUETS_AVANT.load(Ordering::Relaxed)
+        || rendus > VERDICT_RENDUS_AVANT.load(Ordering::Relaxed);
+    if progres {
+        REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
+    } else {
+        let sans_effet = REPRISES_SANS_EFFET.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::serial_println!(
+            "BOUCHAUD_NET_RTL8168_REPRISE_SANS_EFFET suite={} rx_paquets={} own_rendus={}",
+            sans_effet,
+            paquets,
+            rendus,
+        );
+    }
 }
 
 /// La reception est-elle arretee ? Si oui, ARME une reparation.
@@ -1290,7 +1759,9 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
         for _ in 0..N_RX {
             let index = RX_CUR;
             let status = desc_read32(RX_RING, index, 0);
-            compiler_fence(Ordering::Acquire);
+            // On ne lit pas un tampon dont on n'a pas d'abord constate qu'il
+            // nous appartient. Voir `memory::dma_rmb`.
+            memory::dma_rmb();
             // La tete que le PROCESSEUR regarde, a chaque examen. Sans elle,
             // un anneau fige et un anneau qui tourne se lisent pareil.
             RX_TETE_CPU.store(index as u64, Ordering::Relaxed);
@@ -1298,6 +1769,14 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
                 // Le materiel a RENDU ce descripteur : transition 1 -> 0.
                 RX_OWN_RENDUS.fetch_add(1, Ordering::Relaxed);
                 RX_DERNIER_DESC_CPU.store(index as u64, Ordering::Relaxed);
+                // PREMIER TOUR OU SECOND ? Seul le second prouve que l'anneau
+                // circule.
+                if RX_TOURS_CPU.load(Ordering::Relaxed) == 0 {
+                    RX_RENDUS_TOUR1.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    RX_RENDUS_TOUR2.fetch_add(1, Ordering::Relaxed);
+                    RX_REUTILISES_TOUR2.fetch_add(1, Ordering::Relaxed);
+                }
             }
 
             let copied = match anneau::examine(status, anneau::TAILLE_TAMPON) {
@@ -1331,15 +1810,34 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
                 anneau::adresse_tampon(RX_BUFFER_P, index, anneau::TAILLE_TAMPON),
             );
             desc_write32(RX_RING, index, 4, 0);
-            compiler_fence(Ordering::Release);
+            // UNE VRAIE BARRIERE, ET NON UN `compiler_fence`.
+            //
+            // L'adresse et la longueur doivent etre visibles du peripherique
+            // AVANT le bit de propriete, sans quoi la carte peut remplir un
+            // descripteur qui pointe encore sur l'ancien tampon. Voir
+            // `memory::dma_wmb` pour ce que le contrat x86_64 garantit
+            // vraiment, et ce qu'il ne garantit pas.
+            memory::dma_wmb();
             desc_write32(
                 RX_RING,
                 index,
                 0,
                 anneau::opts1_rendu(index, N_RX, anneau::TAILLE_TAMPON),
             );
+            // La propriete doit etre partie avant qu'on ne touche a la suite.
+            memory::dma_wmb();
             RX_REARMEMENTS.fetch_add(1, Ordering::Relaxed);
-            RX_CUR = anneau::suivant(index, N_RX);
+            if RX_TOURS_CPU.load(Ordering::Relaxed) == 0 {
+                RX_REARMES_TOUR1.fetch_add(1, Ordering::Relaxed);
+            }
+            let suivant = anneau::suivant(index, N_RX);
+            if suivant == 0 {
+                // LE PASSAGE 63 -> 0 : le processeur boucle. C'est ici, et
+                // seulement ici, qu'un tour s'acheve.
+                let tour = RX_TOURS_CPU.fetch_add(1, Ordering::Relaxed) + 1;
+                capture_le_bouclage(tour, index);
+            }
+            RX_CUR = suivant;
 
             if let Some(n) = copied {
                 RX_PAQUETS.fetch_add(1, Ordering::Relaxed);

@@ -31,6 +31,11 @@ pub mod anneau_rx;
 /// Voir `network/analyse_refus.rs`.
 #[path = "network/analyse_refus.rs"]
 pub mod analyse_refus;
+
+/// Presence materielle, attachement, service et lien : quatre faits
+/// distincts. Voir `network/etat_pilote.rs`.
+#[path = "network/etat_pilote.rs"]
+pub mod etat_pilote;
 #[path = "network/e1000.rs"]
 pub mod e1000;
 #[path = "network/rtl8168.rs"]

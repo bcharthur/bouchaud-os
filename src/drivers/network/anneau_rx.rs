@@ -566,6 +566,83 @@ pub const SILENCE_RX_NS: u64 = 3_000_000_000;
 /// qui bloque le fil du veilleur juste apres l'emission.
 pub const ATTENTE_REPONSE_NS: u64 = 30_000_000_000;
 
+// ---------------------------------------------------------------------------
+// LES REGLAGES QUE LE 8168h EXIGE, ET QUE NOTRE MINIMALISME OMETTAIT
+// ---------------------------------------------------------------------------
+//
+// # L'audit, XID par XID
+//
+// Le releve physique donne `xid=0x541`, soit RTL8168h/8111h -- ce que Linux
+// appelle `RTL_GIGA_MAC_VER_46`. Notre pilote programmait `RxConfig`,
+// `CPlusCmd`, les adresses d'anneaux et les filtres, et RIEN d'autre. Voici
+// ce que `rtl_hw_start_8168h_1` fait en plus, et ce qu'on en retient :
+//
+// | registre        | Bouchaud | Linux (8168h)              | necessaire |
+// |-----------------|----------|----------------------------|------------|
+// | RxConfig        | pose     | `rtl_init_rxcfg` + early off | deja fait |
+// | CPlusCmd        | pose     | quirks + PCIDAC efface     | deja fait  |
+// | Rx/TxDescAddr   | pose     | `rtl_set_rx_tx_desc_registers` | deja fait |
+// | MAR0/4, accept  | pose     | `rtl_set_rx_mode`          | deja fait  |
+// | Config2 bit 7   | INTACT   | `ClkReqEn` efface          | OUI        |
+// | Config5 bit 0   | INTACT   | `ASPM_en` efface           | OUI        |
+// | MISC 13:14      | INTACT   | `pcie_state_l2l3_disable`  | OUI        |
+// | MISC bit 19     | INTACT   | `rtl_disable_rxdvgate`     | OUI        |
+// | ERI 0xC8/0xE8   | INTACT   | seuils FIFO                | non prouve |
+// | EPHY            | INTACT   | tables par revision        | non prouve |
+//
+// # Pourquoi ces quatre-la, et pas les autres
+//
+// ASPM et CLKREQ laissent le lien PCIe descendre en L1 quand il est calme.
+// Le MAC continue alors de recevoir et de lever `RxOK` -- il a ses propres
+// tampons -- pendant que son moteur DMA ne peut plus atteindre la memoire de
+// l'hote. La signature est exactement celle du releve : trafic normal tant
+// qu'il est soutenu, puis plus un descripteur rendu, `RxEnb` toujours arme,
+// `RxMissed` a zero, aucune erreur.
+//
+// C'est aussi l'un des defauts les plus anciens de cette famille de cartes
+// chez Linux, et `rtl_hw_aspm_clkreq_enable(tp, false)` est ce que le pilote
+// de reference fait avant de demarrer le materiel.
+//
+// `RXDV_GATE` et `l2l3` sont du meme ordre : ils coupent l'alimentation du
+// chemin de reception. Les quatre ne font que DESACTIVER des economies
+// d'energie ; aucun ne change le format des descripteurs ni le protocole.
+//
+// Les tables ERI et EPHY ne sont PAS ajoutees : elles varient par revision de
+// silicium, et rien dans le releve ne les met en cause. On n'ajoute que ce
+// qu'on peut justifier.
+
+/// `Config2` : le bit d'autorisation `CLKREQ`.
+pub const CONFIG2_CLKREQ: u8 = 1 << 7;
+/// `Config5` : le bit d'autorisation ASPM.
+pub const CONFIG5_ASPM: u8 = 1 << 0;
+/// `MISC` : la porte du chemin de reception.
+pub const MISC_RXDV_GATE: u32 = 1 << 19;
+/// `MISC` : les etats L2/L3 du lien PCIe.
+pub const MISC_L2L3: u32 = (1 << 14) | (1 << 13);
+
+/// Cette generation demande-t-elle qu'on lui coupe ses economies d'energie ?
+///
+/// Vrai pour 8168g et suivants -- la famille qui porte `RX_EARLY_OFF`, donc
+/// celle du XID `0x541` releve sur la TRIGKEY.
+pub fn coupe_les_economies(generation: Generation) -> bool {
+    matches!(generation, Generation::ReceptionDifferee)
+}
+
+/// `Config2` apres extinction de `CLKREQ`.
+pub fn config2_sans_clkreq(actuel: u8) -> u8 {
+    actuel & !CONFIG2_CLKREQ
+}
+
+/// `Config5` apres extinction d'ASPM.
+pub fn config5_sans_aspm(actuel: u8) -> u8 {
+    actuel & !CONFIG5_ASPM
+}
+
+/// `MISC` apres ouverture de la porte RX et extinction de L2/L3.
+pub fn misc_chemin_rx_ouvert(actuel: u32) -> u32 {
+    actuel & !(MISC_RXDV_GATE | MISC_L2L3)
+}
+
 /// Delai minimal entre deux reprises, en nanosecondes.
 ///
 /// Une reprise coute des trames. En enchainer sans laisser au moteur le temps
