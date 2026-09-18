@@ -154,3 +154,114 @@ fn compte_rend_bien_ce_qui_a_ete_note() {
     note(Barreau::RecvVide);
     assert_eq!(compte(Barreau::RecvVide), avant + 1);
 }
+
+// ===========================================================================
+// LE BARREAU QUI NE POUVAIT PAS S'ALLUMER
+//
+// La premiere version de cette echelle posait ses trois premiers barreaux
+// DANS la branche `if let Some(u) = udp::parse(...)`, elle-meme placee apres
+// un `parse_header` reussi. Trois verdicts devenaient inatteignables :
+//
+//     « la trame arrive mais route_ipv4 la rejette »
+//     « l'en-tete IPv4 passe mais udp::parse echoue »
+//
+// et surtout, un paquet refuse par l'un des deux analyseurs produisait
+// « aucune trame port 53 n'est arrivee sur la carte » -- c'est-a-dire
+// exactement le contraire de la verite, et la reponse qui ferait remonter
+// l'enquete vers la carte et le reseau externe.
+//
+// `ports_bruts` est la correction : il ne demande que ce qu'il faut pour
+// trouver les ports, avec des bornes et aucune exigence de coherence.
+// ===========================================================================
+
+use sonde_dns::ports_bruts;
+
+/// Un paquet IPv4/UDP minimal : en-tete de vingt octets, puis UDP.
+fn paquet(src_port: u16, dst_port: u16, total_len: u16, longueur_udp: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 20 + 8 + 4];
+    p[0] = 0x45; // version 4, IHL 5 mots
+    p[2] = (total_len >> 8) as u8;
+    p[3] = total_len as u8;
+    p[9] = 17; // UDP
+    p[20] = (src_port >> 8) as u8;
+    p[21] = src_port as u8;
+    p[22] = (dst_port >> 8) as u8;
+    p[23] = dst_port as u8;
+    p[24] = (longueur_udp >> 8) as u8;
+    p[25] = longueur_udp as u8;
+    p
+}
+
+#[test]
+fn les_ports_se_lisent_sur_un_paquet_bien_forme() {
+    let p = paquet(53, 49985, 32, 12);
+    assert_eq!(ports_bruts(&p), Some((53, 49985)));
+}
+
+#[test]
+fn les_ports_se_lisent_meme_quand_la_longueur_ipv4_est_incoherente() {
+    // `parse_header` refuse ce paquet -- `total_len` annonce plus que le
+    // tampon. Le barreau doit s'allumer QUAND MEME : la trame est bien
+    // arrivee, et c'est tout ce qu'il affirme.
+    let p = paquet(53, 49985, 9000, 12);
+    assert_eq!(ports_bruts(&p), Some((53, 49985)));
+}
+
+#[test]
+fn les_ports_se_lisent_meme_quand_la_longueur_udp_est_incoherente() {
+    // `udp::parse` refuse une longueur superieure au tampon, ou inferieure a
+    // huit. Le barreau reste allume : c'est precisement la difference entre
+    // « jamais arrivee » et « arrivee et refusee par udp::parse ».
+    assert_eq!(ports_bruts(&paquet(53, 49985, 32, 9000)), Some((53, 49985)));
+    assert_eq!(ports_bruts(&paquet(53, 49985, 32, 3)), Some((53, 49985)));
+}
+
+#[test]
+fn un_paquet_qui_n_est_pas_udp_ne_concerne_pas_la_sonde() {
+    let mut p = paquet(53, 49985, 32, 12);
+    p[9] = 6; // TCP
+    assert_eq!(ports_bruts(&p), None);
+}
+
+#[test]
+fn un_paquet_tronque_ne_rend_pas_de_ports_inventes() {
+    // Mieux vaut ne rien dire que lire quatre octets hors du tampon.
+    let p = paquet(53, 49985, 32, 12);
+    assert_eq!(ports_bruts(&p[..19]), None);
+    assert_eq!(ports_bruts(&p[..22]), None);
+    assert_eq!(ports_bruts(&[]), None);
+}
+
+#[test]
+fn une_version_ou_une_taille_d_en_tete_absurde_est_refusee() {
+    let mut p = paquet(53, 49985, 32, 12);
+    p[0] = 0x65; // version 6
+    assert_eq!(ports_bruts(&p), None);
+    let mut p = paquet(53, 49985, 32, 12);
+    p[0] = 0x43; // IHL 3 mots : en dessous du minimum
+    assert_eq!(ports_bruts(&p), None);
+}
+
+#[test]
+fn les_options_ipv4_decalent_la_lecture_des_ports() {
+    // IHL de six mots : les ports sont quatre octets plus loin. Les lire a
+    // l'offset fixe donnerait deux nombres pris dans les options.
+    let mut p = vec![0u8; 24 + 8];
+    p[0] = 0x46;
+    p[9] = 17;
+    p[24] = 0x00;
+    p[25] = 53;
+    p[26] = 0xC3;
+    p[27] = 0x41;
+    assert_eq!(ports_bruts(&p), Some((53, 0xC341)));
+}
+
+#[test]
+fn seul_le_port_53_allume_la_sonde() {
+    // Le mDNS et le SSDP d'un reseau domestique -- des centaines de trames
+    // dans le releve -- ne doivent pas franchir un seul barreau.
+    let (s, d) = ports_bruts(&paquet(5353, 5353, 32, 12)).unwrap();
+    assert!(!concerne(s, d));
+    let (s, d) = ports_bruts(&paquet(53, 49985, 32, 12)).unwrap();
+    assert!(concerne(s, d));
+}

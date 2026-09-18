@@ -135,6 +135,45 @@ pub fn concerne(port_source: u16, port_destination: u16) -> bool {
     port_source == 53 || port_destination == 53
 }
 
+/// Les ports UDP d'un paquet IPv4, lus SANS rien valider d'autre.
+///
+/// # Pourquoi une lecture minimale, et pas `parse_header` puis `udp::parse`
+///
+/// C'est le defaut de la premiere version de cette echelle : ses trois
+/// premiers barreaux etaient tous poses DANS la branche
+/// `if let Some(u) = udp::parse(...)`, elle-meme placee apres un
+/// `parse_header` reussi. Trois verdicts devenaient donc inatteignables --
+/// dont « la trame arrive mais route_ipv4 la rejette », precisement celui
+/// qu'on cherche.
+///
+/// Un barreau qui ne peut pas s'allumer ne mesure rien. Celui-ci ne demande
+/// que ce qu'il faut pour trouver les ports : la version, la longueur
+/// d'en-tete, le protocole, et quatre octets a la bonne place -- avec des
+/// bornes, et aucune coherence exigee sur `total_len` ni sur la longueur UDP.
+/// Il s'allume donc meme quand les analyseurs suivants refusent le paquet.
+pub fn ports_bruts(paquet_ip: &[u8]) -> Option<(u16, u16)> {
+    if paquet_ip.len() < 20 {
+        return None;
+    }
+    if paquet_ip[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = (paquet_ip[0] & 0x0F) as usize * 4;
+    if ihl < 20 {
+        return None;
+    }
+    // 17 : UDP. On ne s'interesse qu'a lui.
+    if paquet_ip[9] != 17 {
+        return None;
+    }
+    if paquet_ip.len() < ihl + 4 {
+        return None;
+    }
+    let src = ((paquet_ip[ihl] as u16) << 8) | paquet_ip[ihl + 1] as u16;
+    let dst = ((paquet_ip[ihl + 2] as u16) << 8) | paquet_ip[ihl + 3] as u16;
+    Some((src, dst))
+}
+
 // ---------------------------------------------------------------------------
 // LA PREMIERE REPONSE, EN DETAIL -- ET ELLE SEULE
 // ---------------------------------------------------------------------------

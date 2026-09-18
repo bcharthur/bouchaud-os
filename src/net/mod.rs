@@ -1503,6 +1503,20 @@ fn route_trame(trame: &[u8]) {
 
 fn route_ipv4(trame: &[u8]) {
     let n = trame.len();
+    // BARREAU 1 : LA TRAME EST LA, ET ELLE PORTE UN PORT 53.
+    //
+    // Pose AVANT tout analyseur, sur une lecture minimale des ports. La
+    // premiere version posait ce barreau -- et les deux suivants -- a
+    // l'interieur de `udp::parse`, donc apres un `parse_header` reussi :
+    // « la trame arrive mais route_ipv4 la rejette » ne pouvait jamais
+    // s'afficher. Un barreau qui ne peut pas s'allumer ne mesure rien.
+    let suivi = sonde_dns::ports_bruts(&trame[ethernet::HEADER_LEN..n])
+        .map(|(src, dst)| sonde_dns::concerne(src, dst))
+        .unwrap_or(false);
+    if suivi {
+        sonde_dns::note(sonde_dns::Barreau::RxEthernet);
+    }
+
     let iph = match ipv4::parse_header(&trame[ethernet::HEADER_LEN..n]) {
         Some(h) => h,
         None => return,
@@ -1513,24 +1527,6 @@ fn route_ipv4(trame: &[u8]) {
         return;
     }
     let charge = &trame[debut..fin];
-
-    // L'ECHELLE DE LA SONDE DNS.
-    //
-    // Trois barreaux ici : la trame porte de l'IPv4 avec un port 53, son
-    // en-tete IPv4 a ete lu, son en-tete UDP a ete lu. Le premier barreau nul
-    // dont le predecesseur ne l'est pas nomme l'etage fautif.
-    if iph.proto == ipv4::PROTO_UDP {
-        if let Some(u) = udp::parse(charge) {
-            if sonde_dns::concerne(u.src_port, u.dst_port) {
-                sonde_dns::note(sonde_dns::Barreau::RxEthernet);
-                sonde_dns::note(sonde_dns::Barreau::RxIpv4);
-                sonde_dns::note(sonde_dns::Barreau::RxUdp);
-                let entete_brut =
-                    &trame[ethernet::HEADER_LEN..ethernet::HEADER_LEN + iph.header_len];
-                decris_la_reponse_dns(&iph, &u, entete_brut, charge);
-            }
-        }
-    }
 
     // Le bail DHCP arrive avant qu'on ait une adresse, en diffusion : aucun
     // appelant de `poll_ip` ne le reclamera jamais. Il a sa propre boite.
@@ -1556,14 +1552,27 @@ fn route_ipv4(trame: &[u8]) {
     // courrier que personne ne reclamera jamais -- et le plus ancien part en
     // premier, donc ce serait la reponse DNS qu'on attend qui sortirait.
     if !pour_nous(&iph.dst) {
+        // Le barreau 2 reste eteint : c'est ICI que route_ipv4 rejette.
         return;
     }
+    // BARREAU 2 : l'en-tete IPv4 est lu, et le paquet nous est adresse.
+    if suivi {
+        sonde_dns::note(sonde_dns::Barreau::RxIpv4);
+    }
 
-    if iph.proto == ipv4::PROTO_UDP {
-        if let Some(u) = udp::parse(charge) {
-            if sonde_dns::concerne(u.src_port, u.dst_port) {
+    if suivi && iph.proto == ipv4::PROTO_UDP {
+        match udp::parse(charge) {
+            Some(u) => {
+                // BARREAU 3 : l'en-tete UDP est lu.
+                sonde_dns::note(sonde_dns::Barreau::RxUdp);
+                let entete_brut =
+                    &trame[ethernet::HEADER_LEN..ethernet::HEADER_LEN + iph.header_len];
+                decris_la_reponse_dns(&iph, &u, entete_brut, charge);
+                // BARREAU 4 : il entre dans la file.
                 sonde_dns::note(sonde_dns::Barreau::MisEnFile);
             }
+            // Le barreau 3 reste eteint : `udp::parse` a refuse le paquet.
+            None => {}
         }
     }
     depose_en_attente_verrouille(iph.proto, iph.src, charge);

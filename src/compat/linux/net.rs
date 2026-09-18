@@ -73,6 +73,15 @@ pub struct SocketState {
     pub nonblocking: bool,
     /// Le pair a ferme, ou la connexion a echoue.
     pub eof: bool,
+    /// CE SOCKET A-T-IL DEJA INTERROGE UN RESOLVEUR ?
+    ///
+    /// Les trois derniers barreaux de l'echelle DNS -- `poll_ready`,
+    /// `recv_success`, `recv_eagain` -- n'ont de sens que pour un socket qui
+    /// attend une reponse DNS. Les compter sur tous les sockets UDP noierait
+    /// les quelques evenements qui comptent sous chaque sondage a vide de
+    /// chaque boucle d'evenements : un compteur qu'on ne peut pas lire ne
+    /// mesure rien.
+    pub interroge_dns: bool,
 }
 
 impl SocketState {
@@ -85,6 +94,7 @@ impl SocketState {
             datagrams: Vec::new(),
             nonblocking: false,
             eof: false,
+            interroge_dns: false,
         }
     }
 }
@@ -412,6 +422,19 @@ pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usi
                 let mut borrowed = state.lock();
                 if borrowed.local_port == 0 {
                     borrowed.local_port = ephemeral_port();
+                }
+                // CE SOCKET ATTEND UNE REPONSE DNS.
+                //
+                // C'est lui, et lui seul, dont les sondages a vide et les
+                // reveils de `poll` valent la peine d'etre comptes : compter
+                // sur tous les sockets UDP noierait les quelques evenements
+                // qui comptent sous chaque sondage de chaque boucle.
+                //
+                // Les DEUX chemins d'emission le posent -- `sendto` et
+                // `sendmsg` : le navigateur peut prendre l'un ou l'autre, et
+                // une sonde qui ne couvre qu'une moitie ne mesure rien.
+                if port == 53 {
+                    borrowed.interroge_dns = true;
                 }
                 borrowed.local_port
             };
@@ -779,10 +802,10 @@ pub fn sys_recvfrom(
                 }
             }
             let datagram = state.lock().datagrams.pop();
-            let port_local = state.lock().local_port;
+            let attend_dns = state.lock().interroge_dns;
             match datagram {
                 None => {
-                    if port_local != 0 {
+                    if attend_dns {
                         crate::net::sonde_dns::note(
                             crate::net::sonde_dns::Barreau::RecvVide,
                         );
@@ -794,7 +817,7 @@ pub fn sys_recvfrom(
                     }
                 }
                 Some((source, port, data)) => {
-                    if crate::net::sonde_dns::concerne(port, port_local) {
+                    if attend_dns || port == 53 {
                         crate::net::sonde_dns::note(
                             crate::net::sonde_dns::Barreau::RecvSucces,
                         );
@@ -1043,6 +1066,19 @@ fn send_bytes(fd: i32, data: &[u8], addr: u64, addr_len: usize, _flags: u32) -> 
                 if borrowed.local_port == 0 {
                     borrowed.local_port = ephemeral_port();
                 }
+                // CE SOCKET ATTEND UNE REPONSE DNS.
+                //
+                // C'est lui, et lui seul, dont les sondages a vide et les
+                // reveils de `poll` valent la peine d'etre comptes : compter
+                // sur tous les sockets UDP noierait les quelques evenements
+                // qui comptent sous chaque sondage de chaque boucle.
+                //
+                // Les DEUX chemins d'emission le posent -- `sendto` et
+                // `sendmsg` : le navigateur peut prendre l'un ou l'autre, et
+                // une sonde qui ne couvre qu'une moitie ne mesure rien.
+                if port == 53 {
+                    borrowed.interroge_dns = true;
+                }
                 borrowed.local_port
             };
             let mut packet = alloc::vec![0u8; data.len() + 8];
@@ -1273,7 +1309,8 @@ pub fn socket_readable(state: &Arc<SpinLock<SocketState>>) -> bool {
             // LE BARREAU `poll` : livre, mais la boucle d'evenements le
             // voit-elle ? C'est ce qui distingue « le reseau est casse » de
             // « le reseau marche et RequestServer ne se reveille pas ».
-            if pret && state.lock().local_port != 0 {
+            // Seuls les sockets qui ont interroge un resolveur comptent.
+            if pret && state.lock().interroge_dns {
                 crate::net::sonde_dns::note(crate::net::sonde_dns::Barreau::PollPret);
             }
             pret
