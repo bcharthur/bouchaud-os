@@ -314,6 +314,55 @@ static SANTE_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
 //
 // Le veilleur ne fait donc que DEMANDER ; la reparation a lieu au prochain
 // passage du drainage, sous le verrou de celui-ci.
+/// LA PROGRESSION DU MATERIEL DANS L'ANNEAU, ET LA REPRISE.
+///
+/// # Ce que le releve du 18 septembre ne permettait pas de dire
+///
+/// Il montrait `isr_rx_ok` qui monte de 33 a 67 pendant que `rx_packets`
+/// reste fige a 64 et que les soixante-quatre descripteurs restent la
+/// propriete du materiel. Impossible d'en conclure quoi que ce soit : la
+/// carte annonce-t-elle des trames qu'elle n'ecrit pas, ou le pilote lit-il
+/// un anneau que la carte a quitte ?
+///
+/// Ces compteurs repondent, sans une ligne par paquet.
+
+/// Indice du descripteur que le PROCESSEUR regarde, au dernier examen.
+static RX_TETE_CPU: AtomicU64 = AtomicU64::new(0);
+/// Dernier indice ou le processeur a effectivement PRIS une trame.
+static RX_DERNIER_DESC_CPU: AtomicU64 = AtomicU64::new(0);
+/// Transitions `OWN` 1 -> 0 observees : le materiel a rendu un descripteur.
+static RX_OWN_RENDUS: AtomicU64 = AtomicU64::new(0);
+/// `RxOK` signale alors qu'AUCUN descripteur n'est revenu au processeur.
+///
+/// C'est la signature exacte du defaut : la carte dit avoir recu, et
+/// l'anneau ne bouge pas.
+static RX_OK_SANS_DESCRIPTEUR: AtomicU64 = AtomicU64::new(0);
+/// Nombre de fois ou l'arret de reception a ete CONSTATE.
+static RX_ARRET_DETECTE: AtomicU64 = AtomicU64::new(0);
+/// Reparations demandees, et reparations reellement executees.
+///
+/// Les deux ensemble : le releve physique avait zero reprise SANS qu'on
+/// puisse dire si personne ne l'avait demandee ou si l'execution echouait.
+static REPARATIONS_DEMANDEES: AtomicU64 = AtomicU64::new(0);
+static REPARATIONS_EXECUTEES: AtomicU64 = AtomicU64::new(0);
+/// Degre de la derniere reparation executee.
+static REPARATION_DEGRE: AtomicU64 = AtomicU64::new(0);
+
+/// L'EMISSION, PROUVEE PAR LE MATERIEL.
+///
+/// `tx_packets` compte les trames REMISES a la carte, pas celles qui sont
+/// parties sur le cable. Le releve du 18 septembre montre onze DISCOVER DHCP
+/// enfiles, 342 octets chacun -- et rien ne dit si la carte les a seulement
+/// transmis. Sans cette distinction, un anneau TX bloque se lit exactement
+/// comme un serveur DHCP muet.
+static TX_ENFILES: AtomicU64 = AtomicU64::new(0);
+/// Trames dont le materiel a RENDU le descripteur : elles sont parties.
+static TX_TERMINES: AtomicU64 = AtomicU64::new(0);
+/// Instant du dernier achevement constate.
+static TX_DERNIER_TERMINE_NS: AtomicU64 = AtomicU64::new(0);
+/// Interruptions `TxOK` vues.
+static ISR_TX_OK: AtomicU64 = AtomicU64::new(0);
+
 static REPARATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
 /// Identifiant de revision lu dans `TxConfig`, et la generation qui en decoule.
 static XID: AtomicU32 = AtomicU32::new(0);
@@ -366,6 +415,21 @@ pub struct Releve {
     pub xid: u32,
     pub generation: &'static str,
     pub invariant: Option<&'static str>,
+    /// La progression du materiel dans l'anneau. Voir les compteurs.
+    pub rx_tete_cpu: u64,
+    pub rx_dernier_desc_cpu: u64,
+    pub rx_own_rendus: u64,
+    pub rx_ok_sans_descripteur: u64,
+    pub rx_arret_detecte: u64,
+    pub reparations_demandees: u64,
+    pub reparations_executees: u64,
+    pub reparation_degre: u64,
+    /// L'emission, prouvee par le materiel et non par la mise en file.
+    pub tx_enfiles: u64,
+    pub tx_termines: u64,
+    pub tx_ok_isr: u64,
+    pub tx_dernier_termine_ns: u64,
+    pub tx_desc_possedes: u32,
 }
 
 /// L'etat du pilote, en une lecture. Sans effet de bord sur le materiel.
@@ -410,6 +474,19 @@ pub fn releve() -> Releve {
             xid: XID.load(Ordering::Relaxed),
             generation: anneau::nom(GENERATION),
             invariant: invariant_anneau(),
+            rx_tete_cpu: RX_TETE_CPU.load(Ordering::Relaxed),
+            rx_dernier_desc_cpu: RX_DERNIER_DESC_CPU.load(Ordering::Relaxed),
+            rx_own_rendus: RX_OWN_RENDUS.load(Ordering::Relaxed),
+            rx_ok_sans_descripteur: RX_OK_SANS_DESCRIPTEUR.load(Ordering::Relaxed),
+            rx_arret_detecte: RX_ARRET_DETECTE.load(Ordering::Relaxed),
+            reparations_demandees: REPARATIONS_DEMANDEES.load(Ordering::Relaxed),
+            reparations_executees: REPARATIONS_EXECUTEES.load(Ordering::Relaxed),
+            reparation_degre: REPARATION_DEGRE.load(Ordering::Relaxed),
+            tx_enfiles: TX_ENFILES.load(Ordering::Relaxed),
+            tx_termines: TX_TERMINES.load(Ordering::Relaxed),
+            tx_ok_isr: ISR_TX_OK.load(Ordering::Relaxed),
+            tx_dernier_termine_ns: TX_DERNIER_TERMINE_NS.load(Ordering::Relaxed),
+            tx_desc_possedes: tx_descripteurs_possedes(),
         }
     }
 }
@@ -812,6 +889,9 @@ pub fn send(frame: &[u8]) -> bool {
         TX_CUR = anneau::suivant(index, N_TX);
         let maintenant = crate::kernel::timer::monotonic_ns();
         TX_PAQUETS.fetch_add(1, Ordering::Relaxed);
+        // ENFILE n'est pas PARTI. La preuve filaire, c'est le descripteur que
+        // le materiel rend ; elle se compte dans `moissonne_les_emissions`.
+        TX_ENFILES.fetch_add(1, Ordering::Relaxed);
         TX_OCTETS.fetch_add(longueur as u64, Ordering::Relaxed);
         TX_DERNIER_NS.store(maintenant, Ordering::Relaxed);
         // Le PREMIER instant d'emission, et lui seul, sert de reference quand
@@ -860,6 +940,7 @@ unsafe fn maintenance_isr() -> u16 {
     if status & anneau::isr::RX_ERR != 0 { ISR_RX_ERR.fetch_add(1, Ordering::Relaxed); }
     if status & anneau::isr::RX_OVERFLOW != 0 { ISR_RX_OVERFLOW.fetch_add(1, Ordering::Relaxed); }
     if status & anneau::isr::RX_FIFO_OVER != 0 { ISR_RX_FIFO_OVER.fetch_add(1, Ordering::Relaxed); }
+    if status & anneau::isr::TX_OK != 0 { ISR_TX_OK.fetch_add(1, Ordering::Relaxed); }
     if status & anneau::isr::TX_ERR != 0 { ISR_TX_ERR.fetch_add(1, Ordering::Relaxed); }
     if status & anneau::isr::LINK_CHG != 0 { ISR_LINK_CHG.fetch_add(1, Ordering::Relaxed); }
     if status & anneau::isr::SYS_ERR != 0 { ISR_SYSTEM_ERROR.fetch_add(1, Ordering::Relaxed); }
@@ -868,6 +949,46 @@ unsafe fn maintenance_isr() -> u16 {
         write16(REG_INTR_STATUS, a_ecrire);
     }
     status
+}
+
+/// Combien de descripteurs d'emission le MATERIEL possede encore.
+///
+/// Zero : tout est parti. Non nul : autant de trames sont encore en vol, ou
+/// bloquees.
+unsafe fn tx_descripteurs_possedes() -> u32 {
+    if !READY {
+        return 0;
+    }
+    let mut possedes = 0u32;
+    for index in 0..N_TX {
+        if desc_read32(TX_RING, index, 0) & anneau::OWN != 0 {
+            possedes += 1;
+        }
+    }
+    possedes
+}
+
+/// Compte les emissions que le materiel a ACHEVEES.
+///
+/// Le descripteur rendu (bit `OWN` retombe) est la seule preuve que la trame
+/// est partie sur le cable. Appelee depuis la maintenance : elle ne coute
+/// qu'une lecture par descripteur, et seulement quand l'anneau est au repos.
+unsafe fn moissonne_les_emissions() {
+    if !READY {
+        return;
+    }
+    let possedes = tx_descripteurs_possedes() as u64;
+    let enfiles = TX_ENFILES.load(Ordering::Relaxed);
+    // Ce qui a ete enfile et que le materiel ne detient plus est parti.
+    let termines = enfiles.saturating_sub(possedes);
+    let connus = TX_TERMINES.load(Ordering::Relaxed);
+    if termines > connus {
+        TX_TERMINES.store(termines, Ordering::Relaxed);
+        TX_DERNIER_TERMINE_NS.store(
+            crate::kernel::timer::monotonic_ns(),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 /// La maintenance du passage a vide, bornee en frequence.
@@ -884,7 +1005,19 @@ unsafe fn maintenance_anneau_vide() {
     }
     MAINTENANCE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
 
-    maintenance_isr();
+    let status = maintenance_isr();
+
+    // L'EMISSION ACHEVEE, ET LE `RxOK` STERILE.
+    //
+    // Cette fonction n'est appelee que quand l'anneau semble VIDE -- le
+    // descripteur courant porte encore `OWN`. Si la carte signale `RxOK` a
+    // cet instant precis, elle annonce une trame qu'elle n'a pas ecrite dans
+    // l'anneau que nous lisons. C'est exactement la signature du releve du
+    // 18 septembre, et jusqu'ici rien ne la nommait.
+    moissonne_les_emissions();
+    if status & anneau::isr::RX_OK != 0 {
+        RX_OK_SANS_DESCRIPTEUR.fetch_add(1, Ordering::Relaxed);
+    }
 
     // LE CONTROLEUR DIT LUI-MEME QUE SON MOTEUR EST TOMBE.
     //
@@ -920,6 +1053,7 @@ pub fn repare_si_demande() -> bool {
             return false;
         }
         let avant = RX_PAQUETS.load(Ordering::Relaxed);
+        REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
         let ok = repare_reception();
         // Une reprise qui ne fait rien repartir compte : c'est elle qui fait
         // monter d'un barreau au tour suivant.
@@ -1027,6 +1161,7 @@ unsafe fn repare_reception() -> bool {
         chip,
         REPRISES_SANS_EFFET.load(Ordering::Relaxed),
     );
+    REPARATION_DEGRE.store(degre as u64, Ordering::Relaxed);
 
     // 1 et 2 : drainer ce qui reste et acquitter les statuts. Toujours.
     let status = maintenance_isr();
@@ -1121,6 +1256,8 @@ pub fn demande_reparation_si_arretee() -> bool {
             return false;
         }
         REPARATION_DEMANDEE.store(true, Ordering::Release);
+        RX_ARRET_DETECTE.fetch_add(1, Ordering::Relaxed);
+        REPARATIONS_DEMANDEES.fetch_add(1, Ordering::Relaxed);
         crate::kernel::services::erreur("net.nic.rtl8168", "rx-silencieux");
         true
     }
@@ -1154,6 +1291,14 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
             let index = RX_CUR;
             let status = desc_read32(RX_RING, index, 0);
             compiler_fence(Ordering::Acquire);
+            // La tete que le PROCESSEUR regarde, a chaque examen. Sans elle,
+            // un anneau fige et un anneau qui tourne se lisent pareil.
+            RX_TETE_CPU.store(index as u64, Ordering::Relaxed);
+            if status & anneau::OWN == 0 {
+                // Le materiel a RENDU ce descripteur : transition 1 -> 0.
+                RX_OWN_RENDUS.fetch_add(1, Ordering::Relaxed);
+                RX_DERNIER_DESC_CPU.store(index as u64, Ordering::Relaxed);
+            }
 
             let copied = match anneau::examine(status, anneau::TAILLE_TAMPON) {
                 anneau::Verdict::Materiel => {

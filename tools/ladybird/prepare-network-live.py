@@ -24,6 +24,20 @@ if 'BOUCHAUD_LIVE_DNS_V1' in data:
     data = data.replace('if (getenv("BOUCHAUD_BROWSER_HOST")) {',
         'if (getenv("BOUCHAUD_BROWSER_HOST") && (url.scheme() == "http"sv || url.scheme() == "https"sv)) {')
     client.write_text(data.replace('BOUCHAUD_LIVE_DNS_V1', 'BOUCHAUD_LIVE_DNS_V2'))
+# Un arbre prepare en V2 porte deja la grille DNS mais pas le marqueur de
+# navigation bloquee. `insert` s'arrete au premier marqueur trouve : sans ce
+# rattrapage, la ligne qui porte l'URL ne serait jamais posee sur un arbre
+# deja prepare.
+data = client.read_text()
+if 'BOUCHAUD_LIVE_DNS_V2' in data and 'BOUCHAUD_NAV_BLOQUEE' not in data:
+    ancienne = '            warnln("[ladybird-bouchaud] BROWSER_NETWORK_NOT_READY id={}", request_id);'
+    if data.count(ancienne) == 1:
+        client.write_text(data.replace(
+            ancienne,
+            ancienne + '\n'
+            '            warnln("[ladybird-bouchaud] BOUCHAUD_NAV_BLOQUEE url={} raison=network-not-ready", url.serialize());',
+            1))
+
 anchor = '    note_event_tick("ipc-start-request"sv);'
 insert(client, anchor, '''#if defined(BOUCHAUD_PORT)
     // BOUCHAUD_LIVE_DNS_V2: envp is a launch-time snapshot; DHCP is not.
@@ -31,6 +45,13 @@ insert(client, anchor, '''#if defined(BOUCHAUD_PORT)
         char dns[16] {};
         if (!BouchaudResolver::read(dns)) {
             warnln("[ladybird-bouchaud] BROWSER_NETWORK_NOT_READY id={}", request_id);
+            // UNE NAVIGATION REFUSEE EST UNE NAVIGATION.
+            //
+            // Le noyau ne voit pas cette requete : elle est abandonnee AVANT
+            // le moindre `connect`. Sans cette ligne, la fenetre Services
+            // affiche « aucune navigation » au moment precis ou l'utilisateur
+            // regarde une page qui ne charge pas. L'URL n'existe qu'ici.
+            warnln("[ladybird-bouchaud] BOUCHAUD_NAV_BLOQUEE url={} raison=network-not-ready", url.serialize());
             async_request_finished(request_id, 0, {}, Requests::NetworkError::Unknown);
             return;
         }
@@ -41,7 +62,7 @@ insert(client, anchor, '''#if defined(BOUCHAUD_PORT)
         }
     }
 #endif
-''' + anchor, 'BOUCHAUD_LIVE_DNS_V2')
+''' + anchor, 'BOUCHAUD_NAV_BLOQUEE')
 
 main = root / 'Services/WebContent/main.cpp'
 for anchor, phase in [

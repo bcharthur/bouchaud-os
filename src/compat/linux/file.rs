@@ -534,6 +534,21 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
 
     match kind {
         FdKind::Console => {
+            // LE SEUL CANAL PAR OU UN REFUS DE NAVIGATION SORT DE L'ANNEAU 3.
+            //
+            // Le `RequestServer` renonce a une requete AVANT tout `connect`
+            // quand le resolveur n'est pas configure : aucun appel systeme
+            // reseau n'a lieu, et le noyau ne voit rien. La seule trace est la
+            // ligne que notre propre correctif fait ecrire sur la sortie
+            // d'erreur -- que ce chemin transporte deja.
+            //
+            // On ne lit pas la sortie du navigateur : on reconnait un marqueur
+            // qu'on y a mis. Le test est borne a un seul motif, et tout le
+            // reste passe sans examen.
+            crate::kernel::services::navigation::reconnait_un_refus(
+                &data,
+                crate::kernel::timer::monotonic_ns(),
+            );
             let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
             console_write(&data);

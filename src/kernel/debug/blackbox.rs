@@ -100,7 +100,7 @@ pub const BUILD_COMMIT: &str = match option_env!("BOUCHAUD_BUILD_COMMIT") {
 ///
 /// Une ligne par passe. Ajouter la sienne est le prix d'entree : sans elle, le
 /// prochain releve ne dira pas si le correctif y etait.
-pub const BUILD_LOTS: &str = "reveil-cible,rtl8168-rx-vivant,rx-ingress-unique";
+pub const BUILD_LOTS: &str = "rx-chien-de-garde-libre,dora-comptee,verdict-unique,nav-refusee";
 
 const POLL_NS: u64 = 250_000_000;
 const SAMPLE_NS: u64 = 250_000_000;
@@ -918,6 +918,7 @@ fn network_sample(ts_ns: u64) {
     let (routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis) =
         crate::net::compteurs_routage();
     let smol = crate::net::compteurs_smoltcp();
+    let dora = crate::net::application::dhcp::compteurs();
     let mut out = Text::new();
     let _ = write!(
         &mut out,
@@ -937,7 +938,25 @@ fn network_sample(ts_ns: u64) {
             // lignes de deux sources a la main.
             "routees={} arp_vues={} dhcp_vues={} arp_ok={} arp_ko={} arp_non_emis={} ",
             // LA FILE SMOLTCP : qui consomme, et ce qui se perd.
-            "smol_abonnee={} smol_posees={} smol_retirees={} smol_perdues={} smol_max={}\n"
+            "smol_abonnee={} smol_posees={} smol_retirees={} smol_perdues={} smol_max={} ",
+            // LA PROGRESSION MATERIELLE DE L'ANNEAU RX.
+            //
+            // `isr_rx_ok` qui monte pendant que `rx_packets` reste fige ne
+            // permettait pas de trancher : la carte annonce-t-elle des trames
+            // qu'elle n'ecrit pas, ou lisons-nous un anneau qu'elle a quitte ?
+            // `rx_ok_sans_desc` repond -- c'est le `RxOK` vu alors que le
+            // descripteur courant porte encore `OWN`.
+            "rx_hw_head={} rx_last_desc_cpu={} own_rendus={} rx_ok_sans_desc={} ",
+            "rx_stall={} repair_req={} repair_exec={} repair_degre={} ",
+            // L'EMISSION PROUVEE : enfile n'est pas parti.
+            "tx_enqueued={} tx_completed={} tx_ok_isr={} tx_last_complete_ns={} tx_desc_owned={} ",
+            // DORA, SANS UN OCTET DE PAQUET.
+            //
+            // Onze emissions de 342 octets et zero reponse ne disaient pas OU
+            // la negociation s'arretait : pas d'offre, offre au mauvais xid,
+            // ou REQUEST sans ACK. Trois pannes, trois enquetes.
+            "discover_sent={} offer_seen={} request_sent={} ack_seen={} ",
+            "last_xid={:#010x} dhcp_retry={} dhcp_stage={}\n"
         ),
         ts_ns, nic.xid, nic.generation,
         crate::drivers::e1000::link_up() as u8,
@@ -957,6 +976,13 @@ fn network_sample(ts_ns: u64) {
         routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis,
         crate::net::smoltcp_abonnee() as u8,
         smol.posees, smol.retirees, smol.perdues_pleine, smol.occupation_max,
+        nic.rx_tete_cpu, nic.rx_dernier_desc_cpu, nic.rx_own_rendus,
+        nic.rx_ok_sans_descripteur, nic.rx_arret_detecte,
+        nic.reparations_demandees, nic.reparations_executees, nic.reparation_degre,
+        nic.tx_enfiles, nic.tx_termines, nic.tx_ok_isr,
+        nic.tx_dernier_termine_ns, nic.tx_desc_possedes,
+        dora.discover_envoyes, dora.offres_vues, dora.requests_envoyes, dora.acks_vus,
+        dora.dernier_xid, dora.tentatives, dora.derniere_etape.nom(),
     );
     let _ = append(KIND_NETWORK, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }

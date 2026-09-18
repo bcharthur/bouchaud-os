@@ -139,6 +139,9 @@ pub struct Navigation {
     pub etapes: [Mesure; ETAPES],
     pub debut_ns: u64,
     pub fin_ns: u64,
+    /// Motif du refus, quand la navigation n'a pas ete tentee.
+    refus: [u8; RAISON_MAX],
+    refus_len: usize,
 }
 
 impl Navigation {
@@ -149,11 +152,18 @@ impl Navigation {
             etapes: [Mesure::neuve(); ETAPES],
             debut_ns: 0,
             fin_ns: 0,
+            refus: [0; RAISON_MAX],
+            refus_len: 0,
         }
     }
 
     pub fn url(&self) -> &str {
         core::str::from_utf8(&self.url[..self.url_len]).unwrap_or("?")
+    }
+
+    /// Le motif du refus, vide si la navigation a bien ete tentee.
+    pub fn refus(&self) -> &str {
+        core::str::from_utf8(&self.refus[..self.refus_len]).unwrap_or("")
     }
 
     pub fn en_cours(&self) -> bool {
@@ -167,6 +177,80 @@ static COURANTE: SpinLockIrq<Navigation> = SpinLockIrq::new(Navigation::neuve())
 static VUE: AtomicBool = AtomicBool::new(false);
 static NAVIGATIONS: AtomicU64 = AtomicU64::new(0);
 
+/// UNE NAVIGATION REFUSEE AVANT MEME D'AVOIR COMMENCE.
+///
+/// # Pourquoi elle compte
+///
+/// Le releve du 18 septembre contient, cote navigateur :
+///
+/// ```text
+/// [ladybird-bouchaud] BROWSER_NETWORK_NOT_READY id=0
+/// WebContent(14): Failed load of: "https://www.google.com/"
+/// ```
+///
+/// et, au meme instant, la fenetre Services affichait
+/// « browser.navigation : aucune navigation ». Les deux etaient vrais du
+/// point de vue du noyau -- aucun `connect` n'a eu lieu, le `RequestServer`
+/// a renonce avant -- et ensemble ils faisaient croire que personne n'avait
+/// rien demande, au moment precis ou l'utilisateur regardait une page qui ne
+/// charge pas.
+///
+/// Une navigation refusee EST une navigation. Elle a une URL, une intention,
+/// et un motif ; c'est meme le seul cas ou le motif est connu d'avance.
+///
+/// Les etapes reseau ne sont pas marquees en panne : elles n'ont pas echoue,
+/// elles n'ont pas eu lieu. `Indisponible` avec le vrai prerequis.
+pub fn refusee(url: &str, raison: &str, maintenant_ns: u64) {
+    debute(url, maintenant_ns);
+    {
+        let mut n = COURANTE.lock();
+        // L'URL est connue et l'intention est reelle : la premiere etape a
+        // bien eu lieu. C'est la suivante qui n'a pas ete tentee.
+        n.etapes[Etape::Url as usize].etat = Etat::Actif;
+        for rang in [
+            Etape::Dns as usize,
+            Etape::Tcp as usize,
+            Etape::Tls as usize,
+            Etape::Http as usize,
+            Etape::Telechargement as usize,
+        ] {
+            n.etapes[rang].etat = Etat::Indisponible;
+            n.etapes[rang].debut_ns = maintenant_ns;
+        }
+        n.fin_ns = maintenant_ns;
+    }
+    let mut motif = [0u8; RAISON_MAX];
+    let mut longueur = 0usize;
+    for (place, octet) in raison.as_bytes().iter().take(RAISON_MAX).enumerate() {
+        motif[place] = *octet;
+        longueur = place + 1;
+    }
+    let mut n = COURANTE.lock();
+    n.refus = motif;
+    n.refus_len = longueur;
+}
+
+/// Longueur retenue d'un motif de refus.
+pub const RAISON_MAX: usize = 32;
+
+/// Reconnait, dans une ligne ecrite par le navigateur, une navigation
+/// refusee -- et l'enregistre.
+///
+/// # Pourquoi passer par la sortie d'erreur
+///
+/// Le refus a lieu en anneau 3, dans le `RequestServer`, et ne traverse aucun
+/// appel systeme reseau : il n'y a rien a observer cote noyau. La seule chose
+/// qui en sorte est la ligne que le navigateur ecrit sur sa sortie d'erreur,
+/// et que le noyau transporte deja jusqu'a la console.
+///
+/// On ne PARSE pas la sortie du navigateur : on reconnait un marqueur que
+/// notre propre correctif y a mis, et on en tire deux champs. Rien d'autre de
+/// ce que le navigateur ecrit n'a d'effet.
+pub fn reconnait_un_refus(ligne: &[u8], maintenant_ns: u64) {
+    let Some(refus) = crate::drivers::analyse_refus::refus_dans(ligne) else { return };
+    refusee(refus.url, refus.raison, maintenant_ns);
+}
+
 /// Une navigation commence. Remet toutes les etapes a zero.
 pub fn debute(url: &str, maintenant_ns: u64) {
     let mut n = COURANTE.lock();
@@ -176,6 +260,7 @@ pub fn debute(url: &str, maintenant_ns: u64) {
         n.url_len = place + 1;
     }
     n.etapes = [Mesure::neuve(); ETAPES];
+    n.refus_len = 0;
     n.debut_ns = maintenant_ns;
     n.fin_ns = 0;
     // L'URL est connue des le depart : c'est la premiere etape, et elle
@@ -237,12 +322,12 @@ pub fn termine(maintenant_ns: u64) {
 }
 
 /// Une copie de la navigation courante, pour publier sans tenir le verrou.
-pub fn instantane() -> Option<([u8; URL_MAX], usize, [Mesure; ETAPES], u64, u64)> {
+pub fn instantane() -> Option<([u8; URL_MAX], usize, [Mesure; ETAPES], u64, u64, [u8; RAISON_MAX], usize)> {
     if !VUE.load(Ordering::Acquire) {
         return None;
     }
     let n = COURANTE.lock();
-    Some((n.url, n.url_len, n.etapes, n.debut_ns, n.fin_ns))
+    Some((n.url, n.url_len, n.etapes, n.debut_ns, n.fin_ns, n.refus, n.refus_len))
 }
 
 /// Combien de navigations depuis le demarrage.

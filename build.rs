@@ -11,6 +11,17 @@ fn main() {
     const FONT_PATH: &str = "src/assets/fonts/DejaVuSans.ttf";
     println!("cargo:rerun-if-changed={FONT_PATH}");
 
+    // LE TAMPON DE CONSTRUCTION DOIT SUIVRE LA VARIABLE.
+    //
+    // `blackbox::BUILD_COMMIT` lit `BOUCHAUD_BUILD_COMMIT` par `option_env!`,
+    // donc a la COMPILATION. Sans cette ligne, cargo ne recompile pas quand
+    // la variable change : l'image gardait la valeur figee a la premiere
+    // construction. L'archive du 18 septembre porte « commit=inconnu » sur
+    // une image construite avec la variable posee -- et une archive qui ne
+    // sait pas de quel binaire elle vient ne prouve rien.
+    println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_LOT");
+
     let bytes = fs::read(FONT_PATH).expect("read bundled DejaVu Sans");
     let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
         .expect("parse bundled DejaVu Sans");

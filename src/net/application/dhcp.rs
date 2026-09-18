@@ -112,6 +112,99 @@ pub struct Bail {
 /// que l'initialisation du demarrage ne doit produire qu'une ligne de journal.
 /// Tant qu'il n'y avait qu'un appelant, la question ne se posait pas ; le
 /// demarrage automatique en a fait un second.
+// ---------------------------------------------------------------------------
+// DORA, COMPTEE
+// ---------------------------------------------------------------------------
+//
+// # Ce que le releve du 18 septembre ne disait pas
+//
+// L'archive montre onze emissions de 342 octets et `dhcp_vues=0`. Onze
+// DISCOVER, aucune reponse -- mais rien ne permettait de dire OU la
+// negociation s'arretait : pas d'offre du tout, une offre au mauvais xid, ou
+// un REQUEST sans ACK. Trois pannes differentes, trois enquetes differentes,
+// et le meme silence.
+//
+// Quatre compteurs et un etat, sans un seul vidage de paquet.
+
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+static DISCOVER_ENVOYES: AtomicU64 = AtomicU64::new(0);
+static OFFRES_VUES: AtomicU64 = AtomicU64::new(0);
+static REQUESTS_ENVOYES: AtomicU64 = AtomicU64::new(0);
+static ACKS_VUS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_XID: AtomicU32 = AtomicU32::new(0);
+static TENTATIVES: AtomicU64 = AtomicU64::new(0);
+static DERNIERE_ETAPE: AtomicU32 = AtomicU32::new(0);
+
+/// Ou la negociation s'est arretee la derniere fois.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum Etape {
+    /// Jamais tentee.
+    Jamais = 0,
+    /// DISCOVER emis, on attend une offre.
+    Discover = 1,
+    /// Offre recue, REQUEST emis, on attend l'accuse.
+    Request = 2,
+    /// Bail obtenu.
+    Bail = 3,
+    /// Aucune offre n'est venue.
+    SansOffre = 4,
+    /// L'offre est venue, l'accuse non.
+    SansAccuse = 5,
+}
+
+impl Etape {
+    pub fn nom(self) -> &'static str {
+        match self {
+            Etape::Jamais => "jamais",
+            Etape::Discover => "discover",
+            Etape::Request => "request",
+            Etape::Bail => "bail",
+            Etape::SansOffre => "sans-offre",
+            Etape::SansAccuse => "sans-accuse",
+        }
+    }
+
+    fn depuis(valeur: u32) -> Etape {
+        match valeur {
+            1 => Etape::Discover,
+            2 => Etape::Request,
+            3 => Etape::Bail,
+            4 => Etape::SansOffre,
+            5 => Etape::SansAccuse,
+            _ => Etape::Jamais,
+        }
+    }
+}
+
+/// L'etat de la negociation, pour le diagnostic et la fenetre Services.
+pub struct Compteurs {
+    pub discover_envoyes: u64,
+    pub offres_vues: u64,
+    pub requests_envoyes: u64,
+    pub acks_vus: u64,
+    pub dernier_xid: u32,
+    pub tentatives: u64,
+    pub derniere_etape: Etape,
+}
+
+pub fn compteurs() -> Compteurs {
+    Compteurs {
+        discover_envoyes: DISCOVER_ENVOYES.load(Ordering::Relaxed),
+        offres_vues: OFFRES_VUES.load(Ordering::Relaxed),
+        requests_envoyes: REQUESTS_ENVOYES.load(Ordering::Relaxed),
+        acks_vus: ACKS_VUS.load(Ordering::Relaxed),
+        dernier_xid: DERNIER_XID.load(Ordering::Relaxed),
+        tentatives: TENTATIVES.load(Ordering::Relaxed),
+        derniere_etape: Etape::depuis(DERNIERE_ETAPE.load(Ordering::Relaxed)),
+    }
+}
+
+fn note_etape(etape: Etape) {
+    DERNIERE_ETAPE.store(etape as u32, Ordering::Relaxed);
+}
+
 pub fn negocie() -> Option<Bail> {
     negocie_avant(ATTENTE_DEMARRAGE_MS)
 }
@@ -125,13 +218,31 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     let xid = cpu::rdtsc() as u32;
     let mut msg = [0u8; 400];
 
+    TENTATIVES.fetch_add(1, Ordering::Relaxed);
+    DERNIER_XID.store(xid, Ordering::Relaxed);
+
     let l = build_msg(&mut msg, xid, mac, 1, None, None);
     send(mac, &msg[..l]);
-    let offer = recv_avant(xid, 2, budget_ms)?;
+    DISCOVER_ENVOYES.fetch_add(1, Ordering::Relaxed);
+    note_etape(Etape::Discover);
+    let Some(offer) = recv_avant(xid, 2, budget_ms) else {
+        // AUCUNE OFFRE. C'est le cas du releve : onze DISCOVER, pas une
+        // reponse. Le dire ici evite de confondre avec un REQUEST sans ACK.
+        note_etape(Etape::SansOffre);
+        return None;
+    };
+    OFFRES_VUES.fetch_add(1, Ordering::Relaxed);
 
     let l = build_msg(&mut msg, xid, mac, 3, Some(offer.your_ip), Some(offer.server_id));
     send(mac, &msg[..l]);
-    let ack = recv_avant(xid, 5, budget_ms)?;
+    REQUESTS_ENVOYES.fetch_add(1, Ordering::Relaxed);
+    note_etape(Etape::Request);
+    let Some(ack) = recv_avant(xid, 5, budget_ms) else {
+        note_etape(Etape::SansAccuse);
+        return None;
+    };
+    ACKS_VUS.fetch_add(1, Ordering::Relaxed);
+    note_etape(Etape::Bail);
 
     // Valeurs de repli : un serveur qui n'annonce ni routeur ni resolveur
     // laisse la configuration compilee en place plutot que de poser 0.0.0.0,

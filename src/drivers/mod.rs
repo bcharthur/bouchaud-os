@@ -26,6 +26,11 @@ pub mod display;
 /// hote sans demarrer la machine.
 #[path = "network/anneau_rx.rs"]
 pub mod anneau_rx;
+
+/// La reconnaissance d'une navigation refusee par le navigateur, pure.
+/// Voir `network/analyse_refus.rs`.
+#[path = "network/analyse_refus.rs"]
+pub mod analyse_refus;
 #[path = "network/e1000.rs"]
 pub mod e1000;
 #[path = "network/rtl8168.rs"]

@@ -428,24 +428,35 @@ pub fn publie_les_indicateurs() {
     } else if etat_de("net.arp") != Etat::Degrade {
         etat_car("net.arp", Etat::Actif, "voisins resolus");
     }
-    kpi(
-        "net.dhcp",
-        Kpi {
-            operations: if dhcp_vues == 0 { None } else { Some(dhcp_vues) },
-            ..Kpi::default()
-        },
-    );
     // Le bail se lit sur le BAIL, pas sur le nombre de trames DHCP vues par le
     // routage maison : sous QEMU c'est smoltcp qui mene l'echange, le compteur
     // maison reste a zero, et la ligne restait muette avec une adresse
     // affichee dans la barre du haut.
+    // LA RAISON VIENT DE DORA, PAS D'UNE SUPPOSITION.
+    //
+    // « aucun bail » ne disait pas OU l'echange s'arrete. Les trois cas
+    // n'appellent pas la meme enquete : aucune offre (le serveur ne repond
+    // pas, ou nos trames ne sortent pas), offre sans accuse (le serveur
+    // repond mais refuse), bail obtenu.
+    let dora = crate::net::application::dhcp::compteurs();
+    kpi(
+        "net.dhcp",
+        Kpi {
+            operations: if dora.discover_envoyes == 0 {
+                None
+            } else {
+                Some(dora.discover_envoyes)
+            },
+            ..Kpi::default()
+        },
+    );
     if crate::net::bail_obtenu() {
         etat_car("net.dhcp", Etat::Repos, "bail obtenu");
     } else if !lien {
         etat_car("net.dhcp", Etat::Attente, "lien bas");
     } else {
-        // LE CAS DE LA TRIGKEY. Le cable porte, le serveur ne repond pas.
-        etat_car("net.dhcp", Etat::Attente, "aucun bail");
+        // LE CAS DE LA TRIGKEY : le cable porte, le serveur ne repond pas.
+        etat_car("net.dhcp", Etat::Attente, dora.derniere_etape.nom());
     }
 
     // --- la resolution de noms, et le transport -------------------------
@@ -603,7 +614,9 @@ pub fn publie_les_indicateurs() {
 fn publie_la_navigation() {
     use navigation::{Etape, ETAPES};
     use registre::Kpi;
-    let Some((url, url_len, etapes, debut_ns, fin_ns)) = navigation::instantane() else {
+    let Some((url, url_len, etapes, debut_ns, fin_ns, refus, refus_len)) =
+        navigation::instantane()
+    else {
         // Aucune navigation depuis le demarrage : la chaine attend, elle n'a
         // pas echoue.
         for rang in 0..ETAPES {
@@ -616,6 +629,7 @@ fn publie_la_navigation() {
     };
 
     let adresse = core::str::from_utf8(&url[..url_len]).unwrap_or("?");
+    let motif = core::str::from_utf8(&refus[..refus_len]).unwrap_or("");
     for rang in 0..ETAPES {
         let Some(etape) = Etape::depuis_rang(rang) else { continue };
         let mesure = etapes[rang];
@@ -626,6 +640,9 @@ fn publie_la_navigation() {
         let raison = match mesure.etat {
             Etat::Panne => "echec",
             Etat::Demarrage => "en cours",
+            // UN PREREQUIS ABSENT SE NOMME. « sans objet » n'apprend rien ;
+            // « dhcp: sans-offre » dit ou aller regarder.
+            Etat::Indisponible if !motif.is_empty() => prerequis_reseau(),
             Etat::Indisponible => "sans objet",
             Etat::Actif => "termine",
             _ => "en attente",
@@ -653,11 +670,19 @@ fn publie_la_navigation() {
     } else {
         0
     };
-    etat_car(
-        "browser.navigation",
-        if fin_ns == 0 { Etat::Demarrage } else { Etat::Repos },
-        adresse,
-    );
+    // LE GROUPE PORTE L'URL, ET LE MOTIF QUAND IL Y EN A UN.
+    //
+    // Une navigation refusee avant le moindre `connect` -- reseau sans
+    // configuration -- doit se lire comme un refus, pas comme un repos.
+    if !motif.is_empty() {
+        etat_car("browser.navigation", Etat::Degrade, motif);
+    } else {
+        etat_car(
+            "browser.navigation",
+            if fin_ns == 0 { Etat::Demarrage } else { Etat::Repos },
+            adresse,
+        );
+    }
     kpi(
         "browser.navigation",
         Kpi {
@@ -666,6 +691,20 @@ fn publie_la_navigation() {
             ..Kpi::default()
         },
     );
+}
+
+/// CE QUI MANQUE AU RESEAU, EN DEUX MOTS.
+///
+/// Sert de raison aux etapes de navigation qui n'ont pas ete tentees : elles
+/// n'ont pas echoue, il leur manque un prerequis, et ce prerequis a un nom.
+fn prerequis_reseau() -> &'static str {
+    if !crate::drivers::e1000::link_up() {
+        return "lien bas";
+    }
+    if crate::net::our_ip() == [0, 0, 0, 0] {
+        return "sans adresse IPv4";
+    }
+    "reseau indisponible"
 }
 
 /// Une capacite en gibioctets, pour une raison.

@@ -27,6 +27,7 @@ use anneau::{
     a_acquitter, adresse_tampon, carte_absente, cmd, cplus_cmd, degre, eor_pour, examine,
     generation, invariant_casse, isr, moteur_rx_a_relancer, nom, opts1_rendu, recense,
     reception_arretee, rx_config, suivant, xid, Degre, Generation, Recensement, Sante,
+    SILENCE_RX_NS,
     Verdict, DESCRIPTEURS, EOR, ERR_CRC, ERR_RES, ERR_RUNT, ERR_RWT, MASQUE_LONGUEUR, OCTETS_FCS,
     OWN, RX128_INT_EN, RX_DMA_BURST, RX_EARLY_OFF, RX_FIFO_THRESH_HISTORIQUE, RX_MULTI_EN,
     TAILLE_TAMPON,
@@ -533,8 +534,14 @@ fn emettre_sans_jamais_rien_recevoir_est_une_panne() {
     // panne, et relancer le moteur perdrait la reponse en vol.
     assert!(!reception_arretee(&sante, 22 * SEC));
     // Et une emission qui s'est tue depuis longtemps ne demande plus rien.
+    //
+    // « Longtemps » vaut maintenant ATTENTE_REPONSE_NS et non SILENCE_RX_NS :
+    // le veilleur ne peut pas interroger le chien de garde moins de cinq
+    // secondes apres une emission, parce que le client DHCP lui prend le fil
+    // quatre secondes durant. Voir le banc du 18 septembre plus bas.
     let muet = Sante { tx_dernier_ns: 20 * SEC, ..sante };
-    assert!(!reception_arretee(&muet, 30 * SEC));
+    assert!(reception_arretee(&muet, 30 * SEC), "dix secondes : on attend encore");
+    assert!(!reception_arretee(&muet, 60 * SEC), "quarante secondes : plus personne");
 }
 
 #[test]
@@ -603,4 +610,154 @@ fn l_invariant_casse_passe_devant_le_moteur_arrete() {
         degre(Some("adresse DMA deplacee"), sain, cmd::TX_ENB, 0),
         Degre::ReconstruitAnneau
     );
+}
+
+// ===========================================================================
+// LE DEFAUT DU 18 SEPTEMBRE : UN VEILLEUR QUI NE PEUT PAS VOIR
+//
+// Releve physique TRIGKEY, archive bb(5), `6cb0f72` :
+//
+//     RTL8168 UP, 1000 Mb/s duplex complet
+//     rx_packets  0 -> 64 jusqu'a t = 44,3 s, puis 64 jusqu'a t = 385,6 s
+//     rx_last     43,9 s
+//     tx_packets  5 -> 11  (DISCOVER DHCP, 342 octets, toutes les ~60 s)
+//     isr_rx_ok   33 -> 67     LE MATERIEL SIGNALE ENCORE DES TRAMES
+//     rx_missed=0 rx_err=0 invariant=intact
+//     recoveries=0 recovery_failures=0
+//
+// Trois cent quarante secondes de reception morte, et PAS UNE reprise. Le
+// journal ne contient pas une seule fois « rx-silencieux » : la reparation
+// n'a jamais ete DEMANDEE.
+//
+// La cause n'est pas dans le predicat, elle est dans le temps qu'on lui
+// donne. Le veilleur est un seul fil :
+//
+//     boucle {
+//         dormir(1 s)
+//         verifie_la_reception()            <- le seul appel du chien de garde
+//         ...
+//         dhcp::negocie_avant(4 000 ms)     <- BLOQUE quatre secondes
+//     }
+//
+// `negocie_avant` emet le DISCOVER puis attend l'offre pendant quatre
+// secondes. Quand il rend la main, la derniere emission a DEJA quatre
+// secondes. La boucle dort une seconde de plus, et le chien de garde voit
+// une emission vieille de cinq secondes -- alors qu'il exige qu'elle ait
+// moins de SILENCE_RX_NS, trois secondes.
+//
+// LE BUDGET D'ATTENTE DHCP EST PLUS LONG QUE LA FENETRE DE FRAICHEUR DU
+// CHIEN DE GARDE. Le fil qui pourrait declencher la reprise est justement
+// celui qui est bloque pendant la seule fenetre ou il aurait le droit de le
+// faire. Aucun reglage de seuil ne rattrape cela : il faut que le predicat
+// cesse de dependre de l'instant ou on l'interroge.
+// ===========================================================================
+
+/// Les valeurs exactes du releve physique, en nanosecondes.
+const PHYS_RX_DERNIER: u64 = 43_909_830_705;
+const PHYS_TX_PREMIER: u64 = 6_142_462_766;
+
+fn sante_trigkey(tx_dernier_ns: u64) -> Sante {
+    Sante {
+        lien: true,
+        rx_dernier_ns: PHYS_RX_DERNIER,
+        tx_dernier_ns,
+        tx_premier_ns: PHYS_TX_PREMIER,
+        reprise_derniere_ns: 0,
+    }
+}
+
+#[test]
+fn le_releve_physique_declare_la_reception_arretee() {
+    // L'enonce du chantier : lien haut, rx_last = 43,9 s, tx recent,
+    // maintenant tres au-dela, tx_premier non nul. Cela DOIT etre vrai.
+    let sante = sante_trigkey(374_629_580_643);
+    assert!(
+        reception_arretee(&sante, 375_000_000_000),
+        "trois cent trente et une secondes sans une trame, et le chien de \
+         garde se tait"
+    );
+}
+
+#[test]
+fn le_chien_de_garde_voit_meme_quand_le_dhcp_a_bloque_quatre_secondes() {
+    // LE CAS QUI A COUTE LE RELEVE.
+    //
+    // `negocie_avant` bloque quatre secondes apres avoir emis ; la boucle
+    // dort encore une seconde. Le chien de garde est donc TOUJOURS interroge
+    // au plus tot cinq secondes apres l'emission. S'il exige une emission de
+    // moins de trois secondes, il ne voit jamais rien.
+    const BUDGET_DHCP_NS: u64 = 4_000_000_000;
+    const PERIODE_BOUCLE_NS: u64 = 1_000_000_000;
+
+    let emission = 314_200_000_000;
+    let sante = sante_trigkey(emission);
+    // Le premier instant ou le veilleur peut poser la question.
+    let premier_regard = emission + BUDGET_DHCP_NS + PERIODE_BOUCLE_NS;
+    assert!(
+        premier_regard.saturating_sub(emission) > SILENCE_RX_NS,
+        "le banc ne reproduit rien si le budget DHCP tient dans la fenetre"
+    );
+    assert!(
+        reception_arretee(&sante, premier_regard),
+        "le chien de garde doit voir l'arret au premier regard possible, et \
+         non seulement pendant les trois secondes ou le fil qui l'appelle est \
+         bloque dans l'attente DHCP"
+    );
+
+    // Et il doit continuer a le voir pendant toute la periode de reemission,
+    // pas pendant trois secondes.
+    for seconde in 5..=30u64 {
+        assert!(
+            reception_arretee(&sante, emission + seconde * 1_000_000_000),
+            "muet {seconde} s apres l'emission : la fenetre est encore trop \
+             etroite pour un veilleur qui s'interroge une fois par seconde"
+        );
+    }
+}
+
+#[test]
+fn les_seize_instants_du_releve_declenchent_tous() {
+    // Les seize echantillons de bb(5) ou lien=1, silence RX >= 3 s et une
+    // emission de moins de trois secondes. Le predicat les voyait deja ; ce
+    // qui manquait, c'est que le veilleur puisse les regarder.
+    for (maintenant, tx) in [
+        (73_400_000_000u64, 72_700_000_000u64),
+        (134_500_000_000, 133_600_000_000),
+        (193_900_000_000, 193_800_000_000),
+        (254_100_000_000, 254_000_000_000),
+        (315_200_000_000, 314_200_000_000),
+        (375_000_000_000, 374_629_580_643),
+    ] {
+        assert!(reception_arretee(&sante_trigkey(tx), maintenant));
+    }
+}
+
+#[test]
+fn un_reseau_au_repos_ne_declenche_pas_de_reprise() {
+    // LA CONTREPARTIE. Elargir la fenetre ne doit pas transformer une machine
+    // tranquille en machine qui se repare en boucle : sans emission recente,
+    // le silence en reception ne prouve rien.
+    let sante = Sante {
+        lien: true,
+        rx_dernier_ns: 10 * SEC,
+        tx_dernier_ns: 12 * SEC,
+        tx_premier_ns: 5 * SEC,
+        reprise_derniere_ns: 0,
+    };
+    // Deux minutes apres la derniere emission, plus personne n'attend de
+    // reponse a quoi que ce soit.
+    assert!(!reception_arretee(&sante, 200 * SEC));
+}
+
+#[test]
+fn une_emission_plus_ancienne_que_la_reception_n_accuse_rien() {
+    // Nous avons parle, PUIS entendu : il n'y a rien en attente.
+    let sante = Sante {
+        lien: true,
+        rx_dernier_ns: 40 * SEC,
+        tx_dernier_ns: 30 * SEC,
+        tx_premier_ns: 5 * SEC,
+        reprise_derniere_ns: 0,
+    };
+    assert!(!reception_arretee(&sante, 50 * SEC));
 }

@@ -558,6 +558,14 @@ pub struct Sante {
 /// personne ne nous repond plus, alors que le cable est branche ».
 pub const SILENCE_RX_NS: u64 = 3_000_000_000;
 
+/// Duree pendant laquelle une emission reste EN ATTENTE DE REPONSE.
+///
+/// Elle borne la fenetre ou le chien de garde a le droit d'accuser la carte.
+/// Elle doit etre plus longue que tout ce qui peut retarder son interrogation
+/// -- au premier rang, le budget d'attente du client DHCP, quatre secondes,
+/// qui bloque le fil du veilleur juste apres l'emission.
+pub const ATTENTE_REPONSE_NS: u64 = 30_000_000_000;
+
 /// Delai minimal entre deux reprises, en nanosecondes.
 ///
 /// Une reprise coute des trames. En enchainer sans laisser au moteur le temps
@@ -573,12 +581,7 @@ pub fn reception_arretee(sante: &Sante, maintenant_ns: u64) -> bool {
     if !sante.lien {
         return false;
     }
-    // NOUS PARLONS ENCORE. Sans emission recente, le silence en reception ne
-    // prouve rien : personne n'a rien demande, et un reseau au repos a le
-    // droit d'etre silencieux.
-    if sante.tx_dernier_ns == 0
-        || maintenant_ns.saturating_sub(sante.tx_dernier_ns) > SILENCE_RX_NS
-    {
+    if sante.tx_dernier_ns == 0 {
         return false;
     }
     if sante.reprise_derniere_ns != 0
@@ -596,6 +599,45 @@ pub fn reception_arretee(sante: &Sante, maintenant_ns: u64) -> bool {
     } else {
         sante.rx_dernier_ns
     };
+    // NOUS ATTENDONS UNE REPONSE : nous avons parle APRES avoir entendu.
+    //
+    // C'est cela qui distingue une panne d'un reseau au repos, et non la
+    // fraicheur de l'emission au moment precis ou l'on pose la question.
+    if sante.tx_dernier_ns < reference {
+        return false;
+    }
+    // ... ET L'ATTENTE N'EST PAS PERIMEE.
+    //
+    // # Pourquoi cette borne ne vaut pas SILENCE_RX_NS
+    //
+    // Elle les valait. Le releve physique du 18 septembre montre ce que cela
+    // coutait : trois cent quarante secondes de reception morte, `isr_rx_ok`
+    // qui continue de monter, et PAS UNE reprise -- la reparation n'a meme
+    // jamais ete demandee.
+    //
+    // Le veilleur est un seul fil :
+    //
+    //     boucle { dormir(1 s) ; verifie_la_reception() ; ... ;
+    //              dhcp::negocie_avant(4 000 ms) }
+    //
+    // `negocie_avant` emet, puis attend l'offre quatre secondes. Quand il
+    // rend la main, la derniere emission a deja quatre secondes ; la boucle
+    // dort une seconde de plus. Le chien de garde etait donc TOUJOURS
+    // interroge au moins cinq secondes apres l'emission, alors qu'il exigeait
+    // qu'elle ait moins de trois secondes.
+    //
+    // Le fil qui pouvait declencher la reprise etait precisement celui qui
+    // restait bloque pendant la seule fenetre ou il en avait le droit. Aucun
+    // reglage de seuil ne rattrape cela : un predicat ne doit pas dependre de
+    // l'instant ou on l'interroge.
+    //
+    // Trente secondes laissent au veilleur vingt-cinq occasions de regarder
+    // entre deux reemissions DHCP, et gardent la contrepartie : passe ce
+    // delai, plus personne n'attend de reponse et une machine tranquille
+    // cesse d'accuser sa carte.
+    if maintenant_ns.saturating_sub(sante.tx_dernier_ns) > ATTENTE_REPONSE_NS {
+        return false;
+    }
     maintenant_ns.saturating_sub(reference) >= SILENCE_RX_NS
 }
 

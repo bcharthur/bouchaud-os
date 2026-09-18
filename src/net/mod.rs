@@ -109,6 +109,38 @@ fn oublie_la_presomption_slirp() {
     }
 }
 
+/// POSE LE VERDICT DE DEMARRAGE, ET LUI SEUL.
+///
+/// # Pourquoi cela passe par une fonction
+///
+/// La presomption SLIRP etait effacee a UN endroit : le verdict rendu par
+/// `demarre()`. Sur la TRIGKEY, `demarre()` ne rend jamais
+/// `SansConfiguration` -- au demarrage le lien est encore bas, donc
+/// `LienBas`. C'est le veilleur qui, une fois le cable monte et le DHCP
+/// echoue, pose `SansConfiguration` -- et lui n'effacait rien.
+///
+/// Resultat sur le releve du 18 septembre :
+///
+/// ```text
+/// verdict=sans-configuration  ip=10.0.2.15  gw=10.0.2.2  dns=10.0.2.3
+/// ```
+///
+/// Une adresse de QEMU annoncee sur un cable de bureau : chaque paquet
+/// sortant cherchait par ARP une passerelle qui n'existe pas, et la fenetre
+/// Services affichait `ipv4 Actif` au-dessus d'un reseau injoignable.
+///
+/// Deux chemins pour un meme verdict, et un seul des deux tenait la regle.
+/// Il n'y en a plus qu'un.
+fn pose_le_verdict(nouvel_etat: Demarrage) {
+    if matches!(nouvel_etat, Demarrage::SansConfiguration) {
+        // CARTE REELLE, AUCUN BAIL : la configuration d'usine de QEMU n'est
+        // pas une configuration, c'est une adresse qui n'existe pas sur ce
+        // cable.
+        oublie_la_presomption_slirp();
+    }
+    unsafe { DEMARRAGE = nouvel_etat; }
+}
+
 /// Adresse IPv4 d'eth0.
 pub fn our_ip() -> Ipv4Addr { unsafe { OUR_IP } }
 /// Passerelle par defaut.
@@ -211,7 +243,7 @@ pub fn etat_demarrage() -> Demarrage { unsafe { DEMARRAGE } }
 /// sans carte ne paie rien du tout.
 pub fn demarre() -> Demarrage {
     let etat = demarre_interne();
-    unsafe { DEMARRAGE = etat; }
+    pose_le_verdict(etat);
     crate::kernel::sysroot::refresh_resolver();
     let ligne = match etat {
         Demarrage::SansCarte => String::from("net: lo 127.0.0.1 actif ; aucune carte reseau"),
@@ -248,13 +280,7 @@ fn demarre_interne() -> Demarrage {
         // 10.0.2.x est une convention SLIRP QEMU, pas une configuration
         // universelle. Sur le RTL8168 physique, un DHCP absent signifie
         // simplement "hors ligne" jusqu'a configuration manuelle.
-        None if e1000::using_rtl8168() => {
-            // CARTE REELLE, AUCUN BAIL : la configuration d'usine de QEMU
-            // n'est pas une configuration, c'est une adresse qui n'existe pas
-            // sur ce cable.
-            oublie_la_presomption_slirp();
-            Demarrage::SansConfiguration
-        }
+        None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
         None => Demarrage::SansBail,
     }
 }
@@ -474,7 +500,7 @@ fn veilleur_de_lien() -> ! {
                 // Le cable part : on ne garde pas une configuration qui ne
                 // mene plus nulle part, sinon chaque requete part dans le vide
                 // et attend son echeance.
-                unsafe { DEMARRAGE = Demarrage::LienBas; }
+                pose_le_verdict(Demarrage::LienBas);
                 crate::kernel::sysroot::refresh_resolver();
                 oublie_identite_reseau();
                 oublie_voisins();
@@ -528,7 +554,7 @@ fn veilleur_de_lien() -> ! {
             attente_dhcp_ms = attente_dhcp_ms.saturating_mul(2).min(PLAFOND_DHCP_MS);
         }
         if nouvel_etat as u8 != etat as u8 {
-            unsafe { DEMARRAGE = nouvel_etat; }
+            pose_le_verdict(nouvel_etat);
             crate::kernel::sysroot::refresh_resolver();
             crate::kernel::dmesg::log_fmt(format_args!(
                 "net: eth0 {} gw {} dns {} — {}",
