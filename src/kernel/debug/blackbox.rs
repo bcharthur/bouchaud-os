@@ -67,6 +67,9 @@ pub const KIND_NETWORK: u16 = 6;
 /// navigation en echec -- et elles doivent se relire seules, sans etre noyees
 /// dans le reste.
 pub const KIND_SERVICE: u16 = 7;
+/// Interactions de terminal : commande, sortie et code de retour.
+/// Genre separe pour pouvoir relire `terminal.log` sans noyer la trace serie.
+pub const KIND_TERMINAL: u16 = 8;
 pub const KIND_FATAL: u16 = 9;
 
 const PAYLOAD_MAX: usize = 4032;
@@ -100,7 +103,7 @@ pub const BUILD_COMMIT: &str = match option_env!("BOUCHAUD_BUILD_COMMIT") {
 ///
 /// Une ligne par passe. Ajouter la sienne est le prix d'entree : sans elle, le
 /// prochain releve ne dira pas si le correctif y etait.
-pub const BUILD_LOTS: &str = "rx-chien-de-garde-libre,dora-comptee,verdict-unique,nav-refusee";
+pub const BUILD_LOTS: &str = "rx-chien-de-garde-libre,dora-comptee,verdict-unique,nav-refusee,terminal-blackbox-v1,hid-running-zombie-v3,m11-tab-trace-v1";
 
 const POLL_NS: u64 = 250_000_000;
 const SAMPLE_NS: u64 = 250_000_000;
@@ -408,6 +411,44 @@ impl fmt::Write for Text {
         self.len += n;
         if n == data.len() { Ok(()) } else { Err(fmt::Error) }
     }
+}
+
+// ===========================================================================
+// BOUCHAUD_TERMINAL_BLACKBOX_V1
+// ===========================================================================
+// Une commande saisie dans le terminal graphique ou texte survit au reboot
+// avec sa sortie et son code de retour. Ce chemin est RAM-only.
+// Les mots de passe saisis par `read_secret()` ne passent pas ici. Une cle/API
+// ecrite directement dans une ligne de commande, elle, est journalisee.
+pub fn terminal_commande(source: &str, cwd: &str, command: &str) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out, "TERM CMD ts_ns={} source={} cwd={} command={}\n", ts, source, cwd, command);
+    let _ = append(KIND_TERMINAL, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
+}
+
+pub fn terminal_sortie(args: fmt::Arguments<'_>) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out, "TERM OUT ts_ns={} ", ts);
+    let _ = out.write_fmt(args);
+    let _ = out.write_str("\n");
+    let _ = append(KIND_TERMINAL, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
+}
+
+pub fn terminal_sortie_texte(source: &str, texte: &str) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out, "TERM OUT ts_ns={} source={} {}", ts, source, texte);
+    let _ = out.write_str("\n");
+    let _ = append(KIND_TERMINAL, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
+}
+
+pub fn terminal_resultat(source: &str, status: i32) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out, "TERM RESULT ts_ns={} source={} status={} class={}\n", ts, source, status, if status == 0 { "ok" } else { "error" });
+    let _ = append(KIND_TERMINAL, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
 }
 
 fn flush_flight(ts_ns: u64) {
@@ -913,6 +954,28 @@ fn memory_sample(ts_ns: u64) {
 ///   * `desc_nic`/`desc_cpu` disent qui possede l'anneau -- sature ou non ;
 ///   * `invariant` dit si le materiel et nous parlons encore du meme objet ;
 ///   * `intr_status` a `0xffff` dit une carte absente du bus.
+// Un releve par endpoint HID, a 1 Hz avec le releve reseau.
+fn hid_points_sample(ts_ns: u64) {
+    crate::drivers::xhci_active::pour_chaque_point_hid(|ep| {
+        let mut out = Text::new();
+        let _ = write!(
+            &mut out,
+            concat!(
+                "hid_ep ts_ns={} slot={} dci={} kind={} interface={} proto={} ",
+                "state={} dequeue={:#x} expected={:#x} events={} silence_ms={} ",
+                "reprises={} broken={} sentinel={} sentinel_activity_ms={} ",
+                "since_recovery_ms={} quarantine={} fallback_errors={}\n"
+            ),
+            ts_ns, ep.slot, ep.dci, ep.genre, ep.interface, ep.protocole,
+            ep.etat_contexte, ep.defilement, ep.trb_attendu, ep.evenements,
+            ep.silence_ms, ep.reprises_silence, ep.interrupt_casse as u8,
+            ep.sentinelle_ep0 as u8, ep.sentinelle_activite_ms,
+            ep.depuis_reprise_ms, ep.en_quarantaine as u8, ep.echecs_repli,
+        );
+        let _ = append(KIND_SAMPLE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+    });
+}
+
 fn network_sample(ts_ns: u64) {
     let nic = crate::drivers::rtl8168::releve();
     let (routees, arp_vues, dhcp_vues, arp_ok, arp_ko, arp_non_emis) =
@@ -1017,6 +1080,7 @@ fn network_sample(ts_ns: u64) {
         crate::net::sonde_dns::verdict(),
     );
     let _ = append(KIND_NETWORK, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
+    hid_points_sample(ts_ns);
 }
 
 /// Un changement d'etat de service. Emis SEULEMENT quand l'etat change.

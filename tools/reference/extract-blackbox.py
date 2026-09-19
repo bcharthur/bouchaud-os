@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 from __future__ import annotations
 import argparse, csv, json, struct, zlib
 from pathlib import Path
@@ -9,7 +9,7 @@ HEADER = 64
 MAGIC = b"BOUBBX01"
 PART_NAME = "BOUCHAUD-BLACKBOX"
 
-KIND_NAMES = {1:"serial",2:"sample",3:"marker",4:"flight",5:"memory",6:"network",7:"service",9:"fatal"}
+KIND_NAMES = {1:"serial",2:"sample",3:"marker",4:"flight",5:"memory",6:"network",7:"service",8:"terminal",9:"fatal"}
 EVENT_NAMES = {1:"timer-enter",2:"timer-exit",10:"gfx-enter",11:"gfx-exit"}
 
 class LecteurBrut:
@@ -226,7 +226,7 @@ def extract(source, output):
         recs=sorted(sessions[boot_id], key=lambda r:r["seq"])
         sdir=output/session_dir_name(boot_id)
         sdir.mkdir(parents=True, exist_ok=True)
-        serial=bytearray(); samples=[]; memory=[]; markers=[]; fatal=[]; flight=[]; network=[]; services=[]
+        serial=bytearray(); samples=[]; memory=[]; markers=[]; fatal=[]; flight=[]; network=[]; services=[]; terminal=[]
         for r in recs:
             p=r["payload"]
             if r["kind"]==1: serial.extend(p)
@@ -236,6 +236,7 @@ def extract(source, output):
             elif r["kind"]==5: memory.append(p.decode("utf-8",errors="replace"))
             elif r["kind"]==6: network.append(p.decode("utf-8",errors="replace"))
             elif r["kind"]==7: services.append(p.decode("utf-8",errors="replace"))
+            elif r["kind"]==8: terminal.append(p.decode("utf-8",errors="replace"))
             elif r["kind"]==9: fatal.append(p.decode("utf-8",errors="replace"))
         (sdir/"serial.log").write_bytes(serial)
         (sdir/"samples.log").write_text("".join(samples),encoding="utf-8")
@@ -252,6 +253,7 @@ def extract(source, output):
         # -> navigation en echec. Cette suite-la est exactement ce qui
         # manquait, et elle doit se relire seule, sans etre noyee.
         (sdir/"services.log").write_text("".join(services),encoding="utf-8")
+        (sdir/"terminal.log").write_text("".join(terminal),encoding="utf-8")
         (sdir/"markers.log").write_text("".join(markers),encoding="utf-8")
         (sdir/"fatal.log").write_text("".join(fatal),encoding="utf-8")
         with (sdir/"flight.csv").open("w",newline="",encoding="utf-8") as fp:
@@ -267,6 +269,7 @@ def extract(source, output):
             fatal_records=sum(1 for r in recs if r["kind"]==9),
             network_records=len(network),
             service_records=len(services),
+            terminal_records=len(terminal),
             latency_spikes=sum(1 for l in "".join(services).splitlines() if l.startswith("pic_reveil")),
             serial_bytes=len(serial),flight_events=len(flight),
             # LA VERSION DU NOYAU QUI A PRODUIT CETTE ARCHIVE.
@@ -315,4 +318,3 @@ def main():
 
 if __name__=="__main__":
     main()
-

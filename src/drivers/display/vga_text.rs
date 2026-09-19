@@ -176,6 +176,27 @@ pub fn set_cursor(row: usize, col: usize) {
 /// d'imbriquer redirections (`>`) et pipes (`|`).
 static mut CAPTURE_STACK: Option<alloc::vec::Vec<alloc::string::String>> = None;
 
+/// Profondeur de journalisation d'une commande de terminal.
+static TERMINAL_TRACE_DEPTH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+pub fn terminal_trace_begin() {
+    TERMINAL_TRACE_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn terminal_trace_end() {
+    let _ = TERMINAL_TRACE_DEPTH.fetch_update(
+        core::sync::atomic::Ordering::Relaxed,
+        core::sync::atomic::Ordering::Relaxed,
+        |depth| Some(depth.saturating_sub(1)),
+    );
+}
+
+fn terminal_trace_active() -> bool {
+    TERMINAL_TRACE_DEPTH.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+
 /// Demarre une capture (empile un tampon vide).
 pub fn capture_start() {
     unsafe {
@@ -211,6 +232,11 @@ pub fn serial_mirror() -> bool {
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+
+    // La blackbox voit la sortie AVANT la capture VGA/pipeline.
+    if terminal_trace_active() {
+        crate::kernel::blackbox::terminal_sortie(args.clone());
+    }
 
     // Les captures du shell restent prioritaires : les commandes du terminal
     // graphique continuent a reutiliser println! sans toucher au VGA physique.

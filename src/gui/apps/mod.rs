@@ -31,6 +31,15 @@ fn is_blocked(cmd: &str) -> bool {
         "edit" | "nano" | "desktop" | "gui" | "su" | "passwd" | "useradd" | "userdel" | "login")
 }
 
+fn journal_gui_special(cmd: &str, cwd: usize, status: i32, sortie: Option<&str>) {
+    let chemin = ramfs::path_string(&ramfs::fs(), cwd);
+    crate::kernel::blackbox::terminal_commande("gui", &chemin, cmd);
+    if let Some(texte) = sortie {
+        crate::kernel::blackbox::terminal_sortie_texte("gui", texte);
+    }
+    crate::kernel::blackbox::terminal_resultat("gui", status);
+}
+
 // ── Clavier ───────────────────────────────────────────────────────────────────
 
 /// Transmet une touche à l'application de la fenêtre active.
@@ -47,10 +56,19 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
                 let cmd = input.trim().to_string();
                 input.clear();
                 if cmd.is_empty() { return false; }
-                if cmd == "exit" { return true; }
-                if cmd == "clear" { sb.clear(); return false; }
+                if cmd == "exit" {
+                    journal_gui_special(&cmd, *cwd, 0, Some("fermeture du terminal"));
+                    return true;
+                }
+                if cmd == "clear" {
+                    journal_gui_special(&cmd, *cwd, 0, Some("ecran efface"));
+                    sb.clear();
+                    return false;
+                }
                 if is_blocked(&cmd) {
-                    sb.push(format!("{}: a lancer depuis le shell texte", first_word(&cmd)));
+                    let message = format!("{}: a lancer depuis le shell texte", first_word(&cmd));
+                    journal_gui_special(&cmd, *cwd, 126, Some(&message));
+                    sb.push(message);
                 } else {
                     let out = crate::shell::run_capture(&cmd, cwd);
                     for l in out.lines() { sb.push(l.to_string()); }

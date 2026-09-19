@@ -363,10 +363,14 @@ fn session_loop() {
         dmesg::log("shell: commande executee");
 
         if trimmed == "logout" || trimmed == "exit" {
+            let chemin = ramfs::path_string(&ramfs::fs(), cwd);
+            crate::kernel::blackbox::terminal_commande("tty", &chemin, trimmed);
+            crate::kernel::blackbox::terminal_sortie_texte("tty", "Deconnexion.");
+            crate::kernel::blackbox::terminal_resultat("tty", 0);
             println!("Deconnexion.");
             return;
         }
-        run_line(trimmed, &mut cwd);
+        run_line_journalisee("tty", trimmed, &mut cwd);
     }
 }
 
@@ -498,6 +502,16 @@ fn longest_common_prefix(items: &[String]) -> String {
 // Execution : chainage ; && ||, redirections > >>, $?
 // ---------------------------------------------------------------------------
 
+/// Execute une ligne et enregistre son interaction complete dans la blackbox.
+fn run_line_journalisee(source: &str, line: &str, cwd: &mut usize) {
+    let chemin = ramfs::path_string(&ramfs::fs(), *cwd);
+    crate::kernel::blackbox::terminal_commande(source, &chemin, line);
+    vga::terminal_trace_begin();
+    run_line(line, cwd);
+    vga::terminal_trace_end();
+    crate::kernel::blackbox::terminal_resultat(source, last_status());
+}
+
 /// Execute un script complet sans clavier ni invite, et renvoie un verdict.
 ///
 /// C'est la porte d'entree du mode non interactif ([`crate::kernel::autorun`]).
@@ -520,7 +534,7 @@ pub fn run_batch(script: &str) -> i32 {
         }
         println!("+ {}", line);
         set_status(0);
-        run_line(line, &mut cwd);
+        run_line_journalisee("batch", line, &mut cwd);
         if verdict == 0 && last_status() != 0 {
             verdict = last_status();
         }
@@ -531,7 +545,7 @@ pub fn run_batch(script: &str) -> i32 {
 /// Execute une ligne en capturant sa sortie texte (pour le terminal graphique).
 pub fn run_capture(line: &str, cwd: &mut usize) -> String {
     vga::capture_start();
-    run_line(trim(line), cwd);
+    run_line_journalisee("gui", trim(line), cwd);
     vga::capture_take().unwrap_or_default()
 }
 
@@ -679,7 +693,7 @@ fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     for raw in content.lines() {
         let l = trim(raw);
         if l.is_empty() || l.starts_with('#') { continue; }
-        run_line(l, cwd);
+        run_line_journalisee("script", l, cwd);
     }
     last_status()
 }

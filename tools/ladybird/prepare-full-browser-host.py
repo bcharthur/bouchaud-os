@@ -686,3 +686,83 @@ print(" - WebView::Application upstream")
 print(" - RequestServer/ImageDecoder/Compositor upstream")
 print(" - WebWorker upstream a la demande")
 print(" - M11 conserve comme bridge GUI temporaire")
+
+# ---------------------------------------------------------------------------
+# BOUCHAUD_M11_TAB_HOST_TRACE_V1
+# ---------------------------------------------------------------------------
+webcontent_client_cpp = root / "Libraries/LibWebView/WebContentClient.cpp"
+
+replace_once(
+    webcontent_client_cpp,
+    """    view.m_client_state.page_index = page_id;
+    m_views.set(page_id, view);
+    m_history_recorded_urls_for_current_load.remove(page_id);
+}""",
+    """    view.m_client_state.page_index = page_id;
+    m_views.set(page_id, view);
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 40 VIEW_REGISTERED page={}", page_id);
+#endif
+    m_history_recorded_urls_for_current_load.remove(page_id);
+}""",
+    "M11 host register_view",
+)
+
+replace_once(
+    webcontent_client_cpp,
+    """Messages::WebContentClient::DidRequestNewWebViewResponse WebContentClient::did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints)
+{
+    auto new_page_id = Application::the().allocate_page_id();
+    String handle;
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_new_web_view)
+            handle = view->on_new_web_view(activate_tab, hints, new_page_id);
+    }
+
+    auto view = view_for_page_id(new_page_id);
+    if (!view.has_value())
+        return { {}, {}, move(handle) };
+
+    auto root_navigable_id = Application::the().allocate_ui_process_cross_process_id();
+    view->traversable().set_id(root_navigable_id);
+
+    return { new_page_id, root_navigable_id, move(handle) };
+}""",
+    """Messages::WebContentClient::DidRequestNewWebViewResponse WebContentClient::did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints)
+{
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 10 REQUEST_RECEIVED source={}", page_id);
+#endif
+    auto new_page_id = Application::the().allocate_page_id();
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 20 PAGE_ALLOCATED source={} page={}", page_id, new_page_id);
+#endif
+    String handle;
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_new_web_view)
+            handle = view->on_new_web_view(activate_tab, hints, new_page_id);
+    }
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 30 CHILD_CALLBACK_DONE source={} page={}", page_id, new_page_id);
+#endif
+
+    auto view = view_for_page_id(new_page_id);
+    if (!view.has_value()) {
+#if defined(BOUCHAUD_PORT)
+        warnln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 41 VIEW_MISSING source={} page={}", page_id, new_page_id);
+#endif
+        return { {}, {}, move(handle) };
+    }
+
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 50 VIEW_LOOKUP_OK source={} page={}", page_id, new_page_id);
+#endif
+    auto root_navigable_id = Application::the().allocate_ui_process_cross_process_id();
+    view->traversable().set_id(root_navigable_id);
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] M11_HOST_TAB_STAGE 60 REPLY source={} page={}", page_id, new_page_id);
+#endif
+    return { new_page_id, root_navigable_id, move(handle) };
+}""",
+    "M11 host DidRequestNewWebView",
+)

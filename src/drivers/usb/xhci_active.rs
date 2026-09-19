@@ -984,6 +984,14 @@ struct HidEndpoint {
     /// refusait d'aider precisement le peripherique qui avait prouve qu'il
     /// marchait.
     interrupt_in_casse: bool,
+    /// Sonde EP0 active pendant un silence Interrupt-IN ambigu.
+    sentinelle_ep0: bool,
+    /// Premiere entree reelle vue par la sentinelle.
+    sentinelle_activite_ns: u64,
+    /// Prochaine sonde EP0 autorisee.
+    sentinelle_suivante_ns: u64,
+    /// Derniere tentative de reprise de l'endpoint.
+    derniere_reprise_ns: u64,
     diagnostic_initial: bool,
     /// Adresse du seul TD en vol ; rejette les achevements anciens.
     trb_attendu: u64,
@@ -1038,6 +1046,10 @@ const EMPTY_HID_ENDPOINT: HidEndpoint = HidEndpoint {
     dernier_evenement_ns: 0,
     reprises_silence: 0,
     interrupt_in_casse: false,
+    sentinelle_ep0: false,
+    sentinelle_activite_ns: 0,
+    sentinelle_suivante_ns: 0,
+    derniere_reprise_ns: 0,
             diagnostic_initial: false,
             trb_attendu: 0,
     echecs_repli: 0,
@@ -2570,6 +2582,10 @@ fn configure_hids(
             dernier_evenement_ns: 0,
             reprises_silence: 0,
             interrupt_in_casse: false,
+            sentinelle_ep0: false,
+            sentinelle_activite_ns: 0,
+            sentinelle_suivante_ns: 0,
+            derniere_reprise_ns: 0,
             diagnostic_initial: false,
             trb_attendu: 0,
             echecs_repli: 0,
@@ -3962,9 +3978,19 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
     ep.trb_attendu = 0;
     ep.evenements = ep.evenements.saturating_add(1);
     if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
+        let etait_casse = ep.interrupt_in_casse;
+        let sentinelle_etait_active = ep.sentinelle_ep0;
         ep.dernier_evenement_ns = crate::kernel::timer::monotonic_ns();
         ep.reprises_silence = 0;
         ep.interrupt_in_casse = false;
+        ep.sentinelle_ep0 = false;
+        ep.sentinelle_activite_ns = 0;
+        ep.sentinelle_suivante_ns = 0;
+        if etait_casse {
+            crate::serial_println!("BOUCHAUD_HID_INTERRUPT_BACK slot={} dci={} events={}", slot, dci, ep.evenements);
+        } else if sentinelle_etait_active {
+            crate::serial_println!("BOUCHAUD_HID_SENTINEL_ABORTED slot={} dci={} reason=interrupt-event-arrived", slot, dci);
+        }
     }
     let buffer_len = controller.hids[index].buffer_len;
     let residual = (event.status & 0x00ff_ffff) as usize;
@@ -4065,6 +4091,8 @@ fn process_hid_event(controller: &mut Controller, event: Trb) {
 /// Etats d'un point de terminaison dans son contexte de sortie (xHCI 1.2).
 const EP_ETAT_RUNNING: u32 = 1;
 const EP_ETAT_HALTED: u32 = 2;
+const EP_ETAT_STOPPED: u32 = 3;
+const EP_ETAT_ERROR: u32 = 4;
 
 /// Etat d'un point de terminaison quelconque, lu dans le contexte du
 /// peripherique.
@@ -4084,6 +4112,15 @@ fn etat_du_point(controller: &Controller, device: &Device, dci: u8) -> u32 {
 /// peripherique d'interface humaine, et assez court pour qu'une reprise ne se
 /// sente pas. La verification ne coute que deux lectures de memoire.
 const SILENCE_HID_NS: u64 = 300_000_000;
+/// Running + TD pending devient suspect apres 150 ms sans Transfer Event.
+const SENTINELLE_APRES_NS: u64 = 100_000_000;
+/// Une sonde toutes les 50 ms : avec le fil EP0 a 25 ms, une entree
+/// utilisateur reveille le pont bien avant la borne cible de 250 ms.
+const SENTINELLE_PERIODE_NS: u64 = 50_000_000;
+/// Anti faux-positif : 20 ms pour laisser arriver le vrai Transfer Event.
+const SENTINELLE_CONFIRMATION_NS: u64 = 20_000_000;
+/// Ne jamais marteler Stop/Reset Endpoint.
+const REPRISE_HID_COOLDOWN_NS: u64 = 200_000_000;
 
 /// Reprises tentees avant de declarer le transport Interrupt-IN hors service.
 ///
@@ -4118,31 +4155,47 @@ fn etat_point_hid(controller: &Controller, index: usize) -> Option<(u32, u64)> {
 /// Set TR Dequeue Pointer. Aucun changement d'anneau sur un endpoint Running.
 fn recupere_point_hid(controller: &mut Controller, index: usize, etat: u32) -> bool {
     let (slot, dci) = (controller.hids[index].slot_id, controller.hids[index].dci);
-    if etat == EP_ETAT_HALTED {
-        // Lever aussi le halt USB du peripherique, pas seulement l'etat xHC.
-        let Some(mut device) = controller.devices[slot as usize] else { return false; };
-        let setup = setup_packet(0x02, 0x01, 0, u16::from((dci / 2) | 0x80), 0);
-        let resultat = control_transfer(controller, &mut device, setup, 0, false, BUDGET_REPRISE_NS);
-        controller.devices[slot as usize] = Some(device);
-        if resultat.is_err() { return false; }
 
-        let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
-        if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
-            return false;
+    match etat {
+        EP_ETAT_RUNNING => {
+            let controle = (CMD_STOP_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
+                crate::serial_println!("BOUCHAUD_HID_STOP_FAIL slot={} dci={}", slot, dci);
+                return false;
+            }
+            crate::serial_println!("BOUCHAUD_HID_STOP_OK slot={} dci={}", slot, dci);
         }
+        EP_ETAT_HALTED | EP_ETAT_ERROR => {
+            if etat == EP_ETAT_HALTED {
+                let Some(mut device) = controller.devices[slot as usize] else { return false; };
+                let setup = setup_packet(0x02, 0x01, 0, u16::from((dci / 2) | 0x80), 0);
+                let resultat = control_transfer(controller, &mut device, setup, 0, false, BUDGET_REPRISE_NS);
+                controller.devices[slot as usize] = Some(device);
+                if resultat.is_err() { return false; }
+            }
+            let controle = (CMD_RESET_ENDPOINT << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
+            if command_raw_budget(controller, 0, controle, BUDGET_REPRISE_NS).is_err() {
+                return false;
+            }
+            crate::serial_println!("BOUCHAUD_HID_RESET_OK slot={} dci={} etat={}", slot, dci, etat);
+        }
+        EP_ETAT_STOPPED => {}
+        _ => return false,
     }
-    // Repartir du prochain emplacement producteur avec SON cycle. Remettre
-    // index=0/cycle=1 sans effacer l'anneau republiait les anciens TRB et
-    // permettait plusieurs DMA concurrents sur le meme tampon de rapport.
+
     let ring = &controller.hids[index].ring;
     let pointeur = ring.phys + (ring.index * TRB_SIZE) as u64 | ring.cycle as u64;
     let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
     if command_raw_budget(controller, pointeur, controle, BUDGET_REPRISE_NS).is_err() {
         return false;
     }
+    crate::serial_println!("BOUCHAUD_HID_DEQUEUE_RESET slot={} dci={} ptr={:#x}", slot, dci, pointeur);
+
     controller.hids[index].trb_attendu = 0;
+    controller.hids[index].derniere_reprise_ns = crate::kernel::timer::monotonic_ns();
     arm_hid_endpoint(controller, index);
     HID_REPRISES_REUSSIES.fetch_add(1, Ordering::Relaxed);
+    crate::serial_println!("BOUCHAUD_HID_REARMED slot={} dci={} attendu={:#x}", slot, dci, controller.hids[index].trb_attendu);
     true
 }
 
@@ -4151,16 +4204,12 @@ fn veille_points_hid(controller: &mut Controller) {
     let maintenant = crate::kernel::timer::monotonic_ns();
     for index in 0..controller.hid_count {
         let ep = controller.hids[index];
-        // Un point arrete avant son premier rapport a aussi besoin de reprise.
-        if !ep.active {
-            continue;
-        }
-        if maintenant.saturating_sub(ep.dernier_evenement_ns) < SILENCE_HID_NS {
-            continue;
-        }
-        let Some((etat, defilement)) = etat_point_hid(controller, index) else {
-            continue;
-        };
+        if !ep.active { continue; }
+
+        let silence = maintenant.saturating_sub(ep.dernier_evenement_ns);
+        if silence < SENTINELLE_APRES_NS { continue; }
+
+        let Some((etat, defilement)) = etat_point_hid(controller, index) else { continue; };
         if !ep.diagnostic_initial {
             controller.hids[index].diagnostic_initial = true;
             crate::serial_println!(
@@ -4169,41 +4218,80 @@ fn veille_points_hid(controller: &mut Controller) {
                 unsafe { r32(controller.op, 0x04) },
             );
         }
+
         let ecriture = ep.ring.phys + (ep.ring.index * TRB_SIZE) as u64;
         let file_vide = defilement == ecriture;
-        // LA SEULE CONDITION QUI DISTINGUE LE REPOS DE LA PANNE.
-        if etat == EP_ETAT_RUNNING && !file_vide {
-            continue; // souris immobile : tout va bien
+
+        // Running + TD pending : ne jamais resetter sur le seul silence.
+        if etat == EP_ETAT_RUNNING && !file_vide && !ep.interrupt_in_casse {
+            if !controller.hids[index].sentinelle_ep0 {
+                controller.hids[index].sentinelle_ep0 = true;
+                controller.hids[index].sentinelle_suivante_ns = maintenant;
+                crate::serial_println!(
+                    "BOUCHAUD_HID_SUSPECT slot={} dci={} etat={} silence_ms={} deq={:#x} attendu={:#x}",
+                    ep.slot_id, ep.dci, etat, silence / 1_000_000, defilement, ep.trb_attendu,
+                );
+            }
+
+            let activite = controller.hids[index].sentinelle_activite_ns;
+            if activite == 0 || maintenant.saturating_sub(activite) < SENTINELLE_CONFIRMATION_NS {
+                continue;
+            }
+
+            controller.hids[index].interrupt_in_casse = true;
+            controller.hids[index].reprises_silence = 0;
+            HID_TRANSPORTS_CASSES.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!(
+                "BOUCHAUD_HID_STALL_CONFIRMED slot={} dci={} silence_ms={} confirmation_ms={} deq={:#x} attendu={:#x}",
+                ep.slot_id, ep.dci, silence / 1_000_000,
+                maintenant.saturating_sub(activite) / 1_000_000, defilement, ep.trb_attendu,
+            );
+            crate::serial_println!(
+                "BOUCHAUD_HID_FAILOVER_EP0 slot={} dci={} latency_ms={} recovery=scheduled",
+                ep.slot_id, ep.dci, maintenant.saturating_sub(activite) / 1_000_000,
+            );
         }
-        // Le dequeue du contexte Running peut etre un instantane ancien.
-        // L'egalite ci-dessus ne justifie pas de dupliquer le TD en vol.
-        if !politique_xhci::recuperable(etat) {
+
+        let ep = controller.hids[index];
+        if etat == EP_ETAT_RUNNING {
+            if !ep.interrupt_in_casse { continue; }
+        } else if !politique_xhci::recuperable(etat) {
             continue;
         }
+
+        if ep.derniere_reprise_ns != 0
+            && maintenant.saturating_sub(ep.derniere_reprise_ns) < REPRISE_HID_COOLDOWN_NS
+        {
+            continue;
+        }
+
         if ep.reprises_silence >= REPRISES_SILENCE_MAX {
             if !ep.interrupt_in_casse {
                 controller.hids[index].interrupt_in_casse = true;
                 HID_TRANSPORTS_CASSES.fetch_add(1, Ordering::Relaxed);
                 crate::serial_println!(
                     "BOUCHAUD_HID_INTERRUPT_HORS_SERVICE slot={} dci={} etat={} file_vide={} silence_ms={} evenements={} pont_ep0=1",
-                    ep.slot_id, ep.dci, etat, file_vide as u8,
-                    maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
-                    ep.evenements,
+                    ep.slot_id, ep.dci, etat, file_vide as u8, silence / 1_000_000, ep.evenements,
                 );
             }
             continue;
         }
+
         if ep.reprises_silence == 0 {
             crate::serial_println!(
                 "BOUCHAUD_HID_POINT_MUET slot={} dci={} etat={} file_vide={} silence_ms={} evenements={}",
-                ep.slot_id, ep.dci, etat, file_vide as u8,
-                maintenant.saturating_sub(ep.dernier_evenement_ns) / 1_000_000,
-                ep.evenements,
+                ep.slot_id, ep.dci, etat, file_vide as u8, silence / 1_000_000, ep.evenements,
             );
         }
         controller.hids[index].reprises_silence = ep.reprises_silence.saturating_add(1);
         HID_REPRISES.fetch_add(1, Ordering::Relaxed);
-        recupere_point_hid(controller, index, etat);
+        if !recupere_point_hid(controller, index, etat) {
+            controller.hids[index].derniere_reprise_ns = maintenant;
+            crate::serial_println!(
+                "BOUCHAUD_HID_RECOVERY_FAIL slot={} dci={} etat={} attempt={}",
+                ep.slot_id, ep.dci, etat, controller.hids[index].reprises_silence,
+            );
+        }
     }
 }
 
@@ -4243,6 +4331,10 @@ pub struct ReleveHid {
     pub trb_attendu: u64,
     pub en_quarantaine: bool,
     pub interrupt_casse: bool,
+    pub reprises_silence: u8,
+    pub sentinelle_ep0: bool,
+    pub sentinelle_activite_ms: u64,
+    pub depuis_reprise_ms: u64,
     pub echecs_repli: u8,
 }
 
@@ -4283,6 +4375,10 @@ pub fn pour_chaque_point_hid(mut visite: impl FnMut(ReleveHid)) {
                         trb_attendu: ep.trb_attendu,
                         en_quarantaine: maintenant < ep.repli_muet_jusqu_a_ns,
                         interrupt_casse: ep.interrupt_in_casse,
+                        reprises_silence: ep.reprises_silence,
+                        sentinelle_ep0: ep.sentinelle_ep0,
+                        sentinelle_activite_ms: if ep.sentinelle_activite_ns == 0 { 0 } else { maintenant.saturating_sub(ep.sentinelle_activite_ns) / 1_000_000 },
+                        depuis_reprise_ms: if ep.derniere_reprise_ns == 0 { 0 } else { maintenant.saturating_sub(ep.derniere_reprise_ns) / 1_000_000 },
                         echecs_repli: ep.echecs_repli,
                     });
                 }
@@ -4291,11 +4387,11 @@ pub fn pour_chaque_point_hid(mut visite: impl FnMut(ReleveHid)) {
     }
 }
 
-fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> bool {
-    if endpoint_index >= controller.hid_count { return false; }
+fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> Verdict {
+    if endpoint_index >= controller.hid_count { return Verdict::Refuse; }
     let endpoint = controller.hids[endpoint_index];
-    if !endpoint.active || endpoint.slot_id as usize >= controller.devices.len() { return false; }
-    let Some(mut device) = controller.devices[endpoint.slot_id as usize] else { return false; };
+    if !endpoint.active || endpoint.slot_id as usize >= controller.devices.len() { return Verdict::Refuse; }
+    let Some(mut device) = controller.devices[endpoint.slot_id as usize] else { return Verdict::Refuse; };
 
     let report_id = endpoint.report_id;
     let length = endpoint.buffer_len.clamp(3, 64);
@@ -4321,7 +4417,7 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
         Ok(received) if received != 0 => received.min(length),
         _ => {
             HID_CONTROL_FAILS.fetch_add(1, Ordering::Relaxed);
-            return false;
+            return Verdict::Refuse;
         }
     };
 
@@ -4358,9 +4454,8 @@ fn control_get_report(controller: &mut Controller, endpoint_index: usize) -> boo
     if verdict.analyse() {
         HID_CONTROL_SONDES_UTILES.fetch_add(1, Ordering::Relaxed);
     }
-    verdict.analyse()
+    verdict
 }
-
 /// Sert AU PLUS UN point de terminaison muet, a partir de `depart`.
 ///
 /// Rend l'indice servi, pour que le tour suivant reparte du point d'apres :
@@ -4423,10 +4518,22 @@ fn repli_ep0_un_point(
         // qu'il fonctionnait, et le pointeur restait mort pour le reste de la
         // session. Le chien de garde tente d'abord la reparation ; il ne pose
         // `interrupt_in_casse` que lorsqu'elle a echoue.
-        if controller.hids[index].evenements != 0
-            && !controller.hids[index].interrupt_in_casse
-        {
+        let ep_courant = controller.hids[index];
+        let silence = maintenant.saturating_sub(ep_courant.dernier_evenement_ns);
+        let sentinelle = (ep_courant.kind == 1 || ep_courant.kind == 2)
+            && ep_courant.evenements != 0
+            && !ep_courant.interrupt_in_casse
+            && silence >= SENTINELLE_APRES_NS;
+        if ep_courant.evenements != 0 && !ep_courant.interrupt_in_casse && !sentinelle {
             continue;
+        }
+        if sentinelle && !controller.hids[index].sentinelle_ep0 {
+            controller.hids[index].sentinelle_ep0 = true;
+            controller.hids[index].sentinelle_suivante_ns = maintenant;
+            crate::serial_println!(
+                "BOUCHAUD_HID_SENTINEL_EP0 slot={} dci={} silence_ms={} period_ms={}",
+                ep_courant.slot_id, ep_courant.dci, silence / 1_000_000, SENTINELLE_PERIODE_NS / 1_000_000,
+            );
         }
         // UN POINT QU'ON VIENT D'ARMER N'EST PAS UN POINT MUET.
         //
@@ -4453,10 +4560,11 @@ fn repli_ep0_un_point(
         // peut dormir, au lieu de se reveiller mille fois pour rien.
         let du_a = {
             let ep = &controller.hids[index];
+            let cadence = if sentinelle && !ep.interrupt_in_casse { ep.sentinelle_suivante_ns } else { ep.prochain_repli_ns };
             ep.arme_depuis_ns
                 .saturating_add(GRACE_INTERRUPT_NS)
                 .max(ep.repli_muet_jusqu_a_ns)
-                .max(ep.prochain_repli_ns)
+                .max(cadence)
         };
         if maintenant < du_a {
             *echeance_min = (*echeance_min).min(du_a);
@@ -4468,9 +4576,37 @@ fn repli_ep0_un_point(
         // n'est pas passe se retente dans vingt millisecondes, un peripherique
         // qui ne repond pas attend une seconde.
         let avant = HID_CONTROL_FAILS.load(Ordering::Relaxed);
-        controller.hids[index].prochain_repli_ns =
-            maintenant.saturating_add(controller.hids[index].periode_repli_ns);
-        let repond = control_get_report(controller, index);
+        if sentinelle && !controller.hids[index].interrupt_in_casse {
+            let period = if controller.hids[index].sentinelle_activite_ns != 0 {
+                controller.hids[index].periode_repli_ns
+            } else {
+                SENTINELLE_PERIODE_NS
+            };
+            controller.hids[index].sentinelle_suivante_ns = maintenant.saturating_add(period);
+        } else {
+            controller.hids[index].prochain_repli_ns = maintenant.saturating_add(controller.hids[index].periode_repli_ns);
+        }
+
+        let verdict = control_get_report(controller, index);
+        let repond = verdict.analyse();
+        if sentinelle && !controller.hids[index].interrupt_in_casse {
+            if verdict.entree() {
+                if controller.hids[index].sentinelle_activite_ns == 0 {
+                    controller.hids[index].sentinelle_activite_ns = maintenant;
+                    crate::serial_println!(
+                        "BOUCHAUD_HID_SENTINEL_ACTIVITY slot={} dci={} silence_ms={}",
+                        controller.hids[index].slot_id, controller.hids[index].dci, silence / 1_000_000,
+                    );
+                }
+                controller.hids[index].sentinelle_suivante_ns = maintenant.saturating_add(controller.hids[index].periode_repli_ns);
+            } else if !repond {
+                controller.hids[index].sentinelle_suivante_ns = maintenant.saturating_add(SENTINELLE_PERIODE_NS);
+            }
+            controller.hids[index].echecs_repli = 0;
+            controller.hids[index].quarantaine_annoncee = false;
+            return Some(index);
+        }
+
         let transitoire = !repond
             && HID_CONTROL_FAILS.load(Ordering::Relaxed) != avant
             && DERNIER_CODE_CONTROLE.load(Ordering::Relaxed) == CC_ERREUR_TRANSACTION as usize;
@@ -5947,7 +6083,7 @@ fn fil_repli_ep0() -> ! {
 }
 
 /// Pause du pont EP0 quand il n'a rien a servir, en ticks (millisecondes).
-const PAUSE_REPLI_OISIF_TICKS: u64 = 50;
+const PAUSE_REPLI_OISIF_TICKS: u64 = 25;
 
 /// Lance le fil du repli EP0.
 pub fn demarre_le_fil_repli_ep0() -> bool {

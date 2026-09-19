@@ -62,31 +62,50 @@ if manual_marker not in connection:
     start = "    chrome.on_nouvel_onglet = [this, page_id]() -> u64 {"
     end = "\n\n    chrome.on_fermer_onglet = [this](u64 ferme) {"
     replacement = r'''    chrome.on_nouvel_onglet = [this, page_id]() -> u64 {
+        auto const source_page = page_id();
+        static u64 tentative = 0;
+        auto const numero = ++tentative;
+        outln("[ladybird-bouchaud] M11_TAB_STAGE 10 CALLBACK_ENTER attempt={} source={}", numero, source_page);
+
+        if (!this->page(source_page).has_value()) {
+            warnln("[ladybird-bouchaud] M11_TAB_STAGE 11 SOURCE_MISSING attempt={} source={}", numero, source_page);
+            return 0;
+        }
+
         if (getenv("BOUCHAUD_BROWSER_HOST") != nullptr) {
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 20 HOST_REQUEST_BEGIN attempt={} source={}", numero, source_page);
             auto response = send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(
-                page_id(), Web::HTML::ActivateTab::Yes, Web::HTML::WebViewHints {});
+                source_page, Web::HTML::ActivateTab::Yes, Web::HTML::WebViewHints {});
             if (!response) {
-                warnln("[ladybird-bouchaud] M11_TAB_HOST_REQUEST_FAILED page_source={}", page_id());
+                warnln("[ladybird-bouchaud] M11_TAB_STAGE 21 HOST_REQUEST_FAILED attempt={} source={}", numero, source_page);
                 return 0;
             }
             if (!response->new_page_id().has_value() || !response->root_navigable_id().has_value()) {
-                warnln("[ladybird-bouchaud] M11_TAB_HOST_REFUSED page_source={}", page_id());
+                warnln("[ladybird-bouchaud] M11_TAB_STAGE 22 HOST_REFUSED attempt={} source={}", numero, source_page);
                 return 0;
             }
 
             auto const nouveau = *response->new_page_id();
-            auto& client = page_host().create_page(nouveau, *response->root_navigable_id());
-            // Un onglet ouvert par l'utilisateur porte immediatement un
-            // document about:blank. Le root_navigable_id vient du host et est
-            // donc le meme des deux cotes de l'IPC.
-            Web::HTML::LocalTraversableNavigable::create_a_fresh_top_level_traversable(
-                client.page(), URL::about_blank());
-            client.set_maximum_frames_per_second(60.0);
+            auto const root_navigable = *response->root_navigable_id();
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 30 HOST_REPLY attempt={} source={} page={}", numero, source_page, nouveau);
 
-            // DidRequestNewWebView ne rend `nouveau` qu'apres que le
-            // HeadlessWebView enfant a ete enregistre dans m_views.
-            outln("[ladybird-bouchaud] M11_TAB_HOST_REGISTERED page={} source={}", nouveau, page_id());
+            if (nouveau == 0 || nouveau == source_page || this->page(nouveau).has_value()) {
+                warnln("[ladybird-bouchaud] M11_TAB_STAGE 31 PAGE_ID_COLLISION attempt={} source={} page={}", numero, source_page, nouveau);
+                return 0;
+            }
+
+            outln("[ladybird-bouchaud] M11_TAB_HOST_REGISTERED page={} source={}", nouveau, source_page);
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 40 CREATE_PAGE_BEGIN attempt={} page={}", numero, nouveau);
+            auto& client = page_host().create_page(nouveau, root_navigable);
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 50 CREATE_PAGE_OK attempt={} page={}", numero, nouveau);
+
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 60 TRAVERSABLE_BEGIN attempt={} page={}", numero, nouveau);
+            Web::HTML::LocalTraversableNavigable::create_a_fresh_top_level_traversable(client.page(), URL::about_blank());
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 70 TRAVERSABLE_OK attempt={} page={}", numero, nouveau);
+
+            client.set_maximum_frames_per_second(60.0);
             outln("[ladybird-bouchaud] M11_TAB_CREATED page={}", nouveau);
+            outln("[ladybird-bouchaud] M11_TAB_STAGE 80 READY attempt={} page={}", numero, nouveau);
             return nouveau;
         }
 

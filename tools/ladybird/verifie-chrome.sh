@@ -52,6 +52,19 @@ if grep -Fq 'M11_TAB_HOST_' "$CONNECTION"; then
     fi
 fi
 
+# BOUCHAUD_M11_TAB_TRACE_GUARD
+if grep -Fq 'M11_TAB_HOST_' "$CONNECTION"; then
+    grep -Fq 'M11_TAB_STAGE 80 READY' "$CONNECTION" || {
+        echo 'M11: stage 80 READY absent du WebContent genere' >&2
+        exit 1
+    }
+    HOST_CLIENT="$SRC/Libraries/LibWebView/WebContentClient.cpp"
+    grep -Fq 'M11_HOST_TAB_STAGE 40 VIEW_REGISTERED' "$HOST_CLIENT" || {
+        echo 'M11: VIEW_REGISTERED absent du BrowserHost genere' >&2
+        exit 1
+    }
+fi
+
 ./tools/ladybird/verifie-syntaxe-chrome.sh "$SRC"
 
 printf '\033[32m%s\033[0m\n' 'chrome V16: DejaVu/FreeType + SVG + loading indicator OK'
