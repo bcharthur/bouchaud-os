@@ -121,14 +121,24 @@ fn install_fonts() {
     }
 }
 
-/// Fils logiques par coeur physique sur les machines visees.
+/// Fils logiques par coeur physique, MESURES.
 ///
-/// Deux : la TRIGKEY porte un Ryzen 7 5700U, huit coeurs et seize fils. Ce
-/// n'est pas lu du materiel, parce que rien dans ce noyau ne l'expose encore.
-/// C'est donc une HYPOTHESE, et il faut savoir ce qu'elle influe : `cpu cores`
-/// et `core id` de `/proc/cpuinfo`, et rien d'autre. Le NOMBRE de processeurs
-/// annonce, lui, est mesure.
-const FILS_PAR_COEUR: usize = 2;
+/// BOUCHAUD_C26_SMT_MESURE_ET_NON_SUPPOSE
+///
+/// C'etait une constante a deux, parce que la TRIGKEY porte un Ryzen 7 5700U.
+/// Juste sur cette machine, fausse partout ailleurs : QEMU lance `-smp 8` en
+/// huit paquets d'un seul fil, et `/proc/cpuinfo` annoncait alors
+/// « cpu cores: 4 » sur une machine qui en a huit. Une bibliotheque qui
+/// dimensionne son parallelisme sur `cpu cores` -- Skia en est une -- en
+/// aurait utilise la moitie.
+///
+/// La valeur vient maintenant de CPUID, et le repli prudent est UN.
+fn fils_par_coeur() -> usize {
+    crate::kernel::cpu_topologie::fils_retenus(
+        crate::arch::x86_64::cpu::fils_par_coeur(),
+        processeurs_annonces(),
+    )
+}
 
 /// Le nombre de processeurs a annoncer au monde utilisateur.
 ///
@@ -151,6 +161,7 @@ fn install_proc() {
         return;
     }
     let logiques = processeurs_annonces();
+    let fils = fils_par_coeur();
 
     let (_, free_frames, total_frames) = crate::kernel::vmm::frame_stats();
     let total_kb = total_frames * 4;
@@ -179,7 +190,7 @@ fn install_proc() {
     let vendor = core::str::from_utf8(&vendor).unwrap_or("unknown");
     let mut cpuinfo = String::new();
     let mut index = 0usize;
-    while let Some(bloc) = crate::kernel::cpu_topologie::bloc(logiques, FILS_PAR_COEUR, index) {
+    while let Some(bloc) = crate::kernel::cpu_topologie::bloc(logiques, fils, index) {
         cpuinfo.push_str(&format!(
             "processor\t: {}\nvendor_id\t: {}\ncpu family\t: 6\nmodel name\t: Bouchaud OS virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nphysical id\t: 0\nsiblings\t: {}\ncore id\t\t: {}\ncpu cores\t: {}\nflags\t\t: fpu tsc msr pae cx8 sep cmov pat mmx fxsr sse sse2\n\n",
             bloc.processeur, vendor, bloc.siblings, bloc.core_id, bloc.coeurs,

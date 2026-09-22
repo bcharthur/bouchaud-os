@@ -58,3 +58,57 @@ pub fn print_cpuinfo() {
         smp::hardware_apic_id()
     );
 }
+
+/// Les fils logiques par coeur physique, selon le MATERIEL.
+///
+/// BOUCHAUD_C26_SMT_MESURE_ET_NON_SUPPOSE
+///
+/// `sysroot.rs` supposait deux fils par coeur, en dur, parce que la TRIGKEY
+/// porte un Ryzen 7 5700U. La supposition est juste sur cette machine-la et
+/// fausse partout ailleurs : QEMU lance `-smp 8` en huit paquets d'un seul
+/// fil, et `/proc/cpuinfo` annoncait alors « cpu cores: 4 » sur une machine
+/// qui en a huit. Une bibliotheque qui dimensionne son parallelisme sur
+/// `cpu cores` -- et Skia en est une -- en aurait utilise la moitie.
+///
+/// La feuille 0x1F, puis 0x0B a defaut : c'est l'enumeration de topologie
+/// etendue. Son sous-niveau de type 1 est le niveau SMT, et son EBX donne le
+/// nombre de processeurs logiques a ce niveau -- c'est-a-dire les fils d'un
+/// coeur.
+///
+/// Rend `None` quand le materiel ne repond pas. `None` et non `1` : « le
+/// materiel ne le dit pas » et « il y a un fil par coeur » sont deux faits
+/// differents, et c'est a l'appelant de choisir son repli.
+#[cfg(target_arch = "x86_64")]
+pub fn fils_par_coeur() -> Option<usize> {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+
+    // La feuille maximale supportee. Interroger une feuille au-dela rend des
+    // valeurs d'une AUTRE feuille sur bien des processeurs, donc un nombre
+    // plausible et faux.
+    let maximale = unsafe { __cpuid(0) }.eax;
+
+    for feuille in [0x1Fu32, 0x0B] {
+        if maximale < feuille {
+            continue;
+        }
+        for niveau in 0..8u32 {
+            let r = unsafe { __cpuid_count(feuille, niveau) };
+            if r.ebx == 0 {
+                break;
+            }
+            let type_de_niveau = (r.ecx >> 8) & 0xff;
+            if type_de_niveau == 1 {
+                let fils = (r.ebx & 0xffff) as usize;
+                if fils > 0 {
+                    return Some(fils);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn fils_par_coeur() -> Option<usize> {
+    None
+}

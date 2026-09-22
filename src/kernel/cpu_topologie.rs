@@ -133,3 +133,29 @@ pub fn annonces(schedulables: usize, maximum: usize) -> usize {
     let borne = if maximum == 0 { 1 } else { maximum };
     core::cmp::max(1, core::cmp::min(schedulables, borne))
 }
+
+/// Combien de fils logiques par coeur retenir, mesure ou repli.
+///
+/// BOUCHAUD_C26_SMT_MESURE_ET_NON_SUPPOSE
+///
+/// La valeur etait une CONSTANTE : deux, parce que la TRIGKEY porte un Ryzen
+/// 7 5700U. Juste sur cette machine, fausse partout ailleurs -- QEMU lance
+/// `-smp 8` en huit paquets d'un seul fil, et `/proc/cpuinfo` annoncait alors
+/// « cpu cores: 4 » sur une machine qui en a huit.
+///
+/// Trois regles, et chacune evite un nombre absurde :
+///
+///   * sans mesure, UN fil par coeur. C'est le repli prudent : il
+///     sous-estime le partage au pire, il ne rend jamais plus de coeurs que
+///     la machine n'a de processeurs ;
+///   * jamais zero, qui serait une division par zero chez l'appelant ;
+///   * jamais plus que le nombre de processeurs logiques -- « quatre fils par
+///     coeur » sur une machine a deux processeurs decrirait un materiel qui
+///     n'existe pas.
+pub fn fils_retenus(mesure: Option<usize>, logiques: usize) -> usize {
+    let logiques = if logiques == 0 { 1 } else { logiques };
+    match mesure {
+        Some(fils) if fils >= 1 => core::cmp::min(fils, logiques),
+        _ => 1,
+    }
+}

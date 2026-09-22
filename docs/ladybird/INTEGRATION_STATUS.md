@@ -57,7 +57,7 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    couverture des contrats     13/13  (100 %)
+    couverture des contrats     13/14  (92 %)
     integration fonctionnelle   10/26  (38 %)
 
     dont a revalider physiquement   3
@@ -73,8 +73,9 @@ qu'il reste a instrumenter.
 | Roles des binaires livres *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_roles_livres` | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Fautes de page par processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_fautes` | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Fautes de page raccordees au noyau *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_fautes_demande.sh:FAUTES_DEMANDE_OK` | banc tools/ci/run_fautes_demande.sh (marqueur FAUTES_DEMANDE_OK) |
-| Topologie CPU annoncee *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cpu_topologie` | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
+| Topologie CPU annoncee *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cpu_topologie` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Topologie CPU raccordee *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_topologie_cpu.sh:TOPOLOGIE_CPU_OK` | banc tools/ci/run_topologie_cpu.sh (marqueur TOPOLOGIE_CPU_OK) |
+| Ce que voit l'anneau 3 *(infra)* | **ECHEC** | `STATIC_CONTRACT` | `qemu:tools/ci/run_topologie_cpu.sh:verdict=coherent` | tools/ci/run_topologie_cpu.sh ne porte plus verdict=coherent |
 | Fenetre de pile initiale *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_pile_initiale` | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Cout d'un exec *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_cout_exec.sh:COUT_EXEC_OK` | banc tools/ci/run_cout_exec.sh (marqueur COUT_EXEC_OK) |
 | Profil de demarrage *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_demarrage` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |

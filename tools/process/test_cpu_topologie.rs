@@ -21,7 +21,7 @@
 #[path = "../../src/kernel/cpu_topologie.rs"]
 mod cpu_topologie;
 
-use cpu_topologie::{annonces, bloc, plage};
+use cpu_topologie::{annonces, bloc, fils_retenus, plage};
 
 fn texte(count: usize) -> String {
     let mut tampon = [0u8; 32];
@@ -119,4 +119,46 @@ fn le_nombre_annonce_est_borne_et_jamais_nul() {
     // Et jamais plus que ce que le noyau peut ordonnancer.
     assert_eq!(annonces(64, 16), 16);
     assert_eq!(annonces(8, 0), 1);
+}
+
+#[test]
+fn les_fils_par_coeur_sont_mesures_et_non_supposes() {
+    // LE DEFAUT QUE CETTE REGLE CORRIGE.
+    //
+    // La valeur etait une constante -- deux, parce que la TRIGKEY porte un
+    // Ryzen 7 5700U. QEMU lance `-smp 8` en huit paquets d'un seul fil, et
+    // `/proc/cpuinfo` annoncait alors « cpu cores: 4 » sur une machine qui en
+    // a huit. Une bibliotheque qui dimensionne son parallelisme sur
+    // `cpu cores` en aurait utilise la moitie.
+    assert_eq!(fils_retenus(Some(2), 16), 2, "le Ryzen : deux fils par coeur");
+    assert_eq!(fils_retenus(Some(1), 8), 1, "QEMU -smp 8 : un fil par coeur");
+
+    // Sans mesure, le repli PRUDENT : un fil par coeur sous-estime le partage
+    // au pire, il ne rend jamais plus de coeurs que la machine n'a de
+    // processeurs.
+    assert_eq!(fils_retenus(None, 16), 1);
+
+    // Jamais zero : ce serait une division par zero chez l'appelant.
+    assert_eq!(fils_retenus(Some(0), 16), 1);
+
+    // Jamais plus que le nombre de processeurs : « quatre fils par coeur »
+    // sur une machine a deux processeurs decrirait un materiel inexistant.
+    assert_eq!(fils_retenus(Some(4), 2), 2);
+    assert_eq!(fils_retenus(Some(64), 1), 1);
+    assert_eq!(fils_retenus(Some(2), 0), 1, "zero processeur ne divise pas");
+}
+
+#[test]
+fn la_topologie_suit_les_fils_mesures() {
+    // Huit processeurs, un fil par coeur : huit coeurs, et chaque processeur
+    // a son propre `core id`.
+    let sans_smt = bloc(8, fils_retenus(Some(1), 8), 7).expect("le processeur sept existe");
+    assert_eq!(sans_smt.coeurs, 8);
+    assert_eq!(sans_smt.core_id, 7);
+
+    // Seize processeurs, deux fils : huit coeurs, et deux processeurs par
+    // `core id`.
+    let avec_smt = bloc(16, fils_retenus(Some(2), 16), 7).expect("le processeur sept existe");
+    assert_eq!(avec_smt.coeurs, 8);
+    assert_eq!(avec_smt.core_id, 3);
 }

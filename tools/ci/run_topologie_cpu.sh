@@ -40,7 +40,43 @@ fi
 
 SCENARIO="$SORTIE/scenario"
 rm -rf "$SCENARIO"; mkdir -p "$SCENARIO"
-cat > "$SCENARIO/autorun" <<'AUTORUN'
+
+# BOUCHAUD_C26_CE_QUE_VOIT_L_ANNEAU_3
+#
+# Lire les fichiers depuis le shell du noyau ne prouve pas grand-chose : on y
+# relit ce qu'on vient d'ecrire, sans passer par le bac a sable. La question
+# qui compte est ce que voit un programme UTILISATEUR, avec les memes appels
+# que Ladybird et ses bibliotheques -- un fichier juste mais REFUSE donne le
+# meme resultat qu'un fichier faux.
+#
+# `voir-cpu` repond par la mesure, et il lit aussi CPUID : si le materiel et
+# `/proc` divergent, c'est le noyau qui se trompe ; s'ils s'accordent et que
+# Ladybird voit autre chose, c'est le bac a sable.
+CC=""
+for candidat in gcc cc clang; do
+    if command -v "$candidat" >/dev/null 2>&1; then CC=$candidat; break; fi
+done
+SONDE=0
+if [ -n "$CC" ] && "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles \
+        -Wl,-z,noexecstack -o "$SCENARIO/voir-cpu" tools/userland/voir-cpu.c 2>/dev/null; then
+    SONDE=1
+else
+    echo "topologie : sonde anneau 3 non compilable ici, seuls les fichiers sont lus"
+fi
+
+if [ "$SONDE" = 1 ]; then
+    cat > "$SCENARIO/autorun" <<'AUTORUN'
+echo "=== TOPOLOGIE DEBUT ==="
+cat /sys/devices/system/cpu/online
+cat /sys/devices/system/cpu/present
+cat /sys/devices/system/cpu/possible
+tail /proc/cpuinfo
+cat /proc/stat
+exec /voir-cpu
+echo "=== TOPOLOGIE FIN ==="
+AUTORUN
+else
+    cat > "$SCENARIO/autorun" <<'AUTORUN'
 echo "=== TOPOLOGIE DEBUT ==="
 cat /sys/devices/system/cpu/online
 cat /sys/devices/system/cpu/present
@@ -49,6 +85,7 @@ tail /proc/cpuinfo
 cat /proc/stat
 echo "=== TOPOLOGIE FIN ==="
 AUTORUN
+fi
 (cd tools/userland && IMAGE="$SORTIE/scenario.img" ./mkdisk.sh "$SCENARIO") >/dev/null 2>&1 \
     || { echo "mkdisk a echoue" >&2; exit 1; }
 
@@ -98,6 +135,30 @@ for CPUS in 2 8; do
     if ! echo "$BLOC" | grep -q "^cpu$((CPUS - 1)) "; then
         echo "        /proc/stat n'a pas de ligne cpu$((CPUS - 1))" >&2
         echecs=$((echecs + 1))
+    fi
+
+    # CE QUE VOIT L'ANNEAU 3, et c'est la seule mesure qui engage Ladybird.
+    if [ "$SONDE" = 1 ]; then
+        VU=$(echo "$BLOC" | grep '^VOIR_CPU ' | sed 's/^VOIR_CPU //')
+        echo "$VU" | sed 's/^/        anneau3 /'
+        VERDICT=$(echo "$VU" | grep -m1 '^verdict=' | cut -d= -f2)
+        if [ "${VERDICT:-}" != "coherent" ]; then
+            echo "        l'anneau 3 rend verdict=${VERDICT:-absent}" >&2
+            echecs=$((echecs + 1))
+        fi
+        VU_PROCS=$(echo "$VU" | grep -m1 '^cpuinfo_processors=' | cut -d= -f2)
+        if [ "${VU_PROCS:-0}" != "$CPUS" ]; then
+            echo "        l'anneau 3 voit ${VU_PROCS:-?} processeurs pour $CPUS" >&2
+            echecs=$((echecs + 1))
+        fi
+        # SMT MESURE, ET NON SUPPOSE. QEMU lance `-smp N` en N paquets d'un
+        # seul fil : `cpu cores` doit donc valoir N, et non N/2 comme le
+        # rendait la constante « deux fils par coeur ».
+        VU_CORES=$(echo "$VU" | grep -m1 '^cpuinfo_cores=' | cut -d= -f2)
+        if [ "${VU_CORES:-0}" != "$CPUS" ]; then
+            echo "        cpu cores=${VU_CORES:-?} pour $CPUS processeurs sans SMT" >&2
+            echecs=$((echecs + 1))
+        fi
     fi
 done
 
