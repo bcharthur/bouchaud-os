@@ -49,15 +49,42 @@ static LIVRE_FAUTES: SpinLock<crate::kernel::fautes::Journal> =
 /// conclurait que les fautes ne coutent rien.
 static FAUTES_NON_COMPTEES: AtomicU64 = AtomicU64::new(0);
 
+/// Les notes REFUSEES parce que leur faute etait deja notee.
+///
+/// BOUCHAUD_C26_UNE_FAUTE_UN_SEUL_COMPTE
+///
+/// Ce compteur n'est pas une statistique : c'est une ALARME. Sa valeur
+/// normale est zero, et toute valeur non nulle dit qu'un chemin de faute
+/// note deux fois la meme duree -- exactement le defaut qu'avait `Attente`.
+///
+/// Il existe parce que la somme des categories ne peut PAS trahir ce defaut :
+/// le total d'un processus EST la somme de ses categories, par construction
+/// du livre. Une verification qui les compare ne verifie donc rien -- elle a
+/// ete ecrite, et elle a laisse passer la regression reintroduite expres.
+/// Il faut un temoin porte par la faute elle-meme, et c'est `Note`.
+static FAUTES_DOUBLES: AtomicU64 = AtomicU64::new(0);
+
+/// Les fautes PRESENTEES au livre, comptees ou non.
+///
+/// BOUCHAUD_C26_TAUX_DE_PERTE
+///
+/// `FAUTES_NON_COMPTEES` seul ne se lit pas : « douze mille perdues » ne dit
+/// rien sans savoir si c'est douze mille sur treize mille ou sur douze
+/// millions. Le denominateur est ce qui transforme ce compteur en decision --
+/// sous un pour cent, le `try_lock` est le bon compromis ; au-dela, il faut
+/// un livre par processeur.
+static FAUTES_PRESENTEES: AtomicU64 = AtomicU64::new(0);
+
 /// Enregistre une faute dont la categorie est connue.
 ///
 /// `debut_ns` est l'instant ou la faute est entree dans la resolution. La
 /// duree mesuree couvre donc l'attente des verrous et le travail de
 /// chargement : c'est ce que le processus a reellement perdu, et non ce que
 /// le noyau a passe a travailler.
-pub fn note_faute(pid: u32, categorie: crate::kernel::fautes::Categorie, debut_ns: u64) {
+fn note_faute(pid: u32, categorie: crate::kernel::fautes::Categorie, debut_ns: u64) {
     let maintenant = crate::kernel::timer::monotonic_ns();
     let duree = maintenant.saturating_sub(debut_ns);
+    FAUTES_PRESENTEES.fetch_add(1, Ordering::Relaxed);
     match LIVRE_FAUTES.try_lock() {
         Some(mut livre) => livre.note(pid, categorie, duree, maintenant),
         None => {
@@ -76,6 +103,55 @@ pub fn fautes_du_processus(pid: u32) -> Option<crate::kernel::fautes::Compte> {
     Some(total)
 }
 
+/// Le droit de noter UNE faute, et une seule fois.
+///
+/// BOUCHAUD_C26_UNE_FAUTE_UN_SEUL_COMPTE
+///
+/// Le chemin de faute avait l'instant de depart sous la main -- un simple
+/// `u64` -- et pouvait donc le presenter au livre autant de fois qu'il
+/// passait devant un appel. Il l'a fait : `Attente` etait notee a CHAQUE
+/// tour de la boucle d'attente, puis une seconde fois par le chargeur si le
+/// dormeur devenait chargeur. La meme duree, partant du meme instant,
+/// comptee deux fois et parfois plus.
+///
+/// Un `u64` ne peut pas refuser d'etre relu. Ce jeton le peut : il porte
+/// l'instant de depart ET le fait que la note a deja ete posee. Le second
+/// appel ne corrompt plus le livre -- il leve `FAUTES_DOUBLES`.
+///
+/// La regle qu'il rend indiscutable : une faute, une note. `Attente` ne
+/// decrit que les fautes dont le cout ENTIER a ete l'attente. Une faute qui
+/// finit par charger appartient a sa categorie, et son attente est deja
+/// comprise dans sa duree.
+pub struct Note {
+    pid: u32,
+    debut_ns: u64,
+    posee: bool,
+}
+
+impl Note {
+    /// Ouvre le compte d'une faute : l'horloge part ici.
+    pub fn ouvre(pid: u32) -> Note {
+        Note { pid, debut_ns: crate::kernel::timer::monotonic_ns(), posee: false }
+    }
+
+    /// Classe cette faute. Le deuxieme appel est refuse et signale.
+    pub fn pose(&mut self, categorie: crate::kernel::fautes::Categorie) {
+        if self.posee {
+            FAUTES_DOUBLES.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.posee = true;
+        note_faute(self.pid, categorie, self.debut_ns);
+    }
+}
+
+/// Combien de notes ont ete refusees parce que leur faute etait deja notee.
+///
+/// Sa valeur normale est zero. Toute autre valeur est une regression.
+pub fn notes_doubles() -> u64 {
+    FAUTES_DOUBLES.load(Ordering::Relaxed)
+}
+
 /// La categorie qui coute le plus de temps a ce processus, et son compte.
 pub fn faute_dominante(
     pid: u32,
@@ -86,10 +162,24 @@ pub fn faute_dominante(
 /// Combien de fautes n'ont pas pu etre comptees, et combien de processus ont
 /// ete chasses du livre. Les deux disent la meme chose : que les chiffres
 /// rendus sont un plancher, pas un total.
-pub fn fautes_incompletes() -> (u64, u64) {
+pub fn fautes_incompletes() -> (u64, u64, u64) {
+    let presentees = FAUTES_PRESENTEES.load(Ordering::Relaxed);
     let non_comptees = FAUTES_NON_COMPTEES.load(Ordering::Relaxed);
     let chasses = LIVRE_FAUTES.try_lock().map(|livre| livre.chasses).unwrap_or(0);
-    (non_comptees, chasses)
+    (presentees, non_comptees, chasses)
+}
+
+/// La part des fautes perdues, en pour mille des fautes presentees.
+///
+/// EN POUR MILLE, comme la part de temps passe en faute : une perte de trois
+/// pour mille est un bruit acceptable, une perte de trois pour cent ne l'est
+/// pas, et l'arrondi entier du pourcent confondrait les deux.
+pub fn taux_de_perte_pour_mille() -> u64 {
+    let presentees = FAUTES_PRESENTEES.load(Ordering::Relaxed);
+    if presentees == 0 {
+        return 0;
+    }
+    FAUTES_NON_COMPTEES.load(Ordering::Relaxed).saturating_mul(1000) / presentees
 }
 
 /// Ecrit le livre des fautes sur la sortie courante.
@@ -123,7 +213,7 @@ pub fn ecris_les_fautes() {
         (combien, livre.chasses)
     };
 
-    let non_comptees = FAUTES_NON_COMPTEES.load(Ordering::Relaxed);
+    let (presentees, non_comptees, _) = fautes_incompletes();
     if combien == 0 {
         crate::println!("fautes : aucune faute enregistree pour l'instant");
     } else {
@@ -154,6 +244,26 @@ pub fn ecris_les_fautes() {
                 pire_categorie,
                 pire_total / 1_000_000,
             );
+            // LE DETAIL PAR CATEGORIE, et il sert a une verification precise.
+            //
+            // La somme des categories doit faire le total. Si elle le
+            // depasse, une meme faute est comptee deux fois -- c'est
+            // exactement le defaut qu'avait `Attente`, notee a chaque tour de
+            // la boucle d'attente PUIS une seconde fois par le chargeur.
+            for index in 0..CATEGORIES {
+                let compte = details[rang][index];
+                if compte.vide() {
+                    continue;
+                }
+                let Some(categorie) = Categorie::depuis_rang(index) else { continue };
+                crate::println!(
+                    "         {:<9} n={:<6} total={:>5} ms  pire={:>5} us",
+                    categorie.nom(),
+                    compte.nombre,
+                    compte.total_ns / 1_000_000,
+                    compte.pire_ns / 1_000,
+                );
+            }
         }
     }
 
@@ -164,8 +274,13 @@ pub fn ecris_les_fautes() {
     // autre coeur ecrit. Taire ces deux nombres donnerait un total qu'on
     // croirait complet.
     crate::println!(
-        "  suivis={} chasses={} non_comptees={}",
-        combien, chasses, non_comptees
+        "  suivis={} chasses={} presentees={} non_comptees={} perte_pour_mille={} doubles={}",
+        combien,
+        chasses,
+        presentees,
+        non_comptees,
+        taux_de_perte_pour_mille(),
+        notes_doubles(),
     );
 }
 
@@ -341,8 +456,8 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
     // processus perd inclut l'attente des verrous et celle d'un autre
     // processeur qui charge la meme page ; ne mesurer que le chargement
     // rendrait un chiffre flatteur qui n'explique aucune saccade.
-    let debut_faute_ns = crate::kernel::timer::monotonic_ns();
     let pid_fautif = processus.pid;
+    let mut note = Note::ouvre(pid_fautif);
 
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     let (fault_pml4, token) = {
@@ -354,6 +469,10 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         (mm.space.pml4(), token)
     };
     let record = fault_page(fault_pml4, page, &token);
+    // Voir `Note` : le jeton refuse la deuxieme note. Ce drapeau-ci dit
+    // seulement s'il y a EU attente, car seule une faute resolue PENDANT
+    // l'attente appartient a la categorie `Attente`.
+    let mut a_attendu = false;
     loop {
         let mut state = record.state.lock();
         match &*state {
@@ -362,16 +481,20 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
                 drop(state);
                 FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
                 record.waiters.wait(ticket);
-                // Cette faute-ci n'a rien charge : elle a attendu. La compter
-                // comme un chargement attribuerait a ce processus le travail
-                // d'un autre, et masquerait la contention qui est la vraie
-                // mesure interessante quand six processus Ladybird partagent
-                // des pages.
-                note_faute(pid_fautif, crate::kernel::fautes::Categorie::Attente, debut_faute_ns);
+                a_attendu = true;
             }
             FaultPageState::Present => {
                 let resolved = processus.mm.lock().space.translate(page).is_some();
                 if resolved {
+                    if a_attendu {
+                        // Cette faute-ci n'a rien charge : elle a attendu, et
+                        // un autre processeur l'a resolue. La compter comme un
+                        // chargement attribuerait a ce processus le travail
+                        // d'un autre, et masquerait la contention -- qui est la
+                        // vraie mesure interessante quand six processus
+                        // Ladybird partagent des pages.
+                        note.pose(crate::kernel::fautes::Categorie::Attente);
+                    }
                     record_fault_outcome(FaultOutcome::Resolved);
                     return FaultOutcome::Resolved;
                 }
@@ -401,7 +524,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         }
     }
 
-    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token, debut_faute_ns);
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token, &mut note);
     let outcome = {
         let mut state = record.state.lock();
         match *state {
@@ -429,7 +552,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
     // rejouee et comptee alors, la seconde appartient a un processus qui
     // n'existe plus.
     if matches!(outcome, FaultOutcome::Invalid | FaultOutcome::IoError) {
-        note_faute(pid_fautif, crate::kernel::fautes::Categorie::Echec, debut_faute_ns);
+        note.pose(crate::kernel::fautes::Categorie::Echec);
     }
     outcome
 }
@@ -439,7 +562,7 @@ fn peuple_page_loader(
     adresse: u64,
     fault_pml4: u64,
     token: &MappingToken,
-    debut_faute_ns: u64,
+    note: &mut Note,
 ) -> FaultOutcome {
     stall_pf_phase(210, adresse);
     stall_pf_phase(211, adresse);
@@ -478,7 +601,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
-            note_faute(processus.pid, crate::kernel::fautes::Categorie::Zero, debut_faute_ns);
+            note.pose(crate::kernel::fautes::Categorie::Zero);
             // Le fault courant est maintenant autoritaire. L'anticipation est
             // opportuniste et ne change jamais son resultat : elle valide le
             // meme VMA Zero sous Mm et s'arrete au premier doute.
@@ -496,7 +619,7 @@ fn peuple_page_loader(
                 effective.drapeaux,
                 crate::kernel::vmm::ResidentKind::Device,
             ) {
-                note_faute(processus.pid, crate::kernel::fautes::Categorie::Materiel, debut_faute_ns);
+                note.pose(crate::kernel::fautes::Categorie::Materiel);
                 FaultOutcome::Resolved
             } else {
                 FaultOutcome::IoError
@@ -529,7 +652,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
-            note_faute(processus.pid, crate::kernel::fautes::Categorie::Partage, debut_faute_ns);
+            note.pose(crate::kernel::fautes::Categorie::Partage);
             FaultOutcome::Resolved
         }
         PromesseBacking::File { .. } => {
@@ -578,7 +701,7 @@ fn peuple_page_loader(
                     ) {
                         mm.clean_pages.push(CleanPageMapping { virt: page, key });
                         FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
-                        note_faute(processus.pid, crate::kernel::fautes::Categorie::FichierPrive, debut_faute_ns);
+                        note.pose(crate::kernel::fautes::Categorie::FichierPrive);
                         // The current mapping reference now owns `key`. Publish
                         // verified neighbours only after dropping Mm; their cache
                         // acquisition may perform disk I/O and must never extend
@@ -646,7 +769,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
-            note_faute(processus.pid, crate::kernel::fautes::Categorie::FichierPrive, debut_faute_ns);
+            note.pose(crate::kernel::fautes::Categorie::FichierPrive);
             FaultOutcome::Resolved
         }
     }
