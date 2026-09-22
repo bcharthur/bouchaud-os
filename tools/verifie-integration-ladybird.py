@@ -71,11 +71,12 @@ def main():
     if fraiche == ecrit:
         # Le chiffre, pour qu'il apparaisse dans le journal de CI : c'est la
         # seule ligne que quelqu'un lira sans ouvrir le document.
-        resume = ""
-        for ligne in fraiche.splitlines():
-            if "prouve par execution" in ligne:
-                resume = ligne.strip()
-        print("integration ladybird : %s" % (resume or "document a jour"))
+        resume = [
+            ligne.strip()
+            for ligne in fraiche.splitlines()
+            if "couverture des contrats" in ligne or "integration fonctionnelle" in ligne
+        ]
+        print("integration ladybird : %s" % (" | ".join(resume) or "document a jour"))
         return 0
 
     print("integration ladybird : le document n'est plus celui de la mesure.\n")
@@ -86,7 +87,7 @@ def main():
     for ligne in sorted(lignes_ecrites - lignes_fraiches):
         print("  document : %s" % ligne)
     for ligne in fraiche.splitlines():
-        if ligne.strip().startswith(("prouve", "cable", "vu sur", "non mesure", "en echec")):
+        if ligne.strip().startswith(("couverture", "integration", "dont", "dernier run")):
             print("  %s" % ligne.strip())
     print("\n  corriger avec : python3 tools/ladybird/mesure-integration.py --ecris")
     return 1

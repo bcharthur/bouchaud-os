@@ -90,6 +90,13 @@ pub mod fautes;
 // une mauvaise taille de pool de threads, jamais par une erreur.
 #[path = "cpu_topologie.rs"]
 pub mod cpu_topologie;
+// BOUCHAUD_C25_FENETRE_DE_PILE
+//
+// La place que la pile initiale d'un processus demande vraiment. Module PUR :
+// le defaut qu'il evite est MUET -- `AddressSpace::write()` passe par la vue
+// noyau des tables, donc une page absente perd l'ecriture au lieu de fauter.
+#[path = "process/pile_initiale.rs"]
+pub mod pile_initiale;
 #[path = "scheduler/core.rs"]
 pub mod scheduler;
 #[path = "scheduler/echeances.rs"]

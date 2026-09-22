@@ -512,59 +512,6 @@ pub struct StackLayout<'a> {
 ///   ...          auxv (paires cle/valeur), AT_NULL
 ///   ...          chaines pointees ci-dessus
 /// ```
-/// La taille de la fenetre de pile que `build_stack` ECRIT reellement.
-///
-/// BOUCHAUD_C24_LA_PILE_EST_PROMISE_ET_NON_ALLOUEE
-///
-/// Elle est calculee et non devinee. Une constante genereuse serait juste
-/// jusqu'au jour ou un environnement plus gros la depasserait, et ce
-/// jour-la le defaut serait une pile silencieusement tronquee : `space.write()`
-/// ecrit par la vue noyau des tables, donc une page absente ne fauterait pas,
-/// elle perdrait l'ecriture.
-///
-/// Le calcul MAJORE chaque terme. Un octet de trop coute une page projetee de
-/// plus ; un octet de moins coute une chaine d'environnement tronquee que rien
-/// ne signale.
-fn besoin_de_pile(layout: &StackLayout) -> u64 {
-    let mut octets: u64 = 0;
-
-    // Les chaines. Chacune est alignee a huit octets par `push_bytes`, donc
-    // chacune peut couter jusqu'a sept octets de plus que sa longueur.
-    for arg in layout.argv.iter() {
-        octets += arg.len() as u64 + 1 + 7;
-    }
-    for env in layout.envp.iter() {
-        octets += env.len() as u64 + 1 + 7;
-    }
-    // AT_RANDOM, "x86_64\0", et la copie du nom de l'executable.
-    octets += 16 + 7;
-    octets += 7 + 7;
-    if let Some(premier) = layout.argv.first() {
-        octets += premier.len() as u64 + 1 + 7;
-    }
-
-    // Les tableaux de pointeurs : argc, argv + NULL, envp + NULL, puis le
-    // vecteur auxiliaire. Vingt-quatre paires suffisent aujourd'hui ; on en
-    // majore a soixante-quatre, ce qui coute une demi-page et couvre toute
-    // entree ajoutee plus tard sans qu'on ait a se souvenir de ce calcul.
-    octets += 8;
-    octets += (layout.argv.len() as u64 + 1) * 8;
-    octets += (layout.envp.len() as u64 + 1) * 8;
-    octets += 64 * 16;
-
-    // L'alignement final du RSP, et une page de marge. La marge n'est pas de
-    // la prudence vague : `build_stack` aligne le sommet sur seize octets et
-    // peut reculer d'une page entiere lors du dernier arrondi.
-    octets += 64;
-    octets += PAGE_SIZE;
-
-    // Arrondi a la page superieure, plus une page : la fenetre doit contenir
-    // l'adresse la plus basse ecrite, or celle-ci peut tomber juste en dessous
-    // d'une frontiere de page.
-    let pages = (octets + PAGE_SIZE - 1) / PAGE_SIZE + 1;
-    pages * PAGE_SIZE
-}
-
 pub fn build_stack(
     space: &mut AddressSpace,
     promesses: &mut Vec<crate::kernel::vma::Vma>,
@@ -608,8 +555,20 @@ pub fn build_stack(
     // La fenetre est CALCULEE et non devinee. Une constante genereuse serait
     // juste jusqu'au jour ou un environnement plus gros la depasserait -- et
     // ce jour-la, le defaut serait une pile silencieusement tronquee.
-    let besoin = besoin_de_pile(layout);
-    if besoin >= size {
+    // BOUCHAUD_C25_FENETRE_DE_PILE
+    //
+    // Le budget etait DEVINE : « 64 paires auxv » en dur, dans un calcul local.
+    // Il est maintenant derive de la structure reellement ecrite -- les
+    // longueurs des chaines et le nombre d'entrees auxv -- et le depassement
+    // de `AUXV_MAX` est REFUSE plutot que silencieusement deborde.
+    let argv_longueurs: Vec<usize> = layout.argv.iter().map(|a| a.len()).collect();
+    let envp_longueurs: Vec<usize> = layout.envp.iter().map(|e| e.len()).collect();
+    let besoin = crate::kernel::pile_initiale::fenetre(
+        &argv_longueurs,
+        &envp_longueurs,
+        crate::kernel::pile_initiale::AUXV_MAX,
+    );
+    if !crate::kernel::pile_initiale::tient_dans(besoin, size) {
         return Err("arguments et environnement trop volumineux pour la pile");
     }
     if !space.map_alloc_accounted(
@@ -636,11 +595,22 @@ pub fn build_stack(
     );
 
     // 1. Les chaines, en haut de la pile.
+    //
+    // `plus_basse` suit l'adresse la plus basse REELLEMENT ecrite. C'est elle
+    // que la postcondition compare a la fenetre, en fin de fonction : le
+    // calcul du budget est une majoration faite a la main, et le jour ou cette
+    // fonction ecrira quelque chose que `pile_initiale` ne connait pas, c'est
+    // cette comparaison-la qui le dira.
     let mut cursor = top - 16;
-    let push_bytes = |space: &mut AddressSpace, data: &[u8], cursor: &mut u64| -> u64 {
+    let mut plus_basse = top;
+    let push_bytes = |space: &mut AddressSpace, data: &[u8], cursor: &mut u64,
+                      plus_basse: &mut u64| -> u64 {
         *cursor -= data.len() as u64;
         *cursor &= !0x7;
         space.write(*cursor, data);
+        if *cursor < *plus_basse {
+            *plus_basse = *cursor;
+        }
         *cursor
     };
 
@@ -648,25 +618,25 @@ pub fn build_stack(
     for arg in layout.argv.iter() {
         let mut bytes = arg.as_bytes().to_vec();
         bytes.push(0);
-        argv_ptrs.push(push_bytes(space, &bytes, &mut cursor));
+        argv_ptrs.push(push_bytes(space, &bytes, &mut cursor, &mut plus_basse));
     }
     let mut envp_ptrs = Vec::new();
     for env in layout.envp.iter() {
         let mut bytes = env.as_bytes().to_vec();
         bytes.push(0);
-        envp_ptrs.push(push_bytes(space, &bytes, &mut cursor));
+        envp_ptrs.push(push_bytes(space, &bytes, &mut cursor, &mut plus_basse));
     }
 
     // 16 octets aleatoires pour AT_RANDOM : la libc y puise son canari de pile
     // et la graine de son allocateur.
     let mut random = [0u8; 16];
     crate::net::security::tls::rng::fill(&mut random);
-    let random_addr = push_bytes(space, &random, &mut cursor);
-    let platform_addr = push_bytes(space, b"x86_64\0", &mut cursor);
+    let random_addr = push_bytes(space, &random, &mut cursor, &mut plus_basse);
+    let platform_addr = push_bytes(space, b"x86_64\0", &mut cursor, &mut plus_basse);
     let execfn_addr = if let Some(first) = layout.argv.first() {
         let mut bytes = first.as_bytes().to_vec();
         bytes.push(0);
-        push_bytes(space, &bytes, &mut cursor)
+        push_bytes(space, &bytes, &mut cursor, &mut plus_basse)
     } else {
         platform_addr
     };
@@ -697,6 +667,17 @@ pub fn build_stack(
     auxv.push((AT_SYSINFO_EHDR, 0));
     auxv.push((AT_NULL, 0));
 
+    // BOUCHAUD_C25_FENETRE_DE_PILE : la liste auxv ne depasse pas son budget.
+    //
+    // REFUSER, et non tronquer. La fenetre a ete dimensionnee pour `AUXV_MAX`
+    // entrees ; en ecrire davantage deborderait sous elle, et `space.write()`
+    // ne fauterait pas -- il perdrait les octets. Le jour ou la liste grandit,
+    // c'est ici qu'on l'apprend, et non en cherchant pourquoi une libc lit un
+    // AT_RANDOM nul.
+    if auxv.len() as u64 > crate::kernel::pile_initiale::AUXV_MAX {
+        return Err("le vecteur auxiliaire depasse le budget de la fenetre de pile");
+    }
+
     // 3. Le bloc argc/argv/envp/auxv, aligne sur 16 octets a l'entree de _start.
     let words = 1                       // argc
         + argv_ptrs.len() + 1           // argv + NULL
@@ -723,6 +704,30 @@ pub fn build_stack(
     for &(key, value) in auxv.iter() {
         push_word(space, key, &mut offset);
         push_word(space, value, &mut offset);
+    }
+    if rsp < plus_basse {
+        plus_basse = rsp;
+    }
+
+    // LA POSTCONDITION.
+    //
+    // Le budget est une majoration faite a la main dans `pile_initiale`. Cette
+    // comparaison est ce qui la rend sure : si cette fonction ecrit un jour
+    // quelque chose que le calcul ne connait pas, l'exec ECHOUE au lieu de
+    // rendre un processus dont l'environnement est silencieusement tronque.
+    //
+    // Elle arrive apres les ecritures et non avant, et c'est deliberé : la
+    // seule facon de connaitre l'adresse la plus basse reellement ecrite est
+    // de l'avoir ecrite. L'exec echoue alors proprement -- le processus n'a
+    // pas encore commence -- la ou un environnement tronque tournerait.
+    if !crate::kernel::pile_initiale::ecriture_dans_la_fenetre(plus_basse, top, besoin) {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "PILE_FENETRE_DEPASSEE besoin={} ecrit={} manque={}",
+            besoin,
+            top.saturating_sub(plus_basse),
+            top.saturating_sub(plus_basse).saturating_sub(besoin),
+        ));
+        return Err("la pile initiale a debordé de la fenetre projetee");
     }
 
     Ok(rsp)
