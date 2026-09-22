@@ -6178,6 +6178,20 @@ fn fil_blackbox() -> ! {
         // V3, `poll()` ne touche que la memoire : il ne renonce jamais, et la
         // fenetre qu'il consomme est toujours celle qu'il annonce.
         crate::kernel::blackbox::poll();
+        // LE RELEVE DES PROCESSUS, PARCE QUE PERSONNE D'AUTRE NE LE PREND
+        // QUAND IL N'Y A PAS D'ECRAN.
+        //
+        // Il etait declenche par la boucle du gestionnaire de fenetres, qui ne
+        // tourne que si elle peint. Sur une machine sans affichage -- la CI,
+        // une session serie, cette machine-ci pendant un enregistrement --
+        // l'arbre des processus restait donc vide, c'est-a-dire vide
+        // exactement dans le cas ou on le lit.
+        //
+        // Ce fil-ci est le bon porteur : il est deja elu regulierement, et
+        // c'est lui qui alimente l'enregistreur qu'on relira. La fonction
+        // porte sa propre cadence de cinq secondes et ne prend rien si la
+        // fenetre vient de le faire.
+        crate::gui::services::releve_si_du();
         crate::kernel::task::sleep_ticks(20);
     }
 }

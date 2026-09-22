@@ -152,6 +152,71 @@ pub fn instantane(sortie: &mut [registre::Entree]) -> usize {
 }
 
 /// Publie les indicateurs d'un service.
+/// Declare un service en cours de route, sous un parent existant.
+///
+/// BOUCHAUD_C27_ARBRE_PAR_PROCESSUS
+///
+/// L'arbre etait entierement statique : `declare_arbre()` le posait au
+/// demarrage et plus rien ne bougeait. Cela suffit pour le noyau et le
+/// reseau, dont les briques sont connues d'avance -- pas pour un navigateur,
+/// qui cree un WebContent par onglet et un WebWorker a la demande.
+///
+/// Redeclarer le meme identifiant ne le duplique pas : le releve peut donc
+/// appeler cette fonction a chaque passe sans tenir de liste.
+pub fn declare(id: &str, parent: &str, genre: Genre) -> bool {
+    REGISTRE.lock().declare(id, parent, genre)
+}
+
+/// Passe a `Arrete` les instances de processus qui n'ont pas ete revues.
+///
+/// Une instance disparue laisserait sinon sa derniere mesure affichee pour
+/// toujours : quatre-vingt-trois pour cent de CPU figes, sur un PID qui
+/// n'existe plus. Elle n'est pas RETIREE de l'arbre -- un WebContent qui
+/// vient de mourir est exactement ce qu'on cherche apres un plantage --
+/// mais ses mesures sont vidées et son etat le dit.
+///
+/// `vivants` porte les PID vus pendant la passe. Une entree est une instance
+/// si son identifiant commence par `browser.` ET porte un PID.
+pub fn oublie_instances_absentes(vivants: &[u32]) {
+    let maintenant_ns = maintenant();
+    let mut disparues: [registre::Id; 32] = [registre::Id::vide(); 32];
+    let mut combien = 0usize;
+    {
+        let r = REGISTRE.lock();
+        for entree in r.entrees() {
+            if entree.genre != Genre::Processus || entree.etat == Etat::Arrete {
+                continue;
+            }
+            let Some(pid) = entree.kpi.pid else { continue };
+            if !entree.id.texte().starts_with("browser.") {
+                continue;
+            }
+            // Une instance porte son PID en suffixe ; le noeud de ROLE, lui,
+            // porte un `pid` quand il n'a qu'une instance. Les distinguer par
+            // le suffixe evite d'eteindre le role avec ses enfants.
+            if !entree.id.texte().ends_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            if vivants.contains(&pid) || combien == disparues.len() {
+                continue;
+            }
+            disparues[combien] = entree.id;
+            combien += 1;
+        }
+    }
+    for id in &disparues[..combien] {
+        let texte = id.texte();
+        let evenement = {
+            let mut r = REGISTRE.lock();
+            r.kpi(texte, registre::Kpi::default(), maintenant_ns);
+            r.etat(texte, Etat::Arrete, maintenant_ns)
+        };
+        if evenement {
+            emet_evenement(texte, Etat::Arrete, maintenant_ns);
+        }
+    }
+}
+
 pub fn kpi(id: &str, indicateurs: registre::Kpi) {
     let maintenant_ns = maintenant();
     REGISTRE.lock().kpi(id, indicateurs, maintenant_ns);

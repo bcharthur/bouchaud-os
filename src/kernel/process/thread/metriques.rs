@@ -504,6 +504,15 @@ fn publie_bkl_par_appel(fenetre_ns: u64) {
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
 pub struct Mesure {
     pub pid: u32,
+    /// PID du parent.
+    ///
+    /// BOUCHAUD_C27_ARBRE_PAR_PROCESSUS
+    ///
+    /// Sans lui, la fenetre Services ne peut pas dire QUI a lance quoi : elle
+    /// affiche une liste plate de processus qui portent le meme nom. Or la
+    /// question qu'on se pose devant un navigateur lent est « lequel de ces
+    /// WebContent, et sous quel BrowserHost ? ».
+    pub ppid: u32,
     pub nom: String,
     pub resource_group_id: u32,
     pub resource_group_name: String,
@@ -593,6 +602,7 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
                 cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations.charge(), task.context_switches.charge()));
                 mesures.push(Mesure {
                     pid,
+                    ppid: process.parent,
                     nom,
                     resource_group_id: process.resource_group_id,
                     resource_group_name: process.resource_group_name.clone(),

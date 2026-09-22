@@ -243,6 +243,45 @@ pub struct Kpi {
     /// dix fautes a une milliseconde donnent la meme somme, et seule la
     /// seconde produit une saccade visible.
     pub fautes_pire_us: Option<u64>,
+
+    // ------------------------------------------------------------------
+    // BOUCHAUD_C27_ARBRE_PAR_PROCESSUS
+    //
+    // Ce qu'il faut pour repondre a UNE question devant un navigateur lent :
+    // « quel WebContent est en train de tuer les performances ? »
+    //
+    // Un total par role n'y repond pas. Trois WebContent dont un sature un
+    // coeur et deux dorment donnent le meme cumul que trois qui travaillent
+    // au tiers -- et le remede n'est pas le meme.
+    //
+    // TOUT EST `Option`, et c'est la regle qui compte : `None` se lit « non
+    // mesure » et s'affiche « — ». Un zero affirmerait que la valeur a ete
+    // mesuree et vaut zero, ce qui envoie chercher au mauvais endroit.
+    // ------------------------------------------------------------------
+    /// PID du parent : qui a lance ce processus.
+    pub ppid: Option<u32>,
+    /// Groupe de ressources, pour rattacher une instance a son navigateur.
+    pub groupe: Option<u32>,
+    /// Fils du processus, et combien d'entre eux sont EXECUTABLES.
+    ///
+    /// Les deux ensemble, jamais l'un sans l'autre : dix-huit fils dont un
+    /// seul executable est un processus qui attend, dix-huit dont douze le
+    /// sont est un processus qui sature la machine.
+    pub threads: Option<usize>,
+    pub threads_executables: Option<usize>,
+    /// Le coeur ou ce processus a passe le plus de temps, et quelle part.
+    ///
+    /// Un processus a 100 % reparti sur quatre coeurs et un processus qui
+    /// sature un seul coeur se lisent pareil dans un pourcentage global. Le
+    /// second est celui qui fait saccader, parce qu'il ne peut pas etre
+    /// reparti : c'est un seul fil qui travaille.
+    pub cpu_chaud: Option<usize>,
+    pub cpu_chaud_pour_mille: Option<u32>,
+    /// Migrations et changements de contexte sur la fenetre.
+    pub migrations: Option<u64>,
+    pub commutations: Option<u64>,
+    /// La categorie de faute qui coute le plus de TEMPS a ce processus.
+    pub fautes_dominante: Option<&'static str>,
 }
 
 /// Une entree du registre.
@@ -311,6 +350,15 @@ impl Entree {
                 fautes_nombre: None,
                 fautes_total_us: None,
                 fautes_pire_us: None,
+                ppid: None,
+                groupe: None,
+                threads: None,
+                threads_executables: None,
+                cpu_chaud: None,
+                cpu_chaud_pour_mille: None,
+                migrations: None,
+                commutations: None,
+                fautes_dominante: None,
             },
         }
     }
