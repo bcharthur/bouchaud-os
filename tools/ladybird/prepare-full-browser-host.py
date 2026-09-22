@@ -681,6 +681,137 @@ if new_init not in data:
 
 connection_cpp.write_text(data)
 
+# ---------------------------------------------------------------------------
+# 9. Le cycle de vie d'un WebWorker, dit etape par etape.
+# ---------------------------------------------------------------------------
+#
+# BOUCHAUD_C26_CYCLE_DE_VIE_DU_WORKER
+#
+# Le smoke test du run 35742940872 echoue sur un seul point, et il ne dit
+# qu'une chose :
+#
+#     HOST_WORKER FAIL Error: worker timeout
+#     HOST_SMOKE_FAIL canvas=1 worker=0 image=1 frame=1
+#
+# « timeout » ne distingue pas les cinq pannes possibles, et chacune a un
+# remede different : la vue n'est pas trouvee cote hote ; le processus n'est
+# pas lance ; il est lance mais son IPC n'arrive jamais ; il repond mais ne
+# charge pas son script ; il charge son script et le message ne revient pas.
+#
+# Le journal serie ne portait AUCUNE ligne de worker -- ni lancement, ni
+# refus, ni erreur. Un chemin entierement muet ne se diagnostique pas a
+# distance, et chaque aller-retour de CI coute une dizaine de minutes.
+#
+# Les traces ci-dessous sont donc posees aux QUATRE frontieres que la revue
+# demande de distinguer : la requete recue, le processus lance, les services
+# frere raccordes, et le verdict rendu a WebContent.
+
+worker_manager = root / "Libraries/LibWebView/WorkerProcessManager.cpp"
+ensure_include(
+    worker_manager,
+    "#if defined(BOUCHAUD_PORT)\n#    include <LibCore/System.h>\n#endif",
+    "#include <LibWebView/WorkerProcessManager.h>",
+    "LibCore/System WorkerProcessManager",
+)
+
+replace_once(
+    worker_manager,
+    """    auto agent_id = ++m_next_agent_id;
+    auto client = MUST(launch_web_worker_process(request.agent_type, is_private, agent_id));
+
+    auto request_server_handle = MUST(connect_new_request_server_client(is_private));
+    auto image_decoder_handle = MUST(connect_new_image_decoder_client());
+    client->async_connect_to_request_server(move(request_server_handle));
+    client->async_connect_to_image_decoder(move(image_decoder_handle));""",
+    """    auto agent_id = ++m_next_agent_id;
+#if defined(BOUCHAUD_PORT)
+    // Chaque etape porte l'identifiant de l'agent : plusieurs workers peuvent
+    // demarrer en meme temps, et leurs lignes s'entrelaceraient.
+    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=lancement_demande url={}",
+        agent_id, request.url);
+#endif
+    auto client = MUST(launch_web_worker_process(request.agent_type, is_private, agent_id));
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=processus_lance pid={}",
+        agent_id, client->pid());
+#endif
+
+    // LES TROIS RACCORDEMENTS SONT TRACES SEPAREMENT, ET CE N'EST PAS DU ZELE.
+    //
+    // Les deux premiers sont des `MUST` : un echec y termine le processus
+    // HOTE, c'est-a-dire tout le navigateur. Le troisieme est tolere. Savoir
+    // lequel des trois a ete franchi est la difference entre « le worker
+    // n'est pas parti » et « le navigateur est mort en essayant ».
+    auto request_server_handle = MUST(connect_new_request_server_client(is_private));
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=request_server_raccorde", agent_id);
+#endif
+    auto image_decoder_handle = MUST(connect_new_image_decoder_client());
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=image_decoder_raccorde", agent_id);
+#endif
+    client->async_connect_to_request_server(move(request_server_handle));
+    client->async_connect_to_image_decoder(move(image_decoder_handle));""",
+    "traces de lancement du worker",
+)
+
+replace_once(
+    worker_manager,
+    """void WorkerProcessManager::notify_worker_script_load_success(Owner const& owner)
+{""",
+    """void WorkerProcessManager::notify_worker_script_load_success(Owner const& owner)
+{
+#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] WORKER_ETAPE etape=script_charge");
+#endif""",
+    "trace de chargement reussi",
+)
+
+replace_once(
+    worker_manager,
+    """void WorkerProcessManager::notify_worker_script_load_failure(Owner const& owner)
+{""",
+    """void WorkerProcessManager::notify_worker_script_load_failure(Owner const& owner)
+{
+#if defined(BOUCHAUD_PORT)
+    // L'ECHEC DE CHARGEMENT EST LA PANNE LA PLUS PROBABLE POUR UNE URL blob:.
+    //
+    // Un `blob:` appartient a l'agent qui l'a cree ; un WebWorker Ladybird est
+    // un processus separe. Le resoudre demande que le magasin d'URL de blob
+    // traverse la frontiere de processus, ce qui n'a rien a voir avec le
+    // lancement du processus lui-meme.
+    outln("[ladybird-bouchaud] WORKER_ETAPE etape=script_echoue");
+#endif""",
+    "trace de chargement echoue",
+)
+
+
+# Le processus WebWorker lui-meme : sa naissance et son IPC.
+worker_main = root / "Services/WebWorker/main.cpp"
+replace_once(
+    worker_main,
+    """    auto client = TRY(IPC::take_over_accepted_client_from_system_server<WebWorker::ConnectionFromClient>(mach_server_name));""",
+    """#if defined(BOUCHAUD_PORT)
+    outln("[ladybird-bouchaud] WORKER_ETAPE etape=main pid={}", Core::System::getpid());
+#endif
+    auto client = TRY(IPC::take_over_accepted_client_from_system_server<WebWorker::ConnectionFromClient>(mach_server_name));
+#if defined(BOUCHAUD_PORT)
+    // L'IPC EST PRET, et c'est un fait distinct du fait que le processus
+    // tourne. Un WebWorker lance dont le transport n'arrive jamais et un
+    // WebWorker jamais lance se ressemblent vus de la page : les deux donnent
+    // « timeout ».
+    outln("[ladybird-bouchaud] WORKER_ETAPE etape=ipc_pret pid={}", Core::System::getpid());
+#endif""",
+    "traces de naissance du WebWorker",
+)
+ensure_include(
+    worker_main,
+    "#include <LibCore/System.h>",
+    "#include <LibMain/Main.h>",
+    "LibCore/System WebWorker main",
+)
+
+
 print("Browser Host phase 1 applique au worktree:", root)
 print(" - WebView::Application upstream")
 print(" - RequestServer/ImageDecoder/Compositor upstream")
@@ -765,4 +896,44 @@ replace_once(
     return { new_page_id, root_navigable_id, move(handle) };
 }""",
     "M11 host DidRequestNewWebView",
+)
+
+
+# La requete elle-meme, au moment ou l'hote la recoit. C'est la premiere
+# frontiere, et celle qui rend `{0}` silencieusement.
+replace_once(
+    webcontent_client_cpp,
+    """Messages::WebContentClient::StartWorkerAgentResponse WebContentClient::start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        auto agent_id = WorkerProcessManager::the().start_worker_agent(*this, page_id, move(request));
+        return { agent_id };
+    }
+
+    return { 0 };
+}""",
+    """Messages::WebContentClient::StartWorkerAgentResponse WebContentClient::start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        auto agent_id = WorkerProcessManager::the().start_worker_agent(*this, page_id, move(request));
+#if defined(BOUCHAUD_PORT)
+        outln("[ladybird-bouchaud] WORKER_ETAPE etape=agent_rendu page_id={} agent={}",
+            page_id, agent_id);
+#endif
+        return { agent_id };
+    }
+
+#if defined(BOUCHAUD_PORT)
+    // LE REFUS SILENCIEUX.
+    //
+    // Upstream rend `{0}` sans un mot quand la page n'est pas dans le
+    // registre de vues. Cote WebContent, un agent zero se lit « pas de
+    // worker », et la page attend son message jusqu'a expiration du garde --
+    // ce qui donne exactement « worker timeout », sans aucune trace.
+    outln("[ladybird-bouchaud] WORKER_ETAPE etape=refuse_page_inconnue page_id={} vues={}",
+        page_id, m_views.size());
+#endif
+    return { 0 };
+}""",
+    "trace de refus du worker",
 )
