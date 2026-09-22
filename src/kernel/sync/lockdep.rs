@@ -91,9 +91,33 @@ static DETENTION_IRQ_OFF_MAX_NS: AtomicU64 = AtomicU64::new(0);
 /// qui n'a pas ete comptee sur ce CPU, ou un rendu qui appartient a un autre.
 /// Ces deux compteurs le disent, et la panique les publie.
 ///
-/// Si `RENDUS[c] > PRISES[c]` pour la classe fautive, l'appariement traverse
-/// les CPU : la prise a eu lieu ailleurs. Si les deux sont egaux, le
-/// desequilibre est local et vient d'un chemin qui rend deux fois.
+/// LA LECTURE, CORRIGEE PAR LA MESURE.
+///
+/// La premiere version de ce commentaire disait : « `RENDUS[c] > PRISES[c]`
+/// veut dire que l'appariement traverse les CPU ». C'est trop grossier, et
+/// la mesure l'a montre. Le releve d'une panique reelle :
+///
+///     cpu=3  prises_par_cpu=[20, 4777, 10637, 4980, 0, ...]
+///            rendus_par_cpu=[20, 4777, 10637, 4981, 0, ...]
+///
+/// Un seul rendu de trop, sur le seul CPU 3, tous les autres exactement
+/// equilibres. La prise n'avait pas eu lieu ailleurs : elle etait EN COURS
+/// ICI. `acquired` pose la porte, puis compte -- et entre les deux, une IRQ
+/// du meme CPU a rendu la porte et compte son rendu.
+///
+/// La lecture juste est donc :
+///
+///     RENDUS[c] > PRISES[c]   un rendu sans prise ENREGISTREE sur ce CPU.
+///                             Soit la prise appartient a un autre CPU, soit
+///                             -- et c'est le cas observe -- elle est encore
+///                             en vol sur celui-ci, interrompue entre la pose
+///                             de la porte et son comptage.
+///
+///     RENDUS[c] == PRISES[c]  le desequilibre ne vient pas du compte : un
+///                             chemin rend deux fois la meme prise.
+///
+/// L'ecart d'exactement UN, sur un seul CPU, parmi des dizaines de milliers
+/// de transitions equilibrees, est la signature du premier cas.
 static PRISES_PAR_CPU: [[AtomicU64; NB_CLASSES]; smp::MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; NB_CLASSES] }; smp::MAX_CPUS];
 static RENDUS_PAR_CPU: [[AtomicU64; NB_CLASSES]; smp::MAX_CPUS] =
