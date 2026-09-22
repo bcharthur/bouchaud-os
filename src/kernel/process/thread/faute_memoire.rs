@@ -25,6 +25,84 @@ static FAULT_REGISTRY_PEAK: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETRY_YIELDS: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETRY_MAX_CHAIN: AtomicU64 = AtomicU64::new(0);
 
+// BOUCHAUD_C24_FAUTES_PAR_PROCESSUS
+//
+// Le livre de comptes par processus et par categorie. L'arithmetique vit dans
+// `crate::kernel::fautes`, qui ne depend de rien et se verifie sur l'hote
+// (`tools/process/test_fautes.rs`) ; ce qui suit n'est que le raccordement.
+//
+// `try_lock` ET JAMAIS `lock`, et ce n'est pas une precaution de style.
+//
+// Ce chemin-ci est celui de CHAQUE faute de page de la machine. Y poser un
+// verrou bloquant serialiserait seize processeurs sur un compteur de
+// diagnostic : la mesure creerait la lenteur qu'elle pretend observer, et
+// personne ne le verrait puisque l'outil de mesure serait le coupable. Un
+// echantillon perdu sous contention ne coute rien -- a condition de le DIRE,
+// et c'est le role de `FAUTES_NON_COMPTEES`.
+static LIVRE_FAUTES: SpinLock<crate::kernel::fautes::Journal> =
+    SpinLock::new(crate::kernel::fautes::Journal::neuf());
+
+/// Les fautes qu'on a renonce a compter faute d'avoir eu le verrou.
+///
+/// Sans ce compteur, un livre qui perd la moitie de ses echantillons rend des
+/// chiffres deux fois trop petits sans qu'aucune ligne ne le signale -- et on
+/// conclurait que les fautes ne coutent rien.
+static FAUTES_NON_COMPTEES: AtomicU64 = AtomicU64::new(0);
+
+/// Enregistre une faute dont la categorie est connue.
+///
+/// `debut_ns` est l'instant ou la faute est entree dans la resolution. La
+/// duree mesuree couvre donc l'attente des verrous et le travail de
+/// chargement : c'est ce que le processus a reellement perdu, et non ce que
+/// le noyau a passe a travailler.
+pub fn note_faute(pid: u32, categorie: crate::kernel::fautes::Categorie, debut_ns: u64) {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let duree = maintenant.saturating_sub(debut_ns);
+    match LIVRE_FAUTES.try_lock() {
+        Some(mut livre) => livre.note(pid, categorie, duree, maintenant),
+        None => {
+            FAUTES_NON_COMPTEES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Le total d'un processus, toutes categories confondues.
+pub fn fautes_du_processus(pid: u32) -> Option<crate::kernel::fautes::Compte> {
+    let livre = LIVRE_FAUTES.try_lock()?;
+    let total = livre.total(pid);
+    if total.vide() {
+        return None;
+    }
+    Some(total)
+}
+
+/// La categorie qui coute le plus de temps a ce processus, et son compte.
+pub fn faute_dominante(
+    pid: u32,
+) -> Option<(crate::kernel::fautes::Categorie, crate::kernel::fautes::Compte)> {
+    LIVRE_FAUTES.try_lock()?.categorie_dominante(pid)
+}
+
+/// Combien de fautes n'ont pas pu etre comptees, et combien de processus ont
+/// ete chasses du livre. Les deux disent la meme chose : que les chiffres
+/// rendus sont un plancher, pas un total.
+pub fn fautes_incompletes() -> (u64, u64) {
+    let non_comptees = FAUTES_NON_COMPTEES.load(Ordering::Relaxed);
+    let chasses = LIVRE_FAUTES.try_lock().map(|livre| livre.chasses).unwrap_or(0);
+    (non_comptees, chasses)
+}
+
+/// Un processus est mort : ses comptes partent avec lui.
+///
+/// Un PID se reutilise. Laisser les comptes de l'ancien occupant ferait
+/// apparaitre un WebContent neuf avec les fautes de celui qui vient de
+/// planter -- et l'on chercherait le defaut dans le mauvais processus.
+pub fn oublie_les_fautes(pid: u32) {
+    if let Some(mut livre) = LIVRE_FAUTES.try_lock() {
+        livre.oublie(pid);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultOutcome {
     Resolved,
@@ -180,6 +258,15 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         return FaultOutcome::Retired;
     };
 
+    // BOUCHAUD_C24_FAUTES_PAR_PROCESSUS
+    //
+    // L'instant d'ENTREE, et non celui ou le chargement commence. Ce que le
+    // processus perd inclut l'attente des verrous et celle d'un autre
+    // processeur qui charge la meme page ; ne mesurer que le chargement
+    // rendrait un chiffre flatteur qui n'explique aucune saccade.
+    let debut_faute_ns = crate::kernel::timer::monotonic_ns();
+    let pid_fautif = processus.pid;
+
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     let (fault_pml4, token) = {
         let mm = processus.mm.lock();
@@ -198,6 +285,12 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
                 drop(state);
                 FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
                 record.waiters.wait(ticket);
+                // Cette faute-ci n'a rien charge : elle a attendu. La compter
+                // comme un chargement attribuerait a ce processus le travail
+                // d'un autre, et masquerait la contention qui est la vraie
+                // mesure interessante quand six processus Ladybird partagent
+                // des pages.
+                note_faute(pid_fautif, crate::kernel::fautes::Categorie::Attente, debut_faute_ns);
             }
             FaultPageState::Present => {
                 let resolved = processus.mm.lock().space.translate(page).is_some();
@@ -231,7 +324,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         }
     }
 
-    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token);
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token, debut_faute_ns);
     let outcome = {
         let mut state = record.state.lock();
         match *state {
@@ -253,6 +346,14 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
     // fault and made future lookup O(total faults). Publish, wake, then detach.
     forget_fault_page(&record);
     record_fault_outcome(outcome);
+    // Une faute qui ECHOUE a coute du temps elle aussi, et elle en coute
+    // souvent plus qu'une qui reussit : c'est le chemin qui finit par tuer le
+    // processus. `Retry` et `Retired` n'en sont pas -- la premiere sera
+    // rejouee et comptee alors, la seconde appartient a un processus qui
+    // n'existe plus.
+    if matches!(outcome, FaultOutcome::Invalid | FaultOutcome::IoError) {
+        note_faute(pid_fautif, crate::kernel::fautes::Categorie::Echec, debut_faute_ns);
+    }
     outcome
 }
 
@@ -261,6 +362,7 @@ fn peuple_page_loader(
     adresse: u64,
     fault_pml4: u64,
     token: &MappingToken,
+    debut_faute_ns: u64,
 ) -> FaultOutcome {
     stall_pf_phase(210, adresse);
     stall_pf_phase(211, adresse);
@@ -299,6 +401,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
+            note_faute(processus.pid, crate::kernel::fautes::Categorie::Zero, debut_faute_ns);
             // Le fault courant est maintenant autoritaire. L'anticipation est
             // opportuniste et ne change jamais son resultat : elle valide le
             // meme VMA Zero sous Mm et s'arrete au premier doute.
@@ -316,6 +419,7 @@ fn peuple_page_loader(
                 effective.drapeaux,
                 crate::kernel::vmm::ResidentKind::Device,
             ) {
+                note_faute(processus.pid, crate::kernel::fautes::Categorie::Materiel, debut_faute_ns);
                 FaultOutcome::Resolved
             } else {
                 FaultOutcome::IoError
@@ -348,6 +452,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+            note_faute(processus.pid, crate::kernel::fautes::Categorie::Partage, debut_faute_ns);
             FaultOutcome::Resolved
         }
         PromesseBacking::File { .. } => {
@@ -396,6 +501,7 @@ fn peuple_page_loader(
                     ) {
                         mm.clean_pages.push(CleanPageMapping { virt: page, key });
                         FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+                        note_faute(processus.pid, crate::kernel::fautes::Categorie::FichierPrive, debut_faute_ns);
                         // The current mapping reference now owns `key`. Publish
                         // verified neighbours only after dropping Mm; their cache
                         // acquisition may perform disk I/O and must never extend
@@ -463,6 +569,7 @@ fn peuple_page_loader(
                 return FaultOutcome::IoError;
             }
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
+            note_faute(processus.pid, crate::kernel::fautes::Categorie::FichierPrive, debut_faute_ns);
             FaultOutcome::Resolved
         }
     }

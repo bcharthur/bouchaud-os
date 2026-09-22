@@ -23,6 +23,16 @@ pub enum Role {
     Decodeur,
     /// WebWorker.
     Travailleur,
+    /// Compositor : il POSSEDE la surface et le present.
+    ///
+    /// BOUCHAUD_C24_LE_COMPOSITOR_ETAIT_INVISIBLE
+    ///
+    /// Il manquait, et c'etait la pire absence des cinq. `security::profile`
+    /// lui accordait deja le profil PRIVILEGIE de courtier -- le droit de
+    /// lancer des processus -- alors qu'aucun role ne le supervisait : sa
+    /// mort ne declenchait aucune politique, et Services ne montrait pas le
+    /// processus qui fait le rendu.
+    Composition,
 }
 
 impl Role {
@@ -33,6 +43,7 @@ impl Role {
             Self::Reseau => "reseau",
             Self::Decodeur => "decodeur",
             Self::Travailleur => "travailleur",
+            Self::Composition => "composition",
         }
     }
 
@@ -62,7 +73,21 @@ impl Role {
             "RequestServer" => Some(Role::Reseau),
             "ImageDecoder" => Some(Role::Decodeur),
             "WebWorker" => Some(Role::Travailleur),
-            "BrowserHost" | "bo-navigateur" => Some(Role::Courtier),
+            "Compositor" => Some(Role::Composition),
+            // BOUCHAUD_C24_LE_NOM_REELLEMENT_LIVRE
+            //
+            // `BouchaudBrowserHost` est le nom du binaire que
+            // `tools/ci/run_ladybird_browser_host.sh` copie dans l'image, et
+            // il n'etait reconnu ni ici ni par `security::profile` : le test
+            // `ends_with("/BrowserHost")` echoue dessus, parce que le
+            // caractere qui precede n'est pas une barre oblique mais un `d`.
+            //
+            // Les trois noms designent le meme programme : le binaire est
+            // construit sous le nom `BouchaudBrowserHost`, copie a la racine
+            // du RAMFS sous `bo-navigateur`, et `BrowserHost` reste le nom
+            // historique. Les trois se lisent encore dans le depot ; en
+            // oublier un revient a ne pas superviser le navigateur.
+            "BrowserHost" | "BouchaudBrowserHost" | "bo-navigateur" => Some(Role::Courtier),
             _ => None,
         }
     }

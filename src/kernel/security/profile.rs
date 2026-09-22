@@ -40,15 +40,57 @@ fn browser_network_image(image: &str) -> bool {
     image.ends_with("/RequestServer")
 }
 
+/// Le nom de fichier d'un chemin.
+fn nom_de_fichier(image: &str) -> &str {
+    match image.rsplit_once('/') {
+        Some((_, nom)) => nom,
+        None => image,
+    }
+}
+
+/// Les noms de programme qui recoivent le profil de courtier.
+///
+/// BOUCHAUD_C24_LE_NOM_REELLEMENT_LIVRE
+///
+/// `BouchaudBrowserHost` est le nom du binaire construit et copie dans
+/// l'image par `tools/ci/run_ladybird_browser_host.sh`. Il n'etait reconnu
+/// par aucune des deux tables du navigateur : `ends_with("/BrowserHost")`
+/// echoue dessus, parce que le caractere qui precede n'est pas une barre
+/// oblique mais un `d`.
+const NOMS_DE_COURTIER: [&str; 5] = [
+    "bo-navigateur",
+    "BrowserHost",
+    "BouchaudBrowserHost",
+    "WebDriver",
+    "Compositor",
+];
+
+/// Les repertoires depuis lesquels un courtier peut etre lance.
+///
+/// BOUCHAUD_C24_LA_RACINE_DU_RAMFS_EST_UN_EMPLACEMENT_DE_CONFIANCE
+///
+/// La regle exigeait le chemin exact `/usr/bin/bo-navigateur`. Or le bureau
+/// lance `gui::client::CHEMIN_NAVIGATEUR`, qui vaut `/bo-navigateur` : le
+/// binaire est deplie a la RACINE du RAMFS. Le courtier tournait donc avec le
+/// profil par defaut, sans les droits que son role exige.
+///
+/// `supervision_corps.rs` avait deja ete corrige pour cette meme raison, avec
+/// un commentaire qui l'explique ; cette table-ci ne l'avait pas ete. C'est
+/// exactement la divergence que `tools/ladybird/test_roles_livres.rs` refuse
+/// desormais.
+///
+/// L'EMPLACEMENT L'EMPORTE TOUJOURS SUR LE NOM : `untrusted_path` est
+/// consultee avant, et un binaire copie dans `/tmp` ne devient pas courtier
+/// en s'appelant `BouchaudBrowserHost`.
+const REPERTOIRES_DE_COURTIER: [&str; 3] = ["/", "/usr/bin/", "/usr/libexec/ladybird/"];
+
 fn trusted_browser_broker_image(image: &str) -> bool {
-    image == "/usr/bin/bo-navigateur"
-        || image.ends_with("/usr/bin/BrowserHost")
-        || image.ends_with("/usr/bin/WebDriver")
-        || image.ends_with("/usr/bin/Compositor")
-        || (image.starts_with("/usr/libexec/ladybird/")
-            && (image.ends_with("/BrowserHost")
-                || image.ends_with("/WebDriver")
-                || image.ends_with("/Compositor")))
+    let nom = nom_de_fichier(image);
+    if !NOMS_DE_COURTIER.iter().any(|connu| *connu == nom) {
+        return false;
+    }
+    let repertoire = &image[..image.len() - nom.len()];
+    REPERTOIRES_DE_COURTIER.iter().any(|connu| *connu == repertoire)
 }
 
 pub fn classify(image: &str, uid: u32) -> SecurityProfile {

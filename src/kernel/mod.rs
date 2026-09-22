@@ -74,6 +74,14 @@ pub mod power;
 pub mod process;
 #[path = "process/resource.rs"]
 pub mod resource;
+// BOUCHAUD_C24_FAUTES_PAR_PROCESSUS
+//
+// Le livre de comptes des fautes de page. Module PUR : ni `crate::`, ni
+// `unsafe`, ni horloge -- l'instant est un parametre. C'est ce qui permet a
+// `tools/process/test_fautes.rs` de l'exercer sur l'hote, alors que le chemin
+// de faute lui-meme ne s'execute que dans QEMU.
+#[path = "process/fautes.rs"]
+pub mod fautes;
 #[path = "scheduler/core.rs"]
 pub mod scheduler;
 #[path = "scheduler/echeances.rs"]

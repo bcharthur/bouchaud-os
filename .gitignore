@@ -125,6 +125,9 @@ third_party/build-webcontent-*/
 third_party/vcpkg-browser-manifest/
 third_party/vcpkg-browser-installed/
 third_party/ladybird-browser-src/
+# Arbre jetable sur lequel la chaine `prepare-*.py` est REJOUEE pour
+# verifier que chacune de ses ancres tient encore contre le SHA epingle.
+third_party/ladybird-prep-test/
 third_party/build-ladybird-browser-bouchaud/
 third_party/native-browser-bouchaud/
 
