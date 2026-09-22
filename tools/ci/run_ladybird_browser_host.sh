@@ -64,6 +64,19 @@ JALONS=(
   'HOST_WORKER OK pong'
   'HOST_IMAGE OK 1x1'
   'HOST_IFRAME OK'
+  # LES DEUX BANCS QUI VERIFIENT UN COMPORTEMENT, ET NON UNE CAPACITE.
+  #
+  # `HOST_IMAGE OK 1x1` ci-dessus prouve qu'un PNG d'un pixel se decode. Ce
+  # n'est pas « les images fonctionnent » : le defaut observe sur la machine
+  # physique est une image qui arrive en HTTP 200, que l'ImageDecoder traite,
+  # et qui reste BLANCHE. Il faut relire les PIXELS pour le voir, sur les
+  # quatre codecs, et c'est ce que `HOST_IMAGES_OK` affirme.
+  #
+  # `HOST_CANVAS OK` prouve qu'un peu de JS tourne. `HOST_JS_OK` exige que
+  # dix-sept comportements soient reellement EXECUTES -- boucle d'evenements,
+  # micro-taches, minuteries, fetch, DOM, cadres.
+  'HOST_IMAGES_OK codecs=8/8 fond=1 echelle=1'
+  'HOST_JS_OK'
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
 )
 # Ce qui suffit a conclure : le verdict de la page, plus les deux jalons cote

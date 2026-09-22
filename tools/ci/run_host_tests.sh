@@ -110,4 +110,16 @@ if ! PYTHONPATH=tools/ci/reliability \
     echecs=$((echecs + 1))
 fi
 
+# LE BANC D'IMAGES DOIT ETRE JUSTE AVANT DE SERVIR A ACCUSER LE PORT.
+#
+# Il annonce, pour chaque image, les pixels qu'elle contient. Si cette annonce
+# est fausse, le banc rapporte un echec de decodage la ou le defaut est dans
+# ce depot -- et l'on cherche des heures dans Ladybird. Ce controle redecode
+# les images GENEREES avec un decodeur independant de l'encodeur.
+echo
+echo "banc d'images :"
+if ! python3 tools/health/test_images_fixtures.py; then
+    echecs=$((echecs + 1))
+fi
+
 [ "$echecs" -eq 0 ] || exit 1
