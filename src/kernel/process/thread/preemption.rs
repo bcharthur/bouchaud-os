@@ -13,6 +13,38 @@ pub fn preempt_from_irq() {
 
     stall_site_set(40, 0);
     debug_assert_eq!(smp_lock::profondeur_locale(), 0, "preemption ring3 avec BKL");
+
+    // BOUCHAUD_C26_IRQ_NE_VOLE_PAS_LA_PORTE
+    //
+    // CE TEST PASSE AVANT `complete_switch_handoff`, et l'ordre est tout.
+    //
+    // `complete_switch_handoff` REND la porte de transition, sans condition.
+    // Il etait appele en premier, et la porte n'etait examinee qu'ensuite --
+    // si bien qu'une IRQ tombant entre le `commence_` d'une tache et sa
+    // commutation rendait une porte qui ne lui appartenait pas, puis
+    // renoncait poliment a preempter. La tache interrompue poursuivait alors
+    // sa transition SANS porte : la protection dont elle se croyait munie
+    // avait ete retiree par l'IRQ meme qu'elle devait exclure.
+    //
+    // La trace visible de ce vol etait une panique dans le journal des
+    // verrous, environ quatre executions sur dix sous charge multi-fils :
+    //
+    //     LOCKDEP release without acquisition: scheduler-transition
+    //
+    // `lockdep::acquired` lit la profondeur du CPU puis l'ecrit ; quand
+    // l'IRQ s'intercale entre les deux et rend la porte, le rendu voit une
+    // profondeur encore nulle et l'assertion tombe. La panique n'etait donc
+    // pas un defaut de comptage : c'etait le symptome du vol.
+    //
+    // Une passation EN ATTENTE reste a terminer par l'IRQ -- c'est le
+    // comportement historique et il est correct. Seule la porte sans
+    // passation appartient a quelqu'un d'autre.
+    if transition_ouverte_sans_passation(local_cpu()) {
+        stall_site_clear();
+        request_deferred_preempt();
+        return;
+    }
+
     complete_switch_handoff();
     if !commence_transition_ordonnanceur() {
         stall_site_clear();

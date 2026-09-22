@@ -101,6 +101,27 @@ fn commence_transition_ordonnanceur() -> bool {
     true
 }
 
+/// Une transition est-elle OUVERTE sur ce CPU sans passation a terminer ?
+///
+/// BOUCHAUD_C26_IRQ_NE_VOLE_PAS_LA_PORTE
+///
+/// C'est le discriminant dont `preempt_from_irq` a besoin, et il distingue
+/// deux situations que rien ne separait :
+///
+///   porte ouverte, passation EN ATTENTE
+///       un changement de pile a eu lieu et la continuation entrante n'a pas
+///       encore publie la sortante. Une IRQ qui arrive la DOIT terminer la
+///       passation : c'est le comportement historique, et il est correct.
+///
+///   porte ouverte, AUCUNE passation
+///       une tache de ce CPU a ouvert sa transition et n'a pas encore
+///       commute. La porte lui APPARTIENT. Une IRQ qui la rend ici la lui
+///       vole -- et c'est exactement ce que la porte existe pour empecher.
+pub(super) fn transition_ouverte_sans_passation(cpu: usize) -> bool {
+    TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire)
+        && SWITCH_PENDING[cpu].load(Ordering::Acquire) == NO_TASK
+}
+
 /// Rend la porte locale si cette continuation est celle qui termine la
 /// transition. L'appel est idempotent : plusieurs chemins de reprise peuvent
 /// verifier une passation deja acquittee.
