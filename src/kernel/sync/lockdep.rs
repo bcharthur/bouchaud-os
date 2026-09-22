@@ -82,6 +82,31 @@ static DETENTION_MAX_CLASSE: AtomicU32 = AtomicU32::new(0);
 /// ce que le coeur aurait du servir.
 static DETENTION_IRQ_OFF_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Prises et rendus PAR CPU ET PAR CLASSE, pour attribuer un desequilibre.
+///
+/// BOUCHAUD_C26_DESEQUILIBRE_LOCKDEP
+///
+/// « release without acquisition » dit qu'un CPU a rendu un verrou qu'il ne
+/// tenait pas. Il ne dit pas LEQUEL des deux bouts est en cause : une prise
+/// qui n'a pas ete comptee sur ce CPU, ou un rendu qui appartient a un autre.
+/// Ces deux compteurs le disent, et la panique les publie.
+///
+/// Si `RENDUS[c] > PRISES[c]` pour la classe fautive, l'appariement traverse
+/// les CPU : la prise a eu lieu ailleurs. Si les deux sont egaux, le
+/// desequilibre est local et vient d'un chemin qui rend deux fois.
+static PRISES_PAR_CPU: [[AtomicU64; NB_CLASSES]; smp::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; NB_CLASSES] }; smp::MAX_CPUS];
+static RENDUS_PAR_CPU: [[AtomicU64; NB_CLASSES]; smp::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; NB_CLASSES] }; smp::MAX_CPUS];
+
+/// Les rangs vont jusqu'a 100 ; on les indexe par paquets de dix.
+const NB_CLASSES: usize = 11;
+
+#[inline]
+fn casier(class: LockClass) -> usize {
+    ((class.rank() / 10) as usize).min(NB_CLASSES - 1)
+}
+
 static ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 static MAX_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -140,17 +165,49 @@ pub fn acquired(class: LockClass) {
     DEBUT_DETENTION_NS[c][depth].store(maintenant, Ordering::Release);
     IRQ_MASQUEES[c][depth].store(!interruptions_actives() as u32, Ordering::Release);
     DEPTH[c].store(depth + 1, Ordering::Release);
+    PRISES_PAR_CPU[c][casier(class)].fetch_add(1, Ordering::Relaxed);
     ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
     MAX_DEPTH.fetch_max(depth + 1, Ordering::Relaxed);
 }
 
 pub fn released(class: LockClass) {
     let c = cpu();
+    RENDUS_PAR_CPU[c][casier(class)].fetch_add(1, Ordering::Relaxed);
     let depth = DEPTH[c].load(Ordering::Acquire);
     if depth == 0 {
         VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+        // LA PANIQUE DIT MAINTENANT OU CHERCHER.
+        //
+        // Sans ces chiffres, « release without acquisition » laisse le choix
+        // entre deux diagnostics opposes -- une prise perdue ici, ou un rendu
+        // venu d'un autre coeur -- et il faut relancer la machine pour
+        // trancher. Avec eux, la panique elle-meme tranche.
         #[cfg(debug_assertions)]
-        panic!("LOCKDEP release without acquisition: {}", class.name());
+        {
+            let case = casier(class);
+            let mut prises = [0u64; smp::MAX_CPUS];
+            let mut rendus = [0u64; smp::MAX_CPUS];
+            for i in 0..smp::MAX_CPUS {
+                prises[i] = PRISES_PAR_CPU[i][case].load(Ordering::Relaxed);
+                rendus[i] = RENDUS_PAR_CPU[i][case].load(Ordering::Relaxed);
+            }
+            crate::serial_println!(
+                "[LOCKDEP] desequilibre classe={} cpu={} profondeurs={:?}",
+                class.name(),
+                c,
+                core::array::from_fn::<usize, { smp::MAX_CPUS }, _>(|i| DEPTH[i]
+                    .load(Ordering::Relaxed)),
+            );
+            crate::serial_println!("[LOCKDEP] prises_par_cpu={:?}", prises);
+            crate::serial_println!("[LOCKDEP] rendus_par_cpu={:?}", rendus);
+            panic!(
+                "LOCKDEP release without acquisition: {} cpu={} prises={} rendus={}",
+                class.name(),
+                c,
+                prises[c],
+                rendus[c],
+            );
+        }
         #[cfg(not(debug_assertions))]
         return;
     }
