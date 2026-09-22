@@ -805,8 +805,17 @@ fn peins_le_detail(
         ("Reprises", format!("{}", e.reprises)),
         ("Relances", format!("{}", e.redemarrages)),
         (
+            // BOUCHAUD_C24_PLUSIEURS_INSTANCES
+            //
+            // Un seul PID quand il y en a trois designe arbitrairement l'un
+            // d'eux, et l'on va chercher la lenteur dans le mauvais processus.
+            // Au-dela d'une instance, c'est leur NOMBRE qui se lit.
             "PID",
-            kpi.pid.map(|p| format!("{}", p)).unwrap_or_else(|| String::from(TIRET)),
+            match (kpi.pid, kpi.instances) {
+                (_, Some(n)) if n > 1 => format!("{} processus", n),
+                (Some(p), _) => format!("{}", p),
+                _ => String::from(TIRET),
+            },
         ),
         ("CPU", cpu_affiche(&kpi).unwrap_or_else(|| String::from(TIRET))),
         ("RSS", ram_affiche(&kpi).unwrap_or_else(|| String::from(TIRET))),
@@ -821,6 +830,31 @@ fn peins_le_detail(
         (
             "Disque",
             paire(kpi.disque_lu, kpi.disque_ecrit).unwrap_or_else(|| String::from(TIRET)),
+        ),
+        (
+            // BOUCHAUD_C24_FAUTES_PAR_PROCESSUS
+            //
+            // Le nombre ET le temps : mille fautes qui coutent une
+            // milliseconde au total ne sont pas un probleme, dix qui en
+            // coutent quarante en sont un. Le nombre seul ne permet pas de
+            // faire la difference, et c'est le journal physique qui l'a
+            // montre -- il disait « bottleneck=memory-pagefault » sans jamais
+            // dire combien de temps.
+            "Fautes",
+            match (kpi.fautes_nombre, kpi.fautes_total_us) {
+                (Some(n), Some(us)) => format!("{} / {}", n, duree(us)),
+                (Some(n), None) => format!("{}", n),
+                // `TIRET` et non « 0 » : le livre des fautes est borne et il
+                // chasse. Ne rien savoir d'un processus et savoir qu'il ne
+                // faute pas sont deux choses differentes.
+                _ => String::from(TIRET),
+            },
+        ),
+        (
+            "Pire faute",
+            kpi.fautes_pire_us
+                .map(duree)
+                .unwrap_or_else(|| String::from(TIRET)),
         ),
         (
             "Latence",

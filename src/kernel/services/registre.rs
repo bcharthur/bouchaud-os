@@ -223,6 +223,26 @@ pub struct Kpi {
     pub latence_max_us: Option<u64>,
     pub operations: Option<u64>,
     pub pid: Option<u32>,
+    /// Combien de processus portent ce service.
+    ///
+    /// BOUCHAUD_C24_PLUSIEURS_INSTANCES
+    ///
+    /// `pid` n'en designe qu'un. Le portage lance un WebContent PAR ONGLET :
+    /// montrer un seul PID quand il y en a trois n'est pas une simplification,
+    /// c'est un chiffre faux -- on croit regarder le processus qui consomme
+    /// alors qu'on en regarde un de ses freres. Quand ce compte depasse un,
+    /// c'est lui qu'il faut afficher et non le PID.
+    pub instances: Option<u32>,
+    /// Fautes de page du (ou des) processus, sur la fenetre de mesure.
+    pub fautes_nombre: Option<u64>,
+    /// Temps total perdu en fautes de page, en microsecondes.
+    pub fautes_total_us: Option<u64>,
+    /// La PLUS LONGUE faute observee, en microsecondes.
+    ///
+    /// Elle ne se deduit pas du total : mille fautes a dix microsecondes et
+    /// dix fautes a une milliseconde donnent la meme somme, et seule la
+    /// seconde produit une saccade visible.
+    pub fautes_pire_us: Option<u64>,
 }
 
 /// Une entree du registre.
@@ -287,6 +307,10 @@ impl Entree {
                 latence_max_us: None,
                 operations: None,
                 pid: None,
+                instances: None,
+                fautes_nombre: None,
+                fautes_total_us: None,
+                fautes_pire_us: None,
             },
         }
     }

@@ -128,6 +128,8 @@ third_party/ladybird-browser-src/
 # Arbre jetable sur lequel la chaine `prepare-*.py` est REJOUEE pour
 # verifier que chacune de ses ancres tient encore contre le SHA epingle.
 third_party/ladybird-prep-test/
+# Chemin cree par erreur lors d'un ajout de worktree relatif.
+third_party/third_party/
 third_party/build-ladybird-browser-bouchaud/
 third_party/native-browser-bouchaud/
 

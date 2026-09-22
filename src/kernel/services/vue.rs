@@ -92,6 +92,10 @@ impl Ligne {
                 latence_max_us: None,
                 operations: None,
                 pid: None,
+                instances: None,
+                fautes_nombre: None,
+                fautes_total_us: None,
+                fautes_pire_us: None,
             },
             erreurs_effectives: 0,
             raison_effective: Id::vide(),
@@ -407,6 +411,18 @@ fn ajoute(total: &mut Kpi, part: &Kpi) {
     somme(&mut total.rx_octets, part.rx_octets);
     somme(&mut total.tx_octets, part.tx_octets);
     somme(&mut total.operations, part.operations);
+    somme(&mut total.fautes_nombre, part.fautes_nombre);
+    somme(&mut total.fautes_total_us, part.fautes_total_us);
+    if let Some(v) = part.instances {
+        total.instances = Some(total.instances.unwrap_or(0).saturating_add(v));
+    }
+    // Ni la latence ni la pire faute ne s'additionnent : la pire attente reste
+    // la pire attente, et additionner deux saccades de 4 ms n'en fait pas une
+    // de 8 ms -- cela ferait croire a un defaut deux fois plus grave qu'il
+    // n'est, dans le noeud meme qu'on regarde pour decider ou chercher.
+    if let Some(v) = part.fautes_pire_us {
+        total.fautes_pire_us = Some(total.fautes_pire_us.unwrap_or(0).max(v));
+    }
     // La latence ne s'additionne pas : la pire attente reste la pire attente.
     if let Some(v) = part.latence_us {
         total.latence_us = Some(total.latence_us.unwrap_or(0).max(v));

@@ -68,7 +68,25 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
     // alimente maintenant les noeuds `browser.*` du registre, que la fenetre,
     // la ligne de commande et la boite noire lisent toutes les trois.
     for (nom, service) in PROCESSUS_VERS_SERVICE {
-        let mut vu = false;
+        // BOUCHAUD_C24_PLUSIEURS_INSTANCES
+        //
+        // La boucle s'arretait au PREMIER processus trouve (`break`). Le
+        // portage lance un WebContent PAR ONGLET, et des WebWorker a la
+        // demande : sur trois onglets, Services montrait le CPU et la memoire
+        // d'un seul des trois, avec le PID d'un seul des trois. Ce n'est pas
+        // une approximation, c'est un chiffre faux -- on croit regarder le
+        // processus qui consomme alors qu'on en regarde un de ses freres, et
+        // on cherche la lenteur dans le mauvais.
+        //
+        // Les instances sont donc CUMULEES, et leur nombre est publie. Le
+        // `pid` ne reste rempli que s'il n'y en a qu'une : au-dela, un PID
+        // unique designerait arbitrairement l'un d'eux.
+        let mut instances = 0u32;
+        let mut ticks = 0u64;
+        let mut rss = 0u64;
+        let mut vss = 0u64;
+        let mut pid_unique = 0u32;
+        let mut fautes = crate::kernel::fautes::Compte::default();
         for row in rows {
             if root != 0 && row.resource_group_id != root && row.pid != root {
                 continue;
@@ -78,25 +96,41 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
             if !correspond {
                 continue;
             }
-            vu = true;
+            instances += 1;
+            pid_unique = row.pid;
+            ticks = ticks.saturating_add(row.ticks);
+            rss = rss.saturating_add(row.rss_octets);
+            vss = vss.saturating_add(row.vss_octets);
+            if let Some(compte) = crate::kernel::task::fautes_du_processus(row.pid) {
+                fautes.fusionne(&compte);
+            }
+        }
+        if instances > 0 {
             services::kpi(
                 service,
                 Kpi {
                     cpu_pour_mille: Some(if window == 0 {
                         0
                     } else {
-                        (row.ticks.saturating_mul(1000) / window) as u32
+                        (ticks.saturating_mul(1000) / window) as u32
                     }),
-                    rss_octets: Some(row.rss_octets),
-                    vss_octets: Some(row.vss_octets),
-                    pid: Some(row.pid),
+                    rss_octets: Some(rss),
+                    vss_octets: Some(vss),
+                    pid: if instances == 1 { Some(pid_unique) } else { None },
+                    instances: Some(instances),
+                    // `None` et non `Some(0)` quand rien n'a ete mesure : une
+                    // colonne a zero affirme « ce processus ne faute pas »,
+                    // alors que le livre peut simplement ne rien savoir de lui
+                    // -- il est borne et il chasse.
+                    fautes_nombre: if fautes.vide() { None } else { Some(fautes.nombre) },
+                    fautes_total_us: if fautes.vide() { None } else { Some(fautes.total_ns / 1_000) },
+                    fautes_pire_us: if fautes.vide() { None } else { Some(fautes.pire_ns / 1_000) },
                     ..Kpi::default()
                 },
             );
             services::etat(service, Etat::Actif);
-            break;
         }
-        if !vu {
+        if instances == 0 {
             // ARRETE, ET TOUJOURS DANS L'ARBRE. Un `WebWorker` a la demande
             // doit se lire « arrete », pas disparaitre.
             services::kpi(service, Kpi::default());
