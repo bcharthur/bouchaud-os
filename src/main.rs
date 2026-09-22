@@ -313,6 +313,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
     // USB par transferts synchrones, et ce cout n'a rien a faire sur le
     // chemin de l'entree.
+    // BOUCHAUD_V13_SERVICES_SAMPLER_DEDIE : l'observabilite processus est un
+    // service generique, pas un effet de bord du thread USB/blackbox.
+    gui::services::demarre_fil_mesures_processus();
     drivers::xhci_active::demarre_le_fil_blackbox();
 
     // LE BRING-UP EST FINI : LES BUDGETS PASSENT EN MODE RUNTIME.

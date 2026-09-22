@@ -20,16 +20,14 @@ si un appel a rendu « succes ».
                  pixel est connue par CONSTRUCTION. Aucun encodeur tiers ne
                  s'interpose entre l'attente et le fichier.
 
-  AMONT          JPEG et WebP. Ecrire un encodeur JPEG baseline ou VP8L a la
-                 main pour un banc, c'est ajouter une source de bogues qui
-                 accuserait le port a la place de l'encodeur. Les fichiers
-                 viennent donc de `Tests/LibGfx/test-inputs/` du Ladybird
-                 EPINGLE, et les pixels attendus sont ceux que le test amont
-                 `TestImageDecoder.cpp` affirme lui-meme.
+  FIXTURES       JPEG et WebP. Les octets sont versionnes avec Bouchaud OS
+  AUTONOMES      sous `tools/health/fixtures/browser-images/`, avec SHA-256.
+                 Le banc Fast/Reliability ne depend donc plus d'un checkout
+                 complet de Ladybird. Les quatre codecs restent testes PAR
+                 LADYBIRD : la page charge les fichiers, dessine dans canvas
+                 et relit des pixels connus.
 
-                 C'est la reference la plus forte disponible : si ce decodeur
-                 rend autre chose sous Bouchaud que ce qu'amont exige, la
-                 difference vient du port.
+                 BOUCHAUD_V13_FIXTURES_AUTONOMES
 
 ## Ce que la presence des codecs prouve deja
 
@@ -44,7 +42,14 @@ import struct
 import zlib
 
 RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AMONT = os.path.join(RACINE, "third_party", "ladybird", "Tests", "LibGfx", "test-inputs")
+FIXTURES = os.path.join(RACINE, "tools", "health", "fixtures", "browser-images")
+
+FIXTURE_SHA256 = {
+    "jpeg-rgb-checker.jpg": "aa908d27599e54a73b8ee82866bcd2c2d9ef09f6862b5b11eaf60030e6064e84",
+    "jpeg-rgb-gradient.jpg": "2d0f67f22353e7917075d870fa2d8be5953d2231b8fa8784fc64f99ecfdc85e0",
+    "webp-lossless.webp": "5f8bd924c769c888fe0c98fe302633b871f73a5263fc6970c1ce3848aef7531a",
+    "webp-lossy.webp": "bcb33bbe05b1141511427eaed5f46b552a00b0860905aecebdd08a038f0cf9ed",
+}
 
 
 # --------------------------------------------------------------------------
@@ -154,8 +159,9 @@ def gif_palette(largeur: int, hauteur: int, palette, index, boucles=None, delais
     return bytes(sortie)
 
 
-def _amont(chemin: str) -> bytes:
-    with open(os.path.join(AMONT, chemin), "rb") as f:
+def _fixture(nom: str) -> bytes:
+    """Lit une fixture versionnee avec le banc, jamais un checkout externe."""
+    with open(os.path.join(FIXTURES, nom), "rb") as f:
         return f.read()
 
 
@@ -209,34 +215,36 @@ CATALOGUE = [
         "pixels": [(8, 8, 255, 0, 0)],
     },
     {
-        # JPEG : fichier AMONT, pixels affirmes par `TestImageDecoder.cpp`
-        # (test_jpeg_cmyk, sans marqueur Adobe). 577 octets, 10x10.
-        "id": 5, "nom": "jpeg-cmyk", "fichier": "jpeg-cmyk.jpg", "mime": "image/jpeg",
-        "source": "amont:jpg/cmyk-no-adobe-marker.jpg", "largeur": 10, "hauteur": 10,
-        "tolerance": 4, "octets": _amont("jpg/cmyk-no-adobe-marker.jpg"),
-        "pixels": [(8, 1, 44, 184, 97), (1, 8, 184, 44, 97), (9, 9, 24, 24, 194)],
+        # JPEG baseline 4:4:4 autonome : quatre quadrants non uniformes.
+        "id": 5, "nom": "jpeg-rgb-checker", "fichier": "jpeg-rgb-checker.jpg", "mime": "image/jpeg",
+        "source": "fixture:jpeg-rgb-checker.jpg", "largeur": 32, "hauteur": 32,
+        "tolerance": 10, "octets": _fixture("jpeg-rgb-checker.jpg"),
+        "pixels": [(4, 4, 235, 35, 45), (24, 4, 27, 93, 233),
+                   (4, 24, 35, 210, 81), (24, 24, 243, 202, 32)],
     },
     {
-        # JPEG baseline ordinaire, un seul balayage. Amont n'affirme que le
-        # decodage ; le banc n'affirme donc que les DIMENSIONS, et le dit.
-        "id": 6, "nom": "jpeg-rgb24", "fichier": "jpeg-rgb24.jpg", "mime": "image/jpeg",
-        "source": "amont:jpg/rgb24.jpg", "largeur": None, "hauteur": None,
-        "tolerance": 0, "octets": _amont("jpg/rgb24.jpg"), "pixels": [],
+        # Deuxieme JPEG autonome : degrade RGB, pixels verifies eux aussi.
+        "id": 6, "nom": "jpeg-rgb-gradient", "fichier": "jpeg-rgb-gradient.jpg", "mime": "image/jpeg",
+        "source": "fixture:jpeg-rgb-gradient.jpg", "largeur": 32, "hauteur": 32,
+        "tolerance": 10, "octets": _fixture("jpeg-rgb-gradient.jpg"),
+        "pixels": [(4, 4, 32, 32, 32), (24, 4, 193, 33, 133),
+                   (4, 24, 31, 191, 91), (24, 24, 192, 192, 192)],
     },
     {
-        # WebP SANS PERTE (VP8L). Pixel affirme par `test_webp_simple_lossless`.
+        # WebP SANS PERTE (VP8L), fixture autonome.
         "id": 7, "nom": "webp-lossless", "fichier": "webp-lossless.webp", "mime": "image/webp",
-        "source": "amont:webp/simple-vp8l.webp", "largeur": 386, "hauteur": 395,
-        "tolerance": 0, "octets": _amont("webp/simple-vp8l.webp"),
-        "pixels": [(289, 332, 0xF2, 0xEE, 0xD3)],
+        "source": "fixture:webp-lossless.webp", "largeur": 32, "hauteur": 32,
+        "tolerance": 0, "octets": _fixture("webp-lossless.webp"),
+        "pixels": [(4, 4, 236, 36, 46), (24, 4, 28, 93, 233),
+                   (4, 24, 35, 210, 80), (24, 24, 242, 202, 32)],
     },
     {
-        # WebP AVEC PERTE (VP8). Chemin de decodage entierement different du
-        # precedent : les separer est ce qui permet de dire lequel est casse.
+        # WebP AVEC PERTE (VP8), fixture autonome.
         "id": 8, "nom": "webp-lossy", "fichier": "webp-lossy.webp", "mime": "image/webp",
-        "source": "amont:webp/4.webp", "largeur": 1024, "hauteur": 772,
-        "tolerance": 4, "octets": _amont("webp/4.webp"),
-        "pixels": [(780, 570, 0x72, 0xC8, 0xF6)],
+        "source": "fixture:webp-lossy.webp", "largeur": 32, "hauteur": 32,
+        "tolerance": 12, "octets": _fixture("webp-lossy.webp"),
+        "pixels": [(4, 4, 240, 40, 51), (24, 4, 27, 94, 233),
+                   (4, 24, 36, 210, 81), (24, 24, 240, 199, 29)],
     },
 ]
 

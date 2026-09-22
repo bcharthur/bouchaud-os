@@ -292,6 +292,42 @@ pub fn releve_si_du() {
     observe(&mesures, total);
 }
 
+// BOUCHAUD_V13_SERVICES_SAMPLER_DEDIE
+// Le releve des processus n'appartient ni au rendu ni au pilote USB.
+// Ce petit fil generique le rend disponible en GUI, en headless et dans la
+// blackbox, sans faire dependre l'observabilite du lifecycle xHCI.
+static FIL_MESURES_PROCESSUS: AtomicU8 = AtomicU8::new(0);
+
+fn fil_mesures_processus() -> ! {
+    loop {
+        releve_si_du();
+        // La fonction elle-meme borne la vraie mesure a une fois / 5 s.
+        // 100 ms ne sert qu'a ne pas retarder le premier echantillon.
+        crate::kernel::task::sleep_ticks(100);
+    }
+}
+
+pub fn demarre_fil_mesures_processus() -> bool {
+    if FIL_MESURES_PROCESSUS
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return true;
+    }
+    if crate::kernel::task::spawn_noyau_priorite(
+        fil_mesures_processus,
+        "services-metrics",
+        crate::kernel::task::Priorite::Normale,
+    ) {
+        crate::serial_println!("BOUCHAUD_SERVICES_METRICS_FIL_LANCE periode_ms=5000");
+        true
+    } else {
+        FIL_MESURES_PROCESSUS.store(0, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_SERVICES_METRICS_FIL_REFUSE");
+        false
+    }
+}
+
 pub fn usage() -> (u64, u64, u64) {
     let sample = SAMPLE_MS.load(Ordering::Acquire);
     (CPU.load(Ordering::Relaxed), RSS.load(Ordering::Relaxed), sample)

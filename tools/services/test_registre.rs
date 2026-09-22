@@ -87,6 +87,24 @@ fn un_registre_plein_refuse_et_le_compte() {
 }
 
 #[test]
+fn les_pid_navigateur_morts_se_recyclent_quand_le_registre_est_plein() {
+    // BOUCHAUD_V13_RECYCLAGE_PID : une longue session ne doit pas tuer
+    // Services apres 128 onglets/workers historiques.
+    let mut r = Registre::neuf();
+    r.declare("browser.web_content", "browser", Genre::Processus);
+    for i in 1..SERVICES_MAX {
+        let id = format!("browser.web_content.{i}");
+        assert!(r.declare(&id, "browser.web_content", Genre::Processus));
+        r.etat(&id, Etat::Arrete, i as u64);
+    }
+    assert_eq!(r.entrees().len(), SERVICES_MAX);
+    assert!(r.declare("browser.web_content.999999", "browser.web_content", Genre::Processus));
+    assert!(r.lis("browser.web_content.999999").is_some());
+    assert_eq!(r.compteurs().refuses, 0);
+    assert_eq!(r.entrees().len(), SERVICES_MAX);
+}
+
+#[test]
 fn un_identifiant_trop_long_est_tronque_sans_deborder() {
     let mut r = Registre::neuf();
     let long = "net.un.identifiant.vraiment.beaucoup.trop.long";

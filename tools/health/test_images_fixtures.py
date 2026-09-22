@@ -15,6 +15,7 @@ et n'ont pas a etre redecodes ici.
     python3 tools/health/test_images_fixtures.py
 """
 import os
+import hashlib
 import sys
 import zlib
 
@@ -173,11 +174,22 @@ def controle():
     for entree in fx.CATALOGUE:
         nom, source = entree["nom"], entree["source"]
 
-        if source.startswith("amont:"):
-            chemin = os.path.join(fx.AMONT, source.split(":", 1)[1])
-            verifie(os.path.exists(chemin), f"{nom} : fichier amont absent -- {chemin}")
+        # BOUCHAUD_V13_FIXTURES_AUTONOMES : Fast/Reliability ne doivent
+        # jamais dependre d'un checkout Ladybird absent de leur job.
+        if source.startswith("fixture:"):
+            fichier = source.split(":", 1)[1]
+            chemin = os.path.join(fx.FIXTURES, fichier)
+            verifie(os.path.exists(chemin), f"{nom} : fixture absente -- {chemin}")
             octets = entree["octets"]
-            verifie(len(octets) > 0, f"{nom} : fichier amont vide")
+            verifie(len(octets) > 0, f"{nom} : fixture vide")
+            if os.path.exists(chemin):
+                disque = open(chemin, "rb").read()
+                verifie(octets == disque, f"{nom} : octets catalogue != fixture")
+                attendu = fx.FIXTURE_SHA256.get(fichier)
+                verifie(attendu is not None, f"{nom} : SHA-256 non declare")
+                if attendu is not None:
+                    verifie(hashlib.sha256(disque).hexdigest() == attendu,
+                            f"{nom} : SHA-256 fixture inattendu")
             if entree["mime"] == "image/jpeg":
                 verifie(octets[:2] == b"\xff\xd8", f"{nom} : ce n'est pas un JPEG")
             elif entree["mime"] == "image/webp":

@@ -812,6 +812,44 @@ ensure_include(
 )
 
 
+# BOUCHAUD_V13_PROC_STAT_REOPEN
+#
+# `ProcessStatisticsLinux.cpp` conserve normalement `/proc/stat` ouvert dans un
+# `NeverDestroyed<Core::File>` et fait `seek(0)` entre deux mesures. Sur Linux,
+# procfs regenere le contenu a chaque lecture. Sur Bouchaud, nos pseudo-fichiers
+# `/proc` sont des instantanes fabriques a `open(2)` (meme contrat que
+# `/proc/self/maps`) : seek(0) relirait donc une photo ancienne pour toujours.
+# Rouvrir le fichier a chaque echantillon rend le contrat equivalent a procfs
+# sans ajouter un deuxieme type de descripteur dynamique au noyau.
+process_stats_linux = root / "Libraries/LibCore/Platform/ProcessStatisticsLinux.cpp"
+replace_once(
+    process_stats_linux,
+    '''    static NeverDestroyed<NonnullOwnPtr<Core::File>> proc_stat { TRY(Core::File::open("/proc/stat"sv, Core::File::OpenMode::Read)) };
+    TRY((*proc_stat)->seek(0, SeekMode::SetPosition));
+
+    char buf[1024] = {};
+    auto buffer = Bytes { buf, sizeof(buf) };
+    auto line = TRY((*proc_stat)->read_some(buffer));''',
+    '''#if defined(BOUCHAUD_PORT)
+    // BOUCHAUD_V13_PROC_STAT_REOPEN
+    // Bouchaud /proc est snapshot-per-open : un seek(0) ne regenere pas le
+    // contenu. Reouvrir est donc l'equivalent exact de la lecture procfs Linux.
+    auto proc_stat = TRY(Core::File::open("/proc/stat"sv, Core::File::OpenMode::Read));
+#else
+    static NeverDestroyed<NonnullOwnPtr<Core::File>> proc_stat { TRY(Core::File::open("/proc/stat"sv, Core::File::OpenMode::Read)) };
+    TRY((*proc_stat)->seek(0, SeekMode::SetPosition));
+#endif
+
+    char buf[1024] = {};
+    auto buffer = Bytes { buf, sizeof(buf) };
+#if defined(BOUCHAUD_PORT)
+    auto line = TRY(proc_stat->read_some(buffer));
+#else
+    auto line = TRY((*proc_stat)->read_some(buffer));
+#endif''',
+    "Bouchaud /proc/stat snapshot reopen",
+)
+
 print("Browser Host phase 1 applique au worktree:", root)
 print(" - WebView::Application upstream")
 print(" - RequestServer/ImageDecoder/Compositor upstream")
