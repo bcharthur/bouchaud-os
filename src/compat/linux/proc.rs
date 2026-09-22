@@ -206,7 +206,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         uid,
         gid,
     };
-    let stack = match elf::build_stack(&mut space, &layout) {
+    let stack = match elf::build_stack(&mut space, &mut new_promises, &layout) {
         Ok(stack) => stack,
         Err(_) => return -errno::ENOMEM,
     };

@@ -114,6 +114,9 @@ ITEMS = [
     Item("GPU", "aucune", "--force-cpu-painting"),
     Item("Temps de demarrage decompose", "hote:test_demarrage",
          "clic -> courtier -> reseau -> decodeur -> composition -> rendu -> trame"),
+    Item("Cout d'un exec",
+         "marqueur:tools/ci/run_cout_exec.sh:COUT_EXEC_OK",
+         "banc QEMU : 54 ms -> 0,9 ms, budget 10 ms"),
     Item("Latence interactive sous charge", "aucune", "non mesuree"),
 ]
 

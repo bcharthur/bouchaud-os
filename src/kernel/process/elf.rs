@@ -512,18 +512,128 @@ pub struct StackLayout<'a> {
 ///   ...          auxv (paires cle/valeur), AT_NULL
 ///   ...          chaines pointees ci-dessus
 /// ```
-pub fn build_stack(space: &mut AddressSpace, layout: &StackLayout) -> Result<u64, &'static str> {
+/// La taille de la fenetre de pile que `build_stack` ECRIT reellement.
+///
+/// BOUCHAUD_C24_LA_PILE_EST_PROMISE_ET_NON_ALLOUEE
+///
+/// Elle est calculee et non devinee. Une constante genereuse serait juste
+/// jusqu'au jour ou un environnement plus gros la depasserait, et ce
+/// jour-la le defaut serait une pile silencieusement tronquee : `space.write()`
+/// ecrit par la vue noyau des tables, donc une page absente ne fauterait pas,
+/// elle perdrait l'ecriture.
+///
+/// Le calcul MAJORE chaque terme. Un octet de trop coute une page projetee de
+/// plus ; un octet de moins coute une chaine d'environnement tronquee que rien
+/// ne signale.
+fn besoin_de_pile(layout: &StackLayout) -> u64 {
+    let mut octets: u64 = 0;
+
+    // Les chaines. Chacune est alignee a huit octets par `push_bytes`, donc
+    // chacune peut couter jusqu'a sept octets de plus que sa longueur.
+    for arg in layout.argv.iter() {
+        octets += arg.len() as u64 + 1 + 7;
+    }
+    for env in layout.envp.iter() {
+        octets += env.len() as u64 + 1 + 7;
+    }
+    // AT_RANDOM, "x86_64\0", et la copie du nom de l'executable.
+    octets += 16 + 7;
+    octets += 7 + 7;
+    if let Some(premier) = layout.argv.first() {
+        octets += premier.len() as u64 + 1 + 7;
+    }
+
+    // Les tableaux de pointeurs : argc, argv + NULL, envp + NULL, puis le
+    // vecteur auxiliaire. Vingt-quatre paires suffisent aujourd'hui ; on en
+    // majore a soixante-quatre, ce qui coute une demi-page et couvre toute
+    // entree ajoutee plus tard sans qu'on ait a se souvenir de ce calcul.
+    octets += 8;
+    octets += (layout.argv.len() as u64 + 1) * 8;
+    octets += (layout.envp.len() as u64 + 1) * 8;
+    octets += 64 * 16;
+
+    // L'alignement final du RSP, et une page de marge. La marge n'est pas de
+    // la prudence vague : `build_stack` aligne le sommet sur seize octets et
+    // peut reculer d'une page entiere lors du dernier arrondi.
+    octets += 64;
+    octets += PAGE_SIZE;
+
+    // Arrondi a la page superieure, plus une page : la fenetre doit contenir
+    // l'adresse la plus basse ecrite, or celle-ci peut tomber juste en dessous
+    // d'une frontiere de page.
+    let pages = (octets + PAGE_SIZE - 1) / PAGE_SIZE + 1;
+    pages * PAGE_SIZE
+}
+
+pub fn build_stack(
+    space: &mut AddressSpace,
+    promesses: &mut Vec<crate::kernel::vma::Vma>,
+    layout: &StackLayout,
+) -> Result<u64, &'static str> {
     let top = vmm::user_stack_top();
     let size = vmm::USER_STACK_SIZE;
     let flags = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_WRITE | vmm::PTE_NO_EXEC;
+    // BOUCHAUD_C24_LA_PILE_EST_PROMISE_ET_NON_ALLOUEE
+    //
+    // # Ce qui se passait, mesure
+    //
+    // Cette fonction allouait, projetait et mettait a zero les HUIT
+    // MEBIOCTETS de la pile utilisateur, d'avance, a chaque `exec` :
+    //
+    //     SONDE_PILE alloc_us=52878 taille_kio=8192
+    //     PERF_EXEC_PRET image=/toucher pid=9 duree_us=71769
+    //                    espace_us=114 image_us=2852 pile_us=68801
+    //
+    // Cinquante-trois millisecondes sur les cinquante-quatre que coutait
+    // l'exec d'un binaire de treize kibioctets. Le portage lance six
+    // processus par navigateur : plus de trois cents millisecondes de
+    // demarrage, entierement passees a mettre a zero de la memoire que
+    // presque aucun programme ne touchera.
+    //
+    // # Pourquoi c'etait invisible
+    //
+    // Deux mille quarante-huit pages allouees d'un coup ne produisent ni
+    // erreur, ni faute, ni ligne de journal. La seule trace etait un
+    // demarrage lent -- que l'on attribuait au navigateur.
+    //
+    // # Ce qui se passe maintenant
+    //
+    // La pile est une PROMESSE `Zero`, comme tout `mmap` anonyme de ce noyau,
+    // et le peuplement a la demande la sert page par page. Seule la fenetre
+    // que CETTE fonction ecrit est projetee d'avance, parce que
+    // `space.write()` ecrit par la vue noyau des tables et ne declenche donc
+    // aucune faute : une page qu'elle toucherait sans qu'elle soit presente
+    // serait une ecriture perdue, pas une faute reparable.
+    //
+    // La fenetre est CALCULEE et non devinee. Une constante genereuse serait
+    // juste jusqu'au jour ou un environnement plus gros la depasserait -- et
+    // ce jour-la, le defaut serait une pile silencieusement tronquee.
+    let besoin = besoin_de_pile(layout);
+    if besoin >= size {
+        return Err("arguments et environnement trop volumineux pour la pile");
+    }
     if !space.map_alloc_accounted(
-        top - size,
-        size,
+        top - besoin,
+        besoin,
         flags,
         vmm::ResidentKind::Anonymous,
     ) {
         return Err("memoire physique insuffisante pour la pile utilisateur");
     }
+    // La promesse couvre la pile ENTIERE, fenetre comprise. Les pages deja
+    // projetees ne fauteront pas ; celles d'en dessous le feront, et
+    // `mapping_token` doit alors trouver une region -- sans quoi la premiere
+    // faute de pile tuerait le processus.
+    crate::kernel::vma::remplace(
+        promesses,
+        crate::kernel::vma::Vma {
+            id: crate::kernel::vma::nouvelle_identite(),
+            debut: top - size,
+            fin: top,
+            drapeaux: flags,
+            backing: crate::kernel::vma::Backing::Zero,
+        },
+    );
 
     // 1. Les chaines, en haut de la pile.
     let mut cursor = top - 16;

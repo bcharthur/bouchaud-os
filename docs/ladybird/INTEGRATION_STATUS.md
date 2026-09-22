@@ -34,8 +34,8 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    prouve par execution  15/35 elements  (42 %)
-    cable, non prouve     6 ligne(s)
+    prouve par execution  15/36 elements  (41 %)
+    cable, non prouve     7 ligne(s)
     vu sur la machine     4 ligne(s), non rejouees
     non mesure            10 ligne(s)
     en echec              0 ligne(s)
@@ -76,6 +76,7 @@ qu'il reste a instrumenter.
 | Audio | **NON MESURE** | `—` | aucun backend |
 | GPU | **NON MESURE** | `—` | --force-cpu-painting |
 | Temps de demarrage decompose | **OK** | `hote:test_demarrage` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
+| Cout d'un exec | **CABLE** | `marqueur:tools/ci/run_cout_exec.sh:COUT_EXEC_OK` | COUT_EXEC_OK present dans tools/ci/run_cout_exec.sh |
 | Latence interactive sous charge | **NON MESURE** | `—` | non mesuree |
 
 <!-- MESURE:FIN -->

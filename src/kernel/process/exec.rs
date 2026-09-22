@@ -305,10 +305,20 @@ fn construit_tache(
     String,
 > {
     crate::kernel::perf::exec_start(name);
+    // BOUCHAUD_C24_COUT_DE_L_EXEC
+    //
+    // `PERF_EXEC_START` datait le DEBUT de l'exec et rien d'autre. Or le
+    // chargement d'une image est l'une des etapes que le profil de demarrage
+    // designe, et on ne pouvait pas savoir ce qu'elle coute : entre « exec a
+    // pris 4 ms » et « exec a pris 900 ms », le remede n'est pas le meme, et
+    // les binaires Ladybird sont des static-pie de plusieurs dizaines de
+    // mebioctets.
+    let debut_exec_ns = crate::kernel::timer::monotonic_ns();
     let process = match task::new_process(name, cwd) {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
     };
+    let apres_espace_ns = crate::kernel::timer::monotonic_ns();
 
     // Les descripteurs herites sont poses avant la construction de la pile :
     // l'environnement doit pouvoir citer leurs numeros.
@@ -336,7 +346,7 @@ fn construit_tache(
     };
     let envp = &envp[..];
 
-    let (entry, stack) = {
+    let (entry, stack, apres_espace_ns, apres_image_ns) = {
         let metadata = process.metadata.lock();
         let uid = metadata.uid;
         let gid = metadata.gid;
@@ -353,6 +363,7 @@ fn construit_tache(
             }
         }
         .map_err(|message| alloc::format!("{} : {}", name, message))?;
+        let apres_image_ns = crate::kernel::timer::monotonic_ns();
 
         // Binaire dynamique : on charge aussi l'editeur de liens et on lui donne
         // la main. Le programme est deja en memoire, ld.so le trouvera via
@@ -389,9 +400,13 @@ fn construit_tache(
             uid,
             gid,
         };
-        let stack = elf::build_stack(&mut borrowed.space, &layout)
+        // `borrowed` est un seul garde : emprunter ses deux champs en meme
+        // temps demande de les nommer separement, sinon l'emprunteur voit deux
+        // emprunts mutables du meme objet.
+        let mm = &mut *borrowed;
+        let stack = elf::build_stack(&mut mm.space, &mut mm.promesses, &layout)
             .map_err(|message| message.to_string())?;
-        (entry, stack)
+        (entry, stack, apres_espace_ns, apres_image_ns)
     };
 
     crate::kernel::dmesg::log_fmt(format_args!(
@@ -401,6 +416,37 @@ fn construit_tache(
 
     let frame = TrapFrame::new_user(entry, stack);
     let first = task::Task::new(process.clone(), frame);
+    // Ce que l'exec a coute, de bout en bout : espace d'adressage, lecture de
+    // l'image, promesses de pages, editeur de liens s'il y en a un, pile.
+    //
+    // La duree est celle du CHARGEMENT, pas celle du programme. Les fautes de
+    // page que l'image provoquera ensuite ne sont PAS comptees ici -- elles
+    // appartiennent au livre des fautes, qui les attribue au processus. Les
+    // additionner donnerait un « cout de demarrage » ou la meme milliseconde
+    // serait comptee deux fois.
+    //
+    // TROIS PHASES, PARCE QUE LEURS REMEDES SONT TROIS.
+    //
+    // `espace` est la creation de l'espace d'adressage : allocation du PML4 et
+    // recopie des projections noyau. Elle ne depend pas de la taille du
+    // binaire.
+    // `image` est la lecture de l'en-tete ELF et la pose des promesses de
+    // pages. Elle depend du nombre de segments, pas de leur taille -- le
+    // chargement est PARESSEUX.
+    // `pile` est la construction de la pile initiale : argv, envp, auxv.
+    //
+    // Un total ne dirait pas laquelle des trois grandit avec le nombre de
+    // processus du navigateur.
+    let fin_exec_ns = crate::kernel::timer::monotonic_ns();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_EXEC_PRET image={} pid={} duree_us={} espace_us={} image_us={} pile_us={}",
+        name,
+        process.pid,
+        fin_exec_ns.saturating_sub(debut_exec_ns) / 1_000,
+        apres_espace_ns.saturating_sub(debut_exec_ns) / 1_000,
+        apres_image_ns.saturating_sub(apres_espace_ns) / 1_000,
+        fin_exec_ns.saturating_sub(apres_image_ns) / 1_000,
+    ));
     Ok((process, first))
 }
 
