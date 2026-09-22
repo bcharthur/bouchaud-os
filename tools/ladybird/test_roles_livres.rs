@@ -52,7 +52,25 @@ extern crate alloc;
 /// verrou du noyau, une trace serie qui ne va nulle part, et le jeu de
 /// capacites -- que ce banc ne consulte pas, puisque sa question porte sur la
 /// RECONNAISSANCE des images et non sur les droits qu'elle accorde.
+/// BOUCHAUD_C24_PROFIL_DE_DEMARRAGE
+///
+/// Le module de profil est PUR : il s'inclut tel quel, comme dans le noyau.
+/// Le maquetter ici reviendrait a verifier une copie.
+#[path = "../../src/kernel/navigateur/demarrage.rs"]
+pub mod demarrage;
+
 mod kernel {
+    /// BOUCHAUD_C24_PROFIL_DE_DEMARRAGE
+    ///
+    /// Le module de profil est PUR : il s'inclut tel quel, comme dans le
+    /// noyau. Le maquetter ici reviendrait a verifier une copie.
+    pub mod navigateur {
+        // Re-export et non declaration : un `#[path]` pose ICI se resoudrait
+        // depuis `tools/ladybird/kernel/navigateur/`, un repertoire que la
+        // seule imbrication des modules fait exister. Le module reel est
+        // declare en tete du fichier, ou le chemin est lisible.
+        pub use crate::demarrage as demarrage;
+    }
     pub mod sync {
         pub struct SpinLock<T> {
             inner: std::sync::Mutex<T>,

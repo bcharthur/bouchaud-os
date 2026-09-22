@@ -34,10 +34,10 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    prouve par execution  13/33 elements  (39 %)
+    prouve par execution  14/33 elements  (42 %)
     cable, non prouve     5 ligne(s)
     vu sur la machine     4 ligne(s), non rejouees
-    non mesure            11 ligne(s)
+    non mesure            10 ligne(s)
     en echec              0 ligne(s)
 
 | Element | Etat | Preuve | Ce qu'elle dit |
@@ -73,7 +73,7 @@ qu'il reste a instrumenter.
 | Isolation de site | **NON MESURE** | `—` | --site-isolation=disable |
 | Audio | **NON MESURE** | `—` | aucun backend |
 | GPU | **NON MESURE** | `—` | --force-cpu-painting |
-| Temps de demarrage | **NON MESURE** | `—` | non profile |
+| Temps de demarrage decompose | **OK** | `hote:test_demarrage` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Latence interactive sous charge | **NON MESURE** | `—` | non mesuree |
 
 <!-- MESURE:FIN -->

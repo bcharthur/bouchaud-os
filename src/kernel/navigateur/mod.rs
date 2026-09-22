@@ -6,3 +6,12 @@
 //! connaissait qu'un --, ce qui suffisait tant qu'il n'y en avait qu'un.
 
 pub mod supervision;
+
+// BOUCHAUD_C24_PROFIL_DE_DEMARRAGE
+//
+// Ou passe le temps entre le double-clic et la premiere trame. Module PUR --
+// il ne mesure rien, il RANGE des instants que la supervision et le profil lui
+// donnent --, donc `tools/navigateur/test_demarrage.rs` l'exerce sur l'hote,
+// alors que le demarrage ne s'observe qu'au bout d'une construction complete
+// de Ladybird.
+pub mod demarrage;

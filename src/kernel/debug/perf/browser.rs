@@ -29,6 +29,10 @@ pub fn browser_click() {
     BROWSER_CLICK_NS.store(now, Ordering::Release);
     emit("PERF_BROWSER_CLICK", now, perf_id);
     perf_record(PERF_EVT_BROWSER_CLICK, 0, perf_id, 0);
+    // BOUCHAUD_C24_PROFIL_DE_DEMARRAGE : le chronometre part ici, et la
+    // supervision posera les jalons intermediaires au fur et a mesure que
+    // chaque processus demarre.
+    crate::kernel::navigateur::supervision::demarrage_commence(now);
 }
 
 pub fn exec_start(name: &str) {
@@ -51,6 +55,11 @@ pub fn first_paint() {
     {
         emit("PERF_FIRST_PAINT", now, PERF_ID.load(Ordering::Acquire));
         perf_record(PERF_EVT_FIRST_PAINT, 0, PERF_ID.load(Ordering::Acquire), 0);
+        // Le total existait deja ici -- `since_click_ms`. Ce qui manquait est
+        // sa DECOMPOSITION : un total ne se corrige pas, et « dix secondes »
+        // et « dix secondes dont neuf a attendre le RequestServer » demandent
+        // le meme travail a lire et un travail tout different a reparer.
+        crate::kernel::navigateur::supervision::demarrage_acheve(now);
     }
 }
 

@@ -107,7 +107,8 @@ ITEMS = [
     Item("Isolation de site", "aucune", "--site-isolation=disable"),
     Item("Audio", "aucune", "aucun backend"),
     Item("GPU", "aucune", "--force-cpu-painting"),
-    Item("Temps de demarrage", "aucune", "non profile"),
+    Item("Temps de demarrage decompose", "hote:test_demarrage",
+         "clic -> courtier -> reseau -> decodeur -> composition -> rendu -> trame"),
     Item("Latence interactive sous charge", "aucune", "non mesuree"),
 ]
 

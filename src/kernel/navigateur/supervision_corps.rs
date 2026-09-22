@@ -163,6 +163,90 @@ static REGISTRE: SpinLock<Registre> = SpinLock::new(Registre {
     relances: [RELANCE_VIDE; SUIVIS_MAX],
 });
 
+// BOUCHAUD_C24_PROFIL_DE_DEMARRAGE
+//
+// Le profil du demarrage EN COURS. Il vit ici, contre le registre, parce que
+// c'est `note_lancement` qui connait l'instant ou chaque processus demarre :
+// le faire remonter ailleurs demanderait un second chemin, qui divergerait.
+static PROFIL: SpinLock<crate::kernel::navigateur::demarrage::Profil> =
+    SpinLock::new(crate::kernel::navigateur::demarrage::Profil::neuf());
+
+/// Le double-clic : un nouveau demarrage commence, le precedent est efface.
+pub fn demarrage_commence(maintenant_ns: u64) {
+    use crate::kernel::navigateur::demarrage::Jalon;
+    let mut profil = PROFIL.lock();
+    profil.reinitialise();
+    profil.note(Jalon::Clic, maintenant_ns);
+}
+
+/// La premiere trame : le demarrage est fini, et on dit ou le temps est passe.
+pub fn demarrage_acheve(maintenant_ns: u64) {
+    use crate::kernel::navigateur::demarrage::{Jalon, JALONS};
+    let (profil, neuf) = {
+        let mut profil = PROFIL.lock();
+        let neuf = profil.note(Jalon::PremiereTrame, maintenant_ns);
+        (*profil, neuf)
+    };
+    // UNE SEULE FOIS PAR DEMARRAGE. `first_paint` peut etre appelee a chaque
+    // trame ; repeter le profil a soixante hertz noierait le journal serie,
+    // dont le budget est borne, sous une ligne qui ne change plus.
+    if !neuf || !profil.abouti() {
+        return;
+    }
+    let Some(total) = profil.total_ns() else { return };
+
+    let mut manquants = [Jalon::Clic; JALONS];
+    let combien = profil.manquants(&mut manquants);
+
+    crate::serial_println!(
+        "[LADYBIRD-DEMARRAGE] total_ms={} courtier_ms={} reseau_ms={} decodeur_ms={} \
+composition_ms={} rendu_ms={} trame_ms={} manquants={}",
+        total / 1_000_000,
+        segment_ms(&profil, Jalon::Courtier),
+        segment_ms(&profil, Jalon::Reseau),
+        segment_ms(&profil, Jalon::Decodeur),
+        segment_ms(&profil, Jalon::Composition),
+        segment_ms(&profil, Jalon::Rendu),
+        segment_ms(&profil, Jalon::PremiereTrame),
+        combien,
+    );
+    for index in 0..combien {
+        crate::serial_println!(
+            "[LADYBIRD-DEMARRAGE] jamais_vu={}", manquants[index].nom());
+    }
+    if let Some((jalon, duree)) = profil.plus_long() {
+        // L'ETAPE A OPTIMISER, nommee. C'est la seule ligne de ce bloc qui
+        // serve a decider quoi faire.
+        crate::serial_println!(
+            "[LADYBIRD-DEMARRAGE] plus_long={} duree_ms={} part_pour_cent={}",
+            jalon.nom(),
+            duree / 1_000_000,
+            if total == 0 { 0 } else { duree.saturating_mul(100) / total },
+        );
+    }
+}
+
+/// `-1` quand l'etape n'a pas ete vue.
+///
+/// Un entier signe plutot qu'un `Option` parce que cette valeur part dans une
+/// ligne de journal : `-1` s'y lit « non mesure » sans ambiguite, la ou `0`
+/// se lirait « instantane » et designerait une etape gratuite qui n'a jamais
+/// eu lieu.
+fn segment_ms(
+    profil: &crate::kernel::navigateur::demarrage::Profil,
+    jalon: crate::kernel::navigateur::demarrage::Jalon,
+) -> i64 {
+    match profil.segment_ns(jalon) {
+        Some(ns) => (ns / 1_000_000) as i64,
+        None => -1,
+    }
+}
+
+/// Le profil du demarrage courant, pour qui veut l'afficher.
+pub fn profil_de_demarrage() -> crate::kernel::navigateur::demarrage::Profil {
+    *PROFIL.lock()
+}
+
 static LANCEMENTS: AtomicU64 = AtomicU64::new(0);
 static SORTIES: AtomicU64 = AtomicU64::new(0);
 static PLANTAGES: AtomicU64 = AtomicU64::new(0);
@@ -189,6 +273,15 @@ pub fn note_lancement(pid: u32, role: Role, courtier: u32, contexte: u32, mainte
         REGISTRE_PLEIN.fetch_add(1, Ordering::Relaxed);
         return false;
     };
+    // BOUCHAUD_C24_PROFIL_DE_DEMARRAGE : le role qui demarre pose son jalon.
+    //
+    // ICI, et non dans l'appelant : `note_lancement` est le seul point par
+    // lequel passe le demarrage d'un processus du navigateur. Poser les jalons
+    // chez les appelants demanderait de les retrouver tous, et le prochain
+    // oublierait le sien.
+    if let Some(jalon) = jalon_du_role(role) {
+        PROFIL.lock().note(jalon, maintenant_ns);
+    }
     registre.entrees[place] = Entree {
         pid,
         courtier,
@@ -361,4 +454,21 @@ pub fn log_stats() {
         c.suivis, c.rendus_vivants, c.lancements, c.sorties, c.plantages,
         c.orphelins, c.relances_refusees, c.registre_plein
     );
+}
+
+/// Le jalon de demarrage que ce role franchit, s'il en a un.
+///
+/// `Travailleur` n'en a pas : un WebWorker demarre A LA DEMANDE, longtemps
+/// apres la premiere trame. Lui donner un jalon ferait entrer dans le profil
+/// de demarrage un temps qui n'en fait pas partie.
+fn jalon_du_role(role: Role) -> Option<crate::kernel::navigateur::demarrage::Jalon> {
+    use crate::kernel::navigateur::demarrage::Jalon;
+    match role {
+        Role::Courtier => Some(Jalon::Courtier),
+        Role::Reseau => Some(Jalon::Reseau),
+        Role::Decodeur => Some(Jalon::Decodeur),
+        Role::Composition => Some(Jalon::Composition),
+        Role::Rendu => Some(Jalon::Rendu),
+        Role::Travailleur => None,
+    }
 }
