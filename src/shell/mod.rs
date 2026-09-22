@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "ps", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode",
@@ -786,6 +786,13 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "ticks" => { c::ticks(); 0 }
         "interrupts" => { c::interrupts(); 0 }
         "ps" => { crate::kernel::process::print_table(); 0 }
+        // BOUCHAUD_C24_FAUTES_PAR_PROCESSUS
+        //
+        // Le livre des fautes, classe du plus couteux au moins couteux. La
+        // fenetre Services ne publie que les processus `browser.*` ; cette
+        // commande-ci les montre TOUS, et c'est ce qu'il faut quand la lenteur
+        // ne vient pas du processus qu'on soupconne.
+        "fautes" => { crate::kernel::task::ecris_les_fautes(); 0 }
         "kill" => {
             match argv.get(1).and_then(|s| s.parse::<u32>().ok()) {
                 Some(pid) => {

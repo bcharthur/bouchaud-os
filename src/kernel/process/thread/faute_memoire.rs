@@ -92,6 +92,83 @@ pub fn fautes_incompletes() -> (u64, u64) {
     (non_comptees, chasses)
 }
 
+/// Ecrit le livre des fautes sur la sortie courante.
+///
+/// C'est la commande `fautes` du shell. Elle existe parce que le livre ne
+/// servait a rien tant qu'il n'etait lisible que depuis la fenetre Services :
+/// celle-ci ne publie que les processus `browser.*`, alors que le livre les
+/// compte TOUS -- et sur une machine ou le navigateur est lent, le processus
+/// qui paie n'est pas forcement celui qu'on soupconne.
+///
+/// Elle ne prend le verrou qu'une fois, pour une copie bornee, et rend la
+/// main : un diagnostic ne doit pas retenir le chemin de faute de la machine.
+pub fn ecris_les_fautes() {
+    use crate::kernel::fautes::{Categorie, Compte, CATEGORIES, PROCESSUS_MAX};
+
+    let mut classement = [(0u32, Compte::default()); PROCESSUS_MAX];
+    let mut details = [[Compte::default(); CATEGORIES]; PROCESSUS_MAX];
+    let (combien, chasses) = {
+        let Some(livre) = LIVRE_FAUTES.try_lock() else {
+            crate::println!("fautes : le livre est occupe, reessayer");
+            return;
+        };
+        let combien = livre.classement(&mut classement);
+        for rang in 0..combien {
+            for index in 0..CATEGORIES {
+                if let Some(categorie) = Categorie::depuis_rang(index) {
+                    details[rang][index] = livre.compte(classement[rang].0, categorie);
+                }
+            }
+        }
+        (combien, livre.chasses)
+    };
+
+    let non_comptees = FAUTES_NON_COMPTEES.load(Ordering::Relaxed);
+    if combien == 0 {
+        crate::println!("fautes : aucune faute enregistree pour l'instant");
+    } else {
+        crate::println!("  PID   FAUTES     TOTAL      PIRE   DOMINANTE");
+        for rang in 0..combien {
+            let (pid, total) = classement[rang];
+            // La dominante est celle qui coute du TEMPS, et non celle qui
+            // compte le plus de fautes : c'est le temps que l'utilisateur
+            // ressent.
+            let mut pire_categorie = "—";
+            let mut pire_total = 0u64;
+            for index in 0..CATEGORIES {
+                let compte = details[rang][index];
+                if compte.vide() || compte.total_ns <= pire_total {
+                    continue;
+                }
+                pire_total = compte.total_ns;
+                if let Some(categorie) = Categorie::depuis_rang(index) {
+                    pire_categorie = categorie.nom();
+                }
+            }
+            crate::println!(
+                "  {:>3}  {:>7}  {:>6} ms  {:>5} us   {} ({} ms)",
+                pid,
+                total.nombre,
+                total.total_ns / 1_000_000,
+                total.pire_ns / 1_000,
+                pire_categorie,
+                pire_total / 1_000_000,
+            );
+        }
+    }
+
+    // LES CHIFFRES SONT UN PLANCHER, ET IL FAUT LE DIRE.
+    //
+    // Le livre est borne et il prend son verrou sans attendre : il chasse les
+    // processus inactifs et laisse tomber les echantillons pris pendant qu'un
+    // autre coeur ecrit. Taire ces deux nombres donnerait un total qu'on
+    // croirait complet.
+    crate::println!(
+        "  suivis={} chasses={} non_comptees={}",
+        combien, chasses, non_comptees
+    );
+}
+
 /// Un processus est mort : ses comptes partent avec lui.
 ///
 /// Un PID se reutilise. Laisser les comptes de l'ancien occupant ferait
