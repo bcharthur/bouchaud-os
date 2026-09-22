@@ -22,6 +22,7 @@
 //! `clock_gettime`), pas par ces fichiers.
 
 use alloc::format;
+use alloc::string::String;
 
 use crate::fs::ramfs;
 
@@ -120,12 +121,36 @@ fn install_fonts() {
     }
 }
 
+/// Fils logiques par coeur physique sur les machines visees.
+///
+/// Deux : la TRIGKEY porte un Ryzen 7 5700U, huit coeurs et seize fils. Ce
+/// n'est pas lu du materiel, parce que rien dans ce noyau ne l'expose encore.
+/// C'est donc une HYPOTHESE, et il faut savoir ce qu'elle influe : `cpu cores`
+/// et `core id` de `/proc/cpuinfo`, et rien d'autre. Le NOMBRE de processeurs
+/// annonce, lui, est mesure.
+const FILS_PAR_COEUR: usize = 2;
+
+/// Le nombre de processeurs a annoncer au monde utilisateur.
+///
+/// Une seule fonction pour `/proc/cpuinfo`, `/proc/stat` et les trois fichiers
+/// de `/sys/devices/system/cpu` : deux calculs pourraient diverger, et un
+/// `online` qui ne s'accorde pas avec le nombre de lignes de `cpuinfo` est
+/// exactement le genre d'incoherence qui fait choisir a une bibliotheque la
+/// plus petite des deux.
+fn processeurs_annonces() -> usize {
+    crate::kernel::cpu_topologie::annonces(
+        crate::arch::x86_64::smp::schedulable_cpus(),
+        crate::arch::x86_64::smp::MAX_CPUS,
+    )
+}
+
 /// `/proc` reduit aux fichiers lus au demarrage d'un programme.
 fn install_proc() {
     let proc = mkdir_path("/proc");
     if proc == 0 {
         return;
     }
+    let logiques = processeurs_annonces();
 
     let (_, free_frames, total_frames) = crate::kernel::vmm::frame_stats();
     let total_kb = total_frames * 4;
@@ -140,17 +165,46 @@ fn install_proc() {
         0o444,
     );
 
+    // BOUCHAUD_C24_TOPOLOGIE_CPU
+    //
+    // UN BLOC PAR PROCESSEUR, et `siblings`/`cpu cores` renseignes.
+    //
+    // Ce fichier n'en portait qu'un seul, avec `siblings: 1` et
+    // `cpu cores: 1`. Les bibliotheques qui comptent les lignes
+    // `processor` -- et il y en a beaucoup, parce que c'est la methode
+    // portable -- concluaient qu'il y avait un processeur, sur une machine
+    // qui en ordonnance seize. Chaque pool de threads du navigateur etait
+    // alors cree avec un seul fil.
     let vendor = crate::arch::x86_64::cpu::vendor();
     let vendor = core::str::from_utf8(&vendor).unwrap_or("unknown");
-    write_file(
-        proc,
-        "cpuinfo",
-        &format!(
-            "processor\t: 0\nvendor_id\t: {}\ncpu family\t: 6\nmodel name\t: Bouchaud OS virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nsiblings\t: 1\ncpu cores\t: 1\nflags\t\t: fpu tsc msr pae cx8 sep cmov pat mmx fxsr sse sse2\n\n",
-            vendor
-        ),
-        0o444,
-    );
+    let mut cpuinfo = String::new();
+    let mut index = 0usize;
+    while let Some(bloc) = crate::kernel::cpu_topologie::bloc(logiques, FILS_PAR_COEUR, index) {
+        cpuinfo.push_str(&format!(
+            "processor\t: {}\nvendor_id\t: {}\ncpu family\t: 6\nmodel name\t: Bouchaud OS virtual CPU\ncpu MHz\t\t: 1000.000\ncache size\t: 0 KB\nphysical id\t: 0\nsiblings\t: {}\ncore id\t\t: {}\ncpu cores\t: {}\nflags\t\t: fpu tsc msr pae cx8 sep cmov pat mmx fxsr sse sse2\n\n",
+            bloc.processeur, vendor, bloc.siblings, bloc.core_id, bloc.coeurs,
+        ));
+        index += 1;
+    }
+    write_file(proc, "cpuinfo", &cpuinfo, 0o444);
+
+    // `/proc/stat` : refuse sur la machine physique parce qu'il n'existait
+    // pas. Beaucoup de bibliotheques le lisent pour compter les processeurs
+    // quand `/sys` leur est ferme, et certaines pour mesurer la charge.
+    //
+    // Les compteurs de temps sont a ZERO, et c'est deliberé : le noyau ne
+    // tient pas de comptabilite par processeur au format `jiffies`, et
+    // inventer des nombres ferait calculer a un moniteur des pourcentages
+    // faux. Zero se lit « pas de temps ecoule », ce qui est visiblement faux
+    // et donc lisible comme une absence de mesure ; un nombre plausible ne le
+    // serait pas. Le nombre de LIGNES, lui, est exact -- et c'est ce que les
+    // compteurs de processeurs viennent chercher ici.
+    let mut stat = String::from("cpu  0 0 0 0 0 0 0 0 0 0\n");
+    for cpu in 0..logiques {
+        stat.push_str(&format!("cpu{}  0 0 0 0 0 0 0 0 0 0\n", cpu));
+    }
+    stat.push_str(&format!("ctxt 0\nbtime 0\nprocesses 0\nprocs_running 1\nprocs_blocked 0\n"));
+    write_file(proc, "stat", &stat, 0o444);
 
     write_file(proc, "uptime", &format!("{}.00 {}.00\n", crate::kernel::timer::seconds(), crate::kernel::timer::seconds()), 0o444);
     write_file(proc, "version", &format!("Linux version 6.1.0-bouchaud (Bouchaud OS {})\n", crate::VERSION), 0o444);
@@ -177,10 +231,30 @@ fn install_sys() {
         // C'est ici que passe `sysconf(_SC_NPROCESSORS_ONLN)` de la glibc :
         // un fichier absent la fait retomber sur des heuristiques, un fichier
         // present et coherent evite toute surprise.
-        write_file(cpu, "online", "0\n", 0o444);
-        write_file(cpu, "possible", "0\n", 0o444);
-        write_file(cpu, "present", "0\n", 0o444);
-        mkdir_path("/sys/devices/system/cpu/cpu0");
+        //
+        // BOUCHAUD_C24_TOPOLOGIE_CPU
+        //
+        // Ces trois fichiers disaient « 0 ». Ce n'est pas un compte, c'est
+        // une PLAGE, et celle-la ne contient que le processeur zero : la
+        // glibc en concluait UN processeur sur une machine qui en ordonnance
+        // seize, et tous les pools de threads du navigateur naissaient a un
+        // fil. Le releve physique le decrivait sans le nommer -- « la charge
+        // WebContent peut etre tres elevee sur un seul coeur alors que le CPU
+        // global parait faible ».
+        let logiques = processeurs_annonces();
+        let mut tampon = [0u8; 32];
+        let n = crate::kernel::cpu_topologie::plage(logiques, &mut tampon);
+        let plage = core::str::from_utf8(&tampon[..n]).unwrap_or("0");
+        let ligne = format!("{}\n", plage);
+        write_file(cpu, "online", &ligne, 0o444);
+        write_file(cpu, "possible", &ligne, 0o444);
+        write_file(cpu, "present", &ligne, 0o444);
+        // Un repertoire par processeur : c'est ce que comptent les
+        // bibliotheques qui enumerent `/sys/devices/system/cpu/cpu*` plutot
+        // que de lire `online`.
+        for index in 0..logiques {
+            mkdir_path(&format!("/sys/devices/system/cpu/cpu{}", index));
+        }
     }
 
     let fb = mkdir_path("/sys/class/graphics/fb0");

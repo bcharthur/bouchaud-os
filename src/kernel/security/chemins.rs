@@ -158,6 +158,28 @@ fn lecture_commune(path: &str) -> bool {
         // sensible ne serait pas accorde par accident.
         || sous_arbre(path, "/proc/sys/vm")
         || sous_arbre(path, "/proc/sys/kernel")
+        // BOUCHAUD_C24_TOPOLOGIE_CPU
+        //
+        // La topologie des processeurs. Le releve physique montre
+        // `/sys/devices/system/cpu/online` refuse, et ce refus coute cher :
+        // une bibliotheque a qui l'on ferme `/sys` retombe sur une
+        // heuristique, et cette heuristique vaut souvent UN. Sur une machine
+        // qui ordonnance seize processeurs, chaque pool de threads du
+        // navigateur naissait alors a un fil.
+        //
+        // `/proc/stat` pour la meme raison : c'est la seconde source que les
+        // compteurs de processeurs consultent quand la premiere leur est
+        // fermee.
+        //
+        // Ce sont des valeurs de TOPOLOGIE -- combien de processeurs, combien
+        // de coeurs --, que la moindre machine Linux rend a tout le monde, et
+        // que le processus apprendrait de toute facon en comptant ses propres
+        // migrations. Les chemins sont NOMMES et non `/sys` entier : un `/sys`
+        // futur qui porterait de la donnee de peripherique ne serait pas
+        // accorde par accident.
+        || sous_arbre(path, "/sys/devices/system/cpu")
+        || path == "/proc/stat"
+        || path == "/proc/cpuinfo"
         || sous_arbre(path, "/dev/shm")
         || path == "/dev/null"
         || path == "/dev/zero"

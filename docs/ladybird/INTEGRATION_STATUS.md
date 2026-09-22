@@ -34,8 +34,8 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    prouve par execution  14/33 elements  (42 %)
-    cable, non prouve     5 ligne(s)
+    prouve par execution  15/35 elements  (42 %)
+    cable, non prouve     6 ligne(s)
     vu sur la machine     4 ligne(s), non rejouees
     non mesure            10 ligne(s)
     en echec              0 ligne(s)
@@ -51,6 +51,8 @@ qu'il reste a instrumenter.
 | Fautes de page raccordees au noyau | **CABLE** | `marqueur:tools/ci/run_fautes_demande.sh:FAUTES_DEMANDE_OK` | FAUTES_DEMANDE_OK present dans tools/ci/run_fautes_demande.sh |
 | Cycle de vie des onglets | **OK** | `garde:verifie-lifecycle-pages` | garde verte |
 | Enregistrement des pages chez l'hote | **CABLE** | `marqueur:tools/ladybird/prepare-m11-page-registry.py:M11_TAB_STAGE 80 READY` | M11_TAB_STAGE 80 READY present dans tools/ladybird/prepare-m11-page-registry.py |
+| Topologie CPU annoncee | **OK** | `hote:test_cpu_topologie` | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
+| Topologie CPU raccordee | **CABLE** | `marqueur:tools/ci/run_topologie_cpu.sh:TOPOLOGIE_CPU_OK` | TOPOLOGIE_CPU_OK present dans tools/ci/run_topologie_cpu.sh |
 | Vue Services | **OK** | `garde:verifie-fenetre-services` | garde verte |
 | Onglets du chrome | **OK** | `garde:verifie-onglets` | garde verte |
 | Clavier du navigateur | **OK** | `garde:verifie-clavier-navigateur` | garde verte |

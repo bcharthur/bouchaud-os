@@ -82,6 +82,14 @@ pub mod resource;
 // de faute lui-meme ne s'execute que dans QEMU.
 #[path = "process/fautes.rs"]
 pub mod fautes;
+// BOUCHAUD_C24_TOPOLOGIE_CPU
+//
+// Ce que le monde utilisateur apprend du nombre de processeurs. Module PUR :
+// les plages Linux ont des cas limites tous muets -- « 0 » et non « 0-0 »,
+// « 0-15 » et non « 0-16 », rien du tout pour zero -- et chacun se traduit par
+// une mauvaise taille de pool de threads, jamais par une erreur.
+#[path = "cpu_topologie.rs"]
+pub mod cpu_topologie;
 #[path = "scheduler/core.rs"]
 pub mod scheduler;
 #[path = "scheduler/echeances.rs"]
