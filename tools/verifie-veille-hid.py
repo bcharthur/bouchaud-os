@@ -70,6 +70,96 @@ def corps(source, entete):
     return None
 
 
+def _bloc(source, ouvrante):
+    """Le texte de `{` a son `}` correspondant, accolades comprises."""
+    profondeur = 0
+    for i in range(ouvrante, len(source)):
+        if source[i] == "{":
+            profondeur += 1
+        elif source[i] == "}":
+            profondeur -= 1
+            if profondeur == 0:
+                return source[ouvrante : i + 1]
+    return None
+
+
+def chaines_de_continue(gate, corps_gate):
+    """Les conditions qui gouvernent chaque `continue` d'une branche.
+
+    Rend une liste de chaines de caracteres : pour chaque `continue` trouve,
+    la concatenation de la condition de la porte et de celles de tous les `if`
+    encore ouverts au-dessus de lui.
+
+    On lit les accolades plutot qu'une expression reguliere. C'est ce qui
+    permet de distinguer un `continue` qui appartient a un test interne -- donc
+    conditionne par lui -- d'un `continue` pose a plat dans la branche, qui
+    epargne TOUT ce qui entre dedans. Les deux se ressemblent dans un journal
+    et n'ont pas du tout le meme effet sur un transport mort.
+    """
+    chaines = []
+    pile = [gate]
+    attente = None
+    i = 0
+    while i < len(corps_gate):
+        reste = corps_gate[i:]
+        m = re.match(r"\bif\b([^{;]*)\{", reste)
+        if m:
+            attente = m.group(1)
+            pile.append(attente)
+            i += m.end()
+            continue
+        m = re.match(r"\belse\b\s*\{", reste)
+        if m:
+            # La branche `else` depend de la meme condition, niee. Le NOM y
+            # figure : c'est ce qui compte ici.
+            pile.append("else " + (attente or ""))
+            i += m.end()
+            continue
+        c = corps_gate[i]
+        if c == "{":
+            pile.append("")
+            i += 1
+            continue
+        if c == "}":
+            if len(pile) > 1:
+                pile.pop()
+            i += 1
+            continue
+        if corps_gate.startswith("continue", i):
+            chaines.append(" ".join(pile))
+            i += len("continue")
+            continue
+        i += 1
+    return chaines
+
+
+def conditions_if(source):
+    """Les conditions de tous les `if` du texte donne.
+
+    La chaine de format d'une macro contient des accolades et son nom un point
+    d'exclamation : lire les conditions plutot que le texte est ce qui empeche
+    de prendre une ligne de journal pour une decision.
+    """
+    return [m.group(1) for m in re.finditer(r'\bif\b([^{;"]*)\{', source)]
+
+
+PREUVES = ("interrupt_in_casse", "sentinelle_activite", "activite", "file_vide")
+
+
+def portes_sur_running(source):
+    """Les portes `if ... EP_ETAT_RUNNING ... {` du texte donne.
+
+    Rend, pour chacune, son corps et les chaines de conditions qui gouvernent
+    ses `continue`.
+    """
+    portes = []
+    for m in re.finditer(r"\bif\b([^{;]*EP_ETAT_RUNNING[^{;]*)\{", source):
+        corps_porte = _bloc(source, m.end() - 1)
+        if corps_porte is None:
+            continue
+        portes.append((corps_porte, chaines_de_continue(m.group(1), corps_porte)))
+    return portes
+
 def main():
     if not XHCI.exists():
         print("  - fichier absent : %s" % XHCI)
@@ -121,25 +211,111 @@ def main():
         #
         # Sans elle, chaque souris immobile serait rearmee toutes les trois
         # cents millisecondes, et chaque rearmement pose un TD de plus.
-        # LE TEST, ET PAS SEULEMENT LES MOTS.
         #
-        # Une premiere version de cette regle cherchait la presence de
-        # `EP_ETAT_RUNNING` et de `file_vide` dans la fonction. Elle laissait
-        # passer la suppression du test lui-meme : les deux noms survivent
-        # plus bas, dans la ligne de journal et dans le choix de la reprise.
-        # Ce qui doit exister, c'est le `continue` qui epargne une souris
-        # simplement immobile.
-        repos = re.search(
-            r"etat\s*==\s*EP_ETAT_RUNNING\s*&&\s*!\s*file_vide\s*\{\s*continue",
-            veille,
+        # LA PROPRIETE, ET PAS LA FORME QUI LA PORTAIT.
+        #
+        # Deux versions de cette regle ont echoue, chacune un cran plus loin.
+        # La premiere cherchait la PRESENCE de `EP_ETAT_RUNNING` et de
+        # `file_vide` dans la fonction : les deux noms survivent dans la ligne
+        # de journal, donc la suppression du test passait. La seconde exigeait
+        # l'expression litterale `etat == EP_ETAT_RUNNING && !file_vide {
+        # continue` -- et elle a casse le 19 septembre sur un changement qui
+        # RENFORCE le pilote.
+        #
+        # Ce changement vaut d'etre lu, parce qu'il explique la forme de la
+        # regle ci-dessous. Distinguer une souris immobile d'un transport mort
+        # par le seul `file_vide` est une DEDUCTION : « il reste un TD en
+        # attente, donc le materiel a encore du travail, donc il est vivant ».
+        # Elle est juste la plupart du temps et fausse exactement dans le cas
+        # qui nous interesse -- un achevement perdu laisse aussi un TD en
+        # attente. Le pilote demande maintenant une PREUVE : il interroge le
+        # meme peripherique par EP0, et ce n'est que si EP0 rend une entree
+        # reelle -- le peripherique parle, mais plus par son transport
+        # Interrupt-IN -- qu'il declare le transport casse et bascule dessus.
+        # Tant que cette preuve n'est pas venue, le point est epargne.
+        #
+        # La regle verifie donc ce qui doit rester vrai sous n'importe quelle
+        # forme : AVANT toute reprise, il existe une porte qui epargne un point
+        # `Running` dont le transport n'est pas prouve casse.
+        recuperations = [
+            veille.find("recupere_point_hid("),
+            veille.find("reprises_silence = ep.reprises_silence"),
+            veille.find("reprises_silence.saturating_add"),
+        ]
+        recuperations = [i for i in recuperations if i >= 0]
+        amont = veille[: min(recuperations)] if recuperations else veille
+        if not recuperations:
+            fautes.append(
+                "xhci_active.rs : le chien de garde ne reprend plus aucun "
+                "point. Un transport mort le resterait."
+            )
+
+        portes = portes_sur_running(amont)
+        corps_portes = [corps_porte for corps_porte, _ in portes]
+        chaines = [chaine for _, liste in portes for chaine in liste]
+        epargne_conditionnelle = any(
+            any(preuve in chaine for preuve in PREUVES) for chaine in chaines
         )
-        if repos is None:
+        epargne_aveugle = any(
+            not any(preuve in chaine for preuve in PREUVES) for chaine in chaines
+        )
+
+        if not epargne_conditionnelle:
             fautes.append(
                 "xhci_active.rs : le chien de garde ne distingue plus le repos "
                 "de la panne. Une souris immobile est `Running` avec un TD en "
                 "attente : la relancer remplirait son anneau de TD jamais "
                 "consommes."
             )
+        if epargne_aveugle:
+            fautes.append(
+                "xhci_active.rs : un point `Running` est epargne SANS condition. "
+                "Un transport Interrupt-IN mort est `Running` lui aussi : il ne "
+                "serait alors jamais repris, ni bascule sur le pont EP0, et le "
+                "pointeur resterait mort -- le defaut du 13 septembre."
+            )
+
+        # L'EPARGNE DOIT POUVOIR PRENDRE FIN.
+        #
+        # Une porte qui epargne un point suspect n'est utile que si le soupcon
+        # peut se changer en verdict. Sans cette regle, la garde acceptait une
+        # version ou le point suspect etait epargne a CHAQUE tour et ou rien ne
+        # posait jamais `interrupt_in_casse` : la condition de la porte nommait
+        # bien la preuve, mais la preuve n'arrivait jamais. Le transport mort
+        # n'etait alors ni repris ni bascule sur EP0 -- c'est-a-dire exactement
+        # la souris morte du 13 septembre, avec une condition en plus.
+        #
+        # La confirmation doit vivre DANS une porte sur `Running` : c'est la
+        # que le point est epargne, et c'est donc la seule place d'ou l'epargne
+        # peut cesser.
+        if not any("interrupt_in_casse = true" in corps_porte for corps_porte in corps_portes):
+            fautes.append(
+                "xhci_active.rs : aucune porte sur `Running` ne CONFIRME la "
+                "panne d'un transport. Un point suspect serait epargne a chaque "
+                "tour, pour toujours : le pointeur resterait mort et le pont "
+                "EP0 ne prendrait jamais le relais."
+            )
+
+        # `file_vide` DECIDE, il n'est pas seulement imprime.
+        #
+        # Un point `Running` dont l'anneau est vide n'est pas au repos : il a
+        # perdu un achevement, et celui-la doit etre repris tout de suite. Sans
+        # ce test, il serait confondu avec la souris immobile et epargne.
+        #
+        # On lit les CONDITIONS, et non le texte brut. Une version de cette
+        # regle cherchait `file_vide` dans toute expression suivie d'une
+        # accolade : elle trouvait la ligne de journal, ou `serial_println!`
+        # fournit le point d'exclamation et le format fournit l'accolade. Elle
+        # affirmait alors « file_vide decide » d'un fichier ou il ne decidait
+        # plus rien.
+        if not any("file_vide" in condition for condition in conditions_if(amont)):
+            fautes.append(
+                "xhci_active.rs : `file_vide` ne decide plus de rien. Un point "
+                "`Running` dont l'anneau est vide a perdu un achevement ; sans "
+                "ce test il serait confondu avec un point au repos et jamais "
+                "repris."
+            )
+
         if "REPRISES_SILENCE_MAX" not in veille:
             fautes.append(
                 "xhci_active.rs : les reprises du chien de garde ne sont plus "

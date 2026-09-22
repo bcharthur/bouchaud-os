@@ -76,28 +76,34 @@ if xhci.count("derniere_reprise_ns: 0,") != 2:
 if "if etait_casse" not in xhci or "ep.interrupt_in_casse = false;" not in xhci:
     fail("le premier Transfer Event ne coupe pas explicitement le fallback")
 
-# Contrat absolu : ce lot ne doit modifier aucun fichier reseau.
-allowed = {
-    "src/kernel/debug/blackbox.rs",
-    "src/drivers/display/vga_text.rs",
-    "src/shell/mod.rs",
-    "src/gui/apps/mod.rs",
-    "src/drivers/usb/xhci_active.rs",
-    "tools/reference/extract-blackbox.py",
-    "tools/ladybird/prepare-m11-page-registry.py",
-    "tools/ladybird/prepare-full-browser-host.py",
-    "tools/ladybird/verifie-chrome.sh",
-}
+# LE RESEAU PHYSIQUE NE SE TOUCHE PAS DANS UN LOT QUI NE LE VISE PAS.
+#
+# La chaine RTL8168 -> DHCP -> DNS -> TCP -> TLS est la seule partie du port
+# qui fonctionne bout en bout sur la machine physique. Un lot HID ou navigateur
+# n'a aucune raison d'y toucher, et une modification fortuite s'y verrait au
+# pire moment : dans une archive de boite noire, une semaine plus tard.
+#
+# LA LISTE BLANCHE DE FICHIERS AUTORISES A ETE RETIREE, ET CE N'EST PAS UN
+# RELACHEMENT.
+#
+# Elle enumerait les neuf fichiers du lot du 19 septembre et refusait tout le
+# reste. C'etait juste le jour de la livraison et faux le lendemain : la garde
+# vit dans `tools/verifie-*.py`, donc elle est DECOUVERTE et rejouee a chaque
+# changement du depot. Toute modification ulterieure de n'importe quel autre
+# fichier -- y compris la correction des deux gardes HID que ce meme lot avait
+# rendues fausses -- echouait avec « fichiers hors perimetre modifies ». Une
+# garde permanente ne peut pas encoder le perimetre d'un commit ; elle encode
+# un invariant. L'invariant, ici, c'est le reseau.
+#
+# La comparaison porte sur `git diff HEAD` : l'index ET l'arbre de travail. La
+# version precedente lisait `git diff` seul, donc un fichier reseau deja ajoute
+# a l'index lui echappait entierement.
 try:
     changed = subprocess.check_output(
-        ["git", "diff", "--name-only", "--"], cwd=ROOT, text=True
+        ["git", "diff", "HEAD", "--name-only", "--"], cwd=ROOT, text=True
     ).splitlines()
 except Exception as exc:
     fail(f"git diff impossible: {exc}")
-
-outside = [p for p in changed if p and p not in allowed]
-if outside:
-    fail("fichiers hors perimetre modifies: " + ", ".join(outside))
 
 network_words = ("rtl8168", "dhcp", "dns", "tcp", "tls", "src/net/", "drivers/network/")
 network = [p for p in changed if any(w.lower() in p.lower() for w in network_words)]

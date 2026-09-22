@@ -141,21 +141,85 @@ def main():
                 break
 
     # --- 3. La quarantaine reste decidee par l'analyse ----------------------
+    #
+    # LA PROPRIETE, ET PAS LA FORME QUI LA PORTAIT.
+    #
+    # Deux versions successives de cette regle ont cherche une FORME :
+    # d'abord `verdict.analyse()` n'importe ou dans le corps -- ce qui laissait
+    # passer le remplacement du retour par `verdict.entree()` --, puis le
+    # retour litteral `verdict.analyse() }`. La seconde a casse le 19 septembre
+    # sur un refactor qui AMELIORE le code : `control_get_report` rend
+    # maintenant le `Verdict` entier, et c'est l'appelant qui en tire
+    # l'analyse. Le verdict complet porte strictement plus d'information que le
+    # booleen qu'il remplace ; refuser ce changement aurait fige le port sur la
+    # forme la plus pauvre.
+    #
+    # Ce qui doit etre vrai n'a pas change : c'est l'ANALYSE -- « le rapport
+    # s'est decode » -- qui decide de la quarantaine, jamais l'ENTREE -- « le
+    # rapport portait un evenement ». Un clavier au repos repond parfaitement
+    # et ne porte aucune entree : le confondre avec un peripherique muet le
+    # met en quarantaine a son premier rapport vide, et c'est le defaut du
+    # 15 septembre.
+    #
+    # La regle verifie donc le CHEMIN DE DECISION, la ou il est : dans le pont.
     pont = corps(xhci, "fn control_get_report(")
     if pont is None:
         fautes.append("xhci_active.rs : control_get_report a disparu.")
-    # LA VALEUR DE RETOUR, ET PAS SEULEMENT SA PRESENCE.
-    #
-    # Une premiere version cherchait `verdict.analyse()` n'importe ou dans le
-    # corps : elle laissait passer le remplacement du RETOUR par
-    # `verdict.entree()`, alors que le reste du corps mentionne encore
-    # l'analyse. C'est le retour qui decide de la quarantaine.
-    elif re.search(r"verdict\.analyse\(\)\s*\}\s*$", pont) is None:
+    elif re.search(r"verdict\.entree\(\)\s*\}\s*$", pont) is not None:
         fautes.append(
-            "xhci_active.rs : le pont EP0 ne REND plus l'analyse. S'il rendait "
-            "l'entree, un clavier au repos -- qui fonctionne -- partirait en "
-            "quarantaine a son premier rapport vide."
+            "xhci_active.rs : le pont EP0 rend l'ENTREE au lieu de l'analyse. "
+            "Un clavier au repos -- qui repond -- partirait en quarantaine a "
+            "son premier rapport vide."
         )
+
+    repli = corps(xhci, "fn repli_ep0_un_point(")
+    if repli is None:
+        fautes.append("xhci_active.rs : repli_ep0_un_point a disparu.")
+    else:
+        # Le nom sous lequel l'appelant retient l'analyse. Le laisser libre est
+        # deliberé : c'est la SOURCE qui compte, pas le mot choisi.
+        binding = re.search(r"let\s+(\w+)\s*=\s*verdict\.analyse\(\)\s*;", repli)
+        if binding is None:
+            fautes.append(
+                "xhci_active.rs : le repli EP0 ne consulte plus l'analyse du "
+                "verdict. Sans elle, il ne reste que l'entree pour decider de "
+                "la quarantaine -- et un clavier immobile n'en produit aucune."
+            )
+        else:
+            repond = binding.group(1)
+            apres = repli[binding.end():]
+            # L'ordre EST la regle : le point qui repond sort de quarantaine,
+            # et c'est seulement l'autre branche qui compte un echec.
+            sortie = re.search(
+                r"if\s+%s\s*\{[^}]*?echecs_repli\s*=\s*0\s*;" % re.escape(repond),
+                apres,
+                re.S,
+            )
+            if sortie is None:
+                fautes.append(
+                    "xhci_active.rs : un point qui REPOND ne sort plus de "
+                    "quarantaine. Une interface qui se remet a parler y "
+                    "resterait pour le reste de la session."
+                )
+            compte = apres.find("echecs_repli.saturating_add(1)")
+            if compte < 0:
+                fautes.append(
+                    "xhci_active.rs : le repli EP0 ne compte plus ses echecs ; "
+                    "la quarantaine ne peut plus se declencher."
+                )
+            elif sortie is not None and compte < sortie.end():
+                fautes.append(
+                    "xhci_active.rs : l'echec est compte AVANT la sortie de "
+                    "quarantaine. Un point qui repond verrait quand meme son "
+                    "compteur monter."
+                )
+            # Et surtout : l'entree n'a pas le droit de decider de la peine.
+            if re.search(r"if\s+!\s*verdict\.entree\(\)", apres) is not None:
+                fautes.append(
+                    "xhci_active.rs : la quarantaine est decidee par l'absence "
+                    "d'ENTREE. Un clavier au repos y entrerait a son premier "
+                    "rapport vide."
+                )
 
     # --- 4. Les temoins du clavier sont poses -------------------------------
     temoins = corps(xhci, "fn set_temoins_clavier(")
