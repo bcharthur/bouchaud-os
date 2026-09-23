@@ -19,10 +19,26 @@ cd "$(dirname "$0")/../.."
 
 BOOT=${1:-target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin}
 SORTIE=${FORK_SORTIE:-$(mktemp -d)}
-SECONDES=${FORK_SECONDES:-240}
+# LE PLAFOND EST CELUI D'UNE MACHINE DE CI, PAS DE CELLE-CI.
+#
+# La charge dure environ quatre minutes ici. Un coureur GitHub n'a pas de KVM
+# et emule : le meme scenario y prend plusieurs fois plus longtemps, et un
+# plafond taille sur la machine de developpement rendrait « le scenario n'est
+# pas alle au bout » -- un faux rouge qui ressemble a une panne.
+SECONDES=${FORK_SECONDES:-600}
 # En microsecondes, pour le palier de 256 Mio. Voir l'en-tete du .c.
 BUDGET=${FORK_BUDGET_US:-2000000}
+# LE REPERTOIRE DE SORTIE EST RENDU ABSOLU, ET CE N'EST PAS DU CONFORT.
+#
+# `mkdisk.sh` est lance depuis `tools/userland` (il y cherche ses outils). Un
+# chemin de sortie RELATIF y est donc resolu depuis `tools/userland` et non
+# depuis la racine du depot -- l'image de scenario atterrit a cote, et le banc
+# rend « mkdisk a echoue ».
+#
+# Le defaut ne se voyait pas en local, ou `mktemp -d` rend un chemin absolu. Il
+# est apparu au premier passage en CI, qui passe `proc-stat-ci`.
 mkdir -p "$SORTIE"
+SORTIE=$(cd "$SORTIE" && pwd)
 
 if [ ! -s "$BOOT" ]; then
     echo "image d'amorcage absente : $BOOT" >&2

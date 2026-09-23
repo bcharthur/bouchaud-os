@@ -312,7 +312,8 @@ jobs:
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Deux scenarios QEMU emules, dont un qui projette et recopie 256 Mio.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + compilateur

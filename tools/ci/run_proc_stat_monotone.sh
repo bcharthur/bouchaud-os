@@ -39,8 +39,19 @@ cd "$(dirname "$0")/../.."
 
 BOOT=${1:-target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin}
 SORTIE=${PROCSTAT_SORTIE:-$(mktemp -d)}
-SECONDES=${PROCSTAT_SECONDES:-150}
+# Voir `run_cout_fork.sh` : un coureur de CI emule, et il est plus lent.
+SECONDES=${PROCSTAT_SECONDES:-300}
+# LE REPERTOIRE DE SORTIE EST RENDU ABSOLU, ET CE N'EST PAS DU CONFORT.
+#
+# `mkdisk.sh` est lance depuis `tools/userland` (il y cherche ses outils). Un
+# chemin de sortie RELATIF y est donc resolu depuis `tools/userland` et non
+# depuis la racine du depot -- l'image de scenario atterrit a cote, et le banc
+# rend « mkdisk a echoue ».
+#
+# Le defaut ne se voyait pas en local, ou `mktemp -d` rend un chemin absolu. Il
+# est apparu au premier passage en CI, qui passe `proc-stat-ci`.
 mkdir -p "$SORTIE"
+SORTIE=$(cd "$SORTIE" && pwd)
 
 if [ ! -s "$BOOT" ]; then
     echo "image d'amorcage absente : $BOOT" >&2
