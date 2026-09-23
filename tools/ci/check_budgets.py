@@ -223,6 +223,19 @@ COMPAGNONS = {
     "ready_latency_max_ms": ("normale", "ready_latency_normale_p99_ms"),
 }
 
+# Le noyau NOMME deja qui tenait le gros verrou le plus longtemps :
+#
+#   [BKL-MAX-HOLD] ns=7093563 cpu=0 task=6 syscall=fork(57)/attente-verrou/0t ...
+#
+# Un depassement ne dit rien tant qu'on ignore s'il vient d'un nouveau site de
+# verrouillage ou de la dette deja connue. `fork` et `execve` recopient et
+# liberent l'espace d'adressage ENTIER sous le gros verrou : leur tenue suit la
+# taille du processus et la vitesse de la machine, pas la qualite du
+# verrouillage. Les confondre ferait chercher une regression la ou il y a un
+# choix d'architecture.
+TENUE = re.compile(r"\[BKL-MAX-HOLD\]\s+ns=(?P<ns>\d+)[^\n]*?syscall=(?P<syscall>\S+)")
+DETTE_CONNUE = ("fork", "execve", "clone", "exit")
+
 
 def qualifie(nom, mesure, budget, reference, texte_journal):
     """Dit si un maximum depasse est un OUTLIER ou une REGRESSION.
@@ -231,6 +244,8 @@ def qualifie(nom, mesure, budget, reference, texte_journal):
     seulement lisible -- et c'est la difference entre un banc qu'on croit et
     un banc qu'on finit par ignorer.
     """
+    if nom == "bkl_max_hold_ms" and texte_journal:
+        return attribue_tenue(texte_journal)
     if nom not in COMPAGNONS or not texte_journal:
         return []
     classe, budget_p99_nom = COMPAGNONS[nom]
@@ -260,6 +275,37 @@ def qualifie(nom, mesure, budget, reference, texte_journal):
     elif budget_p99 is not None:
         lignes.append(f"      ECART ISOLE : p99={p99:.1f} tient sous {budget_p99}.")
         lignes.append(f"      Un seul reveil tardif, pas un ralentissement general.")
+    return lignes
+
+
+def attribue_tenue(texte_journal):
+    """Dit QUI tenait le gros verrou, et si c'est une dette deja connue.
+
+    Ne change aucun verdict : le depassement reste un echec. Il devient
+    seulement attribuable -- et la difference entre « un nouveau site prend le
+    verrou trop longtemps » et « fork recopie 256 Mio sous le verrou, comme il
+    l'a toujours fait » est toute la difference entre corriger et re-mesurer.
+    """
+    dernier = None
+    for m in TENUE.finditer(texte_journal):
+        if dernier is None or int(m.group("ns")) > int(dernier.group("ns")):
+            dernier = m
+    if dernier is None:
+        return ["      (pas de [BKL-MAX-HOLD] exploitable : tenue non attribuable)"]
+
+    appel = dernier.group("syscall")
+    lignes = [f"      detenteur : syscall={appel}"]
+    nom_appel = appel.split("(")[0].split("/")[0]
+    if nom_appel in DETTE_CONNUE:
+        lignes.append(f"      DETTE D'ARCHITECTURE CONNUE : `{nom_appel}` traite l'espace")
+        lignes.append(f"      d'adressage ENTIER sous le gros verrou. Sa tenue suit la taille")
+        lignes.append(f"      du processus et la vitesse de la machine, pas la qualite du")
+        lignes.append(f"      verrouillage. Mesure locale (KVM) : 7-9 ms ; coureur de CI")
+        lignes.append(f"      emule : jusqu'a 366 ms pour le MEME code.")
+        lignes.append(f"      Ce budget ne se tiendra pas tant que `fork` recopiera tout.")
+    else:
+        lignes.append(f"      NOUVEAU SITE : `{nom_appel}` n'est pas la dette connue")
+        lignes.append(f"      ({', '.join(DETTE_CONNUE)}). C'est une regression de verrouillage.")
     return lignes
 
 
