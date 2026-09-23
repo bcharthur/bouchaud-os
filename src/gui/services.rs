@@ -37,6 +37,14 @@ static SAMPLE_MS: AtomicU64 = AtomicU64::new(0);
 /// qu'a une chose, la bonne : traduire un nom de processus en identifiant de
 /// service, pour que les mesures CPU et RSS aillent alimenter le registre.
 /// C'est le registre, et lui seul, qui decide ce que la fenetre montre.
+/// Combien de fois le detail des fautes n'a pas pu etre lu.
+///
+/// Voir le commentaire au point de lecture : `try_lock` echoue d'autant plus
+/// volontiers que le systeme faute, donc au pire moment. Ce compteur transforme
+/// un trou silencieux dans la serie en un fait qu'on peut lire.
+static RELEVES_FAUTES_MANQUES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 const PROCESSUS_VERS_SERVICE: [(&str, &str); 6] = [
     ("BouchaudBrowserHost", "browser.host"),
     ("RequestServer", "browser.request_server"),
@@ -156,7 +164,20 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
                 // la lecture anticipee, « zero » par le dimensionnement des
                 // arenes, « attente » par la contention. Un total ne dit
                 // lequel des trois grandit.
-                if let Some(par_categorie) = crate::kernel::task::fautes_par_categorie(row.pid) {
+                // UN RELEVE MANQUANT DOIT SE VOIR.
+                //
+                // `fautes_par_categorie` prend le livre des fautes par
+                // `try_lock` -- et c'est le bon choix : un releve periodique
+                // n'a pas a bloquer le chemin de faute. Mais l'echec est
+                // SILENCIEUX, et il est d'autant plus probable que le systeme
+                // faute beaucoup, c'est-a-dire exactement quand la ligne
+                // interesse. Une instrumentation muette au moment ou elle
+                // compte ne vaut pas mieux que pas d'instrumentation.
+                let detail = crate::kernel::task::fautes_par_categorie(row.pid);
+                if detail.is_none() {
+                    RELEVES_FAUTES_MANQUES.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(par_categorie) = detail {
                     use crate::kernel::fautes::Categorie;
                     let c = |categorie: Categorie| par_categorie[categorie.rang()];
                     let zero = c(Categorie::Zero);
@@ -403,9 +424,10 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         residu / 1_000_000,
     );
     crate::serial_println!(
-        "[PROC-STAT] zombies={} vivantes={}",
+        "[PROC-STAT] zombies={} vivantes={} releves_fautes_manques={}",
         zombies,
         vivantes,
+        RELEVES_FAUTES_MANQUES.load(Ordering::Relaxed),
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     crate::serial_println!(

@@ -103,14 +103,32 @@ def noyau(source):
     return forks, execs, procs
 
 
-def dernier_par_pid(lignes_proc):
-    """Le dernier releve de chaque pid : c'est celui qui porte le total."""
+def series_par_pid(lignes_proc, maximum=8):
+    """La SERIE de chaque pid, pas seulement son dernier releve.
+
+    Le dernier releve porte le total, ce qui repond a « combien au bout du
+    compte ». La question posee est autre : « pendant les vingt-trois secondes
+    avant `main`, ou est passe le temps ». Il y faut la progression -- un
+    processus qui prend dix mille fautes fichier dans ses cinq premieres
+    secondes puis plus rien ne se soigne pas comme un qui faute regulierement.
+    """
     par_pid = {}
     for ligne in lignes_proc:
         m = re.search(r"pid=(\d+)", ligne)
         if m:
-            par_pid[int(m.group(1))] = ligne
-    return [par_pid[pid] for pid in sorted(par_pid)]
+            par_pid.setdefault(int(m.group(1)), []).append(ligne)
+    sortie = []
+    for pid in sorted(par_pid):
+        serie = par_pid[pid]
+        # Les premiers relevés portent le demarrage ; le dernier porte le
+        # total. Entre les deux, on echantillonne plutot que de tout imprimer.
+        if len(serie) <= maximum:
+            retenus = serie
+        else:
+            pas = len(serie) / (maximum - 1)
+            retenus = [serie[int(i * pas)] for i in range(maximum - 1)] + [serie[-1]]
+        sortie.extend(retenus)
+    return sortie
 
 
 def main():
@@ -148,8 +166,8 @@ def main():
     for ligne in execs[:12] or ["   (aucune)"]:
         print(f"   {ligne}")
     print()
-    print("== fautes de page par processus (dernier releve de chaque pid) ==")
-    for ligne in dernier_par_pid(procs) or ["   (aucune)"]:
+    print("== fautes de page par processus, dans le temps ==")
+    for ligne in series_par_pid(procs) or ["   (aucune)"]:
         print(f"   {ligne}")
     return 0
 
