@@ -37,7 +37,7 @@ pixels exacts repond a la question sans rien savoir de la mise en page.
 Les distinguer importe : un port peut faire marcher HTMLImageElement et pas
 le chemin du style calcule, et la page parait alors « a moitie » illustree.
 
-    python3 tools/ci/verifie-surface-mire.py <capture.ppm|png> [--min 2048]
+    python3 tools/ci/analyse-surface-mire.py <capture.ppm|png> [--min 2048]
 """
 import struct
 import sys

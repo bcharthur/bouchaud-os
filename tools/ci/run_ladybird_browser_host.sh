@@ -207,7 +207,7 @@ if grep -aFq "HOST_SURFACE_MIRE_POSEE" "$LOG" && command -v socat >/dev/null 2>&
     if echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
         sleep 2
         if [ -s "$CAPTURE" ]; then
-            if python3 tools/ci/verifie-surface-mire.py "$CAPTURE"; then
+            if python3 tools/ci/analyse-surface-mire.py "$CAPTURE"; then
                 MIRE_VERDICT=ok
             else
                 MIRE_VERDICT=absente

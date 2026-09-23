@@ -385,7 +385,7 @@ HTML = r'''<!doctype html>
   // composee. La verification se fait donc DEHORS : la page pose une mire
   // de trois aplats purs, annonce qu'elle est posee, et le banc prend une
   // capture de l'ecran de la machine par le moniteur QEMU. C'est
-  // `tools/ci/verifie-surface-mire.py` qui compte les pixels.
+  // `tools/ci/analyse-surface-mire.py` qui compte les pixels.
   //
   // Les trois aplats empruntent DEUX chemins differents a dessein :
   //
