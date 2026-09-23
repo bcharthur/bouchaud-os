@@ -811,12 +811,37 @@ HTML = r'''<!doctype html>
     new Blob(['onmessage = e => { if (e.data === "ping") postMessage("pong"); };'],
              { type: "text/javascript" }));
 
-  const MATRICE = [
+  // L'ORDRE EST PILOTABLE, POUR EN FAIRE UNE EXPERIENCE ET NON UNE ANECDOTE.
+  //
+  // BOUCHAUD_C57_LA_PREMIERE_POSITION_OU_L_ORIGINE
+  //
+  // Le dossier porte deja deux observations, mais prises sur deux runs
+  // differents -- donc deux binaires et deux coureurs :
+  //
+  //     ordre http,blob   http_1 lent (~148 s)   blob_2 immediat
+  //     ordre blob,http   blob_1 lent (122 s)    http_2 9 s
+  //
+  // La lenteur suit la PREMIERE POSITION dans les deux cas. C'est fort, mais
+  // ce n'est pas une experience : rien n'etait tenu constant entre les deux.
+  //
+  // `?ordre=http` inverse la matrice. Deux demarrages QEMU FROIDS sur le MEME
+  // binaire, l'un avec chaque ordre, tiennent tout le reste constant et
+  // tranchent : si le premier est lent des deux cotes, c'est le demarrage a
+  // froid ; si `blob` reste lent en seconde position, c'est l'origine.
+  const ordre = new URLSearchParams(location.search).get("ordre") || "blob";
+  const MATRICE = ordre === "http" ? [
+    ["http", () => "/worker.js"],
+    ["blob", urlBlob],
+    ["http", () => "/worker.js"],
+    ["blob", urlBlob],
+  ] : [
     ["blob", urlBlob],
     ["http", () => "/worker.js"],
     ["blob", urlBlob],
     ["http", () => "/worker.js"],
   ];
+  console.log("HOST_WORKER_ORDRE ordre=" + ordre
+              + " matrice=" + MATRICE.map(e => e[0]).join(","));
 
   const releves = [];
   for (let rang = 0; rang < MATRICE.length; rang++) {

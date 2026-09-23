@@ -173,6 +173,62 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
                 // faute beaucoup, c'est-a-dire exactement quand la ligne
                 // interesse. Une instrumentation muette au moment ou elle
                 // compte ne vaut pas mieux que pas d'instrumentation.
+                // BOUCHAUD_C56_LIRE_AVANT_LA_MORT
+                //
+                // `FAULT_FILE_BREAKDOWN` ne sort qu'a la SORTIE du processus.
+                // Or les WebWorker restent vivants : dans le run 35888970521,
+                // aucun n'a produit de ligne par PID, et ce sont justement eux
+                // le sujet. Seul WebContent en a emis -- et trois fois, donc a
+                // chaque sortie de THREAD, pas de processus.
+                //
+                // Ce releve-ci est un SNAPSHOT en lecture seule du meme livre,
+                // pris au rythme du sondeur. Il ne remet rien a zero. Avec
+                // l'horloge partagee, il se recoupe avec les `WORKER_ETAPE` et
+                // borne donc les intervalles pre-`main` sans avoir a attendre
+                // la mort du processus.
+                //
+                // `user_ms`/`sys_ms` viennent du livre /proc deja en place :
+                // `wall - (user + sys)` dit ce qui s'est passe HORS processeur,
+                // et c'est la question ouverte des 88,5 s de pid=16.
+                if let Some(ph) = crate::kernel::task::phases_fichier_du_processus(row.pid) {
+                    let (ph, perdues_global) = ph;
+                    if ph.nombre != 0 {
+                        let (user_ms, sys_ms) =
+                            match crate::kernel::task::proc_processus_cumul(row.pid) {
+                                Some(c) => (c.user_ns / 1_000_000, c.system_ns / 1_000_000),
+                                None => (0, 0),
+                            };
+                        crate::kernel::dmesg::log_fmt(format_args!(
+                            "FAULT_FILE_SNAPSHOT t={} pid={} image={} faults={} \
+total_us={} wait_us={} acquire_us={} hit_n={} miss_n={} miss_us={} \
+miss_read_us={} direct_us={} mm_us={} map_us={} explained_us={} \
+residual_us={} residual_pct={} user_ms={} sys_ms={} lost_samples_global={}",
+                            crate::kernel::timer::monotonic_ms(),
+                            row.pid,
+                            base,
+                            ph.nombre,
+                            ph.total_ns / 1_000,
+                            ph.attente_ns / 1_000,
+                            ph.acquire_ns / 1_000,
+                            ph.hit_n,
+                            ph.miss_n,
+                            ph.miss_ns / 1_000,
+                            // DONT de miss_us : ne jamais additionner.
+                            ph.acquire_backing_ns / 1_000,
+                            ph.backing_direct_ns / 1_000,
+                            ph.mm_ns / 1_000,
+                            ph.map_ns / 1_000,
+                            ph.explique_ns() / 1_000,
+                            ph.residu_ns() / 1_000,
+                            ph.residu_pct(),
+                            user_ms,
+                            sys_ms,
+                            // Compteur GLOBAL : pas « ce pid a perdu N ».
+                            perdues_global,
+                        ));
+                    }
+                }
+
                 let detail = crate::kernel::task::fautes_par_categorie(row.pid);
                 if detail.is_none() {
                     RELEVES_FAUTES_MANQUES.fetch_add(1, Ordering::Relaxed);

@@ -350,3 +350,45 @@ jobs:
           path: .
       - name: Budgets de performance
         run: tools/ci/verifie_ladybird_perf.sh serie-browser-host.log
+
+  # ==========================================================================
+  # BOUCHAUD_C57_LA_PREMIERE_POSITION_OU_L_ORIGINE
+  # ==========================================================================
+  #
+  # Deux demarrages QEMU FROIDS sur le meme binaire, seul l'ordre des origines
+  # change. Il repond a une question que le smoke de reference ne peut pas
+  # poser, parce qu'il n'a qu'un ordre.
+  #
+  # Ce travail est un DIAGNOSTIC : il ne remplace ni le fonctionnel ni la
+  # performance, et n'en modifie aucun. Son echec ne masque rien -- les deux
+  # statuts existants restent ce qu'ils sont.
+  ordre-worker:
+    name: ladybird / ordre worker (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file socat
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Deux demarrages froids, ordres inverses
+        run: tools/ci/run_worker_ordre.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-ordre-worker-logs
+          path: |
+            serie-browser-host-ordre-blob.log
+            serie-browser-host-ordre-http.log
+            ordre-blob.sortie
+            ordre-http.sortie
+          if-no-files-found: warn

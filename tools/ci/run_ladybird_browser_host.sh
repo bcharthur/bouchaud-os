@@ -4,14 +4,27 @@ cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_ladybird_browser_host.sh BOOTIMAGE NATIVE_DIR}
 OUT=${2:?usage: run_ladybird_browser_host.sh BOOTIMAGE NATIVE_DIR}
 
+# DEUX VARIABLES ADDITIVES, POUR POUVOIR APPELER CE BANC DEUX FOIS.
+#
+# BOUCHAUD_C57_LA_PREMIERE_POSITION_OU_L_ORIGINE
+#
+# L'experience d'ordre demande DEUX demarrages QEMU froids sur le MEME
+# binaire. Sans suffixe, le second ecraserait les journaux du premier ; sans
+# `BO_SMOKE_ORDRE`, les deux chargeraient la meme page.
+#
+# Les deux sont vides par defaut : le smoke de reference ne change ni de nom
+# de fichier, ni d'URL, ni de comportement.
+SUFFIXE=${BO_SMOKE_SUFFIXE:-}
+
 for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
   test -f "$OUT/$f"
   file "$OUT/$f"
   ! readelf -l "$OUT/$f" | grep -q INTERP
 done
 
-rm -rf scenario-browser-host ladybird-browser-host.img serie-browser-host.log fixture-browser-host.log
-python3 tools/health/browser_host_fixture.py > fixture-browser-host.log 2>&1 &
+rm -rf scenario-browser-host ladybird-browser-host${SUFFIXE}.img \
+       serie-browser-host${SUFFIXE}.log fixture-browser-host${SUFFIXE}.log
+python3 tools/health/browser_host_fixture.py > fixture-browser-host${SUFFIXE}.log 2>&1 &
 FIXTURE=$!
 trap 'kill "$FIXTURE" 2>/dev/null || true' EXIT
 sleep 1
@@ -39,12 +52,12 @@ export BOUCHAUD_M9=1
 export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_M11=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
-export BOUCHAUD_M9_URL='http://10.0.2.2:18082/browser-host.html'
+export BOUCHAUD_M9_URL='http://10.0.2.2:18082/browser-host.html${BO_SMOKE_ORDRE:+?ordre=$BO_SMOKE_ORDRE}'
 desktop
 AUTORUN
-(cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
+(cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 
-LOG=serie-browser-host.log
+LOG=serie-browser-host${SUFFIXE}.log
 : > "$LOG"
 
 # LE MONITEUR QEMU, POUR REGARDER L'ECRAN.
@@ -58,8 +71,8 @@ LOG=serie-browser-host.log
 #
 # Aucune interface de page ne permet de relire la surface composee. On
 # regarde donc l'ecran de la machine, par `screendump`.
-MONITEUR=$PWD/moniteur-browser-host.sock
-CAPTURE=$PWD/surface-browser-host.ppm
+MONITEUR=$PWD/moniteur-browser-host${SUFFIXE}.sock
+CAPTURE=$PWD/surface-browser-host${SUFFIXE}.ppm
 rm -f "$MONITEUR" "$CAPTURE"
 
 # Les jalons du navigateur, dans l'ordre ou il les franchit.
@@ -170,7 +183,7 @@ SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 # configuration que personne n'expedie ne mesure pas le produit.
 qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
-  -drive format=raw,file=ladybird-browser-host.img \
+  -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
@@ -441,9 +454,9 @@ if [ "$manquants" -ne 0 ]; then
   echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=jalons manquants=$manquants"
   exit 1
 fi
-grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
-grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host.log
-grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host.log
+grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${SUFFIXE}.log
+grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
+grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
 for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur'; do
   if grep -aFq "$forbidden" "$LOG"; then
@@ -532,19 +545,35 @@ fi
 # ====================================================================
 echo
 echo "== preuves du demarrage a froid =="
+# `[^\r]*` ETAIT UN PIEGE, ET IL A COUTE UN RUN.
+#
+# Dans une expression reguliere etendue, `\r` a l'interieur d'une classe ne
+# designe PAS un retour chariot : il vaut « ni backslash ni r ». Le motif
+# coupait donc chaque ligne au premier `r` rencontre, et le bloc de preuves du
+# run 35888970521 a rendu :
+#
+#     BACKING_PROBE path=/bo-navigateu
+#     FAULT_FILE_BREAKDOWN t=353624 pid=15 sou
+#     FAULT_WAIT count=0 total_us=0 wo
+#
+# Les controles `source=` et `faults=` etaient impossibles sur ce journal. Le
+# meme piege avait deja ete corrige dans le balayage de tranche ; il restait
+# ici. `.*` suffit, et `tr -d` retire les retours chariot pour de vrai.
 for motif in \
-    'BACKING_PROBE[^\r]*' \
-    'HOST_SURFACE_INSERTION[^\r]*' \
-    'HOST_SURFACE_CAPTURE[^\r]*' \
-    'BOUCHAUD_SESSION_FIN[^\r]*' \
-    'BOUCHAUD_SYSTEM_EXIT[^\r]*' \
-    'PERF_EXECVE_BKL[^\r]*' \
-    'FAULT_FILE_BREAKDOWN[^\r]*' \
-    'BACKING_DISK[^\r]*' \
-    'BACKING_MEMORY[^\r]*' \
-    'FAULT_WAIT[^\r]*'
+    'BACKING_PROBE .*' \
+    'HOST_SURFACE_INSERTION .*' \
+    'HOST_SURFACE_CAPTURE .*' \
+    'BOUCHAUD_SESSION_FIN .*' \
+    'BOUCHAUD_SYSTEM_EXIT .*' \
+    'PERF_EXECVE_BKL .*' \
+    'FAULT_FILE_BREAKDOWN .*' \
+    'FAULT_FILE_SNAPSHOT .*' \
+    'BACKING_DISK_GLOBAL .*' \
+    'BACKING_MEMORY_GLOBAL .*' \
+    'CLEAN_PAGE_CACHE_GLOBAL .*' \
+    'FAULT_WAIT .*'
 do
-    grep -aoE "$motif" "$LOG" 2>/dev/null | tr -d '\r' | awk '!vu[$0]++' | tail -8 \
+    grep -aoE "$motif" "$LOG" 2>/dev/null | tr -d '\r' | awk '!vu[$0]++' | tail -10 \
         | sed 's/^/  /' || true
 done
 echo "  (une famille absente ci-dessus n'a pas ete emise par ce noyau)"
