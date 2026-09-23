@@ -997,6 +997,22 @@ replace_once(
 }""",
     """Messages::WebContentClient::StartWorkerAgentResponse WebContentClient::start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request)
 {
+#if defined(BOUCHAUD_PORT)
+    // LE PREMIER INSTANT DE LA CHAINE, et il manquait.
+    //
+    // BOUCHAUD_C29_WORKER_PREMIERE_DEMANDE
+    //
+    // Le releve du run 35829303875 porte les etapes des agents 2, 3 et 4 --
+    // et AUCUNE pour le premier. Son processus a pourtant trace sa propre
+    // naissance (`main pid=16`), si bien que le cout le plus interessant de
+    // tous, celui du demarrage a froid, est le seul sans borne de depart.
+    //
+    // `lancement_demande` est emis par WorkerProcessManager, plus loin dans
+    // la chaine. Cette ligne-ci est emise a l'ARRIVEE de la demande, avant
+    // toute recherche de vue et avant tout refus : elle ne peut pas manquer.
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=demande_recue page_id={}",
+        MonotonicTime::now().milliseconds(), page_id);
+#endif
     if (auto view = view_for_page_id(page_id); view.has_value()) {
         auto agent_id = WorkerProcessManager::the().start_worker_agent(*this, page_id, move(request));
 #if defined(BOUCHAUD_PORT)

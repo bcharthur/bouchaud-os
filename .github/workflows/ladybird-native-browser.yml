@@ -257,7 +257,7 @@ jobs:
       - name: QEMU + outils
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file socat
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
