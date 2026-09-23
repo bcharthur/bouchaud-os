@@ -519,4 +519,39 @@ else
   echo "  (verdict de performance non bloquant ici ; voir le travail de CI dedie)"
 fi
 
+# ====================================================================
+# LES PREUVES, EN FIN DE SORTIE
+#
+# BOUCHAUD_C53_LISIBLE_DANS_LA_CI
+#
+# Un journal serie de cinq mille lignes est un artefact, pas un rapport. Les
+# outils qui lisent la CI n'en voient que la fin -- et c'est precisement la que
+# les lignes qui decident manquaient. Les republier ici coute trois `grep` et
+# evite de telecharger l'artefact pour repondre a « la mire a-t-elle ete
+# capturee » ou « pourquoi la session s'est-elle arretee ».
+# ====================================================================
+echo
+echo "== preuves du demarrage a froid =="
+for motif in \
+    'BACKING_PROBE[^\r]*' \
+    'HOST_SURFACE_INSERTION[^\r]*' \
+    'HOST_SURFACE_CAPTURE[^\r]*' \
+    'BOUCHAUD_SESSION_FIN[^\r]*' \
+    'BOUCHAUD_SYSTEM_EXIT[^\r]*' \
+    'PERF_EXECVE_BKL[^\r]*' \
+    'FAULT_FILE_BREAKDOWN[^\r]*' \
+    'BACKING_DISK[^\r]*' \
+    'BACKING_MEMORY[^\r]*' \
+    'FAULT_WAIT[^\r]*'
+do
+    grep -aoE "$motif" "$LOG" 2>/dev/null | tr -d '\r' | awk '!vu[$0]++' | tail -8 \
+        | sed 's/^/  /' || true
+done
+echo "  (une famille absente ci-dessus n'a pas ete emise par ce noyau)"
+
+echo
+echo "== les six services, cote a cote =="
+python3 tools/ci/analyse-demarrage.py "$LOG" 2>/dev/null \
+    | sed -n '/six services/,/^$/p' | head -12 || true
+
 echo LADYBIRD_BROWSER_HOST_OK

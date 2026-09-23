@@ -35,7 +35,18 @@ while IFS= read -r ligne; do
     case "$ligne" in
         *' FAIL '*) echecs=$((echecs + 1)) ;;
     esac
-done < <(grep -aoE 'HOST_WORKER_[A-Z_]*PERF[A-Z_]* (OK|FAIL).*' "$LOG" | sed 's/\r//g' || true)
+# CHAQUE VERDICT EST COMPTE UNE FOIS, ET PAS DEUX.
+#
+# Le run 35867088227 a rendu `hors_budget=4/6` alors qu'il n'y a que TROIS
+# mesures. La page emet chaque ligne deux fois -- une fois brute, une fois
+# citee par le relais de console -- et `grep -o` trouvait les deux. Un verdict
+# qui double ses propres chiffres ne peut pas servir de budget.
+#
+# La normalisation retire le guillemet de fin puis deduplique : ces lignes sont
+# des verdicts nommes, emis une fois par origine, donc deux lignes identiques
+# sont forcement la meme mesure vue deux fois.
+done < <(grep -aoE 'HOST_WORKER_[A-Z_]*PERF[A-Z_]* (OK|FAIL)[^"]*' "$LOG" \
+    | sed 's/\r//g; s/[[:space:]]*$//' | awk '!vu[$0]++' || true)
 
 if [ "$lignes" -eq 0 ]; then
     # INCONCLUSIF N'EST PAS PASS. Le banc a tourne sans produire une seule
