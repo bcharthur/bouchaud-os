@@ -152,17 +152,91 @@ pub fn fautes_par_categorie(
 /// decrit que les fautes dont le cout ENTIER a ete l'attente. Une faute qui
 /// finit par charger appartient a sa categorie, et son attente est deja
 /// comprise dans sa duree.
+// ============================================================================
+// BOUCHAUD_C51_OU_SONT_LES_HUIT_SECONDES
+// ============================================================================
+//
+// `FichierPrive total_us` mesure la latence VECUE par le processus -- attente
+// comprise, et c'est voulu : c'est ce que l'utilisateur subit. Mais elle ne
+// dit pas OU le temps est passe, et les remedes different du tout au tout :
+//
+//     backing ATA domine   -> lecture anticipee, groupement des secteurs
+//     attente domine       -> contention entre processus sur les memes pages
+//     cache domine         -> dimensionnement ou politique d'eviction
+//     verrou mm domine     -> granularite du verrouillage
+//
+// Ces compteurs decomposent le total SANS en changer la semantique : leur
+// somme doit l'approcher, et ce qui reste est publie comme residu plutot que
+// reparti au juge. Un residu de trente pour cent se voit ; une repartition
+// arbitraire ne se voit pas.
+//
+// Cout : une lecture d'horloge par phase traversee, sur un chemin qui prend
+// deja des verrous et parfois lit un disque.
+pub(crate) static PHASE_ATTENTE_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_ATTENTE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_ATTENTE_N: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_CACHE_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_BACKING_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_MM_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PHASE_MAP_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static FICHIER_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static FICHIER_N: AtomicU64 = AtomicU64::new(0);
+
+/// (n, total_ns, attente, cache, backing, mm, map) du chemin FichierPrive.
+pub fn phases_fichier() -> (u64, u64, u64, u64, u64, u64, u64) {
+    (
+        FICHIER_N.load(Ordering::Relaxed),
+        FICHIER_TOTAL_NS.load(Ordering::Relaxed),
+        PHASE_ATTENTE_NS.load(Ordering::Relaxed),
+        PHASE_CACHE_NS.load(Ordering::Relaxed),
+        PHASE_BACKING_NS.load(Ordering::Relaxed),
+        PHASE_MM_NS.load(Ordering::Relaxed),
+        PHASE_MAP_NS.load(Ordering::Relaxed),
+    )
+}
+
+/// (compte, total_ns, pire_ns) de l'attente d'un chargeur concurrent.
+pub fn attente_chargeur() -> (u64, u64, u64) {
+    (
+        PHASE_ATTENTE_N.load(Ordering::Relaxed),
+        PHASE_ATTENTE_NS.load(Ordering::Relaxed),
+        PHASE_ATTENTE_PIRE_NS.load(Ordering::Relaxed),
+    )
+}
+
 pub struct Note {
     pid: u32,
     debut_ns: u64,
     posee: bool,
+    /// Phases traversees par CETTE faute. Sur la pile : aucune contention.
+    attente_ns: u64,
+    cache_ns: u64,
+    backing_ns: u64,
+    mm_ns: u64,
+    map_ns: u64,
 }
 
 impl Note {
     /// Ouvre le compte d'une faute : l'horloge part ici.
     pub fn ouvre(pid: u32) -> Note {
-        Note { pid, debut_ns: crate::kernel::timer::monotonic_ns(), posee: false }
+        Note {
+            pid,
+            debut_ns: crate::kernel::timer::monotonic_ns(),
+            posee: false,
+            attente_ns: 0,
+            cache_ns: 0,
+            backing_ns: 0,
+            mm_ns: 0,
+            map_ns: 0,
+        }
     }
+
+    /// Ajoute le temps d'une phase. Cumulatif : une faute peut y repasser.
+    pub fn attente(&mut self, ns: u64) { self.attente_ns = self.attente_ns.saturating_add(ns); }
+    pub fn cache(&mut self, ns: u64) { self.cache_ns = self.cache_ns.saturating_add(ns); }
+    pub fn backing(&mut self, ns: u64) { self.backing_ns = self.backing_ns.saturating_add(ns); }
+    pub fn mm(&mut self, ns: u64) { self.mm_ns = self.mm_ns.saturating_add(ns); }
+    pub fn map(&mut self, ns: u64) { self.map_ns = self.map_ns.saturating_add(ns); }
 
     /// Classe cette faute. Le deuxieme appel est refuse et signale.
     pub fn pose(&mut self, categorie: crate::kernel::fautes::Categorie) {
@@ -171,6 +245,18 @@ impl Note {
             return;
         }
         self.posee = true;
+        // La decomposition n'est retenue que pour `FichierPrive` : c'est la
+        // seule categorie dont on cherche la composition, et compter les
+        // autres remplirait le journal sans rien eclairer.
+        if matches!(categorie, crate::kernel::fautes::Categorie::FichierPrive) {
+            let total = crate::kernel::timer::monotonic_ns().saturating_sub(self.debut_ns);
+            FICHIER_N.fetch_add(1, Ordering::Relaxed);
+            FICHIER_TOTAL_NS.fetch_add(total, Ordering::Relaxed);
+            PHASE_CACHE_NS.fetch_add(self.cache_ns, Ordering::Relaxed);
+            PHASE_BACKING_NS.fetch_add(self.backing_ns, Ordering::Relaxed);
+            PHASE_MM_NS.fetch_add(self.mm_ns, Ordering::Relaxed);
+            PHASE_MAP_NS.fetch_add(self.map_ns, Ordering::Relaxed);
+        }
         note_faute(self.pid, categorie, self.debut_ns);
     }
 }
@@ -510,7 +596,19 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
                 let ticket = record.waiters.ticket();
                 drop(state);
                 FAULT_WAITS.fetch_add(1, Ordering::Relaxed);
+                // BOUCHAUD_C51 : l'attente d'un chargeur concurrent est le
+                // candidat le plus serieux pour expliquer qu'une meme page
+                // coute huit secondes au premier venu et cinquante
+                // millisecondes au troisieme. `FAULT_WAITS` la comptait sans
+                // jamais la chronometrer.
+                let avant_attente = crate::kernel::timer::monotonic_ns();
                 record.waiters.wait(ticket);
+                let attendu = crate::kernel::timer::monotonic_ns()
+                    .saturating_sub(avant_attente);
+                note.attente(attendu);
+                PHASE_ATTENTE_N.fetch_add(1, Ordering::Relaxed);
+                PHASE_ATTENTE_NS.fetch_add(attendu, Ordering::Relaxed);
+                PHASE_ATTENTE_PIRE_NS.fetch_max(attendu, Ordering::Relaxed);
                 a_attendu = true;
             }
             FaultPageState::Present => {
@@ -713,10 +811,16 @@ fn peuple_page_loader(
             drop(p);
 
             if let Some(key) = clean_key {
-                if let Some(frame) = crate::kernel::clean_page_cache::acquire(key) {
+                let avant_cache = crate::kernel::timer::monotonic_ns();
+                let acquise = crate::kernel::clean_page_cache::acquire(key);
+                note.cache(crate::kernel::timer::monotonic_ns().saturating_sub(avant_cache));
+                if let Some(frame) = acquise {
                     // No process-MM guard is held while readahead performs disk/cache work.
                     crate::kernel::readahead::observe_clean(key);
+                    let avant_mm = crate::kernel::timer::monotonic_ns();
                     let mut mm = processus.mm.lock();
+                    note.mm(crate::kernel::timer::monotonic_ns().saturating_sub(avant_mm));
+                    let avant_map = crate::kernel::timer::monotonic_ns();
                     let outcome = if mm.space.pml4() != fault_pml4 {
                         FaultOutcome::Retired
                     } else if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
@@ -730,6 +834,7 @@ fn peuple_page_loader(
                         crate::kernel::vmm::ResidentKind::FilePrivate,
                     ) {
                         mm.clean_pages.push(CleanPageMapping { virt: page, key });
+                        note.map(crate::kernel::timer::monotonic_ns().saturating_sub(avant_map));
                         FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
                         note.pose(crate::kernel::fautes::Categorie::FichierPrive);
                         // The current mapping reference now owns `key`. Publish
@@ -766,16 +871,23 @@ fn peuple_page_loader(
                 let destination = (start - page) as usize;
                 let source_offset = file_offset.saturating_add(start.saturating_sub(mapping_start));
                 stall_pf_file_begin(source_offset);
+                let avant_backing = crate::kernel::timer::monotonic_ns();
                 let got = crate::fs::backing::read_at(
                     node,
                     source_offset as usize,
                     &mut page_data[destination..destination + wanted],
                 );
+                note.backing(
+                    crate::kernel::timer::monotonic_ns().saturating_sub(avant_backing),
+                );
                 stall_pf_file_done(got, wanted);
                 if got != wanted { return FaultOutcome::IoError; }
             }
 
+            let avant_mm = crate::kernel::timer::monotonic_ns();
             let mut mm = processus.mm.lock();
+            note.mm(crate::kernel::timer::monotonic_ns().saturating_sub(avant_mm));
+            let avant_map = crate::kernel::timer::monotonic_ns();
             if mm.space.pml4() != fault_pml4 { return FaultOutcome::Retired; }
             if mapping_token(&mm.promesses, page).as_ref() != Some(token) {
                 return FaultOutcome::Retry;
@@ -798,6 +910,7 @@ fn peuple_page_loader(
                 processus.mm.lock().space.finish_unmap(retirement);
                 return FaultOutcome::IoError;
             }
+            note.map(crate::kernel::timer::monotonic_ns().saturating_sub(avant_map));
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
             note.pose(crate::kernel::fautes::Categorie::FichierPrive);
             FaultOutcome::Resolved

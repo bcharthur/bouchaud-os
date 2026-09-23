@@ -41,6 +41,47 @@ Releve `[PERF-PROC]` de #348, dernier echantillon de chaque processus :
 
 **Total des fautes fichier : environ 41 s.**
 
+## 2 bis. CORRECTION : ce que la section 3 affirmait de trop
+
+Ce document a d'abord ecrit « le premier paie le disque » et « une faute a
+155 ms, c'est une lecture de disque ». Les deux etaient trop affirmatives.
+
+`faute_memoire.rs` le dit lui-meme : « une faute qui finit par charger
+appartient a sa categorie, et **son attente est deja comprise dans sa duree** ».
+`FichierPrive total_us` mesure donc la latence VECUE par le processus -- ce
+qui est la bonne grandeur, mais pas une mesure d'entrees-sorties.
+
+    OBSERVE       une faute classee FichierPrive a coute 155 ms au processus.
+    NON ETABLI    combien de ces 155 ms sont du backing, de l'attente, du
+                  verrouillage, du cache ou du mapping.
+
+De meme, « le premier paie le disque » devient : « le premier paie un cout
+associe au chemin FichierPrive FROID ; sa composition se mesure, et pour
+Ladybird elle ne l'est pas encore. »
+
+## 2 ter. Une inference invalide, et pourquoi
+
+J'ai sonde une image de scenario, trouve tous les fichiers `disk_backed=0`, et
+failli en conclure que les ELF de Ladybird ne sont pas adosses au disque.
+C'etait faux, pour une raison de seuil :
+
+    tar.rs   INLINE_BOOT_FILE_SIZE = 4 Mio
+             <= 4 Mio  -> contenu copie dans le noeud, AUCUNE etendue
+             >  4 Mio  -> register_disk(Drive::Slave)   sous QEMU
+             >  4 Mio  -> register_memory(adresse)      sur la Trigkey UEFI
+
+Les fichiers de mon scenario faisaient treize kilooctets : inline PAR
+CONSTRUCTION. Les ELF de Ladybird depassent tous quatre mebioctets. Verifie
+avec un temoin de six mebioctets :
+
+    BACKING_PROBE path=/gros-temoin size=6291456 source=ata-disk generation=1
+    BACKING_PROBE path=/coutfork    size=13864   source=inline   generation=none
+
+`disk_backed` est desormais remplace par `BackingKind::{Inline,Disk,Memory}` :
+une lecture ATA et un memcpy depuis le ramdisk UEFI ne se soignent pas pareil,
+et une optimisation du chemin ATA qui gagnerait trente secondes en CI pourrait
+ne rien changer sur la machine physique.
+
 ## 3. La demonstration tient en trois lignes
 
     WebWorker #1  pid=16  fichier=2440 fautes / 8 008 342 us
@@ -78,9 +119,66 @@ poste cent fois plus petit que celui qui domine.
 Zero fichier, zero page. Le sous-systeme est present, il se declare termine,
 et il n'a rien charge.
 
+## 5 bis. MESURE CAUSALE LOCALE : le contraste reproduit sans Ladybird
+
+Un ELF de 5,01 Mio -- au-dessus du seuil, donc `ata-disk`, donc le meme chemin
+que les binaires de Ladybird -- lance quatre fois, toutes pages touchees :
+
+      #  pid  fautes  total_ms  attente  acquire  cc_miss  cc_lect  cc_att   map  residu  ata_n   ata_ms
+      1   10      77      73.2      0.0     61.5   1159.1   1114.9     0.0   1.9     9.5     81   1108.3
+      2   11      77      15.1      0.0      0.6      0.0      0.0     0.0  12.6     1.8      0      0.0
+      3   12      77       2.7      0.0      0.4      0.0      0.0     0.0   0.6     1.6      0      0.0
+      4   13      77       2.6      0.0      0.3      0.0      0.0     0.0   0.7     1.6      0      0.0
+
+Le contraste est reproduit : **73,2 ms a froid contre 2,6 ms a chaud**, pour un
+nombre de fautes IDENTIQUE (77). Meme forme que 8 s contre 54 ms chez Ladybird.
+
+Et il est decompose :
+
+    cc_miss   1159,1 ms   le cout des defauts de clean_page_cache
+    cc_lect   1114,9 ms   dont 96 % est la LECTURE DU SUPPORT
+    ata_ms    1108,3 ms   et cette lecture est bien de l'ATA
+    attente       0,0 ms
+    cc_att        0,0 ms   AUCUNE contention
+
+Un defaut de ma propre instrumentation a ete corrige en route : `acquire` ne
+consulte pas un cache, il LIT LE SUPPORT lui-meme sur un defaut
+(`page_cache.rs`). La premiere version publiait `cache_us=62 ms backing_us=0`,
+ce qui se lisait « le cache est lent et le disque ne fait rien ». Le disque
+travaillait DANS le cache.
+
+### Ce que cela etablit, et sur quoi
+
+CAUSE CONFIRMEE, pour CETTE charge, sous QEMU, source `ata-disk` :
+le surcout du premier lancement est de la lecture ATA faite dans
+`clean_page_cache::acquire`, et la contention n'y est pour rien.
+
+NON ETABLI pour Ladybird. Deux raisons de ne pas extrapoler :
+
+1. Ici le processus ne paie que 73 ms sur 1,16 s de chargement systeme :
+   l'essentiel est paye par la lecture anticipee et l'image d'`execve`, hors
+   des fautes comptees. Chez Ladybird, WebWorker #1 paie 8 s DANS ses propres
+   fautes. Ce n'est pas la meme repartition.
+2. `ata_n=81` pour 5,25 Mio, soit environ 64 Kio par lecture : la lecture
+   anticipee groupe bien. Si les fautes de Ladybird tombent hors de sa
+   fenetre, elles feraient des lectures de quatre kilooctets -- seize fois
+   plus d'operations. C'est une hypothese testable, pas une conclusion.
+
+### Sur la Trigkey, ce resultat ne vaut PAS
+
+Les gros ELF y passent par `register_memory` : un memcpy depuis le ramdisk
+UEFI, pas une lecture ATA. `BACKING_MEMORY` les compte a part precisement pour
+que les deux ne soient jamais melanges dans une meme conclusion.
+
 ## 6. La prochaine optimisation, UNE SEULE
 
-Faire lire au prechauffage les binaires et bibliotheques de Ladybird avant que
+SUSPENDUE. Avant de prechauffer quoi que ce soit, il faut la meme
+decomposition sur un vrai run Ladybird -- l'instrumentation existe desormais,
+il manque le run. Prechauffer maintenant reviendrait a corriger une cause
+etablie sur une charge synthetique et supposee sur la vraie.
+
+L'idee, quand elle reviendra :
+faire lire au prechauffage les binaires et bibliotheques de Ladybird avant que
 le premier service ne les touche.
 
 - **Hypothese** : les 41 s de fautes fichier sont des lectures de disque

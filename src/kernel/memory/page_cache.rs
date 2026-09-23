@@ -67,7 +67,48 @@ fn allocate_clean_frame() -> Option<u64> {
     None
 }
 
+// BOUCHAUD_C52_ACQUIRE_N_EST_PAS_UN_LOOKUP
+//
+// `acquire` ne consulte pas un cache : sur un defaut, il LIT LE SUPPORT
+// lui-meme (voir la branche `loader` plus bas). Chronometrer l'appel entier et
+// l'appeler « cache » melange donc deux choses qui n'ont rien a voir :
+//
+//     un hit          -> une prise de verrou et un compteur
+//     un miss         -> une allocation de trame PLUS une lecture ATA
+//     une attente     -> un autre coeur fait le travail
+//
+// La premiere version de la decomposition des fautes publiait `cache_us=62 ms`
+// et `backing_us=0`, ce qui se lisait « le cache est lent et le disque ne fait
+// rien ». C'etait faux : le disque travaillait DANS le cache.
+static HIT_NS: AtomicU64 = AtomicU64::new(0);
+static MISS_NS: AtomicU64 = AtomicU64::new(0);
+static MISS_READ_NS: AtomicU64 = AtomicU64::new(0);
+static WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// (hits, miss, attentes, hit_ns, miss_ns, miss_read_ns, wait_ns, pire_ns)
+pub fn acquire_timing() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    (
+        HITS.load(Ordering::Relaxed),
+        MISSES.load(Ordering::Relaxed),
+        WAITS.load(Ordering::Relaxed),
+        HIT_NS.load(Ordering::Relaxed),
+        MISS_NS.load(Ordering::Relaxed),
+        MISS_READ_NS.load(Ordering::Relaxed),
+        WAIT_NS.load(Ordering::Relaxed),
+        PIRE_NS.load(Ordering::Relaxed),
+    )
+}
+
+#[inline]
+fn note_duree(compteur: &AtomicU64, debut_ns: u64) {
+    let d = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
+    compteur.fetch_add(d, Ordering::Relaxed);
+    PIRE_NS.fetch_max(d, Ordering::Relaxed);
+}
+
 pub fn acquire(key: Key) -> Option<u64> {
+    let debut_acquire_ns = crate::kernel::timer::monotonic_ns();
     if crate::fs::backing::generation(key.node) != Some(key.generation)
         || key.offset % PAGE_SIZE != 0
     { return None; }
@@ -86,6 +127,7 @@ pub fn acquire(key: Key) -> Option<u64> {
                     HITS.fetch_add(1, Ordering::Relaxed);
                     if mappings == 0 { cesse_d_etre_recuperable(); }
                     else { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
+                    note_duree(&HIT_NS, debut_acquire_ns);
                     return Some(frame);
                 }
                 State::Failed => return None,
@@ -125,7 +167,12 @@ pub fn acquire(key: Key) -> Option<u64> {
         let result = allocate_clean_frame().and_then(|frame| {
             let dst = crate::kernel::memory::phys_to_virt(frame);
             let bytes = unsafe { core::slice::from_raw_parts_mut(dst, PAGE_SIZE as usize) };
+            let avant_lecture = crate::kernel::timer::monotonic_ns();
             let got = crate::fs::backing::read_at(key.node, key.offset as usize, bytes);
+            MISS_READ_NS.fetch_add(
+                crate::kernel::timer::monotonic_ns().saturating_sub(avant_lecture),
+                Ordering::Relaxed,
+            );
             if got == PAGE_SIZE as usize
                 && crate::fs::backing::generation(key.node) == Some(key.generation)
             {
@@ -146,6 +193,7 @@ pub fn acquire(key: Key) -> Option<u64> {
             CACHE.lock().propose(key);
         }
         entry.waiters.wake_all();
+        note_duree(&MISS_NS, debut_acquire_ns);
         return result;
     }
 
@@ -161,6 +209,7 @@ pub fn acquire(key: Key) -> Option<u64> {
                 HITS.fetch_add(1, Ordering::Relaxed);
                 if mappings == 0 { cesse_d_etre_recuperable(); }
                 else { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
+                note_duree(&WAIT_NS, debut_acquire_ns);
                 return Some(frame);
             }
             State::Failed => return None,

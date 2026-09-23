@@ -45,6 +45,80 @@ const BINAIRES: &[&str] = &[
     "/usr/libexec/ladybird/ImageDecoder",
 ];
 
+/// Tout ce qu'on SONDE, ce qui n'est pas tout ce qu'on prechauffe.
+///
+/// BOUCHAUD_C48_SONDER_AVANT_DE_CORRIGER
+///
+/// `[PRECHAUFFAGE] termine=1 fichiers=0 pages=0 duree_ms=0` dit que le fil a
+/// bien tourne et n'a RIEN trouve. Trois sorties de `prechauffe_un` peuvent
+/// produire ce zero, et elles n'appellent pas le meme remede :
+///
+///   1. le chemin ne se resout pas          -> la liste est fausse
+///   2. le noeud n'a pas d'etendue disque   -> le contenu est deja en memoire,
+///                                             il n'y a rien a precharger
+///   3. la taille logique est nulle         -> le fichier est vide
+///
+/// Deviner laquelle ferait corriger la mauvaise. La sonde les distingue, pour
+/// chaque chemin, sans rien precharger.
+///
+/// `WebWorker` y figure alors qu'il est ABSENT de `BINAIRES` : c'est
+/// precisement ce qu'on veut savoir -- le premier worker paie huit secondes de
+/// fautes fichier, et le prechauffeur ne l'a jamais regarde.
+const CANDIDATS: &[&str] = &[
+    "/bo-navigateur",
+    "/usr/libexec/ladybird/WebContent",
+    "/usr/libexec/ladybird/Compositor",
+    "/usr/libexec/ladybird/RequestServer",
+    "/usr/libexec/ladybird/ImageDecoder",
+    "/usr/libexec/ladybird/WebWorker",
+    // Charge d'epreuve locale du chemin FichierPrive froid : elle depasse
+    // `INLINE_BOOT_FILE_SIZE` et arrive donc par le meme chemin que les ELF
+    // de Ladybird. Absente des images ordinaires, ou la sonde dit `absent`.
+    "/gros-elf",
+];
+
+/// Publie la SOURCE REELLE de chaque chemin candidat. Ne precharge RIEN.
+///
+/// BOUCHAUD_C50_TROIS_SOURCES_PAS_UN_BOOLEEN
+///
+/// La sonde precedente rendait `disk_backed=0|1`, ce qui melangeait deux
+/// choses qui n'ont rien a voir : une lecture ATA par secteurs et un memcpy
+/// depuis le ramdisk UEFI. Pire, elle a servi a conclure a tort -- sur une
+/// image de scenario dont TOUS les fichiers font moins de quatre mebioctets,
+/// donc sont inline par construction (`tar.rs`, `INLINE_BOOT_FILE_SIZE`).
+///
+/// Les ELF de Ladybird depassent tous ce seuil. Ils sont donc ATA sous QEMU
+/// (`register_disk(Drive::Slave)`, le second disque) et MEMOIRE sur la Trigkey
+/// (`register_memory`). Conclure de l'un sur l'autre serait faux.
+fn sonde_les_candidats() {
+    for chemin in CANDIDATS.iter() {
+        let resolu = {
+            let fs = crate::fs::ramfs::fs();
+            fs.resolve(chemin, 0)
+        };
+        match resolu {
+            None => crate::serial_println!(
+                "BACKING_PROBE path={} node=- size=- source=absent generation=none",
+                chemin,
+            ),
+            Some(node) => {
+                let taille = crate::fs::backing::logical_len(node);
+                let source = crate::fs::backing::kind(node).etiquette();
+                match crate::fs::backing::generation(node) {
+                    Some(g) => crate::serial_println!(
+                        "BACKING_PROBE path={} node={} size={} source={} generation={}",
+                        chemin, node, taille, source, g,
+                    ),
+                    None => crate::serial_println!(
+                        "BACKING_PROBE path={} node={} size={} source={} generation=none",
+                        chemin, node, taille, source,
+                    ),
+                }
+            }
+        }
+    }
+}
+
 /// Plafond de pages prechauffees, toutes cibles confondues.
 ///
 /// Soixante-quatre mebioctets. Le cache de pages propres en retient au plus
@@ -136,6 +210,10 @@ fn fil_prechauffage() -> ! {
     // l'ecran. Le prechauffage sert un clic qui n'aura pas lieu avant
     // plusieurs secondes ; il peut attendre.
     crate::kernel::task::sleep_ticks(3_000);
+
+    // La sonde d'abord, et INCONDITIONNELLEMENT : elle explique le resultat
+    // du prechauffage quel qu'il soit, y compris quand il ne fait rien.
+    sonde_les_candidats();
 
     let debut = crate::kernel::timer::monotonic_ns();
     let mut budget = PAGES_MAX;

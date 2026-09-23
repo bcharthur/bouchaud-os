@@ -32,6 +32,29 @@ struct BackingExtent {
 static EXTENTS: SpinLock<Vec<BackingExtent>> = SpinLock::new(Vec::new());
 static DISK_READ_OPS: AtomicU64 = AtomicU64::new(0);
 static DISK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_C49_COMBIEN_DE_TEMPS_LE_DISQUE
+//
+// `reads` et `bytes` disent COMBIEN, jamais COMBIEN DE TEMPS. Or la question
+// posee est : les huit secondes de fautes fichier du premier WebWorker sont-
+// elles des lectures de disque, ou de l'attente ?
+//
+// La duree d'une faute, telle que `Note` la mesure, inclut deja son attente --
+// le commentaire de `faute_memoire.rs` le dit. Elle ne peut donc pas trancher
+// seule. Ces deux compteurs-ci ne mesurent QUE le chemin disque reel : la
+// branche `BackingSource::Memory` sort avant eux, parce qu'un memcpy depuis le
+// ramdisk n'est pas une lecture.
+static DISK_READ_NS: AtomicU64 = AtomicU64::new(0);
+static DISK_READ_WORST_NS: AtomicU64 = AtomicU64::new(0);
+
+// Le chemin MEMOIRE est compte a part. Un memcpy depuis le ramdisk UEFI n'est
+// pas une lecture de disque, et les additionner rendrait le total illisible
+// exactement la ou il doit trancher. Sur la Trigkey c'est CE chemin-ci que
+// prennent les gros ELF.
+static MEM_READ_OPS: AtomicU64 = AtomicU64::new(0);
+static MEM_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static MEM_READ_NS: AtomicU64 = AtomicU64::new(0);
+static MEM_READ_WORST_NS: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static READAHEAD_HITS: AtomicU64 = AtomicU64::new(0);
 // V14: amortise ATA/TCG overhead aggressively but keep a hard memory bound.
@@ -59,6 +82,12 @@ pub fn reset() {
     READ_PATTERNS.lock().clear();
     DISK_READ_OPS.store(0, Ordering::Relaxed);
     DISK_READ_BYTES.store(0, Ordering::Relaxed);
+    DISK_READ_NS.store(0, Ordering::Relaxed);
+    DISK_READ_WORST_NS.store(0, Ordering::Relaxed);
+    MEM_READ_OPS.store(0, Ordering::Relaxed);
+    MEM_READ_BYTES.store(0, Ordering::Relaxed);
+    MEM_READ_NS.store(0, Ordering::Relaxed);
+    MEM_READ_WORST_NS.store(0, Ordering::Relaxed);
     CACHE_HITS.store(0, Ordering::Relaxed);
     READAHEAD_HITS.store(0, Ordering::Relaxed);
     READAHEAD_PAGES.store(0, Ordering::Relaxed);
@@ -100,6 +129,57 @@ pub fn unregister(node: usize) {
 
 /// Nom historique: signifie maintenant "fichier externe immutable".
 /// Les etendues ramdisk doivent suivre les memes regles RO/COW que les etendues ATA.
+/// D'OU vient reellement le contenu d'un fichier.
+///
+/// BOUCHAUD_C50_TROIS_SOURCES_PAS_UN_BOOLEEN
+///
+/// `is_disk_backed` rend vrai des qu'une etendue existe -- il ne distingue pas
+/// une lecture ATA d'un memcpy depuis le ramdisk UEFI. Son nom dit « disque »
+/// et il signifie « fichier externe immuable ». Sur la question posee, cette
+/// confusion est fatale :
+///
+///     tar.rs, taille <= 4 Mio   -> contenu INLINE dans le noeud, pas d'etendue
+///     tar.rs, > 4 Mio, QEMU     -> register_disk(Drive::Slave)   = ATA, hdb
+///     tar.rs, > 4 Mio, UEFI     -> register_memory(adresse)      = ramdisk
+///
+/// Les ELF de Ladybird depassent tous 4 Mio. Ils sont donc ATA sous QEMU et
+/// MEMOIRE sur la Trigkey -- et une optimisation du chemin ATA qui gagnerait
+/// trente secondes en CI pourrait ne rien changer sur la machine physique.
+///
+/// Melanger les deux dans une meme conclusion serait une erreur de mesure, pas
+/// une approximation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BackingKind {
+    /// Aucune etendue : le contenu vit dans `fs.nodes[node].content`.
+    Inline,
+    /// Lecture par secteurs sur un disque ATA.
+    Disk,
+    /// Recopie depuis le ramdisk mappe par le chargeur UEFI.
+    Memory,
+}
+
+impl BackingKind {
+    /// Le nom tel qu'il parait dans les journaux. Stable : des scripts le lisent.
+    pub fn etiquette(self) -> &'static str {
+        match self {
+            BackingKind::Inline => "inline",
+            BackingKind::Disk => "ata-disk",
+            BackingKind::Memory => "uefi-memory",
+        }
+    }
+}
+
+/// La source reelle du contenu de `node`.
+pub fn kind(node: usize) -> BackingKind {
+    match EXTENTS.lock().iter().find(|extent| extent.node == node) {
+        None => BackingKind::Inline,
+        Some(extent) => match extent.source {
+            BackingSource::Disk { .. } => BackingKind::Disk,
+            BackingSource::Memory { .. } => BackingKind::Memory,
+        },
+    }
+}
+
 pub fn is_disk_backed(node: usize) -> bool {
     disk_len(node).is_some()
 }
@@ -160,6 +240,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     let wanted = core::cmp::min(out.len(), extent.size - offset);
 
     if let BackingSource::Memory { address } = extent.source {
+        let debut_mem_ns = crate::kernel::timer::monotonic_ns();
         let source = match address.checked_add(offset as u64) {
             Some(value) => value,
             None => return 0,
@@ -170,6 +251,11 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         unsafe {
             core::ptr::copy_nonoverlapping(source as *const u8, out.as_mut_ptr(), wanted);
         }
+        let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_mem_ns);
+        MEM_READ_OPS.fetch_add(1, Ordering::Relaxed);
+        MEM_READ_BYTES.fetch_add(wanted as u64, Ordering::Relaxed);
+        MEM_READ_NS.fetch_add(duree, Ordering::Relaxed);
+        MEM_READ_WORST_NS.fetch_max(duree, Ordering::Relaxed);
         return wanted;
     }
 
@@ -193,6 +279,8 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         absolute += take;
     }
 
+    let debut_io_ns = crate::kernel::timer::monotonic_ns();
+
     let full_sectors = (wanted - done) / SECTOR_SIZE;
     if full_sectors > 0 {
         let bytes = full_sectors * SECTOR_SIZE;
@@ -209,6 +297,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
         if read != full_sectors {
             DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
             DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
+            note_duree_io(debut_io_ns);
             return done;
         }
     }
@@ -225,7 +314,40 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
 
     DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
     DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
+    note_duree_io(debut_io_ns);
     done
+}
+
+/// Ajoute une lecture au cumul, et retient la pire.
+///
+/// La pire compte autant que le total : deux mille lectures a dix
+/// microsecondes et vingt a une milliseconde donnent le meme cumul, mais la
+/// premiere est un chargement paresseux qui se voit a peine et la seconde est
+/// une saccade.
+fn note_duree_io(debut_ns: u64) {
+    let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
+    DISK_READ_NS.fetch_add(duree, Ordering::Relaxed);
+    DISK_READ_WORST_NS.fetch_max(duree, Ordering::Relaxed);
+}
+
+/// (lectures, octets, nanosecondes cumulees, pire) du chemin ATA seul.
+pub fn disk_read_timing() -> (u64, u64, u64, u64) {
+    (
+        DISK_READ_OPS.load(Ordering::Relaxed),
+        DISK_READ_BYTES.load(Ordering::Relaxed),
+        DISK_READ_NS.load(Ordering::Relaxed),
+        DISK_READ_WORST_NS.load(Ordering::Relaxed),
+    )
+}
+
+/// (lectures, octets, nanosecondes cumulees, pire) du chemin RAMDISK seul.
+pub fn memory_read_timing() -> (u64, u64, u64, u64) {
+    (
+        MEM_READ_OPS.load(Ordering::Relaxed),
+        MEM_READ_BYTES.load(Ordering::Relaxed),
+        MEM_READ_NS.load(Ordering::Relaxed),
+        MEM_READ_WORST_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Lit via une fenêtre read-ahead partagée entre processus.

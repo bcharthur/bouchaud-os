@@ -302,10 +302,61 @@ rx_rearmements={} rx_reprises={} rx_reprises_echouees={} rx_abandonnees={} invar
     let (clean_hits, clean_misses, clean_waits, clean_shared) =
         crate::kernel::clean_page_cache::stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BACKING-CACHE] reads={} bytes={} hits={} readahead_hits={} readahead_pages={} clean_hit={} clean_miss={} clean_wait={} clean_shared={} fault_wait={}",
-        backing_reads, backing_bytes, cache_hits, readahead_hits, readahead_pages,
+        "[BACKING-CACHE] reads={} bytes={} io_us={} io_worst_us={} hits={} readahead_hits={} readahead_pages={} clean_hit={} clean_miss={} clean_wait={} clean_shared={} fault_wait={}",
+        backing_reads, backing_bytes,
+        // BOUCHAUD_C49 : le TEMPS du disque, separe de son volume. Sans lui,
+        // « 2440 fautes fichier en 8 s » ne dit pas si le disque y est pour
+        // quelque chose.
+        crate::fs::backing::disk_read_timing().2 / 1_000,
+        crate::fs::backing::disk_read_timing().3 / 1_000,
+        cache_hits, readahead_hits, readahead_pages,
         clean_hits, clean_misses, clean_waits, clean_shared, demand_fault_waits(),
     ));
+    // BOUCHAUD_C51_OU_SONT_LES_HUIT_SECONDES
+    //
+    // La decomposition du chemin FichierPrive, avec son RESIDU publie plutot
+    // que reparti. Les trois familles de backing sont separees : une lecture
+    // ATA et un memcpy depuis le ramdisk UEFI ne se soignent pas pareil, et
+    // les additionner rendrait le chiffre illisible la ou il doit trancher.
+    {
+        let (n, total_ns, attente, cache, backing, mm, map) =
+            crate::kernel::task::phases_fichier();
+        let explique = attente
+            .saturating_add(cache)
+            .saturating_add(backing)
+            .saturating_add(mm)
+            .saturating_add(map);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "FAULT_FILE_BREAKDOWN faults={} total_us={} wait_us={} cache_us={} \
+backing_us={} mm_lock_us={} map_us={} explique_us={} residual_us={} residual_pct={}",
+            n,
+            total_ns / 1_000,
+            attente / 1_000,
+            cache / 1_000,
+            backing / 1_000,
+            mm / 1_000,
+            map / 1_000,
+            explique / 1_000,
+            total_ns.saturating_sub(explique) / 1_000,
+            if total_ns != 0 { total_ns.saturating_sub(explique) * 100 / total_ns } else { 0 },
+        ));
+        let (na, ta, pa) = crate::kernel::task::attente_chargeur();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "FAULT_WAIT count={} total_us={} worst_us={}",
+            na, ta / 1_000, pa / 1_000,
+        ));
+        let (dr, db, dn, dw) = crate::fs::backing::disk_read_timing();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "BACKING_DISK reads={} bytes={} total_us={} worst_us={}",
+            dr, db, dn / 1_000, dw / 1_000,
+        ));
+        let (mr, mb, mn, mw) = crate::fs::backing::memory_read_timing();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "BACKING_MEMORY reads={} bytes={} total_us={} worst_us={}",
+            mr, mb, mn / 1_000, mw / 1_000,
+        ));
+    }
+
     let (resolved, retry, invalid, io_error, retired) = fault_outcome_stats();
     let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
     let (waitq_detached, waitq_legacy, waitq_detached_ns, waitq_detached_max_ns, waitq_detached_loops, waitq_depth_violations) = crate::kernel::sync::waitq_detached_stats();
