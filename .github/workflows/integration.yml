@@ -307,6 +307,44 @@ jobs:
           path: serie-primitives.log
           if-no-files-found: warn
 
+  comptabilite-cpu:
+    name: qemu / proc-stat et cout du fork
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + compilateur
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 build-essential file
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # P18 : `/proc/stat` doit rester cumulatif, et l'ecart qu'il revele doit
+      # etre EXPLIQUE. Ce banc se jouait a la main ; une propriete que rien ne
+      # rejoue se perd au premier remaniement.
+      - name: Compteurs /proc/stat
+        env:
+          PROCSTAT_SORTIE: proc-stat-ci
+        run: tools/ci/run_proc_stat_monotone.sh image/bootimage-bouchaud-os.bin
+      # Le cout de la duplication d'espace d'adressage. C'est le chemin de
+      # chaque lancement de service du navigateur.
+      - name: Cout du fork
+        env:
+          FORK_SORTIE: cout-fork-ci
+        run: tools/ci/run_cout_fork.sh image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-comptabilite-cpu
+          path: |
+            proc-stat-ci
+            cout-fork-ci
+          if-no-files-found: warn
+
   mm-ng6:
     name: qemu / mm-ng6 smp4
     needs: [gate, kernel-build]

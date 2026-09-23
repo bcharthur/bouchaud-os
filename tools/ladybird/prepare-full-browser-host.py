@@ -503,7 +503,18 @@ web_main.write_text(data)
 
 # 5. Avec le vrai host, laisser WebContent envoyer cookies/storage/HSTS/workers
 # au WebContentClient upstream au lieu des fallbacks temporaires.
+def ajoute_include_time(chemin, ancre):
+    """Garantit `#include <AK/Time.h>` dans un fichier qui horodate."""
+    texte = chemin.read_text()
+    if "#include <AK/Time.h>" in texte:
+        return
+    if ancre not in texte:
+        raise SystemExit(f"horodatage : ancre d'inclusion introuvable dans {chemin}")
+    chemin.write_text(texte.replace(ancre, "#include <AK/Time.h>\n" + ancre, 1))
+
+
 page_cpp = root / "Services/WebContent/PageClient.cpp"
+ajoute_include_time(page_cpp, "#include <AK/JsonObjectSerializer.h>\n")
 ensure_include(page_cpp, "#include <cstdlib>", "#include <AK/JsonObjectSerializer.h>", "cstdlib PageClient")
 data = page_cpp.read_text()
 old_guard = "if (bouchaud_m9_enabled())"
@@ -539,11 +550,26 @@ screenshot_route = """void PageClient::page_did_take_screenshot(Gfx::ShareableBi
         if (!BouchaudChrome::present(m_id, screenshot, degat.x(), degat.y(), degat.width(), degat.height()))
             Core::Process::terminate_immediately(70);
 
+        // BOUCHAUD_C31_TRAME_NUMEROTEE
+        //
+        // Une seule ligne, pour la PREMIERE trame, ne permet pas de repondre a
+        // la question que le banc de mire pose : « la mire est-elle arrivee
+        // dans une trame COMPOSEE APRES son insertion ? » Sans numero, le banc
+        // ne pouvait que dormir deux secondes et esperer.
+        //
+        // Le compteur est emis a chaque trame parce que la presentation est
+        // commandee par le DEGAT : une page immobile n'en produit pas. Le
+        // plafond n'est donc pas atteint en usage normal ; il est la pour
+        // qu'une page animee ne puisse pas noyer le journal serie.
+        static u64 frame_seq = 0;
+        ++frame_seq;
         static bool first_frame_reported = false;
         if (!first_frame_reported) {
             first_frame_reported = true;
             outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED page={}\", m_id);
         }
+        if (frame_seq <= 4096 || frame_seq % 64 == 0)
+            outln(\"[ladybird-bouchaud] BROWSER_HOST_M11_TRAME page={} seq={} t={}\", m_id, frame_seq, MonotonicTime::now().milliseconds());
         return;
     }
 #endif
@@ -723,16 +749,6 @@ connection_cpp.write_text(data)
 #
 # `AK/Time.h` n'est inclus par aucun des trois : l'oubli ne se verrait qu'au
 # bout de douze minutes de compilation.
-def ajoute_include_time(chemin, ancre):
-    """Garantit `#include <AK/Time.h>` dans un fichier qui horodate."""
-    texte = chemin.read_text()
-    if "#include <AK/Time.h>" in texte:
-        return
-    if ancre not in texte:
-        raise SystemExit(f"horodatage : ancre d'inclusion introuvable dans {chemin}")
-    chemin.write_text(texte.replace(ancre, "#include <AK/Time.h>\n" + ancre, 1))
-
-
 worker_manager = root / "Libraries/LibWebView/WorkerProcessManager.cpp"
 ajoute_include_time(worker_manager, "#include <LibCore/EventLoop.h>\n")
 ensure_include(

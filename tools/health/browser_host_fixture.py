@@ -421,6 +421,18 @@ HTML = r'''<!doctype html>
       if (im.complete && im.naturalWidth > 0) return res();
       im.onload = res; im.onerror = res;
     })));
+    // LA BORNE QUE LE BANC PEUT CORRELER A UNE TRAME.
+    //
+    // `HOST_SURFACE_MIRE_POSEE` arrive APRES deux `requestAnimationFrame` et
+    // deux secondes d'attente : il dit que la page a fini d'esperer, pas qu'une
+    // trame contenant la mire a ete composee. Le banc capturait donc un ecran
+    // sans savoir ce qu'il capturait.
+    //
+    // Cette ligne-ci est emise a l'instant ou la mire est dans le DOM et ou ses
+    // images sont DECODEES. Toute trame numerotee posterieure la contient
+    // necessairement ; c'est cette trame-la que le banc attend avant de
+    // demander le `screendump`.
+    console.log("HOST_SURFACE_MIRE_INSEREE largeur=" + mire.offsetWidth + " hauteur=" + mire.offsetHeight);
     // DEUX TRAMES DE BATTEMENT, MAIS BORNEES.
     //
     // Attendre deux `requestAnimationFrame` laisse au compositeur le temps de
@@ -850,20 +862,41 @@ HTML = r'''<!doctype html>
 
   // LA CAPACITE : n'importe quelle tentative de cette origine a-t-elle
   // repondu ? Une origine qui marche a la troisieme tentative marche.
-  const capacite = o => releves.some(r => r.origine === o && r.ok);
-  const httpFonctionnel = capacite("http");
-  const blobFonctionnel = capacite("blob");
+  // CHAQUE LIGNE NE DIT QU'UNE CHOSE, ET LA DIT DE SES PROPRES CHIFFRES.
+  //
+  // La version precedente publiait :
+  //
+  //     HOST_WORKER_HTTP_FUNCTIONAL OK pong=0
+  //
+  // `OK` venait de « une tentative HTTP a repondu » ; `pong=0` venait de la
+  // PREMIERE tentative. Deux faits differents sur une meme ligne, dont l'un
+  // contredit l'autre a la lecture. Une ligne de verdict qui se contredit
+  // elle-meme ne se lit plus : elle se devine.
+  //
+  //     _FUNCTIONAL      une tentative de cette origine a-t-elle repondu ?
+  //     successes=N/M    combien, sur combien de tentatives
+  //     _FIRST_ATTEMPT   la PREMIERE a-t-elle repondu ? (independant du budget)
+  //     _PERF_FIRST      cette premiere tenait-elle dans le budget ?
+  const tentatives = o => releves.filter(r => r.origine === o);
+  const reussites = o => tentatives(o).filter(r => r.ok).length;
 
-  console.log(`HOST_WORKER_HTTP_FUNCTIONAL ${httpFonctionnel ? "OK" : "FAIL"} pong=${http.ok ? 1 : 0}`);
-  console.log(`HOST_WORKER_BLOB_FUNCTIONAL ${blobFonctionnel ? "OK" : "FAIL"} pong=${blob.ok ? 1 : 0}`);
+  const httpFonctionnel = reussites("http") > 0;
+  const blobFonctionnel = reussites("blob") > 0;
+
+  for (const [nom, origine, premiere] of [["HTTP", "http", http], ["BLOB", "blob", blob]]) {
+    const n = reussites(origine);
+    const m = tentatives(origine).length;
+    console.log(`HOST_WORKER_${nom}_FUNCTIONAL ${n > 0 ? "OK" : "FAIL"} successes=${n}/${m}`);
+    console.log(`HOST_WORKER_${nom}_FIRST_ATTEMPT ${premiere.ok ? "OK" : "FAIL"} ms=${premiere.ms}`);
+    console.log(`HOST_WORKER_${nom}_PERF_FIRST ${dansBudget(premiere) ? "OK" : "FAIL"}`
+      + ` ms=${premiere.ms} budget=${BUDGET_WORKER_MS}`);
+  }
 
   // LA PERFORMANCE : la PREMIERE tentative de chaque origine, et non la
   // meilleure. C'est elle que vit un utilisateur qui ouvre une page ; prendre
   // la meilleure effacerait le cout du demarrage a froid qu'on mesure.
   workerHttpOK = dansBudget(http);
   workerBlobOK = dansBudget(blob);
-  console.log(`HOST_WORKER_HTTP_PERF ${workerHttpOK ? "OK" : "FAIL"} ms=${http.ms} budget=${BUDGET_WORKER_MS}`);
-  console.log(`HOST_WORKER_BLOB_PERF ${workerBlobOK ? "OK" : "FAIL"} ms=${blob.ms} budget=${BUDGET_WORKER_MS}`);
 
   // LA LECTURE DE LA MATRICE, faite ici pour ne pas avoir a la refaire a la
   // main a chaque execution.

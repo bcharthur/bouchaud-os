@@ -112,8 +112,15 @@ JALONS=(
   'HOST_WORKER_HTTP_FUNCTIONAL OK'
   'HOST_WORKER_BLOB_FUNCTIONAL OK'
   'HOST_WORKER_FUNCTIONAL_GLOBAL OK pong'
-  # La mire doit etre arrivee jusqu'a la frame presentee.
-  'HOST_SURFACE_VERDICT ok'
+  # LA MIRE N'EST PAS UN JALON SERIE, ET L'Y METTRE LA RENDAIT INATTEIGNABLE.
+  #
+  # `HOST_SURFACE_VERDICT` est ecrit par CE script, sur sa propre sortie, apres
+  # le `screendump`. Les jalons, eux, sont cherches par `grep` dans
+  # `serie-browser-host.log`. La ligne n'y a jamais figure et n'y figurera
+  # jamais : le jalon comptait donc comme manquant a CHAQUE run -- un faux
+  # rouge permanent, qui plus est sur le point que ce chantier devait fermer.
+  #
+  # Le verdict de surface est teste directement, plus bas, sur `MIRE_VERDICT`.
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
 )
 # Ce qui suffit a conclure : le verdict de la page, plus les deux jalons cote
@@ -147,6 +154,12 @@ TRAME='[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
 # bloque echoue vite, et le rapport dit ou. Le job dispose de 35 minutes et
 # la construction du noyau en consomme deux.
 PLAFOND=${BO_SMOKE_PLAFOND_S:-900}
+# Secondes d'attente d'une trame composee APRES l'insertion de la mire.
+TRAME_ATTENTE_MAX=${BO_SMOKE_TRAME_S:-45}
+# Le verdict de performance echoue-t-il le script ? Faux par defaut : il a
+# son propre travail de CI, et une machine lente n'est pas une machine
+# cassee. Dans ce travail-la il vaut 1, et il bloque.
+PERF_BLOQUANT=${BO_SMOKE_PERF_BLOQUANT:-0}
 SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 
 # `-smp 4` : tous les autres lanceurs de CI en donnent quatre, et `run.ps1`
@@ -208,10 +221,59 @@ ECOULE=$((SECONDS - DEBUT))
 # LA CAPTURE SE PREND AVANT DE TUER LA MACHINE, et seulement si la page a
 # dit avoir pose sa mire : capturer un ecran ou elle n'est pas encore
 # affichee accuserait le compositeur d'un retard de la page.
+# Le plus grand numero de trame presente dans le journal, ou 0.
+derniere_trame() {
+    grep -ao 'BROWSER_HOST_M11_TRAME page=[0-9]* seq=[0-9]*' "$LOG" \
+        | sed -E 's/.*seq=//' | sort -n | tail -1
+}
+
 MIRE_VERDICT=non_posee
-if grep -aFq "HOST_SURFACE_MIRE_POSEE" "$LOG" && command -v socat >/dev/null 2>&1; then
-    if echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
-        sleep 2
+if ! command -v socat >/dev/null 2>&1; then
+    MIRE_VERDICT=socat_absent
+elif grep -aFq "HOST_SURFACE_MIRE_INSEREE" "$LOG"; then
+    # UNE TRAME COMPOSEE APRES L'INSERTION, PAS UN SOMMEIL APRES LA DEMANDE.
+    #
+    # L'ancienne version demandait le `screendump` puis dormait deux secondes.
+    # Le sommeil arrivait APRES la demande : QEMU avait deja fige l'ecran, et
+    # attendre ensuite n'ajoutait rien. Pire, rien ne garantissait que l'ecran
+    # fige contienne la mire -- une trame anterieure a son insertion aurait
+    # produit un `absente` qui aurait accuse le compositeur d'un retard du banc.
+    #
+    # Le numero de trame rend la correlation exacte : la mire est dans le DOM
+    # et decodee a `MIRE_INSEREE` ; toute trame de numero strictement superieur
+    # a celui d'alors a ete composee apres, donc la contient. La marge de deux
+    # couvre la trame qui pouvait etre en cours de composition a cet instant.
+    SEQ_INSERTION=$(derniere_trame)
+    SEQ_INSERTION=${SEQ_INSERTION:-0}
+    SEQ_VOULUE=$((SEQ_INSERTION + 2))
+    ATTENTE=0
+    while [ "$ATTENTE" -lt "$TRAME_ATTENTE_MAX" ]; do
+        SEQ_VUE=$(derniere_trame)
+        if [ -n "${SEQ_VUE:-}" ] && [ "$SEQ_VUE" -ge "$SEQ_VOULUE" ]; then
+            break
+        fi
+        sleep 1
+        ATTENTE=$((ATTENTE + 1))
+    done
+    SEQ_VUE=$(derniere_trame)
+    SEQ_VUE=${SEQ_VUE:-0}
+    echo "HOST_SURFACE_TRAME insertion=$SEQ_INSERTION voulue=$SEQ_VOULUE vue=$SEQ_VUE attente_s=$ATTENTE"
+    if [ "$SEQ_VUE" -lt "$SEQ_VOULUE" ]; then
+        # Pas de nouvelle composition : capturer maintenant ne prouverait rien.
+        MIRE_VERDICT=sans_trame_posterieure
+    elif echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
+        # `screendump` rend la main avant que le fichier soit entierement
+        # ecrit. On attend que sa TAILLE CESSE DE BOUGER, ce qui est une
+        # observation ; un sommeil fixe est un pari.
+        TAILLE_PRECEDENTE=-1
+        for _ in $(seq 1 15); do
+            TAILLE=$(wc -c < "$CAPTURE" 2>/dev/null || echo 0)
+            if [ "$TAILLE" -gt 0 ] && [ "$TAILLE" -eq "$TAILLE_PRECEDENTE" ]; then
+                break
+            fi
+            TAILLE_PRECEDENTE=$TAILLE
+            sleep 1
+        done
         if [ -s "$CAPTURE" ]; then
             if python3 tools/ci/analyse-surface-mire.py "$CAPTURE"; then
                 MIRE_VERDICT=ok
@@ -224,8 +286,6 @@ if grep -aFq "HOST_SURFACE_MIRE_POSEE" "$LOG" && command -v socat >/dev/null 2>&
     else
         MIRE_VERDICT=moniteur_muet
     fi
-elif ! command -v socat >/dev/null 2>&1; then
-    MIRE_VERDICT=socat_absent
 fi
 echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
 
@@ -305,6 +365,7 @@ if [ "$manquants" -ne 0 ]; then
       ;;
   esac
   echo "$manquants jalon(s) manquant(s)." >&2
+  echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=jalons manquants=$manquants"
   exit 1
 fi
 grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host.log
@@ -314,7 +375,72 @@ grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host.lo
 for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"
     exit 1
   fi
 done
+# ====================================================================
+# LE VERDICT DE SURFACE, TESTE POUR LUI-MEME
+#
+# Il etait dans `JALONS`, donc cherche dans le journal serie, ou il n'a
+# jamais pu figurer : ce script l'ecrit sur SA sortie. Le jalon comptait
+# manquant a chaque run. Il se teste ici, sur la variable qui le porte.
+# ====================================================================
+if [ "$MIRE_VERDICT" != ok ]; then
+  echo "surface : la mire n'a pas ete retrouvee dans la frame presentee ($MIRE_VERDICT)" >&2
+  case "$MIRE_VERDICT" in
+    socat_absent)   echo "  socat manque : le moniteur QEMU est injoignable, la mesure n'a pas eu lieu" >&2 ;;
+    non_posee)      echo "  la page n'a jamais dit avoir insere la mire" >&2 ;;
+    sans_trame_posterieure)
+                    echo "  aucune trame n'a ete composee apres l'insertion : rien a capturer" >&2 ;;
+    moniteur_muet)  echo "  le moniteur n'a pas repondu a screendump" >&2 ;;
+    capture_vide)   echo "  screendump a rendu un fichier vide" >&2 ;;
+    absente)        echo "  la capture existe mais ne contient pas les pixels attendus" >&2 ;;
+  esac
+  echo "FONCTIONNEL" >&2
+  echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=surface"
+  exit 1
+fi
+
+echo "LADYBIRD_FUNCTIONAL_SMOKE ok"
+
+# ====================================================================
+# LE VERDICT DE PERFORMANCE, INDEPENDANT DU FONCTIONNEL
+#
+# BOUCHAUD_C32_DEUX_VERDICTS
+#
+# Separer capacite et performance etait juste, mais incomplet : les lignes
+# `_PERF` n'etaient lues par PERSONNE. Un verdict que rien ne consulte est
+# decoratif, et une regression de performance repassait inapercue.
+#
+# Le resultat est publie a part et, dans le travail de CI qui pose
+# `BO_SMOKE_PERF_BLOQUANT=1`, il bloque. Ailleurs il informe : une machine
+# lente n'est pas une machine cassee, mais elle doit se voir.
+# ====================================================================
+perf_echecs=0
+perf_lignes=0
+while IFS= read -r ligne; do
+  perf_lignes=$((perf_lignes + 1))
+  printf '  %s\n' "$ligne"
+  case "$ligne" in
+    *' FAIL '*) perf_echecs=$((perf_echecs + 1)) ;;
+  esac
+done < <(grep -aoE 'HOST_WORKER_[A-Z_]*PERF[A-Z_]* (OK|FAIL).*' "$LOG" | sed 's/\r//g' || true)
+
+if [ "$perf_lignes" -eq 0 ]; then
+  echo "LADYBIRD_PERFORMANCE_SMOKE inconclusif raison=aucune_ligne_perf"
+  if [ "$PERF_BLOQUANT" = 1 ]; then
+    echo "performance : aucune ligne _PERF dans le journal, le banc n'a rien mesure" >&2
+    exit 1
+  fi
+elif [ "$perf_echecs" -ne 0 ]; then
+  echo "LADYBIRD_PERFORMANCE_SMOKE fail hors_budget=$perf_echecs/$perf_lignes"
+  if [ "$PERF_BLOQUANT" = 1 ]; then
+    echo "performance : $perf_echecs mesure(s) hors budget" >&2
+    exit 1
+  fi
+else
+  echo "LADYBIRD_PERFORMANCE_SMOKE ok mesures=$perf_lignes"
+fi
+
 echo LADYBIRD_BROWSER_HOST_OK

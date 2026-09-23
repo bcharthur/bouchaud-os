@@ -728,9 +728,12 @@ fn temps_vivant(task: &Task, now: u64) -> u64 {
 /// Gardee pour une seule raison : pouvoir montrer l'ecart avec le compteur
 /// cumulatif. Sans les deux cote a cote, « le total ne recule pas » et « le
 /// total est juste » se confondent.
-/// Ce que la somme des vivants a deja perdu, en nanosecondes.
-pub fn proc_temps_mort_ns() -> u64 {
-    TEMPS_MORT_NS.load(Ordering::Relaxed)
+/// Ce qu'un recyclage d'emplacement a retire de la somme des vivants.
+///
+/// Voir `TEMPS_RECYCLE_NS`. Publie a cote du temps mort parce que leur SOMME
+/// est ce qui doit expliquer l'ecart ; separes parce que leurs causes le sont.
+pub fn proc_temps_recycle_ns() -> u64 {
+    TEMPS_RECYCLE_NS.load(Ordering::Relaxed)
 }
 
 /// Les compteurs persistants, lus DIRECTEMENT.
@@ -784,6 +787,36 @@ pub fn proc_cpu_somme_vivants() -> (u64, u64) {
         }
     }
     (user_ns, system_ns)
+}
+
+/// Ce que les taches EXCLUES de la somme des vivants portent encore.
+///
+/// BOUCHAUD_C33_L_ECART_INEXPLIQUE
+///
+/// `proc_cpu_somme_vivants` saute les zombies. Si l'ecart entre le cumulatif
+/// et cette somme vient d'elles, il se lit ICI -- et alors `TEMPS_MORT_NS`,
+/// qui photographie les compteurs a l'instant du passage a l'etat zombie,
+/// sous-compte quelque chose.
+///
+/// Rend `(somme des zombies, nombre de zombies, nombre de vivantes)`. Les
+/// trois ensemble disent si l'ecart est dans la table ou hors d'elle : une
+/// somme de zombies proche de l'ecart accuse la photographie ; une somme
+/// nulle prouve que le temps perdu n'est plus dans la table du tout.
+pub fn proc_cpu_zombies() -> (u64, usize, usize) {
+    let mut total = 0u64;
+    let mut zombies = 0usize;
+    let mut vivantes = 0usize;
+    for task in tasks().iter() {
+        if task.state == TaskState::Zombie {
+            zombies += 1;
+            total = total.saturating_add(
+                task.user_cpu_ns.charge().saturating_add(task.kernel_cpu_ns.charge()),
+            );
+        } else {
+            vivantes += 1;
+        }
+    }
+    (total, zombies, vivantes)
 }
 
 pub fn proc_cpu_cumul() -> ProcCpuCumul {

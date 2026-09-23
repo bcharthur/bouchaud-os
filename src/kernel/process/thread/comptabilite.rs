@@ -89,16 +89,31 @@ fn account_until(task: &Task, now: u64) {
 /// personne a prevenir : elle ne reviendra pas en espace utilisateur.
 // Ne touche plus que des atomiques : une reference PARTAGEE suffit.
 fn marque_zombie(task: &Task) {
-    // CE QUE LA SOMME DES VIVANTS PERDRAIT ICI.
+    // IL N'Y A PLUS DE PHOTOGRAPHIE DES COMPTEURS ICI, ET C'EST UNE CORRECTION.
     //
-    // Voir `TEMPS_MORT_NS`. A cet instant precis, un calcul qui somme les
-    // taches vivantes retire du total tout ce que celle-ci a consomme. On
-    // le compte, pour pouvoir dire combien -- plutot que d'esperer
-    // surprendre une baisse dans un total que la charge environnante masque.
-    TEMPS_MORT_NS.fetch_add(
-        task.user_cpu_ns.charge().saturating_add(task.kernel_cpu_ns.charge()),
-        Ordering::Relaxed,
-    );
+    // BOUCHAUD_C33_L_ECART_INEXPLIQUE
+    //
+    // `TEMPS_MORT_NS` additionnait ici `user_cpu_ns + kernel_cpu_ns` pour
+    // chiffrer ce que la somme des vivants allait perdre. La mesure a montre
+    // que ce chiffre est FAUX, et de beaucoup :
+    //
+    //     ecart_ms=1025   zombies_ms=1030   temps_mort_ms=0
+    //
+    // Mille trente millisecondes tenues par un zombie, et la photographie en
+    // annoncait zero. La raison tient a l'instant choisi : a cet endroit, la
+    // tache est encore SUR SON PROCESSEUR et la tranche ouverte n'est pas
+    // repliee. Une tache qui brule du temps utilisateur sans faire le moindre
+    // appel systeme -- exactement la charge d'epreuve de ce banc -- n'a donc
+    // presque rien dans ses compteurs au moment ou elle meurt. La seconde
+    // d'avant lui est imputee juste apres, par `account_until`, qui alimente
+    // le cumulatif ET les compteurs de la tache : le cumulatif la garde, la
+    // somme des vivants ne la voit plus, et la photographie l'a ratee.
+    //
+    // Ce que la somme des vivants a perdu se LIT desormais, au lieu d'etre
+    // photographie : `proc_cpu_zombies` additionne les compteurs des zombies
+    // au moment de la lecture -- donc complets -- et `TEMPS_RECYCLE_NS`
+    // ramasse ceux dont l'emplacement a ete reutilise. Les deux couvrent
+    // exactement les deux facons de quitter la somme des vivants.
     task.state.range(TaskState::Zombie);
     if task.on_cpu >= 0 && !task.switching_out.charge() {
         let cpu = task.on_cpu.charge() as usize;

@@ -51,18 +51,25 @@ CC=""
 for candidat in gcc cc clang; do
     command -v "$candidat" >/dev/null 2>&1 && { CC=$candidat; break; }
 done
+# FERME PAR DEFAUT.
+#
+# « verification passee » sur machine sans compilateur, c'etait un VERT sans
+# mesure. Un banc qui rend le meme code de sortie qu'il ait mesure ou non
+# n'apprend rien a celui qui le lit, et le premier environnement mal outille
+# fait disparaitre la propriete sans que personne ne le remarque.
 if [ -z "$CC" ]; then
-    echo "proc-stat : aucun compilateur C, verification passee"
-    exit 0
+    echo "proc-stat : aucun compilateur C -- la charge d'epreuve ne peut pas etre construite" >&2
+    echo "            ce banc ne sait pas conclure sans elle ; il echoue plutot que de passer" >&2
+    exit 1
 fi
 
 SCENARIO="$SORTIE/scenario"
 rm -rf "$SCENARIO"; mkdir -p "$SCENARIO"
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/cumul" tools/userland/cumul-cpu.c 2>"$SORTIE/cc.log"; then
-    echo "proc-stat : la charge d'epreuve ne se compile pas ici, verification passee"
-    sed 's/^/    /' "$SORTIE/cc.log" | head -5
-    exit 0
+    echo "proc-stat : la charge d'epreuve ne se compile pas ici" >&2
+    sed 's/^/    /' "$SORTIE/cc.log" | head -5 >&2
+    exit 1
 fi
 
 # LA CHARGE EST CELLE QUI FAIT MOURIR DES PROCESSUS.
@@ -104,10 +111,14 @@ for l in lignes:
 depassements = 0
 pire = 0
 paires = []
+decompositions = []
 for l in lignes:
     m = re.search(r"publie_user_ms=(\d+).*?cumulatif_user_ms=(\d+).*?somme_vivants_user_ms=(\d+)", l)
     if m:
         paires.append((int(m.group(1)), int(m.group(2)), int(m.group(3))))
+    d = re.search(r"zombies_ms=(\d+) temps_recycle_ms=(\d+) ecart_ms=(\d+) residu_ms=(\d+)", l)
+    if d:
+        decompositions.append(tuple(int(d.group(i)) for i in (1, 2, 3, 4)))
 for l in lignes:
     m = re.search(r"depassements=(\d+) pire_depassement_ms=(\d+)", l)
     if m:
@@ -118,6 +129,17 @@ if len(anneau3) < 5:
     print(f"proc-stat : {len(anneau3)} releve(s) en anneau 3, cinq au moins attendus",
           file=sys.stderr)
     sys.exit(1)
+
+# Divergence minimale, en millisecondes, sous laquelle la regle de provenance
+# ne discrimine pas. La mesure de reference donnait 1113 ms ; 200 ms est un
+# cinquieme de cela, assez bas pour ne pas dependre de la vitesse de la
+# machine, assez haut pour que la comparaison ait un sens.
+DIVERGENCE_MINIMALE = 200
+# Part de l'ecart que ni la mort ni le recyclage n'expliquent, en pour cent.
+# Voir BOUCHAUD_C33 : l'ecart mesure etait de 1113 ms et `temps_mort` n'en
+# expliquait que 18. Tant que le residu est gros, une troisieme sortie de
+# l'ensemble des vivants existe et n'a pas ete trouvee.
+RESIDU_MAX_POUR_CENT = 10
 
 echecs = []
 
@@ -148,9 +170,17 @@ if paires:
     # Le banc n'a de valeur que si les deux calculs DIVERGENT : sans mort de
     # tache ils coincident, et la comparaison ne prouverait rien. On le dit
     # plutot que de rendre un vert vide de sens.
-    if ecart < 200:
-        print(f"proc-stat : les deux calculs ne divergent que de {ecart} ms ; "
-              f"la regle de provenance ne discrimine pas sur ce releve")
+    if ecart < DIVERGENCE_MINIMALE:
+        # UN BANC QUI NE PEUT PAS CONCLURE N'EST PAS UN BANC QUI PASSE.
+        #
+        # La regle de provenance compare `publie` a deux valeurs. Tant qu'elles
+        # sont proches, elle ne discrimine RIEN : la regression reinjectee
+        # passerait. L'ancienne version le disait puis rendait zero, ce qui est
+        # la definition d'un faux vert.
+        echecs.append(
+            f"INCONCLUSIF : les deux calculs ne divergent que de {ecart} ms "
+            f"(minimum {DIVERGENCE_MINIMALE} ms) ; la regle de provenance ne "
+            f"discrimine pas, la charge n'a pas fait mourir assez de taches")
     else:
         d_cum = abs(publie_ms - dernier_cum)
         d_viv = abs(publie_ms - dernier_viv)
@@ -160,6 +190,35 @@ if paires:
             echecs.append(
                 f"/proc/stat suit la SOMME DES VIVANTS ({dernier_viv} ms) et non le "
                 f"cumulatif ({dernier_cum} ms) : le temps des taches mortes est perdu")
+
+# L'ECART DOIT ETRE EXPLIQUE, PAS SEULEMENT CONSTATE.
+#
+# BOUCHAUD_C33_L_ECART_INEXPLIQUE
+#
+# Le releve precedent donnait un ecart de 1113 ms dont `temps_mort` expliquait
+# 18. Constater l'ecart prouve que l'ancien calcul perdait du temps ; ne pas
+# savoir OU il part laisse ouverte la possibilite que le CUMULATIF soit lui
+# aussi faux -- par exemple s'il comptait du temps deux fois.
+#
+# Deux sorties de l'ensemble des vivants sont nommees et comptees : la mort
+# (`marque_zombie`) et le RECYCLAGE d'emplacement (`*ancienne = *tache`, qui
+# efface les compteurs de l'incarnation precedente). Leur somme doit couvrir
+# l'ecart. Ce qui reste est le `residu` : s'il est gros, il y a une troisieme
+# sortie, et P18 ne se ferme pas.
+if decompositions:
+    mort, recycle, ecart_k, residu = decompositions[-1]
+    print(f"proc-stat : ecart={ecart_k} ms = zombies {mort} + recycle {recycle} "
+          f"+ residu {residu}")
+    if ecart_k >= DIVERGENCE_MINIMALE:
+        part = (residu * 100) // max(ecart_k, 1)
+        if part > RESIDU_MAX_POUR_CENT:
+            echecs.append(
+                f"{part} % de l'ecart ({residu} ms sur {ecart_k}) n'est explique "
+                f"ni par les zombies ni par le recyclage : une troisieme sortie de "
+                f"l'ensemble des vivants existe et n'a pas ete trouvee")
+else:
+    echecs.append("aucune decomposition de l'ecart dans le journal : "
+                  "le noyau ne publie pas zombies_ms/temps_recycle_ms/residu_ms")
 
 # PLAFOND : le noyau le verifie a chaque releve et compte les depassements.
 if depassements:

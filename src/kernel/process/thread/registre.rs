@@ -528,6 +528,24 @@ pub fn registre_ajoute(
         if !recyclable(ancienne) {
             continue;
         }
+        // CE QUE L'ECRASEMENT RETIRE DE LA SOMME DES VIVANTS.
+        //
+        // Voir `TEMPS_RECYCLE_NS`. `*ancienne = *tache` efface les compteurs de
+        // l'incarnation precedente : son temps quitte la somme des vivants a
+        // cet instant, sans qu'aucune ligne ne le dise.
+        //
+        // TOUTES les incarnations ecrasees, zombies comprises : une zombie
+        // encore dans la table est comptee par `proc_cpu_zombies`, qui la LIT ;
+        // des qu'elle est ecrasee, elle n'y est plus, et c'est ce compteur qui
+        // prend le relais. Les deux ne se chevauchent donc jamais, et ni l'un
+        // ni l'autre ne repose sur une photographie prise trop tot.
+        TEMPS_RECYCLE_NS.fetch_add(
+            ancienne
+                .user_cpu_ns
+                .charge()
+                .saturating_add(ancienne.kernel_cpu_ns.charge()),
+            Ordering::Relaxed,
+        );
         // La generation d'abord : a partir d'ici, toute identite ancienne est
         // refusee, et personne ne peut plus prendre cet emplacement pour
         // l'ancienne tache.

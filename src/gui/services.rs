@@ -307,7 +307,26 @@ pub fn releve_si_du() {
     // `temps_mort` non nul veut dire que le second calcul ment deja.
     let (vivants_user, vivants_sys) = crate::kernel::task::proc_cpu_somme_vivants();
     let (compteurs_user, compteurs_sys) = crate::kernel::task::proc_cpu_compteurs();
-    let mort = crate::kernel::task::proc_temps_mort_ns();
+    // LES DEUX FACONS DE QUITTER LA SOMME DES VIVANTS, LUES ET NON PHOTOGRAPHIEES.
+    let (zombies_ns, zombies, vivantes) = crate::kernel::task::proc_cpu_zombies();
+    let recycle = crate::kernel::task::proc_temps_recycle_ns();
+    // L'ECART, ET CE QU'IL RESTE QUAND ON A NOMME SES CAUSES.
+    //
+    // BOUCHAUD_C33_L_ECART_INEXPLIQUE
+    //
+    // Mesure precedente : `temps_mort_ms=18` pour un ecart de 1113 ms. Dix-huit
+    // millisecondes sur mille cent treize -- un virgule six pour cent. Publier
+    // l'ecart sans publier ce qui en reste inexplique laissait croire qu'il
+    // etait compris.
+    //
+    // `residu` est la partie que NI la mort NI le recyclage n'expliquent. Tant
+    // qu'il n'est pas petit, une troisieme sortie de l'ensemble des vivants
+    // existe et n'a pas ete trouvee ; le banc echoue dessus plutot que de la
+    // taire.
+    let ecart = compteurs_user
+        .saturating_add(compteurs_sys)
+        .saturating_sub(vivants_user.saturating_add(vivants_sys));
+    let residu = ecart.saturating_sub(zombies_ns.saturating_add(recycle));
     let c = crate::kernel::task::proc_cpu_cumul();
     // TROIS VALEURS INDEPENDANTES : voir `proc_cpu_compteurs`.
     //
@@ -321,14 +340,23 @@ pub fn releve_si_du() {
     crate::serial_println!(
         "[PROC-STAT] publie_user_ms={} publie_sys_ms={} \
 cumulatif_user_ms={} cumulatif_sys_ms={} \
-somme_vivants_user_ms={} somme_vivants_sys_ms={} temps_mort_ms={}",
+somme_vivants_user_ms={} somme_vivants_sys_ms={} \
+zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         c.user_ns / 1_000_000,
         c.system_ns / 1_000_000,
         compteurs_user / 1_000_000,
         compteurs_sys / 1_000_000,
         vivants_user / 1_000_000,
         vivants_sys / 1_000_000,
-        mort / 1_000_000,
+        zombies_ns / 1_000_000,
+        recycle / 1_000_000,
+        ecart / 1_000_000,
+        residu / 1_000_000,
+    );
+    crate::serial_println!(
+        "[PROC-STAT] zombies={} vivantes={}",
+        zombies,
+        vivantes,
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     crate::serial_println!(

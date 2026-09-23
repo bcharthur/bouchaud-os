@@ -69,17 +69,20 @@ static COMPTA_DEBUT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MA
 pub static CUMUL_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 pub static CUMUL_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// Le temps qu'un calcul par somme des vivants AURAIT perdu.
+/// Le temps qu'un RECYCLAGE D'EMPLACEMENT retire de la somme des vivants.
 ///
-/// Chaque fois qu'une tache passe a l'etat zombie, ce compteur additionne ce
-/// qu'elle avait consomme. C'est, a la nanoseconde pres, ce que l'ancien
-/// calcul retirait du total a cet instant.
+/// BOUCHAUD_C33_L_ECART_INEXPLIQUE
 ///
-/// Il existe parce que le defaut ne se DEMONTRE pas en guettant une baisse :
-/// la croissance des autres taches la masque, et vingt echantillons d'affilee
-/// peuvent rester monotones sans rien prouver. Ce compteur, lui, mesure
-/// directement la quantite en jeu.
-pub static TEMPS_MORT_NS: AtomicU64 = AtomicU64::new(0);
+/// `TEMPS_MORT_NS` n'expliquait que 18 ms d'un ecart mesure a 1113 ms entre
+/// le cumulatif et la somme des vivants. Le reste vient d'ailleurs, et tant
+/// qu'on ne sait pas d'ou, on ne sait pas non plus si le cumulatif est juste.
+///
+/// `registre_ajoute` recycle un emplacement en ECRASANT l'incarnation
+/// precedente (`*ancienne = *tache`). Ses compteurs disparaissent alors de la
+/// somme des vivants. Si elle etait deja zombie, `TEMPS_MORT_NS` l'avait
+/// comptee -- l'ajouter ici la compterait deux fois. Ce compteur-ci ne prend
+/// donc QUE les incarnations ecrasees sans etre passees par la mort.
+pub static TEMPS_RECYCLE_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Combien de fois `user + system` a depasse la capacite CPU ecoulee.
 ///
