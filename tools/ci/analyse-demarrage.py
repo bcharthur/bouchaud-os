@@ -131,6 +131,98 @@ def series_par_pid(lignes_proc, maximum=8):
     return sortie
 
 
+SERVICES = [
+    "BouchaudBrowserHost",
+    "RequestServer",
+    "ImageDecoder",
+    "Compositor",
+    "WebContent",
+    "WebWorker",
+]
+
+
+def tableau_des_services(execs, procs):
+    """UNE LIGNE PAR SERVICE, PARCE QUE LA COMPARAISON EST LA QUESTION.
+
+    Le premier WebWorker a longtemps occupe toute l'attention parce qu'il
+    etait le seul instrumente. Le releve du run 35829303875 montre pourtant
+    qu'il y a des dizaines de secondes a gagner AVANT qu'il ne soit demande :
+    l'hote demarre a T+22 s et la premiere trame arrive a T+180 s.
+
+    Comparer les six demande de les mettre sur la meme ligne, avec les memes
+    colonnes -- ce que ni `PERF_EXECVE` ni `[PERF-PROC]` ne font seuls,
+    puisque l'un est indexe par image et l'autre par pid.
+    """
+    par_service = {}
+    for ligne in execs:
+        image = re.search(r"image=(\S+)", ligne)
+        pid = re.search(r"pid=(\d+)", ligne)
+        t = re.search(r"t=(\d+)", ligne)
+        duree = re.search(r"duree_us=(\d+)", ligne)
+        if not (image and pid):
+            continue
+        nom = image.group(1).rsplit("/", 1)[-1]
+        if nom not in SERVICES:
+            continue
+        par_service.setdefault(nom, []).append({
+            "pid": int(pid.group(1)),
+            "exec_ms": int(t.group(1)) if t else None,
+            "exec_us": int(duree.group(1)) if duree else None,
+            "faute_nombre": None,
+            "faute_us": None,
+            "faute_pire_us": None,
+            "fichier": None,
+            "zero": None,
+            "rss_kio": None,
+        })
+
+    # Le DERNIER releve de fautes de chaque pid porte ses totaux.
+    derniers = {}
+    for ligne in procs:
+        pid = re.search(r"pid=(\d+)", ligne)
+        if pid:
+            derniers[int(pid.group(1))] = ligne
+    for entrees in par_service.values():
+        for entree in entrees:
+            ligne = derniers.get(entree["pid"])
+            if not ligne:
+                continue
+            def champ(motif):
+                m = re.search(motif, ligne)
+                return int(m.group(1)) if m else None
+            entree["faute_nombre"] = champ(r"fautes=(\d+)")
+            entree["faute_us"] = champ(r"total_us=(\d+)")
+            entree["faute_pire_us"] = champ(r"pire_us=(\d+)")
+            entree["fichier"] = champ(r"fichier=(\d+)/")
+            entree["zero"] = champ(r"zero=(\d+)/")
+            entree["rss_kio"] = champ(r"rss_kio=(\d+)")
+    return par_service
+
+
+def imprime_services(par_service):
+    entete = (f"   {'service':<22} {'pid':>5} {'exec@s':>8} {'exec_us':>8} "
+              f"{'rss_Mio':>8} {'fautes':>8} {'faute_ms':>9} {'pire_ms':>8} "
+              f"{'fichier':>8} {'zero':>8}")
+    print(entete)
+    vide = True
+    for nom in SERVICES:
+        for e in par_service.get(nom, []):
+            vide = False
+            def ms(v):
+                return f"{v / 1000:.1f}" if v is not None else "-"
+            print(f"   {nom:<22} {e['pid']:>5}"
+                  f" {ms(e['exec_ms']):>8}"
+                  f" {e['exec_us'] if e['exec_us'] is not None else '-':>8}"
+                  f" {(e['rss_kio'] // 1024) if e['rss_kio'] is not None else '-':>8}"
+                  f" {e['faute_nombre'] if e['faute_nombre'] is not None else '-':>8}"
+                  f" {ms(e['faute_us']):>9}"
+                  f" {ms(e['faute_pire_us']):>8}"
+                  f" {e['fichier'] if e['fichier'] is not None else '-':>8}"
+                  f" {e['zero'] if e['zero'] is not None else '-':>8}")
+    if vide:
+        print("   (aucun service reconnu ; ni PERF_EXECVE ni [PERF-PROC] ne les nomment)")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -165,6 +257,10 @@ def main():
     print("== ce que le noyau a mesure : etapes de l'execve ==")
     for ligne in execs[:12] or ["   (aucune)"]:
         print(f"   {ligne}")
+    print()
+    print("== les six services, cote a cote ==")
+    imprime_services(tableau_des_services(execs, procs))
+
     print()
     print("== fautes de page par processus, dans le temps ==")
     for ligne in series_par_pid(procs) or ["   (aucune)"]:
