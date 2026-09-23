@@ -706,7 +706,35 @@ connection_cpp.write_text(data)
 # demande de distinguer : la requete recue, le processus lance, les services
 # frere raccordes, et le verdict rendu a WebContent.
 
+# L'HORLOGE DES TRACES DE WORKER.
+#
+# BOUCHAUD_C29_WORKER_HORODATE
+#
+# Les dix traces `WORKER_ETAPE` existaient deja, mais AUCUNE ne portait
+# d'instant. Elles disaient donc quelles etapes avaient ete franchies, et
+# rien sur le temps passe entre elles -- or c'est exactement la question :
+# le premier worker met plus de deux minutes, et il faut savoir OU.
+#
+# `MonotonicTime::now().milliseconds()` rend un instant monotone ABSOLU, et
+# c'est ce qui compte ici : les etapes sont emises par TROIS processus
+# differents -- l'hote, le worker, WebContent. Un temps relatif au demarrage
+# de chacun ne serait pas comparable d'une ligne a l'autre ; une horloge
+# commune permet de soustraire.
+#
+# `AK/Time.h` n'est inclus par aucun des trois : l'oubli ne se verrait qu'au
+# bout de douze minutes de compilation.
+def ajoute_include_time(chemin, ancre):
+    """Garantit `#include <AK/Time.h>` dans un fichier qui horodate."""
+    texte = chemin.read_text()
+    if "#include <AK/Time.h>" in texte:
+        return
+    if ancre not in texte:
+        raise SystemExit(f"horodatage : ancre d'inclusion introuvable dans {chemin}")
+    chemin.write_text(texte.replace(ancre, "#include <AK/Time.h>\n" + ancre, 1))
+
+
 worker_manager = root / "Libraries/LibWebView/WorkerProcessManager.cpp"
+ajoute_include_time(worker_manager, "#include <LibCore/EventLoop.h>\n")
 ensure_include(
     worker_manager,
     "#if defined(BOUCHAUD_PORT)\n#    include <LibCore/System.h>\n#endif",
@@ -727,13 +755,11 @@ replace_once(
 #if defined(BOUCHAUD_PORT)
     // Chaque etape porte l'identifiant de l'agent : plusieurs workers peuvent
     // demarrer en meme temps, et leurs lignes s'entrelaceraient.
-    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=lancement_demande url={}",
-        agent_id, request.url);
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} agent={} etape=lancement_demande url={}", MonotonicTime::now().milliseconds(), agent_id, request.url);
 #endif
     auto client = MUST(launch_web_worker_process(request.agent_type, is_private, agent_id));
 #if defined(BOUCHAUD_PORT)
-    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=processus_lance pid={}",
-        agent_id, client->pid());
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} agent={} etape=processus_lance pid={}", MonotonicTime::now().milliseconds(), agent_id, client->pid());
 #endif
 
     // LES TROIS RACCORDEMENTS SONT TRACES SEPAREMENT, ET CE N'EST PAS DU ZELE.
@@ -744,11 +770,11 @@ replace_once(
     // n'est pas parti » et « le navigateur est mort en essayant ».
     auto request_server_handle = MUST(connect_new_request_server_client(is_private));
 #if defined(BOUCHAUD_PORT)
-    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=request_server_raccorde", agent_id);
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} agent={} etape=request_server_raccorde", MonotonicTime::now().milliseconds(), agent_id);
 #endif
     auto image_decoder_handle = MUST(connect_new_image_decoder_client());
 #if defined(BOUCHAUD_PORT)
-    outln("[ladybird-bouchaud] WORKER_ETAPE agent={} etape=image_decoder_raccorde", agent_id);
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} agent={} etape=image_decoder_raccorde", MonotonicTime::now().milliseconds(), agent_id);
 #endif
     client->async_connect_to_request_server(move(request_server_handle));
     client->async_connect_to_image_decoder(move(image_decoder_handle));""",
@@ -762,7 +788,7 @@ replace_once(
     """void WorkerProcessManager::notify_worker_script_load_success(Owner const& owner)
 {
 #if defined(BOUCHAUD_PORT)
-    outln("[ladybird-bouchaud] WORKER_ETAPE etape=script_charge");
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=script_charge", MonotonicTime::now().milliseconds());
 #endif""",
     "trace de chargement reussi",
 )
@@ -780,7 +806,7 @@ replace_once(
     // un processus separe. Le resoudre demande que le magasin d'URL de blob
     // traverse la frontiere de processus, ce qui n'a rien a voir avec le
     // lancement du processus lui-meme.
-    outln("[ladybird-bouchaud] WORKER_ETAPE etape=script_echoue");
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=script_echoue", MonotonicTime::now().milliseconds());
 #endif""",
     "trace de chargement echoue",
 )
@@ -788,11 +814,12 @@ replace_once(
 
 # Le processus WebWorker lui-meme : sa naissance et son IPC.
 worker_main = root / "Services/WebWorker/main.cpp"
+ajoute_include_time(worker_main, "#include <LibCore/ArgsParser.h>\n")
 replace_once(
     worker_main,
     """    auto client = TRY(IPC::take_over_accepted_client_from_system_server<WebWorker::ConnectionFromClient>(mach_server_name));""",
     """#if defined(BOUCHAUD_PORT)
-    outln("[ladybird-bouchaud] WORKER_ETAPE etape=main pid={}", Core::System::getpid());
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=main pid={}", MonotonicTime::now().milliseconds(), Core::System::getpid());
 #endif
     auto client = TRY(IPC::take_over_accepted_client_from_system_server<WebWorker::ConnectionFromClient>(mach_server_name));
 #if defined(BOUCHAUD_PORT)
@@ -800,9 +827,26 @@ replace_once(
     // tourne. Un WebWorker lance dont le transport n'arrive jamais et un
     // WebWorker jamais lance se ressemblent vus de la page : les deux donnent
     // « timeout ».
-    outln("[ladybird-bouchaud] WORKER_ETAPE etape=ipc_pret pid={}", Core::System::getpid());
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=ipc_pret pid={}", MonotonicTime::now().milliseconds(), Core::System::getpid());
 #endif""",
     "traces de naissance du WebWorker",
+)
+replace_once(
+    worker_main,
+    """    return event_loop.exec();""",
+    """#if defined(BOUCHAUD_PORT)
+    // LA BOUCLE D'EVENEMENTS TOURNE, et c'est un troisieme fait distinct.
+    //
+    // `ipc_pret` dit que le transport est adopte ; il ne dit pas que le
+    // processus est en mesure de SERVIR. Entre les deux il reste l'edition de
+    // liens paresseuse, l'initialisation d'ICU et celle de la machine
+    // JavaScript. C'est le dernier intervalle avant que le worker ne puisse
+    // recevoir un message, et donc le dernier endroit ou un demarrage a froid
+    // peut se cacher sans etre attribue.
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=boucle_prete pid={}", MonotonicTime::now().milliseconds(), Core::System::getpid());
+#endif
+    return event_loop.exec();""",
+    "trace de boucle d'evenements du WebWorker",
 )
 ensure_include(
     worker_main,
@@ -860,6 +904,7 @@ print(" - M11 conserve comme bridge GUI temporaire")
 # BOUCHAUD_M11_TAB_HOST_TRACE_V1
 # ---------------------------------------------------------------------------
 webcontent_client_cpp = root / "Libraries/LibWebView/WebContentClient.cpp"
+ajoute_include_time(webcontent_client_cpp, "#include <AK/Debug.h>\n")
 
 replace_once(
     webcontent_client_cpp,
@@ -955,8 +1000,7 @@ replace_once(
     if (auto view = view_for_page_id(page_id); view.has_value()) {
         auto agent_id = WorkerProcessManager::the().start_worker_agent(*this, page_id, move(request));
 #if defined(BOUCHAUD_PORT)
-        outln("[ladybird-bouchaud] WORKER_ETAPE etape=agent_rendu page_id={} agent={}",
-            page_id, agent_id);
+        outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=agent_rendu page_id={} agent={}", MonotonicTime::now().milliseconds(), page_id, agent_id);
 #endif
         return { agent_id };
     }
@@ -968,8 +1012,7 @@ replace_once(
     // registre de vues. Cote WebContent, un agent zero se lit « pas de
     // worker », et la page attend son message jusqu'a expiration du garde --
     // ce qui donne exactement « worker timeout », sans aucune trace.
-    outln("[ladybird-bouchaud] WORKER_ETAPE etape=refuse_page_inconnue page_id={} vues={}",
-        page_id, m_views.size());
+    outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=refuse_page_inconnue page_id={} vues={}", MonotonicTime::now().milliseconds(), page_id, m_views.size());
 #endif
     return { 0 };
 }""",
