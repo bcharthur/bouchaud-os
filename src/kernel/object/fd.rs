@@ -496,6 +496,20 @@ impl FdTable {
 /// Resout un chemin de peripherique en descripteur, ou `None` si ce n'en est
 /// pas un (le chemin sera alors cherche dans le RAMFS).
 pub fn device_for_path(path: &str) -> Option<FdKind> {
+    // BOUCHAUD_V13_PROC_STATS_DYNAMIQUES_OPEN
+    // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
+    // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
+    // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
+    if path == "/proc/stat" {
+        return Some(FdKind::Instantane(Arc::new(proc_stat_global())));
+    }
+    if path == "/proc/self/stat" {
+        let pid = crate::kernel::task::current_process().pid;
+        return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
+    }
+    if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
+        return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
+    }
     match path {
         "/dev/null" => Some(FdKind::Null),
         "/dev/zero" => Some(FdKind::Zero),
@@ -515,6 +529,58 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         }
         _ => None,
     }
+}
+
+// BOUCHAUD_V13_PROC_STATS_DYNAMIQUES_FORMAT
+const PROC_USER_HZ: u64 = 100;
+const PROC_TICK_NS: u64 = 1_000_000_000 / PROC_USER_HZ;
+
+fn proc_ticks(ns: u64) -> u64 { ns / PROC_TICK_NS }
+
+fn proc_pid_stat_depuis_chemin(path: &str) -> Option<u32> {
+    let reste = path.strip_prefix("/proc/")?;
+    let (pid, feuille) = reste.split_once('/')?;
+    if feuille != "stat" || pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse::<u32>().ok()
+}
+
+fn proc_stat_global() -> Vec<u8> {
+    use alloc::format;
+    let c = crate::kernel::task::proc_cpu_cumul();
+    // Format Linux : user nice system idle iowait irq softirq steal guest guest_nice.
+    // Ladybird ne somme que user/system/idle/irq/softirq. Les categories que
+    // Bouchaud ne distingue pas sont zero, pas inventees.
+    format!(
+        "cpu  {} 0 {} {} 0 0 0 0 0 0\n",
+        proc_ticks(c.user_ns),
+        proc_ticks(c.system_ns),
+        proc_ticks(c.idle_ns),
+    ).into_bytes()
+}
+
+fn proc_stat_processus(pid: u32) -> Option<Vec<u8>> {
+    use alloc::format;
+    let c = crate::kernel::task::proc_processus_cumul(pid)?;
+    // Le parser Ladybird epingle lit exactement 14=utime, 15=stime, 24=rss.
+    // On fournit aussi ppid, nombre de threads et vsize pour rester utile aux
+    // autres consommateurs. `comm` est nettoye car le parser amont emploie %s.
+    let mut nom = c.nom.rsplit('/').next().unwrap_or(&c.nom).replace(' ', "_");
+    nom = nom.replace(')', "_");
+    let rss_pages = c.rss_octets / crate::kernel::vmm::PAGE_SIZE;
+    Some(format!(
+        "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 {} {} 0 0 0 0 {} 0 0 {} {}\n",
+        c.pid,
+        nom,
+        c.etat as char,
+        c.ppid,
+        proc_ticks(c.user_ns),
+        proc_ticks(c.system_ns),
+        c.threads,
+        c.vss_octets,
+        rss_pages,
+    ).into_bytes())
 }
 
 /// Contenu de `/proc/self/maps` pour le processus courant.

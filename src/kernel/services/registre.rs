@@ -394,6 +394,17 @@ pub struct Registre {
     compteurs: Compteurs,
 }
 
+// BOUCHAUD_V13_RECYCLAGE_PID_HELPER
+/// Une entree dynamique Ladybird est reconnaissable a son suffixe PID.
+/// Les noeuds de role (`browser.web_content`) ne sont jamais recyclables.
+fn instance_navigateur_dynamique(id: &str) -> bool {
+    if !id.starts_with("browser.") {
+        return false;
+    }
+    let suffixe = id.rsplit('.').next().unwrap_or("");
+    !suffixe.is_empty() && suffixe.bytes().all(|b| b.is_ascii_digit())
+}
+
 impl Registre {
     pub const fn neuf() -> Self {
         Self {
@@ -426,6 +437,33 @@ impl Registre {
             return true;
         }
         if self.occupees >= SERVICES_MAX {
+            // BOUCHAUD_V13_RECYCLAGE_PID_SATURATION
+            // Les onglets/workers creent des PID nouveaux. Garder leurs lignes
+            // mortes est utile pour le diagnostic, mais ne doit jamais remplir
+            // definitivement le registre. A saturation seulement, on remplace
+            // la PLUS ANCIENNE instance navigateur arretee. Les services
+            // statiques et les roles agreges ne sont jamais touches.
+            if genre == Genre::Processus && instance_navigateur_dynamique(id) {
+                let recyclable = self.entrees[..self.occupees]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        e.genre == Genre::Processus
+                            && e.etat == Etat::Arrete
+                            && instance_navigateur_dynamique(e.id.texte())
+                    })
+                    .min_by_key(|(_, e)| e.derniere_transition_ns)
+                    .map(|(index, _)| index);
+                if let Some(place) = recyclable {
+                    self.entrees[place] = Entree {
+                        id: Id::depuis(id),
+                        parent: Id::depuis(parent),
+                        genre,
+                        ..Entree::vide()
+                    };
+                    return true;
+                }
+            }
             self.compteurs.refuses = self.compteurs.refuses.saturating_add(1);
             return false;
         }

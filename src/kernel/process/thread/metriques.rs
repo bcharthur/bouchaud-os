@@ -688,6 +688,116 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
     (mesures, window)
 }
 
+// BOUCHAUD_V13_PROC_STATS_DYNAMIQUES
+/// Cumul CPU global expose a la compatibilite Linux. Les valeurs sont des
+/// nanosecondes cumulatives ; la couche `/proc` choisit USER_HZ=100 pour les
+/// serialiser. Le total avance comme temps mur * nombre de CPU, ce qui rend le
+/// ratio utilise par Ladybird coherent meme quand la machine est au repos.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcCpuCumul {
+    pub user_ns: u64,
+    pub system_ns: u64,
+    pub idle_ns: u64,
+    pub online: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcProcessusCumul {
+    pub pid: u32,
+    pub ppid: u32,
+    pub nom: String,
+    pub etat: u8,
+    pub user_ns: u64,
+    pub system_ns: u64,
+    pub threads: usize,
+    pub vss_octets: u64,
+    pub rss_octets: u64,
+}
+
+#[inline]
+fn temps_vivant(task: &Task, now: u64) -> u64 {
+    if task.last_account_ns != 0 && task.on_cpu >= 0 {
+        now.saturating_sub(task.last_account_ns.charge())
+    } else {
+        0
+    }
+}
+
+pub fn proc_cpu_cumul() -> ProcCpuCumul {
+    let now = crate::kernel::timer::monotonic_ns();
+    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+    let mut user_ns = 0u64;
+    let mut system_ns = 0u64;
+    for task in tasks().iter() {
+        if task.state == TaskState::Zombie {
+            continue;
+        }
+        let live = temps_vivant(task, now);
+        user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
+        system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
+        if live != 0 {
+            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
+            else { user_ns = user_ns.saturating_add(live); }
+        }
+    }
+    let capacite = now.saturating_mul(online as u64);
+    let idle_ns = capacite.saturating_sub(user_ns.saturating_add(system_ns));
+    ProcCpuCumul { user_ns, system_ns, idle_ns, online }
+}
+
+pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
+    let now = crate::kernel::timer::monotonic_ns();
+    let mut user_ns = 0u64;
+    let mut system_ns = 0u64;
+    let mut threads = 0usize;
+    let mut executable = false;
+    let mut processus: Option<Arc<Process>> = None;
+
+    for task in tasks().iter() {
+        if task.process.pid != pid || task.state == TaskState::Zombie {
+            continue;
+        }
+        if processus.is_none() {
+            processus = Some(Arc::clone(&task.process));
+        }
+        threads += 1;
+        executable |= task.state == TaskState::Ready || task.on_cpu >= 0;
+        let live = temps_vivant(task, now);
+        user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
+        system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
+        if live != 0 {
+            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
+            else { user_ns = user_ns.saturating_add(live); }
+        }
+    }
+
+    let processus = processus?;
+    let usage = crate::kernel::resource::memory_usage(&processus);
+    // BOUCHAUD_V13_2_PROC_METADATA_LIFETIME
+    //
+    // Ne pas laisser le garde `metadata` naitre dans le dernier champ de
+    // l'expression `Some(...)`: Rust prolonge alors le temporaire jusqu'a la
+    // fin du bloc et le garde peut etre detruit apres `processus`. Extraire le
+    // nom dans un bloc force la liberation du verrou avant la construction du
+    // resultat.
+    let ppid = processus.parent;
+    let nom = {
+        let metadata = processus.metadata.lock();
+        metadata.name.clone()
+    };
+    Some(ProcProcessusCumul {
+        pid,
+        ppid,
+        nom,
+        etat: if executable { b'R' } else { b'S' },
+        user_ns,
+        system_ns,
+        threads,
+        vss_octets: usage.vss,
+        rss_octets: usage.rss,
+    })
+}
+
 /// Signale qu'une commutation est souhaitable au prochain point sur.
 pub fn set_need_resched() {
     NEED_RESCHED[local_cpu()].store(true, Ordering::Release);

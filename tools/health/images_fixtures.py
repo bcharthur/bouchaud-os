@@ -20,16 +20,14 @@ si un appel a rendu « succes ».
                  pixel est connue par CONSTRUCTION. Aucun encodeur tiers ne
                  s'interpose entre l'attente et le fichier.
 
-  AMONT          JPEG et WebP. Ecrire un encodeur JPEG baseline ou VP8L a la
-                 main pour un banc, c'est ajouter une source de bogues qui
-                 accuserait le port a la place de l'encodeur. Les fichiers
-                 viennent donc de `Tests/LibGfx/test-inputs/` du Ladybird
-                 EPINGLE, et les pixels attendus sont ceux que le test amont
-                 `TestImageDecoder.cpp` affirme lui-meme.
+  FIXTURES       JPEG et WebP. Les octets sont versionnes avec Bouchaud OS
+  AUTONOMES      sous `tools/health/fixtures/browser-images/`, avec SHA-256.
+                 Le banc Fast/Reliability ne depend donc plus d'un checkout
+                 complet de Ladybird. Les quatre codecs restent testes PAR
+                 LADYBIRD : la page charge les fichiers, dessine dans canvas
+                 et relit des pixels connus.
 
-                 C'est la reference la plus forte disponible : si ce decodeur
-                 rend autre chose sous Bouchaud que ce qu'amont exige, la
-                 difference vient du port.
+                 BOUCHAUD_V13_FIXTURES_AUTONOMES
 
 ## Ce que la presence des codecs prouve deja
 
@@ -40,18 +38,39 @@ du port Bouchaud, jamais une limitation upstream. C'est verifiable et c'est
 verifie.
 """
 import os
-import struct
 import sys
+import struct
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import images_amont  # noqa: E402
 
 RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# L'arbre amont, QUAND il est la. Il est dans `.gitignore` et n'existe que sur
-# le poste qui construit le navigateur ; le catalogue n'en depend plus, mais
-# le controle s'en sert pour detecter une derive entre l'embarque et la source.
+FIXTURES = os.path.join(RACINE, "tools", "health", "fixtures", "browser-images")
+
+# LES DEUX PROVENANCES COEXISTENT, ET C'EST VOULU.
+#
+# `fixtures/browser-images/` porte des images SYNTHETIQUES, produites ici et
+# versionnees : leurs pixels sont connus par construction et elles couvrent
+# chaque codec.
+#
+# `images_amont.py` porte les fichiers du CORPUS DE TEST du Ladybird epingle.
+# Ils apportent ce que les synthetiques ne peuvent pas : `TestImageDecoder.cpp`
+# affirme lui-meme certains de leurs pixels, si bien qu'un ecart accuse le
+# port et rien d'autre. Ils couvrent aussi des chemins qu'une image produite
+# proprement n'emprunte jamais -- un JPEG CMYK sans marqueur Adobe, un WebP
+# a canal alpha.
+#
+# Les garder tous les deux elargit la couverture sans rien retirer.
+import images_amont  # noqa: E402
+
 AMONT = os.path.join(RACINE, "third_party", "ladybird", "Tests", "LibGfx", "test-inputs")
+
+FIXTURE_SHA256 = {
+    "jpeg-rgb-checker.jpg": "aa908d27599e54a73b8ee82866bcd2c2d9ef09f6862b5b11eaf60030e6064e84",
+    "jpeg-rgb-gradient.jpg": "2d0f67f22353e7917075d870fa2d8be5953d2231b8fa8784fc64f99ecfdc85e0",
+    "webp-lossless.webp": "5f8bd924c769c888fe0c98fe302633b871f73a5263fc6970c1ce3848aef7531a",
+    "webp-lossy.webp": "bcb33bbe05b1141511427eaed5f46b552a00b0860905aecebdd08a038f0cf9ed",
+}
 
 
 # --------------------------------------------------------------------------
@@ -161,15 +180,10 @@ def gif_palette(largeur: int, hauteur: int, palette, index, boucles=None, delais
     return bytes(sortie)
 
 
-def _amont(nom: str) -> bytes:
-    """Les octets amont EMBARQUES, jamais lus sur le disque.
-
-    Le catalogue lisait `third_party/ladybird/` a l'import. Ce repertoire est
-    dans `.gitignore` -- il n'existe que la ou le navigateur vient d'etre
-    construit -- si bien que son absence ne donnait pas un banc ignore mais
-    une exception a l'import, donc un lot rouge partout ailleurs.
-    """
-    return images_amont.octets(nom)
+def _fixture(nom: str) -> bytes:
+    """Lit une fixture versionnee avec le banc, jamais un checkout externe."""
+    with open(os.path.join(FIXTURES, nom), "rb") as f:
+        return f.read()
 
 
 # --------------------------------------------------------------------------
@@ -222,54 +236,66 @@ CATALOGUE = [
         "pixels": [(8, 8, 255, 0, 0)],
     },
     {
-        # JPEG : fichier AMONT, pixels affirmes par `TestImageDecoder.cpp`
-        # (test_jpeg_cmyk, sans marqueur Adobe). 577 octets, 10x10.
-        "id": 5, "nom": "jpeg-cmyk", "fichier": "jpeg-cmyk.jpg", "mime": "image/jpeg",
+        # JPEG baseline 4:4:4 autonome : quatre quadrants non uniformes.
+        "id": 5, "nom": "jpeg-rgb-checker", "fichier": "jpeg-rgb-checker.jpg", "mime": "image/jpeg",
+        "source": "fixture:jpeg-rgb-checker.jpg", "largeur": 32, "hauteur": 32,
+        "tolerance": 10, "octets": _fixture("jpeg-rgb-checker.jpg"),
+        "pixels": [(4, 4, 235, 35, 45), (24, 4, 27, 93, 233),
+                   (4, 24, 35, 210, 81), (24, 24, 243, 202, 32)],
+    },
+    {
+        # Deuxieme JPEG autonome : degrade RGB, pixels verifies eux aussi.
+        "id": 6, "nom": "jpeg-rgb-gradient", "fichier": "jpeg-rgb-gradient.jpg", "mime": "image/jpeg",
+        "source": "fixture:jpeg-rgb-gradient.jpg", "largeur": 32, "hauteur": 32,
+        "tolerance": 10, "octets": _fixture("jpeg-rgb-gradient.jpg"),
+        "pixels": [(4, 4, 32, 32, 32), (24, 4, 193, 33, 133),
+                   (4, 24, 31, 191, 91), (24, 24, 192, 192, 192)],
+    },
+    {
+        # WebP SANS PERTE (VP8L), fixture autonome.
+        "id": 7, "nom": "webp-lossless", "fichier": "webp-lossless.webp", "mime": "image/webp",
+        "source": "fixture:webp-lossless.webp", "largeur": 32, "hauteur": 32,
+        "tolerance": 0, "octets": _fixture("webp-lossless.webp"),
+        "pixels": [(4, 4, 236, 36, 46), (24, 4, 28, 93, 233),
+                   (4, 24, 35, 210, 80), (24, 24, 242, 202, 32)],
+    },
+    {
+        # WebP AVEC PERTE (VP8), fixture autonome.
+        "id": 8, "nom": "webp-lossy", "fichier": "webp-lossy.webp", "mime": "image/webp",
+        "source": "fixture:webp-lossy.webp", "largeur": 32, "hauteur": 32,
+        "tolerance": 12, "octets": _fixture("webp-lossy.webp"),
+        "pixels": [(4, 4, 240, 40, 51), (24, 4, 27, 94, 233),
+                   (4, 24, 36, 210, 81), (24, 24, 240, 199, 29)],
+    },
+    {
+        # JPEG CMYK SANS MARQUEUR ADOBE -- un chemin qu'aucune image produite
+        # proprement n'emprunte. Les trois pixels sont ceux qu'affirme
+        # `TestImageDecoder.cpp` (test_jpeg_cmyk). 577 octets.
+        "id": 9, "nom": "jpeg-cmyk", "fichier": "jpeg-cmyk.jpg", "mime": "image/jpeg",
         "source": "amont:jpg/cmyk-no-adobe-marker.jpg", "largeur": 10, "hauteur": 10,
-        "tolerance": 4, "octets": _amont("jpeg_cmyk"),
+        "tolerance": 4, "octets": images_amont.octets("jpeg_cmyk"),
         "pixels": [(8, 1, 44, 184, 97), (1, 8, 184, 44, 97), (9, 9, 24, 24, 194)],
     },
     {
-        # JPEG baseline ordinaire, un seul balayage. Amont n'affirme que le
-        # decodage ; les pixels sont MESURES au Chromium sans tete, decodeur
-        # de reference independant qui s'accorde a l'octet pres avec amont
-        # partout ou les deux se prononcent (voir `images_amont.py`).
-        "id": 6, "nom": "jpeg-rgb24", "fichier": "jpeg-rgb24.jpg", "mime": "image/jpeg",
-        "source": "amont:jpg/rgb24.jpg", "largeur": 127, "hauteur": 64,
-        "tolerance": 6, "octets": _amont("jpeg_rgb24"),
-        "pixels": [(31, 16, 167, 255, 206), (63, 48, 222, 82, 231)],
-    },
-    {
-        # WebP AVEC PERTE (VP8), 784 octets. Les deux pixels sont ceux
-        # qu'affirme `test_webp_simple_lossy`.
-        #
-        # Le premier jet prenait `webp/4.webp` : meme chemin de decodage, et
-        # 176 972 octets. Celui-ci le couvre en moins d'un kibioctet.
-        "id": 7, "nom": "webp-lossy", "fichier": "webp-lossy.webp", "mime": "image/webp",
-        "source": "amont:webp/simple-vp8.webp", "largeur": 240, "hauteur": 240,
-        "tolerance": 4, "octets": _amont("webp_vp8"),
+        # WebP AVEC PERTE (VP8), 784 octets, et ses deux pixels sont affirmes
+        # par `test_webp_simple_lossy`.
+        "id": 10, "nom": "webp-vp8-amont", "fichier": "webp-vp8-amont.webp",
+        "mime": "image/webp", "source": "amont:webp/simple-vp8.webp",
+        "largeur": 240, "hauteur": 240, "tolerance": 4,
+        "octets": images_amont.octets("webp_vp8"),
         "pixels": [(120, 232, 0xF1, 0xEF, 0xF0), (198, 202, 0x7A, 0xAA, 0xD5)],
     },
     {
-        # WebP SANS PERTE (VP8L), 190 octets. Chemin de decodage entierement
-        # different du precedent : les separer est ce qui permet de dire
-        # lequel est casse. Pixels mesures au Chromium.
-        "id": 8, "nom": "webp-lossless", "fichier": "webp-lossless.webp", "mime": "image/webp",
-        "source": "amont:webp/width11-height11-colors3.webp", "largeur": 11, "hauteur": 11,
-        "tolerance": 0, "octets": _amont("webp_vp8l"),
-        "pixels": [(2, 2, 57, 255, 51), (5, 8, 207, 255, 202), (8, 5, 143, 255, 135)],
-    },
-    {
-        # WebP avec ALPHA, 38 octets. L'alpha est un etage separe du reste du
-        # decodage : une image opaque juste ne dit rien de lui.
+        # WebP A CANAL ALPHA, 38 octets. L'alpha est un etage separe du reste
+        # du decodage : les huit images opaques ci-dessus ne disent rien de lui.
         #
-        # L'assertion porte sur le canal alpha, pas sur la couleur : le canvas
-        # PREMULTIPLIE, si bien qu'un pixel blanc a moitie transparent n'en
-        # ressort pas blanc. C'est la valeur d'alpha qui est verifiee, et elle
-        # l'est par une entree dediee du banc -- voir `alpha_attendu`.
-        "id": 9, "nom": "webp-alpha", "fichier": "webp-alpha.webp", "mime": "image/webp",
+        # L'assertion porte sur l'ALPHA et non sur la couleur, parce que le
+        # canvas PREMULTIPLIE : un pixel blanc a moitie transparent n'en
+        # ressort pas blanc, et une assertion de couleur echouerait sur une
+        # image pourtant bien decodee.
+        "id": 11, "nom": "webp-alpha", "fichier": "webp-alpha.webp", "mime": "image/webp",
         "source": "amont:webp/semi-transparent-pixel.webp", "largeur": 1, "hauteur": 1,
-        "tolerance": 0, "octets": _amont("webp_alpha"),
+        "tolerance": 0, "octets": images_amont.octets("webp_alpha"),
         "pixels": [], "alpha_attendu": (0, 0, 128),
     },
 ]

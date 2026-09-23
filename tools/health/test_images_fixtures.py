@@ -14,8 +14,8 @@ et n'ont pas a etre redecodes ici.
 
     python3 tools/health/test_images_fixtures.py
 """
-import hashlib
 import os
+import hashlib
 import sys
 import zlib
 
@@ -172,8 +172,7 @@ def _lzw_gif(donnees, code_min):
 
 # --------------------------------------------------------------------------
 def controle_amont():
-    """Les octets embarques sont-ils ceux qu'ils annoncent, et le sont-ils
-    encore ?
+    """Les octets du corpus amont sont-ils ceux qu'ils annoncent ?
 
     DEUX VERIFICATIONS, ET LA SECONDE EST CONDITIONNELLE.
 
@@ -181,10 +180,11 @@ def controle_amont():
     n'a pas ete edite a la main, ce qu'une relecture humaine ne verrait pas.
 
     La comparaison avec `third_party/ladybird/` n'a lieu que si cet arbre est
-    la. Il est dans `.gitignore` et n'existe que sur le poste qui construit le
-    navigateur ; l'EXIGER rendrait rouge tout autre lot -- c'est precisement
-    le defaut que ce fichier corrige. Quand il est present, la comparaison
-    attrape la derive : un SHA epingle qui bouge sans que l'embarque suive.
+    la. Il est dans `.gitignore` et n'existe que sur le poste qui construit
+    le navigateur ; l'EXIGER rendrait rouges Fast et Reliability, ce qui est
+    exactement le defaut que les fixtures autonomes corrigent. Quand il est
+    present, la comparaison attrape la derive : un SHA amont qui bouge sans
+    que l'embarque suive.
     """
     for nom, entree in amont.AMONT.items():
         octets = amont.octets(nom)
@@ -216,6 +216,31 @@ def controle():
     for entree in fx.CATALOGUE:
         nom, source = entree["nom"], entree["source"]
 
+        # BOUCHAUD_V13_FIXTURES_AUTONOMES : Fast/Reliability ne doivent
+        # jamais dependre d'un checkout Ladybird absent de leur job.
+        if source.startswith("fixture:"):
+            fichier = source.split(":", 1)[1]
+            chemin = os.path.join(fx.FIXTURES, fichier)
+            verifie(os.path.exists(chemin), f"{nom} : fixture absente -- {chemin}")
+            octets = entree["octets"]
+            verifie(len(octets) > 0, f"{nom} : fixture vide")
+            if os.path.exists(chemin):
+                disque = open(chemin, "rb").read()
+                verifie(octets == disque, f"{nom} : octets catalogue != fixture")
+                attendu = fx.FIXTURE_SHA256.get(fichier)
+                verifie(attendu is not None, f"{nom} : SHA-256 non declare")
+                if attendu is not None:
+                    verifie(hashlib.sha256(disque).hexdigest() == attendu,
+                            f"{nom} : SHA-256 fixture inattendu")
+            if entree["mime"] == "image/jpeg":
+                verifie(octets[:2] == b"\xff\xd8", f"{nom} : ce n'est pas un JPEG")
+            elif entree["mime"] == "image/webp":
+                verifie(octets[:4] == b"RIFF" and octets[8:12] == b"WEBP",
+                        f"{nom} : ce n'est pas un WebP")
+            continue
+
+        # Les fichiers du corpus amont : memes verifications de forme. Leurs
+        # empreintes et leur derive sont traitees par `controle_amont()`.
         if source.startswith("amont:"):
             octets = entree["octets"]
             verifie(len(octets) > 0, f"{nom} : octets amont embarques vides")
@@ -259,11 +284,17 @@ def controle():
     for exige in ("image/png", "image/jpeg", "image/gif", "image/webp"):
         verifie(exige in mimes, f"catalogue : plus aucune image {exige}")
     verifie(any(e.get("anime") for e in fx.CATALOGUE), "catalogue : plus de GIF anime")
-    # L'ALPHA EST UN ETAGE SEPARE du reste du decodage : une image opaque
-    # juste ne dit rien de lui.
+    # L'ALPHA EST UN ETAGE SEPARE du reste du decodage : des images opaques
+    # justes ne disent rien de lui.
     verifie(any(e.get("alpha_attendu") for e in fx.CATALOGUE),
             "catalogue : plus d'image a canal alpha")
-    # ET LE BANC DOIT RESTER LEGER. Le premier jet embarquait 211 kio pour
+    # LE CORPUS AMONT DOIT RESTER REPRESENTE. Les fixtures synthetiques
+    # couvrent les codecs ; elles ne peuvent pas porter les pixels que
+    # `TestImageDecoder.cpp` affirme, ni les chemins tordus qu'une image
+    # produite proprement n'emprunte jamais.
+    verifie(any(e["source"].startswith("amont:") for e in fx.CATALOGUE),
+            "catalogue : plus aucune image du corpus amont")
+    # ET LE BANC DOIT RESTER LEGER. Un premier jet embarquait 211 kio pour
     # couvrir les memes chemins ; un banc qu'on hesite a executer ne sert pas.
     poids = sum(len(e["octets"]) for e in fx.CATALOGUE)
     verifie(poids < 32 * 1024, f"catalogue : {poids} octets, au-dela de 32 kio")

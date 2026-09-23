@@ -210,6 +210,9 @@ fn install_proc() {
     // et donc lisible comme une absence de mesure ; un nombre plausible ne le
     // serait pas. Le nombre de LIGNES, lui, est exact -- et c'est ce que les
     // compteurs de processeurs viennent chercher ici.
+    // BOUCHAUD_V13_PROC_STATS_DYNAMIQUES : cette copie RAMFS n'est qu'un
+    // fallback/enumeration. `open("/proc/stat")` est servi dynamiquement par
+    // `kernel::fd::device_for_path`, avec les compteurs scheduler cumulatifs.
     let mut stat = String::from("cpu  0 0 0 0 0 0 0 0 0 0\n");
     for cpu in 0..logiques {
         stat.push_str(&format!("cpu{}  0 0 0 0 0 0 0 0 0 0\n", cpu));
