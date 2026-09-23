@@ -41,9 +41,16 @@ verifie.
 """
 import os
 import struct
+import sys
 import zlib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import images_amont  # noqa: E402
+
 RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# L'arbre amont, QUAND il est la. Il est dans `.gitignore` et n'existe que sur
+# le poste qui construit le navigateur ; le catalogue n'en depend plus, mais
+# le controle s'en sert pour detecter une derive entre l'embarque et la source.
 AMONT = os.path.join(RACINE, "third_party", "ladybird", "Tests", "LibGfx", "test-inputs")
 
 
@@ -154,9 +161,15 @@ def gif_palette(largeur: int, hauteur: int, palette, index, boucles=None, delais
     return bytes(sortie)
 
 
-def _amont(chemin: str) -> bytes:
-    with open(os.path.join(AMONT, chemin), "rb") as f:
-        return f.read()
+def _amont(nom: str) -> bytes:
+    """Les octets amont EMBARQUES, jamais lus sur le disque.
+
+    Le catalogue lisait `third_party/ladybird/` a l'import. Ce repertoire est
+    dans `.gitignore` -- il n'existe que la ou le navigateur vient d'etre
+    construit -- si bien que son absence ne donnait pas un banc ignore mais
+    une exception a l'import, donc un lot rouge partout ailleurs.
+    """
+    return images_amont.octets(nom)
 
 
 # --------------------------------------------------------------------------
@@ -213,30 +226,51 @@ CATALOGUE = [
         # (test_jpeg_cmyk, sans marqueur Adobe). 577 octets, 10x10.
         "id": 5, "nom": "jpeg-cmyk", "fichier": "jpeg-cmyk.jpg", "mime": "image/jpeg",
         "source": "amont:jpg/cmyk-no-adobe-marker.jpg", "largeur": 10, "hauteur": 10,
-        "tolerance": 4, "octets": _amont("jpg/cmyk-no-adobe-marker.jpg"),
+        "tolerance": 4, "octets": _amont("jpeg_cmyk"),
         "pixels": [(8, 1, 44, 184, 97), (1, 8, 184, 44, 97), (9, 9, 24, 24, 194)],
     },
     {
         # JPEG baseline ordinaire, un seul balayage. Amont n'affirme que le
-        # decodage ; le banc n'affirme donc que les DIMENSIONS, et le dit.
+        # decodage ; les pixels sont MESURES au Chromium sans tete, decodeur
+        # de reference independant qui s'accorde a l'octet pres avec amont
+        # partout ou les deux se prononcent (voir `images_amont.py`).
         "id": 6, "nom": "jpeg-rgb24", "fichier": "jpeg-rgb24.jpg", "mime": "image/jpeg",
-        "source": "amont:jpg/rgb24.jpg", "largeur": None, "hauteur": None,
-        "tolerance": 0, "octets": _amont("jpg/rgb24.jpg"), "pixels": [],
+        "source": "amont:jpg/rgb24.jpg", "largeur": 127, "hauteur": 64,
+        "tolerance": 6, "octets": _amont("jpeg_rgb24"),
+        "pixels": [(31, 16, 167, 255, 206), (63, 48, 222, 82, 231)],
     },
     {
-        # WebP SANS PERTE (VP8L). Pixel affirme par `test_webp_simple_lossless`.
-        "id": 7, "nom": "webp-lossless", "fichier": "webp-lossless.webp", "mime": "image/webp",
-        "source": "amont:webp/simple-vp8l.webp", "largeur": 386, "hauteur": 395,
-        "tolerance": 0, "octets": _amont("webp/simple-vp8l.webp"),
-        "pixels": [(289, 332, 0xF2, 0xEE, 0xD3)],
+        # WebP AVEC PERTE (VP8), 784 octets. Les deux pixels sont ceux
+        # qu'affirme `test_webp_simple_lossy`.
+        #
+        # Le premier jet prenait `webp/4.webp` : meme chemin de decodage, et
+        # 176 972 octets. Celui-ci le couvre en moins d'un kibioctet.
+        "id": 7, "nom": "webp-lossy", "fichier": "webp-lossy.webp", "mime": "image/webp",
+        "source": "amont:webp/simple-vp8.webp", "largeur": 240, "hauteur": 240,
+        "tolerance": 4, "octets": _amont("webp_vp8"),
+        "pixels": [(120, 232, 0xF1, 0xEF, 0xF0), (198, 202, 0x7A, 0xAA, 0xD5)],
     },
     {
-        # WebP AVEC PERTE (VP8). Chemin de decodage entierement different du
-        # precedent : les separer est ce qui permet de dire lequel est casse.
-        "id": 8, "nom": "webp-lossy", "fichier": "webp-lossy.webp", "mime": "image/webp",
-        "source": "amont:webp/4.webp", "largeur": 1024, "hauteur": 772,
-        "tolerance": 4, "octets": _amont("webp/4.webp"),
-        "pixels": [(780, 570, 0x72, 0xC8, 0xF6)],
+        # WebP SANS PERTE (VP8L), 190 octets. Chemin de decodage entierement
+        # different du precedent : les separer est ce qui permet de dire
+        # lequel est casse. Pixels mesures au Chromium.
+        "id": 8, "nom": "webp-lossless", "fichier": "webp-lossless.webp", "mime": "image/webp",
+        "source": "amont:webp/width11-height11-colors3.webp", "largeur": 11, "hauteur": 11,
+        "tolerance": 0, "octets": _amont("webp_vp8l"),
+        "pixels": [(2, 2, 57, 255, 51), (5, 8, 207, 255, 202), (8, 5, 143, 255, 135)],
+    },
+    {
+        # WebP avec ALPHA, 38 octets. L'alpha est un etage separe du reste du
+        # decodage : une image opaque juste ne dit rien de lui.
+        #
+        # L'assertion porte sur le canal alpha, pas sur la couleur : le canvas
+        # PREMULTIPLIE, si bien qu'un pixel blanc a moitie transparent n'en
+        # ressort pas blanc. C'est la valeur d'alpha qui est verifiee, et elle
+        # l'est par une entree dediee du banc -- voir `alpha_attendu`.
+        "id": 9, "nom": "webp-alpha", "fichier": "webp-alpha.webp", "mime": "image/webp",
+        "source": "amont:webp/semi-transparent-pixel.webp", "largeur": 1, "hauteur": 1,
+        "tolerance": 0, "octets": _amont("webp_alpha"),
+        "pixels": [], "alpha_attendu": (0, 0, 128),
     },
 ]
 

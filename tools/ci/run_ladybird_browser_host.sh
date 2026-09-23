@@ -75,7 +75,7 @@ JALONS=(
   # `HOST_CANVAS OK` prouve qu'un peu de JS tourne. `HOST_JS_OK` exige que
   # dix-sept comportements soient reellement EXECUTES -- boucle d'evenements,
   # micro-taches, minuteries, fetch, DOM, cadres.
-  'HOST_IMAGES_OK codecs=8/8 fond=1 echelle=1'
+  'HOST_IMAGES_OK codecs=9/9 fond=1 echelle=1'
   'HOST_JS_OK'
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
 )

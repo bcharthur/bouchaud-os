@@ -14,11 +14,13 @@ et n'ont pas a etre redecodes ici.
 
     python3 tools/health/test_images_fixtures.py
 """
+import hashlib
 import os
 import sys
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import images_amont as amont  # noqa: E402
 import images_fixtures as fx  # noqa: E402
 
 ECHECS = []
@@ -169,15 +171,54 @@ def _lzw_gif(donnees, code_min):
 
 
 # --------------------------------------------------------------------------
+def controle_amont():
+    """Les octets embarques sont-ils ceux qu'ils annoncent, et le sont-ils
+    encore ?
+
+    DEUX VERIFICATIONS, ET LA SECONDE EST CONDITIONNELLE.
+
+    L'empreinte SHA256 est verifiee TOUJOURS : elle dit que le bloc base64
+    n'a pas ete edite a la main, ce qu'une relecture humaine ne verrait pas.
+
+    La comparaison avec `third_party/ladybird/` n'a lieu que si cet arbre est
+    la. Il est dans `.gitignore` et n'existe que sur le poste qui construit le
+    navigateur ; l'EXIGER rendrait rouge tout autre lot -- c'est precisement
+    le defaut que ce fichier corrige. Quand il est present, la comparaison
+    attrape la derive : un SHA epingle qui bouge sans que l'embarque suive.
+    """
+    for nom, entree in amont.AMONT.items():
+        octets = amont.octets(nom)
+        verifie(len(octets) == entree["octets_attendus"],
+                f"{nom} : {len(octets)} octets embarques, {entree['octets_attendus']} annonces")
+        empreinte = hashlib.sha256(octets).hexdigest()
+        verifie(empreinte == entree["sha256"],
+                f"{nom} : empreinte {empreinte[:16]}..., {entree['sha256'][:16]}... annoncee")
+
+    presents = 0
+    for nom, entree in amont.AMONT.items():
+        chemin = os.path.join(fx.AMONT, entree["chemin_amont"])
+        if not os.path.exists(chemin):
+            continue
+        presents += 1
+        with open(chemin, "rb") as f:
+            reference = f.read()
+        verifie(reference == amont.octets(nom),
+                f"{nom} : l'embarque ne correspond plus a {entree['chemin_amont']} "
+                f"-- le SHA amont a-t-il bouge ?")
+    if presents == 0:
+        print("images : arbre amont absent, comparaison de derive passee "
+              "(les empreintes, elles, sont verifiees)")
+    else:
+        print(f"images : {presents} fichier(s) compare(s) a l'arbre amont, aucune derive")
+
+
 def controle():
     for entree in fx.CATALOGUE:
         nom, source = entree["nom"], entree["source"]
 
         if source.startswith("amont:"):
-            chemin = os.path.join(fx.AMONT, source.split(":", 1)[1])
-            verifie(os.path.exists(chemin), f"{nom} : fichier amont absent -- {chemin}")
             octets = entree["octets"]
-            verifie(len(octets) > 0, f"{nom} : fichier amont vide")
+            verifie(len(octets) > 0, f"{nom} : octets amont embarques vides")
             if entree["mime"] == "image/jpeg":
                 verifie(octets[:2] == b"\xff\xd8", f"{nom} : ce n'est pas un JPEG")
             elif entree["mime"] == "image/webp":
@@ -218,8 +259,17 @@ def controle():
     for exige in ("image/png", "image/jpeg", "image/gif", "image/webp"):
         verifie(exige in mimes, f"catalogue : plus aucune image {exige}")
     verifie(any(e.get("anime") for e in fx.CATALOGUE), "catalogue : plus de GIF anime")
+    # L'ALPHA EST UN ETAGE SEPARE du reste du decodage : une image opaque
+    # juste ne dit rien de lui.
+    verifie(any(e.get("alpha_attendu") for e in fx.CATALOGUE),
+            "catalogue : plus d'image a canal alpha")
+    # ET LE BANC DOIT RESTER LEGER. Le premier jet embarquait 211 kio pour
+    # couvrir les memes chemins ; un banc qu'on hesite a executer ne sert pas.
+    poids = sum(len(e["octets"]) for e in fx.CATALOGUE)
+    verifie(poids < 32 * 1024, f"catalogue : {poids} octets, au-dela de 32 kio")
 
 
+controle_amont()
 controle()
 if ECHECS:
     print("images : le banc lui-meme est faux")

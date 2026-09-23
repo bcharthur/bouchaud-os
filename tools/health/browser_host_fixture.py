@@ -40,6 +40,7 @@ CATALOGUE_PAGE = [
         "id": e["id"], "nom": e["nom"], "fichier": e["fichier"],
         "url": "/img/" + e["fichier"], "largeur": e["largeur"], "hauteur": e["hauteur"],
         "tolerance": e["tolerance"], "pixels": e["pixels"],
+        "alpha": e.get("alpha_attendu"),
     }
     for e in _img.CATALOGUE
 ]
@@ -249,6 +250,23 @@ HTML = r'''<!doctype html>
       if (entree.largeur !== null && (largeur !== entree.largeur || hauteur !== entree.hauteur)) {
         dit("echec", `raison=dimensions attendu=${entree.largeur}x${entree.hauteur}`);
         return false;
+      }
+
+      // L'ALPHA SE VERIFIE A PART, et pas par curiosite : le canvas
+      // PREMULTIPLIE. Un pixel blanc a moitie transparent n'en ressort pas
+      // blanc, si bien qu'une assertion de couleur echouerait sur une image
+      // pourtant correctement decodee. C'est le canal alpha qui porte
+      // l'information, et c'est lui qu'on lit.
+      if (entree.alpha) {
+        const ctx = lisPixels(image, largeur, hauteur);
+        const [ax, ay, aa] = entree.alpha;
+        const d = ctx.getImageData(ax, ay, 1, 1).data;
+        if (Math.abs(d[3] - aa) > 2) {
+          dit("echec", `raison=alpha en=(${ax},${ay}) lu=${d[3]} attendu=${aa}`);
+          return false;
+        }
+        dit("ok", `verifie=alpha=${d[3]}`);
+        return true;
       }
 
       if (entree.pixels.length === 0) {
