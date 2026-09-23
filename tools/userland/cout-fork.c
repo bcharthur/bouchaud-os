@@ -125,6 +125,64 @@ void _start(void)
         }
     }
 
+    // LE GESTE COMPLET : `fork` PUIS `execve`, COMME LE NAVIGATEUR LE FAIT.
+    //
+    // Les paliers ci-dessus mesurent la duplication seule. Mais
+    // `Core::Process::spawn` enchaine immediatement un `execve` qui DETRUIT
+    // l'espace tout juste duplique. Le pere parcourt donc deux fois sa taille
+    // residente : une fois pour la recopier, une fois pour la rendre.
+    //
+    // Cette derniere mesure est la seule qui passe par `sys_execve` -- le
+    // `exec` du shell, lui, construit la tache directement et n'emprunte pas
+    // ce chemin. Sans elle, `PERF_EXECVE` ne serait jamais exerce.
+    for (int essai = 1; essai <= ESSAIS; essai++) {
+        long t0 = maintenant_us();
+        long pid = appel(57 /* fork */, 0, 0, 0);
+        if (pid == 0) {
+            // TOUT SUR LA PILE, ET CE N'EST PAS UN DETAIL DE STYLE.
+            //
+            // Un `static char *argv[] = { chemin, 0 }` demande une
+            // reinstallation `R_X86_64_RELATIVE` a la mise en place de
+            // l'image. Ce binaire est `-static-pie -nostartfiles` : personne
+            // ne rejoue ses relocations, et le pointeur reste tel que
+            // l'editeur de liens l'a ecrit -- une adresse qui n'existe pas.
+            // `execve` rendait alors EFAULT, silencieusement, et la mesure
+            // s'arretait sur un enfant mort sans image.
+            //
+            // Construits sur la pile, les deux sont calcules a l'execution.
+            char chemin[8];
+            chemin[0] = '/'; chemin[1] = 's'; chemin[2] = 'o'; chemin[3] = 'r';
+            chemin[4] = 't'; chemin[5] = 'i'; chemin[6] = 'e'; chemin[7] = 0;
+            char *argv[2];
+            argv[0] = chemin;
+            argv[1] = 0;
+            appel(59 /* execve */, (long)chemin, (long)argv, 0);
+            appel(60, 3, 0, 0);
+            for (;;) {}
+        }
+        long t1 = maintenant_us();
+        if (pid > 0)
+            appel6(61 /* wait4 */, pid, 0, 0, 0, 0, 0);
+        long t2 = maintenant_us();
+
+        char ligne[160];
+        char *p = ligne;
+        const char *a = "COUT_FORK_EXEC rss_mio=";
+        while (*a) *p++ = *a++;
+        p = entier(p, cumul_mio);
+        a = " essai=";
+        while (*a) *p++ = *a++;
+        p = entier(p, essai);
+        a = " fork_us=";
+        while (*a) *p++ = *a++;
+        p = entier(p, pid < 0 ? -1 : t1 - t0);
+        a = " total_us=";
+        while (*a) *p++ = *a++;
+        p = entier(p, pid < 0 ? -1 : t2 - t0);
+        *p++ = '\n';
+        appel(1, 1, (long)ligne, p - ligne);
+    }
+
     dis("=== COUT FORK FIN ===\n");
     appel(60, 0, 0, 0);
     for (;;) {}

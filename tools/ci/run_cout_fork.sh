@@ -46,6 +46,12 @@ if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
     exit 0
 fi
 
+if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
+        -o "$SCENARIO/sortie" tools/userland/sortie-immediate.c 2>>"$SORTIE/cc.log"; then
+    echo "cout fork : la cible d'execve ne se compile pas ici, verification passee"
+    exit 0
+fi
+
 cat > "$SCENARIO/autorun" <<'AUTORUN'
 exec /coutfork
 AUTORUN
@@ -103,6 +109,27 @@ for MIO in $(printf '%s\n' "${!MEILLEUR[@]}" | sort -n); do
     US=${MEILLEUR[$MIO]}
     printf '%4s Mio %10s us %10s\n' "$MIO" "$US" "$((US / MIO))"
 done
+
+# LE GESTE COMPLET, ET CE QU'IL AJOUTE.
+#
+# `fork` seul ne dit pas tout : l'`execve` qui suit rend une a une les frames
+# que la duplication venait d'allouer. Les deux lignes cote a cote chiffrent
+# les DEUX passages sur la taille residente du pere.
+LIGNES_EXEC=$(grep 'COUT_FORK_EXEC rss_mio=' "$PROPRE" || true)
+if [ -n "$LIGNES_EXEC" ]; then
+    echo
+    echo "$LIGNES_EXEC"
+    echo
+    echo "== etapes de l'execve, vues du noyau =="
+    grep 'PERF_EXECVE' "$PROPRE" | sed 's/^\[kernel\] //' | head -5
+    if ! grep -q 'PERF_EXECVE' "$PROPRE"; then
+        echo "cout fork : aucune ligne PERF_EXECVE ; le chemin sys_execve n'a pas ete pris" >&2
+        echecs=$((echecs + 1))
+    fi
+else
+    echo "cout fork : aucune mesure fork+execve" >&2
+    echecs=$((echecs + 1))
+fi
 
 GROS=$(printf '%s\n' "${!MEILLEUR[@]}" | sort -n | tail -1)
 US=${MEILLEUR[$GROS]}

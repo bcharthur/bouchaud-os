@@ -139,6 +139,54 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
                 let dominante = crate::kernel::task::faute_dominante(row.pid)
                     .map(|(categorie, _)| categorie.nom());
 
+                // LA MEME MESURE, SUR LA CONSOLE SERIE.
+                //
+                // BOUCHAUD_C34_LES_FAUTES_PAR_PHASE
+                //
+                // Le registre porte deja ces chiffres, mais il se lit dans une
+                // fenetre et dans la boite noire. Les bancs, eux, lisent le
+                // journal serie -- et c'est la que se trouvent, a cote, les
+                // `PERF_EXECVE` du noyau et les etapes horodatees du
+                // navigateur. Sans cette ligne, on ne peut pas soustraire :
+                // « les vingt-trois secondes avant `main` sont X ms d'image,
+                // Y ms de fautes fichier, Z ms de fautes zero » demande que
+                // les trois mesures soient dans le MEME journal.
+                //
+                // Le detail par categorie compte : « fichier » se soigne par
+                // la lecture anticipee, « zero » par le dimensionnement des
+                // arenes, « attente » par la contention. Un total ne dit
+                // lequel des trois grandit.
+                if let Some(par_categorie) = crate::kernel::task::fautes_par_categorie(row.pid) {
+                    use crate::kernel::fautes::Categorie;
+                    let c = |categorie: Categorie| par_categorie[categorie.rang()];
+                    let zero = c(Categorie::Zero);
+                    let fichier = c(Categorie::FichierPrive);
+                    let partage = c(Categorie::Partage);
+                    let attente = c(Categorie::Attente);
+                    let copie = c(Categorie::Copie);
+                    let echec = c(Categorie::Echec);
+                    let total = compte_du_processus.unwrap_or_default();
+                    crate::serial_println!(
+                        "[PERF-PROC] pid={} image={} rss_kio={} vss_kio={} taches={} \
+fautes={} total_us={} pire_us={} \
+zero={}/{}us fichier={}/{}us partage={}/{}us copie={}/{}us attente={}/{}us echec={}",
+                        row.pid,
+                        base,
+                        row.rss_octets / 1024,
+                        row.vss_octets / 1024,
+                        row.taches,
+                        total.nombre,
+                        total.total_ns / 1_000,
+                        total.pire_ns / 1_000,
+                        zero.nombre, zero.total_ns / 1_000,
+                        fichier.nombre, fichier.total_ns / 1_000,
+                        partage.nombre, partage.total_ns / 1_000,
+                        copie.nombre, copie.total_ns / 1_000,
+                        attente.nombre, attente.total_ns / 1_000,
+                        echec.nombre,
+                    );
+                }
+
                 services::kpi(
                     texte,
                     Kpi {

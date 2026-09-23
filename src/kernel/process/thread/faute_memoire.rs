@@ -103,6 +103,36 @@ pub fn fautes_du_processus(pid: u32) -> Option<crate::kernel::fautes::Compte> {
     Some(total)
 }
 
+/// Le detail par categorie, pour un processus.
+///
+/// BOUCHAUD_C34_LES_FAUTES_PAR_PHASE
+///
+/// `fautes_du_processus` rend le TOTAL et `faute_dominante` la categorie la
+/// plus lourde. Ni l'un ni l'autre ne permet de repondre a la question posee :
+/// « les vingt-trois secondes avant `main` sont-elles du chargement d'image
+/// (fautes FICHIER) ou de l'allocation (fautes ZERO) ? » Les deux se soignent
+/// a des endroits opposes -- lecture anticipee d'un cote, dimensionnement des
+/// arenes de l'autre.
+///
+/// Rend `None` quand le livre ne sait rien de ce processus, et non un tableau
+/// de zeros : le livre est borne et il chasse ; un zero affirmerait « ce
+/// processus ne faute pas » la ou il faudrait dire « je ne sais pas ».
+pub fn fautes_par_categorie(
+    pid: u32,
+) -> Option<[crate::kernel::fautes::Compte; crate::kernel::fautes::CATEGORIES]> {
+    let livre = LIVRE_FAUTES.try_lock()?;
+    if livre.total(pid).vide() {
+        return None;
+    }
+    let mut sortie = [crate::kernel::fautes::Compte::default(); crate::kernel::fautes::CATEGORIES];
+    for rang in 0..crate::kernel::fautes::CATEGORIES {
+        if let Some(categorie) = crate::kernel::fautes::Categorie::depuis_rang(rang) {
+            sortie[rang] = livre.compte(pid, categorie);
+        }
+    }
+    Some(sortie)
+}
+
 /// Le droit de noter UNE faute, et une seule fois.
 ///
 /// BOUCHAUD_C26_UNE_FAUTE_UN_SEUL_COMPTE
