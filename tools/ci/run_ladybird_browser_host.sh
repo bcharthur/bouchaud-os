@@ -178,6 +178,63 @@ qemu-system-x86_64 \
   -serial file:"$LOG" &
 PID=$!
 
+# ============================================================================
+# BOUCHAUD_C41_CAPTURE_VIVANTE -- la preuve se prend pendant que QEMU vit
+# ============================================================================
+#
+# Le run #347 a pose sa mire vers 211 s et QEMU a vecu jusqu'a 342 s. Cent
+# trente secondes pendant lesquelles la capture etait possible -- et le banc ne
+# la tentait qu'APRES sa boucle, donc apres la mort de la machine. Le verdict
+# rendu etait `moniteur_muet` : une panne du banc presentee comme une panne du
+# produit.
+#
+# La decision « est-ce le moment ? » vit dans `surface_declencheur.py`, ou elle
+# est mise en echec sur des journaux synthetiques -- notamment celui ou la mire
+# est posee, deux trames suivent, puis la machine meurt.
+
+maintenant_ms() { date +%s%3N; }
+
+MIRE_VERDICT=en_attente
+SEQ_INSERTION=""
+SEQ_VOULUE=""
+T_INSERTION_MS=0
+
+# Prend la capture et rend un verdict DEFINITIF. N'est appelee qu'une fois.
+capture_mire() {
+    local seq_vue=$1
+    local t_capture_ms
+    t_capture_ms=$(maintenant_ms)
+    local delta_ms=$((t_capture_ms - T_INSERTION_MS))
+
+    if ! echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
+        MIRE_VERDICT=moniteur_muet
+        echo "HOST_SURFACE_CAPTURE t=$t_capture_ms seq=$seq_vue delta_ms=$delta_ms etat=moniteur_muet"
+        return
+    fi
+
+    # `screendump` rend la main avant que le fichier soit entierement ecrit. On
+    # attend que sa TAILLE CESSE DE BOUGER, ce qui est une observation ; un
+    # sommeil fixe est un pari.
+    local taille taille_precedente=-1
+    for _ in $(seq 1 15); do
+        taille=$(wc -c < "$CAPTURE" 2>/dev/null || echo 0)
+        if [ "$taille" -gt 0 ] && [ "$taille" -eq "$taille_precedente" ]; then
+            break
+        fi
+        taille_precedente=$taille
+        sleep 1
+    done
+
+    if [ ! -s "$CAPTURE" ]; then
+        MIRE_VERDICT=capture_vide
+    elif python3 tools/ci/analyse-surface-mire.py "$CAPTURE"; then
+        MIRE_VERDICT=ok
+    else
+        MIRE_VERDICT=absente
+    fi
+    echo "HOST_SURFACE_CAPTURE t=$t_capture_ms seq=$seq_vue delta_ms=$delta_ms etat=$MIRE_VERDICT"
+}
+
 declare -A VU=()
 DEBUT=$SECONDS
 taille_vue=0
@@ -192,6 +249,28 @@ while kill -0 "$PID" 2>/dev/null; do
       printf '  T+%-4ss %s\n' "${VU[$jalon]}" "$jalon"
     fi
   done
+
+  # LA CAPTURE, PENDANT QUE LA MACHINE VIT.
+  #
+  # Deux etats successifs, chacun franchi une seule fois : on fige la cible a
+  # l'insertion, puis on capture des que la trame voulue est composee. La
+  # verification `en_attente` garantit qu'une preuve acquise ne peut plus etre
+  # effacee -- ni par la mort de QEMU, ni par un tour de boucle suivant.
+  if [ "$MIRE_VERDICT" = "en_attente" ] && command -v socat >/dev/null 2>&1; then
+    ETAT_MIRE=$(python3 tools/ci/surface_declencheur.py "$LOG" "${SEQ_INSERTION:--}" 2>/dev/null || true)
+    if [ -n "$ETAT_MIRE" ]; then
+      eval "$ETAT_MIRE"
+      if [ "$inseree" = "1" ] && [ -z "$SEQ_INSERTION" ]; then
+        SEQ_INSERTION=$seq_insertion
+        SEQ_VOULUE=$seq_voulue
+        T_INSERTION_MS=$(maintenant_ms)
+        echo "HOST_SURFACE_INSERTION t=$T_INSERTION_MS seq=$SEQ_INSERTION voulue=$SEQ_VOULUE"
+      fi
+      if [ "$inseree" = "1" ] && [ "$pret" = "1" ]; then
+        capture_mire "$seq_vue"
+      fi
+    fi
+  fi
 
   if [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ] \
      && grep -aFq "$VERDICT" "$LOG"; then
@@ -218,75 +297,28 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 ECOULE=$((SECONDS - DEBUT))
 
-# LA CAPTURE SE PREND AVANT DE TUER LA MACHINE, et seulement si la page a
-# dit avoir pose sa mire : capturer un ecran ou elle n'est pas encore
-# affichee accuserait le compositeur d'un retard de la page.
-# Le plus grand numero de trame presente dans le journal, ou 0.
-derniere_trame() {
-    grep -ao 'BROWSER_HOST_M11_TRAME page=[0-9]* seq=[0-9]*' "$LOG" \
-        | sed -E 's/.*seq=//' | sort -n | tail -1
-}
-
-MIRE_VERDICT=non_posee
-if ! command -v socat >/dev/null 2>&1; then
-    MIRE_VERDICT=socat_absent
-elif grep -aFq "HOST_SURFACE_MIRE_INSEREE" "$LOG"; then
-    # UNE TRAME COMPOSEE APRES L'INSERTION, PAS UN SOMMEIL APRES LA DEMANDE.
-    #
-    # L'ancienne version demandait le `screendump` puis dormait deux secondes.
-    # Le sommeil arrivait APRES la demande : QEMU avait deja fige l'ecran, et
-    # attendre ensuite n'ajoutait rien. Pire, rien ne garantissait que l'ecran
-    # fige contienne la mire -- une trame anterieure a son insertion aurait
-    # produit un `absente` qui aurait accuse le compositeur d'un retard du banc.
-    #
-    # Le numero de trame rend la correlation exacte : la mire est dans le DOM
-    # et decodee a `MIRE_INSEREE` ; toute trame de numero strictement superieur
-    # a celui d'alors a ete composee apres, donc la contient. La marge de deux
-    # couvre la trame qui pouvait etre en cours de composition a cet instant.
-    SEQ_INSERTION=$(derniere_trame)
-    SEQ_INSERTION=${SEQ_INSERTION:-0}
-    SEQ_VOULUE=$((SEQ_INSERTION + 2))
-    ATTENTE=0
-    while [ "$ATTENTE" -lt "$TRAME_ATTENTE_MAX" ]; do
-        SEQ_VUE=$(derniere_trame)
-        if [ -n "${SEQ_VUE:-}" ] && [ "$SEQ_VUE" -ge "$SEQ_VOULUE" ]; then
-            break
-        fi
-        sleep 1
-        ATTENTE=$((ATTENTE + 1))
-    done
-    SEQ_VUE=$(derniere_trame)
-    SEQ_VUE=${SEQ_VUE:-0}
-    echo "HOST_SURFACE_TRAME insertion=$SEQ_INSERTION voulue=$SEQ_VOULUE vue=$SEQ_VUE attente_s=$ATTENTE"
-    if [ "$SEQ_VUE" -lt "$SEQ_VOULUE" ]; then
-        # Pas de nouvelle composition : capturer maintenant ne prouverait rien.
-        MIRE_VERDICT=sans_trame_posterieure
-    elif echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
-        # `screendump` rend la main avant que le fichier soit entierement
-        # ecrit. On attend que sa TAILLE CESSE DE BOUGER, ce qui est une
-        # observation ; un sommeil fixe est un pari.
-        TAILLE_PRECEDENTE=-1
-        for _ in $(seq 1 15); do
-            TAILLE=$(wc -c < "$CAPTURE" 2>/dev/null || echo 0)
-            if [ "$TAILLE" -gt 0 ] && [ "$TAILLE" -eq "$TAILLE_PRECEDENTE" ]; then
-                break
-            fi
-            TAILLE_PRECEDENTE=$TAILLE
-            sleep 1
-        done
-        if [ -s "$CAPTURE" ]; then
-            if python3 tools/ci/analyse-surface-mire.py "$CAPTURE"; then
-                MIRE_VERDICT=ok
-            else
-                MIRE_VERDICT=absente
-            fi
-        else
-            MIRE_VERDICT=capture_vide
-        fi
+# UNE PREUVE ACQUISE NE SE PERD PLUS.
+#
+# Tout ce qui precede s'est joue PENDANT que QEMU vivait. Ce bloc ne fait que
+# NOMMER ce qui n'a pas pu l'etre : il ne retente rien contre une machine
+# morte, et surtout il n'ecrase jamais un verdict deja rendu. L'ancienne
+# version recalculait tout ici, apres la boucle -- c'est-a-dire toujours trop
+# tard, et elle transformait une capture reussie en `moniteur_muet`.
+if [ "$MIRE_VERDICT" = "en_attente" ]; then
+    if ! command -v socat >/dev/null 2>&1; then
+        MIRE_VERDICT=socat_absent
+    elif [ -z "$SEQ_INSERTION" ]; then
+        # La page n'a jamais dit avoir pose sa mire : capturer n'aurait rien
+        # prouve, et accuser le compositeur d'un retard de la page serait faux.
+        MIRE_VERDICT=non_posee
     else
-        MIRE_VERDICT=moniteur_muet
+        # La mire est posee mais aucune trame posterieure n'est venue : le
+        # compositeur n'a rien recompose depuis. C'est un resultat, pas un
+        # incident du banc -- et il se distingue maintenant des deux autres.
+        MIRE_VERDICT=sans_trame_posterieure
     fi
 fi
+echo "HOST_SURFACE_TRAME insertion=${SEQ_INSERTION:--} voulue=${SEQ_VOULUE:--}"
 echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
 
 # POURQUOI LA SESSION S'EST-ELLE ARRETEE ?
@@ -437,6 +469,9 @@ if [ "$MIRE_VERDICT" != ok ]; then
     moniteur_muet)  echo "  le moniteur n'a pas repondu a screendump" >&2 ;;
     capture_vide)   echo "  screendump a rendu un fichier vide" >&2 ;;
     absente)        echo "  la capture existe mais ne contient pas les pixels attendus" >&2 ;;
+    en_attente)     echo "  BANC : le verdict n'a jamais ete rendu -- ni capture, ni raison." >&2
+                    echo "         C'est un defaut du banc, pas du navigateur." >&2 ;;
+    *)              echo "  verdict inconnu du banc : $MIRE_VERDICT" >&2 ;;
   esac
   echo "FONCTIONNEL" >&2
   echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=surface"
