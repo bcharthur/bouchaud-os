@@ -90,85 +90,6 @@ HTML = r'''<!doctype html>
     console.log("HOST_CANVAS FAIL " + e);
   }
 
-  // BOUCHAUD_C26_WORKER_DEUX_ORIGINES
-  //
-  // Le meme worker, lance de deux facons. Voir WORKER_JS plus haut : un seul
-  // ne pouvait pas dire si c'est le PROCESSUS qui ne demarre pas ou le
-  // `blob:` qui ne traverse pas la frontiere de processus.
-  //
-  // Chaque etape se dit, et avec son horodatage. « worker timeout » ne
-  // distingue pas « le processus n'a jamais demarre » de « il a demarre et
-  // n'a pas repondu », et ces deux-la n'ont pas le meme remede.
-  const essaieWorker = async (nom, url, garde) => {
-    const t0 = performance.now();
-    const dit = (quoi, extra) =>
-      console.log(`HOST_WORKER_ETAPE origine=${nom} etape=${quoi} ms=${Math.round(performance.now() - t0)}${extra ? " " + extra : ""}`);
-    try {
-      dit("construction");
-      const worker = new Worker(url);
-      dit("construit");
-      const answer = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("timeout")), garde);
-        worker.onmessage = e => { clearTimeout(timer); dit("message_recu"); resolve(e.data); };
-        worker.onerror = ev => {
-          clearTimeout(timer);
-          dit("erreur", `message=${ev && ev.message ? ev.message : "?"}`);
-          reject(new Error("worker error"));
-        };
-        dit("postMessage");
-        worker.postMessage("ping");
-      });
-      worker.terminate();
-      const ok = answer === "pong";
-      dit(ok ? "pong" : "reponse_inattendue", `reponse=${answer}`);
-      return ok;
-    } catch (e) {
-      dit("echec", `raison=${e}`);
-      return false;
-    }
-  };
-
-  // LE GARDE-FOU N'EST PAS UN BUDGET DE PERFORMANCE.
-  //
-  // WebWorker est un binaire Ladybird complet, avec son edition de liens et
-  // son initialisation ICU, et la machine emulee de la CI met deja vingt-huit
-  // secondes a initialiser le navigateur lui-meme. Soixante secondes chacun.
-  const GARDE_WORKER_MS = 60000;
-
-  // L'ORDRE COMPTE : HTTP d'abord.
-  //
-  // Si le processus ne demarre pas du tout, c'est celui-la qui le dira, et
-  // l'essai `blob:` qui suit n'aura pas a payer une seconde attente de
-  // soixante secondes pour apprendre la meme chose.
-  let workerHttpOK = false;
-  let workerBlobOK = false;
-  try {
-    workerHttpOK = await essaieWorker("http", "/worker.js", GARDE_WORKER_MS);
-  } catch (e) {
-    console.log("HOST_WORKER_HTTP FAIL " + e);
-  }
-  try {
-    const source = `onmessage = e => { if (e.data === "ping") postMessage("pong"); };`;
-    const blob = new Blob([source], { type: "text/javascript" });
-    workerBlobOK = await essaieWorker("blob", URL.createObjectURL(blob), GARDE_WORKER_MS);
-  } catch (e) {
-    console.log("HOST_WORKER_BLOB FAIL " + e);
-  }
-
-  console.log(`HOST_WORKER_HTTP ${workerHttpOK ? "OK pong" : "FAIL"}`);
-  console.log(`HOST_WORKER_BLOB ${workerBlobOK ? "OK pong" : "FAIL"}`);
-
-  // L'ASSERTION HISTORIQUE, ET CE QU'ELLE EXIGE DESORMAIS.
-  //
-  // `HOST_WORKER OK pong` reste le jalon que la CI attend. Il est satisfait
-  // des qu'un worker repond, PAR N'IMPORTE LAQUELLE des deux origines : ce
-  // que ce jalon affirme est « le navigateur sait executer du JavaScript dans
-  // un processus WebWorker et en recevoir un message ». Le cas `blob:` est
-  // une capacite distincte, et il a sa propre ligne -- la confondre avec la
-  // premiere ferait echouer le lot entier sur un defaut de magasin d'URL.
-  workerOK = workerHttpOK || workerBlobOK;
-  console.log(workerOK ? "HOST_WORKER OK pong" : "HOST_WORKER FAIL les deux origines ont echoue");
-
   try {
     const image = new Image();
     const loaded = new Promise((resolve, reject) => {
@@ -601,6 +522,108 @@ HTML = r'''<!doctype html>
     }
   }
   console.log(`HOST_JS_${jsOK === epreuves.length ? "OK" : "FAIL"} ok=${jsOK}/${epreuves.length}`);
+
+  // ====================================================================
+  // LES WORKERS PASSENT EN DERNIER, ET CE N'EST PAS UN DETAIL D'ORDRE.
+  //
+  // Ils etaient en deuxieme position. Un worker qui ne repond pas coute
+  // SOIXANTE SECONDES par origine, et il y en a deux : deux minutes
+  // pendant lesquelles rien d'autre ne s'execute.
+  //
+  // La mesure du run 35825013435 montre ce que cela coute vraiment :
+  //
+  //     T+205 s  HOST_CANVAS OK
+  //     T+255 s  worker http : echec ms=61070 raison=timeout
+  //     T+256 s  worker blob : construction
+  //     T+267 s  la machine s'eteint
+  //
+  // Les onze images et les dix-sept epreuves JavaScript n'ont jamais eu
+  // leur tour. Un banc qui ne rend AUCUN resultat parce que son epreuve
+  // la plus lente est passee en premier ne mesure rien.
+  //
+  // L'ordre est donc : ce qui est rapide et informatif d'abord, ce qui
+  // peut expirer en dernier. Le verdict global reste le meme -- il a
+  // seulement des chiffres a rapporter quand le worker echoue.
+  // ====================================================================
+  // BOUCHAUD_C26_WORKER_DEUX_ORIGINES
+  //
+  // Le meme worker, lance de deux facons. Voir WORKER_JS plus haut : un seul
+  // ne pouvait pas dire si c'est le PROCESSUS qui ne demarre pas ou le
+  // `blob:` qui ne traverse pas la frontiere de processus.
+  //
+  // Chaque etape se dit, et avec son horodatage. « worker timeout » ne
+  // distingue pas « le processus n'a jamais demarre » de « il a demarre et
+  // n'a pas repondu », et ces deux-la n'ont pas le meme remede.
+  const essaieWorker = async (nom, url, garde) => {
+    const t0 = performance.now();
+    const dit = (quoi, extra) =>
+      console.log(`HOST_WORKER_ETAPE origine=${nom} etape=${quoi} ms=${Math.round(performance.now() - t0)}${extra ? " " + extra : ""}`);
+    try {
+      dit("construction");
+      const worker = new Worker(url);
+      dit("construit");
+      const answer = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timeout")), garde);
+        worker.onmessage = e => { clearTimeout(timer); dit("message_recu"); resolve(e.data); };
+        worker.onerror = ev => {
+          clearTimeout(timer);
+          dit("erreur", `message=${ev && ev.message ? ev.message : "?"}`);
+          reject(new Error("worker error"));
+        };
+        dit("postMessage");
+        worker.postMessage("ping");
+      });
+      worker.terminate();
+      const ok = answer === "pong";
+      dit(ok ? "pong" : "reponse_inattendue", `reponse=${answer}`);
+      return ok;
+    } catch (e) {
+      dit("echec", `raison=${e}`);
+      return false;
+    }
+  };
+
+  // LE GARDE-FOU N'EST PAS UN BUDGET DE PERFORMANCE.
+  //
+  // WebWorker est un binaire Ladybird complet, avec son edition de liens et
+  // son initialisation ICU, et la machine emulee de la CI met deja vingt-huit
+  // secondes a initialiser le navigateur lui-meme. Soixante secondes chacun.
+  const GARDE_WORKER_MS = 60000;
+
+  // L'ORDRE COMPTE : HTTP d'abord.
+  //
+  // Si le processus ne demarre pas du tout, c'est celui-la qui le dira, et
+  // l'essai `blob:` qui suit n'aura pas a payer une seconde attente de
+  // soixante secondes pour apprendre la meme chose.
+  let workerHttpOK = false;
+  let workerBlobOK = false;
+  try {
+    workerHttpOK = await essaieWorker("http", "/worker.js", GARDE_WORKER_MS);
+  } catch (e) {
+    console.log("HOST_WORKER_HTTP FAIL " + e);
+  }
+  try {
+    const source = `onmessage = e => { if (e.data === "ping") postMessage("pong"); };`;
+    const blob = new Blob([source], { type: "text/javascript" });
+    workerBlobOK = await essaieWorker("blob", URL.createObjectURL(blob), GARDE_WORKER_MS);
+  } catch (e) {
+    console.log("HOST_WORKER_BLOB FAIL " + e);
+  }
+
+  console.log(`HOST_WORKER_HTTP ${workerHttpOK ? "OK pong" : "FAIL"}`);
+  console.log(`HOST_WORKER_BLOB ${workerBlobOK ? "OK pong" : "FAIL"}`);
+
+  // L'ASSERTION HISTORIQUE, ET CE QU'ELLE EXIGE DESORMAIS.
+  //
+  // `HOST_WORKER OK pong` reste le jalon que la CI attend. Il est satisfait
+  // des qu'un worker repond, PAR N'IMPORTE LAQUELLE des deux origines : ce
+  // que ce jalon affirme est « le navigateur sait executer du JavaScript dans
+  // un processus WebWorker et en recevoir un message ». Le cas `blob:` est
+  // une capacite distincte, et il a sa propre ligne -- la confondre avec la
+  // premiere ferait echouer le lot entier sur un defaut de magasin d'URL.
+  workerOK = workerHttpOK || workerBlobOK;
+  console.log(workerOK ? "HOST_WORKER OK pong" : "HOST_WORKER FAIL les deux origines ont echoue");
+
 
   console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK && frameOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0} frame=${frameOK ? 1 : 0}`
     + ` images=${imagesOK}/${CATALOGUE.length} js=${jsOK}/${epreuves.length} raf=${rafOK ? 1 : 0}`);
