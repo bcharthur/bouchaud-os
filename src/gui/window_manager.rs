@@ -681,7 +681,28 @@ fn boucle() {
                 degats.tout();
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if menu_open { menu_open = false; }
-                else if !ferme_fenetre_du_dessus(&mut wins) { quit = true; }
+                else if !ferme_fenetre_du_dessus(&mut wins) {
+                    // POURQUOI LA SESSION S'ARRETE, ECRIT AU MOMENT OU ELLE
+                    // S'ARRETE.
+                    //
+                    // BOUCHAUD_C36_FIN_DE_SESSION_EXPLIQUEE
+                    //
+                    // Le run 35830736815 s'est eteint a T+342 s, en plein
+                    // milieu de la matrice de workers : le journal montre
+                    // `AUTORUN FIN statut=0` juste apres le lancement du
+                    // deuxieme agent. Rien ne disait POURQUOI, et il n'y a que
+                    // deux chemins qui posent `quit` -- un clic sur « Quitter »
+                    // et celui-ci. Sans cette ligne, on ne peut pas les
+                    // distinguer, et un banc qui perd ses trois dernieres
+                    // minutes sans explication ne se repare pas.
+                    crate::serial_println!(
+                        "BOUCHAUD_BUREAU_FIN raison=touche_sans_fenetre fenetres={} client_actif={} menu={}",
+                        wins.len(),
+                        client_actif,
+                        menu_open,
+                    );
+                    quit = true;
+                }
                 continue;
             }
             if let Some(index) = actif {
@@ -1997,7 +2018,10 @@ fn handle_click(
         // Ce qui est surligne doit etre ce qui s'ouvre. Une seule definition.
         if let Some(row) = window::ligne_menu_survolee(mx, my) {
             if let Some(&(_, kind)) = MENU.get(row) {
-                if kind == usize::MAX { *quit = true; }
+                if kind == usize::MAX {
+                    crate::serial_println!("BOUCHAUD_BUREAU_FIN raison=menu_quitter");
+                    *quit = true;
+                }
                 // ARRETER LA MACHINE, ET PAS SEULEMENT LE BUREAU.
                 //
                 // `Quitter` rend la main au shell ; ces deux-la ferment la

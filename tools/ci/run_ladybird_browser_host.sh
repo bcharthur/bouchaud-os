@@ -362,6 +362,18 @@ if [ "$manquants" -ne 0 ]; then
       ;;
     *)
       echo "QEMU s'est arrete de lui-meme apres ${ECOULE}s." >&2
+      # LA SESSION S'EST-ELLE ARRETEE, ET POURQUOI ?
+      #
+      # Le run 35830736815 s'est eteint a T+342 s en plein milieu de la
+      # matrice de workers, sans un mot. Le bureau dit desormais lequel de ses
+      # deux chemins de sortie a ete pris ; le rapport le repete ici, ou on
+      # le lit.
+      raison_bureau=$(grep -aF "BOUCHAUD_BUREAU_FIN" "$LOG" | head -1 | sed 's/\r//g; s/\x1b\[[0-9;]*m//g') || true
+      if [ -n "$raison_bureau" ]; then
+        echo "  le bureau a rendu la main : $raison_bureau" >&2
+      else
+        echo "  aucune ligne BOUCHAUD_BUREAU_FIN : la session n'est pas sortie par le bureau" >&2
+      fi
       ;;
   esac
   echo "$manquants jalon(s) manquant(s)." >&2
