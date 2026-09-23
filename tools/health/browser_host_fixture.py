@@ -843,7 +843,24 @@ HTML = r'''<!doctype html>
   console.log("HOST_WORKER_ORDRE ordre=" + ordre
               + " matrice=" + MATRICE.map(e => e[0]).join(","));
 
+  // UN VERDICT TERMINAL, POUR QUE LE RUNNER SACHE QUAND S'ARRETER.
+  //
+  // BOUCHAUD_C62_ATTENDRE_UN_VERDICT_PAS_UNE_FIN_D_AUTORUN
+  //
+  // Le banc d'ordre attendait `AUTORUN FIN`, qui ne dit rien de la page : au
+  // run 35907201865, l'autorun s'est termine alors que le premier worker
+  // n'avait meme pas franchi son constructeur. Le runner a cru l'experience
+  // finie ; elle n'avait pas commence.
+  //
+  // La page dit elle-meme quand elle a fini, et dit aussi quand elle ECHOUE
+  // -- avec le rang et la phase atteinte, seules informations qui permettent
+  // de distinguer « le worker est lent » de « le worker n'est jamais ne ».
   const releves = [];
+  let phase_courante = "avant_premier";
+  const abandon = (rang, origine, raison) => {
+    console.log(`HOST_WORKER_AB_FAIL ordre=${ordre} rang=${rang}`
+      + ` origine=${origine} phase=${phase_courante} raison=${raison}`);
+  };
   for (let rang = 0; rang < MATRICE.length; rang++) {
     const [origine, fabrique] = MATRICE[rang];
     let r;
@@ -854,9 +871,20 @@ HTML = r'''<!doctype html>
       console.log(`HOST_WORKER_ETAPE origine=${origine}_${rang + 1} etape=echec raison=${e}`);
     }
     releves.push({ origine, rang: rang + 1, ok: r.ok, ms: r.ms });
+    phase_courante = `rang_${rang + 1}_termine`;
     console.log(`HOST_WORKER_AB rang=${rang + 1} origine=${origine}`
       + ` repond=${r.ok ? 1 : 0} ms=${r.ms} budget=${BUDGET_WORKER_MS}`
       + ` verdict=${r.ok && r.ms <= BUDGET_WORKER_MS ? "OK" : "HORS_BUDGET"}`);
+  }
+
+  // LE VERDICT TERMINAL. Le runner attend CETTE ligne, pas la fin de l'autorun.
+  if (releves.length === MATRICE.length) {
+    console.log(`HOST_WORKER_AB_COMPLETE ordre=${ordre}`
+      + ` count=${releves.length}`
+      + ` matrice=${MATRICE.map(e => e[0]).join(",")}`);
+  } else {
+    abandon(releves.length + 1, MATRICE[releves.length]?.[0] ?? "?",
+            "matrice_incomplete");
   }
 
   // ====================================================================

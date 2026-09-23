@@ -14,12 +14,36 @@ pub fn exit_current(code: i32) -> ! {
             futex_wake(clear, 1);
         }
         let process = task.process.clone();
+        // BOUCHAUD_C61_UNE_MORT_DE_PROCESSUS_SE_NOMME_UNE_FOIS
+        //
+        // Le nom est lu AVANT `lifecycle.lock()` : le prendre a l'interieur
+        // imbriquerait deux verrous du meme processus sur un chemin de sortie,
+        // et l'ordre inverse existe ailleurs.
+        let nom_sortie = process.metadata.lock().name.clone();
+        let ppid_sortie = process.parent;
         let mut lifecycle = process.lifecycle.lock();
+        let threads_avant = lifecycle.threads;
         if lifecycle.threads > 0 {
             lifecycle.threads -= 1;
         }
         lifecycle.exit_code = code;
         if lifecycle.threads == 0 {
+            // LA frontiere processus, et elle ne passe qu'une fois.
+            //
+            // `FAULT_FILE_BREAKDOWN` sortait a chaque fin de THREAD : au run
+            // 35907201865, WebContent en a emis trois, ce qui se lisait comme
+            // trois morts. Cette ligne-ci est posee la ou le dernier thread
+            // tombe, donc exactement une fois par processus.
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "PROCESS_EXIT t={} pid={} ppid={} image={} code={} \
+threads_before={} threads_after=0 reason=dernier_thread",
+                crate::kernel::timer::monotonic_ms(),
+                process.pid,
+                ppid_sortie,
+                nom_sortie,
+                code,
+                threads_avant,
+            ));
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
@@ -564,8 +588,63 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let (code, pid) = {
         (process.lifecycle.lock().exit_code, process.pid)
     };
+
+    // BOUCHAUD_C60_QUI_A_FAIT_REVENIR_LE_BUREAU
+    //
+    // `switch_context` vient de rendre la main au contexte d'amorcage. Deux
+    // choses tres differentes peuvent l'expliquer :
+    //
+    //   le fil est MORT        -- `exit_current`, donc une sortie voulue
+    //   le fil est VIVANT      -- l'ordonnanceur est simplement revenu ici
+    //                             faute de tache prete sur ce coeur
+    //
+    // Le second cas est une SORTIE ACCIDENTELLE : `run_noyau` rend la main,
+    // le shell reprend, l'autorun se termine et la machine s'eteint, alors
+    // que le bureau n'a jamais demande a s'arreter.
+    //
+    // Au run 35907201865, le bras HTTP s'est eteint sur `autorun_termine`
+    // SANS aucun `BOUCHAUD_BUREAU_FIN` -- or les deux seuls chemins qui
+    // posent `quit` en emettent un. Cette ligne dit laquelle des deux
+    // situations on est en train de vivre, au lieu de la faire deviner.
+    //
+    // Les processus encore vivants sont NOMMES avant d'etre tues juste en
+    // dessous : sans cela, la boucle de nettoyage efface l'etat qui expliquait
+    // l'arret.
+    {
+        let vivants = processes().len();
+        let mort = process.lifecycle.lock().threads == 0;
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "RUN_NOYAU_RETOUR t={} nom={} pid={} code={} fil_mort={} \
+processus_vivants={}",
+            crate::kernel::timer::monotonic_ms(),
+            nom,
+            pid,
+            code,
+            mort as u8,
+            vivants,
+        ));
+        for reste in processes().iter() {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "RUN_NOYAU_VIVANT t={} pid={} nom={}",
+                crate::kernel::timer::monotonic_ms(),
+                reste.pid,
+                reste.metadata.lock().name,
+            ));
+        }
+    }
+
     reap();
     for stale in processes().iter() {
+        // Chaque mise a mort est nommee : c'est le seul endroit ou l'on sait
+        // encore QUI a ete tue et POURQUOI -- parce que le fil appelant est
+        // revenu, pas parce que ce processus avait fini.
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "PROCESS_KILL t={} pid={} nom={} raison=run_noyau_retour parent={}",
+            crate::kernel::timer::monotonic_ms(),
+            stale.pid,
+            stale.metadata.lock().name,
+            nom,
+        ));
         crate::kernel::process::kill(stale.pid);
     }
     PROCESSES.lock().clear();

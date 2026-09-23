@@ -67,6 +67,42 @@ pub fn run_if_present() {
     // LE SUSPECT PRINCIPAL de l'arret du run #347 : quand le script autorun
     // se termine, la session s'eteint. Vu de l'exterieur, cela ressemble a une
     // mort spontanee ; c'est une fin nominale qui ne se nommait pas.
+    //
+    // BOUCHAUD_C63_LE_RUNNER_PEUT_POSSEDER_LA_DUREE_DE_VIE
+    //
+    // Un banc qui mesure une page asynchrone de plus de cent secondes ne peut
+    // pas dependre de la fin de l'autorun. Au run 35907201865, `desktop` est
+    // revenu prematurement, l'autorun s'est termine, et la machine s'est
+    // eteinte alors que le premier worker n'avait pas franchi son
+    // constructeur. Le banc a cru l'experience finie ; elle n'avait pas
+    // commence.
+    //
+    // Le fichier `/garde-vm-vivante` rend la duree de vie a l'hote. Ce n'est
+    // PAS une facon de rendre vert un navigateur mort : l'arret prematuré de
+    // `desktop` reste visible (`AUTORUN_DESKTOP_RETURN`, `RUN_NOYAU_RETOUR`,
+    // `PROCESS_EXIT`), et le banc d'ordre ECHOUE quand il le voit avant son
+    // verdict. Le filet sert a OBSERVER la panne, pas a la taire.
+    let garde_vivante = {
+        let fs = crate::fs::ramfs::fs();
+        fs.resolve("/garde-vm-vivante", 0).is_some()
+    };
+    if garde_vivante {
+        crate::serial_println!(
+            "AUTORUN_FIN_SANS_EXTINCTION t={} statut={} raison=garde-vm-vivante",
+            crate::kernel::timer::monotonic_ms(),
+            status,
+        );
+        // La machine reste debout : c'est l'hote qui decidera de la tuer, apres
+        // avoir lu son verdict ou epuise son propre plafond.
+        //
+        // `hlt` et non `sleep_ticks` : l'autorun s'execute dans le contexte
+        // d'amorcage, ou `CURRENT` vaut `NO_TASK`. Dormir y demande une tache
+        // et panique -- « task: aucune tache active sur ce CPU », verifie.
+        // `hlt` laisse les interruptions reveiller le coeur, donc les autres
+        // processeurs et les fils noyau continuent normalement.
+        crate::arch::x86_64::cpu::halt_loop()
+    }
+
     power::shutdown_avec_raison(
         if status == 0 { power::EXIT_OK } else { power::EXIT_FAIL },
         "autorun_termine",

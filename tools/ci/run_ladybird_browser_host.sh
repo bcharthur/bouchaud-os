@@ -42,6 +42,17 @@ if [ -d "$OUT/resources" ]; then
   cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
 fi
 cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
+
+# LA DUREE DE VIE DE LA VM, RENDUE A L'HOTE -- POUR LE DIAGNOSTIC SEULEMENT.
+#
+# BOUCHAUD_C63_LE_RUNNER_PEUT_POSSEDER_LA_DUREE_DE_VIE
+#
+# Le noyau cherche ce fichier avant d'eteindre sur fin d'autorun. Vide par
+# defaut : le smoke de reference garde exactement son comportement.
+if [ "${BO_SMOKE_KEEP_GUEST_ALIVE:-0}" = "1" ]; then
+    : > "$SCENARIO/garde-vm-vivante"
+    echo "BO_SMOKE_GARDE_VM active=1"
+fi
 # L'URL EST CONSTRUITE SUR L'HOTE, PAS DANS L'INVITE.
 #
 # BOUCHAUD_C58_UN_HEREDOC_PROTEGE_N_EXPANSE_RIEN
@@ -78,7 +89,9 @@ export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_M11=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
 export BOUCHAUD_M9_URL='$URL_PAGE'
+echo "AUTORUN_DESKTOP_ENTER"
 desktop
+echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 
@@ -310,6 +323,24 @@ while kill -0 "$PID" 2>/dev/null; do
     fi
   fi
 
+  # LE VERDICT TERMINAL DE L'EXPERIENCE D'ORDRE, QUAND ON L'ATTEND.
+  #
+  # BOUCHAUD_C62_ATTENDRE_UN_VERDICT_PAS_UNE_FIN_D_AUTORUN
+  #
+  # La page dit elle-meme quand ses quatre mesures sont faites. Attendre
+  # `AUTORUN FIN` ne disait rien d'elle : au run 35907201865 l'autorun s'est
+  # termine alors que le premier worker n'avait pas franchi son constructeur.
+  if [ "${BO_SMOKE_ATTEND_AB:-0}" = "1" ]; then
+    if grep -aFq "HOST_WORKER_AB_COMPLETE" "$LOG"; then
+      verdict=ab_complete
+      break
+    fi
+    if grep -aFq "HOST_WORKER_AB_FAIL" "$LOG"; then
+      verdict=ab_echec
+      break
+    fi
+  fi
+
   if [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ] \
      && grep -aFq "$VERDICT" "$LOG"; then
     verdict=rendu
@@ -374,7 +405,15 @@ echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
 if kill -0 "$PID" 2>/dev/null; then
     echo "BOUCHAUD_SESSION_FIN etat=vivante raison=tuee_par_le_banc"
 else
-    FIN=$(grep -ao 'BOUCHAUD_SYSTEM_EXIT [^\r]*' "$LOG" | tail -1 || true)
+    # Meme piege que plus bas, et il a survecu a sa propre correction : en
+    # expression reguliere, `\r` dans une classe vaut « ni backslash ni r ».
+    # La ligne etait coupee au premier `r`, donc juste apres le nom du
+    # marqueur, et le run 35907201865 n'a affiche que :
+    #
+    #     BOUCHAUD_SESSION_FIN etat=arretee BOUCHAUD_SYSTEM_EXIT
+    #
+    # La raison -- `autorun_termine` -- etait dans le journal et invisible ici.
+    FIN=$(grep -ao 'BOUCHAUD_SYSTEM_EXIT .*' "$LOG" | tr -d '\r' | tail -1 || true)
     if [ -n "$FIN" ]; then
         echo "BOUCHAUD_SESSION_FIN etat=arretee $FIN"
     else

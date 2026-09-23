@@ -34,7 +34,11 @@ echecs=0
 for ordre in blob http; do
     echo
     echo "=== bras ordre=$ordre (demarrage froid) ==="
+    # La VM appartient a l'hote, et la boucle attend le verdict de la PAGE.
+    # Sans ces deux modes, la fin de l'autorun tuait l'experience avant qu'elle
+    # ne commence -- run 35907201865.
     BO_SMOKE_SUFFIXE="-ordre-$ordre" BO_SMOKE_ORDRE="$ordre" \
+    BO_SMOKE_KEEP_GUEST_ALIVE=1 BO_SMOKE_ATTEND_AB=1 \
         tools/ci/run_ladybird_browser_host.sh "$BOOT" "$OUT" \
         > "ordre-$ordre.sortie" 2>&1 || true
     if ! grep -q "LADYBIRD_BROWSER_HOST_OK" "ordre-$ordre.sortie"; then
@@ -57,6 +61,18 @@ for ordre in blob http; do
     if ! grep -aq "BO_SMOKE_URL ordre=$ordre " "ordre-$ordre.sortie"; then
         echo "ordre : bras $ordre -- l'URL demandee n'a pas ete publiee" >&2
         grep -a "BO_SMOKE_URL" "ordre-$ordre.sortie" >&2 || true
+        echecs=$((echecs + 1))
+    fi
+    # UN BUREAU QUI REVIENT AVANT LE VERDICT EST UNE PANNE.
+    #
+    # Le filet de duree de vie garde la machine debout pour qu'on puisse
+    # OBSERVER cela -- pas pour le taire. Si `desktop` est revenu, le
+    # navigateur est mort et le bras ne vaut rien, meme si QEMU tourne encore.
+    if grep -aq "AUTORUN_DESKTOP_RETURN" "ordre-$ordre.sortie" \
+       && ! grep -aq "HOST_WORKER_AB_COMPLETE" "ordre-$ordre.sortie"; then
+        echo "ordre : bras $ordre -- desktop est revenu AVANT le verdict" >&2
+        grep -aE "AUTORUN_DESKTOP_RETURN|RUN_NOYAU_RETOUR|RUN_NOYAU_VIVANT|PROCESS_EXIT" \
+            "ordre-$ordre.sortie" | tail -8 >&2 || true
         echecs=$((echecs + 1))
     fi
     if ! grep -aq "HOST_WORKER_ORDRE ordre=$ordre " "ordre-$ordre.sortie"; then

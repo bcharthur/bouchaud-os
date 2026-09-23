@@ -25,6 +25,63 @@ AB = re.compile(
 )
 ORDRE = re.compile(r"HOST_WORKER_ORDRE ordre=(?P<ordre>\w+)")
 
+# LA PANNE DU RUN 35907201865, RECONNUE POUR CE QU'ELLE EST.
+#
+# BOUCHAUD_C64_EXPLIQUER_LA_PANNE_PAS_LA_COMPTER
+#
+# Ce bras-la n'avait pas « 0 releve sur 4 » : il avait une cause, ecrite dans
+# le journal quatre lignes plus bas. Le premier worker n'a jamais franchi son
+# constructeur, `desktop` est revenu, l'autorun s'est termine et la machine
+# s'est eteinte.
+#
+# Un diagnostic qui compte les absents sans lire la raison deja presente fait
+# recommencer l'enquete a chaque run.
+ETAPE = re.compile(
+    r"HOST_WORKER_ETAPE origine=(?P<origine>\w+)_(?P<rang>\d+) etape=(?P<etape>\w+)"
+)
+SORTIE = re.compile(r"BOUCHAUD_SYSTEM_EXIT raison=(?P<raison>\S+)")
+DESKTOP_RETOUR = re.compile(r"AUTORUN_DESKTOP_RETURN statut=(?P<statut>-?\d+)")
+RUN_NOYAU = re.compile(
+    r"RUN_NOYAU_RETOUR .*?fil_mort=(?P<mort>\d+) processus_vivants=(?P<vivants>\d+)"
+)
+
+
+def diagnostique_panne(texte, ordre):
+    """Explique POURQUOI un bras n'a pas produit ses quatre mesures."""
+    lignes = []
+    etapes = list(ETAPE.finditer(texte))
+    derniere = etapes[-1] if etapes else None
+    if derniere:
+        lignes.append(f"    derniere etape atteinte : rang={derniere.group('rang')}"
+                      f" origine={derniere.group('origine')}"
+                      f" phase={derniere.group('etape')}")
+    else:
+        lignes.append("    aucune etape de worker atteinte : la page n'a pas"
+                      " commence la matrice")
+
+    d = DESKTOP_RETOUR.search(texte)
+    if d:
+        lignes.append(f"    desktop est REVENU (statut={d.group('statut')}) :"
+                      " le bureau a rendu la main")
+    r = RUN_NOYAU.search(texte)
+    if r:
+        mort = r.group("mort") == "1"
+        lignes.append(f"    run_noyau : fil_mort={r.group('mort')}"
+                      f" processus_vivants={r.group('vivants')}")
+        if not mort:
+            lignes.append("    LE FIL BUREAU ETAIT ENCORE VIVANT : sortie"
+                          " accidentelle, pas un arret demande")
+    x = SORTIE.search(texte)
+    if x:
+        lignes.append(f"    extinction : raison={x.group('raison')}")
+
+    rang = int(derniere.group("rang")) if derniere else 1
+    phase = derniere.group("etape") if derniere else "avant_premier"
+    raison = x.group("raison") if x else "inconnue"
+    lignes.append(f"    ORDRE_WORKER_BANC_LIFETIME_FAIL ordre={ordre}"
+                  f" rang={rang} phase={phase} reason={raison}")
+    return lignes
+
 
 def lis(chemin):
     try:
@@ -65,6 +122,10 @@ def main():
                   file=sys.stderr)
             print("        sans les quatre, la comparaison ne tranche rien.",
                   file=sys.stderr)
+            # Et surtout : POURQUOI. La raison est deja dans le journal.
+            texte = open(chemin, encoding="utf-8", errors="replace").read()
+            for l in diagnostique_panne(texte, d["ordre"]):
+                print(l, file=sys.stderr)
             return 1
         # UN BRAS DUPLIQUE N'EST PAS UNE COLLISION, C'EST UNE EXPERIENCE
         # QUI N'A PAS EU LIEU.
