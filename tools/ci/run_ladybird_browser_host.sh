@@ -405,6 +405,20 @@ fi
 echo "LADYBIRD_FUNCTIONAL_SMOKE ok"
 
 # ====================================================================
+# LA CHRONOLOGIE DU DEMARRAGE A FROID
+#
+# Les mesures existaient, eparpillees dans trois vocabulaires -- jalons de
+# l'hote, `WORKER_ETAPE`, `PERF_FORK`/`PERF_EXECVE`/`[PERF-PROC]` du noyau.
+# On pouvait lire chacune sans rien conclure : le seul chiffre qui interesse
+# est une soustraction entre deux d'entre elles.
+#
+# Le rapport ne juge pas -- pas de budget, pas de verdict. Il rassemble.
+# ====================================================================
+echo
+echo "== chronologie du demarrage =="
+python3 tools/ci/analyse-demarrage.py "$LOG" || true
+
+# ====================================================================
 # LE VERDICT DE PERFORMANCE, INDEPENDANT DU FONCTIONNEL
 #
 # BOUCHAUD_C32_DEUX_VERDICTS

@@ -44,6 +44,16 @@ def ensure_include(path: Path, include: str, anchor: str, label: str) -> None:
     path.write_text(data.replace(anchor, include + "\n" + anchor, 1))
 
 
+def ajoute_include_time(chemin, ancre):
+    """Garantit `#include <AK/Time.h>` dans un fichier qui horodate."""
+    texte = chemin.read_text()
+    if "#include <AK/Time.h>" in texte:
+        return
+    if ancre not in texte:
+        raise SystemExit(f"horodatage : ancre d'inclusion introuvable dans {chemin}")
+    chemin.write_text(texte.replace(ancre, "#include <AK/Time.h>\n" + ancre, 1))
+
+
 # 1. Ajouter un hote base sur WebView::Application upstream.
 services_cmake = root / "Services/CMakeLists.txt"
 data = services_cmake.read_text()
@@ -308,6 +318,17 @@ ErrorOr<int> ladybird_main(Main::Arguments)
 # pas encore PR_SET_PDEATHSIG.
 process_cpp = root / "Libraries/LibCore/Process.cpp"
 if "BOUCHAUD_PORT: pas encore de PR_SET_PDEATHSIG" not in process_cpp.read_text():
+    # Un fichier .cpp inclut toujours son propre en-tete : l'ancre est sure.
+    ajoute_include_time(process_cpp, "#include <LibCore/Process.h>\n")
+    # `outln` n'est pas garanti visible ici : LibCore/Process.cpp n'ecrit rien
+    # en amont. Un oubli ne se verrait qu'au bout de douze minutes de
+    # compilation, et pour une seule ligne de trace.
+    ensure_include(
+        process_cpp,
+        "#include <AK/Format.h>",
+        "#include <LibCore/Process.h>",
+        "AK/Format Process.cpp",
+    )
     replace_once(
         process_cpp,
         '''    auto parent_pid = getpid();
@@ -315,7 +336,32 @@ if "BOUCHAUD_PORT: pas encore de PR_SET_PDEATHSIG" not in process_cpp.read_text(
         '''#if !defined(BOUCHAUD_PORT)
     auto parent_pid = getpid();
 #endif
-    auto pid = fork();''',
+#if defined(BOUCHAUD_PORT)
+    // LE LANCEMENT DE PROCESSUS, BORNE DES DEUX COTES, POUR TOUS LES SERVICES.
+    //
+    // BOUCHAUD_C34_TOUS_LES_SERVICES
+    //
+    // Les etapes de worker ne bornaient qu'un seul des six processus du
+    // navigateur. BrowserHost, RequestServer, ImageDecoder, Compositor et
+    // WebContent passent tous par ICI -- `Core::Process::spawn` est
+    // l'entonnoir commun -- et aucun n'avait de mesure de son lancement.
+    //
+    // Le `fork` est isole du reste parce que son cout n'est pas le meme
+    // nature : le noyau recopie l'espace d'adressage du pere page par page
+    // (voir `PERF_FORK`, environ deux millisecondes par mebioctet resident),
+    // alors que l'`execve` qui suit et le raccordement du transport sont des
+    // couts fixes. Un chiffre unique melangerait les deux.
+    auto bouchaud_avant_fork = MonotonicTime::now().milliseconds();
+#endif
+    auto pid = fork();
+#if defined(BOUCHAUD_PORT)
+    if (pid > 0) {
+        auto bouchaud_apres_fork = MonotonicTime::now().milliseconds();
+        outln("[ladybird-bouchaud] SPAWN_ETAPE t={} etape=fork_rendu enfant={} debut={} fork_ms={}",
+            bouchaud_apres_fork, pid, bouchaud_avant_fork,
+            bouchaud_apres_fork - bouchaud_avant_fork);
+    }
+#endif''',
         "parent pid prctl",
     )
     replace_once(
@@ -503,16 +549,6 @@ web_main.write_text(data)
 
 # 5. Avec le vrai host, laisser WebContent envoyer cookies/storage/HSTS/workers
 # au WebContentClient upstream au lieu des fallbacks temporaires.
-def ajoute_include_time(chemin, ancre):
-    """Garantit `#include <AK/Time.h>` dans un fichier qui horodate."""
-    texte = chemin.read_text()
-    if "#include <AK/Time.h>" in texte:
-        return
-    if ancre not in texte:
-        raise SystemExit(f"horodatage : ancre d'inclusion introuvable dans {chemin}")
-    chemin.write_text(texte.replace(ancre, "#include <AK/Time.h>\n" + ancre, 1))
-
-
 page_cpp = root / "Services/WebContent/PageClient.cpp"
 ajoute_include_time(page_cpp, "#include <AK/JsonObjectSerializer.h>\n")
 ensure_include(page_cpp, "#include <cstdlib>", "#include <AK/JsonObjectSerializer.h>", "cstdlib PageClient")
@@ -1030,6 +1066,13 @@ replace_once(
         MonotonicTime::now().milliseconds(), page_id);
 #endif
     if (auto view = view_for_page_id(page_id); view.has_value()) {
+#if defined(BOUCHAUD_PORT)
+        // La recherche de vue separe `demande_recue` de tout le reste. Elle
+        // est probablement instantanee -- mais « probablement » n'est pas une
+        // mesure, et c'est le seul intervalle de cette fonction qui n'en avait
+        // aucune.
+        outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=vue_trouvee page_id={}", MonotonicTime::now().milliseconds(), page_id);
+#endif
         auto agent_id = WorkerProcessManager::the().start_worker_agent(*this, page_id, move(request));
 #if defined(BOUCHAUD_PORT)
         outln("[ladybird-bouchaud] WORKER_ETAPE t={} etape=agent_rendu page_id={} agent={}", MonotonicTime::now().milliseconds(), page_id, agent_id);
