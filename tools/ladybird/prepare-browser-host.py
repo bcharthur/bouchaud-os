@@ -252,6 +252,30 @@ for nom, ancre, corps in stockage:
 # attendent pour toujours une reponse qui ne viendra jamais, et la page se fige
 # sans un mot.
 #
+# MAIS « sans hote » N'EST PAS « lance en M9 ».
+#
+# BOUCHAUD_C28_WORKER_HOTE_PRESENT
+#
+# Le refus etait conditionne a `bouchaud_m9_enabled()`, c'est-a-dire a un
+# DRAPEAU DE LANCEMENT. Or `BOUCHAUD_M9` est exporte au demarrage de la
+# machine (`stage2.rs`) et par le banc, et il est herite par WebContent MEME
+# QUAND un BrowserHost tourne. WebContent refusait donc d'ADRESSER la demande
+# a un hote qui etait la, pret a la servir.
+#
+# Le journal du smoke test le dit mot pour mot :
+#
+#     BROWSER_HOST_START          atteint a T+25 s
+#     BROWSER_HOST_INITIALIZED    atteint a T+39 s
+#     M11_GUI_HANDSHAKE_OK        atteint a T+162 s
+#     ...
+#     HOTE_ABSENT StartWorkerAgent : ce portage n'a pas de processus hote
+#
+# L'hote etait demarre, initialise, et en pleine conversation avec WebContent.
+#
+# Le depot connaissait deja la bonne qualification -- `prepare-full-browser-host.py`
+# ecrit `getenv("BOUCHAUD_M9") && !getenv("BOUCHAUD_BROWSER_HOST")` pour le
+# raccordement de RequestServer. Le refus du worker ne l'avait jamais recue.
+#
 # On decline donc, explicitement et bruyamment. Ce n'est pas un faux service :
 # les trois valeurs rendues sont celles qu'upstream lui-meme produit quand le
 # navigateur refuse. `page_did_request_new_web_view` a deja ce chemin
@@ -266,6 +290,18 @@ for nom, ancre, corps in stockage:
 # levera toutes les trois d'un coup.
 # ---------------------------------------------------------------------------
 
+# LA CONDITION, PAR REFUS.
+#
+# Seul le worker est desormais servi quand un BrowserHost est la : c'est lui
+# que le banc mesure, et c'est `WorkerProcessManager` -- deja present dans
+# LibWebView que BrowserHost edite avec lui -- qui sait lancer le processus.
+#
+# Les trois autres gardent `bouchaud_m9_enabled()` seul, et ce n'est pas un
+# oubli : rien ne prouve encore que BrowserHost sache creer une vue ou un
+# telechargement. Les lever sans banc pour le montrer remplacerait un refus
+# bruyant par un gel silencieux -- exactement ce que ces refus evitent.
+SANS_HOTE = 'bouchaud_m9_enabled() && !getenv("BOUCHAUD_BROWSER_HOST")'
+
 refus = [
     (
         "worker",
@@ -273,6 +309,7 @@ refus = [
         '        warnln("[ladybird-bouchaud] HOTE_ABSENT StartWorkerAgent : '
         'ce portage n\'a pas de processus hote, le worker ne demarrera pas");\n'
         "        return {};",
+        SANS_HOTE,
     ),
     (
         "nouvelle vue",
@@ -280,6 +317,7 @@ refus = [
         '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidRequestNewWebView : '
         'un seul onglet, la fenetre surgissante est refusee");\n'
         "        return {};",
+        "bouchaud_m9_enabled()",
     ),
     (
         "telechargement",
@@ -287,6 +325,7 @@ refus = [
         '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownload : '
         'aucun telechargement possible sans processus hote");\n'
         "        return {};",
+        "bouchaud_m9_enabled()",
     ),
     (
         "telechargement sans requete",
@@ -294,14 +333,15 @@ refus = [
         '        warnln("[ladybird-bouchaud] HOTE_ABSENT DidStartDownloadWithoutRequest : '
         'aucun telechargement possible sans processus hote");\n'
         "        return {};",
+        "bouchaud_m9_enabled()",
     ),
 ]
 
-for nom, ancre, corps in refus:
+for nom, ancre, corps, condition in refus:
     substitute(
         ancre,
         "#if defined(BOUCHAUD_PORT)\n"
-        "    if (bouchaud_m9_enabled()) {\n"
+        f"    if ({condition}) {{\n"
         f"{corps}\n"
         "    }\n"
         "#endif\n" + ancre,
