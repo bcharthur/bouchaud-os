@@ -47,6 +47,21 @@ AUTORUN
 LOG=serie-browser-host.log
 : > "$LOG"
 
+# LE MONITEUR QEMU, POUR REGARDER L'ECRAN.
+#
+# BOUCHAUD_C29_SURFACE_PRESENTEE
+#
+# Le banc de page lit ses pixels dans un canvas : cela prouve que le
+# decodeur rend les bons octets, pas qu'ils arrivent a l'ecran. Le defaut
+# observe sur la machine physique est justement une image qui se decode et
+# reste BLANCHE dans la frame presentee.
+#
+# Aucune interface de page ne permet de relire la surface composee. On
+# regarde donc l'ecran de la machine, par `screendump`.
+MONITEUR=$PWD/moniteur-browser-host.sock
+CAPTURE=$PWD/surface-browser-host.ppm
+rm -f "$MONITEUR" "$CAPTURE"
+
 # Les jalons du navigateur, dans l'ordre ou il les franchit.
 #
 # UNE seule liste. Elle servait deux fois -- trois markers cables dans la
@@ -61,7 +76,6 @@ JALONS=(
   '[ladybird-bouchaud] M11_DOCUMENT_LOADED'
   '[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
   'HOST_CANVAS OK'
-  'HOST_WORKER OK pong'
   'HOST_IMAGE OK 1x1'
   'HOST_IFRAME OK'
   # LES DEUX BANCS QUI VERIFIENT UN COMPORTEMENT, ET NON UNE CAPACITE.
@@ -75,8 +89,25 @@ JALONS=(
   # `HOST_CANVAS OK` prouve qu'un peu de JS tourne. `HOST_JS_OK` exige que
   # dix-sept comportements soient reellement EXECUTES -- boucle d'evenements,
   # micro-taches, minuteries, fetch, DOM, cadres.
-  'HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1'
+  'HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1'
   'HOST_JS_OK'
+  # LES TROIS VERDICTS DE WORKER SONT SEPARES, ET LE GLOBAL EST UNE
+  # CONJONCTION.
+  #
+  # `HOST_WORKER OK pong` etait satisfait par `http || blob`. La CI est donc
+  # passee au vert avec le chargement de script par le RESEAU casse :
+  #
+  #     HOST_WORKER_BLOB OK pong
+  #     HOST_WORKER_HTTP FAIL
+  #     HOST_WORKER      OK pong      <- faux vert
+  #
+  # Un jalon qui peut etre vert alors qu'une moitie de la fonction ne marche
+  # pas ne mesure pas cette fonction.
+  'HOST_WORKER_HTTP OK pong'
+  'HOST_WORKER_BLOB OK pong'
+  'HOST_WORKER_GLOBAL OK pong'
+  # La mire doit etre arrivee jusqu'a la frame presentee.
+  'HOST_SURFACE_VERDICT ok'
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'
 )
 # Ce qui suffit a conclure : le verdict de la page, plus les deux jalons cote
@@ -124,6 +155,7 @@ qemu-system-x86_64 \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
+  -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
 PID=$!
 
@@ -166,6 +198,31 @@ while kill -0 "$PID" 2>/dev/null; do
   sleep 2
 done
 ECOULE=$((SECONDS - DEBUT))
+
+# LA CAPTURE SE PREND AVANT DE TUER LA MACHINE, et seulement si la page a
+# dit avoir pose sa mire : capturer un ecran ou elle n'est pas encore
+# affichee accuserait le compositeur d'un retard de la page.
+MIRE_VERDICT=non_posee
+if grep -aFq "HOST_SURFACE_MIRE_POSEE" "$LOG" && command -v socat >/dev/null 2>&1; then
+    if echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
+        sleep 2
+        if [ -s "$CAPTURE" ]; then
+            if python3 tools/ci/verifie-surface-mire.py "$CAPTURE"; then
+                MIRE_VERDICT=ok
+            else
+                MIRE_VERDICT=absente
+            fi
+        else
+            MIRE_VERDICT=capture_vide
+        fi
+    else
+        MIRE_VERDICT=moniteur_muet
+    fi
+elif ! command -v socat >/dev/null 2>&1; then
+    MIRE_VERDICT=socat_absent
+fi
+echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
+
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
 kill -KILL "$PID" 2>/dev/null || true

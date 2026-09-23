@@ -35,6 +35,28 @@ import images_fixtures as _img
 from collections import defaultdict as _defaultdict
 REQUETES = _defaultdict(int)
 
+# LA MIRE DE SURFACE : trois aplats de couleur PURE.
+#
+# BOUCHAUD_C29_SURFACE_PRESENTEE
+#
+# Tout ce qui precede lit les pixels dans un CANVAS. Cela prouve que le
+# decodeur a rendu les bons octets -- pas qu'ils arrivent a l'ecran. Le
+# defaut observe sur la machine physique est precisement celui-la : une
+# image qui se decode et reste BLANCHE dans la frame presentee.
+#
+# Les trois couleurs sont pures et saturees expres. Le chrome d'un
+# navigateur est fait de gris, de blancs et de bleus d'accentuation ; un
+# rouge #FF0000 ou un vert #00FF00 exact n'y apparait pas par accident. Le
+# controleur peut donc COMPTER les pixels exacts dans une capture d'ecran
+# sans avoir a connaitre la position de la mire -- ce qui le rend insensible
+# a la hauteur de la barre d'adresse, au decalage de la fenetre et a
+# l'echelle.
+MIRE = {
+    "/mire/rouge.png": _img.png_rgba(64, 64, lambda x, y: (255, 0, 0, 255)),
+    "/mire/vert.png": _img.png_rgba(64, 64, lambda x, y: (0, 255, 0, 255)),
+    "/mire/bleu.png": _img.png_rgba(64, 64, lambda x, y: (0, 0, 255, 255)),
+}
+
 CATALOGUE_PAGE = [
     {
         "id": e["id"], "nom": e["nom"], "fichier": e["fichier"],
@@ -229,25 +251,56 @@ HTML = r'''<!doctype html>
   // LES CHEMINS CSS, qui ne passent pas par `new Image()`.
   //
   // `background-image` est servi par un autre chemin du moteur que `<img>` :
-  // il passe par le style calcule et le display list, pas par HTMLImageElement.
-  // Un port peut faire marcher l'un et pas l'autre, et c'est precisement le
-  // genre de trou qui laisse une page « a moitie » illustree.
+  // il passe par le style calcule et le display list, pas par
+  // HTMLImageElement. Un port peut faire marcher l'un et pas l'autre, et
+  // c'est le genre de trou qui laisse une page « a moitie » illustree.
+  //
+  // BOUCHAUD_C29_FOND_PAR_PIXEL
+  //
+  // La version precedente se contentait de `getComputedStyle(...).backgroundImage`
+  // et verifiait que la chaine contenait le nom du fichier. Cela ne prouve
+  // RIEN sur le rendu : le style calcule rend l'URL telle qu'elle a ete
+  // posee, que la ressource ait ete chargee, decodee, ou meme trouvee. Un
+  // 404 donne exactement la meme chaine.
+  //
+  // Le fond est donc verifie par ses PIXELS. Le seul moyen d'en lire dans
+  // une page est de repasser par un canvas : on dessine un `<img>` de la
+  // MEME ressource et l'on compare. Ce n'est toujours pas la surface
+  // presentee -- c'est `HOST_SURFACE` plus bas qui s'en charge, depuis la
+  // capture d'ecran de la machine -- mais cela ferme le trou du « la chaine
+  // contient le bon nom ».
   // ====================================================================
   const CIBLE = CATALOGUE[0];
   let fondOK = false;
   try {
     const boite = document.createElement("div");
+    boite.id = "fond-epreuve";
     boite.style.width = "32px";
     boite.style.height = "32px";
     boite.style.backgroundImage = `url(${CIBLE.url})`;
     boite.style.backgroundSize = "32px 32px";
+    boite.style.backgroundRepeat = "no-repeat";
     document.body.appendChild(boite);
-    // Laisser un tour de boucle au moteur pour charger la ressource de style.
     await new Promise(r => setTimeout(r, 1500));
+
     const calcule = getComputedStyle(boite).backgroundImage;
-    fondOK = calcule && calcule !== "none" && calcule.includes(CIBLE.fichier);
-    console.log(fondOK ? `HOST_IMAGE_FOND OK calcule=${calcule}`
-                       : `HOST_IMAGE_FOND FAIL calcule=${calcule}`);
+    const styleCite = calcule && calcule !== "none" && calcule.includes(CIBLE.fichier);
+
+    // LA RESSOURCE DU FOND DOIT ETRE REELLEMENT DECODABLE, et donner les
+    // pixels que le catalogue annonce. Le style seul ne le dit pas.
+    let pixelsJustes = false;
+    if (styleCite && CIBLE.pixels.length > 0) {
+      const image = await chargeImage(CIBLE.url, 30000);
+      const ctx = lisPixels(image, image.naturalWidth, image.naturalHeight);
+      pixelsJustes = CIBLE.pixels.every(p => {
+        const d = ctx.getImageData(p[0], p[1], 1, 1).data;
+        return Math.max(Math.abs(d[0]-p[2]), Math.abs(d[1]-p[3]), Math.abs(d[2]-p[4])) <= CIBLE.tolerance;
+      });
+    }
+    fondOK = styleCite && pixelsJustes;
+    console.log(`HOST_IMAGE_FOND ${fondOK ? "OK" : "FAIL"}`
+      + ` style_cite=${styleCite ? 1 : 0} pixels_justes=${pixelsJustes ? 1 : 0}`
+      + ` calcule=${calcule}`);
   } catch (e) {
     console.log("HOST_IMAGE_FOND FAIL " + e);
   }
@@ -276,24 +329,130 @@ HTML = r'''<!doctype html>
 
   // REUTILISATION : la meme URL, une seconde fois.
   //
-  // Le cache disque est desactive au lancement ; ce que ce point mesure est
-  // donc la reutilisation EN MEMOIRE, pas le cache HTTP. Le serveur compte
-  // ses requetes et le banc lit ce compteur -- c'est la seule facon de
-  // distinguer « reservi depuis la memoire » de « retelecharge ».
+  // BOUCHAUD_C29_REUTILISE_COMPARE
+  //
+  // La version precedente posait `reutiliseOK = true` juste apres avoir lu
+  // les deux compteurs, sans JAMAIS les comparer, et le resultat n'entrait
+  // pas dans le verdict. C'etait une ligne de journal deguisee en epreuve :
+  // elle ne pouvait pas echouer, donc elle ne mesurait rien.
+  //
+  // Elle compare maintenant, et elle entre dans le verdict. Ce qu'elle
+  // affirme est borne et honnete : le cache disque est desactive au
+  // lancement (`--disable-http-disk-cache`), donc ce qui est teste ici est
+  // la reutilisation EN MEMOIRE d'une ressource deja chargee dans la meme
+  // page. Une requete de plus veut dire que le moteur est retourne au
+  // reseau pour une image qu'il tenait deja.
   let reutiliseOK = false;
   try {
-    const avant = await (await fetch("/compteur?fichier=" + CIBLE.fichier)).text();
-    await chargeImage(CIBLE.url, 30000);
-    const apres = await (await fetch("/compteur?fichier=" + CIBLE.fichier)).text();
-    reutiliseOK = true;
-    console.log(`HOST_IMAGE_REUTILISE requetes_avant=${avant.trim()} apres=${apres.trim()}`);
+    // LA RESSOURCE DE CETTE EPREUVE EST CACHABLE, ET C'EST INDISPENSABLE.
+    //
+    // Les images du catalogue sont servies `Cache-Control: no-store`, pour
+    // que le compteur de requetes reste lisible. Avec `no-store`, un
+    // navigateur CONFORME doit retourner au reseau a chaque acces : exiger
+    // zero requete supplementaire sur ces images-la reviendrait a exiger
+    // qu'il viole la norme. La premiere version le faisait, et Chromium --
+    // qui a raison -- rendait `supplement=1`.
+    //
+    // `/reutilise.png` est donc servie avec un `max-age` ordinaire. Ce que
+    // l'epreuve affirme devient alors vrai et verifiable : une ressource
+    // cachable deja chargee dans ce document ne doit pas etre redemandee.
+    const lisCompteur = async () =>
+      parseInt((await (await fetch("/compteur?fichier=reutilise.png")).text()).trim(), 10);
+    await chargeImage("/reutilise.png", 30000);
+    const avant = await lisCompteur();
+    await chargeImage("/reutilise.png", 30000);
+    const apres = await lisCompteur();
+    const supplement = apres - avant;
+    reutiliseOK = Number.isFinite(avant) && Number.isFinite(apres) && supplement === 0;
+    console.log(`HOST_IMAGE_REUTILISE ${reutiliseOK ? "OK" : "FAIL"}`
+      + ` requetes_avant=${avant} apres=${apres} supplement=${supplement}`);
   } catch (e) {
     console.log("HOST_IMAGE_REUTILISE FAIL " + e);
   }
 
-  const imagesToutesOK = imagesOK === CATALOGUE.length && fondOK && echelleOK;
+  // ====================================================================
+  // LA SURFACE PRESENTEE, et pourquoi elle ne peut pas se lire d'ici.
+  //
+  // BOUCHAUD_C29_SURFACE_PRESENTEE
+  //
+  // Tout ce qui precede lit des pixels dans un CANVAS. Cela prouve que le
+  // decodeur rend les bons octets. Cela ne prouve PAS qu'ils arrivent a
+  // l'ecran -- et le defaut observe sur la machine physique est exactement
+  // celui-la : une image qui se decode et reste BLANCHE dans la frame
+  // presentee.
+  //
+  // Aucune interface de page ne permet de relire la surface reellement
+  // composee. La verification se fait donc DEHORS : la page pose une mire
+  // de trois aplats purs, annonce qu'elle est posee, et le banc prend une
+  // capture de l'ecran de la machine par le moniteur QEMU. C'est
+  // `tools/ci/verifie-surface-mire.py` qui compte les pixels.
+  //
+  // Les trois aplats empruntent DEUX chemins differents a dessein :
+  //
+  //     rouge   <img>              -- HTMLImageElement
+  //     vert    background-image   -- style calcule et display list
+  //     bleu    <img> mis a l'echelle
+  //
+  // Si le rouge arrive et pas le vert, c'est le chemin CSS qui ne peint
+  // pas ; l'inverse accuse HTMLImageElement.
+  // ====================================================================
+  try {
+    const mire = document.createElement("div");
+    mire.id = "mire";
+    mire.style.cssText = "position:fixed;left:0;top:0;z-index:2147483647;"
+      + "background:#000;padding:0;margin:0;line-height:0;font-size:0";
+    const rouge = new Image();
+    rouge.src = "/mire/rouge.png";
+    rouge.width = 64; rouge.height = 64;
+    rouge.style.cssText = "display:inline-block;vertical-align:top";
+    const vert = document.createElement("div");
+    vert.style.cssText = "display:inline-block;vertical-align:top;width:64px;height:64px;"
+      + "background-image:url(/mire/vert.png);background-size:64px 64px;background-repeat:no-repeat";
+    const bleu = new Image();
+    bleu.src = "/mire/bleu.png";
+    bleu.width = 128; bleu.height = 64;
+    bleu.style.cssText = "display:inline-block;vertical-align:top";
+    mire.appendChild(rouge);
+    mire.appendChild(vert);
+    mire.appendChild(bleu);
+    document.body.appendChild(mire);
+
+    await Promise.all([rouge, bleu].map(im => new Promise(res => {
+      if (im.complete && im.naturalWidth > 0) return res();
+      im.onload = res; im.onerror = res;
+    })));
+    // DEUX TRAMES DE BATTEMENT, MAIS BORNEES.
+    //
+    // Attendre deux `requestAnimationFrame` laisse au compositeur le temps de
+    // presenter la mire. Mais un navigateur sans boucle de presentation ne
+    // les declenche JAMAIS -- un Chromium `headless_shell` en temps virtuel,
+    // par exemple. La premiere version attendait sans garde et la page s'y
+    // arretait pour toujours : le banc n'a rendu aucune ligne apres
+    // `HOST_IMAGE_REUTILISE`.
+    //
+    // Une epreuve ne doit pas pouvoir suspendre le banc. La course contre un
+    // delai rend la borne explicite, et le journal dit laquelle a gagne.
+    const deuxTrames = new Promise(r =>
+      requestAnimationFrame(() => requestAnimationFrame(() => r("trames"))));
+    const battement = await Promise.race([
+      deuxTrames,
+      new Promise(r => setTimeout(() => r("delai"), 5000)),
+    ]);
+    await new Promise(r => setTimeout(r, 2000));
+    console.log(`HOST_SURFACE_MIRE_POSEE battement=${battement}` + " rouge=img vert=background-image bleu=img_echelle"
+      + ` attendu_min_pixels=2048 largeur=${mire.offsetWidth} hauteur=${mire.offsetHeight}`);
+  } catch (e) {
+    console.log("HOST_SURFACE_MIRE_POSEE FAIL " + e);
+  }
+
+
+  // LA REUTILISATION ENTRE DANS LE VERDICT.
+  //
+  // Elle n'y entrait pas : son resultat etait calcule puis ignore. Une
+  // epreuve dont le resultat n'a aucune consequence n'en est pas une.
+  const imagesToutesOK = imagesOK === CATALOGUE.length && fondOK && echelleOK && reutiliseOK;
   console.log(`HOST_IMAGES_${imagesToutesOK ? "OK" : "FAIL"} codecs=${imagesOK}/${CATALOGUE.length}`
-    + ` fond=${fondOK ? 1 : 0} echelle=${echelleOK ? 1 : 0}`);
+    + ` fond=${fondOK ? 1 : 0} echelle=${echelleOK ? 1 : 0} reutilise=${reutiliseOK ? 1 : 0}`);
 
   // ====================================================================
   // LE BANC JAVASCRIPT
@@ -545,15 +704,65 @@ HTML = r'''<!doctype html>
   // peut expirer en dernier. Le verdict global reste le meme -- il a
   // seulement des chiffres a rapporter quand le worker echoue.
   // ====================================================================
-  // BOUCHAUD_C26_WORKER_DEUX_ORIGINES
+  // BOUCHAUD_C29_WORKER_MATRICE
   //
-  // Le meme worker, lance de deux facons. Voir WORKER_JS plus haut : un seul
-  // ne pouvait pas dire si c'est le PROCESSUS qui ne demarre pas ou le
-  // `blob:` qui ne traverse pas la frontiere de processus.
+  // # Ce que le « vert » precedent cachait
   //
-  // Chaque etape se dit, et avec son horodatage. « worker timeout » ne
-  // distingue pas « le processus n'a jamais demarre » de « il a demarre et
-  // n'a pas repondu », et ces deux-la n'ont pas le meme remede.
+  //     HOST_WORKER_BLOB OK pong
+  //     HOST_WORKER_HTTP FAIL
+  //     HOST_WORKER      OK pong      <- faux vert
+  //
+  // Le jalon global etait `workerHttpOK || workerBlobOK`. Une origine sur
+  // deux suffisait donc a le satisfaire, et la CI passait au vert avec le
+  // chargement de script par le reseau CASSE. Un jalon qui peut etre vert
+  // alors qu'une moitie de la fonction ne marche pas ne mesure pas cette
+  // fonction.
+  //
+  // Les trois verdicts sont desormais STRICTEMENT separes, et le global est
+  // une CONJONCTION :
+  //
+  //     HOST_WORKER_HTTP    le script vient du reseau
+  //     HOST_WORKER_BLOB    le script vient d'un blob: de l'agent
+  //     HOST_WORKER_GLOBAL  les DEUX
+  //
+  // # La matrice A/B, et la question qu'elle tranche
+  //
+  // Le releve precedent est ambigu. L'ordre etait http puis blob :
+  //
+  //     http  premier   echec a 61 s (garde), reponse observee vers 148 s
+  //     blob  second    reponse immediate
+  //
+  // Deux lectures s'opposent, et elles n'ont pas le meme remede :
+  //
+  //   ORIGINE     le chargement par le RESEAU est lent -- ResourceLoader,
+  //               RequestServer, DNS, boucle de fetch.
+  //   DEMARRAGE   le PREMIER WebWorker paie un demarrage a froid -- edition
+  //               de liens du binaire, ICU, fontconfig -- et son origine n'y
+  //               est pour rien.
+  //
+  // Quatre workers, dans cet ordre, les distinguent en une seule execution :
+  //
+  //     blob_1   http_1   blob_2   http_2
+  //
+  //   blob_1 lent, les trois autres rapides   -> DEMARRAGE A FROID
+  //   http_1 ET http_2 lents, blob_* rapides  -> ORIGINE
+  //
+  // L'ordre est INVERSE par rapport au releve precedent, expres : si la
+  // lenteur suit la premiere position au lieu de suivre `http`, elle est
+  // du demarrage et non de l'origine.
+  //
+  // # Le plafond n'est pas le budget, et c'est ce qui evite de masquer
+  //
+  // Elargir la garde a 180 s rendrait le banc vert sur un worker qui met
+  // deux minutes et demie -- ce serait masquer le defaut, pas le mesurer.
+  //
+  // La garde sert a OBSERVER : elle est assez large pour laisser la reponse
+  // de 148 s arriver et etre horodatee. Le BUDGET, lui, decide du verdict.
+  // Un worker qui repond en 148 s rend donc `FAIL ms=148000`, ce qui est a
+  // la fois un echec et une mesure.
+  const GARDE_WORKER_MS = 200000;
+  const BUDGET_WORKER_MS = 30000;
+
   const essaieWorker = async (nom, url, garde) => {
     const t0 = performance.now();
     const dit = (quoi, extra) =>
@@ -574,55 +783,83 @@ HTML = r'''<!doctype html>
         worker.postMessage("ping");
       });
       worker.terminate();
+      const ms = Math.round(performance.now() - t0);
       const ok = answer === "pong";
       dit(ok ? "pong" : "reponse_inattendue", `reponse=${answer}`);
-      return ok;
+      return { ok, ms };
     } catch (e) {
+      const ms = Math.round(performance.now() - t0);
       dit("echec", `raison=${e}`);
-      return false;
+      return { ok: false, ms };
     }
   };
 
-  // LE GARDE-FOU N'EST PAS UN BUDGET DE PERFORMANCE.
-  //
-  // WebWorker est un binaire Ladybird complet, avec son edition de liens et
-  // son initialisation ICU, et la machine emulee de la CI met deja vingt-huit
-  // secondes a initialiser le navigateur lui-meme. Soixante secondes chacun.
-  const GARDE_WORKER_MS = 60000;
+  const urlBlob = () => URL.createObjectURL(
+    new Blob(['onmessage = e => { if (e.data === "ping") postMessage("pong"); };'],
+             { type: "text/javascript" }));
 
-  // L'ORDRE COMPTE : HTTP d'abord.
-  //
-  // Si le processus ne demarre pas du tout, c'est celui-la qui le dira, et
-  // l'essai `blob:` qui suit n'aura pas a payer une seconde attente de
-  // soixante secondes pour apprendre la meme chose.
-  let workerHttpOK = false;
-  let workerBlobOK = false;
-  try {
-    workerHttpOK = await essaieWorker("http", "/worker.js", GARDE_WORKER_MS);
-  } catch (e) {
-    console.log("HOST_WORKER_HTTP FAIL " + e);
+  const MATRICE = [
+    ["blob", urlBlob],
+    ["http", () => "/worker.js"],
+    ["blob", urlBlob],
+    ["http", () => "/worker.js"],
+  ];
+
+  const releves = [];
+  for (let rang = 0; rang < MATRICE.length; rang++) {
+    const [origine, fabrique] = MATRICE[rang];
+    let r;
+    try {
+      r = await essaieWorker(`${origine}_${rang + 1}`, fabrique(), GARDE_WORKER_MS);
+    } catch (e) {
+      r = { ok: false, ms: -1 };
+      console.log(`HOST_WORKER_ETAPE origine=${origine}_${rang + 1} etape=echec raison=${e}`);
+    }
+    releves.push({ origine, rang: rang + 1, ok: r.ok, ms: r.ms });
+    console.log(`HOST_WORKER_AB rang=${rang + 1} origine=${origine}`
+      + ` repond=${r.ok ? 1 : 0} ms=${r.ms} budget=${BUDGET_WORKER_MS}`
+      + ` verdict=${r.ok && r.ms <= BUDGET_WORKER_MS ? "OK" : "HORS_BUDGET"}`);
   }
-  try {
-    const source = `onmessage = e => { if (e.data === "ping") postMessage("pong"); };`;
-    const blob = new Blob([source], { type: "text/javascript" });
-    workerBlobOK = await essaieWorker("blob", URL.createObjectURL(blob), GARDE_WORKER_MS);
-  } catch (e) {
-    console.log("HOST_WORKER_BLOB FAIL " + e);
-  }
 
-  console.log(`HOST_WORKER_HTTP ${workerHttpOK ? "OK pong" : "FAIL"}`);
-  console.log(`HOST_WORKER_BLOB ${workerBlobOK ? "OK pong" : "FAIL"}`);
-
-  // L'ASSERTION HISTORIQUE, ET CE QU'ELLE EXIGE DESORMAIS.
+  // LE VERDICT PAR ORIGINE : la PREMIERE tentative de chaque origine.
   //
-  // `HOST_WORKER OK pong` reste le jalon que la CI attend. Il est satisfait
-  // des qu'un worker repond, PAR N'IMPORTE LAQUELLE des deux origines : ce
-  // que ce jalon affirme est « le navigateur sait executer du JavaScript dans
-  // un processus WebWorker et en recevoir un message ». Le cas `blob:` est
-  // une capacite distincte, et il a sa propre ligne -- la confondre avec la
-  // premiere ferait echouer le lot entier sur un defaut de magasin d'URL.
-  workerOK = workerHttpOK || workerBlobOK;
-  console.log(workerOK ? "HOST_WORKER OK pong" : "HOST_WORKER FAIL les deux origines ont echoue");
+  // La premiere, et non la meilleure : c'est elle que vit un utilisateur qui
+  // ouvre une page. Prendre la meilleure des deux effacerait precisement le
+  // cout du demarrage a froid qu'on cherche a mesurer.
+  const premier = o => releves.find(r => r.origine === o) || { ok: false, ms: -1 };
+  const http = premier("http");
+  const blob = premier("blob");
+  const dansBudget = r => r.ok && r.ms >= 0 && r.ms <= BUDGET_WORKER_MS;
+
+  workerHttpOK = dansBudget(http);
+  workerBlobOK = dansBudget(blob);
+  console.log(`HOST_WORKER_HTTP ${workerHttpOK ? "OK pong" : "FAIL"} ms=${http.ms} repond=${http.ok ? 1 : 0}`);
+  console.log(`HOST_WORKER_BLOB ${workerBlobOK ? "OK pong" : "FAIL"} ms=${blob.ms} repond=${blob.ok ? 1 : 0}`);
+
+  // LA LECTURE DE LA MATRICE, faite ici pour ne pas avoir a la refaire a la
+  // main a chaque execution.
+  const rapides = releves.filter(r => r.ms >= 0 && r.ms <= BUDGET_WORKER_MS).length;
+  let diagnostic = "indetermine";
+  if (releves.length === 4) {
+    const [a, b, c, d] = releves;
+    const lent = r => r.ms < 0 || r.ms > BUDGET_WORKER_MS;
+    if (lent(a) && !lent(b) && !lent(c) && !lent(d)) diagnostic = "demarrage_a_froid";
+    else if (!lent(a) && !lent(c) && lent(b) && lent(d)) diagnostic = "origine_http";
+    else if (releves.every(r => !lent(r))) diagnostic = "aucun_retard";
+    else if (releves.every(lent)) diagnostic = "tous_lents";
+  }
+  console.log(`HOST_WORKER_DIAGNOSTIC ${diagnostic} rapides=${rapides}/${releves.length}`
+    + ` ordre=${releves.map(r => `${r.origine}:${r.ms}`).join(",")}`);
+
+  // LE GLOBAL EST UNE CONJONCTION.
+  //
+  // « le navigateur sait executer du JavaScript dans un processus WebWorker »
+  // n'est pas vrai si une seule des deux facons de lui donner son script
+  // marche. Le jalon porte desormais un nom qui ne se confond pas avec les
+  // deux autres : `HOST_WORKER_GLOBAL`.
+  workerOK = workerHttpOK && workerBlobOK;
+  console.log(`HOST_WORKER_GLOBAL ${workerOK ? "OK pong" : "FAIL"}`
+    + ` http=${workerHttpOK ? 1 : 0} blob=${workerBlobOK ? 1 : 0}`);
 
 
   console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK && frameOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0} frame=${frameOK ? 1 : 0}`
@@ -648,6 +885,29 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(WORKER_JS)
             print("BROWSER_HOST_FIXTURE_WORKER_OK path=/worker.js", flush=True)
+            return
+        if path == "/reutilise.png":
+            REQUETES["reutilise.png"] += 1
+            octets = MIRE["/mire/rouge.png"]
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(octets)))
+            # CACHABLE, contrairement au reste du catalogue : voir l'epreuve
+            # de reutilisation dans la page.
+            self.send_header("Cache-Control", "max-age=300")
+            self.end_headers()
+            self.wfile.write(octets)
+            print(f"BROWSER_HOST_FIXTURE_REUTILISE requetes={REQUETES['reutilise.png']}", flush=True)
+            return
+        if path in MIRE:
+            octets = MIRE[path]
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(octets)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(octets)
+            print(f"BROWSER_HOST_FIXTURE_MIRE path={path}", flush=True)
             return
         if path in _img.PAR_CHEMIN:
             entree = _img.PAR_CHEMIN[path]
