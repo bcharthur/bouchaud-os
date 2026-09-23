@@ -183,6 +183,86 @@ def mesures_execution(journal: Path) -> dict[str, float]:
     return mesures
 
 
+# ============================================================================
+# BOUCHAUD_C46_UN_MAXIMUM_NE_SE_LIT_PAS_SEUL
+# ============================================================================
+#
+# `ready_latency_interactive_max_ms` depassait son budget DEUX FOIS SUR TROIS,
+# avec ou sans les changements qu'on lui attribuait. Mesure, meme banc :
+#
+#     sans le changement   206.4   40.0   205.2  ms
+#     avec le changement   204.5   223.4   79.2  ms
+#
+# Les distributions sont les memes. Un budget qui rougit au hasard n'est pas
+# une barriere : on finit par le regarder sans le croire, et le jour ou il dit
+# vrai personne ne l'ecoute.
+#
+# Trois reponses etaient possibles. Relacher le plafond a 300 ms est celle
+# qu'interdit le fichier de budgets lui-meme (« jamais en les relachant apres
+# une regression »). Supprimer la mesure perdrait le figement qu'elle attrape.
+# Reste la troisieme : AMELIORER LE TEST.
+#
+# Le noyau publie deja tout ce qu'il faut :
+#
+#     [SCHED-NG-CENTILES] classe=interactive count= p50_ns= p95_ns= p99_ns= max_ns=
+#
+# Un maximum seul ne dit pas s'il vient d'une distribution decalee ou d'un
+# evenement isole. Le p99 le dit. Le budget ne bouge pas d'un iota -- c'est le
+# DIAGNOSTIC qui devient exploitable.
+
+CENTILES = re.compile(
+    r"\[SCHED-NG-CENTILES\] classe=(?P<classe>\w+) count=(?P<count>\d+)"
+    r" p50_ns=(?P<p50>\d+) p95_ns=(?P<p95>\d+) p99_ns=(?P<p99>\d+)"
+    r" max_ns=(?P<max>\d+)"
+)
+
+# Pour chaque budget portant sur un maximum, la classe dont les centiles
+# l'eclairent, et le budget p99 qui decide entre outlier et regression.
+COMPAGNONS = {
+    "ready_latency_interactive_max_ms": ("interactive", "ready_latency_interactive_p99_ms"),
+    "ready_latency_max_ms": ("normale", "ready_latency_normale_p99_ms"),
+}
+
+
+def qualifie(nom, mesure, budget, reference, texte_journal):
+    """Dit si un maximum depasse est un OUTLIER ou une REGRESSION.
+
+    Ne change aucun verdict : le depassement reste un echec. Il devient
+    seulement lisible -- et c'est la difference entre un banc qu'on croit et
+    un banc qu'on finit par ignorer.
+    """
+    if nom not in COMPAGNONS or not texte_journal:
+        return []
+    classe, budget_p99_nom = COMPAGNONS[nom]
+
+    dernier = None
+    for m in CENTILES.finditer(texte_journal):
+        if m.group("classe") == classe:
+            dernier = m
+    if dernier is None:
+        return [f"      (pas de [SCHED-NG-CENTILES] classe={classe} :"
+                f" impossible de dire si c'est un ecart isole)"]
+
+    n = int(dernier.group("count"))
+    p50 = int(dernier.group("p50")) / 1e6
+    p95 = int(dernier.group("p95")) / 1e6
+    p99 = int(dernier.group("p99")) / 1e6
+    budget_p99 = reference.get("execution", {}).get(budget_p99_nom)
+
+    lignes = [f"      n={n} p50={p50:.1f} p95={p95:.1f} p99={p99:.1f} max={mesure:.1f} ms"]
+    if n < 100:
+        # Un maximum sur trois echantillons n'est pas une distribution.
+        lignes.append(f"      ECHANTILLON MAIGRE (n={n}) : ce maximum ne decrit")
+        lignes.append(f"      pas une distribution, il decrit un evenement.")
+    if budget_p99 is not None and p99 > budget_p99:
+        lignes.append(f"      REGRESSION STRUCTURELLE : p99={p99:.1f} > {budget_p99}")
+        lignes.append(f"      La distribution entiere a glisse, pas seulement sa queue.")
+    elif budget_p99 is not None:
+        lignes.append(f"      ECART ISOLE : p99={p99:.1f} tient sous {budget_p99}.")
+        lignes.append(f"      Un seul reveil tardif, pas un ralentissement general.")
+    return lignes
+
+
 def main() -> int:
     parseur = argparse.ArgumentParser()
     parseur.add_argument("--journal", type=Path,
@@ -204,6 +284,12 @@ def main() -> int:
         return 0
 
     fautes, gains, non_verifies = [], [], []
+
+    # Lu UNE fois : `qualifie` en a besoin pour relire les centiles, et relire
+    # le fichier par budget depasse serait absurde.
+    texte_journal = ""
+    if options.journal and options.journal.exists():
+        texte_journal = options.journal.read_text(encoding="utf-8", errors="replace")
 
     # --- architecture -------------------------------------------------------
     attendu = {c: v for c, v in
@@ -256,6 +342,8 @@ def main() -> int:
             libelle = EXECUTION[nom][2] if nom in EXECUTION else nom
             if mesure > budget:
                 fautes.append(f"  {nom} ({libelle}) : {mesure:.3f} > {budget} (budget)")
+                for detail in qualifie(nom, mesure, budget, reference, texte_journal):
+                    fautes.append(detail)
             elif mesure < budget:
                 gains.append(f"  {nom} : {mesure:.3f} < {budget}")
     else:
