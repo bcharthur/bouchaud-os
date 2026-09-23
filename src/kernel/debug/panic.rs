@@ -56,6 +56,26 @@ fn panic(info: &PanicInfo) -> ! {
         idt::arret_definitif();
     }
 
+    // BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
+    //
+    // Le meme marqueur que les extinctions volontaires, pour qu'UN SEUL grep
+    // reponde a « pourquoi la session s'est-elle arretee ». Sans lui, il
+    // fallait savoir a l'avance qu'une panique s'annonce autrement qu'une
+    // extinction, donc savoir deja ce qu'on cherchait.
+    //
+    // Emis ICI, avant l'ecran, les relevés et les enregistreurs de vol : ces
+    // etapes touchent des structures potentiellement corrompues et peuvent
+    // bloquer. La raison de l'arret ne doit pas dependre de leur survie.
+    //
+    // Ni allocation ni verrou : `cpu` est deja lu, et l'horloge est atomique.
+    // Le processus courant n'est PAS lu -- il demanderait un `Arc` et un
+    // verrou, ce qui est exactement ce qu'on ne fait pas dans ce handler.
+    serial_println!(
+        "BOUCHAUD_SYSTEM_EXIT raison=panique code=255 cpu={} t={}",
+        cpu,
+        crate::kernel::timer::monotonic_ms(),
+    );
+
     // LE MESSAGE, FORMATE SANS ALLOUER.
     //
     // La panique du 17 septembre venait de `handle_alloc_error` : le tas a

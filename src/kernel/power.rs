@@ -166,7 +166,45 @@ fn rapporte_echec(vidage: &crate::kernel::blackbox::Vidage, persisted: i64) {
     );
 }
 
+/// Extinction dont la RAISON est connue.
+///
+/// BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
+///
+/// Le run #347 s'est arrete tout seul vers 342 s, en pleine matrice de
+/// workers, et le journal ne disait pas pourquoi. Chercher la cause a demande
+/// de relire le code de quatre appelants pour deviner lequel avait tire -- ce
+/// qui est exactement le travail qu'une ligne de journal doit eviter.
+///
+/// Tous les chemins d'extinction volontaire passent ici. La ligne est emise
+/// AVANT tout le reste : la persistance, l'enregistreur de vol et l'ecran
+/// peuvent echouer ou bloquer, et c'est precisement quand ils echouent qu'on a
+/// besoin de savoir qui a demande l'arret.
+pub fn shutdown_avec_raison(code: u8, raison: &str) -> ! {
+    crate::serial_println!(
+        "BOUCHAUD_SYSTEM_EXIT raison={} code={} pid={} t={}",
+        raison,
+        code,
+        // `_local` et non `current_process` : l'extinction peut venir d'un fil
+        // noyau ou de l'autorun, ou il n'y a PAS de processus courant. La
+        // variante qui panique transformerait un arret explique en panique.
+        crate::kernel::task::current_process_local()
+            .map(|p| p.pid as i64)
+            .unwrap_or(-1),
+        crate::kernel::timer::monotonic_ms(),
+    );
+    shutdown_interne(code)
+}
+
+/// Extinction dont la raison n'a pas ete transmise.
+///
+/// Conserve pour les appelants qui n'ont pas encore ete convertis : mieux vaut
+/// `raison=indetermine` qu'un arret muet. Tout nouvel appelant doit utiliser
+/// `shutdown_avec_raison`.
 pub fn shutdown(code: u8) -> ! {
+    shutdown_avec_raison(code, "indetermine")
+}
+
+fn shutdown_interne(code: u8) -> ! {
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
 
     // L'ENREGISTREUR DE VOL EN PREMIER, ET AVANT LA PERSISTANCE.

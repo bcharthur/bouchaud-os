@@ -289,6 +289,35 @@ elif grep -aFq "HOST_SURFACE_MIRE_INSEREE" "$LOG"; then
 fi
 echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
 
+# POURQUOI LA SESSION S'EST-ELLE ARRETEE ?
+#
+# BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
+#
+# Le run #347 s'est arrete vers 342 s, en pleine matrice de workers, et le
+# journal ne le disait pas. Tous les chemins d'arret volontaire -- fin
+# d'autorun, menu Quitter, commande shell, banc d'entree/sortie -- ainsi que
+# le gestionnaire de panique emettent desormais la meme ligne.
+#
+# Cette lecture a lieu AVANT que le banc ne tue QEMU : apres, on ne saurait
+# plus distinguer « la session s'est arretee toute seule » de « c'est nous qui
+# l'avons tuee », ce qui est justement la question.
+if kill -0 "$PID" 2>/dev/null; then
+    echo "BOUCHAUD_SESSION_FIN etat=vivante raison=tuee_par_le_banc"
+else
+    FIN=$(grep -ao 'BOUCHAUD_SYSTEM_EXIT [^\r]*' "$LOG" | tail -1 || true)
+    if [ -n "$FIN" ]; then
+        echo "BOUCHAUD_SESSION_FIN etat=arretee $FIN"
+    else
+        # Un arret sans marqueur n'est PAS une information manquante : c'est un
+        # chemin d'arret qu'on ne connait pas. Triple faute, reinitialisation,
+        # QEMU tue de l'exterieur, coupure d'alimentation emulee.
+        echo "BOUCHAUD_SESSION_FIN etat=arretee raison=SANS_MARQUEUR"
+        echo "  QEMU est mort sans qu'aucun chemin connu ne l'annonce." >&2
+        echo "  Dernieres lignes du journal serie :" >&2
+        tail -c 2000 "$LOG" | sed -E 's/\x1b\[[0-9;]*m//g' | tail -12 | sed 's/^/    /' >&2
+    fi
+fi
+
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
 kill -KILL "$PID" 2>/dev/null || true

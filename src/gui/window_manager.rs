@@ -2029,7 +2029,7 @@ fn handle_click(
                 // session a produit. Elles ne reviennent jamais.
                 else if kind == window::KIND_ETEINDRE {
                     crate::gui::power_screen::begin();
-                    crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK);
+                    crate::kernel::power::shutdown_avec_raison(crate::kernel::power::EXIT_OK, "menu_quitter");
                 }
                 else if kind == window::KIND_REDEMARRER {
                     crate::gui::power_screen::begin();

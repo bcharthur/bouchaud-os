@@ -64,5 +64,11 @@ pub fn run_if_present() {
     crate::println!("{} statut={}", END, status);
     vga::set_serial_mirror(false);
 
-    power::shutdown(if status == 0 { power::EXIT_OK } else { power::EXIT_FAIL })
+    // LE SUSPECT PRINCIPAL de l'arret du run #347 : quand le script autorun
+    // se termine, la session s'eteint. Vu de l'exterieur, cela ressemble a une
+    // mort spontanee ; c'est une fin nominale qui ne se nommait pas.
+    power::shutdown_avec_raison(
+        if status == 0 { power::EXIT_OK } else { power::EXIT_FAIL },
+        "autorun_termine",
+    )
 }

@@ -817,7 +817,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             println!("Arret de la machine.");
             // Le code ne compte que si l'hote ecoute le peripherique de test de
             // QEMU ; une extinction demandee a la main est toujours un succes.
-            crate::kernel::power::shutdown(crate::kernel::power::EXIT_OK)
+            crate::kernel::power::shutdown_avec_raison(crate::kernel::power::EXIT_OK, "commande_shell")
         }
         "breakpoint" => { c::breakpoint(); 0 }
         "serial-test" => { c::serial_test(); 0 }

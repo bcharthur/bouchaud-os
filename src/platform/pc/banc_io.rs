@@ -264,7 +264,7 @@ fn fil_arbitre() -> ! {
     // Le vidage de l'enregistreur n'a plus lieu qu'ici. Couper au bouton
     // laisserait le tambour intact en RAM -- et invalide, puisque la RAM
     // s'efface -- ce qui ne prouverait rien du chemin qu'on veut mesurer.
-    crate::kernel::power::shutdown(0);
+    crate::kernel::power::shutdown_avec_raison(0, "banc_io");
 }
 
 /// Imprime les mesures que le script relit, dans une forme stable.
