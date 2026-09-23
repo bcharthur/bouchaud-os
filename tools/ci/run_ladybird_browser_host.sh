@@ -507,30 +507,16 @@ python3 tools/ci/analyse-demarrage.py "$LOG" || true
 # `BO_SMOKE_PERF_BLOQUANT=1`, il bloque. Ailleurs il informe : une machine
 # lente n'est pas une machine cassee, mais elle doit se voir.
 # ====================================================================
-perf_echecs=0
-perf_lignes=0
-while IFS= read -r ligne; do
-  perf_lignes=$((perf_lignes + 1))
-  printf '  %s\n' "$ligne"
-  case "$ligne" in
-    *' FAIL '*) perf_echecs=$((perf_echecs + 1)) ;;
-  esac
-done < <(grep -aoE 'HOST_WORKER_[A-Z_]*PERF[A-Z_]* (OK|FAIL).*' "$LOG" | sed 's/\r//g' || true)
-
-if [ "$perf_lignes" -eq 0 ]; then
-  echo "LADYBIRD_PERFORMANCE_SMOKE inconclusif raison=aucune_ligne_perf"
-  if [ "$PERF_BLOQUANT" = 1 ]; then
-    echo "performance : aucune ligne _PERF dans le journal, le banc n'a rien mesure" >&2
-    exit 1
-  fi
-elif [ "$perf_echecs" -ne 0 ]; then
-  echo "LADYBIRD_PERFORMANCE_SMOKE fail hors_budget=$perf_echecs/$perf_lignes"
-  if [ "$PERF_BLOQUANT" = 1 ]; then
-    echo "performance : $perf_echecs mesure(s) hors budget" >&2
-    exit 1
-  fi
+# La logique vit dans `verifie_ladybird_perf.sh`, qui est le verdict autoritaire
+# et porte son PROPRE statut de CI. Ici elle n'informe que le lecteur du banc :
+# `BO_SMOKE_PERF_BLOQUANT=1` reste honore pour les appelants qui s'en servent,
+# mais la CI ne depend plus de cette variable pour voir une regression.
+if tools/ci/verifie_ladybird_perf.sh "$LOG"; then
+  :
+elif [ "$PERF_BLOQUANT" = 1 ]; then
+  exit 1
 else
-  echo "LADYBIRD_PERFORMANCE_SMOKE ok mesures=$perf_lignes"
+  echo "  (verdict de performance non bloquant ici ; voir le travail de CI dedie)"
 fi
 
 echo LADYBIRD_BROWSER_HOST_OK

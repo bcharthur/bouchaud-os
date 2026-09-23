@@ -320,3 +320,33 @@ jobs:
             fixture-browser-host.log
             surface-browser-host.ppm
           if-no-files-found: warn
+
+  # ==========================================================================
+  # BOUCHAUD_C44_DEUX_STATUTS_REELS
+  # ==========================================================================
+  #
+  # `BOUCHAUD_C32_DEUX_VERDICTS` avait separe les deux verdicts dans la SORTIE
+  # du banc, mais un seul travail les portait -- et il ne bloquait que sur le
+  # fonctionnel. `BO_SMOKE_PERF_BLOQUANT` n'etait defini par aucun workflow :
+  # une regression de performance laissait la CI verte.
+  #
+  # Deux travaux, donc deux statuts que GitHub affiche et bloque separement.
+  # UN SEUL demarrage QEMU : ce travail ne relance rien, il relit le journal
+  # que le precedent a publie.
+  #
+  # `needs: browser-host-smoke` sans `if: always()` est VOULU : si le navigateur ne
+  # fonctionne pas, ses chiffres de performance ne veulent rien dire, et un
+  # rouge de performance par-dessus un rouge fonctionnel n'informe personne.
+  performance:
+    name: ladybird / performance
+    needs: browser-host-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ladybird-browser-host-smoke-logs
+          path: .
+      - name: Budgets de performance
+        run: tools/ci/verifie_ladybird_perf.sh serie-browser-host.log
