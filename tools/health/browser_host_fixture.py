@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json as _json
 import struct
+import time
 import zlib
 
 
@@ -962,12 +963,41 @@ class Handler(BaseHTTPRequestHandler):
             print("BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png", flush=True)
             return
         if path == "/worker.js":
+            # CE QUE LE SERVEUR VOIT, ET CE QUE CELA ELIMINE.
+            #
+            # BOUCHAUD_C38_LE_SCRIPT_N_EST_PAS_LE_RESEAU
+            #
+            # Le releve du run 35829303875 donne, pour le premier worker,
+            # 15,7 s entre `boucle_prete` et `script_charge`. Trois choses
+            # peuvent les expliquer : la demande n'est pas partie, le serveur
+            # met du temps a repondre, ou le worker met du temps a recevoir et
+            # analyser.
+            #
+            # Le serveur est le seul des trois dont je controle le code sans
+            # reconstruire Ladybird. S'il repond en quelques millisecondes --
+            # et il n'a rien d'autre a faire -- alors les quinze secondes sont
+            # AILLEURS, et deux des trois hypotheses tombent sans rien deviner.
+            #
+            # L'horloge est celle de l'hote de CI, pas celle de l'invite : les
+            # instants ne sont donc PAS comparables aux `t=` du journal serie.
+            # La DUREE de service, elle, l'est -- c'est pour cela qu'elle est
+            # publiee separement de l'instant.
+            debut = time.monotonic()
+            REQUETES["worker.js"] += 1
             self.send_response(200)
             self.send_header("Content-Type", "text/javascript")
             self.send_header("Content-Length", str(len(WORKER_JS)))
             self.end_headers()
             self.wfile.write(WORKER_JS)
-            print("BROWSER_HOST_FIXTURE_WORKER_OK path=/worker.js", flush=True)
+            self.wfile.flush()
+            print(
+                f"BROWSER_HOST_FIXTURE_WORKER_OK path=/worker.js"
+                f" rang={REQUETES['worker.js']}"
+                f" octets={len(WORKER_JS)}"
+                f" service_ms={(time.monotonic() - debut) * 1000:.1f}"
+                f" hote_s={time.monotonic():.3f}",
+                flush=True,
+            )
             return
         if path == "/reutilise.png":
             REQUETES["reutilise.png"] += 1
