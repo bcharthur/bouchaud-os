@@ -189,6 +189,25 @@ fn read_string_array(addr: u64) -> Option<Vec<String>> {
 /// Ne revient jamais en cas de succes — le processus repart au point d'entree
 /// du nouveau programme.
 pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
+    // BOUCHAUD_C55_LES_QUARANTE_TROIS_SECONDES
+    //
+    // Le segment `fork_exit -> exec_enter` vaut 43,4 s pour le premier
+    // WebWorker de la baseline #347. Aucune faute POST-exec ne peut
+    // l'expliquer : il se situe AVANT l'entree dans `execve`. Le confondre
+    // avec le cout des fautes de page serait attribuer a la memoire une
+    // attente d'ordonnancement.
+    //
+    // Deux bornes le decoupent : `CHILD_AFTER_FORK` (l'enfant est enfin
+    // planifie) et celle-ci (il entre dans l'appel). L'intervalle entre les
+    // deux est ce que l'enfant EXECUTE avant d'appeler `execve` ; ce qui
+    // precede est ce qu'il a ATTENDU.
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "EXECVE_SYSCALL_ENTER t={} pid={}",
+        crate::kernel::timer::monotonic_ms(),
+        crate::kernel::task::current_process_local()
+            .map(|p| p.pid as i64)
+            .unwrap_or(-1),
+    ));
     // Tout doit etre lu **avant** de detruire l'ancien espace d'adressage :
     // le chemin, les arguments et l'environnement y vivent encore.
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {

@@ -1,34 +1,40 @@
 #!/usr/bin/env python3
-"""Cout PAR LANCEMENT du chemin FichierPrive, par difference.
+"""Decomposition du chemin FichierPrive, PAR PROCESSUS.
 
-BOUCHAUD_C51_OU_SONT_LES_HUIT_SECONDES
+BOUCHAUD_C54_PAR_PID_OU_RIEN
 
-Les compteurs du noyau sont CUMULATIFS. C'est voulu : les remettre a zero a
-chaque processus perdrait l'information des que deux se chevauchent. Mais cela
-veut dire qu'additionner les totaux compterait chaque faute autant de fois
-qu'il reste de processus a sortir.
+Les chiffres viennent du livre par PID, alimente faute par faute depuis la
+`Note` qui connait son processus. Ce script ne fait AUCUNE difference entre
+lignes : chaque ligne porte deja le total de SON processus.
 
-Ce script prend donc les DIFFERENCES entre deux sorties successives. La
-premiere ligne est prise telle quelle : rien ne la precede.
+La version precedente soustrayait deux releves globaux successifs, ce qui
+supposait que les processus ne se chevauchent pas -- faux par definition dans
+le cas qu'on veut mesurer.
+
+# Ce qui est additif et ce qui ne l'est pas
+
+`acquire_us` CONTIENT `acquire_miss_read_us` : l'acquisition du cache de pages
+fait la lecture du support elle-meme. Les additionner compterait la lecture
+deux fois. De meme `hit + miss + wait == acquire` : ce sont les trois ISSUES
+d'une acquisition, pas trois etapes.
+
+    explained = wait + acquire + backing_direct + mm_lock + map
 """
 import re
 import sys
 
 LIGNE = re.compile(
-    r"FAULT_FILE_BREAKDOWN t=(\d+) pid=(-?\d+) faults=(\d+)"
-    r" total_us=(\d+) wait_us=(\d+) cache_us=(\d+)"
-    r" backing_us=(\d+) mm_lock_us=(\d+) map_us=(\d+)"
-    r" explique_us=(\d+) residual_us=(\d+)"
-    r" ata_reads=(\d+) ata_bytes=(\d+) ata_us=(\d+)"
-    r" mem_reads=(\d+) mem_bytes=(\d+) mem_us=(\d+)"
-    r" cc_hits=(\d+) cc_miss=(\d+) cc_waits=(\d+) cc_hit_us=(\d+)"
-    r" cc_miss_us=(\d+) cc_miss_read_us=(\d+) cc_wait_us=(\d+)"
+    r"FAULT_FILE_BREAKDOWN t=(?P<t>\d+) pid=(?P<pid>\d+) source=(?P<source>\S+)"
+    r" faults=(?P<faults>\d+) total_us=(?P<total>\d+) wait_us=(?P<wait>\d+)"
+    r" acquire_us=(?P<acq>\d+) acquire_hit_n=(?P<hit_n>\d+)"
+    r" acquire_hit_us=(?P<hit_us>\d+) acquire_miss_n=(?P<miss_n>\d+)"
+    r" acquire_miss_us=(?P<miss_us>\d+) acquire_miss_read_us=(?P<read_us>\d+)"
+    r" acquire_wait_n=(?P<wait_n>\d+) acquire_wait_us=(?P<wait_us2>\d+)"
+    r" backing_direct_us=(?P<direct>\d+) mm_lock_us=(?P<mm>\d+)"
+    r" map_us=(?P<map>\d+) explained_us=(?P<expl>\d+)"
+    r" residual_us=(?P<res>\d+) residual_pct=(?P<pct>\d+)"
+    r" worst_us=(?P<worst>\d+) lost_samples=(?P<lost>\d+)"
 )
-CHAMPS = ["t", "pid", "faults", "total", "wait", "cache", "backing", "mm",
-          "map", "explique", "residual", "ata_reads", "ata_bytes", "ata_us",
-          "mem_reads", "mem_bytes", "mem_us",
-          "cc_hits", "cc_miss", "cc_waits", "cc_hit_us", "cc_miss_us",
-          "cc_miss_read_us", "cc_wait_us"]
 
 
 def main():
@@ -36,47 +42,55 @@ def main():
         print("usage: analyse_faute_fichier.py <journal>", file=sys.stderr)
         return 2
     texte = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-    lignes = [dict(zip(CHAMPS, map(int, m.groups()))) for m in LIGNE.finditer(texte)]
+    lignes = [m.groupdict() for m in LIGNE.finditer(texte)]
     if not lignes:
+        brutes = texte.count("FAULT_FILE_BREAKDOWN")
+        if brutes:
+            print(f"  {brutes} ligne(s) presentes mais NON ANALYSABLES :",
+                  file=sys.stderr)
+            print("  le format de la sonde a change sans que ce script suive.",
+                  file=sys.stderr)
+            return 1
         print("  (aucune ligne FAULT_FILE_BREAKDOWN)")
         return 1
 
     def ms(v):
-        return f"{v / 1000:.1f}"
+        return f"{int(v) / 1000:.1f}"
 
-    print(f"  {'#':>2} {'pid':>4} {'fautes':>7} {'total_ms':>9} {'attente':>8}"
-          f" {'acquire':>8} {'cc_miss':>8} {'cc_lect':>8} {'cc_att':>7}"
-          f" {'map':>6} {'residu':>7} {'ata_n':>6} {'ata_ms':>8}")
-    precedent = None
-    for i, l in enumerate(lignes, 1):
-        if precedent is None:
-            d = dict(l)
-        else:
-            d = {k: l[k] - precedent[k] for k in l}
-            d["pid"] = l["pid"]
-        print(f"  {i:>2} {d['pid']:>4} {d['faults']:>7} {ms(d['total']):>9}"
-              f" {ms(d['wait']):>8} {ms(d['cache']):>8}"
-              f" {ms(d['cc_miss_us']):>8} {ms(d['cc_miss_read_us']):>8}"
-              f" {ms(d['cc_wait_us']):>7}"
-              f" {ms(d['map']):>6} {ms(d['residual']):>7}"
-              f" {d['ata_reads']:>6} {ms(d['ata_us']):>8}")
-        precedent = l
+    print(f"  {'pid':>4} {'source':>11} {'fautes':>7} {'total_ms':>9}"
+          f" {'attente':>8} {'acquire':>8} {'hit_n':>6} {'miss_n':>7}"
+          f" {'dont_lect':>10} {'att_n':>6} {'direct':>7} {'mm':>6}"
+          f" {'map':>6} {'residu':>8} {'%':>4} {'perdus':>7}")
+    for l in lignes:
+        print(f"  {l['pid']:>4} {l['source']:>11} {l['faults']:>7}"
+              f" {ms(l['total']):>9} {ms(l['wait']):>8} {ms(l['acq']):>8}"
+              f" {l['hit_n']:>6} {l['miss_n']:>7} {ms(l['read_us']):>10}"
+              f" {l['wait_n']:>6} {ms(l['direct']):>7} {ms(l['mm']):>6}"
+              f" {ms(l['map']):>6} {ms(l['res']):>8} {l['pct']:>4}"
+              f" {l['lost']:>7}")
 
+    # Un residu au-dessus de 5 % interdit de conclure : c'est la regle du
+    # chantier, et l'annoncer vaut mieux que de laisser lire le tableau.
+    hauts = [l for l in lignes if int(l["pct"]) > 5]
     print()
-    print("  `acquire` = temps total dans clean_page_cache::acquire, vu du")
-    print("  chemin de faute. `cc_miss` en est la part des defauts, dont")
-    print("  `cc_lect` est la LECTURE DU SUPPORT qu'`acquire` fait lui-meme --")
-    print("  c'est du disque, pas du cache. `cc_att` est l'attente d'un autre")
-    print("  coeur deja en train de charger la meme page.")
+    if hauts:
+        print(f"  RESIDU AU-DESSUS DE 5 % sur {len(hauts)} processus :")
+        for l in hauts:
+            print(f"    pid={l['pid']} residu={l['pct']} % "
+                  f"({ms(l['res'])} ms sur {ms(l['total'])} ms)")
+        print("  La decomposition n'explique pas ce demarrage. Instrumenter")
+        print("  avant d'en tirer une conclusion d'optimisation.")
+    else:
+        print("  Tous les residus sont sous 5 %.")
+
+    perdus = max(int(l["lost"]) for l in lignes)
+    if perdus:
+        print(f"  {perdus} echantillon(s) perdus : les totaux sont des")
+        print("  PLANCHERS, pas des totaux.")
     print()
-    print("  `total` est la latence VECUE par CE processus, attente comprise.")
-    print("  Les colonnes `cc_*` et `ata_*` sont SYSTEME : elles comptent le")
-    print("  travail de tous les coeurs sur l'intervalle. Une difference entre")
-    print("  les deux n'est pas une incoherence -- elle dit qu'une partie du")
-    print("  chargement a ete payee hors des fautes de ce processus (lecture")
-    print("  anticipee, chargement de l'image par execve).")
-    print("  `residu` est ce que la decomposition n'explique pas : publie,")
-    print("  jamais reparti.")
+    print("  `acquire` contient `dont_lect` : ne pas les additionner.")
+    print("  hit_n + miss_n + att_n = nombre d'acquisitions, pas d'etapes.")
+    print("  explique = attente + acquire + direct + mm + map")
     return 0
 
 

@@ -100,6 +100,22 @@ pub fn acquire_timing() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     )
 }
 
+/// Assemble la mesure. Un seul endroit ou l'horloge de fin est lue.
+#[inline]
+fn rends(
+    frame: Option<u64>,
+    issue: IssueAcquire,
+    debut_ns: u64,
+    backing_ns: u64,
+) -> MesureAcquire {
+    MesureAcquire {
+        frame,
+        issue,
+        total_ns: crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns),
+        backing_ns,
+    }
+}
+
 #[inline]
 fn note_duree(compteur: &AtomicU64, debut_ns: u64) {
     let d = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
@@ -107,11 +123,55 @@ fn note_duree(compteur: &AtomicU64, debut_ns: u64) {
     PIRE_NS.fetch_max(d, Ordering::Relaxed);
 }
 
+/// Comment une acquisition s'est terminee.
+///
+/// Les trois sont des ISSUES, pas des phases : une acquisition en traverse
+/// exactement une. Les additionner comme des etapes serait faux.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IssueAcquire {
+    /// La page etait la : une prise de verrou et un compteur.
+    Hit,
+    /// La page manquait : allocation d'une trame PLUS lecture du support.
+    Miss,
+    /// Un autre coeur la chargeait deja : on a attendu son reveil.
+    Attente,
+}
+
+/// Ce qu'une acquisition a COUTE, rendu a l'appelant.
+///
+/// BOUCHAUD_C54_PAR_PID_OU_RIEN
+///
+/// Les compteurs globaux disent combien le systeme entier a lu. Ils ne peuvent
+/// pas dire combien CE WebWorker a lu quand six services tournent ensemble.
+/// Le chemin de faute, lui, connait son PID : c'est donc a lui que le temps
+/// doit revenir, au moment ou il est paye.
+///
+/// `backing_ns` est INCLUS dans `total_ns` -- c'est un « dont », pas un terme
+/// a additionner.
+#[derive(Clone, Copy, Debug)]
+pub struct MesureAcquire {
+    pub frame: Option<u64>,
+    pub issue: IssueAcquire,
+    pub total_ns: u64,
+    pub backing_ns: u64,
+}
+
+/// L'acquisition ordinaire. Conserve pour les appelants qui ne mesurent pas.
 pub fn acquire(key: Key) -> Option<u64> {
+    acquire_mesure(key).frame
+}
+
+pub fn acquire_mesure(key: Key) -> MesureAcquire {
     let debut_acquire_ns = crate::kernel::timer::monotonic_ns();
+    let mut backing_ns = 0u64;
+    let mut issue = IssueAcquire::Hit;
     if crate::fs::backing::generation(key.node) != Some(key.generation)
         || key.offset % PAGE_SIZE != 0
-    { return None; }
+    {
+        return MesureAcquire {
+            frame: None, issue: IssueAcquire::Hit, total_ns: 0, backing_ns: 0,
+        };
+    }
 
     let (entry, loader, evicted) = {
         let mut cache = CACHE.lock();
@@ -128,9 +188,12 @@ pub fn acquire(key: Key) -> Option<u64> {
                     if mappings == 0 { cesse_d_etre_recuperable(); }
                     else { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
                     note_duree(&HIT_NS, debut_acquire_ns);
-                    return Some(frame);
+                    return rends(Some(frame), IssueAcquire::Hit,
+                                 debut_acquire_ns, 0);
                 }
-                State::Failed => return None,
+                State::Failed => {
+                    return rends(None, IssueAcquire::Hit, debut_acquire_ns, 0);
+                }
                 State::Loading => { drop(state); (entry, false, None) }
             }
         } else {
@@ -169,10 +232,10 @@ pub fn acquire(key: Key) -> Option<u64> {
             let bytes = unsafe { core::slice::from_raw_parts_mut(dst, PAGE_SIZE as usize) };
             let avant_lecture = crate::kernel::timer::monotonic_ns();
             let got = crate::fs::backing::read_at(key.node, key.offset as usize, bytes);
-            MISS_READ_NS.fetch_add(
-                crate::kernel::timer::monotonic_ns().saturating_sub(avant_lecture),
-                Ordering::Relaxed,
-            );
+            let lu_ns = crate::kernel::timer::monotonic_ns()
+                .saturating_sub(avant_lecture);
+            MISS_READ_NS.fetch_add(lu_ns, Ordering::Relaxed);
+            backing_ns = backing_ns.saturating_add(lu_ns);
             if got == PAGE_SIZE as usize
                 && crate::fs::backing::generation(key.node) == Some(key.generation)
             {
@@ -194,8 +257,9 @@ pub fn acquire(key: Key) -> Option<u64> {
         }
         entry.waiters.wake_all();
         note_duree(&MISS_NS, debut_acquire_ns);
-        return result;
+        return rends(result, IssueAcquire::Miss, debut_acquire_ns, backing_ns);
     }
+    issue = IssueAcquire::Attente;
 
     loop {
         let ticket = entry.waiters.ticket();
@@ -210,9 +274,11 @@ pub fn acquire(key: Key) -> Option<u64> {
                 if mappings == 0 { cesse_d_etre_recuperable(); }
                 else { SHARED_MAPS.fetch_add(1, Ordering::Relaxed); }
                 note_duree(&WAIT_NS, debut_acquire_ns);
-                return Some(frame);
+                return rends(Some(frame), issue, debut_acquire_ns, backing_ns);
             }
-            State::Failed => return None,
+            State::Failed => {
+                return rends(None, issue, debut_acquire_ns, backing_ns);
+            }
             State::Loading => {
                 drop(state);
                 WAITS.fetch_add(1, Ordering::Relaxed);

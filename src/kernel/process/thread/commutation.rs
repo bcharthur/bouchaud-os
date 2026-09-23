@@ -105,6 +105,29 @@ fn install(task: &mut Task) {
         usermode::per_cpu().current = task.tid as u64;
         PID_LOCAL[local_cpu()].store(task.process.pid as u64, Ordering::Relaxed);
         usermode::fxrstor(task.fpu_ptr() as *const u8);
+
+        // BOUCHAUD_C55_LES_QUARANTE_TROIS_SECONDES
+        //
+        // `install` est le point de passage UNIQUE : ses six appelants y
+        // passent, et c'est ici que `fresh` tombe. La premiere version posait
+        // la sonde dans `task_trampoline`, qui lit `fresh` APRES que
+        // `switch_to` l'a deja efface -- elle ne tirait jamais.
+        //
+        // Cette borne separe « l'enfant attend un coeur » de « l'enfant
+        // travaille ». Sans elle, les 43,4 s entre le retour du `fork` chez le
+        // pere et l'entree dans `execve` chez le fils restent un seul bloc.
+        //
+        // `task.process.pid` et non `current_process_local()` : on tient deja
+        // le garde exclusif de la tache, et reprendre le verrou du processus
+        // ici serait une reentrance sur un chemin de commutation.
+        if task.fresh && !task.noyau {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "CHILD_AFTER_FORK t={} pid={} tid={}",
+                crate::kernel::timer::monotonic_ms(),
+                task.process.pid,
+                task.tid,
+            ));
+        }
         task.fresh = false;
     }
 }

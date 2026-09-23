@@ -189,3 +189,100 @@ fn chaque_categorie_a_un_rang_unique_et_reversible() {
     }
     assert_eq!(Categorie::depuis_rang(fautes::CATEGORIES), None);
 }
+
+// ============================================================================
+// BOUCHAUD_C54_PAR_PID_OU_RIEN
+// ============================================================================
+//
+// Le defaut que ces trois tests interdisent : publier une ligne
+// `FAULT_FILE_BREAKDOWN pid=18` dont les chiffres viennent de compteurs
+// GLOBAUX lus a la sortie du processus 18.
+//
+// L'etiquette promet alors une attribution que les chiffres n'ont pas. Quand
+// WebContent, le Compositor et le worker travaillent en meme temps -- ce qui
+// est exactement le cas qu'on veut mesurer -- le « cout du worker » contient
+// celui des deux autres.
+//
+// La difference entre deux sorties successives ne repare rien : elle suppose
+// que les processus ne se chevauchent pas.
+
+fn phase(total_ns: u64, acquire_ns: u64, backing_dans_acquire: u64) -> fautes::PhasesFichier {
+    fautes::PhasesFichier {
+        nombre: 1,
+        total_ns,
+        acquire_ns,
+        acquire_backing_ns: backing_dans_acquire,
+        miss_n: 1,
+        miss_ns: acquire_ns,
+        pire_ns: total_ns,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn deux_processus_entrelaces_ne_melangent_pas_leurs_phases() {
+    // A : dix fautes a une milliseconde.  B : vingt fautes a trois.
+    // Entrelacees, puis B « sort » avant A -- le scenario exact qui faisait
+    // mentir la version globale.
+    let mut journal = fautes::Journal::neuf();
+    let mut instant = 0u64;
+    let mut a_restantes = 10;
+    let mut b_restantes = 20;
+    while a_restantes > 0 || b_restantes > 0 {
+        if a_restantes > 0 {
+            instant += 1;
+            journal.note_phases(7, &phase(1_000_000, 900_000, 800_000), instant);
+            a_restantes -= 1;
+        }
+        for _ in 0..2 {
+            if b_restantes > 0 {
+                instant += 1;
+                journal.note_phases(9, &phase(3_000_000, 2_500_000, 2_000_000), instant);
+                b_restantes -= 1;
+            }
+        }
+    }
+
+    let a = journal.phases(7);
+    let b = journal.phases(9);
+
+    assert_eq!(a.nombre, 10, "A doit porter SES dix fautes");
+    assert_eq!(a.total_ns, 10_000_000, "A doit porter ses dix millisecondes");
+    assert_eq!(b.nombre, 20, "B doit porter SES vingt fautes");
+    assert_eq!(b.total_ns, 60_000_000, "B doit porter ses soixante millisecondes");
+
+    // Et surtout : NI l'un NI l'autre ne porte le cumul.
+    assert_ne!(a.total_ns, 70_000_000, "A porte le cumul : attribution globale");
+    assert_ne!(b.total_ns, 70_000_000, "B porte le cumul : attribution globale");
+}
+
+#[test]
+fn acquire_backing_est_un_dont_pas_un_additif() {
+    // `acquire_ns` CONTIENT `acquire_backing_ns` : l'acquisition du cache de
+    // pages fait la lecture du support elle-meme. Les additionner compterait
+    // la lecture deux fois et pourrait rendre un residu NEGATIF -- c'est-a-dire
+    // saturer a zero et cacher le trou qu'on cherche.
+    let mut journal = fautes::Journal::neuf();
+    journal.note_phases(3, &phase(10_000_000, 9_000_000, 8_000_000), 1);
+    let p = journal.phases(3);
+
+    assert_eq!(p.explique_ns(), 9_000_000, "explique = attente+acquire+direct+mm+map");
+    assert_eq!(p.residu_ns(), 1_000_000);
+    assert_eq!(p.residu_pct(), 10);
+
+    // Le sous-champ reste lisible, et reste INFERIEUR a son contenant.
+    assert!(p.acquire_backing_ns <= p.acquire_ns,
+            "le DONT ne peut pas depasser ce dont il est tire");
+}
+
+#[test]
+fn un_processus_sans_faute_fichier_rend_une_decomposition_vide() {
+    // Rendre `Default` plutot qu'une valeur d'un autre processus : un pid
+    // absent du livre ne doit jamais heriter des chiffres du voisin.
+    let mut journal = fautes::Journal::neuf();
+    journal.note_phases(5, &phase(4_000_000, 3_000_000, 2_000_000), 1);
+    let absent = journal.phases(6);
+    assert_eq!(absent.nombre, 0);
+    assert_eq!(absent.total_ns, 0);
+    assert_eq!(absent.residu_pct(), 0, "pas de division par zero sur un vide");
+}

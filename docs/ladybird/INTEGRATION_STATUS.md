@@ -71,7 +71,7 @@ qu'il reste a instrumenter.
 | Verdict reseau *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-verdict-reseau` | garde verte |
 | Supervision des processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_supervision` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Roles des binaires livres *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_roles_livres` | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
-| Fautes de page par processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_fautes` | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
+| Fautes de page par processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_fautes` | test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Fautes de page raccordees au noyau *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_fautes_demande.sh:FAUTES_DEMANDE_OK` | banc tools/ci/run_fautes_demande.sh (marqueur FAUTES_DEMANDE_OK) |
 | Topologie CPU annoncee *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cpu_topologie` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s |
 | Topologie CPU raccordee *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_topologie_cpu.sh:TOPOLOGIE_CPU_OK` | banc tools/ci/run_topologie_cpu.sh (marqueur TOPOLOGIE_CPU_OK) |

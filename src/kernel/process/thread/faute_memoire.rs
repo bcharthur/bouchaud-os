@@ -181,6 +181,19 @@ pub(crate) static PHASE_MM_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static PHASE_MAP_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FICHIER_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FICHIER_N: AtomicU64 = AtomicU64::new(0);
+/// Decompositions perdues faute d'avoir pu prendre le livre.
+///
+/// Doit rester petit. Une valeur qui monte dit que les totaux par PID sont des
+/// PLANCHERS, et il vaut mieux le lire que de les croire complets.
+pub(crate) static PHASES_PERDUES: AtomicU64 = AtomicU64::new(0);
+
+/// La decomposition FichierPrive de CE processus, et les echantillons perdus.
+pub fn phases_fichier_du_processus(
+    pid: u32,
+) -> Option<(crate::kernel::fautes::PhasesFichier, u64)> {
+    let livre = LIVRE_FAUTES.try_lock()?;
+    Some((livre.phases(pid), PHASES_PERDUES.load(Ordering::Relaxed)))
+}
 
 /// (n, total_ns, attente, cache, backing, mm, map) du chemin FichierPrive.
 pub fn phases_fichier() -> (u64, u64, u64, u64, u64, u64, u64) {
@@ -208,12 +221,9 @@ pub struct Note {
     pid: u32,
     debut_ns: u64,
     posee: bool,
-    /// Phases traversees par CETTE faute. Sur la pile : aucune contention.
-    attente_ns: u64,
-    cache_ns: u64,
-    backing_ns: u64,
-    mm_ns: u64,
-    map_ns: u64,
+    /// Phases traversees par CETTE faute. Sur la pile : aucune contention,
+    /// et surtout aucune confusion possible avec celles d'un autre processus.
+    phases: crate::kernel::fautes::PhasesFichier,
 }
 
 impl Note {
@@ -223,20 +233,50 @@ impl Note {
             pid,
             debut_ns: crate::kernel::timer::monotonic_ns(),
             posee: false,
-            attente_ns: 0,
-            cache_ns: 0,
-            backing_ns: 0,
-            mm_ns: 0,
-            map_ns: 0,
+            phases: crate::kernel::fautes::PhasesFichier::default(),
         }
     }
 
     /// Ajoute le temps d'une phase. Cumulatif : une faute peut y repasser.
-    pub fn attente(&mut self, ns: u64) { self.attente_ns = self.attente_ns.saturating_add(ns); }
-    pub fn cache(&mut self, ns: u64) { self.cache_ns = self.cache_ns.saturating_add(ns); }
-    pub fn backing(&mut self, ns: u64) { self.backing_ns = self.backing_ns.saturating_add(ns); }
-    pub fn mm(&mut self, ns: u64) { self.mm_ns = self.mm_ns.saturating_add(ns); }
-    pub fn map(&mut self, ns: u64) { self.map_ns = self.map_ns.saturating_add(ns); }
+    pub fn attente(&mut self, ns: u64) {
+        self.phases.attente_ns = self.phases.attente_ns.saturating_add(ns);
+    }
+    pub fn mm(&mut self, ns: u64) {
+        self.phases.mm_ns = self.phases.mm_ns.saturating_add(ns);
+    }
+    pub fn map(&mut self, ns: u64) {
+        self.phases.map_ns = self.phases.map_ns.saturating_add(ns);
+    }
+    /// Lecture du support faite HORS acquisition (chemin de construction).
+    pub fn backing_direct(&mut self, ns: u64) {
+        self.phases.backing_direct_ns =
+            self.phases.backing_direct_ns.saturating_add(ns);
+    }
+
+    /// Le cout d'une acquisition, ventile selon son ISSUE.
+    ///
+    /// `backing_ns` est INCLUS dans `total_ns` : c'est un « dont ». Le livre
+    /// ne l'additionne donc pas, il le conserve comme explication.
+    pub fn acquisition(&mut self, m: &crate::kernel::clean_page_cache::MesureAcquire) {
+        use crate::kernel::clean_page_cache::IssueAcquire;
+        self.phases.acquire_ns = self.phases.acquire_ns.saturating_add(m.total_ns);
+        self.phases.acquire_backing_ns =
+            self.phases.acquire_backing_ns.saturating_add(m.backing_ns);
+        match m.issue {
+            IssueAcquire::Hit => {
+                self.phases.hit_n = self.phases.hit_n.saturating_add(1);
+                self.phases.hit_ns = self.phases.hit_ns.saturating_add(m.total_ns);
+            }
+            IssueAcquire::Miss => {
+                self.phases.miss_n = self.phases.miss_n.saturating_add(1);
+                self.phases.miss_ns = self.phases.miss_ns.saturating_add(m.total_ns);
+            }
+            IssueAcquire::Attente => {
+                self.phases.wait_n = self.phases.wait_n.saturating_add(1);
+                self.phases.wait_ns = self.phases.wait_ns.saturating_add(m.total_ns);
+            }
+        }
+    }
 
     /// Classe cette faute. Le deuxieme appel est refuse et signale.
     pub fn pose(&mut self, categorie: crate::kernel::fautes::Categorie) {
@@ -249,13 +289,36 @@ impl Note {
         // seule categorie dont on cherche la composition, et compter les
         // autres remplirait le journal sans rien eclairer.
         if matches!(categorie, crate::kernel::fautes::Categorie::FichierPrive) {
-            let total = crate::kernel::timer::monotonic_ns().saturating_sub(self.debut_ns);
+            let maintenant = crate::kernel::timer::monotonic_ns();
+            let total = maintenant.saturating_sub(self.debut_ns);
+            self.phases.nombre = 1;
+            self.phases.total_ns = total;
+            self.phases.pire_ns = total;
+
+            // BOUCHAUD_C54_PAR_PID_OU_RIEN
+            //
+            // Le livre par PID, et pas des atomiques globaux : c'est la SEULE
+            // facon de dire ce que CE processus a paye quand six services
+            // faultent en meme temps.
+            //
+            // `try_lock` parce qu'on est sur le chemin de faute : bloquer ici
+            // pour une mesure serait mettre le diagnostic au-dessus du
+            // service. L'echec est COMPTE -- un diagnostic qui perd des
+            // echantillons doit le dire, sinon ses totaux sont des planchers
+            // qui se lisent comme des totaux.
+            match LIVRE_FAUTES.try_lock() {
+                Some(mut livre) => livre.note_phases(self.pid, &self.phases, maintenant),
+                None => { PHASES_PERDUES.fetch_add(1, Ordering::Relaxed); }
+            }
+
+            // Les globaux RESTENT, pour la vue systeme. Ils ne servent plus a
+            // fabriquer une ligne etiquetee d'un pid.
             FICHIER_N.fetch_add(1, Ordering::Relaxed);
             FICHIER_TOTAL_NS.fetch_add(total, Ordering::Relaxed);
-            PHASE_CACHE_NS.fetch_add(self.cache_ns, Ordering::Relaxed);
-            PHASE_BACKING_NS.fetch_add(self.backing_ns, Ordering::Relaxed);
-            PHASE_MM_NS.fetch_add(self.mm_ns, Ordering::Relaxed);
-            PHASE_MAP_NS.fetch_add(self.map_ns, Ordering::Relaxed);
+            PHASE_CACHE_NS.fetch_add(self.phases.acquire_ns, Ordering::Relaxed);
+            PHASE_BACKING_NS.fetch_add(self.phases.backing_direct_ns, Ordering::Relaxed);
+            PHASE_MM_NS.fetch_add(self.phases.mm_ns, Ordering::Relaxed);
+            PHASE_MAP_NS.fetch_add(self.phases.map_ns, Ordering::Relaxed);
         }
         note_faute(self.pid, categorie, self.debut_ns);
     }
@@ -811,10 +874,9 @@ fn peuple_page_loader(
             drop(p);
 
             if let Some(key) = clean_key {
-                let avant_cache = crate::kernel::timer::monotonic_ns();
-                let acquise = crate::kernel::clean_page_cache::acquire(key);
-                note.cache(crate::kernel::timer::monotonic_ns().saturating_sub(avant_cache));
-                if let Some(frame) = acquise {
+                let mesure = crate::kernel::clean_page_cache::acquire_mesure(key);
+                note.acquisition(&mesure);
+                if let Some(frame) = mesure.frame {
                     // No process-MM guard is held while readahead performs disk/cache work.
                     crate::kernel::readahead::observe_clean(key);
                     let avant_mm = crate::kernel::timer::monotonic_ns();
@@ -877,7 +939,7 @@ fn peuple_page_loader(
                     source_offset as usize,
                     &mut page_data[destination..destination + wanted],
                 );
-                note.backing(
+                note.backing_direct(
                     crate::kernel::timer::monotonic_ns().saturating_sub(avant_backing),
                 );
                 stall_pf_file_done(got, wanted);

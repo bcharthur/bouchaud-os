@@ -78,53 +78,83 @@ pub fn exit_current(code: i32) -> ! {
     // sur sa pile condamnee et ne pourra jamais executer son Drop. Rendre sa
     // profondeur maintenant garantit que le choix final et `switch_to`
     // entrent bien dans le coeur scheduler sans BKL.
-    // BOUCHAUD_C51_OU_SONT_LES_HUIT_SECONDES
+    // BOUCHAUD_C54_PAR_PID_OU_RIEN
     //
-    // Publie ICI, et pas dans un releve periodique : les relevés periodiques
-    // ne tournent que lorsque le bureau est la, et les scenarios en ligne de
-    // commande -- ceux qui mesurent -- n'en emettent aucun. La sortie d'un
-    // processus est le seul instant ou l'on est CERTAIN que ses fautes sont
-    // finies.
+    // La version precedente imprimait `FAULT_FILE_BREAKDOWN pid=18` a partir
+    // d'atomiques GLOBAUX. L'etiquette promettait une attribution que les
+    // chiffres n'avaient pas : quand WebContent, le Compositor et le worker
+    // faultent en meme temps, le « cout du worker » contenait celui des deux
+    // autres. La difference entre deux sorties ne reparait rien -- elle
+    // supposait qu'ils ne se chevauchent pas, ce qui est faux par definition
+    // dans le cas qu'on veut mesurer.
     //
-    // Les compteurs sont cumulatifs : c'est la DIFFERENCE entre deux sorties
-    // successives qui donne le cout d'un lancement. Un compteur remis a zero
-    // perdrait l'information des que deux processus se chevauchent.
+    // Les chiffres viennent maintenant du livre par PID, alimente faute par
+    // faute depuis la `Note` qui connait son processus.
+    if let Some(pid) = current_process_local().map(|p| p.pid) {
+        if let Some((ph, perdues)) = crate::kernel::task::phases_fichier_du_processus(pid) {
+            if ph.nombre != 0 {
+                // La source du binaire : une lecture ATA et un memcpy depuis le
+                // ramdisk UEFI ne se soignent pas pareil, et le meme service
+                // n'a pas le meme cout sous QEMU et sur la Trigkey.
+                let source = current_process_local()
+                    .and_then(|p| {
+                        let nom = p.metadata.lock().name.clone();
+                        let fs = crate::fs::ramfs::fs();
+                        fs.resolve(&nom, 0)
+                    })
+                    .map(|n| crate::fs::backing::kind(n).etiquette())
+                    .unwrap_or("inconnu");
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "FAULT_FILE_BREAKDOWN t={} pid={} source={} faults={} total_us={} \
+wait_us={} acquire_us={} acquire_hit_n={} acquire_hit_us={} acquire_miss_n={} \
+acquire_miss_us={} acquire_miss_read_us={} acquire_wait_n={} acquire_wait_us={} \
+backing_direct_us={} mm_lock_us={} map_us={} explained_us={} residual_us={} \
+residual_pct={} worst_us={} lost_samples={}",
+                    crate::kernel::timer::monotonic_ms(),
+                    pid,
+                    source,
+                    ph.nombre,
+                    ph.total_ns / 1_000,
+                    ph.attente_ns / 1_000,
+                    ph.acquire_ns / 1_000,
+                    ph.hit_n, ph.hit_ns / 1_000,
+                    ph.miss_n, ph.miss_ns / 1_000,
+                    // « dont » : deja compris dans acquire_us, jamais additif.
+                    ph.acquire_backing_ns / 1_000,
+                    ph.wait_n, ph.wait_ns / 1_000,
+                    ph.backing_direct_ns / 1_000,
+                    ph.mm_ns / 1_000,
+                    ph.map_ns / 1_000,
+                    ph.explique_ns() / 1_000,
+                    ph.residu_ns() / 1_000,
+                    ph.residu_pct(),
+                    ph.pire_ns / 1_000,
+                    perdues,
+                ));
+            }
+        }
+    }
+
+    // La vue SYSTEME, explicitement etiquetee comme telle. Elle repond a
+    // « combien la machine entiere a lu », jamais a « combien ce service a
+    // lu » -- et le suffixe l'empeche d'etre confondue avec la ligne au-dessus.
     {
-        let (n, total_ns, attente, cache, backing, mm, map) =
-            crate::kernel::task::phases_fichier();
-        let explique = attente
-            .saturating_add(cache)
-            .saturating_add(backing)
-            .saturating_add(mm)
-            .saturating_add(map);
-        let (dr, db, dn, _dw) = crate::fs::backing::disk_read_timing();
-        let (mr, mb, mn, _mw) = crate::fs::backing::memory_read_timing();
-        // BOUCHAUD_C52 : `acquire` LIT le support sur un defaut. Sans separer
-        // la lecture du reste, « cache_us » se lit comme un cout de cache
-        // alors que c'est du disque.
-        let (cch, ccm, ccw, cchn, ccmn, ccrn, ccwn) = {
-            let t = crate::kernel::clean_page_cache::acquire_timing();
-            (t.0, t.1, t.2, t.3, t.4, t.5, t.6)
-        };
+        let (dr, db, dn, dw) = crate::fs::backing::disk_read_timing();
+        let (mr, mb, mn, mw) = crate::fs::backing::memory_read_timing();
+        let t = crate::kernel::clean_page_cache::acquire_timing();
         crate::kernel::dmesg::log_fmt(format_args!(
-            "FAULT_FILE_BREAKDOWN t={} pid={} faults={} total_us={} wait_us={} \
-cache_us={} backing_us={} mm_lock_us={} map_us={} explique_us={} residual_us={} \
-ata_reads={} ata_bytes={} ata_us={} mem_reads={} mem_bytes={} mem_us={} \
-cc_hits={} cc_miss={} cc_waits={} cc_hit_us={} cc_miss_us={} cc_miss_read_us={} cc_wait_us={}",
-            crate::kernel::timer::monotonic_ms(),
-            current_process_local().map(|p| p.pid as i64).unwrap_or(-1),
-            n,
-            total_ns / 1_000,
-            attente / 1_000,
-            cache / 1_000,
-            backing / 1_000,
-            mm / 1_000,
-            map / 1_000,
-            explique / 1_000,
-            total_ns.saturating_sub(explique) / 1_000,
-            dr, db, dn / 1_000,
-            mr, mb, mn / 1_000,
-            cch, ccm, ccw, cchn / 1_000, ccmn / 1_000, ccrn / 1_000, ccwn / 1_000,
+            "BACKING_DISK_GLOBAL scope=global reads={} bytes={} total_us={} worst_us={}",
+            dr, db, dn / 1_000, dw / 1_000,
+        ));
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "BACKING_MEMORY_GLOBAL scope=global reads={} bytes={} total_us={} worst_us={}",
+            mr, mb, mn / 1_000, mw / 1_000,
+        ));
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "CLEAN_PAGE_CACHE_GLOBAL scope=global hits={} miss={} waits={} \
+hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
+            t.0, t.1, t.2, t.3 / 1_000, t.4 / 1_000, t.5 / 1_000, t.6 / 1_000,
+            t.7 / 1_000,
         ));
     }
 

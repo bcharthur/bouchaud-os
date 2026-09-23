@@ -179,6 +179,101 @@ impl Compte {
     }
 }
 
+/// La DECOMPOSITION d'une faute FichierPrive, pour UN processus.
+///
+/// BOUCHAUD_C54_PAR_PID_OU_RIEN
+///
+/// La premiere version publiait `FAULT_FILE_BREAKDOWN pid=18 ...` a partir
+/// d'atomiques GLOBAUX lus a la sortie du processus 18. L'etiquette promettait
+/// une attribution que les chiffres n'avaient pas : quand WebContent, le
+/// Compositor et le worker travaillent en meme temps, le « cout du worker »
+/// contenait celui des deux autres.
+///
+/// La difference entre deux sorties successives ne repare rien : elle suppose
+/// que les processus ne se chevauchent pas, ce qui est precisement faux dans
+/// le cas qu'on veut mesurer.
+///
+/// # Ce qui est ADDITIF et ce qui ne l'est pas
+///
+/// `acquire_ns` CONTIENT `acquire_backing_ns` : l'acquisition dans le cache de
+/// pages fait la lecture du support elle-meme. Les additionner compterait la
+/// lecture deux fois. `acquire_backing_ns` est donc un « DONT », explicatif.
+///
+/// De meme `hit_ns + miss_ns + wait_ns == acquire_ns` : ce sont les trois
+/// issues possibles d'une acquisition, pas trois phases successives.
+///
+/// La somme qui doit approcher `total_ns` est :
+///
+///     attente + acquire + backing_direct + mm + map
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct PhasesFichier {
+    pub nombre: u64,
+    pub total_ns: u64,
+    /// Attente qu'un AUTRE coeur finisse de charger la meme page.
+    pub attente_ns: u64,
+    /// Temps total dans l'acquisition du cache de pages propres.
+    pub acquire_ns: u64,
+    /// DONT la lecture du support faite a l'interieur. Non additif.
+    pub acquire_backing_ns: u64,
+    pub hit_n: u64,
+    pub hit_ns: u64,
+    pub miss_n: u64,
+    pub miss_ns: u64,
+    pub wait_n: u64,
+    pub wait_ns: u64,
+    /// Lecture du support faite HORS acquisition (chemin de construction).
+    pub backing_direct_ns: u64,
+    pub mm_ns: u64,
+    pub map_ns: u64,
+    pub pire_ns: u64,
+}
+
+impl PhasesFichier {
+    /// Ce que la decomposition explique. Voir l'en-tete : `acquire_backing`
+    /// n'y figure PAS, il est deja dans `acquire`.
+    pub fn explique_ns(&self) -> u64 {
+        self.attente_ns
+            .saturating_add(self.acquire_ns)
+            .saturating_add(self.backing_direct_ns)
+            .saturating_add(self.mm_ns)
+            .saturating_add(self.map_ns)
+    }
+
+    /// Ce qu'elle n'explique pas. Publie, jamais reparti.
+    pub fn residu_ns(&self) -> u64 {
+        self.total_ns.saturating_sub(self.explique_ns())
+    }
+
+    pub fn residu_pct(&self) -> u64 {
+        if self.total_ns == 0 {
+            return 0;
+        }
+        self.residu_ns().saturating_mul(100) / self.total_ns
+    }
+
+    pub fn ajoute(&mut self, autre: &PhasesFichier) {
+        self.nombre = self.nombre.saturating_add(autre.nombre);
+        self.total_ns = self.total_ns.saturating_add(autre.total_ns);
+        self.attente_ns = self.attente_ns.saturating_add(autre.attente_ns);
+        self.acquire_ns = self.acquire_ns.saturating_add(autre.acquire_ns);
+        self.acquire_backing_ns =
+            self.acquire_backing_ns.saturating_add(autre.acquire_backing_ns);
+        self.hit_n = self.hit_n.saturating_add(autre.hit_n);
+        self.hit_ns = self.hit_ns.saturating_add(autre.hit_ns);
+        self.miss_n = self.miss_n.saturating_add(autre.miss_n);
+        self.miss_ns = self.miss_ns.saturating_add(autre.miss_ns);
+        self.wait_n = self.wait_n.saturating_add(autre.wait_n);
+        self.wait_ns = self.wait_ns.saturating_add(autre.wait_ns);
+        self.backing_direct_ns =
+            self.backing_direct_ns.saturating_add(autre.backing_direct_ns);
+        self.mm_ns = self.mm_ns.saturating_add(autre.mm_ns);
+        self.map_ns = self.map_ns.saturating_add(autre.map_ns);
+        if autre.pire_ns > self.pire_ns {
+            self.pire_ns = autre.pire_ns;
+        }
+    }
+}
+
 /// Le nombre de processus suivis simultanement.
 ///
 /// Seize : le portage fait tourner un BouchaudBrowserHost, un WebContent, un
@@ -193,6 +288,7 @@ struct Entree {
     occupee: bool,
     derniere_ns: u64,
     comptes: [Compte; CATEGORIES],
+    phases: PhasesFichier,
 }
 
 impl Entree {
@@ -202,6 +298,12 @@ impl Entree {
             occupee: false,
             derniere_ns: 0,
             comptes: [Compte { nombre: 0, total_ns: 0, pire_ns: 0 }; CATEGORIES],
+            phases: PhasesFichier {
+                nombre: 0, total_ns: 0, attente_ns: 0, acquire_ns: 0,
+                acquire_backing_ns: 0, hit_n: 0, hit_ns: 0, miss_n: 0,
+                miss_ns: 0, wait_n: 0, wait_ns: 0, backing_direct_ns: 0,
+                mm_ns: 0, map_ns: 0, pire_ns: 0,
+            },
         }
     }
 }
@@ -277,6 +379,27 @@ impl Journal {
             entree.derniere_ns = maintenant_ns;
         }
         entree.comptes[categorie.rang()].ajoute(duree_ns);
+    }
+
+    /// Enregistre la decomposition d'UNE faute FichierPrive pour CE processus.
+    ///
+    /// Le meme rang que `note` : la decomposition suit le processus, pas
+    /// l'ordre des sorties.
+    pub fn note_phases(&mut self, pid: u32, phases: &PhasesFichier, maintenant_ns: u64) {
+        let rang = self.rang_pour(pid);
+        let entree = &mut self.entrees[rang];
+        if maintenant_ns > entree.derniere_ns {
+            entree.derniere_ns = maintenant_ns;
+        }
+        entree.phases.ajoute(phases);
+    }
+
+    /// La decomposition accumulee de ce processus.
+    pub fn phases(&self, pid: u32) -> PhasesFichier {
+        match self.rang_de(pid) {
+            Some(rang) => self.entrees[rang].phases,
+            None => PhasesFichier::default(),
+        }
     }
 
     pub fn compte(&self, pid: u32, categorie: Categorie) -> Compte {
