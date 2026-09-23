@@ -42,7 +42,32 @@ if [ -d "$OUT/resources" ]; then
   cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
 fi
 cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
-cat > "$SCENARIO/autorun" <<'AUTORUN'
+# L'URL EST CONSTRUITE SUR L'HOTE, PAS DANS L'INVITE.
+#
+# BOUCHAUD_C58_UN_HEREDOC_PROTEGE_N_EXPANSE_RIEN
+#
+# La premiere version ecrivait, DANS le heredoc a delimiteur protege :
+#
+#     export BOUCHAUD_M9_URL='...html${BO_SMOKE_ORDRE:+?ordre=$BO_SMOKE_ORDRE}'
+#
+# Deux erreurs superposees. Le delimiteur `<<'AUTORUN'` interdit toute
+# expansion : la chaine partait telle quelle dans l'invite. Et les quotes
+# simples auraient de toute facon empeche l'expansion cote hote.
+#
+# Resultat au run 35900151523 : les DEUX bras ont charge la page sans
+# parametre, donc tous les deux en `ordre=blob`, et l'analyseur n'a vu qu'un
+# seul bras. Le banc ne testait pas ce qu'il croyait tester.
+#
+# L'URL est donc assemblee ici, ou les variables existent, puis injectee
+# COMME VALEUR dans le script de l'invite.
+URL_PAGE='http://10.0.2.2:18082/browser-host.html'
+if [ -n "${BO_SMOKE_ORDRE:-}" ]; then
+    URL_PAGE="${URL_PAGE}?ordre=${BO_SMOKE_ORDRE}"
+fi
+# Publiee : un banc doit pouvoir prouver la configuration qu'il pense tester.
+echo "BO_SMOKE_URL ordre=${BO_SMOKE_ORDRE:-defaut} url=$URL_PAGE"
+
+cat > "$SCENARIO/autorun" <<AUTORUN
 uname
 df
 ifconfig
@@ -52,7 +77,7 @@ export BOUCHAUD_M9=1
 export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_M11=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
-export BOUCHAUD_M9_URL='http://10.0.2.2:18082/browser-host.html${BO_SMOKE_ORDRE:+?ordre=$BO_SMOKE_ORDRE}'
+export BOUCHAUD_M9_URL='$URL_PAGE'
 desktop
 AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")

@@ -175,6 +175,49 @@ spéciale liée au noyau.
 Le bureau démarre, puis le navigateur se lance depuis son entrée graphique. Les
 modes `-LadybirdM8` et `-LadybirdM9Test` restent des scénarios de régression.
 
+### Observabilité du démarrage à froid
+
+Le navigateur fonctionne ; il démarre lentement. Le chantier en cours sépare
+ces deux questions et refuse de les confondre.
+
+**Deux statuts CI indépendants.** `ladybird / browser-host smoke` bloque sur la
+capacité, `ladybird / performance` bloque sur les budgets, et un échec de l'un
+n'est jamais présenté comme un échec de l'autre. Le verdict de performance
+était auparavant écrit mais lu par personne : il dépendait d'une variable
+qu'aucun workflow ne définissait.
+
+**Capacités vertes**, vérifiées à chaque run : canvas, images 11/11 codecs,
+iframes, JS 17/17, WebWorker HTTP et blob, et la mire réellement retrouvée
+dans une trame composée — capture prise pendant que QEMU vit, corrélée à un
+numéro de trame, et non plus après sa mort.
+
+**Ce que la mesure a établi, et ce qu'elle a réfuté.** Le premier WebWorker
+coûte environ 130 s là où les suivants coûtent 1,5 à 9 s. Les bornes posées
+sur le chemin noyau ont successivement innocenté :
+
+| poste | mesure | verdict |
+|---|---|---|
+| `fork` | 28 ms | hors de cause |
+| `fork` → `execve` | 8 ms | hors de cause |
+| `execve` | 22 ms | hors de cause |
+| `exec` → `main` | ~94 s, dont ~93 s de CPU | **le poste réel** |
+| fautes fichier dans ce segment | ~10 s | 11 %, pas la cause |
+
+Le segment de 43,4 s longtemps attribué à l'ordonnanceur n'existait pas : il
+était mal borné. Le premier worker n'attend pas — il calcule.
+
+**L'outillage de mesure est lui-même sous test.** Décomposition des fautes de
+page attribuée par PID et non globalement, avec test de chevauchement de deux
+processus ; `acquire` rend son coût à la faute qui l'a payé ; les sous-champs
+« dont » ne sont jamais additionnés à leur contenant ; les compteurs globaux
+portent `scope=global` pour ne pas se faire passer pour une attribution. Chaque
+garde-fou a été mis en échec volontairement avant d'être retenu.
+
+**Ce qui reste ouvert** est documenté dans
+[docs/MESURE_DEMARRAGE_A_FROID.md](docs/MESURE_DEMARRAGE_A_FROID.md) :
+la décomposition des ~94 s de CPU avant `main`, et le coût propre de
+l'instrumentation à forte charge de fautes.
+
 ## Roadmap multiplateforme
 
 1. **Foundation** — séparation arch/platform/drivers/kernel et compatibilité x86.

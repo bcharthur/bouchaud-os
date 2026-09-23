@@ -42,6 +42,28 @@ for ordre in blob http; do
         tail -15 "ordre-$ordre.sortie" >&2
         echecs=$((echecs + 1))
     fi
+
+    # UN BANC DOIT PROUVER LA CONFIGURATION QU'IL CROIT TESTER.
+    #
+    # BOUCHAUD_C58_UN_HEREDOC_PROTEGE_N_EXPANSE_RIEN
+    #
+    # Au run 35900151523, les deux bras ont charge la MEME page : l'URL
+    # n'emportait pas le parametre. Les deux boots ont pourtant reussi, et
+    # rien ne l'a dit -- il a fallu lire l'analyseur se plaindre de n'avoir
+    # qu'un bras pour decouvrir que l'experience n'avait jamais eu lieu.
+    #
+    # Ces deux verifications ferment ce trou des la fin du bras : l'URL
+    # demandee, et l'ordre que la page dit avoir applique.
+    if ! grep -aq "BO_SMOKE_URL ordre=$ordre " "ordre-$ordre.sortie"; then
+        echo "ordre : bras $ordre -- l'URL demandee n'a pas ete publiee" >&2
+        grep -a "BO_SMOKE_URL" "ordre-$ordre.sortie" >&2 || true
+        echecs=$((echecs + 1))
+    fi
+    if ! grep -aq "HOST_WORKER_ORDRE ordre=$ordre " "ordre-$ordre.sortie"; then
+        echo "ordre : demande=$ordre mais l'ordre reel n'a pas ete observe" >&2
+        grep -a "HOST_WORKER_ORDRE" "ordre-$ordre.sortie" >&2 || true
+        echecs=$((echecs + 1))
+    fi
 done
 
 echo

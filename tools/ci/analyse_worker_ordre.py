@@ -66,6 +66,19 @@ def main():
             print("        sans les quatre, la comparaison ne tranche rien.",
                   file=sys.stderr)
             return 1
+        # UN BRAS DUPLIQUE N'EST PAS UNE COLLISION, C'EST UNE EXPERIENCE
+        # QUI N'A PAS EU LIEU.
+        #
+        # La version precedente ecrasait silencieusement le premier bras par
+        # le second. Au run 35900151523, les deux boots etaient en `blob` --
+        # l'URL n'emportait pas son parametre -- et le seul symptome fut
+        # « bras trouves ['blob'] », plusieurs etapes plus loin.
+        if d["ordre"] in bras:
+            print(f"ordre : bras duplique {d['ordre']} ; la seconde execution"
+                  " n'a probablement pas recu son ordre", file=sys.stderr)
+            print("        verifier BO_SMOKE_URL et HOST_WORKER_ORDRE dans"
+                  " les deux journaux.", file=sys.stderr)
+            return 1
         bras[d["ordre"]] = d["releves"]
 
     if set(bras) != {"blob", "http"}:
