@@ -244,6 +244,22 @@ jobs:
           if [ -f "$OUT/V19_UI_CAPABLE" ]; then cat "$OUT/V19_UI_CAPABLE"; fi
           du -sh "$OUT"
 
+      # BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+      #
+      # Une seconde edition de liens de WebWorker, en statique NON-PIE, a cote
+      # du binaire normal. Les objets ne changent pas : c'est un relink.
+      #
+      # Les deux binaires partent dans le MEME artefact parce que la variance
+      # entre coureurs atteint un facteur deux sur le meme SHA (65,9 s contre
+      # 129,1 s) : comparer deux runs ne prouverait rien.
+      #
+      # `continue-on-error` est volontaire et borne : si la variante ne se lie
+      # pas, le build de reference reste publie et la CI garde son sens. Le
+      # travail de mesure, lui, echoue s'il ne trouve pas le binaire.
+      - name: Variante ET_EXEC de WebWorker
+        continue-on-error: true
+        run: tools/ladybird/build-variante-etexec.sh third_party/native-browser-bouchaud
+
       - name: Publier Ladybird natif
         uses: actions/upload-artifact@v4
         with:
@@ -350,6 +366,52 @@ jobs:
           path: .
       - name: Budgets de performance
         run: tools/ci/verifie_ladybird_perf.sh serie-browser-host.log
+
+  # ==========================================================================
+  # BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+  # ==========================================================================
+  #
+  # Deux demarrages froids, MEME machine, MEME run, seul le WebWorker change :
+  # static-PIE contre static ET_EXEC. Un `-static-pie` glibc applique ~405 000
+  # relocations dans `_dl_relocate_static_pie` avant `main` ; un `ET_EXEC` n'en
+  # applique aucune. La variante supprime la phase au lieu de la regler, ce qui
+  # en fait une falsification.
+  #
+  # Le meme run pour les deux bras parce que la variance entre coureurs atteint
+  # un facteur deux sur le MEME SHA : un avant/apres entre deux runs ne
+  # prouverait rien.
+  #
+  # Diagnostic : il ne remplace ni le fonctionnel ni la performance.
+  variante-elf:
+    name: ladybird / variante ELF (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file socat binutils
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Deux demarrages froids, deux formes d'ELF
+        run: tools/ci/run_variante_elf.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-variante-elf-logs
+          path: |
+            serie-browser-host-elf-pie.log
+            serie-browser-host-elf-etexec.log
+            elf-pie.sortie
+            elf-etexec.sortie
+          if-no-files-found: warn
 
   # ==========================================================================
   # BOUCHAUD_C57_LA_PREMIERE_POSITION_OU_L_ORIGINE

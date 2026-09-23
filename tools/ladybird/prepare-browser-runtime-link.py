@@ -31,6 +31,7 @@ It:
 """
 from pathlib import Path
 import sys
+import os
 
 if len(sys.argv) != 2:
     raise SystemExit("usage: prepare-browser-runtime-link.py <ladybird-worktree>")
@@ -47,6 +48,60 @@ def replace_once(path: Path, old: str, new: str) -> None:
     path.write_text(data.replace(old, new, 1))
 
 
+# ============================================================================
+# BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+# ============================================================================
+#
+# Un `-static-pie` glibc se relocalise LUI-MEME avant le demarrage normal de
+# la libc, dans `_dl_relocate_static_pie`, et cela se produit AVANT `main` --
+# donc dans l'intervalle qu'on cherche a expliquer.
+#
+# L'ELF de WebWorker mesure sur le run 35912027322 :
+#
+#     taille            186 808 568 octets
+#     .rela.dyn           9 731 304 octets
+#     RELACOUNT             405 396 relocations R_X86_64_RELATIVE
+#
+# Quatre cent mille relocations a appliquer avant la premiere ligne de code
+# utile. L'hypothese est forte ; elle n'est PAS confirmee tant qu'un avant /
+# apres ne l'a pas montree.
+#
+# `BOUCHAUD_HELPER_ET_EXEC=1` lie les aides en statique NON-PIE, ce qui
+# supprime entierement cette phase : un `ET_EXEC` n'a pas de relocation de
+# demarrage.
+#
+# ## Pourquoi l'adresse explicite
+#
+# Un `ET_EXEC` impose ses adresses, et celles de Linux (0x400000) tombent hors
+# de la fenetre utilisateur de Bouchaud. Le noyau le dit lui-meme :
+#
+#     segment hors du creneau utilisateur
+#     (relier en PIE ou avec -Ttext-segment=0x400000000000)
+#
+# Verifie sur un micro-binaire : lie a 0x401000 il ne demarre pas ; lie a
+# 0x400000000000 il s'execute, en meme temps qu'un static-PIE identique qui
+# sert de temoin. Le creneau laisse un gibioctet avant `INTERP_OFFSET`, soit
+# cinq fois la taille du binaire.
+#
+# ## Ce que cela COUTE, et qui doit etre dit
+#
+# Un `ET_EXEC` n'est pas relocalisable : plus d'ASLR pour ces aides. Ce n'est
+# donc PAS une optimisation gratuite. Le defaut reste `-static-pie` tant que
+# la mesure n'a pas tranche, et ce mode existe d'abord comme EXPERIENCE.
+ET_EXEC = os.environ.get("BOUCHAUD_HELPER_ET_EXEC", "0") == "1"
+
+# `user_slot_base()` du noyau, tel que son propre message d'erreur le donne.
+BASE_TEXTE_BOUCHAUD = "0x400000000000"
+
+if ET_EXEC:
+    OPTIONS_LIEN = (
+        f"-static -no-pie LINKER:-Ttext-segment={BASE_TEXTE_BOUCHAUD} "
+        "LINKER:--allow-multiple-definition"
+    )
+else:
+    OPTIONS_LIEN = "-static-pie LINKER:--allow-multiple-definition"
+
+
 def append_runtime_link_options(path: Path, target: str) -> None:
     data = path.read_text()
     marker = f"# Bouchaud runtime link policy for {target}"
@@ -56,7 +111,7 @@ def append_runtime_link_options(path: Path, target: str) -> None:
         start = data.index(marker)
         prefix = data[:start].rstrip()
         data = prefix + "\n"
-    block = f'''\n{marker}\nif (BOUCHAUD_PORT)\n    target_link_options({target} PRIVATE -static-pie LINKER:--allow-multiple-definition)\n\n    # A glibc static PIE relocates itself before normal libc/TLS startup. Its\n    # elf_get_dynamic_info() path asserts that static PIE binaries do not carry\n    # DT_RPATH or DT_RUNPATH. CMake otherwise injects the vcpkg build directory\n    # as RUNPATH even though every dependency is linked statically. Keep the\n    # link-time search path in LIBRARY_PATH/CMAKE_LIBRARY_PATH, but emit no\n    # runtime search path in the Bouchaud executable.\n    set_target_properties({target} PROPERTIES\n        SKIP_BUILD_RPATH TRUE\n        BUILD_WITH_INSTALL_RPATH FALSE\n        INSTALL_RPATH \"\"\n    )\nendif()\n'''
+    block = f'''\n{marker}\nif (BOUCHAUD_PORT)\n    target_link_options({target} PRIVATE {OPTIONS_LIEN})\n\n    # A glibc static PIE relocates itself before normal libc/TLS startup. Its\n    # elf_get_dynamic_info() path asserts that static PIE binaries do not carry\n    # DT_RPATH or DT_RUNPATH. CMake otherwise injects the vcpkg build directory\n    # as RUNPATH even though every dependency is linked statically. Keep the\n    # link-time search path in LIBRARY_PATH/CMAKE_LIBRARY_PATH, but emit no\n    # runtime search path in the Bouchaud executable.\n    set_target_properties({target} PROPERTIES\n        SKIP_BUILD_RPATH TRUE\n        BUILD_WITH_INSTALL_RPATH FALSE\n        INSTALL_RPATH \"\"\n    )\nendif()\n'''
     path.write_text(data.rstrip() + "\n" + block)
 
 
