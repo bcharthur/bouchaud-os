@@ -733,6 +733,40 @@ pub fn proc_temps_mort_ns() -> u64 {
     TEMPS_MORT_NS.load(Ordering::Relaxed)
 }
 
+/// Les compteurs persistants, lus DIRECTEMENT.
+///
+/// BOUCHAUD_C30_TROIS_VALEURS_INDEPENDANTES
+///
+/// Le diagnostic publiait `cumulatif` en appelant `proc_cpu_cumul()`. Tant
+/// que celui-ci lit les compteurs, les deux coincident -- mais le jour ou
+/// quelqu'un le fait revenir a la somme des vivants, `cumulatif` et
+/// `somme_vivants` deviennent la MEME valeur et la comparaison qui devait
+/// attraper ce retour ne discrimine plus rien. La mesure l'a montre : en
+/// reinjectant la regression, l'ecart publie tombait a zero et le banc
+/// annoncait tranquillement qu'il ne pouvait pas conclure.
+///
+/// Cette fonction-ci lit les compteurs et rien d'autre. Les trois valeurs
+/// publiees -- ce que `/proc/stat` rend, ce que les compteurs disent, ce que
+/// la somme des vivants dirait -- sont alors independantes, et la comparaison
+/// reste valide quoi que fasse `proc_cpu_cumul`.
+pub fn proc_cpu_compteurs() -> (u64, u64) {
+    let mut user_ns = 0u64;
+    let mut system_ns = 0u64;
+    for cpu in 0..MAX_CPUS {
+        user_ns = user_ns.saturating_add(CUMUL_USER_NS[cpu].load(Ordering::Relaxed));
+        system_ns = system_ns.saturating_add(CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed));
+    }
+    (user_ns, system_ns)
+}
+
+/// Combien de fois `user + system` a depasse la capacite, et de combien.
+pub fn proc_depassements() -> (u64, u64) {
+    (
+        DEPASSEMENT_CAPACITE.load(Ordering::Relaxed),
+        DEPASSEMENT_PIRE_NS.load(Ordering::Relaxed),
+    )
+}
+
 pub fn proc_cpu_somme_vivants() -> (u64, u64) {
     let now = crate::kernel::timer::monotonic_ns();
     let mut user_ns = 0u64;
@@ -790,7 +824,25 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         }
     }
     let capacite = now.saturating_mul(online as u64);
-    let idle_ns = capacite.saturating_sub(user_ns.saturating_add(system_ns));
+    let occupe = user_ns.saturating_add(system_ns);
+    // LE DEPASSEMENT NE DOIT PAS SE SATURER EN SILENCE.
+    //
+    // Voir `DEPASSEMENT_CAPACITE`. `saturating_sub` est le bon calcul -- une
+    // inactivite negative n'a pas de sens -- mais il est muet : un double
+    // comptage ferait passer `user + system` au-dessus du temps ecoule, et
+    // `/proc/stat` aurait l'air sain avec `idle=0`.
+    //
+    // Une petite tolerance est laissee : `now` et les cumuls sont lus a des
+    // instants legerement differents, et la tranche en cours est ajoutee
+    // apres coup. Un ecart de quelques millisecondes par processeur est un
+    // artefact de lecture, pas une faute de comptabilite.
+    const TOLERANCE_NS: u64 = 8_000_000;
+    let plafond = capacite.saturating_add(TOLERANCE_NS.saturating_mul(online as u64));
+    if occupe > plafond {
+        DEPASSEMENT_CAPACITE.fetch_add(1, Ordering::Relaxed);
+        DEPASSEMENT_PIRE_NS.fetch_max(occupe - capacite, Ordering::Relaxed);
+    }
+    let idle_ns = capacite.saturating_sub(occupe);
     ProcCpuCumul { user_ns, system_ns, idle_ns, online }
 }
 

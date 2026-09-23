@@ -81,6 +81,31 @@ pub static CUMUL_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) };
 /// directement la quantite en jeu.
 pub static TEMPS_MORT_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Combien de fois `user + system` a depasse la capacite CPU ecoulee.
+///
+/// BOUCHAUD_C30_PAS_DE_SATURATION_MUETTE
+///
+/// `idle = capacite - (user + system)` est calcule par `saturating_sub`. Ce
+/// choix est juste -- une inactivite negative n'a pas de sens -- mais il est
+/// MUET : le jour ou un double comptage ferait passer `user + system`
+/// au-dessus du temps reellement ecoule, la soustraction rendrait zero et
+/// `/proc/stat` aurait l'air parfaitement sain.
+///
+/// Un compteur cumulatif ne peut se tromper que d'une facon : compter deux
+/// fois. C'est exactement le defaut qui a ete corrige dans le livre des
+/// fautes, et il n'y a aucune raison de croire ce chemin-ci a l'abri.
+///
+/// Ce compteur rend le depassement VISIBLE au lieu de le saturer en silence.
+/// Sa valeur normale est zero.
+pub static DEPASSEMENT_CAPACITE: AtomicU64 = AtomicU64::new(0);
+
+/// Le pire depassement observe, en nanosecondes.
+///
+/// Le nombre d'occurrences ne dit pas l'ampleur : un depassement d'une
+/// microseconde est un arrondi entre deux horloges, un depassement d'une
+/// seconde est un bogue de comptabilite.
+pub static DEPASSEMENT_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
 static COMPTA_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];

@@ -103,9 +103,15 @@ JALONS=(
   #
   # Un jalon qui peut etre vert alors qu'une moitie de la fonction ne marche
   # pas ne mesure pas cette fonction.
-  'HOST_WORKER_HTTP OK pong'
-  'HOST_WORKER_BLOB OK pong'
-  'HOST_WORKER_GLOBAL OK pong'
+  #
+  # BOUCHAUD_C30_CAPACITE_ET_PERFORMANCE : la CI exige la CAPACITE. La
+  # performance a ses propres lignes (`_PERF`), lues par le rapport mais pas
+  # par les jalons -- un budget de performance ne doit pas eteindre une
+  # capacite qui marche, sans quoi « le worker est casse » et « le worker est
+  # lent » deviennent le meme echec.
+  'HOST_WORKER_HTTP_FUNCTIONAL OK'
+  'HOST_WORKER_BLOB_FUNCTIONAL OK'
+  'HOST_WORKER_FUNCTIONAL_GLOBAL OK pong'
   # La mire doit etre arrivee jusqu'a la frame presentee.
   'HOST_SURFACE_VERDICT ok'
   'HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1'

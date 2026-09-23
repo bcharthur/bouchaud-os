@@ -306,16 +306,38 @@ pub fn releve_si_du() {
     //
     // `temps_mort` non nul veut dire que le second calcul ment deja.
     let (vivants_user, vivants_sys) = crate::kernel::task::proc_cpu_somme_vivants();
+    let (compteurs_user, compteurs_sys) = crate::kernel::task::proc_cpu_compteurs();
     let mort = crate::kernel::task::proc_temps_mort_ns();
     let c = crate::kernel::task::proc_cpu_cumul();
+    // TROIS VALEURS INDEPENDANTES : voir `proc_cpu_compteurs`.
+    //
+    //   publie          ce que `/proc/stat` rend reellement
+    //   cumulatif       ce que les compteurs persistants disent
+    //   somme_vivants   ce que rendrait la somme des taches en vie
+    //
+    // `publie` doit suivre `cumulatif`. S'il suit `somme_vivants`, le temps
+    // des taches mortes est perdu -- et la comparaison le dit, meme si
+    // `proc_cpu_cumul` a ete ramene au calcul d'avant.
     crate::serial_println!(
-        "[PROC-STAT] cumulatif_user_ms={} cumulatif_sys_ms={} \
+        "[PROC-STAT] publie_user_ms={} publie_sys_ms={} \
+cumulatif_user_ms={} cumulatif_sys_ms={} \
 somme_vivants_user_ms={} somme_vivants_sys_ms={} temps_mort_ms={}",
         c.user_ns / 1_000_000,
         c.system_ns / 1_000_000,
+        compteurs_user / 1_000_000,
+        compteurs_sys / 1_000_000,
         vivants_user / 1_000_000,
         vivants_sys / 1_000_000,
         mort / 1_000_000,
+    );
+    let (depassements, pire) = crate::kernel::task::proc_depassements();
+    crate::serial_println!(
+        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={}",
+        (crate::kernel::timer::monotonic_ns() / 1_000_000)
+            .saturating_mul(c.online as u64),
+        (c.user_ns.saturating_add(c.system_ns)) / 1_000_000,
+        depassements,
+        pire / 1_000_000,
     );
 }
 

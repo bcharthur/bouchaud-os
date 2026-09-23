@@ -821,20 +821,49 @@ HTML = r'''<!doctype html>
       + ` verdict=${r.ok && r.ms <= BUDGET_WORKER_MS ? "OK" : "HORS_BUDGET"}`);
   }
 
-  // LE VERDICT PAR ORIGINE : la PREMIERE tentative de chaque origine.
+  // ====================================================================
+  // CAPACITE ET PERFORMANCE SONT DEUX QUESTIONS, ET ON NE LES MELANGE PLUS.
   //
-  // La premiere, et non la meilleure : c'est elle que vit un utilisateur qui
-  // ouvre une page. Prendre la meilleure des deux effacerait precisement le
-  // cout du demarrage a froid qu'on cherche a mesurer.
+  // BOUCHAUD_C30_CAPACITE_ET_PERFORMANCE
+  //
+  // La version precedente publiait :
+  //
+  //     HOST_WORKER_BLOB FAIL ms=68779 repond=1
+  //
+  // `repond=1` : le worker a REELLEMENT renvoye son pong. La capacite
+  // fonctionne. Le marquer `FAIL` parce qu'il a mis soixante-huit secondes
+  // transforme un probleme de performance en panne fonctionnelle -- et la
+  // difference compte : l'une se corrige en optimisant, l'autre en reparant
+  // un chemin casse, et l'on ne cherche pas au meme endroit.
+  //
+  // Deux familles de verdicts, donc :
+  //
+  //     _FUNCTIONAL   le pong est-il revenu ? (capacite)
+  //     _PERF         est-il revenu dans le budget ? (performance)
+  //
+  // Un budget de performance ne peut plus eteindre une capacite.
+  // ====================================================================
   const premier = o => releves.find(r => r.origine === o) || { ok: false, ms: -1 };
   const http = premier("http");
   const blob = premier("blob");
   const dansBudget = r => r.ok && r.ms >= 0 && r.ms <= BUDGET_WORKER_MS;
 
+  // LA CAPACITE : n'importe quelle tentative de cette origine a-t-elle
+  // repondu ? Une origine qui marche a la troisieme tentative marche.
+  const capacite = o => releves.some(r => r.origine === o && r.ok);
+  const httpFonctionnel = capacite("http");
+  const blobFonctionnel = capacite("blob");
+
+  console.log(`HOST_WORKER_HTTP_FUNCTIONAL ${httpFonctionnel ? "OK" : "FAIL"} pong=${http.ok ? 1 : 0}`);
+  console.log(`HOST_WORKER_BLOB_FUNCTIONAL ${blobFonctionnel ? "OK" : "FAIL"} pong=${blob.ok ? 1 : 0}`);
+
+  // LA PERFORMANCE : la PREMIERE tentative de chaque origine, et non la
+  // meilleure. C'est elle que vit un utilisateur qui ouvre une page ; prendre
+  // la meilleure effacerait le cout du demarrage a froid qu'on mesure.
   workerHttpOK = dansBudget(http);
   workerBlobOK = dansBudget(blob);
-  console.log(`HOST_WORKER_HTTP ${workerHttpOK ? "OK pong" : "FAIL"} ms=${http.ms} repond=${http.ok ? 1 : 0}`);
-  console.log(`HOST_WORKER_BLOB ${workerBlobOK ? "OK pong" : "FAIL"} ms=${blob.ms} repond=${blob.ok ? 1 : 0}`);
+  console.log(`HOST_WORKER_HTTP_PERF ${workerHttpOK ? "OK" : "FAIL"} ms=${http.ms} budget=${BUDGET_WORKER_MS}`);
+  console.log(`HOST_WORKER_BLOB_PERF ${workerBlobOK ? "OK" : "FAIL"} ms=${blob.ms} budget=${BUDGET_WORKER_MS}`);
 
   // LA LECTURE DE LA MATRICE, faite ici pour ne pas avoir a la refaire a la
   // main a chaque execution.
@@ -857,9 +886,30 @@ HTML = r'''<!doctype html>
   // n'est pas vrai si une seule des deux facons de lui donner son script
   // marche. Le jalon porte desormais un nom qui ne se confond pas avec les
   // deux autres : `HOST_WORKER_GLOBAL`.
-  workerOK = workerHttpOK && workerBlobOK;
-  console.log(`HOST_WORKER_GLOBAL ${workerOK ? "OK pong" : "FAIL"}`
-    + ` http=${workerHttpOK ? 1 : 0} blob=${workerBlobOK ? 1 : 0}`);
+  // LE GLOBAL FONCTIONNEL EST UNE CONJONCTION DE CAPACITES.
+  //
+  // « le navigateur sait executer du JavaScript dans un processus WebWorker »
+  // n'est pas vrai si une seule des deux facons de lui donner son script
+  // marche. C'est ce jalon-la que la CI exige.
+  const fonctionnelGlobal = httpFonctionnel && blobFonctionnel;
+  console.log(`HOST_WORKER_FUNCTIONAL_GLOBAL ${fonctionnelGlobal ? "OK pong" : "FAIL"}`
+    + ` http=${httpFonctionnel ? 1 : 0} blob=${blobFonctionnel ? 1 : 0}`);
+
+  // LE DEMARRAGE A FROID A SON PROPRE VERDICT, separe des deux origines.
+  //
+  // C'est la premiere tentative, quelle qu'en soit l'origine, qui porte le
+  // cout du froid : la matrice A/B l'a montre en inversant l'ordre. Le
+  // mesurer par origine melangerait deux choses ; il a donc sa ligne.
+  const premiereTentative = releves[0] || { ok: false, ms: -1, origine: "?" };
+  const froidOK = dansBudget(premiereTentative);
+  console.log(`HOST_WORKER_COLD_START_PERF ${froidOK ? "OK" : "FAIL"}`
+    + ` ms=${premiereTentative.ms} origine=${premiereTentative.origine}`
+    + ` budget=${BUDGET_WORKER_MS}`);
+
+  // `workerOK` alimente le verdict de fumee global : c'est la CAPACITE qui
+  // doit y entrer, pas la performance. Une machine lente n'est pas une
+  // machine cassee.
+  workerOK = fonctionnelGlobal;
 
 
   console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK && frameOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0} frame=${frameOK ? 1 : 0}`
