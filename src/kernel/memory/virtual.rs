@@ -380,6 +380,80 @@ pub fn free_frame(phys: u64) {
     FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
 }
 
+/// Rend un LOT de frames en prenant le verrou par tranches.
+///
+/// BOUCHAUD_C37_RENDRE_PAR_LOTS
+///
+/// # La mesure qui justifie cette fonction
+///
+///     PERF_EXECVE image=/sortie duree_us=99383 liberation_us=99024
+///                 pages_rendues=65540
+///
+/// Quatre-vingt-dix-neuf virgule six pour cent d'un `execve` passent a rendre
+/// les frames que le `fork` venait de copier -- environ une microseconde et
+/// demie par frame. `free_frame` prend `frames()`, un verrou tournant qui
+/// masque les interruptions, UNE FOIS PAR FRAME : soixante-cinq mille prises
+/// et relachements pour un seul `execve`.
+///
+/// # Pourquoi des tranches, et pas une seule prise
+///
+/// Prendre le verrou une seule fois pour soixante-cinq mille frames le
+/// tiendrait, interruptions masquees, pendant des dizaines de millisecondes.
+/// C'est exactement le genre de tenue que les budgets d'execution de ce depot
+/// refusent, et a juste titre : pendant ce temps aucun autre coeur ne peut
+/// allouer et aucune interruption ne passe.
+///
+/// La tranche ramene le nombre de prises d'un facteur `TRANCHE` tout en
+/// bornant la tenue. Ce n'est pas un compromis tiede : le cout d'une prise
+/// est fixe et celui d'une tranche est lineaire, donc l'essentiel du gain est
+/// acquis des les premieres dizaines.
+const TRANCHE_LIBERATION: usize = 256;
+
+pub fn free_frames_lot(lot: impl IntoIterator<Item = u64>) {
+    let mut tampon = [0u64; TRANCHE_LIBERATION];
+    let mut rempli = 0usize;
+    for phys in lot {
+        tampon[rempli] = phys;
+        rempli += 1;
+        if rempli == TRANCHE_LIBERATION {
+            free_tranche(&tampon[..rempli]);
+            rempli = 0;
+        }
+    }
+    if rempli != 0 {
+        free_tranche(&tampon[..rempli]);
+    }
+}
+
+/// Le corps de `free_frame`, applique a une tranche sous UNE seule prise.
+///
+/// Les assertions sont mot pour mot celles de `free_frame` : rendre par lots
+/// ne doit rien relacher de ce qui detecte un double `free` ou une frame
+/// etrangere aux regions. Une version « rapide » qui les sauterait echangerait
+/// une microseconde contre une corruption silencieuse.
+fn free_tranche(tranche: &[u64]) {
+    let mut f = frames();
+    for &brute in tranche {
+        let phys = brute & !(PAGE_SIZE - 1);
+        assert!(
+            f.libres.couverte(phys),
+            "vmm: free d'une frame {phys:#x} hors des regions de l'allocateur",
+        );
+        assert!(f.used != 0, "vmm: frame accounting underflow for {phys:#x}");
+        assert!(
+            f.libres.marque_libre(phys),
+            "vmm: double free frame {phys:#x}",
+        );
+        f.used -= 1;
+        f.frees = f.frees.wrapping_add(1);
+        unsafe {
+            *(memory::phys_to_virt(phys) as *mut u64) = f.freed_head.unwrap_or(FREE_LIST_END);
+        }
+        f.freed_head = Some(phys);
+    }
+    FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+}
+
 /// Approximate frame usage for interrupt/panic-safe diagnostics.
 ///
 /// This deliberately never touches `FRAMES`: the two atomics may describe
@@ -1350,12 +1424,11 @@ impl Drop for AddressSpace {
             0,
             "vmm: destruction d'un AddressSpace encore actif sur un CPU"
         );
-        for &frame in self.pages.iter() {
-            free_frame(frame);
-        }
-        for &frame in self.tables.iter() {
-            free_frame(frame);
-        }
+        // Voir `free_frames_lot` : un espace d'adressage de 256 Mio rend
+        // soixante-cinq mille frames, et les rendre une par une prenait le
+        // verrou de l'allocateur autant de fois.
+        free_frames_lot(self.pages.iter().copied());
+        free_frames_lot(self.tables.iter().copied());
         free_frame(self.pml4);
     }
 }
