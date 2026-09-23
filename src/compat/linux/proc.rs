@@ -137,7 +137,8 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     FORK_APPELS.fetch_add(1, Ordering::Relaxed);
     FORK_PIRE_NS.fetch_max(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
     crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_FORK pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
+        "PERF_FORK t={} pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
+        fin_ns / 1_000_000,
         parent_pid,
         pid,
         nom_journal,
@@ -368,7 +369,8 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     drop(old);
     let fin_ns = crate::kernel::timer::monotonic_ns();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_EXECVE image={} pid={} duree_us={} ouverture_us={} entetes_us={} projections_us={} pile_us={} quiescence_us={} bascule_us={} liberation_us={} pages_rendues={}",
+        "PERF_EXECVE t={} image={} pid={} duree_us={} ouverture_us={} entetes_us={} projections_us={} pile_us={} quiescence_us={} bascule_us={} liberation_us={} pages_rendues={}",
+        fin_ns / 1_000_000,
         nom_journal,
         process.pid,
         fin_ns.saturating_sub(debut_ns) / 1_000,

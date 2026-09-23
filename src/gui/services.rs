@@ -167,9 +167,10 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
                     let echec = c(Categorie::Echec);
                     let total = compte_du_processus.unwrap_or_default();
                     crate::serial_println!(
-                        "[PERF-PROC] pid={} image={} rss_kio={} vss_kio={} taches={} \
+                        "[PERF-PROC] t={} pid={} image={} rss_kio={} vss_kio={} taches={} \
 fautes={} total_us={} pire_us={} \
 zero={}/{}us fichier={}/{}us partage={}/{}us copie={}/{}us attente={}/{}us echec={}",
+                        crate::kernel::timer::monotonic_ms(),
                         row.pid,
                         base,
                         row.rss_octets / 1024,

@@ -50,15 +50,27 @@ def chronologie(source):
     est donc la seule facon d'obtenir une chronologie -- et c'est pour cela
     que l'horloge devait etre monotone ET absolue.
     """
+    # LES LIGNES DU NOYAU ENTRENT DANS LA MEME CHRONOLOGIE, ET C'EST LICITE.
+    #
+    # `MonotonicTime::now()` de Ladybird appelle `clock_gettime(CLOCK_MONOTONIC)`,
+    # que ce noyau sert depuis `timer::monotonic_ns()`. Les deux `t=` sont donc
+    # la MEME horloge, et les soustraire a un sens -- c'est exactement ce qu'il
+    # faut pour repondre a « les 23,5 s avant `main` sont combien d'ELF, combien
+    # de fautes fichier ».
+    motifs = [
+        (r"WORKER_ETAPE t=(\d+) (.*)$", "worker"),
+        (r"SPAWN_ETAPE t=(\d+) (.*)$", "spawn"),
+        (r"PERF_FORK t=(\d+) (.*)$", "noyau"),
+        (r"PERF_EXECVE t=(\d+) (.*)$", "noyau"),
+        (r"\[PERF-PROC\] t=(\d+) (.*)$", "proc"),
+    ]
     etapes = []
     for ligne in source:
-        m = re.search(r"WORKER_ETAPE t=(\d+) (.*)$", ligne)
-        if m:
-            etapes.append((int(m.group(1)), "worker", m.group(2).strip()))
-            continue
-        m = re.search(r"SPAWN_ETAPE t=(\d+) (.*)$", ligne)
-        if m:
-            etapes.append((int(m.group(1)), "spawn", m.group(2).strip()))
+        for motif, origine in motifs:
+            m = re.search(motif, ligne)
+            if m:
+                etapes.append((int(m.group(1)), origine, m.group(2).strip()))
+                break
     etapes.sort(key=lambda e: e[0])
     return etapes
 
@@ -115,7 +127,7 @@ def main():
 
     etapes = chronologie(source)
     print()
-    print("== chaine du worker et lancements de processus, triee sur l'horloge ==")
+    print("== chronologie commune : page, hote, worker et noyau ==")
     if not etapes:
         print("   (aucune etape horodatee)")
     else:
