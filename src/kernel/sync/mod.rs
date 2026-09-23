@@ -57,6 +57,58 @@ pub fn registre_domaines() -> &'static domaine::Registre {
     &DOMAINES
 }
 
+// =============================================================================
+// BOUCHAUD_C39_PORTEES_ABANDONNEES -- les chemins qui ne reviennent pas
+// =============================================================================
+//
+// Deux chemins du noyau entrent par `syscall_dispatch` et n'en ressortent
+// jamais :
+//
+//   sys_execve reussi        -> saute en ring 3 via `resume_usermode`
+//   retrait d'un zombie      -> commute sans retour (`retire_exec_zombie_current`)
+//
+// Les deux abandonnent la pile noyau de l'appel systeme. Le gros verrou est
+// deja compense sur les deux (`suspend_for_schedule`, puis
+// `abandonne_bkl_avant_sortie_definitive`) -- mais la `PorteeDomaine` ouverte
+// par `syscall_dispatch` ne l'etait sur AUCUN des deux. Son `Drop` ne
+// s'executant jamais, `sommet[cpu]` montait d'un cran a chaque passage.
+//
+// Mesure avant correction, sur trois `fork`+`execve`+`exit` consecutifs :
+//
+//     domaines_avant=13 debordements=11
+//     domaines_avant=15 debordements=15
+//     domaines_avant=17 debordements=19
+//
+// `PROFONDEUR` vaut 8. Au-dela, `courant()` rend toujours la meme case figee et
+// `note_acquisition` attribue TOUTES les prises du verrou a un domaine mort.
+// C'est l'instrument de sortie du gros verrou qui se detruit lui-meme.
+
+static REPERE_NOYAU: [core::sync::atomic::AtomicUsize; domaine::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; domaine::MAX_CPUS];
+
+/// Memorise la profondeur de portees AVANT que l'appel systeme n'ouvre la sienne.
+///
+/// Appele a l'entree de `syscall_dispatch`, sur un CPU qui revient de ring 3.
+#[inline]
+pub fn pose_repere_noyau(cpu: usize) {
+    if cpu < domaine::MAX_CPUS {
+        REPERE_NOYAU[cpu].store(DOMAINES.profondeur(cpu), OrdreDomaine::Relaxed);
+    }
+}
+
+/// Referme les portees qu'une pile noyau abandonnee laisserait ouvertes.
+///
+/// Rend le nombre de portees effectivement refermees, pour que le site d'appel
+/// puisse le publier : une correction qui ne se mesure pas ne se defend pas.
+#[inline]
+pub fn referme_portees_abandonnees(cpu: usize) -> usize {
+    if cpu >= domaine::MAX_CPUS {
+        return 0;
+    }
+    let repere = REPERE_NOYAU[cpu].load(OrdreDomaine::Relaxed);
+    DOMAINES.referme_jusqu_a(cpu, repere)
+}
+
 /// Journalise la PREMIERE reprise du gros verrou par un chemin declare sorti.
 ///
 /// Ne panique pas, volontairement : une regression de verrouillage se decouvre

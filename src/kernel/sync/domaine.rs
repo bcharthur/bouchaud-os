@@ -195,6 +195,8 @@ pub struct Registre {
     acquisitions: [AtomicU64; NOMBRE],
     violations: [AtomicU64; NOMBRE],
     debordements: AtomicU64,
+    /// Voir `referme_jusqu_a` : reperes trouves au-dessus de la pile reelle.
+    reperes_perimes: AtomicU64,
     /// Premier domaine migre a avoir repris le verrou, code + 1 (0 = aucun).
     /// Le PREMIER, pas le dernier : c'est celui-la qui a introduit la
     /// regression, les suivants peuvent n'en etre que la consequence.
@@ -209,6 +211,7 @@ impl Registre {
             acquisitions: [const { AtomicU64::new(0) }; NOMBRE],
             violations: [const { AtomicU64::new(0) }; NOMBRE],
             debordements: AtomicU64::new(0),
+            reperes_perimes: AtomicU64::new(0),
             premiere_regression: AtomicU8::new(0),
         }
     }
@@ -333,6 +336,44 @@ impl Registre {
             0 => None,
             code => Some(Domaine::depuis_code(code - 1)),
         }
+    }
+
+    /// Referme d'un coup les portees ouvertes au-dessus de `repere` sur `cpu`.
+    ///
+    /// BOUCHAUD_C39_PORTEES_ABANDONNEES
+    ///
+    /// Sert aux chemins QUI NE REVIENNENT PAS. Une `PorteeDomaine` est une RAII
+    /// posee sur la pile noyau ; un chemin qui saute en ring 3 ou commute sans
+    /// retour abandonne cette pile, et son `Drop` -- donc le `sort` -- ne
+    /// s'execute jamais. La profondeur du CPU monte alors d'un cran a chaque
+    /// passage et ne redescend plus.
+    ///
+    /// Ne remonte JAMAIS le sommet. Entre la pose du repere et ici, une autre
+    /// tache a pu ouvrir puis refermer une portee sur ce meme CPU ; le repere
+    /// est alors trop haut, et le respecter gonflerait la pile au lieu de la
+    /// vider. Le refus est COMPTE plutot que tu : une imprecision qu'on ne peut
+    /// pas voir ne se distingue pas d'une fuite.
+    pub fn referme_jusqu_a(&self, cpu: usize, repere: usize) -> usize {
+        if cpu >= MAX_CPUS {
+            return 0;
+        }
+        let n = self.sommet[cpu].load(Ordering::Relaxed);
+        if n <= repere {
+            if n < repere {
+                self.reperes_perimes.fetch_add(1, Ordering::Relaxed);
+            }
+            return 0;
+        }
+        self.sommet[cpu].store(repere, Ordering::Relaxed);
+        n - repere
+    }
+
+    /// Combien de fois un repere s'est revele plus haut que la pile reelle.
+    ///
+    /// Doit rester petit. S'il grimpe, c'est que des taches s'entrelacent sur
+    /// un meme CPU plus souvent que le modele ne le suppose.
+    pub fn reperes_perimes(&self) -> u64 {
+        self.reperes_perimes.load(Ordering::Relaxed)
     }
 
     /// Profondeur de portees ouverte sur `cpu`. Sert aux post-conditions : un

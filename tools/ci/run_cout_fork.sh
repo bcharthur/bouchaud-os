@@ -49,23 +49,33 @@ CC=""
 for candidat in gcc cc clang; do
     if command -v "$candidat" >/dev/null 2>&1; then CC=$candidat; break; fi
 done
+# UN GARDE QUI N'A PAS PU MESURER N'EST PAS VERT.
+#
+# Ces trois sorties rendaient 0 quand le banc etait incapable de mesurer quoi
+# que ce soit. Tant que le script tournait a la main, c'etait un confort. Depuis
+# qu'il est dans la CI, c'est un mensonge : un coureur sans compilateur
+# affichait un vert qui ne protegeait rien, et une regression du fork serait
+# passee sans que personne ne le voie.
 if [ -z "$CC" ]; then
-    echo "cout fork : aucun compilateur C, verification passee"
-    exit 0
+    echo "cout fork : aucun compilateur C -- rien n'a pu etre mesure" >&2
+    echo "            installer gcc/cc/clang, ou retirer ce banc de la CI" >&2
+    exit 1
 fi
 
 SCENARIO="$SORTIE/scenario"
 rm -rf "$SCENARIO"; mkdir -p "$SCENARIO"
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/coutfork" tools/userland/cout-fork.c 2>"$SORTIE/cc.log"; then
-    echo "cout fork : la charge d'epreuve ne se compile pas ici, verification passee"
-    exit 0
+    echo "cout fork : la charge d'epreuve ne se compile pas ici" >&2
+    sed -n '1,20p' "$SORTIE/cc.log" >&2
+    exit 1
 fi
 
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/sortie" tools/userland/sortie-immediate.c 2>>"$SORTIE/cc.log"; then
-    echo "cout fork : la cible d'execve ne se compile pas ici, verification passee"
-    exit 0
+    echo "cout fork : la cible d'execve ne se compile pas ici" >&2
+    sed -n '1,20p' "$SORTIE/cc.log" >&2
+    exit 1
 fi
 
 cat > "$SCENARIO/autorun" <<'AUTORUN'
@@ -125,6 +135,16 @@ for MIO in $(printf '%s\n' "${!MEILLEUR[@]}" | sort -n); do
     US=${MEILLEUR[$MIO]}
     printf '%4s Mio %10s us %10s\n' "$MIO" "$US" "$((US / MIO))"
 done
+
+# LES CHEMINS QUI NE REVIENNENT PAS RENDENT-ILS CE QU'ILS ONT PRIS ?
+#
+# Ce banc fait `fork` + `execve` + `exit` en boucle : c'est exactement la charge
+# qui exerce les deux chemins no-return du noyau. Il serait absurde de la faire
+# tourner sans en tirer cette verification-la.
+echo
+if ! python3 tools/ci/verifie_execve_bkl.py "$PROPRE"; then
+    echecs=$((echecs + 1))
+fi
 
 # LA COPIE EST-ELLE COMPLETE ? La question n'est pas rhetorique depuis que
 # `duplicate` prend ses frames sans les mettre a zero : une copie partielle

@@ -80,6 +80,14 @@ pub fn exit_current(code: i32) -> ! {
     // entrent bien dans le coeur scheduler sans BKL.
     abandonne_bkl_avant_sortie_definitive();
 
+    // BOUCHAUD_C39_PORTEES_ABANDONNEES
+    //
+    // Meme raison que pour le gros verrou juste au-dessus, et meme pile : la
+    // `PorteeDomaine` ouverte par `syscall_dispatch` vit sur cette pile-ci, qui
+    // ne reprendra jamais. Sans ce rappel, `sommet[cpu]` montait d'un cran a
+    // chaque processus qui se termine.
+    crate::kernel::sync::referme_portees_abandonnees(local_cpu());
+
     // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
     // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
     // continuent independamment.
@@ -639,6 +647,10 @@ fn retire_exec_zombie_current() -> ! {
     // abandonnee avant le dernier choix d'ordonnancement, sans tentative de
     // restauration : il n'y aura pas de retour pour la rendre.
     abandonne_bkl_avant_sortie_definitive();
+
+    // BOUCHAUD_C39_PORTEES_ABANDONNEES -- voir `exit_current` : meme classe de
+    // defaut, meme pile condamnee, meme compensation.
+    crate::kernel::sync::referme_portees_abandonnees(cpu_id);
 
     commute_sortie_definitive_si_possible(cur, cpu_id);
 

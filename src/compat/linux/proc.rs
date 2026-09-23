@@ -326,6 +326,8 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         );
     }
     let nom_journal = path.clone();
+    // Releve TOT : `process` n'est plus empruntable au point no-return.
+    let pid_journal = process.pid;
     process.metadata.lock().name = path;
     process.files.lock().close_on_exec();
     process.signals.lock().reset_for_exec();
@@ -417,11 +419,57 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     task::stall_site_clear();
     task::stall_syscall_exit();
     task::account_resume_user_noreturn();
+
+    // BOUCHAUD_C39_DEUX_RAII_ABANDONNES_PAS_UN
+    //
+    // `syscall_dispatch` ouvre DEUX gardes RAII avant d'appeler l'appel
+    // systeme, et le chemin no-return les abandonne tous les deux :
+    //
+    //     let _domaine = sync::portee(sync::Domaine::Syscall);   // (2)
+    //     let kernel   = smp_lock::enter();                      // (1)
+    //
+    // (1) est compense juste en dessous par `suspend_for_schedule`. (2) ne
+    // l'etait PAS : son `Drop` appelle `DOMAINES.sort(cpu)`, qui n'est jamais
+    // execute. `sommet[cpu]` monte donc d'un cran a chaque execve REUSSI et ne
+    // redescend jamais.
+    //
+    // La sonde mesure les deux profondeurs de part et d'autre de la bascule,
+    // pour que la fuite soit un CHIFFRE et non une lecture de code. `domaines_`
+    // est ce qui doit rester stable d'un execve au suivant ; s'il monte, la
+    // fuite est la.
+    let cpu_courant = crate::arch::x86_64::smp::cpu_index();
+    let registre = crate::kernel::sync::registre_domaines();
+    let domaines_avant = registre.profondeur(cpu_courant);
+    let depth_avant = crate::kernel::smp_lock::profondeur_locale();
+
     let abandoned_depth = crate::kernel::smp_lock::suspend_for_schedule();
     debug_assert!(
         abandoned_depth > 0,
         "execve: chemin no-return sans BKL syscall actif"
     );
+
+    let portees_refermees = crate::kernel::sync::referme_portees_abandonnees(cpu_courant);
+    let domaines_apres = registre.profondeur(cpu_courant);
+    let owner_apres = crate::kernel::smp_lock::owner_cpu();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_EXECVE_BKL t={} pid={} cpu={} depth_avant={} depth_abandonne={} \
+owner_apres={} domaines_avant={} domaines_apres={} portees_refermees={} \
+debordements={} reperes_perimes={}",
+        crate::kernel::timer::monotonic_ms(),
+        pid_journal,
+        cpu_courant,
+        depth_avant,
+        abandoned_depth,
+        match owner_apres {
+            Some(c) => c as i64,
+            None => -1,
+        },
+        domaines_avant,
+        domaines_apres,
+        portees_refermees,
+        registre.debordements(),
+        registre.reperes_perimes(),
+    ));
 
     unsafe { usermode::resume_usermode(&frame) }
 }
