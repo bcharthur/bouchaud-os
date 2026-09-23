@@ -218,54 +218,6 @@ pub fn add_region(start: u64, end: u64) {
 }
 
 /// Alloue une frame physique de 4 KiB, mise a zero. `None` si plus de RAM.
-pub fn alloc_frame() -> Option<u64> {
-    let phys = {
-        let mut f = frames();
-        let candidate = if let Some(p) = f.freed_head {
-            let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
-            f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
-            // La frame quitte la liste libre : le bit tombe AVANT qu'elle ne
-            // soit rendue a un appelant, sinon un `free` immediat passerait
-            // pour un double `free`.
-            assert!(
-                f.libres.marque_occupee(p),
-                "vmm: frame {p:#x} en tete de liste libre mais absente du bitmap",
-            );
-            Some(p)
-        } else {
-            let mut found = None;
-            for region in f.regions.iter_mut() {
-                if region.0 + PAGE_SIZE <= region.1 {
-                    found = Some(region.0);
-                    region.0 += PAGE_SIZE;
-                    break;
-                }
-            }
-            found
-        };
-
-        let phys = match candidate {
-            Some(phys) => phys,
-            None => {
-                f.failures = f.failures.wrapping_add(1);
-                return None;
-            }
-        };
-        f.used = f
-            .used
-            .checked_add(1)
-            .expect("vmm: used frame accounting overflow");
-        f.allocations = f.allocations.wrapping_add(1);
-        f.high_watermark = f.high_watermark.max(f.used);
-        FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
-        phys
-    };
-    unsafe {
-        core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize);
-    }
-    Some(phys)
-}
-
 /// Une frame NON MISE A ZERO, pour un appelant qui va la recouvrir en entier.
 ///
 /// BOUCHAUD_C35_NE_PAS_ECRIRE_DEUX_FOIS
@@ -281,30 +233,32 @@ pub fn alloc_frame() -> Option<u64> {
 ///     let frame = alloc_frame()?;            // 4 Kio de zeros
 ///     copy_nonoverlapping(..., PAGE_SIZE);   // 4 Kio recouverts
 ///
-/// **Huit kibioctets ecrits pour en transmettre quatre.** La mise a zero
-/// n'est pas seulement inutile ici : elle est integralement effacee a la
-/// ligne suivante. Sur un `fork` de 256 Mio c'est un demi-gibioctet de
-/// memoire ecrite pour rien.
+/// **Huit kibioctets ecrits pour en transmettre quatre.** La mise a zero n'est
+/// pas seulement inutile ici : elle est integralement effacee a la ligne
+/// suivante. Sur un `fork` de 256 Mio c'est un demi-gibioctet de memoire
+/// ecrite pour rien.
 ///
 /// # Le contrat, et pourquoi il n'est pas negociable
 ///
-/// L'appelant DOIT ecrire les `PAGE_SIZE` octets avant que la page ne
-/// devienne visible en anneau 3. Un appelant qui n'ecrirait qu'une partie
-/// exposerait le reste -- c'est-a-dire de la memoire d'un autre processus --
-/// et ce serait une fuite silencieuse, du genre qu'aucun test d'integration
-/// ne remarque.
+/// L'appelant DOIT ecrire les `PAGE_SIZE` octets avant que la page ne devienne
+/// visible en anneau 3. Un appelant qui n'ecrirait qu'une partie exposerait le
+/// reste -- c'est-a-dire de la memoire d'un autre processus -- et ce serait une
+/// fuite silencieuse, du genre qu'aucun test d'integration ne remarque.
 ///
 /// C'est pour cela qu'elle porte un nom different plutot qu'un parametre
 /// booleen : un `alloc_frame(false)` se glisse dans un appel existant sans
 /// qu'on y pense, un nom ne se choisit pas par accident.
 ///
-/// Elle n'est employee que par `duplicate`, qui recouvre la page entiere par
-/// `copy_nonoverlapping` a la ligne suivante.
+/// `tools/ci/run_cout_fork.sh` verifie le contrat octet par octet, et le
+/// verifie en le mettant en echec.
 pub fn alloc_frame_a_recouvrir() -> Option<u64> {
     let mut f = frames();
     let candidate = if let Some(p) = f.freed_head {
         let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
         f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
+        // La frame quitte la liste libre : le bit tombe AVANT qu'elle ne
+        // soit rendue a un appelant, sinon un `free` immediat passerait
+        // pour un double `free`.
         assert!(
             f.libres.marque_occupee(p),
             "vmm: frame {p:#x} en tete de liste libre mais absente du bitmap",
@@ -336,6 +290,19 @@ pub fn alloc_frame_a_recouvrir() -> Option<u64> {
     f.allocations = f.allocations.wrapping_add(1);
     f.high_watermark = f.high_watermark.max(f.used);
     FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+    Some(phys)
+}
+
+/// Une frame mise a zero. C'est l'allocation par defaut, et elle doit le rester.
+///
+/// La mise a zero est la SEULE difference avec `alloc_frame_a_recouvrir` :
+/// les deux partagent le meme corps pour qu'aucune correction de l'allocateur
+/// ne puisse n'en toucher qu'une.
+pub fn alloc_frame() -> Option<u64> {
+    let phys = alloc_frame_a_recouvrir()?;
+    unsafe {
+        core::ptr::write_bytes(memory::phys_to_virt(phys), 0, PAGE_SIZE as usize);
+    }
     Some(phys)
 }
 
