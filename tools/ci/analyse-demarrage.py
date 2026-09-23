@@ -92,7 +92,13 @@ def jalons_hote(source):
 
 
 def noyau(source):
-    forks, execs, procs = [], [], []
+    """Les quatre familles de lignes qui bornent un lancement de service.
+
+    `PERF_EXECVE` est indexe par image, `[PERF-PROC]` par pid, `SPAWN_ETAPE`
+    par enfant et `WORKER_ETAPE` par pid : c'est ce recoupement qui manquait
+    pour mettre les six services sur la meme ligne.
+    """
+    forks, execs, procs, spawns, workers = [], [], [], [], []
     for ligne in source:
         if "PERF_FORK " in ligne:
             forks.append(ligne[ligne.index("PERF_FORK "):].strip())
@@ -100,7 +106,11 @@ def noyau(source):
             execs.append(ligne[ligne.index("PERF_EXECVE "):].strip())
         elif "[PERF-PROC]" in ligne:
             procs.append(ligne[ligne.index("[PERF-PROC]"):].strip())
-    return forks, execs, procs
+        elif "SPAWN_ETAPE " in ligne:
+            spawns.append(ligne[ligne.index("SPAWN_ETAPE "):].strip())
+        elif "WORKER_ETAPE " in ligne:
+            workers.append(ligne[ligne.index("WORKER_ETAPE "):].strip())
+    return forks, execs, procs, spawns, workers
 
 
 def series_par_pid(lignes_proc, maximum=8):
@@ -140,87 +150,302 @@ SERVICES = [
     "WebWorker",
 ]
 
+# UNE COLONNE ABSENTE N'EST PAS UNE COLONNE NULLE.
+#
+# BOUCHAUD_C42_INCONNU_N_EST_PAS_ZERO
+#
+# `0` est une mesure : ce chemin n'a rien coute. `-` est l'aveu qu'on n'a pas
+# regarde. Les confondre fait disparaitre precisement le temps qu'on cherche --
+# un poste non instrumente s'affiche a zero et sort du classement.
+INCONNU = "-"
 
-def tableau_des_services(execs, procs):
-    """UNE LIGNE PAR SERVICE, PARCE QUE LA COMPARAISON EST LA QUESTION.
 
-    Le premier WebWorker a longtemps occupe toute l'attention parce qu'il
-    etait le seul instrumente. Le releve du run 35829303875 montre pourtant
-    qu'il y a des dizaines de secondes a gagner AVANT qu'il ne soit demande :
-    l'hote demarre a T+22 s et la premiere trame arrive a T+180 s.
+def _entier(ligne, motif):
+    m = re.search(motif, ligne)
+    return int(m.group(1)) if m else None
 
-    Comparer les six demande de les mettre sur la meme ligne, avec les memes
-    colonnes -- ce que ni `PERF_EXECVE` ni `[PERF-PROC]` ne font seuls,
-    puisque l'un est indexe par image et l'autre par pid.
+
+def _ms(v, diviseur=1000):
+    if v is None:
+        return INCONNU
+    return f"{v / diviseur:.1f}"
+
+
+def _n(v):
+    return INCONNU if v is None else str(v)
+
+
+def tableau_des_services(execs, forks, spawns, procs, workers):
+    """Une entree par INSTANCE de service, avec ses bornes et ses fautes.
+
+    Les sources sont indexees differemment -- `PERF_EXECVE` par image,
+    `[PERF-PROC]` par pid, `SPAWN_ETAPE` par enfant, `WORKER_ETAPE` par pid --
+    et c'est ce recoupement qui manquait pour comparer les six services.
     """
-    par_service = {}
+    instances = []
     for ligne in execs:
         image = re.search(r"image=(\S+)", ligne)
-        pid = re.search(r"pid=(\d+)", ligne)
-        t = re.search(r"t=(\d+)", ligne)
-        duree = re.search(r"duree_us=(\d+)", ligne)
-        if not (image and pid):
+        pid = _entier(ligne, r"pid=(\d+)")
+        if not image or pid is None:
             continue
         nom = image.group(1).rsplit("/", 1)[-1]
         if nom not in SERVICES:
             continue
-        par_service.setdefault(nom, []).append({
-            "pid": int(pid.group(1)),
-            "exec_ms": int(t.group(1)) if t else None,
-            "exec_us": int(duree.group(1)) if duree else None,
-            "faute_nombre": None,
-            "faute_us": None,
-            "faute_pire_us": None,
-            "fichier": None,
-            "zero": None,
-            "rss_kio": None,
+        exec_exit = _entier(ligne, r"\bt=(\d+)")
+        exec_us = _entier(ligne, r"duree_us=(\d+)")
+        exec_enter = None
+        if exec_exit is not None and exec_us is not None:
+            exec_enter = exec_exit - exec_us // 1000
+        instances.append({
+            "service": nom,
+            "pid": pid,
+            "exec_enter_ms": exec_enter,
+            "exec_exit_ms": exec_exit,
+            "exec_duration_us": exec_us,
+            # La liberation de l'ancien espace est DANS l'execve : la sortir
+            # permet de voir qu'elle en fait l'essentiel.
+            "exec_liberation_us": _entier(ligne, r"liberation_us=(\d+)"),
         })
 
-    # Le DERNIER releve de fautes de chaque pid porte ses totaux.
-    derniers = {}
+    par_pid = {i["pid"]: i for i in instances}
+    for i in instances:
+        for cle in ("spawn_request_ms", "fork_enter_ms", "fork_exit_ms",
+                    "fork_duration_ms", "fork_noyau_us", "fork_pages",
+                    "first_user_instruction_ms", "main_ms", "ready_ms",
+                    "rss_kio", "faults_total", "faults_total_us",
+                    "worst_fault_us", "file_faults", "file_fault_us",
+                    "zero_faults", "zero_fault_us", "shared_faults",
+                    "shared_fault_us", "copy_faults", "copy_fault_us",
+                    "wait_faults", "wait_fault_us"):
+            i.setdefault(cle, None)
+
+    # --- le fork vu de Ladybird (SPAWN_ETAPE, indexe par enfant) ------------
+    for ligne in spawns:
+        pid = _entier(ligne, r"enfant=(\d+)")
+        i = par_pid.get(pid)
+        if i is None:
+            continue
+        i["fork_exit_ms"] = _entier(ligne, r"\bt=(\d+)")
+        i["fork_enter_ms"] = _entier(ligne, r"debut=(\d+)")
+        i["fork_duration_ms"] = _entier(ligne, r"fork_ms=(\d+)")
+
+    # --- le fork vu du noyau (PERF_FORK), pour recouper ---------------------
+    for ligne in forks:
+        pid = _entier(ligne, r"enfant=(\d+)")
+        i = par_pid.get(pid)
+        if i is None:
+            continue
+        i["fork_noyau_us"] = _entier(ligne, r"duree_us=(\d+)")
+        i["fork_pages"] = _entier(ligne, r"pages_copiees=(\d+)")
+
+    # --- les fautes (dernier releve de chaque pid : il porte les totaux) ----
     for ligne in procs:
-        pid = re.search(r"pid=(\d+)", ligne)
-        if pid:
-            derniers[int(pid.group(1))] = ligne
-    for entrees in par_service.values():
-        for entree in entrees:
-            ligne = derniers.get(entree["pid"])
-            if not ligne:
-                continue
-            def champ(motif):
-                m = re.search(motif, ligne)
-                return int(m.group(1)) if m else None
-            entree["faute_nombre"] = champ(r"fautes=(\d+)")
-            entree["faute_us"] = champ(r"total_us=(\d+)")
-            entree["faute_pire_us"] = champ(r"pire_us=(\d+)")
-            entree["fichier"] = champ(r"fichier=(\d+)/")
-            entree["zero"] = champ(r"zero=(\d+)/")
-            entree["rss_kio"] = champ(r"rss_kio=(\d+)")
-    return par_service
+        pid = _entier(ligne, r"pid=(\d+)")
+        i = par_pid.get(pid)
+        if i is None:
+            continue
+        i["rss_kio"] = _entier(ligne, r"rss_kio=(\d+)")
+        i["faults_total"] = _entier(ligne, r"fautes=(\d+)")
+        i["faults_total_us"] = _entier(ligne, r"total_us=(\d+)")
+        i["worst_fault_us"] = _entier(ligne, r"pire_us=(\d+)")
+        for cle, mot in (("zero", "zero"), ("file", "fichier"),
+                         ("shared", "partage"), ("copy", "copie"),
+                         ("wait", "attente")):
+            m = re.search(rf"{mot}=(\d+)/(\d+)us", ligne)
+            if m:
+                i[f"{cle}_faults"] = int(m.group(1))
+                i[f"{cle}_fault_us"] = int(m.group(2))
+
+    # --- les bornes cote Ladybird (WORKER_ETAPE, worker seulement) ----------
+    for ligne in workers:
+        pid = _entier(ligne, r"pid=(\d+)")
+        i = par_pid.get(pid)
+        if i is None:
+            continue
+        t = _entier(ligne, r"\bt=(\d+)")
+        if "etape=main" in ligne:
+            i["main_ms"] = t
+        elif "etape=boucle_prete" in ligne:
+            i["ready_ms"] = t
+        elif "etape=ipc_pret" in ligne and i["ready_ms"] is None:
+            i["ready_ms"] = t
+
+    instances.sort(key=lambda i: (SERVICES.index(i["service"]),
+                                  i["exec_exit_ms"] or 0))
+    return instances
 
 
-def imprime_services(par_service):
-    entete = (f"   {'service':<22} {'pid':>5} {'exec@s':>8} {'exec_us':>8} "
-              f"{'rss_Mio':>8} {'fautes':>8} {'faute_ms':>9} {'pire_ms':>8} "
-              f"{'fichier':>8} {'zero':>8}")
-    print(entete)
-    vide = True
-    for nom in SERVICES:
-        for e in par_service.get(nom, []):
-            vide = False
-            def ms(v):
-                return f"{v / 1000:.1f}" if v is not None else "-"
-            print(f"   {nom:<22} {e['pid']:>5}"
-                  f" {ms(e['exec_ms']):>8}"
-                  f" {e['exec_us'] if e['exec_us'] is not None else '-':>8}"
-                  f" {(e['rss_kio'] // 1024) if e['rss_kio'] is not None else '-':>8}"
-                  f" {e['faute_nombre'] if e['faute_nombre'] is not None else '-':>8}"
-                  f" {ms(e['faute_us']):>9}"
-                  f" {ms(e['faute_pire_us']):>8}"
-                  f" {e['fichier'] if e['fichier'] is not None else '-':>8}"
-                  f" {e['zero'] if e['zero'] is not None else '-':>8}")
-    if vide:
+def imprime_services(instances):
+    """Une LIGNE par instance, greppable, avec toutes les colonnes."""
+    if not instances:
         print("   (aucun service reconnu ; ni PERF_EXECVE ni [PERF-PROC] ne les nomment)")
+        return
+    for i in instances:
+        print(
+            "   SERVICE_TIMELINE"
+            f" service={i['service']}"
+            f" pid={i['pid']}"
+            f" spawn_request_ms={_ms(i['spawn_request_ms'], 1)}"
+            f" fork_enter_ms={_ms(i['fork_enter_ms'], 1)}"
+            f" fork_exit_ms={_ms(i['fork_exit_ms'], 1)}"
+            f" fork_duration_ms={_n(i['fork_duration_ms'])}"
+            f" fork_noyau_us={_n(i['fork_noyau_us'])}"
+            f" fork_pages={_n(i['fork_pages'])}"
+            f" exec_enter_ms={_ms(i['exec_enter_ms'], 1)}"
+            f" exec_exit_ms={_ms(i['exec_exit_ms'], 1)}"
+            f" exec_duration_us={_n(i['exec_duration_us'])}"
+            f" exec_liberation_us={_n(i['exec_liberation_us'])}"
+            f" first_user_instruction_ms={_ms(i['first_user_instruction_ms'], 1)}"
+            f" main_ms={_ms(i['main_ms'], 1)}"
+            f" ready_ms={_ms(i['ready_ms'], 1)}"
+            f" rss_MiB={_n(i['rss_kio'] // 1024 if i['rss_kio'] is not None else None)}"
+            f" faults_total={_n(i['faults_total'])}"
+            f" faults_total_ms={_ms(i['faults_total_us'])}"
+            f" worst_fault_ms={_ms(i['worst_fault_us'])}"
+            f" file_faults={_n(i['file_faults'])}"
+            f" file_fault_ms={_ms(i['file_fault_us'])}"
+            f" zero_faults={_n(i['zero_faults'])}"
+            f" zero_fault_ms={_ms(i['zero_fault_us'])}"
+            f" shared_faults={_n(i['shared_faults'])}"
+            f" shared_fault_ms={_ms(i['shared_fault_us'])}"
+            f" copy_faults={_n(i['copy_faults'])}"
+            f" copy_fault_ms={_ms(i['copy_fault_us'])}"
+            f" wait_faults={_n(i['wait_faults'])}"
+            f" wait_fault_ms={_ms(i['wait_fault_us'])}"
+        )
+    print()
+    print("   Colonnes a `-` : non mesurees, PAS nulles.")
+    print("   spawn_request_ms          : pas de sonde a l'entree de Core::Process::spawn.")
+    print("   first_user_instruction_ms : rien ne borne encore la premiere")
+    print("                               instruction anneau 3 apres l'execve.")
+    print("   main_ms / ready_ms        : instrumentes pour WebWorker seulement.")
+
+
+def decompose(i):
+    """Decompose le demarrage d'une instance, et AVOUE ce qui reste.
+
+    BOUCHAUD_C43_LE_RESIDU_EST_LA_MESURE
+
+    Les cinq segments sont contigus par construction : leur somme vaut le total
+    par definition, et un « residu » calcule ainsi vaudrait toujours zero. Ce
+    n'est pas la question posee.
+
+    La question est : de ce total, quelle part a une CAUSE NOMMEE ? Seuls le
+    `fork`, l'`execve` et les fautes de page en ont une aujourd'hui. Le reste
+    est du temps qui passe sans qu'on sache ou -- et c'est ce chiffre-la qui
+    dit ou instrumenter ensuite.
+    """
+    debut = i["fork_enter_ms"]
+    fin = i["ready_ms"] or i["main_ms"] or i["exec_exit_ms"]
+    if debut is None or fin is None:
+        return None
+    total = fin - debut
+
+    segments = {
+        "launch_to_fork_enter_ms": None,  # pas de sonde a l'entree de spawn
+        "fork_ms": i["fork_duration_ms"],
+        "fork_exit_to_exec_enter_ms": (
+            i["exec_enter_ms"] - i["fork_exit_ms"]
+            if i["exec_enter_ms"] is not None and i["fork_exit_ms"] is not None
+            else None
+        ),
+        "exec_ms": (
+            i["exec_duration_us"] // 1000
+            if i["exec_duration_us"] is not None else None
+        ),
+        "exec_exit_to_main_ms": (
+            i["main_ms"] - i["exec_exit_ms"]
+            if i["main_ms"] is not None and i["exec_exit_ms"] is not None
+            else None
+        ),
+        "main_to_ready_ms": (
+            i["ready_ms"] - i["main_ms"]
+            if i["ready_ms"] is not None and i["main_ms"] is not None
+            else None
+        ),
+    }
+
+    # Les fautes n'ajoutent pas de temps : elles EXPLIQUENT du temps deja
+    # compte dans les segments ci-dessus. Les additionner au total serait le
+    # compter deux fois.
+    causes = {
+        "page_fault_file_ms": i["file_fault_us"],
+        "page_fault_zero_ms": i["zero_fault_us"],
+        "page_fault_wait_ms": i["wait_fault_us"],
+        "page_fault_copy_ms": i["copy_fault_us"],
+        "page_fault_shared_ms": i["shared_fault_us"],
+    }
+    explique = (segments["fork_ms"] or 0) + (segments["exec_ms"] or 0)
+    explique += sum((v or 0) for v in causes.values()) // 1000
+
+    return {
+        "total_ms": total,
+        "segments": segments,
+        "causes_ms": {k: (None if v is None else v // 1000)
+                      for k, v in causes.items()},
+        "explique_ms": explique,
+        "unexplained_ms": total - explique,
+        "residu_pct": (100.0 * (total - explique) / total) if total else 0.0,
+    }
+
+
+def imprime_decomposition(instances):
+    """`WORKER_COLD_START_BREAKDOWN`, et le meme pour les cinq autres."""
+    for i in instances:
+        d = decompose(i)
+        if d is None:
+            print(f"   {i['service']} pid={i['pid']} : bornes insuffisantes"
+                  f" (fork_enter ou fin manquants) -- rien a decomposer")
+            continue
+        etiquette = ("WORKER_COLD_START_BREAKDOWN"
+                     if i["service"] == "WebWorker"
+                     else "SERVICE_COLD_START_BREAKDOWN")
+        print(f"   {etiquette} service={i['service']} pid={i['pid']}"
+              f" total_ms={d['total_ms']}")
+        for cle, valeur in d["segments"].items():
+            print(f"      {cle}={_n(valeur)}")
+        for cle, valeur in d["causes_ms"].items():
+            print(f"      {cle}={_n(valeur)}")
+        print(f"      explique_ms={d['explique_ms']}")
+        print(f"      unexplained_ms={d['unexplained_ms']}"
+              f" ({d['residu_pct']:.1f} % du total)")
+        if d["residu_pct"] > 5.0:
+            print(f"      AU-DESSUS DU BUDGET DE 5 % : ce demarrage n'est pas")
+            print(f"      explique. Instrumenter avant d'optimiser quoi que ce soit.")
+        print()
+
+
+def imprime_classement(instances):
+    """`SERVICE_STARTUP_RANKING`, trie sur la duree MESUREE.
+
+    Le tri est la seule chose qui distingue un classement d'une liste. Trier
+    sur l'intuition -- « le worker est le pire » -- est precisement ce qui a
+    fait passer a cote des 114 s qui separent l'initialisation de l'hote du
+    raccordement de l'interface.
+    """
+    lignes = []
+    for i in instances:
+        d = decompose(i)
+        if d is None:
+            continue
+        lignes.append((d["total_ms"], i, d))
+    lignes.sort(key=lambda e: -e[0])
+    if not lignes:
+        print("   (aucune instance decomposable)")
+        return
+    for total, i, d in lignes:
+        print(
+            "   SERVICE_STARTUP_RANKING"
+            f" service={i['service']}"
+            f" pid={i['pid']}"
+            f" total_ms={total}"
+            f" fork_ms={_n(d['segments']['fork_ms'])}"
+            f" exec_ms={_n(d['segments']['exec_ms'])}"
+            f" prefault_ms={_n(d['causes_ms']['page_fault_file_ms'])}"
+            f" runtime_ms={_n(d['segments']['exec_exit_to_main_ms'])}"
+            f" ipc_wait_ms={_n(d['segments']['main_to_ready_ms'])}"
+            f" unexplained_ms={d['unexplained_ms']}"
+        )
 
 
 def main():
@@ -248,7 +473,7 @@ def main():
                   f"  [{source_etape}] {texte}")
             precedent = t
 
-    forks, execs, procs = noyau(source)
+    forks, execs, procs, spawns, workers = noyau(source)
     print()
     print("== ce que le noyau a mesure : duplication d'espace ==")
     for ligne in forks[:12] or ["   (aucune)"]:
@@ -259,9 +484,17 @@ def main():
         print(f"   {ligne}")
     print()
     print("== les six services, cote a cote ==")
-    imprime_services(tableau_des_services(execs, procs))
+    _INSTANCES = tableau_des_services(execs, forks, spawns, procs, workers)
+    imprime_services(_INSTANCES)
 
     print()
+    print("== classement des lancements, trie sur la duree MESUREE ==")
+    imprime_classement(_INSTANCES)
+
+    print()
+    print("== decomposition de chaque demarrage, residu compris ==")
+    imprime_decomposition(_INSTANCES)
+
     print("== fautes de page par processus, dans le temps ==")
     for ligne in series_par_pid(procs) or ["   (aucune)"]:
         print(f"   {ligne}")
