@@ -125,6 +125,57 @@ void _start(void)
         }
     }
 
+    // LE CONTRAT DE LA FRAME NON MISE A ZERO, VERIFIE OCTET PAR OCTET.
+    //
+    // `AddressSpace::duplicate` prend desormais ses frames par
+    // `alloc_frame_a_recouvrir`, qui ne les met PAS a zero : elles sortent de
+    // l'allocateur en portant ce qu'un autre processus y avait ecrit, et le
+    // `copy_nonoverlapping` qui suit est la SEULE chose qui les rende
+    // presentables. Si un jour cette copie devenait partielle, l'enfant
+    // heriterait de la memoire d'un inconnu -- une fuite qu'aucun test
+    // fonctionnel ne remarquerait, puisque le programme continuerait de
+    // tourner.
+    //
+    // La verification porte sur TOUS les octets, pas sur un par page : c'est
+    // exactement la difference entre « la page est la » et « la page est
+    // celle du pere ». Quatre mebioctets suffisent a la faire -- ce qu'on
+    // teste est une propriete du chemin, pas un volume.
+    {
+        const long octets = 4L * 1024L * 1024L;
+        long base = appel6(9, 0, octets, 3, 0x22, -1, 0);
+        if ((unsigned long)base >= (unsigned long)-4095L) {
+            dis("COUT_FORK_COPIE ok=0 raison=mmap\n");
+        } else {
+            unsigned char *motif = (unsigned char *)base;
+            for (long o = 0; o < octets; o++)
+                motif[o] = (unsigned char)((o * 31 + (o >> 12)) & 0xff);
+
+            long pid = appel(57, 0, 0, 0);
+            if (pid == 0) {
+                long erreurs = 0;
+                for (long o = 0; o < octets; o++)
+                    if (motif[o] != (unsigned char)((o * 31 + (o >> 12)) & 0xff))
+                        erreurs++;
+                char ligne[96];
+                char *q = ligne;
+                const char *r = erreurs == 0
+                    ? "COUT_FORK_COPIE ok=1 erreurs="
+                    : "COUT_FORK_COPIE ok=0 erreurs=";
+                while (*r) *q++ = *r++;
+                q = entier(q, erreurs);
+                *q++ = '\n';
+                appel(1, 1, (long)ligne, q - ligne);
+                appel(60, erreurs == 0 ? 0 : 1, 0, 0);
+                for (;;) {}
+            }
+            if (pid > 0)
+                appel6(61, pid, 0, 0, 0, 0, 0);
+            else
+                dis("COUT_FORK_COPIE ok=0 raison=fork\n");
+            appel(11 /* munmap */, base, octets, 0);
+        }
+    }
+
     // LE GESTE COMPLET : `fork` PUIS `execve`, COMME LE NAVIGATEUR LE FAIT.
     //
     // Les paliers ci-dessus mesurent la duplication seule. Mais

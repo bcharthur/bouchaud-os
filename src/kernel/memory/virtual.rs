@@ -266,6 +266,79 @@ pub fn alloc_frame() -> Option<u64> {
     Some(phys)
 }
 
+/// Une frame NON MISE A ZERO, pour un appelant qui va la recouvrir en entier.
+///
+/// BOUCHAUD_C35_NE_PAS_ECRIRE_DEUX_FOIS
+///
+/// # Ce que cette fonction corrige
+///
+/// `alloc_frame` met la page a zero avant de la rendre. C'est la bonne regle :
+/// une frame qui sort de l'allocateur porte encore ce qu'un autre processus y
+/// avait ecrit, et la rendre telle quelle serait une fuite.
+///
+/// Mais `AddressSpace::duplicate` fait, pour chaque page du pere :
+///
+///     let frame = alloc_frame()?;            // 4 Kio de zeros
+///     copy_nonoverlapping(..., PAGE_SIZE);   // 4 Kio recouverts
+///
+/// **Huit kibioctets ecrits pour en transmettre quatre.** La mise a zero
+/// n'est pas seulement inutile ici : elle est integralement effacee a la
+/// ligne suivante. Sur un `fork` de 256 Mio c'est un demi-gibioctet de
+/// memoire ecrite pour rien.
+///
+/// # Le contrat, et pourquoi il n'est pas negociable
+///
+/// L'appelant DOIT ecrire les `PAGE_SIZE` octets avant que la page ne
+/// devienne visible en anneau 3. Un appelant qui n'ecrirait qu'une partie
+/// exposerait le reste -- c'est-a-dire de la memoire d'un autre processus --
+/// et ce serait une fuite silencieuse, du genre qu'aucun test d'integration
+/// ne remarque.
+///
+/// C'est pour cela qu'elle porte un nom different plutot qu'un parametre
+/// booleen : un `alloc_frame(false)` se glisse dans un appel existant sans
+/// qu'on y pense, un nom ne se choisit pas par accident.
+///
+/// Elle n'est employee que par `duplicate`, qui recouvre la page entiere par
+/// `copy_nonoverlapping` a la ligne suivante.
+pub fn alloc_frame_a_recouvrir() -> Option<u64> {
+    let mut f = frames();
+    let candidate = if let Some(p) = f.freed_head {
+        let next = unsafe { *(memory::phys_to_virt(p) as *const u64) };
+        f.freed_head = if next == FREE_LIST_END { None } else { Some(next) };
+        assert!(
+            f.libres.marque_occupee(p),
+            "vmm: frame {p:#x} en tete de liste libre mais absente du bitmap",
+        );
+        Some(p)
+    } else {
+        let mut found = None;
+        for region in f.regions.iter_mut() {
+            if region.0 + PAGE_SIZE <= region.1 {
+                found = Some(region.0);
+                region.0 += PAGE_SIZE;
+                break;
+            }
+        }
+        found
+    };
+
+    let phys = match candidate {
+        Some(phys) => phys,
+        None => {
+            f.failures = f.failures.wrapping_add(1);
+            return None;
+        }
+    };
+    f.used = f
+        .used
+        .checked_add(1)
+        .expect("vmm: used frame accounting overflow");
+    f.allocations = f.allocations.wrapping_add(1);
+    f.high_watermark = f.high_watermark.max(f.used);
+    FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+    Some(phys)
+}
+
 /// Rend une frame a l'allocateur.
 // BOUCHAUD_P2_FREE_FRAME_O1_V1
 //
@@ -1179,7 +1252,11 @@ impl AddressSpace {
             let phys = entry & ADDR_MASK;
             let flags = entry & !ADDR_MASK;
             if self.owns_frame(phys) {
-                let frame = alloc_frame()?;
+                // Voir `alloc_frame_a_recouvrir` : la page est recouverte en
+                // ENTIER a la ligne suivante, donc la mettre a zero d'abord
+                // reviendrait a ecrire huit kibioctets pour en transmettre
+                // quatre. Le `copy_nonoverlapping` ci-dessous EST le contrat.
+                let frame = alloc_frame_a_recouvrir()?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         memory::phys_to_virt(phys),

@@ -110,6 +110,23 @@ for MIO in $(printf '%s\n' "${!MEILLEUR[@]}" | sort -n); do
     printf '%4s Mio %10s us %10s\n' "$MIO" "$US" "$((US / MIO))"
 done
 
+# LA COPIE EST-ELLE COMPLETE ? La question n'est pas rhetorique depuis que
+# `duplicate` prend ses frames sans les mettre a zero : une copie partielle
+# donnerait a l'enfant la memoire d'un autre processus, et le programme
+# continuerait de tourner sans rien dire.
+LIGNE_COPIE=$(grep 'COUT_FORK_COPIE' "$PROPRE" | head -1 || true)
+echo
+if [ -z "$LIGNE_COPIE" ]; then
+    echo "cout fork : aucune verification de copie ; le contrat de la frame non mise a zero n'est pas teste" >&2
+    echecs=$((echecs + 1))
+elif ! echo "$LIGNE_COPIE" | grep -q 'ok=1'; then
+    echo "cout fork : la copie du fork n'est pas fidele -- $LIGNE_COPIE" >&2
+    echo "            voir alloc_frame_a_recouvrir : la frame sort SALE de l'allocateur" >&2
+    echecs=$((echecs + 1))
+else
+    echo "$LIGNE_COPIE"
+fi
+
 # LE GESTE COMPLET, ET CE QU'IL AJOUTE.
 #
 # `fork` seul ne dit pas tout : l'`execve` qui suit rend une a une les frames
