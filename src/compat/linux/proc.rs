@@ -16,6 +16,12 @@ use crate::kernel::task::{self, FileTable, Mm, MmState, Process, ProcessLifecycl
 use crate::kernel::sync::SpinLock;
 use crate::kernel::{elf, vmm};
 
+static FORK_APPELS: AtomicU64 = AtomicU64::new(0);
+static FORK_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static FORK_COPIE_NS: AtomicU64 = AtomicU64::new(0);
+static FORK_PAGES_COPIEES: AtomicU64 = AtomicU64::new(0);
+static FORK_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
 static EXEC_QUIESCE_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static EXEC_QUIESCE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -35,16 +41,29 @@ pub fn exec_quiesce_stats() -> (u64, u64) {
 /// `cmd1 | cmd2`.
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let parent = task::current_process();
+    // BOUCHAUD_P23_COUT_DU_FORK
+    //
+    // Le commentaire de `duplicate` assume la recopie immediate ; personne ne
+    // l'avait CHIFFREE. Or c'est le chemin que prend chaque processus du
+    // navigateur -- `Core::Process::spawn` fait `fork` puis `execve`, et la
+    // copie entiere est jetee a la ligne suivante.
+    //
+    // `tools/ci/run_cout_fork.sh` mesure la loi en anneau 3 : environ deux
+    // millisecondes par mebioctet resident, lineaire sur quatre paliers. Ce
+    // qui manquait etait de savoir COMBIEN un `fork` donne du navigateur
+    // coute, et sur quelles pages.
+    let debut_ns = crate::kernel::timer::monotonic_ns();
 
-    let (space, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages) = {
+    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages) = {
         let mm = parent.mm.lock();
-        let space = match mm.space.duplicate() {
-            Some(space) => space,
+        let (space, compte) = match mm.space.duplicate() {
+            Some(resultat) => resultat,
             None => return -errno::ENOMEM,
         };
-        (space, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
+        (space, compte, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
             mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone())
     };
+    let apres_espace_ns = crate::kernel::timer::monotonic_ns();
     let files = parent.files.lock().clone();
     let (cwd, uid, gid, name, ecran) = {
         let metadata = parent.metadata.lock();
@@ -73,8 +92,14 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     for plage in &partages {
         crate::kernel::partage::mappe(plage.node);
     }
+    // Une prise de reference par page propre, chacune sous le verrou GLOBAL du
+    // cache. Sur un navigateur dont le texte partage fait des centaines de
+    // mebioctets, ce n'est pas le meme cout que la recopie et il ne se corrige
+    // pas au meme endroit : il est donc borne a part.
+    let apres_references_ns = crate::kernel::timer::monotonic_ns();
 
     let pid = crate::kernel::process::spawn(&name, uid as u16);
+    let nom_journal = name.clone();
     let mut child_signals = signals;
     // Les signaux en attente ne sont pas herites : ils appartenaient au parent.
     child_signals.pending = 0;
@@ -104,7 +129,39 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     child_task.fs_base = usermode::fs_base();
     task::register(child_task);
 
+    let fin_ns = crate::kernel::timer::monotonic_ns();
+    let kio_copies = compte.pages_copiees.saturating_mul(crate::kernel::vmm::PAGE_SIZE) / 1024;
+    FORK_TOTAL_NS.fetch_add(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    FORK_COPIE_NS.fetch_add(apres_espace_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    FORK_PAGES_COPIEES.fetch_add(compte.pages_copiees, Ordering::Relaxed);
+    FORK_APPELS.fetch_add(1, Ordering::Relaxed);
+    FORK_PIRE_NS.fetch_max(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_FORK pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
+        parent_pid,
+        pid,
+        nom_journal,
+        fin_ns.saturating_sub(debut_ns) / 1_000,
+        apres_espace_ns.saturating_sub(debut_ns) / 1_000,
+        apres_references_ns.saturating_sub(apres_espace_ns) / 1_000,
+        fin_ns.saturating_sub(apres_references_ns) / 1_000,
+        compte.pages_copiees,
+        compte.pages_empruntees,
+        kio_copies,
+    ));
+
     pid as i64
+}
+
+/// Ce que tous les `fork` de la machine ont coute, pour le releve periodique.
+pub fn fork_stats() -> (u64, u64, u64, u64, u64) {
+    (
+        FORK_APPELS.load(Ordering::Relaxed),
+        FORK_TOTAL_NS.load(Ordering::Relaxed),
+        FORK_COPIE_NS.load(Ordering::Relaxed),
+        FORK_PAGES_COPIEES.load(Ordering::Relaxed),
+        FORK_PIRE_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Lit un tableau de chaines C termine par un pointeur nul (`argv`, `envp`).
@@ -151,6 +208,18 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
 
     let process = task::current_process();
     let cwd = process.metadata.lock().cwd;
+    // BOUCHAUD_P23_ETAPES_DE_L_EXECVE
+    //
+    // `construit_tache` publiait deja `PERF_EXEC_PRET`, mais AUCUN enfant du
+    // navigateur ne passe par la : le courtier fait `fork` puis `execve`, donc
+    // par ici. Les vingt-trois secondes entre `processus_lance` et `main` du
+    // premier WebWorker n'avaient, cote noyau, pas une seule borne.
+    //
+    // Les etapes sont separees parce que leurs remedes le sont : resoudre un
+    // chemin, lire des en-tetes, poser des promesses, construire une pile,
+    // attendre que les autres coeurs lachent l'ancien CR3, et LIBERER l'ancien
+    // espace ne se corrigent pas au meme endroit.
+    let debut_ns = crate::kernel::timer::monotonic_ns();
 
     let node = {
         let fs = crate::fs::ramfs::fs();
@@ -160,9 +229,11 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
             None => return -errno::ENOENT,
         }
     };
+    let apres_ouverture_ns = crate::kernel::timer::monotonic_ns();
     if elf::parse_node(node).is_err() {
         return -errno::ENOEXEC;
     }
+    let apres_entetes_ns = crate::kernel::timer::monotonic_ns();
 
     let mut space = match vmm::AddressSpace::new() {
         Some(space) => space,
@@ -206,10 +277,12 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         uid,
         gid,
     };
+    let apres_projections_ns = crate::kernel::timer::monotonic_ns();
     let stack = match elf::build_stack(&mut space, &mut new_promises, &layout) {
         Ok(stack) => stack,
         Err(_) => return -errno::ENOMEM,
     };
+    let apres_pile_ns = crate::kernel::timer::monotonic_ns();
 
     // All fallible image construction is complete. Only now terminate sibling
     // tasks and retire the old identity: failed execve must leave both intact.
@@ -231,6 +304,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     EXEC_QUIESCE_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
     EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
     crate::kernel::smp_lock::resume_after_schedule(depth);
+    let apres_quiescence_ns = crate::kernel::timer::monotonic_ns();
 
     // BOUCHAUD_C8_SUPERVISION_SUR_EXECVE_V1
     //
@@ -250,6 +324,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
             crate::kernel::timer::monotonic_ns(),
         );
     }
+    let nom_journal = path.clone();
     process.metadata.lock().name = path;
     process.files.lock().close_on_exec();
     process.signals.lock().reset_for_exec();
@@ -275,6 +350,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         old_identity.mark_inactive(smp::cpu_index());
         (old, old_clean, old_shared)
     };
+    let apres_bascule_ns = crate::kernel::timer::monotonic_ns();
     task::forget_fault_space(old.pml4());
     for mapping in old_clean {
         crate::kernel::clean_page_cache::release(mapping.key);
@@ -282,7 +358,29 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     for mapping in old_shared {
         crate::kernel::partage::demappe(mapping.node);
     }
+    // LIBERER COUTE AUSSI CHER QUE COPIER, ET C'EST LE MEME `fork` QUI PAIE.
+    //
+    // `Drop` rend une a une toutes les frames que la duplication venait
+    // d'allouer. Un `fork` suivi d'un `execve` parcourt donc DEUX FOIS la
+    // taille residente du pere : une fois pour la recopier, une fois pour la
+    // rendre. Le second passage etait invisible.
+    let pages_rendues = old.mapped_pages() as u64;
     drop(old);
+    let fin_ns = crate::kernel::timer::monotonic_ns();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_EXECVE image={} pid={} duree_us={} ouverture_us={} entetes_us={} projections_us={} pile_us={} quiescence_us={} bascule_us={} liberation_us={} pages_rendues={}",
+        nom_journal,
+        process.pid,
+        fin_ns.saturating_sub(debut_ns) / 1_000,
+        apres_ouverture_ns.saturating_sub(debut_ns) / 1_000,
+        apres_entetes_ns.saturating_sub(apres_ouverture_ns) / 1_000,
+        apres_projections_ns.saturating_sub(apres_entetes_ns) / 1_000,
+        apres_pile_ns.saturating_sub(apres_projections_ns) / 1_000,
+        apres_quiescence_ns.saturating_sub(apres_pile_ns) / 1_000,
+        apres_bascule_ns.saturating_sub(apres_quiescence_ns) / 1_000,
+        fin_ns.saturating_sub(apres_bascule_ns) / 1_000,
+        pages_rendues,
+    ));
 
     // La tache repart de zero : nouvelle trame, pile noyau reinitialisee. La
     // pile noyau courante (celle de cet appel systeme) est abandonnee telle

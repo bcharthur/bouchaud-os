@@ -717,6 +717,19 @@ impl UnmapRetirement {
     }
 }
 
+/// Ce qu'une duplication d'espace d'adressage a REELLEMENT fait.
+///
+/// `fork` ne coute pas la meme chose selon la nature des pages du pere : une
+/// page possedee est RECOPIEE (allocation de frame plus quatre kibioctets de
+/// memcpy), une page empruntee est seulement re-projetee. Un chiffre unique
+/// melangerait les deux et ne dirait pas lequel il faut attaquer.
+#[derive(Clone, Copy, Default)]
+pub struct DuplicationCompte {
+    pub pages_vues: u64,
+    pub pages_copiees: u64,
+    pub pages_empruntees: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResidentStats {
     pub total_pages: u64,
@@ -1153,9 +1166,16 @@ impl AddressSpace {
     /// Les pages empruntees (framebuffer, cache partage) sont re-mappees sur
     /// les memes frames plutot que dupliquees : c'est le comportement attendu
     /// d'un `MAP_SHARED`.
-    pub fn duplicate(&self) -> Option<AddressSpace> {
+    pub fn duplicate(&self) -> Option<(AddressSpace, DuplicationCompte)> {
         let mut child = AddressSpace::new()?;
-        for (virt, entry) in self.iter_user_pages() {
+        let mut compte = DuplicationCompte::default();
+        // Le parcours construit d'abord la liste complete des PTE utilisateur.
+        // Sur un espace de plusieurs centaines de mebioctets cette liste EST un
+        // cout, et elle est payee avant la premiere copie : la mesurer a part
+        // evite de l'imputer a la recopie.
+        let pages = self.iter_user_pages();
+        compte.pages_vues = pages.len() as u64;
+        for (virt, entry) in pages {
             let phys = entry & ADDR_MASK;
             let flags = entry & !ADDR_MASK;
             if self.owns_frame(phys) {
@@ -1171,11 +1191,15 @@ impl AddressSpace {
                 if !child.map(virt, frame, flags) {
                     return None;
                 }
-            } else if !child.map(virt, phys, flags) {
-                return None;
+                compte.pages_copiees += 1;
+            } else {
+                if !child.map(virt, phys, flags) {
+                    return None;
+                }
+                compte.pages_empruntees += 1;
             }
         }
-        Some(child)
+        Some((child, compte))
     }
 
     /// Copie `len` octets depuis la memoire utilisateur vers un tampon noyau.
