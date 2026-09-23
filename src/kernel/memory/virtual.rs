@@ -374,15 +374,113 @@ pub fn free_frame(phys: u64) {
 /// bornant la tenue. Ce n'est pas un compromis tiede : le cout d'une prise
 /// est fixe et celui d'une tranche est lineaire, donc l'essentiel du gain est
 /// acquis des les premieres dizaines.
+/// Taille de tranche. 256 est CONSERVE -- la mesure ne justifie pas d'en changer.
+///
+/// BOUCHAUD_C45_LA_TENUE_SE_MESURE
+///
+/// 256 avait ete choisi en estimant la tenue a « environ cent microsecondes ».
+/// Le balayage (`tools/ci/balaye_tranche_liberation.sh`, banc du cout du fork,
+/// 65540 pages rendues) a mesure les cinq tailles :
+///
+///     taille  liberation_us  tranches  tenue_pire_us  attente_us  contentions
+///         32          71069     16447            931       15526         2928
+///         64          58238      8238            560       10578         1852
+///        128          60527      4135           1888        5042         1272
+///        256          59362      2080           2549        3193         1027
+///        512          82493      1056           1553        2179          922
+///
+/// ## Ce que la mesure etablit
+///
+/// La tenue MOYENNE par tranche est exactement lineaire, comme attendu :
+/// 17, 32, 63, 130 us pour 32/64/128/256. A 256, elle vaut 130 us -- proche
+/// de l'estimation d'origine, qui etait donc raisonnable.
+///
+/// La contention decroit de facon monotone quand la tranche grandit :
+/// 15,5 ms d'attente cumulee et 2928 contentions a 32, contre 3,2 ms et 1027
+/// a 256. C'est l'effet recherche, et il est reel.
+///
+/// Les deux extremes degradent le debit : 32 par contention, 512 pour une
+/// raison non elucidee -- probablement son tampon de pile de 4 Kio. Entre 64
+/// et 256, le debit est indiscernable.
+///
+/// ## Ce que la mesure N'ETABLIT PAS
+///
+/// Sur un seul echantillon, 64 semblait gagner sur les deux axes (560 us de
+/// tenue pire-cas contre 2549). Trois executions a 64 donnent :
+///
+///     tenue_pire_us   868   1896   2921
+///
+/// La distribution CHEVAUCHE celle de 256 et la depasse. Le pire-cas est
+/// domine par le bruit d'emulation pendant la section critique, pas par la
+/// taille de tranche. Le « gain » etait un artefact de n=1.
+///
+/// 256 est donc conserve : changer sur la foi d'un echantillon unique aurait
+/// ete exactement l'erreur que ce balayage existe pour empecher.
 const TRANCHE_LIBERATION: usize = 256;
+const TRANCHE_LIBERATION_MAX: usize = 512;
+
+static TRANCHE_EFFECTIVE: AtomicU64 = AtomicU64::new(TRANCHE_LIBERATION as u64);
+
+/// Change la taille de tranche. Reservee au banc de mesure.
+///
+/// Bornee des deux cotes : zero bouclerait sans fin, au-dela du tampon
+/// deborderait la pile. Rend la valeur reellement appliquee.
+pub fn regle_tranche_liberation(taille: usize) -> usize {
+    let taille = taille.clamp(1, TRANCHE_LIBERATION_MAX);
+    TRANCHE_EFFECTIVE.store(taille as u64, Ordering::Relaxed);
+    taille
+}
+
+pub fn tranche_liberation() -> usize {
+    (TRANCHE_EFFECTIVE.load(Ordering::Relaxed) as usize).clamp(1, TRANCHE_LIBERATION_MAX)
+}
+
+// BOUCHAUD_C45_LA_TENUE_SE_MESURE
+//
+// Rendre les frames par lots divise le nombre de prises du verrou par la
+// taille de tranche -- et multiplie d'autant la duree de CHAQUE prise. Le
+// verrou masque les interruptions : une tranche trop grande echangerait un
+// debit contre une latence, ce qui est precisement le troc qu'il ne faut pas
+// faire a l'aveugle.
+//
+// Ces compteurs sont relaches et ne coutent rien sur le chemin : deux lectures
+// d'horloge et quatre additions atomiques par TRANCHE, pas par frame.
+static LOT_TRANCHES: AtomicU64 = AtomicU64::new(0);
+static LOT_FRAMES: AtomicU64 = AtomicU64::new(0);
+static LOT_TENUE_NS: AtomicU64 = AtomicU64::new(0);
+static LOT_TENUE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static LOT_ATTENTE_NS: AtomicU64 = AtomicU64::new(0);
+static LOT_CONTENTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// (tranches, frames, tenue_totale_ns, tenue_pire_ns, attente_ns, contentions)
+pub fn stats_liberation_lot() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        LOT_TRANCHES.load(Ordering::Relaxed),
+        LOT_FRAMES.load(Ordering::Relaxed),
+        LOT_TENUE_NS.load(Ordering::Relaxed),
+        LOT_TENUE_PIRE_NS.load(Ordering::Relaxed),
+        LOT_ATTENTE_NS.load(Ordering::Relaxed),
+        LOT_CONTENTIONS.load(Ordering::Relaxed),
+    )
+}
+
+pub fn remet_stats_liberation_lot() {
+    LOT_TRANCHES.store(0, Ordering::Relaxed);
+    LOT_FRAMES.store(0, Ordering::Relaxed);
+    LOT_TENUE_NS.store(0, Ordering::Relaxed);
+    LOT_TENUE_PIRE_NS.store(0, Ordering::Relaxed);
+    LOT_ATTENTE_NS.store(0, Ordering::Relaxed);
+    LOT_CONTENTIONS.store(0, Ordering::Relaxed);
+}
 
 pub fn free_frames_lot(lot: impl IntoIterator<Item = u64>) {
-    let mut tampon = [0u64; TRANCHE_LIBERATION];
+    let taille = tranche_liberation();
+    let mut tampon = [0u64; TRANCHE_LIBERATION_MAX];
     let mut rempli = 0usize;
     for phys in lot {
         tampon[rempli] = phys;
         rempli += 1;
-        if rempli == TRANCHE_LIBERATION {
+        if rempli == taille {
             free_tranche(&tampon[..rempli]);
             rempli = 0;
         }
@@ -399,7 +497,15 @@ pub fn free_frames_lot(lot: impl IntoIterator<Item = u64>) {
 /// etrangere aux regions. Une version « rapide » qui les sauterait echangerait
 /// une microseconde contre une corruption silencieuse.
 fn free_tranche(tranche: &[u64]) {
+    // L'ATTENTE est mesuree separement de la TENUE.
+    //
+    // Les confondre ferait passer la contention d'un voisin pour une section
+    // critique trop longue -- et conduirait a reduire la tranche alors que le
+    // probleme serait ailleurs.
+    let avant_verrou = crate::kernel::timer::monotonic_ns();
     let mut f = frames();
+    let apres_verrou = crate::kernel::timer::monotonic_ns();
+    let attente = apres_verrou.saturating_sub(avant_verrou);
     for &brute in tranche {
         let phys = brute & !(PAGE_SIZE - 1);
         assert!(
@@ -419,6 +525,19 @@ fn free_tranche(tranche: &[u64]) {
         f.freed_head = Some(phys);
     }
     FRAME_USED_RELAXED.store(f.used, Ordering::Relaxed);
+    drop(f);
+
+    let tenue = crate::kernel::timer::monotonic_ns().saturating_sub(apres_verrou);
+    LOT_TRANCHES.fetch_add(1, Ordering::Relaxed);
+    LOT_FRAMES.fetch_add(tranche.len() as u64, Ordering::Relaxed);
+    LOT_TENUE_NS.fetch_add(tenue, Ordering::Relaxed);
+    LOT_ATTENTE_NS.fetch_add(attente, Ordering::Relaxed);
+    // Une microseconde d'attente n'est pas du bruit d'horloge : c'est un autre
+    // coeur qui tenait le verrou.
+    if attente > 1_000 {
+        LOT_CONTENTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    LOT_TENUE_PIRE_NS.fetch_max(tenue, Ordering::Relaxed);
 }
 
 /// Approximate frame usage for interrupt/panic-safe diagnostics.

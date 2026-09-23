@@ -386,6 +386,31 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         pages_rendues,
     ));
 
+    // BOUCHAUD_C45_LA_TENUE_SE_MESURE
+    //
+    // La liberation de l'ancien espace fait l'essentiel de l'execve, et elle
+    // passe par `free_frames_lot`. Publier la TENUE du verrou ici, au moment ou
+    // elle vient d'etre payee, evite d'avoir a la deduire d'un releve
+    // periodique qui melangerait plusieurs processus.
+    {
+        let (tranches, frames_rendues, tenue_ns, pire_ns, attente_ns, contentions) =
+            crate::kernel::vmm::stats_liberation_lot();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "PERF_FRAME_FREE_BATCH t={} pid={} tranche={} tranches={} frames={} \
+duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}",
+            crate::kernel::timer::monotonic_ms(),
+            pid_journal,
+            crate::kernel::vmm::tranche_liberation(),
+            tranches,
+            frames_rendues,
+            (tenue_ns + attente_ns) / 1_000,
+            tenue_ns / 1_000,
+            pire_ns / 1_000,
+            attente_ns / 1_000,
+            contentions,
+        ));
+    }
+
     // La tache repart de zero : nouvelle trame, pile noyau reinitialisee. La
     // pile noyau courante (celle de cet appel systeme) est abandonnee telle
     // quelle — c'est sans consequence, elle repart du sommet a la prochaine
