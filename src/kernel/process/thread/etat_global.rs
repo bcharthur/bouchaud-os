@@ -46,6 +46,41 @@ static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; 
 /// `live` couvre exactement ce que les compteurs par CPU retiennent. La somme
 /// rendue est identique a l'octet pres.
 static COMPTA_DEBUT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Temps CUMULE par processeur, utilisateur et noyau, depuis le demarrage.
+///
+/// BOUCHAUD_C29_PROC_STAT_CUMULATIF
+///
+/// Les compteurs `COMPTA_*` ci-dessous sont des FRAGMENTS : remis a zero a
+/// chaque repli de tranche, parce qu'ils servent a imputer le temps a la
+/// TACHE. Le total de `/proc/stat` etait donc calcule en sommant les
+/// `user_cpu_ns` des taches VIVANTES -- une somme d'ou une tache disparait
+/// quand elle meurt, en emportant tout ce qu'elle avait consomme.
+///
+/// Ces compteurs-ci ne peuvent pas reculer : ils sont alimentes au moment ou
+/// le temps est impute, et rien ne les relit pour les diminuer. Une tache qui
+/// meurt ne retire rien.
+///
+/// Pourquoi cela compte pour un navigateur : `user` et `system` sont lus pour
+/// EUX-MEMES par un moniteur de charge, et des processus y meurent sans
+/// cesse -- un onglet qu'on ferme, un WebWorker qui finit, un ImageDecoder
+/// recycle. Une courbe de charge utilisateur qui recule a chaque fermeture
+/// d'onglet est fausse, meme si le total `user+system+idle` continue de
+/// croitre parce que `idle` domine.
+pub static CUMUL_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+pub static CUMUL_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Le temps qu'un calcul par somme des vivants AURAIT perdu.
+///
+/// Chaque fois qu'une tache passe a l'etat zombie, ce compteur additionne ce
+/// qu'elle avait consomme. C'est, a la nanoseconde pres, ce que l'ancien
+/// calcul retirait du total a cet instant.
+///
+/// Il existe parce que le defaut ne se DEMONTRE pas en guettant une baisse :
+/// la croissance des autres taches la masque, et vingt echantillons d'affilee
+/// peuvent rester monotones sans rien prouver. Ce compteur, lui, mesure
+/// directement la quantite en jeu.
+pub static TEMPS_MORT_NS: AtomicU64 = AtomicU64::new(0);
+
 static COMPTA_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];

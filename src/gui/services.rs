@@ -290,6 +290,33 @@ pub fn releve_si_du() {
     }
     let (mesures, total) = crate::kernel::task::mesure_processus();
     observe(&mesures, total);
+
+    // LES DEUX CALCULS DE `/proc/stat`, COTE A COTE.
+    //
+    // BOUCHAUD_C29_PROC_STAT_CUMULATIF
+    //
+    // Sans cette ligne, « le total ne recule pas » et « le total est juste »
+    // se confondent. Le defaut ne se demontre pas en guettant une baisse : la
+    // croissance des autres taches la masque, et vingt echantillons
+    // consecutifs peuvent rester monotones sans rien prouver.
+    //
+    //   cumulatif      ce que `/proc/stat` publie, alimente a l'imputation
+    //   somme_vivants  ce qu'il publiait : la somme des taches encore en vie
+    //   temps_mort     ce que la seconde a deja perdu, a la nanoseconde
+    //
+    // `temps_mort` non nul veut dire que le second calcul ment deja.
+    let (vivants_user, vivants_sys) = crate::kernel::task::proc_cpu_somme_vivants();
+    let mort = crate::kernel::task::proc_temps_mort_ns();
+    let c = crate::kernel::task::proc_cpu_cumul();
+    crate::serial_println!(
+        "[PROC-STAT] cumulatif_user_ms={} cumulatif_sys_ms={} \
+somme_vivants_user_ms={} somme_vivants_sys_ms={} temps_mort_ms={}",
+        c.user_ns / 1_000_000,
+        c.system_ns / 1_000_000,
+        vivants_user / 1_000_000,
+        vivants_sys / 1_000_000,
+        mort / 1_000_000,
+    );
 }
 
 // BOUCHAUD_V13_SERVICES_SAMPLER_DEDIE

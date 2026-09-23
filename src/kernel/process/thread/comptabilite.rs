@@ -28,6 +28,20 @@ fn account_until(task: &Task, now: u64) {
 
     task.user_cpu_ns.range(task.user_cpu_ns.charge().saturating_add(user));
     task.kernel_cpu_ns.range(task.kernel_cpu_ns.charge().saturating_add(noyau));
+    // LE MEME TEMPS, DANS UN COMPTEUR QUE LA MORT NE PEUT PAS REPRENDRE.
+    //
+    // Voir `CUMUL_USER_NS`. C'est ici, et nulle part ailleurs, que le temps
+    // est deja decoupe en utilisateur et noyau ET rattache a un processeur
+    // precis. L'addition se fait sur le CPU local, seul a ecrire dans sa
+    // case : aucune contention entre coeurs.
+    CUMUL_USER_NS[cpu].store(
+        CUMUL_USER_NS[cpu].load(Ordering::Relaxed).saturating_add(user),
+        Ordering::Relaxed,
+    );
+    CUMUL_NOYAU_NS[cpu].store(
+        CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed).saturating_add(noyau),
+        Ordering::Relaxed,
+    );
     task.cpu_ns[cpu].range(task.cpu_ns[cpu].charge().saturating_add(elapsed));
     // EWMA 7/8 historique + 1/8 dernière tranche: stable mais réactif en
     // quelques quanta, sans utiliser les ticks comme unité.
@@ -75,6 +89,16 @@ fn account_until(task: &Task, now: u64) {
 /// personne a prevenir : elle ne reviendra pas en espace utilisateur.
 // Ne touche plus que des atomiques : une reference PARTAGEE suffit.
 fn marque_zombie(task: &Task) {
+    // CE QUE LA SOMME DES VIVANTS PERDRAIT ICI.
+    //
+    // Voir `TEMPS_MORT_NS`. A cet instant precis, un calcul qui somme les
+    // taches vivantes retire du total tout ce que celle-ci a consomme. On
+    // le compte, pour pouvoir dire combien -- plutot que d'esperer
+    // surprendre une baisse dans un total que la charge environnante masque.
+    TEMPS_MORT_NS.fetch_add(
+        task.user_cpu_ns.charge().saturating_add(task.kernel_cpu_ns.charge()),
+        Ordering::Relaxed,
+    );
     task.state.range(TaskState::Zombie);
     if task.on_cpu >= 0 && !task.switching_out.charge() {
         let cpu = task.on_cpu.charge() as usize;

@@ -723,9 +723,18 @@ fn temps_vivant(task: &Task, now: u64) -> u64 {
     }
 }
 
-pub fn proc_cpu_cumul() -> ProcCpuCumul {
+/// Ce que la somme des taches VIVANTES aurait rendu.
+///
+/// Gardee pour une seule raison : pouvoir montrer l'ecart avec le compteur
+/// cumulatif. Sans les deux cote a cote, « le total ne recule pas » et « le
+/// total est juste » se confondent.
+/// Ce que la somme des vivants a deja perdu, en nanosecondes.
+pub fn proc_temps_mort_ns() -> u64 {
+    TEMPS_MORT_NS.load(Ordering::Relaxed)
+}
+
+pub fn proc_cpu_somme_vivants() -> (u64, u64) {
     let now = crate::kernel::timer::monotonic_ns();
-    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
     let mut user_ns = 0u64;
     let mut system_ns = 0u64;
     for task in tasks().iter() {
@@ -735,6 +744,46 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         let live = temps_vivant(task, now);
         user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
         system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
+        if live != 0 {
+            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
+            else { user_ns = user_ns.saturating_add(live); }
+        }
+    }
+    (user_ns, system_ns)
+}
+
+pub fn proc_cpu_cumul() -> ProcCpuCumul {
+    let now = crate::kernel::timer::monotonic_ns();
+    let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+
+    // BOUCHAUD_C29_PROC_STAT_CUMULATIF
+    //
+    // Le total venait de la somme des taches VIVANTES. Une tache qui meurt
+    // quittait donc la somme en emportant tout ce qu'elle avait consomme --
+    // et sur un navigateur, des processus meurent sans cesse : un onglet
+    // qu'on ferme, un WebWorker qui finit, un ImageDecoder recycle.
+    //
+    // Le defaut ne se demontre pas en guettant une baisse du total : la
+    // croissance des autres taches la masque, et vingt echantillons
+    // consecutifs peuvent rester monotones sans rien prouver. C'est pourquoi
+    // `TEMPS_MORT_NS` compte directement ce que cette somme-la perdait.
+    //
+    // Les compteurs par processeur, eux, sont alimentes au moment ou le temps
+    // est impute et rien ne les diminue : ils sont cumulatifs PAR
+    // CONSTRUCTION, sans dependre de qui est encore en vie.
+    let mut user_ns = 0u64;
+    let mut system_ns = 0u64;
+    for cpu in 0..MAX_CPUS {
+        user_ns = user_ns.saturating_add(CUMUL_USER_NS[cpu].load(Ordering::Relaxed));
+        system_ns = system_ns.saturating_add(CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed));
+    }
+    // La tranche EN COURS n'est pas encore repliee dans les cumuls : sans
+    // elle, `/proc/stat` avancerait par a-coups au rythme des commutations.
+    for task in tasks().iter() {
+        if task.state == TaskState::Zombie {
+            continue;
+        }
+        let live = temps_vivant(task, now);
         if live != 0 {
             if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
             else { user_ns = user_ns.saturating_add(live); }
