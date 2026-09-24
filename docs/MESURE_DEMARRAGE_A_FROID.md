@@ -509,3 +509,106 @@ Quatre cents millisecondes par appel : `poll` BLOQUE, et la sonde compte son
 attente. Le total, 4 405 s sur un run de 387 s, n'est pas comparable a
 `sys_ms`. La ligne porte desormais `mesure=ecoule_inclut_blocage`.
 
+## 13. REMESURE SOUS LADYBIRD : la correction tient, et au-dela du banc
+
+`run_id=35957883066` (#358), `head_sha=f7872972...`, verifie egal a `HEAD_TESTE`.
+Le job `ladybird / performance` etait ROUGE au run #357 ; il est vert ici, sans
+que le budget ait bouge.
+
+### Le chiffre que le budget surveille
+
+| mesure | #355 | #356 | #357 | **#358** | budget |
+|---|---:|---:|---:|---:|---:|
+| `HOST_WORKER_BLOB_PERF_FIRST` | 113 115 | 112 289 | 126 670 | **8 996** | 30 000 |
+
+**-117 674 ms**, soit un facteur **14**. Le banc local annoncait -62 % de temps
+noyau ; sous Ladybird le gain est bien plus grand, parce que la table y restait
+pleine bien plus longtemps.
+
+### Les temoins, qui disent que rien n'a ete casse
+
+    CACHE_BALAYAGE        appels=0 entrees_parcourues=0 total_us=0
+                          candidats_suffisants=12722
+    CLEAN_PAGE_CACHE      hits=48850 miss=52534
+
+`candidats_suffisants=12722` et `miss=52534` sont **identiques au run #357**.
+Le chemin rapide d'eviction a fait exactement le meme travail, et le cache a
+manque exactement les memes pages : la correction n'a retire que le balayage.
+
+### Ou est passe le temps noyau
+
+| | #357 | #358 |
+|---|---:|---:|
+| `replie_noyau_ms` | 490 240 | **103 500** |
+| dont balayage | 277 128 | **0** |
+| premier WebWorker `sys_ms` | ~113 000 | **8 985** |
+
+Le premier WebWorker (`pid=16`) tombe de ~113 s a **8,985 s** de temps noyau.
+
+Effet de bord visible et bienvenu : les workers suivants trouvent enfin des
+pages en cache. `pid=18` sort a `hit_n=700 miss_n=0`, `total_us=92109` -- 92 ms
+la ou le premier en prend 3 760. Avant, `hit_n=0` partout.
+
+### Ce qui domine MAINTENANT
+
+    BACKING_DISK_GLOBAL  reads=4601 bytes=301531136 total_us=132463795
+
+132 s de lectures disque reelles, pour 301 Mio. Ce n'est plus du travail
+gaspille : c'est le cout d'aller chercher les binaires. La prochaine question
+est la, pas dans le balayage.
+
+## 14. LA SONDE QUI A FIGE LA MACHINE QU'ELLE MESURAIT
+
+Le meme commit a casse `Integration #256`, job `qemu / os primitives`.
+
+La serie s'arrete net apres `SESSION_PERE_SORT fils=4`. La machine est
+VIVANTE -- l'echantillonneur publie encore `[PROC-STAT]` toutes les cinq
+secondes pendant neuf minutes -- mais le scenario ne repart pas. Echeance a
+600 s, sortie 1.
+
+**Ou ca bloque, exactement.** Pas la ou je l'ai cru d'abord. La sortie du
+chef de session publie ses sondes SANS ENCOMBRE :
+
+    PROCESS_EXIT t=84042 pid=25 image=/bin/session-probe code=0
+    CACHE_BALAYAGE_TEMOINS scope=global evites=0 entrees=0 recuperees=0
+    task: pid 25 termine, 4 tache(s) de sa session arretees avec lui
+
+Ce sont les QUATRE TACHES arretees avec lui qui ne publient jamais leur
+`PROCESS_EXIT`. Leur sortie ne s'acheve pas, le shell les attend, et la serie
+s'arrete la. `SMP-SNAPSHOT` montre la machine saine par ailleurs :
+`owner=0 depth=[0,0,0,0]`, les autres taches en `nanosleep`.
+
+**Cause.** `exit_current` tient `process.lifecycle.lock()` sur toute la fenetre
+ou les sondes sont publiees. J'y ai ajoute `balayage_temoins()`, qui prenait
+`CACHE.lock()` : une arete d'ordre de verrous depuis un chemin de sortie. Elle
+ne coute rien quand un processus meurt seul -- d'ou les sondes de pid 25 qui
+passent -- et elle se referme quand quatre taches sont arretees ensemble depuis
+le chemin de teardown de session.
+
+**Preuve, par experience controlee.** Meme scenario, meme machine, deux images
+qui ne different que par ce correctif :
+
+    avant   bloque apres SESSION_PERE_SORT fils=4, aucun PROCESS_EXIT des fils
+    apres   OS_PRIMITIVES_OK, rc=0, SESSION_INVITE_REVENUE et PRIMITIVES_FIN
+
+La regle etait **deja ecrite dans le fichier meme**, sur `log_ng_stats` :
+
+> Reporting must stay lock-free [...] Taking CACHE here would turn
+> observability into another lock-order edge.
+
+Et le commentaire pose juste au-dessus du site d'appel mettait en garde contre
+exactement ce geste : « le prendre a l'interieur imbriquerait deux verrous du
+meme processus sur un chemin de sortie, et l'ordre inverse existe ailleurs ».
+
+**Correction.** `EN_TABLE`, un compteur atomique tenu aux trois seuls sites qui
+mutent `entrees`. La sonde repond sans verrou. Les quatre autres sondes du meme
+chemin -- `proc_cpu_cumul`, `proc_cpu_compteurs`, `fault_retry_cumul`,
+`balayage_stats` -- ont ete verifiees : atomiques pures, aucune ne fautait.
+
+**Garde-fou.** `tools/ci/verifie-sondes-sans-verrou.py` extrait les sondes
+appelees dans `exit_current` et refuse celles dont le corps contient `.lock()`.
+Fail-closed sur les homonymes et sur les fonctions introuvables, avec un test
+negatif qui reintroduit le `CACHE.lock()` exact.
+
+Une regle qu'il faut se rappeler tout seul n'est pas une regle.
+

@@ -42,6 +42,21 @@ static CACHE: SpinLock<Cache> = SpinLock::new(Cache {
     entrees: BTreeMap::new(), candidats: VecDeque::new(),
 });
 static RECUPERABLES: AtomicUsize = AtomicUsize::new(0);
+
+// BOUCHAUD_C70_UNE_SONDE_NE_PREND_PAS_DE_VERROU
+//
+// Taille de `entrees`, tenue par les TROIS seuls sites qui mutent la table.
+// Elle existe pour que `balayage_temoins` reponde sans prendre `CACHE`.
+//
+// La regle etait deja ecrite dans ce fichier, sur `log_ng_stats` :
+// « Reporting must stay lock-free [...] Taking CACHE here would turn
+// observability into another lock-order edge. » Je l'ai enfreinte : la
+// premiere version de `balayage_temoins` prenait `CACHE.lock()`, et je
+// l'appelais depuis `exit_current`, qui tient deja `process.lifecycle`.
+// L'integration #256 s'est figee juste apres `SESSION_PERE_SORT fils=4`.
+//
+// Une sonde qui fige la machine qu'elle mesure ne mesure plus rien.
+static EN_TABLE: AtomicUsize = AtomicUsize::new(0);
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static WAITS: AtomicU64 = AtomicU64::new(0);
@@ -204,6 +219,7 @@ pub fn acquire_mesure(key: Key) -> MesureAcquire {
                 key, state: SpinLock::new(State::Loading), waiters: WaitQueue::new(),
             });
             cache.entrees.insert(key, Arc::clone(&entry));
+            EN_TABLE.store(cache.entrees.len(), Ordering::Relaxed);
             (entry, true, evicted)
         }
     };
@@ -362,9 +378,11 @@ pub fn balayage_stats() -> (u64, u64, u64, u64, u64) {
 /// faire deborder la table ni faire chuter les recuperations. Sans ces deux
 /// temoins, « plus rapide » et « ne fait plus son travail » se confondraient.
 pub fn balayage_temoins() -> (u64, usize, u64) {
+    // SANS VERROU, et ce n'est pas un detail de style : voir EN_TABLE.
+    // `exit_current` appelle cette fonction en tenant `process.lifecycle`.
     (
         BALAYAGE_EVITES.load(Ordering::Relaxed),
-        CACHE.lock().entrees.len(),
+        EN_TABLE.load(Ordering::Relaxed),
         RECLAIMED.load(Ordering::Relaxed),
     )
 }
@@ -378,7 +396,9 @@ fn retire_un_candidat(cache: &mut Cache) -> Option<Arc<Entry>> {
         if sortable {
             cesse_d_etre_recuperable();
             CANDIDATS_SUFFISANTS.fetch_add(1, Ordering::Relaxed);
-            return cache.entrees.remove(&key);
+            let sorti = cache.entrees.remove(&key);
+            EN_TABLE.store(cache.entrees.len(), Ordering::Relaxed);
+            return sorti;
         }
     }
     // BOUCHAUD_C70_NE_PAS_BALAYER_POUR_NE_RIEN_TROUVER
@@ -429,7 +449,9 @@ fn retire_un_candidat(cache: &mut Cache) -> Option<Arc<Entry>> {
     BALAYAGE_PIRE_NS.fetch_max(ecoule, Ordering::Relaxed);
     let victime = victime?;
     cesse_d_etre_recuperable();
-    cache.entrees.remove(&victime)
+    let sorti = cache.entrees.remove(&victime);
+    EN_TABLE.store(cache.entrees.len(), Ordering::Relaxed);
+    sorti
 }
 
 fn pressure_target() -> usize {

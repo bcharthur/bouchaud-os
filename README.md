@@ -217,7 +217,32 @@ Ladybird. La correction sort quand le compteur d'entrées récupérables vaut
 zéro — le balayage est alors garanti de ne rien trouver. Banc à 80 Mio, trois
 exécutions par bras : durée **−58 %**, temps noyau **−62 %**, avec des témoins
 identiques (`entrees=20480`, `recuperees=0`) qui prouvent qu'aucune
-récupération n'a été perdue. Reste à remesurer sous Ladybird.
+récupération n'a été perdue.
+
+**Remesuré sous Ladybird (run #358), et le gain dépasse le banc.**
+`HOST_WORKER_BLOB_PERF_FIRST` passe de **126 670 ms à 8 996 ms** — un facteur
+14, sous un budget de 30 000 ms qui n'a pas bougé. Le temps noyau du run tombe
+de 490 240 ms à 103 500 ms ; le premier WebWorker, de ~113 s à 8,985 s de
+`sys_ms`. Deux témoins restent **identiques au run précédent** —
+`candidats_suffisants=12722` et `miss=52534` — donc le chemin rapide
+d'éviction a fait exactement le même travail et le cache a manqué exactement
+les mêmes pages : seul le balayage a disparu. Ce qui domine maintenant, ce sont
+132 s de lectures disque réelles, et c'est la prochaine question.
+
+**Le même commit a figé la machine, et c'était la sonde.** `Integration #256`
+s'arrête net après `SESSION_PERE_SORT fils=4`, machine vivante, scénario
+bloqué. Le chef de session publie ses sondes sans encombre ; ce sont les
+**quatre tâches arrêtées avec lui** qui ne publient jamais leur `PROCESS_EXIT`.
+`exit_current` tient `process.lifecycle` pendant la publication des sondes, et
+`balayage_temoins()` y prenait `CACHE.lock()` : une arête d'ordre de verrous
+sur un chemin de sortie, inoffensive quand un processus meurt seul, fermée
+quand quatre tâches sont arrêtées ensemble. Reproduit puis levé localement par
+expérience contrôlée (`OS_PRIMITIVES_OK`, rc=0). La règle était déjà
+écrite dans le fichier même (« Reporting must stay lock-free »), et le
+commentaire au-dessus du site d'appel mettait en garde contre ce geste exact.
+Corrigé par un compteur atomique ; vérifié par
+`tools/ci/verifie-sondes-sans-verrou.py`, qui refuse toute sonde d'`exit_current`
+dont le corps contient `.lock()`.
 
 **La mesure corrigée a inversé la conclusion.** Avec la frontière posée, le
 premier WebWorker mesure `user_ms=724` et `sys_ms=113594` : il passe 0,7 s en
