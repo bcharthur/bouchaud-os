@@ -368,10 +368,27 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         // Et quand il ne l'est pas, on NOMME ce qui reste. Le chemin rapide
         // avait ete bati sur une inference -- « la condition etait fausse » --
         // que je n'avais jamais verifiee.
+        // ON ATTEND LE PROCESSUS RACINE, PAS SA DESCENDANCE.
+        //
+        // La distinction est venue des pids, une fois mesuree :
+        //
+        //   system health   retenu pid=11 == racine  -> un THREAD FRERE, dont
+        //                   la sortie n'a pas encore atteint le journal
+        //   os primitives   retenus pid=26,27        -> des PROCESSUS ENFANTS,
+        //                   deja marques zombies par le teardown de session
+        //
+        // Attendre les seconds coute le shell : la boucle commute vers un
+        // travailleur perpetuel et ne revient pas -- 0 passe sur 5 sous
+        // contention. Ne pas attendre les premiers perd la sortie du
+        // programme -- `[poll-selftest] OK` disparu.
+        //
+        // `run` rend le code de sortie du PROCESSUS racine : c'est lui, et
+        // ses threads, qu'il doit attendre. Ce qui descend de lui et survit
+        // est orphelin, et le teardown s'en est deja chargé.
         let mut retenus = 0usize;
         let mut premier = (0u32, 0u32, 0u8);
         for t in tasks().iter() {
-            if t.state != TaskState::Zombie && descend_de(t.process.pid, racine) {
+            if t.state != TaskState::Zombie && t.process.pid == racine {
                 if retenus == 0 {
                     premier = (t.tid, t.process.pid, t.state.charge().code());
                 }
