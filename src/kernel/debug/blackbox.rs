@@ -1742,6 +1742,8 @@ pub struct Checkpoint {
     pub dernier_confirme: u64,
     /// Duree reelle, pour que la cadence soit choisie sur une mesure.
     pub duree_us: u64,
+    /// Pourquoi la synchronisation n'a pas eu lieu, le cas echeant.
+    pub cause_sync: u8,
 }
 
 impl Checkpoint {
@@ -1817,11 +1819,14 @@ vidage_poses={}\n",
     //
     // Son echec reste non fatal : seul le cache n'est pas rendu.
     let echeance_sync = now_ns().saturating_add(BUDGET_SYNC_CHECKPOINT_NS);
+    let mut cause = crate::drivers::xhci_active::SYNC_SANS_SUPPORT;
     for _ in 0..16 {
         if now_ns() >= echeance_sync {
             break;
         }
-        if crate::drivers::xhci_active::blackbox_force_sync() {
+        let (fait, pourquoi) = crate::drivers::xhci_active::blackbox_force_sync_detaille();
+        cause = pourquoi;
+        if fait {
             bilan.synchronise = true;
             break;
         }
@@ -1829,16 +1834,27 @@ vidage_poses={}\n",
             crate::kernel::task::sleep_ticks(1);
         }
     }
+    bilan.cause_sync = cause;
 
     bilan.duree_us = now_ns().saturating_sub(debut) / 1_000;
     crate::serial_println!(
         "BLACKBOX_CHECKPOINT_END ok={} raison={} seq={} support=1 records={} \
-duration_ms={} marker={} sync={} dernier_confirme={}",
+duration_ms={} marker={} sync={} sync_cause={} dernier_confirme={}",
         bilan.ok() as u8, raison, bilan.seq, bilan.poses,
         bilan.duree_us / 1_000, bilan.marque as u8, bilan.synchronise as u8,
-        bilan.dernier_confirme,
+        nom_cause_sync(bilan.cause_sync), bilan.dernier_confirme,
     );
     bilan
+}
+
+fn nom_cause_sync(cause: u8) -> &'static str {
+    use crate::drivers::xhci_active as usb;
+    match cause {
+        usb::SYNC_OK => "ok",
+        usb::SYNC_SANS_SUPPORT => "sans-support",
+        usb::SYNC_VERROU_REFUSE => "verrou-refuse",
+        _ => "pilote-ko",
+    }
 }
 
 /// Checkpoint periodique, appele par le fil de mesures.

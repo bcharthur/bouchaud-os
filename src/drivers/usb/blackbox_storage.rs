@@ -1345,13 +1345,30 @@ fn blackbox_note(resultat: Result<(), &'static str>) -> Result<(), &'static str>
     }
 }
 
+/// Pourquoi une synchronisation n'a pas eu lieu.
+///
+/// Un `sync=0` sans cause est une panne muette : il peut vouloir dire « pas de
+/// support », « pilote occupe » ou « la cle a refuse ». Ces trois-la ne se
+/// soignent pas pareil, et le checkpoint tourne PENDANT la session -- ou le
+/// pilote xHCI travaille -- alors que l'extinction, elle, a deja arrete les
+/// services. Il fallait pouvoir les distinguer.
+pub const SYNC_OK: u8 = 0;
+pub const SYNC_SANS_SUPPORT: u8 = 1;
+pub const SYNC_VERROU_REFUSE: u8 = 2;
+pub const SYNC_PILOTE_KO: u8 = 3;
+
 pub fn blackbox_force_sync() -> bool {
+    blackbox_force_sync_detaille().0
+}
+
+/// Comme `blackbox_force_sync`, mais dit POURQUOI quand elle echoue.
+pub fn blackbox_force_sync_detaille() -> (bool, u8) {
     if !BLACKBOX_STORAGE_READY.load(Ordering::Acquire) {
-        return false;
+        return (false, SYNC_SANS_SUPPORT);
     }
     super::xhci_active::enregistreur_a_saute(crate::kernel::timer::monotonic_ns());
     let Some(_jeton) = attends_le_pilote(Proprietaire::VidageBlackbox, ATTENTE_VIDAGE_NS) else {
-        return false;
+        return (false, SYNC_VERROU_REFUSE);
     };
     super::xhci_active::enregistreur_a_reussi();
     let mut synced = false;
@@ -1365,5 +1382,9 @@ pub fn blackbox_force_sync() -> bool {
             }
         }
     }
-    synced && !failed
+    if synced && !failed {
+        (true, SYNC_OK)
+    } else {
+        (false, SYNC_PILOTE_KO)
+    }
 }
