@@ -452,6 +452,59 @@ pub fn instantane_rx() -> anneau::InstantaneRx {
     }
 }
 
+/// BANC UNIQUEMENT : provoque un ARRET DE RECEPTION REEL.
+///
+/// # Pourquoi une vraie panne et pas un drapeau
+///
+/// Un drapeau qui ferait mentir `receive` testerait le drapeau. Ces deux
+/// pannes sont celles du materiel, obtenues en ecrivant dans la carte :
+///
+///   - `persistant = false` : `RDT = RDH`, plus un seul descripteur libre.
+///     La carte n'a nulle part ou ecrire et cesse de livrer. C'est la panne
+///     qu'un rearmement repare.
+///   - `persistant = true` : `RCTL.EN` a zero, reception coupee dans la puce.
+///     Un rearmement d'anneau n'y peut RIEN, et c'est precisement l'interet :
+///     une reparation qui s'execute sans que la reception reprenne.
+///
+/// Les deux sont indiscernables d'en haut -- plus une trame n'entre -- et
+/// c'est ce que B3 doit savoir distinguer APRES coup.
+pub fn banc_provoque_arret_rx(persistant: bool) {
+    unsafe {
+        if !READY {
+            return;
+        }
+        if persistant {
+            let rctl = reg_read(REG_RCTL);
+            reg_write(REG_RCTL, rctl & !0x2);
+        } else {
+            reg_write(REG_RDT, reg_read(REG_RDH));
+        }
+    }
+}
+
+/// BANC UNIQUEMENT : la reparation d'anneau, telle qu'un pilote la ferait.
+///
+/// Elle rend au materiel tous les descripteurs que le processeur retient et
+/// repose la queue. Elle ne touche PAS a `RCTL` : c'est une reparation
+/// d'anneau, pas une remise en service de la puce. Elle guerit donc la
+/// premiere panne ci-dessus et pas la seconde -- ce qui est exactement ce
+/// qu'il faut pour que « effective » et « inefficace » soient tous deux
+/// atteignables sans truquer le verdict.
+pub fn banc_repare_anneau_rx() {
+    unsafe {
+        if !READY {
+            return;
+        }
+        for i in 0..N_RX {
+            desc_set_u64(RX_RING, i, 0, RX_BUF_P + (i * BUF) as u64);
+            desc_set_u8(RX_RING, i, 12, 0);
+        }
+        RX_CUR = 0;
+        reg_write(REG_RDH, 0);
+        reg_write(REG_RDT, (N_RX - 1) as u32);
+    }
+}
+
 /// BOUCHAUD_C76_L_ETAT_REEL_DE_L_ANNEAU_RX
 ///
 /// `(rdh, rdt, rx_cur, ready, statut des quatre premiers descripteurs)`.

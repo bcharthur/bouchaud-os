@@ -185,3 +185,83 @@ rx_ok_without_progress_after={} effectives={} ineffectives={}",
     ));
 }
 
+// ---------------------------------------------------------------------------
+// LE BANC : les deux issues, sur une VRAIE panne materielle
+// ---------------------------------------------------------------------------
+
+/// Exerce une reparation RX de bout en bout et rend son verdict.
+///
+/// # Pourquoi une panne materielle et pas un drapeau
+///
+/// Faire mentir `receive` testerait le mensonge. Les deux pannes injectees
+/// ici s'ecrivent dans la carte (voir `e1000::banc_provoque_arret_rx`) :
+/// anneau sature pour l'une, `RCTL.EN` coupe pour l'autre. La reparation
+/// appliquee est la meme dans les deux cas -- un rearmement d'anneau, qui ne
+/// touche pas a `RCTL`. Elle guerit donc la premiere et pas la seconde, et le
+/// verdict doit le dire sans qu'on le lui souffle.
+///
+/// # L'injection est PROUVEE avant d'etre reparee
+///
+/// Un test negatif qui passe parce que la faute n'a pas ete injectee est un
+/// test vert qui ne defend rien. La phase 1 genere donc du trafic entrant --
+/// un DISCOVER, auquel SLIRP repond toujours -- et EXIGE que rien n'entre.
+/// Si des trames passent malgre l'injection, le banc le dit et echoue.
+pub fn banc(persistant: bool) {
+    use crate::drivers::e1000;
+
+    let etiquette = if persistant { "persistant" } else { "transitoire" };
+    let depart = e1000::instantane_rx();
+
+    // --- Phase 1 : injecter, puis PROUVER que la reception est arretee -----
+    e1000::banc_provoque_arret_rx(persistant);
+    for _ in 0..6 {
+        let _ = crate::net::application::dhcp::negocie_avant(60);
+    }
+    let apres_injection = e1000::instantane_rx();
+    let entrees = apres_injection.rx_paquets.saturating_sub(depart.rx_paquets);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "RX_STALL_INJECTE mode={} trames_pendant_injection={} rx_cur={} rx_hw_head={}",
+        etiquette, entrees, apres_injection.rx_cur, apres_injection.rx_tete_materiel,
+    ));
+    if entrees != 0 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "RX_STALL_INJECTE verdict=NON_INJECTE mode={} \
+raison=des-trames-sont-entrees-malgre-l-arret",
+            etiquette,
+        ));
+        e1000::banc_repare_anneau_rx();
+        return;
+    }
+
+    // --- Phase 2 : reparer, ouvrir la fenetre ------------------------------
+    e1000::banc_repare_anneau_rx();
+    let (req, exec) = e1000::compteurs_reparation();
+    debut(
+        "banc-injection",
+        e1000::nom_pilote(),
+        0,
+        0,
+        &e1000::instantane_rx(),
+        req,
+        exec,
+    );
+
+    // --- Phase 3 : donner au materiel de quoi montrer qu'il est reparti ----
+    //
+    // La fenetre est celle du verdict, pas une seconde de moins : conclure
+    // plus tot declarerait inefficace une reparation qui marche.
+    let echeance = crate::kernel::timer::monotonic_ns()
+        .saturating_add(FENETRE_VERDICT_NS)
+        .saturating_add(200_000_000);
+    while crate::kernel::timer::monotonic_ns() < echeance {
+        let _ = crate::net::application::dhcp::negocie_avant(60);
+        conclure_si_du(&e1000::instantane_rx());
+    }
+    conclure_si_du(&e1000::instantane_rx());
+
+    let (eff, ineff) = compteurs();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "RX_RECOVERY_BANC mode={} effectives={} ineffectives={}",
+        etiquette, eff, ineff,
+    ));
+}

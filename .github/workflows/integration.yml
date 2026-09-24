@@ -437,7 +437,7 @@ jobs:
           if-no-files-found: warn
 
   dhcp-recuperation:
-    name: qemu / dhcp recuperation
+    name: qemu / dhcp + reprise rx
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
@@ -464,6 +464,11 @@ jobs:
       # Sur 10.0.2.x, le repli compile devine juste par accident : une
       # configuration inventee et un bail reel donnent la meme adresse. Seul
       # un autre sous-reseau distingue les deux.
+      # B3 : les DEUX issues d une reparation RX, sur une vraie panne
+      # materielle. Un banc qui n atteindrait qu une seule issue ne
+      # mesurerait rien.
+      - name: Reprise RX effective et inefficace
+        run: BANC_TRAVAIL=banc-rx tools/ci/run_rx_recuperation.sh image/bootimage-bouchaud-os.bin
       - name: Recuperation, SLIRP hors 10.0.2.x
         env:
           BANC_NETDEV: user,id=net0,net=192.168.76.0/24,host=192.168.76.2,dhcpstart=192.168.76.15,dns=192.168.76.3
@@ -476,6 +481,7 @@ jobs:
             banc-fil/
             banc-defaut/
             banc-autre/
+            banc-rx/
           if-no-files-found: warn
 
   usb-arbre:

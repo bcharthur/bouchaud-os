@@ -808,3 +808,153 @@ fn une_carte_plus_ancienne_garde_ses_reglages() {
     // justifiee par le releve.
     assert!(!coupe_les_economies(Generation::Historique));
 }
+
+// ---------------------------------------------------------------------------
+// B3 : UNE REPARATION INVOQUEE N'EST PAS UNE RECEPTION RESTAUREE
+// ---------------------------------------------------------------------------
+
+use anneau::{verdict_recuperation, InstantaneRx};
+
+/// L'instantane du releve physique : la carte parle, l'anneau ne bouge pas.
+fn baseline_trigkey() -> InstantaneRx {
+    InstantaneRx {
+        rx_paquets: 104,
+        rx_cur: 7,
+        rx_tete_materiel: 7,
+        dernier_desc_cpu: 6,
+        own_rendus: 64,
+        isr_rx_ok: 1_280,
+        rx_ok_sans_progres: 54,
+    }
+}
+
+#[test]
+fn une_reparation_qui_ne_change_rien_est_inefficace() {
+    let avant = baseline_trigkey();
+    let v = verdict_recuperation(&avant, &avant);
+    assert!(!v.effective);
+    assert_eq!(v.raison, "rien");
+}
+
+#[test]
+fn une_trame_rendue_a_la_pile_suffit() {
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.rx_paquets += 1;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(v.effective);
+    assert_eq!(v.raison, "paquets");
+}
+
+#[test]
+fn le_curseur_qui_avance_prouve_un_descripteur_consomme() {
+    // Materiel -> processeur PUIS consomme : c'est ce que dit le curseur.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.rx_cur = 8;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(v.effective);
+    assert_eq!(v.raison, "curseur");
+}
+
+#[test]
+fn le_curseur_qui_reboucle_compte_aussi() {
+    // Dernier descripteur de l'anneau -> retour a zero. La comparaison doit
+    // porter sur « a bouge », pas sur « a augmente » : un `>` aurait declare
+    // inefficace la reprise la plus banale qui soit.
+    let mut avant = baseline_trigkey();
+    avant.rx_cur = 63;
+    let mut apres = avant;
+    apres.rx_cur = 0;
+    assert!(verdict_recuperation(&avant, &apres).effective);
+}
+
+#[test]
+fn les_descripteurs_rendus_seuls_ne_valent_pas_succes() {
+    // LE PIEGE PRINCIPAL. `repare_reception` rend elle-meme au materiel tous
+    // les descripteurs que le processeur retenait : ce compteur monte donc a
+    // CHAQUE tentative, y compris parfaitement sterile. Le compter comme une
+    // progression, c'est declarer 39 succes sur 39 tentatives par
+    // construction.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.own_rendus += 64;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(!v.effective);
+    assert_eq!(v.raison, "rendus_seuls");
+}
+
+#[test]
+fn l_interruption_seule_ne_vaut_pas_succes() {
+    // `rx_ok_without_progress=54` : la carte annonce des trames qu'elle
+    // n'ecrit pas. C'est le symptome, pas la guerison.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.isr_rx_ok += 12;
+    apres.rx_ok_sans_progres += 12;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(!v.effective);
+    assert_eq!(v.raison, "isr_sans_anneau");
+}
+
+#[test]
+fn la_tete_materielle_seule_ne_vaut_pas_succes() {
+    // La tete avance aussi quand la carte ecrit dans un anneau que personne
+    // ne lit. Sans consommation logicielle, ce n'est pas une reprise.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.rx_tete_materiel += 3;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(!v.effective);
+    assert_eq!(v.raison, "tete_seule");
+}
+
+#[test]
+fn la_tete_avec_restitution_d_un_descripteur_vaut_succes() {
+    // Le materiel avance ET restitue un descripteur au processeur : la carte
+    // ecrit de nouveau, meme si le pilote n'a pas encore draine.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.rx_tete_materiel += 3;
+    apres.dernier_desc_cpu += 3;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(v.effective);
+    assert_eq!(v.raison, "tete+restitution");
+}
+
+#[test]
+fn la_tete_avec_les_seuls_rendus_ne_vaut_pas_succes() {
+    // LA REGLE A D'ABORD ETE ECRITE FAUSSE ICI, et cette epreuve garde la
+    // correction. « tete qui avance ET own_rendus qui augmente » etait
+    // satisfait par toute reparation, puisque la reparation rend elle-meme
+    // les descripteurs. Le releve physique se serait declare repare.
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.rx_tete_materiel += 3;
+    apres.own_rendus += 64;
+    assert!(!verdict_recuperation(&avant, &apres).effective);
+}
+
+#[test]
+fn un_pilote_qui_ne_remplit_rien_ne_fabrique_pas_de_succes() {
+    // Un pilote sans compteur d'interruptions laisse ces champs a zero. Des
+    // zeros constants doivent rendre « inefficace », jamais l'inverse.
+    let vide = InstantaneRx::default();
+    assert!(!verdict_recuperation(&vide, &vide).effective);
+}
+
+#[test]
+fn le_releve_trigkey_complet_ne_se_declare_pas_repare() {
+    // L'EPREUVE QUI RESUME B3. On rejoue ce que la baseline physique montre
+    // entre deux reparations : la carte interrompt, les descripteurs sont
+    // rendus, et pas une trame n'entre. L'ancienne lecture appelait cela
+    // « recoveries=39 recovery_failures=0 ».
+    let avant = baseline_trigkey();
+    let mut apres = avant;
+    apres.own_rendus += 64;
+    apres.isr_rx_ok += 33;
+    apres.rx_ok_sans_progres += 33;
+    apres.rx_tete_materiel += 1;
+    let v = verdict_recuperation(&avant, &apres);
+    assert!(!v.effective, "aucune trame n'est entree : ce n'est pas une reprise");
+}
