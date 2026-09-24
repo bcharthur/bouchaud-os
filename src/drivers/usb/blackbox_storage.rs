@@ -582,12 +582,53 @@ pub fn derniere_raison_sync() -> &'static str {
 }
 
 fn blackbox_sync_cache(controller: &mut Controller, storage: &mut BlackboxStorage) -> bool {
+    // LA SYNCHRONISATION RELEVE LE TRANSPORT, COMME L'ECRITURE LE FAIT DEJA.
+    //
+    // # Le defaut, et ce qu'il coutait
+    //
+    // `blackbox_ecris_lot_avec_reprise` termine par :
+    //
+    //     if !TRANSPORT_BOT.autorise_es()
+    //         && !blackbox_reprend_le_transport(controller, storage) { return false }
+    //     ... et il reessaie
+    //
+    // Cette fonction-ci ne le faisait pas : un seul essai, abandon sur
+    // `blackbox-bot-refuse`. Or ce refus ne veut pas dire que la cle va mal,
+    // il veut dire que le transport est EN REPRISE -- et personne ne la
+    // conduisait sur ce chemin.
+    //
+    // Mesure au banc, bras temoin, extinction normale :
+    //
+    //     BOUCHAUD_BLACKBOX_FIN drained=1 marker=1 sync=0 ok=0 poses=661
+    //     BLACKBOX_FIN_SYNC_KO transport=blackbox-bot-refuse bot=reprise reprises=108
+    //
+    // Les donnees ET la marque de fin etaient posees, l'extracteur declarait
+    // l'archive COMPLETE -- et l'ecran annoncait « erreur lors de
+    // l'enregistrement de sauvegarde », parce que
+    // `ok = draine && marked && synced`.
+    //
+    // Une extinction reussie presentee comme un echec, pour une commande
+    // qu'on n'avait meme pas retentee.
     let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut empty = [0u8; 0];
     match blackbox_bot(controller, storage, &cdb, &mut empty, false) {
         Ok(_) => {
             storage.since_sync = 0;
             *DERNIERE_RAISON_SYNC.lock() = "ok";
+            return true;
+        }
+        Err(raison) => *DERNIERE_RAISON_SYNC.lock() = raison,
+    }
+
+    if !TRANSPORT_BOT.autorise_es() && !blackbox_reprend_le_transport(controller, storage) {
+        *DERNIERE_RAISON_SYNC.lock() = "reprise-impossible";
+        return false;
+    }
+    let mut empty = [0u8; 0];
+    match blackbox_bot(controller, storage, &cdb, &mut empty, false) {
+        Ok(_) => {
+            storage.since_sync = 0;
+            *DERNIERE_RAISON_SYNC.lock() = "ok-apres-reprise";
             true
         }
         Err(raison) => {
