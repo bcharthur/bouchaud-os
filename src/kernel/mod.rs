@@ -28,6 +28,9 @@ pub mod dmesg;
 /// boite noire. Voir `services/mod.rs`.
 #[path = "services/mod.rs"]
 pub mod services;
+#[path = "debug/lab/mod.rs"]
+pub mod lab; // LAB MODE : anneau d'evenements, auditeur, debugger distant
+
 #[path = "debug/blackbox.rs"]
 pub mod blackbox; // BOUCHAUD_TRIGKEY_BLACKBOX_V1
 #[path = "debug/souffle.rs"]
