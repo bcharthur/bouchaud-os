@@ -353,14 +353,46 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
     // Sans contention le test est vrai du premier coup, on saute, et tout va
     // bien : c'est pourquoi le defaut passait pour intermittent.
     if pid_sortant == racine {
+        // LE SAUT DIRECT EST CONDITIONNEL, ET IL DIT CE QUI LE RETIENT.
+        //
+        // Premiere version : la racine sautait TOUJOURS. Ca corrigeait la
+        // perte du shell (10/10 sous contention) mais rendait la main avant
+        // que les threads freres du processus racine aient fini --
+        // `qemu / system health` l'a attrape, `[poll-selftest] OK` disparu.
+        //
+        // Le saut n'est donc pris que quand plus rien ne descend de la
+        // racine : c'est exactement la condition de sortie de la boucle
+        // ci-dessous, evaluee UNE fois, sans risque de commutation
+        // irreversible.
+        //
+        // Et quand il ne l'est pas, on NOMME ce qui reste. Le chemin rapide
+        // avait ete bati sur une inference -- « la condition etait fausse » --
+        // que je n'avais jamais verifiee.
+        let mut retenus = 0usize;
+        let mut premier = (0u32, 0u32, 0u8);
+        for t in tasks().iter() {
+            if t.state != TaskState::Zombie && descend_de(t.process.pid, racine) {
+                if retenus == 0 {
+                    premier = (t.tid, t.process.pid, t.state.charge().code());
+                }
+                retenus += 1;
+            }
+        }
+        if retenus == 0 {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=racine_directe",
+                crate::kernel::timer::monotonic_ms(),
+                pid_sortant,
+                local_cpu(),
+                crate::kernel::task::kernel_ctx_rsp(),
+            ));
+            switch_to_kernel();
+        }
         crate::kernel::dmesg::log_fmt(format_args!(
-            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=racine_directe",
+            "RETOUR_SHELL_RETENU t={} racine={} retenus={} tid={} pid={} etat={}",
             crate::kernel::timer::monotonic_ms(),
-            pid_sortant,
-            local_cpu(),
-            crate::kernel::task::kernel_ctx_rsp(),
+            racine, retenus, premier.0, premier.1, premier.2,
         ));
-        switch_to_kernel();
     }
 
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
@@ -604,6 +636,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     set_current_index(NO_TASK);
     clear_current_process_local();
     RACINE_PREMIER_PLAN.store(0, Ordering::Release);
+
     let (code, pid) = {
         (process.lifecycle.lock().exit_code, process.pid)
     };

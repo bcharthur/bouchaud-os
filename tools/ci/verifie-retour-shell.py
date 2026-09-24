@@ -69,7 +69,11 @@ def controle(racine: Path) -> list:
 
     # Elle doit sauter, et sauter AVANT la premiere commutation definitive.
     fin_voie = c.find("}", c.find("switch_to_kernel()", voie))
-    if "switch_to_kernel()" not in c[voie: voie + 600]:
+    # Fenetre large : le bloc porte desormais le denombrement de ce qui
+    # retient la racine, et le saut vient apres. Ce qui compte n'est pas la
+    # distance mais l'absence de commutation definitive entre les deux --
+    # verifiee juste en dessous.
+    if "switch_to_kernel()" not in c[voie: voie + 2400]:
         erreurs.append("la voie directe de la racine ne saute pas vers le fil noyau")
 
     premiere_commutation = c.find("commute_sortie_definitive_si_possible")
