@@ -239,7 +239,7 @@ sur un chemin de sortie. Ce correctif était juste — la règle est écrite dan
 fichier même — mais il **n'a pas suffi** : `Integration #257` a échoué au même
 endroit, et une passe locale verte ne prouve rien contre une course.
 
-**La vraie cause est antérieure : un réveil perdu dans `wait4`.**
+**Un réveil perdu dans `wait4`, antérieur — et ma correction l'a aggravé.**
 `[SCHED-RESUME] pretes=2 ... au_repos=4 en_file=0` — deux tâches prêtes, quatre
 cœurs au repos, file vide : le shell n'a jamais été remis en file. `sys_wait4`
 cherchait les fils zombies, n'en trouvait aucun, **puis** se déclarait en
@@ -248,8 +248,20 @@ encore à faux ; son réveil tombait dans le vide et le parent s'endormait pour
 toujours. Les sondes de sortie de processus n'ont fait que déplacer le timing
 dans cette fenêtre. Corrigé en posant `Blocked` **avant** le drapeau — sinon le
 réveilleur consomme le drapeau puis échoue sur l'état — et en **revérifiant**
-après s'être déclaré. Gardes-fous `verifie-sondes-sans-verrou.py` et
-`verifie-attente-fils.py`. La règle était déjà
+après s'être déclaré. **Cette correction a été retirée : elle empirait le
+défaut**, déplaçant le blocage du 8ᵉ marqueur au 3ᵉ. La relecture du protocole
+établi (`blocage.rs`) est un compteur ; la mienne parcourait tous les processus
+en prenant un verrou par processus, tâche déjà marquée bloquée. La course reste
+**ouverte et documentée, non corrigée**.
+
+**Ce qui est en périmètre, c'est le déclencheur.** Les trois sondes globales
+étaient publiées *dans* le scope de `process.lifecycle` — trois écritures série
+sous un verrou de processus. Elles sont désormais publiées après sa fermeture ;
+mêmes chiffres, section critique rendue à sa longueur. Deux règles tirées de la
+même erreur : une sonde ne prend pas de verrou, et une sonde ne rallonge pas la
+section critique qu'elle observe. Reproducteur : sous contention CPU le défaut
+sort **3 fois sur 3**, là où une passe non contrainte passait et m'avait fait
+conclure trop vite. La règle était déjà
 écrite dans le fichier même (« Reporting must stay lock-free »), et le
 commentaire au-dessus du site d'appel mettait en garde contre ce geste exact.
 Corrigé par un compteur atomique ; vérifié par

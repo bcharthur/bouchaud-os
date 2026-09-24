@@ -596,7 +596,7 @@ pres. Deux lectures a corriger dans ce qui precede :
   * le noyau termine la sortie entierement dans les DEUX cas, jusqu'a
     `CLEAN_PAGE_CACHE_GLOBAL`. Ce qui manque ensuite, c'est le SHELL.
 
-## 15. LA VRAIE CAUSE : un reveil perdu dans `wait4`, anterieur a C70
+## 15. UN REVEIL PERDU DANS `wait4`, ANTERIEUR A C70 -- ET MA CORRECTION L'A AGGRAVE
 
     [SCHED-RESUME] coeurs=4 au_repos=4 en_file=0 taches=9 pretes=2 bloquees=7
 
@@ -629,8 +629,41 @@ timing dedans.
     notre declaration n'a pas pu nous atteindre, mais le zombie qu'il
     annoncait est visible.
 
-Garde-fou : `tools/ci/verifie-attente-fils.py`, deux tests negatifs (ordre
-inverse, reverification retiree).
+**Cette correction a ete RETIREE : elle empirait le defaut.** Le blocage est
+passe de `SESSION_PERE_SORT` (8e marqueur) a `WAL_PROBE_OK` (3e), en CI
+(`Integration #258`) comme en local. `wait4` sert a CHAQUE commande du shell,
+donc une erreur la se paye partout.
+
+La forme n'etait pourtant pas absurde -- `blocage.rs` documente exactement ce
+protocole : « publie `Blocked` AVANT de relire la generation de la file [...]
+il faut defaire la publication ». Mais la relecture du protocole etabli est un
+COMPTEUR ; la mienne parcourait tous les processus en prenant
+`lifecycle.lock()` sur chacun, tache deja marquee bloquee. Trop lourd pour
+cette fenetre.
+
+La course reste donc OUVERTE, decrite ici, non corrigee.
+
+## 16. CE QUI EST EN PERIMETRE : ne pas rallonger ce qu'on observe
+
+Ce qui est a moi dans cette affaire, c'est le declencheur, pas la course.
+
+Les trois sondes globales etaient publiees DANS le scope de
+`process.lifecycle` -- trois ecritures serie tenues sous un verrou de
+processus, intercalees entre `PROCESS_EXIT` et `zombie = true`. Elles sont
+desormais publiees APRES la fermeture de ce verrou, via un simple
+`dernier_thread`. Les chiffres sont les memes ; la section critique retrouve
+sa longueur.
+
+Deux regles, tirees l'une apres l'autre de la meme erreur :
+
+  * une sonde ne prend pas de verrou (`verifie-sondes-sans-verrou.py`) ;
+  * une sonde ne rallonge pas davantage la section critique qu'elle observe.
+
+### Le reproducteur, qui manquait
+
+Une passe locale non contrainte passait et m'a fait conclure trop vite. Sous
+contention -- QEMU epingle sur 2 coeurs d'une machine qui en a 4 -- le defaut
+sort **3 fois sur 3**. C'est ce banc-la qui tranche desormais, pas une passe.
 
 La regle etait **deja ecrite dans le fichier meme**, sur `log_ng_stats` :
 

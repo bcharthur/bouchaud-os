@@ -3,6 +3,17 @@
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
+    // BOUCHAUD_C70_UNE_SONDE_NE_RALENTIT_PAS_CE_QU_ELLE_MESURE
+    //
+    // Les sondes globales de mort de processus sont publiees PLUS BAS, hors
+    // du verrou `process.lifecycle`. Elles y etaient d'abord, et trois
+    // ecritures serie tenues sous un verrou de processus ont suffi a faire
+    // sortir une course de reveil anterieure : `qemu / os primitives` s'est
+    // fige, machine vivante, shell jamais repris.
+    //
+    // Une sonde ne prend pas de verrou (cf. `balayage_temoins`), et elle ne
+    // rallonge pas davantage une section critique qu'elle observe.
+    let mut dernier_thread = false;
     {
         let task = current();
         marque_zombie(task);
@@ -84,42 +95,6 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
                 vue.user_ns / 1_000_000,
                 vue.system_ns / 1_000_000,
             ));
-            // BOUCHAUD_C70_DEUX_EMPLACEMENTS_POUR_DES_CAS_DISJOINTS
-            //
-            // Ces deux compteurs sont AUSSI publies par l'echantillonneur. Ce
-            // n'est pas un doublon : les deux emplacements couvrent des cas
-            // qui ne se recouvrent pas.
-            //
-            //   sous Ladybird   aucun service ne meurt pendant la fenetre
-            //                   mesuree -- seul l'echantillonneur parle
-            //   sur le banc     l'echantillonneur ne tourne qu'une fois, a
-            //                   ~2,9 s, AVANT les lancements -- seule la mort
-            //                   des processus parle
-            //
-            // Avoir mis les sondes au seul endroit qui convenait au banc m'a
-            // fait conclure « balayage refute » sur un `appels=0` qui ne
-            // disait rien. Le run 35955074619 a rendu `appels=22773` et 277 s.
-            let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
-                crate::kernel::clean_page_cache::balayage_stats();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "CACHE_BALAYAGE scope=global t={} appels={} entrees_parcourues={} \
-total_us={} pire_us={} candidats_suffisants={}",
-                crate::kernel::timer::monotonic_ms(),
-                bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
-            ));
-            let (evites, en_table, recuperees) =
-                crate::kernel::clean_page_cache::balayage_temoins();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "CACHE_BALAYAGE_TEMOINS scope=global evites={} entrees={} recuperees={}",
-                evites, en_table, recuperees,
-            ));
-            let (yields, pire_chaine, reprises, chaines) =
-                crate::kernel::task::fault_retry_cumul();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
-                crate::kernel::timer::monotonic_ms(),
-                yields, pire_chaine, reprises, chaines,
-            ));
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
@@ -134,7 +109,38 @@ total_us={} pire_us={} candidats_suffisants={}",
             // enfants, un rendu n'emporte que lui-meme.
             crate::kernel::navigateur::supervision::note_sortie(
                 process.pid, code, crate::kernel::timer::monotonic_ns());
+            dernier_thread = true;
         }
+    }
+
+    // Les compteurs globaux, une fois le verrou du processus RELACHE.
+    //
+    // Ils sont AUSSI publies par l'echantillonneur, et ce n'est pas un
+    // doublon : sous Ladybird aucun service ne meurt pendant la fenetre
+    // mesuree, et sur le banc l'echantillonneur ne tourne qu'une fois, avant
+    // les lancements. Les deux cas ne se recouvrent pas.
+    if dernier_thread {
+        let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
+            crate::kernel::clean_page_cache::balayage_stats();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "CACHE_BALAYAGE scope=global t={} appels={} entrees_parcourues={} \
+total_us={} pire_us={} candidats_suffisants={}",
+            crate::kernel::timer::monotonic_ms(),
+            bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
+        ));
+        let (evites, en_table, recuperees) =
+            crate::kernel::clean_page_cache::balayage_temoins();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "CACHE_BALAYAGE_TEMOINS scope=global evites={} entrees={} recuperees={}",
+            evites, en_table, recuperees,
+        ));
+        let (yields, pire_chaine, reprises, chaines) =
+            crate::kernel::task::fault_retry_cumul();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
+            crate::kernel::timer::monotonic_ms(),
+            yields, pire_chaine, reprises, chaines,
+        ));
     }
 
     // Previent le parent : SIGCHLD, et reveil s'il attendait dans `wait4`.
