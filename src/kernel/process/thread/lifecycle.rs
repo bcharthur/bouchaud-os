@@ -84,40 +84,6 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
                 vue.user_ns / 1_000_000,
                 vue.system_ns / 1_000_000,
             ));
-            // BOUCHAUD_C68_OU_VA_LE_TEMPS_NOYAU
-            //
-            // Le run 35944547625 a rendu le partage honnete : le premier
-            // WebWorker passe 113 594 ms en NOYAU pour 724 ms en utilisateur.
-            // Mais le livre des fautes n'explique que 13 285 ms de ces 113 s.
-            // Cent secondes de temps noyau ne sont attribuees a rien.
-            //
-            // Ces deux lignes nomment les deux candidats, et peuvent les
-            // REFUTER : un balayage jamais atteint, ou zero reprise, tue son
-            // hypothese immediatement.
-            let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
-                crate::kernel::clean_page_cache::balayage_stats();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "CACHE_BALAYAGE scope=global t={} appels={} entrees_parcourues={} \
-total_us={} pire_us={} candidats_suffisants={}",
-                crate::kernel::timer::monotonic_ms(),
-                bal_appels,
-                bal_entrees,
-                bal_ns / 1_000,
-                bal_pire / 1_000,
-                bal_candidats,
-            ));
-            let (yields, pire_chaine, reprises, chaines) =
-                crate::kernel::task::fault_retry_cumul();
-            crate::kernel::dmesg::log_fmt(format_args!(
-                "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} \
-reprises={} chaines={}",
-                crate::kernel::timer::monotonic_ms(),
-                yields,
-                pire_chaine,
-                reprises,
-                chaines,
-            ));
-            crate::kernel::task::publie_syscall_top(8);
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.

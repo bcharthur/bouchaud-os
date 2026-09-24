@@ -367,3 +367,62 @@ l'amorcage et les fautes des processus qui ne meurent pas (shell, init) ne
 sont dans aucune somme. L'ecart local n'est donc pas comparable a l'ecart
 Ladybird, qui est per-process des deux cotes.
 
+## 11. Deux defauts de sonde, trouves par le run #356 (BOUCHAUD_C69)
+
+`run_id=35948934416`, `head_sha=f5e268e...`, verifie identique a `HEAD_TESTE`.
+
+### Le resultat principal se REPRODUIT
+
+Sur un autre coureur, avec un build integralement reconstruit :
+
+| | run #355 | run #356 |
+|---|---:|---:|
+| WebWorker #1 `user_ms` | 724 | **686** |
+| WebWorker #1 `sys_ms` | 113 594 | **112 858** |
+| `HOST_WORKER_BLOB_PERF_FIRST` | 113 115 ms | **112 289 ms** |
+
+La refutation de la section 10 tient sur deux runs independants.
+
+### Defaut 1 : les sondes etaient accrochees a la mort d'un processus
+
+`CACHE_BALAYAGE`, `FAULT_REPRISE`, `SYSCALL_TEMPS` et `CPU_CUMUL` etaient
+emis depuis `PROCESS_EXIT`. Le bloc de preuves du run #356 a rendu pour les
+quatre : « une famille absente n'a pas ete emise par ce noyau ».
+
+La raison : sous Ladybird, AUCUN service ne meurt pendant la fenetre mesuree.
+Une sonde accrochee a la mort ne mesure rien d'un processus vivant -- et c'est
+exactement le processus qu'on cherche a expliquer. Le banc local les faisait
+sortir, parce que `gros-elf` meurt quatre fois ; il validait donc le code sans
+valider le PLACEMENT.
+
+Corrige : les quatre partent de l'echantillonneur, comme
+`FAULT_FILE_SNAPSHOT` qui, lui, sortait bien. Cadence a une fois par minute --
+a chaque passe, huit cents lignes auraient noye le bloc de preuves.
+
+### Defaut 2 : un total par processus qui RECULE
+
+`proc_processus_cumul` sautait les threads zombies. Deux releves du meme
+processus, run #356 :
+
+    t=337938 pid=17 WebWorker  user_ms=2722 sys_ms=3113
+    t=342990 pid=17 WebWorker  user_ms= 262 sys_ms=8302
+
+Deux mille quatre cent soixante millisecondes de temps utilisateur disparues
+entre deux echantillons, parce qu'un thread etait mort entre les deux. « Ce
+processus ne calcule presque pas » devenait une consequence de la
+comptabilite, pas une mesure.
+
+Un thread zombie d'un processus vivant porte des compteurs DEFINITIFS : sa
+tranche a ete repliee a sa derniere commutation. Les compter est juste, et
+`temps_vivant` rendant zero hors processeur, aucune tranche en vol n'est
+ajoutee deux fois. `FAULT_FILE_SNAPSHOT` publie desormais `fils_morts=` pour
+que le lecteur sache si le total en contient.
+
+Ce qui reste perdu et n'est PAS corrige : un emplacement recycle ecrase
+l'incarnation precedente (`TEMPS_RECYCLE_NS` le chiffre globalement). Le total
+par processus reste un minorant -- mais il ne recule plus.
+
+Portee sur la section 10 : les valeurs de WebWorker #1 etaient des minorants
+des deux cotes. Le rapport noyau/utilisateur, lui, tient -- il est le meme sur
+huit processus et sur deux runs.
+

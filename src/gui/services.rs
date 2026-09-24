@@ -193,16 +193,21 @@ pub fn observe(rows: &[crate::kernel::task::Mesure], window: u64) {
                 if let Some(ph) = crate::kernel::task::phases_fichier_du_processus(row.pid) {
                     let (ph, perdues_global) = ph;
                     if ph.nombre != 0 {
-                        let (user_ms, sys_ms) =
+                        let (user_ms, sys_ms, fils_morts) =
                             match crate::kernel::task::proc_processus_cumul(row.pid) {
-                                Some(c) => (c.user_ns / 1_000_000, c.system_ns / 1_000_000),
-                                None => (0, 0),
+                                Some(c) => (
+                                    c.user_ns / 1_000_000,
+                                    c.system_ns / 1_000_000,
+                                    c.threads_zombies,
+                                ),
+                                None => (0, 0, 0),
                             };
                         crate::kernel::dmesg::log_fmt(format_args!(
                             "FAULT_FILE_SNAPSHOT t={} pid={} image={} faults={} \
 total_us={} wait_us={} acquire_us={} hit_n={} miss_n={} miss_us={} \
 miss_read_us={} direct_us={} mm_us={} map_us={} explained_us={} \
-residual_us={} residual_pct={} user_ms={} sys_ms={} lost_samples_global={}",
+residual_us={} residual_pct={} user_ms={} sys_ms={} fils_morts={} \
+lost_samples_global={}",
                             crate::kernel::timer::monotonic_ms(),
                             row.pid,
                             base,
@@ -223,6 +228,9 @@ residual_us={} residual_pct={} user_ms={} sys_ms={} lost_samples_global={}",
                             ph.residu_pct(),
                             user_ms,
                             sys_ms,
+                            // Combien de threads MORTS ce total comprend.
+                            // Voir BOUCHAUD_C69 : sans eux il reculait.
+                            fils_morts,
                             // Compteur GLOBAL : pas « ce pid a perdu N ».
                             perdues_global,
                         ));
@@ -407,6 +415,8 @@ fn identifiant_instance(sortie: &mut [u8; 40], service: &str, pid: u32) -> usize
 /// personne ne l'a fait depuis. Les compteurs de `mesure_processus` sont
 /// differentiels ; deux preneurs non coordonnes se voleraient leurs deltas et
 /// afficheraient chacun la moitie du CPU reel.
+static PASSES_SONDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn releve_si_du() {
     const PERIODE_MS: u64 = 5_000;
     let maintenant = crate::kernel::timer::monotonic_ms();
@@ -416,6 +426,48 @@ pub fn releve_si_du() {
     }
     let (mesures, total) = crate::kernel::task::mesure_processus();
     observe(&mesures, total);
+
+    // BOUCHAUD_C68_LES_SONDES_ETAIENT_AU_MAUVAIS_ENDROIT
+    //
+    // Ces trois lignes etaient emises depuis `PROCESS_EXIT`. Sur le banc
+    // local elles sortaient ; au run 35948934416 le bloc de preuves a rendu
+    // « une famille absente n'a pas ete emise par ce noyau » pour les trois,
+    // parce que sous Ladybird AUCUN service ne meurt pendant la fenetre
+    // mesuree. Une sonde accrochee a la mort ne mesure rien d'un processus
+    // vivant, et c'est exactement le processus qu'on cherche a expliquer.
+    //
+    // Elles partent donc de l'echantillonneur, comme `FAULT_FILE_SNAPSHOT`
+    // qui, lui, est bien sorti.
+    //
+    // CADENCE : une fois par minute, pas une fois par passe. L'echantillonneur
+    // tourne toutes les cinq secondes ; sur un smoke de trois cent quarante
+    // secondes, publier a chaque passe noierait le bloc de preuves sous huit
+    // cents lignes. Ces compteurs sont CUMULATIFS -- un releve par minute
+    // suffit a voir la pente, et le dernier porte le total.
+    const PASSES_PAR_SONDE: u64 = 12;
+    let passe = PASSES_SONDE.fetch_add(1, Ordering::Relaxed);
+    if passe % PASSES_PAR_SONDE == 0 {
+    let (replie_user, replie_noyau) = crate::kernel::task::proc_cpu_compteurs();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "CPU_CUMUL scope=global t={} replie_user_ms={} replie_noyau_ms={}",
+        maintenant,
+        replie_user / 1_000_000,
+        replie_noyau / 1_000_000,
+    ));
+    let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
+        crate::kernel::clean_page_cache::balayage_stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "CACHE_BALAYAGE scope=global t={} appels={} entrees_parcourues={} \
+total_us={} pire_us={} candidats_suffisants={}",
+        maintenant, bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
+    ));
+    let (yields, pire_chaine, reprises, chaines) = crate::kernel::task::fault_retry_cumul();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
+        maintenant, yields, pire_chaine, reprises, chaines,
+    ));
+    crate::kernel::task::publie_syscall_top(8);
+    }
 
     // LES DEUX CALCULS DE `/proc/stat`, COTE A COTE.
     //

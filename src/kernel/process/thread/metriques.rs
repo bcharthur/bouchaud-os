@@ -761,6 +761,9 @@ pub struct ProcProcessusCumul {
     pub user_ns: u64,
     pub system_ns: u64,
     pub threads: usize,
+    /// Threads morts dont le temps est INCLUS dans `user_ns`/`system_ns`.
+    /// Voir BOUCHAUD_C69 : les taire ferait reculer le total.
+    pub threads_zombies: usize,
     pub vss_octets: u64,
     pub rss_octets: u64,
 }
@@ -935,15 +938,50 @@ pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
     let mut user_ns = 0u64;
     let mut system_ns = 0u64;
     let mut threads = 0usize;
+    // Threads morts dont le temps est compte : publie pour que le lecteur
+    // sache si le total en contient, plutot que de le deviner.
+    let mut zombies = 0usize;
     let mut executable = false;
     let mut processus: Option<Arc<Process>> = None;
 
+    // BOUCHAUD_C69_UN_TOTAL_PAR_PROCESSUS_NE_DOIT_PAS_RECULER
+    //
+    // Cette boucle SAUTAIT les threads zombies. Le total rendu perdait donc
+    // le temps d'un thread des sa mort, alors que le processus, lui, vivait
+    // toujours -- et un compteur cumulatif qui recule n'est pas un compteur.
+    //
+    // Observe au run 35948934416, deux releves du MEME processus :
+    //
+    //     t=337938 pid=17 WebWorker  user_ms=2722 sys_ms=3113
+    //     t=342990 pid=17 WebWorker  user_ms= 262 sys_ms=8302
+    //
+    // Deux mille quatre cent soixante millisecondes de temps utilisateur
+    // disparues entre deux echantillons, parce qu'un thread etait mort entre
+    // les deux. La lecture « ce processus ne calcule presque pas » devenait
+    // alors une consequence de la comptabilite, pas une mesure.
+    //
+    // Un thread zombie d'un processus vivant porte des compteurs DEFINITIFS :
+    // sa tranche a ete repliee par `account_slice_end` a sa derniere
+    // commutation. Les compter est juste. `temps_vivant` rend deja zero pour
+    // une tache hors processeur, donc aucune tranche en vol n'est ajoutee
+    // deux fois.
+    //
+    // Ce qui reste perdu, et qui n'est PAS corrige ici : un emplacement
+    // RECYCLE ecrase l'incarnation precedente. `TEMPS_RECYCLE_NS` chiffre
+    // cette perte globalement. Le total par processus reste donc un minorant,
+    // mais il ne recule plus.
     for task in tasks().iter() {
-        if task.process.pid != pid || task.state == TaskState::Zombie {
+        if task.process.pid != pid {
             continue;
         }
         if processus.is_none() {
             processus = Some(Arc::clone(&task.process));
+        }
+        if task.state == TaskState::Zombie {
+            zombies += 1;
+            user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
+            system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
+            continue;
         }
         threads += 1;
         executable |= task.state == TaskState::Ready || task.on_cpu >= 0;
@@ -978,6 +1016,7 @@ pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
         user_ns,
         system_ns,
         threads,
+        threads_zombies: zombies,
         vss_octets: usage.vss,
         rss_octets: usage.rss,
     })
