@@ -551,7 +551,32 @@ fn veilleur_de_lien() -> ! {
             }
             continue;
         }
-        if matches!(etat, Demarrage::Pret | Demarrage::SansBail) {
+        // SEUL UN BAIL REELLEMENT OBTENU EST UN ETAT TERMINAL.
+        //
+        // `SansBail` etait traite ici comme un repos, au motif que le repli
+        // SLIRP « marche ». Deux mesures le refutent.
+        //
+        // La premiere : au demarrage, la reception ne peut pas fonctionner
+        // avant environ une seconde -- sous QEMU, le `flush_queue_timer` du
+        // modele e1000, arme par l'ecriture de RCTL, refuse toute trame tant
+        // qu'il court, et le reecrire repousse la fenetre d'autant. Le DHCP
+        // de demarrage part une milliseconde apres l'init et abandonne 700 ms
+        // plus tard : il est entierement dedans. `SansBail` n'est donc pas un
+        // constat sur le reseau, c'est un constat sur un instant ou l'on ne
+        // pouvait rien constater.
+        //
+        // La seconde, et c'est celle qui tranche : le repli n'est pas une
+        // mesure, c'est une constante compilee. Avec un SLIRP hors 10.0.2.x,
+        // le serveur offre 192.168.76.15 et la machine pose 10.0.2.15, sur un
+        // sous-reseau qui n'existe pas -- pendant que `external_enabled()`
+        // annonce au reste du systeme que le reseau est utilisable. Un seul
+        // DISCOVER en vingt-cinq secondes, et le verdict ne bougeait plus.
+        //
+        // On ne touche ni au budget de demarrage, ni a la croissance de
+        // l'attente : un reseau vraiment sans serveur DHCP reste espace par
+        // le meme plafond qu'avant. On retire seulement le droit de se reposer
+        // sur une supposition.
+        if matches!(etat, Demarrage::Pret) {
             continue;
         }
         let maintenant = crate::kernel::timer::monotonic_ms();

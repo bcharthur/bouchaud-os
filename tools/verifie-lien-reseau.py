@@ -106,6 +106,28 @@ def main():
                 "le lien tombe. Chaque requete partirait alors dans le vide et "
                 "attendrait son echeance."
             )
+        # UN REPLI SUPPOSE N'EST PAS UN ETAT DE REPOS.
+        #
+        # Le veilleur s'arretait sur `SansBail` au motif que le repli SLIRP
+        # « marche ». Deux mesures l'ont refute. Le DHCP de demarrage part une
+        # milliseconde apres l'init du pilote et abandonne 700 ms plus tard,
+        # alors que la reception ne peut pas fonctionner avant une seconde :
+        # `SansBail` ne constate pas le reseau, il constate un instant ou l'on
+        # ne pouvait rien constater. Et le repli n'est pas une mesure mais une
+        # constante compilee : avec un SLIRP hors 10.0.2.x, la machine posait
+        # 10.0.2.15 sur un sous-reseau inexistant -- un seul DISCOVER en
+        # vingt-cinq secondes -- et n'y revenait jamais.
+        #
+        # `tools/ci/run_dhcp_recuperation.sh` rejoue les deux sous-reseaux.
+        if "Demarrage::Pret | Demarrage::SansBail" in veilleur:
+            fautes.append(
+                "net/mod.rs : le veilleur se repose de nouveau sur `SansBail`. "
+                "Ce verdict est une supposition prise dans une fenetre ou la "
+                "reception ne pouvait pas fonctionner : s'y arreter fige la "
+                "machine sur une configuration inventee. Seul `Pret` -- un "
+                "bail reellement obtenu -- est un etat terminal."
+            )
+
         # La regle qui compte : ne JAMAIS fabriquer une configuration QEMU sur
         # du materiel reel. `SansBail` n'est legitime que pour SLIRP.
         if "using_rtl8168()" not in veilleur:
