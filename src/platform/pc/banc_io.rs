@@ -53,6 +53,35 @@ const INJECTION_DONNEES_S: u64 = 30;
 const INJECTION_STATUT_S: u64 = 45;
 const INJECTION_VERROU_S: u64 = 60;
 
+/// BOUCHAUD_C72_SCENARIO_G -- CHECKPOINT OK, PUIS EXTINCTION FORCEE EN ECHEC
+///
+/// Seconde a laquelle le banc pose un checkpoint volontaire. Zero = jamais.
+///
+/// Le checkpoint periodique tourne a 45 s ; un banc court ne l'atteindrait
+/// pas, et un banc long pour cette seule raison coute du temps a chaque
+/// execution. Ce reglage pose le checkpoint QUAND ON VEUT, ce qui est aussi
+/// ce que fait `diag-save` a la main.
+pub const CHECKPOINT_S: u64 = match option_env!("BOUCHAUD_BANC_CHECKPOINT_S") {
+    Some(v) => match u64::from_str_radix(v, 10) {
+        Ok(n) => n,
+        _ => 0,
+    },
+    None => 0,
+};
+
+/// Le vidage FINAL doit-il etre force en echec ?
+///
+/// C'est le scenario qui compte : un checkpoint recuperable, PUIS une
+/// extinction incomplete. Il prouve ce que le test physique du Trigkey a
+/// coute -- qu'un shutdown rate ne doit plus emporter toute la session.
+///
+/// Les trois pannes sont armees juste avant l'extinction, donc apres le
+/// checkpoint : elles tombent sur le vidage final, exactement ou on les veut.
+pub const FINAL_KO: bool = match option_env!("BOUCHAUD_BANC_FINAL_KO") {
+    Some(v) => !matches!(v.as_bytes(), b"0" | b"non" | b"off"),
+    None => false,
+};
+
 /// Les pannes artificielles sont-elles armees ?
 ///
 /// Le banc d'endurance mesure une DUREE, pas une reprise : il tourne sans
@@ -213,6 +242,7 @@ fn fil_arbitre() -> ! {
     let mut donnees = false;
     let mut statut = false;
     let mut verrou = false;
+    let mut checkpoint = false;
     loop {
         let ecoule = crate::kernel::timer::monotonic_ns().saturating_sub(depart);
         if !donnees && INJECTIONS_ARMEES && ecoule >= INJECTION_DONNEES_S * NS {
@@ -230,7 +260,29 @@ fn fil_arbitre() -> ! {
             usb::arme_injection(usb::INJECTE_VERROU_TENU);
             crate::serial_println!("BOUCHAUD_BANC_IO_INJECTION quoi=verrou ecoule_s={}", ecoule / NS);
         }
+        if !checkpoint && CHECKPOINT_S != 0 && ecoule >= CHECKPOINT_S * NS {
+            checkpoint = true;
+            let bilan = crate::kernel::blackbox::checkpoint("banc");
+            crate::serial_println!(
+                "BOUCHAUD_BANC_IO_CHECKPOINT ecoule_s={} ok={} seq={} records={} duree_ms={}",
+                ecoule / NS, bilan.ok() as u8, bilan.seq, bilan.poses,
+                bilan.duree_us / 1_000,
+            );
+        }
         if ecoule >= SECONDES * NS {
+            // LE VIDAGE FINAL EST SABORDE ICI, ET PAS PLUS TOT.
+            //
+            // Arme apres le checkpoint, juste avant l'extinction : les trois
+            // pannes tombent donc sur le vidage final. C'est le scenario G --
+            // checkpoint recuperable, extinction incomplete.
+            if FINAL_KO {
+                usb::arme_injection(
+                    usb::INJECTE_ECHEANCE_DONNEES
+                        | usb::INJECTE_ECHEANCE_STATUT
+                        | usb::INJECTE_VERROU_TENU,
+                );
+                crate::serial_println!("BOUCHAUD_BANC_IO_FINAL_KO arme=1 ecoule_s={}", ecoule / NS);
+            }
             break;
         }
         crate::kernel::task::sleep_ticks(200);
