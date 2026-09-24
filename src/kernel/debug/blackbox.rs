@@ -1801,8 +1801,6 @@ duration_ms={} marker=0 sync=0",
 
     let maintenant = now_ns();
     let etat = BOBINE.etat();
-    let (_lots, _manquants, prochain) = vidage_compteurs();
-    bilan.dernier_confirme = prochain.saturating_sub(1) as u64;
 
     let mut marque = Text::new();
     let _ = write!(
@@ -1813,13 +1811,42 @@ vidage_poses={}\n",
         raison, boot_id(), bilan.seq, maintenant, bilan.dernier_confirme,
         etat.reserves, etat.poses, etat.ecrases, etat.perdus, tour.poses,
     );
+    // LA MARQUE EST POSEE QUAND LE CURSEUR L'A DEPASSEE, ET PAS AVANT.
+    //
+    // Premiere version : `bilan.marque = !pose.reste`, c'est-a-dire « plus
+    // rien du tout ne reste a poser ». Ce n'est pas la question. Le tambour
+    // continue de recevoir pendant le vidage : `reste` peut etre vrai a cause
+    // d'enregistrements PLUS RECENTS que la marque, qui est pourtant sortie.
+    //
+    // Le banc l'a montre -- `records=128 marker=0 sync=1` -- et l'archive
+    // resultante n'avait aucun CHECKPOINT, donc `COUPURE` au lieu de
+    // `PARTIEL_CHECKPOINT` : le checkpoint avait ecrit ses donnees et se
+    // declarait rate.
+    //
+    // Le critere juste est le numero de la marque compare au curseur de
+    // persistance.
     if append(KIND_MARKER, marque.as_bytes(), maintenant,
               crate::drivers::serial::trace_total_bytes()) {
+        let seq_marque = BOBINE.dernier();
         let echeance_marque = now_ns().saturating_add(BUDGET_MARQUE_CHECKPOINT_NS);
-        let pose = vidange(echeance_marque);
-        bilan.poses = bilan.poses.saturating_add(pose.poses);
-        bilan.marque = !pose.reste;
+        loop {
+            let pose = vidange(echeance_marque);
+            bilan.poses = bilan.poses.saturating_add(pose.poses);
+            let (_lots, _manquants, prochain) = vidage_compteurs();
+            if prochain > seq_marque {
+                bilan.marque = true;
+                break;
+            }
+            if now_ns() >= echeance_marque || pose.poses == 0 {
+                break;
+            }
+        }
     }
+
+    // APRES le vidage de la marque, pas avant : sinon le checkpoint
+    // sous-declare jusqu'ou il a confirme.
+    let (_lots, _manquants, prochain) = vidage_compteurs();
+    bilan.dernier_confirme = prochain.saturating_sub(1) as u64;
 
     // LA SYNCHRONISATION A SON PROPRE BUDGET, ET NON LE RESTE DU PRECEDENT.
     //
