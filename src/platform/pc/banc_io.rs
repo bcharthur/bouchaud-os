@@ -276,12 +276,23 @@ fn fil_arbitre() -> ! {
             // pannes tombent donc sur le vidage final. C'est le scenario G --
             // checkpoint recuperable, extinction incomplete.
             if FINAL_KO {
-                usb::arme_injection(
-                    usb::INJECTE_ECHEANCE_DONNEES
-                        | usb::INJECTE_ECHEANCE_STATUT
-                        | usb::INJECTE_VERROU_TENU,
+                // UNE PANNE QUI TIENT, ET PAS TROIS QUI SE RATTRAPENT.
+                //
+                // Premiere version : les trois injections BOT. Elles sont
+                // CONSOMMEES a la premiere occasion, le chemin d'extinction
+                // les rattrape par ses reprises, et le banc a rendu
+                // `completude=COMPLETE` avec le sabotage pourtant arme. Il
+                // avait raison de refuser : la condition n'etait pas exercee.
+                //
+                // Ce qu'on doit prouver n'est pas la reprise mais la SURVIE DU
+                // CHECKPOINT quand le vidage final echoue vraiment. La panne
+                // la plus fidele au cas physique est aussi la plus simple :
+                // la cle ne repond plus.
+                usb::coupe_le_support();
+                crate::serial_println!(
+                    "BOUCHAUD_BANC_IO_FINAL_KO arme=1 quoi=support_coupe ecoule_s={}",
+                    ecoule / NS,
                 );
-                crate::serial_println!("BOUCHAUD_BANC_IO_FINAL_KO arme=1 ecoule_s={}", ecoule / NS);
             }
             break;
         }

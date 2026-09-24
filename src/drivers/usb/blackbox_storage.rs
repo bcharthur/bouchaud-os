@@ -901,7 +901,34 @@ fn blackbox_write_lot(
     Ok(())
 }
 
+// BOUCHAUD_C72_SUPPORT_COUPE
+//
+// Le support disparait-il artificiellement ?
+//
+// Les trois injections BOT sont CONSOMMEES a la premiere occasion : elles
+// fabriquent une panne transitoire, que le chemin d'extinction rattrape par
+// ses reprises. Le banc du scenario G l'a montre -- sabotage arme, et
+// pourtant marque FIN posee, archive COMPLETE.
+//
+// Or ce qu'on doit prouver n'est pas la reprise : c'est la survie du
+// checkpoint quand le vidage final echoue VRAIMENT. Il faut donc une panne
+// qui TIENNE, et la plus fidele au cas physique est la plus simple : la cle
+// ne repond plus.
+//
+// Armee seulement par le harnais de banc, jamais par defaut.
+static SUPPORT_COUPE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Coupe le support pour de bon. Sans retour : c'est une panne, pas un test
+/// de reprise.
+pub fn coupe_le_support() {
+    SUPPORT_COUPE.store(true, Ordering::Release);
+}
+
 pub fn blackbox_storage_ready() -> bool {
+    if SUPPORT_COUPE.load(Ordering::Acquire) {
+        return false;
+    }
     BLACKBOX_STORAGE_READY.load(Ordering::Acquire)
 }
 
