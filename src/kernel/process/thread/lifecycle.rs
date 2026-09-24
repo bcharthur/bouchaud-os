@@ -415,6 +415,24 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
             idle_since = crate::kernel::timer::ticks();
         }
     }
+    // BOUCHAUD_C71_LE_SAUT_ET_LA_REPRISE
+    //
+    // Deux temoins, et c'est leur ECART qui designe le maillon :
+    //
+    //   SAUT sans REPRIS   le saut a eu lieu mais `run` n'est pas revenu :
+    //                      le contexte gare n'est plus celui qu'on croit
+    //   SAUT absent        on n'est jamais arrive jusqu'ici
+    //
+    // Emis pour la seule racine de premier plan : sept lignes par scenario.
+    if racine != 0 && pid_sortant == racine {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x}",
+            crate::kernel::timer::monotonic_ms(),
+            pid_sortant,
+            local_cpu(),
+            crate::kernel::task::kernel_ctx_rsp(),
+        ));
+    }
     switch_to_kernel()
 }
 
@@ -540,6 +558,12 @@ pub fn run(mut first: Box<Task>) -> i32 {
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
     smp_lock::resume_after_schedule(depth);
     complete_switch_handoff();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "RETOUR_SHELL_REPRIS t={} racine={} cpu={}",
+        crate::kernel::timer::monotonic_ms(),
+        racine,
+        local_cpu(),
+    ));
 
     crate::kernel::vmm::activate_kernel();
     set_current_index(NO_TASK);

@@ -77,7 +77,15 @@ def controle(racine: Path) -> list:
         # definissent le meme nom, les deux doivent etre sans verrou.
         trouvee = False
         for src in sorted((racine / "src").rglob("*.rs")):
-            corps = corps_de(sans_commentaires(src.read_text()), f"pub fn {fonction}(")
+            texte = sans_commentaires(src.read_text())
+            # `pub` et `pub(crate)` sont tous deux atteignables depuis
+            # exit_current : ne reconnaitre que le premier faisait echouer le
+            # controle en fail-closed sur une fonction pourtant sans verrou.
+            corps = None
+            for entete in (f"pub fn {fonction}(", f"pub(crate) fn {fonction}("):
+                corps = corps_de(texte, entete)
+                if corps is not None:
+                    break
             if corps is None:
                 continue
             trouvee = True

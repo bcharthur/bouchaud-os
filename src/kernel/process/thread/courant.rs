@@ -64,6 +64,14 @@ fn kernel_ctx() -> &'static mut Context {
     unsafe { &mut KERNEL_CTX[local_cpu()] }
 }
 
+/// RSP gare du fil noyau de CE coeur, pour les temoins de reprise.
+///
+/// Lecture seule : sert a dire si le saut de `switch_to_kernel` vise bien le
+/// contexte ou `run` s'est gare, et rien d'autre.
+pub(crate) fn kernel_ctx_rsp() -> u64 {
+    unsafe { KERNEL_CTX[local_cpu()].rsp }
+}
+
 /// RSP physique courant, uniquement pour verifier l'invariant de passation.
 #[inline]
 fn rsp_courant_passation() -> u64 {
