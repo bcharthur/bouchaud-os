@@ -1727,7 +1727,13 @@ const BUDGET_CHECKPOINT_NS: u64 = 1_500_000_000;
 const BUDGET_SYNC_CHECKPOINT_NS: u64 = 800_000_000;
 
 /// Budget de la marque de checkpoint, separe comme celui de `FIN`.
-const BUDGET_MARQUE_CHECKPOINT_NS: u64 = 400_000_000;
+///
+/// Releve de 400 ms a 1,2 s sur mesure : a 400 ms, le banc rendait
+/// `marker=0` alors que `sync=1` et que 176 enregistrements etaient poses --
+/// la marque restait dans le tambour, l'archive n'avait aucun CHECKPOINT, et
+/// le verdict tombait a COUPURE. La marque est posee EN DERNIER : tout ce qui
+/// la precede doit sortir avant elle.
+const BUDGET_MARQUE_CHECKPOINT_NS: u64 = 1_200_000_000;
 
 /// Cadence du checkpoint periodique.
 ///
@@ -1837,8 +1843,19 @@ vidage_poses={}\n",
                 bilan.marque = true;
                 break;
             }
-            if now_ns() >= echeance_marque || pose.poses == 0 {
+            if now_ns() >= echeance_marque {
                 break;
+            }
+            if pose.poses == 0 {
+                // Rien n'est sorti ce tour-ci : le support est momentanement
+                // occupe, pas absent. On lui laisse un tick plutot que
+                // d'abandonner une marque qui n'attend qu'elle -- la boucle
+                // reste bornee par l'echeance juste au-dessus.
+                if crate::kernel::task::try_current().is_some() {
+                    crate::kernel::task::sleep_ticks(1);
+                } else {
+                    break;
+                }
             }
         }
     }
