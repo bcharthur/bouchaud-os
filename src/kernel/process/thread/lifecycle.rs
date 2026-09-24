@@ -14,6 +14,7 @@ pub fn exit_current(code: i32) -> ! {
     // Une sonde ne prend pas de verrou (cf. `balayage_temoins`), et elle ne
     // rallonge pas davantage une section critique qu'elle observe.
     let mut dernier_thread = false;
+    let mut pid_sortant = 0u32;
     {
         let task = current();
         marque_zombie(task);
@@ -25,6 +26,7 @@ pub fn exit_current(code: i32) -> ! {
             futex_wake(clear, 1);
         }
         let process = task.process.clone();
+        pid_sortant = process.pid;
         // BOUCHAUD_C61_UNE_MORT_DE_PROCESSUS_SE_NOMME_UNE_FOIS
         //
         // Le nom est lu AVANT `lifecycle.lock()` : le prendre a l'interieur
@@ -278,6 +280,26 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
     // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
     // continuent independamment.
     let cpu_id = local_cpu();
+    // BOUCHAUD_C71_QUELLE_BRANCHE_POUR_LA_RACINE
+    //
+    // UNE ligne, et seulement quand la racine de premier plan meurt -- donc
+    // une fois par commande de l'autorun, pas une forêt.
+    //
+    // `run` gare le fil noyau appelant dans le `KERNEL_CTX` de SON CPU, et
+    // `KERNEL_CTX` est PAR CPU. Si la racine meurt sur un coeur different,
+    // `switch_to_kernel` rend la main au fil noyau de CE coeur-la, et le shell
+    // gare sur le BSP n'est jamais repris. Cette ligne dit laquelle des deux
+    // situations on vit, au lieu de la faire deviner.
+    if racine != 0 && pid_sortant == racine {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "RETOUR_SHELL t={} pid={} racine={} cpu={} branche={}",
+            crate::kernel::timer::monotonic_ms(),
+            pid_sortant,
+            racine,
+            cpu_id,
+            if cpu_id != 0 { "ap_sans_retour" } else { "bsp_attend" },
+        ));
+    }
     if cpu_id != 0 {
         let cur = current_index_raw();
         commute_sortie_definitive_si_possible(cur, cpu_id);
@@ -308,6 +330,7 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
     }
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
+    let mut dernier_dit = idle_since;
     loop {
         // LE TEST DE SORTIE VIENT AVANT LA COMMUTATION, ET C'EST NECESSAIRE.
         //
@@ -342,6 +365,33 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
             })
         {
             break;
+        }
+        // QUI RETIENT LE SHELL, nomme toutes les deux secondes.
+        //
+        // Le garde-fou de trente secondes ci-dessous ne se declenche jamais :
+        // il rearme son compteur des que quoi que ce soit est executable, et
+        // les echantillonneurs le sont toutes les cinq secondes. La boucle
+        // pouvait donc tourner sans fin sans qu'une seule ligne le dise.
+        if racine != 0 {
+            let maintenant = crate::kernel::timer::ticks();
+            if maintenant.wrapping_sub(dernier_dit) > 2 * crate::kernel::timer::TICKS_PER_SECOND {
+                dernier_dit = maintenant;
+                let mut retenu = 0usize;
+                let mut premier = (0u32, 0u32, 0u8);
+                for t in tasks().iter() {
+                    if t.state != TaskState::Zombie && descend_de(t.process.pid, racine) {
+                        if retenu == 0 {
+                            premier = (t.tid, t.process.pid, t.state.charge().code());
+                        }
+                        retenu += 1;
+                    }
+                }
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "RETOUR_SHELL_ATTEND t={} racine={} retenus={} tid={} pid={} etat={}",
+                    crate::kernel::timer::monotonic_ms(),
+                    racine, retenu, premier.0, premier.1, premier.2,
+                ));
+            }
         }
         commute_sortie_definitive_si_possible(cur, 0);
         if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
