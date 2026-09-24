@@ -328,6 +328,41 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         commute_sortie_definitive_si_possible(cur, 0);
         switch_to_kernel();
     }
+
+    // BOUCHAUD_C71_LA_RACINE_NE_S_ATTEND_PAS_ELLE_MEME
+    //
+    // LA boucle ci-dessous attend la fin de la racine de premier plan. Quand
+    // c'est la RACINE ELLE-MEME qui meurt, elle n'a personne a attendre : la
+    // condition est atteinte par construction. L'y faire passer quand meme
+    // etait la perte du shell.
+    //
+    // Pourquoi c'est definitif, et pas seulement lent : cette boucle tourne
+    // sur la pile d'une tache DEJA MORTE, et son corps appelle
+    // `commute_sortie_definitive_si_possible`, qui part vers toute tache
+    // executable et NE REVIENT PAS (`unreachable!`). Si les deux tests de
+    // sortie sont faux ne serait-ce qu'un instant -- un descendant pas encore
+    // marque zombie -- la pile est abandonnee, `switch_to_kernel` n'est jamais
+    // atteint, et `run` reste gare a vie. Le shell ne revient plus.
+    //
+    // Mesure, banc contendu (QEMU epingle sur 2 coeurs d'une machine qui en a
+    // 4), temoins `RETOUR_SHELL*` :
+    //
+    //   pid=23, pid=24  commandes qui aboutissent  SAUT puis REPRIS
+    //   pid=25          commande qui bloque        SAUT ABSENT, 3 passes / 3
+    //
+    // Sans contention le test est vrai du premier coup, on saute, et tout va
+    // bien : c'est pourquoi le defaut passait pour intermittent.
+    if pid_sortant == racine {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=racine_directe",
+            crate::kernel::timer::monotonic_ms(),
+            pid_sortant,
+            local_cpu(),
+            crate::kernel::task::kernel_ctx_rsp(),
+        ));
+        switch_to_kernel();
+    }
+
     let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
     let mut idle_since = crate::kernel::timer::ticks();
     let mut dernier_dit = idle_since;
@@ -426,7 +461,7 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
     // Emis pour la seule racine de premier plan : sept lignes par scenario.
     if racine != 0 && pid_sortant == racine {
         crate::kernel::dmesg::log_fmt(format_args!(
-            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x}",
+            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=apres_attente",
             crate::kernel::timer::monotonic_ms(),
             pid_sortant,
             local_cpu(),
