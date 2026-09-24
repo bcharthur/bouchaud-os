@@ -1707,6 +1707,12 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
 /// ne doit jamais se voir.
 const BUDGET_CHECKPOINT_NS: u64 = 1_500_000_000;
 
+/// Budget propre de la synchronisation de cache.
+///
+/// Separe, parce que partager celui du vidage revenait a ne jamais
+/// synchroniser : le vidage consomme d'abord, et il ne reste rien.
+const BUDGET_SYNC_CHECKPOINT_NS: u64 = 800_000_000;
+
 /// Budget de la marque de checkpoint, separe comme celui de `FIN`.
 const BUDGET_MARQUE_CHECKPOINT_NS: u64 = 400_000_000;
 
@@ -1800,13 +1806,19 @@ vidage_poses={}\n",
         bilan.marque = !pose.reste;
     }
 
-    // LA SYNCHRONISATION EST BORNEE, ET SON ECHEC N'EST PAS FATAL.
+    // LA SYNCHRONISATION A SON PROPRE BUDGET, ET NON LE RESTE DU PRECEDENT.
     //
-    // Un checkpoint qui n'a pas pu synchroniser reste utile : les donnees sont
-    // sur la cle, seul le cache n'est pas rendu. L'extracteur le verra au
-    // CRC. Ce qui compte est de ne jamais rester ici.
-    for _ in 0..4 {
-        if now_ns() >= echeance.saturating_add(BUDGET_MARQUE_CHECKPOINT_NS) {
+    // Premiere version : quatre tentatives bornees par l'echeance du vidage.
+    // Le banc a rendu `duration_ms=1093 marker=1 sync=0` -- le vidage avait
+    // deja mange l'essentiel du budget, et la synchronisation n'avait plus de
+    // quoi aboutir. Les donnees etaient bien sur la cle (l'extracteur relit
+    // ses 293 enregistrements), mais `ok=0` faisait passer un checkpoint
+    // reussi pour un echec, et `diag-save` aurait rendu un code trompeur.
+    //
+    // Son echec reste non fatal : seul le cache n'est pas rendu.
+    let echeance_sync = now_ns().saturating_add(BUDGET_SYNC_CHECKPOINT_NS);
+    for _ in 0..16 {
+        if now_ns() >= echeance_sync {
             break;
         }
         if crate::drivers::xhci_active::blackbox_force_sync() {
