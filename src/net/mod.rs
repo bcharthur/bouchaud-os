@@ -143,6 +143,23 @@ fn pose_le_verdict(nouvel_etat: Demarrage) {
         oublie_la_presomption_slirp();
     }
     unsafe { DEMARRAGE = nouvel_etat; }
+    // AUDIT : CE QUE LE RESTE DU SYSTEME VOIT, A CET INSTANT.
+    //
+    // `external_enabled()` est vrai pour `Pret` ET pour `SansBail`. Or
+    // `SansBail` peut porter la presomption SLIRP compilee -- les memes
+    // octets qu'un vrai bail, sans qu'aucun bail n'ait ete obtenu.
+    // `bail_obtenu()` est la seule chose qui les distingue, et cette ligne la
+    // met a cote du verdict pour qu'on puisse en juger sur mesure.
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "NET_VERDICT etat={} ip={} gw={} dns={} source={} external_enabled={} connecte={}",
+        nom_demarrage(nouvel_etat),
+        ipv4::format_addr(&our_ip()),
+        ipv4::format_addr(&gateway()),
+        ipv4::format_addr(&dns_server()),
+        if bail_obtenu() { "bail" } else { "presomption" },
+        external_enabled() as u8,
+        connecte() as u8,
+    ));
 }
 
 /// Adresse IPv4 d'eth0.
@@ -189,8 +206,32 @@ pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
 }
 
 /// Indique si une interface routable vers l'exterieur est active.
+///
+/// # `SansBail` ne suffit pas, et c'est une mesure qui le dit
+///
+/// Ce predicat rendait vrai pour `Pret` ET pour `SansBail`, au motif que le
+/// repli SLIRP « marche ». Sous un SLIRP hors 10.0.2.x, la ligne d'audit
+/// posee au moment du verdict donne :
+///
+/// ```text
+/// NET_VERDICT etat=sans-bail ip=10.0.2.15 gw=10.0.2.2 dns=10.0.2.3
+///             source=presomption external_enabled=1 connecte=1
+/// ```
+///
+/// Le serveur offrait 192.168.76.15. Le systeme annoncait donc un reseau
+/// exterieur utilisable sur une adresse qu'il avait INVENTEE, hors du
+/// sous-reseau reel. `bail_obtenu()` est la seule chose qui distingue une
+/// configuration d'une valeur d'usine -- les deux portent les memes octets --
+/// et c'est elle qui tranche ici.
+///
+/// `SansBail` reste vrai quand un bail A ete obtenu : une renegociation qui
+/// echoue plus tard ne rend pas fausse l'adresse deja recue.
 pub fn external_enabled() -> bool {
-    matches!(etat_demarrage(), Demarrage::Pret | Demarrage::SansBail)
+    match etat_demarrage() {
+        Demarrage::Pret => true,
+        Demarrage::SansBail => bail_obtenu(),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,8 +431,11 @@ pub fn qualite_lien() -> QualiteLien {
 /// `external_enabled()` repond sur le VERDICT de demarrage ; celle-ci repond
 /// sur l'etat courant, lien compris. C'est ce que doit montrer une icone.
 pub fn connecte() -> bool {
-    matches!(etat_demarrage(), Demarrage::Pret | Demarrage::SansBail)
-        && e1000::link_up()
+    // Meme regle que `external_enabled` -- voir son commentaire -- plus le
+    // lien. Les deux ne doivent pas pouvoir diverger : un indicateur qui dit
+    // « connecte » pendant que la pile dit « pas de reseau exterieur » est
+    // pire que les deux reponses prises separement.
+    external_enabled() && e1000::link_up()
 }
 
 /// L'interface physique est-elle presente et pilotee ?

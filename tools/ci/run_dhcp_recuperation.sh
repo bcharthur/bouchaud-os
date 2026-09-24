@@ -102,6 +102,20 @@ echo
 echo "=== verdicts poses ==="
 printf '%s\n' "$SERIE" | grep -aoE "net: eth0 [^\"]{0,90}|BOUCHAUD_NET_RECONFIGURE verdict=[a-z-]+" || true
 
+# AUCUNE CONFIGURATION SUPPOSEE NE DOIT ETRE ANNONCEE COMME UTILISABLE.
+#
+# `external_enabled()` rendait vrai pour `SansBail`, qui porte la presomption
+# SLIRP compilee tant qu'aucun bail n'est arrive. Sous un SLIRP hors
+# 10.0.2.x, le systeme annoncait donc un reseau exterieur utilisable sur
+# 10.0.2.15 pendant que le serveur offrait 192.168.76.15. L'invariant tient
+# sur les deux sous-reseaux, et c'est le second qui le rend detectable.
+echo "=== ce que le systeme annonce ==="
+printf '%s\n' "$SERIE" | grep -aoE "NET_VERDICT[^\"]{0,170}" || true
+if grep -aqE "NET_VERDICT .*source=presomption .*external_enabled=1" <<<"$SERIE"; then
+  echo "DHCP_RECUPERATION verdict=ECHEC raison=configuration-supposee-annoncee-utilisable"
+  exit 1
+fi
+
 echo "=== le fil ==="
 python3 tools/ci/lis_dhcp_pcap.py "$TRAVAIL/fil.pcap" 2>/dev/null | tail -3 || true
 
