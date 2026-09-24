@@ -553,12 +553,41 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             return 0;
         }
 
+        // BOUCHAUD_C70_SE_DECLARER_EN_ATTENTE_AVANT_DE_REVERIFIER
+        //
         // Blocage jusqu'a ce qu'un fils se termine : c'est `exit_current` qui
-        // remettra cette tache en etat pret.
+        // remettra cette tache en etat pret. L'ORDRE compte, et il a coute une
+        // integration entiere.
+        //
+        // Le reveilleur, `notify_parent_of_exit`, exige DEUX conditions :
+        //
+        //     waiting_for_child.compare_exchange(true, false).is_ok()
+        //  && state.echange(Blocked, Ready)
+        //
+        // La version precedente cherchait les zombies, ne trouvait rien, PUIS
+        // se declarait en attente. Un fils qui mourait dans cet intervalle
+        // trouvait `waiting_for_child` encore a faux : son reveil tombait dans
+        // le vide, et le parent s'endormait ensuite pour toujours. C'est le
+        // blocage de `qemu / os primitives` apres `SESSION_PERE_SORT fils=4` :
+        // machine vivante, shell jamais repris, `pretes=2` avec `au_repos=4`.
+        //
+        // `Blocked` AVANT le drapeau, et non l'inverse : le reveilleur qui
+        // gagne le `compare_exchange` trouve alors forcement l'etat `Blocked`
+        // a echanger. Pose dans l'autre sens, il consommait le drapeau puis
+        // echouait sur l'etat, et perdait le reveil aussi surement.
+        //
+        // Puis on REVERIFIE. Un reveil emis avant notre declaration n'a pas pu
+        // nous atteindre, mais le zombie qu'il annoncait, lui, est visible.
         {
             let task = task::current();
-            task.waiting_for_child.range(true);
             task.state.range(task::TaskState::Blocked);
+            task.waiting_for_child.range(true);
+        }
+        if !task::zombie_children(parent_pid).is_empty() {
+            let task = task::current();
+            task.waiting_for_child.range(false);
+            task.state.range(task::TaskState::Ready);
+            continue;
         }
         // schedule() effectue deja HLT avec le BKL suspendu si necessaire.
         let _ = task::schedule();

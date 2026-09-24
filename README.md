@@ -235,9 +235,21 @@ bloqué. Le chef de session publie ses sondes sans encombre ; ce sont les
 **quatre tâches arrêtées avec lui** qui ne publient jamais leur `PROCESS_EXIT`.
 `exit_current` tient `process.lifecycle` pendant la publication des sondes, et
 `balayage_temoins()` y prenait `CACHE.lock()` : une arête d'ordre de verrous
-sur un chemin de sortie, inoffensive quand un processus meurt seul, fermée
-quand quatre tâches sont arrêtées ensemble. Reproduit puis levé localement par
-expérience contrôlée (`OS_PRIMITIVES_OK`, rc=0). La règle était déjà
+sur un chemin de sortie. Ce correctif était juste — la règle est écrite dans le
+fichier même — mais il **n'a pas suffi** : `Integration #257` a échoué au même
+endroit, et une passe locale verte ne prouve rien contre une course.
+
+**La vraie cause est antérieure : un réveil perdu dans `wait4`.**
+`[SCHED-RESUME] pretes=2 ... au_repos=4 en_file=0` — deux tâches prêtes, quatre
+cœurs au repos, file vide : le shell n'a jamais été remis en file. `sys_wait4`
+cherchait les fils zombies, n'en trouvait aucun, **puis** se déclarait en
+attente. Un fils mourant dans cet intervalle trouvait `waiting_for_child`
+encore à faux ; son réveil tombait dans le vide et le parent s'endormait pour
+toujours. Les sondes de sortie de processus n'ont fait que déplacer le timing
+dans cette fenêtre. Corrigé en posant `Blocked` **avant** le drapeau — sinon le
+réveilleur consomme le drapeau puis échoue sur l'état — et en **revérifiant**
+après s'être déclaré. Gardes-fous `verifie-sondes-sans-verrou.py` et
+`verifie-attente-fils.py`. La règle était déjà
 écrite dans le fichier même (« Reporting must stay lock-free »), et le
 commentaire au-dessus du site d'appel mettait en garde contre ce geste exact.
 Corrigé par un compteur atomique ; vérifié par

@@ -585,11 +585,52 @@ ne coute rien quand un processus meurt seul -- d'ou les sondes de pid 25 qui
 passent -- et elle se referme quand quatre taches sont arretees ensemble depuis
 le chemin de teardown de session.
 
-**Preuve, par experience controlee.** Meme scenario, meme machine, deux images
-qui ne different que par ce correctif :
+**Ce correctif etait juste, et il n'a PAS suffi.** J'ai ecrit « preuve par
+experience controlee » sur UNE passe locale verte. Une passe ne prouve rien
+contre une course : `Integration #257` a echoue au meme endroit, au caractere
+pres. Deux lectures a corriger dans ce qui precede :
 
-    avant   bloque apres SESSION_PERE_SORT fils=4, aucun PROCESS_EXIT des fils
-    apres   OS_PRIMITIVES_OK, rc=0, SESSION_INVITE_REVENUE et PRIMITIVES_FIN
+  * les quatre taches de la session ne publient pas `PROCESS_EXIT` parce que
+    le teardown les marque zombies DIRECTEMENT, sans passer par
+    `exit_current`. Leur silence est normal et n'etait pas un symptome.
+  * le noyau termine la sortie entierement dans les DEUX cas, jusqu'a
+    `CLEAN_PAGE_CACHE_GLOBAL`. Ce qui manque ensuite, c'est le SHELL.
+
+## 15. LA VRAIE CAUSE : un reveil perdu dans `wait4`, anterieur a C70
+
+    [SCHED-RESUME] coeurs=4 au_repos=4 en_file=0 taches=9 pretes=2 bloquees=7
+
+Deux taches PRETES, quatre coeurs AU REPOS, file vide. Personne ne dort en
+attendant du travail : le shell n'a jamais ete remis en file.
+
+`sys_wait4` faisait, dans cet ordre :
+
+    (A) chercher les fils zombies -> aucun
+    (B) waiting_for_child = true ; state = Blocked ; schedule()
+
+`notify_parent_of_exit` exige DEUX conditions pour reveiller :
+
+    waiting_for_child.compare_exchange(true, false).is_ok()
+ && state.echange(Blocked, Ready)
+
+Un fils qui meurt entre (A) et (B) trouve le drapeau encore a faux. Son reveil
+tombe dans le vide, et le parent s'endort ensuite pour toujours. La course est
+**anterieure a C70** : les sondes de sortie de processus, qui s'intercalent
+entre `zombie = true` et `notify_parent_of_exit()`, n'ont fait que deplacer le
+timing dedans.
+
+**Correction.** `Blocked` d'abord, le drapeau ensuite, puis on REVERIFIE.
+
+  * l'etat avant le drapeau, et non l'inverse : le reveilleur qui gagne le
+    `compare_exchange` trouve alors forcement `Blocked` a echanger. Pose dans
+    l'autre sens, il consommait le drapeau puis echouait sur l'etat -- et
+    perdait le reveil aussi surement.
+  * la reverification rattrape le seul cas qui reste : un reveil emis avant
+    notre declaration n'a pas pu nous atteindre, mais le zombie qu'il
+    annoncait est visible.
+
+Garde-fou : `tools/ci/verifie-attente-fils.py`, deux tests negatifs (ordre
+inverse, reverification retiree).
 
 La regle etait **deja ecrite dans le fichier meme**, sur `log_ng_stats` :
 
