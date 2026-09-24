@@ -436,6 +436,48 @@ jobs:
           path: target/verifie-dns/serie.log
           if-no-files-found: warn
 
+  dhcp-recuperation:
+    name: qemu / dhcp recuperation
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # Diagnostic : l OFFRE est-elle sur le fil ? Tranche CAS A / CAS B.
+      - name: L offre DHCP sur le fil
+        run: BANC_TRAVAIL=banc-fil tools/ci/run_dhcp_wire.sh image/bootimage-bouchaud-os.bin
+      # La question qui engage : sans aucune commande tapee, la machine
+      # finit-elle par obtenir un VRAI bail ?
+      - name: Recuperation, SLIRP par defaut
+        run: BANC_TRAVAIL=banc-defaut tools/ci/run_dhcp_recuperation.sh image/bootimage-bouchaud-os.bin 45
+      # ET HORS DU SOUS-RESEAU D USINE.
+      #
+      # Sur 10.0.2.x, le repli compile devine juste par accident : une
+      # configuration inventee et un bail reel donnent la meme adresse. Seul
+      # un autre sous-reseau distingue les deux.
+      - name: Recuperation, SLIRP hors 10.0.2.x
+        env:
+          BANC_NETDEV: user,id=net0,net=192.168.76.0/24,host=192.168.76.2,dhcpstart=192.168.76.15,dns=192.168.76.3
+        run: BANC_TRAVAIL=banc-autre tools/ci/run_dhcp_recuperation.sh image/bootimage-bouchaud-os.bin 45
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-dhcp-recuperation
+          path: |
+            banc-fil/
+            banc-defaut/
+            banc-autre/
+          if-no-files-found: warn
+
   usb-arbre:
     name: qemu / arbre usb
     needs: [gate, kernel-build]
@@ -525,7 +567,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, usb-arbre, usb-branchement, usb-stockage]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -539,6 +581,7 @@ jobs:
           MM: ${{ needs.mm-ng6.result }}
           QT: ${{ needs.qt-pixel.result }}
           DNS: ${{ needs.dns-udp.result }}
+          DHCP: ${{ needs.dhcp-recuperation.result }}
           USB: ${{ needs.usb-arbre.result }}
           PLUG: ${{ needs.usb-branchement.result }}
           STOCK: ${{ needs.usb-stockage.result }}
@@ -548,7 +591,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" usb "$USB" plug "$PLUG" stockage "$STOCK"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -558,7 +601,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG" "$STOCK"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -567,7 +610,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$USB" "$PLUG" "$STOCK"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK
