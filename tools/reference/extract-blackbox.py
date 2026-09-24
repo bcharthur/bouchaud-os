@@ -280,6 +280,14 @@ def extract(source, output):
             # fallu compter les occurrences d'un champ pour s'en rendre compte.
             # Une archive doit DIRE de quel noyau elle sort.
             build=prochaine_marque(markers, "BOUCHAUD_BUILD"),
+            # BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
+            #
+            # Une archive SANS marque de FIN mais AVEC un checkpoint valide
+            # n'est pas complete : elle est PARTIELLE JUSQU'AU checkpoint N.
+            # Les confondre, c'est soit jeter des preuves utilisables, soit
+            # croire qu'on a tout alors qu'il manque la fin -- et c'est cette
+            # distinction-la qu'on paie le plus cher a perdre.
+            **verdict_completude(markers, recs),
         ))
     manifest["sessions"].sort(key=lambda x:x["boot_id"])
     (output/"manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
@@ -288,10 +296,73 @@ def extract(source, output):
         (output/"LATEST.txt").write_text(
             f"{latest['directory']}\nboot_id={latest['boot_id']}\nrecords={latest['records']}\n"
             f"fatal_records={latest['fatal_records']}\nserial_bytes={latest['serial_bytes']}\n"
-            f"flight_events={latest['flight_events']}\n",encoding="utf-8")
+            f"flight_events={latest['flight_events']}\n"
+            f"completude={latest['completude']}\n"
+            f"fin_presente={latest['fin_presente']}\n"
+            f"checkpoints={latest['checkpoints']}\n"
+            f"dernier_checkpoint_seq={latest['dernier_checkpoint_seq']}\n"
+            f"trous={latest['trous']}\n",encoding="utf-8")
         print(f"OK: {len(records)} records, {len(manifest['sessions'])} session(s), latest={latest['directory']}")
+        print(f"    completude={latest['completude']} fin={latest['fin_presente']} "
+              f"checkpoints={latest['checkpoints']} "
+              f"dernier_checkpoint_seq={latest['dernier_checkpoint_seq']} "
+              f"premier_seq={latest['first_seq']} dernier_seq={latest['last_seq']} "
+              f"trous={latest['trous']}")
     else:
         print("ATTENTION: aucun record BLACKBOX valide trouve")
+
+def verdict_completude(markers, recs):
+    """COMPLETE / PARTIEL_CHECKPOINT / COUPURE, et de quoi le justifier.
+
+    Trois etats, et pas deux :
+
+      COMPLETE             une marque FIN est presente : la session s'est
+                           terminee et l'a dit.
+      PARTIEL_CHECKPOINT   pas de FIN, mais au moins un CHECKPOINT valide :
+                           tout ce qui precede le dernier checkpoint est
+                           exploitable, la suite est perdue.
+      COUPURE              ni FIN ni CHECKPOINT : on ne sait rien de ce qui
+                           manque.
+    """
+    texte = "".join(markers)
+    fin = None
+    checkpoints = []
+    for ligne in texte.splitlines():
+        if "BOUCHAUD_TRIGKEY_BLACKBOX_V3 FIN" in ligne:
+            fin = ligne.strip()
+        elif "BOUCHAUD_TRIGKEY_BLACKBOX_V3 CHECKPOINT" in ligne:
+            checkpoints.append(ligne.strip())
+
+    def champ(ligne, cle):
+        for morceau in ligne.split():
+            if morceau.startswith(cle + "="):
+                return morceau[len(cle) + 1:]
+        return None
+
+    dernier = checkpoints[-1] if checkpoints else None
+    seqs = [int(r["seq"]) for r in recs] if recs else []
+    trous = 0
+    for a, b in zip(sorted(seqs), sorted(seqs)[1:]):
+        if b != a + 1:
+            trous += b - a - 1
+
+    if fin is not None:
+        etat = "COMPLETE"
+    elif dernier is not None:
+        etat = "PARTIEL_CHECKPOINT"
+    else:
+        etat = "COUPURE"
+
+    return dict(
+        completude=etat,
+        fin_presente=fin is not None,
+        checkpoints=len(checkpoints),
+        dernier_checkpoint_seq=int(champ(dernier, "seq") or 0) if dernier else None,
+        dernier_checkpoint_confirme=(
+            int(champ(dernier, "dernier_confirme") or 0) if dernier else None),
+        trous=trous,
+    )
+
 
 def prochaine_marque(markers, prefixe):
     """La premiere marque portant ce prefixe, ou None.

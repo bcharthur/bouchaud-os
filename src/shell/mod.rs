@@ -216,6 +216,7 @@ pub const COMMANDS: &[&str] = &[
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode",
+    "diag-save",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
@@ -760,6 +761,30 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         }
         "alloctest" => { c::alloctest(); 0 }
         "devices" => { c::devices(); 0 }
+        // BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
+        //
+        // La voie volontaire avant un test risque : on pose un checkpoint, on
+        // continue a tester, et meme si l'extinction finale echoue le gros du
+        // diagnostic est deja persistant.
+        "diag-save" => {
+            let bilan = crate::kernel::blackbox::checkpoint("manuel");
+            if !bilan.support {
+                crate::println!("diag-save : aucun support blackbox — rien n'a ete ecrit.");
+                crate::println!("  la trace RAM reste valide, simplement non persistee.");
+                return 1;
+            }
+            crate::println!(
+                "diag-save : checkpoint {} — {} enregistrement(s), {} ms",
+                bilan.seq, bilan.poses, bilan.duree_us / 1_000,
+            );
+            crate::println!(
+                "  marque {} | synchronisation {} | dernier confirme {}",
+                if bilan.marque { "posee" } else { "MANQUANTE" },
+                if bilan.synchronise { "ok" } else { "NON RENDUE" },
+                bilan.dernier_confirme,
+            );
+            if bilan.ok() { 0 } else { 1 }
+        }
         "dmesg" => { dmesg::print(); 0 }
         // Les couleurs du journal supposent un terminal qui lit l'ANSI. C'est le
         // cas de la console de Windows depuis Windows 10, mais pas d'un journal

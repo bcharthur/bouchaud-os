@@ -563,6 +563,13 @@ static FIL_MESURES_PROCESSUS: AtomicU8 = AtomicU8::new(0);
 fn fil_mesures_processus() -> ! {
     loop {
         releve_si_du();
+        // BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
+        //
+        // Ce fil-ci et pas un autre : ni le compositeur, ni le reseau, ni le
+        // pilote USB ne doivent porter la persistance du diagnostic. La
+        // fonction se borne elle-meme et rend la main immediatement sans
+        // support.
+        crate::kernel::blackbox::checkpoint_si_du();
         // La fonction elle-meme borne la vraie mesure a une fois / 5 s.
         // 100 ms ne sert qu'a ne pas retarder le premier echantillon.
         crate::kernel::task::sleep_ticks(100);

@@ -1676,6 +1676,179 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
 ///
 /// L'ecran d'extinction affiche sa progression a chaque lot : ce n'est pas un
 /// figement, et cela se voit.
+// ---------------------------------------------------------------------------
+// BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
+// ---------------------------------------------------------------------------
+//
+// POURQUOI. Au test physique du Trigkey (image d131f2a), l'utilisateur demande
+// l'extinction, la sauvegarde finale echoue, la machine s'eteint -- et TOUTE
+// la session est perdue, y compris les journaux qui expliquaient le reseau.
+// Un observatoire qui perd ses preuves au moment de la panne n'est pas fini.
+//
+// CE QUE CE N'EST PAS. Ce n'est pas un retour des E/S USB dans le chemin
+// chaud : le design RAM-only garde sa raison d'etre -- un diagnostic ne doit
+// pas dependre, a chaque evenement, du peripherique qu'il observe. Le
+// checkpoint est une operation SEPAREE, bornee, et portee par un fil de
+// mesure deja existant.
+//
+// CE QU'IL REUTILISE. `vidange` est deja bornee par echeance et INCREMENTALE :
+// son curseur n'avance que sur ce que le support a confirme. Un checkpoint
+// n'est donc qu'un vidage borne suivi d'une marque -- rien de neuf dans le
+// chemin de donnees.
+//
+// LA MARQUE EST D'UN AUTRE TYPE QUE `FIN`. `FIN` reste reservee a une vraie
+// fin de session ; une archive qui n'en a pas n'est pas complete, et le dire
+// est precisement ce qu'on paie le plus cher a perdre. Un checkpoint porte
+// donc `CHECKPOINT`, avec son numero de sequence, et l'extracteur distingue
+// trois cas : session complete, session partielle jusqu'au checkpoint N,
+// coupure sans checkpoint.
+
+/// Budget total d'un checkpoint. Tres inferieur a celui de l'extinction : il
+/// ne doit jamais se voir.
+const BUDGET_CHECKPOINT_NS: u64 = 1_500_000_000;
+
+/// Budget de la marque de checkpoint, separe comme celui de `FIN`.
+const BUDGET_MARQUE_CHECKPOINT_NS: u64 = 400_000_000;
+
+/// Cadence du checkpoint periodique.
+///
+/// Valeur de depart, a confirmer par la mesure du cout reel : ce fichier ne
+/// choisit pas un chiffre au hasard, il en pose un et le banc le corrige.
+const PERIODE_CHECKPOINT_MS: u64 = 45_000;
+
+static CHECKPOINT_SEQ: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINT_PROCHAIN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Ce qu'un checkpoint a donne.
+#[derive(Clone, Copy, Default)]
+pub struct Checkpoint {
+    /// Le support repondait-il seulement ?
+    pub support: bool,
+    /// Enregistrements effectivement poses par CE checkpoint.
+    pub poses: u64,
+    /// La marque de checkpoint est-elle posee ?
+    pub marque: bool,
+    /// La cle a-t-elle confirme l'ecriture ?
+    pub synchronise: bool,
+    /// Numero de ce checkpoint dans la session.
+    pub seq: u64,
+    /// Dernier enregistrement confirme persistant.
+    pub dernier_confirme: u64,
+    /// Duree reelle, pour que la cadence soit choisie sur une mesure.
+    pub duree_us: u64,
+}
+
+impl Checkpoint {
+    pub fn ok(&self) -> bool {
+        self.support && self.marque && self.synchronise
+    }
+}
+
+/// Pose un checkpoint : vidage borne, marque `CHECKPOINT`, synchronisation.
+///
+/// Ne suspend PAS la production : contrairement a `vide_avant_extinction`, la
+/// session continue. Ne retire de la RAM que ce que le support a confirme --
+/// c'est `vidange` qui en tient le curseur, et elle ne l'avance jamais sur du
+/// non-confirme.
+///
+/// Sans support, rend immediatement un bilan a `support=false` : une machine
+/// sans cle reste parfaitement utilisable.
+pub fn checkpoint(raison: &str) -> Checkpoint {
+    let debut = now_ns();
+    let mut bilan = Checkpoint::default();
+    bilan.seq = CHECKPOINT_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
+
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        bilan.duree_us = now_ns().saturating_sub(debut) / 1_000;
+        crate::serial_println!(
+            "BLACKBOX_CHECKPOINT_END ok=0 raison={} seq={} support=0 records=0 \
+duration_ms={} marker=0 sync=0",
+            raison, bilan.seq, bilan.duree_us / 1_000,
+        );
+        return bilan;
+    }
+    bilan.support = true;
+
+    crate::serial_println!(
+        "BLACKBOX_CHECKPOINT_BEGIN raison={} seq={} boot_id={} ts_ns={}",
+        raison, bilan.seq, boot_id(), debut,
+    );
+
+    let echeance = debut.saturating_add(BUDGET_CHECKPOINT_NS);
+    let tour = vidange(echeance);
+    bilan.poses = tour.poses;
+
+    let maintenant = now_ns();
+    let etat = BOBINE.etat();
+    let (_lots, _manquants, prochain) = vidage_compteurs();
+    bilan.dernier_confirme = prochain.saturating_sub(1) as u64;
+
+    let mut marque = Text::new();
+    let _ = write!(
+        &mut marque,
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V3 CHECKPOINT raison={} boot_id={} seq={} ts_ns={} \
+dernier_confirme={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} \
+vidage_poses={}\n",
+        raison, boot_id(), bilan.seq, maintenant, bilan.dernier_confirme,
+        etat.reserves, etat.poses, etat.ecrases, etat.perdus, tour.poses,
+    );
+    if append(KIND_MARKER, marque.as_bytes(), maintenant,
+              crate::drivers::serial::trace_total_bytes()) {
+        let echeance_marque = now_ns().saturating_add(BUDGET_MARQUE_CHECKPOINT_NS);
+        let pose = vidange(echeance_marque);
+        bilan.poses = bilan.poses.saturating_add(pose.poses);
+        bilan.marque = !pose.reste;
+    }
+
+    // LA SYNCHRONISATION EST BORNEE, ET SON ECHEC N'EST PAS FATAL.
+    //
+    // Un checkpoint qui n'a pas pu synchroniser reste utile : les donnees sont
+    // sur la cle, seul le cache n'est pas rendu. L'extracteur le verra au
+    // CRC. Ce qui compte est de ne jamais rester ici.
+    for _ in 0..4 {
+        if now_ns() >= echeance.saturating_add(BUDGET_MARQUE_CHECKPOINT_NS) {
+            break;
+        }
+        if crate::drivers::xhci_active::blackbox_force_sync() {
+            bilan.synchronise = true;
+            break;
+        }
+        if crate::kernel::task::try_current().is_some() {
+            crate::kernel::task::sleep_ticks(1);
+        }
+    }
+
+    bilan.duree_us = now_ns().saturating_sub(debut) / 1_000;
+    crate::serial_println!(
+        "BLACKBOX_CHECKPOINT_END ok={} raison={} seq={} support=1 records={} \
+duration_ms={} marker={} sync={} dernier_confirme={}",
+        bilan.ok() as u8, raison, bilan.seq, bilan.poses,
+        bilan.duree_us / 1_000, bilan.marque as u8, bilan.synchronise as u8,
+        bilan.dernier_confirme,
+    );
+    bilan
+}
+
+/// Checkpoint periodique, appele par le fil de mesures.
+///
+/// Rend `true` si un checkpoint a eu lieu. Borne par `PERIODE_CHECKPOINT_MS`
+/// et silencieux sans support : ce chemin ne doit jamais couter a une machine
+/// qui n'a pas de cle.
+pub fn checkpoint_si_du() -> bool {
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let prochain = CHECKPOINT_PROCHAIN_MS.load(Ordering::Acquire);
+    if maintenant < prochain {
+        return false;
+    }
+    CHECKPOINT_PROCHAIN_MS.store(
+        maintenant.saturating_add(PERIODE_CHECKPOINT_MS), Ordering::Release);
+    if !crate::drivers::xhci_active::blackbox_storage_ready() {
+        return false;
+    }
+    checkpoint("periodique");
+    true
+}
+
 const BUDGET_EXTINCTION_NS: u64 = 12_000_000_000;
 /// Budget SUPPLEMENTAIRE reserve a la marque de fin et a la synchronisation.
 const BUDGET_MARQUE_NS: u64 = 1_500_000_000;
