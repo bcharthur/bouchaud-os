@@ -766,3 +766,132 @@ pub fn degre(
     }
     Degre::Draine
 }
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_B3_UNE_REPARATION_INVOQUEE N'EST PAS UNE RECEPTION RESTAUREE
+// ---------------------------------------------------------------------------
+
+/// L'etat de reception a un instant, tel qu'un pilote peut le photographier.
+///
+/// # Pourquoi cette structure est commune aux deux pilotes
+///
+/// Le RTL8168 physique et l'e1000 emule ne tombent PAS en panne de la meme
+/// facon, et rien ici ne pretend le contraire. Ce qui est commun, c'est la
+/// question : apres une reparation, la reception a-t-elle repris ? Elle se
+/// pose dans les memes termes des deux cotes, donc elle se mesure une fois.
+///
+/// Un pilote qui ne sait pas remplir un champ laisse zero. Un zero constant
+/// ne peut pas fabriquer une progression : la regle ci-dessous n'accepte que
+/// des AUGMENTATIONS, jamais une valeur absolue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct InstantaneRx {
+    /// Trames effectivement rendues a la pile.
+    pub rx_paquets: u64,
+    /// Curseur logiciel : ou le pilote lira le prochain descripteur.
+    pub rx_cur: usize,
+    /// Ou en est le materiel dans l'anneau.
+    pub rx_tete_materiel: u32,
+    /// Dernier descripteur repasse materiel -> processeur.
+    pub dernier_desc_cpu: usize,
+    /// Descripteurs rendus au materiel depuis le demarrage.
+    pub own_rendus: u64,
+    /// Interruptions « trame recue » annoncees par la carte.
+    pub isr_rx_ok: u64,
+    /// `RxOK` vus alors que l'anneau n'avait pas progresse.
+    pub rx_ok_sans_progres: u64,
+}
+
+/// Le verdict d'une reparation, et la raison qui le fonde.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VerdictRecuperation {
+    pub effective: bool,
+    /// Ce qui a fait pencher la balance. Present dans les deux cas : savoir
+    /// POURQUOI une reparation est declaree inefficace vaut autant que de
+    /// savoir qu'elle l'est.
+    pub raison: &'static str,
+}
+
+/// La reception a-t-elle REELLEMENT repris apres cette reparation ?
+///
+/// # Ce que ce verdict refuse de compter comme un succes
+///
+/// Le releve physique du Trigkey (`d131f2a`) se lit ainsi :
+///
+/// ```text
+/// rx_stall=39  repair_req=39  repair_exec=39  recoveries=39
+/// recovery_failures=0  rx_ok_without_progress=54
+/// ```
+///
+/// `recoveries=39` compte les EXECUTIONS de la reparation, et
+/// `recovery_failures=0` ne monte que si la reprogrammation materielle de la
+/// puce echoue. Ni l'un ni l'autre ne dit qu'une trame est entree. Trente-neuf
+/// reparations « sans echec » sont parfaitement compatibles avec une reception
+/// morte du debut a la fin.
+///
+/// Trois signaux sont donc explicitement REFUSES :
+///
+///   - le seul fait que `repare_si_demande()` se soit execute ;
+///   - `own_rendus` qui augmente seul. Ce compteur dit que le MATERIEL a
+///     restitue des descripteurs -- transition `OWN` 1 -> 0 constatee par le
+///     pilote. C'est un signal reel, mais pas une reception restauree : un
+///     anneau qui rend soixante-quatre descripteurs dont pas un ne porte de
+///     trame exploitable laisse la pile exactement aussi muette qu'avant.
+///     Une premiere redaction de ce commentaire affirmait le contraire -- que
+///     la reparation gonflait elle-meme ce compteur. C'etait faux, et la
+///     conclusion restait juste pour une meilleure raison ;
+///   - `isr_rx_ok` qui augmente seul -- c'est exactement le motif de
+///     `rx_ok_without_progress=54` : la carte annonce des trames qu'elle
+///     n'ecrit pas.
+///
+/// Reste ce qui prouve une progression :
+///
+///   - une trame de plus rendue a la pile ;
+///   - le curseur logiciel qui avance, donc un descripteur repasse
+///     materiel -> processeur PUIS consomme ;
+///   - la tete materielle qui avance AVEC un descripteur effectivement
+///     repasse materiel -> processeur. La tete seule ne vaut rien : elle
+///     avance aussi quand la carte ecrit dans un anneau que personne ne lit.
+///
+/// Un mot sur ce dernier critere, parce qu'il a d'abord ete ECRIT FAUX. Il
+/// exigeait « tete qui avance ET `own_rendus` qui augmente ». Or le releve
+/// physique du Trigkey montre precisement cela -- descripteurs restitues,
+/// interruptions qui montent, tete qui bouge -- SANS qu'une seule trame
+/// entre. La conjonction s'y verifiait, et le releve se serait declare
+/// REPARE. C'est l'epreuve `le_releve_trigkey_complet_ne_se_declare_pas_repare`
+/// qui l'a attrape, et c'est la seule raison pour laquelle la regle est juste
+/// aujourd'hui.
+///
+/// `dernier_desc_cpu` ne dit pas non plus « une trame est arrivee ». Mais
+/// conjugue a une tete qui avance, il distingue une carte qui ECRIT DE
+/// NOUVEAU d'une carte qui ne fait qu'interrompre : deux faits differents que
+/// `rx_ok_without_progress=54` ne separait pas.
+pub fn verdict_recuperation(
+    avant: &InstantaneRx,
+    apres: &InstantaneRx,
+) -> VerdictRecuperation {
+    if apres.rx_paquets > avant.rx_paquets {
+        return VerdictRecuperation { effective: true, raison: "paquets" };
+    }
+    if apres.rx_cur != avant.rx_cur {
+        return VerdictRecuperation { effective: true, raison: "curseur" };
+    }
+    if apres.rx_tete_materiel != avant.rx_tete_materiel
+        && apres.dernier_desc_cpu != avant.dernier_desc_cpu
+    {
+        return VerdictRecuperation { effective: true, raison: "tete+restitution" };
+    }
+    // A partir d'ici c'est un echec. La raison nomme le motif exact, parce que
+    // « inefficace » tout court ne permet pas de choisir l'enquete suivante.
+    if apres.rx_ok_sans_progres > avant.rx_ok_sans_progres
+        || apres.isr_rx_ok > avant.isr_rx_ok
+    {
+        return VerdictRecuperation { effective: false, raison: "isr_sans_anneau" };
+    }
+    if apres.own_rendus > avant.own_rendus {
+        return VerdictRecuperation { effective: false, raison: "rendus_seuls" };
+    }
+    if apres.rx_tete_materiel != avant.rx_tete_materiel {
+        return VerdictRecuperation { effective: false, raison: "tete_seule" };
+    }
+    VerdictRecuperation { effective: false, raison: "rien" }
+}

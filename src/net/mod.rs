@@ -27,6 +27,7 @@ pub mod file_trames;
 /// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la
 /// duree. Voir `net/diagnostic.rs`.
 pub mod chronologie;
+pub mod rx_recuperation;
 pub mod diagnostic;
 pub mod security;
 pub mod encoding;
@@ -1496,7 +1497,27 @@ fn draine_verrouille() -> usize {
     // doit reconstruire un anneau qu'un autre coeur est peut-etre en train de
     // lire. Tous deux se contentent de poser un drapeau ; c'est ici qu'il est
     // servi.
-    e1000::repare_si_demande();
+    // B3 : ENCADRER LA REPARATION, PAS SEULEMENT LA DECLENCHER.
+    //
+    // `repare_si_demande` rend `true` quand elle s'est executee -- une
+    // INVOCATION, pas un resultat. Le verdict de reprise se rend plus tard,
+    // quand le materiel a eu le temps de montrer qu'il est reparti : la
+    // conclusion de la fenetre precedente passe donc AVANT l'ouverture de la
+    // suivante, a chaque drainage.
+    let instantane = e1000::instantane_rx();
+    crate::net::rx_recuperation::conclure_si_du(&instantane);
+    if e1000::repare_si_demande() {
+        let (req, exec) = e1000::compteurs_reparation();
+        crate::net::rx_recuperation::debut(
+            "rx-silencieux",
+            e1000::nom_pilote(),
+            0,
+            0,
+            &e1000::instantane_rx(),
+            req,
+            exec,
+        );
+    }
     let mut buf = [0u8; 2048];
     let mut traitees = 0usize;
     for _ in 0..TRAMES_PAR_PASSAGE {

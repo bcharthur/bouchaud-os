@@ -1689,6 +1689,35 @@ unsafe fn rend_le_verdict_en_attente() {
     }
 }
 
+/// L'instantane commun aux deux pilotes, vu par le RTL8168.
+///
+/// Les memes champs que pour l'e1000, remplis avec les compteurs que ce
+/// pilote tient deja. Rien n'est invente : `verdict_recuperation` ne juge que
+/// des ECARTS entre deux instantanes.
+pub fn instantane_rx() -> anneau::InstantaneRx {
+    unsafe {
+        if !READY {
+            return anneau::InstantaneRx::default();
+        }
+        anneau::InstantaneRx {
+            rx_paquets: RX_PAQUETS.load(Ordering::Relaxed),
+            rx_cur: RX_CUR,
+            // CETTE PUCE N'EXPOSE AUCUN REGISTRE DE TETE MATERIELLE.
+            //
+            // L'anneau y est pilote par les bits `OWN`, pas par un couple
+            // tete/queue comme sur l'e1000. Mettre `RX_TETE_CPU` ici
+            // fabriquerait une progression materielle a partir d'un curseur
+            // logiciel : le champ reste donc a zero, et le verdict s'appuie
+            // sur les criteres que ce pilote sait vraiment fournir.
+            rx_tete_materiel: 0,
+            dernier_desc_cpu: RX_DERNIER_DESC_CPU.load(Ordering::Relaxed) as usize,
+            own_rendus: RX_OWN_RENDUS.load(Ordering::Relaxed),
+            isr_rx_ok: ISR_RX_OK.load(Ordering::Relaxed),
+            rx_ok_sans_progres: RX_OK_SANS_PROGRES.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// La reception est-elle arretee ? Si oui, ARME une reparation.
 ///
 /// # Cette fonction ne touche pas au materiel, et c'est voulu

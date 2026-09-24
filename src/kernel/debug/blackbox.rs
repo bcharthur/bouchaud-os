@@ -1014,7 +1014,15 @@ fn network_sample(ts_ns: u64) {
             // `rx_ok_sans_desc` repond -- c'est le `RxOK` vu alors que le
             // descripteur courant porte encore `OWN`.
             "rx_hw_head={} rx_last_desc_cpu={} own_rendus={} rx_ok_sans_desc={} ",
+            // B3 : LE RESULTAT, A COTE DES INVOCATIONS.
+            //
+            // `recoveries` et `recovery_failures` ci-dessus comptent des
+            // EXECUTIONS et des reprogrammations ratees. Le releve Trigkey
+            // `recoveries=39 recovery_failures=0` se lisait « trente-neuf
+            // reprises, aucun echec » alors qu'il ne disait rien de la
+            // reception. Ces deux-ci disent le resultat, et eux seuls.
             "rx_stall={} repair_req={} repair_exec={} repair_degre={} ",
+            "recovery_effective={} recovery_ineffective={} ",
             // L'EMISSION PROUVEE : enfile n'est pas parti.
             "tx_enqueued={} tx_completed={} tx_ok_isr={} tx_last_complete_ns={} tx_desc_owned={} ",
             // DORA, SANS UN OCTET DE PAQUET.
@@ -1059,6 +1067,8 @@ fn network_sample(ts_ns: u64) {
         nic.rx_tete_cpu, nic.rx_dernier_desc_cpu, nic.rx_own_rendus,
         nic.rx_ok_sans_descripteur, nic.rx_arret_detecte,
         nic.reparations_demandees, nic.reparations_executees, nic.reparation_degre,
+        crate::net::rx_recuperation::compteurs().0,
+        crate::net::rx_recuperation::compteurs().1,
         nic.tx_enfiles, nic.tx_termines, nic.tx_ok_isr,
         nic.tx_dernier_termine_ns, nic.tx_desc_possedes,
         dora.discover_envoyes, dora.offres_vues, dora.requests_envoyes, dora.acks_vus,

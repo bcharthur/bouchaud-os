@@ -8,6 +8,8 @@
 //! passe mal, le reste du systeme n'est pas affecte.
 
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU64, Ordering};
+use crate::drivers::anneau_rx as anneau;
 use crate::arch::x86_64::pci;
 use crate::drivers::rtl8168;
 use crate::kernel::sync::SpinLockIrq;
@@ -397,7 +399,56 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
         desc_set_u8(RX_RING, i, 12, 0); // libere le descripteur
         reg_write(REG_RDT, i as u32);
         RX_CUR = (i + 1) % N_RX;
+        RX_PAQUETS.fetch_add(1, Ordering::Relaxed);
+        DERNIER_DESC_CPU.store(i as u64, Ordering::Relaxed);
         Some(n)
+    }
+}
+
+/// Trames effectivement rendues a la pile par ce pilote.
+static RX_PAQUETS: AtomicU64 = AtomicU64::new(0);
+/// Dernier descripteur repasse materiel -> processeur.
+static DERNIER_DESC_CPU: AtomicU64 = AtomicU64::new(0);
+
+/// Le nom du pilote reellement en service, pour les lignes de mesure.
+///
+/// Les deux cartes ne tombent pas en panne de la meme facon : une ligne
+/// `RX_RECOVERY_*` qui ne dit pas laquelle a parle n'est pas exploitable.
+pub fn nom_pilote() -> &'static str {
+    if rtl8168::is_ready() { "rtl8168" } else { "e1000" }
+}
+
+/// `(reparations demandees, reparations executees)` du pilote en service.
+pub fn compteurs_reparation() -> (u64, u64) {
+    if rtl8168::is_ready() {
+        let n = rtl8168::releve();
+        return (n.reparations_demandees, n.reparations_executees);
+    }
+    (0, 0)
+}
+
+/// L'instantane commun aux deux pilotes, vu par l'e1000.
+///
+/// Les champs d'interruption restent a zero : ce pilote fonctionne en
+/// scrutation et n'en compte aucune. Un zero constant ne peut pas fabriquer
+/// de progression -- `verdict_recuperation` n'accepte que des augmentations.
+pub fn instantane_rx() -> anneau::InstantaneRx {
+    if rtl8168::is_ready() {
+        return rtl8168::instantane_rx();
+    }
+    unsafe {
+        if !READY {
+            return anneau::InstantaneRx::default();
+        }
+        anneau::InstantaneRx {
+            rx_paquets: RX_PAQUETS.load(Ordering::Relaxed),
+            rx_cur: RX_CUR,
+            rx_tete_materiel: reg_read(REG_RDH),
+            dernier_desc_cpu: DERNIER_DESC_CPU.load(Ordering::Relaxed) as usize,
+            own_rendus: RX_PAQUETS.load(Ordering::Relaxed),
+            isr_rx_ok: 0,
+            rx_ok_sans_progres: 0,
+        }
     }
 }
 
