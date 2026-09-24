@@ -54,8 +54,29 @@ pub const ATTENTE_DEMARRAGE_MS: u64 = 700;
 /// boucle qui rendait le demarrage lent ici et rapide ailleurs, sans que le
 /// code ne dise laquelle des deux etait voulue.
 fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
+    let issue = recv_avant_interne(xid, want_type, budget_ms);
+    let duree = crate::kernel::timer::monotonic_ms()
+        .saturating_sub(DEBUT_ATTENTE.load(Ordering::Relaxed));
+    crate::net::chronologie::trace_rx(
+        TENTATIVES.load(Ordering::Relaxed),
+        xid,
+        match (&issue, want_type) {
+            (Some(_), 2) => "offre",
+            (Some(_), 5) => "accuse",
+            (Some(_), _) => "recu",
+            (None, 2) => "timeout_offre",
+            (None, 5) => "timeout_accuse",
+            (None, _) => "timeout",
+        },
+        duree,
+    );
+    issue
+}
+
+fn recv_avant_interne(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
     let mut buf = [0u8; 1024];
     let debut = crate::kernel::timer::monotonic_ms();
+    DEBUT_ATTENTE.store(debut, Ordering::Relaxed);
     let limite = debut.saturating_add(budget_ms);
     let mut fallback_spins = 0usize;
 
@@ -76,21 +97,27 @@ fn recv_avant(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> {
             net::attente_cedante();
         }
         while let Some(n) = net::prend_dhcp(&mut buf) {
+            crate::net::chronologie::note(&crate::net::chronologie::RX_PRIS);
             if n < 8 {
+                crate::net::chronologie::note(&crate::net::chronologie::RX_TROP_COURT);
                 continue;
             }
             // verifie xid + BOOTREPLY
             if buf[0] != 2 {
+                crate::net::chronologie::note(&crate::net::chronologie::RX_PAS_REPLY);
                 continue;
             }
             let rxid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
             if rxid != xid {
+                crate::net::chronologie::note(&crate::net::chronologie::RX_XID_KO);
                 continue;
             }
             if let Some(l) = parse_reply(&buf[..n]) {
                 if want_type == 0 || l.msg_type == want_type {
+                    crate::net::chronologie::note(&crate::net::chronologie::RX_ACCEPTE);
                     return Some(l);
                 }
+                crate::net::chronologie::note(&crate::net::chronologie::RX_TYPE_KO);
             }
         }
     }
@@ -128,6 +155,8 @@ pub struct Bail {
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+/// Debut de l'attente en cours, pour que la trace porte sa duree reelle.
+static DEBUT_ATTENTE: AtomicU64 = AtomicU64::new(0);
 static DISCOVER_ENVOYES: AtomicU64 = AtomicU64::new(0);
 static OFFRES_VUES: AtomicU64 = AtomicU64::new(0);
 static REQUESTS_ENVOYES: AtomicU64 = AtomicU64::new(0);

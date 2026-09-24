@@ -183,7 +183,15 @@ def main():
             "qui ne repond pas."
         )
 
+    # `recv_avant` peut deleguer sa boucle a un corps interne : la trace par
+    # etage a besoin d'encadrer l'attente, pas de vivre dedans. La garde suit
+    # donc la delegation au lieu de l'interdire -- mais elle verifie
+    # l'invariant sur la REUNION des deux corps, si bien qu'aucun des deux ne
+    # peut relire la carte, et que la boite doit etre relevee dans l'un d'eux.
     recv = corps(dhcp, "fn recv_avant(")
+    interne = corps(dhcp, "fn recv_avant_interne(")
+    if recv is not None and interne is not None:
+        recv = recv + "\n" + interne
     if recv is None:
         fautes.append("dhcp.rs : recv_avant a disparu.")
     else:

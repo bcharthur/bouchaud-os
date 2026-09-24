@@ -1480,6 +1480,7 @@ fn draine_verrouille() -> usize {
             None => break, // plus rien a lire
         };
         traitees += 1;
+        crate::net::chronologie::note(&crate::net::chronologie::RX_TRAMES);
         TRAMES_ROUTEES.fetch_add(1, OrdreCompteur::Relaxed);
         route_trame(&buf[..n]);
     }
@@ -1501,6 +1502,7 @@ fn route_trame(trame: &[u8]) {
         Some(h) => h,
         None => return,
     };
+    crate::net::chronologie::note(&crate::net::chronologie::RX_ETH_OK);
     match entete.ethertype {
         // L'ARP passe avant tout : c'est du service de lien, il ne doit jamais
         // etre jete au motif qu'on attendait autre chose.
@@ -1508,7 +1510,10 @@ fn route_trame(trame: &[u8]) {
             TRAMES_ARP.fetch_add(1, OrdreCompteur::Relaxed);
             traite_arp(trame)
         }
-        ethernet::ETHERTYPE_IPV4 => route_ipv4(trame),
+        ethernet::ETHERTYPE_IPV4 => {
+            crate::net::chronologie::note(&crate::net::chronologie::RX_IPV4_TYPE);
+            route_ipv4(trame)
+        }
         // IPv6, VLAN, controle de flux : la pile ne les traite pas, et les
         // retenir ne ferait que remplir la file pour personne.
         _ => {}
@@ -1533,11 +1538,16 @@ fn route_ipv4(trame: &[u8]) {
 
     let iph = match ipv4::parse_header(&trame[ethernet::HEADER_LEN..n]) {
         Some(h) => h,
-        None => return,
+        None => {
+            crate::net::chronologie::note(&crate::net::chronologie::RX_IPV4_KO);
+            return;
+        }
     };
+    crate::net::chronologie::note(&crate::net::chronologie::RX_IPV4_OK);
     let debut = ethernet::HEADER_LEN + iph.header_len;
     let fin = ethernet::HEADER_LEN + iph.total_len;
     if debut > fin || fin > n {
+        crate::net::chronologie::note(&crate::net::chronologie::RX_BORNES_KO);
         return;
     }
     let charge = &trame[debut..fin];
@@ -1545,15 +1555,22 @@ fn route_ipv4(trame: &[u8]) {
     // Le bail DHCP arrive avant qu'on ait une adresse, en diffusion : aucun
     // appelant de `poll_ip` ne le reclamera jamais. Il a sa propre boite.
     if iph.proto == ipv4::PROTO_UDP {
-        if let Some(u) = udp::parse(charge) {
-            if u.dst_port == 68 {
-                let fin_utile = u.payload_off.saturating_add(u.payload_len);
-                if fin_utile <= charge.len() {
-                    TRAMES_DHCP.fetch_add(1, OrdreCompteur::Relaxed);
-                    depose_dhcp_verrouille(&charge[u.payload_off..fin_utile]);
+        crate::net::chronologie::note(&crate::net::chronologie::RX_UDP_PROTO);
+        match udp::parse(charge) {
+            Some(u) => {
+                crate::net::chronologie::note(&crate::net::chronologie::RX_UDP_OK);
+                if u.dst_port == 68 {
+                    crate::net::chronologie::note(&crate::net::chronologie::RX_PORT68);
+                    let fin_utile = u.payload_off.saturating_add(u.payload_len);
+                    if fin_utile <= charge.len() {
+                        crate::net::chronologie::note(&crate::net::chronologie::RX_DEPOSE);
+                        TRAMES_DHCP.fetch_add(1, OrdreCompteur::Relaxed);
+                        depose_dhcp_verrouille(&charge[u.payload_off..fin_utile]);
+                    }
+                    return;
                 }
-                return;
             }
+            None => { crate::net::chronologie::note(&crate::net::chronologie::RX_UDP_KO); }
         }
     }
 

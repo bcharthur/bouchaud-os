@@ -116,3 +116,111 @@ pub fn phase(etape: Phase, xid: u32) {
         xid,
     ));
 }
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_C76_OU_L_OFFRE_DISPARAIT
+// ---------------------------------------------------------------------------
+//
+// La capture du fil a tranche : l'OFFRE ARRIVE.
+//
+//     OS->reseau  DISCOVER xid=0xb2be5613  0.0.0.0:68 -> 255.255.255.255:67
+//     reseau->OS  OFFER    xid=0xb2be5613  10.0.2.2:67 -> 255.255.255.255:68
+//
+// Meme xid, reponse sous la milliseconde, et le client attend 700 ms. Le
+// serveur fait son travail ; le paquet se perd DANS notre pile.
+//
+// `offer_seen=0` ne dit pas ou. Ces compteurs-ci le disent : chaque etage
+// entre la carte et le client DHCP en a un, et la ligne les publie ENSEMBLE
+// a la fin de chaque tentative -- pas a chaque paquet.
+
+use core::sync::atomic::AtomicU32;
+
+/// Trames sorties de l'anneau par `draine_anneau`.
+pub static RX_TRAMES: AtomicU64 = AtomicU64::new(0);
+/// En-tete Ethernet lu.
+pub static RX_ETH_OK: AtomicU64 = AtomicU64::new(0);
+/// Ethertype IPv4.
+pub static RX_IPV4_TYPE: AtomicU64 = AtomicU64::new(0);
+/// En-tete IPv4 lu.
+pub static RX_IPV4_OK: AtomicU64 = AtomicU64::new(0);
+/// En-tete IPv4 REFUSE par l'analyseur.
+pub static RX_IPV4_KO: AtomicU64 = AtomicU64::new(0);
+/// Bornes de charge utile incoherentes (debut > fin, ou fin > trame).
+pub static RX_BORNES_KO: AtomicU64 = AtomicU64::new(0);
+/// Protocole UDP.
+pub static RX_UDP_PROTO: AtomicU64 = AtomicU64::new(0);
+/// En-tete UDP lu.
+pub static RX_UDP_OK: AtomicU64 = AtomicU64::new(0);
+/// En-tete UDP REFUSE par l'analyseur.
+pub static RX_UDP_KO: AtomicU64 = AtomicU64::new(0);
+/// Port de destination 68.
+pub static RX_PORT68: AtomicU64 = AtomicU64::new(0);
+/// Depose dans la boite DHCP.
+pub static RX_DEPOSE: AtomicU64 = AtomicU64::new(0);
+/// Sorti de la boite par le client.
+pub static RX_PRIS: AtomicU64 = AtomicU64::new(0);
+/// Trop court pour un BOOTP.
+pub static RX_TROP_COURT: AtomicU64 = AtomicU64::new(0);
+/// Pas un BOOTREPLY.
+pub static RX_PAS_REPLY: AtomicU64 = AtomicU64::new(0);
+/// xid different de celui de la tentative.
+pub static RX_XID_KO: AtomicU64 = AtomicU64::new(0);
+/// Type DHCP different de celui attendu.
+pub static RX_TYPE_KO: AtomicU64 = AtomicU64::new(0);
+/// Accepte par le client.
+pub static RX_ACCEPTE: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub fn note(compteur: &AtomicU64) {
+    compteur.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Publie l'etat de tous les etages pour une tentative.
+///
+/// UNE ligne par tentative. Un `offer_seen=0` seul ne distingue pas « aucune
+/// offre n'existe » de « l'offre existe et notre pile la rejette » ; cette
+/// ligne-ci nomme l'etage exact ou elle s'arrete.
+pub fn trace_rx(attempt: u64, xid: u32, resultat: &str, duree_ms: u64) {
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "DHCP_RX_TRACE attempt={} xid={:#x} result={} duration_ms={} \
+trames={} eth={} ipv4_type={} ipv4_ok={} ipv4_ko={} bornes_ko={} \
+udp_proto={} udp_ok={} udp_ko={} port68={} depose={} pris={} \
+trop_court={} pas_reply={} xid_ko={} type_ko={} accepte={}",
+        attempt, xid, resultat, duree_ms,
+        RX_TRAMES.load(Ordering::Relaxed),
+        RX_ETH_OK.load(Ordering::Relaxed),
+        RX_IPV4_TYPE.load(Ordering::Relaxed),
+        RX_IPV4_OK.load(Ordering::Relaxed),
+        RX_IPV4_KO.load(Ordering::Relaxed),
+        RX_BORNES_KO.load(Ordering::Relaxed),
+        RX_UDP_PROTO.load(Ordering::Relaxed),
+        RX_UDP_OK.load(Ordering::Relaxed),
+        RX_UDP_KO.load(Ordering::Relaxed),
+        RX_PORT68.load(Ordering::Relaxed),
+        RX_DEPOSE.load(Ordering::Relaxed),
+        RX_PRIS.load(Ordering::Relaxed),
+        RX_TROP_COURT.load(Ordering::Relaxed),
+        RX_PAS_REPLY.load(Ordering::Relaxed),
+        RX_XID_KO.load(Ordering::Relaxed),
+        RX_TYPE_KO.load(Ordering::Relaxed),
+        RX_ACCEPTE.load(Ordering::Relaxed),
+    ));
+
+    // L'ETAT MATERIEL, A COTE DES ETAGES LOGICIELS.
+    //
+    // `trames=0` ne dit pas si la carte a ecrit et que le pilote regarde au
+    // mauvais endroit, ou si elle n'a rien ecrit du tout. `rdh` repond : il
+    // avance quand le materiel consomme des descripteurs.
+    let (rdh, rdt, rx_cur, pret, statuts) = crate::drivers::e1000::etat_rx();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "DHCP_RX_ANNEAU attempt={} pret={} rdh={} rdt={} rx_cur={} desc0={:#04x} desc1={:#04x} desc2={:#04x} desc3={:#04x}",
+        attempt, pret as u8, rdh, rdt, rx_cur,
+        statuts[0], statuts[1], statuts[2], statuts[3],
+    ));
+    let (status, rctl, ctrl) = crate::drivers::e1000::registres_rx();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "DHCP_RX_REGISTRES attempt={} status={:#010x} rctl={:#010x} ctrl={:#010x} lu={} rx_en={}",
+        attempt, status, rctl, ctrl,
+        (status >> 1) & 1, (rctl >> 1) & 1,
+    ));
+}

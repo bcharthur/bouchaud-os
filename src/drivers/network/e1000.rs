@@ -401,6 +401,47 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// BOUCHAUD_C76_L_ETAT_REEL_DE_L_ANNEAU_RX
+///
+/// `(rdh, rdt, rx_cur, ready, statut des quatre premiers descripteurs)`.
+///
+/// La trace DHCP a montre `trames=0` pendant 700 ms alors que l'OFFRE etait
+/// SUR LE FIL. Ni Ethernet, ni IPv4, ni UDP, ni le port : le pilote ne rend
+/// rien. Reste a savoir si le materiel a ecrit quelque part -- `rdh` avance
+/// quand il consomme des descripteurs -- et si le bit DD est pose la ou le
+/// pilote regarde.
+///
+/// Lecture seule, et hors du verrou d'anneau : cette fonction ne doit jamais
+/// changer ce qu'elle observe.
+pub fn etat_rx() -> (u32, u32, usize, bool, [u8; 4]) {
+    unsafe {
+        if !READY {
+            return (0, 0, 0, false, [0; 4]);
+        }
+        let mut statuts = [0u8; 4];
+        for (k, s) in statuts.iter_mut().enumerate() {
+            if k < N_RX {
+                *s = desc_get_u8(RX_RING, k, 12);
+            }
+        }
+        (reg_read(REG_RDH), reg_read(REG_RDT), RX_CUR, true, statuts)
+    }
+}
+
+/// `(status, rctl, ctrl)` relus DANS LA CARTE.
+///
+/// Ecrire un registre et le croire pose n'est pas la meme chose que le RELIRE.
+/// La comparaison boot / plus tard doit porter sur ce que la carte dit, pas
+/// sur ce que le pilote a voulu.
+pub fn registres_rx() -> (u32, u32, u32) {
+    unsafe {
+        if !READY {
+            return (0, 0, 0);
+        }
+        (reg_read(REG_STATUS), reg_read(REG_RCTL), reg_read(REG_CTRL))
+    }
+}
+
 /// Affiche l'etat de la carte (commande `ethinfo`).
 pub fn print_info() {
     if rtl8168::is_ready() {
