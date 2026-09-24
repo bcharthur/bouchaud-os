@@ -33,6 +33,12 @@ tools/userland/*.img
 # par tools/userland.ps1. Ni l'un ni l'autre n'a sa place dans le depot — c'est
 # la release qui en est la reference.
 tools/userland/userland-manifest.json
+# Image de scenario fabriquee a la racine par les bancs QEMU
+# (`run_faute_fichier.sh` et consorts). Regenerable a chaque execution, et
+# deja de la meme nature que `primitives.img` ou `health.img` : un artefact,
+# jamais une source.
+/scenario.img
+
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/
 # Sondes compilees par `OUT=out-sondes ./build.sh musl`, ce que fait le workflow
