@@ -383,11 +383,18 @@ fn note_souffle(ok: bool, kind: u16, seq: u64, ts_ns: u64) {
 fn append(kind: u16, payload: &[u8], ts_ns: u64, trace_end: usize) -> bool {
     let Some(reservation) = BOBINE.reserve(payload.len()) else {
         note_souffle(false, kind, 0, ts_ns);
+        // UN REFUS DU TAMBOUR EST UN FAIT DATE, pas seulement un compteur.
+        // « write_errors=3 » sans instant ne dit pas si la boite noire a
+        // cesse d'ecrire il y a une seconde ou il y a cinq minutes, et c'est
+        // toute la difference entre une panne en cours et une panne passee.
+        DERNIER_WRITE_ERREUR_NS.store(ts_ns, Ordering::Relaxed);
+        WRITE_ERREURS.fetch_add(1, Ordering::Relaxed);
         return false;
     };
     copie_dans_le_tambour(&reservation, payload);
     BOBINE.publie(&reservation, kind, ts_ns, trace_end as u64);
     note_souffle(true, kind, reservation.seq, ts_ns);
+    DERNIER_WRITE_OK_NS.store(ts_ns, Ordering::Relaxed);
     true
 }
 
@@ -1286,8 +1293,12 @@ pub struct Bilan {
 /// pouvoir dire.
 pub fn vidange(echeance_ns: u64) -> Bilan {
     let mut bilan = Bilan::default();
+    DERNIER_FLUSH_DEBUT_NS.store(now_ns(), Ordering::Relaxed);
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         bilan.reste = PROCHAIN_A_POSER.load(Ordering::Acquire) <= BOBINE.dernier();
+        // PAS UNE ERREUR : une machine sans cle reste parfaitement utilisable,
+        // et compter cela comme un echec de purge ferait accuser en
+        // permanence un materiel qui n'existe pas.
         return bilan;
     }
 
@@ -1372,6 +1383,20 @@ pub fn vidange(echeance_ns: u64) -> Bilan {
     }
 
     bilan.reste = PROCHAIN_A_POSER.load(Ordering::Acquire) <= BOBINE.dernier();
+    // UNE PURGE QUI N'A RIEN POSE ALORS QU'IL RESTAIT A POSER EST UN ECHEC.
+    //
+    // C'est la conjonction, une fois de plus. Zero pose sur un tambour vide
+    // est le cas nominal d'une machine calme ; zero pose alors que la RAM
+    // attend, c'est le support qui ne prend plus -- et c'est cet ecart-la que
+    // `AUDIT_BLACKBOX_PERSISTENCE_STALL` cherche.
+    let fin = now_ns();
+    if bilan.poses > 0 {
+        DERNIER_FLUSH_OK_NS.store(fin, Ordering::Relaxed);
+    } else if bilan.reste {
+        DERNIER_FLUSH_ERREUR_NS.store(fin, Ordering::Relaxed);
+    } else {
+        DERNIER_FLUSH_OK_NS.store(fin, Ordering::Relaxed);
+    }
     bilan
 }
 
@@ -1704,6 +1729,34 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
             bot.etat.nom(), bot.reprises,
         );
     }
+    FIN_ECRITE.store(marked, Ordering::Relaxed);
+    FIN_SYNC_OK.store(synced, Ordering::Relaxed);
+    crate::kernel::lab::emets(
+        crate::kernel::lab::Categorie::Blackbox,
+        crate::kernel::lab::id::BB_FIN,
+        [0, 0, 0, 0],
+    );
+
+    // CE QUE L'ARCHIVE SERA, DIT AVANT QU'ON NE PUISSE PLUS RIEN DIRE.
+    //
+    // Une extinction dont la marque de fin n'atterrit pas produit une archive
+    // que l'extracteur lit comme `PARTIEL_CHECKPOINT` -- complete jusqu'au
+    // dernier point de reprise -- ou comme `COUPURE` s'il n'y en a aucun. La
+    // difference tient a un seul nombre, et ce nombre merite d'etre dans
+    // l'anneau : c'est la derniere chose qu'on saura de cette session.
+    if !ok {
+        crate::kernel::lab::emets(
+            crate::kernel::lab::Categorie::Blackbox,
+            crate::kernel::lab::id::BB_PARTIEL_CHECKPOINT,
+            [
+                CHECKPOINTS_OK.load(Ordering::Relaxed),
+                PROCHAIN_A_POSER.load(Ordering::Acquire).saturating_sub(1),
+                0,
+                0,
+            ],
+        );
+    }
+
     Vidage {
         support: true,
         draine,
@@ -1775,10 +1828,52 @@ const BUDGET_MARQUE_CHECKPOINT_NS: u64 = 1_200_000_000;
 ///
 /// Valeur de depart, a confirmer par la mesure du cout reel : ce fichier ne
 /// choisit pas un chiffre au hasard, il en pose un et le banc le corrige.
-const PERIODE_CHECKPOINT_MS: u64 = 45_000;
+///
+/// LA POLITIQUE, ELLE, A DEMENAGE dans `lab::calendrier`, ou elle est pure et
+/// se contredit en test hote. Cette constante reste ici pour que le lecteur
+/// du fichier trouve la cadence ou il l'a toujours cherchee, et une epreuve
+/// exige qu'elles restent egales.
+const PERIODE_CHECKPOINT_MS: u64 = crate::kernel::lab::calendrier::PERIODE_MS;
+const _: () = assert!(PERIODE_CHECKPOINT_MS == 45_000);
 
 static CHECKPOINT_SEQ: AtomicU64 = AtomicU64::new(0);
-static CHECKPOINT_PROCHAIN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// LE CALENDRIER, ET LA CORRECTION QU'IL PORTE.
+///
+/// L'ancien `CHECKPOINT_PROCHAIN_MS` etait avance AVANT de savoir si le
+/// support suivait. Le releve TRIGKEY en montre le prix : session reelle
+/// 395 s, records persistes 193 s, checkpoints 0. Au premier passage -- cent
+/// millisecondes apres l'amorcage, bien avant qu'une cle USB soit enumeree --
+/// l'echeance passait a quarante-cinq secondes, et chaque echeance ratee
+/// ensuite coutait quarante-cinq secondes de plus.
+///
+/// La politique vit desormais dans `lab::calendrier`, ou elle est pure et se
+/// contredit en test hote. Un `static mut` parce que la decision se compose
+/// -- consulter, poser, rendre compte -- et que des atomiques lues separement
+/// ne composent pas : c'est precisement ainsi que l'echeance se faisait
+/// consommer entre deux lectures. Touche par le seul `checkpoint_si_du`, que
+/// seul le fil `services-metrics` appelle.
+static mut CALENDRIER: crate::kernel::lab::calendrier::Calendrier =
+    crate::kernel::lab::calendrier::Calendrier::nouveau();
+
+// --- CE QUE LE STATUT DOIT POUVOIR DIRE ------------------------------------
+//
+// Le releve physique ne permettait pas de distinguer « la boite noire n'ecrit
+// plus » de « la boite noire n'a rien a ecrire », ni « le support a refuse »
+// de « le support n'a jamais ete la ». Ces temoins-la separent les cas.
+static DERNIER_WRITE_OK_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_WRITE_ERREUR_NS: AtomicU64 = AtomicU64::new(0);
+static WRITE_ERREURS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_FLUSH_DEBUT_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_FLUSH_OK_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_FLUSH_ERREUR_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_DEBUT_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_OK_NS: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINTS_OK: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINT_ECHEANCE_NS: AtomicU64 = AtomicU64::new(0);
+static SUPPORT_ETAIT_PRET: AtomicBool = AtomicBool::new(false);
+static FIN_ECRITE: AtomicBool = AtomicBool::new(false);
+static FIN_SYNC_OK: AtomicBool = AtomicBool::new(false);
 
 /// Ce qu'un checkpoint a donne.
 #[derive(Clone, Copy, Default)]
@@ -1832,6 +1927,19 @@ duration_ms={} marker=0 sync=0",
     }
     bilan.support = true;
 
+    DERNIER_CHECKPOINT_DEBUT_NS.store(debut, Ordering::Relaxed);
+    let etat_avant = BOBINE.etat();
+    crate::kernel::lab::emets_a(
+        debut,
+        crate::kernel::lab::Categorie::Blackbox,
+        crate::kernel::lab::id::BB_CHECKPOINT_BEGIN,
+        [
+            bilan.seq,
+            etat_avant.poses,
+            PROCHAIN_A_POSER.load(Ordering::Acquire).saturating_sub(1),
+            0,
+        ],
+    );
     crate::serial_println!(
         "BLACKBOX_CHECKPOINT_BEGIN raison={} seq={} boot_id={} ts_ns={}",
         raison, bilan.seq, boot_id(), debut,
@@ -1986,22 +2094,176 @@ fn nom_cause_sync(cause: u8) -> &'static str {
 
 /// Checkpoint periodique, appele par le fil de mesures.
 ///
-/// Rend `true` si un checkpoint a eu lieu. Borne par `PERIODE_CHECKPOINT_MS`
+/// Rend `true` si un checkpoint a eu lieu. Borne par `lab::calendrier`
 /// et silencieux sans support : ce chemin ne doit jamais couter a une machine
 /// qui n'a pas de cle.
 pub fn checkpoint_si_du() -> bool {
+    use crate::kernel::lab::calendrier::{Decision, Raison};
+
     let maintenant = crate::kernel::timer::monotonic_ms();
-    let prochain = CHECKPOINT_PROCHAIN_MS.load(Ordering::Acquire);
-    if maintenant < prochain {
-        return false;
+    let support = crate::drivers::xhci_active::blackbox_storage_ready();
+    let calendrier = unsafe { &mut *core::ptr::addr_of_mut!(CALENDRIER) };
+
+    // LE MOMENT OU LE SUPPORT APPARAIT EST LE FAIT LE PLUS UTILE DE TOUS.
+    //
+    // C'est lui qui borne ce qu'on pouvait esperer : une cle enumeree a la
+    // cinquieme seconde ne pouvait rien persister avant, et un checkpoint
+    // absent a la troisieme n'accuse alors personne. Le releve physique ne le
+    // disait nulle part.
+    if support != SUPPORT_ETAIT_PRET.swap(support, Ordering::Relaxed) {
+        crate::kernel::lab::emets(
+            crate::kernel::lab::Categorie::Blackbox,
+            crate::kernel::lab::id::BB_STORAGE_READY,
+            [support as u64, maintenant.saturating_mul(1_000_000), 0, 0],
+        );
     }
-    CHECKPOINT_PROCHAIN_MS.store(
-        maintenant.saturating_add(PERIODE_CHECKPOINT_MS), Ordering::Release);
-    if !crate::drivers::xhci_active::blackbox_storage_ready() {
-        return false;
+
+    // UNE ECHEANCE NE SE CONSOMME QUE SI UNE TENTATIVE A LIEU.
+    //
+    // C'est toute la correction. `consulte` ne pose rien et n'avance rien
+    // tant qu'elle rend `Pose` : c'est le compte rendu qui fait avancer.
+    let decision = calendrier.consulte(maintenant, support);
+    CHECKPOINT_ECHEANCE_NS.store(
+        calendrier.echeance_ms().saturating_mul(1_000_000),
+        Ordering::Relaxed,
+    );
+
+    match decision {
+        Decision::Attendre { .. } => false,
+        Decision::Reporte { raison, prochain_ms } => {
+            // Le report est un FAIT, et il va dans l'anneau. Sans lui, une
+            // boite noire qui attend un support et une boite noire morte se
+            // ressemblent exactement.
+            crate::kernel::lab::emets(
+                crate::kernel::lab::Categorie::Blackbox,
+                crate::kernel::lab::id::BB_CHECKPOINT_REPORTE,
+                [
+                    prochain_ms.saturating_mul(1_000_000),
+                    raison as u64,
+                    calendrier.reports_consecutifs() as u64,
+                    0,
+                ],
+            );
+            false
+        }
+        Decision::Pose => {
+            let bilan = checkpoint("periodique");
+            let fin_ms = crate::kernel::timer::monotonic_ms();
+            if bilan.ok() {
+                calendrier.pose_reussie(fin_ms);
+                CHECKPOINTS_OK.fetch_add(1, Ordering::Relaxed);
+                DERNIER_CHECKPOINT_OK_NS.store(now_ns(), Ordering::Relaxed);
+                crate::kernel::lab::emets(
+                    crate::kernel::lab::Categorie::Blackbox,
+                    crate::kernel::lab::id::BB_CHECKPOINT_OK,
+                    [
+                        bilan.seq,
+                        bilan.duree_us.saturating_mul(1_000),
+                        bilan.dernier_confirme,
+                        0,
+                    ],
+                );
+                true
+            } else {
+                let Decision::Reporte { prochain_ms, .. } = calendrier.pose_echouee(fin_ms)
+                else {
+                    unreachable!("pose_echouee reporte toujours")
+                };
+                crate::kernel::lab::emets(
+                    crate::kernel::lab::Categorie::Blackbox,
+                    crate::kernel::lab::id::BB_CHECKPOINT_ERREUR,
+                    [bilan.seq, bilan.cause_sync as u64, 0, 0],
+                );
+                crate::kernel::lab::emets(
+                    crate::kernel::lab::Categorie::Blackbox,
+                    crate::kernel::lab::id::BB_CHECKPOINT_REPORTE,
+                    [
+                        prochain_ms.saturating_mul(1_000_000),
+                        Raison::EchecEcriture as u64,
+                        0,
+                        0,
+                    ],
+                );
+                false
+            }
+        }
     }
-    checkpoint("periodique");
-    true
+}
+
+// ---------------------------------------------------------------------------
+// LE STATUT, ASSEZ DETAILLE POUR SEPARER LES CAS
+// ---------------------------------------------------------------------------
+
+/// Ce que la boite noire peut dire d'elle-meme, sans interpretation.
+///
+/// # Pourquoi autant de champs
+///
+/// Le releve physique disait « checkpoints=0 » et rien d'autre. Impossible,
+/// a partir de la, de distinguer :
+///
+///   - le support n'a jamais ete la ;
+///   - le support etait la et a refuse d'ecrire ;
+///   - l'echeance n'est jamais arrivee ;
+///   - le fil qui porte la persistance ne tournait pas.
+///
+/// Chacun de ces quatre cas se repare differemment. Les separer est la
+/// premiere chose qu'un statut doit faire.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statut {
+    pub storage_ready: bool,
+
+    pub last_write_ok_ns: u64,
+    pub last_write_error_ns: u64,
+    pub write_errors: u64,
+
+    pub last_flush_begin_ns: u64,
+    pub last_flush_ok_ns: u64,
+    pub last_flush_error_ns: u64,
+
+    pub checkpoint_due_ns: u64,
+    pub last_checkpoint_begin_ns: u64,
+    pub last_checkpoint_ok_ns: u64,
+    pub checkpoint_count: u64,
+
+    pub records_ram: u64,
+    pub records_persisted: u64,
+
+    pub fin_written: bool,
+    pub sync_ok: bool,
+}
+
+/// L'etat de la boite noire, en une lecture et sans effet de bord.
+pub fn statut() -> Statut {
+    let etat = BOBINE.etat();
+    Statut {
+        storage_ready: crate::drivers::xhci_active::blackbox_storage_ready(),
+
+        last_write_ok_ns: DERNIER_WRITE_OK_NS.load(Ordering::Relaxed),
+        last_write_error_ns: DERNIER_WRITE_ERREUR_NS.load(Ordering::Relaxed),
+        write_errors: WRITE_ERREURS.load(Ordering::Relaxed),
+
+        last_flush_begin_ns: DERNIER_FLUSH_DEBUT_NS.load(Ordering::Relaxed),
+        last_flush_ok_ns: DERNIER_FLUSH_OK_NS.load(Ordering::Relaxed),
+        last_flush_error_ns: DERNIER_FLUSH_ERREUR_NS.load(Ordering::Relaxed),
+
+        checkpoint_due_ns: CHECKPOINT_ECHEANCE_NS.load(Ordering::Relaxed),
+        last_checkpoint_begin_ns: DERNIER_CHECKPOINT_DEBUT_NS.load(Ordering::Relaxed),
+        last_checkpoint_ok_ns: DERNIER_CHECKPOINT_OK_NS.load(Ordering::Relaxed),
+        checkpoint_count: CHECKPOINTS_OK.load(Ordering::Relaxed),
+
+        records_ram: etat.poses,
+        // `PROCHAIN_A_POSER` designe le prochain : le compte des confirmes est
+        // celui d'avant. Un tambour neuf vaut un, pas zero.
+        records_persisted: PROCHAIN_A_POSER.load(Ordering::Acquire).saturating_sub(1),
+
+        fin_written: FIN_ECRITE.load(Ordering::Relaxed),
+        sync_ok: FIN_SYNC_OK.load(Ordering::Relaxed),
+    }
+}
+
+/// Un checkpoint demande a la main devient du immediatement.
+pub fn checkpoint_force_echeance() {
+    unsafe { (*core::ptr::addr_of_mut!(CALENDRIER)).force() };
 }
 
 const BUDGET_EXTINCTION_NS: u64 = 12_000_000_000;

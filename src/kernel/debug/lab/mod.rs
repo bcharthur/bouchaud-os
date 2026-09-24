@@ -36,6 +36,7 @@
 pub mod anneau;
 pub mod auditd;
 pub mod auditeur;
+pub mod calendrier;
 pub mod catalogue;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
