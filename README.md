@@ -206,6 +206,16 @@ sur le chemin noyau ont successivement innocenté :
 Le segment de 43,4 s longtemps attribué à l'ordonnanceur n'existait pas : il
 était mal borné.
 
+**La mesure corrigée a inversé la conclusion.** Avec la frontière posée, le
+premier WebWorker mesure `user_ms=724` et `sys_ms=113594` : il passe 0,7 s en
+espace utilisateur et 113 s dans le noyau. `_dl_relocate_static_pie` s'exécute
+en espace utilisateur — l'hypothèse des 405 396 relocations de démarrage est
+donc **réfutée par borne supérieure**, et le banc A/B d'édition de liens a été
+retiré plutôt que laissé rouge. Ce qui reste à expliquer est net : 113 594 ms
+de noyau dont le livre des fautes n'explique que 13 285. Deux candidats
+(balayage de secours du cache, chaîne de reprise des fautes) ont été posés puis
+réfutés localement en quelques minutes — `appels=0` et `reprises=0`.
+
 **Une conclusion a été retirée, parce que l'instrument était faux.** Ce
 tableau portait « dont ~93 s de CPU » et la phrase « le premier worker
 n'attend pas, il calcule ». Les deux venaient d'un relevé `user_ms=92250

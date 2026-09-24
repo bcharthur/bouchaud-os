@@ -564,14 +564,43 @@ pub fn fault_retry_yield() {
     }
 }
 
+// BOUCHAUD_C68_LA_CHAINE_DE_REPRISE
+//
+// SONDE, PAS CORRECTION. `FAULT_RETRY_MAX_CHAIN` ne garde que le PIRE cas, et
+// rien ne l'imprimait. Le pire cas ne dit pas le cout : mille chaines de deux
+// reprises coutent plus qu'une chaine de mille.
+//
+// Ces deux compteurs-ci sont cumulatifs. Ils servent a trancher d'ou vient le
+// temps noyau que la decomposition des fautes n'explique pas : une reprise
+// tourne DANS le gestionnaire de faute, donc dans le temps noyau depuis
+// BOUCHAUD_C66, mais elle ne produit aucune entree au livre des fautes --
+// seule la tentative qui aboutit en pose une.
+pub static FAULT_RETRY_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Chaines qui ont repris au moins une fois. Le denominateur de la moyenne.
+pub static FAULT_RETRY_CHAINES: AtomicU64 = AtomicU64::new(0);
+
 pub fn fault_retry_chain_complete(chain: u64) {
     FAULT_RETRY_MAX_CHAIN.fetch_max(chain, Ordering::Relaxed);
+    if chain != 0 {
+        FAULT_RETRY_TOTAL.fetch_add(chain, Ordering::Relaxed);
+        FAULT_RETRY_CHAINES.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub fn fault_retry_stats() -> (u64, u64) {
     (
         FAULT_RETRY_YIELDS.load(Ordering::Relaxed),
         FAULT_RETRY_MAX_CHAIN.load(Ordering::Relaxed),
+    )
+}
+
+/// `yields, pire_chaine, reprises_totales, chaines_ayant_repris`
+pub fn fault_retry_cumul() -> (u64, u64, u64, u64) {
+    (
+        FAULT_RETRY_YIELDS.load(Ordering::Relaxed),
+        FAULT_RETRY_MAX_CHAIN.load(Ordering::Relaxed),
+        FAULT_RETRY_TOTAL.load(Ordering::Relaxed),
+        FAULT_RETRY_CHAINES.load(Ordering::Relaxed),
     )
 }
 

@@ -320,6 +320,39 @@ pub fn release(key: Key) {
     reclaim_excess();
 }
 
+// BOUCHAUD_C68_LE_BALAYAGE_DE_SECOURS
+//
+// SONDE, PAS CORRECTION. Le repli ci-dessous parcourt TOUTE la table et prend
+// le verrou d'etat de chaque entree, sous le verrou global du cache. Au run
+// 35944547625 la table portait 52 537 entrees.
+//
+// C'est un candidat pour le temps noyau que la decomposition des fautes
+// n'explique pas -- 7,1 ms par defaut de cache dont seulement 1,7 ms de
+// lecture reelle. Candidat, pas cause : tant que ces compteurs n'ont pas
+// montre que ce chemin est seulement EMPRUNTE, l'accuser serait une
+// supposition de plus.
+//
+// Ces compteurs disent trois choses independantes : combien de fois le repli
+// est atteint, combien d'entrees il a fallu parcourir en tout, et le temps
+// qu'il a coute. Un repli jamais atteint refute l'hypothese d'un seul coup.
+pub static BALAYAGE_APPELS: AtomicU64 = AtomicU64::new(0);
+pub static BALAYAGE_ENTREES: AtomicU64 = AtomicU64::new(0);
+pub static BALAYAGE_NS: AtomicU64 = AtomicU64::new(0);
+pub static BALAYAGE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+/// Combien de fois la file de candidats a suffi -- le chemin qui NE balaye pas.
+pub static CANDIDATS_SUFFISANTS: AtomicU64 = AtomicU64::new(0);
+
+/// `appels, entrees_parcourues, total_ns, pire_ns, candidats_suffisants`
+pub fn balayage_stats() -> (u64, u64, u64, u64, u64) {
+    (
+        BALAYAGE_APPELS.load(Ordering::Relaxed),
+        BALAYAGE_ENTREES.load(Ordering::Relaxed),
+        BALAYAGE_NS.load(Ordering::Relaxed),
+        BALAYAGE_PIRE_NS.load(Ordering::Relaxed),
+        CANDIDATS_SUFFISANTS.load(Ordering::Relaxed),
+    )
+}
+
 fn retire_un_candidat(cache: &mut Cache) -> Option<Arc<Entry>> {
     while let Some(key) = cache.candidats.pop_front() {
         let sortable = match cache.entrees.get(&key) {
@@ -328,12 +361,22 @@ fn retire_un_candidat(cache: &mut Cache) -> Option<Arc<Entry>> {
         };
         if sortable {
             cesse_d_etre_recuperable();
+            CANDIDATS_SUFFISANTS.fetch_add(1, Ordering::Relaxed);
             return cache.entrees.remove(&key);
         }
     }
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut parcourues = 0u64;
     let victime = cache.entrees.iter()
+        .map(|(key, entry)| { parcourues += 1; (key, entry) })
         .find(|(_, entry)| recuperable(&entry.state.lock()))
-        .map(|(key, _)| *key)?;
+        .map(|(key, _)| *key);
+    let ecoule = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+    BALAYAGE_APPELS.fetch_add(1, Ordering::Relaxed);
+    BALAYAGE_ENTREES.fetch_add(parcourues, Ordering::Relaxed);
+    BALAYAGE_NS.fetch_add(ecoule, Ordering::Relaxed);
+    BALAYAGE_PIRE_NS.fetch_max(ecoule, Ordering::Relaxed);
+    let victime = victime?;
     cesse_d_etre_recuperable();
     cache.entrees.remove(&victime)
 }

@@ -181,6 +181,11 @@ unsafe extern "C" fn syscall_entry() {
 #[inline]
 unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     crate::kernel::task::account_kernel_enter();
+    // BOUCHAUD_C68 : voir `impute_syscall`. Un appel qui ne rend pas la main
+    // (`execve` reussi, `exit`) n'atteint jamais la borne de sortie et reste
+    // donc absent de la table -- volontairement.
+    let syscall_nr = (*frame).rax;
+    let syscall_debut = crate::kernel::timer::monotonic_ns();
 
     // BOUCHAUD_SECURITY_V1
     // Security is a mandatory boundary in front of BOTH ABIs. It can reject or
@@ -214,6 +219,10 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     let result = (*frame).rax as i64;
     crate::kernel::security::syscall::after_syscall(number, result, native);
 
+    crate::kernel::task::impute_syscall(
+        syscall_nr,
+        crate::kernel::timer::monotonic_ns().saturating_sub(syscall_debut),
+    );
     crate::kernel::task::account_kernel_exit();
     crate::kernel::task::retire_current_if_zombie();
 }

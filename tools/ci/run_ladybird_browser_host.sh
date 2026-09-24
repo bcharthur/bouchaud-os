@@ -632,6 +632,10 @@ for motif in \
     'PERF_EXECVE_BKL .*' \
     'FAULT_FILE_BREAKDOWN .*' \
     'FAULT_FILE_SNAPSHOT .*' \
+    'CPU_CUMUL .*' \
+    'SYSCALL_TEMPS .*' \
+    'CACHE_BALAYAGE .*' \
+    'FAULT_REPRISE .*' \
     'BACKING_DISK_GLOBAL .*' \
     'BACKING_MEMORY_GLOBAL .*' \
     'CLEAN_PAGE_CACHE_GLOBAL .*' \

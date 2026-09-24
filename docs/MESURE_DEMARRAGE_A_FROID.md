@@ -303,3 +303,67 @@ Garde-fou : `tools/ci/verifie-bascule-relr.py` verifie la bascule sur un arbre
 Ladybird factice portant les motifs d'ancrage amont -- la boucle courte qui
 manquait au run 35920701144, ou une experience entiere a ete perdue sur un
 chemin de source suppose au lieu d'etre verifie.
+
+## 10. Le run #355 tranche : le cout est dans le NOYAU (BOUCHAUD_C68)
+
+`run_id=35944547625`, `head_sha=f06aebb0e81b02cdf008f91988a521b111de3cbf`,
+verifie identique a `HEAD_TESTE`. Premier run avec la comptabilite corrigee de
+la section 8.
+
+### Le partage honnete, par processus
+
+`FAULT_FILE_SNAPSHOT` porte `user_ms`/`sys_ms` issus de
+`proc_processus_cumul(pid)` -- verifie per-process (`task.process.pid != pid`
+saute l'entree), et `temps_vivant` exige `on_cpu >= 0`, donc une tache bloquee
+ne contribue rien : ce sont des durees de CPU repliees, pas de l'attente.
+
+| pid | image | `user_ms` | `sys_ms` | fautes (ms) |
+|---|---|---:|---:|---:|
+| 16 | **WebWorker #1 (froid)** | **724** | **113 594** | 13 285 |
+| 15 | WebContent | 6 544 | 160 508 | 22 924 |
+| 14 | Compositor | 2 085 | 54 903 | 11 813 |
+| 13 | ImageDecoder | 383 | 17 999 | 3 157 |
+| 12 | RequestServer | 995 | 17 687 | 3 603 |
+| 17 | WebWorker #2 | 267 | 7 956 | 1 929 |
+| 18 | WebWorker #3 | 205 | 799 | 125 |
+| 19 | WebWorker #4 | 133 | 340 | 81 |
+
+### `HYPOTHESE RELOCATIONS` → **REFUTEE**
+
+`_dl_relocate_static_pie` s'execute en espace UTILISATEUR. Toute la vie
+utilisateur du premier WebWorker tient dans **724 ms**. Les 405 396
+relocations ne peuvent pas couter davantage, quel que soit leur nombre.
+
+L'ancien relevé `user_ms=92250 sys_ms=671` avait les deux valeurs
+essentiellement INVERSEES. C'est cette inversion qui avait envoye la campagne
+vers l'editeur de liens.
+
+Consequence : le job CI `variante-elf` est retire. Vingt-cinq minutes de CI
+pour un effet borne par 724 ms sur un probleme de 113 s serait du gaspillage,
+et un job rouge pour une experience qu'on a decide de ne pas mener polluerait
+le signal. La bascule RELR et son garde-fou restent dans l'arbre.
+
+### Ce qui reste a expliquer
+
+Pour le premier WebWorker : **113 594 ms de noyau, dont 13 285 ms de fautes**.
+Cent secondes de temps noyau ne sont attribuees a rien. Le rapport est le meme
+sur tous les services (`sys_ms` vaut cinq a huit fois leur temps de faute),
+donc le mecanisme est systematique, pas accidentel.
+
+Deux candidats poses puis **REFUTES** sur banc local, en quelques minutes :
+
+| candidat | sonde | mesure | verdict |
+|---|---|---|---|
+| balayage de secours du cache (`retire_un_candidat`, O(n) sous verrou global, 52 537 entrees) | `CACHE_BALAYAGE` | `appels=0` | jamais atteint |
+| chaine de reprise des fautes (`FaultOutcome::Retry`, non comptee au livre) | `FAULT_REPRISE` | `reprises=0 chaines=0` | aucune reprise |
+
+Candidat restant : le **corps des appels systeme**. `SYSCALL_TEMPS` le decoupe
+desormais par numero. Le banc local ne peut PAS trancher -- `gros-elf` est lie
+en `-nostdlib` et n'emet que quatre appels systeme en tout. Seul un run
+Ladybird le dira.
+
+Limite a garder en tete : sur le banc local, `CPU_CUMUL` est cumulatif depuis
+l'amorcage et les fautes des processus qui ne meurent pas (shell, init) ne
+sont dans aucune somme. L'ecart local n'est donc pas comparable a l'ecart
+Ladybird, qui est per-process des deux cotes.
+

@@ -304,3 +304,95 @@ fn frontiere_compta(vers_noyau: bool) -> bool {
 pub fn account_resume_user_noreturn() {
     account_kernel_exit();
 }
+
+// BOUCHAUD_C68_OU_VA_LE_TEMPS_NOYAU
+//
+// Le run 35944547625 a rendu le partage honnete, et le resultat est net :
+//
+//     WebWorker #1 (froid)   user_ms=724   sys_ms=113594
+//
+// Mais le livre des fautes n'explique que 13 285 ms de ces 113 594. Deux
+// candidats pour les cent secondes restantes ont ete poses puis REFUTES sur
+// banc local en quelques minutes -- `CACHE_BALAYAGE appels=0` et
+// `FAULT_REPRISE reprises=0`. Ni le balayage de secours du cache, ni la
+// chaine de reprise des fautes.
+//
+// Reste le temps noyau qui n'est pas de la faute : le CORPS DES APPELS
+// SYSTEME. Aucune sonde ne le decoupait. Celle-ci le fait, par numero.
+//
+// # Ce qu'elle ne mesure PAS
+//
+// Les appels qui ne rendent pas la main -- `execve` reussi, `exit` -- ne
+// passent jamais par la borne de sortie. Leur cout est absent de cette table,
+// et c'est volontaire : `PERF_EXECVE` le mesure deja, avec ses propres
+// bornes. Compter ici une duree jamais fermee serait pire que ne rien
+// compter.
+//
+// # Ce qu'elle coute
+//
+// Deux lectures d'horloge par appel systeme, en plus des deux que les bornes
+// user/noyau font deja. Sur une charge a cent mille appels, c'est du bruit ;
+// la table est publiee avec son nombre d'appels pour qu'on puisse le verifier
+// plutot que le croire.
+const SYSCALL_MAX: usize = 512;
+static SYSCALL_NS: [AtomicU64; SYSCALL_MAX] = [const { AtomicU64::new(0) }; SYSCALL_MAX];
+static SYSCALL_N: [AtomicU64; SYSCALL_MAX] = [const { AtomicU64::new(0) }; SYSCALL_MAX];
+/// Les appels dont le numero depasse la table. Non nul = la table ment par omission.
+static SYSCALL_HORS_TABLE: AtomicU64 = AtomicU64::new(0);
+
+/// Impute `ecoule` au numero `nr`. Appele par la borne de sortie d'appel systeme.
+pub fn impute_syscall(nr: u64, ecoule: u64) {
+    let index = nr as usize;
+    if index >= SYSCALL_MAX {
+        SYSCALL_HORS_TABLE.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    SYSCALL_NS[index].fetch_add(ecoule, Ordering::Relaxed);
+    SYSCALL_N[index].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Publie les `combien` appels systeme les plus couteux, en temps cumule.
+///
+/// GLOBAL, et dit comme tel : ce sont tous les processus depuis le demarrage.
+pub fn publie_syscall_top(combien: usize) {
+    let mut total_ns = 0u64;
+    let mut total_n = 0u64;
+    for i in 0..SYSCALL_MAX {
+        total_ns = total_ns.saturating_add(SYSCALL_NS[i].load(Ordering::Relaxed));
+        total_n = total_n.saturating_add(SYSCALL_N[i].load(Ordering::Relaxed));
+    }
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "SYSCALL_TEMPS scope=global t={} total_ms={} appels={} hors_table={}",
+        crate::kernel::timer::monotonic_ms(),
+        total_ns / 1_000_000,
+        total_n,
+        SYSCALL_HORS_TABLE.load(Ordering::Relaxed),
+    ));
+    // Selection par passes successives : pas d'allocation dans un chemin de
+    // sortie de processus, et `combien` est petit.
+    let mut plafond = u64::MAX;
+    for _ in 0..combien {
+        let mut meilleur = None;
+        for i in 0..SYSCALL_MAX {
+            let ns = SYSCALL_NS[i].load(Ordering::Relaxed);
+            if ns == 0 || ns > plafond {
+                continue;
+            }
+            match meilleur {
+                Some((_, m)) if ns <= m => {}
+                _ => meilleur = Some((i, ns)),
+            }
+        }
+        let Some((i, ns)) = meilleur else { break };
+        let n = SYSCALL_N[i].load(Ordering::Relaxed);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "SYSCALL_TEMPS scope=global nr={} nom={} total_ms={} appels={} moyen_us={}",
+            i,
+            crate::kernel::abi::nr::name(i as u64),
+            ns / 1_000_000,
+            n,
+            if n != 0 { ns / n / 1_000 } else { 0 },
+        ));
+        plafond = ns.saturating_sub(1);
+    }
+}
