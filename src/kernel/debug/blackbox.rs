@@ -1658,6 +1658,19 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
         verrou.proprietaire.nom(), verrou.tenue_max_ns,
         bot.etat.nom(), bot.reprises,
     );
+    if !synced {
+        // CE QUI REND `ok=0` ALORS QUE TOUT EST ECRIT.
+        //
+        // Au banc, `drained=1 marker=1 sync=0` : les donnees ET la marque de
+        // fin sont posees, l'extracteur declare l'archive COMPLETE, et
+        // l'utilisateur voit pourtant « erreur lors de l'enregistrement ».
+        // C'est tres probablement ce qu'a vu le Trigkey.
+        crate::serial_println!(
+            "BLACKBOX_FIN_SYNC_KO raison={} transport={} bot={} reprises={}",
+            raison, crate::drivers::xhci_active::derniere_raison_sync(),
+            bot.etat.nom(), bot.reprises,
+        );
+    }
     Vidage {
         support: true,
         draine,
@@ -1844,6 +1857,13 @@ duration_ms={} marker={} sync={} sync_cause={} dernier_confirme={}",
         bilan.duree_us / 1_000, bilan.marque as u8, bilan.synchronise as u8,
         nom_cause_sync(bilan.cause_sync), bilan.dernier_confirme,
     );
+    if !bilan.synchronise {
+        crate::serial_println!(
+            "BLACKBOX_CHECKPOINT_SYNC_KO seq={} cause={} transport={}",
+            bilan.seq, nom_cause_sync(bilan.cause_sync),
+            crate::drivers::xhci_active::derniere_raison_sync(),
+        );
+    }
     bilan
 }
 

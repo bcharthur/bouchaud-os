@@ -567,12 +567,34 @@ fn blackbox_write_blocks(
     Ok(())
 }
 
+/// Derniere raison d'echec de SYNCHRONIZE CACHE, telle que le transport la
+/// nomme.
+///
+/// `pilote-ko` ne suffisait pas : il confond un refus de transport en cours de
+/// reprise, une echeance et un desaccord de phase. Ces trois-la ne se soignent
+/// pas pareil, et c'est cette commande qui rend `ok=0` a l'extinction alors
+/// que les donnees ET la marque de fin sont bien posees.
+static DERNIERE_RAISON_SYNC: crate::kernel::sync::SpinLock<&'static str> =
+    crate::kernel::sync::SpinLock::new("jamais-tente");
+
+pub fn derniere_raison_sync() -> &'static str {
+    *DERNIERE_RAISON_SYNC.lock()
+}
+
 fn blackbox_sync_cache(controller: &mut Controller, storage: &mut BlackboxStorage) -> bool {
     let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut empty = [0u8; 0];
-    let ok = blackbox_bot(controller, storage, &cdb, &mut empty, false).is_ok();
-    if ok { storage.since_sync = 0; }
-    ok
+    match blackbox_bot(controller, storage, &cdb, &mut empty, false) {
+        Ok(_) => {
+            storage.since_sync = 0;
+            *DERNIERE_RAISON_SYNC.lock() = "ok";
+            true
+        }
+        Err(raison) => {
+            *DERNIERE_RAISON_SYNC.lock() = raison;
+            false
+        }
+    }
 }
 
 fn le_u32(data: &[u8], off: usize) -> u32 {
