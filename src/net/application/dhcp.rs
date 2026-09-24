@@ -107,9 +107,33 @@ fn recv_avant_interne(xid: u32, want_type: u8, budget_ms: u64) -> Option<Lease> 
                 crate::net::chronologie::note(&crate::net::chronologie::RX_PAS_REPLY);
                 continue;
             }
+            // BANC : falsifier le xid d'une reponse QUI AURAIT ETE ACCEPTEE.
+            //
+            // La premiere version falsifiait la premiere reponse venue, et le
+            // banc ne distinguait plus rien : une OFFRE perimee relachee par
+            // l'emulateur -- voir B2 -- produit deja `xid_ko=1` sans aucune
+            // injection, si bien que le cas injecte et le cas normal rendaient
+            // exactement la meme trace. En ne touchant que ce qui correspond,
+            // chaque falsification appliquee TRANSFORME une acceptation en
+            // rejet, et son effet devient attribuable.
+            //
+            // Le tampon est reellement modifie : c'est le client, non le banc,
+            // qui constate le desaccord et rejette.
+            if u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) == xid
+                && banc::fausse_un_xid()
+            {
+                buf[4] ^= 0xFF;
+            }
             let rxid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
             if rxid != xid {
                 crate::net::chronologie::note(&crate::net::chronologie::RX_XID_KO);
+                continue;
+            }
+            // BANC : perdre une OFFRE qui serait sinon acceptee. Elle est
+            // jetee ICI, apres le controle de xid, pour que le compteur
+            // d'injections appliquees ne compte que des offres qui auraient
+            // vraiment abouti.
+            if want_type == 2 && banc::jette_une_offre() {
                 continue;
             }
             if let Some(l) = parse_reply(&buf[..n]) {
@@ -326,4 +350,74 @@ pub fn run() {
     crate::print!("  gw "); ipv4::print_addr(&gw);
     crate::print!("  dns "); ipv4::print_addr(&dns);
     crate::println!("");
+}
+
+/// BANC UNIQUEMENT : rendre DETERMINISTES les pannes DHCP.
+///
+/// # Pourquoi armer un NOMBRE et compter les APPLICATIONS
+///
+/// Un scenario negatif qui passe parce que la panne n'a pas ete injectee est
+/// un vert qui ne defend rien. Ces deux compteurs sont donc separes :
+/// `*_ARMEES` dit ce qu'on a demande, `*_APPLIQUEES` dit ce qui a REELLEMENT
+/// eu lieu. Le banc compare les deux, et l'ecart est un echec.
+///
+/// Les deux injections agissent la ou le client lit, pas sur le fil : c'est
+/// exactement ce qu'il faut pour eprouver le CLIENT. La panne du fil, elle,
+/// est deja couverte par `run_dhcp_wire.sh`.
+pub mod banc {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static OFFRES_A_JETER: AtomicU32 = AtomicU32::new(0);
+    static OFFRES_JETEES: AtomicU32 = AtomicU32::new(0);
+    static XID_A_FAUSSER: AtomicU32 = AtomicU32::new(0);
+    static XID_FAUSSES: AtomicU32 = AtomicU32::new(0);
+
+    /// Arme la perte des `n` prochaines OFFRES qui auraient ete acceptees.
+    pub fn arme_pertes(n: u32) {
+        OFFRES_A_JETER.store(n, Ordering::Relaxed);
+    }
+
+    /// Arme la falsification du xid des `n` prochaines reponses recues.
+    pub fn arme_xid_faux(n: u32) {
+        XID_A_FAUSSER.store(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn jette_une_offre() -> bool {
+        if OFFRES_A_JETER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v == 0 { None } else { Some(v - 1) }
+            })
+            .is_err()
+        {
+            return false;
+        }
+        OFFRES_JETEES.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    pub(super) fn fausse_un_xid() -> bool {
+        if XID_A_FAUSSER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v == 0 { None } else { Some(v - 1) }
+            })
+            .is_err()
+        {
+            return false;
+        }
+        XID_FAUSSES.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Ce qui restait a injecter, et ce qui l'a ete. Le banc lit cette ligne.
+    pub fn rapporte(etiquette: &str) {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "DHCP_BANC_INJECTION scenario={} offres_restantes={} offres_jetees={} \
+xid_restants={} xid_fausses={}",
+            etiquette,
+            OFFRES_A_JETER.load(Ordering::Relaxed),
+            OFFRES_JETEES.load(Ordering::Relaxed),
+            XID_A_FAUSSER.load(Ordering::Relaxed),
+            XID_FAUSSES.load(Ordering::Relaxed),
+        ));
+    }
 }

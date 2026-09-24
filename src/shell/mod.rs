@@ -213,7 +213,7 @@ pub const COMMANDS: &[&str] = &[
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
-    "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
+    "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "persist-test", "safe-mode",
     "diag-save",
@@ -1043,6 +1043,22 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // applique la reparation d'anneau, et laisse le verdict differe dire
         // si la reception a repris. `persistant` coupe `RCTL.EN`, que le
         // rearmement ne rattrape pas : c'est le bras « inefficace ».
+        // BANC UNIQUEMENT. Rend deterministes les pannes du client DHCP :
+        // `perte N` fait disparaitre les N prochaines OFFRES acceptables,
+        // `xid N` falsifie le xid des N prochaines reponses. `etat` rapporte
+        // ce qui a ete ARME et ce qui a ete APPLIQUE.
+        "netbanc-dhcp" => {
+            let n = if argc > 2 { argv[2].parse::<u32>().unwrap_or(1) } else { 1 };
+            match if argc > 1 { argv[1] } else { "etat" } {
+                "perte" => crate::net::application::dhcp::banc::arme_pertes(n),
+                "xid" => crate::net::application::dhcp::banc::arme_xid_faux(n),
+                _ => {}
+            }
+            crate::net::application::dhcp::banc::rapporte(
+                if argc > 1 { argv[1] } else { "etat" },
+            );
+            0
+        }
         "netbanc-rx" => {
             let persistant = argc > 1 && argv[1] == "persistant";
             crate::net::rx_recuperation::banc(persistant);

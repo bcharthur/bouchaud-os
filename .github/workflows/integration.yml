@@ -259,7 +259,7 @@ jobs:
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + curl
@@ -469,6 +469,10 @@ jobs:
       # mesurerait rien.
       - name: Reprise RX effective et inefficace
         run: BANC_TRAVAIL=banc-rx tools/ci/run_rx_recuperation.sh image/bootimage-bouchaud-os.bin
+      # B4 : les scenarios deterministes. Chaque panne est ARMEE et COMPTEE,
+      # et un scenario dont l injection n a pas ete APPLIQUEE echoue.
+      - name: Scenarios DHCP deterministes
+        run: BANC_TRAVAIL=banc-scenarios tools/ci/run_dhcp_scenarios.sh image/bootimage-bouchaud-os.bin
       - name: Recuperation, SLIRP hors 10.0.2.x
         env:
           BANC_NETDEV: user,id=net0,net=192.168.76.0/24,host=192.168.76.2,dhcpstart=192.168.76.15,dns=192.168.76.3
@@ -482,6 +486,7 @@ jobs:
             banc-defaut/
             banc-autre/
             banc-rx/
+            banc-scenarios/
           if-no-files-found: warn
 
   usb-arbre:
