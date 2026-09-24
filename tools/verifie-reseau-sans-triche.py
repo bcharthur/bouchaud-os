@@ -270,7 +270,7 @@ def main():
             )
 
         # ------------------------------------------------------------- 6
-        repare = corps(pur, "unsafe fn repare_reception() -> bool {")
+        repare = corps(pur, "unsafe fn repare_reception() -> Option<bool> {")
         if repare is None:
             fautes.append("rtl8168.rs : `repare_reception` est introuvable.")
         else:

@@ -45,7 +45,7 @@ RACINE = Path(__file__).resolve().parents[1]
 PILOTE = RACINE / "src/drivers/network/rtl8168.rs"
 SERVICES = RACINE / "src/kernel/services/mod.rs"
 
-SIGNATURE_REPARE = "unsafe fn repare_reception() -> bool {"
+SIGNATURE_REPARE = "unsafe fn repare_reception() -> Option<bool> {"
 SIGNATURE_PROGRAMME = "unsafe fn programme_le_materiel() -> bool {"
 SIGNATURE_RECEIVE = "pub fn receive(out: &mut [u8]) -> Option<usize> {"
 SIGNATURE_CARTE = "pub fn carte_active() -> &'static str {"

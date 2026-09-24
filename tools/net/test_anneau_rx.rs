@@ -33,6 +33,7 @@ use anneau::{
     Verdict, DESCRIPTEURS, EOR, ERR_CRC, ERR_RES, ERR_RUNT, ERR_RWT, MASQUE_LONGUEUR, OCTETS_FCS,
     OWN, RX128_INT_EN, RX_DMA_BURST, RX_EARLY_OFF, RX_FIFO_THRESH_HISTORIQUE, RX_MULTI_EN,
     TAILLE_TAMPON,
+    Admission, SuiviVerdict, SuiviVerdictHistorique, REPOS_ENTRE_REPRISES_NS,
 };
 
 // ===========================================================================
@@ -957,4 +958,289 @@ fn le_releve_trigkey_complet_ne_se_declare_pas_repare() {
     apres.rx_tete_materiel += 1;
     let v = verdict_recuperation(&avant, &apres);
     assert!(!v.effective, "aucune trame n'est entree : ce n'est pas une reprise");
+}
+
+// ===========================================================================
+// LA CHRONOLOGIE DES VINGT-SIX REPRISES
+// ===========================================================================
+//
+// # Ce que le physique a ecrit
+//
+// TRIGKEY, campagne `1179cdd`. Cent cinquante et une secondes de reception
+// morte apres la soixante-quatrieme trame, et ce bilan :
+//
+// ```text
+// rx_packets=64  rx_cur=0  desc_nic=64  desc_cpu=0
+// isr_rx_ok croissant  rx_missed=0  chip_cmd=RX_ENB|TX_ENB
+// recoveries_effective=0  recoveries_ineffective=26
+// REPRISES_SANS_EFFET=0   repair_degre=Draine
+// ```
+//
+// La derniere ligne est le defaut. Vingt-six echecs comptes par le module de
+// mesure, zero par le pilote -- qui est pourtant le seul a s'en servir pour
+// escalader. Il est donc reste au drainage, sur un anneau dont les
+// soixante-quatre descripteurs etaient deja au materiel : vingt-six fois rien.
+//
+// # L'arithmetique du defaut
+//
+// `REPOS_ENTRE_REPRISES_NS` vaut deux secondes, `FENETRE_VERDICT_NS` trois.
+// Une demande de reprise arrive donc toujours AVANT que la precedente soit
+// jugeable, et l'ancien code reecrivait l'echeance a chaque demande. Elle
+// fuyait devant le juge, indefiniment.
+//
+// Ces epreuves rejouent la MEME chronologie sur les deux algorithmes. La
+// difference ne peut donc venir que de la regle.
+
+/// La chronologie physique : une demande de reprise toutes les 2,1 s.
+///
+/// Le depart n'est pas a zero. L'ancienne machine se servait de « echeance
+/// nulle » pour dire « aucune question en cours » ; partir de zero lui
+/// offrirait un cas particulier que le materiel ne lui offre jamais, et la
+/// contradiction porterait alors sur un artefact de test.
+const DEPART_NS: u64 = 10_000_000_000;
+const PAS_NS: u64 = 2_100_000_000;
+const FENETRE_NS: u64 = 3_000_000_000;
+const REPRISES_PHYSIQUES: usize = 26;
+
+#[test]
+fn le_repos_entre_reprises_est_plus_court_que_la_fenetre_de_verdict() {
+    // TOUT LE DEFAUT TIENT DANS CETTE INEGALITE. Si elle s'inversait un jour,
+    // l'ecrasement deviendrait impossible et ces epreuves ne prouveraient plus
+    // rien -- il faudrait alors les relire, pas les supprimer.
+    assert!(
+        REPOS_ENTRE_REPRISES_NS < FENETRE_NS,
+        "une reprise peut etre demandee avant que la precedente soit jugeable : \
+c'est la condition du defaut que ces epreuves defendent",
+    );
+    assert_eq!(PAS_NS, 2_100_000_000);
+    assert!(PAS_NS >= REPOS_ENTRE_REPRISES_NS, "le repos du pilote serait viole");
+    assert!(PAS_NS < FENETRE_NS, "la fenetre serait ecoulee a chaque demande");
+}
+
+#[test]
+fn l_ancien_algorithme_ne_rend_jamais_aucun_verdict() {
+    // L'ACCUSATION, CHIFFREE. La reception est morte : `rx_packets` fige a 64
+    // et `own_rendus` fige -- la reprise choisie est un drainage, qui ne rend
+    // aucun descripteur puisqu'ils sont tous deja au materiel.
+    let mut suivi = SuiviVerdictHistorique::nouveau();
+    let (paquets, rendus) = (64u64, 64u64);
+    let mut degres = Vec::new();
+
+    for tour in 0..REPRISES_PHYSIQUES {
+        let t = DEPART_NS + PAS_NS * tour as u64;
+        let sans_effet = suivi.presente_demande(t, FENETRE_NS, paquets, rendus);
+        degres.push(degre(None, tout_au_materiel(), cmd::RX_ENB | cmd::TX_ENB, sans_effet));
+        suivi.arme(t, paquets, rendus);
+    }
+
+    assert_eq!(
+        suivi.sans_effet(), 0,
+        "le releve physique le dit : REPRISES_SANS_EFFET=0 apres vingt-six reprises",
+    );
+    assert!(
+        degres.iter().all(|&d| d == Degre::Draine),
+        "le releve physique le dit : repair_degre=Draine, du debut a la fin -- \
+obtenu {degres:?}",
+    );
+}
+
+#[test]
+fn le_nouvel_algorithme_n_ecrase_pas_une_question_en_cours() {
+    // LA CORRECTION, SUR LA MEME CHRONOLOGIE. Une demande qui tombe pendant
+    // une question en cours est differee ; la question va jusqu'a son terme.
+    let mut suivi = SuiviVerdict::nouveau();
+    let (paquets, rendus) = (64u64, 64u64);
+    let mut degres = Vec::new();
+    let mut differees = 0usize;
+
+    for tour in 0..REPRISES_PHYSIQUES {
+        let t = DEPART_NS + PAS_NS * tour as u64;
+        match suivi.presente_demande(t, FENETRE_NS, paquets, rendus).0 {
+            Admission::Differee { restant_ns } => {
+                differees += 1;
+                assert!(restant_ns > 0, "une demande differee attend forcement quelque chose");
+            }
+            Admission::Reparez { sans_effet } => {
+                degres.push(degre(
+                    None,
+                    tout_au_materiel(),
+                    cmd::RX_ENB | cmd::TX_ENB,
+                    sans_effet,
+                ));
+                suivi.arme(t, paquets, rendus);
+            }
+        }
+    }
+
+    assert!(differees > 0, "sans demande differee, rien n'aurait ete corrige");
+    assert!(
+        suivi.sans_effet() >= 3,
+        "vingt-six reprises inefficaces doivent finir par se compter -- obtenu {}",
+        suivi.sans_effet(),
+    );
+
+    // L'ESCALADE, SELON LA POLITIQUE EXISTANTE ET ELLE SEULE. `degre()` n'est
+    // pas touchee par cette correction : elle recoit enfin un compteur juste.
+    assert_eq!(
+        &degres[..4],
+        &[
+            Degre::Draine,
+            Degre::Draine,
+            Degre::ReconstruitAnneau,
+            Degre::ReinitialiseCarte,
+        ],
+        "escalade attendue sur les quatre premieres reprises reellement executees -- \
+obtenu {degres:?}",
+    );
+}
+
+#[test]
+fn les_deux_algorithmes_divergent_sur_la_meme_chronologie() {
+    // L'epreuve qui interdit de croire que le scenario y est pour quelque
+    // chose : memes instants, memes compteurs, deux conclusions opposees.
+    let (paquets, rendus) = (64u64, 64u64);
+
+    let mut ancien = SuiviVerdictHistorique::nouveau();
+    let mut nouveau = SuiviVerdict::nouveau();
+
+    for tour in 0..REPRISES_PHYSIQUES {
+        let t = DEPART_NS + PAS_NS * tour as u64;
+        ancien.presente_demande(t, FENETRE_NS, paquets, rendus);
+        ancien.arme(t, paquets, rendus);
+        if let Admission::Reparez { .. } =
+            nouveau.presente_demande(t, FENETRE_NS, paquets, rendus).0
+        {
+            nouveau.arme(t, paquets, rendus);
+        }
+    }
+
+    assert_eq!(ancien.sans_effet(), 0);
+    assert!(nouveau.sans_effet() > 0);
+}
+
+#[test]
+fn une_reprise_qui_marche_remet_le_compteur_a_zero() {
+    // L'ESCALADE DOIT SAVOIR REDESCENDRE, sinon une carte qui repart se ferait
+    // reinitialiser pour son passe.
+    let mut suivi = SuiviVerdict::nouveau();
+    let mut paquets = 64u64;
+    let rendus = 64u64;
+
+    // Deux verdicts inefficaces.
+    suivi.arme(DEPART_NS, paquets, rendus);
+    for tour in 1..=4u64 {
+        let t = DEPART_NS + PAS_NS * tour;
+        if let Admission::Reparez { .. } = suivi.presente_demande(t, FENETRE_NS, paquets, rendus).0
+        {
+            suivi.arme(t, paquets, rendus);
+        }
+    }
+    assert!(suivi.sans_effet() >= 1);
+
+    // Puis la reception repart : une trame de plus, et la fenetre s'ecoule.
+    paquets += 1;
+    let t = DEPART_NS + PAS_NS * 8;
+    let issue = suivi.conclut_si_du(t, FENETRE_NS, paquets, rendus);
+    assert!(issue.unwrap().effective);
+    assert_eq!(suivi.sans_effet(), 0, "une reprise efficace efface l'ardoise");
+}
+
+#[test]
+fn un_verdict_ne_se_rend_pas_avant_sa_fenetre() {
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 64);
+    assert!(suivi.conclut_si_du(DEPART_NS, FENETRE_NS, 64, 64).is_none());
+    assert!(suivi
+        .conclut_si_du(DEPART_NS + FENETRE_NS - 1, FENETRE_NS, 64, 64)
+        .is_none());
+    let issue = suivi
+        .conclut_si_du(DEPART_NS + FENETRE_NS, FENETRE_NS, 64, 64)
+        .expect("la fenetre est ecoulee : le verdict est du");
+    assert!(!issue.effective);
+    assert_eq!(issue.age_ns, FENETRE_NS);
+    assert!(
+        suivi.conclut_si_du(DEPART_NS + FENETRE_NS * 4, FENETRE_NS, 64, 64).is_none(),
+        "un verdict rendu ne se rend pas deux fois",
+    );
+}
+
+#[test]
+fn une_demande_differee_le_reste_jusqu_a_l_echeance_et_pas_au_dela() {
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 64);
+
+    let (admission, issue) =
+        suivi.presente_demande(DEPART_NS + PAS_NS, FENETRE_NS, 64, 64);
+    assert!(issue.is_none(), "rien n'est jugeable avant l'echeance");
+    assert_eq!(
+        admission,
+        Admission::Differee { restant_ns: FENETRE_NS - PAS_NS },
+    );
+
+    let (admission, issue) =
+        suivi.presente_demande(DEPART_NS + FENETRE_NS, FENETRE_NS, 64, 64);
+    assert_eq!(issue.map(|i| i.effective), Some(false));
+    assert_eq!(admission, Admission::Reparez { sans_effet: 1 });
+}
+
+#[test]
+fn le_verdict_se_rend_meme_quand_la_demande_tombe_pile_a_l_echeance() {
+    // On juge AVANT de decider, sinon une echeance atteinte au moment exact
+    // d'une nouvelle demande serait perdue -- le defaut d'origine, en plus
+    // discret.
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 64);
+    let (admission, issue) =
+        suivi.presente_demande(DEPART_NS + FENETRE_NS, FENETRE_NS, 64, 64);
+    assert_eq!(issue.map(|i| i.sans_effet), Some(1));
+    assert_eq!(admission, Admission::Reparez { sans_effet: 1 });
+}
+
+#[test]
+fn le_suivi_neuf_ne_differe_rien_et_n_accuse_personne() {
+    let mut suivi = SuiviVerdict::nouveau();
+    assert!(!suivi.en_attente());
+    assert_eq!(suivi.depuis_ns(), 0);
+    let (admission, issue) = suivi.presente_demande(DEPART_NS, FENETRE_NS, 0, 0);
+    assert!(issue.is_none());
+    assert_eq!(admission, Admission::Reparez { sans_effet: 0 });
+}
+
+#[test]
+fn une_question_abandonnee_ne_bloque_plus_les_reprises() {
+    // La reinitialisation de carte remet les compteurs a zero : comparer de
+    // part et d'autre n'aurait plus de sens, et laisser la question ouverte
+    // differerait la reprise suivante pour rien.
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 64);
+    suivi.abandonne();
+    assert!(!suivi.en_attente());
+    let (admission, _) = suivi.presente_demande(DEPART_NS + 1, FENETRE_NS, 0, 0);
+    assert_eq!(admission, Admission::Reparez { sans_effet: 0 });
+}
+
+#[test]
+fn un_pilote_sans_compteur_ne_fabrique_pas_de_reprise_efficace() {
+    // Des zeros constants doivent rendre « inefficace ». La regle ne compare
+    // que des AUGMENTATIONS, jamais des valeurs absolues.
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 0, 0);
+    let issue = suivi.conclut_si_du(DEPART_NS + FENETRE_NS, FENETRE_NS, 0, 0);
+    assert_eq!(issue.map(|i| i.effective), Some(false));
+}
+
+#[test]
+fn le_temps_qui_recule_ne_rend_pas_de_verdict_premature() {
+    // `monotonic_ns` ne recule pas, mais un calcul qui deborderait ferait
+    // rendre un verdict de zero nanoseconde -- donc toujours inefficace, donc
+    // une escalade gratuite.
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 64);
+    assert!(suivi.conclut_si_du(0, FENETRE_NS, 64, 64).is_none());
+    assert!(suivi.en_attente(), "la question doit rester posee");
+}
+
+/// L'anneau du releve physique : les soixante-quatre descripteurs au materiel.
+fn tout_au_materiel() -> Recensement {
+    recense(DESCRIPTEURS, |_| OWN)
 }

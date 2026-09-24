@@ -895,3 +895,266 @@ pub fn verdict_recuperation(
     }
     VerdictRecuperation { effective: false, raison: "rien" }
 }
+
+// ---------------------------------------------------------------------------
+// LE VERDICT D'UNE REPRISE NE SE LAISSE PLUS ECRASER
+// ---------------------------------------------------------------------------
+//
+// # Le defaut, tel que le physique l'a ecrit
+//
+// Releve TRIGKEY, campagne `1179cdd`. Vingt-six reprises executees en cent
+// cinquante et une secondes, et ce bilan :
+//
+// ```text
+// recoveries_effective=0  recoveries_ineffective=26
+// REPRISES_SANS_EFFET=0   repair_degre=Draine
+// ```
+//
+// Le module distant comptait bien vingt-six echecs. Le PILOTE, lui, n'en
+// comptait aucun, et restait donc au degre le plus doux du debut a la fin --
+// un drainage, sur un anneau dont les soixante-quatre descripteurs etaient
+// deja au materiel. Vingt-six fois rien.
+//
+// La cause est arithmetique. L'ancien enchainement etait :
+//
+// ```text
+// rend_le_verdict_en_attente();   // ne conclut QUE si la fenetre est ecoulee
+// repare_reception();
+// VERDICT_ATTENDU_DEPUIS.store(maintenant);   // <-- inconditionnel
+// ```
+//
+// Avec `REPOS_ENTRE_REPRISES_NS` a deux secondes et `FENETRE_VERDICT_NS` a
+// trois, une reprise arrive TOUJOURS avant que la precedente soit jugeable :
+//
+// ```text
+// t=0,0  verdict arme  (echeance 3,0)
+// t=2,1  2,1 < 3,0 -> on ne juge pas ... puis on reecrit l'echeance a 5,1
+// t=4,2  2,1 < 3,0 -> on ne juge pas ... puis on reecrit l'echeance a 7,2
+// ...
+// ```
+//
+// L'echeance fuit devant le juge. Aucun verdict n'est jamais rendu, le
+// compteur reste a zero, l'escalade ne demarre jamais. Ce n'est pas un
+// reglage de seuil qui rate : c'est une machine a etats qui oublie qu'elle
+// avait une question en cours.
+//
+// # Ce que la correction change, et ce qu'elle ne change pas
+//
+// Une demande de reprise n'ecrase plus un verdict en cours : elle est
+// DIFFEREE. La demande reste posee, la reprise aura lieu -- au prochain
+// passage, une fois la question precedente repondue. C'est aussi la bonne
+// physique : une reprise coute les trames en vol, et en enchainer sans savoir
+// si la precedente a servi, c'est payer ce prix a l'aveugle.
+//
+// `degre()` n'est pas touchee. La politique d'escalade est celle d'avant ;
+// elle recoit simplement, enfin, un compteur qui dit la verite.
+
+/// Ce qu'il advient d'une demande de reprise presentee au suivi.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Admission {
+    /// Aucune question ne court : reparez, avec ce compteur d'echecs.
+    Reparez {
+        /// Reprises consecutives dont la reception n'a pas repris. C'est
+        /// l'entree de `degre()`.
+        sans_effet: u32,
+    },
+    /// Un verdict court encore. La demande reste posee, on ne repare pas.
+    Differee {
+        /// Ce qu'il reste a attendre avant de pouvoir juger, en nanosecondes.
+        restant_ns: u64,
+    },
+}
+
+/// Ce qu'a donne un verdict rendu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IssueVerdict {
+    /// La reception a-t-elle repris ?
+    pub effective: bool,
+    /// Reprises consecutives sans effet APRES ce verdict.
+    pub sans_effet: u32,
+    /// Age du verdict au moment ou il est rendu, en nanosecondes.
+    pub age_ns: u64,
+}
+
+/// La question « la derniere reprise a-t-elle servi ? », et son echeance.
+///
+/// Pure : pas de materiel, pas d'horloge propre, pas d'etat global. Le pilote
+/// lui passe l'instant et les compteurs ; elle rend la decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SuiviVerdict {
+    en_attente: bool,
+    depuis_ns: u64,
+    paquets_avant: u64,
+    rendus_avant: u64,
+    sans_effet: u32,
+}
+
+impl SuiviVerdict {
+    pub const fn nouveau() -> Self {
+        Self {
+            en_attente: false,
+            depuis_ns: 0,
+            paquets_avant: 0,
+            rendus_avant: 0,
+            sans_effet: 0,
+        }
+    }
+
+    /// Reprises consecutives sans effet. L'entree de `degre()`.
+    pub fn sans_effet(&self) -> u32 {
+        self.sans_effet
+    }
+
+    /// Une question est-elle en cours ?
+    pub fn en_attente(&self) -> bool {
+        self.en_attente
+    }
+
+    /// Instant d'armement de la question en cours. Zero s'il n'y en a pas.
+    pub fn depuis_ns(&self) -> u64 {
+        if self.en_attente { self.depuis_ns } else { 0 }
+    }
+
+    /// Rend le verdict en attente SI sa fenetre est ecoulee.
+    ///
+    /// Le progres se mesure comme ailleurs dans ce module : par des
+    /// AUGMENTATIONS, jamais par une valeur absolue. Un pilote qui ne sait pas
+    /// remplir un compteur le laisse a zero, et un zero constant ne peut pas
+    /// fabriquer une reprise.
+    pub fn conclut_si_du(
+        &mut self,
+        maintenant_ns: u64,
+        fenetre_ns: u64,
+        paquets: u64,
+        rendus: u64,
+    ) -> Option<IssueVerdict> {
+        if !self.en_attente {
+            return None;
+        }
+        let age = maintenant_ns.saturating_sub(self.depuis_ns);
+        if age < fenetre_ns {
+            return None;
+        }
+        self.en_attente = false;
+        let effective = paquets > self.paquets_avant || rendus > self.rendus_avant;
+        if effective {
+            self.sans_effet = 0;
+        } else {
+            self.sans_effet = self.sans_effet.saturating_add(1);
+        }
+        Some(IssueVerdict {
+            effective,
+            sans_effet: self.sans_effet,
+            age_ns: age,
+        })
+    }
+
+    /// Presente une demande de reprise : juge d'abord, decide ensuite.
+    ///
+    /// # L'ordre est la correction
+    ///
+    /// On tente TOUJOURS de conclure avant de decider, sinon une echeance
+    /// atteinte pile au moment d'une nouvelle demande serait perdue. Et on ne
+    /// repare que si plus rien ne court : c'est le point exact ou l'ancienne
+    /// version ecrasait sa propre question.
+    pub fn presente_demande(
+        &mut self,
+        maintenant_ns: u64,
+        fenetre_ns: u64,
+        paquets: u64,
+        rendus: u64,
+    ) -> (Admission, Option<IssueVerdict>) {
+        let issue = self.conclut_si_du(maintenant_ns, fenetre_ns, paquets, rendus);
+        if self.en_attente {
+            let ecoule = maintenant_ns.saturating_sub(self.depuis_ns);
+            return (
+                Admission::Differee {
+                    restant_ns: fenetre_ns.saturating_sub(ecoule),
+                },
+                issue,
+            );
+        }
+        (
+            Admission::Reparez {
+                sans_effet: self.sans_effet,
+            },
+            issue,
+        )
+    }
+
+    /// Arme la question, APRES que la reprise a eu lieu.
+    ///
+    /// # Pourquoi apres, et pas avant
+    ///
+    /// Une reprise rend elle-meme des descripteurs au materiel, donc elle fait
+    /// monter `own_rendus`. Photographier avant l'appel ferait compter ce
+    /// mouvement-la comme une reception restauree : la reparation se
+    /// declarerait reparee.
+    pub fn arme(&mut self, maintenant_ns: u64, paquets: u64, rendus: u64) {
+        self.en_attente = true;
+        self.depuis_ns = maintenant_ns;
+        self.paquets_avant = paquets;
+        self.rendus_avant = rendus;
+    }
+
+    /// Oublie la question en cours sans la juger.
+    ///
+    /// Pour la reinitialisation de carte, qui remet les compteurs a zero :
+    /// comparer de part et d'autre n'aurait plus de sens.
+    pub fn abandonne(&mut self) {
+        self.en_attente = false;
+    }
+}
+
+/// L'ancienne machine a etats, conservee POUR LA CONTRADICTION.
+///
+/// Elle n'est appelee par aucun pilote. Elle existe pour que le test puisse
+/// rejouer la meme chronologie sur les deux algorithmes et montrer que la
+/// difference vient de la regle, et non du scenario. Un test qui ne decrirait
+/// l'ancien defaut qu'en prose ne prouverait rien.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SuiviVerdictHistorique {
+    depuis_ns: u64,
+    paquets_avant: u64,
+    rendus_avant: u64,
+    sans_effet: u32,
+}
+
+impl SuiviVerdictHistorique {
+    pub const fn nouveau() -> Self {
+        Self { depuis_ns: 0, paquets_avant: 0, rendus_avant: 0, sans_effet: 0 }
+    }
+
+    pub fn sans_effet(&self) -> u32 {
+        self.sans_effet
+    }
+
+    /// L'enchainement d'origine : juger si possible, reparer toujours, et
+    /// REECRIRE l'echeance quoi qu'il arrive.
+    pub fn presente_demande(
+        &mut self,
+        maintenant_ns: u64,
+        fenetre_ns: u64,
+        paquets: u64,
+        rendus: u64,
+    ) -> u32 {
+        if self.depuis_ns != 0
+            && maintenant_ns.saturating_sub(self.depuis_ns) >= fenetre_ns
+        {
+            self.depuis_ns = 0;
+            if paquets > self.paquets_avant || rendus > self.rendus_avant {
+                self.sans_effet = 0;
+            } else {
+                self.sans_effet = self.sans_effet.saturating_add(1);
+            }
+        }
+        self.sans_effet
+    }
+
+    /// L'ecrasement, isole : c'est la ligne qui coutait vingt-six verdicts.
+    pub fn arme(&mut self, maintenant_ns: u64, paquets: u64, rendus: u64) {
+        self.depuis_ns = maintenant_ns;
+        self.paquets_avant = paquets;
+        self.rendus_avant = rendus;
+    }
+}

@@ -440,9 +440,18 @@ const FENETRE_PROGRES_NS: u64 = 1_000_000_000;
 /// On n'escalade que sur une PREUVE d'absence de progres : la reception n'a
 /// pas avance, et aucun descripteur n'est revenu, alors qu'on a laisse a la
 /// carte une fenetre bornee pour le montrer.
-static VERDICT_ATTENDU_DEPUIS: AtomicU64 = AtomicU64::new(0);
-static VERDICT_PAQUETS_AVANT: AtomicU64 = AtomicU64::new(0);
-static VERDICT_RENDUS_AVANT: AtomicU64 = AtomicU64::new(0);
+///
+/// # Pourquoi `static mut` et pas des atomiques
+///
+/// La machine a etats est une DECISION composee -- juger, puis admettre ou
+/// differer, puis armer -- et trois atomiques lues separement ne composent
+/// pas : c'est exactement ainsi que l'echeance se faisait reecrire entre deux
+/// lectures. Elle n'est touchee que depuis `repare_si_demande`, appelee par le
+/// seul drainage verrouille, sous `VERROU_RECEPTION` ; `REPRISES_SANS_EFFET`
+/// en reste le reflet atomique, pour les lecteurs qui ne tiennent rien.
+static mut SUIVI_VERDICT: anneau::SuiviVerdict = anneau::SuiviVerdict::nouveau();
+/// Demandes de reprise repoussees parce qu'un verdict courait encore.
+static REPRISES_DIFFEREES: AtomicU64 = AtomicU64::new(0);
 /// Fenetre laissee a une reprise pour faire ses preuves.
 const FENETRE_VERDICT_NS: u64 = 3_000_000_000;
 
@@ -1448,30 +1457,92 @@ pub fn repare_si_demande() -> bool {
         if !READY || !REPARATION_DEMANDEE.swap(false, Ordering::AcqRel) {
             return false;
         }
-        // LE VERDICT D'UNE REPRISE NE SE REND PAS DANS LA MILLISECONDE.
+        // LE VERDICT D'UNE REPRISE NE SE REND PAS DANS LA MILLISECONDE, ET
+        // UNE NOUVELLE DEMANDE NE L'EFFACE PAS.
         //
-        // L'ancienne version comparait `rx_packets` juste avant et juste
-        // apres l'appel. Aucune trame ne peut arriver dans cet intervalle :
-        // le compteur « reprises sans effet » montait donc a chaque tentative,
-        // quelle qu'elle soit, et l'escalade se faisait au NOMBRE d'appels et
-        // non a l'echec. Le releve du 18 septembre le montre : deux drainages
-        // -- qui ne pouvaient rien changer, les soixante-quatre descripteurs
-        // etant deja rendus au materiel -- puis reconstruction, puis
-        // reinitialisation, en six secondes.
+        // Comparer `rx_packets` juste avant et juste apres l'appel declarerait
+        // toute reprise inefficace : aucune trame ne peut arriver dans cet
+        // intervalle. On note donc une question EN ATTENTE, et on la rend a la
+        // passe suivante, une fois la fenetre ecoulee.
         //
-        // On note donc un verdict EN ATTENTE, et on le rend a la passe
-        // suivante, quand la fenetre d'observation est ecoulee.
-        rend_le_verdict_en_attente();
-        REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
-        let ok = repare_reception();
-        VERDICT_ATTENDU_DEPUIS.store(
-            crate::kernel::timer::monotonic_ns(),
-            Ordering::Relaxed,
+        // La redaction precedente s'arretait la, et reecrivait l'echeance a
+        // chaque demande. Avec un repos de deux secondes entre reprises et une
+        // fenetre de trois, l'echeance fuyait devant le juge : vingt-six
+        // reprises physiques, zero verdict rendu, `REPRISES_SANS_EFFET` a zero
+        // et `repair_degre=Draine` du debut a la fin du releve. Voir
+        // `anneau_rx::SuiviVerdict`, ou la regle vit maintenant et se
+        // contredit en test hote.
+        //
+        // Une demande qui tombe pendant une question en cours est donc
+        // DIFFEREE, pas executee : le drapeau reste pose, la reprise aura lieu
+        // au prochain passage. C'est aussi la bonne physique -- une reprise
+        // coute les trames en vol, et en enchainer sans savoir si la
+        // precedente a servi, c'est payer ce prix a l'aveugle.
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let (admission, issue) = SUIVI_VERDICT.presente_demande(
+            maintenant,
+            FENETRE_VERDICT_NS,
+            RX_PAQUETS.load(Ordering::Relaxed),
+            RX_OWN_RENDUS.load(Ordering::Relaxed),
         );
-        VERDICT_PAQUETS_AVANT.store(RX_PAQUETS.load(Ordering::Relaxed), Ordering::Relaxed);
-        VERDICT_RENDUS_AVANT.store(RX_OWN_RENDUS.load(Ordering::Relaxed), Ordering::Relaxed);
-        ok
+        publie_le_verdict(issue);
+
+        let sans_effet = match admission {
+            anneau::Admission::Differee { restant_ns } => {
+                REPARATION_DEMANDEE.store(true, Ordering::Release);
+                REPRISES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "BOUCHAUD_NET_RTL8168_REPRISE_DIFFEREE restant_us={} sans_effet={} \
+differees={}",
+                    restant_ns / 1_000,
+                    SUIVI_VERDICT.sans_effet(),
+                    REPRISES_DIFFEREES.load(Ordering::Relaxed),
+                );
+                return false;
+            }
+            anneau::Admission::Reparez { sans_effet } => sans_effet,
+        };
+
+        // `repare_reception` lit ce compteur pour choisir son degre : il doit
+        // etre a jour AVANT l'appel, pas apres.
+        REPRISES_SANS_EFFET.store(sans_effet, Ordering::Relaxed);
+        REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
+
+        match repare_reception() {
+            // Le repos entre reprises a parle : rien n'a ete fait, donc il n'y
+            // a rien a juger. Armer ici ferait porter le verdict sur une
+            // reprise qui n'a pas eu lieu.
+            None => false,
+            Some(ok) => {
+                // La photographie se prend APRES la reprise : celle-ci rend
+                // elle-meme des descripteurs au materiel, et les compter
+                // ferait declarer reparee toute reparation.
+                SUIVI_VERDICT.arme(
+                    crate::kernel::timer::monotonic_ns(),
+                    RX_PAQUETS.load(Ordering::Relaxed),
+                    RX_OWN_RENDUS.load(Ordering::Relaxed),
+                );
+                ok
+            }
+        }
     }
+}
+
+/// Trace un verdict rendu, et republie le compteur que la boite noire lit.
+unsafe fn publie_le_verdict(issue: Option<anneau::IssueVerdict>) {
+    let Some(issue) = issue else { return };
+    REPRISES_SANS_EFFET.store(issue.sans_effet, Ordering::Relaxed);
+    if issue.effective {
+        return;
+    }
+    crate::serial_println!(
+        "BOUCHAUD_NET_RTL8168_REPRISE_SANS_EFFET suite={} age_us={} rx_paquets={} \
+own_rendus={}",
+        issue.sans_effet,
+        issue.age_ns / 1_000,
+        RX_PAQUETS.load(Ordering::Relaxed),
+        RX_OWN_RENDUS.load(Ordering::Relaxed),
+    );
 }
 
 /// Rend au materiel tous les descripteurs que le processeur retient.
@@ -1540,7 +1611,10 @@ unsafe fn reconstruit_anneau() {
 /// lien et oblige a refaire DHCP. Elle est au dernier barreau, et on n'y monte
 /// qu'apres que les precedents ont echoue -- `anneau_rx::degre` encode la
 /// regle, et un test hote la contredit sans demarrer la machine.
-unsafe fn repare_reception() -> bool {
+/// Rend `None` quand le repos entre reprises a parle : RIEN n'a ete fait,
+/// donc il n'y a rien a juger. Confondre ce cas avec une reprise executee
+/// ferait porter un verdict sur une reparation qui n'a pas eu lieu.
+unsafe fn repare_reception() -> Option<bool> {
     let maintenant = crate::kernel::timer::monotonic_ns();
     // UNE REPRISE COUTE DES TRAMES, ET UNE LIGNE DE TRACE.
     //
@@ -1554,7 +1628,7 @@ unsafe fn repare_reception() -> bool {
     if precedente != 0
         && maintenant.saturating_sub(precedente) < anneau::REPOS_ENTRE_REPRISES_NS
     {
-        return true;
+        return None;
     }
     REPRISE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
     RX_REPRISES.fetch_add(1, Ordering::Relaxed);
@@ -1630,7 +1704,7 @@ etat={} chip_cmd={:#04x} intr_status={:#06x} desc_materiel={} desc_processeur={}
             recensement.processeur,
             invariant.unwrap_or("intact"),
         );
-        return remise_en_service;
+        return Some(remise_en_service);
     }
 
     crate::kernel::services::etat("net.nic.rtl8168", crate::kernel::services::Etat::Reprise);
@@ -1652,41 +1726,7 @@ desc_materiel={} desc_processeur={} rx_cur={} invariant={} rx_paquets={}",
         invariant.unwrap_or("intact"),
         paquets_avant,
     );
-    true
-}
-
-/// Rend le verdict de la reprise precedente, si sa fenetre est ecoulee.
-///
-/// C'est ici, et nulle part ailleurs, que `REPRISES_SANS_EFFET` bouge : une
-/// reprise qui n'a rien fait repartir fait monter d'un barreau, une reprise
-/// qui a remis la reception en route remet le compteur a zero.
-unsafe fn rend_le_verdict_en_attente() {
-    let depuis = VERDICT_ATTENDU_DEPUIS.load(Ordering::Relaxed);
-    if depuis == 0 {
-        return;
-    }
-    let maintenant = crate::kernel::timer::monotonic_ns();
-    if maintenant.saturating_sub(depuis) < FENETRE_VERDICT_NS {
-        // Trop tot pour juger : on ne compte rien, et surtout on n'escalade
-        // pas.
-        return;
-    }
-    VERDICT_ATTENDU_DEPUIS.store(0, Ordering::Relaxed);
-    let paquets = RX_PAQUETS.load(Ordering::Relaxed);
-    let rendus = RX_OWN_RENDUS.load(Ordering::Relaxed);
-    let progres = paquets > VERDICT_PAQUETS_AVANT.load(Ordering::Relaxed)
-        || rendus > VERDICT_RENDUS_AVANT.load(Ordering::Relaxed);
-    if progres {
-        REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
-    } else {
-        let sans_effet = REPRISES_SANS_EFFET.fetch_add(1, Ordering::Relaxed) + 1;
-        crate::serial_println!(
-            "BOUCHAUD_NET_RTL8168_REPRISE_SANS_EFFET suite={} rx_paquets={} own_rendus={}",
-            sans_effet,
-            paquets,
-            rendus,
-        );
-    }
+    Some(true)
 }
 
 /// L'instantane commun aux deux pilotes, vu par le RTL8168.
