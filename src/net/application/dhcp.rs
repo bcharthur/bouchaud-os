@@ -225,6 +225,7 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     send(mac, &msg[..l]);
     DISCOVER_ENVOYES.fetch_add(1, Ordering::Relaxed);
     note_etape(Etape::Discover);
+    crate::net::chronologie::phase(crate::net::chronologie::Phase::DhcpDiscover, xid);
     let Some(offer) = recv_avant(xid, 2, budget_ms) else {
         // AUCUNE OFFRE. C'est le cas du releve : onze DISCOVER, pas une
         // reponse. Le dire ici evite de confondre avec un REQUEST sans ACK.
@@ -232,17 +233,20 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
         return None;
     };
     OFFRES_VUES.fetch_add(1, Ordering::Relaxed);
+    crate::net::chronologie::phase(crate::net::chronologie::Phase::DhcpOffre, xid);
 
     let l = build_msg(&mut msg, xid, mac, 3, Some(offer.your_ip), Some(offer.server_id));
     send(mac, &msg[..l]);
     REQUESTS_ENVOYES.fetch_add(1, Ordering::Relaxed);
     note_etape(Etape::Request);
+    crate::net::chronologie::phase(crate::net::chronologie::Phase::DhcpRequest, xid);
     let Some(ack) = recv_avant(xid, 5, budget_ms) else {
         note_etape(Etape::SansAccuse);
         return None;
     };
     ACKS_VUS.fetch_add(1, Ordering::Relaxed);
     note_etape(Etape::Bail);
+    crate::net::chronologie::phase(crate::net::chronologie::Phase::DhcpAck, xid);
 
     // Valeurs de repli : un serveur qui n'annonce ni routeur ni resolveur
     // laisse la configuration compilee en place plutot que de poser 0.0.0.0,
@@ -251,6 +255,7 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
     net::set_config(ack.your_ip, gateway, dns);
     net::pose_identite_reseau(&ack.domaine[..ack.domaine_len], ack.masque);
+    crate::net::chronologie::phase(crate::net::chronologie::Phase::Ipv4Prete, xid);
     Some(Bail { ip: ack.your_ip, gateway, dns })
 }
 

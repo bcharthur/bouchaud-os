@@ -26,6 +26,7 @@ pub mod sonde_dns;
 pub mod file_trames;
 /// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la
 /// duree. Voir `net/diagnostic.rs`.
+pub mod chronologie;
 pub mod diagnostic;
 pub mod security;
 pub mod encoding;
@@ -268,15 +269,25 @@ pub fn demarre() -> Demarrage {
 }
 
 fn demarre_interne() -> Demarrage {
+    use chronologie::Phase;
     if pci::find_network().is_none() {
         return Demarrage::SansCarte;
     }
+    chronologie::phase(Phase::CarteDetectee, 0);
+    chronologie::phase(Phase::PiloteInit, 0);
     if !e1000::init() {
         return Demarrage::CarteRefusee;
     }
+    chronologie::phase(Phase::PiloteRret, 0);
     if !e1000::link_up() {
+        // LE VERDICT DU PREMIER INSTANT N'EST PAS LA VERITE DU RESEAU.
+        //
+        // On le pose comme avant -- ce commit ne change aucun comportement --
+        // mais on DATE desormais ce moment, pour pouvoir mesurer plus tard
+        // combien de temps separe ce « lien bas » de la montee reelle.
         return Demarrage::LienBas;
     }
+    chronologie::phase(Phase::LienHaut, 0);
     match dhcp::negocie() {
         Some(_) => Demarrage::Pret,
         // 10.0.2.x est une convention SLIRP QEMU, pas une configuration
@@ -499,6 +510,7 @@ fn veilleur_de_lien() -> ! {
                 nom_demarrage(etat),
             );
             if !lien {
+                chronologie::phase(chronologie::Phase::LienBas, 0);
                 // Le cable part : on ne garde pas une configuration qui ne
                 // mene plus nulle part, sinon chaque requete part dans le vide
                 // et attend son echeance.
@@ -509,6 +521,7 @@ fn veilleur_de_lien() -> ! {
                 crate::kernel::dmesg::log("net: eth0 lien tombe");
                 continue;
             }
+            chronologie::phase(chronologie::Phase::LienHaut, 0);
             // Le lien monte : on retente tout de suite, et la montee remet
             // l'attente a son plancher -- c'est un evenement neuf, pas la
             // suite de la serie d'echecs precedente.
@@ -533,6 +546,7 @@ fn veilleur_de_lien() -> ! {
             if maintenant >= prochaine_negociation_ms {
                 prochaine_negociation_ms =
                     maintenant.saturating_add(PERIODE_AUTONEGOCIATION_MS);
+                chronologie::phase(chronologie::Phase::PhyDemarre, 0);
                 e1000::reveille_le_lien();
             }
             continue;

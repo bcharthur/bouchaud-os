@@ -249,6 +249,9 @@ fn make_boot_id() -> u64 {
     date.saturating_mul(1000).saturating_add(tsc % 1000).max(1)
 }
 
+/// L'identifiant de session, pour que la chronologie reseau porte le meme.
+pub fn boot_id_public() -> u64 { boot_id() }
+
 fn boot_id() -> u64 {
     let current = BOOT_ID.load(Ordering::Acquire);
     if current != 0 {
