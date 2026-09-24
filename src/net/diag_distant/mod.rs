@@ -29,6 +29,7 @@
 //! repond `RST`. Voir `tri`, qui porte la regle et se contredit en test hote.
 
 pub mod adresse;
+pub mod brdp;
 pub mod tri;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
