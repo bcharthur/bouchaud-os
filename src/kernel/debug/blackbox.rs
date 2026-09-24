@@ -1601,9 +1601,29 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
         }
     }
 
-    let draine = FLIGHT_FLUSHED.load(Ordering::Acquire) >= cible_vol
-        && LAST_TRACE_SEQ.load(Ordering::Acquire) >= cible_serie
-        && !vidange(echeance).reste;
+    // LAQUELLE DES TROIS CONDITIONS MANQUE ?
+    //
+    // `draine` en agrege trois, et un `drained=0` seul ne dit pas laquelle.
+    // Le banc rend `drained=0 marker=1 sync=1 ok=0` : l'archive est pourtant
+    // declaree COMPLETE par l'extracteur, donc le verdict ment encore, par un
+    // autre chemin que la synchronisation.
+    //
+    // La troisieme condition est de la meme famille que le defaut que le
+    // checkpoint vient de corriger chez lui : elle exige un tambour
+    // ENTIEREMENT vide, ce qui n'est pas la meme question que « tout ce qui
+    // devait sortir est sorti ».
+    let vol_ok = FLIGHT_FLUSHED.load(Ordering::Acquire) >= cible_vol;
+    let serie_ok = LAST_TRACE_SEQ.load(Ordering::Acquire) >= cible_serie;
+    let reste = vidange(echeance).reste;
+    let draine = vol_ok && serie_ok && !reste;
+    if !draine {
+        crate::serial_println!(
+            "BLACKBOX_FIN_DRAINE_KO vol={} serie={} reste={} vol_flushed={} vol_cible={} serie_seq={} serie_cible={}",
+            vol_ok as u8, serie_ok as u8, reste as u8,
+            FLIGHT_FLUSHED.load(Ordering::Acquire), cible_vol,
+            LAST_TRACE_SEQ.load(Ordering::Acquire), cible_serie,
+        );
+    }
 
     // LA MARQUE DE FIN PART EN DERNIER, ET ELLE PORTE LE BILAN.
     //
@@ -1808,13 +1828,24 @@ duration_ms={} marker=0 sync=0",
     let maintenant = now_ns();
     let etat = BOBINE.etat();
 
+    // CE QUE LA MARQUE ANNONCE EST CE QUI SERA VRAI QUAND ELLE ATTERRIRA.
+    //
+    // La marque part EN DERNIER : tout ce qui la precede est persiste au
+    // moment ou elle-meme l'est. Le dernier numero du tambour AVANT elle est
+    // donc exactement la borne qu'elle peut promettre.
+    //
+    // Le banc a attrape la version precedente : le champ portait `0` parce
+    // que `bilan.dernier_confirme` n'etait calcule qu'APRES le vidage, alors
+    // que le texte, lui, est fige avant. Le journal disait 288, la marque
+    // disait 0, et l'extracteur croyait la marque -- a juste titre.
+    let confirme_annonce = BOBINE.dernier() as u64;
     let mut marque = Text::new();
     let _ = write!(
         &mut marque,
         "BOUCHAUD_TRIGKEY_BLACKBOX_V3 CHECKPOINT raison={} boot_id={} seq={} ts_ns={} \
 dernier_confirme={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} \
 vidage_poses={}\n",
-        raison, boot_id(), bilan.seq, maintenant, bilan.dernier_confirme,
+        raison, boot_id(), bilan.seq, maintenant, confirme_annonce,
         etat.reserves, etat.poses, etat.ecrases, etat.perdus, tour.poses,
     );
     // LA MARQUE EST POSEE QUAND LE CURSEUR L'A DEPASSEE, ET PAS AVANT.
