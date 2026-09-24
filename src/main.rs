@@ -263,6 +263,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // L'auditeur LAB : il lit ce que les pilotes publient, et n'ecrit que
     // dans l'anneau. Voir `kernel/debug/lab/auditd.rs`.
     kernel::lab::auditd::demarre();
+    // Le canal de diagnostic, sur une adresse link-local derivee de la MAC :
+    // il ne demande rien a DHCP, dont l'OFFER est une trame entrante.
+    net::diag_distant::ouvre(drivers::e1000::mac());
     kernel::services::etat(
         "net.link",
         if drivers::e1000::link_up() {

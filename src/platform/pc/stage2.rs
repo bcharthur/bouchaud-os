@@ -498,6 +498,17 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // une tache noyau recurrente, et la fenetre INIT/SIPI est celle qui a
     // declenche la double faute Trigkey.
     crate::kernel::lab::auditd::demarre();
+    // LE CANAL DE DIAGNOSTIC S'OUVRE SUR UNE ADRESSE QU'ON N'A DEMANDEE A
+    // PERSONNE. Un OFFER DHCP est une trame ENTRANTE, c'est-a-dire la chose
+    // en panne : faire dependre le canal d'enquete de DHCP garantirait son
+    // absence le jour ou il sert.
+    let ip_lab = crate::net::diag_distant::ouvre(crate::drivers::e1000::mac());
+    crate::serial_println!(
+        "BOUCHAUD_LAB_LINK_LOCAL ip={}.{}.{}.{} prefixe=16 brdp={} telemetrie={}",
+        ip_lab[0], ip_lab[1], ip_lab[2], ip_lab[3],
+        crate::net::diag_distant::PORT_BRDP,
+        crate::net::diag_distant::PORT_TELEMETRIE,
+    );
     crate::kernel::services::etat("net.link", crate::kernel::services::Etat::Actif);
     crate::kernel::services::phase("sys.graphique");
 

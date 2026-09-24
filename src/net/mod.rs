@@ -28,6 +28,7 @@ pub mod file_trames;
 /// duree. Voir `net/diagnostic.rs`.
 pub mod chronologie;
 pub mod rx_recuperation;
+pub mod diag_distant;
 pub mod diagnostic;
 pub mod security;
 pub mod encoding;
@@ -1579,14 +1580,33 @@ fn draine_verrouille() -> usize {
 
 /// Donne UNE trame a qui de droit. Ne jette que ce que personne n'attend.
 fn route_trame(trame: &[u8]) {
-    // LA COPIE SMOLTCP PASSE AVANT L'ANALYSE, ET AVANT TOUT REJET.
+    // LE TRI PASSE AVANT TOUT LE MONDE, Y COMPRIS AVANT SMOLTCP.
     //
-    // Le routage maison jette ce qu'il ne sait pas traiter -- IPv6, VLAN,
+    // La copie smoltcp se faisait sur le flux BRUT, avant le moindre tri :
+    // le routage maison jette ce qu'il ne sait pas traiter -- IPv6, VLAN,
     // controle de flux -- et une trame jetee ici serait perdue pour smoltcp
-    // aussi. La copie se fait donc sur le flux BRUT, avant le moindre tri :
-    // smoltcp doit voir ce que la carte a recu, pas ce que notre pile en a
-    // retenu.
-    file_smoltcp().pose(trame);
+    // aussi. C'etait juste tant qu'il n'y avait qu'une pile.
+    //
+    // Des qu'une seconde ecoute sur la meme carte, cela devient un RST
+    // FRATRICIDE : smoltcp recoit un segment destine au port 2222, ne trouve
+    // aucune chaussette, et repond `RST`. Le PC voit sa connexion au debugger
+    // refusee par la machine elle-meme, au moment precis ou l'on cherche a
+    // savoir ce qu'elle a. La reciproque est aussi vraie.
+    //
+    // Une pile TCP ne jette pas silencieusement : elle REPOND. Le tri ne peut
+    // donc pas se faire par soustraction, et il ne peut pas se faire apres.
+    //
+    // LAB eteint, `trie` rend `Normale` pour tout : le comportement est alors
+    // exactement celui d'avant ce module.
+    let verdict = crate::net::diag_distant::trie(trame);
+    if verdict.pour_normale() {
+        file_smoltcp().pose(trame);
+    }
+    if !verdict.pour_normale() {
+        // La trame appartient a la pile de diagnostic, qui l'a deja recue.
+        // La donner AUSSI au routage maison la ferait traiter deux fois.
+        return;
+    }
 
     let entete = match ethernet::parse_header(trame) {
         Some(h) => h,
