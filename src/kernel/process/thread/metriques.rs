@@ -768,6 +768,11 @@ pub struct ProcProcessusCumul {
     pub rss_octets: u64,
 }
 
+/// Derniers totaux rendus par `proc_cpu_cumul`, pour attraper un recul a
+/// l'instant ou il se produit plutot qu'a la relecture.
+static DERNIER_CUMUL_USER_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CUMUL_SYS_NS: AtomicU64 = AtomicU64::new(0);
+
 #[inline]
 fn temps_vivant(task: &Task, now: u64) -> u64 {
     if task.last_account_ns != 0 && task.on_cpu >= 0 {
@@ -898,6 +903,26 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         user_ns = user_ns.saturating_add(CUMUL_USER_NS[cpu].load(Ordering::Relaxed));
         system_ns = system_ns.saturating_add(CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed));
     }
+    // BOUCHAUD_C75_D_OU_VIENT_LE_RECUL
+    //
+    // Les cumuls viennent d'etre lus ; les tranches VIVES le sont juste
+    // apres. Entre les deux, un repli concurrent (`account_until`) deplace
+    // une tranche de `live` vers `CUMUL`. Lue ainsi, elle n'est comptee NI
+    // dans les cumuls -- trop tot -- NI dans les tranches -- deja repliee.
+    //
+    // C'est une hypothese, et ce bloc existe pour la trancher au lieu de la
+    // supposer : on retient separement ce que chaque moitie apporte, et le
+    // plus gros contributeur vif. Quand un recul survient, la ligne dit
+    // laquelle des deux a bouge.
+    let cumul_user_seul = user_ns;
+    let cumul_sys_seul = system_ns;
+    let mut live_user = 0u64;
+    let mut live_sys = 0u64;
+    let mut pire_live = 0u64;
+    let mut pire_tid = 0u32;
+    let mut pire_pid = 0u32;
+    let mut pire_noyau = false;
+
     // La tranche EN COURS n'est pas encore repliee dans les cumuls : sans
     // elle, `/proc/stat` avancerait par a-coups au rythme des commutations.
     for task in tasks().iter() {
@@ -906,8 +931,46 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         }
         let live = temps_vivant(task, now);
         if live != 0 {
-            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
-            else { user_ns = user_ns.saturating_add(live); }
+            if live > pire_live {
+                pire_live = live;
+                pire_tid = task.tid;
+                pire_pid = task.process.pid;
+                pire_noyau = task.in_kernel.charge();
+            }
+            if task.in_kernel.charge() {
+                system_ns = system_ns.saturating_add(live);
+                live_sys = live_sys.saturating_add(live);
+            } else {
+                user_ns = user_ns.saturating_add(live);
+                live_user = live_user.saturating_add(live);
+            }
+        }
+    }
+
+    // LE RECUL SE PHOTOGRAPHIE AU MOMENT OU IL SE PRODUIT.
+    //
+    // Le banc `run_proc_stat_monotone.sh` le detecte a la relecture, quand
+    // l'etat qui l'expliquait a disparu. Ici, tout est encore la.
+    {
+        let avant_user = DERNIER_CUMUL_USER_NS.swap(user_ns, Ordering::Relaxed);
+        let avant_sys = DERNIER_CUMUL_SYS_NS.swap(system_ns, Ordering::Relaxed);
+        if user_ns < avant_user || system_ns < avant_sys {
+            crate::serial_println!(
+                "PROC_STAT_RECUL t_ns={} user_ns={} avant_user_ns={} \
+sys_ns={} avant_sys_ns={} cumul_user={} cumul_sys={} live_user={} live_sys={} \
+pire_live_ns={} pire_tid={} pire_pid={} pire_noyau={} online={}",
+                now, user_ns, avant_user, system_ns, avant_sys,
+                cumul_user_seul, cumul_sys_seul, live_user, live_sys,
+                pire_live, pire_tid, pire_pid, pire_noyau as u8, online,
+            );
+            for cpu in 0..online.min(MAX_CPUS) {
+                crate::serial_println!(
+                    "PROC_STAT_RECUL_CPU cpu={} cumul_user_ns={} cumul_noyau_ns={}",
+                    cpu,
+                    CUMUL_USER_NS[cpu].load(Ordering::Relaxed),
+                    CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed),
+                );
+            }
         }
     }
     let capacite = now.saturating_mul(online as u64);
