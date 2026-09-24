@@ -426,3 +426,86 @@ Portee sur la section 10 : les valeurs de WebWorker #1 etaient des minorants
 des deux cotes. Le rapport noyau/utilisateur, lui, tient -- il est le meme sur
 huit processus et sur deux runs.
 
+## 12. CAUSE CONFIRMEE : le balayage de secours du cache de pages (C70)
+
+`run_id=35955074619`, `head_sha=c985d1c...`, verifie identique a `HEAD_TESTE`.
+
+### Je m'etais trompe, et voici comment
+
+Au tour precedent j'ai ecrit que le balayage de secours etait REFUTE, sur un
+`CACHE_BALAYAGE appels=0` du banc local. C'etait faux. Le banc utilisait un
+binaire de 5 Mio, soit 1 280 pages, quand `MAX_RECLAIMABLE_PAGES` vaut 16 384
+pages (64 Mio) : **il n'atteignait jamais ce chemin**. Un zero obtenu sur un
+banc qui ne passe pas par le code ne refute rien.
+
+Sous Ladybird :
+
+    CACHE_BALAYAGE scope=global t=370309 appels=22773
+                   entrees_parcourues=632406210 total_us=277127871 pire_us=45328
+                   candidats_suffisants=12722
+
+**277 secondes**, pour 632 millions d'entrees parcourues. `CPU_CUMUL` donne
+`replie_noyau_ms=490240` au meme instant : le balayage represente **57 % du
+temps noyau du run entier**.
+
+### Le mecanisme, verifie au chiffre pres
+
+`acquire` appelle `retire_un_candidat` a CHAQUE defaut de cache des que la
+table atteint `MAX_RECLAIMABLE_PAGES`. Quand la file de candidats est vide --
+le cas normal tant que les pages restent mappees -- le repli parcourt TOUTE la
+table en prenant le verrou d'etat de chaque entree, sous le verrou GLOBAL.
+
+Le modele « un balayage par defaut de cache une fois la table pleine » predit
+`miss - 16384` evictions :
+
+| charge | `miss` | attendu | observe | ecart |
+|---|---:|---:|---:|---:|
+| banc local 80 Mio | 20 480 | 4 096 | 4 096 | **0,0 %** |
+| Ladybird #357 | 52 534 | 36 150 | 35 495 | 1,8 % |
+
+### La correction, et pourquoi elle est sure
+
+`RECUPERABLES` compte les entrees recuperables, incremente et decremente par
+paires. **A zero, le balayage est garanti de ne rien trouver** : il ne fait que
+decouvrir lentement ce que le compteur dit deja. On sort avant.
+
+Ni la taille du cache, ni la politique d'eviction, ni l'ordre des victimes ne
+changent. On supprime un travail dont le resultat est connu d'avance.
+
+### Avant / apres, banc a 80 Mio, trois executions par bras
+
+| variante | duree_ms min/med/max | noyau_ms min/med/max | balayage |
+|---|---|---|---:|
+| avant | 53014 / **54422** / 55130 | 49722 / **51399** / 51842 | 31 384 ms |
+| apres | 21905 / **22607** / 22817 | 18677 / **19344** / 19565 | **0 ms** |
+
+Duree **-58 %**, temps noyau **-62 %** (-32 055 ms). Le balayage supprime vaut
+31 384 ms : le gain noyau le recoupe a 2 % pres.
+
+**Temoins IDENTIQUES dans les deux bras** : `entrees=20480`, `recuperees=0`.
+La table n'a pas deborde et aucune recuperation n'a ete perdue -- les
+balayages supprimes ne trouvaient effectivement rien. Sans ces deux temoins,
+« plus rapide » et « ne fait plus son travail » se confondraient.
+
+A noter : `entrees=20480` depasse `MAX_RECLAIMABLE_PAGES` dans les DEUX bras.
+Le plafond n'etait deja pas tenu avant la correction, faute d'entrees
+recuperables. La correction ne le degrade donc pas -- mais elle ne le repare
+pas non plus, et c'est une question ouverte distincte.
+
+Garde-fou : `tools/ci/verifie-balayage-cache.py`, trois tests negatifs (garde
+retiree, garde neutralisee, temoins retires).
+
+### Ce qui n'est PAS encore etabli
+
+Que les 277 s se retrouvent dans le demarrage du premier WebWorker. Le gain
+est mesure sur le banc ; sur Ladybird il reste a REMESURER. Le budget de
+30 000 ms ne bouge pas tant que la mesure n'a pas parle.
+
+### En passant : `SYSCALL_TEMPS` mesure de l'ECOULE, pas du CPU
+
+    poll  ecoule_ms=4002863  appels=10007  moyen_us=400006
+
+Quatre cents millisecondes par appel : `poll` BLOQUE, et la sonde compte son
+attente. Le total, 4 405 s sur un run de 387 s, n'est pas comparable a
+`sys_ms`. La ligne porte desormais `mesure=ecoule_inclut_blocage`.
+

@@ -341,6 +341,9 @@ pub static BALAYAGE_NS: AtomicU64 = AtomicU64::new(0);
 pub static BALAYAGE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 /// Combien de fois la file de candidats a suffi -- le chemin qui NE balaye pas.
 pub static CANDIDATS_SUFFISANTS: AtomicU64 = AtomicU64::new(0);
+/// Balayages SUPPRIMES parce que `RECUPERABLES` valait zero. C'est la mesure
+/// directe de la correction : sans elle, chacun aurait parcouru la table.
+pub static BALAYAGE_EVITES: AtomicU64 = AtomicU64::new(0);
 
 /// `appels, entrees_parcourues, total_ns, pire_ns, candidats_suffisants`
 pub fn balayage_stats() -> (u64, u64, u64, u64, u64) {
@@ -350,6 +353,19 @@ pub fn balayage_stats() -> (u64, u64, u64, u64, u64) {
         BALAYAGE_NS.load(Ordering::Relaxed),
         BALAYAGE_PIRE_NS.load(Ordering::Relaxed),
         CANDIDATS_SUFFISANTS.load(Ordering::Relaxed),
+    )
+}
+
+/// `balayages_evites, entrees_en_table, pages_recuperees`
+///
+/// Publies A COTE du temps de balayage : un balayage supprime ne doit pas
+/// faire deborder la table ni faire chuter les recuperations. Sans ces deux
+/// temoins, « plus rapide » et « ne fait plus son travail » se confondraient.
+pub fn balayage_temoins() -> (u64, usize, u64) {
+    (
+        BALAYAGE_EVITES.load(Ordering::Relaxed),
+        CACHE.lock().entrees.len(),
+        RECLAIMED.load(Ordering::Relaxed),
     )
 }
 
@@ -364,6 +380,41 @@ fn retire_un_candidat(cache: &mut Cache) -> Option<Arc<Entry>> {
             CANDIDATS_SUFFISANTS.fetch_add(1, Ordering::Relaxed);
             return cache.entrees.remove(&key);
         }
+    }
+    // BOUCHAUD_C70_NE_PAS_BALAYER_POUR_NE_RIEN_TROUVER
+    //
+    // CAUSE CONFIRMEE, et corrigee ici.
+    //
+    // `acquire` appelle cette fonction a CHAQUE defaut de cache des que la
+    // table atteint `MAX_RECLAIMABLE_PAGES`. Quand la file de candidats est
+    // vide -- ce qui est le cas normal tant que les pages restent mappees --
+    // le repli parcourait toute la table, en prenant le verrou d'etat de
+    // chaque entree, sous le verrou GLOBAL du cache.
+    //
+    // Le modele « un balayage par defaut de cache une fois la table pleine »
+    // se verifie au chiffre pres sur deux charges independantes :
+    //
+    //     banc local      20 480 miss - 16 384 = 4 096 attendus,  4 096 observes
+    //     Ladybird #357   52 534 miss - 16 384 = 36 150 attendus, 35 495 observes
+    //
+    // Cout mesure : 277 secondes sur le run 35955074619, soit 57 % des 490 s
+    // de temps noyau du run entier.
+    //
+    // # Pourquoi ce test suffit, et pourquoi il est SUR
+    //
+    // `RECUPERABLES` compte les entrees recuperables ; il est incremente et
+    // decremente par paires aux memes endroits que l'etat qu'il resume. A
+    // zero, le balayage est GARANTI de ne rien trouver -- il ne fait que
+    // decouvrir lentement ce que le compteur dit deja.
+    //
+    // On ne change donc ni la taille du cache, ni la politique d'eviction, ni
+    // l'ordre des victimes : on supprime un travail dont le resultat est
+    // connu d'avance. Si le compteur etait errone en MOINS, une eviction
+    // legitime serait sautee et la table depasserait son plafond ; c'est
+    // pourquoi le banc verifie aussi `entrees` et `RECLAIMED`.
+    if RECUPERABLES.load(Ordering::Relaxed) == 0 {
+        BALAYAGE_EVITES.fetch_add(1, Ordering::Relaxed);
+        return None;
     }
     let debut = crate::kernel::timer::monotonic_ns();
     let mut parcourues = 0u64;

@@ -84,6 +84,42 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
                 vue.user_ns / 1_000_000,
                 vue.system_ns / 1_000_000,
             ));
+            // BOUCHAUD_C70_DEUX_EMPLACEMENTS_POUR_DES_CAS_DISJOINTS
+            //
+            // Ces deux compteurs sont AUSSI publies par l'echantillonneur. Ce
+            // n'est pas un doublon : les deux emplacements couvrent des cas
+            // qui ne se recouvrent pas.
+            //
+            //   sous Ladybird   aucun service ne meurt pendant la fenetre
+            //                   mesuree -- seul l'echantillonneur parle
+            //   sur le banc     l'echantillonneur ne tourne qu'une fois, a
+            //                   ~2,9 s, AVANT les lancements -- seule la mort
+            //                   des processus parle
+            //
+            // Avoir mis les sondes au seul endroit qui convenait au banc m'a
+            // fait conclure « balayage refute » sur un `appels=0` qui ne
+            // disait rien. Le run 35955074619 a rendu `appels=22773` et 277 s.
+            let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
+                crate::kernel::clean_page_cache::balayage_stats();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "CACHE_BALAYAGE scope=global t={} appels={} entrees_parcourues={} \
+total_us={} pire_us={} candidats_suffisants={}",
+                crate::kernel::timer::monotonic_ms(),
+                bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
+            ));
+            let (evites, en_table, recuperees) =
+                crate::kernel::clean_page_cache::balayage_temoins();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "CACHE_BALAYAGE_TEMOINS scope=global evites={} entrees={} recuperees={}",
+                evites, en_table, recuperees,
+            ));
+            let (yields, pire_chaine, reprises, chaines) =
+                crate::kernel::task::fault_retry_cumul();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
+                crate::kernel::timer::monotonic_ms(),
+                yields, pire_chaine, reprises, chaines,
+            ));
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.

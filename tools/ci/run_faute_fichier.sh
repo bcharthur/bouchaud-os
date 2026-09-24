@@ -51,12 +51,19 @@ python3 - "$SORTIE/gros.bin" <<'PY'
 import sys
 # Motif deterministe de 5 Mio. Ni compressible par le systeme de fichiers, ni
 # aleatoire : deux executions doivent produire le meme binaire.
-taille = 5 * 1024 * 1024
+import os
+taille = int(os.environ.get("FAUTE_TAILLE_MIO", "5")) * 1024 * 1024
 with open(sys.argv[1], "wb") as f:
     f.write(bytes((i * 37 + (i >> 8) * 11) & 0xFF for i in range(taille)))
 PY
 
+# BOUCHAUD_C70 : au-dela de 64 Mio (MAX_RECLAIMABLE_PAGES x 4 Kio) le banc
+# atteint l'eviction du cache de pages. En deca il ne l'atteint JAMAIS, et un
+# `CACHE_BALAYAGE appels=0` n'y refute rien du tout.
+TAILLE_MIO=${FAUTE_TAILLE_MIO:-5}
+export FAUTE_TAILLE_MIO="$TAILLE_MIO"
 if ! (cd "$SORTIE" && "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles \
+        -DTAILLE_MIO="$TAILLE_MIO" \
         -Wl,-z,noexecstack -o "$SCENARIO/gros-elf" \
         "$OLDPWD/tools/userland/gros-elf.c") 2>"$SORTIE/cc.log"; then
     echo "faute fichier : la charge d'epreuve ne se compile pas" >&2
@@ -111,6 +118,11 @@ echo "== decomposition du chemin FichierPrive, dans le temps =="
 grep -o 'FAULT_FILE_BREAKDOWN.*' "$PROPRE" || echo "  (aucune)"
 echo
 grep -o 'FAULT_WAIT.*' "$PROPRE" | tail -3 || true
+echo
+echo "== eviction du cache de pages (BOUCHAUD_C70) =="
+grep -o 'CACHE_BALAYAGE scope.*' "$PROPRE" | tail -1 || echo "  (aucune)"
+grep -o 'CACHE_BALAYAGE_TEMOINS.*' "$PROPRE" | tail -1 || true
+grep -o 'CLEAN_PAGE_CACHE_GLOBAL.*' "$PROPRE" | tail -1 || true
 grep -o 'BACKING_DISK.*' "$PROPRE" | tail -3 || true
 grep -o 'BACKING_MEMORY.*' "$PROPRE" | tail -3 || true
 

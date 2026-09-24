@@ -206,6 +206,19 @@ sur le chemin noyau ont successivement innocenté :
 Le segment de 43,4 s longtemps attribué à l'ordonnanceur n'existait pas : il
 était mal borné.
 
+**Cause confirmée, et corrigée : le balayage de secours du cache de pages.**
+À chaque défaut de cache, dès que la table atteint son plafond de 16 384
+pages, le noyau parcourait **toute** la table en prenant le verrou d'état de
+chaque entrée, sous le verrou global — pour n'y rien trouver. Mesuré sous
+Ladybird : 22 773 balayages, 632 millions d'entrées parcourues, **277 s**,
+soit 57 % du temps noyau du run. Le modèle « un balayage par défaut de cache
+une fois la table pleine » se vérifie à 0,0 % près sur banc local et 1,8 % sur
+Ladybird. La correction sort quand le compteur d'entrées récupérables vaut
+zéro — le balayage est alors garanti de ne rien trouver. Banc à 80 Mio, trois
+exécutions par bras : durée **−58 %**, temps noyau **−62 %**, avec des témoins
+identiques (`entrees=20480`, `recuperees=0`) qui prouvent qu'aucune
+récupération n'a été perdue. Reste à remesurer sous Ladybird.
+
 **La mesure corrigée a inversé la conclusion.** Avec la frontière posée, le
 premier WebWorker mesure `user_ms=724` et `sys_ms=113594` : il passe 0,7 s en
 espace utilisateur et 113 s dans le noyau. `_dl_relocate_static_pie` s'exécute

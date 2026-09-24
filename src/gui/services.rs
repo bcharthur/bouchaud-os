@@ -461,6 +461,12 @@ pub fn releve_si_du() {
 total_us={} pire_us={} candidats_suffisants={}",
         maintenant, bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
     ));
+    let (evites, en_table, recuperees) =
+        crate::kernel::clean_page_cache::balayage_temoins();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "CACHE_BALAYAGE_TEMOINS scope=global evites={} entrees={} recuperees={}",
+        evites, en_table, recuperees,
+    ));
     let (yields, pire_chaine, reprises, chaines) = crate::kernel::task::fault_retry_cumul();
     crate::kernel::dmesg::log_fmt(format_args!(
         "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",

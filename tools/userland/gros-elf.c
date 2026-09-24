@@ -27,7 +27,22 @@ __asm__(
 );
 extern const unsigned char gros_bloc[];
 
-#define TAILLE (5 * 1024 * 1024)
+// BOUCHAUD_C70_ATTEINDRE_LE_CHEMIN_D_EVICTION
+//
+// La taille etait figee a 5 Mio. C'etait assez pour reproduire le contraste
+// froid/chaud des fautes fichier, et PAS assez pour atteindre l'eviction du
+// cache de pages : `MAX_RECLAIMABLE_PAGES` vaut 16 384 pages, soit 64 Mio.
+//
+// Consequence mesuree : le banc rendait `CACHE_BALAYAGE appels=0` et j'en ai
+// conclu que le balayage de secours etait hors de cause. Le run 35955074619 a
+// montre `appels=22773` et 277 SECONDES passees dedans. Le banc ne refutait
+// rien -- il n'atteignait simplement jamais ce chemin.
+//
+// `-DTAILLE_MIO=N` permet desormais de le depasser volontairement.
+#ifndef TAILLE_MIO
+#define TAILLE_MIO 5
+#endif
+#define TAILLE ((unsigned long)TAILLE_MIO * 1024 * 1024)
 #define PAGE 4096
 
 static long ecris(const char *s, unsigned long n) {

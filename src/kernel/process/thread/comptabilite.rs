@@ -328,6 +328,19 @@ pub fn account_resume_user_noreturn() {
 // bornes. Compter ici une duree jamais fermee serait pire que ne rien
 // compter.
 //
+// # CE QU'ELLE MESURE, ET CE QU'ELLE NE MESURE PAS
+//
+// Du temps ECOULE entre les deux bornes, pas du temps CPU. Un appel qui
+// BLOQUE -- `poll`, `futex`, `read` -- compte son attente. Le run
+// 35955074619 le montre sans ambiguite :
+//
+//     poll   ecoule_ms=4002863  appels=10007  moyen_us=400006
+//
+// Quatre cents millisecondes par appel, et 4405 secondes de total sur un run
+// de 387 secondes. Ce total n'est donc PAS comparable a `sys_ms`, et il ne
+// peut pas servir a attribuer du temps processeur. La ligne porte
+// `mesure=ecoule_inclut_blocage` pour qu'on ne s'y trompe pas.
+//
 // # Ce qu'elle coute
 //
 // Deux lectures d'horloge par appel systeme, en plus des deux que les bornes
@@ -362,7 +375,8 @@ pub fn publie_syscall_top(combien: usize) {
         total_n = total_n.saturating_add(SYSCALL_N[i].load(Ordering::Relaxed));
     }
     crate::kernel::dmesg::log_fmt(format_args!(
-        "SYSCALL_TEMPS scope=global t={} total_ms={} appels={} hors_table={}",
+        "SYSCALL_TEMPS scope=global mesure=ecoule_inclut_blocage t={} \
+ecoule_ms={} appels={} hors_table={}",
         crate::kernel::timer::monotonic_ms(),
         total_ns / 1_000_000,
         total_n,
@@ -386,7 +400,7 @@ pub fn publie_syscall_top(combien: usize) {
         let Some((i, ns)) = meilleur else { break };
         let n = SYSCALL_N[i].load(Ordering::Relaxed);
         crate::kernel::dmesg::log_fmt(format_args!(
-            "SYSCALL_TEMPS scope=global nr={} nom={} total_ms={} appels={} moyen_us={}",
+            "SYSCALL_TEMPS scope=global nr={} nom={} ecoule_ms={} appels={} moyen_us={}",
             i,
             crate::kernel::abi::nr::name(i as u64),
             ns / 1_000_000,
