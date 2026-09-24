@@ -327,6 +327,11 @@ extern "x86-interrupt" fn page_fault_handler(
     code: PageFaultErrorCode,
 ) {
     let _gs = GsGuard::enter(&stack);
+    // BOUCHAUD_C66 : tout ce qui suit est du temps NOYAU. Sans cette
+    // frontiere, l'attente d'une lecture ATA declenchee par une faute etait
+    // comptee comme du calcul utilisateur -- et faisait lire `user_ms=92250
+    // sys_ms=671` comme « limite par le CPU ». Voir `account_fault_enter`.
+    let mur_avant_faute = crate::kernel::task::account_fault_enter();
     let addr = x86_64::registers::control::Cr2::read();
     crate::platform::pc::ecran_faute::entre_exception(
         14, stack.instruction_pointer.as_u64(), code.bits(), Some(addr.as_u64()),
@@ -367,6 +372,7 @@ extern "x86-interrupt" fn page_fault_handler(
             // dire a chaque page peuplee a la demande.
             crate::kernel::task::retire_current_if_zombie();
             crate::platform::pc::ecran_faute::sort_exception_resolue();
+            crate::kernel::task::account_fault_exit(mur_avant_faute);
             return;
         }
 
@@ -381,6 +387,9 @@ extern "x86-interrupt" fn page_fault_handler(
             addr.as_u64(),
             code
         );
+        // Pas de `account_fault_exit` ici : `kill_faulting_task` ne rend pas
+        // la main. `install()` reecrira `COMPTA_EN_NOYAU` depuis le
+        // `in_kernel` de la tache entrante a la prochaine commutation.
         kill_faulting_task("faute de page", &stack);
     }
 

@@ -44,6 +44,46 @@ threads_before={} threads_after=0 reason=dernier_thread",
                 code,
                 threads_avant,
             ));
+            // BOUCHAUD_C66_LE_PARTAGE_UTILISATEUR_NOYAU_A_LA_MORT
+            //
+            // GLOBAL, ET DIT COMME TEL. Ce ne sont PAS les compteurs de ce
+            // processus : ce sont les cumuls de tous les CPU depuis le
+            // demarrage. Leur interet est la DIFFERENCE entre deux sorties
+            // consecutives, qui donne le partage utilisateur/noyau du travail
+            // fait entre les deux -- la meme methode que
+            // `analyse_faute_fichier.py` emploie deja pour les fautes.
+            //
+            // Cette ligne existe parce que `[PROC-STAT]` n'est emis que par
+            // l'echantillonneur du bureau : un scenario `autorun` sans bureau
+            // n'en produisait aucune, et le partage utilisateur/noyau y etait
+            // tout simplement invisible.
+            // DEUX LECTURES, ET ELLES NE MESURENT PAS LA MEME CHOSE.
+            //
+            // `replie_*` ne lit que `CUMUL_USER_NS`/`CUMUL_NOYAU_NS` : du
+            // temps deja impute, jamais revise. `vue_*` y ajoute la TRANCHE EN
+            // COURS de chaque tache vivante, attribuee selon son `in_kernel`.
+            //
+            // La difference n'est pas cosmetique. Une tache qui dort depuis
+            // longtemps sans avoir replie sa tranche porte un `live` enorme,
+            // et `vue_*` le verse d'un coup du cote ou son `in_kernel` pointe.
+            // Un releve de `vue_noyau_ms` peut donc bondir de plus d'une
+            // seconde en quarante millisecondes de temps reel -- ce qui est
+            // physiquement impossible et signale une attribution en vol, pas
+            // du travail.
+            //
+            // Publier les deux, c'est pouvoir dire laquelle des deux on lit.
+            let vue = crate::kernel::task::proc_cpu_cumul();
+            let (replie_user, replie_noyau) = crate::kernel::task::proc_cpu_compteurs();
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "CPU_CUMUL scope=global t={} apres_pid={} \
+replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
+                crate::kernel::timer::monotonic_ms(),
+                process.pid,
+                replie_user / 1_000_000,
+                replie_noyau / 1_000_000,
+                vue.user_ns / 1_000_000,
+                vue.system_ns / 1_000_000,
+            ));
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.

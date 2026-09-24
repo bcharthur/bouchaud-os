@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AVANT / APRES DE LIAISON, DANS LE MEME RUN.
 #
-# BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+# BOUCHAUD_C67_LA_TABLE_DE_RELOCATION_DU_DEMARRAGE
 #
 # Deux demarrages froids identiques, seul le WebWorker change :
 #
@@ -20,14 +20,14 @@ cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_variante_elf.sh BOOTIMAGE NATIVE_DIR}
 OUT=${2:?usage: run_variante_elf.sh BOOTIMAGE NATIVE_DIR}
 
-if [ ! -f "$OUT/WebWorker.etexec" ]; then
-    echo "variante : $OUT/WebWorker.etexec absent -- rien a comparer" >&2
-    echo "           l'etape « Variante ET_EXEC » a-t-elle reussi ?" >&2
+if [ ! -f "$OUT/WebWorker.relr" ]; then
+    echo "variante : $OUT/WebWorker.relr absent -- rien a comparer" >&2
+    echo "           l'etape « Variante RELR » a-t-elle reussi ?" >&2
     exit 1
 fi
 
 echo "== forme des deux ELF =="
-for f in WebWorker WebWorker.etexec; do
+for f in WebWorker WebWorker.relr; do
     printf '  %-20s ' "$f"
     printf 'type=%s bytes=%s relasz=%s relacount=%s\n' \
         "$(readelf -h "$OUT/$f" | awk '/Type:/ {print $2}')" \
@@ -41,7 +41,7 @@ done
 cp "$OUT/WebWorker" "$OUT/WebWorker.pie"
 
 echecs=0
-for bras in pie etexec; do
+for bras in pie relr; do
     echo
     echo "=== bras $bras (demarrage froid) ==="
     cp "$OUT/WebWorker.$bras" "$OUT/WebWorker"
@@ -68,7 +68,7 @@ cp "$OUT/WebWorker.pie" "$OUT/WebWorker"
 
 echo
 echo "== avant / apres =="
-python3 tools/ci/analyse_variante_elf.py "elf-pie.sortie" "elf-etexec.sortie" \
+python3 tools/ci/analyse_variante_elf.py "elf-pie.sortie" "elf-relr.sortie" \
     || echecs=$((echecs + 1))
 
 if [ "$echecs" -ne 0 ]; then

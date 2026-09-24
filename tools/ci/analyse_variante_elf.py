@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Avant / apres de liaison, sur les bornes qui comptent.
 
-BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+BOUCHAUD_C67_LA_TABLE_DE_RELOCATION_DU_DEMARRAGE
 
 La cible est `execve fin -> main`, mesuree a ~92 s sur les deux bras du banc
 d'ordre du run 35912027322 -- donc independante de l'origine du script.
 
 Un `-static-pie` glibc applique ses relocations dans `_dl_relocate_static_pie`
-AVANT `main`. Un `ET_EXEC` n'en a aucune. Si l'hypothese est juste, ce segment
-doit s'effondrer et les autres ne pas bouger.
+AVANT `main`. Le bras RELR encode les memes relocations dans un champ de bits
+`DT_RELR` : il supprime le PARCOURS de la table (9,7 Mio de `.rela.dyn`) et
+garde les 405 396 ECRITURES. Le banc separe donc deux couts qu'on confondait.
+
+Si `exec_fin -> main` s'effondre, le cout etait la lecture de la table, donc
+des fautes de page. S'il ne bouge pas, ce sont les ecritures.
+
+La variante ET_EXEC, qui aurait supprime les deux, est REFUTEE : avec la glibc
+statique, lier a 0x400000000000 echoue (`R_X86_64_PLT32` tronque contre les
+symboles faibles indefinis de `libc.a`). Le detail est dans
+`tools/ladybird/prepare-browser-runtime-link.py`.
 
 Fail-closed : sans les bornes des deux bras, on ne conclut pas.
 """
@@ -59,11 +68,11 @@ SEGMENTS = [
 
 def main():
     if len(sys.argv) < 3:
-        print("usage: analyse_variante_elf.py <bras-pie> <bras-etexec>",
+        print("usage: analyse_variante_elf.py <bras-pie> <bras-relr>",
               file=sys.stderr)
         return 2
     bras = {}
-    for nom, chemin in (("PIE", sys.argv[1]), ("ET_EXEC", sys.argv[2])):
+    for nom, chemin in (("PIE", sys.argv[1]), ("RELR", sys.argv[2])):
         b, err = bornes(chemin)
         if err:
             print(f"variante : {nom} : {err}", file=sys.stderr)
@@ -77,26 +86,26 @@ def main():
             return 1
         bras[nom] = b
 
-    print(f"  {'segment':<30} {'PIE (ms)':>12} {'ET_EXEC (ms)':>14} {'delta':>12}")
+    print(f"  {'segment':<30} {'PIE (ms)':>12} {'RELR (ms)':>14} {'delta':>12}")
     dominant = None
     for libelle, debut, fin in SEGMENTS:
         vals = {}
-        for nom in ("PIE", "ET_EXEC"):
+        for nom in ("PIE", "RELR"):
             b = bras[nom]
             vals[nom] = (b[fin] - b[debut]) if (debut in b and fin in b) else None
-        if vals["PIE"] is None or vals["ET_EXEC"] is None:
+        if vals["PIE"] is None or vals["RELR"] is None:
             print(f"  {libelle:<30} {'-':>12} {'-':>14} {'-':>12}")
             continue
-        delta = vals["ET_EXEC"] - vals["PIE"]
-        print(f"  {libelle:<30} {vals['PIE']:>12} {vals['ET_EXEC']:>14} {delta:>+12}")
+        delta = vals["RELR"] - vals["PIE"]
+        print(f"  {libelle:<30} {vals['PIE']:>12} {vals['RELR']:>14} {delta:>+12}")
         if libelle == "exec_fin -> main":
-            dominant = (vals["PIE"], vals["ET_EXEC"])
+            dominant = (vals["PIE"], vals["RELR"])
 
     print()
     for cle, libelle in (("cold_total_ms", "cold premier worker"),
                          ("warm_max_ms", "pire worker chaud")):
         a = bras["PIE"].get(cle)
-        b = bras["ET_EXEC"].get(cle)
+        b = bras["RELR"].get(cle)
         if a is None or b is None:
             print(f"  {libelle:<24} {'-':>12} {'-':>14}")
         else:

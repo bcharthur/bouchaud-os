@@ -215,20 +215,81 @@ pub fn account_kernel_exit() {
     frontiere_compta(false);
 }
 
+// BOUCHAUD_C66_LE_TEMPS_DE_FAUTE_ETAIT_COMPTE_EN_UTILISATEUR
+//
+// `account_kernel_enter` / `account_kernel_exit` n'etaient appelees QUE depuis
+// `usermode.rs`, autour du corps d'un appel systeme. Le gestionnaire de faute
+// de page n'en contenait aucune. Tout ce qu'il fait -- allouer une trame,
+// attendre le cache de pages, DECLENCHER ET ATTENDRE UNE LECTURE ATA, recopier
+// la page, poser la traduction -- se deroulait donc avec `COMPTA_EN_NOYAU`
+// reste a `false`, et tombait dans `user_ns`.
+//
+// Consequence directe sur la campagne de mesure en cours : le releve
+//
+//     user_ms=92250 sys_ms=671
+//
+// avait ete lu comme « ce segment est limite par le CPU en espace utilisateur,
+// donc ce n'est pas de l'attente disque ». Cette lecture ne tenait pas : la
+// seule chose que `sys_ms` mesurait, c'etait le corps des appels systeme. Une
+// attente de lecture de plusieurs secondes dans une faute de page apparaissait
+// comme du calcul utilisateur.
+//
+// # Pourquoi une SAUVEGARDE, et pas `account_kernel_enter`
+//
+// Une faute peut survenir alors qu'on est deja du cote noyau. Poser `true` a
+// l'entree puis `false` a la sortie ferait basculer le CPU du mauvais cote
+// pour tout le reste de l'appel systeme englobant. Ces deux fonctions rendent
+// donc l'etat PRECEDENT et le restaurent, au lieu d'ecrire une valeur absolue.
+//
+// # Pourquoi pas une garde RAII
+//
+// Le gestionnaire de faute se termine parfois sans retourner : `kill_faulting_
+// task` et `releve_faute_fatale` ne rendent pas la main. Une garde `Drop` n'y
+// serait jamais executee -- c'est exactement le defaut qui avait corrompu la
+// comptabilite des domaines du gros verrou sur les chemins sans retour de
+// `sys_execve`. On pose donc un couple entrer/sortir explicite.
+//
+// Et si l'on sort quand meme sans restaurer, sur un chemin de mort : la tache
+// est tuee, et `install()` reecrit `COMPTA_EN_NOYAU` depuis le `in_kernel` de
+// la tache entrante au prochain changement de contexte. L'etat se repare de
+// lui-meme a la premiere commutation ; il ne peut pas rester faux durablement.
+
+/// Le cote du mur user/noyau tel qu'il etait AVANT la faute.
+///
+/// `#[must_use]` : oublier de le rendre a `account_fault_exit` laisserait le
+/// CPU marque « en noyau » pour la suite de la tranche.
+#[must_use = "a rendre a account_fault_exit, sinon le mur user/noyau reste fausse"]
+pub struct MurAvantFaute(bool);
+
+/// Entre dans le gestionnaire de faute : le temps qui suit est du temps noyau.
+pub fn account_fault_enter() -> MurAvantFaute {
+    MurAvantFaute(frontiere_compta(true))
+}
+
+/// Sort du gestionnaire de faute et rend au CPU le cote qu'il avait avant.
+pub fn account_fault_exit(avant: MurAvantFaute) {
+    frontiere_compta(avant.0);
+}
+
 /// Ferme le fragment en cours et ouvre le suivant, du cote demande.
 ///
 /// Les interruptions sont coupees : sans cela, le numero de CPU pourrait etre
 /// lu ici et les compteurs mis a jour la-bas, apres une migration. C'est le
 /// meme raisonnement que pour `identite_courante`, et c'est tout ce qu'il faut
 /// -- aucun autre CPU n'ecrit dans notre case.
-fn frontiere_compta(vers_noyau: bool) {
+///
+/// Rend le cote sur lequel on se trouvait AVANT l'appel. Les frontieres
+/// d'appel systeme l'ignorent -- elles savent de quel cote elles vont. Les
+/// fautes de page s'en servent pour restaurer au lieu d'ecraser.
+fn frontiere_compta(vers_noyau: bool) -> bool {
     interrupts::without_interrupts(|| {
         let cpu = local_cpu();
         let now = crate::kernel::timer::monotonic_ns();
         let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+        let avant = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
         if debut != 0 {
             let ecoule = now.saturating_sub(debut);
-            if COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed) {
+            if avant {
                 COMPTA_NOYAU_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
             } else {
                 COMPTA_USER_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
@@ -236,7 +297,8 @@ fn frontiere_compta(vers_noyau: bool) {
             COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
         }
         COMPTA_EN_NOYAU[cpu].store(vers_noyau, Ordering::Relaxed);
-    });
+        avant
+    })
 }
 
 pub fn account_resume_user_noreturn() {

@@ -49,12 +49,11 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 
 # ============================================================================
-# BOUCHAUD_C65_STATIC_PIE_OU_ET_EXEC
+# BOUCHAUD_C67_LA_TABLE_DE_RELOCATION_DU_DEMARRAGE
 # ============================================================================
 #
 # Un `-static-pie` glibc se relocalise LUI-MEME avant le demarrage normal de
-# la libc, dans `_dl_relocate_static_pie`, et cela se produit AVANT `main` --
-# donc dans l'intervalle qu'on cherche a expliquer.
+# la libc, dans `_dl_relocate_static_pie`, donc AVANT `main`.
 #
 # L'ELF de WebWorker mesure sur le run 35912027322 :
 #
@@ -62,40 +61,72 @@ def replace_once(path: Path, old: str, new: str) -> None:
 #     .rela.dyn           9 731 304 octets
 #     RELACOUNT             405 396 relocations R_X86_64_RELATIVE
 #
-# Quatre cent mille relocations a appliquer avant la premiere ligne de code
-# utile. L'hypothese est forte ; elle n'est PAS confirmee tant qu'un avant /
-# apres ne l'a pas montree.
+# ## CE QUI A ETE REFUTE : la variante ET_EXEC
 #
-# `BOUCHAUD_HELPER_ET_EXEC=1` lie les aides en statique NON-PIE, ce qui
-# supprime entierement cette phase : un `ET_EXEC` n'a pas de relocation de
-# demarrage.
+# Un `ET_EXEC` n'a aucune relocation de demarrage, et supprimer la phase est
+# une falsification bien plus propre que l'optimiser. Cette voie est FERMEE, et
+# il faut dire pourquoi, parce que le commentaire qui occupait cette place
+# affirmait le contraire.
 #
-# ## Pourquoi l'adresse explicite
+# Il affirmait : « verifie sur un micro-binaire : lie a 0x400000000000 il
+# s'execute ». C'etait vrai, et cela ne prouvait rien : le micro-binaire etait
+# lie en `-nostdlib`. Il montrait que le CHARGEUR de Bouchaud accepte cette
+# adresse, pas que la glibc peut y etre liee.
 #
-# Un `ET_EXEC` impose ses adresses, et celles de Linux (0x400000) tombent hors
-# de la fenetre utilisateur de Bouchaud. Le noyau le dit lui-meme :
+# Avec la glibc statique, l'edition de liens ECHOUE. Mesure localement, gcc 13
+# et binutils d'Ubuntu, `-static -no-pie -Wl,-Ttext-segment=0x400000000000` :
 #
-#     segment hors du creneau utilisateur
-#     (relier en PIE ou avec -Ttext-segment=0x400000000000)
+#     crt1.o: in function `_start':
+#     failed to convert GOTPCREL relocation against 'main'; relink with --no-relax
 #
-# Verifie sur un micro-binaire : lie a 0x401000 il ne demarre pas ; lie a
-# 0x400000000000 il s'execute, en meme temps qu'un static-PIE identique qui
-# sert de temoin. Le creneau laisse un gibioctet avant `INTERP_OFFSET`, soit
-# cinq fois la taille du binaire.
+# et en ajoutant `--no-relax` comme l'editeur de liens le demande :
 #
-# ## Ce que cela COUTE, et qui doit etre dit
+#     libc.a(printf_buffer_flush.o): relocation truncated to fit:
+#     R_X86_64_PLT32 against undefined symbol `__printf_buffer_flush_obstack'
+#     libgcc_eh.a(unwind-dw2-fde-dip.o): relocation truncated to fit:
+#     R_X86_64_PLT32 against undefined symbol `pthread_cond_wait'
 #
-# Un `ET_EXEC` n'est pas relocalisable : plus d'ASLR pour ces aides. Ce n'est
-# donc PAS une optimisation gratuite. Le defaut reste `-static-pie` tant que
-# la mesure n'a pas tranche, et ce mode existe d'abord comme EXPERIENCE.
-ET_EXEC = os.environ.get("BOUCHAUD_HELPER_ET_EXEC", "0") == "1"
+# Le mecanisme est structurel, pas un reglage de drapeaux : la glibc statique
+# reference des symboles faibles indefinis, qui se resolvent a l'adresse zero.
+# Un deplacement relatif de 0x400000000000 vers 0 ne tient pas dans les
+# trente-deux bits d'un `R_X86_64_PLT32`. Un `-static-pie` y echappe parce
+# qu'il est LIE a la base zero -- c'est le chargement, pas l'edition de liens,
+# qui le deplace. Aucun choix d'adresse haute ne contourne cela.
+#
+# ## CE QUI REMPLACE : RELR
+#
+# `-Wl,-z,pack-relative-relocs` encode les relocations RELATIVE dans un champ
+# de bits `DT_RELR` au lieu d'entrees `Elf64_Rela` de vingt-quatre octets.
+# Mesure localement sur un temoin de vingt mille pointeurs :
+#
+#     defaut   RELASZ = 26 280 octets, RELACOUNT = 1 095
+#     relr     RELASZ = 0, RELRSZ = 288 octets, RELRENT = 8
+#
+# Quatre-vingt-onze fois moins, et les deux binaires s'executent. Extrapole a
+# WebWorker, les 9,7 Mio de `.rela.dyn` tomberaient sous la centaine de kio.
+#
+# ## CE QUE RELR NE FAIT PAS, ET IL FAUT LE DIRE
+#
+# RELR reduit ce qu'il faut LIRE, pas ce qu'il faut ECRIRE : les 405 396
+# ecritures restent. L'experience discrimine donc entre deux couts qu'on
+# confondait -- le parcours de la table et l'application des relocations. Si le
+# temps ne bouge pas, ce sont les ecritures ; s'il s'effondre, c'etait la
+# lecture de la table, c'est-a-dire des fautes de page sur 9,7 Mio.
+#
+# Contrairement a ET_EXEC, RELR conserve la relocalisation, donc l'ASLR.
+#
+# ## QUAND LA LANCER
+#
+# PAS AVANT d'avoir un partage utilisateur/noyau honnete du segment
+# `exec_fin -> main`. Le releve `user_ms=92250 sys_ms=671` qui a motive toute
+# cette piste etait fausse : le temps du gestionnaire de faute de page tombait
+# dans `user_ns` (voir BOUCHAUD_C66). Tant que ce partage n'est pas remesure,
+# rien ne dit que le cout est en espace utilisateur.
+RELR = os.environ.get("BOUCHAUD_HELPER_RELR", "0") == "1"
 
-# `user_slot_base()` du noyau, tel que son propre message d'erreur le donne.
-BASE_TEXTE_BOUCHAUD = "0x400000000000"
-
-if ET_EXEC:
+if RELR:
     OPTIONS_LIEN = (
-        f"-static -no-pie LINKER:-Ttext-segment={BASE_TEXTE_BOUCHAUD} "
+        "-static-pie LINKER:-z,pack-relative-relocs "
         "LINKER:--allow-multiple-definition"
     )
 else:

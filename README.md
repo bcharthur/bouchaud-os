@@ -200,11 +200,32 @@ sur le chemin noyau ont successivement innocenté :
 | `fork` | 28 ms | hors de cause |
 | `fork` → `execve` | 8 ms | hors de cause |
 | `execve` | 22 ms | hors de cause |
-| `exec` → `main` | ~94 s, dont ~93 s de CPU | **le poste réel** |
+| `exec` → `main` | ~94 s | **le poste réel** |
 | fautes fichier dans ce segment | ~10 s | 11 %, pas la cause |
 
 Le segment de 43,4 s longtemps attribué à l'ordonnanceur n'existait pas : il
-était mal borné. Le premier worker n'attend pas — il calcule.
+était mal borné.
+
+**Une conclusion a été retirée, parce que l'instrument était faux.** Ce
+tableau portait « dont ~93 s de CPU » et la phrase « le premier worker
+n'attend pas, il calcule ». Les deux venaient d'un relevé `user_ms=92250
+sys_ms=671`. Or les frontières de comptabilité n'existaient qu'autour des
+appels système : le gestionnaire de faute de page n'en avait aucune, et tout
+ce qu'il fait — y compris **déclencher et attendre une lecture ATA** —
+tombait dans `user_ns`. Mesuré sur banc local, trois exécutions par variante,
+la frontière posée déplace 94 % du « temps utilisateur » vers le noyau
+(1320 ms → 61 ms côté utilisateur, 14 ms → 1204 ms côté noyau, total
+conservé). Rien n'est devenu plus rapide : l'étiquette était fausse. Le
+partage réel du segment `exec` → `main` demande un nouveau run, et la piste
+des relocations de démarrage perd l'argument qui la soutenait.
+
+Dans la foulée, la variante ET_EXEC qui devait falsifier cette piste s'est
+révélée **impossible à lier** : la glibc statique référence des symboles
+faibles indéfinis résolus à l'adresse zéro, et un `R_X86_64_PLT32` ne peut pas
+porter le déplacement depuis `0x400000000000`. Le micro-binaire qui semblait
+la valider était lié en `-nostdlib`. Elle est remplacée par une variante RELR
+(`-z pack-relative-relocs`), vérifiée localement : 26 280 octets de table
+deviennent 288, l'ASLR est conservée.
 
 **L'outillage de mesure est lui-même sous test.** Décomposition des fautes de
 page attribuée par PID et non globalement, avec test de chevauchement de deux
@@ -215,8 +236,9 @@ garde-fou a été mis en échec volontairement avant d'être retenu.
 
 **Ce qui reste ouvert** est documenté dans
 [docs/MESURE_DEMARRAGE_A_FROID.md](docs/MESURE_DEMARRAGE_A_FROID.md) :
-la décomposition des ~94 s de CPU avant `main`, et le coût propre de
-l'instrumentation à forte charge de fautes.
+la décomposition des ~94 s avant `main` avec un partage utilisateur/noyau
+désormais honnête, et le coût propre de l'instrumentation à forte charge de
+fautes.
 
 ## Roadmap multiplateforme
 

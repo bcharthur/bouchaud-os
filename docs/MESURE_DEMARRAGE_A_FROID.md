@@ -194,11 +194,112 @@ le premier service ne les touche.
 
 ## 7. Ce qui reste OUVERT
 
-- Les 43,4 s entre le retour du `fork` et le debut de l'`execve` du premier
-  worker (baseline #347) ne sont toujours pas decomposees. Aucune sonde ne
-  borne ce que fait l'enfant entre les deux.
+- ~~Les 43,4 s entre le retour du `fork` et le debut de l'`execve`~~ :
+  REFUTE. Ce segment etait mal borne et n'existe pas. Mesure : fork 28 ms,
+  fork -> exec 8 ms, execve 22 ms.
 - `first_user_instruction_ms` et `spawn_request_ms` ne sont pas instrumentes.
 - `unexplained_ms` vaut 78 % sur la decomposition du premier worker.
 - `HOST_IMAGES_OK codecs=11/11` n'est jamais atteint sous Ladybird alors qu'il
   l'est sous Chromium headless. Un codec echoue, ou la fenetre de mesure se
   ferme avant.
+
+## 8. Le partage utilisateur/noyau etait faux (BOUCHAUD_C66)
+
+**CAUSE CONFIRMEE, et c'est un defaut d'INSTRUMENT, pas de performance.**
+
+`account_kernel_enter` / `account_kernel_exit` n'etaient appelees que depuis
+`usermode.rs`, autour du corps d'un appel systeme. `exceptions.rs` n'en
+contenait aucune. Tout ce que fait le gestionnaire de faute de page --
+attendre le cache de pages, declencher et attendre une lecture ATA, recopier
+la page, poser la traduction -- se deroulait avec `COMPTA_EN_NOYAU` reste a
+`false`, et tombait donc dans `user_ns`.
+
+### Ce que cela a coute
+
+Le releve `user_ms=92250 sys_ms=671` du segment `exec_fin -> main` a ete lu
+comme « limite par le CPU en espace utilisateur, donc ce n'est pas de
+l'attente disque ». Cette lecture a oriente toute une campagne vers les
+relocations de demarrage de la glibc. Elle ne tenait pas : la seule chose que
+`sys_ms` mesurait, c'etait le corps des appels systeme.
+
+### La mesure
+
+Banc `run_faute_fichier.sh`, trois executions par variante, meme arbre, seule
+la frontiere de comptabilite change. Compteurs REPLIES (`CUMUL_*`, sans
+tranche en vol) ; `vue_*` et `replie_*` coincidaient sur les six releves, donc
+aucune attribution en vol ne contamine le resultat.
+
+| variante | `user_ms` min/med/max | `noyau_ms` min/med/max | total med |
+|----------|----------------------|------------------------|-----------|
+| avant    | 1319 / **1320** / 1322 | 13 / **14** / 14     | 1334 |
+| apres    | 56 / **61** / 74     | 1174 / **1204** / 1278 | 1260 |
+
+**94 % de ce qui etait appele « temps CPU utilisateur » etait du traitement de
+faute de page.** Le total est conserve : le temps a change d'etiquette, il n'a
+pas change de valeur. **Rien n'est devenu plus rapide.**
+
+### Ce que cela ne dit pas
+
+Cela ne dit PAS ou va le temps du segment `exec_fin -> main` de Ladybird. Cela
+dit que la mesure qui servait a le trancher ne le tranchait pas. Le partage
+honnete demande un nouveau run.
+
+Garde-fou : `tools/ci/verifie-compta-faute.py`, avec trois tests negatifs
+(frontiere retiree, sortie retiree, sortie qui ecrase au lieu de restaurer).
+
+## 9. La variante ET_EXEC est REFUTEE (BOUCHAUD_C67)
+
+L'experience devait supprimer entierement `_dl_relocate_static_pie` en liant
+WebWorker en statique non-PIE. Elle ne peut pas exister.
+
+Le commentaire qui la justifiait affirmait : « verifie sur un micro-binaire :
+lie a `0x400000000000` il s'execute ». C'etait vrai et cela ne prouvait rien :
+le micro-binaire etait lie en `-nostdlib`. Il montrait que le CHARGEUR de
+Bouchaud accepte cette adresse, pas que la glibc peut y etre liee.
+
+Mesure locale, gcc 13 / binutils Ubuntu :
+
+```
+$ gcc -static -no-pie -Wl,-Ttext-segment=0x400000000000 mini.c
+crt1.o: in function `_start':
+failed to convert GOTPCREL relocation against 'main'; relink with --no-relax
+
+$ ... -Wl,--no-relax
+libc.a(printf_buffer_flush.o): relocation truncated to fit:
+R_X86_64_PLT32 against undefined symbol `__printf_buffer_flush_obstack'
+libgcc_eh.a(unwind-dw2-fde-dip.o): relocation truncated to fit:
+R_X86_64_PLT32 against undefined symbol `pthread_cond_wait'
+```
+
+Le mecanisme est structurel : la glibc statique reference des symboles faibles
+indefinis qui se resolvent a l'adresse zero. Un deplacement relatif de
+`0x400000000000` vers `0` ne tient pas dans les trente-deux bits d'un
+`R_X86_64_PLT32`. Un `-static-pie` y echappe parce qu'il est LIE a la base
+zero : c'est le chargement, pas l'edition de liens, qui le deplace. Aucun
+choix d'adresse haute ne contourne cela.
+
+### Ce qui la remplace : RELR
+
+`-Wl,-z,pack-relative-relocs`. Temoin local de vingt mille pointeurs :
+
+| lien | `RELASZ` | `RELACOUNT` | `RELRSZ` |
+|------|---------:|------------:|---------:|
+| defaut | 26 280 | 1 095 | -- |
+| RELR   | 0      | --    | 288 |
+
+Quatre-vingt-onze fois moins, et les deux binaires s'executent. RELR conserve
+la relocalisation, donc l'ASLR -- contrairement a ET_EXEC.
+
+**Ce que RELR ne fait pas, et il faut le dire** : il reduit ce qu'il faut
+LIRE, pas ce qu'il faut ECRIRE. Les 405 396 ecritures restent. L'experience
+discrimine donc entre deux couts qu'on confondait : parcourir 9,7 Mio de table
+(donc des fautes de page) et appliquer les relocations.
+
+**Elle n'est pas lancee pour l'instant.** Elle n'a de sens qu'apres le partage
+utilisateur/noyau honnete de la section 8 : tant qu'il n'est pas remesure,
+rien ne dit que le cout est en espace utilisateur.
+
+Garde-fou : `tools/ci/verifie-bascule-relr.py` verifie la bascule sur un arbre
+Ladybird factice portant les motifs d'ancrage amont -- la boucle courte qui
+manquait au run 35920701144, ou une experience entiere a ete perdue sur un
+chemin de source suppose au lieu d'etre verifie.
