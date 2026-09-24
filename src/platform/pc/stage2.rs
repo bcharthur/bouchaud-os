@@ -490,6 +490,14 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // la fenetre INIT/SIPI qui a declenche la double faute Trigkey.
     crate::net::demarre_le_veilleur_de_lien();
     crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
+    // L'AUDITEUR PART ICI, ET APRES LE VEILLEUR.
+    //
+    // Il lit ce que le pilote publie ; le lancer avant que le pilote existe
+    // lui ferait poser ses temoins sur des zeros et croire, une seconde, a
+    // une machine muette. Comme le veilleur, il attend le cablage SMP : c'est
+    // une tache noyau recurrente, et la fenetre INIT/SIPI est celle qui a
+    // declenche la double faute Trigkey.
+    crate::kernel::lab::auditd::demarre();
     crate::kernel::services::etat("net.link", crate::kernel::services::Etat::Actif);
     crate::kernel::services::phase("sys.graphique");
 

@@ -15,7 +15,7 @@ use core::sync::atomic::{compiler_fence, AtomicBool, AtomicU32, AtomicU64, Order
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::anneau_rx as anneau;
-use crate::kernel::{dmesg, memory};
+use crate::kernel::{dmesg, lab, memory};
 
 pub const VENDOR_REALTEK: u16 = 0x10EC;
 pub const DEVICE_RTL8168: u16 = 0x8168;
@@ -1324,37 +1324,233 @@ unsafe fn moissonne_les_emissions() {
 /// apres.
 ///
 /// Deux lignes en tout pour une session : pas un journal par paquet.
-unsafe fn capture_le_bouclage(tour: u64, dernier_index: usize) {
-    if tour > 2 {
-        return;
+// ---------------------------------------------------------------------------
+// LA CAPTURE LAB : CE QUE LE MATERIEL VOIT, AU MOMENT OU IL LE VOIT
+// ---------------------------------------------------------------------------
+//
+// # Pourquoi ces captures ne passent plus par COM1
+//
+// La version precedente ecrivait tout dans `serial_println!`. Le releve
+// TRIGKEY dit ce que cela vaut sur cette machine :
+//
+// ```text
+// com1=bus-flottant  serial_bytes=0
+// ```
+//
+// Pas un octet. Les captures de bouclage de toute la campagne precedente ont
+// ete ecrites dans un port serie qui n'existe pas. Elles vont desormais dans
+// l'anneau LAB -- de la RAM, lisible par le shell, la boite noire, le
+// debugger distant et la telemetrie -- et la ligne serie reste en doublon,
+// gratuite la ou elle marche.
+//
+// # Ce que la capture doit prouver, et ne prouve pas
+//
+// Elle ne repare rien. Le releve physique montre un premier tour parfait puis
+// cent cinquante et une secondes de rien, avec `RxEnb` arme, `rx_missed=0` et
+// `isr_rx_ok` qui monte. La question ouverte est : que voit le MATERIEL ?
+// D'ou la relecture de `RxDescAddr` DANS LA PUCE plutot que la confiance en
+// `RX_RING_P`, la carte des soixante-quatre bits `OWN`, et les descripteurs
+// 63 et 0 avec leurs deux mots de statut et leur adresse DMA.
+//
+// `opts1_rendu()` repose deja `OWN | EOR | longueur` sur le dernier
+// descripteur. On ne touche donc PAS a `EOR` : on va voir si la puce est
+// d'accord.
+
+/// Les raisons possibles d'une capture. Passees en `arg1` de `RX_REGISTRES`.
+pub mod raison_capture {
+    pub const BOUCLAGE_AVANT: u64 = 1;
+    pub const BOUCLAGE_APRES: u64 = 2;
+    pub const SECOND_TOUR_ABSENT: u64 = 3;
+    pub const DMA_STALL: u64 = 4;
+    pub const INVARIANT: u64 = 5;
+    pub const DEMANDE: u64 = 6;
+}
+
+/// La carte des soixante-quatre bits `OWN`, un bit par descripteur.
+///
+/// Bit `i` a un : le MATERIEL possede le descripteur `i`. Le releve physique
+/// donne `desc_nic=64 desc_cpu=0`, soit `0xffff_ffff_ffff_ffff` -- et c'est
+/// precisement ce qui rend la panne muette : un anneau entierement rendu ne
+/// peut produire aucune erreur, aucun `RxMissed`, aucun bit de statut.
+unsafe fn carte_own() -> u64 {
+    let mut carte = 0u64;
+    for i in 0..N_RX.min(64) {
+        if desc_read32(RX_RING, i, 0) & DESC_OWN != 0 {
+            carte |= 1u64 << i;
+        }
     }
-    let desc63 = desc_read32(RX_RING, dernier_index, 0);
-    let desc0 = desc_read32(RX_RING, 0, 0);
-    let adresse0 = desc_read64(RX_RING, 0, 8);
-    crate::serial_println!(
-        "BOUCHAUD_NET_RTL8168_BOUCLAGE tour={} index={} desc_dernier_apres={:#010x} \
+    carte
+}
+
+/// Un descripteur, tel qu'il est en memoire : `opts1`, `opts2`, adresse DMA.
+unsafe fn emet_descripteur(index: usize) {
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RX_DESC,
+        [
+            index as u64,
+            desc_read32(RX_RING, index, 0) as u64,
+            desc_read32(RX_RING, index, 4) as u64,
+            desc_read64(RX_RING, index, 8),
+        ],
+    );
+}
+
+/// LA CAPTURE COMPLETE. Registres, descripteurs, adresses, energie.
+///
+/// Sans allocation et sans verrou : elle est appelable depuis le drainage
+/// verrouille comme depuis l'auditeur.
+pub fn capture_lab(raison: u64) {
+    unsafe {
+        if !READY {
+            return;
+        }
+        // 1. Les registres que la panne met en cause.
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_REGISTRES,
+            [
+                read8(REG_CHIP_CMD) as u64,
+                read16(REG_INTR_STATUS) as u64,
+                read32(REG_RX_CONFIG) as u64,
+                read16(REG_CPLUS_CMD) as u64,
+            ],
+        );
+
+        // 2. Qui possede quoi, sur les soixante-quatre descripteurs.
+        let recensement = anneau::recense(N_RX, |i| desc_read32(RX_RING, i, 0));
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_OWN_MAP,
+            [
+                carte_own(),
+                recensement.materiel as u64,
+                recensement.processeur as u64,
+                RX_CUR as u64,
+            ],
+        );
+
+        // 3. LES DEUX DESCRIPTEURS DE LA CHARNIERE. Le 63 porte `EOR`, le 0
+        //    est celui que le materiel doit reprendre au second tour. La
+        //    panne vit entre les deux.
+        emet_descripteur(N_RX - 1);
+        emet_descripteur(0);
+        if RX_CUR != 0 && RX_CUR != N_RX - 1 {
+            emet_descripteur(RX_CUR);
+        }
+
+        // 4. L'ADRESSE, RELUE DANS LA PUCE ET NON SUPPOSEE.
+        //
+        // `RX_RING_P` est ce que NOUS avons ecrit. Ce qui compte est ce que la
+        // carte a garde : un registre reecrit par une reprise, une
+        // reinitialisation partielle ou une economie d'energie s'y verrait, et
+        // nulle part ailleurs.
+        let relu = (read32(REG_RX_DESC_LOW) as u64)
+            | ((read32(REG_RX_DESC_HIGH) as u64) << 32);
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_DESC_ADDR_RELU,
+            [relu, RX_RING_P, (relu == RX_RING_P) as u64, raison],
+        );
+
+        // 5. LES ECONOMIES D'ENERGIE. ASPM et CLKREQ laissent le lien PCIe
+        //    descendre en L1 : le MAC continue de lever `RxOK` -- il a ses
+        //    propres tampons -- pendant que son moteur DMA ne peut plus
+        //    atteindre la memoire de l'hote. C'est EXACTEMENT la signature du
+        //    releve, et c'est pourquoi on les relit a chaque capture plutot
+        //    que de croire qu'elles sont restees coupees.
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_ENERGIE,
+            [
+                read8(REG_CONFIG2) as u64,
+                read8(REG_CONFIG5) as u64,
+                read32(REG_MISC) as u64,
+                1,
+            ],
+        );
+
+        // 6. Ou en est la circulation de l'anneau.
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_PROGRES,
+            [
+                RX_PAQUETS.load(Ordering::Relaxed),
+                RX_RENDUS_TOUR1.load(Ordering::Relaxed),
+                RX_RENDUS_TOUR2.load(Ordering::Relaxed),
+                RX_TOURS_CPU.load(Ordering::Relaxed),
+            ],
+        );
+    }
+}
+
+/// Le bouclage `63 -> 0`, cote processeur : AVANT que `RX_CUR` ne reparte.
+unsafe fn capture_le_bouclage(tour: u64, dernier_index: usize) {
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RING_WRAP_BEFORE,
+        [
+            RX_CUR as u64,
+            RX_PAQUETS.load(Ordering::Relaxed),
+            desc_read32(RX_RING, dernier_index, 0) as u64,
+            desc_read32(RX_RING, 0, 0) as u64,
+        ],
+    );
+    // LES DEUX PREMIERS TOURS SEULEMENT pour la capture complete. Un anneau
+    // qui circule boucle des centaines de fois par seconde sous charge, et
+    // soixante-dix evenements par tour noieraient tout le reste. Le releve
+    // physique n'en a jamais eu qu'un seul a montrer.
+    if tour <= 2 {
+        capture_lab(raison_capture::BOUCLAGE_AVANT);
+        crate::serial_println!(
+            "BOUCHAUD_NET_RTL8168_BOUCLAGE tour={} index={} desc_dernier={:#010x} \
 desc0={:#010x} desc0_dma={:#018x} anneau_dma={:#018x} \
 rx_desc_low={:#010x} rx_desc_high={:#010x} chip_cmd={:#04x} rx_config={:#010x} \
 cplus_cmd={:#06x} intr_status={:#06x} intr_mask={:#06x} rx_missed={} rx_max={} \
 rx_paquets={} own_rendus={}",
-        tour,
-        dernier_index,
-        desc63,
-        desc0,
-        adresse0,
-        RX_RING_P,
-        read32(REG_RX_DESC_LOW),
-        read32(REG_RX_DESC_HIGH),
-        read8(REG_CHIP_CMD),
-        read32(REG_RX_CONFIG),
-        read16(REG_CPLUS_CMD),
-        read16(REG_INTR_STATUS),
-        read16(REG_INTR_MASK),
-        read32(REG_RX_MISSED),
-        read16(REG_RX_MAX_SIZE),
-        RX_PAQUETS.load(Ordering::Relaxed),
-        RX_OWN_RENDUS.load(Ordering::Relaxed),
+            tour,
+            dernier_index,
+            desc_read32(RX_RING, dernier_index, 0),
+            desc_read32(RX_RING, 0, 0),
+            desc_read64(RX_RING, 0, 8),
+            RX_RING_P,
+            read32(REG_RX_DESC_LOW),
+            read32(REG_RX_DESC_HIGH),
+            read8(REG_CHIP_CMD),
+            read32(REG_RX_CONFIG),
+            read16(REG_CPLUS_CMD),
+            read16(REG_INTR_STATUS),
+            read16(REG_INTR_MASK),
+            read32(REG_RX_MISSED),
+            read16(REG_RX_MAX_SIZE),
+            RX_PAQUETS.load(Ordering::Relaxed),
+            RX_OWN_RENDUS.load(Ordering::Relaxed),
+        );
+    }
+}
+
+/// Le meme bouclage, APRES que `RX_CUR` soit revenu a zero.
+///
+/// # Pourquoi deux captures pour un seul instant
+///
+/// Entre les deux, une seule chose change de notre cote : le curseur
+/// logiciel. Si un registre materiel, un bit `OWN` ou l'adresse relue bouge
+/// entre « avant » et « apres », ce n'est PAS nous qui l'avons fait -- et
+/// c'est exactement le genre de fait qui manque pour nommer la panne.
+unsafe fn capture_apres_bouclage(tour: u64, dernier_index: usize) {
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RING_WRAP_AFTER,
+        [
+            RX_CUR as u64,
+            RX_PAQUETS.load(Ordering::Relaxed),
+            desc_read32(RX_RING, dernier_index, 0) as u64,
+            desc_read32(RX_RING, 0, 0) as u64,
+        ],
     );
+    if tour <= 2 {
+        capture_lab(raison_capture::BOUCLAGE_APRES);
+    }
 }
 
 /// `RxOK` A-T-IL PROGRESSE SANS QUE LA RECEPTION PROGRESSE ?
@@ -1905,8 +2101,11 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
                 // seulement ici, qu'un tour s'acheve.
                 let tour = RX_TOURS_CPU.fetch_add(1, Ordering::Relaxed) + 1;
                 capture_le_bouclage(tour, index);
+                RX_CUR = suivant;
+                capture_apres_bouclage(tour, index);
+            } else {
+                RX_CUR = suivant;
             }
-            RX_CUR = suivant;
 
             if let Some(n) = copied {
                 RX_PAQUETS.fetch_add(1, Ordering::Relaxed);

@@ -34,6 +34,8 @@
 //! descripteurs et les registres a l'instant du bouclage plutot qu'apres coup.
 
 pub mod anneau;
+pub mod auditd;
+pub mod auditeur;
 pub mod catalogue;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
