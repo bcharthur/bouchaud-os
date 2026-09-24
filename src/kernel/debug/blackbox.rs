@@ -1738,7 +1738,10 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
 
 /// Budget total d'un checkpoint. Tres inferieur a celui de l'extinction : il
 /// ne doit jamais se voir.
-const BUDGET_CHECKPOINT_NS: u64 = 1_500_000_000;
+// 4 s : mesure du banc -- 320 enregistrements demandaient ~1,4 s de vidage
+// plus la marque, et 1,5 s au total ne suffisait pas. Borne, et porte par un
+// fil de mesure qui dort entre ses tours.
+const BUDGET_CHECKPOINT_NS: u64 = 4_000_000_000;
 
 /// Budget propre de la synchronisation de cache.
 ///
@@ -1821,10 +1824,21 @@ duration_ms={} marker=0 sync=0",
         raison, bilan.seq, boot_id(), debut,
     );
 
+    // LA MARQUE EST POSEE D'ABORD, ET C'EST CE QUI REND LA CIBLE FIXE.
+    //
+    // Version precedente : vidanger, PUIS poser la marque. La production
+    // continue pendant le vidage, donc la marque arrivait derriere des
+    // enregistrements nes entre-temps -- une cible qui recule pendant qu'on
+    // l'approche. Le banc l'a rendu visible par intermittence :
+    //
+    //     records=320 duration_ms=1396 marker=0    -> archive sans CHECKPOINT
+    //     records=288 duration_ms=1362 marker=1    -> archive exploitable
+    //
+    // Posee EN PREMIER, la marque fixe la cible : tout ce qui la precede est
+    // ce qui existait au debut du checkpoint, un ensemble FINI. Ce qui nait
+    // ensuite appartient au checkpoint suivant, et c'est exactement la
+    // semantique qu'on veut.
     let echeance = debut.saturating_add(BUDGET_CHECKPOINT_NS);
-    let tour = vidange(echeance);
-    bilan.poses = tour.poses;
-
     let maintenant = now_ns();
     let etat = BOBINE.etat();
 
@@ -1846,7 +1860,7 @@ duration_ms={} marker=0 sync=0",
 dernier_confirme={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} \
 vidage_poses={}\n",
         raison, boot_id(), bilan.seq, maintenant, confirme_annonce,
-        etat.reserves, etat.poses, etat.ecrases, etat.perdus, tour.poses,
+        etat.reserves, etat.poses, etat.ecrases, etat.perdus, 0,
     );
     // LA MARQUE EST POSEE QUAND LE CURSEUR L'A DEPASSEE, ET PAS AVANT.
     //
@@ -1865,7 +1879,12 @@ vidage_poses={}\n",
     if append(KIND_MARKER, marque.as_bytes(), maintenant,
               crate::drivers::serial::trace_total_bytes()) {
         let seq_marque = BOBINE.dernier();
-        let echeance_marque = now_ns().saturating_add(BUDGET_MARQUE_CHECKPOINT_NS);
+        // UNE SEULE ECHEANCE, UNE SEULE CIBLE.
+        //
+        // `seq_marque` ne bouge plus : il est fige a la pose. Le vidage a donc
+        // un travail fini a faire, et l'echeance est la seule borne.
+        let echeance_marque = echeance.max(
+            now_ns().saturating_add(BUDGET_MARQUE_CHECKPOINT_NS));
         loop {
             let pose = vidange(echeance_marque);
             bilan.poses = bilan.poses.saturating_add(pose.poses);
