@@ -82,6 +82,8 @@ static AUTH_KO: AtomicU64 = AtomicU64::new(0);
 static COMMANDES: AtomicU64 = AtomicU64::new(0);
 static REFUSEES: AtomicU64 = AtomicU64::new(0);
 static OCTETS_RENDUS: AtomicU64 = AtomicU64::new(0);
+/// Sessions dont le pair a ferme son sens RX.
+static FERMETURES_DISTANTES: AtomicU64 = AtomicU64::new(0);
 
 /// Le peripherique de la pile de diagnostic.
 ///
@@ -398,6 +400,17 @@ fn fil_brdp() -> ! {
     loop {
         iface.poll(maintenant(), &mut peripherique, &mut chaussettes);
         let sock = chaussettes.get_mut::<tcp::Socket>(poignee);
+
+        // Un FIN/RST distant peut laisser l'unique socket BRDP encore ouverte
+        // cote smoltcp (ex. CLOSE-WAIT). `is_open()` seul ne suffit donc pas
+        // pour recycler la session. Si plus rien ne peut etre recu, ferme
+        // notre cote et laisse la boucle revenir ensuite vers LISTEN.
+        if ouverte && !sock.may_recv() {
+            FERMETURES_DISTANTES.fetch_add(1, Ordering::Relaxed);
+            reste = 0;
+            session.fermer = false;
+            sock.close();
+        }
 
         if !sock.is_open() {
             if ouverte {

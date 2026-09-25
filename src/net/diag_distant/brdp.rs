@@ -120,6 +120,15 @@ pub enum Commande {
     ServicesSnapshot,
     ProcessesSnapshot,
     MemorySnapshot,
+    /// Lance la preuve Internet active asynchrone.
+    InternetProofStart,
+    /// Lit la progression de la preuve sans effet de bord.
+    InternetProofStatus,
+    // BOUCHAUD_HOTFIX11_SERIAL_BRDP
+    /// Bornes du journal serie RAM.
+    SerialStatus,
+    /// Lecture bornee d'une tranche encore presente dans l'anneau serie.
+    SerialRead { start: u64, combien: u16 },
     Quit,
 }
 
@@ -144,7 +153,12 @@ impl Commande {
             Commande::ServicesSnapshot => 15,
             Commande::ProcessesSnapshot => 16,
             Commande::MemorySnapshot => 17,
+            // BOUCHAUD_HOTFIX11_SERIAL_BRDP
+            Commande::SerialStatus => 90,
+            Commande::SerialRead { .. } => 91,
             Commande::Quit => 18,
+            Commande::InternetProofStart => 19,
+            Commande::InternetProofStatus => 20,
         }
     }
 
@@ -164,6 +178,11 @@ pub const DESCRIPTEURS_MAX: u16 = 64;
 /// Un client qui demanderait dix mille evenements ferait ecrire la machine
 /// pendant des secondes sur un canal que la panne rend deja fragile.
 pub const EVENTS_TAIL_MAX: u32 = 1024;
+// BOUCHAUD_HOTFIX11_SERIAL_BRDP
+/// Une reponse fait 4096 octets. L'hexadecimal double la charge utile:
+/// 1536 octets -> 3072 caracteres, avec une marge confortable pour le JSON.
+pub const SERIAL_READ_MAX: u16 = 1536;
+
 
 // ---------------------------------------------------------------------------
 // LE DECOUPAGE EN LIGNES
@@ -569,6 +588,30 @@ pub fn analyse(ligne: &[u8]) -> Result<Commande, Erreur> {
         b"services snapshot" => Ok(Commande::ServicesSnapshot),
         b"processes snapshot" => Ok(Commande::ProcessesSnapshot),
         b"memory snapshot" => Ok(Commande::MemorySnapshot),
+        // BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
+        b"internet proof start" => Ok(Commande::InternetProofStart),
+        b"internet proof status" => Ok(Commande::InternetProofStatus),
+        // BOUCHAUD_HOTFIX11_SERIAL_BRDP
+        b"serial status" => Ok(Commande::SerialStatus),
+        b"serial read" => {
+            let start = match lit_entier(ligne, "start") {
+                LectureEntier::Absent => return Err(Erreur::ArgumentManquant),
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            let combien = match lit_entier(ligne, "n") {
+                LectureEntier::Absent => return Err(Erreur::ArgumentManquant),
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            if combien == 0 || combien > SERIAL_READ_MAX as u64 {
+                return Err(Erreur::ArgumentInvalide);
+            }
+            Ok(Commande::SerialRead {
+                start,
+                combien: combien as u16,
+            })
+        }
         b"quit" => Ok(Commande::Quit),
         // PAS DE REPLI SUR UN SHELL. Une commande inconnue est refusee, et
         // c'est tout : il n'y a rien derriere la liste blanche.

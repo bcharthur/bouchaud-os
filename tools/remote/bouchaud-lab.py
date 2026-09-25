@@ -71,6 +71,11 @@ NONCE_LEN = 32
 DESCRIPTEURS_MAX = 64
 #: `brdp::EVENTS_TAIL_MAX`
 EVENTS_TAIL_MAX = 1024
+# HOTFIX11_SERIAL_CAPTURE
+SERIAL_READ_MAX = 1536
+SERIAL_STATUS_CODE = 90
+SERIAL_READ_CODE = 91
+
 
 #: `reponses::REPONSE_MAX` vaut 4096 ; le terminateur et un peu de marge
 #: au-dessus evitent de refuser une ligne que le serveur a le droit d'emettre.
@@ -163,7 +168,11 @@ COMMANDES = [
     Commande("services", "services snapshot", 15),
     Commande("processes", "processes snapshot", 16),
     Commande("memory", "memory snapshot", 17),
+    # HOTFIX11_SERIAL_CAPTURE
+    Commande("serial-status", "serial status", 90),
     Commande("quit", "quit", 18),
+    Commande("internet-start", "internet proof start", 19),
+    Commande("internet", "internet proof status", 20),
 ]
 
 PAR_NOM = {c.cli: c for c in COMMANDES}
@@ -421,6 +430,45 @@ class ClientBrdp:
             )
         return reponse
 
+
+    # HOTFIX11_SERIAL_CAPTURE
+    def serial_read(self, start: int, n: int) -> tuple[dict, bytes]:
+        "Lit une tranche bornee du journal serie RAM."
+        if not self.authentifiee:
+            raise ErreurAuth("commande envoyee avant authentification")
+        if start < 0:
+            raise ErreurLab("serial read: start negatif")
+        if not 1 <= n <= SERIAL_READ_MAX:
+            raise ErreurLab(
+                f"serial read demande entre 1 et {SERIAL_READ_MAX} octets, recu {n}"
+            )
+        self._envoie({"cmd": "serial read", "start": int(start), "n": int(n)})
+        reponse = self._lecteur.objet()
+        if not reponse.get("ok"):
+            raise ErreurCommande(
+                reponse.get("error", "inconnue"), reponse.get("code", 0)
+            )
+        if reponse.get("cmd") != SERIAL_READ_CODE:
+            raise ErreurProtocole(
+                f"reponse pour cmd={reponse.get('cmd')}, attendu cmd={SERIAL_READ_CODE}"
+            )
+        hexa = reponse.get("data_hex")
+        if not isinstance(hexa, str):
+            raise ErreurProtocole("serial read: data_hex absent")
+        try:
+            donnees = binascii.unhexlify(hexa)
+        except (binascii.Error, ValueError) as exc:
+            raise ErreurProtocole(f"serial read: hexadecimal invalide: {exc}") from exc
+        debut = reponse.get("start")
+        suivant = reponse.get("next")
+        if not isinstance(debut, int) or not isinstance(suivant, int):
+            raise ErreurProtocole("serial read: bornes absentes")
+        if suivant < debut or len(donnees) != suivant - debut:
+            raise ErreurProtocole(
+                "serial read: longueur incoherente avec start/next"
+            )
+        return reponse, donnees
+
     def evenements(self, tail: int | None = None, limite: int | None = None):
         """Demande le flux et rend les lignes au fur et a mesure.
 
@@ -538,13 +586,18 @@ def ecoute_telemetrie(port: int, duree: float | None, rappel,
 # LA MISE EN FORME
 # ---------------------------------------------------------------------------
 
+# BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
 #: Les compteurs que la campagne RTL8168 regarde, dans l'ordre ou on les lit.
 #: Aucun verdict n'est calcule ici : les deux criteres viennent du noyau.
 CHAMPS_RTL8168 = [
     "rx_packets", "rx_octets", "rx_cur", "desc_nic", "desc_cpu",
     "rx_tours_cpu", "rx_rendus_tour1", "rx_rendus_tour2",
     "rx_reutilises_tour2", "isr_rx_ok", "isr_rx_err",
-    "rx_ok_sans_progres", "repair_degre", "reinitialisations",
+    "rx_ok_sans_progres", "repair_degre", "repair_raison",
+    "repair_sans_preuve", "repair_preuves_consommees",
+    "repair_differee_pending", "repair_verdict_pending",
+    "reprises_differees", "reprises_sans_effet",
+    "reinitialisations", "reinitialisations_ok",
     "critere_rx_au_dela_de_64", "critere_tour2",
 ]
 
@@ -639,6 +692,7 @@ PLAN_DUMP = [
     ("services.json", "services", None),
     ("processes.json", "processes", None),
     ("memory.json", "memory", None),
+    ("internet-proof.json", "internet", None),
 ]
 
 
@@ -704,6 +758,20 @@ def fait_dump(args, jeton) -> int:
                     # ce qui precede est deja sur le disque.
                     break
 
+        # HOTFIX11_SERIAL_CAPTURE
+        try:
+            serial_meta = capture_serial_snapshot(
+                client, dossier / "serial-live.log", 512 * 1024
+            )
+            ecris("serial-live.json", serial_meta)
+            reussies.append("serial-capture")
+        except (ErreurLab, OSError) as exc:
+            ecris("serial-live.json", {
+                "ok": False,
+                "erreur_client": str(exc),
+            })
+            echouees.append("serial-capture")
+
         lignes = []
         try:
             for genre, objet in client.evenements(tail=args.events):
@@ -739,6 +807,81 @@ def fait_dump(args, jeton) -> int:
     for cle in ("critere_rx_au_dela_de_64", "critere_tour2"):
         print(f"  {cle} : {_valeur(metadonnees[cle])}")
     return 0 if not echouees else 2
+
+
+
+# HOTFIX11_SERIAL_CAPTURE
+def capture_serial_snapshot(client: ClientBrdp, fichier: Path,
+                            max_octets: int = 512 * 1024) -> dict:
+    "Capture une fenetre FIGEE du journal serie."
+    statut = client.commande("serial-status")
+    oldest = int(statut.get("oldest", 0))
+    end = int(statut.get("end", 0))
+    capacity = int(statut.get("capacity", 0))
+    if oldest < 0 or end < oldest:
+        raise ErreurProtocole("serial status: bornes invalides")
+    if max_octets < 0:
+        raise ErreurLab("--bytes doit etre positif ou nul")
+    start = oldest if max_octets == 0 else max(oldest, end - max_octets)
+    cursor = start
+    recus = 0
+    perdus = 0
+    morceaux = 0
+
+    fichier.parent.mkdir(parents=True, exist_ok=True)
+    with fichier.open("wb") as sortie:
+        while cursor < end:
+            n = min(SERIAL_READ_MAX, end - cursor)
+            reponse, donnees = client.serial_read(cursor, n)
+            reel = int(reponse["start"])
+            suivant = int(reponse["next"])
+            if reel < cursor:
+                raise ErreurProtocole("serial read: le serveur a recule le curseur")
+            if reel > cursor:
+                perdus += reel - cursor
+            if suivant <= reel and reel < end:
+                raise ErreurProtocole("serial read: aucun progres")
+            if reel >= end:
+                break
+            utile = min(len(donnees), end - reel)
+            sortie.write(donnees[:utile])
+            recus += utile
+            morceaux += 1
+            cursor = min(suivant, end)
+
+    return {
+        "oldest_at_snapshot": oldest,
+        "end_at_snapshot": end,
+        "capacity": capacity,
+        "requested_start": start,
+        "bytes_written": recus,
+        "bytes_lost_during_capture": perdus,
+        "chunks": morceaux,
+        "complete_window": perdus == 0 and start + recus == end,
+    }
+
+
+def fait_serial_capture(args, jeton) -> int:
+    quand = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sortie = Path(args.out) if args.out else (
+        racine_depot() / "target" / f"serial-live-{quand}.log"
+    )
+    with ClientBrdp(args.host, jeton, args.port, args.timeout) as client:
+        meta = capture_serial_snapshot(client, sortie, args.bytes)
+    meta_path = sortie.with_suffix(sortie.suffix + ".json")
+    meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    if args.json:
+        print(json.dumps({"file": str(sortie), "meta": meta}, indent=2,
+                         sort_keys=True))
+    else:
+        print(f"serial capture : {sortie}")
+        print(f"  bytes        : {meta['bytes_written']}")
+        print(f"  chunks       : {meta['chunks']}")
+        print(f"  lost         : {meta['bytes_lost_during_capture']}")
+        print(f"  complete     : {meta['complete_window']}")
+        print(f"  metadata     : {meta_path}")
+    return 0 if meta["complete_window"] else 2
 
 
 def fait_telemetrie(args) -> int:
@@ -867,10 +1010,14 @@ def construis_parseur() -> argparse.ArgumentParser:
         ("rtl8168", "rtl8168", CHAMPS_RTL8168, "RTL8168"),
         ("rtl8168-ring", "rtl8168-ring", None, "anneau RTL8168"),
         ("dhcp", "dhcp", None, "DHCP"),
+        ("serial-status", "serial-status", None, "journal serie RAM"),
         ("blackbox", "blackbox", None, "boite noire"),
         ("services", "services", None, "services"),
         ("processes", "processes", None, "processus"),
         ("memory", "memory", None, "memoire"),
+        # BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
+        ("internet", "internet", None, "preuve Internet (etat)"),
+        ("internet-start", "internet-start", None, "preuve Internet (lancer)"),
     ]
     for nom, cible, ordre, titre in SIMPLES:
         sp = avec_hote(sous.add_parser(nom, help=titre))
@@ -882,6 +1029,16 @@ def construis_parseur() -> argparse.ArgumentParser:
     sp.add_argument("index", type=int)
     sp.set_defaults(_faire=lambda a, j: fait_commande_simple(
         a, j, "rtl8168-desc", a.index, None, f"descripteur {a.index}"))
+
+    # HOTFIX11_SERIAL_CAPTURE
+    sp = avec_hote(sous.add_parser(
+        "serial-capture", help="capturer le journal serie RAM via BRDP"),
+        defaut_timeout=10.0)
+    sp.add_argument("--bytes", type=int, default=512 * 1024,
+                    help="octets les plus recents a capturer; 0 = tout l'anneau")
+    sp.add_argument("--out", default=None,
+                    help="fichier de sortie (defaut: target/serial-live-*.log)")
+    sp.set_defaults(_faire=fait_serial_capture)
 
     sp = avec_hote(sous.add_parser(
         "checkpoint", help="forcer un checkpoint de boite noire (ECRIT)"))

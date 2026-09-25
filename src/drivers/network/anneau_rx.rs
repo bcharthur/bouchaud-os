@@ -718,6 +718,37 @@ pub fn reception_arretee(sante: &Sante, maintenant_ns: u64) -> bool {
     maintenant_ns.saturating_sub(reference) >= SILENCE_RX_NS
 }
 
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
+// ---------------------------------------------------------------------------
+//
+// Le silence n'est pas une preuve de panne materielle.
+//
+// Une reprise destructive demande desormais UNE PREUVE MATERIELLE en plus :
+// soit le controleur dit lui-meme que son moteur RX est tombe, soit un nouveau
+// `RxOK sans progres` a ete observe (RxOK monte, paquets et OWN rendus figes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreuveArretRx {
+    pub moteur_a_relancer: bool,
+    pub rx_ok_sans_progres_nouveau: bool,
+}
+
+/// Le silence applicatif ne devient une panne du NIC qu'avec une preuve.
+pub fn reception_arretee_confirmee(
+    sante: &Sante,
+    maintenant_ns: u64,
+    preuve: PreuveArretRx,
+) -> bool {
+    if !sante.lien {
+        return false;
+    }
+    if preuve.moteur_a_relancer {
+        return true;
+    }
+    preuve.rx_ok_sans_progres_nouveau && reception_arretee(sante, maintenant_ns)
+}
+
 /// Les degres de la reprise, du moins invasif au plus invasif.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub enum Degre {
@@ -1103,6 +1134,12 @@ impl SuiviVerdict {
     /// comparer de part et d'autre n'aurait plus de sens.
     pub fn abandonne(&mut self) {
         self.en_attente = false;
+    }
+
+    /// Nouvelle epoque de lien : aucune reprise precedente ne doit peser sur
+    /// la suivante.
+    pub fn reinitialise(&mut self) {
+        *self = Self::nouveau();
     }
 }
 

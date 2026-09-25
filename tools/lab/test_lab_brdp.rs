@@ -532,3 +532,58 @@ fn une_longueur_ou_un_caractere_faux_est_refuse() {
     let mut trop_petit = [0u8; 1];
     assert!(!hex_encode(b"ab", &mut trop_petit));
 }
+
+
+// ===========================================================================
+// BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
+// ===========================================================================
+
+#[test]
+fn hotfix10_les_commandes_internet_sont_dans_la_liste_blanche() {
+    assert_eq!(
+        analyse(br#"{"cmd":"internet proof start"}"#),
+        Ok(Commande::InternetProofStart),
+    );
+    assert_eq!(
+        analyse(br#"{"cmd":"internet proof status"}"#),
+        Ok(Commande::InternetProofStatus),
+    );
+    assert_eq!(Commande::InternetProofStart.code(), 19);
+    assert_eq!(Commande::InternetProofStatus.code(), 20);
+}
+
+#[test]
+fn hotfix10_start_et_status_restent_authentifies() {
+    assert!(!Commande::InternetProofStart.avant_auth());
+    assert!(!Commande::InternetProofStatus.avant_auth());
+}
+
+#[test]
+fn hotfix10_les_codes_internet_sont_nouveaux() {
+    let existants = [
+        Commande::Hello { mac: [0; 32] }.code(),
+        Commande::Status.code(),
+        Commande::AuditStatus.code(),
+        Commande::AuditRun.code(),
+        Commande::AuditLast.code(),
+        Commande::NetStatus.code(),
+        Commande::Rtl8168Status.code(),
+        Commande::Rtl8168Ring.code(),
+        Commande::Rtl8168Desc { index: 0 }.code(),
+        Commande::DhcpStatus.code(),
+        Commande::BlackboxStatus.code(),
+        Commande::BlackboxCheckpoint.code(),
+        Commande::EventsTail { combien: 1 }.code(),
+        Commande::EventsWatch.code(),
+        Commande::ServicesSnapshot.code(),
+        Commande::ProcessesSnapshot.code(),
+        Commande::MemorySnapshot.code(),
+        Commande::Quit.code(),
+    ];
+    assert!(!existants.contains(&Commande::InternetProofStart.code()));
+    assert!(!existants.contains(&Commande::InternetProofStatus.code()));
+    assert_ne!(
+        Commande::InternetProofStart.code(),
+        Commande::InternetProofStatus.code(),
+    );
+}

@@ -22,6 +22,8 @@ pub mod internet;
 pub mod transport;
 /// L'echelle de la reponse DNS : voir `sonde_dns.rs`.
 pub mod sonde_dns;
+/// BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1 : preuve active couche par couche.
+pub mod preuve_internet;
 /// La file de trames d'un consommateur, PURE : voir `net/file_trames.rs`.
 pub mod file_trames;
 /// `netdiag` et `netetat` : la preuve physique que le reseau tient dans la

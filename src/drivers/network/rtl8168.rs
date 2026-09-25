@@ -354,6 +354,9 @@ static REPARATIONS_DEMANDEES: AtomicU64 = AtomicU64::new(0);
 static REPARATIONS_EXECUTEES: AtomicU64 = AtomicU64::new(0);
 /// Degre de la derniere reparation executee.
 static REPARATION_DEGRE: AtomicU64 = AtomicU64::new(0);
+/// 0=inconnue, 1=moteur-rx, 2=rx-silencieux.
+static REPARATION_RAISON: AtomicU64 = AtomicU64::new(0);
+static REPARATION_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
 
 /// L'EMISSION, PROUVEE PAR LE MATERIEL.
 ///
@@ -456,6 +459,14 @@ static REPRISES_DIFFEREES: AtomicU64 = AtomicU64::new(0);
 const FENETRE_VERDICT_NS: u64 = 3_000_000_000;
 
 static REPARATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
+
+// BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
+static VERDICT_EN_ATTENTE: AtomicBool = AtomicBool::new(false);
+static REPARATION_DIFFEREE_EN_ATTENTE: AtomicBool = AtomicBool::new(false);
+static RX_OK_SANS_PROGRES_CONSOMMES: AtomicU64 = AtomicU64::new(0);
+static RX_OK_SANS_PROGRES_DERNIER_NS: AtomicU64 = AtomicU64::new(0);
+static REPARATIONS_REFUSEES_SANS_PREUVE: AtomicU64 = AtomicU64::new(0);
+const PREUVE_RX_RECENTE_NS: u64 = 5_000_000_000;
 /// Identifiant de revision lu dans `TxConfig`, et la generation qui en decoule.
 static XID: AtomicU32 = AtomicU32::new(0);
 static mut GENERATION: anneau::Generation = anneau::Generation::Inconnue;
@@ -516,6 +527,14 @@ pub struct Releve {
     pub reparations_demandees: u64,
     pub reparations_executees: u64,
     pub reparation_degre: u64,
+    pub reparation_raison: u64,
+    pub reparation_derniere_ns: u64,
+    pub reprises_differees: u64,
+    pub reprises_sans_effet: u32,
+    pub reparations_refusees_sans_preuve: u64,
+    pub preuves_rx_sans_progres_consommees: u64,
+    pub reparation_differee_en_attente: bool,
+    pub verdict_en_attente: bool,
     /// L'emission, prouvee par le materiel et non par la mise en file.
     pub tx_enfiles: u64,
     pub tx_termines: u64,
@@ -586,6 +605,17 @@ pub fn releve() -> Releve {
             reparations_demandees: REPARATIONS_DEMANDEES.load(Ordering::Relaxed),
             reparations_executees: REPARATIONS_EXECUTEES.load(Ordering::Relaxed),
             reparation_degre: REPARATION_DEGRE.load(Ordering::Relaxed),
+            reparation_raison: REPARATION_RAISON.load(Ordering::Relaxed),
+            reparation_derniere_ns: REPARATION_DERNIERE_NS.load(Ordering::Relaxed),
+            reprises_differees: REPRISES_DIFFEREES.load(Ordering::Relaxed),
+            reprises_sans_effet: REPRISES_SANS_EFFET.load(Ordering::Relaxed),
+            reparations_refusees_sans_preuve:
+                REPARATIONS_REFUSEES_SANS_PREUVE.load(Ordering::Relaxed),
+            preuves_rx_sans_progres_consommees:
+                RX_OK_SANS_PROGRES_CONSOMMES.load(Ordering::Relaxed),
+            reparation_differee_en_attente:
+                REPARATION_DIFFEREE_EN_ATTENTE.load(Ordering::Relaxed),
+            verdict_en_attente: VERDICT_EN_ATTENTE.load(Ordering::Relaxed),
             tx_enfiles: TX_ENFILES.load(Ordering::Relaxed),
             tx_termines: TX_TERMINES.load(Ordering::Relaxed),
             tx_ok_isr: ISR_TX_OK.load(Ordering::Relaxed),
@@ -1576,19 +1606,58 @@ unsafe fn juge_le_progres(maintenant: u64) {
     if maintenant.saturating_sub(precedent) < FENETRE_PROGRES_NS {
         return;
     }
+
     let rx_ok = ISR_RX_OK.load(Ordering::Relaxed);
     let paquets = RX_PAQUETS.load(Ordering::Relaxed);
     let rendus = RX_OWN_RENDUS.load(Ordering::Relaxed);
+
     if rx_ok > TEMOIN_ISR_RX_OK.load(Ordering::Relaxed)
         && paquets == TEMOIN_RX_PAQUETS.load(Ordering::Relaxed)
         && rendus == TEMOIN_OWN_RENDUS.load(Ordering::Relaxed)
     {
         RX_OK_SANS_PROGRES.fetch_add(1, Ordering::Relaxed);
+        RX_OK_SANS_PROGRES_DERNIER_NS.store(maintenant, Ordering::Release);
     }
+
     TEMOIN_FENETRE_NS.store(maintenant, Ordering::Relaxed);
     TEMOIN_ISR_RX_OK.store(rx_ok, Ordering::Relaxed);
     TEMOIN_RX_PAQUETS.store(paquets, Ordering::Relaxed);
     TEMOIN_OWN_RENDUS.store(rendus, Ordering::Relaxed);
+}
+
+/// BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
+/// Arme UNE reprise, ou UNE reprise differee.
+fn demande_reparation(raison: u64, maintenant: u64) -> bool {
+    REPARATION_RAISON.store(raison, Ordering::Relaxed);
+    REPARATION_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
+
+    if VERDICT_EN_ATTENTE.load(Ordering::Acquire) {
+        if REPARATION_DIFFEREE_EN_ATTENTE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            REPARATIONS_DEMANDEES.fetch_add(1, Ordering::Relaxed);
+            RX_ARRET_DETECTE.fetch_add(1, Ordering::Relaxed);
+            let n = REPRISES_DIFFEREES.fetch_add(1, Ordering::Relaxed) + 1;
+            crate::serial_println!(
+                "BOUCHAUD_NET_RTL8168_REPRISE_DIFFEREE_MISE_EN_FILE raison={} total={}",
+                raison,
+                n,
+            );
+            return true;
+        }
+        return false;
+    }
+
+    if REPARATION_DEMANDEE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        REPARATIONS_DEMANDEES.fetch_add(1, Ordering::Relaxed);
+        RX_ARRET_DETECTE.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 /// La maintenance du passage a vide, bornee en frequence.
@@ -1606,33 +1675,15 @@ unsafe fn maintenance_anneau_vide() {
     MAINTENANCE_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
 
     let status = maintenance_isr();
-
-    // L'EMISSION ACHEVEE, ET LE `RxOK` STERILE.
-    //
-    // Cette fonction n'est appelee que quand l'anneau semble VIDE -- le
-    // descripteur courant porte encore `OWN`. Si la carte signale `RxOK` a
-    // cet instant precis, elle annonce une trame qu'elle n'a pas ecrite dans
-    // l'anneau que nous lisons. C'est exactement la signature du releve du
-    // 18 septembre, et jusqu'ici rien ne la nommait.
     moissonne_les_emissions();
+
     if status & anneau::isr::RX_OK != 0 {
         RX_OK_SANS_DESCRIPTEUR.fetch_add(1, Ordering::Relaxed);
     }
     juge_le_progres(maintenant);
 
-    // LE CONTROLEUR DIT LUI-MEME QUE SON MOTEUR EST TOMBE.
-    //
-    // `RxEnb` a zero, ou `RxBufEmpty` pose alors que nous venons de tout lui
-    // rendre : dans les deux cas il n'ecrira plus rien, et rien ne le
-    // redemarrera tout seul. Il n'y a aucune raison d'attendre trois secondes
-    // de silence pour agir sur un signe aussi explicite.
-    //
-    // MAIS ON N'AGIT PAS ICI. `receive` est aussi appelee par le peripherique
-    // smoltcp, qui ne tient pas le verrou de reception : y reconstruire
-    // l'anneau serait la course que ce verrou existe pour fermer. On ARME, et
-    // `repare_si_demande` -- appelee par le seul drainage verrouille -- agit.
     if anneau::moteur_rx_a_relancer(read8(REG_CHIP_CMD)) {
-        REPARATION_DEMANDEE.store(true, Ordering::Release);
+        let _ = demande_reparation(1, maintenant);
     }
 }
 
@@ -1650,74 +1701,76 @@ unsafe fn maintenance_anneau_vide() {
 /// seulement. Tout le reste se contente de poser le drapeau.
 pub fn repare_si_demande() -> bool {
     unsafe {
-        if !READY || !REPARATION_DEMANDEE.swap(false, Ordering::AcqRel) {
+        if !READY {
             return false;
         }
-        // LE VERDICT D'UNE REPRISE NE SE REND PAS DANS LA MILLISECONDE, ET
-        // UNE NOUVELLE DEMANDE NE L'EFFACE PAS.
-        //
-        // Comparer `rx_packets` juste avant et juste apres l'appel declarerait
-        // toute reprise inefficace : aucune trame ne peut arriver dans cet
-        // intervalle. On note donc une question EN ATTENTE, et on la rend a la
-        // passe suivante, une fois la fenetre ecoulee.
-        //
-        // La redaction precedente s'arretait la, et reecrivait l'echeance a
-        // chaque demande. Avec un repos de deux secondes entre reprises et une
-        // fenetre de trois, l'echeance fuyait devant le juge : vingt-six
-        // reprises physiques, zero verdict rendu, `REPRISES_SANS_EFFET` a zero
-        // et `repair_degre=Draine` du debut a la fin du releve. Voir
-        // `anneau_rx::SuiviVerdict`, ou la regle vit maintenant et se
-        // contredit en test hote.
-        //
-        // Une demande qui tombe pendant une question en cours est donc
-        // DIFFEREE, pas executee : le drapeau reste pose, la reprise aura lieu
-        // au prochain passage. C'est aussi la bonne physique -- une reprise
-        // coute les trames en vol, et en enchainer sans savoir si la
-        // precedente a servi, c'est payer ce prix a l'aveugle.
+
+        if !link_up() {
+            SUIVI_VERDICT.reinitialise();
+            VERDICT_EN_ATTENTE.store(false, Ordering::Release);
+            REPARATION_DIFFEREE_EN_ATTENTE.store(false, Ordering::Release);
+            REPARATION_DEMANDEE.store(false, Ordering::Release);
+            REPRISES_SANS_EFFET.store(0, Ordering::Relaxed);
+            return false;
+        }
+
         let maintenant = crate::kernel::timer::monotonic_ns();
-        let (admission, issue) = SUIVI_VERDICT.presente_demande(
+
+        let issue = SUIVI_VERDICT.conclut_si_du(
             maintenant,
             FENETRE_VERDICT_NS,
             RX_PAQUETS.load(Ordering::Relaxed),
             RX_OWN_RENDUS.load(Ordering::Relaxed),
         );
+        let issue_effective = issue.map(|v| v.effective);
+        if issue.is_some() {
+            VERDICT_EN_ATTENTE.store(false, Ordering::Release);
+        }
         publie_le_verdict(issue);
 
-        let sans_effet = match admission {
-            anneau::Admission::Differee { restant_ns } => {
-                REPARATION_DEMANDEE.store(true, Ordering::Release);
-                REPRISES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
-                crate::serial_println!(
-                    "BOUCHAUD_NET_RTL8168_REPRISE_DIFFEREE restant_us={} sans_effet={} \
-differees={}",
-                    restant_ns / 1_000,
-                    SUIVI_VERDICT.sans_effet(),
-                    REPRISES_DIFFEREES.load(Ordering::Relaxed),
-                );
-                return false;
-            }
-            anneau::Admission::Reparez { sans_effet } => sans_effet,
-        };
+        if issue_effective == Some(true) {
+            REPARATION_DIFFEREE_EN_ATTENTE.store(false, Ordering::Release);
+            REPARATION_DEMANDEE.store(false, Ordering::Release);
+        }
 
-        // `repare_reception` lit ce compteur pour choisir son degre : il doit
-        // etre a jour AVANT l'appel, pas apres.
-        REPRISES_SANS_EFFET.store(sans_effet, Ordering::Relaxed);
-        REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
+        if SUIVI_VERDICT.en_attente() {
+            VERDICT_EN_ATTENTE.store(true, Ordering::Release);
+            if REPARATION_DEMANDEE.swap(false, Ordering::AcqRel)
+                && REPARATION_DIFFEREE_EN_ATTENTE
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                let n = REPRISES_DIFFEREES.fetch_add(1, Ordering::Relaxed) + 1;
+                crate::serial_println!(
+                    "BOUCHAUD_NET_RTL8168_REPRISE_DIFFEREE_MISE_EN_FILE raison={} total={}",
+                    REPARATION_RAISON.load(Ordering::Relaxed),
+                    n,
+                );
+            }
+            return false;
+        }
+
+        let directe = REPARATION_DEMANDEE.swap(false, Ordering::AcqRel);
+        let differee = REPARATION_DIFFEREE_EN_ATTENTE.swap(false, Ordering::AcqRel);
+        if !directe && !differee {
+            return false;
+        }
+
+        REPRISES_SANS_EFFET.store(SUIVI_VERDICT.sans_effet(), Ordering::Relaxed);
 
         match repare_reception() {
-            // Le repos entre reprises a parle : rien n'a ete fait, donc il n'y
-            // a rien a juger. Armer ici ferait porter le verdict sur une
-            // reprise qui n'a pas eu lieu.
-            None => false,
+            None => {
+                REPARATION_DIFFEREE_EN_ATTENTE.store(true, Ordering::Release);
+                false
+            }
             Some(ok) => {
-                // La photographie se prend APRES la reprise : celle-ci rend
-                // elle-meme des descripteurs au materiel, et les compter
-                // ferait declarer reparee toute reparation.
+                REPARATIONS_EXECUTEES.fetch_add(1, Ordering::Relaxed);
                 SUIVI_VERDICT.arme(
                     crate::kernel::timer::monotonic_ns(),
                     RX_PAQUETS.load(Ordering::Relaxed),
                     RX_OWN_RENDUS.load(Ordering::Relaxed),
                 );
+                VERDICT_EN_ATTENTE.store(true, Ordering::Release);
                 ok
             }
         }
@@ -1972,6 +2025,14 @@ pub fn demande_reparation_si_arretee() -> bool {
         if !READY {
             return false;
         }
+
+        if VERDICT_EN_ATTENTE.load(Ordering::Acquire)
+            || REPARATION_DIFFEREE_EN_ATTENTE.load(Ordering::Acquire)
+            || REPARATION_DEMANDEE.load(Ordering::Acquire)
+        {
+            return true;
+        }
+
         let maintenant = crate::kernel::timer::monotonic_ns();
         let precedent = SANTE_DERNIERE_NS.load(Ordering::Relaxed);
         if precedent != 0 && maintenant.saturating_sub(precedent) < SANTE_PERIODE_NS {
@@ -1986,14 +2047,45 @@ pub fn demande_reparation_si_arretee() -> bool {
             tx_premier_ns: TX_PREMIER_NS.load(Ordering::Relaxed),
             reprise_derniere_ns: REPRISE_DERNIERE_NS.load(Ordering::Relaxed),
         };
+
         if !anneau::reception_arretee(&sante, maintenant) {
             return false;
         }
-        REPARATION_DEMANDEE.store(true, Ordering::Release);
-        RX_ARRET_DETECTE.fetch_add(1, Ordering::Relaxed);
-        REPARATIONS_DEMANDEES.fetch_add(1, Ordering::Relaxed);
-        crate::kernel::services::erreur("net.nic.rtl8168", "rx-silencieux");
-        true
+
+        let preuves = RX_OK_SANS_PROGRES.load(Ordering::Acquire);
+        let consommees = RX_OK_SANS_PROGRES_CONSOMMES.load(Ordering::Relaxed);
+        let preuve_ns = RX_OK_SANS_PROGRES_DERNIER_NS.load(Ordering::Acquire);
+        let reference = if sante.rx_dernier_ns == 0 {
+            sante.tx_premier_ns
+        } else {
+            sante.rx_dernier_ns
+        };
+
+        let preuve_nouvelle = preuves > consommees
+            && preuve_ns != 0
+            && preuve_ns >= reference
+            && maintenant.saturating_sub(preuve_ns) <= PREUVE_RX_RECENTE_NS;
+
+        let preuve = anneau::PreuveArretRx {
+            moteur_a_relancer: false,
+            rx_ok_sans_progres_nouveau: preuve_nouvelle,
+        };
+
+        if !anneau::reception_arretee_confirmee(&sante, maintenant, preuve) {
+            REPARATIONS_REFUSEES_SANS_PREUVE.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        RX_OK_SANS_PROGRES_CONSOMMES.store(preuves, Ordering::Release);
+
+        let armee = demande_reparation(2, maintenant);
+        if armee {
+            crate::kernel::services::erreur(
+                "net.nic.rtl8168",
+                "rx-silencieux-confirme",
+            );
+        }
+        armee
     }
 }
 

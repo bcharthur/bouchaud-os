@@ -77,6 +77,7 @@
 //! `VERROU_RECEPTION` : un envoi reseau lent ne peut donc pas retarder la
 //! persistance ni le drainage.
 
+use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::politique::{self, Bornes, LectureTransport};
@@ -89,6 +90,8 @@ type Charge = Tampon<CHARGE_MAX>;
 /// Periode d'emission. Cinq par seconde : assez pour suivre un auditeur a dix
 /// hertz sans faire de l'emission le facteur limitant.
 const PERIODE_MS: u64 = 200;
+/// Battement de vie : distingue silence normal et canal mort.
+const HEARTBEAT_MS: u64 = 5_000;
 
 /// Ce qu'un tour s'autorise : ce qui part, et ce qui est seulement regarde.
 ///
@@ -117,6 +120,8 @@ static TROP_GRANDS: AtomicU64 = AtomicU64::new(0);
 static RECALAGES: AtomicU64 = AtomicU64::new(0);
 static TOURS_BORNES: AtomicU64 = AtomicU64::new(0);
 static CURSEUR: AtomicU64 = AtomicU64::new(0);
+static HEARTBEATS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Emet un datagramme de diffusion. Rend faux si la carte n'a pas pris.
 ///
@@ -263,9 +268,25 @@ pub fn tour() -> usize {
     }
 }
 
+fn emet_heartbeat_si_du() {
+    let maintenant_ms = crate::kernel::timer::monotonic_ms();
+    let precedent = DERNIER_HEARTBEAT_MS.load(Ordering::Relaxed);
+    if precedent != 0 && maintenant_ms.saturating_sub(precedent) < HEARTBEAT_MS { return; }
+
+    // Ne passe PAS par l'anneau LAB : pas d'auto-alimentation du transport.
+    let mut charge = Charge::neuf();
+    let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"t_ms\":{},\"seq\":{}}}", maintenant_ms, HEARTBEATS.load(Ordering::Relaxed));
+    charge.termine();
+    if emet(charge.octets()) {
+        HEARTBEATS.fetch_add(1, Ordering::Relaxed);
+        DERNIER_HEARTBEAT_MS.store(maintenant_ms, Ordering::Relaxed);
+    }
+}
+
 fn fil_telemetrie() -> ! {
     loop {
         tour();
+        emet_heartbeat_si_du();
         crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(PERIODE_MS));
     }
 }

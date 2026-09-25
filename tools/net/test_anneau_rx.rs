@@ -1244,3 +1244,98 @@ fn le_temps_qui_recule_ne_rend_pas_de_verdict_premature() {
 fn tout_au_materiel() -> Recensement {
     recense(DESCRIPTEURS, |_| OWN)
 }
+
+
+// ===========================================================================
+// BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
+// ===========================================================================
+
+#[test]
+fn hotfix9_le_silence_seul_ne_declenche_plus_une_reprise_nic() {
+    let sante = anneau::Sante {
+        lien: true,
+        rx_dernier_ns: 10_000_000_000,
+        tx_dernier_ns: 14_000_000_000,
+        tx_premier_ns: 1_000_000_000,
+        reprise_derniere_ns: 0,
+    };
+    let maintenant = 15_000_000_000;
+    assert!(anneau::reception_arretee(&sante, maintenant));
+    assert!(!anneau::reception_arretee_confirmee(
+        &sante,
+        maintenant,
+        anneau::PreuveArretRx::default(),
+    ));
+}
+
+#[test]
+fn hotfix9_un_nouveau_rxok_sterile_confirme_le_blocage() {
+    let sante = anneau::Sante {
+        lien: true,
+        rx_dernier_ns: 10_000_000_000,
+        tx_dernier_ns: 14_000_000_000,
+        tx_premier_ns: 1_000_000_000,
+        reprise_derniere_ns: 0,
+    };
+    assert!(anneau::reception_arretee_confirmee(
+        &sante,
+        15_000_000_000,
+        anneau::PreuveArretRx {
+            moteur_a_relancer: false,
+            rx_ok_sans_progres_nouveau: true,
+        },
+    ));
+}
+
+#[test]
+fn hotfix9_un_moteur_explicitement_tombe_est_une_preuve_directe() {
+    let sante = anneau::Sante {
+        lien: true,
+        rx_dernier_ns: 0,
+        tx_dernier_ns: 0,
+        tx_premier_ns: 0,
+        reprise_derniere_ns: 0,
+    };
+    assert!(anneau::reception_arretee_confirmee(
+        &sante,
+        1,
+        anneau::PreuveArretRx {
+            moteur_a_relancer: true,
+            rx_ok_sans_progres_nouveau: false,
+        },
+    ));
+}
+
+#[test]
+fn hotfix9_un_lien_bas_ne_declenche_jamais_la_reprise_rx() {
+    let sante = anneau::Sante {
+        lien: false,
+        rx_dernier_ns: 10_000_000_000,
+        tx_dernier_ns: 14_000_000_000,
+        tx_premier_ns: 1_000_000_000,
+        reprise_derniere_ns: 0,
+    };
+    assert!(!anneau::reception_arretee_confirmee(
+        &sante,
+        15_000_000_000,
+        anneau::PreuveArretRx {
+            moteur_a_relancer: true,
+            rx_ok_sans_progres_nouveau: true,
+        },
+    ));
+}
+
+#[test]
+fn hotfix9_nouvelle_epoque_de_lien_efface_la_serie_d_echecs() {
+    let mut suivi = anneau::SuiviVerdict::nouveau();
+    suivi.arme(1_000_000_000, 10, 10);
+    let issue = suivi
+        .conclut_si_du(5_000_000_000, 3_000_000_000, 10, 10)
+        .expect("le verdict doit etre du");
+    assert!(!issue.effective);
+    assert_eq!(suivi.sans_effet(), 1);
+
+    suivi.reinitialise();
+    assert_eq!(suivi.sans_effet(), 0);
+    assert!(!suivi.en_attente());
+}

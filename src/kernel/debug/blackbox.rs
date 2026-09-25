@@ -611,6 +611,40 @@ fn flush_serial(ts_ns: u64, emergency: bool) {
     SERIAL_RETARD.store(ring_end.saturating_sub(next.min(ring_end)) as u64, Ordering::Relaxed);
 }
 
+
+// BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+//
+// Scelle dans le tambour RAM les DEUX sources qui n'y vivent pas en continu:
+// l'enregistreur de vol binaire et le journal serie.
+//
+// C'est volontairement RAM-only: aucun acces USB ici. La persistance physique
+// reste le travail de `vidange`, avec ses budgets et son curseur confirme.
+//
+// La cible est figee AVANT de commencer. Ce qui est produit pendant la copie
+// appartient au checkpoint suivant; on ne poursuit donc jamais une queue qui
+// avance sans fin.
+fn scelle_preuves_ram(ts_ns: u64) -> (u64, u64) {
+    let cible_vol = FLIGHT_WRITE.load(Ordering::Acquire);
+    while FLIGHT_FLUSHED.load(Ordering::Acquire) < cible_vol {
+        let avant = FLIGHT_FLUSHED.load(Ordering::Acquire);
+        flush_flight(ts_ns);
+        if FLIGHT_FLUSHED.load(Ordering::Acquire) == avant {
+            break;
+        }
+    }
+
+    let cible_serie = crate::drivers::serial::trace_total_bytes() as u64;
+    while (LAST_TRACE_SEQ.load(Ordering::Acquire) as u64) < cible_serie {
+        let avant = LAST_TRACE_SEQ.load(Ordering::Acquire);
+        flush_serial(ts_ns, false);
+        if LAST_TRACE_SEQ.load(Ordering::Acquire) == avant {
+            break;
+        }
+    }
+
+    (cible_vol, cible_serie)
+}
+
 fn sample(ts_ns: u64) {
     let mut out = Text::new();
     let (task, syscall, phase, site, aux) = crate::kernel::task::stall_probe_local_context();
@@ -1030,6 +1064,10 @@ fn network_sample(ts_ns: u64) {
             // reception. Ces deux-ci disent le resultat, et eux seuls.
             "rx_stall={} repair_req={} repair_exec={} repair_degre={} ",
             "recovery_effective={} recovery_ineffective={} ",
+            // BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
+            "repair_reason={} repair_suppressed_no_proof={} repair_evidence_used={} ",
+            "repair_deferred={} repair_verdict_pending={} repair_deferred_queued={} ",
+            "repair_without_effect={} ",
             // L'EMISSION PROUVEE : enfile n'est pas parti.
             "tx_enqueued={} tx_completed={} tx_ok_isr={} tx_last_complete_ns={} tx_desc_owned={} ",
             // DORA, SANS UN OCTET DE PAQUET.
@@ -1076,6 +1114,13 @@ fn network_sample(ts_ns: u64) {
         nic.reparations_demandees, nic.reparations_executees, nic.reparation_degre,
         crate::net::rx_recuperation::compteurs().0,
         crate::net::rx_recuperation::compteurs().1,
+        nic.reparation_raison,
+        nic.reparations_refusees_sans_preuve,
+        nic.preuves_rx_sans_progres_consommees,
+        nic.reparation_differee_en_attente as u8,
+        nic.verdict_en_attente as u8,
+        nic.reprises_differees,
+        nic.reprises_sans_effet,
         nic.tx_enfiles, nic.tx_termines, nic.tx_ok_isr,
         nic.tx_dernier_termine_ns, nic.tx_desc_possedes,
         dora.discover_envoyes, dora.offres_vues, dora.requests_envoyes, dora.acks_vus,
@@ -1598,6 +1643,13 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
     // le debut de la session, precisement ce qu'aucune des trois archives
     // physiques n'a jamais contenu. Convertis apres, ils passent par un
     // tambour vide, et rien n'est chasse.
+    // BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+    // Avant le PREMIER vidage physique, transformer les preuves recentes
+    // (flight + serie) en records RAM. Si le tambour est plein, ce sont les
+    // anciens samples qui peuvent etre recycles: les dernieres lignes qui
+    // expliquent la panne ne doivent plus etre celles que l'on perd.
+    let (_cible_vol_hotfix11, _cible_serie_hotfix11) = scelle_preuves_ram(maintenant);
+
     let mut bilan = vidange(echeance);
     crate::gui::power_screen::progress("Enregistrement des journaux", 0);
 
@@ -1870,6 +1922,18 @@ static DERNIER_FLUSH_ERREUR_NS: AtomicU64 = AtomicU64::new(0);
 static DERNIER_CHECKPOINT_DEBUT_NS: AtomicU64 = AtomicU64::new(0);
 static DERNIER_CHECKPOINT_OK_NS: AtomicU64 = AtomicU64::new(0);
 static CHECKPOINTS_OK: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL: compteurs de TOUS les checkpoints,
+// periodiques comme demandes par BRDP.
+static CHECKPOINTS_TENTES: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINTS_REUSSIS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINTS_ECHECS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_SEQ: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_DUREE_US: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_DERNIER_CONFIRME: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_CAUSE_SYNC: AtomicU64 = AtomicU64::new(0);
+static DERNIER_CHECKPOINT_SUPPORT: AtomicBool = AtomicBool::new(false);
+static DERNIER_CHECKPOINT_MARQUE: AtomicBool = AtomicBool::new(false);
+static DERNIER_CHECKPOINT_SYNC: AtomicBool = AtomicBool::new(false);
 static CHECKPOINT_ECHEANCE_NS: AtomicU64 = AtomicU64::new(0);
 static SUPPORT_ETAIT_PRET: AtomicBool = AtomicBool::new(false);
 static FIN_ECRITE: AtomicBool = AtomicBool::new(false);
@@ -1902,6 +1966,24 @@ impl Checkpoint {
     }
 }
 
+// BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+fn note_resultat_checkpoint(bilan: &Checkpoint) {
+    DERNIER_CHECKPOINT_SEQ.store(bilan.seq, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_DUREE_US.store(bilan.duree_us, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_DERNIER_CONFIRME.store(bilan.dernier_confirme, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_CAUSE_SYNC.store(bilan.cause_sync as u64, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_SUPPORT.store(bilan.support, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_MARQUE.store(bilan.marque, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_SYNC.store(bilan.synchronise, Ordering::Relaxed);
+    if bilan.ok() {
+        CHECKPOINTS_REUSSIS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        DERNIER_CHECKPOINT_OK_NS.store(now_ns(), Ordering::Relaxed);
+    } else {
+        CHECKPOINTS_ECHECS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+
 /// Pose un checkpoint : vidage borne, marque `CHECKPOINT`, synchronisation.
 ///
 /// Ne suspend PAS la production : contrairement a `vide_avant_extinction`, la
@@ -1915,6 +1997,9 @@ pub fn checkpoint(raison: &str) -> Checkpoint {
     let debut = now_ns();
     let mut bilan = Checkpoint::default();
     bilan.seq = CHECKPOINT_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
+    CHECKPOINTS_TENTES.fetch_add(1, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_DEBUT_NS.store(debut, Ordering::Relaxed);
+    DERNIER_CHECKPOINT_SEQ.store(bilan.seq, Ordering::Relaxed);
 
     if !crate::drivers::xhci_active::blackbox_storage_ready() {
         bilan.duree_us = now_ns().saturating_sub(debut) / 1_000;
@@ -1923,6 +2008,8 @@ pub fn checkpoint(raison: &str) -> Checkpoint {
 duration_ms={} marker=0 sync=0",
             raison, bilan.seq, bilan.duree_us / 1_000,
         );
+        bilan.cause_sync = crate::drivers::xhci_active::SYNC_SANS_SUPPORT;
+        note_resultat_checkpoint(&bilan);
         return bilan;
     }
     bilan.support = true;
@@ -1944,6 +2031,11 @@ duration_ms={} marker=0 sync=0",
         "BLACKBOX_CHECKPOINT_BEGIN raison={} seq={} boot_id={} ts_ns={}",
         raison, bilan.seq, boot_id(), debut,
     );
+
+    // BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+    // Le checkpoint doit couvrir la PREUVE, pas seulement les samples.
+    // On scelle d'abord les deux anneaux auxiliaires dans le tambour RAM.
+    let (_cible_vol_hotfix11, _cible_serie_hotfix11) = scelle_preuves_ram(debut);
 
     // LA MARQUE EST POSEE D'ABORD, ET C'EST CE QUI REND LA CIBLE FIXE.
     //
@@ -2065,6 +2157,7 @@ vidage_poses={}\n",
     bilan.cause_sync = cause;
 
     bilan.duree_us = now_ns().saturating_sub(debut) / 1_000;
+    note_resultat_checkpoint(&bilan);
     crate::serial_println!(
         "BLACKBOX_CHECKPOINT_END ok={} raison={} seq={} support=1 records={} \
 duration_ms={} marker={} sync={} sync_cause={} dernier_confirme={}",
@@ -2225,8 +2318,25 @@ pub struct Statut {
     pub last_checkpoint_ok_ns: u64,
     pub checkpoint_count: u64,
 
+    // BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+    pub checkpoint_attempts: u64,
+    pub checkpoint_successes: u64,
+    pub checkpoint_failures: u64,
+    pub last_checkpoint_seq: u64,
+    pub last_checkpoint_duration_us: u64,
+    pub last_checkpoint_confirmed: u64,
+    pub last_checkpoint_cause_sync: u64,
+    pub last_checkpoint_support: bool,
+    pub last_checkpoint_marker: bool,
+    pub last_checkpoint_sync: bool,
+
     pub records_ram: u64,
     pub records_persisted: u64,
+
+    pub serial_produced_bytes: u64,
+    pub serial_persisted_bytes: u64,
+    pub flight_produced: u64,
+    pub flight_persisted: u64,
 
     pub fin_written: bool,
     pub sync_ok: bool,
@@ -2251,10 +2361,26 @@ pub fn statut() -> Statut {
         last_checkpoint_ok_ns: DERNIER_CHECKPOINT_OK_NS.load(Ordering::Relaxed),
         checkpoint_count: CHECKPOINTS_OK.load(Ordering::Relaxed),
 
+        checkpoint_attempts: CHECKPOINTS_TENTES.load(Ordering::Relaxed),
+        checkpoint_successes: CHECKPOINTS_REUSSIS_TOTAL.load(Ordering::Relaxed),
+        checkpoint_failures: CHECKPOINTS_ECHECS_TOTAL.load(Ordering::Relaxed),
+        last_checkpoint_seq: DERNIER_CHECKPOINT_SEQ.load(Ordering::Relaxed),
+        last_checkpoint_duration_us: DERNIER_CHECKPOINT_DUREE_US.load(Ordering::Relaxed),
+        last_checkpoint_confirmed: DERNIER_CHECKPOINT_DERNIER_CONFIRME.load(Ordering::Relaxed),
+        last_checkpoint_cause_sync: DERNIER_CHECKPOINT_CAUSE_SYNC.load(Ordering::Relaxed),
+        last_checkpoint_support: DERNIER_CHECKPOINT_SUPPORT.load(Ordering::Relaxed),
+        last_checkpoint_marker: DERNIER_CHECKPOINT_MARQUE.load(Ordering::Relaxed),
+        last_checkpoint_sync: DERNIER_CHECKPOINT_SYNC.load(Ordering::Relaxed),
+
         records_ram: etat.poses,
         // `PROCHAIN_A_POSER` designe le prochain : le compte des confirmes est
         // celui d'avant. Un tambour neuf vaut un, pas zero.
         records_persisted: PROCHAIN_A_POSER.load(Ordering::Acquire).saturating_sub(1),
+
+        serial_produced_bytes: crate::drivers::serial::trace_total_bytes() as u64,
+        serial_persisted_bytes: LAST_TRACE_SEQ.load(Ordering::Acquire) as u64,
+        flight_produced: FLIGHT_WRITE.load(Ordering::Acquire),
+        flight_persisted: FLIGHT_FLUSHED.load(Ordering::Acquire),
 
         fin_written: FIN_ECRITE.load(Ordering::Relaxed),
         sync_ok: FIN_SYNC_OK.load(Ordering::Relaxed),

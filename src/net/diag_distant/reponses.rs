@@ -117,6 +117,25 @@ pub fn rend(t: &mut Reponse, commande: Commande) -> bool {
             memoire(t);
             true
         }
+        // BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
+        Commande::InternetProofStart => {
+            let started = crate::net::preuve_internet::lance();
+            internet_proof(t, Some(started));
+            true
+        }
+        Commande::InternetProofStatus => {
+            internet_proof(t, None);
+            true
+        }
+        // BOUCHAUD_HOTFIX11_SERIAL_BRDP
+        Commande::SerialStatus => {
+            serial_status(t);
+            true
+        }
+        Commande::SerialRead { start, combien } => {
+            serial_read(t, start, combien);
+            true
+        }
         Commande::Quit => false,
     };
     let _ = t.write_char('}');
@@ -135,6 +154,97 @@ pub fn erreur(t: &mut Reponse, e: brdp::Erreur) {
         e as u16,
     );
     t.termine();
+}
+
+
+// BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
+fn internet_proof(t: &mut Reponse, started: Option<bool>) {
+    let r = crate::net::preuve_internet::releve();
+
+    if let Some(v) = started {
+        let _ = write!(t, ",\"started\":{}", v);
+    }
+
+    let _ = write!(
+        t,
+        ",\"generation\":{},\"running\":{},\"done\":{},\"chain_ok\":{},\
+\"stage\":\"{}\",\"first_failure\":\"{}\",\"start_ms\":{},\"end_ms\":{},\
+\"link\":{},\"lease\":{},\
+\"arp_ok\":{},\"arp_ms\":{},\"arp_routed\":{},\"arp_seen\":{},\
+\"arp_resolved\":{},\"arp_failed\":{},\"arp_not_sent\":{},\
+\"dns_ok\":{},\"dns_ms\":{},\
+\"dns53_rx_ethernet\":{},\"dns53_rx_ipv4\":{},\"dns53_rx_udp\":{},\
+\"dns53_queued_ip\":{},\"dns53_dequeued_ip\":{},\"dns53_socket_match\":{},\
+\"dns53_socket_busy\":{},\"dns53_socket_delivered\":{},\"dns53_poll_ready\":{},\
+\"dns53_recv_success\":{},\"dns53_recv_eagain\":{},\
+\"tcp80_ok\":{},\"tcp80_ms\":{},\"tcp80_bytes\":{},\"tcp80_http_status\":{},\
+\"tcp443_ok\":{},\"tcp443_ms\":{},\"tcp_handshakes\":{},\"tcp_syn_retx\":{},\
+\"tls_ok\":{},\"tls_ms\":{},\"tls_error\":\"{}\",\"tls_trusted\":{},\
+\"tls_hostname_ok\":{},\"tls_expired\":{},\"tls_cipher\":\"{}\",\
+\"tls_kx\":\"{}\",\"tls_alpn\":\"{}\",\
+\"http_sent\":{},\"http_ok\":{},\"http_ms\":{},\"http_raw_bytes\":{},\
+\"http_body_bytes\":{},\"http_status\":{},\"http_html\":{},\"http_complete\":{},\
+\"rx_start\":{},\"rx_end\":{},\"tx_start\":{},\"tx_end\":{},\
+\"resets_start\":{},\"resets_end\":{}",
+        r.generation,
+        r.en_cours,
+        r.terminee,
+        r.chaine_ok,
+        crate::net::preuve_internet::etape_nom(r.etape),
+        crate::net::preuve_internet::echec_nom(r.premier_echec),
+        r.debut_ms,
+        r.fin_ms,
+        r.lien,
+        r.bail,
+        r.arp_ok,
+        r.arp_ms,
+        r.arp_routees_delta,
+        r.arp_vues_delta,
+        r.arp_resolues_delta,
+        r.arp_echecs_delta,
+        r.arp_non_emises_delta,
+        r.dns_ok,
+        r.dns_ms,
+        r.dns_delta[0], r.dns_delta[1], r.dns_delta[2], r.dns_delta[3],
+        r.dns_delta[4], r.dns_delta[5], r.dns_delta[6], r.dns_delta[7],
+        r.dns_delta[8], r.dns_delta[9], r.dns_delta[10],
+        r.tcp80_ok,
+        r.tcp80_ms,
+        r.tcp80_octets,
+        r.tcp80_status,
+        r.tcp443_ok,
+        r.tcp443_ms,
+        r.tcp_poignees_delta,
+        r.tcp_syn_retx_delta,
+        r.tls_ok,
+        r.tls_ms,
+        crate::net::preuve_internet::tls_erreur_nom(r.tls_erreur),
+        r.tls_trusted,
+        r.tls_hostname_ok,
+        r.tls_expired,
+        crate::net::preuve_internet::cipher_nom(r.tls_cipher),
+        crate::net::preuve_internet::kx_nom(r.tls_kx),
+        crate::net::preuve_internet::alpn_nom(r.tls_alpn),
+        r.http_sent,
+        r.http_ok,
+        r.http_ms,
+        r.http_raw,
+        r.http_body,
+        r.http_status,
+        r.http_html,
+        r.http_complete,
+        r.rx_start,
+        r.rx_end,
+        r.tx_start,
+        r.tx_end,
+        r.reset_start,
+        r.reset_end,
+    );
+
+    ip_json(t, "ip", r.ip);
+    ip_json(t, "gateway", r.passerelle);
+    ip_json(t, "dns_server", r.dns);
+    ip_json(t, "resolved_ip", r.dns_ip);
 }
 
 fn status(t: &mut Reponse) {
@@ -212,6 +322,7 @@ fn net(t: &mut Reponse) {
     ip_json(t, "ip_lab", super::ip());
 }
 
+// BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
 fn rtl8168(t: &mut Reponse) {
     let r = crate::drivers::rtl8168::releve();
     let _ = write!(
@@ -223,7 +334,11 @@ fn rtl8168(t: &mut Reponse) {
 \"isr_rx_ok\":{},\"isr_rx_err\":{},\"isr_rx_overflow\":{},\"isr_rx_fifo_over\":{},\
 \"isr_system_error\":{},\"rx_ok_sans_progres\":{},\"own_rendus\":{},\
 \"reparations_demandees\":{},\"reparations_executees\":{},\"repair_degre\":{},\
-\"reinitialisations\":{},\"invariant\":\"{}\",\"tx_packets\":{},\"tx_termines\":{}",
+\"repair_raison\":{},\"repair_derniere_ns\":{},\"reprises_differees\":{},\
+\"reprises_sans_effet\":{},\"repair_sans_preuve\":{},\"repair_preuves_consommees\":{},\
+\"repair_differee_pending\":{},\"repair_verdict_pending\":{},\
+\"reinitialisations\":{},\"reinitialisations_ok\":{},\
+\"invariant\":\"{}\",\"tx_packets\":{},\"tx_termines\":{}",
         r.xid, r.generation, r.chip_cmd, r.intr_status, r.rx_missed,
         r.rx_paquets, r.rx_octets, r.rx_cur,
         r.rx_desc_materiel, r.rx_desc_processeur,
@@ -232,8 +347,12 @@ fn rtl8168(t: &mut Reponse) {
         r.isr_rx_ok, r.isr_rx_err, r.isr_rx_overflow, r.isr_rx_fifo_over,
         r.isr_system_error, r.rx_ok_sans_progres, r.rx_own_rendus,
         r.reparations_demandees, r.reparations_executees, r.reparation_degre,
-        r.reinitialisations, r.invariant.unwrap_or("intact"),
-        r.tx_paquets, r.tx_termines,
+        r.reparation_raison, r.reparation_derniere_ns, r.reprises_differees,
+        r.reprises_sans_effet, r.reparations_refusees_sans_preuve,
+        r.preuves_rx_sans_progres_consommees,
+        r.reparation_differee_en_attente, r.verdict_en_attente,
+        r.reinitialisations, r.reinitialisations_ok,
+        r.invariant.unwrap_or("intact"), r.tx_paquets, r.tx_termines,
     );
     // LE CRITERE PHYSIQUE, EXPLICITE DANS LA REPONSE.
     //
@@ -330,6 +449,84 @@ fn blackbox(t: &mut Reponse) {
         ",\"retard_records\":{}",
         s.records_ram.saturating_sub(s.records_persisted),
     );
+    // BOUCHAUD_HOTFIX11_EVIDENCE_SURVIVAL
+    let cause_sync = match s.last_checkpoint_cause_sync as u8 {
+        crate::drivers::xhci_active::SYNC_OK => "ok",
+        crate::drivers::xhci_active::SYNC_SANS_SUPPORT => "sans-support",
+        crate::drivers::xhci_active::SYNC_VERROU_REFUSE => "verrou-refuse",
+        _ => "pilote-ko",
+    };
+    let _ = write!(
+        t,
+        ",\"checkpoint_attempts\":{},\"checkpoint_successes\":{},\"checkpoint_failures\":{},\
+\"last_checkpoint_seq\":{},\"last_checkpoint_duration_us\":{},\
+\"last_checkpoint_confirmed\":{},\"last_checkpoint_support\":{},\
+\"last_checkpoint_marker\":{},\"last_checkpoint_sync\":{},\
+\"last_checkpoint_cause_sync\":{},\"last_checkpoint_cause\":\"{}\",\
+\"serial_produced_bytes\":{},\"serial_persisted_bytes\":{},\"serial_backlog_bytes\":{},\
+\"flight_produced\":{},\"flight_persisted\":{},\"flight_backlog\":{}",
+        s.checkpoint_attempts,
+        s.checkpoint_successes,
+        s.checkpoint_failures,
+        s.last_checkpoint_seq,
+        s.last_checkpoint_duration_us,
+        s.last_checkpoint_confirmed,
+        s.last_checkpoint_support,
+        s.last_checkpoint_marker,
+        s.last_checkpoint_sync,
+        s.last_checkpoint_cause_sync,
+        cause_sync,
+        s.serial_produced_bytes,
+        s.serial_persisted_bytes,
+        s.serial_produced_bytes.saturating_sub(s.serial_persisted_bytes),
+        s.flight_produced,
+        s.flight_persisted,
+        s.flight_produced.saturating_sub(s.flight_persisted),
+    );
+
+}
+
+
+// BOUCHAUD_HOTFIX11_SERIAL_BRDP
+fn serial_status(t: &mut Reponse) {
+    let (debut, fin) = crate::drivers::serial::trace_bornes();
+    let _ = write!(
+        t,
+        ",\"oldest\":{},\"end\":{},\"capacity\":{},\"retained\":{}",
+        debut,
+        fin,
+        crate::drivers::serial::trace_capacite(),
+        fin.saturating_sub(debut),
+    );
+}
+
+// Lecture SANS allocation et SANS effet de bord. Le contenu est hexadecimal:
+// pas d'echappement JSON variable, donc la borne de REPONSE_MAX reste simple
+// a prouver.
+fn serial_read(t: &mut Reponse, demande: u64, combien: u16) {
+    let (plus_ancien, fin) = crate::drivers::serial::trace_bornes();
+    let demande_usize = demande.min(usize::MAX as u64) as usize;
+    let debut = demande_usize.max(plus_ancien).min(fin);
+    let n = (combien as usize)
+        .min(super::brdp::SERIAL_READ_MAX as usize)
+        .min(fin.saturating_sub(debut));
+    let suivant = debut.saturating_add(n);
+    let _ = write!(
+        t,
+        ",\"requested_start\":{},\"oldest\":{},\"start\":{},\"next\":{},\"end\":{},\
+\"lost_before\":{},\"eof\":{},\"data_hex\":\"",
+        demande,
+        plus_ancien,
+        debut,
+        suivant,
+        fin,
+        demande_usize < plus_ancien,
+        suivant >= fin,
+    );
+    for seq in debut..suivant {
+        let _ = write!(t, "{:02x}", crate::drivers::serial::trace_octet(seq));
+    }
+    let _ = t.write_char('"');
 }
 
 fn services(t: &mut Reponse) {
