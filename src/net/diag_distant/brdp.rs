@@ -81,6 +81,13 @@ pub enum Erreur {
     NonAuthentifie = 8,
     /// Le HMAC ne correspond pas.
     AuthRefusee = 9,
+    /// Trop de commandes en attente : celle-ci a ete refusee.
+    ///
+    /// Le serveur SERIALISE ses reponses et retient ce qui arrive pendant ce
+    /// temps, dans une file bornee. Un client qui envoie sans jamais lire
+    /// finit par la remplir. Le lui DIRE est la seule facon qu'il ait de
+    /// distinguer « ma commande a ete refusee » de « la machine est figee ».
+    FilePleine = 10,
 }
 
 /// LA LISTE BLANCHE. Il n'y a pas de shell, et il n'y en aura pas en V1.
@@ -581,5 +588,6 @@ pub const fn nom_erreur(e: Erreur) -> &'static str {
         Erreur::TropLongue => "ligne-trop-longue",
         Erreur::NonAuthentifie => "non-authentifie",
         Erreur::AuthRefusee => "auth-refusee",
+        Erreur::FilePleine => "file-pleine",
     }
 }

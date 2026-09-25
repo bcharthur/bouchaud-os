@@ -136,6 +136,27 @@ pub fn recale(curseur: u64) -> (u64, u64) {
     (neuf, perdues)
 }
 
+/// Recale un curseur SANS rien emettre.
+///
+/// # Pourquoi cette variante existe
+///
+/// `recale` emet `LAB_PERTE`, ce qui est juste pour un lecteur qui presente une
+/// chronologie a un humain : le trou fait partie du releve. C'est FAUX pour un
+/// lecteur qui reexpedie l'anneau, parce que son propre recalage fabrique alors
+/// l'evenement suivant qu'il aura a reexpedier :
+///
+/// ```text
+/// telemetrie lit -> recale -> LAB_PERTE dans l'anneau -> telemetrie le lit
+///   -> l'emet -> ... et l'anneau ne se vide jamais
+/// ```
+///
+/// Le canal de telemetrie compte donc ses pertes chez lui, et n'ecrit rien dans
+/// ce qu'il est cense transporter. Voir `diag_distant::politique`, qui refuse
+/// en plus de transporter les evenements du transport lui-meme.
+pub fn recale_muet(curseur: u64) -> (u64, u64) {
+    ANNEAU.recale(curseur)
+}
+
 /// Evenements emis alors que l'horloge monotone rendait encore zero.
 pub fn avant_horloge() -> u64 {
     AVANT_HORLOGE.load(Ordering::Relaxed)

@@ -2138,3 +2138,79 @@ pub fn print_info() {
         if link_up() { "UP" } else { "DOWN" },
     );
 }
+
+// ---------------------------------------------------------------------------
+// LES LECTEURS PUBLICS : DE LA LECTURE, ET RIEN QUE DE LA LECTURE
+// ---------------------------------------------------------------------------
+//
+// Le shell et le debugger distant ont besoin des descripteurs un par un. Ils
+// n'ont AUCUNE raison d'ecrire, et ces fonctions leur en retirent le moyen :
+// elles lisent la memoire de l'anneau et deux registres, point.
+//
+// Un diagnostic qui modifie ce qu'il observe efface la panne qu'il doit
+// nommer. `tools/verifie-reseau-sans-triche.py` garde deja cette propriete
+// pour `releve()` ; elle vaut ici pour la meme raison.
+
+/// `opts1` du descripteur `index` : `OWN`, `EOR`, `FS`, `LS`, erreurs, longueur.
+pub fn desc_opts1(index: usize) -> u32 {
+    unsafe {
+        if !READY || index >= N_RX {
+            return 0;
+        }
+        desc_read32(RX_RING, index, 0)
+    }
+}
+
+/// `opts2` du descripteur `index` : etiquette VLAN, et rien d'autre chez nous.
+pub fn desc_opts2(index: usize) -> u32 {
+    unsafe {
+        if !READY || index >= N_RX {
+            return 0;
+        }
+        desc_read32(RX_RING, index, 4)
+    }
+}
+
+/// L'adresse DMA du tampon que porte le descripteur `index`.
+pub fn desc_addr(index: usize) -> u64 {
+    unsafe {
+        if !READY || index >= N_RX {
+            return 0;
+        }
+        desc_read64(RX_RING, index, 8)
+    }
+}
+
+/// La carte des bits `OWN`, un bit par descripteur. Bit a un : au materiel.
+pub fn carte_own_publique() -> u64 {
+    unsafe {
+        if !READY {
+            return 0;
+        }
+        carte_own()
+    }
+}
+
+/// L'adresse physique de l'anneau, telle que NOUS l'avons ecrite.
+pub fn anneau_dma() -> u64 {
+    unsafe {
+        if !READY {
+            return 0;
+        }
+        RX_RING_P
+    }
+}
+
+/// L'adresse de l'anneau RELUE DANS LA PUCE.
+///
+/// Ce n'est pas `anneau_dma()`, et c'est tout l'interet : une reprise, une
+/// reinitialisation partielle ou une economie d'energie qui aurait reecrit ce
+/// registre ne se verrait nulle part ailleurs.
+pub fn desc_addr_relu() -> u64 {
+    unsafe {
+        if !READY {
+            return 0;
+        }
+        (read32(REG_RX_DESC_LOW) as u64) | ((read32(REG_RX_DESC_HIGH) as u64) << 32)
+    }
+}

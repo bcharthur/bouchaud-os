@@ -30,6 +30,12 @@
 
 pub mod adresse;
 pub mod brdp;
+pub mod politique;
+pub mod reponses;
+pub mod serveur;
+pub mod session;
+pub mod tampon;
+pub mod telemetrie;
 pub mod tri;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
