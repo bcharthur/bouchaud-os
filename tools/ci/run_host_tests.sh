@@ -110,6 +110,28 @@ if ! PYTHONPATH=tools/ci/reliability \
     echecs=$((echecs + 1))
 fi
 
+# LE CLIENT DISTANT SE CONTREDIT SANS QEMU ET SANS RESEAU EXTERIEUR.
+#
+# Il parle a un faux serveur BRDP en boucle locale, qui sait faire ce que le
+# vrai ne sait pas : fragmenter une annonce octet par octet, fermer au milieu
+# d'une reponse, renvoyer du JSON invalide. Ce sont precisement les cas qu'un
+# banc AVEC pile reseau reproduit le plus mal -- on ne choisit pas comment le
+# noyau distant segmente.
+#
+# La decouverte porte sur le REPERTOIRE, comme pour `tools/ci/reliability` :
+# une epreuve deposee dans `tools/remote` est bloquante le jour meme.
+echo
+echo "suites Python client distant :"
+# PAS DE TUBE ICI. `producteur | consommateur` sous `pipefail` a deja coute un
+# faux rouge a ce depot : voir l'en-tete de `run_dhcp_recuperation.sh`. Une
+# variable ne peut pas prendre de SIGPIPE.
+if sortie_remote=$(python3 -m unittest discover -s tools/remote -p 'test_*.py' -v 2>&1); then
+    echo "$sortie_remote" | grep -E '^(Ran |OK)' || echo ok
+else
+    echo "$sortie_remote"
+    echecs=$((echecs + 1))
+fi
+
 # LE BANC D'IMAGES DOIT ETRE JUSTE AVANT DE SERVIR A ACCUSER LE PORT.
 #
 # Il annonce, pour chaque image, les pixels qu'elle contient. Si cette annonce
