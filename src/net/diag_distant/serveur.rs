@@ -25,6 +25,29 @@
 //! l'etat interne de la machine a quiconque atteint le segment local, et
 //! « lecture seule » ne rend pas cela acceptable.
 //!
+//! ## « Desactive » veut dire ABSENT, pas endormi
+//!
+//! `demarre_services()` consulte `arme()` AVANT d'appeler `demarre()`. Comme
+//! `arme()` se reduit a une constante, le compilateur elimine l'appel dans une
+//! image sans jeton -- et avec lui le fil, la boucle d'acceptation et jusqu'au
+//! nom `bouchaud-brdp`. Une image de production ne porte aucun code d'ecoute
+//! BRDP, ce qui est une forme de desactivation qu'on ne peut pas mettre a
+//! l'envers par erreur. `tools/ci/run_brdp_jeton.sh` le prouve sur le binaire.
+//!
+//! ## CE QUE LE JETON NE PROTEGE PAS
+//!
+//! Il est compile DANS l'image de laboratoire, en clair : `strings` sur cette
+//! image le retrouve. C'est inherent a un secret partage lu a la construction,
+//! et cela n'a rien d'un oubli -- mais il faut le dire, parce que cela fixe la
+//! regle d'usage : UNE IMAGE LAB NE SE DISTRIBUE PAS. Elle est un outil de
+//! banc. Ce que le jeton ferme, c'est l'acces depuis le segment local a
+//! quelqu'un qui n'a PAS l'image ; il ne ferme rien a quelqu'un qui l'a.
+//!
+//! Ce que le protocole protege, en revanche, et qui tient meme sur un segment
+//! ecoute : le jeton ne traverse JAMAIS le reseau. Le client prouve qu'il le
+//! connait par un HMAC du nonce, et `tools/verifie-jeton-brdp.py` refuse tout
+//! chemin qui le ferait sortir -- impression, boite noire, reponse, telemetrie.
+//!
 //! # Ce fil ne bloque personne
 //!
 //! Il possede sa propre file de trames, sa propre interface et ses propres

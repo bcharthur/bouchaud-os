@@ -680,6 +680,13 @@ pub const PREREQUIS: &[(&str, &str)] = &[
     ("net.hpack", "net.http2"),
     ("net.gzip", "net.http1"),
     ("net.brotli", "net.http1"),
+    // LE CANAL D'ENQUETE N'ATTEND PAS DHCP, ET C'EST TOUT SON INTERET.
+    //
+    // Un OFFER DHCP est une trame ENTRANTE, c'est-a-dire la chose en panne le
+    // jour ou ce canal sert. La telemetrie ne demande que de quoi EMETTRE ;
+    // BRDP, lui, a besoin des deux sens, donc du lien.
+    ("net.lab.telemetrie", "net.ethernet"),
+    ("net.lab.brdp", "net.link"),
     // Le navigateur.
     ("browser.request_server", "browser.host"),
     ("browser.web_content", "browser.host"),
@@ -749,6 +756,14 @@ pub const TOPOLOGIE: &[(&str, &str, Genre)] = &[
     ("net.l4", "net", Genre::Groupe),
     ("net.udp", "net.l4", Genre::Protocole),
     ("net.tcp", "net.l4", Genre::Protocole),
+    // LE CANAL D'ENQUETE EST UN SERVICE COMME UN AUTRE, ET IL EST DECLARE
+    // ICI POUR LA MEME RAISON QUE LES AUTRES : un composant qui se tait est
+    // exactement celui qu'on vient chercher dans cette vue. Un BRDP
+    // `indisponible faute de jeton` doit se lire, sinon on cherche une panne
+    // la ou il n'y a qu'une image qui n'est pas une image de laboratoire.
+    ("net.lab", "net", Genre::Groupe),
+    ("net.lab.telemetrie", "net.lab", Genre::Service),
+    ("net.lab.brdp", "net.lab", Genre::Service),
     ("net.security", "net", Genre::Groupe),
     ("net.tls", "net.security", Genre::Protocole),
     ("net.application", "net", Genre::Groupe),

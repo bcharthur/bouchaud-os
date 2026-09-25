@@ -110,6 +110,13 @@ jobs:
       - name: Suites de tests hote
         run: tools/ci/run_host_tests.sh
 
+      # ICI, ET PAS DANS INTEGRATION. Ce banc construit le noyau deux fois, une
+      # fois avec jeton et une fois sans ; il n'a de sens que la ou le cache
+      # cargo est deja chaud, sinon il paie deux constructions froides pour
+      # verifier une constante. Integration part d'une image telechargee.
+      - name: Jeton BRDP (image armee / image sans serveur)
+        run: tools/ci/run_brdp_jeton.sh
+
       # Ce qui a ete gagne ne doit pas se reperdre : un site d'acquisition du
       # gros verrou rajoute dans un sous-systeme qu'on venait d'alleger
       # n'echoue a aucun test, et annule pourtant le travail.

@@ -191,6 +191,24 @@ fn net(t: &mut Reponse) {
         super::PORT_TELEMETRIE,
         super::jetees(),
     );
+    // L'ETAT DU BRANCHEMENT, DANS LE VOCABULAIRE DU CLIENT PC.
+    //
+    // Dire « armed » ne dit rien du jeton : c'est le fait qu'un fil ecoute,
+    // pas son secret. Un client qui n'obtient pas de reponse a besoin de
+    // distinguer « le serveur est desactive faute de jeton » de « le serveur
+    // est mort » -- et cette reponse-ci, il ne l'obtient que s'il a deja pu
+    // s'authentifier, donc la lui donner n'apprend rien a personne d'autre.
+    let etat = super::services();
+    let (datagrammes, evenements, _, abandons) = super::telemetrie::compteurs();
+    let _ = write!(
+        t,
+        ",\"brdp\":\"{}\",\"telemetry\":\"{}\",\"telemetrie_datagrammes\":{datagrammes},\
+\"telemetrie_evenements\":{evenements},\"telemetrie_abandons\":{abandons},\
+\"telemetrie_perdus\":{}",
+        etat.brdp.nom(),
+        etat.telemetrie.nom(),
+        super::telemetrie::perdus(),
+    );
     ip_json(t, "ip_lab", super::ip());
 }
 

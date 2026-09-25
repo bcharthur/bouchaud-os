@@ -509,6 +509,10 @@ pub fn run(boot: &'static BootInfo) -> ! {
         crate::net::diag_distant::PORT_BRDP,
         crate::net::diag_distant::PORT_TELEMETRIE,
     );
+    // LES DEUX CANAUX PARTENT ICI, et la politique est celle de `main.rs`
+    // parce que c'est LA MEME FONCTION. Voir `diag_distant::demarre_services`.
+    // Ni l'un ni l'autre ne peut faire echouer l'amorcage.
+    crate::net::diag_distant::demarre_services();
     crate::kernel::services::etat("net.link", crate::kernel::services::Etat::Actif);
     crate::kernel::services::phase("sys.graphique");
 

@@ -38,7 +38,7 @@ pub mod tampon;
 pub mod telemetrie;
 pub mod tri;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::net::file_trames::FileTrames;
 
@@ -194,4 +194,223 @@ pub fn compteurs() -> (u64, u64, u64, u64) {
 
 pub fn jetees() -> u64 {
     JETEES.load(Ordering::Relaxed)
+}
+
+
+// ---------------------------------------------------------------------------
+// LE BRANCHEMENT AU DEMARRAGE : UNE SEULE POLITIQUE, DEUX CHEMINS D'AMORCAGE
+// ---------------------------------------------------------------------------
+//
+// `main.rs` et `platform/pc/stage2.rs` amorcent la meme machine par deux
+// routes differentes. Ecrire la politique dans les deux ferait deux
+// politiques : elles resteraient identiques le jour de la livraison et
+// divergeraient la semaine suivante, sans que rien ne le dise -- et l'on
+// passerait la campagne d'apres a se demander pourquoi le canal d'enquete
+// repond en QEMU et pas sur la machine physique, ou l'inverse.
+//
+// Les deux appellent donc `ouvre(mac)` puis `demarre_services()`, et la
+// politique vit ici.
+
+/// Ce que le serveur BRDP est devenu au demarrage.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum EtatBrdp {
+    /// `demarre_services()` n'a pas encore ete appele.
+    PasEncore = 0,
+    /// Le fil ecoute sur `PORT_BRDP`.
+    Arme = 1,
+    /// AUCUN JETON N'A ETE INJECTE AU BUILD, et rien n'ecoute.
+    ///
+    /// Ce n'est pas une panne : c'est une image qui n'est pas une image de
+    /// laboratoire. La distinction compte, parce qu'une panne appelle une
+    /// enquete et celle-ci appelle une option de construction.
+    Desactive = 2,
+    /// Un jeton existe, mais le fil n'a pas pu demarrer.
+    Echec = 3,
+}
+
+impl EtatBrdp {
+    /// Le mot que porte le releve. C'est le vocabulaire du client PC.
+    pub const fn nom(self) -> &'static str {
+        match self {
+            EtatBrdp::PasEncore => "pending",
+            EtatBrdp::Arme => "armed",
+            EtatBrdp::Desactive => "disabled",
+            EtatBrdp::Echec => "failed",
+        }
+    }
+
+    const fn depuis(v: u8) -> Self {
+        match v {
+            1 => EtatBrdp::Arme,
+            2 => EtatBrdp::Desactive,
+            3 => EtatBrdp::Echec,
+            _ => EtatBrdp::PasEncore,
+        }
+    }
+}
+
+/// Ce que la telemetrie est devenue au demarrage.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum EtatTelemetrie {
+    /// `demarre_services()` n'a pas encore ete appele.
+    PasEncore = 0,
+    /// Le fil tourne et pousse l'anneau en diffusion.
+    EnMarche = 1,
+    /// Le fil n'a pas pu demarrer.
+    Echec = 2,
+}
+
+impl EtatTelemetrie {
+    pub const fn nom(self) -> &'static str {
+        match self {
+            EtatTelemetrie::PasEncore => "pending",
+            EtatTelemetrie::EnMarche => "running",
+            EtatTelemetrie::Echec => "failed",
+        }
+    }
+
+    const fn depuis(v: u8) -> Self {
+        match v {
+            1 => EtatTelemetrie::EnMarche,
+            2 => EtatTelemetrie::Echec,
+            _ => EtatTelemetrie::PasEncore,
+        }
+    }
+}
+
+/// L'etat du canal d'enquete, en une lecture et sans effet de bord.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Services {
+    pub ip: [u8; 4],
+    pub brdp: EtatBrdp,
+    pub telemetrie: EtatTelemetrie,
+}
+
+static ETAT_BRDP: AtomicU8 = AtomicU8::new(0);
+static ETAT_TELEMETRIE: AtomicU8 = AtomicU8::new(0);
+static SERVICES_DEMARRES: AtomicBool = AtomicBool::new(false);
+
+/// L'etat publie par `demarre_services()`.
+///
+/// LISIBLE SANS COM1, SANS RESEAU ET SANS VERROU. Le message serie n'est
+/// qu'un doublon : sur la machine de reference il n'a jamais produit un seul
+/// octet (`com1=bus-flottant  serial_bytes=0`), et une observabilite qui ne
+/// vit que dans un port absent n'existe pas.
+pub fn services() -> Services {
+    Services {
+        ip: ip(),
+        brdp: EtatBrdp::depuis(ETAT_BRDP.load(Ordering::Acquire)),
+        telemetrie: EtatTelemetrie::depuis(ETAT_TELEMETRIE.load(Ordering::Acquire)),
+    }
+}
+
+/// Lance les deux canaux d'enquete. NE PANIQUE PAS, NE BLOQUE PAS L'AMORCAGE.
+///
+/// A appeler juste apres `ouvre(mac)`. Idempotent.
+///
+/// # L'ordre n'est pas arbitraire
+///
+/// La telemetrie part EN PREMIER, parce qu'elle est le canal qui survit a ce
+/// qu'on cherche a nommer. Elle ne demande ni bail DHCP -- dont l'OFFER est
+/// une trame ENTRANTE, c'est-a-dire precisement la chose en panne -- ni
+/// jeton : elle n'accepte rien en entree, donc il n'y a rien a authentifier.
+/// BRDP, lui, a besoin des deux sens ; le faire partir d'abord ferait
+/// dependre le canal de survie de la reussite du canal fragile.
+///
+/// # Aucun des deux ne peut faire echouer l'amorcage
+///
+/// Les deux `demarre()` rendent un booleen et ne paniquent pas : un fil noyau
+/// qu'on ne peut pas creer rend `false`. Un canal d'enquete qui empecherait la
+/// machine de demarrer serait la pire des ironies -- on perdrait la machine
+/// pour garder l'outil qui sert a l'observer.
+pub fn demarre_services() -> Services {
+    if SERVICES_DEMARRES.swap(true, Ordering::AcqRel) {
+        // Les deux chemins d'amorcage sont exclusifs, mais l'idempotence est
+        // gratuite et elle evite qu'un second appel republie un etat.
+        return services();
+    }
+
+    let ouvert = actif();
+
+    let telemetrie = if telemetrie::demarre() {
+        EtatTelemetrie::EnMarche
+    } else {
+        EtatTelemetrie::Echec
+    };
+
+    // `serveur::arme()` ne dit pas « le fil tourne » : il dit qu'un jeton non
+    // vide a ete injecte au build. Sans lui on ne TENTE meme pas, et l'on ne
+    // parle pas d'echec -- un debugger en lecture seule sans authentification
+    // reste un debugger qui publie l'etat interne de la machine a quiconque
+    // atteint le segment local.
+    let brdp = if !serveur::arme() {
+        EtatBrdp::Desactive
+    } else if serveur::demarre() {
+        EtatBrdp::Arme
+    } else {
+        EtatBrdp::Echec
+    };
+
+    ETAT_TELEMETRIE.store(telemetrie as u8, Ordering::Release);
+    ETAT_BRDP.store(brdp as u8, Ordering::Release);
+
+    let ip = ip();
+    publie(ip, ouvert, brdp, telemetrie);
+    Services { ip, brdp, telemetrie }
+}
+
+/// Publie l'etat la ou on ira le chercher : le registre, l'anneau, la serie.
+fn publie(ip: [u8; 4], ouvert: bool, brdp: EtatBrdp, telemetrie: EtatTelemetrie) {
+    use crate::kernel::services::{etat, etat_car, Etat};
+
+    etat(
+        "net.lab",
+        if ouvert { Etat::Actif } else { Etat::Indisponible },
+    );
+
+    match telemetrie {
+        EtatTelemetrie::EnMarche => etat("net.lab.telemetrie", Etat::Actif),
+        // LA RAISON EST DITE, PAS DEVINEE. « Panne » sans raison oblige a
+        // choisir entre « le LAB n'est pas ouvert » et « l'ordonnanceur a
+        // refuse un fil », et l'on choisit toujours mal le jour ou l'on n'a
+        // pas le temps.
+        EtatTelemetrie::Echec => etat_car(
+            "net.lab.telemetrie",
+            Etat::Panne,
+            if ouvert { "fil-refuse" } else { "lab-ferme" },
+        ),
+        EtatTelemetrie::PasEncore => {}
+    }
+
+    match brdp {
+        EtatBrdp::Arme => etat("net.lab.brdp", Etat::Actif),
+        // INDISPONIBLE, PAS EN PANNE. Le registre porte deja cette
+        // distinction : une panne appelle une enquete, une indisponibilite
+        // appelle un prerequis -- ici, une option de construction.
+        EtatBrdp::Desactive => etat_car("net.lab.brdp", Etat::Indisponible, "sans-jeton"),
+        EtatBrdp::Echec => etat_car(
+            "net.lab.brdp",
+            Etat::Panne,
+            if ouvert { "fil-refuse" } else { "lab-ferme" },
+        ),
+        EtatBrdp::PasEncore => {}
+    }
+
+    crate::kernel::lab::emets(
+        crate::kernel::lab::Categorie::Remote,
+        crate::kernel::lab::id::LAB_SERVICES,
+        [empaquete_ip(ip), brdp as u64, telemetrie as u64, PORT_BRDP as u64],
+    );
+
+    // LE MESSAGE SERIE EST UN DOUBLON, ET RIEN D'AUTRE. Tout ce qu'il dit est
+    // deja dans le registre des services et dans l'anneau LAB ; sur la machine
+    // de reference il n'a jamais produit un octet.
+    crate::serial_println!(
+        "BOUCHAUD_LAB_READY ip={}.{}.{}.{} brdp={} telemetry={}",
+        ip[0], ip[1], ip[2], ip[3],
+        brdp.nom(),
+        telemetrie.nom(),
+    );
 }

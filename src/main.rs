@@ -266,6 +266,11 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // Le canal de diagnostic, sur une adresse link-local derivee de la MAC :
     // il ne demande rien a DHCP, dont l'OFFER est une trame entrante.
     net::diag_distant::ouvre(drivers::e1000::mac());
+    // LA POLITIQUE DES DEUX CANAUX VIT DANS `demarre_services`, PAS ICI.
+    // `stage2.rs` amorce la meme machine par une autre route et appelle la
+    // meme fonction : deux blocs separes resteraient identiques le jour de la
+    // livraison et divergeraient la semaine suivante, sans un mot.
+    net::diag_distant::demarre_services();
     kernel::services::etat(
         "net.link",
         if drivers::e1000::link_up() {
