@@ -575,10 +575,44 @@ jobs:
           path: target/usb-stockage-ci/usb-stockage.log
           if-no-files-found: warn
 
+  brdp-qemu-e2e:
+    name: qemu / BRDP + telemetry e2e
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + TAP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 iproute2
+      - name: Cache Cargo LAB
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: integration-brdp-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            integration-brdp-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: BRDP et telemetrie sur segment TAP reel
+        run: bash tools/ci/run_brdp_qemu_e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-brdp-qemu-e2e
+          path: target/brdp-qemu-e2e/
+          if-no-files-found: warn
+          retention-days: 7
+
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -596,13 +630,14 @@ jobs:
           USB: ${{ needs.usb-arbre.result }}
           PLUG: ${{ needs.usb-branchement.result }}
           STOCK: ${{ needs.usb-stockage.result }}
+          BRDP: ${{ needs.brdp-qemu-e2e.result }}
         run: |
           if [ "$ENABLED" != true ]; then
             echo 'INTEGRATION NON DEMANDEE : aucune suite QEMU n a tourne.'
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -612,7 +647,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -621,7 +656,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

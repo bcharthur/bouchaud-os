@@ -87,8 +87,22 @@ pub fn ouvre(mac: [u8; 6]) -> [u8; 4] {
         m = (m << 8) | octet as u64;
     }
     MAC.store(m, Ordering::Relaxed);
-    if !ACTIF.swap(true, Ordering::AcqRel) {
-        file().abonne();
+
+    // LA FILE DIAGNOSTIC PARTAGE LE MEME INGRESS QUE LA PILE NORMALE.
+    //
+    // `route_trame()` appelle `trie()` sous `VERROU_RECEPTION`. Abonner la
+    // file hors de ce verrou laisserait une fenetre ou ACTIF vaut vrai mais ou
+    // `pose()` refuse encore les trames. C'est une petite fenetre au boot, mais
+    // un canal d'enquete n'a justement pas le droit d'avoir une perte muette.
+    let premiere = {
+        let _garde = super::VERROU_RECEPTION.lock();
+        let premiere = !ACTIF.swap(true, Ordering::AcqRel);
+        if premiere {
+            file().abonne();
+        }
+        premiere
+    };
+    if premiere {
         crate::kernel::lab::emets(
             crate::kernel::lab::Categorie::Reseau,
             crate::kernel::lab::id::NET_LINK_LOCAL,
@@ -100,6 +114,7 @@ pub fn ouvre(mac: [u8; 6]) -> [u8; 4] {
 
 /// Ferme le canal. Le tri redevient exactement celui d'avant ce module.
 pub fn ferme() {
+    let _garde = super::VERROU_RECEPTION.lock();
     if ACTIF.swap(false, Ordering::AcqRel) {
         file().desabonne();
     }
@@ -178,7 +193,34 @@ pub fn trie(trame: &[u8]) -> tri::Verdict {
 }
 
 /// Retire une trame pour la pile de diagnostic.
+///
+/// # Pourquoi une file vide DOIT pomper l'ingress
+///
+/// La carte fonctionne en polling. Avant ce chemin, le fil BRDP ne lisait que
+/// sa file logique : si personne d'autre n'appelait `draine_anneau()`, un SYN
+/// pouvait rester vingt secondes dans l'anneau materiel, jusqu'au prochain
+/// reveil DHCP. La capture QEMU l'a montre directement : SYN et ARP entraient,
+/// aucune reponse ne sortait, puis un DHCP Request reveillait le drainage et
+/// faisait sortir d'un coup ARP Reply + SYN/ACK.
+///
+/// La pile normale applique deja exactement cette regle dans
+/// `retire_trame_smoltcp` : regarder la file sous le verrou, rendre le verrou,
+/// pomper l'ingress unique, puis relire. Le diagnostic doit suivre le meme
+/// contrat ; surtout PAS lire l'anneau directement, ce qui recreerait deux
+/// proprietaires RX.
 pub fn prends(sortie: &mut [u8]) -> Option<usize> {
+    {
+        let _garde = super::VERROU_RECEPTION.lock();
+        if let Some(n) = file().retire(sortie) {
+            return Some(n);
+        }
+    }
+
+    // `draine_anneau()` reprend lui-meme VERROU_RECEPTION. Il faut donc avoir
+    // rendu la garde ci-dessus avant cet appel.
+    super::draine_anneau();
+
+    let _garde = super::VERROU_RECEPTION.lock();
     file().retire(sortie)
 }
 

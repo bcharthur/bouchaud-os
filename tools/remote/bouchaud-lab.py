@@ -46,6 +46,7 @@ import json
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,18 @@ LIGNE_MAX = 8192
 #: `telemetrie::CHARGE_MAX`, plus l'en-tete UDP. Un datagramme plus gros a ete
 #: fragmente ou n'est pas de nous.
 DATAGRAMME_MAX = 2048
+
+# Le serveur BRDP V1 utilise une seule socket smoltcp. Apres un `quit`, cette
+# socket peut rester tres brievement indisponible pendant son recyclage avant
+# de repasser en LISTEN. Une seconde invocation CLI peut donc recevoir un
+# ECONNREFUSED transitoire alors que le service est sain.
+#
+# On ne masque PAS une panne : seul ConnectionRefusedError est rejoue, pendant
+# au plus 1,5 s (et jamais au-dela du --timeout demande). Un timeout, une route
+# absente, une erreur d'authentification ou un protocole invalide remontent
+# immediatement.
+RECYCLAGE_REFUS_MAX = 1.5
+RECYCLAGE_REFUS_PAUSE = 0.01
 
 
 class ErreurLab(Exception):
@@ -257,7 +270,27 @@ class ClientBrdp:
         return False
 
     def ouvre(self):
-        self._sock = socket.create_connection((self.hote, self.port), self.delai)
+        # Une socket unique cote serveur implique une courte fenetre de
+        # recyclage apres `quit`. C'est visible surtout quand plusieurs
+        # commandes CLI sont lancees a la suite par un banc : le processus
+        # suivant peut arriver avant que smoltcp ait remis la socket en LISTEN.
+        #
+        # Retenter uniquement ECONNREFUSED rend le vrai client robuste a ce
+        # comportement documente sans transformer `--timeout` en attente
+        # silencieuse. Le temps total de recyclage est borne a 1,5 s.
+        debut = time.monotonic()
+        fin_recyclage = debut + min(self.delai, RECYCLAGE_REFUS_MAX)
+        while True:
+            try:
+                self._sock = socket.create_connection(
+                    (self.hote, self.port), self.delai
+                )
+                break
+            except ConnectionRefusedError:
+                if time.monotonic() >= fin_recyclage:
+                    raise
+                time.sleep(RECYCLAGE_REFUS_PAUSE)
+
         self._sock.settimeout(self.delai)
         self._lecteur = LecteurLignes(self._sock)
         try:
