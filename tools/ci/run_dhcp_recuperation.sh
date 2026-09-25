@@ -121,7 +121,23 @@ python3 tools/ci/lis_dhcp_pcap.py "$TRAVAIL/fil.pcap" 2>/dev/null | tail -3 || t
 
 # Le critere n'est pas « un bail a ete vu quelque part » mais « le verdict
 # durable de la machine est devenu `pret` sans qu'on lui demande rien ».
-if printf '%s\n' "$SERIE" | grep -aq "BOUCHAUD_NET_RECONFIGURE verdict=pret"; then
+#
+# UNE CHAINE ICI, PAS UN TUBE, ET CE N'EST PAS UN DETAIL DE STYLE.
+#
+# `printf ... | grep -q` sous `set -o pipefail` rend 141 des que grep trouve
+# tot : grep sort, `printf` prend un SIGPIPE, et le statut du TUBE devient
+# l'echec de printf -- pas le succes de grep. Ce banc declarait donc FIGE une
+# machine dont il venait d'IMPRIMER le `verdict=pret` six lignes plus haut,
+# avec un « printf: write error: Broken pipe » comme seul indice.
+#
+# Le declenchement depend de la LONGUEUR du journal : tant qu'il tenait dans
+# le tampon du tube, printf finissait avant grep et le bug dormait. Une ligne
+# de serie de plus au demarrage -- `BOUCHAUD_LAB_READY` -- a suffi a le
+# reveiller. Un faux rouge est aussi couteux qu'un faux vert.
+#
+# `run_rx_recuperation.sh` et `run_dhcp_scenarios.sh` portaient deja la regle ;
+# ce banc-ci avait ete oublie.
+if grep -aq "BOUCHAUD_NET_RECONFIGURE verdict=pret" <<<"$SERIE"; then
   echo "DHCP_RECUPERATION verdict=RATTRAPE"
   exit 0
 fi
