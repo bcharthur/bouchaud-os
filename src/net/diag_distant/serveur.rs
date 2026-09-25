@@ -515,20 +515,30 @@ fn verse_des_evenements(
                 // LE TROU SE DIT, IL NE SE COMBLE PAS. Un client qui recevrait
                 // une suite trouee presentee comme continue tirerait des
                 // conclusions fausses sur la chronologie.
-                let (neuf, perdues) = crate::kernel::lab::recale(session.curseur);
+                let (recale_vers, _) = crate::kernel::lab::recale(session.curseur);
+                // LA DESTINATION EST DECIDEE AVANT D'ETRE ANNONCEE, et le
+                // curseur avance toujours d'au moins un : un recalage qui ne
+                // ferait pas avancer relancerait le meme trou a chaque tour.
+                // Voir `politique::LectureTransport`, qui porte la meme regle
+                // pour le canal de telemetrie.
+                //
+                // `perdues` se DEDUIT de la destination au lieu d'etre repris
+                // de `recale`. Les deux coincident des que le recalage avance
+                // -- le cas courant -- mais pas quand la borne d'un cran joue :
+                // annoncer alors le `0` de `recale` dirait au client qu'il n'a
+                // rien manque, en sautant quand meme un evenement. Un trou tu
+                // est precisement ce que cette branche existe pour empecher.
+                let destination = recale_vers.max(session.curseur + 1);
+                let perdues = destination - session.curseur;
                 sortie.vide();
                 let _ = write!(
                     sortie,
-                    "{{\"lost\":{perdues},\"from\":{},\"to\":{neuf}}}",
+                    "{{\"lost\":{perdues},\"from\":{},\"to\":{destination}}}",
                     session.curseur,
                 );
                 sortie.termine();
                 let pris = verse(sock, sortie.octets());
-                // LE CURSEUR PREND LA VALEUR RENDUE, et ne recule jamais : un
-                // recalage qui ne ferait pas avancer relancerait le meme trou
-                // a chaque tour. Voir `politique::LectureTransport`, qui porte
-                // la meme regle pour le canal de telemetrie.
-                session.curseur = neuf.max(session.curseur + 1);
+                session.curseur = destination;
                 if pris < sortie.len() {
                     reste = sortie.len() - pris;
                 }
