@@ -266,6 +266,50 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         ));
     }
 
+    // BOUCHAUD_HOTFIX13_ASYNC_KERNEL_REAP_V2
+    //
+    // `spawn_noyau_*` cree un vrai Process + une ligne dans le registre
+    // utilisateur, mais rend seulement un bool : personne ne recoit de PID,
+    // personne ne peut faire wait4(), et un travailleur fini n'a donc AUCUN
+    // recolteur. La campagne physique Internet l'a rendu mesurable : une
+    // preuve finie ajoutait exactement une ligne `taches` au releve distant.
+    //
+    // Le lancement synchrone `run()` est different : sa racine est publiee
+    // dans RACINE_PREMIER_PLAN et le fil noyau appelant attend son code de
+    // sortie. On ne la recolte jamais ici.
+    //
+    // Un travailleur NOYAU, parent=0, dernier thread, qui n'est pas la racine
+    // synchrone courante est donc un travailleur detache sans wait4 possible.
+    // Toutes les sondes de sortie et la supervision ont deja ete publiees
+    // au-dessus; c'est le dernier endroit sur sa pile ou ses deux registres
+    // peuvent etre nettoyes avant la commutation definitive.
+    if dernier_thread {
+        let (detache, pid, nom) = {
+            let task = current();
+            let process = &task.process;
+            let racine_synchrone = RACINE_PREMIER_PLAN.load(Ordering::Acquire);
+            (
+                task.noyau
+                    && process.parent == 0
+                    && process.pid != racine_synchrone,
+                process.pid,
+                process.metadata.lock().name.clone(),
+            )
+        };
+        if detache {
+            // `collect_child` retire l'Arc de PROCESSES et la ligne du
+            // registre simple kernel::process. La tache courante conserve
+            // encore son propre Arc jusqu'a sa commutation definitive.
+            collect_child(pid);
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ASYNC_KERNEL_REAP t={} pid={} nom={}",
+                crate::kernel::timer::monotonic_ms(),
+                pid,
+                nom,
+            ));
+        }
+    }
+
     abandonne_bkl_avant_sortie_definitive();
 
     // BOUCHAUD_C39_PORTEES_ABANDONNEES

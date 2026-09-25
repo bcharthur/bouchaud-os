@@ -2,6 +2,8 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 pub const DEMARRER: u8 = 1;
 pub const ARRETER: u8 = 2;
+// BOUCHAUD_P0_REMOTE_CONTROL_V1
+pub const REDEMARRER: u8 = 3;
 static COMMANDE: AtomicU8 = AtomicU8::new(0);
 static RACINE: AtomicU32 = AtomicU32::new(0);
 static ECHEC: AtomicU8 = AtomicU8::new(0);

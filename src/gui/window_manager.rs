@@ -1078,7 +1078,27 @@ fn boucle() {
             }
         }
         let service_action = crate::gui::services::prend_commande();
-        if service_action == crate::gui::services::ARRETER {
+
+        // BOUCHAUD_P0_REMOTE_CONTROL_V1_2_TWO_PHASE_RESTART
+        // Le releve physique du 25/09/2026 a prouve STOP seul et START seul,
+        // mais le V1.1 les enchainait dans le meme tour du WM et rendait BRDP
+        // indisponible pendant la relance. Un restart est maintenant deux phases:
+        // ce tour detruit l'ancien arbre puis programme DEMARRER; prend_commande()
+        // ayant deja eu lieu, le start ne peut etre consomme qu'au tour suivant.
+        if service_action == crate::gui::services::REDEMARRER {
+            for w in wins.iter_mut() {
+                if let App::Navigateur { client } = &mut w.app { client.termine(); }
+            }
+            wins.retain(|w| !window::est_client(w));
+            crate::gui::services::arrete();
+            degats.tout();
+            sale = true;
+            crate::serial_println!(
+                "BOUCHAUD_REMOTE_BROWSER_RESTART phase=stopped next=start t_ms={}",
+                crate::kernel::timer::monotonic_ms(),
+            );
+            crate::gui::services::demande(crate::gui::services::DEMARRER);
+        } else if service_action == crate::gui::services::ARRETER {
             for w in wins.iter_mut() {
                 if let App::Navigateur { client } = &mut w.app { client.termine(); }
             }

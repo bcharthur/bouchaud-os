@@ -76,6 +76,9 @@ SERIAL_READ_MAX = 1536
 SERIAL_STATUS_CODE = 90
 SERIAL_READ_CODE = 91
 
+# BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+SERVICES_PAGE_CODE = 92
+
 
 #: `reponses::REPONSE_MAX` vaut 4096 ; le terminateur et un peu de marge
 #: au-dessus evitent de refuser une ligne que le serveur a le droit d'emettre.
@@ -166,6 +169,8 @@ COMMANDES = [
     Commande("events-tail", "events tail", 13, argument="n", flux=True),
     Commande("events-watch", "events watch", 14, flux=True),
     Commande("services", "services snapshot", 15),
+    # BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+    Commande("services-page", "services page", SERVICES_PAGE_CODE, argument="start"),
     Commande("processes", "processes snapshot", 16),
     Commande("memory", "memory snapshot", 17),
     # HOTFIX11_SERIAL_CAPTURE
@@ -173,6 +178,15 @@ COMMANDES = [
     Commande("quit", "quit", 18),
     Commande("internet-start", "internet proof start", 19),
     Commande("internet", "internet proof status", 20),
+
+    # BOUCHAUD_P0_REMOTE_CONTROL_V1
+    Commande("system-reboot", "system reboot", 100),
+    Commande("system-shutdown", "system shutdown", 101),
+    Commande("browser-start", "browser start", 110),
+    Commande("browser-stop", "browser stop", 111),
+    Commande("browser-restart", "browser restart", 112),
+    Commande("process-kill", "process kill", 120, argument="pid"),
+    Commande("process-kill-tree", "process kill-tree", 121, argument="pid"),
 ]
 
 PAR_NOM = {c.cli: c for c in COMMANDES}
@@ -234,6 +248,30 @@ class LecteurLignes:
             raise ErreurProtocole(f"ligne JSON invalide : {exc}") from exc
         if not isinstance(objet, dict):
             raise ErreurProtocole("une ligne du protocole est toujours un objet")
+        return objet
+
+    # BOUCHAUD_HOTFIX12_1_SERVICES_JSON_COMPAT
+    def objet_services_v1_compat(self) -> dict:
+        # Compatibilite ciblee avec le JSON coupe de Hotfix12 V1.
+        morceaux = []
+        continuations = 0
+        while True:
+            brut = self.ligne()
+            if brut.endswith(b"\\"):
+                morceaux.append(brut[:-1])
+                continuations += 1
+                if continuations > 4:
+                    raise ErreurProtocole("services page V1: trop de continuations JSON")
+                continue
+            morceaux.append(brut)
+            break
+        brut = b"".join(morceaux)
+        try:
+            objet = json.loads(brut.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise ErreurProtocole(f"services page: JSON invalide apres compat V1 : {exc}") from exc
+        if not isinstance(objet, dict):
+            raise ErreurProtocole("services page: reponse non objet")
         return objet
 
 
@@ -342,6 +380,17 @@ class ClientBrdp:
             self._lecteur = None
             self.authentifiee = False
 
+    def abandonne(self):
+        # Fermeture locale immediate d'un transport deja douteux.
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._sock = None
+        self._lecteur = None
+        self.authentifiee = False
+
     # -- la poignee de main ------------------------------------------------
 
     def _poignee_de_main(self):
@@ -415,7 +464,10 @@ class ClientBrdp:
             objet[commande.argument] = int(valeur)
         self._envoie(objet)
 
-        reponse = self._lecteur.objet()
+        if nom == "services-page":
+            reponse = self._lecteur.objet_services_v1_compat()
+        else:
+            reponse = self._lecteur.objet()
         if not reponse.get("ok"):
             raise ErreurCommande(
                 reponse.get("error", "inconnue"), reponse.get("code", 0)
@@ -975,6 +1027,171 @@ def fait_commande_simple(args, jeton, nom: str, valeur=None,
     return 0
 
 
+# BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+def collecte_services_detail(args, jeton) -> dict:
+    start = 0
+    total = None
+    entrees = []
+    t_ns = 0
+    client = None
+    echecs_consecutifs = 0
+
+    try:
+        while total is None or start < total:
+            try:
+                if client is None:
+                    client = ClientBrdp(args.host, jeton, args.port, args.timeout)
+                    client.ouvre()
+                page = client.commande("services-page", start)
+                echecs_consecutifs = 0
+            except (OSError, socket.timeout, FinDeFlux) as exc:
+                if client is not None:
+                    client.abandonne()
+                client = None
+                echecs_consecutifs += 1
+                print(
+                    f"services-all: transport retry {echecs_consecutifs}/5 au curseur {start}: {exc}",
+                    file=sys.stderr,
+                )
+                if echecs_consecutifs >= 5:
+                    raise
+                time.sleep(min(0.25 * echecs_consecutifs, 1.0))
+                continue
+
+            page_total = page.get("total")
+            prochain = page.get("next")
+            lignes = page.get("entries")
+            if not isinstance(page_total, int) or page_total < 0:
+                raise ErreurProtocole("services page: total absent/invalide")
+            if not isinstance(prochain, int) or prochain < start:
+                raise ErreurProtocole("services page: curseur next invalide")
+            if not isinstance(lignes, list):
+                raise ErreurProtocole("services page: entries absent")
+            if prochain == start and start < page_total:
+                raise ErreurProtocole("services page: aucun progres")
+
+            if total is None:
+                total = page_total
+            elif page_total != total:
+                entrees.clear()
+                start = 0
+                total = page_total
+                continue
+
+            for e in lignes:
+                if not isinstance(e, dict) or not isinstance(e.get("id"), str):
+                    raise ErreurProtocole("services page: entree invalide")
+                entrees.append(e)
+
+            t_ns = max(t_ns, int(page.get("t_ns", 0)))
+            start = prochain
+            if page.get("done") is True:
+                break
+    finally:
+        if client is not None:
+            client.ferme()
+
+    return {
+        "host": args.host,
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "t_ns": t_ns,
+        "total": total if total is not None else 0,
+        "services": entrees,
+    }
+
+
+def _profondeur_service(entree: dict, par_id: dict) -> int:
+    profondeur = 0
+    parent = entree.get("parent") or ""
+    vus = set()
+    while parent and parent in par_id and parent not in vus and profondeur < 8:
+        vus.add(parent)
+        profondeur += 1
+        parent = par_id[parent].get("parent") or ""
+    return profondeur
+
+
+def fait_services_all(args, jeton) -> int:
+    capture = collecte_services_detail(args, jeton)
+    services = capture["services"]
+    prefixe = (args.prefix or "").strip()
+    if prefixe:
+        services_affiches = [
+            e for e in services
+            if e.get("id") == prefixe or str(e.get("id", "")).startswith(prefixe + ".")
+        ]
+    else:
+        services_affiches = services
+
+    sortie = Path(args.out) if args.out else (
+        racine_depot() / "target" /
+        f"services-detail-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    )
+    sortie.parent.mkdir(parents=True, exist_ok=True)
+    sortie.write_text(
+        json.dumps(capture, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+
+    if args.json:
+        print(json.dumps(
+            {**capture, "services": services_affiches},
+            indent=2, ensure_ascii=False, sort_keys=False,
+        ))
+        return 0
+
+    par_id = {e.get("id"): e for e in services if isinstance(e.get("id"), str)}
+    print("=== registre des services Bouchaud OS ===")
+    print(f"  total capture : {capture['total']}")
+    if prefixe:
+        print(f"  filtre        : {prefixe}")
+    print(f"  fichier       : {sortie}")
+    print()
+
+    racine_precedente = None
+    for e in services_affiches:
+        ident = e.get("id", "?")
+        racine = ident.split(".", 1)[0]
+        if racine != racine_precedente:
+            if racine_precedente is not None:
+                print()
+            print(f"[{racine}]")
+            racine_precedente = racine
+
+        profondeur = _profondeur_service(e, par_id)
+        etat = e.get("etat") or "?"
+        raison = e.get("raison") or "-"
+        prerequis = e.get("prerequis") or "-"
+        kpi = e.get("kpi") if isinstance(e.get("kpi"), dict) else {}
+        pid = kpi.get("pid")
+        cpu = kpi.get("cpu_pour_mille")
+        erreurs = e.get("erreurs", 0)
+
+        extras = []
+        if pid is not None:
+            extras.append(f"pid={pid}")
+        if cpu is not None:
+            extras.append(f"cpu={cpu/10:.1f}%")
+        if erreurs:
+            extras.append(f"err={erreurs}")
+        suffixe = ("  " + " ".join(extras)) if extras else ""
+
+        print(
+            f"{'  ' * profondeur}{ident:<36} "
+            f"{etat:<13} raison={raison} prerequis={prerequis}{suffixe}"
+        )
+
+    print()
+    problematiques = [
+        e for e in services
+        if e.get("etat") in ("demarrage", "degrade", "reprise", "panne")
+    ]
+    print(f"services a examiner : {len(problematiques)}")
+    for e in problematiques:
+        print(f"  {e.get('id')}: {e.get('etat')} ({e.get('raison') or '-'})")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # LA LIGNE DE COMMANDE
 # ---------------------------------------------------------------------------
@@ -1023,6 +1240,19 @@ def construis_parseur() -> argparse.ArgumentParser:
         sp = avec_hote(sous.add_parser(nom, help=titre))
         sp.set_defaults(_faire=lambda a, j, c=cible, o=ordre, t=titre:
                         fait_commande_simple(a, j, c, None, o, t))
+
+    # BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+    sp = avec_hote(sous.add_parser(
+        "services-all",
+        help="capturer le registre detaille sys/net/browser sans interaction"),
+        defaut_timeout=15.0)
+    sp.add_argument(
+        "--prefix", default=None,
+        help="filtre d'affichage local: sys, net, browser ou un sous-arbre")
+    sp.add_argument(
+        "--out", default=None,
+        help="JSON complet (defaut: target/services-detail-*.json)")
+    sp.set_defaults(_faire=fait_services_all)
 
     sp = avec_hote(sous.add_parser(
         "rtl8168-desc", help=f"un descripteur (0..{DESCRIPTEURS_MAX - 1})"))

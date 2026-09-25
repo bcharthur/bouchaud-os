@@ -203,3 +203,19 @@ tools/ladybird/certs/cacert.pem
 /ladybird-browser-host.img
 # run_native_ipc_probe.sh (l'image vit sous target/, le scenario non)
 /scenario-native-ipc/
+
+# BOUCHAUD_LOCAL_PATCH_SCAFFOLDS_V1
+# Overlays, sauvegardes et scripts ponctuels generes pendant les campagnes.
+/.patch-backup/
+/.hotfix*-last-backup
+/HOTFIX*/
+/STRESS-*/
+/P0-REMOTE-CONTROL-V*/
+/BOUCHAUD-LIVE-AND-STRESS-V*/
+/ANALYSE-LADYBIRD-*.ps1
+/APPLY-LADYBIRD-*.ps1
+/FINALIZE-LADYBIRD-*.ps1
+/.ladybird-local-export*
+/native-browser-m9/
+/native-browser-m9.previous-*/
+/scenario-stage2-ladybird/

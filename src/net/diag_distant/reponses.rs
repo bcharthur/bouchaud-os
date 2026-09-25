@@ -109,6 +109,11 @@ pub fn rend(t: &mut Reponse, commande: Commande) -> bool {
             services(t);
             true
         }
+        // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+        Commande::ServicesPage { start } => {
+            services_page(t, start);
+            true
+        }
         Commande::ProcessesSnapshot => {
             processus(t);
             true
@@ -117,6 +122,45 @@ pub fn rend(t: &mut Reponse, commande: Commande) -> bool {
             memoire(t);
             true
         }
+
+        // BOUCHAUD_P0_REMOTE_CONTROL_V1
+        Commande::SystemReboot => {
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"reboot\",\"delay_ms\":250");
+            true
+        }
+        Commande::SystemShutdown => {
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"shutdown\",\"delay_ms\":250");
+            true
+        }
+        Commande::BrowserStart => {
+            crate::gui::services::demande(crate::gui::services::DEMARRER);
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"browser-start\",\"root_pid\":{}", crate::gui::services::racine());
+            true
+        }
+        Commande::BrowserStop => {
+            crate::gui::services::demande(crate::gui::services::ARRETER);
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"browser-stop\",\"root_pid\":{}", crate::gui::services::racine());
+            true
+        }
+        Commande::BrowserRestart => {
+            crate::gui::services::demande(crate::gui::services::REDEMARRER);
+            // BOUCHAUD_P0_REMOTE_CONTROL_V1_2_ACK
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"browser-restart\",\"mode\":\"two-phase\",\"root_pid\":{}", crate::gui::services::racine());
+            true
+        }
+        Commande::ProcessKill { pid } => {
+            crate::kernel::task::tue_processus(pid, 137);
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"process-kill\",\"pid\":{pid}");
+            true
+        }
+        Commande::ProcessKillTree { pid } => {
+            let cibles = crate::kernel::task::arbre_de(pid);
+            let nombre = cibles.len();
+            for cible in cibles.iter().rev() { crate::kernel::task::tue_processus(*cible, 137); }
+            let _ = write!(t, ",\"accepted\":true,\"action\":\"process-kill-tree\",\"pid\":{pid},\"targets\":{nombre}");
+            true
+        }
+
         // BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
         Commande::InternetProofStart => {
             let started = crate::net::preuve_internet::lance();
@@ -535,6 +579,126 @@ fn services(t: &mut Reponse) {
         t,
         ",\"utilisateur_ms\":{utilisateur_ms},\"systeme_ms\":{systeme_ms},\"charge\":{charge}",
     );
+}
+
+// BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+//
+// La fenetre Services lit deja le registre central complet. BRDP lit maintenant
+// exactement cette meme source de verite, par petites pages bornees.
+const SERVICES_PAR_PAGE: usize = 1;
+
+fn json_chaine(t: &mut Reponse, texte: &str) {
+    let _ = t.write_char('"');
+    for c in texte.chars() {
+        match c {
+            '"' => { let _ = t.write_str("\\\""); }
+            '\\' => { let _ = t.write_str("\\\\"); }
+            '\n' => { let _ = t.write_str("\\n"); }
+            '\r' => { let _ = t.write_str("\\r"); }
+            '\t' => { let _ = t.write_str("\\t"); }
+            c if c.is_control() => { let _ = write!(t, "\\u{:04x}", c as u32); }
+            c => { let _ = t.write_char(c); }
+        }
+    }
+    let _ = t.write_char('"');
+}
+
+fn json_option_nombre<T: core::fmt::Display>(t: &mut Reponse, valeur: Option<T>) {
+    match valeur {
+        Some(v) => { let _ = write!(t, "{v}"); }
+        None => { let _ = t.write_str("null"); }
+    }
+}
+
+fn json_option_chaine(t: &mut Reponse, valeur: Option<&str>) {
+    match valeur {
+        Some(v) => json_chaine(t, v),
+        None => { let _ = t.write_str("null"); }
+    }
+}
+
+fn service_detail(t: &mut Reponse, e: &crate::kernel::services::registre::Entree) {
+    use crate::kernel::services::registre;
+
+    let _ = t.write_str("{\"id\":");
+    json_chaine(t, e.id.texte());
+    let _ = t.write_str(",\"parent\":");
+    json_chaine(t, e.parent.texte());
+    let _ = t.write_str(",\"genre\":");
+    json_chaine(t, e.genre.nom());
+    let _ = t.write_str(",\"etat\":");
+    json_chaine(t, e.etat.nom());
+    let _ = t.write_str(",\"raison\":");
+    if e.raison.est_vide() { let _ = t.write_str("null"); } else { json_chaine(t, e.raison.texte()); }
+    let _ = t.write_str(",\"prerequis\":");
+    json_option_chaine(t, registre::prerequis(e.id.texte()));
+
+    let _ = write!(
+        t,
+        ",\"debut_ns\":{},\"pret_ns\":{},\"derniere_activite_ns\":{},\
+\"dernier_succes_ns\":{},\"derniere_erreur_ns\":{},\"derniere_transition_ns\":{},\
+\"redemarrages\":{},\"reprises\":{},\"erreurs\":{}",
+        e.debut_ns,
+        e.pret_ns,
+        e.derniere_activite_ns,
+        e.dernier_succes_ns,
+        e.derniere_erreur_ns,
+        e.derniere_transition_ns,
+        e.redemarrages,
+        e.reprises,
+        e.erreurs,
+    );
+
+    let k = e.kpi;
+    let _ = t.write_str(",\"kpi\":{\"cpu_pour_mille\":");
+    json_option_nombre(t, k.cpu_pour_mille);
+    let _ = t.write_str(",\"rss_octets\":"); json_option_nombre(t, k.rss_octets);
+    let _ = t.write_str(",\"vss_octets\":"); json_option_nombre(t, k.vss_octets);
+    let _ = t.write_str(",\"disque_lu\":"); json_option_nombre(t, k.disque_lu);
+    let _ = t.write_str(",\"disque_ecrit\":"); json_option_nombre(t, k.disque_ecrit);
+    let _ = t.write_str(",\"rx_octets\":"); json_option_nombre(t, k.rx_octets);
+    let _ = t.write_str(",\"tx_octets\":"); json_option_nombre(t, k.tx_octets);
+    let _ = t.write_str(",\"latence_us\":"); json_option_nombre(t, k.latence_us);
+    let _ = t.write_str(",\"latence_max_us\":"); json_option_nombre(t, k.latence_max_us);
+    let _ = t.write_str(",\"operations\":"); json_option_nombre(t, k.operations);
+    let _ = t.write_str(",\"pid\":"); json_option_nombre(t, k.pid);
+    let _ = t.write_str(",\"instances\":"); json_option_nombre(t, k.instances);
+    let _ = t.write_str(",\"fautes_nombre\":"); json_option_nombre(t, k.fautes_nombre);
+    let _ = t.write_str(",\"fautes_total_us\":"); json_option_nombre(t, k.fautes_total_us);
+    let _ = t.write_str(",\"fautes_pire_us\":"); json_option_nombre(t, k.fautes_pire_us);
+    let _ = t.write_str(",\"ppid\":"); json_option_nombre(t, k.ppid);
+    let _ = t.write_str(",\"groupe\":"); json_option_nombre(t, k.groupe);
+    let _ = t.write_str(",\"threads\":"); json_option_nombre(t, k.threads);
+    let _ = t.write_str(",\"threads_executables\":"); json_option_nombre(t, k.threads_executables);
+    let _ = t.write_str(",\"cpu_chaud\":"); json_option_nombre(t, k.cpu_chaud);
+    let _ = t.write_str(",\"cpu_chaud_pour_mille\":"); json_option_nombre(t, k.cpu_chaud_pour_mille);
+    let _ = t.write_str(",\"migrations\":"); json_option_nombre(t, k.migrations);
+    let _ = t.write_str(",\"commutations\":"); json_option_nombre(t, k.commutations);
+    let _ = t.write_str(",\"fautes_dominante\":"); json_option_chaine(t, k.fautes_dominante);
+    let _ = t.write_str("}}");
+}
+
+fn services_page(t: &mut Reponse, start: u16) {
+    // Rafraichit les producteurs sans inventer une seconde mesure : chacun
+    // conserve sa cadence propre (1 s protocoles, 5 s processus).
+    crate::kernel::services::publie_les_indicateurs();
+    crate::gui::services::releve_si_du();
+
+    crate::kernel::services::avec_atelier(|atelier| {
+        let total = atelier.connues;
+        let debut = (start as usize).min(total);
+        let fin = debut.saturating_add(SERVICES_PAR_PAGE).min(total);
+        let _ = write!(
+            t,
+            ",\"t_ns\":{},\"total\":{},\"start\":{},\"next\":{},\"done\":{},\"entries\":[",
+            crate::kernel::timer::monotonic_ns(), total, debut, fin, fin >= total,
+        );
+        for (rang, e) in atelier.entrees[debut..fin].iter().enumerate() {
+            if rang != 0 { let _ = t.write_char(','); }
+            service_detail(t, e);
+        }
+        let _ = t.write_char(']');
+    });
 }
 
 fn processus(t: &mut Reponse) {

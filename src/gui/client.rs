@@ -818,12 +818,19 @@ impl Client {
     }
 
     pub fn termine(&mut self) {
+        // BOUCHAUD_P0_REMOTE_CONTROL_V1_2_IDEMPOTENT_TERMINE
+        // `wins.retain` detruit le Client et son Drop rappelle termine(). Le
+        // second passage ne doit ni recalculer l'arbre ni recolter une seconde
+        // fois des PID deja detaches.
+        if self.etat == Etat::Termine {
+            return;
+        }
+        self.etat = Etat::Termine;
         if crate::gui::services::racine() == self.pid { crate::gui::services::enregistre(0); }
         let arbre = task::arbre_de(self.pid);
         for pid in &arbre {
             task::tue_processus(*pid, 0);
         }
-        self.etat = Etat::Termine;
         task::nettoie_zombies();
         for pid in arbre {
             task::collect_child(pid);

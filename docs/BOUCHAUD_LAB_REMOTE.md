@@ -124,17 +124,22 @@ Toutes prennent `--host`, plus `--port` (2222), `--token`, `--timeout`.
 | `services` | `{"cmd":"services snapshot"}` | charge et temps |
 | `processes` | `{"cmd":"processes snapshot"}` | taches et coeurs |
 | `memory` | `{"cmd":"memory snapshot"}` | le tas |
+| `serial-status` | `{"cmd":"serial status"}` | bornes de l'anneau serie RAM |
+| `internet` | `{"cmd":"internet proof status"}` | etat de la preuve Internet |
+| `internet-start` | `{"cmd":"internet proof start"}` | lance une generation de preuve Internet |
 | `events --tail N` | `{"cmd":"events tail","n":N}` | les N derniers, `1..1024` |
 | `events --watch` | `{"cmd":"events watch"}` | le flux continu |
 
-`checkpoint` est la **seule** commande du protocole qui modifie quelque chose.
-C'est voulu : c'est precisement l'effet qu'on veut pouvoir declencher a
-distance quand la machine ne repond plus a rien d'autre. Elle n'est pas dans
-le plan de `dump` -- un releve ne modifie pas ce qu'il releve.
+<!-- BOUCHAUD_P0_REMOTE_CONTROL_V1_2_DOC -->
+Les commandes de snapshot (`status`, `net`, `rtl8168`, `memory`, etc.) restent
+en lecture seule. `checkpoint` a un effet de bord, et le plan de controle P0
+ajoute des actions **bornees et nommees** : reboot/extinction, start/stop/restart
+du navigateur et kill/kill-tree d'un PID explicite. Elles utilisent la meme
+authentification HMAC et sont documentees dans [`REMOTE_CONTROL.md`](REMOTE_CONTROL.md).
 
 Il n'y a **pas de shell**, et il n'y en aura pas : une commande arbitraire sur
 un canal d'enquete est un acces root sur le segment local au premier jeton qui
-fuit.
+fuit. Le controle distant est volontairement une liste fermee d'actions.
 
 ## Ce que `rtl8168` rend, et le critere de la campagne
 
@@ -154,6 +159,20 @@ critere_tour2            : rx_rendus_tour2 > 0
 Les deux ensemble, et seulement les deux ensemble, diront que le second tour
 de l'anneau RTL8168 demarre enfin. **La panne racine n'est pas corrigee a ce
 jour.**
+
+## Capture serie RAM via BRDP
+
+```powershell
+python .\tools\remote\bouchaud-lab.py serial-capture `
+    --host 169.254.178.21 `
+    --bytes 131072 `
+    --out .\target\serial-live.log
+```
+
+La capture fige une fenetre de l'anneau serie RAM et ecrit aussi ses
+metadonnees. Elle exige une RX fonctionnelle puisqu'elle passe par BRDP. Pour
+une panne de reception, `telemetry --watch` lance **avant** l'essai reste le
+canal de survie.
 
 ## La telemetrie
 

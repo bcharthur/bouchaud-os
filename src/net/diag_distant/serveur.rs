@@ -140,6 +140,10 @@ fn maintenant() -> Instant {
     Instant::from_millis(crate::kernel::timer::monotonic_ms() as i64)
 }
 
+// BOUCHAUD_P0_REMOTE_CONTROL_V1
+#[derive(Clone, Copy)]
+enum ActionDifferee { Reboot, Shutdown }
+
 /// L'etat d'UNE connexion. Reinitialise a chaque acceptation.
 struct Session {
     decoupeur: Decoupeur,
@@ -322,6 +326,20 @@ fn traite(session: &mut Session, ligne: &[u8], sortie: &mut Reponse) {
     }
 
     let continuer = reponses::rend(sortie, commande);
+
+    // BOUCHAUD_P0_REMOTE_CONTROL_V1
+    if commande.est_controle() {
+        crate::kernel::lab::emets(
+            crate::kernel::lab::Categorie::Remote,
+            crate::kernel::lab::id::BRDP_CONTROLE,
+            [commande.code() as u64, commande.cible_controle(), 1, 0],
+        );
+        crate::serial_println!(
+            "BOUCHAUD_REMOTE_CONTROL cmd={} cible={} t={}",
+            commande.code(), commande.cible_controle(), crate::kernel::timer::monotonic_ms(),
+        );
+    }
+
     if !continuer {
         session.fermer = true;
     }
@@ -390,6 +408,9 @@ fn fil_brdp() -> ! {
     let mut sortie = Reponse::neuf();
     // Ce qui reste a verser quand la chaussette etait pleine.
     let mut reste: usize = 0;
+
+    // BOUCHAUD_P0_REMOTE_CONTROL_V1
+    let mut action_differee: Option<(ActionDifferee, u64)> = None;
 
     crate::kernel::lab::emets(
         crate::kernel::lab::Categorie::Remote,
@@ -471,9 +492,23 @@ fn fil_brdp() -> ! {
         if ouverte && reste == 0 {
             let mut ligne = [0u8; brdp::LIGNE_MAX];
             if let Some(n) = session.en_attente.retire(&mut ligne) {
+                // BOUCHAUD_P0_REMOTE_CONTROL_V1_1_AUTH_GATE
+                // Une session non authentifiee ne peut jamais armer power.
+                let power = if session.authentifiee {
+                    brdp::analyse(&ligne[..n]).ok().and_then(|commande| match commande {
+                        Commande::SystemReboot => Some(ActionDifferee::Reboot),
+                        Commande::SystemShutdown => Some(ActionDifferee::Shutdown),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
                 traite(&mut session, &ligne[..n], &mut sortie);
                 let pris = verse(sock, sortie.octets());
                 reste = sortie.len() - pris;
+                if let Some(action) = power {
+                    action_differee = Some((action, crate::kernel::timer::monotonic_ms().saturating_add(250)));
+                }
             } else if session.file_debordee {
                 // LE DEBORDEMENT SE DIT. Un client qui perd des commandes sans
                 // le savoir attend des reponses qui ne viendront jamais, et ne
@@ -498,6 +533,25 @@ fn fil_brdp() -> ! {
         if session.fermer && reste == 0 {
             sock.close();
             session.fermer = false;
+        }
+
+        // BOUCHAUD_P0_REMOTE_CONTROL_V1
+        if let Some((action, echeance_ms)) = action_differee {
+            if reste == 0 && crate::kernel::timer::monotonic_ms() >= echeance_ms {
+                match action {
+                    ActionDifferee::Reboot => {
+                        crate::serial_println!("BOUCHAUD_REMOTE_CONTROL_EXEC action=reboot");
+                        crate::gui::power_screen::begin();
+                        crate::kernel::power::reboot();
+                    }
+                    ActionDifferee::Shutdown => {
+                        crate::serial_println!("BOUCHAUD_REMOTE_CONTROL_EXEC action=shutdown");
+                        crate::gui::power_screen::begin();
+                        crate::kernel::power::shutdown_avec_raison(
+                            crate::kernel::power::EXIT_OK, "brdp-remote-control");
+                    }
+                }
+            }
         }
 
         // DIX MILLISECONDES. Assez pour que `events watch` soit vivant, assez

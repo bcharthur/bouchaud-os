@@ -1,6 +1,6 @@
 # Bouchaud OS — Current Status
 
-Dernière mise à jour : 13 septembre 2026
+Dernière mise à jour : 25 septembre 2026
 
 **Point actuel Trigkey :** voir [le bilan mesure du 13 septembre](docs/TRIGKEY_FLUIDITE_2026-09-13.md).
 Le dernier ZIP prouve UEFI, 16 CPU/timers et configuration Ethernet ; il ne
@@ -9,6 +9,14 @@ restent des checkpoints dates, pas une validation physique de toutes les fonctio
 
 Ce document sépare le code présent, les validations hors cible et les résultats
 observés sur la cible. La vision ne constitue jamais une preuve d'exécution.
+
+**P0 Remote Control V1.2 — preuve physique TRIGKEY (25 septembre 2026).**
+BRDP authentifié et `doctor` sont fonctionnels ; `browser stop` et `browser start`
+ont été exercés séparément sans perdre BRDP ; le reboot distant a rendu son ACK,
+a redémarré physiquement la machine puis BRDP est revenu sur le nouveau boot.
+Le restart V1.1 exécutait stop+start dans un seul tour GUI et provoquait une
+indisponibilité transitoire ; V1.2 le sépare en deux tours. Voir
+[`docs/REMOTE_CONTROL.md`](docs/REMOTE_CONTROL.md).
 
 ## Legend
 

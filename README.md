@@ -356,6 +356,8 @@ Documents utiles :
 - `docs/architecture/AARCH64_RASPBERRY.md` — cible ARM/Raspberry ;
 - `docs/architecture/MULTIPLATFORM_FOUNDATION.md` — règles de la refonte ;
 - `docs/ladybird/MASTER_PLAN.md` — intégration Ladybird.
+- `docs/BOUCHAUD_LAB_REMOTE.md` — protocole BRDP et télémétrie de survie ;
+- `docs/REMOTE_CONTROL.md` — contrôle distant et procédure TRIGKEY.
 
 ## Matériel de référence : TRIGKEY
 

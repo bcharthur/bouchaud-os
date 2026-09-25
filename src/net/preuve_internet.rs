@@ -293,7 +293,10 @@ fn tls_error_class(e: &str) -> u64 {
     else { 255 }
 }
 
-fn travailleur() -> ! {
+// BOUCHAUD_HOTFIX14_INTERNET_PROOF_DROP_SCOPE_V1
+// La logique retourne normalement afin que Rust execute Drop sur tous
+// les Vec/String/Session/TcpConn avant l'abandon definitif de la pile.
+fn execute_preuve() -> i32 {
     use alloc::vec::Vec;
 
     let generation = GENERATION.load(Ordering::Acquire);
@@ -320,10 +323,10 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
         dns[0], dns[1], dns[2], dns[3],
     );
 
-    if !lien { note_echec(ECHEC_LIEN); termine(false); crate::kernel::task::exit_current(1); }
-    if zero_ip(ip) { note_echec(ECHEC_IPV4); termine(false); crate::kernel::task::exit_current(2); }
-    if zero_ip(gw) { note_echec(ECHEC_PASSERELLE); termine(false); crate::kernel::task::exit_current(3); }
-    if zero_ip(dns) { note_echec(ECHEC_DNS_CONFIG); termine(false); crate::kernel::task::exit_current(4); }
+    if !lien { note_echec(ECHEC_LIEN); termine(false); return 1; }
+    if zero_ip(ip) { note_echec(ECHEC_IPV4); termine(false); return 2; }
+    if zero_ip(gw) { note_echec(ECHEC_PASSERELLE); termine(false); return 3; }
+    if zero_ip(dns) { note_echec(ECHEC_DNS_CONFIG); termine(false); return 4; }
 
     ETAPE.store(ETAPE_ARP, Ordering::Release);
     let a0 = crate::net::compteurs_routage();
@@ -348,7 +351,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
         a1.3.saturating_sub(a0.3), a1.4.saturating_sub(a0.4),
         a1.5.saturating_sub(a0.5),
     );
-    if arp.is_none() { note_echec(ECHEC_ARP); termine(false); crate::kernel::task::exit_current(5); }
+    if arp.is_none() { note_echec(ECHEC_ARP); termine(false); return 5; }
 
     ETAPE.store(ETAPE_DNS, Ordering::Release);
     let d0 = crate::net::sonde_dns::releve();
@@ -376,7 +379,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
     );
 
     let Some(resolved) = resolved else {
-        note_echec(ECHEC_DNS); termine(false); crate::kernel::task::exit_current(6);
+        note_echec(ECHEC_DNS); termine(false); return 6;
     };
 
     ETAPE.store(ETAPE_TCP80, Ordering::Release);
@@ -411,7 +414,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
         h1.0.saturating_sub(h0.0), h1.1.saturating_sub(h0.1),
     );
     let Some(conn) = conn else {
-        note_echec(ECHEC_TCP443); termine(false); crate::kernel::task::exit_current(7);
+        note_echec(ECHEC_TCP443); termine(false); return 7;
     };
 
     ETAPE.store(ETAPE_TLS, Ordering::Release);
@@ -431,7 +434,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
                 generation, ms, cl
             );
             termine(false);
-            crate::kernel::task::exit_current(8);
+            return 8;
         }
     };
 
@@ -499,7 +502,15 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
     sess.close();
     let ok = cert_ok && parsed && HTTP_SENT.load(Ordering::Relaxed);
     termine(ok);
-    crate::kernel::task::exit_current(if ok { 0 } else { 9 });
+    return if ok { 0 } else { 9 };
+}
+
+/// Frontiere de terminaison de tache.
+/// `execute_preuve()` revient normalement : tous ses destructeurs sont executes
+/// avant que le wrapper abandonne definitivement la pile noyau.
+fn travailleur() -> ! {
+    let code = execute_preuve();
+    crate::kernel::task::exit_current(code);
 }
 
 pub fn lance() -> bool {

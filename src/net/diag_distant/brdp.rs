@@ -118,6 +118,9 @@ pub enum Commande {
     /// Le flux continu, a partir du curseur courant.
     EventsWatch,
     ServicesSnapshot,
+    // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+    /// Page detaillee du registre central des services.
+    ServicesPage { start: u16 },
     ProcessesSnapshot,
     MemorySnapshot,
     /// Lance la preuve Internet active asynchrone.
@@ -129,6 +132,16 @@ pub enum Commande {
     SerialStatus,
     /// Lecture bornee d'une tranche encore presente dans l'anneau serie.
     SerialRead { start: u64, combien: u16 },
+
+    // BOUCHAUD_P0_REMOTE_CONTROL_V1
+    SystemReboot,
+    SystemShutdown,
+    BrowserStart,
+    BrowserStop,
+    BrowserRestart,
+    ProcessKill { pid: u32 },
+    ProcessKillTree { pid: u32 },
+
     Quit,
 }
 
@@ -151,6 +164,8 @@ impl Commande {
             Commande::EventsTail { .. } => 13,
             Commande::EventsWatch => 14,
             Commande::ServicesSnapshot => 15,
+            // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+            Commande::ServicesPage { .. } => 92,
             Commande::ProcessesSnapshot => 16,
             Commande::MemorySnapshot => 17,
             // BOUCHAUD_HOTFIX11_SERIAL_BRDP
@@ -159,6 +174,28 @@ impl Commande {
             Commande::Quit => 18,
             Commande::InternetProofStart => 19,
             Commande::InternetProofStatus => 20,
+            // BOUCHAUD_P0_REMOTE_CONTROL_V1
+            Commande::SystemReboot => 100,
+            Commande::SystemShutdown => 101,
+            Commande::BrowserStart => 110,
+            Commande::BrowserStop => 111,
+            Commande::BrowserRestart => 112,
+            Commande::ProcessKill { .. } => 120,
+            Commande::ProcessKillTree { .. } => 121,
+        }
+    }
+
+    pub fn est_controle(&self) -> bool {
+        matches!(self,
+            Commande::SystemReboot | Commande::SystemShutdown |
+            Commande::BrowserStart | Commande::BrowserStop | Commande::BrowserRestart |
+            Commande::ProcessKill { .. } | Commande::ProcessKillTree { .. })
+    }
+
+    pub fn cible_controle(&self) -> u64 {
+        match self {
+            Commande::ProcessKill { pid } | Commande::ProcessKillTree { pid } => *pid as u64,
+            _ => 0,
         }
     }
 
@@ -182,6 +219,10 @@ pub const EVENTS_TAIL_MAX: u32 = 1024;
 /// Une reponse fait 4096 octets. L'hexadecimal double la charge utile:
 /// 1536 octets -> 3072 caracteres, avec une marge confortable pour le JSON.
 pub const SERIAL_READ_MAX: u16 = 1536;
+
+// BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+/// Le registre central est borne a 128 entrees (`services::registre`).
+pub const SERVICES_REMOTE_MAX: u16 = 128;
 
 
 // ---------------------------------------------------------------------------
@@ -586,6 +627,18 @@ pub fn analyse(ligne: &[u8]) -> Result<Commande, Erreur> {
         }
         b"events watch" => Ok(Commande::EventsWatch),
         b"services snapshot" => Ok(Commande::ServicesSnapshot),
+        // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
+        b"services page" => {
+            let start = match lit_entier(ligne, "start") {
+                LectureEntier::Absent => 0,
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            if start >= SERVICES_REMOTE_MAX as u64 {
+                return Err(Erreur::ArgumentInvalide);
+            }
+            Ok(Commande::ServicesPage { start: start as u16 })
+        }
         b"processes snapshot" => Ok(Commande::ProcessesSnapshot),
         b"memory snapshot" => Ok(Commande::MemorySnapshot),
         // BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
@@ -611,6 +664,30 @@ pub fn analyse(ligne: &[u8]) -> Result<Commande, Erreur> {
                 start,
                 combien: combien as u16,
             })
+        }
+        // BOUCHAUD_P0_REMOTE_CONTROL_V1
+        b"system reboot" => Ok(Commande::SystemReboot),
+        b"system shutdown" => Ok(Commande::SystemShutdown),
+        b"browser start" => Ok(Commande::BrowserStart),
+        b"browser stop" => Ok(Commande::BrowserStop),
+        b"browser restart" => Ok(Commande::BrowserRestart),
+        b"process kill" => {
+            let pid = match lit_entier(ligne, "pid") {
+                LectureEntier::Absent => return Err(Erreur::ArgumentManquant),
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            if pid <= 1 || pid > u32::MAX as u64 { return Err(Erreur::ArgumentInvalide); }
+            Ok(Commande::ProcessKill { pid: pid as u32 })
+        }
+        b"process kill-tree" => {
+            let pid = match lit_entier(ligne, "pid") {
+                LectureEntier::Absent => return Err(Erreur::ArgumentManquant),
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            if pid <= 1 || pid > u32::MAX as u64 { return Err(Erreur::ArgumentInvalide); }
+            Ok(Commande::ProcessKillTree { pid: pid as u32 })
         }
         b"quit" => Ok(Commande::Quit),
         // PAS DE REPLI SUR UN SHELL. Une commande inconnue est refusee, et

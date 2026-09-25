@@ -194,6 +194,8 @@ pub mod id {
     pub const TELEMETRIE_ENVOI: u32 = 0x605;
     pub const TELEMETRIE_ABANDON: u32 = 0x606;
     pub const LAB_SERVICES: u32 = 0x607;
+    // BOUCHAUD_P0_REMOTE_CONTROL_V1
+    pub const BRDP_CONTROLE: u32 = 0x608;
 }
 
 use Forme::{Absent as A, Booleen as B, Decimal as N, Hexa16 as H16, Hexa32 as H32,
@@ -298,6 +300,9 @@ pub static DEFINITIONS: &[Definition] = &[
       ["raison", "abandons", "", ""], [N, N, A, A]),
     d(id::LAB_SERVICES, "LAB_SERVICES",
       ["ip", "brdp", "telemetrie", "port_brdp"], [H32, N, N, N]),
+    // BOUCHAUD_P0_REMOTE_CONTROL_V1
+    d(id::BRDP_CONTROLE, "BRDP_CONTROLE",
+      ["commande", "cible", "acceptee", ""], [N, N, B, A]),
 ];
 
 /// La definition d'un identifiant, si le catalogue la connait.
