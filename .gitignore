@@ -219,3 +219,6 @@ tools/ladybird/certs/cacert.pem
 /native-browser-m9/
 /native-browser-m9.previous-*/
 /scenario-stage2-ladybird/
+
+# Secrets locaux de laboratoire - JAMAIS versionner
+/.env

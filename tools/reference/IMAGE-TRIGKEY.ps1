@@ -55,6 +55,45 @@ function Fail([string]$Message) {
     exit 1
 }
 
+# BOUCHAUD_LOCAL_ENV_BRDP_V1
+# Le secret du banc peut vivre dans .env, ignore par Git.
+# Une variable deja presente dans le processus reste prioritaire.
+$EnvFile = Join-Path $RepoRoot ".env"
+
+if (-not $env:BOUCHAUD_DEBUG_TOKEN -and
+    (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
+
+    $EnvLine = Get-Content -LiteralPath $EnvFile |
+        Where-Object { $_ -match '^\s*BOUCHAUD_DEBUG_TOKEN\s*=' } |
+        Select-Object -Last 1
+
+    if ($EnvLine) {
+        $Sep = $EnvLine.IndexOf("=")
+
+        if ($Sep -ge 0) {
+            $LocalToken = $EnvLine.Substring($Sep + 1).Trim()
+
+            if (-not [string]::IsNullOrWhiteSpace($LocalToken)) {
+                $env:BOUCHAUD_DEBUG_TOKEN = $LocalToken
+                Write-Host (
+                    "BRDP : token LAB charge depuis .env (valeur masquee, longueur={0})." `
+                    -f $LocalToken.Length
+                ) -ForegroundColor Green
+            }
+        }
+    }
+}
+
+if (-not $env:BOUCHAUD_DEBUG_TOKEN) {
+    Fail (
+        "BOUCHAUD_DEBUG_TOKEN absent. " +
+        "Cree .env depuis .env.example ou pose la variable dans l'environnement. " +
+        "Construction physique refusee pour eviter une image LAB sans BRDP."
+    )
+}
+
+Write-Host "BRDP LAB = ARME (secret present, valeur masquee)" -ForegroundColor Green
+
 Write-Host "=== BOUCHAUD OS - IMAGE USB TRIGKEY ===" -ForegroundColor Cyan
 Write-Host ""
 
