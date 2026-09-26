@@ -660,6 +660,35 @@ pub fn publie_les_indicateurs() {
     etat_car("sys.memory.physical", Etat::Actif, &gio(ram));
     etat_car("sys.memory.buddy", Etat::Actif, &mio(heap_total as u64));
 
+    // BOUCHAUD_P13_CACHE_TELEMETRIE
+    // Uniquement des compteurs atomiques/lock-free : observer le cache ne doit
+    // jamais ajouter une arete de verrou dans le chemin de faute de page.
+    let (cache_hits, cache_misses, cache_waits, _cache_shared) =
+        crate::kernel::clean_page_cache::stats();
+    let (balayages_evites, cache_entrees, cache_reclaimed) =
+        crate::kernel::clean_page_cache::balayage_temoins();
+    let (_, _, _, _, _, _, _, cache_pire_ns) =
+        crate::kernel::clean_page_cache::acquire_timing();
+    let cache_ops = cache_hits.saturating_add(cache_misses).saturating_add(cache_waits);
+    kpi(
+        "sys.memory.page_cache",
+        Kpi {
+            operations: Some(cache_ops),
+            latence_max_us: if cache_pire_ns == 0 { None } else { Some(cache_pire_ns / 1_000) },
+            ..Kpi::default()
+        },
+    );
+    let raison_cache = if cache_reclaimed != 0 {
+        "reclamation observee"
+    } else if balayages_evites != 0 {
+        "balayages inutiles evites"
+    } else if cache_entrees != 0 {
+        "pages propres en cache"
+    } else {
+        "aucune page en cache"
+    };
+    etat_car("sys.memory.page_cache", Etat::Actif, raison_cache);
+
     // LE STOCKAGE.
     let noeuds = crate::fs::ramfs::used_nodes_relaxed();
     kpi("sys.storage.ramfs", Kpi { operations: Some(noeuds as u64), ..Kpi::default() });
@@ -734,6 +763,23 @@ pub fn publie_les_indicateurs() {
     publie_la_navigation();
 
     // LE GRAPHIQUE ET LE DIAGNOSTIC.
+    // BOUCHAUD_P13_GPU_TELEMETRIE
+    // Le GPU core ne vaut pas "le bureau" : sur une machine framebuffer sans
+    // backend BGA enregistre, le bureau peut fonctionner et le GPU rester
+    // indisponible. Les deux etats sont donc publies separement.
+    let gpu = crate::drivers::gpu::stats();
+    if gpu.active {
+        kpi(
+            "sys.graphics.gpu",
+            Kpi {
+                operations: Some(gpu.presents),
+                ..Kpi::default()
+            },
+        );
+        etat_car("sys.graphics.gpu", Etat::Actif, gpu.backend.label());
+    } else {
+        etat_car("sys.graphics.gpu", Etat::Indisponible, "aucun backend GPU enregistre");
+    }
     etat_car("sys.diag.blackbox", Etat::Actif, "archive armee");
     etat_car("sys.diag.serial", Etat::Actif, "trace noyau");
     etat_car("sys.graphics.wm", Etat::Actif, "compositeur");

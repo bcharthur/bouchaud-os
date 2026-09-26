@@ -651,4 +651,8 @@ echo "== les six services, cote a cote =="
 python3 tools/ci/analyse-demarrage.py "$LOG" 2>/dev/null \
     | sed -n '/six services/,/^$/p' | head -12 || true
 
+# BOUCHAUD_P13_VERDICT_CONVERGENCE
+python3 tools/ci/ladybird_runtime_verdict.py "$LOG" \
+    --surface "$MIRE_VERDICT" \
+    --json-out "convergence-browser-host${SUFFIXE}.json"
 echo LADYBIRD_BROWSER_HOST_OK

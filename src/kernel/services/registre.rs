@@ -721,6 +721,8 @@ pub const TOPOLOGIE: &[(&str, &str, Genre)] = &[
     ("sys.memory.physical", "sys.memory", Genre::Noyau),
     ("sys.memory.heap", "sys.memory", Genre::Noyau),
     ("sys.memory.buddy", "sys.memory", Genre::Noyau),
+    // BOUCHAUD_P13_CACHE_SERVICE
+    ("sys.memory.page_cache", "sys.memory", Genre::Noyau),
     ("sys.storage", "sys", Genre::Groupe),
     ("sys.storage.usb", "sys.storage", Genre::Pilote),
     ("sys.storage.nvme", "sys.storage", Genre::Pilote),
@@ -732,6 +734,8 @@ pub const TOPOLOGIE: &[(&str, &str, Genre)] = &[
     ("sys.usb.mouse", "sys.usb", Genre::Pilote),
     ("sys.usb.bot", "sys.usb", Genre::Pilote),
     ("sys.graphics", "sys", Genre::Groupe),
+    // BOUCHAUD_P13_GPU_SERVICE
+    ("sys.graphics.gpu", "sys.graphics", Genre::Pilote),
     ("sys.graphics.desktop", "sys.graphics", Genre::Service),
     ("sys.graphics.wm", "sys.graphics", Genre::Service),
     ("sys.graphics.present", "sys.graphics", Genre::Etape),

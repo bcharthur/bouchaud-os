@@ -9,6 +9,8 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/ladybird_runtime_verdict.py'
+      - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
       # gardes-fous : la modifier change ce que le job mesure, et ne pas la
       # declencher laissait cette modification invisible jusqu'au prochain
@@ -26,13 +28,19 @@ on:
       - 'src/compat/linux/**'
       - 'src/kernel/navigateur/**'
       - 'src/gui/services.rs'
+      - 'src/kernel/services/**'
+      - 'src/drivers/api/gpu.rs'
+      - 'src/kernel/native/**'
   push:
-    branches: [main]
+    # BOUCHAUD_P13_BUILD_SUR_BRANCHES
+    branches: [main, 'claude/**', 'feat/**']
     paths:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/ladybird_runtime_verdict.py'
+      - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
       # gardes-fous : la modifier change ce que le job mesure, et ne pas la
       # declencher laissait cette modification invisible jusqu'au prochain
@@ -50,6 +58,9 @@ on:
       - 'src/compat/linux/**'
       - 'src/kernel/navigateur/**'
       - 'src/gui/services.rs'
+      - 'src/kernel/services/**'
+      - 'src/drivers/api/gpu.rs'
+      - 'src/kernel/native/**'
   workflow_dispatch:
 
 permissions:
@@ -244,6 +255,18 @@ jobs:
           if [ -f "$OUT/V19_UI_CAPABLE" ]; then cat "$OUT/V19_UI_CAPABLE"; fi
           du -sh "$OUT"
 
+      # BOUCHAUD_P13_MANIFESTE_ARTEFACT
+      - name: Manifeste reproductible de l'artefact
+        run: |
+          python3 tools/ladybird/artifact_manifest.py create \
+            --root third_party/native-browser-bouchaud \
+            --upstream third_party/UPSTREAM.md \
+            --output third_party/native-browser-bouchaud/BOUCHAUD_ARTIFACT_MANIFEST.json
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root third_party/native-browser-bouchaud \
+            --upstream third_party/UPSTREAM.md \
+            --manifest third_party/native-browser-bouchaud/BOUCHAUD_ARTIFACT_MANIFEST.json
+
       # L'etape « Variante RELR de WebWorker » a ete retiree avec le job
       # `variante-elf` : voir BOUCHAUD_C68 plus bas. Le relink reste
       # disponible a la main (`tools/ladybird/build-variante-relr.sh`).
@@ -304,6 +327,12 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
       - name: Smoke BrowserHost sur Bouchaud OS
         run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -323,6 +352,7 @@ jobs:
             serie-browser-host.log
             fixture-browser-host.log
             surface-browser-host.ppm
+            convergence-browser-host.json
           if-no-files-found: warn
 
   # ==========================================================================

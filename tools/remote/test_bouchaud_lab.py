@@ -809,6 +809,9 @@ class TableDuProtocole(unittest.TestCase):
         # SI CETTE EPREUVE TOMBE, LE CLIENT PARLE A COTE. Ces chaines sont
         # celles de `brdp::analyse`, recopiees a la main : le seul moyen de
         # s'apercevoir d'une divergence est de les comparer ici.
+        # BOUCHAUD_P13_BRDPCONTRACT_CURRENT
+        # Cette table reste volontairement independante de COMMANDES : elle
+        # attrape une divergence client/noyau au lieu de recopier le client.
         attendus = {
             "status": ("status", 2), "audit": ("audit status", 3),
             "audit-run": ("audit run", 4), "audit-last": ("audit last", 5),
@@ -820,9 +823,20 @@ class TableDuProtocole(unittest.TestCase):
             "events-tail": ("events tail", 13),
             "events-watch": ("events watch", 14),
             "services": ("services snapshot", 15),
+            "services-page": ("services page", 92),
             "processes": ("processes snapshot", 16),
             "memory": ("memory snapshot", 17),
+            "serial-status": ("serial status", 90),
             "quit": ("quit", 18),
+            "internet-start": ("internet proof start", 19),
+            "internet": ("internet proof status", 20),
+            "system-reboot": ("system reboot", 100),
+            "system-shutdown": ("system shutdown", 101),
+            "browser-start": ("browser start", 110),
+            "browser-stop": ("browser stop", 111),
+            "browser-restart": ("browser restart", 112),
+            "process-kill": ("process kill", 120),
+            "process-kill-tree": ("process kill-tree", 121),
         }
         self.assertEqual(set(attendus), set(lab.PAR_NOM))
         for cli, (fil, code) in attendus.items():
