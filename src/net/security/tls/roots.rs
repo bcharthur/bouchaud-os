@@ -52,7 +52,9 @@ pub fn count() -> usize { ROOTS_DER.len() }
 pub fn find_issuer_for(child: &Certificate) -> Option<Certificate> {
     for der in ROOTS_DER {
         if let Some(root) = x509::parse(der) {
-            if root.subject == child.issuer {
+            if root.subject == child.issuer
+                && x509::verify_signed_by(child, &root.pubkey)
+            {
                 return Some(root);
             }
         }
@@ -60,6 +62,33 @@ pub fn find_issuer_for(child: &Certificate) -> Option<Certificate> {
     None
 }
 
+// BOUCHAUD_P13_3_EQUIVALENT_TRUST_ANCHOR_V1
+// Une variante cross-signee d'une racine peut avoir un issuer different de
+// la trust anchor locale tout en portant EXACTEMENT le meme Subject et la
+// meme cle publique. Dans ce cas, le chemin est autorise a s'arreter sur
+// l'ancre locale : on ne fait pas confiance au cross-signataire par transit.
+fn meme_cle_publique(a: &PubKey, b: &PubKey) -> bool {
+    match (a, b) {
+        (PubKey::Rsa { n: an, e: ae }, PubKey::Rsa { n: bn, e: be }) => an == bn && ae == be,
+        (PubKey::EcP256 { point: ap }, PubKey::EcP256 { point: bp }) => ap == bp,
+        (PubKey::EcP384 { point: ap }, PubKey::EcP384 { point: bp }) => ap == bp,
+        _ => false,
+    }
+}
+
+/// Trouve une trust anchor locale equivalente au certificat presente :
+/// meme Subject DER + meme cle publique. C'est le cas standard d'une racine
+/// cross-signee partageant la cle de la racine self-signee du magasin.
+pub fn find_equivalent_anchor(cert: &Certificate) -> Option<Certificate> {
+    for der in ROOTS_DER {
+        if let Some(root) = x509::parse(der) {
+            if root.subject == cert.subject && meme_cle_publique(&root.pubkey, &cert.pubkey) {
+                return Some(root);
+            }
+        }
+    }
+    None
+}
 /// Toutes les racines parsees (pour diagnostics).
 pub fn parsed() -> Vec<Certificate> {
     let mut v = Vec::new();

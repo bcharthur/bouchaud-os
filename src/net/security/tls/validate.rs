@@ -41,47 +41,67 @@ pub fn validate(certs: &[Certificate], hostname: &str, now: u64) -> ChainResult 
     // 1. Le nom d'hote doit figurer dans les SAN du certificat feuille.
     res.hostname_ok = x509::matches_hostname(&certs[0], hostname);
 
-    // 2. Validite temporelle de chaque certificat de la chaine.
-    for c in certs {
-        if now != 0 && (now < c.not_before || now > c.not_after) {
+    // BOUCHAUD_P13_3_PATH_PREFIX_V2
+    // 2. Construit le chemin a partir de la feuille, mais s'arrete DES qu'une
+    // trust anchor locale peut signer le certificat courant. Les certificats
+    // supplementaires envoyes par le serveur ne font pas partie du chemin
+    // choisi et ne doivent donc pas pouvoir le faire echouer.
+    for i in 0..certs.len() {
+        let courant = &certs[i];
+
+        // Une variante cross-signee d'une trust anchor peut etre remplacee par
+        // l'ancre locale equivalente (meme Subject + meme cle publique). Une
+        // trust anchor n'est pas validee comme un certificat ordinaire du chemin.
+        if roots::find_equivalent_anchor(courant).is_some() {
+            res.trusted = true;
+            res.anchor = Some("magasin:subject+spki");
+            res.detail = if !res.hostname_ok {
+                "chaine valide mais nom d'hote non couvert par le certificat"
+            } else {
+                "chaine de confiance complete (ancre equivalente cross-signee)"
+            };
+            return res;
+        }
+
+        // Le certificat courant est un element normal du chemin : sa periode
+        // de validite compte. La trust anchor locale, elle, n'est pas dans certs.
+        if now != 0 && (now < courant.not_before || now > courant.not_after) {
             res.expired = true;
         }
-    }
 
-    // 3. Chaque certificat doit etre signe par le suivant.
-    for i in 0..certs.len() - 1 {
-        if !x509::verify_signed_by(&certs[i], &certs[i + 1].pubkey) {
+        // Cas prefere : une racine locale signe deja le certificat courant.
+        // Pour example.com, le chemin peut donc s'arreter sur le certificat
+        // "SSL.com TLS Transit ECC CA R2" et ignorer la racine cross-signee
+        // supplementaire envoyee par le serveur.
+        if roots::find_issuer_for(courant).is_some() {
+            res.trusted = true;
+            res.anchor = Some("magasin:issuer");
+            res.detail = if res.expired {
+                "chaine cryptographiquement valide mais expiree"
+            } else if !res.hostname_ok {
+                "chaine valide mais nom d'hote non couvert par le certificat"
+            } else {
+                "chaine de confiance complete"
+            };
+            return res;
+        }
+
+        // Pas encore d'ancre : il faut un certificat serveur suivant coherent.
+        let Some(suivant) = certs.get(i + 1) else {
+            res.detail = "ancre de confiance inconnue (racine absente du magasin)";
+            return res;
+        };
+
+        if courant.issuer != suivant.subject {
+            res.detail = "issuer/subject incoherents dans la chaine";
+            return res;
+        }
+        if !x509::verify_signed_by(courant, &suivant.pubkey) {
             res.detail = "signature de chaine invalide";
             return res;
         }
     }
 
-    // 4. Le dernier certificat doit etre signe par une racine de confiance.
-    let last = &certs[certs.len() - 1];
-    match roots::find_issuer_for(last) {
-        Some(root) => {
-            if x509::verify_signed_by(last, &root.pubkey) {
-                res.trusted = true;
-                res.detail = if res.expired {
-                    "chaine cryptographiquement valide mais expiree"
-                } else if !res.hostname_ok {
-                    "chaine valide mais nom d'hote non couvert par le certificat"
-                } else {
-                    "chaine de confiance complete"
-                };
-            } else {
-                res.detail = "signature de la racine invalide";
-            }
-        }
-        None => {
-            // Cas ou le serveur envoie lui-meme la racine en bout de chaine.
-            if last.subject == last.issuer && x509::verify_signed_by(last, &last.pubkey) {
-                res.detail = "racine auto-signee non presente dans le magasin";
-            } else {
-                res.detail = "ancre de confiance inconnue (racine absente du magasin)";
-            }
-        }
-    }
     res
 }
 
