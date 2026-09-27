@@ -31,6 +31,9 @@ pub static ROOTS_DER: &[&[u8]] = &[
     include_bytes!("ca/USERTrust_ECC_Certification_Authority.der"),
     include_bytes!("ca/COMODO_RSA_Certification_Authority.der"),
     include_bytes!("ca/Sectigo_Public_Server_Authentication_Root_R46.der"),
+    // SSL.com TLS 2022
+    include_bytes!("ca/SSL_com_TLS_ECC_Root_CA_2022.der"),
+    include_bytes!("ca/SSL_com_TLS_RSA_Root_CA_2022.der"),
     // Amazon
     include_bytes!("ca/Amazon_Root_CA_1.der"),
     // Microsoft
