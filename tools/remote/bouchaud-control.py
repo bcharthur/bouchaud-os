@@ -26,7 +26,7 @@ DEFAULT_HOST = "169.254.178.21"
 
 
 def get_token(args):
-    value = args.token or os.environ.get("BOUCHAUD_DEBUG_TOKEN")
+    value = args.token or lab.lit_variable_locale("BOUCHAUD_DEBUG_TOKEN")
     if not value:
         raise SystemExit("BOUCHAUD_DEBUG_TOKEN absent.")
     return value
@@ -43,7 +43,9 @@ def confirm(args, label):
 
 
 def open_client(args):
-    return lab.ClientBrdp(args.host, get_token(args), args.port, args.timeout)
+    return lab.ClientBrdp(
+        args.host, get_token(args), args.port, args.timeout, args.source_ip
+    )
 
 
 def dump(obj):
@@ -200,6 +202,14 @@ def capabilities_cmd(_args):
 def build_parser():
     parser = argparse.ArgumentParser(description="Bouchaud OS P0 Remote Control V1.2")
     parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument(
+        "--source-ip",
+        default=None,
+        help=(
+            "adresse IPv4 source locale pour BRDP; defaut: "
+            "BOUCHAUD_LAB_SOURCE_IP/.env ou choix automatique de l'OS"
+        ),
+    )
     parser.add_argument("--port", type=int, default=lab.PORT_BRDP)
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--token", default=None)
@@ -256,6 +266,8 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    # BOUCHAUD_P13_1_V5_CONTROL_RESOLVE_SOURCE
+    args.source_ip = lab.resout_source_ip(args.host, args.source_ip)
     try:
         if getattr(args, "ready_timeout", 1.0) <= 0:
             raise SystemExit("--ready-timeout doit etre > 0")

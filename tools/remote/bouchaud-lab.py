@@ -42,6 +42,7 @@ import binascii
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import socket
@@ -290,7 +291,7 @@ class ClientBrdp:
     """
 
     def __init__(self, hote: str, jeton: str, port: int = PORT_BRDP,
-                 delai: float = 5.0):
+                 delai: float = 5.0, source_ip: str | None = None):
         if not jeton:
             # Le serveur refuse un jeton vide ; le dire ICI evite une
             # connexion, un nonce brule et un refus qu'on prendrait pour un
@@ -300,6 +301,14 @@ class ClientBrdp:
         self.port = port
         self._jeton = jeton.encode("utf-8")
         self.delai = delai
+        self.source_ip = source_ip
+        if self.source_ip:
+            try:
+                socket.inet_aton(self.source_ip)
+            except OSError as exc:
+                raise ErreurLab(
+                    f"adresse source IPv4 invalide : {self.source_ip}"
+                ) from exc
         self._sock = None
         self._lecteur = None
         #: la version annoncee par le serveur, une fois la main serree
@@ -330,7 +339,9 @@ class ClientBrdp:
         while True:
             try:
                 self._sock = socket.create_connection(
-                    (self.hote, self.port), self.delai
+                    (self.hote, self.port),
+                    self.delai,
+                    source_address=(self.source_ip, 0) if self.source_ip else None,
                 )
                 break
             except ConnectionRefusedError:
@@ -704,14 +715,59 @@ def horodatage_local() -> str:
 # ---------------------------------------------------------------------------
 
 
+def lit_variable_locale(nom: str) -> str | None:
+    """Variable processus, puis .env local a la racine du depot.
+
+    Le fichier .env est ignore par Git. Aucune valeur n'est affichee ici.
+    """
+    valeur = os.environ.get(nom)
+    if valeur:
+        return valeur.strip()
+
+    chemin = Path(__file__).resolve().parents[2] / ".env"
+    if not chemin.is_file():
+        return None
+    try:
+        lignes = chemin.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    prefixe = nom + "="
+    for ligne in reversed(lignes):
+        brut = ligne.strip()
+        if brut.startswith(prefixe):
+            valeur = brut[len(prefixe):].strip()
+            return valeur or None
+    return None
+
+
+# BOUCHAUD_P13_1_V5_TARGET_AWARE_SOURCE
+def resout_source_ip(hote: str, explicite: str | None) -> str | None:
+    """Choisit la source BRDP sans contaminer les autres destinations.
+
+    Un --source-ip explicite gagne toujours. Sinon la valeur LAB locale
+    n'est appliquee automatiquement qu'a une cible IPv4 link-local. Cela
+    garde le banc 169.254/16 deterministe sans forcer 169.254.x.x vers les
+    faux serveurs 127.0.0.1 ni vers une destination classique.
+    """
+    if explicite:
+        return explicite.strip()
+    try:
+        cible = ipaddress.ip_address(hote)
+    except ValueError:
+        return None
+    if isinstance(cible, ipaddress.IPv4Address) and cible.is_link_local:
+        return lit_variable_locale("BOUCHAUD_LAB_SOURCE_IP")
+    return None
+
+
 def lis_le_jeton(args) -> str:
-    """`--token`, puis `BOUCHAUD_DEBUG_TOKEN`. Jamais affiche.
+    """`--token`, puis `BOUCHAUD_DEBUG_TOKEN`/.env. Jamais affiche.
 
     Le message d'echec nomme les deux sources SANS jamais montrer la moindre
     portion d'une valeur -- pas meme tronquee : un prefixe divise l'espace de
     recherche, ce qui est exactement ce qu'un secret ne doit pas faire.
     """
-    jeton = getattr(args, "token", None) or os.environ.get("BOUCHAUD_DEBUG_TOKEN")
+    jeton = getattr(args, "token", None) or lit_variable_locale("BOUCHAUD_DEBUG_TOKEN")
     if not jeton:
         raise ErreurAuth(
             "aucun jeton BRDP.\n"
@@ -769,7 +825,10 @@ def fait_dump(args, jeton) -> int:
         )
 
     try:
-        client = ClientBrdp(args.host, jeton, args.port, args.timeout)
+        client = ClientBrdp(
+            args.host, jeton, args.port, args.timeout,
+            getattr(args, "source_ip", None),
+        )
         client.ouvre()
     except (ErreurLab, OSError) as exc:
         # MEME UN DUMP QUI NE SE CONNECTE PAS LAISSE UNE TRACE. Le jour de la
@@ -918,7 +977,10 @@ def fait_serial_capture(args, jeton) -> int:
     sortie = Path(args.out) if args.out else (
         racine_depot() / "target" / f"serial-live-{quand}.log"
     )
-    with ClientBrdp(args.host, jeton, args.port, args.timeout) as client:
+    with ClientBrdp(
+            args.host, jeton, args.port, args.timeout,
+            getattr(args, "source_ip", None),
+        ) as client:
         meta = capture_serial_snapshot(client, sortie, args.bytes)
     meta_path = sortie.with_suffix(sortie.suffix + ".json")
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
@@ -999,7 +1061,10 @@ def fait_discover(args) -> int:
 
 
 def fait_events(args, jeton) -> int:
-    with ClientBrdp(args.host, jeton, args.port, args.timeout) as client:
+    with ClientBrdp(
+            args.host, jeton, args.port, args.timeout,
+            getattr(args, "source_ip", None),
+        ) as client:
         tail = None if args.watch else args.tail
         try:
             for genre, objet in client.evenements(tail=tail):
@@ -1018,7 +1083,10 @@ def fait_events(args, jeton) -> int:
 
 def fait_commande_simple(args, jeton, nom: str, valeur=None,
                          ordre=None, titre=None) -> int:
-    with ClientBrdp(args.host, jeton, args.port, args.timeout) as client:
+    with ClientBrdp(
+            args.host, jeton, args.port, args.timeout,
+            getattr(args, "source_ip", None),
+        ) as client:
         reponse = client.commande(nom, valeur)
     if args.json:
         print(json.dumps(reponse, indent=2, sort_keys=True))
@@ -1040,7 +1108,10 @@ def collecte_services_detail(args, jeton) -> dict:
         while total is None or start < total:
             try:
                 if client is None:
-                    client = ClientBrdp(args.host, jeton, args.port, args.timeout)
+                    client = ClientBrdp(
+            args.host, jeton, args.port, args.timeout,
+            getattr(args, "source_ip", None),
+        )
                     client.ouvre()
                 page = client.commande("services-page", start)
                 echecs_consecutifs = 0
@@ -1211,6 +1282,14 @@ def construis_parseur() -> argparse.ArgumentParser:
 
     def avec_hote(sp, defaut_timeout=5.0):
         sp.add_argument("--host", required=True, help="adresse LAB de la machine")
+        sp.add_argument(
+            "--source-ip",
+            default=None,
+            help=(
+                "adresse IPv4 source locale pour BRDP; defaut: "
+                "BOUCHAUD_LAB_SOURCE_IP/.env ou choix automatique de l'OS"
+            ),
+        )
         sp.add_argument("--port", type=int, default=PORT_BRDP)
         sp.add_argument("--token", default=None,
                         help="jeton BRDP (defaut : BOUCHAUD_DEBUG_TOKEN)")
@@ -1309,6 +1388,11 @@ def construis_parseur() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = construis_parseur().parse_args(argv)
+    # BOUCHAUD_P13_1_V5_MAIN_RESOLVE_SOURCE
+    if hasattr(args, "source_ip"):
+        args.source_ip = resout_source_ip(
+            getattr(args, "host", ""), getattr(args, "source_ip", None)
+        )
     try:
         # `telemetry` et `discover` n'ouvrent aucune connexion et ne prouvent
         # rien a personne : leur demander un jeton serait une ceremonie vide.

@@ -760,7 +760,14 @@ class LeJetonNeFuitPas(unittest.TestCase):
         self.assertIn("rx_packets", sortie.getvalue())
 
     def test_le_message_d_absence_de_jeton_ne_montre_aucune_valeur(self):
+        # BOUCHAUD_P13_1_TEST_NO_TOKEN_SOURCE_V3
+        # Depuis P13.1, .env est une source volontaire du jeton. Ce test doit
+        # donc neutraliser TOUTES les sources, pas seulement os.environ ; sinon
+        # le .env reel du poste de developpement transforme ce test unitaire en
+        # tentative reseau vers 127.0.0.1 et il rend 5 au lieu de 2.
         ancien = os.environ.pop("BOUCHAUD_DEBUG_TOKEN", None)
+        ancien_lit = lab.lit_variable_locale
+        lab.lit_variable_locale = lambda _nom: None
         try:
             erreurs = io.StringIO()
             with redirect_stderr(erreurs):
@@ -770,6 +777,7 @@ class LeJetonNeFuitPas(unittest.TestCase):
             self.assertIn("BOUCHAUD_DEBUG_TOKEN", texte)
             self.assertIn("--token", texte)
         finally:
+            lab.lit_variable_locale = ancien_lit
             if ancien is not None:
                 os.environ["BOUCHAUD_DEBUG_TOKEN"] = ancien
 
@@ -796,6 +804,38 @@ class LeJetonNeFuitPas(unittest.TestCase):
                 os.environ.pop("BOUCHAUD_DEBUG_TOKEN", None)
             else:
                 os.environ["BOUCHAUD_DEBUG_TOKEN"] = ancien
+
+
+# BOUCHAUD_P13_1_V5_SOURCE_TESTS
+class SourceLocale(unittest.TestCase):
+
+    def test_source_env_ignoree_pour_loopback(self):
+        ancien = lab.lit_variable_locale
+        lab.lit_variable_locale = lambda nom: (
+            "169.254.6.185" if nom == "BOUCHAUD_LAB_SOURCE_IP" else None
+        )
+        try:
+            self.assertIsNone(lab.resout_source_ip("127.0.0.1", None))
+            self.assertIsNone(lab.resout_source_ip("192.168.137.1", None))
+        finally:
+            lab.lit_variable_locale = ancien
+
+    def test_source_env_utilisee_pour_cible_link_local_et_explicite_prioritaire(self):
+        ancien = lab.lit_variable_locale
+        lab.lit_variable_locale = lambda nom: (
+            "169.254.6.185" if nom == "BOUCHAUD_LAB_SOURCE_IP" else None
+        )
+        try:
+            self.assertEqual(
+                lab.resout_source_ip("169.254.178.21", None),
+                "169.254.6.185",
+            )
+            self.assertEqual(
+                lab.resout_source_ip("127.0.0.1", "127.0.0.1"),
+                "127.0.0.1",
+            )
+        finally:
+            lab.lit_variable_locale = ancien
 
 
 # ===========================================================================

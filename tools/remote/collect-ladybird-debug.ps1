@@ -9,8 +9,38 @@ $ErrorActionPreference = "Stop"
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $Repo
 
+# BOUCHAUD_P13_1_V4_COLLECTOR_DOTENV
+# Les clients Python savent deja lire .env. Le collecteur PowerShell doit avoir
+# le meme contrat, sinon une collecte manuelle fonctionne et le bundle echoue
+# dans la console suivante uniquement parce que la variable processus n'existe
+# plus. Aucune valeur n'est affichee.
+function Get-BouchaudLocalEnvValue {
+    param([Parameter(Mandatory=$true)][string]$Name)
+    $EnvFile = Join-Path $Repo ".env"
+    if (-not (Test-Path -LiteralPath $EnvFile)) { return $null }
+    $Prefix = "$Name="
+    $Found = $null
+    foreach ($Line in Get-Content -LiteralPath $EnvFile -ErrorAction SilentlyContinue) {
+        $Trimmed = $Line.Trim()
+        if ($Trimmed.StartsWith($Prefix)) {
+            $Candidate = $Trimmed.Substring($Prefix.Length).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($Candidate)) { $Found = $Candidate }
+        }
+    }
+    return $Found
+}
+
 if (-not $env:BOUCHAUD_DEBUG_TOKEN) {
-    throw "BOUCHAUD_DEBUG_TOKEN est absent. Le bundle BRDP exige le jeton de l'image de laboratoire."
+    $LocalToken = Get-BouchaudLocalEnvValue -Name "BOUCHAUD_DEBUG_TOKEN"
+    if ($LocalToken) { $env:BOUCHAUD_DEBUG_TOKEN = $LocalToken }
+}
+if (-not $env:BOUCHAUD_LAB_SOURCE_IP) {
+    $LocalSource = Get-BouchaudLocalEnvValue -Name "BOUCHAUD_LAB_SOURCE_IP"
+    if ($LocalSource) { $env:BOUCHAUD_LAB_SOURCE_IP = $LocalSource }
+}
+
+if (-not $env:BOUCHAUD_DEBUG_TOKEN) {
+    throw "BOUCHAUD_DEBUG_TOKEN est absent de l'environnement et de .env. Le bundle BRDP exige le jeton de l'image de laboratoire."
 }
 if ($Events -lt 1 -or $Events -gt 1024) {
     throw "Events doit etre entre 1 et 1024."
