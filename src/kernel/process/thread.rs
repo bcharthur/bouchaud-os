@@ -84,6 +84,8 @@ include!("thread/registre.rs");
 include!("thread/tache.rs");
 include!("thread/etat_global.rs");
 include!("thread/diagnostic_stall.rs");
+// BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+include!("thread/forensic.rs");
 include!("thread/courant.rs");
 include!("thread/creation.rs");
 include!("thread/commutation.rs");

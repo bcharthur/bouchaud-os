@@ -59,6 +59,21 @@ static POUR_DIAGNOSTIC: AtomicU64 = AtomicU64::new(0);
 static POUR_NORMALE: AtomicU64 = AtomicU64::new(0);
 static POUR_LES_DEUX: AtomicU64 = AtomicU64::new(0);
 static JETEES: AtomicU64 = AtomicU64::new(0);
+// P18_BRDP_ARP_TRACE_V1: snapshots atomiques pour le canal TX de survie.
+static ARP_LAB: AtomicU64 = AtomicU64::new(0);
+static ICMP_LAB: AtomicU64 = AtomicU64::new(0);
+static TCP_LAB: AtomicU64 = AtomicU64::new(0);
+static FILE_POSEES: AtomicU64 = AtomicU64::new(0);
+static FILE_RETIREES: AtomicU64 = AtomicU64::new(0);
+static FILE_PERDUES: AtomicU64 = AtomicU64::new(0);
+static FILE_OCCUPATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn etat_ingress() -> (u64, u64, u64, u64, u64, u64, u64) {
+    (ARP_LAB.load(Ordering::Relaxed), ICMP_LAB.load(Ordering::Relaxed),
+     TCP_LAB.load(Ordering::Relaxed), FILE_POSEES.load(Ordering::Relaxed),
+     FILE_RETIREES.load(Ordering::Relaxed), FILE_PERDUES.load(Ordering::Relaxed),
+     FILE_OCCUPATION.load(Ordering::Relaxed))
+}
 
 /// La file de la pile de diagnostic. Bornee, et abonnee seulement si le LAB
 /// ecoute : le cas courant ne paie pas une copie par trame.
@@ -177,7 +192,18 @@ pub fn trie(trame: &[u8]) -> tri::Verdict {
         }
     }
     if verdict.pour_diagnostic() {
-        file().pose(trame);
+        match verdict.motif {
+            tri::Motif::ArpDiagnostic => { ARP_LAB.fetch_add(1, Ordering::Relaxed); }
+            tri::Motif::IcmpDiagnostic => { ICMP_LAB.fetch_add(1, Ordering::Relaxed); }
+            tri::Motif::TcpBrdp => { TCP_LAB.fetch_add(1, Ordering::Relaxed); }
+            _ => {}
+        }
+        if file().pose(trame) {
+            FILE_POSEES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            FILE_PERDUES.fetch_add(1, Ordering::Relaxed);
+        }
+        FILE_OCCUPATION.store(file().occupation() as u64, Ordering::Relaxed);
         // Une trame detournee de la pile normale est un fait qui merite
         // d'etre dans l'anneau : c'est la preuve que le RST fratricide a ete
         // EVITE, et non pas qu'il ne s'est simplement rien passe.
@@ -212,6 +238,8 @@ pub fn prends(sortie: &mut [u8]) -> Option<usize> {
     {
         let _garde = super::VERROU_RECEPTION.lock();
         if let Some(n) = file().retire(sortie) {
+            FILE_RETIREES.fetch_add(1, Ordering::Relaxed);
+            FILE_OCCUPATION.store(file().occupation() as u64, Ordering::Relaxed);
             return Some(n);
         }
     }
@@ -221,7 +249,10 @@ pub fn prends(sortie: &mut [u8]) -> Option<usize> {
     super::draine_anneau();
 
     let _garde = super::VERROU_RECEPTION.lock();
-    file().retire(sortie)
+    let result = file().retire(sortie);
+    if result.is_some() { FILE_RETIREES.fetch_add(1, Ordering::Relaxed); }
+    FILE_OCCUPATION.store(file().occupation() as u64, Ordering::Relaxed);
+    result
 }
 
 /// Triees, pour le diagnostic, pour la normale, pour les deux.

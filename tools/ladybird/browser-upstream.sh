@@ -43,9 +43,13 @@ python3 tools/ladybird/prepare-v19-navigateur.py "$SRC"
 python3 tools/ladybird/prepare-m11-page-registry.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
+python3 tools/ladybird/prepare-p17-ipc-recovery.py "$SRC"
+# BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+python3 tools/ladybird/prepare-p15-forensics.py "$SRC"
 python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
 python3 tools/ladybird/prepare-platform-complete.py "$SRC"
 python3 tools/ladybird/prepare-network-live.py "$SRC"
+python3 tools/ladybird/prepare-p18-network-selfheal.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.

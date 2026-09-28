@@ -35,6 +35,12 @@ pub(crate) fn prepare_park_current_on_detached(
         "task: parking demande hors de toute tache"
     );
 
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_begin_if_idle(
+        WAIT_WAIT_QUEUE,
+        wait_queue_key as u64,
+        deadline_ns.unwrap_or(0),
+    );
     {
         let task = current();
         task.wait_queue_key.range(wait_queue_key);
@@ -58,6 +64,8 @@ pub(crate) fn annule_park_courant() {
     task.wait_queue_key.range(0);
     task.wake_deadline_ns.range(0);
     task.state.range(TaskState::Ready);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_WAIT_QUEUE);
 }
 
 /// Returns `(notified_before_deadline, number_of_schedule_loops)`.
@@ -134,6 +142,8 @@ pub(crate) fn finish_park_current_on_detached(
         task.wait_queue_key.range(0);
         task.wake_deadline_ns.range(0);
     }
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_WAIT_QUEUE);
 
     let depth_final = smp_lock::profondeur_locale();
     smp_lock::note_detached_check(3, loops, depth_final);
@@ -159,6 +169,8 @@ pub(crate) fn finish_park_current_on_detached(
 /// Endort la tache courante sur une WaitQueue. L'appelant doit avoir valide la
 /// generation sous le BKL juste avant cet appel pour fermer le lost wakeup.
 pub(crate) fn park_current_on(wait_queue_key: usize) {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_begin_if_idle(WAIT_WAIT_QUEUE, wait_queue_key as u64, 0);
     {
         let task = current();
         task.wait_queue_key.range(wait_queue_key);
@@ -170,6 +182,8 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
     }
     verifie_profondeur_rendue("park_current_on", profondeur_entree);
     current().wait_queue_key.range(0);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_WAIT_QUEUE);
 }
 
 /// Endort la tache sur une WaitQueue jusqu'a notification ou echeance.
@@ -178,6 +192,8 @@ pub(crate) fn park_current_on(wait_queue_key: usize) {
 /// tache Ready. La cle de queue reste posee jusqu'au reveil, de sorte qu'une
 /// notification et l'echeance puissent courir sans perdre le reveil.
 pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> bool {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_begin_if_idle(WAIT_WAIT_QUEUE, wait_queue_key as u64, deadline_ns);
     {
         let task = current();
         task.wait_queue_key.range(wait_queue_key);
@@ -194,6 +210,8 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
     let task = current();
     task.wait_queue_key.range(0);
     task.wake_deadline_ns.range(0);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_WAIT_QUEUE);
     notified
 }
 

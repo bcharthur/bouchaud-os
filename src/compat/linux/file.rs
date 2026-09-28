@@ -545,9 +545,15 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             // On ne lit pas la sortie du navigateur : on reconnait un marqueur
             // qu'on y a mis. Le test est borne a un seul motif, et tout le
             // reste passe sans examen.
+            let navigation_now = crate::kernel::timer::monotonic_ns();
             crate::kernel::services::navigation::reconnait_un_refus(
                 &data,
-                crate::kernel::timer::monotonic_ns(),
+                navigation_now,
+            );
+            // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+            crate::kernel::services::navigation::reconnait_document_charge(
+                &data,
+                navigation_now,
             );
             let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
             let _kernel = crate::kernel::smp_lock::enter();
@@ -1212,27 +1218,57 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) -> i64 {
 pub fn sys_dup(fd: i32) -> i64 {
     let process = task::current_process();
     let mut borrowed = process.files.lock();
-    let desc = match borrowed.get(fd) {
+    let mut desc = match borrowed.get(fd) {
         Some(desc) => desc.clone(),
         None => return -errno::EBADF,
     };
+    // P17_POSIX_DUP_CLOEXEC
+    // dup() cree un NOUVEAU descripteur : FD_CLOEXEC n'est pas copie.
+    desc.cloexec = false;
     borrowed.insert(desc) as i64
 }
 
-/// `dup2` / `dup3`.
+/// `dup2`.
 pub fn sys_dup2(old: i32, new: i32) -> i64 {
     if new < 0 {
         return -errno::EBADF;
     }
-    if old == new {
-        return new as i64;
-    }
+
     let process = task::current_process();
     let mut borrowed = process.files.lock();
-    let desc = match borrowed.get(old) {
+
+    if old == new {
+        return if borrowed.get(old).is_some() { new as i64 } else { -errno::EBADF };
+    }
+
+    let mut desc = match borrowed.get(old) {
         Some(desc) => desc.clone(),
         None => return -errno::EBADF,
     };
+    desc.cloexec = false;
+    borrowed.set(new as usize, desc);
+    new as i64
+}
+
+/// `dup3`.
+pub fn sys_dup3(old: i32, new: i32, flags: u32) -> i64 {
+    if new < 0 {
+        return -errno::EBADF;
+    }
+    if old == new {
+        return -errno::EINVAL;
+    }
+    if flags & !O_CLOEXEC != 0 {
+        return -errno::EINVAL;
+    }
+
+    let process = task::current_process();
+    let mut borrowed = process.files.lock();
+    let mut desc = match borrowed.get(old) {
+        Some(desc) => desc.clone(),
+        None => return -errno::EBADF,
+    };
+    desc.cloexec = flags & O_CLOEXEC != 0;
     borrowed.set(new as usize, desc);
     new as i64
 }

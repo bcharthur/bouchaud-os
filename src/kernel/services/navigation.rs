@@ -130,6 +130,17 @@ impl Mesure {
     const fn neuve() -> Self {
         Self { etat: Etat::Inconnu, duree_us: 0, octets: 0, debut_ns: 0 }
     }
+
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    pub fn age_us(&self, maintenant_ns: u64) -> u64 {
+        if self.debut_ns == 0 {
+            0
+        } else if self.duree_us != 0 {
+            self.duree_us
+        } else {
+            maintenant_ns.saturating_sub(self.debut_ns) / 1_000
+        }
+    }
 }
 
 /// L'etat d'une navigation.
@@ -176,6 +187,8 @@ static COURANTE: SpinLockIrq<Navigation> = SpinLockIrq::new(Navigation::neuve())
 /// repondre « rien » cent fois par seconde.
 static VUE: AtomicBool = AtomicBool::new(false);
 static NAVIGATIONS: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+static DOCUMENTS_CHARGES: AtomicU64 = AtomicU64::new(0);
 
 /// UNE NAVIGATION REFUSEE AVANT MEME D'AVOIR COMMENCE.
 ///
@@ -249,6 +262,55 @@ pub const RAISON_MAX: usize = 32;
 pub fn reconnait_un_refus(ligne: &[u8], maintenant_ns: u64) {
     let Some(refus) = crate::drivers::analyse_refus::refus_dans(ligne) else { return };
     refusee(refus.url, refus.raison, maintenant_ns);
+}
+
+// BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+const MARQUEUR_DOCUMENT_CHARGE: &[u8] = b"M11_DOCUMENT_LOADED";
+
+fn contient(bloc: &[u8], motif: &[u8]) -> bool {
+    !motif.is_empty()
+        && bloc.len() >= motif.len()
+        && (0..=bloc.len() - motif.len())
+            .any(|debut| &bloc[debut..debut + motif.len()] == motif)
+}
+
+pub fn reconnait_document_charge(bloc: &[u8], maintenant_ns: u64) {
+    if !contient(bloc, MARQUEUR_DOCUMENT_CHARGE) {
+        return;
+    }
+
+    let mut n = COURANTE.lock();
+    if n.debut_ns == 0 {
+        return;
+    }
+
+    let reseau_vu = [Etape::Tcp, Etape::Tls, Etape::Http, Etape::Telechargement]
+        .iter()
+        .any(|e| !matches!(
+            n.etapes[*e as usize].etat,
+            Etat::Inconnu | Etat::Indisponible
+        ));
+
+    // file:/about: peuvent aussi charger un document. Ne leur inventons pas
+    // un TCP/TLS qu'ils n'ont jamais eu.
+    if !reseau_vu {
+        return;
+    }
+
+    let debut_navigation = n.debut_ns;
+    for etape in [Etape::Tcp, Etape::Tls, Etape::Http, Etape::Telechargement] {
+        let m = &mut n.etapes[etape as usize];
+        if matches!(m.etat, Etat::Panne | Etat::Indisponible) {
+            continue;
+        }
+        if m.debut_ns == 0 {
+            m.debut_ns = debut_navigation;
+        }
+        m.duree_us = maintenant_ns.saturating_sub(m.debut_ns) / 1_000;
+        m.etat = Etat::Actif;
+    }
+    n.fin_ns = maintenant_ns;
+    DOCUMENTS_CHARGES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Une navigation commence. Remet toutes les etapes a zero.
@@ -333,4 +395,9 @@ pub fn instantane() -> Option<([u8; URL_MAX], usize, [Mesure; ETAPES], u64, u64,
 /// Combien de navigations depuis le demarrage.
 pub fn compteur() -> u64 {
     NAVIGATIONS.load(Ordering::Relaxed)
+}
+
+// BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+pub fn documents_charges() -> u64 {
+    DOCUMENTS_CHARGES.load(Ordering::Relaxed)
 }

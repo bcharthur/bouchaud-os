@@ -206,6 +206,8 @@ pub fn stall_ipi_bkl_result(acquired: bool) {
 }
 
 pub fn stall_pf_begin(addr: u64) {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_fault(addr);
     let cpu = local_cpu();
     STALL_PF_BEGIN[cpu].fetch_add(1, Ordering::Relaxed);
     stall_site_set(20, addr);
@@ -239,6 +241,8 @@ pub fn stall_pf_fail(addr: u64) {
 
 // --- Sonde de stall SMP : aucun verrou Process, uniquement atomiques. ---
 pub fn stall_syscall_enter(nr: u64) {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_syscall_enter(nr);
     let cpu = local_cpu();
     STALL_SYSCALL_NR[cpu].store(nr, Ordering::Release);
     STALL_SYSCALL_TICK[cpu].store(crate::kernel::timer::ticks(), Ordering::Release);
@@ -309,6 +313,8 @@ static POLL_DETAIL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CP
 
 #[inline]
 pub fn poll_phase_set(phase: u32, detail: u64) {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_poll_phase_set(phase, detail);
     let cpu = local_cpu();
     POLL_DETAIL[cpu].store(detail, Ordering::Release);
     POLL_PHASE[cpu].store(phase, Ordering::Release);
@@ -365,6 +371,8 @@ pub fn stall_syscall_sans_verrou() {
 }
 
 pub fn stall_syscall_exit() {
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_syscall_exit();
     let cpu = local_cpu();
     STALL_SYSCALL_PHASE[cpu].store(0, Ordering::Release);
     STALL_SYSCALL_NR[cpu].store(STALL_NO_SYSCALL, Ordering::Release);

@@ -55,6 +55,50 @@ use crate::net::ipv4::Ipv4Addr;
 use crate::kernel::sync::SpinLockIrq;
 use core::sync::atomic::AtomicBool;
 
+// BOUCHAUD_P18_NETWORK_SELF_HEAL_V1
+//
+// Le fallback ICS n'est PAS une configuration generale de Bouchaud OS.
+// Il est arme seulement sur le RTL8168 physique ET lorsque le canal LAB BRDP
+// est actif. Une image normale sans canal LAB continue donc a exiger DHCP.
+const LAB_ICS_IP: Ipv4Addr = [192, 168, 137, 2];
+const LAB_ICS_PASSERELLE: Ipv4Addr = [192, 168, 137, 1];
+const LAB_ICS_DNS: Ipv4Addr = [192, 168, 137, 1];
+const LAB_ICS_MASQUE: Ipv4Addr = [255, 255, 255, 0];
+const LAB_ICS_RETEST_DHCP_MS: u64 = 30_000;
+const LAB_ICS_RETRY_FALLBACK_MS: u64 = 30_000;
+const LAB_ICS_DHCP_BACKOFF_MAX_MS: u64 = 8_000;
+
+static LAB_ICS_FALLBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn lab_ics_fallback_autorise() -> bool {
+    // BOUCHAUD_P18_HOTFIX2_SAFE_NETWORK_V1
+    //
+    // P18 avait ajoute ici un fallback 192.168.137.2 declenche depuis le
+    // veilleur noyau apres plusieurs DISCOVER sans OFFER. Sur le Trigkey,
+    // l'image P18 a ensuite presente une regression plus basse que DHCP :
+    // plus de reponse ARP LAB, plus de BRDP et plus de telemetrie UDP 2223.
+    //
+    // Tant que cette interaction materielle n'est pas prouvee innocente, le
+    // noyau ne doit PAS changer de profil IPv4 ni lancer de resolution ARP
+    // de secours depuis ce thread. Retour au chemin P17 connu-good :
+    // DHCP dynamique uniquement cote noyau.
+    //
+    // Restent actifs :
+    // - le gardien ICS Windows ;
+    // - l'attente/reprise automatique RequestServer/Ladybird ;
+    // - l'observabilite P15.
+    false
+}
+
+pub fn lab_ics_fallback_active() -> bool {
+    LAB_ICS_FALLBACK_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// IPv4 reellement utilisable : bail DHCP OU fallback LAB verifie par ARP.
+pub fn ipv4_ready() -> bool {
+    bail_obtenu() || lab_ics_fallback_active()
+}
+
 /// Adresse de l'interface loopback.
 pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
 
@@ -159,7 +203,13 @@ fn pose_le_verdict(nouvel_etat: Demarrage) {
         ipv4::format_addr(&our_ip()),
         ipv4::format_addr(&gateway()),
         ipv4::format_addr(&dns_server()),
-        if bail_obtenu() { "bail" } else { "presomption" },
+        if bail_obtenu() {
+            "bail"
+        } else if lab_ics_fallback_active() {
+            "lab-ics-fallback"
+        } else {
+            "aucun"
+        },
         external_enabled() as u8,
         connecte() as u8,
     ));
@@ -202,10 +252,93 @@ pub fn bail_obtenu() -> bool {
 pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
     unsafe { OUR_IP = ip; GW_IP = gw; DNS_IP = dns; GW_MAC = None; }
     BAIL_OBTENU.store(true, core::sync::atomic::Ordering::Release);
+    let etait_en_secours =
+        LAB_ICS_FALLBACK_ACTIVE.swap(false, core::sync::atomic::Ordering::AcqRel);
+    if etait_en_secours {
+        crate::serial_println!(
+            "P18_NETWORK_DHCP_RECOVERED ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
+            ip[0], ip[1], ip[2], ip[3],
+            gw[0], gw[1], gw[2], gw[3],
+            dns[0], dns[1], dns[2], dns[3],
+        );
+    }
     // Une adresse materielle apprise avant la configuration ne vaut plus rien,
     // et une entree NEGATIVE posee pendant qu'on etait mal configure ferait
     // echouer les deux premieres secondes d'un reseau desormais correct.
     oublie_voisins();
+}
+
+// P18 : retire uniquement NOTRE configuration LAB. Une configuration DHCP ou
+// statique exterieure n'est jamais effacee par ce chemin.
+fn oublie_lab_ics_fallback() {
+    if !LAB_ICS_FALLBACK_ACTIVE.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    unsafe {
+        if OUR_IP == LAB_ICS_IP { OUR_IP = [0, 0, 0, 0]; }
+        if GW_IP == LAB_ICS_PASSERELLE { GW_IP = [0, 0, 0, 0]; }
+        if DNS_IP == LAB_ICS_DNS { DNS_IP = [0, 0, 0, 0]; }
+        GW_MAC = None;
+    }
+    BAIL_OBTENU.store(false, core::sync::atomic::Ordering::Release);
+    oublie_identite_reseau();
+    oublie_voisins();
+}
+
+/// Essaie le profil ICS uniquement apres des DISCOVER sans OFFER.
+///
+/// L'adresse n'est CONSERVEE que si 192.168.137.1 repond reellement en ARP.
+/// Une simple constante ne peut donc jamais transformer un cable sans passerelle
+/// en faux reseau "pret".
+fn essaie_lab_ics_fallback() -> bool {
+    if !lab_ics_fallback_autorise()
+        || !e1000::link_up()
+        || bail_obtenu()
+        || lab_ics_fallback_active()
+    {
+        return lab_ics_fallback_active();
+    }
+
+    // Ne jamais ecraser une configuration manuelle/eventuellement future.
+    let actuelle = our_ip();
+    if actuelle != [0, 0, 0, 0] && actuelle != LAB_ICS_IP {
+        return false;
+    }
+
+    unsafe {
+        OUR_IP = LAB_ICS_IP;
+        GW_IP = LAB_ICS_PASSERELLE;
+        DNS_IP = LAB_ICS_DNS;
+        GW_MAC = None;
+    }
+    BAIL_OBTENU.store(false, core::sync::atomic::Ordering::Release);
+    pose_identite_reseau(&[], LAB_ICS_MASQUE);
+    oublie_voisins();
+
+    // Le profil n'est valide qu'avec une preuve de couche 2.
+    if arp_resolve(LAB_ICS_PASSERELLE).is_some() {
+        LAB_ICS_FALLBACK_ACTIVE.store(true, core::sync::atomic::Ordering::Release);
+        crate::serial_println!(
+            "P18_NETWORK_FALLBACK_ACTIVE ip=192.168.137.2 gw=192.168.137.1 dns=192.168.137.1 proof=arp"
+        );
+        crate::kernel::dmesg::log(
+            "net: LAB ICS DHCP absent ; secours 192.168.137.2/24 verifie par ARP"
+        );
+        return true;
+    }
+
+    unsafe {
+        OUR_IP = [0, 0, 0, 0];
+        GW_IP = [0, 0, 0, 0];
+        DNS_IP = [0, 0, 0, 0];
+        GW_MAC = None;
+    }
+    oublie_identite_reseau();
+    oublie_voisins();
+    crate::serial_println!(
+        "P18_NETWORK_FALLBACK_REJECTED gw=192.168.137.1 reason=arp-timeout"
+    );
+    false
 }
 
 /// Indique si une interface routable vers l'exterieur est active.
@@ -514,6 +647,69 @@ const BUDGET_DHCP_VEILLEUR_MS: u64 = 4_000;
 const PLAFOND_DHCP_MS: u64 = 60_000;
 
 static VEILLEUR_LANCE: AtomicBool = AtomicBool::new(false);
+// P18_RX_POLL_LIVENESS_V1 : le veilleur peut attendre DHCP plusieurs secondes.
+// Le pilote en scrutation exige un lecteur RX independant de cette attente.
+static POMPE_RX_LANCEE: AtomicBool = AtomicBool::new(false);
+static POMPE_RX_TOURS: AtomicU64 = AtomicU64::new(0);
+static POMPE_RX_DERNIER_MS: AtomicU64 = AtomicU64::new(0);
+const PERIODE_POMPE_RX_MS: u64 = 20;
+
+fn pompe_rx() -> ! {
+    loop {
+        crate::kernel::task::sleep_ticks(
+            crate::kernel::timer::ms_to_ticks(PERIODE_POMPE_RX_MS),
+        );
+        POMPE_RX_TOURS.fetch_add(1, OrdreCompteur::Relaxed);
+        POMPE_RX_DERNIER_MS.store(crate::kernel::timer::monotonic_ms(), OrdreCompteur::Relaxed);
+        if e1000::is_ready() && e1000::link_up() {
+            // Une preuve de panne peut apparaitre entre deux DHCP. La
+            // demande est bornee par le pilote ; le drainage reste regulier
+            // meme sans requete ARP, client TCP ou session de diagnostic.
+            let _ = e1000::demande_reparation_si_arretee();
+            draine_anneau();
+        }
+    }
+}
+
+// P18_SERVICE_GUARDIAN_V1
+pub fn fil_reseau_actif(nom: &str) -> bool {
+    match nom {
+        "net-rx-poll" => POMPE_RX_LANCEE.load(OrdreCompteur::Acquire),
+        "net-lien" => VEILLEUR_LANCE.load(OrdreCompteur::Acquire),
+        _ => false,
+    }
+}
+pub fn fil_reseau_termine(nom: &str) {
+    match nom {
+        "net-rx-poll" => POMPE_RX_LANCEE.store(false, OrdreCompteur::Release),
+        "net-lien" => VEILLEUR_LANCE.store(false, OrdreCompteur::Release),
+        _ => {}
+    }
+}
+fn demarre_la_pompe_rx() -> bool {
+    if POMPE_RX_LANCEE.compare_exchange(false, true, OrdreCompteur::AcqRel, OrdreCompteur::Acquire).is_err() {
+        return true;
+    }
+    if crate::kernel::task::spawn_noyau_priorite(
+        pompe_rx,
+        "net-rx-poll",
+        crate::kernel::task::Priorite::Normale,
+    ) {
+        crate::serial_println!("BOUCHAUD_NET_POMPE_RX_LANCEE periode_ms={}", PERIODE_POMPE_RX_MS);
+        return true;
+    }
+    POMPE_RX_LANCEE.store(false, OrdreCompteur::Release);
+    crate::serial_println!("BOUCHAUD_NET_POMPE_RX_ECHEC");
+    false
+}
+
+pub fn etat_pompe_rx() -> (bool, u64, u64) {
+    (
+        POMPE_RX_LANCEE.load(OrdreCompteur::Relaxed),
+        POMPE_RX_TOURS.load(OrdreCompteur::Relaxed),
+        POMPE_RX_DERNIER_MS.load(OrdreCompteur::Relaxed),
+    )
+}
 
 /// Relit l'etat du lien et reconfigure quand il change.
 ///
@@ -542,6 +738,7 @@ fn veilleur_de_lien() -> ! {
     let mut prochain_dhcp_ms = 0u64;
     let mut attente_dhcp_ms = PERIODE_DHCP_MS;
     let mut prochaine_negociation_ms = 0u64;
+    let mut prochain_fallback_ms = 0u64;
     loop {
         crate::kernel::task::sleep_ticks(
             crate::kernel::timer::ms_to_ticks(PERIODE_LIEN_MS),
@@ -562,6 +759,7 @@ fn veilleur_de_lien() -> ! {
                 // Le cable part : on ne garde pas une configuration qui ne
                 // mene plus nulle part, sinon chaque requete part dans le vide
                 // et attend son echeance.
+                oublie_lab_ics_fallback();
                 pose_le_verdict(Demarrage::LienBas);
                 crate::kernel::sysroot::refresh_resolver();
                 oublie_identite_reseau();
@@ -575,6 +773,7 @@ fn veilleur_de_lien() -> ! {
             // suite de la serie d'echecs precedente.
             prochain_dhcp_ms = 0;
             attente_dhcp_ms = PERIODE_DHCP_MS;
+            prochain_fallback_ms = 0;
             crate::kernel::dmesg::log_fmt(format_args!(
                 "net: eth0 lien UP {} Mb/s duplex {}",
                 e1000::vitesse_mbps(),
@@ -624,7 +823,9 @@ fn veilleur_de_lien() -> ! {
         // l'attente : un reseau vraiment sans serveur DHCP reste espace par
         // le meme plafond qu'avant. On retire seulement le droit de se reposer
         // sur une supposition.
-        if matches!(etat, Demarrage::Pret) {
+        // Un vrai bail reste terminal. Le secours LAB, lui, continue a
+        // demander DHCP toutes les 30 s : DHCP garde toujours la priorite.
+        if matches!(etat, Demarrage::Pret) && !lab_ics_fallback_active() {
             continue;
         }
         let maintenant = crate::kernel::timer::monotonic_ms();
@@ -632,16 +833,48 @@ fn veilleur_de_lien() -> ! {
             continue;
         }
         prochain_dhcp_ms = maintenant.saturating_add(attente_dhcp_ms);
-        let nouvel_etat = match dhcp::negocie_avant(BUDGET_DHCP_VEILLEUR_MS) {
+
+        let resultat_dhcp = dhcp::negocie_avant(BUDGET_DHCP_VEILLEUR_MS);
+        let nouvel_etat = match resultat_dhcp {
             Some(_) => Demarrage::Pret,
-            None if e1000::using_rtl8168() => Demarrage::SansConfiguration,
+            None if e1000::using_rtl8168() => {
+                let c = dhcp::compteurs();
+                let preuve_sans_offre =
+                    c.discover_envoyes >= 2 && c.offres_vues == 0;
+
+                if lab_ics_fallback_active() {
+                    Demarrage::Pret
+                } else if preuve_sans_offre
+                    && maintenant >= prochain_fallback_ms
+                {
+                    prochain_fallback_ms =
+                        maintenant.saturating_add(LAB_ICS_RETRY_FALLBACK_MS);
+                    if essaie_lab_ics_fallback() {
+                        Demarrage::Pret
+                    } else {
+                        Demarrage::SansConfiguration
+                    }
+                } else {
+                    Demarrage::SansConfiguration
+                }
+            }
             None => Demarrage::SansBail,
         };
-        if matches!(nouvel_etat, Demarrage::Pret) {
+
+        if bail_obtenu() {
             attente_dhcp_ms = PERIODE_DHCP_MS;
+        } else if lab_ics_fallback_active() {
+            attente_dhcp_ms = LAB_ICS_RETEST_DHCP_MS;
+            prochain_dhcp_ms = maintenant.saturating_add(LAB_ICS_RETEST_DHCP_MS);
         } else {
-            attente_dhcp_ms = attente_dhcp_ms.saturating_mul(2).min(PLAFOND_DHCP_MS);
+            let plafond = if lab_ics_fallback_autorise() {
+                LAB_ICS_DHCP_BACKOFF_MAX_MS
+            } else {
+                PLAFOND_DHCP_MS
+            };
+            attente_dhcp_ms = attente_dhcp_ms.saturating_mul(2).min(plafond);
         }
+
         if nouvel_etat as u8 != etat as u8 {
             pose_le_verdict(nouvel_etat);
             crate::kernel::sysroot::refresh_resolver();
@@ -653,8 +886,15 @@ fn veilleur_de_lien() -> ! {
                 nom_demarrage(nouvel_etat),
             ));
             crate::serial_println!(
-                "BOUCHAUD_NET_RECONFIGURE verdict={}",
+                "BOUCHAUD_NET_RECONFIGURE verdict={} source={}",
                 nom_demarrage(nouvel_etat),
+                if bail_obtenu() {
+                    "dhcp"
+                } else if lab_ics_fallback_active() {
+                    "lab-ics-fallback"
+                } else {
+                    "none"
+                },
             );
         }
     }
@@ -678,22 +918,23 @@ fn nom_demarrage(etat: Demarrage) -> &'static str {
 
 /// Lance le veilleur de lien. Sans effet si une carte manque.
 pub fn demarre_le_veilleur_de_lien() -> bool {
-    if VEILLEUR_LANCE.load(core::sync::atomic::Ordering::Acquire) {
-        return true;
-    }
     if matches!(etat_demarrage(), Demarrage::SansCarte | Demarrage::CarteRefusee) {
         // Rien a veiller : pas de carte, ou une carte que personne ne pilote.
         return false;
+    }
+    let pompe_lancee = demarre_la_pompe_rx();
+    if VEILLEUR_LANCE.compare_exchange(false, true, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire).is_err() {
+        return pompe_lancee;
     }
     if crate::kernel::task::spawn_noyau_priorite(
         veilleur_de_lien,
         "net-lien",
         crate::kernel::task::Priorite::Normale,
     ) {
-        VEILLEUR_LANCE.store(true, core::sync::atomic::Ordering::Release);
         crate::serial_println!("BOUCHAUD_NET_VEILLEUR_LANCE periode_ms={}", PERIODE_LIEN_MS);
-        return true;
+        return pompe_lancee;
     }
+    VEILLEUR_LANCE.store(false, core::sync::atomic::Ordering::Release);
     false
 }
 
@@ -1531,8 +1772,24 @@ pub fn verifie_la_reception() {
 }
 
 pub(crate) fn draine_anneau() -> usize {
+    DRAIN_TENTATIVES.fetch_add(1, OrdreCompteur::Relaxed);
     let _garde = VERROU_RECEPTION.lock();
+    DRAIN_ENTREES.fetch_add(1, OrdreCompteur::Relaxed);
     draine_verrouille()
+}
+
+static DRAIN_TENTATIVES: AtomicU64 = AtomicU64::new(0);
+static DRAIN_ENTREES: AtomicU64 = AtomicU64::new(0);
+static DRAIN_TRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Lecture sans prise du verrou : le canal TX peut signaler un blocage RX.
+pub fn compteurs_drainage() -> (u64, u64, u64, bool) {
+    (
+        DRAIN_TENTATIVES.load(OrdreCompteur::Relaxed),
+        DRAIN_ENTREES.load(OrdreCompteur::Relaxed),
+        DRAIN_TRAMES.load(OrdreCompteur::Relaxed),
+        VERROU_RECEPTION.is_locked(),
+    )
 }
 
 fn draine_verrouille() -> usize {
@@ -1547,24 +1804,12 @@ fn draine_verrouille() -> usize {
     // B3 : ENCADRER LA REPARATION, PAS SEULEMENT LA DECLENCHER.
     //
     // `repare_si_demande` rend `true` quand elle s'est executee -- une
-    // INVOCATION, pas un resultat. Le verdict de reprise se rend plus tard,
-    // quand le materiel a eu le temps de montrer qu'il est reparti : la
-    // conclusion de la fenetre precedente passe donc AVANT l'ouverture de la
-    // suivante, a chaque drainage.
-    let instantane = e1000::instantane_rx();
-    crate::net::rx_recuperation::conclure_si_du(&instantane);
-    if e1000::repare_si_demande() {
-        let (req, exec) = e1000::compteurs_reparation();
-        crate::net::rx_recuperation::debut(
-            "rx-silencieux",
-            e1000::nom_pilote(),
-            0,
-            0,
-            &e1000::instantane_rx(),
-            req,
-            exec,
-        );
-    }
+    // INVOCATION, pas un resultat. Le verdict de reprise se rend plus tard.
+    // On draine d'abord les trames deja disponibles, puis on conclut la
+    // fenetre precedente et ouvre eventuellement la suivante.
+    // Lire les trames deja DMA AVANT la reparation. Rearmer les descripteurs
+    // CPU avant ce passage les perdait et laissait RX_CUR derriere la tete
+    // materielle, ce que le releve physique montre a t=41..71 secondes.
     let mut buf = [0u8; 2048];
     let mut traitees = 0usize;
     for _ in 0..TRAMES_PAR_PASSAGE {
@@ -1573,9 +1818,21 @@ fn draine_verrouille() -> usize {
             None => break, // plus rien a lire
         };
         traitees += 1;
+        DRAIN_TRAMES.fetch_add(1, OrdreCompteur::Relaxed);
         crate::net::chronologie::note(&crate::net::chronologie::RX_TRAMES);
         TRAMES_ROUTEES.fetch_add(1, OrdreCompteur::Relaxed);
         route_trame(&buf[..n]);
+    }
+    let instantane = e1000::instantane_rx();
+    crate::net::rx_recuperation::conclure_si_du(&instantane);
+    // Si le budget est epuise, un autre passage terminera le drainage.
+    // Ne pas jeter les descripteurs qui restent pour reparer trop tot.
+    if traitees < TRAMES_PAR_PASSAGE && e1000::repare_si_demande() {
+        let (req, exec) = e1000::compteurs_reparation();
+        crate::net::rx_recuperation::debut(
+            "rx-silencieux", e1000::nom_pilote(), 0, 0,
+            &e1000::instantane_rx(), req, exec,
+        );
     }
     traitees
 }

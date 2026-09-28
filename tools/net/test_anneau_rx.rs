@@ -67,6 +67,19 @@ fn un_anneau_degenere_ne_divise_pas_par_zero() {
     assert_eq!(eor_pour(0, 0), 0);
 }
 
+#[test]
+fn une_trame_dma_derriere_un_trou_own_redevient_accessible() {
+    let mut ring = [OWN; 8];
+    ring[5] = 64;
+    assert_eq!(anneau::premier_pret_apres_trou(4, 8, |i| ring[i]), Some(5));
+    ring[5] = OWN;
+    ring[0] = 64;
+    assert_eq!(anneau::premier_pret_apres_trou(7, 8, |i| ring[i]), Some(0));
+    ring[0] = OWN;
+    assert_eq!(anneau::premier_pret_apres_trou(4, 8, |i| ring[i]), None);
+    assert_eq!(anneau::premier_pret_apres_trou(0, 0, |_| OWN), None);
+}
+
 // ===========================================================================
 // EOR, OWN, longueur, adresse
 // ===========================================================================
@@ -1227,6 +1240,20 @@ fn un_pilote_sans_compteur_ne_fabrique_pas_de_reprise_efficace() {
     suivi.arme(DEPART_NS, 0, 0);
     let issue = suivi.conclut_si_du(DEPART_NS + FENETRE_NS, FENETRE_NS, 0, 0);
     assert_eq!(issue.map(|i| i.effective), Some(false));
+}
+
+#[test]
+fn own_et_curseur_sans_paquet_ne_prouvent_pas_la_reprise() {
+    let mut suivi = SuiviVerdict::nouveau();
+    suivi.arme(DEPART_NS, 64, 0);
+    // Le dernier argument simule des OWN rendus ou un curseur qui bouge.
+    let issue = suivi.conclut_si_du(DEPART_NS + FENETRE_NS, FENETRE_NS, 64, 5).unwrap();
+    assert!(!issue.effective);
+    assert_eq!(issue.sans_effet, 1);
+    suivi.arme(DEPART_NS + FENETRE_NS, 64, 5);
+    let issue = suivi.conclut_si_du(DEPART_NS + 2 * FENETRE_NS, FENETRE_NS, 65, 5).unwrap();
+    assert!(issue.effective);
+    assert_eq!(issue.sans_effet, 0);
 }
 
 #[test]

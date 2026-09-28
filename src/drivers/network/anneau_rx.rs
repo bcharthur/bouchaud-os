@@ -93,6 +93,28 @@ pub fn suivant(index: usize, descripteurs: usize) -> usize {
     }
 }
 
+/// Retrouve une trame deja rendue au processeur apres un trou OWN.
+/// Une reprise peut rendre le descripteur courant au NIC alors que le NIC
+/// continue d'ecrire plus loin. Attendre un tour complet laisserait les
+/// trames suivantes bloquees derriere ce trou.
+pub fn premier_pret_apres_trou(
+    courant: usize,
+    descripteurs: usize,
+    opts1: impl Fn(usize) -> u32,
+) -> Option<usize> {
+    if descripteurs == 0 || courant >= descripteurs || opts1(courant) & OWN == 0 {
+        return None;
+    }
+    let mut index = suivant(courant, descripteurs);
+    while index != courant {
+        if opts1(index) & OWN == 0 {
+            return Some(index);
+        }
+        index = suivant(index, descripteurs);
+    }
+    None
+}
+
 /// Le bit `EOR` appartient-il a ce descripteur ?
 ///
 /// A UN SEUL, LE DERNIER. Le poser sur un autre ferait revenir le materiel a
@@ -1016,7 +1038,6 @@ pub struct SuiviVerdict {
     en_attente: bool,
     depuis_ns: u64,
     paquets_avant: u64,
-    rendus_avant: u64,
     sans_effet: u32,
 }
 
@@ -1026,7 +1047,6 @@ impl SuiviVerdict {
             en_attente: false,
             depuis_ns: 0,
             paquets_avant: 0,
-            rendus_avant: 0,
             sans_effet: 0,
         }
     }
@@ -1048,16 +1068,14 @@ impl SuiviVerdict {
 
     /// Rend le verdict en attente SI sa fenetre est ecoulee.
     ///
-    /// Le progres se mesure comme ailleurs dans ce module : par des
-    /// AUGMENTATIONS, jamais par une valeur absolue. Un pilote qui ne sait pas
-    /// remplir un compteur le laisse a zero, et un zero constant ne peut pas
-    /// fabriquer une reprise.
+    /// Seule une trame effectivement livree a la pile prouve le retour RX.
+    /// OWN et le curseur bougent aussi quand une trame abimee est rejetee.
     pub fn conclut_si_du(
         &mut self,
         maintenant_ns: u64,
         fenetre_ns: u64,
         paquets: u64,
-        rendus: u64,
+        _rendus: u64,
     ) -> Option<IssueVerdict> {
         if !self.en_attente {
             return None;
@@ -1067,7 +1085,7 @@ impl SuiviVerdict {
             return None;
         }
         self.en_attente = false;
-        let effective = paquets > self.paquets_avant || rendus > self.rendus_avant;
+        let effective = paquets > self.paquets_avant;
         if effective {
             self.sans_effet = 0;
         } else {
@@ -1117,15 +1135,11 @@ impl SuiviVerdict {
     ///
     /// # Pourquoi apres, et pas avant
     ///
-    /// Une reprise rend elle-meme des descripteurs au materiel, donc elle fait
-    /// monter `own_rendus`. Photographier avant l'appel ferait compter ce
-    /// mouvement-la comme une reception restauree : la reparation se
-    /// declarerait reparee.
-    pub fn arme(&mut self, maintenant_ns: u64, paquets: u64, rendus: u64) {
+    /// Une reprise peut rendre OWN et avancer le curseur sans livrer de trame.
+    pub fn arme(&mut self, maintenant_ns: u64, paquets: u64, _rendus: u64) {
         self.en_attente = true;
         self.depuis_ns = maintenant_ns;
         self.paquets_avant = paquets;
-        self.rendus_avant = rendus;
     }
 
     /// Oublie la question en cours sans la juger.

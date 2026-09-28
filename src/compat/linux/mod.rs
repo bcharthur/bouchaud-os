@@ -513,7 +513,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         FTRUNCATE => file::sys_ftruncate(args[0] as i32, args[1] as usize),
         DUP => file::sys_dup(args[0] as i32),
         DUP2 => file::sys_dup2(args[0] as i32, args[1] as i32),
-        DUP3 => file::sys_dup2(args[0] as i32, args[1] as i32),
+        // P17_POSIX_DUP3_FLAGS
+        DUP3 => file::sys_dup3(args[0] as i32, args[1] as i32, args[2] as u32),
         PIPE => file::sys_pipe(args[0], 0),
         PIPE2 => file::sys_pipe(args[0], args[1] as u32),
         FCNTL => file::sys_fcntl(args[0] as i32, args[1] as u32, args[2]),

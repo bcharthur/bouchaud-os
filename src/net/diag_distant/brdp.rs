@@ -121,6 +121,9 @@ pub enum Commande {
     // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
     /// Page detaillee du registre central des services.
     ServicesPage { start: u16 },
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    ForensicsStatus,
+    ThreadsPage { start: u16 },
     ProcessesSnapshot,
     MemorySnapshot,
     /// Lance la preuve Internet active asynchrone.
@@ -166,6 +169,9 @@ impl Commande {
             Commande::ServicesSnapshot => 15,
             // BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
             Commande::ServicesPage { .. } => 92,
+            // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+            Commande::ForensicsStatus => 93,
+            Commande::ThreadsPage { .. } => 94,
             Commande::ProcessesSnapshot => 16,
             Commande::MemorySnapshot => 17,
             // BOUCHAUD_HOTFIX11_SERIAL_BRDP
@@ -638,6 +644,19 @@ pub fn analyse(ligne: &[u8]) -> Result<Commande, Erreur> {
                 return Err(Erreur::ArgumentInvalide);
             }
             Ok(Commande::ServicesPage { start: start as u16 })
+        }
+        // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+        b"forensics status" => Ok(Commande::ForensicsStatus),
+        b"threads page" => {
+            let start = match lit_entier(ligne, "start") {
+                LectureEntier::Absent => 0,
+                LectureEntier::Invalide => return Err(Erreur::ArgumentInvalide),
+                LectureEntier::Valeur(n) => n,
+            };
+            if start >= 1024 {
+                return Err(Erreur::ArgumentInvalide);
+            }
+            Ok(Commande::ThreadsPage { start: start as u16 })
         }
         b"processes snapshot" => Ok(Commande::ProcessesSnapshot),
         b"memory snapshot" => Ok(Commande::MemorySnapshot),

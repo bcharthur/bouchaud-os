@@ -11,6 +11,23 @@ $RepoRoot=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $RepoRoot
 function Fail([string]$Message){ Write-Host "ERREUR: $Message" -ForegroundColor Red; exit 1 }
 
+# P18_BRDP_BUILD_TRUTH_V1: ce chemin contourne IMAGE-TRIGKEY.ps1.
+# Armer le LAB avant toute compilation et refuser une image physique muette.
+if ([string]::IsNullOrWhiteSpace($env:BOUCHAUD_DEBUG_TOKEN)) {
+    $EnvFile = Join-Path $RepoRoot '.env'
+    if (Test-Path -LiteralPath $EnvFile -PathType Leaf) {
+        $Lines = @(Get-Content -LiteralPath $EnvFile | Where-Object { $_ -match '^\s*BOUCHAUD_DEBUG_TOKEN\s*=' })
+        if ($Lines.Count -gt 0) {
+            $Line = $Lines[-1]
+            $Value = $Line.Substring($Line.IndexOf('=') + 1).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($Value)) { $env:BOUCHAUD_DEBUG_TOKEN = $Value }
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($env:BOUCHAUD_DEBUG_TOKEN)) {
+    throw 'BOUCHAUD_DEBUG_TOKEN absent. Definir la variable ou .env avant le build physique.'
+}
+Write-Host 'TRIGKEY_BRDP_TOKEN_SOURCE_OK (valeur masquee)' -ForegroundColor Green
 Write-Host "=== Bouchaud OS - TRIGKEY Stage 2 single-USB image ===" -ForegroundColor Cyan
 & ".\tools\reference\prepare-reference-ladybird.ps1" -Force:$ForceLadybird
 if($LASTEXITCODE -ne 0){ exit $LASTEXITCODE }

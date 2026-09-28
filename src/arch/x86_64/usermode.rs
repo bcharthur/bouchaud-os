@@ -219,10 +219,11 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     let result = (*frame).rax as i64;
     crate::kernel::security::syscall::after_syscall(number, result, native);
 
-    crate::kernel::task::impute_syscall(
-        syscall_nr,
-        crate::kernel::timer::monotonic_ns().saturating_sub(syscall_debut),
-    );
+    let syscall_duree =
+        crate::kernel::timer::monotonic_ns().saturating_sub(syscall_debut);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    crate::kernel::task::forensic_syscall_result(syscall_nr, result, syscall_duree);
+    crate::kernel::task::impute_syscall(syscall_nr, syscall_duree);
     crate::kernel::task::account_kernel_exit();
     crate::kernel::task::retire_current_if_zombie();
 }
@@ -230,6 +231,10 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
 unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     let number = (*frame).rax;
     crate::kernel::task::stall_syscall_enter(number);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    // Dernier contexte USER connu. Ce n'est pas presente comme un RIP noyau :
+    // c'est l'adresse de retour qui permet de retrouver l'appelant ring 3.
+    crate::kernel::task::forensic_user_frame(&*frame);
 
     // BOUCHAUD_C39_PORTEES_ABANDONNEES
     //

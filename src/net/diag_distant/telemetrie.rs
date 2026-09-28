@@ -275,7 +275,89 @@ fn emet_heartbeat_si_du() {
 
     // Ne passe PAS par l'anneau LAB : pas d'auto-alimentation du transport.
     let mut charge = Charge::neuf();
-    let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"t_ms\":{},\"seq\":{}}}", maintenant_ms, HEARTBEATS.load(Ordering::Relaxed));
+
+    // BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+    // Lecture atomique uniquement : le canal UDP ne prend toujours aucun
+    // verrou RX. Si BRDP se fige, son age continue d'etre visible.
+    let brdp_dernier_tour_ms = super::serveur::dernier_tour_ms();
+    let brdp_loop_age_ms = if brdp_dernier_tour_ms == 0 {
+        0
+    } else {
+        maintenant_ms.saturating_sub(brdp_dernier_tour_ms)
+    };
+    let _ = write!(
+        charge,
+        "{{\"telemetry\":1,\"heartbeat\":true,\"t_ms\":{},\"seq\":{},\"brdp_loop_age_ms\":{},\"brdp_force_abort\":{}}}",
+        maintenant_ms,
+        HEARTBEATS.load(Ordering::Relaxed),
+        brdp_loop_age_ms,
+        super::serveur::fermetures_forcees(),
+    );
+    // P18_RX_STABILITY_APPEND_V2: conserver les champs LAB deja presents.
+    // Le battement existant doit finir par '}' ; aucun JSON tronque n'est emis.
+    if !charge.tronque() && charge.octets().last() == Some(&b'}') {
+        let _ = charge.tronque_a(charge.len() - 1);
+        let rtl = crate::drivers::rtl8168::releve();
+        let _ = write!(charge,
+            ",\"rtl_rx_packets\":{},\"rtl_rx_cur\":{},\"rtl_rx_tours\":{},\
+\"rtl_isr_rx_ok\":{},\"rtl_rx_sterile\":{},\"rtl_rep_req\":{},\
+\"rtl_rep_exec\":{},\"rtl_rep_sans_effet\":{},\"rtl_rep_degre\":{},\
+\"rtl_reinit\":{},\"rtl_reinit_ok\":{},\"rtl_desc_nic\":{},\
+\"rtl_desc_cpu\":{},\"rtl_tx_enfiles\":{},\"rtl_tx_termines\":{}}}",
+            rtl.rx_paquets, rtl.rx_cur, rtl.rx_tours_cpu,
+            rtl.isr_rx_ok, rtl.rx_ok_sans_progres,
+            rtl.reparations_demandees, rtl.reparations_executees,
+            rtl.reprises_sans_effet, rtl.reparation_degre,
+            rtl.reinitialisations, rtl.reinitialisations_ok,
+            rtl.rx_desc_materiel, rtl.rx_desc_processeur,
+            rtl.tx_enfiles, rtl.tx_termines);
+    }
+    if charge.tronque() || charge.octets().last() != Some(&b'}') {
+        charge.vide();
+        let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"rtl_truncated\":true}}");
+    }
+    // P18_RX_DRAIN_DIAG_V1: lecture sans verrou de reception.
+    if !charge.tronque() && charge.octets().last() == Some(&b'}') {
+        let _ = charge.tronque_a(charge.len() - 1);
+        let rtl_drain = crate::drivers::rtl8168::releve();
+        let (drain_try, drain_enter, drain_frames, rx_lock) = crate::net::compteurs_drainage();
+        let _ = write!(charge,
+            ",\"rtl_rx_head_opts1\":{},\"rtl_rx_tete_cpu\":{},\"rtl_rx_trous\":{},\
+\"net_drain_try\":{},\"net_drain_enter\":{},\"net_drain_frames\":{},\"net_rx_lock\":{}}}",
+            rtl_drain.rx_desc_courant, rtl_drain.rx_tete_cpu,
+            crate::drivers::rtl8168::trous_sautes(),
+            drain_try, drain_enter, drain_frames, rx_lock as u8);
+    }
+    if charge.tronque() || charge.octets().last() != Some(&b'}') {
+        charge.vide();
+        let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"rtl_truncated\":true}}");
+    }
+    // P18_RX_POLL_LIVENESS_TELEMETRY_V1: la pompe publie son activite.
+    if !charge.tronque() && charge.octets().last() == Some(&b'}') {
+        let _ = charge.tronque_a(charge.len() - 1);
+        let (pompe_lancee, pompe_tours, pompe_dernier_ms) = crate::net::etat_pompe_rx();
+        let _ = write!(charge,
+            ",\"net_rx_pump_started\":{},\"net_rx_pump_ticks\":{},\"net_rx_pump_last_ms\":{}}}",
+            pompe_lancee as u8, pompe_tours, pompe_dernier_ms);
+    }
+    if charge.tronque() || charge.octets().last() != Some(&b'}') {
+        charge.vide();
+        let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"rtl_truncated\":true}}");
+    }
+    // P18_BRDP_ARP_TRACE_V1: suit la requete jusqu'a la reponse smoltcp.
+    if !charge.tronque() && charge.octets().last() == Some(&b'}') {
+        let _ = charge.tronque_a(charge.len() - 1);
+        let (arp, icmp, tcp, posees, retirees, perdues, occupation) = super::etat_ingress();
+        let (boucles, dernier_ms, rx, tx, tx_ok) = super::serveur::etat_boucle();
+        let _ = write!(charge,
+            ",\"lab_brdp_state\":{},\"lab_arp_rx\":{},\"lab_icmp_rx\":{},\"lab_tcp_rx\":{},\"lab_q_put\":{},\"lab_q_get\":{},\"lab_q_lost\":{},\"lab_q_depth\":{},\"brdp_rx_polls\":{},\"brdp_last_ms\":{},\"brdp_rx\":{},\"brdp_tx\":{},\"brdp_tx_ok\":{}}}",
+            super::services().brdp as u8, arp, icmp, tcp, posees, retirees,
+            perdues, occupation, boucles, dernier_ms, rx, tx, tx_ok);
+    }
+    if charge.tronque() || charge.octets().last() != Some(&b'}') {
+        charge.vide();
+        let _ = write!(charge, "{{\"telemetry\":1,\"heartbeat\":true,\"lab_truncated\":true}}");
+    }
     charge.termine();
     if emet(charge.octets()) {
         HEARTBEATS.fetch_add(1, Ordering::Relaxed);
@@ -294,14 +376,12 @@ fn fil_telemetrie() -> ! {
 /// Lance la telemetrie. Idempotent. Ne demande aucun jeton : ce canal ne rend
 /// que ce que l'anneau contient deja, et il n'accepte RIEN en entree.
 pub fn demarre() -> bool {
-    if LANCE.load(Ordering::Acquire) {
-        return true;
-    }
     if !super::actif() {
         return false;
     }
     // On part du present, pas du debut : un canal de survie n'a aucune raison
     // de commencer par rejouer l'amorcage.
+    if LANCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return true; }
     let (_, _, prochaine, _) = crate::kernel::lab::compteurs();
     CURSEUR.store(prochaine, Ordering::Relaxed);
     if crate::kernel::task::spawn_noyau_priorite(
@@ -309,12 +389,14 @@ pub fn demarre() -> bool {
         "bouchaud-telemetrie",
         crate::kernel::task::Priorite::Normale,
     ) {
-        LANCE.store(true, Ordering::Release);
         return true;
     }
+    LANCE.store(false, Ordering::Release);
     false
 }
 
+// P18_SERVICE_GUARDIAN_V1
+pub fn fil_termine() { LANCE.store(false, Ordering::Release); }
 pub fn lance() -> bool {
     LANCE.load(Ordering::Relaxed)
 }

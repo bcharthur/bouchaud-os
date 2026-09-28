@@ -550,6 +550,8 @@ pub fn registre_ajoute(
         // refusee, et personne ne peut plus prendre cet emplacement pour
         // l'ancienne tache.
         let generation = prochaine_generation(emplacement);
+        // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+        forensic_reset_slot(emplacement);
         *ancienne = *tache;
         return Some(TacheId { emplacement: emplacement as u32, generation });
     }
@@ -558,6 +560,8 @@ pub fn registre_ajoute(
         return None;
     }
     let generation = prochaine_generation(longueur);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_reset_slot(longueur);
     EMPLACEMENTS[longueur]
         .tache
         .store(alloc::boxed::Box::into_raw(tache), Ordering::Release);

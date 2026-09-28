@@ -128,6 +128,8 @@ const EVENEMENTS_DIFFERES: usize = 16;
 /// des descripteurs, configuration --, et le bureau appelle `poll()` depuis sa
 /// boucle de dessin. En faire plusieurs d'affilee ferait sauter l'image.
 const BRANCHEMENTS_PAR_TOUR: usize = 1;
+// P17_XHCI_DISCONNECT_DEBOUNCE
+const DECONNEXION_CONFIRMATION_NS: u64 = 150_000_000;
 const MAX_RUNTIME_DEVICES: usize = 32;
 // UNE ATTENTE SE BORNE EN TEMPS, PAS EN NOMBRE DE TOURS.
 //
@@ -1167,6 +1169,8 @@ struct Controller {
     differes_len: usize,
     /// Ports dont l'etat a change et qu'il reste a traiter, un bit par port.
     ports_a_traiter: u32,
+    /// Premier instant ou PORTSC.CCS a ete observe a zero.
+    deconnexion_depuis_ns: [u64; MAX_PORTS_PER_CONTROLLER],
     arbre: [Option<NoeudUsb>; NOEUDS_MAX],
     compte_noeuds: usize,
     hid_count: usize,
@@ -3514,8 +3518,42 @@ fn traite_port_change(controller: &mut Controller, port_index: usize) {
     }
 
     if portsc & PORTSC_CCS == 0 {
+        // P17_XHCI_CONFIRM_DISCONNECT
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let depuis = controller.deconnexion_depuis_ns[port_index];
+        if depuis == 0 {
+            controller.deconnexion_depuis_ns[port_index] = maintenant;
+            controller.ports_a_traiter |= 1u32 << port_index;
+            crate::serial_println!(
+                "P17_XHCI_DISCONNECT_SUSPECT port={} portsc={:#010x}",
+                port, portsc,
+            );
+            return;
+        }
+
+        let age = maintenant.saturating_sub(depuis);
+        if age < DECONNEXION_CONFIRMATION_NS {
+            controller.ports_a_traiter |= 1u32 << port_index;
+            return;
+        }
+
+        controller.deconnexion_depuis_ns[port_index] = 0;
+        crate::serial_println!(
+            "P17_XHCI_DISCONNECT_CONFIRMED port={} age_ms={} portsc={:#010x}",
+            port, age / 1_000_000, portsc,
+        );
         retire_sous_arbre(controller, port);
         return;
+    }
+
+    if controller.deconnexion_depuis_ns[port_index] != 0 {
+        let age = crate::kernel::timer::monotonic_ns()
+            .saturating_sub(controller.deconnexion_depuis_ns[port_index]);
+        controller.deconnexion_depuis_ns[port_index] = 0;
+        crate::serial_println!(
+            "P17_XHCI_DISCONNECT_CANCELLED port={} age_ms={} portsc={:#010x}",
+            port, age / 1_000_000, portsc,
+        );
     }
 
     // Deja enumere : un changement sur un port occupe qu'on connait
@@ -3843,6 +3881,7 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
             differes: [Trb { parameter: 0, status: 0, control: 0 }; EVENEMENTS_DIFFERES],
             differes_len: 0,
             ports_a_traiter: 0,
+            deconnexion_depuis_ns: [0; MAX_PORTS_PER_CONTROLLER],
             arbre: [None; NOEUDS_MAX],
             compte_noeuds: 0,
             hid_count: 0,

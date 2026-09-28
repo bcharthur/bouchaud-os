@@ -463,6 +463,8 @@ impl Client {
             // Do not count backpressure retries as dropped input.
             let room = { let c = self.vers_client.lock(); c.lecteurs != 0 && c.place() >= proto::message(Genre::Key, 0, &charge).len() };
             if !room || !self.envoie(Genre::Key, &charge) { break; }
+            // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+            crate::kernel::perf::browser_input(self.pid, true, false);
             self.touches_attente.delivered();
         }
     }
@@ -811,7 +813,14 @@ impl Client {
                 "gui: client pid={} termine (code {})",
                 self.pid, code
             ));
+            // P18_CHILD_RECOVERY_V1: une sortie inattendue du courtier, meme
+            // avec code 0, ne laisse ni racine stale ni enfants orphelins.
+            crate::gui::services::relance_apres_crash(self.pid, code);
             self.etat = Etat::Termine;
+            let arbre = task::arbre_de(self.pid);
+            crate::gui::services::arrete();
+            task::nettoie_zombies();
+            for pid in arbre { task::collect_child(pid); }
             return false;
         }
         true

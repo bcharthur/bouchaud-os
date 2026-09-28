@@ -545,10 +545,6 @@ fn boucle() {
         #[cfg(not(feature = "reference-desktop"))]
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
-    let debut_services = crate::kernel::timer::monotonic_ms();
-    let mut services_initialises = !cfg!(feature = "reference-desktop");
-    let mut derniere_decision_navigateur =
-        crate::gui::demarrage_navigateur::Decision::LaisserLeBureauSePoser;
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -1022,62 +1018,18 @@ fn boucle() {
             sale = true;
         }
 
-        // One boot attempt, after the desktop has actually rendered. No crash loop.
-        //
-        // BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V1
-        //
-        // Le seul critere etait le temps : cinq cents millisecondes apres la
-        // premiere trame. Le releve du 16 septembre montre ce que cela donne
-        // sur la machine :
-        //
-        //     t=5799 ms  bureau-premiere-trame
-        //     t~6500 ms  le lien Ethernet monte (autonegociation cuivre)
-        //     t=6799 ms  navigateur-demande -- resolveur=NON-CONFIGURE
-        //
-        // Trois cents millisecondes apres la montee du lien, donc avant tout
-        // bail DHCP. Le navigateur lit son resolveur UNE FOIS, a l'exec, et le
-        // garde pour la vie : la session entiere se passe ensuite sans DNS, et
-        // la panne parait venir du navigateur.
-        //
-        // L'attente est BORNEE et ne bloque rien : la boucle continue de
-        // dessiner, on se contente de ne pas encore demander le lancement.
-        // Lien bas, on n'attend pas -- un bail ne peut pas venir, et la page
-        // locale n'a besoin de personne.
-        if !services_initialises && derniere_trame != 0 {
-            let decision = crate::gui::demarrage_navigateur::decide(
-                maintenant.saturating_sub(debut_services),
-                // Un bail peut encore arriver tant qu'il y a une carte
-                // utilisable. Le lien qui n'est pas ENCORE monte n'est pas une
-                // absence de cable : l'autonegociation cuivre dure trois
-                // secondes.
-                !matches!(
-                    crate::net::etat_demarrage(),
-                    crate::net::Demarrage::SansCarte | crate::net::Demarrage::CarteRefusee,
-                ),
-                matches!(crate::net::etat_demarrage(), crate::net::Demarrage::Pret),
-                crate::gui::demarrage_navigateur::REPOS_BUREAU_MS,
-                crate::gui::demarrage_navigateur::ATTENTE_MAXIMALE_MS,
-            );
-            // Aux TRANSITIONS seulement : une ligne par tour de compositeur
-            // noierait le releve a soixante par seconde.
-            if decision != derniere_decision_navigateur {
-                derniere_decision_navigateur = decision;
-                crate::serial_println!(
-                    "BOUCHAUD_NAVIGATEUR_DEPART decision={} t_ms={} lien={}",
-                    decision.nom(),
-                    maintenant.saturating_sub(debut_services),
-                    crate::net::connecte() as u8,
-                );
-            }
-            if decision.lance() {
-                services_initialises = true;
-                if !wins.iter().any(window::est_client) {
-                    crate::platform::pc::ecran_faute::point("navigateur-demande");
-                    crate::gui::services::demande(crate::gui::services::DEMARRER);
-                }
-            }
+        // Le navigateur demarre explicitement depuis le bureau ou BRDP.
+        // Le diagnostic reseau est ainsi disponible avant sa charge CPU/RAM.
+        let mut service_action = crate::gui::services::prend_commande();
+        // P18_CHILD_RECOVERY_V1. Une commande STOP/RESTART explicite est
+        // prioritaire. Le bureau ne repart qu'apres le delai de grace du
+        // courtier et seulement si une fenetre Ladybird est encore ouverte.
+        if service_action == 0 && wins.iter().any(window::est_client)
+            && crate::gui::services::relance_enfant_si_necessaire(
+                crate::kernel::timer::monotonic_ns())
+        {
+            service_action = crate::gui::services::REDEMARRER;
         }
-        let service_action = crate::gui::services::prend_commande();
 
         // BOUCHAUD_P0_REMOTE_CONTROL_V1_2_TWO_PHASE_RESTART
         // Le releve physique du 25/09/2026 a prouve STOP seul et START seul,

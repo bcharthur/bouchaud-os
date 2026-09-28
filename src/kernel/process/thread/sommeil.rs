@@ -114,6 +114,8 @@ pub fn sleep_ticks(ticks: u64) {
     // BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1 : voir `verifie_profondeur_rendue`.
     let profondeur_entree = smp_lock::profondeur_locale();
     let deadline = echeance_pour(ticks);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
     {
         let task = current();
         task.wake_deadline_ns.range(deadline);
@@ -143,6 +145,8 @@ pub fn sleep_ticks(ticks: u64) {
     let task = current();
     task.wake_deadline_ns.range(0);
     task.state.range(TaskState::Ready);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_SLEEP);
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.

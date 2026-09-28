@@ -340,3 +340,23 @@ fn le_registre_est_borne_et_le_dit() {
         oublie(1000 + index);
     }
 }
+
+// P18_CHILD_RECOVERY_V1: la politique observe le meme registre que le noyau.
+#[test]
+fn enfant_critique_sans_remplacant_declenche_apres_grace() {
+    const ROOT: u32 = 7100;
+    const OLD: u32 = 7101;
+    const NEW: u32 = 7102;
+    let start = 90_000_000_000;
+    let grace = 8_000_000_000;
+    assert!(note_lancement(ROOT, Role::Courtier, 0, 0, start));
+    assert!(note_lancement(OLD, Role::Rendu, ROOT, 1, start + 1));
+    assert_eq!(note_sortie(OLD, 137, start + 10), Some(Role::Rendu));
+    assert!(supervision::enfant_sans_remplacant(ROOT, start + grace - 1, grace).is_none());
+    let lost = supervision::enfant_sans_remplacant(ROOT, start + grace + 10, grace);
+    assert_eq!(lost.map(|(pid, role, code, _)| (pid, role, code)), Some((OLD, Role::Rendu, 137)));
+    assert!(note_lancement(NEW, Role::Rendu, ROOT, 1, start + grace + 11));
+    assert!(supervision::enfant_sans_remplacant(ROOT, start + grace + 20, grace).is_none());
+    assert!(supervision::enfant_sans_remplacant(ROOT + 1, start + grace + 20, grace).is_none());
+    for pid in [ROOT, OLD, NEW] { oublie(pid); }
+}

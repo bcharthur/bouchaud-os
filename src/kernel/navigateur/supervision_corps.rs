@@ -392,6 +392,34 @@ pub fn vivants(role: Role) -> usize {
         .count()
 }
 
+// P18_CHILD_RECOVERY_V1. La decision de secours est prise par le bureau.
+// Le registre constate seulement la perte d'un service critique et laisse
+// le courtier libre de le remplacer pendant le delai de grace.
+pub fn enfant_sans_remplacant(courtier: u32, maintenant_ns: u64, grace_ns: u64)
+    -> Option<(u32, Role, i32, u64)>
+{
+    if courtier == 0 { return None; }
+    let registre = REGISTRE.lock();
+    let mut resultat = None;
+    for mort in registre.entrees.iter() {
+        if !mort.occupee || mort.courtier != courtier || mort.etat != Etat::Plante
+            || !matches!(mort.role, Role::Rendu | Role::Reseau | Role::Decodeur | Role::Composition)
+        { continue; }
+        let age = maintenant_ns.saturating_sub(mort.depuis_ns);
+        if age < grace_ns { continue; }
+        let remplace = registre.entrees.iter().any(|vivant| {
+            vivant.occupee && vivant.courtier == courtier && vivant.role == mort.role
+                && vivant.etat == Etat::Vivant && vivant.depuis_ns > mort.depuis_ns
+        });
+        if remplace { continue; }
+        let candidat = (mort.pid, mort.role, mort.code_sortie, age / 1_000_000);
+        if resultat.map_or(true, |(pid, _, _, _)| mort.pid < pid) {
+            resultat = Some(candidat);
+        }
+    }
+    resultat
+}
+
 /// L'etat d'un pid supervise.
 pub fn etat(pid: u32) -> Option<Etat> {
     let registre = REGISTRE.lock();

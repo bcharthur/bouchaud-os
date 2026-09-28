@@ -14,6 +14,69 @@ pub fn demande(action: u8) {
 pub fn prend_commande() -> u8 { COMMANDE.swap(0, Ordering::AcqRel) }
 pub fn enregistre(pid: u32) { RACINE.store(pid, Ordering::Release); ECHEC.store(0, Ordering::Release); }
 pub fn echec() { ECHEC.store(1, Ordering::Release); }
+// Une session ouverte volontairement peut redemarrer apres un crash du
+// courtier. Trois essais en trente secondes, jamais de boucle sans borne.
+const FENETRE_CRASH_MS: u64 = 30_000;
+const MAX_RELANCES_CRASH: u32 = 3;
+static CRASH_DEBUT_MS: AtomicU64 = AtomicU64::new(0);
+static CRASH_RELANCES: AtomicU32 = AtomicU32::new(0);
+pub fn relance_apres_crash(pid: u32, code: i32) {
+    // P18_CHILD_RECOVERY_V1: une sortie 0 inattendue du courtier doit aussi
+    // etre suivie; l'arret explicite passe par Client::termine().
+    if RACINE.load(Ordering::Acquire) != pid { return; }
+    // Appele uniquement par le fil du bureau ; le PID est celui de la session
+    // effectivement visible. Un STOP explicite passe par Client::termine().
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let debut = CRASH_DEBUT_MS.load(Ordering::Relaxed);
+    if debut == 0 || maintenant.saturating_sub(debut) > FENETRE_CRASH_MS {
+        CRASH_DEBUT_MS.store(maintenant, Ordering::Relaxed);
+        CRASH_RELANCES.store(0, Ordering::Relaxed);
+    }
+    let nombre = CRASH_RELANCES.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "LADYBIRD_BROKER_CRASH pid={} code={} relance={} limite={}",
+        pid, code, nombre, MAX_RELANCES_CRASH,
+    ));
+    if nombre <= MAX_RELANCES_CRASH { demande(DEMARRER); } else { echec(); }
+}
+// P18_CHILD_RECOVERY_V1: la relance de toute la session reste un secours.
+// Trois redemarrages en cinq minutes, meme si le PID du courtier change.
+const GRACE_ENFANT_NS: u64 = 8_000_000_000;
+const FENETRE_ENFANT_MS: u64 = 300_000;
+const MAX_RELANCES_ENFANT: u32 = 3;
+static ENFANT_FENETRE_MS: AtomicU64 = AtomicU64::new(0);
+static ENFANT_RELANCES: AtomicU32 = AtomicU32::new(0);
+static ENFANT_TRAITE: AtomicU32 = AtomicU32::new(0);
+static ENFANT_DERNIER_CHECK_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Appele uniquement par le bureau, apres consommation d'une commande externe.
+/// True demande un restart en deux phases; false garde la session courante.
+pub fn relance_enfant_si_necessaire(maintenant_ns: u64) -> bool {
+    let root = racine();
+    if root == 0 { return false; }
+    let maintenant_ms = maintenant_ns / 1_000_000;
+    let precedent = ENFANT_DERNIER_CHECK_MS.load(Ordering::Relaxed);
+    if maintenant_ms.saturating_sub(precedent) < 500 { return false; }
+    ENFANT_DERNIER_CHECK_MS.store(maintenant_ms, Ordering::Relaxed);
+    let Some((pid, role, code, age_ms)) =
+        crate::kernel::navigateur::supervision::enfant_sans_remplacant(
+            root, maintenant_ns, GRACE_ENFANT_NS)
+    else { return false; };
+    if ENFANT_TRAITE.load(Ordering::Relaxed) == pid { return false; }
+    ENFANT_TRAITE.store(pid, Ordering::Relaxed);
+    let debut = ENFANT_FENETRE_MS.load(Ordering::Relaxed);
+    if debut == 0 || maintenant_ms.saturating_sub(debut) > FENETRE_ENFANT_MS {
+        ENFANT_FENETRE_MS.store(maintenant_ms, Ordering::Relaxed);
+        ENFANT_RELANCES.store(0, Ordering::Relaxed);
+    }
+    let nombre = ENFANT_RELANCES.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "LADYBIRD_CHILD_RECOVERY root={} child={} role={} code={} age_ms={} attempt={} limit={}",
+        root, pid, role.nom(), code, age_ms, nombre, MAX_RELANCES_ENFANT,
+    ));
+    if nombre <= MAX_RELANCES_ENFANT { true } else { echec(); false }
+}
+
 pub fn racine() -> u32 { RACINE.load(Ordering::Acquire) }
 pub fn en_echec() -> bool { ECHEC.load(Ordering::Acquire) != 0 }
 /// Arret borne de l'arbre, y compris les moteurs sans fenetre.
@@ -565,6 +628,8 @@ static FIL_MESURES_PROCESSUS: AtomicU8 = AtomicU8::new(0);
 fn fil_mesures_processus() -> ! {
     loop {
         releve_si_du();
+        // P18_SERVICE_GUARDIAN_V1: deux observateurs se couvrent mutuellement.
+        crate::kernel::services::gardien::tour();
         // BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
         //
         // Ce fil-ci et pas un autre : ni le compositeur, ni le reseau, ni le
@@ -578,6 +643,10 @@ fn fil_mesures_processus() -> ! {
     }
 }
 
+// P18_SERVICE_GUARDIAN_V1
+pub fn fil_mesures_termine() {
+    FIL_MESURES_PROCESSUS.store(0, Ordering::Release);
+}
 pub fn demarre_fil_mesures_processus() -> bool {
     if FIL_MESURES_PROCESSUS
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)

@@ -51,6 +51,8 @@ const O_NONBLOCK: u32 = 0o4000;
 /// Ladybird l'utilise pour drainer son transport jusqu'a `EAGAIN` sans rendre
 /// le socket lui-meme non bloquant.
 const MSG_DONTWAIT: u32 = 0x40;
+// P17_SCM_RIGHTS_CLOEXEC
+const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
 
 /// Nature d'un socket.
 #[derive(Clone, Copy, PartialEq)]
@@ -900,6 +902,22 @@ fn lit_descripteurs_envoyes(msghdr: u64) -> Vec<i32> {
     fds
 }
 
+// P17_SCM_RIGHTS_BOUNDED_RECEIVE
+fn capacite_descripteurs_recus(msghdr: u64) -> usize {
+    let controle = match crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROL) {
+        Some(adresse) if adresse != 0 => adresse,
+        _ => return 0,
+    };
+    let _ = controle;
+    let disponible = crate::kernel::abi::user_read_u64(msghdr + MSG_CONTROLLEN)
+        .unwrap_or(0) as usize;
+    if disponible < CMSG_ENTETE + 4 {
+        0
+    } else {
+        (disponible - CMSG_ENTETE) / 4
+    }
+}
+
 /// Ecrit dans le `msghdr` les descripteurs recus. Rend le nombre ecrit.
 fn ecrit_descripteurs_recus(msghdr: u64, fds: &[i32]) -> usize {
     if fds.is_empty() {
@@ -980,50 +998,71 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
             None => return -errno::EFAULT,
         }
     }
-    // Les descripteurs que l'appelant veut faire passer partent avec le
-    // message. Un envoi peut n'etre *que* cela : `SCM_RIGHTS` accompagne
-    // souvent un octet unique, parfois aucun.
+    // P17_SCM_RIGHTS_ATOMIC_SEND
+    //
+    // Les droits et les octets d'un meme sendmsg sont publies sous le meme
+    // verrou. La version precedente pouvait rendre visibles les FileDesc avant
+    // leur corps, ce qui desynchronisait LibIPC.
     let a_passer = lit_descripteurs_envoyes(msghdr);
-    if !a_passer.is_empty() {
-        let process = task::current_process();
-        let sortant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
-            Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
-            // Passer un descripteur n'a de sens que sur un socket local.
-            _ => return -errno::EINVAL,
-        };
-        if let Some(canal) = sortant {
-            for fd_source in &a_passer {
-                // Le descripteur est **copie** dans le canal : le recepteur en
-                // obtiendra un a lui, et l'emetteur garde le sien. C'est ce que
-                // dit la norme, et c'est ce qui evite qu'un envoi ferme un
-                // fichier sous les pieds de celui qui l'envoie.
-                let copie = process.files.lock().get(*fd_source).cloned();
-                match copie {
-                    Some(desc) => canal.lock().descripteurs.push(desc),
-                    None => return -errno::EBADF,
+    let process = task::current_process();
+    let sortant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
+        Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
+        _ => None,
+    };
+
+    if !a_passer.is_empty() && sortant.is_none() {
+        return -errno::EINVAL;
+    }
+
+    let mut droits_a_passer: Vec<FileDesc> = Vec::new();
+    for fd_source in &a_passer {
+        let copie = process.files.lock().get(*fd_source).cloned();
+        match copie {
+            Some(desc) => droits_a_passer.push(desc),
+            None => return -errno::EBADF,
+        }
+    }
+
+    if let Some(canal) = sortant {
+        if payload.is_empty() {
+            return if droits_a_passer.is_empty() { 0 } else { -errno::EINVAL };
+        }
+
+        let non_bloquant = fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0;
+        let echeance = crate::kernel::timer::monotonic_ns()
+            .saturating_add(5_000_000_000);
+
+        loop {
+            let ticket = crate::kernel::fd::readiness_ticket();
+            {
+                let mut ch = canal.lock();
+                if ch.lecteurs == 0 {
+                    return -errno::EPIPE;
+                }
+                let place = ch.place();
+                if place != 0 {
+                    let ecrits = core::cmp::min(place, payload.len());
+                    ch.descripteurs.extend(droits_a_passer.drain(..));
+                    ch.octets.extend_from_slice(&payload[..ecrits]);
+                    drop(ch);
+                    crate::kernel::fd::notify_readiness();
+                    return ecrits as i64;
                 }
             }
+
+            if non_bloquant {
+                return -errno::EAGAIN;
+            }
+            if crate::kernel::timer::monotonic_ns() >= echeance {
+                return -errno::EAGAIN;
+            }
+            crate::kernel::fd::wait_readiness(ticket, Some(echeance));
         }
     }
 
-    // Une paire de sockets n'a ni adresse ni pile TCP : le corps s'ecrit
-    // directement dans le canal sortant. Le faire passer par `sendto`, comme on
-    // le faisait, echouait — et l'appelant en concluait que son envoi n'etait
-    // pas parti, alors que les descripteurs, eux, etaient bien arrives.
-    {
-        let process = task::current_process();
-        let sortant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
-            Some(FdKind::SocketPair(_, sortant)) => Some(sortant),
-            _ => None,
-        };
-        if let Some(canal) = sortant {
-            let ecrits = payload.len();
-            canal.lock().octets.extend_from_slice(&payload);
-            crate::kernel::fd::notify_readiness();
-            return ecrits as i64;
-        }
+    if payload.is_empty() {
+        return 0;
     }
-
     if payload.is_empty() {
         return 0;
     }
@@ -1138,8 +1177,16 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         }
     }
     if let Some(canal) = entrant {
-        let recus: Vec<_> = canal.lock().descripteurs.drain(..).collect();
-        for desc in recus {
+        // P17_SCM_RIGHTS_BOUNDED_DRAIN
+        // Ne retire que les droits que le buffer de CE recvmsg peut rendre.
+        let capacite = capacite_descripteurs_recus(msghdr);
+        let recus: Vec<_> = {
+            let mut ch = canal.lock();
+            let combien = core::cmp::min(capacite, ch.descripteurs.len());
+            ch.descripteurs.drain(..combien).collect()
+        };
+        for mut desc in recus {
+            desc.cloexec = flags & MSG_CMSG_CLOEXEC != 0;
             let numero = process.files.lock().insert(desc);
             if numero >= 0 {
                 installes.push(numero);
@@ -1255,6 +1302,8 @@ pub fn sys_getsockopt(fd: i32, _level: u32, option: u32, value: u64, len_addr: u
 /// `socketpair` : deux extremites reliees, implementees par deux tubes croises.
 pub fn sys_socketpair(_domain: u32, kind: u32, _protocol: u32, out: u64) -> i64 {
     let cloexec = kind & SOCK_CLOEXEC != 0;
+    // P17_SOCKETPAIR_NONBLOCK
+    let non_bloquant = kind & SOCK_NONBLOCK != 0;
     // Un socket est bidirectionnel : il faut donc deux tampons, chacun lu d'un
     // cote et ecrit de l'autre.
     let a_to_b = crate::kernel::fd::Canal::neuf();
@@ -1267,6 +1316,10 @@ pub fn sys_socketpair(_domain: u32, kind: u32, _protocol: u32, out: u64) -> i64 
         let mut end_b = FileDesc::new(FdKind::SocketPair(a_to_b, b_to_a));
         end_a.cloexec = cloexec;
         end_b.cloexec = cloexec;
+        if non_bloquant {
+            end_a.flags |= O_NONBLOCK;
+            end_b.flags |= O_NONBLOCK;
+        }
         (borrowed.insert(end_a), borrowed.insert(end_b))
     };
     if !user_write(out, &first.to_le_bytes()) || !user_write(out + 4, &second.to_le_bytes()) {

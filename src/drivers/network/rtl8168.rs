@@ -459,6 +459,12 @@ static REPRISES_DIFFEREES: AtomicU64 = AtomicU64::new(0);
 const FENETRE_VERDICT_NS: u64 = 3_000_000_000;
 
 static REPARATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
+/// P18_RX_DRAIN_RECOVERY_V1 : trous OWN sautes lorsque des trames deja DMA attendent plus loin.
+static RX_TROUS_SAUTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn trous_sautes() -> u64 {
+    RX_TROUS_SAUTES.load(Ordering::Relaxed)
+}
 
 // BOUCHAUD_HOTFIX9_RX_PROOF_GATE_V1
 static VERDICT_EN_ATTENTE: AtomicBool = AtomicBool::new(false);
@@ -1731,6 +1737,25 @@ pub fn repare_si_demande() -> bool {
         if issue_effective == Some(true) {
             REPARATION_DIFFEREE_EN_ATTENTE.store(false, Ordering::Release);
             REPARATION_DEMANDEE.store(false, Ordering::Release);
+        } else if let Some(verdict) = issue {
+            // Une preuve materielle a deja ouvert cette serie de reparations.
+            // Sans ce relais, le premier verdict negatif ne serait jamais
+            // suivi d'une escalade si RxOK cesse lui aussi de monter.
+            // Trois echecs au maximum : le prochain degre reinitialise la
+            // carte, puis on attend une NOUVELLE preuve avant de recommencer.
+            if verdict.sans_effet <= 3
+                && REPARATION_DEMANDEE
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                REPARATION_RAISON.store(3, Ordering::Relaxed);
+                REPARATION_DERNIERE_NS.store(maintenant, Ordering::Relaxed);
+                REPARATIONS_DEMANDEES.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!(
+                    "BOUCHAUD_NET_RTL8168_REPRISE_ESCALADE suite={} raison=verdict_inefficace",
+                    verdict.sans_effet,
+                );
+            }
         }
 
         if SUIVI_VERDICT.en_attente() {
@@ -1786,10 +1811,11 @@ unsafe fn publie_le_verdict(issue: Option<anneau::IssueVerdict>) {
     }
     crate::serial_println!(
         "BOUCHAUD_NET_RTL8168_REPRISE_SANS_EFFET suite={} age_us={} rx_paquets={} \
-own_rendus={}",
+rx_cur={} own_rendus={}",
         issue.sans_effet,
         issue.age_ns / 1_000,
         RX_PAQUETS.load(Ordering::Relaxed),
+        RX_CUR,
         RX_OWN_RENDUS.load(Ordering::Relaxed),
     );
 }
@@ -2122,6 +2148,18 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
             // La tete que le PROCESSEUR regarde, a chaque examen. Sans elle,
             // un anneau fige et un anneau qui tourne se lisent pareil.
             RX_TETE_CPU.store(index as u64, Ordering::Relaxed);
+            if status & anneau::OWN != 0 {
+                if let Some(pret) = anneau::premier_pret_apres_trou(index, N_RX, |i| {
+                    desc_read32(RX_RING, i, 0)
+                }) {
+                    // Le trou est toujours au NIC, donc ne pas le rearmer.
+                    // Reprendre une trame DMA deja disponible, sans attendre
+                    // que le materiel fasse un tour complet de l'anneau.
+                    RX_CUR = pret;
+                    RX_TROUS_SAUTES.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
             if status & anneau::OWN == 0 {
                 // Le materiel a RENDU ce descripteur : transition 1 -> 0.
                 RX_OWN_RENDUS.fetch_add(1, Ordering::Relaxed);

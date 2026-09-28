@@ -38,6 +38,11 @@
 
 #[path = "registre.rs"]
 pub mod registre;
+// P18_SERVICE_GUARDIAN_V1
+#[path = "reprise.rs"]
+pub mod reprise;
+#[path = "gardien.rs"]
+pub mod gardien;
 /// Le pipeline de navigation : a quelle etape une page bloque.
 #[path = "navigation.rs"]
 pub mod navigation;

@@ -231,6 +231,8 @@ fn emets_verdict(t: u64, v: &Verdict) {
 fn fil_auditd() -> ! {
     loop {
         tour();
+        // P18_SERVICE_GUARDIAN_V1
+        crate::kernel::services::gardien::tour();
         // La cadence est relue A CHAQUE TOUR : une anomalie vue au tour N doit
         // resserrer le tour N+1, pas le tour d'apres.
         let hz = CADENCE_HZ.load(Ordering::Relaxed).max(1);
@@ -241,7 +243,7 @@ fn fil_auditd() -> ! {
 
 /// Lance l'auditeur. Idempotent.
 pub fn demarre() -> bool {
-    if LANCE.load(Ordering::Acquire) {
+    if LANCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return true;
     }
     super::demarre();
@@ -250,12 +252,14 @@ pub fn demarre() -> bool {
         "bouchaud-auditd",
         crate::kernel::task::Priorite::Normale,
     ) {
-        LANCE.store(true, Ordering::Release);
         return true;
     }
+    LANCE.store(false, Ordering::Release);
     false
 }
 
+// P18_SERVICE_GUARDIAN_V1
+pub fn fil_termine() { LANCE.store(false, Ordering::Release); }
 pub fn lance() -> bool {
     LANCE.load(Ordering::Relaxed)
 }

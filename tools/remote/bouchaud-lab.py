@@ -172,6 +172,9 @@ COMMANDES = [
     Commande("services", "services snapshot", 15),
     # BOUCHAUD_HOTFIX12_SERVICES_REMOTE_DETAIL_V1
     Commande("services-page", "services page", SERVICES_PAGE_CODE, argument="start"),
+    # BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    Commande("forensics", "forensics status", 93),
+    Commande("threads-page", "threads page", 94, argument="start"),
     Commande("processes", "processes snapshot", 16),
     Commande("memory", "memory snapshot", 17),
     # HOTFIX11_SERIAL_CAPTURE
@@ -800,6 +803,8 @@ PLAN_DUMP = [
     ("services.json", "services", None),
     ("processes.json", "processes", None),
     ("memory.json", "memory", None),
+    # BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    ("forensics.json", "forensics", None),
     ("internet-proof.json", "internet", None),
 ]
 
@@ -1311,6 +1316,8 @@ def construis_parseur() -> argparse.ArgumentParser:
         ("services", "services", None, "services"),
         ("processes", "processes", None, "processus"),
         ("memory", "memory", None, "memoire"),
+        # BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+        ("forensics", "forensics", None, "forensic navigateur/thread/storage"),
         # BOUCHAUD_HOTFIX10_INTERNET_PROOF_CHAIN_V1
         ("internet", "internet", None, "preuve Internet (etat)"),
         ("internet-start", "internet-start", None, "preuve Internet (lancer)"),
@@ -1338,6 +1345,13 @@ def construis_parseur() -> argparse.ArgumentParser:
     sp.add_argument("index", type=int)
     sp.set_defaults(_faire=lambda a, j: fait_commande_simple(
         a, j, "rtl8168-desc", a.index, None, f"descripteur {a.index}"))
+
+    # BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    sp = avec_hote(sous.add_parser(
+        "threads-page", help="page forensic des threads (4 slots par page)"))
+    sp.add_argument("start", type=int)
+    sp.set_defaults(_faire=lambda a, j: fait_commande_simple(
+        a, j, "threads-page", a.start, None, f"threads page {a.start}"))
 
     # HOTFIX11_SERIAL_CAPTURE
     sp = avec_hote(sous.add_parser(

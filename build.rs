@@ -21,6 +21,10 @@ fn main() {
     // sait pas de quel binaire elle vient ne prouve rien.
     println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=BOUCHAUD_BUILD_LOT");
+    // P18_BRDP_BUILD_TRUTH_V1: option_env! est resolu a la compilation.
+    // Sans invalidation, une image physique peut garder un noyau sans BRDP.
+    // Ne jamais publier la VALEUR du jeton dans la sortie du build script.
+    println!("cargo:rerun-if-env-changed=BOUCHAUD_DEBUG_TOKEN");
 
     // ET SI PERSONNE NE POSE LA VARIABLE, ON LA TROUVE SOI-MEME.
     //

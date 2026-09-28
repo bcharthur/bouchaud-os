@@ -238,6 +238,16 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
         cr2,
         stack.cpu_flags
     );
+    // P18_SERVICE_GUARDIAN_V1. La sortie 139 seule ne distingue pas
+    // une exception CPU d'un exit(139); conserver le vecteur et les registres.
+    let pid = crate::kernel::task::try_current().map(|t| t.process.pid).unwrap_or(0);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x}",
+        pid, reason, stack.instruction_pointer.as_u64(),
+        stack.stack_pointer.as_u64(), cr2));
+    crate::kernel::blackbox::processus_faute(
+        pid, reason, stack.instruction_pointer.as_u64(),
+        stack.stack_pointer.as_u64(), cr2);
     crate::platform::pc::ecran_faute::sort_exception_resolue();
     crate::kernel::task::exit_group(139)
 }

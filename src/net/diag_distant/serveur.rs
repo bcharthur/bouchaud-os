@@ -75,6 +75,19 @@ const JETON: Option<&str> = option_env!("BOUCHAUD_DEBUG_TOKEN");
 
 const TRAME_MAX: usize = 1600;
 
+// P18_BRDP_ARP_TRACE_V1: l'etat d'un fil ne se deduit pas de spawn reussi.
+static RX_POLL_APPELS: AtomicU64 = AtomicU64::new(0);
+static DERNIERE_BOUCLE_MS: AtomicU64 = AtomicU64::new(0);
+static RX_LUES: AtomicU64 = AtomicU64::new(0);
+static TX_TENTEES: AtomicU64 = AtomicU64::new(0);
+static TX_ACCEPTEES: AtomicU64 = AtomicU64::new(0);
+
+pub fn etat_boucle() -> (u64, u64, u64, u64, u64) {
+    (RX_POLL_APPELS.load(Ordering::Relaxed), DERNIERE_BOUCLE_MS.load(Ordering::Relaxed),
+     RX_LUES.load(Ordering::Relaxed), TX_TENTEES.load(Ordering::Relaxed),
+     TX_ACCEPTEES.load(Ordering::Relaxed))
+}
+
 static LANCE: AtomicBool = AtomicBool::new(false);
 static CONNEXIONS: AtomicU64 = AtomicU64::new(0);
 static AUTH_OK: AtomicU64 = AtomicU64::new(0);
@@ -84,6 +97,13 @@ static REFUSEES: AtomicU64 = AtomicU64::new(0);
 static OCTETS_RENDUS: AtomicU64 = AtomicU64::new(0);
 /// Sessions dont le pair a ferme son sens RX.
 static FERMETURES_DISTANTES: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+// `close()` reste gracieux pour laisser partir la reponse `quit`. smoltcp
+// peut ensuite rester en FIN-WAIT-1/2 si le pair ne ferme jamais son sens RX.
+const BRDP_CLOSE_GRACE_MS: u64 = 750;
+static FERMETURES_FORCEES: AtomicU64 = AtomicU64::new(0);
+static DERNIER_TOUR_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Le peripherique de la pile de diagnostic.
 ///
@@ -110,7 +130,10 @@ impl smoltcp::phy::TxToken for JetonTx {
         let mut tampon = [0u8; TRAME_MAX];
         let n = taille.min(TRAME_MAX);
         let r = f(&mut tampon[..n]);
-        crate::drivers::e1000::send(&tampon[..n]);
+        TX_TENTEES.fetch_add(1, Ordering::Relaxed);
+        if crate::drivers::e1000::send(&tampon[..n]) {
+            TX_ACCEPTEES.fetch_add(1, Ordering::Relaxed);
+        }
         r
     }
 }
@@ -121,7 +144,13 @@ impl Device for Peripherique {
 
     fn receive(&mut self, _t: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut tampon = [0u8; TRAME_MAX];
-        super::prends(&mut tampon).map(|n| (JetonRx { tampon, n }, JetonTx))
+        // Compte les appels effectifs de smoltcp au peripherique RX.
+        RX_POLL_APPELS.fetch_add(1, Ordering::Relaxed);
+        DERNIERE_BOUCLE_MS.store(crate::kernel::timer::monotonic_ms(), Ordering::Relaxed);
+        super::prends(&mut tampon).map(|n| {
+            RX_LUES.fetch_add(1, Ordering::Relaxed);
+            (JetonRx { tampon, n }, JetonTx)
+        })
     }
 
     fn transmit(&mut self, _t: Instant) -> Option<Self::TxToken<'_>> {
@@ -412,6 +441,12 @@ fn fil_brdp() -> ! {
     // BOUCHAUD_P0_REMOTE_CONTROL_V1
     let mut action_differee: Option<(ActionDifferee, u64)> = None;
 
+    // BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+    // Premier instant du close de la session courante. Ne pas le repousser
+    // d'un tour a l'autre, sinon une fermeture coincee repousserait son
+    // propre watchdog indefiniment.
+    let mut fermeture_depuis_ms: Option<u64> = None;
+
     crate::kernel::lab::emets(
         crate::kernel::lab::Categorie::Remote,
         crate::kernel::lab::id::BRDP_ECOUTE,
@@ -419,6 +454,13 @@ fn fil_brdp() -> ! {
     );
 
     loop {
+        // BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+        // Le heartbeat UDP lit cet age sans prendre le verrou RX.
+        DERNIER_TOUR_MS.store(
+            crate::kernel::timer::monotonic_ms(),
+            Ordering::Relaxed,
+        );
+
         iface.poll(maintenant(), &mut peripherique, &mut chaussettes);
         let sock = chaussettes.get_mut::<tcp::Socket>(poignee);
 
@@ -426,14 +468,40 @@ fn fil_brdp() -> ! {
         // cote smoltcp (ex. CLOSE-WAIT). `is_open()` seul ne suffit donc pas
         // pour recycler la session. Si plus rien ne peut etre recu, ferme
         // notre cote et laisse la boucle revenir ensuite vers LISTEN.
-        if ouverte && !sock.may_recv() {
+        if ouverte && !sock.may_recv() && fermeture_depuis_ms.is_none() {
             FERMETURES_DISTANTES.fetch_add(1, Ordering::Relaxed);
             reste = 0;
             session.fermer = false;
             sock.close();
+            fermeture_depuis_ms = Some(crate::kernel::timer::monotonic_ms());
+        }
+
+        // BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+        // `close()` ferme le sens TX. En FIN-WAIT-1/2, `may_recv()` et
+        // `is_open()` peuvent rester vrais. Apres la grace, `abort()` force
+        // CLOSED et permet le relisten immediat de l'unique socket BRDP.
+        if let Some(depuis_ms) = fermeture_depuis_ms {
+            let maintenant_ms = crate::kernel::timer::monotonic_ms();
+            if !sock.is_open() {
+                fermeture_depuis_ms = None;
+            } else if maintenant_ms.saturating_sub(depuis_ms) >= BRDP_CLOSE_GRACE_MS {
+                FERMETURES_FORCEES.fetch_add(1, Ordering::Relaxed);
+                sock.abort();
+                fermeture_depuis_ms = None;
+
+                if ouverte {
+                    ouverte = false;
+                    crate::kernel::lab::emets(
+                        crate::kernel::lab::Categorie::Remote,
+                        crate::kernel::lab::id::BRDP_DECONNEXION,
+                        [2, session.commandes, 0, 0],
+                    );
+                }
+            }
         }
 
         if !sock.is_open() {
+            fermeture_depuis_ms = None;
             if ouverte {
                 // La connexion precedente est finie.
                 ouverte = false;
@@ -531,7 +599,10 @@ fn fil_brdp() -> ! {
         }
 
         if session.fermer && reste == 0 {
-            sock.close();
+            if fermeture_depuis_ms.is_none() {
+                sock.close();
+                fermeture_depuis_ms = Some(crate::kernel::timer::monotonic_ms());
+            }
             session.fermer = false;
         }
 
@@ -655,9 +726,6 @@ fn verse_des_evenements(
 
 /// Lance le serveur. Rend faux si aucun jeton n'a ete injecte au build.
 pub fn demarre() -> bool {
-    if LANCE.load(Ordering::Acquire) {
-        return true;
-    }
     if !super::actif() {
         return false;
     }
@@ -675,12 +743,12 @@ indice=construire avec BOUCHAUD_DEBUG_TOKEN",
         crate::serial_println!("BOUCHAUD_BRDP_DESACTIVE raison=jeton-vide");
         return false;
     }
+    if LANCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return true; }
     if crate::kernel::task::spawn_noyau_priorite(
         fil_brdp,
         "bouchaud-brdp",
         crate::kernel::task::Priorite::Normale,
     ) {
-        LANCE.store(true, Ordering::Release);
         let ip = super::ip();
         crate::serial_println!(
             "BOUCHAUD_BRDP_ECOUTE ip={}.{}.{}.{} port={}",
@@ -688,9 +756,12 @@ indice=construire avec BOUCHAUD_DEBUG_TOKEN",
         );
         return true;
     }
+    LANCE.store(false, Ordering::Release);
     false
 }
 
+// P18_SERVICE_GUARDIAN_V1
+pub fn fil_termine() { LANCE.store(false, Ordering::Release); }
 pub fn lance() -> bool {
     LANCE.load(Ordering::Relaxed)
 }
@@ -716,4 +787,13 @@ pub fn octets_rendus() -> u64 {
 
 pub fn refusees() -> u64 {
     REFUSEES.load(Ordering::Relaxed)
+}
+
+// BOUCHAUD_P16_BRDP_LIFECYCLE_V1
+pub fn fermetures_forcees() -> u64 {
+    FERMETURES_FORCEES.load(Ordering::Relaxed)
+}
+
+pub fn dernier_tour_ms() -> u64 {
+    DERNIER_TOUR_MS.load(Ordering::Relaxed)
 }

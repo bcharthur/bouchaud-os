@@ -36,3 +36,6 @@ Write-Host "BLACKBOX OK :" -ForegroundColor Green
 Write-Host $Out
 Write-Host "ZIP :" -ForegroundColor Green
 Write-Host $Zip
+
+# Token : fd72dcb3284c4640ba1640350f61f8aa9791c62e336a4e018560ee804ce6442f
+# $env:BOUCHAUD_DEBUG_TOKEN = "fd72dcb3284c4640ba1640350f61f8aa9791c62e336a4e018560ee804ce6442f"

@@ -55,6 +55,12 @@ pub fn futex_bkl_stats() -> (u64, u64, u64, u64) {
 
 pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
     FUTEX_ATTENTES.fetch_add(1, OrdreFutex::Relaxed);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_begin_if_idle(
+        WAIT_FUTEX,
+        uaddr,
+        ((expected as u64) << 32) | (timeout_ms & 0xffff_ffff),
+    );
     // The Linux syscall may still enter through the conservative outer-BKL
     // policy. Explicitly suspend it for the native wait. V13 can therefore be
     // benchmarked without weakening the default syscall safety table globally.
@@ -62,6 +68,8 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: u64) -> bool {
     note_heritage(depth);
     let result = crate::kernel::sync::wait_word_wait(uaddr, expected, timeout_ms);
     smp_lock::resume_after_schedule(depth);
+    // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+    forensic_wait_clear(WAIT_FUTEX);
     matches!(
         result,
         crate::kernel::sync::WaitWordWake::Signaled

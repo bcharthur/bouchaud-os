@@ -114,6 +114,15 @@ pub fn rend(t: &mut Reponse, commande: Commande) -> bool {
             services_page(t, start);
             true
         }
+        // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+        Commande::ForensicsStatus => {
+            forensics_status(t);
+            true
+        }
+        Commande::ThreadsPage { start } => {
+            threads_page(t, start);
+            true
+        }
         Commande::ProcessesSnapshot => {
             processus(t);
             true
@@ -316,6 +325,12 @@ fn status(t: &mut Reponse) {
     );
     ip_json(t, "ip_lab", super::ip());
     ip_json(t, "ip_bail", crate::net::our_ip());
+    // P18_SERVICE_GUARDIAN_V1: version du noyau qui repond, pas du dossier PC.
+    let (sorties, anomalies, morts, relances, echecs, refuses) =
+        crate::kernel::services::gardien::compteurs();
+    let _ = write!(t, ",\"service_guardian_version\":1,\"process_exits\":{sorties},\"process_abnormal_exits\":{anomalies},\"service_deaths\":{morts},\"service_restarts\":{relances},\"service_restart_failures\":{echecs},\"service_restart_denials\":{refuses}");
+    // P18_CHILD_RECOVERY_V1: preuve de la version REELLEMENT demarree.
+    let _ = t.write_str(",\"child_recovery_version\":1");
 }
 
 fn audit(t: &mut Reponse) {
@@ -458,15 +473,28 @@ fn dhcp(t: &mut Reponse) {
     );
     ip_json(t, "ip", crate::net::our_ip());
     ip_json(t, "passerelle", crate::net::gateway());
-    // LE CRITERE PHYSIQUE : OFFER, REQUEST, ACK, IPV4_READY.
+    // P18_DHCP_FALLBACK_DIAGNOSTIC
+    // IPV4_READY ne signifie plus exclusivement "ACK DHCP" : le profil LAB
+    // n'est pret qu'apres une vraie preuve ARP de la passerelle ICS.
+    let fallback = crate::net::lab_ics_fallback_active();
+    let source = if crate::net::bail_obtenu() {
+        "dhcp"
+    } else if fallback {
+        "lab-ics-fallback"
+    } else {
+        "none"
+    };
     let _ = write!(
         t,
-        ",\"critere_offer\":{},\"critere_request\":{},\"critere_ack\":{},\
+        ",\"source\":\"{}\",\"lab_fallback\":{},\
+\"critere_offer\":{},\"critere_request\":{},\"critere_ack\":{},\
 \"critere_ipv4_ready\":{}",
+        source,
+        fallback,
         c.offres_vues > 0,
         c.requests_envoyes > 0,
         c.acks_vus > 0,
-        crate::net::bail_obtenu(),
+        crate::net::ipv4_ready(),
     );
 }
 
@@ -699,6 +727,182 @@ fn services_page(t: &mut Reponse, start: u16) {
         }
         let _ = t.write_char(']');
     });
+}
+
+
+// BOUCHAUD_P15_BROWSER_HANG_FORENSICS
+const THREADS_PAR_PAGE: usize = 2;
+
+fn forensics_status(t: &mut Reponse) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let browser = crate::kernel::perf::browser_snapshot();
+    let scheduler = crate::kernel::task::diagnostic_ordonnanceur();
+    let threads = crate::kernel::task::forensic_counts(now);
+    let sup = crate::kernel::navigateur::supervision::compteurs();
+    let (wait_detached, wait_legacy, wait_total_ns, wait_max_ns, wait_loops, wait_depth_viol) =
+        crate::kernel::sync::waitq_detached_stats();
+    let (futex_waits, futex_wakes, futex_bkl, futex_depth) =
+        crate::kernel::task::futex_bkl_stats();
+    let (ata_acquires, ata_wait_ns, ata_max_wait_ns) =
+        crate::drivers::ata::contention_stats();
+    let (nv_reads, nv_writes, nv_flushes, nv_errors, nv_timeouts) =
+        crate::drivers::nvme::stats();
+    let (nv_slots, nv_free, nv_depth, nv_slot_waits) =
+        crate::drivers::nvme::file_stats();
+    let (nv_flight, nv_quarantine, nv_deadlines, nv_late, nv_rejects) =
+        crate::drivers::nvme::suivi_stats();
+
+    let input_age_ms = if browser.last_input_ns == 0 { 0 } else {
+        now.saturating_sub(browser.last_input_ns) / 1_000_000
+    };
+    let frame_age_ms = if browser.last_frame_ns == 0 { 0 } else {
+        now.saturating_sub(browser.last_frame_ns) / 1_000_000
+    };
+
+    let mut nav_running = false;
+    let mut nav_age_ms = 0u64;
+    let mut tls_state = "none";
+    let mut tls_age_ms = 0u64;
+    let mut http_state = "none";
+    let mut http_age_ms = 0u64;
+    let mut download_state = "none";
+    let mut download_age_ms = 0u64;
+    if let Some((_url, _url_len, stages, begin, end, _refus, _refus_len)) =
+        crate::kernel::services::navigation::instantane()
+    {
+        nav_running = begin != 0 && end == 0;
+        nav_age_ms = if begin == 0 { 0 } else { now.saturating_sub(begin) / 1_000_000 };
+        let tls = stages[crate::kernel::services::navigation::Etape::Tls as usize];
+        let http = stages[crate::kernel::services::navigation::Etape::Http as usize];
+        let dl = stages[crate::kernel::services::navigation::Etape::Telechargement as usize];
+        tls_state = tls.etat.nom();
+        tls_age_ms = tls.age_us(now) / 1_000;
+        http_state = http.etat.nom();
+        http_age_ms = http.age_us(now) / 1_000;
+        download_state = dl.etat.nom();
+        download_age_ms = dl.age_us(now) / 1_000;
+    }
+
+    let _ = write!(
+        t,
+        ",\"t_ns\":{},\"browser\":{{\"input_seq\":{},\"frame_seq\":{},\
+\"inputs_total\":{},\"inputs_dropped\":{},\"frames_total\":{},\
+\"input_age_ms\":{},\"frame_age_ms\":{},\"frame_gap_max_ms\":{},\
+\"input_to_frame_max_ms\":{},\"pending_input\":{}}},\
+\"threads\":{{\"ready\":{},\"blocked\":{},\"zombie\":{},\
+\"active_syscalls\":{},\"waits_over_1s\":{},\"faults\":{}}},\
+\"scheduler\":{{\"switches\":{},\"irq_preemptions\":{},\
+\"deferred_preemptions\":{},\"wm_age_ms\":{},\"ready\":{},\"live\":{}}},\
+\"supervision\":{{\"suivis\":{},\"rendus_vivants\":{},\"lancements\":{},\
+\"sorties\":{},\"plantages\":{},\"orphelins\":{},\"relances_refusees\":{}}},\
+\"waitq\":{{\"detached\":{},\"legacy\":{},\"total_ms\":{},\"max_ms\":{},\
+\"schedule_loops\":{},\"depth_violations\":{}}},\
+\"futex\":{{\"waits\":{},\"wakes\":{},\"bkl_inherited\":{},\"bkl_depth_max\":{}}},\
+\"storage\":{{\"ata_acquires\":{},\"ata_wait_ms\":{},\"ata_max_wait_ms\":{},\
+\"nvme_present\":{},\"nvme_offline\":{},\"nvme_reads\":{},\"nvme_writes\":{},\
+\"nvme_flushes\":{},\"nvme_errors\":{},\"nvme_timeouts\":{},\"nvme_busy\":{},\
+\"nvme_slots\":{},\"nvme_free\":{},\"nvme_depth_max\":{},\"nvme_slot_waits\":{},\
+\"nvme_inflight\":{},\"nvme_quarantine\":{},\"nvme_deadlines\":{},\
+\"nvme_late\":{},\"nvme_rejects\":{}}},\
+\"navigation\":{{\"running\":{},\"age_ms\":{},\"documents_loaded\":{},\
+\"tls_state\":\"{}\",\"tls_age_ms\":{},\"http_state\":\"{}\",\
+\"http_age_ms\":{},\"download_state\":\"{}\",\"download_age_ms\":{}}}",
+        now,
+        browser.input_seq, browser.frame_seq, browser.inputs_total,
+        browser.inputs_dropped, browser.frames_total, input_age_ms, frame_age_ms,
+        browser.frame_gap_max_ns / 1_000_000,
+        browser.input_to_frame_max_ns / 1_000_000,
+        browser.last_input_seq != 0 && browser.last_input_seq != browser.last_frame_input_seq,
+        threads.ready, threads.blocked, threads.zombie, threads.active_syscalls,
+        threads.waits_over_1s, threads.faults,
+        scheduler.switches, scheduler.irq_preemptions, scheduler.deferred_preemptions,
+        scheduler.wm_age_ms, scheduler.ready, scheduler.live,
+        sup.suivis, sup.rendus_vivants, sup.lancements, sup.sorties, sup.plantages,
+        sup.orphelins, sup.relances_refusees,
+        wait_detached, wait_legacy, wait_total_ns / 1_000_000,
+        wait_max_ns / 1_000_000, wait_loops, wait_depth_viol,
+        futex_waits, futex_wakes, futex_bkl, futex_depth,
+        ata_acquires, ata_wait_ns / 1_000_000, ata_max_wait_ns / 1_000_000,
+        crate::drivers::nvme::present(), crate::drivers::nvme::hors_service(),
+        nv_reads, nv_writes, nv_flushes, nv_errors, nv_timeouts,
+        crate::drivers::nvme::occupes(), nv_slots, nv_free, nv_depth, nv_slot_waits,
+        nv_flight, nv_quarantine, nv_deadlines, nv_late, nv_rejects,
+        nav_running, nav_age_ms, crate::kernel::services::navigation::documents_charges(),
+        tls_state, tls_age_ms, http_state, http_age_ms, download_state, download_age_ms,
+    );
+}
+
+fn threads_page(t: &mut Reponse, start: u16) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let total = crate::kernel::task::registre_longueur();
+    let begin = (start as usize).min(total);
+    let end = begin.saturating_add(THREADS_PAR_PAGE).min(total);
+
+    let _ = write!(
+        t,
+        ",\"t_ns\":{},\"total\":{},\"start\":{},\"next\":{},\"done\":{},\"entries\":[",
+        now, total, begin, end, end >= total,
+    );
+
+    let mut first = true;
+    for slot in begin..end {
+        let Some(s) = crate::kernel::task::forensic_thread(slot, now) else { continue };
+        if !first {
+            let _ = t.write_char(',');
+        }
+        first = false;
+
+        let (poll_step, poll_index, poll_fd) =
+            crate::kernel::task::poll_detail_decode(s.poll_detail);
+        let syscall_name = if s.syscall_nr == crate::kernel::task::FORENSIC_NO_SYSCALL {
+            "none"
+        } else {
+            crate::kernel::abi::nr::name(s.syscall_nr)
+        };
+        let last_syscall_name =
+            if s.last_syscall_nr == crate::kernel::task::FORENSIC_NO_SYSCALL {
+                "none"
+            } else {
+                crate::kernel::abi::nr::name(s.last_syscall_nr)
+            };
+
+        let _ = write!(
+            t,
+            "{{\"slot\":{},\"generation\":{},\"pid\":{},\"tid\":{},\
+\"state\":\"{}\",\"priority\":\"{}\",\"on_cpu\":{},\"last_cpu\":{},\
+\"in_kernel\":{},\"wait\":\"{}\",\"wait_key\":\"{:#x}\",\
+\"wait_aux\":\"{:#x}\",\"wait_age_ms\":{},\"wait_queue_key\":\"{:#x}\",\
+\"futex_key\":\"{:#x}\",\"wake_deadline_ns\":{},\
+\"syscall_nr\":{},\"syscall\":\"{}\",\"syscall_age_ms\":{},\
+\"arg0\":\"{:#x}\",\"arg1\":\"{:#x}\",\"arg2\":\"{:#x}\",\
+\"poll_phase\":\"{}\",\"poll_step\":{},\"poll_index\":{},\"poll_fd\":{},\
+\"last_syscall_nr\":{},\"last_syscall\":\"{}\",\"last_result\":{},\
+\"last_duration_us\":{},\"faults\":{},\"last_fault_addr\":\"{:#x}\",\
+\"last_fault_age_ms\":{},\"activity_age_ms\":{},\
+\"user_rip\":\"{:#x}\",\"user_rsp\":\"{:#x}\",\"user_rbp\":\"{:#x}\",\
+\"user_ms\":{},\"kernel_ms\":{},\"switches\":{},\"migrations\":{},\
+\"ready_age_ms\":{}}}",
+            s.slot, s.generation, s.pid, s.tid,
+            crate::kernel::task::forensic_state_name(s.state),
+            crate::kernel::task::forensic_priority_name(s.priority),
+            s.on_cpu, s.last_cpu, s.in_kernel,
+            crate::kernel::task::forensic_wait_name(s.wait_kind),
+            s.wait_key, s.wait_aux, s.wait_age_ns / 1_000_000,
+            s.wait_queue_key, s.futex_key, s.wake_deadline_ns,
+            s.syscall_nr, syscall_name, s.syscall_age_ns / 1_000_000,
+            s.arg0, s.arg1, s.arg2,
+            crate::kernel::task::forensic_poll_name(s.poll_phase),
+            poll_step, poll_index, poll_fd,
+            s.last_syscall_nr, last_syscall_name, s.last_syscall_result,
+            s.last_syscall_duration_ns / 1_000,
+            s.fault_count, s.last_fault_addr, s.last_fault_age_ns / 1_000_000,
+            s.last_activity_age_ns / 1_000_000,
+            s.user_rip, s.user_rsp, s.user_rbp,
+            s.user_cpu_ns / 1_000_000, s.kernel_cpu_ns / 1_000_000,
+            s.context_switches, s.migrations, s.ready_age_ns / 1_000_000,
+        );
+    }
+    let _ = t.write_char(']');
 }
 
 fn processus(t: &mut Reponse) {

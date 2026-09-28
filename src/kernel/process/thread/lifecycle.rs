@@ -122,6 +122,12 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
     // mesuree, et sur le banc l'echantillonneur ne tourne qu'une fois, avant
     // les lancements. Les deux cas ne se recouvrent pas.
     if dernier_thread {
+        // P18_SERVICE_GUARDIAN_V1. Hors du verrou lifecycle: aucune
+        // serialisation, allocation ou relance sous le verrou de sortie.
+        let process = &current().process;
+        let nom = process.metadata.lock().name.clone();
+        crate::kernel::services::gardien::mort(
+            process.pid, process.parent, &nom, code, false);
         let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
             crate::kernel::clean_page_cache::balayage_stats();
         crate::kernel::dmesg::log_fmt(format_args!(
@@ -573,9 +579,14 @@ fn notify_parent_of_exit() {
         let process = &current().process;
         (process.parent, process.lifecycle.lock().zombie)
     };
-    if !is_zombie || parent_pid == 0 {
-        return;
-    }
+    if !is_zombie { return; }
+    notify_parent_of_exit_for(parent_pid);
+}
+
+// P18_CHILD_EXIT_NOTIFY_V1: le kill distant ne sort pas depuis le thread vise.
+// Le meme chemin SIGCHLD/wait4 doit fonctionner pour une sortie forcee.
+fn notify_parent_of_exit_for(parent_pid: u32) {
+    if parent_pid == 0 { return; }
     for index in 0..tasks().len() {
         if tasks()[index].state == TaskState::Zombie {
             continue;
@@ -1016,6 +1027,15 @@ pub fn arbre_de(racine: u32) -> Vec<u32> {
 /// personne ne compose la surface n'a plus de raison de peindre, et le laisser
 /// vivre laisserait aussi vivante la surface qu'il projette.
 pub fn tue_processus(pid: u32, code: i32) {
+    // P18_SERVICE_GUARDIAN_V1: une mort imposee ne passe pas par
+    // exit_current; enregistrer avant que le processus soit zombie.
+    if let Some(process) = process_by_pid(pid) {
+        if !process.lifecycle.lock().zombie {
+            let nom = process.metadata.lock().name.clone();
+            crate::kernel::services::gardien::mort(
+                pid, process.parent, &nom, code, true);
+        }
+    }
     let courant = try_current().map(|t| t.tid);
     for task in tasks().iter() {
         if Some(task.tid) == courant {
@@ -1026,10 +1046,35 @@ pub fn tue_processus(pid: u32, code: i32) {
         }
     }
     if let Some(process) = process_by_pid(pid) {
-        let mut lifecycle = process.lifecycle.lock();
-        lifecycle.threads = 0;
-        lifecycle.exit_code = code;
-        lifecycle.zombie = true;
+        let nouveau_zombie = {
+            let mut lifecycle = process.lifecycle.lock();
+            if lifecycle.zombie {
+                false
+            } else {
+                lifecycle.threads = 0;
+                lifecycle.exit_code = code;
+                lifecycle.zombie = true;
+                true
+            }
+        };
+        if nouveau_zombie {
+            // P18_CHILD_EXIT_NOTIFY_V1: une terminaison admin est une vraie
+            // sortie de processus. Le parent peut relancer son enfant via
+            // SIGCHLD/wait4 et le registre ne laisse pas un faux "vivant".
+            let role = crate::kernel::navigateur::supervision::note_sortie(
+                pid, code, crate::kernel::timer::monotonic_ns());
+            if let Some(role) = role {
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "LADYBIRD_CHILD_EXIT pid={} role={} code={} source=force",
+                    pid, role.nom(), code,
+                ));
+            }
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "PROCESS_EXIT t={} pid={} ppid={} code={} reason=force",
+                crate::kernel::timer::monotonic_ms(), pid, process.parent, code,
+            ));
+            notify_parent_of_exit_for(process.parent);
+        }
     }
 }
 

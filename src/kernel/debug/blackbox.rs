@@ -1148,6 +1148,25 @@ fn network_sample(ts_ns: u64) {
     hid_points_sample(ts_ns);
 }
 
+// P18_SERVICE_GUARDIAN_V1: evenements rares poses dans le tambour RAM.
+// Le checkpoint periodique reste asynchrone; aucune I/O dans le chemin fatal.
+pub fn processus_mort(pid: u32, ppid: u32, nom: &str, code: i32, cause: &str) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out,
+        "PROCESS_DEATH ts_ns={} pid={} ppid={} image={} code={} cause={}\n",
+        ts, pid, ppid, nom, code, cause);
+    let _ = append(KIND_SERVICE, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
+}
+pub fn processus_faute(pid: u32, raison: &str, rip: u64, rsp: u64, cr2: u64) {
+    let ts = now_ns();
+    let mut out = Text::new();
+    let _ = write!(&mut out,
+        "PROCESS_FAULT ts_ns={} pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x}\n",
+        ts, pid, raison, rip, rsp, cr2);
+    let _ = append(KIND_SERVICE, out.as_bytes(), ts, crate::drivers::serial::trace_total_bytes());
+}
+
 /// Un changement d'etat de service. Emis SEULEMENT quand l'etat change.
 ///
 /// Un service qui reste actif sans erreur pendant cinq minutes n'ecrit rien :
