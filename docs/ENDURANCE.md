@@ -141,3 +141,16 @@ sonde n'a pas ete modifie ; il reste bloquant et rapporte tel quel.
         --require-fichier TRAVAIL/marqueurs-endurance.txt
     python3 tools/ci/reliability/budgets_endurance.py SORTIE
     python3 tools/ci/attribue-lectures-disque.py SORTIE/cycle-0001/smp4.log
+
+## 5. Deuxieme campagne CI (run 36723718532, commit 220bdf27 : FIFO + points surs)
+
+| tranche | run #6 (1909e792, avant les correctifs ATA) | run #8 (220bdf27) |
+|---|---|---|
+| SMP1 | VERT | 32/32 cycles noyau OK ; budgets tenus 30/32 -- cycle 26 : `bkl_max_hold` 321 ms (exit_group), `ready_latency_max` 323 ms |
+| SMP2 | 35/35 cycles noyau OK, budgets rouges 35/35 | cycles noyau OK, budgets rouges 1 cycle (27) |
+| SMP4 | 19 cycles, budgets rouges 19/19, cycle 19 noyau KO | cycles noyau OK, budgets rouges 1 cycle (4) |
+| SMP8 | 1 cycle : budgets rouges (p99 interactif 134 ms, max 979 ms) + sonde A/B | 1 cycle : budgets TENUS ; sonde A/B 2/4 (seul echec) |
+
+Nouveau rouge a SMP1 (2 cycles sur 32, aucun avant) : hypothese a verifier, une
+inversion de priorite -- un detenteur du controleur preempte a un point sur,
+un detenteur du BKL qui a besoin du disque parque derriere lui. Ouvert.
