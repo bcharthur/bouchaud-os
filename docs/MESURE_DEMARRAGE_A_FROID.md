@@ -845,3 +845,24 @@ Deux cycles SMP8 finissent `statut=1` : `ENDURANCE_ORDONNANCEUR_OK` absent
 variable pour balayer la fenetre (A)/(B). 5 demarrages x 6 x 1 000 tours en
 SMP4 sur la tete de branche : **30 000 `wait4`, 0 blocage**. Pas de
 correctif sans reproduction ; la course reste decrite et ouverte.
+
+### 18.6 BrowserHost avant / apres DMA (CI, `ladybird-native-browser`)
+
+    run                        #367 (6fc08087, PIO)   #371 (846b5b5b, DMA)
+    smoke BrowserHost          ROUGE (fetch-json)     VERT
+    LADYBIRD_CONVERGENCE_OK    --                     startup ipc worker_http
+                                                      worker_blob codecs=11/11 js
+    lectures disque            4 604 / 287,8 Mio      4 604 / 287,8 Mio
+    service du controleur      66,0 s                 46,7 s   (-29 %)
+    attente du verrou (somme)  59,1 s                 37,4 s
+    service par lecture 64 Kio 14,3 ms                10,1 ms
+    HOST_WORKER_HTTP_PERF_FIRST 2 645 ms              2 546 ms
+    HOST_WORKER_BLOB_PERF_FIRST 9 009 ms              8 706 ms
+    ordre worker (diagnostic)  ROUGE                  ROUGE (INCONCLUSIF, anterieur)
+
+Le DMA ne gagne que 29 % sous Ladybird, contre un facteur ~30 au banc au
+repos (0,4 ms par 64 Kio). Hypothese NON verifiee : la boucle d'attente du
+bus-master cede le coeur verrou tenu, et sous charge chaque cession coute un
+quantum facture au service. 347fbbe5 ajoute la mesure (dma_attente_ms,
+dma_cede_ms, dma_cessions dans ATA_CONTROLEUR, publie aussi a chaque sortie
+de processus) ; aucune correction avant ce chiffre.
