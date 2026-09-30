@@ -652,6 +652,31 @@ echo "  (une famille absente ci-dessus n'a pas ete emise par ce noyau)"
 # Qui lit le disque : le dernier releve ENTIER de BACKING_DISK_ATTRIB, joint
 # aux images (PERF_EXEC_PRET) et aux chemins (BACKING_PROBE). `tail -10` ne
 # convient pas ici : un releve fait une ligne par couple (pid, fichier).
+# BOUCHAUD_DMA32_V1 -- QUEL CHEMIN DISQUE A SERVI CE RUN ?
+#
+# Le run #371 a ete lu comme « apres DMA » alors que son journal portait
+# `ATA_DMA indisponible raison=adresses-hors-contraintes` et `lots_dma=0` :
+# tout en PIO. Une mesure n'est « apres DMA » que si le journal le PROUVE :
+# dma_pret=1, lots_dma > 0, et aucune desactivation. Sinon elle est PIO, et
+# le resume le dit en toutes lettres. Informatif : le repli PIO est un
+# fonctionnement legitime, il ne fait pas echouer le smoke.
+echo
+echo "== chemin disque =="
+python3 - "$LOG" <<'PY' | sed 's/^/  /' || true
+import re, sys
+texte = open(sys.argv[1], "rb").read().decode("latin-1").replace("\r", "")
+lignes = re.findall(r"ATA_CONTROLEUR [^\n\x1b]*", texte)
+desactive = re.findall(r"ATA_DMA indisponible raison=\S+", texte)
+if not lignes:
+    print("LADYBIRD_DISQUE_MODE inconnu -- aucune ligne ATA_CONTROLEUR")
+    sys.exit(0)
+champs = dict(re.findall(r"(\w+)=(\d+)", lignes[-1]))
+pret, lots, replis = (int(champs.get(k, 0)) for k in ("dma_pret", "lots_dma", "replis_pio"))
+mode = "dma" if pret == 1 and lots > 0 and not desactive else "pio"
+print(f"LADYBIRD_DISQUE_MODE {mode} dma_pret={pret} lots_dma={lots} replis_pio={replis} "
+      f"desactivation={desactive[0].split('=')[1] if desactive else 'aucune'}")
+PY
+
 echo
 echo "== lectures disque, par service et par fichier =="
 python3 tools/ci/attribue-lectures-disque.py "$LOG" 2>&1 | sed 's/^/  /' || true
