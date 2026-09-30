@@ -638,6 +638,8 @@ for motif in \
     'FAULT_REPRISE .*' \
     'BACKING_DISK_GLOBAL .*' \
     'BACKING_DISK_DECOMP .*' \
+    'ATA_CONTROLEUR .*' \
+    'ATA_DMA .*' \
     'BACKING_MEMORY_GLOBAL .*' \
     'CLEAN_PAGE_CACHE_GLOBAL .*' \
     'FAULT_WAIT .*'

@@ -609,6 +609,24 @@ mod dma {
     static TAMPON_PHYS: AtomicU64 = AtomicU64::new(0);
     static ECHECS: AtomicU32 = AtomicU32::new(0);
     static LOTS: AtomicU64 = AtomicU64::new(0);
+    // Ou passe le temps d'un transfert DMA tenu sous le verrou du controleur :
+    // attente du bus-master au total, dont le temps rendu a l'ordonnanceur
+    // par les points surs de la boucle d'attente (et combien de ces cessions
+    // ont reellement coute -- plus de 100 us). Sous Ladybird (run #371), une
+    // lecture de 64 Kio coute 10 ms de service contre ~0,4 ms au banc au
+    // repos : ces trois compteurs disent si c'est la cession.
+    static ATTENTE_NS: AtomicU64 = AtomicU64::new(0);
+    static CEDE_NS: AtomicU64 = AtomicU64::new(0);
+    static CESSIONS: AtomicU64 = AtomicU64::new(0);
+
+    /// (attente du bus-master ns, dont cedee ns, cessions > 100 us).
+    pub fn temps() -> (u64, u64, u64) {
+        (
+            ATTENTE_NS.load(Ordering::Relaxed),
+            CEDE_NS.load(Ordering::Relaxed),
+            CESSIONS.load(Ordering::Relaxed),
+        )
+    }
 
     /// (lots lus en DMA, echecs retombes en PIO, pret ?).
     pub fn stats() -> (u64, u32, bool) {
@@ -761,14 +779,25 @@ mod dma {
         let debut = crate::kernel::timer::ticks();
         let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
         let mut tours = 0u64;
+        let debut_ns = crate::kernel::timer::monotonic_ns();
         let bm_statut = loop {
             let st = unsafe { inb(bm + 2) };
             if st & BM_ST_ERREUR != 0 || st & BM_ST_ACTIF == 0 {
+                ATTENTE_NS.fetch_add(
+                    crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns),
+                    Ordering::Relaxed,
+                );
                 break st;
             }
             tours += 1;
             if tours % 256 == 0 {
+                let avant = crate::kernel::timer::monotonic_ns();
                 point_sur();
+                let cede = crate::kernel::timer::monotonic_ns().saturating_sub(avant);
+                CEDE_NS.fetch_add(cede, Ordering::Relaxed);
+                if cede > 100_000 {
+                    CESSIONS.fetch_add(1, Ordering::Relaxed);
+                }
             }
             if crate::kernel::timer::ticks().wrapping_sub(debut) > limite {
                 unsafe { outb(bm, 0) };
@@ -798,6 +827,31 @@ mod dma {
 /// (lots lus en DMA, echecs, DMA pret ?). Voir `dma`.
 pub fn dma_stats() -> (u64, u32, bool) {
     dma::stats()
+}
+
+/// (attente du bus-master ns, dont cedee a l'ordonnanceur ns, cessions > 100 us).
+pub fn dma_temps() -> (u64, u64, u64) {
+    dma::temps()
+}
+
+/// Publie l'etat du controleur : file du verrou, lots DMA, replis PIO et
+/// temps d'attente du bus-master. Tout atomique, aucun verrou pris : appele
+/// par l'echantillonneur ET par la sortie de processus, aux memes instants
+/// que l'attribution des lectures (`backing_attrib::publie`).
+///
+/// `replis_pio` : lots DMA refaits en PIO. Le mot « echec » n'apparait pas
+/// dans ce releve periodique (le bilan de sante le proscrit, casse ignoree,
+/// meme a zero) ; un echec reel publie sa propre ligne `ATA_DMA echec`.
+pub fn publie_controleur(maintenant_ms: u64) {
+    let (prochain, servi, detenteur, age_ms) = etat_verrou();
+    let (lots_dma, replis_pio, dma_pret) = dma_stats();
+    let (dma_attente_ns, dma_cede_ns, dma_cessions) = dma_temps();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={} dma_attente_ms={} dma_cede_ms={} dma_cessions={}",
+        maintenant_ms, prochain, servi, prochain.saturating_sub(servi), detenteur, age_ms,
+        dma_pret as u8, lots_dma, replis_pio,
+        dma_attente_ns / 1_000_000, dma_cede_ns / 1_000_000, dma_cessions,
+    ));
 }
 
 /// Lit un lot d'au plus 256 secteurs (une seule commande ATA).

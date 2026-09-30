@@ -272,7 +272,9 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         ));
         // Attribution des memes lectures. Tout atomique : aucun verrou pris
         // ici, conformement a `verifie-sondes-sans-verrou.py`.
-        crate::fs::backing_attrib::publie(crate::kernel::timer::monotonic_ms());
+        let maintenant = crate::kernel::timer::monotonic_ms();
+        crate::fs::backing_attrib::publie(maintenant);
+        crate::drivers::ata::publie_controleur(maintenant);
     }
 
     // BOUCHAUD_HOTFIX13_ASYNC_KERNEL_REAP_V2

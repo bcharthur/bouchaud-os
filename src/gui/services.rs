@@ -541,16 +541,7 @@ total_us={} pire_us={} candidats_suffisants={}",
     // Qui lit le disque, et ce que coute l'attente du controleur. Meme
     // cadence : compteurs cumulatifs, un releve par minute.
     crate::fs::backing_attrib::publie(maintenant);
-    let (prochain, servi, detenteur, age_ms) = crate::drivers::ata::etat_verrou();
-    // `replis_pio` : lots DMA refaits en PIO. Le mot « echec » n'apparait pas
-    // dans ce releve periodique (le bilan de sante le proscrit, casse ignoree,
-    // meme a zero) ; un echec reel publie sa propre ligne `ATA_DMA echec`.
-    let (lots_dma, replis_pio, dma_pret) = crate::drivers::ata::dma_stats();
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={}",
-        maintenant, prochain, servi, prochain.saturating_sub(servi), detenteur, age_ms,
-        dma_pret as u8, lots_dma, replis_pio,
-    ));
+    crate::drivers::ata::publie_controleur(maintenant);
     }
 
     // LES DEUX CALCULS DE `/proc/stat`, COTE A COTE.
