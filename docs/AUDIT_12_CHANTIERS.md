@@ -38,8 +38,8 @@ lui fait confiance.
 | Mesure | Valeur |
 |---|---|
 | Appels systeme aiguilles | **159** |
-| Appels hors gros verrou | **150** |
-| Appels encore sous gros verrou | **9** |
+| Appels hors gros verrou | **158** |
+| Appels encore sous gros verrou | **1** |
 | Fichiers portant un point sur de preemption | **5** |
 | Garde-fous d'architecture | **117** |
 | Suites de test hote | **106** |

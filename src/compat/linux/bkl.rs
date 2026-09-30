@@ -690,6 +690,39 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::LISTEN, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
     (nr::ACCEPT, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
     (nr::ACCEPT4, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
+    // B8 -- le cycle de vie des processus.
+    //
+    // Mesure (endurance SMP4, [BKL-INVENTAIRE]) : exit_group=65/419 ms tenus/
+    // 158 ms d'attente, exit=28/173/44, fork=50/89/2, wait4=39/5/105.
+    //
+    // Audit. Chaque etat a son verrou : registre des taches (le sien, seule
+    // section critique de `register`, qui ne prend plus le gros verrou) ;
+    // PROCESSES (RankedSpinLock, classe ProcessTable) ; par processus, `mm`,
+    // `files`, `metadata`, `signals` et `lifecycle` ; identifiants de fil
+    // atomiques. `fork` prend ses instantanes sous ces verrous (duplication de
+    // l'espace et champs de `mm` sous la MEME prise). `execve` attendait deja
+    // la quiescence gros verrou rendu.
+    //
+    // Ce que le gros verrou serialisait et que `lifecycle` serialise desormais
+    // (BOUCHAUD_GROUPE_RECLAME_V1, BOUCHAUD_WAIT4_RECOLTE_UNIQUE_V1) :
+    //  * deux `exit_group`/`execve` concurrents se tuaient mutuellement et
+    //    demontaient le processus deux fois : le premier fil qui RECLAME le
+    //    groupe gagne, les autres se retirent comme les fils tues par execve ;
+    //  * un `clone` pouvait enregistrer un fil apres le balayage et survivre a
+    //    la sortie du groupe : il relit la reclamation apres l'enregistrement ;
+    //  * un fil deja compte sorti pouvait retrouver `threads == 0` apres la
+    //    remise a 1 d'`exit_group` : une seule transition, tranchee par
+    //    `zombie` sous `lifecycle` ;
+    //  * deux `wait4` du meme parent pouvaient recolter le meme zombie : seul
+    //    celui qui le retire de PROCESSES le rend.
+    (nr::CLONE, "B8 -- fork (ci-dessous) ou fil : lifecycle + registre ; groupe reclame relu apres enregistrement"),
+    (nr::CLONE3, "B8 -- meme chemin que clone"),
+    (nr::FORK, "B8 -- instantanes sous mm/files/metadata/signals ; PROCESSES + registre sous leurs verrous"),
+    (nr::VFORK, "B8 -- meme chemin que fork"),
+    (nr::EXECVE, "B8 -- groupe reclame sous lifecycle avant le point de non-retour ; quiescence deja hors BKL"),
+    (nr::EXIT, "B8 -- lifecycle ; une seule transition vers le dernier fil"),
+    (nr::EXIT_GROUP, "B8 -- groupe reclame sous lifecycle ; un seul demontage"),
+    (nr::WAIT4, "B8 -- PROCESSES + lifecycle ; recolte unique sous le verrou de PROCESSES"),
 ];
 
 /// Ce que cet appel systeme exige du gros verrou.

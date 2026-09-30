@@ -216,6 +216,15 @@ AUDITS_NOMMES = {
     "LISTEN": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
     "ACCEPT": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
     "ACCEPT4": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
+    # B8 -- audit ecrit au-dessus du lot dans SANS_BKL (cycle de vie).
+    "CLONE": "B8 -- fork (ci-dessous) ou fil : lifecycle + registre ; groupe reclame relu apres enregistrement",
+    "CLONE3": "B8 -- meme chemin que clone",
+    "FORK": "B8 -- instantanes sous mm/files/metadata/signals ; PROCESSES + registre sous leurs verrous",
+    "VFORK": "B8 -- meme chemin que fork",
+    "EXECVE": "B8 -- groupe reclame sous lifecycle avant le point de non-retour ; quiescence deja hors BKL",
+    "EXIT": "B8 -- lifecycle ; une seule transition vers le dernier fil",
+    "EXIT_GROUP": "B8 -- groupe reclame sous lifecycle ; un seul demontage",
+    "WAIT4": "B8 -- PROCESSES + lifecycle ; recolte unique sous le verrou de PROCESSES",
 }
 
 # Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.
