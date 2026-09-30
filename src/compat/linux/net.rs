@@ -26,7 +26,6 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, Ordering};
 use crate::kernel::sync::SpinLock;
 
 use crate::kernel::abi::{errno, user_read, user_write};
@@ -108,22 +107,8 @@ impl SocketState {
 // Maintenant que BIND sort du verrou global, l'etat devient explicitement
 // atomique.
 fn ephemeral_port() -> u16 {
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let seed = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
-    let mut courant = NEXT.load(Ordering::Acquire);
-    loop {
-        let base = if courant == 0 { seed } else { courant };
-        let suivant = base.wrapping_add(1) | 0xC000;
-        match NEXT.compare_exchange_weak(
-            courant,
-            suivant,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return suivant,
-            Err(observe) => courant = observe,
-        }
-    }
+    // Le meme compteur que TCP : BOUCHAUD_PORT_EPHEMERE_MONOTONE_V1.
+    crate::net::port_ephemere()
 }
 
 /// Lit une `struct sockaddr_in` : famille, port (gros-boutiste), adresse.

@@ -279,14 +279,20 @@ def verifie_c8_receive_side():
     net = net_path.read_text(encoding="utf-8")
     file = file_path.read_text(encoding="utf-8")
 
+    # L'audit de BIND repose sur un port ephemere ATOMIQUE. Le compteur a
+    # quitte net.rs pour `net::port_ephemere` (BOUCHAUD_PORT_EPHEMERE_MONOTONE_V1),
+    # partage avec TCP : la garde suit la garantie ou elle vit desormais.
     for marqueur in [
         "BOUCHAUD_C8_RECV_SANS_BKL_V2",
-        "static NEXT: AtomicU16",
+        "crate::net::port_ephemere()",
         "Domaine::Reseau",
         "crate::kernel::scheduler::preempt::safe_point()",
     ]:
         if marqueur not in net:
             echec(f"C8/V2 net.rs : marqueur absent `{marqueur}`")
+    pile = RACINE / "src" / "net" / "mod.rs"
+    if not pile.exists() or "static PROCHAIN_PORT_EPHEMERE: AtomicU16" not in pile.read_text(encoding="utf-8"):
+        echec("C8/V2 net/mod.rs : compteur atomique de port ephemere absent")
 
     # C8 : trois pumps partagent UNE frontiere legacy.
     # Le nombre de sites BKL est lui-meme un budget d'architecture.

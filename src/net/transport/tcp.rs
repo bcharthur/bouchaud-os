@@ -182,7 +182,7 @@ fn maintenant_ms() -> u64 {
 }
 
 pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> bool {
-    let sport = 0xC000u16 | (cpu::rdtsc() as u16 & 0x0FFF);
+    let sport = crate::net::port_ephemere();
     let isn = cpu::rdtsc() as u32;
     let mut seg = [0u8; 1600];
     let mut rb = [0u8; 2048];
@@ -439,7 +439,8 @@ pub struct TcpConn {
 impl TcpConn {
     /// Ouvre une connexion (poignee SYN/SYN-ACK/ACK).
     pub fn connect(dst: Ipv4Addr, port: u16) -> Option<TcpConn> {
-        let sport = 0xC000u16 | (cpu::rdtsc() as u16 & 0x0FFF);
+        // BOUCHAUD_PORT_EPHEMERE_MONOTONE_V1 : voir `net::port_ephemere`.
+        let sport = crate::net::port_ephemere();
         let isn = cpu::rdtsc() as u32;
         let mut seg = [0u8; 64];
         let mut rb = [0u8; 2048];

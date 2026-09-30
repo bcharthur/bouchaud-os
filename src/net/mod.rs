@@ -1072,12 +1072,48 @@ const ARP_TTL_NEGATIF_MS: u64 = 2_000;
 /// Il protege le cache ARP, la file des paquets mis de cote et la boite DHCP.
 /// Avant lui, `sendto` (sans gros verrou) et `pump_udp` (sous le domaine
 /// Reseau du gros verrou) modifiaient les memes `Vec` depuis deux processeurs.
+// BOUCHAUD_PORT_EPHEMERE_MONOTONE_V1
+//
+// Le port source d'une connexion TCP etait TIRE a chaque ouverture :
+// `0xC000 | (rdtsc & 0x0FFF)` -- 4 096 valeurs, aucune memoire des ports deja
+// servis, et le MEME port pour les cinq SYN d'une poignee. Retomber sur le
+// quadruplet d'une connexion que la passerelle (SLIRP) garde encore fait
+// ignorer les cinq SYN : `connect` echoue au bout de 25 a 57 s, et la
+// connexion suivante -- nouveau tirage -- passe en quelques millisecondes.
+// Observe : smoke Ladybird #373 (`fetch-texte`, 25,6 s) ; reproduit :
+// `tcp-connexions-probe`, 8 echecs de 54-57 s sur 242 connexions.
+//
+// Un compteur partage, amorce UNE fois par le TSC, parcourt les 16 384 ports
+// 49152-65535 : un port ne revient qu'apres 16 384 ouvertures. UDP (qui avait
+// deja un compteur) et les trois ouvertures TCP le partagent.
+static PROCHAIN_PORT_EPHEMERE: AtomicU16 = AtomicU16::new(0);
+
+/// Port source ephemere suivant, dans 49152-65535, sans reutilisation avant
+/// 16 384 allocations.
+pub fn port_ephemere() -> u16 {
+    let amorce = 0xC000 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x3FFF);
+    let mut courant = PROCHAIN_PORT_EPHEMERE.load(OrdreCompteur::Acquire);
+    loop {
+        let base = if courant == 0 { amorce } else { courant };
+        let suivant = base.wrapping_add(1) | 0xC000;
+        match PROCHAIN_PORT_EPHEMERE.compare_exchange_weak(
+            courant,
+            suivant,
+            OrdreCompteur::AcqRel,
+            OrdreCompteur::Acquire,
+        ) {
+            Ok(_) => return suivant,
+            Err(observe) => courant = observe,
+        }
+    }
+}
+
 static VERROU_RECEPTION: SpinLockIrq<()> = SpinLockIrq::new(());
 
 // Ce que le routage a vu, pour que le prochain releve physique puisse DIRE si
 // la resolution marche au lieu de laisser deviner. Des compteurs relaches :
 // ils ne commandent rien, ils racontent.
-use core::sync::atomic::{AtomicU64, Ordering as OrdreCompteur};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering as OrdreCompteur};
 // ---------------------------------------------------------------------------
 // BOUCHAUD_NET_INGRESS_UNIQUE_V1 : UNE seule fonction lit la carte
 // ---------------------------------------------------------------------------

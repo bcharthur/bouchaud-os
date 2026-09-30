@@ -76,7 +76,7 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let tx_buf = tcp::SocketBuffer::new(vec![0u8; 4096]);
     let mut socket = tcp::Socket::new(rx_buf, tx_buf);
 
-    let local_port = 0xC000u16 | (crate::arch::x86_64::cpu::rdtsc() as u16 & 0x0FFF);
+    let local_port = crate::net::port_ephemere();
     let remote = IpEndpoint::new(IpAddress::v4(dst[0], dst[1], dst[2], dst[3]), port);
     if socket.connect(iface.context(), remote, local_port).is_err() {
         return false;
