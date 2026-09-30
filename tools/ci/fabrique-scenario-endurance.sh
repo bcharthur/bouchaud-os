@@ -23,7 +23,11 @@
 #   stockage      disque-probe sur un fichier de 6 Mio (au-dela du seuil
 #                 inline : vraies lectures bloc), wal-probe
 #   processus     session-probe (arret d'une session entiere), verrous-probe,
-#                 poll-bkl-probe (attente de readiness hors gros verrou)
+#                 poll-bkl-probe (attente de readiness hors gros verrou),
+#                 exec-fd-probe (un VRAI execve : l'autorun lance ses
+#                 programmes par exec_image, jamais par l'appel systeme, et
+#                 la panique execve du lot B8 n'a ete vue que par le smoke
+#                 Ladybird #377)
 #
 # Chaque famille ecrit un marqueur `_OK` seulement si toutes ses commandes ont
 # reussi (`&&`), et `soak.py --require` exige tous les marqueurs : une famille
@@ -48,7 +52,7 @@ mkdir -p "$SCENARIO/bin"
 (cd tools/userland && OUT="$TRAVAIL/sondes" ./build.sh musl >/dev/null)
 CC=musl-gcc ELF_REPORT="$TRAVAIL/mmstress.readelf.txt" tools/userland/build-mmstress.sh >/dev/null
 mv mmstress "$SCENARIO/bin/mmstress"
-for sonde in ordonnanceur-probe disque-probe wal-probe session-probe verrous-probe poll-bkl-probe; do
+for sonde in ordonnanceur-probe disque-probe wal-probe session-probe verrous-probe poll-bkl-probe exec-fd-probe; do
     cp "$TRAVAIL/sondes/$sonde" "$SCENARIO/bin/$sonde"
 done
 
@@ -67,7 +71,7 @@ smpstat
 echo ENDURANCE_MEMOIRE_DEBUT && /bin/mmstress 4 512 4 && /bin/mmstress unrelated && /bin/mmstress aba && /bin/mmstress churn && echo ENDURANCE_MEMOIRE_OK
 echo ENDURANCE_ORDONNANCEUR_DEBUT && /bin/ordonnanceur-probe 8 && echo ENDURANCE_ORDONNANCEUR_OK
 echo ENDURANCE_STOCKAGE_DEBUT && /bin/disque-probe /bin/gros.bin && /bin/wal-probe && echo ENDURANCE_STOCKAGE_OK
-echo ENDURANCE_PROCESSUS_DEBUT && /bin/session-probe 4 && /bin/verrous-probe && /bin/poll-bkl-probe && echo ENDURANCE_PROCESSUS_OK
+echo ENDURANCE_PROCESSUS_DEBUT && /bin/session-probe 4 && /bin/verrous-probe && /bin/poll-bkl-probe && /bin/exec-fd-probe && echo ENDURANCE_PROCESSUS_OK
 smpstat
 echo ENDURANCE_CYCLE_FIN
 AUTORUN

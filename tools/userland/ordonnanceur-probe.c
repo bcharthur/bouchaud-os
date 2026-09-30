@@ -82,8 +82,24 @@ static long long maintenant_us(void)
 }
 
 #define PERIODE_US 16000
-#define REVEILS 60
+// BOUCHAUD_SONDE_ORDO_QUANTILES_V1
+//
+// C'etait 60. Avec 60 reveils, `p99 = retards[60 * 99 / 100] = retards[59]`,
+// c'est-a-dire le DERNIER : le « p99 » etait le pire cas, et les deux
+// verifications comparaient la meme valeur -- un seul echantillon par phase.
+// Sous emulation, cet echantillon est celui ou l'hote a retire son fil au
+// processeur virtuel : la sonde echouait une fois sur deux sur n'importe quel
+// noyau (mesure : 5 demarrages x 5 passes, image d'avant le chantier BKL,
+// 5 echecs sur 10), alors que la mediane interactive etait meilleure a
+// chaque passe. Avec 300 reveils, le p99 est le troisieme pire : un vrai
+// quantile, distinct du maximum, comme la sonde le supposait (sa validation
+// sur Linux comparait bien deux valeurs differentes).
+#define REVEILS 300
 #define CALCULS_MAX 16
+
+// Le calcul doit couvrir TOUTE la mesure : 300 reveils de 16 ms font 4,8 s.
+// Il durait 2 s, pour une mesure qui en durait alors moins d'une.
+#define CALCUL_SECONDES ((REVEILS * PERIODE_US) / 1000000 + 2)
 
 // Ce qu'une serie de reveils apprend. Les quantiles hauts comptent plus que la
 // mediane : une interface dont une trame sur vingt arrive en retard se voit,
@@ -141,7 +157,7 @@ static void mesure_interface(struct latence *sortie)
         retards[i] = reel > attendu ? reel - attendu : 0;
     }
 
-    // Tri par insertion : soixante valeurs, la simplicite vaut mieux ici.
+    // Tri par insertion : trois cents valeurs, la simplicite vaut mieux ici.
     for (int i = 1; i < REVEILS; i++) {
         long long v = retards[i];
         int j = i - 1;
@@ -199,7 +215,7 @@ static unsigned long long sous_charge(int interactif, int combien,
             // Le calcul reste normal dans les deux cas : ce qu'on change est la
             // priorite de **l'interface**, pas la sienne. Le degrader serait
             // une autre experience, et une moins honnete.
-            calcule_jusqua(tube[1], 2);
+            calcule_jusqua(tube[1], CALCUL_SECONDES);
         }
         enfants[nes++] = enfant;
     }
