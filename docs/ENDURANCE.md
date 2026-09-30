@@ -85,22 +85,34 @@ production) : 16/18 -> 18/18. QEMU SMP1 : `ready_latency_max` 26 523 ->
 410 ms, ordonnanceur-probe echec -> 0/4. SMP4 : interactif sous charge p99
 13,8 -> 3,1 ms.
 
-### 3.2 Attentes pretes de ~2 s derriere le disque (OUVERT)
+### 3.2 Attentes pretes de ~2 s derriere le disque (CORRIGE en partie, 19f53545)
 
 Residu SMP4/SMP8 apres 3.1 : la pire attente (usb-hid interactive, enfants
-de disque-probe) est sur le coeur qui execute une E/S disque. Mecanisme
-mesure (voir `MESURE_DEMARRAGE_A_FROID.md` section 17) :
+de disque-probe) etait sur le coeur qui executait une E/S disque.
 
-* le controleur ATA est protege par un `SpinLock` ; un `SpinLock` rend le
-  coeur NON PREEMPTIBLE des l'attente ;
-* `ata::read`/`write` gardent ce verrou sur TOUS les lots d'une requete, et
-  `write` y ajoute `FLUSH CACHE` ; `fsync` sur `/persist` reecrit un
-  instantane sous ce verrou ;
-* `ata_max_ns` observe : 452 ms a 1,6 s d'attente unique ; `ata_wait_ns`
-  cumule 41-46 s sur un cycle.
+Cause mesuree : le controleur ATA etait garde par un `SpinLock`, qui rend le
+coeur NON PREEMPTIBLE des l'attente ; le transfert PIO dure (un lot de 256
+secteurs sous le meme verrou, `FLUSH CACHE` a l'ecriture). Les coeurs en
+attente tournaient a vide, taches pretes derriere eux, et sous TCG volaient
+le processeur hote a l'emulation du detenteur. Au passage, `probe()` prenait
+ce verrou a chaque E/S pour lire un drapeau (db60f400, double file).
 
-Piste (non realisee, audit requis) : verrou dormant pour le controleur, ou
-relachement entre lots. A trancher apres l'attribution Ladybird.
+Trois bras mesures, meme scenario :
+
+| | spinlock | SleepMutex | verrou a tickets dormant (retenu) |
+|---|---|---|---|
+| cycles OK | 1/2 | 1/4 | 4/4 |
+| `ready_latency_max` SMP4 | 2 040 / 2 306 ms | 194-237 ms | 447 / 314 ms |
+| SMP8 / SMP1 | -- | 134 / 574 ms | 61 / 258 ms |
+| p99 interactif | 134 / 268 ms | 33,5 ms | 33,5 ms |
+| pire attente controleur | 0,76 / 1,15 s | 6,9-7,7 s | 0,26-0,33 s |
+| debit controleur | ~1,5 Mio/s | ~2,8 Mio/s | ~3 Mio/s |
+
+`SleepMutex` n'est pas equitable (un arrivant passe devant le reveille) : une
+faute de page pouvait attendre 7 s. Le verrou a tickets sert dans l'ordre.
+
+Reste depasse, budgets NON relaches : `ready_latency_max` 314-447 ms a SMP4
+(budget 250), `ready_latency_interactive_max`, `bkl_attente_max` 76 ms a SMP8.
 
 ### 3.3 Sonde A/B de l'ordonnanceur a SMP>=2
 
