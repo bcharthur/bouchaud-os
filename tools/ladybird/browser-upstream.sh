@@ -43,13 +43,24 @@ python3 tools/ladybird/prepare-v19-navigateur.py "$SRC"
 python3 tools/ladybird/prepare-m11-page-registry.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
-python3 tools/ladybird/prepare-p17-ipc-recovery.py "$SRC"
-# BOUCHAUD_P15_BROWSER_HANG_FORENSICS
-python3 tools/ladybird/prepare-p15-forensics.py "$SRC"
+# BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1
+#
+# Le commit p18 (b16a6fd6) appelait ici prepare-p17-ipc-recovery.py et
+# prepare-p15-forensics.py, et plus bas prepare-p18-network-selfheal.py. Ces
+# trois fichiers n'ont JAMAIS ete versionnes, sur aucune branche : chaque run
+# de ladybird-native-browser tombait sur « can't open file ». Tout artefact
+# Ladybird jamais produit par la CI l'a ete SANS eux.
+#
+# Le cote noyau de p15/p17/p18 (forensique syscall, gardien des fils noyau,
+# repli reseau LAB) est autonome et reste en place ; rien dans le noyau ni
+# dans les verdicts runtime n'attend un Ladybird patche par eux. Les appels
+# sont retires plutot que remplaces par des patchers reconstitues de memoire :
+# un patcher invente ne serait pas celui qui a ete teste sur le Trigkey.
+# Pour les retablir : versionner les trois fichiers et remettre les appels ;
+# tools/verifie-scripts-ladybird-presents.py refuse un appel sans fichier.
 python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
 python3 tools/ladybird/prepare-platform-complete.py "$SRC"
 python3 tools/ladybird/prepare-network-live.py "$SRC"
-python3 tools/ladybird/prepare-p18-network-selfheal.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.
