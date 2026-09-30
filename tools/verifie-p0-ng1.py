@@ -61,10 +61,17 @@ if "free_frame_global" not in page:
     errors.append("pressure reclaim must bypass local cache and return frames globally")
 
 user = text("src/arch/x86_64/usermode.rs")
-pos_drop = user.find("drop(kernel);")
 pos_safe = user.find("scheduler::preempt::safe_point")
-if pos_drop < 0 or pos_safe < 0 or pos_safe < pos_drop:
-    errors.append("kernel safe-point must occur after outer BKL drop")
+# BOUCHAUD_AIGUILLEUR_SANS_BKL_V1 : l'aiguilleur ne prend plus le gros verrou.
+# L'invariant tient toujours, et plus fort : le point sur suit l'appel systeme,
+# et aucun verrou global n'est tenu a cet endroit.
+user_code = "\n".join(line.split("//", 1)[0] for line in user.splitlines())
+pos_exec = user_code.find("execute_syscall(frame, native);")
+pos_safe_code = user_code.find("scheduler::preempt::safe_point")
+if pos_safe < 0 or pos_exec < 0 or pos_safe_code < pos_exec:
+    errors.append("kernel safe-point must occur after the syscall body")
+if "smp_lock::enter" in user_code:
+    errors.append("kernel safe-point: the dispatcher takes the BKL again")
 
 # Ownership invariant: CURRENT_IS_KERNEL accessor belongs to thread/metriques.rs.
 # tache.rs only defines Task layout. Duplicating the function in two include!

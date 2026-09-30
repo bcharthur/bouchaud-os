@@ -745,7 +745,22 @@ pub fn exit_group(code: i32) -> ! {
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
-    let _kernel = smp_lock::enter();
+    // BOUCHAUD_RUN_PORTE_TRANSITION_V1
+    //
+    // `run` et `run_noyau` prenaient le gros verrou. Ce qu'il protegeait
+    // vraiment, c'est une fenetre : entre `set_current_index` et
+    // `switch_context`, la tache courante de ce coeur est deja la nouvelle
+    // alors qu'on execute encore sur la pile d'amorcage. Une preemption sur
+    // IRQ a cet instant sauverait la pile d'amorcage dans le contexte de la
+    // tache. Le BKL l'empechait (`preemption_noyau_sure` le refuse)... mais il
+    // etait SUSPENDU juste avant `switch_context` : la fin de la fenetre
+    // n'etait pas couverte.
+    //
+    // La primitive qui existe pour cela est la porte de transition de
+    // l'ordonnanceur, celle que `switch_to` ouvre : `preempt_from_irq` renonce
+    // quand elle est ouverte sans passation (C26), et la continuation
+    // entrante la rend (`complete_switch_handoff`, cas « transition noyau ->
+    // tache », qui l'attendait deja). Elle couvre la fenetre ENTIERE.
     // Le thread racine d'un lancement synchrone doit revenir sur la pile
     // noyau de son CPU appelant. Lui seul est pince; les pthreads qu'il cree
     // naissent avec une affinite machine complete et peuvent etre balances.
@@ -757,6 +772,7 @@ pub fn run(mut first: Box<Task>) -> i32 {
     let racine = process.pid;
     let index = register(first);
     let cpu_id = local_cpu();
+    assert!(commence_transition_ordonnanceur(), "run: transition scheduler deja ouverte");
     let to_ptr = unsafe {
         RACINE_PREMIER_PLAN.store(racine, Ordering::Release);
         let list = tasks();
@@ -768,10 +784,8 @@ pub fn run(mut first: Box<Task>) -> i32 {
     unsafe { install(&mut *to_ptr); }
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-installe");
     let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
-    let depth = smp_lock::suspend_for_schedule();
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-switch");
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
-    smp_lock::resume_after_schedule(depth);
     complete_switch_handoff();
     crate::kernel::dmesg::log_fmt(format_args!(
         "RETOUR_SHELL_REPRIS t={} racine={} cpu={}",
@@ -882,9 +896,10 @@ fn spawn_noyau_interne(
 ) -> bool {
     // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
     //
-    // `run_noyau` en prend un parce qu'il COMMUTE : il touche l'etat du coeur
-    // courant, la tache courante et la pile noyau du moment. Lancer une tache
-    // ne touche rien de tout cela.
+    // `run_noyau` ouvre la porte de transition parce qu'il COMMUTE : il touche
+    // l'etat du coeur courant, la tache courante et la pile noyau du moment
+    // (BOUCHAUD_RUN_PORTE_TRANSITION_V1). Lancer une tache ne touche rien de
+    // tout cela.
     //
     // `new_process` se protege par ses propres verrous -- l'espace
     // d'adressage, la table des processus, les champs du descripteur -- et
@@ -924,7 +939,8 @@ fn spawn_noyau_interne(
 
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
-    let _kernel = smp_lock::enter();
+    // Porte de transition et non gros verrou : BOUCHAUD_RUN_PORTE_TRANSITION_V1
+    // (voir `run`).
     if in_user_task() {
         crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
         return -1;
@@ -940,6 +956,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     task.runq_cpu.range(0);
     task.last_cpu.range(0);
     let index = register(task);
+    assert!(commence_transition_ordonnanceur(), "run_noyau: transition scheduler deja ouverte");
     let to_ptr = unsafe {
         let list = tasks();
         let ptr = unsafe { registre_pointeur_ordonnanceur(index) }.expect("registre: tache absente");
@@ -949,9 +966,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     set_current_index(index);
     unsafe { install(&mut *to_ptr); }
     let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
-    let depth = smp_lock::suspend_for_schedule();
     unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
-    smp_lock::resume_after_schedule(depth);
     complete_switch_handoff();
 
     crate::kernel::vmm::activate_kernel();

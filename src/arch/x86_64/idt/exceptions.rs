@@ -1,12 +1,13 @@
 extern "x86-interrupt" fn breakpoint_handler(stack: InterruptStackFrame) {
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     println!("exception: breakpoint (int3) capturee, on continue");
     serial_println!("[cpu] breakpoint at {:?}", stack.instruction_pointer);
 }
@@ -217,13 +218,14 @@ impl Drop for GsGuard {
 
 fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     let cr2 = x86_64::registers::control::Cr2::read().as_u64();
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
@@ -258,13 +260,14 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
     );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de protection generale", &stack);
     }
@@ -278,13 +281,14 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("instruction illegale", &stack);
     }
@@ -298,13 +302,14 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("division par zero", &stack);
     }
@@ -318,13 +323,14 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
     );
     let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
-    // panique. Le gros verrou y reste legitime -- il n'y a plus de
-    // concurrence a preserver quand on demonte la tache qui a fait la faute,
-    // et la coherence du diagnostic prime. Ce n'est pas un chemin normal, et
-    // le compter comme tel rendrait l'objectif « zero » inatteignable pour de
-    // mauvaises raisons.
+    // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
+    // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
+    // appel systeme ne le prend depuis le lot B9 -- et il avait un cout reel :
+    // un coeur en faute pendant qu'un autre le tenait attendait avant meme de
+    // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
+    // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
+    // panique (`PANIC_GLOBAL`).
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
-    let _kernel = crate::kernel::smp_lock::enter();
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de pile", &stack);
     }

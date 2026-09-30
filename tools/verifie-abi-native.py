@@ -39,8 +39,13 @@ if "BOUCHAUD_NATIVE_ABI_V1" not in usermode:
     errors.append("usermode: routage ABI natif absent")
 if "native::abi::is_native_syscall" not in usermode:
     errors.append("usermode: detection namespace natif absente")
-if "let sans_verrou = native" not in usermode:
-    errors.append("usermode: les appels natifs ne sont pas explicitement hors BKL")
+# BOUCHAUD_AIGUILLEUR_SANS_BKL_V1 : plus aucun chemin de l'aiguilleur ne prend
+# le gros verrou -- les appels natifs pas plus que les autres.
+if "BOUCHAUD_AIGUILLEUR_SANS_BKL_V1" not in usermode:
+    errors.append("usermode: aiguilleur sans gros verrou (marqueur) absent")
+usermode_code = "\n".join(line.split("//", 1)[0] for line in usermode.splitlines())
+if "smp_lock::enter" in usermode_code or "Domaine::Syscall" in usermode_code:
+    errors.append("usermode: l'aiguilleur reprend le gros verrou")
 
 legacy = Path("src/kernel/object/handle.rs").read_text(encoding="utf-8")
 legacy_code = '\n'.join(line.split('//', 1)[0] for line in legacy.splitlines())

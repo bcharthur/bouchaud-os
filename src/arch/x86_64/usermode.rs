@@ -249,20 +249,22 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     // Native calls are recognized BEFORE Linux compatibility. They never
     // acquire the BKL: each native object owns its synchronization domain.
     let native = crate::kernel::native::abi::is_native_syscall(number);
-    let sans_verrou = native
-        || (!crate::kernel::abi::bkl::exige_bkl(number)
-            && !crate::kernel::abi::trace_enabled());
 
-    if sans_verrou {
-        crate::kernel::task::stall_syscall_sans_verrou();
-        execute_syscall(frame, native);
-    } else {
-        let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Syscall);
-        let kernel = crate::kernel::smp_lock::enter();
-        crate::kernel::task::stall_syscall_bkl_acquired();
-        execute_syscall(frame, false);
-        drop(kernel);
-    }
+    // BOUCHAUD_AIGUILLEUR_SANS_BKL_V1
+    //
+    // Il y avait ici deux chemins : sans verrou pour les appels audites
+    // (`SANS_BKL`), sous le gros verrou pour tout le reste -- les numeros
+    // inconnus, et TOUS les appels des que la trace etait active. Depuis le
+    // lot B9, chaque appel aiguille a son audit ; ce qui restait sous verrou
+    // ne le justifiait plus :
+    //   * un numero inconnu fait un `store` atomique (LAST_UNKNOWN), une ligne
+    //     COM1 avec le nom du processus (lu sous `metadata`) et rend ENOSYS ;
+    //   * la trace n'ecrit que sur COM1, qui a son jeton d'emission. La
+    //     serialiser sous le gros verrou faisait pire que rien : en mode trace,
+    //     le noyau ne tournait plus comme en production, et une course ne se
+    //     reproduisait plus des qu'on cherchait a l'observer.
+    crate::kernel::task::stall_syscall_sans_verrou();
+    execute_syscall(frame, native);
 
     let _ = crate::kernel::scheduler::preempt::safe_point();
     crate::kernel::task::stall_syscall_exit();
