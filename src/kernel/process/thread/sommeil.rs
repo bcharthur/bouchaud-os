@@ -222,7 +222,12 @@ fn wake_sleepers() {
             && now >= task.wake_deadline_ns.charge()
             && task.state.echange(TaskState::Blocked, TaskState::Ready)
         {
-            task.wake_deadline_ns.range(0);
+            // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : l'echeance n'est PAS
+            // effacee ici. La tache, reveillee, peut s'etre deja reparquee
+            // avec une NOUVELLE echeance ; l'effacer apres coup la
+            // transformerait en attente infinie. Chaque attente efface la
+            // sienne en reprenant la main. Une echeance perimee sur une tache
+            // Ready est sans effet : le reveil exige Blocked -> Ready.
             task.futex_key.range(0);
             publish_ready(index);
         }

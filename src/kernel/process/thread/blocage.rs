@@ -7,9 +7,12 @@ pub fn wake_for_signal(pid: u32) {
         if task.process.pid == pid
             && task.state.echange(TaskState::Blocked, TaskState::Ready)
         {
+            // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : ni la cle d'attente ni
+            // l'echeance ne sont effacees ici -- la tache peut s'etre deja
+            // reparquee avec les SIENNES. Voir `wake_wait_queue`. Chaque
+            // attente efface ses propres champs en reprenant la main.
+            // (`futex_key` et `waiting_for_child` ne sont plus jamais poses.)
             task.futex_key.range(0);
-            task.wait_queue_key.range(0);
-            task.wake_deadline_ns.range(0);
             task.waiting_for_child.range(false);
             publish_ready(index);
         }
@@ -252,7 +255,28 @@ pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
         if !tache.state.echange(TaskState::Blocked, TaskState::Ready) {
             continue;
         }
-        tache.wait_queue_key.range(0);
+        // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1
+        //
+        // Le reveilleur n'efface PLUS la cle d'attente. Il le faisait APRES
+        // la transition, et cette ecriture tardive pouvait tomber sur l'attente
+        // SUIVANTE de la meme tache :
+        //
+        //   tache    publie Blocked (cle Q), n'est pas encore sortie du coeur
+        //   reveil   Blocked -> Ready gagne
+        //   tache    voit Ready, sort de sa boucle, repart, n'a pas son tour,
+        //            se reparque : cle Q, Blocked
+        //   reveil   efface la cle -> la tache est Blocked avec cle 0
+        //
+        // Plus aucun reveil ne la retrouve (la recherche se fait par cle), et
+        // la mise en file qui suit est jetee (tache non eligible). Observe :
+        // endurance SMP4, verrou du controleur ATA -- le lecteur dont c'etait
+        // le tour `Blocked cle_attente=0`, tous les autres parques derriere
+        // lui, neuf minutes de machine figee.
+        //
+        // Chaque attente efface deja sa propre cle en reprenant la main
+        // (`finish_park_current_on_detached`, `park_current_on`,
+        // `park_current_on_until`, `annule_park_courant`). Une cle perimee sur
+        // une tache Ready est sans effet : tout reveil exige Blocked -> Ready.
         publish_ready(index);
         woke += 1;
     }
