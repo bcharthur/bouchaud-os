@@ -81,24 +81,90 @@ static mut SECTORS: [u64; 2] = [0, 0];
 static mut PROBED: bool = false;
 /// Miroir atomique de `PROBED`, lisible sans verrou. Voir [`probe`].
 static PROBED_ATOMIQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static CONTROLLER: crate::kernel::sync::SpinLock<()> = crate::kernel::sync::SpinLock::new(());
+// BOUCHAUD_ATA_VERROU_DORMANT_FIFO_V1
+//
+// LE CONTROLEUR ETAIT GARDE PAR UN SPINLOCK, ET CELA COUTAIT DEUX FOIS.
+//
+// Un `SpinLock` rend le coeur NON PREEMPTIBLE des l'attente. Or le
+// transfert PIO dure longtemps (12,5 ms par 64 Kio sous TCG, un lot entier de
+// 256 secteurs sous le meme verrou, plus `FLUSH CACHE` a l'ecriture) :
+//
+//   * les coeurs qui attendaient le controleur tournaient a vide, non
+//     preemptibles -- toute tache prete sur ces coeurs attendait avec eux ;
+//   * sous TCG, ces attentes actives volaient le processeur hote a
+//     l'emulation du detenteur, qui transferait trois fois moins vite.
+//
+// Mesure (endurance SMP4, meme scenario, voir docs/ENDURANCE.md) : attente
+// prete maximale 2,0-2,3 s, p99 interactif 134-268 ms, occupation du
+// controleur 9,2-10,0 s ; avec un verrou dormant : 0,19-0,24 s, 33,5 ms,
+// 2,7-2,8 s.
+//
+// POURQUOI UN TICKET, ET PAS `SleepMutex`.
+//
+// `SleepMutex` n'est pas equitable : un arrivant peut prendre le verrou avant
+// le reveille. Mesure : une attente unique de 6,9-7,7 s sur le controleur,
+// contre 0,8-1,1 s avec le spinlock (FIFO de fait). Un disque partage par des
+// fautes de page ne doit affamer personne : les tickets servent dans l'ordre
+// d'arrivee, et le verrou passe de main en main sans course.
+//
+// INTERRUPTIONS MASQUEES (amorcage, sonde des disques) : on ne peut pas
+// dormir, et personne ne peut tenir le controleur -- l'attente reste active.
+struct Controleur {
+    prochain: AtomicU64,
+    servi: AtomicU64,
+    attente: crate::kernel::sync::WaitQueue,
+}
+
+static CONTROLLER: Controleur = Controleur {
+    prochain: AtomicU64::new(0),
+    servi: AtomicU64::new(0),
+    attente: crate::kernel::sync::WaitQueue::new(),
+};
+
+/// Le controleur est a nous tant que cette garde vit.
+struct GardeControleur;
+
+impl Drop for GardeControleur {
+    fn drop(&mut self) {
+        CONTROLLER.servi.fetch_add(1, Ordering::Release);
+        // Tous les attendants se reveillent et relisent `servi` : seul le
+        // ticket suivant continue. Au plus quelques lecteurs concurrents --
+        // un par coeur --, le reveil collectif ne coute rien de mesurable
+        // face a un transfert PIO.
+        CONTROLLER.attente.wake_all();
+    }
+}
+
 static CONTROLLER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_MAX_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 
-fn lock_controller() -> crate::kernel::sync::SpinLockGuard<'static, ()> {
+fn lock_controller() -> GardeControleur {
     lock_controller_mesure().0
 }
 
 /// Le verrou, et le temps passe a l'attendre (ns).
-fn lock_controller_mesure() -> (crate::kernel::sync::SpinLockGuard<'static, ()>, u64) {
+fn lock_controller_mesure() -> (GardeControleur, u64) {
     let start = crate::kernel::timer::monotonic_ns();
-    let guard = CONTROLLER.lock();
+    let mon_tour = CONTROLLER.prochain.fetch_add(1, Ordering::AcqRel);
+    let peut_dormir = crate::arch::x86_64::cpu::interrupts_enabled();
+    while CONTROLLER.servi.load(Ordering::Acquire) != mon_tour {
+        if peut_dormir {
+            let ticket = CONTROLLER.attente.ticket();
+            // Relire APRES avoir pris le ticket : un `wake_all` publie entre
+            // la premiere lecture et le ticket ne doit pas etre perdu.
+            if CONTROLLER.servi.load(Ordering::Acquire) != mon_tour {
+                CONTROLLER.attente.wait(ticket);
+            }
+        } else {
+            core::hint::spin_loop();
+        }
+    }
     let waited = crate::kernel::timer::monotonic_ns().saturating_sub(start);
     CONTROLLER_ACQUIRES.fetch_add(1, Ordering::Relaxed);
     CONTROLLER_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
     CONTROLLER_MAX_WAIT_NS.fetch_max(waited, Ordering::Relaxed);
-    (guard, waited)
+    (GardeControleur, waited)
 }
 
 pub fn contention_stats() -> (u64, u64, u64) {
