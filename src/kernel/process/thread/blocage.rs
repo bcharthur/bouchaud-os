@@ -11,9 +11,15 @@ pub fn wake_for_signal(pid: u32) {
             // l'echeance ne sont effacees ici -- la tache peut s'etre deja
             // reparquee avec les SIENNES. Voir `wake_wait_queue`. Chaque
             // attente efface ses propres champs en reprenant la main.
-            // (`futex_key` et `waiting_for_child` ne sont plus jamais poses.)
+            //
+            // `waiting_for_child` non plus : `sys_wait4` le pose et l'efface
+            // lui-meme au reveil. L'effacer ICI, apres la transition, peut
+            // tomber sur un parent deja revenu dans `wait4` et reparque avec
+            // `waiting_for_child = true` : `notify_parent_of_exit` exige ce
+            // drapeau, la sortie du fils ne le reveillerait plus. Un drapeau
+            // perime sur une tache `Ready` est sans effet (il faut encore
+            // `Blocked -> Ready`). (`futex_key` n'est plus jamais pose.)
             task.futex_key.range(0);
-            task.waiting_for_child.range(false);
             publish_ready(index);
         }
     }

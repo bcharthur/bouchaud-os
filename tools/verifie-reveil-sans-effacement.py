@@ -22,8 +22,10 @@ une attente bornee devenait infinie).
 
 # La regle
 
-Dans ces trois reveilleurs, AUCUNE ecriture de `wait_queue_key` ni de
-`wake_deadline_ns` sur la tache reveillee. Chaque attente efface ses propres
+Dans ces trois reveilleurs, AUCUNE ecriture de `wait_queue_key`, de
+`wake_deadline_ns` ni de `waiting_for_child` sur la tache reveillee.
+(`waiting_for_child` : meme motif dans `wake_for_signal` -- un parent revenu
+dans `wait4` et reparque perdait le drapeau que la sortie du fils exige.) Chaque attente efface ses propres
 champs en reprenant la main ; une cle perimee sur une tache `Ready` est sans
 effet, puisque tout reveil exige `Blocked -> Ready`.
 
@@ -42,7 +44,9 @@ CIBLES = [
     ("src/kernel/process/thread/blocage.rs", "pub fn wake_for_signal("),
     ("src/kernel/process/thread/sommeil.rs", "fn wake_sleepers("),
 ]
-INTERDIT = re.compile(r"\b(?!current\(\))\w+\s*\.\s*(wait_queue_key|wake_deadline_ns)\s*\.\s*range\s*\(")
+INTERDIT = re.compile(
+    r"\b(?!current\(\))\w+\s*\.\s*(wait_queue_key|wake_deadline_ns|waiting_for_child)\s*\.\s*range\s*\("
+)
 
 
 def sans_commentaires(texte: str) -> str:
@@ -97,6 +101,13 @@ def test_negatif() -> bool:
         texte = texte.replace("        publish_ready(index);\n        woke += 1;",
                               "        tache.wait_queue_key.range(0);\n        publish_ready(index);\n        woke += 1;", 1)
         cible.write_text(texte, encoding="utf-8")
+        if not verifie(copie):
+            return False
+        # Second negatif : l'effacement du drapeau d'attente de fils.
+        texte = texte.replace("        tache.wait_queue_key.range(0);\n", "", 1)
+        texte = texte.replace("            task.futex_key.range(0);\n",
+                              "            task.futex_key.range(0);\n            task.waiting_for_child.range(false);\n", 1)
+        cible.write_text(texte, encoding="utf-8")
         return bool(verifie(copie))
 
 
@@ -109,7 +120,7 @@ def main() -> int:
     if not test_negatif():
         print("reveil sans effacement : le test negatif ne rougit pas -- garde inoperant")
         return 1
-    print("REVEIL_SANS_EFFACEMENT_OK cibles=3 negatif=1")
+    print("REVEIL_SANS_EFFACEMENT_OK cibles=3 negatifs=2")
     return 0
 
 
