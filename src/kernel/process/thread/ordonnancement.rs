@@ -270,8 +270,8 @@ fn debug_assert_interrupts_enabled() {
 pub fn wait_for_interrupt_releasing_bkl() {
     debug_assert_interrupts_enabled();
     let profondeur_entree = smp_lock::profondeur_locale();
-    // BOUCHAUD_COMPTA_IDLE_V1 : replier AVANT le hlt, gros verrou encore tenu
-    // -- `tasks()` l'exige.
+    // BOUCHAUD_COMPTA_IDLE_V1 : replier AVANT le hlt. (`tasks()` passe par
+    // la lecture du registre, pas par le gros verrou.)
     let rearmer = suspend_compta_pour_idle();
     // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
     cpu::prepare_scheduler_idle();

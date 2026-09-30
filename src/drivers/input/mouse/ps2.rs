@@ -23,7 +23,14 @@ unsafe fn set_sample_rate(rate: u8) {
 }
 
 /// Active la souris et l'IRQ12.
+// BOUCHAUD_SOURIS_ARMEMENT_V1 : l'armement parle au controleur PS/2 par une
+// suite de commandes sur les ports 0x60/0x64. Deux armements entrelaces (le
+// bureau, un `open` de /dev/input/event1) brouillaient le controleur ; le gros
+// verrou de `openat` les separait, ce verrou-ci le fait desormais.
+static ARMEMENT: crate::kernel::sync::SleepMutex<()> = crate::kernel::sync::SleepMutex::new(());
+
 pub fn init() {
+    let _armement = ARMEMENT.lock();
     interrupts::without_interrupts(|| unsafe {
         ctl(0xAE);
         ctl(0xA8);

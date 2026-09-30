@@ -924,37 +924,95 @@ pub fn sys_sendfile(out_fd: i32, in_fd: i32, offset_ptr: u64, count: usize) -> i
 }
 
 /// `pread64`.
+// BOUCHAUD_PREAD_POSITIONNE_V1
+//
+// `pread`/`pwrite` deplacaient TEMPORAIREMENT le decalage partage du
+// descripteur : sauver, poser, `read`/`write`, restaurer. C'est faux des qu'un
+// second fil touche le meme descripteur -- un `read` concurrent (hors gros
+// verrou depuis c1) lisait au decalage emprunte, deux `pread` paralleles
+// s'ecrasaient mutuellement. POSIX : `pread`/`pwrite` ne modifient PAS le
+// decalage du fichier. Ils lisent/ecrivent donc ici a la position demandee,
+// sans jamais y toucher. Tube et socket : ESPIPE.
 pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
+    if offset < 0 {
+        return -errno::EINVAL;
+    }
+    let offset = offset as usize;
     let process = task::current_process();
-    let saved = match process.files.lock().get(fd) {
-        Some(desc) => desc.offset,
+    let kind = match process.files.lock().get(fd) {
+        Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
-    if let Some(desc) = process.files.lock().get_mut(fd) {
-        desc.offset = offset.max(0) as usize;
+    match kind {
+        FdKind::File(node) => {
+            let total = backing::logical_len(node);
+            if offset >= total || count == 0 {
+                return 0;
+            }
+            let wanted = core::cmp::min(count, total - offset);
+            let mut data = alloc::vec![0u8; wanted];
+            let got = backing::read_at(node, offset, &mut data);
+            data.truncate(got);
+            if !user_write(buffer, &data) {
+                return -errno::EFAULT;
+            }
+            got as i64
+        }
+        FdKind::Instantane(ref contenu) => {
+            if offset >= contenu.len() {
+                return 0;
+            }
+            let fin = core::cmp::min(contenu.len(), offset + count);
+            if !user_write(buffer, &contenu[offset..fin]) {
+                return -errno::EFAULT;
+            }
+            (fin - offset) as i64
+        }
+        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Pipe(..) | FdKind::Socket(_) | FdKind::SocketPair(..) => -errno::ESPIPE,
+        // Peripheriques sans position (null, zero, random...) : le decalage
+        // n'a pas de sens, la lecture est la lecture ordinaire.
+        _ => sys_read(fd, buffer, count),
     }
-    let result = sys_read(fd, buffer, count);
-    if let Some(desc) = process.files.lock().get_mut(fd) {
-        desc.offset = saved;
-    }
-    result
 }
 
-/// `pwrite64`.
 pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
+    if offset < 0 {
+        return -errno::EINVAL;
+    }
+    let offset = offset as usize;
     let process = task::current_process();
-    let saved = match process.files.lock().get(fd) {
-        Some(desc) => desc.offset,
+    let kind = match process.files.lock().get(fd) {
+        Some(desc) => desc.kind.clone(),
         None => return -errno::EBADF,
     };
-    if let Some(desc) = process.files.lock().get_mut(fd) {
-        desc.offset = offset.max(0) as usize;
+    match kind {
+        FdKind::File(node) => {
+            if backing::is_disk_backed(node) {
+                return -errno::EROFS;
+            }
+            let data = match user_read(buffer, count) {
+                Some(data) => data,
+                None => return -errno::EFAULT,
+            };
+            // Meme discipline que `write` : la table des descripteurs est deja
+            // rendue ; tout se fait sous une seule prise de `fs()`.
+            let mut fs = ramfs::fs();
+            let content = &mut fs.nodes[node].content;
+            if offset + data.len() > ramfs::MAX_FILE_SIZE {
+                return -errno::EFBIG;
+            }
+            let end = offset + data.len();
+            if content.len() < end {
+                content.resize(end, 0);
+            }
+            content[offset..end].copy_from_slice(&data);
+            data.len() as i64
+        }
+        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Pipe(..) | FdKind::Socket(_) | FdKind::SocketPair(..) => -errno::ESPIPE,
+        _ => sys_write(fd, buffer, count),
     }
-    let result = sys_write(fd, buffer, count);
-    if let Some(desc) = process.files.lock().get_mut(fd) {
-        desc.offset = saved;
-    }
-    result
 }
 
 // --- Ouverture / fermeture ---------------------------------------------------
@@ -1042,11 +1100,10 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         // `enter()` ici reinitialiserait BGA et le double-tampon du bureau au
         // beau milieu d'une session — c'est-a-dire ferait clignoter l'ecran
         // chaque fois qu'une application s'ouvre.
-        if matches!(kind, FdKind::Framebuffer)
-            && ecran_virtuel().is_none()
-            && !crate::drivers::gfx::is_active()
-        {
-            crate::drivers::gfx::enter();
+        // Test et bascule sous le verrou propre de l'affichage
+        // (BOUCHAUD_AFFICHAGE_BASCULE_V1) : plus de gros verrou ici.
+        if matches!(kind, FdKind::Framebuffer) && ecran_virtuel().is_none() {
+            crate::drivers::gfx::entre_si_inactif();
         }
         // Un client du gestionnaire de fenetres ne lit pas les entrees : c'est
         // le bureau qui possede le clavier et la souris, et qui lui transmet ce
@@ -1065,6 +1122,9 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         // Sans cela, /dev/input/event1 resterait muet. On prend ensuite un
         // instantane de son etat pour que la premiere lecture parte de zero.
         if matches!(kind, FdKind::InputMouse) {
+            // Armement sous le verrou propre du pilote
+            // (BOUCHAUD_SOURIS_ARMEMENT_V1) ; `sync_mouse` ecrit sous
+            // ETAT_SOURIS.
             crate::drivers::mouse::init();
             input::sync_mouse();
         }
@@ -1093,6 +1153,16 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                 Some(value) => value,
                 None => return -errno::ENOENT,
             };
+            // BOUCHAUD_VFS_UNE_SEULE_PRISE_V1 : un autre `open(O_CREAT)` a pu
+            // creer le nom depuis la resolution ci-dessus, faite sous une autre
+            // prise. On le revoit ICI, sous la prise qui cree : sans cela le
+            // second ouvreur recevait EEXIST au lieu du fichier.
+            if let Some(deja) = fs.find_child(parent, name) {
+                if flags & O_EXCL != 0 {
+                    return -errno::EEXIST;
+                }
+                deja
+            } else {
             match fs.touch_at(parent, name) {
                 Ok(node) => {
                     // SECURITY_OWNER_OPEN
@@ -1104,6 +1174,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
                     node
                 }
                 Err(raison) => return -errno_creation(raison),
+            }
             }
         }
     };
@@ -1871,16 +1942,17 @@ pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
     ) {
         return code;
     }
-    let resolved = {
-        let fs = ramfs::fs();
-        fs.resolve(&path, 0)
-    };
-    match resolved {
+    // BOUCHAUD_VFS_UNE_SEULE_PRISE_V1 : resoudre et retirer sous la MEME
+    // prise de `fs()`. En deux prises, un `unlink` + une creation concurrents
+    // pouvaient recycler l'index entre les deux, et l'on retirait un autre
+    // fichier. Le gros verrou de l'aiguilleur masquait cette fenetre.
+    // `is_disk_backed` prend EXTENTS sous FS : EXTENTS ne prend jamais FS.
+    let mut fs = ramfs::fs();
+    match fs.resolve(&path, 0) {
         Some(node) if node != 0 => {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            let mut fs = ramfs::fs();
             if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
             }
@@ -1903,14 +1975,17 @@ pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
         Some(path) => absolute(&path),
         None => return -errno::EFAULT,
     };
-    let node = match resolve(&from) {
+    // BOUCHAUD_VFS_UNE_SEULE_PRISE_V1 : la source est resolue sous la meme
+    // prise de `fs()` que la modification (voir `sys_unlinkat`). `cwd` est lu
+    // avant : ordre metadata -> Vfs, celui de `resolve`.
+    let cwd = task::current_process().metadata.lock().cwd;
+    let mut fs = ramfs::fs();
+    let node = match fs.resolve(&from, cwd) {
         Some(node) if node != 0 && backing::is_disk_backed(node) => return -errno::EROFS,
         Some(node) if node != 0 => node,
         Some(_) => return -errno::EBUSY,
         None => return -errno::ENOENT,
     };
-    let cwd = task::current_process().metadata.lock().cwd;
-    let mut fs = ramfs::fs();
     let (parent, name) = match fs.resolve_parent_name(&to, cwd) {
         Some(value) => value,
         None => return -errno::ENOENT,
@@ -2908,7 +2983,13 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         let ticket = crate::kernel::fd::readiness_ticket();
         let mut attente_ns = deadline_ns;
         let mut written = 0usize;
-        for &(fd, wanted, data) in list.lock().iter() {
+        // BOUCHAUD_EPOLL_SANS_VERROU_TENU_V1 : la liste est COPIEE, puis le
+        // verrou rendu, avant d'evaluer. `readable` peut prendre le verrou
+        // d'un objet -- et, pour un socket, se garer -- et `user_write` peut
+        // faire une faute de page : ni l'un ni l'autre sous un SpinLock.
+        // Sous le gros verrou de l'aiguilleur, ce defaut restait masque.
+        let entrees: Vec<(i32, u32, u64)> = list.lock().clone();
+        for &(fd, wanted, data) in entrees.iter() {
             if written >= max {
                 break;
             }

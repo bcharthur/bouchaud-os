@@ -248,10 +248,9 @@ fn writeback_pages(node: usize, pages: &[(u64, u64)]) {
     if crate::fs::backing::is_disk_backed(node) || pages.is_empty() {
         return;
     }
-    // Attribue a `Fs`, et non a `Vm` : ce que le gros verrou protege ici
-    // n'est pas la memoire partagee -- son cache a deja son propre verrou --
-    // mais le RAMFS, dont l'etat reste un `static mut`. Compter cette prise
-    // dans `Vm` designerait le mauvais sous-systeme a migrer.
+    // Le contenu du RAMFS est modifie sous `fs()` (RankedSpinLock) : c'est
+    // ce verrou, et non le gros verrou, qui ordonne cette recopie avec toute
+    // lecture ou ecriture concurrente du fichier.
     let mut fs = crate::fs::ramfs::fs();
     for &(numero, frame) in pages {
         let debut = (numero * PAGE_SIZE) as usize;

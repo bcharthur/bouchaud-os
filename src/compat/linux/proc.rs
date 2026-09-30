@@ -582,44 +582,66 @@ pub fn sys_rt_sigaction(signal: u32, act: u64, oldact: u64) -> i64 {
     let process = task::current_process();
     let index = signal as usize - 1;
 
-    if oldact != 0 {
-        let previous = process.signals.lock().actions[index];
-        if !signal::write_sigaction(oldact, &previous) {
-            return -errno::EFAULT;
-        }
-    }
-    if act != 0 {
-        let action = match signal::read_sigaction(act) {
-            Some(action) => action,
+    // BOUCHAUD_SIGNAUX_UNE_SEULE_PRISE_V1 : l'ancienne action rendue doit etre
+    // celle que la nouvelle REMPLACE. Lecture et remplacement sous une seule
+    // prise de `signals` ; lecture et ecriture utilisateur hors du verrou.
+    let action = if act != 0 {
+        match signal::read_sigaction(act) {
+            Some(action) => Some(action),
             None => return -errno::EFAULT,
-        };
-        process.signals.lock().actions[index] = action;
+        }
+    } else {
+        None
+    };
+    let previous = {
+        let mut signals = process.signals.lock();
+        let previous = signals.actions[index];
+        if let Some(action) = action {
+            signals.actions[index] = action;
+        }
+        previous
+    };
+    if oldact != 0 && !signal::write_sigaction(oldact, &previous) {
+        return -errno::EFAULT;
     }
     0
 }
 
 /// `rt_sigprocmask`.
 pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
+    // BOUCHAUD_SIGNAUX_UNE_SEULE_PRISE_V1 : l'ancien masque etait lu sous une
+    // prise de `signals`, le nouveau ecrit sous une autre, calcule a partir de
+    // la copie perimee. Deux fils du processus bloquant des signaux differents
+    // en meme temps perdaient une des deux mises a jour -- le gros verrou de
+    // l'aiguilleur masquait la fenetre. Lecture utilisateur AVANT, calcul et
+    // ecriture sous UNE prise, ecriture utilisateur APRES (aucune faute de
+    // page sous le verrou).
     let process = task::current_process();
-    let current_mask = process.signals.lock().blocked;
+    let new = if set != 0 {
+        match user_read_u64(set) {
+            Some(value) => Some(value),
+            None => return -errno::EFAULT,
+        }
+    } else {
+        None
+    };
+    let current_mask = {
+        let mut signals = process.signals.lock();
+        let current_mask = signals.blocked;
+        if let Some(new) = new {
+            signals.blocked = match how {
+                signal::SIG_BLOCK => current_mask | new,
+                signal::SIG_UNBLOCK => current_mask & !new,
+                signal::SIG_SETMASK => new,
+                _ => return -errno::EINVAL,
+            };
+            signals.blocked &= !(1 << (signal::SIGKILL - 1));
+            signals.blocked &= !(1 << (signal::SIGSTOP - 1));
+        }
+        current_mask
+    };
     if oldset != 0 && !user_write(oldset, &current_mask.to_le_bytes()) {
         return -errno::EFAULT;
-    }
-    if set != 0 {
-        let new = match user_read_u64(set) {
-            Some(value) => value,
-            None => return -errno::EFAULT,
-        };
-        let mut signals = process.signals.lock();
-        signals.blocked = match how {
-            signal::SIG_BLOCK => current_mask | new,
-            signal::SIG_UNBLOCK => current_mask & !new,
-            signal::SIG_SETMASK => new,
-            _ => return -errno::EINVAL,
-        };
-        // Ces deux-la ne se bloquent pas, quoi qu'on demande.
-        signals.blocked &= !(1 << (signal::SIGKILL - 1));
-        signals.blocked &= !(1 << (signal::SIGSTOP - 1));
     }
     0
 }

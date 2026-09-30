@@ -558,10 +558,33 @@ pub fn resume_from_userland() {
     crate::serial_println!("[gfx] framebuffer repris par le bureau");
 }
 
+// BOUCHAUD_AFFICHAGE_BASCULE_V1
+//
+// La bascule en mode graphique reecrit l'etat global du pilote (BACK, LFB,
+// HD_ACTIVE...). Elle etait serialisee par le gros verrou de l'appel systeme
+// `openat` ; elle l'est desormais par CE verrou, qui ne protege qu'elle. Deux
+// ouvertures simultanees de /dev/fb ne basculent plus deux fois (double
+// allocation du double-tampon, mode BGA reprogramme sous les pieds du premier).
+static BASCULE: crate::kernel::sync::SleepMutex<()> = crate::kernel::sync::SleepMutex::new(());
+
+/// Bascule en mode graphique SI ce n'est pas deja fait, test et bascule sous
+/// le meme verrou.
+pub fn entre_si_inactif() {
+    let _bascule = BASCULE.lock();
+    if !is_active() {
+        enter_verrouille();
+    }
+}
+
 /// Passe en mode graphique HD (1280x720x32) et alloue le double-buffer.
 /// Si la carte BGA est absente, le double-buffer existe quand meme mais
 /// `present()` est sans effet (le shell texte reste accessible via Echap).
 pub fn enter() {
+    let _bascule = BASCULE.lock();
+    enter_verrouille();
+}
+
+fn enter_verrouille() {
     if firmware_backend_installed() {
         let canvas_width = width();
         let canvas_height = height();
