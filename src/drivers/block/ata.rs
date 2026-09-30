@@ -113,13 +113,23 @@ struct Controleur {
     prochain: AtomicU64,
     servi: AtomicU64,
     attente: crate::kernel::sync::WaitQueue,
+    /// Pid du detenteur courant (diagnostic seulement).
+    detenteur_pid: AtomicU64,
+    /// Instant de prise par le detenteur courant (ns).
+    detenteur_depuis: AtomicU64,
 }
 
 static CONTROLLER: Controleur = Controleur {
     prochain: AtomicU64::new(0),
     servi: AtomicU64::new(0),
     attente: crate::kernel::sync::WaitQueue::new(),
+    detenteur_pid: AtomicU64::new(0),
+    detenteur_depuis: AtomicU64::new(0),
 };
+
+/// Au-dela, une attente du controleur est publiee avec son contexte.
+const ATTENTE_LONGUE_NS: u64 = 100_000_000;
+static ATTENTES_LONGUES: AtomicU64 = AtomicU64::new(0);
 
 /// Le controleur est a nous tant que cette garde vit.
 struct GardeControleur;
@@ -182,7 +192,29 @@ fn lock_controller_mesure() -> (GardeControleur, u64) {
             core::hint::spin_loop();
         }
     }
-    let waited = crate::kernel::timer::monotonic_ns().saturating_sub(start);
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let waited = maintenant.saturating_sub(start);
+    let cpu = crate::arch::x86_64::usermode::cpu_index();
+    let pid = crate::kernel::task::pid_pour_sonde(cpu);
+    // Qui attendait qui : une attente longue est publiee avec le detenteur
+    // qu'elle a trouve en arrivant (lu AVANT de prendre la main) et la
+    // profondeur du gros verrou chez l'attendant -- c'est ce qui distingue
+    // une file ordinaire d'une inversion (un detenteur du BKL parque derriere
+    // un detenteur du controleur preempte).
+    let precedent = CONTROLLER.detenteur_pid.swap(pid, Ordering::Relaxed);
+    let precedent_depuis = CONTROLLER.detenteur_depuis.swap(maintenant, Ordering::Relaxed);
+    if waited >= ATTENTE_LONGUE_NS && ATTENTES_LONGUES.fetch_add(1, Ordering::Relaxed) < 64 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ATA_ATTENTE_LONGUE pid={} cpu={} attente_ms={} bkl_profondeur={} dernier_detenteur={} tenu_depuis_ms={} file={}",
+            pid,
+            cpu,
+            waited / 1_000_000,
+            crate::kernel::smp_lock::profondeur_locale(),
+            precedent,
+            maintenant.saturating_sub(precedent_depuis) / 1_000_000,
+            CONTROLLER.prochain.load(Ordering::Relaxed).saturating_sub(mon_tour + 1),
+        ));
+    }
     CONTROLLER_ACQUIRES.fetch_add(1, Ordering::Relaxed);
     CONTROLLER_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
     CONTROLLER_MAX_WAIT_NS.fetch_max(waited, Ordering::Relaxed);
