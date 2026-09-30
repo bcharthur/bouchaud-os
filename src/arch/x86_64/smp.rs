@@ -857,7 +857,37 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
 
 /// Handler minimal appele directement depuis l'IDT, sans BKL.
 pub fn handle_tlb_shootdown() {
-    let cpu = cpu_index();
+    sert_shootdowns(cpu_index());
+    eoi_local();
+}
+
+/// BOUCHAUD_TLB_POINT_DE_SERVICE_V1
+///
+/// Sert, SANS attendre l'IPI, les shootdowns qui visent ce CPU. Appele par
+/// une section qui tourne interruptions masquees assez longtemps pour que
+/// l'emetteur, qui attend l'acquittement, atteigne sa borne fail-closed.
+///
+/// Le cas qui l'impose : le releve complet de l'ordonnanceur s'imprime
+/// depuis l'IRQ du minuteur du BSP. Sa duree est celle du port serie --
+/// 87 us par octet sur un COM1 reel a 115200 bauds, un releve de 23 Ko
+/// passe donc les deux secondes -- et pendant ce temps le coeur 0 n'acquitte
+/// rien. Observe en endurance SMP4 : `[TLB-SHOOTDOWN-ECHEC] manquants=0x1`
+/// sur trois emetteurs, coeur 0 dans `uart16550::write_lot`, arret.
+///
+/// Sur : le traitement est celui du gestionnaire, sans verrou, idempotent
+/// (un creneau deja acquitte est saute) ; l'IPI qui arrivera au retour
+/// d'interruption ne trouvera rien et ne coutera qu'un EOI. Pas d'EOI ici :
+/// aucun IPI n'est en service. Cout nul hors shootdown : un balayage des
+/// creneaux, sans `cpu_index()` si aucun n'est publie (utilisable avant la
+/// mise en place du GS).
+pub fn sert_shootdowns_en_attente() {
+    if !TLB_SLOTS.iter().any(|slot| slot.sequence.load(Ordering::Acquire) != 0) {
+        return;
+    }
+    sert_shootdowns(cpu_index());
+}
+
+fn sert_shootdowns(cpu: usize) {
     let bit = if cpu < 64 { 1u64 << cpu } else { 0 };
 
     if bit != 0 {
@@ -885,7 +915,6 @@ pub fn handle_tlb_shootdown() {
             slot.acknowledgements.fetch_or(bit, Ordering::AcqRel);
         }
     }
-    eoi_local();
 }
 
 /// L'etat du creneau de shootdown d'un CPU : (sequence, cibles, acquittements).

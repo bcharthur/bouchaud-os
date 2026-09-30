@@ -204,8 +204,17 @@ fn write_lot(octets: &[u8]) {
         return;
     }
 
+    // BOUCHAUD_TLB_POINT_DE_SERVICE_V1 -- interruptions masquees (releve de
+    // l'IRQ du minuteur, panique), chaque octet coute le temps du port et
+    // aucun IPI n'est pris : le coeur sert lui-meme, a chaque lot, les
+    // shootdowns qui l'attendent. Sinon l'emetteur atteint sa borne de deux
+    // secondes et arrete la machine pour une ligne de diagnostic.
+    let masquees = !x86_64::instructions::interrupts::are_enabled();
     let mut pose = 0usize;
     while pose < octets.len() {
+        if masquees {
+            crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+        }
         attends_place();
         let fin = (pose + PROFONDEUR_FIFO).min(octets.len());
         while pose < fin {
