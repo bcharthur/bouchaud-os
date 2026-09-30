@@ -491,6 +491,178 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::SCHED_GETSCHEDULER, "constante : 0, une seule politique"),
     (nr::SIGALTSTACK, "constante : 0, pas de pile de signal alternative"),
     (nr::UMASK, "constante : 0o022, le RAMFS n'a pas de masque de creation"),
+    // B1 -- RETRAIT COMPLET DU GROS VERROU, LOT 1 : les appels simples.
+    //
+    // Audit. Aucun de ces appels ne parcourt la table des taches, ni le VFS,
+    // ni la pile reseau. Ce qu'ils touchent a chacun son propre verrou :
+    //  * `uname` : tampon sur pile, chaines constantes (`crate::VERSION`),
+    //    `user_write` -> verrou `mm` du processus courant ;
+    //  * `sysinfo` : `vmm::frame_stats` prend `FRAMES` (SpinLockIrq), l'uptime
+    //    derive du compteur atomique de ticks, puis `user_write` ;
+    //  * `getrlimit`/`setrlimit`/`prlimit64` : `limite_as` vit sous le verrou
+    //    `mm` du processus ; les autres limites sont des constantes ; la
+    //    lecture de l'ancienne valeur precede l'ecriture de la nouvelle SOUS
+    //    deux prises distinctes -- comme avant sous BKL, puisque `mm.lock()`
+    //    etait deja pris separement pour chacune.
+    (nr::SCHED_GET_PRIORITY_MAX, "constante : 0, une seule classe de priorite"),
+    (nr::SCHED_GET_PRIORITY_MIN, "constante : 0, une seule classe de priorite"),
+    (nr::UNAME, "B1 -- tampon sur pile + chaines constantes + verrou mm"),
+    (nr::SYSINFO, "B1 -- FRAMES (SpinLockIrq) + ticks atomiques + verrou mm"),
+    (nr::GETRLIMIT, "B1 -- limite_as sous verrou mm ; autres limites constantes"),
+    (nr::SETRLIMIT, "B1 -- limite_as sous verrou mm"),
+    (nr::PRLIMIT64, "B1 -- limite_as sous verrou mm ; autres limites constantes"),
+    // B2 -- `fcntl`, premier consommateur mesure du gros verrou.
+    //
+    // Mesure (endurance SMP4, [BKL-INVENTAIRE]) : fcntl=54910 acquisitions,
+    // 860 ms tenu, 617 ms d'attente -- plus que tous les autres appels
+    // reunis. `F_SETLKW` dort un tick par essai, et chaque reveil reprenait
+    // le gros verrou pour retenter la pose.
+    //
+    // Audit. Chaque partie a son domaine :
+    //  * `F_DUPFD`/`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL` : table des
+    //    descripteurs seule (`files.lock()`), lecture et ecriture sous la
+    //    MEME prise ;
+    //  * `F_GETLK`/`F_SETLK`/`F_SETLKW` : `user_read`/`user_write` (verrou
+    //    mm) ; table des descripteurs puis `backing::logical_len` (EXTENTS,
+    //    puis FS en RankedSpinLock) -- ordre FdTable -> Vfs, celui deja
+    //    documente par `openat` ; les verrous d'enregistrement vivent dans
+    //    `VERROUS`, RankedSpinLock de classe PosixRecord, dont `pose` fait
+    //    le test ET l'insertion sous une seule prise (plus de course
+    //    check-then-insert) ; l'attente est `sleep_ticks`, qui ne suppose
+    //    plus le gros verrou.
+    (nr::FCNTL, "B2 -- descripteurs + VERROUS (PosixRecord) + FS/EXTENTS + mm ; attente sans BKL"),
+    // B3 -- persistance et memoire composee.
+    //
+    // Mesure (endurance SMP4) : fsync=348 acquisitions, 199-466 ms tenus.
+    //
+    // Audit.
+    //  * `fsync`/`fdatasync` : table des descripteurs, puis `sous_racine`
+    //    (FS) ; `sync` et les deux precedents appellent
+    //    `persistance::synchronise`, serialise par `TRANSACTION`
+    //    (SleepMutex) : l'instantane lit l'arbre sous `fs()`, et l'ecriture
+    //    disque tournait DEJA gros verrou rendu (`suspend_for_schedule`), sous
+    //    `TRANSACTION` seul et le verrou du controleur ATA ;
+    //  * `msync` : `mm` du processus, puis `shared::writeback` -- CACHE
+    //    (SpinLock) et le RAMFS sous `fs()` ; le commentaire qui y parle d'un
+    //    RAMFS en `static mut` date d'avant son RankedSpinLock ;
+    //  * `mremap` : composition de `mmap`, `munmap`, `user_read`,
+    //    `user_write`, tous deja hors gros verrou -- son atomicite vis-a-vis
+    //    d'un `munmap` concurrent n'etait donc deja plus garantie par lui.
+    (nr::FSYNC, "B3 -- descripteurs + FS + TRANSACTION ; l'ecriture tournait deja sans BKL"),
+    (nr::FDATASYNC, "B3 -- meme chemin que fsync"),
+    (nr::SYNC, "B3 -- TRANSACTION (SleepMutex) + FS"),
+    (nr::MSYNC, "B3 -- mm + CACHE partage + FS"),
+    (nr::MREMAP, "B3 -- composition de mmap/munmap/user_read/user_write, deja hors BKL"),
+    (nr::FCHMOD, "constante : 0, pas de modes de fichier honores"),
+    (nr::FCHOWN, "constante : 0, pas de proprietaires honores"),
+    (nr::CHMOD, "constante : 0, pas de modes de fichier honores"),
+    (nr::CHOWN, "constante : 0, pas de proprietaires honores"),
+    // B4 -- readiness : le domaine de `poll`, deja sorti.
+    //
+    // Audit. `epoll_create` : table des descripteurs seule. `select` /
+    // `pselect6` et `epoll_wait` / `epoll_pwait` : `user_read`/`user_write`
+    // (mm), `readable`/`writable` (verrou de chaque objet ; pour un socket, le
+    // gros verrou est repris LOCALEMENT, comme sous `poll`), ticket et attente
+    // de readiness (`fd::readiness_ticket` / `wait_readiness`, deja utilises
+    // par `poll` hors gros verrou).
+    //
+    // Correction prealable (BOUCHAUD_EPOLL_SANS_VERROU_TENU_V1) :
+    // `epoll_wait` evaluait `readable` et `user_write` EN TENANT le SpinLock de
+    // la liste epoll. Sous le gros verrou de l'aiguilleur, la reprise locale du
+    // gros verrou par un socket etait une reentrance sans effet ; hors gros
+    // verrou, c'eut ete se garer SOUS un SpinLock. La liste est desormais
+    // copiee, le verrou rendu, puis evaluee.
+    (nr::EPOLL_CREATE, "B4 -- table des descripteurs seule"),
+    (nr::EPOLL_CREATE1, "B4 -- table des descripteurs seule"),
+    (nr::EPOLL_WAIT, "B4 -- liste copiee sous son verrou ; readiness comme poll ; mm"),
+    (nr::EPOLL_PWAIT, "B4 -- meme chemin qu'epoll_wait"),
+    (nr::SELECT, "B4 -- readiness comme poll ; mm"),
+    (nr::PSELECT6, "B4 -- meme chemin que select"),
+    // B5 -- le systeme de fichiers.
+    //
+    // Mesure (endurance SMP4, [BKL-INVENTAIRE]) : open=157 acquisitions ;
+    // unlink, stat, ftruncate : quelques unites. Faible cout, mais c'est la
+    // famille qui portait le plus de courses MASQUEES par le gros verrou.
+    //
+    // Audit. Le RAMFS vit sous `fs()` (RankedSpinLock, classe Vfs) ; les
+    // etendues disque sous EXTENTS (SpinLock, pris sous FS, jamais l'inverse) ;
+    // cwd et ecran sous `metadata` (pris AVANT FS, ordre de `resolve`) ; la
+    // table des descripteurs sous `files` (jamais tenue en prenant FS pour une
+    // modification) ; la politique de securite sous CONTEXTS (SpinLock) ; la
+    // memoire utilisateur sous `mm`.
+    //
+    // Corrections prealables, toutes des courses que le gros verrou masquait
+    // (BOUCHAUD_VFS_UNE_SEULE_PRISE_V1, BOUCHAUD_PREAD_POSITIONNE_V1) :
+    //  * `unlinkat` resolvait sous une prise de FS et retirait sous une autre :
+    //    un index recycle entre les deux faisait retirer un autre fichier ;
+    //  * `rename` : meme defaut entre la resolution de la source et le
+    //    deplacement ;
+    //  * `open(O_CREAT)` concurrent sur un meme nom : le second recevait
+    //    EEXIST ; le nom est revu sous la prise qui cree ;
+    //  * `pread`/`pwrite` deplacaient le decalage PARTAGE du descripteur le
+    //    temps de l'appel ; ils lisent/ecrivent desormais a la position
+    //    demandee sans y toucher (POSIX), ESPIPE sur tube et socket.
+    // Les effets de bord a l'ouverture d'un peripherique ont recu leur propre
+    // verrou plutot qu'un gros verrou local (le budget « sites BKL / Pilote =
+    // 0 » l'interdit, a raison) : bascule de l'affichage sous BASCULE (test et
+    // bascule sous la meme prise), armement PS/2 sous ARMEMENT. `ioctl` reste
+    // sous gros verrou : chantier des pilotes.
+    (nr::OPEN, "B5 -- VFS : FS + descripteurs + metadata ; creation revue sous la prise qui cree"),
+    (nr::OPENAT, "B5 -- meme chemin qu'open ; affichage sous BASCULE, souris sous ARMEMENT"),
+    (nr::ACCESS, "B5 -- resolution sous FS"),
+    (nr::FACCESSAT, "B5 -- resolution sous FS"),
+    (nr::STAT, "B5 -- resolution sous FS + mm"),
+    (nr::LSTAT, "B5 -- resolution sous FS + mm"),
+    (nr::NEWFSTATAT, "B5 -- fstat ou stat, deja audites + mm"),
+    (nr::STATX, "B5 -- descripteurs + FS + EXTENTS + mm"),
+    (nr::READLINK, "B5 -- metadata du processus + mm"),
+    (nr::READLINKAT, "B5 -- metadata du processus + mm"),
+    (nr::GETDENTS64, "B5 -- descripteurs + FS ; copie sous FS, ecriture utilisateur apres"),
+    (nr::GETCWD, "B5 -- metadata + FS + mm"),
+    (nr::CHDIR, "B5 -- metadata + FS"),
+    (nr::MKDIR, "B5 -- une seule prise de FS"),
+    (nr::MKDIRAT, "B5 -- une seule prise de FS"),
+    (nr::UNLINK, "B5 -- resolution ET retrait sous une seule prise de FS"),
+    (nr::UNLINKAT, "B5 -- resolution ET retrait sous une seule prise de FS"),
+    (nr::RENAME, "B5 -- source, cible et deplacement sous une seule prise de FS"),
+    (nr::STATFS, "B5 -- resolution sous FS + mm"),
+    (nr::FSTATFS, "B5 -- descripteurs + mm"),
+    (nr::FTRUNCATE, "B5 -- descripteurs + EXTENTS + FS"),
+    (nr::PREAD64, "B5 -- lecture positionnee, sans toucher au decalage partage"),
+    (nr::PWRITE64, "B5 -- ecriture positionnee sous une seule prise de FS"),
+    (nr::SENDFILE, "B5 -- descripteurs + backing + chemin d'ecriture deja audite"),
+    (nr::MEMFD_CREATE, "B5 -- FS + descripteurs + mm"),
+    // B6 -- les signaux.
+    //
+    // Mesure (endurance SMP4) : rt_sigprocmask=304 acquisitions, 52 ms tenus,
+    // 133 ms d'ATTENTE -- l'appel le plus attendu apres fcntl et exit_group.
+    //
+    // Audit. L'etat de signaux vit dans `process.signals` (verrou propre) ;
+    // les alarmes dans ALARMES (SpinLock) ; la recherche d'un processus dans
+    // PROCESSES (SpinLock), d'une tache dans le registre en lecture ; le
+    // reveil d'une tache endormie est le CAS Blocked -> Ready de
+    // `wake_for_signal` (BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1) ; l'attente de
+    // `sigsuspend`/`pause` est `wait_for_interrupt_releasing_bkl`, dont la
+    // comptabilite lit le registre et non le gros verrou (commentaire corrige).
+    //
+    // Corrections prealables (BOUCHAUD_SIGNAUX_UNE_SEULE_PRISE_V1) :
+    // `rt_sigprocmask` lisait le masque sous une prise et l'ecrivait sous une
+    // autre, calcule sur la copie perimee (mise a jour perdue entre deux fils) ;
+    // `rt_sigaction` rendait comme « ancienne » une action lue sous une autre
+    // prise que le remplacement. Les deux calculent et ecrivent desormais sous
+    // une seule prise, la memoire utilisateur etant lue avant et ecrite apres.
+    (nr::RT_SIGACTION, "B6 -- signals du processus, lecture/remplacement sous une prise ; mm hors verrou"),
+    (nr::RT_SIGPROCMASK, "B6 -- masque calcule et ecrit sous une seule prise de signals ; mm hors verrou"),
+    (nr::RT_SIGPENDING, "B6 -- signals + mm"),
+    (nr::RT_SIGRETURN, "B6 -- trame restauree depuis la pile utilisateur (mm) + signals"),
+    (nr::RT_SIGSUSPEND, "B6 -- signals + attente d'interruption (registre en lecture, pas de BKL)"),
+    (nr::PAUSE, "B6 -- meme chemin que sigsuspend"),
+    (nr::KILL, "B6 -- PROCESSES (SpinLock) + signals + reveil par CAS Blocked->Ready"),
+    (nr::TKILL, "B6 -- registre des taches en lecture + meme chemin que kill"),
+    (nr::TGKILL, "B6 -- meme chemin que kill"),
+    (nr::ALARM, "B6 -- ALARMES (SpinLock) + ticks atomiques"),
+    (nr::GETITIMER, "B6 -- ALARMES + mm"),
+    (nr::SETITIMER, "B6 -- ALARMES + mm"),
 ];
 
 /// Ce que cet appel systeme exige du gros verrou.
