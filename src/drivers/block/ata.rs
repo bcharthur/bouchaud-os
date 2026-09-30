@@ -79,6 +79,8 @@ impl Drive {
 /// Nombre de secteurs de chaque disque, 0 s'il est absent.
 static mut SECTORS: [u64; 2] = [0, 0];
 static mut PROBED: bool = false;
+/// Miroir atomique de `PROBED`, lisible sans verrou. Voir [`probe`].
+static PROBED_ATOMIQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static CONTROLLER: crate::kernel::sync::SpinLock<()> = crate::kernel::sync::SpinLock::new(());
 static CONTROLLER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
@@ -318,6 +320,21 @@ fn identify(drive: Drive) -> u64 {
 
 /// Detecte les disques presents. Idempotent.
 pub fn probe() {
+    // BOUCHAUD_ATA_SONDE_SANS_VERROU_V1
+    //
+    // `probe()` ouvre CHAQUE lecture et CHAQUE ecriture. Il prenait le verrou
+    // du controleur rien que pour lire `PROBED` : chaque E/S faisait donc la
+    // queue DEUX fois derriere le transfert en cours -- et un `SpinLock` rend
+    // le coeur non preemptible des l'attente. Mesure (endurance SMP4, quatre
+    // lecteurs disque-probe) : 26,5 s d'attente hors du verrou de transfert,
+    // contre 9,6 s de transfert effectif.
+    //
+    // Le drapeau atomique est lu SANS verrou ; il n'est pose (Release)
+    // qu'apres l'ecriture de `SECTORS`, et relu sous le verrou pour que deux
+    // premiers appels concurrents ne sondent pas deux fois.
+    if PROBED_ATOMIQUE.load(Ordering::Acquire) {
+        return;
+    }
     let _controller = lock_controller();
     if unsafe { PROBED } {
         return;
@@ -327,6 +344,7 @@ pub fn probe() {
         SECTORS[1] = identify(Drive::Slave);
         PROBED = true;
     }
+    PROBED_ATOMIQUE.store(true, Ordering::Release);
     drop(_controller);
     let (master, slave) = capacities();
     crate::kernel::dmesg::log_fmt(format_args!(
