@@ -440,3 +440,93 @@ fn la_longueur_reste_exacte_apres_un_cycle_complet() {
         assert_eq!(file.defile(), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 9 : le tourniquet tourne AUSSI a l'interieur d'un mot.
+// ---------------------------------------------------------------------------
+
+/// Une tache qui se remet prete aussitot servie n'affame pas ses voisines de
+/// mot.
+///
+/// # La famine que ce test a trouvee
+///
+/// Le curseur n'avancait que de mot en mot, et dans un mot le service prenait
+/// toujours le plus petit bit. Tant qu'il y a moins de 64 taches -- le cas de
+/// toute la machine --, tout vit dans le mot 0 : le « tourniquet » devenait
+/// une priorite stricte par numero d'emplacement. Le banc d'endurance l'a
+/// mesure sur SMP1 : quatre enfants de `disque-probe`, forkes a 24,3 s, n'ont
+/// recu leur premier quantum qu'a la sortie de leur aine, un par un -- 26,5 s
+/// d'attente prete pour le dernier (`[SCHED-NG-PIRE]`).
+#[test]
+fn une_tache_qui_revient_sans_cesse_n_affame_pas_son_mot() {
+    let file = FileCpu::neuve();
+    let gourmande = 3usize;
+    let voisines = [7usize, 12, 40, 63];
+    file.enfile(gourmande, Bande::Normale);
+    for &v in &voisines {
+        file.enfile(v, Bande::Normale);
+    }
+    let pretes = 1 + voisines.len();
+
+    // La gourmande se remet en file a chaque fois qu'elle est servie ; les
+    // voisines, une fois servies, s'endorment. Chacune doit passer en au plus
+    // `pretes` elections : c'est la borne d'un tourniquet.
+    let mut servies = HashSet::new();
+    for election in 1..=pretes * 2 {
+        let e = file.defile().expect("la file n'est jamais vide ici");
+        if e == gourmande {
+            file.enfile(gourmande, Bande::Normale);
+        } else {
+            assert!(servies.insert(e), "voisine {e} servie deux fois");
+        }
+        if servies.len() == voisines.len() {
+            assert!(
+                election <= pretes,
+                "les voisines ont attendu {election} elections pour {pretes} taches pretes"
+            );
+            return;
+        }
+    }
+    panic!(
+        "voisines jamais servies : {:?} -- la gourmande (emplacement {gourmande}) monopolise le mot",
+        voisines.iter().filter(|v| !servies.contains(v)).collect::<Vec<_>>()
+    );
+}
+
+/// Le meme tourniquet, a l'interieur d'un mot, pour le VOL (par le haut).
+#[test]
+fn le_vol_tourne_aussi_a_l_interieur_d_un_mot() {
+    let file = FileCpu::neuve();
+    let gourmande = 60usize;
+    let voisines = [2usize, 17, 33];
+    file.enfile(gourmande, Bande::Normale);
+    for &v in &voisines {
+        file.enfile(v, Bande::Normale);
+    }
+    let mut servies = HashSet::new();
+    for _ in 0..(1 + voisines.len()) {
+        let e = file.vole().expect("file non vide");
+        if e == gourmande {
+            file.enfile(gourmande, Bande::Normale);
+        } else {
+            servies.insert(e);
+        }
+    }
+    assert_eq!(servies.len(), voisines.len(), "vol monopolise par l'emplacement {gourmande}");
+}
+
+/// Le tourniquet traverse la frontiere de mot et revient au debut.
+#[test]
+fn le_tourniquet_revient_au_debut_apres_le_dernier_emplacement() {
+    let file = FileCpu::neuve();
+    for e in [5usize, 70, EMPLACEMENTS - 1] {
+        file.enfile(e, Bande::Normale);
+    }
+    let mut ordre = Vec::new();
+    for _ in 0..6 {
+        let e = file.defile().unwrap();
+        ordre.push(e);
+        file.enfile(e, Bande::Normale);
+    }
+    assert_eq!(ordre, vec![5, 70, EMPLACEMENTS - 1, 5, 70, EMPLACEMENTS - 1]);
+}

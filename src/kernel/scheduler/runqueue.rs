@@ -147,15 +147,23 @@ pub struct BandeFile {
     /// autorite -- voir l'en-tete du module.
     resume: AtomicU64,
     longueur: AtomicUsize,
-    /// Mot par lequel commencer la prochaine ELECTION, et par lequel commencer
-    /// le prochain VOL. Deux curseurs, parce que les deux services partent de
-    /// bouts opposes : un curseur commun ferait deplacer l'election par un vol
-    /// venu d'un autre coeur.
+    /// EMPLACEMENT par lequel commencer la prochaine ELECTION, et par lequel
+    /// commencer le prochain VOL. Deux curseurs, parce que les deux services
+    /// partent de bouts opposes : un curseur commun ferait deplacer l'election
+    /// par un vol venu d'un autre coeur.
     ///
-    /// Le curseur AVANCE apres chaque service. Sans cela, un mot du bitmap qui
-    /// ne se vide jamais -- une tache qui se remet prete aussitot servie --
-    /// retiendrait le service et affamerait tous les mots suivants. Avec, le
-    /// balayage repasse par tous les mots en au plus `MOTS` services.
+    /// Le curseur AVANCE apres chaque service, jusqu'a l'emplacement qui suit
+    /// celui qu'on vient de servir. Sans cela, une tache qui se remet prete
+    /// aussitot servie retiendrait le service et affamerait tout ce qui la
+    /// suit. Avec, une tache prete est servie en au plus autant d'elections
+    /// qu'il y a de taches pretes dans sa bande.
+    ///
+    /// BOUCHAUD_TOURNIQUET_AU_BIT_V1 : le curseur designait un MOT, et dans un
+    /// mot le service prenait toujours le plus petit bit. Moins de 64 taches
+    /// -- toute la machine -- vivent dans le mot 0 : le tourniquet etait une
+    /// priorite stricte par numero d'emplacement. Mesure (endurance SMP1) :
+    /// quatre enfants forkes a 24,3 s servis un par un a la sortie de leur
+    /// aine, 26,5 s d'attente prete pour le dernier.
     curseur_bas: AtomicUsize,
     curseur_haut: AtomicUsize,
 }
@@ -264,39 +272,47 @@ impl BandeFile {
     }
 
     /// Un emplacement pose, s'il y en a un. Resume d'abord, balayage ensuite.
+    ///
+    /// Le parcours est CIRCULAIRE a partir du curseur, au bit pres : la fin du
+    /// mot de depart (bits a partir du curseur), les mots suivants, puis le
+    /// debut du mot de depart. `MOTS + 1` lectures au plus, quel que soit le
+    /// nombre de taches.
     fn candidat(&self, par_le_haut: bool) -> Option<usize> {
         let curseur = if par_le_haut { &self.curseur_haut } else { &self.curseur_bas };
-        let depart = curseur.load(Ordering::Relaxed) % MOTS;
+        let depart = curseur.load(Ordering::Relaxed) % EMPLACEMENTS;
+        let (mot_depart, bit_depart) = (depart / 64, depart % 64);
         let resume = self.resume.load(Ordering::SeqCst);
 
-        if resume != 0 {
-            for pas in 0..MOTS {
-                let mot = mot_visite(depart, pas, par_le_haut);
-                if resume & (1u64 << mot) == 0 {
+        // Premier passage guide par le resume ; second passage integral, qui
+        // rend la correction independante du resume.
+        for guide in [true, false] {
+            if guide && resume == 0 {
+                continue;
+            }
+            for pas in 0..=MOTS {
+                let mot = mot_visite(mot_depart, pas, par_le_haut);
+                if guide && resume & (1u64 << mot) == 0 {
                     continue;
                 }
-                let valeur = self.mots[mot].load(Ordering::Acquire);
+                let mut valeur = self.mots[mot].load(Ordering::Acquire);
+                let devant = bits_devant(bit_depart, par_le_haut);
+                if pas == 0 {
+                    valeur &= devant;
+                } else if pas == MOTS {
+                    valeur &= !devant;
+                }
                 if valeur == 0 {
                     continue;
                 }
-                curseur.store(mot_suivant(mot, par_le_haut), Ordering::Relaxed);
-                return Some(mot * 64 + bit_choisi(valeur, par_le_haut));
+                if !guide {
+                    // Le resume avait tort : le corriger ici evite que le
+                    // balayage devienne le chemin normal.
+                    self.resume.fetch_or(1u64 << mot, Ordering::SeqCst);
+                }
+                let emplacement = mot * 64 + bit_choisi(valeur, par_le_haut);
+                curseur.store(emplacement_suivant(emplacement, par_le_haut), Ordering::Relaxed);
+                return Some(emplacement);
             }
-        }
-
-        // Balayage integral : `MOTS` lectures, independamment du nombre de
-        // taches. C'est ce qui rend la correction independante du resume.
-        for pas in 0..MOTS {
-            let mot = mot_visite(depart, pas, par_le_haut);
-            let valeur = self.mots[mot].load(Ordering::Acquire);
-            if valeur == 0 {
-                continue;
-            }
-            // Le resume avait tort : le corriger ici evite que le balayage
-            // devienne le chemin normal.
-            self.resume.fetch_or(1u64 << mot, Ordering::SeqCst);
-            curseur.store(mot_suivant(mot, par_le_haut), Ordering::Relaxed);
-            return Some(mot * 64 + bit_choisi(valeur, par_le_haut));
         }
         None
     }
@@ -326,15 +342,27 @@ const fn mot_visite(depart: usize, pas: usize, par_le_haut: bool) -> usize {
     }
 }
 
-/// Ou reprendre au prochain service : le mot D'APRES celui qu'on vient de
-/// servir. C'est ce qui empeche un mot qui ne se vide jamais de retenir le
-/// service.
+/// Ou reprendre au prochain service : l'emplacement D'APRES celui qu'on vient
+/// de servir. C'est ce qui empeche une tache qui revient sans cesse de retenir
+/// le service -- y compris a l'interieur de son mot.
 #[inline]
-const fn mot_suivant(mot: usize, par_le_haut: bool) -> usize {
+const fn emplacement_suivant(emplacement: usize, par_le_haut: bool) -> usize {
     if par_le_haut {
-        (mot + MOTS - 1) % MOTS
+        (emplacement + EMPLACEMENTS - 1) % EMPLACEMENTS
     } else {
-        (mot + 1) % MOTS
+        (emplacement + 1) % EMPLACEMENTS
+    }
+}
+
+/// Les bits du mot de depart qui sont DEVANT le curseur, curseur compris :
+/// a partir de lui vers le haut pour l'election, jusqu'a lui vers le bas pour
+/// le vol. Le complement est ce qu'on revisite en fin de tour.
+#[inline]
+const fn bits_devant(bit: usize, par_le_haut: bool) -> u64 {
+    if par_le_haut {
+        if bit == 63 { u64::MAX } else { (1u64 << (bit + 1)) - 1 }
+    } else {
+        u64::MAX << bit
     }
 }
 
