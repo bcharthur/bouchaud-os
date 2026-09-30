@@ -555,8 +555,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 &data,
                 navigation_now,
             );
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
-            let _kernel = crate::kernel::smp_lock::enter();
+            // La console porte son propre verrou (BOUCHAUD_CONSOLE_VERROU_V1),
+            // COM1 son jeton d'emission : le gros verrou ne protegeait plus rien.
             console_write(&data);
             count as i64
         }
@@ -566,10 +566,9 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         // `/proc/self/maps` decrit un etat, il ne le recoit pas.
         FdKind::Instantane(_) => -errno::EBADF,
         FdKind::Audio => {
-            // AC97 still has legacy global driver state. Keep its safety domain
-            // local to this rare branch instead of serialising every write.
-            let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Fd);
-            let _kernel = crate::kernel::smp_lock::enter();
+            // Le pilote AC97 porte son propre verrou (BOUCHAUD_AC97_VERROU_V1) :
+            // chaque appel ci-dessous est atomique, et l'attente de place se
+            // fait sans rien tenir.
             if !crate::drivers::ac97::pret() && !crate::drivers::ac97::init() {
                 return -errno::ENODEV;
             }
@@ -2099,8 +2098,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         Some(v) => v,
                         None => return -errno::EFAULT,
                     };
-                    let (_, voies, bits) = crate::drivers::ac97::format();
-                    let (retenue, _, _) = crate::drivers::ac97::configure(demande, voies, bits);
+                    let (retenue, _, _) = crate::drivers::ac97::configure(Some(demande), None, None);
                     if !user_write(arg, &retenue.to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -2111,9 +2109,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         Some(v) => v,
                         None => return -errno::EFAULT,
                     };
-                    let (frequence, _, bits) = crate::drivers::ac97::format();
                     let (_, retenues, _) =
-                        crate::drivers::ac97::configure(frequence, demande.min(255) as u8, bits);
+                        crate::drivers::ac97::configure(None, Some(demande.min(255) as u8), None);
                     if !user_write(arg, &(retenues as u32).to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -2124,9 +2121,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         Some(v) => v,
                         None => return -errno::EFAULT,
                     };
-                    let (frequence, _, bits) = crate::drivers::ac97::format();
                     let voies = if demande != 0 { 2 } else { 1 };
-                    let (_, retenues, _) = crate::drivers::ac97::configure(frequence, voies, bits);
+                    let (_, retenues, _) = crate::drivers::ac97::configure(None, Some(voies), None);
                     if !user_write(arg, &(retenues as u32 - 1).to_le_bytes()) {
                         return -errno::EFAULT;
                     }
@@ -2137,12 +2133,11 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                         Some(v) => v,
                         None => return -errno::EFAULT,
                     };
-                    let (frequence, voies, _) = crate::drivers::ac97::format();
                     // On ne sait produire que ces deux-la ; toute autre demande
                     // se voit repondre ce qu'on fera reellement, comme le veut
                     // le protocole.
                     let bits = if demande == AFMT_U8 { 8 } else { 16 };
-                    let (_, _, retenus) = crate::drivers::ac97::configure(frequence, voies, bits);
+                    let (_, _, retenus) = crate::drivers::ac97::configure(None, None, Some(bits));
                     let format = if retenus == 8 { AFMT_U8 } else { AFMT_S16_LE };
                     if !user_write(arg, &format.to_le_bytes()) {
                         return -errno::EFAULT;
@@ -2179,11 +2174,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                 SNDCTL_DSP_GETODELAY => {
                     // Octets encore en vol : c'est ce qui permet a un lecteur de
                     // savoir de combien l'image est en avance sur le son.
-                    let (frequence, voies, bits) = crate::drivers::ac97::format();
-                    let (_, _, _, _, en_vol, _) = crate::drivers::ac97::resume();
-                    let par_tampon = 2048 * voies as u32 * (bits as u32 / 8) * frequence
-                        / crate::drivers::ac97::FREQUENCE_NATIVE;
-                    if !user_write(arg, &(en_vol as u32 * par_tampon).to_le_bytes()) {
+                    let en_vol = crate::drivers::ac97::octets_en_vol() as u32;
+                    if !user_write(arg, &en_vol.to_le_bytes()) {
                         return -errno::EFAULT;
                     }
                     0

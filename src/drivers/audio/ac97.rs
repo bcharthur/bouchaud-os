@@ -32,6 +32,7 @@ use core::ptr::write_volatile;
 
 use crate::arch::x86_64::pci;
 use crate::arch::x86_64::ports::{inb, inl, inw, outb, outl, outw};
+use crate::kernel::sync::SleepMutex;
 use crate::kernel::{dmesg, memory};
 
 // --- Registres du mixeur (BAR0, « NAM » : Native Audio Mixer) ----------------
@@ -74,57 +75,98 @@ const OCTETS_PAR_TAMPON: usize = ECHANTILLONS_PAR_TAMPON * 4; // 2 voies × 16 b
 /// Frequence native de la puce.
 pub const FREQUENCE_NATIVE: u32 = 48000;
 
-static mut NAM: u16 = 0;
-static mut NABM: u16 = 0;
-static mut PRET: bool = false;
+// BOUCHAUD_AC97_VERROU_V1
+//
+// Tout l'etat du pilote tenait dans treize `static mut`, que seul le gros
+// verrou du noyau serialisait : `/dev/dsp` n'etait sur que parce que `write`
+// et `ioctl` le prenaient. Deux programmes -- ou deux fils d'un meme lecteur,
+// l'un qui pousse le PCM, l'autre qui demande `SNDCTL_DSP_GETODELAY` --
+// pouvaient sinon lire `EN_VOL` pendant que l'autre le decrementait, ou
+// avancer `ECRITURE` deux fois pour le meme descripteur.
+//
+// L'etat est maintenant une structure unique sous un `SleepMutex` : chaque
+// fonction publique le prend une fois et fait tout son travail dessous. Une
+// attente de place (tampons pleins) se fait HORS du verrou, chez l'appelant.
+// Le verrou dort plutot que de tourner : `init` attend le codec et le reset du
+// canal, et `ecrit` convertit jusqu'a 32 tampons de 8 Kio.
 
-/// Liste de descripteurs : 32 × (adresse 32 bits, longueur et drapeaux 32 bits).
-static mut BDL_PHYS: u64 = 0;
-static mut BDL_VIRT: *mut u32 = core::ptr::null_mut();
-/// Les 32 tampons de PCM, contigus.
-static mut TAMPONS_VIRT: *mut u8 = core::ptr::null_mut();
+struct Ac97 {
+    nam: u16,
+    nabm: u16,
+    pret: bool,
+    /// Liste de descripteurs : 32 × (adresse 32 bits, longueur et drapeaux 32 bits).
+    bdl_phys: u64,
+    bdl_virt: *mut u32,
+    /// Les 32 tampons de PCM, contigus.
+    tampons_virt: *mut u8,
+    /// Prochain descripteur que le pilote remplira.
+    ecriture: usize,
+    /// Nombre de tampons remplis et pas encore joues.
+    en_vol: usize,
+    /// Le moteur DMA tourne-t-il ?
+    en_lecture: bool,
+    /// Format demande par le programme, converti a l'ecriture.
+    frequence: u32,
+    voies: u8,
+    /// 16 = PCM 16 bits signe, 8 = PCM 8 bits non signe.
+    bits: u8,
+    /// Echantillons joues depuis le demarrage : c'est l'horloge de reference
+    /// pour synchroniser l'image sur le son.
+    echantillons_joues: u64,
+}
 
-/// Prochain descripteur que le pilote remplira.
-static mut ECRITURE: usize = 0;
-/// Nombre de tampons remplis et pas encore joues.
-static mut EN_VOL: usize = 0;
-/// Le moteur DMA tourne-t-il ?
-static mut EN_LECTURE: bool = false;
+// Les deux pointeurs designent la memoire DMA du pilote, allouee une fois et
+// jamais rendue ; on n'y accede que sous `ETAT`.
+unsafe impl Send for Ac97 {}
 
-/// Format demande par le programme, converti a l'ecriture.
-static mut FREQUENCE: u32 = 48000;
-static mut VOIES: u8 = 2;
-/// 16 = PCM 16 bits signe, 8 = PCM 8 bits non signe.
-static mut BITS: u8 = 16;
-
-/// Echantillons joues depuis le demarrage : c'est l'horloge de reference pour
-/// synchroniser l'image sur le son.
-static mut ECHANTILLONS_JOUES: u64 = 0;
+static ETAT: SleepMutex<Ac97> = SleepMutex::new(Ac97 {
+    nam: 0,
+    nabm: 0,
+    pret: false,
+    bdl_phys: 0,
+    bdl_virt: core::ptr::null_mut(),
+    tampons_virt: core::ptr::null_mut(),
+    ecriture: 0,
+    en_vol: 0,
+    en_lecture: false,
+    frequence: 48000,
+    voies: 2,
+    bits: 16,
+    echantillons_joues: 0,
+});
 
 // --- Acces au mixeur ---------------------------------------------------------
 
-unsafe fn mixeur_ecrit(offset: u16, valeur: u16) {
-    outw(NAM + offset, valeur);
-}
+impl Ac97 {
+    unsafe fn mixeur_ecrit(&self, offset: u16, valeur: u16) {
+        outw(self.nam + offset, valeur);
+    }
 
-unsafe fn mixeur_lit(offset: u16) -> u16 {
-    inw(NAM + offset)
+    unsafe fn mixeur_lit(&self, offset: u16) -> u16 {
+        inw(self.nam + offset)
+    }
 }
 
 // --- Initialisation ----------------------------------------------------------
 
 /// Le peripherique audio a-t-il ete initialise ?
 pub fn pret() -> bool {
-    unsafe { PRET }
+    ETAT.lock().pret
 }
 
 /// Cherche et initialise la carte. Rend `false` s'il n'y en a pas.
 ///
 /// Appele a la demande et non au boot : une machine sans carte son doit demarrer
-/// exactement comme avant.
+/// exactement comme avant. Deux premiers appels simultanes n'initialisent
+/// qu'une fois : le second attend le verrou et trouve `pret`.
 pub fn init() -> bool {
-    unsafe {
-        if PRET {
+    let mut etat = ETAT.lock();
+    unsafe { etat.init() }
+}
+
+impl Ac97 {
+    unsafe fn init(&mut self) -> bool {
+        if self.pret {
             return true;
         }
         let peripherique = match pci::find_audio() {
@@ -138,19 +180,19 @@ pub fn init() -> bool {
 
         // Les deux BAR sont des espaces d'entrees/sorties : le bit 0 les marque
         // comme tels, l'adresse est dans les bits superieurs.
-        NAM = (pci::bar(&peripherique, 0) & 0xFFFC) as u16;
-        NABM = (pci::bar(&peripherique, 1) & 0xFFFC) as u16;
-        if NAM == 0 || NABM == 0 {
+        self.nam = (pci::bar(&peripherique, 0) & 0xFFFC) as u16;
+        self.nabm = (pci::bar(&peripherique, 1) & 0xFFFC) as u16;
+        if self.nam == 0 || self.nabm == 0 {
             dmesg::log("ac97: BAR d'entrees/sorties absents");
             return false;
         }
 
         // Reveil du controleur, puis reset du codec.
-        outl(NABM + NABM_GLOB_CNT, 0x00000002);
-        mixeur_ecrit(NAM_RESET, 0);
+        outl(self.nabm + NABM_GLOB_CNT, 0x00000002);
+        self.mixeur_ecrit(NAM_RESET, 0);
         // Le codec met quelques microsecondes a repondre.
         for _ in 0..1000 {
-            if mixeur_lit(NAM_RESET) != 0xFFFF {
+            if self.mixeur_lit(NAM_RESET) != 0xFFFF {
                 break;
             }
             core::hint::spin_loop();
@@ -158,15 +200,15 @@ pub fn init() -> bool {
 
         // Volume au maximum : l'attenuation se fait plus haut, dans le
         // programme, ou elle sait ce qu'elle attenue.
-        mixeur_ecrit(NAM_MASTER_VOLUME, 0x0000);
-        mixeur_ecrit(NAM_PCM_VOLUME, 0x0000);
+        self.mixeur_ecrit(NAM_MASTER_VOLUME, 0x0000);
+        self.mixeur_ecrit(NAM_PCM_VOLUME, 0x0000);
 
         // Frequence variable, si le codec la propose. Sinon tout sera reechantillonne
         // vers 48 kHz par le pilote.
-        let extensions = mixeur_lit(NAM_EXT_ID);
+        let extensions = self.mixeur_lit(NAM_EXT_ID);
         if extensions & 0x0001 != 0 {
-            mixeur_ecrit(NAM_EXT_CTRL, mixeur_lit(NAM_EXT_CTRL) | 0x0001);
-            mixeur_ecrit(NAM_PCM_FRONT_RATE, FREQUENCE_NATIVE as u16);
+            self.mixeur_ecrit(NAM_EXT_CTRL, self.mixeur_lit(NAM_EXT_CTRL) | 0x0001);
+            self.mixeur_ecrit(NAM_PCM_FRONT_RATE, FREQUENCE_NATIVE as u16);
         }
 
         // Anneau DMA : la liste de descripteurs et les tampons.
@@ -186,39 +228,39 @@ pub fn init() -> bool {
                 }
             };
 
-        BDL_PHYS = bdl_phys;
-        BDL_VIRT = bdl_virt as *mut u32;
-        TAMPONS_VIRT = tampons_virt;
+        self.bdl_phys = bdl_phys;
+        self.bdl_virt = bdl_virt as *mut u32;
+        self.tampons_virt = tampons_virt;
 
         // Chaque descripteur pointe son tampon. La longueur est **en
         // echantillons de 16 bits**, pas en octets : une erreur ici fait jouer
         // le double ou la moitie du tampon, et s'entend tout de suite.
         for index in 0..DESCRIPTEURS {
             let adresse = tampons_phys + (index * OCTETS_PAR_TAMPON) as u64;
-            write_volatile(BDL_VIRT.add(index * 2), adresse as u32);
-            write_volatile(BDL_VIRT.add(index * 2 + 1), OCTETS_PAR_TAMPON as u32 / 2);
+            write_volatile(self.bdl_virt.add(index * 2), adresse as u32);
+            write_volatile(self.bdl_virt.add(index * 2 + 1), OCTETS_PAR_TAMPON as u32 / 2);
         }
 
         // Reset du canal de sortie, puis on lui donne sa liste.
-        outb(NABM + NABM_PO_CR, CR_RESET);
+        outb(self.nabm + NABM_PO_CR, CR_RESET);
         for _ in 0..10000 {
-            if inb(NABM + NABM_PO_CR) & CR_RESET == 0 {
+            if inb(self.nabm + NABM_PO_CR) & CR_RESET == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
-        outl(NABM + NABM_PO_BDBAR, BDL_PHYS as u32);
-        outb(NABM + NABM_PO_LVI, 0);
+        outl(self.nabm + NABM_PO_BDBAR, self.bdl_phys as u32);
+        outb(self.nabm + NABM_PO_LVI, 0);
 
-        ECRITURE = 0;
-        EN_VOL = 0;
-        EN_LECTURE = false;
-        ECHANTILLONS_JOUES = 0;
-        PRET = true;
+        self.ecriture = 0;
+        self.en_vol = 0;
+        self.en_lecture = false;
+        self.echantillons_joues = 0;
+        self.pret = true;
 
         crate::serial_println!(
             "[kernel] ac97: {:04x}:{:04x}, mixeur {:#06x}, bus maitre {:#06x}",
-            peripherique.vendor, peripherique.device, NAM, NABM
+            peripherique.vendor, peripherique.device, self.nam, self.nabm
         );
         dmesg::log("ac97: sortie audio prete (48 kHz, 16 bits, stereo)");
         true
@@ -228,191 +270,219 @@ pub fn init() -> bool {
 // --- Ecriture ----------------------------------------------------------------
 
 /// Regle le format attendu par le programme. Rend le format reellement retenu.
-pub fn configure(frequence: u32, voies: u8, bits: u8) -> (u32, u8, u8) {
-    unsafe {
-        FREQUENCE = frequence.clamp(4000, 96000);
-        VOIES = if voies >= 2 { 2 } else { 1 };
-        BITS = if bits >= 16 { 16 } else { 8 };
-        (FREQUENCE, VOIES, BITS)
+///
+/// Chaque champ absent garde sa valeur : `SNDCTL_DSP_CHANNELS` ne change que
+/// les voies. La lecture de l'ancien format et l'ecriture du nouveau se font
+/// sous la meme prise -- un `SNDCTL_DSP_SPEED` concurrent n'est pas perdu.
+pub fn configure(frequence: Option<u32>, voies: Option<u8>, bits: Option<u8>) -> (u32, u8, u8) {
+    let mut etat = ETAT.lock();
+    if let Some(frequence) = frequence {
+        etat.frequence = frequence.clamp(4000, 96000);
     }
+    if let Some(voies) = voies {
+        etat.voies = if voies >= 2 { 2 } else { 1 };
+    }
+    if let Some(bits) = bits {
+        etat.bits = if bits >= 16 { 16 } else { 8 };
+    }
+    (etat.frequence, etat.voies, etat.bits)
 }
 
 /// Format courant `(frequence, voies, bits)`.
 pub fn format() -> (u32, u8, u8) {
-    unsafe { (FREQUENCE, VOIES, BITS) }
+    let etat = ETAT.lock();
+    (etat.frequence, etat.voies, etat.bits)
 }
 
 /// Nombre de tampons libres : c'est la place disponible pour ecrire.
 pub fn libres() -> usize {
-    unsafe {
-        recolte();
-        DESCRIPTEURS.saturating_sub(EN_VOL).saturating_sub(1)
-    }
+    let mut etat = ETAT.lock();
+    unsafe { etat.libres() }
 }
 
 /// Octets que le programme peut ecrire sans bloquer, dans **son** format.
 pub fn place_disponible() -> usize {
-    unsafe {
-        let par_tampon = ECHANTILLONS_PAR_TAMPON * VOIES as usize * (BITS as usize / 8)
-            * FREQUENCE as usize
-            / FREQUENCE_NATIVE as usize;
-        libres() * par_tampon.max(1)
-    }
+    let mut etat = ETAT.lock();
+    let par_tampon = ECHANTILLONS_PAR_TAMPON * etat.voies as usize * (etat.bits as usize / 8)
+        * etat.frequence as usize
+        / FREQUENCE_NATIVE as usize;
+    unsafe { etat.libres() * par_tampon.max(1) }
+}
+
+/// Octets encore en vol, dans le format du programme (`SNDCTL_DSP_GETODELAY`).
+///
+/// Le nombre de tampons et le format sont lus sous la meme prise : sinon un
+/// changement de format entre les deux lectures rendrait un delai faux.
+pub fn octets_en_vol() -> usize {
+    let etat = ETAT.lock();
+    let par_tampon = 2048 * etat.voies as usize * (etat.bits as usize / 8)
+        * etat.frequence as usize
+        / FREQUENCE_NATIVE as usize;
+    etat.en_vol * par_tampon
 }
 
 /// Ecrit du PCM dans le format configure. Rend le nombre d'octets consommes.
 ///
 /// N'attend jamais : ce qui ne tient pas dans les tampons libres n'est pas
 /// consomme, et l'appelant reessaie. C'est ce que fait `/dev/dsp` en mode non
-/// bloquant, et cela evite qu'une ecriture tienne le noyau pendant 40 ms.
+/// bloquant, et cela evite qu'une ecriture tienne le verrou pendant 40 ms.
 pub fn ecrit(donnees: &[u8]) -> usize {
-    unsafe {
-        if !PRET || donnees.is_empty() {
+    let mut etat = ETAT.lock();
+    unsafe { etat.ecrit(donnees) }
+}
+
+impl Ac97 {
+    unsafe fn libres(&mut self) -> usize {
+        self.recolte();
+        DESCRIPTEURS.saturating_sub(self.en_vol).saturating_sub(1)
+    }
+
+    unsafe fn ecrit(&mut self, donnees: &[u8]) -> usize {
+        if !self.pret || donnees.is_empty() {
             return 0;
         }
-        let octets_par_trame = VOIES as usize * (BITS as usize / 8);
+        let octets_par_trame = self.voies as usize * (self.bits as usize / 8);
         if octets_par_trame == 0 {
             return 0;
         }
 
         let mut consommes = 0usize;
         while consommes < donnees.len() {
-            if libres() == 0 {
+            if self.libres() == 0 {
                 break;
             }
             let restant = &donnees[consommes..];
-            let pris = remplit_tampon(restant, octets_par_trame);
+            let pris = self.remplit_tampon(restant, octets_par_trame);
             if pris == 0 {
                 break;
             }
             consommes += pris;
         }
 
-        if consommes > 0 && !EN_LECTURE {
-            demarre();
+        if consommes > 0 && !self.en_lecture {
+            self.demarre();
         }
         consommes
     }
-}
 
-/// Remplit un descripteur avec ce qu'on peut prendre de `source`.
-///
-/// C'est ici que se fait la conversion de format : la puce ne connait que 48 kHz
-/// 16 bits stereo, et tout le reste est ramene a cela par duplication de voie
-/// et repetition d'echantillon. Le reechantillonnage est le plus simple
-/// possible — au plus proche voisin — ce qui suffit pour du 44,1 kHz vers
-/// 48 kHz et evite d'embarquer un filtre dans le noyau.
-unsafe fn remplit_tampon(source: &[u8], octets_par_trame: usize) -> usize {
-    let index = ECRITURE % DESCRIPTEURS;
-    let destination = TAMPONS_VIRT.add(index * OCTETS_PAR_TAMPON) as *mut i16;
+    /// Remplit un descripteur avec ce qu'on peut prendre de `source`.
+    ///
+    /// C'est ici que se fait la conversion de format : la puce ne connait que
+    /// 48 kHz 16 bits stereo, et tout le reste est ramene a cela par duplication
+    /// de voie et repetition d'echantillon. Le reechantillonnage est le plus
+    /// simple possible — au plus proche voisin — ce qui suffit pour du 44,1 kHz
+    /// vers 48 kHz et evite d'embarquer un filtre dans le noyau.
+    unsafe fn remplit_tampon(&mut self, source: &[u8], octets_par_trame: usize) -> usize {
+        let index = self.ecriture % DESCRIPTEURS;
+        let destination = self.tampons_virt.add(index * OCTETS_PAR_TAMPON) as *mut i16;
 
-    let trames_source_dispo = source.len() / octets_par_trame;
-    if trames_source_dispo == 0 {
-        return 0;
-    }
-
-    let mut ecrites = 0usize; // paires stereo ecrites dans le tampon
-    let mut consommees = 0usize; // trames lues dans la source
-    // Position fractionnaire dans la source, en 16.16.
-    let pas = ((FREQUENCE as u64) << 16) / FREQUENCE_NATIVE as u64;
-    let mut position: u64 = 0;
-
-    while ecrites < ECHANTILLONS_PAR_TAMPON {
-        let trame = (position >> 16) as usize;
-        if trame >= trames_source_dispo {
-            break;
+        let trames_source_dispo = source.len() / octets_par_trame;
+        if trames_source_dispo == 0 {
+            return 0;
         }
-        let base = trame * octets_par_trame;
-        let (gauche, droite) = lit_trame(source, base, octets_par_trame);
-        write_volatile(destination.add(ecrites * 2), gauche);
-        write_volatile(destination.add(ecrites * 2 + 1), droite);
-        ecrites += 1;
-        position += pas;
-        consommees = ((position >> 16) as usize).min(trames_source_dispo);
+
+        let mut ecrites = 0usize; // paires stereo ecrites dans le tampon
+        let mut consommees = 0usize; // trames lues dans la source
+        // Position fractionnaire dans la source, en 16.16.
+        let pas = ((self.frequence as u64) << 16) / FREQUENCE_NATIVE as u64;
+        let mut position: u64 = 0;
+
+        while ecrites < ECHANTILLONS_PAR_TAMPON {
+            let trame = (position >> 16) as usize;
+            if trame >= trames_source_dispo {
+                break;
+            }
+            let base = trame * octets_par_trame;
+            let (gauche, droite) = self.lit_trame(source, base);
+            write_volatile(destination.add(ecrites * 2), gauche);
+            write_volatile(destination.add(ecrites * 2 + 1), droite);
+            ecrites += 1;
+            position += pas;
+            consommees = ((position >> 16) as usize).min(trames_source_dispo);
+        }
+
+        if ecrites == 0 {
+            return 0;
+        }
+        // Un tampon partiel est complete par du silence : le materiel joue
+        // toujours le descripteur en entier, et laisser l'ancien contenu ferait
+        // entendre la fin du son precedent.
+        for reste in ecrites..ECHANTILLONS_PAR_TAMPON {
+            write_volatile(destination.add(reste * 2), 0);
+            write_volatile(destination.add(reste * 2 + 1), 0);
+        }
+
+        self.ecriture = self.ecriture.wrapping_add(1);
+        self.en_vol += 1;
+        // `LVI` designe le dernier descripteur que le materiel a le droit de jouer.
+        outb(self.nabm + NABM_PO_LVI, (index % DESCRIPTEURS) as u8);
+        consommees * octets_par_trame
     }
 
-    if ecrites == 0 {
-        return 0;
-    }
-    // Un tampon partiel est complete par du silence : le materiel joue toujours
-    // le descripteur en entier, et laisser l'ancien contenu ferait entendre la
-    // fin du son precedent.
-    for reste in ecrites..ECHANTILLONS_PAR_TAMPON {
-        write_volatile(destination.add(reste * 2), 0);
-        write_volatile(destination.add(reste * 2 + 1), 0);
-    }
-
-    ECRITURE = ECRITURE.wrapping_add(1);
-    EN_VOL += 1;
-    // `LVI` designe le dernier descripteur que le materiel a le droit de jouer.
-    outb(NABM + NABM_PO_LVI, (index % DESCRIPTEURS) as u8);
-    consommees * octets_par_trame
-}
-
-/// Lit une trame de la source et la rend en deux voies 16 bits signees.
-unsafe fn lit_trame(source: &[u8], base: usize, octets_par_trame: usize) -> (i16, i16) {
-    if BITS == 8 {
-        // PCM 8 bits non signe, centre sur 128.
-        let g = ((source[base] as i16) - 128) << 8;
-        let d = if VOIES == 2 && base + 1 < source.len() {
-            ((source[base + 1] as i16) - 128) << 8
+    /// Lit une trame de la source et la rend en deux voies 16 bits signees.
+    fn lit_trame(&self, source: &[u8], base: usize) -> (i16, i16) {
+        if self.bits == 8 {
+            // PCM 8 bits non signe, centre sur 128.
+            let g = ((source[base] as i16) - 128) << 8;
+            let d = if self.voies == 2 && base + 1 < source.len() {
+                ((source[base + 1] as i16) - 128) << 8
+            } else {
+                g
+            };
+            return (g, d);
+        }
+        let g = i16::from_le_bytes([source[base], source[base + 1]]);
+        let d = if self.voies == 2 && base + 3 < source.len() {
+            i16::from_le_bytes([source[base + 2], source[base + 3]])
         } else {
             g
         };
-        let _ = octets_par_trame;
-        return (g, d);
+        (g, d)
     }
-    let g = i16::from_le_bytes([source[base], source[base + 1]]);
-    let d = if VOIES == 2 && base + 3 < source.len() {
-        i16::from_le_bytes([source[base + 2], source[base + 3]])
-    } else {
-        g
-    };
-    (g, d)
-}
 
-/// Demarre le moteur DMA.
-///
-/// Les interruptions du peripherique (`IOCE`, `LVBIE`) restent **coupees**, et
-/// c'est deliberé : le pilote se tient a jour en lisant l'index courant du
-/// materiel, qui est de toute facon la source de verite. Une IRQ n'apporterait
-/// qu'un reveil plus tot — sans interet ici, puisque le seul moment ou l'etat
-/// compte est celui ou un programme ecrit ou demande la position. Le pilote
-/// disque suit le meme raisonnement, et cela evite d'avoir a router une ligne
-/// PCI partagee vers le bon vecteur.
-unsafe fn demarre() {
-    outb(NABM + NABM_PO_CR, CR_RUN);
-    EN_LECTURE = true;
-}
+    /// Demarre le moteur DMA.
+    ///
+    /// Les interruptions du peripherique (`IOCE`, `LVBIE`) restent **coupees**,
+    /// et c'est deliberé : le pilote se tient a jour en lisant l'index courant
+    /// du materiel, qui est de toute facon la source de verite. Une IRQ
+    /// n'apporterait qu'un reveil plus tot — sans interet ici, puisque le seul
+    /// moment ou l'etat compte est celui ou un programme ecrit ou demande la
+    /// position. Le pilote disque suit le meme raisonnement, et cela evite
+    /// d'avoir a router une ligne PCI partagee vers le bon vecteur.
+    unsafe fn demarre(&mut self) {
+        outb(self.nabm + NABM_PO_CR, CR_RUN);
+        self.en_lecture = true;
+    }
 
-/// Compte les tampons que le materiel a fini de jouer.
-///
-/// Appele avant chaque ecriture plutot que depuis l'interruption seule : le son
-/// doit continuer meme si une IRQ est perdue, et l'index courant du materiel
-/// est de toute facon la source de verite.
-unsafe fn recolte() {
-    if !PRET || !EN_LECTURE {
-        return;
-    }
-    let courant = inb(NABM + NABM_PO_CIV) as usize % DESCRIPTEURS;
-    let ecriture = ECRITURE % DESCRIPTEURS;
-    // Distance entre la tete de lecture et la tete d'ecriture.
-    let occupes = if ecriture >= courant {
-        ecriture - courant
-    } else {
-        DESCRIPTEURS - courant + ecriture
-    };
-    if occupes < EN_VOL {
-        ECHANTILLONS_JOUES += ((EN_VOL - occupes) * ECHANTILLONS_PAR_TAMPON) as u64;
-        EN_VOL = occupes;
-    }
-    // Plus rien a jouer : on arrete le moteur pour ne pas boucler sur du vieux
-    // contenu.
-    if EN_VOL == 0 {
-        let etat = inw(NABM + NABM_PO_SR);
-        if etat & SR_DCH != 0 {
-            outb(NABM + NABM_PO_CR, 0);
-            EN_LECTURE = false;
+    /// Compte les tampons que le materiel a fini de jouer.
+    ///
+    /// Appele avant chaque ecriture plutot que depuis l'interruption seule : le
+    /// son doit continuer meme si une IRQ est perdue, et l'index courant du
+    /// materiel est de toute facon la source de verite.
+    unsafe fn recolte(&mut self) {
+        if !self.pret || !self.en_lecture {
+            return;
+        }
+        let courant = inb(self.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
+        let ecriture = self.ecriture % DESCRIPTEURS;
+        // Distance entre la tete de lecture et la tete d'ecriture.
+        let occupes = if ecriture >= courant {
+            ecriture - courant
+        } else {
+            DESCRIPTEURS - courant + ecriture
+        };
+        if occupes < self.en_vol {
+            self.echantillons_joues += ((self.en_vol - occupes) * ECHANTILLONS_PAR_TAMPON) as u64;
+            self.en_vol = occupes;
+        }
+        // Plus rien a jouer : on arrete le moteur pour ne pas boucler sur du
+        // vieux contenu.
+        if self.en_vol == 0 {
+            let etat = inw(self.nabm + NABM_PO_SR);
+            if etat & SR_DCH != 0 {
+                outb(self.nabm + NABM_PO_CR, 0);
+                self.en_lecture = false;
+            }
         }
     }
 }
@@ -422,51 +492,45 @@ unsafe fn recolte() {
 /// C'est l'horloge sur laquelle l'image se cale : le son ne peut pas accelerer
 /// ni ralentir sans qu'on l'entende, l'image si.
 pub fn position_echantillons() -> u64 {
+    let mut etat = ETAT.lock();
     unsafe {
-        recolte();
-        if !PRET {
+        etat.recolte();
+        if !etat.pret {
             return 0;
         }
-        let restants = inw(NABM + NABM_PO_PICB) as u64 / 2;
-        ECHANTILLONS_JOUES
+        let restants = inw(etat.nabm + NABM_PO_PICB) as u64 / 2;
+        etat.echantillons_joues
             .saturating_add((ECHANTILLONS_PAR_TAMPON as u64).saturating_sub(restants))
     }
 }
 
 /// Vide la file : tout ce qui n'est pas encore joue est abandonne.
 pub fn arrete() {
+    let mut etat = ETAT.lock();
     unsafe {
-        if !PRET {
+        if !etat.pret {
             return;
         }
-        outb(NABM + NABM_PO_CR, 0);
-        outb(NABM + NABM_PO_CR, CR_RESET);
+        outb(etat.nabm + NABM_PO_CR, 0);
+        outb(etat.nabm + NABM_PO_CR, CR_RESET);
         for _ in 0..10000 {
-            if inb(NABM + NABM_PO_CR) & CR_RESET == 0 {
+            if inb(etat.nabm + NABM_PO_CR) & CR_RESET == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
-        outl(NABM + NABM_PO_BDBAR, BDL_PHYS as u32);
-        outb(NABM + NABM_PO_LVI, 0);
-        ECRITURE = 0;
-        EN_VOL = 0;
-        EN_LECTURE = false;
+        outl(etat.nabm + NABM_PO_BDBAR, etat.bdl_phys as u32);
+        outb(etat.nabm + NABM_PO_LVI, 0);
+        etat.ecriture = 0;
+        etat.en_vol = 0;
+        etat.en_lecture = false;
     }
 }
 
 /// Etat lisible pour la commande `audio`.
 pub fn resume() -> (bool, u32, u8, u8, usize, usize) {
-    unsafe {
-        (
-            PRET,
-            FREQUENCE,
-            VOIES,
-            BITS,
-            EN_VOL,
-            DESCRIPTEURS,
-        )
-    }
+    let etat = ETAT.lock();
+    (etat.pret, etat.frequence, etat.voies, etat.bits, etat.en_vol, DESCRIPTEURS)
 }
 
 /// Numero d'IRQ du peripherique audio, s'il y en a un.
@@ -476,10 +540,9 @@ pub fn irq() -> Option<u8> {
 
 /// Lecture directe du registre d'etat global, pour le diagnostic.
 pub fn etat_global() -> u32 {
-    unsafe {
-        if !PRET {
-            return 0;
-        }
-        inl(NABM + NABM_GLOB_STA)
+    let etat = ETAT.lock();
+    if !etat.pret {
+        return 0;
     }
+    unsafe { inl(etat.nabm + NABM_GLOB_STA) }
 }

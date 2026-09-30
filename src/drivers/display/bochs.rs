@@ -12,7 +12,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 use crate::arch::x86_64::pci;
 use crate::kernel::memory;
@@ -95,15 +95,23 @@ fn rgb(index: u8) -> u32 {
 
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
-static mut HD_ACTIVE: bool = false;
+// BOUCHAUD_GFX_DRAPEAUX_ATOMIQUES_V1
+//
+// Ces trois drapeaux etaient des `static mut` ecrits par le bureau (sous le
+// gros verrou) et lus par les appels systeme de `/dev/fb0` et de la console
+// virtuelle (`ioctl`, `mmap`) -- qui ne le prennent plus. Lecture et ecriture
+// concurrentes d'un `static mut` sont une course de donnees : ce sont
+// maintenant des atomiques. Leur ordre mutuel ne porte aucun invariant ; le
+// basculement complet reste serialise par `BASCULE`.
+static HD_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Vrai pendant qu'un processus ring 3 possede logiquement la sortie video.
 ///
 /// Le mode BGA reste actif : seul `present()` du bureau est suspendu. Le
 /// client userland peut donc ecrire `/dev/fb0` sans transition par le VGA texte.
-static mut USERLAND_OWNS_DISPLAY: bool = false;
+static USERLAND_OWNS_DISPLAY: AtomicBool = AtomicBool::new(false);
 /// Adresse *physique* du framebuffer lineaire, memorisee pour pouvoir le
 /// remapper dans un espace d'adressage utilisateur (`mmap` de `/dev/fb0`).
-static mut LFB_PHYS: u64 = 0;
+static LFB_PHYS: AtomicU64 = AtomicU64::new(0);
 
 // BOUCHAUD_STAGE2_GOP_BACKEND
 #[derive(Clone, Copy)]
@@ -445,7 +453,7 @@ fn locate_lfb() -> Option<*mut u32> {
     // BAR memoire : on masque les 4 bits de poids faible (drapeaux).
     let phys = (bar0 & 0xFFFF_FFF0) as u64;
     if phys == 0 { return None; }
-    unsafe { LFB_PHYS = phys; }
+    LFB_PHYS.store(phys, Ordering::Release);
     Some(memory::phys_to_virt(phys) as *mut u32)
 }
 
@@ -458,14 +466,14 @@ pub fn lfb_phys() -> Option<u64> {
     if firmware_backend_installed() {
         return None;
     }
-    let phys = unsafe { LFB_PHYS };
+    let phys = LFB_PHYS.load(Ordering::Acquire);
     if phys == 0 {
         // Le mode HD n'a pas encore ete active : on interroge le PCI.
         let dev = pci::find_display()?;
         let bar0 = pci::bar(&dev, 0);
         let phys = (bar0 & 0xFFFF_FFF0) as u64;
         if phys == 0 { return None; }
-        unsafe { LFB_PHYS = phys; }
+        LFB_PHYS.store(phys, Ordering::Release);
         return Some(phys);
     }
     Some(phys)
@@ -515,12 +523,12 @@ pub fn resolution() -> (usize, usize) {
 /// le clavier en direct (ex. REPL Python) : en mode graphique, le clavier est
 /// pompe par le window manager, une lecture bloquante gelerait le bureau.
 pub fn is_active() -> bool {
-    unsafe { HD_ACTIVE }
+    HD_ACTIVE.load(Ordering::Acquire)
 }
 
 /// Le framebuffer physique est-il temporairement cede a un client ring 3 ?
 pub fn userland_owns_display() -> bool {
-    unsafe { USERLAND_OWNS_DISPLAY }
+    USERLAND_OWNS_DISPLAY.load(Ordering::Acquire)
 }
 
 /// Cede logiquement l'ecran au userland sans repasser par le mode VGA texte.
@@ -539,7 +547,7 @@ pub fn handoff_to_userland() -> bool {
         crate::serial_println!("[gfx] handoff userland impossible : BGA inactif");
         return false;
     }
-    unsafe { USERLAND_OWNS_DISPLAY = true; }
+    USERLAND_OWNS_DISPLAY.store(true, Ordering::Release);
     crate::drivers::gpu::note_handoff(true);
     crate::serial_println!("[gfx] framebuffer cede au userland (BGA conserve)");
     true
@@ -553,7 +561,7 @@ pub fn resume_from_userland() {
         // un futur backend le fait.
         enter();
     }
-    unsafe { USERLAND_OWNS_DISPLAY = false; }
+    USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
     crate::drivers::gpu::note_handoff(false);
     crate::serial_println!("[gfx] framebuffer repris par le bureau");
 }
@@ -591,9 +599,9 @@ fn enter_verrouille() {
         unsafe {
             BACK = Some(vec![0u32; canvas_width * canvas_height]);
             LFB = core::ptr::null_mut();
-            LFB_PHYS = 0;
-            USERLAND_OWNS_DISPLAY = false;
-            HD_ACTIVE = true;
+            LFB_PHYS.store(0, Ordering::Release);
+            USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
+            HD_ACTIVE.store(true, Ordering::Release);
         }
         reset_clip();
         FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
@@ -610,18 +618,18 @@ fn enter_verrouille() {
     let lfb = locate_lfb();
     unsafe {
         BACK = Some(vec![0u32; width() * height()]);
-        USERLAND_OWNS_DISPLAY = false;
+        USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
         match (id >= 0xB0C0 && id <= 0xB0C5, lfb) {
             (true, Some(p)) => {
                 bga_set_mode(width() as u16, height() as u16);
                 LFB = p;
-                HD_ACTIVE = true;
-                crate::drivers::gpu::activate_bga(width(), height(), 32, LFB_PHYS);
+                HD_ACTIVE.store(true, Ordering::Release);
+                crate::drivers::gpu::activate_bga(width(), height(), 32, LFB_PHYS.load(Ordering::Acquire));
                 crate::serial_println!("[gfx] BGA HD actif (1280x720x32, id={:#x})", id);
             }
             _ => {
                 LFB = core::ptr::null_mut();
-                HD_ACTIVE = false;
+                HD_ACTIVE.store(false, Ordering::Release);
                 crate::drivers::gpu::deactivate();
                 crate::serial_println!("[gfx] BGA indisponible (id={:#x}) : present() inactif", id);
             }
@@ -637,8 +645,8 @@ pub fn leave() {
         unsafe {
             BACK = None;
             LFB = core::ptr::null_mut();
-            HD_ACTIVE = false;
-            USERLAND_OWNS_DISPLAY = false;
+            HD_ACTIVE.store(false, Ordering::Release);
+            USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
         }
         FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
         return;
@@ -660,8 +668,8 @@ pub fn leave() {
         load_text_font();
         BACK = None;
         LFB = core::ptr::null_mut();
-        HD_ACTIVE = false;
-        USERLAND_OWNS_DISPLAY = false;
+        HD_ACTIVE.store(false, Ordering::Release);
+        USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
     }
     crate::drivers::gpu::deactivate();
     crate::serial_println!("[gfx] retour mode texte");

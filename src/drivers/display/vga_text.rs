@@ -4,7 +4,9 @@
 //! que la gestion des couleurs et du defilement.
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::arch::x86_64::ports::outb;
+use crate::kernel::sync::SpinLockIrq;
 
 const VGA_BUFFER: usize = 0xb8000;
 const VGA_WIDTH: usize = 80;
@@ -26,11 +28,60 @@ pub struct VgaWriter {
     color: u8,
 }
 
-static mut VGA: VgaWriter = VgaWriter {
-    row: 0,
-    col: 0,
-    color: COLOR_DEFAULT,
-};
+// BOUCHAUD_CONSOLE_VERROU_V1
+//
+// L'ecrivain VGA et la pile de captures etaient deux `static mut`. Le gros
+// verrou du noyau ne les protegeait qu'a moitie : `write(1)` d'un programme le
+// prenait, le bureau le tenait, mais chaque fil noyau qui fait un `println!`
+// (services reseau, echantillonneur, ...) ecrivait deja sans lui -- et pouvait
+// pousser dans le `String` de capture pendant qu'un autre coeur le faisait
+// grandir, ou `pop` la pile sous ses pieds.
+//
+// Les deux vivent maintenant sous un seul verrou a interruptions masquees
+// (un `println!` peut partir d'un gestionnaire). La prise est BORNEE : un
+// coeur qui panique en tenant la console, puis y reecrit, perdrait sinon la
+// machine dans une attente sans fin ; il perd seulement la copie VGA de son
+// message, que COM1 et l'ecran GOP recoivent de toute facon.
+struct Console {
+    vga: VgaWriter,
+    /// Pile de tampons de capture. Quand elle n'est pas vide, la sortie texte
+    /// est ecrite dans le tampon du sommet au lieu d'aller a l'ecran. La pile
+    /// permet d'imbriquer redirections (`>`) et pipes (`|`).
+    captures: alloc::vec::Vec<alloc::string::String>,
+}
+
+static CONSOLE: SpinLockIrq<Console> = SpinLockIrq::new(Console {
+    vga: VgaWriter {
+        row: 0,
+        col: 0,
+        color: COLOR_DEFAULT,
+    },
+    captures: alloc::vec::Vec::new(),
+});
+
+/// Tentatives de prise avant d'abandonner une ecriture de console.
+const PRISE_CONSOLE_TENTATIVES: u32 = 1 << 22;
+
+/// Ecritures de console abandonnees faute d'avoir pu prendre le verrou.
+static CONSOLE_ABANDONS: AtomicU64 = AtomicU64::new(0);
+
+/// Execute `f` sous le verrou de la console. `None` si la prise a echoue apres
+/// `PRISE_CONSOLE_TENTATIVES` essais : voir BOUCHAUD_CONSOLE_VERROU_V1.
+fn avec_console<R>(f: impl FnOnce(&mut Console) -> R) -> Option<R> {
+    for _ in 0..PRISE_CONSOLE_TENTATIVES {
+        if let Some(mut console) = CONSOLE.try_lock() {
+            return Some(f(&mut console));
+        }
+        core::hint::spin_loop();
+    }
+    CONSOLE_ABANDONS.fetch_add(1, Ordering::Relaxed);
+    None
+}
+
+/// Ecritures de console abandonnees depuis le demarrage (diagnostic).
+pub fn abandons_console() -> u64 {
+    CONSOLE_ABANDONS.load(Ordering::Relaxed)
+}
 
 impl VgaWriter {
     fn clear(&mut self) {
@@ -134,47 +185,42 @@ impl fmt::Write for VgaWriter {
 
 /// Efface l'ecran et replace le curseur en haut a gauche.
 pub fn clear() {
-    #[cfg(feature = "reference-desktop")]
-    {
-        unsafe {
-            VGA.row = 0;
-            VGA.col = 0;
+    avec_console(|console| {
+        #[cfg(feature = "reference-desktop")]
+        {
+            console.vga.row = 0;
+            console.vga.col = 0;
         }
-        return;
-    }
 
-    #[cfg(not(feature = "reference-desktop"))]
-    unsafe {
-        VGA.clear();
-    }
+        #[cfg(not(feature = "reference-desktop"))]
+        console.vga.clear();
+    });
 }
 
 /// Change la couleur d'affichage courante.
 pub fn set_color(color: u8) {
-    unsafe { VGA.set_color(color); }
+    avec_console(|console| console.vga.set_color(color));
 }
 
 /// Positionne le curseur (texte + curseur materiel) sur (row, col).
 pub fn set_cursor(row: usize, col: usize) {
-    unsafe {
-        VGA.row = if row >= VGA_HEIGHT { VGA_HEIGHT - 1 } else { row };
-        VGA.col = if col >= VGA_WIDTH { VGA_WIDTH - 1 } else { col };
+    avec_console(|console| {
+        let vga = &mut console.vga;
+        vga.row = if row >= VGA_HEIGHT { VGA_HEIGHT - 1 } else { row };
+        vga.col = if col >= VGA_WIDTH { VGA_WIDTH - 1 } else { col };
 
         #[cfg(not(feature = "reference-desktop"))]
         {
-            let pos = VGA.row * VGA_WIDTH + VGA.col;
-            outb(0x3D4, 0x0F);
-            outb(0x3D5, (pos & 0xFF) as u8);
-            outb(0x3D4, 0x0E);
-            outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+            let pos = vga.row * VGA_WIDTH + vga.col;
+            unsafe {
+                outb(0x3D4, 0x0F);
+                outb(0x3D5, (pos & 0xFF) as u8);
+                outb(0x3D4, 0x0E);
+                outb(0x3D5, ((pos >> 8) & 0xFF) as u8);
+            }
         }
-    }
+    });
 }
-
-/// Pile de tampons de capture. Quand elle n'est pas vide, la sortie texte est
-/// ecrite dans le tampon du sommet au lieu d'aller a l'ecran. La pile permet
-/// d'imbriquer redirections (`>`) et pipes (`|`).
-static mut CAPTURE_STACK: Option<alloc::vec::Vec<alloc::string::String>> = None;
 
 /// Profondeur de journalisation d'une commande de terminal.
 static TERMINAL_TRACE_DEPTH: core::sync::atomic::AtomicUsize =
@@ -199,17 +245,12 @@ fn terminal_trace_active() -> bool {
 
 /// Demarre une capture (empile un tampon vide).
 pub fn capture_start() {
-    unsafe {
-        if CAPTURE_STACK.is_none() { CAPTURE_STACK = Some(alloc::vec::Vec::new()); }
-        if let Some(stack) = CAPTURE_STACK.as_mut() {
-            stack.push(alloc::string::String::new());
-        }
-    }
+    avec_console(|console| console.captures.push(alloc::string::String::new()));
 }
 
 /// Termine la capture courante et renvoie le texte accumule.
 pub fn capture_take() -> Option<alloc::string::String> {
-    unsafe { CAPTURE_STACK.as_mut().and_then(|s| s.pop()) }
+    avec_console(|console| console.captures.pop()).flatten()
 }
 
 /// Recopie sur COM1 tout ce qui part a l'ecran.
@@ -217,16 +258,16 @@ pub fn capture_take() -> Option<alloc::string::String> {
 /// Sert au mode non interactif : la sortie des commandes doit atteindre l'hote
 /// pour qu'il puisse l'analyser. La recopie se fait au fil de l'eau et non a la
 /// fin, de sorte qu'une panique laisse quand meme voir tout ce qui l'a precedee.
-static mut SERIAL_MIRROR: bool = false;
+static SERIAL_MIRROR: AtomicBool = AtomicBool::new(false);
 
 /// Active ou coupe la recopie de la sortie texte vers COM1.
 pub fn set_serial_mirror(on: bool) {
-    unsafe { SERIAL_MIRROR = on; }
+    SERIAL_MIRROR.store(on, Ordering::Relaxed);
 }
 
 /// La sortie texte est-elle recopiee sur COM1 ?
 pub fn serial_mirror() -> bool {
-    unsafe { SERIAL_MIRROR }
+    SERIAL_MIRROR.load(Ordering::Relaxed)
 }
 
 /// Implementation reelle derriere les macros `print!` / `println!`.
@@ -240,13 +281,17 @@ pub fn _print(args: fmt::Arguments) {
 
     // Les captures du shell restent prioritaires : les commandes du terminal
     // graphique continuent a reutiliser println! sans toucher au VGA physique.
-    unsafe {
-        if let Some(stack) = CAPTURE_STACK.as_mut() {
-            if let Some(top) = stack.last_mut() {
-                let _ = top.write_fmt(args);
-                return;
-            }
+    // Le test et l'ecriture se font sous la meme prise : un `capture_take`
+    // concurrent ne peut pas retirer le tampon entre les deux.
+    let capturee = avec_console(|console| match console.captures.last_mut() {
+        Some(top) => {
+            let _ = top.write_fmt(args);
+            true
         }
+        None => false,
+    });
+    if capturee == Some(true) {
+        return;
     }
 
     #[cfg(feature = "reference-desktop")]
@@ -257,10 +302,14 @@ pub fn _print(args: fmt::Arguments) {
     }
 
     #[cfg(not(feature = "reference-desktop"))]
-    unsafe {
-        if SERIAL_MIRROR {
+    {
+        // COM1 hors du verrou de la console : l'emission serie dure 87 us par
+        // octet, et elle a deja son propre jeton.
+        if serial_mirror() {
             crate::drivers::serial::_print(args);
         }
-        let _ = VGA.write_fmt(args);
+        avec_console(|console| {
+            let _ = console.vga.write_fmt(args);
+        });
     }
 }

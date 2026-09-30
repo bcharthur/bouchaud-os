@@ -225,6 +225,8 @@ AUDITS_NOMMES = {
     "EXIT": "B8 -- lifecycle ; une seule transition vers le dernier fil",
     "EXIT_GROUP": "B8 -- groupe reclame sous lifecycle ; un seul demontage",
     "WAIT4": "B8 -- PROCESSES + lifecycle ; recolte unique sous le verrou de PROCESSES",
+    # B9 -- ioctl, audit ecrit au-dessus de l'entree dans SANS_BKL.
+    "IOCTL": "B9 -- AC97 sous SleepMutex ; drapeaux gfx atomiques ; metadata ; files ; SocketState",
 }
 
 # Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.

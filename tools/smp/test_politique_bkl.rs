@@ -46,18 +46,17 @@ use bkl::{exige_bkl, verrouillage, Verrouillage, SANS_BKL};
 /// ait a y penser. Il faut un geste explicite pour le perdre.
 #[test]
 fn tout_ce_qui_n_est_pas_declare_garde_le_verrou() {
-    // Un numero qui n'existe dans aucune table.
+    // Un numero qui n'existe dans aucune table. Depuis le lot B9, aucun appel
+    // reel n'est plus sous verrou (`openat` jusqu'a B5, `execve` jusqu'a B8,
+    // `ioctl` jusqu'a B9 : liberes chacun avec son audit) ; le defaut, lui,
+    // reste le verrou tant que le verrou existe.
     assert!(exige_bkl(60_000));
-    // Le dernier appel reel encore sous verrou : les pilotes (`ioctl`).
-    // (`openat` jusqu'au lot B5, `execve` jusqu'au lot B8 : liberes chacun
-    // avec son audit.)
-    assert!(exige_bkl(nr::IOCTL));
 }
 
-/// Lots B1 a B8 : chaque appel libere l'a ete avec un audit ecrit dans
+/// Lots B1 a B9 : chaque appel libere l'a ete avec un audit ecrit dans
 /// SANS_BKL. Aucun ne doit revenir sous le verrou sans qu'un test le dise.
 #[test]
-fn les_lots_b1_a_b8_ne_regressent_pas() {
+fn les_lots_b1_a_b9_ne_regressent_pas() {
     for numero in [
         nr::UNAME, nr::SYSINFO, nr::PRLIMIT64,                    // B1
         nr::FCNTL,                                                  // B2
@@ -68,6 +67,7 @@ fn les_lots_b1_a_b8_ne_regressent_pas() {
         nr::RT_SIGPROCMASK, nr::RT_SIGACTION, nr::KILL,             // B6
         nr::CONNECT, nr::SENDTO, nr::SENDMSG, nr::SHUTDOWN,         // B7
         nr::FORK, nr::CLONE, nr::EXECVE, nr::EXIT_GROUP, nr::WAIT4, // B8
+        nr::IOCTL,                                                  // B9
     ] {
         assert!(!exige_bkl(numero), "lot B : syscall {} repris sous BKL", numero);
     }

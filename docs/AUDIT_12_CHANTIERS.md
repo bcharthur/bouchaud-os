@@ -38,10 +38,10 @@ lui fait confiance.
 | Mesure | Valeur |
 |---|---|
 | Appels systeme aiguilles | **159** |
-| Appels hors gros verrou | **158** |
-| Appels encore sous gros verrou | **1** |
+| Appels hors gros verrou | **159** |
+| Appels encore sous gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **5** |
-| Garde-fous d'architecture | **117** |
+| Garde-fous d'architecture | **118** |
 | Suites de test hote | **106** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |

@@ -723,6 +723,21 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::EXIT, "B8 -- lifecycle ; une seule transition vers le dernier fil"),
     (nr::EXIT_GROUP, "B8 -- groupe reclame sous lifecycle ; un seul demontage"),
     (nr::WAIT4, "B8 -- PROCESSES + lifecycle ; recolte unique sous le verrou de PROCESSES"),
+    // B9 -- `ioctl`, le dernier appel reel sous le gros verrou.
+    //
+    // Audit, branche par branche :
+    //  * audio (OSS) : l'etat du pilote AC97 etait treize `static mut` ; il est
+    //    sous un SleepMutex (BOUCHAUD_AC97_VERROU_V1), chaque fonction prend le
+    //    verrou une fois, et le reglage du format lit et ecrit sous la meme
+    //    prise (un SPEED concurrent n'est plus perdu) ;
+    //  * console, VT : constantes, et `gfx::is_active` devenu atomique
+    //    (BOUCHAUD_GFX_DRAPEAUX_ATOMIQUES_V1) ;
+    //  * framebuffer : `metadata` du processus (ecran virtuel), geometrie
+    //    atomique, `lfb_phys` atomique ;
+    //  * evdev : tables constantes du pilote d'entree ;
+    //  * FIONBIO/FIONREAD : table des descripteurs, tube/paire sous leur
+    //    verrou, prise inet sous SocketState (domaine Reseau, deja Migre).
+    (nr::IOCTL, "B9 -- AC97 sous SleepMutex ; drapeaux gfx atomiques ; metadata ; files ; SocketState"),
 ];
 
 /// Ce que cet appel systeme exige du gros verrou.
