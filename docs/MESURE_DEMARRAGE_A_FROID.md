@@ -931,21 +931,58 @@ connexions avant, 0 sur 900 apres).
 Rappel §17.1 : ce gain est propre a QEMU/ATA ; la TRIGKEY lit ses binaires
 dans le ramdisk.
 
-### 18.9 Retrait du gros verrou : etat apres le lot B7
+### 18.9 Retrait du gros verrou : etat apres les lots B8, B9 et B10
 
-    appels systeme hors gros verrou   81 -> 150 sur 159 (lots B1 a B7)
-    endurance SMP4, [BKL-STATS] fin de cycle :
-      avant B2 (fcntl sous BKL)   57 321 acquisitions  tenue 2 346 ms
-      B6                           1 694                     1 116 ms
-      B7 (reseau sorti)              416-431                  753-804 ms
-    [BKL-DOMAINES] regressions=0 ; domaines sortis : Fs, Vfs, Ordonnanceur,
-    Readiness, RegistreProcessus, VerrouEnregistrement, Reseau
+    appels systeme hors gros verrou   81 -> 159 sur 159 (lots B1 a B9)
+    endurance, [BKL-STATS] fin de cycle (acquisitions / tenue) :
+      avant B2 (fcntl sous BKL)   57 321      2 346 ms   SMP4
+      B6                           1 694      1 116 ms   SMP4
+      B7 (reseau sorti)              416-431    753-804 ms   SMP4
+      B8 (cycle de vie sorti)        230-231    270-740 ms   SMP4 x2, SMP8
+      B9 (ioctl, console, AC97)       20         10-14 ms   SMP4 x2, SMP8
+    [BKL-DOMAINES] regressions=0 a chaque lot.
 
-Restent : les 8 appels du cycle de vie des processus (clone/clone3/fork/
-vfork/execve/exit/exit_group/wait4), `ioctl`, puis les 12 sites hors appel
-systeme (exceptions fatales, creation de taches, fil `desktop`, console,
-AC97) et enfin `smp_lock` lui-meme.
+B8 a corrige d'abord quatre courses que seul le verrou de l'aiguilleur
+masquait (exit_group/execve concurrents, clone contre exit_group, double
+transition « dernier fil », double recolte wait4 : GROUPE_RECLAME_V1,
+WAIT4_RECOLTE_UNIQUE_V1). B9 a donne leur verrou aux trois etats qui n'en
+avaient pas : AC97 (treize `static mut` -> SleepMutex), console VGA et pile de
+captures (deux `static mut`, deja ecrits sans BKL par les fils noyau ->
+SpinLockIrq a prise bornee), drapeaux gfx (atomiques). Sonde
+`audio-concurrence-probe` : 12/12.
 
-La course `wait4` du §15, la sonde d'ordonnanceur A/B (fragile sur la base
-comme sur chaque lot) et les caches `static mut` du chemin de rendu noyau
+**Regression B8 vue par la CI et pas en local.** Le smoke Ladybird #377 a
+panique au premier `execve` du navigateur : le chemin no-return verifiait
+qu'il tenait le gros verrou (`abandoned_depth > 0`), invariant inverse par B8.
+Aucune sonde locale n'appelait `execve` -- l'autorun lance ses programmes par
+`exec_image`. Corrige (d2c45e1a, prouve avant/apres par `exec-fd-probe`), et
+`exec-fd-probe` entre dans le scenario d'endurance.
+
+B10 retire les derniers sites d'acquisition : l'aiguilleur (numeros inconnus,
+mode trace), `run`/`run_noyau` (remplaces par la porte de transition de
+l'ordonnanceur, qui couvre en plus la fin de fenetre que le verrou suspendu
+laissait ouverte), les exceptions fatales. Apres B10, `smp_lock::enter` et
+`try_enter` n'ont plus d'appelant. Le fil `desktop` ne tenait deja plus le
+verrou : `run_noyau` le suspendait avant la commutation, et les portees
+`desktop_bkl` etaient mortes (`SKIP_NO_BKL`).
+
+Reste : supprimer `smp_lock` lui-meme -- ses points d'accroche dans
+l'ordonnanceur, les attentes et les releves (`[BKL-*]`), les portees de
+domaine qui n'existaient que pour attribuer ses prises -- et poser une garde
+qui interdise son retour.
+
+**Sonde d'ordonnanceur.** Mesuree isolement (5 passes par demarrage, 2
+demarrages par image, sonde a 60 reveils) : image d'avant le chantier 5/10
+en echec, dma32 2/10, b1 2/10, b9 5/10 -- aucune tendance liee aux lots. La
+sonde avait un defaut : avec 60 reveils, `p99 = retards[59]` = le maximum, et
+les deux verifications comparaient un seul echantillon. Portee a 300 reveils
+(BOUCHAUD_SONDE_ORDO_QUANTILES_V1), elle echoue encore sur l'image d'avant le
+chantier (3/5) : la mediane et le p95 interactifs sont meilleurs a chaque
+passe, mais la queue (p99 5,8-8,8 ms, pire jusqu'a 40 ms) est parfois pire que
+celle de la classe normale. C'est un defaut reel de l'ordonnanceur, anterieur
+au chantier : une tache interactive utilisateur est reveillee par demande
+differee sur son coeur precedent, sans IPI ; la priorite n'agit qu'a
+l'election. Ouvert.
+
+La course `wait4` du §15 et les caches `static mut` du chemin de rendu noyau
 (RES_CACHE, SUBRES_*) restent ouverts.
