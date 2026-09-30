@@ -497,9 +497,19 @@ duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}"
     let depth_avant = crate::kernel::smp_lock::profondeur_locale();
 
     let abandoned_depth = crate::kernel::smp_lock::suspend_for_schedule();
-    debug_assert!(
-        abandoned_depth > 0,
-        "execve: chemin no-return sans BKL syscall actif"
+    // BOUCHAUD_EXECVE_SANS_BKL_V1
+    //
+    // L'invariant s'est INVERSE au lot B8. Tant qu'`execve` passait par le
+    // gros verrou de l'aiguilleur, ce chemin devait l'y trouver (profondeur
+    // > 0) et l'abandonner ; l'assertion le verifiait. Depuis qu'`execve` est
+    // dans SANS_BKL, rien ne le prend : une profondeur non nulle ici serait
+    // une FUITE -- un gros verrou pris quelque part dans execve et jamais
+    // rendu. L'ancienne assertion paniquait au premier execve reussi du
+    // navigateur (smoke Ladybird #377, proc.rs:500, RequestServer) ; aucune
+    // sonde locale n'appelait execve.
+    debug_assert_eq!(
+        abandoned_depth, 0,
+        "execve: le chemin no-return tient le gros verrou (fuite)"
     );
 
     let portees_refermees = crate::kernel::sync::referme_portees_abandonnees(cpu_courant);
