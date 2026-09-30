@@ -253,7 +253,11 @@ def mesure_hote(nom):
     resume = ""
     for ligne in sortie.splitlines():
         if ligne.startswith("test result:"):
-            resume = ligne.strip()
+            # La duree (« finished in 0.01s ») n'est pas une preuve : c'est
+            # l'horloge de la machine qui mesure. La garder dans le document
+            # rendait verifie-integration-ladybird.py rouge a 0.00s contre
+            # 0.01s, sans qu'un seul test ait change d'etat.
+            resume = re.sub(r";\s*finished in [0-9.]+s", "", ligne.strip())
     if code == 0:
         return "OK", resume or "banc vert"
     return "ECHEC", resume or "banc rouge"
