@@ -846,23 +846,57 @@ variable pour balayer la fenetre (A)/(B). 5 demarrages x 6 x 1 000 tours en
 SMP4 sur la tete de branche : **30 000 `wait4`, 0 blocage**. Pas de
 correctif sans reproduction ; la course reste decrite et ouverte.
 
-### 18.6 BrowserHost avant / apres DMA (CI, `ladybird-native-browser`)
+### 18.6 #371 : PAS une mesure apres-DMA -- nouvelle baseline fonctionnelle PIO
 
-    run                        #367 (6fc08087, PIO)   #371 (846b5b5b, DMA)
-    smoke BrowserHost          ROUGE (fetch-json)     VERT
-    LADYBIRD_CONVERGENCE_OK    --                     startup ipc worker_http
-                                                      worker_blob codecs=11/11 js
-    lectures disque            4 604 / 287,8 Mio      4 604 / 287,8 Mio
-    service du controleur      66,0 s                 46,7 s   (-29 %)
-    attente du verrou (somme)  59,1 s                 37,4 s
-    service par lecture 64 Kio 14,3 ms                10,1 ms
-    HOST_WORKER_HTTP_PERF_FIRST 2 645 ms              2 546 ms
-    HOST_WORKER_BLOB_PERF_FIRST 9 009 ms              8 706 ms
-    ordre worker (diagnostic)  ROUGE                  ROUGE (INCONCLUSIF, anterieur)
+**Correction d'une lecture fausse.** Une premiere version de ce paragraphe
+attribuait au DMA la baisse du service disque de #367 a #371. C'est faux :
+le journal BrowserHost de #371 porte
 
-Le DMA ne gagne que 29 % sous Ladybird, contre un facteur ~30 au banc au
-repos (0,4 ms par 64 Kio). Hypothese NON verifiee : la boucle d'attente du
-bus-master cede le coeur verrou tenu, et sous charge chaque cession coute un
-quantum facture au service. 347fbbe5 ajoute la mesure (dma_attente_ms,
-dma_cede_ms, dma_cessions dans ATA_CONTROLEUR, publie aussi a chaque sortie
-de processus) ; aucune correction avant ce chiffre.
+    ATA_DMA indisponible raison=adresses-hors-contraintes
+    ATA_CONTROLEUR ... dma_pret=0 lots_dma=0
+
+Le smoke a tourne ENTIEREMENT en PIO. Je n'avais pas verifie `dma_pret` ni
+`lots_dma` avant de conclure.
+
+#371 (846b5b5b : PIO + correctifs SMP / TLB / reveils) est donc une nouvelle
+baseline fonctionnelle PIO :
+
+    BrowserHost smoke            SUCCESS   (#367 : rouge, fetch-json)
+    HOST_SMOKE_OK                images=11/11 js=17/17
+    LADYBIRD_FUNCTIONAL_SMOKE    ok
+    LADYBIRD_PERFORMANCE_SMOKE   ok
+    HOST_WORKER_HTTP_PERF_FIRST  2 546 ms
+    HOST_WORKER_BLOB_PERF_FIRST  8 706 ms   (cold start 8 706 ms)
+    lectures disque              4 604 / 287,8 Mio, service 46,7 s, PIO
+    ordre worker (diagnostic)    ORDRE_WORKER_ANALYSE_OK puis INCONCLUSIF
+                                 (job rouge, deja rouge en #367)
+
+L'ecart de service 66,0 s -> 46,7 s entre #367 et #371 n'est PAS un effet du
+DMA ; il n'est pas explique ici.
+
+### 18.7 Pourquoi le DMA se desactivait sous Ladybird : l'arene au-dessus de 4 Gio
+
+Le smoke BrowserHost donne `-m 8192` a QEMU ; tous les autres lanceurs,
+4 Gio. Sur i440fx, 8 Gio se repartissent en ~3 Gio sous 4 Gio et 5 Gio
+au-dessus. L'arene DMA est taillee en haut de la PLUS GRANDE region : a
+8 Gio, elle est entierement au-dessus de 4 Gio (compagnon `base=0x23e005000`).
+Les deux contraintes « PRDT sous 4 Gio » et « tampon sous 4 Gio » tombaient ;
+l'alignement et la frontiere de 64 Kio etaient respectes. Reproduit en local :
+
+    -m 4096 : compagnon base=0xbdfe5000   -> ATA_DMA pret
+    -m 8192 : compagnon base=0x23e005000  -> ATA_DMA indisponible
+                                             raison=adresses-hors-contraintes
+
+Correction (BOUCHAUD_DMA32_V1) : `alloc_dma32`. Si l'arene principale est
+sous 4 Gio, elle sert ; sinon une reserve de 1 Mio, prise en haut de la plus
+haute region ENTIEREMENT sous 4 Gio et retiree des frames utilisateur. Aucune
+adresse codee en dur. L'ATA y prend sa PRDT (une page : alignee, ne traverse
+pas 64 Kio) et son tampon ; la verification des quatre contraintes reste et
+publie, en cas de faute, les adresses exactes et la contrainte violee
+(`ATA_DMA contraintes ... prdt_sous_4gio= tampon_sous_4gio= prdt_alignee=
+prdt_dans_64k=`). Repli PIO inchange.
+
+    -m 4096 : DMA32 source=arene-principale        ATA_DMA pret prdt=0xbffdf000
+    -m 8192 : DMA32 source=reserve 0xbfee0000..0xbffe0000
+                                                   ATA_DMA pret prdt=0xbfee0000
+              ATA_CONTROLEUR dma_pret=1 lots_dma=22 replis_pio=0
