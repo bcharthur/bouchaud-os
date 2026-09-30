@@ -538,6 +538,9 @@ total_us={} pire_us={} candidats_suffisants={}",
         maintenant, yields, pire_chaine, reprises, chaines,
     ));
     crate::kernel::task::publie_syscall_top(8);
+    // Qui lit le disque, et ce que coute l'attente du controleur. Meme
+    // cadence : compteurs cumulatifs, un releve par minute.
+    crate::fs::backing_attrib::publie(maintenant);
     }
 
     // LES DEUX CALCULS DE `/proc/stat`, COTE A COTE.

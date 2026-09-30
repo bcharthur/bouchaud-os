@@ -637,6 +637,7 @@ for motif in \
     'CACHE_BALAYAGE .*' \
     'FAULT_REPRISE .*' \
     'BACKING_DISK_GLOBAL .*' \
+    'BACKING_DISK_DECOMP .*' \
     'BACKING_MEMORY_GLOBAL .*' \
     'CLEAN_PAGE_CACHE_GLOBAL .*' \
     'FAULT_WAIT .*'
@@ -645,6 +646,13 @@ do
         | sed 's/^/  /' || true
 done
 echo "  (une famille absente ci-dessus n'a pas ete emise par ce noyau)"
+
+# Qui lit le disque : le dernier releve ENTIER de BACKING_DISK_ATTRIB, joint
+# aux images (PERF_EXEC_PRET) et aux chemins (BACKING_PROBE). `tail -10` ne
+# convient pas ici : un releve fait une ligne par couple (pid, fichier).
+echo
+echo "== lectures disque, par service et par fichier =="
+python3 tools/ci/attribue-lectures-disque.py "$LOG" 2>&1 | sed 's/^/  /' || true
 
 echo
 echo "== les six services, cote a cote =="

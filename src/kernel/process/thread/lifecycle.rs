@@ -270,6 +270,9 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
             t.0, t.1, t.2, t.3 / 1_000, t.4 / 1_000, t.5 / 1_000, t.6 / 1_000,
             t.7 / 1_000,
         ));
+        // Attribution des memes lectures. Tout atomique : aucun verrou pris
+        // ici, conformement a `verifie-sondes-sans-verrou.py`.
+        crate::fs::backing_attrib::publie(crate::kernel::timer::monotonic_ms());
     }
 
     // BOUCHAUD_HOTFIX13_ASYNC_KERNEL_REAP_V2

@@ -85,13 +85,18 @@ static CONTROLLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_MAX_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 
 fn lock_controller() -> crate::kernel::sync::SpinLockGuard<'static, ()> {
+    lock_controller_mesure().0
+}
+
+/// Le verrou, et le temps passe a l'attendre (ns).
+fn lock_controller_mesure() -> (crate::kernel::sync::SpinLockGuard<'static, ()>, u64) {
     let start = crate::kernel::timer::monotonic_ns();
     let guard = CONTROLLER.lock();
     let waited = crate::kernel::timer::monotonic_ns().saturating_sub(start);
     CONTROLLER_ACQUIRES.fetch_add(1, Ordering::Relaxed);
     CONTROLLER_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
     CONTROLLER_MAX_WAIT_NS.fetch_max(waited, Ordering::Relaxed);
-    guard
+    (guard, waited)
 }
 
 pub fn contention_stats() -> (u64, u64, u64) {
@@ -356,11 +361,22 @@ pub fn present(drive: Drive) -> bool {
 /// Le mode LBA28 limite chaque commande a 256 secteurs (128 Kio) : les demandes
 /// plus grandes sont decoupees.
 pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
+    read_mesure(drive, lba, count, out).0
+}
+
+/// Comme [`read`], et rend aussi l'attente du verrou du controleur (ns).
+///
+/// Le controleur est une ressource SERIE : la duree d'une lecture vue de
+/// l'appelant = attente (une autre lecture l'occupe) + service (il travaille
+/// pour celle-ci). Les additionner sans les separer fait compter l'attente de
+/// chaque lecteur concurrent comme du travail disque. Voir
+/// `fs::backing_attrib`.
+pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usize, u64) {
     probe();
     if !present(drive) || count == 0 {
-        return 0;
+        return (0, 0);
     }
-    let _controller = lock_controller();
+    let (_controller, attente_ns) = lock_controller_mesure();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);
@@ -377,7 +393,7 @@ pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
         }
         done += batch;
     }
-    done
+    (done, attente_ns)
 }
 
 /// Lit un lot d'au plus 256 secteurs (une seule commande ATA).

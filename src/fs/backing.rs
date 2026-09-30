@@ -265,12 +265,21 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     };
     let mut done = 0usize;
     let mut absolute = offset;
+    // Attribution (`fs::backing_attrib`) : duree totale des trois commandes
+    // eventuelles, dont l'attente du verrou du controleur. Les compteurs
+    // historiques ci-dessous gardent leur definition, pour rester comparables
+    // aux runs precedents.
+    let debut_attrib_ns = crate::kernel::timer::monotonic_ns();
+    let mut attente_ns = 0u64;
 
     let intra = absolute % SECTOR_SIZE;
     if intra != 0 && done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        if block::read_blocks(drive, lba, 1, &mut sector) != 1 {
+        let (lus, attente) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
+        attente_ns += attente;
+        if lus != 1 {
+            attribue(node, offset, done, debut_attrib_ns, attente_ns);
             return done;
         }
         let take = core::cmp::min(SECTOR_SIZE - intra, wanted - done);
@@ -285,12 +294,13 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if full_sectors > 0 {
         let bytes = full_sectors * SECTOR_SIZE;
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        let read = block::read_blocks(
+        let (read, attente) = block::read_blocks_mesure(
             drive,
             lba,
             full_sectors,
             &mut out[done..done + bytes],
         );
+        attente_ns += attente;
         let got = read * SECTOR_SIZE;
         done += got;
         absolute += got;
@@ -298,6 +308,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
             DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
             DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
             note_duree_io(debut_io_ns);
+            attribue(node, offset, done, debut_attrib_ns, attente_ns);
             return done;
         }
     }
@@ -305,7 +316,9 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        if block::read_blocks(drive, lba, 1, &mut sector) == 1 {
+        let (lus, attente) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
+        attente_ns += attente;
+        if lus == 1 {
             let take = wanted - done;
             out[done..done + take].copy_from_slice(&sector[..take]);
             done += take;
@@ -315,7 +328,19 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
     DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
     note_duree_io(debut_io_ns);
+    attribue(node, offset, done, debut_attrib_ns, attente_ns);
     done
+}
+
+/// Remet une lecture disque a `fs::backing_attrib` : pid courant, noeud,
+/// plage, service (duree - attente du verrou) et attente.
+fn attribue(node: usize, offset: usize, octets: usize, debut_ns: u64, attente_ns: u64) {
+    let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
+    let cpu = crate::arch::x86_64::usermode::cpu_index();
+    let pid = crate::kernel::task::pid_pour_sonde(cpu);
+    crate::fs::backing_attrib::note(
+        pid, node, offset, octets, duree.saturating_sub(attente_ns), attente_ns.min(duree),
+    );
 }
 
 /// Ajoute une lecture au cumul, et retient la pire.
