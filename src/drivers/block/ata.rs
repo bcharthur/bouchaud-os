@@ -666,19 +666,35 @@ mod dma {
             desactive("bar4-non-es");
             return false;
         }
-        let Some((prdt, _)) = crate::kernel::memory::alloc_dma(PRD_MAX * 8) else {
-            desactive("prdt-non-allouee");
+        // BOUCHAUD_DMA32_V1 : le bus-master IDE n'a que des adresses de 32 bits.
+        // `alloc_dma` peut rendre de la memoire au-dessus de 4 Gio (arene
+        // taillee dans la plus grande region : c'est le cas avec 8 Gio, smoke
+        // Ladybird #371). La PRDT prend une PAGE entiere : alignee sur 4 Kio,
+        // elle ne peut pas traverser une frontiere de 64 Kio.
+        let Some((prdt, _)) = crate::kernel::memory::alloc_dma32(PRDT_OCTETS) else {
+            desactive("prdt-non-allouee-sous-4gio");
             return false;
         };
-        let Some((tampon, _)) = crate::kernel::memory::alloc_dma(TAMPON) else {
-            desactive("tampon-non-alloue");
+        let Some((tampon, _)) = crate::kernel::memory::alloc_dma32(TAMPON) else {
+            crate::kernel::memory::free_dma32(prdt, PRDT_OCTETS);
+            desactive("tampon-non-alloue-sous-4gio");
             return false;
         };
-        if prdt + (PRD_MAX * 8) as u64 > 0x1_0000_0000
-            || tampon + TAMPON as u64 > 0x1_0000_0000
-            || prdt % 4 != 0
-            || prdt / 0x1_0000 != (prdt + (PRD_MAX * 8) as u64 - 1) / 0x1_0000
-        {
+        // Verification maintenue, contrainte par contrainte : si l'allocateur
+        // venait a mentir, le journal nomme la contrainte et les adresses.
+        let fautes = contraintes_violees(prdt, tampon);
+        if fautes != 0 {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ATA_DMA contraintes prdt={:#x}..{:#x} tampon={:#x}..{:#x} \
+prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
+                prdt, prdt + PRDT_OCTETS as u64, tampon, tampon + TAMPON as u64,
+                (fautes & FAUTE_PRDT_4GIO == 0) as u8,
+                (fautes & FAUTE_TAMPON_4GIO == 0) as u8,
+                (fautes & FAUTE_PRDT_ALIGNEMENT == 0) as u8,
+                (fautes & FAUTE_PRDT_64K == 0) as u8,
+            ));
+            crate::kernel::memory::free_dma32(tampon, TAMPON);
+            crate::kernel::memory::free_dma32(prdt, PRDT_OCTETS);
             desactive("adresses-hors-contraintes");
             return false;
         }
@@ -692,6 +708,36 @@ mod dma {
             bar4 & 0xFFFC, prdt, tampon, ide.bus, ide.slot, ide.func
         ));
         true
+    }
+
+    /// Une page : la PRDT n'utilise que `PRD_MAX * 8` octets, mais une page
+    /// alignee ne traverse jamais une frontiere de 64 Kio.
+    const PRDT_OCTETS: usize = 4096;
+    const FAUTE_PRDT_4GIO: u8 = 1;
+    const FAUTE_TAMPON_4GIO: u8 = 2;
+    const FAUTE_PRDT_ALIGNEMENT: u8 = 4;
+    const FAUTE_PRDT_64K: u8 = 8;
+
+    /// Les quatre contraintes du bus-master IDE (spec. PCI IDE, PRDT) : PRDT
+    /// et tampon entierement sous 4 Gio, PRDT alignee sur 4 octets et
+    /// contenue dans une meme fenetre de 64 Kio. Rend un masque de fautes.
+    pub(super) fn contraintes_violees(prdt: u64, tampon: u64) -> u8 {
+        const QUATRE_GIO: u64 = 0x1_0000_0000;
+        let utile = (PRD_MAX * 8) as u64;
+        let mut fautes = 0;
+        if prdt + PRDT_OCTETS as u64 > QUATRE_GIO {
+            fautes |= FAUTE_PRDT_4GIO;
+        }
+        if tampon + TAMPON as u64 > QUATRE_GIO {
+            fautes |= FAUTE_TAMPON_4GIO;
+        }
+        if prdt % 4 != 0 {
+            fautes |= FAUTE_PRDT_ALIGNEMENT;
+        }
+        if prdt / 0x1_0000 != (prdt + utile - 1) / 0x1_0000 {
+            fautes |= FAUTE_PRDT_64K;
+        }
+        fautes
     }
 
     /// Construit la PRDT pour `octets` a partir du tampon. Rend le nombre

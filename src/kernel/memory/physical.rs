@@ -29,6 +29,29 @@ static ARENE: AreneDma = AreneDma::neuve();
 /// Reserve en fin de la plus grande region pour l'arene DMA (pilotes).
 const DMA_RESERVE: u64 = 32 * 1024 * 1024;
 
+// BOUCHAUD_DMA32_V1
+//
+// L'ARENE DMA N'EST PAS FORCEMENT SOUS 4 GIO.
+//
+// Elle est taillee en haut de la PLUS GRANDE region RAM. Avec 8 Gio donnes a
+// QEMU (i440fx : ~3 Gio sous 4 Gio, 5 Gio au-dessus), cette region est
+// au-dessus de 4 Gio, et toute l'arene aussi (base 0x23e005000). Les
+// peripheriques 64 bits (NVMe, xHCI, e1000, RTL8168) s'en moquent ; le
+// bus-master IDE, lui, n'a que des adresses de 32 bits (PRDT et tampons) :
+// la lecture DMA de l'ATA se desactivait (« adresses-hors-contraintes ») sur
+// le smoke Ladybird (#371, -m 8192) et nulle part ailleurs, puisque tous les
+// autres lanceurs donnent 4 Gio.
+//
+// Une reserve dediee, prise en haut de la plus haute region ENTIEREMENT sous
+// 4 Gio, sert `alloc_dma32`. Quand l'arene principale est elle-meme sous
+// 4 Gio, `alloc_dma32` la sert directement et la reserve n'existe pas.
+// Aucune adresse n'est codee en dur : la reserve suit la carte memoire.
+const DMA32_RESERVE: u64 = 1024 * 1024;
+const QUATRE_GIO: u64 = 0x1_0000_0000;
+static ARENE_32: AreneDma = AreneDma::neuve();
+static DMA32_PAR_PRINCIPALE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Reserve pour les frames physiques distribuees aux processus utilisateur
 /// (tables de pages, segments ELF, piles, `mmap`). Prelevee sur la plus grande
 /// region, juste avant l'arene DMA : sans elle, le tas noyau avalerait toute la
@@ -119,6 +142,44 @@ pub fn init(boot: &'static BootInfo) {
     }
     crate::kernel::dmesg::log("memory: acces physique + tas etendu + arene DMA prets");
 
+    // Reserve DMA 32 bits (voir BOUCHAUD_DMA32_V1). `reserve32` est la plage
+    // retiree de sa region avant que celle-ci n'alimente les frames.
+    let mut reserve32: Option<(u64, u64)> = None;
+    if region_end <= QUATRE_GIO {
+        DMA32_PAR_PRINCIPALE.store(true, core::sync::atomic::Ordering::Release);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "DMA32 source=arene-principale fin={:#x}", region_end
+        ));
+    } else {
+        let mut meilleure: Option<(u64, u64)> = None;
+        for region in boot.memory_regions.iter() {
+            if region.kind != MemoryRegionKind::Usable || region.start == best_start {
+                continue;
+            }
+            let debut = region.start.max(0x100000);
+            let fin = region.start.saturating_add(region.len).min(QUATRE_GIO) & !0xFFF;
+            if fin <= debut || fin - debut < DMA32_RESERVE + 16 * 1024 * 1024 {
+                continue;
+            }
+            if meilleure.map_or(true, |(_, f)| fin > f) {
+                meilleure = Some((debut, fin));
+            }
+        }
+        match meilleure {
+            Some((_, fin)) => {
+                let debut = (fin - DMA32_RESERVE) & !0xFFF;
+                ARENE_32.configure(debut, fin);
+                reserve32 = Some((debut, fin));
+                crate::kernel::dmesg::log_fmt(format_args!(
+                    "DMA32 source=reserve debut={:#x} fin={:#x}", debut, fin
+                ));
+            }
+            None => crate::kernel::dmesg::log(
+                "DMA32 source=aucune -- aucune region sous 4 Gio assez grande",
+            ),
+        }
+    }
+
     // Alimente l'allocateur de frames : l'arene utilisateur reservee ci-dessus,
     // plus toutes les autres regions RAM utilisables laissees de cote.
     unsafe {
@@ -137,7 +198,19 @@ pub fn init(boot: &'static BootInfo) {
             continue;
         }
         if start >= 0x100000 && end > start {
-            crate::kernel::vmm::add_region(start, end);
+            match reserve32 {
+                // La reserve 32 bits est retiree de sa region : elle ne doit
+                // jamais devenir des frames utilisateur.
+                Some((r_debut, r_fin)) if r_debut >= start && r_fin <= end => {
+                    if r_debut > start {
+                        crate::kernel::vmm::add_region(start, r_debut);
+                    }
+                    if end > r_fin {
+                        crate::kernel::vmm::add_region(r_fin, end);
+                    }
+                }
+                _ => crate::kernel::vmm::add_region(start, end),
+            }
         }
     }
 }
@@ -245,6 +318,37 @@ pub fn alloc_dma(size: usize) -> Option<(u64, *mut u8)> {
     // tampon.
     unsafe { core::ptr::write_bytes(virt, 0, size) };
     Some((base, virt))
+}
+
+/// Alloue un bloc DMA dont TOUTES les adresses sont sous 4 Gio (aligne page,
+/// mis a zero), pour un peripherique aux adresses de 32 bits. Voir
+/// BOUCHAUD_DMA32_V1. `None` si aucune source 32 bits n'existe ou si elle est
+/// epuisee ; le pilote retombe alors sur son chemin sans DMA.
+pub fn alloc_dma32(size: usize) -> Option<(u64, *mut u8)> {
+    if DMA32_PAR_PRINCIPALE.load(core::sync::atomic::Ordering::Acquire) {
+        let (base, virt) = alloc_dma(size)?;
+        if base + size as u64 > QUATRE_GIO {
+            free_dma(base, size);
+            return None;
+        }
+        return Some((base, virt));
+    }
+    if !ARENE_32.configuree() {
+        return None;
+    }
+    let base = interrupts::without_interrupts(|| ARENE_32.alloue(size))?;
+    let virt = phys_to_virt(base);
+    unsafe { core::ptr::write_bytes(virt, 0, size) };
+    Some((base, virt))
+}
+
+/// Rend un bloc obtenu par [`alloc_dma32`].
+pub fn free_dma32(base: u64, size: usize) {
+    if DMA32_PAR_PRINCIPALE.load(core::sync::atomic::Ordering::Acquire) {
+        free_dma(base, size);
+    } else {
+        interrupts::without_interrupts(|| ARENE_32.libere(base, size));
+    }
 }
 
 /// Rend un bloc DMA a l'arene.

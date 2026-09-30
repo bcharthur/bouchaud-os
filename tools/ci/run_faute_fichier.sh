@@ -96,7 +96,7 @@ LOG="$SORTIE/serie.log"
 timeout "$SECONDES" qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$SORTIE/scenario.img" \
-  -m 2048 -smp 4 -display none -serial file:"$LOG" \
+  -m "${MEMOIRE:-2048}" -smp 4 -display none -serial file:"$LOG" \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || true
 
 PROPRE="$SORTIE/propre.log"
