@@ -686,3 +686,49 @@ negatif qui reintroduit le `CACHE.lock()` exact.
 
 Une regle qu'il faut se rappeler tout seul n'est pas une regle.
 
+
+## 17. LES 121-132 s DE LECTURES DISQUE : SOMME DE LATENCES, PAS OCCUPATION
+
+### Ce que disaient les compteurs
+
+    BACKING_DISK_GLOBAL      reads=4474 bytes=293 Mio total_us=120 881 523 worst_us=5 599 631
+    CLEAN_PAGE_CACHE_GLOBAL  miss=52534 miss_read_us=107 800 634          (run 36239992990)
+
+Les instantanes par service n'expliquaient que ~22 s des lectures du cache :
+WebContent 9,65 s (1 372 miss), Compositor 5,94 s, RequestServer 2,31 s,
+WebWorker #1 2,31 s, ImageDecoder 2,02 s. Et `total_us` mesure chaque lecture
+depuis AVANT la prise du verrou du controleur ATA : deux lecteurs concurrents
+comptent chacun l'attente de l'autre. Ce total n'est pas le temps pendant
+lequel le disque a travaille.
+
+### La sonde (`fs::backing_attrib`, c284c35b + 0a8d1f8b)
+
+Par (pid, fichier) : lectures, octets, sequentielles, **service** (verrou du
+controleur TENU), **attente** (de ce verrou), **hors verrou** (le reste),
+pire service, pages deja lues (bitmap par noeud). Global : les memes sommes,
+pages neuves/relues, histogramme des tailles. Sans verrou ni allocation.
+`tools/ci/attribue-lectures-disque.py` joint `PERF_EXEC_PRET` et
+`BACKING_PROBE`, et le smoke BrowserHost l'imprime dans son bloc de preuves.
+
+Validation (banc `run_faute_fichier.sh`, 80 Mio x 4, SMP4) : 20 484 pages
+neuves (20 480 + en-tetes), somme des couples = global = 15 976 ms,
+`BACKING_DISK_GLOBAL` 15 974 ms ; un lecteur, 100 % sequentiel, 64 Kio ;
+**5,0 Mio/s** de debit controleur (PIO sous TCG).
+
+### Premier defaut revele : la double file de `probe()` (db60f400)
+
+Scenario d'endurance SMP4, quatre lecteurs : service 9,6 s, attente 5,5 s,
+**hors verrou 26,5 s**. `ata::probe()`, appele au debut de chaque E/S, prenait
+le verrou du controleur pour lire un drapeau : chaque E/S faisait la queue
+deux fois. Apres correction : hors verrou 5 ms, `ata_acquires` 5 071 ->
+1 214. **Pas de gain de latence** : l'attente s'est reportee sur le verrou de
+transfert (37,8 s), le controleur restant la ressource serie.
+
+### Ce qu'il reste a etablir sous Ladybird
+
+Le run Ladybird qui porte la sonde dira, par service et par fichier :
+occupation reelle du controleur, file d'attente, pages relues (plafond de
+64 Mio du cache contre des binaires de 60 a 196 Mio), taille des lectures.
+Hors CI, sur la TRIGKEY, les binaires viennent du ramdisk (`BACKING_MEMORY`),
+pas d'ATA : ce cout est d'abord un cout QEMU/PIO, a ne pas confondre avec le
+materiel.
