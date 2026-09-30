@@ -775,3 +775,73 @@ Conclusions, par la mesure :
   cache ne gagnerait que ~22 Mio), pas l'attente hors verrou (44 ms) ;
 * ce cout est propre a QEMU/ATA : sur la TRIGKEY les binaires sont dans le
   ramdisk (`fs/backing.rs` : UEFI -> `register_memory`).
+
+## 18. LECTURE DMA, DEUX REVEILS PERDUS ET UNE PANIQUE TLB (branche `claude/ata-dma-investigation`)
+
+Branche d'investigation, PAS fusionnee : la lecture DMA reste marquee WIP.
+Baseline verte de reference : `checkpoint/ladybird-green-20260930` (228efb16).
+Toutes les mesures ci-dessous sont QEMU TCG locales sauf mention CI.
+
+### 18.1 Lecture ATA en DMA bus-master (8d84fb0e, WIP)
+
+`READ DMA` (0xC8) par le bus-master IDE PCI (BAR4), PRDT + tampon de rebond
+de 128 Kio sous 4 Gio, repli PIO sur tout ecart, DMA desactive apres trois
+echecs. Banc de faute 80 Mio x 4 : service du controleur **380-555 ms** contre
+**15 449-17 028 ms** en PIO ; verification de CHAQUE octet (`gros-elf`,
+formule du generateur) sur 3 x 4 lancements : **0 octet corrompu**.
+Rappel §17.1 : ce gain est propre a QEMU/ATA -- la TRIGKEY lit ses binaires
+dans le ramdisk.
+
+### 18.2 Reveils perdus : le reveilleur effacait l'etat de l'attente suivante
+
+Observe une fois en endurance SMP4 (DMA) : lecteur `Blocked cle_attente=0`,
+hors de toute file, cinq autres parques derriere lui, neuf minutes figees.
+`wake_wait_queue`, `wake_sleepers` (bde2cf5e) et `wake_for_signal` (5ad82286)
+faisaient la transition `Blocked -> Ready` PUIS effacaient cle, echeance ou
+`waiting_for_child` : effacement qui pouvait tomber sur une NOUVELLE attente
+deja publiee par la tache reveillee. Chaque attente efface desormais ses
+propres champs ; garde `verifie-reveil-sans-effacement.py` (deux negatifs).
+Non reproduit a la demande (stress 3 x 5 x 10 cycles, 0 blocage) : la
+correction repose sur le mecanisme, pas sur un avant/apres.
+
+### 18.3 Panique TLB « acquittement manquant » : reproduite, corrigee
+
+Le releve complet de l'ordonnanceur s'imprime depuis l'IRQ du minuteur du BSP,
+interruptions masquees ; sa duree est celle du port serie. Au-dela de 2 s,
+l'emetteur d'un shootdown panique (borne fail-closed). Sur un COM1 reel a
+115 200 bauds, un releve de ~23 Ko suffit.
+
+Banc `tools/ci/banc-com1-lent.sh` : COM1 vide a 2 400 o/s par un lecteur lent
+(le tube plein laisse THRE a zero, comme un 16550). Scenario d'endurance SMP4,
+300 s :
+
+    noyau               essais  paniques  releves   pire masque   phases
+    avant (bef8a341)       3      3/3      1-3      2 922-3 221 ms  MEMOIRE au plus
+    apres (846b5b5b)       3      0/3     18-22     4 797-4 798 ms  les quatre, statut=0
+
+Correction : `write_lot`, interruptions masquees, sert lui-meme les
+shootdowns en attente a chaque lot de 16 octets (`sert_shootdowns_en_attente`,
+traitement du gestionnaire d'IPI, idempotent, sans EOI). Borne de 2 s et
+releve inchanges. Garde `verifie-tlb-point-de-service.py`.
+
+Reste ouvert : a debit lent, un releve de plusieurs secondes masquees
+provoque la latence HID qui declenche le releve suivant (22 releves en
+300 s). Sans danger pour le TLB desormais, mais c'est une boucle.
+
+### 18.4 Serie longue sur le noyau corrige (DMA + 18.2), COM1 vers fichier
+
+    topologie  cycles  paniques  echecs TLB  echecs DMA  pire masque
+    SMP4         10       0          0           0        22-74 ms
+    SMP8          5       0          0           0        40-111 ms
+    SMP2          5       0          0           0        18-23 ms
+    SMP1          5       0          0           0         8-14 ms
+
+Deux cycles SMP8 finissent `statut=1` : `ENDURANCE_ORDONNANCEUR_OK` absent
+(sonde d'ordonnanceur A/B, defaut anterieur) ; stockage et processus passent.
+
+### 18.5 La course `wait4` du §15 : mesuree, non reproduite
+
+`wait4-course-probe` : fork, sortie immediate du fils, `waitpid`, delai
+variable pour balayer la fenetre (A)/(B). 5 demarrages x 6 x 1 000 tours en
+SMP4 sur la tete de branche : **30 000 `wait4`, 0 blocage**. Pas de
+correctif sans reproduction ; la course reste decrite et ouverte.
