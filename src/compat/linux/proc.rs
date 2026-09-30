@@ -113,7 +113,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             partages, limite_as, promesses, clean_pages })),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
-        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1 }),
+        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(child_signals),
     });
     task::register_process(child.clone());
@@ -306,6 +306,11 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
 
     // All fallible image construction is complete. Only now terminate sibling
     // tasks and retire the old identity: failed execve must leave both intact.
+    // BOUCHAUD_GROUPE_RECLAME_V1 : point de non-retour. Un autre fil qui a
+    // deja reclame le groupe (exit_group, execve) gagne ; celui-ci se retire.
+    if !task::reclame_groupe() {
+        task::retire_perdant_du_groupe();
+    }
     task::terminate_sibling_threads();
     // Stop every sibling on the old CR3 before replacement.
     let old_identity = process.mm.lock().space.identity();
@@ -350,7 +355,12 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     process.metadata.lock().name = path;
     process.files.lock().close_on_exec();
     process.signals.lock().reset_for_exec();
-    process.lifecycle.lock().threads = 1;
+    {
+        // Nouvelle image, un seul fil : le groupe est rendu.
+        let mut lifecycle = process.lifecycle.lock();
+        lifecycle.threads = 1;
+        lifecycle.groupe_en_sortie = false;
+    }
     let (old, old_clean, old_shared) = {
         let mut mm = process.mm.lock();
         mm.brk_start = (image.end + 0x10_0000) & !0xFFF;
@@ -531,6 +541,11 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             .copied();
 
         if let Some((child_pid, code)) = found {
+            // BOUCHAUD_WAIT4_RECOLTE_UNIQUE_V1 : seul le fil qui retire le zombie
+            // le rend ; un autre fil du meme parent l'a peut-etre deja recolte.
+            if !task::collect_child(child_pid) {
+                continue;
+            }
             if status_addr != 0 {
                 // Encodage `wait` : octet de poids faible = cause, octet
                 // suivant = code de sortie. Un code >= 128 signale une mort par
@@ -542,7 +557,6 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
                 };
                 user_write_u32(status_addr, status);
             }
-            task::collect_child(child_pid);
             return child_pid as i64;
         }
 

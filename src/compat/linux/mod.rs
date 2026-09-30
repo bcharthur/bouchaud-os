@@ -1267,7 +1267,11 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
             user_write_u32(child_tid, tid);
         }
     }
-    task::register(child);
+    let process_du_fil = task::current().process.clone();
+    let index = task::register(child);
+    // BOUCHAUD_GROUPE_RECLAME_V1 : un `exit_group`/`execve` concurrent a pu
+    // balayer les fils avant cet enregistrement.
+    task::tue_si_groupe_reclame(&process_du_fil, index, tid);
     tid as i64
 }
 

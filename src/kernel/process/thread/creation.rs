@@ -429,8 +429,10 @@ fn publish_ready(index: usize) {
 }
 
 pub fn register(mut task: Box<Task>) -> usize {
+    // Lot B8 : plus de gros verrou. La tache est encore a nous seuls (Box) ;
+    // la SEULE section critique du chemin est l'insertion dans le registre,
+    // sous son propre verrou (voir plus bas), puis `publish_ready`.
     let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
-    let _kernel = smp_lock::enter();
     if task.noyau && !task.migrable {
         // Les taches noyau historiques supposent le coeur zero, et rien ne
         // dit qu'elles y survivraient ailleurs. Le defaut reste donc leur

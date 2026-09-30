@@ -40,7 +40,11 @@ pub fn exit_current(code: i32) -> ! {
             lifecycle.threads -= 1;
         }
         lifecycle.exit_code = code;
-        if lifecycle.threads == 0 {
+        // BOUCHAUD_GROUPE_RECLAME_V1 : UNE seule transition vers le dernier fil.
+        // `exit_group` remet `threads` a 1 ; un fil deja compte sorti pouvait
+        // alors retrouver `threads == 0` et demonter le processus une seconde
+        // fois. `zombie`, pose sous ce meme verrou par le premier, tranche.
+        if lifecycle.threads == 0 && !lifecycle.zombie {
             // LA frontiere processus, et elle ne passe qu'une fois.
             //
             // `FAULT_FILE_BREAKDOWN` sortait a chaque fin de THREAD : au run
@@ -636,14 +640,81 @@ pub fn has_children(parent_pid: u32) -> bool {
     processes().iter().any(|p| p.parent == parent_pid)
 }
 
-/// Retire un processus zombie de la table (il a ete recolte).
-pub fn collect_child(pid: u32) {
-    PROCESSES.lock().retain(|p| p.pid != pid);
-    crate::kernel::process::kill(pid);
+/// Retire un fils zombie (il a ete recolte). Rend `true` si CET appel l'a retire.
+///
+/// BOUCHAUD_WAIT4_RECOLTE_UNIQUE_V1 : deux fils du meme parent dans `wait4`
+/// pouvaient voir le meme zombie et le recolter tous les deux (meme pid rendu
+/// deux fois) ; le gros verrou serialisait `wait4` entier. Le retrait sous le
+/// verrou de PROCESSES decide desormais d'un seul gagnant.
+pub fn collect_child(pid: u32) -> bool {
+    let retire = {
+        let mut table = PROCESSES.lock();
+        let avant = table.len();
+        table.retain(|p| p.pid != pid);
+        table.len() != avant
+    };
+    if retire {
+        crate::kernel::process::kill(pid);
+    }
+    retire
+}
+
+// BOUCHAUD_GROUPE_RECLAME_V1
+//
+// `exit_group` et `execve` tuent les autres fils du processus. Deux d'entre eux
+// en meme temps -- deux `exit_group`, deux `execve`, ou l'un contre l'autre --
+// se tuaient mutuellement, puis demontaient ou remplacaient le processus deux
+// fois ; un `clone` concurrent pouvait enregistrer un fil APRES le balayage et
+// survivre a la sortie du groupe. Le gros verrou, pris par l'aiguilleur pour
+// ces appels, les serialisait. Le verrou `lifecycle` le fait desormais :
+//
+//   * le premier fil qui RECLAME le groupe gagne ; les autres, qui allaient de
+//     toute facon etre tues, se retirent comme les fils tues par `execve`
+//     (sans toucher `threads`, sans notifier le parent) ;
+//   * `clone` relit la reclamation APRES avoir enregistre son fils : ou bien
+//     le balayage du gagnant voit le fils, ou bien `clone` voit la
+//     reclamation et marque lui-meme son fils zombie.
+
+/// `true` si ce fil vient de reclamer le groupe ; `false` si un autre le tient.
+pub fn reclame_groupe() -> bool {
+    let process = current().process.clone();
+    let mut lifecycle = process.lifecycle.lock();
+    if lifecycle.groupe_en_sortie {
+        return false;
+    }
+    lifecycle.groupe_en_sortie = true;
+    true
+}
+
+/// Le fil a perdu la reclamation : il se retire comme un fil tue par `execve`.
+pub fn retire_perdant_du_groupe() -> ! {
+    {
+        let task = current();
+        marque_zombie(task);
+    }
+    retire_exec_zombie_current()
+}
+
+/// Apres l'enregistrement d'un fil par `clone` : si le groupe a ete reclame
+/// entre-temps, le fil ne doit pas survivre au balayage qu'il a manque.
+pub fn tue_si_groupe_reclame(process: &Arc<Process>, index: usize, tid: u32) {
+    if !process.lifecycle.lock().groupe_en_sortie {
+        return;
+    }
+    let table = tasks();
+    if let Some(task) = table.get(index) {
+        if task.tid == tid {
+            marque_zombie(task);
+        }
+    }
 }
 
 /// Termine tous les threads du processus courant (`exit_group`).
 pub fn exit_group(code: i32) -> ! {
+    // BOUCHAUD_GROUPE_RECLAME_V1 : un seul fil demonte le groupe.
+    if !reclame_groupe() {
+        retire_perdant_du_groupe();
+    }
     let (pid, tid, process) = {
         let task = current();
         (task.process.pid, task.tid, task.process.clone())

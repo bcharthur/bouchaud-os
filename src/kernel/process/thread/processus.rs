@@ -64,7 +64,11 @@ pub struct ProcessMetadata {
     pub ecran: Option<EcranVirtuel>,
 }
 
-pub struct ProcessLifecycle { pub exit_code: i32, pub zombie: bool, pub threads: usize }
+/// `groupe_en_sortie` (BOUCHAUD_GROUPE_RECLAME_V1) : un fil du processus a
+/// RECLAME le groupe -- `exit_group` ou `execve` -- et va tuer les autres.
+/// Pose sous ce verrou, relu sous ce verrou : c'est ce qui remplace la
+/// serialisation que le gros verrou donnait a ces appels.
+pub struct ProcessLifecycle { pub exit_code: i32, pub zombie: bool, pub threads: usize, pub groupe_en_sortie: bool }
 
 pub struct Process {
     pub pid: u32,
