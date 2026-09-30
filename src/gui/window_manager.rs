@@ -545,6 +545,16 @@ fn boucle() {
         #[cfg(not(feature = "reference-desktop"))]
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
+    // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
+    // plus bas. `services_initialises` dit que la session supervisee PEUT
+    // demarrer : la premiere trame est posee et le reseau a eu sa chance. Le
+    // bureau legacy ne demarre aucune session supervisee et n'a rien a
+    // arbitrer ; son portail est ouvert d'emblee.
+    let debut_services = crate::kernel::timer::monotonic_ms();
+    let mut services_initialises = !cfg!(feature = "reference-desktop");
+    let mut derniere_decision_navigateur =
+        crate::gui::demarrage_navigateur::Decision::LaisserLeBureauSePoser;
+    let mut portail = crate::gui::demarrage_navigateur::Portail::neuf();
     let mut derniere_trame = 0u64;
     let mut derniere_horloge = 0u64;
     let mut derniere_souris = (usize::MAX, usize::MAX);
@@ -1020,7 +1030,81 @@ fn boucle() {
 
         // Le navigateur demarre explicitement depuis le bureau ou BRDP.
         // Le diagnostic reseau est ainsi disponible avant sa charge CPU/RAM.
-        let mut service_action = crate::gui::services::prend_commande();
+        //
+        // BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
+        //
+        // Mais une demande faite avant le bail ne doit pas partir avant lui.
+        // Le navigateur lit son resolveur UNE FOIS, a l'exec ; le releve du
+        // 16 septembre montre ce que donne un depart trop tot :
+        //
+        //     t=5799 ms  bureau-premiere-trame
+        //     t~6500 ms  le lien Ethernet monte (autonegociation cuivre)
+        //     t=6799 ms  navigateur-demande -- resolveur=NON-CONFIGURE
+        //
+        // et la session entiere se passe sans DNS. La V1 retenait le
+        // demarrage AUTOMATIQUE ; p18 a retire celui-ci, et la retenue avec
+        // lui, alors qu'un clic des la premiere trame ou un `browser start`
+        // BRDP enchaine apres un redemarrage reproduisent le meme depart. La
+        // retenue s'applique donc maintenant a la demande : voir
+        // `demarrage_navigateur::Portail`.
+        //
+        // L'attente est BORNEE et ne bloque rien : la boucle continue de
+        // dessiner, et l'horloge la reveille chaque seconde pour reevaluer.
+        // Sans carte, on n'attend pas -- un bail ne peut pas venir, et la page
+        // locale n'a besoin de personne.
+        if !services_initialises && derniere_trame != 0 {
+            let decision = crate::gui::demarrage_navigateur::decide(
+                maintenant.saturating_sub(debut_services),
+                // Un bail peut encore arriver tant qu'il y a une carte
+                // utilisable. Le lien qui n'est pas ENCORE monte n'est pas une
+                // absence de cable : l'autonegociation cuivre dure trois
+                // secondes.
+                !matches!(
+                    crate::net::etat_demarrage(),
+                    crate::net::Demarrage::SansCarte | crate::net::Demarrage::CarteRefusee,
+                ),
+                matches!(crate::net::etat_demarrage(), crate::net::Demarrage::Pret),
+                crate::gui::demarrage_navigateur::REPOS_BUREAU_MS,
+                crate::gui::demarrage_navigateur::ATTENTE_MAXIMALE_MS,
+            );
+            // Aux TRANSITIONS seulement : une ligne par tour de compositeur
+            // noierait le releve a soixante par seconde. `demande` dit si un
+            // demarrage attendait : sans lui, « reseau-pret » se lirait comme
+            // « navigateur lance ».
+            if decision != derniere_decision_navigateur {
+                derniere_decision_navigateur = decision;
+                crate::serial_println!(
+                    "BOUCHAUD_NAVIGATEUR_DEPART decision={} t_ms={} bail={} demande={}",
+                    decision.nom(),
+                    maintenant.saturating_sub(debut_services),
+                    crate::net::bail_obtenu() as u8,
+                    if portail.retient() { "retenue" } else { "aucune" },
+                );
+            }
+            if decision.lance() {
+                services_initialises = true;
+            }
+        }
+        let commande_lue = crate::gui::services::prend_commande();
+        let vue = match commande_lue {
+            0 => crate::gui::demarrage_navigateur::Commande::Aucune,
+            crate::gui::services::DEMARRER => crate::gui::demarrage_navigateur::Commande::Demarrer,
+            crate::gui::services::ARRETER => crate::gui::demarrage_navigateur::Commande::Arreter,
+            _ => crate::gui::demarrage_navigateur::Commande::Autre,
+        };
+        let mut service_action = match portail.filtre(vue, services_initialises) {
+            crate::gui::demarrage_navigateur::Commande::Aucune => 0,
+            crate::gui::demarrage_navigateur::Commande::Demarrer => crate::gui::services::DEMARRER,
+            crate::gui::demarrage_navigateur::Commande::Arreter => crate::gui::services::ARRETER,
+            crate::gui::demarrage_navigateur::Commande::Autre => commande_lue,
+        };
+        if vue == crate::gui::demarrage_navigateur::Commande::Demarrer && service_action == 0 {
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_DEMANDE_RETENUE decision={} t_ms={}",
+                derniere_decision_navigateur.nom(),
+                maintenant.saturating_sub(debut_services),
+            );
+        }
         // P18_CHILD_RECOVERY_V1. Une commande STOP/RESTART explicite est
         // prioritaire. Le bureau ne repart qu'apres le delai de grace du
         // courtier et seulement si une fenetre Ladybird est encore ouverte.

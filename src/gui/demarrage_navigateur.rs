@@ -111,3 +111,83 @@ pub fn decide(
     }
     Decision::AttendreLeResolveur
 }
+
+// BOUCHAUD_NAVIGATEUR_DEMARRAGE_EXPLICITE_V1
+//
+// # Depuis p18, le navigateur ne part plus tout seul
+//
+// Le bureau le demarre sur DEMANDE -- bouton Services, BRDP `browser start`
+// -- pour que le diagnostic reseau soit disponible avant sa charge processeur
+// et memoire. Mais une demande peut arriver AVANT le bail : un clic des la
+// premiere trame, un script BRDP qui enchaine apres un redemarrage. Le defaut
+// du 16 septembre n'a besoin de rien d'autre : le navigateur lit son
+// resolveur UNE FOIS, a l'exec, et une session partie trop tot se passe
+// entiere sans DNS.
+//
+// `decide` repond toujours a la meme question -- le reseau a-t-il eu sa
+// chance -- mais ce n'est plus lui qui LANCE. Le portail retient une demande
+// de demarrage tant que `decide` n'a pas dit « lancer », et la relache au
+// premier tour ou il le dit. Sur un reseau deja pret, rien ne change : la
+// demande part au tour meme ou elle est lue.
+
+/// Une commande de service, telle que le portail la voit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Commande {
+    Aucune,
+    Demarrer,
+    Arreter,
+    /// Toute autre commande -- le redemarrage en deux phases. Elle traverse :
+    /// sa phase d'arret n'a rien a attendre, et sa phase de demarrage revient
+    /// au tour suivant comme un `Demarrer`, qui passe alors par le portail.
+    Autre,
+}
+
+/// Au plus UNE demande de demarrage retenue, et pas de file : la derniere
+/// commande l'emporte, comme dans `gui::services`, dont la boite aux lettres
+/// ne garde elle aussi que la derniere.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Portail {
+    retenue: bool,
+}
+
+impl Portail {
+    pub const fn neuf() -> Self {
+        Portail { retenue: false }
+    }
+
+    /// Une demande de demarrage attend-elle que le reseau ait eu sa chance ?
+    pub fn retient(&self) -> bool {
+        self.retenue
+    }
+
+    /// La commande a executer CE tour.
+    ///
+    /// `ouvert` : `decide` a deja dit « lancer » depuis la premiere trame du
+    /// bureau. Une fois ouvert, le portail ne se referme pas -- l'arbitrage
+    /// porte sur le PREMIER bail, pas sur chaque demarrage.
+    pub fn filtre(&mut self, commande: Commande, ouvert: bool) -> Commande {
+        match commande {
+            Commande::Demarrer if !ouvert => {
+                self.retenue = true;
+                Commande::Aucune
+            }
+            Commande::Demarrer => {
+                self.retenue = false;
+                Commande::Demarrer
+            }
+            // Un arret n'attend JAMAIS, et il annule une demande retenue :
+            // c'est la derniere volonte exprimee. Relancer apres coup ce
+            // qu'on vient de demander d'arreter serait pire que l'attente.
+            Commande::Arreter => {
+                self.retenue = false;
+                Commande::Arreter
+            }
+            Commande::Autre => Commande::Autre,
+            Commande::Aucune if self.retenue && ouvert => {
+                self.retenue = false;
+                Commande::Demarrer
+            }
+            Commande::Aucune => Commande::Aucune,
+        }
+    }
+}

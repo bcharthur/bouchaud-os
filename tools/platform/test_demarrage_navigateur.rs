@@ -7,7 +7,7 @@
 #[path = "../../src/gui/demarrage_navigateur.rs"]
 mod demarrage;
 
-use demarrage::{decide, Decision, ATTENTE_MAXIMALE_MS, REPOS_BUREAU_MS};
+use demarrage::{decide, Commande, Decision, Portail, ATTENTE_MAXIMALE_MS, REPOS_BUREAU_MS};
 
 fn d(ms: u64, bail_possible: bool, pret: bool) -> Decision {
     decide(ms, bail_possible, pret, REPOS_BUREAU_MS, ATTENTE_MAXIMALE_MS)
@@ -118,4 +118,127 @@ fn sans_carte_du_tout_on_ne_perd_pas_huit_secondes() {
     // Le seul cas ou plus aucun bail ne peut arriver.
     assert_eq!(d(600, false, false), Decision::LancerSansReseau);
     assert_eq!(d(60_000, false, false), Decision::LancerSansReseau);
+}
+
+// -- Le portail de la demande explicite (depuis p18) --------------------------
+//
+// Le bureau ne lance plus le navigateur tout seul ; il obeit a une demande.
+// Le portail retient celle qui arrive avant que le reseau ait eu sa chance.
+
+/// Un tour de bureau : `decide` puis le portail, dans l'ordre du
+/// `window_manager`. Rend ce qui est execute, et l'etat ouvert du portail.
+fn tour(
+    portail: &mut Portail,
+    ouvert: &mut bool,
+    t_ms: u64,
+    bail_possible: bool,
+    pret: bool,
+    commande: Commande,
+) -> Commande {
+    if !*ouvert && d(t_ms, bail_possible, pret).lance() {
+        *ouvert = true;
+    }
+    portail.filtre(commande, *ouvert)
+}
+
+#[test]
+fn sur_un_reseau_pret_la_demande_part_au_tour_meme() {
+    // Ce que p18 a voulu et que le portail ne doit pas abimer : sur un
+    // reseau qui marche, cliquer lance.
+    let mut p = Portail::neuf();
+    assert_eq!(p.filtre(Commande::Demarrer, true), Commande::Demarrer);
+    assert!(!p.retient());
+}
+
+#[test]
+fn le_portail_seul_ne_lance_jamais_rien() {
+    // L'invariant de p18 : pas de demarrage automatique. S'ouvrir n'est pas
+    // lancer ; seule une demande lance.
+    let mut p = Portail::neuf();
+    for _ in 0..3 {
+        assert_eq!(p.filtre(Commande::Aucune, true), Commande::Aucune);
+    }
+}
+
+#[test]
+fn le_seize_septembre_rejoue_avec_un_clic() {
+    // Premiere trame posee, clic a 1000 ms, lien monte mais pas de bail : la
+    // demande attend. Le bail arrive a 3001 ms : elle part a ce tour-la, pas
+    // avant, et une seule fois.
+    let mut p = Portail::neuf();
+    let mut ouvert = false;
+    assert_eq!(tour(&mut p, &mut ouvert, 1_000, true, false, Commande::Demarrer), Commande::Aucune);
+    assert!(p.retient());
+    assert_eq!(tour(&mut p, &mut ouvert, 2_000, true, false, Commande::Aucune), Commande::Aucune);
+    assert_eq!(tour(&mut p, &mut ouvert, 3_001, true, true, Commande::Aucune), Commande::Demarrer);
+    assert!(!p.retient());
+    assert_eq!(tour(&mut p, &mut ouvert, 4_000, true, true, Commande::Aucune), Commande::Aucune);
+}
+
+#[test]
+fn sans_serveur_dhcp_la_demande_part_au_bout_de_l_attente_bornee() {
+    let mut p = Portail::neuf();
+    let mut ouvert = false;
+    assert_eq!(tour(&mut p, &mut ouvert, 1_000, true, false, Commande::Demarrer), Commande::Aucune);
+    assert_eq!(
+        tour(&mut p, &mut ouvert, ATTENTE_MAXIMALE_MS - 1, true, false, Commande::Aucune),
+        Commande::Aucune
+    );
+    assert_eq!(
+        tour(&mut p, &mut ouvert, ATTENTE_MAXIMALE_MS, true, false, Commande::Aucune),
+        Commande::Demarrer
+    );
+}
+
+#[test]
+fn sans_carte_la_demande_n_attend_pas() {
+    let mut p = Portail::neuf();
+    let mut ouvert = false;
+    assert_eq!(
+        tour(&mut p, &mut ouvert, REPOS_BUREAU_MS, false, false, Commande::Demarrer),
+        Commande::Demarrer
+    );
+}
+
+#[test]
+fn une_fois_ouvert_le_portail_ne_se_referme_pas() {
+    // L'arbitrage porte sur le PREMIER bail. Un bail perdu plus tard ne doit
+    // pas retenir une relance -- la supervision la demande justement quand
+    // quelque chose va mal.
+    let mut p = Portail::neuf();
+    let mut ouvert = false;
+    assert_eq!(tour(&mut p, &mut ouvert, 600, true, true, Commande::Demarrer), Commande::Demarrer);
+    assert_eq!(tour(&mut p, &mut ouvert, 900, true, false, Commande::Demarrer), Commande::Demarrer);
+}
+
+#[test]
+fn un_arret_n_attend_jamais_et_annule_la_demande_retenue() {
+    let mut p = Portail::neuf();
+    assert_eq!(p.filtre(Commande::Demarrer, false), Commande::Aucune);
+    assert_eq!(p.filtre(Commande::Arreter, false), Commande::Arreter);
+    assert!(!p.retient());
+    // Le reseau arrive ensuite : on ne relance pas ce qu'on a demande
+    // d'arreter.
+    assert_eq!(p.filtre(Commande::Aucune, true), Commande::Aucune);
+}
+
+#[test]
+fn deux_clics_avant_le_bail_ne_lancent_qu_une_fois() {
+    let mut p = Portail::neuf();
+    assert_eq!(p.filtre(Commande::Demarrer, false), Commande::Aucune);
+    assert_eq!(p.filtre(Commande::Demarrer, false), Commande::Aucune);
+    assert_eq!(p.filtre(Commande::Aucune, true), Commande::Demarrer);
+    assert_eq!(p.filtre(Commande::Aucune, true), Commande::Aucune);
+}
+
+#[test]
+fn le_redemarrage_traverse_sans_toucher_la_retenue() {
+    // Sa phase d'arret n'a rien a attendre ; sa phase de demarrage revient
+    // au tour suivant comme un Demarrer et passe alors par le portail.
+    let mut p = Portail::neuf();
+    assert_eq!(p.filtre(Commande::Autre, false), Commande::Autre);
+    assert!(!p.retient());
+    assert_eq!(p.filtre(Commande::Demarrer, false), Commande::Aucune);
+    assert_eq!(p.filtre(Commande::Autre, false), Commande::Autre);
+    assert!(p.retient());
 }
