@@ -111,8 +111,18 @@ Trois bras mesures, meme scenario :
 `SleepMutex` n'est pas equitable (un arrivant passe devant le reveille) : une
 faute de page pouvait attendre 7 s. Le verrou a tickets sert dans l'ordre.
 
-Reste depasse, budgets NON relaches : `ready_latency_max` 314-447 ms a SMP4
-(budget 250), `ready_latency_interactive_max`, `bkl_attente_max` 76 ms a SMP8.
+Puis des points de preemption dans le transfert PIO et l'attente de commande
+(`BOUCHAUD_ATA_POINT_SUR_V1`) : le coeur qui transfere n'est plus monopolise.
+
+| | FIFO seul | FIFO + points surs |
+|---|---|---|
+| `ready_latency_max` SMP4 | 447 / 314 ms | 56-90 ms (n=5) |
+| SMP1 / SMP8 | 258 / 61 ms | 104 / 64 ms |
+| interactive max | 314-447 ms | 47-90 ms |
+
+Les budgets `ready_latency_*` sont TENUS sur ces cycles. Reste, NON relache :
+`bkl_attente_max` 47-70 ms (budget 50, deja 36-66 avant ces commits) ; une
+tenue BKL de 157 ms (fcntl, cpu0) sur 1 cycle sur 5, non reproduite.
 
 ### 3.3 Sonde A/B de l'ordonnanceur a SMP>=2
 
