@@ -100,6 +100,57 @@ pub const fn borne_superieure(classe: usize) -> u64 {
     }
 }
 
+// QUI A ATTENDU, ET PAS SEULEMENT COMBIEN.
+//
+// L'endurance du 30 septembre a publie `max_ns=27640277726` en classe normale
+// sur SMP1 : une tache prete a attendu vingt-sept secondes un coeur. Ni le
+// maximum ni l'histogramme ne disent laquelle, ni quand -- donc ni si c'est
+// une famine, une tache prete jamais mise en file, ou une affinite vers un
+// coeur absent. Le pire cas de chaque classe garde desormais son identite.
+//
+// Cout : rien sur le chemin ordinaire. Les champs ne sont ecrits que par
+// l'appel qui FAIT MONTER le maximum de sa classe -- quelques fois par
+// campagne. Deux records simultanes peuvent entrelacer leurs champs ; le
+// champ `ns` lu avec eux dit alors lequel a gagne, et le relevé le signale
+// par `coherent=0`.
+struct PireAttribue {
+    ns: AtomicU64,
+    tid: AtomicU64,
+    pid: AtomicU64,
+    cpu: AtomicU64,
+    elu_ns: AtomicU64,
+    ecrit_pour_ns: AtomicU64,
+}
+
+impl PireAttribue {
+    const fn vide() -> Self {
+        Self {
+            ns: AtomicU64::new(0),
+            tid: AtomicU64::new(0),
+            pid: AtomicU64::new(0),
+            cpu: AtomicU64::new(0),
+            elu_ns: AtomicU64::new(0),
+            ecrit_pour_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+static PIRE: [PireAttribue; CLASSES_ORDONNANCEMENT] =
+    [const { PireAttribue::vide() }; CLASSES_ORDONNANCEMENT];
+
+/// `record`, plus l'identite de la tache si elle bat le pire de sa classe.
+pub fn record_attribue(ns: u64, interactive: bool, tid: u64, pid: u64, cpu: usize, elu_ns: u64) {
+    record(ns, interactive);
+    let pire = &PIRE[if interactive { INTERACTIVE } else { NORMALE }];
+    if pire.ns.fetch_max(ns, Ordering::AcqRel) < ns {
+        pire.tid.store(tid, Ordering::Relaxed);
+        pire.pid.store(pid, Ordering::Relaxed);
+        pire.cpu.store(cpu as u64, Ordering::Relaxed);
+        pire.elu_ns.store(elu_ns, Ordering::Relaxed);
+        pire.ecrit_pour_ns.store(ns, Ordering::Release);
+    }
+}
+
 pub fn record(ns: u64, interactive: bool) {
     COUNT.fetch_add(1, Ordering::Relaxed);
     SUM_NS.fetch_add(ns, Ordering::Relaxed);
@@ -141,6 +192,8 @@ pub fn remise_a_zero() {
     }
     for classe_ordo in 0..CLASSES_ORDONNANCEMENT {
         MAX_PAR_CLASSE[classe_ordo].store(0, Ordering::Relaxed);
+        PIRE[classe_ordo].ns.store(0, Ordering::Relaxed);
+        PIRE[classe_ordo].ecrit_pour_ns.store(0, Ordering::Relaxed);
         for case in HISTOGRAMME[classe_ordo].iter() {
             case.store(0, Ordering::Relaxed);
         }
@@ -223,6 +276,22 @@ pub fn log_stats() {
         crate::serial_println!(
             "[SCHED-NG-CENTILES] classe={} count={} p50_ns={} p95_ns={} p99_ns={} max_ns={}",
             nom, c.count, c.p50_ns, c.p95_ns, c.p99_ns, c.max_ns
+        );
+        let pire = &PIRE[classe_ordo];
+        let ns = pire.ns.load(Ordering::Acquire);
+        if ns == 0 {
+            continue;
+        }
+        let elu_ns = pire.elu_ns.load(Ordering::Relaxed);
+        crate::serial_println!(
+            "[SCHED-NG-PIRE] classe={} attente_ns={} tid={} pid={} cpu={} pret_depuis_ms={} elu_a_ms={} coherent={}",
+            nom, ns,
+            pire.tid.load(Ordering::Relaxed),
+            pire.pid.load(Ordering::Relaxed),
+            pire.cpu.load(Ordering::Relaxed),
+            elu_ns.saturating_sub(ns) / 1_000_000,
+            elu_ns / 1_000_000,
+            (pire.ecrit_pour_ns.load(Ordering::Acquire) == ns) as u8,
         );
     }
 }

@@ -165,9 +165,13 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
         "task: cursor CPU encore arme hors CPU tid={}", task.tid);
 
     if task.ready_since_ns != 0 {
-        crate::kernel::scheduler::latency::record(
+        crate::kernel::scheduler::latency::record_attribue(
             now.saturating_sub(task.ready_since_ns.charge()),
             task.priorite == Priorite::Interactive,
+            task.tid as u64,
+            task.process.pid as u64,
+            cpu_id,
+            now,
         );
         task.ready_since_ns.range(0);
     }
