@@ -154,3 +154,21 @@ sonde n'a pas ete modifie ; il reste bloquant et rapporte tel quel.
 Nouveau rouge a SMP1 (2 cycles sur 32, aucun avant) : hypothese a verifier, une
 inversion de priorite -- un detenteur du controleur preempte a un point sur,
 un detenteur du BKL qui a besoin du disque parque derriere lui. Ouvert.
+
+### 5.1 Le rouge SMP1 : l'inversion est REFUTEE
+
+Diagnostic `ATA_ATTENTE_LONGUE` (attentes du controleur >= 100 ms, avec la
+profondeur du gros verrou chez l'attendant), 21 cycles SMP1 locaux :
+
+* 21/21 cycles noyau OK ; budgets tenus 20/21 ;
+* TOUTES les attentes longues ont `bkl_profondeur=0` : file FIFO ordinaire
+  entre les cinq lecteurs de `disque-probe` (110-153 ms, 4-5 en file). Aucun
+  detenteur du BKL ne parque derriere le controleur ;
+* le cycle rouge : `ready_latency_max` 336 ms, un seul reveil tardif (p99
+  16,8 ms), un lecteur en classe normale ; BKL tenu 37 ms au plus.
+
+Hypothese restante, NON testee : le reveil collectif (`wake_all`) du verrou a
+tickets reveille tous les attendants a chaque liberation ; a un seul coeur,
+ce sont des commutations en plus. Un reveil cible du ticket suivant demande
+une primitive que `WaitQueue` n'offre pas sans risque de reveil perdu.
+Ouvert ; budget non relache.
