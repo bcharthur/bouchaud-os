@@ -135,6 +135,28 @@ impl Drop for GardeControleur {
     }
 }
 
+/// Secteurs transferes entre deux points de preemption : 16 Kio, quelques
+/// millisecondes de PIO sous TCG.
+const SECTEURS_PAR_POINT_SUR: usize = 32;
+
+/// BOUCHAUD_ATA_POINT_SUR_V1
+///
+/// Un transfert PIO est du travail processeur dans le noyau, sans aucun point
+/// ou l'ordonnanceur puisse reprendre la main : un lot de 256 secteurs, ou le
+/// `FLUSH CACHE` qui suit une ecriture, monopolisait le coeur des dizaines a
+/// des centaines de millisecondes. Mesure (endurance SMP4, verrou deja
+/// dormant) : usb-hid, interactif, pret 314-447 ms sur le coeur de `fsync`.
+///
+/// Le verrou du controleur etant dormant, ceder en le tenant est permis ; le
+/// peripherique PIO attend simplement qu'on reprenne le transfert.
+/// `cond_resched` ne commute que si c'est sur (interruptions ouvertes, BKL
+/// libre, aucune section classee, tache utilisateur) : a l'amorcage ou depuis
+/// un fil noyau, c'est un test et rien d'autre.
+#[inline]
+fn point_sur() {
+    crate::kernel::scheduler::preempt::cond_resched();
+}
+
 static CONTROLLER_ACQUIRES: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static CONTROLLER_MAX_WAIT_NS: AtomicU64 = AtomicU64::new(0);
@@ -209,6 +231,11 @@ fn wait_not_busy() -> bool {
             return true;
         }
         tours += 1;
+        // L'attente de fin de commande -- surtout `FLUSH CACHE` -- peut durer :
+        // elle ne doit pas monopoliser le coeur (voir `point_sur`).
+        if tours % 1024 == 0 {
+            point_sur();
+        }
         if tours > TOURS_MAX {
             return false;
         }
@@ -518,6 +545,9 @@ fn read_batch(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
         unsafe {
             read_sector_into(&mut out[start..start + SECTOR_SIZE]);
         }
+        if (index + 1) % SECTEURS_PAR_POINT_SUR == 0 {
+            point_sur();
+        }
     }
     // Rendre le controleur au repos avant de partir : la commande suivante
     // vise souvent l'AUTRE disque du canal, et la trouverait sinon en cours.
@@ -610,6 +640,9 @@ fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
         let start = index * SECTOR_SIZE;
         unsafe {
             write_sector_from(&data[start..start + SECTOR_SIZE]);
+        }
+        if (index + 1) % SECTEURS_PAR_POINT_SUR == 0 {
+            point_sur();
         }
     }
     if !wait_not_busy() {
