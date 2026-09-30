@@ -732,3 +732,46 @@ occupation reelle du controleur, file d'attente, pages relues (plafond de
 Hors CI, sur la TRIGKEY, les binaires viennent du ramdisk (`BACKING_MEMORY`),
 pas d'ATA : ce cout est d'abord un cout QEMU/PIO, a ne pas confondre avec le
 materiel.
+
+### 17.1 L'attribution sous Ladybird (run 36719113456, noyau 6fc08087)
+
+Premier run Ladybird vert au build depuis b16a6fd6 (patchers p15/p17/p18
+retires, 373e268a). Smoke : tous les jalons sauf `HOST_JS_OK` -- 16/17, seul
+`fetch-json` echoue (« Unable to connect » apres 48 s, alors que
+`fetch-texte` et `fetch-404` vers la meme fixture passent) ; ouvert.
+
+Baseline du chemin utilisateur (T = demarrage du smoke) :
+
+    BROWSER_HOST_START        T+21 s     M11_GUI_HANDSHAKE_OK   T+70 s
+    BROWSER_HOST_INITIALIZED  T+37 s     M11_DOCUMENT_LOADED    T+78 s
+    FRAME_PRESENTED           T+72 s     HOST_IMAGES_OK         T+88 s
+    HOST_WORKER_HTTP_PERF_FIRST 2 645 ms  HOST_WORKER_BLOB_PERF_FIRST 9 009 ms
+    ordre worker : premier a froid 8 716 (blob) / 8 810 (http) ms
+
+Lectures disque (`attribue-lectures-disque.py`, releve 7, t=147,8 s) :
+
+    4 604 lectures x 64 Kio = 287,8 Mio
+    occupation du controleur (service)   66,0 s
+    file d'attente (somme, non additive) 59,1 s
+    hors verrou                           0,04 s
+    pages uniques 68 080 (266 Mio) ; relues 5 584 (21,8 Mio, 7,6 %)
+    debit du controleur                  4,4 Mio/s (PIO sous TCG)
+
+    service                  Mio   service_s  attente_s  seq%
+    bo-navigateur (12+14)   93,0     23,2       25,3     37-98
+    WebContent              79,0     17,3       13,8     36
+    Compositor              40,5     11,8       15,1     38
+    WebWorker #1            45,3      7,3        0,1     37
+    RequestServer           11,9      3,0        2,4     37
+    ImageDecoder            10,1      2,3        2,3     43
+    WebWorker #2             8,1      1,0        0,0     81
+
+Conclusions, par la mesure :
+
+* les ~125 s de `BACKING_DISK_GLOBAL` = 66 s de travail disque + 59 s de
+  file : l'ancienne somme comptait l'attente de chaque lecteur concurrent ;
+* le cout dominant est le DEBIT du transfert PIO (4,4 Mio/s) sur ~266 Mio
+  de donnees reellement necessaires -- pas les relectures (7,6 % : agrandir le
+  cache ne gagnerait que ~22 Mio), pas l'attente hors verrou (44 ms) ;
+* ce cout est propre a QEMU/ATA : sur la TRIGKEY les binaires sont dans le
+  ramdisk (`fs/backing.rs` : UEFI -> `register_memory`).
