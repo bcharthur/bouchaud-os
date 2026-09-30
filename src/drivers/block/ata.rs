@@ -221,6 +221,25 @@ fn lock_controller_mesure() -> (GardeControleur, u64) {
     (GardeControleur, waited)
 }
 
+/// Etat instantane du verrou du controleur, pour l'echantillonneur :
+/// (prochain ticket, ticket servi, pid du dernier preneur, age de la prise
+/// en ms). `prochain - servi` > 1 avec un age qui grandit : quelqu'un tient
+/// le controleur et ne le rend pas, ou une file ne se reveille plus.
+pub fn etat_verrou() -> (u64, u64, u64, u64) {
+    let depuis = CONTROLLER.detenteur_depuis.load(Ordering::Relaxed);
+    let age = if depuis == 0 {
+        0
+    } else {
+        crate::kernel::timer::monotonic_ns().saturating_sub(depuis) / 1_000_000
+    };
+    (
+        CONTROLLER.prochain.load(Ordering::Relaxed),
+        CONTROLLER.servi.load(Ordering::Relaxed),
+        CONTROLLER.detenteur_pid.load(Ordering::Relaxed),
+        age,
+    )
+}
+
 pub fn contention_stats() -> (u64, u64, u64) {
     (
         CONTROLLER_ACQUIRES.load(Ordering::Relaxed),
@@ -533,12 +552,252 @@ pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usi
         if offset + batch * SECTOR_SIZE > out.len() {
             break;
         }
-        if !read_batch(drive, sector, batch, &mut out[offset..]) {
+        if !dma::lit(drive, sector, batch, &mut out[offset..])
+            && !read_batch(drive, sector, batch, &mut out[offset..])
+        {
             break;
         }
         done += batch;
     }
     (done, attente_ns, crate::kernel::timer::monotonic_ns().saturating_sub(tenu_debut))
+}
+
+/// BOUCHAUD_ATA_LECTURE_DMA_V1 -- lecture par DMA bus-master (IDE PCI).
+///
+/// # Pourquoi
+///
+/// Mesure sous Ladybird (run 36719113456) : 287,8 Mio lus en 66,0 s
+/// d'occupation du controleur, 4,4 Mio/s. Le cout dominant du demarrage a
+/// froid sous QEMU n'etait ni les relectures (7,6 %) ni l'attente hors verrou
+/// (44 ms), mais le DEBIT du transfert PIO : chaque mot de 16 bits est une
+/// entree-sortie emulee. En DMA bus-master, le controleur copie lui-meme les
+/// secteurs en memoire ; le processeur ne transfere plus rien.
+///
+/// # Portee, deliberement etroite
+///
+/// * LECTURES seulement ; les ecritures (persistance, `fsync`) restent en PIO.
+/// * Canal primaire, controleur IDE PCI declarant le bus-master (prog_if bit
+///   7), BAR4 en espace d'E/S.
+/// * Tampon de rebond de 128 Kio (un lot de 256 secteurs), physiquement
+///   contigu et sous 4 Gio ; la PRDT decoupe aux frontieres de 64 Kio, comme
+///   l'exige le format.
+/// * Tout ecart -- controleur absent, tampon hors 4 Gio, bit d'erreur, delai
+///   -- rend `false` et l'appelant retombe sur le PIO pour ce lot. Trois
+///   echecs desactivent le DMA pour le reste du demarrage, et le disent.
+/// * Sur la TRIGKEY les binaires viennent du ramdisk : ce chemin n'y sert pas.
+mod dma {
+    use super::*;
+    use core::sync::atomic::{AtomicU32, AtomicU8};
+
+    const INCONNU: u8 = 0;
+    const PRET: u8 = 1;
+    const INDISPONIBLE: u8 = 2;
+
+    const CMD_READ_DMA: u8 = 0xC8;
+    const BM_CMD_START: u8 = 0x01;
+    /// Sens : 1 = le controleur ECRIT en memoire (lecture disque).
+    const BM_CMD_VERS_MEMOIRE: u8 = 0x08;
+    const BM_ST_ACTIF: u8 = 0x01;
+    const BM_ST_ERREUR: u8 = 0x02;
+    const BM_ST_IRQ: u8 = 0x04;
+    const TAMPON: usize = 256 * SECTOR_SIZE;
+    const PRD_MAX: usize = 4;
+
+    static ETAT: AtomicU8 = AtomicU8::new(INCONNU);
+    static BASE_BM: AtomicU32 = AtomicU32::new(0);
+    static PRDT_PHYS: AtomicU64 = AtomicU64::new(0);
+    static TAMPON_PHYS: AtomicU64 = AtomicU64::new(0);
+    static ECHECS: AtomicU32 = AtomicU32::new(0);
+    static LOTS: AtomicU64 = AtomicU64::new(0);
+
+    /// (lots lus en DMA, echecs retombes en PIO, pret ?).
+    pub fn stats() -> (u64, u32, bool) {
+        (
+            LOTS.load(Ordering::Relaxed),
+            ECHECS.load(Ordering::Relaxed),
+            ETAT.load(Ordering::Relaxed) == PRET,
+        )
+    }
+
+    fn desactive(raison: &str) {
+        ETAT.store(INDISPONIBLE, Ordering::Release);
+        crate::kernel::dmesg::log_fmt(format_args!("ATA_DMA indisponible raison={}", raison));
+    }
+
+    /// Premiere lecture : trouver le controleur, preparer PRDT et tampon.
+    /// Appelee sous le verrou du controleur : une seule initialisation.
+    fn initialise() -> bool {
+        let mut ide = None;
+        crate::arch::x86_64::pci::parcours(&mut |d| {
+            if d.class == 0x01 && d.subclass == 0x01 {
+                ide = Some(*d);
+                return false;
+            }
+            true
+        });
+        let Some(ide) = ide else {
+            desactive("pas-de-controleur-ide-pci");
+            return false;
+        };
+        if ide.prog_if & 0x80 == 0 {
+            desactive("sans-bus-master");
+            return false;
+        }
+        let bar4 = crate::arch::x86_64::pci::bar(&ide, 4);
+        if bar4 & 1 == 0 || bar4 & 0xFFFC == 0 {
+            desactive("bar4-non-es");
+            return false;
+        }
+        let Some((prdt, _)) = crate::kernel::memory::alloc_dma(PRD_MAX * 8) else {
+            desactive("prdt-non-allouee");
+            return false;
+        };
+        let Some((tampon, _)) = crate::kernel::memory::alloc_dma(TAMPON) else {
+            desactive("tampon-non-alloue");
+            return false;
+        };
+        if prdt + (PRD_MAX * 8) as u64 > 0x1_0000_0000
+            || tampon + TAMPON as u64 > 0x1_0000_0000
+            || prdt % 4 != 0
+            || prdt / 0x1_0000 != (prdt + (PRD_MAX * 8) as u64 - 1) / 0x1_0000
+        {
+            desactive("adresses-hors-contraintes");
+            return false;
+        }
+        crate::arch::x86_64::pci::enable_bus_master(&ide);
+        BASE_BM.store(bar4 & 0xFFFC, Ordering::Relaxed);
+        PRDT_PHYS.store(prdt, Ordering::Relaxed);
+        TAMPON_PHYS.store(tampon, Ordering::Relaxed);
+        ETAT.store(PRET, Ordering::Release);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ATA_DMA pret bm={:#x} prdt={:#x} tampon={:#x} pci={:02x}:{:02x}.{}",
+            bar4 & 0xFFFC, prdt, tampon, ide.bus, ide.slot, ide.func
+        ));
+        true
+    }
+
+    /// Construit la PRDT pour `octets` a partir du tampon. Rend le nombre
+    /// d'entrees, ou 0 si le decoupage depasse `PRD_MAX`.
+    fn construit_prdt(octets: usize) -> usize {
+        let prdt = crate::kernel::memory::phys_to_virt(PRDT_PHYS.load(Ordering::Relaxed)) as *mut u32;
+        let mut adresse = TAMPON_PHYS.load(Ordering::Relaxed);
+        let mut reste = octets;
+        let mut n = 0usize;
+        while reste > 0 {
+            if n == PRD_MAX {
+                return 0;
+            }
+            let jusqua_frontiere = 0x1_0000 - (adresse as usize % 0x1_0000);
+            let morceau = core::cmp::min(reste, jusqua_frontiere);
+            reste -= morceau;
+            // Compte de 0 = 64 Kio ; bit 31 du second mot = derniere entree.
+            let compte = (morceau & 0xFFFF) as u32;
+            let fin = if reste == 0 { 0x8000_0000u32 } else { 0 };
+            unsafe {
+                prdt.add(2 * n).write_volatile(adresse as u32);
+                prdt.add(2 * n + 1).write_volatile(compte | fin);
+            }
+            adresse += morceau as u64;
+            n += 1;
+        }
+        n
+    }
+
+    fn echec(raison: &str, bm_statut: u8) -> bool {
+        let (statut, erreur) = etat_controleur();
+        let n = ECHECS.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ATA_DMA echec raison={} bm={:#04x} statut={:#04x} erreur={:#04x} n={}",
+            raison, bm_statut, statut, erreur, n
+        ));
+        if n >= 3 {
+            desactive("trois-echecs");
+        }
+        false
+    }
+
+    /// Lit `count` secteurs (<= 256) en DMA. `false` : l'appelant fait le PIO.
+    pub fn lit(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
+        match ETAT.load(Ordering::Acquire) {
+            PRET => {}
+            INCONNU => {
+                if !initialise() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        let octets = count * SECTOR_SIZE;
+        if count == 0 || count > 256 || out.len() < octets {
+            return false;
+        }
+        if construit_prdt(octets) == 0 {
+            return false;
+        }
+        let bm = BASE_BM.load(Ordering::Relaxed) as u16;
+        crate::kernel::memory::dma_wmb();
+        unsafe {
+            outb(bm, 0); // arret
+            outb(bm + 2, BM_ST_ERREUR | BM_ST_IRQ); // acquitte
+            crate::arch::x86_64::ports::outl(bm + 4, PRDT_PHYS.load(Ordering::Relaxed) as u32);
+            outb(bm, BM_CMD_VERS_MEMOIRE);
+        }
+        select_lba(drive, lba);
+        if !wait_not_busy() {
+            return echec("occupe-avant-commande", unsafe { inb(bm + 2) });
+        }
+        unsafe {
+            outb(ERROR, 0);
+            outb(SECTOR_COUNT, if count == 256 { 0 } else { count as u8 });
+            outb(LBA_LOW, (lba & 0xFF) as u8);
+            outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
+            outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
+            outb(COMMAND, CMD_READ_DMA);
+            outb(bm, BM_CMD_VERS_MEMOIRE | BM_CMD_START);
+        }
+        // Fin du transfert : le bit ACTIF du bus-master retombe. Borne en
+        // temps, comme les attentes PIO ; points surs pour ne pas monopoliser
+        // le coeur pendant que le controleur travaille.
+        let debut = crate::kernel::timer::ticks();
+        let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
+        let mut tours = 0u64;
+        let bm_statut = loop {
+            let st = unsafe { inb(bm + 2) };
+            if st & BM_ST_ERREUR != 0 || st & BM_ST_ACTIF == 0 {
+                break st;
+            }
+            tours += 1;
+            if tours % 256 == 0 {
+                point_sur();
+            }
+            if crate::kernel::timer::ticks().wrapping_sub(debut) > limite {
+                unsafe { outb(bm, 0) };
+                return echec("delai", st);
+            }
+        };
+        unsafe { outb(bm, 0) };
+        if !wait_not_busy() {
+            return echec("occupe-apres-transfert", bm_statut);
+        }
+        let (statut, _) = etat_controleur();
+        if bm_statut & BM_ST_ERREUR != 0 || statut & (ST_ERR | ST_DF) != 0 || statut & ST_DRQ != 0 {
+            unsafe { outb(bm + 2, BM_ST_ERREUR | BM_ST_IRQ) };
+            return echec("erreur", bm_statut);
+        }
+        unsafe { outb(bm + 2, BM_ST_ERREUR | BM_ST_IRQ) };
+        crate::kernel::memory::dma_rmb();
+        let source = crate::kernel::memory::phys_to_virt(TAMPON_PHYS.load(Ordering::Relaxed));
+        unsafe {
+            core::ptr::copy_nonoverlapping(source as *const u8, out.as_mut_ptr(), octets);
+        }
+        LOTS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+}
+
+/// (lots lus en DMA, echecs, DMA pret ?). Voir `dma`.
+pub fn dma_stats() -> (u64, u32, bool) {
+    dma::stats()
 }
 
 /// Lit un lot d'au plus 256 secteurs (une seule commande ATA).

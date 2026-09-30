@@ -102,6 +102,18 @@ timeout "$SECONDES" qemu-system-x86_64 \
 PROPRE="$SORTIE/propre.log"
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' > "$PROPRE"
 
+# Integrite : chaque octet du binaire est verifie par la charge elle-meme.
+# Un seul lancement corrompu fait echouer le banc, quel que soit le temps.
+if grep -q "GROS_ELF_CORROMPU" "$PROPRE"; then
+    echo "faute fichier : CONTENU CORROMPU lu depuis le disque" >&2
+    grep -o 'GROS_ELF_CORROMPU.*' "$PROPRE" >&2
+    exit 1
+fi
+if [ "$(grep -c 'GROS_ELF_OK' "$PROPRE")" -ne "$LANCEMENTS" ]; then
+    echo "faute fichier : $(grep -c 'GROS_ELF_OK' "$PROPRE")/$LANCEMENTS lancements verifies" >&2
+    exit 1
+fi
+
 if ! grep -q "GROS_ELF_FIN" "$PROPRE"; then
     echo "faute fichier : le scenario n'est pas alle au bout" >&2
     tail -12 "$PROPRE" >&2

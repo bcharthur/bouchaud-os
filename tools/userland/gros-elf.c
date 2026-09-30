@@ -75,6 +75,35 @@ void _start(void) {
         somme += gros_bloc[o];
     }
 
+    // CHAQUE OCTET est ensuite compare a la formule du generateur
+    // (run_faute_fichier.sh : (i*37 + (i>>8)*11) & 0xFF). Toucher une page
+    // prouve qu'elle a ete fautee, pas qu'elle contient les bons octets : un
+    // chemin de lecture disque qui rendrait le mauvais secteur passerait.
+    // La boucle vient APRES celle des fautes : les pages sont deja la, elle
+    // n'ajoute aucune faute et ne change pas ce que le banc mesure.
+    unsigned long corrompus = 0, premier = 0;
+    for (unsigned long o = 0; o < TAILLE; o++) {
+        unsigned char attendu = (unsigned char)((o * 37 + (o >> 8) * 11) & 0xFF);
+        if (gros_bloc[o] != attendu) {
+            if (corrompus == 0) premier = o;
+            corrompus++;
+        }
+    }
+    if (corrompus != 0) {
+        char alerte[96] = "GROS_ELF_CORROMPU octets=";
+        char c[24], q[24];
+        nombre(c, corrompus);
+        nombre(q, premier);
+        int k = 25;
+        for (int j = 0; c[j]; j++) alerte[k++] = c[j];
+        const char *lib = " premier=";
+        for (int j = 0; lib[j]; j++) alerte[k++] = lib[j];
+        for (int j = 0; q[j]; j++) alerte[k++] = q[j];
+        alerte[k++] = '\n';
+        ecris(alerte, (unsigned long)k);
+        sortie(1);
+    }
+
     char ligne[64] = "GROS_ELF_OK pages=";
     char n[24];
     nombre(n, TAILLE / PAGE);
