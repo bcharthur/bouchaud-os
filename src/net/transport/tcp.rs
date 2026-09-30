@@ -477,7 +477,15 @@ impl TcpConn {
             // Attente croissante d'une tentative a l'autre, comme le veut la
             // retransmission exponentielle.
             let patience = 1_500_000u32.saturating_mul(tentative + 1);
-            for _ in 0..patience {
+            for tour in 0..patience {
+                // Lot B7 : l'attente du SYN-ACK est une boucle active ; le noyau
+                // n'etant pas preemptible, elle monopolisait le coeur jusqu'a
+                // 25 s (et, sous le gros verrou, bloquait tout le systeme). Un
+                // point sur regulier rend la main si l'ordonnanceur le demande,
+                // sans changer ni la patience ni la sequence des SYN.
+                if tour % 4096 == 4095 {
+                    let _ = crate::kernel::scheduler::preempt::safe_point();
+                }
                 if let Some((_, n)) = net::poll_ip(6, Some(dst), &mut rb) {
                     if let Some(h) = parse(&rb[..n]) {
                         if h.dport == sport {

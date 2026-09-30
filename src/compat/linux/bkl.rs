@@ -663,6 +663,33 @@ pub const SANS_BKL: &[(u64, &str)] = &[
     (nr::ALARM, "B6 -- ALARMES (SpinLock) + ticks atomiques"),
     (nr::GETITIMER, "B6 -- ALARMES + mm"),
     (nr::SETITIMER, "B6 -- ALARMES + mm"),
+    // B7 -- le reseau (BOUCHAUD_RESEAU_SANS_BKL_V1).
+    //
+    // Mesure (smoke Ladybird #373) : [BKL-MAX-HOLD] 25 611 ms sur connect(42)
+    // -- la poignee TCP attendait le SYN-ACK en boucle active, gros verrou
+    // tenu, pendant que `sendto` et `rt_sigprocmask` d'autres taches
+    // attendaient derriere.
+    //
+    // Audit. La pile inet n'a plus d'etat que seul le gros verrou protege :
+    // anneau RX, routage des trames et cache ARP sous VERROU_RECEPTION
+    // (SpinLockIrq) ; anneau TX sous ANNEAU_TX ; etat de chaque socket et
+    // connexion TCP sous le SpinLock de son SocketState ; port ephemere et
+    // identifiant IP atomiques (BOUCHAUD_PORT_EPHEMERE_MONOTONE_V1,
+    // PROCHAIN_IP_ID) ; cache DNS du resolveur noyau sous SpinLock. La
+    // frontiere `avec_domaine_reseau` et les deux branches socket de `file.rs`
+    // ne prennent plus le gros verrou, et le domaine `Reseau` est declare
+    // `Migre` : toute reprise serait une regression comptee (budget zero).
+    // `listen`/`accept`/`accept4` rendent ENOSYS. `TcpConn::connect` attend
+    // desormais avec des points surs reguliers (meme patience, memes SYN).
+    (nr::CONNECT, "B7 -- SocketState + TcpConn (poll_ip sous VERROU_RECEPTION, send_ip sous ANNEAU_TX) ; attente avec points surs"),
+    (nr::SENDTO, "B7 -- envoie_octets : SocketState + send_ip (ANNEAU_TX, ARP) + port ephemere atomique"),
+    (nr::SENDMSG, "B7 -- descripteurs + mm + envoie_octets deja audite"),
+    (nr::SENDMMSG, "B7 -- boucle SENDMSG + mm"),
+    (nr::SHUTDOWN, "B7 -- SocketState seul"),
+    (nr::GETSOCKNAME, "B7 -- SocketState + adresse locale + mm"),
+    (nr::LISTEN, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
+    (nr::ACCEPT, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
+    (nr::ACCEPT4, "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire"),
 ];
 
 /// Ce que cet appel systeme exige du gros verrou.

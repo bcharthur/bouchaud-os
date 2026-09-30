@@ -52,7 +52,7 @@ use crate::drivers::vga::{self, COLOR_CYAN, COLOR_GREEN, COLOR_YELLOW, COLOR_DEF
 use alloc::format;
 use alloc::string::String;
 use crate::net::ipv4::Ipv4Addr;
-use crate::kernel::sync::SpinLockIrq;
+use crate::kernel::sync::{SpinLock, SpinLockIrq};
 use core::sync::atomic::AtomicBool;
 
 // BOUCHAUD_P18_NETWORK_SELF_HEAL_V1
@@ -1504,11 +1504,13 @@ fn same_subnet(ip: &Ipv4Addr) -> bool {
     (0..4).all(|i| ip[i] & masque[i] == nous[i] & masque[i])
 }
 
-static mut IP_ID: u16 = 0x4000;
+static PROCHAIN_IP_ID: AtomicU16 = AtomicU16::new(0x4000);
 static mut GW_MAC: Option<[u8; 6]> = None;
 
 fn next_ip_id() -> u16 {
-    unsafe { IP_ID = IP_ID.wrapping_add(1); IP_ID }
+    // Lot B7 : deux emetteurs concurrents (plus de gros verrou pour les
+    // separer) ne doivent pas tirer le meme identifiant IP.
+    PROCHAIN_IP_ID.fetch_add(1, OrdreCompteur::Relaxed).wrapping_add(1)
 }
 
 /// MAC du prochain saut pour atteindre `dst` (cache la MAC de la passerelle).
@@ -2129,35 +2131,24 @@ pub(crate) fn poll_ip(proto: u8, src_filter: Option<Ipv4Addr>, out: &mut [u8]) -
 // re-resoudre le nom a chaque fois coute un aller-retour UDP (jusqu'a 3 essais
 // de 2,5M iterations). On memorise donc les resolutions reussies. Mono-thread
 // (boucle GUI), borne en nombre d'entrees (purge FIFO).
-static mut DNS_CACHE: Option<alloc::vec::Vec<(String, Ipv4Addr)>> = None;
+// Lot B7 : le cache DNS du resolveur noyau etait un `static mut` lu et ecrit
+// par des fils noyau concurrents (TLS, preuve d'internet) qui ne tenaient pas
+// le gros verrou. Il a son verrou.
+static DNS_CACHE: SpinLock<alloc::vec::Vec<(String, Ipv4Addr)>> = SpinLock::new(alloc::vec::Vec::new());
 const DNS_CACHE_MAX: usize = 64;
 
 fn dns_cache_get(name: &str) -> Option<Ipv4Addr> {
-    unsafe {
-        let slot = &*core::ptr::addr_of!(DNS_CACHE);
-        if let Some(c) = slot.as_ref() {
-            if let Some((_, ip)) = c.iter().find(|(n, _)| n == name) { return Some(*ip); }
-        }
-    }
-    None
+    DNS_CACHE.lock().iter().find(|(n, _)| n == name).map(|(_, ip)| *ip)
 }
 
 fn dns_cache_put(name: &str, ip: Ipv4Addr) {
     use alloc::string::ToString;
-    unsafe {
-        let slot = &mut *core::ptr::addr_of_mut!(DNS_CACHE);
-        let c = slot.get_or_insert_with(alloc::vec::Vec::new);
-        if c.iter().any(|(n, _)| n == name) { return; }
-        if c.len() >= DNS_CACHE_MAX { c.remove(0); }
-        c.push((name.to_string(), ip));
-    }
+    let mut c = DNS_CACHE.lock();
+    if c.iter().any(|(n, _)| n == name) { return; }
+    if c.len() >= DNS_CACHE_MAX { c.remove(0); }
+    c.push((name.to_string(), ip));
 }
 
-/// Attente d'une reponse DNS par tentative, en millisecondes.
-///
-/// Un resolveur local repond en quelques millisecondes ; deux secondes
-/// couvrent largement un resolveur distant, et trois tentatives donnent six
-/// secondes au pire -- ce qui reste sous le delai d'un navigateur.
 const DNS_ATTENTE_MS: u64 = 2_000;
 
 /// Resout un nom d'hote en IPv4 via DNS (None en cas d'echec/timeout).

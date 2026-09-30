@@ -48,11 +48,29 @@ use bkl::{exige_bkl, verrouillage, Verrouillage, SANS_BKL};
 fn tout_ce_qui_n_est_pas_declare_garde_le_verrou() {
     // Un numero qui n'existe dans aucune table.
     assert!(exige_bkl(60_000));
-    // Un appel reel, volontairement laisse sous verrou : il descend dans le
-    // coeur du systeme de fichiers, dont le domaine n'existe pas encore.
-    assert!(exige_bkl(nr::OPENAT));
+    // Des appels reels, encore sous verrou : les pilotes (`ioctl`) et le cycle
+    // de vie des processus. (`openat` en faisait partie jusqu'au lot B5, qui
+    // l'a libere avec son audit : le systeme de fichiers a son domaine.)
     assert!(exige_bkl(nr::IOCTL));
     assert!(exige_bkl(nr::EXECVE));
+}
+
+/// Lots B1 a B7 : chaque appel libere l'a ete avec un audit ecrit dans
+/// SANS_BKL. Aucun ne doit revenir sous le verrou sans qu'un test le dise.
+#[test]
+fn les_lots_b1_a_b7_ne_regressent_pas() {
+    for numero in [
+        nr::UNAME, nr::SYSINFO, nr::PRLIMIT64,                    // B1
+        nr::FCNTL,                                                  // B2
+        nr::FSYNC, nr::SYNC, nr::MSYNC, nr::MREMAP,                 // B3
+        nr::EPOLL_WAIT, nr::SELECT,                                 // B4
+        nr::OPENAT, nr::STAT, nr::GETDENTS64, nr::UNLINKAT,
+        nr::RENAME, nr::PREAD64, nr::PWRITE64,                      // B5
+        nr::RT_SIGPROCMASK, nr::RT_SIGACTION, nr::KILL,             // B6
+        nr::CONNECT, nr::SENDTO, nr::SENDMSG, nr::SHUTDOWN,         // B7
+    ] {
+        assert!(!exige_bkl(numero), "lot B : syscall {} repris sous BKL", numero);
+    }
 }
 
 /// `FUTEX` est libere, et doit le rester.
@@ -106,10 +124,13 @@ fn receive_side_socket_reste_hors_bkl_externe() {
     ] {
         assert!(!exige_bkl(numero), "C8/V2 : syscall {} sous BKL", numero);
     }
+    // Le cote EMISSION restait sous verrou apres C8/V2 ; le lot B7 l'a libere
+    // (BOUCHAUD_RESEAU_SANS_BKL_V1) une fois la pile inet entierement sous ses
+    // verrous propres. L'assertion s'inverse, elle ne disparait pas.
     for numero in [
         nr::CONNECT, nr::SENDTO, nr::SENDMSG, nr::SENDMMSG, nr::SHUTDOWN
     ] {
-        assert!(exige_bkl(numero), "C8/V2 : syscall TX {} libere trop tot", numero);
+        assert!(!exige_bkl(numero), "B7 : syscall TX {} repris sous BKL", numero);
     }
 }
 

@@ -206,6 +206,16 @@ AUDITS_NOMMES = {
     "ALARM": "B6 -- ALARMES (SpinLock) + ticks atomiques",
     "GETITIMER": "B6 -- ALARMES + mm",
     "SETITIMER": "B6 -- ALARMES + mm",
+    # B7 -- audit ecrit au-dessus du lot dans SANS_BKL (reseau).
+    "CONNECT": "B7 -- SocketState + TcpConn (poll_ip sous VERROU_RECEPTION, send_ip sous ANNEAU_TX) ; attente avec points surs",
+    "SENDTO": "B7 -- envoie_octets : SocketState + send_ip (ANNEAU_TX, ARP) + port ephemere atomique",
+    "SENDMSG": "B7 -- descripteurs + mm + envoie_octets deja audite",
+    "SENDMMSG": "B7 -- boucle SENDMSG + mm",
+    "SHUTDOWN": "B7 -- SocketState seul",
+    "GETSOCKNAME": "B7 -- SocketState + adresse locale + mm",
+    "LISTEN": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
+    "ACCEPT": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
+    "ACCEPT4": "B7 -- sys_listen_unsupported : rend -ENOSYS sans rien lire",
 }
 
 # Une constante rendue directement : `0`, `1`, `0o022`, `-errno::ENOSYS`.

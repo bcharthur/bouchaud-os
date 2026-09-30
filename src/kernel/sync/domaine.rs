@@ -159,6 +159,14 @@ impl Domaine {
             // appelant -- c'est la dette des domaines `Syscall` et `Fd`, pas
             // celle de la readiness, et `[MM-NG6] waitq_bkl_enters=` la compte.
             Self::Readiness => Contrat::Migre,
+            // Le reseau (lot B7, BOUCHAUD_RESEAU_SANS_BKL_V1) : anneau RX,
+            // routage et ARP sous VERROU_RECEPTION, anneau TX sous ANNEAU_TX,
+            // etat de chaque socket sous son SpinLock, port ephemere et
+            // identifiant IP atomiques. La frontiere `avec_domaine_reseau` et
+            // les deux branches socket de `file.rs` ne reprennent plus le gros
+            // verrou ; la portee reste ouverte pour que toute reapparition
+            // soit comptee comme une REGRESSION.
+            Self::Reseau => Contrat::Migre,
             // Legitimes : pas de concurrence a proteger.
             Self::BootPrecoce | Self::Panique => Contrat::Exempte,
             // Le chantier en cours.
