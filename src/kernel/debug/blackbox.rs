@@ -681,7 +681,7 @@ fn sample(ts_ns: u64) {
             "timer1={:#x}/{:#x}/stage{}/{}:{} ",
             "timer2={:#x}/{:#x}/stage{}/{}:{} ",
             "timer3={:#x}/{:#x}/stage{}/{}:{} ",
-            "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} ",
+            "hid polls={} events={} reports={} kbd={} mouse={} errors={} rearms={} kicks={} recomptes={} ",
             "hid_ecart_max_ms={} hid_dernier_ns={} ",
             // OU EST PASSE CE TEMPS, ET PAS SEULEMENT COMBIEN.
             //
@@ -741,6 +741,7 @@ fn sample(ts_ns: u64) {
         t3, k3, TIMER_STAGE[3].load(Ordering::Acquire),
         TIMER_ENTERS[3].load(Ordering::Relaxed), TIMER_EXITS[3].load(Ordering::Relaxed),
         polls, events, reports, kbd, mouse, hid_errors, rearms, kicks,
+        crate::drivers::xhci_active::hid_recomptes(),
         hid_ecart_max / 1_000_000, hid_dernier,
         chrono.wake_to_run_max_us, chrono.run_to_lock_max_us,
         chrono.lock_starve_max_us, chrono.poll_body_max_us, chrono.responsable(),

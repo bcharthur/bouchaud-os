@@ -245,6 +245,22 @@ static CONTROL_OK: AtomicUsize = AtomicUsize::new(0);
 static USB_DEVICES: AtomicUsize = AtomicUsize::new(0);
 static HID_KEYBOARDS: AtomicUsize = AtomicUsize::new(0);
 static HID_MICE: AtomicUsize = AtomicUsize::new(0);
+// UNE LIGNE PAR TRANSITION, PAS UNE PAR RECOMPTE.
+//
+// Le recompte suit chaque tour qui a traite un changement de port. Sous QEMU,
+// la confirmation de debranchement P17 retraite les memes ports a chaque tour
+// pendant deux secondes : 303 lignes `claviers=0 souris=0` identiques par
+// demarrage, 36 % de tout le journal serie, dans le tambour d'un mebioctet
+// qui doit tenir seize demarrages. Les comptes, eux, n'avaient pas bouge.
+//
+// On publie donc les comptes quand ils CHANGENT, avec le nombre de recomptes
+// silencieux depuis la ligne precedente ; le total depuis l'amorcage part dans
+// chaque echantillon de la boite noire (`hid ... recomptes=`). Le va-et-vient
+// des ports reste mesure, sans occuper une ligne par tour. Ecrits par le seul
+// fil qui tient `RUNTIME_BUSY` ; atomiques pour les lecteurs.
+static HID_COMPTES_PUBLIES: AtomicUsize = AtomicUsize::new(usize::MAX);
+static HID_RECOMPTES_SILENCIEUX: AtomicUsize = AtomicUsize::new(0);
+static HID_RECOMPTES: AtomicUsize = AtomicUsize::new(0);
 // Le decodage pur -- tables de touches, differences de rapports,
 // disposition de la souris -- vit a part et est mis a l'epreuve sur l'hote.
 #[path = "hid/decodage.rs"]
@@ -5818,6 +5834,13 @@ pub fn hid_mice() -> usize {
     HID_MICE.load(Ordering::Acquire)
 }
 
+/// Recomptes des peripheriques HID depuis l'amorcage, publies ou non. Un
+/// total qui grimpe sans ligne `BOUCHAUD_USB_HID_RECOMPTE` dit que des ports
+/// sont retraites sans que les comptes changent.
+pub fn hid_recomptes() -> usize {
+    HID_RECOMPTES.load(Ordering::Relaxed)
+}
+
 /// Concentrateurs vus sur les ports racine et non traverses.
 ///
 /// Un nombre non nul explique a lui seul un clavier qui ne repond pas : il est
@@ -6486,11 +6509,22 @@ fn poll_interne(mesure: Option<u64>) {
             }
             if changement_hid {
                 recompte_les_hid(runtime);
-                crate::serial_println!(
-                    "BOUCHAUD_USB_HID_RECOMPTE claviers={} souris={}",
-                    HID_KEYBOARDS.load(Ordering::Acquire),
-                    HID_MICE.load(Ordering::Acquire),
-                );
+                HID_RECOMPTES.fetch_add(1, Ordering::Relaxed);
+                let claviers = HID_KEYBOARDS.load(Ordering::Acquire);
+                let souris = HID_MICE.load(Ordering::Acquire);
+                // Deux compteurs bornes par le nombre d'extremites : la cle
+                // tient dans un mot sans collision.
+                let comptes = (claviers << 16) | (souris & 0xffff);
+                if HID_COMPTES_PUBLIES.swap(comptes, Ordering::AcqRel) != comptes {
+                    crate::serial_println!(
+                        "BOUCHAUD_USB_HID_RECOMPTE claviers={} souris={} recomptes_sans_changement={}",
+                        claviers,
+                        souris,
+                        HID_RECOMPTES_SILENCIEUX.swap(0, Ordering::Relaxed),
+                    );
+                } else {
+                    HID_RECOMPTES_SILENCIEUX.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
