@@ -65,7 +65,8 @@ de `ladybird-native-browser.yml`.
 |---|---|---|---|
 | SMP8 | 1 cycle (arret au 1er rouge) | evalues 12/14 ; rouges : interactive p99 134 ms, interactive max 979 ms, `bkl_attente_max` 66 ms | ECHEC : ordonnanceur-probe A/B 2/4, statut 1 |
 | SMP4 | 19 cycles | evalues sur les 19 ; rouges a chaque cycle (`ready_latency_max` ~2 s isole, interactive p99 134 ms) | cycles 1-18 OK, cycle 19 marqueur absent ; 0 faute fatale |
-| SMP1, SMP2 | voir le run | | |
+| SMP2 | 35 cycles | evalues sur les 35 ; rouges a chaque cycle | 35/35 OK, 0 faute fatale |
+| SMP1 | tous les cycles de la tranche | **tenus** : verdict VERT | OK, 0 faute fatale |
 
 Aucune panique, aucune faute fatale. Les rouges sont des budgets de latence
 et une sonde A/B : de vrais defauts, non relaches.
