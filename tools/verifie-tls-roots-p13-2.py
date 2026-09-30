@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 CA = ROOT / 'src' / 'net' / 'security' / 'tls' / 'ca'
 ROOTS = ROOT / 'src' / 'net' / 'security' / 'tls' / 'roots.rs'
 EXPECTED = {
