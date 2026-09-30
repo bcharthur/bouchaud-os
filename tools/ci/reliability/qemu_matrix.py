@@ -19,12 +19,32 @@ def qemu_binary() -> str:
             return found
     raise SystemExit("qemu-system-x86_64 introuvable dans PATH")
 
+def journal_du_cycle(out_dir: Path, cpus: int) -> Path:
+    """Ou `run_one` ecrit la trace serie d'un passage.
+
+    LE SEUL ENDROIT QUI CONNAIT CE NOM. Le workflow d'endurance cherchait
+    `cycle-*/serial.log` quand ce module ecrivait `smp{N}.log` : l'etape des
+    budgets n'a jamais lu une seule trace. Les consommateurs lisent desormais
+    le chemin publie dans `summary.json` (champ `log`), et
+    `test_traces_endurance.py` verifie le contrat de bout en bout.
+    """
+    return out_dir / f"smp{cpus}.log"
+
+
 def run_one(qemu: str, bootimage: Path, cpus: int, seconds: int, memory_mb: int,
-            out_dir: Path, required: list[str]) -> dict:
+            out_dir: Path, required: list[str], disque: Path | None = None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    log = out_dir / f"smp{cpus}.log"
+    log = journal_du_cycle(out_dir, cpus)
     if log.exists():
         log.unlink()
+
+    # Le disque de scenario est COPIE par passage : un cycle ne doit pas
+    # heriter de ce que le precedent y a ecrit, sinon deux cycles ne sont plus
+    # le meme essai. La copie reste dans le dossier du cycle, avec sa trace.
+    disque_cycle = None
+    if disque is not None:
+        disque_cycle = out_dir / "scenario.img"
+        shutil.copyfile(disque, disque_cycle)
 
     command = [
         qemu,
@@ -40,6 +60,8 @@ def run_one(qemu: str, bootimage: Path, cpus: int, seconds: int, memory_mb: int,
         "-audiodev", "none,id=muet",
         "-device", "AC97,audiodev=muet",
     ]
+    if disque_cycle is not None:
+        command += ["-drive", f"format=raw,file={disque_cycle}"]
 
     timed_out = False
     returncode = None
@@ -59,6 +81,7 @@ def run_one(qemu: str, bootimage: Path, cpus: int, seconds: int, memory_mb: int,
         "returncode": returncode,
         "qemu_exit_ok": qemu_exit_ok,
         "log": str(log),
+        "disque": str(disque_cycle) if disque_cycle is not None else None,
         "log_bytes": scan.bytes,
         "fatal_findings": [
             {"kind": f.kind, "line": f.line, "text": f.text}

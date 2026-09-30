@@ -94,40 +94,48 @@ jobs:
         with:
           name: endurance-bootimage
           path: target/x86_64-bouchaud_os/debug/
-      - name: QEMU
+      - name: QEMU et chaine musl
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          # musl-tools/build-essential : les sondes du scenario sont compilees
+          # ici, depuis les sources du commit -- jamais un binaire perime.
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 musl-tools build-essential
+      - name: Scenario d'endurance (disque autorun + charges reelles)
+        shell: bash
+        run: tools/ci/fabrique-scenario-endurance.sh endurance-scenario
       - name: Campagne
         shell: bash
         run: |
           chmod +x target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || true
           minutes='${{ github.event.inputs.minutes_par_tranche || 90 }}'
+          # Le cycle doit contenir le scenario entier (~75 s sous TCG a SMP1,
+          # plus lent a SMP8) avec une marge : un cycle coupe avant
+          # `ENDURANCE_CYCLE_FIN` est ROUGE (marqueur absent), jamais tronque
+          # en silence.
           PYTHONPATH=tools/ci/reliability python3 tools/ci/reliability/soak.py \
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             --cpus '${{ matrix.cpus }}' \
             --duration-seconds "$(( minutes * 60 ))" \
             --cycle-seconds 300 \
             --memory-mb 4096 \
+            --disque endurance-scenario/endurance.img \
+            --require-fichier endurance-scenario/marqueurs-endurance.txt \
             --out-dir endurance-tranche-${{ matrix.tranche }}
-      - name: Budgets d'execution sur la trace
+      - name: Verdict (campagne / budgets / metriques absentes / noyau)
         if: always()
         shell: bash
         run: |
-          # Les budgets du chantier 11 se lisent sur la trace la plus longue :
-          # c'est celle ou une derive lente finit par se voir.
-          trace=$(ls -S endurance-tranche-${{ matrix.tranche }}/cycle-*/serial.log 2>/dev/null | head -1 || true)
-          if [ -n "$trace" ]; then
-            python3 tools/ci/check_budgets.py --journal "$trace"
-          else
-            echo "aucune trace serie produite" >&2
-            exit 1
-          fi
+          # Le consommateur suit le chemin publie dans `summary.json` : aucun
+          # nom de trace n'est devine ici. Voir `test_traces_endurance.py`.
+          python3 tools/ci/reliability/budgets_endurance.py endurance-tranche-${{ matrix.tranche }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: endurance-tranche-${{ matrix.tranche }}
-          path: endurance-tranche-${{ matrix.tranche }}
+          path: |
+            endurance-tranche-${{ matrix.tranche }}
+            endurance-scenario/scenario/autorun
+            endurance-scenario/marqueurs-endurance.txt
           retention-days: 14
 
   endurance-gate:

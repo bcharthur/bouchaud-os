@@ -317,6 +317,14 @@ def main() -> int:
                          help="ecrit les valeurs courantes comme nouvelle reference")
     options = parseur.parse_args()
 
+    # Un journal DEMANDE mais introuvable n'est pas « aucun journal fourni » :
+    # c'est un producteur de traces qui a change de nom ou n'a rien ecrit, et
+    # le confondre avec l'absence d'option rendait rc=0 (budgets « non
+    # verifies ») -- exactement la barriere muette que l'endurance a subie.
+    if options.journal is not None and not options.journal.is_file():
+        print(f"ECHEC : journal demande introuvable : {options.journal}", file=sys.stderr)
+        return 2
+
     reference = json.loads(REFERENCE.read_text(encoding="utf-8"))
     courant = sites_par_domaine()
 
@@ -403,16 +411,21 @@ def main() -> int:
         # pas tourne est pire que pas de budget du tout.
         print("budgets NON VERIFIES (pas de mesure disponible) :")
         print("\n".join(non_verifies))
+    # Le compte des mesures est imprime AUSSI en cas d'echec : un rouge doit
+    # dire sur combien de grandeurs il s'est prononce, sinon « 1 depassement »
+    # sur 3 grandeurs mesurees et sur 20 se lisent pareil.
+    mesures_faites = sum(1 for nom, _ in budgets if nom in mesures)
     if fautes:
         print("budgets depasses :")
         print("\n".join(fautes))
+        print(f"ECHEC budgets ; execution : {mesures_faites}/{len(budgets)} "
+              f"grandeur(s) mesuree(s)")
         return 1
 
     # Le compte des mesures fait PARTIE du verdict. « budgets tenus » sans lui
     # se lit comme « tout a ete verifie » alors que la trace pouvait n'avoir
     # rien porte du tout -- exactement ce que cette barriere doit empecher.
     total = sum(courant.values())
-    mesures_faites = sum(1 for nom, _ in budgets if nom in mesures)
     print(f"ok  budgets tenus ; {total} site(s) d'acquisition du gros verrou "
           f"dans {len(courant)} domaine(s) ; execution : "
           f"{mesures_faites}/{len(budgets)} grandeur(s) mesuree(s)"

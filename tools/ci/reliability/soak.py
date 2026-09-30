@@ -35,10 +35,28 @@ def main() -> int:
     parser.add_argument("--memory-mb", type=int, default=4096)
     parser.add_argument("--out-dir", type=Path, default=Path("reliability-soak"))
     parser.add_argument("--require", action="append", default=[])
+    # Un disque de scenario (autorun + charges) attache a CHAQUE cycle, et le
+    # fichier des marqueurs qu'il promet. Voir
+    # `tools/ci/fabrique-scenario-endurance.sh`.
+    parser.add_argument("--disque", type=Path, default=None)
+    parser.add_argument("--require-fichier", type=Path, default=None)
     args = parser.parse_args()
 
     if args.duration_seconds <= 0 or args.cycle_seconds <= 0:
         raise SystemExit("les durees doivent etre positives")
+    if args.disque is not None and not args.disque.is_file():
+        raise SystemExit(f"disque de scenario absent : {args.disque}")
+    if args.require_fichier is not None:
+        marqueurs = [
+            ligne.strip()
+            for ligne in args.require_fichier.read_text(encoding="utf-8").splitlines()
+            if ligne.strip()
+        ]
+        if not marqueurs:
+            # Un fichier de marqueurs vide exigerait RIEN : c'est la forme la
+            # plus discrete d'une barriere qui ne peut pas rougir.
+            raise SystemExit(f"fichier de marqueurs vide : {args.require_fichier}")
+        args.require.extend(marqueurs)
 
     qemu = qemu_matrix.qemu_binary()
     started = time.monotonic()
@@ -63,8 +81,19 @@ def main() -> int:
         cycle_dir = args.out_dir / f"cycle-{index:04d}"
         result = qemu_matrix.run_one(
             qemu, args.bootimage, args.cpus, args.cycle_seconds, args.memory_mb,
-            cycle_dir, args.require,
+            cycle_dir, args.require, args.disque,
         )
+        # La copie du disque de scenario (140 Mio) n'est gardee que si le
+        # cycle a echoue : c'est alors une piece du dossier -- l'etat qu'y ont
+        # ecrit wal-probe et fsync. Un cycle reussi la rend : l'image se
+        # refabrique a l'identique depuis le commit, et dix-huit copies par
+        # tranche feraient un artefact de plusieurs gigaoctets.
+        result["disque_conserve"] = False
+        if result.get("disque"):
+            if result["ok"]:
+                Path(result["disque"]).unlink(missing_ok=True)
+            else:
+                result["disque_conserve"] = True
         cycles.append(result)
         etat = "OK" if result["ok"] else "ECHEC"
         print(
@@ -86,7 +115,10 @@ def main() -> int:
             break
 
     payload = {
-        "schema": 2,
+        "schema": 3,
+        "cpus": args.cpus,
+        "disque": str(args.disque) if args.disque is not None else None,
+        "marqueurs_exiges": args.require,
         "requested_seconds": args.duration_seconds,
         "cycle_seconds": args.cycle_seconds,
         "elapsed_seconds": round(time.monotonic() - started, 3),
