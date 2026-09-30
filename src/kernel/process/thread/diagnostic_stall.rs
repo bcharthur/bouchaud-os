@@ -437,6 +437,27 @@ static STALL_DERNIER_ACQUIRE_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Appelee par le PIT BSP AVANT tout try_enter(BKL). Si les logs normaux
 /// meurent parce qu'un AP garde le BKL, cette ligne continue donc a sortir.
+static RELEVE_IRQ_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Publie, a la sortie du releve, sa duree interruptions masquees.
+struct DureeReleve {
+    debut_ns: u64,
+    complet: bool,
+}
+
+impl Drop for DureeReleve {
+    fn drop(&mut self) {
+        let duree = crate::kernel::timer::monotonic_ns().saturating_sub(self.debut_ns);
+        let pire = RELEVE_IRQ_PIRE_NS.fetch_max(duree, Ordering::Relaxed).max(duree);
+        crate::serial_println!(
+            "[SONDE-IRQ-DUREE] complet={} duree_ms={} pire_ms={}",
+            self.complet as u8,
+            duree / 1_000_000,
+            pire / 1_000_000,
+        );
+    }
+}
+
 pub fn stall_probe_from_timer() {
     let now = crate::kernel::timer::ticks();
     if now == 0 || now % crate::kernel::timer::TICKS_PER_SECOND != 0 {
@@ -545,6 +566,12 @@ pub fn stall_probe_from_timer() {
     if !complet && now % periode_resume != 0 {
         return;
     }
+    // BOUCHAUD_SONDE_IRQ_DUREE_V1 -- ce releve s'imprime depuis l'IRQ du
+    // minuteur du BSP, interruptions masquees : pendant ce temps le coeur 0
+    // n'acquitte aucun IPI (TLB shootdown : arret fail-closed a 2 s). Sa
+    // duree est donc mesuree et publiee, sans rien changer d'autre.
+    let debut_releve_ns = crate::kernel::timer::monotonic_ns();
+    let _duree = DureeReleve { debut_ns: debut_releve_ns, complet };
 
     crate::serial_println!(
         "[{}] t={} owner={} depth=[{},{},{},{}] cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{} {} {} {}]",
