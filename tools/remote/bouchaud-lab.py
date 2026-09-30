@@ -1348,7 +1348,9 @@ def construis_parseur() -> argparse.ArgumentParser:
 
     # BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     sp = avec_hote(sous.add_parser(
-        "threads-page", help="page forensic des threads (4 slots par page)"))
+        "threads-page",
+        help="page forensic des threads (reponses::THREADS_PAR_PAGE, "
+             "2 slots par page)"))
     sp.add_argument("start", type=int)
     sp.set_defaults(_faire=lambda a, j: fait_commande_simple(
         a, j, "threads-page", a.start, None, f"threads page {a.start}"))

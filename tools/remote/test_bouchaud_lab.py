@@ -864,6 +864,11 @@ class TableDuProtocole(unittest.TestCase):
             "events-watch": ("events watch", 14),
             "services": ("services snapshot", 15),
             "services-page": ("services page", 92),
+            # BOUCHAUD_P15_BROWSER_HANG_FORENSICS : ajoutees par p18 au noyau
+            # et au client, sans que cette table suive. Valeurs relues dans
+            # `brdp::analyse` et `Commande::code()`, pas dans le client.
+            "forensics": ("forensics status", 93),
+            "threads-page": ("threads page", 94),
             "processes": ("processes snapshot", 16),
             "memory": ("memory snapshot", 17),
             "serial-status": ("serial status", 90),
