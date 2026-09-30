@@ -96,6 +96,25 @@ pub fn validate(certs: &[Certificate], hostname: &str, now: u64) -> ChainResult 
             res.detail = "issuer/subject incoherents dans la chaine";
             return res;
         }
+        // BOUCHAUD_TLS_SIGNATAIRE_CA_V1
+        //
+        // Une signature valide ne suffit pas : son auteur doit avoir le DROIT
+        // de signer. Sans ce controle, n'importe quelle feuille legitimement
+        // emise -- `attaquant.test`, CA:FALSE -- signait une fausse feuille
+        // pour n'importe quel nom, et la chaine
+        //     [fausse feuille, feuille de l'attaquant, intermediaire]
+        // recevait « [TLS OK] » : chaque signature verifie, le nom d'hote
+        // correspond. Voir `tools/securite/test_chaine_x509.rs`.
+        //
+        // RFC 5280 4.2.1.9 : sans basicConstraints cA=TRUE -- extension
+        // absente comprise -- la cle d'un certificat ne verifie aucune
+        // signature de certificat. Les racines du magasin ne passent pas par
+        // ici : elles sont ancres par configuration, pas par ce qu'elles
+        // disent d'elles-memes.
+        if !suivant.is_ca {
+            res.detail = "signataire sans basicConstraints CA dans la chaine";
+            return res;
+        }
         if !x509::verify_signed_by(courant, &suivant.pubkey) {
             res.detail = "signature de chaine invalide";
             return res;
