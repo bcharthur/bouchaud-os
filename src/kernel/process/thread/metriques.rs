@@ -56,6 +56,7 @@ rej_inel={} rej_crs={} mig={}",
         max_tenue, max_site, preempt_irq_bkl_tenu(), identite_repli(),
         parked_waiters, parks, wake_ipis,
     ));
+    publie_inventaire_bkl();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[BKL-MAX-HOLD] ns={} cpu={} task={} syscall={} site_acquisition={} origine={} site_tenue={}",
         max_tenue,
@@ -478,6 +479,37 @@ fn log_smp_sample(online: usize) {
         current.gpu_bytes.saturating_sub(previous.gpu_bytes),
     ));
     publie_bkl_par_appel(elapsed);
+}
+
+// BOUCHAUD_BKL_INVENTAIRE_V1
+//
+// Retirer le gros verrou, c'est vider CETTE liste. `[BKL-SYSCALL]` ne donne
+// que les trois plus gros consommateurs d'une fenetre ; pour savoir ce qu'il
+// reste a migrer, il faut TOUT ce qui l'a pris au moins une fois depuis le
+// demarrage : chaque appel (`nom=acquisitions/tenue_ms/attente_ms`) et le
+// seau hors appel systeme (exceptions, creation et sortie de taches).
+fn publie_inventaire_bkl() {
+    let seaux = smp_lock::nombre_de_seaux();
+    let mut ligne = alloc::string::String::from("[BKL-INVENTAIRE]");
+    let mut n = 0u32;
+    for index in 0..seaux {
+        let (tenue, attente, acquisitions, _) = smp_lock::stats_du_seau(index);
+        if acquisitions == 0 {
+            continue;
+        }
+        n += 1;
+        let nom = if index == smp_lock::SEAU_NOYAU {
+            "hors-syscall"
+        } else {
+            crate::kernel::abi::nr::name(index as u64)
+        };
+        let _ = core::fmt::Write::write_fmt(
+            &mut ligne,
+            format_args!(" {}={}/{}/{}", nom, acquisitions, tenue / 1_000_000, attente / 1_000_000),
+        );
+    }
+    let _ = core::fmt::Write::write_fmt(&mut ligne, format_args!(" seaux_actifs={}", n));
+    crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
 }
 
 // BOUCHAUD_P2_BKL_PAR_APPEL_V1
