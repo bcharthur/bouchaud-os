@@ -54,6 +54,7 @@ struct Couple {
     sequentielles: AtomicU64,
     service_ns: AtomicU64,
     attente_ns: AtomicU64,
+    hors_verrou_ns: AtomicU64,
     pire_service_ns: AtomicU64,
     pages_relues: AtomicU64,
     fin_precedente: AtomicU64,
@@ -68,6 +69,7 @@ impl Couple {
             sequentielles: AtomicU64::new(0),
             service_ns: AtomicU64::new(0),
             attente_ns: AtomicU64::new(0),
+            hors_verrou_ns: AtomicU64::new(0),
             pire_service_ns: AtomicU64::new(0),
             pages_relues: AtomicU64::new(0),
             fin_precedente: AtomicU64::new(u64::MAX),
@@ -84,6 +86,7 @@ static LECTURES: AtomicU64 = AtomicU64::new(0);
 static OCTETS: AtomicU64 = AtomicU64::new(0);
 static SERVICE_NS: AtomicU64 = AtomicU64::new(0);
 static ATTENTE_NS: AtomicU64 = AtomicU64::new(0);
+static HORS_VERROU_NS: AtomicU64 = AtomicU64::new(0);
 static PAGES_NEUVES: AtomicU64 = AtomicU64::new(0);
 static PAGES_RELUES: AtomicU64 = AtomicU64::new(0);
 static HORS_BITMAP: AtomicU64 = AtomicU64::new(0);
@@ -131,8 +134,12 @@ fn bitmap(noeud: usize) -> Option<&'static [AtomicU64; MOTS_PAR_NOEUD]> {
 }
 
 /// Une lecture disque terminee. `service_ns` : duree verrou du controleur
-/// tenu ; `attente_ns` : duree passee a l'attendre.
-pub fn note(pid: u64, noeud: usize, offset: usize, octets: usize, service_ns: u64, attente_ns: u64) {
+/// tenu ; `attente_ns` : duree passee a l'attendre ; `hors_verrou_ns` : le
+/// reste de la duree de la lecture.
+pub fn note(
+    pid: u64, noeud: usize, offset: usize, octets: usize,
+    service_ns: u64, attente_ns: u64, hors_verrou_ns: u64,
+) {
     if octets == 0 {
         return;
     }
@@ -140,6 +147,7 @@ pub fn note(pid: u64, noeud: usize, offset: usize, octets: usize, service_ns: u6
     OCTETS.fetch_add(octets as u64, Ordering::Relaxed);
     SERVICE_NS.fetch_add(service_ns, Ordering::Relaxed);
     ATTENTE_NS.fetch_add(attente_ns, Ordering::Relaxed);
+    HORS_VERROU_NS.fetch_add(hors_verrou_ns, Ordering::Relaxed);
     let classe = (octets.saturating_sub(1) / PAGE).checked_ilog2().map_or(0, |b| b as usize + 1);
     TAILLE[classe.min(TAILLES - 1)].fetch_add(1, Ordering::Relaxed);
 
@@ -172,6 +180,7 @@ pub fn note(pid: u64, noeud: usize, offset: usize, octets: usize, service_ns: u6
         c.octets.fetch_add(octets as u64, Ordering::Relaxed);
         c.service_ns.fetch_add(service_ns, Ordering::Relaxed);
         c.attente_ns.fetch_add(attente_ns, Ordering::Relaxed);
+        c.hors_verrou_ns.fetch_add(hors_verrou_ns, Ordering::Relaxed);
         c.pire_service_ns.fetch_max(service_ns, Ordering::Relaxed);
         c.pages_relues.fetch_add(relues, Ordering::Relaxed);
         let fin = (offset + octets) as u64;
@@ -191,7 +200,7 @@ pub fn publie(t_ms: u64) {
     let t = |i: usize| TAILLE[i].load(Ordering::Relaxed);
     crate::kernel::dmesg::log_fmt(format_args!(
         "BACKING_DISK_DECOMP scope=global releve={} t={} lectures={} octets={} service_us={} \
-attente_us={} pages_neuves={} pages_relues={} hors_bitmap={} debordements={} \
+attente_us={} hors_verrou_us={} pages_neuves={} pages_relues={} hors_bitmap={} debordements={} \
 tailles=4k:{},8k:{},16k:{},32k:{},64k:{},128k:{},256k:{},plus:{}",
         releve,
         t_ms,
@@ -199,6 +208,7 @@ tailles=4k:{},8k:{},16k:{},32k:{},64k:{},128k:{},256k:{},plus:{}",
         OCTETS.load(Ordering::Relaxed),
         SERVICE_NS.load(Ordering::Relaxed) / 1_000,
         ATTENTE_NS.load(Ordering::Relaxed) / 1_000,
+        HORS_VERROU_NS.load(Ordering::Relaxed) / 1_000,
         PAGES_NEUVES.load(Ordering::Relaxed),
         PAGES_RELUES.load(Ordering::Relaxed),
         HORS_BITMAP.load(Ordering::Relaxed),
@@ -213,7 +223,7 @@ tailles=4k:{},8k:{},16k:{},32k:{},64k:{},128k:{},256k:{},plus:{}",
         }
         crate::kernel::dmesg::log_fmt(format_args!(
             "BACKING_DISK_ATTRIB releve={} pid={} node={} lectures={} octets={} sequentielles={} \
-service_us={} attente_us={} pire_service_us={} pages_relues={}",
+service_us={} attente_us={} hors_verrou_us={} pire_service_us={} pages_relues={}",
             releve,
             (cle >> 24) - 1,
             cle & 0xFF_FFFF,
@@ -222,6 +232,7 @@ service_us={} attente_us={} pire_service_us={} pages_relues={}",
             c.sequentielles.load(Ordering::Relaxed),
             c.service_ns.load(Ordering::Relaxed) / 1_000,
             c.attente_ns.load(Ordering::Relaxed) / 1_000,
+            c.hors_verrou_ns.load(Ordering::Relaxed) / 1_000,
             c.pire_service_ns.load(Ordering::Relaxed) / 1_000,
             c.pages_relues.load(Ordering::Relaxed),
         ));

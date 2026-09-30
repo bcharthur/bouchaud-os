@@ -67,6 +67,7 @@ def analyse(texte: str) -> tuple[list[str], int]:
         f"{int(g['octets']) / 2**20:.1f} Mio",
         f"  occupation du controleur (somme du service) : {int(g['service_us']) / 1e3:.0f} ms",
         f"  attente du verrou (somme, NON additive)     : {int(g['attente_us']) / 1e3:.0f} ms",
+        f"  hors verrou (reste de la duree des lectures): {int(g.get('hors_verrou_us', 0)) / 1e3:.0f} ms",
         f"  pages neuves {g['pages_neuves']}  relues {g['pages_relues']}  "
         f"hors_bitmap {g['hors_bitmap']}  debordements {g['debordements']}",
         f"  tailles {g['tailles']}",

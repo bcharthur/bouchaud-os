@@ -59,8 +59,9 @@ pub fn read_blocks(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usiz
     AtaBlockDevice::new(drive).read_blocks(lba, count, out)
 }
 
-/// Lecture ATA qui rend aussi l'attente du verrou du controleur (ns).
-pub fn read_blocks_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usize, u64) {
+/// Lecture ATA qui rend aussi l'attente du verrou du controleur et sa duree
+/// de tenue (ns).
+pub fn read_blocks_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usize, u64, u64) {
     ata::read_mesure(drive, lba, count, out)
 }
 

@@ -364,19 +364,21 @@ pub fn read(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> usize {
     read_mesure(drive, lba, count, out).0
 }
 
-/// Comme [`read`], et rend aussi l'attente du verrou du controleur (ns).
+/// Comme [`read`], et rend aussi l'attente du verrou du controleur et la
+/// duree pendant laquelle il a ete TENU (ns).
 ///
 /// Le controleur est une ressource SERIE : la duree d'une lecture vue de
 /// l'appelant = attente (une autre lecture l'occupe) + service (il travaille
 /// pour celle-ci). Les additionner sans les separer fait compter l'attente de
 /// chaque lecteur concurrent comme du travail disque. Voir
 /// `fs::backing_attrib`.
-pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usize, u64) {
+pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usize, u64, u64) {
     probe();
     if !present(drive) || count == 0 {
-        return (0, 0);
+        return (0, 0, 0);
     }
     let (_controller, attente_ns) = lock_controller_mesure();
+    let tenu_debut = crate::kernel::timer::monotonic_ns();
     let mut done = 0usize;
     while done < count {
         let batch = core::cmp::min(count - done, 256);
@@ -393,7 +395,7 @@ pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usi
         }
         done += batch;
     }
-    (done, attente_ns)
+    (done, attente_ns, crate::kernel::timer::monotonic_ns().saturating_sub(tenu_debut))
 }
 
 /// Lit un lot d'au plus 256 secteurs (une seule commande ATA).

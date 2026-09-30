@@ -271,15 +271,17 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     // aux runs precedents.
     let debut_attrib_ns = crate::kernel::timer::monotonic_ns();
     let mut attente_ns = 0u64;
+    let mut tenu_ns = 0u64;
 
     let intra = absolute % SECTOR_SIZE;
     if intra != 0 && done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        let (lus, attente) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
+        let (lus, attente, tenu) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
         attente_ns += attente;
+        tenu_ns += tenu;
         if lus != 1 {
-            attribue(node, offset, done, debut_attrib_ns, attente_ns);
+            attribue(node, offset, done, debut_attrib_ns, attente_ns, tenu_ns);
             return done;
         }
         let take = core::cmp::min(SECTOR_SIZE - intra, wanted - done);
@@ -294,13 +296,14 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if full_sectors > 0 {
         let bytes = full_sectors * SECTOR_SIZE;
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        let (read, attente) = block::read_blocks_mesure(
+        let (read, attente, tenu) = block::read_blocks_mesure(
             drive,
             lba,
             full_sectors,
             &mut out[done..done + bytes],
         );
         attente_ns += attente;
+        tenu_ns += tenu;
         let got = read * SECTOR_SIZE;
         done += got;
         absolute += got;
@@ -308,7 +311,7 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
             DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
             DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
             note_duree_io(debut_io_ns);
-            attribue(node, offset, done, debut_attrib_ns, attente_ns);
+            attribue(node, offset, done, debut_attrib_ns, attente_ns, tenu_ns);
             return done;
         }
     }
@@ -316,8 +319,9 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     if done < wanted {
         let mut sector = [0u8; SECTOR_SIZE];
         let lba = data_lba + (absolute / SECTOR_SIZE) as u64;
-        let (lus, attente) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
+        let (lus, attente, tenu) = block::read_blocks_mesure(drive, lba, 1, &mut sector);
         attente_ns += attente;
+        tenu_ns += tenu;
         if lus == 1 {
             let take = wanted - done;
             out[done..done + take].copy_from_slice(&sector[..take]);
@@ -328,19 +332,21 @@ fn read_at_uncached(node: usize, offset: usize, out: &mut [u8]) -> usize {
     DISK_READ_OPS.fetch_add(1, Ordering::Relaxed);
     DISK_READ_BYTES.fetch_add(done as u64, Ordering::Relaxed);
     note_duree_io(debut_io_ns);
-    attribue(node, offset, done, debut_attrib_ns, attente_ns);
+    attribue(node, offset, done, debut_attrib_ns, attente_ns, tenu_ns);
     done
 }
 
 /// Remet une lecture disque a `fs::backing_attrib` : pid courant, noeud,
-/// plage, service (duree - attente du verrou) et attente.
-fn attribue(node: usize, offset: usize, octets: usize, debut_ns: u64, attente_ns: u64) {
+/// plage, et la duree decoupee en trois : verrou du controleur TENU (le
+/// disque travaille pour cette lecture), ATTENTE de ce verrou, et le reste
+/// (hors verrou : copies, interruptions servies sur ce coeur).
+fn attribue(node: usize, offset: usize, octets: usize, debut_ns: u64, attente_ns: u64, tenu_ns: u64) {
     let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
     let cpu = crate::arch::x86_64::usermode::cpu_index();
     let pid = crate::kernel::task::pid_pour_sonde(cpu);
-    crate::fs::backing_attrib::note(
-        pid, node, offset, octets, duree.saturating_sub(attente_ns), attente_ns.min(duree),
-    );
+    let attente = attente_ns.min(duree);
+    let tenu = tenu_ns.min(duree - attente);
+    crate::fs::backing_attrib::note(pid, node, offset, octets, tenu, attente, duree - attente - tenu);
 }
 
 /// Ajoute une lecture au cumul, et retient la pire.
