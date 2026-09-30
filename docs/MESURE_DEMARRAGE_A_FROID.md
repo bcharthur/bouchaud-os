@@ -900,3 +900,52 @@ prdt_dans_64k=`). Repli PIO inchange.
     -m 8192 : DMA32 source=reserve 0xbfee0000..0xbffe0000
                                                    ATA_DMA pret prdt=0xbfee0000
               ATA_CONTROLEUR dma_pret=1 lots_dma=22 replis_pio=0
+
+### 18.8 La mesure apres-DMA VALIDE : run #375 (cb20549e)
+
+Criteres (demandes explicitement) : `LADYBIRD_DISQUE_MODE dma dma_pret=1
+lots_dma=4721 replis_pio=0 desactivation=aucune`, smoke fonctionnel vert.
+Tout le workflow est vert, « ordre worker (diagnostic) » compris -- rouge
+depuis #367.
+
+    run                         #371 (846b5b5b)       #375 (cb20549e)
+                                PIO + correctifs      DMA32 + lots B1-B6
+                                SMP/TLB/reveils       + port TCP monotone
+    chemin disque               pio (DMA refuse)      dma, 4 721 lots, 0 repli
+    lectures disque             4 604 / 287,8 Mio     4 571 / 285,7 Mio
+    service du controleur       46,7 s                1,33 s   (x35)
+    attente du verrou (somme)   37,4 s                3,7 s
+    HOST_WORKER_HTTP_PERF_FIRST 2 546 ms              1 134 ms
+    HOST_WORKER_BLOB_PERF_FIRST 8 706 ms              1 352 ms  (x6,4)
+    HOST_JS_OK / images         17/17, 11/11          17/17 (T+34 s), 11/11 (T+31 s)
+    HOST_SMOKE_OK               --                    T+40 s
+    etape smoke CI              1 min 38 s            51 s
+    [BKL-MAX-HOLD]              --                    34,7 ms (clone)
+
+#373 (DMA32 sans le correctif TCP) avait les memes gains disque et workers,
+mais `fetch-texte` echouait : `connect` muet 25,6 s, gros verrou tenu tout
+du long. Cause reproduite et corrigee (cb20549e, port source TCP tire sur
+4 096 valeurs ; tcp-connexions-probe : 8 echecs de 54-57 s sur 242
+connexions avant, 0 sur 900 apres).
+
+Rappel §17.1 : ce gain est propre a QEMU/ATA ; la TRIGKEY lit ses binaires
+dans le ramdisk.
+
+### 18.9 Retrait du gros verrou : etat apres le lot B7
+
+    appels systeme hors gros verrou   81 -> 150 sur 159 (lots B1 a B7)
+    endurance SMP4, [BKL-STATS] fin de cycle :
+      avant B2 (fcntl sous BKL)   57 321 acquisitions  tenue 2 346 ms
+      B6                           1 694                     1 116 ms
+      B7 (reseau sorti)              416-431                  753-804 ms
+    [BKL-DOMAINES] regressions=0 ; domaines sortis : Fs, Vfs, Ordonnanceur,
+    Readiness, RegistreProcessus, VerrouEnregistrement, Reseau
+
+Restent : les 8 appels du cycle de vie des processus (clone/clone3/fork/
+vfork/execve/exit/exit_group/wait4), `ioctl`, puis les 12 sites hors appel
+systeme (exceptions fatales, creation de taches, fil `desktop`, console,
+AC97) et enfin `smp_lock` lui-meme.
+
+La course `wait4` du §15, la sonde d'ordonnanceur A/B (fragile sur la base
+comme sur chaque lot) et les caches `static mut` du chemin de rendu noyau
+(RES_CACHE, SUBRES_*) restent ouverts.
