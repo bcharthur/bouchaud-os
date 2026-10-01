@@ -310,6 +310,11 @@ l'anneau ne demarre pas -- `RING_WRAP_BEFORE`, `RING_WRAP_AFTER`,
 `RING_SECOND_LAP_TIMEOUT`, `AUDIT_RX_DMA_STALL`, et la capture des
 descripteurs 63 et 0 au moment du bouclage.
 
+Suite du 1er octobre 2026 : le second tour demarre, mais seulement apres une
+reprise de degre 3, ~10 s apres le premier bouclage. Enquete, chronologie
+corrigee, audit de l'echelle de reprise et protocole physique :
+[RTL8168_PREMIER_BOUCLAGE.md](RTL8168_PREMIER_BOUCLAGE.md).
+
 ## Les epreuves
 
 `tools/remote/test_bouchaud_lab.py` fait parler le client a un faux serveur

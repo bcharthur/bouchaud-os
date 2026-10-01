@@ -5,7 +5,7 @@
 //!   feature `map_physical_memory`) et petit allocateur de frames DMA pour les
 //!   pilotes (e1000). A terme : frames physiques generiques + pagination.
 
-use crate::boot::{BootInfo, MemoryRegionKind};
+use crate::boot::{BootInfo, MemoryRegion, MemoryRegionKind};
 use crate::kernel::arene_dma::AreneDma;
 use crate::kernel::heap;
 use x86_64::instructions::interrupts;
@@ -13,6 +13,8 @@ use x86_64::instructions::interrupts;
 static mut PHYS_OFFSET: u64 = 0;
 static mut USER_START: u64 = 0;
 static mut USER_END: u64 = 0;
+/// La carte memoire du chargeur, gardee pour `est_ram_connue`.
+static mut REGIONS: &[MemoryRegion] = &[];
 
 // BOUCHAUD_C3_ARENE_DMA_V1
 //
@@ -81,6 +83,7 @@ pub fn init(boot: &'static BootInfo) {
 
     unsafe {
         PHYS_OFFSET = physical_memory_offset;
+        REGIONS = boot.memory_regions;
     }
 
     // Choisit la plus grande region RAM libre (>= 1 MiB).
@@ -223,6 +226,22 @@ pub fn phys_offset() -> u64 {
 /// Pointeur virtuel pour acceder a une adresse physique donnee.
 pub fn phys_to_virt(phys: u64) -> *mut u8 {
     (unsafe { PHYS_OFFSET } + phys) as *mut u8
+}
+
+/// `[phys, phys + len)` tient-il ENTIER dans une region RAM de la carte de boot ?
+///
+/// Pour une sonde qui veut lire une adresse physique qu'elle n'a pas allouee
+/// (BOUCHAUD_RTL8168_HORS_ANNEAU_V1). Fail-closed : une plage absente de la
+/// carte, a cheval sur deux regions ou dans une region MMIO est refusee --
+/// lire un trou du bus ou un registre n'est pas une observation.
+pub fn est_ram_connue(phys: u64, len: u64) -> bool {
+    let Some(fin) = phys.checked_add(len) else { return false };
+    let regions = unsafe { *core::ptr::addr_of!(REGIONS) };
+    regions.iter().any(|r| {
+        r.kind != MemoryRegionKind::Mmio
+            && r.start <= phys
+            && fin <= r.start.saturating_add(r.len)
+    })
 }
 
 /// Choisit l'allocateur DMA : le compagnon, ou l'arene s'il ne peut pas.

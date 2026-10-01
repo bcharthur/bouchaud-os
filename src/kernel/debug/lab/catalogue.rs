@@ -149,6 +149,10 @@ pub mod id {
     pub const RX_ENERGIE: u32 = 0x109;
     pub const RX_DESC_ADDR_RELU: u32 = 0x10A;
     pub const RX_PROGRES: u32 = 0x10B;
+    // BOUCHAUD_RTL8168_PREMIER_BOUCLAGE_V1
+    pub const RX_COMPTEURS_MAT: u32 = 0x10C;
+    pub const RX_ADRESSES_INIT: u32 = 0x10D;
+    pub const RX_HORS_ANNEAU: u32 = 0x10E;
 
     // --- blackbox ----------------------------------------------------------
     pub const BB_STORAGE_READY: u32 = 0x200;
@@ -229,9 +233,16 @@ pub static DEFINITIONS: &[Definition] = &[
     d(id::RX_ENERGIE, "RX_ENERGIE",
       ["config2", "config5", "misc", "apres"], [H8, H8, H32, B]),
     d(id::RX_DESC_ADDR_RELU, "RX_DESC_ADDR_RELU",
-      ["relu", "attendu", "concorde", ""], [H64, H64, B, A]),
+      ["relu", "attendu", "concorde", "raison"], [H64, H64, B, N]),
     d(id::RX_PROGRES, "RX_PROGRES",
       ["rx_paquets", "rendus_tour1", "rendus_tour2", "tours_cpu"], [N, N, N, N]),
+    // Compteurs DTCC de la carte. `raison` >= 100 : releve non acheve.
+    d(id::RX_COMPTEURS_MAT, "RX_COMPTEURS_MAT",
+      ["rx_ok_mat", "manquees_mat", "rdu_isr", "raison"], [N, N, N, N]),
+    d(id::RX_ADRESSES_INIT, "RX_ADRESSES_INIT",
+      ["rx_desc_avant", "tx_desc_avant", "rx_anneau", "tx_anneau"], [H64, H64, H64, H64]),
+    d(id::RX_HORS_ANNEAU, "RX_HORS_ANNEAU",
+      ["ombre", "ombre_modifies", "ombre_trames", "queue_modifies"], [H64, N, N, N]),
 
     d(id::BB_STORAGE_READY, "BB_STORAGE_READY",
       ["pret", "depuis_ns", "", ""], [B, NS, A, A]),

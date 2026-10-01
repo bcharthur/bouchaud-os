@@ -22,6 +22,9 @@ pub const DEVICE_RTL8168: u16 = 0x8168;
 
 const REG_MAC0: u32 = 0x00;
 const REG_MAR0: u32 = 0x08;
+/// `CounterAddrLow` / `CounterAddrHigh` : adresse du bloc de compteurs (DTCC).
+const REG_DTCC_LOW: u32 = 0x10;
+const REG_DTCC_HIGH: u32 = 0x14;
 const REG_TX_DESC_LOW: u32 = 0x20;
 const REG_TX_DESC_HIGH: u32 = 0x24;
 const REG_CHIP_CMD: u32 = 0x37;
@@ -893,6 +896,15 @@ pub fn init_with_device(device: &PciDevice) -> bool {
             );
         }
 
+        // BOUCHAUD_RTL8168_PREMIER_BOUCLAGE_V1 : le bloc de compteurs, et la
+        // photographie hors anneau AVANT que la carte ne demarre. Ni l'un ni
+        // l'autre n'est necessaire au service : un echec laisse la sonde muette.
+        if let Some((p, v)) = memory::alloc_dma(64) {
+            TALLY_P = p;
+            TALLY_V = v;
+        }
+        photographie_hors_anneau();
+
         pose_etat(crate::drivers::etat_pilote::Etat::Lie);
     }
 
@@ -959,6 +971,20 @@ unsafe fn programme_le_materiel() -> bool {
         dmesg::log("rtl8168: reset timeout");
         return false;
     }
+
+    // CE QUE LES REGISTRES D'ADRESSE CONTIENNENT AVANT NOUS, apres la remise
+    // a zero : la moitie haute que la carte a sous la main au moment ou l'on
+    // ecrira la moitie basse. Garde pour `capture_lab` : la telemetrie part du
+    // present, et cet instant-ci la precede.
+    RX_DESC_AVANT.store(
+        (read32(REG_RX_DESC_LOW) as u64) | ((read32(REG_RX_DESC_HIGH) as u64) << 32),
+        Ordering::Relaxed,
+    );
+    TX_DESC_AVANT.store(
+        (read32(REG_TX_DESC_LOW) as u64) | ((read32(REG_TX_DESC_HIGH) as u64) << 32),
+        Ordering::Relaxed,
+    );
+    emet_adresses_init();
 
     // LES ANNEAUX SONT REMIS A NEUF, PAS REALLOUES.
     RX_CUR = 0;
@@ -1400,6 +1426,10 @@ pub mod raison_capture {
     pub const DMA_STALL: u64 = 4;
     pub const INVARIANT: u64 = 5;
     pub const DEMANDE: u64 = 6;
+    /// Premier descripteur rendu par le materiel au second tour.
+    pub const RETOUR: u64 = 7;
+    /// Etat juste AVANT qu'une reprise n'agisse.
+    pub const REPRISE: u64 = 8;
 }
 
 /// La carte des soixante-quatre bits `OWN`, un bit par descripteur.
@@ -1517,6 +1547,10 @@ pub fn capture_lab(raison: u64) {
                 RX_TOURS_CPU.load(Ordering::Relaxed),
             ],
         );
+
+        // 7. Le materiel ecrit-il HORS de notre anneau ? Lecture seule.
+        sonde_hors_anneau();
+        emet_adresses_init();
     }
 }
 
@@ -1537,6 +1571,7 @@ unsafe fn capture_le_bouclage(tour: u64, dernier_index: usize) {
     // soixante-dix evenements par tour noieraient tout le reste. Le releve
     // physique n'en a jamais eu qu'un seul a montrer.
     if tour <= 2 {
+        releve_compteurs_materiel(raison_capture::BOUCLAGE_AVANT);
         capture_lab(raison_capture::BOUCLAGE_AVANT);
         crate::serial_println!(
             "BOUCHAUD_NET_RTL8168_BOUCLAGE tour={} index={} desc_dernier={:#010x} \
@@ -1587,6 +1622,196 @@ unsafe fn capture_apres_bouclage(tour: u64, dernier_index: usize) {
     if tour <= 2 {
         capture_lab(raison_capture::BOUCLAGE_APRES);
     }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_RTL8168_PREMIER_BOUCLAGE_V1 : CE QUE FAIT LA CARTE PENDANT L'ARRET
+// ---------------------------------------------------------------------------
+//
+// # Le fait physique (TRIGKEY, 04fef512, deux demarrages sur deux)
+//
+// Premier tour parfait, bouclage 63 -> 0 a t=8,859 s, puis plus un seul
+// descripteur rendu alors que les soixante-quatre sont au materiel, que
+// l'adresse relue concorde, et que `RxOK` continue de monter (~40 lectures).
+// Deux reprises de degre 0 ne changent rien ; la troisieme, de degre 3
+// (`reconstruit_anneau` : RxEnb coupe, base reecrite, RxEnb remis), fait
+// repartir l'anneau, qui tourne ensuite des dizaines de fois sans faute.
+//
+// # Ce que le releve ne permet PAS de dire
+//
+// Ou vont les trames que `RxOK` annonce. Trois reponses, trois pannes :
+//
+//   1. la carte les ECRIT, mais ailleurs que dans notre anneau -- compteur
+//      materiel `rx_ok` qui monte, et des ecritures hors anneau ;
+//   2. la carte les JETTE faute de descripteur -- compteur materiel
+//      `manquees` et `RDU` qui montent : elle croit l'anneau plein ;
+//   3. ni l'un ni l'autre -- `RxOK` est un bit sans trame derriere.
+//
+// `RxMissed` (0x4C) ne tranche pas : sur 8168 ce registre ne compte plus
+// (Linux ne le lit que jusqu'a VER_06) ; le zero des releves precedents ne
+// prouvait rien. Les compteurs DTCC, eux, sont ceux que Linux lit.
+//
+// # Ce que ces sondes ne font pas
+//
+// Aucune ne touche a un descripteur, a `ChipCmd`, a `RxConfig` ni aux
+// adresses d'anneau. Le releve DTCC ecrit `CounterAddr*` (rien d'autre) et
+// n'est fait QUE depuis le pilote -- jamais depuis `releve()` ni depuis
+// `capture_lab`, que l'auditeur appelle et qui restent en lecture seule.
+
+/// Bloc de compteurs materiels (64 octets, alignes : une page entiere).
+static mut TALLY_P: u64 = 0;
+static mut TALLY_V: *mut u8 = core::ptr::null_mut();
+/// Un seul releve DTCC a la fois : `receive` peut etre appele sans le verrou.
+static DTCC_OCCUPE: AtomicBool = AtomicBool::new(false);
+/// Releves DTCC que la carte n'a pas acheves dans le delai.
+static DTCC_DELAIS: AtomicU64 = AtomicU64::new(0);
+const DTCC_VIDAGE: u32 = 1 << 3;
+const DTCC_REMISE: u32 = 1 << 0;
+/// Linux attend 1 000 x 10 us (`rtl_counters_cond`).
+const DTCC_DELAI_NS: u64 = 10_000_000;
+
+/// L'adresse « tronquee » : la base RX privee de sa moitie haute.
+///
+/// Si la carte bouclait vers `RxDescAddrLow` seul, c'est la qu'elle lirait.
+/// Zero : l'anneau est sous 4 Gio, ou cette adresse n'est pas de la RAM
+/// connue -- la sonde ne lit alors rien.
+static mut OMBRE_P: u64 = 0;
+/// `opts1` de l'ombre et de la fin de page de l'anneau, AVANT le demarrage.
+static mut OMBRE_INITIALE: [u32; N_RX] = [0; N_RX];
+/// L'anneau occupe 1 Kio d'une page qui n'appartient qu'a lui : les 3 Kio
+/// suivants ne sont ecrits par personne. Une carte qui ignorerait `EOR`
+/// y lirait ses descripteurs suivants.
+const QUEUE_DESC: usize = (4096 - N_RX * DESC_SIZE) / DESC_SIZE;
+static mut QUEUE_INITIALE: [u32; QUEUE_DESC] = [0; QUEUE_DESC];
+/// `RxDescAddr` et `TxDescAddr` relus juste avant que le pilote les ecrive.
+static RX_DESC_AVANT: AtomicU64 = AtomicU64::new(0);
+static TX_DESC_AVANT: AtomicU64 = AtomicU64::new(0);
+
+fn emet_adresses_init() {
+    unsafe {
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_ADRESSES_INIT,
+            [
+                RX_DESC_AVANT.load(Ordering::Relaxed),
+                TX_DESC_AVANT.load(Ordering::Relaxed),
+                RX_RING_P,
+                TX_RING_P,
+            ],
+        );
+    }
+}
+
+/// Le premier retour du second tour n'est capture qu'une fois.
+static RETOUR_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// Un mot `opts1` qui a la forme d'une trame ecrite par la carte.
+fn ressemble_a_une_trame(opts1: u32) -> bool {
+    let longueur = opts1 & anneau::MASQUE_LONGUEUR;
+    opts1 & DESC_OWN == 0
+        && opts1 & (DESC_FS | DESC_LS) == (DESC_FS | DESC_LS)
+        && (TRAME_MIN as u32..=anneau::TAILLE_TAMPON).contains(&longueur)
+}
+
+/// Photographie l'ombre et la fin de page, avant que la carte ne demarre.
+unsafe fn photographie_hors_anneau() {
+    let haut = RX_RING_P >> 32;
+    let ombre = RX_RING_P & 0xFFFF_FFFF;
+    if haut != 0 && memory::est_ram_connue(ombre, (N_RX * DESC_SIZE) as u64) {
+        let v = memory::phys_to_virt(ombre);
+        for i in 0..N_RX {
+            OMBRE_INITIALE[i] = read_volatile(v.add(i * DESC_SIZE) as *const u32);
+        }
+        OMBRE_P = ombre;
+    }
+    for i in 0..QUEUE_DESC {
+        QUEUE_INITIALE[i] = desc_read32(RX_RING, N_RX + i, 0);
+    }
+}
+
+/// Ce qui a change hors de l'anneau depuis la photographie. Lecture seule.
+unsafe fn sonde_hors_anneau() {
+    let mut ombre_modifies = 0u64;
+    let mut ombre_trames = 0u64;
+    if OMBRE_P != 0 {
+        let v = memory::phys_to_virt(OMBRE_P);
+        for i in 0..N_RX {
+            let mot = read_volatile(v.add(i * DESC_SIZE) as *const u32);
+            if mot != OMBRE_INITIALE[i] {
+                ombre_modifies += 1;
+                if ressemble_a_une_trame(mot) {
+                    ombre_trames += 1;
+                }
+            }
+        }
+    }
+    let mut queue_modifies = 0u64;
+    for i in 0..QUEUE_DESC {
+        if desc_read32(RX_RING, N_RX + i, 0) != QUEUE_INITIALE[i] {
+            queue_modifies += 1;
+        }
+    }
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RX_HORS_ANNEAU,
+        [OMBRE_P, ombre_modifies, ombre_trames, queue_modifies],
+    );
+}
+
+/// Les compteurs que la CARTE tient : trames recues, trames perdues.
+///
+/// Meme sequence que `rtl8169_do_counters` : moitie haute, moitie basse,
+/// puis moitie basse avec la commande ; on attend que la carte l'efface.
+/// `raison` + 100 dans l'evenement : la carte n'a pas fini dans le delai.
+unsafe fn releve_compteurs_materiel(raison: u64) {
+    if TALLY_P == 0 || DTCC_OCCUPE.swap(true, Ordering::Acquire) {
+        return;
+    }
+    let bas = TALLY_P as u32;
+    write32(REG_DTCC_HIGH, (TALLY_P >> 32) as u32);
+    write32(REG_DTCC_LOW, bas);
+    write32(REG_DTCC_LOW, bas | DTCC_VIDAGE);
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut fini = false;
+    loop {
+        if read32(REG_DTCC_LOW) & (DTCC_VIDAGE | DTCC_REMISE) == 0 {
+            fini = true;
+            break;
+        }
+        if crate::kernel::timer::monotonic_ns().saturating_sub(debut) > DTCC_DELAI_NS {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let rdu = ISR_RX_OVERFLOW.load(Ordering::Relaxed);
+    if fini {
+        memory::dma_rmb();
+        let rx_ok = read_volatile(TALLY_V.add(8) as *const u64);
+        let manquees = read_volatile(TALLY_V.add(28) as *const u16) as u64;
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_COMPTEURS_MAT,
+            [rx_ok, manquees, rdu, raison],
+        );
+    } else {
+        DTCC_DELAIS.fetch_add(1, Ordering::Relaxed);
+        lab::emets(
+            lab::Categorie::Rtl8168,
+            lab::id::RX_COMPTEURS_MAT,
+            [0, 0, rdu, raison + 100],
+        );
+    }
+    DTCC_OCCUPE.store(false, Ordering::Release);
+}
+
+/// Le premier descripteur que le materiel rend au second tour : l'instant
+/// exact ou l'anneau repart. Une fois par demarrage.
+unsafe fn capture_le_retour() {
+    if RETOUR_CAPTURE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    releve_compteurs_materiel(raison_capture::RETOUR);
+    capture_lab(raison_capture::RETOUR);
 }
 
 /// `RxOK` A-T-IL PROGRESSE SANS QUE LA RECEPTION PROGRESSE ?
@@ -1806,6 +2031,16 @@ pub fn repare_si_demande() -> bool {
 unsafe fn publie_le_verdict(issue: Option<anneau::IssueVerdict>) {
     let Some(issue) = issue else { return };
     REPRISES_SANS_EFFET.store(issue.sans_effet, Ordering::Relaxed);
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RX_RECOVERY_END,
+        [
+            issue.effective as u64,
+            issue.sans_effet as u64,
+            issue.age_ns,
+            RX_PAQUETS.load(Ordering::Relaxed),
+        ],
+    );
     if issue.effective {
         return;
     }
@@ -1919,6 +2154,22 @@ unsafe fn repare_reception() -> Option<bool> {
         REPRISES_SANS_EFFET.load(Ordering::Relaxed),
     );
     REPARATION_DEGRE.store(degre as u64, Ordering::Relaxed);
+
+    // L'ETAT QUE LA REPRISE TROUVE, avant qu'elle n'agisse. Le releve serie
+    // ci-dessous part dans un port absent sur la TRIGKEY : sans cet
+    // evenement, le degre de chaque reprise n'etait visible nulle part.
+    lab::emets(
+        lab::Categorie::Rtl8168,
+        lab::id::RX_RECOVERY_BEGIN,
+        [
+            degre as u64,
+            REPRISES_SANS_EFFET.load(Ordering::Relaxed) as u64,
+            paquets_avant,
+            RX_OWN_RENDUS.load(Ordering::Relaxed),
+        ],
+    );
+    releve_compteurs_materiel(raison_capture::REPRISE);
+    capture_lab(raison_capture::REPRISE);
 
     // 1 et 2 : drainer ce qui reste et acquitter les statuts. Toujours.
     let status = maintenance_isr();
@@ -2169,8 +2420,11 @@ pub fn receive(out: &mut [u8]) -> Option<usize> {
                 if RX_TOURS_CPU.load(Ordering::Relaxed) == 0 {
                     RX_RENDUS_TOUR1.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    RX_RENDUS_TOUR2.fetch_add(1, Ordering::Relaxed);
+                    let avant = RX_RENDUS_TOUR2.fetch_add(1, Ordering::Relaxed);
                     RX_REUTILISES_TOUR2.fetch_add(1, Ordering::Relaxed);
+                    if avant == 0 {
+                        capture_le_retour();
+                    }
                 }
             }
 

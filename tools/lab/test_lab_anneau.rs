@@ -341,6 +341,12 @@ fn les_evenements_que_les_phases_annoncent_existent() {
         "AUDIT_BLACKBOX_PERSISTENCE_STALL",
         "BB_PARTIEL_CHECKPOINT",
         "DHCP_IPV4_READY",
+        // BOUCHAUD_RTL8168_PREMIER_BOUCLAGE_V1
+        "RX_COMPTEURS_MAT",
+        "RX_ADRESSES_INIT",
+        "RX_HORS_ANNEAU",
+        "RX_RECOVERY_BEGIN",
+        "RX_RECOVERY_END",
     ] {
         assert!(
             DEFINITIONS.iter().any(|d| d.nom == attendu),
