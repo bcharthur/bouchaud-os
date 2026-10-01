@@ -136,15 +136,12 @@ for MIO in $(printf '%s\n' "${!MEILLEUR[@]}" | sort -n); do
     printf '%4s Mio %10s us %10s\n' "$MIO" "$US" "$((US / MIO))"
 done
 
-# LES CHEMINS QUI NE REVIENNENT PAS RENDENT-ILS CE QU'ILS ONT PRIS ?
-#
-# Ce banc fait `fork` + `execve` + `exit` en boucle : c'est exactement la charge
-# qui exerce les deux chemins no-return du noyau. Il serait absurde de la faire
-# tourner sans en tirer cette verification-la.
-echo
-if ! python3 tools/ci/verifie_execve_bkl.py "$PROPRE"; then
-    echecs=$((echecs + 1))
-fi
+# LES CHEMINS QUI NE REVIENNENT PAS -- execve reussi, retrait d'un zombie --
+# etaient verifies ici par `verifie_execve_bkl.py` : rendaient-ils le gros
+# verrou et la portee de domaine qu'ils abandonnaient ? Les deux n'existent
+# plus (BOUCHAUD_BKL_SUPPRIME_V1), et la ligne `PERF_EXECVE_BKL` qui portait la
+# mesure non plus. Ce que ce banc continue d'exercer -- fork + execve + exit en
+# boucle -- reste couvert par la copie et les couts ci-dessous.
 
 # LA COPIE EST-ELLE COMPLETE ? La question n'est pas rhetorique depuis que
 # `duplicate` prend ses frames sans les mettre a zero : une copie partielle

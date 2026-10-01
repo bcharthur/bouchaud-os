@@ -60,19 +60,13 @@ pub use legacy::{
 #[inline]
 pub fn present() {
     crate::kernel::task::stall_site_set(750, 0);
-    crate::gui::desktop_bkl::sans_bkl(
-        crate::gui::desktop_bkl::Site::Present,
-        crate::drivers::gfx::present,
-    );
+    crate::drivers::gfx::present();
     crate::kernel::task::stall_site_set(751, 0);
 }
 
 #[inline]
 pub fn present_rect(x: usize, y: usize, width: usize, height: usize) {
     crate::kernel::task::stall_site_set(752, ((width as u64) << 32) | height as u64);
-    crate::gui::desktop_bkl::sans_bkl(
-        crate::gui::desktop_bkl::Site::PresentRect,
-        || crate::drivers::gfx::present_rect(x, y, width, height),
-    );
+    crate::drivers::gfx::present_rect(x, y, width, height);
     crate::kernel::task::stall_site_set(753, 0);
 }

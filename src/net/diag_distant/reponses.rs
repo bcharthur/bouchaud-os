@@ -739,10 +739,9 @@ fn forensics_status(t: &mut Reponse) {
     let scheduler = crate::kernel::task::diagnostic_ordonnanceur();
     let threads = crate::kernel::task::forensic_counts(now);
     let sup = crate::kernel::navigateur::supervision::compteurs();
-    let (wait_detached, wait_legacy, wait_total_ns, wait_max_ns, wait_loops, wait_depth_viol) =
+    let (wait_detached, wait_total_ns, wait_max_ns, wait_loops) =
         crate::kernel::sync::waitq_detached_stats();
-    let (futex_waits, futex_wakes, futex_bkl, futex_depth) =
-        crate::kernel::task::futex_bkl_stats();
+    let (futex_waits, futex_wakes) = crate::kernel::task::futex_stats();
     let (ata_acquires, ata_wait_ns, ata_max_wait_ns) =
         crate::drivers::ata::contention_stats();
     let (nv_reads, nv_writes, nv_flushes, nv_errors, nv_timeouts) =
@@ -795,9 +794,9 @@ fn forensics_status(t: &mut Reponse) {
 \"deferred_preemptions\":{},\"wm_age_ms\":{},\"ready\":{},\"live\":{}}},\
 \"supervision\":{{\"suivis\":{},\"rendus_vivants\":{},\"lancements\":{},\
 \"sorties\":{},\"plantages\":{},\"orphelins\":{},\"relances_refusees\":{}}},\
-\"waitq\":{{\"detached\":{},\"legacy\":{},\"total_ms\":{},\"max_ms\":{},\
-\"schedule_loops\":{},\"depth_violations\":{}}},\
-\"futex\":{{\"waits\":{},\"wakes\":{},\"bkl_inherited\":{},\"bkl_depth_max\":{}}},\
+\"waitq\":{{\"detached\":{},\"total_ms\":{},\"max_ms\":{},\
+\"schedule_loops\":{}}},\
+\"futex\":{{\"waits\":{},\"wakes\":{}}},\
 \"storage\":{{\"ata_acquires\":{},\"ata_wait_ms\":{},\"ata_max_wait_ms\":{},\
 \"nvme_present\":{},\"nvme_offline\":{},\"nvme_reads\":{},\"nvme_writes\":{},\
 \"nvme_flushes\":{},\"nvme_errors\":{},\"nvme_timeouts\":{},\"nvme_busy\":{},\
@@ -819,9 +818,9 @@ fn forensics_status(t: &mut Reponse) {
         scheduler.wm_age_ms, scheduler.ready, scheduler.live,
         sup.suivis, sup.rendus_vivants, sup.lancements, sup.sorties, sup.plantages,
         sup.orphelins, sup.relances_refusees,
-        wait_detached, wait_legacy, wait_total_ns / 1_000_000,
-        wait_max_ns / 1_000_000, wait_loops, wait_depth_viol,
-        futex_waits, futex_wakes, futex_bkl, futex_depth,
+        wait_detached, wait_total_ns / 1_000_000,
+        wait_max_ns / 1_000_000, wait_loops,
+        futex_waits, futex_wakes,
         ata_acquires, ata_wait_ns / 1_000_000, ata_max_wait_ns / 1_000_000,
         crate::drivers::nvme::present(), crate::drivers::nvme::hors_service(),
         nv_reads, nv_writes, nv_flushes, nv_errors, nv_timeouts,

@@ -1002,8 +1002,8 @@ const ARP_ECOUTE_MS: u64 = 500;
 /// l'attente et en n'attendant jamais depuis le chemin de disponibilite -- mais
 /// c'est ce qui empeche le cout de se repeter sans fin.
 ///
-/// `static mut` sous gros verrou, comme le cache DNS juste en dessous : toute
-/// la pile reseau s'execute deja sous ce verrou.
+/// `static mut` lu et ecrit seulement sous `VERROU_RECEPTION` (fonctions
+/// `*_verrouille` et leurs enveloppes).
 struct EntreeArp {
     ip: Ipv4Addr,
     /// `None` = ce voisin n'a pas repondu (entree negative).

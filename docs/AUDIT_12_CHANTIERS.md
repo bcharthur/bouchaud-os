@@ -38,11 +38,11 @@ lui fait confiance.
 | Mesure | Valeur |
 |---|---|
 | Appels systeme aiguilles | **159** |
-| Appels hors gros verrou | **159** |
-| Appels encore sous gros verrou | **0** |
+| Gros verrou noyau (smp_lock) | **supprime** |
+| Sites d'acquisition du gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **5** |
-| Garde-fous d'architecture | **118** |
-| Suites de test hote | **106** |
+| Garde-fous d'architecture | **115** |
+| Suites de test hote | **99** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
@@ -465,7 +465,7 @@ emulee, et la machine emulee n'a jamais double-faute.
 
 | # | Chantier | Etat | Ce qui manque, en une phrase |
 |---|---|---:|---|
-| 1 | BKL → noyau concurrent | 🔵 | Voir le bloc mesure ci-dessus. `futex`, la famille boucle d'evenements et le sommeil sont sortis ; les **sockets**, `openat`/coeur FS, `ioctl`, les signaux, `clone` et `execve` restent. |
+| 1 | BKL → noyau concurrent | ✅ | Gros verrou **supprime** (lots B1-B11) : 159/159 appels audites (docs/AUDIT_VERROUILLAGE_SYSCALLS.md), 0 acquisition mesuree, `verifie-bkl-supprime.py` + budget a zero interdisent son retour. |
 | 2 | Scheduler NG + preemption | 🔵 | Preemption depuis l'IRQ seulement ; pas de points surs, pas de tickless. |
 | 3 | Memoire NG | 🔵 | Compagnon pour le DMA ; `LockedHeap` reste le fond du tas noyau, pas de slab. |
 | 4 | Graphique NG / compositeur ring 3 | 🔵 | Le contrat existe et le compositeur noyau reste le chemin par defaut. |
@@ -480,7 +480,18 @@ emulee, et la machine emulee n'a jamais double-faute.
 
 ---
 
-## 1 — BKL → noyau reellement concurrent 🔵
+## 1 — BKL → noyau reellement concurrent ✅
+
+**Etat au lot B11 (1er octobre 2026).** Le gros verrou n'existe plus :
+`smp_lock`, ses points d'accroche dans l'ordonnanceur et les attentes, ses
+releves `[BKL-*]`, les portees de domaine qui attribuaient ses prises et les
+portees `desktop_bkl` ont ete supprimes (BOUCHAUD_BKL_SUPPRIME_V1). Chaque appel
+systeme a son audit ecrit (docs/AUDIT_VERROUILLAGE_SYSCALLS.md). Mesures avant
+suppression : 57 321 acquisitions par cycle d'endurance avant le lot B2, 0
+apres B10 (SMP1/4/4/8) ; session Ladybird complete #378 : 1 acquisition, tenue
+max 0,74 ms. *Preuves executables :* `tools/verifie-bkl-supprime.py` (le module
+et toute acquisition sont interdits), budget `sites_acquisition_gros_verrou = 0`
+de `check_budgets.py`. L'historique ci-dessous est conserve tel quel.
 
 **Ce qui existe.** Le gros verrou est passe de dizaines de sites a **15
 acquisitions**, toutes attribuees a un domaine nomme. Six domaines sont

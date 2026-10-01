@@ -36,9 +36,7 @@ fn execute_process_invalidation(
     _process: &Arc<task::Process>,
     invalidation: vmm::TlbInvalidation,
 ) {
-    let depth = crate::kernel::smp_lock::suspend_for_schedule();
     invalidation.execute();
-    crate::kernel::smp_lock::resume_after_schedule(depth);
 }
 
 fn finish_mapping_replacement(
@@ -705,8 +703,8 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
     // serialise their own state; the shootdown helper already tolerates depth 0.
     let process = super::processus_courant();
     // BOUCHAUD_P2_VM_PHASE_V1 : les quatre etapes n'ont pas le meme profil, et
-    // une tenue de plusieurs secondes vient forcement de l'une des trois qui
-    // restent sous le gros verrou. Voir `task::vm_phase_set`.
+    // une tenue de plusieurs secondes se rattache a l'une d'elles. Voir
+    // `task::vm_phase_set`.
     task::vm_phase_set(task::VM_VALIDATION, length / PAGE_SIZE);
     let retirement = {
         let mut borrowed = process.mm.lock();

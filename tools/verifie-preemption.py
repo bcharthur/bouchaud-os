@@ -15,9 +15,10 @@ Deux regressions sont possibles, et elles sont opposees.
     reactif, et personne ne le voit.
 
   * **Perdre les gardes.** `safe_point()` est sur parce qu'il REFUSE de
-    commuter dans cinq situations : gros verrou tenu, section critique de rang
-    ouverte, preemption desactivee, interruptions coupees, contexte
-    d'interruption. C'est ce qui permet d'appeler la fonction n'importe ou.
+    commuter dans quatre situations : section critique de rang ouverte,
+    preemption desactivee, interruptions coupees, contexte d'interruption. (Il
+    y en avait une cinquieme, « gros verrou tenu » ; le verrou n'existe plus,
+    BOUCHAUD_BKL_SUPPRIME_V1, et `verifie-bkl-supprime.py` garde son absence.) C'est ce qui permet d'appeler la fonction n'importe ou.
     Retirer un seul de ces controles transforme chaque site d'appel en
     commutation au mauvais moment -- et le symptome apparait ailleurs, sous
     forme de corruption.
@@ -39,7 +40,6 @@ GARDES = [
     ("irq_depth", "commuter depuis un contexte d'interruption"),
     ("preempt_count", "commuter dans une section non preemptible"),
     ("lockdep::depth", "commuter en tenant une section critique de rang"),
-    ("held_by_current_cpu", "commuter en tenant le gros verrou"),
 ]
 
 # Le noyau doit garder au moins ce nombre de sites d'appel HORS du module de

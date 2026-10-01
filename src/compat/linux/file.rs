@@ -692,8 +692,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
         FdKind::Socket(_) => {
-            // Lot B7 (BOUCHAUD_RESEAU_SANS_BKL_V1) : plus de gros verrou ; la
-            // portee `Reseau` est ouverte dans `envoie_octets` lui-meme.
+            // Lot B7 (BOUCHAUD_RESEAU_SANS_BKL_V1) : SocketState et anneaux
+            // reseau sous leurs verrous propres, dans `envoie_octets`.
             crate::kernel::abi::net::envoie_octets(fd, data, 0, 0, 0)
         }
         FdKind::SocketPair(_, outbox) => {
@@ -2742,8 +2742,7 @@ fn readable(fd: i32) -> bool {
             state.expirations > 0
         }
         FdKind::Socket(state) => {
-            // Lot B7 : plus de gros verrou ; la portee `Reseau` est ouverte
-            // dans `socket_readable` lui-meme.
+            // Lot B7 : SocketState sous son verrou, dans `socket_readable`.
             crate::kernel::abi::net::socket_readable(&state)
         }
         FdKind::SocketPair(inbox, _) => !inbox.lock().octets.is_empty(),

@@ -26,10 +26,8 @@ DEBUT = "<!-- MESURE-CHANTIERS:DEBUT -->"
 FIN = "<!-- MESURE-CHANTIERS:FIN -->"
 
 
-def appels_liberes() -> tuple:
-    """(liberes, aiguilles) d'apres la table de politique et l'aiguillage."""
-    bkl = (RACINE / "src/compat/linux/bkl.rs").read_text(encoding="utf-8")
-    libres = set(re.findall(r"\(nr::(\w+),", bkl))
+def appels_aiguilles() -> int:
+    """Appels systeme reellement aiguilles par `abi::dispatch`."""
     nr = (RACINE / "src/compat/linux/nr.rs").read_text(encoding="utf-8")
     noms = set(re.findall(r"pub const (\w+)\s*:\s*u64\s*=", nr))
     mod = (RACINE / "src/compat/linux/mod.rs").read_text(encoding="utf-8")
@@ -38,15 +36,30 @@ def appels_liberes() -> tuple:
     aiguilles = set(re.findall(r"\bnr::(\w+)\b", corps))
     # Les bras GROUPES comptent chacun pour un appel : `GETUID | GETEUID |
     # GETGID | GETEGID => 0` en aiguille quatre. Ne lire que le premier nom
-    # avant `=>` en perdait vingt, et le document aurait annonce moins d'appels
-    # liberes qu'il n'y en a -- une sous-estimation est un mensonge comme un
-    # autre.
+    # avant `=>` en perdait vingt.
     for gauche in re.findall(r"^\s+([A-Z0-9_ |]+?)\s*=>", corps, re.M):
         for nom in (partie.strip() for partie in gauche.split("|")):
             if nom in noms:
                 aiguilles.add(nom)
-    aiguilles &= noms
-    return len(aiguilles & libres), len(aiguilles)
+    return len(aiguilles & noms)
+
+
+ACQUISITION_BKL = re.compile(r"\bsmp_lock::(?:enter|try_enter|try_enter_depuis_zero)\(")
+
+
+def sites_gros_verrou() -> int:
+    """Sites qui prennent le gros verrou noyau (BOUCHAUD_BKL_SUPPRIME_V1 : 0)."""
+    total = 0
+    for chemin in RACINE.glob("src/**/*.rs"):
+        for ligne in chemin.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not ligne.strip().startswith("//") and ACQUISITION_BKL.search(ligne):
+                total += 1
+    return total
+
+
+def gros_verrou_present() -> bool:
+    noyau = (RACINE / "src/kernel/mod.rs").read_text(encoding="utf-8")
+    return (RACINE / "src/kernel/sync/bkl.rs").exists() or "mod smp_lock" in noyau
 
 
 def fichiers_avec_points_surs() -> int:
@@ -83,12 +96,10 @@ def canari_present() -> bool:
 
 
 def mesures() -> list:
-    liberes, aiguilles = appels_liberes()
-    restants = aiguilles - liberes
     return [
-        ("Appels systeme aiguilles", str(aiguilles)),
-        ("Appels hors gros verrou", str(liberes)),
-        ("Appels encore sous gros verrou", str(restants)),
+        ("Appels systeme aiguilles", str(appels_aiguilles())),
+        ("Gros verrou noyau (smp_lock)", "present" if gros_verrou_present() else "supprime"),
+        ("Sites d'acquisition du gros verrou", str(sites_gros_verrou())),
         ("Fichiers portant un point sur de preemption", str(fichiers_avec_points_surs())),
         ("Garde-fous d'architecture", str(compte("tools/verifie-*.py"))),
         ("Suites de test hote", str(compte("tools/**/test_*.rs"))),

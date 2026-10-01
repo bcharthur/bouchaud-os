@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 FACADES = {
     ROOT / "src/kernel/process/thread.rs": "thread",
-    ROOT / "src/kernel/sync/bkl/acquisition.rs": "acquisition",
+    # `sync/bkl/acquisition.rs` : supprime avec le gros verrou
+    # (BOUCHAUD_BKL_SUPPRIME_V1).
     ROOT / "src/fs/persistance.rs": "persistance",
     ROOT / "src/arch/x86_64/idt.rs": "idt",
 }

@@ -961,7 +961,6 @@ pub fn pic_reveil(delta_us: u64, echeance_ns: u64, reprise_ns: u64) {
     let file = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
         .map(|id| crate::arch::x86_64::cpu_local::local(id).run_queue_len())
         .unwrap_or(0);
-    let bkl = crate::kernel::smp_lock::health_snapshot();
     let phase = phase_courante();
 
     crate::kernel::blackbox::pic_reveil(
@@ -971,7 +970,6 @@ pub fn pic_reveil(delta_us: u64, echeance_ns: u64, reprise_ns: u64) {
         cpu as u32,
         file as u32,
         crate::kernel::task::current_is_kernel_task(),
-        bkl.owner_token as u32,
         if phase.est_vide() { "runtime" } else { phase.texte() },
     );
 

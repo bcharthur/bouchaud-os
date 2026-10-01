@@ -84,13 +84,7 @@ pub fn attends_un_tick() {
 /// qu'elle maintenait `nanosleep` et `clock_nanosleep` sous le gros verrou,
 /// alors qu'ils n'en avaient aucun usage.
 ///
-/// # Ce qui reste garanti
-///
-/// La profondeur d'entree est relevee, quelle qu'elle soit, et
-/// `verifie_profondeur_rendue` exige qu'on la retrouve a la sortie. Un appelant
-/// qui tenait le verrou le retrouve ; un appelant qui n'en avait pas n'en
-/// gagne pas. Zero est une profondeur comme une autre, et c'est desormais la
-/// plus courante.
+/// Le gros verrou lui-meme n'existe plus (BOUCHAUD_BKL_SUPPRIME_V1).
 /// L'echeance qu'un `sleep_ticks(ticks)` armerait s'il etait appele
 /// maintenant.
 ///
@@ -111,8 +105,6 @@ pub fn echeance_pour(ticks: u64) -> u64 {
 }
 
 pub fn sleep_ticks(ticks: u64) {
-    // BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1 : voir `verifie_profondeur_rendue`.
-    let profondeur_entree = smp_lock::profondeur_locale();
     let deadline = echeance_pour(ticks);
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
@@ -123,13 +115,6 @@ pub fn sleep_ticks(ticks: u64) {
     }
     arme_echeance(deadline);
 
-    // `syscall_dispatch` conserve un BKL externe. Le suspendre ici, avant
-    // meme de savoir si schedule() trouvera une autre tache, ferme le cas ou
-    // wake_sleepers() remet la tache courante Ready parce que son court delai
-    // a deja expire : schedule() ne dort alors pas et ne suspendrait sinon que
-    // son propre niveau recursif, laissant le niveau syscall acquis pendant
-    // toute la boucle poll/select/epoll.
-    let outer_depth = smp_lock::suspend_for_schedule();
     while crate::kernel::timer::monotonic_ns() < deadline {
         // schedule() fait deja HLT si la tache est bloquee et seule.
         schedule();
@@ -140,8 +125,6 @@ pub fn sleep_ticks(ticks: u64) {
             break;
         }
     }
-    smp_lock::resume_after_schedule(outer_depth);
-    verifie_profondeur_rendue("sleep_ticks", profondeur_entree);
     let task = current();
     task.wake_deadline_ns.range(0);
     task.state.range(TaskState::Ready);

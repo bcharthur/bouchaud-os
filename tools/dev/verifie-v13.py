@@ -5,7 +5,8 @@ root=Path(__file__).resolve().parents[2]
 required=[
  'src/kernel/sync/wait_word.rs','src/kernel/sync/wait_word/attente.rs',
  'src/fs/persistance/snapshot.rs','src/fs/persistance/transaction.rs','src/fs/persistance/io.rs',
- 'src/kernel/memory/readahead.rs','src/gui/desktop_bkl/politique.rs',
+ 'src/kernel/memory/readahead.rs',  # desktop_bkl : supprime (BOUCHAUD_BKL_SUPPRIME_V1)
+
  'tools/perf/profile-v13.py','tools/perf/run-ladybird-fast.ps1']
 missing=[p for p in required if not (root/p).exists()]
 if missing:

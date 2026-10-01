@@ -16,8 +16,9 @@ barriere ; faire mieux est signale, et s'adopte explicitement.
 # Les deux familles
 
   * ARCHITECTURE -- se calcule sur la SOURCE, donc partout et tout de suite :
-    combien de sites prennent encore le gros verrou, et dans quel domaine.
-    C'est la mesure directe du chantier « sortie du gros verrou ».
+    combien de sites prennent le gros verrou. C'etait la mesure directe du
+    chantier « sortie du gros verrou » ; le verrou a ete supprime
+    (BOUCHAUD_BKL_SUPPRIME_V1) et le budget vaut zero pour toujours.
 
   * EXECUTION -- se lit dans un journal QEMU (`--journal`). Tenue maximale,
     attente maximale, regressions de domaine. Sans journal, ces budgets sont
@@ -32,54 +33,26 @@ import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent.parent
-REFERENCE = Path(__file__).resolve().parent / "budgets" / "bkl-sites.json"
+REFERENCE = Path(__file__).resolve().parent / "budgets" / "budgets.json"
 SRC = RACINE / "src"
 
 ACQUISITION = re.compile(r"\bsmp_lock::(?:enter|try_enter|try_enter_depuis_zero)\(\)")
-PORTEE = re.compile(r"\bportee\(\s*(?:crate::kernel::sync::)?Domaine::(\w+)")
-
-EXEMPTS_PREFIXES = ("src/kernel/sync/bkl/",)
-EXEMPTS = {"src/kernel/sync/bkl.rs", "src/kernel/sync/mod.rs"}
 
 
-def sites_par_domaine() -> dict[str, int]:
-    """Combien de sites prennent le gros verrou, et sous quel domaine."""
-    compte: dict[str, int] = {}
+def sites_acquisition() -> list[str]:
+    """Chaque site qui prend le gros verrou : `chemin:ligne`. Doit etre vide."""
+    sites = []
     for chemin in sorted(SRC.rglob("*.rs")):
         relatif = chemin.relative_to(RACINE).as_posix()
-        if relatif in EXEMPTS or relatif.startswith(EXEMPTS_PREFIXES):
-            continue
-        lignes = chemin.read_text(encoding="utf-8", errors="replace").split("\n")
-        for numero, ligne in enumerate(lignes):
-            if ligne.lstrip().startswith("//") or not ACQUISITION.search(ligne):
-                continue
-            domaine = "Indetermine"
-            for precedente in reversed(lignes[max(0, numero - 3):numero]):
-                trouve = PORTEE.search(precedente)
-                if trouve:
-                    domaine = trouve.group(1)
-                    break
-            compte[domaine] = compte.get(domaine, 0) + 1
-    return compte
+        for numero, ligne in enumerate(
+                chemin.read_text(encoding="utf-8", errors="replace").split("\n"), 1):
+            if not ligne.lstrip().startswith("//") and ACQUISITION.search(ligne):
+                sites.append(f"{relatif}:{numero}")
+    return sites
 
 
 # Les grandeurs lues dans un journal d'execution, et leur sens.
 EXECUTION = {
-    "bkl_max_hold_ms": (
-        re.compile(r"\[BKL-MAX-HOLD\]\s+ns=(\d+)"),
-        lambda v: v / 1_000_000,
-        "plus longue tenue du gros verrou",
-    ),
-    "bkl_attente_max_ms": (
-        re.compile(r"\[BKL-COMPTES\].*?attente_max_ns=(\d+)"),
-        lambda v: v / 1_000_000,
-        "plus longue attente avant acquisition",
-    ),
-    "bkl_regressions_domaine": (
-        re.compile(r"\[BKL-DOMAINES\]\s+normaux=\d+\s+regressions=(\d+)"),
-        lambda v: v,
-        "chemins declares sortis ayant repris le verrou",
-    ),
     # --- ordonnanceur ------------------------------------------------------
     #
     # Ces deux-la mesurent ce que l'utilisateur RESSENT. Une preemption
@@ -136,16 +109,6 @@ EXECUTION = {
         re.compile(r"\[NET-TCP\].*?busy_poll_tours=(\d+)"),
         lambda v: v,
         "tours d'attente active TCP -- le coeur occupe a interroger l'anneau",
-    ),
-    # --- BKL herite, chantier 1 ---------------------------------------------
-    #
-    # Le futex ne PREND plus le gros verrou ; il en HERITE encore un de son
-    # appelant. Tant que ce chiffre n'est pas nul, le domaine reste
-    # `EnMigration`, et le voir monter serait une regression de ses appelants.
-    "futex_bkl_herites_max": (
-        re.compile(r"\[BKL-FUTEX\].*?herites=(\d+)"),
-        lambda v: v,
-        "operations futex entrees avec un gros verrou herite de leur appelant",
     ),
     # --- ce qui doit rester A ZERO ------------------------------------------
     #
@@ -223,20 +186,6 @@ COMPAGNONS = {
     "ready_latency_max_ms": ("normale", "ready_latency_normale_p99_ms"),
 }
 
-# Le noyau NOMME deja qui tenait le gros verrou le plus longtemps :
-#
-#   [BKL-MAX-HOLD] ns=7093563 cpu=0 task=6 syscall=fork(57)/attente-verrou/0t ...
-#
-# Un depassement ne dit rien tant qu'on ignore s'il vient d'un nouveau site de
-# verrouillage ou de la dette deja connue. `fork` et `execve` recopient et
-# liberent l'espace d'adressage ENTIER sous le gros verrou : leur tenue suit la
-# taille du processus et la vitesse de la machine, pas la qualite du
-# verrouillage. Les confondre ferait chercher une regression la ou il y a un
-# choix d'architecture.
-TENUE = re.compile(r"\[BKL-MAX-HOLD\]\s+ns=(?P<ns>\d+)[^\n]*?syscall=(?P<syscall>\S+)")
-DETTE_CONNUE = ("fork", "execve", "clone", "exit")
-
-
 def qualifie(nom, mesure, budget, reference, texte_journal):
     """Dit si un maximum depasse est un OUTLIER ou une REGRESSION.
 
@@ -244,8 +193,6 @@ def qualifie(nom, mesure, budget, reference, texte_journal):
     seulement lisible -- et c'est la difference entre un banc qu'on croit et
     un banc qu'on finit par ignorer.
     """
-    if nom == "bkl_max_hold_ms" and texte_journal:
-        return attribue_tenue(texte_journal)
     if nom not in COMPAGNONS or not texte_journal:
         return []
     classe, budget_p99_nom = COMPAGNONS[nom]
@@ -278,37 +225,6 @@ def qualifie(nom, mesure, budget, reference, texte_journal):
     return lignes
 
 
-def attribue_tenue(texte_journal):
-    """Dit QUI tenait le gros verrou, et si c'est une dette deja connue.
-
-    Ne change aucun verdict : le depassement reste un echec. Il devient
-    seulement attribuable -- et la difference entre « un nouveau site prend le
-    verrou trop longtemps » et « fork recopie 256 Mio sous le verrou, comme il
-    l'a toujours fait » est toute la difference entre corriger et re-mesurer.
-    """
-    dernier = None
-    for m in TENUE.finditer(texte_journal):
-        if dernier is None or int(m.group("ns")) > int(dernier.group("ns")):
-            dernier = m
-    if dernier is None:
-        return ["      (pas de [BKL-MAX-HOLD] exploitable : tenue non attribuable)"]
-
-    appel = dernier.group("syscall")
-    lignes = [f"      detenteur : syscall={appel}"]
-    nom_appel = appel.split("(")[0].split("/")[0]
-    if nom_appel in DETTE_CONNUE:
-        lignes.append(f"      DETTE D'ARCHITECTURE CONNUE : `{nom_appel}` traite l'espace")
-        lignes.append(f"      d'adressage ENTIER sous le gros verrou. Sa tenue suit la taille")
-        lignes.append(f"      du processus et la vitesse de la machine, pas la qualite du")
-        lignes.append(f"      verrouillage. Mesure locale (KVM) : 7-9 ms ; coureur de CI")
-        lignes.append(f"      emule : jusqu'a 366 ms pour le MEME code.")
-        lignes.append(f"      Ce budget ne se tiendra pas tant que `fork` recopiera tout.")
-    else:
-        lignes.append(f"      NOUVEAU SITE : `{nom_appel}` n'est pas la dette connue")
-        lignes.append(f"      ({', '.join(DETTE_CONNUE)}). C'est une regression de verrouillage.")
-    return lignes
-
-
 def main() -> int:
     parseur = argparse.ArgumentParser()
     parseur.add_argument("--journal", type=Path,
@@ -326,10 +242,9 @@ def main() -> int:
         return 2
 
     reference = json.loads(REFERENCE.read_text(encoding="utf-8"))
-    courant = sites_par_domaine()
+    courant = sites_acquisition()
 
     if options.adopte:
-        reference["architecture"]["sites_bkl_par_domaine"] = courant
         if options.journal and options.journal.exists():
             reference["execution"].update(mesures_execution(options.journal))
         REFERENCE.write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n",
@@ -346,20 +261,13 @@ def main() -> int:
         texte_journal = options.journal.read_text(encoding="utf-8", errors="replace")
 
     # --- architecture -------------------------------------------------------
-    attendu = {c: v for c, v in
-               reference["architecture"]["sites_bkl_par_domaine"].items()
-               if not c.startswith("_")}
-    for domaine in sorted(set(attendu) | set(courant)):
-        budget = attendu.get(domaine, 0)
-        mesure = courant.get(domaine, 0)
-        if mesure > budget:
-            fautes.append(
-                f"  sites BKL / {domaine} : {mesure} > {budget} (budget). "
-                f"Un site rajoute dans un sous-systeme qu'on allege annule le "
-                f"travail sans echouer a aucun test."
-            )
-        elif mesure < budget:
-            gains.append(f"  sites BKL / {domaine} : {mesure} < {budget}")
+    budget_sites = reference["architecture"]["sites_acquisition_gros_verrou"]
+    if len(courant) > budget_sites:
+        fautes.append(
+            f"  gros verrou : {len(courant)} site(s) d'acquisition > {budget_sites} "
+            f"(budget). Il a ete supprime ; le reintroduire defait le chantier : "
+            + ", ".join(courant)
+        )
 
     # --- execution ----------------------------------------------------------
     #
@@ -425,9 +333,8 @@ def main() -> int:
     # Le compte des mesures fait PARTIE du verdict. « budgets tenus » sans lui
     # se lit comme « tout a ete verifie » alors que la trace pouvait n'avoir
     # rien porte du tout -- exactement ce que cette barriere doit empecher.
-    total = sum(courant.values())
-    print(f"ok  budgets tenus ; {total} site(s) d'acquisition du gros verrou "
-          f"dans {len(courant)} domaine(s) ; execution : "
+    print(f"ok  budgets tenus ; {len(courant)} site(s) d'acquisition du gros verrou ; "
+          f"execution : "
           f"{mesures_faites}/{len(budgets)} grandeur(s) mesuree(s)"
           + (f", {len(budgets) - mesures_faites} absente(s)"
              if mesures_faites < len(budgets) else ""))

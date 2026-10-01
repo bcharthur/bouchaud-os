@@ -95,7 +95,7 @@ fn current_index_raw() -> usize {
     CURRENT[local_cpu()].load(Ordering::Acquire)
 }
 
-/// Contexte uniquement atomique, lu par smp_lock au moment exact ou un CPU
+/// Contexte uniquement atomique, lu au moment exact ou un CPU
 /// devient proprietaire. Aucun domaine Process verrouille n'est touche ici.
 // BOUCHAUD_DF_FORENSIC_V1
 //
@@ -196,14 +196,6 @@ pub fn quantums_recus(cpu: usize) -> u64 {
     STALL_IPI_COUNT[cpu].load(Ordering::Acquire)
 }
 
-pub fn stall_ipi_bkl_result(acquired: bool) {
-    let cpu = local_cpu();
-    if acquired {
-        STALL_IPI_BKL_HIT[cpu].fetch_add(1, Ordering::Relaxed);
-    } else {
-        STALL_IPI_BKL_MISS[cpu].fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 pub fn stall_pf_begin(addr: u64) {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
@@ -249,9 +241,6 @@ pub fn stall_syscall_enter(nr: u64) {
     STALL_SYSCALL_PHASE[cpu].store(1, Ordering::Release);
 }
 
-pub fn stall_syscall_bkl_acquired() {
-    STALL_SYSCALL_PHASE[local_cpu()].store(2, Ordering::Release);
-}
 
 /// Ou en est la boucle de disponibilite de `poll`/`select`, par CPU.
 ///
@@ -495,20 +484,12 @@ pub fn stall_probe_from_timer() {
     let aux2 = STALL_KERNEL_AUX[2].load(Ordering::Acquire);
     let aux3 = STALL_KERNEL_AUX[3].load(Ordering::Acquire);
 
-    // Un releve periodique n'est pas un blocage. La ligne s'appelait
-    // `[SMP-STALL]` a chaque seconde, y compris avec `owner=0
-    // depth=[0,0,0,0]` -- c'est-a-dire avec un verrou libre et personne
-    // dedans. Une alarme qui sonne en permanence ne se lit plus.
-    //
-    // Le verdict se prend sur une donnee, pas sur la periodicite : si le
-    // numero d'acquisition n'a PAS bouge depuis le releve precedent, personne
-    // n'a pris le verrou pendant toute cette seconde. Joint a un proprietaire
-    // non nul, cela veut dire qu'une seule et meme tenue dure depuis au moins
-    // une seconde. C'est un blocage, et rien d'autre ne l'est.
-    let owner = crate::kernel::smp_lock::stall_probe_owner_token();
-    let acquire_seq = crate::kernel::smp_lock::stall_probe_acquire_seq();
-    let precedent = STALL_DERNIER_ACQUIRE_SEQ.swap(acquire_seq, Ordering::AcqRel);
-    let bloque = owner != 0 && precedent == acquire_seq;
+    // BOUCHAUD_BKL_SUPPRIME_V1 : le verdict « bloque » se lisait sur le gros
+    // verrou (un proprietaire, et aucune nouvelle acquisition depuis une
+    // seconde). Il n'existe plus. Restent les demandes explicites de releve
+    // complet (RAISON_DUMP) et, plus bas, les attentes de verrou tournant
+    // (`[SMP-SPIN]`), qui distinguent seules un noyau bloque d'un noyau occupe.
+    let bloque = false;
 
     // V14: the probe still executes every second so a continuous BKL hold is
     // detected with the same latency, but healthy snapshots are printed only
@@ -574,14 +555,8 @@ pub fn stall_probe_from_timer() {
     let _duree = DureeReleve { debut_ns: debut_releve_ns, complet };
 
     crate::serial_println!(
-        "[{}] t={} owner={} depth=[{},{},{},{}] cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{} {} {} {}]",
-        if bloque { "SMP-STALL" } else { "SMP-SNAPSHOT" },
+        "[SMP-SNAPSHOT] t={} cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{} {} {} {}]",
         now,
-        owner,
-        crate::kernel::smp_lock::stall_probe_depth(0),
-        crate::kernel::smp_lock::stall_probe_depth(1),
-        crate::kernel::smp_lock::stall_probe_depth(2),
-        crate::kernel::smp_lock::stall_probe_depth(3),
         CURRENT[0].load(Ordering::Acquire),
         CURRENT[1].load(Ordering::Acquire),
         CURRENT[2].load(Ordering::Acquire),
@@ -605,7 +580,7 @@ pub fn stall_probe_from_timer() {
     }
 
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
-    // pas d'acquisition BKL, pas de faute, pas de changement de tache. Cette
+    // pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
     // elle ne sort que si un CPU attend depuis assez longtemps pour que ce soit
     // anormal.
@@ -630,101 +605,18 @@ pub fn stall_probe_from_timer() {
         );
     }
 
-    let prov = crate::kernel::smp_lock::stall_probe_provenance();
-    let owner_cpu = if prov.owner_token == 0 { 255usize } else { prov.owner_token - 1 };
-    let held = if prov.owner_token == 0 || prov.generation == 0 {
-        0
-    } else {
-        now.wrapping_sub(prov.since_tick)
-    };
-
-    // Ou en est la boucle de disponibilite du proprietaire, s'il y en a un qui
-    // dure. Rien n'est imprime en marche normale : la ligne ne sort que
-    // lorsqu'une tenue depasse le demi-seconde, c'est-a-dire exactement quand
-    // `syscall=7 phase=2 site=0` ne suffit plus a dire ou l'on est bloque.
-    if owner_cpu < MAX_CPUS && held >= 500 {
-        // Poll state is CPU-local and belongs to user tasks. A kernel thread on
-        // the same CPU must not inherit the previous user's poll phase.
-        let (phase, detail) = if CURRENT_IS_KERNEL[owner_cpu].load(Ordering::Acquire) {
-            (POLL_HORS, 0)
-        } else {
-            poll_phase(owner_cpu)
-        };
-        let nom = match phase {
-            POLL_ENTREE => "entree",
-            POLL_BALAYAGE => "balayage",
-            POLL_PRET => "pret",
-            POLL_ATTENTE => "attente",
-            POLL_REVEIL => "reveil",
-            POLL_RETOUR => "retour",
-            _ => "hors-poll",
-        };
-        if phase == POLL_BALAYAGE {
-            let (etape, index, fd) = poll_detail_decode(detail);
-            let quoi = match etape {
-                ETAPE_LIT_FD => "lit-fd",
-                ETAPE_LIT_EVENTS => "lit-events",
-                ETAPE_LISIBLE => "lisible",
-                ETAPE_INSCRIPTIBLE => "inscriptible",
-                ETAPE_ETAT_PAIR => "etat-pair",
-                ETAPE_REND_REVENTS => "rend-revents",
-                _ => "?",
-            };
-            crate::serial_println!(
-                "[SMP-POLL] cpu={} tenue={}ms phase=balayage etape={} index={} fd={} tx_plein={}",
-                owner_cpu,
-                held,
-                quoi,
-                index,
-                fd as i32,
-                crate::drivers::e1000::tx_anneau_plein(),
-            );
-        } else {
-            crate::serial_println!(
-                "[SMP-POLL] cpu={} tenue={}ms phase={} detail={:#x} tx_plein={}",
-                owner_cpu,
-                held,
-                nom,
-                detail,
-                crate::drivers::e1000::tx_anneau_plein(),
-            );
-        }
-    }
-    let (live_site, live_aux, live_depth) = if owner_cpu < MAX_CPUS {
-        (
-            STALL_KERNEL_SITE[owner_cpu].load(Ordering::Acquire),
-            STALL_KERNEL_AUX[owner_cpu].load(Ordering::Acquire),
-            crate::kernel::smp_lock::stall_probe_depth(owner_cpu),
-        )
-    } else {
-        (0, 0, 0)
-    };
-    let last_rel_age = if prov.last_release_tick == 0 {
-        0
-    } else {
-        now.wrapping_sub(prov.last_release_tick)
-    };
-    crate::serial_println!(
-        "[SMP-PROV] t={} owner={} cpu={} gen={} coherent={} held={}ms depth={} acq={} rel={} reent={} kind={} task={} syscall={}:{} acquired_site={}:{:#x} live_site={}:{:#x} lastrel={}@cpu{}:kind{} gen={} age={}ms",
-        now, prov.owner_token, owner_cpu, prov.generation, prov.coherent as u8,
-        held, live_depth, prov.acquire_seq, prov.release_seq, prov.reenter_seq,
-        prov.acquire_kind, prov.task, prov.syscall_nr, prov.syscall_phase,
-        prov.site, prov.aux, live_site, live_aux, prov.last_release_tick,
-        prov.last_release_cpu, prov.last_release_kind, prov.last_release_gen, last_rel_age,
-    );
-
     let ipi_age = |cpu: usize| {
         let count = STALL_IPI_COUNT[cpu].load(Ordering::Acquire);
         let tick = STALL_IPI_TICK[cpu].load(Ordering::Acquire);
         if count == 0 { 0 } else { now.wrapping_sub(tick) }
     };
     crate::serial_println!(
-        "[SMP-IPI] t={} c0={}/{}ms/{:#x}/u{}/{}/{} c1={}/{}ms/{:#x}/u{}/{}/{} c2={}/{}ms/{:#x}/u{}/{}/{} c3={}/{}ms/{:#x}/u{}/{}/{}",
+        "[SMP-IPI] t={} c0={}/{}ms/{:#x}/u{} c1={}/{}ms/{:#x}/u{} c2={}/{}ms/{:#x}/u{} c3={}/{}ms/{:#x}/u{}",
         now,
-        STALL_IPI_COUNT[0].load(Ordering::Acquire), ipi_age(0), STALL_IPI_RIP[0].load(Ordering::Acquire), STALL_IPI_USER[0].load(Ordering::Acquire), STALL_IPI_BKL_HIT[0].load(Ordering::Acquire), STALL_IPI_BKL_MISS[0].load(Ordering::Acquire),
-        STALL_IPI_COUNT[1].load(Ordering::Acquire), ipi_age(1), STALL_IPI_RIP[1].load(Ordering::Acquire), STALL_IPI_USER[1].load(Ordering::Acquire), STALL_IPI_BKL_HIT[1].load(Ordering::Acquire), STALL_IPI_BKL_MISS[1].load(Ordering::Acquire),
-        STALL_IPI_COUNT[2].load(Ordering::Acquire), ipi_age(2), STALL_IPI_RIP[2].load(Ordering::Acquire), STALL_IPI_USER[2].load(Ordering::Acquire), STALL_IPI_BKL_HIT[2].load(Ordering::Acquire), STALL_IPI_BKL_MISS[2].load(Ordering::Acquire),
-        STALL_IPI_COUNT[3].load(Ordering::Acquire), ipi_age(3), STALL_IPI_RIP[3].load(Ordering::Acquire), STALL_IPI_USER[3].load(Ordering::Acquire), STALL_IPI_BKL_HIT[3].load(Ordering::Acquire), STALL_IPI_BKL_MISS[3].load(Ordering::Acquire),
+        STALL_IPI_COUNT[0].load(Ordering::Acquire), ipi_age(0), STALL_IPI_RIP[0].load(Ordering::Acquire), STALL_IPI_USER[0].load(Ordering::Acquire),
+        STALL_IPI_COUNT[1].load(Ordering::Acquire), ipi_age(1), STALL_IPI_RIP[1].load(Ordering::Acquire), STALL_IPI_USER[1].load(Ordering::Acquire),
+        STALL_IPI_COUNT[2].load(Ordering::Acquire), ipi_age(2), STALL_IPI_RIP[2].load(Ordering::Acquire), STALL_IPI_USER[2].load(Ordering::Acquire),
+        STALL_IPI_COUNT[3].load(Ordering::Acquire), ipi_age(3), STALL_IPI_RIP[3].load(Ordering::Acquire), STALL_IPI_USER[3].load(Ordering::Acquire),
     );
 
     crate::serial_println!(

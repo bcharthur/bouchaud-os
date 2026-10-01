@@ -12,7 +12,6 @@ use crate::arch::x86_64::{cpu, cpu_local::{self, CpuId}, smp};
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static SAFE_POINTS: AtomicU64 = AtomicU64::new(0);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
-static BLOCKED_BKL: AtomicU64 = AtomicU64::new(0);
 static BLOCKED_PREEMPT: AtomicU64 = AtomicU64::new(0);
 static BLOCKED_CONTEXT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_NS: [AtomicU64; smp::MAX_CPUS] =
@@ -99,7 +98,6 @@ pub struct Stats {
     pub requests: u64,
     pub safe_points: u64,
     pub switches: u64,
-    pub blocked_bkl: u64,
     pub blocked_preempt: u64,
     pub blocked_context: u64,
     /// Plus long report SUBI : du premier refus au service effectif.
@@ -189,9 +187,6 @@ pub fn masque_cible() -> u64 {
 ///     etre commute ;
 ///   * une section critique rangee est ouverte : commuter la laisserait
 ///     ouverte sur un autre coeur ;
-///   * le gros verrou est tenu par ce coeur : le rendre ailleurs est
-///     impossible, et `preempt_from_irq` l'interdit par assertion ;
-///   * le gros verrou est tenu a une profondeur non nulle : meme cause ;
 ///   * un VERROU TOURNANT SIMPLE est tenu par ce coeur : couper son porteur
 ///     ferait tourner la tache entrante sur ce meme verrou, sur ce meme
 ///     coeur, pendant que la sortante attend un coeur pour le rendre. Ni
@@ -217,8 +212,6 @@ pub fn preemption_noyau_sure() -> bool {
     local.preempt_count() == 0
         && local.verrous_simples() == 0
         && crate::kernel::sync::lockdep::depth() == 0
-        && crate::kernel::smp_lock::profondeur_locale() == 0
-        && !crate::kernel::smp_lock::held_by_current_cpu()
 }
 
 /// Accorde-t-on la preemption d'un fil noyau sur ce coeur, maintenant ?
@@ -291,11 +284,6 @@ pub fn safe_point() -> bool {
         note_refus(index);
         return false;
     }
-    if crate::kernel::smp_lock::held_by_current_cpu() {
-        BLOCKED_BKL.fetch_add(1, Ordering::Relaxed);
-        note_refus(index);
-        return false;
-    }
     if !crate::kernel::task::in_user_task() || crate::kernel::task::current_is_kernel_task() {
         BLOCKED_CONTEXT.fetch_add(1, Ordering::Relaxed);
         note_refus(index);
@@ -325,7 +313,6 @@ pub fn stats() -> Stats {
         requests: REQUESTS.load(Ordering::Relaxed),
         safe_points: SAFE_POINTS.load(Ordering::Relaxed),
         switches: SWITCHES.load(Ordering::Relaxed),
-        blocked_bkl: BLOCKED_BKL.load(Ordering::Relaxed),
         blocked_preempt: BLOCKED_PREEMPT.load(Ordering::Relaxed),
         blocked_context: BLOCKED_CONTEXT.load(Ordering::Relaxed),
         max_defer_ns: MAX_DEFER_NS.load(Ordering::Relaxed),
@@ -346,8 +333,8 @@ pub fn log_reveil() {
 pub fn log_stats() {
     let s = stats();
     crate::serial_println!(
-        "[SCHED-NG-PREEMPT] requests={} safe={} switches={} blocked_bkl={} blocked_preempt={} blocked_ctx={} max_defer_ns={} attente_service_max_ns={}",
-        s.requests, s.safe_points, s.switches, s.blocked_bkl,
+        "[SCHED-NG-PREEMPT] requests={} safe={} switches={} blocked_preempt={} blocked_ctx={} max_defer_ns={} attente_service_max_ns={}",
+        s.requests, s.safe_points, s.switches,
         s.blocked_preempt, s.blocked_context, s.max_defer_ns, s.max_attente_ns
     );
 }

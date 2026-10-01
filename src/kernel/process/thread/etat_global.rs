@@ -118,27 +118,17 @@ static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false)
 /// `retire_current_if_zombie` s'execute a la sortie de CHAQUE appel systeme et
 /// lisait `current().state`, donc la table des taches, donc le gros verrou --
 /// pour une condition qui est fausse presque toujours. Le drapeau rend le
-/// chemin commun a une seule lecture atomique ; le gros verrou n'est pris que
-/// lorsqu'une retraite est reellement demandee.
+/// chemin commun a une seule lecture atomique.
 ///
-/// Il est pose par [`marque_zombie`], qui tient le gros verrou et connait le
-/// CPU de la tache (`on_cpu`), et efface par [`mark_task_running`] quand une
+/// Il est pose par [`marque_zombie`], qui connait le CPU de la tache (`on_cpu`), et efface par [`mark_task_running`] quand une
 /// nouvelle tache prend le CPU. Une tache qui tourne ne peut pas changer de CPU
 /// sans passer par un changement de contexte, et un zombie n'est jamais
 /// reordonnance : le drapeau designe donc bien la tache courante de ce CPU.
 static RETRAITE_DEMANDEE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-/// Preemptions IRQ refusees parce que ce CPU detenait deja le gros verrou.
-///
-/// Doit rester a zero : `preempt_now` n'est arme que si l'IRQ a interrompu du
-/// ring 3, qui ne peut rien detenir. Le compteur est la pour que ce « doit »
-/// soit une mesure et non une croyance -- y compris dans une construction sans
-/// assertions de debogage, ou `debug_assert!` ne dit rien. Publie par
-/// `[SMP-LOAD]`, donc lisible par `smpstat`.
-static PREEMPT_IRQ_BKL_TENU: AtomicU64 = AtomicU64::new(0);
 
 /// Fois ou le domaine CPU-local n'a PAS su repondre, et ou l'appelant a du
-/// retomber sur `current_process()`, donc sur le gros verrou.
+/// retomber sur `current_process()`.
 ///
 /// Sans ce compteur, « l'identite est servie sans verrou » est une intention.
 /// Avec lui, c'est une mesure : si le repli est frequent, le gain annonce
@@ -146,16 +136,11 @@ static PREEMPT_IRQ_BKL_TENU: AtomicU64 = AtomicU64::new(0);
 /// chronometre.
 static IDENTITE_REPLI: AtomicU64 = AtomicU64::new(0);
 
-/// Nombre de replis du domaine CPU-local vers le chemin sous gros verrou.
+/// Nombre de replis du domaine CPU-local vers `current_process()`.
 pub fn identite_repli() -> u64 {
     IDENTITE_REPLI.load(Ordering::Relaxed)
 }
 
-/// Nombre de preemptions IRQ refusees faute d'avoir pu prendre le verrou depuis
-/// la profondeur zero alors que ce CPU le detenait.
-pub fn preempt_irq_bkl_tenu() -> u64 {
-    PREEMPT_IRQ_BKL_TENU.load(Ordering::Relaxed)
-}
 
 static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
     [const { SpinLockIrq::new(None) }; MAX_CPUS];
@@ -179,7 +164,6 @@ static TRANSITION_ORDONNANCEUR: [AtomicBool; MAX_CPUS] =
     [const { AtomicBool::new(false) }; MAX_CPUS];
 static TRANSITIONS_ORDONNANCEUR: AtomicU64 = AtomicU64::new(0);
 static TRANSITIONS_ORDONNANCEUR_REFUSEES: AtomicU64 = AtomicU64::new(0);
-static DETACHEMENTS_BKL_LEGACY: AtomicU64 = AtomicU64::new(0);
 static NEXT_TID: AtomicU32 = AtomicU32::new(100);
 static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
@@ -245,9 +229,6 @@ struct SmpSamplePrevious {
     reject_affinity: [u64; MAX_CPUS],
     page_faults: [u64; MAX_CPUS],
     tlb: u64,
-    bkl_wait: u64,
-    bkl_hold: u64,
-    bkl_acq: u64,
     gpu_presents: u64,
     gpu_bytes: u64,
     irq_preemptions: u64,
@@ -313,10 +294,6 @@ static STALL_IPI_RIP: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
 static STALL_IPI_USER: [AtomicU32; MAX_CPUS] =
     [const { AtomicU32::new(0) }; MAX_CPUS];
-static STALL_IPI_BKL_HIT: [AtomicU64; MAX_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_CPUS];
-static STALL_IPI_BKL_MISS: [AtomicU64; MAX_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_CPUS];
 
 // Compteurs page-fault. begin/done mesurent le handler ; file begin/done
 // encadrent exactement fs::backing::read_at dans le demand paging.

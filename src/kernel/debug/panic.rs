@@ -112,9 +112,6 @@ fn panic(info: &PanicInfo) -> ! {
     // Il passe avant tout relevé de structures riches potentiellement corrompues.
     crate::kernel::perf::dump_flight_recorder();
 
-    // Enregistreur BKL existant, lui aussi conçu pour le chemin de panique.
-    crate::kernel::smp_lock::vide_enregistreur();
-
     idt::releve_contexte_courant(cpu, None);
     serial_println!("======== fin du releve ========");
 

@@ -205,11 +205,10 @@ fn lock_controller_mesure() -> (GardeControleur, u64) {
     let precedent_depuis = CONTROLLER.detenteur_depuis.swap(maintenant, Ordering::Relaxed);
     if waited >= ATTENTE_LONGUE_NS && ATTENTES_LONGUES.fetch_add(1, Ordering::Relaxed) < 64 {
         crate::kernel::dmesg::log_fmt(format_args!(
-            "ATA_ATTENTE_LONGUE pid={} cpu={} attente_ms={} bkl_profondeur={} dernier_detenteur={} tenu_depuis_ms={} file={}",
+            "ATA_ATTENTE_LONGUE pid={} cpu={} attente_ms={} dernier_detenteur={} tenu_depuis_ms={} file={}",
             pid,
             cpu,
             waited / 1_000_000,
-            crate::kernel::smp_lock::profondeur_locale(),
             precedent,
             maintenant.saturating_sub(precedent_depuis) / 1_000_000,
             CONTROLLER.prochain.load(Ordering::Relaxed).saturating_sub(mon_tour + 1),

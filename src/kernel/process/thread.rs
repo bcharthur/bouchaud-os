@@ -49,7 +49,6 @@ use crate::arch::x86_64::{cpu, smp};
 use x86_64::instructions::interrupts;
 use crate::arch::x86_64::usermode::{self, TrapFrame};
 use crate::kernel::fd::FdTable;
-use crate::kernel::smp_lock;
 use crate::kernel::vmm::AddressSpace;
 use crate::kernel::sync::{SpinLock, SpinLockGuard, SpinLockIrq};
 use crate::kernel::sync::{RankedSpinLock, RankedSpinLockGuard};

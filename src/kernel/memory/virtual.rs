@@ -895,10 +895,6 @@ impl AddressSpaceIdentity {
     /// disabled across the final sequence/mask recheck and `sti; hlt`, closing
     /// the classic notification-before-HLT lost-wakeup window.
     pub(crate) fn wait_remote_quiescent(&self, self_cpu: usize) {
-        debug_assert!(
-            !crate::kernel::smp_lock::held_by_current_cpu(),
-            "vmm: exec quiescence must not HLT while holding the BKL"
-        );
         self.quiescence_waiter.store(self_cpu as u64, Ordering::Release);
         let self_bit = 1u64 << self_cpu;
         while self.active_cpus() & !self_bit != 0 {

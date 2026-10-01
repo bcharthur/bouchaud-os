@@ -124,10 +124,9 @@ pub fn log_preempt_irq_diagnostic() {
     use core::sync::atomic::Ordering;
 
     let now = crate::kernel::timer::monotonic_ns();
-    let provenance = crate::kernel::smp_lock::stall_probe_provenance();
 
     crate::serial_println!(
-        "[PREEMPT-IRQ] bsp_defer={} bsp_ciblees={} requests={} direct={}/{} bsp_deferred={} site_clears={} continuation_max_ns={} bkl_owner={} bkl_cpu={} bkl_site={} bkl_kind={}",
+        "[PREEMPT-IRQ] bsp_defer={} bsp_ciblees={} requests={} direct={}/{} bsp_deferred={} site_clears={} continuation_max_ns={}",
         BSP_DEFER_DIRECT_IRQ_PREEMPT_V8 as u8,
         PREEMPT_IRQ_BSP_CIBLEES.load(Ordering::Relaxed),
         PREEMPT_IRQ_REQUESTS.load(Ordering::Relaxed),
@@ -136,10 +135,6 @@ pub fn log_preempt_irq_diagnostic() {
         PREEMPT_IRQ_BSP_DEFERRED.load(Ordering::Relaxed),
         PREEMPT_IRQ_SITE_CLEARS.load(Ordering::Relaxed),
         PREEMPT_IRQ_MAX_CONTINUATION_NS.load(Ordering::Relaxed),
-        provenance.owner_token,
-        if provenance.owner_token == 0 { usize::MAX } else { provenance.owner_token - 1 },
-        provenance.site,
-        provenance.acquire_kind,
     );
 
     let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);

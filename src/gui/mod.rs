@@ -81,7 +81,6 @@ pub fn pose_echelle_affichage(echelle: u32) -> u32 {
 pub mod surface;
 pub mod desktop;
 pub mod stage2_preview;
-pub mod desktop_bkl;
 pub mod event;
 
 // V15: FPS utile + frame-gap, atomique et sans verrou.

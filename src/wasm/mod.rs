@@ -675,7 +675,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                     let now = clock_ns();
                     let deadline = if flags & 1 != 0 { timeout } else { now.saturating_add(timeout) };
                     while clock_ns() < deadline {
-                        crate::kernel::task::wait_for_interrupt_releasing_bkl();
+                        crate::kernel::task::attends_interruption();
                     }
                 }
                 let mut ev = [0u8; 32];

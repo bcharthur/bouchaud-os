@@ -492,7 +492,7 @@ pub struct IdentiteCourante {
 /// # Le domaine
 ///
 /// Deux emplacements, tous deux ecrits par [`install`] pendant un changement de
-/// contexte, c'est-a-dire sous le gros verrou :
+/// contexte, porte de transition de l'ordonnanceur ouverte :
 ///
 ///  * `usermode::per_cpu().current` — le `tid`, dans le bloc par-CPU adresse par
 ///    `GS`. Il y etait deja : `install` l'ecrit depuis toujours, pour que le
@@ -561,13 +561,11 @@ fn clear_current_process_local() {
 }
 
 pub fn fault_retry_yield() {
-    PF_BKL_ENTERS.fetch_add(1, Ordering::Relaxed);
     FAULT_RETRY_YIELDS.fetch_add(1, Ordering::Relaxed);
     if !schedule() {
         // With no local peer, schedule() deliberately does not HLT a Ready
         // task. A continuously mutating remote mapping would otherwise leave
         // this fault in an unbounded busy loop; wait for the next IRQ instead.
-        debug_assert!(!smp_lock::held_by_current_cpu());
         cpu::wait_for_interrupt();
     }
 }
@@ -612,9 +610,6 @@ pub fn fault_retry_cumul() -> (u64, u64, u64, u64) {
     )
 }
 
-pub fn pf_bkl_enters() -> u64 {
-    PF_BKL_ENTERS.load(Ordering::Relaxed)
-}
 
 /// Temps processeur consomme par un processus, en millisecondes.
 ///

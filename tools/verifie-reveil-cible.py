@@ -302,8 +302,6 @@ def main():
                 ("preempt_count()", "quelqu'un a demande a ne pas etre commute"),
                 ("verrous_simples()", "un porteur de verrou tournant simple serait coupe, et la tache entrante tournerait sur ce verrou sur ce meme coeur"),
                 ("lockdep::depth()", "une section critique rangee resterait ouverte sur un autre coeur"),
-                ("profondeur_locale()", "le gros verrou serait tenu par une pile suspendue"),
-                ("held_by_current_cpu()", "le gros verrou appartient a ce coeur"),
             ):
                 if jeton not in sure:
                     fautes.append(

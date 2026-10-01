@@ -1,5 +1,5 @@
 {
-  "_lisez_moi": "Contrats du chantier 11. Ces valeurs ne remplacent pas bkl-sites.json; elles bornent la campagne de fiabilite elle-meme.",
+  "_lisez_moi": "Contrats du chantier 11. Ces valeurs ne remplacent pas budgets.json; elles bornent la campagne de fiabilite elle-meme.",
   "schema": 1,
   "smp_topologies_required": [
     1,

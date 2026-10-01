@@ -35,57 +35,28 @@ impl WaitQueue {
             return;
         }
 
-        let profondeur_avant = crate::kernel::smp_lock::profondeur_locale();
-
-        if profondeur_avant == 0 {
-            // Chemin detache : plus aucun gros verrou.
-            let _inscrit = Inscription::nouvelle(self);
-            WAITQ_DETACHED_WAITS.fetch_add(1, Ordering::Relaxed);
-            let start = crate::kernel::timer::monotonic_ns();
-
-            crate::kernel::task::prepare_park_current_on_detached(self.key(), None);
-
-            // La relecture vient APRES la publication du parking : c'est ce qui
-            // ferme la fenetre du reveil perdu.
-            if self.point.ticket() != ticket.0 {
-                crate::kernel::task::annule_park_courant();
-                return;
-            }
-
-            let (_, loops) = crate::kernel::task::finish_park_current_on_detached(None);
-            WAITQ_DETACHED_SCHEDULE_LOOPS.fetch_add(loops, Ordering::Relaxed);
-
-            let elapsed = crate::kernel::timer::monotonic_ns().saturating_sub(start);
-            WAITQ_DETACHED_WAIT_NS.fetch_add(elapsed, Ordering::Relaxed);
-            waitq_update_max(&WAITQ_DETACHED_WAIT_MAX_NS, elapsed);
-
-            if crate::kernel::smp_lock::profondeur_locale() != 0 {
-                WAITQ_DETACHED_BKL_RETURN_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-            }
-            return;
-        }
-
-        // Chemin LEGACY : l'appelant tenait deja le gros verrou en entrant.
-        // On le conserve tel quel, avec l'ancien ordre -- il est correct sous
-        // verrou, et le migrer demande de migrer d'abord ses appelants.
-        //
-        // Ce qu'on ne fait plus, c'est le REPRENDRE. Le gros verrou est
-        // reentrant et appartient au CPU : le reprendre ici n'ajoutait aucune
-        // exclusion, seulement un compteur et une paire enter/Drop par
-        // attente.
-        //
-        // Et pas de portee de domaine sur cette branche : elle enjamberait le
-        // parking, donc une COMMUTATION. La pile de domaines est PAR CPU ; une
-        // portee ouverte avant un changement de tache est refermee par une
-        // autre pile, parfois sur un autre coeur. La regle est verifiee par
-        // `tools/verifie-portee-sans-commutation.py`.
-        note_attente_sous_bkl_herite();
+        // Un seul chemin depuis que le gros verrou n'existe plus
+        // (BOUCHAUD_BKL_SUPPRIME_V1) : la branche LEGACY servait les appelants
+        // qui le tenaient en entrant.
         let _inscrit = Inscription::nouvelle(self);
+        WAITQ_DETACHED_WAITS.fetch_add(1, Ordering::Relaxed);
+        let start = crate::kernel::timer::monotonic_ns();
+
+        crate::kernel::task::prepare_park_current_on_detached(self.key(), None);
+
+        // La relecture vient APRES la publication du parking : c'est ce qui
+        // ferme la fenetre du reveil perdu.
         if self.point.ticket() != ticket.0 {
+            crate::kernel::task::annule_park_courant();
             return;
         }
-        WAITQ_LEGACY_WAITS.fetch_add(1, Ordering::Relaxed);
-        crate::kernel::task::park_current_on(self.key());
+
+        let (_, loops) = crate::kernel::task::finish_park_current_on_detached(None);
+        WAITQ_DETACHED_SCHEDULE_LOOPS.fetch_add(loops, Ordering::Relaxed);
+
+        let elapsed = crate::kernel::timer::monotonic_ns().saturating_sub(start);
+        WAITQ_DETACHED_WAIT_NS.fetch_add(elapsed, Ordering::Relaxed);
+        waitq_update_max(&WAITQ_DETACHED_WAIT_MAX_NS, elapsed);
     }
 
     pub fn wait_until(&self, ticket: WaitTicket, deadline_ns: u64) -> bool {
@@ -93,43 +64,27 @@ impl WaitQueue {
             return true;
         }
 
-        let profondeur_avant = crate::kernel::smp_lock::profondeur_locale();
-
-        if profondeur_avant == 0 {
-            let _inscrit = Inscription::nouvelle(self);
-            WAITQ_DETACHED_WAITS.fetch_add(1, Ordering::Relaxed);
-            let start = crate::kernel::timer::monotonic_ns();
-
-            crate::kernel::task::prepare_park_current_on_detached(
-                self.key(),
-                Some(deadline_ns),
-            );
-
-            if self.point.ticket() != ticket.0 {
-                crate::kernel::task::annule_park_courant();
-                return true;
-            }
-
-            let (notified, loops) =
-                crate::kernel::task::finish_park_current_on_detached(Some(deadline_ns));
-            WAITQ_DETACHED_SCHEDULE_LOOPS.fetch_add(loops, Ordering::Relaxed);
-
-            let elapsed = crate::kernel::timer::monotonic_ns().saturating_sub(start);
-            WAITQ_DETACHED_WAIT_NS.fetch_add(elapsed, Ordering::Relaxed);
-            waitq_update_max(&WAITQ_DETACHED_WAIT_MAX_NS, elapsed);
-
-            if crate::kernel::smp_lock::profondeur_locale() != 0 {
-                WAITQ_DETACHED_BKL_RETURN_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-            }
-            return notified;
-        }
-
-        note_attente_sous_bkl_herite();
         let _inscrit = Inscription::nouvelle(self);
+        WAITQ_DETACHED_WAITS.fetch_add(1, Ordering::Relaxed);
+        let start = crate::kernel::timer::monotonic_ns();
+
+        crate::kernel::task::prepare_park_current_on_detached(
+            self.key(),
+            Some(deadline_ns),
+        );
+
         if self.point.ticket() != ticket.0 {
+            crate::kernel::task::annule_park_courant();
             return true;
         }
-        WAITQ_LEGACY_WAITS.fetch_add(1, Ordering::Relaxed);
-        crate::kernel::task::park_current_on_until(self.key(), deadline_ns)
+
+        let (notified, loops) =
+            crate::kernel::task::finish_park_current_on_detached(Some(deadline_ns));
+        WAITQ_DETACHED_SCHEDULE_LOOPS.fetch_add(loops, Ordering::Relaxed);
+
+        let elapsed = crate::kernel::timer::monotonic_ns().saturating_sub(start);
+        WAITQ_DETACHED_WAIT_NS.fetch_add(elapsed, Ordering::Relaxed);
+        waitq_update_max(&WAITQ_DETACHED_WAIT_MAX_NS, elapsed);
+        notified
     }
 }

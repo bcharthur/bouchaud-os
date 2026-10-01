@@ -106,8 +106,6 @@ pub mod scheduler;
 pub mod echeances;
 #[path = "process/signal.rs"]
 pub mod signal;
-#[path = "sync/bkl.rs"]
-pub mod smp_lock;
 pub mod sync;
 #[path = "syscall/legacy.rs"]
 pub mod syscall;

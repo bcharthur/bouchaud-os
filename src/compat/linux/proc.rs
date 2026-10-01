@@ -317,7 +317,6 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     old_identity.begin_retire();
     let self_cpu = smp::cpu_index();
     let active = old_identity.active_cpus() & !(1u64 << self_cpu);
-    let depth = crate::kernel::smp_lock::suspend_for_schedule();
     for cpu in 0..smp::MAX_CPUS.min(64) {
         if active & (1u64 << cpu) != 0 {
             smp::reschedule_cpu(cpu);
@@ -328,7 +327,6 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     let waited = crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
     EXEC_QUIESCE_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
     EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
-    crate::kernel::smp_lock::resume_after_schedule(depth);
     let apres_quiescence_ns = crate::kernel::timer::monotonic_ns();
 
     // BOUCHAUD_C8_SUPERVISION_SUR_EXECVE_V1
@@ -457,83 +455,13 @@ duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}"
     // aucun recyclage ne pourrait plus le reprendre.
     drop(task);
 
-    // BOUCHAUD_EXECVE_NORETURN_BKL_FIX_V1
-    //
-    // `sys_execve` ne retourne jamais vers `syscall_dispatch`: il saute
-    // directement vers le nouveau ring3 via `resume_usermode`. Le RAII
-    // `KernelGuard` cree dans syscall_dispatch est donc abandonne sur l'ancienne
-    // pile noyau et son Drop ne peut jamais liberer le BKL.
-    //
-    // Avant ce fix, un execve reussi laissait OWNER=CPU courant et DEPTH=1
-    // indefiniment. Le nouveau programme pouvait etre preempte, mais toute la
-    // machine continuait avec un BKL fantome, ce qui gelait Ladybird.
-    //
-    // Comme cette pile ne reprendra jamais, on libere explicitement toute la
-    // profondeur BKL et on ferme aussi la sonde syscall avant l'iretq.
+    // Cette pile ne reprendra jamais : la sonde syscall est fermee ici, avant
+    // l'iretq. Le chemin no-return abandonnait aussi le gros verrou et une
+    // portee de domaine ; ni l'un ni l'autre n'existent plus
+    // (BOUCHAUD_BKL_SUPPRIME_V1, qui remplace BOUCHAUD_EXECVE_SANS_BKL_V1).
     task::stall_site_clear();
     task::stall_syscall_exit();
     task::account_resume_user_noreturn();
-
-    // BOUCHAUD_C39_DEUX_RAII_ABANDONNES_PAS_UN
-    //
-    // `syscall_dispatch` ouvre DEUX gardes RAII avant d'appeler l'appel
-    // systeme, et le chemin no-return les abandonne tous les deux :
-    //
-    //     let _domaine = sync::portee(sync::Domaine::Syscall);   // (2)
-    //     let kernel   = smp_lock::enter();                      // (1)
-    //
-    // (1) est compense juste en dessous par `suspend_for_schedule`. (2) ne
-    // l'etait PAS : son `Drop` appelle `DOMAINES.sort(cpu)`, qui n'est jamais
-    // execute. `sommet[cpu]` monte donc d'un cran a chaque execve REUSSI et ne
-    // redescend jamais.
-    //
-    // La sonde mesure les deux profondeurs de part et d'autre de la bascule,
-    // pour que la fuite soit un CHIFFRE et non une lecture de code. `domaines_`
-    // est ce qui doit rester stable d'un execve au suivant ; s'il monte, la
-    // fuite est la.
-    let cpu_courant = crate::arch::x86_64::smp::cpu_index();
-    let registre = crate::kernel::sync::registre_domaines();
-    let domaines_avant = registre.profondeur(cpu_courant);
-    let depth_avant = crate::kernel::smp_lock::profondeur_locale();
-
-    let abandoned_depth = crate::kernel::smp_lock::suspend_for_schedule();
-    // BOUCHAUD_EXECVE_SANS_BKL_V1
-    //
-    // L'invariant s'est INVERSE au lot B8. Tant qu'`execve` passait par le
-    // gros verrou de l'aiguilleur, ce chemin devait l'y trouver (profondeur
-    // > 0) et l'abandonner ; l'assertion le verifiait. Depuis qu'`execve` est
-    // dans SANS_BKL, rien ne le prend : une profondeur non nulle ici serait
-    // une FUITE -- un gros verrou pris quelque part dans execve et jamais
-    // rendu. L'ancienne assertion paniquait au premier execve reussi du
-    // navigateur (smoke Ladybird #377, proc.rs:500, RequestServer) ; aucune
-    // sonde locale n'appelait execve.
-    debug_assert_eq!(
-        abandoned_depth, 0,
-        "execve: le chemin no-return tient le gros verrou (fuite)"
-    );
-
-    let portees_refermees = crate::kernel::sync::referme_portees_abandonnees(cpu_courant);
-    let domaines_apres = registre.profondeur(cpu_courant);
-    let owner_apres = crate::kernel::smp_lock::owner_cpu();
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_EXECVE_BKL t={} pid={} cpu={} depth_avant={} depth_abandonne={} \
-owner_apres={} domaines_avant={} domaines_apres={} portees_refermees={} \
-debordements={} reperes_perimes={}",
-        crate::kernel::timer::monotonic_ms(),
-        pid_journal,
-        cpu_courant,
-        depth_avant,
-        abandoned_depth,
-        match owner_apres {
-            Some(c) => c as i64,
-            None => -1,
-        },
-        domaines_avant,
-        domaines_apres,
-        portees_refermees,
-        registre.debordements(),
-        registre.reperes_perimes(),
-    ));
 
     unsafe { usermode::resume_usermode(&frame) }
 }
@@ -750,8 +678,8 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
     }
     loop {
         // `deliver_pending` s'execute a la fin de CHAQUE appel systeme, et
-        // `task::current_process()` prend le gros verrou parce qu'il passe par
-        // la table des taches. C'etait donc une acquisition par appel systeme,
+        // `task::current_process()` prenait alors le gros verrou parce qu'il
+        // passait par la table des taches. C'etait donc une acquisition par appel systeme,
         // AVANT meme de regarder s'il y a un signal a livrer -- et sur un appel
         // libere, elle annulait a elle seule tout le benefice de la
         // liberation : mesure, 20 123 acquisitions pour 20 000 `getpid`.

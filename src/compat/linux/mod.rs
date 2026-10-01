@@ -18,7 +18,6 @@
 //! signal, metadata and lifecycle state have distinct synchronization domains.
 //! No domain guard may cross a blocking or scheduling boundary.
 
-pub mod bkl;
 pub mod errno;
 pub mod file;
 pub mod mem;
@@ -233,7 +232,7 @@ fn sys_sigsuspend(set: u64) -> i64 {
     }
     while !task::signal_pending() {
         task::yield_now();
-        task::wait_for_interrupt_releasing_bkl();
+        task::attends_interruption();
     }
     process.signals.lock().blocked = saved;
     // POSIX impose ce retour : l'attente s'est terminee par un signal.
@@ -313,8 +312,8 @@ fn sys_alarm(seconds: u32) -> i64 {
 /// syscall d'ecrire dans une page que le processus lui-meme voit read-only.
 /// Le processus courant, sans le gros verrou quand c'est possible.
 ///
-/// `task::current_process()` prend le gros verrou parce qu'il passe par
-/// `task::current()`, donc par la table des taches. Le domaine CPU-local
+/// `task::current_process()` passe par `task::current()`, donc par la table des
+/// taches (il prenait le gros verrou, aujourd'hui supprime). Le domaine CPU-local
 /// (`task::current_process_local`) rend le meme `Arc` sans rien verrouiller ;
 /// il ne rend `None` que pour un fil noyau, cas ou l'on retombe sur le chemin
 /// historique. Aucun comportement ne change : c'est le meme processus.
@@ -1406,9 +1405,8 @@ pub fn resolve_user_path(addr: u64) -> Option<String> {
 /// Affiche la table des appels systeme implementes (commande `syscalls`).
 /// Les appels systeme les plus emis depuis le boot, du plus chaud au moins.
 ///
-/// C'est la donnee sur laquelle se decide quel appel merite qu'on lui ecrive
-/// une preuve de synchronisation (voir [`bkl`]). Le verrouillage de chacun est
-/// affiche a cote : on voit d'un coup d'oeil ou passe le temps sous verrou.
+/// C'est la donnee sur laquelle se decide quel chemin merite d'etre optimise ;
+/// l'audit de verrouillage de chacun est dans docs/AUDIT_VERROUILLAGE_SYSCALLS.md.
 pub fn print_frequences(combien: usize) {
     let mut top: Vec<(u64, u32)> = Vec::new();
     for numero in 0..SYSCALL_HITS_LEN {
@@ -1419,14 +1417,13 @@ pub fn print_frequences(combien: usize) {
     }
     top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     crate::println!("");
-    crate::println!("appels les plus emis (numero, nom, compte, verrou) :");
+    crate::println!("appels les plus emis (numero, nom, compte) :");
     for (numero, hits) in top.iter().take(combien) {
         crate::println!(
-            "  {:>4} {:<20} {:>10}  {}",
+            "  {:>4} {:<20} {:>10}",
             numero,
             nr::name(*numero),
             hits,
-            if bkl::exige_bkl(*numero) { "BKL" } else { "sans" },
         );
     }
     crate::println!("  ({} numeros distincts emis)", top.len());

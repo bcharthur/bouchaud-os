@@ -260,94 +260,21 @@ fn debug_assert_interrupts_enabled() {
     );
 }
 
-/// Dort jusqu'a la prochaine interruption en garantissant que le Big Kernel
-/// Lock n'est jamais conserve pendant HLT.
+/// Dort jusqu'a la prochaine interruption.
 ///
 /// Cette primitive est la seule autorisee depuis les attentes ABI qui dorment
-/// directement (sigsuspend/pause, WASI clock poll). `syscall_dispatch` garde
-/// un BKL externe pendant `abi::handle`; la suspension explicite est donc
-/// obligatoire avant HLT.
-pub fn wait_for_interrupt_releasing_bkl() {
+/// directement (sigsuspend/pause, WASI clock poll). Elle rendait le gros verrou
+/// avant le `hlt` et le reprenait apres ; il n'existe plus (BOUCHAUD_BKL_SUPPRIME_V1).
+pub fn attends_interruption() {
     debug_assert_interrupts_enabled();
-    let profondeur_entree = smp_lock::profondeur_locale();
-    // BOUCHAUD_COMPTA_IDLE_V1 : replier AVANT le hlt. (`tasks()` passe par
-    // la lecture du registre, pas par le gros verrou.)
+    // BOUCHAUD_COMPTA_IDLE_V1 : replier AVANT le hlt.
     let rearmer = suspend_compta_pour_idle();
     // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
     cpu::prepare_scheduler_idle();
-    let depth = smp_lock::suspend_for_schedule();
-
-    #[cfg(debug_assertions)]
-    debug_assert!(
-        !smp_lock::held_by_current_cpu(),
-        "task: HLT interdit tant que le BKL est detenu"
-    );
-
     cpu::commit_scheduler_idle();
-    smp_lock::resume_after_schedule(depth);
     if rearmer {
         rearme_compta_apres_idle();
     }
-    verifie_profondeur_rendue("wait_for_interrupt_releasing_bkl", profondeur_entree);
-}
-
-// BOUCHAUD_P0_CONTRAT_PROFONDEUR_V1
-//
-// LE CONTRAT, ET POURQUOI IL N'ETAIT NULLE PART
-// ---------------------------------------------
-// Toute primitive bloquante du noyau rend la main en gardant le gros verrou a
-// la profondeur exacte ou elle l'a trouve. `suspend_for_schedule` la met a
-// zero, `resume_after_schedule` la restaure : le contrat est simple, et il
-// n'etait verifie nulle part.
-//
-// La consequence pratique est ce qui a rendu
-// `smp_lock: release sans acquisition` si difficile a attribuer. Une primitive
-// qui perd une profondeur ne provoque AUCUNE erreur : la panique arrive plus
-// tard, au Drop d'un garde quelconque -- souvent d'une autre fonction, parfois
-// d'une autre tache. La victime n'est pas le coupable, et la trace accuse le
-// mauvais code.
-//
-// Ces post-conditions transforment ce panic differe et anonyme en echec
-// immediat et NOMME. Elles ne masquent rien : elles s'ajoutent aux assertions
-// de `release_one`, qui restent intactes.
-#[inline]
-fn verifie_profondeur_rendue(site: &str, attendue: usize) {
-    #[cfg(debug_assertions)]
-    {
-        let rendue = smp_lock::profondeur_locale();
-        if rendue != attendue {
-            smp_lock::vide_enregistreur();
-            panic!(
-                "task: {} a rendu une profondeur BKL de {} au lieu de {} \
-                 (contrat de suspension rompu)",
-                site, rendue, attendue,
-            );
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = (site, attendue);
-}
-
-/// Abandonne le BKL d'une continuation qui ne reviendra jamais.
-///
-/// `exit_current` et la retraite d'un sibling tue par `execve` arrivent encore
-/// depuis des appels systeme legacy : leur garde BKL vit sur la pile de la
-/// tache. Cette pile etant condamnee, personne ne repassera par le `Drop` du
-/// garde. La profondeur doit donc etre rendue AVANT le dernier `switch_to`,
-/// exactement comme `schedule` la suspend avant d'entrer dans son coeur sans
-/// verrou, mais sans reprise symetrique.
-#[inline]
-fn abandonne_bkl_avant_sortie_definitive() {
-    let abandonnee = smp_lock::suspend_for_schedule();
-    #[cfg(debug_assertions)]
-    debug_assert_eq!(
-        smp_lock::profondeur_locale(),
-        0,
-        "task: sortie definitive entree dans le scheduler sous BKL (profondeur abandonnee={})",
-        abandonnee,
-    );
-    #[cfg(not(debug_assertions))]
-    let _ = abandonnee;
 }
 
 /// Elit et commute depuis une pile qui ne doit plus jamais reprendre.
@@ -362,7 +289,6 @@ fn abandonne_bkl_avant_sortie_definitive() {
 /// Si aucune autre tache n'est prete, la porte est rendue et l'appelant peut
 /// dormir ou revenir au contexte noyau.
 fn commute_sortie_definitive_si_possible(cur: usize, cpu_id: usize) {
-    debug_assert_eq!(smp_lock::profondeur_locale(), 0);
     complete_switch_handoff();
     assert!(
         commence_transition_ordonnanceur(),
@@ -382,31 +308,10 @@ fn commute_sortie_definitive_si_possible(cur: usize, cpu_id: usize) {
 
 /// Rend la main : bascule sur une autre tache prete s'il y en a une.
 ///
-/// Le coeur du scheduler s'execute TOUJOURS a profondeur BKL nulle. Les
-/// appelants legacy qui entrent encore avec une profondeur non nulle sont
-/// detaches a la frontiere, puis retrouvent exactement leur profondeur au
-/// retour. Le chemin normal depth=0 ne suspend ni ne reprend le gros verrou.
-///
 /// Renvoie `true` si un changement de tache a eu lieu. Si la tache courante est
 /// la seule prete, la fonction attend une interruption (`hlt`) et rend la main a
 /// l'appelant, qui doit reevaluer sa condition d'attente.
 pub fn schedule() -> bool {
-    let profondeur_entree = smp_lock::profondeur_locale();
-    if profondeur_entree == 0 {
-        return schedule_sans_bkl();
-    }
-
-    DETACHEMENTS_BKL_LEGACY.fetch_add(1, Ordering::Relaxed);
-    let profondeur = smp_lock::suspend_for_schedule();
-    debug_assert_eq!(profondeur, profondeur_entree);
-    let commute = schedule_sans_bkl();
-    smp_lock::resume_after_schedule(profondeur);
-    verifie_profondeur_rendue("schedule/legacy", profondeur_entree);
-    commute
-}
-
-fn schedule_sans_bkl() -> bool {
-    debug_assert_eq!(smp_lock::profondeur_locale(), 0, "scheduler execute sous BKL");
     complete_switch_handoff();
     if !commence_transition_ordonnanceur() {
         request_deferred_preempt();
@@ -424,8 +329,6 @@ fn schedule_sans_bkl() -> bool {
         Some(next) if next != cur => next,
         _ => {
             if tasks()[cur].state != TaskState::Ready {
-                // Ne jamais dormir en tenant le BKL : les autres CPU doivent
-                // pouvoir entrer dans leurs syscalls pendant notre HLT.
                 // BOUCHAUD_COMPTA_IDLE_V1 : c'est ICI que le bureau passait
                 // ses sommeils depuis Gate 1B, et c'est ce repli qui manquait.
                 let rearmer = suspend_compta_pour_idle();
@@ -447,7 +350,6 @@ fn schedule_sans_bkl() -> bool {
 }
 
 fn switch_to(from: usize, to: usize) {
-    debug_assert_eq!(smp_lock::profondeur_locale(), 0);
     debug_assert!(TRANSITION_ORDONNANCEUR[local_cpu()].load(Ordering::Acquire));
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
@@ -469,22 +371,12 @@ fn switch_to(from: usize, to: usize) {
         (from_ptr, to_ptr)
     };
 
-    smp_lock::note_switch(true, from, to);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
-    smp_lock::note_switch(false, from, to);
     complete_switch_handoff();
 }
 
 /// Retour definitif au fil noyau appelant (la tache courante est terminee).
 fn switch_to_kernel() -> ! {
-    // La continuation sortante ne reviendra jamais : sa profondeur legacy est
-    // abandonnee avant d'entrer dans le coeur sans BKL. La pile noyau entrante
-    // restaure sa propre profondeur dans le chemin qui l'avait lancee.
-    let profondeur = smp_lock::profondeur_locale();
-    if profondeur != 0 {
-        let abandonnee = smp_lock::suspend_for_schedule();
-        debug_assert_eq!(abandonnee, profondeur);
-    }
     complete_switch_handoff();
     assert!(commence_transition_ordonnanceur(), "transition scheduler deja active");
     let cpu_id = local_cpu();
@@ -510,7 +402,6 @@ fn switch_to_kernel() -> ! {
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
     let target_rsp = kernel_ctx().rsp;
-    smp_lock::note_switch(true, cur, NO_TASK);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
     unreachable!("task: reprise d'une tache terminee")
 }
@@ -528,7 +419,6 @@ pub fn secondary_cpu_loop() -> ! {
     usermode::per_cpu().current = 0;
 
     loop {
-        debug_assert_eq!(smp_lock::profondeur_locale(), 0);
         complete_switch_handoff();
         if !commence_transition_ordonnanceur() {
             core::hint::spin_loop();

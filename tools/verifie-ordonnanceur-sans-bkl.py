@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Prouve structurellement que l'ordonnanceur ne reprend plus le BKL."""
+"""Prouve structurellement les invariants de l'ordonnanceur sans verrou global.
 
-import json
+Le gros verrou (`smp_lock`) a ete supprime (BOUCHAUD_BKL_SUPPRIME_V1) : les
+clauses qui verifiaient son contrat de domaine et son budget sont parties avec
+lui, et `verifie-bkl-supprime.py` garde son absence. Restent ici les
+mecanismes qui l'ont remplace dans l'ordonnanceur.
+"""
+
 import re
 import sys
 from pathlib import Path
@@ -31,19 +36,6 @@ def main() -> int:
         if ACQUISITION.search(source):
             fautes.append(f"{relatif}: acquisition BKL restante")
 
-    domaine = lit("src/kernel/sync/domaine.rs")
-    branches_migrees = re.findall(
-        r"((?:Self::\w+\s*\|?\s*)+)=>\s*Contrat::Migre", domaine
-    )
-    migres = {nom for branche in branches_migrees for nom in re.findall(r"Self::(\w+)", branche)}
-    if "Ordonnanceur" not in migres:
-        fautes.append("domaine Ordonnanceur non declare Migre")
-
-    budget = json.loads(lit("tools/ci/budgets/bkl-sites.json"))
-    sites = budget["architecture"]["sites_bkl_par_domaine"]
-    if "Ordonnanceur" in sites:
-        fautes.append("budget BKL: Ordonnanceur doit disparaitre plutot que rester a zero")
-
     modeles = lit("src/kernel/process/thread/modeles.rs")
     commutation = lit("src/kernel/process/thread/commutation.rs")
     courant = lit("src/kernel/process/thread/courant.rs")
@@ -70,8 +62,8 @@ def main() -> int:
         "revendication on_cpu -1 -> cpu": "fn revendique_candidate(" in ordonnanceur
             and ".compare_exchange(-1, cpu as i8)" in ordonnanceur,
         "porte de transition per-CPU": "TRANSITION_ORDONNANCEUR" in courant,
-        "coeur scheduler depth zero": "fn schedule_sans_bkl()" in ordonnanceur
-            and "scheduler execute sous BKL" in ordonnanceur,
+        "ordonnanceur sans aucun point d'accroche du verrou global":
+            "smp_lock" not in ordonnanceur and "pub fn schedule() -> bool {" in ordonnanceur,
         "timer bottom-half sans BKL": "flush_interface_irq()" in timer,
         "alarmes protegees par verrou classe": "LockClass::SchedulerAlarms" in sommeil
             and "static mut ALARMS" not in sommeil,
@@ -82,9 +74,6 @@ def main() -> int:
             "state.echange(TaskState::Blocked, TaskState::Ready)" in sommeil
             and "state.echange(TaskState::Blocked, TaskState::Ready)" in blocage
             and ".echange(TaskState::Blocked, TaskState::Ready)" in lifecycle,
-        "sorties definitives detachees avant switch":
-            lifecycle.count("abandonne_bkl_avant_sortie_definitive();") == 2
-            and "fn abandonne_bkl_avant_sortie_definitive()" in ordonnanceur,
         # QUATRE SITES, ET LE COMPTE EXACT EST LA REGLE.
         #
         # Trois jusqu'ici : le coeur secondaire, la boucle d'attente du BSP, et
@@ -109,12 +98,6 @@ def main() -> int:
     for preuve, presente in preuves.items():
         if not presente:
             fautes.append(f"preuve absente: {preuve}")
-
-    debut = ordonnanceur.find("fn schedule_sans_bkl()")
-    fin = ordonnanceur.find("\nfn switch_to(", debut)
-    coeur = ordonnanceur[debut:fin]
-    if "suspend_for_schedule" in coeur or "resume_after_schedule" in coeur:
-        fautes.append("le coeur schedule_sans_bkl suspend/reprend encore le BKL")
 
     if fautes:
         print("ordonnanceur sans BKL : ECHEC")

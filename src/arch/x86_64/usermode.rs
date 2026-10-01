@@ -243,8 +243,6 @@ unsafe extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
     // repassent jamais par le `drop` d'en bas -- `execve` reussi et le retrait
     // d'un zombie -- s'en servent pour refermer ce que leur `Drop` ne fermera
     // pas. Voir `kernel::sync::referme_portees_abandonnees`.
-    crate::kernel::sync::pose_repere_noyau(crate::arch::x86_64::smp::cpu_index());
-
     // BOUCHAUD_NATIVE_ABI_V1
     // Native calls are recognized BEFORE Linux compatibility. They never
     // acquire the BKL: each native object owns its synchronization domain.

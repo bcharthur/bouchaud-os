@@ -42,130 +42,11 @@ rej_inel={} rej_crs={} mig={}",
         ));
     }
     crate::kernel::dmesg::log_fmt(format_args!("{}", line));
-    let (bkl_wait, bkl_hold, bkl_acq) = smp_lock::contention_stats();
-    let (acq_enter, acq_try, acq_resume) = smp_lock::acquisitions_par_origine();
-    let (max_tenue, max_site) = smp_lock::plus_longue_tenue();
-    let (parked_waiters, parks, wake_ipis) = smp_lock::park_stats();
-    // BOUCHAUD_P1_BKL_MAX_HOLD_PROVENANCE_V1 : le texte est fabrique ICI, une
-    // fois par releve. Le chemin d'acquisition ne range que des entiers.
-    let (max_cpu, max_tache, max_syscall, max_phase, max_site_acq, max_origine) =
-        smp_lock::provenance_plus_longue_tenue();
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-STATS] wait_ns={} hold_ns={} acquisitions={} enter={} try_enter={} resume={} max_hold_ns={} max_hold_site={} preempt_irq_bkl_tenu={} identite_repli={} parked_waiters={} parks={} wake_ipis={}",
-        bkl_wait, bkl_hold, bkl_acq, acq_enter, acq_try, acq_resume,
-        max_tenue, max_site, preempt_irq_bkl_tenu(), identite_repli(),
-        parked_waiters, parks, wake_ipis,
-    ));
-    publie_inventaire_bkl();
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-MAX-HOLD] ns={} cpu={} task={} syscall={} site_acquisition={} origine={} site_tenue={}",
-        max_tenue,
-        Absent(max_cpu as u64),
-        Absent(max_tache as u64),
-        EtatSyscall { nr: max_syscall, phase: max_phase, age_ticks: 0 },
-        max_site_acq,
-        match max_origine {
-            1 => "enter",
-            2 => "try_enter",
-            3 => "resume_after_schedule",
-            _ => "none",
-        },
-        max_site,
-    ));
-    // BOUCHAUD_P0_BKL_COMPTABILITE_V1
-    //
-    // Les grandeurs sont SEPAREES, et leurs unites annoncees : les melanger
-    // est ce qui avait produit un `hold_pct` de 183 % sur un verrou exclusif.
-    //
-    //   tenue_ns    temps de muraille -- majore par la fenetre, comparable a elle
-    //   attente_ns  temps de CPU -- quatre coeurs qui attendent en cumulent quatre
-    //   reprise_ns  la part de l'attente subie apres une commutation
-    //
-    // `anomalies=0/0/0` est la CONDITION pour croire les trois premieres. Non
-    // nulles, elles disent ou le modele s'est decroche de la machine, au lieu
-    // de laisser un cumul absurde le suggerer.
-    let c = smp_lock::comptes();
-    let mut ventilation = String::new();
-    for cpu_id in 0..online.min(MAX_CPUS) {
-        let _ = core::fmt::Write::write_fmt(
-            &mut ventilation,
-            format_args!(
-                " c{}=[parks_sur={} wakes_recus={}]",
-                cpu_id,
-                smp_lock::parks_sur(cpu_id),
-                smp_lock::wakes_vers(cpu_id),
-            ),
-        );
-    }
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-COMPTES] tenue_ns={} attente_ns={} attente_max_ns={} \
-attente_max=[origine={} cpu={} appel={}] reprise_ns={} reprise_max_ns={} \
-spins={} spins_irq_masquees={} parks={} wake_ipis={} reveils_sans_acq={} liberations_migrees={} \
-anomalies={}/{}/{} proprietaire={}{}",
-        c.tenue_ns, c.attente_ns, c.attente_max_ns,
-        match c.attente_max_origine {
-            1 => "enter",
-            2 => "try_enter",
-            3 => "resume_after_schedule",
-            _ => "none",
-        },
-        Absent(c.attente_max_cpu as u64),
-        if c.attente_max_seau == smp_lock::SEAU_NOYAU {
-            "hors-syscall"
-        } else {
-            crate::kernel::abi::nr::name(c.attente_max_seau as u64)
-        },
-        c.reprise_ns, c.reprise_max_ns,
-        c.spins, c.spins_irq_masquees, c.parks, c.wake_ipis, c.reveils_sans_acquisition,
-        c.liberations_migrees,
-        c.sans_debut, c.sur_tenue, c.horloge_a_rebours,
-        Absent(c.proprietaire as u64),
-        ventilation,
-    ));
-    // BOUCHAUD_C1_ATTRIBUTION_DOMAINE_V1
-    //
-    // Le chiffre du chantier « sortie du gros verrou ». `normaux` exclut le
-    // boot precoce et la panique, ou le verrou reste legitime : les inclure
-    // rendrait l'objectif inatteignable par construction, donc inutile.
-    //
-    // `regressions` doit valoir zero POUR TOUJOURS. Non nul, un chemin declare
-    // sorti l'a repris, et le domaine fautif est NOMME -- ce qu'aucun total
-    // d'acquisitions ne pouvait dire.
-    {
-        use crate::kernel::sync::{domaine, registre_domaines, Contrat, Domaine};
-        let registre = registre_domaines();
-        let mut ligne = alloc::string::String::from("[BKL-DOMAINES]");
-        let _ = core::fmt::Write::write_fmt(
-            &mut ligne,
-            format_args!(
-                " normaux={} regressions={} debordements={} premiere_regression={}",
-                registre.acquisitions_chemins_normaux(),
-                registre.total_violations(),
-                registre.debordements(),
-                match registre.premiere_regression() {
-                    Some(fautif) => fautif.nom(),
-                    None => "aucune",
-                },
-            ),
-        );
-        for code in 0..domaine::NOMBRE as u8 {
-            let d = Domaine::depuis_code(code);
-            let acquisitions = registre.acquisitions(d);
-            // Un domaine a zero n'apprend rien tant qu'il n'a rien promis ;
-            // un domaine SORTI a zero est au contraire la preuve recherchee.
-            if acquisitions == 0 && !matches!(d.contrat(), Contrat::Migre) {
-                continue;
-            }
-            let _ = core::fmt::Write::write_fmt(
-                &mut ligne,
-                format_args!(
-                    " {}=[{} acq={} regressions={}]",
-                    d.nom(), d.contrat().nom(), acquisitions, registre.violations(d),
-                ),
-            );
-        }
-        crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
-    }
+    // BOUCHAUD_BKL_SUPPRIME_V1 : les releves [BKL-STATS], [BKL-MAX-HOLD],
+    // [BKL-COMPTES], [BKL-DOMAINES] et [BKL-INVENTAIRE] mesuraient un verrou
+    // qui n'existe plus. Reste, de ce bloc, le repli d'identite -- une mesure
+    // du domaine CPU-local, sans rapport avec lui.
+    crate::kernel::dmesg::log_fmt(format_args!("[IDENTITE] repli={}", identite_repli()));
     // BOUCHAUD_C2_LATENCE_DANS_CHAQUE_TRACE_V1
     //
     // Ces deux releves n'etaient emis que par le rapport du navigateur, donc
@@ -292,10 +173,10 @@ rx_rearmements={} rx_reprises={} rx_reprises_echouees={} rx_abandonnees={} invar
         pages_chaudes,
         prechauffage_ns / 1_000_000,
     ));
-    let (futex_attentes, futex_reveils, futex_herites, futex_profondeur) = futex_bkl_stats();
+    let (futex_attentes, futex_reveils) = futex_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[BKL-FUTEX] attentes={} reveils={} herites={} profondeur_max={}",
-        futex_attentes, futex_reveils, futex_herites, futex_profondeur,
+        "[FUTEX] attentes={} reveils={}",
+        futex_attentes, futex_reveils,
     ));
     let (_, _, backing_reads, backing_bytes) = crate::fs::backing::stats();
     let (cache_hits, readahead_hits) = crate::fs::backing::cache_stats();
@@ -359,8 +240,7 @@ backing_us={} mm_lock_us={} map_us={} explique_us={} residual_us={} residual_pct
     }
 
     let (resolved, retry, invalid, io_error, retired) = fault_outcome_stats();
-    let (waitq_bkl, waitq_bkl_ns) = crate::kernel::sync::waitq_bkl_stats();
-    let (waitq_detached, waitq_legacy, waitq_detached_ns, waitq_detached_max_ns, waitq_detached_loops, waitq_depth_violations) = crate::kernel::sync::waitq_detached_stats();
+    let (waitq_detached, waitq_detached_ns, waitq_detached_max_ns, waitq_detached_loops) = crate::kernel::sync::waitq_detached_stats();
     let waitq_sans_verrou = crate::kernel::sync::waitq_wake_sans_verrou();
     let (ata_acquires, ata_wait_ns, ata_max_ns) = crate::drivers::ata::contention_stats();
     let (exec_wait_ns, exec_max_ns) = crate::kernel::abi::proc::exec_quiesce_stats();
@@ -369,11 +249,11 @@ backing_us={} mm_lock_us={} map_us={} explique_us={} residual_us={} residual_pct
     let (clean_entries, clean_reclaimable) = crate::kernel::clean_page_cache::lifetime_stats();
     let (shared_nodes, shared_pages, shared_orphans) = crate::kernel::partage::lifetime_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} pf_bkl_enters={} waitq_bkl_enters={} waitq_bkl_wait_ns={} waitq_wake_sans_verrou={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
+        "[MM-NG6] fault_resolved={} fault_retry={} fault_invalid={} fault_io_error={} fault_retired={} fault_retry_yields={} fault_retry_max_chain={} fault_registry_current={} fault_registry_peak={} clean_cache_entries={} clean_cache_reclaimable={} shared_cache_nodes={} shared_cache_pages={} shared_cache_orphans={} waitq_wake_sans_verrou={} exec_wait_ns={} exec_max_ns={} ata_acquires={} ata_wait_ns={} ata_max_ns={}",
         resolved, retry, invalid, io_error, retired, retry_yields, retry_max_chain,
         fault_registry_current, fault_registry_peak,
         clean_entries, clean_reclaimable, shared_nodes, shared_pages, shared_orphans,
-        pf_bkl_enters(), waitq_bkl, waitq_bkl_ns, waitq_sans_verrou,
+        waitq_sans_verrou,
         exec_wait_ns,
         exec_max_ns, ata_acquires, ata_wait_ns, ata_max_ns,
     ));
@@ -388,13 +268,11 @@ backing_us={} mm_lock_us={} map_us={} explique_us={} residual_us={} residual_pct
         zero_faults, zero_triggered, zero_mapped, zero_already, zero_aborts, zero_max_batch,
     ));
     crate::serial_println!(
-        "[WAITQ-DETACHED] waits={} legacy={} wait_ns={} wait_max_ns={} schedule_loops={} depth_violations={}",
+        "[WAITQ-DETACHED] waits={} wait_ns={} wait_max_ns={} schedule_loops={}",
         waitq_detached,
-        waitq_legacy,
         waitq_detached_ns,
         waitq_detached_max_ns,
         waitq_detached_loops,
-        waitq_depth_violations,
     );
     log_smp_sample(online);
 }
@@ -421,15 +299,11 @@ fn log_smp_sample(online: usize) {
         reject_affinity: [0; MAX_CPUS],
         page_faults: [0; MAX_CPUS],
         tlb: smp::tlb_shootdown_count(),
-        bkl_wait: 0,
-        bkl_hold: 0,
-        bkl_acq: 0,
         gpu_presents: 0,
         gpu_bytes: 0,
         irq_preemptions: IRQ_PREEMPTIONS.load(Ordering::Relaxed),
         deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
     };
-    (current.bkl_wait, current.bkl_hold, current.bkl_acq) = smp_lock::contention_stats();
     let gpu = crate::drivers::gpu::stats();
     current.gpu_presents = gpu.presents;
     current.gpu_bytes = gpu.bytes_presented;
@@ -460,7 +334,7 @@ fn log_smp_sample(online: usize) {
     };
     let migrations = delta(&current.migrations, &previous.migrations);
     crate::kernel::dmesg::log_fmt(format_args!(
-        "[SMP-SAMPLE] v=2 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} bkl_wait_delta_ns={} bkl_hold_delta_ns={} bkl_acq_delta={} pf_delta={} tlb_delta={} irq_preempt_delta={} deferred_preempt_delta={} fb_presents_delta={} fb_bytes_delta={}",
+        "[SMP-SAMPLE] v=3 t_ns={} window_ns={} load={} runnable={} rq={} ctx_delta={} mig_delta={} steal_ok_delta={} steal_try_delta={} steal_rej_bal_delta={} steal_rej_aff_delta={} pf_delta={} tlb_delta={} irq_preempt_delta={} deferred_preempt_delta={} fb_presents_delta={} fb_bytes_delta={}",
         now, elapsed, sample_list(&load, online), sample_list(&runnable, online),
         sample_list(&rq, online), current.ctx.saturating_sub(previous.ctx),
         migrations[..online].iter().copied().sum::<u64>(),
@@ -468,9 +342,6 @@ fn log_smp_sample(online: usize) {
         sample_list(&delta(&current.steal_try, &previous.steal_try), online),
         sample_list(&delta(&current.reject_balance, &previous.reject_balance), online),
         sample_list(&delta(&current.reject_affinity, &previous.reject_affinity), online),
-        current.bkl_wait.saturating_sub(previous.bkl_wait),
-        current.bkl_hold.saturating_sub(previous.bkl_hold),
-        current.bkl_acq.saturating_sub(previous.bkl_acq),
         sample_list(&delta(&current.page_faults, &previous.page_faults), online),
         current.tlb.saturating_sub(previous.tlb),
         current.irq_preemptions.saturating_sub(previous.irq_preemptions),
@@ -478,110 +349,6 @@ fn log_smp_sample(online: usize) {
         current.gpu_presents.saturating_sub(previous.gpu_presents),
         current.gpu_bytes.saturating_sub(previous.gpu_bytes),
     ));
-    publie_bkl_par_appel(elapsed);
-}
-
-// BOUCHAUD_BKL_INVENTAIRE_V1
-//
-// Retirer le gros verrou, c'est vider CETTE liste. `[BKL-SYSCALL]` ne donne
-// que les trois plus gros consommateurs d'une fenetre ; pour savoir ce qu'il
-// reste a migrer, il faut TOUT ce qui l'a pris au moins une fois depuis le
-// demarrage : chaque appel (`nom=acquisitions/tenue_ms/attente_ms`) et le
-// seau hors appel systeme (exceptions, creation et sortie de taches).
-fn publie_inventaire_bkl() {
-    let seaux = smp_lock::nombre_de_seaux();
-    let mut ligne = alloc::string::String::from("[BKL-INVENTAIRE]");
-    let mut n = 0u32;
-    for index in 0..seaux {
-        let (tenue, attente, acquisitions, _) = smp_lock::stats_du_seau(index);
-        if acquisitions == 0 {
-            continue;
-        }
-        n += 1;
-        let nom = if index == smp_lock::SEAU_NOYAU {
-            "hors-syscall"
-        } else {
-            crate::kernel::abi::nr::name(index as u64)
-        };
-        let _ = core::fmt::Write::write_fmt(
-            &mut ligne,
-            format_args!(" {}={}/{}/{}", nom, acquisitions, tenue / 1_000_000, attente / 1_000_000),
-        );
-    }
-    let _ = core::fmt::Write::write_fmt(&mut ligne, format_args!(" seaux_actifs={}", n));
-    crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
-}
-
-// BOUCHAUD_P2_BKL_PAR_APPEL_V1
-//
-// « BKL detenu 99,96 % de la fenetre » dit qu'il y a un probleme, pas OU. Le
-// maximum et sa provenance donnent UN coupable — celui d'une seule tenue. Ils
-// ne disent pas s'il est isole ou systematique, ni ce que les autres appels
-// coutent a cote.
-//
-// Cette ligne classe les appels systeme par temps de DETENTION sur la fenetre.
-// C'est elle qui permet d'affirmer un avant/apres chiffre plutot qu'une
-// impression.
-static mut BKL_APPEL_PRECEDENT: Option<alloc::vec::Vec<u64>> = None;
-
-fn publie_bkl_par_appel(fenetre_ns: u64) {
-    let seaux = smp_lock::nombre_de_seaux();
-    let mut hold = alloc::vec![0u64; seaux];
-    for index in 0..seaux {
-        hold[index] = smp_lock::stats_du_seau(index).0;
-    }
-    let precedent = unsafe {
-        let ancien = BKL_APPEL_PRECEDENT.replace(hold.clone());
-        ancien
-    };
-    let Some(precedent) = precedent else { return; };
-    if precedent.len() != seaux {
-        return;
-    }
-
-    // Les trois plus gros consommateurs de la fenetre. Trois, parce qu'une
-    // ligne de journal qui deroule cinquante appels ne se lit pas — et parce
-    // qu'un quatrieme n'a jamais rien explique jusqu'ici.
-    let mut classement: [(usize, u64); 3] = [(usize::MAX, 0); 3];
-    for index in 0..seaux {
-        let delta = hold[index].saturating_sub(precedent[index]);
-        if delta == 0 {
-            continue;
-        }
-        if delta > classement[2].1 {
-            classement[2] = (index, delta);
-            classement.sort_by(|a, b| b.1.cmp(&a.1));
-        }
-    }
-    if classement[0].0 == usize::MAX {
-        return;
-    }
-
-    let mut ligne = alloc::string::String::from("[BKL-SYSCALL]");
-    let _ = core::fmt::Write::write_fmt(
-        &mut ligne,
-        format_args!(" window_ns={fenetre_ns}"),
-    );
-    for (index, delta) in classement.iter().copied() {
-        if index == usize::MAX {
-            continue;
-        }
-        let (_, attente, acquisitions, max_hold) = smp_lock::stats_du_seau(index);
-        let nom = if index == smp_lock::SEAU_NOYAU {
-            "hors-syscall"
-        } else {
-            crate::kernel::abi::nr::name(index as u64)
-        };
-        let part = if fenetre_ns == 0 { 0 } else { delta.saturating_mul(100) / fenetre_ns };
-        let _ = core::fmt::Write::write_fmt(
-            &mut ligne,
-            format_args!(
-                " {nom}=[hold_delta_ns={delta} hold_pct={part} \
-                 max_hold_ns={max_hold} acq_total={acquisitions} wait_total_ns={attente}]"
-            ),
-        );
-    }
-    crate::kernel::dmesg::log_fmt(format_args!("{}", ligne));
 }
 
 /// Instantane d'un processus pour le journal : (pid, nom, ticks, octets).
@@ -1176,7 +943,6 @@ pub struct OrdonnanceurStats {
     pub deferred_preemptions: u64,
     pub transitions: u64,
     pub transitions_refusees: u64,
-    pub detach_bkl_legacy: u64,
     pub wm_age_ms: u64,
     pub ready: usize,
     pub live: usize,
@@ -1191,7 +957,6 @@ pub fn diagnostic_ordonnanceur() -> OrdonnanceurStats {
         deferred_preemptions: DEFERRED_PREEMPTIONS.load(Ordering::Relaxed),
         transitions: TRANSITIONS_ORDONNANCEUR.load(Ordering::Relaxed),
         transitions_refusees: TRANSITIONS_ORDONNANCEUR_REFUSEES.load(Ordering::Relaxed),
-        detach_bkl_legacy: DETACHEMENTS_BKL_LEGACY.load(Ordering::Relaxed),
         wm_age_ms: now.saturating_sub(heartbeat).saturating_mul(1000)
             / crate::kernel::timer::TICKS_PER_SECOND,
         ready: ready_count(),

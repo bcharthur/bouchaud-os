@@ -37,10 +37,9 @@ pub fn reclaim_budget() -> usize {
     }
 }
 
-/// Bounded synchronous reclaim. Call only outside BKL/ranked critical sections.
+/// Bounded synchronous reclaim. Call only outside ranked critical sections.
 pub fn reclaim_now(limit: usize) -> usize {
     if limit == 0 { return 0; }
-    debug_assert!(!crate::kernel::smp_lock::held_by_current_cpu());
     debug_assert_eq!(crate::kernel::sync::lockdep::depth(), 0);
     RECLAIM_RUNS.fetch_add(1, Ordering::Relaxed);
     let from_local = crate::kernel::frame_cache::drain(limit);

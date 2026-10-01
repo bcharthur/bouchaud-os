@@ -20,7 +20,6 @@ static FAULT_RETRY: AtomicU64 = AtomicU64::new(0);
 static FAULT_INVALID: AtomicU64 = AtomicU64::new(0);
 static FAULT_IO_ERROR: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETIRED: AtomicU64 = AtomicU64::new(0);
-static PF_BKL_ENTERS: AtomicU64 = AtomicU64::new(0);
 static FAULT_REGISTRY_PEAK: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETRY_YIELDS: AtomicU64 = AtomicU64::new(0);
 static FAULT_RETRY_MAX_CHAIN: AtomicU64 = AtomicU64::new(0);
@@ -966,9 +965,7 @@ fn peuple_page_loader(
             if !mm.space.write(page, &page_data) {
                 let retirement = mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
                 drop(mm);
-                let depth = smp_lock::suspend_for_schedule();
                 retirement.invalidation().execute();
-                smp_lock::resume_after_schedule(depth);
                 processus.mm.lock().space.finish_unmap(retirement);
                 return FaultOutcome::IoError;
             }

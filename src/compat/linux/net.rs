@@ -366,9 +366,6 @@ pub fn sys_sendto(fd: i32, buffer: u64, len: usize, flags: u32, addr: u64, addr_
 /// destination une socket, et rien dans l'operation ne passe par l'espace
 /// utilisateur.
 pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usize) -> i64 {
-    // Domaine `Reseau`, declare `Migre` (lot B7) : ouvert ICI, la ou vit le
-    // code reseau, pour que toute reprise du gros verrou dessous soit comptee.
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
     let len = data.len();
     if len == 0 {
         return 0;
@@ -639,24 +636,17 @@ fn pump_udp(state: &Arc<SpinLock<SocketState>>) {
     }
 }
 
-/// C8 : frontiere unique du legacy inet encore serialise.
+/// Section courte de la pile inet historique : l'operation fournie ne dort
+/// jamais, et tout ce qu'elle touche a son verrou propre -- l'etat du socket
+/// (`SocketState`), la file des paquets routes, l'anneau RX et le cache ARP
+/// (`VERROU_RECEPTION`), l'anneau TX (`ANNEAU_TX`).
 ///
-/// Le receive-side n'herite plus du BKL. Seul le pump de la pile historique
-/// reprend temporairement le domaine Reseau. L'operation fournie doit rester
-/// courte et ne jamais dormir.
-///
-/// BOUCHAUD_C8_RESEAU_BKL_BORNE_V1
-///
-/// BOUCHAUD_RESEAU_SANS_BKL_V1 (lot B7) : la frontiere ne prend PLUS le gros
-/// verrou. Tout ce que l'operation touche a son verrou propre : l'etat du
-/// socket (`SocketState`, SpinLock), la file des paquets routes, l'anneau RX
-/// et le cache ARP (`VERROU_RECEPTION`, SpinLockIrq), l'anneau TX
-/// (`ANNEAU_TX`). La portee `Reseau` reste ouverte : le domaine est declare
-/// `Migre`, et toute reprise du gros verrou dessous serait comptee comme une
-/// REGRESSION (budget zero).
+/// C'etait `avec_domaine_reseau`, la frontiere ou le gros verrou etait pris
+/// (C8) puis seulement attribue (lot B7). Le verrou n'existe plus
+/// (BOUCHAUD_BKL_SUPPRIME_V1) ; reste le contrat, et un seul endroit pour le
+/// lire.
 #[inline]
-fn avec_domaine_reseau<R>(operation: impl FnOnce() -> R) -> R {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
+fn section_reseau<R>(operation: impl FnOnce() -> R) -> R {
     operation()
 }
 
@@ -732,9 +722,7 @@ pub fn sys_recvfrom(
             let echeance = crate::kernel::timer::ticks()
                 + 3 * crate::kernel::timer::TICKS_PER_SECOND.max(1);
             loop {
-                let pret = avec_domaine_reseau(|| {
-                    // La portee Reseau precede SocketState (lot B7 : plus de
-                    // gros verrou dans la frontiere).
+                let pret = section_reseau(|| {
                     let mut borrowed = state.lock();
                     let conn = match borrowed.conn.as_mut() {
                         Some(conn) => conn,
@@ -776,7 +764,7 @@ pub fn sys_recvfrom(
         }
         SocketKind::Udp => {
             if state.lock().datagrams.is_empty() {
-                avec_domaine_reseau(|| pump_udp(&state))
+                section_reseau(|| pump_udp(&state))
             }
             // Attente bloquante : sur le temps, et en rendant le processeur.
             //
@@ -795,7 +783,7 @@ pub fn sys_recvfrom(
                     // prochaine interruption materielle. Meme raison que dans
                     // `sys_poll`.
                     task::attends_un_tick();
-                    avec_domaine_reseau(|| pump_udp(&state))
+                    section_reseau(|| pump_udp(&state))
                 }
             }
             let datagram = state.lock().datagrams.pop();
@@ -1330,7 +1318,6 @@ pub fn sys_listen_unsupported() -> i64 {
 
 /// Un socket a-t-il des donnees a lire ? (pour `poll`/`select`)
 pub fn socket_readable(state: &Arc<SpinLock<SocketState>>) -> bool {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Reseau);
     let kind = state.lock().kind;
     match kind {
         SocketKind::Tcp => {

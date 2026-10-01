@@ -4,7 +4,7 @@
 //!
 //! Le pilote serie ecrivait un octet a la fois, en attendant THRE avant chacun.
 //! Chaque attente est un `inb`, c'est-a-dire une sortie du mode traduit sous
-//! TCG ; et `write(2)` s'execute sous le gros verrou du noyau, donc un
+//! TCG ; et `write(2)` s'executait alors sous le gros verrou du noyau, donc un
 //! programme bavard y serialisait les quatre coeurs derriere COM1.
 //!
 //! Le 16550 a un FIFO d'emission de seize octets. Attendre une fois puis en

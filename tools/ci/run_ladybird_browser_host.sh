@@ -629,7 +629,6 @@ for motif in \
     'HOST_SURFACE_CAPTURE .*' \
     'BOUCHAUD_SESSION_FIN .*' \
     'BOUCHAUD_SYSTEM_EXIT .*' \
-    'PERF_EXECVE_BKL .*' \
     'FAULT_FILE_BREAKDOWN .*' \
     'FAULT_FILE_SNAPSHOT .*' \
     'CPU_CUMUL .*' \

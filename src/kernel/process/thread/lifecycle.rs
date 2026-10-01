@@ -325,16 +325,6 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         }
     }
 
-    abandonne_bkl_avant_sortie_definitive();
-
-    // BOUCHAUD_C39_PORTEES_ABANDONNEES
-    //
-    // Meme raison que pour le gros verrou juste au-dessus, et meme pile : la
-    // `PorteeDomaine` ouverte par `syscall_dispatch` vit sur cette pile-ci, qui
-    // ne reprendra jamais. Sans ce rappel, `sommet[cpu]` montait d'un cran a
-    // chaque processus qui se termine.
-    crate::kernel::sync::referme_portees_abandonnees(local_cpu());
-
     // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
     // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
     // continuent independamment.
@@ -548,9 +538,7 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         let rearmer = suspend_compta_pour_idle();
         // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
         cpu::prepare_scheduler_idle();
-        let depth = smp_lock::suspend_for_schedule();
         cpu::commit_scheduler_idle();
-        smp_lock::resume_after_schedule(depth);
         if rearmer {
             rearme_compta_apres_idle();
         }
@@ -744,7 +732,6 @@ pub fn exit_group(code: i32) -> ! {
 /// effacerait l'identite de la tache appelante. Les appelants verifient
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     // BOUCHAUD_RUN_PORTE_TRANSITION_V1
     //
     // `run` et `run_noyau` prenaient le gros verrou. Ce qu'il protegeait
@@ -938,7 +925,6 @@ fn spawn_noyau_interne(
 }
 
 pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Processus);
     // Porte de transition et non gros verrou : BOUCHAUD_RUN_PORTE_TRANSITION_V1
     // (voir `run`).
     if in_user_task() {
@@ -1196,7 +1182,7 @@ pub fn terminate_sibling_threads() {
 ///
 /// Chemin commun : une lecture atomique d'un drapeau par CPU, rien d'autre.
 ///
-/// Chemin rare : le drapeau est leve, on prend le gros verrou et on RELIT
+/// Chemin rare : le drapeau est leve, on RELIT
 /// l'etat reel avant d'agir. Le drapeau n'est donc qu'un filtre -- s'il est
 /// devenu obsolete (la tache qu'il visait a deja quitte ce CPU), la relecture
 /// le constate et l'on repart sans rien faire.
@@ -1222,16 +1208,8 @@ fn retire_exec_zombie_current() -> ! {
     let cpu_id = local_cpu();
     let cur = current_index_raw();
 
-    // Cette pile ne reprendra jamais. Toute profondeur de gros verrou encore
-    // detenue -- celle de l'appel systeme qui nous a amenes ici -- est
-    // abandonnee avant le dernier choix d'ordonnancement, sans tentative de
-    // restauration : il n'y aura pas de retour pour la rendre.
-    abandonne_bkl_avant_sortie_definitive();
-
     // BOUCHAUD_C39_PORTEES_ABANDONNEES -- voir `exit_current` : meme classe de
     // defaut, meme pile condamnee, meme compensation.
-    crate::kernel::sync::referme_portees_abandonnees(cpu_id);
-
     commute_sortie_definitive_si_possible(cur, cpu_id);
 
     // Aucun runnable local à cet instant. Le contexte noyau/AP idle reprendra
@@ -1257,21 +1235,14 @@ fn retire_exec_zombie_current() -> ! {
 // page resolue -- ce n'est que le test du drapeau, faux presque toujours, qui
 // l'evitait.
 //
-// La profondeur, elle, est inchangee. Sur le chemin qui demonte la tache,
-// `abandonne_bkl_avant_sortie_definitive` remet la profondeur a zero et la
-// pile ne reprend jamais : elle abandonnait deja celle de l'appelant en plus
-// de celle-ci. Sur le chemin qui ne demonte rien, il n'y a plus ni prise ni
-// relachement au lieu d'une paire equilibree.
+// Le gros verrou lui-meme n'existe plus (BOUCHAUD_BKL_SUPPRIME_V1).
 pub fn retire_current_if_zombie() {
     let cpu = interrupts::without_interrupts(local_cpu);
     if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
         return;
     }
-    // Aucune portee de domaine ici. Elle n'aurait plus rien a attribuer, et
-    // elle FUIRAIT : `retire_exec_zombie_current` commute sans retour, donc le
-    // `Drop` qui referme la portee ne s'executerait jamais et la pile de
-    // domaines de ce CPU garderait une entree morte -- toute acquisition
-    // ulterieure non etiquetee lui serait attribuee.
+    // Aucun garde RAII ici : `retire_exec_zombie_current` commute sans retour,
+    // et un `Drop` ne s'executerait jamais.
     RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
     if in_user_task() && current().state == TaskState::Zombie {
         retire_exec_zombie_current();

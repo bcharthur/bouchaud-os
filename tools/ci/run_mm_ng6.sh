@@ -62,7 +62,7 @@ grep -aF '=== AUTORUN FIN === statut=0' mm-ng6.log
 # Le releve doit avoir atteint le port serie, sinon les budgets d'execution qui
 # suivent n'auraient rien a lire. On le verifie ICI, ou l'echec nomme sa cause,
 # plutot que de laisser `check_budgets.py` annoncer treize absences.
-for tag in '[BKL-DOMAINES]' '[SCHED-NG-LAT]' '[SCHED-NG-CENTILES]' '[SCHED-NG-FILE]'; do
+for tag in '[IDENTITE]' '[SCHED-NG-LAT]' '[SCHED-NG-CENTILES]' '[SCHED-NG-FILE]'; do
   grep -aqF "$tag" mm-ng6.log || {
     echo "releve periodique absent de la trace : $tag -- smpstat n'a rien emis" >&2
     exit 1

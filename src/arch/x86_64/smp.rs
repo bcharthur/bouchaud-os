@@ -482,7 +482,7 @@ pub const PANIC_STOP_VECTOR: u8 = 0xF3;
 ///
 /// # Pourquoi un vecteur dedie
 ///
-/// Le vecteur de replanification prend le gros verrou et peut commuter : c'est
+/// Le vecteur de replanification peut commuter : c'est
 /// exactement ce qu'il ne faut pas faire quand l'etat du noyau est douteux. Ce
 /// vecteur-ci ne fait rien d'autre que `cli; hlt`.
 ///
@@ -765,11 +765,6 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
     if targets == 0 {
         return;
     }
-
-    debug_assert!(
-        !crate::kernel::smp_lock::held_by_current_cpu(),
-        "TLB shootdown: attente ACK sous BKL interdite"
-    );
 
     let slot = &TLB_SLOTS[current];
     debug_assert_eq!(slot.sequence.load(Ordering::Acquire), 0);

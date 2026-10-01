@@ -12,7 +12,6 @@ pub fn preempt_from_irq() {
     );
 
     stall_site_set(40, 0);
-    debug_assert_eq!(smp_lock::profondeur_locale(), 0, "preemption ring3 avec BKL");
 
     // BOUCHAUD_C26_IRQ_NE_VOLE_PAS_LA_PORTE
     //
@@ -106,9 +105,7 @@ pub fn preempt_from_irq() {
     // entrante la rend dans `complete_switch_handoff`, avant toute execution
     // normale de la tache.
     stall_site_clear();
-    smp_lock::note_switch(true, cur, next);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
-    smp_lock::note_switch(false, cur, next);
 
     // Quand cette pile IRQ reprend plus tard, la passation qui vient de la
     // remettre en service est deja acquittee par la continuation precedente.

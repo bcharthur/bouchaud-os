@@ -7,7 +7,6 @@ extern "x86-interrupt" fn breakpoint_handler(stack: InterruptStackFrame) {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     println!("exception: breakpoint (int3) capturee, on continue");
     serial_println!("[cpu] breakpoint at {:?}", stack.instruction_pointer);
 }
@@ -145,23 +144,14 @@ pub fn releve_contexte_courant(cpu: usize, rsp_connu: Option<u64>) {
         usermode::cpu_index(),
     );
 
-    let provenance = crate::kernel::smp_lock::stall_probe_provenance();
+    // Etat syscall DU CPU FAUTIF. Ce releve lisait la provenance du gros
+    // verrou -- c'est-a-dire l'appel du CPU qui le tenait, pas forcement
+    // celui-ci (`task_bkl=`) : sur le smoke #377, il designait une autre
+    // tache. Le verrou n'existe plus (BOUCHAUD_BKL_SUPPRIME_V1).
+    let (tache, syscall_nr, phase, site, aux) = crate::kernel::task::stall_probe_context_pour(cpu);
     serial_println!(
-        "[FAULT] bkl owner_token={} depth={} coherent={} acquire_kind={} acquire_seq={} release_seq={}",
-        provenance.owner_token,
-        crate::kernel::smp_lock::stall_probe_depth(cpu),
-        provenance.coherent,
-        provenance.acquire_kind,
-        provenance.acquire_seq,
-        provenance.release_seq,
-    );
-    serial_println!(
-        "[FAULT] syscall_nr={} phase={} site={} aux={:#x} task_bkl={}",
-        provenance.syscall_nr,
-        provenance.syscall_phase,
-        provenance.site,
-        provenance.aux,
-        provenance.task,
+        "[FAULT] syscall_nr={} phase={} site={} aux={:#x} tache={}",
+        syscall_nr, phase, site, aux, tache,
     );
     serial_println!(
         "[FAULT] need_resched={} irq_profondeur=<non suivi>",
@@ -225,7 +215,6 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     let cr2 = x86_64::registers::control::Cr2::read().as_u64();
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
@@ -267,7 +256,6 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de protection generale", &stack);
     }
@@ -288,7 +276,6 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("instruction illegale", &stack);
     }
@@ -309,7 +296,6 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("division par zero", &stack);
     }
@@ -330,7 +316,6 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let _domaine = crate::kernel::sync::portee(crate::kernel::sync::Domaine::Panique);
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         kill_faulting_task("faute de pile", &stack);
     }

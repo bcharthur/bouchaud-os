@@ -648,7 +648,6 @@ fn scelle_preuves_ram(ts_ns: u64) -> (u64, u64) {
 fn sample(ts_ns: u64) {
     let mut out = Text::new();
     let (task, syscall, phase, site, aux) = crate::kernel::task::stall_probe_local_context();
-    let bkl = crate::kernel::smp_lock::health_snapshot();
     let cpu = crate::arch::x86_64::usermode::cpu_index();
     let rsp: u64;
     let here: u64;
@@ -676,7 +675,6 @@ fn sample(ts_ns: u64) {
         concat!(
             "sample ts_ns={} cpu={} rsp={:#x} here={:#x} ",
             "task={} syscall={} phase={} site={} aux={:#x} need_resched={} ",
-            "bkl_owner={} bkl_cpu={} bkl_depth={} bkl_ok={} parked={:#x} resume={:#x} ",
             "timer0={:#x}/{:#x}/stage{}/{}:{} ",
             "timer1={:#x}/{:#x}/stage{}/{}:{} ",
             "timer2={:#x}/{:#x}/stage{}/{}:{} ",
@@ -730,8 +728,6 @@ fn sample(ts_ns: u64) {
         ts_ns, cpu, rsp, here,
         task, syscall, phase, site, aux,
         crate::kernel::task::besoin_de_replanifier() as u8,
-        bkl.owner_token, bkl.owner_cpu, bkl.owner_depth, bkl.owner_depth_ok as u8,
-        bkl.parked_mask, bkl.resume_mask,
         t0, k0, TIMER_STAGE[0].load(Ordering::Acquire),
         TIMER_ENTERS[0].load(Ordering::Relaxed), TIMER_EXITS[0].load(Ordering::Relaxed),
         t1, k1, TIMER_STAGE[1].load(Ordering::Acquire),
@@ -1206,20 +1202,19 @@ pub fn pic_reveil(
     cpu: u32,
     file: u32,
     noyau: bool,
-    bkl: u32,
     phase: &str,
 ) {
     let mut out = Text::new();
     let _ = write!(
         &mut out,
         "pic_reveil ts_ns={} echeance_ns={} delta_us={} cpu={} runqueue={} \
-tache_noyau={} bkl_owner={} phase={}\n",
-        ts_ns, echeance_ns, delta_us, cpu, file, noyau as u8, bkl, phase,
+tache_noyau={} phase={}\n",
+        ts_ns, echeance_ns, delta_us, cpu, file, noyau as u8, phase,
     );
     let _ = append(KIND_SERVICE, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
     crate::serial_println!(
-        "HID_LATENCY_SPIKE delta_us={} cpu={} runqueue={} tache_noyau={} bkl_owner={} phase={}",
-        delta_us, cpu, file, noyau as u8, bkl, phase,
+        "HID_LATENCY_SPIKE delta_us={} cpu={} runqueue={} tache_noyau={} phase={}",
+        delta_us, cpu, file, noyau as u8, phase,
     );
 }
 

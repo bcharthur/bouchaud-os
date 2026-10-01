@@ -3,8 +3,9 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 root=Path(__file__).resolve().parents[2]
 need={
-"src/kernel/sync/reveil/attente.rs":["expected_depth","INTERFACE_DETACHED_NESTED","profondeur_locale() > 0"],
-"src/gui/desktop_bkl/scope.rs":["accepte_imbrique","NESTED_SCOPES","suspend_for_schedule"],
+# Les contrats V16 du detachement INTERFACE du bureau (reveil/attente.rs) et
+# des portees desktop_bkl sont partis avec le gros verrou
+# (BOUCHAUD_BKL_SUPPRIME_V1) : il n'y a plus rien a detacher.
 "src/kernel/process/thread/faute_cluster.rs":[
     "ZERO_CLUSTER_MAX_PAGES",
     "zero_fault_cluster_stats",
@@ -34,7 +35,7 @@ for rel,tokens in need.items():
     if '\r' in s: raise SystemExit(f"V16 CRLF forbidden in drop-in: {rel}")
 ET.parse(root/"tools/ladybird/fontconfig/fonts.conf")
 # include fragments must never start with inner doc comments
-for rel in ["src/kernel/sync/reveil/attente.rs","src/kernel/sync/reveil/etat.rs","src/kernel/sync/reveil/diagnostic.rs","src/gui/desktop_bkl/scope.rs","src/kernel/process/thread/faute_cluster.rs"]:
+for rel in ["src/kernel/sync/reveil/attente.rs","src/kernel/sync/reveil/etat.rs","src/kernel/sync/reveil/diagnostic.rs","src/kernel/process/thread/faute_cluster.rs"]:
     if (root/rel).read_text(encoding="utf-8").lstrip().startswith("//!"):
         raise SystemExit(f"V16 include fragment uses //!: {rel}")
 print("V16 typography + fluidity contracts: OK")
