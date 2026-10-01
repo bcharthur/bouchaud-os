@@ -68,6 +68,7 @@ rej_inel={} rej_crs={} mig={}",
     // 200 ms PENDANT leur attente.
     // BOUCHAUD_SONDE_GEL_V1 : les coeurs restes sans tic, publies ici.
     publie_sonde_gel();
+    publie_rapports_veille();
     let (episodes, pire, rapports) = compteurs_veille();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[SCHED-NG-VEILLE] episodes={} pire_ms={} rapports={}",

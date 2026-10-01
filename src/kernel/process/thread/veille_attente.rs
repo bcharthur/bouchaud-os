@@ -20,6 +20,10 @@
 // `smpstat`.
 //
 // Lecture seule : aucun etat d'ordonnancement n'est modifie.
+//
+// BOUCHAUD_RELEVES_HORS_IRQ_V1 : la veille tourne dans l'interruption, mais
+// n'y imprime plus rien -- quatorze mots par rapport, publies par
+// `diag-noyau` (ou `smpstat`).
 
 const VEILLE_PERIODE_NS: u64 = 20_000_000;
 const SEUIL_ATTENTE_VIVE_NS: u64 = 50_000_000;
@@ -77,7 +81,8 @@ pub fn veille_attentes_vives() {
             continue;
         }
         VEILLE_EPISODES.fetch_add(1, Ordering::Relaxed);
-        if VEILLE_RAPPORTS.fetch_add(1, Ordering::Relaxed) >= VEILLE_RAPPORTS_MAX {
+        let rang = VEILLE_RAPPORTS.fetch_add(1, Ordering::Relaxed);
+        if rang >= VEILLE_RAPPORTS_MAX {
             continue;
         }
         let cpu = (tache.runq_cpu.charge() as usize).min(MAX_CPUS - 1);
@@ -89,23 +94,60 @@ pub fn veille_attentes_vives() {
             (0, 0, 0)
         };
         let (rip, rip_noyau) = rips_timer(cpu);
+        // BOUCHAUD_RELEVES_HORS_IRQ_V1 : range, publie par `diag-noyau`.
+        let n = rang as usize;
+        let mots = [
+            tache.tid as u64,
+            tache.process.pid as u64,
+            (tache.priorite == Priorite::Interactive) as u64,
+            cpu as u64,
+            attente,
+            ready_count_cpu(cpu) as u64,
+            cur_tid as u64,
+            cur_pid as u64,
+            cur_noyau as u64,
+            crate::arch::x86_64::cpu::is_idle(cpu) as u64,
+            STALL_SYSCALL_NR[cpu].load(Ordering::Relaxed),
+            STALL_KERNEL_SITE[cpu].load(Ordering::Relaxed) as u64,
+            rip,
+            rip_noyau,
+        ];
+        for (i, m) in mots.iter().enumerate() {
+            VEILLE_RAPPORT[n][i].store(*m, Ordering::Relaxed);
+        }
+        VEILLE_RAPPORT_PRET[n].store(1, Ordering::Release);
+    }
+}
+
+const VEILLE_MOTS: usize = 14;
+static VEILLE_RAPPORT: [[AtomicU64; VEILLE_MOTS]; VEILLE_RAPPORTS_MAX as usize] =
+    [const { [const { AtomicU64::new(0) }; VEILLE_MOTS] }; VEILLE_RAPPORTS_MAX as usize];
+static VEILLE_RAPPORT_PRET: [AtomicU32; VEILLE_RAPPORTS_MAX as usize] =
+    [const { AtomicU32::new(0) }; VEILLE_RAPPORTS_MAX as usize];
+/// Rapports deja publies (un seul lecteur : `diag-noyau` ou `smpstat`).
+static VEILLE_PUBLIES: AtomicU32 = AtomicU32::new(0);
+
+/// Publie les rapports ranges par les interruptions. Depuis une tache.
+pub fn publie_rapports_veille() {
+    loop {
+        let n = VEILLE_PUBLIES.load(Ordering::Acquire);
+        if n >= VEILLE_RAPPORTS_MAX || VEILLE_RAPPORT_PRET[n as usize].load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if VEILLE_PUBLIES
+            .compare_exchange(n, n + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
+        }
+        let m: [u64; VEILLE_MOTS] =
+            core::array::from_fn(|i| VEILLE_RAPPORT[n as usize][i].load(Ordering::Relaxed));
         crate::serial_println!(
             "[SCHED-NG-ATTENTE-VIVE] tid={} pid={} classe={} cpu={} attente_ms={} file={} \
 cur_tid={} cur_pid={} cur_noyau={} idle={} syscall={} site={} rip={:#x} rip_noyau={:#x}",
-            tache.tid,
-            tache.process.pid,
-            if tache.priorite == Priorite::Interactive { "interactive" } else { "normale" },
-            cpu,
-            attente / 1_000_000,
-            ready_count_cpu(cpu),
-            cur_tid,
-            cur_pid,
-            cur_noyau,
-            crate::arch::x86_64::cpu::is_idle(cpu) as u8,
-            STALL_SYSCALL_NR[cpu].load(Ordering::Relaxed),
-            STALL_KERNEL_SITE[cpu].load(Ordering::Relaxed),
-            rip,
-            rip_noyau,
+            m[0], m[1],
+            if m[2] != 0 { "interactive" } else { "normale" },
+            m[3], m[4] / 1_000_000, m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13],
         );
     }
 }

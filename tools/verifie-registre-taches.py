@@ -153,10 +153,22 @@ def main() -> int:
     except SystemExit:
         ajoute = ""
         fautes.append("  registre.rs  `registre_ajoute` a disparu")
+    # BOUCHAUD_SONDE_GEL_V1 : la section d'ecriture vit dans
+    # `registre_ajoute_sous_ecriture` (chronometree par `registre_ajoute`), et
+    # l'ancienne incarnation en sort par `core::mem::replace` pour etre
+    # detruite hors du rendez-vous.
+    if ajoute and "registre_ajoute_sous_ecriture(" in ajoute:
+        try:
+            ajoute = corps(code, "fn registre_ajoute_sous_ecriture(")
+        except SystemExit:
+            ajoute = ""
+            fautes.append("  registre.rs  `registre_ajoute_sous_ecriture` a disparu")
     if ajoute:
         exclusivite = ajoute.find("RegistreEcriture::acquire()")
         generation = ajoute.find("prochaine_generation(")
         ecriture = ajoute.find("*ancienne =")
+        if ecriture == -1:
+            ecriture = ajoute.find("core::mem::replace(ancienne,")
         if exclusivite == -1:
             fautes.append(
                 "  registre_ajoute  recycle sans garde d'ecriture : une "

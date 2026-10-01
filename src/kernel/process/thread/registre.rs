@@ -331,12 +331,8 @@ impl RegistreEcriture {
         // (un compte qui a deborde par le bas se voit ici).
         let debut = crate::kernel::timer::monotonic_ns();
         let mut vu = 0usize;
-        loop {
-            let n = LECTEURS.load(Ordering::Acquire);
-            if n == 0 {
-                break;
-            }
-            vu = vu.max(n);
+        while LECTEURS.load(Ordering::Acquire) != 0 {
+            vu = vu.max(LECTEURS.load(Ordering::Relaxed));
             core::hint::spin_loop();
         }
         ATTENTE_LECTEURS_PIRE_NS.fetch_max(

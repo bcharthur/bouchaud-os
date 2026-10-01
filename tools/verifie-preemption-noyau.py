@@ -93,7 +93,7 @@ def verifie(racine: Path) -> list[str]:
     if "preemption_noyau::decide(&contexte)" not in a:
         fautes.append(f"{PREEMPT} : accorde_preemption_noyau ne passe plus par decide")
     vrais = [m.start() for m in re.finditer(r"\btrue\b", a)]
-    garde = a.find("if crate::kernel::preemption_noyau::decide(&contexte) {")
+    garde = a.find("crate::kernel::preemption_noyau::decide(&contexte) {")
     fin_garde = a.find("}", garde)
     if garde < 0 or any(not (garde < v < fin_garde) for v in vrais):
         fautes.append(f"{PREEMPT} : une preemption est accordee hors de decide")

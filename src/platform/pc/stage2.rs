@@ -551,6 +551,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // L'enregistreur de vol part avec son propre fil : il ecrit sur la cle
     // USB par transferts synchrones, et ce cout n'a rien a faire sur le
     // chemin de l'entree.
+    // BOUCHAUD_RELEVES_HORS_IRQ_V1 : le fil qui imprime ce que les
+    // interruptions capturent ; ce chemin ne rend jamais la main a main.rs.
+    crate::kernel::task::demarre_fil_diagnostic();
     crate::drivers::xhci_active::demarre_le_fil_blackbox();
 
     // LE BRING-UP EST FINI : LES BUDGETS PASSENT EN MODE RUNTIME.

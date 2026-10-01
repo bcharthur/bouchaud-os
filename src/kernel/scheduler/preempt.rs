@@ -207,7 +207,15 @@ pub fn masque_cible() -> u64 {
 /// ouverte. Une IRQ qui interrompt le scheduler ne peut donc pas en elire une
 /// seconde, quel que soit le chemin par lequel elle est arrivee.
 pub fn preemption_noyau_sure() -> bool {
-    contexte_noyau(false).map_or(false, |c| crate::kernel::preemption_noyau::contexte_sur(&c))
+    let Some(id) = local_id() else { return false; };
+    let local = cpu_local::local(id);
+    // Les conditions historiques, lues en clair ; puis le contexte complet de
+    // la decision pure (registre, shootdown, IF).
+    local.preempt_count() == 0
+        && local.verrous_simples() == 0
+        && crate::kernel::sync::lockdep::depth() == 0
+        && !crate::kernel::task::sortie_en_cours_locale()
+        && contexte_noyau(false).map_or(false, |c| crate::kernel::preemption_noyau::contexte_sur(&c))
 }
 
 /// Ce que la decision pure lit de ce coeur, maintenant.
@@ -252,7 +260,7 @@ pub fn accorde_preemption_noyau() -> bool {
     if contexte.interruptions_ouvertes {
         PREEMPTIONS_NOYAU_IF_OUVERT.fetch_add(1, Ordering::Relaxed);
     }
-    if crate::kernel::preemption_noyau::decide(&contexte) {
+    if preemption_noyau_sure() && crate::kernel::preemption_noyau::decide(&contexte) {
         PREEMPTIONS_NOYAU_ACCORDEES.fetch_add(1, Ordering::Relaxed);
         return true;
     }

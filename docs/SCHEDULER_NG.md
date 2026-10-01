@@ -42,7 +42,10 @@ interactive/normale, porte de transition par coeur, aucun verrou global.
 | veille d'attente vive (obs.) | `0f06ebb8` | attentes longues sans coupable | attribution en direct |
 | releves globaux espaces | `cd6bc0a8` | sortie de fil = 7-10 lignes serie, coeur tenu | episodes > 50 ms SMP4 : 59 -> 0-5 |
 | jeton serie : proprietaire, priorite IRQ, releve tenu une fois | `c24b11a2` | releve IRQ du minuteur : coeur zero tenu, interruptions masquees, 0,46 a 12,6 s | releves complets > 100 ms : 7 sur 129 (pire 12 622 ms) -> 2 sur 99 (pire 127 ms) |
-| quantum des fils noyau | (ce lot) | fil noyau preemptable seulement sur demande ciblee : `usb-hid` 732 ms sur un AP | 1 a 10 preemptions au quantum par demarrage ; aucun fil noyau ne tient un coeur > 64 ms (15 demarrages) |
+| quantum des fils noyau | `1df8a88b`, RETIRE par `000a99ef` | fil noyau coupe n'importe ou : contrats de non-preemption violes | panic `runtime > fenetre` (lecteur du registre commute) ; voir §3 |
+| preemption noyau sure | `000a99ef` | predicat aveugle au garde de lecture du registre et au shootdown TLB en vol | test hote exhaustif 256 cas ; garde 8 negatifs |
+| sonde de gel (obs.) | `25d978e2` | gel global sans coupable | gel = attente des lecteurs du registre, a la ms |
+| releves hors hard IRQ + ligne serie IRQ masquees | (ce lot) | cycle registre / jeton serie / tic, rompu seulement par la borne du jeton | SMP8 : gels >= 200 ms 4/9 (pire 24,2 s) -> 0/15 |
 
 Details : `docs/CYCLE_DE_VIE_TACHE.md`.
 
@@ -108,6 +111,15 @@ avec une fenetre plus courte.
 
 ### Quantum des fils noyau (BOUCHAUD_QUANTUM_NOYAU_V1)
 
+**RETIRE** (`000a99ef`, BOUCHAUD_PREEMPTION_NOYAU_SURE_V1). Couper un fil
+noyau a n'importe quel point IF=1 viole les contrats de non-preemption du
+noyau (garde de lecture du registre, emplacement TLB par coeur, compositeur).
+Mesure : panic `task: runtime > fenetre tid=104` dans `services-metrics`
+commute sous garde de lecture. La decision restante (demande ciblee seule)
+exige en plus : aucune lecture du registre, aucun shootdown en vol, IF
+masque (`kernel::preemption_noyau`, test hote exhaustif). Le texte ci-dessous
+decrit le lot retire.
+
 Un fil noyau n'etait preemptable que sur DEMANDE CIBLEE (reveil d'une tache
 sensible a la latence). Un fil noyau qui travaille sans dormir tenait donc
 son coeur : `usb-hid`, 732 ms sur un AP, `fork-exit` p99 1,26 s dans ce
@@ -131,15 +143,52 @@ L'episode d'origine (732 ms) est rare -- un demarrage sur une vingtaine --
 et 15 demarrages ne suffisent pas a le declarer disparu : la preuve est
 celle du mecanisme (il se declenche, sans regression), pas d'une frequence.
 
-### Ouvert : gel de toute la machine pendant ~2 s
+### Le gel global (BOUCHAUD_SONDE_GEL_V1, BOUCHAUD_RELEVES_HORS_IRQ_V1, BOUCHAUD_JETON_SERIE_CONTEXTE_V1)
 
-Dans 2 demarrages SMP4/8 sur 10, avant comme apres ce lot, TOUS les coeurs
-s'arretent ensemble 2 a 4,5 s : `PERF_FORK ... reste_us=2025745`,
-`HID_LATENCY_SPIKE delta_us=2024460`, attentes vives simultanees sur les
-quatre coeurs occupes a des choses differentes (write, fork, exit_group,
-fil noyau). Ni un releve IRQ (56 ms juste avant), ni une attente de verrou
-tournant (`[SMP-SPIN]` muet), ni un shootdown TLB (`tlb_relances=0`). A
-attribuer par une sonde dediee.
+Sonde par coeur (`sonde_gel.rs`) : trou entre deux tics d'un meme coeur,
+RIP/tache/site avant et apres, tics PIT livres ; sonde hote
+(`tools/ci/sonde-gel`) : fils de QEMU, schedstat, futex.
+
+Ce qu'elle a etabli (QEMU SMP8) :
+
+1. pendant un gel, 7 ou 8 coeurs sans tic au meme instant, la plupart
+   immobiles DANS leur gestionnaire de tic ; cote hote les 8 vCPU tournent
+   (R, CPU consomme, aucun futex commun) : ni pause QEMU, ni famine hote,
+   ni verrou global de l'emulateur ;
+2. duree du gel = attente des lecteurs du registre par l'ecrivain (`fork`),
+   a la milliseconde (227/233, 257/260, 24210/24212 ms) ;
+3. aucun garde de lecture ne traverse une commutation, aucun compte ne
+   deborde ; la destruction de l'incarnation recyclee coute 3-9 ms : ni
+   l'un ni l'autre n'est la cause ;
+4. tout gel >= 250 ms coincide avec une attente du jeton serie allee a sa
+   borne (100 000 tours, ~250 ms sous TCG) : 54 bornes -> 24,2 s.
+
+Le cycle : une tache tient un garde de lecture et imprime (attend le
+jeton) ; le detenteur du jeton, interruptions ouvertes, prend un tic dont le
+gestionnaire demande une NOUVELLE lecture -- refusee, un ecrivain attend ;
+l'ecrivain attend la premiere tache. Seule la borne du jeton le rompt.
+
+Correctifs : le hard IRQ ne forme plus de releve (capture, `diag-noyau`
+imprime) et une ligne serie s'emet interruptions masquees (son detenteur ne
+peut plus etre interrompu ni preempte).
+
+| QEMU SMP8, scheduler-ng-banc | instrumente seul | A (releves hors IRQ) | A+B (+ ligne IRQ masquees) |
+|---|---|---|---|
+| demarrages | 9 | 10 | 15 |
+| gels >= 200 ms | 4 (pire 24 212 ms) | 0 | 0 |
+| pire attente des lecteurs | 24 210 ms | 18 ms | 12 ms |
+| bornes du jeton serie | 56 | 0 | 1 (sans gel) |
+| echecs / perdus / ressuscites / panics | 0 | 0 (1 demarrage sans ligne FIN, a analyser) | 0 |
+
+A seul suffit sur 10 demarrages : il retire du hard IRQ les ecrivains
+serie (veille, releve) qui fermaient le cycle. B ferme le cycle par
+construction (detenteur du jeton non interruptible) et supprime la
+corruption des lignes (texte d'IRQ insere au milieu d'une ligne, mesure
+avant). Classe de preuve : QEMU.
+
+Ouvert : la borne du jeton atteinte une fois sous A+B sans gel ; le
+demarrage A sans `FIN` ; usb-hid 732 ms (quantum retire) ; preemption ciblee
+du compositeur (cas preexistant).
 
 ## 4. Invariants
 

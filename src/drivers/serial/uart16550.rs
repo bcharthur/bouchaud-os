@@ -10,7 +10,7 @@
 //!   formateur série.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
 #[path = "sonde.rs"]
@@ -331,102 +331,47 @@ impl fmt::Write for SerialPort {
 /// un garde-fou qui avait pourtant raison, et elle rendrait inexploitable un
 /// releve d'essai physique -- ce pour quoi la console serie existe.
 ///
-/// BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 -- le jeton porte le coeur qui le
-/// tient (`coeur + 1`, 0 = libre), et un ecrivain aux interruptions masquees
-/// passe devant.
+/// BOUCHAUD_JETON_SERIE_CONTEXTE_V1 -- une ligne s'emet interruptions
+/// masquees, jeton tenu par le CONTEXTE qui l'emet.
 ///
-/// Le releve d'ordonnancement de l'IRQ du minuteur (une vingtaine de lignes,
-/// interruptions masquees) disputait le jeton LIGNE PAR LIGNE :
+/// BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 marquait le jeton du numero de coeur
+/// et laissait passer sans attendre tout ecrivain du meme coeur. Faux deux
+/// fois :
 ///
-///   * aux taches qui ecrivaient sur les autres coeurs -- un CAS n'est pas
-///     equitable, l'IRQ perdait encore et encore et allait a la borne de
-///     100 000 tours a chaque ligne : coeur zero tenu 5 a 12,6 s
-///     (scheduler-ng-banc SMP4/SMP8, QEMU) ;
-///   * a la tache qu'il avait lui-meme coupee au milieu d'une ligne sur son
-///     coeur -- qui ne pouvait rendre le jeton qu'apres lui : 463 a 566 ms
-///     a SMP1.
+///   * un coeur n'est pas un contexte. Une tache qui tient le jeton peut etre
+///     preemptee (fil noyau sur demande ciblee) ; la tache
+///     suivante sur ce coeur passait, et la ligne de l'une se melait a celle
+///     de l'autre (`CHILD_AFTER_FORK t=164[...] CHILD_AFTER_FORK ...`) ;
+///   * meme pour une vraie reentrance d'IRQ, passer sans attendre insere le
+///     texte de l'interruption AU MILIEU de la ligne interrompue
+///     (`PROCESS_DEATH ... image=/bin[...][SMP-SNAPSHOT]...`).
 ///
-/// Desormais : un ecrivain qui trouve le jeton tenu par SON coeur ecrit tout
-/// de suite (c'est lui, ou une section qu'il a ouverte -- `tiens_emission`) ;
-/// un ecrivain aux interruptions masquees qui attend leve
-/// `EMISSION_PRIORITAIRE`, et les autres cessent de prendre le jeton jusqu'a
-/// ce qu'il l'ait eu : il attend au plus la ligne en cours.
+/// Et sa priorite (un booleen) etait rendue par le premier de deux ecrivains
+/// prioritaires pendant que le second attendait encore.
+///
+/// Desormais : interruptions masquees du debut de l'attente a la fin de la
+/// ligne. Le detenteur ne peut alors etre ni interrompu ni preempte : une
+/// ligne est atomique, et seul un AUTRE coeur peut attendre -- au plus le
+/// temps d'une ligne. Les gros releves ne s'impriment plus depuis le hard
+/// IRQ (BOUCHAUD_RELEVES_HORS_IRQ_V1), aucune priorite n'est donc utile. Le
+/// jeton garde son coeur (`cpu_index() + 1`) pour une seule chose :
+/// reconnaitre une reentrance impossible par construction (exception ou NMI
+/// pendant l'emission), la compter (`serie_reentrees`, attendu 0) et emettre
+/// quand meme plutot que de s'interbloquer. La panique garde son chemin
+/// synchrone distinct (`_print_raw`, sans jeton).
 static EMISSION: AtomicUsize = AtomicUsize::new(0);
-static EMISSION_PRIORITAIRE: AtomicBool = AtomicBool::new(false);
-static EMISSIONS_IMBRIQUEES: AtomicU64 = AtomicU64::new(0);
+static EMISSIONS_REENTREES: AtomicU64 = AtomicU64::new(0);
 static EMISSIONS_A_LA_BORNE: AtomicU64 = AtomicU64::new(0);
 
-/// Lignes emises alors que leur coeur tenait deja le jeton.
-pub fn emissions_imbriquees() -> u64 {
-    EMISSIONS_IMBRIQUEES.load(Ordering::Relaxed)
+/// Lignes emises alors que leur propre coeur tenait deja le jeton (reentrance
+/// par exception ou NMI). Attendu : 0.
+pub fn emissions_reentrees() -> u64 {
+    EMISSIONS_REENTREES.load(Ordering::Relaxed)
 }
 
 /// Attentes du jeton allees jusqu'a la borne (ligne emise sans lui).
 pub fn emissions_a_la_borne() -> u64 {
     EMISSIONS_A_LA_BORNE.load(Ordering::Relaxed)
-}
-
-enum Acquisition {
-    Pris,
-    DejaAuCoeur,
-    Borne,
-}
-
-/// Attente BORNEE du jeton.
-///
-/// Le port serie sert aussi aux paniques et aux gestionnaires d'interruption.
-/// Y attendre sans fin transformerait une console en interblocage, et une
-/// ligne entrelacee vaut infiniment mieux qu'une machine qui se tait.
-fn acquiert_emission() -> Acquisition {
-    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
-    let masquees = !x86_64::instructions::interrupts::are_enabled();
-    let mut tours = 0u32;
-    let issue = loop {
-        let cede = !masquees && EMISSION_PRIORITAIRE.load(Ordering::Relaxed);
-        let detenteur = if cede {
-            EMISSION.load(Ordering::Relaxed)
-        } else {
-            match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
-                Ok(_) => break Acquisition::Pris,
-                Err(detenteur) => detenteur,
-            }
-        };
-        if detenteur == moi {
-            break Acquisition::DejaAuCoeur;
-        }
-        if masquees {
-            EMISSION_PRIORITAIRE.store(true, Ordering::Relaxed);
-        }
-        tours += 1;
-        if tours > 100_000 {
-            EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
-            break Acquisition::Borne;
-        }
-        core::hint::spin_loop();
-    };
-    if masquees {
-        EMISSION_PRIORITAIRE.store(false, Ordering::Relaxed);
-    }
-    issue
-}
-
-/// Le jeton tenu pour plusieurs lignes : celles que ce coeur emet pendant
-/// que la garde vit sortent sans le redemander. Rendu a la fin de la garde,
-/// seulement s'il a ete pris par elle.
-pub struct JetonEmission {
-    rendre: bool,
-}
-
-impl Drop for JetonEmission {
-    fn drop(&mut self) {
-        if self.rendre {
-            EMISSION.store(0, Ordering::Release);
-        }
-    }
-}
-
-pub fn tiens_emission() -> JetonEmission {
-    JetonEmission { rendre: matches!(acquiert_emission(), Acquisition::Pris) }
 }
 
 pub fn _print(args: fmt::Arguments) {
@@ -435,21 +380,44 @@ pub fn _print(args: fmt::Arguments) {
         return;
     }
 
-    // Le formatage se fait HORS du jeton : il peut etre long, et rien ne
-    // l'oblige a etre serialise. Seule l'EMISSION doit l'etre.
+    // Le formatage se fait HORS du jeton, interruptions ouvertes : il peut
+    // etre long, et rien ne l'oblige a etre serialise.
     let mut sortie = TamponFormat::neuf();
     let _ = sortie.write_fmt(args);
 
-    match acquiert_emission() {
-        Acquisition::Pris => {
-            sortie.vide();
-            EMISSION.store(0, Ordering::Release);
+    let ouvertes = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
+    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    // Attente BORNEE : le port sert aussi aux paniques et aux interruptions ;
+    // une ligne entrelacee vaut mieux qu'une machine qui se tait.
+    let mut tours = 0u32;
+    let pris = loop {
+        match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => break true,
+            Err(detenteur) if detenteur == moi => {
+                EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);
+                break false;
+            }
+            Err(_) => {}
         }
-        Acquisition::DejaAuCoeur => {
-            EMISSIONS_IMBRIQUEES.fetch_add(1, Ordering::Relaxed);
-            sortie.vide();
+        // Interruptions masquees : servir soi-meme les shootdowns TLB qui
+        // attendent ce coeur, comme pendant l'emission.
+        if tours % 64 == 0 {
+            crate::arch::x86_64::smp::sert_shootdowns_en_attente();
         }
-        Acquisition::Borne => sortie.vide(),
+        tours += 1;
+        if tours > 100_000 {
+            EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
+            break false;
+        }
+        core::hint::spin_loop();
+    };
+    sortie.vide();
+    if pris {
+        EMISSION.store(0, Ordering::Release);
+    }
+    if ouvertes {
+        x86_64::instructions::interrupts::enable();
     }
 }
 

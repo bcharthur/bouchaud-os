@@ -424,30 +424,43 @@ impl core::fmt::Display for Absent {
 /// Seul le PIT du BSP ecrit ici, une fois par seconde : pas de course.
 static STALL_DERNIER_ACQUIRE_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Appelee par le PIT BSP AVANT tout try_enter(BKL). Si les logs normaux
-/// meurent parce qu'un AP garde le BKL, cette ligne continue donc a sortir.
+/// BOUCHAUD_RELEVES_HORS_IRQ_V1 -- la pire duree de la CAPTURE faite dans
+/// l'IRQ du minuteur (interruptions masquees), et celle du releve forme
+/// ensuite par `diag-noyau`.
 static RELEVE_IRQ_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static RELEVE_FIL_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static RELEVE_IRQ_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Publie, a la sortie du releve, sa duree interruptions masquees.
-struct DureeReleve {
-    debut_ns: u64,
-    complet: bool,
-}
-
-impl Drop for DureeReleve {
-    fn drop(&mut self) {
-        let duree = crate::kernel::timer::monotonic_ns().saturating_sub(self.debut_ns);
-        let pire = RELEVE_IRQ_PIRE_NS.fetch_max(duree, Ordering::Relaxed).max(duree);
-        crate::serial_println!(
-            "[SONDE-IRQ-DUREE] complet={} duree_ms={} pire_ms={} serie_imbriquees={} serie_bornes={}",
-            self.complet as u8,
-            duree / 1_000_000,
-            pire / 1_000_000,
-            crate::drivers::serial::emissions_imbriquees(),
-            crate::drivers::serial::emissions_a_la_borne(),
-        );
-    }
-}
+// BOUCHAUD_RELEVES_HORS_IRQ_V1
+//
+// LE HARD IRQ CAPTURE, UNE TACHE IMPRIME.
+//
+// Ce releve s'imprimait depuis l'IRQ du minuteur du coeur zero, interruptions
+// masquees : une vingtaine de lignes formatees et emises sur COM1. Mesure
+// apres BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 : 118-127 ms au pire, coeur zero
+// sourd a tout IPI pendant ce temps -- et une ligne de tache coupee en deux
+// par le releve insere au milieu.
+//
+// Desormais l'IRQ ne fait que DECIDER (demande explicite, periode du resume)
+// et CAPTURER l'instantane par coeur (vingt-quatre mots, aucune impression,
+// aucune allocation), puis pose une demande. Le fil `diag-noyau` la sert :
+// formatage, lignes `[SMP-SNAPSHOT]`, `[SCHED-DUMP]`, `[SMP-SPIN]`... depuis
+// une tache, interruptions ouvertes, preemptable.
+//
+// Un noyau bloque ne fait plus tourner ce fil. Pour ne pas perdre ce que la
+// sonde existait pour voir, une demande non servie depuis
+// `DIAG_SOUFFRANCE_NS` fait emettre par l'IRQ UNE ligne compacte
+// (`[DIAG-EN-SOUFFRANCE]`), au plus une fois par periode.
+const DIAG_SOUFFRANCE_NS: u64 = 5_000_000_000;
+const CAPTURE_MOTS: usize = 25;
+/// Sequence paire : capture stable ; impaire : ecriture en cours.
+static DIAG_CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+static DIAG_CAPTURE: [AtomicU64; CAPTURE_MOTS] = [const { AtomicU64::new(0) }; CAPTURE_MOTS];
+/// bit 63 : demande pendante ; bit 8 : releve complet ; octet bas : raison.
+static DIAG_DEMANDE: AtomicU64 = AtomicU64::new(0);
+static DIAG_DEMANDE_DEPUIS_NS: AtomicU64 = AtomicU64::new(0);
+static DIAG_SOUFFRANCE_DERNIERE_NS: AtomicU64 = AtomicU64::new(0);
+static DIAG_FIL_LANCE: AtomicBool = AtomicBool::new(false);
 
 pub fn stall_probe_from_timer() {
     let now = crate::kernel::timer::ticks();
@@ -549,42 +562,124 @@ pub fn stall_probe_from_timer() {
     if !complet && now % periode_resume != 0 {
         return;
     }
-    // BOUCHAUD_SONDE_IRQ_DUREE_V1 -- ce releve s'imprime depuis l'IRQ du
-    // minuteur du BSP, interruptions masquees : pendant ce temps le coeur 0
-    // n'acquitte aucun IPI (TLB shootdown : arret fail-closed a 2 s). Sa
-    // duree est donc mesuree et publiee, sans rien changer d'autre.
-    let debut_releve_ns = crate::kernel::timer::monotonic_ns();
-    // BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 : le jeton serie est pris UNE
-    // fois pour tout le releve (et sa ligne de duree, rendue avant lui), pas
-    // dispute a chaque ligne interruptions masquees.
-    let _jeton = crate::drivers::serial::tiens_emission();
-    let _duree = DureeReleve { debut_ns: debut_releve_ns, complet };
+    // Capture : vingt-quatre lectures atomiques, rien d'autre.
+    let debut_ns = crate::kernel::timer::monotonic_ns();
+    let mots: [u64; CAPTURE_MOTS] = [
+        now,
+        CURRENT[0].load(Ordering::Acquire) as u64,
+        CURRENT[1].load(Ordering::Acquire) as u64,
+        CURRENT[2].load(Ordering::Acquire) as u64,
+        CURRENT[3].load(Ordering::Acquire) as u64,
+        site0 as u64, aux0, site1 as u64, aux1, site2 as u64, aux2, site3 as u64, aux3,
+        nr0, ph0 as u64, age0,
+        nr1, ph1 as u64, age1,
+        nr2, ph2 as u64, age2,
+        nr3, ph3 as u64, age3,
+    ];
+    let seq = DIAG_CAPTURE_SEQ.fetch_add(1, Ordering::AcqRel);
+    for (i, m) in mots.iter().enumerate() {
+        DIAG_CAPTURE[i].store(*m, Ordering::Relaxed);
+    }
+    DIAG_CAPTURE_SEQ.store(seq.wrapping_add(2) & !1, Ordering::Release);
+    let raison = if complet { demande.max(RaisonDump::Manuelle as u8) } else { 0 };
+    let precedente = DIAG_DEMANDE.fetch_or(
+        (1u64 << 63) | ((complet as u64) << 8) | raison as u64,
+        Ordering::AcqRel,
+    );
+    if precedente & (1u64 << 63) == 0 {
+        DIAG_DEMANDE_DEPUIS_NS.store(debut_ns, Ordering::Release);
+    }
+    let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
+    RELEVE_IRQ_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
+    RELEVE_IRQ_DERNIERE_NS.store(duree, Ordering::Relaxed);
 
+    // Le fil ne sert plus : UNE ligne, depuis l'IRQ, au plus toutes les cinq
+    // secondes. C'est le seul texte que ce chemin forme encore.
+    let depuis = DIAG_DEMANDE_DEPUIS_NS.load(Ordering::Acquire);
+    if precedente & (1u64 << 63) != 0
+        && depuis != 0
+        && debut_ns.saturating_sub(depuis) >= DIAG_SOUFFRANCE_NS
+        && debut_ns.saturating_sub(DIAG_SOUFFRANCE_DERNIERE_NS.load(Ordering::Relaxed)) >= DIAG_SOUFFRANCE_NS
+    {
+        DIAG_SOUFFRANCE_DERNIERE_NS.store(debut_ns, Ordering::Relaxed);
+        let spin = |cpu: usize| crate::kernel::sync::attente_verrou(cpu)
+            .map(|a| (a.verrou as u64, now.wrapping_sub(a.depuis)))
+            .unwrap_or((0, 0));
+        crate::serial_println!(
+            "[DIAG-EN-SOUFFRANCE] t={} demande_ms={} fil={} cur=[{},{},{},{}] site=[{} {} {} {}] \
+spin=[{:#x}/{} {:#x}/{} {:#x}/{} {:#x}/{}]",
+            now,
+            debut_ns.saturating_sub(depuis) / 1_000_000,
+            DIAG_FIL_LANCE.load(Ordering::Relaxed) as u8,
+            mots[1] as i64, mots[2] as i64, mots[3] as i64, mots[4] as i64,
+            site0, site1, site2, site3,
+            spin(0).0, spin(0).1, spin(1).0, spin(1).1, spin(2).0, spin(2).1, spin(3).0, spin(3).1,
+        );
+    }
+}
+
+/// Lance `diag-noyau`. Idempotent.
+pub fn demarre_fil_diagnostic() -> bool {
+    if DIAG_FIL_LANCE.swap(true, Ordering::AcqRel) {
+        return true;
+    }
+    if spawn_noyau_priorite(fil_diagnostic, "diag-noyau", Priorite::Normale) {
+        return true;
+    }
+    DIAG_FIL_LANCE.store(false, Ordering::Release);
+    false
+}
+
+fn fil_diagnostic() -> ! {
+    loop {
+        sleep_ticks_noyau(20);
+        sert_diagnostic();
+    }
+}
+
+/// Sert ce que les interruptions ont capture : rapports de la veille
+/// d'attente vive, releve demande par la sonde. Depuis une tache.
+pub fn sert_diagnostic() {
+    publie_rapports_veille();
+    let demande = DIAG_DEMANDE.swap(0, Ordering::AcqRel);
+    if demande & (1u64 << 63) == 0 {
+        return;
+    }
+    DIAG_DEMANDE_DEPUIS_NS.store(0, Ordering::Release);
+    let complet = demande & (1u64 << 8) != 0;
+    let raison = (demande & 0xff) as u8;
+    let mots: [u64; CAPTURE_MOTS] = loop {
+        let avant = DIAG_CAPTURE_SEQ.load(Ordering::Acquire);
+        if avant & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let m = core::array::from_fn(|i| DIAG_CAPTURE[i].load(Ordering::Relaxed));
+        if DIAG_CAPTURE_SEQ.load(Ordering::Acquire) == avant {
+            break m;
+        }
+    };
+    let debut_ns = crate::kernel::timer::monotonic_ns();
+    let now = mots[0];
+    let syscall = |b: usize| EtatSyscall { nr: mots[b], phase: mots[b + 1] as u32, age_ticks: mots[b + 2] };
     crate::serial_println!(
         "[SMP-SNAPSHOT] t={} cur=[{},{},{},{}] site=[{}:{:#x} {}:{:#x} {}:{:#x} {}:{:#x}] syscall=[{} {} {} {}]",
         now,
-        CURRENT[0].load(Ordering::Acquire),
-        CURRENT[1].load(Ordering::Acquire),
-        CURRENT[2].load(Ordering::Acquire),
-        CURRENT[3].load(Ordering::Acquire),
-        site0, aux0, site1, aux1, site2, aux2, site3, aux3,
-        EtatSyscall { nr: nr0, phase: ph0, age_ticks: age0 },
-        EtatSyscall { nr: nr1, phase: ph1, age_ticks: age1 },
-        EtatSyscall { nr: nr2, phase: ph2, age_ticks: age2 },
-        EtatSyscall { nr: nr3, phase: ph3, age_ticks: age3 },
+        mots[1] as usize, mots[2] as usize, mots[3] as usize, mots[4] as usize,
+        mots[5], mots[6], mots[7], mots[8], mots[9], mots[10], mots[11], mots[12],
+        syscall(13), syscall(16), syscall(19), syscall(22),
     );
 
     signale_taches_orphelines();
     if complet {
         crate::serial_println!(
             "[SCHED-DUMP] raison={} -- etat complet ci-dessous",
-            nom_raison(demande, bloque),
+            nom_raison(raison, false),
         );
         signale_etat_ordonnancement();
     } else {
         resume_ordonnancement();
     }
-
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
@@ -633,8 +728,23 @@ pub fn stall_probe_from_timer() {
         STALL_PF_BEGIN[2].load(Ordering::Acquire), STALL_PF_DONE[2].load(Ordering::Acquire), STALL_PF_FAIL[2].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[2].load(Ordering::Acquire), STALL_PF_FILE_DONE[2].load(Ordering::Acquire),
         STALL_PF_BEGIN[3].load(Ordering::Acquire), STALL_PF_DONE[3].load(Ordering::Acquire), STALL_PF_FAIL[3].load(Ordering::Acquire), STALL_PF_FILE_BEGIN[3].load(Ordering::Acquire), STALL_PF_FILE_DONE[3].load(Ordering::Acquire),
     );
-}
 
+    let releve = crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns);
+    let pire_fil = RELEVE_FIL_PIRE_NS.fetch_max(releve, Ordering::Relaxed).max(releve);
+    // `duree_ms`/`pire_ms` : ce qui reste interruptions masquees (la capture).
+    // `releve_ms` : le formatage et l'emission, dans ce fil.
+    crate::serial_println!(
+        "[SONDE-IRQ-DUREE] complet={} duree_ms={} pire_ms={} capture_us={} releve_ms={} releve_pire_ms={} serie_reentrees={} serie_bornes={}",
+        complet as u8,
+        RELEVE_IRQ_DERNIERE_NS.load(Ordering::Relaxed) / 1_000_000,
+        RELEVE_IRQ_PIRE_NS.load(Ordering::Relaxed) / 1_000_000,
+        RELEVE_IRQ_DERNIERE_NS.load(Ordering::Relaxed) / 1_000,
+        releve / 1_000_000,
+        pire_fil / 1_000_000,
+        crate::drivers::serial::emissions_reentrees(),
+        crate::drivers::serial::emissions_a_la_borne(),
+    );
+}
 
 // BOUCHAUD_C1_TACHE_ORPHELINE_V1
 //

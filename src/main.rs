@@ -326,6 +326,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // chemin de l'entree.
     // BOUCHAUD_V13_SERVICES_SAMPLER_DEDIE : l'observabilite processus est un
     // service generique, pas un effet de bord du thread USB/blackbox.
+    // BOUCHAUD_RELEVES_HORS_IRQ_V1 : le fil qui imprime ce que les
+    // interruptions capturent (sonde d'ordonnancement, veille d'attente).
+    kernel::task::demarre_fil_diagnostic();
     gui::services::demarre_fil_mesures_processus();
     drivers::xhci_active::demarre_le_fil_blackbox();
 
