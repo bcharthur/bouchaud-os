@@ -411,6 +411,14 @@ fn complete_switch_handoff() {
         task.runq_cpu.range(cpu as u8);
         task.on_cpu.range(-1);
         task.switching_out.range(false);
+        // BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1 : la lecture de l'etat ne
+        // doit pas passer devant les deux ecritures ci-dessus. Sans cette
+        // barriere, x86-TSO la sert pendant que `on_cpu` / `switching_out`
+        // sont encore dans le tampon d'ecriture du coeur : la passation lit
+        // `Blocked`, un reveilleur concurrent lit `switching_out == true`, et
+        // personne ne publie la tache (`[SCHED-ORPHELINE]`, scheduler-ng-banc
+        // SMP4). Pendant de la barriere de `publish_ready`.
+        core::sync::atomic::fence(Ordering::SeqCst);
         task.state == TaskState::Ready
     };
 

@@ -305,6 +305,13 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
 ///   3. LA DEMANDE CIBLEE. Elle seule ouvre la preemption d'un fil noyau, et
 ///      seulement pour une tache sensible restee sous son budget.
 fn publish_ready(index: usize) {
+    // BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1 : le reveilleur vient d'ecrire
+    // l'etat (`Blocked -> Ready`) ; sa lecture de `on_cpu` / `switching_out`
+    // ne doit pas passer devant. Pendant de la barriere de
+    // `complete_switch_handoff` : des deux cotes une ecriture, une barriere,
+    // une lecture -- au moins l'un voit l'autre, et la tache est publiee
+    // (au pire deux fois : la file deduplique). `tools/smp/test_passation_reveil.rs`.
+    core::sync::atomic::fence(Ordering::SeqCst);
     if index >= tasks().len() || tasks()[index].state != TaskState::Ready
         || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
     { return; }

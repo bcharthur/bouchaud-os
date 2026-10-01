@@ -171,3 +171,26 @@ traitee par le lot suivant (BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1).
   dependance qu'avant ce lot.
 * Les fins de fichier non livrees apres la mort d'un ecrivain (5 `perdus`
   dans la ligne de base) relevent de la fermeture des descripteurs : phase 9.
+
+## 6. Passation et reveil (BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1)
+
+Le demarrage SMP4 fige du §4 : une tache `Ready`, hors de tout coeur, dans
+aucune file. Une tache bloquee reveillee PENDANT sa commutation de sortie est
+publiee soit par la passation (`complete_switch_handoff` : ecrit `on_cpu = -1`,
+`switching_out = false`, puis lit l'etat), soit par le reveilleur
+(`publish_ready` : apres le CAS `Blocked -> Ready`, lit `on_cpu` /
+`switching_out`). Motif « store buffer » : en x86-TSO, la lecture de chaque
+cote peut passer devant sa propre ecriture ; la passation lit `Blocked`, le
+reveilleur lit `switching_out == true`, et personne ne publie. Une barriere
+`SeqCst` de chaque cote, entre l'ecriture et la lecture, l'interdit (au pire
+la tache est publiee deux fois ; la file deduplique).
+
+* hote `tools/smp/test_passation_reveil.rs` : modele x86-TSO exhaustif
+  (tampons d'ecriture, vidage non deterministe, instructions verrouillees) —
+  l'ancien protocole a une execution qui perd la tache, le nouveau aucune ;
+  sur de vrais fils de l'hote, 31 pertes sur 200 000 pour l'ancien, 0 pour
+  le nouveau ;
+* QEMU `scheduler-ng-banc`, 4 x SMP1/2/4/8 : 16/16 complets, zero rapport
+  `[SCHED-ORPHELINE]` (ligne de base : 2 rapports sur 15 demarrages ;
+  phase 1 seule : 1 demarrage fige sur 12) ;
+* garde `tools/verifie-passation-reveil.py` (3 negatifs).
