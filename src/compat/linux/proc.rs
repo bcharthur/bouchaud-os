@@ -505,14 +505,40 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             return 0;
         }
 
-        // Blocage jusqu'a ce qu'un fils se termine : c'est `exit_current` qui
-        // remettra cette tache en etat pret.
+        // BOUCHAUD_WAIT4_PUBLIE_PUIS_RELIT_V1
+        //
+        // L'ordre etait : chercher les zombies (au-dessus), PUIS se declarer en
+        // attente. Un fils qui mourait entre les deux trouvait
+        // `waiting_for_child` a faux, ne reveillait personne, et le parent
+        // dormait pour toujours sur un zombie (MESURE_DEMARRAGE_A_FROID §15).
+        // Tant que `wait4` et `exit` passaient tous deux par le gros verrou,
+        // la fenetre etait fermee par serialisation ; le lot B8 l'a rouverte,
+        // et `wait4-course-probe` l'a attrapee (B11 : un parent fige,
+        // `zombies=4`, coeurs au repos).
+        //
+        // Meme motif croise que la WaitQueue : on PUBLIE l'attente, barriere,
+        // puis on RELIT les zombies. Le fils, lui, pose `zombie` sous
+        // `lifecycle` puis fait un CAS sur `waiting_for_child` (barriere
+        // pleine). Au moins l'un des deux voit l'autre : ou bien le fils
+        // trouve l'attente et nous remet pret, ou bien nous trouvons son
+        // zombie et annulons le parking.
         {
             let task = task::current();
             task.waiting_for_child.range(true);
             task.state.range(task::TaskState::Blocked);
         }
-        // schedule() effectue deja HLT avec le BKL suspendu si necessaire.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        let deja_la = task::zombie_children(parent_pid)
+            .iter()
+            .any(|(child, _)| pid <= 0 || *child == pid as u32);
+        if deja_la || !task::has_children(parent_pid) {
+            // Annule le parking. Si le fils a gagne le CAS entre-temps, il
+            // nous remet pret lui-meme ; dans les deux cas on reboucle.
+            let task = task::current();
+            let _ = task.waiting_for_child.compare_exchange(true, false);
+            task.state.range(task::TaskState::Ready);
+            continue;
+        }
         let _ = task::schedule();
         let task = task::current();
         task.waiting_for_child.range(false);

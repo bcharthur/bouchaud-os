@@ -41,8 +41,8 @@ lui fait confiance.
 | Gros verrou noyau (smp_lock) | **supprime** |
 | Sites d'acquisition du gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **5** |
-| Garde-fous d'architecture | **115** |
-| Suites de test hote | **99** |
+| Garde-fous d'architecture | **116** |
+| Suites de test hote | **100** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
