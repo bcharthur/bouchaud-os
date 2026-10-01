@@ -931,7 +931,7 @@ connexions avant, 0 sur 900 apres).
 Rappel §17.1 : ce gain est propre a QEMU/ATA ; la TRIGKEY lit ses binaires
 dans le ramdisk.
 
-### 18.9 Retrait du gros verrou : etat apres les lots B8, B9 et B10
+### 18.9 Retrait du gros verrou : lots B8 a B11 -- le verrou est supprime
 
     appels systeme hors gros verrou   81 -> 159 sur 159 (lots B1 a B9)
     endurance, [BKL-STATS] fin de cycle (acquisitions / tenue) :
@@ -966,10 +966,28 @@ laissait ouverte), les exceptions fatales. Apres B10, `smp_lock::enter` et
 verrou : `run_noyau` le suspendait avant la commutation, et les portees
 `desktop_bkl` etaient mortes (`SKIP_NO_BKL`).
 
-Reste : supprimer `smp_lock` lui-meme -- ses points d'accroche dans
-l'ordonnanceur, les attentes et les releves (`[BKL-*]`), les portees de
-domaine qui n'existaient que pour attribuer ses prises -- et poser une garde
-qui interdise son retour.
+**B11 : suppression.** `smp_lock` (module, comptabilite, discipline), les
+portees de domaine qui n'attribuaient plus que ses prises, les portees
+`desktop_bkl`, la table `SANS_BKL` (ses 159 audits sont dans
+`docs/AUDIT_VERROUILLAGE_SYSCALLS.md`) et les releves `[BKL-*]` sont retires :
+-9 660 / +1 296 lignes. `tools/verifie-bkl-supprime.py` interdit le retour du
+module et de ses primitives ; le budget `sites_acquisition_gros_verrou` vaut 0.
+Endurance SMP1/4/4/8 : memoire, stockage, processus (+ execve) OK partout,
+ordonnanceur 3/4, aucune ligne `[BKL-*]`. Le releve
+`[FAULT]` donne desormais l'appel du CPU fautif (il donnait celui du detenteur
+du verrou).
+
+**Course `wait4` (§15), fermee.** Le parent cherchait les zombies PUIS
+publiait `waiting_for_child` : un fils mort entre les deux ne reveillait
+personne. Le gros verrou serialisait `wait4` et `exit` ; B8 a rouvert la
+fenetre, et `wait4-course-probe` l'a attrapee sur l'image B11 (parent
+`Blocked`, `cle_attente=0`, `echeance=0`, `zombies=4`, coeurs au repos ; 1
+blocage en ~50 passes depuis B8). Correctif BOUCHAUD_WAIT4_PUBLIE_PUIS_RELIT_V1 :
+publier, barriere SeqCst, relire, annuler le parking si un zombie est deja la
+(le fils fait un CAS, l'autre moitie du motif croise). Preuve hote
+`tools/smp/test_wait4_course.rs` : ancien ordre, 150 reveils perdus sur 200
+(fenetre elargie) ; nouvel ordre, 0 sur 3 x 400 avec la pause a chaque point.
+Garde `tools/verifie-wait4-course.py`.
 
 **Sonde d'ordonnanceur.** Mesuree isolement (5 passes par demarrage, 2
 demarrages par image, sonde a 60 reveils) : image d'avant le chantier 5/10
@@ -984,5 +1002,9 @@ au chantier : une tache interactive utilisateur est reveillee par demande
 differee sur son coeur precedent, sans IPI ; la priorite n'agit qu'a
 l'election. Ouvert.
 
-La course `wait4` du §15 et les caches `static mut` du chemin de rendu noyau
-(RES_CACHE, SUBRES_*) restent ouverts.
+Restent ouverts : la queue de latence interactive (sonde d'ordonnanceur
+ci-dessus ; `ready_latency_interactive_max_ms` depasse 100 ms sur une partie
+des runs, avant comme apres le chantier) ; les `static mut` de configuration
+reseau (`OUR_IP`, `GW_IP`, `DNS_IP`, `MASQUE`, `NOM_RESEAU`, ecrits par DHCP
+et lus sans verrou -- course anterieure au chantier, le fil DHCP n'a jamais pris
+le gros verrou) et les caches du chemin de rendu noyau (RES_CACHE, SUBRES_*).
