@@ -119,6 +119,7 @@ pub fn preempt_from_irq() {
     // entrante la rend dans `complete_switch_handoff`, avant toute execution
     // normale de la tache.
     stall_site_clear();
+    note_commutation_registre(unsafe { (*from_ptr).tid });
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
 
     // Quand cette pile IRQ reprend plus tard, la passation qui vient de la

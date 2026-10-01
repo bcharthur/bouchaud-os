@@ -24,6 +24,12 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         stack.instruction_pointer.as_u64(),
         interrupted_user,
     );
+    // BOUCHAUD_SONDE_GEL_V1 : rangement en RAM, aucune impression.
+    crate::kernel::task::sonde_gel_tic(
+        stack.instruction_pointer.as_u64(),
+        interrupted_user,
+        crate::kernel::task::GEL_SOURCE_QUANTUM,
+    );
     smp::eoi_local();
     if smp::local_scheduler_timer_enabled() {
         smp::arm_local_scheduler_timer();

@@ -101,3 +101,5 @@ include!("thread/futex.rs");
 include!("thread/diagnostic.rs");
 // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1
 include!("thread/veille_attente.rs");
+// BOUCHAUD_SONDE_GEL_V1
+include!("thread/sonde_gel.rs");

@@ -189,6 +189,32 @@ static ECRIVAIN: AtomicBool = AtomicBool::new(false);
 static PROFONDEUR_LECTURE: [AtomicUsize; MAX_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_CPUS];
 
+static ATTENTE_LECTEURS_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static LECTEURS_MAX_VU: AtomicUsize = AtomicUsize::new(0);
+static GARDES_COMMUTES: AtomicU64 = AtomicU64::new(0);
+static GARDES_COMMUTES_TID: AtomicU64 = AtomicU64::new(0);
+
+/// BOUCHAUD_SONDE_GEL_V1 : a appeler juste avant le changement physique de
+/// pile. Un garde de lecture tenu a cet instant TRAVERSE la commutation --
+/// ce que le contrat du registre exclut. Compte, et dernier fil sortant.
+pub fn note_commutation_registre(tid_sortant: u32) {
+    if profondeur_lecture_locale() != 0 {
+        GARDES_COMMUTES.fetch_add(1, Ordering::Relaxed);
+        GARDES_COMMUTES_TID.store(tid_sortant as u64, Ordering::Relaxed);
+    }
+}
+
+/// gardes commutes, dernier tid, pire attente des lecteurs (ns), plus grand
+/// compte de lecteurs vu par un ecrivain.
+pub fn compteurs_gardes_registre() -> (u64, u64, u64, usize) {
+    (
+        GARDES_COMMUTES.load(Ordering::Relaxed),
+        GARDES_COMMUTES_TID.load(Ordering::Relaxed),
+        ATTENTE_LECTEURS_PIRE_NS.load(Ordering::Relaxed),
+        LECTEURS_MAX_VU.load(Ordering::Relaxed),
+    )
+}
+
 /// Profondeur de lecture tenue par le coeur courant.
 #[inline]
 fn profondeur_lecture_locale() -> usize {
@@ -300,9 +326,24 @@ impl RegistreEcriture {
         {
             core::hint::spin_loop();
         }
-        while LECTEURS.load(Ordering::Acquire) != 0 {
+        // BOUCHAUD_SONDE_GEL_V1 : combien de temps l'ecrivain attend les
+        // lecteurs, et la plus grande valeur du compte vue pendant l'attente
+        // (un compte qui a deborde par le bas se voit ici).
+        let debut = crate::kernel::timer::monotonic_ns();
+        let mut vu = 0usize;
+        loop {
+            let n = LECTEURS.load(Ordering::Acquire);
+            if n == 0 {
+                break;
+            }
+            vu = vu.max(n);
             core::hint::spin_loop();
         }
+        ATTENTE_LECTEURS_PIRE_NS.fetch_max(
+            crate::kernel::timer::monotonic_ns().saturating_sub(debut),
+            Ordering::Relaxed,
+        );
+        LECTEURS_MAX_VU.fetch_max(vu, Ordering::Relaxed);
         Self { restaure_irq }
     }
 }
@@ -520,6 +561,74 @@ pub fn registre_ajoute(
     tache: alloc::boxed::Box<Task>,
     recyclable: impl Fn(&Task) -> bool,
 ) -> Option<TacheId> {
+    // BOUCHAUD_SONDE_GEL_V1 : la duree de la section d'ecriture, interruptions
+    // masquees et lecteurs de tous les coeurs en attente. Mesuree HORS de la
+    // section, publiee par `smpstat`.
+    let debut = crate::kernel::timer::monotonic_ns();
+    let (rendu, remplacee) = registre_ajoute_sous_ecriture(tache, recyclable);
+    let fin = crate::kernel::timer::monotonic_ns();
+    note_section_ecriture(fin.saturating_sub(debut));
+    // BOUCHAUD_DESTRUCTION_HORS_REGISTRE_V1 -- L'ANCIENNE INCARNATION MEURT
+    // HORS DU RENDEZ-VOUS.
+    //
+    // `*ancienne = *tache` la detruisait SUR PLACE, sous `STRUCTURE` et sous
+    // le rendez-vous d'ecriture, interruptions masquees. Detruire une tache,
+    // c'est lacher son `Arc<Process>` -- et quand c'est le dernier, liberer
+    // tout l'espace d'adressage du processus, tables de pages et cadres
+    // compris. Pendant ce temps, le gestionnaire de tic de CHAQUE autre coeur
+    // attendait une lecture du registre (veille d'attente vive, sonde) :
+    // scheduler-ng-banc SMP8, sept coeurs sans tic 262-280 ms au meme
+    // instant, six d'entre eux immobiles dans leur gestionnaire, le coeur
+    // zero dans `fork` reprenant au relachement de `STRUCTURE`.
+    //
+    // L'emplacement est deja reecrit et sa generation avancee : personne ne
+    // peut plus atteindre l'ancienne incarnation. La detruire ici, verrous
+    // rendus et interruptions restaurees, ne change que QUI attend : plus
+    // personne.
+    if let Some(vieille) = remplacee {
+        drop(vieille);
+        note_destruction(crate::kernel::timer::monotonic_ns().saturating_sub(fin));
+    }
+    rendu
+}
+
+static DESTRUCTION_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+fn note_destruction(duree: u64) {
+    DESTRUCTION_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
+}
+
+/// Pire destruction d'une incarnation recyclee, hors rendez-vous (ns).
+pub fn destruction_recyclee_pire_ns() -> u64 {
+    DESTRUCTION_PIRE_NS.load(Ordering::Relaxed)
+}
+
+static ECRITURE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static ECRITURES_LONGUES: AtomicU64 = AtomicU64::new(0);
+static ECRITURES: AtomicU64 = AtomicU64::new(0);
+const ECRITURE_LONGUE_NS: u64 = 20_000_000;
+
+fn note_section_ecriture(duree: u64) {
+    ECRITURES.fetch_add(1, Ordering::Relaxed);
+    ECRITURE_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
+    if duree >= ECRITURE_LONGUE_NS {
+        ECRITURES_LONGUES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// sections d'ecriture, dont plus longues que 20 ms, pire (ns).
+pub fn compteurs_ecriture_registre() -> (u64, u64, u64) {
+    (
+        ECRITURES.load(Ordering::Relaxed),
+        ECRITURES_LONGUES.load(Ordering::Relaxed),
+        ECRITURE_PIRE_NS.load(Ordering::Relaxed),
+    )
+}
+
+fn registre_ajoute_sous_ecriture(
+    tache: alloc::boxed::Box<Task>,
+    recyclable: impl Fn(&Task) -> bool,
+) -> (Option<TacheId>, Option<Task>) {
     let _structure = STRUCTURE.lock();
     let _ecriture = RegistreEcriture::acquire();
     let longueur = LONGUEUR.load(Ordering::Acquire);
@@ -559,12 +668,12 @@ pub fn registre_ajoute(
         let generation = prochaine_generation(emplacement);
         // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
         forensic_reset_slot(emplacement);
-        *ancienne = *tache;
-        return Some(TacheId { emplacement: emplacement as u32, generation });
+        let vieille = core::mem::replace(ancienne, *tache);
+        return (Some(TacheId { emplacement: emplacement as u32, generation }), Some(vieille));
     }
 
     if longueur >= MAX_TACHES {
-        return None;
+        return (None, None);
     }
     let generation = prochaine_generation(longueur);
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
@@ -575,7 +684,7 @@ pub fn registre_ajoute(
     // La longueur monte APRES le pointeur : un lecteur qui voit l'indice voit
     // donc forcement un emplacement deja rempli.
     LONGUEUR.store(longueur + 1, Ordering::Release);
-    Some(TacheId { emplacement: longueur as u32, generation })
+    (Some(TacheId { emplacement: longueur as u32, generation }), None)
 }
 
 /// Numero d'incarnation suivant pour cet emplacement.

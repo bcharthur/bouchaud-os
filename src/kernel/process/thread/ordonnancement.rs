@@ -392,6 +392,7 @@ fn switch_to(from: usize, to: usize) {
         (from_ptr, to_ptr)
     };
 
+    note_commutation_registre(unsafe { (*from_ptr).tid });
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
     complete_switch_handoff();
 }

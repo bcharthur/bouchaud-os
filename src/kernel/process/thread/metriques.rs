@@ -66,6 +66,8 @@ rej_inel={} rej_crs={} mig={}",
     crate::kernel::scheduler::latency::log_stats();
     // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : taches vues prete depuis plus de
     // 200 ms PENDANT leur attente.
+    // BOUCHAUD_SONDE_GEL_V1 : les coeurs restes sans tic, publies ici.
+    publie_sonde_gel();
     let (episodes, pire, rapports) = compteurs_veille();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[SCHED-NG-VEILLE] episodes={} pire_ms={} rapports={}",

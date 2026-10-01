@@ -69,6 +69,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
         stack.instruction_pointer.as_u64(),
         interrupted_user,
     );
+    // BOUCHAUD_SONDE_GEL_V1 : rangement en RAM, aucune impression.
+    crate::kernel::task::sonde_gel_tic(
+        stack.instruction_pointer.as_u64(),
+        interrupted_user,
+        crate::kernel::task::GEL_SOURCE_PIT,
+    );
 
     let ticks = timer::ticks();
     let quantum = ticks % smp::SCHED_QUANTUM_TICKS == 0;
