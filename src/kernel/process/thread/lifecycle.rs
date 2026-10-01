@@ -15,6 +15,9 @@ pub fn exit_current(code: i32) -> ! {
     // rallonge pas davantage une section critique qu'elle observe.
     let mut dernier_thread = false;
     let mut pid_sortant = 0u32;
+    // BOUCHAUD_RELEVES_GLOBAUX_ESPACES_V1 : les releves `scope=global` (au
+    // plus un par seconde), decides une fois pour toute cette sortie.
+    let releve_global = releve_global_du();
     {
         let task = current();
         marque_zombie(task);
@@ -91,7 +94,7 @@ threads_before={} threads_after=0 reason=dernier_thread",
             // Publier les deux, c'est pouvoir dire laquelle des deux on lit.
             let vue = crate::kernel::task::proc_cpu_cumul();
             let (replie_user, replie_noyau) = crate::kernel::task::proc_cpu_compteurs();
-            crate::kernel::dmesg::log_fmt(format_args!(
+            if releve_global { crate::kernel::dmesg::log_fmt(format_args!(
                 "CPU_CUMUL scope=global t={} apres_pid={} \
 replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
                 crate::kernel::timer::monotonic_ms(),
@@ -100,7 +103,7 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
                 replie_noyau / 1_000_000,
                 vue.user_ns / 1_000_000,
                 vue.system_ns / 1_000_000,
-            ));
+            )); }
             // Dernier thread : le processus devient zombie jusqu'a ce que son
             // parent le recolte par `wait4`. C'est ce qui permet au parent de
             // recuperer le code de sortie apres coup.
@@ -141,6 +144,8 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
         let nom = process.metadata.lock().name.clone();
         crate::kernel::services::gardien::mort(
             process.pid, process.parent, &nom, code, false);
+    }
+    if dernier_thread && releve_global {
         let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
             crate::kernel::clean_page_cache::balayage_stats();
         crate::kernel::dmesg::log_fmt(format_args!(
@@ -265,7 +270,7 @@ residual_pct={} worst_us={} lost_samples={}",
     // La vue SYSTEME, explicitement etiquetee comme telle. Elle repond a
     // « combien la machine entiere a lu », jamais a « combien ce service a
     // lu » -- et le suffixe l'empeche d'etre confondue avec la ligne au-dessus.
-    {
+    if releve_global {
         let (dr, db, dn, dw) = crate::fs::backing::disk_read_timing();
         let (mr, mb, mn, mw) = crate::fs::backing::memory_read_timing();
         let t = crate::kernel::clean_page_cache::acquire_timing();
@@ -951,6 +956,43 @@ pub fn code_de_sortie(pid: u32) -> Option<i32> {
         }
     })
 }
+// BOUCHAUD_RELEVES_GLOBAUX_ESPACES_V1
+//
+// CE QUE COUTAIT UNE SORTIE
+//
+// Chaque fin de fil emettait sept a dix lignes : `CPU_CUMUL`,
+// `CACHE_BALAYAGE`, `CACHE_BALAYAGE_TEMOINS`, `FAULT_REPRISE`,
+// `BACKING_DISK_GLOBAL`, `BACKING_MEMORY_GLOBAL`, `CLEAN_PAGE_CACHE_GLOBAL`,
+// `BACKING_DISK_DECOMP`, `ATA_CONTROLEUR` -- des compteurs CUMULES de toute la
+// machine, identiques d'une sortie a la suivante a quelques unites pres, et
+// `CPU_CUMUL` sous le verrou `lifecycle`. La tache qui meurt est deja `Zombie` :
+// elle n'est plus preemptable (BOUCHAUD_SORTIE_NON_PREEMPTEE_V1), et elle
+// tient son coeur pendant toute l'ecriture.
+//
+// La veille d'attente vive (BOUCHAUD_VEILLE_ATTENTE_VIVE_V1) l'a mesure :
+// scheduler-ng-banc SMP4, 59 episodes de taches pretes attendant 50 a 631 ms,
+// TOUS sur un coeur occupe par une tache dans `exit_group` (appel 231), le
+// RIP dans `uart16550::write_lot` et la boucle du jeton d'emission serie.
+//
+// Ces releves partent desormais au plus une fois par seconde (la premiere
+// sortie en emet toujours) : cumules, ils ne perdent que leur granularite.
+// Les faits PROPRES au processus -- `PROCESS_EXIT`, `FAULT_FILE_BREAKDOWN` --
+// sortent a chaque fois.
+const RELEVE_GLOBAL_PERIODE_MS: u64 = 1_000;
+static RELEVE_GLOBAL_DERNIER_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Cette sortie emet-elle les releves globaux ? Un seul gagnant par periode.
+fn releve_global_du() -> bool {
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let dernier = RELEVE_GLOBAL_DERNIER_MS.load(Ordering::Relaxed);
+    if dernier != u64::MAX && maintenant.saturating_sub(dernier) < RELEVE_GLOBAL_PERIODE_MS {
+        return false;
+    }
+    RELEVE_GLOBAL_DERNIER_MS
+        .compare_exchange(dernier, maintenant, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+}
+
 /// Ferme tous les descripteurs d'un processus mort.
 ///
 /// La table est videe sous son verrou, et les descripteurs sont fermes APRES :
