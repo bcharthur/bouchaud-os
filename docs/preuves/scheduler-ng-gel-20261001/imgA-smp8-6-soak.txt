@@ -1,0 +1,4 @@
+cycle 1: ECHEC log=214931 octets timeout=True rc=None
+  marqueur absent: SNG v=1 sec=FIN
+  journal complet : /tmp/claude-0/-home-user-bouchaud-os/2ee20b70-3eb2-5e27-85c8-1e5956bc273b/scratchpad/sngb/imgA/smp8-6/cycle-0001/smp8.log
+soak : 0/1 cycle(s) de 250s en 250.085s

@@ -1,0 +1,4 @@
+498:[01:04:50][ 97%:  0%:  2%][FPS: --] [SONDE-IRQ-DUREE] complet=1 duree_ms=0 pire_ms=0 capture_us=86 releve_ms=53 releve_pire_ms=53 serie_reentrees=0 serie_bornes=1
+724:[01:04:59][ 49%:  0%:  2%][FPS: --] [SONDE-IRQ-DUREE] complet=1 duree_ms=0 pire_ms=0 capture_us=3 releve_ms=34 releve_pire_ms=53 serie_reentrees=0 serie_bornes=1
+1085:[01:05:05][ 97%:  1%:  2%][FPS: --] [SONDE-IRQ-DUREE] complet=1 duree_ms=0 pire_ms=0 capture_us=3 releve_ms=68 releve_pire_ms=68 serie_reentrees=0 serie_bornes=1
+287:[01:04:44][ 90%:  0%:  2%][FPS: --] [SONDE-IRQ-DUREE] complet=1 duree_ms=0 pire_ms=0 capture_us=189 releve_ms=36 releve_pire_ms=36 serie_reentrees=0 serie_bornes=0

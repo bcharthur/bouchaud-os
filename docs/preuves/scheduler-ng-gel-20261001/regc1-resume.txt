@@ -1,0 +1,13 @@
+smp4-1.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp4-2.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-1.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-10.log gel_pire_ms=2014 attente_lecteurs_ms=0 serie_bornes=5 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-2.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-3.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=2 
+smp8-4.log gel_pire_ms=263 attente_lecteurs_ms=0 serie_bornes=2 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-5.log gel_pire_ms=267 attente_lecteurs_ms=0 serie_bornes=1 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-6.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-7.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-8.log gel_pire_ms=0 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+smp8-9.log gel_pire_ms=106 attente_lecteurs_ms=0 serie_bornes=0 panic=0 echecs=0 perdus=0 ressuscites=0
+TOTAL /tmp/claude-0/-home-user-bouchaud-os/2ee20b70-3eb2-5e27-85c8-1e5956bc273b/scratchpad/sngb/regc1 demarrages=12 gels>=200ms=3 pire_gel_ms=2014 pire_attente_lecteurs_ms=0 serie_bornes=8 panics=2

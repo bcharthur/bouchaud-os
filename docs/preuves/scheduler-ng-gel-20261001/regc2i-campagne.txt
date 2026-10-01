@@ -1,0 +1,9 @@
+SMP8 #1 SNG v=1 sec=FIN coeurs=8 duree_ms=39006 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42176 seuil_ms=100 episodes=0 pire_ms=0 retenus=0
+SMP8 #2 SNG v=1 sec=FIN coeurs=8 duree_ms=39347 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42499 seuil_ms=100 episodes=0 pire_ms=0 retenus=0
+SMP8 #3 SNG v=1 sec=FIN coeurs=8 duree_ms=39248 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42382 seuil_ms=100 episodes=8 pire_ms=233 retenus=8
+SMP8 #4 SNG v=1 sec=FIN coeurs=8 duree_ms=39034 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42300 seuil_ms=100 episodes=0 pire_ms=0 retenus=0
+SMP8 #5 SNG v=1 sec=FIN coeurs=8 duree_ms=39328 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42421 seuil_ms=100 episodes=0 pire_ms=0 retenus=0
+SMP8 #6 SNG v=1 sec=FIN coeurs=8 duree_ms=38875 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42037 seuil_ms=100 episodes=0 pire_ms=0 retenus=0
+SMP8 #7 SNG v=1 sec=FIN coeurs=8 duree_ms=39648 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42830 seuil_ms=100 episodes=7 pire_ms=260 retenus=7
+SMP8 #8 SNG v=1 sec=FIN coeurs=8 duree_ms=39204 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=42351 seuil_ms=100 episodes=7 pire_ms=257 retenus=7
+SMP8 #9 SNG v=1 sec=FIN coeurs=8 duree_ms=61776 echecs=0 perdus=0 ressuscites=0 reveils_perdus=0 panique=0 gels=SONDE-GEL-RESUME] maintenant_ms=65032 seuil_ms=100 episodes=15 pire_ms=24212 retenus=15

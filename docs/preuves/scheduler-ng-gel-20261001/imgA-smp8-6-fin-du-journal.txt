@@ -1,0 +1,120 @@
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] BACKING_DISK_GLOBAL scope=global reads=0 bytes=0 total_us=0 worst_us=0
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27698 pid=84 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] BACKING_MEMORY_GLOBAL scope=global reads=0 bytes=0 total_us=0 worst_us=0
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27705 pid=83 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27698 pid=82 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27715 pid=85 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CLEAN_PAGE_CACHE_GLOBAL scope=global hits=0 miss=0 waits=0 hit_us=0 miss_us=0 miss_read_us=0 wait_us=0 worst_us=0
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] BACKING_DISK_DECOMP scope=global releve=10 t=27719 lectures=0 octets=0 service_us=0 attente_us=0 hors_verrou_us=0 pages_neuves=0 pages_relues=0 hors_bitmap=0 debordements=0 tailles=4k:0,8k:0,16k:0,32k:0,64k:0,128k:0,256k:0,plus:0
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] ATA_CONTROLEUR t=27719 prochain=11 servi=11 en_file=0 dernier_preneur=0 age_ms=25956 dma_pret=1 lots_dma=10 replis_pio=0 dma_attente_ms=1 dma_cede_ms=0 dma_cessions=1
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27692 pid=81 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27721 pid=86 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27721 pid=87 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27743 pid=88 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27757 pid=89 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27765 pid=90 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27766 pid=91 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL t_ns=27767574571 user_ns=86941099373 avant_user_ns=86946291843 sys_ns=63305241044 avant_sys_ns=63291286839 cumul_user=86940647446 cumul_sys=63305241044 live_user=451927 live_sys=0 pire_live_ns=444878 pire_tid=110 pire_pid=14 pire_noyau=0 online=8
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=0 cumul_user_ns=10167495285 cumul_noyau_ns=8370110908
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27766 pid=92 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=1 cumul_user_ns=10388657324 cumul_noyau_ns=6485550987
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27774 pid=93 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=2 cumul_user_ns=10751033803 cumul_noyau_ns=7717736950
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=3 cumul_user_ns=10726786421 cumul_noyau_ns=7554780277
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=4 cumul_user_ns=11580458285 cumul_noyau_ns=9112246365
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=5 cumul_user_ns=11467199836 cumul_noyau_ns=8121531818
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=6 cumul_user_ns=11364275018 cumul_noyau_ns=9633668249
+[01:10:16][ 97%:  1%:  2%][FPS: --] PROC_STAT_RECUL_CPU cpu=7 cumul_user_ns=10508592715 cumul_noyau_ns=6340386863
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27801 pid=94 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27805 pid=95 ppid=14 image=/bin/scheduler-ng-banc code=0 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] SNG v=1 sec=B calculs=16 duree_ms=2121 recus=16 tours_min=3282 tours_max=6067 tours_total=69232 jain_milli=968 ratio_min_max_milli=540 trou_max_us=33861 trou_median_us=17694 perdus=0
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=11 tid=192 pid=96 rq=4 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27822 pere=14 enfant=96 image=/bin/scheduler-ng-banc duree_us=1477 copie_us=419 references_us=59 reste_us=998 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27822 pid=96 tid=192
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=12 tid=193 pid=97 rq=6 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27826 pid=97 tid=193
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27827 pere=14 enfant=97 image=/bin/scheduler-ng-banc duree_us=2146 copie_us=452 references_us=58 reste_us=1635 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=13 tid=194 pid=98 rq=1 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27831 pere=14 enfant=98 image=/bin/scheduler-ng-banc duree_us=905 copie_us=249 references_us=27 reste_us=628 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27831 pid=98 tid=194
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=14 tid=195 pid=99 rq=5 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27835 pere=14 enfant=99 image=/bin/scheduler-ng-banc duree_us=3293 copie_us=2808 references_us=37 reste_us=447 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27835 pid=99 tid=195
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=15 tid=196 pid=100 rq=3 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27838 pere=14 enfant=100 image=/bin/scheduler-ng-banc duree_us=880 copie_us=292 references_us=30 reste_us=557 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27838 pid=100 tid=196
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=16 tid=197 pid=101 rq=7 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27844 pere=14 enfant=101 image=/bin/scheduler-ng-banc duree_us=5045 copie_us=217 references_us=77 reste_us=4750 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27844 pid=101 tid=197
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=17 tid=198 pid=102 rq=2 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27850 pere=14 enfant=102 image=/bin/scheduler-ng-banc duree_us=4655 copie_us=191 references_us=25 reste_us=4437 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27850 pid=102 tid=198
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=18 tid=199 pid=103 rq=2 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27855 pere=14 enfant=103 image=/bin/scheduler-ng-banc duree_us=4478 copie_us=298 references_us=23 reste_us=4156 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27855 pid=103 tid=199
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=19 tid=200 pid=104 rq=2 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27861 pere=14 enfant=104 image=/bin/scheduler-ng-banc duree_us=761 copie_us=241 references_us=30 reste_us=488 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27861 pid=104 tid=200
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=20 tid=201 pid=105 rq=1 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27867 pere=14 enfant=105 image=/bin/scheduler-ng-banc duree_us=4210 copie_us=322 references_us=27 reste_us=3860 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27868 pid=105 tid=201
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=21 tid=202 pid=106 rq=3 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27876 pere=14 enfant=106 image=/bin/scheduler-ng-banc duree_us=773 copie_us=231 references_us=26 reste_us=515 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27878 pid=106 tid=202
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=22 tid=203 pid=107 rq=3 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27881 pere=14 enfant=107 image=/bin/scheduler-ng-banc duree_us=2871 copie_us=394 references_us=54 reste_us=2421 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27883 pid=107 tid=203
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=23 tid=204 pid=108 rq=2 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27890 pere=14 enfant=108 image=/bin/scheduler-ng-banc duree_us=7460 copie_us=599 references_us=67 reste_us=6793 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27890 pid=108 tid=204
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=24 tid=205 pid=109 rq=3 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27894 pere=14 enfant=109 image=/bin/scheduler-ng-banc duree_us=1920 copie_us=253 references_us=26 reste_us=1640 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27903 pid=109 tid=205
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=25 tid=206 pid=110 rq=6 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27907 pere=14 enfant=110 image=/bin/scheduler-ng-banc duree_us=10839 copie_us=9813 references_us=32 reste_us=994 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=26 tid=207 pid=111 rq=2 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27910 pid=110 tid=206
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27910 pere=14 enfant=111 image=/bin/scheduler-ng-banc duree_us=1064 copie_us=340 references_us=53 reste_us=670 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27914 pid=111 tid=207
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=27 tid=208 pid=112 rq=5 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27919 pere=14 enfant=112 image=/bin/scheduler-ng-banc duree_us=2460 copie_us=252 references_us=30 reste_us=2177 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27920 pid=112 tid=208
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=28 tid=209 pid=113 rq=4 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27925 pere=14 enfant=113 image=/bin/scheduler-ng-banc duree_us=2275 copie_us=273 references_us=28 reste_us=1973 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27928 pid=113 tid=209
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=29 tid=210 pid=114 rq=6 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27942 pere=113 enfant=114 image=/bin/scheduler-ng-banc duree_us=9681 copie_us=242 references_us=31 reste_us=9407 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27946 pid=114 tid=210
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27957 pid=114 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=27962 pid=114 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=30 tid=211 pid=115 rq=7 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=27962 pid=114 policy=owner_or_no_restart
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=27976 pere=113 enfant=115 image=/bin/scheduler-ng-banc duree_us=12186 copie_us=249 references_us=35 reste_us=11901 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=27986 pid=115 tid=211
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=27996 pid=115 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=28006 pid=115 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=28006 pid=115 policy=owner_or_no_restart
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=29 tid=212 pid=116 rq=1 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=28018 pere=113 enfant=116 image=/bin/scheduler-ng-banc duree_us=6817 copie_us=232 references_us=40 reste_us=6543 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=28018 pid=116 tid=212
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=28033 pid=116 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=28034 pid=116 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=28034 pid=116 policy=owner_or_no_restart
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=30 tid=213 pid=117 rq=6 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=28046 pere=113 enfant=117 image=/bin/scheduler-ng-banc duree_us=10199 copie_us=241 references_us=38 reste_us=9919 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=28050 pid=117 tid=213
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=28068 pid=117 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=28075 pid=117 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=28075 pid=117 policy=owner_or_no_restart
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=29 tid=214 pid=118 rq=3 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=28086 pere=113 enfant=118 image=/bin/scheduler-ng-banc duree_us=6297 copie_us=233 references_us=38 reste_us=6026 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=28086 pid=118 tid=214
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=28089 pid=118 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=28089 pid=118 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=28089 pid=118 policy=owner_or_no_restart
+[01:10:16][ 97%:  1%:  2%][FPS: --] [SMP-TASK] idx=29 tid=215 pid=119 rq=5 last=255 aff=0xff on=-1 kernel=false prio=Normale name=/bin/scheduler-ng-banc
+[01:10:16][ 97%:  1%:  2%][FPS: --] [kernel] PERF_FORK t=28091 pere=113 enfant=119 image=/bin/scheduler-ng-banc duree_us=966 copie_us=210 references_us=33 reste_us=721 pages_copiees=25 pages_empruntees=1 kio_copies=100
+[01:10:17][ 97%:  1%:  2%][FPS: --] [kernel] CHILD_AFTER_FORK t=28091 pid=119 tid=215
+[01:10:17][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_EXIT t=28109 pid=119 ppid=113 image=/bin/scheduler-ng-banc code=3 threads_before=1 threads_after=0 reason=dernier_thread
+[01:10:17][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_DEATH t=28116 pid=119 ppid=113 image=/bin/scheduler-ng-banc code=3 cause=sortie_non_zero
+[01:10:17][ 97%:  1%:  2%][FPS: --] [kernel] PROCESS_RECOVERY t=28116 pid=119 policy=owner_or_no_restart
