@@ -54,6 +54,8 @@
 #define CALCULS_MAX 16
 #define ECHEANCE_RECOLTE_US 10000000LL
 
+static int recolte(pid_t pid, int *statut, long long echeance_us);
+
 static int echecs = 0;
 static long perdus_total = 0;
 static long ressuscites_total = 0;
@@ -113,6 +115,32 @@ static int coeurs_sysconf(void)
 {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n < 1 ? 1 : (int)n;
+}
+
+// Ce que voit un fils forke : la racine d'un lancement synchrone est
+// epinglee a son coeur (sa vraie affinite), pas ses fils.
+static int coeurs_sysconf_fils(void)
+{
+    int tube[2];
+    if (pipe(tube) != 0)
+        return 0;
+    pid_t f = fork();
+    if (f < 0)
+        return 0;
+    if (f == 0) {
+        int n = coeurs_sysconf();
+        if (write(tube[1], &n, sizeof n) != (ssize_t)sizeof n)
+            _exit(1);
+        _exit(0);
+    }
+    close(tube[1]);
+    int n = 0;
+    if (read(tube[0], &n, sizeof n) != (ssize_t)sizeof n)
+        n = 0;
+    close(tube[0]);
+    int st = 0;
+    recolte(f, &st, ECHEANCE_RECOLTE_US);
+    return n;
 }
 
 static int nb_coeurs(void)
@@ -916,8 +944,8 @@ int main(int argc, char **argv)
         }
     }
     long long debut = maintenant_us();
-    printf("SNG v=1 sec=DEBUT coeurs=%d coeurs_sysfs=%d coeurs_sysconf=%d sections=%s partage_fork=%d\n",
-           coeurs, coeurs_sysfs(), coeurs_sysconf(), sections, partage);
+    printf("SNG v=1 sec=DEBUT coeurs=%d coeurs_sysfs=%d coeurs_sysconf=%d coeurs_sysconf_fils=%d sections=%s partage_fork=%d\n",
+           coeurs, coeurs_sysfs(), coeurs_sysconf(), coeurs_sysconf_fils(), sections, partage);
     if (!partage) {
         printf("SNG v=1 sec=X anomalie=partage_fork_absent\n");
         echecs++;

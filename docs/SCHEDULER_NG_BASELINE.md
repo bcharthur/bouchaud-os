@@ -87,18 +87,22 @@ Classes : **[noyau]** defaut du noyau a corriger dans le chantier ;
    store), etait remis `Ready` par son echeance ou son reveil, et retournait en
    espace utilisateur apres la recolte de son processus. En fin de banc,
    `[SMP-LOAD]` montre encore ces fils sur les coeurs. Nul a SMP1 : le frere
-   ne peut pas s'executer pendant la sortie. Phase 1.
+   ne peut pas s'executer pendant la sortie. Phase 1. **Corrige**
+   (BOUCHAUD_CYCLE_DE_VIE_V1).
 2. **[noyau] Fin de fichier jamais livree apres la mort d'un ecrivain.**
    `eof-avant-recolte` 0/10 et `racine-avant-descendants` 0/5 a TOUS les SMP :
    les descripteurs d'un processus mort ne sont pas fermes a sa mort (ni a sa
    recolte : la lecture apres `wait4` ne voit pas non plus la fin). Un
    processus orphelin garde ses tubes ouverts pour toujours. Ce sont les 5
-   `perdus`. Phase 9 (semantique de sortie).
+   `perdus`. Phase 9 (semantique de sortie). **Corrige**
+   (BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1).
 3. **[ABI] `sched_getaffinity` rend le masque 1.** `coeurs_sysconf=1` a tous
    les SMP alors que `/sys/devices/system/cpu/online` dit N : musl calcule
    `sysconf(_SC_NPROCESSORS_ONLN)` par `sched_getaffinity`. Tout pool de fils
    d'un programme musl — dont ceux du navigateur — est dimensionne a UN fil.
-   Phase 4 (topologie generique).
+   Phase 4 (topologie generique). **Corrige** (BOUCHAUD_AFFINITE_VISIBLE_V1) :
+   un fils forke voit N coeurs a SMP1/2/4/8/16 ; la racine d'un lancement
+   synchrone, epinglee a son coeur, voit 1 — c'est sa vraie affinite.
 4. **[ABI] `MAP_SHARED|MAP_ANONYMOUS` n'est pas partage a travers `fork`**
    (`partage_fork=2` : le banc s'est replie sur `memfd`). Hors ordonnanceur ;
    consigne.

@@ -231,6 +231,27 @@ pub fn pose_priorite(priorite: Priorite) -> Priorite {
     ancienne
 }
 
+/// BOUCHAUD_AFFINITE_VISIBLE_V1 : le masque d'affinite que voit l'espace
+/// utilisateur (`sched_getaffinity`) -- celui de la tache, limite aux coeurs
+/// en ligne. `tid == 0` designe la tache courante ; `None` si la tache
+/// n'existe pas.
+///
+/// L'appel systeme rendait `1` en dur. musl calcule
+/// `sysconf(_SC_NPROCESSORS_ONLN)` par cet appel : tout programme musl --
+/// les pools de fils du navigateur compris -- croyait n'avoir qu'un coeur,
+/// alors que `/sys/devices/system/cpu/online` en annoncait seize
+/// (scheduler-ng-banc : `coeurs_sysconf=1` a SMP1/2/4/8/16).
+pub fn masque_affinite_visible(tid: u32) -> Option<u64> {
+    let masque = if tid == 0 {
+        current().affinity_mask
+    } else {
+        tasks().iter().find(|t| t.tid == tid && t.state != TaskState::Zombie)?.affinity_mask
+    };
+    let en_ligne = online_affinity_mask();
+    let visible = masque & en_ligne;
+    Some(if visible == 0 { en_ligne } else { visible })
+}
+
 /// La classe d'ordonnancement du processus courant.
 pub fn priorite() -> Priorite {
     current().priorite.charge()

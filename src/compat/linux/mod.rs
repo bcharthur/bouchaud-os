@@ -659,9 +659,20 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         SETUID | SETGID | SETPGID | SETSID => 0,
         GETPGRP | GETPGID | GETSID => 1,
         SCHED_GETAFFINITY => {
-            // Un seul CPU : masque = 1.
-            if args[2] != 0 {
-                user_write(args[2], &1u64.to_le_bytes());
+            // BOUCHAUD_AFFINITE_VISIBLE_V1 : le vrai masque de la tache, borne
+            // aux coeurs en ligne. Rendait 1 en dur : musl en deduisait UN
+            // coeur, et dimensionnait chaque pool de fils a un fil.
+            //
+            // Linux rend la taille ecrite (un mot de 64 bits ici, MAX_CPUS
+            // <= 64) et refuse un tampon trop petit pour la contenir.
+            if (args[1] as usize) < 8 {
+                return -errno::EINVAL;
+            }
+            let Some(masque) = task::masque_affinite_visible(args[0] as u32) else {
+                return -errno::ESRCH;
+            };
+            if args[2] != 0 && !user_write(args[2], &masque.to_le_bytes()) {
+                return -errno::EFAULT;
             }
             8
         }
