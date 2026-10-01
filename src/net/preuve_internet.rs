@@ -303,9 +303,8 @@ fn execute_preuve() -> i32 {
 
     ETAPE.store(ETAPE_CONFIG, Ordering::Release);
     let lien = crate::drivers::e1000::link_up();
-    let ip = crate::net::our_ip();
-    let gw = crate::net::gateway();
-    let dns = crate::net::dns_server();
+    let config = crate::net::config::instantane();
+    let (ip, gw, dns) = (config.ip, config.passerelle, config.resolveur);
     let bail = crate::net::bail_obtenu();
 
     LIEN.store(lien, Ordering::Relaxed);

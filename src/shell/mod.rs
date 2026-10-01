@@ -836,6 +836,25 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // verrou de cette charge, ce qu'aucune mesure de temps ne
         // distingue toute seule.
         "smpstat" => { crate::kernel::task::log_smp_load(); 0 }
+        // BOUCHAUD_NET_CONFIG_GENERATION_V1 : deux ecrivains et N lecteurs
+        // sur une instance de banc du mecanisme de configuration ;
+        // `[NET-GEN] ... melanges=0` ou echec. Le reseau n'est pas touche.
+        // Arguments par couples `ms lecteurs` ; defaut 3000 ms, 4 lecteurs.
+        // Depuis l'autorun, la suite ETEINT la machine a la fin (voir
+        // `net::config::banc`) : c'est la derniere commande d'un scenario.
+        "netcfg-banc" => {
+            let mut couples = alloc::vec::Vec::new();
+            let mut i = 1;
+            while i + 1 < argc {
+                couples.push((argv[i].parse::<u64>().unwrap_or(3000),
+                              argv[i + 1].parse::<u32>().unwrap_or(4)));
+                i += 2;
+            }
+            if couples.is_empty() {
+                couples.push((3000, 4));
+            }
+            crate::net::config::banc(&couples)
+        }
         "apps" => { crate::app::launcher::list(); 0 }
         "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
         "poweroff" | "halt" | "shutdown" => {

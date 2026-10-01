@@ -1029,7 +1029,8 @@ ci-dessus ; `ready_latency_interactive_max_ms` depasse 100 ms sur une partie
 des runs, avant comme apres le chantier) ; les `static mut` de configuration
 reseau (`OUR_IP`, `GW_IP`, `DNS_IP`, `MASQUE`, `NOM_RESEAU`, ecrits par DHCP
 et lus sans verrou -- course anterieure au chantier, le fil DHCP n'a jamais pris
-le gros verrou) et les caches du chemin de rendu noyau (RES_CACHE, SUBRES_*).
+le gros verrou ; FERMEE par le lot B12, §18.12) et les caches du chemin de rendu
+noyau (RES_CACHE, SUBRES_*).
 
 ### 18.10 Surface de mire : le faux negatif du #381 et la poignee de main
 
@@ -1114,3 +1115,79 @@ AB_FAIL de meme ; la nouvelle sort sur le terminal sans perte ; terminal
 absent -> plafond ; worker muet -> sortie terminale et jalons rouges ; VM
 morte avant le terminal -> `qemu_morte`. Page executee sous Chromium dans les
 deux ordres : le terminal est la derniere ligne.
+
+### 18.12 Lot B12 : la configuration reseau publiee par generation
+
+Adresse, passerelle, resolveur, masque et nom du reseau etaient six `static mut`
+ecrits champ par champ, en DEUX appels (`set_config` puis
+`pose_identite_reseau`), lus champ par champ, et jamais proteges (le fil DHCP
+ne prenait pas le gros verrou). `GW_MAC` n'etait jamais lu. `DEMARRAGE` etait
+un `static mut` lu partout.
+
+Inventaire avant changement :
+
+    ecrivains   fils noyau seulement (demarrage, `net-lien`, banc RX) ; aucun
+                en interruption (pilotes en polling) ; RMW concurrents
+                (presomption SLIRP, secours LAB ICS, repli passerelle du bail)
+    lecteurs    pompe RX (`pour_nous` : adresse+masque), emission (`hop_mac`,
+                ping : adresse+masque puis passerelle), smoltcp (adresse+
+                passerelle), getsockname, interface, releves (nom+ip+gw+dns),
+                services, diagnostics, boite noire (contexte de faute)
+
+Mecanisme (BOUCHAUD_NET_CONFIG_GENERATION_V1, `src/net/config.rs`) : un
+instantane versionne -- sequence impaire pendant l'ecriture, champs atomiques,
+barrieres Release/Acquire, le lecteur relit si la sequence a bouge. Lecteurs
+SANS verrou ; ecrivains serialises par un `SpinLockIrq` PROPRE a la
+configuration (interruptions coupees : sur un coeur, un lecteur ne tourne pas
+derriere un ecrivain preempte), toute ecriture par `modifie`, qui lit l'etat
+sous ce verrou (RMW atomiques entre ecrivains). Un bail = UNE publication
+(`applique_bail`) ; le verdict de demarrage (atomique) est publie APRES la
+configuration ; les lecteurs qui combinent des champs prennent UN instantane
+(`prochain_saut`, `pour_nous`, smoltcp, releves, services, GUI, diagnostics,
+preuve internet) ; la boite noire lit par `instantane_borne`. Aucun verrou
+global : le mecanisme est un type, `Publication`, dont `ETH0` est l'instance
+reelle.
+
+Preuves :
+
+  * hote `tools/smp/test_config_reseau_coherente.rs` : l'ancien protocole
+    (deux appels, champs separes) produit 335 998 instantanes melanges sur
+    2 x 200 000 publications, le nouveau 0 sur trois passes ; retirer la
+    relecture de la sequence fait echouer le test ;
+  * garde `tools/verifie-config-reseau.py` (six negatifs) : aucun ancien
+    `static mut`, protocole de lecture/ecriture, bail en un appel, aucune
+    fonction de `src/` ne combine deux lectures champ a champ (elle en a
+    trouve une de plus, `publie_les_indicateurs`), boite noire bornee, banc
+    hors de la configuration reelle ;
+  * QEMU TCG, `netcfg-banc 4000 4 2000 6 2000 1` (2 ecrivains, 1 a 6
+    lecteurs, instance `BANC` du meme type), 3 demarrages par taille :
+
+        SMP   bancs OK   melanges   temoin sans sequence (max)   relectures (max)
+        1      9/9          0               0                          0
+        2      9/9          0         114 283                    295 623
+        4      9/9          0         873 100                  2 272 017
+        8      9/9          0       1 133 040                  3 240 025
+
+    Le temoin lit les memes champs SANS la sequence : il voit des melanges
+    sur plusieurs coeurs (le banc touche donc la fenetre) ; 0 sur un coeur,
+    puisque l'ecrivain y coupe les interruptions. Le vrai bail DHCP arrive
+    pendant le premier banc de chaque demarrage (`DHCP_ACK`) par le nouveau
+    chemin, et le reseau passe `pret`.
+
+Ce que le banc a appris sur lui-meme (trois defauts du BANC, corriges avant de
+conclure) : depuis l'autorun, le shell tourne dans le contexte d'amorcage sans
+tache courante -- les fils crees n'y tournaient pas (`fils_absents`), puis
+`sleep_ticks` y paniquait ; une generation synthetique doit etre publiee avant
+d'ouvrir les lecteurs (256 faux melanges, 0 relecture) ; et le banc ne doit pas
+ecrire la configuration reelle : le veilleur de lien y publiait son bail en
+plein banc (faux melanges en SMP4/8), puis le banc « restaurait » la
+presomption SLIRP par-dessus.
+
+Constat pour le lot ORDONNANCEUR (non corrige ici) : en SMP1, `run_noyau` ne
+reprend pas le contexte d'amorcage apres la sortie (`exit_current`, code 0
+comme 1) d'un fil pilote lance depuis l'autorun ; la machine reste au repos
+jusqu'au plafond, la tache `usb-hid` notee courante et bloquee. Le banc ne
+depend pas de ce retour : son pilote eteint la machine avec un code explicite
+(`[NET-GEN-SUITE]`).
+
+Restent ouverts (hors B12) : RES_CACHE/SUBRES_* du chemin de rendu noyau.

@@ -65,11 +65,15 @@ pub fn fetch(dst: Ipv4Addr, port: u16, request: &[u8], out: &mut Vec<u8>) -> boo
     let t0 = Instant::from_millis(now_ms());
     let mut iface = Interface::new(config, &mut device, t0);
 
-    let our = crate::net::our_ip();
+    // Adresse et passerelle du MEME instantane (BOUCHAUD_NET_CONFIG_GENERATION_V1) :
+    // deux lectures separees pouvaient donner l'adresse d'un bail et la
+    // passerelle du precedent.
+    let config = crate::net::config::instantane();
+    let our = config.ip;
     iface.update_ip_addrs(|ips| {
         let _ = ips.push(IpCidr::new(IpAddress::v4(our[0], our[1], our[2], our[3]), 24));
     });
-    let gw = crate::net::gateway();
+    let gw = config.passerelle;
     let _ = iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(gw[0], gw[1], gw[2], gw[3]));
 
     let rx_buf = tcp::SocketBuffer::new(vec![0u8; 16384]);

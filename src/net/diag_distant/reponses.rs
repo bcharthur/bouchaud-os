@@ -471,8 +471,9 @@ fn dhcp(t: &mut Reponse) {
         c.dernier_xid, c.tentatives,
         crate::net::bail_obtenu(),
     );
-    ip_json(t, "ip", crate::net::our_ip());
-    ip_json(t, "passerelle", crate::net::gateway());
+    let config = crate::net::config::instantane();
+    ip_json(t, "ip", config.ip);
+    ip_json(t, "passerelle", config.passerelle);
     // P18_DHCP_FALLBACK_DIAGNOSTIC
     // IPV4_READY ne signifie plus exclusivement "ACK DHCP" : le profil LAB
     // n'est pret qu'apres une vraie preuve ARP de la passerelle ICS.

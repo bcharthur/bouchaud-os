@@ -73,7 +73,10 @@ def main():
     ecritures = [
         (no, ligne.strip())
         for no, ligne in enumerate(pur.splitlines(), 1)
-        if re.search(r"\bDEMARRAGE\s*=", ligne)
+        # `DEMARRAGE = x` (ancien `static mut`) ou `DEMARRAGE.store(x, ..)`
+        # (atomique, BOUCHAUD_NET_CONFIG_GENERATION_V1) : la regle porte sur
+        # le nombre d'ecrivains, pas sur la forme de l'ecriture.
+        if re.search(r"\bDEMARRAGE\s*(=[^=]|\.store\()", ligne)
     ]
     if not ecritures:
         fautes.append(

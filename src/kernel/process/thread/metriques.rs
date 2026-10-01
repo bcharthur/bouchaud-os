@@ -107,6 +107,7 @@ rej_inel={} rej_crs={} mig={}",
         irq7_p, irq7_r, irq15_p, irq15_r, lapic_p, idt_absentes,
     ));
     let qualite = crate::net::qualite_lien();
+    let config = crate::net::config::instantane();
     crate::kernel::dmesg::log_fmt(format_args!(
         "[NET-LIEN] verdict={} lien={} vitesse_mbps={} duplex={} trames_perdues={} \
 nom={} ip={} gw={} dns={}",
@@ -116,9 +117,9 @@ nom={} ip={} gw={} dns={}",
         if qualite.duplex_complet { "complet" } else { "alternat" },
         qualite.trames_perdues,
         crate::net::nom_reseau(),
-        crate::net::ipv4::format_addr(&crate::net::our_ip()),
-        crate::net::ipv4::format_addr(&crate::net::gateway()),
-        crate::net::ipv4::format_addr(&crate::net::dns_server()),
+        crate::net::ipv4::format_addr(&config.ip),
+        crate::net::ipv4::format_addr(&config.passerelle),
+        crate::net::ipv4::format_addr(&config.resolveur),
     ));
     // CE QUE LE ROUTAGE DE RECEPTION A VU.
     //

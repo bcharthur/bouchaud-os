@@ -798,9 +798,13 @@ fn etat_systeme(ts_ns: u64) {
         crate::net::Demarrage::SansConfiguration => "sans-configuration",
         crate::net::Demarrage::Pret => "pret",
     };
-    let ip = crate::net::our_ip();
-    let gw = crate::net::gateway();
-    let dns = crate::net::dns_server();
+    // Lecture BORNEE : la boite noire peut ecrire alors qu'un ecrivain de la
+    // configuration a ete interrompu dans sa fenetre ; elle ne doit pas
+    // tourner derriere lui. Zeros si l'instantane n'a pas pu etre pris.
+    let (ip, gw, dns) = match crate::net::config::instantane_borne(64) {
+        Some(c) => (c.ip, c.passerelle, c.resolveur),
+        None => ([0; 4], [0; 4], [0; 4]),
+    };
 
     let trames = crate::gui::frame_clock::snapshot();
     let (_, _, bulk_transferts, bulk_octets, bulk_stalls, _, _, bulk_echecs, _, bulk_occupes) =

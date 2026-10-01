@@ -490,7 +490,9 @@ pub fn publie_les_indicateurs() {
         },
     );
     // LA CONNECTIVITE EFFECTIVE, distincte du lien et de la configuration.
-    let adresse = crate::net::our_ip();
+    // Adresse et resolveur du MEME instantane (BOUCHAUD_NET_CONFIG_GENERATION_V1).
+    let config = crate::net::config::instantane();
+    let adresse = config.ip;
     if adresse == [0, 0, 0, 0] {
         etat_car("net.ipv4", Etat::Attente, "aucune adresse");
     } else if routees != 0 {
@@ -561,7 +563,7 @@ pub fn publie_les_indicateurs() {
     //   operationnel  une reponse est arrivee jusqu'au socket
     //   en erreur     des requetes partent, aucune ne revient
     use crate::net::sonde_dns::{compte, Barreau};
-    let resolveur = crate::net::dns_server();
+    let resolveur = config.resolveur;
     let emises = compte(Barreau::RxEthernet);
     let recues = compte(Barreau::SocketLivre) + compte(Barreau::RecvSucces);
     kpi(

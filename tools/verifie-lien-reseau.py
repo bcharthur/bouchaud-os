@@ -245,7 +245,10 @@ def main():
     if nom is None:
         fautes.append("net/mod.rs : `nom_reseau` a disparu.")
     else:
-        if "NOM_RESEAU[..NOM_RESEAU_LEN]" not in nom:
+        # BOUCHAUD_NET_CONFIG_GENERATION_V1 : le nom annonce vit desormais dans
+        # la configuration publiee par generation, avec l'adresse et le masque
+        # qu'il qualifie ; il se lit dans UN instantane.
+        if "config::instantane()" not in nom or "from_utf8(c.nom())" not in nom:
             fautes.append(
                 "net/mod.rs : `nom_reseau` ne rend plus le nom que le serveur "
                 "DHCP a annonce ; il rend autre chose, et l'indicateur nomme "

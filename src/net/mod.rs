@@ -36,6 +36,8 @@ pub mod security;
 pub mod encoding;
 pub mod application;
 pub mod stack;
+/// La configuration d'eth0 publiee par generation : voir `net/config.rs`.
+pub mod config;
 
 // Re-exports a plat : conserve les chemins `net::<module>` historiques tout en
 // rangeant physiquement les fichiers par couche.
@@ -116,7 +118,7 @@ pub const LO_ADDR: Ipv4Addr = [127, 0, 0, 1];
 /// qui ne mene nulle part vaut moins que pas d'adresse du tout : sans
 /// resolveur, le navigateur le DIT ; avec un faux, il attend un delai
 /// d'attente et accuse le reseau.
-mod presomption_slirp {
+pub(crate) mod presomption_slirp {
     use super::Ipv4Addr;
     pub const IP: Ipv4Addr = [10, 0, 2, 15];
     pub const PASSERELLE: Ipv4Addr = [10, 0, 2, 2];
@@ -124,10 +126,9 @@ mod presomption_slirp {
 }
 
 // Configuration eth0 : presomption SLIRP au depart, que DHCP remplace, et que
-// `oublie_la_presomption_slirp` efface sur une carte reelle.
-static mut OUR_IP: Ipv4Addr = presomption_slirp::IP;
-static mut GW_IP: Ipv4Addr = presomption_slirp::PASSERELLE;
-static mut DNS_IP: Ipv4Addr = presomption_slirp::RESOLVEUR;
+// `oublie_la_presomption_slirp` efface sur une carte reelle. Elle vit dans
+// `config` (BOUCHAUD_NET_CONFIG_GENERATION_V1) : une seule publication par
+// changement, des lecteurs qui ne voient jamais deux generations a la fois.
 
 /// Le resolveur COMPILE, ou RIEN sur une carte reelle.
 ///
@@ -153,11 +154,11 @@ pub fn resolveur_compile() -> Ipv4Addr {
 /// n'existe pas sur ce reseau -- quatre tentatives, deux secondes, et un echec
 /// mis en cache, a chaque paquet sortant.
 fn oublie_la_presomption_slirp() {
-    unsafe {
-        if OUR_IP == presomption_slirp::IP { OUR_IP = [0, 0, 0, 0]; }
-        if GW_IP == presomption_slirp::PASSERELLE { GW_IP = [0, 0, 0, 0]; }
-        if DNS_IP == presomption_slirp::RESOLVEUR { DNS_IP = [0, 0, 0, 0]; }
-    }
+    config::modifie(|c| {
+        if c.ip == presomption_slirp::IP { c.ip = [0, 0, 0, 0]; }
+        if c.passerelle == presomption_slirp::PASSERELLE { c.passerelle = [0, 0, 0, 0]; }
+        if c.resolveur == presomption_slirp::RESOLVEUR { c.resolveur = [0, 0, 0, 0]; }
+    });
 }
 
 /// POSE LE VERDICT DE DEMARRAGE, ET LUI SEUL.
@@ -189,7 +190,9 @@ fn pose_le_verdict(nouvel_etat: Demarrage) {
         // cable.
         oublie_la_presomption_slirp();
     }
-    unsafe { DEMARRAGE = nouvel_etat; }
+    // APRES la configuration : un lecteur qui voit le nouveau verdict voit
+    // deja la configuration qui va avec (Release ici, Acquire a la lecture).
+    DEMARRAGE.store(nouvel_etat as u8, core::sync::atomic::Ordering::Release);
     // AUDIT : CE QUE LE RESTE DU SYSTEME VOIT, A CET INSTANT.
     //
     // `external_enabled()` est vrai pour `Pret` ET pour `SansBail`. Or
@@ -197,12 +200,13 @@ fn pose_le_verdict(nouvel_etat: Demarrage) {
     // octets qu'un vrai bail, sans qu'aucun bail n'ait ete obtenu.
     // `bail_obtenu()` est la seule chose qui les distingue, et cette ligne la
     // met a cote du verdict pour qu'on puisse en juger sur mesure.
+    let c = config::instantane();
     crate::kernel::dmesg::log_fmt(format_args!(
         "NET_VERDICT etat={} ip={} gw={} dns={} source={} external_enabled={} connecte={}",
         nom_demarrage(nouvel_etat),
-        ipv4::format_addr(&our_ip()),
-        ipv4::format_addr(&gateway()),
-        ipv4::format_addr(&dns_server()),
+        ipv4::format_addr(&c.ip),
+        ipv4::format_addr(&c.passerelle),
+        ipv4::format_addr(&c.resolveur),
         if bail_obtenu() {
             "bail"
         } else if lab_ics_fallback_active() {
@@ -215,12 +219,13 @@ fn pose_le_verdict(nouvel_etat: Demarrage) {
     ));
 }
 
-/// Adresse IPv4 d'eth0.
-pub fn our_ip() -> Ipv4Addr { unsafe { OUR_IP } }
-/// Passerelle par defaut.
-pub fn gateway() -> Ipv4Addr { unsafe { GW_IP } }
-/// Serveur DNS configure.
-pub fn dns_server() -> Ipv4Addr { unsafe { DNS_IP } }
+/// Adresse IPv4 d'eth0. Un seul champ : pour en COMBINER plusieurs (adresse
+/// et masque, adresse et passerelle...), prendre `config::instantane()`.
+pub fn our_ip() -> Ipv4Addr { config::instantane().ip }
+/// Passerelle par defaut. Voir `our_ip`.
+pub fn gateway() -> Ipv4Addr { config::instantane().passerelle }
+/// Serveur DNS configure. Voir `our_ip`.
+pub fn dns_server() -> Ipv4Addr { config::instantane().resolveur }
 
 // BOUCHAUD_BAIL_REELLEMENT_OBTENU_V1
 //
@@ -248,9 +253,24 @@ pub fn bail_obtenu() -> bool {
     BAIL_OBTENU.load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// Applique une configuration reseau (ex. obtenue par DHCP). Invalide le cache ARP.
-pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
-    unsafe { OUR_IP = ip; GW_IP = gw; DNS_IP = dns; GW_MAC = None; }
+/// Applique un bail DHCP COMPLET en UNE publication : adresse, passerelle et
+/// resolveur (ceux de l'offre, ou les courants si l'offre n'en donne pas --
+/// decide sous le verrou des ecrivains), nom et masque. Invalide le cache ARP.
+///
+/// C'etaient deux appels, `set_config` puis `pose_identite_reseau` : entre les
+/// deux, un lecteur voyait la nouvelle adresse avec l'ancien masque.
+///
+/// Rend la configuration publiee (passerelle et resolveur effectifs).
+pub fn applique_bail(ip: Ipv4Addr, routeur: Ipv4Addr, resolveur: Ipv4Addr,
+                     nom: &[u8], masque: Ipv4Addr) -> config::ConfigEth0 {
+    let c = config::modifie(|c| {
+        c.ip = ip;
+        if routeur != [0, 0, 0, 0] { c.passerelle = routeur; }
+        if resolveur != [0, 0, 0, 0] { c.resolveur = resolveur; }
+        c.pose_identite(nom, masque);
+        *c
+    });
+    let (ip, gw, dns) = (c.ip, c.passerelle, c.resolveur);
     BAIL_OBTENU.store(true, core::sync::atomic::Ordering::Release);
     let etait_en_secours =
         LAB_ICS_FALLBACK_ACTIVE.swap(false, core::sync::atomic::Ordering::AcqRel);
@@ -266,6 +286,7 @@ pub fn set_config(ip: Ipv4Addr, gw: Ipv4Addr, dns: Ipv4Addr) {
     // et une entree NEGATIVE posee pendant qu'on etait mal configure ferait
     // echouer les deux premieres secondes d'un reseau desormais correct.
     oublie_voisins();
+    c
 }
 
 // P18 : retire uniquement NOTRE configuration LAB. Une configuration DHCP ou
@@ -274,14 +295,13 @@ fn oublie_lab_ics_fallback() {
     if !LAB_ICS_FALLBACK_ACTIVE.swap(false, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    unsafe {
-        if OUR_IP == LAB_ICS_IP { OUR_IP = [0, 0, 0, 0]; }
-        if GW_IP == LAB_ICS_PASSERELLE { GW_IP = [0, 0, 0, 0]; }
-        if DNS_IP == LAB_ICS_DNS { DNS_IP = [0, 0, 0, 0]; }
-        GW_MAC = None;
-    }
+    config::modifie(|c| {
+        if c.ip == LAB_ICS_IP { c.ip = [0, 0, 0, 0]; }
+        if c.passerelle == LAB_ICS_PASSERELLE { c.passerelle = [0, 0, 0, 0]; }
+        if c.resolveur == LAB_ICS_DNS { c.resolveur = [0, 0, 0, 0]; }
+        c.oublie_identite();
+    });
     BAIL_OBTENU.store(false, core::sync::atomic::Ordering::Release);
-    oublie_identite_reseau();
     oublie_voisins();
 }
 
@@ -299,20 +319,21 @@ fn essaie_lab_ics_fallback() -> bool {
         return lab_ics_fallback_active();
     }
 
-    // Ne jamais ecraser une configuration manuelle/eventuellement future.
-    let actuelle = our_ip();
-    if actuelle != [0, 0, 0, 0] && actuelle != LAB_ICS_IP {
+    // Ne jamais ecraser une configuration manuelle/eventuellement future. Le
+    // test et la pose se font sous le verrou des ecrivains : un bail arrive
+    // entre les deux ne peut plus etre ecrase.
+    let posee = config::modifie(|c| {
+        if c.ip != [0, 0, 0, 0] && c.ip != LAB_ICS_IP {
+            return false;
+        }
+        *c = config::ConfigEth0::neuve(LAB_ICS_IP, LAB_ICS_PASSERELLE, LAB_ICS_DNS);
+        c.pose_identite(&[], LAB_ICS_MASQUE);
+        true
+    });
+    if !posee {
         return false;
     }
-
-    unsafe {
-        OUR_IP = LAB_ICS_IP;
-        GW_IP = LAB_ICS_PASSERELLE;
-        DNS_IP = LAB_ICS_DNS;
-        GW_MAC = None;
-    }
     BAIL_OBTENU.store(false, core::sync::atomic::Ordering::Release);
-    pose_identite_reseau(&[], LAB_ICS_MASQUE);
     oublie_voisins();
 
     // Le profil n'est valide qu'avec une preuve de couche 2.
@@ -327,13 +348,7 @@ fn essaie_lab_ics_fallback() -> bool {
         return true;
     }
 
-    unsafe {
-        OUR_IP = [0, 0, 0, 0];
-        GW_IP = [0, 0, 0, 0];
-        DNS_IP = [0, 0, 0, 0];
-        GW_MAC = None;
-    }
-    oublie_identite_reseau();
+    config::modifie(|c| *c = config::ConfigEth0::neuve([0; 4], [0; 4], [0; 4]));
     oublie_voisins();
     crate::serial_println!(
         "P18_NETWORK_FALLBACK_REJECTED gw=192.168.137.1 reason=arp-timeout"
@@ -394,10 +409,20 @@ pub enum Demarrage {
     Pret,
 }
 
-static mut DEMARRAGE: Demarrage = Demarrage::SansCarte;
+static DEMARRAGE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(Demarrage::SansCarte as u8);
 
 /// Ce que l'initialisation du demarrage a obtenu.
-pub fn etat_demarrage() -> Demarrage { unsafe { DEMARRAGE } }
+pub fn etat_demarrage() -> Demarrage {
+    match DEMARRAGE.load(core::sync::atomic::Ordering::Acquire) {
+        x if x == Demarrage::CarteRefusee as u8 => Demarrage::CarteRefusee,
+        x if x == Demarrage::LienBas as u8 => Demarrage::LienBas,
+        x if x == Demarrage::SansBail as u8 => Demarrage::SansBail,
+        x if x == Demarrage::SansConfiguration as u8 => Demarrage::SansConfiguration,
+        x if x == Demarrage::Pret as u8 => Demarrage::Pret,
+        _ => Demarrage::SansCarte,
+    }
+}
 
 /// Met le reseau en service au demarrage. **N'echoue jamais.**
 ///
@@ -430,17 +455,23 @@ pub fn demarre() -> Demarrage {
         Demarrage::SansCarte => String::from("net: lo 127.0.0.1 actif ; aucune carte reseau"),
         Demarrage::CarteRefusee => String::from("net: lo actif ; carte presente mais non geree"),
         Demarrage::LienBas => String::from("net: lo actif ; eth0 initialisee, lien bas"),
-        Demarrage::SansBail => format!(
-            "net: eth0 {} (repli QEMU SLIRP) gw {} dns {}",
-            ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
-            ipv4::format_addr(&dns_server())),
+        Demarrage::SansBail => {
+            let c = config::instantane();
+            format!(
+                "net: eth0 {} (repli QEMU SLIRP) gw {} dns {}",
+                ipv4::format_addr(&c.ip), ipv4::format_addr(&c.passerelle),
+                ipv4::format_addr(&c.resolveur))
+        }
         Demarrage::SansConfiguration => String::from(
             "net: eth0 lien UP mais DHCP absent ; pas de fausse configuration QEMU"
         ),
-        Demarrage::Pret => format!(
-            "net: eth0 {} gw {} dns {} — pret",
-            ipv4::format_addr(&our_ip()), ipv4::format_addr(&gateway()),
-            ipv4::format_addr(&dns_server())),
+        Demarrage::Pret => {
+            let c = config::instantane();
+            format!(
+                "net: eth0 {} gw {} dns {} — pret",
+                ipv4::format_addr(&c.ip), ipv4::format_addr(&c.passerelle),
+                ipv4::format_addr(&c.resolveur))
+        }
     };
     crate::kernel::dmesg::log(&ligne);
     etat
@@ -489,28 +520,11 @@ fn demarre_interne() -> Demarrage {
 // le reseau aussi surement, et c'est ce qu'affichent les outils quand le
 // serveur ne nomme rien.
 
-/// Longueur maximale du nom de reseau retenu.
-const NOM_RESEAU_MAX: usize = 63;
-static mut NOM_RESEAU: [u8; NOM_RESEAU_MAX] = [0; NOM_RESEAU_MAX];
-static mut NOM_RESEAU_LEN: usize = 0;
-static mut MASQUE: Ipv4Addr = [0, 0, 0, 0];
-
-/// Retient ce que le bail DHCP a appris sur l'identite du reseau.
-pub fn pose_identite_reseau(domaine: &[u8], masque: Ipv4Addr) {
-    unsafe {
-        let n = domaine.len().min(NOM_RESEAU_MAX);
-        NOM_RESEAU[..n].copy_from_slice(&domaine[..n]);
-        NOM_RESEAU_LEN = n;
-        MASQUE = masque;
-    }
-}
-
 /// Oublie l'identite du reseau : le lien est tombe, elle ne vaut plus rien.
+/// (Le nom et le masque vivent dans `config`, avec l'adresse qu'ils
+/// qualifient ; un bail les pose par `applique_bail`.)
 pub fn oublie_identite_reseau() {
-    unsafe {
-        NOM_RESEAU_LEN = 0;
-        MASQUE = [0, 0, 0, 0];
-    }
+    config::modifie(|c| c.oublie_identite());
 }
 
 /// Le nom du reseau, tel qu'on peut l'afficher.
@@ -519,23 +533,22 @@ pub fn oublie_identite_reseau() {
 /// passerelle, sinon rien. On ne FABRIQUE jamais un nom : « hors ligne » se lit
 /// a l'etat du lien, pas a une chaine vide.
 pub fn nom_reseau() -> String {
-    unsafe {
-        if NOM_RESEAU_LEN != 0 {
-            if let Ok(nom) = core::str::from_utf8(&NOM_RESEAU[..NOM_RESEAU_LEN]) {
-                return String::from(nom);
-            }
+    // UN instantane : nom, adresse et masque de la meme publication.
+    let c = config::instantane();
+    if !c.nom().is_empty() {
+        if let Ok(nom) = core::str::from_utf8(c.nom()) {
+            return String::from(nom);
         }
-        let ip = our_ip();
-        // La longueur de prefixe et l'adresse de reseau viennent du module pur
-        // du client DHCP, celui que la suite hote met a l'epreuve. Les
-        // recopier ici en ferait deux versions a corriger.
-        if let Some(prefixe) = dhcp::options::longueur_prefixe(MASQUE) {
-            let reseau = dhcp::options::adresse_reseau(ip, MASQUE);
-            return format!("{}/{}", ipv4::format_addr(&reseau), prefixe);
-        }
-        if ip != [0, 0, 0, 0] {
-            return ipv4::format_addr(&ip);
-        }
+    }
+    // La longueur de prefixe et l'adresse de reseau viennent du module pur
+    // du client DHCP, celui que la suite hote met a l'epreuve. Les recopier
+    // ici en ferait deux versions a corriger.
+    if let Some(prefixe) = dhcp::options::longueur_prefixe(c.masque) {
+        let reseau = dhcp::options::adresse_reseau(c.ip, c.masque);
+        return format!("{}/{}", ipv4::format_addr(&reseau), prefixe);
+    }
+    if c.ip != [0, 0, 0, 0] {
+        return ipv4::format_addr(&c.ip);
     }
     String::new()
 }
@@ -878,11 +891,12 @@ fn veilleur_de_lien() -> ! {
         if nouvel_etat as u8 != etat as u8 {
             pose_le_verdict(nouvel_etat);
             crate::kernel::sysroot::refresh_resolver();
+            let c = config::instantane();
             crate::kernel::dmesg::log_fmt(format_args!(
                 "net: eth0 {} gw {} dns {} — {}",
-                ipv4::format_addr(&our_ip()),
-                ipv4::format_addr(&gateway()),
-                ipv4::format_addr(&dns_server()),
+                ipv4::format_addr(&c.ip),
+                ipv4::format_addr(&c.passerelle),
+                ipv4::format_addr(&c.resolveur),
                 nom_demarrage(nouvel_etat),
             ));
             crate::serial_println!(
@@ -1486,7 +1500,7 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
 ///
 /// La fonction supposait que tout reseau tient dans un /24. Le bail DHCP
 /// porte pourtant son masque (option 1), il est deja lu et deja retenu dans
-/// `MASQUE` -- personne ne s'en servait pour router. Sur un /16 domestique ou
+/// la configuration -- personne ne s'en servait pour router. Sur un /16 domestique ou
 /// un /22 d'entreprise, chaque voisin hors des 254 premieres adresses etait
 /// donc envoye a la passerelle, qui le renvoyait sur le meme cable : au mieux
 /// un aller-retour inutile, au pire un voisin injoignable si la passerelle ne
@@ -1495,17 +1509,16 @@ pub fn arping(argc: usize, argv: &[&str; 12]) {
 /// Sans masque connu -- avant le bail, ou sur une configuration statique de
 /// repli -- on retombe sur le /24, qui est ce que la version precedente
 /// faisait toujours.
-fn same_subnet(ip: &Ipv4Addr) -> bool {
-    let nous = our_ip();
-    let masque = unsafe { MASQUE };
-    if masque == [0, 0, 0, 0] {
-        return ip[0] == nous[0] && ip[1] == nous[1] && ip[2] == nous[2];
-    }
-    (0..4).all(|i| ip[i] & masque[i] == nous[i] & masque[i])
+///
+/// Le choix du prochain saut lit adresse, masque ET passerelle : il les prend
+/// dans UN instantane (`config::ConfigEth0::meme_sous_reseau`), sinon un bail
+/// arrive entre deux lectures ferait router selon deux reseaux a la fois.
+fn prochain_saut(dst: &Ipv4Addr) -> Ipv4Addr {
+    let c = config::instantane();
+    if c.meme_sous_reseau(dst) { *dst } else { c.passerelle }
 }
 
 static PROCHAIN_IP_ID: AtomicU16 = AtomicU16::new(0x4000);
-static mut GW_MAC: Option<[u8; 6]> = None;
 
 fn next_ip_id() -> u16 {
     // Lot B7 : deux emetteurs concurrents (plus de gros verrou pour les
@@ -1521,7 +1534,7 @@ fn next_ip_id() -> u16 {
 /// appelant qui tient un verrou tournant ou qui sert un chemin de
 /// disponibilite.
 fn hop_mac(dst: &Ipv4Addr, bloquant: bool) -> Option<[u8; 6]> {
-    let cible = if same_subnet(dst) { *dst } else { gateway() };
+    let cible = prochain_saut(dst);
 
     match arp_cache_lit(cible) {
         Some(Some(mac)) => return Some(mac),
@@ -2069,11 +2082,12 @@ longueur={} somme_ipv4={} somme_udp={}",
 /// sous-reseau. Avant le bail, on ne sait pas encore qui on est : on accepte
 /// tout, parce que refuser reviendrait a ne jamais pouvoir se configurer.
 fn pour_nous(dst: &Ipv4Addr) -> bool {
-    let nous = our_ip();
+    // Adresse et masque du MEME instantane.
+    let c = config::instantane();
+    let (nous, masque) = (c.ip, c.masque);
     if nous == [0, 0, 0, 0] || *dst == nous || *dst == [255, 255, 255, 255] {
         return true;
     }
-    let masque = unsafe { MASQUE };
     if masque == [0, 0, 0, 0] {
         // Sans masque connu, on ne sait pas calculer la diffusion dirigee :
         // seul le /24 de repli est sur, et c'est ce que faisait le routage
@@ -2646,7 +2660,7 @@ pub fn tls_cmd(argc: usize, argv: &[&str; 12]) {
 /// Ping reel via e1000 : ARP -> ICMP echo sur 4 paquets.
 fn ping_remote(target: Ipv4Addr) {
     // Adresse de niveau lien : la cible si locale, sinon la passerelle.
-    let next_hop = if same_subnet(&target) { target } else { gateway() };
+    let next_hop = prochain_saut(&target);
     let dst_mac = match arp_resolve(next_hop) {
         Some(m) => m,
         None => {

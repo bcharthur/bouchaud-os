@@ -304,10 +304,12 @@ pub fn negocie_avant(budget_ms: u64) -> Option<Bail> {
     // Valeurs de repli : un serveur qui n'annonce ni routeur ni resolveur
     // laisse la configuration compilee en place plutot que de poser 0.0.0.0,
     // qui donnerait une interface configuree et injoignable.
-    let gateway = if ack.router == [0, 0, 0, 0] { net::gateway() } else { ack.router };
-    let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
-    net::set_config(ack.your_ip, gateway, dns);
-    net::pose_identite_reseau(&ack.domaine[..ack.domaine_len], ack.masque);
+    // UNE publication (BOUCHAUD_NET_CONFIG_GENERATION_V1) : le repli sur la
+    // passerelle et le resolveur courants est decide sous le verrou des
+    // ecrivains, avec le reste du bail.
+    let publiee = net::applique_bail(ack.your_ip, ack.router, ack.dns,
+                                     &ack.domaine[..ack.domaine_len], ack.masque);
+    let (gateway, dns) = (publiee.passerelle, publiee.resolveur);
     crate::net::chronologie::phase(crate::net::chronologie::Phase::Ipv4Prete, xid);
     Some(Bail { ip: ack.your_ip, gateway, dns })
 }
@@ -341,10 +343,9 @@ pub fn run() {
     };
 
     // Applique la configuration (avec valeurs de repli).
-    let gw = if ack.router == [0, 0, 0, 0] { net::gateway() } else { ack.router };
-    let dns = if ack.dns == [0, 0, 0, 0] { net::dns_server() } else { ack.dns };
-    net::set_config(ack.your_ip, gw, dns);
-    net::pose_identite_reseau(&ack.domaine[..ack.domaine_len], ack.masque);
+    let publiee = net::applique_bail(ack.your_ip, ack.router, ack.dns,
+                                     &ack.domaine[..ack.domaine_len], ack.masque);
+    let (gw, dns) = (publiee.passerelle, publiee.resolveur);
 
     crate::print!("DHCP: bail obtenu  inet "); ipv4::print_addr(&ack.your_ip);
     crate::print!("  gw "); ipv4::print_addr(&gw);

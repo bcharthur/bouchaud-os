@@ -112,9 +112,11 @@ impl Client {
         // `source=bail-dhcp` sur une machine qui n'avait recu aucun bail, et
         // le repli sur la passerelle ne pouvait jamais se declencher.
         let bail = crate::net::bail_obtenu();
+        // Resolveur et passerelle du MEME instantane.
+        let config = crate::net::config::instantane();
         let (resolveur_choisi, resolveur_source) = crate::net::resolveur::choisis(
-            if bail { crate::net::dns_server() } else { [0, 0, 0, 0] },
-            if bail { crate::net::gateway() } else { [0, 0, 0, 0] },
+            if bail { config.resolveur } else { [0, 0, 0, 0] },
+            if bail { config.passerelle } else { [0, 0, 0, 0] },
             // ZERO SUR UNE CARTE REELLE : le resolveur compile est celui du
             // NAT de QEMU, et le remettre au navigateur sur la machine de
             // reference lui fait attendre un delai d'attente par page.
@@ -222,8 +224,8 @@ impl Client {
             pid,
             crate::net::ipv4::format_addr(&resolveur_choisi),
             resolveur_source.nom(),
-            crate::net::ipv4::format_addr(&crate::net::dns_server()),
-            crate::net::ipv4::format_addr(&crate::net::gateway()),
+            crate::net::ipv4::format_addr(&config.resolveur),
+            crate::net::ipv4::format_addr(&config.passerelle),
         );
         // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
         // sont identiques avec et sans DHCP.

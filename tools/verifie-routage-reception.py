@@ -36,7 +36,7 @@ Deux causes, toutes deux structurelles :
 4. Le verdict de `e1000::send` est REGARDE quand on emet une requete ARP.
 5. Les anneaux de la carte sont serialises.
 6. Les trames courtes sont bourrees a soixante octets, dans les deux pilotes.
-7. `same_subnet` utilise le masque du bail, pas un /24 code en dur.
+7. le prochain saut utilise le masque du bail, pas un /24 code en dur.
 8. Un echec de resolution n'ecrase jamais une reussite concurrente.
 """
 
@@ -253,12 +253,19 @@ def main():
             )
 
     # --- 7. LE MASQUE DU BAIL, PAS UN /24 CODE EN DUR -----------------------
-    sous_reseau = corps(net, "fn same_subnet(")
-    if sous_reseau is None:
-        fautes.append("net/mod.rs : same_subnet a disparu.")
-    elif "MASQUE" not in sous_reseau:
+    #
+    # BOUCHAUD_NET_CONFIG_GENERATION_V1 : la decision vit dans
+    # `ConfigEth0::meme_sous_reseau` (net/config.rs), qui lit masque et adresse
+    # du MEME instantane ; `prochain_saut` (net/mod.rs) la consulte.
+    config_net = sans_commentaires(
+        (RACINE / "src/net/config.rs").read_text(encoding="utf-8"))
+    sous_reseau = corps(config_net, "pub fn meme_sous_reseau(")
+    saut = corps(net, "fn prochain_saut(")
+    if sous_reseau is None or saut is None:
+        fautes.append("net : le choix du sous-reseau (meme_sous_reseau / prochain_saut) a disparu.")
+    elif "self.masque" not in sous_reseau or "meme_sous_reseau(" not in saut:
         fautes.append(
-            "net/mod.rs : same_subnet ignore de nouveau le masque du bail. Sur "
+            "net : le choix du prochain saut ignore de nouveau le masque du bail. Sur "
             "un /16 ou un /22, chaque voisin hors des 254 premieres adresses "
             "serait envoye a la passerelle."
         )

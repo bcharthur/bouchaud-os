@@ -159,8 +159,8 @@ pub fn netdiag(argc: usize, argv: &[&str; 12]) {
         SECONDES_DEFAUT
     };
 
-    let passerelle = net::gateway();
-    let serveur_noms = net::dns_server();
+    let config = net::config::instantane();
+    let (passerelle, serveur_noms) = (config.passerelle, config.resolveur);
     if passerelle == [0, 0, 0, 0] {
         crate::println!(
             "netdiag: aucune passerelle configuree -- le reseau n'est pas monte."
@@ -485,14 +485,15 @@ pub fn netetat() {
     );
     let nic = crate::drivers::rtl8168::releve();
     let qualite = net::qualite_lien();
+    let config = net::config::instantane();
     crate::println!(
         "lien : {} {} Mb/s duplex {} | ip {} gw {} dns {}",
         if crate::drivers::e1000::link_up() { "UP" } else { "DOWN" },
         qualite.vitesse_mbps,
         if qualite.duplex_complet { "complet" } else { "alternat" },
-        ipv4::format_addr(&net::our_ip()),
-        ipv4::format_addr(&net::gateway()),
-        ipv4::format_addr(&net::dns_server()),
+        ipv4::format_addr(&config.ip),
+        ipv4::format_addr(&config.passerelle),
+        ipv4::format_addr(&config.resolveur),
     );
     if nic.xid == 0 && nic.rx_paquets == 0 && nic.tx_paquets == 0 {
         crate::println!("rtl8168 : absent ou non initialise.");
@@ -589,12 +590,12 @@ pub fn dnsdiag(argc: usize, argv: &[&str; 12]) {
         ["example.com", "wikipedia.org", "google.com"]
     };
 
-    let resolveur = crate::net::dns_server();
+    let config = crate::net::config::instantane();
+    let (resolveur, ip) = (config.resolveur, config.ip);
     crate::println!(
         "dnsdiag : resolveur {}.{}.{}.{}  interface {}.{}.{}.{}",
         resolveur[0], resolveur[1], resolveur[2], resolveur[3],
-        crate::net::our_ip()[0], crate::net::our_ip()[1],
-        crate::net::our_ip()[2], crate::net::our_ip()[3],
+        ip[0], ip[1], ip[2], ip[3],
     );
     if resolveur == [0, 0, 0, 0] {
         crate::println!("dnsdiag : aucun resolveur configure — rien a interroger.");
