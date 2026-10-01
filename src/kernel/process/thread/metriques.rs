@@ -60,8 +60,8 @@ rej_inel={} rej_crs={} mig={}",
     // preemption reportee, une tache prete qui attend son coeur -- et ils
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
-    // BOUCHAUD_QUANTUM_NOYAU_V1 : le releve des reveils et des preemptions de
-    // fils noyau existait (`log_reveil`) et n'etait appele nulle part.
+    // Le releve des reveils et des preemptions de fils noyau existait
+    // (`log_reveil`) et n'etait appele nulle part.
     crate::kernel::scheduler::preempt::log_reveil();
     crate::kernel::scheduler::latency::log_stats();
     // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : taches vues prete depuis plus de

@@ -207,59 +207,74 @@ pub fn masque_cible() -> u64 {
 /// ouverte. Une IRQ qui interrompt le scheduler ne peut donc pas en elire une
 /// seconde, quel que soit le chemin par lequel elle est arrivee.
 pub fn preemption_noyau_sure() -> bool {
-    let Some(id) = local_id() else { return false; };
+    contexte_noyau(false).map_or(false, |c| crate::kernel::preemption_noyau::contexte_sur(&c))
+}
+
+/// Ce que la decision pure lit de ce coeur, maintenant.
+fn contexte_noyau(demande_ciblee: bool) -> Option<crate::kernel::preemption_noyau::Contexte> {
+    let id = local_id()?;
     let local = cpu_local::local(id);
-    local.preempt_count() == 0
-        && local.verrous_simples() == 0
-        && crate::kernel::sync::lockdep::depth() == 0
+    Some(crate::kernel::preemption_noyau::Contexte {
+        demande_ciblee,
+        preempt_count: local.preempt_count() as u32,
+        verrous_simples: local.verrous_simples() as u32,
+        profondeur_lockdep: crate::kernel::sync::lockdep::depth() as u32,
+        // BOUCHAUD_PREEMPTION_NOYAU_SURE_V1 : le garde de lecture du registre
+        // ne traverse pas une commutation...
+        lectures_registre: crate::kernel::task::lectures_registre_locales() as u32,
+        // ... et un shootdown TLB ne quitte pas son coeur en vol.
+        shootdown_en_vol: smp::shootdown_en_vol_local(),
         // BOUCHAUD_SORTIE_NON_PREEMPTEE_V1 : une tache qui meurt finit sa
         // sortie. Coupee apres `marque_zombie`, elle n'est jamais republiee :
         // `continuation-banc` l'a vu sur SMP1 -- racine coupee au milieu
         // d'`exit_current` par une preemption ciblee, continuation reprise
         // 2 s plus tard par la mort suivante.
-        && !crate::kernel::task::sortie_en_cours_locale()
+        sortie_en_cours: crate::kernel::task::sortie_en_cours_locale(),
+        // Controle a l'execution de l'invariant « pas d'IRQ imbriquee » : voir
+        // `preemption_noyau`. Dans un gestionnaire, IF vaut zero.
+        interruptions_ouvertes: x86_64::instructions::interrupts::are_enabled(),
+    })
 }
 
 /// Accorde-t-on la preemption d'un fil noyau sur ce coeur, maintenant ?
 ///
-/// Rend `true` UNE fois, et seulement si une demande ciblee est pendante --
-/// ou si le fil noyau courant a epuise `QUANTUM_NOYAU_NS` devant des taches
-/// pretes sur ce coeur -- et que le contexte est sur. La demande n'est pas rendue ici : elle l'est
-/// quand la commutation a effectivement eu lieu, pour qu'un refus ne fasse
-/// pas disparaitre une tache qui attend d'etre elue pour se rendormir.
+/// Rend `true` UNE fois, et seulement si une demande ciblee est pendante et
+/// que le contexte est sur -- `preemption_noyau::decide`, pure et testee sur
+/// l'hote. La demande n'est pas rendue ici : elle l'est quand la commutation
+/// a effectivement eu lieu, pour qu'un refus ne fasse pas disparaitre une
+/// tache qui attend d'etre elue pour se rendormir.
 pub fn accorde_preemption_noyau() -> bool {
-    // BOUCHAUD_QUANTUM_NOYAU_V1 : la demande ciblee n'est plus la SEULE
-    // raison. Un fil noyau qui a epuise son quantum pendant que des taches
-    // attendent son coeur est preempte au tic, sous les MEMES conditions de
-    // surete. Sans cela un fil noyau qui scrute en boucle -- `usb-hid` sur un
-    // AP, 732 ms mesurees par la veille d'attente vive -- tient son coeur
-    // tant qu'il ne dort pas.
     let ciblee = demande_ciblee_pendante();
-    let quantum = !ciblee
-        && crate::kernel::task::fil_noyau_quantum_epuise(QUANTUM_NOYAU_NS);
-    if !ciblee && !quantum {
+    if !ciblee {
         return false;
     }
-    if preemption_noyau_sure() {
+    let Some(contexte) = contexte_noyau(ciblee) else { return false; };
+    if contexte.interruptions_ouvertes {
+        PREEMPTIONS_NOYAU_IF_OUVERT.fetch_add(1, Ordering::Relaxed);
+    }
+    if crate::kernel::preemption_noyau::decide(&contexte) {
         PREEMPTIONS_NOYAU_ACCORDEES.fetch_add(1, Ordering::Relaxed);
-        if quantum {
-            PREEMPTIONS_NOYAU_QUANTUM.fetch_add(1, Ordering::Relaxed);
-        }
         return true;
+    }
+    if contexte.lectures_registre != 0 {
+        PREEMPTIONS_NOYAU_LECTEUR.fetch_add(1, Ordering::Relaxed);
     }
     PREEMPTIONS_NOYAU_REFUSEES.fetch_add(1, Ordering::Relaxed);
     false
 }
 
-/// Quantum d'un fil noyau quand des taches attendent son coeur : deux quanta
-/// de l'ordonnanceur. Un fil noyau qui dort avant ne le voit jamais.
-pub const QUANTUM_NOYAU_NS: u64 = 2 * smp::SCHED_QUANTUM_TICKS * 1_000_000;
+/// Decisions prises interruptions OUVERTES dans un gestionnaire : un
+/// gestionnaire a rouvert IF, une IRQ pourrait s'y imbriquer. Attendu : 0.
+static PREEMPTIONS_NOYAU_IF_OUVERT: AtomicU64 = AtomicU64::new(0);
+/// Refus parce que la tache interrompue tenait une lecture du registre.
+static PREEMPTIONS_NOYAU_LECTEUR: AtomicU64 = AtomicU64::new(0);
 
-static PREEMPTIONS_NOYAU_QUANTUM: AtomicU64 = AtomicU64::new(0);
+pub fn preemptions_noyau_if_ouvert() -> u64 {
+    PREEMPTIONS_NOYAU_IF_OUVERT.load(Ordering::Relaxed)
+}
 
-/// Preemptions de fils noyau accordees au quantum (et non sur demande).
-pub fn preemptions_noyau_quantum() -> u64 {
-    PREEMPTIONS_NOYAU_QUANTUM.load(Ordering::Relaxed)
+pub fn preemptions_noyau_refus_lecteur() -> u64 {
+    PREEMPTIONS_NOYAU_LECTEUR.load(Ordering::Relaxed)
 }
 
 pub fn note_reveil_immediat() { REVEILS_IMMEDIATS.fetch_add(1, Ordering::Relaxed); }
@@ -353,10 +368,10 @@ pub fn stats() -> Stats {
 pub fn log_reveil() {
     let r = stats_reveil();
     crate::serial_println!(
-        "[SCHED-NG-REVEIL] immediats={} cibles={} differes={} en_file={} ipi={} preempt_noyau={}/{} preempt_noyau_quantum={} deplaces={}",
+        "[SCHED-NG-REVEIL] immediats={} cibles={} differes={} en_file={} ipi={} preempt_noyau={}/{} refus_lecteur={} if_ouvert={} deplaces={}",
         r.immediats, r.cibles, r.differes, r.en_file, r.ipi_envoyes,
         r.preemptions_noyau, r.preemptions_noyau.saturating_add(r.preemptions_noyau_refusees),
-        preemptions_noyau_quantum(), r.placements_deplaces
+        preemptions_noyau_refus_lecteur(), preemptions_noyau_if_ouvert(), r.placements_deplaces
     );
 }
 

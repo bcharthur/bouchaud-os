@@ -195,6 +195,13 @@ fn profondeur_lecture_locale() -> usize {
     PROFONDEUR_LECTURE[local_cpu()].load(Ordering::Relaxed)
 }
 
+/// BOUCHAUD_PREEMPTION_NOYAU_SURE_V1 : gardes de lecture du registre tenus par ce
+/// coeur. Lu par la decision de preemption depuis l'IRQ : non nul, la tache
+/// interrompue tient une vue de la table et ne doit pas quitter le coeur.
+pub fn lectures_registre_locales() -> usize {
+    profondeur_lecture_locale()
+}
+
 struct RegistreLecture;
 
 impl RegistreLecture {

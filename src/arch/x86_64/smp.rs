@@ -919,6 +919,14 @@ fn sert_shootdowns(cpu: usize) {
 /// toujours. C'est ce que montre le blocage mm-ng6 -- `munmap` immobile
 /// pendant 285 secondes, sans faute de page et sans gros verrou. Ces trois
 /// nombres disent QUEL CPU manque a l'appel.
+/// BOUCHAUD_PREEMPTION_NOYAU_SURE_V1 : ce coeur attend-il les acquittements
+/// d'un shootdown qu'il a emis ? Un seul emplacement par coeur : le fil qui
+/// l'attend ne doit pas quitter le coeur avant de l'avoir rendu.
+pub fn shootdown_en_vol_local() -> bool {
+    let cpu = cpu_index();
+    cpu < MAX_CPUS && TLB_SLOTS[cpu].sequence.load(Ordering::Acquire) != 0
+}
+
 pub fn tlb_slot_etat(cpu: usize) -> (u64, u64, u64) {
     if cpu >= MAX_CPUS {
         return (0, 0, 0);
