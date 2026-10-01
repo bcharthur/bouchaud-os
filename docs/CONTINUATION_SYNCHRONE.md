@@ -85,7 +85,10 @@ Modele de propriete :
   boucle idle dediee (pile de 64 Kio, amorcee une fois par
   `assure_idle_coeur_zero`), commune avec celle des AP (`boucle_idle`).
 * `CONTINUATION` est la pile d'amorcage garee par `run` / `run_noyau`, avec son
-  proprietaire : pid racine, coeur, et pour `run` sa descendance. Etats LIBRE ->
+  proprietaire : pid racine et coeur. « Racine terminee » veut dire : plus
+  aucun fil d'execution non zombie du PROCESSUS racine -- pas sa descendance,
+  que le teardown de session a deja arretee (`run` ne l'a jamais attendue :
+  BOUCHAUD_C71). Etats LIBRE ->
   GAREE (contexte d'amorcage) -> LIBRE (consommee une fois, par CAS).
 * Elle n'est reprise que si `continuation::reprenable` : racine terminee, sur
   le coeur proprietaire. Deux endroits seulement : la mort qui la rend due
@@ -156,6 +159,14 @@ Le risque reste latent : une variable persistante l'emporte en silence.
 commit a la ligne `BOUCHAUD_BUILD` du noyau suffirait a le rendre bruyant.
 
 ## 7. Ce qui reste ouvert
+
+* **Zombies ressuscites (pre-existant, hors de ce lot).** `session-probe 4`
+  sous SMP4 : le teardown de session marque les quatre fils zombie (`4
+  tache(s) de sa session arretees`), puis trois d'entre eux sont relus
+  `Blocked` -- leur `nanosleep` ecrit l'etat par `range` (ecriture simple) et
+  efface le `Zombie`. Une premiere version de ce lot attendait la descendance
+  de la racine de `run` et a fige le shell sur ce cas ; elle attend desormais
+  le seul processus racine, comme avant.
 
 * Apres une VRAIE sortie du bureau, `stage2` fait toujours `cli; hlt` et le
   menage ne fait que vider des tables : les taches des AP continuent. Hors de

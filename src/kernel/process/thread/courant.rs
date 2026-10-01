@@ -104,7 +104,7 @@ pub fn derniere_reprise_continuation_ms() -> u64 {
 ///
 /// Fail-fast : une continuation deja garee voudrait dire deux lancements
 /// synchrones a la fois, donc une pile d'amorcage ecrasee.
-fn gare_continuation(cpu: usize, racine: u32, tid: u32, descendance: bool) {
+fn gare_continuation(cpu: usize, racine: u32, tid: u32) {
     assert_eq!(
         CONTINUATION_ETAT.load(Ordering::Acquire),
         CONTINUATION_LIBRE,
@@ -112,35 +112,32 @@ fn gare_continuation(cpu: usize, racine: u32, tid: u32, descendance: bool) {
         CONTINUATION_RACINE.load(Ordering::Relaxed),
     );
     CONTINUATION_RACINE.store(racine, Ordering::Relaxed);
-    CONTINUATION_DESCENDANCE.store(descendance, Ordering::Relaxed);
     CONTINUATION_CPU.store(cpu, Ordering::Relaxed);
     CONTINUATION_EPOQUE_VUE.store(u64::MAX, Ordering::Relaxed);
     CONTINUATION_ETAT.store(CONTINUATION_GAREE, Ordering::Release);
     crate::kernel::dmesg::log_fmt(format_args!(
-        "RUN_NOYAU_CTX t={} cpu={} owner_pid={} owner_tid={} rsp={:#x} descendance={}",
+        "RUN_NOYAU_CTX t={} cpu={} owner_pid={} owner_tid={} rsp={:#x}",
         crate::kernel::timer::monotonic_ms(),
         cpu,
         racine,
         tid,
         rsp_courant_passation(),
-        descendance as u8,
     ));
 }
 
 /// La racine de la continuation garee est-elle terminee ?
 ///
-/// Terminee : plus AUCUNE tache non zombie du processus racine -- ni, pour
-/// `run`, de sa descendance. C'est la seule condition qui rend une
-/// continuation reprenable, quel que soit le contexte qui la constate.
-fn racine_terminee(racine: u32, descendance: bool) -> bool {
-    !tasks().iter().any(|t| {
-        t.state != TaskState::Zombie
-            && if descendance {
-                descend_de(t.process.pid, racine)
-            } else {
-                t.process.pid == racine
-            }
-    })
+/// Terminee : plus AUCUNE tache non zombie du PROCESSUS racine. C'est la
+/// seule condition qui rend une continuation reprenable, quel que soit le
+/// contexte qui la constate.
+///
+/// La descendance n'en fait pas partie, et c'est voulu : le teardown de
+/// session l'a deja marquee, et l'attendre bloquait le shell
+/// (`session-probe` : des fils endormis ne meurent jamais).
+fn racine_terminee(racine: u32) -> bool {
+    !tasks()
+        .iter()
+        .any(|t| t.state != TaskState::Zombie && t.process.pid == racine)
 }
 
 /// La continuation garee peut-elle etre reprise ICI, maintenant ?
@@ -159,10 +156,7 @@ fn continuation_due(cpu: usize) -> bool {
     }
     let due = crate::kernel::continuation::reprenable(
         true,
-        racine_terminee(
-            CONTINUATION_RACINE.load(Ordering::Relaxed),
-            CONTINUATION_DESCENDANCE.load(Ordering::Relaxed),
-        ),
+        racine_terminee(CONTINUATION_RACINE.load(Ordering::Relaxed)),
         cpu,
         CONTINUATION_CPU.load(Ordering::Relaxed),
     );
@@ -179,11 +173,10 @@ fn continuation_due(cpu: usize) -> bool {
 /// transformerait de nouveau un defaut local en extinction globale.
 fn consomme_continuation(cpu: usize, raison: &'static str) -> u64 {
     let racine = CONTINUATION_RACINE.load(Ordering::Relaxed);
-    let descendance = CONTINUATION_DESCENDANCE.load(Ordering::Relaxed);
     let garee = CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_GAREE;
     if !crate::kernel::continuation::reprenable(
         garee,
-        racine_terminee(racine, descendance),
+        racine_terminee(racine),
         cpu,
         CONTINUATION_CPU.load(Ordering::Relaxed),
     ) {

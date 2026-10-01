@@ -185,6 +185,8 @@ static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
 // seulement sur le coeur qui l'a garee : soit par la mort meme qui la rend
 // due (`reprend_continuation`), soit par la boucle idle de ce coeur.
 //
+// Racine = le PROCESSUS racine (ses fils d'execution), pas sa descendance.
+//
 // Propriete : posee par le contexte d'amorcage (LIBRE -> GAREE), consommee
 // une fois (GAREE -> LIBRE) par le coeur `CONTINUATION_CPU`. Un seul
 // lancement synchrone a la fois : `run_noyau` refuse depuis une tache, et le
@@ -195,8 +197,6 @@ const CONTINUATION_GAREE: u8 = 1;
 static CONTINUATION_ETAT: AtomicU8 = AtomicU8::new(CONTINUATION_LIBRE);
 /// Pid de la racine attendue.
 static CONTINUATION_RACINE: AtomicU32 = AtomicU32::new(0);
-/// `run` attend aussi la descendance de sa racine ; `run_noyau` non.
-static CONTINUATION_DESCENDANCE: AtomicBool = AtomicBool::new(false);
 static CONTINUATION_CPU: AtomicUsize = AtomicUsize::new(0);
 /// Sorties menees a la boucle idle PENDANT qu'une continuation etait garee :
 /// exactement l'evenement qui, avant, la reprenait a tort.

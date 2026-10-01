@@ -128,7 +128,7 @@ def main() -> int:
     negatifs = [
         (ORDO, "    let target_rsp = kernel_ctx().rsp;\n    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }",
          "    let target_rsp = unsafe { CONTINUATION.rsp };\n    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }"),
-        (VIE, "    gare_continuation(0, process.pid, unsafe { (*to_ptr).tid }, false);\n    let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };",
+        (VIE, "    gare_continuation(0, process.pid, unsafe { (*to_ptr).tid });\n    let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };",
          "    let continuation = &mut kernel_ctx().rsp as *mut u64;"),
         (COURANT, "        panic!(\n            \"task: reprise de la continuation",
          "        crate::kernel::dmesg::log_fmt(format_args!(\n            \"task: reprise de la continuation"),

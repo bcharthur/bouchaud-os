@@ -31,7 +31,7 @@ pub struct Sortie {
     pub garee: bool,
     /// Coeur qui l'a garee.
     pub cpu_continuation: usize,
-    /// La racine (et, pour `run`, sa descendance) est-elle terminee, cette
+    /// Le processus racine (tous ses fils d'execution) est-il termine, cette
     /// mort comprise ?
     pub racine_terminee: bool,
     /// Une autre tache est-elle prete sur ce coeur ?

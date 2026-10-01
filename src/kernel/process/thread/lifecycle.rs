@@ -346,8 +346,8 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
     //
     // La boucle d'attente sur la pile morte, son garde-fou de trente secondes
     // et sa commutation sans retour disparaissent avec cette confusion : une
-    // racine pas encore terminee (fils, descendance de `run`) laisse sa
-    // continuation garee, et c'est la derniere mort -- ou la boucle idle du
+    // racine pas encore terminee (un fil de son processus vit encore) laisse
+    // sa continuation garee, et c'est la derniere mort -- ou la boucle idle du
     // coeur proprietaire -- qui la reprend.
     let cpu_id = local_cpu();
     let cur = current_index_raw();
@@ -372,10 +372,7 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         garee,
         cpu_continuation: coeur_proprietaire,
         racine_terminee: garee
-            && racine_terminee(
-                CONTINUATION_RACINE.load(Ordering::Relaxed),
-                CONTINUATION_DESCENDANCE.load(Ordering::Relaxed),
-            ),
+            && racine_terminee(CONTINUATION_RACINE.load(Ordering::Relaxed)),
         // Decide plus bas par `commute_sortie_definitive_si_possible` : la
         // continuation passe avant, quelle que soit la reponse.
         autre_prete: false,
@@ -609,9 +606,11 @@ pub fn run(mut first: Box<Task>) -> i32 {
     unsafe { install(&mut *to_ptr); }
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-installe");
     // La pile d'amorcage est garee dans LA continuation, a son proprietaire
-    // -- plus dans `KERNEL_CTX`, qui est l'idle du coeur. Seule la fin de la
-    // racine ET de sa descendance la rendra (BOUCHAUD_CONTINUATION_SYNCHRONE_V1).
-    gare_continuation(cpu_id, racine, unsafe { (*to_ptr).tid }, true);
+    // -- plus dans `KERNEL_CTX`, qui est l'idle du coeur. Seule la fin du
+    // PROCESSUS racine la rendra (BOUCHAUD_CONTINUATION_SYNCHRONE_V1) : sa
+    // descendance a deja ete arretee par le teardown de session, et `run`
+    // ne l'attendait pas (voir BOUCHAUD_C71 : l'attendre coutait le shell).
+    gare_continuation(cpu_id, racine, unsafe { (*to_ptr).tid });
     let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-switch");
     unsafe { switch_context(continuation, (*to_ptr).ctx.rsp); }
@@ -796,7 +795,7 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     };
     set_current_index(index);
     unsafe { install(&mut *to_ptr); }
-    gare_continuation(0, process.pid, unsafe { (*to_ptr).tid }, false);
+    gare_continuation(0, process.pid, unsafe { (*to_ptr).tid });
     let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };
     unsafe { switch_context(continuation, (*to_ptr).ctx.rsp); }
     complete_switch_handoff();
