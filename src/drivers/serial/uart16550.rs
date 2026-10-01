@@ -10,7 +10,7 @@
 //!   formateur série.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
 #[path = "sonde.rs"]
@@ -330,7 +330,104 @@ impl fmt::Write for SerialPort {
 /// Une ligne de diagnostic entrelacee est une ligne PERDUE. Elle a fait echouer
 /// un garde-fou qui avait pourtant raison, et elle rendrait inexploitable un
 /// releve d'essai physique -- ce pour quoi la console serie existe.
-static EMISSION: AtomicBool = AtomicBool::new(false);
+///
+/// BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 -- le jeton porte le coeur qui le
+/// tient (`coeur + 1`, 0 = libre), et un ecrivain aux interruptions masquees
+/// passe devant.
+///
+/// Le releve d'ordonnancement de l'IRQ du minuteur (une vingtaine de lignes,
+/// interruptions masquees) disputait le jeton LIGNE PAR LIGNE :
+///
+///   * aux taches qui ecrivaient sur les autres coeurs -- un CAS n'est pas
+///     equitable, l'IRQ perdait encore et encore et allait a la borne de
+///     100 000 tours a chaque ligne : coeur zero tenu 5 a 12,6 s
+///     (scheduler-ng-banc SMP4/SMP8, QEMU) ;
+///   * a la tache qu'il avait lui-meme coupee au milieu d'une ligne sur son
+///     coeur -- qui ne pouvait rendre le jeton qu'apres lui : 463 a 566 ms
+///     a SMP1.
+///
+/// Desormais : un ecrivain qui trouve le jeton tenu par SON coeur ecrit tout
+/// de suite (c'est lui, ou une section qu'il a ouverte -- `tiens_emission`) ;
+/// un ecrivain aux interruptions masquees qui attend leve
+/// `EMISSION_PRIORITAIRE`, et les autres cessent de prendre le jeton jusqu'a
+/// ce qu'il l'ait eu : il attend au plus la ligne en cours.
+static EMISSION: AtomicUsize = AtomicUsize::new(0);
+static EMISSION_PRIORITAIRE: AtomicBool = AtomicBool::new(false);
+static EMISSIONS_IMBRIQUEES: AtomicU64 = AtomicU64::new(0);
+static EMISSIONS_A_LA_BORNE: AtomicU64 = AtomicU64::new(0);
+
+/// Lignes emises alors que leur coeur tenait deja le jeton.
+pub fn emissions_imbriquees() -> u64 {
+    EMISSIONS_IMBRIQUEES.load(Ordering::Relaxed)
+}
+
+/// Attentes du jeton allees jusqu'a la borne (ligne emise sans lui).
+pub fn emissions_a_la_borne() -> u64 {
+    EMISSIONS_A_LA_BORNE.load(Ordering::Relaxed)
+}
+
+enum Acquisition {
+    Pris,
+    DejaAuCoeur,
+    Borne,
+}
+
+/// Attente BORNEE du jeton.
+///
+/// Le port serie sert aussi aux paniques et aux gestionnaires d'interruption.
+/// Y attendre sans fin transformerait une console en interblocage, et une
+/// ligne entrelacee vaut infiniment mieux qu'une machine qui se tait.
+fn acquiert_emission() -> Acquisition {
+    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    let masquees = !x86_64::instructions::interrupts::are_enabled();
+    let mut tours = 0u32;
+    let issue = loop {
+        let cede = !masquees && EMISSION_PRIORITAIRE.load(Ordering::Relaxed);
+        let detenteur = if cede {
+            EMISSION.load(Ordering::Relaxed)
+        } else {
+            match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => break Acquisition::Pris,
+                Err(detenteur) => detenteur,
+            }
+        };
+        if detenteur == moi {
+            break Acquisition::DejaAuCoeur;
+        }
+        if masquees {
+            EMISSION_PRIORITAIRE.store(true, Ordering::Relaxed);
+        }
+        tours += 1;
+        if tours > 100_000 {
+            EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
+            break Acquisition::Borne;
+        }
+        core::hint::spin_loop();
+    };
+    if masquees {
+        EMISSION_PRIORITAIRE.store(false, Ordering::Relaxed);
+    }
+    issue
+}
+
+/// Le jeton tenu pour plusieurs lignes : celles que ce coeur emet pendant
+/// que la garde vit sortent sans le redemander. Rendu a la fin de la garde,
+/// seulement s'il a ete pris par elle.
+pub struct JetonEmission {
+    rendre: bool,
+}
+
+impl Drop for JetonEmission {
+    fn drop(&mut self) {
+        if self.rendre {
+            EMISSION.store(0, Ordering::Release);
+        }
+    }
+}
+
+pub fn tiens_emission() -> JetonEmission {
+    JetonEmission { rendre: matches!(acquiert_emission(), Acquisition::Pris) }
+}
 
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -343,26 +440,17 @@ pub fn _print(args: fmt::Arguments) {
     let mut sortie = TamponFormat::neuf();
     let _ = sortie.write_fmt(args);
 
-    // Attente BORNEE, et emission quand meme si le jeton ne se libere pas.
-    //
-    // Le port serie sert aussi aux paniques et aux gestionnaires
-    // d'interruption. Y attendre sans fin transformerait une console en
-    // interblocage, et une ligne entrelacee vaut infiniment mieux qu'une
-    // machine qui se tait.
-    let mut tours = 0u32;
-    while EMISSION
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        tours += 1;
-        if tours > 100_000 {
+    match acquiert_emission() {
+        Acquisition::Pris => {
             sortie.vide();
-            return;
+            EMISSION.store(0, Ordering::Release);
         }
-        core::hint::spin_loop();
+        Acquisition::DejaAuCoeur => {
+            EMISSIONS_IMBRIQUEES.fetch_add(1, Ordering::Relaxed);
+            sortie.vide();
+        }
+        Acquisition::Borne => sortie.vide(),
     }
-    sortie.vide();
-    EMISSION.store(false, Ordering::Release);
 }
 
 impl fmt::Write for SerialBrut {

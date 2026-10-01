@@ -439,10 +439,12 @@ impl Drop for DureeReleve {
         let duree = crate::kernel::timer::monotonic_ns().saturating_sub(self.debut_ns);
         let pire = RELEVE_IRQ_PIRE_NS.fetch_max(duree, Ordering::Relaxed).max(duree);
         crate::serial_println!(
-            "[SONDE-IRQ-DUREE] complet={} duree_ms={} pire_ms={}",
+            "[SONDE-IRQ-DUREE] complet={} duree_ms={} pire_ms={} serie_imbriquees={} serie_bornes={}",
             self.complet as u8,
             duree / 1_000_000,
             pire / 1_000_000,
+            crate::drivers::serial::emissions_imbriquees(),
+            crate::drivers::serial::emissions_a_la_borne(),
         );
     }
 }
@@ -552,6 +554,10 @@ pub fn stall_probe_from_timer() {
     // n'acquitte aucun IPI (TLB shootdown : arret fail-closed a 2 s). Sa
     // duree est donc mesuree et publiee, sans rien changer d'autre.
     let debut_releve_ns = crate::kernel::timer::monotonic_ns();
+    // BOUCHAUD_JETON_SERIE_PROPRIETAIRE_V1 : le jeton serie est pris UNE
+    // fois pour tout le releve (et sa ligne de duree, rendue avant lui), pas
+    // dispute a chaque ligne interruptions masquees.
+    let _jeton = crate::drivers::serial::tiens_emission();
     let _duree = DureeReleve { debut_ns: debut_releve_ns, complet };
 
     crate::serial_println!(
