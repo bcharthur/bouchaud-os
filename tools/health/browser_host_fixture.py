@@ -1038,6 +1038,19 @@ HTML = r'''<!doctype html>
 
   console.log(`HOST_SMOKE_${canvasOK && workerOK && imageOK && frameOK ? "OK" : "FAIL"} canvas=${canvasOK ? 1 : 0} worker=${workerOK ? 1 : 0} image=${imageOK ? 1 : 0} frame=${frameOK ? 1 : 0}`
     + ` images=${imagesOK}/${CATALOGUE.length} js=${jsOK}/${epreuves.length} raf=${rafOK ? 1 : 0}`);
+
+  // BOUCHAUD_SMOKE_TERMINAL_V1 -- LA DERNIERE LIGNE, ET LA SEULE TERMINALE.
+  //
+  // `HOST_WORKER_AB_COMPLETE` dit que la matrice est MESUREE ; il est ecrit
+  // avant les verdicts FUNCTIONAL, GLOBAL, COLD_START_PERF et SMOKE. Le banc
+  // d'ordre s'y arretait et tuait la VM avant que ces lignes n'aient traverse
+  // la console (Ladybird #382, bras blob : quatre jalons « jamais atteints »).
+  // Cette ligne-ci vient APRES tout ce que le banc juge, que la matrice ait
+  // reussi ou non ; c'est elle qu'attend `BO_SMOKE_ATTEND_AB=1`
+  // (tools/ci/smoke_terminal.py).
+  console.log(`HOST_WORKER_AB_VERDICT_COMPLETE ordre=${ordre}`
+    + ` rangs=${releves.length}/${MATRICE.length} fonctionnel=${fonctionnelGlobal ? 1 : 0}`
+    + ` smoke=${canvasOK && workerOK && imageOK && frameOK ? 1 : 0}`);
 })();
 </script></body>'''
 

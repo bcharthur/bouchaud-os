@@ -1081,3 +1081,36 @@ l'ancienne regle a la trame 10 ; un pipeline simule (DOM pret, ancienne
 surface encore presentee) fait capturer a l'ancienne regle une surface perimee
 et a la nouvelle la mire ; une mire jamais peinte reste `absente` ; trois
 mutations (marge 1, sans certification, `>=`) font rougir le banc.
+
+### 18.11 Banc d'ordre des workers : une sortie sur un marqueur intermediaire
+
+Ladybird #382 (821b0a1a) : smoke, surface (`seq_ancre=10`, capture certifiee
+12 `ok`), performance, Integration, Reliability, CI Fast et Native IPC verts ;
+seul `ordre worker (diagnostic)` rouge. Les quatre rangs des deux bras etaient
+mesures (blob : 1964/1753/1632/2169 ms ; http : 2171/1431/1841/1873 ms) et
+`ORDRE_WORKER_ANALYSE_OK` -- aucun effet clair de l'ordre. Le bras blob
+s'arretait pourtant a T+48 s avec FUNCTIONAL/GLOBAL/SMOKE « jamais atteints »
+et « QEMU s'est arrete de lui-meme ».
+
+Cause : avec `BO_SMOKE_ATTEND_AB=1`, la boucle sortait sur
+`HOST_WORKER_AB_COMPLETE` (et `HOST_WORKER_AB_FAIL`), que la page ecrit AVANT
+ses verdicts ; le banc tuait la VM avant que ceux-ci n'aient atteint la
+console. Le message venait de `verdict=ab_complete`, sans branche dans le
+diagnostic, donc tombe dans le cas par defaut.
+
+Correction (BOUCHAUD_SMOKE_TERMINAL_V1), protocole seulement :
+`HOST_WORKER_AB_VERDICT_COMPLETE` est la DERNIERE ligne de la page (apres
+`HOST_SMOKE_*`, que la matrice ait reussi ou non) ; la sortie de boucle est
+decidee par `tools/ci/smoke_terminal.py` -- ce terminal pour le banc d'ordre,
+`HOST_SMOKE_*` pour le smoke principal, et dans les deux cas une surface
+conclue ; `AB_COMPLETE`/`AB_FAIL` redeviennent informatifs. Le diagnostic
+distingue `rendu`/`ab_verdict_complete` (verdict terminal, VM arretee par le
+banc), `qemu_morte`, `plafond`, `muet`, et ecrit « BANC : verdict inconnu »
+au lieu d'accuser QEMU. Le banc d'ordre exige le terminal de chaque bras.
+
+Banc hote `smoke_terminal.py --test` (garde `verifie-terminal-smoke.py`, trois
+negatifs) : l'ancienne regle sort a AB_COMPLETE en perdant les 4 jalons, et a
+AB_FAIL de meme ; la nouvelle sort sur le terminal sans perte ; terminal
+absent -> plafond ; worker muet -> sortie terminale et jalons rouges ; VM
+morte avant le terminal -> `qemu_morte`. Page executee sous Chromium dans les
+deux ordres : le terminal est la derniere ligne.

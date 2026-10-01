@@ -69,10 +69,19 @@ for ordre in blob http; do
     # OBSERVER cela -- pas pour le taire. Si `desktop` est revenu, le
     # navigateur est mort et le bras ne vaut rien, meme si QEMU tourne encore.
     if grep -aq "AUTORUN_DESKTOP_RETURN" "ordre-$ordre.sortie" \
-       && ! grep -aq "HOST_WORKER_AB_COMPLETE" "ordre-$ordre.sortie"; then
+       && ! grep -aq "HOST_WORKER_AB_VERDICT_COMPLETE" "ordre-$ordre.sortie"; then
         echo "ordre : bras $ordre -- desktop est revenu AVANT le verdict" >&2
         grep -aE "AUTORUN_DESKTOP_RETURN|RUN_NOYAU_RETOUR|RUN_NOYAU_VIVANT|PROCESS_EXIT" \
             "ordre-$ordre.sortie" | tail -8 >&2 || true
+        echecs=$((echecs + 1))
+    fi
+    # LE BRAS DOIT AVOIR VU SON VERDICT TERMINAL (BOUCHAUD_SMOKE_TERMINAL_V1).
+    #
+    # Sans lui, la boucle est sortie par le plafond, le silence ou la mort de
+    # QEMU : le bras n'a rien prouve, quel que soit le reste.
+    if ! grep -aq "HOST_WORKER_AB_VERDICT_COMPLETE ordre=$ordre " "ordre-$ordre.sortie"; then
+        echo "ordre : bras $ordre -- le verdict terminal n'est jamais arrive" >&2
+        grep -aE "verdict: |BOUCHAUD_SESSION_FIN" "ordre-$ordre.sortie" | tail -3 >&2 || true
         echecs=$((echecs + 1))
     fi
     if ! grep -aq "HOST_WORKER_ORDRE ordre=$ordre " "ordre-$ordre.sortie"; then

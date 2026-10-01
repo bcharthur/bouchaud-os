@@ -185,8 +185,8 @@ JALONS=(
 #
 # La conclusion, c'est le PREFIXE. Ce que la page a repondu se lit ensuite dans
 # le rapport, ou les jalons manquants deviennent alors de vrais echecs et non
-# un manque de temps.
-VERDICT='HOST_SMOKE_'
+# un manque de temps. Le prefixe `HOST_SMOKE_` vit desormais dans
+# tools/ci/smoke_terminal.py, avec la regle de sortie entiere.
 DOCUMENT='[ladybird-bouchaud] M11_DOCUMENT_LOADED'
 TRAME='[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
 
@@ -331,27 +331,26 @@ while kill -0 "$PID" 2>/dev/null; do
     fi
   fi
 
-  # LE VERDICT TERMINAL DE L'EXPERIENCE D'ORDRE, QUAND ON L'ATTEND.
+  # LA SORTIE DE BOUCLE N'A LIEU QUE SUR UN VERDICT TERMINAL.
   #
-  # BOUCHAUD_C62_ATTENDRE_UN_VERDICT_PAS_UNE_FIN_D_AUTORUN
+  # BOUCHAUD_C62_ATTENDRE_UN_VERDICT_PAS_UNE_FIN_D_AUTORUN,
+  # BOUCHAUD_SMOKE_TERMINAL_V1
   #
-  # La page dit elle-meme quand ses quatre mesures sont faites. Attendre
-  # `AUTORUN FIN` ne disait rien d'elle : au run 35907201865 l'autorun s'est
-  # termine alors que le premier worker n'avait pas franchi son constructeur.
-  if [ "${BO_SMOKE_ATTEND_AB:-0}" = "1" ]; then
-    if grep -aFq "HOST_WORKER_AB_COMPLETE" "$LOG"; then
-      verdict=ab_complete
-      break
-    fi
-    if grep -aFq "HOST_WORKER_AB_FAIL" "$LOG"; then
-      verdict=ab_echec
-      break
-    fi
+  # La regle vit dans tools/ci/smoke_terminal.py, ou elle est mise en echec
+  # sur un journal livre par morceaux. `HOST_WORKER_AB_COMPLETE` n'est plus
+  # terminal : au #382 la boucle sortait dessus et tuait la VM avant que les
+  # verdicts FUNCTIONAL/GLOBAL/SMOKE, ecrits APRES, n'aient atteint la
+  # console. Et aucune sortie avant que la poignee de main de surface n'ait
+  # conclu.
+  surface_conclue=0
+  if [ "$MIRE_VERDICT" != "en_attente" ] || ! command -v socat >/dev/null 2>&1; then
+    surface_conclue=1
   fi
-
-  if [ -n "${VU[$DOCUMENT]:-}" ] && [ -n "${VU[$TRAME]:-}" ] \
-     && grep -aFq "$VERDICT" "$LOG"; then
-    verdict=rendu
+  sortie=$(python3 tools/ci/smoke_terminal.py "$LOG" "${BO_SMOKE_ATTEND_AB:-0}" \
+    "$([ -n "${VU[$DOCUMENT]:-}" ] && echo 1 || echo 0)" \
+    "$([ -n "${VU[$TRAME]:-}" ] && echo 1 || echo 0)" "$surface_conclue" 2>/dev/null || true)
+  if [ -n "$sortie" ]; then
+    verdict=$sortie
     break
   fi
 
@@ -373,6 +372,11 @@ while kill -0 "$PID" 2>/dev/null; do
   sleep 2
 done
 ECOULE=$((SECONDS - DEBUT))
+# La boucle s'est aussi terminee parce que QEMU ne vivait plus : c'est un
+# verdict a part entiere, pas un « inconnu ».
+if [ "$verdict" = "inconnu" ] && ! kill -0 "$PID" 2>/dev/null; then
+  verdict=qemu_morte
+fi
 
 # UNE PREUVE ACQUISE NE SE PERD PLUS.
 #
@@ -503,12 +507,13 @@ if [ "$manquants" -ne 0 ]; then
       echo "plafond de ${PLAFOND}s atteint alors que l'invite ecrivait encore :" >&2
       echo "le navigateur progressait trop lentement, il n'etait pas bloque." >&2
       ;;
-    rendu)
-      echo "la page a rendu son verdict en ${ECOULE}s : les jalons manquants" >&2
-      echo "ci-dessus sont de vrais echecs, pas un manque de temps." >&2
+    rendu|ab_verdict_complete)
+      echo "la page a rendu son verdict TERMINAL ($verdict) en ${ECOULE}s, puis le banc" >&2
+      echo "a arrete la VM : les jalons manquants ci-dessus sont de vrais echecs," >&2
+      echo "pas un manque de temps ni une ligne encore en route." >&2
       ;;
-    *)
-      echo "QEMU s'est arrete de lui-meme apres ${ECOULE}s." >&2
+    qemu_morte)
+      echo "QEMU s'est arrete AVANT le verdict terminal, apres ${ECOULE}s." >&2
       # LA SESSION S'EST-ELLE ARRETEE, ET POURQUOI ?
       #
       # Le run 35830736815 s'est eteint a T+342 s en plein milieu de la
@@ -521,6 +526,12 @@ if [ "$manquants" -ne 0 ]; then
       else
         echo "  aucune ligne BOUCHAUD_BUREAU_FIN : la session n'est pas sortie par le bureau" >&2
       fi
+      ;;
+    *)
+      # Jamais « QEMU s'est arrete de lui-meme » par defaut : un verdict que ce
+      # rapport ne connait pas est un defaut du BANC, et il le dit.
+      echo "BANC : verdict de boucle inconnu ($verdict) apres ${ECOULE}s." >&2
+      echo "       Voir BOUCHAUD_SESSION_FIN plus haut pour savoir qui a arrete la VM." >&2
       ;;
   esac
   echo "$manquants jalon(s) manquant(s)." >&2
