@@ -77,18 +77,33 @@ fn account_until(task: &Task, now: u64) {
     task.slice_start_ns.range(now);
 }
 
-/// Marque une tache zombie, et previent le CPU sur lequel elle tourne.
+/// Tue une tache : la courante meurt sur-le-champ, une autre est CONDAMNEE.
 ///
-/// Point de passage unique : `retire_current_if_zombie` s'execute a la sortie
-/// de chaque appel systeme, et son chemin commun ne doit plus consulter la
-/// table des taches. Il lit un drapeau par CPU ; c'est ici qu'on le pose.
+/// BOUCHAUD_CYCLE_DE_VIE_V1 -- point de passage unique de toute mort, voulue
+/// (`exit`, retraite) ou imposee (`exit_group`, `execve`, fin de session,
+/// `tue_processus`). La regle est `kernel::cycle_vie` :
 ///
-/// Tous les appelants tiennent le gros verrou -- c'est ce qui leur permet de
-/// tenir une `&mut Task` -- et `on_cpu` designe le CPU ou la tache s'execute,
-/// ou -1 si elle n'est nulle part. Une tache qui n'est sur aucun CPU n'a
-/// personne a prevenir : elle ne reviendra pas en espace utilisateur.
-// Ne touche plus que des atomiques : une reference PARTAGEE suffit.
+///   * la tache COURANTE de ce coeur passe a `Zombie` elle-meme ;
+///   * une AUTRE tache n'est jamais passee a `Zombie` par simple ecriture.
+///     Elle est condamnee, et `condamne` decide : tuee sur place si elle est
+///     parquee dans une attente interruptible, reveillee si elle est bloquee
+///     sur son coeur, laissee a sa frontiere sinon.
+///
+/// Avant ce lot, l'etat etait ECRIT : une tache tuee en entrant dans
+/// `nanosleep` ecrasait `Zombie` par `Blocked`, et revenait en espace
+/// utilisateur une fois son processus recolte.
 fn marque_zombie(task: &Task) {
+    let courante = try_current().map(|c| c.tid) == Some(task.tid);
+    if courante {
+        meurt_soi_meme(task);
+    } else {
+        condamne(task);
+    }
+}
+
+/// La tache courante meurt : `Zombie`, et le drapeau de retraite de son coeur.
+// Ne touche plus que des atomiques : une reference PARTAGEE suffit.
+fn meurt_soi_meme(task: &Task) {
     // IL N'Y A PLUS DE PHOTOGRAPHIE DES COMPTEURS ICI, ET C'EST UNE CORRECTION.
     //
     // BOUCHAUD_C33_L_ECART_INEXPLIQUE
@@ -114,15 +129,126 @@ fn marque_zombie(task: &Task) {
     // au moment de la lecture -- donc complets -- et `TEMPS_RECYCLE_NS`
     // ramasse ceux dont l'emplacement a ete reutilise. Les deux couvrent
     // exactement les deux facons de quitter la somme des vivants.
-    task.state.range(TaskState::Zombie);
-    // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : publie APRES l'etat (Release) ;
-    // qui lit le compteur (Acquire) voit donc le zombie.
-    MORTS.fetch_add(1, Ordering::Release);
+    if task.state.meurt() {
+        // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : publie APRES l'etat ; qui lit
+        // le compteur (Acquire) voit donc le zombie.
+        MORTS.fetch_add(1, Ordering::Release);
+    }
     if task.on_cpu >= 0 && !task.switching_out.charge() {
         let cpu = task.on_cpu.charge() as usize;
         if cpu < MAX_CPUS {
             RETRAITE_DEMANDEE[cpu].store(true, Ordering::Release);
         }
+    }
+}
+
+// BOUCHAUD_CYCLE_DE_VIE_V1 : ce que les tueurs ont fait, par issue.
+static CONDAMNATIONS: AtomicU64 = AtomicU64::new(0);
+static TUEES_PARQUEES: AtomicU64 = AtomicU64::new(0);
+static REVEILLEES_POUR_MOURIR: AtomicU64 = AtomicU64::new(0);
+static MORTES_A_LA_FRONTIERE: AtomicU64 = AtomicU64::new(0);
+static MORTES_AU_PARKING: AtomicU64 = AtomicU64::new(0);
+/// Attentes refusees parce que la tache n'etait plus prete. Zero est
+/// l'invariant : seule une tache vivante s'endort, et une tache morte ne
+/// s'execute plus.
+static ENDORMISSEMENTS_REFUSES: AtomicU64 = AtomicU64::new(0);
+
+/// condamnations, tuees parquees, reveillees pour mourir, mortes a la
+/// frontiere, mortes au parking, endormissements refuses.
+pub fn compteurs_cycle_vie() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        CONDAMNATIONS.load(Ordering::Relaxed),
+        TUEES_PARQUEES.load(Ordering::Relaxed),
+        REVEILLEES_POUR_MOURIR.load(Ordering::Relaxed),
+        MORTES_A_LA_FRONTIERE.load(Ordering::Relaxed),
+        MORTES_AU_PARKING.load(Ordering::Relaxed),
+        ENDORMISSEMENTS_REFUSES.load(Ordering::Relaxed),
+    )
+}
+
+#[inline]
+fn etat_cycle_vie(etat: TaskState) -> crate::kernel::cycle_vie::Etat {
+    match etat {
+        TaskState::Ready => crate::kernel::cycle_vie::Etat::Pret,
+        TaskState::Blocked => crate::kernel::cycle_vie::Etat::Bloque,
+        TaskState::Zombie => crate::kernel::cycle_vie::Etat::Zombie,
+    }
+}
+
+/// Condamne une tache qui n'est pas la courante de ce coeur.
+///
+/// Ordre : la condamnation est publiee (`SeqCst`) AVANT la lecture de l'etat.
+/// La tache, elle, publie `Blocked` avant de relire sa condamnation : au
+/// moins l'un des deux voit l'autre (`kernel::cycle_vie`, la fenetre du
+/// parking).
+fn condamne(task: &Task) {
+    use crate::kernel::cycle_vie::{action_tueur, ActionTueur, VueTueur};
+    if task.condamnee.condamne() {
+        CONDAMNATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    loop {
+        let sur_coeur = task.on_cpu >= 0 || task.switching_out.charge();
+        let vue = VueTueur {
+            etat: etat_cycle_vie(task.state.charge()),
+            sur_coeur,
+            interruptible: task.attente_interruptible.charge(),
+        };
+        match action_tueur(vue) {
+            ActionTueur::Rien | ActionTueur::AttendSonEvenement => return,
+            ActionTueur::Frontiere => {
+                // Elle s'execute peut-etre : prevenir son coeur, et le forcer
+                // a entrer dans le noyau si elle est en espace utilisateur.
+                let cpu = task.on_cpu.charge();
+                if cpu >= 0 && (cpu as usize) < MAX_CPUS {
+                    RETRAITE_DEMANDEE[cpu as usize].store(true, Ordering::Release);
+                    if cpu as usize != local_cpu() {
+                        smp::reschedule_cpu(cpu as usize);
+                    }
+                }
+                return;
+            }
+            ActionTueur::TueSurPlace => {
+                if task.state.tue_parquee() {
+                    TUEES_PARQUEES.fetch_add(1, Ordering::Relaxed);
+                    MORTS.fetch_add(1, Ordering::Release);
+                    return;
+                }
+                // Un reveilleur l'a remise prete entre-temps : redecider.
+            }
+            ActionTueur::Reveille => {
+                if task.state.reveille() {
+                    REVEILLEES_POUR_MOURIR.fetch_add(1, Ordering::Relaxed);
+                    // Meme publication qu'un reveilleur ordinaire : la
+                    // passation la republiera si elle est encore sur son
+                    // coeur.
+                    for index in 0..tasks().len() {
+                        if tasks()[index].tid == task.tid {
+                            publish_ready(index);
+                            break;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// La tache courante, condamnee, meurt a une frontiere (retour d'appel
+/// systeme, de faute, preemption depuis l'espace utilisateur, premier
+/// passage en espace utilisateur). Ne revient pas.
+fn meurt_a_la_frontiere() -> ! {
+    MORTES_A_LA_FRONTIERE.fetch_add(1, Ordering::Relaxed);
+    meurt_soi_meme(current());
+    retire_exec_zombie_current()
+}
+
+/// La tache courante est-elle condamnee ? Une lecture `SeqCst` de son drapeau.
+pub fn condamnee_courante() -> bool {
+    match try_current() {
+        Some(task) => task.condamnee.est_condamnee(),
+        None => false,
     }
 }
 

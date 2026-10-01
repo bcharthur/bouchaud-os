@@ -12,6 +12,12 @@ unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
 extern "C" fn task_trampoline() -> ! {
     let frame = {
         complete_switch_handoff();
+        // BOUCHAUD_CYCLE_DE_VIE_V1 : un fil condamne avant d'avoir jamais
+        // tourne (clone pendant un exit_group) n'entre pas en espace
+        // utilisateur. C'est sa premiere frontiere.
+        if current().condamnee.est_condamnee() {
+            meurt_a_la_frontiere();
+        }
         // `install` ecrit la trame de la tache : contenu prive, acces exclusif.
         let mut task = current_exclusif();
         install(&mut task);
@@ -203,5 +209,10 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
     COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
     COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel.charge(), Ordering::Relaxed);
-    RETRAITE_DEMANDEE[cpu_id].store(task.state == TaskState::Zombie, Ordering::Release);
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : une tache condamnee pendant qu'elle etait en
+    // file doit mourir a sa premiere frontiere sur ce coeur.
+    RETRAITE_DEMANDEE[cpu_id].store(
+        task.state == TaskState::Zombie || task.condamnee.est_condamnee(),
+        Ordering::Release,
+    );
 }

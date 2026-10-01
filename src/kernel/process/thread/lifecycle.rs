@@ -434,9 +434,7 @@ fn notify_parent_of_exit_for(parent_pid: u32) {
                 .waiting_for_child
                 .compare_exchange(true, false)
                 .is_ok()
-            && tasks()[index]
-                .state
-                .echange(TaskState::Blocked, TaskState::Ready)
+            && tasks()[index].state.reveille()
         {
             publish_ready(index);
         }
@@ -544,6 +542,9 @@ pub fn exit_group(code: i32) -> ! {
             marque_zombie(task);
         }
     }
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : les freres condamnes meurent d'eux-memes ;
+    // la fin du processus n'est rapportee qu'apres le dernier.
+    attend_extinction_freres();
 
     // `exit_group` termine tous les autres threads du processus. Le thread
     // courant est donc le seul encore vivant; `exit_current` le decrementera
@@ -1036,6 +1037,62 @@ pub fn terminate_sibling_threads() {
     }
 }
 
+/// BOUCHAUD_CYCLE_DE_VIE_V1 : attend que tous les autres fils du processus
+/// courant soient morts.
+///
+/// `exit_group` ne rapporte la fin du processus qu'apres : sans cela, un
+/// frere qui s'executait en espace utilisateur sur un autre coeur pouvait y
+/// executer encore quelques instructions -- le temps que l'IPI le rattrape --
+/// alors que le parent avait deja recolte le processus (scheduler-ng-banc,
+/// SMP4/8 : un compteur sur trois demarrages). C'est la regle de Linux :
+/// `wait4` ne rend un processus a plusieurs fils qu'une fois tous morts.
+///
+/// `execve` remplace l'espace d'adressage. Avant ce lot, un frere tue
+/// pendant une attente du noyau (lecture disque, verrou dormant) etait passe
+/// `Zombie` sur place et ne repartait jamais -- en laissant fuir ce qu'il
+/// tenait -- ou bien, entre dans l'attente juste apres sa mort, ressuscitait
+/// et reprenait sur le NOUVEL espace. Condamne, il termine desormais son
+/// attente puis meurt a sa frontiere : `execve` ne doit remplacer l'image
+/// qu'apres. Une attente d'appel systeme le tue sur place ; une attente du
+/// noyau finit avec son entree-sortie. Rien n'est abandonne au temps : au
+/// dela d'une seconde, la ligne `EXTINCTION_FRERES_LENTE` nomme le fil
+/// attendu, et l'attente continue.
+pub fn attend_extinction_freres() {
+    let (pid, tid) = {
+        let task = current();
+        (task.process.pid, task.tid)
+    };
+    let debut = crate::kernel::timer::monotonic_ms();
+    let mut signale = false;
+    loop {
+        let mut vivant = None;
+        for task in tasks().iter() {
+            if task.process.pid == pid && task.tid != tid && task.state != TaskState::Zombie {
+                vivant = Some((task.tid, task.state.charge(), task.on_cpu.charge(),
+                    task.attente_interruptible.charge()));
+                break;
+            }
+        }
+        let Some((frere, etat, coeur, interruptible)) = vivant else { return };
+        let ecoule = crate::kernel::timer::monotonic_ms().saturating_sub(debut);
+        if !signale && ecoule >= 1_000 {
+            signale = true;
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "EXTINCTION_FRERES_LENTE pid={} attend_tid={} etat={:?} coeur={} interruptible={} ms={}",
+                pid, frere, etat, coeur, interruptible as u8, ecoule,
+            ));
+        }
+        // Une tache condamnee elle-meme (fin de session pendant sa sortie)
+        // cesse d'attendre : elle va mourir, et sa sortie doit aller au bout.
+        // Le sommeil est NON interruptible pour la meme raison : y mourir
+        // laisserait le processus sans fin rapportee.
+        if condamnee_courante() {
+            return;
+        }
+        sleep_ticks_noyau(1);
+    }
+}
+
 /// Called with the BKL immediately before returning from a syscall. An exec
 /// may have retired this sibling while it ran an audited BKL-bypass syscall.
 /// Ne rentre pas en espace utilisateur si la tache courante a ete tuee.
@@ -1102,13 +1159,26 @@ fn retire_exec_zombie_current() -> ! {
 // Le gros verrou lui-meme n'existe plus (BOUCHAUD_BKL_SUPPRIME_V1).
 pub fn retire_current_if_zombie() {
     let cpu = interrupts::without_interrupts(local_cpu);
-    if !RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire) {
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : le drapeau du coeur reste le filtre rapide,
+    // mais la CONDAMNATION de la tache fait foi. Un tueur qui lit `on_cpu`
+    // juste avant qu'un coeur ne revendique la tache ne pose aucun drapeau, et
+    // la mise en route l'aurait pose avant la condamnation : la frontiere doit
+    // relire la tache elle-meme. Une lecture atomique de plus, sur une tache
+    // deja chaude.
+    let drapeau = RETRAITE_DEMANDEE[cpu].load(Ordering::Acquire);
+    if !drapeau && !condamnee_courante() {
         return;
     }
     // Aucun garde RAII ici : `retire_exec_zombie_current` commute sans retour,
     // et un `Drop` ne s'executerait jamais.
     RETRAITE_DEMANDEE[cpu].store(false, Ordering::Release);
-    if in_user_task() && current().state == TaskState::Zombie {
+    if !in_user_task() {
+        return;
+    }
+    if current().condamnee.est_condamnee() {
+        meurt_a_la_frontiere();
+    }
+    if current().state == TaskState::Zombie {
         retire_exec_zombie_current();
     }
 }

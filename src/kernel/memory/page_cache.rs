@@ -298,7 +298,7 @@ pub fn acquire_mesure(key: Key) -> MesureAcquire {
             State::Loading => {
                 drop(state);
                 WAITS.fetch_add(1, Ordering::Relaxed);
-                entry.waiters.wait(ticket);
+                entry.waiters.wait_noyau(ticket);
             }
         }
     }

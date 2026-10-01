@@ -664,7 +664,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
                 // millisecondes au troisieme. `FAULT_WAITS` la comptait sans
                 // jamais la chronometrer.
                 let avant_attente = crate::kernel::timer::monotonic_ns();
-                record.waiters.wait(ticket);
+                record.waiters.wait_noyau(ticket);
                 let attendu = crate::kernel::timer::monotonic_ns()
                     .saturating_sub(avant_attente);
                 note.attente(attendu);

@@ -96,7 +96,7 @@ pub fn ouvre(node: usize) {
                 None
             }
         };
-        match wait { Some((queue, ticket)) => queue.wait(ticket), None => return }
+        match wait { Some((queue, ticket)) => queue.wait_noyau(ticket), None => return }
     }
 }
 
@@ -123,7 +123,7 @@ pub fn mappe(node: usize) {
                 None
             }
         };
-        match wait { Some((queue, ticket)) => queue.wait(ticket), None => return }
+        match wait { Some((queue, ticket)) => queue.wait_noyau(ticket), None => return }
     }
 }
 
@@ -167,7 +167,7 @@ pub fn page(node: usize, numero: u64) -> Option<SharedPageLease> {
         };
         match result {
             Ok(result) => break result,
-            Err((queue, ticket)) => queue.wait(ticket),
+            Err((queue, ticket)) => queue.wait_noyau(ticket),
         }
     };
     let pin = SharedPagePin { node, page: Arc::clone(&page) };
@@ -212,7 +212,7 @@ pub fn page(node: usize, numero: u64) -> Option<SharedPageLease> {
             SharedPageState::Failed => return None,
             SharedPageState::Loading => {
                 drop(state);
-                page.waiters.wait(ticket);
+                page.waiters.wait_noyau(ticket);
             }
         }
     }
@@ -239,7 +239,7 @@ fn present_pages(node: usize) -> Vec<(u64, u64)> {
                     _ => None,
                 }
             }).collect(),
-            Err((queue, ticket)) => queue.wait(ticket),
+            Err((queue, ticket)) => queue.wait_noyau(ticket),
         }
     }
 }

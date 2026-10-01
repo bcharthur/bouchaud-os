@@ -173,8 +173,9 @@ impl TaskState {
 //
 // L'egalite est implementee contre `TaskState` pour que les soixante-cinq
 // lectures existantes -- `task.state == TaskState::Ready` -- restent
-// inchangees. Seules les ECRITURES deviennent explicites (`range`), ce qui est
-// souhaitable : une transition d'etat merite d'etre visible a la lecture.
+// inchangees. Seules les ECRITURES deviennent explicites -- les transitions
+// nommees ci-dessous --, ce qui est souhaitable : une transition d'etat merite
+// d'etre visible a la lecture.
 #[repr(transparent)]
 pub struct EtatAtomique(core::sync::atomic::AtomicU8);
 
@@ -189,44 +190,97 @@ impl EtatAtomique {
         TaskState::depuis_code(self.0.load(core::sync::atomic::Ordering::Acquire))
     }
 
-    /// Publie un nouvel etat.
-    ///
-    /// # Pourquoi `SeqCst` et non `Release`
-    ///
-    /// `Release` suffirait a rendre visibles les ecritures precedentes -- une
-    /// tache reveillee ne doit pas repartir sur une echeance perimee. Il ne
-    /// suffit PAS au protocole de reveil perdu, qui est un motif
-    /// ecriture-puis-lecture CROISE :
-    ///
-    ///   le dormeur  ecrit `Blocked`, puis lit la generation ;
-    ///   le reveilleur ecrit la generation, puis lit l'etat.
-    ///
-    /// Sans ordre total, les deux lectures peuvent remonter avant les deux
-    /// ecritures : le dormeur ne voit pas le reveil, le reveilleur ne voit pas
-    /// le dormeur, et la tache ne repart jamais. Sur x86 cela coute une
-    /// instruction verrouillee -- au prix d'un changement d'etat, pas d'une
-    /// boucle chaude.
-    #[inline]
-    pub fn range(&self, etat: TaskState) {
-        self.0.store(etat.code(), core::sync::atomic::Ordering::SeqCst);
-    }
+    // BOUCHAUD_CYCLE_DE_VIE_V1
+    //
+    // LES QUATRE TRANSITIONS, ET AUCUNE AUTRE
+    //
+    // L'ecriture libre (`range`) a disparu. Elle permettait a une tache tuee
+    // pendant qu'elle entrait dans `nanosleep` d'ecraser `Zombie` par
+    // `Blocked` : l'echeance la remettait `Ready`, et le fil d'un processus
+    // deja recolte retournait en espace utilisateur (scheduler-ng-banc,
+    // SMP2/4 : 210 a 266 compteurs de fils morts qui bougeaient encore).
+    //
+    // Chaque transition est un CAS sur l'etat ATTENDU : aucune ne part de
+    // `Zombie`, qui est donc absorbant par construction. La table est
+    // `kernel::cycle_vie::applique`, explorée par `tools/smp/test_cycle_vie.rs`.
+    //
+    // # Pourquoi `SeqCst` partout
+    //
+    // Deux protocoles croises reposent sur ces transitions. Le reveil perdu :
+    // le dormeur publie `Blocked` puis relit la generation, le reveilleur
+    // ecrit la generation puis tente `Blocked -> Ready`. La condamnation : la
+    // tache publie `Blocked` puis relit `condamnee`, le tueur ecrit
+    // `condamnee` puis lit l'etat. Sans ordre total, les deux lectures
+    // remontent avant les deux ecritures et chacun manque l'autre. Sur x86 un
+    // CAS est deja une instruction verrouillee : l'ordre total ne coute rien
+    // de plus.
 
-    /// Transition CONDITIONNELLE : ne passe a `nouveau` que si l'etat vaut
-    /// encore `attendu`.
-    ///
-    /// C'est ce qui remplace « lire, decider, ecrire » sous gros verrou. Deux
-    /// CPU qui reveillent la meme tache bloquee doivent en avoir exactement un
-    /// qui gagne ; sans cela, elle serait mise deux fois en file d'execution.
     #[inline]
-    pub fn echange(&self, attendu: TaskState, nouveau: TaskState) -> bool {
+    fn transite(&self, depuis: TaskState, vers: TaskState) -> bool {
         self.0
             .compare_exchange(
-                attendu.code(),
-                nouveau.code(),
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
+                depuis.code(),
+                vers.code(),
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
+    }
+
+    /// `Ready -> Blocked`, par la tache ELLE-MEME. Faux si elle n'est plus
+    /// prete -- c'est-a-dire morte : une tache ne dort pas apres sa mort.
+    #[inline]
+    pub fn endort(&self) -> bool {
+        self.transite(TaskState::Ready, TaskState::Blocked)
+    }
+
+    /// `Blocked -> Ready`, par un reveilleur ou par la tache qui annule son
+    /// parking. Exactement un gagnant ; un zombie n'est jamais reveille.
+    #[inline]
+    pub fn reveille(&self) -> bool {
+        self.transite(TaskState::Blocked, TaskState::Ready)
+    }
+
+    /// `Blocked -> Zombie`, par un TUEUR, pour une tache PARQUEE dans une
+    /// attente interruptible (voir `cycle_vie::action_tueur`).
+    #[inline]
+    pub fn tue_parquee(&self) -> bool {
+        self.transite(TaskState::Blocked, TaskState::Zombie)
+    }
+
+    /// `Ready | Blocked -> Zombie`, par la tache ELLE-MEME, ou par un tueur
+    /// pour une tache qui ne s'executera plus jamais (fin de machine).
+    /// Rend vrai si c'est cet appel qui l'a tuee.
+    #[inline]
+    pub fn meurt(&self) -> bool {
+        self.0.swap(TaskState::Zombie.code(), core::sync::atomic::Ordering::SeqCst)
+            != TaskState::Zombie.code()
+    }
+}
+
+/// La condamnation d'une tache qui s'execute encore : elle mourra a sa
+/// prochaine frontiere. Voir `kernel::cycle_vie`.
+///
+/// Lectures et ecritures en `SeqCst` : c'est la moitie « tueur » du protocole
+/// croise decrit dans `EtatAtomique`.
+#[repr(transparent)]
+pub struct Condamnation(core::sync::atomic::AtomicBool);
+
+impl Condamnation {
+    #[inline]
+    pub const fn neuve() -> Self {
+        Self(core::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Condamne. Rend vrai si c'est cet appel qui a condamne.
+    #[inline]
+    pub fn condamne(&self) -> bool {
+        !self.0.swap(true, core::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn est_condamnee(&self) -> bool {
+        self.0.load(core::sync::atomic::Ordering::SeqCst)
     }
 }
 

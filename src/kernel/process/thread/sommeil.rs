@@ -105,13 +105,33 @@ pub fn echeance_pour(ticks: u64) -> u64 {
 }
 
 pub fn sleep_ticks(ticks: u64) {
+    dort(ticks, true)
+}
+
+/// Sommeil NON interruptible : une tache condamnee le termine au lieu d'y
+/// mourir. Pour les attentes du noyau qui doivent aller a leur terme meme
+/// pendant une mort imposee (`attend_extinction_freres`).
+pub(crate) fn sleep_ticks_noyau(ticks: u64) {
+    dort(ticks, false)
+}
+
+fn dort(ticks: u64, interruptible: bool) {
     let deadline = echeance_pour(ticks);
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
-    {
-        let task = current();
-        task.wake_deadline_ns.range(deadline);
-        task.state.range(TaskState::Blocked);
+    current().wake_deadline_ns.range(deadline);
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : le sommeil est interruptible -- `nanosleep`,
+    // et les attentes par tick des appels systeme. Les fils noyau, qui s'en
+    // servent aussi, ne sont jamais condamnes. C'etait ICI l'ecriture qui
+    // ecrasait `Zombie` par `Blocked`.
+    match publie_parking(interruptible) {
+        Parking::Gare => {}
+        Parking::Refuse => {
+            current().wake_deadline_ns.range(0);
+            forensic_wait_clear(WAIT_SLEEP);
+            return;
+        }
+        Parking::Condamnee => meurt_au_parking(),
     }
     arme_echeance(deadline);
 
@@ -125,9 +145,10 @@ pub fn sleep_ticks(ticks: u64) {
             break;
         }
     }
-    let task = current();
-    task.wake_deadline_ns.range(0);
-    task.state.range(TaskState::Ready);
+    current().wake_deadline_ns.range(0);
+    // Echeance passee sans reveil : annuler le parking (sans effet si un
+    // reveilleur l'a deja fait).
+    termine_attente();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_SLEEP);
 }
@@ -203,7 +224,7 @@ fn wake_sleepers() {
         let task = &registre[index];
         if task.wake_deadline_ns != 0
             && now >= task.wake_deadline_ns.charge()
-            && task.state.echange(TaskState::Blocked, TaskState::Ready)
+            && task.state.reveille()
         {
             // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : l'echeance n'est PAS
             // effacee ici. La tache, reveillee, peut s'etre deja reparquee

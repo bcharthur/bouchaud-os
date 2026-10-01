@@ -36,6 +36,14 @@ pub struct Task {
     pub tid: u32,
     pub process: Arc<Process>,
     pub state: EtatAtomique,
+    /// BOUCHAUD_CYCLE_DE_VIE_V1 : tuee pendant qu'elle s'executait. Elle
+    /// meurt a sa prochaine frontiere (`kernel::cycle_vie`).
+    pub condamnee: Condamnation,
+    /// L'attente en cours est interruptible : une tache condamnee n'y dort
+    /// pas, et un tueur peut l'y tuer sur place. Pose par la tache elle-meme
+    /// autour d'une attente d'appel systeme (sommeil, futex, wait4,
+    /// descripteurs) ; faux pour les attentes internes du noyau.
+    pub attente_interruptible: DrapeauAtomique,
     pub priorite: PrioriteAtomique,
     pub affinity_mask: u64,
     pub runq_cpu: CoeurAtomique,

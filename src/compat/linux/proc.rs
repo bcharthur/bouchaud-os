@@ -312,6 +312,9 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         task::retire_perdant_du_groupe();
     }
     task::terminate_sibling_threads();
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : les freres condamnes meurent d'eux-memes ;
+    // l'image n'est remplacee qu'une fois le dernier mort.
+    task::attend_extinction_freres();
     // Stop every sibling on the old CR3 before replacement.
     let old_identity = process.mm.lock().space.identity();
     old_identity.begin_retire();
@@ -522,10 +525,12 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         // pleine). Au moins l'un des deux voit l'autre : ou bien le fils
         // trouve l'attente et nous remet pret, ou bien nous trouvons son
         // zombie et annulons le parking.
-        {
-            let task = task::current();
-            task.waiting_for_child.range(true);
-            task.state.range(task::TaskState::Blocked);
+        task::current().waiting_for_child.range(true);
+        // BOUCHAUD_CYCLE_DE_VIE_V1 : attente interruptible. `Ready -> Blocked`
+        // par CAS ; une tache condamnee y meurt au lieu d'y dormir.
+        if !task::publie_attente_interruptible() {
+            let _ = task::current().waiting_for_child.compare_exchange(true, false);
+            return -errno::EINTR;
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let deja_la = task::zombie_children(parent_pid)
@@ -534,15 +539,13 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         if deja_la || !task::has_children(parent_pid) {
             // Annule le parking. Si le fils a gagne le CAS entre-temps, il
             // nous remet pret lui-meme ; dans les deux cas on reboucle.
-            let task = task::current();
-            let _ = task.waiting_for_child.compare_exchange(true, false);
-            task.state.range(task::TaskState::Ready);
+            let _ = task::current().waiting_for_child.compare_exchange(true, false);
+            task::termine_attente();
             continue;
         }
         let _ = task::schedule();
-        let task = task::current();
-        task.waiting_for_child.range(false);
-        task.state.range(task::TaskState::Ready);
+        task::current().waiting_for_child.range(false);
+        task::termine_attente();
     }
 }
 

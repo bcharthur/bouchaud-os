@@ -41,7 +41,7 @@ impl<T: ?Sized> SleepMutex<T> {
             }
             let ticket = self.waiters.ticket();
             if self.locked.load(Ordering::Acquire) {
-                self.waiters.wait(ticket);
+                self.waiters.wait_noyau(ticket);
             }
         }
     }

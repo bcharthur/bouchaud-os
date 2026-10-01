@@ -44,6 +44,20 @@ pub fn preempt_from_irq() {
         return;
     }
 
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : LA FRONTIERE DE L'ESPACE UTILISATEUR.
+    //
+    // Une tache utilisateur n'arrive ici qu'interrompue EN ESPACE UTILISATEUR
+    // (le timer et l'IPI ne preemptent une tache utilisateur que dans ce
+    // cas) : elle ne tient rien dans le noyau. Condamnee, elle meurt ici --
+    // sans quoi un calcul pur, qui ne fait aucun appel systeme, survivrait a
+    // son processus jusqu'a la fin de sa boucle. Le tueur envoie l'IPI qui
+    // l'amene ici. Les fils NOYAU, preemptes en mode noyau, ne passent jamais
+    // par cette porte.
+    if current_index_raw() != NO_TASK && !current_is_kernel_task() && condamnee_courante() {
+        stall_site_clear();
+        meurt_a_la_frontiere();
+    }
+
     complete_switch_handoff();
     if !commence_transition_ordonnanceur() {
         stall_site_clear();

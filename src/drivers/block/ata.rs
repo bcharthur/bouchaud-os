@@ -186,7 +186,7 @@ fn lock_controller_mesure() -> (GardeControleur, u64) {
             // Relire APRES avoir pris le ticket : un `wake_all` publie entre
             // la premiere lecture et le ticket ne doit pas etre perdu.
             if CONTROLLER.servi.load(Ordering::Acquire) != mon_tour {
-                CONTROLLER.attente.wait(ticket);
+                CONTROLLER.attente.wait_noyau(ticket);
             }
         } else {
             core::hint::spin_loop();

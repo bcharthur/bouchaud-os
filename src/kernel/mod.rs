@@ -106,6 +106,8 @@ pub mod scheduler;
 pub mod echeances;
 #[path = "scheduler/continuation.rs"]
 pub mod continuation;
+#[path = "scheduler/cycle_vie.rs"]
+pub mod cycle_vie;
 #[path = "process/signal.rs"]
 pub mod signal;
 pub mod sync;

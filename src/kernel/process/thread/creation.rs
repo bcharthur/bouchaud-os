@@ -19,6 +19,8 @@ impl Task {
             tid: alloc_tid(),
             process,
             state: EtatAtomique::neuf(TaskState::Ready),
+            condamnee: Condamnation::neuve(),
+            attente_interruptible: DrapeauAtomique::neuf(false),
             priorite: PrioriteAtomique::neuve(Priorite::Normale),
             affinity_mask: 0,
             runq_cpu: CoeurAtomique::neuf(u8::MAX),

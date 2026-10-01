@@ -61,6 +61,14 @@ rej_inel={} rej_crs={} mig={}",
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
+    // BOUCHAUD_CYCLE_DE_VIE_V1 : comment les morts imposees se terminent.
+    // `refus` (endormissements refuses a une tache non prete) doit rester nul.
+    let (condamnations, parquees, reveillees, frontiere, parking, refus) = compteurs_cycle_vie();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[SCHED-NG-CYCLE] condamnations={} tuees_parquees={} reveillees_pour_mourir={} \
+mortes_frontiere={} mortes_parking={} endormissements_refuses={}",
+        condamnations, parquees, reveillees, frontiere, parking, refus,
+    ));
     // CE QUE FAIT UN PROCESSUS QUI TOURNE SANS AVANCER.
     //
     // `[PROC-SAMPLE] cpu_pct=76 ctx_delta=4` designe une attente active sans

@@ -5,7 +5,7 @@ pub fn wake_for_signal(pid: u32) {
         let registre = tasks();
         let task = &registre[index];
         if task.process.pid == pid
-            && task.state.echange(TaskState::Blocked, TaskState::Ready)
+            && task.state.reveille()
         {
             // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : ni la cle d'attente ni
             // l'echeance ne sont effacees ici -- la tache peut s'etre deja
@@ -30,10 +30,73 @@ pub fn wake_for_signal(pid: u32) {
 // Preparation is under the WaitQueue BKL guard. Finish starts only after that
 // guard has been dropped, so no WaitQueue-owned KernelGuard spans schedule().
 
+/// Issue d'une publication de parking.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Parking {
+    /// `Blocked` publie : l'appelant relit sa condition, puis dort.
+    Gare,
+    /// La tache n'etait plus prete : elle ne dort pas.
+    Refuse,
+    /// Attente interruptible d'une tache condamnee : l'appelant libere ce
+    /// qu'il tient ET meurt (`meurt_au_parking`), sans dormir.
+    Condamnee,
+}
+
+/// Publie `Blocked` pour la tache courante. Le coeur commun de toutes les
+/// attentes (`kernel::cycle_vie`) :
+///
+///   1. l'interruptibilite est posee AVANT l'etat, pour qu'un tueur qui lit
+///      `Blocked` la lise aussi ;
+///   2. `Ready -> Blocked` par CAS : une tache qui n'est plus prete ne dort
+///      pas ;
+///   3. la condamnation est relue APRES la publication : c'est la moitie
+///      « tache » du protocole croise avec `condamne`.
+fn publie_parking(interruptible: bool) -> Parking {
+    let task = current();
+    task.attente_interruptible.range(interruptible);
+    if !task.state.endort() {
+        ENDORMISSEMENTS_REFUSES.fetch_add(1, Ordering::Relaxed);
+        task.attente_interruptible.range(false);
+        return Parking::Refuse;
+    }
+    if crate::kernel::cycle_vie::meurt_au_parking(task.condamnee.est_condamnee(), interruptible) {
+        return Parking::Condamnee;
+    }
+    Parking::Gare
+}
+
+/// La tache courante, condamnee, meurt dans son attente interruptible au lieu
+/// d'y dormir. Ne revient pas.
+pub(crate) fn meurt_au_parking() -> ! {
+    MORTES_AU_PARKING.fetch_add(1, Ordering::Relaxed);
+    meurt_soi_meme(current());
+    retire_exec_zombie_current()
+}
+
+/// Une attente d'appel systeme interruptible hors WaitQueue (`wait4`) :
+/// publie `Blocked`. Faux : ne pas dormir (tache morte). Une tache condamnee
+/// ne revient pas.
+pub fn publie_attente_interruptible() -> bool {
+    match publie_parking(true) {
+        Parking::Gare => true,
+        Parking::Refuse => false,
+        Parking::Condamnee => meurt_au_parking(),
+    }
+}
+
+/// Fin d'une attente : l'attente n'est plus interruptible, et un parking
+/// encore publie (echeance, reveil parasite de `schedule`) est annule.
+pub fn termine_attente() {
+    let task = current();
+    task.attente_interruptible.range(false);
+    task.state.reveille();
+}
+
 pub(crate) fn prepare_park_current_on_detached(
     wait_queue_key: usize,
     deadline_ns: Option<u64>,
-) {
+    interruptible: bool,
+) -> Parking {
     // L'assertion « sous gros verrou » a disparu parce que la PRECONDITION a
     // disparu, non pour faire passer un controle : ce chemin est justement
     // celui qu'on sort du verrou. Ce qui reste vrai, et qui compte, est que
@@ -54,12 +117,20 @@ pub(crate) fn prepare_park_current_on_detached(
         let task = current();
         task.wait_queue_key.range(wait_queue_key);
         task.wake_deadline_ns.range(deadline_ns.unwrap_or(0));
-        task.state.range(TaskState::Blocked);
+    }
+    let issue = publie_parking(interruptible);
+    if issue != Parking::Gare {
+        let task = current();
+        task.wait_queue_key.range(0);
+        task.wake_deadline_ns.range(0);
+        forensic_wait_clear(WAIT_WAIT_QUEUE);
+        return issue;
     }
 
     if let Some(deadline) = deadline_ns {
         arme_echeance(deadline);
     }
+    Parking::Gare
 }
 
 /// Annule un parking publie mais pas encore effectif.
@@ -72,7 +143,9 @@ pub(crate) fn annule_park_courant() {
     let task = current();
     task.wait_queue_key.range(0);
     task.wake_deadline_ns.range(0);
-    task.state.range(TaskState::Ready);
+    task.attente_interruptible.range(false);
+    // `Blocked -> Ready` ; sans effet si un reveilleur l'a deja fait.
+    task.state.reveille();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_WAIT_QUEUE);
 }
@@ -110,6 +183,7 @@ pub(crate) fn finish_park_current_on_detached(
         let task = current();
         task.wait_queue_key.range(0);
         task.wake_deadline_ns.range(0);
+        task.attente_interruptible.range(false);
     }
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_WAIT_QUEUE);
@@ -122,13 +196,11 @@ pub(crate) fn finish_park_current_on_detached(
 pub(crate) fn park_current_on(wait_queue_key: usize) {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_WAIT_QUEUE, wait_queue_key as u64, 0);
-    {
-        let task = current();
-        task.wait_queue_key.range(wait_queue_key);
-        task.state.range(TaskState::Blocked);
-    }
-    while current().state == TaskState::Blocked {
-        schedule();
+    current().wait_queue_key.range(wait_queue_key);
+    if publie_parking(false) == Parking::Gare {
+        while current().state == TaskState::Blocked {
+            schedule();
+        }
     }
     current().wait_queue_key.range(0);
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
@@ -147,11 +219,12 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
         let task = current();
         task.wait_queue_key.range(wait_queue_key);
         task.wake_deadline_ns.range(deadline_ns);
-        task.state.range(TaskState::Blocked);
     }
-    arme_echeance(deadline_ns);
-    while current().state == TaskState::Blocked {
-        schedule();
+    if publie_parking(false) == Parking::Gare {
+        arme_echeance(deadline_ns);
+        while current().state == TaskState::Blocked {
+            schedule();
+        }
     }
     let notified = crate::kernel::timer::monotonic_ns() < deadline_ns;
     let task = current();
@@ -195,7 +268,7 @@ pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
             continue;
         }
         // Le gagnant du compare_exchange est le seul a poursuivre.
-        if !tache.state.echange(TaskState::Blocked, TaskState::Ready) {
+        if !tache.state.reveille() {
             continue;
         }
         // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1

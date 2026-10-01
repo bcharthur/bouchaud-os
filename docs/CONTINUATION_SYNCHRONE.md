@@ -160,7 +160,8 @@ commit a la ligne `BOUCHAUD_BUILD` du noyau suffirait a le rendre bruyant.
 
 ## 7. Ce qui reste ouvert
 
-* **Zombies ressuscites (pre-existant, hors de ce lot).** `session-probe 4`
+* **Zombies ressuscites (pre-existant, hors de ce lot) -- CORRIGE par
+  BOUCHAUD_CYCLE_DE_VIE_V1 (`docs/CYCLE_DE_VIE_TACHE.md`).** `session-probe 4`
   sous SMP4 : le teardown de session marque les quatre fils zombie (`4
   tache(s) de sa session arretees`), puis trois d'entre eux sont relus
   `Blocked` -- leur `nanosleep` ecrit l'etat par `range` (ecriture simple) et

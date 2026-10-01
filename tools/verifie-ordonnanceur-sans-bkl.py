@@ -70,10 +70,13 @@ def main() -> int:
         "balayage echeances revendique par CAS": "commence_balayage(now)" in sommeil
             and "compare_exchange(" in echeances
             and "fetch_min(minimum_ns" in echeances,
+        # BOUCHAUD_CYCLE_DE_VIE_V1 : la transition se nomme `reveille`, un CAS
+        # Blocked -> Ready (verifie-cycle-vie.py garde la table entiere).
         "reveils arbitres Blocked vers Ready":
-            "state.echange(TaskState::Blocked, TaskState::Ready)" in sommeil
-            and "state.echange(TaskState::Blocked, TaskState::Ready)" in blocage
-            and ".echange(TaskState::Blocked, TaskState::Ready)" in lifecycle,
+            "fn reveille(&self) -> bool {\n        self.transite(TaskState::Blocked, TaskState::Ready)" in modeles
+            and "state.reveille()" in sommeil
+            and "state.reveille()" in blocage
+            and "state.reveille()" in lifecycle,
         # DEUX SITES, ET LE COMPTE EXACT EST LA REGLE.
         #
         # BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : la boucle d'attente du BSP et sa
