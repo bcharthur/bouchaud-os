@@ -1017,6 +1017,10 @@ fn boucle() {
                 && matches!(&w.app, App::Navigateur { client } if client.jauge.visible()));
         }
 
+        // L'instant ou ce tour commence a lire les clients : tout `FrameReady`
+        // ecrit AVANT est lu par ce tour ou par un precedent. Voir
+        // `temoin_composition` plus bas.
+        let pompe_t_ms = crate::kernel::timer::monotonic_ms();
         let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
         if !degat_clients.vide() {
             sale = true;
@@ -1263,6 +1267,9 @@ fn boucle() {
 
                 crate::kernel::timer::mark_frame();
                 reveil::note_trame(horloge_seule);
+                if wins.iter().any(|w| matches!(&w.app, App::Navigateur { .. })) {
+                    temoin_composition(pompe_t_ms);
+                }
             }
 
             // LE DEMARRAGE NE S'ARRETE PAS AU BUREAU.
@@ -1717,6 +1724,41 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// alors qu'une fenetre vient de se fermer, et c'est precisement ce cas qui
 /// exige que le bureau redessine ce qu'elle couvrait. Rendre un plein ecran
 /// ici, comme avant, obligeait l'appelant a le subir sans savoir pourquoi.
+/// BOUCHAUD_GUI_COMPOSITION_DATEE_V1
+///
+/// Le banc de mire (tools/ci/surface_declencheur.py) doit savoir quand l'ECRAN
+/// porte une trame du navigateur, pas seulement quand le navigateur l'a remise.
+/// `BROWSER_HOST_M11_TRAME seq=N t=T` est ecrit par WebContent APRES son
+/// `FrameReady` ; ce tour-ci a commence a lire les clients a `pompe_t_ms`. Si
+/// `pompe_t_ms > T`, le `FrameReady` de N a ete lu par ce tour ou un precedent,
+/// et cette composition -- qui recopie tout degat en attente -- a laisse sur le
+/// framebuffer la trame N ou une plus recente. Les deux horloges sont la meme :
+/// `clock_gettime(CLOCK_MONOTONIC)` rend `timer::monotonic_ns()`.
+///
+/// Emis seulement quand une fenetre de navigateur existe, et au plus quatre
+/// fois par seconde : le temoin n'a pas a dater chaque composition, il suffit
+/// qu'une composition posterieure finisse par l'etre. Au-dela de 2048 lignes,
+/// une toutes les dix secondes, pour qu'une longue session ne noie pas la
+/// console.
+fn temoin_composition(pompe_t_ms: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static DERNIER_MS: AtomicU64 = AtomicU64::new(0);
+    static EMIS: AtomicU64 = AtomicU64::new(0);
+    let emis = EMIS.load(Ordering::Relaxed);
+    let intervalle = if emis < 2048 { 250 } else { 10_000 };
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    let dernier = DERNIER_MS.load(Ordering::Relaxed);
+    if emis != 0 && maintenant.saturating_sub(dernier) < intervalle {
+        return;
+    }
+    DERNIER_MS.store(maintenant, Ordering::Relaxed);
+    EMIS.store(emis + 1, Ordering::Relaxed);
+    crate::serial_println!(
+        "GUI_COMPOSITION_NAVIGATEUR pompe_t_ms={} fin_t_ms={} n={}",
+        pompe_t_ms, maintenant, emis + 1
+    );
+}
+
 fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
     let mut degat_ecran = Rect::default();
     let mut morts: Vec<usize> = Vec::new();
