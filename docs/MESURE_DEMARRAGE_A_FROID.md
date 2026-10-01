@@ -1002,6 +1002,28 @@ au chantier : une tache interactive utilisateur est reveillee par demande
 differee sur son coeur precedent, sans IPI ; la priorite n'agit qu'a
 l'election. Ouvert.
 
+**Ladybird en CI pendant les lots : de la variance, pas un gain.** Valeurs
+lues dans les journaux du job `browser-host smoke` (HOST_WORKER_*_PERF_FIRST ;
+« worker » = WORKER_COLD_START_BREAKDOWN des quatre WebWorker) :
+
+    run (tentative)  head       etat          HTTP    BLOB    workers      lots_dma
+    #378 (1)         d2c45e1a   B8+B9          820     951    490-643 ms   4741
+    #379 (1)         096a3f6b   B10           1687    1954   1053-1351 ms  4739
+    #380 (1)         fbf135c4   B11+wait4     1686    1954   1025-1408 ms  4874
+    -- relances le 2026-10-01, a dix minutes d'intervalle --
+    #380 (2)         fbf135c4   B11+wait4     1108    1340    665-964 ms   4738
+    #378 (3)         d2c45e1a   B8+B9         1149    1371    699-945 ms   4742
+
+Les mesures `HTTP=820 ms / BLOB=951 ms` sont celles de #378, pas de #379. Le
+passage a ~1690/1950 ms entre #378 et #379 touchait TOUS les demarrages a la
+fois (RequestServer 35 -> 64 ms, chaque WebWorker x2) ; pour distinguer une
+regression B10 d'un runner plus lent, les deux heads extremes ont ete relances
+dans la meme fenetre : d2c45e1a (avant B10) et fbf135c4 (apres B11) y donnent
+1149/1371 et 1108/1340 ms, a 4 % l'un de l'autre, alors que fbf135c4 seul a
+varie de 1686 a 1108 ms entre deux tentatives (34 %). Conclusion : sur ce
+smoke, l'effet de B10/B11 est sous la variance CI ; ni gain ni regression
+n'est demontre. Les DMA sont stables (4738-4874 lots, 0 repli PIO).
+
 Restent ouverts : la queue de latence interactive (sonde d'ordonnanceur
 ci-dessus ; `ready_latency_interactive_max_ms` depasse 100 ms sur une partie
 des runs, avant comme apres le chantier) ; les `static mut` de configuration
