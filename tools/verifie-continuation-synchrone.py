@@ -26,9 +26,12 @@ continuation perdue).
      la verification `if !mort { panic!` ;
   5. la boucle idle -- AP et BSP, une seule -- teste la continuation due
      AVANT d'elire une tache ;
-  6. le banc hote rejoue l'ancien et le nouveau protocole.
+  6. le banc hote rejoue l'ancien et le nouveau protocole ;
+  7. (BOUCHAUD_SORTIE_NON_PREEMPTEE_V1) la preemption noyau est refusee a une
+     tache deja marquee zombie : coupee, elle n'est jamais republiee, et sa
+     sortie -- dont la reprise de la continuation -- est perdue.
 
-Fail-closed ; six tests negatifs.
+Fail-closed ; sept tests negatifs.
 """
 import re
 import sys
@@ -40,7 +43,8 @@ ORDO = "src/kernel/process/thread/ordonnancement.rs"
 VIE = "src/kernel/process/thread/lifecycle.rs"
 COURANT = "src/kernel/process/thread/courant.rs"
 TEST = "tools/smp/test_continuation.rs"
-FICHIERS = (ORDO, VIE, COURANT, TEST)
+PREEMPT = "src/kernel/scheduler/preempt.rs"
+FICHIERS = (ORDO, VIE, COURANT, TEST, PREEMPT)
 
 
 def sans_commentaires(texte: str) -> str:
@@ -93,6 +97,8 @@ def verifie(racine: Path) -> list[str]:
     for nom in ("secondary_cpu_loop", "idle_bsp_trampoline"):
         if "boucle_idle(" not in corps(src[ORDO], nom):
             fautes.append(f"{ORDO} : {nom} ne passe plus par la boucle idle commune")
+    if "!crate::kernel::task::sortie_en_cours_locale()" not in corps(src[PREEMPT], "preemption_noyau_sure"):
+        fautes.append(f"{PREEMPT} : une tache qui meurt peut de nouveau etre preemptee")
     if 'src/kernel/scheduler/continuation.rs' not in src[TEST] or "Regle::Ancienne" not in src[TEST]:
         fautes.append(f"{TEST} : le banc hote ne rejoue plus l'ancien protocole")
     return fautes
@@ -129,6 +135,7 @@ def main() -> int:
         (VIE, "    if !mort {\n        panic!(", "    if false {\n        panic!("),
         (ORDO, "        if continuation_due(cpu_id) {\n            let cible", "        if false {\n            let cible"),
         (TEST, '#[path = "../../src/kernel/scheduler/continuation.rs"]', '#[path = "continuation_copie.rs"]'),
+        (PREEMPT, "        && !crate::kernel::task::sortie_en_cours_locale()\n", ""),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):

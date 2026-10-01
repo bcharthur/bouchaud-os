@@ -76,6 +76,17 @@ pub(crate) fn kernel_ctx_rsp() -> u64 {
 // BOUCHAUD_CONTINUATION_SYNCHRONE_V1
 // ---------------------------------------------------------------------------
 
+/// La tache courante de CE coeur est-elle deja marquee zombie ?
+///
+/// BOUCHAUD_SORTIE_NON_PREEMPTEE_V1. Lu par `preemption_noyau_sure` : une
+/// tache noyau qui execute sa propre sortie ne doit pas etre coupee. Une fois
+/// commutee, `complete_switch_handoff` ne la republie pas (seul `Ready` l'est),
+/// et le reste de sa sortie -- notification, reprise de continuation -- est
+/// perdu avec sa pile.
+pub fn sortie_en_cours_locale() -> bool {
+    RETRAITE_DEMANDEE[local_cpu()].load(Ordering::Acquire)
+}
+
 /// Sorties menees a la boucle idle pendant qu'une continuation etait garee.
 ///
 /// C'est l'evenement qui, avant ce lot, REPRENAIT la continuation d'un autre.

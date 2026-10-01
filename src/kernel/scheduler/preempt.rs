@@ -212,6 +212,12 @@ pub fn preemption_noyau_sure() -> bool {
     local.preempt_count() == 0
         && local.verrous_simples() == 0
         && crate::kernel::sync::lockdep::depth() == 0
+        // BOUCHAUD_SORTIE_NON_PREEMPTEE_V1 : une tache qui meurt finit sa
+        // sortie. Coupee apres `marque_zombie`, elle n'est jamais republiee :
+        // `continuation-banc` l'a vu sur SMP1 -- racine coupee au milieu
+        // d'`exit_current` par une preemption ciblee, continuation reprise
+        // 2 s plus tard par la mort suivante.
+        && !crate::kernel::task::sortie_en_cours_locale()
 }
 
 /// Accorde-t-on la preemption d'un fil noyau sur ce coeur, maintenant ?
