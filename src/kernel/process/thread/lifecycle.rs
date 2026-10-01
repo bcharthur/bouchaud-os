@@ -126,6 +126,15 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
     // mesuree, et sur le banc l'echantillonneur ne tourne qu'une fois, avant
     // les lancements. Les deux cas ne se recouvrent pas.
     if dernier_thread {
+        // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : les descripteurs se ferment
+        // A LA MORT, avant que le parent ne l'apprenne -- comme `exit_files`
+        // precede `exit_notify` sous Linux. Ils ne se fermaient qu'au
+        // recyclage de l'emplacement de la tache, qui tient le processus :
+        // un tube dont l'ecrivain etait mort ne rendait jamais la fin de
+        // fichier, meme apres `wait4` (scheduler-ng-banc :
+        // eof-avant-recolte 0/10, racine-avant-descendants 0/5, a tous les
+        // SMP). Les objets eux-memes vivent tant qu'un autre les tient.
+        ferme_descripteurs(&current().process);
         // P18_SERVICE_GUARDIAN_V1. Hors du verrou lifecycle: aucune
         // serialisation, allocation ou relance sous le verrou de sortie.
         let process = &current().process;
@@ -942,6 +951,17 @@ pub fn code_de_sortie(pid: u32) -> Option<i32> {
         }
     })
 }
+/// Ferme tous les descripteurs d'un processus mort.
+///
+/// La table est videe sous son verrou, et les descripteurs sont fermes APRES :
+/// fermer un tube reveille ses lecteurs, ce qui ne se fait pas sous le verrou
+/// d'une table. La table n'est jamais partagee entre processus (`fork` en
+/// fait une copie) : la vider ne touche que ce processus.
+pub fn ferme_descripteurs(process: &Arc<Process>) {
+    let fermes = process.files.lock().prend_tout();
+    drop(fermes);
+}
+
 /// Un processus et tous ses descendants, du plus proche au plus lointain.
 ///
 /// Un navigateur n'est pas un processus, c'est un arbre : l'interface forke un
@@ -1015,6 +1035,9 @@ pub fn tue_processus(pid: u32, code: i32) {
                 "PROCESS_EXIT t={} pid={} ppid={} code={} reason=force",
                 crate::kernel::timer::monotonic_ms(), pid, process.parent, code,
             ));
+            // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : meme regle qu'une sortie
+            // volontaire -- fermer avant de prevenir le parent.
+            ferme_descripteurs(&process);
             notify_parent_of_exit_for(process.parent);
         }
     }

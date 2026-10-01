@@ -483,6 +483,15 @@ impl FdTable {
         self.entries.iter().filter(|slot| slot.is_some()).count()
     }
 
+    /// Retire TOUS les descripteurs, pour qu'ils soient fermes par
+    /// l'appelant -- hors du verrou de la table : la fermeture d'un tube
+    /// reveille ses lecteurs, et ne doit rien faire sous ce verrou.
+    ///
+    /// BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : appele a la mort du processus.
+    pub fn prend_tout(&mut self) -> Vec<Option<FileDesc>> {
+        core::mem::take(&mut self.entries)
+    }
+
     /// Ferme les descripteurs marques `FD_CLOEXEC` (appele par `execve`).
     pub fn close_on_exec(&mut self) {
         for slot in self.entries.iter_mut() {

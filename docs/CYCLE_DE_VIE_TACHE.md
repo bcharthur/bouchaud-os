@@ -194,3 +194,23 @@ la tache est publiee deux fois ; la file deduplique).
   `[SCHED-ORPHELINE]` (ligne de base : 2 rapports sur 15 demarrages ;
   phase 1 seule : 1 demarrage fige sur 12) ;
 * garde `tools/verifie-passation-reveil.py` (3 negatifs).
+
+## 7. Descripteurs fermes a la mort (BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1)
+
+Ligne de base, tous les SMP : `eof-avant-recolte` 0/10, `racine-avant-descendants`
+0/5. La table de descripteurs vit dans le `Process`, que l'emplacement de la
+tache zombie tient jusqu'a son recyclage : un tube dont l'ecrivain etait mort
+ne rendait jamais la fin de fichier, ni avant ni apres `wait4`, et les tubes
+d'un processus orphelin restaient ouverts pour toujours.
+
+Les descripteurs se ferment desormais a la mort du dernier fil (`exit_current`)
+et a une mort imposee (`tue_processus`), AVANT de prevenir le parent — comme
+`exit_files` precede `exit_notify` sous Linux. La table est videe sous son
+verrou, les descripteurs fermes hors du verrou (fermer un tube reveille ses
+lecteurs). Elle n'est jamais partagee entre processus (`fork` la copie).
+
+QEMU `scheduler-ng-banc`, 3 x SMP1/2/4/8/16 : `eof-avant-recolte` 10/10 et
+`racine-avant-descendants` 5/5 sur les 15 demarrages, `perdus` 0, `echecs` 0
+— le banc passe entierement pour la premiere fois, et sa duree tombe de
+72-90 s a 37-50 s (plus d'echeance de 2-3 s sur les fins de fichier
+perdues). Garde `tools/verifie-descripteurs-a-la-mort.py` (3 negatifs).
