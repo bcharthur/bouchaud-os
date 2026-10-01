@@ -246,44 +246,48 @@ PID=$!
 maintenant_ms() { date +%s%3N; }
 
 MIRE_VERDICT=en_attente
-SEQ_INSERTION=""
-SEQ_VOULUE=""
-T_INSERTION_MS=0
+MIRE_CLASSE=""
+# BOUCHAUD_SURFACE_POIGNEE_DE_MAIN_V1 : une ligne par tentative,
+# « seq resultat », relue par surface_declencheur.py a chaque tour.
+TENTATIVES=$PWD/surface-tentatives${SUFFIXE}.txt
+rm -f "$TENTATIVES" "$PWD"/surface-browser-host"${SUFFIXE}"-t*.ppm
 
-# Prend la capture et rend un verdict DEFINITIF. N'est appelee qu'une fois.
+# Prend UNE capture pour la trame que surface_declencheur.py a certifiee, et
+# en garde la preuve : fichier propre a la tentative, seq, date de la trame,
+# pompe du bureau, comptes de pixels. La premiere est aussi copiee sous le nom
+# historique `$CAPTURE`, que le workflow publie.
 capture_mire() {
-    local seq_vue=$1
-    local t_capture_ms
+    local seq=$1 t_trame=$2 pompe=$3 n=$4
+    local fichier="$PWD/surface-browser-host${SUFFIXE}-t${n}.ppm"
+    local t_capture_ms resultat
     t_capture_ms=$(maintenant_ms)
-    local delta_ms=$((t_capture_ms - T_INSERTION_MS))
 
-    if ! echo "screendump $CAPTURE" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
-        MIRE_VERDICT=moniteur_muet
-        echo "HOST_SURFACE_CAPTURE t=$t_capture_ms seq=$seq_vue delta_ms=$delta_ms etat=moniteur_muet"
-        return
-    fi
-
-    # `screendump` rend la main avant que le fichier soit entierement ecrit. On
-    # attend que sa TAILLE CESSE DE BOUGER, ce qui est une observation ; un
-    # sommeil fixe est un pari.
-    local taille taille_precedente=-1
-    for _ in $(seq 1 15); do
-        taille=$(wc -c < "$CAPTURE" 2>/dev/null || echo 0)
-        if [ "$taille" -gt 0 ] && [ "$taille" -eq "$taille_precedente" ]; then
-            break
-        fi
-        taille_precedente=$taille
-        sleep 1
-    done
-
-    if [ ! -s "$CAPTURE" ]; then
-        MIRE_VERDICT=capture_vide
-    elif python3 tools/ci/analyse-surface-mire.py "$CAPTURE"; then
-        MIRE_VERDICT=ok
+    if ! echo "screendump $fichier" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
+        resultat=moniteur_muet
     else
-        MIRE_VERDICT=absente
+        # `screendump` rend la main avant que le fichier soit entierement
+        # ecrit. On attend que sa TAILLE CESSE DE BOUGER, ce qui est une
+        # observation ; un sommeil fixe est un pari.
+        local taille taille_precedente=-1
+        for _ in $(seq 1 15); do
+            taille=$(wc -c < "$fichier" 2>/dev/null || echo 0)
+            if [ "$taille" -gt 0 ] && [ "$taille" -eq "$taille_precedente" ]; then
+                break
+            fi
+            taille_precedente=$taille
+            sleep 1
+        done
+        if [ ! -s "$fichier" ]; then
+            resultat=capture_vide
+        elif python3 tools/ci/analyse-surface-mire.py "$fichier"; then
+            resultat=ok
+        else
+            resultat=absente
+        fi
+        [ "$n" = 1 ] && cp -f "$fichier" "$CAPTURE" 2>/dev/null || true
     fi
-    echo "HOST_SURFACE_CAPTURE t=$t_capture_ms seq=$seq_vue delta_ms=$delta_ms etat=$MIRE_VERDICT"
+    echo "$seq $resultat" >> "$TENTATIVES"
+    echo "HOST_SURFACE_CAPTURE tentative=$n seq=$seq t_trame=$t_trame pompe=$pompe t=$t_capture_ms etat=$resultat"
 }
 
 declare -A VU=()
@@ -301,24 +305,28 @@ while kill -0 "$PID" 2>/dev/null; do
     fi
   done
 
-  # LA CAPTURE, PENDANT QUE LA MACHINE VIT.
+  # LA CAPTURE, PENDANT QUE LA MACHINE VIT -- ET SEULEMENT QUAND ELLE EST PROUVEE.
   #
-  # Deux etats successifs, chacun franchi une seule fois : on fige la cible a
-  # l'insertion, puis on capture des que la trame voulue est composee. La
-  # verification `en_attente` garantit qu'une preuve acquise ne peut plus etre
-  # effacee -- ni par la mort de QEMU, ni par un tour de boucle suivant.
+  # surface_declencheur.py lit le journal et les tentatives, et rend une
+  # action. `capturer` n'arrive que pour une trame lancee apres l'ancre de
+  # PEINTURE et deja composee par le bureau ; `conclure` fige le verdict. Une
+  # preuve acquise ne peut plus etre effacee : seul `en_attente` est revise.
   if [ "$MIRE_VERDICT" = "en_attente" ] && command -v socat >/dev/null 2>&1; then
-    ETAT_MIRE=$(python3 tools/ci/surface_declencheur.py "$LOG" "${SEQ_INSERTION:--}" 2>/dev/null || true)
+    ETAT_MIRE=$(python3 tools/ci/surface_declencheur.py "$LOG" "$TENTATIVES" 2>/dev/null || true)
     if [ -n "$ETAT_MIRE" ]; then
       eval "$ETAT_MIRE"
-      if [ "$inseree" = "1" ] && [ -z "$SEQ_INSERTION" ]; then
-        SEQ_INSERTION=$seq_insertion
-        SEQ_VOULUE=$seq_voulue
-        T_INSERTION_MS=$(maintenant_ms)
-        echo "HOST_SURFACE_INSERTION t=$T_INSERTION_MS seq=$SEQ_INSERTION voulue=$SEQ_VOULUE"
+      if [ "$surf_seq_ancre" != "-1" ] && [ -z "${ANCRE_ANNONCEE:-}" ]; then
+        ANCRE_ANNONCEE=1
+        echo "HOST_SURFACE_ANCRE seq_ancre=$surf_seq_ancre voulue=$surf_voulue decodees=$surf_decodees t=$(maintenant_ms)"
       fi
-      if [ "$inseree" = "1" ] && [ "$pret" = "1" ]; then
-        capture_mire "$seq_vue"
+      if [ "$surf_action" = "capturer" ]; then
+        capture_mire "$surf_seq" "$surf_t_trame" "$surf_pompe" "$surf_tentative"
+      elif [ "$surf_action" = "conclure" ]; then
+        MIRE_CLASSE=$surf_verdict
+        case "$surf_verdict" in
+          ok|latence_publication*) MIRE_VERDICT=ok ;;
+          *) MIRE_VERDICT=$surf_verdict ;;
+        esac
       fi
     fi
   fi
@@ -376,19 +384,20 @@ ECOULE=$((SECONDS - DEBUT))
 if [ "$MIRE_VERDICT" = "en_attente" ]; then
     if ! command -v socat >/dev/null 2>&1; then
         MIRE_VERDICT=socat_absent
-    elif [ -z "$SEQ_INSERTION" ]; then
-        # La page n'a jamais dit avoir pose sa mire : capturer n'aurait rien
-        # prouve, et accuser le compositeur d'un retard de la page serait faux.
-        MIRE_VERDICT=non_posee
     else
-        # La mire est posee mais aucune trame posterieure n'est venue : le
-        # compositeur n'a rien recompose depuis. C'est un resultat, pas un
-        # incident du banc -- et il se distingue maintenant des deux autres.
-        MIRE_VERDICT=sans_trame_posterieure
+        # QEMU ne vit plus : plus aucune trame ne viendra. Le module rend le
+        # verdict de ce qui a ete observe -- sans rien capturer de plus.
+        surf_verdict=en_attente
+        eval "$(python3 tools/ci/surface_declencheur.py "$LOG" "$TENTATIVES" --fin 2>/dev/null || true)"
+        MIRE_CLASSE=$surf_verdict
+        case "$surf_verdict" in
+          ok|latence_publication*) MIRE_VERDICT=ok ;;
+          *) MIRE_VERDICT=$surf_verdict ;;
+        esac
     fi
 fi
-echo "HOST_SURFACE_TRAME insertion=${SEQ_INSERTION:--} voulue=${SEQ_VOULUE:--}"
-echo "HOST_SURFACE_VERDICT $MIRE_VERDICT"
+echo "HOST_SURFACE_TENTATIVES $(tr '\n' ',' < "$TENTATIVES" 2>/dev/null || true)"
+echo "HOST_SURFACE_VERDICT $MIRE_VERDICT classe=${MIRE_CLASSE:-$MIRE_VERDICT}"
 
 # POURQUOI LA SESSION S'EST-ELLE ARRETEE ?
 #
@@ -540,12 +549,15 @@ if [ "$MIRE_VERDICT" != ok ]; then
   echo "surface : la mire n'a pas ete retrouvee dans la frame presentee ($MIRE_VERDICT)" >&2
   case "$MIRE_VERDICT" in
     socat_absent)   echo "  socat manque : le moniteur QEMU est injoignable, la mesure n'a pas eu lieu" >&2 ;;
-    non_posee)      echo "  la page n'a jamais dit avoir insere la mire" >&2 ;;
+    non_posee)      echo "  la page n'a jamais pose son ancre de peinture (HOST_SURFACE_MIRE_PEINTE)" >&2 ;;
+    non_prouvee)    echo "  l'ancre est venue par le delai, pas par deux etapes de rendu : aucune peinture prouvee" >&2 ;;
     sans_trame_posterieure)
-                    echo "  aucune trame n'a ete composee apres l'insertion : rien a capturer" >&2 ;;
+                    echo "  aucune trame lancee apres l'ancre n'a ete remise : rien a capturer" >&2 ;;
+    non_composee)   echo "  la trame retenue n'a jamais ete datee comme composee par le bureau" >&2 ;;
+    trame_non_datee) echo "  BANC : BROWSER_HOST_M11_TRAME sans t= ; le maillon de composition est impossible" >&2 ;;
     moniteur_muet)  echo "  le moniteur n'a pas repondu a screendump" >&2 ;;
     capture_vide)   echo "  screendump a rendu un fichier vide" >&2 ;;
-    absente)        echo "  la capture existe mais ne contient pas les pixels attendus" >&2 ;;
+    absente)        echo "  la mire manque dans 1 + 3 captures certifiees (voir HOST_SURFACE_CAPTURE) : vrai defaut" >&2 ;;
     en_attente)     echo "  BANC : le verdict n'a jamais ete rendu -- ni capture, ni raison." >&2
                     echo "         C'est un defaut du banc, pas du navigateur." >&2 ;;
     *)              echo "  verdict inconnu du banc : $MIRE_VERDICT" >&2 ;;
@@ -625,8 +637,8 @@ echo "== preuves du demarrage a froid =="
 # ici. `.*` suffit, et `tr -d` retire les retours chariot pour de vrai.
 for motif in \
     'BACKING_PROBE .*' \
-    'HOST_SURFACE_INSERTION .*' \
-    'HOST_SURFACE_CAPTURE .*' \
+    'JS_CONSOLE log HOST_SURFACE_MIRE_[A-Z]+ .*' \
+    'GUI_COMPOSITION_NAVIGATEUR .*' \
     'BOUCHAUD_SESSION_FIN .*' \
     'BOUCHAUD_SYSTEM_EXIT .*' \
     'FAULT_FILE_BREAKDOWN .*' \

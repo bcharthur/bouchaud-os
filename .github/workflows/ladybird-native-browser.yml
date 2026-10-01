@@ -352,6 +352,8 @@ jobs:
             serie-browser-host.log
             fixture-browser-host.log
             surface-browser-host.ppm
+            surface-browser-host-t*.ppm
+            surface-tentatives.txt
             convergence-browser-host.json
           if-no-files-found: warn
 

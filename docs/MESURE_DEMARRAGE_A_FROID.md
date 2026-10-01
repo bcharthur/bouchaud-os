@@ -1030,3 +1030,54 @@ des runs, avant comme apres le chantier) ; les `static mut` de configuration
 reseau (`OUR_IP`, `GW_IP`, `DNS_IP`, `MASQUE`, `NOM_RESEAU`, ecrits par DHCP
 et lus sans verrou -- course anterieure au chantier, le fil DHCP n'a jamais pris
 le gros verrou) et les caches du chemin de rendu noyau (RES_CACHE, SUBRES_*).
+
+### 18.10 Surface de mire : le faux negatif du #381 et la poignee de main
+
+Ladybird #381 (02260abd, commit documentaire seul apres fbf135c4 qui avait
+passe #380) a echoue sur `HOST_SURFACE_VERDICT absente` ; tout le fonctionnel
+passait (canvas, images 11/11, JS 17/17, workers, iframe). Chronologie
+invitee lue dans le journal :
+
+    trame 8                 t=23280 ms
+    MIRE_INSEREE (JS)       t=23607 ms
+    trame 9                 t=23724 ms   (+117 ms)
+    trame 10                t=23919 ms   (+312 ms)  <- capturee
+    MIRE_POSEE              t=25786 ms
+    trames 11..17           t=26209..29123 ms
+
+Capture de la trame 10 : bleu 8704 px, rouge 512, vert 0. La page porte 512
+pixels rouges et 512 bleus hors de la mire (meme page sous Chromium : rouge
+4608, vert 4096, bleu 8704) : l'aplat bleu etait peint, ni le rouge ni le
+vert. Une mire en cours de peinture, pas une mire jamais rendue.
+
+`seq=8` etait la derniere trame vue avant le marqueur, `voulue=10` = 8 + 2,
+`delta_ms=1` le temps entre la detection DU BANC (sondage toutes les 2 s) et
+`screendump` -- pas l'ecart avec l'insertion. Rien ne garantissait que la
+trame 10 portait la mire : le marqueur precedait l'etape de rendu, le vert
+(`background-image`) n'etait pas attendu, la capture de WebContent est a un
+seul vol (celle qui revient apres le marqueur a pu partir avant), et la
+trame est datee a sa remise au bureau, pas a sa composition sur le
+framebuffer.
+
+Correction (BOUCHAUD_SURFACE_POIGNEE_DE_MAIN_V1), sans toucher au moteur :
+
+  * page : ancre `HOST_SURFACE_MIRE_PEINTE` apres `decode()` des trois
+    ressources et deux `requestAnimationFrame` ; `battement=delai` est refuse
+    comme preuve ; trois changements d'un pixel garantissent deux
+    presentations apres l'ancre ; le sommeil de 2 s est retire ;
+  * capture retenue : `seq_ancre + 2`, la premiere lancee apres l'ancre (les
+    deux lignes sortent par `outln` du meme processus) ;
+  * noyau : `GUI_COMPOSITION_NAVIGATEUR pompe_t_ms=P`
+    (BOUCHAUD_GUI_COMPOSITION_DATEE_V1) ; capture seulement quand `P > t` de
+    la trame retenue -- le bureau l'a lue et composee ;
+  * si la mire manque : jusqu'a 3 trames NOUVELLES, chacune certifiee, sans
+    relance au temps ; `ok`, `latence_publication tentatives=n trames=k`
+    (classe et mesure), ou `absente` (vrai echec). Preuves : une capture par
+    tentative, `surface-tentatives.txt`, lignes `HOST_SURFACE_CAPTURE`.
+
+Banc hote `tools/ci/surface_declencheur.py --test` (garde
+`verifie-declencheur-surface.py`) : le journal reel du #381 declenche
+l'ancienne regle a la trame 10 ; un pipeline simule (DOM pret, ancienne
+surface encore presentee) fait capturer a l'ancienne regle une surface perimee
+et a la nouvelle la mire ; une mire jamais peinte reste `absente` ; trois
+mutations (marge 1, sans certification, `>=`) font rougir le banc.

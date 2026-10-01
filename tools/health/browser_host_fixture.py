@@ -422,37 +422,74 @@ HTML = r'''<!doctype html>
       if (im.complete && im.naturalWidth > 0) return res();
       im.onload = res; im.onerror = res;
     })));
-    // LA BORNE QUE LE BANC PEUT CORRELER A UNE TRAME.
-    //
-    // `HOST_SURFACE_MIRE_POSEE` arrive APRES deux `requestAnimationFrame` et
-    // deux secondes d'attente : il dit que la page a fini d'esperer, pas qu'une
-    // trame contenant la mire a ete composee. Le banc capturait donc un ecran
-    // sans savoir ce qu'il capturait.
-    //
-    // Cette ligne-ci est emise a l'instant ou la mire est dans le DOM et ou ses
-    // images sont DECODEES. Toute trame numerotee posterieure la contient
-    // necessairement ; c'est cette trame-la que le banc attend avant de
-    // demander le `screendump`.
+    // Informatif seulement : la mire est dans le DOM, `<img>` rouge et bleu
+    // ont fini de charger. Ce n'est PAS une borne de peinture -- voir
+    // BOUCHAUD_SURFACE_ANCRE_PEINTE_V1 ci-dessous.
     console.log("HOST_SURFACE_MIRE_INSEREE largeur=" + mire.offsetWidth + " hauteur=" + mire.offsetHeight);
-    // DEUX TRAMES DE BATTEMENT, MAIS BORNEES.
+
+    // BOUCHAUD_SURFACE_ANCRE_PEINTE_V1 -- LA BORNE QUE LE BANC CORRELE.
     //
-    // Attendre deux `requestAnimationFrame` laisse au compositeur le temps de
-    // presenter la mire. Mais un navigateur sans boucle de presentation ne
-    // les declenche JAMAIS -- un Chromium `headless_shell` en temps virtuel,
-    // par exemple. La premiere version attendait sans garde et la page s'y
-    // arretait pour toujours : le banc n'a rendu aucune ligne apres
-    // `HOST_IMAGE_REUTILISE`.
+    // `HOST_SURFACE_MIRE_INSEREE` servait d'ancre, et le run 36836362480 (#381)
+    // a montre pourquoi ce n'en etait pas une : la trame capturee, deux
+    // presentations plus tard, portait l'aplat bleu et NI le rouge NI le vert
+    // (rouge 512 px et bleu 8704 px : la page en porte 512 de chaque hors de
+    // la mire, comme le montre la meme page sous Chromium -- rouge 4608, vert
+    // 4096, bleu 8704). Trois raisons, toutes dans le protocole :
     //
-    // Une epreuve ne doit pas pouvoir suspendre le banc. La course contre un
-    // delai rend la borne explicite, et le journal dit laquelle a gagne.
-    const deuxTrames = new Promise(r =>
-      requestAnimationFrame(() => requestAnimationFrame(() => r("trames"))));
-    const battement = await Promise.race([
-      deuxTrames,
+    //   1. le script tourne AVANT l'etape de rendu qui peindra son DOM : le
+    //      marqueur precedait la peinture qu'il pretendait borner ;
+    //   2. le vert passe par `background-image`, que rien n'attendait -- sa
+    //      requete se terminait a l'instant de l'insertion ;
+    //   3. la capture de WebContent est a un seul vol : celle qui revient
+    //      juste apres le marqueur peut avoir ete lancee avant lui.
+    //
+    // L'ancre est donc posee ici, quand les TROIS ressources sont decodees
+    // (`decode()` ; le vert par une image sonde de la meme URL, que LibWeb
+    // partage avec le style) et que DEUX etapes de rendu sont passees : la
+    // premiere a peint la mire, la seconde prouve que la premiere est finie.
+    // Le banc attend alors la presentation `seq_ancre + 2`, la premiere dont la
+    // capture a forcement ete lancee apres l'ancre.
+    const sonde = new Image();
+    sonde.src = "/mire/vert.png";
+    // Sans `decode()`, retomber sur `load` -- et le dire : `decodees` compte
+    // les vrais decodages, `charge` les simples chargements.
+    const decodages = await Promise.all([rouge, bleu, sonde].map(im =>
+      typeof im.decode === "function"
+        ? im.decode().then(() => 1, () => 0)
+        : new Promise(r => {
+            if (im.complete && im.naturalWidth > 0) return r(0);
+            im.addEventListener("load", () => r(0)); im.addEventListener("error", () => r(0));
+          })));
+    // Un navigateur sans boucle de presentation ne declenche JAMAIS
+    // `requestAnimationFrame` -- un Chromium `headless_shell` en temps
+    // virtuel, par exemple. Une epreuve ne doit pas pouvoir suspendre le
+    // banc : la course contre un delai rend la borne explicite. `delai` n'est
+    // PAS une preuve de peinture, et le banc le refuse comme telle.
+    const deuxEtapes = () => Promise.race([
+      new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r("trames")))),
       new Promise(r => setTimeout(() => r("delai"), 5000)),
     ]);
-    await new Promise(r => setTimeout(r, 2000));
-    console.log(`HOST_SURFACE_MIRE_POSEE battement=${battement}` + " rouge=img vert=background-image bleu=img_echelle"
+    const battement = await deuxEtapes();
+    console.log(`HOST_SURFACE_MIRE_PEINTE battement=${battement}`
+      + ` decodees=${decodages.reduce((a, b) => a + b, 0)}/3`);
+
+    // AU MOINS DEUX PRESENTATIONS APRES L'ANCRE, SANS SOMMEIL.
+    //
+    // La capture a un seul vol coalesce les invalidations : sur une page qui
+    // ne bouge plus, `seq_ancre + 2` pourrait ne jamais venir. Trois
+    // changements d'un pixel, une etape de rendu chacun, garantissent une
+    // capture lancee apres l'ancre ET une capture de rattrapage apres la
+    // premiere. Borne : trois etapes, chacune sous le meme delai.
+    const pouls = document.createElement("div");
+    pouls.style.cssText = "position:fixed;left:300px;top:0;width:1px;height:1px;background:#010101";
+    document.body.appendChild(pouls);
+    let pas = 0;
+    for (; pas < 3; pas++) {
+      pouls.style.background = pas % 2 ? "#010101" : "#020202";
+      if (await deuxEtapes() !== "trames") break;
+    }
+    console.log(`HOST_SURFACE_MIRE_POSEE battement=${battement} pouls=${pas}/3`
+      + " rouge=img vert=background-image bleu=img_echelle"
       + ` attendu_min_pixels=2048 largeur=${mire.offsetWidth} hauteur=${mire.offsetHeight}`);
   } catch (e) {
     console.log("HOST_SURFACE_MIRE_POSEE FAIL " + e);
