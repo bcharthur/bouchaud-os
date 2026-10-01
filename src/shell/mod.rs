@@ -836,6 +836,11 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // verrou de cette charge, ce qu'aucune mesure de temps ne
         // distingue toute seule.
         "smpstat" => { crate::kernel::task::log_smp_load(); 0 }
+        // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : banc de la continuation run_noyau.
+        "continuation-banc" => {
+            let fils = if argc >= 2 { argv[1].parse::<u32>().unwrap_or(20) } else { 20 };
+            crate::kernel::task::banc_continuation(fils)
+        }
         "apps" => { crate::app::launcher::list(); 0 }
         "launch" => { if argc >= 2 { crate::app::launcher::launch(argv[1]); } else { println!("usage: launch <app>"); } 0 }
         "poweroff" | "halt" | "shutdown" => {

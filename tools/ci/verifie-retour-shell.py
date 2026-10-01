@@ -26,6 +26,14 @@ temoins `RETOUR_SHELL*` :
 
 Sans contention le test est vrai du premier coup : c'est ce qui faisait passer
 le defaut pour intermittent, et une passe verte pour une preuve.
+
+EVOLUTION (BOUCHAUD_CONTINUATION_SYNCHRONE_V1). La boucle d'attente sur la
+pile morte a disparu : `switch_to_kernel` mene desormais a l'IDLE du coeur, et
+la continuation de `run` / `run_noyau` n'est reprise que par
+`reprend_continuation`, quand sa racine est terminee. L'invariant est le meme,
+dit avec les nouveaux noms : la voie de la continuation est decidee AVANT toute
+commutation definitive, et la pile de la racine ne peut plus etre abandonnee
+avant d'avoir rendu le shell.
 """
 from pathlib import Path
 import re
@@ -62,40 +70,22 @@ def controle(racine: Path) -> list:
     if c is None:
         return ["exit_current introuvable : le garde-fou ne controle plus rien"]
 
-    voie = c.find("if pid_sortant == racine {")
+    voie = c.find("reprend_continuation(")
     if voie < 0:
-        return ["la voie directe de la racine a disparu de exit_current : "
-                "elle repasserait par la boucle d'attente"]
+        return ["la voie de la continuation a disparu de exit_current : la mort "
+                "de la racine ne rendrait plus le shell"]
 
-    # Elle doit sauter, et sauter AVANT la premiere commutation definitive.
-    fin_voie = c.find("}", c.find("switch_to_kernel()", voie))
-    # Fenetre large : le bloc porte desormais le denombrement de ce qui
-    # retient la racine, et le saut vient apres. Ce qui compte n'est pas la
-    # distance mais l'absence de commutation definitive entre les deux --
-    # verifiee juste en dessous.
-    if "switch_to_kernel()" not in c[voie: voie + 2400]:
-        erreurs.append("la voie directe de la racine ne saute pas vers le fil noyau")
-
+    # Decidee AVANT la premiere commutation definitive : sinon la pile de la
+    # racine part vers une autre tache et la continuation reste garee.
     premiere_commutation = c.find("commute_sortie_definitive_si_possible")
-    saut_racine = c.find("switch_to_kernel()", voie)
-    if premiere_commutation >= 0 and saut_racine >= 0:
-        # Une commutation definitive peut preceder la voie (cas racine == 0),
-        # mais aucune ne doit se trouver ENTRE la voie et son saut.
-        entre = c[voie: saut_racine]
-        if "commute_sortie_definitive_si_possible" in entre:
-            erreurs.append(
-                "une commutation definitive s'intercale entre le test "
-                "pid_sortant == racine et son switch_to_kernel : la pile de la "
-                "racine peut encore etre abandonnee"
-            )
-
-    # La boucle d'attente doit rester precedee de la voie directe.
-    boucle = c.find("let patience =")
-    if boucle >= 0 and voie > boucle:
+    if premiere_commutation >= 0 and premiere_commutation < voie:
         erreurs.append(
-            "la voie directe est posee APRES la boucle d'attente : la racine "
-            "y entre encore"
+            "une commutation definitive precede la voie de la continuation : "
+            "la pile de la racine peut encore etre abandonnee"
         )
+    if "Destination::Continuation" not in c[:voie]:
+        erreurs.append("la voie de la continuation n'est plus gardee par "
+                       "`continuation::destination`")
 
     for temoin in ("RETOUR_SHELL_SAUT", "RETOUR_SHELL_REPRIS"):
         if temoin not in (racine / LIFECYCLE).read_text():
@@ -110,8 +100,12 @@ def test_negatif() -> list:
     """Le controle doit REFUSER les deux regressions qui reperdent le shell."""
     txt = (RACINE / LIFECYCLE).read_text()
     mutations = [
-        ("voie directe retiree", lambda t: t.replace(
-            "    if pid_sortant == racine {", "    if false && pid_sortant == racine {", 1)),
+        ("voie de la continuation retiree", lambda t: t.replace(
+            '        reprend_continuation("racine_terminee");', "", 1)),
+        ("commutation avant la continuation", lambda t: t.replace(
+            "    let garee = CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_GAREE;\n    let sortie",
+            "    commute_sortie_definitive_si_possible(cur, cpu_id);\n"
+            "    let garee = CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_GAREE;\n    let sortie", 1)),
         # La mutation ne doit pas CONTENIR la chaine cherchee, sinon le test
         # negatif passe pour vert sans rien avoir prouve.
         ("temoin de reprise retire", lambda t: t.replace(
@@ -135,7 +129,7 @@ def main() -> int:
             print(f"RETOUR_SHELL_FAIL {e}")
         print(f"RETOUR_SHELL_VERDICT echec erreurs={len(erreurs)}")
         return 1
-    print("RETOUR_SHELL_VERDICT ok voie=directe_avant_boucle temoins=2 negatifs=2")
+    print("RETOUR_SHELL_VERDICT ok voie=continuation_avant_commutation temoins=2 negatifs=3")
     return 0
 
 

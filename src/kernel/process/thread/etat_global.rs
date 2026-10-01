@@ -165,7 +165,54 @@ static TRANSITION_ORDONNANCEUR: [AtomicBool; MAX_CPUS] =
 static TRANSITIONS_ORDONNANCEUR: AtomicU64 = AtomicU64::new(0);
 static TRANSITIONS_ORDONNANCEUR_REFUSEES: AtomicU64 = AtomicU64::new(0);
 static NEXT_TID: AtomicU32 = AtomicU32::new(100);
+/// Le contexte IDLE de chaque coeur, et RIEN D'AUTRE.
+///
+/// BOUCHAUD_CONTINUATION_SYNCHRONE_V1. Sur un AP c'est la pile de
+/// `secondary_cpu_loop` ; sur le BSP, celle de la boucle idle dediee que
+/// `assure_idle_coeur_zero` amorce au premier lancement synchrone.
+/// `switch_to_kernel` y mene TOUTE tache qui sort sans successeur pret.
+///
+/// Il servait aussi, sur le BSP, de continuation a `run` / `run_noyau` : la
+/// mort de n'importe quelle tache du coeur zero, faute d'autre tache prete,
+/// reprenait alors le lancement synchrone d'un autre -- incident TRIGKEY,
+/// `RUN_NOYAU_RETOUR nom=desktop fil_mort=0` a T+60,519 s.
 static mut KERNEL_CTX: [Context; MAX_CPUS] = [Context { rsp: 0 }; MAX_CPUS];
+
+// LA CONTINUATION D'UN LANCEMENT SYNCHRONE, ET SON PROPRIETAIRE.
+//
+// `run` / `run_noyau` garent ici la pile d'amorcage qui les a appeles. Elle
+// n'est reprise QUE lorsque sa racine est terminee (`continuation_due`), et
+// seulement sur le coeur qui l'a garee : soit par la mort meme qui la rend
+// due (`reprend_continuation`), soit par la boucle idle de ce coeur.
+//
+// Propriete : posee par le contexte d'amorcage (LIBRE -> GAREE), consommee
+// une fois (GAREE -> LIBRE) par le coeur `CONTINUATION_CPU`. Un seul
+// lancement synchrone a la fois : `run_noyau` refuse depuis une tache, et le
+// contexte d'amorcage est unique.
+static mut CONTINUATION: Context = Context { rsp: 0 };
+const CONTINUATION_LIBRE: u8 = 0;
+const CONTINUATION_GAREE: u8 = 1;
+static CONTINUATION_ETAT: AtomicU8 = AtomicU8::new(CONTINUATION_LIBRE);
+/// Pid de la racine attendue.
+static CONTINUATION_RACINE: AtomicU32 = AtomicU32::new(0);
+/// `run` attend aussi la descendance de sa racine ; `run_noyau` non.
+static CONTINUATION_DESCENDANCE: AtomicBool = AtomicBool::new(false);
+static CONTINUATION_CPU: AtomicUsize = AtomicUsize::new(0);
+/// Sorties menees a la boucle idle PENDANT qu'une continuation etait garee :
+/// exactement l'evenement qui, avant, la reprenait a tort.
+static DETOURS_IDLE: AtomicU64 = AtomicU64::new(0);
+/// Morts (passages a `Zombie`) depuis le demarrage. Seule une mort peut rendre
+/// une racine terminee : la boucle idle ne rebalaie les taches que si ce
+/// compteur a bouge depuis son dernier constat negatif.
+static MORTS: AtomicU64 = AtomicU64::new(0);
+/// Valeur de `MORTS` au dernier constat « continuation pas encore due ».
+static CONTINUATION_EPOQUE_VUE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Instant (ms) de la derniere reprise de continuation, pour les bancs.
+static DERNIERE_REPRISE_MS: AtomicU64 = AtomicU64::new(0);
+/// Lignes `SWITCH_TO_KERNEL` encore permises : evenements rares, borne dure.
+static TEMOINS_SWITCH_KERNEL: AtomicU32 = AtomicU32::new(32);
+/// La boucle idle du coeur zero est-elle amorcee ?
+static IDLE_BSP_PRET: AtomicBool = AtomicBool::new(false);
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static CURRENT_IS_KERNEL: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 // BOUCHAUD_P0_REVEIL_CIBLE_V1

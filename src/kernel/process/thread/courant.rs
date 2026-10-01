@@ -72,6 +72,172 @@ pub(crate) fn kernel_ctx_rsp() -> u64 {
     unsafe { KERNEL_CTX[local_cpu()].rsp }
 }
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_CONTINUATION_SYNCHRONE_V1
+// ---------------------------------------------------------------------------
+
+/// Sorties menees a la boucle idle pendant qu'une continuation etait garee.
+///
+/// C'est l'evenement qui, avant ce lot, REPRENAIT la continuation d'un autre.
+/// Le banc `continuation-banc` s'en sert pour prouver qu'il l'a provoque.
+pub fn detours_idle() -> u64 {
+    DETOURS_IDLE.load(Ordering::Relaxed)
+}
+
+/// Instant (ms) de la derniere reprise d'une continuation synchrone.
+pub fn derniere_reprise_continuation_ms() -> u64 {
+    DERNIERE_REPRISE_MS.load(Ordering::Acquire)
+}
+
+/// Gare la continuation d'un lancement synchrone. Contexte d'amorcage seul.
+///
+/// Fail-fast : une continuation deja garee voudrait dire deux lancements
+/// synchrones a la fois, donc une pile d'amorcage ecrasee.
+fn gare_continuation(cpu: usize, racine: u32, tid: u32, descendance: bool) {
+    assert_eq!(
+        CONTINUATION_ETAT.load(Ordering::Acquire),
+        CONTINUATION_LIBRE,
+        "task: continuation synchrone deja garee (racine={})",
+        CONTINUATION_RACINE.load(Ordering::Relaxed),
+    );
+    CONTINUATION_RACINE.store(racine, Ordering::Relaxed);
+    CONTINUATION_DESCENDANCE.store(descendance, Ordering::Relaxed);
+    CONTINUATION_CPU.store(cpu, Ordering::Relaxed);
+    CONTINUATION_EPOQUE_VUE.store(u64::MAX, Ordering::Relaxed);
+    CONTINUATION_ETAT.store(CONTINUATION_GAREE, Ordering::Release);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "RUN_NOYAU_CTX t={} cpu={} owner_pid={} owner_tid={} rsp={:#x} descendance={}",
+        crate::kernel::timer::monotonic_ms(),
+        cpu,
+        racine,
+        tid,
+        rsp_courant_passation(),
+        descendance as u8,
+    ));
+}
+
+/// La racine de la continuation garee est-elle terminee ?
+///
+/// Terminee : plus AUCUNE tache non zombie du processus racine -- ni, pour
+/// `run`, de sa descendance. C'est la seule condition qui rend une
+/// continuation reprenable, quel que soit le contexte qui la constate.
+fn racine_terminee(racine: u32, descendance: bool) -> bool {
+    !tasks().iter().any(|t| {
+        t.state != TaskState::Zombie
+            && if descendance {
+                descend_de(t.process.pid, racine)
+            } else {
+                t.process.pid == racine
+            }
+    })
+}
+
+/// La continuation garee peut-elle etre reprise ICI, maintenant ?
+fn continuation_due(cpu: usize) -> bool {
+    // Courts-circuits AVANT tout balayage des taches : pas de continuation
+    // garee, pas le coeur proprietaire, ou aucune mort depuis le dernier
+    // constat negatif. La boucle idle passe ici a chaque reveil.
+    if CONTINUATION_ETAT.load(Ordering::Acquire) != CONTINUATION_GAREE
+        || CONTINUATION_CPU.load(Ordering::Relaxed) != cpu
+    {
+        return false;
+    }
+    let epoque = MORTS.load(Ordering::Acquire);
+    if CONTINUATION_EPOQUE_VUE.load(Ordering::Relaxed) == epoque {
+        return false;
+    }
+    let due = crate::kernel::continuation::reprenable(
+        true,
+        racine_terminee(
+            CONTINUATION_RACINE.load(Ordering::Relaxed),
+            CONTINUATION_DESCENDANCE.load(Ordering::Relaxed),
+        ),
+        cpu,
+        CONTINUATION_CPU.load(Ordering::Relaxed),
+    );
+    if !due {
+        CONTINUATION_EPOQUE_VUE.store(epoque, Ordering::Relaxed);
+    }
+    due
+}
+
+/// Consomme la continuation (GAREE -> LIBRE) et rend sa pile.
+///
+/// Fail-fast si elle n'est pas due : reprendre la continuation d'une racine
+/// vivante est EXACTEMENT la corruption que ce lot ferme, et la masquer
+/// transformerait de nouveau un defaut local en extinction globale.
+fn consomme_continuation(cpu: usize, raison: &'static str) -> u64 {
+    let racine = CONTINUATION_RACINE.load(Ordering::Relaxed);
+    let descendance = CONTINUATION_DESCENDANCE.load(Ordering::Relaxed);
+    let garee = CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_GAREE;
+    if !crate::kernel::continuation::reprenable(
+        garee,
+        racine_terminee(racine, descendance),
+        cpu,
+        CONTINUATION_CPU.load(Ordering::Relaxed),
+    ) {
+        panic!(
+            "task: reprise de la continuation de pid={} alors qu'elle n'est pas due (cpu={} raison={})",
+            racine, cpu, raison
+        );
+    }
+    assert!(
+        CONTINUATION_ETAT
+            .compare_exchange(
+                CONTINUATION_GAREE,
+                CONTINUATION_LIBRE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok(),
+        "task: continuation consommee deux fois (racine={})",
+        racine,
+    );
+    let rsp = unsafe { CONTINUATION.rsp };
+    let maintenant = crate::kernel::timer::monotonic_ms();
+    DERNIERE_REPRISE_MS.store(maintenant, Ordering::Release);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "CONTINUATION_REPRISE t={} cpu={} owner_pid={} rsp={:#x} raison={}",
+        maintenant,
+        cpu,
+        racine,
+        rsp,
+        raison,
+    ));
+    rsp
+}
+
+/// Le temoin de `switch_to_kernel`, borne : seulement quand une continuation
+/// est garee sur ce coeur, donc l'evenement qui la reprenait a tort.
+fn temoin_switch_to_kernel(cpu: usize, cur: usize, raison: &'static str) {
+    if CONTINUATION_ETAT.load(Ordering::Acquire) != CONTINUATION_GAREE
+        || CONTINUATION_CPU.load(Ordering::Relaxed) != cpu
+    {
+        return;
+    }
+    DETOURS_IDLE.fetch_add(1, Ordering::Relaxed);
+    let (pid, tid) = registre_tache(cur)
+        .map(|t| (t.process.pid, t.tid))
+        .unwrap_or((0, 0));
+    if TEMOINS_SWITCH_KERNEL
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "SWITCH_TO_KERNEL t={} cpu={} pid={} tid={} current={} target_rsp={:#x} \
+cible=idle continuation_owner={} raison={}",
+            crate::kernel::timer::monotonic_ms(),
+            cpu,
+            pid,
+            tid,
+            cur,
+            unsafe { KERNEL_CTX[cpu].rsp },
+            CONTINUATION_RACINE.load(Ordering::Relaxed),
+            raison,
+        ));
+    }
+}
+
 /// RSP physique courant, uniquement pour verifier l'invariant de passation.
 #[inline]
 fn rsp_courant_passation() -> u64 {

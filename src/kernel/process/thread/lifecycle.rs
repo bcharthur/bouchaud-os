@@ -325,20 +325,37 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
         }
     }
 
-    // Sur un AP, le contexte noyau appelant est la boucle idle : si ce CPU
-    // n'a plus rien de runnable, on y revient immediatement. Les autres CPU
-    // continuent independamment.
+    // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : OU VA CETTE PILE CONDAMNEE.
+    //
+    // Trois destinations, et une regle stricte pour la premiere :
+    //
+    //   1. la continuation du lancement synchrone (`run` / `run_noyau`), si
+    //      CETTE mort termine sa racine et qu'elle est garee sur CE coeur ;
+    //   2. une autre tache prete de ce coeur ;
+    //   3. la boucle idle de ce coeur -- AP comme BSP.
+    //
+    // Avant ce lot, sur le BSP, « idle » ETAIT la continuation. Deux pannes en
+    // sortaient, prouvees par `continuation-banc` sur le protocole d'origine :
+    //
+    //   * la mort de N'IMPORTE QUELLE tache du coeur zero, faute d'autre tache
+    //     prete, reprenait le lancement d'un autre -- incident TRIGKEY,
+    //     `RUN_NOYAU_RETOUR nom=desktop fil_mort=0`, puis la cascade
+    //     `PROCESS_KILL raison=run_noyau_retour` (SMP4 et SMP8 : 1er fil court) ;
+    //   * la mort de la racine, si une autre tache etait prete, partait vers
+    //     elle et laissait la continuation garee pour toujours (SMP1, SMP2).
+    //
+    // La boucle d'attente sur la pile morte, son garde-fou de trente secondes
+    // et sa commutation sans retour disparaissent avec cette confusion : une
+    // racine pas encore terminee (fils, descendance de `run`) laisse sa
+    // continuation garee, et c'est la derniere mort -- ou la boucle idle du
+    // coeur proprietaire -- qui la reprend.
     let cpu_id = local_cpu();
+    let cur = current_index_raw();
     // BOUCHAUD_C71_QUELLE_BRANCHE_POUR_LA_RACINE
     //
     // UNE ligne, et seulement quand la racine de premier plan meurt -- donc
     // une fois par commande de l'autorun, pas une forêt.
-    //
-    // `run` gare le fil noyau appelant dans le `KERNEL_CTX` de SON CPU, et
-    // `KERNEL_CTX` est PAR CPU. Si la racine meurt sur un coeur different,
-    // `switch_to_kernel` rend la main au fil noyau de CE coeur-la, et le shell
-    // gare sur le BSP n'est jamais repris. Cette ligne dit laquelle des deux
-    // situations on vit, au lieu de la faire deviner.
+    let coeur_proprietaire = CONTINUATION_CPU.load(Ordering::Relaxed);
     if racine != 0 && pid_sortant == racine {
         crate::kernel::dmesg::log_fmt(format_args!(
             "RETOUR_SHELL t={} pid={} racine={} cpu={} branche={}",
@@ -346,225 +363,43 @@ hit_us={} miss_us={} miss_read_us={} wait_us={} worst_us={}",
             pid_sortant,
             racine,
             cpu_id,
-            if cpu_id != 0 { "ap_sans_retour" } else { "bsp_attend" },
+            if cpu_id == coeur_proprietaire { "coeur_proprietaire" } else { "autre_coeur" },
         ));
     }
-    if cpu_id != 0 {
-        let cur = current_index_raw();
-        commute_sortie_definitive_si_possible(cur, cpu_id);
-        switch_to_kernel();
-    }
-
-    // BSP : conserve la semantique historique des lancements synchrones et du
-    // desktop, mais ne choisit que des taches affinees CPU0.
-    let cur = current_index_raw();
-
-    // SANS LANCEMENT SYNCHRONE EN COURS, IL N'Y A RIEN A ATTENDRE.
-    //
-    // La boucle ci-dessous existe pour qu'un `run` synchrone reprenne la main
-    // quand SA racine est finie. Une tache qui se termine hors de ce cadre --
-    // un travailleur de fond, une sonde -- n'a personne a faire revenir : elle
-    // doit se comporter comme sur un coeur secondaire, commuter et rendre la
-    // main.
-    //
-    // Sans cette sortie, une telle tache attendait que TOUTES les autres
-    // soient zombie. Un travailleur perpetuel rendait cette attente infinie,
-    // et le garde-fou de trente secondes ne se declenchait pas : il rearme son
-    // compteur des qu'une tache est executable. La troisieme sonde NVMe d'une
-    // meme session ne rendait plus son verdict, sans qu'aucune ligne ne le
-    // dise.
-    if racine == 0 {
-        commute_sortie_definitive_si_possible(cur, 0);
-        switch_to_kernel();
-    }
-
-    // BOUCHAUD_C71_LA_RACINE_NE_S_ATTEND_PAS_ELLE_MEME
-    //
-    // LA boucle ci-dessous attend la fin de la racine de premier plan. Quand
-    // c'est la RACINE ELLE-MEME qui meurt, elle n'a personne a attendre : la
-    // condition est atteinte par construction. L'y faire passer quand meme
-    // etait la perte du shell.
-    //
-    // Pourquoi c'est definitif, et pas seulement lent : cette boucle tourne
-    // sur la pile d'une tache DEJA MORTE, et son corps appelle
-    // `commute_sortie_definitive_si_possible`, qui part vers toute tache
-    // executable et NE REVIENT PAS (`unreachable!`). Si les deux tests de
-    // sortie sont faux ne serait-ce qu'un instant -- un descendant pas encore
-    // marque zombie -- la pile est abandonnee, `switch_to_kernel` n'est jamais
-    // atteint, et `run` reste gare a vie. Le shell ne revient plus.
-    //
-    // Mesure, banc contendu (QEMU epingle sur 2 coeurs d'une machine qui en a
-    // 4), temoins `RETOUR_SHELL*` :
-    //
-    //   pid=23, pid=24  commandes qui aboutissent  SAUT puis REPRIS
-    //   pid=25          commande qui bloque        SAUT ABSENT, 3 passes / 3
-    //
-    // Sans contention le test est vrai du premier coup, on saute, et tout va
-    // bien : c'est pourquoi le defaut passait pour intermittent.
-    if pid_sortant == racine {
-        // LE SAUT DIRECT EST CONDITIONNEL, ET IL DIT CE QUI LE RETIENT.
-        //
-        // Premiere version : la racine sautait TOUJOURS. Ca corrigeait la
-        // perte du shell (10/10 sous contention) mais rendait la main avant
-        // que les threads freres du processus racine aient fini --
-        // `qemu / system health` l'a attrape, `[poll-selftest] OK` disparu.
-        //
-        // Le saut n'est donc pris que quand plus rien ne descend de la
-        // racine : c'est exactement la condition de sortie de la boucle
-        // ci-dessous, evaluee UNE fois, sans risque de commutation
-        // irreversible.
-        //
-        // Et quand il ne l'est pas, on NOMME ce qui reste. Le chemin rapide
-        // avait ete bati sur une inference -- « la condition etait fausse » --
-        // que je n'avais jamais verifiee.
-        // ON ATTEND LE PROCESSUS RACINE, PAS SA DESCENDANCE.
-        //
-        // La distinction est venue des pids, une fois mesuree :
-        //
-        //   system health   retenu pid=11 == racine  -> un THREAD FRERE, dont
-        //                   la sortie n'a pas encore atteint le journal
-        //   os primitives   retenus pid=26,27        -> des PROCESSUS ENFANTS,
-        //                   deja marques zombies par le teardown de session
-        //
-        // Attendre les seconds coute le shell : la boucle commute vers un
-        // travailleur perpetuel et ne revient pas -- 0 passe sur 5 sous
-        // contention. Ne pas attendre les premiers perd la sortie du
-        // programme -- `[poll-selftest] OK` disparu.
-        //
-        // `run` rend le code de sortie du PROCESSUS racine : c'est lui, et
-        // ses threads, qu'il doit attendre. Ce qui descend de lui et survit
-        // est orphelin, et le teardown s'en est deja chargé.
-        let mut retenus = 0usize;
-        let mut premier = (0u32, 0u32, 0u8);
-        for t in tasks().iter() {
-            if t.state != TaskState::Zombie && t.process.pid == racine {
-                if retenus == 0 {
-                    premier = (t.tid, t.process.pid, t.state.charge().code());
-                }
-                retenus += 1;
-            }
-        }
-        if retenus == 0 {
+    let garee = CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_GAREE;
+    let sortie = crate::kernel::continuation::Sortie {
+        cpu: cpu_id,
+        garee,
+        cpu_continuation: coeur_proprietaire,
+        racine_terminee: garee
+            && racine_terminee(
+                CONTINUATION_RACINE.load(Ordering::Relaxed),
+                CONTINUATION_DESCENDANCE.load(Ordering::Relaxed),
+            ),
+        // Decide plus bas par `commute_sortie_definitive_si_possible` : la
+        // continuation passe avant, quelle que soit la reponse.
+        autre_prete: false,
+    };
+    if crate::kernel::continuation::destination(sortie)
+        == crate::kernel::continuation::Destination::Continuation
+    {
+        if racine != 0 && pid_sortant == racine {
             crate::kernel::dmesg::log_fmt(format_args!(
-                "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=racine_directe",
+                "RETOUR_SHELL_SAUT t={} pid={} cpu={} voie=racine_directe",
                 crate::kernel::timer::monotonic_ms(),
                 pid_sortant,
-                local_cpu(),
-                crate::kernel::task::kernel_ctx_rsp(),
+                cpu_id,
             ));
-            switch_to_kernel();
         }
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "RETOUR_SHELL_RETENU t={} racine={} retenus={} tid={} pid={} etat={}",
-            crate::kernel::timer::monotonic_ms(),
-            racine, retenus, premier.0, premier.1, premier.2,
-        ));
+        reprend_continuation("racine_terminee");
     }
-
-    let patience = 30 * crate::kernel::timer::TICKS_PER_SECOND;
-    let mut idle_since = crate::kernel::timer::ticks();
-    let mut dernier_dit = idle_since;
-    loop {
-        // LE TEST DE SORTIE VIENT AVANT LA COMMUTATION, ET C'EST NECESSAIRE.
-        //
-        // `commute_sortie_definitive_si_possible` part vers toute tache
-        // executable. Un travailleur perpetuel en est une : la commutation a
-        // lieu, et le reste de la boucle -- y compris le test ci-dessous --
-        // n'est jamais atteint. On ne revient pas d'un fil qui ne finit pas.
-        //
-        // Teste d'abord, on sort quand il faut sortir ; teste apres, on part
-        // ailleurs juste avant de constater qu'on aurait du s'arreter.
-        if tasks().iter().all(|t| t.state == TaskState::Zombie) { break; }
-        // UN LANCEMENT SYNCHRONE ATTEND SA RACINE, PAS L'EXTINCTION DU SYSTEME.
-        //
-        // La condition ci-dessus -- « toutes les taches sont zombie » -- etait
-        // la seule. Elle a tenu tant qu'aucune tache noyau ne survivait a un
-        // programme : le fil de montage NVMe meurt, le bureau est lui-meme la
-        // racine. Un travailleur PERPETUEL la rend infranchissable.
-        //
-        // Le garde-fou de trente secondes ne rattrapait rien : il rearme son
-        // compteur des qu'une tache est executable, et un travailleur qui se
-        // reveille toutes les millisecondes l'est en permanence. La machine
-        // tournait a vide sans jamais rendre la main -- cent soixante-cinq
-        // secondes observees, `AUTORUN DEBUT` pour derniere ligne.
-        //
-        // Ce que `run` attend est la fin de SA racine. Le bloc de sortie plus
-        // haut a deja marque zombie tout ce qui en descend ; il ne reste donc
-        // a verifier que cela. Ce qui vit a cote et n'en descend pas ne
-        // regarde pas ce lancement.
-        if racine != 0
-            && tasks().iter().all(|t| {
-                t.state == TaskState::Zombie || !descend_de(t.process.pid, racine)
-            })
-        {
-            break;
-        }
-        // QUI RETIENT LE SHELL, nomme toutes les deux secondes.
-        //
-        // Le garde-fou de trente secondes ci-dessous ne se declenche jamais :
-        // il rearme son compteur des que quoi que ce soit est executable, et
-        // les echantillonneurs le sont toutes les cinq secondes. La boucle
-        // pouvait donc tourner sans fin sans qu'une seule ligne le dise.
-        if racine != 0 {
-            let maintenant = crate::kernel::timer::ticks();
-            if maintenant.wrapping_sub(dernier_dit) > 2 * crate::kernel::timer::TICKS_PER_SECOND {
-                dernier_dit = maintenant;
-                let mut retenu = 0usize;
-                let mut premier = (0u32, 0u32, 0u8);
-                for t in tasks().iter() {
-                    if t.state != TaskState::Zombie && descend_de(t.process.pid, racine) {
-                        if retenu == 0 {
-                            premier = (t.tid, t.process.pid, t.state.charge().code());
-                        }
-                        retenu += 1;
-                    }
-                }
-                crate::kernel::dmesg::log_fmt(format_args!(
-                    "RETOUR_SHELL_ATTEND t={} racine={} retenus={} tid={} pid={} etat={}",
-                    crate::kernel::timer::monotonic_ms(),
-                    racine, retenu, premier.0, premier.1, premier.2,
-                ));
-            }
-        }
-        commute_sortie_definitive_si_possible(cur, 0);
-        if crate::kernel::timer::ticks().wrapping_sub(idle_since) > patience {
-            crate::kernel::dmesg::log("task: aucune tache executable CPU0 depuis 30 s, interblocage suppose");
-            for task in tasks().iter() {
-                if task.runq_cpu == 0 && allowed_on(task, 0) { marque_zombie(task); }
-            }
-            break;
-        }
-        // BOUCHAUD_COMPTA_IDLE_V1
-        let rearmer = suspend_compta_pour_idle();
-        // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
-        cpu::prepare_scheduler_idle();
-        cpu::commit_scheduler_idle();
-        if rearmer {
-            rearme_compta_apres_idle();
-        }
-        if tasks().iter().any(|t| runnable_local(t, 0) || runnable_steal(t, 0)) {
-            idle_since = crate::kernel::timer::ticks();
-        }
+    // Due, mais garee sur un autre coeur : sa boucle idle la reprendra.
+    // On la reveille plutot que d'attendre son prochain tick.
+    if crate::kernel::continuation::reveiller_proprietaire(sortie) {
+        smp::reschedule_cpu(coeur_proprietaire);
     }
-    // BOUCHAUD_C71_LE_SAUT_ET_LA_REPRISE
-    //
-    // Deux temoins, et c'est leur ECART qui designe le maillon :
-    //
-    //   SAUT sans REPRIS   le saut a eu lieu mais `run` n'est pas revenu :
-    //                      le contexte gare n'est plus celui qu'on croit
-    //   SAUT absent        on n'est jamais arrive jusqu'ici
-    //
-    // Emis pour la seule racine de premier plan : sept lignes par scenario.
-    if racine != 0 && pid_sortant == racine {
-        crate::kernel::dmesg::log_fmt(format_args!(
-            "RETOUR_SHELL_SAUT t={} pid={} cpu={} rsp_gare={:#x} voie=apres_attente",
-            crate::kernel::timer::monotonic_ms(),
-            pid_sortant,
-            local_cpu(),
-            crate::kernel::task::kernel_ctx_rsp(),
-        ));
-    }
-    switch_to_kernel()
+    commute_sortie_definitive_si_possible(cur, cpu_id);
+    switch_to_kernel(if cpu_id == 0 { "bsp_idle" } else { "ap_idle" })
 }
 
 /// Signale au parent qu'un de ses fils vient de se terminer.
@@ -752,6 +587,9 @@ pub fn run(mut first: Box<Task>) -> i32 {
     // noyau de son CPU appelant. Lui seul est pince; les pthreads qu'il cree
     // naissent avec une affinite machine complete et peuvent etre balances.
     let caller_cpu = local_cpu();
+    if caller_cpu == 0 {
+        assure_idle_coeur_zero();
+    }
     first.affinity_mask = 1u64 << caller_cpu;
     first.runq_cpu.range(caller_cpu as u8);
     first.last_cpu.range(caller_cpu as u8);
@@ -770,9 +608,13 @@ pub fn run(mut first: Box<Task>) -> i32 {
     set_current_index(index);
     unsafe { install(&mut *to_ptr); }
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-installe");
-    let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
+    // La pile d'amorcage est garee dans LA continuation, a son proprietaire
+    // -- plus dans `KERNEL_CTX`, qui est l'idle du coeur. Seule la fin de la
+    // racine ET de sa descendance la rendra (BOUCHAUD_CONTINUATION_SYNCHRONE_V1).
+    gare_continuation(cpu_id, racine, unsafe { (*to_ptr).tid }, true);
+    let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-switch");
-    unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
+    unsafe { switch_context(continuation, (*to_ptr).ctx.rsp); }
     complete_switch_handoff();
     crate::kernel::dmesg::log_fmt(format_args!(
         "RETOUR_SHELL_REPRIS t={} racine={} cpu={}",
@@ -935,6 +777,9 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         Some(process) => process,
         None => return -1,
     };
+    if local_cpu() == 0 {
+        assure_idle_coeur_zero();
+    }
     let mut task = Task::new_kernel(process.clone(), entree);
     crate::platform::pc::ecran_faute::point_silencieux("run-noyau-pile-creee");
     task.priorite.range(Priorite::Interactive);
@@ -951,8 +796,9 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     };
     set_current_index(index);
     unsafe { install(&mut *to_ptr); }
-    let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
-    unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
+    gare_continuation(0, process.pid, unsafe { (*to_ptr).tid }, false);
+    let continuation = unsafe { core::ptr::addr_of_mut!(CONTINUATION.rsp) };
+    unsafe { switch_context(continuation, (*to_ptr).ctx.rsp); }
     complete_switch_handoff();
 
     crate::kernel::vmm::activate_kernel();
@@ -983,9 +829,9 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
     // Les processus encore vivants sont NOMMES avant d'etre tues juste en
     // dessous : sans cela, la boucle de nettoyage efface l'etat qui expliquait
     // l'arret.
+    let mort = process.lifecycle.lock().threads == 0;
     {
         let vivants = processes().len();
-        let mort = process.lifecycle.lock().threads == 0;
         crate::kernel::dmesg::log_fmt(format_args!(
             "RUN_NOYAU_RETOUR t={} nom={} pid={} code={} fil_mort={} \
 processus_vivants={}",
@@ -1004,6 +850,25 @@ processus_vivants={}",
                 reste.metadata.lock().name,
             ));
         }
+    }
+
+    // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : LE MENAGE CI-DESSOUS N'A LIEU
+    // QU'APRES UNE VRAIE FIN.
+    //
+    // Il tue tous les processus restants et vide la table. Execute apres un
+    // faux retour -- racine vivante --, il transformait une erreur locale de
+    // l'ordonnanceur en extinction de la machine : a T+60,519 s sur la
+    // TRIGKEY, quatorze processus tues dont le reseau, l'USB et Ladybird.
+    //
+    // Ce faux retour est desormais impossible par construction : seule
+    // `consomme_continuation` rend cette pile, et elle refuse tant que la
+    // racine vit. S'il se produit QUAND MEME, c'est une corruption : on
+    // s'arrete ici, nomme, au lieu d'en effacer les traces.
+    if !mort {
+        panic!(
+            "run_noyau: continuation reprise racine vivante nom={} pid={} -- invariant viole",
+            nom, pid
+        );
     }
 
     reap();
@@ -1214,7 +1079,7 @@ fn retire_exec_zombie_current() -> ! {
 
     // Aucun runnable local à cet instant. Le contexte noyau/AP idle reprendra
     // le scheduling. La pile de ce sibling ne doit plus jamais être réactivée.
-    switch_to_kernel()
+    switch_to_kernel("retraite_exec")
 }
 
 // BOUCHAUD_C1_RETRAITE_SANS_REPRISE_V1

@@ -375,14 +375,10 @@ fn switch_to(from: usize, to: usize) {
     complete_switch_handoff();
 }
 
-/// Retour definitif au fil noyau appelant (la tache courante est terminee).
-fn switch_to_kernel() -> ! {
-    complete_switch_handoff();
-    assert!(commence_transition_ordonnanceur(), "transition scheduler deja active");
-    let cpu_id = local_cpu();
-    let cur = current_index_raw();
+/// Abandonne la pile de la tache courante, terminee, et remet le coeur dans
+/// l'etat « aucune tache ». La porte de transition doit etre tenue.
+fn abandonne_la_tache_courante(cpu_id: usize, cur: usize) -> *mut Task {
     let from_ptr = unsafe {
-        let list = tasks();
         let ptr = unsafe { registre_pointeur_ordonnanceur(cur) }.expect("registre: tache absente");
         // Replier AVANT de rendre `on_cpu` negatif : depuis que la
         // comptabilite d'appel systeme vit par CPU, c'est ici -- et non plus a
@@ -401,9 +397,73 @@ fn switch_to_kernel() -> ! {
     efface_current_profil();
     usermode::per_cpu().current = 0;
     crate::kernel::vmm::activate_kernel();
+    from_ptr
+}
+
+/// Sortie definitive vers la boucle IDLE de ce coeur (la tache courante est
+/// terminee et aucune autre n'est prete).
+///
+/// BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : la cible est TOUJOURS l'idle du
+/// coeur, jamais la continuation d'un lancement synchrone. Celle-ci n'est
+/// reprise que par [`reprend_continuation`], quand sa racine est terminee.
+fn switch_to_kernel(raison: &'static str) -> ! {
+    complete_switch_handoff();
+    assert!(commence_transition_ordonnanceur(), "transition scheduler deja active");
+    let cpu_id = local_cpu();
+    let cur = current_index_raw();
+    assert!(
+        cpu_id != 0 || IDLE_BSP_PRET.load(Ordering::Acquire),
+        "task: sortie definitive sur le BSP sans boucle idle amorcee (raison={})",
+        raison
+    );
+    temoin_switch_to_kernel(cpu_id, cur, raison);
+    let from_ptr = abandonne_la_tache_courante(cpu_id, cur);
     let target_rsp = kernel_ctx().rsp;
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
     unreachable!("task: reprise d'une tache terminee")
+}
+
+/// Sortie definitive vers la continuation du lancement synchrone, depuis la
+/// mort qui la rend due. Fail-fast si elle ne l'est pas.
+fn reprend_continuation(raison: &'static str) -> ! {
+    complete_switch_handoff();
+    assert!(commence_transition_ordonnanceur(), "transition scheduler deja active");
+    let cpu_id = local_cpu();
+    let cur = current_index_raw();
+    let target_rsp = consomme_continuation(cpu_id, raison);
+    let from_ptr = abandonne_la_tache_courante(cpu_id, cur);
+    unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
+    unreachable!("task: reprise d'une tache terminee")
+}
+
+/// Amorce la boucle idle du coeur zero, une fois pour toutes.
+///
+/// Les AP ont `secondary_cpu_loop` ; le BSP n'avait que la pile d'amorcage,
+/// donc rien d'autre ou mener une tache morte que la continuation de `run` /
+/// `run_noyau`. Cette pile-ci lui donne le meme idle qu'aux autres coeurs.
+/// Contexte d'amorcage seulement, avant de garer la premiere continuation.
+fn assure_idle_coeur_zero() {
+    if IDLE_BSP_PRET.load(Ordering::Acquire) {
+        return;
+    }
+    let pile: &'static mut [u8] = Box::leak(vec![0u8; KSTACK_SIZE].into_boxed_slice());
+    unsafe {
+        // Meme trame que `amorce_pile` : RSP % 16 == 8 a l'entree du
+        // trampoline, sept mots que `switch_context` depile.
+        let mut sp = ((pile.as_ptr() as u64 + KSTACK_SIZE as u64) & !0xF) as *mut u64;
+        sp = sp.sub(1); *sp = 0;
+        sp = sp.sub(1); *sp = idle_bsp_trampoline as *const () as usize as u64;
+        // IF=1, comme la boucle des AP : `prepare_scheduler_idle` l'exige.
+        sp = sp.sub(1); *sp = 0x0000_0202;
+        for _ in 0..6 { sp = sp.sub(1); *sp = 0; }
+        KERNEL_CTX[0].rsp = sp as u64;
+    }
+    IDLE_BSP_PRET.store(true, Ordering::Release);
+}
+
+extern "C" fn idle_bsp_trampoline() -> ! {
+    complete_switch_handoff();
+    boucle_idle(0)
 }
 
 /// Boucle idle/scheduler des AP. Le contexte `KERNEL_CTX[cpu]` est la pile de
@@ -412,6 +472,11 @@ fn switch_to_kernel() -> ! {
 pub fn secondary_cpu_loop() -> ! {
     let cpu_id = local_cpu();
     assert!(cpu_id != 0, "task: secondary_cpu_loop sur BSP");
+    boucle_idle(cpu_id)
+}
+
+/// La boucle idle d'un coeur : AP, ou BSP depuis `assure_idle_coeur_zero`.
+fn boucle_idle(cpu_id: usize) -> ! {
     set_current_index(NO_TASK);
     clear_current_process_local();
     set_current_is_kernel(false);
@@ -425,6 +490,16 @@ pub fn secondary_cpu_loop() -> ! {
             continue;
         }
         stall_site_set(50, current_index_raw() as u64);
+        // LA CONTINUATION DUE PASSE AVANT TOUT : sa racine est terminee
+        // (morte ici ou sur un autre coeur), et ce coeur est le sien.
+        if continuation_due(cpu_id) {
+            let cible = consomme_continuation(cpu_id, "idle");
+            let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
+            stall_site_clear();
+            unsafe { switch_context(kernel_rsp, cible); }
+            reprise_de_la_boucle_idle(cpu_id);
+            continue;
+        }
         // Avant le premier register() du BSP, ne meme pas materialiser TASKS :
         // cela permet d'activer les AP juste avant l'autorun sans mettre le boot
         // historique en concurrence avec une allocation secondaire.
@@ -452,19 +527,7 @@ pub fn secondary_cpu_loop() -> ! {
             let kernel_rsp = &mut kernel_ctx().rsp as *mut u64;
             stall_site_clear();
             unsafe { switch_context(kernel_rsp, (*to_ptr).ctx.rsp); }
-            stall_site_set(52, current_index_raw() as u64);
-            stall_site_set(53, current_index_raw() as u64);
-            stall_site_set(54, SWITCH_PENDING[cpu_id].load(Ordering::Acquire) as u64);
-            complete_switch_handoff();
-            stall_site_set(50, current_index_raw() as u64);
-            set_current_index(NO_TASK);
-            clear_current_process_local();
-            set_current_is_kernel(false);
-            efface_current_profil();
-            usermode::per_cpu().current = 0;
-            stall_site_set(55, 0);
-            crate::kernel::vmm::activate_kernel();
-            stall_site_set(50, NO_TASK as u64);
+            reprise_de_la_boucle_idle(cpu_id);
         } else {
             // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
             cpu::prepare_scheduler_idle();
@@ -475,4 +538,21 @@ pub fn secondary_cpu_loop() -> ! {
             stall_site_set(53, current_index_raw() as u64);
         }
     }
+}
+
+/// Ce que la boucle idle refait chaque fois qu'on la reprend.
+fn reprise_de_la_boucle_idle(cpu_id: usize) {
+    stall_site_set(52, current_index_raw() as u64);
+    stall_site_set(53, current_index_raw() as u64);
+    stall_site_set(54, SWITCH_PENDING[cpu_id].load(Ordering::Acquire) as u64);
+    complete_switch_handoff();
+    stall_site_set(50, current_index_raw() as u64);
+    set_current_index(NO_TASK);
+    clear_current_process_local();
+    set_current_is_kernel(false);
+    efface_current_profil();
+    usermode::per_cpu().current = 0;
+    stall_site_set(55, 0);
+    crate::kernel::vmm::activate_kernel();
+    stall_site_set(50, NO_TASK as u64);
 }

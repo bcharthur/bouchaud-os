@@ -74,7 +74,14 @@ def main() -> int:
             "state.echange(TaskState::Blocked, TaskState::Ready)" in sommeil
             and "state.echange(TaskState::Blocked, TaskState::Ready)" in blocage
             and ".echange(TaskState::Blocked, TaskState::Ready)" in lifecycle,
-        # QUATRE SITES, ET LE COMPTE EXACT EST LA REGLE.
+        # DEUX SITES, ET LE COMPTE EXACT EST LA REGLE.
+        #
+        # BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : la boucle d'attente du BSP et sa
+        # reprise ont disparu avec la confusion idle/continuation, et la
+        # sortie des AP et celle du BSP n'en font plus qu'une. Restent la fin
+        # d'`exit_current` et la retraite d'un fil tue par `execve`.
+        #
+        # Historique : QUATRE SITES.
         #
         # Trois jusqu'ici : le coeur secondaire, la boucle d'attente du BSP, et
         # la reprise apres cette boucle. Un quatrieme a ete ajoute : la sortie
@@ -88,7 +95,7 @@ def main() -> int:
         # un site s'installer sans que personne ne verifie qu'il passe bien par
         # la porte locale.
         "sorties definitives sous porte locale":
-            lifecycle.count("commute_sortie_definitive_si_possible(") == 4
+            lifecycle.count("commute_sortie_definitive_si_possible(") == 2
             and "switch_to(" not in lifecycle
             and debut_sortie >= 0
             and fin_sortie > debut_sortie

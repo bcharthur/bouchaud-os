@@ -115,6 +115,9 @@ fn marque_zombie(task: &Task) {
     // ramasse ceux dont l'emplacement a ete reutilise. Les deux couvrent
     // exactement les deux facons de quitter la somme des vivants.
     task.state.range(TaskState::Zombie);
+    // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : publie APRES l'etat (Release) ;
+    // qui lit le compteur (Acquire) voit donc le zombie.
+    MORTS.fetch_add(1, Ordering::Release);
     if task.on_cpu >= 0 && !task.switching_out.charge() {
         let cpu = task.on_cpu.charge() as usize;
         if cpu < MAX_CPUS {

@@ -43,7 +43,7 @@ use alloc::sync::Arc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{cpu, smp};
 use x86_64::instructions::interrupts;
@@ -91,6 +91,8 @@ include!("thread/commutation.rs");
 include!("thread/comptabilite.rs");
 include!("thread/ordonnancement.rs");
 include!("thread/lifecycle.rs");
+// BOUCHAUD_CONTINUATION_SYNCHRONE_V1
+include!("thread/banc_continuation.rs");
 include!("thread/blocage.rs");
 include!("thread/preemption.rs");
 include!("thread/metriques.rs");

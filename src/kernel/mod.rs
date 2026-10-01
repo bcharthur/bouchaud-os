@@ -104,6 +104,8 @@ pub mod pile_initiale;
 pub mod scheduler;
 #[path = "scheduler/echeances.rs"]
 pub mod echeances;
+#[path = "scheduler/continuation.rs"]
+pub mod continuation;
 #[path = "process/signal.rs"]
 pub mod signal;
 pub mod sync;
