@@ -61,6 +61,10 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
             );
         }
 
+        // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : les AP veillent aussi -- c'est
+        // ce qui voit un coeur zero pris.
+        crate::kernel::task::veille_attentes_vives();
+
         if crate::kernel::task::in_user_task() {
             if interrupted_user {
                 preempt_now = true;

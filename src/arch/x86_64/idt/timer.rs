@@ -107,6 +107,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     // Limiter par la frequence est le bon controle ; ne jamais appeler ne l'est
     // pas.
     crate::kernel::task::stall_probe_from_timer();
+    // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : une lecture atomique par tic.
+    crate::kernel::task::veille_attentes_vives();
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 4);
 
     let mut preempt_now = false;

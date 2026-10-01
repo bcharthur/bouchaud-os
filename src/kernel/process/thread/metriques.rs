@@ -61,6 +61,13 @@ rej_inel={} rej_crs={} mig={}",
     // doivent exister dans toute trace ou l'on cherche un figement.
     crate::kernel::scheduler::preempt::log_stats();
     crate::kernel::scheduler::latency::log_stats();
+    // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : taches vues prete depuis plus de
+    // 200 ms PENDANT leur attente.
+    let (episodes, pire, rapports) = compteurs_veille();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[SCHED-NG-VEILLE] episodes={} pire_ms={} rapports={}",
+        episodes, pire / 1_000_000, rapports,
+    ));
     // BOUCHAUD_CYCLE_DE_VIE_V1 : comment les morts imposees se terminent.
     // `refus` (endormissements refuses a une tache non prete) doit rester nul.
     let (condamnations, parquees, reveillees, frontiere, parking, refus) = compteurs_cycle_vie();
