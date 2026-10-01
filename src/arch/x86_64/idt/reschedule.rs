@@ -88,6 +88,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
                 // tache qui declare `latency_sensitive` et qui est restee sous
                 // son budget, et seulement quand le contexte est verifie sur :
                 // aucun verrou, aucune section rangee, aucune IRQ imbriquee.
+                // BOUCHAUD_QUANTUM_NOYAU_V1 : ou pour un fil noyau qui a
+                // epuise son quantum pendant que des taches attendent ce
+                // coeur -- memes conditions de surete.
                 //
                 // `preempt_from_irq` ne lit rien de la tache sortante que
                 // `switch_to` ne lise aussi. Commuter un fil noyau depuis une

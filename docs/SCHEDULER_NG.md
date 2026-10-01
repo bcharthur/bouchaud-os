@@ -41,7 +41,8 @@ interactive/normale, porte de transition par coeur, aucun verrou global.
 | affinite visible | `cd648655` | sysconf = 1 coeur | QEMU fils voit N |
 | veille d'attente vive (obs.) | `0f06ebb8` | attentes longues sans coupable | attribution en direct |
 | releves globaux espaces | `cd6bc0a8` | sortie de fil = 7-10 lignes serie, coeur tenu | episodes > 50 ms SMP4 : 59 -> 0-5 |
-| jeton serie : proprietaire, priorite IRQ, releve tenu une fois | (ce lot) | releve IRQ du minuteur : coeur zero tenu, interruptions masquees, 0,46 a 12,6 s | releves complets > 100 ms : 7 sur 129 (pire 12 622 ms) -> 2 sur 99 (pire 127 ms) |
+| jeton serie : proprietaire, priorite IRQ, releve tenu une fois | `c24b11a2` | releve IRQ du minuteur : coeur zero tenu, interruptions masquees, 0,46 a 12,6 s | releves complets > 100 ms : 7 sur 129 (pire 12 622 ms) -> 2 sur 99 (pire 127 ms) |
+| quantum des fils noyau | (ce lot) | fil noyau preemptable seulement sur demande ciblee : `usb-hid` 732 ms sur un AP | 1 a 10 preemptions au quantum par demarrage ; aucun fil noyau ne tient un coeur > 64 ms (15 demarrages) |
 
 Details : `docs/CYCLE_DE_VIE_TACHE.md`.
 
@@ -57,7 +58,7 @@ plus de 50 ms et ce qui occupe son coeur. Sur scheduler-ng-banc SMP4 :
 | cause | avant | apres espacement des releves globaux |
 |---|---|---|
 | tache dans `exit_group` ecrivant sur COM1 (`uart16550::write_lot`, jeton d'emission) | 59 episodes, 50-631 ms | 0 |
-| fil noyau `usb-hid` (non preemptable hors demande ciblee) | — | 1 episode, jusqu'a 732 ms |
+| fil noyau `usb-hid` (non preemptable hors demande ciblee) | — | 1 episode, jusqu'a 732 ms ; avec le quantum noyau : aucun fil noyau > 64 ms |
 | releve `smpstat` du shell (hors tache) | — | fin de banc seulement |
 | releve d'ordonnancement de l'IRQ du minuteur (`[SCHED-DUMP] raison=latence-hid`), interruptions masquees, qui disputait le jeton serie ligne par ligne | 463-566 ms (SMP1), 5,0-12,6 s (SMP4/8) | pire 127 ms |
 
@@ -104,6 +105,31 @@ ci-dessous, qui subsiste apres ; ceux de SMP1 sont le defaut 1 seul.
 Classe de preuve : QEMU. Le jeton est pris meme sans COM1 (la machine de
 reference ecrit dans le tambour RAM) : le defaut 1 existe aussi en physique,
 avec une fenetre plus courte.
+
+### Quantum des fils noyau (BOUCHAUD_QUANTUM_NOYAU_V1)
+
+Un fil noyau n'etait preemptable que sur DEMANDE CIBLEE (reveil d'une tache
+sensible a la latence). Un fil noyau qui travaille sans dormir tenait donc
+son coeur : `usb-hid`, 732 ms sur un AP, `fork-exit` p99 1,26 s dans ce
+demarrage. Desormais, au tic (BSP) ou a l'IPI de quantum (AP), un fil noyau
+qui tourne depuis `QUANTUM_NOYAU_NS` (deux quanta, 8 ms) alors que des
+taches attendent CE coeur est preempte, sous la meme condition de surete que
+la demande ciblee (`preemption_noyau_sure` : aucun verrou, aucune section
+rangee, pas de sortie en cours). La tranche se mesure depuis la mise en
+route (`slice_start_ns`, posee a la commutation et au reveil d'idle).
+`[SCHED-NG-REVEIL]` publie `preempt_noyau_quantum` (`log_reveil` n'etait
+appele nulle part). Garde `verifie-quantum-noyau.py` (5 negatifs).
+
+| QEMU, scheduler-ng-banc, 15 demarrages SMP1/4/8 par image | sans | avec |
+|---|---|---|
+| preemptions au quantum par demarrage | — | 1-2 (SMP1), 1-5 (SMP4), 4-10 (SMP8) |
+| plus longue attente derriere un fil noyau | 427 ms (`usb-hid`, pendant le gel ci-dessous) | 64 ms (`services-metrics`) |
+| `fork-exit-wait4` p99, mediane SMP1 / SMP4 / SMP8 (ms) | 23,3 / 30,1 / 24,8 | 24,0 / 26,4 / 30,0 |
+| echecs / perdus / ressuscites | 0 / 0 / 0 | 0 / 0 / 0 |
+
+L'episode d'origine (732 ms) est rare -- un demarrage sur une vingtaine --
+et 15 demarrages ne suffisent pas a le declarer disparu : la preuve est
+celle du mecanisme (il se declenche, sans regression), pas d'une frequence.
 
 ### Ouvert : gel de toute la machine pendant ~2 s
 

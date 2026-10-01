@@ -222,20 +222,44 @@ pub fn preemption_noyau_sure() -> bool {
 
 /// Accorde-t-on la preemption d'un fil noyau sur ce coeur, maintenant ?
 ///
-/// Rend `true` UNE fois, et seulement si une demande ciblee est pendante et
-/// que le contexte est sur. La demande n'est pas rendue ici : elle l'est
+/// Rend `true` UNE fois, et seulement si une demande ciblee est pendante --
+/// ou si le fil noyau courant a epuise `QUANTUM_NOYAU_NS` devant des taches
+/// pretes sur ce coeur -- et que le contexte est sur. La demande n'est pas rendue ici : elle l'est
 /// quand la commutation a effectivement eu lieu, pour qu'un refus ne fasse
 /// pas disparaitre une tache qui attend d'etre elue pour se rendormir.
 pub fn accorde_preemption_noyau() -> bool {
-    if !demande_ciblee_pendante() {
+    // BOUCHAUD_QUANTUM_NOYAU_V1 : la demande ciblee n'est plus la SEULE
+    // raison. Un fil noyau qui a epuise son quantum pendant que des taches
+    // attendent son coeur est preempte au tic, sous les MEMES conditions de
+    // surete. Sans cela un fil noyau qui scrute en boucle -- `usb-hid` sur un
+    // AP, 732 ms mesurees par la veille d'attente vive -- tient son coeur
+    // tant qu'il ne dort pas.
+    let ciblee = demande_ciblee_pendante();
+    let quantum = !ciblee
+        && crate::kernel::task::fil_noyau_quantum_epuise(QUANTUM_NOYAU_NS);
+    if !ciblee && !quantum {
         return false;
     }
     if preemption_noyau_sure() {
         PREEMPTIONS_NOYAU_ACCORDEES.fetch_add(1, Ordering::Relaxed);
+        if quantum {
+            PREEMPTIONS_NOYAU_QUANTUM.fetch_add(1, Ordering::Relaxed);
+        }
         return true;
     }
     PREEMPTIONS_NOYAU_REFUSEES.fetch_add(1, Ordering::Relaxed);
     false
+}
+
+/// Quantum d'un fil noyau quand des taches attendent son coeur : deux quanta
+/// de l'ordonnanceur. Un fil noyau qui dort avant ne le voit jamais.
+pub const QUANTUM_NOYAU_NS: u64 = 2 * smp::SCHED_QUANTUM_TICKS * 1_000_000;
+
+static PREEMPTIONS_NOYAU_QUANTUM: AtomicU64 = AtomicU64::new(0);
+
+/// Preemptions de fils noyau accordees au quantum (et non sur demande).
+pub fn preemptions_noyau_quantum() -> u64 {
+    PREEMPTIONS_NOYAU_QUANTUM.load(Ordering::Relaxed)
 }
 
 pub fn note_reveil_immediat() { REVEILS_IMMEDIATS.fetch_add(1, Ordering::Relaxed); }
@@ -329,10 +353,10 @@ pub fn stats() -> Stats {
 pub fn log_reveil() {
     let r = stats_reveil();
     crate::serial_println!(
-        "[SCHED-NG-REVEIL] immediats={} cibles={} differes={} en_file={} ipi={} preempt_noyau={}/{} deplaces={}",
+        "[SCHED-NG-REVEIL] immediats={} cibles={} differes={} en_file={} ipi={} preempt_noyau={}/{} preempt_noyau_quantum={} deplaces={}",
         r.immediats, r.cibles, r.differes, r.en_file, r.ipi_envoyes,
         r.preemptions_noyau, r.preemptions_noyau.saturating_add(r.preemptions_noyau_refusees),
-        r.placements_deplaces
+        preemptions_noyau_quantum(), r.placements_deplaces
     );
 }
 

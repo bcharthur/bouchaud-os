@@ -231,6 +231,27 @@ pub fn pose_priorite(priorite: Priorite) -> Priorite {
     ancienne
 }
 
+/// BOUCHAUD_QUANTUM_NOYAU_V1 : le fil noyau courant de ce coeur tourne-t-il
+/// depuis au moins `seuil_ns` alors que des taches attendent ce coeur ?
+///
+/// Lecture seule, depuis l'IRQ de quantum : la tranche commence a la mise en
+/// route (`slice_start_ns`, posee par `finalise_task_running`).
+pub fn fil_noyau_quantum_epuise(seuil_ns: u64) -> bool {
+    if !current_is_kernel_task() {
+        return false;
+    }
+    let cpu = local_cpu();
+    if ready_count_cpu(cpu) == 0 {
+        return false;
+    }
+    let courant = CURRENT[cpu].load(Ordering::Acquire);
+    if courant == NO_TASK || courant >= tasks().len() {
+        return false;
+    }
+    let debut = tasks()[courant].slice_start_ns.charge();
+    debut != 0 && crate::kernel::timer::monotonic_ns().saturating_sub(debut) >= seuil_ns
+}
+
 /// BOUCHAUD_AFFINITE_VISIBLE_V1 : le masque d'affinite que voit l'espace
 /// utilisateur (`sched_getaffinity`) -- celui de la tache, limite aux coeurs
 /// en ligne. `tid == 0` designe la tache courante ; `None` si la tache
