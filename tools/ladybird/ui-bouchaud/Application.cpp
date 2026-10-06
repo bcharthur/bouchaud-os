@@ -174,7 +174,7 @@ static int etat_chrome(WebView::FileDownloader::DownloadStatus statut)
 // renommage est une ecriture du dossier).
 static void synchronise_fichier_termine(LexicalPath const& destination)
 {
-    for (auto const& chemin : { destination.string(), destination.dirname() }) {
+    for (StringView chemin : Array<StringView, 2> { destination.string().view(), destination.dirname() }) {
         auto fd = Core::System::open(chemin, O_RDONLY | O_CLOEXEC);
         if (fd.is_error()) {
             warnln("[LB:DOWNLOAD] fsync impossible chemin={} erreur={}", chemin, fd.error());
