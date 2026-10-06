@@ -147,9 +147,73 @@ void BrowserWindow::retire_vue(u64 onglet)
     BouchaudChrome::retire_onglet(onglet);
 }
 
+// BOUCHAUD_SONDE_PIXELS_V1 -- ce que le Compositor a REELLEMENT peint.
+//
+// « page blanche » ne se deduit pas du DOM : un document peut etre charge et
+// rien peint, ou peint uniformement. La sonde lit 64 x 48 points de la trame
+// presentee (le bitmap du Compositor, avant toute copie) : somme de controle,
+// luminance moyenne et variance, nombre de couleurs distinctes (borne a 64),
+// part de points non blancs. Une page reelle a de la variance et plusieurs
+// couleurs ; une trame vide ou uniforme n'en a pas.
+struct SondePixels {
+    u32 somme { 2166136261u };
+    u32 luminance_moyenne { 0 };
+    u32 variance { 0 };
+    u32 couleurs { 0 };
+    u32 non_blanc_pct { 0 };
+    u32 echantillons { 0 };
+};
+
+static SondePixels sonde_pixels(Gfx::Bitmap const& bitmap, int largeur, int hauteur)
+{
+    SondePixels s;
+    int const w = min(largeur, bitmap.width());
+    int const h = min(hauteur, bitmap.height());
+    if (w <= 0 || h <= 0)
+        return s;
+    u32 vues[64];
+    u32 nb_vues = 0;
+    u64 total = 0;
+    u64 carres = 0;
+    u32 non_blanc = 0;
+    for (int j = 0; j < 48; ++j) {
+        int const y = (j * 2 + 1) * h / 96;
+        auto const* ligne = bitmap.scanline(y);
+        for (int i = 0; i < 64; ++i) {
+            int const x = (i * 2 + 1) * w / 128;
+            u32 const p = ligne[x] & 0x00ffffff;
+            u32 const r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, b = p & 0xff;
+            u32 const l = (r * 299 + g * 587 + b * 114) / 1000;
+            total += l;
+            carres += static_cast<u64>(l) * l;
+            non_blanc += l < 245;
+            s.somme = (s.somme ^ p) * 16777619u;
+            bool deja = false;
+            for (u32 k = 0; k < nb_vues && !deja; ++k)
+                deja = vues[k] == p;
+            if (!deja && nb_vues < 64)
+                vues[nb_vues++] = p;
+            ++s.echantillons;
+        }
+    }
+    u64 const moyenne = total / s.echantillons;
+    s.luminance_moyenne = static_cast<u32>(moyenne);
+    s.variance = static_cast<u32>(carres / s.echantillons - moyenne * moyenne);
+    s.couleurs = nb_vues;
+    s.non_blanc_pct = non_blanc * 100 / s.echantillons;
+    return s;
+}
+
 void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bitmap, int largeur, int hauteur, Gfx::IntRect degat)
 {
     auto const debut = MonotonicTime::now();
+    if (m_trames < 64 || m_trames % 16 == 15) {
+        auto const s = sonde_pixels(*bitmap, largeur, hauteur);
+        m_derniere_sonde = ByteString::formatted("onglet={} page={} seq={} damage={},{},{}x{} taille={}x{} somme={:08x} luminance={} variance={} couleurs={} non_blanc_pct={} echantillons={}",
+            vue.onglet(), vue.page_courante(), m_trames + 1, degat.x(), degat.y(), degat.width(), degat.height(),
+            largeur, hauteur, s.somme, s.luminance_moyenne, s.variance, s.couleurs, s.non_blanc_pct, s.echantillons);
+        warnln("[LB] PRESENT {}", m_derniere_sonde);
+    }
     if (BouchaudChrome::enabled())
         BouchaudChrome::present(vue.onglet(), move(bitmap), largeur, hauteur, { degat.x(), degat.y(), degat.width(), degat.height() });
     auto const duree_us = static_cast<u64>((MonotonicTime::now() - debut).to_microseconds());
@@ -278,6 +342,17 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // proprement (boucle d'evenements, puis services). Hors banc
     // (BOUCHAUD_LB_BANC_QUITTE absent), un titre n'a aucun effet.
     static bool const banc_quitte = getenv("BOUCHAUD_LB_BANC_QUITTE") != nullptr;
+    // Banc des sites reels : quitter apres BOUCHAUD_LB_BANC_DUREE_S secondes,
+    // en rejouant la derniere sonde de pixels (la trame finale de la page).
+    if (auto const* duree = getenv("BOUCHAUD_LB_BANC_DUREE_S"); duree && !m_quitte_apres) {
+        auto const secondes = max(5, atoi(duree));
+        m_quitte_apres = Core::Timer::create_single_shot(secondes * 1000, [this, secondes] {
+            warnln("[LB] PRESENT_DERNIER {}", m_derniere_sonde.is_empty() ? ByteString("aucune_trame") : m_derniere_sonde);
+            warnln("[LB] BROWSER_QUIT_REQUEST raison=duree_s={}", secondes);
+            Core::EventLoop::current().quit(0);
+        });
+        m_quitte_apres->start();
+    }
     vue.on_title_change = [onglet, vue_ptr = &vue](Utf16String const& titre) {
         auto texte = titre.to_byte_string();
         if (banc_coupe_lien && texte == "BOUCHAUD_BANC_COUPE_LIEN"sv) {

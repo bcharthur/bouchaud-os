@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Vector.h>
 #include <LibCore/AnonymousBuffer.h>
@@ -75,6 +76,10 @@ private:
     u64 m_present_us_total { 0 };
     u64 m_present_us_pire { 0 };
     bool m_premiere_trame_vue { false };
+
+    // BOUCHAUD_SONDE_PIXELS_V1 : la derniere sonde, rejouee a la sortie de banc.
+    ByteString m_derniere_sonde;
+    RefPtr<Core::Timer> m_quitte_apres;
 };
 
 }

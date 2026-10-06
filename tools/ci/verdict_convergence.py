@@ -22,6 +22,7 @@ EPREUVES = [
     ("R_CACHE", "cache HTTP et SQLite apres redemarrage du navigateur"),
     ("R_WPT", "WPT smoke (50 fichiers, compares a Linux)"),
     ("R_ENDURANCE", "endurance 10 min (cadres, workers, onglets cross-site) sans crash Compositor"),
+    ("R_SITES", "sites reels HTTPS (Example exige, Wikipedia mesure), pixels du Compositor"),
 ]
 
 
