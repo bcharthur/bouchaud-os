@@ -84,12 +84,13 @@ FIN = "<!-- MESURE:FIN -->"
 # Le build de Ladybird lui-meme a REUSSI : l'artefact
 # `bouchaud-ladybird-native-browser` (433 Mio) a ete publie. Ce qui echoue est
 # le smoke test, et sur un seul point.
-DERNIER_RUN_CI = "37483690336"
-DATE_RUN_CI = "2026-10-06, claude/ladybird-observability-performance @ fb6e0cfb"
+DERNIER_RUN_CI = "37526620689"
+DATE_RUN_CI = "2026-10-06, claude/ladybird-observability-performance @ 75643fb0"
 ARTEFACT_LADYBIRD_PRESENT = True
 
-# Recopie du job « ladybird / browser-host smoke » du run ci-dessus (QEMU,
-# -smp 4, 8 Gio). Les jalons absents du dictionnaire restent NON MESURE.
+# Recopie des jobs du run ci-dessus (QEMU, -smp 4, 8 Gio ; noyau et Ladybird
+# du MEME HEAD, manifeste verifie). Les jalons absents du dictionnaire restent
+# NON MESURE.
 JALONS_CI = {
     "BROWSER_HOST_START": True,
     "BROWSER_HOST_INITIALIZED": True,
@@ -108,6 +109,20 @@ JALONS_CI = {
     "HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1": True,
     "HOST_JS_OK": True,
     "HOST_WORKER_FUNCTIONAL_GLOBAL OK pong": True,
+    # Smoke 112486415610 : chaque chaine testee pour elle-meme.
+    "HOST_SCROLL_CHAINE OK": True,
+    "HOST_AUDIO_CHAINE OK": True,
+    "HOST_ISOLATION_CHAINE OK": True,
+    "HOST_LIEN_CHAINE OK": True,
+    "HOST_WORKER_BATTERIE OK 10/10": True,
+    # Job cache 112486415577.
+    "LADYBIRD_CACHE_REDEMARRAGE_OK": True,
+    # Job endurance 112486415688 : 604 s, 108 cycles, 36 onglets cross-site,
+    # un seul Compositor, aucune assertion.
+    "LADYBIRD_ENDURANCE_OK": True,
+    # Job wpt 112486415569 : le runner s'est fige apres le premier fichier
+    # (plafond 40 min) ; il avait conclu au run 37518121906 (4596/4621).
+    "LADYBIRD_WPT_OK": False,
 }
 
 
@@ -198,6 +213,15 @@ ITEMS = [
     Item("Cache jetable de la persistance (deux demarrages)",
          "qemu:tools/ci/run_persist_cache.sh:PERSIST_CACHE_OK",
          "2101 fichiers de cache : fsync reussit, temoins intacts apres redemarrage"),
+    Item("Horloge audio OSS (AC'97, ODELAY/SYNC)",
+         "qemu:tools/ci/run_oss_horloge.sh:OSS_HORLOGE_CHAINE_OK",
+         "boucle de PlaybackStreamBouchaud rejouee : horloge a 1,01-1,02 x le temps reel ; avant : figee a 0"),
+    Item("Faute non canonique : programme tue, noyau vivant",
+         "qemu:tools/ci/run_os_primitives.sh:FAUTE_NONCANONIQUE_OK",
+         "lecture, ecriture, saut vers 0xffff413f021ee480 : SIGSEGV ; avant : panique noyau"),
+    Item("Matrice de securite des roles (vrais appels systeme)",
+         "qemu:tools/ci/run_matrice_roles.sh:MATRICE_ROLES_OK",
+         "5 roles x 15 operations (base SQL, cache, telechargements, /dev/dsp, socket, exec...)"),
 
     # --- Capacites du navigateur -----------------------------------------
     #
@@ -247,13 +271,20 @@ ITEMS = [
     Item("Plusieurs onglets", "physique:2026-09-19:photo", fonctionnel=True,
          note="trois onglets, le premier ferme, navigation poursuivie",
          derniere_validation=("2026-09-19", "3c7e726")),
-    Item("Cookies", "aucune",
-         "base SQL active (plus de --disable-sql-database) ; aucun banc ne relit un cookie apres redemarrage",
-         fonctionnel=True),
+    Item("Cookies et localStorage (SQLite) apres redemarrage", "ci-jalon:LADYBIRD_CACHE_REDEMARRAGE_OK",
+         fonctionnel=True,
+         note="job cache : cookie persistant renvoye et localStorage relu par un NOUVEAU navigateur"),
     Item("Cache disque", "ci-jalon:[LB:CACHE] disque=oui", fonctionnel=True,
-         note="cree par RequestServer, plafond 32 Mio, CACHEDIR.TAG ; reutilisation apres redemarrage non mesuree"),
-    Item("Stockage / profil", "aucune",
-         "/persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM", fonctionnel=True),
+         note="cree par RequestServer, plafond 32 Mio, CACHEDIR.TAG"),
+    Item("Cache HTTP relu apres redemarrage du navigateur", "ci-jalon:LADYBIRD_CACHE_REDEMARRAGE_OK",
+         fonctionnel=True,
+         note="[LB] STORE puis [LB] HIT, un seul GET serveur sur deux passages, 304 et invalidation"),
+    Item("Lien Compositor coupe : reprise sans crash", "ci-jalon:HOST_LIEN_CHAINE OK", fonctionnel=True,
+         note="condition du crash ConnectionFromClient.cpp:68 rejouee ; COMPOSITOR_LINK_RECOVERED"),
+    Item("Endurance 10 min sans crash Compositor", "ci-jalon:LADYBIRD_ENDURANCE_OK", fonctionnel=True,
+         note="cadres, workers, onglets cross-site ; un seul Compositor du debut a la fin"),
+    Item("WPT smoke (50 fichiers compares a Linux)", "ci-jalon:LADYBIRD_WPT_OK", fonctionnel=True,
+         note="4596/4621 au run 37518121906 ; fige apres 1 fichier au run 37526620689 (cause a etablir)"),
     Item("Isolation de site (top-level)", "ci-jalon:HOST_ISOLATION_CHAINE OK", fonctionnel=True,
          note="navigation 10.0.2.2 -> 10.0.2.100 (guestfwd) : autre processus WebContent, confine"),
     Item("Audio (/dev/dsp depuis WebContent)", "ci-jalon:HOST_AUDIO_CHAINE OK", fonctionnel=True,

@@ -57,13 +57,13 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    couverture des contrats     19/19  (100 %)
-    integration fonctionnelle   20/31  (64 %)
+    couverture des contrats     22/22  (100 %)
+    integration fonctionnelle   28/34  (82 %)
 
     dont a revalider physiquement   3
-    dont en ECHEC                   0
+    dont en ECHEC                   1
 
-    dernier run CI lu : 37483690336  (2026-10-06, claude/ladybird-observability-performance @ fb6e0cfb)
+    dernier run CI lu : 37526620689  (2026-10-06, claude/ladybird-observability-performance @ 75643fb0)
 
 | Element | Etat | Niveau | Preuve | Ce qu'elle dit |
 |---|---|---|---|---|
@@ -86,35 +86,41 @@ qu'il reste a instrumenter.
 | Renommage POSIX (rename/renameat/renameat2) *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_renommage` | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Cache jetable de la persistance (decision) *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cache_jetable` | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Cache jetable de la persistance (deux demarrages) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_persist_cache.sh:PERSIST_CACHE_OK` | banc tools/ci/run_persist_cache.sh (marqueur PERSIST_CACHE_OK) |
-| Ladybird construit | **OK** | `QEMU_RUNTIME` | `ci:ladybird-native-browser.yml:bouchaud-ladybird-native-browser` | artefact bouchaud-ladybird-native-browser produit au run 37483690336 |
-| BrowserHost demarre | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_START` | atteint au run 37483690336 |
-| BrowserHost initialise | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_INITIALIZED` | atteint au run 37483690336 |
-| Frontend pret (UI/Bouchaud) | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_V1_READY` | atteint au run 37483690336 |
-| WebContent sans chrome | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_WEBCONTENT_CHROME 0` | atteint au run 37483690336 |
-| Pont GUI etabli (navigateur) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:UI] canal_gui=notifier` | atteint au run 37483690336 |
-| Document charge | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:NAV] onglet=1 document_charge` | atteint au run 37483690336 |
-| Trame presentee par le Compositor | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_FIRST_FRAME onglet=1` | atteint au run 37483690336 |
-| Bac a sable verifie (WebContent) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:SANDBOX] service=WebContent role=rendu` | atteint au run 37483690336 |
-| Canvas 2D | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_CANVAS OK` | atteint au run 37483690336 |
-| Image PNG decodee et affichee | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGE OK` | atteint au run 37483690336 |
-| iframe | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IFRAME OK` | atteint au run 37483690336 |
-| JavaScript | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_CANVAS OK` | atteint au run 37483690336 |
-| WebWorker | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_WORKER_FUNCTIONAL_GLOBAL OK pong` | atteint au run 37483690336 |
-| JavaScript (17 comportements executes) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_JS_OK` | atteint au run 37483690336 |
-| JPEG / GIF / WebP (pixels verifies) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37483690336 |
-| background-image CSS | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37483690336 |
-| Image redimensionnee | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37483690336 |
-| Profil persistant (XDG sous /persist/ladybird) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:PROFILE] config=/persist/ladybird/config/Ladybird/Profiles/default` | atteint au run 37483690336 |
-| Defilement asynchrone (molette reelle) | **NON MESURE** | `—` | `ci-jalon:HOST_SCROLL_CHAINE OK` | molette PS/2 -> WM -> chrome -> vue -> page ; chemin Compositor non distingue |
+| Horloge audio OSS (AC'97, ODELAY/SYNC) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_oss_horloge.sh:OSS_HORLOGE_CHAINE_OK` | banc tools/ci/run_oss_horloge.sh (marqueur OSS_HORLOGE_CHAINE_OK) |
+| Faute non canonique : programme tue, noyau vivant *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_os_primitives.sh:FAUTE_NONCANONIQUE_OK` | banc tools/ci/run_os_primitives.sh (marqueur FAUTE_NONCANONIQUE_OK) |
+| Matrice de securite des roles (vrais appels systeme) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_matrice_roles.sh:MATRICE_ROLES_OK` | banc tools/ci/run_matrice_roles.sh (marqueur MATRICE_ROLES_OK) |
+| Ladybird construit | **OK** | `QEMU_RUNTIME` | `ci:ladybird-native-browser.yml:bouchaud-ladybird-native-browser` | artefact bouchaud-ladybird-native-browser produit au run 37526620689 |
+| BrowserHost demarre | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_START` | atteint au run 37526620689 |
+| BrowserHost initialise | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_INITIALIZED` | atteint au run 37526620689 |
+| Frontend pret (UI/Bouchaud) | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_V1_READY` | atteint au run 37526620689 |
+| WebContent sans chrome | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_WEBCONTENT_CHROME 0` | atteint au run 37526620689 |
+| Pont GUI etabli (navigateur) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:UI] canal_gui=notifier` | atteint au run 37526620689 |
+| Document charge | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:NAV] onglet=1 document_charge` | atteint au run 37526620689 |
+| Trame presentee par le Compositor | **OK** | `QEMU_RUNTIME` | `ci-jalon:BOUCHAUD_UI_FIRST_FRAME onglet=1` | atteint au run 37526620689 |
+| Bac a sable verifie (WebContent) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:SANDBOX] service=WebContent role=rendu` | atteint au run 37526620689 |
+| Canvas 2D | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_CANVAS OK` | atteint au run 37526620689 |
+| Image PNG decodee et affichee | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGE OK` | atteint au run 37526620689 |
+| iframe | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IFRAME OK` | atteint au run 37526620689 |
+| JavaScript | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_CANVAS OK` | atteint au run 37526620689 |
+| WebWorker | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_WORKER_FUNCTIONAL_GLOBAL OK pong` | atteint au run 37526620689 |
+| JavaScript (17 comportements executes) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_JS_OK` | atteint au run 37526620689 |
+| JPEG / GIF / WebP (pixels verifies) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37526620689 |
+| background-image CSS | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37526620689 |
+| Image redimensionnee | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1` | atteint au run 37526620689 |
+| Profil persistant (XDG sous /persist/ladybird) | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:PROFILE] config=/persist/ladybird/config/Ladybird/Profiles/default` | atteint au run 37526620689 |
+| Defilement asynchrone (molette reelle) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_SCROLL_CHAINE OK` | atteint au run 37526620689 |
 | HTTPS / TLS | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-18:bb(8)` | bb(8) (2026-09-18, commit a36b3e4) |
 | HTTP / RequestServer | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-18:bb(8)` | bb(8) (2026-09-18, commit a36b3e4) |
 | Plusieurs onglets | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-19:photo` | photo (2026-09-19, commit 3c7e726) |
-| Cookies | **NON MESURE** | `—` | `—` | base SQL active (plus de --disable-sql-database) ; aucun banc ne relit un cookie apres redemarrage |
-| Cache disque | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:CACHE] disque=oui` | atteint au run 37483690336 |
-| Stockage / profil | **NON MESURE** | `—` | `—` | /persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM |
-| Isolation de site (top-level) | **NON MESURE** | `—` | `ci-jalon:HOST_ISOLATION_CHAINE OK` | navigation 10.0.2.2 -> 10.0.2.100 (guestfwd) : autre processus WebContent, confine |
-| Audio (/dev/dsp depuis WebContent) | **NON MESURE** | `—` | `ci-jalon:HOST_AUDIO_CHAINE OK` | PlaybackStreamBouchaud (OSS, AC'97) ; clic reel -> play() -> /dev/dsp ; HDA non pris en charge (repli nul) |
-| WebWorker : batterie de dix comportements | **NON MESURE** | `—` | `ci-jalon:HOST_WORKER_BATTERIE OK 10/10` | — |
+| Cookies et localStorage (SQLite) apres redemarrage | **OK** | `QEMU_RUNTIME` | `ci-jalon:LADYBIRD_CACHE_REDEMARRAGE_OK` | atteint au run 37526620689 |
+| Cache disque | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:CACHE] disque=oui` | atteint au run 37526620689 |
+| Cache HTTP relu apres redemarrage du navigateur | **OK** | `QEMU_RUNTIME` | `ci-jalon:LADYBIRD_CACHE_REDEMARRAGE_OK` | atteint au run 37526620689 |
+| Lien Compositor coupe : reprise sans crash | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_LIEN_CHAINE OK` | atteint au run 37526620689 |
+| Endurance 10 min sans crash Compositor | **OK** | `QEMU_RUNTIME` | `ci-jalon:LADYBIRD_ENDURANCE_OK` | atteint au run 37526620689 |
+| WPT smoke (50 fichiers compares a Linux) | **ECHEC** | `QEMU_RUNTIME` | `ci-jalon:LADYBIRD_WPT_OK` | JAMAIS ATTEINT au run 37526620689 |
+| Isolation de site (top-level) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_ISOLATION_CHAINE OK` | atteint au run 37526620689 |
+| Audio (/dev/dsp depuis WebContent) | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_AUDIO_CHAINE OK` | atteint au run 37526620689 |
+| WebWorker : batterie de dix comportements | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_WORKER_BATTERIE OK 10/10` | atteint au run 37526620689 |
 | GPU | **NON MESURE** | `—` | `—` | --force-cpu-painting |
 | Latence interactive sous charge | **NON MESURE** | `—` | `—` | non mesuree |
 
