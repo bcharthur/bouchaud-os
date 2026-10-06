@@ -84,7 +84,7 @@ verdict=inconnu
 while kill -0 "$PID" 2>/dev/null; do
   if grep -aq 'HOST_ENDURANCE_FIN' "$LOG"; then verdict=fini; break; fi
   if grep -aq 'KERNEL PANIC' "$LOG"; then verdict=panique; break; fi
-  n=$(grep -ac 'js log) "HOST_ENDURANCE cycle=' "$LOG" || true)
+  n=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ac 'js log) "HOST_ENDURANCE cycle=' || true)
   if [ "$n" != "$cycles_vus" ]; then
     cycles_vus=$n
     if (( n % 12 == 0 )); then printf '  T+%-5ss %s cycle(s)\n' "$((SECONDS - DEBUT))" "$n"; fi

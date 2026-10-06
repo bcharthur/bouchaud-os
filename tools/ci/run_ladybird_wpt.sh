@@ -71,9 +71,12 @@ fichiers_vus=0
 verdict=inconnu
 while kill -0 "$PID" 2>/dev/null; do
   if grep -aq 'HOST_WPT_FIN' "$LOG"; then verdict=fini; break; fi
-  n=$(grep -ac 'js log) "HOST_WPT fichier=' "$LOG" || true)
+  # Sans codes ANSI : le journal brut colore « (js log) », et ce compteur
+  # n'avancait jamais.
+  n=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ac 'js log) "HOST_WPT fichier=' || true)
   if [ "$n" != "$fichiers_vus" ]; then
     fichiers_vus=$n
+    derniere_ligne_wpt=$SECONDS
     printf '  T+%-5ss %s fichier(s)\n' "$((SECONDS - DEBUT))" "$n"
   fi
   taille=$(wc -c < "$LOG")
@@ -85,6 +88,11 @@ while kill -0 "$PID" 2>/dev/null; do
     break
   fi
   if (( SECONDS - DEBUT >= PLAFOND )); then verdict=plafond; break; fi
+  # Le runner a sa propre echeance de 120 s par fichier : sans nouvelle ligne
+  # HOST_WPT pendant 420 s, c'est la PAGE du runner qui est figee (run
+  # 37526620689 : 38 min sans avancer, le journal grossissant des releves du
+  # noyau, d'ou ni `muet` ni sortie avant le plafond).
+  if (( SECONDS - ${derniere_ligne_wpt:-$DEBUT} >= 420 )); then verdict=runner_fige; break; fi
   sleep 5
 done
 sleep 2
@@ -98,6 +106,14 @@ cat wpt-rapport.md
 echo "WPT_VERDICT $verdict duree_s=$((SECONDS - DEBUT))"
 if [ "$verdict" != "fini" ]; then
   echo "le runner WPT n'a pas conclu ($verdict)" >&2
+  # Ce qui permet de dire POURQUOI : le dernier fichier demande au serveur,
+  # puis la fin du journal du navigateur (journal serie en artefact seulement).
+  echo "== requetes HTTP (fin) =="
+  tail -15 http-wpt.log | sed 's/^/  /' || true
+  echo "== navigateur : fautes, IPC, [LB], console (fin) =="
+  sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | tr -d '\r' \
+    | grep -aE 'js log|\[LB\]|\[LB:(NAV|TAB|FRAME|UI)\]|PROCESS_(FAULT|EXIT|DEATH)|faute de|IPC|Failed|VERIFICATION|PANIC|unavailable|SECURITY-DENY' \
+    | grep -avE 'PRESENT onglet|MISS url|STORE url' | tail -60 | sed 's/^/  /' || true
   exit 1
 fi
 if grep -aq 'panicked at' "$LOG"; then
