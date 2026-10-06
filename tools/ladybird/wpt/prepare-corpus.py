@@ -114,6 +114,15 @@ def main() -> int:
             manifeste.append({"chemin": relatif.as_posix(), **ref})
             retenus += 1
         shutil.copytree(source, sortie / "wpt" / repertoire, dirs_exist_ok=True)
+        # Les `resources/` VOISINES des ancetres (`streams/resources/rs-utils.js`,
+        # `rs-test-templates.js`...) : sans elles, les scripts `../resources/*`
+        # rendent 404 et les tests gabarits disparaissent (tee.any : 6
+        # sous-tests au lieu de 26, run 37518121906) -- un ecart du BANC.
+        parties = Path(repertoire).parts
+        for i in range(1, len(parties) + 1):
+            voisines = entree.joinpath(*parties[:i]) / "resources"
+            if voisines.is_dir():
+                shutil.copytree(voisines, sortie / "wpt" / Path(*parties[:i]) / "resources", dirs_exist_ok=True)
 
     shutil.copytree(entree / "resources", sortie / "wpt/resources", dirs_exist_ok=True)
     if (entree / "common").is_dir():
