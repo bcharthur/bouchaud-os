@@ -238,3 +238,7 @@ tools/userland/out-oss-horloge/
 /serie-matrice.log*
 tools/userland/out-matrice/
 /serie-cache.log.propre
+/scenario-endurance/
+/ladybird-endurance.img
+/serie-endurance.log*
+/fixture-endurance.log

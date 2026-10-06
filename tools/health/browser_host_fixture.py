@@ -216,6 +216,67 @@ SITE_B_HTML = b'''<!doctype html><meta charset="utf-8"><title>site B</title>
 </script></body>'''
 WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
 
+# BOUCHAUD_ENDURANCE_V1 (convergence P1/P6) : la page d'endurance. Pendant
+# `?duree=S` secondes (600 par defaut), un cycle toutes les 5 s : un cadre
+# remplace (nouveau contexte Compositor, ancien detruit), un worker cree puis
+# termine, un canvas anime, un defilement aller-retour, des images rechargees ;
+# un cycle sur trois ouvre un onglet sur l'AUTRE site (10.0.2.100 : autre
+# processus WebContent sous isolation de site) et le referme au cycle suivant.
+# Une ligne `HOST_ENDURANCE cycle=` par cycle, puis `HOST_ENDURANCE_FIN`.
+ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</title>
+<body style="margin:0;font:16px sans-serif"><div id="etat">endurance</div>
+<canvas id="c" width="320" height="120"></canvas><div id="cadres"></div>
+<div style="height:3000px;background:linear-gradient(#fff,#88f)"></div><script>
+(() => {
+  const duree = Number(new URLSearchParams(location.search).get("duree") || 600) * 1000;
+  const t0 = performance.now();
+  const ctx = document.getElementById("c").getContext("2d");
+  let cycle = 0, onglet = null, workersOk = 0, cadresOk = 0, ongletsOuverts = 0;
+  let raf = 0;
+  (function anime() {
+    raf++;
+    ctx.fillStyle = `hsl(${raf % 360},60%,50%)`;
+    ctx.fillRect((raf * 3) % 300, 20, 20, 80);
+    if (performance.now() - t0 < duree) requestAnimationFrame(anime);
+  })();
+  function un_cycle() {
+    cycle++;
+    const ici = document.getElementById("cadres");
+    ici.textContent = "";
+    const f = document.createElement("iframe");
+    f.style.cssText = "width:200px;height:80px;border:0";
+    f.srcdoc = `<body style="margin:0;background:hsl(${cycle * 37 % 360},70%,60%)">cadre ${cycle}<img src="/pixel.png?c=${cycle}"></body>`;
+    f.onload = () => cadresOk++;
+    ici.appendChild(f);
+    const w = new Worker(URL.createObjectURL(new Blob(["onmessage = e => postMessage(e.data * 2)"])));
+    w.onmessage = e => { if (e.data === cycle * 2) workersOk++; w.terminate(); };
+    w.postMessage(cycle);
+    scrollTo(0, 400);
+    setTimeout(() => scrollTo(0, 0), 600);
+    if (onglet) { onglet.close(); onglet = null; }
+    else if (cycle % 3 === 0) {
+      onglet = window.open(`http://10.0.2.100:18082/endurance-enfant.html?cycle=${cycle}`, "_blank");
+      if (onglet) ongletsOuverts++;
+    }
+    const s = Math.round((performance.now() - t0) / 1000);
+    document.getElementById("etat").textContent = `cycle ${cycle} t=${s}s`;
+    console.log(`HOST_ENDURANCE cycle=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf}`);
+    if (performance.now() - t0 < duree) setTimeout(un_cycle, 5000);
+    else {
+      if (onglet) onglet.close();
+      console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf}`);
+    }
+  }
+  setTimeout(un_cycle, 1000);
+})();
+</script></body>"""
+ENDURANCE_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>enfant</title>
+<body style="margin:0;background:#cfe">onglet enfant<canvas id="c" width="200" height="60"></canvas><script>
+  console.log(`HOST_ENDURANCE_ENFANT ${location.search} origine=${location.origin}`);
+  const ctx = document.getElementById("c").getContext("2d"); let n = 0;
+  (function a() { n++; ctx.fillStyle = `hsl(${n % 360},50%,50%)`; ctx.fillRect(n % 180, 10, 20, 40); requestAnimationFrame(a); })();
+</script></body>"""
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1443,6 +1504,8 @@ class Handler(BaseHTTPRequestHandler):
             "/worker-data.json": (WORKER_DATA_JSON, "application/json"),
             "/son.wav": (SON_WAV, "audio/wav"),
             "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
+            "/endurance.html": (ENDURANCE_HTML, "text/html; charset=utf-8"),
+            "/endurance-enfant.html": (ENDURANCE_ENFANT_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie
