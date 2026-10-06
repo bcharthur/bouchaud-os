@@ -169,6 +169,15 @@ def _son_wav():
 
 
 SON_WAV = _son_wav()
+
+# BOUCHAUD_ISOLATION_SITE_V1 (P9) : la page du SECOND site. Le banc l'expose a
+# l'invite sous 10.0.2.100 (`guestfwd` QEMU vers cette meme fixture) : un autre
+# hote, donc un autre site au sens de l'isolation -- la navigation depuis
+# 10.0.2.2 doit changer de processus WebContent (`--site-isolation top-level`).
+SITE_B_HTML = b'''<!doctype html><meta charset="utf-8"><title>site B</title>
+<body>site B<script>
+  console.log(`HOST_SITE_B OK origine=${location.origin} referent=${document.referrer ? new URL(document.referrer).host : "aucun"}`);
+</script></body>'''
 WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
 
 HTML = r'''<!doctype html>
@@ -1334,7 +1343,7 @@ HTML = r'''<!doctype html>
       dit = true;
       console.log(`HOST_AUDIO_PRET duree=${son.duration.toFixed(2)}`);
     });
-    son.addEventListener("error", () => console.log(`HOST_AUDIO FAIL erreur=${son.error && son.error.code}`));
+    son.addEventListener("error", () => { console.log(`HOST_AUDIO FAIL erreur=${son.error && son.error.code}`); versLeSiteB(2000); });
     // La cible du clic est CERTAINE : un bouton fixe qui couvre toute la vue.
     // Sans lui, le clic du banc tombait dans un <iframe> d'une epreuve
     // precedente -- un clic dans un cadre ne remonte pas a la fenetre, et
@@ -1347,15 +1356,32 @@ HTML = r'''<!doctype html>
       bouton.remove();
       const t0 = performance.now();
       son.play().then(() => console.log("HOST_AUDIO_PLAY OK"),
-        err => console.log(`HOST_AUDIO FAIL play=${err && err.name}`));
+        err => { console.log(`HOST_AUDIO FAIL play=${err && err.name}`); versLeSiteB(2000); });
       son.addEventListener("timeupdate", function suivi() {
         if (son.currentTime >= 0.5) {
           son.removeEventListener("timeupdate", suivi);
           console.log(`HOST_AUDIO OK t=${son.currentTime.toFixed(2)} ms=${Math.round(performance.now() - t0)}`);
+          versLeSiteB(2000);
         }
       });
       son.addEventListener("ended", () => console.log(`HOST_AUDIO_FIN t=${son.currentTime.toFixed(2)}`), { once: true });
     }, { once: true });
+    // Sans clic (banc sans moniteur), l'isolation est jouee quand meme.
+    setTimeout(() => versLeSiteB(0), 60000);
+  }
+
+  // BOUCHAUD_ISOLATION_SITE_V1 (P9) -- la DERNIERE epreuve : elle quitte la
+  // page. Navigation de premier niveau vers un AUTRE site ; le banc verifie
+  // que la page B s'execute dans un autre processus WebContent, confine lui
+  // aussi.
+  let siteBDemande = false;
+  function versLeSiteB(delaiMs) {
+    if (siteBDemande) return;
+    siteBDemande = true;
+    setTimeout(() => {
+      console.log(`HOST_SITE_A_PART vers=10.0.2.100:18082 depuis=${location.host}`);
+      location.href = "http://10.0.2.100:18082/site-b.html";
+    }, delaiMs);
   }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     console.log(`HOST_SCROLL_PRET hauteur=${document.documentElement.scrollHeight} vue=${innerHeight} y=${scrollY}`);
@@ -1380,6 +1406,7 @@ class Handler(BaseHTTPRequestHandler):
             "/worker-lib.js": (WORKER_LIB_JS, "text/javascript"),
             "/worker-data.json": (WORKER_DATA_JSON, "application/json"),
             "/son.wav": (SON_WAV, "audio/wav"),
+            "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie

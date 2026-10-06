@@ -112,7 +112,7 @@ qu'il reste a instrumenter.
 | Cookies | **NON MESURE** | `—` | `—` | base SQL active (plus de --disable-sql-database) ; aucun banc ne relit un cookie apres redemarrage |
 | Cache disque | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:CACHE] disque=oui` | atteint au run 37483690336 |
 | Stockage / profil | **NON MESURE** | `—` | `—` | /persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM |
-| Isolation de site | **NON MESURE** | `—` | `—` | top-level par defaut depuis UI/Bouchaud ; aucun banc ne l'exerce encore |
+| Isolation de site (top-level) | **NON MESURE** | `—` | `ci-jalon:HOST_ISOLATION_CHAINE OK` | navigation 10.0.2.2 -> 10.0.2.100 (guestfwd) : autre processus WebContent, confine |
 | Audio (/dev/dsp depuis WebContent) | **NON MESURE** | `—` | `ci-jalon:HOST_AUDIO_CHAINE OK` | PlaybackStreamBouchaud (OSS, AC'97) ; clic reel -> play() -> /dev/dsp ; HDA non pris en charge (repli nul) |
 | WebWorker : batterie de dix comportements | **NON MESURE** | `—` | `ci-jalon:HOST_WORKER_BATTERIE OK 10/10` | — |
 | GPU | **NON MESURE** | `—` | `—` | --force-cpu-painting |

@@ -236,7 +236,7 @@ qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
-  -netdev user,id=net0 -device e1000,netdev=net0 \
+  -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
@@ -506,6 +506,30 @@ if [ "$DEFILEMENT" = "1" ] && [ "$DEFILEMENT_VERDICT" = "ok" ] && kill -0 "$PID"
   fi
 fi
 echo "HOST_AUDIO_VERDICT $AUDIO_VERDICT"
+
+# BOUCHAUD_ISOLATION_SITE_V1 (P9) -- UN AUTRE SITE, UN AUTRE PROCESSUS.
+#
+# La page part vers http://10.0.2.100:18082/site-b.html (second site : un
+# `guestfwd` QEMU vers la meme fixture, `nc` par connexion). Le navigateur est
+# lance en `--site-isolation top-level` : la page B doit s'executer dans un
+# AUTRE processus WebContent que la page A, et ce processus doit verifier son
+# propre confinement.
+ISOLATION_VERDICT=non_joue
+if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null; then
+  ISOLATION_VERDICT=site_b_absent
+  for _ in $(seq 1 120); do
+    grep -aq 'HOST_SITE_B OK' "$LOG" && { ISOLATION_VERDICT=charge; break; }
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 1
+  done
+  sleep 2
+fi
+PID_SITE_A=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SMOKE_' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
+PID_SITE_B=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SITE_B OK' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
+echo "HOST_ISOLATION_VERDICT $ISOLATION_VERDICT pid_site_a=${PID_SITE_A:-?} pid_site_b=${PID_SITE_B:-?}"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aoE 'HOST_SITE_[AB].*|\[LB:NAV\] onglet=1 document_charge url=http://10\.0\.2\.100.*|PERF_EXECVE .*image=/usr/libexec/ladybird/WebContent pid=[0-9]+' \
+  | head -10 | sed 's/^/  /' || true
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
   | grep -aoE '\[LB:AUDIO\].*|HOST_AUDIO[A-Z_]* .*' | head -12 | sed 's/^/  /' || true
 echo "HOST_SCROLL_VERDICT $DEFILEMENT_VERDICT t_molette=${T_MOLETTE:-0}"
@@ -704,6 +728,29 @@ if [ "$DEFILEMENT" = "1" ]; then
     exit 1
   fi
   echo "HOST_AUDIO_CHAINE OK dsp=1 ecriture=1 page=1"
+fi
+# ====================================================================
+# L'ISOLATION DE SITE (P9), TESTEE POUR ELLE-MEME.
+# ====================================================================
+if [ "$DEFILEMENT" = "1" ]; then
+  maillon_isolation=""
+  [ "$ISOLATION_VERDICT" = "charge" ] || maillon_isolation="site_b_${ISOLATION_VERDICT}"
+  [ -z "$maillon_isolation" ] && { grep -aqE '\[LB:NAV\] onglet=1 document_charge url=http://10\.0\.2\.100:18082/site-b\.html' "$LOG" || maillon_isolation="navigation_non_vue_par_le_navigateur"; }
+  if [ -z "$maillon_isolation" ]; then
+    if [ -z "${PID_SITE_A:-}" ] || [ -z "${PID_SITE_B:-}" ]; then
+      maillon_isolation="pid_introuvable"
+    elif [ "$PID_SITE_A" = "$PID_SITE_B" ]; then
+      maillon_isolation="meme_processus_pid_${PID_SITE_A}"
+    elif ! grep -aqF ".bouchaud-confinement-WebContent-${PID_SITE_B}" "$LOG"; then
+      maillon_isolation="site_b_sans_verification_de_confinement"
+    fi
+  fi
+  if [ -n "$maillon_isolation" ]; then
+    echo "isolation de site : maillon manquant $maillon_isolation" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=isolation maillon=$maillon_isolation"
+    exit 1
+  fi
+  echo "HOST_ISOLATION_CHAINE OK site_a_pid=$PID_SITE_A site_b_pid=$PID_SITE_B confine=1"
 fi
 # ====================================================================
 # LE VERDICT DE SURFACE, TESTE POUR LUI-MEME
