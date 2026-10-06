@@ -1051,6 +1051,37 @@ HTML = r'''<!doctype html>
   console.log(`HOST_WORKER_AB_VERDICT_COMPLETE ordre=${ordre}`
     + ` rangs=${releves.length}/${MATRICE.length} fonctionnel=${fonctionnelGlobal ? 1 : 0}`
     + ` smoke=${canvasOK && workerOK && imageOK && frameOK ? 1 : 0}`);
+
+  // BOUCHAUD_DEFILEMENT_ASYNC_V1 (P4) -- APRES tout ce qui est juge.
+  //
+  // Le defilement asynchrone n'est plus desactive. Le prouver demande une
+  // vraie molette : le banc l'envoie par le moniteur QEMU (souris PS/2
+  // IntelliMouse) une fois cette ligne vue, et la molette traverse le WM
+  // (`[GUI-WHEEL-TX]`), le chrome (`WEB_WHEEL_DISPATCH`), la vue upstream
+  // (`enqueue_input_event`, qui la confie d'abord au Compositor quand le
+  // defilement asynchrone est actif) puis WebContent.
+  //
+  // La page ne s'allonge qu'ICI : la mire et ses captures sont conclues, et
+  // rien de ce qui precede ne doit voir un document plus haut que la vue.
+  // L'ecouteur est PASSIF : un ecouteur de molette non passif obligerait le
+  // moteur a attendre le script avant de defiler.
+  const espace = document.createElement("div");
+  espace.style.height = "4000px";
+  espace.style.background = "linear-gradient(#f0f0f0, #a0a0ff)";
+  document.body.appendChild(espace);
+  let defileVu = false;
+  addEventListener("wheel", e => {
+    console.log(`HOST_WHEEL_EVENT dy=${e.deltaY} y=${scrollY}`);
+  }, { passive: true, once: true });
+  addEventListener("scroll", () => {
+    if (!defileVu && scrollY > 0) {
+      defileVu = true;
+      console.log(`HOST_SCROLL OK y=${scrollY} hauteur=${document.documentElement.scrollHeight} vue=${innerHeight}`);
+    }
+  }, { passive: true });
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    console.log(`HOST_SCROLL_PRET hauteur=${document.documentElement.scrollHeight} vue=${innerHeight} y=${scrollY}`);
+  }));
 })();
 </script></body>'''
 

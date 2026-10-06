@@ -84,20 +84,30 @@ FIN = "<!-- MESURE:FIN -->"
 # Le build de Ladybird lui-meme a REUSSI : l'artefact
 # `bouchaud-ladybird-native-browser` (433 Mio) a ete publie. Ce qui echoue est
 # le smoke test, et sur un seul point.
-DERNIER_RUN_CI = "35742940872"
-DATE_RUN_CI = "2026-09-22, main @ 3c7e726"
+DERNIER_RUN_CI = "37483690336"
+DATE_RUN_CI = "2026-10-06, claude/ladybird-observability-performance @ fb6e0cfb"
 ARTEFACT_LADYBIRD_PRESENT = True
 
+# Recopie du job « ladybird / browser-host smoke » du run ci-dessus (QEMU,
+# -smp 4, 8 Gio). Les jalons absents du dictionnaire restent NON MESURE.
 JALONS_CI = {
     "BROWSER_HOST_START": True,
     "BROWSER_HOST_INITIALIZED": True,
     "M11_GUI_HANDSHAKE_OK": True,
-    "M11_DOCUMENT_LOADED": True,
-    "BROWSER_HOST_M11_FRAME_PRESENTED": True,
+    "BOUCHAUD_UI_V1_READY": True,
+    "BOUCHAUD_UI_WEBCONTENT_CHROME 0": True,
+    "[LB:UI] canal_gui=notifier": True,
+    "[LB:NAV] onglet=1 document_charge": True,
+    "BOUCHAUD_UI_FIRST_FRAME onglet=1": True,
+    "[LB:SANDBOX] service=WebContent role=rendu": True,
+    "[LB:PROFILE] config=/persist/ladybird/config/Ladybird/Profiles/default": True,
+    "[LB:CACHE] disque=oui": True,
     "HOST_CANVAS OK": True,
     "HOST_IMAGE OK": True,
     "HOST_IFRAME OK": True,
-    "HOST_WORKER OK": False,
+    "HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1": True,
+    "HOST_JS_OK": True,
+    "HOST_WORKER_FUNCTIONAL_GLOBAL OK pong": True,
 }
 
 
@@ -165,7 +175,10 @@ ITEMS = [
          "qemu:tools/ci/run_topologie_cpu.sh:TOPOLOGIE_CPU_OK",
          "la plage suit le -smp, deux tailles de machine"),
     Item("Ce que voit l'anneau 3",
-         "qemu:tools/ci/run_topologie_cpu.sh:verdict=coherent",
+         # Le banc lit les lignes `VOIR_CPU` de la sonde anneau 3 et echoue si
+         # `verdict` n'y vaut pas `coherent` ; la chaine `verdict=coherent`
+         # n'y figure pas litteralement (comparaison `!= "coherent"`).
+         "qemu:tools/ci/run_topologie_cpu.sh:VOIR_CPU",
          "sonde ring 3 : sysfs, cpuinfo, procstat et CPUID s'accordent"),
     Item("Fenetre de pile initiale", "hote:test_pile_initiale",
          "budget derive, postcondition, gros argv/envp"),
@@ -210,13 +223,21 @@ ITEMS = [
     Item("iframe", "ci-jalon:HOST_IFRAME OK", fonctionnel=True),
     Item("JavaScript", "ci-jalon:HOST_CANVAS OK", fonctionnel=True,
          note="le canvas et le worker sont pilotes en JS : leur execution le prouve"),
-    Item("WebWorker", "ci-jalon:HOST_WORKER OK", fonctionnel=True,
-         note="ECHEC en CI : worker timeout apres 60 s"),
-    Item("JPEG", "aucune", "aucun banc ne l'exerce", fonctionnel=True),
-    Item("GIF", "aucune", "aucun banc ne l'exerce", fonctionnel=True),
-    Item("WebP", "aucune", "aucun banc ne l'exerce", fonctionnel=True),
-    Item("background-image CSS", "aucune", "aucun banc ne l'exerce", fonctionnel=True),
-    Item("Image redimensionnee", "aucune", "aucun banc ne l'exerce", fonctionnel=True),
+    Item("WebWorker", "ci-jalon:HOST_WORKER_FUNCTIONAL_GLOBAL OK pong", fonctionnel=True,
+         note="script par HTTP et par blob, processus WebWorker confine"),
+    Item("JavaScript (17 comportements executes)", "ci-jalon:HOST_JS_OK", fonctionnel=True),
+    Item("JPEG / GIF / WebP (pixels verifies)",
+         "ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1", fonctionnel=True,
+         note="11 fixtures : JPEG RGB et CMYK, GIF fixe et anime, WebP VP8/VP8L/alpha, PNG"),
+    Item("background-image CSS",
+         "ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1", fonctionnel=True),
+    Item("Image redimensionnee",
+         "ci-jalon:HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1", fonctionnel=True),
+    Item("Profil persistant (XDG sous /persist/ladybird)",
+         "ci-jalon:[LB:PROFILE] config=/persist/ladybird/config/Ladybird/Profiles/default",
+         fonctionnel=True),
+    Item("Defilement asynchrone (molette reelle)", "ci-jalon:HOST_SCROLL_CHAINE OK", fonctionnel=True,
+         note="molette PS/2 -> WM -> chrome -> vue -> page ; chemin Compositor non distingue"),
     Item("HTTPS / TLS", "physique:2026-09-18:bb(8)", fonctionnel=True,
          note="wikipedia.org servi en 200, 119573 octets",
          derniere_validation=("2026-09-18", "a36b3e4")),
@@ -229,9 +250,8 @@ ITEMS = [
     Item("Cookies", "aucune",
          "base SQL active (plus de --disable-sql-database) ; aucun banc ne relit un cookie apres redemarrage",
          fonctionnel=True),
-    Item("Cache disque", "aucune",
-         "actif (plus de --disable-http-disk-cache), plafond 32 Mio, CACHEDIR.TAG ; aucun banc de reutilisation HTTP",
-         fonctionnel=True),
+    Item("Cache disque", "ci-jalon:[LB:CACHE] disque=oui", fonctionnel=True,
+         note="cree par RequestServer, plafond 32 Mio, CACHEDIR.TAG ; reutilisation apres redemarrage non mesuree"),
     Item("Stockage / profil", "aucune",
          "/persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM", fonctionnel=True),
     Item("Isolation de site", "aucune",

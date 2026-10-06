@@ -389,7 +389,11 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Le smoke QEMU, ou `/persist` est monte avant l'autorun, tourne lui sur
     // `/persist/ladybird`.
     crate::shell::set_exported_for_boot("BOUCHAUD_LADYBIRD_EPHEMERAL", "1");
-    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_ASYNC_SCROLLING", "1");
+    // BOUCHAUD_DEFILEMENT_ASYNC_V1 : plus de BOUCHAUD_DISABLE_ASYNC_SCROLLING.
+    // Il datait de la premiere validation multiprocessus, sans Compositor ;
+    // la trame vient desormais du Compositor, qui porte le defilement
+    // asynchrone d'upstream. Le smoke QEMU l'exerce par une vraie molette
+    // (`HOST_SCROLL_CHAINE`). La variable reste lue pour un diagnostic.
     crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_AUDIO", "1");
 
     crate::serial_println!("BOUCHAUD_STAGE2_LADYBIRD_RAMONLY_ENV_OK");

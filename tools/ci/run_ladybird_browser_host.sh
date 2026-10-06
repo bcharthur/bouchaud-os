@@ -416,6 +416,53 @@ fi
 echo "HOST_SURFACE_TENTATIVES $(tr '\n' ',' < "$TENTATIVES" 2>/dev/null || true)"
 echo "HOST_SURFACE_VERDICT $MIRE_VERDICT classe=${MIRE_CLASSE:-$MIRE_VERDICT}"
 
+# ============================================================================
+# BOUCHAUD_DEFILEMENT_ASYNC_V1 (P4) -- UNE VRAIE MOLETTE, APRES LE VERDICT
+# ============================================================================
+#
+# Le defilement asynchrone n'est plus desactive (ni par Stage 2, ni ici). Le
+# prouver demande une molette qui traverse TOUTE la chaine : souris PS/2
+# IntelliMouse emulee -> pilote -> WM (`[GUI-WHEEL-TX]`) -> chrome
+# (`WEB_WHEEL_DISPATCH`) -> `ViewImplementation::enqueue_input_event`, qui la
+# confie au Compositor quand le defilement asynchrone est actif -> WebContent
+# -> evenement `scroll` de la page (`HOST_SCROLL OK`), et une trame presentee
+# apres elle (`[LB:FRAME] apres_molette=1`).
+#
+# APRES le verdict : la page ne s'allonge qu'une fois la mire capturee.
+# Calibrage (QEMU local, ecran 1280x720) : le pointeur nait au CENTRE
+# (640,360), qui tombe dans la zone de page de la fenetre du navigateur ; un
+# `mouse_move 0 0 -1` est un cran vers le BAS (`dy=-1` cote WM). Le pointeur
+# n'est donc pas deplace -- un deplacement de plusieurs milliers de pixels
+# saturait la file PS/2 de QEMU.
+DEFILEMENT=${BO_SMOKE_DEFILEMENT:-1}
+DEFILEMENT_VERDICT=non_joue
+if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null && command -v socat >/dev/null 2>&1; then
+  DEFILEMENT_VERDICT=page_pas_prete
+  for _ in $(seq 1 30); do
+    grep -aq 'HOST_SCROLL_PRET' "$LOG" && break
+    sleep 1
+  done
+  if grep -aq 'HOST_SCROLL_PRET' "$LOG"; then
+    DEFILEMENT_VERDICT=sans_defilement
+    T_MOLETTE=$(maintenant_ms)
+    for _ in 1 2 3; do
+      echo "mouse_move 0 0 -1" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1 || true
+      sleep 0.4
+    done
+    for _ in $(seq 1 20); do
+      if grep -aq 'HOST_SCROLL OK' "$LOG"; then
+        DEFILEMENT_VERDICT=ok
+        break
+      fi
+      sleep 1
+    done
+  fi
+fi
+echo "HOST_SCROLL_VERDICT $DEFILEMENT_VERDICT t_molette=${T_MOLETTE:-0}"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aoE '\[GUI-WHEEL-(TX|DROP|APP)\].*|WEB_WHEEL_DISPATCH.*|\[LB:FRAME\] apres_molette.*|HOST_(WHEEL_EVENT|SCROLL_PRET|SCROLL OK).*' \
+  | head -16 | sed 's/^/  /' || true
+
 # POURQUOI LA SESSION S'EST-ELLE ARRETEE ?
 #
 # BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
@@ -562,6 +609,22 @@ for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESY
     exit 1
   fi
 done
+# ====================================================================
+# LE DEFILEMENT (P4), TESTE POUR LUI-MEME -- maillon par maillon.
+# ====================================================================
+if [ "$DEFILEMENT" = "1" ]; then
+  maillon_manquant=""
+  grep -aqE '\[GUI-WHEEL-TX\].*transmis=1' "$LOG" || maillon_manquant="wm_vers_navigateur"
+  [ -z "$maillon_manquant" ] && { grep -aq 'WEB_WHEEL_DISPATCH' "$LOG" || maillon_manquant="chrome_vers_vue"; }
+  [ -z "$maillon_manquant" ] && { [ "$DEFILEMENT_VERDICT" = "ok" ] || maillon_manquant="page_${DEFILEMENT_VERDICT}"; }
+  [ -z "$maillon_manquant" ] && { grep -aq 'apres_molette=1' "$LOG" || maillon_manquant="trame_apres_molette"; }
+  if [ -n "$maillon_manquant" ]; then
+    echo "defilement : maillon manquant $maillon_manquant" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=defilement maillon=$maillon_manquant"
+    exit 1
+  fi
+  echo "HOST_SCROLL_CHAINE OK wm=1 chrome=1 page=1 trame=1 defilement_async=$(grep -aq 'defilement_async=oui' "$LOG" && echo oui || echo non)"
+fi
 # ====================================================================
 # LE VERDICT DE SURFACE, TESTE POUR LUI-MEME
 #
