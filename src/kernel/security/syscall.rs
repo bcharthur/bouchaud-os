@@ -153,6 +153,24 @@ fn check_mutation(
     }
 }
 
+/// `mkdir`/`mknod` : un chemin qui existe et que l'appelant voit rend EEXIST
+/// AVANT le controle de creation, comme sous Linux et Landlock.
+/// BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1 -- voir
+/// `filesystem::existence_visible`.
+fn check_create(
+    dirfd: i32,
+    path_pointer: u64,
+    kind: filesystem::Mutation,
+    operation: &'static str,
+) -> GateDecision {
+    if let Some(raw_path) = path_at(path_pointer) {
+        if filesystem::existence_visible(policy::current(), dirfd, raw_path.as_str()) {
+            return GateDecision::Return(-errno::EEXIST);
+        }
+    }
+    check_mutation(dirfd, path_pointer, kind, operation)
+}
+
 fn check_reference(
     dirfd: i32,
     path_pointer: u64,
@@ -384,10 +402,10 @@ pub fn gate(number: u64, args: [u64; 6], native: bool) -> GateDecision {
         OPENAT => check_open(args[0] as i32, args[1], args[2] as u32),
         CREAT => check_open(filesystem::AT_FDCWD, args[0], 0x41),
 
-        MKDIR | MKNOD => check_mutation(
+        MKDIR | MKNOD => check_create(
             filesystem::AT_FDCWD, args[0], filesystem::Mutation::Create, "fs-create"
         ),
-        MKDIRAT | MKNODAT => check_mutation(
+        MKDIRAT | MKNODAT => check_create(
             args[0] as i32, args[1], filesystem::Mutation::Create, "fs-at-create"
         ),
         RMDIR | UNLINK => check_mutation(

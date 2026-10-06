@@ -1887,6 +1887,16 @@ pub fn sys_mkdirat(dirfd: i32, path_addr: u64, mode: u32) -> i64 {
         Ok(path) => path,
         Err(code) => return code,
     };
+    // L'ordre de Linux : un chemin qui existe rend EEXIST avant le controle de
+    // permission -- s'il est visible de l'appelant. Voir
+    // `security::filesystem::existence_visible`.
+    if crate::kernel::security::filesystem::existence_visible(
+        crate::kernel::security::policy::current(),
+        AT_FDCWD,
+        path.as_str(),
+    ) {
+        return -errno::EEXIST;
+    }
     if let Err(code) = security_recheck_mutation(
         path.as_str(),
         crate::kernel::security::filesystem::Mutation::Create,

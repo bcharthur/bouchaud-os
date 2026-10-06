@@ -382,6 +382,35 @@ fn le_serveur_de_requetes_possede_son_profil_persistant() {
     assert!(ecriture_permise(SecurityProfile::BrowserNetwork, PROFIL_NAVIGATEUR));
 }
 
+// BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1 : `mkdir` d'un ancetre existant rend
+// EEXIST quand le role le VOIT (`filesystem::existence_visible`). Le role
+// reseau doit voir chaque ancetre de son profil -- sinon
+// `Core::Directory::ensure_directory` echoue sur `/persist` et le cache disque
+// n'est jamais cree --, et un rendu ne doit voir aucun d'eux : `mkdir` ne
+// devient pas un oracle d'existence pour lui.
+#[test]
+fn le_role_reseau_voit_chaque_ancetre_de_son_profil_et_un_rendu_aucun() {
+    let cache = "/persist/ladybird/cache/Ladybird/Profiles/default/Cache";
+    let mut ancetre = String::new();
+    for morceau in cache.split('/').filter(|m| !m.is_empty()) {
+        ancetre.push('/');
+        ancetre.push_str(morceau);
+        assert!(
+            lecture_permise(SecurityProfile::BrowserNetwork, &ancetre),
+            "le role reseau ne voit pas {ancetre}"
+        );
+        for rendu in [SecurityProfile::BrowserContent] {
+            if ancetre.starts_with("/persist") {
+                assert!(!lecture_permise(rendu, &ancetre), "un rendu voit {ancetre}");
+            }
+        }
+    }
+    // Ce que le role reseau ne voit pas reste un refus, existant ou non.
+    for invisible in ["/persist/Downloads", "/persist/Downloads/x", "/persist/ladybird-chrome", "/"] {
+        assert!(!lecture_permise(SecurityProfile::BrowserNetwork, invisible), "{invisible}");
+    }
+}
+
 #[test]
 fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
     // LE test de ce chantier. WebContent, WebWorker et ImageDecoder analysent

@@ -1,0 +1,64 @@
+# noyau APRES (binaire final du commit) : HEAD + existence_visible (security/syscall.rs check_create, file.rs sys_mkdirat)
+== demarrage 1 ==
+[kernel] persistance: zone vierge
+mkdir-visible-probe prepare : /persist/Downloads/x r=0 errno=0
+mkdir-visible-probe : argv0=/bin/RequestServer no_new_privs=1
+  la sonde tourne confinee (no_new_privs=1)                    ok (errno=0)
+  mkdir(/persist), visible et existant : EEXIST                ok (errno=17)
+  ensure_directory(cache du profil) reussit                    ok (errno=0)
+  le dossier du cache existe                                   ok (errno=0)
+[kernel] [SECURITY-DENY] seq=1 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/x reason=outside-sandbox
+  mkdir(/persist/Downloads/x), existant mais INVISIBLE : EACCES ok (errno=13)
+[kernel] [SECURITY-DENY] seq=2 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/neuf reason=outside-sandbox
+  mkdir(/persist/Downloads/neuf), absent et interdit : EACCES  ok (errno=13)
+[kernel] [SECURITY-DENY] seq=3 pid=15 uid=0 op=fs-create detail=0x1 path=/dossier-neuf-a-la-racine reason=outside-sandbox
+  mkdir(/dossier-neuf-a-la-racine) : EACCES                    ok (errno=13)
+[kernel] [SECURITY-DENY] seq=4 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/ladybird-chrome reason=outside-sandbox
+  mkdir(/persist/ladybird-chrome) : EACCES (pas au role reseau) ok (errno=13)
+MKDIR_VISIBLE_OK
+cache-persist-probe : passage 1 -- depot
+  statfs /persist total=66580480 libre=66580480 fichiers=2048 libres=2048 ; /tmp total=1001013248
+  statfs(/persist) et statfs(/tmp) reussissent                   ok
+  /persist annonce la zone : 32 Mio < total <= 64 Mio            ok
+  /persist annonce moins que la RAM                              ok
+  /persist annonce les 2048 entrees de la table                  ok
+  l'espace libre de la zone ne depasse pas son total             ok
+  la base de temoins s'ecrit                                     ok
+  les reglages s'ecrivent                                        ok
+  le gros cache est etiquete                                     ok
+  le petit cache est etiquete                                    ok
+  gros cache : 2100/2100 fichiers
+  le gros cache depasse a lui seul les 2048 entrees              ok
+BOUCHAUD_PERSIST_CACHE_ECARTE arbres=1 fichiers=2101 octets=57742 total_fichiers=2107 fois=1
+  fsync(temoins) = 0 errno=0
+  fsync reussit malgre le cache qui deborde (pas d'EIO)          ok
+CACHE_PERSIST_PASSAGE1_OK
+[kernel] persistance: 6 fichier(s) ecrit(s) a l'extinction
+== demarrage 2 ==
+[kernel] persistance: 6 fichier(s) restaure(s) depuis le disque
+mkdir-visible-probe prepare : /persist/Downloads/x r=0 errno=0
+mkdir-visible-probe : argv0=/bin/RequestServer no_new_privs=1
+  la sonde tourne confinee (no_new_privs=1)                    ok (errno=0)
+  mkdir(/persist), visible et existant : EEXIST                ok (errno=17)
+  ensure_directory(cache du profil) reussit                    ok (errno=0)
+  le dossier du cache existe                                   ok (errno=0)
+[kernel] [SECURITY-DENY] seq=1 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/x reason=outside-sandbox
+  mkdir(/persist/Downloads/x), existant mais INVISIBLE : EACCES ok (errno=13)
+[kernel] [SECURITY-DENY] seq=2 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/neuf reason=outside-sandbox
+  mkdir(/persist/Downloads/neuf), absent et interdit : EACCES  ok (errno=13)
+[kernel] [SECURITY-DENY] seq=3 pid=15 uid=0 op=fs-create detail=0x1 path=/dossier-neuf-a-la-racine reason=outside-sandbox
+  mkdir(/dossier-neuf-a-la-racine) : EACCES                    ok (errno=13)
+[kernel] [SECURITY-DENY] seq=4 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/ladybird-chrome reason=outside-sandbox
+  mkdir(/persist/ladybird-chrome) : EACCES (pas au role reseau) ok (errno=13)
+MKDIR_VISIBLE_OK
+cache-persist-probe : passage 2 -- relecture apres redemarrage
+  la base de temoins a survecu, intacte                          ok
+  les reglages ont survecu, intacts                              ok
+  gros cache apres redemarrage : -1 fichier(s), etiquette=0
+  le gros cache est ecarte EN ENTIER (aucun fichier isole)       ok
+  petit cache apres redemarrage : 4 entree(s)
+  le petit cache, qui tenait, est intact (3 + etiquette)         ok
+  et son contenu aussi                                           ok
+CACHE_PERSIST_OK
+[kernel] persistance: 6 fichier(s) ecrit(s) a l'extinction
+PERSIST_CACHE_OK

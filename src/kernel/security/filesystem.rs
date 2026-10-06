@@ -151,6 +151,39 @@ fn sandbox_path_allowed(security: Snapshot, canonical: &str, write: bool) -> boo
     }
 }
 
+/// Le chemin existe-t-il, ET l'appelant a-t-il le droit de le voir ?
+///
+/// BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1
+///
+/// `mkdir` d'un chemin qui existe rend `EEXIST` sous Linux AVANT tout
+/// controle de permission -- Landlock compris : `security_path_mkdir` n'est
+/// appele qu'apres la recherche du nom. `Core::Directory::ensure_directory`
+/// (LibCore) en depend : il cree chaque ancetre en ignorant `EEXIST`. Le
+/// noyau controlait la mutation d'abord, et RequestServer recevait `EACCES`
+/// sur `mkdir("/persist")` -- un dossier qu'il a le droit de LIRE et qui
+/// existe toujours :
+///
+/// ```text
+/// [SECURITY-DENY] pid=16 op=fs-create path=/persist reason=outside-sandbox
+/// Unable to create disk cache: mkdir: Permission denied (errno=13)
+/// ```
+///
+/// Le cache HTTP sur disque n'a donc jamais ete cree (smoke 35b64893).
+///
+/// La reponse `EEXIST` n'est rendue que si le chemin est VISIBLE de
+/// l'appelant (lecture permise par son profil) : un rendu confine qui sonde
+/// `/persist/Downloads` recoit toujours `EACCES`, et `mkdir` ne devient pas
+/// un oracle d'existence pour ce qu'il ne peut pas lire.
+pub fn existence_visible(security: Snapshot, dirfd: i32, raw_path: &str) -> bool {
+    let Some(canonical) = canonical_at(dirfd, raw_path) else {
+        return false;
+    };
+    if !sandbox_path_allowed(security, canonical.as_str(), false) {
+        return false;
+    }
+    ramfs::fs().resolve(canonical.as_str(), 0).is_some()
+}
+
 pub fn node_access_allowed(
     security: Snapshot,
     node: usize,

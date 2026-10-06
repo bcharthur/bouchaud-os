@@ -6,7 +6,9 @@
 #
 # Le premier demarrage depose temoins, reglages, un cache `CACHEDIR.TAG` de
 # 2100 fichiers (plus que les 2048 entrees de la zone) et un petit cache, puis
-# `fsync`. Le second relit : le non-jetable doit etre intact, le gros cache
+# `fsync`. Avant elle, une sonde confinee sous le role reseau verifie que
+# `mkdir` d'un ancetre existant et visible rend EEXIST (LibCore en depend pour
+# creer le cache). Le second relit : le non-jetable doit etre intact, le gros cache
 # ecarte en entier, le petit conserve. Refabriquer l'image entre les deux
 # effacerait ce qu'on verifie : la sonde reconnait seule son passage.
 set -euo pipefail
@@ -21,7 +23,13 @@ rm -rf "tools/userland/$OUT"
 (cd tools/userland && OUT=$OUT ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp "tools/userland/$OUT/cache-persist-probe" "$SCENARIO/bin/"
+# BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1 : la meme sonde, copiee sous le nom
+# `RequestServer`, recoit du noyau le role BrowserNetwork et tourne confinee.
+cp "tools/userland/$OUT/mkdir-visible-probe" "$SCENARIO/bin/"
+cp "tools/userland/$OUT/mkdir-visible-probe" "$SCENARIO/bin/RequestServer"
 cat > "$SCENARIO/autorun" <<'AUTORUN'
+/bin/mkdir-visible-probe prepare
+/bin/RequestServer
 /bin/cache-persist-probe
 echo PERSIST_CACHE_FIN
 AUTORUN
@@ -48,7 +56,7 @@ demarre() { # demarre <journal>
 
 # Le journal serie prefixe chaque ligne d'un horodatage colore.
 lignes() { sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$1" \
-  | grep -aE '^cache-persist-probe|^  |CACHE_PERSIST|BOUCHAUD_PERSIST|persistance:' || true; }
+  | grep -aE '^cache-persist-probe|^mkdir-visible-probe|^  |CACHE_PERSIST|MKDIR_VISIBLE|BOUCHAUD_PERSIST|persistance:|SECURITY-DENY.*(fs-create|fs-at-create)' || true; }
 echo "== demarrage 1 =="
 demarre serie-persist-cache-1.log
 lignes serie-persist-cache-1.log
@@ -56,6 +64,7 @@ echo "== demarrage 2 =="
 demarre serie-persist-cache-2.log
 lignes serie-persist-cache-2.log
 
+grep -aq MKDIR_VISIBLE_OK serie-persist-cache-1.log || { echo "mkdir confine : ordre EEXIST/EACCES faux" >&2; exit 1; }
 grep -aq CACHE_PERSIST_PASSAGE1_OK serie-persist-cache-1.log || { echo "passage 1 en echec" >&2; exit 1; }
 grep -aq 'BOUCHAUD_PERSIST_CACHE_ECARTE arbres=1 fichiers=2101' serie-persist-cache-1.log \
   || { echo "le noyau n'a pas annonce l'ecart du gros cache" >&2; exit 1; }
