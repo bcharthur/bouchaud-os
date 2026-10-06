@@ -17,6 +17,10 @@
  *                                 lui donne le role BrowserNetwork
  *                                 (`security/profile.rs`), confine.
  *
+ * BOUCHAUD_FCHOWN_SANS_EFFET_V1 : la meme sonde confinee verifie aussi qu'un
+ * `fchown` qui ne change rien (ce que SQLite fait sur ses `-wal`/`-shm` quand
+ * euid=0) reussit pour le proprietaire, et qu'un vrai changement reste refuse.
+ *
  * Sortie : `MKDIR_VISIBLE_OK` ou `MKDIR_VISIBLE_ECHEC n=...`.
  */
 #define _GNU_SOURCE
@@ -90,6 +94,29 @@ int main(int argc, char **argv)
     struct stat etat;
     verifie("le dossier du cache existe", stat("/persist/ladybird/cache/Ladybird/Profiles/default/Cache", &etat) == 0
         && S_ISDIR(etat.st_mode), errno);
+
+    /* fchown : sans effet -> accepte ; vrai changement -> EPERM. */
+    int fd = open("/persist/ladybird/cache/Ladybird/Profiles/default/Cache/index.db-wal",
+        O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    verifie("un fichier -wal se cree dans le profil", fd >= 0, errno);
+    if (fd >= 0) {
+        struct stat f;
+        fstat(fd, &f);
+        errno = 0;
+        int a = fchown(fd, (uid_t)-1, (gid_t)-1);
+        verifie("fchown(fd, -1, -1) sans effet : accepte", a == 0, errno);
+        errno = 0;
+        int b = fchown(fd, f.st_uid, f.st_gid);
+        verifie("fchown(fd, uid, gid actuels) sans effet : accepte", b == 0, errno);
+        errno = 0;
+        int c = fchown(fd, f.st_uid + 1000, (gid_t)-1);
+        int ec = errno;
+        verifie("fchown vers un autre proprietaire : EPERM", c != 0 && ec == EPERM, ec);
+        struct stat apres;
+        fstat(fd, &apres);
+        verifie("le proprietaire n'a pas change", apres.st_uid == f.st_uid && apres.st_gid == f.st_gid, 0);
+        close(fd);
+    }
 
     r = essaie("/persist/Downloads/x", &e);
     verifie("mkdir(/persist/Downloads/x), existant mais INVISIBLE : EACCES", r != 0 && e == EACCES, e);

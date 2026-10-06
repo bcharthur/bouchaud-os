@@ -1,0 +1,23 @@
+# noyau AVANT : 4bb3a01d, sonde mkdir-visible-probe confinee (role BrowserNetwork)
+== demarrage 1 ==
+[kernel] persistance: zone vierge
+mkdir-visible-probe prepare : /persist/Downloads/x r=0 errno=0
+mkdir-visible-probe : argv0=/bin/RequestServer no_new_privs=1
+  la sonde tourne confinee (no_new_privs=1)                    ok (errno=0)
+  mkdir(/persist), visible et existant : EEXIST                ok (errno=17)
+  ensure_directory(cache du profil) reussit                    ok (errno=0)
+  le dossier du cache existe                                   ok (errno=0)
+  un fichier -wal se cree dans le profil                       ok (errno=0)
+  fchown(fd, -1, -1) sans effet : accepte                      ECHEC (errno=1)
+  fchown(fd, uid, gid actuels) sans effet : accepte            ECHEC (errno=1)
+  fchown vers un autre proprietaire : EPERM                    ok (errno=1)
+  le proprietaire n'a pas change                               ok (errno=0)
+[kernel] [SECURITY-DENY] seq=4 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/x reason=outside-sandbox
+  mkdir(/persist/Downloads/x), existant mais INVISIBLE : EACCES ok (errno=13)
+[kernel] [SECURITY-DENY] seq=5 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/Downloads/neuf reason=outside-sandbox
+  mkdir(/persist/Downloads/neuf), absent et interdit : EACCES  ok (errno=13)
+[kernel] [SECURITY-DENY] seq=6 pid=15 uid=0 op=fs-create detail=0x1 path=/dossier-neuf-a-la-racine reason=outside-sandbox
+  mkdir(/dossier-neuf-a-la-racine) : EACCES                    ok (errno=13)
+[kernel] [SECURITY-DENY] seq=7 pid=15 uid=0 op=fs-create detail=0x1 path=/persist/ladybird-chrome reason=outside-sandbox
+  mkdir(/persist/ladybird-chrome) : EACCES (pas au role reseau) ok (errno=13)
+MKDIR_VISIBLE_ECHEC n=2

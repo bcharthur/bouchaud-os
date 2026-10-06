@@ -433,6 +433,40 @@ pub fn reference_allowed(
     }
 }
 
+/// `fchown` qui ne change RIEN : le proprietaire du fichier le « remet » a
+/// son proprietaire et a son groupe actuels (ou -1, « inchange »).
+///
+/// BOUCHAUD_FCHOWN_SANS_EFFET_V1
+///
+/// SQLite le fait sur chaque `-wal`, `-shm` et journal qu'il ouvre quand
+/// `geteuid() == 0` -- c'est le cas de tout processus Bouchaud -- pour que ces
+/// fichiers aient le proprietaire de la base (`robustFchown`). Le noyau
+/// refusait tout `fchown` sans FS_ADMIN : trois `[SECURITY-DENY] op=fs-fchown`
+/// par base ouverte, pour le navigateur (historique, reglages) et pour
+/// RequestServer (index du cache), dans chaque smoke. Linux accepte ce cas
+/// pour le proprietaire sans CAP_CHOWN ; il ne donne rien a personne.
+pub fn fchown_sans_effet(security: Snapshot, fd: i32, uid: u32, gid: u32) -> bool {
+    let process = task::current_process();
+    let kind = {
+        let files = process.files.lock();
+        let Some(desc) = files.get(fd) else {
+            return false;
+        };
+        desc.kind.clone()
+    };
+    let (FdKind::File(node) | FdKind::Dir(node)) = kind else {
+        return false;
+    };
+    let fs = ramfs::fs();
+    if node >= fs.nodes.len() || !fs.nodes[node].used {
+        return false;
+    }
+    let (proprietaire, groupe) = (fs.nodes[node].uid as u32, fs.nodes[node].gid as u32);
+    security.credentials.euid == proprietaire
+        && (uid == u32::MAX || uid == proprietaire)
+        && (gid == u32::MAX || gid == groupe)
+}
+
 pub fn fd_metadata_change_allowed(
     security: Snapshot,
     fd: i32,

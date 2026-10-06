@@ -421,6 +421,12 @@ pub fn gate(number: u64, args: [u64; 6], native: bool) -> GateDecision {
             filesystem::AT_FDCWD, args[0], filesystem::Mutation::Chown, "fs-chown"
         ),
         FCHMOD => check_fd_metadata(args[0] as i32, false, "fs-fchmod"),
+        // BOUCHAUD_FCHOWN_SANS_EFFET_V1 : un `fchown` qui ne change rien est
+        // accepte pour le proprietaire, comme sous Linux (SQLite en emet un par
+        // fichier `-wal`/`-shm`). Tout vrai changement reste soumis a FS_ADMIN.
+        FCHOWN if filesystem::fchown_sans_effet(
+            policy::current(), args[0] as i32, args[1] as u32, args[2] as u32,
+        ) => GateDecision::Return(0),
         FCHOWN => check_fd_metadata(args[0] as i32, true, "fs-fchown"),
 
         RENAME => {
