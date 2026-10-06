@@ -300,11 +300,15 @@ jobs:
           path: image
       - name: Sondes ABI/FS/disque
         run: tools/ci/run_os_primitives.sh image/bootimage-bouchaud-os.bin
+      - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
+        run: tools/ci/run_persist_cache.sh image/bootimage-bouchaud-os.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-os-primitives
-          path: serie-primitives.log
+          path: |
+            serie-primitives.log
+            serie-persist-cache-*.log
           if-no-files-found: warn
 
   comptabilite-cpu:

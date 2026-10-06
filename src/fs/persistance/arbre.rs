@@ -35,4 +35,7 @@ struct Entree {
     chemin: String,
     noeud: usize,
     longueur: usize,
+    /// L'arbre `CACHEDIR.TAG` qui le contient : jetable si `/persist` ne tient
+    /// plus (`fs/cache_jetable.rs`).
+    groupe: Option<u32>,
 }

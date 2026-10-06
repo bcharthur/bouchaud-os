@@ -10,6 +10,7 @@
 pub mod backing;
 pub mod backing_attrib;
 pub mod fat32;
+pub mod cache_jetable;
 pub mod gpt;
 pub mod persistance;
 pub mod ramfs;

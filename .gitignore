@@ -192,6 +192,9 @@ tools/ladybird/certs/cacert.pem
 # run_os_primitives.sh
 /primitives.img
 /scenario-primitives/
+/persist-cache.img
+/scenario-persist-cache/
+tools/userland/out-persist-cache/
 # run_usb_arbre.sh
 /usb-arbre.img
 /usb-arbre-scenario/

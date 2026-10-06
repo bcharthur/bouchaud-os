@@ -3236,21 +3236,44 @@ fn write_itimerspec(addr: u64, interval_ticks: u64, value_ticks: u64) {
 /// **est** la memoire libre. C'est ce que rend cette implementation, avec le
 /// nombre reel de frames disponibles et le nombre reel de nœuds RAMFS encore
 /// alloues. Aucune de ces valeurs n'est inventee.
-fn statfs_bytes() -> [u8; 120] {
+///
+/// ## Sous `/persist`, la borne est la ZONE
+///
+/// BOUCHAUD_PERSIST_CACHE_JETABLE_V1. Un chemin persistant n'a pas la memoire
+/// vive pour limite : ce qui ne tient pas dans la zone du disque n'y sera
+/// jamais ecrit. Annoncer la memoire libre (des gigaoctets) pour
+/// `/persist/ladybird/cache` faisait dimensionner le cache HTTP a plusieurs
+/// centaines de mebioctets, pour une zone qui en porte 64. `zone` porte donc
+/// `(secteurs_utilises, secteurs_max, fichiers, fichiers_max)` quand une zone
+/// existe : la taille et l'espace libre sont ceux de la zone, bornes par la
+/// memoire libre (le contenu vit aussi en RAM), et les inodes sont les
+/// entrees de sa table.
+fn statfs_bytes(zone: Option<(u64, u64, usize, usize)>) -> [u8; 120] {
     const BLOC: u64 = 4096;
     let (_, frames_libres, frames_totales) = crate::kernel::vmm::frame_stats();
+    let (mut frames_totales, mut frames_libres) = (frames_totales as u64, frames_libres as u64);
     let fs = crate::fs::ramfs::fs();
-    let nœuds_utilises = fs.used_nodes() as u64;
-    let nœuds_totaux = crate::fs::ramfs::MAX_NODES as u64;
+    let mut nœuds_utilises = fs.used_nodes() as u64;
+    let mut nœuds_totaux = crate::fs::ramfs::MAX_NODES as u64;
+    drop(fs);
+    if let Some((utilises, max, fichiers, fichiers_max)) = zone {
+        const SECTEUR: u64 = 512;
+        let blocs_zone = max * SECTEUR / BLOC;
+        let libres_zone = max.saturating_sub(utilises) * SECTEUR / BLOC;
+        frames_totales = blocs_zone;
+        frames_libres = libres_zone.min(frames_libres);
+        nœuds_totaux = fichiers_max as u64;
+        nœuds_utilises = (fichiers as u64).min(nœuds_totaux);
+    }
 
     let mut buffer = [0u8; 120];
     // f_type : `RAMFS_MAGIC`, la valeur que Linux rend pour un tmpfs/ramfs.
     // Certains programmes s'en servent pour savoir qu'un chemin est volatil.
     buffer[0..8].copy_from_slice(&0x8584_58f6u64.to_le_bytes()); // f_type
     buffer[8..16].copy_from_slice(&BLOC.to_le_bytes()); // f_bsize
-    buffer[16..24].copy_from_slice(&(frames_totales as u64).to_le_bytes()); // f_blocks
-    buffer[24..32].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bfree
-    buffer[32..40].copy_from_slice(&(frames_libres as u64).to_le_bytes()); // f_bavail
+    buffer[16..24].copy_from_slice(&frames_totales.to_le_bytes()); // f_blocks
+    buffer[24..32].copy_from_slice(&frames_libres.to_le_bytes()); // f_bfree
+    buffer[32..40].copy_from_slice(&frames_libres.to_le_bytes()); // f_bavail
     buffer[40..48].copy_from_slice(&nœuds_totaux.to_le_bytes()); // f_files
     buffer[48..56].copy_from_slice(&(nœuds_totaux - nœuds_utilises).to_le_bytes()); // f_ffree
     // `f_fsid` ne fait que **huit** octets (deux entiers 32 bits), pas seize :
@@ -3278,7 +3301,14 @@ pub fn sys_statfs(path_addr: u64, out: u64) -> i64 {
     if resolve(&path).is_none() && device_for_path(&path).is_none() {
         return -errno::ENOENT;
     }
-    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
+    let zone = if sous_persist(&path) { crate::fs::persistance::occupation() } else { None };
+    if user_write(out, &statfs_bytes(zone)) { 0 } else { -errno::EFAULT }
+}
+
+/// `/persist` lui-meme, ou un chemin dessous.
+fn sous_persist(path: &str) -> bool {
+    let racine = crate::fs::persistance::RACINE;
+    path == racine || (path.starts_with(racine) && path.as_bytes().get(racine.len()) == Some(&b'/'))
 }
 
 /// `fstatfs(fd, buf)`.
@@ -3287,5 +3317,8 @@ pub fn sys_fstatfs(fd: i32, out: u64) -> i64 {
     if process.files.lock().get(fd).is_none() {
         return -errno::EBADF;
     }
-    if user_write(out, &statfs_bytes()) { 0 } else { -errno::EFAULT }
+    // Le chemin d'un descripteur n'est pas suivi ici : la memoire vive est la
+    // reponse vraie pour tout ce qui n'est pas sous `/persist`, et Ladybird
+    // n'interroge l'espace libre que par chemin (`statvfs`).
+    if user_write(out, &statfs_bytes(None)) { 0 } else { -errno::EFAULT }
 }

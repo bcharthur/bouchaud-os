@@ -13,8 +13,27 @@ fn rassemble() -> Vec<Entree> {
     };
 
     let mut entrees = Vec::new();
-    collecte_sous_garde(&systeme, racine, &String::new(), &mut entrees);
+    let mut groupes = 0u32;
+    collecte_sous_garde(&systeme, racine, &String::new(), None, &mut groupes, &mut entrees);
     entrees
+}
+
+/// Le dossier porte-t-il une etiquette `CACHEDIR.TAG` valide ?
+///
+/// BOUCHAUD_PERSIST_CACHE_JETABLE_V1 : voir `fs/cache_jetable.rs`. Lu sous le
+/// garde deja tenu par l'appelant, comme le reste de la collecte.
+fn porte_une_etiquette(systeme: &crate::fs::ramfs::FileSystem, dossier: usize) -> bool {
+    match systeme.find_child(dossier, crate::fs::cache_jetable::NOM_ETIQUETTE) {
+        Some(index) => {
+            let noeud = &systeme.nodes[index];
+            noeud.kind == NodeKind::File
+                && crate::fs::cache_jetable::est_etiquette(
+                    noeud.name_str(),
+                    &noeud.content[..noeud.content_len()],
+                )
+        }
+        None => false,
+    }
 }
 
 /// Parcours recursif d'un instantane coherent du RAMFS.
@@ -26,6 +45,8 @@ fn collecte_sous_garde(
     systeme: &crate::fs::ramfs::FileSystem,
     dossier: usize,
     prefixe: &str,
+    groupe: Option<u32>,
+    groupes: &mut u32,
     entrees: &mut Vec<Entree>,
 ) {
     // Relever d'abord les indices permet de ne conserver aucune reference vers
@@ -50,7 +71,18 @@ fn collecte_sous_garde(
 
         match systeme.nodes[index].kind {
             NodeKind::Dir => {
-                collecte_sous_garde(systeme, index, &chemin, entrees);
+                // Un arbre etiquete devient un groupe jetable ; le plus externe
+                // l'emporte, pour qu'un cache dans un cache s'ecarte d'un bloc.
+                let groupe = match groupe {
+                    Some(g) => Some(g),
+                    None if porte_une_etiquette(systeme, index) => {
+                        let g = *groupes;
+                        *groupes += 1;
+                        Some(g)
+                    }
+                    None => None,
+                };
+                collecte_sous_garde(systeme, index, &chemin, groupe, groupes, entrees);
             }
             NodeKind::File => {
                 let longueur = systeme.nodes[index].content_len();
@@ -65,6 +97,7 @@ fn collecte_sous_garde(
                     chemin,
                     noeud: index,
                     longueur,
+                    groupe,
                 });
             }
         }

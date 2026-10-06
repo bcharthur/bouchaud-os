@@ -1,0 +1,40 @@
+# noyau AVANT : 35b64893 (HEAD), tools/ci/run_persist_cache.sh
+== demarrage 1 ==
+[kernel] persistance: zone vierge
+cache-persist-probe : passage 1 -- depot
+  statfs /persist total=1001021440 libre=1000902656 fichiers=4096 libres=4017 ; /tmp total=1001021440
+  statfs(/persist) et statfs(/tmp) reussissent                   ok
+  /persist annonce la zone : 32 Mio < total <= 64 Mio            ECHEC
+  /persist annonce moins que la RAM                              ECHEC
+  /persist annonce les 2048 entrees de la table                  ECHEC
+  l'espace libre de la zone ne depasse pas son total             ok
+  la base de temoins s'ecrit                                     ok
+  les reglages s'ecrivent                                        ok
+  le gros cache est etiquete                                     ok
+  le petit cache est etiquete                                    ok
+  gros cache : 2100/2100 fichiers
+  le gros cache depasse a lui seul les 2048 entrees              ok
+  fsync(temoins) = -1 errno=5
+  fsync reussit malgre le cache qui deborde (pas d'EIO)          ECHEC
+CACHE_PERSIST_ECHEC passage=1 n=4
+[kernel] persistance: ECHEC de l'ecriture a l'extinction, /persist n'est pas a jour
+== demarrage 2 ==
+[kernel] persistance: zone vierge
+cache-persist-probe : passage 1 -- depot
+  statfs /persist total=1001021440 libre=1000902656 fichiers=4096 libres=4017 ; /tmp total=1001021440
+  statfs(/persist) et statfs(/tmp) reussissent                   ok
+  /persist annonce la zone : 32 Mio < total <= 64 Mio            ECHEC
+  /persist annonce moins que la RAM                              ECHEC
+  /persist annonce les 2048 entrees de la table                  ECHEC
+  l'espace libre de la zone ne depasse pas son total             ok
+  la base de temoins s'ecrit                                     ok
+  les reglages s'ecrivent                                        ok
+  le gros cache est etiquete                                     ok
+  le petit cache est etiquete                                    ok
+  gros cache : 2100/2100 fichiers
+  le gros cache depasse a lui seul les 2048 entrees              ok
+  fsync(temoins) = -1 errno=5
+  fsync reussit malgre le cache qui deborde (pas d'EIO)          ECHEC
+CACHE_PERSIST_ECHEC passage=1 n=4
+[kernel] persistance: ECHEC de l'ecriture a l'extinction, /persist n'est pas a jour
+passage 1 en echec

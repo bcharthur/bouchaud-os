@@ -1,0 +1,34 @@
+# noyau APRES : HEAD + cache jetable + statfs zone (arbre de travail), tools/ci/run_persist_cache.sh
+== demarrage 1 ==
+[kernel] persistance: zone vierge
+cache-persist-probe : passage 1 -- depot
+  statfs /persist total=66580480 libre=66580480 fichiers=2048 libres=2048 ; /tmp total=1001017344
+  statfs(/persist) et statfs(/tmp) reussissent                   ok
+  /persist annonce la zone : 32 Mio < total <= 64 Mio            ok
+  /persist annonce moins que la RAM                              ok
+  /persist annonce les 2048 entrees de la table                  ok
+  l'espace libre de la zone ne depasse pas son total             ok
+  la base de temoins s'ecrit                                     ok
+  les reglages s'ecrivent                                        ok
+  le gros cache est etiquete                                     ok
+  le petit cache est etiquete                                    ok
+  gros cache : 2100/2100 fichiers
+  le gros cache depasse a lui seul les 2048 entrees              ok
+BOUCHAUD_PERSIST_CACHE_ECARTE arbres=1 fichiers=2101 octets=57742 total_fichiers=2107 fois=1
+  fsync(temoins) = 0 errno=0
+  fsync reussit malgre le cache qui deborde (pas d'EIO)          ok
+CACHE_PERSIST_PASSAGE1_OK
+[kernel] persistance: 6 fichier(s) ecrit(s) a l'extinction
+== demarrage 2 ==
+[kernel] persistance: 6 fichier(s) restaure(s) depuis le disque
+cache-persist-probe : passage 2 -- relecture apres redemarrage
+  la base de temoins a survecu, intacte                          ok
+  les reglages ont survecu, intacts                              ok
+  gros cache apres redemarrage : -1 fichier(s), etiquette=0
+  le gros cache est ecarte EN ENTIER (aucun fichier isole)       ok
+  petit cache apres redemarrage : 4 entree(s)
+  le petit cache, qui tenait, est intact (3 + etiquette)         ok
+  et son contenu aussi                                           ok
+CACHE_PERSIST_OK
+[kernel] persistance: 6 fichier(s) ecrit(s) a l'extinction
+PERSIST_CACHE_OK
