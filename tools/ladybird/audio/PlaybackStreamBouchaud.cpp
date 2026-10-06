@@ -346,11 +346,17 @@ private:
                         m_pcm[i] = static_cast<i16>(v * 32767.0f);
                     }
                     if (ecrit_tout(ReadonlyBytes { m_pcm.data(), m_pcm.size() * sizeof(i16) })) {
+                        auto const seconde_avant = m_trames_ecrites / m_taux;
                         m_trames_ecrites += trames_rendues;
+                        // Une ligne par seconde de son ecrite, pas une par ecriture.
+                        if (m_trames_ecrites / m_taux != seconde_avant)
+                            warnln("[LB] DSP_WRITE trames={} jouees={} en_vol={} sous_alimentations={}",
+                                m_trames_ecrites, m_trames_jouees.load(), en_vol, m_sous_alimentations);
                         if (!m_premiere_ecriture_dite) {
                             m_premiere_ecriture_dite = true;
                             warnln("[LB:AUDIO] premiere_ecriture trames={} taux={} voies={} cible_trames={}",
                                 trames_rendues, m_taux, VOIES, m_trames_cibles);
+                            warnln("[LB] DSP_PLAYING trames={} cible_trames={}", trames_rendues, m_trames_cibles);
                         }
                     }
                 }
@@ -359,6 +365,7 @@ private:
                 if (m_state == StreamState::Playing && trames_rendues == 0 && en_vol == 0) {
                     m_state = StreamState::Underrun;
                     ++m_sous_alimentations;
+                    warnln("[LB] DSP_UNDERRUN count={} trames={} jouees={}", m_sous_alimentations, m_trames_ecrites, m_trames_jouees.load());
                 }
                 continue;
             }
@@ -424,6 +431,7 @@ ErrorOr<NonnullRefPtr<PlaybackStream>> PlaybackStreamBouchaud::create(OutputStat
     ferme_fd.disarm();
     auto state = make_ref_counted<State>(fd, static_cast<u32>(taux), initial_output_state, target_latency_ms, move(data_request_callback));
     warnln("[LB:AUDIO] /dev/dsp ouvert taux={} voies={} latence_ms={} pid={}", taux, voies, target_latency_ms, getpid());
+    warnln("[LB] DSP_OPEN_OK pid={} format=s16le rate={} channels={} latence_ms={}", getpid(), taux, voies, target_latency_ms);
     state->start();
     return adopt_ref<PlaybackStream>(*new PlaybackStreamBouchaud(move(state)));
 }
