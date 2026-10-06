@@ -38,6 +38,8 @@ jobs:
         run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
+        run: tools/ci/run_oss_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:

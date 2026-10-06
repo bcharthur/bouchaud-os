@@ -60,6 +60,7 @@ const CR_RESET: u8 = 0x02;
 
 // Bits de `PO_SR`.
 const SR_DCH: u16 = 0x01; // le moteur DMA s'est arrete
+const SR_CELV: u16 = 0x02; // l'index courant est le dernier valide
 
 /// Nombre de descripteurs de la liste. Le materiel en impose 32.
 const DESCRIPTEURS: usize = 32;
@@ -103,6 +104,12 @@ struct Ac97 {
     ecriture: usize,
     /// Nombre de tampons remplis et pas encore joues.
     en_vol: usize,
+    /// Trames (a 48 kHz) REELLEMENT deposees dans chaque descripteur.
+    ///
+    /// BOUCHAUD_AC97_HORLOGE_V1 : chaque descripteur est soumis avec SA
+    /// longueur, jamais complete par du silence. C'est ce qui permet a
+    /// `SNDCTL_DSP_GETODELAY` de dire le vrai.
+    reelles: [u16; DESCRIPTEURS],
     /// Le moteur DMA tourne-t-il ?
     en_lecture: bool,
     /// Format demande par le programme, converti a l'ecriture.
@@ -128,6 +135,7 @@ static ETAT: SleepMutex<Ac97> = SleepMutex::new(Ac97 {
     tampons_virt: core::ptr::null_mut(),
     ecriture: 0,
     en_vol: 0,
+    reelles: [0; DESCRIPTEURS],
     en_lecture: false,
     frequence: 48000,
     voies: 2,
@@ -303,22 +311,38 @@ pub fn libres() -> usize {
 /// Octets que le programme peut ecrire sans bloquer, dans **son** format.
 pub fn place_disponible() -> usize {
     let mut etat = ETAT.lock();
-    let par_tampon = ECHANTILLONS_PAR_TAMPON * etat.voies as usize * (etat.bits as usize / 8)
-        * etat.frequence as usize
-        / FREQUENCE_NATIVE as usize;
+    let par_tampon = etat.vers_octets_programme(ECHANTILLONS_PAR_TAMPON);
     unsafe { etat.libres() * par_tampon.max(1) }
+}
+
+/// Taille d'un fragment (un descripteur plein), dans le format du programme :
+/// `SNDCTL_DSP_GETBLKSIZE` et `GETOSPACE.fragsize` annoncent la meme.
+pub fn octets_par_fragment() -> usize {
+    let etat = ETAT.lock();
+    etat.vers_octets_programme(ECHANTILLONS_PAR_TAMPON).max(1)
 }
 
 /// Octets encore en vol, dans le format du programme (`SNDCTL_DSP_GETODELAY`).
 ///
-/// Le nombre de tampons et le format sont lus sous la meme prise : sinon un
-/// changement de format entre les deux lectures rendrait un delai faux.
+/// BOUCHAUD_AC97_HORLOGE_V1 : le delai se calcule sur ce que le materiel a
+/// REELLEMENT encore a jouer -- les trames deposees dans chaque descripteur,
+/// moins ce qui est deja joue du descripteur courant (`PICB`) -- et APRES
+/// avoir relu sa position. Avant, ce chiffre ne relisait rien : un lecteur qui
+/// n'ecrit que lorsque le delai passe sous sa cible (Ladybird) attendait un
+/// delai qui ne pouvait plus baisser, et son horloge restait a zero.
 pub fn octets_en_vol() -> usize {
-    let etat = ETAT.lock();
-    let par_tampon = 2048 * etat.voies as usize * (etat.bits as usize / 8)
-        * etat.frequence as usize
-        / FREQUENCE_NATIVE as usize;
-    etat.en_vol * par_tampon
+    let mut etat = ETAT.lock();
+    let trames = unsafe { etat.trames_en_vol() };
+    etat.vers_octets_programme(trames)
+}
+
+/// `true` quand tout ce qui a ete ecrit a ete joue (`SNDCTL_DSP_SYNC`).
+pub fn vide() -> bool {
+    let mut etat = ETAT.lock();
+    unsafe {
+        etat.recolte();
+    }
+    etat.en_vol == 0
 }
 
 /// Ecrit du PCM dans le format configure. Rend le nombre d'octets consommes.
@@ -332,6 +356,36 @@ pub fn ecrit(donnees: &[u8]) -> usize {
 }
 
 impl Ac97 {
+    /// Trames natives (48 kHz stereo 16 bits) -> octets du programme.
+    fn vers_octets_programme(&self, trames_natives: usize) -> usize {
+        trames_natives * self.voies as usize * (self.bits as usize / 8) * self.frequence as usize
+            / FREQUENCE_NATIVE as usize
+    }
+
+    /// Trames natives que le materiel doit encore jouer.
+    unsafe fn trames_en_vol(&mut self) -> usize {
+        self.recolte();
+        if !self.pret || self.en_vol == 0 {
+            return 0;
+        }
+        // Les descripteurs en vol, du plus ancien -- celui que le materiel joue
+        // -- au plus recent.
+        let premier = self.ecriture.wrapping_sub(self.en_vol) % DESCRIPTEURS;
+        let mut total = 0usize;
+        for k in 0..self.en_vol {
+            total += self.reelles[(premier + k) % DESCRIPTEURS] as usize;
+        }
+        // Le descripteur courant est entame : `PICB` compte les echantillons
+        // de 16 bits qui lui restent.
+        let courant = inb(self.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
+        if courant == premier {
+            let restants = inw(self.nabm + NABM_PO_PICB) as usize / 2;
+            let deja = (self.reelles[premier] as usize).saturating_sub(restants);
+            total = total.saturating_sub(deja);
+        }
+        total
+    }
+
     unsafe fn libres(&mut self) -> usize {
         self.recolte();
         DESCRIPTEURS.saturating_sub(self.en_vol).saturating_sub(1)
@@ -404,17 +458,19 @@ impl Ac97 {
         if ecrites == 0 {
             return 0;
         }
-        // Un tampon partiel est complete par du silence : le materiel joue
-        // toujours le descripteur en entier, et laisser l'ancien contenu ferait
-        // entendre la fin du son precedent.
-        for reste in ecrites..ECHANTILLONS_PAR_TAMPON {
-            write_volatile(destination.add(reste * 2), 0);
-            write_volatile(destination.add(reste * 2 + 1), 0);
-        }
+        // BOUCHAUD_AC97_HORLOGE_V1 : le descripteur est soumis avec SA longueur
+        // (en echantillons de 16 bits). Il etait complete par du silence
+        // jusqu'a 2048 trames : un lecteur qui ecrit par petits morceaux
+        // entendait des trous, et le delai annonce depassait ce qu'il avait
+        // ecrit.
+        write_volatile(self.bdl_virt.add(index * 2 + 1), (ecrites * 2) as u32);
+        self.reelles[index] = ecrites as u16;
 
         self.ecriture = self.ecriture.wrapping_add(1);
         self.en_vol += 1;
-        // `LVI` designe le dernier descripteur que le materiel a le droit de jouer.
+        // `LVI` designe le dernier descripteur que le materiel a le droit de
+        // jouer. Moteur arrete sur l'ancien dernier (DCH) mais toujours en
+        // marche (RPBM) : ecrire LVI le relance sur ce descripteur.
         outb(self.nabm + NABM_PO_LVI, (index % DESCRIPTEURS) as u8);
         consommees * octets_par_trame
     }
@@ -460,30 +516,40 @@ impl Ac97 {
     /// son doit continuer meme si une IRQ est perdue, et l'index courant du
     /// materiel est de toute facon la source de verite.
     unsafe fn recolte(&mut self) {
-        if !self.pret || !self.en_lecture {
+        if !self.pret || !self.en_lecture || self.en_vol == 0 {
             return;
         }
+        let etat = inw(self.nabm + NABM_PO_SR);
         let courant = inb(self.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
         let ecriture = self.ecriture % DESCRIPTEURS;
-        // Distance entre la tete de lecture et la tete d'ecriture.
-        let occupes = if ecriture >= courant {
+        // BOUCHAUD_AC97_HORLOGE_V1 : le moteur s'arrete DE LUI-MEME apres le
+        // dernier descripteur valide (DCH + CELV), et `CIV` reste POINTE sur
+        // lui. La distance CIV -> ecriture vaut alors 1 alors que tout est
+        // joue : un descripteur restait compte en vol pour toujours, le delai
+        // ne revenait jamais a zero et `SYNC` ne pouvait pas finir.
+        let tout_joue = etat & SR_DCH != 0
+            && etat & SR_CELV != 0
+            && inw(self.nabm + NABM_PO_PICB) == 0
+            && (courant + 1) % DESCRIPTEURS == ecriture;
+        let occupes = if tout_joue {
+            0
+        } else if ecriture >= courant {
             ecriture - courant
         } else {
             DESCRIPTEURS - courant + ecriture
         };
         if occupes < self.en_vol {
-            self.echantillons_joues += ((self.en_vol - occupes) * ECHANTILLONS_PAR_TAMPON) as u64;
+            let premier = self.ecriture.wrapping_sub(self.en_vol) % DESCRIPTEURS;
+            for k in 0..(self.en_vol - occupes) {
+                let index = (premier + k) % DESCRIPTEURS;
+                self.echantillons_joues += self.reelles[index] as u64;
+                self.reelles[index] = 0;
+            }
             self.en_vol = occupes;
         }
-        // Plus rien a jouer : on arrete le moteur pour ne pas boucler sur du
-        // vieux contenu.
-        if self.en_vol == 0 {
-            let etat = inw(self.nabm + NABM_PO_SR);
-            if etat & SR_DCH != 0 {
-                outb(self.nabm + NABM_PO_CR, 0);
-                self.en_lecture = false;
-            }
-        }
+        // Le moteur reste en marche (RPBM) : arrete sur le dernier descripteur,
+        // la prochaine ecriture de LVI le relance. L'arreter ici obligeait a
+        // le redemarrer par CR, ce qui sur ICH reprend au descripteur COURANT.
     }
 }
 
@@ -498,9 +564,17 @@ pub fn position_echantillons() -> u64 {
         if !etat.pret {
             return 0;
         }
+        if etat.en_vol == 0 {
+            return etat.echantillons_joues;
+        }
+        let premier = etat.ecriture.wrapping_sub(etat.en_vol) % DESCRIPTEURS;
+        let courant = inb(etat.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
+        if courant != premier {
+            return etat.echantillons_joues;
+        }
         let restants = inw(etat.nabm + NABM_PO_PICB) as u64 / 2;
         etat.echantillons_joues
-            .saturating_add((ECHANTILLONS_PAR_TAMPON as u64).saturating_sub(restants))
+            .saturating_add((etat.reelles[premier] as u64).saturating_sub(restants))
     }
 }
 
@@ -523,6 +597,7 @@ pub fn arrete() {
         outb(etat.nabm + NABM_PO_LVI, 0);
         etat.ecriture = 0;
         etat.en_vol = 0;
+        etat.reelles = [0; DESCRIPTEURS];
         etat.en_lecture = false;
     }
 }

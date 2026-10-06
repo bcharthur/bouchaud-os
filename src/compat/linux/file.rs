@@ -2195,9 +2195,25 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                 return -errno::ENODEV;
             }
             match request {
-                SNDCTL_DSP_RESET | SNDCTL_DSP_SYNC | SNDCTL_DSP_POST => {
-                    if request == SNDCTL_DSP_RESET {
-                        crate::drivers::ac97::arrete();
+                SNDCTL_DSP_RESET => {
+                    crate::drivers::ac97::arrete();
+                    0
+                }
+                // Chaque ecriture est soumise au materiel tout de suite : il
+                // n'y a pas de fragment partiel a pousser.
+                SNDCTL_DSP_POST => 0,
+                SNDCTL_DSP_SYNC => {
+                    // BOUCHAUD_AC97_HORLOGE_V1 : SYNC rend quand tout ce qui
+                    // a ete ecrit est JOUE (il rendait aussitot). La file tient
+                    // au plus 31 x 2048 trames (~1,3 s) ; l'echeance de 3 s
+                    // n'est atteinte que si le materiel ne consomme plus.
+                    let echeance = crate::kernel::timer::ticks()
+                        + crate::kernel::timer::ms_to_ticks(3000);
+                    while !crate::drivers::ac97::vide() {
+                        if crate::kernel::timer::ticks() >= echeance {
+                            return -errno::EIO;
+                        }
+                        task::attends_un_tick();
                     }
                     0
                 }
@@ -2259,7 +2275,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                     0
                 }
                 SNDCTL_DSP_GETBLKSIZE => {
-                    if !user_write(arg, &4096u32.to_le_bytes()) {
+                    let fragment = crate::drivers::ac97::octets_par_fragment() as u32;
+                    if !user_write(arg, &fragment.to_le_bytes()) {
                         return -errno::EFAULT;
                     }
                     0
@@ -2272,7 +2289,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
                     let mut buffer = [0u8; 16];
                     buffer[0..4].copy_from_slice(&libres.to_le_bytes());
                     buffer[4..8].copy_from_slice(&32u32.to_le_bytes());
-                    buffer[8..12].copy_from_slice(&4096u32.to_le_bytes());
+                    let fragment = crate::drivers::ac97::octets_par_fragment() as u32;
+                    buffer[8..12].copy_from_slice(&fragment.to_le_bytes());
                     buffer[12..16].copy_from_slice(&octets.to_le_bytes());
                     if !user_write(arg, &buffer) {
                         return -errno::EFAULT;

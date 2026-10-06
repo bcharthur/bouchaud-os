@@ -225,3 +225,7 @@ tools/userland/out-persist-cache/
 
 # Secrets locaux de laboratoire - JAMAIS versionner
 /.env
+/oss-horloge.img
+/scenario-oss-horloge/
+tools/userland/out-oss-horloge/
+/serie-oss-horloge.log
