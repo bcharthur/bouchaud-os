@@ -847,6 +847,15 @@ struct State {
     /// de place : une page qui invalide hors fenetre n'a plus a reveiller le
     /// compositeur.
     u64 page_frames_sans_effet { 0 };
+    /// La derniere presentation de page, telle que le compositeur l'a recue :
+    /// le rectangle annonce par `FrameReady` (vide si rien n'a ete publie),
+    /// les pixels reellement reecrits dans la surface, et si la trame etait
+    /// complete. `[LB:FRAME]` les journalise a cote du degat du Compositor :
+    /// un `publie` toujours plein ecran pour un petit degat serait le
+    /// symptome d'un degat perdu en route (P3).
+    BouchaudDegat::Rect derniere_publication {};
+    u64 derniere_copie_px { 0 };
+    bool derniere_complete { false };
 
     // Rappels vers les vues du navigateur. Poses par `BouchaudUI::BrowserWindow`
     // (UI/Bouchaud) : chacun agit sur la `ViewImplementation` de l'onglet actif.
@@ -2440,6 +2449,9 @@ inline void dessine_calques(Canvas const& canvas, BouchaudDegat::Rect publie)
 inline bool compose_page(BouchaudDegat::Rect degat)
 {
     auto& s = state();
+    s.derniere_publication = {};
+    s.derniere_copie_px = 0;
+    s.derniere_complete = false;
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0) {
         warnln("[ladybird-bouchaud] M11_SURFACE_ENV_INVALID surface_fd={} gui_fd={} {}x{}",
             s.surface_fd, s.gui_fd, s.surface_width, s.surface_height);
@@ -2567,6 +2579,10 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     // barre d'outils si elle a ete repeinte, les calques. Un rectangle plus
     // petit laisserait le compositeur afficher l'ancien contenu.
     send_frame_ready({ publie.x, publie.y, publie.w, publie.h });
+    s.derniere_publication = publie;
+    s.derniere_copie_px = static_cast<u64>(painted)
+        + (plan.efface_necessaire ? static_cast<u64>(plan.efface.w) * static_cast<u64>(plan.efface.h) : 0);
+    s.derniere_complete = plan.complet;
 
     // Le temoin dit « la premiere trame de PAGE », pas « la premiere trame ».
     // Depuis qu'un `Configure` recompose immediatement, la toute premiere trame
@@ -2639,6 +2655,9 @@ inline bool present(u64 page_id, NonnullRefPtr<Gfx::Bitmap> bitmap, int largeur,
     if (page_id != page_active()) {
         if (auto* onglet = onglet_de_la_page(page_id); onglet != nullptr && image.valide())
             onglet->last_page = move(image);
+        s.derniere_publication = {};
+        s.derniere_copie_px = 0;
+        s.derniere_complete = false;
         return true;
     }
     if (s.frame_after_wheel_pending)

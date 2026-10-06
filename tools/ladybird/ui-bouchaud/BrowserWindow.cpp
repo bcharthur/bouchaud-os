@@ -164,17 +164,29 @@ void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bit
     // La presentation est commandee par le DEGAT : une page immobile n'en
     // produit pas. Le plafond n'est atteint que par une page animee, et il est
     // la pour qu'elle ne noie pas le journal serie.
+    //
+    // `degat` : ce que le Compositor a declare change (repere de la page).
+    // `vue` : la taille peinte. `publie` : le rectangle annonce au WM par
+    // `FrameReady` (repere de la surface, barre d'outils comprise ; vide si la
+    // trame n'a rien change a l'ecran). `copie_px` : les pixels reecrits.
     if (m_trames <= trames_journalisees || m_trames % 64 == 0) {
-        warnln("[LB:FRAME] onglet={} seq={} t={} degat={},{} {}x{} zone={}x{} present_us={}",
+        auto const& c = BouchaudChrome::state();
+        auto const& p = c.derniere_publication;
+        warnln("[LB:FRAME] onglet={} seq={} t={} degat={},{} {}x{} vue={}x{} publie={},{} {}x{} copie_px={} complet={} present_us={}",
             vue.onglet(), m_trames, MonotonicTime::now().milliseconds(),
-            degat.x(), degat.y(), degat.width(), degat.height(), largeur, hauteur, duree_us);
+            degat.x(), degat.y(), degat.width(), degat.height(), largeur, hauteur,
+            p.x, p.y, p.w, p.h, c.derniere_copie_px, c.derniere_complete ? 1 : 0, duree_us);
     }
     publie_compteurs_si_du();
 }
 
 void BrowserWindow::publie_compteurs_si_du()
 {
-    if (m_trames - m_trames_publiees_au_releve < releve_toutes_les)
+    // Un releve a 16 et 64 trames, puis toutes les `releve_toutes_les` : une
+    // page de banc n'en produit que quelques dizaines, et un releve qui
+    // n'arrive qu'a la 256e ne serait jamais lu par le smoke.
+    bool const releve_precoce = m_trames == 16 || m_trames == 64;
+    if (!releve_precoce && m_trames - m_trames_publiees_au_releve < releve_toutes_les)
         return;
     m_trames_publiees_au_releve = m_trames;
 

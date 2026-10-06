@@ -88,10 +88,20 @@ Sûreté de la référence : la vue ne rend le tampon au Compositor
 `present()` remplace la référence avant toute réécriture. Un onglet inactif
 range sa trame sans la composer.
 
-Télémétrie : `BOUCHAUD_UI_FIRST_FRAME`, `[LB:FRAME] onglet= seq= t= degat= zone=
-present_us=` (4 096 premières puis 1/64), `[LB:PERF] trames= degat_px= zone_px=
-copie_px= trames_partielles= trames_completes= sans_effet= present_us_moy=
-present_us_pire=` toutes les 256 trames.
+Télémétrie : `BOUCHAUD_UI_FIRST_FRAME`, `[LB:FRAME] onglet= seq= t= degat=
+vue= publie= copie_px= complet= present_us=` (4 096 premières puis 1/64) --
+`degat` est ce que le Compositor a déclaré, `publie` le rectangle annoncé au WM
+par `FrameReady`, `copie_px` les pixels réécrits --, et `[LB:PERF] trames=
+degat_px= zone_px= copie_px= trames_partielles= trames_completes= sans_effet=
+present_us_moy= present_us_pire=` à 16 et 64 trames puis toutes les 256.
+
+Mesure (smoke QEMU `35b64893`, run 37478286837, 26 trames, page de banc
+1100×538) : 17 trames à dégât partiel (3×2 à 512×158) se présentent en
+2,9 ms médian (1,3 à 27,4 ms), 9 trames pleine page en 37 ms médian (8,4 à
+63,2 ms) ; la première trame
+Compositor arrive à T+25 s du lancement du smoke (`[LADYBIRD-DEMARRAGE]
+total_ms=7460`, dont `trame_ms=2565`). Le format `publie=` est postérieur à ce
+run : sa première mesure viendra du run suivant.
 
 ## 5. Bac à sable (P6)
 

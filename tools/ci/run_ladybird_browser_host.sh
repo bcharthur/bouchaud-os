@@ -136,6 +136,9 @@ JALONS=(
   '[LB:CACHE] disque=oui'
   '[LB:NAV] onglet=1 document_charge'
   'BOUCHAUD_UI_FIRST_FRAME onglet=1'
+  # P3 : le premier releve de presentation (degat du Compositor, pixels
+  # copies, trames partielles/completes) -- emis a la 16e trame.
+  '[LB:PERF] trames=16 '
   'HOST_CANVAS OK'
   'HOST_IMAGE OK 1x1'
   'HOST_IFRAME OK'
