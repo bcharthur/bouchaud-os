@@ -12,6 +12,7 @@ on:
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
       - 'tools/ci/ladybird_cache_fixture.py'
+      - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
@@ -45,6 +46,7 @@ on:
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
       - 'tools/ci/ladybird_cache_fixture.py'
+      - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
@@ -350,6 +352,12 @@ jobs:
         with:
           name: bouchaud-wpt-corpus
           path: wpt-corpus
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
       - name: WPT sur Bouchaud OS
         run: tools/ci/run_ladybird_wpt.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser wpt-corpus
       - name: Rapport et journaux
@@ -393,6 +401,12 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
       - name: Cache HTTP et SQLite apres redemarrage du navigateur
         run: tools/ci/run_ladybird_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -404,6 +418,23 @@ jobs:
             serie-cache.log
             temoin-cache.log
           if-no-files-found: warn
+
+  convergence:
+    # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
+    name: ladybird / verdict de convergence
+    needs: [build, browser-host-smoke, cache, wpt]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verdict
+        env:
+          R_BUILD: ${{ needs.build.result }}
+          R_SMOKE: ${{ needs.browser-host-smoke.result }}
+          R_CACHE: ${{ needs.cache.result }}
+          R_WPT: ${{ needs.wpt.result }}
+        run: python3 tools/ci/verdict_convergence.py
 
   browser-host-smoke:
     name: ladybird / browser-host smoke

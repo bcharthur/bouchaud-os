@@ -545,7 +545,9 @@ if [ "$ISOLATION_VERDICT" = "charge" ] && kill -0 "$PID" 2>/dev/null; then
   if [ "$LIEN_VERDICT" = "fin" ]; then
     LIEN_VERDICT=sans_trame_apres_reprise
     for _ in $(seq 1 20); do
-      if sed -n '/\[LB\] COMPOSITOR_LINK_RECOVERED/,$p' "$LOG" | grep -aq '\[LB:FRAME\] onglet='; then
+      # Compter plutot que `grep -q` : sous pipefail, un SIGPIPE de sed ferait
+      # passer une ligne TROUVEE pour un echec.
+      if [ "$(sed -n '/\[LB\] COMPOSITOR_LINK_RECOVERED/,$p' "$LOG" | grep -ac '\[LB:FRAME\] onglet=' || true)" -gt 0 ]; then
         LIEN_VERDICT=ok
         break
       fi

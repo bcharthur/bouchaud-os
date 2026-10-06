@@ -93,10 +93,13 @@ sleep 1
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 
-propre() { sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | tr -d '\r'; }
+# Nettoye UNE fois : sous `pipefail`, `sed | grep -q` echoue des que grep
+# ferme le tube avant la fin (SIGPIPE), meme quand la ligne est trouvee.
+sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | tr -d '\r' > "$LOG.propre"
+propre() { cat "$LOG.propre"; }
 echo "== invite =="
 propre | grep -aE 'CACHE_PASSAGE|CACHE_BANC_FIN|HOST_CACHE|HOST_SQL|\[LB\] (MISS|STORE|HIT|REVALIDATE|REVALIDATED|INVALIDATE|BROWSER_QUIT)|BROWSER_HOST_(EXIT|ARRET)|PERF_EXECVE .*RequestServer|KERNEL PANIC|VERIFICATION FAILED' \
-  | sed -E 's/^.*(\[LB\]|HOST_|CACHE_|BROWSER_HOST|PERF_EXECVE|KERNEL|VERIFICATION)/\1/' | head -80
+  | sed -E 's/^.*(\[LB\]|HOST_|CACHE_|BROWSER_HOST|PERF_EXECVE|KERNEL|VERIFICATION)/\1/' | head -80 || true
 echo "== temoin (serveur hote) =="
 cat "$TEMOIN"
 
@@ -105,11 +108,11 @@ exige() { # exige <description> <commande...>
   local quoi=$1; shift
   if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi
 }
-dans_invite() { propre | grep -aqE "$1"; }
+dans_invite() { grep -aqE "$1" "$LOG.propre"; }
 gets_stable=$(grep -c 'CACHE_FIXTURE GET /cache/stable.bin ' "$TEMOIN" || true)
 somme1=$(propre | grep -aoE 'HOST_CACHE passage=1 res=stable.bin statut=200 taille=65536 somme=[0-9]+' | grep -oE '[0-9]+$' | head -1 || true)
 somme2=$(propre | grep -aoE 'HOST_CACHE passage=2 res=stable.bin statut=200 taille=65536 somme=[0-9]+' | grep -oE '[0-9]+$' | head -1 || true)
-rs=$(propre | grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/RequestServer pid=[0-9]+' | grep -oE 'pid=[0-9]+$' | sort -u | wc -l)
+rs=$(propre | grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/RequestServer pid=[0-9]+' | grep -oE 'pid=[0-9]+$' | sort -u | wc -l || true)
 
 echo "== verdict =="
 exige "les deux navigateurs sont sortis" dans_invite 'CACHE_PASSAGE_2_SORTI'
