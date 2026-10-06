@@ -11,11 +11,12 @@ cd tools/userland/out-sondes
 ./wal-probe
 ./nom-long-probe
 ./sendfile-probe
+./renommage-probe
 cd ../../..
 
 SCENARIO=scenario-primitives
 mkdir -p "$SCENARIO/bin"
-for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe; do
+for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe; do
   cp "tools/userland/out-sondes/$f" "$SCENARIO/bin/"
 done
 python3 - <<'PY'
@@ -32,6 +33,7 @@ strace echecs
 /bin/disque-probe /bin/gros.bin
 /bin/nom-long-probe
 /bin/sendfile-probe
+/bin/renommage-probe
 /bin/session-probe 4
 echo SESSION_INVITE_REVENUE
 strace off
@@ -59,7 +61,7 @@ kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 tail -c 262144 "$LOG"
 
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK \
+for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK \
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done

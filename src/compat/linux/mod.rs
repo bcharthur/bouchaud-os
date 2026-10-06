@@ -497,6 +497,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         UNLINK => file::sys_unlink(args[0]),
         UNLINKAT => file::sys_unlinkat(args[0] as i32, args[1], args[2] as u32),
         RENAME => file::sys_rename(args[0], args[1]),
+        RENAMEAT => file::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0),
+        RENAMEAT2 => file::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], args[4] as u32),
         // Le RAMFS actuel fusionne entree de repertoire et inode : il ne peut
         // pas representer deux noms pointant vers le meme inode sans refonte
         // de son modele. Retourner succes ou copier le contenu serait un faux

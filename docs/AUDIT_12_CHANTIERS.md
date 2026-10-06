@@ -37,12 +37,12 @@ lui fait confiance.
 <!-- MESURE-CHANTIERS:DEBUT -->
 | Mesure | Valeur |
 |---|---|
-| Appels systeme aiguilles | **159** |
+| Appels systeme aiguilles | **161** |
 | Gros verrou noyau (smp_lock) | **supprime** |
 | Sites d'acquisition du gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **5** |
 | Garde-fous d'architecture | **130** |
-| Suites de test hote | **104** |
+| Suites de test hote | **105** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->

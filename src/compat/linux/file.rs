@@ -1963,34 +1963,132 @@ pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
 
 /// `rename`.
 pub fn sys_rename(from_addr: u64, to_addr: u64) -> i64 {
+    sys_renameat2(AT_FDCWD, from_addr, AT_FDCWD, to_addr, 0)
+}
+
+/// `renameat` / `renameat2`.
+///
+/// BOUCHAUD_RENOMMAGE_POSIX_V1 : la DECISION est `fs::renommage::decide`,
+/// pure et testee sur l'hote (`tools/fs/test_renommage.rs`) ; ici on resout,
+/// on decide et on applique sous UNE prise de `fs()` -- en deux prises, un
+/// `unlink` concurrent pouvait recycler un index entre la resolution et
+/// l'ecriture (BOUCHAUD_VFS_UNE_SEULE_PRISE_V1).
+///
+/// Le renommage d'avant rattachait la source sous le nom cible sans regarder
+/// la cible : une cible existante donnait DEUX entrees du meme nom, un dossier
+/// pouvait devenir son propre descendant.
+///
+/// Limite connue, partagee avec `unlink` : la cible remplacee est liberee tout
+/// de suite ; un descripteur encore ouvert sur elle ne la garde pas en vie.
+pub fn sys_renameat2(olddirfd: i32, from_addr: u64, newdirfd: i32, to_addr: u64, flags: u32) -> i64 {
+    use crate::fs::renommage::{self, Action, Demande, Genre, Noeud, Parent};
+
     let from = match crate::kernel::abi::resolve_user_path(from_addr) {
-        Some(path) => absolute(&path),
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
     let to = match crate::kernel::abi::resolve_user_path(to_addr) {
-        Some(path) => absolute(&path),
+        Some(path) => path,
         None => return -errno::EFAULT,
     };
-    // BOUCHAUD_VFS_UNE_SEULE_PRISE_V1 : la source est resolue sous la meme
-    // prise de `fs()` que la modification (voir `sys_unlinkat`). `cwd` est lu
-    // avant : ordre metadata -> Vfs, celui de `resolve`.
-    let cwd = task::current_process().metadata.lock().cwd;
-    let mut fs = ramfs::fs();
-    let node = match fs.resolve(&from, cwd) {
-        Some(node) if node != 0 && backing::is_disk_backed(node) => return -errno::EROFS,
-        Some(node) if node != 0 => node,
-        Some(_) => return -errno::EBUSY,
-        None => return -errno::ENOENT,
+    let from = match absolute_at(olddirfd, from.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
     };
-    let (parent, name) = match fs.resolve_parent_name(&to, cwd) {
-        Some(value) => value,
-        None => return -errno::ENOENT,
+    let to = match absolute_at(newdirfd, to.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
     };
-    fs.nodes[node].parent = parent;
-    if !fs.nodes[node].set_name(name) {
-        return -errno::ENAMETOOLONG;
+    for (chemin, genre, operation) in [
+        (from.as_str(), crate::kernel::security::filesystem::Mutation::RenameSource, "fs-rename-source-backend"),
+        (to.as_str(), crate::kernel::security::filesystem::Mutation::RenameTarget, "fs-rename-target-backend"),
+    ] {
+        if let Err(code) = security_recheck_mutation(chemin, genre, operation) {
+            return code;
+        }
     }
-    0
+
+    let mut fs = ramfs::fs();
+    let source = fs.resolve(&from, 0);
+    let (parent, nom) = match fs.resolve_parent_name(&to, 0) {
+        Some((parent, nom)) => (Some(parent), nom),
+        None => (None, ""),
+    };
+    let cible = parent.and_then(|p| if fs.nodes[p].kind == NodeKind::Dir { fs.find_child(p, nom) } else { None });
+    let decrit = |fs: &ramfs::FileSystem, i: usize| Noeud {
+        genre: if fs.nodes[i].kind == NodeKind::Dir { Genre::Dossier } else { Genre::Fichier },
+        racine: i == 0,
+        disque: backing::is_disk_backed(i),
+        vide: fs.nodes[i].kind != NodeKind::Dir || fs.is_empty_dir(i),
+    };
+    // `x` est-il `ancetre`, ou l'un de ses descendants ? Borne par la taille de
+    // la table : un arbre corrompu ne fait pas boucler le noyau.
+    let sous = |fs: &ramfs::FileSystem, mut x: usize, ancetre: usize| {
+        for _ in 0..=fs.nodes.len() {
+            if x == ancetre {
+                return true;
+            }
+            if x == 0 {
+                return false;
+            }
+            x = fs.nodes[x].parent;
+        }
+        true
+    };
+    let demande = Demande {
+        drapeaux: flags,
+        source: source.map(|s| decrit(&fs, s)),
+        parent_cible: match parent {
+            None => Parent::Absent,
+            Some(p) if fs.nodes[p].kind == NodeKind::Dir => Parent::Dossier,
+            Some(_) => Parent::PasUnDossier,
+        },
+        nom_cible: renommage::classe_nom(nom, ramfs::NAME_LEN),
+        cible: cible.map(|c| decrit(&fs, c)),
+        meme_noeud: source.is_some() && cible == source,
+        cible_sous_la_source: match (source, parent) {
+            (Some(s), Some(p)) => sous(&fs, p, s),
+            _ => false,
+        },
+        source_sous_la_cible: match (source, cible) {
+            (Some(s), Some(c)) => sous(&fs, fs.nodes[s].parent, c),
+            _ => false,
+        },
+    };
+    let action = match renommage::decide(&demande) {
+        Ok(action) => action,
+        Err(code) => return -code,
+    };
+    // Toutes les valeurs ci-dessous existent : `decide` ne rend une action
+    // qu'avec une source, un parent dossier et un nom valide.
+    let (Some(s), Some(p)) = (source, parent) else {
+        return -errno::EINVAL;
+    };
+    match action {
+        Action::Rien => 0,
+        Action::Deplacer | Action::Remplacer => {
+            if let (Action::Remplacer, Some(c)) = (action, cible) {
+                fs.nodes[c].used = false;
+                fs.nodes[c].content = Vec::new();
+            }
+            fs.nodes[s].parent = p;
+            if !fs.nodes[s].set_name(nom) {
+                return -errno::ENAMETOOLONG;
+            }
+            0
+        }
+        Action::Echanger => {
+            let Some(c) = cible else { return -errno::ENOENT };
+            let (parent_s, nom_s, long_s) = (fs.nodes[s].parent, fs.nodes[s].name, fs.nodes[s].name_len);
+            fs.nodes[s].parent = fs.nodes[c].parent;
+            fs.nodes[s].name = fs.nodes[c].name;
+            fs.nodes[s].name_len = fs.nodes[c].name_len;
+            fs.nodes[c].parent = parent_s;
+            fs.nodes[c].name = nom_s;
+            fs.nodes[c].name_len = long_s;
+            0
+        }
+    }
 }
 
 /// `ftruncate`.

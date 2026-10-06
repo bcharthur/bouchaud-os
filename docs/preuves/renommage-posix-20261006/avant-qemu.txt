@@ -1,0 +1,19 @@
+# Noyau 2fe45535 (avant BOUCHAUD_RENOMMAGE_POSIX_V1), meme sonde, meme banc
+# tools/ci/run_os_primitives.sh, QEMU TCG -smp 4 -m 4096. Lignes en ECHEC :
+  une seule entree rapport.pdf apres remplacement            ECHEC
+  le contenu est celui du remplacant                         ECHEC
+  fichier -> dossier : EISDIR                                ECHEC
+  dossier -> fichier : ENOTDIR                               ECHEC
+  dossier -> dossier non vide : ENOTEMPTY ou EEXIST          ECHEC
+  rename(p, p/q/p) : EINVAL                                  ECHEC
+  l'arbre p/q est intact                                     ECHEC
+  renameat(db, g, da, h) reussit                             ECHEC
+  a/h existe, b/g non                                        ECHEC
+  NOREPLACE sur cible existante : EEXIST                     ECHEC
+  NOREPLACE sur cible libre : reussit                        ECHEC
+  EXCHANGE reussit                                           ECHEC
+  les contenus sont echanges                                 ECHEC
+  EXCHANGE sans cible : ENOENT                               ECHEC
+  NOREPLACE|EXCHANGE : EINVAL                                ECHEC
+  drapeau inconnu : EINVAL                                   ECHEC
+RENOMMAGE_ECHEC n=16

@@ -1,0 +1,36 @@
+renommage : /tmp/renommage-EFolBB
+  rename(part, existant) reussit                             ok
+  une seule entree rapport.pdf apres remplacement            ok
+  rapport.pdf.part a disparu                                 ok
+  le contenu est celui du remplacant                         ok
+  rename(a/f, b/g) reussit                                   ok
+  b/g existe, a/f non                                        ok
+  rename(b/g, b/g) reussit sans rien changer                 ok
+[syscall-echec] 82 (rename) (0x400000409076, 0x4000004090b5, 0x0) = -21 (EISDIR)
+  fichier -> dossier : EISDIR                                ok
+[syscall-echec] 82 (rename) (0x4000004090b5, 0x400000409076, 0x0) = -20 (ENOTDIR)
+  dossier -> fichier : ENOTDIR                               ok
+[syscall-echec] 82 (rename) (0x4000004090b5, 0x4000004090a7, 0x0) = -39 (ENOTEMPTY)
+  dossier -> dossier non vide : ENOTEMPTY ou EEXIST          ok
+  dossier -> dossier vide : remplace                         ok
+[syscall-echec] 82 (rename) (0x400000409101, 0x4000004090fd, 0x0) = -22 (EINVAL)
+  rename(p, p/q/p) : EINVAL                                  ok
+  l'arbre p/q est intact                                     ok
+[syscall-echec] 82 (rename) (0x400000409134, 0x4000004090b3, 0x0) = -2 (ENOENT)
+  source absente : ENOENT                                    ok
+[syscall-echec] 82 (rename) (0x400000409076, 0x400000409153, 0x0) = -2 (ENOENT)
+  parent cible absent : ENOENT                               ok
+  renameat(db, g, da, h) reussit                             ok
+  a/h existe, b/g non                                        ok
+[syscall-echec] 316 (renameat2) (0x3, 0x40000040917b, 0x3) = -17 (EEXIST)
+  NOREPLACE sur cible existante : EEXIST                     ok
+  NOREPLACE sur cible libre : reussit                        ok
+  EXCHANGE reussit                                           ok
+  les contenus sont echanges                                 ok
+[syscall-echec] 316 (renameat2) (0x3, 0x40000040919a, 0x4) = -2 (ENOENT)
+  EXCHANGE sans cible : ENOENT                               ok
+[syscall-echec] 316 (renameat2) (0x3, 0x40000040919a, 0x4) = -22 (EINVAL)
+  NOREPLACE|EXCHANGE : EINVAL                                ok
+[syscall-echec] 316 (renameat2) (0x3, 0x40000040919a, 0x4) = -22 (EINVAL)
+  drapeau inconnu : EINVAL                                   ok
+RENOMMAGE_OK cas=24

@@ -123,6 +123,8 @@ pub const OPENAT: u64 = 257;
 pub const MKDIRAT: u64 = 258;
 pub const NEWFSTATAT: u64 = 262;
 pub const UNLINKAT: u64 = 263;
+pub const RENAMEAT: u64 = 264;
+pub const RENAMEAT2: u64 = 316;
 pub const READLINKAT: u64 = 267;
 pub const FACCESSAT: u64 = 269;
 pub const PSELECT6: u64 = 270;
@@ -267,6 +269,8 @@ pub fn name(number: u64) -> &'static str {
         OPENAT => "openat",
         NEWFSTATAT => "newfstatat",
         UNLINKAT => "unlinkat",
+        RENAMEAT => "renameat",
+        RENAMEAT2 => "renameat2",
         READLINKAT => "readlinkat",
         FACCESSAT => "faccessat",
         PPOLL => "ppoll",
@@ -363,7 +367,7 @@ _ => "?",
 pub fn print_implemented() {
     let groups: [(&str, &[u64]); 9] = [
         ("E/S", &[READ, WRITE, OPEN, OPENAT, CLOSE, LSEEK, READV, WRITEV, PREAD64, PWRITE64, DUP, DUP2, DUP3, PIPE, PIPE2, FCNTL, IOCTL, FTRUNCATE]),
-        ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME]),
+        ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME, RENAMEAT, RENAMEAT2]),
         ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2, TIMERFD_CREATE, TIMERFD_SETTIME, TIMERFD_GETTIME]),
         ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE, MSYNC]),
         ("taches", &[CLONE, CLONE3, FORK, VFORK, EXECVE, WAIT4, EXIT, EXIT_GROUP, GETPID, GETPPID, GETTID, SET_TID_ADDRESS, SCHED_YIELD, FUTEX, NANOSLEEP, CLOCK_NANOSLEEP, ARCH_PRCTL, PRCTL]),
