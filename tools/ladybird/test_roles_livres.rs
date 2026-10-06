@@ -33,10 +33,12 @@
 //!     `ends_with("/BrowserHost")` echoue sur `BouchaudBrowserHost` : le
 //!     caractere qui precede n'est pas une barre oblique mais un `d`.
 //!
-//!   * `Compositor` recoit le profil PRIVILEGIE de courtier et n'a aucun role
-//!     de supervision. C'est la combinaison la plus mauvaise des deux : il
-//!     peut lancer des processus, et sa mort ne se voit nulle part -- ni dans
-//!     Services, ni dans la politique de relance.
+//!   * `Compositor` recevait le profil PRIVILEGIE de courtier et n'avait aucun
+//!     role de supervision. C'etait la combinaison la plus mauvaise des deux :
+//!     il pouvait lancer des processus, et sa mort ne se voyait nulle part.
+//!     Il a maintenant le role `Composition` et, depuis BOUCHAUD_SANDBOX_V1,
+//!     le profil de RENDU confine (`BrowserContent`) : il rejoue des listes
+//!     d'affichage produites par le script des sites.
 //!
 //! # Ce que ce banc verifie
 //!
@@ -225,4 +227,12 @@ fn un_binaire_copie_dans_tmp_ne_devient_pas_courtier_par_son_nom() {
             image
         );
     }
+}
+
+#[test]
+fn le_compositor_est_supervise_et_confine_comme_un_rendu() {
+    // BOUCHAUD_SANDBOX_V1
+    let image = "/usr/libexec/ladybird/Compositor";
+    assert_eq!(Role::depuis_image(image), Some(Role::Composition));
+    assert_eq!(classify(image, 0), SecurityProfile::BrowserContent);
 }

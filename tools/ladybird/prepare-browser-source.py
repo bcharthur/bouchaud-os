@@ -4,7 +4,7 @@
 The pinned upstream tree remains untouched. This script only edits the disposable
 worktree passed as argv[1]. Changes are deliberately tiny and mechanical:
 - configure Services without adding the desktop UI;
-- select the unimplemented renderer sandbox for Bouchaud (M14 comes later);
+- select the Bouchaud renderer sandbox (kernel-applied, process-verified);
 - provide a deterministic x86_64 cache-line alignment when building AK with Clang;
 - force a portable x86-64 ISA instead of the CI host's -march=native.
 
@@ -74,12 +74,14 @@ replace_once(
     "#ifndef AK_SYSTEM_CACHE_ALIGNMENT_SIZE\n#    if defined(BOUCHAUD_PORT)\n#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE 64\n#    else\n#        define AK_SYSTEM_CACHE_ALIGNMENT_SIZE __GCC_DESTRUCTIVE_SIZE\n#    endif\n#endif",
 )
 
-# Sandbox: Bouchaud deliberately uses upstream's no-op implementation at M7/M8.
+# Sandbox: BOUCHAUD_SANDBOX_V1 -- the kernel confines WebContent (profile
+# BrowserContent) and RendererSandboxBouchaud.cpp verifies it, fail-closed
+# (copied by prepare-sandbox-bouchaud.py).
 svc = root / "Services/WebContent/CMakeLists.txt"
 replace_once(
     svc,
     "if (LINUX)\n    target_sources(WebContent PRIVATE ../RendererSandboxLinux.cpp)",
-    "if (BOUCHAUD_PORT)\n    target_sources(WebContent PRIVATE ../RendererSandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(WebContent PRIVATE ../RendererSandboxLinux.cpp)",
+    "if (BOUCHAUD_PORT)\n    target_sources(WebContent PRIVATE ../RendererSandboxBouchaud.cpp)\nelseif (LINUX)\n    target_sources(WebContent PRIVATE ../RendererSandboxLinux.cpp)",
 )
 
 print("Bouchaud browser adaptations applied to", root)

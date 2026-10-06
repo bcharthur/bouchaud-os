@@ -22,6 +22,7 @@ REQUIRED = {
     # navigateur (UI/Bouchaud), plus par WebContent.
     "ui": "BOUCHAUD_UI_V1_READY",
     "webcontent_sans_chrome": "BOUCHAUD_UI_WEBCONTENT_CHROME 0",
+    "sandbox_webcontent": "[LB:SANDBOX] service=WebContent role=rendu",
     "document": "[LB:NAV] onglet=1 document_charge",
     "frame": "BOUCHAUD_UI_FIRST_FRAME onglet=1",
     "codecs": "HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1",

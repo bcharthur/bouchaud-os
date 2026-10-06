@@ -12,8 +12,10 @@ It:
 - scopes -static-pie/duplicate-symbol tolerance to Bouchaud runtime services;
 - strips build/install RPATH from those static PIE executables: glibc's
   _dl_relocate_static_pie asserts that DT_RPATH/DT_RUNPATH are absent;
-- forces the no-op sandbox implementations for Bouchaud services instead of
-  selecting the Linux sandbox merely because CMake itself runs on Ubuntu;
+- selects the Bouchaud sandbox implementations (BOUCHAUD_SANDBOX_V1: the kernel
+  confines each service by profile, the service verifies it fail-closed;
+  sources copied by prepare-sandbox-bouchaud.py) instead of the Linux sandbox
+  that CMake would pick merely because it runs on Ubuntu;
 - leaves every build-time generator/tool with the native Ubuntu link policy;
 - pins LibWebView's resource:// root to /usr/share/ladybird on Bouchaud, matching
   the filesystem layout produced by the QEMU/runtime packaging instead of
@@ -151,7 +153,7 @@ request = root / "Services/RequestServer/CMakeLists.txt"
 replace_once(
     request,
     "if (LINUX)\n    list(APPEND SOURCES SandboxLinux.cpp)",
-    "if (BOUCHAUD_PORT)\n    list(APPEND SOURCES SandboxUnimplemented.cpp)\nelseif (LINUX)\n    list(APPEND SOURCES SandboxLinux.cpp)",
+    "if (BOUCHAUD_PORT)\n    list(APPEND SOURCES SandboxBouchaud.cpp)\nelseif (LINUX)\n    list(APPEND SOURCES SandboxLinux.cpp)",
 )
 append_runtime_link_options(request, "RequestServer")
 
@@ -160,7 +162,7 @@ image = root / "Services/ImageDecoder/CMakeLists.txt"
 replace_once(
     image,
     "if (LINUX)\n    target_sources(ImageDecoder PRIVATE SandboxLinux.cpp)",
-    "if (BOUCHAUD_PORT)\n    target_sources(ImageDecoder PRIVATE SandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(ImageDecoder PRIVATE SandboxLinux.cpp)",
+    "if (BOUCHAUD_PORT)\n    target_sources(ImageDecoder PRIVATE SandboxBouchaud.cpp)\nelseif (LINUX)\n    target_sources(ImageDecoder PRIVATE SandboxLinux.cpp)",
 )
 append_runtime_link_options(image, "ImageDecoder")
 
@@ -169,7 +171,7 @@ worker = root / "Services/WebWorker/CMakeLists.txt"
 replace_once(
     worker,
     "if (LINUX)\n    target_sources(WebWorker PRIVATE ../RendererSandboxLinux.cpp)",
-    "if (BOUCHAUD_PORT)\n    target_sources(WebWorker PRIVATE ../RendererSandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(WebWorker PRIVATE ../RendererSandboxLinux.cpp)",
+    "if (BOUCHAUD_PORT)\n    target_sources(WebWorker PRIVATE ../RendererSandboxBouchaud.cpp)\nelseif (LINUX)\n    target_sources(WebWorker PRIVATE ../RendererSandboxLinux.cpp)",
 )
 append_runtime_link_options(worker, "WebWorker")
 
@@ -181,7 +183,7 @@ compositor = root / "Services/Compositor/CMakeLists.txt"
 replace_once(
     compositor,
     "if (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
-    "if (BOUCHAUD_PORT)\n    target_sources(Compositor PRIVATE SandboxUnimplemented.cpp)\nelseif (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
+    "if (BOUCHAUD_PORT)\n    target_sources(Compositor PRIVATE SandboxBouchaud.cpp)\nelseif (LINUX)\n    target_sources(Compositor PRIVATE SandboxLinux.cpp)",
 )
 append_runtime_link_options(compositor, "Compositor")
 

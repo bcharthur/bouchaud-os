@@ -125,10 +125,11 @@ JALONS=(
   '[ladybird-bouchaud] BROWSER_HOST_INITIALIZED'
   '[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK'
   # BOUCHAUD_UI_V1 : le navigateur (UI/Bouchaud) tient la fenetre ; WebContent
-  # n'a ni chrome ni canal GUI.
+  # n'a ni chrome ni canal GUI, et chaque service verifie son confinement.
   'BOUCHAUD_UI_CHROME_OWNER browser'
   'BOUCHAUD_UI_WEBCONTENT_CHROME 0'
   'BOUCHAUD_UI_V1_READY'
+  '[LB:SANDBOX] service=WebContent role=rendu'
   '[LB:NAV] onglet=1 document_charge'
   'BOUCHAUD_UI_FIRST_FRAME onglet=1'
   'HOST_CANVAS OK'
@@ -547,7 +548,7 @@ grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
-for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' 'sans_image_cpu=1' '[LB:CRASH]'; do
+for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"

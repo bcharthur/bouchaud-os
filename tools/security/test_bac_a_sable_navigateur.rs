@@ -444,6 +444,29 @@ fn aucun_role_sandboxe_n_atteint_le_depot_ni_le_magasin_du_chrome() {
 }
 
 #[test]
+fn le_compositor_est_un_role_de_rendu_confine() {
+    // BOUCHAUD_SANDBOX_V1 : le Compositor rejoue des listes d'affichage
+    // produites par le script d'un site. Il etait classe courtier (non
+    // sandboxe, DEVICE_IO, NET_CONNECT).
+    for image in ["/usr/libexec/ladybird/Compositor", "/Compositor"] {
+        let profil = classify(image, UTILISATEUR);
+        assert_eq!(profil, SecurityProfile::BrowserContent, "{}", image);
+        assert!(sandboxe(profil));
+        let droits = initial_capabilities(image, 0);
+        assert!(!droits.contains(Capabilities::NET_CONNECT), "{} : reseau", image);
+        assert!(!droits.contains(Capabilities::DEVICE_IO), "{} : peripheriques", image);
+    }
+    for chemin in [CACHE_ALT_SVC, PROFIL_NAVIGATEUR, "/persist/Downloads/x"] {
+        assert!(!ecriture_permise(classify("/usr/libexec/ladybird/Compositor", UTILISATEUR), chemin));
+    }
+    // Le processus navigateur, lui, reste le courtier.
+    assert_eq!(
+        classify("/usr/libexec/ladybird/BouchaudBrowserHost", 0),
+        SecurityProfile::BrowserBroker
+    );
+}
+
+#[test]
 fn un_binaire_non_fiable_reste_dehors() {
     for chemin in [CACHE_ALT_SVC, PROFIL_NAVIGATEUR, "/persist"] {
         assert!(!lecture_permise(SecurityProfile::Untrusted, chemin));

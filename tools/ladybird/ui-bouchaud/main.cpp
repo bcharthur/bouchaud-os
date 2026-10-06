@@ -115,10 +115,13 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     arguments.append("BouchaudBrowserHost");
     arguments.append("--force-cpu-painting");
     arguments.append("--force-fontconfig");
-    // Le bac a sable Linux de WebContent (seccomp, namespaces) n'a pas
-    // d'equivalent Bouchaud dans ce binaire : le confinement est celui du
-    // noyau, par profil (`src/kernel/security/profile.rs`).
-    arguments.append("--disable-sandbox");
+    // Pas de `--disable-sandbox` : BOUCHAUD_SANDBOX_V1. Le noyau confine
+    // chaque service par profil (`src/kernel/security/profile.rs`) et chaque
+    // service le verifie avant de traiter une donnee du reseau
+    // (`tools/ladybird/sandbox/BouchaudConfinement.h`). Le drapeau reste
+    // disponible pour un diagnostic, jamais par defaut.
+    if (getenv("BOUCHAUD_DISABLE_SANDBOX"))
+        arguments.append("--disable-sandbox");
     if (getenv("BOUCHAUD_DISABLE_DISK_CACHE"))
         arguments.append("--disable-http-disk-cache");
     if (getenv("BOUCHAUD_DISABLE_SQL"))
@@ -156,7 +159,8 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     warnln("[LB:UI] surface={}x{} url={}", largeur, hauteur, url);
     warnln("[LB:UI] profil persistant={} chemin={} telechargements={} ressources=/usr/share/ladybird",
         ephemere ? "non"sv : "oui"sv, profil, telechargements);
-    warnln("[LB:UI] plateforme sql={} cache_disque={} defilement_async={} isolation={} fuseau={} audio={}",
+    warnln("[LB:UI] plateforme sandbox={} sql={} cache_disque={} defilement_async={} isolation={} fuseau={} audio={}",
+        getenv("BOUCHAUD_DISABLE_SANDBOX") ? "DESACTIVE"sv : "noyau+verification"sv,
         getenv("BOUCHAUD_DISABLE_SQL") ? "non"sv : "oui"sv,
         getenv("BOUCHAUD_DISABLE_DISK_CACHE") ? "non"sv : "oui"sv,
         getenv("BOUCHAUD_DISABLE_ASYNC_SCROLLING") ? "non"sv : "oui"sv,

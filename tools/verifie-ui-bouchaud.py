@@ -17,8 +17,10 @@ Les regles :
      `BOUCHAUD_UI_CHROME_OWNER browser`, `BOUCHAUD_UI_WEBCONTENT_CHROME 0`.
   5. Le chrome ne connait plus WebContent : namespace neutre, aucune capture
      (`ShareableBitmap`), aucun `present_complet`.
+  6. Le bac a sable n'est pas desactive par defaut, et chaque service le
+     verifie (`BouchaudConfinement::verifie`) au lieu d'un no-op.
 
-Fail-closed ; six tests negatifs.
+Fail-closed ; huit tests negatifs.
 """
 import sys
 import tempfile
@@ -29,7 +31,9 @@ UI = "tools/ladybird/ui-bouchaud"
 VUE_H, VUE = f"{UI}/BouchaudWebView.h", f"{UI}/BouchaudWebView.cpp"
 FENETRE, MAIN = f"{UI}/BrowserWindow.cpp", f"{UI}/main.cpp"
 CHROME = "tools/ladybird/chrome/BouchaudChrome.h"
-FICHIERS = (VUE_H, VUE, FENETRE, MAIN, CHROME)
+CONFINEMENT = "tools/ladybird/sandbox/BouchaudConfinement.h"
+RENDU = "tools/ladybird/sandbox/RendererSandboxBouchaud.cpp"
+FICHIERS = (VUE_H, VUE, FENETRE, MAIN, CHROME, CONFINEMENT, RENDU)
 
 
 def corps(texte: str, signature: str) -> str:
@@ -108,6 +112,17 @@ def verifie(racine: Path) -> list[str]:
         if interdit in c[CHROME]:
             fautes.append(f"{CHROME} : {interdit} -- reste du pont de capture")
 
+    # 6. Bac a sable.
+    i = c[MAIN].find('arguments.append("--disable-sandbox");')
+    if i >= 0 and "BOUCHAUD_DISABLE_SANDBOX" not in c[MAIN][max(0, i - 120):i]:
+        fautes.append(f"{MAIN} : --disable-sandbox est passe par defaut")
+    if "BouchaudConfinement::verifie(" not in c[RENDU]:
+        fautes.append(f"{RENDU} : le rendu ne verifie plus son confinement")
+    verif = corps(c[CONFINEMENT], "inline ErrorOr<void> verifie(")
+    for attendu in ("PR_GET_NO_NEW_PRIVS", "socket(AF_INET", "/persist/ladybird", "/persist/Downloads",
+                    "/persist/ladybird-chrome", 'ecriture_refusee("/usr"sv'):
+        if attendu not in verif:
+            fautes.append(f"{CONFINEMENT} : la sonde {attendu} a disparu")
     return fautes
 
 
@@ -139,12 +154,15 @@ def main() -> int:
         (CHROME, '    unsetenv("BO_GUI_FD");\n', ""),
         (MAIN, 'warnln("BOUCHAUD_UI_WEBCONTENT_CHROME 0");', 'warnln("ok");'),
         (CHROME, "namespace BouchaudChrome {", "namespace WebContent::BouchaudChrome {"),
+        (MAIN, "    if (getenv(\"BOUCHAUD_DISABLE_SANDBOX\"))\n        arguments.append(\"--disable-sandbox\");",
+         "    arguments.append(\"--disable-sandbox\");"),
+        (CONFINEMENT, "int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);", "int s = -1;"),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):
             print(f"UI/Bouchaud : le test negatif {n} ne rougit pas -- garde inoperant")
             return 1
-    print(f"UI_BOUCHAUD_OK regles=5 negatifs={len(negatifs)}")
+    print(f"UI_BOUCHAUD_OK regles=6 negatifs={len(negatifs)}")
     return 0
 
 

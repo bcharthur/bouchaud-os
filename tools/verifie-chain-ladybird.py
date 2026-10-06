@@ -39,6 +39,7 @@ ORDRE = [
     "prepare-v16-fonts.py",
     "prepare-tls-diagnostic.py",
     "prepare-browser-runtime-link.py",
+    "prepare-sandbox-bouchaud.py",
     "prepare-full-browser-host.py",
     "prepare-network-live.py",
     "prepare-ui-bouchaud.py",

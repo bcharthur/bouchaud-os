@@ -34,6 +34,11 @@ fn browser_content_image(image: &str) -> bool {
     image.ends_with("/WebContent")
         || image.ends_with("/WebWorker")
         || image.ends_with("/ImageDecoder")
+        // BOUCHAUD_SANDBOX_V1 : le Compositor rejoue les listes d'affichage
+        // que WebContent -- donc le script d'un site -- a produites. Il etait
+        // classe COURTIER : non sandboxe, avec DEVICE_IO, NET_CONNECT et le
+        // droit de lancer des processus. C'est un role de RENDU.
+        || image.ends_with("/Compositor")
 }
 
 fn browser_network_image(image: &str) -> bool {
@@ -57,12 +62,11 @@ fn nom_de_fichier(image: &str) -> &str {
 /// par aucune des deux tables du navigateur : `ends_with("/BrowserHost")`
 /// echoue dessus, parce que le caractere qui precede n'est pas une barre
 /// oblique mais un `d`.
-const NOMS_DE_COURTIER: [&str; 5] = [
+const NOMS_DE_COURTIER: [&str; 4] = [
     "bo-navigateur",
     "BrowserHost",
     "BouchaudBrowserHost",
     "WebDriver",
-    "Compositor",
 ];
 
 /// Les repertoires depuis lesquels un courtier peut etre lance.
