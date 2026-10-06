@@ -559,8 +559,12 @@ echo "HOST_LIEN_VERDICT $LIEN_VERDICT"
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
   | grep -aoE '\[LB\] (LINK_CUT_[A-Z]+|CONNECTION_[A-Z]+|PEER_CLOSE|LATE_MESSAGE|COMPOSITOR_LINK_[A-Z_]+|CONTEXT_CREATE).*|HOST_LIEN_[A-Z_]+.*' \
   | tail -40 | sed 's/^/  /' || true
-PID_SITE_A=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SMOKE_' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
-PID_SITE_B=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SITE_B OK' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
+# Le journal BRUT colore le nom du processus et « (js log) »
+# (`\e[33;1mWebContent(19)\e[0m: \e[32;1m(js log)\e[0m "HOST_SMOKE_OK...`) :
+# les PID se lisent sur le journal SANS codes ANSI (run 37522655079 :
+# `pid_introuvable` alors que les PID 19 et 20 etaient dans le journal).
+PID_SITE_A=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SMOKE_' | head -1 | grep -oE '[0-9]+' | head -1 || true)
+PID_SITE_B=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SITE_B OK' | head -1 | grep -oE '[0-9]+' | head -1 || true)
 echo "HOST_ISOLATION_VERDICT $ISOLATION_VERDICT pid_site_a=${PID_SITE_A:-?} pid_site_b=${PID_SITE_B:-?}"
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
   | grep -aoE 'HOST_SITE_[AB].*|\[LB:NAV\] onglet=1 document_charge url=http://10\.0\.2\.100.*|PERF_EXECVE .*image=/usr/libexec/ladybird/WebContent pid=[0-9]+' \
