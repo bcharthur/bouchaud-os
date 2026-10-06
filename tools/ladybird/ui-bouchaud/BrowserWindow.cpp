@@ -6,6 +6,7 @@
 
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
+#include <stdlib.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Notifier.h>
 #include <LibCore/Timer.h>
@@ -264,8 +265,21 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
 {
     auto const onglet = vue.onglet();
 
-    vue.on_title_change = [onglet](Utf16String const& titre) {
-        BouchaudChrome::set_title(onglet, titre.to_byte_string());
+    // BOUCHAUD_COMPOSITOR_LIEN_V1 -- banc de non-regression du crash
+    // `ConnectionFromClient.cpp:68 VERIFICATION FAILED: connection`. Quand le
+    // smoke exporte BOUCHAUD_LB_BANC_COUPE_LIEN, une page qui prend le titre
+    // BOUCHAUD_BANC_COUPE_LIEN fait fermer, par SON WebContent, le lien vers
+    // le Compositor (prepare-compositor-lien.py) : l'etat exact du journal
+    // d'origine. Hors banc, un titre n'a aucun effet.
+    static bool const banc_coupe_lien = getenv("BOUCHAUD_LB_BANC_COUPE_LIEN") != nullptr;
+    vue.on_title_change = [onglet, vue_ptr = &vue](Utf16String const& titre) {
+        auto texte = titre.to_byte_string();
+        if (banc_coupe_lien && texte == "BOUCHAUD_BANC_COUPE_LIEN"sv) {
+            warnln("[LB] LINK_CUT_REQUEST onglet={} page={} t_ms={}", onglet, vue_ptr->page_courante(),
+                MonotonicTime::now().milliseconds());
+            vue_ptr->debug_request("bouchaud-coupe-lien-compositor"sv);
+        }
+        BouchaudChrome::set_title(onglet, texte);
     };
     vue.on_url_change = [onglet](URL::URL const& url) {
         BouchaudChrome::set_committed_url(onglet, url.serialize().to_byte_string());

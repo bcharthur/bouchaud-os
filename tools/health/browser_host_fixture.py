@@ -174,9 +174,45 @@ SON_WAV = _son_wav()
 # l'invite sous 10.0.2.100 (`guestfwd` QEMU vers cette meme fixture) : un autre
 # hote, donc un autre site au sens de l'isolation -- la navigation depuis
 # 10.0.2.2 doit changer de processus WebContent (`--site-isolation top-level`).
+#
+# BOUCHAUD_COMPOSITOR_LIEN_V1 (convergence P1) : la page B rejoue ENSUITE la
+# condition du crash `ConnectionFromClient.cpp:68 VERIFICATION FAILED:
+# connection`. Son titre BOUCHAUD_BANC_COUPE_LIEN fait fermer par son
+# WebContent le lien vers le Compositor (UI/Bouchaud, seulement sous
+# BOUCHAUD_LB_BANC_COUPE_LIEN) ; la page cree alors des cadres -- chacun un
+# nouveau contexte Compositor, `create_context` -- pendant et apres la coupure,
+# et anime son fond. Avant le correctif : contexte demande sur une connexion
+# morte, VERIFY, Compositor mort. Apres : reprise du lien pour CE WebContent,
+# trames presentees de nouveau.
 SITE_B_HTML = b'''<!doctype html><meta charset="utf-8"><title>site B</title>
-<body>site B<script>
+<body style="margin:0;font:32px sans-serif">site B<div id="lien">lien</div><script>
   console.log(`HOST_SITE_B OK origine=${location.origin} referent=${document.referrer ? new URL(document.referrer).host : "aucun"}`);
+  setTimeout(() => {
+    console.log(`HOST_LIEN_COUPE_DEMANDE t=${Math.round(performance.now())}`);
+    document.title = "BOUCHAUD_BANC_COUPE_LIEN";
+    // Dix cadres sur deux secondes : certains tombent AVANT que l'UI ait lu la
+    // perte (message tardif), les autres APRES la reprise.
+    let cadres = 0;
+    const minuterie = setInterval(() => {
+      const f = document.createElement("iframe");
+      f.style.cssText = "width:120px;height:60px;border:0";
+      f.srcdoc = `<body style="margin:0;background:hsl(${cadres * 36},70%,50%)">${cadres}</body>`;
+      f.onload = () => console.log(`HOST_LIEN_CADRE n=${cadres}`);
+      document.body.appendChild(f);
+      if (++cadres === 10) clearInterval(minuterie);
+    }, 200);
+    // Du dommage a chaque trame pendant huit secondes : la preuve de rendu
+    // est cote navigateur ([LB:FRAME] apres COMPOSITOR_LINK_RECOVERED).
+    const t0 = performance.now();
+    let rafs = 0;
+    (function tic() {
+      rafs++;
+      document.getElementById("lien").textContent = `lien ${rafs}`;
+      document.body.style.background = `hsl(${rafs % 360},40%,80%)`;
+      if (performance.now() - t0 < 8000) requestAnimationFrame(tic);
+      else console.log(`HOST_LIEN_FIN rafs=${rafs} cadres=${cadres} titre=${document.title}`);
+    })();
+  }, 1500);
 </script></body>'''
 WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
 

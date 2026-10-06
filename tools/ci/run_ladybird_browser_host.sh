@@ -89,6 +89,9 @@ export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_M11=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
 export BOUCHAUD_M9_URL='$URL_PAGE'
+# BOUCHAUD_COMPOSITOR_LIEN_V1 : la page B (P9) rejoue la coupure du lien
+# Compositor <-> WebContent. Sans cette variable, UI/Bouchaud ignore le titre.
+export BOUCHAUD_LB_BANC_COUPE_LIEN=1
 echo "AUTORUN_DESKTOP_ENTER"
 desktop
 echo "AUTORUN_DESKTOP_RETURN statut=\$?"
@@ -524,6 +527,36 @@ if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null; then
   done
   sleep 2
 fi
+# BOUCHAUD_COMPOSITOR_LIEN_V1 (convergence P1) -- LE LIEN COMPOSITOR COUPE.
+#
+# La page B fait fermer par son WebContent le lien vers le Compositor, puis
+# cree dix cadres (dix `create_context`) et anime son fond huit secondes.
+# C'est la condition du crash `ConnectionFromClient.cpp:68 VERIFICATION
+# FAILED: connection`. On attend la fin de la page, puis une trame presentee
+# APRES la reprise du lien (borne : 20 s).
+LIEN_VERDICT=non_joue
+if [ "$ISOLATION_VERDICT" = "charge" ] && kill -0 "$PID" 2>/dev/null; then
+  LIEN_VERDICT=page_sans_fin
+  for _ in $(seq 1 60); do
+    grep -aq 'HOST_LIEN_FIN' "$LOG" && { LIEN_VERDICT=fin; break; }
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 1
+  done
+  if [ "$LIEN_VERDICT" = "fin" ]; then
+    LIEN_VERDICT=sans_trame_apres_reprise
+    for _ in $(seq 1 20); do
+      if sed -n '/\[LB\] COMPOSITOR_LINK_RECOVERED/,$p' "$LOG" | grep -aq '\[LB:FRAME\] onglet='; then
+        LIEN_VERDICT=ok
+        break
+      fi
+      sleep 1
+    done
+  fi
+fi
+echo "HOST_LIEN_VERDICT $LIEN_VERDICT"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aoE '\[LB\] (LINK_CUT_[A-Z]+|CONNECTION_[A-Z]+|PEER_CLOSE|LATE_MESSAGE|COMPOSITOR_LINK_[A-Z_]+|CONTEXT_CREATE).*|HOST_LIEN_[A-Z_]+.*' \
+  | tail -40 | sed 's/^/  /' || true
 PID_SITE_A=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SMOKE_' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
 PID_SITE_B=$(grep -aoE 'WebContent\(([0-9]+)\): \(js log\) "HOST_SITE_B OK' "$LOG" | head -1 | grep -oE '[0-9]+' | head -1 || true)
 echo "HOST_ISOLATION_VERDICT $ISOLATION_VERDICT pid_site_a=${PID_SITE_A:-?} pid_site_b=${PID_SITE_B:-?}"
@@ -679,7 +712,7 @@ grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
-for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]' 'Unable to create disk cache' 'BOUCHAUD_PERSIST_DEBORDE' 'op=fs-fchown' 'op=fs-create detail=0x1 path=/persist reason'; do
+for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]' 'Unable to create disk cache' 'BOUCHAUD_PERSIST_DEBORDE' 'op=fs-fchown' 'op=fs-create detail=0x1 path=/persist reason' '[LB] COMPOSITOR_LINK_GIVE_UP'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"
@@ -751,6 +784,23 @@ if [ "$DEFILEMENT" = "1" ]; then
     exit 1
   fi
   echo "HOST_ISOLATION_CHAINE OK site_a_pid=$PID_SITE_A site_b_pid=$PID_SITE_B confine=1"
+fi
+# ====================================================================
+# LE LIEN COMPOSITOR <-> WebContent COUPE (convergence P1), maillon par maillon.
+# ====================================================================
+if [ "$DEFILEMENT" = "1" ]; then
+  maillon_lien=""
+  grep -aq '\[LB\] LINK_CUT_TEST page=[0-9]* lien=true' "$LOG" || maillon_lien="coupure_non_jouee"
+  [ -z "$maillon_lien" ] && { grep -aq '\[LB\] CONNECTION_REMOVE' "$LOG" || maillon_lien="compositor_sans_retrait"; }
+  [ -z "$maillon_lien" ] && { grep -aqE "\\[LB\\] COMPOSITOR_LINK_RECOVERED pid=${PID_SITE_B:-x} " "$LOG" || maillon_lien="pas_de_reprise_pour_le_site_b"; }
+  [ -z "$maillon_lien" ] && { [ "$LIEN_VERDICT" = "ok" ] || maillon_lien="page_${LIEN_VERDICT}"; }
+  [ -z "$maillon_lien" ] && { grep -aq 'HOST_LIEN_FIN rafs=[0-9]* cadres=10 ' "$LOG" || maillon_lien="cadres_incomplets"; }
+  if [ -n "$maillon_lien" ]; then
+    echo "lien compositor : maillon manquant $maillon_lien" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=lien_compositor maillon=$maillon_lien"
+    exit 1
+  fi
+  echo "HOST_LIEN_CHAINE OK coupe=1 reprise=1 trame=1 tardifs=$(grep -ac '\[LB\] LATE_MESSAGE' "$LOG")"
 fi
 # ====================================================================
 # LE VERDICT DE SURFACE, TESTE POUR LUI-MEME

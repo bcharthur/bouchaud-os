@@ -42,6 +42,7 @@ ORDRE = [
     "prepare-sandbox-bouchaud.py",
     "prepare-audio-bouchaud.py",
     "prepare-worker-terminate.py",
+    "prepare-compositor-lien.py",
     "prepare-full-browser-host.py",
     "prepare-network-live.py",
     "prepare-ui-bouchaud.py",
