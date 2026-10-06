@@ -573,6 +573,15 @@ sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
   | grep -aoE '\[GUI-WHEEL-(TX|DROP|APP)\].*|WEB_WHEEL_DISPATCH.*|\[LB:FRAME\] apres_molette.*|HOST_(WHEEL_EVENT|SCROLL_PRET|SCROLL OK).*' \
   | head -16 | sed 's/^/  /' || true
 
+# DIAGNOSTIC IPC -- toujours imprime, borne. Le run 37518121906 a perdu
+# RequestServer a t=20,9 s (`RequestServerDied`, RequestServer vivant) sans
+# que la sortie du banc ne dise pourquoi : les lignes d'erreur de LibIPC et
+# les fautes de processus sont maintenant extraites ici.
+echo "== diagnostic IPC et fautes =="
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aE 'IPC::ConnectionBase|Failed to parse IPC|Disconnecting misbehaving|did misbehave|TransportSocket|Failed to receive message_id|Transport shutdown|RequestServer is currently unavailable|PROCESS_FAULT|faute de [a-z ]+ en ring 3|\[LB\] (CONNECTION_REMOVE|PEER_CLOSE|LATE_MESSAGE|COMPOSITOR_LINK_[A-Z_]+)' \
+  | head -30 | sed 's/^/  /' || true
+
 # POURQUOI LA SESSION S'EST-ELLE ARRETEE ?
 #
 # BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
