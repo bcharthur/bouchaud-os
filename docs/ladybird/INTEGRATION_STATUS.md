@@ -57,8 +57,8 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    couverture des contrats     13/14  (92 %)
-    integration fonctionnelle   10/26  (38 %)
+    couverture des contrats     15/16  (93 %)
+    integration fonctionnelle   7/29  (24 %)
 
     dont a revalider physiquement   3
     dont en ECHEC                   1
@@ -70,7 +70,7 @@ qu'il reste a instrumenter.
 | Reseau physique (RTL8168) *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-pilote-rtl8168` | garde verte |
 | Verdict reseau *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-verdict-reseau` | garde verte |
 | Supervision des processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_supervision` | test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
-| Roles des binaires livres *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_roles_livres` | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
+| Roles des binaires livres *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_roles_livres` | test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Fautes de page par processus *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_fautes` | test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Fautes de page raccordees au noyau *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_fautes_demande.sh:FAUTES_DEMANDE_OK` | banc tools/ci/run_fautes_demande.sh (marqueur FAUTES_DEMANDE_OK) |
 | Topologie CPU annoncee *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cpu_topologie` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
@@ -81,12 +81,17 @@ qu'il reste a instrumenter.
 | Profil de demarrage *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_demarrage` | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Vue Services *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-fenetre-services` | garde verte |
 | Cycle de vie des onglets *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-lifecycle-pages` | garde verte |
+| Frontend UI/Bouchaud (chrome hors WebContent) *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-ui-bouchaud` | garde verte |
+| Chaine de preparation Ladybird *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-chain-ladybird` | garde verte |
 | Ladybird construit | **OK** | `QEMU_RUNTIME` | `ci:ladybird-native-browser.yml:bouchaud-ladybird-native-browser` | artefact bouchaud-ladybird-native-browser produit au run 35742940872 |
 | BrowserHost demarre | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_START` | atteint au run 35742940872 |
 | BrowserHost initialise | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_INITIALIZED` | atteint au run 35742940872 |
-| Pont GUI etabli | **OK** | `QEMU_RUNTIME` | `ci-jalon:M11_GUI_HANDSHAKE_OK` | atteint au run 35742940872 |
-| Document charge | **OK** | `QEMU_RUNTIME` | `ci-jalon:M11_DOCUMENT_LOADED` | atteint au run 35742940872 |
-| Trame presentee | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_M11_FRAME_PRESENTED` | atteint au run 35742940872 |
+| Frontend pret (UI/Bouchaud) | **NON MESURE** | `—` | `ci-jalon:BOUCHAUD_UI_V1_READY` | — |
+| WebContent sans chrome | **NON MESURE** | `—` | `ci-jalon:BOUCHAUD_UI_WEBCONTENT_CHROME 0` | — |
+| Pont GUI etabli (navigateur) | **NON MESURE** | `—` | `ci-jalon:[LB:UI] canal_gui=notifier` | — |
+| Document charge | **NON MESURE** | `—` | `ci-jalon:[LB:NAV] onglet=1 document_charge` | — |
+| Trame presentee par le Compositor | **NON MESURE** | `—` | `ci-jalon:BOUCHAUD_UI_FIRST_FRAME onglet=1` | — |
+| Bac a sable verifie (WebContent) | **NON MESURE** | `—` | `ci-jalon:[LB:SANDBOX] service=WebContent role=rendu` | le noyau confine, le service le verifie fail-closed |
 | Canvas 2D | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_CANVAS OK` | atteint au run 35742940872 |
 | Image PNG decodee et affichee | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IMAGE OK` | atteint au run 35742940872 |
 | iframe | **OK** | `QEMU_RUNTIME` | `ci-jalon:HOST_IFRAME OK` | atteint au run 35742940872 |
@@ -103,7 +108,7 @@ qu'il reste a instrumenter.
 | Cookies | **NON MESURE** | `—` | `—` | --disable-sql-database |
 | Cache disque | **NON MESURE** | `—` | `—` | --disable-http-disk-cache |
 | Stockage / profil | **NON MESURE** | `—` | `—` | pots upstream en memoire seulement |
-| Isolation de site | **NON MESURE** | `—` | `—` | --site-isolation=disable |
+| Isolation de site | **NON MESURE** | `—` | `—` | top-level par defaut depuis UI/Bouchaud ; aucun banc ne l'exerce encore |
 | Audio | **NON MESURE** | `—` | `—` | aucun backend |
 | GPU | **NON MESURE** | `—` | `—` | --force-cpu-painting |
 | Latence interactive sous charge | **NON MESURE** | `—` | `—` | non mesuree |

@@ -1,5 +1,8 @@
 # Frontend Ladybird natif Bouchaud
 
+> **Réalisé** : BOUCHAUD_UI_V1, voir `UI_BOUCHAUD.md`. Ce document reste le
+> plan d'origine et sa justification.
+
 Plan etabli en inspectant l'arbre epingle (`cdfe5f8`), pas la documentation
 d'upstream. Les nombres ci-dessous sont mesures sur cet arbre-la.
 

@@ -174,6 +174,10 @@ ITEMS = [
     Item("Profil de demarrage", "hote:test_demarrage"),
     Item("Vue Services", "garde:verifie-fenetre-services"),
     Item("Cycle de vie des onglets", "garde:verifie-lifecycle-pages"),
+    Item("Frontend UI/Bouchaud (chrome hors WebContent)", "garde:verifie-ui-bouchaud",
+         "BOUCHAUD_UI_V1 : vue upstream, trame du Compositor, fd GUI prives"),
+    Item("Chaine de preparation Ladybird", "garde:verifie-chain-ladybird",
+         "13 preparateurs, WebContent sans greffe navigateur"),
 
     # --- Capacites du navigateur -----------------------------------------
     #
@@ -183,9 +187,17 @@ ITEMS = [
          "artefact de 433 Mio produit par la CI", fonctionnel=True),
     Item("BrowserHost demarre", "ci-jalon:BROWSER_HOST_START", fonctionnel=True),
     Item("BrowserHost initialise", "ci-jalon:BROWSER_HOST_INITIALIZED", fonctionnel=True),
-    Item("Pont GUI etabli", "ci-jalon:M11_GUI_HANDSHAKE_OK", fonctionnel=True),
-    Item("Document charge", "ci-jalon:M11_DOCUMENT_LOADED", fonctionnel=True),
-    Item("Trame presentee", "ci-jalon:BROWSER_HOST_M11_FRAME_PRESENTED", fonctionnel=True),
+    # BOUCHAUD_UI_V1 : ces jalons sont emis par le processus navigateur. Le
+    # run 35742940872 prouvait l'ANCIEN chemin (chrome dans WebContent, trame
+    # par capture) : il ne prouve rien de celui-ci, d'ou des noms nouveaux qui
+    # restent NON MESURE jusqu'au prochain run.
+    Item("Frontend pret (UI/Bouchaud)", "ci-jalon:BOUCHAUD_UI_V1_READY", fonctionnel=True),
+    Item("WebContent sans chrome", "ci-jalon:BOUCHAUD_UI_WEBCONTENT_CHROME 0", fonctionnel=True),
+    Item("Pont GUI etabli (navigateur)", "ci-jalon:[LB:UI] canal_gui=notifier", fonctionnel=True),
+    Item("Document charge", "ci-jalon:[LB:NAV] onglet=1 document_charge", fonctionnel=True),
+    Item("Trame presentee par le Compositor", "ci-jalon:BOUCHAUD_UI_FIRST_FRAME onglet=1", fonctionnel=True),
+    Item("Bac a sable verifie (WebContent)", "ci-jalon:[LB:SANDBOX] service=WebContent role=rendu",
+         fonctionnel=True, note="le noyau confine, le service le verifie fail-closed"),
     Item("Canvas 2D", "ci-jalon:HOST_CANVAS OK", fonctionnel=True),
     Item("Image PNG decodee et affichee", "ci-jalon:HOST_IMAGE OK", fonctionnel=True),
     Item("iframe", "ci-jalon:HOST_IFRAME OK", fonctionnel=True),
@@ -210,7 +222,8 @@ ITEMS = [
     Item("Cookies", "aucune", "--disable-sql-database", fonctionnel=True),
     Item("Cache disque", "aucune", "--disable-http-disk-cache", fonctionnel=True),
     Item("Stockage / profil", "aucune", "pots upstream en memoire seulement", fonctionnel=True),
-    Item("Isolation de site", "aucune", "--site-isolation=disable", fonctionnel=True),
+    Item("Isolation de site", "aucune",
+         "top-level par defaut depuis UI/Bouchaud ; aucun banc ne l'exerce encore", fonctionnel=True),
     Item("Audio", "aucune", "aucun backend", fonctionnel=True),
     Item("GPU", "aucune", "--force-cpu-painting", fonctionnel=True),
     Item("Latence interactive sous charge", "aucune", "non mesuree", fonctionnel=True),
