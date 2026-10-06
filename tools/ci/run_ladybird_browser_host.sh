@@ -476,6 +476,38 @@ if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null && command -v socat >/d
     fi
   fi
 fi
+
+# BOUCHAUD_AUDIO_DSP_V1 (P8) -- UN VRAI CLIC, PUIS DU SON SUR /dev/dsp.
+#
+# `play()` exige une activation par l'utilisateur ; la page attend un clic
+# (HOST_AUDIO_PRET). Le pointeur est toujours au centre, dans la page. Le son
+# doit traverser LibMedia et PlaybackStreamBouchaud jusqu'a /dev/dsp (AC'97
+# emule, `-audiodev none` : consomme comme s'il etait joue).
+AUDIO_VERDICT=non_joue
+if [ "$DEFILEMENT" = "1" ] && [ "$DEFILEMENT_VERDICT" = "ok" ] && kill -0 "$PID" 2>/dev/null; then
+  AUDIO_VERDICT=page_pas_prete
+  for _ in $(seq 1 60); do
+    grep -aq 'HOST_AUDIO_PRET' "$LOG" && break
+    grep -aq 'HOST_AUDIO FAIL' "$LOG" && break
+    sleep 1
+  done
+  if grep -aq 'HOST_AUDIO_PRET' "$LOG"; then
+    AUDIO_VERDICT=sans_lecture
+    echo "mouse_button 1" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1 || true
+    sleep 0.2
+    echo "mouse_button 0" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if grep -aq 'HOST_AUDIO OK' "$LOG"; then AUDIO_VERDICT=ok; break; fi
+      if grep -aq 'HOST_AUDIO FAIL' "$LOG"; then AUDIO_VERDICT=echec_page; break; fi
+      sleep 1
+    done
+  elif grep -aq 'HOST_AUDIO FAIL' "$LOG"; then
+    AUDIO_VERDICT=echec_page
+  fi
+fi
+echo "HOST_AUDIO_VERDICT $AUDIO_VERDICT"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aoE '\[LB:AUDIO\].*|HOST_AUDIO[A-Z_]* .*' | head -12 | sed 's/^/  /' || true
 echo "HOST_SCROLL_VERDICT $DEFILEMENT_VERDICT t_molette=${T_MOLETTE:-0}"
 # BOUCHAUD_WORKER_BATTERIE_V1 (P5) : dix comportements, une ligne chacun.
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
@@ -656,6 +688,22 @@ if [ "$DEFILEMENT" = "1" ]; then
     exit 1
   fi
   echo "HOST_SCROLL_CHAINE OK wm=1 chrome=1 page=1 trame=1 defilement_async=$(grep -aq 'defilement_async=oui' "$LOG" && echo oui || echo non)"
+fi
+# ====================================================================
+# L'AUDIO (P8), TESTE POUR LUI-MEME.
+# ====================================================================
+if [ "$DEFILEMENT" = "1" ]; then
+  maillon_audio=""
+  grep -aq '\[LB:AUDIO\] /dev/dsp ouvert' "$LOG" || maillon_audio="dsp_non_ouvert"
+  [ -z "$maillon_audio" ] && { grep -aq '\[LB:AUDIO\] premiere_ecriture' "$LOG" || maillon_audio="aucune_ecriture"; }
+  [ -z "$maillon_audio" ] && { [ "$AUDIO_VERDICT" = "ok" ] || maillon_audio="page_${AUDIO_VERDICT}"; }
+  if grep -aq 'repli sur la sortie nulle' "$LOG"; then maillon_audio="repli_sortie_nulle"; fi
+  if [ -n "$maillon_audio" ]; then
+    echo "audio : maillon manquant $maillon_audio" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=audio maillon=$maillon_audio"
+    exit 1
+  fi
+  echo "HOST_AUDIO_CHAINE OK dsp=1 ecriture=1 page=1"
 fi
 # ====================================================================
 # LE VERDICT DE SURFACE, TESTE POUR LUI-MEME

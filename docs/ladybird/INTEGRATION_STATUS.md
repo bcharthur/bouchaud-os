@@ -58,7 +58,7 @@ qu'il reste a instrumenter.
 <!-- MESURE:DEBUT -->
 
     couverture des contrats     19/19  (100 %)
-    integration fonctionnelle   20/30  (66 %)
+    integration fonctionnelle   20/31  (64 %)
 
     dont a revalider physiquement   3
     dont en ECHEC                   0
@@ -113,7 +113,8 @@ qu'il reste a instrumenter.
 | Cache disque | **OK** | `QEMU_RUNTIME` | `ci-jalon:[LB:CACHE] disque=oui` | atteint au run 37483690336 |
 | Stockage / profil | **NON MESURE** | `—` | `—` | /persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM |
 | Isolation de site | **NON MESURE** | `—` | `—` | top-level par defaut depuis UI/Bouchaud ; aucun banc ne l'exerce encore |
-| Audio | **NON MESURE** | `—` | `—` | aucun backend |
+| Audio (/dev/dsp depuis WebContent) | **NON MESURE** | `—` | `ci-jalon:HOST_AUDIO_CHAINE OK` | PlaybackStreamBouchaud (OSS, AC'97) ; clic reel -> play() -> /dev/dsp ; HDA non pris en charge (repli nul) |
+| WebWorker : batterie de dix comportements | **NON MESURE** | `—` | `ci-jalon:HOST_WORKER_BATTERIE OK 10/10` | — |
 | GPU | **NON MESURE** | `—` | `—` | --force-cpu-painting |
 | Latence interactive sous charge | **NON MESURE** | `—` | `—` | non mesuree |
 

@@ -411,6 +411,20 @@ fn le_role_reseau_voit_chaque_ancetre_de_son_profil_et_un_rendu_aucun() {
     }
 }
 
+// BOUCHAUD_AUDIO_DSP_V1 : le rendu ECRIT sur /dev/dsp, et rien de plus.
+#[test]
+fn le_rendu_ecrit_sur_dev_dsp_et_rien_de_plus() {
+    assert!(ecriture_permise(SecurityProfile::BrowserContent, "/dev/dsp"));
+    // Pas de lecture : une capture future ne serait pas accordee par accident.
+    assert!(!lecture_permise(SecurityProfile::BrowserContent, "/dev/dsp"));
+    // Ni les autres noms du peripherique, ni un voisin de nom.
+    for autre in ["/dev/dsp0", "/dev/audio", "/dev/sound/dsp", "/dev/dspx", "/dev/dsp/x"] {
+        assert!(!ecriture_permise(SecurityProfile::BrowserContent, autre), "{autre}");
+    }
+    // Ni le role reseau.
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, "/dev/dsp"));
+}
+
 #[test]
 fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
     // LE test de ce chantier. WebContent, WebWorker et ImageDecoder analysent

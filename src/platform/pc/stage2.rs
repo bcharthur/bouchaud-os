@@ -394,7 +394,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // la trame vient desormais du Compositor, qui porte le defilement
     // asynchrone d'upstream. Le smoke QEMU l'exerce par une vraie molette
     // (`HOST_SCROLL_CHAINE`). La variable reste lue pour un diagnostic.
-    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_AUDIO", "1");
+    // BOUCHAUD_AUDIO_DSP_V1 : plus de BOUCHAUD_DISABLE_AUDIO. WebContent ouvre
+    // /dev/dsp (OSS) ; sans AC'97 -- un HDA par exemple --, le premier ioctl
+    // rend ENODEV et LibMedia retombe d'elle-meme sur la sortie nulle.
 
     crate::serial_println!("BOUCHAUD_STAGE2_LADYBIRD_RAMONLY_ENV_OK");
 

@@ -180,8 +180,26 @@ pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
     path == "/persist" || sous_arbre(path, PROFIL_NAVIGATEUR)
 }
 
+/// La sortie audio, en ECRITURE seulement, pour le role de rendu.
+///
+/// BOUCHAUD_AUDIO_DSP_V1 (P8). LibMedia joue le son DANS WebContent
+/// (`PlaybackStream`, `tools/ladybird/audio/PlaybackStreamBouchaud.cpp`) :
+/// sans ce droit, chaque `<audio>` retombait sur la sortie nulle. Ce qui est
+/// accorde est le strict necessaire : ouvrir `/dev/dsp` pour y ECRIRE du PCM
+/// et le regler (ioctls OSS). Ni lecture (une capture future ne serait pas
+/// accordee par accident), ni les autres noms du peripherique, ni le role
+/// reseau. Le profil de rendu est partage avec ImageDecoder, WebWorker et le
+/// Compositor : un rendu compromis peut donc faire du bruit -- c'est le prix,
+/// et il est le meme qu'avec une socket PulseAudio sous Linux.
+const fn joue_du_son(profile: SecurityProfile) -> bool {
+    matches!(profile, SecurityProfile::BrowserContent)
+}
+
 pub fn ecriture_permise(profile: SecurityProfile, path: &str) -> bool {
     if ecriture_commune(path) {
+        return true;
+    }
+    if joue_du_son(profile) && path == "/dev/dsp" {
         return true;
     }
     possede_le_profil(profile) && sous_arbre(path, PROFIL_NAVIGATEUR)

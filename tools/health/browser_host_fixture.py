@@ -141,6 +141,34 @@ BATTERIE_WORKER_JS = rb'''self.onmessage = async (e) => {
 };
 '''
 WORKER_LIB_JS = b'self.BOUCHAUD_LIB = "lib-importee-42";\n'
+
+
+def _son_wav():
+    """BOUCHAUD_AUDIO_DSP_V1 (P8) : 1,5 s de la4 (440 Hz), 48 kHz stereo S16.
+
+    Fabrique ici, en memoire : aucun fichier binaire dans le depot, et le
+    format est exactement celui que `PlaybackStreamBouchaud` demande a
+    /dev/dsp -- le resampler de LibMedia n'a rien a faire.
+    """
+    import io as _io
+    import math as _math
+    import struct as _struct
+    import wave as _wave
+    taux, duree = 48000, 1.5
+    tampon = _io.BytesIO()
+    with _wave.open(tampon, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(taux)
+        trames = bytearray()
+        for i in range(int(taux * duree)):
+            v = int(12000 * _math.sin(2 * _math.pi * 440 * i / taux))
+            trames += _struct.pack("<hh", v, v)
+        w.writeframes(bytes(trames))
+    return tampon.getvalue()
+
+
+SON_WAV = _son_wav()
 WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
 
 HTML = r'''<!doctype html>
@@ -1283,8 +1311,52 @@ HTML = r'''<!doctype html>
     if (!defileVu && scrollY > 0) {
       defileVu = true;
       console.log(`HOST_SCROLL OK y=${scrollY} hauteur=${document.documentElement.scrollHeight} vue=${innerHeight}`);
+      prepareAudio();
     }
   }, { passive: true });
+
+  // BOUCHAUD_AUDIO_DSP_V1 (P8) -- APRES le defilement.
+  //
+  // `play()` exige une activation par l'utilisateur (politique d'autoplay) :
+  // une molette n'en est pas une. Le banc envoie donc un VRAI clic par le
+  // moniteur QEMU une fois HOST_AUDIO_PRET vu ; la lecture part de ce clic.
+  // Le son traverse LibMedia (FFmpeg, melangeur) puis PlaybackStreamBouchaud,
+  // qui l'ecrit sur /dev/dsp depuis WebContent ; `currentTime` avance au
+  // rythme de ce que le peripherique a JOUE (SNDCTL_DSP_GETODELAY).
+  function prepareAudio() {
+    const son = document.createElement("audio");
+    son.src = "/son.wav";
+    son.preload = "auto";
+    document.body.appendChild(son);
+    let dit = false;
+    son.addEventListener("canplaythrough", () => {
+      if (dit) return;
+      dit = true;
+      console.log(`HOST_AUDIO_PRET duree=${son.duration.toFixed(2)}`);
+    });
+    son.addEventListener("error", () => console.log(`HOST_AUDIO FAIL erreur=${son.error && son.error.code}`));
+    // La cible du clic est CERTAINE : un bouton fixe qui couvre toute la vue.
+    // Sans lui, le clic du banc tombait dans un <iframe> d'une epreuve
+    // precedente -- un clic dans un cadre ne remonte pas a la fenetre, et
+    // l'activation n'etait pas donnee a CE document (verifie sous Chromium).
+    const bouton = document.createElement("button");
+    bouton.textContent = "Lire le son";
+    bouton.style.cssText = "position:fixed;inset:0;width:100%;height:100%;z-index:2147483647;opacity:0.85;font-size:32px";
+    document.body.appendChild(bouton);
+    bouton.addEventListener("click", () => {
+      bouton.remove();
+      const t0 = performance.now();
+      son.play().then(() => console.log("HOST_AUDIO_PLAY OK"),
+        err => console.log(`HOST_AUDIO FAIL play=${err && err.name}`));
+      son.addEventListener("timeupdate", function suivi() {
+        if (son.currentTime >= 0.5) {
+          son.removeEventListener("timeupdate", suivi);
+          console.log(`HOST_AUDIO OK t=${son.currentTime.toFixed(2)} ms=${Math.round(performance.now() - t0)}`);
+        }
+      });
+      son.addEventListener("ended", () => console.log(`HOST_AUDIO_FIN t=${son.currentTime.toFixed(2)}`), { once: true });
+    }, { once: true });
+  }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     console.log(`HOST_SCROLL_PRET hauteur=${document.documentElement.scrollHeight} vue=${innerHeight} y=${scrollY}`);
   }));
@@ -1307,6 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
             "/batterie-worker.js": (BATTERIE_WORKER_JS, "text/javascript"),
             "/worker-lib.js": (WORKER_LIB_JS, "text/javascript"),
             "/worker-data.json": (WORKER_DATA_JSON, "application/json"),
+            "/son.wav": (SON_WAV, "audio/wav"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie

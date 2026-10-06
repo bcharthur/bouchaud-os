@@ -134,10 +134,10 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     setenv("XDG_CACHE_HOME", cache, 1);
     setenv("XDG_DOWNLOAD_DIR", telechargements, 1);
 
-    if (getenv("BOUCHAUD_DISABLE_AUDIO") == nullptr) {
-        setenv("SDL_AUDIODRIVER", "oss", 1);
-        setenv("AUDIODEV", "/dev/dsp", 1);
-    }
+    // L'audio : LibMedia joue dans WebContent par `PlaybackStreamBouchaud`
+    // (/dev/dsp, OSS -- BOUCHAUD_AUDIO_DSP_V1). `BOUCHAUD_DISABLE_AUDIO`, herite
+    // par WebContent, force le repli upstream sur la sortie nulle. Les
+    // variables SDL posees ici auparavant n'etaient lues par personne.
 
     constexpr char fontconfig_file[] = "/usr/share/ladybird/fontconfig/fonts.conf";
     if (access(fontconfig_file, R_OK) == 0) {
