@@ -190,7 +190,7 @@ ITEMS = [
     Item("Frontend UI/Bouchaud (chrome hors WebContent)", "garde:verifie-ui-bouchaud",
          "BOUCHAUD_UI_V1 : vue upstream, trame du Compositor, fd GUI prives"),
     Item("Chaine de preparation Ladybird", "garde:verifie-chain-ladybird",
-         "13 preparateurs, WebContent sans greffe navigateur"),
+         "14 preparateurs, WebContent sans greffe navigateur"),
     Item("Renommage POSIX (rename/renameat/renameat2)", "hote:test_renommage",
          "FileDownloader, SQLite et le cache HTTP remplacent par renommage"),
     Item("Cache jetable de la persistance (decision)", "hote:test_cache_jetable",

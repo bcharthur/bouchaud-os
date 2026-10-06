@@ -452,7 +452,10 @@ if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null && command -v socat >/d
       echo "mouse_move 0 0 -1" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1 || true
       sleep 0.4
     done
-    for _ in $(seq 1 20); do
+    # 60 s : au run 37488566594 la page a defile 22 s apres la molette, sur
+    # une machine que des workers « termines » (P5) chargeaient encore. Le
+    # delai est une borne de banc ; l'exigence -- defilement ET trame -- reste.
+    for _ in $(seq 1 60); do
       if grep -aq 'HOST_SCROLL OK' "$LOG"; then
         DEFILEMENT_VERDICT=ok
         break

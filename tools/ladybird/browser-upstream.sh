@@ -44,6 +44,7 @@ python3 tools/ladybird/prepare-v16-fonts.py "$SRC"
 python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-sandbox-bouchaud.py "$SRC"
+python3 tools/ladybird/prepare-worker-terminate.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1
 #

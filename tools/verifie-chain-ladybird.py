@@ -40,6 +40,7 @@ ORDRE = [
     "prepare-tls-diagnostic.py",
     "prepare-browser-runtime-link.py",
     "prepare-sandbox-bouchaud.py",
+    "prepare-worker-terminate.py",
     "prepare-full-browser-host.py",
     "prepare-network-live.py",
     "prepare-ui-bouchaud.py",
