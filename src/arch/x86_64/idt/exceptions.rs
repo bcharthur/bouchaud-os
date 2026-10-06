@@ -57,7 +57,7 @@ fn cr2_si_faute_de_page(nom: &str) -> Option<u64> {
     if nom == "PAGE FAULT" || nom == "DOUBLE FAULT" {
         // Dans une double faute CR2 n'est qu'un indice : s'il a change juste
         // avant l'echec de livraison, il designe souvent la premiere #PF.
-        Some(x86_64::registers::control::Cr2::read().as_u64())
+        Some(x86_64::registers::control::Cr2::read_raw())
     } else {
         None
     }
@@ -215,7 +215,7 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let cr2 = x86_64::registers::control::Cr2::read().as_u64();
+    let cr2 = x86_64::registers::control::Cr2::read_raw();
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
         reason,
@@ -333,23 +333,30 @@ extern "x86-interrupt" fn page_fault_handler(
     // comptee comme du calcul utilisateur -- et faisait lire `user_ms=92250
     // sys_ms=671` comme « limite par le CPU ». Voir `account_fault_enter`.
     let mur_avant_faute = crate::kernel::task::account_fault_enter();
-    let addr = x86_64::registers::control::Cr2::read();
+    // BOUCHAUD_CR2_BRUT_V1 : `Cr2::read()` (x86_64 0.14) passe par
+    // `VirtAddr::new`, qui PANIQUE sur une adresse non canonique. Le smoke
+    // 37518121906 en est mort : `VirtAddrNotValid(0xffff413f021ee480)`
+    // pendant une faute de WebContent (`in_kernel=false`) -- une faute d'un
+    // programme utilisateur emportait le noyau. L'adresse est lue brute ;
+    // une adresse qu'aucune projection ne couvre (non canonique comprise)
+    // termine le programme fautif comme toute autre faute non resolue.
+    let addr = x86_64::registers::control::Cr2::read_raw();
     crate::platform::pc::ecran_faute::entre_exception(
-        14, stack.instruction_pointer.as_u64(), code.bits(), Some(addr.as_u64()),
+        14, stack.instruction_pointer.as_u64(), code.bits(), Some(addr),
     );
-    let _site = crate::kernel::task::SiteIrq::enter(20, addr.as_u64());
-    crate::kernel::task::stall_pf_begin(addr.as_u64());
+    let _site = crate::kernel::task::SiteIrq::enter(20, addr);
+    crate::kernel::task::stall_pf_begin(addr);
 
     if from_user(&stack) {
         x86_64::instructions::interrupts::enable();
     }
 
-    crate::kernel::task::stall_site_set(21, addr.as_u64());
+    crate::kernel::task::stall_site_set(21, addr);
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         let mut retries = 0u32;
         let outcome = loop {
             let outcome = crate::kernel::task::peuple_a_la_demande(
-                addr.as_u64(),
+                addr,
                 code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
             );
             if outcome != crate::kernel::task::FaultOutcome::Retry {
@@ -365,7 +372,7 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::kernel::task::fault_retry_chain_complete(retries as u64);
 
         if outcome == crate::kernel::task::FaultOutcome::Resolved {
-            crate::kernel::task::stall_pf_done(addr.as_u64());
+            crate::kernel::task::stall_pf_done(addr);
             // `retire_current_if_zombie` prend elle-meme ce qu'il lui faut, et
             // seulement lorsqu'une retraite est reellement demandee -- ce qui
             // est faux presque toujours. L'envelopper ici prenait le gros
@@ -381,11 +388,11 @@ extern "x86-interrupt" fn page_fault_handler(
             crate::kernel::task::retire_current_if_zombie();
         }
 
-        crate::kernel::task::stall_pf_fail(addr.as_u64());
-        crate::kernel::task::log_fault_mapping(addr.as_u64());
+        crate::kernel::task::stall_pf_fail(addr);
+        crate::kernel::task::log_fault_mapping(addr);
         crate::println!(
             "faute de page utilisateur @ {:#x} ({:?})",
-            addr.as_u64(),
+            addr,
             code
         );
         // Pas de `account_fault_exit` ici : `kill_faulting_task` ne rend pas
@@ -394,10 +401,10 @@ extern "x86-interrupt" fn page_fault_handler(
         kill_faulting_task("faute de page", &stack);
     }
 
-    serial_println!("[cpu] page fault @ {:?} code {:?}", addr, code);
+    serial_println!("[cpu] page fault @ {:#x} code {:?}", addr, code);
     releve_faute_fatale("PAGE FAULT", &stack, code.bits());
     panic!(
-        "EXCEPTION: page fault @ {:?}\ncode: {:?}\n{:#?}",
+        "EXCEPTION: page fault @ {:#x}\ncode: {:?}\n{:#?}",
         addr, code, stack
     );
 }
