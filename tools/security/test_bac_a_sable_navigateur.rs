@@ -367,19 +367,64 @@ fn le_droit_reseau_fait_partie_de_toute_l_autorite() {
 const CACHE_ALT_SVC: &str = "/persist/ladybird/cache/Ladybird/Profiles/default/alt-svc-cache.txt";
 
 #[test]
-fn le_serveur_de_requetes_possede_son_profil_persistant() {
+fn le_serveur_de_requetes_possede_son_cache_et_rien_d_autre_du_profil() {
     // Le chemin exact que le journal montrait refuse, soixante-cinq fois.
     assert!(lecture_permise(SecurityProfile::BrowserNetwork, CACHE_ALT_SVC));
     assert!(ecriture_permise(SecurityProfile::BrowserNetwork, CACHE_ALT_SVC));
     assert!(ecriture_permise(
         SecurityProfile::BrowserNetwork,
-        "/persist/ladybird/data/Ladybird/Profiles/default/Ladybird.db"
-    ));
-    assert!(ecriture_permise(
-        SecurityProfile::BrowserNetwork,
         "/persist/ladybird/cache/Ladybird/Profiles/default/Cache/index.db-wal"
     ));
-    assert!(ecriture_permise(SecurityProfile::BrowserNetwork, PROFIL_NAVIGATEUR));
+    // BOUCHAUD_PROFIL_PAR_ROLE_V1 : la base SQL (cookies, stockage local) et
+    // les reglages appartiennent au processus navigateur. RequestServer n'y
+    // lit ni n'y ecrit plus rien, et ne peut plus ecrire a la racine du profil.
+    for interdit in [
+        "/persist/ladybird/data/Ladybird/Profiles/default/Ladybird.db",
+        "/persist/ladybird/data/Ladybird/Profiles/default/Ladybird.db-wal",
+        "/persist/ladybird/config/Ladybird/Profiles/default/Settings.json",
+        "/persist/ladybird/data",
+        "/persist/ladybird/config",
+        "/persist/ladybird/ailleurs",
+    ] {
+        assert!(!lecture_permise(SecurityProfile::BrowserNetwork, interdit), "lecture {interdit}");
+        assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, interdit), "ecriture {interdit}");
+    }
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, PROFIL_NAVIGATEUR));
+    assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, "/persist/ladybird/cache-vole/x"));
+}
+
+// BOUCHAUD_PROFIL_PAR_ROLE_V1 : en mode EPHEMERE le profil vit sous `/tmp`,
+// que tous les roles sandboxes lisent et ecrivent. Ses racines restent
+// privees : le rendu n'y voit rien, le role reseau n'y voit que son cache.
+#[test]
+fn le_profil_ephemere_sous_tmp_reste_prive() {
+    let rendus = [SecurityProfile::BrowserContent, SecurityProfile::Untrusted];
+    for chemin in [
+        "/tmp/ladybird-data/Ladybird/Profiles/default/Ladybird.db",
+        "/tmp/ladybird-config/Ladybird/Profiles/default/Settings.json",
+        "/tmp/ladybird-cache/Ladybird/Profiles/default/Cache/index.db",
+        "/tmp/ladybird/.config",
+        "/tmp/ladybird-data",
+        "/tmp/ladybird-cache",
+    ] {
+        for profil in rendus {
+            assert!(!lecture_permise(profil, chemin), "{profil:?} lit {chemin}");
+            assert!(!ecriture_permise(profil, chemin), "{profil:?} ecrit {chemin}");
+        }
+    }
+    let cache = "/tmp/ladybird-cache/Ladybird/Profiles/default/Cache/index.db";
+    assert!(lecture_permise(SecurityProfile::BrowserNetwork, cache));
+    assert!(ecriture_permise(SecurityProfile::BrowserNetwork, cache));
+    for interdit in ["/tmp/ladybird-data/Ladybird/Profiles/default/Ladybird.db", "/tmp/ladybird-config/x", "/tmp/ladybird/x"] {
+        assert!(!lecture_permise(SecurityProfile::BrowserNetwork, interdit), "{interdit}");
+        assert!(!ecriture_permise(SecurityProfile::BrowserNetwork, interdit), "{interdit}");
+    }
+    // Ce qui n'est PAS le profil reste commun : runtime, voisins de nom.
+    for profil in [SecurityProfile::BrowserContent, SecurityProfile::BrowserNetwork] {
+        assert!(ecriture_permise(profil, "/tmp/ladybird-runtime/socket"));
+        assert!(ecriture_permise(profil, "/tmp/ladybird-cachex/y"));
+        assert!(ecriture_permise(profil, "/tmp/fontconfig/cache"));
+    }
 }
 
 // BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1 : `mkdir` d'un ancetre existant rend
@@ -552,7 +597,7 @@ fn un_voisin_de_nom_n_est_pas_un_descendant() {
     // Et la reciproque, pour que le test ne passe pas en refusant tout.
     assert!(ecriture_permise(
         SecurityProfile::BrowserNetwork,
-        "/persist/ladybird/x"
+        "/persist/ladybird/cache/x"
     ));
 }
 

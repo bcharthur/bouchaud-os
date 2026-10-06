@@ -53,13 +53,12 @@ use super::profile::SecurityProfile;
 /// Le profil persistant du navigateur, tel que le processus navigateur le place
 /// (`tools/ladybird/ui-bouchaud/main.cpp`).
 ///
-/// Un seul prefixe couvre tout ce que RequestServer y ecrit : le profil
-/// `default` d'upstream sous les racines XDG (BOUCHAUD_PROFIL_XDG_V1),
-/// `XDG_CACHE_HOME=/persist/ladybird/cache` pour le cache HTTP et alt-svc,
-/// `XDG_DATA_HOME=/persist/ladybird/data` pour les magasins SQL,
-/// `XDG_CONFIG_HOME=/persist/ladybird/config` pour les reglages. Les
-/// enumerer separement ferait trois sources de verite pour une seule
-/// arborescence.
+/// Le profil `default` d'upstream sous les racines XDG (BOUCHAUD_PROFIL_XDG_V1) :
+/// `XDG_CACHE_HOME=/persist/ladybird/cache` (cache HTTP, alt-svc : a
+/// RequestServer), `XDG_DATA_HOME=/persist/ladybird/data` (magasins SQL : au
+/// processus navigateur), `XDG_CONFIG_HOME=/persist/ladybird/config`
+/// (reglages : au processus navigateur). BOUCHAUD_PROFIL_PAR_ROLE_V1 : aucun
+/// role sandboxe ne possede plus l'arborescence entiere.
 pub const PROFIL_NAVIGATEUR: &str = "/persist/ladybird";
 
 /// Ou le navigateur depose ce que l'utilisateur telecharge.
@@ -160,24 +159,78 @@ fn ecriture_commune(path: &str) -> bool {
         || path == "/dev/null"
 }
 
-/// Ce role possede-t-il le profil persistant du navigateur ?
-const fn possede_le_profil(profile: SecurityProfile) -> bool {
+// BOUCHAUD_PROFIL_PAR_ROLE_V1 (convergence P2)
+//
+// RequestServer possedait TOUT `/persist/ladybird` : configuration, donnees
+// (la base SQL ou le processus navigateur range cookies et stockage local)
+// et cache. Or il n'utilise que son `cache_path` (Services/RequestServer/
+// main.cpp : cache disque et `alt-svc-cache.txt`) -- le bac a sable upstream
+// le restreint d'ailleurs a ce seul chemin. Il ne possede plus que le CACHE.
+//
+// Et en mode EPHEMERE (bureau live, `BOUCHAUD_LADYBIRD_EPHEMERAL`), le profil
+// vit sous `/tmp/ladybird-*` -- que `lecture_commune`/`ecriture_commune`
+// ouvraient a TOUS les roles sandboxes : un WebContent compromis lisait la
+// base des cookies et le cache HTTP d'un autre site. Ces racines sont
+// desormais PRIVEES, quel que soit le mode : seul le processus navigateur
+// (non sandboxe) y a acces, et RequestServer a son cache.
+
+/// Les racines du profil du navigateur, persistant puis ephemere
+/// (`tools/ladybird/ui-bouchaud/main.cpp`). Le runtime
+/// (`/tmp/ladybird-runtime`, sockets) n'en fait pas partie.
+const RACINES_PRIVEES: [&str; 5] = [
+    PROFIL_NAVIGATEUR,
+    "/tmp/ladybird",
+    "/tmp/ladybird-config",
+    "/tmp/ladybird-data",
+    "/tmp/ladybird-cache",
+];
+
+/// Le cache HTTP (`XDG_CACHE_HOME`), persistant puis ephemere : le seul
+/// morceau du profil qui appartient a RequestServer.
+pub const CACHES_RESEAU: [&str; 2] = ["/persist/ladybird/cache", "/tmp/ladybird-cache"];
+
+fn dans_le_profil_prive(path: &str) -> bool {
+    RACINES_PRIVEES.iter().any(|racine| sous_arbre(path, racine))
+}
+
+fn dans_le_cache_reseau(path: &str) -> bool {
+    CACHES_RESEAU.iter().any(|racine| sous_arbre(path, racine))
+}
+
+/// `path` est-il un ancetre STRICT d'un cache reseau (`/persist`,
+/// `/persist/ladybird`) ? `Core::Directory::ensure_directory` cree chaque
+/// ancetre en ignorant EEXIST : le role reseau doit les VOIR
+/// (BOUCHAUD_MKDIR_EEXIST_AVANT_EACCES_V1), sans pouvoir y ecrire ni lire ce
+/// qu'ils contiennent d'autre.
+fn ancetre_du_cache(path: &str) -> bool {
+    CACHES_RESEAU.iter().any(|racine| {
+        racine.len() > path.len()
+            && racine.starts_with(path)
+            && (path == "/" || racine.as_bytes()[path.len()] == b'/')
+    })
+}
+
+/// Ce role possede-t-il le cache HTTP du navigateur ?
+const fn possede_le_cache(profile: SecurityProfile) -> bool {
     matches!(profile, SecurityProfile::BrowserNetwork)
 }
 
 pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
+    if path == "/" {
+        return false;
+    }
+    if dans_le_profil_prive(path) {
+        return possede_le_cache(profile) && (dans_le_cache_reseau(path) || ancetre_du_cache(path));
+    }
     if lecture_commune(path) {
         return true;
     }
-    if !possede_le_profil(profile) {
-        return false;
-    }
-    // Le repertoire `/persist` LUI-MEME est lisible pour ce role : un magasin
-    // qui commence par verifier que son volume existe echouerait sinon avant
-    // d'atteindre son propre sous-arbre. Sa racine reste en revanche
+    // Le repertoire `/persist` LUI-MEME est lisible pour le role reseau : un
+    // magasin qui commence par verifier que son volume existe echouerait sinon
+    // avant d'atteindre son propre sous-arbre. Sa racine reste en revanche
     // inscriptible par personne -- c'est la couche plateforme, non sandboxee,
     // qui la peuple au demarrage.
-    path == "/persist" || sous_arbre(path, PROFIL_NAVIGATEUR)
+    possede_le_cache(profile) && ancetre_du_cache(path)
 }
 
 /// La sortie audio, en ECRITURE seulement, pour le role de rendu.
@@ -196,11 +249,11 @@ const fn joue_du_son(profile: SecurityProfile) -> bool {
 }
 
 pub fn ecriture_permise(profile: SecurityProfile, path: &str) -> bool {
+    if dans_le_profil_prive(path) {
+        return possede_le_cache(profile) && dans_le_cache_reseau(path);
+    }
     if ecriture_commune(path) {
         return true;
     }
-    if joue_du_son(profile) && path == "/dev/dsp" {
-        return true;
-    }
-    possede_le_profil(profile) && sous_arbre(path, PROFIL_NAVIGATEUR)
+    joue_du_son(profile) && path == "/dev/dsp"
 }

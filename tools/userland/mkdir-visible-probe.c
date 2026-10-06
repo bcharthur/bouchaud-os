@@ -76,6 +76,13 @@ int main(int argc, char **argv)
 {
     int e = 0;
     if (argc > 1 && strcmp(argv[1], "prepare") == 0) {
+        // Ce que fait le processus navigateur (non sandboxe) AVANT de lancer
+        // RequestServer (`ui-bouchaud/main.cpp`) : la racine du profil et
+        // celle du cache existent. BOUCHAUD_PROFIL_PAR_ROLE_V1 : RequestServer
+        // ne possede plus que le cache ; creer `/persist/ladybird` lui-meme
+        // lui est refuse, et il n'en a pas besoin.
+        mkdir("/persist/ladybird", 0700);
+        mkdir("/persist/ladybird/cache", 0700);
         mkdir("/persist/Downloads", 0755);
         int r = essaie("/persist/Downloads/x", &e);
         printf("mkdir-visible-probe prepare : /persist/Downloads/x r=%d errno=%d\n", r, e);
@@ -124,6 +131,8 @@ int main(int argc, char **argv)
     verifie("mkdir(/persist/Downloads/neuf), absent et interdit : EACCES", r != 0 && e == EACCES, e);
     r = essaie("/dossier-neuf-a-la-racine", &e);
     verifie("mkdir(/dossier-neuf-a-la-racine) : EACCES", r != 0 && e == EACCES, e);
+    r = essaie("/persist/ladybird/data", &e);
+    verifie("mkdir(/persist/ladybird/data) : EACCES (profil hors cache)", r != 0 && e == EACCES, e);
     r = essaie("/persist/ladybird-chrome", &e);
     verifie("mkdir(/persist/ladybird-chrome) : EACCES (pas au role reseau)", r != 0 && e == EACCES, e);
 

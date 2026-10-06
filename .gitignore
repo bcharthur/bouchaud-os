@@ -233,3 +233,8 @@ tools/userland/out-oss-horloge/
 /ladybird-cache.img
 /temoin-cache.log
 /serie-cache.log
+/scenario-matrice/
+/matrice.img
+/serie-matrice.log*
+tools/userland/out-matrice/
+/serie-cache.log.propre
