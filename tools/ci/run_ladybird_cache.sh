@@ -59,15 +59,19 @@ cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.c
 # Pas de bureau : le navigateur tourne sans fenetre (`[LB:UI] sans_fenetre=1`)
 # -- le reseau, le cache et la base SQL n'en dependent pas -- et l'autorun
 # peut le lancer deux fois de suite.
+# Le navigateur lit son URL dans BOUCHAUD_M9_URL (ui-bouchaud/main.cpp), pas
+# dans argv : le run 37522655079 a ouvert le defaut, https://example.com/.
 cat > "$SCENARIO/autorun" <<AUTORUN
 export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
 export BOUCHAUD_LB_BANC_QUITTE=1
 echo CACHE_PASSAGE_1_DEBUT
-/bo-navigateur http://10.0.2.2:$PORT/cache-test.html?passage=1
+export BOUCHAUD_M9_URL='http://10.0.2.2:$PORT/cache-test.html?passage=1'
+/bo-navigateur
 echo CACHE_PASSAGE_1_SORTI statut=\$?
 echo CACHE_PASSAGE_2_DEBUT
-/bo-navigateur http://10.0.2.2:$PORT/cache-test.html?passage=2
+export BOUCHAUD_M9_URL='http://10.0.2.2:$PORT/cache-test.html?passage=2'
+/bo-navigateur
 echo CACHE_PASSAGE_2_SORTI statut=\$?
 echo CACHE_BANC_FIN
 AUTORUN
