@@ -130,6 +130,10 @@ JALONS=(
   'BOUCHAUD_UI_WEBCONTENT_CHROME 0'
   'BOUCHAUD_UI_V1_READY'
   '[LB:SANDBOX] service=WebContent role=rendu'
+  # BOUCHAUD_PROFIL_XDG_V1 : base SQL et cache HTTP actifs, profil sous
+  # /persist (le smoke n'exporte pas BOUCHAUD_LADYBIRD_EPHEMERAL).
+  '[LB:PROFILE] config=/persist/ladybird/config/Ladybird/Profiles/default'
+  '[LB:CACHE] disque=oui'
   '[LB:NAV] onglet=1 document_charge'
   'BOUCHAUD_UI_FIRST_FRAME onglet=1'
   'HOST_CANVAS OK'
@@ -548,7 +552,7 @@ grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
-for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]'; do
+for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]' 'Unable to create disk cache' 'BOUCHAUD_PERSIST_DEBORDE'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"

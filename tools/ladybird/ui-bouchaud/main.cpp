@@ -16,11 +16,15 @@
 #include <AK/ByteString.h>
 #include <AK/StringView.h>
 #include <AK/Vector.h>
+#include <LibHTTP/Cache/Utilities.h>
 #include <LibMain/Main.h>
 #include <LibURL/URL.h>
+#include <LibWebView/Settings.h>
 #include <UI/Bouchaud/Application.h>
 
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,6 +44,39 @@ char const* env_ou(char const* name, char const* fallback)
     auto* value = getenv(name);
     return (value && *value) ? value : fallback;
 }
+
+// Le cache HTTP est REGENERABLE, et il le dit : `CACHEDIR.TAG` (Cache
+// Directory Tagging Specification). Sous `/persist`, la persistance du noyau
+// ecarte un arbre ainsi etiquete, en entier, quand la zone ne le tient plus --
+// au lieu de faire echouer la sauvegarde des cookies et des reglages avec lui
+// (`src/fs/cache_jetable.rs`, BOUCHAUD_PERSIST_CACHE_JETABLE_V1).
+bool etiquette_le_cache(char const* dossier)
+{
+    static constexpr char contenu[] = "Signature: 8a477f597d28d172789f06886806bc55\n"
+                                      "# Cache HTTP de Ladybird (Bouchaud OS). Regenerable : la persistance l'ecarte\n"
+                                      "# en entier quand /persist ne tient plus dans sa zone.\n";
+    auto chemin = ByteString::formatted("{}/CACHEDIR.TAG", dossier);
+    struct stat etat {};
+    if (stat(chemin.characters(), &etat) == 0 && etat.st_size >= 43)
+        return true;
+    int fd = open(chemin.characters(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    auto const taille = strlen(contenu);
+    bool const ok = write(fd, contenu, taille) == static_cast<ssize_t>(taille);
+    close(fd);
+    return ok;
+}
+
+// Le plafond du cache HTTP sur disque. Upstream le derive de l'espace libre
+// (`statvfs`), jusqu'a 5 Gio. Deux bornes Bouchaud ne se voient pas dans ce
+// calcul : en mode ephemere le « disque » est la RAM (un cache de 20 % de la
+// memoire libre serait de la memoire prise aux pages), et le RAMFS n'a que
+// `MAX_NODES` = 4096 inodes pour TOUT le systeme -- un fichier par reponse.
+// Sous `/persist`, `statfs` annonce deja la zone (64 Mio) ; 32 Mio bornent
+// les deux cas. Un reglage choisi par l'utilisateur (about:settings) n'est
+// pas ecrase : seul le defaut upstream l'est.
+constexpr u64 PLAFOND_CACHE_HTTP = 32 * MiB;
 
 Main::Arguments make_arguments(Vector<ByteString>& storage, Vector<char*>& argv, Vector<StringView>& strings)
 {
@@ -69,19 +106,26 @@ ErrorOr<int> ladybird_main(Main::Arguments)
 
     // Le profil. `/persist` est monte par Bouchaud avant l'autorun ; le mode
     // ephemere (bureau live, banc) garde tout en RAM.
+    //
+    // BOUCHAUD_PROFIL_XDG_V1 : plus de `--profile-path`. Upstream y range
+    // config, donnees, cache ET runtime sous une seule racine -- les sockets
+    // et le fichier pid auraient donc vecu dans `/persist`, et survecu a un
+    // redemarrage. Sans selecteur, upstream prend le profil nomme `default`
+    // sous les racines XDG : `/persist/ladybird/{config,data,cache}/Ladybird/
+    // Profiles/default`, et le runtime sous `XDG_RUNTIME_DIR` (`/tmp`).
     bool const ephemere = getenv("BOUCHAUD_LADYBIRD_EPHEMERAL") != nullptr;
     char const* home = ephemere ? "/tmp/ladybird" : "/persist/ladybird";
-    char const* profil = ephemere ? "/tmp/ladybird-profile" : "/persist/ladybird/profile";
     char const* config = ephemere ? "/tmp/ladybird-config" : "/persist/ladybird/config";
     char const* donnees = ephemere ? "/tmp/ladybird-data" : "/persist/ladybird/data";
     char const* cache = ephemere ? "/tmp/ladybird-cache" : "/persist/ladybird/cache";
     char const* telechargements = ephemere ? "/tmp" : "/persist/Downloads";
     if (!ephemere)
         mkdir("/persist/ladybird", 0700);
-    for (auto* dossier : { home, profil, config, donnees, cache })
+    for (auto* dossier : { home, config, donnees, cache })
         mkdir(dossier, 0700);
     if (!ephemere)
         mkdir("/persist/Downloads", 0755);
+    bool const cache_etiquete = etiquette_le_cache(cache);
 
     setenv("HOME", home, 1);
     setenv("XDG_CONFIG_HOME", config, 1);
@@ -136,8 +180,6 @@ ErrorOr<int> ladybird_main(Main::Arguments)
         arguments.append("--enable-autoplay");
     arguments.append("--default-time-zone");
     arguments.append(fuseau);
-    arguments.append("--profile-path");
-    arguments.append(profil);
     arguments.append("--dns-server");
     arguments.append(dns);
     arguments.append("--dns-port");
@@ -157,8 +199,8 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     warnln("BOUCHAUD_UI_CHROME_OWNER browser");
     warnln("BOUCHAUD_UI_WEBCONTENT_CHROME 0");
     warnln("[LB:UI] surface={}x{} url={}", largeur, hauteur, url);
-    warnln("[LB:UI] profil persistant={} chemin={} telechargements={} ressources=/usr/share/ladybird",
-        ephemere ? "non"sv : "oui"sv, profil, telechargements);
+    warnln("[LB:UI] profil persistant={} config={} donnees={} cache={} telechargements={} ressources=/usr/share/ladybird",
+        ephemere ? "non"sv : "oui"sv, config, donnees, cache, telechargements);
     warnln("[LB:UI] plateforme sandbox={} sql={} cache_disque={} defilement_async={} isolation={} fuseau={} audio={}",
         getenv("BOUCHAUD_DISABLE_SANDBOX") ? "DESACTIVE"sv : "noyau+verification"sv,
         getenv("BOUCHAUD_DISABLE_SQL") ? "non"sv : "oui"sv,
@@ -173,6 +215,19 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     {
         auto application = TRY(BouchaudUI::Application::create(host_arguments));
         warnln("[ladybird-bouchaud] BROWSER_HOST_INITIALIZED");
+
+        auto& reglages = WebView::Application::settings();
+        auto navigation = reglages.browsing_data_settings();
+        if (navigation.disk_cache_settings.maximum_size == HTTP::DEFAULT_MAXIMUM_DISK_CACHE_SIZE) {
+            navigation.disk_cache_settings.maximum_size = PLAFOND_CACHE_HTTP;
+            reglages.set_browsing_data_settings(navigation);
+        }
+        auto const& chemins = WebView::Application::profile().paths();
+        warnln("[LB:CACHE] disque={} plafond_octets={} etiquette={} chemin={}",
+            getenv("BOUCHAUD_DISABLE_DISK_CACHE") ? "non"sv : "oui"sv,
+            reglages.browsing_data_settings().disk_cache_settings.maximum_size,
+            cache_etiquete ? 1 : 0, chemins.cache);
+        warnln("[LB:PROFILE] config={} donnees={} runtime={}", chemins.config, chemins.data, chemins.runtime);
 
         auto const& urls = WebView::Application::browser_options().urls;
         auto initiale = urls.is_empty() ? URL::about_blank() : urls.first();

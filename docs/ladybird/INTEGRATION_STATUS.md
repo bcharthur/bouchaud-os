@@ -57,7 +57,7 @@ qu'il reste a instrumenter.
 
 <!-- MESURE:DEBUT -->
 
-    couverture des contrats     15/16  (93 %)
+    couverture des contrats     18/19  (94 %)
     integration fonctionnelle   7/29  (24 %)
 
     dont a revalider physiquement   3
@@ -83,6 +83,9 @@ qu'il reste a instrumenter.
 | Cycle de vie des onglets *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-lifecycle-pages` | garde verte |
 | Frontend UI/Bouchaud (chrome hors WebContent) *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-ui-bouchaud` | garde verte |
 | Chaine de preparation Ladybird *(infra)* | **OK** | `STATIC_CONTRACT` | `garde:verifie-chain-ladybird` | garde verte |
+| Renommage POSIX (rename/renameat/renameat2) *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_renommage` | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
+| Cache jetable de la persistance (decision) *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cache_jetable` | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
+| Cache jetable de la persistance (deux demarrages) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_persist_cache.sh:PERSIST_CACHE_OK` | banc tools/ci/run_persist_cache.sh (marqueur PERSIST_CACHE_OK) |
 | Ladybird construit | **OK** | `QEMU_RUNTIME` | `ci:ladybird-native-browser.yml:bouchaud-ladybird-native-browser` | artefact bouchaud-ladybird-native-browser produit au run 35742940872 |
 | BrowserHost demarre | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_START` | atteint au run 35742940872 |
 | BrowserHost initialise | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_INITIALIZED` | atteint au run 35742940872 |
@@ -105,9 +108,9 @@ qu'il reste a instrumenter.
 | HTTPS / TLS | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-18:bb(8)` | bb(8) (2026-09-18, commit a36b3e4) |
 | HTTP / RequestServer | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-18:bb(8)` | bb(8) (2026-09-18, commit a36b3e4) |
 | Plusieurs onglets | **PHYSICAL_OLD** | `PHYSICAL_RUNTIME` | `physique:2026-09-19:photo` | photo (2026-09-19, commit 3c7e726) |
-| Cookies | **NON MESURE** | `—` | `—` | --disable-sql-database |
-| Cache disque | **NON MESURE** | `—` | `—` | --disable-http-disk-cache |
-| Stockage / profil | **NON MESURE** | `—` | `—` | pots upstream en memoire seulement |
+| Cookies | **NON MESURE** | `—` | `—` | base SQL active (plus de --disable-sql-database) ; aucun banc ne relit un cookie apres redemarrage |
+| Cache disque | **NON MESURE** | `—` | `—` | actif (plus de --disable-http-disk-cache), plafond 32 Mio, CACHEDIR.TAG ; aucun banc de reutilisation HTTP |
+| Stockage / profil | **NON MESURE** | `—` | `—` | /persist/ladybird/{config,data,cache} (profil XDG `default`) ; Stage 2 en RAM |
 | Isolation de site | **NON MESURE** | `—` | `—` | top-level par defaut depuis UI/Bouchaud ; aucun banc ne l'exerce encore |
 | Audio | **NON MESURE** | `—` | `—` | aucun backend |
 | GPU | **NON MESURE** | `—` | `—` | --force-cpu-painting |

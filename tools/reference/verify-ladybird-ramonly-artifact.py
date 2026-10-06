@@ -4,7 +4,7 @@ import sys
 
 MARKERS = (
     b"BROWSER_HOST_INITIALIZED",
-    b"/tmp/ladybird-profile",
+    b"/tmp/ladybird-cache",
     b"--disable-http-disk-cache",
     b"--disable-sql-database",
 )

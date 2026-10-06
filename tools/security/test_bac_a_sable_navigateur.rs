@@ -362,7 +362,9 @@ fn le_droit_reseau_fait_partie_de_toute_l_autorite() {
 // qui pourrait ecrire sur `/persist` survivrait a un redemarrage.
 // ---------------------------------------------------------------------------
 
-const CACHE_ALT_SVC: &str = "/persist/ladybird/profile/cache/alt-svc-cache.txt";
+// BOUCHAUD_PROFIL_XDG_V1 : le profil `default` d'upstream sous
+// `XDG_CACHE_HOME`, plus `--profile-path`.
+const CACHE_ALT_SVC: &str = "/persist/ladybird/cache/Ladybird/Profiles/default/alt-svc-cache.txt";
 
 #[test]
 fn le_serveur_de_requetes_possede_son_profil_persistant() {
@@ -371,7 +373,11 @@ fn le_serveur_de_requetes_possede_son_profil_persistant() {
     assert!(ecriture_permise(SecurityProfile::BrowserNetwork, CACHE_ALT_SVC));
     assert!(ecriture_permise(
         SecurityProfile::BrowserNetwork,
-        "/persist/ladybird/data/cookies.sqlite"
+        "/persist/ladybird/data/Ladybird/Profiles/default/Ladybird.db"
+    ));
+    assert!(ecriture_permise(
+        SecurityProfile::BrowserNetwork,
+        "/persist/ladybird/cache/Ladybird/Profiles/default/Cache/index.db-wal"
     ));
     assert!(ecriture_permise(SecurityProfile::BrowserNetwork, PROFIL_NAVIGATEUR));
 }

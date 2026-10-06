@@ -53,10 +53,13 @@ use super::profile::SecurityProfile;
 /// Le profil persistant du navigateur, tel que le processus navigateur le place
 /// (`tools/ladybird/ui-bouchaud/main.cpp`).
 ///
-/// Un seul prefixe couvre tout ce que RequestServer y ecrit : `--profile-path`
-/// y met le cache HTTP et le cache alt-svc, `XDG_DATA_HOME` les magasins SQL,
-/// `XDG_CACHE_HOME` le reste. Les enumerer separement ferait deux sources de
-/// verite pour une seule arborescence.
+/// Un seul prefixe couvre tout ce que RequestServer y ecrit : le profil
+/// `default` d'upstream sous les racines XDG (BOUCHAUD_PROFIL_XDG_V1),
+/// `XDG_CACHE_HOME=/persist/ladybird/cache` pour le cache HTTP et alt-svc,
+/// `XDG_DATA_HOME=/persist/ladybird/data` pour les magasins SQL,
+/// `XDG_CONFIG_HOME=/persist/ladybird/config` pour les reglages. Les
+/// enumerer separement ferait trois sources de verite pour une seule
+/// arborescence.
 pub const PROFIL_NAVIGATEUR: &str = "/persist/ladybird";
 
 /// Ou le navigateur depose ce que l'utilisateur telecharge.

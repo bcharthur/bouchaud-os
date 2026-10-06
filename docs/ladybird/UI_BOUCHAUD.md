@@ -112,9 +112,41 @@ WebContent. Tests négatifs : `tools/security/test_bac_a_sable_navigateur.rs`
 `le_compositor_est_un_role_de_rendu_confine`),
 `tools/ladybird/test_roles_livres.rs`.
 
+## 5 bis. Profil, base SQL, cache HTTP (P7)
+
+`--disable-sql-database` et `--disable-http-disk-cache` ne sont plus passés
+(ni par Stage 2, ni par le smoke) ; ils restent disponibles pour un diagnostic
+(`BOUCHAUD_DISABLE_SQL`, `BOUCHAUD_DISABLE_DISK_CACHE`).
+
+- **Prérequis noyau** : `rename`/`renameat`/`renameat2` POSIX
+  (`src/fs/renommage.rs`, sonde `renommage-probe` 24/24) ; le WAL de SQLite
+  (verrous d'enregistrement, `MAP_SHARED` du `-shm`) est couvert par
+  `wal-probe`.
+- **Profil** (BOUCHAUD_PROFIL_XDG_V1) : plus de `--profile-path`, qui rangeait
+  aussi le *runtime* (sockets, pid) sous `/persist`. Le profil `default`
+  d'upstream sous les racines XDG donne
+  `/persist/ladybird/{config,data,cache}/Ladybird/Profiles/default`, runtime
+  sous `/tmp/ladybird-runtime`. Journal : `[LB:PROFILE]`, `[LB:CACHE]`.
+- **Stage 2** reste en RAM (`BOUCHAUD_LADYBIRD_EPHEMERAL`) : le montage NVMe
+  y est différé après l'arrivée au bureau et dépose les fichiers du disque
+  par-dessus ceux du RAMFS — une base SQLite ouverte avant lui serait réécrite
+  sous les pieds du navigateur. SQL et cache y sont actifs, en RAM.
+- **Cache jetable** (BOUCHAUD_PERSIST_CACHE_JETABLE_V1) : la zone persistante
+  porte 2048 fichiers et ~64 Mio ; au-delà, la synchronisation échouait pour
+  TOUT `/persist` (cookies et réglages compris, `fsync` → `EIO`). Le navigateur
+  étiquette son cache `CACHEDIR.TAG` ; la persistance écarte un arbre étiqueté
+  **en entier** (index SQLite compris) quand il ne tient plus, jamais le
+  non-jetable (`src/fs/cache_jetable.rs`, `tools/fs/test_cache_jetable.rs`,
+  `tools/ci/run_persist_cache.sh`, preuves dans
+  `docs/preuves/persist-cache-jetable-20261006/`).
+- **`statfs(/persist)`** annonce la zone (66 580 480 octets, 2048 entrées) et
+  non la RAM (~1 Gio en QEMU) : c'est sur ce chiffre qu'upstream dimensionne le
+  cache. Plafond Bouchaud supplémentaire : 32 Mio (le RAMFS n'a que 4096
+  inodes pour tout le système ; un réglage utilisateur n'est pas écrasé).
+
 ## 6. Journal structuré
 
-`[LB:UI]`, `[LB:TAB]`, `[LB:NAV]`, `[LB:FRAME]`, `[LB:PERF]`, `[LB:JS]`,
+`[LB:UI]`, `[LB:PROFILE]`, `[LB:CACHE]`, `[LB:TAB]`, `[LB:NAV]`, `[LB:FRAME]`, `[LB:PERF]`, `[LB:JS]`,
 `[LB:DOWNLOAD]`, `[LB:DIALOG]`, `[LB:CRASH]`, `[LB:SANDBOX]`. Jalons :
 `BOUCHAUD_UI_CHROME_OWNER browser`, `BOUCHAUD_UI_WEBCONTENT_CHROME 0`,
 `BOUCHAUD_UI_V1_READY`, `BOUCHAUD_UI_FIRST_FRAME`.
@@ -141,5 +173,8 @@ WebContent. Tests négatifs : `tools/security/test_bac_a_sable_navigateur.rs`
 - Menu contextuel de lien : le lien est celui du dernier survol.
 - Historique/favoris : magasin texte du chrome (`/persist/ladybird-chrome`),
   pas encore `WebView::HistoryStore`.
+- Cache HTTP : aucune réutilisation après redémarrage n'est encore mesurée par
+  un banc navigateur (la persistance, elle, l'est en QEMU). Le RAMFS reste borné
+  à 4096 inodes.
 - `BOUCHAUD_M9` reste exporté : il ne commande plus que l'instrumentation
   LibRequests et le drainage du corps (contournement du notificateur).

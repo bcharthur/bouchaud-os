@@ -375,12 +375,20 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::shell::set_exported_for_boot("BOUCHAUD_TIME_ZONE", "Europe/Paris");
     crate::shell::set_exported_for_boot("BOUCHAUD_ALLOW_POPUPS", "1");
 
-    // Stage 2 single-USB : aucun stockage persistant writable n'est requis.
-    // Le BrowserHost platform-complete sait basculer nativement vers son
-    // profil/cache RAM-only via ces variables.
+    // Stage 2 single-USB : le profil reste en RAM (`/tmp/ladybird-*`).
+    //
+    // Ce n'est plus un mode degrade. BOUCHAUD_PROFIL_XDG_V1 : la base SQL
+    // (cookies, historique, stockage) et le cache HTTP sur disque sont
+    // ACTIFS -- `rename`/`renameat2` sont POSIX (`fs/renommage.rs`), et le
+    // WAL de SQLite a ses verrous et son `MAP_SHARED` (`wal-probe`). Seul
+    // l'emplacement reste en RAM, pour une raison qui n'est pas Ladybird :
+    // la persistance NVMe est montee APRES l'arrivee au bureau
+    // (`installation::differe_le_montage`), et ce montage depose les
+    // fichiers du disque PAR-DESSUS ceux du RAMFS. Une base SQLite ouverte
+    // sous `/persist` avant lui serait reecrite sous les pieds du navigateur.
+    // Le smoke QEMU, ou `/persist` est monte avant l'autorun, tourne lui sur
+    // `/persist/ladybird`.
     crate::shell::set_exported_for_boot("BOUCHAUD_LADYBIRD_EPHEMERAL", "1");
-    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_SQL", "1");
-    crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_DISK_CACHE", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_ASYNC_SCROLLING", "1");
     crate::shell::set_exported_for_boot("BOUCHAUD_DISABLE_AUDIO", "1");
 
