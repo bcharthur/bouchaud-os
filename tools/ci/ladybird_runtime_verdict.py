@@ -18,8 +18,12 @@ REQUIRED = {
     "startup_host": "[ladybird-bouchaud] BROWSER_HOST_START",
     "startup_initialized": "[ladybird-bouchaud] BROWSER_HOST_INITIALIZED",
     "ipc_gui": "[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK",
-    "document": "[ladybird-bouchaud] M11_DOCUMENT_LOADED",
-    "frame": "[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED",
+    # BOUCHAUD_UI_V1 : le document et la trame sont annonces par le
+    # navigateur (UI/Bouchaud), plus par WebContent.
+    "ui": "BOUCHAUD_UI_V1_READY",
+    "webcontent_sans_chrome": "BOUCHAUD_UI_WEBCONTENT_CHROME 0",
+    "document": "[LB:NAV] onglet=1 document_charge",
+    "frame": "BOUCHAUD_UI_FIRST_FRAME onglet=1",
     "codecs": "HOST_IMAGES_OK codecs=11/11 fond=1 echelle=1 reutilise=1",
     "javascript": "HOST_JS_OK",
     "worker_http": "HOST_WORKER_HTTP_FUNCTIONAL OK",

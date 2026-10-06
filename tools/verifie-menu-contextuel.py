@@ -44,7 +44,7 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
-V19 = RACINE / "tools" / "ladybird" / "prepare-v19-navigateur.py"
+V19 = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BrowserWindow.cpp"
 
 
 def corps(source, signature):
@@ -147,17 +147,24 @@ def regle_origine(code, v19, fautes):
             "menu, et aucune capture ne le montrerait."
         )
 
-    for hook, quoi in (
-        ("page_did_request_context_menu", "le clic droit dans la page"),
-        ("page_did_request_link_context_menu", "le clic droit sur un lien"),
-        ("page_did_request_image_context_menu", "le clic droit sur une image"),
+    # BOUCHAUD_UI_V1 : les demandes du moteur arrivent a la VUE
+    # (`ViewImplementation::did_request_*_context_menu` active le menu
+    # correspondant) ; la fenetre branche chacun sur le menu du chrome.
+    for menu, quoi in (
+        ("page_context_menu()", "le clic droit dans la page"),
+        ("link_context_menu()", "le clic droit sur un lien"),
+        ("image_context_menu()", "le clic droit sur une image"),
     ):
-        bloc = v19.find(hook)
-        if bloc < 0 or "ouvre_menu_contextuel" not in v19[bloc : bloc + 1600]:
+        motif = "vue.%s.on_activation = [ouvre_menu]" % menu
+        if motif not in v19:
             fautes.append(
-                "prepare-v19-navigateur.py : %s n'ouvre plus le menu (%s)."
-                % (quoi, hook)
+                "BrowserWindow.cpp : %s n'ouvre plus le menu (%s)." % (quoi, menu)
             )
+    ouvre = v19.find("auto ouvre_menu = [")
+    if ouvre < 0 or "BouchaudChrome::ouvre_menu_contextuel(" not in v19[ouvre : ouvre + 600]:
+        fautes.append(
+            "BrowserWindow.cpp : `ouvre_menu` n'ouvre plus le menu du chrome."
+        )
 
 
 def regle_entrees(code, fautes):

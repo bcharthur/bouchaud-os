@@ -47,14 +47,12 @@ LES REGLES
    `compose_toolbar_only()` ne touche aucun pixel de page : il ne peut pas
    restaurer ce qu'un calque deplace laisse derriere lui.
 
-7. Le texte des calques passe par `draw_ui_text`. C'est le point unique que
-   `modernise-v15.py` remplace par le rendu Skia ; un `draw_text` direct
-   donnerait une bulle en police bitmap a cote d'une barre d'adresse en DejaVu.
+7. Le texte des calques passe par `draw_ui_text`. C'est le point unique rendu
+   par Skia ; un `draw_text` direct donnerait une bulle en police bitmap a
+   cote d'une barre d'adresse en DejaVu.
 
-8. Les ancres de `modernise-v15.py` existent encore, mot pour mot. C'est la
-   regle qui coute vingt minutes quand elle lache : la substitution echoue au
-   milieu de la construction, ou -- pire -- ne s'applique plus et le chrome
-   part avec la police de secours sans que rien ne le dise.
+8. `draw_ui_text` essaie d'abord Skia (`draw_browser_text`, FontConfig), et ne
+   tombe sur l'atlas 8x8 qu'en secours.
 
 CE QUE CE VERIFICATEUR NE PEUT PAS VOIR
 ---------------------------------------
@@ -75,7 +73,6 @@ RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
 CALQUES = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudCalques.h"
 BANC = RACINE / "tools" / "ladybird" / "chrome" / "test_calques.cpp"
-V15 = RACINE / "tools" / "ladybird" / "chrome" / "modernise-v15.py"
 
 
 def texte(chemin, fautes):
@@ -342,7 +339,7 @@ def regle_texte_unique(code, fautes):
     if corps(code, "inline void draw_ui_text(Canvas const& canvas") is None:
         fautes.append(
             "BouchaudChrome.h : `draw_ui_text` a disparu. C'est le point "
-            "unique que modernise-v15.py remplace par le rendu Skia."
+            "unique rendu par Skia."
         )
         return
     for nom in re.findall(r"^inline void (dessine_[a-z_]+)\(Canvas", code, re.M):
@@ -353,43 +350,40 @@ def regle_texte_unique(code, fautes):
             fautes.append(
                 "BouchaudChrome.h : `%s` appelle `draw_text` directement. "
                 "Le texte du chrome passe par `draw_ui_text`, sinon ce calque "
-                "restera en police bitmap quand V15 modernisera le reste." % nom
+                "restera en police bitmap a cote du reste, rendu par Skia." % nom
             )
 
 
-def regle_ancres_v15(chrome, v15, fautes):
-    """8. Les ancres de modernise-v15.py existent encore, mot pour mot."""
-    ancres = re.findall(r"^anchor = '(.*)'$", v15, re.M)
-    if not ancres:
-        fautes.append("modernise-v15.py : plus aucune ancre `anchor = ...`.")
-    for brute in ancres:
-        ancre = brute.encode("utf-8").decode("unicode_escape").replace("\\'", "'")
-        if ancre not in chrome:
-            fautes.append(
-                "modernise-v15.py vise une ancre absente de BouchaudChrome.h :\n"
-                "    %r\n"
-                "La substitution echouera au milieu de la construction." % ancre
-            )
+def regle_texte_skia(code, fautes):
+    """8. `draw_ui_text` rend par Skia, l'atlas en secours.
 
-    bloc = re.search(r"^old = '''(.*?)'''$", v15, re.M | re.S)
-    if not bloc:
+    BOUCHAUD_CHROME_V15/V16 est dans la source du chrome depuis BOUCHAUD_UI_V1
+    (il etait applique par `modernise-v15.py` a la construction). Ce qui doit
+    rester vrai : le point unique essaie d'abord le rendu Skia, et ne tombe sur
+    l'atlas 8x8 que si Skia echoue."""
+    bloc = corps(code, "inline void draw_ui_text(Canvas const& canvas")
+    if bloc is None:
+        return
+    skia = bloc.find("draw_browser_text(")
+    atlas = bloc.find("draw_text(canvas")
+    if skia < 0:
         fautes.append(
-            "modernise-v15.py : le corps de `draw_ui_text` a remplacer n'est "
-            "plus une chaine `old = '''...'''`."
+            "BouchaudChrome.h : `draw_ui_text` ne passe plus par le rendu Skia "
+            "(`draw_browser_text`). Le chrome partirait en police bitmap."
         )
-    elif bloc.group(1) not in chrome:
+    elif atlas >= 0 and atlas < skia:
         fautes.append(
-            "modernise-v15.py : le corps de `draw_ui_text` a remplacer ne "
-            "figure plus tel quel dans BouchaudChrome.h. Le chrome partirait "
-            "avec la police de secours sans que rien ne le signale."
+            "BouchaudChrome.h : `draw_ui_text` dessine l'atlas AVANT d'essayer "
+            "Skia ; le secours deviendrait la regle."
         )
+    if corps(code, "inline bool draw_browser_text(") is None:
+        fautes.append("BouchaudChrome.h : `draw_browser_text` (Skia/FontConfig) a disparu.")
 
 
 def main():
     fautes = []
     chrome = texte(CHROME, fautes)
     calques = texte(CALQUES, fautes)
-    v15 = texte(V15, fautes)
     texte(BANC, fautes)
 
     if chrome is not None and calques is not None:
@@ -400,10 +394,7 @@ def main():
         regle_ordre_composition(code, fautes)
         regle_tick(code, fautes)
         regle_texte_unique(code, fautes)
-        # Les ancres de V15 sont des commentaires de documentation : elles se
-        # cherchent dans le texte brut, pas dans le code depouille.
-        if v15 is not None:
-            regle_ancres_v15(chrome, v15, fautes)
+        regle_texte_skia(code, fautes)
 
     if fautes:
         print("calques du chrome : %d regle(s) violee(s)\n" % len(fautes))

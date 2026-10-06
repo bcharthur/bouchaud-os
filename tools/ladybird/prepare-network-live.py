@@ -94,8 +94,9 @@ insert(client, '    set_option(CURLMOPT_SOCKETFUNCTION, &on_socket_callback);', 
 # Route diagnostics only AFTER all structural patches consumed their anchors.
 # Earlier routing broke input ownership and platform-complete preparation.
 def route_diagnostics(root):
-    for relative in ("Services/BouchaudBrowserHost/main.cpp",
-                     "Services/WebContent/ConnectionFromClient.cpp"):
+    # BOUCHAUD_UI_V1 : l'hote (UI/Bouchaud) ecrit deja ses jalons sur stderr ;
+    # seul WebContent peut encore en porter d'anciens.
+    for relative in ("Services/WebContent/ConnectionFromClient.cpp",):
         path = root / relative
         data = path.read_text()
         path.write_text(data.replace('outln("[ladybird-bouchaud] BROWSER_HOST_',

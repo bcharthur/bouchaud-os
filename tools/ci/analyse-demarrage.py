@@ -80,8 +80,9 @@ def jalons_hote(source):
         "BROWSER_HOST_START",
         "BROWSER_HOST_INITIALIZED",
         "M11_GUI_HANDSHAKE_OK",
-        "BROWSER_HOST_M11_FRAME_PRESENTED",
-        "M11_DOCUMENT_LOADED",
+        "BOUCHAUD_UI_V1_READY",
+        "BOUCHAUD_UI_FIRST_FRAME",
+        "document_charge",
     ]
     vus = {}
     for numero, ligne in enumerate(source):

@@ -123,8 +123,15 @@ jobs:
       - name: Budgets d'architecture
         run: python3 tools/ci/check_budgets.py
 
-      - name: Ownership des entrees Ladybird
-        run: tools/ladybird/test-input-ownership.sh
+      # BOUCHAUD_UI_V1 : l'entree part du processus navigateur par la file
+      # upstream (`enqueue_input_event`) ; l'ancienne sonde d'accuse de
+      # reception de l'injection locale dans WebContent n'a plus d'objet. Ce
+      # qui se verifie a sa place : le frontend, la chaine, le bac a sable.
+      - name: Frontend UI/Bouchaud (architecture, chaine, bac a sable)
+        run: |
+          python3 tools/verifie-ui-bouchaud.py
+          python3 tools/verifie-chain-ladybird.py
+          python3 tools/verifie-lifecycle-pages.py
 
       # Le service ring 3 est freestanding : le compiler ici coute quelques
       # secondes et attrape ce qu'aucun test hote ne verra -- un en-tete qui ne

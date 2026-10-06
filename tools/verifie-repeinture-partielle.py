@@ -25,27 +25,22 @@ c'est une machine qui rame et une page qui clignote.
 1. `present()` compose par degat, pas par trame complete. C'est le defaut
    lui-meme : un `compose_full()` remis ici et tout revient.
 
-2. Le degat de `paint_next_frame()` est ACCUMULE, pas ecrase. Le pump ne garde
-   qu'une capture en vol ; les etapes de rendu qui tombent pendant une capture
-   ont bel et bien change des pixels. Ne retenir que la derniere laisserait
-   leurs traces a l'ecran, et le defaut serait pire que celui qu'on corrige --
-   une trainee au lieu d'une lenteur.
+2. Le degat est celui du COMPOSITOR (BOUCHAUD_UI_V1). Il accumule ce qui a
+   change entre deux trames presentees a une vue ; `server_did_paint` le remet
+   a la vue, qui le transmet intact a la fenetre puis au chrome. Le remplacer
+   par la trame entiere ramenerait le defaut d'origine.
 
-3. Les deux `PaintConfig` -- celle du rendu, celle de la capture -- restent
-   identiques mot pour mot. Elles se comparent par egalite : une difference
-   d'un seul pixel fait reenregistrer TOUTE la liste d'affichage a chaque
-   capture, et empeche le calcul de degat de se declencher, puisqu'il exige que
-   la config memorisee soit deja la sienne. Rien ne casse ; tout redevient
-   lent.
+3. Aucune capture. La page etait peinte deux fois -- une fois pour le
+   Compositor, une fois pour la capture que le chrome demandait. Elle ne l'est
+   plus qu'une fois.
 
-4. La cible d'une capture M11 est anonyme des l'origine, et reutilisee.
-   `Gfx::Bitmap::create()` alloue de la memoire ordinaire, puis
-   `to_shareable_bitmap()` en alloue une seconde pour y recopier la premiere :
-   six mebioctets de pages neuves par trame. C'est ce chemin que le journal de
-   la machine nommait `bottleneck=memory-pagefault`.
+4. Le backing store presente n'est copie qu'une fois, dans la surface, et
+   seulement les lignes du plan. Aucune copie de transit
+   (`to_shareable_bitmap`, `clone`) : six mebioctets de pages neuves par trame,
+   c'est ce que le journal nommait `bottleneck=memory-pagefault`.
 
-5. `BouchaudDegat.h` voyage avec le chrome. L'oublier ne se voit pas ici : cela
-   echoue a la compilation de WebContent, vingt minutes plus tard.
+5. `BouchaudDegat.h` voyage avec le chrome (`prepare-ui-bouchaud.py`). L'oublier
+   ne se voit pas ici : cela echoue a la compilation du navigateur.
 
 6. Le banc d'essai hote existe et reste decouvert. C'est la seule chose qui
    exerce cette arithmetique ailleurs que dans QEMU -- et une erreur d'un pixel
@@ -73,8 +68,9 @@ RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
 DEGAT = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudDegat.h"
 BANC = RACINE / "tools" / "ladybird" / "chrome" / "test_degat.cpp"
-REPAINT = RACINE / "tools" / "ladybird" / "prepare-repaint.py"
-M11 = RACINE / "tools" / "ladybird" / "prepare-m11-chrome.py"
+VUE = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BouchaudWebView.cpp"
+FENETRE = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BrowserWindow.cpp"
+INSTALLATEUR = RACINE / "tools" / "ladybird" / "prepare-ui-bouchaud.py"
 HOTE = RACINE / "tools" / "ci" / "run_host_tests.sh"
 
 
@@ -166,7 +162,7 @@ def etendue(source, signature):
 
 def regle_present(chrome, fautes):
     """1. `present()` compose par degat."""
-    bloc = corps(chrome, "inline bool present(u64 page_id, Gfx::ShareableBitmap const& screenshot, int degat_x")
+    bloc = corps(chrome, "inline bool present(u64 page_id, NonnullRefPtr<Gfx::Bitmap> bitmap")
     if bloc is None:
         fautes.append(
             "BouchaudChrome.h : `present()` ne prend plus de degat. Une capture "
@@ -257,128 +253,70 @@ def regle_present(chrome, fautes):
         )
 
 
-def regle_accumulation(repaint, fautes):
-    """2. Le degat est accumule, pas ecrase."""
-    if "bouchaud_accumulate_frame_damage" not in repaint:
+def regle_degat_natif(vue, fenetre, fautes):
+    """2. Le degat est celui du Compositor, transmis intact.
+
+    BOUCHAUD_UI_V1 : le Compositor accumule le degat entre deux trames
+    presentees (`BackingStoreManager`), et `server_did_paint` le remet a la
+    vue. Il ne doit etre ni remplace par la trame entiere, ni perdu en route."""
+    accepte = corps(vue, "void BouchaudWebView::did_accept_presented_backing_store(")
+    if accepte is None or "m_window.present(" not in accepte or "damage_rect)" not in accepte:
         fautes.append(
-            "prepare-repaint.py : le degat de `paint_next_frame()` n'est plus "
-            "accumule. Il redeviendrait ce qu'il etait : calcule puis jete."
+            "BouchaudWebView.cpp : la trame presentee n'arrive plus a la "
+            "fenetre avec le degat du Compositor."
         )
-        return
-    if "present_frame(viewport_rect, damage_rect)" not in repaint:
+    present = corps(fenetre, "void BrowserWindow::present(")
+    if present is None or "BouchaudChrome::present(" not in present:
+        fautes.append("BrowserWindow.cpp : `present` ne remet plus la trame au chrome.")
+    elif "degat.x(), degat.y(), degat.width(), degat.height()" not in present:
         fautes.append(
-            "prepare-repaint.py : l'ancre de `paint_next_frame()` a disparu ; "
-            "l'accumulation ne s'accroche plus a rien."
-        )
-    if "m_bouchaud_frame_damage.united(" not in repaint:
-        fautes.append(
-            "prepare-repaint.py : les degats successifs ne sont plus REUNIS. "
-            "Le pump ne capture pas toutes les etapes de rendu : ne garder que "
-            "la derniere laisse a l'ecran les pixels changes par les autres."
-        )
-    if "bouchaud_require_full_frame_damage" not in repaint:
-        fautes.append(
-            "prepare-repaint.py : plus aucun moyen de dire « on ne sait plus ». "
-            "Un navigable imbrique peint dans son propre repere : reunir son "
-            "rectangle avec celui du sommet designerait des pixels au hasard."
+            "BrowserWindow.cpp : `present` ne transmet plus le degat recu. "
+            "Chaque trame redeviendrait complete."
         )
 
 
-def bloc_substitution(source, etiquette):
-    """Le texte d'un appel `substitute(...)` designe par son etiquette.
-
-    Chercher dans tout le fichier laisserait la docstring repondre a la place
-    du code : elle CITE les expressions qu'elle explique. Une regle satisfaite
-    par un commentaire ne protege rien.
-    """
-    fin = source.find('"%s"' % etiquette)
-    if fin < 0:
-        return None
-    debut = source.rfind("substitute(", 0, fin)
-    if debut < 0:
-        return None
-    return source[debut:fin]
+def regle_aucune_capture(vue, fenetre, fautes):
+    """3. Aucune capture : la page arrive par le Compositor, une fois."""
+    for nom, source in (("BouchaudWebView.cpp", vue), ("BrowserWindow.cpp", fenetre)):
+        for interdit in ("take_screenshot", "queue_screenshot_task", "request_screenshot",
+                         "process_screenshot_requests", "on_ready_to_paint"):
+            if interdit in source:
+                fautes.append(
+                    "%s : `%s` -- la page serait peinte une seconde fois pour "
+                    "etre capturee, en plus de la trame du Compositor." % (nom, interdit)
+                )
 
 
-def regle_config_identique(repaint, fautes):
-    """3. Les deux PaintConfig restent identiques."""
-    bloc = bloc_substitution(repaint, "taille de la capture")
-    if bloc is None:
+def regle_aucune_copie(vue, fenetre, chrome, fautes):
+    """4. Le backing store n'est copie qu'une fois : dans la surface.
+
+    La vue remet une REFERENCE sur le tampon de face ; le chrome en recopie les
+    seules lignes du plan. Toute copie intermediaire (`to_shareable_bitmap`,
+    `clone`, une `Bitmap::create` de transit) referait les six mebioctets par
+    trame que le journal nommait `bottleneck=memory-pagefault`."""
+    for nom, source in (("BouchaudWebView.cpp", vue), ("BrowserWindow.cpp", fenetre)):
+        for interdit in ("to_shareable_bitmap", "->clone(", ".clone(", "Bitmap::create("):
+            if interdit in source:
+                fautes.append("%s : copie intermediaire de la trame (`%s`)." % (nom, interdit))
+    if "bitmap_if_present()" not in vue:
         fautes.append(
-            "prepare-repaint.py : la substitution « taille de la capture » a "
-            "disparu ; plus rien ne dimensionne la capture M11."
+            "BouchaudWebView.cpp : la vue ne lit plus le tampon de face du "
+            "backing store presente."
         )
-        return
-
-    compact = " ".join(bloc.split())
-    if "? page().css_to_device_rect(this->viewport_rect())" not in compact:
+    if "ShareableBitmap last_page" in chrome:
         fautes.append(
-            "prepare-repaint.py : la capture M11 ne convertit plus le viewport "
-            "comme `paint_next_frame()`. `PaintConfig` se compare par egalite : "
-            "une difference d'un pixel reenregistre toute la liste d'affichage "
-            "a chaque capture et eteint le calcul de degat, sans rien casser."
-        )
-    if "task.bouchaud_interactive_frame" not in compact:
-        fautes.append(
-            "prepare-repaint.py : la conversion alignee n'est plus reservee a "
-            "la trame interactive, ou elle ne s'y applique plus."
-        )
-    # `Gfx::Rect::to_type<U>()` et `Gfx::Size::to_type<U>()` portent tous deux
-    # `requires(!IsSame<T, U>)`. Convertir `rect` en entiers DES ICI a donc
-    # fait echouer les quatre `.to_type<int>()` que le code d'origine applique
-    # plus bas -- sur des lignes qu'on n'avait pas touchees, et avec un message
-    # qui ne parlait pas de la ligne fautive.
-    if "css_to_device_rect(this->viewport_rect()).to_type<int>()" in compact:
-        fautes.append(
-            "prepare-repaint.py : la taille de capture est convertie en "
-            "entiers des sa definition. `to_type<U>()` exige U != T : les "
-            "conversions que le code d'origine applique plus bas cesseraient "
-            "de compiler. Laisser `rect` en DevicePixelRect."
+            "BouchaudChrome.h : `last_page` redevient une capture partagee "
+            "(`ShareableBitmap`) au lieu d'une reference sur le backing store."
         )
 
 
-def regle_cible_reutilisee(repaint, fautes):
-    """4. La cible de capture M11 est anonyme et reutilisee."""
-    if "bouchaud_interactive_frame_bitmap" not in repaint:
+def regle_entete_voyage(installateur, fautes):
+    """5. Les en-tetes du chrome voyagent avec le frontend."""
+    if 'chrome.glob("Bouchaud*.h")' not in installateur:
         fautes.append(
-            "prepare-repaint.py : la cible d'une capture M11 n'est plus "
-            "reutilisee. Chaque trame rallouerait six mebioctets de pages "
-            "neuves -- `bottleneck=memory-pagefault` dans le journal."
-        )
-        return
-    if "create_shareable" not in repaint:
-        fautes.append(
-            "prepare-repaint.py : la cible n'est plus allouee dans un tampon "
-            "anonyme. `to_shareable_bitmap()` en allouerait un second et y "
-            "recopierait toute l'image a chaque trame."
-        )
-    if "bouchaud_take_frame_damage" not in repaint:
-        fautes.append(
-            "prepare-repaint.py : la capture ne prend plus le degat accumule. "
-            "Elle partirait sans lui, et PageClient n'aurait rien a transmettre."
-        )
-
-
-def regle_entete_voyage(m11, fautes):
-    """5. Les en-tetes du chrome voyagent avec lui, et sont DECOUVERTS.
-
-    Ils etaient enumeres, un `shutil.copyfile` par fichier. Chaque piece
-    extraite dans son propre en-tete -- parce qu'elle ne depend de rien et
-    devient donc verifiable sur l'hote -- demandait une ligne de plus, et en
-    oublier une ne se voit qu'a la compilation de WebContent, vingt minutes
-    plus tard, sur un `#include` introuvable.
-    """
-    if 'glob("Bouchaud*.h")' not in m11:
-        fautes.append(
-            "prepare-m11-chrome.py : les en-tetes du chrome ne sont plus "
-            "decouverts. Un en-tete ajoute serait oublie, et cela ne se "
-            "verrait qu'a la compilation de WebContent."
-        )
-        return
-    if "shutil.copyfile(source_header" not in m11:
-        fautes.append(
-            "prepare-m11-chrome.py : les en-tetes decouverts ne sont plus "
-            "copies dans l'arbre Ladybird."
+            "prepare-ui-bouchaud.py : les en-tetes du chrome (dont "
+            "BouchaudDegat.h) ne sont plus copies dans UI/Bouchaud ; la "
+            "compilation du navigateur echouerait vingt minutes plus tard."
         )
 
 
@@ -392,7 +330,7 @@ def regle_banc_decouvert(hote, fautes):
         )
 
 
-def regle_viewport(chrome, m11, fautes):
+def regle_viewport(chrome, fenetre, fautes):
     """7. Le viewport suit la fenetre."""
     if "on_resize" not in chrome:
         fautes.append(
@@ -400,16 +338,17 @@ def regle_viewport(chrome, m11, fautes):
             "plein ecran agrandirait le cadre sans rien changer a ce qu'il "
             "encadre."
         )
-    if "chrome.on_resize = [" not in m11:
+    i = fenetre.find("c.on_resize = [")
+    if i < 0:
         fautes.append(
-            "prepare-m11-chrome.py : `on_resize` n'est plus branche ; le moteur "
+            "BrowserWindow.cpp : `on_resize` n'est plus branche ; le moteur "
             "continuerait de mettre en page a la largeur du demarrage."
         )
         return
-    if "set_viewport(page_id" not in m11:
+    if "reset_viewport_size(" not in fenetre[i : i + 600]:
         fautes.append(
-            "prepare-m11-chrome.py : le redimensionnement ne change plus le "
-            "viewport. C'est LibWeb qui decide de la largeur de ligne, pas nous."
+            "BrowserWindow.cpp : le redimensionnement ne change plus le "
+            "viewport des vues. C'est LibWeb qui decide de la largeur de ligne."
         )
 
 
@@ -419,30 +358,31 @@ def main():
     chrome = texte(CHROME, fautes)
     degat = texte(DEGAT, fautes)
     banc = texte(BANC, fautes)
-    repaint = texte(REPAINT, fautes)
-    m11 = texte(M11, fautes)
+    vue = texte(VUE, fautes)
+    fenetre = texte(FENETRE, fautes)
+    installateur = texte(INSTALLATEUR, fautes)
     hote = texte(HOTE, fautes)
 
-    if None in (chrome, degat, banc, repaint, m11, hote):
+    if None in (chrome, degat, banc, vue, fenetre, installateur, hote):
         for faute in fautes:
             print("ECHEC  %s" % faute)
         return 1
 
     regle_present(chrome, fautes)
-    regle_accumulation(repaint, fautes)
-    regle_config_identique(repaint, fautes)
-    regle_cible_reutilisee(repaint, fautes)
-    regle_entete_voyage(m11, fautes)
+    regle_degat_natif(vue, fenetre, fautes)
+    regle_aucune_capture(vue, fenetre, fautes)
+    regle_aucune_copie(vue, fenetre, chrome, fautes)
+    regle_entete_voyage(installateur, fautes)
     regle_banc_decouvert(hote, fautes)
-    regle_viewport(chrome, m11, fautes)
+    regle_viewport(chrome, fenetre, fautes)
 
     if fautes:
         for faute in fautes:
             print("ECHEC  %s" % faute)
         return 1
 
-    print("repeinture partielle : degat accumule, config alignee, cible "
-          "reutilisee, viewport suivi, banc hote decouvert")
+    print("repeinture partielle : degat du Compositor transmis, aucune "
+          "capture, aucune copie de transit, viewport suivi, banc hote decouvert")
     return 0
 
 

@@ -404,113 +404,43 @@ fn un_moteur_de_rendu_n_ecrit_rien_de_persistant() {
 }
 
 #[test]
-fn un_moteur_de_rendu_depose_ses_telechargements_et_rien_d_autre() {
-    // BOUCHAUD_C20_TELECHARGEMENTS
+fn aucun_role_sandboxe_n_atteint_le_depot_ni_le_magasin_du_chrome() {
+    // BOUCHAUD_UI_V1 / BOUCHAUD_SANDBOX_V1
     //
-    // Ce droit est un ELARGISSEMENT, et le test le dit dans les deux sens : ce
-    // qu'il ouvre, et ce qu'il n'ouvre pas. Le second compte davantage --
-    // c'est lui qui echouera le jour ou quelqu'un elargira le predicat en
-    // croyant simplifier.
-    assert!(ecriture_permise(
+    // Le depot de telechargements et le magasin du chrome (historique,
+    // favoris) etaient ouverts au RENDU parce que le chrome vivait dans
+    // WebContent. Il vit maintenant dans le processus navigateur, qui n'est
+    // pas sandboxe : aucun role sandboxe ne doit plus y lire ni y ecrire.
+    // C'est le test qui echouera le jour ou quelqu'un rouvrira ce droit « pour
+    // simplifier ».
+    for profil in [
         SecurityProfile::BrowserContent,
-        "/persist/Downloads/rapport.pdf"
-    ));
-    assert!(lecture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/Downloads/rapport.pdf"
-    ));
-    // Le dossier lui-meme : le portage y fait un `mkdir` au demarrage, et un
-    // sous-arbre qui exclurait sa propre racine echouerait a la creer.
-    assert!(ecriture_permise(
-        SecurityProfile::BrowserContent,
-        DOSSIER_TELECHARGEMENTS
-    ));
-
-    // La frontiere qui compte : le PROFIL du navigateur -- cookies, HSTS,
-    // cache -- reste ferme au rendu. Ce qu'il gagne est un depot, pas une
-    // memoire.
-    for chemin in [
-        CACHE_ALT_SVC,
-        "/persist/ladybird/data/cookies.sqlite",
-        PROFIL_NAVIGATEUR,
-        "/persist",
-        "/persist/autre/charge",
+        SecurityProfile::BrowserNetwork,
+        SecurityProfile::Untrusted,
     ] {
-        assert!(
-            !ecriture_permise(SecurityProfile::BrowserContent, chemin),
-            "le depot de telechargement a elargi {} au passage",
-            chemin
-        );
+        for chemin in [
+            DOSSIER_TELECHARGEMENTS,
+            "/persist/Downloads/rapport.pdf",
+            MAGASIN_DU_CHROME,
+            "/persist/ladybird-chrome/favoris",
+            "/persist/ladybird-chrome/historique",
+            "/persist/Downloads-vole/charge.exe",
+            "/persist/ladybird-chrome-vole/favoris",
+        ] {
+            assert!(
+                !ecriture_permise(profil, chemin),
+                "{:?} ne doit pas pouvoir ecrire {}",
+                profil,
+                chemin
+            );
+            assert!(
+                !lecture_permise(profil, chemin),
+                "{:?} ne doit pas pouvoir lire {}",
+                profil,
+                chemin
+            );
+        }
     }
-
-    // Le droit est attache au ROLE. RequestServer lit et ecrit le profil, pas
-    // le depot : c'est WebContent qui tient les octets du corps de reponse.
-    assert!(!ecriture_permise(
-        SecurityProfile::BrowserNetwork,
-        "/persist/Downloads/rapport.pdf"
-    ));
-    assert!(!ecriture_permise(
-        SecurityProfile::Untrusted,
-        "/persist/Downloads/rapport.pdf"
-    ));
-    assert!(!lecture_permise(
-        SecurityProfile::Untrusted,
-        "/persist/Downloads/rapport.pdf"
-    ));
-
-    // Et le reste du bac a sable n'a pas bouge.
-    for chemin in ["/usr/bin/sh", "/etc/passwd", "/root/.ssh/id_rsa", "/dev/fb0"] {
-        assert!(
-            !ecriture_permise(SecurityProfile::BrowserContent, chemin),
-            "{} ne doit pas devenir inscriptible",
-            chemin
-        );
-    }
-}
-
-#[test]
-fn le_magasin_du_chrome_est_un_voisin_de_nom_et_pas_un_descendant() {
-    // BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
-    //
-    // `/persist/ladybird-chrome` est volontairement voisin de
-    // `/persist/ladybird`. C'est le cas exact ou une comparaison de prefixe
-    // sans separateur transforme un droit en trou -- dans les DEUX sens.
-    assert!(ecriture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/ladybird-chrome/favoris"
-    ));
-    assert!(lecture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/ladybird-chrome/historique"
-    ));
-
-    // Le rendu ne gagne pas le profil au passage.
-    assert!(!ecriture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/ladybird/data/cookies.sqlite"
-    ));
-    assert!(!lecture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/ladybird/data/cookies.sqlite"
-    ));
-
-    // Et RequestServer ne gagne pas le magasin du chrome : le profil et le
-    // magasin sont deux sous-arbres, deux roles, deux droits.
-    assert!(!ecriture_permise(
-        SecurityProfile::BrowserNetwork,
-        "/persist/ladybird-chrome/favoris"
-    ));
-    assert!(!lecture_permise(
-        SecurityProfile::Untrusted,
-        "/persist/ladybird-chrome/favoris"
-    ));
-
-    // Un troisieme voisin n'existe pas.
-    assert!(!ecriture_permise(
-        SecurityProfile::BrowserContent,
-        "/persist/ladybird-chrome-vole/favoris"
-    ));
-    assert!(!ecriture_permise(SecurityProfile::BrowserContent, MAGASIN_DU_CHROME.trim_end_matches("-chrome")));
 }
 
 #[test]

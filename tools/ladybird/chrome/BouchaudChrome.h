@@ -3,41 +3,34 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * ## Pourquoi ce fichier existe
+ * ## Ou il vit
  *
- * M9 a prouve la chaine « LibWeb -> RequestServer -> HTTP -> pixels dans une
- * fenetre Bouchaud ». Il l'a prouvee avec une URL passee en variable
- * d'environnement, une seule capture, et aucune entree : c'est une preuve, pas
- * un navigateur. M11 ajoute exactement ce qui manque pour s'en servir — une
- * barre d'adresse, un historique, des liens cliquables, du defilement — sans
- * introduire le processus Browser d'upstream, qui reste un jalon ulterieur.
+ * Dans le processus NAVIGATEUR (`UI/Bouchaud`, binaire `BouchaudBrowserHost`),
+ * jamais dans WebContent. BOUCHAUD_UI_V1 :
  *
- * ## Ou il s'insere
+ *     Bouchaud WM --- Key/Pointer/Wheel (protocole GUI v1) ---> ce fichier
+ *          ^                                                        |
+ *          |                                   WebView::ViewImplementation
+ *          |                                   (enqueue_input_event, load...)
+ *          |                                                        v
+ *          |                                                   WebContent
+ *          |                                                        |
+ *          |                                               display list
+ *          |                                                        v
+ *          +-- FrameReady(degat) + surface <-- present() <-- Compositor
+ *                                              (backing store presente,
+ *                                               `did_accept_presented_backing_store`)
  *
- *     Bouchaud WM  --- Key/Pointer/Wheel (protocole GUI v1) --->  ce fichier
- *          ^                                                          |
- *          |                                          Web::MouseEvent / KeyEvent
- *          |                                                          v
- *          +---- FrameReady + surface partagee <---- composition <-- WebContent
+ * Le processus qui execute le script des sites n'a ni le descripteur GUI, ni
+ * la surface, ni la barre d'adresse, ni l'historique, ni les favoris, ni les
+ * fichiers telecharges : ils sont ici, et `initialize_from_environment()` pose
+ * FD_CLOEXEC sur les deux descripteurs pour qu'aucun processus enfant ne les
+ * herite.
  *
- * Il est **entierement en-tete** et volontairement sans dependance nouvelle :
- * l'ajouter ne demande aucune modification de `Services/WebContent/CMakeLists.txt`,
- * donc aucune divergence de plus avec l'arbre upstream epingle.
- *
- * ## Ce qu'il ne fait pas
- *
- * Il vit DANS WebContent, et c'est sa limite de fond : le processus qui execute
- * le script des sites est aussi celui qui tient la barre d'adresse, les
- * favoris, l'historique et les fichiers telecharges. Les deux droits d'ecriture
- * persistants que cela demande sont accordes, nommes et bornes dans
- * `src/kernel/security/chemins.rs` -- et ils repartiront ensemble le jour ou le
- * chrome sortira d'ici (`docs/ladybird/AUDIT_INTEGRATION.md` §5).
- *
- * Le texte, lui, n'est plus en police bitmap : `modernise-v15.py` remplace le
- * corps de `draw_ui_text` par le rendu Skia du meme moteur que la page, et
- * l'atlas 8x8 reste le secours et la MESURE. C'est pour cela que tout le texte
- * d'interface passe par cette seule fonction : une seconde voie de dessin
- * echapperait a la modernisation sans que rien ne le signale.
+ * Le texte d'interface passe par une seule fonction, `draw_ui_text`, rendue
+ * par Skia (meme rasteriseur que la page) avec l'atlas 8x8 en secours et pour
+ * la MESURE : une seconde voie de dessin echapperait au secours sans que rien
+ * ne le signale.
  */
 
 #pragma once
@@ -46,6 +39,7 @@
 // Atlas de glyphes DejaVu, genere par tools/ladybird/chrome/fabrique-atlas.py.
 // C'est de la donnee : ce fichier ne gagne aucune dependance de dessin.
 #include "BouchaudAtlas.h"
+#include "BouchaudChromeV15Assets.h"
 
 // BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
 //
@@ -92,6 +86,16 @@
 #    include <AK/Types.h>
 #    include <AK/Vector.h>
 #    include <LibGfx/Bitmap.h>
+#    include <core/SkBitmap.h>
+#    include <core/SkCanvas.h>
+#    include <core/SkFont.h>
+#    include <core/SkFontMgr.h>
+#    include <ports/SkFontMgr_fontconfig.h>
+#    include <ports/SkFontScanner_FreeType.h>
+#    include <core/SkImageInfo.h>
+#    include <core/SkPaint.h>
+#    include <core/SkRect.h>
+#    include <core/SkTypeface.h>
 #    include <LibGfx/Point.h>
 #    include <LibGfx/ShareableBitmap.h>
 #    include <LibWeb/Page/InputEvent.h>
@@ -107,7 +111,7 @@
 #    include <sys/stat.h>
 #    include <unistd.h>
 
-namespace WebContent::BouchaudChrome {
+namespace BouchaudChrome {
 
 // ----------------------------------------------------------------------------
 // Geometrie
@@ -589,6 +593,22 @@ inline bool Champ::applique(u32 code, u32 code_point)
 // Etat
 // ----------------------------------------------------------------------------
 
+/// La derniere trame PRESENTEE d'une page : le backing store que le
+/// Compositor a remis a la vue, et la partie qu'il a peinte.
+///
+/// Le backing store peut etre plus grand que la zone peinte (le Compositor
+/// alloue large pour absorber un redimensionnement) : seule `largeur` x
+/// `hauteur` porte la page. Retenir le `RefPtr` ne copie rien et reste sur :
+/// la vue ne rend ce tampon au Compositor qu'APRES avoir presente le suivant,
+/// et `present()` remplace alors cette reference avant toute reecriture.
+struct ImagePage {
+    RefPtr<Gfx::Bitmap> bitmap;
+    int largeur { 0 };
+    int hauteur { 0 };
+
+    bool valide() const { return bitmap && largeur > 0 && hauteur > 0; }
+};
+
 struct State {
     BouchaudTransport::Sortie<> sortie_gui;
     bool trame_a_republier { false };
@@ -639,18 +659,10 @@ struct State {
         bool secure { false };
         bool loading { false };
         int zoom_cran { BouchaudZoom::cran_neutre };
-        Gfx::ShareableBitmap last_page;
+        ImagePage last_page;
     };
     Vector<Onglet> onglets;
     size_t onglet_actif { 0 };
-    /// Le prochain identifiant de page libre.
-    ///
-    /// Il commence a 2 : la page 1 est celle que `initialize` cree. Les
-    /// identifiants ne sont jamais REUTILISES -- un onglet ferme laisse le
-    /// sien derriere lui --, et c'est ce qui garantit qu'une capture partie
-    /// avant la fermeture, et il y en a toujours une en vol, ne soit pas prise
-    /// pour celle du nouvel onglet.
-    u64 prochaine_page { 2 };
 
     /// Barre d'adresse.
     ///
@@ -714,17 +726,15 @@ struct State {
 
     /// Derniere capture de page recue.
     ///
-    /// La garder est ce qui permet de redessiner la barre d'outils sans
-    /// redemander une page au moteur. `ShareableBitmap` porte un tampon
-    /// anonyme partage et compte ses references : la retenir ne copie rien.
-    Gfx::ShareableBitmap last_page;
+    /// La garder est ce qui permet de redessiner la barre d'outils -- et de
+    /// restaurer la page sous un calque -- sans redemander une trame au moteur.
+    ImagePage last_page;
 
     // Compte de series des messages sortants.
     u32 serial { 0 };
     bool handshake_done { false };
     bool frame_seen { false };
     bool frame_after_wheel_pending { false };
-    bool wheel_input_pending { false };
 
     /// Ce que la surface partagee porte deja, et donc ce qu'une capture doit
     /// reecrire. Voir BouchaudDegat.h.
@@ -783,7 +793,6 @@ struct State {
     // fichier et ce qu'il faut pour l'afficher, rien de plus.
     struct Telechargement {
         u64 identifiant { 0 };
-        int fd { -1 };
         ByteString nom;
         u64 recus { 0 };
         u64 total { 0 };
@@ -792,7 +801,6 @@ struct State {
         int etat { 0 };
     };
     Vector<Telechargement> telechargements;
-    u64 prochain_telechargement { 1 };
     /// Tics restants avant que le panneau s'efface. Zero = cache.
     ///
     /// Un panneau qui ne s'efface jamais finit par etre ignore ; un panneau
@@ -840,7 +848,8 @@ struct State {
     /// compositeur.
     u64 page_frames_sans_effet { 0 };
 
-    // Rappels vers WebContent. Poses par `ConnectionFromClient::bouchaud_m11_start`.
+    // Rappels vers les vues du navigateur. Poses par `BouchaudUI::BrowserWindow`
+    // (UI/Bouchaud) : chacun agit sur la `ViewImplementation` de l'onglet actif.
     Function<void(Web::MouseEvent)> on_mouse_event;
     Function<void(Web::KeyEvent)> on_key_event;
     Function<void(ByteString)> on_navigate;
@@ -871,6 +880,10 @@ struct State {
     /// Insere un texte a la place de la selection du document.
     Function<void(ByteString)> on_paste;
     Function<void()> on_close;
+    /// L'onglet actif a change. La fenetre rend visible la page de cet onglet
+    /// et cache les autres : une page cachee ne fait plus peindre le
+    /// Compositor (`VisibilityState::Hidden`).
+    Function<void(u64)> on_onglet_actif;
 };
 
 inline State& state()
@@ -920,12 +933,6 @@ inline u64 page_active()
     return s.onglets[rang_actif()].page_id;
 }
 
-/// Le prochain identifiant de page libre. Voir `State::prochaine_page`.
-inline u64 prochaine_page()
-{
-    return state().prochaine_page++;
-}
-
 /// L'onglet qui porte cette page, ou `nullptr`.
 inline State::Onglet* onglet_de_la_page(u64 page_id)
 {
@@ -937,18 +944,20 @@ inline State::Onglet* onglet_de_la_page(u64 page_id)
     return nullptr;
 }
 
-/// M11 est actif seulement si le lanceur l'a demande. Sans la variable, le
-/// comportement de M9 est conserve octet pour octet.
+/// Le chrome est actif quand le gestionnaire de fenetres a confie une fenetre
+/// au navigateur : un canal GUI et une surface. Sans eux (banc headless), le
+/// navigateur tourne sans fenetre et rien n'est peint.
 inline bool enabled()
 {
-    static bool const value = getenv("BOUCHAUD_M11") != nullptr;
+    static bool const value = getenv("BO_GUI_FD") != nullptr && getenv("BO_SURFACE_FD") != nullptr;
     return value;
 }
 
 /// Demande une recomposition du chrome au prochain tic.
 ///
 /// A n'appeler que pour un changement **du chrome**. Une page qui change se
-/// signale toute seule : voir tools/ladybird/prepare-repaint.py.
+/// signale toute seule : le Compositor presente une trame, et `present()` la
+/// recoit avec son degat.
 inline void request_chrome_frame()
 {
     state().chrome_frames_pending = 1;
@@ -1481,6 +1490,86 @@ inline bool point_in_address_field(int x, int y)
         && y >= button_top && y < button_top + button_height;
 }
 
+// BOUCHAUD_CHROME_V15_REAL_TEXT_SVG_LOADING
+//
+// Le document et le chrome utilisent desormais le meme rasteriseur Skia pour
+// le texte visible de la barre d'adresse. L'ancien atlas DejaVu reste le
+// fallback et continue de servir a la mesure/caret : aucune panne de fontconfig
+// ne peut rendre la navigation inutilisable.
+inline bool draw_browser_text(Canvas const& canvas, int x, int y, StringView text, u32 color, int max_width)
+{
+    if (!canvas.base || canvas.width <= 0 || canvas.height <= 0 || canvas.stride <= 0 || max_width <= 0)
+        return false;
+
+    SkBitmap bitmap;
+    auto info = SkImageInfo::Make(canvas.width, canvas.height, kBGRA_8888_SkColorType, kOpaque_SkAlphaType);
+    if (!bitmap.installPixels(info, canvas.base, static_cast<size_t>(canvas.stride)))
+        return false;
+
+    // Le pointeur est volontairement alloue une fois et jamais detruit :
+    // Ladybird interdit les destructeurs statiques (-Wexit-time-destructors).
+    // BOUCHAUD_CHROME_V16_FONTCONFIG_TYPEFACE
+    // Do not use SkTypeface::MakeFromName's process-default backend: the old
+    // artifact could silently fall back to the bitmap atlas. Use the same
+    // FontConfig + FreeType backend as Ladybird page text.
+    static sk_sp<SkFontMgr>* font_manager = [] {
+        return new sk_sp<SkFontMgr>(SkFontMgr_New_FontConfig(nullptr, SkFontScanner_Make_FreeType()));
+    }();
+    static sk_sp<SkTypeface>* typeface = [] {
+        if (!*font_manager)
+            return new sk_sp<SkTypeface>();
+        return new sk_sp<SkTypeface>((*font_manager)->matchFamilyStyle("DejaVu Sans", SkFontStyle()));
+    }();
+    if (!*typeface)
+        return false;
+
+    SkFont font(*typeface, 16.0f);
+    font.setEdging(SkFont::Edging::kAntiAlias);
+    font.setSubpixel(true);
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    paint.setColor(SkColorSetARGB(0xff, (color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff));
+
+    SkCanvas sk_canvas(bitmap);
+    sk_canvas.save();
+    sk_canvas.clipRect(SkRect::MakeXYWH(static_cast<float>(x), static_cast<float>(y),
+        static_cast<float>(max_width), 22.0f));
+    sk_canvas.drawSimpleText(text.characters_without_null_termination(), text.length(),
+        SkTextEncoding::kUTF8, static_cast<float>(x), static_cast<float>(y + 17), font, paint);
+    sk_canvas.restore();
+    return true;
+}
+
+inline void blend_icon_pixel(u32& destination, u32 source, unsigned alpha)
+{
+    if (alpha == 0)
+        return;
+    auto blend = [alpha](u32 src, u32 dst) -> u32 {
+        return (src * alpha + dst * (255 - alpha) + 127) / 255;
+    };
+    auto r = blend((source >> 16) & 0xff, (destination >> 16) & 0xff);
+    auto g = blend((source >> 8) & 0xff, (destination >> 8) & 0xff);
+    auto b = blend(source & 0xff, destination & 0xff);
+    destination = (r << 16) | (g << 8) | b;
+}
+
+inline void draw_svg_icon(Canvas const& canvas, int x, int y, unsigned char const* mask, u32 color)
+{
+    using namespace BouchaudChromeV15Assets;
+    for (int iy = 0; iy < ICON_SIZE; ++iy) {
+        auto py = y + iy;
+        if (py < 0 || py >= canvas.height)
+            continue;
+        auto* row = canvas.row(py);
+        for (int ix = 0; ix < ICON_SIZE; ++ix) {
+            auto px = x + ix;
+            if (px < 0 || px >= canvas.width)
+                continue;
+            blend_icon_pixel(row[px], color, mask[iy * ICON_SIZE + ix]);
+        }
+    }
+}
+
 /// Le texte d'interface du chrome, en UN SEUL point de passage.
 ///
 /// `y` est le HAUT de la ligne, et sa hauteur est `ui_text_height`.
@@ -1498,6 +1587,8 @@ inline bool point_in_address_field(int x, int y)
 /// pour un meme texte donneraient deux boites differentes.
 inline void draw_ui_text(Canvas const& canvas, int x, int y, StringView texte, u32 couleur, int largeur_max)
 {
+    if (draw_browser_text(canvas, x, y, texte, couleur, largeur_max))
+        return;
     draw_text(canvas, x, y + 1, texte, couleur, 2, largeur_max);
 }
 
@@ -1648,10 +1739,14 @@ inline void draw_toolbar(Canvas const& canvas)
     auto draw_button = [&](Button const& button, bool active) {
         fill_rect(canvas, button.x, button_top, button.width, button_height,
             active ? color_button : color_button_off);
-        auto glyph_x = button.x + (button.width - glyph_width * 2) / 2;
-        auto glyph_y = button_top + (button_height - glyph_height * 2) / 2;
-        draw_glyph(canvas, glyph_x, glyph_y, button.glyph[0],
-            active ? color_glyph : color_glyph_off, 2);
+        auto icon_x = button.x + (button.width - BouchaudChromeV15Assets::ICON_SIZE) / 2;
+        auto icon_y = button_top + (button_height - BouchaudChromeV15Assets::ICON_SIZE) / 2;
+        auto const* icon = BouchaudChromeV15Assets::BACK;
+        if (button.x == forward_button().x)
+            icon = BouchaudChromeV15Assets::FORWARD;
+        else if (button.x == reload_button().x)
+            icon = s.loading ? BouchaudChromeV15Assets::STOP : BouchaudChromeV15Assets::RELOAD;
+        draw_svg_icon(canvas, icon_x, icon_y, icon, active ? color_glyph : color_glyph_off);
     };
 
     // Les fleches restent dessinees en permanence : WebContent ne publie pas
@@ -1749,12 +1844,12 @@ inline void draw_toolbar(Canvas const& canvas)
 
     draw_favori(canvas);
 
-    // Etat du chargement, a droite, en petit.
-    auto status_text = s.loading ? ByteString { "chargement..." } : s.status;
-    auto status_width = text_width(status_text.view(), 1);
-    auto status_x = canvas.width - margin - status_width;
-    if (status_x > field_x + field_w + 4)
-        draw_text(canvas, status_x, toolbar_height - glyph_height - 3, status_text.view(), color_glyph_off, 1, status_width);
+    // Indicateur visuel : bleu = navigation en cours, vert = page stabilisee.
+    // La ligne n'affiche volontairement aucun pourcentage fictif.
+    auto status_color = s.loading ? 0x3b82f6u : 0x22c55eu;
+    fill_rect(canvas, field_x + field_w - 9, button_top + 10, 5, 5, status_color);
+    if (s.loading)
+        fill_rect(canvas, field_x, toolbar_height - 3, field_w, 3, status_color);
 }
 
 /// Tout ce que le chrome peint au-dessus de la page : barre et onglets.
@@ -2356,16 +2451,16 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         return false;
     auto canvas = canvas_or_error.release_value();
 
-    auto const* bitmap = (s.last_page.is_valid() && s.last_page.bitmap())
-        ? s.last_page.bitmap()
-        : nullptr;
+    auto const* bitmap = s.last_page.valide() ? s.last_page.bitmap.ptr() : nullptr;
 
+    // La zone PEINTE, jamais la taille du backing store : au-dela, le tampon
+    // porte une trame plus ancienne ou rien du tout.
     BouchaudDegat::Geometrie geometrie {
         s.surface_width,
         s.surface_height,
         page_origin_y(),
-        bitmap ? bitmap->width() : 0,
-        bitmap ? bitmap->height() : 0,
+        bitmap ? min(s.last_page.largeur, bitmap->width()) : 0,
+        bitmap ? min(s.last_page.hauteur, bitmap->height()) : 0,
     };
 
     // BOUCHAUD_CHROME_V19_CALQUES
@@ -2519,50 +2614,38 @@ inline bool compose_toolbar_only()
     return true;
 }
 
-/// Recoit une nouvelle capture du moteur et l'affiche.
+/// Recoit une trame PRESENTEE par le Compositor et l'affiche.
 ///
-/// C'est le seul point ou `last_page` change. Une capture invalide n'ecrase
-/// pas la precedente : mieux vaut reafficher la page d'avant qu'un rectangle
-/// vide.
+/// BOUCHAUD_UI_V1_PRESENTATION : appele par
+/// `BouchaudWebView::did_accept_presented_backing_store`, une fois par trame
+/// que le Compositor a peinte -- jamais sur un minuteur, jamais par capture.
+/// `degat` est en coordonnees de PAGE ; c'est le rectangle que le Compositor a
+/// accumule depuis la trame precedente presentee a cette vue, donc ce qui a
+/// change sur la surface depuis la derniere copie de CET onglet.
 ///
-/// `degat_*` sont les coordonnees de PAGE du rectangle que le moteur a
-/// recalcule, accumulees depuis la capture precedente. Voir BouchaudDegat.h et
-/// tools/ladybird/prepare-repaint.py : l'accumulation est ce qui rend le
-/// partiel sur, puisque le pump ne capture pas toutes les etapes de rendu.
-inline bool present(u64 page_id, Gfx::ShareableBitmap const& screenshot, int degat_x, int degat_y,
-    int degat_largeur, int degat_hauteur)
+/// C'est le seul point ou `last_page` change.
+inline bool present(u64 page_id, NonnullRefPtr<Gfx::Bitmap> bitmap, int largeur, int hauteur,
+    BouchaudDegat::Rect degat)
 {
     auto& s = state();
-    auto const valid = screenshot.is_valid() && screenshot.bitmap();
+    ImagePage image { move(bitmap), largeur, hauteur };
 
     // BOUCHAUD_C22_ONGLETS
     //
-    // Une capture qui vient d'un onglet INACTIF est rangee, pas affichee. Les
+    // Une trame qui vient d'un onglet INACTIF est rangee, pas affichee. Les
     // pages d'arriere-plan continuent de tourner -- un chargement se termine,
-    // une animation avance --, et composer leur capture ferait clignoter la
-    // page qu'on regarde avec celle d'a cote.
+    // une animation avance --, et composer leur trame ferait clignoter la page
+    // qu'on regarde avec celle d'a cote.
     if (page_id != page_active()) {
-        if (auto* onglet = onglet_de_la_page(page_id); onglet != nullptr && valid)
-            onglet->last_page = screenshot;
+        if (auto* onglet = onglet_de_la_page(page_id); onglet != nullptr && image.valide())
+            onglet->last_page = move(image);
         return true;
     }
     if (s.frame_after_wheel_pending)
-        outln("[ladybird-bouchaud] WEB_SCREENSHOT_READY after_wheel=1 valid={}", valid ? 1 : 0);
-    if (valid)
-        s.last_page = screenshot;
-    return compose_page({ degat_x, degat_y, degat_largeur, degat_hauteur });
-}
-
-/// Recoit une capture dont rien ne dit ce qui a change.
-///
-/// Le chemin M9+M11 -- chrome sans BrowserHost, donc sans processus Compositor
-/// et sans calcul de degat -- n'a aucun rectangle a offrir. Chaque capture y
-/// est une trame complete. Le dire explicitement vaut mieux que de passer un
-/// degat par defaut, qui aurait l'air d'un vrai et recopierait un coin de page.
-inline bool present_complet(u64 page_id, Gfx::ShareableBitmap const& screenshot)
-{
-    state().suivi_page.invalide();
-    return present(page_id, screenshot, 0, 0, 0, 0);
+        outln("[LB:FRAME] apres_molette=1 page={} degat={}x{}", page_id, degat.w, degat.h);
+    if (image.valide())
+        s.last_page = move(image);
+    return compose_page(degat);
 }
 
 // ----------------------------------------------------------------------------
@@ -2675,12 +2758,12 @@ inline void commit_address()
 //
 // BOUCHAUD_C22_ONGLETS
 //
-// Un onglet EST une page du moteur. WebContent sait en tenir plusieurs depuis
-// toujours -- `PageHost` les indexe par identifiant, `create_page` en fabrique
-// une -- et ce chrome n'en connaissait qu'une, en dur, parce que rien n'en
-// demandait une seconde.
+// Un onglet EST une vue du navigateur (`BouchaudUI::BouchaudWebView`), donc une
+// page d'un WebContent. Le chrome ne cree ni ne detruit de page : il demande
+// (`on_nouvel_onglet`, `on_fermer_onglet`) et la fenetre lui annonce ce qui
+// existe (`ajoute_onglet`, `retire_onglet`).
 //
-// L'etat affiche -- URL, titre, chargement, zoom, derniere capture -- est
+// L'etat affiche -- URL, titre, chargement, zoom, derniere trame -- est
 // RECOPIE entre l'onglet et les champs plats du chrome a chaque bascule. Voir
 // `struct Onglet` pour pourquoi ce n'est pas une lecture directe.
 
@@ -2748,6 +2831,8 @@ inline void apres_changement_d_onglet()
         s.on_resize(s.surface_width, viewport_height());
     if (s.on_zoom)
         s.on_zoom(BouchaudZoom::pourcent(s.zoom_cran));
+    if (s.on_onglet_actif)
+        s.on_onglet_actif(page_active());
 }
 
 inline void bascule_onglet(size_t rang)
@@ -3353,23 +3438,21 @@ inline void set_presse_papiers_du_document(ByteString const& texte)
 //
 // BOUCHAUD_C20_TELECHARGEMENTS
 //
-// Le corps de la reponse est lu par WebContent -- `LocalNavigable` le pousse
-// bloc par bloc -- et c'est donc WebContent qui ecrit le fichier. Ce n'est pas
-// le decoupage d'upstream, ou l'hote reprend la requete a RequestServer : ce
-// portage n'a pas de processus qui puisse le faire, le chrome vivant DANS
-// WebContent. Le role qui tient les octets est celui qui ecrit, et c'est ce
-// que `src/kernel/security/chemins.rs` autorise -- ce sous-arbre-la et rien
-// d'autre.
+// Le decoupage est celui d'upstream : le processus navigateur reprend la
+// requete a RequestServer et `WebView::FileDownloader` ecrit le fichier.
+// WebContent ne tient plus aucun octet telecharge, et n'a donc plus aucun
+// droit d'ecriture sur le depot (`src/kernel/security/chemins.rs`).
 //
-// Le nom propose vient du SERVEUR. Il passe par `BouchaudNomFichier::assainit`
-// avant de toucher un chemin ; le noyau refuse en plus tout ce qui sortirait du
-// depot, sur le chemin canonique. Deux lignes, parce que la premiere est a
-// quatre couches de l'endroit ou la donnee entre.
+// Le nom propose vient du SERVEUR. Le navigateur le fait passer par
+// `BouchaudNomFichier::assainit` puis `chemin_de_telechargement` avant de
+// toucher un chemin (`BouchaudUI::Application::ask_user_for_download_path`) ;
+// le noyau refuse en plus tout ce qui sortirait du depot, sur le chemin
+// canonique.
 
 /// Ou deposer. La couche plateforme du portage a deja calcule la reponse.
 ///
 /// `XDG_DOWNLOAD_DIR` vaut `/persist/Downloads`, ou `/tmp` quand le profil est
-/// ephemere (`tools/ladybird/prepare-platform-complete.py`). La lire plutot que
+/// ephemere (`UI/Bouchaud/main.cpp`). La lire plutot que
 /// de la reecrire evite deux verites pour une seule decision -- et le repli
 /// n'est la que pour un binaire lance a la main.
 inline ByteString dossier_de_telechargement()
@@ -3413,48 +3496,6 @@ inline ByteString chemin_de_telechargement(StringView nom)
     return ByteString::formatted("{}/{}", dossier, nom);
 }
 
-/// Ouvre le fichier et enregistre le telechargement. Rend son identifiant, ou
-/// rien si le depot n'est pas ecrivable -- auquel cas LibWeb arrete la requete
-/// au lieu de lire un corps que personne ne garde.
-inline Optional<u64> demarre_telechargement(ByteString const& nom_propose, bool total_connu, u64 total)
-{
-    auto& s = state();
-
-    auto const dossier = dossier_de_telechargement();
-    // 0755 et non 0777 : ce depot appartient a l'utilisateur, et un droit
-    // d'ecriture pour tout le monde sur un dossier ou atterrit ce que le
-    // reseau envoie n'a aucune raison d'exister.
-    mkdir(dossier.characters(), 0755);
-
-    auto const sur = BouchaudNomFichier::assainit(
-        nom_propose.characters(), static_cast<int>(nom_propose.length()));
-    StringView nom { sur.c_str(), static_cast<size_t>(sur.taille) };
-    auto const chemin = chemin_de_telechargement(nom);
-
-    // O_EXCL : `chemin_de_telechargement` vient de constater que le fichier
-    // n'existe pas, mais entre les deux il a pu apparaitre. Sans O_EXCL on
-    // ecraserait alors le fichier de quelqu'un d'autre, et c'est le genre de
-    // course qu'on ne reproduit jamais en la cherchant.
-    auto const fd = open(chemin.characters(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (fd < 0) {
-        warnln("[ladybird-bouchaud] M11_DOWNLOAD_REFUSED path={} errno={}", chemin, errno);
-        return {};
-    }
-
-    State::Telechargement t;
-    t.identifiant = s.prochain_telechargement++;
-    t.fd = fd;
-    t.nom = ByteString { nom };
-    t.total = total;
-    t.total_connu = total_connu;
-    s.telechargements.append(move(t));
-    s.telechargements_tics = telechargements_duree_tics;
-
-    outln("[ladybird-bouchaud] M11_DOWNLOAD_START id={} path={} total={}",
-        s.telechargements.last().identifiant, chemin, total_connu ? total : 0);
-    return s.telechargements.last().identifiant;
-}
-
 inline State::Telechargement* telechargement_par_identifiant(u64 identifiant)
 {
     auto& s = state();
@@ -3465,79 +3506,35 @@ inline State::Telechargement* telechargement_par_identifiant(u64 identifiant)
     return nullptr;
 }
 
-inline void recoit_telechargement(u64 identifiant, u8 const* octets, size_t taille)
-{
-    auto* t = telechargement_par_identifiant(identifiant);
-    if (t == nullptr || t->fd < 0)
-        return;
-
-    size_t ecrits = 0;
-    while (ecrits < taille) {
-        auto const n = write(t->fd, octets + ecrits, taille - ecrits);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            // Une ecriture qui echoue au milieu laisse un fichier tronque. Le
-            // dire tout de suite vaut mieux que de le decouvrir en l'ouvrant :
-            // le panneau passe en rouge et le journal porte l'errno.
-            warnln("[ladybird-bouchaud] M11_DOWNLOAD_WRITE_FAILED id={} errno={}",
-                identifiant, errno);
-            close(t->fd);
-            t->fd = -1;
-            t->etat = 2;
-            state().telechargements_tics = telechargements_duree_tics;
-            return;
-        }
-        ecrits += static_cast<size_t>(n);
-    }
-    t->recus += taille;
-    state().telechargements_tics = telechargements_duree_tics;
-}
-
-inline void termine_telechargement(u64 identifiant)
-{
-    auto* t = telechargement_par_identifiant(identifiant);
-    if (t == nullptr)
-        return;
-    if (t->fd >= 0) {
-        // `fsync` avant `close` : `/persist` est adosse au RAMFS, et ce qui
-        // n'est pas synchronise n'atteint le disque qu'a l'extinction. Un
-        // telechargement annonce comme termine doit avoir survecu a une coupure
-        // qui arrive juste apres.
-        fsync(t->fd);
-        close(t->fd);
-        t->fd = -1;
-    }
-    if (t->etat == 0)
-        t->etat = 1;
-    state().telechargements_tics = telechargements_duree_tics;
-    outln("[ladybird-bouchaud] M11_DOWNLOAD_DONE id={} name={} bytes={}",
-        identifiant, t->nom, t->recus);
-}
-
-inline void echoue_telechargement(u64 identifiant, ByteString const& raison)
-{
-    auto* t = telechargement_par_identifiant(identifiant);
-    if (t == nullptr)
-        return;
-    if (t->fd >= 0) {
-        close(t->fd);
-        t->fd = -1;
-    }
-    t->etat = 2;
-    state().telechargements_tics = telechargements_duree_tics;
-    warnln("[ladybird-bouchaud] M11_DOWNLOAD_FAILED id={} name={} raison={}",
-        identifiant, t->nom, raison);
-}
-
-/// Ce chrome n'a pas encore de bouton pour annuler.
+/// Un telechargement a change : le chrome le montre, il ne l'ecrit pas.
 ///
-/// La reponse est donc toujours « non ». Elle est ECRITE plutot que laissee au
-/// defaut d'upstream parce que le jour ou le bouton existera, c'est ici qu'il
-/// se branchera, et non dans un `return false` perdu ailleurs.
-inline bool telechargement_annule(u64)
+/// BOUCHAUD_UI_V1_TELECHARGEMENTS : l'ecriture est celle d'upstream,
+/// `WebView::FileDownloader`, dans le processus navigateur. Ce point recoit ce
+/// qu'un `FileDownloaderObserver` voit -- etat 0 en cours, 1 termine, 2
+/// echoue ou annule -- et ne touche aucun fichier.
+inline void observe_telechargement(u64 identifiant, ByteString const& nom, u64 recus,
+    bool total_connu, u64 total, int etat)
 {
-    return false;
+    auto& s = state();
+    auto* t = telechargement_par_identifiant(identifiant);
+    if (t == nullptr) {
+        State::Telechargement nouveau;
+        nouveau.identifiant = identifiant;
+        nouveau.nom = nom;
+        s.telechargements.append(move(nouveau));
+        t = &s.telechargements.last();
+        outln("[LB:DOWNLOAD] debut id={} nom={}", identifiant, nom);
+    }
+    auto const etat_precedent = t->etat;
+    t->recus = recus;
+    t->total = total;
+    t->total_connu = total_connu;
+    t->etat = etat;
+    s.telechargements_tics = telechargements_duree_tics;
+    if (etat != etat_precedent && etat == 1)
+        outln("[LB:DOWNLOAD] fin id={} nom={} octets={}", identifiant, t->nom, recus);
+    if (etat != etat_precedent && etat == 2)
+        warnln("[LB:DOWNLOAD] echec id={} nom={}", identifiant, t->nom);
 }
 
 // ----------------------------------------------------------------------------
@@ -3891,7 +3888,6 @@ inline void handle_wheel(int delta, int x, int y)
     auto page_y = y - page_origin_y();
     auto wheel_y = static_cast<double>(-delta) * 54.0;
     outln("[ladybird-bouchaud] WEB_WHEEL_DISPATCH viewport_x={} viewport_y={} delta_y={}", x, page_y, wheel_y);
-    s.wheel_input_pending = true;
     s.frame_after_wheel_pending = true;
     dispatch_mouse(Web::MouseEvent::Type::MouseWheel, x, page_y, 0, s.last_buttons,
         wheel_y);
@@ -4515,20 +4511,6 @@ inline void drain()
         s.incoming.remove(0, offset);
 }
 
-inline bool wheel_input_pending()
-{
-    return state().wheel_input_pending;
-}
-
-inline void wheel_handled_and_capture_requested(int result)
-{
-    auto& s = state();
-    if (!s.wheel_input_pending)
-        return;
-    s.wheel_input_pending = false;
-    outln("[ladybird-bouchaud] WEB_WHEEL_HANDLED result={} capture=scheduled", result);
-}
-
 /// Un tic du minuteur : lire les entrees, puis recomposer si le chrome a change.
 ///
 /// Ce que ce tic ne fait plus : reclamer une trame de page. Il le faisait a
@@ -4538,8 +4520,8 @@ inline void wheel_handled_and_capture_requested(int result)
 /// modele d'invalidation en devenait inoperant, et la machine passait 90 a 98 %
 /// de son unique cœur a remettre en page un document inchange.
 ///
-/// Le contenu de la page arrive maintenant par `present()`, quand LibWeb a
-/// decide qu'il fallait repeindre. Voir tools/ladybird/prepare-repaint.py.
+/// Le contenu de la page arrive par `present()`, quand le Compositor a peint
+/// une trame : ce tic ne la demande jamais.
 inline void tick()
 {
     flush_gui_output();
@@ -4593,6 +4575,9 @@ inline void tick()
 
 inline void initialize_from_environment()
 {
+    // `enabled()` lit l'environnement une fois ; le lire AVANT de retirer les
+    // variables plus bas est ce qui le garde vrai pour toute la vie du processus.
+    (void)enabled();
     auto& s = state();
     auto* gui = getenv("BO_GUI_FD");
     auto* surface = getenv("BO_SURFACE_FD");
@@ -4615,7 +4600,25 @@ inline void initialize_from_environment()
             fcntl(s.gui_fd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    warnln("[ladybird-bouchaud] M11_CHROME gui_fd={} surface_fd={} surface={}x{} toolbar={}",
+    // BOUCHAUD_UI_V1_FD_PRIVES : le canal GUI et la surface sont au navigateur.
+    // Sans FD_CLOEXEC, chaque WebContent, RequestServer, ImageDecoder ou
+    // WebWorker lance par l'Application les heriterait -- et un moteur de rendu
+    // compromis pourrait lire le clavier ou ecrire dans la fenetre. Les
+    // variables d'environnement partent aussi : un enfant ne doit pas meme
+    // savoir quels numeros chercher.
+    int prives = 0;
+    for (int fd : { s.gui_fd, s.surface_fd }) {
+        if (fd < 0)
+            continue;
+        auto drapeaux = fcntl(fd, F_GETFD, 0);
+        if (drapeaux >= 0 && fcntl(fd, F_SETFD, drapeaux | FD_CLOEXEC) == 0)
+            ++prives;
+    }
+    unsetenv("BO_GUI_FD");
+    unsetenv("BO_SURFACE_FD");
+    outln("[LB:UI] fd_prives={} cloexec=1 env_retire=1", prives);
+
+    warnln("[LB:UI] chrome gui_fd={} surface_fd={} surface={}x{} toolbar={}",
         s.gui_fd, s.surface_fd, s.surface_width, s.surface_height, toolbar_height);
 
     // Le magasin est relu ICI, une fois, avant la premiere navigation : la

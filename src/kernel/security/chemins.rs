@@ -50,8 +50,8 @@
 
 use super::profile::SecurityProfile;
 
-/// Le profil persistant du navigateur, tel que la couche plateforme du portage
-/// Ladybird le place (`tools/ladybird/prepare-platform-complete.py`).
+/// Le profil persistant du navigateur, tel que le processus navigateur le place
+/// (`tools/ladybird/ui-bouchaud/main.cpp`).
 ///
 /// Un seul prefixe couvre tout ce que RequestServer y ecrit : `--profile-path`
 /// y met le cache HTTP et le cache alt-svc, `XDG_DATA_HOME` les magasins SQL,
@@ -61,70 +61,33 @@ pub const PROFIL_NAVIGATEUR: &str = "/persist/ladybird";
 
 /// Ou le navigateur depose ce que l'utilisateur telecharge.
 ///
-/// BOUCHAUD_C20_TELECHARGEMENTS
+/// BOUCHAUD_C20_TELECHARGEMENTS, BOUCHAUD_UI_V1
 ///
-/// # Ce que ce droit ouvre, et pourquoi il est accorde quand meme
+/// Aucun role SANDBOXE n'y a acces. Le fichier est ecrit par le processus
+/// navigateur (`BouchaudBrowserHost`, profil `BrowserBroker`, non sandboxe),
+/// par `WebView::FileDownloader` upstream : il reprend la requete a
+/// RequestServer et ecrit lui-meme. Le droit que WebContent recevait ici
+/// existait parce que le chrome vivait DANS WebContent ; il est parti avec lui
+/// (`docs/ladybird/UI_BOUCHAUD.md`).
 ///
-/// Il est accorde a `BrowserContent` -- WebContent, WebWorker, ImageDecoder --
-/// c'est-a-dire aux roles qui executent le script d'un site. C'est un
-/// elargissement reel, et le nier serait malhonnete : un rendu compromis peut
-/// desormais deposer un fichier qui survit au redemarrage.
-///
-/// Trois choses le bornent, et la troisieme est la vraie raison.
-///
-/// D'abord le sous-arbre : le controle porte sur le chemin CANONIQUE
-/// (`path::normalize_absolute` a deja resolu les `..`), donc un
-/// `Content-Disposition: filename="../ladybird/profile/cookies.sqlite"` ne
-/// sort pas d'ici. Le chrome assainit en plus le nom propose -- la ceinture
-/// et les bretelles, parce que ce nom vient du SERVEUR.
-///
-/// Ensuite le statut de ce qui y atterrit : `security::profile` classe tout
-/// binaire lance depuis un chemin contenant `/Downloads/` comme `Untrusted`.
-/// Un fichier depose la ne peut donc pas servir a gagner des droits ; il peut
-/// au pire etre execute avec moins de droits que tout le reste.
-///
-/// Enfin, l'alternative. Sans ce droit, le navigateur ne peut ecrire que dans
-/// `/tmp`, qui est en RAMFS : un telechargement disparaitrait au redemarrage.
-/// « Le navigateur ne sait pas enregistrer un fichier » n'est pas une
-/// propriete de securite, c'est une fonction absente -- et l'utilisateur qui
-/// la contourne le fera par un chemin que personne n'a examine.
-///
-/// La frontiere qui compte ne bouge pas : le PROFIL du navigateur
-/// (`/persist/ladybird` : cookies, HSTS, cache) reste ferme aux roles de
-/// rendu. Ce qu'ils gagnent est un depot, pas une memoire.
+/// Ce qui y atterrit reste `Untrusted` a l'execution : `security::profile`
+/// classe ainsi tout binaire lance depuis un chemin contenant `/Downloads/`.
 pub const DOSSIER_TELECHARGEMENTS: &str = "/persist/Downloads";
 
 /// Ou le chrome du navigateur garde l'historique et les favoris.
 ///
-/// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS
+/// BOUCHAUD_C21_HISTORIQUE_ET_FAVORIS, BOUCHAUD_UI_V1
 ///
 /// Voisin de nom du profil -- `/persist/ladybird-chrome` a cote de
 /// `/persist/ladybird` -- et deliberement : la comparaison de `sous_arbre` va
-/// jusqu'au separateur, donc l'un n'ouvre pas l'autre, et le voir dans un `ls`
-/// dit tout de suite que ce sont deux choses.
+/// jusqu'au separateur, donc l'un n'ouvre pas l'autre.
 ///
-/// # Ce que ce droit coute
-///
-/// Il est accorde au meme role que le depot de telechargement, et pour la meme
-/// raison de fond : dans ce portage, le chrome vit DANS WebContent. Mais ce
-/// qu'il expose n'est pas de la meme nature, et il faut le dire :
-///
-///   * l'historique est une donnee PRIVEE. Un rendu compromis y lit ce que
-///     l'utilisateur a visite avant, et pas seulement pendant sa session ;
-///   * un favori est une cible de NAVIGATION que l'utilisateur a choisie. Le
-///     reecrire est un hameconnage durable -- un signet vers sa banque qui
-///     mene ailleurs.
-///
-/// Ce que le chrome oppose : rien n'est relu tel quel. Toute adresse rechargee
-/// passe par `BouchaudUrl::acceptable_pour_le_magasin` -- liste blanche de
-/// schemas, donc pas de `javascript:` ni de `data:`, et aucun octet de
-/// controle. Cela ferme l'execution ; cela ne ferme pas la substitution d'un
-/// `https://` par un autre, et rien ici ne le peut.
-///
-/// Ce qui la fermera est nomme : sortir le chrome de WebContent
-/// (`docs/ladybird/AUDIT_INTEGRATION.md` §5). Ce jour-la, ce droit et celui du
-/// depot de telechargement partent ensemble, parce qu'ils existent tous deux
-/// pour la meme raison.
+/// Aucun role SANDBOXE n'y a acces. L'historique est une donnee PRIVEE et un
+/// favori une cible de navigation que l'utilisateur a choisie : un rendu
+/// compromis qui pourrait les lire ou les reecrire ferait de l'espionnage ou
+/// de l'hameconnage durable. Le chrome vit maintenant dans le processus
+/// navigateur (UI/Bouchaud), qui n'est pas sandboxe ; le droit qu'avait
+/// WebContent est retire.
 pub const MAGASIN_DU_CHROME: &str = "/persist/ladybird-chrome";
 
 /// `path` est-il `root` lui-meme, ou un descendant ?
@@ -199,30 +162,8 @@ const fn possede_le_profil(profile: SecurityProfile) -> bool {
     matches!(profile, SecurityProfile::BrowserNetwork)
 }
 
-/// Ce role porte-t-il le chrome du navigateur ?
-///
-/// C'est `BrowserContent` -- WebContent -- et non `BrowserNetwork`, parce que
-/// dans ce portage la barre d'outils, l'historique, les favoris et la lecture
-/// du corps d'un telechargement vivent tous dans le processus de rendu.
-///
-/// Les deux sous-arbres qui en dependent -- le depot de telechargement et le
-/// magasin du chrome -- existent pour cette seule raison, et repartiront
-/// ensemble le jour ou le chrome sortira de WebContent. Un seul predicat le
-/// dit, plutot que deux identiques : ce n'est pas deux decisions, c'est une.
-const fn depose_les_telechargements(profile: SecurityProfile) -> bool {
-    matches!(profile, SecurityProfile::BrowserContent)
-}
-
 pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
     if lecture_commune(path) {
-        return true;
-    }
-    // Le role qui depose relit son propre depot : c'est ainsi qu'il decouvre
-    // qu'un fichier du meme nom existe deja, et qu'il numerote le suivant au
-    // lieu de l'ecraser. Lui refuser la lecture ferait perdre le precedent.
-    if depose_les_telechargements(profile)
-        && (sous_arbre(path, DOSSIER_TELECHARGEMENTS) || sous_arbre(path, MAGASIN_DU_CHROME))
-    {
         return true;
     }
     if !possede_le_profil(profile) {
@@ -238,11 +179,6 @@ pub fn lecture_permise(profile: SecurityProfile, path: &str) -> bool {
 
 pub fn ecriture_permise(profile: SecurityProfile, path: &str) -> bool {
     if ecriture_commune(path) {
-        return true;
-    }
-    if depose_les_telechargements(profile)
-        && (sous_arbre(path, DOSSIER_TELECHARGEMENTS) || sous_arbre(path, MAGASIN_DU_CHROME))
-    {
         return true;
     }
     possede_le_profil(profile) && sous_arbre(path, PROFIL_NAVIGATEUR)

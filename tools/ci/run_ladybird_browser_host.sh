@@ -124,8 +124,13 @@ JALONS=(
   '[ladybird-bouchaud] BROWSER_HOST_START'
   '[ladybird-bouchaud] BROWSER_HOST_INITIALIZED'
   '[ladybird-bouchaud] M11_GUI_HANDSHAKE_OK'
-  '[ladybird-bouchaud] M11_DOCUMENT_LOADED'
-  '[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
+  # BOUCHAUD_UI_V1 : le navigateur (UI/Bouchaud) tient la fenetre ; WebContent
+  # n'a ni chrome ni canal GUI.
+  'BOUCHAUD_UI_CHROME_OWNER browser'
+  'BOUCHAUD_UI_WEBCONTENT_CHROME 0'
+  'BOUCHAUD_UI_V1_READY'
+  '[LB:NAV] onglet=1 document_charge'
+  'BOUCHAUD_UI_FIRST_FRAME onglet=1'
   'HOST_CANVAS OK'
   'HOST_IMAGE OK 1x1'
   'HOST_IFRAME OK'
@@ -187,8 +192,8 @@ JALONS=(
 # le rapport, ou les jalons manquants deviennent alors de vrais echecs et non
 # un manque de temps. Le prefixe `HOST_SMOKE_` vit desormais dans
 # tools/ci/smoke_terminal.py, avec la regle de sortie entiere.
-DOCUMENT='[ladybird-bouchaud] M11_DOCUMENT_LOADED'
-TRAME='[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED'
+DOCUMENT='[LB:NAV] onglet=1 document_charge'
+TRAME='BOUCHAUD_UI_FIRST_FRAME onglet=1'
 
 # BOUCHAUD_SMOKE_BUDGET_MESURE_V1
 #
@@ -542,7 +547,7 @@ grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
-for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur'; do
+for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' 'sans_image_cpu=1' '[LB:CRASH]'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"
@@ -565,7 +570,7 @@ if [ "$MIRE_VERDICT" != ok ]; then
     sans_trame_posterieure)
                     echo "  aucune trame lancee apres l'ancre n'a ete remise : rien a capturer" >&2 ;;
     non_composee)   echo "  la trame retenue n'a jamais ete datee comme composee par le bureau" >&2 ;;
-    trame_non_datee) echo "  BANC : BROWSER_HOST_M11_TRAME sans t= ; le maillon de composition est impossible" >&2 ;;
+    trame_non_datee) echo "  BANC : [LB:FRAME] sans t= ; le maillon de composition est impossible" >&2 ;;
     moniteur_muet)  echo "  le moniteur n'a pas repondu a screendump" >&2 ;;
     capture_vide)   echo "  screendump a rendu un fichier vide" >&2 ;;
     absente)        echo "  la mire manque dans 1 + 3 captures certifiees (voir HOST_SURFACE_CAPTURE) : vrai defaut" >&2 ;;

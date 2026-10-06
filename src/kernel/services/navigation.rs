@@ -265,7 +265,9 @@ pub fn reconnait_un_refus(ligne: &[u8], maintenant_ns: u64) {
 }
 
 // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
-const MARQUEUR_DOCUMENT_CHARGE: &[u8] = b"M11_DOCUMENT_LOADED";
+// BOUCHAUD_UI_V1 : ecrit par le processus navigateur (UI/Bouchaud) quand un
+// onglet a fini de charger un document, `[LB:NAV] onglet=N document_charge`.
+const MARQUEUR_DOCUMENT_CHARGE: &[u8] = b" document_charge url=";
 
 fn contient(bloc: &[u8], motif: &[u8]) -> bool {
     !motif.is_empty()

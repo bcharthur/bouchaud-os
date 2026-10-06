@@ -1728,7 +1728,7 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 ///
 /// Le banc de mire (tools/ci/surface_declencheur.py) doit savoir quand l'ECRAN
 /// porte une trame du navigateur, pas seulement quand le navigateur l'a remise.
-/// `BROWSER_HOST_M11_TRAME seq=N t=T` est ecrit par WebContent APRES son
+/// `[LB:FRAME] onglet=N seq=N t=T` est ecrit par le navigateur APRES son
 /// `FrameReady` ; ce tour-ci a commence a lire les clients a `pompe_t_ms`. Si
 /// `pompe_t_ms > T`, le `FrameReady` de N a ete lu par ce tour ou un precedent,
 /// et cette composition -- qui recopie tout degat en attente -- a laisse sur le

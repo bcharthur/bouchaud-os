@@ -35,7 +35,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 
 SRC=${1:-third_party/ladybird-browser-src}
-CHROME="$SRC/Services/WebContent/BouchaudChrome.h"
+CHROME="$SRC/UI/Bouchaud/BouchaudChrome.h"
 
 if [ ! -f "$CHROME" ]; then
     echo "syntaxe chrome : arbre prepare absent ($CHROME)" >&2
@@ -209,7 +209,7 @@ done
 UNITE="$BOUCHONS/unite.cpp"
 {
     echo '#define BOUCHAUD_PORT 1'
-    echo '#include <WebContent/BouchaudChrome.h>'
+    echo '#include <UI/Bouchaud/BouchaudChrome.h>'
     # Une unite de traduction qui n'instancie rien ne verifie que les
     # declarations. Le chrome est entierement `inline` : ce sont ses corps qu'on
     # veut analyser, et le compilateur les analyse des qu'il les voit.

@@ -55,9 +55,7 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
 DECODEUR = RACINE / "src" / "drivers" / "input" / "clavier_decodeur.rs"
-M11 = RACINE / "tools" / "ladybird" / "prepare-m11-chrome.py"
-V19 = RACINE / "tools" / "ladybird" / "prepare-v19-navigateur.py"
-UPSTREAM = RACINE / "tools" / "ladybird" / "browser-upstream.sh"
+V19 = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BrowserWindow.cpp"
 
 
 def corps_fonction(source, signature):
@@ -254,36 +252,6 @@ def regle_champ_unique(chrome, fautes):
             )
 
 
-def regle_ancres_v19(v19, m11, upstream, fautes):
-    """Les ancres de `prepare-v19-navigateur.py` existent la ou il les cherche.
-
-    Deux familles, et elles ne se cassent pas de la meme facon :
-
-      * celles qui visent notre propre texte -- ce que `prepare-m11-chrome.py`
-        vient d'ecrire -- ne peuvent bouger que si nous les bougeons ;
-      * celles qui visent du texte upstream peuvent disparaitre a la montee de
-        SHA suivante.
-
-    Les premieres se verifient ici, tout de suite. Les secondes ne se
-    verifient qu'avec l'arbre epingle sous la main : `browser-upstream.sh`
-    echoue alors avec le nom de l'ancre, ce qui est deja beaucoup mieux qu'une
-    erreur de compilation vingt minutes plus tard.
-    """
-    if "prepare-v19-navigateur.py" not in upstream:
-        fautes.append(
-            "browser-upstream.sh : `prepare-v19-navigateur.py` n'est plus "
-            "lance. Le chrome garderait ses raccourcis, et aucun n'atteindrait "
-            "le moteur."
-        )
-    for ancre in re.findall(r'^    """(    chrome\.[a-z_]+ = \[\] \{)""",$', v19, re.M):
-        if ancre not in m11:
-            fautes.append(
-                "prepare-v19-navigateur.py vise une ancre absente de "
-                "prepare-m11-chrome.py :\n    %r\n"
-                "La substitution echouera au milieu de la construction." % ancre
-            )
-
-
 def regle_recherche(chrome, v19, fautes):
     """6. La recherche dans la page atteint le moteur.
 
@@ -326,20 +294,21 @@ def regle_recherche(chrome, v19, fautes):
             "BouchaudChrome.h : fermer la barre n'efface plus le surlignage. "
             "La page resterait marquee par une recherche qui n'existe plus."
         )
-    for symbole, quoi in (
-        ("chrome.on_find = [", "la requete"),
-        ("chrome.on_find_next = [", "la correspondance suivante"),
-        ("chrome.on_find_previous = [", "la correspondance precedente"),
+    for symbole, appel, quoi in (
+        ("c.on_find = [", "->find_in_page(", "la requete"),
+        ("c.on_find_next = [", "->find_in_page_next_match()", "la correspondance suivante"),
+        ("c.on_find_previous = [", "->find_in_page_previous_match()", "la correspondance precedente"),
     ):
-        if symbole not in v19:
+        i = v19.find(symbole)
+        if i < 0 or appel not in v19[i : i + 400]:
             fautes.append(
-                "prepare-v19-navigateur.py : %s n'est plus branchee sur "
-                "LibWeb." % quoi
+                "BrowserWindow.cpp : %s n'est plus branchee sur la vue." % quoi
             )
-    if "set_resultat_recherche(" not in v19:
+    i = v19.find("vue.on_find_in_page = [")
+    if i < 0 or "set_resultat_recherche(" not in v19[i : i + 500]:
         fautes.append(
-            "prepare-v19-navigateur.py : le resultat du moteur ne revient plus "
-            "au chrome ; le compteur afficherait toujours zero."
+            "BrowserWindow.cpp : le resultat du moteur ne revient plus au "
+            "chrome ; le compteur afficherait toujours zero."
         )
 
 
@@ -356,20 +325,19 @@ def regle_zoom(chrome, m11, fautes):
             "facteur calcule sur place accumulerait ses erreurs, et Ctrl+0 "
             "cesserait de rendre exactement la taille d'origine."
         )
-    if "chrome.on_zoom = [" not in m11:
+    i = m11.find("c.on_zoom = [")
+    if i < 0:
         fautes.append(
-            "prepare-m11-chrome.py : `on_zoom` n'est plus branche ; les "
-            "raccourcis de zoom ne changeraient rien du tout."
+            "BrowserWindow.cpp : `on_zoom` n'est plus branche ; les raccourcis "
+            "de zoom ne changeraient rien du tout."
         )
         return
-    # L'APPEL, pas la mention : le commentaire qui explique la regle nomme
-    # `set_zoom_level()`, et une regle qui se contente du nom se laisse
-    # satisfaire par sa propre explication.
-    if "->set_zoom_level(" not in m11:
+    # L'APPEL, pas la mention.
+    if "->set_zoom(" not in m11[i : i + 400]:
         fautes.append(
-            "prepare-m11-chrome.py : le zoom n'atteint plus le moteur. C'est "
-            "`set_zoom_level()` qui refait la mise en page ; sans lui la page "
-            "garderait sa taille."
+            "BrowserWindow.cpp : le zoom n'atteint plus la vue. C'est "
+            "`ViewImplementation::set_zoom()` qui refait la mise en page ; sans "
+            "lui la page garderait sa taille."
         )
 
 
@@ -407,9 +375,7 @@ def main():
     regle_champ_unique(chrome, fautes)
     v19 = V19.read_text(encoding="utf-8")
     regle_recherche(chrome, v19, fautes)
-    regle_ancres_v19(v19, M11.read_text(encoding="utf-8"),
-        UPSTREAM.read_text(encoding="utf-8"), fautes)
-    regle_zoom(chrome, M11.read_text(encoding="utf-8"), fautes)
+    regle_zoom(chrome, v19, fautes)
     regle_suppr(decodeur, fautes)
 
     if fautes:

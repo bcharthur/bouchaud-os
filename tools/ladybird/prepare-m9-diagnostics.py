@@ -138,79 +138,6 @@ request_cpp.write_text(data)
 
 
 # ---------------------------------------------------------------------------
-# PageClient: M9 deliberately has no Browser process. These three messages are
-# DevTools/network-observability notifications only; ResourceLoader calls them
-# before forwarding headers/completion into Fetch. Do not send them into the
-# bootstrap socket in M9. This mirrors the existing M9 cookie/HSTS/local
-# navigation policy and leaves every normal Ladybird build untouched.
-# ---------------------------------------------------------------------------
-page_cpp = root / "Services/WebContent/PageClient.cpp"
-data = page_cpp.read_text()
-
-patches = [
-    (
-        '''void PageClient::page_did_start_network_request(u64 request_id, URL::URL const& url, ByteString const& method, Vector<HTTP::Header> const& request_headers, ReadonlyBytes request_body, Optional<String> initiator_type, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority priority)
-{
-    client().async_did_start_network_request(m_id, request_id, url, method, request_headers, request_body, move(initiator_type), referrer_policy, is_navigation_request, priority);
-}''',
-        '''void PageClient::page_did_start_network_request(u64 request_id, URL::URL const& url, ByteString const& method, Vector<HTTP::Header> const& request_headers, ReadonlyBytes request_body, Optional<String> initiator_type, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority priority)
-{
-#if defined(BOUCHAUD_PORT)
-    if (bouchaud_m9_enabled()) {
-        outln("[ladybird-bouchaud] M9_BROWSER_NET_START_SKIPPED id={} url={}", request_id, url);
-        return;
-    }
-#endif
-    client().async_did_start_network_request(m_id, request_id, url, method, request_headers, request_body, move(initiator_type), referrer_policy, is_navigation_request, priority);
-}''',
-        "PageClient network start",
-    ),
-    (
-        '''void PageClient::page_did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String> reason_phrase, Vector<HTTP::Header> const& response_headers, Requests::CameFromCache came_from_cache)
-{
-    client().async_did_receive_network_response_headers(m_id, request_id, status_code, move(reason_phrase), response_headers, came_from_cache);
-}''',
-        '''void PageClient::page_did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String> reason_phrase, Vector<HTTP::Header> const& response_headers, Requests::CameFromCache came_from_cache)
-{
-#if defined(BOUCHAUD_PORT)
-    if (bouchaud_m9_enabled()) {
-        outln("[ladybird-bouchaud] M9_BROWSER_NET_HEADERS_SKIPPED id={} status={}", request_id, status_code);
-        return;
-    }
-#endif
-    client().async_did_receive_network_response_headers(m_id, request_id, status_code, move(reason_phrase), response_headers, came_from_cache);
-}''',
-        "PageClient network headers",
-    ),
-    (
-        '''void PageClient::page_did_finish_network_request(u64 request_id, u64 body_size, Requests::RequestTimingInfo const& timing_info, Optional<Requests::NetworkError> const& network_error)
-{
-    client().async_did_finish_network_request(m_id, request_id, body_size, timing_info, network_error);
-}''',
-        '''void PageClient::page_did_finish_network_request(u64 request_id, u64 body_size, Requests::RequestTimingInfo const& timing_info, Optional<Requests::NetworkError> const& network_error)
-{
-#if defined(BOUCHAUD_PORT)
-    if (bouchaud_m9_enabled()) {
-        outln("[ladybird-bouchaud] M9_BROWSER_NET_FINISH_SKIPPED id={} size={} error={}", request_id, body_size, network_error.has_value());
-        return;
-    }
-#endif
-    client().async_did_finish_network_request(m_id, request_id, body_size, timing_info, network_error);
-}''',
-        "PageClient network finish",
-    ),
-]
-
-for old, new, label in patches:
-    if new in data:
-        continue
-    if old not in data:
-        raise SystemExit(f"M9 diagnostics pattern not found ({label}) in {page_cpp}")
-    data = data.replace(old, new, 1)
-
-page_cpp.write_text(data)
-
-# ---------------------------------------------------------------------------
 # RequestServer : nommer l'etat ou la requete s'arrete.
 #
 # Le journal de l'essai Internet passe de `M9_BROWSER_NET_START_SKIPPED` — donc
@@ -352,12 +279,10 @@ if "M9_RS_START_RECU" not in data:
     connection_rs_cpp.write_text(data)
 
 
-# The next adaptation is deliberately kept in its own small source-patch file:
-# it changes one upstream Fetch behaviour (Document-body pausing), while this
-# file remains diagnostics/observability. browser-upstream.sh already invokes
-# this script, so chain the local-navigation patch here without another build
-# entry point.
-navigation_script = Path(__file__).with_name("prepare-m9-navigation.py")
-exec(compile(navigation_script.read_text(), str(navigation_script), "exec"))
+# BOUCHAUD_UI_V1 : prepare-m9-navigation.py n'est plus enchaine ici. Il gardait
+# le corps d'un Document non suspendu et rejouait localement les operations
+# d'historique, parce que M9 n'avait pas de processus navigateur. UI/Bouchaud en
+# a un : la suspension (transfert inter-processus, telechargement) et
+# l'historique sont de nouveau ceux d'upstream.
 
 print("Bouchaud M9 body/Fetch diagnostics applied to", root)

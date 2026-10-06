@@ -16,7 +16,9 @@ need={
     "let window = adaptive.min(pressure_cap)",
 ],
 "src/kernel/process/thread/faute_memoire.rs":["fault_cluster_after_zero"],
-"tools/ladybird/chrome/modernise-v16.py":["BOUCHAUD_CHROME_V16_FONTCONFIG_TYPEFACE","SkFontMgr_New_FontConfig"],
+# V16 est dans la source du chrome depuis BOUCHAUD_UI_V1.
+"tools/ladybird/chrome/BouchaudChrome.h":["BOUCHAUD_CHROME_V16_FONTCONFIG_TYPEFACE","SkFontMgr_New_FontConfig"],
+"tools/ladybird/browser-upstream.sh":["prepare-v16-fonts.py"],
 "tools/ladybird/prepare-v16-fonts.py":["FONTS_V16_FORCE_FONTCONFIG","BOUCHAUD_V16_PATH_FONT_ALIAS","nearest_distance","DejaVu Sans"],
 # `perf/gui-event-driven` a ete fusionnee dans main puis supprimee : epingler
 # une branche morte ne protege rien. On garde le marqueur de capacite UI, qui

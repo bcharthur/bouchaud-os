@@ -38,23 +38,14 @@ expected = {
         "BOUCHAUD_HID_REARMED",
         "BOUCHAUD_HID_INTERRUPT_BACK",
     ],
-    "tools/ladybird/prepare-m11-page-registry.py": [
-        "M11_TAB_STAGE 10 CALLBACK_ENTER",
-        "M11_TAB_STAGE 20 HOST_REQUEST_BEGIN",
-        "M11_TAB_STAGE 30 HOST_REPLY",
-        "M11_TAB_STAGE 40 CREATE_PAGE_BEGIN",
-        "M11_TAB_STAGE 50 CREATE_PAGE_OK",
-        "M11_TAB_STAGE 60 TRAVERSABLE_BEGIN",
-        "M11_TAB_STAGE 70 TRAVERSABLE_OK",
-        "M11_TAB_STAGE 80 READY",
-        "auto const source_page = page_id();",
+    # BOUCHAUD_UI_V1 : les onglets sont des vues du navigateur. Leur cycle de
+    # vie se lit dans le journal par `[LB:TAB]`, ecrit par la fenetre.
+    "tools/ladybird/ui-bouchaud/BrowserWindow.cpp": [
+        "[LB:TAB] ouvert onglet={} page={} processus=neuf",
+        "[LB:TAB] ouvert onglet={} page={} ouvreur={} processus={}",
+        "[LB:TAB] ferme onglet={} page={}",
     ],
-    "tools/ladybird/prepare-full-browser-host.py": [
-        "M11_HOST_TAB_STAGE 10 REQUEST_RECEIVED",
-        "M11_HOST_TAB_STAGE 40 VIEW_REGISTERED",
-        "M11_HOST_TAB_STAGE 60 REPLY",
-    ],
-    "tools/ladybird/verifie-chrome.sh": ["M11_TAB_STAGE 80 READY", "M11_HOST_TAB_STAGE 40 VIEW_REGISTERED"],
+    "tools/ladybird/verifie-chrome.sh": ["did_accept_presented_backing_store", "WebContent porte encore"],
     "tools/reference/extract-blackbox.py": ['8:"terminal"', '"terminal.log"', "terminal_records=len(terminal)"],
 }
 
@@ -112,5 +103,5 @@ if network:
 
 print("[OK] aucun fichier RTL8168/DHCP/DNS/TCP/TLS modifie")
 print("[OK] contrat HID : sentinelle EP0 + Stop/SetDequeue + retour Interrupt-IN present")
-print("[OK] contrat onglets : stages 10..80 + VIEW_REGISTERED present")
+print("[OK] contrat onglets : [LB:TAB] ouvert/ferme present dans UI/Bouchaud")
 print("STABILITY_OVERLAY_VERIFY_OK")

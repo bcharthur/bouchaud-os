@@ -71,17 +71,23 @@ composee.
 import re
 import sys
 
+# BOUCHAUD_UI_V1 : la console de la page sort par le navigateur
+# (`[LB:JS] onglet=N log ...`) et la trame presentee par la fenetre
+# (`[LB:FRAME] onglet=N seq=N t=T`). Les anciens journaux (`JS_CONSOLE log`,
+# `BROWSER_HOST_M11_TRAME page=N`) se relisent encore : un journal archive doit
+# rester analysable.
+CONSOLE = r"(?:JS_CONSOLE|\[LB:JS\] onglet=\d+) log "
 ANCRE = re.compile(
-    r"JS_CONSOLE log HOST_SURFACE_MIRE_PEINTE battement=(\w+)(?: decodees=(\d)/3)?")
-INSEREE = re.compile(r"JS_CONSOLE log HOST_SURFACE_MIRE_INSEREE")
-TRAME = re.compile(r"BROWSER_HOST_M11_TRAME page=\d+ seq=(\d+)(?: t=(\d+))?")
+    CONSOLE + r"HOST_SURFACE_MIRE_PEINTE battement=(\w+)(?: decodees=(\d)/3)?")
+INSEREE = re.compile(CONSOLE + r"HOST_SURFACE_MIRE_INSEREE")
+TRAME = re.compile(r"(?:BROWSER_HOST_M11_TRAME page|\[LB:FRAME\] onglet)=\d+ seq=(\d+)(?: t=(\d+))?")
 COMPOSITION = re.compile(r"GUI_COMPOSITION_NAVIGATEUR pompe_t_ms=(\d+)")
 MARGE = 2
 SUIVANTES = 3
 
 # L'ancienne regle, gardee pour que le test la montre en defaut.
 ANCIEN_MARQUEUR = "HOST_SURFACE_MIRE_INSEREE"
-ANCIENNE_TRAME = re.compile(r"BROWSER_HOST_M11_TRAME page=\d+ seq=(\d+)")
+ANCIENNE_TRAME = re.compile(r"(?:BROWSER_HOST_M11_TRAME page|\[LB:FRAME\] onglet)=\d+ seq=(\d+)")
 
 
 def ancienne_regle(texte):
@@ -192,7 +198,7 @@ class Pipeline:
             fin = depart + duree
             contenu = "mire" if (not jamais and depart >= t_peinture) else "ancienne"
             remises.append((fin, contenu))
-            self.lignes.append((fin, f"BROWSER_HOST_M11_TRAME page=1 seq={seq} t={fin}"))
+            self.lignes.append((fin, f"[LB:FRAME] onglet=1 seq={seq} t={fin} degat=0,0 10x10 zone=10x10 present_us=1"))
         # Le bureau pompe `latence_wm` apres chaque remise ; une composition
         # montre la DERNIERE trame remise avant sa pompe -- l'invariant que
         # `temoin_composition` publie.
@@ -202,11 +208,11 @@ class Pipeline:
             self.ecran.append((pompe, contenu))
             self.lignes.append((pompe + 1, f"GUI_COMPOSITION_NAVIGATEUR pompe_t_ms={pompe}"
                                            f" fin_t_ms={pompe + 1} n={n}"))
-        self.lignes.append((t_insertion, "JS_CONSOLE log HOST_SURFACE_MIRE_INSEREE largeur=256 hauteur=64"))
+        self.lignes.append((t_insertion, "[LB:JS] onglet=1 log HOST_SURFACE_MIRE_INSEREE largeur=256 hauteur=64"))
         # La page pose son ancre deux etapes de rendu apres ce qu'elle CROIT
         # etre la peinture complete ; `t_ancre` permet de la tromper.
         ancre = t_peinture + 2 if t_ancre is None else t_ancre
-        self.lignes.append((ancre, "JS_CONSOLE log HOST_SURFACE_MIRE_PEINTE battement=trames decodees=3/3"))
+        self.lignes.append((ancre, "[LB:JS] onglet=1 log HOST_SURFACE_MIRE_PEINTE battement=trames decodees=3/3"))
         self.lignes.sort(key=lambda x: x[0])
 
     def journal_jusqua(self, instant):

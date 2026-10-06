@@ -67,7 +67,8 @@ MODULE = RACINE / "src" / "gui" / "presse_papiers.rs"
 CLIENT = RACINE / "src" / "gui" / "client.rs"
 PROTOCOLE = RACINE / "src" / "gui" / "protocole.rs"
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
-V19 = RACINE / "tools" / "ladybird" / "prepare-v19-navigateur.py"
+FENETRE = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BrowserWindow.cpp"
+APPLICATION = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "Application.cpp"
 BANC = RACINE / "tools" / "gui" / "test_presse_papiers.rs"
 
 
@@ -336,27 +337,26 @@ def regle_chrome(chrome, fautes):
                 )
 
 
-def regle_v19(v19, fautes):
-    """7 et 8 cote portage."""
-    for symbole, quoi in (
-        ("chrome.on_select_all = [", "la selection totale du document"),
-        ("chrome.on_copy = [", "la copie depuis le document"),
-        ("chrome.on_cut = [", "le couper depuis le document"),
-        ("chrome.on_paste = [", "le collage dans le document"),
-        ("set_presse_papiers_du_document(", "l'ecriture par l'API Clipboard"),
-        ("retrieved_clipboard_entries(", "la lecture par l'API Clipboard"),
+def regle_navigateur(fenetre, application, fautes):
+    """7 et 8 cote navigateur (UI/Bouchaud, BOUCHAUD_UI_V1)."""
+    for source, symbole, quoi in (
+        (fenetre, "c.on_select_all = [", "la selection totale du document"),
+        (fenetre, "c.on_copy = [", "la copie depuis le document"),
+        (fenetre, "c.on_cut = [", "le couper depuis le document"),
+        (fenetre, "c.on_paste = [", "le collage dans le document"),
+        (application, "set_presse_papiers_du_document(", "l'ecriture par l'API Clipboard"),
+        (application, "Application::clipboard_entries() const", "la lecture par l'API Clipboard"),
     ):
-        if symbole not in v19:
-            fautes.append(
-                "prepare-v19-navigateur.py : %s n'est plus branchee." % quoi
-            )
-    if "from_utf8_with_replacement_character" not in v19:
+        if symbole not in source:
+            fautes.append("UI/Bouchaud : %s n'est plus branchee." % quoi)
+    lecture = application[application.find("Utf16String Application::clipboard_text("):]
+    lecture = lecture[:lecture.find("\n}") + 2]
+    if "from_utf8_with_replacement_character" not in lecture or "Utf16String::from_utf8(" in lecture:
         fautes.append(
-            "prepare-v19-navigateur.py : le collage dans le document ne "
-            "convertit plus avec le caractere de remplacement. "
-            "`Utf16String::from_utf8` AFFIRME la validite de son entree, et "
-            "ce texte vient d'un autre processus : l'affirmation est une "
-            "panne qui attend."
+            "Application.cpp : le texte colle dans le document ne se convertit "
+            "plus avec le caractere de remplacement. `Utf16String::from_utf8` "
+            "AFFIRME la validite de son entree, et ce texte vient d'un autre "
+            "processus : l'affirmation est une panne qui attend."
         )
 
 
@@ -366,7 +366,8 @@ def main():
     client = texte(CLIENT, fautes)
     protocole = texte(PROTOCOLE, fautes)
     chrome = texte(CHROME, fautes)
-    v19 = texte(V19, fautes)
+    fenetre = texte(FENETRE, fautes)
+    application = texte(APPLICATION, fautes)
     texte(BANC, fautes)
 
     if client is not None:
@@ -379,8 +380,8 @@ def main():
         regle_borne(sans_commentaires(module), fautes)
     if chrome is not None:
         regle_chrome(sans_commentaires(chrome), fautes)
-    if v19 is not None:
-        regle_v19(sans_commentaires(v19), fautes)
+    if fenetre is not None and application is not None:
+        regle_navigateur(sans_commentaires(fenetre), sans_commentaires(application), fautes)
 
     if fautes:
         print("presse-papiers : %d regle(s) violee(s)\n" % len(fautes))

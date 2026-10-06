@@ -26,22 +26,23 @@ prendre.
 
 LES REGLES
 ----------
-1. Les rappels du chrome vers le moteur demandent l'onglet ACTIF. `page_id`
-   n'est plus une valeur capturee mais un appel.
+1. Les rappels du chrome vers le moteur agissent sur la vue de l'onglet
+   ACTIF (`BrowserWindow::vue_active`, qui le demande au chrome a chaque
+   appel). BOUCHAUD_UI_V1 : le chrome vit dans le processus navigateur.
 
-2. Les hooks qui remontent au chrome portent leur identifiant de page. Un hook
-   qui n'en porte pas ne peut pas savoir si l'evenement concerne l'onglet
+2. Les hooks qui remontent au chrome portent leur identifiant d'onglet. Un
+   hook qui n'en porte pas ne peut pas savoir si l'evenement concerne l'onglet
    affiche.
 
-3. Le moteur cree la page, le chrome cree l'onglet -- et jamais l'inverse. Une
-   fenetre surgissante passe par `page_did_request_new_web_view`.
+3. Le moteur cree la page, le navigateur cree la vue puis l'onglet -- et
+   jamais l'inverse. Une fenetre surgissante passe par `on_new_web_view`.
 
-4. La fermeture retire l'onglet AVANT `remove_page`. Apres, l'identifiant
-   designerait un onglet dont la page n'existe plus.
+4. La fermeture passe par le moteur (`request_close`, `beforeunload`) et
+   retire la vue ET l'onglet, apres coup, hors du rappel de la vue.
 
-5. Les identifiants ne sont jamais reutilises. Une capture partie avant une
-   fermeture -- il y en a toujours une en vol -- serait sinon prise pour celle
-   du nouvel onglet.
+5. Les identifiants d'onglet ne sont jamais reutilises. Une trame partie
+   avant une fermeture -- il y en a toujours une en vol -- serait sinon prise
+   pour celle du nouvel onglet.
 
 6. La bande se peint avec la barre d'outils, et le degat du chrome couvre les
    deux. Une bande peinte sans etre annoncee reste invisible ; annoncee sans
@@ -63,9 +64,7 @@ TRIPLE = "'" * 3
 
 RACINE = Path(__file__).resolve().parent.parent
 CHROME = RACINE / "tools" / "ladybird" / "chrome" / "BouchaudChrome.h"
-M11 = RACINE / "tools" / "ladybird" / "prepare-m11-chrome.py"
-V19 = RACINE / "tools" / "ladybird" / "prepare-v19-navigateur.py"
-HOTE = RACINE / "tools" / "ladybird" / "prepare-full-browser-host.py"
+FENETRE = RACINE / "tools" / "ladybird" / "ui-bouchaud" / "BrowserWindow.cpp"
 
 
 def corps(source, signature):
@@ -122,135 +121,120 @@ def corps(source, signature):
     return None
 
 
-def regle_rappels(m11, fautes):
+RAPPELS_MOTEUR = (
+    "on_mouse_event", "on_key_event", "on_navigate", "on_history_delta", "on_reload",
+    "on_stop", "on_zoom", "on_find", "on_find_next", "on_find_previous",
+    "on_select_all", "on_copy", "on_cut", "on_paste",
+)
+
+
+def rappel(fenetre, nom):
+    """Le corps de la lambda posee sur `c.<nom>` dans `branche_chrome`."""
+    m = re.search(r"\bc\." + re.escape(nom) + r" = \[", fenetre)
+    if not m:
+        return None
+    return corps(fenetre, fenetre[m.start():m.start() + len(nom) + 6])
+
+
+def regle_rappels(fenetre, fautes):
     """1. Les rappels visent l'onglet actif."""
-    if "constexpr u64 page_id = 1;" in m11:
+    actif = corps(fenetre, "BouchaudWebView* BrowserWindow::vue_active() const")
+    if actif is None or "BouchaudChrome::page_active()" not in actif:
         fautes.append(
-            "prepare-m11-chrome.py : `page_id` est redevenu une constante. "
-            "Chaque rappel agirait alors sur le premier onglet, quel que soit "
-            "celui que l'utilisateur regarde -- un clic rechargerait l'autre."
+            "BrowserWindow.cpp : `vue_active` ne demande plus au chrome quel "
+            "onglet est actif. Un clic rechargerait l'autre onglet."
         )
-    if "BouchaudChrome::page_active()" not in m11:
-        fautes.append(
-            "prepare-m11-chrome.py : les rappels ne demandent plus quel onglet "
-            "est actif."
-        )
-    # Un usage nu de `page_id` -- sans les parentheses -- serait la lambda
-    # elle-meme la ou on attend un identifiant.
-    #
-    # La regle ne porte que sur le CORPS de `bouchaud_m11_start` : ailleurs
-    # dans le script, `page_id` designe la variable du chemin M9, ou il n'y a
-    # qu'une page et ou elle vaut bien 1.
-    corps_m11 = re.search("m11_start = r" + TRIPLE + "(.*?)" + TRIPLE, m11, re.S)
-    if not corps_m11:
-        fautes.append(
-            "prepare-m11-chrome.py : le corps de `bouchaud_m11_start` n'est "
-            "plus une chaine brute delimitee par des triples apostrophes."
-        )
-        return
-    for ligne in corps_m11.group(1).splitlines():
-        nue = ligne.split("//", 1)[0]
-        if "page_id" not in nue or "page_id()" in nue:
+    for nom in RAPPELS_MOTEUR:
+        bloc = rappel(fenetre, nom)
+        if bloc is None:
+            fautes.append("BrowserWindow.cpp : `%s` n'est plus branche." % nom)
             continue
-        # La capture d'une lambda et sa declaration nomment le rappel lui-meme.
-        if "[this, page_id" in nue or "auto const page_id" in nue:
-            continue
-        # Le premier onglet et sa premiere URL portent l'identifiant reel.
-        if "ajoute_onglet" in nue or "set_committed_url" in nue:
-            continue
-        fautes.append(
-            "prepare-m11-chrome.py : `page_id` employe sans parentheses hors "
-            "capture :\n           %s" % ligne.strip()
-        )
+        if "vue_active()" not in bloc:
+            fautes.append(
+                "BrowserWindow.cpp : `%s` n'agit plus sur la vue de l'onglet "
+                "ACTIF." % nom
+            )
 
 
-def regle_hooks(chrome, m11, hote, fautes):
-    """2. Les hooks portent leur identifiant de page."""
+def regle_hooks(chrome, fenetre, fautes):
+    """2. Les hooks portent leur identifiant d'onglet."""
     for signature, quoi in (
-        ("inline bool present(u64 page_id,", "une capture"),
+        ("inline bool present(u64 page_id,", "une trame"),
         ("inline void set_committed_url(u64 page_id,", "une URL commitee"),
         ("inline void set_loading(u64 page_id,", "un etat de chargement"),
         ("inline void set_title(u64 page_id,", "un titre"),
     ):
         if signature not in chrome:
             fautes.append(
-                "BouchaudChrome.h : %s arrive sans dire de quelle page elle "
+                "BouchaudChrome.h : %s arrive sans dire de quel onglet elle "
                 "vient. Le chrome l'appliquerait a l'onglet affiche, quel que "
                 "soit celui qui a change." % quoi
             )
-
-    for source, nom in ((m11, "prepare-m11-chrome.py"), (hote, "prepare-full-browser-host.py")):
-        for appel in re.findall(
-            r"BouchaudChrome::(set_committed_url|set_loading|set_title|present|present_complet)"
-            r"\((m_id|page_id\(\)|page_id|initial_page_id|[^,)]*)",
-            source,
-        ):
-            premier = appel[1].strip()
-            if premier in ("m_id", "page_id", "initial_page_id", "page_id()"):
-                continue
-            fautes.append(
-                "%s : `BouchaudChrome::%s` est appelee sans identifiant de "
-                "page (premier argument : %r)." % (nom, appel[0], premier)
-            )
-
-
-def regle_creation(v19, fautes):
-    """3 et 4."""
-    # La substitution est reperee par son ETIQUETTE, et non par le nom du
-    # hook : celui-ci apparait d'abord dans la docstring du script, ou une
-    # fenetre de recherche ne contient evidemment pas le code.
-    etiquette = v19.find('"nouvelle vue",')
-    bloc = v19[max(0, etiquette - 3000) : etiquette] if etiquette >= 0 else ""
-    if etiquette < 0 or "create_page(" not in bloc:
-        fautes.append(
-            "prepare-v19-navigateur.py : une fenetre surgissante ne cree plus "
-            "de page. `target=_blank` ne ferait rien du tout."
-        )
-    elif "ajoute_onglet(" not in bloc:
-        fautes.append(
-            "prepare-v19-navigateur.py : la page creee par une fenetre "
-            "surgissante n'apparait dans aucun onglet : elle vivrait sans que "
-            "rien ne puisse l'atteindre."
-        )
-
-    fermeture = v19.rfind("page_did_close_top_level_traversable")
-    if fermeture < 0 or "retire_onglet(" not in v19[fermeture : fermeture + 1500]:
-        fautes.append(
-            "prepare-v19-navigateur.py : la fermeture d'une page ne retire "
-            "plus son onglet. La bande garderait une ligne dont la page "
-            "n'existe plus."
-        )
-    else:
-        extrait = v19[fermeture : fermeture + 1500]
-        retire = extrait.find("retire_onglet(")
-        arret = extrait.find("stop_presenting_to_client")
-        if arret >= 0 and retire > arret:
-            fautes.append(
-                "prepare-v19-navigateur.py : l'onglet est retire APRES que la "
-                "page a commence a disparaitre."
-            )
-
-
-def regle_identifiants(chrome, fautes):
-    """5. Les identifiants ne sont jamais reutilises."""
-    bloc = corps(chrome, "inline u64 prochaine_page()")
-    if bloc is None:
-        fautes.append("BouchaudChrome.h : `prochaine_page` a disparu.")
-        return
-    if "++" not in bloc:
-        fautes.append(
-            "BouchaudChrome.h : `prochaine_page` ne progresse plus. Deux "
-            "onglets porteraient le meme identifiant."
-        )
-    for interdit in ("onglets.size()", "-", "="):
-        if interdit == "=" and "prochaine_page++" in bloc:
+    for appel in re.findall(
+        r"BouchaudChrome::(set_committed_url|set_loading|set_title|present)\(([^,)]*)",
+        fenetre,
+    ):
+        premier = appel[1].strip()
+        if premier == "onglet" or premier.startswith(("vue.onglet(", "vue->onglet(")):
             continue
-        if interdit in ("onglets.size()", "-") and interdit in bloc:
+        fautes.append(
+            "BrowserWindow.cpp : `BouchaudChrome::%s` est appelee sans "
+            "identifiant d'onglet (premier argument : %r)." % (appel[0], premier)
+        )
+
+
+def regle_creation(fenetre, fautes):
+    """3 et 4. Le navigateur cree la vue, puis l'onglet ; la fermeture passe
+    par le moteur (`request_close`, `beforeunload`) et retire les deux."""
+    popup = corps(fenetre, "String BrowserWindow::ouvre_vue_demandee_par_la_page(")
+    if popup is None or "create_child(" not in popup:
+        fautes.append(
+            "BrowserWindow.cpp : une fenetre surgissante ne cree plus de vue "
+            "sur la page que le moteur a deja creee. `target=_blank` ne ferait "
+            "rien du tout."
+        )
+    elif "ajoute_onglet(" not in popup:
+        fautes.append(
+            "BrowserWindow.cpp : la page ouverte par le document n'apparait "
+            "dans aucun onglet : elle vivrait sans que rien ne puisse l'atteindre."
+        )
+    fermer = rappel(fenetre, "on_fermer_onglet")
+    if fermer is None or "request_close()" not in fermer:
+        fautes.append(
+            "BrowserWindow.cpp : fermer un onglet ne passe plus par le moteur "
+            "(`request_close`) : `beforeunload` serait saute."
+        )
+    if "Core::deferred_invoke([this, onglet] { retire_vue(onglet); })" not in fenetre:
+        fautes.append(
+            "BrowserWindow.cpp : `on_close` ne differe plus la destruction de "
+            "la vue -- elle se detruirait dans son propre rappel."
+        )
+    retire = corps(fenetre, "void BrowserWindow::retire_vue(")
+    if retire is None or "m_vues.remove(" not in retire or "BouchaudChrome::retire_onglet(onglet)" not in retire:
+        fautes.append(
+            "BrowserWindow.cpp : `retire_vue` ne retire plus a la fois la vue "
+            "et l'onglet. La bande garderait une ligne sans page, ou l'inverse."
+        )
+
+
+def regle_identifiants(fenetre, fautes):
+    """5. Les identifiants d'onglet ne sont jamais reutilises.
+
+    La fenetre les attribue (`m_prochain_onglet`) : ni le chrome, ni le
+    `page_id` du moteur -- qui change quand la vue change de WebContent."""
+    for sig in ("u64 BrowserWindow::ouvre_onglet(", "String BrowserWindow::ouvre_vue_demandee_par_la_page("):
+        bloc = corps(fenetre, sig)
+        if bloc is None or "m_prochain_onglet++" not in bloc:
             fautes.append(
-                "BouchaudChrome.h : `prochaine_page` calcule son numero au "
-                "lieu de l'incrementer. Un identifiant reutilise ferait "
-                "prendre une capture en vol pour celle du nouvel onglet."
+                "BrowserWindow.cpp : %s n'attribue plus un identifiant neuf. "
+                "Deux onglets porteraient le meme, et une trame en vol serait "
+                "prise pour celle du nouvel onglet." % sig.split("::")[1]
             )
+    if re.search(r"m_prochain_onglet\s*(=|-=|--)", fenetre):
+        fautes.append(
+            "BrowserWindow.cpp : `m_prochain_onglet` est recule ou reaffecte : "
+            "un identifiant serait reutilise."
+        )
 
 
 def regle_peinture(chrome, fautes):
@@ -293,7 +277,7 @@ def regle_raccourcis(chrome, fautes):
 
 def main():
     fautes = []
-    for chemin in (CHROME, M11, V19, HOTE):
+    for chemin in (CHROME, FENETRE):
         if not chemin.exists():
             fautes.append("fichier absent : %s" % chemin.relative_to(RACINE).as_posix())
     if fautes:
@@ -302,14 +286,12 @@ def main():
         return 1
 
     chrome = CHROME.read_text(encoding="utf-8")
-    m11 = M11.read_text(encoding="utf-8")
-    v19 = V19.read_text(encoding="utf-8")
-    hote = HOTE.read_text(encoding="utf-8")
+    fenetre = FENETRE.read_text(encoding="utf-8")
 
-    regle_rappels(m11, fautes)
-    regle_hooks(chrome, m11, hote, fautes)
-    regle_creation(v19, fautes)
-    regle_identifiants(chrome, fautes)
+    regle_rappels(fenetre, fautes)
+    regle_hooks(chrome, fenetre, fautes)
+    regle_creation(fenetre, fautes)
+    regle_identifiants(fenetre, fautes)
     regle_peinture(chrome, fautes)
     regle_raccourcis(chrome, fautes)
 
@@ -318,8 +300,8 @@ def main():
         for faute in fautes:
             print("  - %s\n" % faute)
         return 1
-    print("onglets : chaque rappel vise l'onglet actif, chaque hook dit sa "
-          "page, aucun identifiant reutilise")
+    print("onglets : chaque rappel vise l'onglet actif, chaque hook dit son "
+          "onglet, aucun identifiant reutilise")
     return 0
 
 

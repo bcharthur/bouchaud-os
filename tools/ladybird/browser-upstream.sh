@@ -27,20 +27,21 @@ fi
 rm -rf "$SRC"
 git -C "$LB" worktree prune
 git -C "$LB" worktree add --force --detach "$SRC" HEAD >/dev/null
+# BOUCHAUD_UI_V1 : la chaine ne greffe plus rien de navigateur dans
+# WebContent. Le chrome, les onglets, l'entree et la presentation vivent dans
+# le processus navigateur (UI/Bouchaud, prepare-ui-bouchaud.py, en dernier) ;
+# WebContent garde le chemin upstream (IPC, Compositor). Retires :
+# prepare-m11-chrome, -m11-page-registry, -m11-input-ownership,
+# -v19-navigateur, -repaint, -browser-host, -console, -image-decoder,
+# -platform-complete, -m9-navigation (docs/ladybird/UI_BOUCHAUD.md).
 python3 tools/ladybird/prepare-browser-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-source.py "$SRC"
 python3 tools/ladybird/prepare-m9-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-m16-dns.py "$SRC"
 python3 tools/ladybird/prepare-dns-une-question.py "$SRC"
-python3 tools/ladybird/prepare-image-decoder.py "$SRC"
 python3 tools/ladybird/prepare-fonts-systeme.py "$SRC"
-python3 tools/ladybird/prepare-repaint.py "$SRC"
+python3 tools/ladybird/prepare-v16-fonts.py "$SRC"
 python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
-python3 tools/ladybird/prepare-browser-host.py "$SRC"
-python3 tools/ladybird/prepare-console.py "$SRC"
-python3 tools/ladybird/prepare-m11-chrome.py "$SRC"
-python3 tools/ladybird/prepare-v19-navigateur.py "$SRC"
-python3 tools/ladybird/prepare-m11-page-registry.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1
@@ -58,9 +59,8 @@ python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # un patcher invente ne serait pas celui qui a ete teste sur le Trigkey.
 # Pour les retablir : versionner les trois fichiers et remettre les appels ;
 # tools/verifie-scripts-ladybird-presents.py refuse un appel sans fichier.
-python3 tools/ladybird/prepare-m11-input-ownership.py "$SRC"
-python3 tools/ladybird/prepare-platform-complete.py "$SRC"
 python3 tools/ladybird/prepare-network-live.py "$SRC"
+python3 tools/ladybird/prepare-ui-bouchaud.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.

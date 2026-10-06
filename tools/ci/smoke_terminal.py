@@ -78,8 +78,8 @@ def terminal(texte, attend_ab, document_vu, trame_vue, surface_conclue):
 # ---------------------------------------------------------------------------
 
 PAGE_AB = [
-    (20, "[ladybird-bouchaud] M11_DOCUMENT_LOADED"),
-    (21, "[ladybird-bouchaud] BROWSER_HOST_M11_FRAME_PRESENTED page=1"),
+    (20, "[LB:NAV] onglet=1 document_charge url=http://10.0.2.2:18082/browser-host.html"),
+    (21, "BOUCHAUD_UI_FIRST_FRAME onglet=1 page=1 zone=1278x708 source=compositor"),
     (40, "HOST_WORKER_AB rang=1 origine=blob repond=1 ms=1964"),
     (42, "HOST_WORKER_AB rang=2 origine=http repond=1 ms=1753"),
     (44, "HOST_WORKER_AB rang=3 origine=blob repond=1 ms=1632"),
@@ -110,8 +110,8 @@ def joue(page, regle, attend_ab=True, surface_a=0, sonde=2, plafond=120, qemu_me
             vu = "".join(l + "\n" for a, l in page if a <= qemu_meurt_a)
             return t, "qemu_morte", vu
         vu = "".join(l + "\n" for a, l in page if a <= t)
-        doc = "M11_DOCUMENT_LOADED" in vu
-        trame = "FRAME_PRESENTED" in vu
+        doc = "[LB:NAV] onglet=1 document_charge" in vu
+        trame = "BOUCHAUD_UI_FIRST_FRAME onglet=1" in vu
         if regle is ancienne_regle:
             v = ancienne_regle(vu, attend_ab, doc, trame)
         else:
