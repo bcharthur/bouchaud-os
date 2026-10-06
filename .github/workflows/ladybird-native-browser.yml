@@ -9,6 +9,7 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
@@ -39,6 +40,7 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
       # La page que le smoke charge. Elle porte ses quatre sous-tests et leurs
@@ -280,6 +282,18 @@ jobs:
           retention-days: 14
           compression-level: 1
 
+      # BOUCHAUD_WPT_V1 (P11) : le corpus WPT vient de l'arbre EXACT qui vient
+      # d'etre construit -- memes tests, memes resultats attendus.
+      - name: Corpus WPT
+        run: python3 tools/ladybird/wpt/prepare-corpus.py third_party/ladybird-browser-src third_party/wpt-corpus
+      - name: Publier le corpus WPT
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-wpt-corpus
+          path: third_party/wpt-corpus/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Sauvegarder le build incremental
         if: ${{ !cancelled() && steps.ninja.outcome == 'success' }}
         uses: actions/cache/save@v4
@@ -297,6 +311,52 @@ jobs:
           path: ~/.cache/ccache
           key: ${{ steps.ccache.outputs.cache-primary-key }}
 
+
+  wpt:
+    # BOUCHAUD_WPT_V1 (P11) : Ladybird SUR Bouchaud contre Ladybird sous Linux.
+    name: ladybird / wpt
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-wpt-corpus
+          path: wpt-corpus
+      - name: WPT sur Bouchaud OS
+        run: tools/ci/run_ladybird_wpt.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser wpt-corpus
+      - name: Rapport et journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-wpt
+          path: |
+            wpt-rapport.md
+            serie-wpt.log
+          if-no-files-found: warn
 
   browser-host-smoke:
     name: ladybird / browser-host smoke

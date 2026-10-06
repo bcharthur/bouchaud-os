@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bouchaud WPT</title>
+<body>
+<p>Bouchaud WPT -- <span id="etat">demarrage</span></p>
+<iframe id="cadre" style="width:800px;height:300px;border:1px solid #888"></iframe>
+<script>
+// BOUCHAUD_WPT_V1 (P11)
+//
+// Joue chaque fichier du manifeste dans un cadre, un a la fois, et compare
+// ce que Ladybird obtient SUR BOUCHAUD a ce qu'il obtient en headless sous
+// Linux au meme commit (`expected/wpt-import/*.txt`). Une ligne par fichier,
+// puis un bilan. Le rapport est une MESURE : un ecart est un fait a expliquer,
+// pas une case a cocher.
+(async () => {
+  const STATUTS = ["Pass", "Fail", "Timeout", "NotRun", "Optional"];
+  const ECHEANCE_MS = 120000;
+  const manifeste = await (await fetch("manifeste.json")).json();
+  const cadre = document.getElementById("cadre");
+  const etat = document.getElementById("etat");
+  console.log(`HOST_WPT_DEBUT fichiers=${manifeste.length}`);
+
+  let enAttente = null;
+  addEventListener("message", ev => {
+    if (ev.data && ev.data.bouchaud_wpt && enAttente) enAttente(ev.data);
+  });
+
+  const bilan = { fichiers: 0, pass: 0, total: 0, attendu_pass: 0, attendu_total: 0, egaux: 0, mieux: 0, moins: 0, echeances: 0 };
+  for (const [rang, m] of manifeste.entries()) {
+    etat.textContent = `${rang + 1}/${manifeste.length} ${m.chemin}`;
+    const t0 = performance.now();
+    const resultat = await new Promise(res => {
+      const garde = setTimeout(() => { enAttente = null; res(null); }, ECHEANCE_MS);
+      enAttente = r => { clearTimeout(garde); enAttente = null; res(r); };
+      cadre.src = m.chemin;
+    });
+    const ms = Math.round(performance.now() - t0);
+    bilan.fichiers++;
+    bilan.attendu_pass += m.attendu_pass;
+    bilan.attendu_total += m.attendu_total;
+    if (resultat === null) {
+      bilan.echeances++;
+      bilan.moins++;
+      console.log(`HOST_WPT fichier=${m.chemin} statut=ECHEANCE pass=0 total=? attendu=${m.attendu_pass}/${m.attendu_total} ms=${ms}`);
+      continue;
+    }
+    const comptes = [0, 0, 0, 0, 0];
+    for (const [s] of resultat.tests) comptes[s] = (comptes[s] || 0) + 1;
+    const pass = comptes[0];
+    const total = resultat.tests.length;
+    bilan.pass += pass;
+    bilan.total += total;
+    const ecart = pass - m.attendu_pass;
+    if (ecart === 0) bilan.egaux++; else if (ecart > 0) bilan.mieux++; else bilan.moins++;
+    const detail = comptes.map((n, i) => n ? `${STATUTS[i]}=${n}` : "").filter(Boolean).join(",");
+    console.log(`HOST_WPT fichier=${m.chemin} statut=${ecart === 0 ? "EGAL" : ecart > 0 ? "MIEUX" : "MOINS"}`
+      + ` pass=${pass} total=${total} attendu=${m.attendu_pass}/${m.attendu_total} harness=${resultat.harness} ${detail} ms=${ms}`);
+    // Les sous-tests qui passent sous Linux et echouent ici : les nommer, au
+    // plus trois par fichier, est ce qui rend l'ecart exploitable.
+    if (ecart < 0) {
+      resultat.tests.filter(([s]) => s !== 0).slice(0, 3).forEach(([s, n]) =>
+        console.log(`HOST_WPT_ECART fichier=${m.chemin} statut=${STATUTS[s]} nom=${String(n).slice(0, 140)}`));
+    }
+  }
+  etat.textContent = "fini";
+  console.log(`HOST_WPT_FIN fichiers=${bilan.fichiers} pass=${bilan.pass}/${bilan.total}`
+    + ` attendu=${bilan.attendu_pass}/${bilan.attendu_total} egaux=${bilan.egaux} mieux=${bilan.mieux}`
+    + ` moins=${bilan.moins} echeances=${bilan.echeances}`);
+})();
+</script>
+</body>
