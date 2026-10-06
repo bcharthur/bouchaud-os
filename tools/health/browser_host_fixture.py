@@ -89,6 +89,60 @@ CATALOGUE_PAGE = [
 #     http KO, blob OK  -> le chargement du script par le reseau est casse
 WORKER_JS = b'onmessage = e => { if (e.data === "ping") postMessage("pong"); };\n'
 
+# BOUCHAUD_WORKER_BATTERIE_V1 (P5) -- dix comportements, un worker neuf chacun.
+#
+# Le ping/pong ci-dessus prouve qu'un processus WebWorker demarre et que son
+# IPC passe. Il ne dit rien de ce qu'un script de worker reel fait : cloner une
+# structure, transferer un tampon, importer un script, appeler le reseau,
+# lever une erreur, se faire terminer, parler par un MessagePort. Un seul
+# script, servi en HTTP, repond a chaque epreuve selon le message recu.
+BATTERIE_WORKER_JS = rb'''self.onmessage = async (e) => {
+  const m = e.data;
+  try {
+    switch (m.t) {
+    case "clone": postMessage({ t: "clone", v: m.v }); break;
+    case "transfert": {
+      const u8 = new Uint8Array(m.buf);
+      let somme = 0;
+      for (let i = 0; i < u8.length; i++) somme += u8[i];
+      postMessage({ t: "transfert", somme, taille: u8.length });
+      break;
+    }
+    case "import":
+      importScripts("/worker-lib.js");
+      postMessage({ t: "import", v: self.BOUCHAUD_LIB });
+      break;
+    case "fetch": {
+      const r = await fetch("/worker-data.json");
+      const j = await r.json();
+      postMessage({ t: "fetch", v: j.valeur, statut: r.status });
+      break;
+    }
+    case "erreur": setTimeout(() => { throw new Error("BOUCHAUD_ERREUR_VOULUE"); }, 0); break;
+    case "tic": setInterval(() => postMessage({ t: "tic" }), 40); break;
+    case "port": m.port.onmessage = ev => m.port.postMessage(ev.data * 2); m.port.postMessage("pret"); break;
+    case "ordre": {
+      const o = [];
+      setTimeout(() => { o.push("minuterie"); postMessage({ t: "ordre", v: o.join(",") }); }, 0);
+      Promise.resolve().then(() => o.push("microtache"));
+      o.push("synchrone");
+      break;
+    }
+    case "portee":
+      postMessage({ t: "portee", nom: self.constructor.name, importe: typeof importScripts,
+        origine: location.origin === m.origine, octets: new TextEncoder().encode("\u00e9").length,
+        fenetre: typeof window });
+      break;
+    case "ping": postMessage({ t: "ping", v: "pong", id: m.id }); break;
+    }
+  } catch (err) {
+    postMessage({ t: "exception", v: String(err) });
+  }
+};
+'''
+WORKER_LIB_JS = b'self.BOUCHAUD_LIB = "lib-importee-42";\n'
+WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1052,6 +1106,158 @@ HTML = r'''<!doctype html>
     + ` rangs=${releves.length}/${MATRICE.length} fonctionnel=${fonctionnelGlobal ? 1 : 0}`
     + ` smoke=${canvasOK && workerOK && imageOK && frameOK ? 1 : 0}`);
 
+  // BOUCHAUD_WORKER_BATTERIE_V1 (P5) -- dix comportements de worker.
+  //
+  // APRES tout ce qui est juge, comme le defilement : la batterie lance onze
+  // processus WebWorker, et rien de ce qui precede ne doit en subir la charge.
+  // Chaque epreuve a son worker NEUF et sa propre echeance ; une epreuve qui
+  // echoue n'empeche pas les suivantes.
+  const ECHEANCE_BATTERIE_MS = 20000;
+  function attend(worker, accepte, ms = ECHEANCE_BATTERIE_MS) {
+    return new Promise((res, rej) => {
+      const garde = setTimeout(() => rej(new Error("echeance")), ms);
+      worker.onmessage = ev => {
+        if (ev.data && ev.data.t === "exception") { clearTimeout(garde); rej(new Error(ev.data.v)); return; }
+        if (accepte(ev.data)) { clearTimeout(garde); res(ev.data); }
+      };
+      worker.onerror = ev => { clearTimeout(garde); ev.preventDefault(); rej(new Error("onerror " + ev.message)); };
+    });
+  }
+  const neuf = () => new Worker("/batterie-worker.js");
+  const BATTERIE = [
+    ["clone-structure", async () => {
+      const w = neuf();
+      try {
+        const envoye = { a: 1, b: [1, 2, { c: "x" }], d: new Date(0), m: new Map([[1, 2]]), s: new Set(["u"]) };
+        w.postMessage({ t: "clone", v: envoye });
+        const r = (await attend(w, d => d.t === "clone")).v;
+        if (!(r.a === 1 && r.b[2].c === "x" && r.d instanceof Date && r.d.getTime() === 0
+              && r.m instanceof Map && r.m.get(1) === 2 && r.s instanceof Set && r.s.has("u")))
+          throw new Error("structure alteree");
+        return "date,map,set";
+      } finally { w.terminate(); }
+    }],
+    ["transfert-arraybuffer", async () => {
+      const w = neuf();
+      try {
+        const buf = new ArrayBuffer(1 << 20);
+        const u8 = new Uint8Array(buf);
+        let attendue = 0;
+        for (let i = 0; i < u8.length; i++) { u8[i] = i % 7; attendue += i % 7; }
+        w.postMessage({ t: "transfert", buf }, [buf]);
+        if (buf.byteLength !== 0) throw new Error("tampon non detache cote page");
+        const r = await attend(w, d => d.t === "transfert");
+        if (r.taille !== (1 << 20) || r.somme !== attendue) throw new Error(`somme=${r.somme} taille=${r.taille}`);
+        return "1Mio detache";
+      } finally { w.terminate(); }
+    }],
+    ["importScripts", async () => {
+      const w = neuf();
+      try {
+        w.postMessage({ t: "import" });
+        const r = await attend(w, d => d.t === "import");
+        if (r.v !== "lib-importee-42") throw new Error(`v=${r.v}`);
+        return r.v;
+      } finally { w.terminate(); }
+    }],
+    ["fetch-depuis-worker", async () => {
+      const w = neuf();
+      try {
+        w.postMessage({ t: "fetch" });
+        const r = await attend(w, d => d.t === "fetch");
+        if (r.statut !== 200 || r.v !== "donnee-du-reseau-7") throw new Error(`statut=${r.statut} v=${r.v}`);
+        return "200";
+      } finally { w.terminate(); }
+    }],
+    ["erreur-non-rattrapee", async () => {
+      const w = neuf();
+      try {
+        const vue = new Promise((res, rej) => {
+          const garde = setTimeout(() => rej(new Error("aucun onerror")), ECHEANCE_BATTERIE_MS);
+          w.onerror = ev => { clearTimeout(garde); ev.preventDefault(); res(ev.message || ""); };
+        });
+        w.postMessage({ t: "erreur" });
+        const message = await vue;
+        if (!message.includes("BOUCHAUD_ERREUR_VOULUE")) throw new Error(`message=${message}`);
+        return "onerror";
+      } finally { w.terminate(); }
+    }],
+    ["terminate", async () => {
+      const w = neuf();
+      let apres = 0;
+      w.postMessage({ t: "tic" });
+      await attend(w, d => d.t === "tic");
+      w.terminate();
+      w.onmessage = () => { apres++; };
+      await new Promise(r => setTimeout(r, 600));
+      if (apres !== 0) throw new Error(`${apres} message(s) apres terminate`);
+      return "silence 600ms";
+    }],
+    ["messageport-transfere", async () => {
+      const w = neuf();
+      try {
+        const canal = new MessageChannel();
+        const reponse = new Promise((res, rej) => {
+          const garde = setTimeout(() => rej(new Error("echeance port")), ECHEANCE_BATTERIE_MS);
+          canal.port1.onmessage = ev => {
+            if (ev.data === "pret") { canal.port1.postMessage(21); return; }
+            clearTimeout(garde); res(ev.data);
+          };
+        });
+        w.postMessage({ t: "port", port: canal.port2 }, [canal.port2]);
+        const v = await reponse;
+        if (v !== 42) throw new Error(`v=${v}`);
+        return "21*2=42";
+      } finally { w.terminate(); }
+    }],
+    ["ordre-boucle-evenements", async () => {
+      const w = neuf();
+      try {
+        w.postMessage({ t: "ordre" });
+        const r = await attend(w, d => d.t === "ordre");
+        if (r.v !== "synchrone,microtache,minuterie") throw new Error(`ordre=${r.v}`);
+        return r.v;
+      } finally { w.terminate(); }
+    }],
+    ["portee-globale", async () => {
+      const w = neuf();
+      try {
+        w.postMessage({ t: "portee", origine: location.origin });
+        const r = await attend(w, d => d.t === "portee");
+        if (r.nom !== "DedicatedWorkerGlobalScope" || r.importe !== "function" || !r.origine
+            || r.octets !== 2 || r.fenetre !== "undefined")
+          throw new Error(`nom=${r.nom} importe=${r.importe} origine=${r.origine} octets=${r.octets} fenetre=${r.fenetre}`);
+        return r.nom;
+      } finally { w.terminate(); }
+    }],
+    ["trois-simultanes", async () => {
+      const ws = [neuf(), neuf(), neuf()];
+      try {
+        const r = await Promise.all(ws.map((w, id) => {
+          const p = attend(w, d => d.t === "ping" && d.id === id);
+          w.postMessage({ t: "ping", id });
+          return p;
+        }));
+        if (r.some(x => x.v !== "pong")) throw new Error("une reponse manque");
+        return "3/3";
+      } finally { ws.forEach(w => w.terminate()); }
+    }],
+  ];
+  let batterieOK = 0;
+  const debutBatterie = performance.now();
+  for (const [nom, epreuve] of BATTERIE) {
+    const t0 = performance.now();
+    try {
+      const detail = await epreuve();
+      batterieOK++;
+      console.log(`HOST_WORKER_TEST nom=${nom} etat=OK ms=${Math.round(performance.now() - t0)} detail=${detail}`);
+    } catch (err) {
+      console.log(`HOST_WORKER_TEST nom=${nom} etat=FAIL ms=${Math.round(performance.now() - t0)} raison=${err && err.message}`);
+    }
+  }
+  console.log(`HOST_WORKER_BATTERIE ${batterieOK === BATTERIE.length ? "OK" : "FAIL"} ${batterieOK}/${BATTERIE.length}`
+    + ` ms=${Math.round(performance.now() - debutBatterie)}`);
+
   // BOUCHAUD_DEFILEMENT_ASYNC_V1 (P4) -- APRES tout ce qui est juge.
   //
   // Le defilement asynchrone n'est plus desactive. Le prouver demande une
@@ -1095,6 +1301,22 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(PIXEL_PNG)
             print("BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png", flush=True)
+            return
+        # BOUCHAUD_WORKER_BATTERIE_V1 : les trois ressources de la batterie.
+        batterie = {
+            "/batterie-worker.js": (BATTERIE_WORKER_JS, "text/javascript"),
+            "/worker-lib.js": (WORKER_LIB_JS, "text/javascript"),
+            "/worker-data.json": (WORKER_DATA_JSON, "application/json"),
+        }.get(path)
+        if batterie is not None:
+            corps, genre = batterie
+            REQUETES[path] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", genre)
+            self.send_header("Content-Length", str(len(corps)))
+            self.end_headers()
+            self.wfile.write(corps)
+            print(f"BROWSER_HOST_FIXTURE_BATTERIE path={path} rang={REQUETES[path]}", flush=True)
             return
         if path == "/worker.js":
             # CE QUE LE SERVEUR VOIT, ET CE QUE CELA ELIMINE.

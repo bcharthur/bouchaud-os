@@ -438,8 +438,11 @@ DEFILEMENT=${BO_SMOKE_DEFILEMENT:-1}
 DEFILEMENT_VERDICT=non_joue
 if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null && command -v socat >/dev/null 2>&1; then
   DEFILEMENT_VERDICT=page_pas_prete
-  for _ in $(seq 1 30); do
+  # La page annonce HOST_SCROLL_PRET APRES la batterie de workers (P5), qui
+  # lance onze processus WebWorker : ~1,3 s de demarrage chacun en QEMU.
+  for _ in $(seq 1 240); do
     grep -aq 'HOST_SCROLL_PRET' "$LOG" && break
+    kill -0 "$PID" 2>/dev/null || break
     sleep 1
   done
   if grep -aq 'HOST_SCROLL_PRET' "$LOG"; then
@@ -456,9 +459,24 @@ if [ "$DEFILEMENT" = "1" ] && kill -0 "$PID" 2>/dev/null && command -v socat >/d
       fi
       sleep 1
     done
+    # LA TRAME QUI SUIT LA MOLETTE. Le run 37487376035 tuait la VM moins
+    # d'une seconde apres `HOST_SCROLL OK` : la page avait defile, la trame
+    # n'avait pas encore eu le temps d'etre rasterisee et presentee, et le
+    # maillon manquait pour une raison qui etait celle du BANC. On l'attend
+    # donc, borne, sans relacher l'exigence.
+    if [ "$DEFILEMENT_VERDICT" = "ok" ]; then
+      for _ in $(seq 1 20); do
+        grep -aq 'apres_molette=1' "$LOG" && break
+        sleep 1
+      done
+      echo "HOST_SCROLL_TRAME attente_s=$(( $(maintenant_ms) / 1000 - ${T_MOLETTE:-0} / 1000 ))"
+    fi
   fi
 fi
 echo "HOST_SCROLL_VERDICT $DEFILEMENT_VERDICT t_molette=${T_MOLETTE:-0}"
+# BOUCHAUD_WORKER_BATTERIE_V1 (P5) : dix comportements, une ligne chacun.
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+  | grep -aoE 'HOST_WORKER_(TEST|BATTERIE) .*' | sed 's/^/  /' || true
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
   | grep -aoE '\[GUI-WHEEL-(TX|DROP|APP)\].*|WEB_WHEEL_DISPATCH.*|\[LB:FRAME\] apres_molette.*|HOST_(WHEEL_EVENT|SCROLL_PRET|SCROLL OK).*' \
   | head -16 | sed 's/^/  /' || true
@@ -609,6 +627,17 @@ for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESY
     exit 1
   fi
 done
+# ====================================================================
+# LA BATTERIE DE WORKERS (P5), TESTEE POUR ELLE-MEME.
+# ====================================================================
+if [ "$DEFILEMENT" = "1" ]; then
+  if ! grep -aq 'HOST_WORKER_BATTERIE OK 10/10' "$LOG"; then
+    echo "batterie de workers incomplete :" >&2
+    grep -aoE 'HOST_WORKER_TEST nom=[^ ]+ etat=FAIL.*' "$LOG" | tr -d '\r' | sed 's/^/  /' >&2 || true
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=batterie_workers"
+    exit 1
+  fi
+fi
 # ====================================================================
 # LE DEFILEMENT (P4), TESTE POUR LUI-MEME -- maillon par maillon.
 # ====================================================================
