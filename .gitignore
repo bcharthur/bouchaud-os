@@ -229,3 +229,7 @@ tools/userland/out-persist-cache/
 /scenario-oss-horloge/
 tools/userland/out-oss-horloge/
 /serie-oss-horloge.log
+/scenario-cache/
+/ladybird-cache.img
+/temoin-cache.log
+/serie-cache.log

@@ -272,12 +272,22 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // le Compositor (prepare-compositor-lien.py) : l'etat exact du journal
     // d'origine. Hors banc, un titre n'a aucun effet.
     static bool const banc_coupe_lien = getenv("BOUCHAUD_LB_BANC_COUPE_LIEN") != nullptr;
+    // BOUCHAUD_CACHE_REDEMARRAGE_V1 -- banc du cache et de la base SQL a
+    // travers un redemarrage COMPLET du navigateur : la page de banc prend le
+    // titre BOUCHAUD_BANC_QUITTE quand elle a fini, et le navigateur quitte
+    // proprement (boucle d'evenements, puis services). Hors banc
+    // (BOUCHAUD_LB_BANC_QUITTE absent), un titre n'a aucun effet.
+    static bool const banc_quitte = getenv("BOUCHAUD_LB_BANC_QUITTE") != nullptr;
     vue.on_title_change = [onglet, vue_ptr = &vue](Utf16String const& titre) {
         auto texte = titre.to_byte_string();
         if (banc_coupe_lien && texte == "BOUCHAUD_BANC_COUPE_LIEN"sv) {
             warnln("[LB] LINK_CUT_REQUEST onglet={} page={} t_ms={}", onglet, vue_ptr->page_courante(),
                 MonotonicTime::now().milliseconds());
             vue_ptr->debug_request("bouchaud-coupe-lien-compositor"sv);
+        }
+        if (banc_quitte && texte == "BOUCHAUD_BANC_QUITTE"sv) {
+            warnln("[LB] BROWSER_QUIT_REQUEST onglet={} raison=banc", onglet);
+            Core::deferred_invoke([] { Core::EventLoop::current().quit(0); });
         }
         BouchaudChrome::set_title(onglet, texte);
     };
