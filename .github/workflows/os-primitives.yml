@@ -13,7 +13,7 @@ concurrency:
 jobs:
   probes:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
@@ -36,6 +36,21 @@ jobs:
         run: tools/ci/build_kernel.sh
       - name: Primitives sur Bouchaud OS
         run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Primitives sous KVM, trois demarrages (compta-stress, signaux)
+        # BOUCHAUD_COMPTA_STRESS_V1 : la panique de comptabilite n'est
+        # apparue que sous KVM (run 37589903681). Trois demarrages complets,
+        # chacun doit rendre OS_PRIMITIVES_OK (COMPTA_STRESS_OK compris).
+        run: |
+          for essai in 1 2 3; do
+            echo "== demarrage KVM ${essai}/3 =="
+            BO_QEMU_KVM=1 tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin > "primitives-kvm-${essai}.log" 2>&1 || { tail -c 20000 "primitives-kvm-${essai}.log"; exit 1; }
+            grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
+            cp serie-primitives.log "serie-primitives-kvm-${essai}.log"
+          done
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -48,5 +63,6 @@ jobs:
           name: os-primitives-debug
           path: |
             serie-primitives.log
+            serie-primitives-kvm-*.log
             serie-persist-cache-*.log
           if-no-files-found: warn

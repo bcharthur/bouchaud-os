@@ -58,7 +58,7 @@ musl_static() {
     }
     # static-pie : pas d'adresse fixe, donc aucune contrainte d'edition de liens.
     # Necessite un musl >= 1.1.21 et binutils recent.
-    for src in hello.c qpa-probe.c posix-probe.c verrous-probe.c exec-fd-probe.c wal-probe.c disque-probe.c nom-long-probe.c session-probe.c sendfile-probe.c audio-probe.c net-probe.c persist-probe.c shm-probe.c ipc-probe.c ordonnanceur-probe.c scheduler-ng-banc.c poll-bkl-probe.c ata-concurrence-probe.c wait4-course-probe.c tcp-connexions-probe.c audio-concurrence-probe.c exec-cible.c renommage-probe.c cache-persist-probe.c mkdir-visible-probe.c oss-horloge-probe.c faute-noncanonique-probe.c matrice-roles-probe.c sigchld-multifil-probe.c "$@"; do
+    for src in hello.c qpa-probe.c posix-probe.c verrous-probe.c exec-fd-probe.c wal-probe.c disque-probe.c nom-long-probe.c session-probe.c sendfile-probe.c audio-probe.c net-probe.c persist-probe.c shm-probe.c ipc-probe.c ordonnanceur-probe.c scheduler-ng-banc.c poll-bkl-probe.c ata-concurrence-probe.c wait4-course-probe.c tcp-connexions-probe.c audio-concurrence-probe.c exec-cible.c renommage-probe.c cache-persist-probe.c mkdir-visible-probe.c oss-horloge-probe.c faute-noncanonique-probe.c matrice-roles-probe.c sigchld-multifil-probe.c compta-stress-probe.c "$@"; do
         [ -f "$src" ] || continue
         name=$(basename "$src" .c)
         echo "  MUSL $name (static-pie)"

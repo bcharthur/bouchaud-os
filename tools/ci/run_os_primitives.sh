@@ -14,11 +14,12 @@ cd tools/userland/out-sondes
 ./renommage-probe
 ./faute-noncanonique-probe
 ./sigchld-multifil-probe
+./compta-stress-probe 5
 cd ../../..
 
 SCENARIO=scenario-primitives
 mkdir -p "$SCENARIO/bin"
-for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe sigchld-multifil-probe; do
+for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe sigchld-multifil-probe compta-stress-probe; do
   cp "tools/userland/out-sondes/$f" "$SCENARIO/bin/"
 done
 python3 - <<'PY'
@@ -38,6 +39,7 @@ strace echecs
 /bin/renommage-probe
 /bin/faute-noncanonique-probe
 /bin/sigchld-multifil-probe
+/bin/compta-stress-probe 30
 /bin/session-probe 4
 echo SESSION_INVITE_REVENUE
 strace off
@@ -47,7 +49,18 @@ AUTORUN
 
 LOG=serie-primitives.log
 : > "$LOG"
-qemu-system-x86_64 \
+# BO_QEMU_KVM=1 : memes sondes sous KVM (-cpu host). La course que
+# compta-stress-probe fabrique depend du rythme reel des vCPU : sous TCG les
+# coeurs avancent par tranches emulees, sous KVM ils tournent en parallele
+# et l'hote peut suspendre un vCPU au milieu d'une section (run 37589903681).
+ACCEL=""
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  [ -w /dev/kvm ] || { echo "BO_QEMU_KVM=1 mais /dev/kvm inaccessible" >&2; exit 1; }
+  ACCEL="-enable-kvm -cpu host"
+fi
+echo "PRIMITIVES_ACCEL ${ACCEL:-tcg}"
+# shellcheck disable=SC2086
+qemu-system-x86_64 $ACCEL \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=primitives.img \
   -m 4096 -smp 4 -display none -no-reboot \
@@ -65,10 +78,13 @@ kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 tail -c 262144 "$LOG"
 
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK SIGCHLD_MULTIFIL_OK \
+for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK SIGCHLD_MULTIFIL_OK COMPTA_STRESS_OK \
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done
+# BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
+# course a eu lieu), lu sur le dernier releve du noyau.
+awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
 if grep -aq 'KERNEL PANIC' "$LOG"; then echo "panique noyau" >&2; exit 1; fi
 if grep -aqE "ata: (lecture|ecriture) " "$LOG"; then
   echo "Le pilote ATA a signale au moins une commande en echec" >&2
