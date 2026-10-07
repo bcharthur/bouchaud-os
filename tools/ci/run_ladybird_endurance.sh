@@ -152,6 +152,10 @@ python3 tools/ci/tendance_rss.py "$P" --min-releves 10 | sed 's/^/  /'
 # (BOUCHAUD_GS_NOYAU_EN_IRQ_V1). Affichage seulement.
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
 awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
+# BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run
+# 37654172489), la page comptait t_s=316 pour 206 s de QEMU : toutes les
+# durees du banc (cycles, cadres > 30 s) en dependent.
+awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print "  " substr($0, RSTART, RLENGTH) }' "$LOG"
 
 echo "== verdict =="
 echecs=()

@@ -127,16 +127,19 @@ def main():
                 "a une milliseconde ferait dormir un appel non bloquant."
             )
 
-    # `realtime_ns` doit s'ancrer sur la meme seconde RTC que `realtime_ms`,
-    # faute de quoi les deux horloges divergeraient.
+    # BOUCHAUD_HORLOGE_MURALE_UNIQUE_V1 : UNE horloge murale. `realtime_ns`
+    # pose l'ancre ; `realtime_ms` (et donc `unix_time`, les dates de
+    # fichier) en derive, sans jamais recompter les ticks du PIT -- sinon
+    # les dates de fichier et `clock_gettime` divergent (run 37654178128,
+    # KVM : st_mtime immobile apres sleep(1)).
     ancre = corps(source, "pub fn realtime_ns()")
     if ancre is None:
         fautes.append("mod.rs : `realtime_ns` a disparu.")
     else:
-        if "realtime_ms()" not in ancre:
+        if "pose_ancre_murale()" not in ancre:
             fautes.append(
-                "mod.rs : `realtime_ns` ne pose plus l'ancre par le meme "
-                "chemin que `realtime_ms` ; les deux horloges divergeraient."
+                "mod.rs : `realtime_ns` ne pose plus l'ancre murale ; la "
+                "seconde RTC de reference ne serait plus la meme pour tous."
             )
         if "monotonic_ns()" not in ancre:
             fautes.append(
@@ -151,6 +154,16 @@ def main():
                 "et c'est pour eviter ce retard que l'horloge monotone lit le "
                 "TSC et non le PIT."
             )
+
+    murale_ms = corps(source, "pub fn realtime_ms()")
+    if murale_ms is None:
+        fautes.append("mod.rs : `realtime_ms` a disparu.")
+    elif "realtime_ns()" not in murale_ms or "ticks()" in murale_ms:
+        fautes.append(
+            "mod.rs : `realtime_ms` ne derive plus de `realtime_ns` (ou relit "
+            "les ticks du PIT) : deux horloges murales, les dates de fichier "
+            "et `clock_gettime` divergent."
+        )
 
     if fautes:
         print("horloge utilisateur : %d probleme(s)\n" % len(fautes))

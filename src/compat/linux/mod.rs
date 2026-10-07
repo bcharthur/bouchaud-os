@@ -853,8 +853,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
 /// ce qui est la vraie exigence -- une horloge murale qui differe d'un CPU a
 /// l'autre reculerait a chaque migration.
 static EPOCH_SECONDS: AtomicU64 = AtomicU64::new(0);
-static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
-// L'ANCRE NANOSECONDE, POSEE AU MEME INSTANT QUE L'ANCRE EN TICKS.
+// L'ANCRE NANOSECONDE, POSEE AU MEME INSTANT QUE LA SECONDE RTC.
 //
 // Les deux horloges du noyau ne sont pas la meme : `ticks()` compte les IRQ0
 // du PIT, `monotonic_ns()` lit le TSC. Sous charge, le PIT prend du retard --
@@ -882,7 +881,19 @@ fn rtc_seconds() -> u64 {
 /// on y ajoute le temps ecoule mesure par le timer — ce qui donne la
 /// milliseconde et, accessoirement, une horloge qui ne recule jamais.
 pub fn realtime_ms() -> u64 {
-    let now_ticks = crate::kernel::timer::ticks();
+    // BOUCHAUD_HORLOGE_MURALE_UNIQUE_V1 : UNE horloge murale, celle de
+    // `realtime_ns` (ancree sur l'horloge monotone). Celle-ci comptait les
+    // ticks du PIT pendant que `clock_gettime(CLOCK_REALTIME)` et
+    // `nanosleep` lisaient le TSC : les dates de fichier (`unix_time`) et le
+    // temps des programmes divergeaient. Run 37654178128 (os-primitives sous
+    // KVM) : apres sleep(1), ecrire dans un fichier ne faisait pas avancer sa
+    // st_mtime (1791391630 -> 1791391630, MTIME_STABLE_ECHEC).
+    realtime_ns() / 1_000_000
+}
+
+/// Pose l'ancre de l'horloge murale (seconde RTC, ticks et horloge monotone
+/// au meme instant), une fois.
+fn pose_ancre_murale() {
     if EPOCH_POSEE.load(Ordering::Acquire) == 0 {
         let seconds = rtc_seconds();
         // Les deux valeurs sont publiees AVANT le drapeau ; le drapeau est lu
@@ -894,7 +905,6 @@ pub fn realtime_ms() -> u64 {
             .is_ok()
         {
             EPOCH_SECONDS.store(seconds, Ordering::Relaxed);
-            EPOCH_TICKS.store(now_ticks, Ordering::Relaxed);
             EPOCH_MONO_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
             EPOCH_POSEE.store(2, Ordering::Release);
         }
@@ -902,21 +912,16 @@ pub fn realtime_ms() -> u64 {
             core::hint::spin_loop();
         }
     }
-    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
-    let base_ticks = EPOCH_TICKS.load(Ordering::Relaxed);
-    let elapsed_ticks = now_ticks.saturating_sub(base_ticks);
-    base_seconds * 1000 + elapsed_ticks * 1000 / crate::kernel::timer::TICKS_PER_SECOND
 }
 
 /// Horloge murale en NANOSECONDES depuis l'epoch Unix.
 ///
-/// `realtime_ms` compte en ticks, donc par millisecondes. Cette version ancre
-/// la meme seconde RTC sur l'horloge monotone nanoseconde, qui est lue au TSC.
-/// C'est ce qu'attend `clock_gettime` : un `timespec` dont le champ des
-/// nanosecondes veut dire quelque chose.
+/// La seconde RTC ancree sur l'horloge monotone nanoseconde, qui est lue au
+/// TSC. C'est ce qu'attend `clock_gettime` : un `timespec` dont le champ des
+/// nanosecondes veut dire quelque chose ; `realtime_ms` et `unix_time` en
+/// derivent.
 pub fn realtime_ns() -> u64 {
-    // Pose l'ancre si ce n'est pas deja fait, par le meme chemin.
-    let _ = realtime_ms();
+    pose_ancre_murale();
     let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
     let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed);
     let ecoule_ns = crate::kernel::timer::monotonic_ns().saturating_sub(base_ns);
