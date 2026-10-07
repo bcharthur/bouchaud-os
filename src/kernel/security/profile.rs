@@ -176,6 +176,22 @@ pub fn initial_capabilities(image: &str, uid: u32) -> Capabilities {
 /// Every ordinary security-domain transition is monotonic.  Exec, identity
 /// changes and sandboxing may remove authority but never manufacture a bit that
 /// the process did not already own.
+/// BOUCHAUD_HERITAGE_APRES_EXEC_V1 : ce que devient un contexte de securite
+/// quand son image change (exec), a partir de l'etat qu'il portait avant :
+/// profil reclasse depuis la nouvelle image, droits INTERSECTES (un exec ne
+/// gagne rien), `no_new_privs` monotone (pose par un role sandboxe, jamais
+/// retire). C'est aussi ce que subit un fils de `fork`/`posix_spawn` qui a
+/// deja execute son image quand le pere lui transmet son contexte.
+pub fn transition_exec(
+    capacites: Capabilities,
+    no_new_privs: bool,
+    nouvelle_image: &str,
+    euid: u32,
+) -> (SecurityProfile, Capabilities, bool) {
+    let nouveau = classify(nouvelle_image, euid);
+    (nouveau, transition_capabilities(capacites, nouveau), no_new_privs || sandboxe(nouveau))
+}
+
 pub const fn transition_capabilities(
     current: Capabilities,
     wanted: SecurityProfile,

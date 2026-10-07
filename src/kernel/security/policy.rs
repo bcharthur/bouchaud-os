@@ -89,14 +89,18 @@ fn ensure_entry<'a>(
     // execve keeps the PID but changes security domain. no_new_privs makes the
     // transition monotonic: exec may reduce authority, never increase it.
     if entry.image != image {
-        let new_profile = profile::classify(image, entry.credentials.euid);
-        entry.capabilities =
-            profile::transition_capabilities(entry.capabilities, new_profile);
-        entry.profile = new_profile;
         // Un exec vers un role sandboxe pose le drapeau ; il ne le retire
         // JAMAIS. `no_new_privs` est monotone, sinon un exec suffirait a s'en
         // debarrasser -- ce qui serait exactement le contraire de son objet.
-        entry.no_new_privs = entry.no_new_privs || profile::sandboxe(new_profile);
+        let (new_profile, capacites, nnp) = profile::transition_exec(
+            entry.capabilities,
+            entry.no_new_privs,
+            image,
+            entry.credentials.euid,
+        );
+        entry.capabilities = capacites;
+        entry.profile = new_profile;
+        entry.no_new_privs = nnp;
         entry.image.clear();
         entry.image.push_str(image);
     }
@@ -281,6 +285,8 @@ pub fn inherit(parent_pid: u32, child_pid: u32) {
 
     let child_metadata = child.metadata.lock();
     let child_image = child_metadata.name.clone();
+    let child_uid = child_metadata.uid;
+    let child_gid = child_metadata.gid;
     drop(child_metadata);
 
     let mut contexts = CONTEXTS.lock();
@@ -295,11 +301,31 @@ pub fn inherit(parent_pid: u32, child_pid: u32) {
         parent_entry.clone()
     };
 
+    // BOUCHAUD_HERITAGE_APRES_EXEC_V1
+    //
+    // Cet heritage s'execute dans le PERE, au retour de clone/fork. Avec
+    // posix_spawn (CLONE_VM|CLONE_VFORK, que le noyau ne suspend pas), le
+    // fils peut avoir DEJA execute sa nouvelle image. L'ancien code collait
+    // l'entree du pere sous l'image COURANTE du fils : image=WebWorker,
+    // profil BrowserBroker, no_new_privs=0 -- et comme l'image ne
+    // « changeait » plus, aucun exec ne la reclassait. Un processus de rendu
+    // tournait avec les droits du courtier (endurance 37654172489 :
+    // `NNP_ABSENT pid=34 image=/usr/libexec/ladybird/WebWorker
+    // profil=BrowserBroker`, 3 WebWorker sur 29).
+    //
+    // Le fils herite de l'etat du pere AU MOMENT DU FORK (image du pere),
+    // puis la transition d'exec s'applique vers son image reelle, par le
+    // meme chemin qu'un exec : reclassement, droits intersectes,
+    // no_new_privs monotone.
+    // Ce que le fils a deja pose lui-meme (prctl) ne se perd pas non plus :
+    // no_new_privs ne redescend jamais.
+    let deja_confine = contexts.iter().any(|entry| entry.pid == child_pid && entry.no_new_privs);
     contexts.retain(|entry| entry.pid != child_pid);
     let mut child_entry = inherited;
     child_entry.pid = child_pid;
-    child_entry.image = child_image;
     contexts.push(child_entry);
+    let entree = ensure_entry(&mut contexts, child_pid, child_image.as_str(), child_uid, child_gid);
+    entree.no_new_privs |= deja_confine;
 }
 
 pub fn forget(pid: u32) {

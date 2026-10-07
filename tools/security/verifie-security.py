@@ -115,6 +115,22 @@ if profile.find("if untrusted_path(image)") > profile.find("if browser_content_i
 if "ambient.intersection" not in profile:
     errors.append("profile.rs: les capacites initiales ne sont pas bornees par l'identite")
 
+# BOUCHAUD_HERITAGE_APRES_EXEC_V1 : l'heritage fork/clone s'execute dans le
+# pere, parfois APRES l'exec du fils (posix_spawn). Il doit partir de l'etat
+# du pere au fork, puis appliquer la transition d'exec vers l'image reelle du
+# fils -- jamais coller l'entree du pere sous l'image du fils (un WebWorker
+# tournait avec le profil du courtier, no_new_privs=0).
+policy = text("src/kernel/security/policy.rs")
+debut_inherit = policy.find("pub fn inherit(")
+fin_inherit = policy.find("\npub fn ", debut_inherit + 1)
+inherit = policy[debut_inherit:fin_inherit if fin_inherit > 0 else len(policy)]
+if "child_entry.image = child_image" in inherit:
+    errors.append("policy.rs: inherit colle l'entree du pere sous l'image du fils")
+if "ensure_entry(&mut contexts, child_pid, child_image" not in inherit:
+    errors.append("policy.rs: inherit n'applique plus la transition d'exec a l'image du fils")
+if "profile::transition_exec(" not in policy:
+    errors.append("policy.rs: ensure_entry ne passe plus par profile::transition_exec")
+
 if errors:
     for error in errors:
         print("ECHEC:", error, file=sys.stderr)

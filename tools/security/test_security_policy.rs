@@ -165,3 +165,39 @@ fn canonical_relative_path_uses_exact_dirfd_base() {
         "/dev/fb0"
     );
 }
+
+/// BOUCHAUD_HERITAGE_APRES_EXEC_V1 : un fils de posix_spawn qui a DEJA
+/// execute son image quand le pere lui transmet son contexte. Il herite de
+/// l'etat du courtier au moment du fork, puis subit la transition d'exec :
+/// role de rendu, droits du courtier perdus, no_new_privs pose. L'ancien
+/// heritage collait l'etat du courtier sous l'image du WebWorker (profil
+/// BrowserBroker, no_new_privs=0 : endurance 37654172489, NNP_ABSENT).
+#[test]
+fn fils_deja_execute_herite_puis_transite_vers_son_role() {
+    let courtier = "/usr/libexec/ladybird/BouchaudBrowserHost";
+    let pere_profil = classify(courtier, 0);
+    assert_eq!(pere_profil, SecurityProfile::BrowserBroker);
+    let pere_droits = initial_capabilities(courtier, 0);
+    assert!(pere_droits.contains(Capabilities::NET_CONNECT));
+
+    let (profil, droits, nnp) =
+        profile::transition_exec(pere_droits, false, "/usr/libexec/ladybird/WebWorker", 0);
+    assert_eq!(profil, SecurityProfile::BrowserContent);
+    assert!(nnp, "un role de rendu herite d'un courtier doit porter no_new_privs");
+    assert!(!droits.contains(Capabilities::NET_CONNECT));
+    assert!(!droits.contains(Capabilities::DEVICE_IO));
+    // Le rendu garde JIT (LibJS) : seul ce que le courtier a EN PLUS tombe.
+    assert_eq!(droits, pere_droits.intersection(capabilities(SecurityProfile::BrowserContent)));
+}
+
+/// no_new_privs ne redescend jamais, meme vers une image plus privilegiee.
+#[test]
+fn transition_exec_ne_retire_jamais_no_new_privs() {
+    let rendu = capabilities(SecurityProfile::BrowserContent);
+    let (profil, droits, nnp) =
+        profile::transition_exec(rendu, true, "/usr/libexec/ladybird/BouchaudBrowserHost", 0);
+    assert_eq!(profil, SecurityProfile::BrowserBroker);
+    assert!(nnp);
+    // Les droits sont intersectes : un exec vers le courtier ne rend rien.
+    assert!(!droits.contains(Capabilities::NET_CONNECT));
+}
