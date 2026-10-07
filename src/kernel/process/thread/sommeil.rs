@@ -115,8 +115,39 @@ pub(crate) fn sleep_ticks_noyau(ticks: u64) {
     dort(ticks, false)
 }
 
-fn dort(ticks: u64, interruptible: bool) {
+/// Sommeil de `nanosleep` : ne rend la main avant l'echeance que pour un
+/// signal qui fera quelque chose sur CE fil.
+///
+/// BOUCHAUD_SOMMEIL_SIGNAL_V1. Rend `None` a l'echeance, `Some(reste_ns)` si
+/// un signal l'interrompt (l'appelant rend alors EINTR et ecrit `remain`).
+///
+/// `dort` rend la main des que la tache est reveillee. Depuis que la pose
+/// d'un signal reveille tout le processus (BOUCHAUD_SIGNAL_EINTR_V1), un
+/// SIGCHLD a la disposition par defaut -- ignore -- reveillait chaque fil en
+/// `sleep()` : la sonde compta-stress a vu `sleep(30)` rendre 0 au bout
+/// d'une seconde, des la mort de son premier fils. Linux ne reveille pas un
+/// sommeil pour un signal ignore, et rend EINTR pour un signal gere.
+pub fn sleep_ticks_signalable(ticks: u64) -> Option<u64> {
     let deadline = echeance_pour(ticks);
+    loop {
+        dort_jusqua(deadline, ticks, true);
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        if maintenant >= deadline {
+            return None;
+        }
+        if signal_interrompt_attente() {
+            return Some(deadline - maintenant);
+        }
+        // Reveil sans effet (signal ignore, ou destine a un autre fil) : on
+        // se rendort jusqu'a la MEME echeance.
+    }
+}
+
+fn dort(ticks: u64, interruptible: bool) {
+    dort_jusqua(echeance_pour(ticks), ticks, interruptible)
+}
+
+fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
     current().wake_deadline_ns.range(deadline);

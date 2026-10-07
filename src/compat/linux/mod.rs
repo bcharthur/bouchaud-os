@@ -1010,13 +1010,19 @@ fn timespec_ms(addr: u64) -> Option<u64> {
 
 /// `nanosleep` : la duree demandee est toujours **relative**.
 fn sys_nanosleep(request: u64, remain: u64) -> i64 {
-    dors_ms(timespec_ms(request).unwrap_or(0));
+    let reste = dors_ms(timespec_ms(request).unwrap_or(0));
+    ecrit_reste(remain, reste)
+}
+
+/// Ecrit `remain` (le temps non dormi) et rend EINTR si le sommeil a ete
+/// interrompu par un signal, 0 sinon. BOUCHAUD_SOMMEIL_SIGNAL_V1.
+fn ecrit_reste(remain: u64, reste_ns: Option<u64>) -> i64 {
+    let ns = reste_ns.unwrap_or(0);
     if remain != 0 {
-        // Le sommeil n'a pas ete interrompu : il ne reste rien a dormir.
-        user_write(remain, &0u64.to_le_bytes());
-        user_write(remain + 8, &0u64.to_le_bytes());
+        user_write(remain, &(ns / 1_000_000_000).to_le_bytes());
+        user_write(remain + 8, &(ns % 1_000_000_000).to_le_bytes());
     }
-    0
+    if reste_ns.is_some() { -errno::EINTR } else { 0 }
 }
 
 /// `clock_nanosleep(clockid, flags, request, remain)`.
@@ -1044,25 +1050,26 @@ fn sys_clock_nanosleep(clock: i32, flags: u64, request: u64, remain: u64) -> i64
         // Une echeance deja passee rend la main tout de suite. `remain` n'est
         // pas ecrit dans cette forme : Linux ne le remplit que pour un sommeil
         // relatif, l'echeance etant deja connue de l'appelant.
-        dors_ms(demande.saturating_sub(maintenant));
-        return 0;
+        return match dors_ms(demande.saturating_sub(maintenant)) {
+            Some(_) => -errno::EINTR,
+            None => 0,
+        };
     }
 
-    dors_ms(demande);
-    if remain != 0 {
-        user_write(remain, &0u64.to_le_bytes());
-        user_write(remain + 8, &0u64.to_le_bytes());
-    }
-    0
+    let reste = dors_ms(demande);
+    ecrit_reste(remain, reste)
 }
 
 /// Dort `ms` millisecondes, en cedant simplement le CPU sous le tick.
-fn dors_ms(ms: u64) {
+///
+/// Rend le temps non dormi si un signal gere a interrompu le sommeil.
+fn dors_ms(ms: u64) -> Option<u64> {
     let ticks = crate::kernel::timer::ms_to_ticks(ms);
     if ticks == 0 {
         task::yield_now();
+        None
     } else {
-        task::sleep_ticks(ticks);
+        task::sleep_ticks_signalable(ticks)
     }
 }
 

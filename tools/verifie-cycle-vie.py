@@ -128,8 +128,14 @@ def verifie(racine: Path) -> list[str]:
     if not avant(pp, "task.attente_interruptible.range(interruptible)", "task.state.endort()") \
             or not avant(pp, "task.state.endort()", "est_condamnee()"):
         fautes.append(f"{BLOCAGE} : le parking ne relit plus la condamnation apres sa publication")
+    # BOUCHAUD_SOMMEIL_SIGNAL_V1 : le corps du sommeil vit dans `dort_jusqua`
+    # (une echeance fixe, pour que `nanosleep` se rendorme jusqu'a la MEME
+    # echeance apres un reveil sans effet) ; `dort` et
+    # `sleep_ticks_signalable` y passent tous deux, interruptibles.
     if "dort(ticks, true)" not in corps(src[SOMMEIL], "sleep_ticks") \
-            or "publie_parking(interruptible)" not in corps(src[SOMMEIL], "dort"):
+            or "dort_jusqua(" not in corps(src[SOMMEIL], "dort") \
+            or "dort_jusqua(deadline, ticks, true)" not in corps(src[SOMMEIL], "sleep_ticks_signalable") \
+            or "publie_parking(interruptible)" not in corps(src[SOMMEIL], "dort_jusqua"):
         fautes.append(f"{SOMMEIL} : le sommeil ne passe plus par le parking interruptible")
     if "publie_attente_interruptible()" not in corps(src[PROC], "sys_wait4"):
         fautes.append(f"{PROC} : wait4 ne passe plus par l'attente interruptible")
