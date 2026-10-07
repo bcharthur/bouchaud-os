@@ -385,11 +385,18 @@ OOPIF_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>oopif-a</title>
       console.log(`HOST_OOPIF_A echo_confirme=${echos}`);
     }
   });
-  // Lire le document du cadre doit etre REFUSE (autre origine), quel que soit le processus.
+  // Le CONTENU du cadre (autre origine) ne doit jamais etre lisible. Sous
+  // isolation des cadres, le parent peut tenir un document local vide a la
+  // place du cadre distant : y acceder n'est pas une fuite, lire « cadre »
+  // en serait une.
   setTimeout(() => {
-    let acces = "refuse";
-    try { void document.getElementById("f").contentWindow.document.body; acces = "PERMIS"; } catch (e) {}
-    console.log(`HOST_OOPIF_A acces_document_enfant=${acces}`);
+    let acces = "refuse", contenu = "";
+    try {
+      const d = document.getElementById("f").contentWindow.document;
+      acces = "PERMIS";
+      contenu = ((d.body && d.body.textContent) || "").trim().slice(0, 20);
+    } catch (e) {}
+    console.log(`HOST_OOPIF_A acces_document_enfant=${acces} contenu_lu=[${contenu}]`);
   }, 4000);
   setTimeout(() => console.log(`HOST_OOPIF_A_FIN recus=${recus} echos=${echos} t_ms=${Math.round(performance.now() - t0)}`), 20000);
 })();

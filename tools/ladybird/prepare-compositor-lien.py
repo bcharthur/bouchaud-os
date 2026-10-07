@@ -403,6 +403,16 @@ def main() -> int:
         "            dbgln(\"[LB] SIGCHLD_FILS pid={} surveille={} signale={} signal={} sorti={} code={}\", pid, m_monitored_processes.contains(pid),\n"
         "                WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : 0);\n",
     )
+    # BOUCHAUD_OOPIF_V1 -- isolation des cadres : quel processus heberge un
+    # cadre d'un autre site. Sans cette ligne, le banc ne voit qu'un
+    # WebContent de plus, sans savoir pour qui.
+    sim = wv / "SiteIsolationManager.cpp"
+    remplace(
+        sim,
+        "    child_frame->set_remote_host(move(remote_client), remote_page_id);\n",
+        "    dbgln(\"[LB] OOPIF_REMOTE parent_pid={} hote_pid={} page={} page_distante={}\", parent_client.pid(), remote_client->pid(), page_id, remote_page_id);\n"
+        "    child_frame->set_remote_host(move(remote_client), remote_page_id);\n",
+    )
     return 0
 
 
