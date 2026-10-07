@@ -32,6 +32,13 @@
  *              que seul SIGCHLD peut reveiller (EINTR). Une alarme de 10 s
  *              borne l'essai.
  *
+ *   abi_glibc  BOUCHAUD_ABI_PID_INT_V1 : un fils sort (code 5) ; le pere le
+ *              recolte par wait4 BRUT, pid -1 passe comme la glibc x86_64 le
+ *              passe : rdi = 0x00000000ffffffff (int range par un mov 32
+ *              bits, haut a zero). Linux lit les 32 bits du bas. Bouchaud lisait
+ *              64 bits, cherchait le fils 4294967295 et rendait 0 : Ladybird
+ *              (glibc) recevait SIGCHLD sans jamais recolter (run 37618172578).
+ *
  * Pour chacun : delai de la fin de prise (EOF), delai du SIGCHLD, et ce que
  * waitpid rend. Sortie : une ligne `SIGCHLD_CAS cas=...`, puis
  * `SIGCHLD_MULTIFIL_OK` ou `SIGCHLD_MULTIFIL_ECHEC n=...`.
@@ -77,6 +84,19 @@ static long maintenant_ms(void)
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* wait4 tel que la glibc l'emet pour waitpid(-1, ..) : pid en 32 bits,
+ * etendu par des ZEROS dans rdi. */
+static long wait4_comme_glibc(int *statut, int options)
+{
+    long ret;
+    register long r10 __asm__("r10") = 0;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(61L), "D"(0x00000000ffffffffUL), "S"(statut), "d"((long)options), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return ret;
 }
 
 static void faute(void)
@@ -291,6 +311,28 @@ int main(void)
         }
     }
     fil_actif_continue = 0;
+    {
+        pid_t p = fork();
+        if (p == 0)
+            _exit(5);
+        long rendu = 0;
+        int statut = 0;
+        long t0 = maintenant_ms();
+        while (maintenant_ms() - t0 < 10000) {
+            rendu = wait4_comme_glibc(&statut, WNOHANG);
+            if (rendu != 0)
+                break;
+            usleep(10 * 1000);
+        }
+        int ok = rendu == p && WIFEXITED(statut) && WEXITSTATUS(statut) == 5;
+        printf("SIGCHLD_CAS cas=abi_glibc wait4_rdi=0x00000000ffffffff rendu=%ld attendu=%d statut=%s%d %s\n", rendu, (int)p,
+            WIFEXITED(statut) ? "sortie:" : "autre:", WIFEXITED(statut) ? WEXITSTATUS(statut) : statut, ok ? "ok" : "ECHEC");
+        if (!ok) {
+            echecs++;
+            kill(p, SIGKILL);
+            waitpid(p, NULL, 0);
+        }
+    }
     if (echecs == 0)
         printf("SIGCHLD_MULTIFIL_OK\n");
     else

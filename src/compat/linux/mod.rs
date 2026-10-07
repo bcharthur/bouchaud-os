@@ -464,6 +464,23 @@ pub fn user_read_u64(addr: u64) -> Option<u64> {
     Some(u64::from_le_bytes(value))
 }
 
+/// Un argument `pid_t` (un `int` C), comme Linux le lit : les 32 bits du bas,
+/// signes.
+///
+/// BOUCHAUD_ABI_PID_INT_V1. La glibc x86_64 range un argument `int` dans son
+/// registre par un `mov` 32 bits (`TYPEFY`/`ARGIFY`, sysdep.h), qui met a ZERO
+/// les 32 bits du haut : `waitpid(-1, ..)` arrive en `rdi = 0x00000000ffffffff`.
+/// Linux tronque a `int` et lit -1 ; Bouchaud lisait `args[0] as i64`, soit
+/// 4294967295, cherchait ce fils-la, ne le trouvait pas, et rendait 0 sous
+/// WNOHANG. C'est ainsi que Ladybird (glibc) recevait bien SIGCHLD -- `[LB]
+/// SIGCHLD_RECU waitpid=0`, run 37618172578 -- sans jamais recolter un rendu
+/// mort, donc sans jamais le remplacer. musl etend le signe (`long`) : les
+/// sondes musl ne pouvaient pas le voir.
+#[inline]
+fn arg_pid(valeur: u64) -> i64 {
+    valeur as u32 as i32 as i64
+}
+
 /// Aiguillage principal.
 fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
     use nr::*;
@@ -639,7 +656,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         EXECVE => proc::sys_execve(args[0], args[1], args[2]),
         EXIT => task::exit_current(args[0] as i32),
         EXIT_GROUP => task::exit_group(args[0] as i32),
-        WAIT4 => proc::sys_wait4(args[0] as i64, args[1], args[2] as u32, args[3]),
+        WAIT4 => proc::sys_wait4(arg_pid(args[0]), args[1], args[2] as u32, args[3]),
         SCHED_YIELD => {
             task::yield_now();
             0
@@ -710,9 +727,9 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         ARCH_PRCTL => sys_arch_prctl(args[0] as i32, args[1]),
         // Le numero de signal n'est pas au meme rang selon l'appel :
         // kill(pid, sig), tkill(tid, sig), mais tgkill(tgid, tid, sig).
-        KILL => proc::sys_kill(args[0] as i64, args[1] as u32),
+        KILL => proc::sys_kill(arg_pid(args[0]), args[1] as u32),
         TKILL => proc::sys_tkill(args[0] as u32, args[1] as u32),
-        TGKILL => proc::sys_kill(args[0] as i64, args[2] as u32),
+        TGKILL => proc::sys_kill(arg_pid(args[0]), args[2] as u32),
 
         // --- Signaux ---
         RT_SIGACTION => proc::sys_rt_sigaction(args[0] as u32, args[1], args[2]),
