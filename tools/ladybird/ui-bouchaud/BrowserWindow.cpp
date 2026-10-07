@@ -6,14 +6,17 @@
 
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Notifier.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
 #include <LibURL/Parser.h>
+#include <LibWebView/Application.h>
 #include <LibWebView/ConsoleOutput.h>
 #include <LibWebView/Menu.h>
+#include <LibWebView/ProcessManager.h>
 #include <UI/Bouchaud/BouchaudChrome.h>
 #include <UI/Bouchaud/BrowserWindow.h>
 
@@ -353,6 +356,10 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // titre BOUCHAUD_BANC_CRASH_RENDU fait fauter SON WebContent
     // (prepare-compositor-lien.py). Hors banc, un titre n'a aucun effet.
     static bool const banc_crash_rendu = getenv("BOUCHAUD_LB_BANC_CRASH_RENDU") != nullptr;
+    // BOUCHAUD_CYCLE_WORKER_V1 -- banc du cycle de vie des workers : le titre
+    // BOUCHAUD_BANC_CRASH_WORKER fait tuer (SIGSEGV) le DERNIER processus
+    // WebWorker connu du gestionnaire d'upstream. Hors banc, aucun effet.
+    static bool const banc_crash_worker = getenv("BOUCHAUD_LB_BANC_CRASH_WORKER") != nullptr;
     // Banc des sites reels : quitter apres BOUCHAUD_LB_BANC_DUREE_S secondes,
     // en rejouant la derniere sonde de pixels (la trame finale de la page).
     if (auto const* duree = getenv("BOUCHAUD_LB_BANC_DUREE_S"); duree && !m_quitte_apres) {
@@ -380,6 +387,19 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
             warnln("[LB] LINK_CUT_REQUEST onglet={} page={} t_ms={}", onglet, vue_ptr->page_courante(),
                 MonotonicTime::now().milliseconds());
             vue_ptr->debug_request("bouchaud-coupe-lien-compositor"sv);
+        }
+        if (banc_crash_worker && texte == "BOUCHAUD_BANC_CRASH_WORKER"sv) {
+            pid_t cible = 0;
+            size_t workers = 0;
+            WebView::Application::process_manager().for_each_process([&](WebView::Process& processus) {
+                if (processus.type() != WebView::ProcessType::WebWorker)
+                    return;
+                ++workers;
+                cible = max(cible, processus.pid());
+            });
+            auto const resultat = cible > 0 ? ::kill(cible, SIGSEGV) : -1;
+            warnln("[LB] WORKER_CRASH_REQUEST onglet={} pid={} workers_vivants={} kill={} t_ms={}", onglet, cible, workers,
+                resultat == 0 ? "ok"sv : "echec"sv, MonotonicTime::now().milliseconds());
         }
         if (banc_crash_rendu && texte == "BOUCHAUD_BANC_CRASH_RENDU"sv) {
             warnln("[LB] RENDERER_CRASH_REQUEST onglet={} page={} webcontent_pid={} t_ms={}", onglet, vue_ptr->page_courante(),

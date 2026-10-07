@@ -16,6 +16,7 @@ on:
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
+      - 'tools/ci/run_ladybird_worker_cycle.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
@@ -55,6 +56,7 @@ on:
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
+      - 'tools/ci/run_ladybird_worker_cycle.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
@@ -488,10 +490,10 @@ jobs:
   crash-rendu:
     # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
     # de l'autre site et le Compositor vivent, le navigateur le remplace.
-    name: ladybird / crash d'un rendu et isolation des cadres
+    name: ladybird / robustesse (crash d'un rendu, cadres isoles, cycle des workers)
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + outils
@@ -527,6 +529,9 @@ jobs:
       - name: Isolation des cadres (BOUCHAUD_SITE_ISOLATION=iframe)
         if: ${{ !cancelled() }}
         run: tools/ci/run_ladybird_oopif.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Cycle de vie des workers (crash, navigation, sortie)
+        if: ${{ !cancelled() }}
+        run: tools/ci/run_ladybird_worker_cycle.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
@@ -537,6 +542,8 @@ jobs:
             fixture-crash-rendu.log
             serie-oopif.log
             fixture-oopif.log
+            serie-worker-cycle.log
+            fixture-worker-cycle.log
           if-no-files-found: warn
 
   sites:

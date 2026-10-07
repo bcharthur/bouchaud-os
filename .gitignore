@@ -250,6 +250,10 @@ tools/userland/out-matrice/
 /ladybird-oopif.img
 /serie-oopif.log*
 /fixture-oopif.log
+/scenario-worker-cycle/
+/ladybird-worker-cycle.img
+/serie-worker-cycle.log*
+/fixture-worker-cycle.log
 /scenario-sites/
 /ladybird-sites.img
 /serie-sites.log*

@@ -409,6 +409,69 @@ OOPIF_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>oopif-enfant
   const t = setInterval(() => { parent.postMessage({ type: "bonjour", origine: location.origin }, "http://10.0.2.2:18082"); if (++k >= 3) clearInterval(t); }, 1500);
 </script></body>"""
 
+# BOUCHAUD_CYCLE_WORKER_V1 -- le cycle de vie des workers, au-dela de la
+# batterie : crash VOLONTAIRE du processus d'un worker (le navigateur doit
+# survivre et en lancer un autre), navigation PENDANT qu'un worker vit, worker
+# APRES navigation, et arret du navigateur avec un worker vivant.
+WCYCLE_COMMUN = rb"""
+const ECHEANCE_MS = 30000;
+function nouveau(nom) {
+  const w = new Worker(URL.createObjectURL(new Blob([
+    "let n = 0; setInterval(() => postMessage({ n: ++n }), 250); onmessage = e => postMessage({ echo: e.data });"])));
+  w.nom = nom; w.recus = 0; w.erreur = false;
+  w.addEventListener("message", () => { w.recus++; });
+  w.addEventListener("error", () => { w.erreur = true; });
+  return w;
+}
+function premier_message(w) {
+  const t0 = performance.now();
+  return new Promise((ok, ko) => {
+    const garde = setTimeout(() => ko(new Error(`${w.nom} muet apres ${ECHEANCE_MS} ms`)), ECHEANCE_MS);
+    w.addEventListener("message", () => { clearTimeout(garde); ok(Math.round(performance.now() - t0)); }, { once: true });
+  });
+}
+const pause = ms => new Promise(r => setTimeout(r, ms));
+"""
+WCYCLE_HTML = b"""<!doctype html><meta charset="utf-8"><title>wcycle</title><body>cycle des workers<script>""" + WCYCLE_COMMUN + rb"""
+(async () => {
+  try {
+    const w1 = nouveau("w1");
+    console.log(`HOST_WCYCLE w1_vivant ms=${await premier_message(w1)}`);
+    await pause(1000);
+    const avant = w1.recus;
+    document.title = "BOUCHAUD_BANC_CRASH_WORKER";
+    await pause(6000);
+    const apres1 = w1.recus;
+    await pause(4000);
+    console.log(`HOST_WCYCLE crash recus_avant=${avant} recus_6s=${apres1} recus_10s=${w1.recus} erreur=${w1.erreur}`);
+    const w2 = nouveau("w2");
+    console.log(`HOST_WCYCLE w2_apres_crash ok ms=${await premier_message(w2)}`);
+    const w3 = nouveau("w3");
+    console.log(`HOST_WCYCLE w3_vivant ms=${await premier_message(w3)}`);
+    console.log("HOST_WCYCLE navigation_avec_worker_vivant");
+    location.href = "/worker-cycle-2.html";
+  } catch (e) {
+    console.log(`HOST_WCYCLE FAIL ${e && e.message}`);
+  }
+})();
+</script></body>"""
+WCYCLE2_HTML = b"""<!doctype html><meta charset="utf-8"><title>wcycle2</title><body>apres navigation<script>""" + WCYCLE_COMMUN + rb"""
+(async () => {
+  console.log("HOST_WCYCLE2 arrive");
+  try {
+    const w4 = nouveau("w4");
+    console.log(`HOST_WCYCLE2 w4_apres_navigation ok ms=${await premier_message(w4)}`);
+    w4.postMessage("ping");
+    await pause(3000);
+    console.log(`HOST_WCYCLE2 quitte_avec_worker_vivant recus=${w4.recus}`);
+    document.title = "BOUCHAUD_BANC_QUITTE";
+  } catch (e) {
+    console.log(`HOST_WCYCLE2 FAIL ${e && e.message}`);
+    document.title = "BOUCHAUD_BANC_QUITTE";
+  }
+})();
+</script></body>"""
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1642,6 +1705,8 @@ class Handler(BaseHTTPRequestHandler):
             "/crash-a.html": (CRASH_A_HTML, "text/html; charset=utf-8"),
             "/crash-b0.html": (CRASH_B0_HTML, "text/html; charset=utf-8"),
             "/crash-b.html": (CRASH_B_HTML, "text/html; charset=utf-8"),
+            "/worker-cycle.html": (WCYCLE_HTML, "text/html; charset=utf-8"),
+            "/worker-cycle-2.html": (WCYCLE2_HTML, "text/html; charset=utf-8"),
             "/oopif-a.html": (OOPIF_A_HTML, "text/html; charset=utf-8"),
             "/oopif-enfant.html": (OOPIF_ENFANT_HTML, "text/html; charset=utf-8"),
         }.get(path)
