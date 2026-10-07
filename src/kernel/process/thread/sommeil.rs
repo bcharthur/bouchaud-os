@@ -122,7 +122,7 @@ pub(crate) fn sleep_ticks_noyau(ticks: u64) {
 /// un signal l'interrompt (l'appelant rend alors EINTR et ecrit `remain`).
 ///
 /// `dort` rend la main des que la tache est reveillee. Depuis que la pose
-/// d'un signal reveille tout le processus (BOUCHAUD_SIGNAL_EINTR_V1), un
+/// d'un signal reveille tout le processus (BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1), un
 /// SIGCHLD a la disposition par defaut -- ignore -- reveillait chaque fil en
 /// `sleep()` : la sonde compta-stress a vu `sleep(30)` rendre 0 au bout
 /// d'une seconde, des la mort de son premier fils. Linux ne reveille pas un

@@ -94,9 +94,41 @@ Le smoke refuse explicitement les refus qui signalent une **régression** :
 `op=fs-create detail=0x1 path=/persist reason` (création du cache impossible),
 `op=fs-fchown`, `Unable to create disk cache`, `[LB:SANDBOX] ECHEC`.
 
+## Isolation de site et des cadres
+
+UI/Bouchaud transmet `BOUCHAUD_SITE_ISOLATION` à l'option upstream
+`--site-isolation` (`ui-bouchaud/main.cpp`), `top-level` par défaut.
+
+- **top-level** (défaut) : une navigation racine vers un autre site change de
+  WebContent (`[LB] PROCESS_SWAP onglet= ancien_pid= nouveau_pid=`). Attention :
+  un onglet ouvert par `window.open` naît sur `about:blank`, et upstream laisse
+  `about:blank` aller vers n'importe quel site **sans** changer de processus
+  (`SiteIsolationManager::navigation_requires_process_swap`). Un tel onglet
+  partage donc le WebContent de son ouvreur tant qu'il ne navigue pas lui-même.
+- **iframe** : un cadre d'un autre site est hébergé par un autre WebContent
+  (`[LB] OOPIF_REMOTE parent_pid= hote_pid=`, banc `run_ladybird_oopif.sh`).
+  Limite amont (cdfe5f8) : aucun canal `postMessage` entre processus
+  (`WebContentServer.ipc`) ; un cadre isolé ne communique pas avec son parent.
+  Mode non activé par défaut.
+
+Un rendu qui faute est tué par le noyau (`PROCESS_FAULT`) ; le navigateur
+l'apprend par SIGCHLD (`ProcessMonitor`) et le remplace (reprise upstream :
+nouveau WebContent, page d'erreur, au plus 5 plantages rapprochés).
+
+État de la preuve (7 oct. 2026) :
+
+| Maillon | Correctif | Preuve |
+|---|---|---|
+| SIGCHLD interrompt le `poll` d'un navigateur au repos | `BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1` | QEMU : `sigchld-multifil-probe`, cas `attente` (EINTR) |
+| le signal va au fil principal, pas à un fil de travail | `BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1` | QEMU : même sonde, cas `boucle` |
+| LibCore réveille la boucle qui a enregistré le gestionnaire | `BOUCHAUD_SIGNAL_BOUCLE_V1` | compilation seulement |
+| reprise réelle d'un WebContent planté dans Ladybird | — | **NON PROUVÉE** : banc `run_ladybird_crash_rendu.sh` (job robustesse) en attente |
+
+Tant que la dernière ligne n'est pas verte, la reprise après plantage d'un
+rendu n'est pas une garantie de sécurité de ce document.
+
 ## Ce qui n'est pas couvert
 
-- iframe isolation (site isolation au niveau des cadres) : non activée ;
 - profils distincts par rôle de rendu (`BrowserWorker`, `BrowserImageDecoder`,
   `BrowserCompositor`, `BrowserMedia`) : un seul profil `BrowserContent`
   aujourd'hui ;
