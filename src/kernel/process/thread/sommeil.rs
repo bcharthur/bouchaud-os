@@ -130,7 +130,16 @@ pub(crate) fn sleep_ticks_noyau(ticks: u64) {
 pub fn sleep_ticks_signalable(ticks: u64) -> Option<u64> {
     let deadline = echeance_pour(ticks);
     loop {
-        dort_jusqua(deadline, ticks, true);
+        // Parking refuse : la tache ne peut plus dormir -- elle est morte
+        // (`exit_group` d'un autre fil). Rendre la main tout de suite, comme
+        // avant : la frontiere de sortie d'appel systeme la retire. Boucler
+        // ici la faisait TOURNER jusqu'a l'echeance -- un fil tue pendant un
+        // `sleep(30)` brulait son coeur 30 s et retardait d'autant la mort de
+        // son processus (os-primitives et endurance sous KVM, run
+        // 37618172578 : machine vivante, occupee, qui n'avance plus).
+        if !dort_jusqua(deadline, ticks, true) || current().state == TaskState::Zombie {
+            return None;
+        }
         let maintenant = crate::kernel::timer::monotonic_ns();
         if maintenant >= deadline {
             return None;
@@ -144,10 +153,11 @@ pub fn sleep_ticks_signalable(ticks: u64) -> Option<u64> {
 }
 
 fn dort(ticks: u64, interruptible: bool) {
-    dort_jusqua(echeance_pour(ticks), ticks, interruptible)
+    dort_jusqua(echeance_pour(ticks), ticks, interruptible);
 }
 
-fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) {
+/// Rend `false` si le parking a ete refuse (la tache ne peut plus dormir).
+fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
     current().wake_deadline_ns.range(deadline);
@@ -160,7 +170,7 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) {
         Parking::Refuse => {
             current().wake_deadline_ns.range(0);
             forensic_wait_clear(WAIT_SLEEP);
-            return;
+            return false;
         }
         Parking::Condamnee => meurt_au_parking(),
     }
@@ -182,6 +192,7 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) {
     termine_attente();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_SLEEP);
+    true
 }
 
 /// Reveille les taches dont le sommeil est echu, et declenche les `SIGALRM`.

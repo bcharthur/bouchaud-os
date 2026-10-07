@@ -39,6 +39,12 @@
  *              64 bits, cherchait le fils 4294967295 et rendait 0 : Ladybird
  *              (glibc) recevait SIGCHLD sans jamais recolter (run 37618172578).
  *
+ *   exit_group_sommeil  BOUCHAUD_SOMMEIL_SIGNAL_V1 : un fils dont un fil dort
+ *              30 s (nanosleep) sort par _exit (exit_group) au bout de
+ *              200 ms. Il doit etre recolte en moins de 3 s : un fil tue
+ *              pendant son sommeil meurt tout de suite, il ne tourne pas
+ *              jusqu'a son echeance.
+ *
  * Pour chacun : delai de la fin de prise (EOF), delai du SIGCHLD, et ce que
  * waitpid rend. Sortie : une ligne `SIGCHLD_CAS cas=...`, puis
  * `SIGCHLD_MULTIFIL_OK` ou `SIGCHLD_MULTIFIL_ECHEC n=...`.
@@ -178,6 +184,14 @@ static void fils(int cas)
             poll(&p, 1, -1);
     }
     _exit(101);
+}
+
+static void *dort_longtemps(void *arg)
+{
+    (void)arg;
+    struct timespec d = { .tv_sec = 30 };
+    nanosleep(&d, NULL);
+    return NULL;
 }
 
 /* --- pere ----------------------------------------------------------------- */
@@ -332,6 +346,24 @@ int main(void)
             kill(p, SIGKILL);
             waitpid(p, NULL, 0);
         }
+    }
+    {
+        long t0 = maintenant_ms();
+        pid_t p = fork();
+        if (p == 0) {
+            pthread_t t;
+            pthread_create(&t, NULL, dort_longtemps, NULL);
+            usleep(200 * 1000);
+            _exit(3);
+        }
+        int statut = 0;
+        pid_t r = waitpid(p, &statut, 0);
+        long duree = maintenant_ms() - t0;
+        int ok = r == p && WIFEXITED(statut) && WEXITSTATUS(statut) == 3 && duree < 3000;
+        printf("SIGCHLD_CAS cas=exit_group_sommeil recolte_ms=%ld statut=%s%d %s\n", duree,
+            WIFEXITED(statut) ? "sortie:" : "autre:", WIFEXITED(statut) ? WEXITSTATUS(statut) : statut, ok ? "ok" : "ECHEC");
+        if (!ok)
+            echecs++;
     }
     if (echecs == 0)
         printf("SIGCHLD_MULTIFIL_OK\n");
