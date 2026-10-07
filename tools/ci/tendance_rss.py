@@ -19,6 +19,9 @@ import re
 import sys
 
 LIGNE = re.compile(r"\[PERF-PROC\] t=(\d+) pid=(\d+) image=(\S+) rss_kio=(\d+)")
+# BOUCHAUD_PERF_PROC_CPU_V1 : temps processeur cumule (absent des noyaux
+# anterieurs : la colonne cpu vaut alors « ? »).
+CPU = re.compile(r" user_ms=(\d+) sys_ms=(\d+)")
 
 
 def pente(points):
@@ -49,7 +52,9 @@ def main(argv):
             t, pid, image, rss = int(m[1]), int(m[2]), m[3].rsplit("/", 1)[-1], int(m[4])
             # Un pid recycle par une autre image est un autre processus.
             cle = (pid, image)
-            par_pid.setdefault(cle, []).append((t, rss))
+            c = CPU.search(ligne)
+            cpu_ms = int(c[1]) + int(c[2]) if c else None
+            par_pid.setdefault(cle, []).append((t, rss, cpu_ms))
     suivis = 0
     for (pid, image), pts in sorted(par_pid.items(), key=lambda kv: kv[1][0][0]):
         if len(pts) < min_releves:
@@ -58,12 +63,20 @@ def main(argv):
         pts.sort()
         moitie = pts[len(pts) // 2:]
         # t en ms -> pente en kio par minute
-        p2 = pente([(t / 60000.0, r) for t, r in moitie])
+        p2 = pente([(t / 60000.0, r) for t, r, _ in moitie])
+        # Part d'UN coeur sur la vie observee, et sur la seconde moitie.
+        def part(a, b):
+            if a[2] is None or b[2] is None or b[0] <= a[0]:
+                return "?"
+            return f"{100.0 * (b[2] - a[2]) / (b[0] - a[0]):.0f}"
+        cpu = part(pts[0], pts[-1])
+        cpu2 = part(moitie[0], moitie[-1])
         print(
             f"RSS_TENDANCE pid={pid} image={image} releves={len(pts)} "
             f"vie_s={(pts[-1][0] - pts[0][0]) // 1000} premier_kio={pts[0][1]} "
             f"milieu_kio={pts[len(pts) // 2][1]} dernier_kio={pts[-1][1]} "
-            f"max_kio={max(r for _, r in pts)} pente2_kio_min={p2:.0f}"
+            f"max_kio={max(r for _, r, _ in pts)} pente2_kio_min={p2:.0f} "
+            f"cpu_pct={cpu} cpu2_pct={cpu2}"
         )
     print(f"RSS_TENDANCE_FIN pids={len(par_pid)} suivis={suivis} min_releves={min_releves}")
     return 0

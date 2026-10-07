@@ -316,10 +316,19 @@ lost_samples_global={}",
                     let copie = c(Categorie::Copie);
                     let echec = c(Categorie::Echec);
                     let total = compte_du_processus.unwrap_or_default();
+                    // BOUCHAUD_PERF_PROC_CPU_V1 : le temps processeur CUMULE
+                    // du processus (livre /proc, threads morts compris). Deux
+                    // releves donnent sa part d'un coeur ; c'est ce qui separe
+                    // « le rendu calcule sans arret » de « il attend quelque
+                    // chose » (endurance : rAF ~1 Hz, run 37581515158).
+                    let (cpu_user_ms, cpu_sys_ms) = crate::kernel::task::proc_processus_cumul(row.pid)
+                        .map(|c| (c.user_ns / 1_000_000, c.system_ns / 1_000_000))
+                        .unwrap_or((0, 0));
                     crate::serial_println!(
                         "[PERF-PROC] t={} pid={} image={} rss_kio={} vss_kio={} taches={} \
 fautes={} total_us={} pire_us={} \
-zero={}/{}us fichier={}/{}us partage={}/{}us copie={}/{}us attente={}/{}us echec={}",
+zero={}/{}us fichier={}/{}us partage={}/{}us copie={}/{}us attente={}/{}us echec={} \
+user_ms={} sys_ms={}",
                         crate::kernel::timer::monotonic_ms(),
                         row.pid,
                         base,
@@ -335,6 +344,8 @@ zero={}/{}us fichier={}/{}us partage={}/{}us copie={}/{}us attente={}/{}us echec
                         copie.nombre, copie.total_ns / 1_000,
                         attente.nombre, attente.total_ns / 1_000,
                         echec.nombre,
+                        cpu_user_ms,
+                        cpu_sys_ms,
                     );
                 }
 
