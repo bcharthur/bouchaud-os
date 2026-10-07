@@ -126,13 +126,14 @@ done
 echo "== verdict =="
 echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
-fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+' "$P" | head -1 || true)
+fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ cadres_echus=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+' "$P" | head -1 || true)
 val() { echo "$fin" | grep -oE "$1=[0-9]+" | cut -d= -f2; }
-cycles=$(val cycles); t_s=$(val t_s); cadres=$(val cadres_ok); workers=$(val workers_ok); onglets=$(val onglets)
+cycles=$(val cycles); t_s=$(val t_s); cadres=$(val cadres_ok); echus=$(val cadres_echus); workers=$(val workers_ok); onglets=$(val onglets)
 exige "la page a fini (HOST_ENDURANCE_FIN)" test -n "$fin"
 exige "duree >= 95 % de ${DUREE} s (t_s=${t_s:-?})" test "${t_s:-0}" -ge $((DUREE * 95 / 100))
 exige "au moins $((DUREE / 10)) cycles (${cycles:-0})" test "${cycles:-0}" -ge $((DUREE / 10))
-exige "cadres charges (${cadres:-0}/${cycles:-0})" test "${cadres:-0}" -ge $(( ${cycles:-0} - 2 ))
+exige "cadres charges (${cadres:-0}/${cycles:-0}, ${echus:-?} au-dela de 30 s)" test "${cadres:-0}" -ge $(( ${cycles:-0} - 2 ))
+exige "aucun cadre au-dela de 30 s (${echus:-?})" test "${echus:-1}" -eq 0
 exige "workers au rendez-vous (${workers:-0}/${cycles:-0})" test "${workers:-0}" -ge $(( ${cycles:-0} - 2 ))
 exige "onglets sur l'autre site ouverts (${onglets:-0})" test "${onglets:-0}" -ge 1
 exige "onglet enfant charge sur 10.0.2.100" grep -aq 'HOST_ENDURANCE_ENFANT .*origine=http://10.0.2.100:18082' "$P"

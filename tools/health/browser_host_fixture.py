@@ -232,6 +232,11 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
   const t0 = performance.now();
   const ctx = document.getElementById("c").getContext("2d");
   let cycle = 0, onglet = null, workersOk = 0, cadresOk = 0, ongletsOuverts = 0;
+  // Le cycle suivant attend que le cadre de celui-ci ait CHARGE (borne 30 s :
+  // au-dela, un echec). Remplacer un cadre au bout de 5 s quoi qu'il arrive
+  // mesurait la VITESSE de la machine (run 37532626400 : 36/93 sur un
+  // executant trois fois plus lent), pas la correction du cycle de vie.
+  let cadresEchus = 0, latMax = 0, latTotal = 0;
   let raf = 0;
   (function anime() {
     raf++;
@@ -246,7 +251,16 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
     const f = document.createElement("iframe");
     f.style.cssText = "width:200px;height:80px;border:0";
     f.srcdoc = `<body style="margin:0;background:hsl(${cycle * 37 % 360},70%,60%)">cadre ${cycle}<img src="/pixel.png?c=${cycle}"></body>`;
-    f.onload = () => cadresOk++;
+    const tCadre = performance.now();
+    let suite = null;
+    const garde = setTimeout(() => { cadresEchus++; suite && suite(); }, 30000);
+    f.onload = () => {
+      clearTimeout(garde);
+      cadresOk++;
+      const lat = Math.round(performance.now() - tCadre);
+      latMax = Math.max(latMax, lat); latTotal += lat;
+      suite && suite();
+    };
     ici.appendChild(f);
     const w = new Worker(URL.createObjectURL(new Blob(["onmessage = e => postMessage(e.data * 2)"])));
     w.onmessage = e => { if (e.data === cycle * 2) workersOk++; w.terminate(); };
@@ -261,11 +275,16 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
     const s = Math.round((performance.now() - t0) / 1000);
     document.getElementById("etat").textContent = `cycle ${cycle} t=${s}s`;
     console.log(`HOST_ENDURANCE cycle=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf}`);
-    if (performance.now() - t0 < duree) setTimeout(un_cycle, 5000);
-    else {
-      if (onglet) onglet.close();
-      console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf}`);
-    }
+    const debutCycle = performance.now();
+    suite = () => {
+      suite = null;
+      const s2 = Math.round((performance.now() - t0) / 1000);
+      if (performance.now() - t0 < duree) setTimeout(un_cycle, Math.max(0, 5000 - (performance.now() - debutCycle)));
+      else {
+        if (onglet) onglet.close();
+        console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax}`);
+      }
+    };
   }
   setTimeout(un_cycle, 1000);
 })();
