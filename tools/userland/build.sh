@@ -45,7 +45,11 @@ freestanding() {
         name=$(basename "$src" .c)
         echo "  CC  $name"
         gcc -c $CFLAGS_COMMON -fno-builtin -mcmodel=large -fno-pie -mno-red-zone "$src" -o "$OUT/$name.o"
-        ld -static -n -z noexecstack --no-warn-rwx-segments \
+        # Ni `-n` (NMAGIC) ni `--no-warn-rwx-segments` : le premier fusionnait
+        # code et donnees dans UN segment RWE, le second taisait l'avertissement.
+        # Le noyau refuse ce segment (W^X, 0ef49aec) : ring3-selftest n'etait
+        # plus execute du tout depuis. `-z separate-code` : code R-X seul.
+        ld -static -z noexecstack -z separate-code \
            -Ttext-segment=$BASE -e _start "$OUT/$name.o" -o "$OUT/$name"
         rm -f "$OUT/$name.o"
     done
