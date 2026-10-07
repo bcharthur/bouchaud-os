@@ -42,9 +42,13 @@ pub struct PerCpu {
     pub user_rsp: u64,
     pub current: u64,
     pub cpu_index: u64,
+    /// BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 : 1 quand le coeur qui tient ce slot
+    /// l'a confirme contre son APIC materiel (`verifie_gs_courant`). Ajoute EN
+    /// FIN de structure : l'assembleur n'adresse que gs:[0] et gs:[8].
+    pub gs_verifie: u64,
 }
 impl PerCpu {
-    const fn new() -> Self { Self { kernel_rsp: 0, user_rsp: 0, current: 0, cpu_index: 0 } }
+    const fn new() -> Self { Self { kernel_rsp: 0, user_rsp: 0, current: 0, cpu_index: 0, gs_verifie: 0 } }
 }
 
 static mut PER_CPU: [PerCpu; smp::MAX_CPUS] = [PerCpu::new(); smp::MAX_CPUS];
@@ -74,6 +78,23 @@ pub fn cpu_index_from_gs() -> Option<usize> {
     if publie != index {
         return None;
     }
+    // BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 : slot deja confirme par SON coeur.
+    //
+    // La confirmation ci-dessous coutait `hardware_apic_id()` -- `detect_topology`,
+    // une dizaine d'instructions CPUID -- A CHAQUE appel, et `local_cpu()`
+    // passe ici plusieurs fois par appel systeme. Sous TCG, CPUID est une
+    // instruction emulee comme une autre ; sous KVM chaque CPUID est une
+    // sortie vers l'hyperviseur, et sur les runners (KVM imbrique) des
+    // dizaines de microsecondes : run 37622717446, os-primitives sous KVM,
+    // coeurs echantillonnes DANS `__cpuid` (cpu_index_from_gs ->
+    // hardware_apic_id -> detect_topology), machine vivante qui n'avance
+    // plus. Meme sur le metal, CPUID serialise (~1-2 kcycles par appel ici).
+    // La verification garde tout son sens -- un AP qui recevrait le slot du
+    // BSP -- mais elle n'a lieu qu'une fois, sur le coeur concerne, a la mise
+    // en place de GS (`verifie_gs_courant`).
+    if unsafe { (*(base as *const PerCpu)).gs_verifie } == 1 {
+        return Some(index);
+    }
     // Une adresse de slot valide ne suffit pas si un AP a recu par erreur le
     // slot du BSP. Lorsque la topologie est deja publiee, le CpuId derive de
     // l'APIC materiel doit confirmer GS. Pendant l'amorcage precoce, l'absence
@@ -84,6 +105,32 @@ pub fn cpu_index_from_gs() -> Option<usize> {
         }
     }
     Some(index)
+}
+
+/// BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 -- confirme, sur le coeur COURANT, que le
+/// slot designe par GS est bien le sien (APIC materiel -> CpuId enregistre).
+///
+/// Pose `gs_verifie` si oui, l'EFFACE si non : un coeur qui aurait recu le
+/// slot d'un autre fait retomber ce slot sur la verification complete a
+/// chaque appel (lente, mais juste) au lieu d'y etre cru. Ne fait rien tant
+/// que GS n'est pas pose ou que la topologie n'est pas enregistree : la
+/// verification complete s'applique alors, comme avant. Appelee a la fin de
+/// `init_cpu` et des enregistrements BSP/AP (l'ordre des deux varie selon
+/// le chemin d'amorcage) ; le BSP se verifie avant le demarrage des AP.
+pub fn verifie_gs_courant() {
+    let base = read_msr(MSR_GS_BASE) as usize;
+    let debut = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu as usize;
+    let taille = core::mem::size_of::<PerCpu>();
+    let fin = debut.saturating_add(taille.saturating_mul(smp::MAX_CPUS));
+    if base == 0 || base < debut || base >= fin || (base - debut) % taille != 0 {
+        return;
+    }
+    let index = (base - debut) / taille;
+    let Some(materiel) = cpu_local::logical_for_apic(cpu_local::hardware_apic_id()) else {
+        return;
+    };
+    let slot = per_cpu_for(index);
+    slot.gs_verifie = if materiel.as_usize() == index && slot.cpu_index as usize == index { 1 } else { 0 };
 }
 
 pub fn per_cpu() -> &'static mut PerCpu {
@@ -136,10 +183,12 @@ fn init_cpu(cpu: usize, log: bool) {
         pcpu.cpu_index = cpu as u64;
         pcpu.current = 0;
         pcpu.kernel_rsp = gdt::kernel_stack_for(cpu);
+        pcpu.gs_verifie = 0;
         write_msr(MSR_GS_BASE, pcpu as *mut PerCpu as u64);
         write_msr(MSR_KERNEL_GS_BASE, 0);
         enable_sse();
     }
+    verifie_gs_courant();
     READY.store(true, Ordering::Release);
     if log { crate::kernel::dmesg::log("usermode: syscall/sysret armes, GS/TSS per-CPU, SSE actif, ABI Bouchaud natif v1"); }
 }

@@ -548,6 +548,8 @@ pub fn register_bsp() -> CpuId {
             Err(actual) => seen = actual,
         }
     }
+    // BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 : si GS est deja pose, le confirmer.
+    crate::arch::x86_64::usermode::verifie_gs_courant();
     id
 }
 
@@ -562,6 +564,8 @@ pub fn register_current_ap() -> Option<CpuId> {
     let slot = REGISTERED_CPUS.fetch_add(1, Ordering::AcqRel);
     let id = CpuId::from_index(slot)?;
     initialize(id, topology);
+    // BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 (sans effet si GS n'est pas encore pose).
+    crate::arch::x86_64::usermode::verifie_gs_courant();
     Some(id)
 }
 
