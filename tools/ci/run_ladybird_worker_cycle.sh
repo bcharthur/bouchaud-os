@@ -88,8 +88,8 @@ sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | tr 
 P="$LOG.propre"
 
 echo "== chronologie =="
-grep -anE 'HOST_WCYCLE2?|WORKER_CRASH_REQUEST|\[LB\] PROCESS_(CREATE|EXIT) type=WebWorker|PROCESS_(EXIT|DEATH|FAULT) .*WebWorker|BROWSER_HOST_EXIT|WCYCLE_(DEBUT|SORTI)|VERIFICATION FAILED|KERNEL PANIC' "$P" \
-  | sed -E 's/^([0-9]+):.*(HOST_|\[LB|PROCESS_|BROWSER_HOST|WCYCLE|VERIFICATION|KERNEL)/\1: \2/' | awk 'NR <= 60 { print "  " substr($0, 1, 200) }' || true
+grep -anE 'HOST_WCYCLE2?|WORKER_CRASH_REQUEST|WORKER_FIN_DOCUMENT|\[LB\] SIGCHLD_(RECU|FILS)|\[LB\] PROCESS_(CREATE|EXIT) type=WebWorker|PROCESS_(EXIT|DEATH|FAULT) .*WebWorker|BROWSER_HOST_EXIT|WCYCLE_(DEBUT|SORTI)|VERIFICATION FAILED|KERNEL PANIC' "$P" \
+  | sed -E 's/^([0-9]+):.*(HOST_|\[LB|PROCESS_|BROWSER_HOST|WCYCLE|VERIFICATION|KERNEL)/\1: \2/' | awk 'NR <= 90 { print "  " substr($0, 1, 200) }' || true
 
 ligne_de() { grep -anE "$1" "$P" | head -1 | cut -d: -f1 || true; }
 champ() { echo "$1" | grep -oE "$2=[0-9a-z]+" | head -1 | cut -d= -f2 || true; }

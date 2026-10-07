@@ -27,7 +27,7 @@ IPI = re.compile(r"\[SMP-IPI\].*")
 COEUR = re.compile(r"c(\d+)=\d+/\d+ms/(0x[0-9a-f]+)/u\d")
 FILE = re.compile(r"\[SCHED-FILE\] cpu=(\d+).*?rip_noyau=(0x[0-9a-f]+)")
 SNAPSHOT = re.compile(r"\[SMP-SNAPSHOT\].*")
-REPERES = re.compile(r"_OK\b|_FAIL|ECHEC|LECTEUR_ATTEND|PROCESS_FAULT|panicked|ata: |exec: |SESSION_|PRIMITIVES_FIN")
+REPERES = re.compile(r"_OK\b|_FAIL|ECHEC|NNP_ABSENT|LECTEUR_ATTEND|PROCESS_FAULT|panicked|ata: |exec: |SESSION_|PRIMITIVES_FIN")
 
 
 def main(argv):

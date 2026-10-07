@@ -223,7 +223,20 @@ pub fn set_no_new_privs_current() {
 }
 
 pub fn no_new_privs_current() -> bool {
-    current().no_new_privs
+    let instantane = current();
+    // BOUCHAUD_NNP_DIAGNOSTIC_V1 : endurance 37627107473, deux WebWorker sur
+    // vingt-neuf lisent `no_new_privs=0` et refusent de tourner
+    // (`[LB:SANDBOX] ECHEC`). Le profil vient de l'image ; dire laquelle le
+    // noyau a vue, et sous quel profil, au moment ou il repond 0.
+    if !instantane.no_new_privs {
+        let process = task::current_process();
+        let image = process.metadata.lock().name.clone();
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "NNP_ABSENT pid={} image={} profil={:?} euid={}",
+            instantane.pid, image, instantane.profile, instantane.credentials.euid
+        ));
+    }
+    instantane.no_new_privs
 }
 
 pub fn apply_profile(pid: u32, wanted: SecurityProfile) -> bool {
