@@ -7,6 +7,13 @@
 /// recursive sur le meme CPU (observee pendant `fsync`, syscall 74).
 fn rassemble() -> Vec<Entree> {
     let systeme = fs();
+    rassemble_sous(&systeme)
+}
+
+/// Comme [`rassemble`], sous un garde du RAMFS DEJA tenu par l'appelant :
+/// celui qui recopie ensuite les contenus doit le faire sous la MEME prise
+/// (BOUCHAUD_PERSIST_INSTANTANE_UNIQUE_V1, voir `rassemble_snapshot`).
+fn rassemble_sous(systeme: &crate::fs::ramfs::FileSystem) -> Vec<Entree> {
     let racine = match systeme.resolve(RACINE, 0) {
         Some(idx) => idx,
         None => return Vec::new(),
@@ -14,7 +21,7 @@ fn rassemble() -> Vec<Entree> {
 
     let mut entrees = Vec::new();
     let mut groupes = 0u32;
-    collecte_sous_garde(&systeme, racine, &String::new(), None, &mut groupes, &mut entrees);
+    collecte_sous_garde(systeme, racine, &String::new(), None, &mut groupes, &mut entrees);
     entrees
 }
 

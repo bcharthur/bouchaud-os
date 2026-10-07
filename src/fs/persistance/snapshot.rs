@@ -21,9 +21,9 @@ const LIMITES_ZONE: crate::fs::cache_jetable::Limites = crate::fs::cache_jetable
 ///
 /// Sans zone, rien n'est ecarte : il n'y a pas de borne a respecter, et
 /// `synchronise_snapshot` rendra `SANS_ZONE` de toute facon.
-fn ecarte_les_caches_qui_debordent(meta: Vec<Entree>) -> Vec<Entree> {
+fn ecarte_les_caches_qui_debordent(meta: Vec<Entree>, zone: bool) -> Vec<Entree> {
     use crate::fs::cache_jetable::{selectionne, Fichier, Verdict};
-    if debut().is_none() {
+    if !zone {
         return meta;
     }
     let groupes = meta.iter().filter_map(|e| e.groupe).max().map_or(0, |g| g as usize + 1);
@@ -58,8 +58,18 @@ fn ecarte_les_caches_qui_debordent(meta: Vec<Entree>) -> Vec<Entree> {
 }
 
 fn rassemble_snapshot() -> Vec<SnapshotEntree> {
-    let meta = ecarte_les_caches_qui_debordent(rassemble());
+    // BOUCHAUD_PERSIST_INSTANTANE_UNIQUE_V1 : la collecte (chemins, noeuds,
+    // longueurs) et la copie des contenus se font sous UNE prise du RAMFS.
+    // Elles en faisaient deux : un fichier tronque ou supprime entre les
+    // deux -- un service Ladybird qui ecrit son cache pendant le `fsync` du
+    // navigateur -- faisait copier `content[..longueur]` d'un contenu devenu
+    // vide : panique noyau (run 37654172489, banc cache et SQL,
+    // snapshot.rs:66 « range end index 28872 out of range for slice of
+    // length 0 »). La presence de la zone est lue AVANT la prise : elle
+    // interroge le volume, pas le RAMFS.
+    let zone = debut().is_some();
     let systeme = fs();
+    let meta = ecarte_les_caches_qui_debordent(rassemble_sous(&systeme), zone);
     let mut out = Vec::with_capacity(meta.len());
     for entree in meta {
         let mut contenu = vec![0u8; entree.longueur];
