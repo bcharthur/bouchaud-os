@@ -310,6 +310,59 @@ pub fn signal_pending() -> bool {
     }
 }
 
+/// Un signal en attente doit-il INTERROMPRE une attente de disponibilite
+/// (`poll`, `select`, `epoll_wait`) par `EINTR` ?
+///
+/// BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1
+///
+/// Oui s'il est livrable (non bloque) ET qu'il fera quelque chose : un
+/// gestionnaire installe, ou une action par defaut qui termine. Un signal
+/// ignore (`SIG_IGN`, ou `SIGCHLD` sans gestionnaire) n'interrompt rien :
+/// Linux ne le met meme pas en file, et un `EINTR` pour lui serait un faux
+/// reveil que bien des programmes traitent en erreur.
+///
+/// Run 37584587000 : le WebContent d'un onglet meurt, le navigateur n'en sait
+/// jamais rien. LibCore attend en `poll(-1)` et n'apprend la mort d'un fils
+/// QUE par son gestionnaire de SIGCHLD ; ce `poll` ne rendait jamais la main
+/// pour un signal (sigchld-multifil-probe, cas `attente` : pere fige plus de
+/// huit minutes apres la mort de son fils, meme l'alarme de 10 s ignoree).
+pub fn signal_interrompt_attente() -> bool {
+    let Some(task) = try_current() else { return false };
+    let signals = task.process.signals.lock();
+    let mut prets = signals.pending & !signals.blocked;
+    while prets != 0 {
+        let signal = prets.trailing_zeros() + 1;
+        prets &= prets - 1;
+        if signal == crate::kernel::signal::SIGKILL || signal == crate::kernel::signal::SIGSTOP {
+            return true;
+        }
+        let action = signals.actions[signal as usize - 1];
+        if action.handler == crate::kernel::signal::SIG_IGN {
+            continue;
+        }
+        if action.handler == crate::kernel::signal::SIG_DFL
+            && matches!(crate::kernel::signal::default_action(signal), crate::kernel::signal::DefaultAction::Ignore)
+        {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Un signal vient d'etre pose sur `pid` : reveiller ses fils endormis ET
+/// les attentes de disponibilite, pour qu'elles le voient.
+///
+/// `wake_for_signal` remet `Ready` les fils DEJA bloques. Un fil entre son
+/// balayage de descripteurs et son parking ne l'est pas encore : sans
+/// changement de generation de la file de disponibilite, il se garerait
+/// apres le signal et dormirait pour rien. `notify_readiness` change cette
+/// generation (`WaitQueue` : relecture du ticket apres publication).
+pub fn reveille_pour_signal(pid: u32) {
+    wake_for_signal(pid);
+    crate::kernel::fd::notify_readiness();
+}
+
 /// Termine de force toutes les taches (utilise apres une faute fatale).
 pub fn kill_all(code: i32) {
     for task in tasks().iter() {

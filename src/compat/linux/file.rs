@@ -2972,6 +2972,15 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             task::poll_phase_set(task::POLL_HORS, 0);
             return ready;
         }
+        // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 : rien de pret, un signal a
+        // livrer -> EINTR, et `deliver_pending` lancera son gestionnaire au
+        // retour. Sans cela, une boucle d'evenements au repos en `poll(-1)`
+        // (LibCore) n'executait JAMAIS son gestionnaire de SIGCHLD.
+        if task::signal_interrompt_attente() {
+            task::poll_phase_set(task::POLL_RETOUR, 0);
+            task::poll_phase_set(task::POLL_HORS, 0);
+            return -errno::EINTR;
+        }
         task::poll_phase_set(task::POLL_ATTENTE, 0);
         crate::kernel::fd::wait_readiness(ticket, attente_ns);
         task::poll_phase_set(task::POLL_REVEIL, 0);
@@ -3022,6 +3031,10 @@ pub fn sys_select(
         }
         if ready > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
             return ready;
+        }
+        // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 (voir `sys_poll`).
+        if task::signal_interrompt_attente() {
+            return -errno::EINTR;
         }
         crate::kernel::fd::wait_readiness(ticket, attente_ns);
     }
@@ -3122,6 +3135,10 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         }
         if written > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
             return written as i64;
+        }
+        // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 (voir `sys_poll`).
+        if task::signal_interrompt_attente() {
+            return -errno::EINTR;
         }
         crate::kernel::fd::wait_readiness(ticket, attente_ns);
     }

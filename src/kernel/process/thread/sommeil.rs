@@ -303,7 +303,8 @@ fn fire_alarms(maintenant_ticks: u64) {
         if let Some(process) = process_by_pid(pid) {
             process.signals.lock().raise(crate::kernel::signal::SIGALRM);
         }
-        wake_for_signal(pid);
+        // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 : `poll` compris.
+        reveille_pour_signal(pid);
     }
 }
 

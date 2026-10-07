@@ -430,6 +430,7 @@ fn notify_parent_of_exit() {
 // Le meme chemin SIGCHLD/wait4 doit fonctionner pour une sortie forcee.
 fn notify_parent_of_exit_for(parent_pid: u32) {
     if parent_pid == 0 { return; }
+    let mut parent_trouve = false;
     for index in 0..tasks().len() {
         if tasks()[index].state == TaskState::Zombie {
             continue;
@@ -443,6 +444,7 @@ fn notify_parent_of_exit_for(parent_pid: u32) {
                 false
             }
         };
+        parent_trouve |= matches;
         if matches
             && tasks()[index]
                 .waiting_for_child
@@ -452,6 +454,12 @@ fn notify_parent_of_exit_for(parent_pid: u32) {
         {
             publish_ready(index);
         }
+    }
+    // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 : le pere qui n'est PAS en `wait4`
+    // -- une boucle d'evenements en `poll`, comme le navigateur -- doit voir
+    // son SIGCHLD. Le reveil ne suffisait qu'aux attentes de `wait4`.
+    if parent_trouve {
+        reveille_pour_signal(parent_pid);
     }
 }
 

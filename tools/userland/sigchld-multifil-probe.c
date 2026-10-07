@@ -20,6 +20,11 @@
  *   principal  quatre fils (poll, nanosleep, attente de condition, read),
  *              le fil PRINCIPAL faute ;
  *   secondaire meme chose, un fil SECONDAIRE faute, le principal en poll.
+ *   attente    multi-fils (comme principal), mais le pere attend en
+ *              poll(-1) sur le SEUL tube du gestionnaire, sans delai ni
+ *              autre descripteur : c'est la boucle d'un navigateur au repos,
+ *              que seul SIGCHLD peut reveiller (EINTR). Une alarme de 10 s
+ *              borne l'essai.
  *
  * Pour chacun : delai de la fin de prise (EOF), delai du SIGCHLD, et ce que
  * waitpid rend. Sortie : une ligne `SIGCHLD_CAS cas=...`, puis
@@ -40,6 +45,11 @@
 #include <unistd.h>
 
 static int tube_signal[2];
+
+static void sur_alarme(int sig)
+{
+    (void)sig;
+}
 
 static void sur_sigchld(int sig)
 {
@@ -152,7 +162,7 @@ static void *pere_ailleurs(void *arg)
 
 int main(void)
 {
-    static const char *const noms[] = { "mono", "principal", "secondaire" };
+    static const char *const noms[] = { "mono", "principal", "secondaire", "attente" };
     setvbuf(stdout, NULL, _IONBF, 0);
     if (pipe2(tube_signal, O_CLOEXEC | O_NONBLOCK) != 0) {
         printf("SIGCHLD_MULTIFIL_ECHEC n=1 raison=pipe2\n");
@@ -163,11 +173,15 @@ int main(void)
     sa.sa_handler = sur_sigchld;
     sa.sa_flags = SA_RESTART;
     sigaction(SIGCHLD, &sa, NULL);
+    struct sigaction sal;
+    memset(&sal, 0, sizeof sal);
+    sal.sa_handler = sur_alarme;
+    sigaction(SIGALRM, &sal, NULL);
     pthread_t autre;
     pthread_create(&autre, NULL, pere_ailleurs, NULL);
 
     int echecs = 0;
-    for (int cas = 0; cas < 3; cas++) {
+    for (int cas = 0; cas < 4; cas++) {
         int prise[2];
         socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, prise);
         char c;
@@ -177,13 +191,37 @@ int main(void)
         pid_t p = fork();
         if (p == 0) {
             close(prise[0]);
-            fils(cas);
+            fils(cas == 3 ? 1 : cas);
         }
         close(prise[1]);
         long t_eof = -1, t_sig = -1;
         pid_t rendu = 0;
         int statut = 0;
-        while (maintenant_ms() - t0 < 10000 && (t_eof < 0 || rendu <= 0)) {
+        if (cas == 3) {
+            // Aucun delai, aucun autre descripteur : seul un signal peut
+            // interrompre ce poll (EINTR), ou y faire apparaitre le tube.
+            alarm(10);
+            struct pollfd f = { .fd = tube_signal[0], .events = POLLIN };
+            int n = poll(&f, 1, -1);
+            int erreur = n < 0 ? errno : 0;
+            alarm(0);
+            t_sig = maintenant_ms() - t0;
+            long attendu = t_sig;
+            for (;;) {
+                int st = 0;
+                pid_t r = waitpid(-1, &st, WNOHANG);
+                if (r <= 0)
+                    break;
+                if (r == p) {
+                    rendu = r;
+                    statut = st;
+                }
+            }
+            if (t_sig >= 9900)
+                t_sig = -1; // reveille par l'alarme, pas par SIGCHLD
+            printf("SIGCHLD_ATTENTE poll=%d errno=%d reveil_ms=%ld\n", n, erreur, attendu);
+        }
+        while (cas != 3 && maintenant_ms() - t0 < 10000 && (t_eof < 0 || rendu <= 0)) {
             struct pollfd f[2] = { { .fd = tube_signal[0], .events = POLLIN }, { .fd = prise[0], .events = POLLIN } };
             int n = poll(f, t_eof < 0 ? 2 : 1, 200);
             if (n < 0 && errno != EINTR)

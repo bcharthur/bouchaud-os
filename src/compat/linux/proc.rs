@@ -662,8 +662,9 @@ pub fn send_signal(pid: u32, signal: u32) -> i64 {
         Some(process) => {
             process.signals.lock().raise(signal);
             // Un signal doit reveiller une tache endormie, sinon un `SIGTERM`
-            // sur un processus bloque resterait sans effet.
-            task::wake_for_signal(pid);
+            // sur un processus bloque resterait sans effet -- y compris en
+            // `poll` (BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1).
+            task::reveille_pour_signal(pid);
             0
         }
         None => -errno::ESRCH,
