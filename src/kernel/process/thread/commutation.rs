@@ -202,13 +202,17 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     task.last_cpu.range(cpu_id as u8);
     task.runq_cpu.range(cpu_id as u8);
     task.switching_out.range(false);
-    task.slice_start_ns.range(now);
-    task.last_account_ns.range(now);
+    // BOUCHAUD_COMPTA_SEQLOCK_V1 : le curseur ET le bloc par CPU s'arment
+    // sous la sequence -- un lecteur qui voit le curseur arme lit le bloc.
+    compta_section(task, || {
+        task.slice_start_ns.range(now);
+        task.last_account_ns.range(now);
+        COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
+        COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
+        COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
+        COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel.charge(), Ordering::Relaxed);
+    });
     task.context_switches.range(task.context_switches.charge().saturating_add(1));
-    COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
-    COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
-    COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
-    COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel.charge(), Ordering::Relaxed);
     // BOUCHAUD_CYCLE_DE_VIE_V1 : une tache condamnee pendant qu'elle etait en
     // file doit mourir a sa premiere frontiere sur ce coeur.
     RETRAITE_DEMANDEE[cpu_id].store(

@@ -57,6 +57,11 @@ pub struct Task {
     /// Zero signifie "pas en file". Sert a la latence wake/ready-to-run NG.
     pub ready_since_ns: EcheanceAtomique,
     pub last_account_ns: EcheanceAtomique,
+    /// BOUCHAUD_COMPTA_SEQLOCK_V1 : sequence de la comptabilite CPU. Impaire
+    /// pendant qu'un CPU met a jour `last_account_ns`, `user_cpu_ns`,
+    /// `kernel_cpu_ns` et `cpu_ns` ; un lecteur qui la voit impaire, ou
+    /// changee, relit. Un seul ecrivain a la fois : le CPU de la tache.
+    pub compta_seq: EcheanceAtomique,
     pub user_cpu_ns: EcheanceAtomique,
     pub kernel_cpu_ns: EcheanceAtomique,
     pub cpu_ns: [EcheanceAtomique; MAX_CPUS],

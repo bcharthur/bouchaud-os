@@ -83,6 +83,31 @@ pub struct Process {
     pub metadata: SpinLock<ProcessMetadata>,
     pub lifecycle: SpinLock<ProcessLifecycle>,
     pub signals: SpinLock<crate::kernel::signal::SignalState>,
+    /// Temps CPU des fils de ce processus dont l'emplacement a ete recycle.
+    pub temps_recycle: TempsRecycle,
+}
+
+/// BOUCHAUD_COMPTA_SEQLOCK_V1 -- le temps des fils disparus d'un processus.
+///
+/// Un fil mort reste lisible tant que son emplacement de tache n'est pas
+/// reutilise ; une fois ecrase, ses compteurs quittaient le total du
+/// processus, et `utime` de /proc/<pid>/stat RECULAIT (sonde compta-stress,
+/// QEMU : « fils pid=48 utime=1<-2 »). Le registre les verse ici AVANT
+/// l'ecrasement, sous sa section d'ecriture -- qui attend tous les lecteurs :
+/// un parcours de la table voit donc le fil OU ce versement, jamais les deux,
+/// jamais aucun.
+pub struct TempsRecycle {
+    pub user_ns: core::sync::atomic::AtomicU64,
+    pub noyau_ns: core::sync::atomic::AtomicU64,
+}
+
+impl TempsRecycle {
+    pub const fn neuf() -> Self {
+        Self {
+            user_ns: core::sync::atomic::AtomicU64::new(0),
+            noyau_ns: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }
 
 // Compile-time contract: Task and the registry may transfer/share Process

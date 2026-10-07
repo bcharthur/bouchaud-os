@@ -405,11 +405,26 @@ pub struct Mesure {
 /// Un cumul depuis le demarrage ne dit rien d'utile : au bout d'une minute,
 /// tout le monde a « beaucoup » de ticks. Ce qu'on veut lire, c'est ce qui s'est
 /// passe depuis la ligne precedente du journal.
-static mut MESURE_PRECEDENTE: Option<Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)>> = None;
-static mut MESURE_NS_PRECEDENT: u64 = 0;
-/// Runtime par TID au snapshot précédent, uniquement pour vérifier l'invariant
-/// qu'un thread ne peut consommer plus d'un CPU logique sur une fenêtre.
-static mut MESURE_TACHE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
+type CumulProcessus = (u32, u64, [u64; MAX_CPUS], u64, u64);
+
+/// La mesure precedente : instant de debut, cumuls par processus, runtime par
+/// TID (ce dernier sert a verifier qu'un fil ne consomme pas plus d'un CPU
+/// logique sur la fenetre).
+///
+/// BOUCHAUD_COMPTA_SEQLOCK_V1 -- sous verrou. C'etaient trois `static mut`,
+/// alors que `mesure_processus` a TROIS appelants concurrents (le fil des
+/// mesures, le gestionnaire de fenetres, la commande `ps`) : l'un pouvait
+/// liberer le vecteur pendant qu'un autre le clonait, et lire l'instant d'une
+/// passe avec les compteurs d'une autre. Le verrou ne couvre que la copie et
+/// le remplacement, jamais le parcours des taches.
+struct MesurePrecedente {
+    ns: u64,
+    cumuls: Vec<CumulProcessus>,
+    taches: Vec<(u32, u64)>,
+}
+
+static MESURE_PRECEDENTE: SpinLock<MesurePrecedente> =
+    SpinLock::new(MesurePrecedente { ns: 0, cumuls: Vec::new(), taches: Vec::new() });
 
 /// Mesure tous les processus vivants et remet les compteurs a la reference.
 ///
@@ -418,11 +433,13 @@ static mut MESURE_TACHE_PRECEDENTE: Option<Vec<(u32, u64)>> = None;
 /// qui depassent 100 % des que la machine dort.
 pub fn mesure_processus() -> (Vec<Mesure>, u64) {
     let now = crate::kernel::timer::monotonic_ns();
-    let previous_ns = unsafe { MESURE_NS_PRECEDENT };
+    let (previous_ns, precedents, previous_tasks) = {
+        let precedente = MESURE_PRECEDENTE.lock();
+        (precedente.ns, precedente.cumuls.clone(), precedente.taches.clone())
+    };
     let window = if previous_ns == 0 { now.max(1) } else { now.saturating_sub(previous_ns).max(1) };
-    let previous_tasks = unsafe { MESURE_TACHE_PRECEDENTE.clone().unwrap_or_default() };
     let mut current_tasks: Vec<(u32, u64)> = Vec::new();
-    let mut cumuls: Vec<(u32, u64, [u64; MAX_CPUS], u64, u64)> = Vec::new();
+    let mut cumuls: Vec<CumulProcessus> = Vec::new();
     let mut mesures: Vec<Mesure> = Vec::new();
 
     for task in tasks().iter() {
@@ -432,26 +449,36 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         let pid = task.process.pid;
         // Inclure la tranche actuellement en cours sans modifier le curseur :
         // le delta du prochain snapshot soustraira exactement ce même préfixe.
-        let live = if task.last_account_ns != 0 {
-            now.saturating_sub(task.last_account_ns.charge())
-        } else { 0 };
-        let runtime = task.user_cpu_ns.charge()
-            .saturating_add(task.kernel_cpu_ns.charge())
-            .saturating_add(live);
-        // Instantane du temps par coeur. Les cases sont atomiques ; on les
-        // recopie en valeurs pour le calcul qui suit.
-        let mut cpu_map_snapshot = [0u64; MAX_CPUS];
-        for cpu in 0..MAX_CPUS {
-            cpu_map_snapshot[cpu] = task.cpu_ns[cpu].charge();
-        }
-        if live != 0 && task.on_cpu >= 0 {
-            let cpu = task.on_cpu.charge() as usize;
+        // BOUCHAUD_COMPTA_SEQLOCK_V1 : curseur, compteurs et cases par coeur
+        // lus d'un seul tenant.
+        let lu = lecture_compta(task, now);
+        let live = lu.vivant;
+        let runtime = lu.user_ns.saturating_add(lu.noyau_ns).saturating_add(live);
+        let mut cpu_map_snapshot = lu.par_coeur;
+        if live != 0 && lu.coeur >= 0 {
+            let cpu = lu.coeur as usize;
             if cpu < MAX_CPUS { cpu_map_snapshot[cpu] = cpu_map_snapshot[cpu].saturating_add(live); }
         }
         if let Some((_, before)) = previous_tasks.iter().find(|(tid, _)| *tid == task.tid) {
             let delta = runtime.saturating_sub(*before);
-            debug_assert!(delta <= window.saturating_add(1_000_000),
-                "task: runtime > fenêtre tid={} delta={} window={}", task.tid, delta, window);
+            // BOUCHAUD_COMPTA_SEQLOCK_V1 -- la borne, demontree.
+            //
+            // Notons C(t) le temps CPU reel de la tache jusqu'a t, now(k) le
+            // debut de la passe k, lu(k) l'instant ou CETTE tache vient d'etre
+            // lue (lu(k) >= now(k)), e l'ecart d'horloge entre deux coeurs.
+            // La lecture est coherente (sequence) ; elle rend
+            //   R(k) <= C(lu(k)) + e   (un repli posterieur a now(k) est vu)
+            //   R(k) >= C(now(k)) - e  (sinon la tranche vive est ajoutee).
+            // Donc R(k) - R(k-1) <= lu(k) - now(k-1) + 2e : un fil ne peut pas
+            // consommer plus de temps CPU qu'il ne s'ecoule de temps mur.
+            // `window` seule (now(k) - now(k-1)) oubliait lu(k) - now(k), la
+            // duree du parcours de la table -- que l'hote KVM peut allonger
+            // en suspendant le vCPU. La marge de 1 ms ne couvre plus que 2e.
+            // Un tid recycle entre deux passes a vecu moins que la fenetre :
+            // la borne vaut aussi pour lui.
+            let borne = crate::kernel::timer::monotonic_ns().saturating_sub(previous_ns);
+            debug_assert!(delta <= borne.saturating_add(1_000_000),
+                "task: runtime > fenêtre tid={} delta={} borne={} window={}", task.tid, delta, borne, window);
         }
         current_tasks.push((task.tid, runtime));
         match cumuls.iter_mut().find(|(autre, _, _, _, _)| *autre == pid) {
@@ -509,14 +536,6 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         current_tasks.len(),
     ));
 
-    let precedents = unsafe {
-        let pointeur = &raw mut MESURE_PRECEDENTE;
-        if (*pointeur).is_none() {
-            *pointeur = Some(Vec::new());
-        }
-        (*pointeur).as_ref().unwrap().clone()
-    };
-
     for mesure in mesures.iter_mut() {
         let cumul = cumuls
             .iter()
@@ -548,10 +567,13 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
         mesure.context_switches = current_switches.saturating_sub(previous_switches);
     }
 
-    unsafe {
-        MESURE_PRECEDENTE = Some(cumuls);
-        MESURE_TACHE_PRECEDENTE = Some(current_tasks);
-        MESURE_NS_PRECEDENT = now;
+    {
+        // Une passe plus ancienne qui finit apres une plus recente ne la
+        // remplace pas : la reference ne recule jamais.
+        let mut precedente = MESURE_PRECEDENTE.lock();
+        if now >= precedente.ns {
+            *precedente = MesurePrecedente { ns: now, cumuls, taches: current_tasks };
+        }
     }
     // Vue processus: 100% représente un CPU logique complet; un processus
     // multithread peut donc atteindre N*100%. La topbar conserve séparément
@@ -590,17 +612,112 @@ pub struct ProcProcessusCumul {
 
 /// Derniers totaux rendus par `proc_cpu_cumul`, pour attraper un recul a
 /// l'instant ou il se produit plutot qu'a la relecture.
+/// Dernier releve de `/proc/stat`, pour photographier un recul.
+///
+/// Deux lecteurs concurrents se croisaient sur les deux `swap` : le plus
+/// ANCIEN, fini le dernier, se faisait passer pour un recul (`PROC_STAT_RECUL`
+/// de 0,5 ms, sonde compta-stress, deux lecteurs de /proc/stat). Un releve
+/// plus ancien que le dernier connu (`DERNIER_CUMUL_INSTANT`, `fetch_max`)
+/// ne compare ni n'ecrit plus rien. Sans verrou : `proc_cpu_cumul` est
+/// appelee sur le chemin de sortie, qui tient deja `process.lifecycle`
+/// (`verifie-sondes-sans-verrou.py`). Reste une fenetre etroite entre deux
+/// lecteurs presque simultanes ; c'est un diagnostic, la valeur rendue ne
+/// depend pas de lui.
+static DERNIER_CUMUL_INSTANT: AtomicU64 = AtomicU64::new(0);
 static DERNIER_CUMUL_USER_NS: AtomicU64 = AtomicU64::new(0);
 static DERNIER_CUMUL_SYS_NS: AtomicU64 = AtomicU64::new(0);
 
-#[inline]
-fn temps_vivant(task: &Task, now: u64) -> u64 {
-    if task.last_account_ns != 0 && task.on_cpu >= 0 {
-        now.saturating_sub(task.last_account_ns.charge())
-    } else {
-        0
+/// Comptabilite CPU d'une tache, lue d'un seul tenant.
+///
+/// BOUCHAUD_COMPTA_SEQLOCK_V1
+struct LectureCompta {
+    user_ns: u64,
+    noyau_ns: u64,
+    /// Tranche en cours, pas encore imputee (0 hors processeur), et son
+    /// partage exact entre utilisateur et noyau.
+    vivant: u64,
+    vivant_user: u64,
+    vivant_noyau: u64,
+    coeur: i8,
+    par_coeur: [u64; MAX_CPUS],
+}
+
+/// Lit la comptabilite d'une tache sous sa sequence (`compta_seq`).
+///
+/// Les champs sont atomiques un a un, pas ensemble : lu au mauvais instant,
+/// un curseur ancien et des compteurs deja credites de la tranche comptent
+/// cette tranche deux fois (run 37589903681 : `mesure_processus` a pris
+/// 35,8 ms pour une fenetre de 33,0 ms, et l'assertion a panique le noyau).
+///
+/// Protocole (voir `compta_section`) : sequence lue, relue si impaire ; tous
+/// les champs ; `fence(Acquire)` ; sequence relue ; la lecture n'est acceptee
+/// que si les deux valeurs sont egales et paires. La tranche vive est prise
+/// dans le bloc par CPU du coeur de la tache, sous la sequence de ce coeur
+/// (frontieres d'appel systeme) ET sous celle de la tache (commutation,
+/// repli) : c'est le meme calcul que `account_until`, donc le meme partage
+/// utilisateur/noyau que le repli fera.
+///
+/// La relecture n'est PAS bornee. Une borne rendrait, au bout du compte, la
+/// lecture dechiree qu'on cherche a eviter -- et sous KVM l'hote peut
+/// suspendre le vCPU ecrivain des millisecondes, bien plus qu'un nombre fixe
+/// d'essais. L'attente se termine toujours : les sections masquent les
+/// interruptions et ne contiennent aucune attente, et aucun lecteur ne tourne
+/// en contexte d'interruption. Une attente anormalement longue est signalee
+/// une fois (`[COMPTA] LECTEUR_ATTEND`).
+fn lecture_compta(task: &Task, now: u64) -> LectureCompta {
+    let mut essais = 0u64;
+    loop {
+        let avant = task.compta_seq.charge();
+        if avant & 1 == 0 {
+            let curseur = task.last_account_ns.charge();
+            let coeur = task.on_cpu.charge();
+            let user_ns = task.user_cpu_ns.charge();
+            let noyau_ns = task.kernel_cpu_ns.charge();
+            let mut par_coeur = [0u64; MAX_CPUS];
+            for cpu in 0..MAX_CPUS {
+                par_coeur[cpu] = task.cpu_ns[cpu].charge();
+            }
+            let (mut vivant_user, mut vivant_noyau) = (0u64, 0u64);
+            let mut bloc_coherent = true;
+            if curseur != 0 && coeur >= 0 && (coeur as usize) < MAX_CPUS {
+                let c = coeur as usize;
+                let b1 = COMPTA_SEQ_CPU[c].load(Ordering::Acquire);
+                let acc_user = COMPTA_USER_NS[c].load(Ordering::Relaxed);
+                let acc_noyau = COMPTA_NOYAU_NS[c].load(Ordering::Relaxed);
+                let debut = COMPTA_DEBUT_NS[c].load(Ordering::Relaxed);
+                let en_noyau = COMPTA_EN_NOYAU[c].load(Ordering::Relaxed);
+                core::sync::atomic::fence(Ordering::Acquire);
+                let b2 = COMPTA_SEQ_CPU[c].load(Ordering::Relaxed);
+                bloc_coherent = b1 & 1 == 0 && b1 == b2;
+                let fragment = if debut != 0 { now.saturating_sub(debut) } else { 0 };
+                vivant_user = acc_user.saturating_add(if en_noyau { 0 } else { fragment });
+                vivant_noyau = acc_noyau.saturating_add(if en_noyau { fragment } else { 0 });
+            }
+            core::sync::atomic::fence(Ordering::Acquire);
+            if bloc_coherent && task.compta_seq.charge() == avant {
+                LECTURES_COMPTA_RELUES.fetch_add(essais.min(1), Ordering::Relaxed);
+                return LectureCompta {
+                    user_ns,
+                    noyau_ns,
+                    vivant: vivant_user.saturating_add(vivant_noyau),
+                    vivant_user,
+                    vivant_noyau,
+                    coeur,
+                    par_coeur,
+                };
+            }
+        }
+        essais += 1;
+        if essais == 1 << 24 {
+            crate::serial_println!("[COMPTA] LECTEUR_ATTEND tid={} seq={}", task.tid, avant);
+        }
+        core::hint::spin_loop();
     }
 }
+
+/// Lectures qui ont du etre refaites : une section d'ecriture etait en cours.
+/// Non nul prouve que la course existe ; c'etait la panique avant le verrou.
+static LECTURES_COMPTA_RELUES: AtomicU64 = AtomicU64::new(0);
 
 /// Ce que la somme des taches VIVANTES aurait rendu.
 ///
@@ -641,6 +758,12 @@ pub fn proc_cpu_compteurs() -> (u64, u64) {
     (user_ns, system_ns)
 }
 
+/// Lectures de comptabilite refaites parce qu'une section d'ecriture etait
+/// en cours (BOUCHAUD_COMPTA_SEQLOCK_V1).
+pub fn lectures_compta_relues() -> u64 {
+    LECTURES_COMPTA_RELUES.load(Ordering::Relaxed)
+}
+
 /// Combien de fois `user + system` a depasse la capacite, et de combien.
 pub fn proc_depassements() -> (u64, u64) {
     (
@@ -657,13 +780,9 @@ pub fn proc_cpu_somme_vivants() -> (u64, u64) {
         if task.state == TaskState::Zombie {
             continue;
         }
-        let live = temps_vivant(task, now);
-        user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
-        system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
-        if live != 0 {
-            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
-            else { user_ns = user_ns.saturating_add(live); }
-        }
+        let lu = lecture_compta(task, now);
+        user_ns = user_ns.saturating_add(lu.user_ns).saturating_add(lu.vivant_user);
+        system_ns = system_ns.saturating_add(lu.noyau_ns).saturating_add(lu.vivant_noyau);
     }
     (user_ns, system_ns)
 }
@@ -717,64 +836,89 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
     // Les compteurs par processeur, eux, sont alimentes au moment ou le temps
     // est impute et rien ne les diminue : ils sont cumulatifs PAR
     // CONSTRUCTION, sans dependre de qui est encore en vie.
+    //
+    // BOUCHAUD_COMPTA_SEQLOCK_V1 -- cumul ET tranche vive, PAR COEUR, d'un
+    // seul tenant.
+    //
+    // Les cumuls etaient lus d'abord, les tranches vives ensuite en
+    // parcourant les taches (C75). Un repli entre les deux sortait une
+    // tranche de l'une sans l'avoir encore mise dans l'autre : le total
+    // plongeait, puis rattrapait d'un coup -- la sonde compta-stress mesurait
+    // 11 a 20 ticks en 15 ms sur 4 coeurs, au-dela de 4 x 15 ms.
+    //
+    // Le cumul d'un coeur et sa tranche vive (le bloc par CPU) sont
+    // complementaires : le repli fait passer exactement l'un dans l'autre, et
+    // tout ecrivain de l'un ou de l'autre tient `COMPTA_SEQ_CPU` de ce coeur
+    // (sections de tache et frontieres d'appel systeme). Lus sous cette
+    // sequence, ils donnent un total exact a l'instant de la lecture. Un coeur
+    // inactif a son bloc desarme (`COMPTA_DEBUT_NS` nul) : rien de vif.
     let mut user_ns = 0u64;
     let mut system_ns = 0u64;
-    for cpu in 0..MAX_CPUS {
-        user_ns = user_ns.saturating_add(CUMUL_USER_NS[cpu].load(Ordering::Relaxed));
-        system_ns = system_ns.saturating_add(CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed));
-    }
-    // BOUCHAUD_C75_D_OU_VIENT_LE_RECUL
-    //
-    // Les cumuls viennent d'etre lus ; les tranches VIVES le sont juste
-    // apres. Entre les deux, un repli concurrent (`account_until`) deplace
-    // une tranche de `live` vers `CUMUL`. Lue ainsi, elle n'est comptee NI
-    // dans les cumuls -- trop tot -- NI dans les tranches -- deja repliee.
-    //
-    // C'est une hypothese, et ce bloc existe pour la trancher au lieu de la
-    // supposer : on retient separement ce que chaque moitie apporte, et le
-    // plus gros contributeur vif. Quand un recul survient, la ligne dit
-    // laquelle des deux a bouge.
-    let cumul_user_seul = user_ns;
-    let cumul_sys_seul = system_ns;
+    let mut cumul_user_seul = 0u64;
+    let mut cumul_sys_seul = 0u64;
     let mut live_user = 0u64;
     let mut live_sys = 0u64;
     let mut pire_live = 0u64;
-    let mut pire_tid = 0u32;
-    let mut pire_pid = 0u32;
+    let mut pire_coeur = usize::MAX;
     let mut pire_noyau = false;
-
-    // La tranche EN COURS n'est pas encore repliee dans les cumuls : sans
-    // elle, `/proc/stat` avancerait par a-coups au rythme des commutations.
-    for task in tasks().iter() {
-        if task.state == TaskState::Zombie {
-            continue;
-        }
-        let live = temps_vivant(task, now);
-        if live != 0 {
-            if live > pire_live {
-                pire_live = live;
-                pire_tid = task.tid;
-                pire_pid = task.process.pid;
-                pire_noyau = task.in_kernel.charge();
+    for cpu in 0..MAX_CPUS {
+        let (cu, cn, vu, vn) = loop {
+            let s1 = COMPTA_SEQ_CPU[cpu].load(Ordering::Acquire);
+            if s1 & 1 != 0 {
+                core::hint::spin_loop();
+                continue;
             }
-            if task.in_kernel.charge() {
-                system_ns = system_ns.saturating_add(live);
-                live_sys = live_sys.saturating_add(live);
-            } else {
-                user_ns = user_ns.saturating_add(live);
-                live_user = live_user.saturating_add(live);
+            let cu = CUMUL_USER_NS[cpu].load(Ordering::Relaxed);
+            let cn = CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed);
+            let acc_user = COMPTA_USER_NS[cpu].load(Ordering::Relaxed);
+            let acc_noyau = COMPTA_NOYAU_NS[cpu].load(Ordering::Relaxed);
+            let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+            let en_noyau = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
+            core::sync::atomic::fence(Ordering::Acquire);
+            if COMPTA_SEQ_CPU[cpu].load(Ordering::Relaxed) != s1 {
+                core::hint::spin_loop();
+                continue;
             }
+            let fragment = if debut != 0 { now.saturating_sub(debut) } else { 0 };
+            let vu = acc_user.saturating_add(if en_noyau { 0 } else { fragment });
+            let vn = acc_noyau.saturating_add(if en_noyau { fragment } else { 0 });
+            break (cu, cn, vu, vn);
+        };
+        cumul_user_seul = cumul_user_seul.saturating_add(cu);
+        cumul_sys_seul = cumul_sys_seul.saturating_add(cn);
+        live_user = live_user.saturating_add(vu);
+        live_sys = live_sys.saturating_add(vn);
+        let vif = vu.saturating_add(vn);
+        if vif > pire_live {
+            pire_live = vif;
+            pire_coeur = cpu;
+            pire_noyau = vn > vu;
         }
     }
+    user_ns = user_ns.saturating_add(cumul_user_seul).saturating_add(live_user);
+    system_ns = system_ns.saturating_add(cumul_sys_seul).saturating_add(live_sys);
+    // Pour le diagnostic seulement : qui tient la plus grosse tranche vive.
+    let (pire_tid, pire_pid) = if pire_coeur < MAX_CPUS {
+        let index = CURRENT[pire_coeur].load(Ordering::Acquire);
+        tasks().get(index).map_or((0, 0), |t| (t.tid, t.process.pid))
+    } else {
+        (0, 0)
+    };
 
     // LE RECUL SE PHOTOGRAPHIE AU MOMENT OU IL SE PRODUIT.
     //
     // Le banc `run_proc_stat_monotone.sh` le detecte a la relecture, quand
     // l'etat qui l'expliquait a disparu. Ici, tout est encore la.
     {
-        let avant_user = DERNIER_CUMUL_USER_NS.swap(user_ns, Ordering::Relaxed);
-        let avant_sys = DERNIER_CUMUL_SYS_NS.swap(system_ns, Ordering::Relaxed);
-        if user_ns < avant_user || system_ns < avant_sys {
+        let (avant_user, avant_sys, plus_recent) =
+            if DERNIER_CUMUL_INSTANT.fetch_max(now, Ordering::AcqRel) <= now {
+                let avant_user = DERNIER_CUMUL_USER_NS.swap(user_ns, Ordering::AcqRel);
+                let avant_sys = DERNIER_CUMUL_SYS_NS.swap(system_ns, Ordering::AcqRel);
+                (avant_user, avant_sys, DERNIER_CUMUL_INSTANT.load(Ordering::Acquire) == now)
+            } else {
+                (0, 0, false)
+            };
+        if plus_recent && (user_ns < avant_user || system_ns < avant_sys) {
             crate::serial_println!(
                 "PROC_STAT_RECUL t_ns={} user_ns={} avant_user_ns={} \
 sys_ns={} avant_sys_ns={} cumul_user={} cumul_sys={} live_user={} live_sys={} \
@@ -845,36 +989,43 @@ pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
     //
     // Un thread zombie d'un processus vivant porte des compteurs DEFINITIFS :
     // sa tranche a ete repliee par `account_slice_end` a sa derniere
-    // commutation. Les compter est juste. `temps_vivant` rend deja zero pour
+    // commutation. Les compter est juste. `lecture_compta` rend deja zero pour
     // une tache hors processeur, donc aucune tranche en vol n'est ajoutee
     // deux fois.
     //
-    // Ce qui reste perdu, et qui n'est PAS corrige ici : un emplacement
-    // RECYCLE ecrase l'incarnation precedente. `TEMPS_RECYCLE_NS` chiffre
-    // cette perte globalement. Le total par processus reste donc un minorant,
-    // mais il ne recule plus.
+    // Un emplacement RECYCLE ecrase l'incarnation precedente : ses compteurs
+    // sont verses avant a `Process::temps_recycle` (BOUCHAUD_COMPTA_SEQLOCK_V1),
+    // ajoute ci-dessous. Le total par processus ne perd donc plus rien.
     for task in tasks().iter() {
         if task.process.pid != pid {
             continue;
         }
         if processus.is_none() {
             processus = Some(Arc::clone(&task.process));
+            // Les fils deja recycles, lus sous le MEME garde de registre que
+            // le parcours : aucun recyclage ne peut s'intercaler.
+            user_ns = user_ns.saturating_add(task.process.temps_recycle.user_ns.load(Ordering::Relaxed));
+            system_ns = system_ns.saturating_add(task.process.temps_recycle.noyau_ns.load(Ordering::Relaxed));
         }
         if task.state == TaskState::Zombie {
             zombies += 1;
-            user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
-            system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
+            // Une tache qui vient de passer `Zombie` d'elle-meme est encore
+            // sur son coeur, sa derniere tranche pas repliee
+            // (`meurt_soi_meme`) : lue brute, le total plongeait puis
+            // rattrapait au repli (sonde compta-stress : 7 ticks en 8 ms pour
+            // un processus de 4 fils). La lecture sous sequence ajoute cette
+            // tranche tant qu'elle est vive.
+            let lu = lecture_compta(task, now);
+            user_ns = user_ns.saturating_add(lu.user_ns).saturating_add(lu.vivant_user);
+            system_ns = system_ns.saturating_add(lu.noyau_ns).saturating_add(lu.vivant_noyau);
             continue;
         }
         threads += 1;
         executable |= task.state == TaskState::Ready || task.on_cpu >= 0;
-        let live = temps_vivant(task, now);
-        user_ns = user_ns.saturating_add(task.user_cpu_ns.charge());
-        system_ns = system_ns.saturating_add(task.kernel_cpu_ns.charge());
-        if live != 0 {
-            if task.in_kernel.charge() { system_ns = system_ns.saturating_add(live); }
-            else { user_ns = user_ns.saturating_add(live); }
-        }
+        // BOUCHAUD_COMPTA_SEQLOCK_V1 : meme lecture d'un seul tenant.
+        let lu = lecture_compta(task, now);
+        user_ns = user_ns.saturating_add(lu.user_ns).saturating_add(lu.vivant_user);
+        system_ns = system_ns.saturating_add(lu.noyau_ns).saturating_add(lu.vivant_noyau);
     }
 
     let processus = processus?;

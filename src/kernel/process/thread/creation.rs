@@ -32,6 +32,7 @@ impl Task {
             slice_start_ns: EcheanceAtomique::neuf(0),
             ready_since_ns: EcheanceAtomique::neuf(0),
             last_account_ns: EcheanceAtomique::neuf(0),
+            compta_seq: EcheanceAtomique::neuf(0),
             user_cpu_ns: EcheanceAtomique::neuf(0),
             kernel_cpu_ns: EcheanceAtomique::neuf(0),
             cpu_ns: [const { EcheanceAtomique::neuf(0) }; MAX_CPUS],

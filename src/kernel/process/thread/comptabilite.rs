@@ -1,9 +1,71 @@
+/// BOUCHAUD_COMPTA_SEQLOCK_V1 -- section d'ecriture de la comptabilite CPU.
+///
+/// Run 37589903681 (KVM) : panique « task: runtime > fenetre tid=118
+/// delta=35786689 window=33031990 ». `mesure_processus` lisait
+/// `last_account_ns` (ancien) puis les compteurs (deja credites de la
+/// tranche) : la tranche comptait deux fois. Chaque champ est atomique, leur
+/// ensemble ne l'etait pas.
+///
+/// La sequence `compta_seq` est impaire pendant la section ; un lecteur
+/// (`lecture_compta`) relit tant qu'il la voit impaire ou changee.
+///
+/// UN SEUL ECRIVAIN, par construction :
+///   * toute section porte sur la tache COURANTE du coeur qui l'execute
+///     (`account_slice_end` a la commutation, au repli d'idle et a l'abandon ;
+///     `finalise_task_running` apres la revendication CAS de `on_cpu` ;
+///     `rearme_compta_apres_idle`). Deux coeurs ne peuvent pas tenir la meme
+///     tache : `on_cpu` passe de -1 a un coeur par compare-exchange, et ne
+///     revient a -1 qu'APRES `account_slice_end` ;
+///   * le meme coeur ne peut pas s'interrompre lui-meme au milieu : la section
+///     masque les interruptions. Sans cela, `attends_interruption` (qui
+///     replie avec IF=1) pouvait etre preemptee par le minuteur, dont
+///     `account_slice_end` ouvrait une seconde section imbriquee sur la meme
+///     tache -- la sequence redevenait paire en pleine ecriture ;
+///   * migration, reveil distant, signal, recolte d'un zombie, recyclage
+///     d'emplacement : aucun n'ecrit ces champs (verifie par
+///     `tools/verifie-compta-seqlock.py`).
+///
+/// La section couvre aussi le bloc par CPU (`COMPTA_DEBUT_NS`,
+/// `COMPTA_USER_NS`, `COMPTA_NOYAU_NS`, `COMPTA_EN_NOYAU`) du coeur de la
+/// tache tant qu'elle y est installee ; les frontieres d'appel systeme
+/// (`frontiere_compta`), qui ne connaissent pas la tache, l'ecrivent sous la
+/// sequence du coeur (`COMPTA_SEQ_CPU`). Le lecteur y prend
+/// le partage utilisateur/noyau de la tranche vive ; sans cela il attribuait
+/// toute la tranche au cote de `in_kernel` -- perime depuis le dernier repli
+/// -- et `utime` reculait au repli suivant (sonde compta-stress, QEMU :
+/// « utime=6<-8 stime=12<-7 »).
+///
+/// Ces champs-la sont `Relaxed` : les barrieres encadrent les donnees
+/// (ecrivain : ouverture, `fence(Release)`, donnees ; lecteur : donnees,
+/// `fence(Acquire)`, seconde lecture de la sequence).
+///
+/// L'assertion de parite attrape tout ecrivain qui violerait ces regles.
+#[inline]
+fn compta_section<R>(task: &Task, corps: impl FnOnce() -> R) -> R {
+    interrupts::without_interrupts(|| {
+        let seq = task.compta_seq.charge();
+        debug_assert!(seq & 1 == 0, "compta: ecrivain concurrent tid={} seq={}", task.tid, seq);
+        // Le coeur local : celui de la tache, seul a ecrire son bloc et ses
+        // cumuls (`CUMUL_USER_NS`, `CUMUL_NOYAU_NS`), lus sous cette sequence
+        // par `proc_cpu_cumul`.
+        let cpu = local_cpu();
+        let seq_cpu = COMPTA_SEQ_CPU[cpu].load(Ordering::Relaxed);
+        debug_assert!(seq_cpu & 1 == 0, "compta: section imbriquee cpu={} seq={}", cpu, seq_cpu);
+        task.compta_seq.range(seq.wrapping_add(1));
+        COMPTA_SEQ_CPU[cpu].store(seq_cpu.wrapping_add(1), Ordering::Relaxed);
+        core::sync::atomic::fence(Ordering::Release);
+        let rendu = corps();
+        COMPTA_SEQ_CPU[cpu].store(seq_cpu.wrapping_add(2), Ordering::Release);
+        task.compta_seq.range(seq.wrapping_add(2));
+        rendu
+    })
+}
+
 /// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
 ///
 /// Toutes les frontières (syscall, préemption, blocage) utilisent le même
 /// curseur. Une seconde frontière au même instant voit donc un delta nul au
-/// lieu de recompter la tranche précédente.
-// Ne touche plus que des atomiques : une reference partagee suffit.
+/// lieu de recompter la tranche précédente. A appeler dans `compta_section`.
 fn account_until(task: &Task, now: u64) {
     if task.last_account_ns == 0 {
         return;
@@ -310,27 +372,32 @@ fn rearme_compta_apres_idle() {
     let Some(task) = table.get(index) else {
         return;
     };
-    task.last_account_ns.range(now);
-    task.slice_start_ns.range(now);
-    let en_noyau = task.in_kernel.charge();
-    COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
-    COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
-    COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
-    COMPTA_EN_NOYAU[cpu].store(en_noyau, Ordering::Relaxed);
+    compta_section(task, || {
+        task.last_account_ns.range(now);
+        task.slice_start_ns.range(now);
+        COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+        COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_EN_NOYAU[cpu].store(task.in_kernel.charge(), Ordering::Relaxed);
+    });
 }
 
 fn account_slice_end(task: &Task) {
     let now = crate::kernel::timer::monotonic_ns();
-    account_until(task, now);
-    task.last_account_ns.range(0);
-    task.slice_start_ns.range(0);
-    // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon le
-    // premier repli de la tache SUIVANTE lui attribuerait le temps passe entre
-    // les deux.
-    let cpu = local_cpu();
-    COMPTA_DEBUT_NS[cpu].store(0, Ordering::Relaxed);
-    COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
-    COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+    // Une seule section : la tranche close ET le curseur remis a zero. Un
+    // lecteur entre les deux compterait sinon du temps hors processeur.
+    compta_section(task, || {
+        account_until(task, now);
+        task.last_account_ns.range(0);
+        task.slice_start_ns.range(0);
+        // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon
+        // le premier repli de la tache SUIVANTE lui attribuerait le temps
+        // passe entre les deux.
+        let cpu = local_cpu();
+        COMPTA_DEBUT_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+    });
 }
 
 /// Frontières syscall utilisées pour séparer user/kernel sans dépendre du PIT.
@@ -412,22 +479,36 @@ pub fn account_fault_exit(avant: MurAvantFaute) {
 /// fautes de page s'en servent pour restaurer au lieu d'ecraser.
 fn frontiere_compta(vers_noyau: bool) -> bool {
     interrupts::without_interrupts(|| {
+        // BOUCHAUD_COMPTA_SEQLOCK_V1 : le bloc se lit sous la sequence de SON
+        // coeur (`COMPTA_SEQ_CPU`). Ce coeur en est le seul ecrivain, IRQ
+        // masquees ; rien d'autre qu'un compteur local n'est touche ici.
         let cpu = local_cpu();
-        let now = crate::kernel::timer::monotonic_ns();
-        let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
-        let avant = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
-        if debut != 0 {
-            let ecoule = now.saturating_sub(debut);
-            if avant {
-                COMPTA_NOYAU_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
-            } else {
-                COMPTA_USER_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
-            }
-            COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
-        }
-        COMPTA_EN_NOYAU[cpu].store(vers_noyau, Ordering::Relaxed);
+        let seq = COMPTA_SEQ_CPU[cpu].load(Ordering::Relaxed);
+        debug_assert!(seq & 1 == 0, "compta: frontiere dans une section cpu={} seq={}", cpu, seq);
+        COMPTA_SEQ_CPU[cpu].store(seq.wrapping_add(1), Ordering::Relaxed);
+        core::sync::atomic::fence(Ordering::Release);
+        let avant = frontiere_compta_bloc(vers_noyau);
+        COMPTA_SEQ_CPU[cpu].store(seq.wrapping_add(2), Ordering::Release);
         avant
     })
+}
+
+fn frontiere_compta_bloc(vers_noyau: bool) -> bool {
+    let cpu = local_cpu();
+    let now = crate::kernel::timer::monotonic_ns();
+    let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+    let avant = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
+    if debut != 0 {
+        let ecoule = now.saturating_sub(debut);
+        if avant {
+            COMPTA_NOYAU_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
+        } else {
+            COMPTA_USER_NS[cpu].fetch_add(ecoule, Ordering::Relaxed);
+        }
+        COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+    }
+    COMPTA_EN_NOYAU[cpu].store(vers_noyau, Ordering::Relaxed);
+    avant
 }
 
 pub fn account_resume_user_noreturn() {

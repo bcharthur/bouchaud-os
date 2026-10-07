@@ -658,6 +658,20 @@ fn registre_ajoute_sous_ecriture(
                 .saturating_add(ancienne.kernel_cpu_ns.charge()),
             Ordering::Relaxed,
         );
+        // Et au processus : son total ne doit pas reculer pour autant
+        // (BOUCHAUD_COMPTA_SEQLOCK_V1, voir `TempsRecycle`). Un fil recycle
+        // est mort : sa derniere tranche est repliee, ses compteurs ne
+        // bougent plus.
+        ancienne
+            .process
+            .temps_recycle
+            .user_ns
+            .fetch_add(ancienne.user_cpu_ns.charge(), Ordering::Relaxed);
+        ancienne
+            .process
+            .temps_recycle
+            .noyau_ns
+            .fetch_add(ancienne.kernel_cpu_ns.charge(), Ordering::Relaxed);
         // La generation d'abord : a partir d'ici, toute identite ancienne est
         // refusee, et personne ne peut plus prendre cet emplacement pour
         // l'ancienne tache.

@@ -625,12 +625,13 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     crate::serial_println!(
-        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={}",
+        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={}",
         (crate::kernel::timer::monotonic_ns() / 1_000_000)
             .saturating_mul(c.online as u64),
         (c.user_ns.saturating_add(c.system_ns)) / 1_000_000,
         depassements,
         pire / 1_000_000,
+        crate::kernel::task::lectures_compta_relues(),
     );
 }
 

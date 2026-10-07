@@ -112,6 +112,11 @@ pub static DEPASSEMENT_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 static COMPTA_USER_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_NOYAU_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static COMPTA_EN_NOYAU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// BOUCHAUD_COMPTA_SEQLOCK_V1 : sequence du bloc ci-dessus ET des cumuls
+/// `CUMUL_USER_NS` / `CUMUL_NOYAU_NS` de ce coeur, impaire pendant leur mise
+/// a jour (frontieres d'appel systeme, sections de tache). Un seul ecrivain :
+/// le coeur lui-meme, interruptions masquees.
+static COMPTA_SEQ_CPU: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// « Une tache qui etait sur ce CPU vient d'etre marquee zombie. »
 ///
