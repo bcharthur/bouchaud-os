@@ -93,6 +93,8 @@ done
 # BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
 # course a eu lieu), lu sur le dernier releve du noyau.
 awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
+# BOUCHAUD_GS_NOYAU_EN_IRQ_V1 : recalculs de l'identite du coeur par CPUID.
+awk 'match($0, /replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "replis_apic=absent") }' "$LOG"
 if grep -aq 'KERNEL PANIC' "$LOG"; then echo "panique noyau" >&2; exit 1; fi
 if grep -aqE "ata: (lecture|ecriture) " "$LOG"; then
   echo "Le pilote ATA a signale au moins une commande en echec" >&2

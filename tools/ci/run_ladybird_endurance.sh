@@ -147,6 +147,12 @@ done
 echo "== tendance RSS par processus (pente de la seconde moitie de vie) =="
 python3 tools/ci/tendance_rss.py "$P" --min-releves 10 | sed 's/^/  /'
 
+# Compteurs noyau du dernier releve : lectures de comptabilite refaites
+# (BOUCHAUD_COMPTA_SEQLOCK_V1) et recalculs de l'identite du coeur par CPUID
+# (BOUCHAUD_GS_NOYAU_EN_IRQ_V1). Affichage seulement.
+echo "== compteurs noyau (dernier [PROC-STAT]) =="
+awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
+
 echo "== verdict =="
 echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }

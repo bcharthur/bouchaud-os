@@ -62,8 +62,9 @@ pub fn per_cpu_for(cpu: usize) -> &'static mut PerCpu {
 /// valeur userland entre deux `swapgs`, ou la preuve qu'une entree noyau a
 /// oublie sa bascule. La convertir silencieusement en zero ferait partager les
 /// tableaux per-CPU du BSP a un AP.
-pub fn cpu_index_from_gs() -> Option<usize> {
-    let base = read_msr(MSR_GS_BASE) as usize;
+/// Le slot PER_CPU que designe `base`, s'il en designe un (adresse alignee
+/// dans le tableau, `cpu_index` publie coherent).
+fn slot_designe(base: usize) -> Option<usize> {
     if base == 0 {
         return None;
     }
@@ -75,9 +76,29 @@ pub fn cpu_index_from_gs() -> Option<usize> {
     }
     let index = (base - debut) / taille;
     let publie = unsafe { (*(base as *const PerCpu)).cpu_index as usize };
-    if publie != index {
+    (publie == index).then_some(index)
+}
+
+pub fn cpu_index_from_gs() -> Option<usize> {
+    let base = read_msr(MSR_GS_BASE) as usize;
+    let Some(index) = slot_designe(base) else {
+        // BOUCHAUD_GS_NOYAU_EN_IRQ_V1 : une interruption prise en mode
+        // utilisateur n'execute pas `swapgs` (seules les exceptions le font,
+        // `GsGuard`) : GS_BASE porte alors la valeur utilisateur (0) et le
+        // slot noyau de CE coeur est dans KERNEL_GS_BASE -- c'est `swapgs`
+        // qui les echange. Chaque tick du minuteur en mode utilisateur
+        // retombait ainsi sur `hardware_apic_id()`, une dizaine de CPUID
+        // (endurance, run 37622716750 : coeurs echantillonnes dans
+        // `usermode::cpu_index` -> `or_else` -> `topology_from_leaf`). On ne
+        // s'y fie que si ce slot a deja ete confirme par son coeur.
+        let noyau = read_msr(MSR_KERNEL_GS_BASE) as usize;
+        if let Some(index) = slot_designe(noyau) {
+            if unsafe { (*(noyau as *const PerCpu)).gs_verifie } == 1 {
+                return Some(index);
+            }
+        }
         return None;
-    }
+    };
     // BOUCHAUD_GS_VERIFIE_UNE_FOIS_V1 : slot deja confirme par SON coeur.
     //
     // La confirmation ci-dessous coutait `hardware_apic_id()` -- `detect_topology`,
@@ -118,19 +139,13 @@ pub fn cpu_index_from_gs() -> Option<usize> {
 /// `init_cpu` et des enregistrements BSP/AP (l'ordre des deux varie selon
 /// le chemin d'amorcage) ; le BSP se verifie avant le demarrage des AP.
 pub fn verifie_gs_courant() {
-    let base = read_msr(MSR_GS_BASE) as usize;
-    let debut = core::ptr::addr_of_mut!(PER_CPU) as *mut PerCpu as usize;
-    let taille = core::mem::size_of::<PerCpu>();
-    let fin = debut.saturating_add(taille.saturating_mul(smp::MAX_CPUS));
-    if base == 0 || base < debut || base >= fin || (base - debut) % taille != 0 {
+    let Some(index) = slot_designe(read_msr(MSR_GS_BASE) as usize) else {
         return;
-    }
-    let index = (base - debut) / taille;
+    };
     let Some(materiel) = cpu_local::logical_for_apic(cpu_local::hardware_apic_id()) else {
         return;
     };
-    let slot = per_cpu_for(index);
-    slot.gs_verifie = if materiel.as_usize() == index && slot.cpu_index as usize == index { 1 } else { 0 };
+    per_cpu_for(index).gs_verifie = if materiel.as_usize() == index { 1 } else { 0 };
 }
 
 pub fn per_cpu() -> &'static mut PerCpu {
@@ -138,9 +153,20 @@ pub fn per_cpu() -> &'static mut PerCpu {
 }
 pub fn cpu_index() -> usize {
     cpu_index_from_gs()
-        .or_else(|| cpu_local::logical_for_apic(cpu_local::hardware_apic_id()).map(|id| id.as_usize()))
+        .or_else(|| {
+            REPLIS_APIC.fetch_add(1, Ordering::Relaxed);
+            cpu_local::logical_for_apic(cpu_local::hardware_apic_id()).map(|id| id.as_usize())
+        })
         .unwrap_or(0)
         .min(smp::MAX_CPUS - 1)
+}
+
+/// BOUCHAUD_GS_NOYAU_EN_IRQ_V1 : combien de fois l'identite du coeur a du
+/// etre recalculee par CPUID (GS inutilisable). Publie par `[PROC-STAT]`.
+static REPLIS_APIC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn replis_apic() -> u64 {
+    REPLIS_APIC.load(Ordering::Relaxed)
 }
 pub fn set_kernel_stack(top: u64) {
     let cpu = cpu_index().min(smp::MAX_CPUS - 1);
