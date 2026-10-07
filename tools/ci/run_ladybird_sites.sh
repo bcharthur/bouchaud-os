@@ -28,6 +28,8 @@ SCENARIO=scenario-sites
 IMAGE=ladybird-sites.img
 LOG=serie-sites.log
 rm -rf "$SCENARIO" "$IMAGE" "$LOG"
+# Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
+trap 'tools/ci/extrait_panique.sh "$LOG"' EXIT
 mkdir -p "$SCENARIO/usr/libexec/ladybird" "$SCENARIO/usr/share/ladybird" "$SCENARIO/etc/ssl/certs"
 for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
   cp "$OUT/$f" "$SCENARIO/usr/libexec/ladybird/$f"

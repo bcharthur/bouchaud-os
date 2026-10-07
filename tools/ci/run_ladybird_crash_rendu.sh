@@ -38,7 +38,8 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-crash-rendu.log
 
 python3 tools/health/browser_host_fixture.py > fixture-crash-rendu.log 2>&1 &
 FIXTURE=$!
-trap 'kill "$FIXTURE" 2>/dev/null || true' EXIT
+# Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 
@@ -124,6 +125,7 @@ pids_wc=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/WebContent pid=[0
 compositors=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/Compositor pid=[0-9]+' "$P" | grep -oE 'pid=[0-9]+$' | sort -u | wc -l || true)
 # Trames de A : derniere valeur avant la demande, et a la fin.
 raf_avant=$(awk -v l="${l_demande:-0}" 'NR < l && match($0, /HOST_CRASH_A t_s=[0-9]+ raf=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*raf=/, "", s); v = s } END { print v + 0 }' "$P")
+ticks_a_apres=$(awk -v l="${l_demande:-999999999}" 'NR > l && /HOST_CRASH_A t_s=/ && /WebContent\(/ { n++ } END { print n + 0 }' "$P")
 fin=$(grep -aoE 'HOST_CRASH_A_FIN t_s=[0-9]+ raf=[0-9]+ gel_max_ms=[0-9]+' "$P" | head -1 || true)
 raf_fin=$(echo "$fin" | grep -oE 'raf=[0-9]+' | cut -d= -f2 || true)
 gel_avant=$(awk -v l="${l_demande:-0}" 'NR < l && match($0, /HOST_CRASH_A t_s=[0-9]+ raf=[0-9]+ gel_max_ms=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*gel_max_ms=/, "", s); v = s } END { print v + 0 }' "$P")
@@ -137,7 +139,7 @@ if [ -n "$l_demande" ] && [ -n "$l_reprise" ]; then
   t2=$(grep -aoE "\[LB:CRASH\] onglet=${onglet_b} .* t_ms=[0-9]+" "$P" | head -1 | grep -oE 't_ms=[0-9]+$' | cut -d= -f2 || true)
   [ -n "$t1" ] && [ -n "$t2" ] && delai=$((t2 - t1))
 fi
-echo "CRASH_RENDU_MESURE onglet_b=${onglet_b:-?} pid_a=${pid_a:-?} pid_a_fin=${pid_a_fin:-?} pid_b=${pid_b:-?} pid_b_nouveau=${pid_b2:-?} webcontents=[${pids_wc}] delai_reprise_ms=${delai:-?} raf_a_avant=${raf_avant} raf_a_fin=${raf_fin:-?} gel_a_avant_ms=${gel_avant} gel_a_fin_ms=${gel_fin:-?} trame_b_apres_reprise=[${apres_reprise#*PRESENT_APRES_REPRISE }]"
+echo "CRASH_RENDU_MESURE onglet_b=${onglet_b:-?} pid_a=${pid_a:-?} pid_a_fin=${pid_a_fin:-?} pid_b=${pid_b:-?} pid_b_nouveau=${pid_b2:-?} webcontents=[${pids_wc}] delai_reprise_ms=${delai:-?} raf_a_avant=${raf_avant} raf_a_fin=${raf_fin:-?} gel_a_avant_ms=${gel_avant} gel_a_fin_ms=${gel_fin:-?} releves_a_apres=${ticks_a_apres} trame_b_apres_reprise=[${apres_reprise#*PRESENT_APRES_REPRISE }]"
 
 echo "== verdict =="
 echecs=()
@@ -156,7 +158,10 @@ exige "le navigateur a recolte la mort de ${pid_b:-?} (PROCESS_EXIT)" dans "\\[L
 exige "le navigateur a enregistre ${pid_b2:-?} (PROCESS_CREATE)" dans "\\[LB\\] PROCESS_CREATE type=WebContent pid=${pid_b2:-x} "
 exige "une trame de B presentee par son NOUVEAU WebContent (${pid_trame_b:-aucune})" test -n "$pid_trame_b" -a "${pid_trame_b:-x}" = "${pid_b2:-y}"
 exige "A a fini (HOST_CRASH_A_FIN)" test -n "$fin"
-exige "A a continue de peindre apres le plantage (${raf_avant} -> ${raf_fin:-?})" test "${raf_fin:-0}" -gt $(( raf_avant + 30 ))
+# A est un onglet d'ARRIERE-PLAN des que B s'ouvre : sans rAF, a juste titre
+# (run 37584587000 : raf=19 avant ET apres). Sa vie se lit a ses minuteries :
+# une ligne HOST_CRASH_A par seconde.
+exige "A a continue de tourner apres le plantage (${ticks_a_apres} releves)" test "$ticks_a_apres" -ge 10
 exige "A garde son WebContent (${pid_a:-?} -> ${pid_a_fin:-?})" test -n "$pid_a_fin" -a "${pid_a_fin:-x}" = "${pid_a:-y}"
 exige "aucun autre onglet n'a plante (${a_change})" test "$a_change" -eq 0
 exige "un seul Compositor du debut a la fin ($compositors)" test "$compositors" -eq 1

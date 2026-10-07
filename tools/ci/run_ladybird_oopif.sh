@@ -27,7 +27,8 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-oopif.log
 
 python3 tools/health/browser_host_fixture.py > fixture-oopif.log 2>&1 &
 FIXTURE=$!
-trap 'kill "$FIXTURE" 2>/dev/null || true' EXIT
+# Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 

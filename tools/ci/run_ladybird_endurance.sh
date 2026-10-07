@@ -38,7 +38,8 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" fixture-endurance.log
 
 python3 tools/health/browser_host_fixture.py > fixture-endurance.log 2>&1 &
 FIXTURE=$!
-trap 'kill "$FIXTURE" 2>/dev/null || true' EXIT
+# Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 
@@ -137,7 +138,9 @@ echo "== verdict =="
 echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
 fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ cadres_echus=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+' "$P" | head -1 || true)
-val() { echo "$fin" | grep -oE "$1=[0-9]+" | cut -d= -f2; }
+# `|| true` : sans ligne FIN (panique, VM morte), grep rend 1 et `set -e`
+# tuait le banc AVANT son verdict (run 37584587000 : rien apres « verdict »).
+val() { echo "$fin" | grep -oE "$1=[0-9]+" | cut -d= -f2 || true; }
 cycles=$(val cycles); t_s=$(val t_s); cadres=$(val cadres_ok); echus=$(val cadres_echus); workers=$(val workers_ok); onglets=$(val onglets)
 exige "la page a fini (HOST_ENDURANCE_FIN)" test -n "$fin"
 exige "duree >= 95 % de ${DUREE} s (t_s=${t_s:-?})" test "${t_s:-0}" -ge $((DUREE * 95 / 100))
@@ -152,6 +155,7 @@ exige "chaque onglet enfant a change de WebContent (${swaps} swaps / ${onglets:-
 exige "un seul Compositor du debut a la fin ($compositors)" test "$compositors" -eq 1
 exige "aucune assertion (VERIFICATION FAILED)" bash -c "! grep -aq 'VERIFICATION FAILED' '$P'"
 exige "aucune panique noyau" bash -c "! grep -aq 'KERNEL PANIC' '$P'"
+exige "la boucle a fini sur la page, pas sur ${verdict}" test "$verdict" = fini
 exige "aucun abandon de lien Compositor" bash -c "! grep -aq 'COMPOSITOR_LINK_GIVE_UP' '$P'"
 exige "aucune mort du Compositor" bash -c "! grep -aqE '(PROCESS_FAULT|PROCESS_EXIT|PROCESS_DEATH).*Compositor' '$P'"
 

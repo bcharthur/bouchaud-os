@@ -26,7 +26,8 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" http-wpt.log
 
 (cd "$CORPUS" && exec python3 -m http.server 18083 --bind 0.0.0.0) > http-wpt.log 2>&1 &
 SERVEUR=$!
-trap 'kill "$SERVEUR" 2>/dev/null || true' EXIT
+# Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
+trap 'kill "$SERVEUR" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
 sleep 1
 kill -0 "$SERVEUR"
 
