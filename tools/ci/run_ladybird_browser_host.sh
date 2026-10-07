@@ -102,7 +102,7 @@ LOG=serie-browser-host${SUFFIXE}.log
 : > "$LOG"
 # Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh) --
 # le journal complet imprime plus haut depasse ce que l'API rend.
-trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"' EXIT
 
 # LE MONITEUR QEMU, POUR REGARDER L'ECRAN.
 #

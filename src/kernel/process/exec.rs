@@ -439,13 +439,17 @@ fn construit_tache(
     // processus du navigateur.
     let fin_exec_ns = crate::kernel::timer::monotonic_ns();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_EXEC_PRET image={} pid={} duree_us={} espace_us={} image_us={} pile_us={}",
+        "PERF_EXEC_PRET image={} pid={} duree_us={} espace_us={} image_us={} pile_us={} base={:#x}",
         name,
         process.pid,
         fin_exec_ns.saturating_sub(debut_exec_ns) / 1_000,
         apres_espace_ns.saturating_sub(debut_exec_ns) / 1_000,
         apres_image_ns.saturating_sub(apres_espace_ns) / 1_000,
         fin_exec_ns.saturating_sub(apres_image_ns) / 1_000,
+        // BOUCHAUD_SYMBOLISE_FAUTES_V1 : base de chargement d'un PIE, pour
+        // symboliser un `rip` de PROCESS_FAULT contre le binaire exact
+        // (tools/ci/symbolise_fautes.py).
+        vmm::user_load_base(),
     ));
     Ok((process, first))
 }

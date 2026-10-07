@@ -39,7 +39,7 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-crash-rendu.log
 python3 tools/health/browser_host_fixture.py > fixture-crash-rendu.log 2>&1 &
 FIXTURE=$!
 # Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
-trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 

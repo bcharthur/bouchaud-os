@@ -41,7 +41,7 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$TEMOIN"
 python3 tools/ci/ladybird_cache_fixture.py "$PORT" "$TEMOIN" &
 SERVEUR=$!
 # Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
-trap 'kill "$SERVEUR" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
+trap 'kill "$SERVEUR" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"' EXIT
 sleep 1
 kill -0 "$SERVEUR"
 

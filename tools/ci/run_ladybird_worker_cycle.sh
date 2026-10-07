@@ -32,7 +32,7 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-worker-cycle.log
 python3 tools/health/browser_host_fixture.py > fixture-worker-cycle.log 2>&1 &
 FIXTURE=$!
 # Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
-trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG"' EXIT
+trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 
@@ -106,12 +106,15 @@ w4=$(grep -aoE 'HOST_WCYCLE2 w4_apres_navigation ok ms=[0-9]+' "$P" | head -1 ||
 l_quitte=$(ligne_de 'HOST_WCYCLE2 quitte_avec_worker_vivant')
 vivants=$(awk -v l="${l_quitte:-0}" 'NR < l && /\[LB\] PROCESS_CREATE type=WebWorker / { c++ } NR < l && /\[LB\] PROCESS_EXIT type=WebWorker / { e++ } END { print c - e }' "$P")
 crees=$(grep -ac '\[LB\] PROCESS_CREATE type=WebWorker ' "$P" || true)
+# Vue du NOYAU, independante de la recolte par le navigateur : combien de
+# processus WebWorker sont REELLEMENT sortis avant que la page ne quitte.
+noyau_sortis=$(awk -v l="${l_quitte:-0}" 'NR < l && /PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\/WebWorker / { n++ } END { print n + 0 }' "$P")
 # Noyau : chaque image Ladybird lancee doit etre sortie quand l'autorun reprend la main.
 l_sorti=$(ligne_de 'WCYCLE_SORTI statut=')
 lances=$(awk -v l="${l_sorti:-999999999}" 'NR < l && match($0, /PERF_EXECVE .*image=\/usr\/libexec\/ladybird\/[A-Za-z]+ pid=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*pid=/, "", s); vu[s] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
 sortis=$(awk -v l="${l_sorti:-999999999}" 'NR < l && /PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\// && match($0, / pid=[0-9]+/) { vu[substr($0, RSTART + 5, RLENGTH - 5)] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
 statut=$(grep -aoE 'WCYCLE_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
-echo "WCYCLE_MESURE demarrage_w1_ms=$(champ "$w1" ms) pid_tue=${pid_w:-?} workers_vivants_au_crash=$(champ "$demande" workers_vivants) recus_6s=${r6:-?} recus_10s=${r10:-?} erreur_w1=$(champ "$crash" erreur) w2_ms=$(champ "$w2" ms) w4_ms=$(champ "$w4" ms) webworkers_crees=$crees vivants_a_la_sortie=$vivants ladybird_lances=$lances ladybird_sortis=$sortis statut=${statut:-?}"
+echo "WCYCLE_MESURE demarrage_w1_ms=$(champ "$w1" ms) pid_tue=${pid_w:-?} workers_vivants_au_crash=$(champ "$demande" workers_vivants) recus_6s=${r6:-?} recus_10s=${r10:-?} erreur_w1=$(champ "$crash" erreur) w2_ms=$(champ "$w2" ms) w4_ms=$(champ "$w4" ms) webworkers_crees=$crees vivants_a_la_sortie=$vivants webworkers_sortis_noyau_avant_sortie=$noyau_sortis ladybird_lances=$lances ladybird_sortis=$sortis statut=${statut:-?}"
 
 echo "== verdict =="
 echecs=()
