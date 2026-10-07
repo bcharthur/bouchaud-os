@@ -387,7 +387,7 @@ OOPIF_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>oopif-a</title>
   });
   // Le CONTENU du cadre (autre origine) ne doit jamais etre lisible. Sous
   // isolation des cadres, le parent peut tenir un document local vide a la
-  // place du cadre distant : y acceder n'est pas une fuite, lire « cadre »
+  // place du cadre distant : y acceder n'est pas une fuite, lire "cadre"
   // en serait une.
   setTimeout(() => {
     let acces = "refuse", contenu = "";

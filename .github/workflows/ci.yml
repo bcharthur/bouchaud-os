@@ -132,6 +132,9 @@ jobs:
           python3 tools/verifie-ui-bouchaud.py
           python3 tools/verifie-chain-ladybird.py
           python3 tools/verifie-lifecycle-pages.py
+          # Fixtures et bancs : un script qui ne compile pas tuait quatre
+          # jobs Ladybird en deux minutes (run 37589065373).
+          python3 tools/verifie-scripts-python-compilent.py
 
       # Le service ring 3 est freestanding : le compiler ici coute quelques
       # secondes et attrape ce qu'aucun test hote ne verra -- un en-tete qui ne
