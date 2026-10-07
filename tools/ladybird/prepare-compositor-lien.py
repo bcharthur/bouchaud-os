@@ -413,6 +413,76 @@ def main() -> int:
         "    dbgln(\"[LB] OOPIF_REMOTE parent_pid={} hote_pid={} page={} page_distante={}\", parent_client.pid(), remote_client->pid(), page_id, remote_page_id);\n"
         "    child_frame->set_remote_host(move(remote_client), remote_page_id);\n",
     )
+    # BOUCHAUD_SIGNAL_BOUCLE_V1 -- un signal va a la boucle d'evenements du
+    # fil qui a ENREGISTRE son gestionnaire, pas a celle du fil qui le recoit.
+    # Upstream ecrit dans le tube du fil RECEVEUR et abandonne le signal si ce
+    # fil n'a pas de boucle : sous Linux le noyau livre au fil principal, sur
+    # Bouchaud le premier fil qui repasse en mode utilisateur le prenait (run
+    # 37589903681 : aucun [LB] SIGCHLD_RECU, aucun service mort recolte). Le
+    # noyau donne desormais la preference au fil principal
+    # (BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1) ; ceci couvre le cas ou il calcule
+    # en mode utilisateur, et evite qu'un gestionnaire tourne sur une boucle
+    # etrangere (ProcessManager::verify_event_loop).
+    elu = racine / "Libraries/LibCore/EventLoopImplementationUnix.cpp"
+    remplace(
+        elu,
+        "thread_local ThreadData* s_this_thread_data;\n",
+        "thread_local ThreadData* s_this_thread_data;\n"
+        "// BOUCHAUD_SIGNAL_BOUCLE_V1 : la boucle proprietaire de chaque signal.\n"
+        "static ThreadData* s_signal_owner[65] {};\n",
+    )
+    remplace(
+        elu,
+        "static void destroy_thread_data(void* value)\n"
+        "{\n"
+        "    s_this_thread_data = nullptr;\n",
+        "static void destroy_thread_data(void* value)\n"
+        "{\n"
+        "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de proprietaire mort.\n"
+        "    for (auto& owner : s_signal_owner) {\n"
+        "        if (owner == value)\n"
+        "            owner = nullptr;\n"
+        "    }\n"
+        "    s_this_thread_data = nullptr;\n",
+    )
+    remplace(
+        elu,
+        "    if (!s_this_thread_data)\n"
+        "        return;\n"
+        "    auto& thread_data = *s_this_thread_data;\n",
+        "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : vers la boucle qui a enregistre le\n"
+        "    // gestionnaire, depuis n'importe quel fil (write() est sur en signal).\n"
+        "    auto* destination = (signal_number > 0 && signal_number < 65 && s_signal_owner[signal_number])\n"
+        "        ? s_signal_owner[signal_number]\n"
+        "        : s_this_thread_data;\n"
+        "    if (!destination)\n"
+        "        return;\n"
+        "    auto& thread_data = *destination;\n",
+    )
+    remplace(
+        elu,
+        "    if (remove_signal_number != 0)\n"
+        "        info.signal_handlers.remove(remove_signal_number);\n",
+        "    if (remove_signal_number != 0) {\n"
+        "        info.signal_handlers.remove(remove_signal_number);\n"
+        "        // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de gestionnaire, plus de proprietaire.\n"
+        "        if (remove_signal_number > 0 && remove_signal_number < 65)\n"
+        "            s_signal_owner[remove_signal_number] = nullptr;\n"
+        "    }\n",
+    )
+    remplace(
+        elu,
+        "int EventLoopManagerUnix::register_signal(int signal_number, Function<void(int)> handler)\n"
+        "{\n"
+        "    VERIFY(signal_number != 0);\n",
+        "int EventLoopManagerUnix::register_signal(int signal_number, Function<void(int)> handler)\n"
+        "{\n"
+        "    VERIFY(signal_number != 0);\n"
+        "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : le premier fil qui enregistre ce signal\n"
+        "    // en possede la boucle de distribution.\n"
+        "    if (signal_number > 0 && signal_number < 65 && !s_signal_owner[signal_number])\n"
+        "        s_signal_owner[signal_number] = &ThreadData::the();\n",
+    )
     return 0
 
 
