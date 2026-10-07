@@ -61,6 +61,10 @@ pub struct Node {
     pub mode: u16,
     pub uid: u16,
     pub gid: u16,
+    /// BOUCHAUD_MTIME_STABLE_V1 -- derniere modification, secondes Unix :
+    /// creation, puis ecriture (fichier) ou ajout/retrait d'entree
+    /// (repertoire). `stat` la rend telle quelle.
+    pub mtime: u64,
 }
 
 impl Node {
@@ -75,6 +79,7 @@ impl Node {
             mode: 0o644,
             uid: 0,
             gid: 0,
+            mtime: 0,
         }
     }
 
@@ -211,6 +216,7 @@ impl FileSystem {
         self.nodes[0].mode = 0o755;
         self.nodes[0].uid = 0;
         self.nodes[0].gid = 0;
+        self.nodes[0].mtime = crate::kernel::abi::unix_time();
         USED_NODES_RELAXED.store(1, Ordering::Relaxed);
 
         let home = self.mkdir_at(0, "home").unwrap_or(0);
@@ -268,12 +274,31 @@ impl FileSystem {
             if !self.nodes[i].used {
                 self.nodes[i] = Node::empty();
                 self.nodes[i].used = true;
+                self.nodes[i].mtime = crate::kernel::abi::unix_time();
                 let old = USED_NODES_RELAXED.fetch_add(1, Ordering::Relaxed);
                 assert!(old < MAX_NODES, "ramfs: used-node accounting overflow");
                 return Some(i);
             }
         }
         None
+    }
+
+    /// BOUCHAUD_MTIME_STABLE_V1 -- le noeud vient d'etre modifie.
+    ///
+    /// `stat` rendait l'heure COURANTE comme date de modification de tout
+    /// fichier et de tout repertoire. fontconfig valide chaque cache en
+    /// comparant la date du repertoire de polices a celle qu'il a notee :
+    /// aucun cache n'etait jamais valide (re-analyse de toutes les polices au
+    /// demarrage de chaque WebContent, tentatives de reecrire `.uuid` que le
+    /// bac a sable refuse), et toutes les 30 s (`rescanInterval`)
+    /// `FcConfigUptoDate` voyait les repertoires « modifies » et rechargeait
+    /// la configuration sous les objets que Skia tenait encore : WebContent
+    /// en faute dans `FcValueCanonicalize`, cr2=0xffff413f021ee480 (WPT,
+    /// runs 37585729384, 37518121906, 37622716750).
+    pub fn touche(&mut self, idx: usize) {
+        if idx < MAX_NODES {
+            self.nodes[idx].mtime = crate::kernel::abi::unix_time();
+        }
     }
 
     pub fn find_child(&self, parent: usize, name: &str) -> Option<usize> {
@@ -309,6 +334,7 @@ impl FileSystem {
         if !self.nodes[idx].set_name(name) {
             return Err("invalid name");
         }
+        self.touche(parent);
         Ok(idx)
     }
 
@@ -384,6 +410,7 @@ impl FileSystem {
         if !self.nodes[idx].set_name(name) {
             return Err("invalid name");
         }
+        self.touche(parent);
         Ok(idx)
     }
 
@@ -400,6 +427,7 @@ impl FileSystem {
         // Une ecriture explicite remplace le backing immutable eventuel.
         crate::fs::backing::unregister(idx);
         self.nodes[idx].content = data.to_vec();
+        self.touche(idx);
         true
     }
 
@@ -417,6 +445,7 @@ impl FileSystem {
             node.content.push(b'\n');
         }
         node.content.extend_from_slice(text.as_bytes());
+        self.touche(idx);
     }
 
     pub fn resolve(&self, path: &str, cwd: usize) -> Option<usize> {

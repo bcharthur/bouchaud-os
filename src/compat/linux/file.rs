@@ -635,6 +635,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                     content.resize(end, 0);
                 }
                 content[start..end].copy_from_slice(&data);
+                fs.touche(node); // BOUCHAUD_MTIME_STABLE_V1
                 end
             };
             if let Some(desc) = process.files.lock().get_mut(fd) {
@@ -1003,6 +1004,7 @@ pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
                 content.resize(end, 0);
             }
             content[offset..end].copy_from_slice(&data);
+            fs.touche(node); // BOUCHAUD_MTIME_STABLE_V1
             data.len() as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
@@ -1197,6 +1199,7 @@ pub fn sys_openat(dirfd: i32, path_addr: u64, flags: u32, mode: u32) -> i64 {
         }
         if flags & O_TRUNC != 0 && !is_dir {
             fs.nodes[node].content.clear();
+            fs.touche(node); // BOUCHAUD_MTIME_STABLE_V1
         }
         (is_dir, fs.nodes[node].content.len())
     };
@@ -1572,13 +1575,20 @@ fn fill_stat(node: usize) -> [u8; 144] {
     } else {
         backing::disk_len(node).unwrap_or(entry.content.len()) as u64
     };
-    stat_bytes(node as u64, mode, entry.uid as u32, entry.gid as u32, size)
+    stat_bytes_date(node as u64, mode, entry.uid as u32, entry.gid as u32, size, entry.mtime)
 }
 
 /// Compose les 144 octets d'un `struct stat`.
 fn stat_bytes(inode: u64, mode: u32, uid: u32, gid: u32, size: u64) -> [u8; 144] {
+    // Peripheriques, tubes, prises, instantanes : produits a l'instant.
+    stat_bytes_date(inode, mode, uid, gid, size, crate::kernel::abi::unix_time())
+}
+
+/// `struct stat` d'un objet date. BOUCHAUD_MTIME_STABLE_V1 : un fichier ou
+/// un repertoire du RAMFS porte SA date (`Node::mtime`), pas l'heure du
+/// `stat` -- voir `FileSystem::touche`.
+fn stat_bytes_date(inode: u64, mode: u32, uid: u32, gid: u32, size: u64, now: u64) -> [u8; 144] {
     let mut buffer = [0u8; 144];
-    let now = crate::kernel::abi::unix_time();
     buffer[0..8].copy_from_slice(&1u64.to_le_bytes()); // st_dev
     buffer[8..16].copy_from_slice(&inode.to_le_bytes()); // st_ino
     buffer[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink
@@ -1702,7 +1712,7 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
         resolve(&absolute(&path))
     };
 
-    let (mode, size, uid, gid, inode) = match node {
+    let (mode, size, uid, gid, inode, date) = match node {
         Some(node) => {
             let fs = ramfs::fs();
             let entry = &fs.nodes[node];
@@ -1717,14 +1727,15 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
             } else {
                 backing::disk_len(node).unwrap_or(entry.content.len()) as u64
             };
-            (mode, size, entry.uid as u32, entry.gid as u32, node as u64)
+            (mode, size, entry.uid as u32, entry.gid as u32, node as u64, entry.mtime)
         }
         None if !path.is_empty() && device_for_path(&absolute(&path)).is_some() => {
+            let maintenant = crate::kernel::abi::unix_time();
             match device_for_path(&absolute(&path)) {
                 Some(FdKind::Instantane(contenu)) => {
-                    (S_IFREG | 0o444, contenu.len() as u64, 0, 0, 1)
+                    (S_IFREG | 0o444, contenu.len() as u64, 0, 0, 1, maintenant)
                 }
-                _ => (S_IFCHR | 0o666, 0, 0, 0, 1),
+                _ => (S_IFCHR | 0o666, 0, 0, 0, 1, maintenant),
             }
         }
         None => return -errno::ENOENT,
@@ -1741,6 +1752,11 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
     buffer[32..40].copy_from_slice(&inode.to_le_bytes());
     buffer[40..48].copy_from_slice(&size.to_le_bytes());
     buffer[48..56].copy_from_slice(&size.div_ceil(512).to_le_bytes());
+    // stx_atime, stx_btime, stx_ctime, stx_mtime : { i64 tv_sec; u32 tv_nsec; i32 }.
+    // Ils restaient a zero alors que le masque les annonce.
+    for offset in [64usize, 80, 96, 112] {
+        buffer[offset..offset + 8].copy_from_slice(&date.to_le_bytes());
+    }
     if user_write(out, &buffer) {
         0
     } else {
@@ -1962,6 +1978,9 @@ pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
             if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
             }
+            // BOUCHAUD_MTIME_STABLE_V1 : une entree en moins, le repertoire change.
+            let parent = fs.nodes[node].parent;
+            fs.touche(parent);
             fs.nodes[node].used = false;
             fs.nodes[node].content = Vec::new();
             0
@@ -2081,6 +2100,10 @@ pub fn sys_renameat2(olddirfd: i32, from_addr: u64, newdirfd: i32, to_addr: u64,
                 fs.nodes[c].used = false;
                 fs.nodes[c].content = Vec::new();
             }
+            // BOUCHAUD_MTIME_STABLE_V1 : les deux repertoires changent.
+            let ancien_parent = fs.nodes[s].parent;
+            fs.touche(ancien_parent);
+            fs.touche(p);
             fs.nodes[s].parent = p;
             if !fs.nodes[s].set_name(nom) {
                 return -errno::ENAMETOOLONG;
@@ -2096,6 +2119,9 @@ pub fn sys_renameat2(olddirfd: i32, from_addr: u64, newdirfd: i32, to_addr: u64,
             fs.nodes[c].parent = parent_s;
             fs.nodes[c].name = nom_s;
             fs.nodes[c].name_len = long_s;
+            let (pa, pb) = (fs.nodes[s].parent, fs.nodes[c].parent);
+            fs.touche(pa);
+            fs.touche(pb);
             0
         }
     }
@@ -2117,7 +2143,9 @@ pub fn sys_ftruncate(fd: i32, length: usize) -> i64 {
     if length > ramfs::MAX_FILE_SIZE {
         return -errno::EFBIG;
     }
-    ramfs::fs().nodes[node].content.resize(length, 0);
+    let mut fs = ramfs::fs();
+    fs.nodes[node].content.resize(length, 0);
+    fs.touche(node); // BOUCHAUD_MTIME_STABLE_V1
     0
 }
 

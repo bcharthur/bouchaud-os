@@ -15,11 +15,12 @@ cd tools/userland/out-sondes
 ./faute-noncanonique-probe
 ./sigchld-multifil-probe
 ./compta-stress-probe 5
+./mtime-probe
 cd ../../..
 
 SCENARIO=scenario-primitives
 mkdir -p "$SCENARIO/bin"
-for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe sigchld-multifil-probe compta-stress-probe; do
+for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe sigchld-multifil-probe compta-stress-probe mtime-probe; do
   cp "tools/userland/out-sondes/$f" "$SCENARIO/bin/"
 done
 python3 - <<'PY'
@@ -40,6 +41,7 @@ strace echecs
 /bin/faute-noncanonique-probe
 /bin/sigchld-multifil-probe
 /bin/compta-stress-probe 30
+/bin/mtime-probe
 /bin/session-probe 4
 echo SESSION_INVITE_REVENUE
 strace off
@@ -84,7 +86,7 @@ kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 tail -c 262144 "$LOG"
 
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK SIGCHLD_MULTIFIL_OK COMPTA_STRESS_OK \
+for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK SIGCHLD_MULTIFIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK \
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done
