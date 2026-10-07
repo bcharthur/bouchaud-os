@@ -93,12 +93,22 @@ for s in $SITES; do
   variance=$(champ "$dernier" variance); couleurs=$(champ "$dernier" couleurs)
   non_blanc=$(champ "$dernier" non_blanc_pct); taille=$(echo "$dernier" | grep -oE 'taille=[0-9]+x[0-9]+' | cut -d= -f2)
   tls=$(echo "$bloc" | grep -acE 'SSL|TLS|certificate' || true)
-  if [ "$charge" -eq 0 ]; then verdict=document_non_charge
-  elif [ "$trames" -eq 0 ]; then verdict=charge_rien_peint
-  elif [ "${variance:-0}" -lt 50 ] || [ "${couleurs:-0}" -lt 3 ]; then verdict=peint_uniforme
-  else verdict=page_reelle; fi
-  echo "SITE nom=$nom url=$url verdict=$verdict document_charge=$charge trames=$trames taille=${taille:-?} variance=${variance:-?} couleurs=${couleurs:-?} non_blanc_pct=${non_blanc:-?} lignes_tls=$tls"
-  echo "$bloc" | grep -aoE '\[LB:NAV\].*|\[LB\] (MISS|STORE|HIT) url=https://[^ ]{0,80}|M9_RS_[A-Z_]*(FAIL|ERR)[^ ]*.*|Request finished with error.*' | head -8 | sed 's/^/    /' || true
+  # Deux axes independants : l'evenement `load` (document_charge) et ce que
+  # la trame presentee montre. Le run 37532626400 a classe Wikipedia
+  # « document_non_charge » alors qu'il avait peint 16 trames, 64 couleurs :
+  # la page etait affichee, seul `load` manquait au bout de 90 s.
+  if [ "$trames" -eq 0 ]; then peint=rien_peint
+  elif [ "${variance:-0}" -lt 50 ] || [ "${couleurs:-0}" -lt 3 ]; then peint=peint_uniforme
+  else peint=page_reelle; fi
+  if [ "$charge" -ge 1 ]; then verdict=$peint
+  elif [ "$peint" = rien_peint ]; then verdict=document_non_charge
+  else verdict=${peint}_sans_load; fi
+  miss=$(echo "$bloc" | grep -ac '\[LB\] MISS url=' || true)
+  store=$(echo "$bloc" | grep -ac '\[LB\] STORE url=' || true)
+  hit=$(echo "$bloc" | grep -ac '\[LB\] HIT url=' || true)
+  echo "SITE nom=$nom url=$url verdict=$verdict load=$charge peint=$peint trames=$trames taille=${taille:-?} variance=${variance:-?} couleurs=${couleurs:-?} non_blanc_pct=${non_blanc:-?} cache_miss=$miss cache_store=$store cache_hit=$hit lignes_tls=$tls"
+  # awk lit tout le flux : pas de tube ferme avant la fin (SIGPIPE).
+  echo "$bloc" | grep -aoE '\[LB:NAV\].*|\[LB\] (MISS|STORE|HIT) url=https://[^ ]{0,80}|M9_RS_[A-Z_]*(FAIL|ERR)[^ ]*.*|Request finished with error.*' | awk 'NR <= 8 { print "    " $0 }' || true
   if [ "$nom" = example ] && [ "$verdict" != page_reelle ]; then echecs+=("example:$verdict"); fi
 done
 
