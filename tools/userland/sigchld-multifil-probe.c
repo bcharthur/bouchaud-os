@@ -45,6 +45,13 @@
  *              pendant son sommeil meurt tout de suite, il ne tourne pas
  *              jusqu'a son echeance.
  *
+ *   sortie_normale  BOUCHAUD_SIGCHLD_SORTIE_NORMALE_V1 : un fils MULTI-FILS
+ *              sort par exit(0) (fil principal, deux autres fils bloques),
+ *              le pere est la boucle LibCore (cas boucle). Run 37627107473 :
+ *              le navigateur recoltait le WebWorker tue (SIGSEGV), jamais
+ *              ceux qui sortent d'eux-memes (code 0) -- le noyau les voyait
+ *              sortir. Doit etre recolte, statut sortie:0, en moins de 3 s.
+ *
  * Pour chacun : delai de la fin de prise (EOF), delai du SIGCHLD, et ce que
  * waitpid rend. Sortie : une ligne `SIGCHLD_CAS cas=...`, puis
  * `SIGCHLD_MULTIFIL_OK` ou `SIGCHLD_MULTIFIL_ECHEC n=...`.
@@ -57,6 +64,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -364,6 +372,57 @@ int main(void)
             WIFEXITED(statut) ? "sortie:" : "autre:", WIFEXITED(statut) ? WEXITSTATUS(statut) : statut, ok ? "ok" : "ECHEC");
         if (!ok)
             echecs++;
+    }
+    {
+        // Le pere redevient la boucle LibCore, un fil actif a cote.
+        fil_actif_continue = 1;
+        pthread_create(&actif, NULL, pere_actif, NULL);
+        char c;
+        while (read(tube_signal[0], &c, 1) == 1) {
+        }
+        long t0 = maintenant_ms();
+        pid_t p = fork();
+        if (p == 0) {
+            pthread_t t1, t2;
+            pthread_create(&t1, NULL, dort_longtemps, NULL);
+            pthread_create(&t2, NULL, pere_ailleurs, NULL);
+            usleep(200 * 1000);
+            exit(0);
+        }
+        pid_t rendu = 0;
+        int statut = 0;
+        long t_sig = -1;
+        alarm(10);
+        while (rendu != p && maintenant_ms() - t0 < 10000) {
+            struct pollfd f = { .fd = tube_signal[0], .events = POLLIN };
+            int n = poll(&f, 1, -1);
+            if (n < 0 && errno != EINTR)
+                break;
+            while (read(tube_signal[0], &c, 1) == 1) {
+            }
+            for (;;) {
+                int st = 0;
+                pid_t r = waitpid(-1, &st, WNOHANG);
+                if (r <= 0)
+                    break;
+                if (r == p) {
+                    rendu = r;
+                    statut = st;
+                    t_sig = maintenant_ms() - t0;
+                }
+            }
+        }
+        alarm(0);
+        fil_actif_continue = 0;
+        pthread_join(actif, NULL);
+        int ok = rendu == p && WIFEXITED(statut) && WEXITSTATUS(statut) == 0 && t_sig >= 0 && t_sig < 3000;
+        printf("SIGCHLD_CAS cas=sortie_normale recolte_ms=%ld waitpid=%d statut=%s%d %s\n", t_sig, (int)rendu,
+            WIFEXITED(statut) ? "sortie:" : "autre:", WIFEXITED(statut) ? WEXITSTATUS(statut) : statut, ok ? "ok" : "ECHEC");
+        if (!ok) {
+            echecs++;
+            kill(p, SIGKILL);
+            waitpid(p, NULL, 0);
+        }
     }
     if (echecs == 0)
         printf("SIGCHLD_MULTIFIL_OK\n");

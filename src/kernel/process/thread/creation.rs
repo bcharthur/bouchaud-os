@@ -50,6 +50,7 @@ impl Task {
             futex_key: EcheanceAtomique::neuf(0),
             wait_queue_key: CleAtomique::neuf(0),
             wake_deadline_ns: EcheanceAtomique::neuf(0),
+            masque_signaux: EcheanceAtomique::neuf(0),
             waiting_for_child: DrapeauAtomique::neuf(false),
             fresh: true,
             ticks_cpu: EcheanceAtomique::neuf(0),

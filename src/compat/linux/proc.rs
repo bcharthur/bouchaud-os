@@ -124,6 +124,10 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let mut child_frame = *frame;
     child_frame.rax = 0;
     let mut child_task = Task::new(child, child_frame);
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le fils herite du masque du fil qui
+    // appelle `fork` (posix_spawn de la glibc : tout bloque, le fils le
+    // restaure avant `execve`).
+    child_task.masque_signaux.range(task::current().masque_signaux.charge());
     // La base FS doit suivre : c'est le TLS, et la premiere chose que fait la
     // libc dans l'enfant est de lire `%fs:0` pour retrouver sa structure de
     // thread. Une base nulle la ferait dereferencer l'adresse 0.
@@ -598,7 +602,14 @@ pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
     // l'aiguilleur masquait la fenetre. Lecture utilisateur AVANT, calcul et
     // ecriture sous UNE prise, ecriture utilisateur APRES (aucune faute de
     // page sous le verrou).
-    let process = task::current_process();
+    //
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le masque est celui du FIL appelant.
+    // Un masque de processus faisait d'un « bloquer tout puis restaurer »
+    // de la glibc (pthread_create, posix_spawn) une ecriture sur le masque
+    // des AUTRES fils : restaurer le masque transitoire d'un voisin laissait
+    // SIGCHLD bloque pour toujours (sigmasque-fil-probe, cas course). Seul
+    // ce fil ecrit son masque : aucun verrou.
+    let fil = task::current();
     let new = if set != 0 {
         match user_read_u64(set) {
             Some(value) => Some(value),
@@ -607,21 +618,16 @@ pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
     } else {
         None
     };
-    let current_mask = {
-        let mut signals = process.signals.lock();
-        let current_mask = signals.blocked;
-        if let Some(new) = new {
-            signals.blocked = match how {
-                signal::SIG_BLOCK => current_mask | new,
-                signal::SIG_UNBLOCK => current_mask & !new,
-                signal::SIG_SETMASK => new,
-                _ => return -errno::EINVAL,
-            };
-            signals.blocked &= !(1 << (signal::SIGKILL - 1));
-            signals.blocked &= !(1 << (signal::SIGSTOP - 1));
-        }
-        current_mask
-    };
+    let current_mask = fil.masque_signaux.charge();
+    if let Some(new) = new {
+        let masque = match how {
+            signal::SIG_BLOCK => current_mask | new,
+            signal::SIG_UNBLOCK => current_mask & !new,
+            signal::SIG_SETMASK => new,
+            _ => return -errno::EINVAL,
+        };
+        fil.masque_signaux.range(signal::SignalState::masque_permis(masque));
+    }
     if oldset != 0 && !user_write(oldset, &current_mask.to_le_bytes()) {
         return -errno::EFAULT;
     }
@@ -635,7 +641,7 @@ pub fn sys_rt_sigprocmask(how: i32, set: u64, oldset: u64) -> i64 {
 pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
     match signal::restore(frame) {
         Some(mask) => {
-            task::current_process().signals.lock().blocked = mask;
+            task::current().masque_signaux.range(signal::SignalState::masque_permis(mask));
             frame.rax as i64
         }
         None => {
@@ -728,15 +734,14 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         if task::signal_a_effet_en_attente() && task::laisse_le_signal_au_fil_principal() {
             return;
         }
-        let (signal, action, blocked) = {
+        // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le masque du fil qui livre.
+        let fil = task::current();
+        let blocked = fil.masque_signaux.charge();
+        let (signal, action) = {
             let signals = process.signals.lock();
-            match signals.next_deliverable() {
+            match signals.next_deliverable(blocked) {
                 None => return,
-                Some(signal) => (
-                    signal,
-                    signals.actions[signal as usize - 1],
-                    signals.blocked,
-                ),
+                Some(signal) => (signal, signals.actions[signal as usize - 1]),
             }
         };
         process.signals.lock().clear(signal);
@@ -769,16 +774,17 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         }
 
         {
-            let mut signals = process.signals.lock();
             // Le signal livre est bloque pendant l'execution de son
             // gestionnaire (sauf SA_NODEFER), plus ceux demandes par sa_mask :
-            // c'est ce qui evite qu'il se reentre indefiniment.
-            signals.blocked |= action.mask;
+            // c'est ce qui evite qu'il se reentre indefiniment. Sur CE fil
+            // seulement : les autres fils peuvent prendre le suivant.
+            let mut masque = blocked | action.mask;
             if action.flags & signal::SA_NODEFER == 0 {
-                signals.blocked |= 1 << (signal - 1);
+                masque |= 1 << (signal - 1);
             }
+            fil.masque_signaux.range(signal::SignalState::masque_permis(masque));
             if action.flags & signal::SA_RESETHAND != 0 {
-                signals.actions[signal as usize - 1] = SigAction::default();
+                process.signals.lock().actions[signal as usize - 1] = SigAction::default();
             }
         }
         // Un seul signal par retour : le suivant sera livre au retour du

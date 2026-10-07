@@ -305,7 +305,12 @@ pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
 /// sans limite de temps doit pouvoir etre interrompue par un signal.
 pub fn signal_pending() -> bool {
     match try_current() {
-        Some(task) => task.process.signals.lock().next_deliverable().is_some(),
+        Some(task) => task
+            .process
+            .signals
+            .lock()
+            .next_deliverable(task.masque_signaux.charge())
+            .is_some(),
         None => false,
     }
 }
@@ -338,16 +343,27 @@ pub fn signal_interrompt_attente() -> bool {
     !laisse_le_signal_au_fil_principal()
 }
 
-/// Un signal livrable et qui fera quelque chose est-il en attente ?
+/// Un signal livrable PAR LE FIL COURANT et qui fera quelque chose est-il
+/// en attente ?
 pub fn signal_a_effet_en_attente() -> bool {
-    let Some(task) = try_current() else { return false };
+    signaux_a_effet_pour_le_fil_courant() != 0
+}
+
+/// Les signaux en attente que le fil courant ne bloque pas et qui feront
+/// quelque chose (bit n-1 pour le signal n). Le verrou `signals` est rendu
+/// en sortant.
+fn signaux_a_effet_pour_le_fil_courant() -> u64 {
+    let Some(task) = try_current() else { return 0 };
     let signals = task.process.signals.lock();
-    let mut prets = signals.pending & !signals.blocked;
+    let mut prets = signals.pending & !task.masque_signaux.charge();
+    let mut effet = 0u64;
     while prets != 0 {
         let signal = prets.trailing_zeros() + 1;
         prets &= prets - 1;
+        let bit = 1u64 << (signal - 1);
         if signal == crate::kernel::signal::SIGKILL || signal == crate::kernel::signal::SIGSTOP {
-            return true;
+            effet |= bit;
+            continue;
         }
         let action = signals.actions[signal as usize - 1];
         if action.handler == crate::kernel::signal::SIG_IGN {
@@ -358,9 +374,9 @@ pub fn signal_a_effet_en_attente() -> bool {
         {
             continue;
         }
-        return true;
+        effet |= bit;
     }
-    false
+    effet
 }
 
 /// Le fil COURANT doit-il laisser un signal de processus en attente au fil
@@ -387,6 +403,13 @@ pub fn signal_a_effet_en_attente() -> bool {
 /// courant livre, comme avant : aucun signal n'attend indefiniment.
 pub fn laisse_le_signal_au_fil_principal() -> bool {
     let Some(courant) = try_current() else { return false };
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le fil principal ne prend que ce qu'il
+    // ne bloque pas. Lu AVANT le parcours du registre (ordre registre puis
+    // signals ailleurs).
+    let a_livrer = signaux_a_effet_pour_le_fil_courant();
+    if a_livrer == 0 {
+        return false;
+    }
     let pid = courant.process.pid;
     let registre = tasks();
     let mut principal: Option<usize> = None;
@@ -402,6 +425,9 @@ pub fn laisse_le_signal_au_fil_principal() -> bool {
     let Some(index) = principal else { return false };
     let fil = &registre[index];
     if fil.tid == courant.tid {
+        return false;
+    }
+    if a_livrer & !fil.masque_signaux.charge() == 0 {
         return false;
     }
     match fil.state.charge() {

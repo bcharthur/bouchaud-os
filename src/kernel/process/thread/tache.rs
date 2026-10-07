@@ -79,6 +79,13 @@ pub struct Task {
     pub futex_key: EcheanceAtomique,
     pub wait_queue_key: CleAtomique,
     pub wake_deadline_ns: EcheanceAtomique,
+    /// BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : signaux bloques par CE fil
+    /// (`rt_sigprocmask`, masque du gestionnaire en cours, `rt_sigsuspend`).
+    /// POSIX : le masque appartient au fil, les signaux en attente et les
+    /// actions au processus. Ecrit par son seul fil ; lu par les autres pour
+    /// choisir qui prend un signal de processus. Herite du createur
+    /// (`clone`, `fork`), conserve par `execve`.
+    pub masque_signaux: EcheanceAtomique,
     pub waiting_for_child: DrapeauAtomique,
     pub fresh: bool,
     pub ticks_cpu: EcheanceAtomique,

@@ -48,7 +48,7 @@ jobs:
           for essai in 1 2 3; do
             echo "== demarrage KVM ${essai}/3 =="
             BO_QEMU_KVM=1 tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin > "primitives-kvm-${essai}.log" 2>&1 || { tail -c 20000 "primitives-kvm-${essai}.log"; exit 1; }
-            grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
+            grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|SIGMASQUE_CAS|BOUCHAUD_TSC_|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
             cp serie-primitives.log "serie-primitives-kvm-${essai}.log"
           done
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)

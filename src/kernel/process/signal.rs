@@ -93,13 +93,13 @@ pub struct SignalState {
     pub actions: [SigAction; NSIG],
     /// Signaux en attente de livraison (bit n-1 pour le signal n).
     pub pending: u64,
-    /// Signaux bloques par `rt_sigprocmask`.
-    pub blocked: u64,
+    // Le masque n'est PAS ici : il appartient au fil (`Task::masque_signaux`,
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1).
 }
 
 impl Default for SignalState {
     fn default() -> Self {
-        SignalState { actions: [SigAction::default(); NSIG], pending: 0, blocked: 0 }
+        SignalState { actions: [SigAction::default(); NSIG], pending: 0 }
     }
 }
 
@@ -126,9 +126,9 @@ impl SignalState {
         }
     }
 
-    /// Premier signal livrable (non bloque), s'il y en a un.
-    pub fn next_deliverable(&self) -> Option<u32> {
-        let ready = self.pending & !self.blocked;
+    /// Premier signal livrable par un fil dont le masque est `bloques`.
+    pub fn next_deliverable(&self, bloques: u64) -> Option<u32> {
+        let ready = self.pending & !bloques;
         if ready == 0 {
             return None;
         }
@@ -139,6 +139,12 @@ impl SignalState {
             }
         }
         Some(ready.trailing_zeros() + 1)
+    }
+
+    /// Masque tel que `rt_sigprocmask` le pose : SIGKILL et SIGSTOP ne se
+    /// bloquent jamais.
+    pub fn masque_permis(masque: u64) -> u64 {
+        masque & !(1 << (SIGKILL - 1)) & !(1 << (SIGSTOP - 1))
     }
 
     /// Retire un signal de la file d'attente.

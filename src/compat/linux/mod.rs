@@ -223,18 +223,19 @@ pub fn handle(frame: &mut TrapFrame) {
 
 /// `rt_sigsuspend` / `pause` : attend qu'un signal arrive.
 fn sys_sigsuspend(set: u64) -> i64 {
-    let process = task::current_process();
-    let saved = process.signals.lock().blocked;
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : masque du fil appelant.
+    let fil = task::current();
+    let saved = fil.masque_signaux.charge();
     if set != 0 {
         if let Some(mask) = user_read_u64(set) {
-            process.signals.lock().blocked = mask & !(1 << (crate::kernel::signal::SIGKILL - 1));
+            fil.masque_signaux.range(crate::kernel::signal::SignalState::masque_permis(mask));
         }
     }
     while !task::signal_pending() {
         task::yield_now();
         task::attends_interruption();
     }
-    process.signals.lock().blocked = saved;
+    fil.masque_signaux.range(saved);
     // POSIX impose ce retour : l'attente s'est terminee par un signal.
     -errno::EINTR
 }
@@ -1288,6 +1289,10 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
     let process = task::current().process.clone();
     process.lifecycle.lock().threads += 1;
     let mut child = task::Task::new(process, child_frame);
+    // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : un fil nait avec le masque de son
+    // createur (la glibc y compte : elle cree le fil tout bloque, puis il
+    // restaure le masque d'origine du createur).
+    child.masque_signaux.range(task::current().masque_signaux.charge());
     if flags & CLONE_SETTLS != 0 {
         child.fs_base = tls;
     }
