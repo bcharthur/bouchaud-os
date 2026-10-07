@@ -424,12 +424,37 @@ def main() -> int:
     # en mode utilisateur, et evite qu'un gestionnaire tourne sur une boucle
     # etrangere (ProcessManager::verify_event_loop).
     elu = racine / "Libraries/LibCore/EventLoopImplementationUnix.cpp"
+    # Le gestionnaire de signal ne touche que des atomiques sans verrou et
+    # n'appelle que write() et getpid() (surs en contexte de signal). La
+    # destruction d'une boucle attend qu'aucun gestionnaire ne soit en vol vers
+    # son tube avant de le fermer : sinon un fil pouvait lire le proprietaire,
+    # perdre la main, et ecrire dans un tube ferme -- ou dans le descripteur
+    # qu'un autre fil venait de rouvrir sous le meme numero.
+    remplace(
+        elu,
+        "#include <AK/HashMap.h>\n",
+        "#include <AK/Atomic.h>\n"
+        "#include <AK/HashMap.h>\n",
+    )
+    remplace(
+        elu,
+        "#include <pthread.h>\n",
+        "#include <errno.h>\n"
+        "#include <pthread.h>\n"
+        "#include <sched.h>\n",
+    )
     remplace(
         elu,
         "thread_local ThreadData* s_this_thread_data;\n",
         "thread_local ThreadData* s_this_thread_data;\n"
         "// BOUCHAUD_SIGNAL_BOUCLE_V1 : la boucle proprietaire de chaque signal.\n"
-        "static ThreadData* s_signal_owner[65] {};\n",
+        "struct SignalOwner {\n"
+        "    Atomic<ThreadData*> owner { nullptr };\n"
+        "    Atomic<int> wake_fd { -1 };\n"
+        "    Atomic<pid_t> pid { 0 };\n"
+        "    Atomic<int> in_flight { 0 };\n"
+        "};\n"
+        "static SignalOwner s_signal_owner[65];\n",
     )
     remplace(
         elu,
@@ -438,10 +463,18 @@ def main() -> int:
         "    s_this_thread_data = nullptr;\n",
         "static void destroy_thread_data(void* value)\n"
         "{\n"
-        "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de proprietaire mort.\n"
-        "    for (auto& owner : s_signal_owner) {\n"
-        "        if (owner == value)\n"
-        "            owner = nullptr;\n"
+        "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de proprietaire mort, et plus aucun\n"
+        "    // gestionnaire en vol vers son tube quand le destructeur le ferme.\n"
+        "    // Ordre (seq_cst) : wake_fd = -1 PUIS lecture de in_flight ; le\n"
+        "    // gestionnaire fait in_flight++ PUIS lit wake_fd. L'un des deux voit\n"
+        "    // l'autre : soit le gestionnaire lit -1, soit on l'attend.\n"
+        "    for (auto& slot : s_signal_owner) {\n"
+        "        ThreadData* attendu = static_cast<ThreadData*>(value);\n"
+        "        if (slot.owner.compare_exchange_strong(attendu, nullptr)) {\n"
+        "            slot.wake_fd.store(-1);\n"
+        "            while (slot.in_flight.load() != 0)\n"
+        "                sched_yield();\n"
+        "        }\n"
         "    }\n"
         "    s_this_thread_data = nullptr;\n",
     )
@@ -451,13 +484,27 @@ def main() -> int:
         "        return;\n"
         "    auto& thread_data = *s_this_thread_data;\n",
         "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : vers la boucle qui a enregistre le\n"
-        "    // gestionnaire, depuis n'importe quel fil (write() est sur en signal).\n"
-        "    auto* destination = (signal_number > 0 && signal_number < 65 && s_signal_owner[signal_number])\n"
-        "        ? s_signal_owner[signal_number]\n"
-        "        : s_this_thread_data;\n"
-        "    if (!destination)\n"
+        "    // gestionnaire, quel que soit le fil qui recoit le signal. Le pid\n"
+        "    // ecarte la fenetre fork()/exec() (le tube est partage avec le pere).\n"
+        "    if (signal_number > 0 && signal_number < 65) {\n"
+        "        auto& slot = s_signal_owner[signal_number];\n"
+        "        slot.in_flight.fetch_add(1);\n"
+        "        int fd = slot.wake_fd.load();\n"
+        "        bool livre = false;\n"
+        "        if (fd >= 0 && slot.pid.load() == getpid()) {\n"
+        "            int saved_errno = errno;\n"
+        "            livre = write(fd, &signal_number, sizeof(signal_number)) == sizeof(signal_number);\n"
+        "            errno = saved_errno;\n"
+        "        }\n"
+        "        slot.in_flight.fetch_sub(1);\n"
+        "        if (livre)\n"
+        "            return;\n"
+        "    }\n"
+        "    // Pas de proprietaire (ou il est mort) : comportement amont, le fil\n"
+        "    // receveur.\n"
+        "    if (!s_this_thread_data)\n"
         "        return;\n"
-        "    auto& thread_data = *destination;\n",
+        "    auto& thread_data = *s_this_thread_data;\n",
     )
     remplace(
         elu,
@@ -465,9 +512,13 @@ def main() -> int:
         "        info.signal_handlers.remove(remove_signal_number);\n",
         "    if (remove_signal_number != 0) {\n"
         "        info.signal_handlers.remove(remove_signal_number);\n"
-        "        // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de gestionnaire, plus de proprietaire.\n"
-        "        if (remove_signal_number > 0 && remove_signal_number < 65)\n"
-        "            s_signal_owner[remove_signal_number] = nullptr;\n"
+        "        // BOUCHAUD_SIGNAL_BOUCLE_V1 : plus de gestionnaire, plus de\n"
+        "        // proprietaire. Le tube reste ouvert (son fil vit) : rien a attendre.\n"
+        "        if (remove_signal_number > 0 && remove_signal_number < 65) {\n"
+        "            auto& slot = s_signal_owner[remove_signal_number];\n"
+        "            slot.wake_fd.store(-1);\n"
+        "            slot.owner.store(nullptr);\n"
+        "        }\n"
         "    }\n",
     )
     remplace(
@@ -479,9 +530,18 @@ def main() -> int:
         "{\n"
         "    VERIFY(signal_number != 0);\n"
         "    // BOUCHAUD_SIGNAL_BOUCLE_V1 : le premier fil qui enregistre ce signal\n"
-        "    // en possede la boucle de distribution.\n"
-        "    if (signal_number > 0 && signal_number < 65 && !s_signal_owner[signal_number])\n"
-        "        s_signal_owner[signal_number] = &ThreadData::the();\n",
+        "    // en possede la boucle de distribution, jusqu'au retrait du dernier\n"
+        "    // gestionnaire ou a la mort de ce fil. pid avant tube : qui lit le\n"
+        "    // tube lit aussi le bon pid.\n"
+        "    if (signal_number > 0 && signal_number < 65) {\n"
+        "        auto& slot = s_signal_owner[signal_number];\n"
+        "        auto& self = ThreadData::the();\n"
+        "        ThreadData* attendu = nullptr;\n"
+        "        if (slot.owner.compare_exchange_strong(attendu, &self)) {\n"
+        "            slot.pid.store(self.pid);\n"
+        "            slot.wake_fd.store(self.wake_pipe_fds[1]);\n"
+        "        }\n"
+        "    }\n",
     )
     return 0
 
