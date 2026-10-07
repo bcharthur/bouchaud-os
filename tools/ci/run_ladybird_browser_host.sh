@@ -381,6 +381,18 @@ while kill -0 "$PID" 2>/dev/null; do
     break
   fi
 
+  # LE NAVIGATEUR EST MORT : rien ne viendra plus.
+  #
+  # BOUCHAUD_SMOKE_NAVIGATEUR_MORT_V1 -- run 37581515158 : le navigateur et
+  # ses services sont morts vers T+19 s (zombies=9, plus un seul processus
+  # Ladybird vivant), et la boucle a attendu le plafond, 900 s, en
+  # rapportant « le navigateur progressait trop lentement ». La mort du
+  # processus /bo-navigateur est un verdict terminal, et elle est nommee.
+  if [ -z "${VU[$DOCUMENT]:-}" ] && grep -aqE 'PROCESS_DEATH .*image=/bo-navigateur ' "$LOG"; then
+    verdict=navigateur_mort
+    break
+  fi
+
   if (( SECONDS - DEBUT >= PLAFOND )); then
     verdict=plafond
     break
@@ -687,6 +699,12 @@ if [ "$manquants" -ne 0 ]; then
     muet)
       echo "l'invite a cesse d'ecrire sur la console serie pendant ${SILENCE_MAX}s :" >&2
       echo "la machine est bloquee, pas lente. Le dernier jalon atteint dit ou." >&2
+      ;;
+    navigateur_mort)
+      echo "le processus /bo-navigateur est MORT apres ${ECOULE}s, avant le document :" >&2
+      sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+        | grep -aoE '(PROCESS_(DEATH|EXIT|FAULT)|FAULT_FATAL) .*(bo-navigateur|ladybird/[A-Za-z]+|pid=[0-9]+ reason=).*' \
+        | awk 'NR <= 30 { print "  " substr($0, 1, 220) }' >&2 || true
       ;;
     plafond)
       echo "plafond de ${PLAFOND}s atteint alors que l'invite ecrivait encore :" >&2
