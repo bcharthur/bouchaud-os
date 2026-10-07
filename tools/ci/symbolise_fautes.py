@@ -30,7 +30,7 @@ from pathlib import Path
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 EXEC = re.compile(r"PERF_EXEC_PRET image=(\S+) pid=(\d+) .*?base=(0x[0-9a-f]+)")
 EXECVE = re.compile(r"PERF_EXECVE .*?image=(\S+) pid=(\d+)")
-FAUTE = re.compile(r"PROCESS_FAULT pid=(\d+) reason=(.*?) rip=(0x[0-9a-f]+) rsp=(0x[0-9a-f]+) cr2=(0x[0-9a-f]+)")
+FAUTE = re.compile(r"PROCESS_FAULT pid=(\d+) reason=(.*?) rip=(0x[0-9a-f]+) rsp=(0x[0-9a-f]+) cr2=(0x[0-9a-f]+)(?: base=(0x[0-9a-f]+))?")
 # /bo-navigateur est une copie de BouchaudBrowserHost.
 ALIAS = {"bo-navigateur": "BouchaudBrowserHost"}
 
@@ -70,7 +70,9 @@ def main(argv):
         image = images.get(pid, "?")
         nom = ALIAS.get(Path(image).name, Path(image).name)
         binaire = dossier / nom
-        base = bases.get(pid)
+        # La ligne de faute porte la base depuis BOUCHAUD_SYMBOLISE_FAUTES_V1 ;
+        # sinon, celle de l'exec (absente pour les services du navigateur).
+        base = int(f[6], 16) if f[6] else bases.get(pid)
         entete = f"FAUTE_SYMBOLE pid={pid} image={image} rip={rip:#x} cr2={cr2} raison={raison.strip()}"
         if base is None or not binaire.is_file():
             print(f"{entete} -> non symbolisable (base={'?' if base is None else hex(base)} binaire={'present' if binaire.is_file() else 'absent'})")

@@ -232,10 +232,12 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // P18_SERVICE_GUARDIAN_V1. La sortie 139 seule ne distingue pas
     // une exception CPU d'un exit(139); conserver le vecteur et les registres.
     let pid = crate::kernel::task::try_current().map(|t| t.process.pid).unwrap_or(0);
+    // BOUCHAUD_SYMBOLISE_FAUTES_V1 : `base=` (fin de ligne) rapporte le rip
+    // a l'image PIE ; tools/ci/symbolise_fautes.py le lit ici d'abord.
     crate::kernel::dmesg::log_fmt(format_args!(
-        "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x}",
+        "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
         pid, reason, stack.instruction_pointer.as_u64(),
-        stack.stack_pointer.as_u64(), cr2));
+        stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base()));
     crate::kernel::blackbox::processus_faute(
         pid, reason, stack.instruction_pointer.as_u64(),
         stack.stack_pointer.as_u64(), cr2);
