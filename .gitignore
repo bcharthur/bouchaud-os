@@ -246,6 +246,10 @@ tools/userland/out-matrice/
 /ladybird-crash-rendu.img
 /serie-crash-rendu.log*
 /fixture-crash-rendu.log
+/scenario-oopif/
+/ladybird-oopif.img
+/serie-oopif.log*
+/fixture-oopif.log
 /scenario-sites/
 /ladybird-sites.img
 /serie-sites.log*

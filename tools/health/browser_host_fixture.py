@@ -364,6 +364,51 @@ CRASH_B_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-b</title>
   setTimeout(() => { console.log(`HOST_CRASH_B_DEMANDE raf=${n}`); document.title = "BOUCHAUD_BANC_CRASH_RENDU"; }, 5000);
 </script></body>"""
 
+# BOUCHAUD_OOPIF_V1 -- isolation des CADRES (BOUCHAUD_SITE_ISOLATION=iframe).
+# Le parent (10.0.2.2) embarque un cadre de L'AUTRE site (10.0.2.100). Sous
+# isolation des cadres, le cadre doit tourner dans un AUTRE WebContent, et
+# postMessage doit traverser dans les deux sens.
+OOPIF_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>oopif-a</title>
+<body style="margin:0;font:16px sans-serif;background:#eef">parent<br>
+<iframe id="f" src="http://10.0.2.100:18082/oopif-enfant.html" style="width:400px;height:200px;border:0"></iframe><script>
+(() => {
+  const t0 = performance.now();
+  let recus = 0, echos = 0;
+  console.log(`HOST_OOPIF_A origine=${location.origin}`);
+  addEventListener("message", e => {
+    if (e.data && e.data.type === "bonjour") {
+      recus++;
+      console.log(`HOST_OOPIF_A recu=${recus} de=${e.origin} enfant_origine=${e.data.origine}`);
+      document.getElementById("f").contentWindow.postMessage({ type: "echo", n: recus }, "http://10.0.2.100:18082");
+    } else if (e.data && e.data.type === "echo-recu") {
+      echos++;
+      console.log(`HOST_OOPIF_A echo_confirme=${echos}`);
+    }
+  });
+  // Lire le document du cadre doit etre REFUSE (autre origine), quel que soit le processus.
+  setTimeout(() => {
+    let acces = "refuse";
+    try { void document.getElementById("f").contentWindow.document.body; acces = "PERMIS"; } catch (e) {}
+    console.log(`HOST_OOPIF_A acces_document_enfant=${acces}`);
+  }, 4000);
+  setTimeout(() => console.log(`HOST_OOPIF_A_FIN recus=${recus} echos=${echos} t_ms=${Math.round(performance.now() - t0)}`), 20000);
+})();
+</script></body>"""
+OOPIF_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>oopif-enfant</title>
+<body style="margin:0;background:#fd8">cadre<canvas id="c" width="300" height="100"></canvas><script>
+  console.log(`HOST_OOPIF_ENFANT origine=${location.origin} parent_meme_origine=${(() => { try { return !!parent.document; } catch (e) { return false; } })()}`);
+  const ctx = document.getElementById("c").getContext("2d"); let n = 0;
+  (function a() { n++; ctx.fillStyle = `hsl(${n % 360},60%,50%)`; ctx.fillRect(n % 280, 10, 20, 80); requestAnimationFrame(a); })();
+  addEventListener("message", e => {
+    if (e.data && e.data.type === "echo") {
+      console.log(`HOST_OOPIF_ENFANT echo=${e.data.n} de=${e.origin}`);
+      parent.postMessage({ type: "echo-recu" }, "http://10.0.2.2:18082");
+    }
+  });
+  let k = 0;
+  const t = setInterval(() => { parent.postMessage({ type: "bonjour", origine: location.origin }, "http://10.0.2.2:18082"); if (++k >= 3) clearInterval(t); }, 1500);
+</script></body>"""
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1597,6 +1642,8 @@ class Handler(BaseHTTPRequestHandler):
             "/crash-a.html": (CRASH_A_HTML, "text/html; charset=utf-8"),
             "/crash-b0.html": (CRASH_B0_HTML, "text/html; charset=utf-8"),
             "/crash-b.html": (CRASH_B_HTML, "text/html; charset=utf-8"),
+            "/oopif-a.html": (OOPIF_A_HTML, "text/html; charset=utf-8"),
+            "/oopif-enfant.html": (OOPIF_ENFANT_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie
