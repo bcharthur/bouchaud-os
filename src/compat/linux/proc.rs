@@ -717,6 +717,16 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         // Le domaine CPU-local rend le meme `Arc` sans rien verrouiller, et
         // `signals` a son propre verrou sur le `Process`.
         let process = super::processus_courant();
+        // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1 : comme Linux, un signal de
+        // processus revient au fil principal quand il peut le prendre.
+        // Le verrou `signals` est rendu AVANT de parcourir le registre des
+        // taches (`signal_a_effet_en_attente` le rend en sortant) : ailleurs
+        // l'ordre est registre puis signals (`notify_parent_of_exit_for`).
+        // Un signal IGNORE n'a rien a attendre : n'importe quel fil le
+        // consomme. Seul celui qui fera quelque chose est laisse.
+        if task::signal_a_effet_en_attente() && task::laisse_le_signal_au_fil_principal() {
+            return;
+        }
         let (signal, action, blocked) = {
             let signals = process.signals.lock();
             match signals.next_deliverable() {

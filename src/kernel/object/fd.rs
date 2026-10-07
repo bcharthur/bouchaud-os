@@ -303,6 +303,13 @@ pub const CAPACITE_CANAL: usize = 64 * 1024;
 /// tout producteur appelle `notify_readiness` apres avoir publie son etat.
 static READINESS: WaitQueue = WaitQueue::new();
 
+/// Cle de la file de disponibilite : un fil dont `wait_queue_key` vaut
+/// cette cle dort dans `poll`/`select`/`epoll_wait` (meme calcul que
+/// `WaitQueue::key`). BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1.
+pub fn readiness_cle() -> usize {
+    &READINESS as *const WaitQueue as usize
+}
+
 pub fn readiness_ticket() -> WaitTicket {
     READINESS.ticket()
 }

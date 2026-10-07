@@ -20,6 +20,12 @@
  *   principal  quatre fils (poll, nanosleep, attente de condition, read),
  *              le fil PRINCIPAL faute ;
  *   secondaire meme chose, un fil SECONDAIRE faute, le principal en poll.
+ *   boucle     comme attente, mais le gestionnaire imite LibCore
+ *              (EventLoopManagerUnix::handle_signal) : il n'ecrit dans le
+ *              tube QUE s'il s'execute sur le fil de la boucle, et un fil
+ *              secondaire du pere fait des appels systeme sans arret. Linux
+ *              livre au fil principal ; un noyau qui livre au premier fil
+ *              venu perd le signal (le gestionnaire l'ignore ailleurs).
  *   attente    multi-fils (comme principal), mais le pere attend en
  *              poll(-1) sur le SEUL tube du gestionnaire, sans delai ni
  *              autre descripteur : c'est la boucle d'un navigateur au repos,
@@ -45,6 +51,9 @@
 #include <unistd.h>
 
 static int tube_signal[2];
+static __thread int est_la_boucle;
+static volatile int imiter_libcore;
+static volatile int fil_actif_continue = 1;
 
 static void sur_alarme(int sig)
 {
@@ -56,7 +65,10 @@ static void sur_sigchld(int sig)
     (void)sig;
     int e = errno;
     char c = 'c';
-    (void)!write(tube_signal[1], &c, 1);
+    // LibCore : `if (!s_this_thread_data) return;` -- le signal est perdu
+    // s'il tombe sur un fil sans boucle d'evenements.
+    if (!imiter_libcore || est_la_boucle)
+        (void)!write(tube_signal[1], &c, 1);
     errno = e;
 }
 
@@ -149,6 +161,16 @@ static void fils(int cas)
 }
 
 /* --- pere ----------------------------------------------------------------- */
+static void *pere_actif(void *arg)
+{
+    (void)arg;
+    while (fil_actif_continue) {
+        (void)getppid();
+        usleep(200);
+    }
+    return NULL;
+}
+
 static void *pere_ailleurs(void *arg)
 {
     (void)arg;
@@ -162,7 +184,7 @@ static void *pere_ailleurs(void *arg)
 
 int main(void)
 {
-    static const char *const noms[] = { "mono", "principal", "secondaire", "attente" };
+    static const char *const noms[] = { "mono", "principal", "secondaire", "attente", "boucle" };
     setvbuf(stdout, NULL, _IONBF, 0);
     if (pipe2(tube_signal, O_CLOEXEC | O_NONBLOCK) != 0) {
         printf("SIGCHLD_MULTIFIL_ECHEC n=1 raison=pipe2\n");
@@ -179,9 +201,16 @@ int main(void)
     sigaction(SIGALRM, &sal, NULL);
     pthread_t autre;
     pthread_create(&autre, NULL, pere_ailleurs, NULL);
+    est_la_boucle = 1;
 
     int echecs = 0;
-    for (int cas = 0; cas < 4; cas++) {
+    pthread_t actif;
+    for (int cas = 0; cas < 5; cas++) {
+        if (cas == 4) {
+            imiter_libcore = 1;
+            pthread_create(&actif, NULL, pere_actif, NULL);
+            usleep(50 * 1000);
+        }
         int prise[2];
         socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, prise);
         char c;
@@ -191,13 +220,13 @@ int main(void)
         pid_t p = fork();
         if (p == 0) {
             close(prise[0]);
-            fils(cas == 3 ? 1 : cas);
+            fils(cas >= 3 ? 1 : cas);
         }
         close(prise[1]);
         long t_eof = -1, t_sig = -1;
         pid_t rendu = 0;
         int statut = 0;
-        if (cas == 3) {
+        if (cas >= 3) {
             // Aucun delai, aucun autre descripteur : seul un signal peut
             // interrompre ce poll (EINTR), ou y faire apparaitre le tube.
             alarm(10);
@@ -219,9 +248,9 @@ int main(void)
             }
             if (t_sig >= 9900)
                 t_sig = -1; // reveille par l'alarme, pas par SIGCHLD
-            printf("SIGCHLD_ATTENTE poll=%d errno=%d reveil_ms=%ld\n", n, erreur, attendu);
+            printf("SIGCHLD_ATTENTE cas=%s poll=%d errno=%d reveil_ms=%ld\n", noms[cas], n, erreur, attendu);
         }
-        while (cas != 3 && maintenant_ms() - t0 < 10000 && (t_eof < 0 || rendu <= 0)) {
+        while (cas < 3 && maintenant_ms() - t0 < 10000 && (t_eof < 0 || rendu <= 0)) {
             struct pollfd f[2] = { { .fd = tube_signal[0], .events = POLLIN }, { .fd = prise[0], .events = POLLIN } };
             int n = poll(f, t_eof < 0 ? 2 : 1, 200);
             if (n < 0 && errno != EINTR)
@@ -261,6 +290,7 @@ int main(void)
             waitpid(p, NULL, 0);
         }
     }
+    fil_actif_continue = 0;
     if (echecs == 0)
         printf("SIGCHLD_MULTIFIL_OK\n");
     else

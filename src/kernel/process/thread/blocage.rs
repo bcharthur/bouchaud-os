@@ -327,6 +327,19 @@ pub fn signal_pending() -> bool {
 /// pour un signal (sigchld-multifil-probe, cas `attente` : pere fige plus de
 /// huit minutes apres la mort de son fils, meme l'alarme de 10 s ignoree).
 pub fn signal_interrompt_attente() -> bool {
+    // Le cas courant (aucun signal) reste un simple test de bits : cette
+    // fonction est appelee a chaque reveil de `poll`. Le parcours du
+    // registre n'a lieu que si un signal attend vraiment.
+    if !signal_a_effet_en_attente() {
+        return false;
+    }
+    // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1 : le signal attend le fil principal ;
+    // un autre fil en `poll` ne doit pas en sortir en boucle sur EINTR.
+    !laisse_le_signal_au_fil_principal()
+}
+
+/// Un signal livrable et qui fera quelque chose est-il en attente ?
+pub fn signal_a_effet_en_attente() -> bool {
     let Some(task) = try_current() else { return false };
     let signals = task.process.signals.lock();
     let mut prets = signals.pending & !signals.blocked;
@@ -348,6 +361,54 @@ pub fn signal_interrompt_attente() -> bool {
         return true;
     }
     false
+}
+
+/// Le fil COURANT doit-il laisser un signal de processus en attente au fil
+/// principal ?
+///
+/// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V1
+///
+/// Un signal adresse au PROCESSUS (kill, SIGCHLD, alarme) peut, selon POSIX,
+/// echoir a n'importe quel fil qui ne le bloque pas. Linux, lui, le donne au
+/// fil PRINCIPAL des qu'il peut le prendre (`complete_signal`), et LibCore en
+/// depend : `EventLoopManagerUnix::handle_signal` ecrit dans le tube de
+/// reveil du FIL QUI RECOIT le signal, et rend la main sans rien faire si ce
+/// fil n'a pas de boucle d'evenements. Livre au premier fil qui rentrait en
+/// mode utilisateur -- dans le navigateur, un fil de travail toujours actif,
+/// jamais le fil principal endormi en `poll` -- le SIGCHLD etait perdu
+/// (sigchld-multifil-probe, cas `boucle` : 10,3 s, reveil par l'alarme ; run
+/// 37589903681 : aucun [LB] SIGCHLD_RECU, aucune reprise de WebContent).
+///
+/// Fil principal : le plus ancien fil vivant du processus (plus petit tid).
+/// On le lui laisse s'il le prendra BIENTOT : endormi dans une attente de
+/// disponibilite (il sera reveille, `poll` rendra EINTR), ou dans le noyau
+/// (il repasse par la fin d'appel systeme, ou la livraison a lieu). S'il
+/// calcule en mode utilisateur ou dort ailleurs (futex, sommeil), le fil
+/// courant livre, comme avant : aucun signal n'attend indefiniment.
+pub fn laisse_le_signal_au_fil_principal() -> bool {
+    let Some(courant) = try_current() else { return false };
+    let pid = courant.process.pid;
+    let registre = tasks();
+    let mut principal: Option<usize> = None;
+    for index in 0..registre.len() {
+        let tache = &registre[index];
+        if tache.process.pid != pid || tache.state == TaskState::Zombie {
+            continue;
+        }
+        if principal.map_or(true, |i| tache.tid < registre[i].tid) {
+            principal = Some(index);
+        }
+    }
+    let Some(index) = principal else { return false };
+    let fil = &registre[index];
+    if fil.tid == courant.tid {
+        return false;
+    }
+    match fil.state.charge() {
+        TaskState::Blocked => fil.wait_queue_key.charge() as usize == crate::kernel::fd::readiness_cle(),
+        TaskState::Ready => fil.in_kernel.charge(),
+        TaskState::Zombie => false,
+    }
 }
 
 /// Un signal vient d'etre pose sur `pid` : reveiller ses fils endormis ET
