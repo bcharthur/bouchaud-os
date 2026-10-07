@@ -180,8 +180,12 @@ Bundle de debug distant : `.\tools\remote\collect-ladybird-debug.ps1`.
 5. **Lenteur** → `[PROC-STAT]` (CPU par processus), `ATA_CONTROLEUR`
    (attente disque, `lots_dma`, `lots_dma_ecrits`), `BOUCHAUD_TSC_CONTROLE`
    (une horloge fausse fausse toutes les durées).
-6. **Sous KVM seulement** → `BOUCHAUD_TSC_CONTROLE rapport_pour_mille=` loin
-   de 1000 : horloge monotone fausse ; `replis_apic=` élevé : identité du
+6. **Sous KVM seulement** → `BOUCHAUD_TSC_CONTROLE` : `source=` dit d'où
+   vient la fréquence retenue (`pit2`, `cpuid15`, `hyperviseur`…) ; un
+   `rapport_pour_mille=` loin de 1000 mesure les **ticks d'IRQ0** du
+   démarrage (KVM rattrape les ticks en souffrance), pas l'horloge monotone,
+   qui ne dépend plus d'eux. Les délais comptés en ticks se lisent dans
+   `[PROC-STAT] ticks_ms= mono_ms=`. `replis_apic=` élevé : identité du
    cœur recalculée par CPUID (coûteux sous KVM imbriqué).
 
 ## 7. Sources de vérité
