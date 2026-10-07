@@ -123,6 +123,9 @@ for img in BouchaudBrowserHost bo-navigateur WebContent RequestServer ImageDecod
   [ -n "$premier" ] && printf '  %-20s premier %-16s dernier %s\n' "$img" "$premier" "$dernier"
 done
 
+echo "== tendance RSS par processus (pente de la seconde moitie de vie) =="
+python3 tools/ci/tendance_rss.py "$P" --min-releves 10 | sed 's/^/  /'
+
 echo "== verdict =="
 echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
