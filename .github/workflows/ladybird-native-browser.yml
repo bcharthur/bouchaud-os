@@ -487,6 +487,69 @@ jobs:
             fixture-endurance.log
           if-no-files-found: warn
 
+  endurance-kvm:
+    # BOUCHAUD_ENDURANCE_KVM_V1 : la meme page, 5 minutes, sous KVM.
+    # DIAGNOSTIC (hors verdict de convergence) : il dit ce que coute
+    # l'emulation TCG dans les cadences mesurees par l'endurance.
+    name: ladybird / endurance sous KVM (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Executant -- processeurs et acceleration (diagnostic)
+        # Les bancs lancent QEMU SANS -enable-kvm (TCG, emulation logicielle) :
+        # les cadences mesurees (rAF, chargement des cadres) en dependent.
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          if [ -e /dev/kvm ]; then ls -l /dev/kvm; echo "KVM_PRESENT=1 (non utilise par les bancs)"; else echo "KVM_PRESENT=0"; fi
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Endurance 5 minutes sous KVM
+        env:
+          BO_QEMU_KVM: "1"
+        run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 300
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-endurance-kvm
+          path: |
+            serie-endurance.log
+            fixture-endurance.log
+          if-no-files-found: warn
+
   crash-rendu:
     # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
     # de l'autre site et le Compositor vivent, le navigateur le remplace.

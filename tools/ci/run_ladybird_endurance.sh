@@ -70,10 +70,20 @@ AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 : > "$LOG"
+# BOUCHAUD_ENDURANCE_KVM_V1 -- BO_QEMU_KVM=1 : meme banc sous KVM, pour
+# separer ce que coute l'emulation TCG de ce que coute le logiciel (run
+# 37585729384 : rAF ~1,3 Hz, WebContent a 37 % d'un coeur, Compositor 64 %).
+# Diagnostic seulement : la porte de convergence reste sous TCG.
+ACCEL="-cpu max"
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  [ -w /dev/kvm ] || { echo "BO_QEMU_KVM=1 mais /dev/kvm inaccessible" >&2; exit 1; }
+  ACCEL="-enable-kvm -cpu host"
+fi
+echo "ENDURANCE_ACCEL ${ACCEL}"
 qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$IMAGE" \
-  -m 8192 -smp 4 -cpu max -display none -no-reboot \
+  -m 8192 -smp 4 $ACCEL -display none -no-reboot \
   -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   -serial file:"$LOG" &
