@@ -78,6 +78,10 @@ static long long maintenant_ns(void)
 }
 
 /* Lit les champs 14 (utime) et 15 (stime) de /proc/<pid>/stat. */
+/* Derniere ligne brute lue par ce fil : imprimee avec la precedente quand
+ * une lecture recule (etat, nombre de fils, tous les champs). */
+static __thread char ligne_brute[256];
+
 static int lit_stat(const char *chemin, unsigned long long *u, unsigned long long *s)
 {
     char tampon[1024];
@@ -89,6 +93,12 @@ static int lit_stat(const char *chemin, unsigned long long *u, unsigned long lon
     if (n <= 0)
         return -1;
     tampon[n] = 0;
+    size_t k = (size_t)n < sizeof ligne_brute - 1 ? (size_t)n : sizeof ligne_brute - 1;
+    memcpy(ligne_brute, tampon, k);
+    ligne_brute[k] = 0;
+    char *nl = strchr(ligne_brute, '\n');
+    if (nl)
+        *nl = 0;
     // Le nom (champ 2) peut contenir des espaces : repartir de la derniere ')'.
     char *p = strrchr(tampon, ')');
     if (!p)
@@ -129,6 +139,7 @@ struct suivi {
     int amorce;
     unsigned long long u, s;
     long long a; /* horloge juste avant la lecture precedente */
+    char ligne[256]; /* ligne brute precedente (lectures de /proc/<pid>/stat) */
 };
 
 static void verifie(struct suivi *v, const char *quoi, long pid, unsigned long long u, unsigned long long s,
@@ -137,8 +148,12 @@ static void verifie(struct suivi *v, const char *quoi, long pid, unsigned long l
     atomic_fetch_add(&lectures, 1);
     if (v->amorce) {
         if (u < v->u || s < v->s) {
-            if (atomic_fetch_add(&reculs, 1) < 8)
-                printf("COMPTA_RECUL %s pid=%ld utime=%llu<-%llu stime=%llu<-%llu\n", quoi, pid, u, v->u, s, v->s);
+            if (atomic_fetch_add(&reculs, 1) < 8) {
+                printf("COMPTA_RECUL %s pid=%ld utime=%llu<-%llu stime=%llu<-%llu ecart_ns=%lld\n", quoi, pid, u, v->u, s,
+                    v->s, b - v->a);
+                if (pid > 0)
+                    printf("COMPTA_RECUL_AVANT %s\nCOMPTA_RECUL_APRES %s\n", v->ligne, ligne_brute);
+            }
         }
         unsigned long long d = (u + s) - (v->u + v->s);
         long long mur = b - v->a;
@@ -153,6 +168,8 @@ static void verifie(struct suivi *v, const char *quoi, long pid, unsigned long l
     v->u = u;
     v->s = s;
     v->a = a;
+    if (pid > 0)
+        memcpy(v->ligne, ligne_brute, sizeof v->ligne);
 }
 
 /* --- fils de calcul ------------------------------------------------------ */
