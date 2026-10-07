@@ -140,6 +140,8 @@ void BrowserWindow::retire_vue(u64 onglet)
         if (m_vues[i]->onglet() != onglet)
             continue;
         warnln("[LB:TAB] ferme onglet={} page={}", onglet, m_vues[i]->page_courante());
+        m_webcontent_de_l_onglet.remove(onglet);
+        m_onglets_repris.remove(onglet);
         m_vues.remove(i);
         break;
     }
@@ -362,6 +364,16 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         });
         m_quitte_apres->start();
     }
+    // BOUCHAUD_PROCESSUS_JOURNAL_V1 -- isolation de site : une navigation
+    // vers un autre site donne a l'onglet un NOUVEAU WebContent (upstream,
+    // create_new_process_for_cross_site_navigation).
+    m_webcontent_de_l_onglet.set(onglet, vue.client().pid());
+    vue.on_web_content_process_change_for_cross_site_navigation = [this, onglet, vue_ptr = &vue] {
+        auto const nouveau = vue_ptr->client().pid();
+        auto const ancien = m_webcontent_de_l_onglet.get(onglet).value_or(-1);
+        m_webcontent_de_l_onglet.set(onglet, nouveau);
+        warnln("[LB] PROCESS_SWAP onglet={} raison=autre_site ancien_pid={} nouveau_pid={}", onglet, ancien, nouveau);
+    };
     vue.on_title_change = [onglet, vue_ptr = &vue](Utf16String const& titre) {
         auto texte = titre.to_byte_string();
         if (banc_coupe_lien && texte == "BOUCHAUD_BANC_COUPE_LIEN"sv) {
@@ -452,6 +464,7 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // nouveau WebContent, page d'erreur, au plus 5 plantages rapproches).
     vue.on_web_content_crashed = [this, onglet, vue_ptr = &vue] {
         m_onglets_repris.set(onglet);
+        m_webcontent_de_l_onglet.set(onglet, vue_ptr->client().pid());
         warnln("[LB:CRASH] onglet={} webcontent=mort nouveau_pid={} t_ms={}", onglet, vue_ptr->client().pid(),
             MonotonicTime::now().milliseconds());
         BouchaudChrome::set_loading(onglet, false, "moteur arrete"sv);

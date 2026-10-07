@@ -109,12 +109,16 @@ grep -aoE 'HOST_ENDURANCE(_FIN)? cycle[s]?=.*' "$P" | awk 'NR % 20 == 1' | head 
 grep -aoE 'HOST_ENDURANCE_FIN .*' "$P" | head -1 || true
 
 echo "== cycle de vie des connexions Compositor =="
-for m in CONNECTION_CREATE CONNECTION_REMOVE PEER_CLOSE CONTEXT_CREATE CONTEXT_DESTROY LATE_MESSAGE COMPOSITOR_LINK_LOST COMPOSITOR_LINK_RECOVERED COMPOSITOR_LINK_GIVE_UP; do
+for m in CONNECTION_CREATE CONNECTION_REMOVE PEER_CLOSE CONTEXT_CREATE CONTEXT_DESTROY LATE_MESSAGE COMPOSITOR_LINK_LOST COMPOSITOR_LINK_RECOVERED COMPOSITOR_LINK_GIVE_UP PROCESS_SWAP; do
   printf '  %-26s %s\n' "$m" "$(grep -ac "\[LB\] $m" "$P" || true)"
 done
 compositors=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/Compositor pid=[0-9]+' "$P" | grep -oE 'pid=[0-9]+' | sort -u | wc -l || true)
 webcontents=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/WebContent pid=[0-9]+' "$P" | grep -oE 'pid=[0-9]+' | sort -u | wc -l || true)
 echo "  processus Compositor lances : $compositors ; WebContent lances : $webcontents"
+echo "== processus du navigateur (ProcessManager : PROCESS_CREATE / PROCESS_EXIT) =="
+for t in WebContent WebWorker RequestServer ImageDecoder Compositor; do
+  printf '  %-14s crees %-5s sortis %s\n' "$t" "$(grep -ac "\[LB\] PROCESS_CREATE type=$t " "$P" || true)" "$(grep -ac "\[LB\] PROCESS_EXIT type=$t " "$P" || true)"
+done
 
 echo "== RSS (kio) premier et dernier releve, par image =="
 for img in BouchaudBrowserHost bo-navigateur WebContent RequestServer ImageDecoder Compositor WebWorker; do

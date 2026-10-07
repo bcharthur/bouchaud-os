@@ -96,7 +96,7 @@ P="$LOG.propre"
 echo "CRASH_RENDU_VERDICT_BOUCLE $verdict duree_reelle_s=$((SECONDS - DEBUT))"
 
 echo "== chronologie =="
-grep -anE 'HOST_CRASH_A_OUVRE_B|HOST_CRASH_B|RENDERER_CRASH_(REQUEST|TEST)|PRESENT_APRES_REPRISE|PROCESS_FAULT|\[LB:CRASH\]|WebContent process crashed|CONNECTION_(CREATE|REMOVE)|COMPOSITOR_LINK|HOST_CRASH_A_FIN|VERIFICATION FAILED|KERNEL PANIC' "$P" \
+grep -anE 'HOST_CRASH_A_OUVRE_B|HOST_CRASH_B|RENDERER_CRASH_(REQUEST|TEST)|PRESENT_APRES_REPRISE|\[LB\] PROCESS_(CREATE|EXIT|SWAP)|PROCESS_FAULT|\[LB:CRASH\]|WebContent process crashed|CONNECTION_(CREATE|REMOVE)|COMPOSITOR_LINK|HOST_CRASH_A_FIN|VERIFICATION FAILED|KERNEL PANIC' "$P" \
   | sed -E 's/^([0-9]+):.*(HOST_|\[LB|PROCESS_FAULT|WebContent process|VERIFICATION|KERNEL)/\1: \2/' | awk 'NR <= 40 { print "  " $0 }' || true
 
 # Les numeros de ligne ordonnent les evenements.
@@ -144,6 +144,8 @@ exige "le pid demande est celui qui execute B (${pid_b_js:-?})" test -n "$pid_b_
 exige "B et A dans des WebContent differents (${pid_a:-?} / ${pid_b:-?})" test -n "$pid_a" -a "${pid_a:-x}" != "${pid_b:-x}"
 exige "le WebContent de B a faute (noyau : ${faute:-rien})" test -n "$faute"
 exige "B repris dans un NOUVEAU WebContent (${pid_b:-?} -> ${pid_b2:-?})" test -n "$pid_b2" -a "${pid_b2:-x}" != "${pid_b:-x}"
+exige "le navigateur a recolte la mort de ${pid_b:-?} (PROCESS_EXIT)" dans "\\[LB\\] PROCESS_EXIT type=WebContent pid=${pid_b:-x} "
+exige "le navigateur a enregistre ${pid_b2:-?} (PROCESS_CREATE)" dans "\\[LB\\] PROCESS_CREATE type=WebContent pid=${pid_b2:-x} "
 exige "une trame de B presentee par son NOUVEAU WebContent (${pid_trame_b:-aucune})" test -n "$pid_trame_b" -a "${pid_trame_b:-x}" = "${pid_b2:-y}"
 exige "A a fini (HOST_CRASH_A_FIN)" test -n "$fin"
 exige "A a continue de peindre apres le plantage (${raf_avant} -> ${raf_fin:-?})" test "${raf_fin:-0}" -gt $(( raf_avant + 30 ))

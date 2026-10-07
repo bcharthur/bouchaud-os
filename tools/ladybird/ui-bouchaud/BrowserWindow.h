@@ -21,6 +21,7 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/HashMap.h>
 #include <AK/HashTable.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Vector.h>
@@ -83,6 +84,8 @@ private:
     // Onglets dont le WebContent vient d'etre remplace (plantage) : leur
     // premiere trame suivante est journalisee (PRESENT_APRES_REPRISE).
     HashTable<u64> m_onglets_repris;
+    // Le WebContent courant de chaque onglet (PROCESS_SWAP : ancien -> nouveau).
+    HashMap<u64, pid_t> m_webcontent_de_l_onglet;
     RefPtr<Core::Timer> m_quitte_apres;
 };
 

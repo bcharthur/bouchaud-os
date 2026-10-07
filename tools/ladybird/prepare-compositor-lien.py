@@ -61,6 +61,7 @@ Journal structure (le banc et la campagne de convergence le lisent) :
   [LB] CONNECTION_CREATE / CONNECTION_REMOVE / PEER_CLOSE (Compositor)
   [LB] CONTEXT_CREATE / CONTEXT_DESTROY / LATE_MESSAGE      (Compositor)
   [LB] COMPOSITOR_LINK_LOST / _RECOVER / _RECOVERED / _GIVE_UP (UI)
+  [LB] PROCESS_CREATE / PROCESS_EXIT (UI, ProcessManager ; BOUCHAUD_PROCESSUS_JOURNAL_V1)
   [LB] LINK_CUT_TEST                                        (WebContent, banc)
 
 Banc : `debug_request("bouchaud-crash-rendu")` fait fauter le WebContent
@@ -358,6 +359,28 @@ def main() -> int:
         "    }\n"
         "\n"
         "    if (request == \"bouchaud-coupe-lien-compositor\") {\n",
+    )
+    # BOUCHAUD_PROCESSUS_JOURNAL_V1 -- cycle de vie des processus du
+    # navigateur, vu par le gestionnaire d'upstream (le seul endroit ou
+    # chaque service est enregistre et chaque mort recoltee).
+    pm = wv / "ProcessManager.cpp"
+    remplace(
+        pm,
+        "    auto pid = process.pid();\n"
+        "    on_process_added(process);\n",
+        "    auto pid = process.pid();\n"
+        "    dbgln(\"[LB] PROCESS_CREATE type={} pid={} total={}\", process_name_from_type(process.type()), pid, m_processes.size() + 1);\n"
+        "    on_process_added(process);\n",
+    )
+    remplace(
+        pm,
+        "        if (auto process = remove_process(pid); process.has_value())\n"
+        "            on_process_exited(process.release_value(), exit_status);\n",
+        "        if (auto process = remove_process(pid); process.has_value()) {\n"
+        "            dbgln(\"[LB] PROCESS_EXIT type={} pid={} statut={} restants={}\", process_name_from_type(process->type()), pid,\n"
+        "                exit_status.value_or(-1), m_processes.size());\n"
+        "            on_process_exited(process.release_value(), exit_status);\n"
+        "        }\n",
     )
     return 0
 
