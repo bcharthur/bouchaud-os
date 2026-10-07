@@ -44,6 +44,20 @@ def remplace(chemin: Path, ancre: str, nouveau: str) -> None:
     chemin.write_text(texte.replace(ancre, nouveau, 1), encoding="utf-8")
 
 
+MARQUEUR_DOCUMENT = "BOUCHAUD_WORKER_FIN_DOCUMENT_V1"
+
+
+def remplace_document(chemin: Path, ancre: str, nouveau: str) -> None:
+    """Comme `remplace`, sous le second marqueur : ces fichiers portent deja
+    le premier, qui ferait tout sauter."""
+    texte = chemin.read_text(encoding="utf-8")
+    if nouveau in texte:
+        return
+    if texte.count(ancre) != 1:
+        raise SystemExit(f"worker fin de document : ancre introuvable ou ambigue dans {chemin}")
+    chemin.write_text(texte.replace(ancre, nouveau, 1), encoding="utf-8")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: prepare-worker-terminate.py <arbre-ladybird>", file=sys.stderr)
@@ -94,7 +108,75 @@ def main() -> int:
         "        m_outside_port->close();\n"
         "    return {};\n",
     )
-    print("worker terminate : Worker::terminate() termine l'agent et ferme le port exterieur")
+
+    # BOUCHAUD_WORKER_FIN_DOCUMENT_V1 -- un worker dedie meurt avec le
+    # document qui l'a cree.
+    #
+    # Upstream (cdfe5f8) ne termine un worker dedie que lorsque son objet
+    # `Worker` est ramasse par le GC (`finalize()` -> close_worker_agent).
+    # Quitter la page ne le tue donc pas : banc cycle des workers (run
+    # 37622716750) -- 3 WebWorker vivants apres la navigation, jusqu'a la
+    # fermeture du navigateur ; endurance -- 27 WebWorker crees, 0 sortis,
+    # chacun avec ses minuteries. HTML : un document jete (discarded) est
+    # retire de l'ensemble des proprietaires de ses workers, et un worker sans
+    # proprietaire est termine. Pour un worker DEDIE, le seul proprietaire est
+    # ce document : le terminer quand le document est jete. Un document
+    # recuperable (salvageable, gardé dans l'historique) les garde, comme le
+    # veut la regle. Les workers partages (plusieurs proprietaires) ne sont
+    # pas touches.
+    remplace_document(
+        html / "WorkerAgentParent.h",
+        "    void terminate();\n",
+        "    void terminate();\n\n"
+        f"    // {MARQUEUR_DOCUMENT}\n"
+        "    // Termine les workers DEDIES dont le proprietaire est `document` (document jete).\n"
+        "    static WEB_API void terminate_dedicated_workers_of(DOM::Document&);\n",
+    )
+    remplace_document(
+        html / "WorkerAgentParent.cpp",
+        "void WorkerAgentParent::visit_edges(Cell::Visitor& visitor)\n",
+        f"// {MARQUEUR_DOCUMENT}\n"
+        "void WorkerAgentParent::terminate_dedicated_workers_of(DOM::Document& document)\n"
+        "{\n"
+        "    // `terminate()` retire l'agent de la table : relever d'abord, terminer ensuite.\n"
+        "    Vector<GC::Ref<WorkerAgentParent>> owned;\n"
+        "    for (auto& entry : worker_agent_parents()) {\n"
+        "        auto& agent = entry.value;\n"
+        "        if (agent->m_agent_type != AgentType::DedicatedWorker)\n"
+        "            continue;\n"
+        "        auto* window = window_from_global_object(agent->m_outside_settings->global_object());\n"
+        "        if (window && &window->associated_document() == &document)\n"
+        "            owned.append(agent);\n"
+        "    }\n"
+        "    for (auto& agent : owned) {\n"
+        "        dbgln(\"[LB] WORKER_FIN_DOCUMENT agent={}\", agent->m_agent_id);\n"
+        "        agent->terminate();\n"
+        "    }\n"
+        "}\n\n"
+        "void WorkerAgentParent::visit_edges(Cell::Visitor& visitor)\n",
+    )
+    dom = Path(sys.argv[1]).resolve() / "Libraries/LibWeb/DOM"
+    remplace_document(
+        dom / "Document.cpp",
+        "#include <LibWeb/HTML/Window.h>\n",
+        "#include <LibWeb/HTML/Window.h>\n"
+        "#include <LibWeb/HTML/WorkerAgentParent.h>\n",
+    )
+    remplace_document(
+        dom / "Document.cpp",
+        "        // 2. Clear window's map of active timers.\n"
+        "        window.clear_map_of_active_timers();\n"
+        "    }\n",
+        "        // 2. Clear window's map of active timers.\n"
+        "        window.clear_map_of_active_timers();\n"
+        "\n"
+        f"        // {MARQUEUR_DOCUMENT} : le document est jete -- ses workers dedies n'ont plus de\n"
+        "        // proprietaire (HTML, workers : owner set vide => terminer le worker).\n"
+        "        HTML::WorkerAgentParent::terminate_dedicated_workers_of(*this);\n"
+        "    }\n",
+    )
+    print("worker terminate : Worker::terminate() termine l'agent et ferme le port exterieur ; "
+          "un document jete termine ses workers dedies")
     return 0
 
 
