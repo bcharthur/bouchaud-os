@@ -93,6 +93,9 @@ done
 # BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
 # course a eu lieu), lu sur le dernier releve du noyau.
 awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
+# BOUCHAUD_TSC_SOURCE_V1 : la frequence du TSC retenue, sa source, et le
+# controle par les ticks PIT (KVM : horloge monotone 4,5 fois trop rapide).
+awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print substr($0, RSTART, RLENGTH) }' "$LOG"
 # BOUCHAUD_GS_NOYAU_EN_IRQ_V1 : recalculs de l'identite du coeur par CPUID.
 awk 'match($0, /replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "replis_apic=absent") }' "$LOG"
 if grep -aq 'KERNEL PANIC' "$LOG"; then echo "panique noyau" >&2; exit 1; fi

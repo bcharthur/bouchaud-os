@@ -1,7 +1,7 @@
 //! Gestion du temps noyau : ticks PIT et mesure de charge CPU via TSC.
 
 use core::arch::x86_64::{__cpuid, __cpuid_count};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::ports::{inb, outb};
@@ -15,6 +15,25 @@ static HAS_RDTSCP: AtomicBool = AtomicBool::new(false);
 static HPET_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
 static HPET_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
 static HPET_BOOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// BOUCHAUD_TSC_SOURCE_V1 : d'ou vient `TSC_HZ` (voir `nom_source`).
+static TSC_SOURCE: AtomicU8 = AtomicU8::new(SOURCE_AUCUNE);
+const SOURCE_AUCUNE: u8 = 0;
+const SOURCE_CPUID_15: u8 = 1;
+const SOURCE_HYPERVISEUR: u8 = 2;
+const SOURCE_CPUID_16: u8 = 3;
+const SOURCE_PIT2: u8 = 4;
+const SOURCE_TICKS: u8 = 5;
+
+fn nom_source(source: u8) -> &'static str {
+    match source {
+        SOURCE_CPUID_15 => "cpuid15",
+        SOURCE_HYPERVISEUR => "hyperviseur",
+        SOURCE_CPUID_16 => "cpuid16",
+        SOURCE_PIT2 => "pit2",
+        SOURCE_TICKS => "ticks",
+        _ => "aucune",
+    }
+}
 
 /// Frequence de base du PIT 8253/8254, en hertz.
 const PIT_BASE_HZ: u32 = 1_193_182;
@@ -102,15 +121,16 @@ pub fn init() {
     // Un TSC dont la frequence varie avec P-state n'est pas une horloge. Dans
     // ce cas on force la calibration/fallback au lieu de publier des deadlines
     // architecturales trompeuses.
-    let tsc_hz = if invariant {
+    let (tsc_hz, source) = if invariant {
         detect_tsc_hz()
-            .or_else(|| calibrate_tsc_hz_pit2(rdtscp))
-            .unwrap_or(0)
+            .or_else(|| calibrate_tsc_hz_pit2(rdtscp).map(|hz| (hz, SOURCE_PIT2)))
+            .unwrap_or((0, SOURCE_AUCUNE))
     } else {
-        0
+        (0, SOURCE_AUCUNE)
     };
 
     TSC_HZ.store(tsc_hz, Ordering::Release);
+    TSC_SOURCE.store(source, Ordering::Release);
 
     // Rend immediatement utilisables les budgets en cycles, meme avant IRQ0.
     if tsc_hz != 0 {
@@ -118,8 +138,9 @@ pub fn init() {
             CYCLES_PER_MS = tsc_hz / 1000;
         }
         crate::serial_println!(
-            "BOUCHAUD_TSC_EARLY_CALIBRATION_OK hz={}",
-            tsc_hz
+            "BOUCHAUD_TSC_EARLY_CALIBRATION_OK hz={} source={}",
+            tsc_hz,
+            nom_source(source)
         );
     }
     unsafe {
@@ -219,8 +240,9 @@ pub fn monotonic_ns() -> u64 {
     candidate.max(LAST_MONOTONIC_NS.fetch_max(candidate, Ordering::AcqRel))
 }
 
-/// Frequence architecturale du TSC annoncee par CPUID, si exploitable.
-fn detect_tsc_hz() -> Option<u64> {
+/// Frequence du TSC annoncee par CPUID (architecturale, ou publiee par
+/// l'hyperviseur), si exploitable, avec sa source.
+fn detect_tsc_hz() -> Option<(u64, u8)> {
     let max_basic = __cpuid(0).eax;
     if max_basic >= 0x15 {
         let leaf = __cpuid_count(0x15, 0);
@@ -229,14 +251,30 @@ fn detect_tsc_hz() -> Option<u64> {
                 .saturating_mul(leaf.ebx as u128)
                 / leaf.eax as u128;
             if hz != 0 && hz <= u64::MAX as u128 {
-                return Some(hz as u64);
+                return Some((hz as u64, SOURCE_CPUID_15));
+            }
+        }
+    }
+    // BOUCHAUD_TSC_SOURCE_V1 : sous hyperviseur, la frequence du TSC de
+    // l'invite est celle que l'hyperviseur publie (feuille 0x40000010, kHz :
+    // QEMU/KVM, VMware). Run 37627113185 (os-primitives sous KVM, AMD EPYC,
+    // sans feuille 0x15/0x16) : l'horloge monotone avancait 4,5 fois trop
+    // vite -- 2 561 s de `monotonic_ms` pour 570 s de ticks PIT et ~586 s de
+    // temps reel. La mesure par sondage du canal 2 du PIT (port 0x61), seul
+    // repli restant, ne vaut rien sous virtualisation imbriquee.
+    if __cpuid(1).ecx & (1 << 31) != 0 {
+        let max_hyperviseur = __cpuid(0x4000_0000).eax;
+        if (0x4000_0010..0x4000_0100).contains(&max_hyperviseur) {
+            let khz = __cpuid(0x4000_0010).eax as u64;
+            if khz != 0 {
+                return Some((khz * 1000, SOURCE_HYPERVISEUR));
             }
         }
     }
     if max_basic >= 0x16 {
         let mhz = __cpuid(0x16).eax as u64;
         if mhz != 0 {
-            return mhz.checked_mul(1_000_000);
+            return mhz.checked_mul(1_000_000).map(|hz| (hz, SOURCE_CPUID_16));
         }
     }
     None
@@ -315,7 +353,21 @@ pub fn calibrate() {
         // architecturale, car des IRQ perdues faussent précisément ce calcul.
         if TSC_HZ.load(Ordering::Acquire) == 0 {
             TSC_HZ.store(cycles_per_ms.saturating_mul(1000), Ordering::Release);
+            TSC_SOURCE.store(SOURCE_TICKS, Ordering::Release);
         }
+        // BOUCHAUD_TSC_SOURCE_V1 : la frequence retenue, sa source, et ce que
+        // les ticks PIT en disent sur 250 ms. Un ecart de plusieurs fois dit
+        // une horloge monotone fausse (KVM, run 37627113185) ; quelques
+        // pour-cent sous TCG ne sont que des IRQ0 retardees.
+        let retenue = TSC_HZ.load(Ordering::Acquire);
+        let selon_ticks = cycles_per_ms.saturating_mul(1000);
+        crate::serial_println!(
+            "BOUCHAUD_TSC_CONTROLE hz={} source={} hz_selon_ticks={} rapport_pour_mille={}",
+            retenue,
+            nom_source(TSC_SOURCE.load(Ordering::Acquire)),
+            selon_ticks,
+            if retenue == 0 { 0 } else { selon_ticks.saturating_mul(1000) / retenue },
+        );
     }
 }
 
