@@ -574,7 +574,8 @@ pub fn read_mesure(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> (usi
 ///
 /// # Portee, deliberement etroite
 ///
-/// * LECTURES seulement ; les ecritures (persistance, `fsync`) restent en PIO.
+/// * Lectures, et depuis BOUCHAUD_ATA_ECRITURE_DMA_V1 ecritures (voir
+///   [`ecrit`]).
 /// * Canal primaire, controleur IDE PCI declarant le bus-master (prog_if bit
 ///   7), BAR4 en espace d'E/S.
 /// * Tampon de rebond de 128 Kio (un lot de 256 secteurs), physiquement
@@ -593,6 +594,7 @@ mod dma {
     const INDISPONIBLE: u8 = 2;
 
     const CMD_READ_DMA: u8 = 0xC8;
+    const CMD_WRITE_DMA: u8 = 0xCA;
     const BM_CMD_START: u8 = 0x01;
     /// Sens : 1 = le controleur ECRIT en memoire (lecture disque).
     const BM_CMD_VERS_MEMOIRE: u8 = 0x08;
@@ -608,6 +610,7 @@ mod dma {
     static TAMPON_PHYS: AtomicU64 = AtomicU64::new(0);
     static ECHECS: AtomicU32 = AtomicU32::new(0);
     static LOTS: AtomicU64 = AtomicU64::new(0);
+    static LOTS_ECRITS: AtomicU64 = AtomicU64::new(0);
     // Ou passe le temps d'un transfert DMA tenu sous le verrou du controleur :
     // attente du bus-master au total, dont le temps rendu a l'ordonnanceur
     // par les points surs de la boucle d'attente (et combien de ces cessions
@@ -625,6 +628,11 @@ mod dma {
             CEDE_NS.load(Ordering::Relaxed),
             CESSIONS.load(Ordering::Relaxed),
         )
+    }
+
+    /// Lots ecrits en DMA.
+    pub fn lots_ecrits() -> u64 {
+        LOTS_ECRITS.load(Ordering::Relaxed)
     }
 
     /// (lots lus en DMA, echecs retombes en PIO, pret ?).
@@ -781,29 +789,85 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
 
     /// Lit `count` secteurs (<= 256) en DMA. `false` : l'appelant fait le PIO.
     pub fn lit(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
+        let octets = count * SECTOR_SIZE;
+        if out.len() < octets || !transfere(drive, lba, count, false) {
+            return false;
+        }
+        crate::kernel::memory::dma_rmb();
+        let source = crate::kernel::memory::phys_to_virt(TAMPON_PHYS.load(Ordering::Relaxed));
+        unsafe {
+            core::ptr::copy_nonoverlapping(source as *const u8, out.as_mut_ptr(), octets);
+        }
+        LOTS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// BOUCHAUD_ATA_ECRITURE_DMA_V1 -- ecrit `count` secteurs (<= 256) en
+    /// DMA. `false` : l'appelant fait le PIO.
+    ///
+    /// Run 37627113185 (os-primitives sous KVM) : `disque-probe` n'avance
+    /// plus -- `fsync` en moyenne plusieurs secondes, le coeur de l'ecrivain
+    /// trouve trois fois sur trois dans le `rep outsw` de
+    /// `write_sector_from`, cinq lecteurs parques derriere le verrou du
+    /// controleur. Sous KVM, un port d'E/S emule par QEMU coute une sortie
+    /// de la machine virtuelle par ACCES ; `rep insw` est servi par lots
+    /// (lecture anticipee du noyau hote), `rep outsw` non : 256 sorties par
+    /// secteur, chacune doublee en virtualisation imbriquee. Le DMA
+    /// bus-master transfere le lot entier en une commande.
+    ///
+    /// Une ecriture ratee en DMA est refaite en PIO par l'appelant : reecrire
+    /// les memes secteurs est sans effet de bord.
+    pub fn ecrit(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
+        let octets = count * SECTOR_SIZE;
+        if count == 0 || count > 256 || data.len() < octets {
+            return false;
+        }
+        if !pret() {
+            return false;
+        }
+        let cible = crate::kernel::memory::phys_to_virt(TAMPON_PHYS.load(Ordering::Relaxed));
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), cible as *mut u8, octets);
+        }
+        if !transfere(drive, lba, count, true) {
+            return false;
+        }
+        LOTS_ECRITS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Le DMA est-il utilisable (initialise a la premiere demande) ?
+    fn pret() -> bool {
         match ETAT.load(Ordering::Acquire) {
-            PRET => {}
-            INCONNU => {
-                if !initialise() {
-                    return false;
-                }
-            }
-            _ => return false,
+            PRET => true,
+            INCONNU => initialise(),
+            _ => false,
+        }
+    }
+
+    /// Une commande DMA entre le disque et le tampon de rebond. `ecriture` :
+    /// le controleur LIT la memoire (le tampon est deja rempli) ; sinon il y
+    /// ecrit. Appele sous le verrou du controleur.
+    fn transfere(drive: Drive, lba: u64, count: usize, ecriture: bool) -> bool {
+        if !pret() {
+            return false;
         }
         let octets = count * SECTOR_SIZE;
-        if count == 0 || count > 256 || out.len() < octets {
+        if count == 0 || count > 256 {
             return false;
         }
         if construit_prdt(octets) == 0 {
             return false;
         }
         let bm = BASE_BM.load(Ordering::Relaxed) as u16;
+        let sens = if ecriture { 0 } else { BM_CMD_VERS_MEMOIRE };
+        // PRDT, et en ecriture le tampon, visibles du controleur avant le depart.
         crate::kernel::memory::dma_wmb();
         unsafe {
             outb(bm, 0); // arret
             outb(bm + 2, BM_ST_ERREUR | BM_ST_IRQ); // acquitte
             crate::arch::x86_64::ports::outl(bm + 4, PRDT_PHYS.load(Ordering::Relaxed) as u32);
-            outb(bm, BM_CMD_VERS_MEMOIRE);
+            outb(bm, sens);
         }
         select_lba(drive, lba);
         if !wait_not_busy() {
@@ -815,8 +879,8 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
             outb(LBA_LOW, (lba & 0xFF) as u8);
             outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
             outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
-            outb(COMMAND, CMD_READ_DMA);
-            outb(bm, BM_CMD_VERS_MEMOIRE | BM_CMD_START);
+            outb(COMMAND, if ecriture { CMD_WRITE_DMA } else { CMD_READ_DMA });
+            outb(bm, sens | BM_CMD_START);
         }
         // Fin du transfert : le bit ACTIF du bus-master retombe. Borne en
         // temps, comme les attentes PIO ; points surs pour ne pas monopoliser
@@ -859,12 +923,6 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
             return echec("erreur", bm_statut);
         }
         unsafe { outb(bm + 2, BM_ST_ERREUR | BM_ST_IRQ) };
-        crate::kernel::memory::dma_rmb();
-        let source = crate::kernel::memory::phys_to_virt(TAMPON_PHYS.load(Ordering::Relaxed));
-        unsafe {
-            core::ptr::copy_nonoverlapping(source as *const u8, out.as_mut_ptr(), octets);
-        }
-        LOTS.fetch_add(1, Ordering::Relaxed);
         true
     }
 }
@@ -892,10 +950,11 @@ pub fn publie_controleur(maintenant_ms: u64) {
     let (lots_dma, replis_pio, dma_pret) = dma_stats();
     let (dma_attente_ns, dma_cede_ns, dma_cessions) = dma_temps();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={} dma_attente_ms={} dma_cede_ms={} dma_cessions={}",
+        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={} dma_attente_ms={} dma_cede_ms={} dma_cessions={} lots_dma_ecrits={}",
         maintenant_ms, prochain, servi, prochain.saturating_sub(servi), detenteur, age_ms,
         dma_pret as u8, lots_dma, replis_pio,
         dma_attente_ns / 1_000_000, dma_cede_ns / 1_000_000, dma_cessions,
+        dma::lots_ecrits(),
     ));
 }
 
@@ -987,7 +1046,9 @@ pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
         if offset + batch * SECTOR_SIZE > data.len() {
             break;
         }
-        if !write_batch(drive, sector, batch, &data[offset..]) {
+        if !dma::ecrit(drive, sector, batch, &data[offset..])
+            && !write_batch(drive, sector, batch, &data[offset..])
+        {
             break;
         }
         done += batch;
