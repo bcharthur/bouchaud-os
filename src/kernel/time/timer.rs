@@ -121,12 +121,24 @@ pub fn init() {
     // Un TSC dont la frequence varie avec P-state n'est pas une horloge. Dans
     // ce cas on force la calibration/fallback au lieu de publier des deadlines
     // architecturales trompeuses.
+    //
+    // BOUCHAUD_TSC_SANS_IRQ_V1 : sans TSC invariant, la frequence est MESUREE
+    // -- jamais declaree -- mais par le canal 2 du PIT, sonde sans
+    // interruption, et non plus en comptant les IRQ0 (`calibrate`). Le TSC
+    // sert d'horloge monotone dans les deux cas ; seule la qualite de la
+    // mesure change. Run 37658228134 (os-primitives sous KVM, `-cpu host`
+    // migrable, donc sans `invtsc`) : comptee en IRQ0, la frequence valait
+    // 639 a 680 MHz pour un TSC d'EPYC 7763 a ~2,45 GHz -- KVM reinjecte en
+    // rafale les ticks perdus pendant l'amorcage, la fenetre de 250 ticks
+    // durait ~65 ms, et l'horloge monotone avancait ~3,8 fois trop vite.
     let (tsc_hz, source) = if invariant {
         detect_tsc_hz()
             .or_else(|| calibrate_tsc_hz_pit2(rdtscp).map(|hz| (hz, SOURCE_PIT2)))
             .unwrap_or((0, SOURCE_AUCUNE))
     } else {
-        (0, SOURCE_AUCUNE)
+        calibrate_tsc_hz_pit2(rdtscp)
+            .map(|hz| (hz, SOURCE_PIT2))
+            .unwrap_or((0, SOURCE_AUCUNE))
     };
 
     TSC_HZ.store(tsc_hz, Ordering::Release);
@@ -359,6 +371,9 @@ pub fn calibrate() {
         // les ticks PIT en disent sur 250 ms. Un ecart de plusieurs fois dit
         // une horloge monotone fausse (KVM, run 37627113185) ; quelques
         // pour-cent sous TCG ne sont que des IRQ0 retardees.
+        // Quand la frequence retenue VIENT de cette mesure (source=ticks), le
+        // rapport vaut 1000 par construction : il ne controle rien, et la
+        // ligne le dit par sa source.
         let retenue = TSC_HZ.load(Ordering::Acquire);
         let selon_ticks = cycles_per_ms.saturating_mul(1000);
         crate::serial_println!(
