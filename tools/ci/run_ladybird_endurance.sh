@@ -39,7 +39,10 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" fixture-endurance.log
 python3 tools/health/browser_host_fixture.py > fixture-endurance.log 2>&1 &
 FIXTURE=$!
 # Panique noyau : son contexte en DERNIER (tools/ci/extrait_panique.sh).
-trap 'kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"' EXIT
+# Et si le banc echoue sans panique (KVM, run 37618172578 : 1206 s de QEMU,
+# navigateur jamais lance), ce que faisaient les coeurs, symbolise contre le
+# noyau qui a tourne (BOUCHAUD_SYMBOLISE_NOYAU_V1).
+trap 'rc=$?; kill "$FIXTURE" 2>/dev/null || true; tools/ci/extrait_panique.sh "$LOG" "$OUT"; if [ "$rc" -ne 0 ]; then python3 tools/ci/symbolise_noyau.py "$LOG" "$(dirname "$BOOT")/bouchaud-os"; fi; exit "$rc"' EXIT
 sleep 1
 kill -0 "$FIXTURE"
 
