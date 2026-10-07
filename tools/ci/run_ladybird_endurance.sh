@@ -134,8 +134,8 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") }
   match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+/) { split(substr($0, RSTART, RLENGTH), c, /[= ]/); if (c[3] % 3 != 0) next }
   match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+|HOST_ENDURANCE_(RELAIS|ENFANT|ONGLET) [^"]*|\[LB\] PROCESS_SWAP .*/) {
     h = ""; if (match($0, /^\[[0-9:]+\]/)) h = substr($0, 2, 8)
-    if (match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+|HOST_ENDURANCE_(RELAIS|ENFANT|ONGLET) [^"]*|\[LB\] PROCESS_SWAP .*/)) print "  " h " " substr($0, RSTART, RLENGTH)
-  }' "$LOG" | head -80
+    if (match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+|HOST_ENDURANCE_(RELAIS|ENFANT|ONGLET) [^"]*|\[LB\] PROCESS_SWAP .*/) && imprimees++ < 80) print "  " h " " substr($0, RSTART, RLENGTH)
+  }' "$LOG"
 
 echo "== cycle de vie des connexions Compositor =="
 for m in CONNECTION_CREATE CONNECTION_REMOVE PEER_CLOSE CONTEXT_CREATE CONTEXT_DESTROY LATE_MESSAGE COMPOSITOR_LINK_LOST COMPOSITOR_LINK_RECOVERED COMPOSITOR_LINK_GIVE_UP PROCESS_SWAP; do
@@ -174,6 +174,11 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
     if (!(pid in t0)) { t0[pid] = t; a0[pid] = app } ; t1[pid] = t; a1[pid] = app; im[pid] = img; tp[pid] = top
   }
   END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | head -12
+# BOUCHAUD_PROFIL_RIP_V1 : ou les fils passent leur temps (RIP echantillonnes
+# au quantum, symbolises contre les binaires du run). Affichage seulement.
+# Pas de `| head` : sous `pipefail`, un producteur coupe par SIGPIPE ferait
+# sortir le banc avant son verdict ; les bornes sont dans le script.
+python3 tools/ci/profil_rip.py "$LOG" "$OUT" --noyau "$(dirname "$BOOT")/bouchaud-os"
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
 awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms=[0-9]+)?/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
 # BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run

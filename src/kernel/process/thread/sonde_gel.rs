@@ -80,6 +80,8 @@ pub fn sonde_gel_tic(rip: u64, depuis_utilisateur: bool, source: u64) {
     let avant_pit = GEL_DERNIER_PIT[cpu].swap(pit, Ordering::Relaxed);
     let avant_rip = GEL_DERNIER_RIP[cpu].swap(rip, Ordering::Relaxed);
     let avant_etat = GEL_DERNIER_ETAT[cpu].swap(etat, Ordering::Relaxed);
+    // BOUCHAUD_PROFIL_RIP_V1 : le meme tic echantillonne le RIP interrompu.
+    profil_rip_note(cpu, rip, depuis_utilisateur, source);
     if avant_ns == 0 || maintenant <= avant_ns {
         return;
     }

@@ -516,6 +516,8 @@ pub fn releve_si_du() {
     }
     let (mesures, total) = crate::kernel::task::mesure_processus();
     observe(&mesures, total);
+    // BOUCHAUD_PROFIL_RIP_V1 : ou les fils passent leur temps, a chaque passe.
+    crate::kernel::task::publie_profil_rip();
 
     // BOUCHAUD_C68_LES_SONDES_ETAIENT_AU_MAUVAIS_ENDROIT
     //

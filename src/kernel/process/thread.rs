@@ -103,3 +103,5 @@ include!("thread/diagnostic.rs");
 include!("thread/veille_attente.rs");
 // BOUCHAUD_SONDE_GEL_V1
 include!("thread/sonde_gel.rs");
+// BOUCHAUD_PROFIL_RIP_V1
+include!("thread/profil_rip.rs");
