@@ -299,6 +299,10 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     crate::kernel::task::forensic_syscall_result(syscall_nr, result, syscall_duree);
     crate::kernel::task::impute_syscall(syscall_nr, syscall_duree);
+    // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui appelle quoi.
+    if let Some(courante) = crate::kernel::task::try_current() {
+        courante.process.appels.note(syscall_nr);
+    }
     crate::kernel::task::account_kernel_exit();
     crate::kernel::task::retire_current_if_zombie();
 }

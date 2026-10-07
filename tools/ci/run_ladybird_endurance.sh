@@ -150,6 +150,18 @@ python3 tools/ci/tendance_rss.py "$P" --min-releves 10 | sed 's/^/  /'
 # Compteurs noyau du dernier releve : lectures de comptabilite refaites
 # (BOUCHAUD_COMPTA_SEQLOCK_V1) et recalculs de l'identite du coeur par CPUID
 # (BOUCHAUD_GS_NOYAU_EN_IRQ_V1). Affichage seulement.
+# BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : un service au repos qui brule un coeur
+# (ImageDecoder 20 %, RequestServer 21 %, run 37654172489) se voit a son
+# rythme d'appels systeme et a ce qu'il appelle.
+echo "== appels systeme par processus (premier -> dernier releve) =="
+awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
+  match($0, /\[PERF-APPELS\] t=[0-9]+ pid=[0-9]+ image=[^ ]+ appels=[0-9]+ top=[^ \r]+/) {
+    l = substr($0, RSTART, RLENGTH); n = split(l, f, " ")
+    split(f[2], a, "="); t = a[2]; split(f[3], a, "="); pid = a[2]; split(f[4], a, "="); img = a[2]
+    split(f[5], a, "="); app = a[2]; split(f[6], a, "="); top = a[2]
+    if (!(pid in t0)) { t0[pid] = t; a0[pid] = app } ; t1[pid] = t; a1[pid] = app; im[pid] = img; tp[pid] = top
+  }
+  END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | head -12
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
 awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
 # BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run

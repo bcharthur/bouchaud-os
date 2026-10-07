@@ -85,6 +85,64 @@ pub struct Process {
     pub signals: SpinLock<crate::kernel::signal::SignalState>,
     /// Temps CPU des fils de ce processus dont l'emplacement a ete recycle.
     pub temps_recycle: TempsRecycle,
+    /// Appels systeme de ce processus, par numero (BOUCHAUD_APPELS_PAR_PROCESSUS_V1).
+    pub appels: AppelsSyscall,
+}
+
+/// Nombre de numeros d'appel systeme comptes par processus.
+pub const APPELS_NR_MAX: usize = 512;
+
+/// BOUCHAUD_APPELS_PAR_PROCESSUS_V1 -- combien d'appels systeme, et
+/// lesquels, chaque processus fait.
+///
+/// Endurance 37654172489 (TCG, 10 min) : des services AU REPOS brulent un
+/// coeur en continu -- ImageDecoder 20 %, RequestServer 21 % (ils decodent un
+/// pixel toutes les ~16 s), le Compositor 72 % -- pendant qu'un cadre
+/// `srcdoc` de 200x80 met 16 s en moyenne a charger. Une boucle
+/// d'evenements qui tourne a vide se voit dans ses appels, pas dans son
+/// temps : la table `SYSCALL_TEMPS` est GLOBALE et ne dit pas qui. Un
+/// compteur par numero, ecrit par le seul fil appelant en `Relaxed` : un
+/// increment atomique par appel systeme, aucun verrou.
+pub struct AppelsSyscall {
+    pub total: core::sync::atomic::AtomicU64,
+    par_nr: [core::sync::atomic::AtomicU32; APPELS_NR_MAX],
+}
+
+impl AppelsSyscall {
+    pub const fn neuf() -> Self {
+        Self {
+            total: core::sync::atomic::AtomicU64::new(0),
+            par_nr: [const { core::sync::atomic::AtomicU32::new(0) }; APPELS_NR_MAX],
+        }
+    }
+
+    #[inline]
+    pub fn note(&self, nr: u64) {
+        use core::sync::atomic::Ordering;
+        self.total.fetch_add(1, Ordering::Relaxed);
+        if let Some(case) = self.par_nr.get(nr as usize) {
+            case.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Les trois numeros les plus appeles : (numero, appels), 0 si absent.
+    pub fn trois_premiers(&self) -> [(u16, u32); 3] {
+        use core::sync::atomic::Ordering;
+        let mut top = [(0u16, 0u32); 3];
+        for (nr, case) in self.par_nr.iter().enumerate() {
+            let n = case.load(Ordering::Relaxed);
+            if n > top[2].1 {
+                top[2] = (nr as u16, n);
+                if top[2].1 > top[1].1 {
+                    top.swap(1, 2);
+                }
+                if top[1].1 > top[0].1 {
+                    top.swap(0, 1);
+                }
+            }
+        }
+        top
+    }
 }
 
 /// BOUCHAUD_COMPTA_SEQLOCK_V1 -- le temps des fils disparus d'un processus.

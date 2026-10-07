@@ -116,6 +116,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(child_signals),
         temps_recycle: task::TempsRecycle::neuf(),
+        appels: task::AppelsSyscall::neuf(),
     });
     task::register_process(child.clone());
 

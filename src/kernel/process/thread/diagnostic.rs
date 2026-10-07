@@ -47,6 +47,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
         temps_recycle: TempsRecycle::neuf(),
+        appels: AppelsSyscall::neuf(),
     });
     PROCESSES.lock().push(process.clone());
     Some(process)

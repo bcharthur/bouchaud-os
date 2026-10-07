@@ -347,6 +347,20 @@ user_ms={} sys_ms={}",
                         cpu_user_ms,
                         cpu_sys_ms,
                     );
+                    // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui fait tourner sa
+                    // boucle d'evenements a vide se voit a ses appels.
+                    if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
+                        let top = process.appels.trois_premiers();
+                        let nom = |i: usize| crate::kernel::abi::nr::name(top[i].0 as u64);
+                        crate::serial_println!(
+                            "[PERF-APPELS] t={} pid={} image={} appels={} top={}:{},{}:{},{}:{}",
+                            crate::kernel::timer::monotonic_ms(),
+                            row.pid,
+                            base,
+                            process.appels.total.load(Ordering::Relaxed),
+                            nom(0), top[0].1, nom(1), top[1].1, nom(2), top[2].1,
+                        );
+                    }
                 }
 
                 services::kpi(
