@@ -464,6 +464,13 @@ jobs:
             --root native-browser \
             --upstream third_party/UPSTREAM.md \
             --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Executant -- processeurs et acceleration (diagnostic)
+        # Les bancs lancent QEMU SANS -enable-kvm (TCG, emulation logicielle) :
+        # les cadences mesurees (rAF, chargement des cadres) en dependent.
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          if [ -e /dev/kvm ]; then ls -l /dev/kvm; echo "KVM_PRESENT=1 (non utilise par les bancs)"; else echo "KVM_PRESENT=0"; fi
       - name: Endurance 10 minutes sur Bouchaud OS
         run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 600
       - name: Journaux
