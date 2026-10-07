@@ -242,6 +242,10 @@ tools/userland/out-matrice/
 /ladybird-endurance.img
 /serie-endurance.log*
 /fixture-endurance.log
+/scenario-crash-rendu/
+/ladybird-crash-rendu.img
+/serie-crash-rendu.log*
+/fixture-crash-rendu.log
 /scenario-sites/
 /ladybird-sites.img
 /serie-sites.log*

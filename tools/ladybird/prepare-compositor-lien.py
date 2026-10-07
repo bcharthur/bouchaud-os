@@ -63,6 +63,9 @@ Journal structure (le banc et la campagne de convergence le lisent) :
   [LB] COMPOSITOR_LINK_LOST / _RECOVER / _RECOVERED / _GIVE_UP (UI)
   [LB] LINK_CUT_TEST                                        (WebContent, banc)
 
+Banc : `debug_request("bouchaud-crash-rendu")` fait fauter le WebContent
+(BOUCHAUD_CRASH_RENDU_V1).
+
 Banc : `debug_request("bouchaud-coupe-lien-compositor")` ferme, depuis
 WebContent, son lien vers le Compositor -- l'etat exact du journal
 utilisateur. Seul le processus UI peut l'envoyer ; UI/Bouchaud ne le fait que
@@ -339,6 +342,22 @@ def main() -> int:
         "    }\n"
         "\n"
         "    if (request == \"dump-session-history\") {\n",
+    )
+    # BOUCHAUD_CRASH_RENDU_V1 -- banc : une VRAIE faute dans ce WebContent
+    # (ecriture a une page non mappee). Le noyau la livre en SIGSEGV, le
+    # processus meurt, ses sockets se ferment : exactement un rendu qui
+    # plante. Le banc prouve que les autres onglets et le Compositor vivent.
+    remplace(
+        cfcw,
+        "    if (request == \"bouchaud-coupe-lien-compositor\") {\n",
+        "    if (request == \"bouchaud-crash-rendu\") {\n"
+        "        dbgln(\"[LB] RENDERER_CRASH_TEST page={}\", page_id);\n"
+        "        FlatPtr volatile adresse = 0x10;\n"
+        "        *reinterpret_cast<int volatile*>(adresse) = 1;\n"
+        "        return;\n"
+        "    }\n"
+        "\n"
+        "    if (request == \"bouchaud-coupe-lien-compositor\") {\n",
     )
     return 0
 

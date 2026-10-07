@@ -21,6 +21,7 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/HashTable.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/Vector.h>
 #include <LibCore/AnonymousBuffer.h>
@@ -79,6 +80,9 @@ private:
 
     // BOUCHAUD_SONDE_PIXELS_V1 : la derniere sonde, rejouee a la sortie de banc.
     ByteString m_derniere_sonde;
+    // Onglets dont le WebContent vient d'etre remplace (plantage) : leur
+    // premiere trame suivante est journalisee (PRESENT_APRES_REPRISE).
+    HashTable<u64> m_onglets_repris;
     RefPtr<Core::Timer> m_quitte_apres;
 };
 

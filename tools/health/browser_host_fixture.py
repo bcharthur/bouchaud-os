@@ -296,6 +296,49 @@ ENDURANCE_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>enfant</
   (function a() { n++; ctx.fillStyle = `hsl(${n % 360},50%,50%)`; ctx.fillRect(n % 180, 10, 20, 40); requestAnimationFrame(a); })();
 </script></body>"""
 
+# BOUCHAUD_CRASH_RENDU_V1 -- un rendu meurt, les autres vivent.
+# A (10.0.2.2) anime et mesure son plus long gel ; il ouvre B sur L'AUTRE site
+# (10.0.2.100, donc un autre WebContent) ; B prend le titre
+# BOUCHAUD_BANC_CRASH_RENDU, et UI/Bouchaud fait fauter SON WebContent. A
+# continue de compter ses trames, puis rapporte HOST_CRASH_A_FIN.
+CRASH_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-a</title>
+<body style="margin:0;font:16px sans-serif;background:#ffe"><div id="etat">A</div>
+<canvas id="c" width="320" height="120"></canvas><script>
+(() => {
+  const duree = Number(new URLSearchParams(location.search).get("duree") || 90) * 1000;
+  const t0 = performance.now();
+  const ctx = document.getElementById("c").getContext("2d");
+  let raf = 0, dernier = performance.now(), gelMax = 0, b = null;
+  (function anime() {
+    const ici = performance.now();
+    gelMax = Math.max(gelMax, ici - dernier); dernier = ici;
+    raf++;
+    ctx.fillStyle = `hsl(${raf % 360},60%,50%)`;
+    ctx.fillRect((raf * 3) % 300, 20, 20, 80);
+    if (ici - t0 < duree) requestAnimationFrame(anime);
+  })();
+  let seconde = 0;
+  const releve = setInterval(() => {
+    seconde++;
+    document.getElementById("etat").textContent = `A t=${seconde}s raf=${raf}`;
+    console.log(`HOST_CRASH_A t_s=${seconde} raf=${raf} gel_max_ms=${Math.round(gelMax)}`);
+    if (performance.now() - t0 >= duree) {
+      clearInterval(releve);
+      if (b) b.close();
+      console.log(`HOST_CRASH_A_FIN t_s=${seconde} raf=${raf} gel_max_ms=${Math.round(gelMax)}`);
+    }
+  }, 1000);
+  setTimeout(() => { b = window.open("http://10.0.2.100:18082/crash-b.html", "_blank"); console.log(`HOST_CRASH_A_OUVRE_B ok=${!!b}`); }, 3000);
+})();
+</script></body>"""
+CRASH_B_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-b</title>
+<body style="margin:0;background:#fcc">onglet B<canvas id="c" width="200" height="60"></canvas><script>
+  console.log(`HOST_CRASH_B origine=${location.origin}`);
+  const ctx = document.getElementById("c").getContext("2d"); let n = 0;
+  (function a() { n++; ctx.fillStyle = `hsl(${n % 360},50%,50%)`; ctx.fillRect(n % 180, 10, 20, 40); requestAnimationFrame(a); })();
+  setTimeout(() => { console.log(`HOST_CRASH_B_DEMANDE raf=${n}`); document.title = "BOUCHAUD_BANC_CRASH_RENDU"; }, 5000);
+</script></body>"""
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1525,6 +1568,8 @@ class Handler(BaseHTTPRequestHandler):
             "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
             "/endurance.html": (ENDURANCE_HTML, "text/html; charset=utf-8"),
             "/endurance-enfant.html": (ENDURANCE_ENFANT_HTML, "text/html; charset=utf-8"),
+            "/crash-a.html": (CRASH_A_HTML, "text/html; charset=utf-8"),
+            "/crash-b.html": (CRASH_B_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie

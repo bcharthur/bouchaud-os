@@ -14,6 +14,8 @@ on:
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/run_ladybird_endurance.sh'
+      - 'tools/ci/run_ladybird_crash_rendu.sh'
+      - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
@@ -50,6 +52,8 @@ on:
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/run_ladybird_endurance.sh'
+      - 'tools/ci/run_ladybird_crash_rendu.sh'
+      - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
@@ -472,6 +476,55 @@ jobs:
             fixture-endurance.log
           if-no-files-found: warn
 
+  crash-rendu:
+    # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
+    # de l'autre site et le Compositor vivent, le navigateur le remplace.
+    name: ladybird / crash d'un rendu
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 file netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Crash d'un rendu sur Bouchaud OS
+        run: tools/ci/run_ladybird_crash_rendu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 90
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-crash-rendu
+          path: |
+            serie-crash-rendu.log
+            fixture-crash-rendu.log
+          if-no-files-found: warn
+
   sites:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)
     # en HTTPS reel, sonde de pixels sur la trame du Compositor.
@@ -522,7 +575,7 @@ jobs:
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     name: ladybird / verdict de convergence
-    needs: [build, browser-host-smoke, cache, wpt, endurance, sites]
+    needs: [build, browser-host-smoke, cache, wpt, endurance, sites, crash-rendu]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -536,6 +589,7 @@ jobs:
           R_WPT: ${{ needs.wpt.result }}
           R_ENDURANCE: ${{ needs.endurance.result }}
           R_SITES: ${{ needs.sites.result }}
+          R_CRASH_RENDU: ${{ needs.crash-rendu.result }}
         run: python3 tools/ci/verdict_convergence.py
 
   browser-host-smoke:

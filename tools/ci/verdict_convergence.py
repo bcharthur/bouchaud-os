@@ -23,6 +23,7 @@ EPREUVES = [
     ("R_WPT", "WPT smoke (50 fichiers, compares a Linux)"),
     ("R_ENDURANCE", "endurance 10 min (cadres, workers, onglets cross-site) sans crash Compositor"),
     ("R_SITES", "sites reels HTTPS (Example exige, Wikipedia mesure), pixels du Compositor"),
+    ("R_CRASH_RENDU", "crash d'un WebContent : l'autre site et le Compositor vivent, reprise par un nouveau WebContent"),
 ]
 
 

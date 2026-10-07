@@ -207,6 +207,11 @@ static SondePixels sonde_pixels(Gfx::Bitmap const& bitmap, int largeur, int haut
 void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bitmap, int largeur, int hauteur, Gfx::IntRect degat)
 {
     auto const debut = MonotonicTime::now();
+    if (m_onglets_repris.remove(vue.onglet())) {
+        auto const s = sonde_pixels(*bitmap, largeur, hauteur);
+        warnln("[LB] PRESENT_APRES_REPRISE onglet={} page={} webcontent_pid={} taille={}x{} somme={:08x} variance={} couleurs={} non_blanc_pct={}",
+            vue.onglet(), vue.page_courante(), vue.client().pid(), largeur, hauteur, s.somme, s.variance, s.couleurs, s.non_blanc_pct);
+    }
     if (m_trames < 64 || m_trames % 16 == 15) {
         auto const s = sonde_pixels(*bitmap, largeur, hauteur);
         m_derniere_sonde = ByteString::formatted("onglet={} page={} seq={} damage={},{},{}x{} taille={}x{} somme={:08x} luminance={} variance={} couleurs={} non_blanc_pct={} echantillons={}",
@@ -342,6 +347,10 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // proprement (boucle d'evenements, puis services). Hors banc
     // (BOUCHAUD_LB_BANC_QUITTE absent), un titre n'a aucun effet.
     static bool const banc_quitte = getenv("BOUCHAUD_LB_BANC_QUITTE") != nullptr;
+    // BOUCHAUD_CRASH_RENDU_V1 -- banc d'isolation : une page qui prend le
+    // titre BOUCHAUD_BANC_CRASH_RENDU fait fauter SON WebContent
+    // (prepare-compositor-lien.py). Hors banc, un titre n'a aucun effet.
+    static bool const banc_crash_rendu = getenv("BOUCHAUD_LB_BANC_CRASH_RENDU") != nullptr;
     // Banc des sites reels : quitter apres BOUCHAUD_LB_BANC_DUREE_S secondes,
     // en rejouant la derniere sonde de pixels (la trame finale de la page).
     if (auto const* duree = getenv("BOUCHAUD_LB_BANC_DUREE_S"); duree && !m_quitte_apres) {
@@ -359,6 +368,11 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
             warnln("[LB] LINK_CUT_REQUEST onglet={} page={} t_ms={}", onglet, vue_ptr->page_courante(),
                 MonotonicTime::now().milliseconds());
             vue_ptr->debug_request("bouchaud-coupe-lien-compositor"sv);
+        }
+        if (banc_crash_rendu && texte == "BOUCHAUD_BANC_CRASH_RENDU"sv) {
+            warnln("[LB] RENDERER_CRASH_REQUEST onglet={} page={} webcontent_pid={} t_ms={}", onglet, vue_ptr->page_courante(),
+                vue_ptr->client().pid(), MonotonicTime::now().milliseconds());
+            vue_ptr->debug_request("bouchaud-crash-rendu"sv);
         }
         if (banc_quitte && texte == "BOUCHAUD_BANC_QUITTE"sv) {
             warnln("[LB] BROWSER_QUIT_REQUEST onglet={} raison=banc", onglet);
@@ -434,8 +448,12 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         vue.prompt_closed({});
     };
 
-    vue.on_web_content_crashed = [onglet] {
-        warnln("[LB:CRASH] onglet={} webcontent=mort", onglet);
+    // Appele APRES la reprise d'upstream (handle_web_content_process_crash :
+    // nouveau WebContent, page d'erreur, au plus 5 plantages rapproches).
+    vue.on_web_content_crashed = [this, onglet, vue_ptr = &vue] {
+        m_onglets_repris.set(onglet);
+        warnln("[LB:CRASH] onglet={} webcontent=mort nouveau_pid={} t_ms={}", onglet, vue_ptr->client().pid(),
+            MonotonicTime::now().milliseconds());
         BouchaudChrome::set_loading(onglet, false, "moteur arrete"sv);
     };
 
