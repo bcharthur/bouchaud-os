@@ -720,6 +720,19 @@ if [ "$manquants" -ne 0 ]; then
       ;;
   esac
   echo "$manquants jalon(s) manquant(s)." >&2
+  # BOUCHAUD_SMOKE_DIAGNOSTIC_DEMARRAGE_V1 -- le journal serie complet est
+  # imprime plus haut (`cat "$LOG"`), mais l'API des journaux de job n'en rend
+  # que les 5000 DERNIERES lignes : au run 37581515158 (navigateur fige
+  # avant M11_GUI_HANDSHAKE_OK, 900 s), ce n'etaient que des releves d'une
+  # machine au repos, et l'artefact n'est pas toujours lisible. L'extrait du
+  # demarrage est donc imprime EN DERNIER : qui a ete lance, qui est mort et
+  # de quoi, qui a ete refuse, ou en est la poignee de main GUI.
+  echo
+  echo "== diagnostic de demarrage (extrait du journal serie, 160 lignes au plus) =="
+  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
+    | grep -aE 'PERF_EXECVE|PERF_FORK .*ladybird|PROCESS_(EXIT|DEATH|FAULT)|FAULT_FATAL|KERNEL PANIC|VERIFICATION FAILED|ASSERTION|BROWSER_HOST_|M11_|BOUCHAUD_UI_|\[LB(:[A-Z]+)?\] |\[SECURITY-DENY\]|SPAWN_ETAPE|WORKER_ETAPE|BOUCHAUD_BUREAU|BOUCHAUD_SYSTEM_EXIT|GUI-(HANDSHAKE|SESSION|CLIENT)|Unable to|Failed to|error' \
+    | grep -avE '\[LB\] PRESENT|\[LB:FRAME\]|\[LB:PERF\]|\[LB:JS\]|bouchaud-confinement|op=raw-socket' \
+    | awk 'NR <= 160 { print "  " substr($0, 1, 240) }' || true
   echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=jalons manquants=$manquants"
   exit 1
 fi
