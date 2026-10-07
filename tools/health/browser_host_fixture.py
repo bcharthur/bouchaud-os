@@ -236,12 +236,31 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
   const t0 = performance.now();
   const ctx = document.getElementById("c").getContext("2d");
   let cycle = 0, onglet = null, workersOk = 0, cadresOk = 0, ongletsOuverts = 0;
+  let ongletCycle = 0, ongletT0 = 0, ongletsFermesParOuvreur = 0;
   // Le cycle suivant attend que le cadre de celui-ci ait CHARGE (borne 30 s :
   // au-dela, un echec). Remplacer un cadre au bout de 5 s quoi qu'il arrive
   // mesurait la VITESSE de la machine (run 37532626400 : 36/93 sur un
   // executant trois fois plus lent), pas la correction du cycle de vie.
   let cadresEchus = 0, latMax = 0, latTotal = 0;
   let raf = 0;
+  // BOUCHAUD_ENDURANCE_ETAPES_V1 : ou passe la latence d'un cadre (9 s en
+  // moyenne sous KVM, 16 s sous TCG, run 37661162354) ? Document du cadre
+  // analyse (son script s'execute), image du cadre chargee, `load` du cadre ;
+  // et le retard de la boucle d'evenements de la page (une echeance de
+  // 100 ms tenue a combien) : une boucle a l'heure et un cadre lent, c'est
+  // une ATTENTE (reseau, IPC, autre processus), pas ce fil qui calcule.
+  let docTotal = 0, docN = 0, imgTotal = 0, imgN = 0, derDoc = -1, derImg = -1, derCadre = -1;
+  let retardMax = 0, retardTotal = 0, retardN = 0, tCadreCourant = 0;
+  window.__doc = c => { if (c === cycle) { derDoc = Math.round(performance.now() - tCadreCourant); docTotal += derDoc; docN++; } };
+  window.__img = c => { if (c === cycle) { derImg = Math.round(performance.now() - tCadreCourant); imgTotal += derImg; imgN++; } };
+  (function sonde() {
+    const prevu = performance.now() + 100;
+    setTimeout(() => {
+      const r = Math.max(0, performance.now() - prevu);
+      retardMax = Math.max(retardMax, r); retardTotal += r; retardN++;
+      if (performance.now() - t0 < duree) sonde();
+    }, 100);
+  })();
   (function anime() {
     raf++;
     ctx.fillStyle = `hsl(${raf % 360},60%,50%)`;
@@ -254,14 +273,16 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
     ici.textContent = "";
     const f = document.createElement("iframe");
     f.style.cssText = "width:200px;height:80px;border:0";
-    f.srcdoc = `<body style="margin:0;background:hsl(${cycle * 37 % 360},70%,60%)">cadre ${cycle}<img src="/pixel.png?c=${cycle}"></body>`;
+    f.srcdoc = `<body style="margin:0;background:hsl(${cycle * 37 % 360},70%,60%)">cadre ${cycle}<script>parent.__doc(${cycle})<\/script><img src="/pixel.png?c=${cycle}" onload="parent.__img(${cycle})"></body>`;
     const tCadre = performance.now();
+    tCadreCourant = tCadre;
     let suite = null;
     const garde = setTimeout(() => { cadresEchus++; suite && suite(); }, 30000);
     f.onload = () => {
       clearTimeout(garde);
       cadresOk++;
       const lat = Math.round(performance.now() - tCadre);
+      derCadre = lat;
       latMax = Math.max(latMax, lat); latTotal += lat;
       suite && suite();
     };
@@ -271,17 +292,32 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
     w.postMessage(cycle);
     scrollTo(0, 400);
     setTimeout(() => scrollTo(0, 0), 600);
-    if (onglet) { onglet.close(); onglet = null; }
-    else if (cycle % 3 === 0) {
+    // L'onglet se ferme LUI-MEME 3 s apres avoir charge l'enfant. L'ouvreur
+    // ne le ferme qu'en dernier recours, a l'ouverture suivante (3 cycles).
+    // Le fermer au cycle suivant coupait la navigation du relais : sous KVM
+    // (run 37661162354) un cycle dure ~9 s, autant que le chargement du
+    // relais dans le WebContent occupe -- 1 changement de processus sur 10,
+    // aucun enfant charge. Chaque fin d'onglet est journalisee avec son age.
+    if (onglet && onglet.closed) {
+      console.log(`HOST_ENDURANCE_ONGLET ouvert_au_cycle=${ongletCycle} ferme=lui_meme vu_au_cycle=${cycle} age_ms=${Math.round(performance.now() - ongletT0)}`);
+      onglet = null;
+    }
+    if (cycle % 3 === 0) {
+      if (onglet) {
+        console.log(`HOST_ENDURANCE_ONGLET ouvert_au_cycle=${ongletCycle} ferme=ouvreur vu_au_cycle=${cycle} age_ms=${Math.round(performance.now() - ongletT0)}`);
+        onglet.close();
+        ongletsFermesParOuvreur++;
+      }
       // Par un relais du MEME site : un onglet ouvert directement sur l'autre
       // site resterait dans ce WebContent (about:blank -> tout site ne change
       // pas de processus) ; la navigation racine du relais, elle, en change.
       onglet = window.open(`/endurance-relais.html?cycle=${cycle}`, "_blank");
+      ongletCycle = cycle; ongletT0 = performance.now();
       if (onglet) ongletsOuverts++;
     }
     const s = Math.round((performance.now() - t0) / 1000);
     document.getElementById("etat").textContent = `cycle ${cycle} t=${s}s`;
-    console.log(`HOST_ENDURANCE cycle=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf}`);
+    console.log(`HOST_ENDURANCE cycle=${cycle} t_s=${s} cadres_ok=${cadresOk} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf} prec_doc_ms=${derDoc} prec_img_ms=${derImg} prec_cadre_ms=${derCadre} retard_boucle_max_ms=${Math.round(retardMax)}`);
     const debutCycle = performance.now();
     suite = () => {
       suite = null;
@@ -289,7 +325,7 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
       if (performance.now() - t0 < duree) setTimeout(un_cycle, Math.max(0, 5000 - (performance.now() - debutCycle)));
       else {
         if (onglet) onglet.close();
-        console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax}`);
+        console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} onglets_fermes_par_ouvreur=${ongletsFermesParOuvreur} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax} lat_doc_moy_ms=${Math.round(docTotal / Math.max(1, docN))} docs=${docN} lat_img_moy_ms=${Math.round(imgTotal / Math.max(1, imgN))} imgs=${imgN} retard_boucle_moy_ms=${Math.round(retardTotal / Math.max(1, retardN))} retard_boucle_max_ms=${Math.round(retardMax)}`);
       }
     };
   }
@@ -298,6 +334,7 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
 </script></body>"""
 ENDURANCE_RELAIS_HTML = b"""<!doctype html><meta charset="utf-8"><title>relais</title>
 <body>relais<script>
+  console.log(`HOST_ENDURANCE_RELAIS ${location.search}`);
   // replace : l'historique reste a une entree, l'onglet reste fermable par script.
   location.replace(`http://10.0.2.100:18082/endurance-enfant.html${location.search}`);
 </script></body>"""

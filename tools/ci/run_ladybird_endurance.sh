@@ -125,6 +125,18 @@ echo "ENDURANCE_VERDICT_BOUCLE $verdict duree_reelle_s=$((SECONDS - DEBUT))"
 grep -aoE 'HOST_ENDURANCE(_FIN)? cycle[s]?=.*' "$P" | awk 'NR % 20 == 1' | head -10 || true
 grep -aoE 'HOST_ENDURANCE_FIN .*' "$P" | head -1 || true
 
+# BOUCHAUD_ENDURANCE_ONGLETS_CHRONO_V1 : la vie de chaque onglet « autre
+# site » (ouverture au cycle, relais, changement de WebContent, enfant
+# charge, fermeture et par qui), horodatee par la ligne serie. Run
+# 37661162354 (KVM) : 1 changement sur 10 onglets, aucun enfant charge.
+echo "== chronologie des onglets autre site =="
+awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") }
+  match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+/) { split(substr($0, RSTART, RLENGTH), c, /[= ]/); if (c[3] % 3 != 0) next }
+  match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+|HOST_ENDURANCE_(RELAIS|ENFANT|ONGLET) [^"]*|\[LB\] PROCESS_SWAP .*/) {
+    h = ""; if (match($0, /^\[[0-9:]+\]/)) h = substr($0, 2, 8)
+    if (match($0, /HOST_ENDURANCE cycle=[0-9]+ t_s=[0-9]+|HOST_ENDURANCE_(RELAIS|ENFANT|ONGLET) [^"]*|\[LB\] PROCESS_SWAP .*/)) print "  " h " " substr($0, RSTART, RLENGTH)
+  }' "$LOG" | head -80
+
 echo "== cycle de vie des connexions Compositor =="
 for m in CONNECTION_CREATE CONNECTION_REMOVE PEER_CLOSE CONTEXT_CREATE CONTEXT_DESTROY LATE_MESSAGE COMPOSITOR_LINK_LOST COMPOSITOR_LINK_RECOVERED COMPOSITOR_LINK_GIVE_UP PROCESS_SWAP; do
   printf '  %-26s %s\n' "$m" "$(grep -ac "\[LB\] $m" "$P" || true)"
