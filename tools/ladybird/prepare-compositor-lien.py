@@ -382,6 +382,27 @@ def main() -> int:
         "            on_process_exited(process.release_value(), exit_status);\n"
         "        }\n",
     )
+    # BOUCHAUD_PROCESSUS_JOURNAL_V1 -- ce que voit ProcessMonitor : chaque
+    # SIGCHLD recu et ce que waitpid rend. Run 37584587000 : un WebContent
+    # mort (faute) n'a JAMAIS ete vu par le navigateur, alors que le noyau
+    # livre SIGCHLD et waitpid a un pere multi-fils
+    # (sigchld-multifil-probe, SIGCHLD_MULTIFIL_OK). Ces lignes disent lequel
+    # des maillons manque.
+    pmon = wv / "ProcessMonitor.cpp"
+    remplace(
+        pmon,
+        "    m_signal_handle = Core::EventLoop::register_signal(SIGCHLD, [this](int) {\n"
+        "        auto result = Core::System::waitpid(-1, WNOHANG);\n"
+        "        while (!result.is_error() && result.value().pid > 0) {\n"
+        "            auto& [pid, status] = result.value();\n",
+        "    m_signal_handle = Core::EventLoop::register_signal(SIGCHLD, [this](int) {\n"
+        "        auto result = Core::System::waitpid(-1, WNOHANG);\n"
+        "        dbgln(\"[LB] SIGCHLD_RECU waitpid={}\", result.is_error() ? -1 : result.value().pid);\n"
+        "        while (!result.is_error() && result.value().pid > 0) {\n"
+        "            auto& [pid, status] = result.value();\n"
+        "            dbgln(\"[LB] SIGCHLD_FILS pid={} surveille={} signale={} signal={} sorti={} code={}\", pid, m_monitored_processes.contains(pid),\n"
+        "                WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : 0);\n",
+    )
     return 0
 
 
