@@ -49,6 +49,12 @@ AUTORUN
 
 LOG=serie-primitives.log
 : > "$LOG"
+# BOUCHAUD_SYMBOLISE_NOYAU_V1 : en cas d'echec, ce que faisaient les coeurs,
+# symbolise contre le noyau EXACT qui a tourne (les artefacts ne sont pas
+# toujours lisibles ; le journal du job, si). Imprime EN DERNIER : l'API ne
+# rend que la fin d'un journal de job.
+ELF="$(dirname "$BOOT")/bouchaud-os"
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then python3 tools/ci/symbolise_noyau.py "$LOG" "$ELF"; fi; exit "$rc"' EXIT
 # BO_QEMU_KVM=1 : memes sondes sous KVM (-cpu host). La course que
 # compta-stress-probe fabrique depend du rythme reel des vCPU : sous TCG les
 # coeurs avancent par tranches emulees, sous KVM ils tournent en parallele
