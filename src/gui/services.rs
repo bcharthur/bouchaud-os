@@ -639,7 +639,7 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     crate::serial_println!(
-        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={}",
+        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={} ticks_ms={} mono_ms={}",
         (crate::kernel::timer::monotonic_ns() / 1_000_000)
             .saturating_mul(c.online as u64),
         (c.user_ns.saturating_add(c.system_ns)) / 1_000_000,
@@ -647,6 +647,11 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         pire / 1_000_000,
         crate::kernel::task::lectures_compta_relues(),
         crate::arch::x86_64::usermode::replis_apic(),
+        // BOUCHAUD_CYCLES_PAR_MS_DU_TSC_V1 : les delais comptes en ticks
+        // d'IRQ0 (alarmes, rythme des trames, delais TCP) contre l'horloge
+        // monotone, sur toute la session et pas seulement au demarrage.
+        crate::kernel::timer::ticks().saturating_mul(1000) / crate::kernel::timer::TICKS_PER_SECOND,
+        crate::kernel::timer::monotonic_ms(),
     );
 }
 

@@ -359,7 +359,6 @@ pub fn calibrate() {
     let elapsed_ms = elapsed_ticks * 1000 / TICKS_PER_SECOND;
     if elapsed_ms > 0 {
         let cycles_per_ms = elapsed_tsc / elapsed_ms;
-        unsafe { CYCLES_PER_MS = cycles_per_ms; }
         // La calibration PIT n'est qu'un repli pour les machines qui ne
         // publient aucune frequence CPUID. Elle ne remplace jamais une valeur
         // architecturale, car des IRQ perdues faussent précisément ce calcul.
@@ -367,6 +366,16 @@ pub fn calibrate() {
             TSC_HZ.store(cycles_per_ms.saturating_mul(1000), Ordering::Release);
             TSC_SOURCE.store(SOURCE_TICKS, Ordering::Release);
         }
+        // BOUCHAUD_CYCLES_PAR_MS_DU_TSC_V1 : `cycles_to_ms`/`ms_to_cycles`
+        // suivent la frequence RETENUE, pas ces 250 ms de ticks. Sous KVM,
+        // IRQ0 rattrape au demarrage les ticks en souffrance (run
+        // 37661162354 : hz_selon_ticks=560486000 pour un TSC de 2446092920,
+        // rapport 229) : la valeur des ticks rendait chaque duree 4,4 fois
+        // trop longue et chaque budget en cycles 4,4 fois trop court, pour
+        // toute la session -- l'horloge de smoltcp et les delais de
+        // `net/mod.rs` comptaient ainsi plus de 4 ms par milliseconde.
+        // Quand la frequence vient des ticks, la valeur est la meme qu'avant.
+        unsafe { CYCLES_PER_MS = TSC_HZ.load(Ordering::Acquire) / 1000; }
         // BOUCHAUD_TSC_SOURCE_V1 : la frequence retenue, sa source, et ce que
         // les ticks PIT en disent sur 250 ms. Un ecart de plusieurs fois dit
         // une horloge monotone fausse (KVM, run 37627113185) ; quelques
@@ -377,11 +386,12 @@ pub fn calibrate() {
         let retenue = TSC_HZ.load(Ordering::Acquire);
         let selon_ticks = cycles_per_ms.saturating_mul(1000);
         crate::serial_println!(
-            "BOUCHAUD_TSC_CONTROLE hz={} source={} hz_selon_ticks={} rapport_pour_mille={}",
+            "BOUCHAUD_TSC_CONTROLE hz={} source={} hz_selon_ticks={} rapport_pour_mille={} cycles_par_ms={}",
             retenue,
             nom_source(TSC_SOURCE.load(Ordering::Acquire)),
             selon_ticks,
             if retenue == 0 { 0 } else { selon_ticks.saturating_mul(1000) / retenue },
+            unsafe { CYCLES_PER_MS },
         );
     }
 }

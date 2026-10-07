@@ -175,7 +175,7 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
   }
   END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | head -12
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
-awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
+awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms=[0-9]+)?/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
 # BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run
 # 37654172489), la page comptait t_s=316 pour 206 s de QEMU : toutes les
 # durees du banc (cycles, cadres > 30 s) en dependent.
