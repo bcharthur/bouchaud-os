@@ -7,10 +7,13 @@
 # La page /endurance.html de la fixture boucle DUREE_S secondes (600 par
 # defaut) : cadres remplaces (contextes Compositor crees et detruits),
 # workers crees puis termines, canvas anime, defilement, images rechargees,
-# et un onglet sur L'AUTRE site (10.0.2.100) ouvert puis ferme tous les trois
-# cycles -- donc des processus WebContent crees et detruits, et leurs
-# connexions au Compositor avec eux. C'est le cycle de vie qui menait au
-# crash `ConnectionFromClient.cpp:68 VERIFICATION FAILED: connection`.
+# et tous les trois cycles un onglet qui passe par un relais du meme site sur
+# L'AUTRE site (10.0.2.100) puis se ferme -- donc des processus WebContent
+# crees ([LB] PROCESS_SWAP) et detruits, et leurs connexions au Compositor
+# avec eux. C'est le cycle de vie qui menait au crash
+# `ConnectionFromClient.cpp:68 VERIFICATION FAILED: connection`.
+# (Jusqu'au run 37581515158, l'onglet s'ouvrait directement sur l'autre site
+# et restait dans le WebContent de la page : 27 onglets, 2 WebContent.)
 #
 # Exige :
 #   - HOST_ENDURANCE_FIN apres au moins 95 % de DUREE_S ;
@@ -144,6 +147,8 @@ exige "aucun cadre au-dela de 30 s (${echus:-?})" test "${echus:-1}" -eq 0
 exige "workers au rendez-vous (${workers:-0}/${cycles:-0})" test "${workers:-0}" -ge $(( ${cycles:-0} - 2 ))
 exige "onglets sur l'autre site ouverts (${onglets:-0})" test "${onglets:-0}" -ge 1
 exige "onglet enfant charge sur 10.0.2.100" grep -aq 'HOST_ENDURANCE_ENFANT .*origine=http://10.0.2.100:18082' "$P"
+swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || true)
+exige "chaque onglet enfant a change de WebContent (${swaps} swaps / ${onglets:-0} onglets)" test "$swaps" -ge $(( ${onglets:-0} - 2 )) -a "${onglets:-0}" -ge 1
 exige "un seul Compositor du debut a la fin ($compositors)" test "$compositors" -eq 1
 exige "aucune assertion (VERIFICATION FAILED)" bash -c "! grep -aq 'VERIFICATION FAILED' '$P'"
 exige "aucune panique noyau" bash -c "! grep -aq 'KERNEL PANIC' '$P'"

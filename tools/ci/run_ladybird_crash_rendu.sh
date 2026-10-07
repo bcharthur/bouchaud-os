@@ -5,8 +5,12 @@
 #   tools/ci/run_ladybird_crash_rendu.sh BOOTIMAGE NATIVE_DIR [DUREE_S]
 #
 # L'onglet A (http://10.0.2.2:18082/crash-a.html) anime un canvas et rapporte
-# chaque seconde ses trames et son plus long gel. Il ouvre B sur L'AUTRE site
-# (10.0.2.100) : un autre WebContent. B prend le titre
+# chaque seconde ses trames et son plus long gel. Il ouvre un onglet sur le
+# MEME site (crash-b0.html), qui navigue au niveau racine vers L'AUTRE site
+# (10.0.2.100) : upstream change alors de WebContent ([LB] PROCESS_SWAP).
+# (Un window.open direct vers l'autre site resterait dans le processus de A :
+# l'onglet nait sur about:blank, et about:blank -> tout site ne change pas de
+# processus.) B prend le titre
 # BOUCHAUD_BANC_CRASH_RENDU ; UI/Bouchaud demande alors a SON WebContent une
 # vraie faute (ecriture a une page non mappee, prepare-compositor-lien.py).
 #
@@ -96,7 +100,7 @@ P="$LOG.propre"
 echo "CRASH_RENDU_VERDICT_BOUCLE $verdict duree_reelle_s=$((SECONDS - DEBUT))"
 
 echo "== chronologie =="
-grep -anE 'HOST_CRASH_A_OUVRE_B|HOST_CRASH_B|RENDERER_CRASH_(REQUEST|TEST)|PRESENT_APRES_REPRISE|\[LB\] PROCESS_(CREATE|EXIT|SWAP)|PROCESS_FAULT|\[LB:CRASH\]|WebContent process crashed|CONNECTION_(CREATE|REMOVE)|COMPOSITOR_LINK|HOST_CRASH_A_FIN|VERIFICATION FAILED|KERNEL PANIC' "$P" \
+grep -anE 'HOST_CRASH_A_OUVRE_B|HOST_CRASH_B0?|RENDERER_CRASH_(REQUEST|TEST)|PRESENT_APRES_REPRISE|\[LB\] PROCESS_(CREATE|EXIT|SWAP)|PROCESS_FAULT|\[LB:CRASH\]|WebContent process crashed|CONNECTION_(CREATE|REMOVE)|COMPOSITOR_LINK|HOST_CRASH_A_FIN|VERIFICATION FAILED|KERNEL PANIC' "$P" \
   | sed -E 's/^([0-9]+):.*(HOST_|\[LB|PROCESS_FAULT|WebContent process|VERIFICATION|KERNEL)/\1: \2/' | awk 'NR <= 40 { print "  " $0 }' || true
 
 # Les numeros de ligne ordonnent les evenements.
@@ -114,6 +118,8 @@ pid_js() { grep -aoE "WebContent\(([0-9]+)\): \(js log\) \"$1" "$P" | ${2:-head}
 pid_a=$(pid_js 'HOST_CRASH_A t_s=')
 pid_a_fin=$(pid_js 'HOST_CRASH_A_FIN')
 pid_b_js=$(pid_js 'HOST_CRASH_B origine=')
+swap_b=$(grep -aoE "\[LB\] PROCESS_SWAP onglet=${onglet_b:-x} raison=autre_site ancien_pid=[0-9-]+ nouveau_pid=[0-9]+" "$P" | head -1 | sed 's/.*raison=autre_site //' || true)
+swap_nouveau=$(echo "$swap_b" | grep -oE 'nouveau_pid=[0-9]+' | cut -d= -f2 || true)
 pids_wc=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/WebContent pid=[0-9]+' "$P" | grep -oE 'pid=[0-9]+$' | cut -d= -f2 | awk '!vu[$0]++' | tr '\n' ' ' || true)
 compositors=$(grep -aoE 'PERF_EXECVE .*image=/usr/libexec/ladybird/Compositor pid=[0-9]+' "$P" | grep -oE 'pid=[0-9]+$' | sort -u | wc -l || true)
 # Trames de A : derniere valeur avant la demande, et a la fin.
@@ -138,8 +144,10 @@ echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
 dans() { grep -aqE "$1" "$P"; }
 exige "A a ouvert B" dans 'HOST_CRASH_A_OUVRE_B ok=true'
+exige "B est parti du site de A" dans 'HOST_CRASH_B0 part_de=http://10\.0\.2\.2:18082'
 exige "B tourne sur l'autre site" dans 'HOST_CRASH_B origine=http://10\.0\.2\.100:18082'
 exige "demande de plantage de B (pid ${pid_b:-?})" test -n "$pid_b"
+exige "B a change de WebContent en changeant de site (PROCESS_SWAP ${swap_b:-absent})" test -n "$swap_b" -a "${swap_nouveau:-x}" = "${pid_b:-y}"
 exige "le pid demande est celui qui execute B (${pid_b_js:-?})" test -n "$pid_b_js" -a "${pid_b_js:-x}" = "${pid_b:-y}"
 exige "B et A dans des WebContent differents (${pid_a:-?} / ${pid_b:-?})" test -n "$pid_a" -a "${pid_a:-x}" != "${pid_b:-x}"
 exige "le WebContent de B a faute (noyau : ${faute:-rien})" test -n "$faute"

@@ -220,8 +220,12 @@ WORKER_DATA_JSON = b'{"valeur": "donnee-du-reseau-7"}'
 # `?duree=S` secondes (600 par defaut), un cycle toutes les 5 s : un cadre
 # remplace (nouveau contexte Compositor, ancien detruit), un worker cree puis
 # termine, un canvas anime, un defilement aller-retour, des images rechargees ;
-# un cycle sur trois ouvre un onglet sur l'AUTRE site (10.0.2.100 : autre
-# processus WebContent sous isolation de site) et le referme au cycle suivant.
+# un cycle sur trois ouvre un onglet qui passe, par un relais du meme site,
+# sur l'AUTRE site (10.0.2.100) : la navigation racine du relais lui donne un
+# AUTRE processus WebContent (isolation de site), et il se ferme seul 3 s
+# apres. Avant cela, l'onglet etait ouvert directement sur l'autre site et
+# restait dans le WebContent de la page (about:blank -> tout site ne change
+# pas de processus) : run 37581515158, 27 onglets, 2 WebContent en tout.
 # Une ligne `HOST_ENDURANCE cycle=` par cycle, puis `HOST_ENDURANCE_FIN`.
 ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</title>
 <body style="margin:0;font:16px sans-serif"><div id="etat">endurance</div>
@@ -269,7 +273,10 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
     setTimeout(() => scrollTo(0, 0), 600);
     if (onglet) { onglet.close(); onglet = null; }
     else if (cycle % 3 === 0) {
-      onglet = window.open(`http://10.0.2.100:18082/endurance-enfant.html?cycle=${cycle}`, "_blank");
+      // Par un relais du MEME site : un onglet ouvert directement sur l'autre
+      // site resterait dans ce WebContent (about:blank -> tout site ne change
+      // pas de processus) ; la navigation racine du relais, elle, en change.
+      onglet = window.open(`/endurance-relais.html?cycle=${cycle}`, "_blank");
       if (onglet) ongletsOuverts++;
     }
     const s = Math.round((performance.now() - t0) / 1000);
@@ -289,16 +296,29 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
   setTimeout(un_cycle, 1000);
 })();
 </script></body>"""
+ENDURANCE_RELAIS_HTML = b"""<!doctype html><meta charset="utf-8"><title>relais</title>
+<body>relais<script>
+  // replace : l'historique reste a une entree, l'onglet reste fermable par script.
+  location.replace(`http://10.0.2.100:18082/endurance-enfant.html${location.search}`);
+</script></body>"""
 ENDURANCE_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>enfant</title>
 <body style="margin:0;background:#cfe">onglet enfant<canvas id="c" width="200" height="60"></canvas><script>
   console.log(`HOST_ENDURANCE_ENFANT ${location.search} origine=${location.origin}`);
+  // Il se ferme lui-meme : apres le changement de processus, la fenetre que
+  // tient l'ouvreur ne le joint plus forcement.
+  setTimeout(() => window.close(), 3000);
   const ctx = document.getElementById("c").getContext("2d"); let n = 0;
   (function a() { n++; ctx.fillStyle = `hsl(${n % 360},50%,50%)`; ctx.fillRect(n % 180, 10, 20, 40); requestAnimationFrame(a); })();
 </script></body>"""
 
 # BOUCHAUD_CRASH_RENDU_V1 -- un rendu meurt, les autres vivent.
-# A (10.0.2.2) anime et mesure son plus long gel ; il ouvre B sur L'AUTRE site
-# (10.0.2.100, donc un autre WebContent) ; B prend le titre
+# A (10.0.2.2) anime et mesure son plus long gel ; il ouvre un onglet sur
+# crash-b0.html (MEME site), qui navigue au niveau racine vers L'AUTRE site
+# (10.0.2.100) : c'est cette navigation qui donne a B son propre WebContent.
+# Un window.open direct vers l'autre site ne le ferait pas : l'onglet nait sur
+# about:blank, et upstream laisse about:blank aller vers n'importe quel site
+# SANS changer de processus (SiteIsolationManager::
+# navigation_requires_process_swap). B prend le titre
 # BOUCHAUD_BANC_CRASH_RENDU, et UI/Bouchaud fait fauter SON WebContent. A
 # continue de compter ses trames, puis rapporte HOST_CRASH_A_FIN.
 CRASH_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-a</title>
@@ -328,8 +348,13 @@ CRASH_A_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-a</title>
       console.log(`HOST_CRASH_A_FIN t_s=${seconde} raf=${raf} gel_max_ms=${Math.round(gelMax)}`);
     }
   }, 1000);
-  setTimeout(() => { b = window.open("http://10.0.2.100:18082/crash-b.html", "_blank"); console.log(`HOST_CRASH_A_OUVRE_B ok=${!!b}`); }, 3000);
+  setTimeout(() => { b = window.open("/crash-b0.html", "_blank"); console.log(`HOST_CRASH_A_OUVRE_B ok=${!!b}`); }, 3000);
 })();
+</script></body>"""
+CRASH_B0_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-b0</title>
+<body>vers l'autre site<script>
+  console.log(`HOST_CRASH_B0 part_de=${location.origin}`);
+  setTimeout(() => { location.replace("http://10.0.2.100:18082/crash-b.html"); }, 500);
 </script></body>"""
 CRASH_B_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-b</title>
 <body style="margin:0;background:#fcc">onglet B<canvas id="c" width="200" height="60"></canvas><script>
@@ -1567,8 +1592,10 @@ class Handler(BaseHTTPRequestHandler):
             "/son.wav": (SON_WAV, "audio/wav"),
             "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
             "/endurance.html": (ENDURANCE_HTML, "text/html; charset=utf-8"),
+            "/endurance-relais.html": (ENDURANCE_RELAIS_HTML, "text/html; charset=utf-8"),
             "/endurance-enfant.html": (ENDURANCE_ENFANT_HTML, "text/html; charset=utf-8"),
             "/crash-a.html": (CRASH_A_HTML, "text/html; charset=utf-8"),
+            "/crash-b0.html": (CRASH_B0_HTML, "text/html; charset=utf-8"),
             "/crash-b.html": (CRASH_B_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
