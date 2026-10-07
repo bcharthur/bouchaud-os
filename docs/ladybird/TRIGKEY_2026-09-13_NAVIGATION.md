@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # Navigation sur Trigkey : diagnostic du test de 23:16
 
 Source : blackbox-extract-20260913-232108.zip, serial.log, memory.log,

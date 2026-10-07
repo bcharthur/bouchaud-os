@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # M5b en ring 3 : le reveil perdu de `poll`
 
 **M5 est termine.** Les six verifications du temoin passent en ring 3, sous

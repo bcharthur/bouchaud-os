@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../README.md).
+
 # Trigkey : bilan mesure et ameliorations du 13 septembre 2026
 
 Base consolidee : `f2398ef558115b6a8897a8de5da704362041ffb4`.

@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # P13.1 V5 — source BRDP cible-aware
 
 La V4 a valide physiquement la configuration Windows suivante :

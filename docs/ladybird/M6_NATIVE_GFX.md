@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # M6 — LibGfx / Skia CPU natif dans Bouchaud OS
 
 Ce jalon fait volontairement une chose mesurable : construire **le vrai

@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # Ladybird M8 — HTML local dans une fenetre Bouchaud
 
 M8 ferme la boucle entre le vrai `WebContent` Ladybird et le gestionnaire de

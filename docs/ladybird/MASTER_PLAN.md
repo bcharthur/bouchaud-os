@@ -1,4 +1,12 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # Ladybird comme moteur Web natif de Bouchaud OS — plan directeur
+
+> **Plan d'origine (août 2026), conservé tel quel pour ses décisions.** Les
+> jalons M1–M16 ci-dessous sont faits ; le travail se suit désormais par lots
+> **P1–P13** dont l'état, le niveau de preuve et ce qui manque sont dans la
+> section 1 du [README](../../README.md). Le SHA Ladybird épinglé n'a pas
+> changé : `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6`.
 
 *Document de conception. Aucune ligne de code de portage n'a encore ete ecrite au
 moment ou il est redige : ce qui suit est le resultat d'une inspection des deux

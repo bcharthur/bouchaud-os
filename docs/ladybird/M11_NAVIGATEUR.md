@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # M11 — le navigateur devient utilisable
 
 ## Ce que M11 change, et pourquoi c'etait le jalon bloquant

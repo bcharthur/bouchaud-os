@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../README.md).
+
 # Handoff Scheduler NG -- 1er octobre 2026
 
 Branche `claude/ladybird-observability-performance`, HEAD `9f7c5cf8` (+ le

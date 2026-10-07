@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../README.md).
+
 # Audit TRIGKEY — archive blackbox du 16 septembre 2026
 
 Session `2026-09-16_17-00-37_520`, extraite a 17:22. Ce document dit ce que

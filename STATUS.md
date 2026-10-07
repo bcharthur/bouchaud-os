@@ -1,6 +1,38 @@
 # Bouchaud OS — Current Status
 
-Dernière mise à jour : 25 septembre 2026
+Dernière mise à jour : 7 octobre 2026
+
+## État au 7 octobre 2026 (branche `claude/ladybird-observability-performance`)
+
+Le tableau de bord vivant est la section 1 du [README](README.md) (lots
+P1–P13, niveau de preuve, ce qui manque). L'état élément par élément du
+navigateur est **généré** dans
+[docs/ladybird/INTEGRATION_STATUS.md](docs/ladybird/INTEGRATION_STATUS.md).
+
+Corrections noyau de la passe de convergence, chacune avec sa preuve :
+
+| Correction | Preuve | Niveau |
+|---|---|---|
+| Masque des signaux par fil (POSIX) — SIGCHLD ne reste plus bloqué après la première mort d'un fils | `sigmasque-fil-probe` : avant 0/20 récoltes, après 20/20 ; `LADYBIRD_WORKER_CYCLE_OK` ; endurance WebWorker 29/29 récoltés | QEMU (TCG, KVM) |
+| Héritage fork/exec : un fils déjà exécuté n'hérite plus du profil du courtier | `NNP_ABSENT … profil=BrowserBroker` (3/29) avant ; tests hôte 16/16 | HOST ; QEMU à confirmer |
+| Instantané `/persist` sous une seule prise (panique pendant `fsync`) | `persist-course-probe` : panique reproduite sans la correction, `PERSIST_COURSE_OK` avec | QEMU (TCG) |
+| Une seule horloge murale | KVM : `MTIME_STABLE_ECHEC` avant | QEMU (TCG) ; KVM à confirmer |
+| Écritures ATA en DMA bus-master | `disque-probe` 53 s → 11 s (TCG, même machine) ; 0 repli PIO | QEMU (TCG) |
+| Fréquence du TSC publiée par l'hyperviseur ; contrôle `BOUCHAUD_TSC_CONTROLE` | KVM : horloge monotone 4,5× trop rapide avant (2 561 s pour 570 s de ticks) | KVM : à confirmer |
+| Identité du cœur sans CPUID par interruption | os-primitives KVM franchit le démarrage (bloqué dans `cpuid` avant) | KVM |
+| `stat` rend la date de modification | `MTIME_STABLE_OK` ; WPT sans faute `FcValueCanonicalize` | QEMU |
+| Comptabilité CPU par seqlock | `COMPTA_STRESS_OK` (reculs=0, dépassements=0) | QEMU (TCG) |
+| Un document jeté termine ses workers dédiés (patch Ladybird) | workers 21/22 sortis à la navigation (noyau) | QEMU |
+
+Ouvert : endurance (29 cycles/60, 6 cadres > 30 s sous TCG), RSS du
+Compositor (+2,7 à 2,9 Mio/min), horloge de l'invite sous KVM (~1,6× trop
+rapide au run 37654172489), un recul isolé de `COMPTA_STRESS` (1 sur 13,
+cause non établie, diagnostic posé), P10 GPU
+(BLOCKED), HDA Trigkey (BLOCKED, pas de pilote), **Trigkey NOT TESTED sur ce
+HEAD**.
+
+> Les sections qui suivent sont des **relevés datés**. Elles ne sont pas
+> réévaluées à chaque passe ; une ligne ✅ y date de son checkpoint.
 
 **Point actuel Trigkey :** voir [le bilan mesure du 13 septembre](docs/TRIGKEY_FLUIDITE_2026-09-13.md).
 Le dernier ZIP prouve UEFI, 16 CPU/timers et configuration Ethernet ; il ne

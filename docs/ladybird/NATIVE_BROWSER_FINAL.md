@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # Ladybird natif — convergence M7/M8
 
 Cette chaine part du dernier jalon prouve (M6 LibGfx/Skia CPU en ring3) et du premier morceau M7 (`build-libweb-gen.sh`). Elle ne remplace aucun composant Ladybird par un renderer maison.

@@ -1,75 +1,227 @@
 # Bouchaud OS
 
-Bouchaud OS est un système d'exploitation **bare-metal écrit from scratch en Rust**.
-Il ne repose ni sur Linux ni sur Windows à l'exécution. La cible réellement
-exécutée aujourd'hui est **x86_64 sous QEMU** ; le dépôt est désormais structuré
-pour accueillir **AArch64**, d'abord sous QEMU `virt`, puis sur **Raspberry Pi 4**.
+Système d'exploitation **bare-metal écrit from scratch en Rust** (`no_std`,
+x86_64), qui fait tourner le navigateur **Ladybird natif** — multi-processus,
+confiné par le noyau — sans Linux ni Windows à l'exécution.
 
-> La fondation AArch64 présente dans le dépôt est une architecture de portage,
-> pas encore un backend bootable. Le chemin x86_64 reste la référence fonctionnelle.
+> **EXPÉRIMENTAL.** Rien ici n'est un produit. Chaque ligne « DONE » du
+> tableau ci-dessous renvoie à une preuve rejouable ; ce qui n'a pas de
+> preuve est écrit « NOT TESTED », jamais « OK ».
 
-## Vision technique
+## 1. État — tableau de bord
+
+| | |
+|---|---|
+| Date du relevé | 2026-10-07 |
+| Branche | `claude/ladybird-observability-performance` |
+| HEAD des preuves | voir la ligne « Dernières preuves » de chaque lot ; le HEAD courant est `git rev-parse HEAD` |
+| Machine de référence | **TRIGKEY Speed S5** — AMD Ryzen 7 5700U, 16 CPU logiques, NVMe, RTL8168, UEFI depuis clé USB |
+| Banc d'exécution | QEMU x86_64 (TCG et KVM), `-smp 4` |
+| Ladybird épinglé | `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6` ([third_party/UPSTREAM.md](third_party/UPSTREAM.md)) |
+| Statut | **EXPÉRIMENTAL** — convergence Ladybird en cours, **Trigkey NOT TESTED** sur ce HEAD |
+
+### Les lots P1–P13
+
+Niveaux de preuve : **STATIC** (garde-fou sur le code), **HOST** (test exécuté
+sur l'hôte), **QEMU** (comportement observé dans une exécution réelle),
+**PHYSICAL** (observé sur la Trigkey). États : **DONE**, **PARTIAL**,
+**BLOCKED**, **NOT TESTED**.
+
+| Lot | Sujet | État | Niveau | Preuve (marqueur — banc) | Ce qui manque |
+|---|---|---|---|---|---|
+| P1 | UI/Bouchaud, BrowserHost | DONE | QEMU | `BOUCHAUD_UI_V1_READY`, `M11_GUI_HANDSHAKE_OK` — `run_ladybird_browser_host.sh` | Trigkey |
+| P2 | Compositor → gestionnaire de fenêtres | DONE | QEMU | `BOUCHAUD_UI_FIRST_FRAME`, un seul Compositor sur 10 min — endurance | Trigkey |
+| P3 | Dégât (damage) | DONE | QEMU | `[LB:PERF] trames_partielles=` — smoke | Trigkey |
+| P4 | Défilement asynchrone | DONE | QEMU | `HOST_SCROLL_CHAINE OK` — smoke | Trigkey |
+| P5 | Web Workers | DONE | QEMU | `HOST_WORKER_BATTERIE OK 10/10`, `LADYBIRD_WORKER_CYCLE_OK` (run 37654172489) ; endurance : WebWorker 29 créés / 29 récoltés | Trigkey |
+| P6 | Bac à sable | PARTIAL | QEMU + HOST | `MATRICE_ROLES_OK`, `[LB:SANDBOX] service=WebContent role=rendu` ; course d'héritage fork/exec corrigée (`7649056a`, tests hôte 16/16) | prouver en QEMU l'absence de `NNP_ABSENT` sur l'endurance |
+| P7 | Persistance (profil, SQL, cache HTTP) | DONE | QEMU | `LADYBIRD_CACHE_REDEMARRAGE_OK`, `PERSIST_CACHE_OK` | Trigkey |
+| P8 | Audio | PARTIAL | QEMU | `HOST_AUDIO_CHAINE OK`, `OSS_HORLOGE_CHAINE_OK` (AC'97 de QEMU) | **Trigkey HDA : BLOCKED** — aucun pilote HDA |
+| P9 | Isolation de site / OOPIF | PARTIAL | QEMU | `LADYBIRD_OOPIF_OK`, `LADYBIRD_CRASH_RENDU_OK` | `postMessage` entre processus : limite amont (0/3) |
+| P10 | GPU | BLOCKED | — | aucun backend GPU : rendu CPU + scanout linéaire | pilote 3D (aucun faux backend) |
+| P11 | WPT | DONE | QEMU | `HOST_WPT_FIN`, `LADYBIRD_WPT_OK` : 50 fichiers, 4632/4641 (Linux 4628/4641), égaux 49, mieux 1, moins 0, échéances 0 | élargir le corpus |
+| P12 | Documentation | DONE | STATIC | ce README ; `tools/verifie-readme-commandes.py` | — |
+| P13 | Convergence | PARTIAL | QEMU | verdict `BOUCHAUD_LADYBIRD_CONVERGENCE_OK` non atteint | endurance (≥ 60 cycles, aucun cadre > 30 s) ; banc cache/SQL (panique `/persist` corrigée en `d75d2b3b`, à rejouer) |
+
+**P18 (lot historique)** : `/proc/stat`, `/proc/self/stat`, `/proc/<pid>/stat`
+dynamiques, verrouillés par garde-fou (STATIC) et exercés par
+`COMPTA_STRESS_OK` (QEMU).
+
+L'état mesuré élément par élément (34 lignes, deux indicateurs séparés) est
+**généré** dans [docs/ladybird/INTEGRATION_STATUS.md](docs/ladybird/INTEGRATION_STATUS.md).
+
+## 2. Ladybird dans Bouchaud OS
 
 ```text
-Applications / Ladybird
-          │
-          ▼
-Userland et services
-          │  syscalls / IPC
-          ▼
-Compatibilité ABI (Linux aujourd'hui, Bouchaud native à terme)
-          │
-          ▼
-┌─────────────────────────────────────────────┐
-│                 Kernel core                 │
-│ mémoire · process · scheduler · IPC · FS    │
-│ objets · sync · temps · réseau              │
-└───────────────────┬─────────────────────────┘
-                    │
-            Driver contracts
-                    │
-        ┌───────────┴───────────┐
-        ▼                       ▼
-     Drivers                 Platform
- e1000/ATA/BGA/...       PC / QEMU / Pi
-        │                       │
-        └───────────┬───────────┘
-                    ▼
-              Architecture
-             x86_64 / AArch64
-                    │
-                    ▼
-                 Hardware
+ ┌──────────────────────── ring 3 ─────────────────────────────────────────┐
+ │  BouchaudBrowserHost (UI/Bouchaud : onglets, barre, chrome)  BrowserBroker
+ │      │ IPC (sockets Unix)                                                │
+ │      ├── WebContent ×N (un par site)       ── BrowserContent (confiné)   │
+ │      ├── WebWorker ×N                      ── BrowserContent             │
+ │      ├── ImageDecoder                      ── BrowserContent             │
+ │      ├── RequestServer (HTTP/TLS/cache)    ── BrowserNetwork             │
+ │      └── Compositor ──trames──► surface du WM (FrameReady + dégât)       │
+ ├──────────────────────── noyau Bouchaud ─────────────────────────────────┤
+ │  ABI Linux (glibc statique) · ordonnanceur SMP · mémoire · ramfs/persist │
+ │  profils de sécurité par image (no_new_privs d'office) · réseau TCP/TLS  │
+ │  signaux POSIX (masque par fil) · ATA DMA · AC'97 · e1000 / RTL8168      │
+ └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-La règle de dépendance cible est simple : **le cœur générique ne doit pas connaître un
-CPU ou un périphérique concret**. `x86_64`, `AArch64`, `e1000`, VGA, ATA ou un
-Raspberry Pi sont des backends, pas des concepts du kernel. La structure existe,
-mais la suppression de toutes les dépendances historiques reste progressive.
+| Fonction | Où | Preuve |
+|---|---|---|
+| Fenêtre, onglets, barre d'adresse | `UI/Bouchaud` (BrowserHost), hors WebContent | `BOUCHAUD_UI_WEBCONTENT_CHROME 0` |
+| Rendu d'une page | WebContent → Compositor → WM | `BOUCHAUD_UI_FIRST_FRAME` |
+| Réseau, TLS, cache disque | RequestServer | `[LB:CACHE] disque=oui` ; HTTPS : PHYSICAL au 2026-09-18 seulement |
+| Profil, cookies, localStorage | `/persist/ladybird` (XDG) | `LADYBIRD_CACHE_REDEMARRAGE_OK` |
+| Confinement | noyau, par image (`src/kernel/security/profile.rs`) ; chaque service le vérifie | `[LB:SANDBOX]`, `MATRICE_ROLES_OK` |
+| Mort d'un rendu | SIGCHLD → ProcessMonitor → page d'erreur, autres onglets vivants | `LADYBIRD_CRASH_RENDU_OK` |
+| Audio | WebContent → `/dev/dsp` → AC'97 | `HOST_AUDIO_CHAINE OK` (QEMU seulement) |
+| Isolation de cadres | WebContent par site, cadre distant | `LADYBIRD_OOPIF_OK` |
 
-## État actuel
+Détails : [UI_BOUCHAUD.md](docs/ladybird/UI_BOUCHAUD.md),
+[SECURITE_ROLES.md](docs/ladybird/SECURITE_ROLES.md),
+[MASTER_PLAN.md](docs/ladybird/MASTER_PLAN.md).
 
-> **Références vivantes :** [Current status](STATUS.md) distingue les éléments
-> prouvés, implémentés, en cours et planifiés. Le périmètre de la première
-> release est défini dans [Bouchaud OS 0.1](docs/BOUCHAUD_OS_0_1.md).
+## 3. Démarrage rapide
 
-- noyau Rust `no_std`, mémoire virtuelle, ELF, ring 3 et ABI Linux-compatible ;
-- processus, threads et ordonnanceur SMP ; Gate0 a validé trois boots QEMU
-  SMP4, sans généraliser cette preuve à SMP8 ou au matériel physique ;
-- pile réseau, TCP/IP, DNS et TLS ;
-- framebuffer/GUI historique et entrées clavier/souris ;
-- intégration de WebContent/Ladybird et de plusieurs services ; le frontend
-  Ladybird complet, sa sandbox et la compatibilité Web générale restent à faire ;
-- x86_64/QEMU : cible fonctionnelle ;
-- AArch64/QEMU `virt` : structure créée, bring-up à faire ;
-- Raspberry Pi 4 : cible matérielle suivante ;
-- Raspberry Pi 5 : hors du premier port, volontairement.
+Prérequis : Rust/rustup (toolchain du dépôt), QEMU, `cargo install bootimage`.
 
-Le BKL historique et plusieurs structures issues de la première architecture
-restent des dettes connues. La restructuration multiplateforme ne prétend pas les
-masquer : elle crée les frontières nécessaires pour les supprimer proprement.
+**Windows (PowerShell), bureau + navigateur sous QEMU :**
 
-## Organisation du dépôt
+```powershell
+git clone https://github.com/bcharthur/bouchaud-os.git
+cd bouchaud-os
+.\run.ps1
+.\run.ps1 -Accel tcg -CpuCount 4 -RamMiB 8192
+.\check.ps1
+```
+
+`run.ps1` télécharge l'artefact Ladybird du dernier run vert de la branche
+(`-LadybirdRunId` pour en choisir un, `-RefreshLadybird` pour le reprendre).
+
+**Linux, noyau et bancs :**
+
+```bash
+cargo bootimage
+tools/test.sh
+tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+tools/ci/run_architecture_guards.sh
+python3 tools/verifie-readme-commandes.py
+```
+
+`BO_QEMU_KVM=1` devant `run_os_primitives.sh` rejoue les mêmes sondes sous
+KVM (`/dev/kvm` requis).
+
+## 4. Image Trigkey (clé USB)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\reference\IMAGE-TRIGKEY.ps1
+.\tools\reference\run-trigkey-single-usb-qemu.ps1 -Accel tcg -SkipBuild
+```
+
+Le script refuse un arbre modifié et produit dans `target\reference\` trois
+fichiers **à garder ensemble** : l'image `.img`, le noyau non strippé
+`.img.kernel.elf`, et le manifeste `.img.manifeste.json` (commit, SHA256).
+La seconde commande démarre exactement cette image sous QEMU avant tout flash.
+
+### Flasher avec Rufus
+
+1. Rufus → périphérique : **la clé USB**. Vérifier deux fois : **ne jamais
+   choisir le NVMe interne**, Rufus l'effacerait.
+2. Sélection : le fichier `.img`, puis **mode DD** (pas ISO).
+3. Sur la Trigkey : Secure Boot **désactivé**, Boot Override → la clé UEFI.
+
+> **Avertissement.** Une image Trigkey n'est **pas** validée physiquement par
+> la CI. L'AC'97 de QEMU n'est pas le HDA de la Trigkey (BLOCKED, pas de
+> pilote). Un essai physique se rapporte avec le manifeste de l'image, sans
+> quoi aucune adresse de la blackbox n'est symbolisable.
+
+Après un essai : `python3 tools/reference/extract-blackbox.py --image <img> --output <dossier>`,
+puis `python3 tools/reference/symbolise-blackbox.py --manifeste <manifeste> <RIP>`.
+Bundle de debug distant : `.\tools\remote\collect-ladybird-debug.ps1`.
+
+## 5. Marqueurs — aide-mémoire
+
+| Marqueur | Banc / source | Veut dire |
+|---|---|---|
+| `M11_GUI_HANDSHAKE_OK` | smoke navigateur | BrowserHost ↔ bureau établi |
+| `BOUCHAUD_UI_V1_READY` / `BOUCHAUD_UI_FIRST_FRAME` | smoke | UI prête / première trame Compositor présentée |
+| `LADYBIRD_ARTIFACT_MANIFEST_OK` | CI | l'artefact Ladybird correspond au HEAD et au SHA épinglé |
+| `LADYBIRD_CRASH_RENDU_OK` | robustesse | un rendu meurt, les autres onglets et le Compositor vivent |
+| `LADYBIRD_OOPIF_OK` | robustesse | un cadre d'un autre site vit dans un autre WebContent |
+| `LADYBIRD_WORKER_CYCLE_OK` | robustesse | workers : crash, navigation, sortie, recolte |
+| `HOST_WPT_FIN` + `LADYBIRD_WPT_OK` | wpt | corpus fini, aucune régression contre Linux |
+| `LADYBIRD_SITES_OK` | sites réels | pages réelles chargées et peintes |
+| `LADYBIRD_ENDURANCE_OK` | endurance 10 min | cycles, cadres, workers, aucun crash |
+| `LADYBIRD_CACHE_REDEMARRAGE_OK` | persistance | cookies, localStorage, cache relus après redémarrage |
+| `BOUCHAUD_LADYBIRD_CONVERGENCE_OK` | verdict de convergence | tous les bancs ci-dessus, même HEAD |
+| `OS_PRIMITIVES_OK` | os-primitives | sondes POSIX (verrous, WAL, disque, signaux, comptabilité CPU, mtime) |
+| `SIGCHLD_MULTIFIL_OK` / `SIGMASQUE_FIL_OK` | os-primitives | SIGCHLD livré et récolté / masque des signaux par fil |
+| `COMPTA_STRESS_OK` | os-primitives | comptabilité CPU cohérente sous migrations (seqlock) |
+| `BOUCHAUD_TSC_CONTROLE` | tout démarrage | fréquence du TSC, sa source, contrôle par les ticks PIT |
+| `KERNEL PANIC`, `PROCESS_FAULT`, `[LB:SANDBOX] ECHEC`, `NNP_ABSENT` | tout banc | à lire en premier |
+
+## 6. Arbre de diagnostic
+
+1. **La machine ne démarre pas / s'arrête tôt** → dernier repère du journal
+   série ; `KERNEL PANIC` ? Les bancs impriment en fin d'échec les adresses
+   noyau symbolisées (`tools/ci/symbolise_noyau.py`). Sur Trigkey :
+   blackbox → `extract-blackbox.py` → `symbolise-blackbox.py`.
+2. **Le bureau vient, pas le navigateur** → `M11_GUI_HANDSHAKE_OK` absent :
+   vérifier `LADYBIRD_ARTIFACT_MANIFEST_OK` (artefact du bon HEAD), puis
+   `[LB:SANDBOX] ECHEC` (un service a refusé de tourner non confiné).
+3. **Une page ne s'affiche pas** → `BOUCHAUD_UI_FIRST_FRAME` ? Sinon
+   `PROCESS_FAULT` (faute d'un WebContent, symbolisée par
+   `tools/ci/symbolise_fautes.py`), puis le réseau (`[LB:CACHE]`, TLS).
+4. **Un onglet mort ne revient pas** → `[LB] SIGCHLD_RECU` / `SIGCHLD_FILS`
+   présents ? Sinon problème de signaux noyau : rejouer `sigchld-multifil-probe`
+   et `sigmasque-fil-probe` (os-primitives).
+5. **Lenteur** → `[PROC-STAT]` (CPU par processus), `ATA_CONTROLEUR`
+   (attente disque, `lots_dma`, `lots_dma_ecrits`), `BOUCHAUD_TSC_CONTROLE`
+   (une horloge fausse fausse toutes les durées).
+6. **Sous KVM seulement** → `BOUCHAUD_TSC_CONTROLE rapport_pour_mille=` loin
+   de 1000 : horloge monotone fausse ; `replis_apic=` élevé : identité du
+   cœur recalculée par CPUID (coûteux sous KVM imbriqué).
+
+## 7. Sources de vérité
+
+| Question | Source |
+|---|---|
+| Qu'est-ce qui marche, à quel niveau ? | [docs/ladybird/INTEGRATION_STATUS.md](docs/ladybird/INTEGRATION_STATUS.md) — généré par `python3 tools/ladybird/mesure-integration.py --ecris`, vérifié par `tools/verifie-integration-ladybird.py` |
+| Les verdicts d'un run | les journaux de jobs `ladybird-native-browser` et `os-primitives` (marqueurs §5) |
+| L'artefact Ladybird | `BOUCHAUD_ARTIFACT_MANIFEST.json` (HEAD Bouchaud + SHA Ladybird) |
+| Le noyau d'une image Trigkey | `.img.manifeste.json` + `.img.kernel.elf` |
+| Les contrats d'architecture | `tools/verifie-*.py` (161 garde-fous, `tools/ci/run_architecture_guards.sh`) |
+| L'état général, daté | [STATUS.md](STATUS.md) |
+
+## 8. Prochaines priorités
+
+1. **Endurance (P13)** : 29 cycles en 10 min sous TCG pour ≥ 60 exigés,
+   6 cadres au-delà de 30 s ; profiler par étape avant de toucher au budget.
+2. **Compositor** : RSS de 1 à 88 Mio en 10 min (pente 2,9 Mio/min) —
+   fuite ou cache non borné, à attribuer.
+3. **P6** : confirmer en QEMU que plus aucun WebWorker ne lit `no_new_privs=0` (`NNP_ABSENT`).
+4. **KVM** : confirmer la fréquence du TSC (`BOUCHAUD_TSC_CONTROLE`) et le
+   disque en DMA, puis comparer TCG/KVM (cycles, latence, CPU, RSS).
+5. **Trigkey** : image du HEAD convergé, essai physique, HDA (pilote absent).
+
+## 9. Journal des corrections récentes (noyau)
+
+| Commit | Correction | Preuve |
+|---|---|---|
+| `7649056a` | un fils déjà exécuté n'hérite plus du profil du **courtier** (course posix_spawn : un WebWorker tournait avec les droits du BrowserHost) | `NNP_ABSENT … profil=BrowserBroker` (3/29) ; tests hôte 16/16 |
+| `d75d2b3b` | instantané de `/persist` sous une seule prise du RAMFS (panique noyau pendant un `fsync`) | `persist-course-probe` : panique reproduite sans, `PERSIST_COURSE_OK` avec |
+| `6fdd5421` | une seule horloge murale (dates de fichier = `clock_gettime`) | KVM : `MTIME_STABLE` échouait |
+| `eea4b8a7` | masque des signaux **par fil** (il était par processus : SIGCHLD restait bloqué après la première mort d'un fils) | `sigmasque-fil-probe` : avant 0/20 récoltes, après 20/20 ; `LADYBIRD_WORKER_CYCLE_OK` |
+| `fe049123` | écritures ATA en DMA bus-master | `disque-probe` TCG 53 s → 11 s |
+| `b94542b7` | fréquence du TSC publiée par l'hyperviseur | KVM : horloge 4,5× trop rapide avant ; contrôle publié |
+| `3d5f5f0e`, `e2528579` | identité du cœur sans CPUID par interruption | KVM : plus de blocage au démarrage |
+| `2de74c38` | `stat` rend la vraie date de modification | WPT : plus de faute dans `FcValueCanonicalize` |
+| `65fb2b39` | comptabilité CPU par seqlock | `COMPTA_STRESS_OK` |
+
+
+## 10. Organisation du dépôt
 
 ```text
 src/
@@ -140,179 +292,7 @@ Pendant la transition, certains anciens chemins Rust (`kernel::fd`,
 volontaire : **déplacer les sources et changer leur comportement dans le même
 commit rendrait les régressions impossibles à isoler**.
 
-## Construire et lancer
-
-Prérequis : Rust/rustup, QEMU et `cargo install bootimage`.
-
-```powershell
-git clone https://github.com/bcharthur/bouchaud-os.git
-cd bouchaud-os
-.\run.ps1
-```
-
-Pour compiler sans lancer QEMU :
-
-```powershell
-.\check.ps1
-```
-
-La cible x86_64 personnalisée vit maintenant dans
-`targets/x86_64-bouchaud_os.json` et `.cargo/config.toml` la sélectionne par
-défaut.
-
-## Navigateur
-
-Le travail navigateur est centré sur l'intégration native de Ladybird :
-WebContent, RequestServer, ImageDecoder, Compositor, WebWorker et le host
-Bouchaud sont empaquetés dans le userland/scénario de développement. Le but est
-que le navigateur soit un citoyen normal de Bouchaud OS et non une démonstration
-spéciale liée au noyau.
-
-```powershell
-.\run.ps1
-```
-
-Le bureau démarre, puis le navigateur se lance depuis son entrée graphique. Les
-modes `-LadybirdM8` et `-LadybirdM9Test` restent des scénarios de régression.
-
-### Observabilité du démarrage à froid
-
-Le navigateur fonctionne ; il démarre lentement. Le chantier en cours sépare
-ces deux questions et refuse de les confondre.
-
-**Deux statuts CI indépendants.** `ladybird / browser-host smoke` bloque sur la
-capacité, `ladybird / performance` bloque sur les budgets, et un échec de l'un
-n'est jamais présenté comme un échec de l'autre. Le verdict de performance
-était auparavant écrit mais lu par personne : il dépendait d'une variable
-qu'aucun workflow ne définissait.
-
-**Capacités vertes**, vérifiées à chaque run : canvas, images 11/11 codecs,
-iframes, JS 17/17, WebWorker HTTP et blob, et la mire réellement retrouvée
-dans une trame composée — capture prise pendant que QEMU vit, corrélée à un
-numéro de trame, et non plus après sa mort.
-
-**Ce que la mesure a établi, et ce qu'elle a réfuté.** Le premier WebWorker
-coûte environ 130 s là où les suivants coûtent 1,5 à 9 s. Les bornes posées
-sur le chemin noyau ont successivement innocenté :
-
-| poste | mesure | verdict |
-|---|---|---|
-| `fork` | 28 ms | hors de cause |
-| `fork` → `execve` | 8 ms | hors de cause |
-| `execve` | 22 ms | hors de cause |
-| `exec` → `main` | ~94 s | **le poste réel** |
-| fautes fichier dans ce segment | ~10 s | 11 %, pas la cause |
-
-Le segment de 43,4 s longtemps attribué à l'ordonnanceur n'existait pas : il
-était mal borné.
-
-**Cause confirmée, et corrigée : le balayage de secours du cache de pages.**
-À chaque défaut de cache, dès que la table atteint son plafond de 16 384
-pages, le noyau parcourait **toute** la table en prenant le verrou d'état de
-chaque entrée, sous le verrou global — pour n'y rien trouver. Mesuré sous
-Ladybird : 22 773 balayages, 632 millions d'entrées parcourues, **277 s**,
-soit 57 % du temps noyau du run. Le modèle « un balayage par défaut de cache
-une fois la table pleine » se vérifie à 0,0 % près sur banc local et 1,8 % sur
-Ladybird. La correction sort quand le compteur d'entrées récupérables vaut
-zéro — le balayage est alors garanti de ne rien trouver. Banc à 80 Mio, trois
-exécutions par bras : durée **−58 %**, temps noyau **−62 %**, avec des témoins
-identiques (`entrees=20480`, `recuperees=0`) qui prouvent qu'aucune
-récupération n'a été perdue.
-
-**Remesuré sous Ladybird (run #358), et le gain dépasse le banc.**
-`HOST_WORKER_BLOB_PERF_FIRST` passe de **126 670 ms à 8 996 ms** — un facteur
-14, sous un budget de 30 000 ms qui n'a pas bougé. Le temps noyau du run tombe
-de 490 240 ms à 103 500 ms ; le premier WebWorker, de ~113 s à 8,985 s de
-`sys_ms`. Deux témoins restent **identiques au run précédent** —
-`candidats_suffisants=12722` et `miss=52534` — donc le chemin rapide
-d'éviction a fait exactement le même travail et le cache a manqué exactement
-les mêmes pages : seul le balayage a disparu. Ce qui domine maintenant, ce sont
-132 s de lectures disque réelles, et c'est la prochaine question.
-
-**Le même commit a figé la machine, et c'était la sonde.** `Integration #256`
-s'arrête net après `SESSION_PERE_SORT fils=4`, machine vivante, scénario
-bloqué. Le chef de session publie ses sondes sans encombre ; ce sont les
-**quatre tâches arrêtées avec lui** qui ne publient jamais leur `PROCESS_EXIT`.
-`exit_current` tient `process.lifecycle` pendant la publication des sondes, et
-`balayage_temoins()` y prenait `CACHE.lock()` : une arête d'ordre de verrous
-sur un chemin de sortie. Ce correctif était juste — la règle est écrite dans le
-fichier même — mais il **n'a pas suffi** : `Integration #257` a échoué au même
-endroit, et une passe locale verte ne prouve rien contre une course.
-
-**Un réveil perdu dans `wait4`, antérieur — et ma correction l'a aggravé.**
-`[SCHED-RESUME] pretes=2 ... au_repos=4 en_file=0` — deux tâches prêtes, quatre
-cœurs au repos, file vide : le shell n'a jamais été remis en file. `sys_wait4`
-cherchait les fils zombies, n'en trouvait aucun, **puis** se déclarait en
-attente. Un fils mourant dans cet intervalle trouvait `waiting_for_child`
-encore à faux ; son réveil tombait dans le vide et le parent s'endormait pour
-toujours. Les sondes de sortie de processus n'ont fait que déplacer le timing
-dans cette fenêtre. Corrigé en posant `Blocked` **avant** le drapeau — sinon le
-réveilleur consomme le drapeau puis échoue sur l'état — et en **revérifiant**
-après s'être déclaré. **Cette correction a été retirée : elle empirait le
-défaut**, déplaçant le blocage du 8ᵉ marqueur au 3ᵉ. La relecture du protocole
-établi (`blocage.rs`) est un compteur ; la mienne parcourait tous les processus
-en prenant un verrou par processus, tâche déjà marquée bloquée. La course reste
-**ouverte et documentée, non corrigée**.
-
-**Ce qui est en périmètre, c'est le déclencheur.** Les trois sondes globales
-étaient publiées *dans* le scope de `process.lifecycle` — trois écritures série
-sous un verrou de processus. Elles sont désormais publiées après sa fermeture ;
-mêmes chiffres, section critique rendue à sa longueur. Deux règles tirées de la
-même erreur : une sonde ne prend pas de verrou, et une sonde ne rallonge pas la
-section critique qu'elle observe. Reproducteur : sous contention CPU le défaut
-sort **3 fois sur 3**, là où une passe non contrainte passait et m'avait fait
-conclure trop vite. La règle était déjà
-écrite dans le fichier même (« Reporting must stay lock-free »), et le
-commentaire au-dessus du site d'appel mettait en garde contre ce geste exact.
-Corrigé par un compteur atomique ; vérifié par
-`tools/ci/verifie-sondes-sans-verrou.py`, qui refuse toute sonde d'`exit_current`
-dont le corps contient `.lock()`.
-
-**La mesure corrigée a inversé la conclusion.** Avec la frontière posée, le
-premier WebWorker mesure `user_ms=724` et `sys_ms=113594` : il passe 0,7 s en
-espace utilisateur et 113 s dans le noyau. `_dl_relocate_static_pie` s'exécute
-en espace utilisateur — l'hypothèse des 405 396 relocations de démarrage est
-donc **réfutée par borne supérieure**, et le banc A/B d'édition de liens a été
-retiré plutôt que laissé rouge. Ce qui reste à expliquer est net : 113 594 ms
-de noyau dont le livre des fautes n'explique que 13 285. Deux candidats
-(balayage de secours du cache, chaîne de reprise des fautes) ont été posés puis
-réfutés localement en quelques minutes — `appels=0` et `reprises=0`.
-
-**Une conclusion a été retirée, parce que l'instrument était faux.** Ce
-tableau portait « dont ~93 s de CPU » et la phrase « le premier worker
-n'attend pas, il calcule ». Les deux venaient d'un relevé `user_ms=92250
-sys_ms=671`. Or les frontières de comptabilité n'existaient qu'autour des
-appels système : le gestionnaire de faute de page n'en avait aucune, et tout
-ce qu'il fait — y compris **déclencher et attendre une lecture ATA** —
-tombait dans `user_ns`. Mesuré sur banc local, trois exécutions par variante,
-la frontière posée déplace 94 % du « temps utilisateur » vers le noyau
-(1320 ms → 61 ms côté utilisateur, 14 ms → 1204 ms côté noyau, total
-conservé). Rien n'est devenu plus rapide : l'étiquette était fausse. Le
-partage réel du segment `exec` → `main` demande un nouveau run, et la piste
-des relocations de démarrage perd l'argument qui la soutenait.
-
-Dans la foulée, la variante ET_EXEC qui devait falsifier cette piste s'est
-révélée **impossible à lier** : la glibc statique référence des symboles
-faibles indéfinis résolus à l'adresse zéro, et un `R_X86_64_PLT32` ne peut pas
-porter le déplacement depuis `0x400000000000`. Le micro-binaire qui semblait
-la valider était lié en `-nostdlib`. Elle est remplacée par une variante RELR
-(`-z pack-relative-relocs`), vérifiée localement : 26 280 octets de table
-deviennent 288, l'ASLR est conservée.
-
-**L'outillage de mesure est lui-même sous test.** Décomposition des fautes de
-page attribuée par PID et non globalement, avec test de chevauchement de deux
-processus ; `acquire` rend son coût à la faute qui l'a payé ; les sous-champs
-« dont » ne sont jamais additionnés à leur contenant ; les compteurs globaux
-portent `scope=global` pour ne pas se faire passer pour une attribution. Chaque
-garde-fou a été mis en échec volontairement avant d'être retenu.
-
-**Ce qui reste ouvert** est documenté dans
-[docs/MESURE_DEMARRAGE_A_FROID.md](docs/MESURE_DEMARRAGE_A_FROID.md) :
-la décomposition des ~94 s avant `main` avec un partage utilisateur/noyau
-désormais honnête, et le coût propre de l'instrumentation à forte charge de
-fautes.
-
-## Roadmap multiplateforme
+## 11. Roadmap multiplateforme
 
 1. **Foundation** — séparation arch/platform/drivers/kernel et compatibilité x86.
 2. **Boot contract** — remplacer `bootloader::BootInfo` dans le cœur par
@@ -327,7 +307,7 @@ fautes.
 7. **Userland AArch64** — libc/ABI, services et Ladybird recompilés ARM64.
 8. **Graphics NG** — compositeur userland + BouchaudGraphics/BouchaudUI.
 
-## Principes de portabilité
+## 12. Principes de portabilité
 
 - `arch` n'est pas `platform` : AArch64 ne signifie pas Raspberry Pi ;
 - un driver PCI n'est pas intrinsèquement x86 ;
@@ -336,7 +316,7 @@ fautes.
 - QEMU `virt` est le banc de bring-up ARM avant le vrai Raspberry Pi ;
 - le backend x86_64 doit rester vert pendant chaque étape du portage.
 
-## Documentation
+## 13. Documentation
 
 Les documents de référence se trouvent dans `docs/`. La fondation actuelle est
 décrite dans `docs/architecture/MULTIPLATFORM_FOUNDATION.md`. L'ancien README
@@ -359,10 +339,10 @@ Documents utiles :
 - `docs/BOUCHAUD_LAB_REMOTE.md` — protocole BRDP et télémétrie de survie ;
 - `docs/REMOTE_CONTROL.md` — contrôle distant et procédure TRIGKEY.
 
-## Matériel de référence : TRIGKEY
+## 14. Matériel de référence : TRIGKEY
 
 Le banc physique est un **TRIGKEY Speed S5** (Ryzen 7, 16 CPU logiques, NVMe
-interne, RTL8168, boot UEFI depuis une clé USB).
+interne, RTL8168, boot UEFI depuis une clé USB) — AMD Ryzen 7 5700U.
 
 Ce que la machine a réellement exercé, et l'état de chaque chemin, est tenu à
 jour dans `docs/TRIGKEY_AUDIT_2026-09-15.md` — avec, pour chaque verdict, le
@@ -374,6 +354,6 @@ qui refuse de construire sur un arbre modifié et publie le commit, le SHA256 de
 l'image et le manifeste de symbolisation — sans lesquels aucun RIP relevé par
 la blackbox ne veut dire quoi que ce soit.
 
-## Licence
+## 15. Licence
 
 MIT OR Apache-2.0. Voir `LICENSE`, `LICENSE-MIT` et les notices tierces.

@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../../README.md).
+
 # Trigkey : services, entrees et fin de session
 
 Capture examinee : blackbox-extract-20260914-002442.zip, session 00:19:51–00:20:03.

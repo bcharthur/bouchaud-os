@@ -1,3 +1,5 @@
+> **HISTORIQUE.** Relevé ou jalon daté, conservé pour mémoire : il n'est pas réévalué à chaque passe et ne décrit pas forcément le HEAD courant. État vivant : section 1 du [README](../README.md).
+
 # Audit materiel Trigkey -- releve du 15 septembre 2026
 
 Source : `blackbox-extract-20260915-190540.zip`, session `20260915185504640`,

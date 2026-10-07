@@ -169,9 +169,15 @@ WebContent. Tests négatifs : `tools/security/test_bac_a_sable_navigateur.rs`
 | Les TU de `UI/Bouchaud`, les sandbox, et les `.cpp` patchés compilent (`-fsyntax-only`, en-têtes générés par `genere-entetes-locaux.py`) | hôte, syntaxe/sémantique C++ (hors Skia réel, curl, OpenSSL ≥ 3.2) |
 | Gardes d'architecture (UI, chaîne, onglets, presse-papiers, téléchargements, menus, clavier, calques, repeinture) avec tests négatifs | statique |
 | Bac à sable : prédicats de chemins et classification des rôles | hôte (tests Rust) |
-| Build Ladybird complet, lien statique | **CI** (`ladybird-native-browser`) — à constater |
-| Fenêtre, trame Compositor, entrée, onglets, sandbox à l'exécution | **QEMU** (smoke `run_ladybird_browser_host.sh`) — à constater |
-| Trigkey physique | **non validé** |
+| Build Ladybird complet, lien statique | **CI** (`ladybird-native-browser`, `LADYBIRD_ARTIFACT_MANIFEST_OK`) — constaté à chaque run de la branche |
+| Fenêtre, trame Compositor, entrée, onglets, sandbox à l'exécution | **QEMU** (smoke `run_ladybird_browser_host.sh` : `BOUCHAUD_UI_V1_READY`, `BOUCHAUD_UI_FIRST_FRAME`, `[LB:SANDBOX] service=WebContent role=rendu`) — constaté (run 37627107473, 2026-10-07) |
+| Un rendu qui meurt : les autres onglets et le Compositor vivent | **QEMU** (`LADYBIRD_CRASH_RENDU_OK`) |
+| Trigkey physique | **non validé** (NOT TESTED sur le HEAD courant) |
+
+Limite ouverte du bac à sable (P6) : dans l'endurance du 2026-10-07, deux
+WebWorker sur vingt-neuf ont lu `no_new_privs=0` et ont refusé de tourner
+(`[LB:SANDBOX] ECHEC`) ; le noyau journalise désormais `NNP_ABSENT` (image,
+profil, euid) pour l'attribuer.
 
 ## 8. Limites connues (non masquées)
 
