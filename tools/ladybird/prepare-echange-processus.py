@@ -24,16 +24,17 @@ une -- l'ouvreur, cas de tout `window.open` et de tout `target=_blank` --
 la page reste : son document, ses navigables, et dans le Compositor son
 contexte et ses surfaces de rendu, pour toute la vie de l'ouvreur.
 
-Correctif : avant de l'oublier, l'UI demande a l'ancien WebContent de FERMER
-cette page, par le chemin existant (`WebContentClient::request_close` :
-fermeture detachee, le processus est garde vivant jusqu'a l'accuse
-`did_close_browsing_context`, qui ne trouve plus de vue et ne fait que
-liberer). Cote WebContent, `close_top_level_traversable` decharge le document
-et detruit les navigables, donc leurs contextes Compositor.
+Correctif : avant de l'oublier, l'UI demande a l'ancien WebContent de JETER
+cette page (`bouchaud_discard_page`, nouveau message). Cote WebContent : le
+document est decharge, puis le traversable detruit
+(`destroy_top_level_traversable`) -- donc ses navigables, et leurs contextes
+Compositor (le destructeur du handle envoie `destroy_context`).
 
-Limite connue : une page qui a un gestionnaire `beforeunload` ACTIF, avec
-activation utilisateur, demanderait une confirmation que plus aucune vue ne
-peut afficher ; elle resterait ouverte (pas de blocage ailleurs).
+Pourquoi pas `request_close` (premiere version, run 37773872578 : 20 pages
+« fermees », contextes Compositor toujours 3 -> 13 -> 22) :
+`close_top_level_traversable` passe par une operation d'historique, et
+l'historique d'une page vit dans l'UI (CanonicalTraversable) -- qui vient
+justement de l'oublier. L'operation n'aboutit pas ; la page reste.
 
 Ancres strictes, fail-closed, idempotent.
 """
@@ -68,9 +69,52 @@ def main() -> int:
         f"        // {MARQUEUR} : the old process may still host other views (the opener of a window.open). Close\n"
         "        // this page there, or its document, navigables and Compositor surfaces live as long as that process.\n"
         "        dbgln(\"[LB] PROCESS_SWAP_CLOSE_OLD_PAGE pid={} page={}\", m_client_state.client->pid(), m_client_state.page_index);\n"
-        "        m_client_state.client->request_close(m_client_state.page_index);\n"
+        "        m_client_state.client->async_bouchaud_discard_page(m_client_state.page_index);\n"
         "        m_client_state.client->unregister_view(m_client_state.page_index);\n"
         "    }\n",
+    )
+    # Le message, et son service cote WebContent.
+    remplace(
+        racine / "Services/WebContent/WebContentServer.ipc",
+        "    request_close(u64 page_id) =|\n",
+        "    request_close(u64 page_id) =|\n"
+        f"    // {MARQUEUR} : jeter la page laissee derriere un changement de processus.\n"
+        "    bouchaud_discard_page(u64 page_id) =|\n",
+    )
+    remplace(
+        racine / "Services/WebContent/ConnectionFromClient.h",
+        "    virtual void request_close(u64 page_id) override;\n",
+        "    virtual void request_close(u64 page_id) override;\n"
+        f"    virtual void bouchaud_discard_page(u64 page_id) override; // {MARQUEUR}\n",
+    )
+    remplace(
+        racine / "Services/WebContent/ConnectionFromClient.cpp",
+        "        page->page().top_level_traversable()->close_top_level_traversable();\n}\n",
+        "        page->page().top_level_traversable()->close_top_level_traversable();\n}\n"
+        "\n"
+        f"// {MARQUEUR}\n"
+        "// The UI moved this page's view to another process and forgot it. Its session history lives in the UI, so the\n"
+        "// normal close (a history operation) would never complete: unload the document, then destroy the traversable --\n"
+        "// its navigables, and with them their Compositor contexts.\n"
+        "void ConnectionFromClient::bouchaud_discard_page(u64 page_id)\n"
+        "{\n"
+        "    auto page = this->page(page_id);\n"
+        "    if (!page.has_value())\n"
+        "        return;\n"
+        "    auto traversable = page->page().top_level_traversable();\n"
+        "    if (traversable->has_been_destroyed() || traversable->is_closing())\n"
+        "        return;\n"
+        "    dbgln(\"[LB] PAGE_DISCARD page={}\", page_id);\n"
+        "    traversable->set_closing(true);\n"
+        "    auto document = traversable->active_document();\n"
+        "    if (!document) {\n"
+        "        traversable->destroy_top_level_traversable();\n"
+        "        return;\n"
+        "    }\n"
+        "    document->unload_a_document_and_its_descendants({}, GC::create_function(document->heap(), [traversable] {\n"
+        "        traversable->destroy_top_level_traversable();\n"
+        "    }));\n"
+        "}\n",
     )
     return 0
 

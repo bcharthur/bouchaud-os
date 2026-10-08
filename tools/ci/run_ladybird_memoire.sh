@@ -100,6 +100,25 @@ echo "  changements de WebContent : $swaps pour $((2 * N)) onglets"
 # a chaque changement est fermee, pas seulement oubliee par l'UI.
 fermees=$(grep -ac '\[LB\] PROCESS_SWAP_CLOSE_OLD_PAGE' "$P" || true)
 echo "  anciennes pages fermees au changement de processus : $fermees"
+echo "  pages jetees par l'ancien WebContent (PAGE_DISCARD) : $(grep -ac '\[LB\] PAGE_DISCARD' "$P" || true)"
+# Ou restent les contextes : par connexion WebContent du Compositor, crees
+# (CONTEXT_CREATE), detruits un par un (CONTEXT_DESTROY), ou tous a la fermeture
+# du pair (PEER_CLOSE). Seules les connexions qui en gardent sont imprimees.
+python3 - "$P" <<'PY' || true
+import re, sys
+crees, detruits, ferme, ctx_conn = {}, {}, set(), {}
+for l in open(sys.argv[1], errors="replace"):
+    if m := re.search(r"\[LB\] CONTEXT_CREATE ctx=(\d+) page=(\d+) conn=(\d+)", l):
+        crees[m[3]] = crees.get(m[3], 0) + 1; ctx_conn[m[1]] = (m[3], m[2])
+    elif m := re.search(r"\[LB\] CONTEXT_DESTROY ctx=(\d+) conn=(\d+)", l):
+        detruits[m[2]] = detruits.get(m[2], 0) + 1
+    elif m := re.search(r"\[LB\] PEER_CLOSE conn=(\d+)", l):
+        ferme.add(m[1])
+restes = {c: n - detruits.get(c, 0) for c, n in crees.items() if c not in ferme and n - detruits.get(c, 0) > 0}
+print(f"  CONTEXTES_PAR_CONNEXION connexions={len(crees)} fermees={len(ferme)} crees={sum(crees.values())} detruits_un_par_un={sum(detruits.values())}")
+for c, n in sorted(restes.items(), key=lambda kv: -kv[1])[:8]:
+    print(f"  CONTEXTES_RESTANTS conn={c} restants={n} crees={crees[c]} detruits={detruits.get(c, 0)}")
+PY
 
 echo "== verdict =="
 echecs=()
