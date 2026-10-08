@@ -78,6 +78,17 @@ fi
 # Publiee : un banc doit pouvoir prouver la configuration qu'il pense tester.
 echo "BO_SMOKE_URL ordre=${BO_SMOKE_ORDRE:-defaut} url=$URL_PAGE"
 
+# BOUCHAUD_PROFIL_RIP_V1 : `BO_SMOKE_PROFIL_RIP=on|off` fixe le profil RIP du
+# noyau des l'autorun (A/B de son cout, et de son role dans une panne).
+# Absent : rien n'est ecrit, le smoke de reference garde son autorun.
+LIGNE_PROFIL=""
+case "${BO_SMOKE_PROFIL_RIP:-}" in
+  on|off) LIGNE_PROFIL="profil-rip ${BO_SMOKE_PROFIL_RIP}" ;;
+  "") ;;
+  *) echo "BO_SMOKE_PROFIL_RIP=${BO_SMOKE_PROFIL_RIP} : on ou off" >&2; exit 2 ;;
+esac
+echo "BO_SMOKE_PROFIL_RIP valeur=${BO_SMOKE_PROFIL_RIP:-defaut}"
+
 cat > "$SCENARIO/autorun" <<AUTORUN
 uname
 df
@@ -96,6 +107,9 @@ echo "AUTORUN_DESKTOP_ENTER"
 desktop
 echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
+if [ -n "$LIGNE_PROFIL" ]; then
+  sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
+fi
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 
 LOG=serie-browser-host${SUFFIXE}.log
@@ -761,7 +775,7 @@ grep -F "BROWSER_HOST_FIXTURE_OK path=/browser-host.html" fixture-browser-host${
 grep -F "BROWSER_HOST_FIXTURE_IMAGE_OK path=/pixel.png" fixture-browser-host${SUFFIXE}.log
 grep -F "BROWSER_HOST_FIXTURE_FRAME_OK path=/frame.html" fixture-browser-host${SUFFIXE}.log
 
-for forbidden in 'VERIFICATION FAILED:' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]' 'Unable to create disk cache' 'BOUCHAUD_PERSIST_DEBORDE' 'op=fs-fchown' 'op=fs-create detail=0x1 path=/persist reason' '[LB] COMPOSITOR_LINK_GIVE_UP'; do
+for forbidden in 'VERIFICATION FAILED:' 'UNEXPECTED ERROR' 'ASSERTION FAILED' IMAGE_DECODER_ABSENT M11_GUI_STREAM_DESYNC 'instruction illegale dans le programme utilisateur' '[LB:SANDBOX] ECHEC' 'sans_image_cpu=1' '[LB:CRASH]' 'Unable to create disk cache' 'BOUCHAUD_PERSIST_DEBORDE' 'op=fs-fchown' 'op=fs-create detail=0x1 path=/persist reason' '[LB] COMPOSITOR_LINK_GIVE_UP'; do
   if grep -aFq "$forbidden" "$LOG"; then
     echo "diagnostic interdit detecte: $forbidden" >&2
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=diagnostic_interdit"

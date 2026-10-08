@@ -809,3 +809,42 @@ jobs:
             ordre-blob.sortie
             ordre-http.sortie
           if-no-files-found: warn
+
+  compositor-piege:
+    # BOUCHAUD_COMPOSITOR_PIEGE_V1 -- DIAGNOSTIC (hors verdict de convergence).
+    # Run 37667817559 : le Compositor meurt sur `ak_trap` apres HOST_SMOKE_OK
+    # (banc ordre worker, bras http). Quatre demarrages froids par bras, profil
+    # RIP alterne : frequence, bras, role du profil, et pour chaque faute la
+    # pile symbolisee publiee par le noyau (BOUCHAUD_PILE_DE_FAUTE_V1).
+    name: ladybird / piege du Compositor (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Huit demarrages froids, bras http et blob, profil alterne
+        run: tools/ci/run_compositor_piege.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 4
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-compositor-piege
+          path: |
+            serie-browser-host-piege-*.log
+            piege-*.sortie
+          if-no-files-found: warn
