@@ -255,6 +255,74 @@ void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bit
     publie_compteurs_si_du();
 }
 
+// BOUCHAUD_CRASH_SERVICES_V1
+void BrowserWindow::demande_crash_service(u64 onglet, StringView service)
+{
+    Optional<WebView::ProcessType> type;
+    if (service == "ImageDecoder"sv)
+        type = WebView::ProcessType::ImageDecoder;
+    else if (service == "RequestServer"sv)
+        type = WebView::ProcessType::RequestServer;
+    else if (service == "Compositor"sv)
+        type = WebView::ProcessType::Compositor;
+    if (!type.has_value() || (m_suivi_crash_tic && m_suivi_crash_tic->is_active())) {
+        warnln("[LB] SERVICE_CRASH_REQUEST onglet={} service={} refuse={}", onglet, service,
+            type.has_value() ? "suivi_en_cours"sv : "service_inconnu"sv);
+        return;
+    }
+    pid_t cible = 0;
+    WebView::Application::process_manager().for_each_process([&](WebView::Process& processus) {
+        if (processus.type() == *type)
+            cible = max(cible, processus.pid());
+    });
+    auto const resultat = cible > 0 ? ::kill(cible, SIGSEGV) : -1;
+    warnln("[LB] SERVICE_CRASH_REQUEST onglet={} service={} pid={} kill={} trames={} t_ms={}", onglet, service, cible,
+        resultat == 0 ? "ok"sv : "echec"sv, m_trames, MonotonicTime::now().milliseconds());
+    if (resultat != 0)
+        return;
+    m_suivi_crash = SuiviCrashService {};
+    m_suivi_crash.service = ByteString(service);
+    m_suivi_crash.type = to_underlying(*type);
+    m_suivi_crash.ancien = cible;
+    m_suivi_crash.depuis = MonotonicTime::now();
+    m_suivi_crash.trames_au_crash = m_trames;
+    // Cree une fois, arrete et relance ensuite : le detruire depuis son propre
+    // rappel liberait la fonction en cours d'execution.
+    if (!m_suivi_crash_tic)
+        m_suivi_crash_tic = Core::Timer::create_repeating(250, [this] { suit_crash_service(); });
+    m_suivi_crash_tic->start();
+}
+
+// Le remplacant : un processus du meme type, d'un autre pid. Puis, 5 s plus
+// tard, les trames presentees depuis le crash -- un Compositor relance qui ne
+// presente plus rien serait une reprise de facade. 30 s sans remplacant :
+// echec publie, pas d'attente infinie.
+void BrowserWindow::suit_crash_service()
+{
+    auto& s = m_suivi_crash;
+    ++s.tics;
+    auto const ecoule_ms = (MonotonicTime::now() - s.depuis).to_milliseconds();
+    if (s.nouveau == 0) {
+        WebView::Application::process_manager().for_each_process([&](WebView::Process& processus) {
+            if (to_underlying(processus.type()) == s.type && processus.pid() != s.ancien)
+                s.nouveau = processus.pid();
+        });
+        if (s.nouveau != 0) {
+            s.trames_au_remplacant = m_trames;
+            warnln("[LB] SERVICE_RESTART service={} ancien_pid={} nouveau_pid={} delai_ms={}", s.service, s.ancien, s.nouveau, ecoule_ms);
+        } else if (s.tics >= 120) {
+            warnln("[LB] SERVICE_RESTART service={} ancien_pid={} nouveau_pid=aucun delai_ms={}", s.service, s.ancien, ecoule_ms);
+            m_suivi_crash_tic->stop();
+        }
+        return;
+    }
+    if (++s.tics_apres_remplacant < 20)
+        return;
+    warnln("[LB] SERVICE_BILAN service={} nouveau_pid={} trames_avant_remplacant={} trames_apres_remplacant={} ecoule_ms={}",
+        s.service, s.nouveau, s.trames_au_remplacant - s.trames_au_crash, m_trames - s.trames_au_remplacant, ecoule_ms);
+    m_suivi_crash_tic->stop();
+}
+
 void BrowserWindow::publie_compteurs_si_du()
 {
     // Un releve a 16 et 64 trames, puis toutes les `releve_toutes_les` : une
@@ -360,6 +428,11 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
     // BOUCHAUD_BANC_CRASH_WORKER fait tuer (SIGSEGV) le DERNIER processus
     // WebWorker connu du gestionnaire d'upstream. Hors banc, aucun effet.
     static bool const banc_crash_worker = getenv("BOUCHAUD_LB_BANC_CRASH_WORKER") != nullptr;
+    // BOUCHAUD_CRASH_SERVICES_V1 -- politique de crash des services : le
+    // titre BOUCHAUD_BANC_CRASH_SERVICE=<ImageDecoder|RequestServer|Compositor>
+    // fait tuer (SIGSEGV) ce service ; la reprise est celle d'upstream
+    // (Application::launch_*). Hors banc, aucun effet.
+    static bool const banc_crash_service = getenv("BOUCHAUD_LB_BANC_CRASH_SERVICE") != nullptr;
     // Banc des sites reels : quitter apres BOUCHAUD_LB_BANC_DUREE_S secondes,
     // en rejouant la derniere sonde de pixels (la trame finale de la page).
     if (auto const* duree = getenv("BOUCHAUD_LB_BANC_DUREE_S"); duree && !m_quitte_apres) {
@@ -381,8 +454,10 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         m_webcontent_de_l_onglet.set(onglet, nouveau);
         warnln("[LB] PROCESS_SWAP onglet={} raison=autre_site ancien_pid={} nouveau_pid={}", onglet, ancien, nouveau);
     };
-    vue.on_title_change = [onglet, vue_ptr = &vue](Utf16String const& titre) {
+    vue.on_title_change = [this, onglet, vue_ptr = &vue](Utf16String const& titre) {
         auto texte = titre.to_byte_string();
+        if (banc_crash_service && texte.starts_with("BOUCHAUD_BANC_CRASH_SERVICE="sv))
+            demande_crash_service(onglet, texte.substring_view(sizeof("BOUCHAUD_BANC_CRASH_SERVICE=") - 1));
         if (banc_coupe_lien && texte == "BOUCHAUD_BANC_COUPE_LIEN"sv) {
             warnln("[LB] LINK_CUT_REQUEST onglet={} page={} t_ms={}", onglet, vue_ptr->page_courante(),
                 MonotonicTime::now().milliseconds());

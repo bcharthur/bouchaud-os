@@ -263,3 +263,12 @@ tools/userland/out-matrice/
 tools/userland/out-horloge/
 /horloge-horodatage.tsv
 /horodateur.py
+# BOUCHAUD_MEMOIRE_ONGLETS_V1 / BOUCHAUD_CRASH_SERVICES_V1
+/scenario-memoire/
+/ladybird-memoire.img
+/serie-memoire.log*
+/fixture-memoire.log
+/scenario-crash-services/
+/ladybird-crash-services.img
+/serie-crash-services.log*
+/fixture-crash-services.log

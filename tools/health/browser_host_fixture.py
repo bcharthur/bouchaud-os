@@ -561,6 +561,70 @@ WCYCLE2_HTML = b"""<!doctype html><meta charset="utf-8"><title>wcycle2</title><b
 })();
 </script></body>"""
 
+# BOUCHAUD_CRASH_SERVICES_V1 -- politique de crash des services. Pour chaque
+# service (ImageDecoder, RequestServer, Compositor, dans cet ordre) : une
+# image decodee et un fetch reussis AVANT, le titre
+# BOUCHAUD_BANC_CRASH_SERVICE=<service> (UI/Bouchaud lui envoie SIGSEGV),
+# puis la reprise : image ET fetch a nouveau reussis (45 s au plus). Un
+# canvas anime en continu fait presenter des trames (degat) : le bilan de
+# l'UI dit si un Compositor relance presente encore.
+CRASH_SERVICES_HTML = b"""<!doctype html><meta charset="utf-8"><title>crash-services</title>
+<body>politique de crash des services<canvas id=c width=64 height=64></canvas><script>
+const pause = ms => new Promise(r => setTimeout(r, ms));
+const echeance = (p, ms, quoi) => Promise.race([p, new Promise((_, ko) => setTimeout(() => ko(new Error(quoi + "_echeance")), ms))]);
+let k = 0;
+async function image() {
+  const i = new Image();
+  const charge = new Promise((ok, ko) => { i.onload = ok; i.onerror = () => ko(new Error("image_erreur")); });
+  i.src = "/pixel.png?k=" + (++k);
+  await echeance(charge, 10000, "image");
+  return i.naturalWidth === 1 && i.naturalHeight === 1;
+}
+async function reseau() {
+  const r = await echeance(fetch("/json?k=" + (++k), { cache: "no-store" }), 10000, "fetch");
+  return (await r.json()).n === 42;
+}
+async function sonde() {
+  const s = { img: false, net: false, err: [] };
+  try { s.img = await image(); } catch (e) { s.err.push(e.message); }
+  try { s.net = await reseau(); } catch (e) { s.err.push(e.message); }
+  return s;
+}
+async function reprise(ms) {
+  const t0 = performance.now();
+  let s;
+  do {
+    s = await sonde();
+    if (s.img && s.net) return { ...s, ms: Math.round(performance.now() - t0) };
+    await pause(1000);
+  } while (performance.now() - t0 < ms);
+  return { ...s, ms: -1 };
+}
+function cadres(ms) {
+  let n = 0;
+  const fin = performance.now() + ms;
+  return new Promise(ok => { const f = () => { n++; if (performance.now() < fin) requestAnimationFrame(f); else ok(n); }; requestAnimationFrame(f); });
+}
+const ctx = document.getElementById("c").getContext("2d");
+let teinte = 0;
+setInterval(() => { teinte = (teinte + 37) % 360; ctx.fillStyle = `hsl(${teinte},80%,50%)`; ctx.fillRect(0, 0, 64, 64); }, 100);
+const services = (new URLSearchParams(location.search).get("services") || "ImageDecoder,RequestServer,Compositor").split(",");
+(async () => {
+  for (const s of services) {
+    const avant = await sonde();
+    console.log(`HOST_CRASH_SERVICE avant service=${s} image=${avant.img} reseau=${avant.net} raf_2s=${await cadres(2000)}`);
+    document.title = "BOUCHAUD_BANC_CRASH_SERVICE=" + s;
+    await pause(3000);
+    const apres = await reprise(45000);
+    console.log(`HOST_CRASH_SERVICE apres service=${s} image=${apres.img} reseau=${apres.net} reprise_ms=${apres.ms} raf_2s=${await cadres(2000)} erreurs=${apres.err.join("+") || "aucune"}`);
+    document.title = "crash-services " + s;
+    await pause(8000);
+  }
+  console.log("HOST_CRASH_SERVICE fin");
+  document.title = "BOUCHAUD_BANC_QUITTE";
+})();
+</script></body>"""
+
 HTML = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Bouchaud BrowserHost smoke</title>
@@ -1799,6 +1863,7 @@ class Handler(BaseHTTPRequestHandler):
             "/worker-cycle-2.html": (WCYCLE2_HTML, "text/html; charset=utf-8"),
             "/oopif-a.html": (OOPIF_A_HTML, "text/html; charset=utf-8"),
             "/oopif-enfant.html": (OOPIF_ENFANT_HTML, "text/html; charset=utf-8"),
+            "/crash-services.html": (CRASH_SERVICES_HTML, "text/html; charset=utf-8"),
         }.get(path)
         if batterie is not None:
             corps, genre = batterie

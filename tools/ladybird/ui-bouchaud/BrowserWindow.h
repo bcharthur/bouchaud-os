@@ -24,6 +24,7 @@
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Time.h>
 #include <AK/Vector.h>
 #include <LibCore/AnonymousBuffer.h>
 #include <LibCore/Forward.h>
@@ -64,6 +65,8 @@ private:
     void branche_chrome();
     void retire_vue(u64 onglet);
     void publie_compteurs_si_du();
+    void demande_crash_service(u64 onglet, StringView service);
+    void suit_crash_service();
 
     Core::AnonymousBuffer m_theme;
     Web::DevicePixelSize m_viewport;
@@ -87,6 +90,22 @@ private:
     // Le WebContent courant de chaque onglet (PROCESS_SWAP : ancien -> nouveau).
     HashMap<u64, pid_t> m_webcontent_de_l_onglet;
     RefPtr<Core::Timer> m_quitte_apres;
+
+    // BOUCHAUD_CRASH_SERVICES_V1 : le service tue par le banc, et son
+    // remplacant (meme type, autre pid) tel que le gestionnaire le voit.
+    struct SuiviCrashService {
+        ByteString service;
+        int type { -1 };
+        pid_t ancien { 0 };
+        pid_t nouveau { 0 };
+        MonotonicTime depuis { MonotonicTime::now_coarse() };
+        u64 trames_au_crash { 0 };
+        u64 trames_au_remplacant { 0 };
+        u32 tics { 0 };
+        u32 tics_apres_remplacant { 0 };
+    };
+    SuiviCrashService m_suivi_crash;
+    RefPtr<Core::Timer> m_suivi_crash_tic;
 };
 
 }

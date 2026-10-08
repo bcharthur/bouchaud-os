@@ -17,6 +17,7 @@ on:
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
+      - 'tools/ci/run_ladybird_crash_services.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
@@ -57,6 +58,7 @@ on:
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
+      - 'tools/ci/run_ladybird_crash_services.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
@@ -908,4 +910,49 @@ jobs:
           path: |
             serie-memoire.log
             fixture-memoire.log
+          if-no-files-found: warn
+
+  crash-services:
+    # BOUCHAUD_CRASH_SERVICES_V1 -- DIAGNOSTIC (hors verdict de convergence
+    # tant que le banc n'a pas fait ses preuves ; il rejoindra alors le job
+    # de robustesse). ImageDecoder, RequestServer puis Compositor tues par
+    # SIGSEGV dans le meme demarrage : remplacant unique, reprise de la page,
+    # le Compositor relance presente encore, aucune corruption noyau.
+    name: ladybird / politique de crash des services (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Trois services tues, un demarrage (KVM)
+        env:
+          BO_QEMU_KVM: "1"
+        run: tools/ci/run_ladybird_crash_services.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-crash-services
+          path: |
+            serie-crash-services.log
+            fixture-crash-services.log
           if-no-files-found: warn
