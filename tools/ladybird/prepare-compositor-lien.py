@@ -303,7 +303,23 @@ def main() -> int:
         "    // Called right before this connection is replaced by a new one: report the loss exactly once, now, then\n"
         "    // detach. A deferred EOF arriving later finds the loss already reported and the callbacks gone, so it can\n"
         "    // no longer tell the pages that the NEW connection was lost.\n"
-        "    void abandon_before_reconnect();\n",
+        "    void abandon_before_reconnect();\n"
+        "\n"
+        "    // BOUCHAUD_LISTES_RETENUES_V1\n"
+        "    // A replacement connection reaches a Compositor whose contexts for this WebContent are NEW and empty, and\n"
+        "    // the UI registers them on its own schedule. Until compositor_process_reconnected() resets what the pages\n"
+        "    // believe the Compositor holds, a display list or its deltas would be dropped (context not owned yet) or\n"
+        "    // applied against an empty resource storage (font not found, VERIFY in DrawGlyphRun). Hold them.\n"
+        "    void hold_display_lists_until_reconnected() { m_display_lists_held = true; }\n"
+        "    void release_display_lists();\n",
+    )
+    remplace(
+        wv / "CompositorConnection.h",
+        "    bool m_has_lost_compositor { false };\n",
+        "    bool m_has_lost_compositor { false };\n"
+        f"    // {MARQUEUR} / BOUCHAUD_LISTES_RETENUES_V1\n"
+        "    bool m_display_lists_held { false };\n"
+        "    size_t m_display_list_messages_held { 0 };\n",
     )
     remplace(
         wv / "CompositorConnection.cpp",
@@ -318,8 +334,36 @@ def main() -> int:
         "    on_compositor_lost = nullptr;\n"
         "}\n"
         "\n"
+        "// BOUCHAUD_LISTES_RETENUES_V1\n"
+        "void CompositorConnection::release_display_lists()\n"
+        "{\n"
+        "    if (m_display_lists_held)\n"
+        "        dbgln(\"[LB] DISPLAY_LISTS_RELEASED retenues={}\", m_display_list_messages_held);\n"
+        "    m_display_lists_held = false;\n"
+        "    m_display_list_messages_held = 0;\n"
+        "}\n"
+        "\n"
         "bool CompositorConnection::can_send_message_to_compositor() const\n",
     )
+    for envoi in ("update_display_list", "update_visual_context_tree", "update_scroll_state"):
+        texte_cc = (wv / "CompositorConnection.cpp").read_text(encoding="utf-8")
+        debut = texte_cc.find(f"void CompositorConnection::{envoi}(")
+        if debut < 0:
+            raise SystemExit(f"compositor lien : {envoi} introuvable")
+        garde = "{\n    if (!can_send_message_to_compositor())\n        return;\n"
+        position = texte_cc.find(garde, debut)
+        if position < 0 or texte_cc.find("\n}\n", debut) < position:
+            raise SystemExit(f"compositor lien : garde de {envoi} introuvable")
+        retenue = (
+            "{\n    if (!can_send_message_to_compositor())\n        return;\n"
+            f"    if (m_display_lists_held) {{ // BOUCHAUD_LISTES_RETENUES_V1 ({envoi})\n"
+            "        ++m_display_list_messages_held;\n"
+            "        return;\n"
+            "    }\n"
+        )
+        if texte_cc[position:position + len(retenue)] != retenue:
+            texte_cc = texte_cc[:position] + retenue + texte_cc[position + len(garde):]
+            (wv / "CompositorConnection.cpp").write_text(texte_cc, encoding="utf-8")
     cfcw = wc / "ConnectionFromClient.cpp"
     remplace(
         cfcw,
@@ -327,9 +371,32 @@ def main() -> int:
         "    m_compositor_connection = adopt_ref(*new WebView::CompositorConnection(move(transport)));\n",
         "    auto transport = MUST(handle.create_transport());\n"
         f"    // {MARQUEUR}\n"
+        "    bool const is_replacement = !m_compositor_connection.is_null();\n"
         "    if (m_compositor_connection)\n"
         "        m_compositor_connection->abandon_before_reconnect();\n"
         "    m_compositor_connection = adopt_ref(*new WebView::CompositorConnection(move(transport)));\n",
+    )
+    remplace(
+        cfcw,
+        "    m_compositor_connection->ensure_video_presentation_channel();\n}\n",
+        "    m_compositor_connection->ensure_video_presentation_channel();\n"
+        "\n"
+        "    // BOUCHAUD_LISTES_RETENUES_V1 : the first connection starts empty on both sides; a replacement does not.\n"
+        "    if (is_replacement) {\n"
+        "        dbgln(\"[LB] DISPLAY_LISTS_HELD raison=connexion_remplacee\");\n"
+        "        m_compositor_connection->hold_display_lists_until_reconnected();\n"
+        "    }\n"
+        "}\n",
+    )
+    remplace(
+        cfcw,
+        "void ConnectionFromClient::compositor_process_reconnected()\n{\n    m_page_host->compositor_process_reconnected();\n}\n",
+        "void ConnectionFromClient::compositor_process_reconnected()\n{\n"
+        "    // BOUCHAUD_LISTES_RETENUES_V1 : the UI has registered the new contexts; the pages now forget what the old\n"
+        "    // Compositor state held (repaint_after_compositor_process_reconnect) and record full transactions.\n"
+        "    if (m_compositor_connection)\n"
+        "        m_compositor_connection->release_display_lists();\n"
+        "    m_page_host->compositor_process_reconnected();\n}\n",
     )
     remplace(
         cfcw,

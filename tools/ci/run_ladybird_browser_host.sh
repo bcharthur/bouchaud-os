@@ -856,6 +856,10 @@ if [ "$DEFILEMENT" = "1" ]; then
   grep -aq '\[LB\] LINK_CUT_TEST page=[0-9]* lien=true' "$LOG" || maillon_lien="coupure_non_jouee"
   [ -z "$maillon_lien" ] && { grep -aq '\[LB\] CONNECTION_REMOVE' "$LOG" || maillon_lien="compositor_sans_retrait"; }
   [ -z "$maillon_lien" ] && { grep -aqE "\\[LB\\] COMPOSITOR_LINK_RECOVERED pid=${PID_SITE_B:-x} " "$LOG" || maillon_lien="pas_de_reprise_pour_le_site_b"; }
+  # BOUCHAUD_LISTES_RETENUES_V1 : la connexion de remplacement retient les
+  # listes d'affichage jusqu'a compositor_process_reconnected, puis les relache.
+  [ -z "$maillon_lien" ] && { grep -aq '\[LB\] DISPLAY_LISTS_HELD raison=connexion_remplacee' "$LOG" || maillon_lien="listes_non_retenues"; }
+  [ -z "$maillon_lien" ] && { grep -aqE '\[LB\] DISPLAY_LISTS_RELEASED retenues=[0-9]+' "$LOG" || maillon_lien="listes_jamais_relachees"; }
   [ -z "$maillon_lien" ] && { [ "$LIEN_VERDICT" = "ok" ] || maillon_lien="page_${LIEN_VERDICT}"; }
   [ -z "$maillon_lien" ] && { grep -aq 'HOST_LIEN_FIN rafs=[0-9]* cadres=10 ' "$LOG" || maillon_lien="cadres_incomplets"; }
   if [ -n "$maillon_lien" ]; then
@@ -863,7 +867,7 @@ if [ "$DEFILEMENT" = "1" ]; then
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=lien_compositor maillon=$maillon_lien"
     exit 1
   fi
-  echo "HOST_LIEN_CHAINE OK coupe=1 reprise=1 trame=1 tardifs=$(grep -ac '\[LB\] LATE_MESSAGE' "$LOG")"
+  echo "HOST_LIEN_CHAINE OK coupe=1 reprise=1 trame=1 tardifs=$(grep -ac '\[LB\] LATE_MESSAGE' "$LOG") $(grep -aoE 'DISPLAY_LISTS_RELEASED retenues=[0-9]+' "$LOG" | head -1 | cut -d' ' -f2 || true)"
 fi
 # ====================================================================
 # LE VERDICT DE SURFACE, TESTE POUR LUI-MEME

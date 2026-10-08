@@ -203,11 +203,20 @@ SITE_B_HTML = b'''<!doctype html><meta charset="utf-8"><title>site B</title>
     }, 200);
     // Du dommage a chaque trame pendant huit secondes : la preuve de rendu
     // est cote navigateur ([LB:FRAME] apres COMPOSITOR_LINK_RECOVERED).
+    // BOUCHAUD_LISTES_RETENUES_V1 : une taille et une famille de police
+    // NOUVELLES a chaque trame -- donc une ressource de police nouvelle dans
+    // chaque liste d'affichage, pile pendant la reprise du lien. C'est la
+    // condition du piege `m_has_value` (DrawGlyphRun, police absente du
+    // Compositor) du smoke 37746917003.
+    const familles = ["serif", "sans-serif", "monospace"];
     const t0 = performance.now();
     let rafs = 0;
     (function tic() {
       rafs++;
-      document.getElementById("lien").textContent = `lien ${rafs}`;
+      const lien = document.getElementById("lien");
+      lien.textContent = `lien ${rafs}`;
+      lien.style.fontSize = `${10 + (rafs % 47)}px`;
+      lien.style.fontFamily = familles[rafs % familles.length];
       document.body.style.background = `hsl(${rafs % 360},40%,80%)`;
       if (performance.now() - t0 < 8000) requestAnimationFrame(tic);
       else console.log(`HOST_LIEN_FIN rafs=${rafs} cadres=${cadres} titre=${document.title}`);
