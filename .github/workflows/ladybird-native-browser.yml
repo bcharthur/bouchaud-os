@@ -472,7 +472,11 @@ jobs:
           nproc
           grep -m1 'model name' /proc/cpuinfo
           if [ -e /dev/kvm ]; then ls -l /dev/kvm; echo "KVM_PRESENT=1 (non utilise par les bancs)"; else echo "KVM_PRESENT=0"; fi
-      - name: Endurance 10 minutes sur Bouchaud OS
+      - name: Endurance 10 minutes sur Bouchaud OS (TCG -- stabilite ; performance mesuree)
+        # BOUCHAUD_PORTE_PERF_SOUS_KVM_V1 : sous TCG la cadence mesure
+        # l'emulation SSE ; la porte de performance juge le job KVM.
+        env:
+          BO_ENDURANCE_PERF: diagnostic
         run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 600
       - name: Journaux
         if: always()
@@ -488,7 +492,7 @@ jobs:
     # BOUCHAUD_ENDURANCE_KVM_V1 : la meme page, 5 minutes, sous KVM.
     # DIAGNOSTIC (hors verdict de convergence) : il dit ce que coute
     # l'emulation TCG dans les cadences mesurees par l'endurance.
-    name: ladybird / endurance sous KVM (diagnostic)
+    name: ladybird / endurance sous KVM (stabilite + performance)
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -535,8 +539,11 @@ jobs:
       - name: Endurance 5 minutes sous KVM, profil RIP actif puis coupe (A/B)
         # BOUCHAUD_PROFIL_RIP_V1 : meme executant, meme image, meme duree ; la
         # sortie complete de chaque bras est imprimee, puis PROFIL_RIP_OVERHEAD.
+        # BOUCHAUD_PORTE_PERF_SOUS_KVM_V1 : stabilite des deux bras ET
+        # performance du bras par defaut -- c'est ici que la cadence est jugee.
         env:
           BO_QEMU_KVM: "1"
+          BO_AB_EXIGE_PERF: "1"
         run: |
           rc=0
           tools/ci/run_ab_profil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 300 > ab-profil.resume 2>&1 || rc=$?
@@ -670,7 +677,7 @@ jobs:
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     name: ladybird / verdict de convergence
-    needs: [build, browser-host-smoke, cache, wpt, endurance, sites, crash-rendu]
+    needs: [build, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -683,6 +690,7 @@ jobs:
           R_CACHE: ${{ needs.cache.result }}
           R_WPT: ${{ needs.wpt.result }}
           R_ENDURANCE: ${{ needs.endurance.result }}
+          R_ENDURANCE_KVM: ${{ needs.endurance-kvm.result }}
           R_SITES: ${{ needs.sites.result }}
           R_CRASH_RENDU: ${{ needs.crash-rendu.result }}
         run: python3 tools/ci/verdict_convergence.py

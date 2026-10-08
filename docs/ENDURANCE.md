@@ -172,3 +172,51 @@ tickets reveille tous les attendants a chaque liberation ; a un seul coeur,
 ce sont des commutations en plus. Un reveil cible du ticket suivant demande
 une primitive que `WaitQueue` n'offre pas sans risque de reveil perdu.
 Ouvert ; budget non relache.
+
+## 6. Endurance Ladybird : stabilité sous TCG, cadence sous KVM
+
+`BOUCHAUD_PORTE_PERF_SOUS_KVM_V1`, 2026-10-08.
+
+`tools/ci/run_ladybird_endurance.sh` rend deux verdicts séparés
+(`BOUCHAUD_ENDURANCE_MODERNE_V1`).
+
+- **`STABILITY_GATE`** couvre la page, les cycles conclus, les workers, les
+  onglets autre site et leurs changements de processus. Il exige aussi un
+  seul Compositor du début à la fin, et aucune panique, assertion, faute de
+  processus, `NNP_ABSENT` ni mort du Compositor.
+- **`PERFORMANCE_GATE`** exige au moins durée/10 cycles et aucun cadre
+  au-delà de 30 s. Il publie p50/p95/p99.
+
+Le budget de performance n'a pas changé. Ce qui change, c'est **où** il est
+jugé.
+
+| Relevé | Accélération | Cycles | Cadres > 30 s |
+|---|---|---|---|
+| a2f4b333 | TCG 600 s | 34 | 3 |
+| 112b98c8 | TCG 600 s | 36 | 4 |
+| e6799c24 | TCG 600 s | 39 | 1 |
+| 812f3941 | TCG 600 s | 30 | 4 |
+| 07880ce6 | TCG 600 s | 34 | 4 |
+| 1c6568dc | TCG 600 s | 30 | 4 |
+| 812f3941 | KVM 300 s | 23 | 0 |
+| 07880ce6 | KVM 300 s, profileur actif / coupé | 49 / 50 | 0 / 0 |
+
+Sous TCG, la cadence mesure l'émulateur. Sur l'endurance 37746917003, le fil
+principal du Compositor passe 71 % de son temps en mode utilisateur, dans les
+étages SSE2 du raster Skia (dégradé à deux arrêts, dither, repeat), que TCG
+émule. Six relevés de suite restent entre 30 et 39 cycles. Sous KVM, la
+même porte passe largement depuis les correctifs noyau du 2026-10-08 :
+`rdmsr` GS remplacé par TSC_AUX, VGA invisible, processus courant prêté.
+
+Le job TCG (`endurance`) rend donc son verdict sur la seule stabilité
+(`BO_ENDURANCE_PERF=diagnostic`). Il imprime toujours `PERFORMANCE_GATE`, et
+son marqueur est `LADYBIRD_ENDURANCE_STABILITE_OK`, jamais
+`LADYBIRD_ENDURANCE_OK`.
+
+Le job KVM (`endurance-kvm`) exige la stabilité des deux bras A/B et la
+performance du bras par défaut (`BO_AB_EXIGE_PERF=1`,
+`AB_PROFIL_PERFORMANCE_OK`). Il entre dans le verdict de convergence
+(`R_ENDURANCE_KVM`).
+
+La campagne longue (`endurance-longue`, 1 200 s sous KVM) reste un
+diagnostic.

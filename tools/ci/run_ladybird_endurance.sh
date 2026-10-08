@@ -293,6 +293,18 @@ if [ ${#diagnostics_ko[@]} -eq 0 ]; then
 else
   echo "VERDICT_DIAGNOSTIC echec outils=${diagnostics_ko[*]}"
 fi
+# BOUCHAUD_PORTE_PERF_SOUS_KVM_V1 : BO_ENDURANCE_PERF=diagnostic (job TCG)
+# rend le verdict sur la SEULE stabilite ; la performance est imprimee, pas
+# jugee, et le marqueur n'est PAS LADYBIRD_ENDURANCE_OK. Sous TCG, la cadence
+# mesure l'emulation SSE du raster Skia (Compositor 71 % en mode utilisateur,
+# endurance 37746917003) : six releves de 30 a 39 cycles pour 600 s depuis
+# a2f4b333, jamais 60. La meme porte, au meme budget, juge KVM (49 a 50
+# cycles pour 300 s, 0 cadre au-dela de 30 s). docs/ENDURANCE.md.
+if [ "${BO_ENDURANCE_PERF:-bloquant}" = diagnostic ] && [ "$stabilite_ko" -eq 0 ] && [ "$performance_ko" -gt 0 ] \
+  && [ "${#echecs[@]}" -eq "$performance_ko" ]; then
+  echo "LADYBIRD_ENDURANCE_STABILITE_OK duree_s=${t_s} cycles=${cycles} performance=echec_mesuree"
+  exit 0
+fi
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_ENDURANCE_OK duree_s=${t_s} cycles=${cycles}"
 else

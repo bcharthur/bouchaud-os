@@ -21,7 +21,9 @@ EPREUVES = [
     ("R_SMOKE", "smoke BrowserHost (canvas, codecs, JS, workers x10, molette, audio, isolation, lien Compositor)"),
     ("R_CACHE", "cache HTTP et SQLite apres redemarrage du navigateur"),
     ("R_WPT", "WPT smoke (50 fichiers, compares a Linux)"),
-    ("R_ENDURANCE", "endurance 10 min (cadres, workers, onglets cross-site) sans crash Compositor"),
+    ("R_ENDURANCE", "endurance 10 min sous TCG : stabilite (cadres, workers, onglets cross-site, aucun crash)"),
+    # BOUCHAUD_PORTE_PERF_SOUS_KVM_V1 : la cadence est jugee sous KVM (docs/ENDURANCE.md).
+    ("R_ENDURANCE_KVM", "endurance 5 min sous KVM : stabilite des deux bras A/B et performance du bras par defaut"),
     ("R_SITES", "sites reels HTTPS (Example exige, Wikipedia mesure), pixels du Compositor"),
     ("R_CRASH_RENDU", "robustesse : crash d'un WebContent (reprise), isolation des cadres, cycle de vie des workers"),
 ]

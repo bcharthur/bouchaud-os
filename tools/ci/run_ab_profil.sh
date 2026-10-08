@@ -34,4 +34,14 @@ for bras in on off; do
   fi
 done
 [ "$rc" -eq 0 ] && echo "AB_PROFIL_STABILITE_OK"
+# BOUCHAUD_PORTE_PERF_SOUS_KVM_V1 : BO_AB_EXIGE_PERF=1 juge aussi la
+# performance du bras A (la configuration par defaut, profil actif).
+if [ "${BO_AB_EXIGE_PERF:-0}" = 1 ]; then
+  if grep -aq '^PERFORMANCE_GATE ok' ab-profil-on.sortie; then
+    echo "AB_PROFIL_PERFORMANCE_OK bras=on"
+  else
+    echo "AB_PROFIL_PERFORMANCE_ECHEC bras=on"
+    rc=1
+  fi
+fi
 exit "$rc"
