@@ -1,5 +1,14 @@
 # Reprise Codex — 8 octobre 2026
 
+> **Mise a jour de reprise (19 h 15 Paris) :** lire d'abord
+> [Reception SCM_RIGHTS atomique](../handoffs/2026-10-08-scm-atomic-receive.md).
+> La campagne instrumentee `37807102697` est terminee et analysee.
+> Le correctif noyau minimal `c78be28` est publie ; la sonde renforcee
+> `1a47387` passe 10000/10000 sous Bouchaud KVM (run `37814193790`).
+> Le replay Ladybird `37813732807` reste en cours : ne pas le declarer valide.
+> P13 et P2/P9 restent ouverts. Aucun changement P10, aucun test PHYSICAL.
+> La suite de ce fichier decrit l'etat historique a `3658af0`.
+
 **P13 reste ouvert. P2/P9 n'est pas DONE. P10 n'a pas été modifié. Aucun essai PHYSICAL.**
 
 Branche unique : `claude/ladybird-observability-performance`.
