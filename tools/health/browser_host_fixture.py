@@ -363,7 +363,10 @@ MEMOIRE_HTML = b"""<!doctype html><meta charset="utf-8"><title>memoire</title>
   const stab = Number(q.get("stab") || 20) * 1000;
   const pause = ms => new Promise(r => setTimeout(r, ms));
   const etat = t => { document.getElementById("etat").textContent = t; };
-  await pause(5000);
+  // Meme stabilisation pour M0, M1 et M2. Le redimensionnement initial
+  // des surfaces arrive vers 3 s : cinq secondes donnaient trop peu de
+  // releves stables avant M0. Aucun GC n'est force.
+  await pause(stab);
   console.log(`HOST_MEMOIRE_REPERE m=0 n=${n}`);
   for (const phase of [1, 2]) {
     for (let i = 1; i <= n; i++) {

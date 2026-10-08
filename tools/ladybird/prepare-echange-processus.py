@@ -116,6 +116,106 @@ def main() -> int:
         "    }));\n"
         "}\n",
     )
+    # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
+    # Aucun objet n'est garde vivant par ces compteurs. Le timer ne fait
+    # qu'emettre un instantane de l'etat courant du PageHost.
+    host_h = racine / "Services/WebContent/PageHost.h"
+    host_cpp = racine / "Services/WebContent/PageHost.cpp"
+    page_cpp = racine / "Services/WebContent/PageClient.cpp"
+
+    remplace(
+        host_h,
+        "#include <LibGC/Root.h>\n",
+        "#include <LibCore/Timer.h>\n"
+        "#include <LibGC/Root.h>\n",
+    )
+    remplace(
+        host_h,
+        "namespace WebContent {\n",
+        "namespace WebContent {\n\n"
+        "void bouchaud_note_page_finalisee(); // BOUCHAUD_PAGES_MEMOIRE_V1\n",
+    )
+    remplace(
+        host_h,
+        "    HashMap<u64, GC::Root<PageClient>> m_pages;\n",
+        "    HashMap<u64, GC::Root<PageClient>> m_pages;\n"
+        "    RefPtr<Core::Timer> m_bouchaud_pages_timer;\n"
+        "    u64 m_bouchaud_pages_sequence { 0 };\n",
+    )
+
+    remplace(
+        host_cpp,
+        "#include <WebContent/PageHost.h>\n",
+        "#include <WebContent/PageHost.h>\n"
+        "#include <LibCore/System.h>\n"
+        "#include <stdlib.h>\n",
+    )
+    remplace(
+        host_cpp,
+        "namespace WebContent {\n",
+        "namespace WebContent {\n\n"
+        "// BOUCHAUD_PAGES_MEMOIRE_V1 : compteurs de diagnostic seulement.\n"
+        "static u64 s_bouchaud_pages_created = 0;\n"
+        "static u64 s_bouchaud_pages_detached = 0;\n"
+        "static u64 s_bouchaud_pages_finalized = 0;\n"
+        "void bouchaud_note_page_finalisee()\n"
+        "{\n"
+        "    ++s_bouchaud_pages_finalized;\n"
+        "}\n",
+    )
+    remplace(
+        host_cpp,
+        "    : m_client(client)\n"
+        "{\n"
+        "}\n",
+        "    : m_client(client)\n"
+        "{\n"
+        "    if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\")) {\n"
+        "        m_bouchaud_pages_timer = Core::Timer::create_repeating(1000, [this] {\n"
+        "            dbgln(\"[LB:PAGE_STATE] pid={} seq={} roots={} created={} detached={} finalized={} END\",\n"
+        "                Core::System::getpid(),\n"
+        "                ++m_bouchaud_pages_sequence,\n"
+        "                m_pages.size(),\n"
+        "                s_bouchaud_pages_created,\n"
+        "                s_bouchaud_pages_detached,\n"
+        "                s_bouchaud_pages_finalized);\n"
+        "        });\n"
+        "        m_bouchaud_pages_timer->start();\n"
+        "    }\n"
+        "}\n",
+    )
+    remplace(
+        host_cpp,
+        "    m_pages.set(page_id, PageClient::create(*this, page_id, pending_root_navigable_id));\n",
+        "    m_pages.set(page_id, PageClient::create(*this, page_id, pending_root_navigable_id));\n"
+        "    ++s_bouchaud_pages_created;\n",
+    )
+    remplace(
+        host_cpp,
+        "    m_pages.remove(page_id);\n",
+        "    if (m_pages.remove(page_id))\n"
+        "        ++s_bouchaud_pages_detached;\n",
+    )
+    remplace(
+        host_cpp,
+        "PageHost::~PageHost() = default;\n",
+        "PageHost::~PageHost()\n"
+        "{\n"
+        "    if (m_bouchaud_pages_timer) {\n"
+        "        m_bouchaud_pages_timer->on_timeout = {};\n"
+        "        m_bouchaud_pages_timer->stop();\n"
+        "    }\n"
+        "}\n",
+    )
+    remplace(
+        page_cpp,
+        "PageClient::~PageClient() = default;\n",
+        "PageClient::~PageClient()\n"
+        "{\n"
+        "    bouchaud_note_page_finalisee();\n"
+        "}\n",
+    )
+
     return 0
 
 
