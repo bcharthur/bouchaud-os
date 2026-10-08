@@ -51,6 +51,7 @@ export BOUCHAUD_BROWSER_HOST=1
 export BOUCHAUD_M11=1
 export BOUCHAUD_TIME_ZONE=Europe/Paris
 export BOUCHAUD_ALLOW_POPUPS=1
+export BOUCHAUD_LB_MEMORY_PROOF=1
 export BOUCHAUD_M9_URL='$URL'
 desktop
 AUTORUN
@@ -95,7 +96,7 @@ P="$LOG.propre"
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' > "$P"
 grep -aoE 'HOST_MEMOIRE_(REPERE|ONGLET) [^"]*' "$P" | awk 'NR <= 60' || true
 swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || true)
-echo "  changements de WebContent : $swaps pour $((2 * N)) onglets"
+echo "  marqueurs ponctuels de swap lisibles : $swaps pour $((2 * N)) onglets (diagnostic)"
 # BOUCHAUD_ECHANGE_PROCESSUS_V1 : la page laissee dans l'ancien processus
 # a chaque changement est fermee, pas seulement oubliee par l'UI.
 fermees=$(grep -ac '\[LB\] PROCESS_SWAP_CLOSE_OLD_PAGE' "$P" || true)
@@ -124,7 +125,7 @@ echo "== verdict =="
 echecs=()
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
 exige "la page a fini (HOST_MEMOIRE_FIN), boucle sur ${verdict}" test "$verdict" = fini
-exige "les onglets ont change de WebContent ($swaps / $((2 * N)))" test "$swaps" -ge $(( 2 * N - 2 ))
+exige "exactement $((2 * N)) swaps distincts, onglets fermes et nouveaux WebContent recoltes" python3 tools/ci/preuve_swaps.py "$LOG" "$N"
 exige "aucune panique noyau" bash -c "! grep -aq 'KERNEL PANIC' '$P'"
 exige "aucune assertion, aucun MUST() ni ASSERT en echec" bash -c "! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED' '$P'"
 exige "aucune faute de processus" bash -c "! grep -aq 'PROCESS_FAULT pid=' '$P'"

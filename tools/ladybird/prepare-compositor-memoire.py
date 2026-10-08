@@ -107,17 +107,50 @@ def main() -> int:
         "    void bouchaud_publie_memoire(StringView evenement, Web::Compositor::CompositorContextId) const;\n",
     )
     cs = comp / "CompositorState.cpp"
+    # BOUCHAUD_MEMOIRE_RELEVE_FRAIS_V1 : les evenements seuls deviennent
+    # perimes au repos (et peuvent se perdre sur la serie). Le banc demande
+    # un vrai instantane du meme objet, dans sa boucle d'evenements.
+    remplace(
+        comp / "CompositorState.h",
+        "    RefPtr<Core::Timer> m_gpu_completion_timer;\n",
+        "    RefPtr<Core::Timer> m_bouchaud_memory_timer;\n"
+        "    u64 m_bouchaud_contexts_created { 0 };\n"
+        "    u64 m_bouchaud_contexts_destroyed { 0 };\n"
+        "    RefPtr<Core::Timer> m_gpu_completion_timer;\n",
+    )
+    remplace(
+        cs,
+        "    , m_async_scrolling_enabled(async_scrolling_enabled)\n{\n}\n",
+        "    , m_async_scrolling_enabled(async_scrolling_enabled)\n{\n"
+        "    if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\")) {\n"
+        "        m_bouchaud_memory_timer = Core::Timer::create_repeating(1000, [this] {\n"
+        "            bouchaud_publie_memoire(\"sample\"sv, Web::Compositor::CompositorContextId { 0 });\n"
+        "        });\n"
+        "        m_bouchaud_memory_timer->start();\n"
+        "    }\n}\n",
+    )
+    remplace(
+        cs,
+        "CompositorState::~CompositorState()\n{\n",
+        "CompositorState::~CompositorState()\n{\n"
+        "    if (m_bouchaud_memory_timer) {\n"
+        "        m_bouchaud_memory_timer->on_timeout = {};\n"
+        "        m_bouchaud_memory_timer->stop();\n"
+        "    }\n",
+    )
     remplace(
         cs,
         "#include <LibCore/Timer.h>\n",
         "#include <LibCore/Timer.h>\n"
         f"// {MARQUEUR}\n"
+        "#include <stdlib.h>\n"
         "#include <core/SkGraphics.h>\n",
     )
     remplace(
         cs,
         "    resize_backing_stores_if_needed(context_id, context);\n}\n",
         "    resize_backing_stores_if_needed(context_id, context);\n"
+        "    ++m_bouchaud_contexts_created;\n"
         f"    bouchaud_publie_memoire(\"context_create\"sv, context_id); // {MARQUEUR}\n"
         "}\n"
         "\n"
@@ -131,10 +164,10 @@ def main() -> int:
         "        octets += entree.value->bouchaud_backing_stores().bouchaud_octets();\n"
         "    }\n"
         "    dbgln(\"[LB:MEM] ev={} ctx={} contexts_live={} backing_stores_live={} backing_store_octets={} \"\n"
-        "          \"skia_ressources_octets={} skia_ressources_limite={} skia_polices_octets={}\",\n"
+        "          \"skia_ressources_octets={} skia_ressources_limite={} skia_polices_octets={} created_total={} destroyed_total={} END\",\n"
         "        evenement, context_id.value(), m_contexts.size(), surfaces, octets,\n"
         "        SkGraphics::GetResourceCacheTotalBytesUsed(), SkGraphics::GetResourceCacheTotalByteLimit(),\n"
-        "        SkGraphics::GetFontCacheUsed());\n"
+        "        SkGraphics::GetFontCacheUsed(), m_bouchaud_contexts_created, m_bouchaud_contexts_destroyed);\n"
         "}\n",
     )
     remplace(
@@ -142,6 +175,7 @@ def main() -> int:
         "    m_contexts.remove(context_id);\n    update_video_sink_ticking_states();\n}\n",
         "    m_contexts.remove(context_id);\n"
         "    update_video_sink_ticking_states();\n"
+        "    ++m_bouchaud_contexts_destroyed;\n"
         f"    bouchaud_publie_memoire(\"context_destroy\"sv, context_id); // {MARQUEUR}\n"
         "}\n",
     )

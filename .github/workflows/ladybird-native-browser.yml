@@ -14,6 +14,11 @@ on:
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/run_ladybird_endurance.sh'
+      - 'tools/ci/run_ladybird_memoire.sh'
+      - 'tools/ci/analyse_memoire.py'
+      - 'tools/ci/preuve_compositor.py'
+      - 'tools/ci/preuve_swaps.py'
+      - 'tools/ci/verifie-preuve-*.py'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
@@ -55,6 +60,11 @@ on:
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
       - 'tools/ci/run_ladybird_endurance.sh'
+      - 'tools/ci/run_ladybird_memoire.sh'
+      - 'tools/ci/analyse_memoire.py'
+      - 'tools/ci/preuve_compositor.py'
+      - 'tools/ci/preuve_swaps.py'
+      - 'tools/ci/verifie-preuve-*.py'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
@@ -99,6 +109,12 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      - name: Regressions des analyseurs de preuves runtime
+        run: |
+          python3 tools/ci/verifie-preuve-compositor.py
+          python3 tools/ci/verifie-preuve-memoire.py
+          python3 tools/ci/verifie-preuve-swaps.py
 
       - name: Toolchain C/C++
         id: toolchain
@@ -906,18 +922,27 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Deux phases de 10 onglets, sous KVM
+      - name: Deux repetitions de deux phases de 10 onglets, sous KVM
         env:
           BO_QEMU_KVM: "1"
-        run: tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10
+        run: |
+          rc=0
+          for essai in 1 2; do
+            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-${essai}.sortie" 2>&1 || rc=1
+            cat "memoire-${essai}.sortie"
+            cp serie-memoire.log "serie-memoire-${essai}.log"
+            cp fixture-memoire.log "fixture-memoire-${essai}.log"
+          done
+          exit "$rc"
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ladybird-memoire
           path: |
-            serie-memoire.log
-            fixture-memoire.log
+            serie-memoire*.log
+            fixture-memoire*.log
+            memoire-*.sortie
           if-no-files-found: warn
 
   crash-services:
