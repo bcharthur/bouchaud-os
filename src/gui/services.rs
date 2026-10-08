@@ -641,7 +641,7 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     crate::serial_println!(
-        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={} ticks_ms={} mono_ms={}",
+        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={} ticks_ms={} mono_ms={} index_coeur={}",
         (crate::kernel::timer::monotonic_ns() / 1_000_000)
             .saturating_mul(c.online as u64),
         (c.user_ns.saturating_add(c.system_ns)) / 1_000_000,
@@ -654,6 +654,8 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         // monotone, sur toute la session et pas seulement au demarrage.
         crate::kernel::timer::ticks().saturating_mul(1000) / crate::kernel::timer::TICKS_PER_SECOND,
         crate::kernel::timer::monotonic_ms(),
+        // BOUCHAUD_CPU_INDEX_TSC_AUX_V1 : d'ou vient l'identite du coeur.
+        crate::arch::x86_64::usermode::source_index_coeur(),
     );
 }
 

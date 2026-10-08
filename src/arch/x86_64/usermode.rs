@@ -146,12 +146,89 @@ pub fn verifie_gs_courant() {
         return;
     };
     per_cpu_for(index).gs_verifie = if materiel.as_usize() == index { 1 } else { 0 };
+    // BOUCHAUD_CPU_INDEX_TSC_AUX_V1 : seulement pour un slot CONFIRME par
+    // l'APIC materiel -- jamais un index que GS seul affirme.
+    if materiel.as_usize() == index {
+        pose_tsc_aux(index);
+    }
 }
 
 pub fn per_cpu() -> &'static mut PerCpu {
     per_cpu_for(cpu_index())
 }
+// BOUCHAUD_CPU_INDEX_TSC_AUX_V1 -- l'identite du coeur sans `rdmsr`.
+//
+// Endurance KVM 37742169261 (812f3941) : `read_msr <- cpu_index_from_gs`
+// porte 45 a 71 % des echantillons noyau nommes de chaque service du
+// navigateur. `local_cpu()` passe par ici a chaque prise de verrou, a chaque
+// `current()`, a chaque frontiere de comptabilite -- et `rdmsr` serialise le
+// coeur (sous KVM, `MSR_KERNEL_GS_BASE` sort meme vers l'hyperviseur).
+//
+// Comme le `getcpu` de Linux : chaque coeur ecrit une fois son index dans
+// IA32_TSC_AUX (`verifie_gs_courant`, une fois son slot GS confirme), et on le
+// relit par `rdpid` -- ou `rdtscp` a defaut --, sans sortie de VM ni
+// serialisation. La valeur porte une ETIQUETTE (0xB0C0 dans les 16 bits du
+// haut) : un TSC_AUX laisse par le micrologiciel, ou celui d'un coeur pas
+// encore verifie, ne ressemble a rien de valide et retombe sur le chemin GS.
+const MSR_TSC_AUX: u32 = 0xC000_0103;
+const TSC_AUX_ETIQUETTE: u32 = 0xB0C0_0000;
+/// 0 : inconnu ou indisponible ; 1 : rdtscp ; 2 : rdpid.
+static MODE_TSC_AUX: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+#[inline]
+fn index_par_tsc_aux() -> Option<usize> {
+    let mode = MODE_TSC_AUX.load(Ordering::Relaxed);
+    if mode == 0 {
+        return None;
+    }
+    let aux: u64;
+    unsafe {
+        if mode == 2 {
+            asm!("rdpid {0}", out(reg) aux, options(nomem, nostack, preserves_flags));
+        } else {
+            let ecx: u32;
+            asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") ecx, options(nomem, nostack, preserves_flags));
+            aux = ecx as u64;
+        }
+    }
+    let aux = aux as u32;
+    if aux & 0xFFFF_0000 != TSC_AUX_ETIQUETTE {
+        return None;
+    }
+    let numero = (aux & 0xFFFF) as usize;
+    (numero >= 1 && numero <= smp::MAX_CPUS).then(|| numero - 1)
+}
+
+/// Pose IA32_TSC_AUX du coeur courant (index confirme par `verifie_gs_courant`).
+fn pose_tsc_aux(index: usize) {
+    if MODE_TSC_AUX.load(Ordering::Relaxed) == 0 {
+        // Detection une seule fois (CPUID est cher sous KVM) : RDPID =
+        // CPUID.7.0:ECX[22], RDTSCP = CPUID.80000001:EDX[27]. L'un ou l'autre
+        // garantit l'existence de IA32_TSC_AUX.
+        let rdpid = unsafe { core::arch::x86_64::__cpuid_count(7, 0) }.ecx & (1 << 22) != 0;
+        let etendu = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }.eax;
+        let rdtscp = etendu >= 0x8000_0001 && unsafe { core::arch::x86_64::__cpuid(0x8000_0001) }.edx & (1 << 27) != 0;
+        let mode = if rdpid { 2 } else if rdtscp { 1 } else { return };
+        unsafe { write_msr(MSR_TSC_AUX, (TSC_AUX_ETIQUETTE | (index as u32 + 1)) as u64) };
+        MODE_TSC_AUX.store(mode, Ordering::Release);
+        return;
+    }
+    unsafe { write_msr(MSR_TSC_AUX, (TSC_AUX_ETIQUETTE | (index as u32 + 1)) as u64) };
+}
+
+/// Source de l'identite du coeur, pour le journal.
+pub fn source_index_coeur() -> &'static str {
+    match MODE_TSC_AUX.load(Ordering::Relaxed) {
+        2 => "rdpid",
+        1 => "rdtscp",
+        _ => "gs",
+    }
+}
+
 pub fn cpu_index() -> usize {
+    if let Some(index) = index_par_tsc_aux() {
+        return index;
+    }
     cpu_index_from_gs()
         .or_else(|| {
             REPLIS_APIC.fetch_add(1, Ordering::Relaxed);
