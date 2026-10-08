@@ -74,6 +74,27 @@ int main(void) {
                 }
                 if (n != 1 || count != 1 || byte != (char)(round % 251) || (msg.msg_flags & MSG_CTRUNC) || failed) {
                     printf("SCM_RECEIVE_RACE_FAIL round=%d bytes=%ld rights=%d errno=%d flags=%d peer_open=1 END\n", round, (long)n, count, error, msg.msg_flags);
+                    /* No next request: the sender keeps its socket open but
+                     * cannot send again. Inspect the orphaned ancillary data
+                     * without repairing the failure or counting it as success. */
+                    if (n == 1 && count == 0) {
+                        memset(&control, 0, sizeof(control));
+                        msg.msg_controllen = sizeof(control.bytes);
+                        msg.msg_flags = 0;
+                        ssize_t next = recvmsg(sockets[1], &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+                        int next_error = next < 0 ? errno : 0, next_rights = 0;
+                        if (next >= 0) {
+                            for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+                                if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) continue;
+                                size_t nfds = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                                for (size_t j = 0; j < nfds; ++j) {
+                                    int fd; memcpy(&fd, (char *)CMSG_DATA(c) + j * sizeof(int), sizeof(int));
+                                    close(fd); ++next_rights;
+                                }
+                            }
+                        }
+                        printf("SCM_RECEIVE_AFTER_SPLIT bytes=%ld rights=%d errno=%d peer_open=1 END\n", (long)next, next_rights, next_error);
+                    }
                     failed = 1;
                 } else ++completed;
                 break;
