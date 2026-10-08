@@ -224,6 +224,10 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
 # Pas de `| head` : sous `pipefail`, un producteur coupe par SIGPIPE ferait
 # sortir le banc avant son verdict ; les bornes sont dans le script.
 diagnostic profil_rip python3 tools/ci/profil_rip.py "$LOG" "$OUT" --noyau "$(dirname "$BOOT")/bouchaud-os"
+# BOUCHAUD_DRAIN_MESURE_V1 : ce que la lecture forcee du corps HTTP
+# (prepare-m9-source.py) a recupere que le notificateur n'avait pas livre.
+echo "== contournement M9_BODY_DRAIN =="
+awk '{ gsub(/\x1b\[[0-9;]*m/, "") } match($0, /M9_BODY_DRAIN_DONE total=[0-9]+ deja_livre=[0-9]+ recupere=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*recupere=/, "", s); n++; if (s + 0 > 0) { k++; o += s } } END { printf "  DRAIN_MESURE drains=%d recupere_non_nul=%d octets_recuperes=%d\n", n, k, o }' "$LOG"
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
 awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms=[0-9]+)?/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
 # BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run

@@ -107,9 +107,14 @@ if "M9_BODY_DRAIN_BEGIN" not in data:
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_SKIP reason=no-read-stream total={}", total_size);
 
     if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_stream && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
+        // BOUCHAUD_DRAIN_MESURE_V1 : ce que la lecture FORCEE recupere. Zero
+        // partout = le notificateur avait deja tout livre ; le contournement
+        // ne sert plus et peut partir (audit des prepare-*.py).
+        auto const deja_livre = m_internal_stream_data->delivered_size;
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
         m_internal_stream_data->read_notifier->on_activation();
-        outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={}", total_size);
+        auto const apres = m_internal_stream_data ? m_internal_stream_data->delivered_size : deja_livre;
+        outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={} deja_livre={} recupere={}", total_size, deja_livre, apres - deja_livre);
     }
 #endif
     if (on_finish)

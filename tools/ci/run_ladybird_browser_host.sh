@@ -1028,4 +1028,6 @@ python3 tools/ci/analyse-demarrage.py "$LOG" 2>/dev/null \
 python3 tools/ci/ladybird_runtime_verdict.py "$LOG" \
     --surface "$MIRE_VERDICT" \
     --json-out "convergence-browser-host${SUFFIXE}.json"
+# BOUCHAUD_DRAIN_MESURE_V1 : voir run_ladybird_endurance.sh.
+awk '{ gsub(/\x1b\[[0-9;]*m/, "") } match($0, /M9_BODY_DRAIN_DONE total=[0-9]+ deja_livre=[0-9]+ recupere=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*recupere=/, "", s); n++; if (s + 0 > 0) { k++; o += s } } END { printf "  DRAIN_MESURE drains=%d recupere_non_nul=%d octets_recuperes=%d\n", n, k, o }' "$LOG"
 echo LADYBIRD_BROWSER_HOST_OK
