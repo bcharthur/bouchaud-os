@@ -308,6 +308,18 @@ pub fn _print(args: fmt::Arguments) {
         if serial_mirror() {
             crate::drivers::serial::_print(args);
         }
+        // BOUCHAUD_VGA_TEXTE_INVISIBLE_V1 : bureau graphique actif, la memoire
+        // texte 0xB8000 n'est pas affichee -- et sous QEMU chaque octet ecrit
+        // la-bas est une sortie MMIO (sortie de VM sous KVM), chaque
+        // defilement en coute ~4 000, sous le verrou de la console que les
+        // autres coeurs attendent. Endurance KVM 37742169261 : `avec_console`
+        // porte 55 a 74 % des echantillons noyau de WebContent et du
+        // BrowserHost (leur stderr passe par ici). Le texte reste sur COM1 et
+        // dans les captures du terminal ; seule la copie invisible disparait.
+        // (La Trigkey -- `reference-desktop`, GOP -- n'ecrit deja jamais ici.)
+        if crate::drivers::gfx::is_active() {
+            return;
+        }
         avec_console(|console| {
             let _ = console.vga.write_fmt(args);
         });
