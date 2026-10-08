@@ -43,6 +43,7 @@ ORDRE = [
     "prepare-audio-bouchaud.py",
     "prepare-worker-terminate.py",
     "prepare-compositor-lien.py",
+    "prepare-control-channel-diagnostics.py",
     "prepare-compositor-memoire.py",
     "prepare-echange-processus.py",
     "prepare-cache-journal.py",
