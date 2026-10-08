@@ -67,16 +67,22 @@ int main(void)
     stat(dossier, &c);
     verifie("creer une entree fait avancer la st_mtime du repertoire", c.st_mtime > b.st_mtime, b.st_mtime, c.st_mtime);
 
+    /* Un repertoire A NOUS, pas /tmp : sur l'hote, n'importe quel processus
+     * cree des entrees dans /tmp (run local du 8 octobre : faux echec). */
+    const char *autre = "/tmp/mtime-probe-autre";
+    mkdir(autre, 0755);
     struct stat d1, d2, autre1, autre2;
     fstat(g, &d1);
-    stat("/tmp", &autre1);
+    stat(autre, &autre1);
     sleep(1);
     (void)!write(g, "x", 1);
     fstat(g, &d2);
-    stat("/tmp", &autre2);
+    stat(autre, &autre2);
     close(g);
     verifie("ecrire fait avancer la st_mtime du fichier", d2.st_mtime > d1.st_mtime, d1.st_mtime, d2.st_mtime);
-    verifie("ecrire ne touche pas /tmp", autre1.st_mtime == autre2.st_mtime, autre1.st_mtime, autre2.st_mtime);
+    verifie("ecrire ne touche pas un autre repertoire", autre1.st_mtime == autre2.st_mtime, autre1.st_mtime,
+        autre2.st_mtime);
+    rmdir(autre);
 
     unlink("/tmp/mtime-probe/fichier");
     rmdir(dossier);
