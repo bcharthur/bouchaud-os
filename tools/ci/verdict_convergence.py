@@ -17,7 +17,14 @@ import subprocess
 import sys
 
 EPREUVES = [
-    ("R_BUILD", "build Ladybird (chaine canonique, 17 preparateurs)"),
+    ("R_PRIMITIVES", "os-primitives : TCG/KVM, horloges, stockage, services et sondes QEMU"),
+    ("R_PERFORMANCE", "budgets de performance"),
+    ("R_MEMOIRE", "memoire apres process swaps : deux repetitions, 20/20 swaps chacune"),
+    ("R_ORDRE_WORKER", "ordre worker sur deux demarrages froids"),
+    ("R_CRASH_SERVICES", "politique de crash des services"),
+    ("R_COMPOSITOR_PIEGE", "piege Compositor : huit demarrages froids"),
+    ("R_ENDURANCE_LONGUE", "endurance 20 min sous KVM"),
+    ("R_BUILD", "build Ladybird (chaine canonique)"),
     ("R_SMOKE", "smoke BrowserHost (canvas, codecs, JS, workers x10, molette, audio, isolation, lien Compositor)"),
     ("R_CACHE", "cache HTTP et SQLite apres redemarrage du navigateur"),
     ("R_WPT", "WPT smoke (50 fichiers, compares a Linux)"),

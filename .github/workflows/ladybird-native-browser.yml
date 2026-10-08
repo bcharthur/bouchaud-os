@@ -8,6 +8,7 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      - '.github/workflows/os-primitives.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
@@ -54,6 +55,7 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      - '.github/workflows/os-primitives.yml'
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
@@ -103,6 +105,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  primitives:
+    uses: ./.github/workflows/os-primitives.yml
+
   build:
     name: ladybird / build once
     runs-on: ubuntu-24.04
@@ -693,7 +698,7 @@ jobs:
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     name: ladybird / verdict de convergence
-    needs: [build, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu]
+    needs: [build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -701,6 +706,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verdict
         env:
+          R_PRIMITIVES: ${{ needs.primitives.result }}
+          R_PERFORMANCE: ${{ needs.performance.result }}
+          R_MEMOIRE: ${{ needs.memoire-onglets.result }}
+          R_ORDRE_WORKER: ${{ needs.ordre-worker.result }}
+          R_CRASH_SERVICES: ${{ needs.crash-services.result }}
+          R_COMPOSITOR_PIEGE: ${{ needs.compositor-piege.result }}
+          R_ENDURANCE_LONGUE: ${{ needs.endurance-longue.result }}
           R_BUILD: ${{ needs.build.result }}
           R_SMOKE: ${{ needs.browser-host-smoke.result }}
           R_CACHE: ${{ needs.cache.result }}
