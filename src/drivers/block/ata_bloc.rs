@@ -11,11 +11,12 @@
 //! l'achevement. Declarer plus laisserait croire a un parallelisme qui
 //! n'existe pas.
 //!
-//! `vidange_reelle: false` -- le pilote n'emet pas `FLUSH CACHE`. Un disque
-//! avec un cache d'ecriture peut donc avoir accepte une ecriture sans l'avoir
-//! posee sur le plateau. Le declarer FAUX est le seul choix honnete : un commit
-//! qui croit avoir une barriere qu'il n'a pas est pire qu'un commit qui sait
-//! qu'il n'en a pas -- le premier se croit sur, le second peut compenser.
+//! `vidange_reelle: true` -- une vidange emet `FLUSH CACHE` et attend sa fin
+//! (`ata::vide_cache`), et elle echoue si le disque signale une faute. Avant
+//! BOUCHAUD_ATA_VIDANGE_A_LA_BARRIERE_V1, ce commentaire disait l'inverse
+//! (« le pilote n'emet pas FLUSH CACHE ») pendant que `ata::write` en emettait
+//! un apres CHAQUE ecriture : la barriere etait fausse, et chaque ecriture
+//! payait un vidage. Les deux sont maintenant a leur place.
 
 use crate::drivers::ata::{self, Drive, SECTOR_SIZE};
 use crate::drivers::bloc::{
@@ -64,7 +65,7 @@ impl PiloteBloc for AtaPilote {
             taille_bloc: SECTOR_SIZE,
             blocs: self.secteurs(),
             profondeur_file: 1,
-            vidange_reelle: false,
+            vidange_reelle: true,
             nom: self.nom,
         }
     }
@@ -94,10 +95,10 @@ impl PiloteBloc for AtaPilote {
                 let ecrits = ata::write(self.nappe, requete.lba, requete.blocs, donnees);
                 if ecrits == requete.blocs { Achevement::Fait(ecrits) } else { Achevement::Erreur }
             }
-            // La vidange REUSSIT, et `vidange_reelle: false` dit qu'elle ne
-            // garantit rien. Les deux ensemble sont la verite : l'appel ne
-            // casse pas, et l'appelant sait qu'il n'a pas de barriere.
-            Genre::Vidange => Achevement::Fait(0),
+            // BOUCHAUD_ATA_VIDANGE_A_LA_BARRIERE_V1 : une vraie barriere.
+            Genre::Vidange => {
+                if ata::vide_cache(self.nappe) { Achevement::Fait(0) } else { Achevement::Erreur }
+            }
             Genre::Lecture => Achevement::Erreur,
         }
     }

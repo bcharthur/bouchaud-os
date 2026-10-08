@@ -15,11 +15,17 @@ pub fn log_transaction_stats() {
     // permet de verifier, dans une trace de coupure de courant, que le systeme
     // remonte bien sur la generation attendue -- et pas sur une plus ancienne,
     // ce qui serait une perte silencieuse au lieu d'une corruption bruyante.
+    // BOUCHAUD_ATA_VIDANGE_A_LA_BARRIERE_V1 : barrieres REELLES (le disque a
+    // vide son cache) et barrieres demandees sans etre obtenues. Deux par
+    // commit ; une barriere absente est un aveu, pas une erreur.
+    let (barrieres, barrieres_absentes) = volume_statistiques();
     crate::serial_println!(
-        "[PERSIST-COMMIT] commits={} generation={} montages_v1={} superblocs_rejetes={}",
+        "[PERSIST-COMMIT] commits={} generation={} montages_v1={} superblocs_rejetes={} barrieres={} barrieres_absentes={}",
         TX_COMMITS.load(Ordering::Relaxed),
         TX_GENERATION.load(Ordering::Relaxed),
         TX_MONTAGES_V1.load(Ordering::Relaxed),
         TX_SUPERBLOCS_REJETES.load(Ordering::Relaxed),
+        barrieres,
+        barrieres_absentes,
     );
 }

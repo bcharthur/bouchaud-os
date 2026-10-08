@@ -950,11 +950,13 @@ pub fn publie_controleur(maintenant_ms: u64) {
     let (lots_dma, replis_pio, dma_pret) = dma_stats();
     let (dma_attente_ns, dma_cede_ns, dma_cessions) = dma_temps();
     crate::kernel::dmesg::log_fmt(format_args!(
-        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={} dma_attente_ms={} dma_cede_ms={} dma_cessions={} lots_dma_ecrits={}",
+        "ATA_CONTROLEUR t={} prochain={} servi={} en_file={} dernier_preneur={} age_ms={} dma_pret={} lots_dma={} replis_pio={} dma_attente_ms={} dma_cede_ms={} dma_cessions={} lots_dma_ecrits={} vidanges={} vidanges_ko={}",
         maintenant_ms, prochain, servi, prochain.saturating_sub(servi), detenteur, age_ms,
         dma_pret as u8, lots_dma, replis_pio,
         dma_attente_ns / 1_000_000, dma_cede_ns / 1_000_000, dma_cessions,
         dma::lots_ecrits(),
+        VIDANGES.load(core::sync::atomic::Ordering::Relaxed),
+        VIDANGES_ECHOUEES.load(core::sync::atomic::Ordering::Relaxed),
     ));
 }
 
@@ -1053,11 +1055,38 @@ pub fn write(drive: Drive, lba: u64, count: usize, data: &[u8]) -> usize {
         }
         done += batch;
     }
-    if done > 0 {
-        flush(drive);
-    }
+    // BOUCHAUD_ATA_VIDANGE_A_LA_BARRIERE_V1 : plus de `FLUSH CACHE` apres
+    // CHAQUE ecriture. La durabilite est demandee la ou elle a un sens -- par
+    // la barriere de la couche bloc (`vide_cache`, via `ata_bloc`), que la
+    // persistance pose deux fois par commit. Ici, chaque ecriture vidait le
+    // cache puis l'attendait en scrutant le registre d'etat : sous QEMU, un
+    // `fsync` de l'image hote et une sortie de VM par lecture du port, sur le
+    // fil qui ecrivait. Endurance 37746917003 : 29 % des echantillons noyau
+    // du fil principal du BrowserHost dans `wait_not_busy <- write`.
     done
 }
+
+/// Vide le cache d'ecriture du disque : la BARRIERE de la couche bloc.
+///
+/// Rend `true` si la commande a abouti sans erreur. `false` si le disque est
+/// absent, reste occupe au-dela de la borne, ou signale une faute : la
+/// barriere n'est alors PAS acquise, et l'appelant le sait.
+pub fn vide_cache(drive: Drive) -> bool {
+    probe();
+    if !present(drive) {
+        return false;
+    }
+    let _controller = lock_controller();
+    let ok = flush(drive);
+    VIDANGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if !ok {
+        VIDANGES_ECHOUEES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    ok
+}
+
+static VIDANGES: AtomicU64 = AtomicU64::new(0);
+static VIDANGES_ECHOUEES: AtomicU64 = AtomicU64::new(0);
 
 /// Ecrit un lot d'au plus 256 secteurs (une seule commande ATA).
 fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
@@ -1108,15 +1137,19 @@ fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
 }
 
 /// Demande au disque de vider son cache d'ecriture.
-fn flush(drive: Drive) {
+fn flush(drive: Drive) -> bool {
     select(drive);
     if !wait_not_busy() {
-        return;
+        return false;
     }
     unsafe {
         outb(COMMAND, CMD_FLUSH_CACHE);
     }
-    wait_not_busy();
+    if !wait_not_busy() {
+        return false;
+    }
+    let statut = unsafe { inb(STATUS) };
+    statut & (ST_ERR | ST_DF) == 0
 }
 
 /// Transfere un secteur vers le port de donnees.
