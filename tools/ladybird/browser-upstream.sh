@@ -50,6 +50,7 @@ python3 tools/ladybird/prepare-compositor-lien.py "$SRC"
 python3 tools/ladybird/prepare-control-channel-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-compositor-memoire.py "$SRC"
 python3 tools/ladybird/prepare-echange-processus.py "$SRC"
+python3 tools/ladybird/prepare-gc-retention-proof.py "$SRC"
 python3 tools/ladybird/prepare-cache-journal.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1

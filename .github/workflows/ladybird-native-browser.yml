@@ -17,6 +17,7 @@ on:
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
+      - 'tools/ci/analyse_gc_retention.py'
       - 'tools/ci/preuve_compositor.py'
       - 'tools/ci/preuve_swaps.py'
       - 'tools/ci/verifie-preuve-*.py'
@@ -64,6 +65,7 @@ on:
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
+      - 'tools/ci/analyse_gc_retention.py'
       - 'tools/ci/preuve_compositor.py'
       - 'tools/ci/preuve_swaps.py'
       - 'tools/ci/verifie-preuve-*.py'
@@ -119,6 +121,7 @@ jobs:
         run: |
           python3 tools/ci/verifie-preuve-compositor.py
           python3 tools/ci/verifie-preuve-memoire.py
+          python3 tools/ci/verifie-preuve-gc-retention.py
           python3 tools/ci/verifie-preuve-swaps.py
 
       - name: Toolchain C/C++
@@ -905,6 +908,9 @@ jobs:
           if-no-files-found: warn
 
   memoire-onglets:
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- deux repetitions de mesure intactes.
+    # Si elles sont rouges, une troisieme repetition active dump_graph() uniquement
+    # pour attribuer la retention, sans contaminer M0/M1/M2 des deux mesures.
     # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- DIAGNOSTIC (hors verdict de convergence
     # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
     # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
@@ -912,7 +918,7 @@ jobs:
     name: ladybird / memoire apres onglets fermes (diagnostic)
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + outils
@@ -934,7 +940,7 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Deux repetitions de deux phases de 10 onglets, sous KVM
+      - name: Deux mesures puis attribution GC uniquement si elles restent rouges
         env:
           BO_QEMU_KVM: "1"
         run: |
@@ -945,6 +951,30 @@ jobs:
             cp serie-memoire.log "serie-memoire-${essai}.log"
             cp fixture-memoire.log "fixture-memoire-${essai}.log"
           done
+
+          if [ "$rc" -ne 0 ]; then
+            echo "=== preuve GC retention separee : le verdict memoire reste celui des deux runs precedents ==="
+            diag_run_rc=0
+            BO_GC_RETENTION_PROOF=1 tools/ci/run_ladybird_memoire.sh               target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10               > gc-retention.sortie 2>&1 || diag_run_rc=$?
+            cat gc-retention.sortie
+            cp serie-memoire.log serie-gc-retention.log
+            cp fixture-memoire.log fixture-gc-retention.log
+
+            diag_ok=0
+            grep -aq 'HOST_MEMOIRE_FIN' serie-gc-retention.log || diag_ok=1
+            python3 tools/ci/preuve_swaps.py serie-gc-retention.log 10 || diag_ok=1
+            ! grep -aq 'KERNEL PANIC' serie-gc-retention.log || diag_ok=1
+            ! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED' serie-gc-retention.log || diag_ok=1
+            ! grep -aq 'PROCESS_FAULT pid=' serie-gc-retention.log || diag_ok=1
+            python3 tools/ci/analyse_gc_retention.py serie-gc-retention.log || diag_ok=1
+
+            echo "GC_RETENTION_DIAGNOSTIC run_rc=$diag_run_rc proof_rc=$diag_ok"
+            if [ "$diag_ok" -ne 0 ]; then
+              rc=1
+            fi
+          else
+            echo "GC_RETENTION_DIAGNOSTIC_SKIP raison=memoire_deja_bornee"
+          fi
           exit "$rc"
       - name: Journaux
         if: always()
@@ -955,6 +985,9 @@ jobs:
             serie-memoire*.log
             fixture-memoire*.log
             memoire-*.sortie
+            serie-gc-retention.log
+            fixture-gc-retention.log
+            gc-retention.sortie
           if-no-files-found: warn
 
   crash-services:

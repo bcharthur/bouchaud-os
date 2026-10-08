@@ -43,6 +43,10 @@ fi
 cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
 
 URL="http://10.0.2.2:18082/memoire.html?n=$N"
+GC_RETENTION_GUEST_EXPORT=""
+if [ "${BO_GC_RETENTION_PROOF:-0}" = 1 ]; then
+  GC_RETENTION_GUEST_EXPORT="export BOUCHAUD_GC_RETENTION_PROOF=1"
+fi
 cat > "$SCENARIO/autorun" <<AUTORUN
 echo "=== Bouchaud memoire ==="
 export BO_AUTOSTART_BROWSER=1
@@ -53,6 +57,7 @@ export BOUCHAUD_TIME_ZONE=Europe/Paris
 export BOUCHAUD_ALLOW_POPUPS=1
 export BOUCHAUD_LB_MEMORY_PROOF=1
 export LIBGC_LOG_LEVEL=1
+${GC_RETENTION_GUEST_EXPORT}
 export BOUCHAUD_M9_URL='$URL'
 desktop
 AUTORUN
@@ -135,6 +140,14 @@ if python3 tools/ci/analyse_memoire.py "$LOG"; then
 else
   echo "  ECHEC   memoire : croissance ou reperes absents (voir ci-dessus)"
   echecs+=("memoire")
+fi
+# BOUCHAUD_P13_GC_RETENTION_V1 : attribution obligatoire de la retention.
+# Ce controle valide la PREUVE, jamais la fuite elle-meme.
+if python3 tools/ci/analyse_gc_retention.py "$LOG"; then
+  echo "  ok      retention PageClient attribuee (ou absente) avec chemins GC complets"
+else
+  echo "  ECHEC   preuve GC retention absente, tronquee ou incoherente"
+  echecs+=("preuve_gc_retention")
 fi
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_MEMOIRE_OK n_par_phase=$N"

@@ -46,6 +46,7 @@ ORDRE = [
     "prepare-control-channel-diagnostics.py",
     "prepare-compositor-memoire.py",
     "prepare-echange-processus.py",
+    "prepare-gc-retention-proof.py",
     "prepare-cache-journal.py",
     "prepare-full-browser-host.py",
     "prepare-network-live.py",
