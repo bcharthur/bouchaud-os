@@ -17,7 +17,7 @@ les echantillons pris dans le noyau, resolus contre l'ELF du noyau (--noyau).
 Ce script additionne tout
 le journal, rapporte chaque RIP a la base et le resout par addr2line contre
 le binaire EXACT du run, puis imprime par image et par role (fil principal
-= tid == pid, autres fils) les fonctions qui portent le plus d'echantillons.
+= le plus ancien fil du pid, autres fils) les fonctions qui portent le plus d'echantillons.
 
 Ne juge rien : imprime et rend 0.
 """
@@ -102,15 +102,20 @@ def main(argv):
     rips_noyau = defaultdict(Counter)
     jetons_invalides = 0
     base_vue = {}
-    for brut in journal.read_text(errors="replace").splitlines():
-        m = LIGNE.search(ANSI.sub("", brut))
-        if not m:
-            continue
+    lignes = [m for m in (LIGNE.search(ANSI.sub("", brut)) for brut in journal.read_text(errors="replace").splitlines()) if m]
+    # Le fil principal d'un processus est son PLUS ANCIEN fil : chez Bouchaud
+    # les tid ne valent pas le pid (ils partent de 100), `tid == pid` ne
+    # designait jamais personne (run 37667817559 : tout en « autres fils »).
+    premier_fil = {}
+    for m in lignes:
+        pid, tid = int(m[1]), int(m[2])
+        premier_fil[pid] = min(tid, premier_fil.get(pid, tid))
+    for m in lignes:
         pid, tid, image = int(m[1]), int(m[2]), Path(m[3]).name
         image = ALIAS.get(image, image)
         if image not in images:
             continue
-        cle = (image, "principal" if pid == tid else "autres fils")
+        cle = (image, "principal" if tid == premier_fil[pid] else "autres fils")
         user[cle] += int(m[4])
         noyau[cle] += int(m[5])
         base_vue[image] = int(m[6], 16)
