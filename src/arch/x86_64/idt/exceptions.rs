@@ -238,11 +238,70 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
         "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
         pid, reason, stack.instruction_pointer.as_u64(),
         stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base()));
+    // BOUCHAUD_PILE_DE_FAUTE_V1 : le RIP seul nomme `ak_trap`, pas qui l'a
+    // appele (run 37667817559 : Compositor, `ak_trap (??:?)`, rien d'autre).
+    // Les adresses de retour sont sur la pile : on la balaie et on publie les
+    // mots qui tombent dans l'image, que symbolise_fautes.py resout.
+    pile_de_faute(pid, stack.stack_pointer.as_u64(), crate::kernel::vmm::user_load_base());
     crate::kernel::blackbox::processus_faute(
         pid, reason, stack.instruction_pointer.as_u64(),
         stack.stack_pointer.as_u64(), cr2);
     crate::platform::pc::ecran_faute::sort_exception_resolue();
     crate::kernel::task::exit_group(139)
+}
+
+/// Balaie au plus 8 Kio de pile utilisateur au-dessus de `rsp` et publie les
+/// mots qui ressemblent a une adresse de code de l'image (le premier Gio
+/// apres sa base) : `PROCESS_FAULT_PILE pid= base= adresses=`.
+///
+/// Lecture par les tables de pages du processus (`AddressSpace::read`) : ni
+/// faute, ni lecture disque ; la premiere page absente arrete le balayage.
+/// Heuristique assumee -- des valeurs de pointeurs de fonction peuvent s'y
+/// glisser -- mais les adresses de retour y sont, dans l'ordre des appels.
+fn pile_de_faute(pid: u32, rsp: u64, base: u64) {
+    const OCTETS: u64 = 8192;
+    const MAX: usize = 32;
+    let Some(tache) = crate::kernel::task::try_current() else { return };
+    let mut adresses = alloc::string::String::new();
+    let mut n = 0usize;
+    let mut tampon = [0u8; 512];
+    let mut adr = rsp & !7;
+    let fin = adr.saturating_add(OCTETS);
+    'balayage: while adr < fin {
+        let fin_page = ((adr | 0xfff) + 1).min(fin).min(adr + tampon.len() as u64);
+        let longueur = (fin_page - adr) as usize;
+        if !tache.process.mm.lock().space.read(adr, &mut tampon[..longueur]) {
+            break;
+        }
+        for mot in tampon[..longueur].chunks_exact(8) {
+            let v = u64::from_le_bytes([mot[0], mot[1], mot[2], mot[3], mot[4], mot[5], mot[6], mot[7]]);
+            if v > base && v < base + 0x4000_0000 {
+                if n > 0 {
+                    adresses.push(',');
+                }
+                let _ = core::fmt::Write::write_fmt(&mut adresses, format_args!("{:#x}", v));
+                n += 1;
+                if n >= MAX {
+                    break 'balayage;
+                }
+            }
+        }
+        adr = fin_page;
+    }
+    // L'image : un fils de `fork` n'a pas de PERF_EXEC_PRET a lui, mais il
+    // porte le nom de l'image de son pere. `try_lock` : un chemin de faute ne
+    // doit attendre personne.
+    let image = tache
+        .process
+        .metadata
+        .try_lock()
+        .map(|m| m.name.clone())
+        .unwrap_or_default();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PROCESS_FAULT_PILE pid={} image={} base={:#x} rsp={:#x} adresses={}",
+        pid, if image.is_empty() { "?" } else { image.as_str() }, base, rsp,
+        if n == 0 { "-" } else { adresses.as_str() },
+    ));
 }
 
 extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame, code: u64) {

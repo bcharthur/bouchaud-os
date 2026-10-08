@@ -98,6 +98,13 @@ for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done
+# BOUCHAUD_PILE_DE_FAUTE_V1 : le fils `piege` de faute-noncanonique-probe
+# meurt sur ud2 au bout de deux appels ; la pile publiee par le noyau a la
+# faute, symbolisee contre la sonde, doit nommer son appelant. C'est la meme
+# chaine qui nomme l'appelant d'un `ak_trap` de Ladybird.
+python3 tools/ci/symbolise_fautes.py "$LOG" "$SCENARIO/bin" > pile-faute.log
+grep -am1 -B2 -A8 'FAUTE_SYMBOLE .*faute-noncanonique' pile-faute.log || true
+grep -aF 'piege_niveau1' pile-faute.log
 # BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
 # course a eu lieu), lu sur le dernier releve du noyau.
 awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
