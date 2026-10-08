@@ -655,6 +655,45 @@ pub fn current_process_local() -> Option<Arc<Process>> {
     })
 }
 
+/// BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1 -- le processus courant, PRETE.
+///
+/// Endurance 37667817559 (TCG, 600 s) : `current_process_local` porte 31 a
+/// 41 % des echantillons noyau de CHAQUE processus du navigateur (WebContent,
+/// Compositor, RequestServer, ImageDecoder, BrowserHost). Chaque appel masque
+/// les interruptions, prend le verrou `CURRENT_PROCESS[cpu]` (cases voisines
+/// dans la meme ligne de cache) et fait un aller-retour sur le compteur de
+/// l'`Arc` -- partage par tous les fils du processus, sur tous les coeurs.
+/// Et `user_read`/`user_write` l'appellent deux ou trois fois par copie,
+/// `poll` quatre fois par descripteur.
+///
+/// Or la tache courante TIENT deja un `Arc<Process>` pour toute la duree de
+/// l'appel : elle ne peut pas etre recyclee pendant qu'elle tourne
+/// (`on_cpu`), et une tache utilisateur en mode noyau n'est jamais preemptee
+/// sur place -- l'IRQ ne fait que demander une preemption differee, servie
+/// au retour vers l'espace utilisateur (idt/timer.rs). Elle ne change donc de
+/// coeur qu'a ses points de blocage explicites, ou `current()` la retrouve.
+/// Une reference empruntee a `current().process` suffit : ni verrou, ni
+/// compteur. La fermeture empeche de la conserver au-dela.
+///
+/// Meme semantique que [`current_process_local`] : `None` pour un fil noyau
+/// ou un coeur sans tache.
+#[inline]
+pub fn avec_processus_courant<R>(f: impl FnOnce(&Process) -> R) -> Option<R> {
+    let index = current_index_raw();
+    if index == NO_TASK {
+        return None;
+    }
+    let pointeur = EMPLACEMENTS[index].tache.load(Ordering::Acquire);
+    if pointeur.is_null() {
+        return None;
+    }
+    let tache = unsafe { &*pointeur };
+    if tache.noyau {
+        return None;
+    }
+    Some(f(&tache.process))
+}
+
 /// Identite de la tache courante, lue **sans le gros verrou noyau**.
 ///
 /// C'est une COPIE, pas une vue : le `tid` est un entier, le processus est un

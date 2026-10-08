@@ -325,6 +325,15 @@ pub(crate) fn processus_courant() -> alloc::sync::Arc<task::Process> {
     }
 }
 
+/// Le processus courant, PRETE pour la duree de `f` -- sans verrou ni part
+/// d'`Arc` (BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1, voir
+/// `task::avec_processus_courant`). Meme processus que [`processus_courant`]
+/// dans tous les cas, fil noyau compris : c'est celui de `current()`.
+#[inline]
+pub(crate) fn avec_processus<R>(f: impl FnOnce(&task::Process) -> R) -> R {
+    f(&task::current().process)
+}
+
 fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
     if len == 0 {
         return true;
@@ -346,25 +355,24 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
     let last_page = last & !(page_size - 1);
 
     loop {
-        let present = {
-            let process = processus_courant();
-            let present = process.mm.lock().space.translate(page).is_some();
-            present
-        };
+        // Une seule prise de `mm` pour les deux questions, et aucune part
+        // d'`Arc` (BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1).
+        let (present, writable) = avec_processus(|process| {
+            let mut mm = process.mm.lock();
+            (mm.space.translate(page).is_some(), mm.space.writable(page))
+        });
 
-        if !present && task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
-            return false;
-        }
-
-        if write {
-            let writable = {
-                let process = processus_courant();
-                let writable = process.mm.lock().space.writable(page);
-                writable
-            };
-            if !writable {
+        if !present {
+            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
                 return false;
             }
+            // La page vient d'etre peuplee : son droit d'ecriture se lit
+            // maintenant, pas avant.
+            if write && !avec_processus(|process| process.mm.lock().space.writable(page)) {
+                return false;
+            }
+        } else if write && !writable {
+            return false;
         }
 
         if page == last_page {
@@ -416,8 +424,7 @@ pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
     }
 
     let mut buffer = alloc::vec![0u8; len];
-    let process = processus_courant();
-    if process.mm.lock().space.read(addr, &mut buffer) {
+    if avec_processus(|process| process.mm.lock().space.read(addr, &mut buffer)) {
         Some(buffer)
     } else {
         None
@@ -430,9 +437,7 @@ pub fn user_write(addr: u64, data: &[u8]) -> bool {
         return false;
     }
 
-    let process = processus_courant();
-    let written = process.mm.lock().space.write(addr, data);
-    written
+    avec_processus(|process| process.mm.lock().space.write(addr, data))
 }
 
 /// Ecrit une valeur 64 bits dans l'espace utilisateur.

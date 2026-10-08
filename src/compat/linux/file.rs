@@ -2800,16 +2800,16 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
 // sondes n'a alors de descripteur a examiner.
 
 /// Le processus courant, sans prendre le gros verrou.
-fn processus_local() -> Option<alloc::sync::Arc<crate::kernel::task::Process>> {
-    task::current_process_local()
+/// Le genre du descripteur `fd` du processus courant, sans prendre de part
+/// de l'`Arc<Process>` (BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1) : `poll` en
+/// interroge chaque descripteur quatre fois par passe. `None` : fil noyau,
+/// ou descripteur absent.
+fn genre_du_fd(fd: i32) -> Option<FdKind> {
+    task::avec_processus_courant(|process| process.files.lock().get(fd).map(|desc| desc.kind.clone())).flatten()
 }
 
 fn writable(fd: i32) -> bool {
-    let Some(process) = processus_local() else { return false };
-    let kind = match process.files.lock().get(fd) {
-        Some(desc) => desc.kind.clone(),
-        None => return false,
-    };
+    let Some(kind) = genre_du_fd(fd) else { return false };
     match kind {
         // Un tube dont plus personne ne lit est « pret » : l'ecriture doit
         // echouer tout de suite en EPIPE, pas attendre une place qui ne
@@ -2836,11 +2836,7 @@ fn writable(fd: i32) -> bool {
 /// l'annonce — sans quoi un producteur verrait `POLLOUT` (la place est libre,
 /// puisque personne ne consomme) et croirait pouvoir continuer.
 fn etat_pair(fd: i32) -> u32 {
-    let Some(process) = processus_local() else { return 0 };
-    let kind = match process.files.lock().get(fd) {
-        Some(desc) => desc.kind.clone(),
-        None => return 0,
-    };
+    let Some(kind) = genre_du_fd(fd) else { return 0 };
     match kind {
         FdKind::Pipe(state, true) if state.lock().writers == 0 => POLLHUP,
         FdKind::Pipe(state, false) if state.lock().readers == 0 => POLLHUP | POLLERR,
@@ -2851,11 +2847,7 @@ fn etat_pair(fd: i32) -> u32 {
 
 /// Un descripteur est-il pret en lecture ?
 fn readable(fd: i32) -> bool {
-    let Some(process) = processus_local() else { return false };
-    let kind = match process.files.lock().get(fd) {
-        Some(desc) => desc.kind.clone(),
-        None => return false,
-    };
+    let Some(kind) = genre_du_fd(fd) else { return false };
     match kind {
         FdKind::Console => keyboard::has_pending(),
         FdKind::File(_)
@@ -2910,8 +2902,7 @@ fn readable(fd: i32) -> bool {
 /// un coup de pompe court car le pilote e1000 masque encore ses IRQ RX; les
 /// pipes, socketpair, eventfd et GUI restent, eux, purement event-driven.
 fn readiness_deadline_ns(fd: i32) -> Option<u64> {
-    let process = processus_local()?;
-    let kind = process.files.lock().get(fd).map(|desc| desc.kind.clone())?;
+    let kind = genre_du_fd(fd)?;
     match kind {
         FdKind::TimerFd(state) => {
             let deadline = state.lock().deadline;
