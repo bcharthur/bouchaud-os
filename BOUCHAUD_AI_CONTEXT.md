@@ -1,12 +1,19 @@
 # Bouchaud OS — contexte de référence pour humain ou IA
 
 **Branche :** `claude/ladybird-observability-performance`  
-**HEAD :** `9e086175c8e77c3a48d11eee8d2aa86442c78d67`  
+**HEAD technique testé :** `3658af04f05e04edf732cc086ddc890faaf88c52`  
 **Ladybird upstream :** `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6`  
 **Référence physique :** TRIGKEY Speed S5  
 **Date :** 2026-10-08
 
 Ce fichier est le point d'entrée recommandé.
+
+**Reprise du 8 octobre 2026 : lire d'abord [le handoff Codex](docs/current/HANDOFF_CODEX_2026-10-08.md).**
+Le commit ajoutant ce handoff est documentaire. La campagne du HEAD technique ci-dessus est terminée et rouge :
+Compositor réellement remplacé sur le bras KVM A, croissance RSS du WebContent principal, et preuve de pile
+os-primitives corrompue par l'entrelacement série. Les deux répétitions mémoire prouvent chacune 20/20 swaps.
+P2/P9 et P13 restent ouverts. P10 est inchangé. Aucun essai physique.
+Les diagnostics mémoire préparés mais non publiés comme code sont conservés dans le patch joint au handoff.
 
 ## Hiérarchie de vérité
 
@@ -26,7 +33,7 @@ sources autoritatives de la trajectoire actuelle.
 CI Fast                     SUCCESS
 Reliability V3              SUCCESS
 Integration                 SUCCESS
-os-primitives               SUCCESS
+os-primitives               FAILURE (preuve de pile série corrompue)
 
 Ladybird build              SUCCESS
 BrowserHost smoke           SUCCESS
@@ -41,8 +48,8 @@ performance                 SUCCESS
 endurance TCG 10 min        SUCCESS
 endurance KVM 20 min        SUCCESS
 
-mémoire onglets             FAILURE diagnostic
-endurance KVM A/B           FAILURE
+mémoire onglets             FAILURE (20/20 swaps x2, RSS WebContent en croissance)
+endurance KVM A/B           FAILURE (Compositor PID 18 remplacé par PID 28)
 convergence P13             FAILURE
 ```
 

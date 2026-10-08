@@ -1,0 +1,84 @@
+diff --git a/tools/ci/run_ladybird_memoire.sh b/tools/ci/run_ladybird_memoire.sh
+--- a/tools/ci/run_ladybird_memoire.sh
++++ b/tools/ci/run_ladybird_memoire.sh
+@@ -52,6 +52,7 @@ export BOUCHAUD_M11=1
+ export BOUCHAUD_TIME_ZONE=Europe/Paris
+ export BOUCHAUD_ALLOW_POPUPS=1
+ export BOUCHAUD_LB_MEMORY_PROOF=1
++export LIBGC_LOG_LEVEL=1
+ export BOUCHAUD_M9_URL='$URL'
+ desktop
+ AUTORUN
+diff --git a/tools/health/browser_host_fixture.py b/tools/health/browser_host_fixture.py
+--- a/tools/health/browser_host_fixture.py
++++ b/tools/health/browser_host_fixture.py
+@@ -363,7 +363,11 @@ def _son_wav():
+   const stab = Number(q.get("stab") || 20) * 1000;
+   const pause = ms => new Promise(r => setTimeout(r, ms));
+   const etat = t => { document.getElementById("etat").textContent = t; };
+-  await pause(5000);
++  // Meme stabilisation pour M0, M1 et M2. Le redimensionnement initial des
++  // surfaces arrive vers 3 s : 5 s ne donnaient que deux releves stables
++  // avant M0, contre les trois requis (run 37800200518, deux repetitions).
++  // Le plafond d'execution reste inchange ; aucun GC n'est force.
++  await pause(stab);
+   console.log(`HOST_MEMOIRE_REPERE m=0 n=${n}`);
+   for (const phase of [1, 2]) {
+     for (let i = 1; i <= n; i++) {
+diff --git a/tools/ladybird/prepare-echange-processus.py b/tools/ladybird/prepare-echange-processus.py
+--- a/tools/ladybird/prepare-echange-processus.py
++++ b/tools/ladybird/prepare-echange-processus.py
+@@ -116,6 +116,53 @@ def main() -> int:
+         "    }));\n"
+         "}\n",
+     )
++    # BOUCHAUD_PAGES_MEMOIRE_V1 : differencier une page detachee de l'UI,
++    # une racine PageHost retiree et une PageClient reellement collectee.
++    # Les compteurs de finalisation sont globaux au processus : le GC peut
++    # detruire une PageClient apres son PageHost, sans toucher un owner mort.
++    host_h = racine / "Services/WebContent/PageHost.h"
++    host_cpp = racine / "Services/WebContent/PageHost.cpp"
++    remplace(host_h, "#include <LibGC/Root.h>\n",
++             "#include <LibCore/Timer.h>\n#include <LibGC/Root.h>\n")
++    remplace(host_h, "namespace WebContent {\n",
++             "namespace WebContent {\n\nvoid bouchaud_note_page_finalisee(); // BOUCHAUD_PAGES_MEMOIRE_V1\n")
++    remplace(host_h, "    HashMap<u64, GC::Root<PageClient>> m_pages;\n",
++             "    HashMap<u64, GC::Root<PageClient>> m_pages;\n"
++             "    RefPtr<Core::Timer> m_bouchaud_pages_timer;\n"
++             "    u64 m_bouchaud_pages_sequence { 0 };\n")
++    remplace(host_cpp, "#include <WebContent/PageHost.h>\n",
++             "#include <WebContent/PageHost.h>\n#include <stdlib.h>\n")
++    remplace(host_cpp, "namespace WebContent {\n",
++             "namespace WebContent {\n\n"
++             "// BOUCHAUD_PAGES_MEMOIRE_V1 : compteurs, aucune racine GC ajoutee.\n"
++             "static u64 s_bouchaud_pages_created = 0;\n"
++             "static u64 s_bouchaud_pages_detached = 0;\n"
++             "static u64 s_bouchaud_pages_finalized = 0;\n"
++             "void bouchaud_note_page_finalisee() { ++s_bouchaud_pages_finalized; }\n")
++    remplace(host_cpp, "    : m_client(client)\n{\n}\n",
++             "    : m_client(client)\n{\n"
++             "    if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\")) {\n"
++             "        m_bouchaud_pages_timer = Core::Timer::create_repeating(1000, [this] {\n"
++             "            dbgln(\"[LB:PAGE_STATE] seq={} roots={} created={} detached={} finalized={} END\",\n"
++             "                ++m_bouchaud_pages_sequence, m_pages.size(), s_bouchaud_pages_created,\n"
++             "                s_bouchaud_pages_detached, s_bouchaud_pages_finalized);\n"
++             "        });\n"
++             "        m_bouchaud_pages_timer->start();\n"
++             "    }\n}\n")
++    remplace(host_cpp, "    m_pages.set(page_id, PageClient::create(*this, page_id, pending_root_navigable_id));\n",
++             "    m_pages.set(page_id, PageClient::create(*this, page_id, pending_root_navigable_id));\n"
++             "    ++s_bouchaud_pages_created;\n")
++    remplace(host_cpp, "    m_pages.remove(page_id);\n",
++             "    if (m_pages.remove(page_id))\n"
++             "        ++s_bouchaud_pages_detached;\n")
++    remplace(host_cpp, "PageHost::~PageHost() = default;\n",
++             "PageHost::~PageHost()\n{\n"
++             "    if (m_bouchaud_pages_timer) {\n"
++             "        m_bouchaud_pages_timer->on_timeout = {};\n"
++             "        m_bouchaud_pages_timer->stop();\n"
++             "    }\n}\n")
++    remplace(racine / "Services/WebContent/PageClient.cpp", "PageClient::~PageClient() = default;\n",
++             "PageClient::~PageClient() { bouchaud_note_page_finalisee(); } // BOUCHAUD_PAGES_MEMOIRE_V1\n")
+     return 0
+ 
+ 
