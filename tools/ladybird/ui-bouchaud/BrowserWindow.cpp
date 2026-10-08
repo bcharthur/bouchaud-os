@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/HashTable.h>
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
 #include <signal.h>
@@ -33,6 +34,10 @@ BrowserWindow::BrowserWindow(Core::AnonymousBuffer theme, Web::DevicePixelSize v
 
 BrowserWindow::~BrowserWindow()
 {
+    if (m_preuves_tic) {
+        m_preuves_tic->on_timeout = {};
+        m_preuves_tic->stop();
+    }
     // Les rappels du chrome capturent `this` : un chrome qui survivrait a la
     // fenetre appellerait dans le vide.
     auto& c = BouchaudChrome::state();
@@ -80,6 +85,34 @@ void BrowserWindow::demarre(URL::URL const& url_initiale)
         m_viewport = Web::DevicePixelSize { BouchaudChrome::state().surface_width, BouchaudChrome::viewport_height() };
     }
     branche_chrome();
+
+    if (getenv("BOUCHAUD_LB_MEMORY_PROOF") || getenv("BOUCHAUD_LB_LIFECYCLE_PROOF")) {
+        m_preuves_tic = Core::Timer::create_repeating(1000, [this] {
+            auto const seq = ++m_preuves_sequence;
+            size_t fermes = 0, valides = 0, vivants = 0;
+            HashTable<pid_t> nouveaux;
+            for (auto const& entree : m_preuves_swaps) {
+                auto const& p = entree.value;
+                fermes += p.ferme;
+                valides += p.ancien > 0 && p.nouveau > 0 && p.ancien != p.nouveau && p.changements == 1;
+                vivants += WebView::Application::process_manager().find_process(p.nouveau).has_value();
+                nouveaux.set(p.nouveau);
+            }
+            warnln("[LB:SWAP_STATE] seq={} swaps={} views={} closed={} valid={} distinct_new={} new_live={} END",
+                seq, m_preuves_swaps.size(), m_vues.size(), fermes, valides, nouveaux.size(), vivants);
+            // Les preuves individuelles sont surtout utiles au repos : ne
+            // pas ajouter vingt lignes par seconde pendant la charge.
+            if (!getenv("BOUCHAUD_LB_MEMORY_PROOF") || m_vues.size() != 1)
+                return;
+            for (auto const& entree : m_preuves_swaps) {
+                auto const& p = entree.value;
+                auto const vivant = WebView::Application::process_manager().find_process(p.nouveau).has_value();
+                warnln("[LB:SWAP_PROOF] seq={} onglet={} old={} new={} changes={} closed={} new_live={} END",
+                    seq, entree.key, p.ancien, p.nouveau, p.changements, p.ferme ? 1 : 0, vivant ? 1 : 0);
+            }
+        });
+        m_preuves_tic->start();
+    }
 
     auto const premier = ouvre_onglet(url_initiale, true, true);
     warnln("[LB:UI] premier_onglet={} viewport={}x{} url={}", premier,
@@ -143,6 +176,8 @@ void BrowserWindow::retire_vue(u64 onglet)
         if (m_vues[i]->onglet() != onglet)
             continue;
         warnln("[LB:TAB] ferme onglet={} page={}", onglet, m_vues[i]->page_courante());
+        if (auto preuve = m_preuves_swaps.find(onglet); preuve != m_preuves_swaps.end())
+            preuve->value.ferme = true;
         m_webcontent_de_l_onglet.remove(onglet);
         m_onglets_repris.remove(onglet);
         m_vues.remove(i);
@@ -452,6 +487,14 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         auto const nouveau = vue_ptr->client().pid();
         auto const ancien = m_webcontent_de_l_onglet.get(onglet).value_or(-1);
         m_webcontent_de_l_onglet.set(onglet, nouveau);
+        if (getenv("BOUCHAUD_LB_MEMORY_PROOF") || getenv("BOUCHAUD_LB_LIFECYCLE_PROOF")) {
+            if (auto preuve = m_preuves_swaps.find(onglet); preuve != m_preuves_swaps.end()) {
+                ++preuve->value.changements;
+                preuve->value.nouveau = nouveau;
+            } else {
+                m_preuves_swaps.set(onglet, PreuveSwap { ancien, nouveau });
+            }
+        }
         warnln("[LB] PROCESS_SWAP onglet={} raison=autre_site ancien_pid={} nouveau_pid={}", onglet, ancien, nouveau);
     };
     vue.on_title_change = [this, onglet, vue_ptr = &vue](Utf16String const& titre) {

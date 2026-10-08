@@ -268,7 +268,8 @@ exige "workers au rendez-vous (${workers:-0}/${cycles:-0})" test "${workers:-0}"
 exige "onglets sur l'autre site ouverts (${onglets:-0})" test "${onglets:-0}" -ge 1
 exige "onglet enfant charge sur 10.0.2.100" grep -aq 'HOST_ENDURANCE_ENFANT .*origine=http://10.0.2.100:18082' "$P"
 swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || true)
-exige "chaque onglet enfant a change de WebContent (${swaps} swaps / ${onglets:-0} onglets)" test "$swaps" -ge $(( ${onglets:-0} - 2 )) -a "${onglets:-0}" -ge 1
+echo "  marqueurs ponctuels de swap lisibles : $swaps (diagnostic)"
+exige "chaque onglet enfant a change de WebContent (preuve cumulative exacte)" python3 tools/ci/preuve_swaps.py "$LOG" "${onglets:-0}" --endurance
 exige "un seul Compositor du debut a la fin (compteurs runtime cumulatifs)" python3 tools/ci/preuve_compositor.py "$LOG"
 exige "aucune assertion (VERIFICATION FAILED)" bash -c "! grep -aq 'VERIFICATION FAILED' '$P'"
 # Un `MUST()` qui echoue ou un ASSERT : toujours suivis d'`ak_trap`, jamais benins.

@@ -91,6 +91,18 @@ private:
     HashMap<u64, pid_t> m_webcontent_de_l_onglet;
     RefPtr<Core::Timer> m_quitte_apres;
 
+    // Seulement pour les bancs : journal cumulatif, conserve apres
+    // fermeture afin qu'une ligne serie perdue ne perde pas le process swap.
+    struct PreuveSwap {
+        pid_t ancien;
+        pid_t nouveau;
+        bool ferme { false };
+        u64 changements { 1 };
+    };
+    HashMap<u64, PreuveSwap> m_preuves_swaps;
+    RefPtr<Core::Timer> m_preuves_tic;
+    u64 m_preuves_sequence { 0 };
+
     // BOUCHAUD_CRASH_SERVICES_V1 : le service tue par le banc, et son
     // remplacant (meme type, autre pid) tel que le gestionnaire le voit.
     struct SuiviCrashService {
