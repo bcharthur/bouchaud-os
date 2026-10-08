@@ -5,8 +5,12 @@ fn wait_word_key(uaddr: u64) -> Option<u64> {
     // BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1 : un `futex` par appel, sans part
     // d'`Arc<Process>` ni verrou du bloc par-CPU.
     let translated = crate::kernel::task::avec_processus_courant(|process| {
-        let mut mm = process.mm.lock();
-        mm.space.translate(uaddr)
+        // Garder explicitement le SpinLockGuard dans un scope local (V13.1).
+        let translated = {
+            let mut mm = process.mm.lock();
+            mm.space.translate(uaddr)
+        };
+        translated
     })?;
 
     translated.or(Some(uaddr))

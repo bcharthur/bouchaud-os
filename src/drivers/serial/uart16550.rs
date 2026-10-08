@@ -374,6 +374,36 @@ pub fn emissions_a_la_borne() -> u64 {
     EMISSIONS_A_LA_BORNE.load(Ordering::Relaxed)
 }
 
+/// BOUCHAUD_SERIE_ATTENTE_DATEE_V1 -- faire la queue SANS masquer.
+///
+/// Le jeton attendait 100 000 `pause` interruptions masquees : 1 a 4 ms. Une
+/// ligne de 200 octets coute ~0,6 ms sous KVM (une sortie de VM par octet) et
+/// ~17 ms a 115 200 bauds sur la Trigkey : des que deux ou trois coeurs
+/// faisaient la queue, la borne expirait et les lignes se melaient octet par
+/// octet (run 37667817559, KVM : `origine=\x1b[9h0mt[`, un [PERF-RIP] illisible
+/// qui a fait planter profil_rip.py, « Compositor lances : 0 »).
+///
+/// Un appelant interruptible attend ici que le jeton paraisse libre, sans le
+/// prendre et sans rien masquer -- il ne tient rien ; preempte, il reprend sa
+/// place --, au plus 1 s (DATEE, pas comptee en tours), avec un plafond de tours
+/// pour finir meme si l'horloge n'avance pas encore. `_print` masque ensuite
+/// et prend le jeton comme avant : la phase masquee ne couvre plus que la
+/// course finale, et la ligne reste atomique.
+fn attend_jeton_libre() {
+    const BORNE_NS: u64 = 1_000_000_000;
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut tours = 0u32;
+    while EMISSION.load(Ordering::Relaxed) != 0 {
+        tours = tours.wrapping_add(1);
+        if tours > 50_000_000
+            || (tours % 256 == 0 && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > BORNE_NS)
+        {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     if !is_ready() {
@@ -386,28 +416,18 @@ pub fn _print(args: fmt::Arguments) {
     let _ = sortie.write_fmt(args);
 
     let ouvertes = x86_64::instructions::interrupts::are_enabled();
-    // BOUCHAUD_SERIE_ATTENTE_DATEE_V1
-    //
-    // L'attente etait de 100 000 `pause`, interruptions masquees : 1 a 4 ms.
-    // Une ligne de 200 octets coute ~0,6 ms sous KVM (chaque octet est une
-    // sortie de VM) et ~17 ms a 115 200 bauds sur la Trigkey ; des que deux
-    // ou trois coeurs font la queue, la borne expirait et les lignes se
-    // melaient octet par octet -- run 37667817559 (KVM) : `origine=\x1b[9h0mt[`,
-    // un `[PERF-RIP]` illisible, « Compositor lances : 0 ».
-    //
-    // Desormais l'attente est DATEE, et se fait dans l'etat d'interruption de
-    // l'appelant : un appelant interruptible attend jusqu'a 1 s sans rien
-    // masquer (il ne tient rien ; preempte, il reprend sa place) ; un appelant
-    // deja masque (IRQ, exception) garde une borne courte, 20 ms. Les
-    // interruptions ne sont masquees que pour PRENDRE le jeton et emettre :
-    // la ligne reste atomique. La panique garde son chemin sans jeton.
-    let borne_ns: u64 = if ouvertes { 1_000_000_000 } else { 20_000_000 };
-    let debut = crate::kernel::timer::monotonic_ns();
+    // BOUCHAUD_SERIE_ATTENTE_DATEE_V1 : la file d'attente se fait AVANT de
+    // masquer, sans rien tenir (voir `attend_jeton_libre`) ; la phase masquee
+    // ne couvre plus que la course finale.
+    if ouvertes {
+        attend_jeton_libre();
+    }
+    x86_64::instructions::interrupts::disable();
+    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    // Attente BORNEE : le port sert aussi aux paniques et aux interruptions ;
+    // une ligne entrelacee vaut mieux qu'une machine qui se tait.
     let mut tours = 0u32;
-    let mut moi;
     let pris = loop {
-        x86_64::instructions::interrupts::disable();
-        moi = crate::arch::x86_64::smp::cpu_index() + 1;
         match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => break true,
             Err(detenteur) if detenteur == moi => {
@@ -416,22 +436,13 @@ pub fn _print(args: fmt::Arguments) {
             }
             Err(_) => {}
         }
-        // Interruptions masquees (ou a l'etre) : servir soi-meme les
-        // shootdowns TLB qui attendent ce coeur, comme pendant l'emission.
+        // Interruptions masquees : servir soi-meme les shootdowns TLB qui
+        // attendent ce coeur, comme pendant l'emission.
         if tours % 64 == 0 {
             crate::arch::x86_64::smp::sert_shootdowns_en_attente();
         }
-        tours = tours.wrapping_add(1);
-        if ouvertes {
-            x86_64::instructions::interrupts::enable();
-        }
-        // Filet : avant la calibration, l'horloge peut ne pas avancer
-        // (ticks d'IRQ0 masques) ; un compte de tours garantit la fin.
-        if (tours % 256 == 0
-            && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > borne_ns)
-            || tours > 50_000_000
-        {
-            x86_64::instructions::interrupts::disable();
+        tours += 1;
+        if tours > 100_000 {
             EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
             break false;
         }
