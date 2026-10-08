@@ -956,3 +956,48 @@ jobs:
             serie-crash-services.log
             fixture-crash-services.log
           if-no-files-found: warn
+
+  endurance-longue:
+    # BOUCHAUD_ENDURANCE_LONGUE_V1 -- DIAGNOSTIC : la page d'endurance 20
+    # minutes sous KVM (cadres, workers, onglets autre site, changements de
+    # processus, fermetures). STABILITY_GATE et PERFORMANCE_GATE (budget
+    # proportionnel a la duree), memoire du Compositor ([LB:MEM]) et pentes
+    # RSS sur toute la duree.
+    name: ladybird / endurance 20 min sous KVM (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Endurance 1 200 s sous KVM
+        env:
+          BO_QEMU_KVM: "1"
+        run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 1200
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-endurance-longue
+          path: |
+            serie-endurance.log
+            fixture-endurance.log
+          if-no-files-found: warn
