@@ -242,6 +242,14 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
   // mesurait la VITESSE de la machine (run 37532626400 : 36/93 sur un
   // executant trois fois plus lent), pas la correction du cycle de vie.
   let cadresEchus = 0, latMax = 0, latTotal = 0;
+  // BOUCHAUD_ENDURANCE_MODERNE_V1 : la serie complete, pour p50/p95/p99 --
+  // une moyenne et un maximum ne disent pas la forme de la distribution.
+  const lats = [];
+  const centile = (q) => {
+    if (lats.length === 0) return -1;
+    const t = lats.slice().sort((a, b) => a - b);
+    return t[Math.min(t.length - 1, Math.floor(q * (t.length - 1) + 0.5))];
+  };
   let raf = 0;
   // BOUCHAUD_ENDURANCE_ETAPES_V1 : ou passe la latence d'un cadre (9 s en
   // moyenne sous KVM, 16 s sous TCG, run 37661162354) ? Document du cadre
@@ -283,7 +291,7 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
       cadresOk++;
       const lat = Math.round(performance.now() - tCadre);
       derCadre = lat;
-      latMax = Math.max(latMax, lat); latTotal += lat;
+      latMax = Math.max(latMax, lat); latTotal += lat; lats.push(lat);
       suite && suite();
     };
     ici.appendChild(f);
@@ -325,7 +333,7 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
       if (performance.now() - t0 < duree) setTimeout(un_cycle, Math.max(0, 5000 - (performance.now() - debutCycle)));
       else {
         if (onglet) onglet.close();
-        console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} onglets_fermes_par_ouvreur=${ongletsFermesParOuvreur} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax} lat_doc_moy_ms=${Math.round(docTotal / Math.max(1, docN))} docs=${docN} lat_img_moy_ms=${Math.round(imgTotal / Math.max(1, imgN))} imgs=${imgN} retard_boucle_moy_ms=${Math.round(retardTotal / Math.max(1, retardN))} retard_boucle_max_ms=${Math.round(retardMax)}`);
+        console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} onglets_fermes_par_ouvreur=${ongletsFermesParOuvreur} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax} lat_cadre_p50_ms=${centile(0.5)} lat_cadre_p95_ms=${centile(0.95)} lat_cadre_p99_ms=${centile(0.99)} cycles_conclus=${cadresOk + cadresEchus} lat_doc_moy_ms=${Math.round(docTotal / Math.max(1, docN))} docs=${docN} lat_img_moy_ms=${Math.round(imgTotal / Math.max(1, imgN))} imgs=${imgN} retard_boucle_moy_ms=${Math.round(retardTotal / Math.max(1, retardN))} retard_boucle_max_ms=${Math.round(retardMax)}`);
       }
     };
   }

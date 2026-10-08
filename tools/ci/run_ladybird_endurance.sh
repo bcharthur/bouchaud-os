@@ -175,6 +175,24 @@ diagnostic() {
   fi
 }
 
+# BOUCHAUD_LB_MEM_V1 : ce que le Compositor tient, au premier releve, au pire
+# et au dernier -- contextes vivants, surfaces de rendu, caches de Skia (bornes,
+# limite publiee). Une croissance de RSS sans croissance de ces compteurs
+# designe autre chose qu'eux.
+echo "== memoire du Compositor ([LB:MEM]) =="
+awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") }
+  match($0, /\[LB:MEM\] ev=[a-z_]+ ctx=[0-9]+ contexts_live=[0-9]+ backing_stores_live=[0-9]+ backing_store_octets=[0-9]+ skia_ressources_octets=[0-9]+ skia_ressources_limite=[0-9]+ skia_polices_octets=[0-9]+/) {
+    n = split(substr($0, RSTART, RLENGTH), f, /[ =]/)
+    ctx = f[7]; bs = f[9]; oct = f[11]; skia = f[13]; lim = f[15]; pol = f[17]
+    if (vus++ == 0) { p_ctx = ctx; p_oct = oct; p_skia = skia }
+    if (ctx > m_ctx) m_ctx = ctx; if (oct > m_oct) m_oct = oct; if (skia > m_skia) m_skia = skia
+    d_ctx = ctx; d_oct = oct; d_skia = skia; d_pol = pol; d_lim = lim; d_bs = bs
+  }
+  END {
+    if (vus == 0) { print "  LB_MEM absent (aucune ligne [LB:MEM])"; exit }
+    printf "  LB_MEM releves=%d contexts premier=%d max=%d dernier=%d backing_store_kio premier=%d max=%d dernier=%d surfaces_dernier=%d skia_ressources_kio premier=%d max=%d dernier=%d limite_kio=%d skia_polices_kio=%d\n",
+      vus, p_ctx, m_ctx, d_ctx, p_oct / 1024, m_oct / 1024, d_oct / 1024, d_bs, p_skia / 1024, m_skia / 1024, d_skia / 1024, d_lim / 1024, d_pol / 1024
+  }' "$LOG"
 echo "== tendance RSS par processus (pente de la seconde moitie de vie) =="
 diagnostic tendance_rss python3 tools/ci/tendance_rss.py "$P" --min-releves 10 --prefixe "  "
 
@@ -206,19 +224,34 @@ awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms
 awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print "  " substr($0, RSTART, RLENGTH) }' "$LOG"
 
 echo "== verdict =="
+# BOUCHAUD_ENDURANCE_MODERNE_V1 : deux verdicts, jamais melanges.
+#
+#   STABILITY_GATE    -- le systeme tient : aucune panique, aucune assertion,
+#                        aucune faute de processus, aucun echec du bac a sable,
+#                        chaque cycle conclu, workers et onglets coherents.
+#   PERFORMANCE_GATE  -- le debit : cycles par duree, aucun cadre au-dela de
+#                        30 s ; p50/p95/p99 de la latence d'un cadre imprimes.
+#
+# Les budgets de performance ne changent PAS ici (un cycle par 10 s, aucun
+# cadre > 30 s) : ils ne seront redefinis que sur une baseline mesuree. Le banc
+# reste rouge si l'un des deux verdicts l'est ; ils sont simplement lisibles
+# separement.
 echecs=()
-exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); fi; }
-fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ cadres_echus=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+' "$P" | head -1 || true)
+stabilite_ko=0
+performance_ko=0
+exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); stabilite_ko=$((stabilite_ko + 1)); fi; }
+exige_perf() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs+=("$quoi"); performance_ko=$((performance_ko + 1)); fi; }
+fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ cadres_echus=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+.*' "$P" | head -1 || true)
 # `|| true` : sans ligne FIN (panique, VM morte), grep rend 1 et `set -e`
 # tuait le banc AVANT son verdict (run 37584587000 : rien apres « verdict »).
-val() { echo "$fin" | grep -oE "$1=[0-9]+" | cut -d= -f2 || true; }
+val() { echo "$fin" | grep -oE "(^| )$1=-?[0-9]+" | head -1 | cut -d= -f2 || true; }
 cycles=$(val cycles); t_s=$(val t_s); cadres=$(val cadres_ok); echus=$(val cadres_echus); workers=$(val workers_ok); onglets=$(val onglets)
+conclus=$(val cycles_conclus)
+echo " -- STABILITE --"
 exige "la page a fini (HOST_ENDURANCE_FIN)" test -n "$fin"
 exige "duree >= 95 % de ${DUREE} s (t_s=${t_s:-?})" test "${t_s:-0}" -ge $((DUREE * 95 / 100))
-exige "au moins $((DUREE / 10)) cycles (${cycles:-0})" test "${cycles:-0}" -ge $((DUREE / 10))
-exige "cadres charges (${cadres:-0}/${cycles:-0}, ${echus:-?} au-dela de 30 s)" test "${cadres:-0}" -ge $(( ${cycles:-0} - 2 ))
-exige "aucun cadre au-dela de 30 s (${echus:-?})" test "${echus:-1}" -eq 0
-exige "workers au rendez-vous (${workers:-0}/${cycles:-0})" test "${workers:-0}" -ge $(( ${cycles:-0} - 2 ))
+exige "chaque cycle conclu, charge ou echu (${conclus:-?}/${cycles:-0})" test "${conclus:-0}" -ge $(( ${cycles:-0} - 1 )) -a "${cycles:-0}" -ge 1
+exige "workers au rendez-vous (${workers:-0}/${cycles:-0})" test "${workers:-0}" -ge $(( ${cycles:-0} - 1 ))
 exige "onglets sur l'autre site ouverts (${onglets:-0})" test "${onglets:-0}" -ge 1
 exige "onglet enfant charge sur 10.0.2.100" grep -aq 'HOST_ENDURANCE_ENFANT .*origine=http://10.0.2.100:18082' "$P"
 swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || true)
@@ -231,6 +264,16 @@ exige "aucune panique noyau" bash -c "! grep -aq 'KERNEL PANIC' '$P'"
 exige "la boucle a fini sur la page, pas sur ${verdict}" test "$verdict" = fini
 exige "aucun abandon de lien Compositor" bash -c "! grep -aq 'COMPOSITOR_LINK_GIVE_UP' '$P'"
 exige "aucune mort du Compositor" bash -c "! grep -aqE '(PROCESS_FAULT|PROCESS_EXIT|PROCESS_DEATH).*Compositor' '$P'"
+# Ce banc n'injecte aucune panne : toute faute d'un processus est inattendue.
+exige "aucune faute de processus ($(grep -ac 'PROCESS_FAULT pid=' "$P" || true))" bash -c "! grep -aq 'PROCESS_FAULT pid=' '$P'"
+exige "bac a sable : aucun echec, aucun NNP_ABSENT" bash -c "! grep -aqE '\[LB:SANDBOX\] ECHEC|NNP_ABSENT' '$P'"
+echo " -- PERFORMANCE (budgets inchanges ; p50/p95/p99 publies) --"
+echo "  latence d'un cadre : p50=$(val lat_cadre_p50_ms) ms p95=$(val lat_cadre_p95_ms) ms p99=$(val lat_cadre_p99_ms) ms max=$(val lat_cadre_max_ms) ms moyenne=$(val lat_cadre_moy_ms) ms"
+exige_perf "au moins $((DUREE / 10)) cycles (${cycles:-0})" test "${cycles:-0}" -ge $((DUREE / 10))
+exige_perf "cadres charges (${cadres:-0}/${cycles:-0}, ${echus:-?} au-dela de 30 s)" test "${cadres:-0}" -ge $(( ${cycles:-0} - 2 ))
+exige_perf "aucun cadre au-dela de 30 s (${echus:-?})" test "${echus:-1}" -eq 0
+if [ "$stabilite_ko" -eq 0 ]; then echo "STABILITY_GATE ok"; else echo "STABILITY_GATE echec n=$stabilite_ko"; fi
+if [ "$performance_ko" -eq 0 ]; then echo "PERFORMANCE_GATE ok"; else echo "PERFORMANCE_GATE echec n=$performance_ko"; fi
 
 # Le verdict DIAGNOSTIC, a part : il ne change pas le verdict fonctionnel.
 if [ ${#diagnostics_ko[@]} -eq 0 ]; then
