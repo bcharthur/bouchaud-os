@@ -220,7 +220,7 @@ pub const COMMANDS: &[&str] = &[
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
-    "exec", "elfinfo", "usermode", "poll-selftest", "tasks", "vmstat", "strace",
+    "exec", "elfinfo", "usermode", "poll-selftest", "tasks", "vmstat", "strace", "profil-rip",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -1134,6 +1134,19 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "tasks" => { crate::kernel::task::print_table(); 0 }
         "vmstat" => { crate::kernel::vmm::print_info(); 0 }
         "strace" => { c::strace(argc, &argv); 0 }
+        // BOUCHAUD_PROFIL_RIP_V1 : couper le profil (A/B de son cout).
+        "profil-rip" => {
+            match argv.get(1).copied().filter(|_| argc >= 2) {
+                Some("on") => crate::kernel::task::profil_rip_actif(true),
+                Some("off") => crate::kernel::task::profil_rip_actif(false),
+                _ => println!("usage: profil-rip on|off"),
+            }
+            println!(
+                "PROFIL_RIP actif={}",
+                crate::kernel::task::profil_rip_est_actif() as u8
+            );
+            0
+        }
 
         // Un nom qui n'est pas une commande interne peut etre un programme.
         //

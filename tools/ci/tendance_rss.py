@@ -3,7 +3,7 @@
 
 BOUCHAUD_TENDANCE_RSS_V1 (convergence P6).
 
-    tools/ci/tendance_rss.py SERIE_PROPRE [--min-releves N]
+    tools/ci/tendance_rss.py SERIE_PROPRE [--min-releves N] [--prefixe TEXTE]
 
 Le premier et le dernier releve d'une IMAGE melangent des processus
 differents (un WebContent qui meurt, un autre qui nait). Ici chaque pid est
@@ -43,6 +43,9 @@ def main(argv):
     min_releves = 6
     if "--min-releves" in argv:
         min_releves = int(argv[argv.index("--min-releves") + 1])
+    # Le banc indentait par `| sed` : sous `pipefail`, une erreur ici l'aurait
+    # arrete avant son verdict. Le prefixe est donc pose ici.
+    prefixe = argv[argv.index("--prefixe") + 1] if "--prefixe" in argv else ""
     par_pid = {}
     with open(argv[1], "r", errors="replace") as f:
         for ligne in f:
@@ -72,13 +75,13 @@ def main(argv):
         cpu = part(pts[0], pts[-1])
         cpu2 = part(moitie[0], moitie[-1])
         print(
-            f"RSS_TENDANCE pid={pid} image={image} releves={len(pts)} "
+            f"{prefixe}RSS_TENDANCE pid={pid} image={image} releves={len(pts)} "
             f"vie_s={(pts[-1][0] - pts[0][0]) // 1000} premier_kio={pts[0][1]} "
             f"milieu_kio={pts[len(pts) // 2][1]} dernier_kio={pts[-1][1]} "
             f"max_kio={max(r for _, r, _ in pts)} pente2_kio_min={p2:.0f} "
             f"cpu_pct={cpu} cpu2_pct={cpu2}"
         )
-    print(f"RSS_TENDANCE_FIN pids={len(par_pid)} suivis={suivis} min_releves={min_releves}")
+    print(f"{prefixe}RSS_TENDANCE_FIN pids={len(par_pid)} suivis={suivis} min_releves={min_releves}")
     return 0
 
 

@@ -35,6 +35,10 @@ LIGNE = re.compile(
 # Ligne « fichier:ligne » d'addr2line (une fonction C++ ne finit jamais par
 # « :chiffres »).
 FICHIER_LIGNE = re.compile(r":(\d+|\?)( \(discriminator \d+\))?$")
+# Un couple « rip:compte » valide. Le journal serie peut etre entrelace (deux
+# coeurs sur l'UART, run 37667817559 : `0x\x1b168[a9398`) : un jeton
+# invalide est compte et ecarte, jamais fatal.
+COUPLE = re.compile(r"^0x[0-9a-f]{1,16}:[0-9]{1,9}$")
 # /bo-navigateur est une copie de BouchaudBrowserHost.
 ALIAS = {"bo-navigateur": "BouchaudBrowserHost"}
 IMAGES_DEFAUT = "WebContent,RequestServer,Compositor,ImageDecoder,BouchaudBrowserHost"
@@ -96,6 +100,7 @@ def main(argv):
     noyau = Counter()
     rips = defaultdict(Counter)
     rips_noyau = defaultdict(Counter)
+    jetons_invalides = 0
     base_vue = {}
     for brut in journal.read_text(errors="replace").splitlines():
         m = LIGNE.search(ANSI.sub("", brut))
@@ -109,14 +114,17 @@ def main(argv):
         user[cle] += int(m[4])
         noyau[cle] += int(m[5])
         base_vue[image] = int(m[6], 16)
-        if m[7] != "-":
-            for paire in m[7].split(","):
+        for champ, cible in ((m[7], rips), (m[8], rips_noyau)):
+            if not champ or champ == "-":
+                continue
+            for paire in champ.split(","):
+                if not COUPLE.match(paire):
+                    jetons_invalides += 1
+                    continue
                 rip, n = paire.split(":")
-                rips[cle][int(rip, 16)] += int(n)
-        if m[8] and m[8] != "-":
-            for paire in m[8].split(","):
-                rip, n = paire.split(":")
-                rips_noyau[cle][int(rip, 16)] += int(n)
+                cible[cle][int(rip, 16)] += int(n)
+    if jetons_invalides:
+        print(f"PROFIL_RIP_JETONS_INVALIDES n={jetons_invalides} (lignes serie entrelacees)")
     if not user and not noyau:
         print("PROFIL_RIP absent (aucune ligne [PERF-RIP])")
         return 0
@@ -156,4 +164,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    # Un outil de DIAGNOSTIC ne plante pas : une erreur imprevue est dite,
+    # avec un code dedie (3), et c'est le banc qui la classe diagnostic.
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as erreur:  # noqa: BLE001
+        print(f"PROFIL_RIP_ERREUR {type(erreur).__name__}: {erreur}")
+        sys.exit(3)

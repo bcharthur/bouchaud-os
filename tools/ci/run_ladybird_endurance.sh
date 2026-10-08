@@ -156,8 +156,27 @@ for img in BouchaudBrowserHost bo-navigateur WebContent RequestServer ImageDecod
   [ -n "$premier" ] && printf '  %-20s premier %-16s dernier %s\n' "$img" "$premier" "$dernier"
 done
 
+# BOUCHAUD_VERDICT_DIAGNOSTIC_V1 : un outil de mesure qui echoue (ligne
+# serie entrelacee, ELF absent, adresse non symbolisable) ne fait pas echouer
+# le banc -- run 37667817559 (KVM) : une trace Python de profil_rip.py avait
+# arrete le banc AVANT son verdict, un navigateur fonctionnel est sorti rouge.
+# Il est dit (`DIAGNOSTIC_ECHEC outil= rc=`) et compte dans un verdict
+# DIAGNOSTIC separe, imprime a cote du verdict fonctionnel.
+diagnostics_ko=()
+diagnostic() {
+  local outil=$1
+  shift
+  if "$@"; then
+    return 0
+  else
+    local rc=$?
+    echo "  DIAGNOSTIC_ECHEC outil=$outil rc=$rc"
+    diagnostics_ko+=("$outil")
+  fi
+}
+
 echo "== tendance RSS par processus (pente de la seconde moitie de vie) =="
-python3 tools/ci/tendance_rss.py "$P" --min-releves 10 | sed 's/^/  /'
+diagnostic tendance_rss python3 tools/ci/tendance_rss.py "$P" --min-releves 10 --prefixe "  "
 
 # Compteurs noyau du dernier releve : lectures de comptabilite refaites
 # (BOUCHAUD_COMPTA_SEQLOCK_V1) et recalculs de l'identite du coeur par CPUID
@@ -178,7 +197,7 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
 # au quantum, symbolises contre les binaires du run). Affichage seulement.
 # Pas de `| head` : sous `pipefail`, un producteur coupe par SIGPIPE ferait
 # sortir le banc avant son verdict ; les bornes sont dans le script.
-python3 tools/ci/profil_rip.py "$LOG" "$OUT" --noyau "$(dirname "$BOOT")/bouchaud-os"
+diagnostic profil_rip python3 tools/ci/profil_rip.py "$LOG" "$OUT" --noyau "$(dirname "$BOOT")/bouchaud-os"
 echo "== compteurs noyau (dernier [PROC-STAT]) =="
 awk 'match($0, /compta_relues=[0-9]+ replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms=[0-9]+)?/) { v = substr($0, RSTART, RLENGTH) } END { print "  " (v != "" ? v : "absents") }' "$LOG"
 # BOUCHAUD_TSC_SOURCE_V1 : l'horloge de l'invite. Sous KVM (run
@@ -206,11 +225,19 @@ swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || t
 exige "chaque onglet enfant a change de WebContent (${swaps} swaps / ${onglets:-0} onglets)" test "$swaps" -ge $(( ${onglets:-0} - 2 )) -a "${onglets:-0}" -ge 1
 exige "un seul Compositor du debut a la fin ($compositors)" test "$compositors" -eq 1
 exige "aucune assertion (VERIFICATION FAILED)" bash -c "! grep -aq 'VERIFICATION FAILED' '$P'"
+# Un `MUST()` qui echoue ou un ASSERT : toujours suivis d'`ak_trap`, jamais benins.
+exige "aucun MUST() ni ASSERT en echec (UNEXPECTED ERROR, ASSERTION FAILED)" bash -c "! grep -aqE 'UNEXPECTED ERROR|ASSERTION FAILED' '$P'"
 exige "aucune panique noyau" bash -c "! grep -aq 'KERNEL PANIC' '$P'"
 exige "la boucle a fini sur la page, pas sur ${verdict}" test "$verdict" = fini
 exige "aucun abandon de lien Compositor" bash -c "! grep -aq 'COMPOSITOR_LINK_GIVE_UP' '$P'"
 exige "aucune mort du Compositor" bash -c "! grep -aqE '(PROCESS_FAULT|PROCESS_EXIT|PROCESS_DEATH).*Compositor' '$P'"
 
+# Le verdict DIAGNOSTIC, a part : il ne change pas le verdict fonctionnel.
+if [ ${#diagnostics_ko[@]} -eq 0 ]; then
+  echo "VERDICT_DIAGNOSTIC ok"
+else
+  echo "VERDICT_DIAGNOSTIC echec outils=${diagnostics_ko[*]}"
+fi
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_ENDURANCE_OK duree_s=${t_s} cycles=${cycles}"
 else

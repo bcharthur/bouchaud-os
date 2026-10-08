@@ -37,9 +37,23 @@ static PROFIL_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 const PROFIL_BIT_USER: u64 = 1 << 63;
 
+/// Interrupteur (commande shell `profil-rip on|off`). Actif par defaut : le
+/// profil est un diagnostic des bancs. L'A/B de son cout (meme image, meme
+/// banc, profil coupe) le coupe des l'autorun ; `[PERF-RIP-RESUME] actif=`
+/// dit dans quel mode le run a tourne.
+static PROFIL_ACTIF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn profil_rip_actif(actif: bool) {
+    PROFIL_ACTIF.store(actif, Ordering::Release);
+}
+
+pub fn profil_rip_est_actif() -> bool {
+    PROFIL_ACTIF.load(Ordering::Acquire)
+}
+
 /// Depuis `sonde_gel_tic`, donc depuis l'interruption du tic.
 fn profil_rip_note(cpu: usize, rip: u64, depuis_utilisateur: bool, source: u64) {
-    if cpu >= MAX_CPUS {
+    if cpu >= MAX_CPUS || !PROFIL_ACTIF.load(Ordering::Relaxed) {
         return;
     }
     if source == GEL_SOURCE_PIT {
@@ -167,7 +181,8 @@ pub fn publie_profil_rip() {
         );
     }
     crate::serial_println!(
-        "[PERF-RIP-RESUME] t={} echantillons={} total={} perdus={}",
-        maintenant, vus, total, PROFIL_PERDUS.load(Ordering::Relaxed),
+        "[PERF-RIP-RESUME] t={} actif={} echantillons={} total={} perdus={}",
+        maintenant, PROFIL_ACTIF.load(Ordering::Relaxed) as u8, vus, total,
+        PROFIL_PERDUS.load(Ordering::Relaxed),
     );
 }
