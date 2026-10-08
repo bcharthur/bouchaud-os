@@ -109,6 +109,19 @@ int main(void) {
     atomic_store(&stop, 1);
     pthread_join(thread, NULL);
     close(attachment); close(sockets[0]); close(sockets[1]);
-    printf("SCM_RECEIVE_RACE_%s rounds=%d expected=%d END\n", failed ? "FAIL" : "OK", completed, ROUNDS);
+    /* Repeat the same final snapshot, not the workload: concurrent kernel
+     * diagnostics can corrupt a serial record. The runner still requires
+     * a complete 10000/10000 success line and rejects every failure marker.
+     * Keep the original failed run as evidence; never reconstruct its END. */
+    char record[128];
+    int length = snprintf(record, sizeof(record),
+        "SCM_RECEIVE_RACE_%s rounds=%d expected=%d END\n",
+        failed ? "FAIL" : "OK", completed, ROUNDS);
+    fflush(stdout);
+    for (int copy = 0; copy < 3; ++copy) {
+        if (write(STDOUT_FILENO, record, (size_t)length) != length) return 2;
+        struct timespec pause = {.tv_nsec = 1000000};
+        nanosleep(&pause, NULL);
+    }
     return failed;
 }
