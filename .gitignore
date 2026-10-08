@@ -272,3 +272,7 @@ tools/userland/out-horloge/
 /ladybird-crash-services.img
 /serie-crash-services.log*
 /fixture-crash-services.log
+# BOUCHAUD_ATA_INTEGRITE_V1 (tools/ci/run_ata_integrite.sh)
+/scenario-ata-integrite/
+/ata-integrite.img
+/ata-integrite-blkdebug.conf

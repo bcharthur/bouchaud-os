@@ -417,7 +417,18 @@ fn index_data_disk() -> Option<Unpacked> {
         sector = data_lba + data_sectors;
     }
 
+    // BOUCHAUD_ATA_INTEGRITE_V1 : ou s'arrete l'archive sur hdb. Ses fichiers
+    // paresseux y sont relus a la demande ; un test d'ecriture brute ne doit
+    // jamais y toucher.
+    FIN_ARCHIVE_SECTEUR.store(sector, core::sync::atomic::Ordering::Release);
     Some(result)
+}
+
+static FIN_ARCHIVE_SECTEUR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Premier secteur de hdb apres l'archive indexee (0 : aucune archive lue).
+pub fn fin_archive_secteur() -> u64 {
+    FIN_ARCHIVE_SECTEUR.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Cherche une archive sur le disque de donnees et la deplie dans le RAMFS.

@@ -59,6 +59,13 @@ jobs:
           cp serie-horloge.log serie-horloge-tcg.log
           BO_QEMU_KVM=1 tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60
           cp serie-horloge.log serie-horloge-kvm.log
+      - name: ATA -- integrite du chemin DMA et repli PIO sur erreur injectee (TCG puis KVM)
+        # BOUCHAUD_ATA_INTEGRITE_V1 : 2 048 secteurs ecrits, vides, relus et
+        # compares ; puis une ecriture refusee par QEMU blkdebug, vue par le
+        # pilote et refaite en PIO, sans corruption silencieuse.
+        run: |
+          tools/ci/run_ata_integrite.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          BO_QEMU_KVM=1 tools/ci/run_ata_integrite.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -74,4 +81,5 @@ jobs:
             serie-primitives-kvm-*.log
             serie-persist-cache-*.log
             serie-horloge-*.log
+            serie-ata-integrite-*.log
           if-no-files-found: warn

@@ -115,6 +115,13 @@ pub const RACINE: &str = "/persist";
 include!("persistance/volume.rs");
 include!("persistance/superbloc.rs");
 include!("persistance/format.rs");
+
+/// Premier secteur de la zone persistante sur le volume des donnees, s'il y a
+/// une zone. BOUCHAUD_ATA_INTEGRITE_V1 : la borne qu'un test d'ecriture brute
+/// ne doit pas franchir.
+pub fn premier_secteur_de_la_zone() -> Option<u64> {
+    debut()
+}
 include!("persistance/transaction.rs");
 include!("persistance/arbre.rs");
 include!("persistance/index.rs");

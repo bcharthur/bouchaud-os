@@ -11,6 +11,9 @@ pub mod ac97;
 pub mod ata;
 #[path = "block/ata_bloc.rs"]
 pub mod ata_bloc;
+/// BOUCHAUD_ATA_INTEGRITE_V1 : ecrire, vider, relire, comparer (commande `ata-integrite`).
+#[path = "block/ata_integrite.rs"]
+pub mod ata_integrite;
 #[path = "api/block.rs"]
 pub mod block;
 #[path = "api/bloc.rs"]

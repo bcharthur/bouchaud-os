@@ -932,6 +932,11 @@ pub fn dma_stats() -> (u64, u32, bool) {
     dma::stats()
 }
 
+/// Lots ecrits en DMA depuis le demarrage.
+pub fn dma_lots_ecrits() -> u64 {
+    dma::lots_ecrits()
+}
+
 /// (attente du bus-master ns, dont cedee a l'ordonnanceur ns, cessions > 100 us).
 pub fn dma_temps() -> (u64, u64, u64) {
     dma::temps()
