@@ -65,19 +65,28 @@ def main() -> int:
         "        }\n"
         "        return n;\n"
         "    }\n"
-        "    size_t bouchaud_octets() const\n"
-        "    {\n"
-        "        size_t n = 0;\n"
-        "        for (auto const& store : m_backing_stores) {\n"
-        "            if (store.surface) {\n"
-        "                auto taille = store.surface->size();\n"
-        "                n += static_cast<size_t>(taille.width()) * static_cast<size_t>(taille.height()) * 4;\n"
-        "            }\n"
-        "        }\n"
-        "        return n;\n"
-        "    }\n"
+        "    // Defini dans le .cpp : PaintingSurface n'est ici qu'annonce.\n"
+        "    size_t bouchaud_octets() const;\n"
         "\n"
         "private:\n",
+    )
+    remplace(
+        comp / "BackingStoreManager.cpp",
+        "    return m_backing_stores[*m_latest_rendered_store_index].surface;\n}\n",
+        "    return m_backing_stores[*m_latest_rendered_store_index].surface;\n}\n"
+        "\n"
+        f"// {MARQUEUR}\n"
+        "size_t BackingStoreManager::bouchaud_octets() const\n"
+        "{\n"
+        "    size_t n = 0;\n"
+        "    for (auto const& store : m_backing_stores) {\n"
+        "        if (store.surface) {\n"
+        "            auto taille = store.surface->size();\n"
+        "            n += static_cast<size_t>(taille.width()) * static_cast<size_t>(taille.height()) * 4;\n"
+        "        }\n"
+        "    }\n"
+        "    return n;\n"
+        "}\n",
     )
 
     # --- ContextState : l'exposer en lecture --------------------------------
