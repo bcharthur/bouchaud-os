@@ -1,0 +1,8 @@
+{
+  "mode": "additive_only",
+  "head": "9e086175c8e77c3a48d11eee8d2aa86442c78d67",
+  "branch": "claude/ladybird-observability-performance",
+  "entrypoint": "BOUCHAUD_AI_CONTEXT.md",
+  "documentation_dir": "docs/current",
+  "overwrites_existing_tracked_documentation": false
+}

@@ -1,0 +1,26 @@
+# Documentation courante Bouchaud OS
+
+Ce dossier est **additif**. Il complète la documentation détaillée déjà
+présente sans la remplacer.
+
+## Index
+
+- `STATUS_CURRENT.md`
+- `P1_P13_CURRENT.md`
+- `ARCHITECTURE_CURRENT.md`
+- `TRIGKEY_REFERENCE.md`
+- `BOUCHAUD_NAVIGATEUR.md`
+- `KERNEL_RUNTIME.md`
+- `NETWORK_STORAGE.md`
+- `GRAPHICS_AUDIO_INPUT.md`
+- `SECURITY_MODEL.md`
+- `OBSERVABILITY_RELIABILITY.md`
+- `CI_AND_PROOFS.md`
+- `HISTORY_AND_DECISIONS.md`
+- `MODERNITY_AND_DIFFERENTIATION.md`
+- `ROADMAP_CURRENT.md`
+- `KNOWN_LIMITATIONS.md`
+- `DEPENDENCIES_AND_LICENSES.md`
+- `GLOSSARY.md`
+- `RELEASE_TRIGKEY_CHECKLIST.md`
+- `AI_HANDOFF_TEMPLATE.md`
