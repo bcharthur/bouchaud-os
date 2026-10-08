@@ -431,11 +431,55 @@ def main() -> int:
     # navigateur, vu par le gestionnaire d'upstream (le seul endroit ou
     # chaque service est enregistre et chaque mort recoltee).
     pm = wv / "ProcessManager.cpp"
+    # BOUCHAUD_COMPOSITOR_PREUVE_V1 : compter dans le gestionnaire, pas dans
+    # un grep de PERF_EXECVE. Le run 37776506426 a perdu ce marqueur par
+    # entrelacement serie. Les compteurs persistent meme si une ligne se perd.
+    remplace(
+        wv / "ProcessManager.h",
+        "    Core::Platform::ProcessStatistics m_statistics;\n",
+        "    u64 m_bouchaud_compositor_created { 0 };\n"
+        "    u64 m_bouchaud_compositor_removed { 0 };\n"
+        "    u64 m_bouchaud_compositor_sample { 0 };\n"
+        "    RefPtr<Core::Timer> m_bouchaud_compositor_timer;\n"
+        "    Core::Platform::ProcessStatistics m_statistics;\n",
+    )
+    remplace(pm, "#include <AK/String.h>\n", "#include <AK/String.h>\n#include <stdlib.h>\n")
+    remplace(
+        pm,
+        "    add_process(Process(WebView::ProcessType::Browser, nullptr, Core::Process::current()));\n",
+        "    add_process(Process(WebView::ProcessType::Browser, nullptr, Core::Process::current()));\n"
+        "    if (getenv(\"BOUCHAUD_LB_LIFECYCLE_PROOF\")) {\n"
+        "        m_bouchaud_compositor_timer = Core::Timer::create_repeating(1000, [this] {\n"
+        "            size_t live = 0;\n"
+        "            pid_t pid = 0;\n"
+        "            for_each_process([&](Process& process) {\n"
+        "                if (process.type() == ProcessType::Compositor) {\n"
+        "                    ++live;\n"
+        "                    pid = process.pid();\n"
+        "                }\n"
+        "            });\n"
+        "            dbgln(\"[LB:COMPOSITOR_STATE] seq={} created={} removed={} live={} pid={} END\",\n"
+        "                ++m_bouchaud_compositor_sample, m_bouchaud_compositor_created,\n"
+        "                m_bouchaud_compositor_removed, live, pid);\n"
+        "        });\n"
+        "        m_bouchaud_compositor_timer->start();\n"
+        "    }\n",
+    )
+    remplace(
+        pm,
+        "    return m_processes.take(pid);\n",
+        "    auto process = m_processes.take(pid);\n"
+        "    if (process.has_value() && process->type() == ProcessType::Compositor)\n"
+        "        ++m_bouchaud_compositor_removed;\n"
+        "    return process;\n",
+    )
     remplace(
         pm,
         "    auto pid = process.pid();\n"
         "    on_process_added(process);\n",
         "    auto pid = process.pid();\n"
+        "    if (process.type() == ProcessType::Compositor)\n"
+        "        ++m_bouchaud_compositor_created;\n"
         "    dbgln(\"[LB] PROCESS_CREATE type={} pid={} total={}\", process_name_from_type(process.type()), pid, m_processes.size() + 1);\n"
         "    on_process_added(process);\n",
     )
