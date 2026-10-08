@@ -866,3 +866,46 @@ jobs:
             piege-*.sortie
           if-no-files-found: warn
 
+  memoire-onglets:
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- DIAGNOSTIC (hors verdict de convergence
+    # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
+    # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
+    # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
+    name: ladybird / memoire apres onglets fermes (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Deux phases de 10 onglets, sous KVM
+        env:
+          BO_QEMU_KVM: "1"
+        run: tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-memoire
+          path: |
+            serie-memoire.log
+            fixture-memoire.log
+          if-no-files-found: warn

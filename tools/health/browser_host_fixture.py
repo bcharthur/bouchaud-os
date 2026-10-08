@@ -340,6 +340,43 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
   setTimeout(un_cycle, 1000);
 })();
 </script></body>"""
+# BOUCHAUD_MEMOIRE_ONGLETS_V1 (P2/P9) : ce qui reste apres des onglets fermes.
+# Deux phases IDENTIQUES de `n` onglets autre site (relais -> 10.0.2.100 ->
+# nouveau WebContent, comme l'endurance), chacune suivie d'une stabilisation.
+# Repere M0 avant, M1 apres la phase 1, M2 apres la phase 2 : une fuite croit
+# autant en phase 2 qu'en phase 1 ; un cache borne croit en phase 1 puis plus.
+MEMOIRE_HTML = b"""<!doctype html><meta charset="utf-8"><title>memoire</title>
+<body style="margin:0;font:16px sans-serif"><div id="etat">memoire</div><script>
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const n = Number(q.get("n") || 10);
+  const garde = Number(q.get("garde") || 15) * 1000;
+  const stab = Number(q.get("stab") || 20) * 1000;
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  const etat = t => { document.getElementById("etat").textContent = t; };
+  await pause(5000);
+  console.log(`HOST_MEMOIRE_REPERE m=0 n=${n}`);
+  for (const phase of [1, 2]) {
+    for (let i = 1; i <= n; i++) {
+      const t0 = performance.now();
+      const o = window.open(`/endurance-relais.html?cycle=mem${phase}_${i}`, "_blank");
+      let ferme = o ? "ouvreur" : "refus";
+      while (o && performance.now() - t0 < garde) {
+        if (o.closed) { ferme = "lui_meme"; break; }
+        await pause(250);
+      }
+      if (o && !o.closed) o.close();
+      console.log(`HOST_MEMOIRE_ONGLET phase=${phase} i=${i} ms=${Math.round(performance.now() - t0)} ferme=${ferme}`);
+      etat(`phase ${phase} onglet ${i}/${n}`);
+      await pause(1000);
+    }
+    etat(`phase ${phase} stabilisation`);
+    await pause(stab);
+    console.log(`HOST_MEMOIRE_REPERE m=${phase} n=${n}`);
+  }
+  console.log(`HOST_MEMOIRE_FIN n=${n}`);
+})();
+</script></body>"""
 ENDURANCE_RELAIS_HTML = b"""<!doctype html><meta charset="utf-8"><title>relais</title>
 <body>relais<script>
   console.log(`HOST_ENDURANCE_RELAIS ${location.search}`);
@@ -1753,6 +1790,7 @@ class Handler(BaseHTTPRequestHandler):
             "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
             "/endurance.html": (ENDURANCE_HTML, "text/html; charset=utf-8"),
             "/endurance-relais.html": (ENDURANCE_RELAIS_HTML, "text/html; charset=utf-8"),
+            "/memoire.html": (MEMOIRE_HTML, "text/html; charset=utf-8"),
             "/endurance-enfant.html": (ENDURANCE_ENFANT_HTML, "text/html; charset=utf-8"),
             "/crash-a.html": (CRASH_A_HTML, "text/html; charset=utf-8"),
             "/crash-b0.html": (CRASH_B0_HTML, "text/html; charset=utf-8"),
