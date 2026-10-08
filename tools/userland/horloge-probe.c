@@ -26,12 +26,20 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 static int echecs;
+
+/* Une ligne = UN write(). Sur une sortie non tamponnee, musl decoupe un
+ * printf long en plusieurs ecritures, et une ligne du noyau peut s'y glisser
+ * (KVM, os-primitives 37746924011 : « reel_ms=BACKING_PROBE ... ») : la
+ * mesure d=1 etait perdue pour le juge exterieur. */
+static void ligne(char const *format, ...) __attribute__((format(printf, 1, 2)));
 
 static int64_t ns(clockid_t horloge)
 {
@@ -40,9 +48,23 @@ static int64_t ns(clockid_t horloge)
     return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+static void ligne(char const *format, ...)
+{
+    char tampon[256];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(tampon, sizeof tampon, format, args);
+    va_end(args);
+    if (n < 0)
+        return;
+    if ((size_t)n >= sizeof tampon)
+        n = sizeof tampon - 1;
+    (void)!write(1, tampon, (size_t)n);
+}
+
 static void verifie(const char *quoi, int condition, long long valeur)
 {
-    printf("  %-62s %s (%lld)\n", quoi, condition ? "ok" : "ECHEC", valeur);
+    ligne("  %-62s %s (%lld)\n", quoi, condition ? "ok" : "ECHEC", valeur);
     if (!condition)
         echecs++;
 }
@@ -68,14 +90,14 @@ int main(int argc, char **argv)
     for (int i = 0; i < n && durees[i] <= plafond; i++) {
         int d = durees[i];
         int64_t m0 = ns(CLOCK_MONOTONIC), r0 = ns(CLOCK_REALTIME);
-        printf("HORLOGE_DEBUT d=%d\n", d);
+        ligne("HORLOGE_DEBUT d=%d\n", d);
         struct timespec demande = { d, 0 }, reste;
         while (nanosleep(&demande, &reste) != 0 && errno == EINTR)
             demande = reste;
         int64_t m1 = ns(CLOCK_MONOTONIC), r1 = ns(CLOCK_REALTIME);
         long long mono_us = (m1 - m0) / 1000, reel_us = (r1 - r0) / 1000;
         long long excedent_us = mono_us - (long long)d * 1000000LL;
-        printf("HORLOGE_FIN d=%d mono_us=%lld reel_us=%lld excedent_us=%lld reel_ms=%lld\n",
+        ligne("HORLOGE_FIN d=%d mono_us=%lld reel_us=%lld excedent_us=%lld reel_ms=%lld\n",
                d, mono_us, reel_us, excedent_us, (long long)(r1 / 1000000));
         char quoi[96];
         snprintf(quoi, sizeof quoi, "d=%d s : le sommeil n'est pas plus court, excedent us", d);
@@ -88,8 +110,8 @@ int main(int argc, char **argv)
         verifie(quoi, ecart <= tolere && -ecart <= tolere, ecart);
     }
     if (echecs == 0)
-        printf("HORLOGE_INVITE_OK\n");
+        ligne("HORLOGE_INVITE_OK\n");
     else
-        printf("HORLOGE_INVITE_ECHEC n=%d\n", echecs);
+        ligne("HORLOGE_INVITE_ECHEC n=%d\n", echecs);
     return echecs ? 1 : 0;
 }

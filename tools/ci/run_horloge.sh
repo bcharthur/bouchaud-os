@@ -86,9 +86,9 @@ echo "HORLOGE_BANC $etat"
 sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | grep -aE '^  .*(ok|ECHEC) \(|HORLOGE_(INVITE|DEBUT|FIN)' || true
 
 rc_hote=0
-python3 - "$STAMPS" <<'PY' || rc_hote=$?
+python3 - "$STAMPS" "$PLAFOND" <<'PY' || rc_hote=$?
 import re, sys
-debut, echecs, vus = {}, 0, 0
+debut, echecs, vus, mesurees = {}, 0, 0, set()
 for ligne in open(sys.argv[1], encoding="utf-8"):
     t_mono, t_mur, texte = ligne.rstrip("\n").split("\t", 2)
     texte = re.sub(r"\x1b\[[0-9;]*m", "", texte)
@@ -99,6 +99,7 @@ for ligne in open(sys.argv[1], encoding="utf-8"):
         if d not in debut:
             continue
         vus += 1
+        mesurees.add(d)
         hote_ms = (int(t_mono) - debut[d]) / 1e6
         invite_ms = int(m[2]) / 1e3
         ecart = invite_ms - hote_ms
@@ -110,6 +111,13 @@ for ligne in open(sys.argv[1], encoding="utf-8"):
         print(f"HORLOGE_AUDIT d={d} invite_ms={invite_ms:.1f} hote_ms={hote_ms:.1f} ecart_ms={ecart:+.1f} "
               f"ecart_pct={pct:+.2f} reel_decalage_ms={decalage:+d} "
               f"{'ok' if ok_duree and ok_reel else 'ECHEC'}")
+# Chaque duree attendue doit avoir sa mesure : une ligne perdue n'est pas un
+# succes par omission (os-primitives 37746924011 : d=1 absente, verdict OK).
+attendues = [d for d in (1, 10, 60) if d <= int(sys.argv[2])]
+manquantes = [d for d in attendues if d not in mesurees]
+for d in manquantes:
+    print(f"HORLOGE_AUDIT d={d} ECHEC mesure absente (ligne DEBUT ou FIN illisible)")
+    echecs += 1
 if vus == 0:
     print("HORLOGE_AUDIT aucune mesure")
     sys.exit(1)
