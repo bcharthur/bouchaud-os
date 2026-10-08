@@ -37,6 +37,9 @@ from pathlib import Path
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 EXEC = re.compile(r"PERF_EXEC_PRET image=(\S+) pid=(\d+) .*?base=(0x[0-9a-f]+)")
 EXECVE = re.compile(r"PERF_EXECVE .*?image=(\S+) pid=(\d+)")
+# La mort d'un processus porte toujours son image (fils de fork compris) :
+# repli quand la ligne PILE n'a pas pu la lire (verrou pris, image=?).
+MORT = re.compile(r"PROCESS_(?:EXIT|DEATH) t=\d+ pid=(\d+) ppid=\d+ image=(\S+)")
 PILE = re.compile(r"PROCESS_FAULT_PILE pid=(\d+) (?:image=(\S+) )?base=(0x[0-9a-f]+) rsp=(0x[0-9a-f]+) adresses=(\S+)")
 PREFIXE_SERIE = re.compile(r"^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] ")
 ERREUR = re.compile(r"UNEXPECTED ERROR|VERIFICATION FAILED|ASSERTION FAILED|Assertion .* failed|terminate called|panicked at")
@@ -62,7 +65,7 @@ def main(argv):
     journal, dossier = Path(argv[1]), Path(argv[2])
     if not journal.is_file():
         return 0
-    images, bases, fautes, piles, lignes = {}, {}, [], {}, []
+    images, bases, fautes, piles, lignes, morts = {}, {}, [], {}, [], {}
     for ligne in journal.read_text(errors="replace").splitlines():
         ligne = PREFIXE_SERIE.sub("", ANSI.sub("", ligne)).replace("\r", "")
         lignes.append(ligne)
@@ -73,6 +76,8 @@ def main(argv):
             images.setdefault(m[2], m[1])
         if m := FAUTE.search(ligne):
             fautes.append((m, len(lignes) - 1))
+        if m := MORT.search(ligne):
+            morts.setdefault(m[1], m[2])
         if m := PILE.search(ligne):
             piles[m[1]] = (int(m[3], 16), [] if m[5] == "-" else [int(a, 16) for a in m[5].split(",")])
             # Un fils de fork n'a pas d'exec a lui : le noyau donne son image.
@@ -85,7 +90,7 @@ def main(argv):
     print(f"== fautes des processus, symbolisees ({len(fautes)}) ==")
     for f, indice in fautes[:12]:
         pid, raison, rip, cr2 = f[1], f[2], int(f[3], 16), f[5]
-        image = images.get(pid, "?")
+        image = images.get(pid) or morts.get(pid, "?")
         nom = ALIAS.get(Path(image).name, Path(image).name)
         binaire = dossier / nom
         # La ligne de faute porte la base depuis BOUCHAUD_SYMBOLISE_FAUTES_V1 ;

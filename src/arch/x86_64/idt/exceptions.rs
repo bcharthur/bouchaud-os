@@ -290,13 +290,17 @@ fn pile_de_faute(pid: u32, rsp: u64, base: u64) {
     }
     // L'image : un fils de `fork` n'a pas de PERF_EXEC_PRET a lui, mais il
     // porte le nom de l'image de son pere. `try_lock` : un chemin de faute ne
-    // doit attendre personne.
-    let image = tache
-        .process
-        .metadata
-        .try_lock()
-        .map(|m| m.name.clone())
-        .unwrap_or_default();
+    // doit attendre personne -- mais un seul essai perdait la course contre
+    // un pere qui lit ses fils dans `wait4` (KVM, os-primitives 37744591052,
+    // 3e demarrage : image=?, pile non symbolisee). Quelques essais BORNES.
+    let mut image = alloc::string::String::new();
+    for _ in 0..4096 {
+        if let Some(m) = tache.process.metadata.try_lock() {
+            image = m.name.clone();
+            break;
+        }
+        core::hint::spin_loop();
+    }
     crate::kernel::dmesg::log_fmt(format_args!(
         "PROCESS_FAULT_PILE pid={} image={} base={:#x} rsp={:#x} adresses={}",
         pid, if image.is_empty() { "?" } else { image.as_str() }, base, rsp,

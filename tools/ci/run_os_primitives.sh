@@ -104,7 +104,14 @@ done
 # chaine qui nomme l'appelant d'un `ak_trap` de Ladybird.
 python3 tools/ci/symbolise_fautes.py "$LOG" "$SCENARIO/bin" > pile-faute.log
 grep -am1 -B2 -A8 'FAUTE_SYMBOLE .*faute-noncanonique' pile-faute.log || true
-grep -aF 'piege_niveau1' pile-faute.log
+if ! grep -aF 'piege_niveau1' pile-faute.log; then
+  # Ce que le noyau a publie pour le fils `piege`, et ce que l'outil en a
+  # fait : de quoi trancher entre pile vide, image inconnue, ligne abimee.
+  echo "PILE_DE_FAUTE_ECHEC piege_niveau1 absent de la pile symbolisee" >&2
+  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/PROCESS_FAULT(_PILE)? pid=/ && n++ < 8 { print "  " substr($0, 1, 400) }' >&2
+  awk '/FAUTE_SYMBOLE .*instruction illegale/ { on = 1 } on && n++ < 24 { print "  " $0 }' pile-faute.log >&2
+  exit 1
+fi
 # BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
 # course a eu lieu), lu sur le dernier releve du noyau.
 awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
