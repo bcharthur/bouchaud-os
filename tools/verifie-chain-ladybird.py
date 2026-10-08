@@ -44,6 +44,7 @@ ORDRE = [
     "prepare-worker-terminate.py",
     "prepare-compositor-lien.py",
     "prepare-compositor-memoire.py",
+    "prepare-echange-processus.py",
     "prepare-cache-journal.py",
     "prepare-full-browser-host.py",
     "prepare-network-live.py",

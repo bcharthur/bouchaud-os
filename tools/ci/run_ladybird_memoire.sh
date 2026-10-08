@@ -96,6 +96,10 @@ sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' > "$P"
 grep -aoE 'HOST_MEMOIRE_(REPERE|ONGLET) [^"]*' "$P" | awk 'NR <= 60' || true
 swaps=$(grep -ac '\[LB\] PROCESS_SWAP onglet=[0-9]* raison=autre_site' "$P" || true)
 echo "  changements de WebContent : $swaps pour $((2 * N)) onglets"
+# BOUCHAUD_ECHANGE_PROCESSUS_V1 : la page laissee dans l'ancien processus
+# a chaque changement est fermee, pas seulement oubliee par l'UI.
+fermees=$(grep -ac '\[LB\] PROCESS_SWAP_CLOSE_OLD_PAGE' "$P" || true)
+echo "  anciennes pages fermees au changement de processus : $fermees"
 
 echo "== verdict =="
 echecs=()
