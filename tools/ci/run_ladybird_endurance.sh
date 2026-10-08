@@ -70,6 +70,14 @@ export BOUCHAUD_ALLOW_POPUPS=1
 export BOUCHAUD_M9_URL='$URL'
 desktop
 AUTORUN
+# BOUCHAUD_PROFIL_RIP_V1 : BO_ENDURANCE_PROFIL_RIP=on|off fixe le profil RIP
+# des l'autorun (A/B de son cout, tools/ci/run_ab_profil.sh). Absent : rien.
+case "${BO_ENDURANCE_PROFIL_RIP:-}" in
+  on|off) sed -i "1i profil-rip ${BO_ENDURANCE_PROFIL_RIP}" "$SCENARIO/autorun" ;;
+  "") ;;
+  *) echo "BO_ENDURANCE_PROFIL_RIP=${BO_ENDURANCE_PROFIL_RIP} : on ou off" >&2; exit 2 ;;
+esac
+echo "ENDURANCE_PROFIL_RIP valeur=${BO_ENDURANCE_PROFIL_RIP:-defaut}"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 : > "$LOG"

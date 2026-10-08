@@ -530,17 +530,34 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Endurance 5 minutes sous KVM
+      - name: Endurance 5 minutes sous KVM, profil RIP actif puis coupe (A/B)
+        # BOUCHAUD_PROFIL_RIP_V1 : meme executant, meme image, meme duree ; la
+        # sortie complete de chaque bras est imprimee, puis PROFIL_RIP_OVERHEAD.
         env:
           BO_QEMU_KVM: "1"
-        run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 300
+        run: |
+          rc=0
+          tools/ci/run_ab_profil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 300 > ab-profil.resume 2>&1 || rc=$?
+          # Le bras A en entier, puis le resume A/B en dernier : la fin du
+          # journal du job est ce qui se lit.
+          echo "=== bras A (profil actif), sortie complete ==="
+          cat ab-profil-on.sortie
+          echo "=== bras B (profil coupe), verdict ==="
+          sed -n '/^== verdict ==/,$p' ab-profil-off.sortie
+          echo "=== A/B ==="
+          cat ab-profil.resume
+          exit $rc
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ladybird-endurance-kvm
           path: |
-            serie-endurance.log
+            serie-endurance-ab-on.log
+            serie-endurance-ab-off.log
+            ab-profil-on.sortie
+            ab-profil-off.sortie
+            ab-profil.resume
             fixture-endurance.log
           if-no-files-found: warn
 
@@ -848,3 +865,4 @@ jobs:
             serie-browser-host-piege-*.log
             piege-*.sortie
           if-no-files-found: warn
+
