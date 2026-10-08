@@ -1,0 +1,43 @@
+name: SCM_RIGHTS receive atomicity
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/ladybird-observability-performance']
+    paths:
+      - '.github/workflows/scm-receive.yml'
+      - 'tools/ci/run_scm_receive_race.sh'
+      - 'tools/userland/scm-receive-race-probe.c'
+      - 'src/compat/linux/net.rs'
+      - 'src/kernel/object/fd.rs'
+permissions:
+  contents: read
+jobs:
+  receive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU and musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: scm-receive-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Build kernel
+        run: tools/ci/build_kernel.sh
+      - name: Receive atomicity on host and Bouchaud KVM
+        run: |
+          sudo chmod 666 /dev/kvm
+          bash tools/ci/run_scm_receive_race.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scm-receive-proof
+          path: serie-scm-receive.log
