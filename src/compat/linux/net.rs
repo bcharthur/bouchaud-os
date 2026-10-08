@@ -1129,16 +1129,17 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
     };
     let name = crate::kernel::abi::user_read_u64(msghdr + MSG_NAME).unwrap_or(0);
 
-    // Les descripteurs arrives par `SCM_RIGHTS` sont installes dans ce
-    // processus avant la lecture des octets : c'est ce qui permet a un
-    // `recvmsg` qui ne recoit *que* des descripteurs — le cas courant — de les
-    // rendre malgre un corps vide.
+    // BOUCHAUD_SCM_RECEPTION_ATOMIQUE_V1
+    // Un sendmsg publie ses droits et ses octets ensemble. Le recvmsg doit
+    // aussi les retirer ensemble : si un envoi arrive entre le retrait des
+    // droits et sys_recvfrom, celui-ci prend les octets SANS les droits.
+    // L'appel suivant trouvait alors des droits seuls et rendait 0, un faux
+    // EOF pour LibIPC alors que le pair vivait encore.
     let process = task::current_process();
     let entrant = match process.files.lock().get(fd).map(|d| d.kind.clone()) {
         Some(FdKind::SocketPair(entrant, _)) => Some(entrant),
         _ => None,
     };
-    let mut installes: Vec<i32> = Vec::new();
     if let Some(canal) = &entrant {
         // Meme attente que pour les octets : le pair n'a peut-etre pas encore
         // eu la main. Sans elle, le premier `recvmsg` bloquant d'un dialogue
@@ -1160,14 +1161,36 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         }
     }
     if let Some(canal) = entrant {
-        // P17_SCM_RIGHTS_BOUNDED_DRAIN
-        // Ne retire que les droits que le buffer de CE recvmsg peut rendre.
+        let non_bloquant = fd_non_bloquant(fd) || flags & MSG_DONTWAIT != 0;
         let capacite = capacite_descripteurs_recus(msghdr);
-        let recus: Vec<_> = {
-            let mut ch = canal.lock();
-            let combien = core::cmp::min(capacite, ch.descripteurs.len());
-            ch.descripteurs.drain(..combien).collect()
+        // Meme attente et meme plafond que lit_octets, appele auparavant
+        // par sys_recvfrom. La disponibilite et les deux retraits sont
+        // maintenant decides sous le MEME verrou du canal.
+        let echeance = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000_000);
+        let (data, recus): (Vec<u8>, Vec<FileDesc>) = loop {
+            let ticket = crate::kernel::fd::readiness_ticket();
+            {
+                let mut ch = canal.lock();
+                if !ch.octets.is_empty() {
+                    let taille = core::cmp::min(len, ch.octets.len());
+                    let data = ch.octets.drain(..taille).collect();
+                    // P17_SCM_RIGHTS_BOUNDED_DRAIN : ne pas installer plus
+                    // de droits que le tampon de controle peut en rendre.
+                    let combien = core::cmp::min(capacite, ch.descripteurs.len());
+                    let recus = ch.descripteurs.drain(..combien).collect();
+                    break (data, recus);
+                }
+            }
+            if non_bloquant || crate::kernel::timer::monotonic_ns() >= echeance {
+                return -errno::EAGAIN;
+            }
+            crate::kernel::fd::wait_readiness(ticket, Some(echeance));
         };
+        crate::kernel::fd::notify_readiness();
+        if !user_write(base, &data) {
+            return -errno::EFAULT;
+        }
+        let mut installes: Vec<i32> = Vec::new();
         for mut desc in recus {
             desc.cloexec = flags & MSG_CMSG_CLOEXEC != 0;
             let numero = process.files.lock().insert(desc);
@@ -1175,19 +1198,18 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
                 installes.push(numero);
             }
         }
+        ecrit_descripteurs_recus(msghdr, &installes);
+        if name != 0 {
+            user_write(msghdr + MSG_NAMELEN, &16u32.to_le_bytes());
+        }
+        return data.len() as i64;
     }
-    ecrit_descripteurs_recus(msghdr, &installes);
+    ecrit_descripteurs_recus(msghdr, &[]);
 
     let received = sys_recvfrom(fd, base, len, flags, name, 0);
     if received >= 0 && name != 0 {
         // `msg_namelen` doit refleter la taille reellement ecrite.
         user_write(msghdr + MSG_NAMELEN, &16u32.to_le_bytes());
-    }
-    // Des descripteurs sans octets ne sont pas une fin de flux : rendre une
-    // erreur ferait croire a l'appelant qu'il n'a rien recu, alors qu'il vient
-    // d'obtenir ce qu'il attendait.
-    if received < 0 && !installes.is_empty() {
-        return 0;
     }
     received
 }
