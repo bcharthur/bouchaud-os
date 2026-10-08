@@ -257,3 +257,9 @@ tools/userland/out-matrice/
 /scenario-sites/
 /ladybird-sites.img
 /serie-sites.log*
+# BOUCHAUD_HORLOGE_AUDIT_V1 (tools/ci/run_horloge.sh)
+/horloge.img
+/scenario-horloge/
+tools/userland/out-horloge/
+/horloge-horodatage.tsv
+/horodateur.py

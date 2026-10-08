@@ -50,6 +50,15 @@ jobs:
             grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|SIGMASQUE_CAS|BOUCHAUD_TSC_|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
             cp serie-primitives.log "serie-primitives-kvm-${essai}.log"
           done
+      - name: Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)
+        # BOUCHAUD_HORLOGE_AUDIT_V1 : chaque ligne serie horodatee a son
+        # arrivee par l'hote ; la duree vue par l'invite doit coller a la
+        # sienne (1 s : 50 ms ; 10 et 60 s : 1 %).
+        run: |
+          tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60
+          cp serie-horloge.log serie-horloge-tcg.log
+          BO_QEMU_KVM=1 tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60
+          cp serie-horloge.log serie-horloge-kvm.log
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -64,4 +73,5 @@ jobs:
             serie-primitives.log
             serie-primitives-kvm-*.log
             serie-persist-cache-*.log
+            serie-horloge-*.log
           if-no-files-found: warn
