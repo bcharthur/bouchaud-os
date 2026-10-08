@@ -24,8 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Installer QEMU
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          tools/ci/apt-installe.sh qemu-system-x86 file
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:

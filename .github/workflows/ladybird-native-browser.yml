@@ -101,8 +101,7 @@ jobs:
       - name: Toolchain C/C++
         id: toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-installe.sh \
             build-essential pkg-config python3 python3-dev python3-venv perl \
             clang lld ccache cmake ninja-build rsync git curl wget gnupg lsb-release zip unzip tar xz-utils file \
             autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
@@ -114,8 +113,7 @@ jobs:
             sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg.gpg /tmp/llvm-snapshot.gpg.key
             echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" \
               | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+            tools/ci/apt-installe.sh "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
           fi
           clang-20 --version
           ld.lld-20 --version
@@ -340,8 +338,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          tools/ci/apt-installe.sh qemu-system-x86 file
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -393,8 +390,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          tools/ci/apt-installe.sh qemu-system-x86 file
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -442,8 +438,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file netcat-openbsd
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -499,8 +494,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file netcat-openbsd
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -561,8 +555,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file netcat-openbsd
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -620,8 +613,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          tools/ci/apt-installe.sh qemu-system-x86 file
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -685,8 +677,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file socat netcat-openbsd
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
@@ -798,8 +789,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file socat netcat-openbsd
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
       - name: Bootimage
         run: tools/ci/build_kernel.sh
       - uses: actions/download-artifact@v4

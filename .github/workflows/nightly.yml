@@ -60,8 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Dependances
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 curl musl-tools build-essential file
+          tools/ci/apt-installe.sh qemu-system-x86 curl musl-tools build-essential file
       - uses: actions/download-artifact@v4
         with:
           name: nightly-bootimage
@@ -95,8 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          tools/ci/apt-installe.sh qemu-system-x86
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -152,8 +150,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + file
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 file
+          tools/ci/apt-installe.sh qemu-system-x86 file
       - uses: actions/download-artifact@v4
         with:
           name: nightly-bootimage

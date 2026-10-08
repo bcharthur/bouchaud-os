@@ -31,8 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Dependances de construction
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-installe.sh \
             build-essential python3-dev pkg-config perl \
             libfreetype-dev libpng-dev libjpeg-dev libpcre2-dev \
             zlib1g-dev libbrotli-dev libbz2-dev libfontconfig1-dev \
@@ -133,8 +132,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          tools/ci/apt-installe.sh qemu-system-x86
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
