@@ -38,7 +38,7 @@ sur l'hôte), **QEMU** (comportement observé dans une exécution réelle),
 | P7 | Persistance (profil, SQL, cache HTTP) | DONE | QEMU | `LADYBIRD_CACHE_REDEMARRAGE_OK`, `PERSIST_CACHE_OK` | Trigkey |
 | P8 | Audio | PARTIAL | QEMU | `HOST_AUDIO_CHAINE OK`, `OSS_HORLOGE_CHAINE_OK` (AC'97 de QEMU) | **Trigkey HDA : BLOCKED** — aucun pilote HDA |
 | P9 | Isolation de site / OOPIF | PARTIAL | QEMU | `LADYBIRD_OOPIF_OK`, `LADYBIRD_CRASH_RENDU_OK` | `postMessage` entre processus : limite amont (0/3) |
-| P10 | GPU | BLOCKED | STATIC + QEMU | aucun backend GPU : rendu CPU (Skia raster) + scanout linéaire ; `virtio-gpu-pci` énuméré, aucun pilote — [audit](docs/ladybird/P10_GPU_AUDIT.md) | premier composant : transport virtio-PCI moderne du noyau ; Trigkey : `amdgpu` + RADV hors de portée (aucun faux backend) |
+| P10 | GPU | BLOCKED | STATIC + QEMU | aucun backend GPU : rendu CPU (Skia raster) + scanout linéaire. Premier composant fait : transport virtio-PCI moderne + `GET_DISPLAY_INFO` (`BOUCHAUD_VIRTIO_GPU_OK`, `run_virtio_gpu.sh`) — [audit](docs/ladybird/P10_GPU_AUDIT.md) | virtio-gpu 3D (virgl/Venus) + uAPI DRM + Mesa ; Trigkey : `amdgpu` + RADV hors de portée (aucun faux backend) |
 | P11 | WPT | DONE | QEMU | `HOST_WPT_FIN`, `LADYBIRD_WPT_OK` : 50 fichiers, 4632/4641 (Linux 4628/4641), égaux 49, mieux 1, moins 0, échéances 0 | élargir le corpus |
 | P12 | Documentation | DONE | STATIC | ce README ; `tools/verifie-readme-commandes.py` | — |
 | P13 | Convergence | PARTIAL | QEMU | verdict `BOUCHAUD_LADYBIRD_CONVERGENCE_OK` non atteint | endurance (≥ 60 cycles, aucun cadre > 30 s) ; banc cache/SQL (panique `/persist` corrigée en `d75d2b3b`, à rejouer) |

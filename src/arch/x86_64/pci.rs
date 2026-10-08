@@ -59,6 +59,12 @@ fn config_write32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
     }
 }
 
+/// Un mot de 32 bits de l'espace de configuration d'un peripherique.
+/// BOUCHAUD_VIRTIO_PCI_V1 : les capacites vendeur de virtio s'y lisent.
+pub fn config_lit32(d: &PciDevice, decalage: u8) -> u32 {
+    config_read32(d.bus, d.slot, d.func, decalage)
+}
+
 /// Lit un BAR (Base Address Register) brut, index 0..5.
 pub fn bar(d: &PciDevice, index: u8) -> u32 {
     config_read32(d.bus, d.slot, d.func, 0x10 + index * 4)

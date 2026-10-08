@@ -114,6 +114,19 @@ DONE quand :
 3. le journal série le publie ;
 4. un banc QEMU l'exige, et un garde statique protège le marqueur.
 
+**État : premier composant FAIT sous QEMU-TCG** (`BOUCHAUD_VIRTIO_PCI_V1`,
+`src/drivers/display/virtio_gpu.rs`, banc `tools/ci/run_virtio_gpu.sh`, garde
+`tools/verifie-virtio-pci.py`). Relevé local du 2026-10-08 :
+
+    VIRTIO_PCI peripherique=1af4:1050 bus=00:04.0 commune=1 notification=1 isr=1 config=1
+    VIRTIO_GPU_INIT fonctionnalites_proposees=0x0000010130000002 retenues=0x0000000100000000 files=2 controlq=64/64
+    VIRTIO_GPU_DISPLAY_INFO ecrans_actifs=1 ecran0=1280x800 delai_us=224
+    BOUCHAUD_VIRTIO_GPU_OK ecran0=1280x800
+
+Sans `-device virtio-gpu-pci` : une ligne `VIRTIO_GPU absent`, rien d'autre.
+L'aller-retour est scruté (pas d'interruption) et borné à 1 s. La preuve
+QEMU-KVM vient de l'étape os-primitives.
+
 Un **virtio-gpu 2D** qui affiche le bureau à la place de BGA serait l'étape
 suivante. Il ne ferait pas passer P10 en DONE, puisqu'il n'y a toujours pas
 d'accélération. Il faut le dire comme ça, et ne pas le présenter autrement.

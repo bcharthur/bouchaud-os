@@ -24,6 +24,9 @@ pub mod disk;
 pub mod nvme;
 #[path = "api/display.rs"]
 pub mod display;
+/// BOUCHAUD_VIRTIO_PCI_V1 : transport virtio-PCI moderne et premier aller-retour virtio-gpu (P10).
+#[path = "display/virtio_gpu.rs"]
+pub mod virtio_gpu;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir
 /// `network/anneau_rx.rs`. Aucun acces materiel, donc verifiable par un test
 /// hote sans demarrer la machine.

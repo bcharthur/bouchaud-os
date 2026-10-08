@@ -225,6 +225,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     if drivers::nvme::bring_up() {
         platform::pc::installation::differe_le_montage();
     }
+    // BOUCHAUD_VIRTIO_PCI_V1 : premier composant de P10 -- transport virtio
+    // et GET_DISPLAY_INFO si QEMU expose un virtio-gpu ; une ligne sinon.
+    drivers::virtio_gpu::sonde();
     fs::tar::mount_data_disk();
     // Ce que la machine a retenu du demarrage precedent. Vient apres l'archive :
     // un fichier persistant doit pouvoir remplacer celui que l'archive depose,

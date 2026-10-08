@@ -66,6 +66,12 @@ jobs:
         run: |
           tools/ci/run_ata_integrite.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           BO_QEMU_KVM=1 tools/ci/run_ata_integrite.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: P10 -- transport virtio-PCI et GET_DISPLAY_INFO (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_PCI_V1 : premier composant de P10. Pas un pilote
+        # d'affichage, rien d'accelere : P10 reste BLOCKED.
+        run: |
+          tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          BO_QEMU_KVM=1 tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -82,4 +88,5 @@ jobs:
             serie-persist-cache-*.log
             serie-horloge-*.log
             serie-ata-integrite-*.log
+            serie-virtio-*.log
           if-no-files-found: warn
