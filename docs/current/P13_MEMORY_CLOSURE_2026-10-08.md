@@ -104,3 +104,15 @@ sépare donc strictement les responsabilités :
 Pour une racine `StackPointer`, le marqueur contient aussi `frame_label=...`,
 issu du tableau `stack_frames` déjà produit par LibGC. Un simple numéro de frame
 sans son label n'est pas considéré comme une attribution suffisante.
+
+
+## V3 - lifecycle closure
+
+- Base: `de27a322d07052731f46d494fae852e021105ddf`.
+- Les deux mesures restent non instrumentees par `dump_graph()`.
+- La preuve GC n'est requise que dans le troisieme run diagnostic.
+- `bouchaud_discard_page` attend maintenant la destruction asynchrone du Document avant retrait du BrowsingContext/PageHost.
+- `Document::destroy()` annule explicitement un `HTMLParserEndState` restant afin de relacher son Timer activity-root.
+- Les resumes `LB:GC_SUMMARY` sont courts, emis trois fois et valides seulement si au moins deux copies completes sont identiques.
+- Aucun seuil RSS n'est releve, aucun GC n'est force.
+- P13 reste ouvert jusqu'a une campagne same-HEAD entierement verte.

@@ -141,13 +141,17 @@ else
   echo "  ECHEC   memoire : croissance ou reperes absents (voir ci-dessus)"
   echecs+=("memoire")
 fi
-# BOUCHAUD_P13_GC_RETENTION_V1 : attribution obligatoire de la retention.
-# Ce controle valide la PREUVE, jamais la fuite elle-meme.
-if python3 tools/ci/analyse_gc_retention.py "$LOG"; then
-  echo "  ok      retention PageClient attribuee (ou absente) avec chemins GC complets"
+# BOUCHAUD_P13_GC_RETENTION_V3 : la preuve GC appartient UNIQUEMENT au
+# troisieme run diagnostic. Les deux runs de benchmark restent purs.
+if [ "${BO_GC_RETENTION_PROOF:-0}" = 1 ]; then
+  if python3 tools/ci/analyse_gc_retention.py "$LOG"; then
+    echo "  ok      retention PageClient attribuee par resumes GC redondants"
+  else
+    echo "  ECHEC   preuve GC retention absente, tronquee ou incoherente"
+    echecs+=("preuve_gc_retention")
+  fi
 else
-  echo "  ECHEC   preuve GC retention absente, tronquee ou incoherente"
-  echecs+=("preuve_gc_retention")
+  echo "  info    preuve GC retention non demandee sur ce run de mesure"
 fi
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_MEMOIRE_OK n_par_phase=$N"

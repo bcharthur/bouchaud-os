@@ -108,14 +108,76 @@ def main() -> int:
         "    traversable->set_closing(true);\n"
         "    auto document = traversable->active_document();\n"
         "    if (!document) {\n"
-        "        traversable->destroy_top_level_traversable();\n"
+        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction();\n"
         "        return;\n"
         "    }\n"
         "    document->unload_a_document_and_its_descendants({}, GC::create_function(document->heap(), [traversable] {\n"
-        "        traversable->destroy_top_level_traversable();\n"
+        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction();\n"
         "    }));\n"
         "}\n",
     )
+    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3 : le retrait de PageHost est la DERNIERE etape.
+    # Le Document est detruit de facon asynchrone. On conserve le BrowsingContext
+    # avant que Document::destroy() mette active_document a null, puis on retire
+    # l'UI/PageHost seulement dans le callback de fin de destruction.
+    remplace(
+        racine / "Libraries/LibWeb/HTML/LocalTraversableNavigable.h",
+        "    void destroy_top_level_traversable();\n",
+        "    void destroy_top_level_traversable();\n"
+        "    void bouchaud_destroy_top_level_traversable_after_document_destruction(); // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/HTML/LocalTraversableNavigable.cpp",
+        "// https://html.spec.whatwg.org/multipage/interaction.html#system-visibility-state\n",
+        "// BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3\n"
+        "void LocalTraversableNavigable::bouchaud_destroy_top_level_traversable_after_document_destruction()\n"
+        "{\n"
+        "    VERIFY(is_top_level_traversable());\n"
+        "    if (has_been_destroyed())\n"
+        "        return;\n"
+        "\n"
+        "    auto browsing_context = active_browsing_context();\n"
+        "    auto finish = GC::create_function(heap(), [this, browsing_context] {\n"
+        "        if (has_been_destroyed())\n"
+        "            return;\n"
+        "        dbgln(\"[LB] PAGE_DISCARD_DOCUMENT_DESTROY_END navigable={}\", id());\n"
+        "        if (!browsing_context)\n"
+        "            dbgln(\"[LB] PAGE_DISCARD_NO_BROWSING_CONTEXT navigable={}\", id());\n"
+        "        else\n"
+        "            browsing_context->remove();\n"
+        "        page().client().page_did_close_top_level_traversable();\n"
+        "        user_agent_top_level_traversable_set().remove(this);\n"
+        "        set_has_been_destroyed();\n"
+        "        remove_from_all_local_navigables();\n"
+        "        dbgln(\"[LB] PAGE_DISCARD_END navigable={}\", id());\n"
+        "    });\n"
+        "\n"
+        "    if (auto document = active_document()) {\n"
+        "        dbgln(\"[LB] PAGE_DISCARD_DOCUMENT_DESTROY_BEGIN navigable={}\", id());\n"
+        "        document->destroy_a_document_and_its_descendants(finish);\n"
+        "        return;\n"
+        "    }\n"
+        "    finish->function()();\n"
+        "}\n"
+        "\n"
+        "// https://html.spec.whatwg.org/multipage/interaction.html#system-visibility-state\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "    // 2. Abort document.\n"
+        "    abort();\n",
+        "    // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3 : un parser-end encore actif porte\n"
+        "    // un Timer activity-root. A la destruction definitive du Document, il ne\n"
+        "    // doit plus pouvoir retenir HTMLDocument -> Page -> PageClient.\n"
+        "    if (m_html_parser_end_state) {\n"
+        "        m_html_parser_end_state->cancel();\n"
+        "        m_html_parser_end_state = nullptr;\n"
+        "    }\n"
+        "\n"
+        "    // 2. Abort document.\n"
+        "    abort();\n",
+    )
+
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
     # Aucun objet n'est garde vivant par ces compteurs. Le timer ne fait
     # qu'emettre un instantane de l'etat courant du PageHost.

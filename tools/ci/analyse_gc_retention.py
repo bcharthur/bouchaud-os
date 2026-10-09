@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Valide et classe la preuve BOUCHAUD_P13_GC_RETENTION_V2.
+"""Analyse robuste de la preuve GC P13 V3.
 
-Cette analyse ne declare jamais la memoire bornee. Elle attribue uniquement
-les PageClient encore vivants a une racine GC. Le benchmark memoire normal est
-execute sans dump_graph(); cette preuve provient d'une repetition diagnostic
-separee pour ne pas polluer les mesures RSS M0/M1/M2.
+Le verdict mémoire appartient à analyse_memoire.py. Ici on valide uniquement
+l'attribution des PageClient encore vivants dans le run diagnostic séparé.
+Les longues lignes GC_PATH sont informatives ; le verdict de preuve repose sur
+au moins deux copies identiques d'un LB:GC_SUMMARY court par jalon 10 et 20.
 """
 from __future__ import annotations
 
@@ -15,28 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+PAGE_STATE = re.compile(
+    r"\[LB:PAGE_STATE\] pid=(\d+) seq=(\d+) roots=(\d+) created=(\d+) "
+    r"detached=(\d+) finalized=(\d+) END"
+)
 SUMMARY = re.compile(
-    r"\[LB:GC_RETENTION\] pid=(\d+) detached=(\d+) active=(\d+) "
-    r"pageclients=(\d+) retained=(\d+) paths=(\d+) END"
+    r"\[LB:GC_SUMMARY\] pid=(\d+) detached=(\d+) active=(\d+) "
+    r"pageclients=(\d+) retained=(\d+) rooted=(\d+) strong=(\d+) "
+    r"conservative=(\d+) unknown=(\d+) layout=(\d+) timer=(\d+) "
+    r"pagehost=(\d+) paths=(\d+) END"
 )
 PATH = re.compile(
     r"\[LB:GC_PATH\] pid=(\d+) detached=(\d+) target=([^ ]+) "
     r"root=(.*?) frame=(-?\d+) frame_label=(.*?) depth=(\d+) path=(.*?) END"
 )
-PAGE_STATE = re.compile(
-    r"\[LB:PAGE_STATE\] pid=(\d+) seq=(\d+) roots=(\d+) created=(\d+) "
-    r"detached=(\d+) finalized=(\d+) END"
-)
-
-CONSERVATIVE = {
-    "StackPointer",
-    "RegisterPointer",
-    "ConservativeVector",
-    "ConservativeHashMap",
-    "ConservativeHashTable",
-    "HeapFunctionCapturedPointer",
-}
-
 
 @dataclass(frozen=True)
 class Summary:
@@ -45,8 +37,14 @@ class Summary:
     active: int
     pageclients: int
     retained: int
+    rooted: int
+    strong: int
+    conservative: int
+    unknown: int
+    layout: int
+    timer: int
+    pagehost: int
     paths: int
-
 
 @dataclass(frozen=True)
 class PathEvidence:
@@ -58,18 +56,6 @@ class PathEvidence:
     frame_label: str
     depth: int
     path: str
-
-
-def classify_root(root: str) -> str:
-    if root in CONSERVATIVE:
-        return "conservative"
-    if root == "NO_PATH":
-        return "unknown"
-    if root == "VM" or root.startswith("Root ") or root.startswith("Root"):
-        return "strong"
-    if root in {"CrossHeapMember", "RootVector", "RootHashMap", "RootHashTable"}:
-        return "strong"
-    return "unknown"
 
 
 def analyse(text: str) -> tuple[int, list[str]]:
@@ -84,7 +70,6 @@ def analyse(text: str) -> tuple[int, list[str]]:
         for m in PATH.finditer(clean)
     ]
 
-    out: list[str] = []
     if not states:
         return 2, ["GC_RETENTION_INCONCLUSIF PAGE_STATE absent"]
 
@@ -92,63 +77,59 @@ def analyse(text: str) -> tuple[int, list[str]]:
     for pid, _seq, _roots, _created, detached, _finalized in states:
         max_detached_by_pid[pid] = max(max_detached_by_pid[pid], detached)
     main_pid, max_detached = max(max_detached_by_pid.items(), key=lambda kv: kv[1])
-    out.append(f"GC_RETENTION_MAIN pid={main_pid} detached_max={max_detached}")
+    out = [f"GC_RETENTION_MAIN pid={main_pid} detached_max={max_detached}"]
     if max_detached < 20:
         return 2, out + ["GC_RETENTION_INCONCLUSIF le WebContent ouvreur n'a pas atteint 20 detachements"]
 
-    selected = {s.detached: s for s in summaries if s.pid == main_pid}
-    missing = [m for m in (10, 20) if m not in selected]
-    if missing:
-        return 2, out + [f"GC_RETENTION_INCONCLUSIF jalons_absents={missing}"]
-
-    all_classifications: Counter[str] = Counter()
     for milestone in (10, 20):
-        s = selected[milestone]
-        expected_retained = max(0, s.pageclients - s.active)
-        if expected_retained != s.retained:
-            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} retained={s.retained} attendu={expected_retained}"]
-        if s.active < 1:
-            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} active={s.active}"]
+        candidates = [s for s in summaries if s.pid == main_pid and s.detached == milestone]
+        if len(candidates) < 2:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} resumes_complets={len(candidates)}/2"]
+        counts = Counter(candidates)
+        summary, copies = counts.most_common(1)[0]
+        if copies < 2:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} resumes_incoherents={dict(counts)}"]
+        if len(counts) != 1:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} resumes_divergents={len(counts)}"]
 
-        pp = [p for p in paths if p.pid == main_pid and p.detached == milestone]
-        required_paths = min(s.pageclients, 32)
-        if s.paths < required_paths or len(pp) < required_paths:
-            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} paths={len(pp)}/{required_paths} annonce={s.paths}"]
+        expected_retained = max(0, summary.pageclients - summary.active)
+        if summary.retained != expected_retained:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} retained={summary.retained} attendu={expected_retained}"]
+        if summary.strong + summary.conservative + summary.unknown != summary.pageclients:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} partition_racines_invalide"]
+        if summary.rooted != summary.pageclients - summary.unknown:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} rooted={summary.rooted} incoherent"]
+        if summary.layout + summary.timer + summary.pagehost > summary.strong:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} sous_categories_strong_incoherentes"]
+        if summary.unknown != 0:
+            return 2, out + [f"GC_RETENTION_INCONCLUSIF detached={milestone} unknown={summary.unknown}"]
 
-        classes = Counter(classify_root(p.root) for p in pp)
-        all_classifications.update(classes)
-        roots = Counter(p.root for p in pp)
         out.append(
             "GC_RETENTION_JALON "
-            f"pid={main_pid} detached={milestone} active={s.active} pageclients={s.pageclients} "
-            f"retained={s.retained} conservative={classes['conservative']} "
-            f"strong={classes['strong']} unknown={classes['unknown']} roots={dict(roots)}"
+            f"pid={main_pid} detached={milestone} copies={copies} active={summary.active} "
+            f"pageclients={summary.pageclients} retained={summary.retained} rooted={summary.rooted} "
+            f"strong={summary.strong} conservative={summary.conservative} "
+            f"layout={summary.layout} timer={summary.timer} pagehost={summary.pagehost} paths={summary.paths}"
         )
 
-        shown: set[tuple[str, str, str]] = set()
-        for p in pp:
-            signature = (p.root, p.frame_label, p.path)
-            if signature in shown:
+        shown = 0
+        seen: set[tuple[str, str, str]] = set()
+        for p in paths:
+            if p.pid != main_pid or p.detached != milestone:
                 continue
-            shown.add(signature)
+            sig = (p.root, p.frame_label, p.path)
+            if sig in seen:
+                continue
+            seen.add(sig)
             out.append(
                 f"GC_RETENTION_PATH detached={milestone} root={p.root} frame={p.frame} "
                 f"frame_label={p.frame_label or '<none>'} depth={p.depth} path={p.path}"
             )
-            if len(shown) >= 5:
+            shown += 1
+            if shown >= 5:
                 break
 
-        if s.retained == 0:
-            out.append(f"GC_RETENTION_NONE pid={main_pid} detached={milestone}")
-
-    if all_classifications["unknown"]:
-        return 2, out + [f"GC_RETENTION_INCONCLUSIF unknown_paths={all_classifications['unknown']}"]
-
-    out.append(
-        "GC_RETENTION_PREUVE_OK "
-        f"pid={main_pid} conservative={all_classifications['conservative']} "
-        f"strong={all_classifications['strong']}"
-    )
+    out.append("GC_RETENTION_PREUVE_OK resumes_redondants=2plus unknown=0")
     return 0, out
 
 

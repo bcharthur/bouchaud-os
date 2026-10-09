@@ -1,62 +1,72 @@
 #!/usr/bin/env python3
-"""Tests positifs et negatifs du parseur de retention GC V2."""
+from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
 
-HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("analyse_gc_retention", HERE / "analyse_gc_retention.py")
-MOD = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = MOD
-SPEC.loader.exec_module(MOD)
+AN = Path(__file__).with_name("analyse_gc_retention.py")
+spec = importlib.util.spec_from_file_location("analyse_gc_retention", AN)
+mod = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
 
 
-def state(pid: int, seq: int, roots: int, created: int, detached: int, finalized: int) -> str:
-    return f"[LB:PAGE_STATE] pid={pid} seq={seq} roots={roots} created={created} detached={detached} finalized={finalized} END"
+def state(detached: int, finalized: int = 0) -> str:
+    return f"[LB:PAGE_STATE] pid=19 seq={detached+1} roots=1 created={detached+1} detached={detached} finalized={finalized} END\n"
 
 
-def summary(pid: int, detached: int, active: int, pageclients: int, retained: int, paths: int) -> str:
-    return f"[LB:GC_RETENTION] pid={pid} detached={detached} active={active} pageclients={pageclients} retained={retained} paths={paths} END"
-
-
-def path(pid: int, detached: int, n: int, root: str = "StackPointer", label: str = "WebContent::close_tab PageClient.cpp:1") -> str:
+def summary(detached: int, *, unknown: int = 0, retained: int | None = None, tweak: int = 0) -> str:
+    pageclients = detached + 1
+    active = 1
+    if retained is None:
+        retained = detached
+    strong = pageclients - unknown
+    layout = max(0, detached - 3) + tweak
+    timer = min(3, detached)
+    pagehost = 1
+    # Keep subsets coherent for synthetic proof.
+    if layout + timer + pagehost > strong:
+        layout = max(0, strong - timer - pagehost)
     return (
-        f"[LB:GC_PATH] pid={pid} detached={detached} target={1000+n} root={root} "
-        f"frame=2 frame_label={label} depth=3 path=Window>Page>PageClient END"
+        f"[LB:GC_SUMMARY] pid=19 detached={detached} active={active} pageclients={pageclients} "
+        f"retained={retained} rooted={pageclients-unknown} strong={strong} conservative=0 "
+        f"unknown={unknown} layout={layout} timer={timer} pagehost={pagehost} paths={pageclients+tweak} END\n"
     )
 
 
-def good(retained: bool = True) -> str:
-    lines = [state(19, 1, 1, 1, 0, 0), state(19, 20, 1, 11, 10, 0)]
-    if retained:
-        lines.append(summary(19, 10, 1, 11, 10, 11))
-        lines.extend(path(19, 10, i, "StackPointer" if i < 10 else "Root PageHost x:1") for i in range(11))
-    else:
-        lines.append(summary(19, 10, 1, 1, 0, 1))
-        lines.append(path(19, 10, 0, "Root PageHost x:1", ""))
-    lines.append(state(19, 40, 1, 21 if retained else 1, 20, 0 if retained else 20))
-    if retained:
-        lines.append(summary(19, 20, 1, 21, 20, 21))
-        lines.extend(path(19, 20, i, "ConservativeVector" if i < 20 else "Root PageHost x:1") for i in range(21))
-    else:
-        lines.append(summary(19, 20, 1, 1, 0, 1))
-        lines.append(path(19, 20, 0, "Root PageHost x:1", ""))
-    return "\n".join(lines)
+def positive() -> str:
+    text = state(10) + state(20)
+    for d in (10, 20):
+        s = summary(d)
+        text += s + s + s
+        text += f"[LB:GC_PATH] pid=19 detached={d} target=0x1 root=Root_Node frame=-1 frame_label= depth=3 path=HTMLDocument>Page>PageClient END\n"
+    return text
 
+cases_ok = [positive(), "\x1b[31m" + positive() + "\x1b[0m"]
+for i, text in enumerate(cases_ok, 1):
+    code, out = mod.analyse(text)
+    assert code == 0, (i, out)
 
-def expect(code: int, text: str, name: str) -> None:
-    got, report = MOD.analyse(text)
-    if got != code:
-        raise SystemExit(f"{name}: code {got}, attendu {code}: {report}")
+bad = []
+# une seule copie du resume au jalon 20
+x = state(10) + state(20) + summary(10)*2 + summary(20)
+bad.append(x)
+# deux resumes divergents au meme jalon
+x = state(10) + state(20) + summary(10)*2 + summary(20) + summary(20, tweak=1)
+bad.append(x)
+# racine inconnue
+x = state(10) + state(20) + summary(10, unknown=1)*2 + summary(20)*2
+bad.append(x)
+# retained incoherent
+x = state(10) + state(20) + summary(10, retained=9)*2 + summary(20)*2
+bad.append(x)
+# pas 20 detachements
+x = state(10) + summary(10)*2
+bad.append(x)
 
+for i, text in enumerate(bad, 1):
+    code, out = mod.analyse(text)
+    assert code != 0, (i, out)
 
-expect(0, good(True), "retention attribuee")
-expect(0, good(False), "aucune retention")
-expect(2, "\n".join(good(True).splitlines()[:20]), "preuve tronquee")
-expect(2, state(19, 1, 1, 1, 0, 0), "sans jalons")
-corrupt = good(True).replace("retained=20 paths=21", "retained=19 paths=21")
-expect(2, corrupt, "compte incoherent")
-legacy = good(True).replace(" frame_label=WebContent::close_tab PageClient.cpp:1", "")
-expect(2, legacy, "ancienne preuve sans label")
-print("GC_RETENTION_ANALYSER_V2_TESTS_OK positifs=2 negatifs=4")
+print(f"GC_RETENTION_ANALYSER_V3_TESTS_OK positifs={len(cases_ok)} negatifs={len(bad)}")

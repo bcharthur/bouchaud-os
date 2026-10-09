@@ -21,6 +21,7 @@ on:
       - 'tools/ci/preuve_compositor.py'
       - 'tools/ci/preuve_swaps.py'
       - 'tools/ci/verifie-preuve-*.py'
+      - 'tools/ci/verifie-p13-lifecycle-closure.py'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
@@ -69,6 +70,7 @@ on:
       - 'tools/ci/preuve_compositor.py'
       - 'tools/ci/preuve_swaps.py'
       - 'tools/ci/verifie-preuve-*.py'
+      - 'tools/ci/verifie-p13-lifecycle-closure.py'
       - 'tools/ci/run_ladybird_crash_rendu.sh'
       - 'tools/ci/run_ladybird_oopif.sh'
       - 'tools/ci/run_ladybird_worker_cycle.sh'
@@ -122,6 +124,7 @@ jobs:
           python3 tools/ci/verifie-preuve-compositor.py
           python3 tools/ci/verifie-preuve-memoire.py
           python3 tools/ci/verifie-preuve-gc-retention.py
+          python3 tools/ci/verifie-p13-lifecycle-closure.py
           python3 tools/ci/verifie-preuve-swaps.py
 
       - name: Toolchain C/C++
