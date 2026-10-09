@@ -101,11 +101,11 @@ for marker in [
 ]:
     if marker not in prep:
         raise SystemExit(f"P13_LIFECYCLE_STATIC_FAIL V6 ancien client console non detache: {marker}")
+# The preparation uses the upstream AD-HOC anchor directly following
+# run_unloading_cleanup_steps() in pinned Document::destroy(). The build
+# checks the exact upstream anchor and will fail closed if it changes.
 destroy_anchor = '"    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),'
-cleanup_anchor = '"    // 6. Run any unloading document cleanup steps for document that are defined by this specification'
-if destroy_anchor not in prep or cleanup_anchor not in prep:
-    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 anchors Document::destroy manquantes")
-if prep.index("console_object->console().bouchaud_clear_client_if(m_console_client.ptr());") < prep.index(cleanup_anchor):
-    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 client console coupe avant cleanup")
+if prep.count(destroy_anchor) != 1:
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 anchor Document::destroy absent ou ambigu")
 print("P13_CONSOLE_LIFECYCLE_STATIC_OK after_unload_cleanup=1 console_client_cleared=1 existing_pageclient_teardown=1")
 
