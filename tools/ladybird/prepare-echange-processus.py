@@ -192,28 +192,28 @@ def main() -> int:
     # Le Page de navigation normal garde son client tant que PageHost le possede.
     remplace(
         racine / "Libraries/LibWeb/Page/Page.h",
-        "    PageClient& client() { return m_client; }\\n"
-        "    PageClient const& client() const { return m_client; }\\n",
-        "    PageClient& client() { VERIFY(m_client); return *m_client; }\\n"
-        "    PageClient const& client() const { VERIFY(m_client); return *m_client; }\\n"
-        "    void bouchaud_release_client_after_discard(); // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\\n",
+        "    PageClient& client() { return m_client; }\n"
+        "    PageClient const& client() const { return m_client; }\n",
+        "    PageClient& client() { VERIFY(m_client); return *m_client; }\n"
+        "    PageClient const& client() const { VERIFY(m_client); return *m_client; }\n"
+        "    void bouchaud_release_client_after_discard(); // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\n",
     )
     remplace(
         racine / "Libraries/LibWeb/Page/Page.h",
-        "    GC::Ref<PageClient> m_client;\\n",
-        "    GC::Ptr<PageClient> m_client; // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\\n",
+        "    GC::Ref<PageClient> m_client;\n",
+        "    GC::Ptr<PageClient> m_client; // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\n",
     )
     remplace(
         racine / "Libraries/LibWeb/Page/Page.cpp",
-        "Page::~Page() = default;\\n",
-        "Page::~Page() = default;\\n"
-        "\\n"
-        "// BOUCHAUD_P13_PAGECLIENT_DISCARD_V5 : called only after PageHost unroots a fully destroyed page.\\n"
-        "void Page::bouchaud_release_client_after_discard()\\n"
-        "{\\n"
-        "    VERIFY(m_client);\\n"
-        "    m_client = nullptr;\\n"
-        "}\\n",
+        "Page::~Page() = default;\n",
+        "Page::~Page() = default;\n"
+        "\n"
+        "// BOUCHAUD_P13_PAGECLIENT_DISCARD_V5 : called only after PageHost unroots a fully destroyed page.\n"
+        "void Page::bouchaud_release_client_after_discard()\n"
+        "{\n"
+        "    VERIFY(m_client);\n"
+        "    m_client = nullptr;\n"
+        "}\n",
     )
 
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
