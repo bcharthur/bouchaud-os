@@ -4,12 +4,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 checks = {
     ROOT / "tools/ladybird/prepare-echange-processus.py": [
-        "BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4",
+        "BOUCHAUD_P13_LIFECYCLE_CLOSURE_V5",
         "bouchaud_destroy_top_level_traversable_after_document_destruction",
         "m_html_parser_end_state->cancel()",
         "PAGE_DISCARD_DOCUMENT_DESTROY_BEGIN",
         "PAGE_DISCARD_DOCUMENT_DESTROY_END",
         "PAGE_DISCARD_END",
+        "PAGE_DISCARD_CLIENT_RELEASED",
+        "BOUCHAUD_P13_PAGECLIENT_DISCARD_V5",
     ],
     ROOT / "tools/ladybird/prepare-gc-retention-proof.py": [
         "BOUCHAUD_P13_GC_RETENTION_V3",
@@ -68,4 +70,22 @@ for marker in [
         raise SystemExit(f"P13_LIFECYCLE_STATIC_FAIL BFS alias/capacite: {marker}")
 if 'root_label.set(edge, *label)' in gc_prep or 'root_frame.set(edge, *frame)' in gc_prep:
     raise SystemExit("P13_LIFECYCLE_STATIC_FAIL BFS garde des references invalidables")
-print("P13_LIFECYCLE_STATIC_OK V4 context_before_unload=1 callback_rooted=1 gc_hashmap_alias_fixed=1")
+# V5 : checks that the already-dead PageClient edge is removed after all close bookkeeping.
+page_close = 'discarded_page.client().page_did_close_top_level_traversable();'
+remove_navigables = 'remove_from_all_local_navigables();'
+release_client = 'discarded_page.bouchaud_release_client_after_discard();'
+if not (page_close in prep and remove_navigables in prep and release_client in prep):
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V5 page discard hook incomplete")
+if not (prep.index(page_close) < prep.index(remove_navigables) < prep.index(release_client)):
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V5 closes PageClient before compositor teardown")
+for marker in [
+    'GC::Ptr<PageClient> m_client;',
+    'VERIFY(m_client); return *m_client;',
+    'void Page::bouchaud_release_client_after_discard()',
+    'm_client = nullptr;',
+]:
+    if marker not in prep:
+        raise SystemExit(f"P13_LIFECYCLE_STATIC_FAIL V5 detach invariant: {marker}")
+if 'GC::Ref<PageClient> m_client;' not in prep:
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V5 weak-edge replacement anchor absent")
+print("P13_LIFECYCLE_STATIC_OK V5 context_before_unload=1 pageclient_edge_detached_after_teardown=1 gc_hashmap_alias_fixed=1")

@@ -118,7 +118,7 @@ def main() -> int:
         "    }));\n"
         "}\n",
     )
-    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4 : le retrait de PageHost est la DERNIERE etape.
+    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V5 : le retrait de PageHost est la DERNIERE etape.
     # Le Document est detruit de facon asynchrone. La connexion capture le BrowsingContext
     # AVANT unload (qui peut detruire Document et annuler active_document), puis retire
     # l'UI/PageHost seulement dans le callback de fin de destruction.
@@ -148,10 +148,14 @@ def main() -> int:
         "            browsing_context->remove();\n"
         "            dbgln(\"[LB] PAGE_DISCARD_BROWSING_CONTEXT_REMOVED navigable={}\", id());\n"
         "        }\n"
-        "        page().client().page_did_close_top_level_traversable();\n"
+        "        auto& discarded_page = page();\n"
+        "        discarded_page.client().page_did_close_top_level_traversable();\n"
         "        user_agent_top_level_traversable_set().remove(this);\n"
         "        set_has_been_destroyed();\n"
         "        remove_from_all_local_navigables();\n"
+        "        // PageHost has already removed the GC root. A retained closed WindowProxy must not retain PageClient.\n"
+        "        discarded_page.bouchaud_release_client_after_discard();\n"
+        "        dbgln(\"[LB] PAGE_DISCARD_CLIENT_RELEASED navigable={}\", id());\n"
         "        dbgln(\"[LB] PAGE_DISCARD_END navigable={}\", id());\n"
         "    });\n"
         "\n"
@@ -179,6 +183,37 @@ def main() -> int:
         "\n"
         "    // 2. Abort document.\n"
         "    abort();\n",
+    )
+
+    # BOUCHAUD_P13_PAGECLIENT_DISCARD_V5 : une fermeture peut laisser un WindowProxy
+    # atteignable par le JS de l'ouvreur (Promise/GeneratorObject). Ce proxy garde
+    # le Page GC, qui ne doit plus garder un PageClient ferme une fois la fermeture
+    # et la destruction des contexts Compositor entierement terminees.
+    # Le Page de navigation normal garde son client tant que PageHost le possede.
+    remplace(
+        racine / "Libraries/LibWeb/Page/Page.h",
+        "    PageClient& client() { return m_client; }\\n"
+        "    PageClient const& client() const { return m_client; }\\n",
+        "    PageClient& client() { VERIFY(m_client); return *m_client; }\\n"
+        "    PageClient const& client() const { VERIFY(m_client); return *m_client; }\\n"
+        "    void bouchaud_release_client_after_discard(); // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/Page/Page.h",
+        "    GC::Ref<PageClient> m_client;\\n",
+        "    GC::Ptr<PageClient> m_client; // BOUCHAUD_P13_PAGECLIENT_DISCARD_V5\\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/Page/Page.cpp",
+        "Page::~Page() = default;\\n",
+        "Page::~Page() = default;\\n"
+        "\\n"
+        "// BOUCHAUD_P13_PAGECLIENT_DISCARD_V5 : called only after PageHost unroots a fully destroyed page.\\n"
+        "void Page::bouchaud_release_client_after_discard()\\n"
+        "{\\n"
+        "    VERIFY(m_client);\\n"
+        "    m_client = nullptr;\\n"
+        "}\\n",
     )
 
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
