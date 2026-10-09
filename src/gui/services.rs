@@ -373,6 +373,62 @@ user_ms={} sys_ms={}",
                                     stats.file_private_pages, stats.shared_pages,
                                     stats.device_pages, stats.untracked_pages,
                                 );
+                                // BOUCHAUD_P13_RSS_BINS_V8 : PREUVE TEMPORAIRE
+                                // Quatre instantanes au plus sur deux minutes.
+                                // Les comptages par classe ci-dessus restent O(1).
+                                // Cette enumeration de PTE ne s'execute que sur
+                                // le premier WebContent et tous les ~20 secondes.
+                                static PID_BINS: AtomicU32 = AtomicU32::new(0);
+                                static DERNIER_BINS: AtomicU64 = AtomicU64::new(0);
+                                static BINS_PRECEDENTS: crate::kernel::sync::SpinLock<
+                                    Option<alloc::collections::BTreeMap<u64, u32>>
+                                > = crate::kernel::sync::SpinLock::new(None);
+                                let cible = PID_BINS.load(Ordering::Relaxed);
+                                if cible == 0 {
+                                    let _ = PID_BINS.compare_exchange(
+                                        0, row.pid, Ordering::Relaxed, Ordering::Relaxed,
+                                    );
+                                }
+                                let avant_bins = DERNIER_BINS.load(Ordering::Relaxed);
+                                if PID_BINS.load(Ordering::Relaxed) == row.pid
+                                    && maintenant.saturating_sub(avant_bins) >= 20_000
+                                    && DERNIER_BINS.compare_exchange(
+                                        avant_bins, maintenant,
+                                        Ordering::Relaxed, Ordering::Relaxed,
+                                    ).is_ok()
+                                {
+                                    let residents = {
+                                        let mm = processus.mm.lock();
+                                        mm.space.iter_user_pages()
+                                    };
+                                    let mut bins = alloc::collections::BTreeMap::<u64, u32>::new();
+                                    for (adresse, _) in residents {
+                                        *bins.entry(adresse >> 21).or_insert(0) += 1;
+                                    }
+                                    let mut croissances = alloc::vec::Vec::<(u64, u32, u32)>::new();
+                                    let mut precedent = BINS_PRECEDENTS.lock();
+                                    if let Some(ref avant) = *precedent {
+                                        for (&bin, &pages) in &bins {
+                                            let anciennes = avant.get(&bin).copied().unwrap_or(0);
+                                            if pages > anciennes {
+                                                croissances.push((bin, pages - anciennes, pages));
+                                            }
+                                        }
+                                    }
+                                    *precedent = Some(bins);
+                                    drop(precedent);
+                                    croissances.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                                    crate::serial_println!(
+                                        "[P13-RSS-BINS] t={} pid={} croissance_bins={} END",
+                                        maintenant, row.pid, croissances.len(),
+                                    );
+                                    for (bin, delta, resident) in croissances.into_iter().take(12) {
+                                        crate::serial_println!(
+                                            "[P13-RSS-BIN] t={} pid={} debut={:#x} delta_pages={} resident_pages={} END",
+                                            maintenant, row.pid, bin << 21, delta, resident,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
