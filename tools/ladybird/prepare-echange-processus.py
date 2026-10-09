@@ -107,8 +107,8 @@ def main() -> int:
         "    dbgln(\"[LB] PAGE_DISCARD page={}\", page_id);\n"
         "    traversable->set_closing(true);\n"
         "    auto browsing_context = traversable->active_browsing_context();\n"
-    "    dbgln(\"[LB] PAGE_DISCARD_BROWSING_CONTEXT_CAPTURED page={} present={}\", page_id, browsing_context ? 1 : 0);\n"
-    "    auto document = traversable->active_document();\n"
+        "    dbgln(\"[LB] PAGE_DISCARD_BROWSING_CONTEXT_CAPTURED page={} present={}\", page_id, browsing_context ? 1 : 0);\n"
+        "    auto document = traversable->active_document();\n"
         "    if (!document) {\n"
         "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction(browsing_context);\n"
         "        return;\n"
@@ -138,7 +138,6 @@ def main() -> int:
         "    if (has_been_destroyed())\n"
         "        return;\n"
         "\n"
-        
         "    auto finish = GC::create_function(heap(), [this, browsing_context] {\n"
         "        if (has_been_destroyed())\n"
         "            return;\n"
