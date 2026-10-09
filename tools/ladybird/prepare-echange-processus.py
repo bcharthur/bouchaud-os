@@ -106,45 +106,49 @@ def main() -> int:
         "        return;\n"
         "    dbgln(\"[LB] PAGE_DISCARD page={}\", page_id);\n"
         "    traversable->set_closing(true);\n"
-        "    auto document = traversable->active_document();\n"
+        "    auto browsing_context = traversable->active_browsing_context();\n"
+    "    dbgln(\"[LB] PAGE_DISCARD_BROWSING_CONTEXT_CAPTURED page={} present={}\", page_id, browsing_context ? 1 : 0);\n"
+    "    auto document = traversable->active_document();\n"
         "    if (!document) {\n"
-        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction();\n"
+        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction(browsing_context);\n"
         "        return;\n"
         "    }\n"
-        "    document->unload_a_document_and_its_descendants({}, GC::create_function(document->heap(), [traversable] {\n"
-        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction();\n"
+        "    document->unload_a_document_and_its_descendants({}, GC::create_function(document->heap(), [traversable, browsing_context] {\n"
+        "        traversable->bouchaud_destroy_top_level_traversable_after_document_destruction(browsing_context);\n"
         "    }));\n"
         "}\n",
     )
-    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3 : le retrait de PageHost est la DERNIERE etape.
-    # Le Document est detruit de facon asynchrone. On conserve le BrowsingContext
-    # avant que Document::destroy() mette active_document a null, puis on retire
+    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4 : le retrait de PageHost est la DERNIERE etape.
+    # Le Document est detruit de facon asynchrone. La connexion capture le BrowsingContext
+    # AVANT unload (qui peut detruire Document et annuler active_document), puis retire
     # l'UI/PageHost seulement dans le callback de fin de destruction.
     remplace(
         racine / "Libraries/LibWeb/HTML/LocalTraversableNavigable.h",
         "    void destroy_top_level_traversable();\n",
         "    void destroy_top_level_traversable();\n"
-        "    void bouchaud_destroy_top_level_traversable_after_document_destruction(); // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3\n",
+        "    void bouchaud_destroy_top_level_traversable_after_document_destruction(GC::Ptr<BrowsingContext> browsing_context); // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4\n",
     )
     remplace(
         racine / "Libraries/LibWeb/HTML/LocalTraversableNavigable.cpp",
         "// https://html.spec.whatwg.org/multipage/interaction.html#system-visibility-state\n",
-        "// BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3\n"
-        "void LocalTraversableNavigable::bouchaud_destroy_top_level_traversable_after_document_destruction()\n"
+        "// BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4\n"
+        "void LocalTraversableNavigable::bouchaud_destroy_top_level_traversable_after_document_destruction(GC::Ptr<BrowsingContext> browsing_context)\n"
         "{\n"
         "    VERIFY(is_top_level_traversable());\n"
         "    if (has_been_destroyed())\n"
         "        return;\n"
         "\n"
-        "    auto browsing_context = active_browsing_context();\n"
+        
         "    auto finish = GC::create_function(heap(), [this, browsing_context] {\n"
         "        if (has_been_destroyed())\n"
         "            return;\n"
         "        dbgln(\"[LB] PAGE_DISCARD_DOCUMENT_DESTROY_END navigable={}\", id());\n"
         "        if (!browsing_context)\n"
         "            dbgln(\"[LB] PAGE_DISCARD_NO_BROWSING_CONTEXT navigable={}\", id());\n"
-        "        else\n"
+        "        else {\n"
         "            browsing_context->remove();\n"
+        "            dbgln(\"[LB] PAGE_DISCARD_BROWSING_CONTEXT_REMOVED navigable={}\", id());\n"
+        "        }\n"
         "        page().client().page_did_close_top_level_traversable();\n"
         "        user_agent_top_level_traversable_set().remove(this);\n"
         "        set_has_been_destroyed();\n"
@@ -166,7 +170,7 @@ def main() -> int:
         racine / "Libraries/LibWeb/DOM/Document.cpp",
         "    // 2. Abort document.\n"
         "    abort();\n",
-        "    // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V3 : un parser-end encore actif porte\n"
+        "    // BOUCHAUD_P13_LIFECYCLE_CLOSURE_V4 : un parser-end encore actif porte\n"
         "    // un Timer activity-root. A la destruction definitive du Document, il ne\n"
         "    // doit plus pouvoir retenir HTMLDocument -> Page -> PageClient.\n"
         "    if (m_html_parser_end_state) {\n"

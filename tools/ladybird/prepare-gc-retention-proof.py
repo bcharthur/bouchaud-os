@@ -118,6 +118,10 @@ static void bouchaud_trace_pageclient_retention(size_t active_pages, u64 detache
     HashMap<String, String> root_label;
     HashMap<String, i64> root_frame;
     Vector<String> queue;
+    parent.ensure_capacity(nodes.size());
+    root_label.ensure_capacity(nodes.size());
+    root_frame.ensure_capacity(nodes.size());
+    queue.ensure_capacity(nodes.size());
     for (auto const& [address, node] : nodes) {
         if (!node.root.has_value())
             continue;
@@ -137,12 +141,14 @@ static void bouchaud_trace_pageclient_retention(size_t active_pages, u64 detache
         auto frame = root_frame.get(address);
         if (!label.has_value() || !frame.has_value())
             continue;
+        String label_copy = *label;
+        auto frame_copy = *frame;
         for (auto const& edge : node->edges) {
             if (!nodes.contains(edge) || parent.contains(edge))
                 continue;
             parent.set(edge, address);
-            root_label.set(edge, *label);
-            root_frame.set(edge, *frame);
+            root_label.set(edge, label_copy);
+            root_frame.set(edge, frame_copy);
             queue.append(edge);
         }
     }
