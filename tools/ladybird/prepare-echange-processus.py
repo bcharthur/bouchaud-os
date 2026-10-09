@@ -118,7 +118,7 @@ def main() -> int:
         "    }));\n"
         "}\n",
     )
-    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V5 : le retrait de PageHost est la DERNIERE etape.
+    # BOUCHAUD_P13_LIFECYCLE_CLOSURE_V6 : le retrait de PageHost est la DERNIERE etape.
     # Le Document est detruit de facon asynchrone. La connexion capture le BrowsingContext
     # AVANT unload (qui peut detruire Document et annuler active_document), puis retire
     # l'UI/PageHost seulement dans le callback de fin de destruction.
@@ -214,6 +214,41 @@ def main() -> int:
         "    VERIFY(m_client);\n"
         "    m_client = nullptr;\n"
         "}\n",
+    )
+
+    # BOUCHAUD_P13_CONSOLE_LIFECYCLE_V6 : la racine du dernier PageClient
+    # passe par WindowProxy -> Window -> ancien Document -> DevToolsConsoleClient.
+    # La destruction definitive du Document retire ses clients console, apres
+    # unload/cleanup. La console de JS conserve son objet mais plus ce client :
+    # les vieux WindowProxy restent valides (closed), sans retenir PageClient.
+    remplace(
+        racine / "Libraries/LibJS/Console.h",
+        "    void set_client(ConsoleClient& client) { m_client = &client; }\n",
+        "    void set_client(ConsoleClient& client) { m_client = &client; }\n"
+        "    void bouchaud_clear_client_if(ConsoleClient const* client) // BOUCHAUD_P13_CONSOLE_LIFECYCLE_V6\n"
+        "    {\n"
+        "        if (m_client.ptr() == client)\n"
+        "            m_client = nullptr;\n"
+        "    }\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "#include <LibJS/Console.h>\n",
+        "#include <LibJS/Console.h>\n"
+        "#include <LibJS/Runtime/ConsoleObject.h>\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),\n",
+        "    // BOUCHAUD_P13_CONSOLE_LIFECYCLE_V6 : detach the obsolete console client\n"
+        "    // only after abort/unloading cleanup, before the destroyed Document remains\n"
+        "    // reachable through a closed WindowProxy in its opener's JS promises.\n"
+        "    if (m_console_client) {\n"
+        "        auto console_object = relevant_settings_object().realm().intrinsics().console_object();\n"
+        "        console_object->console().bouchaud_clear_client_if(m_console_client.ptr());\n"
+        "        m_console_client = nullptr;\n"
+        "    }\n"
+        "    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),\n",
     )
 
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.

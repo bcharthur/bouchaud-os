@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 checks = {
     ROOT / "tools/ladybird/prepare-echange-processus.py": [
-        "BOUCHAUD_P13_LIFECYCLE_CLOSURE_V5",
+        "BOUCHAUD_P13_LIFECYCLE_CLOSURE_V6",
         "bouchaud_destroy_top_level_traversable_after_document_destruction",
         "m_html_parser_end_state->cancel()",
         "PAGE_DISCARD_DOCUMENT_DESTROY_BEGIN",
@@ -88,4 +88,24 @@ for marker in [
         raise SystemExit(f"P13_LIFECYCLE_STATIC_FAIL V5 detach invariant: {marker}")
 if 'GC::Ref<PageClient> m_client;' not in prep:
     raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V5 weak-edge replacement anchor absent")
-print("P13_LIFECYCLE_STATIC_OK V5 context_before_unload=1 pageclient_edge_detached_after_teardown=1 gc_hashmap_alias_fixed=1")
+print("P13_LIFECYCLE_STATIC_OK V6 context_before_unload=1 pageclient_edge_detached_after_teardown=1 gc_hashmap_alias_fixed=1")
+# V6 : verify both ways the old document console retains its PageClient
+# are severed when (and only when) Document::destroy runs.
+for marker in [
+    "BOUCHAUD_P13_CONSOLE_LIFECYCLE_V6",
+    "void bouchaud_clear_client_if(ConsoleClient const* client)",
+    "if (m_client.ptr() == client)",
+    "console_object->console().bouchaud_clear_client_if(m_console_client.ptr());",
+    "m_console_client = nullptr;",
+    "#include <LibJS/Runtime/ConsoleObject.h>",
+]:
+    if marker not in prep:
+        raise SystemExit(f"P13_LIFECYCLE_STATIC_FAIL V6 ancien client console non detache: {marker}")
+destroy_anchor = '"    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),'
+cleanup_anchor = '"    // 6. Run any unloading document cleanup steps for document that are defined by this specification'
+if destroy_anchor not in prep or cleanup_anchor not in prep:
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 anchors Document::destroy manquantes")
+if prep.index("console_object->console().bouchaud_clear_client_if(m_console_client.ptr());") < prep.index(cleanup_anchor):
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 client console coupe avant cleanup")
+print("P13_CONSOLE_LIFECYCLE_STATIC_OK after_unload_cleanup=1 console_client_cleared=1 existing_pageclient_teardown=1")
+
