@@ -297,6 +297,31 @@ def main() -> int:
         "}\n",
     )
 
+    # Experimental, opt-in P13 sparse tail trim; non-moving GC, no forced sweep.
+    remplace(
+        racine / "Libraries/LibGC/HeapBlock.h",
+        "    void deallocate(Cell*);\n",
+        "    void deallocate(Cell*);\n    void bouchaud_trim_dead_tail(); // BOUCHAUD_P13_SPARSE_TAIL_EXPERIMENT\n",
+    )
+
+    remplace(
+        racine / "Libraries/LibGC/HeapBlock.cpp",
+        "#include <LibGC/HeapBlock.h>\n",
+        "#include <LibGC/HeapBlock.h>\n#include <AK/Format.h>\n#include <errno.h>\n#include <stdlib.h>\n#include <sys/mman.h>\n#include <unistd.h>\n",
+    )
+
+    remplace(
+        racine / "Libraries/LibGC/HeapBlock.cpp",
+        "void HeapBlock::deallocate(Cell* cell)\n{",
+        "// BOUCHAUD_P13_SPARSE_TAIL_EXPERIMENT : reclaim only complete pages beyond\n// the highest still-live cell. The in-block free list MUST NOT point into\n// a discarded page. This opt-in prototype is disabled outside the memory bench.\nvoid HeapBlock::bouchaud_trim_dead_tail()\n{\n    if (!getenv(\"BOUCHAUD_LB_MEMORY_TRIM_TAIL\"))\n        return;\n\n    auto first_unused = m_next_lazy_freelist_index;\n    while (first_unused > 0 && cell(first_unused - 1)->state() == Cell::State::Dead)\n        --first_unused;\n    if (first_unused == m_next_lazy_freelist_index)\n        return;\n\n    FreelistEntry* first = nullptr;\n    FreelistEntry* previous = nullptr;\n    auto* current = m_freelist.ptr();\n    while (current) {\n        auto* next = current->next.ptr();\n        auto index = (reinterpret_cast<FlatPtr>(current) - reinterpret_cast<FlatPtr>(m_storage)) / m_cell_size;\n        VERIFY(index < m_next_lazy_freelist_index);\n        if (index < first_unused) {\n            if (previous)\n                previous->next = current;\n            else\n                first = current;\n            previous = current;\n        }\n        current = next;\n    }\n    if (previous)\n        previous->next = nullptr;\n    m_freelist = first;\n    m_next_lazy_freelist_index = first_unused;\n\n#if defined(MADV_DONTNEED) && !defined(HAS_ADDRESS_SANITIZER) && !defined(AK_OS_WINDOWS)\n    auto page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));\n    if (page_size == 0 || page_size > BLOCK_SIZE || (page_size & (page_size - 1)) != 0)\n        return;\n    auto tail_begin = reinterpret_cast<FlatPtr>(m_storage) + first_unused * m_cell_size;\n    auto first_whole_page = (tail_begin + page_size - 1) & ~(page_size - 1);\n    auto block_end = reinterpret_cast<FlatPtr>(this) + BLOCK_SIZE;\n    if (first_whole_page < block_end) {\n        if (madvise(reinterpret_cast<void*>(first_whole_page), block_end - first_whole_page, MADV_DONTNEED) < 0)\n            warnln(\"[LB:P13_TAIL_MADVISE_FAIL] errno={}\", errno);\n    }\n#endif\n}\n\nvoid HeapBlock::deallocate(Cell* cell)\n{",
+    )
+
+    remplace(
+        racine / "Libraries/LibGC/Heap.cpp",
+        "    if (!block_has_live_cells) {\n",
+        "    if (block_has_live_cells)\n        block.bouchaud_trim_dead_tail();\n    if (!block_has_live_cells) {\n",
+    )
+
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
     # Aucun objet n'est garde vivant par ces compteurs. Le timer ne fait
     # qu'emettre un instantane de l'etat courant du PageHost.
