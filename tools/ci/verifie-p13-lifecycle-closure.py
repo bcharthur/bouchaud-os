@@ -105,7 +105,7 @@ for marker in [
 # run_unloading_cleanup_steps() in pinned Document::destroy(). The build
 # checks the exact upstream anchor and will fail closed if it changes.
 destroy_anchor = '"    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),'
-if prep.count(destroy_anchor) != 1:
-    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 anchor Document::destroy absent ou ambigu")
+if prep.count(destroy_anchor) != 2:
+    raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 ancien et nouvel anchor Document::destroy non conserves")
 print("P13_CONSOLE_LIFECYCLE_STATIC_OK after_unload_cleanup=1 console_client_cleared=1 existing_pageclient_teardown=1")
 
