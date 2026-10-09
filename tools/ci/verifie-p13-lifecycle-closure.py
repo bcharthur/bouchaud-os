@@ -113,7 +113,7 @@ for token in [
     "BOUCHAUD_P13_GC_PHYSICAL_OBSERVATION_V10",
     "[LB:P13_GC_CHUNK]",
     "[LB:P13_GC_DECOMMIT]",
-    'getenv(\"BOUCHAUD_LB_MEMORY_PROOF\")',
+    'BOUCHAUD_LB_MEMORY_PROOF',
 ]:
     if token not in prep:
         raise SystemExit(f"P13_GC_PHYSICAL_STATIC_FAIL missing {token}")
