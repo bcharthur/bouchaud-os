@@ -260,7 +260,7 @@ def main() -> int:
         racine / "Libraries/LibGC/BlockAllocator.cpp",
         "#include <AK/Assertions.h>\n",
         "#include <AK/Assertions.h>\n"
-        "#include <AK/Debug.h>\n"
+        "#include <AK/Format.h>\n"
         "#include <stdlib.h>\n",
     )
     remplace(
