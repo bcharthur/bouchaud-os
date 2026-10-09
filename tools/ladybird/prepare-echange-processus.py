@@ -251,6 +251,42 @@ def main() -> int:
         "    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),\n",
     )
 
+    # BOUCHAUD_P13_DECOMMIT_BACKLOG_V9 : le RSS encore resident apres
+    # 20 detachements appartient a la premiere cage de 4 TiB de LibGC,
+    # pas au Compositor ni aux fichiers. GC root stable, blocs liberes mais
+    # restitution trop tardive : declencher le worker asynchrone des que
+    # 32 blocs de 16 KiB sont en attente, sans GC force et sans syscall
+    # sous le verrou de l'allocateur. Le reveil existant de fin de sweep
+    # reste le chemin normal pour les petits lots.
+    remplace(
+        racine / "Libraries/LibGC/BlockAllocator.cpp",
+        "    bool need_to_register = false;\n"
+        "    {\n"
+        "        Sync::MutexLocker locker(m_mutex);\n"
+        "        m_freshly_freed.append(block);\n",
+        "    bool need_to_register = false;\n"
+        "    bool kick_for_backlog = false; // BOUCHAUD_P13_DECOMMIT_BACKLOG_V9\n"
+        "    {\n"
+        "        Sync::MutexLocker locker(m_mutex);\n"
+        "        m_freshly_freed.append(block);\n"
+        "        // Bound resident reclaimed blocks even if the incremental sweep\n"
+        "        // has not reached its final timer tick. No foreground madvise.\n"
+        "        if (defer_decommit == DeferDecommit::Yes\n"
+        "            && m_freshly_freed.size() >= 32\n"
+        "            && m_freshly_freed.size() % 32 == 0)\n"
+        "            kick_for_backlog = true;\n",
+    )
+    remplace(
+        racine / "Libraries/LibGC/BlockAllocator.cpp",
+        "    if (need_to_register && defer_decommit == DeferDecommit::Yes)\n"
+        "        DecommitWorker::the().register_pending(*this);\n",
+        "    if (need_to_register && defer_decommit == DeferDecommit::Yes)\n"
+        "        DecommitWorker::the().register_pending(*this);\n"
+        "    // BOUCHAUD_P13_DECOMMIT_BACKLOG_V9 : coalesced wake, outside m_mutex.\n"
+        "    if (kick_for_backlog)\n"
+        "        DecommitWorker::the().kick();\n",
+    )
+
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
     # Aucun objet n'est garde vivant par ces compteurs. Le timer ne fait
     # qu'emettre un instantane de l'etat courant du PageHost.
