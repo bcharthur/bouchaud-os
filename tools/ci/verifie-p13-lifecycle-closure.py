@@ -108,18 +108,15 @@ destroy_anchor = '"    // AD-HOC: Destruction does not go through did_stop_being
 if prep.count(destroy_anchor) != 2:
     raise SystemExit("P13_LIFECYCLE_STATIC_FAIL V6 ancien et nouvel anchor Document::destroy non conserves")
 print("P13_CONSOLE_LIFECYCLE_STATIC_OK after_unload_cleanup=1 console_client_cleared=1 existing_pageclient_teardown=1")
-# V9: decommit is asynchronous and coalesced at a fixed backlog, not GC-forcing.
+# V10: only opt-in native GC arena diagnostics; no early wake remains.
 for token in [
-    "BOUCHAUD_P13_DECOMMIT_BACKLOG_V9",
-    "m_freshly_freed.size() >= 32",
-    "m_freshly_freed.size() % 32 == 0",
-    "if (kick_for_backlog)",
-    "DecommitWorker::the().kick();",
+    "BOUCHAUD_P13_GC_PHYSICAL_OBSERVATION_V10",
+    "[LB:P13_GC_CHUNK]",
+    "[LB:P13_GC_DECOMMIT]",
+    'getenv(\"BOUCHAUD_LB_MEMORY_PROOF\")',
 ]:
     if token not in prep:
-        raise SystemExit(f"P13_DECOMMIT_STATIC_FAIL missing {token}")
-if "collect_garbage(CollectionType::CollectEverything)" in prep:
-    raise SystemExit("P13_DECOMMIT_STATIC_FAIL GC force interdit")
-print("P13_DECOMMIT_STATIC_OK asynchronous=1 backlog_blocks=32 no_forced_gc=1")
-
-
+        raise SystemExit(f"P13_GC_PHYSICAL_STATIC_FAIL missing {token}")
+if "BOUCHAUD_P13_DECOMMIT_BACKLOG_V9" in prep:
+    raise SystemExit("P13_GC_PHYSICAL_STATIC_FAIL unwanted early wake")
+print("P13_GC_PHYSICAL_STATIC_OK no_forced_gc=1 no_early_wake=1 opt_in=1")

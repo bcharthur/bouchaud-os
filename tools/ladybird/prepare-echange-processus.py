@@ -251,40 +251,50 @@ def main() -> int:
         "    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),\n",
     )
 
-    # BOUCHAUD_P13_DECOMMIT_BACKLOG_V9 : le RSS encore resident apres
-    # 20 detachements appartient a la premiere cage de 4 TiB de LibGC,
-    # pas au Compositor ni aux fichiers. GC root stable, blocs liberes mais
-    # restitution trop tardive : declencher le worker asynchrone des que
-    # 32 blocs de 16 KiB sont en attente, sans GC force et sans syscall
-    # sous le verrou de l'allocateur. Le reveil existant de fin de sweep
-    # reste le chemin normal pour les petits lots.
+    # BOUCHAUD_P13_GC_PHYSICAL_OBSERVATION_V10 : TEMPORARY, opt-in.
+    # V9 (early wake after 32 freed blocks) did not improve RSS and is
+    # reverted. Count real LibGC 2-MiB chunks committed and 16-KiB blocks
+    # decommitted, only when BOUCHAUD_LB_MEMORY_PROOF=1. No forced GC,
+    # allocator policy or test threshold changes.
     remplace(
         racine / "Libraries/LibGC/BlockAllocator.cpp",
-        "    bool need_to_register = false;\n"
-        "    {\n"
-        "        Sync::MutexLocker locker(m_mutex);\n"
-        "        m_freshly_freed.append(block);\n",
-        "    bool need_to_register = false;\n"
-        "    bool kick_for_backlog = false; // BOUCHAUD_P13_DECOMMIT_BACKLOG_V9\n"
-        "    {\n"
-        "        Sync::MutexLocker locker(m_mutex);\n"
-        "        m_freshly_freed.append(block);\n"
-        "        // Bound resident reclaimed blocks even if the incremental sweep\n"
-        "        // has not reached its final timer tick. No foreground madvise.\n"
-        "        if (defer_decommit == DeferDecommit::Yes\n"
-        "            && m_freshly_freed.size() >= 32\n"
-        "            && m_freshly_freed.size() % 32 == 0)\n"
-        "            kick_for_backlog = true;\n",
+        "#include <AK/Assertions.h>\n",
+        "#include <AK/Assertions.h>\n"
+        "#include <AK/Debug.h>\n"
+        "#include <stdlib.h>\n",
     )
     remplace(
         racine / "Libraries/LibGC/BlockAllocator.cpp",
-        "    if (need_to_register && defer_decommit == DeferDecommit::Yes)\n"
-        "        DecommitWorker::the().register_pending(*this);\n",
-        "    if (need_to_register && defer_decommit == DeferDecommit::Yes)\n"
-        "        DecommitWorker::the().register_pending(*this);\n"
-        "    // BOUCHAUD_P13_DECOMMIT_BACKLOG_V9 : coalesced wake, outside m_mutex.\n"
-        "    if (kick_for_backlog)\n"
-        "        DecommitWorker::the().kick();\n",
+        "        MUST(Core::System::commit_memory(chunk, CHUNK_SIZE));\n"
+        "        m_next_chunk_offset += CHUNK_SIZE;\n"
+        "        return chunk;\n",
+        "        MUST(Core::System::commit_memory(chunk, CHUNK_SIZE));\n"
+        "        m_next_chunk_offset += CHUNK_SIZE;\n"
+        "        // BOUCHAUD_P13_GC_PHYSICAL_OBSERVATION_V10 : read-only chunk counter.\n"
+        "        if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\"))\n"
+        "            dbgln(\"[LB:P13_GC_CHUNK] pid={} chunk={:p} count={} END\", Core::System::getpid(), chunk, m_next_chunk_offset / CHUNK_SIZE);\n"
+        "        return chunk;\n",
+    )
+    remplace(
+        racine / "Libraries/LibGC/BlockAllocator.cpp",
+        "    {\n"
+        "        Sync::MutexLocker locker(a.m_mutex);\n"
+        "        for (auto* slot : to_process)\n"
+        "            a.m_blocks.append(slot);\n"
+        "    }\n"
+        "}\n",
+        "    {\n"
+        "        Sync::MutexLocker locker(a.m_mutex);\n"
+        "        for (auto* slot : to_process)\n"
+        "            a.m_blocks.append(slot);\n"
+        "    }\n"
+        "    if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\") && !to_process.is_empty()) {\n"
+        "        static size_t total_decommitted = 0;\n"
+        "        total_decommitted += to_process.size();\n"
+        "        dbgln(\"[LB:P13_GC_DECOMMIT] pid={} batch={} total={} END\",\n"
+        "            Core::System::getpid(), to_process.size(), total_decommitted);\n"
+        "    }\n"
+        "}\n",
     )
 
     # BOUCHAUD_PAGES_MEMOIRE_V1 : distinguer racines PageHost et finalisation GC.
