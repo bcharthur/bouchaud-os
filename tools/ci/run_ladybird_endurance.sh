@@ -107,9 +107,31 @@ taille_vue=0
 derniere_avancee=$SECONDS
 cycles_vus=0
 verdict=inconnu
+# P13 : HOST_ENDURANCE_FIN est emis juste apres onglet.close(), avant la
+# fermeture asynchrone du dernier WebContent. La preuve est un etat kernel
+# [LB:SWAP_STATE] apres FIN avec TOUS les enfants fermes et recoltes.
+# Ne pas arreter QEMU au marqueur JS tant que cette preuve n'est pas acquise.
+fin_observe=-1
+fin_onglets=
 while kill -0 "$PID" 2>/dev/null; do
-  if grep -aq 'HOST_ENDURANCE_FIN' "$LOG"; then verdict=fini; break; fi
   if grep -aq 'KERNEL PANIC' "$LOG"; then verdict=panique; break; fi
+  if grep -aq 'HOST_ENDURANCE_FIN' "$LOG"; then
+    if (( fin_observe < 0 )); then
+      fin_observe=$SECONDS
+      fin_onglets=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ cadres_echus=[0-9]+ workers_ok=[0-9]+ onglets=[0-9]+' "$LOG" | head -1 | grep -oE 'onglets=[0-9]+' | cut -d= -f2 || true)
+    fi
+    if [[ "${fin_onglets:-}" =~ ^[0-9]+$ ]] \
+      && python3 tools/ci/preuve_swaps.py "$LOG" "$fin_onglets" --endurance >/dev/null 2>&1; then
+      verdict=fini
+      break
+    fi
+    # Le dernier enfant se ferme tout seul apres ~5 s, mais un vrai blocage
+    # reste ROUGE. Ce delai n'affecte ni les budgets ni la duree de navigation.
+    if (( SECONDS - fin_observe >= 20 )); then
+      verdict=swaps_non_recoltes
+      break
+    fi
+  fi
   n=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ac 'js log) "HOST_ENDURANCE cycle=' || true)
   if [ "$n" != "$cycles_vus" ]; then
     cycles_vus=$n
