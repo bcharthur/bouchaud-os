@@ -126,7 +126,77 @@ for s in "${SERVICES[@]}"; do
   exige "$s : le noyau l'a vu mourir" test -n "$mort"
   exige "$s : le navigateur l'a recolte ([LB] PROCESS_EXIT)" test -n "$recolte"
   exige "$s : un remplacant, autre pid (${nouveau:-aucun})" bash -c "[[ '${nouveau:-x}' =~ ^[0-9]+$ ]] && [ '${nouveau:-x}' != '${pid:-x}' ]"
-  exige "$s : une seule relance, pas de boucle ($creations creations)" test "$creations" -eq 2
+  if [ "$s" = Compositor ]; then
+    # P13 : les lignes [LB] PROCESS_CREATE peuvent etre perdues sur la
+    # console serie pendant la relance. Utiliser les execve du NOYAU,
+    # identifies par PID, sans tolerer une 3e relance silencieuse.
+    execve_observes=$(grep -aoE "PERF_EXECVE t=[0-9]+ image=/usr/libexec/ladybird/Compositor pid=[0-9]+" "$P" | sed -E 's/^.* pid=([0-9]+)$/\1/' | sort -nu || true)
+    execve_attendus=$(printf '%s\n' "$pid" "$nouveau" | grep -E '^[0-9]+  exige "$s : image et fetch reussis apres la reprise" test "$(champ "$apres" image)" = true -a "$(champ "$apres" reseau)" = true
+  if [ "$s" = Compositor ]; then
+    exige "Compositor : des trames presentees apres son remplacant ($(champ "$bilan" trames_apres_remplacant))" test "$(champ "$bilan" trames_apres_remplacant)" -gt 0 2>/dev/null
+  fi
+done
+# Seules les fautes VOULUES : les pids tues.
+autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+' "$P" | cut -d= -f2 | sort -u | grep -vxF -f <(printf '%s\n' "${tues[@]}") || true)
+exige "aucune autre faute de processus (${autres:-aucune})" test -z "$autres"
+exige "la page a fini les trois" grep -aq 'HOST_CRASH_SERVICE fin' "$P"
+exige "le navigateur quitte, code 0" grep -aq 'BROWSER_HOST_EXIT boucle_quittee code=0' "$P"
+statut=$(grep -aoE 'CSERV_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
+exige "l'autorun reprend la main (statut ${statut:-?})" test "${statut:-x}" = 0
+exige "aucune assertion, aucun MUST() en echec, aucune panique" bash -c "! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED|KERNEL PANIC' '$P'"
+
+if [ ${#echecs[@]} -eq 0 ]; then
+  echo "LADYBIRD_CRASH_SERVICES_OK services=${SERVICES[*]}"
+else
+  echo "LADYBIRD_CRASH_SERVICES_ECHEC n=${#echecs[@]}"
+  exit 1
+fi
+ | sort -nu || true)
+    exige "Compositor : seulement les execve initiaux et le remplacant (pids ${execve_observes//  exige "$s : image et fetch reussis apres la reprise" test "$(champ "$apres" image)" = true -a "$(champ "$apres" reseau)" = true
+  if [ "$s" = Compositor ]; then
+    exige "Compositor : des trames presentees apres son remplacant ($(champ "$bilan" trames_apres_remplacant))" test "$(champ "$bilan" trames_apres_remplacant)" -gt 0 2>/dev/null
+  fi
+done
+# Seules les fautes VOULUES : les pids tues.
+autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+' "$P" | cut -d= -f2 | sort -u | grep -vxF -f <(printf '%s\n' "${tues[@]}") || true)
+exige "aucune autre faute de processus (${autres:-aucune})" test -z "$autres"
+exige "la page a fini les trois" grep -aq 'HOST_CRASH_SERVICE fin' "$P"
+exige "le navigateur quitte, code 0" grep -aq 'BROWSER_HOST_EXIT boucle_quittee code=0' "$P"
+statut=$(grep -aoE 'CSERV_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
+exige "l'autorun reprend la main (statut ${statut:-?})" test "${statut:-x}" = 0
+exige "aucune assertion, aucun MUST() en echec, aucune panique" bash -c "! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED|KERNEL PANIC' '$P'"
+
+if [ ${#echecs[@]} -eq 0 ]; then
+  echo "LADYBIRD_CRASH_SERVICES_OK services=${SERVICES[*]}"
+else
+  echo "LADYBIRD_CRASH_SERVICES_ECHEC n=${#echecs[@]}"
+  exit 1
+fi
+\n'/,})" \
+      test "$execve_observes" = "$execve_attendus" -a "$(printf '%s\n' "$execve_observes" | grep -cE '^[0-9]+  exige "$s : image et fetch reussis apres la reprise" test "$(champ "$apres" image)" = true -a "$(champ "$apres" reseau)" = true
+  if [ "$s" = Compositor ]; then
+    exige "Compositor : des trames presentees apres son remplacant ($(champ "$bilan" trames_apres_remplacant))" test "$(champ "$bilan" trames_apres_remplacant)" -gt 0 2>/dev/null
+  fi
+done
+# Seules les fautes VOULUES : les pids tues.
+autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+' "$P" | cut -d= -f2 | sort -u | grep -vxF -f <(printf '%s\n' "${tues[@]}") || true)
+exige "aucune autre faute de processus (${autres:-aucune})" test -z "$autres"
+exige "la page a fini les trois" grep -aq 'HOST_CRASH_SERVICE fin' "$P"
+exige "le navigateur quitte, code 0" grep -aq 'BROWSER_HOST_EXIT boucle_quittee code=0' "$P"
+statut=$(grep -aoE 'CSERV_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
+exige "l'autorun reprend la main (statut ${statut:-?})" test "${statut:-x}" = 0
+exige "aucune assertion, aucun MUST() en echec, aucune panique" bash -c "! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED|KERNEL PANIC' '$P'"
+
+if [ ${#echecs[@]} -eq 0 ]; then
+  echo "LADYBIRD_CRASH_SERVICES_OK services=${SERVICES[*]}"
+else
+  echo "LADYBIRD_CRASH_SERVICES_ECHEC n=${#echecs[@]}"
+  exit 1
+fi
+ || true)" -eq 2
+  else
+    exige "$s : une seule relance, pas de boucle ($creations creations)" test "$creations" -eq 2
+  fi
   exige "$s : image et fetch reussis apres la reprise" test "$(champ "$apres" image)" = true -a "$(champ "$apres" reseau)" = true
   if [ "$s" = Compositor ]; then
     exige "Compositor : des trames presentees apres son remplacant ($(champ "$bilan" trames_apres_remplacant))" test "$(champ "$bilan" trames_apres_remplacant)" -gt 0 2>/dev/null
