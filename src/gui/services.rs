@@ -347,6 +347,35 @@ user_ms={} sys_ms={}",
                         cpu_user_ms,
                         cpu_sys_ms,
                     );
+                    // BOUCHAUD_P13_RSS_ORIGINES_V7 : les PageClient fermes ont tous
+                    // ete finalises, mais le RSS WebContent garde +2 a +3 Mio.
+                    // Attribution O(1) : les categories sont deja maintenues
+                    // par les PTE. Aucun parcours de pages, GC ni allocation.
+                    // Une mesure toutes les 10 s, sans verrou tenu pendant l'UART.
+                    if base == "WebContent" {
+                        static DERNIER_RELEVE_P13: AtomicU64 = AtomicU64::new(0);
+                        let maintenant = crate::kernel::timer::monotonic_ms();
+                        let dernier = DERNIER_RELEVE_P13.load(Ordering::Relaxed);
+                        if maintenant.saturating_sub(dernier) >= 10_000
+                            && DERNIER_RELEVE_P13.compare_exchange(
+                                dernier, maintenant, Ordering::Relaxed, Ordering::Relaxed,
+                            ).is_ok()
+                        {
+                            if let Some(processus) = crate::kernel::task::process_by_pid(row.pid) {
+                                let stats = {
+                                    let mm = processus.mm.lock();
+                                    mm.space.resident_stats()
+                                };
+                                crate::serial_println!(
+                                    "[P13-RSS-ORIGINES] t={} pid={} total={} anon={} file_private={} shared={} device={} untracked={} END",
+                                    maintenant, row.pid,
+                                    stats.total_pages, stats.anonymous_pages,
+                                    stats.file_private_pages, stats.shared_pages,
+                                    stats.device_pages, stats.untracked_pages,
+                                );
+                            }
+                        }
+                    }
                     // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui fait tourner sa
                     // boucle d'evenements a vide se voit a ses appels.
                     if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
