@@ -77,6 +77,9 @@ import sys
 # `BROWSER_HOST_M11_TRAME page=N`) se relisent encore : un journal archive doit
 # rester analysable.
 CONSOLE = r"(?:JS_CONSOLE|\[LB:JS\] onglet=\d+) log "
+# BOUCHAUD_P13_SURFACE_RELAY_ORDER_V1: UI can relay JS console *after* later frame records.
+# A timestamped raw WebContent js-log offers the event time, not UI queue time.
+RAW_PAINT = re.compile(r"(\d+\.\d{3}) WebContent\(\d+\): \(js log\) \"HOST_SURFACE_MIRE_PEINTE battement=trames decodees=(\d)/3")
 ANCRE = re.compile(
     CONSOLE + r"HOST_SURFACE_MIRE_PEINTE battement=(\w+)(?: decodees=(\d)/3)?")
 INSEREE = re.compile(CONSOLE + r"HOST_SURFACE_MIRE_INSEREE")
@@ -116,6 +119,15 @@ def decide(texte, tentatives, fin=False):
     {ok, absente, capture_vide, moniteur_muet}. `fin` : QEMU ne vit plus,
     plus aucune ligne ne viendra.
     """
+    # BOUCHAUD_P13_SURFACE_SERIAL_NORMALIZE_V1
+    # Contrairement a l'autopsie hors-ligne, le banc recevait le journal SERIE
+    # brut. Les sequences de couleur ANSI et les CR peuvent couper une ligne
+    # WebContent dans son formatage. RAW_PAINT ne matche alors plus ; le code
+    # revient silencieusement a l'ancre [LB:JS], relayee apres les trames.
+    # Nettoyage uniquement des controles de terminal (pas des evenements,
+    # des dates ni des numeros de trame). Tous les offsets sont ensuite pris
+    # dans la MEME chaine nettoyee pour rester comparables.
+    texte = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", texte).replace("\r", "")
     trames, compositions, ancre = lis(texte)
     rendu = {"action": "attendre", "verdict": "", "seq": -1, "t_trame": -1,
              "pompe": -1, "seq_ancre": -1, "voulue": -1, "tentative": len(tentatives) + 1,
@@ -132,7 +144,25 @@ def decide(texte, tentatives, fin=False):
     if ancre.group(1) != "trames":
         return conclut("non_prouvee")
 
-    seq_ancre = max((s for p, s, _ in trames if p < ancre.start()), default=0)
+    # BOUCHAUD_P13_SURFACE_RELAY_ORDER_V1: when the UI console forwarding arrives late, a
+    # textual "last frame before [LB:JS]" anchor wrongly points into the future.
+    # Use WebContent's monotonic timestamp and the frame's monotonic `t=` to
+    # reconstruct the event time. Both signals must exist. Otherwise keep
+    # the strict historical path. The capture is still mandatory and its
+    # pixels still have to pass analyse-surface-mire.py; no synthetic success.
+    raw_paint_ms = None
+    for candidate in RAW_PAINT.finditer(texte):
+        if int(candidate.group(2)) != rendu["decodees"]:
+            continue
+        moment = int(round(float(candidate.group(1)) * 1000))
+        frame_times = [t for _, _, t in trames if t is not None]
+        if frame_times and min(frame_times) - 1000 <= moment <= max(frame_times) + 1000:
+            raw_paint_ms = moment
+            break
+    if raw_paint_ms is None:
+        seq_ancre = max((s for p, s, _ in trames if p < ancre.start()), default=0)
+    else:
+        seq_ancre = max((s for _, s, t in trames if t is not None and t <= raw_paint_ms), default=0)
     rendu["seq_ancre"] = seq_ancre
     rendu["voulue"] = seq_ancre + MARGE
 
@@ -154,7 +184,10 @@ def decide(texte, tentatives, fin=False):
             return conclut("absente")
 
     plancher = seq_ancre + MARGE if not tentatives else tentatives[-1][0] + 1
-    candidates = sorted((s, t) for p, s, t in trames if s >= plancher and p > ancre.start())
+    candidates = sorted((s, t) for p, s, t in trames
+                        if s >= plancher and
+                        ((t is not None and t > raw_paint_ms) if raw_paint_ms is not None
+                         else p > ancre.start()))
     if not candidates:
         if fin:
             return conclut("sans_trame_posterieure" if not tentatives else "absente")
@@ -323,6 +356,23 @@ def autotest():
     p = Pipeline(1000, 1700, 200, 30, captures, t_ancre=1452)
     echecs += _cas("peinture apres l'ancre -> latence_publication mesuree",
                    joue_nouvelle(p), lambda v: v.startswith("latence_publication tentatives=2"))
+
+    # BOUCHAUD_P13_SURFACE_RELAY_ORDER_V1: delayed UI relay must not move the paint anchor to
+    # the final frame; the candidate MUST still wait for pixels to be checked.
+    late = (
+        '[LB:FRAME] onglet=1 seq=12 t=19985\n'
+        '20.007 WebContent(19): (js log) "HOST_SURFACE_MIRE_PEINTE battement=trames decodees=3/3"\n'
+        '[LB:FRAME] onglet=1 seq=13 t=20079\n'
+        '[LB:FRAME] onglet=1 seq=14 t=20161\n'
+        'GUI_COMPOSITION_NAVIGATEUR pompe_t_ms=20200 fin_t_ms=20215 n=30\n'
+        '[LB:FRAME] onglet=1 seq=22 t=22160\n'
+        '[LB:JS] onglet=1 log HOST_SURFACE_MIRE_PEINTE battement=trames decodees=3/3\n'
+    )
+    d = decide(late, [])
+    echecs += _cas('UI relayed late: first eligible frame is 14, capture required',
+                   (d['action'], d['seq'], d['voulue']), ('capturer', 14, 14))
+    echecs += _cas('capture with wrong pixels never passes',
+                   decide(late, [(14, 'absente')], fin=True)['verdict'], 'absente')
 
     if echecs:
         print(f"surface/declencheur : {echecs} cas en echec", file=sys.stderr)

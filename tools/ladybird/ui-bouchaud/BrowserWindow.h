@@ -82,6 +82,11 @@ private:
     u64 m_present_us_pire { 0 };
     bool m_premiere_trame_vue { false };
 
+    // BOUCHAUD_P13_WHEEL_FRAME_PROOF_V1: the next *real presented frame*,
+    // not a synthetic timer event, proves output subsequent to wheel input.
+    bool m_trame_attendue_apres_molette { false };
+    u64 m_molette_onglet { 0 };
+
     // BOUCHAUD_SONDE_PIXELS_V1 : la derniere sonde, rejouee a la sortie de banc.
     ByteString m_derniere_sonde;
     // Onglets dont le WebContent vient d'etre remplace (plantage) : leur

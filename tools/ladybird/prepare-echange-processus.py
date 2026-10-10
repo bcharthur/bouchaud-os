@@ -422,6 +422,27 @@ def main() -> int:
         "}\n",
     )
 
+    # BOUCHAUD_P13_MIMALLOC_POST_SWEEP_V1: release native allocator pages after
+    # the complete incremental GC sweep, when the associated C++ destructors
+    # have run. This is NOT a forced JS collection and does not run per slice.
+    # Ladybird AK/kmalloc.cpp uses mimalloc v2; its native heap is distinct
+    # from LibGC BlockAllocator. No runtime benchmark or threshold checks here.
+    remplace(
+        racine / "Libraries/LibGC/Heap.cpp",
+        "#include <AK/NeverDestroyed.h>\n",
+        "#include <AK/NeverDestroyed.h>\n"
+        "#include <AK/kmalloc.h> // BOUCHAUD_P13_MIMALLOC_POST_SWEEP_V1\n",
+    )
+    remplace(
+        racine / "Libraries/LibGC/Heap.cpp",
+        "    BlockAllocator::wake_decommit_worker_async();\n}\n",
+        "    BlockAllocator::wake_decommit_worker_async();\n"
+        "    // BOUCHAUD_P13_MIMALLOC_POST_SWEEP_V1: native mimalloc release on\n"
+        "    // this mutator thread, once per *completed* incremental sweep.\n"
+        "    // No JS GC is started and no live allocation is invalidated.\n"
+        "    ak_kmalloc_collect();\n"
+        "}\n",
+    )
     return 0
 
 

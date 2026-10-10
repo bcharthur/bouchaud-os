@@ -287,6 +287,14 @@ void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bit
             degat.x(), degat.y(), degat.width(), degat.height(), largeur, hauteur,
             p.x, p.y, p.w, p.h, c.derniere_copie_px, c.derniere_complete ? 1 : 0, duree_us);
     }
+    // BOUCHAUD_P13_WHEEL_FRAME_PROOF_V1: mark only a frame actually passed
+    // through present() for the same tab after input enqueuing. This branch
+    // NEVER schedules or manufactures a frame. Missing redraw remains red.
+    if (m_trame_attendue_apres_molette && vue.onglet() == m_molette_onglet) {
+        m_trame_attendue_apres_molette = false;
+        warnln("[LB:FRAME] onglet={} seq={} t={} apres_molette=1",
+            vue.onglet(), m_trames, MonotonicTime::now().milliseconds());
+    }
     publie_compteurs_si_du();
 }
 
@@ -619,9 +627,20 @@ void BrowserWindow::branche_chrome()
 {
     auto& c = BouchaudChrome::state();
 
+    // BOUCHAUD_P13_WHEEL_FRAME_PROOF_V1: log only an actual mouse-wheel event
+    // that has been handed to the active WebView. Other mouse events cannot
+    // satisfy the wheel dispatch proof.
     c.on_mouse_event = [this](Web::MouseEvent evenement) {
-        if (auto* vue = vue_active())
+        if (auto* vue = vue_active()) {
+            auto const est_molette = evenement.type == Web::MouseEvent::Type::MouseWheel;
+            auto const delta_y = evenement.wheel_delta_y;
             vue->enqueue_input_event(move(evenement));
+            if (est_molette) {
+                m_molette_onglet = vue->onglet();
+                m_trame_attendue_apres_molette = true;
+                warnln("WEB_WHEEL_DISPATCH onglet={} dy={} enfile=1", m_molette_onglet, delta_y);
+            }
+        }
     };
     c.on_key_event = [this](Web::KeyEvent evenement) {
         if (auto* vue = vue_active())
