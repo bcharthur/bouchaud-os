@@ -85,7 +85,7 @@ import sys
 from pathlib import Path
 log = Path(sys.argv[1]).read_bytes()
 lances = {int(x) for x in re.findall(
-    rb'PERF_EXECVE[^\r\n]*?image=/usr/libexec/ladybird/[A-Za-z]+ pid=(\d+)', log)}
+    rb'PERF_EXECVE[^\x0d\x0a]*?image=/usr/libexec/ladybird/[A-Za-z]+ pid=(\d+)', log)}
 sortis = {int(x) for x in re.findall(
     rb'PROCESS_EXIT t=\d+ pid=(\d+) ppid=\d+ image=/usr/libexec/ladybird/', log)}
 sys.exit(0 if lances and lances <= sortis else 1)
