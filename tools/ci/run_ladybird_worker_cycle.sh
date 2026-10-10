@@ -62,6 +62,8 @@ echo WCYCLE_DEBUT
 echo WCYCLE_SORTI statut=\$?
 echo WCYCLE_BANC_FIN
 AUTORUN
+# BOUCHAUD_P13_WCYCLE_POST_EXIT_PROOF_V1: le noyau ne doit pas eteindre la VM avant la preuve de sortie.
+: > "$SCENARIO/garde-vm-vivante"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 : > "$LOG"
@@ -73,11 +75,43 @@ qemu-system-x86_64 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   -serial file:"$LOG" &
 PID=$!
+# BOUCHAUD_P13_WCYCLE_POST_EXIT_PROOF_V1: collecte bornée de sorties REELLES, depuis le journal noyau.
+# L'autorun est termine; le Compositor recoit son EOF de facon asynchrone.
+# Aucun succes n'est deduit d'un simple COMPOSITOR_EXIT logiciel.
+tous_processus_sortis() {
+  python3 - "$LOG" <<'PY_WCYCLE_PROCESS_EXIT'
+import re
+import sys
+from pathlib import Path
+log = Path(sys.argv[1]).read_bytes()
+lances = {int(x) for x in re.findall(
+    rb'PERF_EXECVE[^\r\n]*?image=/usr/libexec/ladybird/[A-Za-z]+ pid=(\d+)', log)}
+sortis = {int(x) for x in re.findall(
+    rb'PROCESS_EXIT t=\d+ pid=(\d+) ppid=\d+ image=/usr/libexec/ladybird/', log)}
+sys.exit(0 if lances and lances <= sortis else 1)
+PY_WCYCLE_PROCESS_EXIT
+}
 LIMITE=$((SECONDS + 1000))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
-  grep -aq 'WCYCLE_BANC_FIN\|KERNEL PANIC' "$LOG" && { sleep 2; break; }
-  sleep 2
+  if grep -aq 'KERNEL PANIC' "$LOG"; then break; fi
+  if grep -aq 'WCYCLE_BANC_FIN' "$LOG"; then
+    grace_s=${BO_WCYCLE_GRACE_S:-5}
+    case "$grace_s" in 1|2|3|4|5|6|7|8|9|10) ;; *) echo "BO_WCYCLE_GRACE_S invalide" >&2; exit 2 ;; esac
+    fin_grace=$((SECONDS + grace_s))
+    while (( SECONDS < fin_grace )); do
+      if tous_processus_sortis; then
+        echo "WCYCLE_POST_EXIT preuve=tous_sortis delai_max_s=$grace_s"
+        break
+      fi
+      sleep 0.2
+    done
+    if ! tous_processus_sortis; then
+      echo "WCYCLE_POST_EXIT preuve=incomplete delai_max_s=$grace_s"
+    fi
+    break
+  fi
+  sleep 1
 done
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
@@ -112,7 +146,8 @@ noyau_sortis=$(awk -v l="${l_quitte:-0}" 'NR < l && /PROCESS_EXIT t=[0-9]+ pid=[
 # Noyau : chaque image Ladybird lancee doit etre sortie quand l'autorun reprend la main.
 l_sorti=$(ligne_de 'WCYCLE_SORTI statut=')
 lances=$(awk -v l="${l_sorti:-999999999}" 'NR < l && match($0, /PERF_EXECVE .*image=\/usr\/libexec\/ladybird\/[A-Za-z]+ pid=[0-9]+/) { s = substr($0, RSTART, RLENGTH); sub(/.*pid=/, "", s); vu[s] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
-sortis=$(awk -v l="${l_sorti:-999999999}" 'NR < l && /PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\// && match($0, / pid=[0-9]+/) { vu[substr($0, RSTART + 5, RLENGTH - 5)] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
+# Les sorties sont observees dans la fenetre post-autorun bornee, jusqu'a la capture du journal.
+sortis=$(awk '/PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\// && match($0, / pid=[0-9]+/) { vu[substr($0, RSTART + 5, RLENGTH - 5)] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
 statut=$(grep -aoE 'WCYCLE_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
 echo "WCYCLE_MESURE demarrage_w1_ms=$(champ "$w1" ms) pid_tue=${pid_w:-?} workers_vivants_au_crash=$(champ "$demande" workers_vivants) recus_6s=${r6:-?} recus_10s=${r10:-?} erreur_w1=$(champ "$crash" erreur) w2_ms=$(champ "$w2" ms) w4_ms=$(champ "$w4" ms) webworkers_crees=$crees vivants_a_la_sortie=$vivants webworkers_sortis_noyau_avant_sortie=$noyau_sortis ladybird_lances=$lances ladybird_sortis=$sortis statut=${statut:-?}"
 
