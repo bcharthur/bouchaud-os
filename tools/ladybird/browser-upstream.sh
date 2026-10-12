@@ -177,8 +177,30 @@ LADYBIRD_RUST_TOOLCHAIN=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]
     exit 1
 }
 say "Rust Ladybird : $LADYBIRD_RUST_TOOLCHAIN"
-rustup toolchain install "$LADYBIRD_RUST_TOOLCHAIN" --profile minimal >/dev/null
-export RUSTUP_TOOLCHAIN="$LADYBIRD_RUST_TOOLCHAIN"
+# P19_RUST_TOOLCHAIN_ADAPTIVE_V1
+# WSL --exec bash does not load .profile; a user-installed rustup can be hidden.
+export PATH="$HOME/.cargo/bin:$PATH"
+if command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install "$LADYBIRD_RUST_TOOLCHAIN" --profile minimal >/dev/null
+    export RUSTUP_TOOLCHAIN="$LADYBIRD_RUST_TOOLCHAIN"
+    say "P19_RUSTUP_TOOLCHAIN_VERIFIED=$LADYBIRD_RUST_TOOLCHAIN"
+else
+    # Ubuntu can provide the exact pinned compiler without rustup. Accept it
+    # only with the correct host standard library and an available Cargo.
+    installed_release=$(rustc -vV | sed -n 's/^release: //p' | head -n1)
+    if [ "$installed_release" != "$LADYBIRD_RUST_TOOLCHAIN" ]; then
+        echo "P19_RUST_TOOLCHAIN_MISSING: rustup unavailable, rustc=$installed_release expected=$LADYBIRD_RUST_TOOLCHAIN" >&2
+        echo 'Use the P19 preflight installer before re-running this build.' >&2
+        exit 42
+    fi
+    command -v cargo >/dev/null 2>&1 || { echo 'P19_CARGO_MISSING' >&2; exit 42; }
+    rust_host_libdir=$(rustc --print target-libdir)
+    if ! compgen -G "$rust_host_libdir/libstd-*.rlib" >/dev/null; then
+        echo "P19_RUST_HOST_STD_MISSING=$rust_host_libdir" >&2
+        exit 42
+    fi
+    say "P19_SYSTEM_RUST_VERIFIED=$installed_release"
+fi
 
 ROOT_CARGO_CONFIG="$ROOT/.cargo/config.toml"
 ROOT_CARGO_CONFIG_SAVED="$ROOT/.cargo/config.toml.bouchaud-kernel-saved"

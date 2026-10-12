@@ -103,7 +103,7 @@ pub const BUILD_COMMIT: &str = match option_env!("BOUCHAUD_BUILD_COMMIT") {
 ///
 /// Une ligne par passe. Ajouter la sienne est le prix d'entree : sans elle, le
 /// prochain releve ne dira pas si le correctif y etait.
-pub const BUILD_LOTS: &str = "rx-chien-de-garde-libre,dora-comptee,verdict-unique,nav-refusee,terminal-blackbox-v1,hid-running-zombie-v3,m11-tab-trace-v1";
+pub const BUILD_LOTS: &str = "rx-chien-de-garde-libre,dora-comptee,verdict-unique,nav-refusee,terminal-blackbox-v1,hid-running-zombie-v3,m11-tab-trace-v1,p19-physical-evidence-v1";
 
 const POLL_NS: u64 = 250_000_000;
 const SAMPLE_NS: u64 = 250_000_000;
@@ -945,6 +945,12 @@ fn memory_sample(ts_ns: u64) {
     let (heap_utilise, heap_libre, heap_total) = crate::kernel::heap::stats();
     let (_, _, _, _, pages_refus, _) = crate::kernel::pages_tas::stats();
     let plus_grand_contigu = crate::kernel::pages_tas::plus_grand_contigu();
+    // BOUCHAUD_P19_MEM_PROOF_V1: lock-free counter readings only.
+    // VMM usage alone cannot separate live process mappings from retained caches.
+    // These counters are observations, NEVER a trigger for synchronous reclaim.
+    let cache_frames = crate::kernel::frame_cache::cached_pages();
+    let clean_reclaimables = crate::kernel::clean_page_cache::indice_recuperables();
+    let clean_reclaimed = crate::kernel::clean_page_cache::reclaimed_pages();
     let mut out = Text::new();
     let _ = write!(
         &mut out,
@@ -960,7 +966,8 @@ fn memory_sample(ts_ns: u64) {
             // servable -- c'est elle qui echoue en premier, pas le total.
             "pages_refus={} plus_grand_contigu={} ",
             "dalles={} vides={} vivants={} candidats={} manques={} saturations={} ",
-            "sous_flux={} surallocations={} max_probe={}\n"
+            "sous_flux={} surallocations={} max_probe={} ",
+            "cache_frames={} clean_reclaimables={} clean_reclaimed={}\n"
         ),
         ts_ns,
         frames_used,
@@ -979,6 +986,9 @@ fn memory_sample(ts_ns: u64) {
         d.sous_flux,
         d.surallocations,
         d.max_probe,
+        cache_frames,
+        clean_reclaimables,
+        clean_reclaimed,
     );
     let _ = append(KIND_MEMORY, out.as_bytes(), ts_ns, crate::drivers::serial::trace_total_bytes());
 }
@@ -1730,6 +1740,9 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
         );
     }
 
+    // BOUCHAUD_P19_BLACKBOX_FIN_BUILD: keep exact build identity in FIN.
+    // START is overwritten during long sessions by the circular recorder.
+    // FIN is written last and so survives a successful, synchronized shutdown.
     // LA MARQUE DE FIN PART EN DERNIER, ET ELLE PORTE LE BILAN.
     //
     // Sans elle, un silence est indistinguable d'une coupure. Avec le bilan
@@ -1740,10 +1753,11 @@ pub fn vide_avant_extinction(raison: &str) -> Vidage {
     let mut marque = Text::new();
     let _ = write!(
         &mut marque,
-        "BOUCHAUD_TRIGKEY_BLACKBOX_V3 FIN raison={} boot_id={} ts_ns={} draine={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} tambour_refuses={} vidage_poses={} vidage_manquants={} vidage_lots={}\n",
+        "BOUCHAUD_TRIGKEY_BLACKBOX_V3 FIN raison={} boot_id={} ts_ns={} draine={} tambour_reserves={} tambour_poses={} tambour_ecrases={} tambour_perdus={} tambour_refuses={} vidage_poses={} vidage_manquants={} vidage_lots={} BOUCHAUD_BUILD commit={} lot={}\n",
         raison, boot_id(), maintenant, draine as u8,
         etat.reserves, etat.poses, etat.ecrases, etat.perdus, etat.refuses,
         bilan.poses, bilan.manquants, VIDAGE_LOTS.load(Ordering::Relaxed),
+        BUILD_COMMIT, BUILD_LOTS,
     );
     let mut marked = false;
     if append(KIND_MARKER, marque.as_bytes(), maintenant, cible_serie) {

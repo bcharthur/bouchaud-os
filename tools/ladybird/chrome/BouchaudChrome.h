@@ -53,6 +53,7 @@
 // Les crans de zoom. Meme raison d'etre que BouchaudDegat.h : de l'arithmetique
 // entiere sans dependance, donc verifiable sur l'hote par `test_zoom.cpp`.
 #include "BouchaudZoom.h"
+#include "BouchaudChargement.h" // BOUCHAUD_P19_LOADING_UNIFIED_V1
 
 // BOUCHAUD_CHROME_V19_CALQUES
 //
@@ -658,6 +659,7 @@ struct State {
         ByteString status { "pret" };
         bool secure { false };
         bool loading { false };
+        BouchaudChargement::Etat chargement; // BOUCHAUD_P19_LOADING_UNIFIED_V1
         int zoom_cran { BouchaudZoom::cran_neutre };
         ImagePage last_page;
     };
@@ -703,6 +705,8 @@ struct State {
     ByteString status { "pret" };
     bool loading { false };
     bool secure { false };
+    BouchaudChargement::Etat chargement_initial; // BOUCHAUD_P19_LOADING_UNIFIED_V1
+    uint64_t chargement_horloge { 0 };
 
     // Suivi du pointeur : le protocole GUI envoie un etat de boutons absolu,
     // pas des fronts. Les fronts se deduisent ici.
@@ -952,6 +956,11 @@ inline State::Onglet* onglet_de_la_page(u64 page_id)
     }
     return nullptr;
 }
+
+// Fonctions implementees avec les evenements de navigation en fin de fichier.
+inline void set_loading(u64, bool, StringView);
+inline void commence_navigation_utilisateur();
+inline void termine_chargement_anormal(u64, StringView, bool);
 
 /// Le chrome est actif quand le gestionnaire de fenetres a confie une fenetre
 /// au navigateur : un canal GUI et une surface. Sans eux (banc headless), le
@@ -1701,12 +1710,12 @@ inline void draw_onglets(Canvas const& canvas)
             // Un trait clair sur l'arete haute : c'est ce qui distingue
             // l'onglet actif au premier coup d'oeil, meme en vision
             // peripherique, la ou deux gris proches ne se distinguent pas.
-            fill_rect(canvas, boite.x, boite.y + 2, boite.w - 2, 2, color_glyph);
+            fill_rect(canvas, boite.x + 1, boite.y + 7, 2, boite.h - 12, color_glyph); // onglet actif, PAS une seconde barre de chargement
         }
 
         auto const fermeture = boite_fermeture_onglet(static_cast<int>(rang));
         auto const reserve = fermeture.vide() ? calque_marge : (fermeture.w + 2 * calque_marge);
-        auto const largeur_texte = boite.w - calque_marge - reserve;
+        auto const largeur_texte = boite.w - calque_marge - reserve - 12;
         if (largeur_texte > 0) {
             auto const& onglet = s.onglets[rang];
             // Le TITRE si le document en a un, l'adresse sinon : une page qui
@@ -1721,7 +1730,14 @@ inline void draw_onglets(Canvas const& canvas)
             auto const titre = est_actif ? s.title : onglet.titre;
             auto const adresse = est_actif ? s.committed_url : onglet.url;
             auto const libelle = titre.is_empty() ? adresse : titre;
-            draw_ui_text(canvas, boite.x + calque_marge,
+            // Un petit point remplace la deuxieme barre : un signal par onglet.
+            if (onglet.chargement.actif()) {
+                auto const couleur = (onglet.chargement.signale_rafale(s.chargement_horloge)
+                    || onglet.chargement.lent(s.chargement_horloge)) ? 0x00f59e0bu : 0x003b82f6u;
+                if ((s.chargement_horloge / 16) % 2 == 0)
+                    fill_rect(canvas, boite.x + 7, boite.y + 13, 5, 5, couleur);
+            }
+            draw_ui_text(canvas, boite.x + calque_marge + 12,
                 boite.y + (onglets_hauteur - ui_text_height) / 2 + 1,
                 libelle.view(), est_actif ? color_glyph : color_glyph_off, largeur_texte);
         }
@@ -1853,12 +1869,25 @@ inline void draw_toolbar(Canvas const& canvas)
 
     draw_favori(canvas);
 
-    // Indicateur visuel : bleu = navigation en cours, vert = page stabilisee.
-    // La ligne n'affiche volontairement aucun pourcentage fictif.
-    auto status_color = s.loading ? 0x3b82f6u : 0x22c55eu;
-    fill_rect(canvas, field_x + field_w - 9, button_top + 10, 5, 5, status_color);
-    if (s.loading)
-        fill_rect(canvas, field_x, toolbar_height - 3, field_w, 3, status_color);
+    // BOUCHAUD_P19_LOADING_UNIFIED_V1 : indicateur UNIQUE sous l'URL.
+    // Segment indetermine : sans octets totaux, on n'invente PAS un pourcentage.
+    auto const* onglet = onglet_de_la_page(page_active());
+    auto const& suivi = onglet ? onglet->chargement : s.chargement_initial;
+    if (field_w > 30 && suivi.actif()) {
+        auto const largeur = max(12, field_w / 5);
+        auto const periode = static_cast<uint64_t>(field_w + largeur);
+        auto const avance = static_cast<int>((s.chargement_horloge * 7u) % periode);
+        auto const debut = avance - largeur;
+        auto const gauche = max(0, debut);
+        auto const droite = min(field_w, avance);
+        if (droite > gauche)
+            fill_rect(canvas, field_x + gauche, toolbar_height - 3,
+                droite - gauche, 2,
+                suivi.signale_rafale(s.chargement_horloge) || suivi.lent(s.chargement_horloge)
+                    ? 0x00f59e0bu : 0x003b82f6u);
+    } else if (field_w > 30 && suivi.affiche_fin(s.chargement_horloge)) {
+        fill_rect(canvas, field_x, toolbar_height - 3, field_w, 2, 0x0022c55eu);
+    }
 }
 
 /// Tout ce que le chrome peint au-dessus de la page : barre et onglets.
@@ -2762,8 +2791,7 @@ inline void commit_address()
         return;
 
     defocus_address();
-    s.loading = true;
-    s.status = "chargement...";
+    commence_navigation_utilisateur();
     outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
     if (s.on_navigate)
         s.on_navigate(target);
@@ -2886,6 +2914,8 @@ inline void ajoute_onglet(u64 page_id, ByteString const& url, bool activer)
     State::Onglet onglet;
     onglet.page_id = page_id;
     onglet.url = url;
+    if (premier)
+        onglet.chargement = s.chargement_initial;
     s.onglets.append(move(onglet));
     outln("[ladybird-bouchaud] M11_TAB_OPEN page={} total={}", page_id, s.onglets.size());
 
@@ -3624,8 +3654,7 @@ inline void active_entree_menu(int rang)
     switch (entree) {
     case MenuOuvrirLien:
         if (!lien.is_empty() && s.on_navigate) {
-            s.loading = true;
-            s.status = "chargement...";
+            commence_navigation_utilisateur();
             s.on_navigate(lien);
         }
         break;
@@ -3642,8 +3671,7 @@ inline void active_entree_menu(int rang)
             s.on_history_delta(1);
         break;
     case MenuRecharger:
-        s.loading = true;
-        s.status = "chargement...";
+        commence_navigation_utilisateur();
         if (s.on_reload)
             s.on_reload();
         break;
@@ -3788,10 +3816,13 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                     s.on_history_delta(1);
             } else if (point_in_button(reload_button(), x, y)) {
                 outln("[ladybird-bouchaud] M11_RELOAD");
-                s.loading = true;
-                s.status = "chargement...";
-                if (s.on_reload)
-                    s.on_reload();
+                if (s.loading) {
+                    termine_chargement_anormal(page_active(), "arrete"sv, false);
+                    if (s.on_stop) s.on_stop();
+                } else {
+                    commence_navigation_utilisateur();
+                    if (s.on_reload) s.on_reload();
+                }
             } else if (BouchaudCalques::contient(boite_favori(), x, y)) {
                 bascule_favori();
             } else if (point_in_address_field(x, y)) {
@@ -4065,8 +4096,7 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         return true;
 
     if (rechargement) {
-        s.loading = true;
-        s.status = "chargement...";
+        commence_navigation_utilisateur();
         if (s.on_reload)
             s.on_reload();
         request_chrome_frame();
@@ -4363,8 +4393,7 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
         // relachement le demanderait deux fois par frappe, et la seconde
         // porterait sur un chargement deja arrete.
         if (appui && s.loading) {
-            s.loading = false;
-            s.status = "arrete";
+            termine_chargement_anormal(page_active(), "arrete"sv, false);
             if (s.on_stop)
                 s.on_stop();
             // Ici le chrome change reellement ("arrete"), donc une seule
@@ -4550,6 +4579,14 @@ inline void tick()
     drain();
 
     auto& s = state();
+    ++s.chargement_horloge; // horloge GUI, aucun repaint de page force
+    auto const* actif = onglet_de_la_page(page_active());
+    auto const& suivi = actif ? actif->chargement : s.chargement_initial;
+    if (suivi.actif() && s.chargement_horloge % 4 == 0)
+        request_chrome_frame(); // 15 fps maximum, chrome uniquement
+    if (suivi.phase == BouchaudChargement::Phase::Termine
+        && s.chargement_horloge == suivi.fin_tick + BouchaudChargement::TICKS_FADE)
+        request_chrome_frame(); // efface la bande de succes apres 224 ms
 
     // BOUCHAUD_CHROME_V19_CALQUES
     //
@@ -4689,26 +4726,81 @@ inline void set_committed_url(u64 page_id, ByteString const& url)
     request_chrome_frame();
 }
 
+// BOUCHAUD_P19_LOADING_UNIFIED_V1 : unique entree pour les rappels LibWeb.
+// Les ressources secondaires n'ont aucun droit de reinitialiser l'etat visuel.
 inline void set_loading(u64 page_id, bool loading, StringView status)
 {
     auto& s = state();
-    if (page_id != page_active()) {
-        if (auto* onglet = onglet_de_la_page(page_id)) {
-            onglet->loading = loading;
-            onglet->status = status;
-            request_chrome_frame();
-        }
+    auto* onglet = onglet_de_la_page(page_id);
+    auto* suivi = onglet ? &onglet->chargement
+        : (s.onglets.is_empty() && page_id == page_active() ? &s.chargement_initial : nullptr);
+    if (!suivi)
+        return;
+    auto const evenement = loading
+        ? suivi->commence(s.chargement_horloge) : suivi->termine(s.chargement_horloge);
+    if (evenement == BouchaudChargement::Transition::DoublonDebut) {
+        if (suivi->debuts_doublons <= 3 || suivi->debuts_doublons % 16 == 0)
+            warnln("[LB:LOAD] page={} event=start_duplicate generation={} duplicates={} tic={}",
+                page_id, suivi->generation, suivi->debuts_doublons, s.chargement_horloge);
         return;
     }
-    // Un document qui commence a charger n'a plus de lien survole : celui
-    // qu'on affichait appartenait au document precedent, et LibWeb n'enverra
-    // pas de `unhover` pour un element qui n'existe plus. Sans cela la bulle
-    // resterait, et montrerait une adresse sans rapport avec ce qui est a
-    // l'ecran -- exactement ce contre quoi elle existe.
-    if (loading && !s.loading)
+    if (evenement == BouchaudChargement::Transition::DoublonFin)
+        return;
+    outln("[LB:LOAD] page={} event={} generation={} starts_10s={} loop_suspect={} tic={}",
+        page_id, loading ? "start"sv : "finish"sv, suivi->generation,
+        suivi->demarrages_fenetre, suivi->signale_rafale(s.chargement_horloge) ? 1 : 0,
+        s.chargement_horloge);
+    if (page_id == page_active()) {
+        if (loading && !s.loading)
+            clear_survol_url();
+        s.loading = suivi->actif();
+        s.status = status;
+    } else if (onglet) {
+        onglet->loading = suivi->actif();
+        onglet->status = status;
+    }
+    request_chrome_frame();
+}
+
+// Navigation demarree explicitement par l'utilisateur : un nouveau cycle,
+// distinct d'un doublon de callback upstream. Ne recharge JAMAIS la page ici.
+inline void commence_navigation_utilisateur()
+{
+    auto& s = state();
+    auto* onglet = onglet_de_la_page(page_active());
+    auto& suivi = onglet ? onglet->chargement : s.chargement_initial;
+    suivi.commence(s.chargement_horloge, true);
+    if (!s.loading)
         clear_survol_url();
-    s.loading = loading;
-    s.status = status;
+    s.loading = true;
+    s.status = "chargement...";
+    outln("[LB:LOAD] page={} event=user_start generation={} tic={}",
+        page_active(), suivi.generation, s.chargement_horloge);
+    request_chrome_frame();
+}
+
+inline void termine_chargement_anormal(u64 page_id, StringView status, bool echec)
+{
+    auto& s = state();
+    auto* onglet = onglet_de_la_page(page_id);
+    auto* suivi = onglet ? &onglet->chargement
+        : (s.onglets.is_empty() && page_id == page_active() ? &s.chargement_initial : nullptr);
+    if (!suivi)
+        return;
+    if (echec)
+        suivi->echec();
+    else
+        suivi->arrete();
+    if (page_id == page_active()) {
+        s.loading = false;
+        s.status = status;
+    } else if (onglet) {
+        onglet->loading = false;
+        onglet->status = status;
+    }
+    warnln("[LB:LOAD] page={} event={} generation={} tic={}",
+        page_id, echec ? "crash_or_error"sv : "stopped"sv,
+        suivi->generation, s.chargement_horloge);
     request_chrome_frame();
 }
 

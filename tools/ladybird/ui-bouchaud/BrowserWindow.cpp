@@ -252,7 +252,10 @@ void BrowserWindow::present(BouchaudWebView& vue, NonnullRefPtr<Gfx::Bitmap> bit
         warnln("[LB] PRESENT_APRES_REPRISE onglet={} page={} webcontent_pid={} taille={}x{} somme={:08x} variance={} couleurs={} non_blanc_pct={}",
             vue.onglet(), vue.page_courante(), vue.client().pid(), largeur, hauteur, s.somme, s.variance, s.couleurs, s.non_blanc_pct);
     }
-    if (m_trames < 64 || m_trames % 16 == 15) {
+    // P19 PERF AB: keep the first 8 visual probes and then 1/64.
+    // This is visual diagnostic sampling, not the actual presentation.
+    // It does not change the compositor or its damage decisions.
+    if (m_trames < 8 || m_trames % 64 == 63) {
         auto const s = sonde_pixels(*bitmap, largeur, hauteur);
         m_derniere_sonde = ByteString::formatted("onglet={} page={} seq={} damage={},{},{}x{} taille={}x{} somme={:08x} luminance={} variance={} couleurs={} non_blanc_pct={} echantillons={}",
             vue.onglet(), vue.page_courante(), m_trames + 1, degat.x(), degat.y(), degat.width(), degat.height(),
@@ -613,7 +616,7 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         m_webcontent_de_l_onglet.set(onglet, vue_ptr->client().pid());
         warnln("[LB:CRASH] onglet={} webcontent=mort nouveau_pid={} t_ms={}", onglet, vue_ptr->client().pid(),
             MonotonicTime::now().milliseconds());
-        BouchaudChrome::set_loading(onglet, false, "moteur arrete"sv);
+        BouchaudChrome::termine_chargement_anormal(onglet, "moteur arrete"sv, true);
     };
 
     vue.on_close = [this, onglet] {
@@ -653,7 +656,7 @@ void BrowserWindow::branche_chrome()
         auto url = URL::create_with_url_or_path(cible);
         if (!url.has_value()) {
             warnln("[LB:NAV] url_invalide valeur=<{}>", cible);
-            BouchaudChrome::set_loading(vue->onglet(), false, "URL invalide"sv);
+            BouchaudChrome::termine_chargement_anormal(vue->onglet(), "URL invalide"sv, true);
             return;
         }
         warnln("[LB:NAV] onglet={} demande url={}", vue->onglet(), *url);

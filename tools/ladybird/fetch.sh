@@ -41,7 +41,8 @@ info()  { printf '\033[36m%s\033[0m\n' "$*"; }
 # est ce qu'un humain a ecrit, le submodule ce que git a enregistre. Quand les
 # deux divergent, c'est le manifeste qui dit l'intention.
 sha_epingle() {
-    grep -m1 -E '^\s+sha\s+[0-9a-f]{40}' "$MANIFESTE" | awk '{print $2}'
+    # P19_WSL_MANIFEST_CRLF_V1: CRLF from Windows must not become part of the Git refspec.
+    grep -m1 -E '^\s+sha\s+[0-9a-f]{40}' "$MANIFESTE" | awk '{print $2}' | tr -d '\r'
 }
 
 VERIFIE=0
@@ -58,6 +59,61 @@ if [ -z "$SHA" ]; then
     rouge "aucun SHA dans $MANIFESTE"
     exit 1
 fi
+# P19_WSL_MANIFEST_SHA_GUARD_V1: fail before contacting Git if the SHA is contaminated.
+if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    rouge "SHA Ladybird invalide: 40 caracteres hexadecimaux attendus (CRLF / argument)."
+    exit 1
+fi
+
+# P19_PORTABLE_PATCHES_V1: Normalize patch input (not the tracked .patch or
+# pinned upstream source), refuse an incompatible patch with the REAL error.
+# A retry at the correct SHA must verify/apply missing patches, never exit early.
+applique_patches_bouchaud() {
+    local mode="$1"
+    if [ ! -d "$PATCHES" ] || ! ls "$PATCHES"/*.patch >/dev/null 2>&1; then
+        info "aucun patch Bouchaud (arbre upstream pur)"
+        return 0
+    fi
+    local tmpdir patchname normalise p tmpdir_quoted
+    tmpdir=$(mktemp -d)
+    # Expand the trap path at registration: Bash function locals disappear
+    # before an EXIT trap when this function returns an error under set -e.
+    printf -v tmpdir_quoted '%q' "$tmpdir"
+    trap "rm -rf -- $tmpdir_quoted" EXIT
+    for p in "$PATCHES"/*.patch; do
+        patchname=$(basename "$p")
+        normalise="$tmpdir/$patchname"
+        # `*.patch` is not covered by .gitattributes eol=lf on Windows.
+        # GNU sed removes only an end-of-line CR; no patch hunk is edited.
+        sed 's/$//' "$p" > "$normalise"
+        if [ ! -s "$normalise" ]; then
+            rouge "P19_PATCH_INVALID vide=$patchname"
+            return 1
+        fi
+        if git -C "$CIBLE" apply --reverse --check "$normalise" >/dev/null 2>&1; then
+            info "P19_PATCH_VERIFIED already-applied=$patchname"
+            continue
+        fi
+        if [ "$mode" = verifier ]; then
+            rouge "P19_PATCH_MISSING_OR_DIVERGENT=$patchname"
+            git -C "$CIBLE" apply --check "$normalise" || true
+            return 1
+        fi
+        info "P19_PATCH_CHECK_START=$patchname"
+        if ! git -C "$CIBLE" apply --check "$normalise"; then
+            rouge "P19_PATCH_INCOMPATIBLE=$patchname (source ou contexte modifie)"
+            return 1
+        fi
+        git -C "$CIBLE" apply "$normalise" || return 1
+        if ! git -C "$CIBLE" apply --reverse --check "$normalise"; then
+            rouge "P19_PATCH_POST_APPLY_CHECK_FAILED=$patchname"
+            return 1
+        fi
+        info "P19_PATCH_APPLIED_OK=$patchname"
+    done
+    rm -rf "$tmpdir"
+    trap - EXIT
+}
 
 if [ "$VERIFIE" = 1 ]; then
     if [ ! -e "$CIBLE/.git" ]; then
@@ -71,7 +127,8 @@ if [ "$VERIFIE" = 1 ]; then
         echo "  present  (arbre)    : $ACTUEL"
         exit 1
     fi
-    vert "Ladybird au SHA epingle : $SHA"
+    applique_patches_bouchaud verifier
+    vert "Ladybird au SHA epingle et patches verifies : $SHA"
     exit 0
 fi
 
@@ -80,20 +137,28 @@ info "== Ladybird $SHA =="
 if [ -e "$CIBLE/.git" ]; then
     ACTUEL=$(git -C "$CIBLE" rev-parse HEAD 2>/dev/null || echo "")
     if [ "$ACTUEL" = "$SHA" ]; then
-        vert "deja au bon SHA, rien a faire"
-        exit 0
+        vert "deja au bon SHA, verification des patches Bouchaud"
+    else
+        info "arbre present a $ACTUEL, mise a jour"
+        info "P19_FETCH_PROGRESS_V1 stage=fetch-start"
+        git -C "$CIBLE" fetch --progress --depth 1 origin "$SHA"
+        info "P19_FETCH_PROGRESS_V1 stage=fetch-complete"
+        info "P19_FETCH_PROGRESS_V1 stage=checkout-start"
+        git -C "$CIBLE" checkout --progress --force --detach FETCH_HEAD
+        info "P19_FETCH_PROGRESS_V1 stage=checkout-complete"
     fi
-    info "arbre present a $ACTUEL, mise a jour"
-    git -C "$CIBLE" fetch --depth 1 origin "$SHA"
-    git -C "$CIBLE" checkout --force --detach FETCH_HEAD
 else
     info "clone superficiel"
     rm -rf "$CIBLE"
     mkdir -p "$(dirname "$CIBLE")"
     git init -q "$CIBLE"
     git -C "$CIBLE" remote add origin "$DEPOT"
-    git -C "$CIBLE" fetch --depth 1 origin "$SHA"
-    git -C "$CIBLE" checkout --force --detach FETCH_HEAD
+    info "P19_FETCH_PROGRESS_V1 stage=fetch-start"
+    git -C "$CIBLE" fetch --progress --depth 1 origin "$SHA"
+    info "P19_FETCH_PROGRESS_V1 stage=fetch-complete"
+    info "P19_FETCH_PROGRESS_V1 stage=checkout-start"
+    git -C "$CIBLE" checkout --progress --force --detach FETCH_HEAD
+    info "P19_FETCH_PROGRESS_V1 stage=checkout-complete"
 fi
 
 OBTENU=$(git -C "$CIBLE" rev-parse HEAD)
@@ -105,19 +170,6 @@ fi
 # Les divergences vivent en patches numerotes, jamais en modifications directes
 # de l'arbre : c'est ce qui permet de dire a tout moment ce que nous avons change
 # par rapport a upstream, et de proposer en amont ce qui le merite.
-if [ -d "$PATCHES" ] && ls "$PATCHES"/*.patch >/dev/null 2>&1; then
-    info "application des patches Bouchaud"
-    for p in "$PATCHES"/*.patch; do
-        echo "  PATCH $(basename "$p")"
-        git -C "$CIBLE" apply --check "$RACINE/$p" 2>/dev/null || {
-            rouge "  le patch ne s'applique pas a ce SHA : $(basename "$p")"
-            rouge "  c'est le signal d'une divergence upstream a examiner, pas a forcer"
-            exit 1
-        }
-        git -C "$CIBLE" apply "$RACINE/$p"
-    done
-else
-    info "aucun patch Bouchaud (l'arbre est upstream pur)"
-fi
+applique_patches_bouchaud installer
 
 vert "Ladybird pret dans $CIBLE au SHA $OBTENU"

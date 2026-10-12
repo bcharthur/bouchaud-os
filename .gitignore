@@ -276,3 +276,5 @@ tools/userland/out-horloge/
 /scenario-ata-integrite/
 /ata-integrite.img
 /ata-integrite-blkdebug.conf
+# P19: caches de construction locaux, jamais versionnes
+/third_party/caches/

@@ -12,6 +12,8 @@ legacy-boot = ["dep:bootloader"]
 uefi-boot = ["dep:bootloader_api"]
 reference-bringup = []
 reference-desktop = ["reference-bringup"]
+# P19 experimental QEMU TCG profile, opt-in; the physical default is unchanged.
+p19-tcg-low-latency = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #
 # Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la

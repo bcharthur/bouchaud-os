@@ -731,8 +731,14 @@ fn draw_window(w: &Win, focused: bool) {
     let title_clipped = tronque_a_largeur(&w.title, place, 12.0);
     fb::draw_text_prop(origine_titre, y + (title_h - 12) / 2, title_clipped,
         crate::gui::theme::COLOR_TEXT_PRIMARY, 12.0, false);
-    dessine_duree_chargement(w, origine_titre, fb::text_width(title_clipped, 12.0, false),
-        premier_bouton, y + (title_h - 11) / 2);
+    // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
+    // La duree noyau reste dans la barre de titre PENDANT le demarrage
+    // uniquement. La navigation appartient exclusivement au chrome Ladybird.
+    if matches!(&w.app, App::Navigateur { client }
+        if client.etat == crate::gui::client::Etat::Demarrage) {
+        dessine_duree_chargement(w, origine_titre, fb::text_width(title_clipped, 12.0, false),
+            premier_bouton, y + (title_h - 11) / 2);
+    }
 
     let mouse = crate::gui::mouse::pos();
     let hovered = crate::gui::windowing::hit_test(outer,
@@ -841,10 +847,10 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     }
     fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
 
-    // La jauge se pose APRES la recopie : c'est ce qui la fait disparaitre
-    // toute seule. Quand elle cesse d'etre visible, la surface du client
-    // reprend ces trois lignes sans qu'aucun effacement soit necessaire.
-    dessine_jauge(&zone, &client.jauge, maintenant);
+    // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
+    // Ne JAMAIS superposer une jauge OS aux pixels de WebContent :
+    // BouchaudChrome.h possede l'indicateur unique sous la barre URL.
+    // Les mesures Jauge sont conservees dans le client pour la telemetrie.
 }
 
 // ─── Jauge de chargement ───────────────────────────────────────────────────
@@ -867,36 +873,8 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
 /// Hauteur de la barre, en pixels.
 pub(crate) const JAUGE_H: usize = 3;
 
-fn dessine_jauge(zone: &crate::gui::protocole::Rect, jauge: &crate::gui::jauge::Jauge,
-    maintenant: u64) {
-    use crate::gui::jauge::Phase;
-    if !jauge.visible() {
-        return;
-    }
-    let largeur = zone.largeur.max(0) as usize;
-    if largeur == 0 || zone.hauteur as usize <= JAUGE_H {
-        return;
-    }
-    let x = zone.x.max(0) as usize;
-    let y = zone.y.max(0) as usize;
-
-    // Le rail. Une page blanche et une barre bleue sur un fond blanc : sans
-    // rail, la partie NON remplie serait invisible et la barre paraitrait
-    // toujours pleine.
-    fb::fill_rect_rgb(x, y, largeur, JAUGE_H, crate::gui::theme::COLOR_BORDER);
-
-    let progression = jauge.progression(maintenant) as usize;
-    // Arrondi vers le HAUT d'un pixel minimum : a 1 % sur une fenetre etroite,
-    // la division rendait zero et la barre restait eteinte pendant que la page
-    // chargeait -- exactement le contraire de ce qu'elle doit dire.
-    let remplie = (largeur * progression / 100).max(1).min(largeur);
-    let couleur = if jauge.phase() == Phase::Termine {
-        crate::gui::theme::COLOR_SUCCESS
-    } else {
-        crate::gui::theme::COLOR_ACCENT
-    };
-    fb::fill_rect_rgb(x, y, remplie, JAUGE_H, couleur);
-}
+// BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1 : l ancienne jauge
+// graphique d application est retiree. Seule la jauge de DEMARRAGE demeure.
 
 /// La duree de chargement, en clair, a droite du titre de la fenetre.
 ///

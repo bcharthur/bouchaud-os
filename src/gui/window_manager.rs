@@ -1006,15 +1006,21 @@ fn boucle() {
                 }
                 let zone = window::zone_jauge(w);
                 let App::Navigateur { client } = &mut w.app else { continue };
-                if client.tic_jauge(maintenant) {
+                // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
+                // On continue de mesurer les rafales de trames sans generer de
+                // repaint OS pour la navigation : seul le demarrage a une jauge.
+                let jauge_change = client.tic_jauge(maintenant);
+                let demarrage = client.etat == crate::gui::client::Etat::Demarrage;
+                if jauge_change && demarrage {
                     degats.ajoute(Origine::Client, zone);
                     sale = true;
                 }
-                jauge_visible |= client.jauge.visible();
+                jauge_visible |= demarrage && client.jauge.visible();
             }
         } else {
             jauge_visible = wins.iter().any(|w| !w.min
-                && matches!(&w.app, App::Navigateur { client } if client.jauge.visible()));
+                && matches!(&w.app, App::Navigateur { client }
+                    if client.etat == crate::gui::client::Etat::Demarrage && client.jauge.visible()));
         }
 
         // L'instant ou ce tour commence a lire les clients : tout `FrameReady`
