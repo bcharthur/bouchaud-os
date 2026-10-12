@@ -36,7 +36,7 @@
 - `tools/ladybird/ui-bouchaud/BrowserWindow.cpp`
 
 Vérifier précisément dans le diff que ces changements incluent : Crash Guard du noyau, correctifs P19 mémoire, instrumentation, adaptation locale de la chaîne Ladybird, nouveau chrome et machine à états par onglet.
-**Important** : le patch Rust ONE-LOADER qui retire la seconde barre côté noyau a été proposé, mais **son application locale n'était pas confirmée au moment de ce handoff**. Inspecter `src/gui/widgets.rs` et `src/gui/window_manager.rs` avant de conclure.
+**Important** : le patch Rust ONE-LOADER a été **appliqué localement et vérifié sur les sources** le 12 octobre à 20:54 (`P19_UNIQUE_LOADING_PATCH_APPLIED_OK=2`, `P19_UNIQUE_LOADING_SOURCE_VERIFY_OK`) ; ses deux fichiers sont **présents dans le commit** `8e1bdf9`. **Aucune campagne QEMU du noyau recompilé avec ce patch n'est attestée** : ne pas déclarer le doublon résolu avant ce test.
 
 ## 3. Preuves et limites observées
 
@@ -46,7 +46,7 @@ Vérifier précisément dans le diff que ces changements incluent : Crash Guard 
 - Refonte UI P19 V3 : tests C++ machine à états PASS, compilation Ladybird `2788/2788` PASS, nouveau `BouchaudBrowserHost` exporté dans `native-browser-m9`.
 - QEMU Baseline de la nouvelle UI : Google s'affiche et fonctionne visuellement ; YouTube reste partiel (skeleton). Captures utilisateur : deux barres visibles, une dans le noyau et l'autre dans Ladybird.
 - Log `baseline-20261012-202709` examiné hors dépôt : 13 événements `[LB:LOAD]`, dont des `start_duplicate`, sans `KERNEL PANIC`, `PROCESS_FAULT` ni `VERIFICATION FAILED` dans cette capture de campagne. La fin du fichier ne montre pas d'arrêt propre ; cela ne prouve pas une longue endurance.
-- Les `start_duplicate` signalent des callbacks répétés ; ne **prouvent pas** à eux seuls une vraie boucle de navigation du document.
+- Collecteur P19 : `navigation_requests=3`, `browser_crashes=0`, `short_restart_flags=[]`, trois onglets avec des `start_duplicate` et un seul `finish` rapporté. Les `start_duplicate` signalent des callbacks répétés ; ils ne **prouvent pas** une vraie boucle de navigation du document.
 - CPU élevé et FPS relativement bas sous QEMU TCG ; ne pas extrapoler aux performances matérielles TRIGKEY.
 - Aucun flash TRIGKEY ni validation physique P19.
 
@@ -55,13 +55,13 @@ Vérifier précisément dans le diff que ces changements incluent : Crash Guard 
 - Barre supérieure dans la surface, chronomètre près du titre `Ladybird` : noyau Rust, `src/gui/widgets.rs::dessine_jauge` piloté par `src/gui/jauge.rs`.
 - Barre fine sous l'URL et points par onglet : frontend C++, `tools/ladybird/chrome/BouchaudChrome.h`, états dans `BouchaudChargement.h`.
 - La seconde barre du noyau n'est pas un indicateur réseau/DOM : elle mesure les trames graphiques et peut redémarrer sur de l'animation.
-- Correctif envisagé : garder la jauge pendant le *démarrage initial* et sa télémétrie, puis cesser de dessiner la barre du noyau par-dessus les pages actives.
+- Correctif ONE-LOADER **commité et vérifié statiquement** : garder la jauge pendant le *démarrage initial* et sa télémétrie, puis cesser de dessiner la barre du noyau par-dessus les pages actives. **Test de rendu QEMU encore requis**.
 - Ne pas confondre avec le liseré actif sous un onglet ou dans la barre des tâches.
 
 ## 5. Prochaine séance : ordre recommandé
 
 1. Faire le point sur le HEAD réellement poussé et vérifier `git status --short`.
-2. Contrôler si ONE-LOADER est dans le diff ; sinon appliquer le correctif existant **sur une copie de travail propre**, prévalidation puis tests Rust.
+2. Confirmer ONE-LOADER dans les diffs `src/gui/widgets.rs` et `src/gui/window_manager.rs` (**déjà commité**), exécuter les tests Rust puis recompiler le noyau. Ne pas appliquer le patch une seconde fois.
 3. Construire noyau + nouvelle image QEMU isolée, conserver `ladybird-browser.img` original (SHA connu `947d7170a217bb69553906d4c0f6d3d46e69c20b449619e5a06d8588e1497584` dans l'expérience précédente).
 4. Vérifier visuellement une seule barre de navigation et la disparition de l'overlay noyau sur une page active.
 5. Instrumenter `start/user_start/start_duplicate/finish/stop` par page/génération/URL réelle pour diagnostiquer YouTube sans supposer une boucle infinie.
