@@ -62,6 +62,33 @@ ABSENT_REQUIS = re.compile(r"^\s*(\S+) : REQUIS mais absent", re.M)
 ABSENT_OPTIONNEL = re.compile(r"^\s*(\S+) : absent du journal", re.M)
 MESUREES = re.compile(r"execution : (\d+)/(\d+) grandeur\(s\) mesuree\(s\)")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Le prefixe d'horodatage de la console (`[19:40:24][ 97%:  0%:  2%][FPS: --] `).
+PREFIXE_CONSOLE = re.compile(r"^(?:\[[^\]]*\]){2}\[FPS:[^\]]*\] ")
+# Ce qu'une sonde dit d'une verification ROUGE (`  - nom : detail`), et ses
+# mesures de latence (ordonnanceur-probe).
+LIGNE_ECHEC = re.compile(r"^\s+- \S")
+LIGNE_LATENCE = re.compile(r"^\s+(sans charge|sous charge)[^\n]*median")
+
+
+def details_sondes(texte: str) -> list[list[str]]:
+    """Pour chaque ligne RESULTAT, les lignes d'echec et de latence qui la precedent.
+
+    BOUCHAUD_ENDURANCE_ECHEC_NOMME_V1 -- Endurance hebdomadaire 38130602802 :
+    « sonde : 1 echec(s), 3 passee(s) » sur les quatre topologies, et rien de
+    plus dans le journal du job ; l'artefact, lui, n'est pas toujours lisible.
+    Un echec qui ne dit pas QUELLE verification a rougi oblige a relancer la
+    campagne pour l'apprendre.
+    """
+    blocs: list[list[str]] = []
+    courant: list[str] = []
+    for brute in texte.splitlines():
+        ligne = PREFIXE_CONSOLE.sub("", brute.rstrip("\r"))
+        if RESULTAT.search(ligne):
+            blocs.append(courant[-12:])
+            courant = []
+        elif LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne):
+            courant.append(ligne.strip())
+    return blocs
 
 
 def trace_du_cycle(resume: Path, cycle: dict) -> Path | None:
@@ -106,11 +133,15 @@ def evalue_budgets(trace: Path, check_budgets: Path) -> dict:
 def releve_noyau(trace: Path) -> dict:
     texte = ANSI.sub("", trace.read_text(encoding="utf-8", errors="replace"))
     fin = FIN.findall(texte)
+    details = details_sondes(texte)
+    resultats = [
+        {"echecs": int(e), "passees": int(t)} for e, t in RESULTAT.findall(texte)
+    ]
+    for r, d in zip(resultats, details):
+        r["details"] = d
     return {
         "autorun_statut": int(fin[-1]) if fin else None,
-        "resultats_sondes": [
-            {"echecs": int(e), "passees": int(t)} for e, t in RESULTAT.findall(texte)
-        ],
+        "resultats_sondes": resultats,
         "pire_attente": PIRE.findall(texte),
     }
 
@@ -216,6 +247,8 @@ def texte(rapport: dict) -> str:
         )
         for r in noyau.get("resultats_sondes", []):
             lignes.append(f"     sonde : {r['echecs']} echec(s), {r['passees']} passee(s)")
+            if r["echecs"]:
+                lignes.extend(f"       {d}" for d in r.get("details", []))
         for p in noyau.get("pire_attente", []):
             lignes.append(f"     {p}")
         if fiche.get("budgets_sortie") and fiche["budgets"]["rc"] != 0:
