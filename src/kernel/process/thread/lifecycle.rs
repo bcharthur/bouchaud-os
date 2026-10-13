@@ -193,6 +193,24 @@ total_us={} pire_us={} candidats_suffisants={}",
                 }
                 let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
+                    // BOUCHAUD_SESSION_EMPORTE_V1 : chaque tache condamnee
+                    // par la fin de session est NOMMEE. Elle meurt ensuite a
+                    // son attente ou a sa frontiere, sans passer par
+                    // `exit_current` -- donc sans `PROCESS_EXIT`. Sans cette
+                    // ligne, un banc qui compte les `PROCESS_EXIT` ne pouvait
+                    // pas distinguer « emporte par la session » de « jamais
+                    // sorti » (robustesse 8/9 : `SORTIE_ABSENTE
+                    // image=Compositor`). Ce n'est PAS une preuve de mort :
+                    // c'est l'acte de condamnation, date et nomme.
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "SESSION_EMPORTE t={} racine={} pid={} tid={} image={} etat={:?}",
+                        crate::kernel::timer::monotonic_ms(),
+                        racine,
+                        pid,
+                        tasks()[index].tid,
+                        tasks()[index].process.metadata.lock().name,
+                        tasks()[index].state,
+                    ));
                     marque_zombie(&tasks()[index]);
                     emportes += 1;
                 }
