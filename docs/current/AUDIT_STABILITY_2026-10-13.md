@@ -71,6 +71,30 @@ Qualifications longues sur `4401bcec` (lues) : **soak hébergé 20 min vert**
 CI, 0/17 en local) ; **endurance 20 min sous KVM verte** (38442948204, job
 115454974323) — premier passage long après le retrait du report BSP V8.
 
+### 3 ter. Campagnes `7ffedd2b` → `d466c9ff` → `cd65aa45` (lues)
+
+| BUG | Sévérité | Symptôme | Cause | Preuve avant → après | Commit |
+|---|---|---|---|---|---|
+| NAV-TRACE | P1 (build) | build Ladybird `7ffedd2b` rouge, `BrowserWindow.cpp:463` | `bytes()` sur une `String` temporaire (code de session) | arbre préparé jetable + clang `-fsyntax-only` : erreur CI reproduite → rc=0 ; build CI `d466c9ff` vert | `d466c9ff` |
+| EXTINCTION-SANS-TACHE | P0 | KERNEL PANIC à l'extinction après `AUTORUN FIN` (sites réels `d466c9ff`, run 38475302676) : `blocage.rs:105 « parking demande hors de toute tache »` | l'autorun s'éteint depuis le contexte d'amorçage (`NO_TASK`) ; `persistance::synchronise` attend un verrou dormant (`TRANSACTION`, contrôleur ATA) tenu par un processus encore vivant | `extinction-contention-probe` : SMP1 3/3 panique → SMP1 3/3 + SMP4 2/2 propres ; banc `run_extinction_contention.sh` (contrôle négatif : 5 rouges) | `cd65aa45` |
+| WCYCLE (qualifié) | à instruire | robustesse 8/9, **déterministe** (`4401bcec`, `d466c9ff`, `cd65aa45`) | **nommé** : `SORTIE_ABSENTE pid=17 image=Compositor` ; le Compositor reçoit la fermeture du pair et programme sa mort (`COMPOSITOR_DIE_REASON`), puis plus rien. Piste mesurée : quand la racine de premier plan meurt, le noyau **condamne** sa descendance (fin de session) et ces tâches meurent sans `PROCESS_EXIT` — invisible au banc (sonde orphelin : `1 tache(s) de sa session arretees avec lui`, aucune ligne nominative) | fenêtre **non** élargie ; `SESSION_EMPORTE` nomme désormais chaque condamnation (`19864d65`) : le prochain run dira si le Compositor est emporté par la session ou réellement bloqué | `19864d65` (diagnostic) |
+
+`7ffedd2b` : CI Fast, Integration, Reliability V3 **avec soak 20 min**,
+os-primitives (`FAUTE_MULTIFIL_OK` TCG SMP1/4/8 **et KVM SMP4**,
+`NOEUDS_CHURN_OK`, `MATRICE_ROLES_OK`), Native IPC, SCM_RIGHTS, Security :
+**verts**. Endurance hebdo (tranches 30 min) : **rouge**, voir registre.
+
+`d466c9ff` : CI Fast, Integration, Reliability V3 avec soak 20 min, IPC,
+SCM, Security **verts** ; Ladybird 14/16 : build, primitives, smoke,
+cache/SQL, WPT, mémoire, ordre worker, crash des services, piège Compositor,
+performance, endurance 10 min TCG, endurance KVM A/B, endurance 20 min KVM
+**verts** ; rouges : sites (EXTINCTION-SANS-TACHE), robustesse (WCYCLE).
+
+`cd65aa45` (correctif d'extinction) : **sites réels verts** (la panique
+d'extinction a disparu), smoke, cache/SQL, WPT, mémoire, ordre worker, crash
+des services, piège Compositor, performance verts ; robustesse 8/9 (WCYCLE,
+inchangé). Les autres verdicts de ce SHA sont dans le handoff.
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |
