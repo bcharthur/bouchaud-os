@@ -251,10 +251,25 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // BOUCHAUD_P19_FATAL_USER_IRQ_EXIT_V1
     // Les handlers `extern "x86-interrupt"` debutent avec IF=0. Apres un
     // #UD/#GP/#DE/#SS ring 3, on ne revient pas par iretq : `exit_group`
-    // passe par l'ordonnanceur, qui exige IF=1. Le #PF utilisateur a deja
-    // cette remise en route explicite (exceptions.rs, page_fault_handler).
-    // La sonde de faute et le diagnostic sont acheves, sans garde emprunte.
-    x86_64::instructions::interrupts::enable();
+    // attend l'extinction des freres (`attend_extinction_freres` ->
+    // `sleep_ticks_noyau` -> schedule), et l'ordonnanceur exige IF=1 : un
+    // processus multi-fils emportait le noyau (`ordonnancement.rs`,
+    // « commutation demandee interruptions coupees », faute-multifil-probe).
+    // Le #PF utilisateur a deja cette remise en route (page_fault_handler).
+    //
+    // Pourquoi c'est sur ICI, et seulement pour une faute venue du ring 3 :
+    // une exception venue du ring 3 est une trappe SYNCHRONE, comme un appel
+    // systeme. Elle s'execute sur la pile noyau de la tache (RSP0 du TSS :
+    // aucun de ces vecteurs n'a d'IST, `idt.rs`), GS est deja celui du noyau
+    // (`GsGuard`), aucun verrou n'est tenu a ce point (la pile de faute et
+    // le diagnostic sont acheves), et une IRQ qui arrive voit CPL0 : elle
+    // traite ce contexte exactement comme un appel systeme en cours. Une
+    // faute du NOYAU n'arrive jamais ici (ses appelants exigent `from_user`)
+    // -- la condition le rend structurel, et `verifie-preemption-noyau.py` le
+    // garde.
+    if from_user(stack) {
+        x86_64::instructions::interrupts::enable();
+    }
     crate::kernel::task::exit_group(139)
 }
 

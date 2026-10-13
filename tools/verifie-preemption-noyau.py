@@ -22,9 +22,18 @@ Ce garde verifie son CABLAGE et l'invariant structurel dont elle depend :
   4. pas d'IRQ imbriquee PAR CONSTRUCTION : aucune porte de trappe dans
      l'IDT, et les seuls fichiers qui rouvrent IF sont ceux de la liste
      ci-dessous -- tout nouveau site doit etre justifie ici ;
-  5. les compteurs publies par `smpstat`.
+  5. dans les gestionnaires d'exception, CHAQUE reouverture d'IF est gardee
+     par `if from_user(...)` (faute venue du ring 3 : trappe synchrone sur la
+     pile noyau de la tache, comme un appel systeme), et aucun vecteur qui
+     peut rouvrir IF n'a de pile IST (une IST est partagee par le coeur : y
+     dormir la ferait ecraser par la faute suivante) ;
+  6. les compteurs publies par `smpstat`.
 
-Fail-closed ; huit tests negatifs.
+BOUCHAUD_P19_FATAL_USER_IRQ_EXIT_V1 : la V1 de ce garde ne lisait que la
+PREMIERE reouverture du fichier d'exceptions. Une seconde, ajoutee plus bas
+et sans condition, passait. Toutes sont lues desormais (test negatif 9).
+
+Fail-closed ; onze tests negatifs.
 """
 import re
 import sys
@@ -39,14 +48,18 @@ METRIQUES = "src/kernel/process/thread/metriques.rs"
 EXCEPTIONS = "src/arch/x86_64/idt/exceptions.rs"
 TIMER = "src/arch/x86_64/idt/timer.rs"
 SMPF = "src/arch/x86_64/smp.rs"
-FICHIERS = (PREEMPT, PUR, ORDO, METRIQUES, EXCEPTIONS, TIMER, SMPF)
+IDT = "src/arch/x86_64/idt.rs"
+FICHIERS = (PREEMPT, PUR, ORDO, METRIQUES, EXCEPTIONS, TIMER, SMPF, IDT)
+# Les vecteurs dont le gestionnaire peut rouvrir IF (faute venue du ring 3).
+VECTEURS_IF = ("page_fault", "general_protection_fault", "invalid_opcode",
+               "divide_error", "stack_segment_fault")
 
 # Fichier -> pourquoi il peut rouvrir IF. Aucun n'est execute depuis un
 # gestionnaire d'interruption avec IF a rouvrir.
 IF_AUTORISES = {
     "src/arch/x86_64/cpu/idle/lock_park.rs": "idle : sti; hlt",
     "src/arch/x86_64/cpu/idle/scheduler.rs": "idle : sti; hlt",
-    "src/arch/x86_64/idt/exceptions.rs": "faute de page VENUE DE L'ESPACE UTILISATEUR seulement",
+    "src/arch/x86_64/idt/exceptions.rs": "faute VENUE DE L'ESPACE UTILISATEUR seulement (#PF, et sortie fatale #UD/#GP/#DE/#SS/#PF)",
     "src/arch/x86_64/interrupts.rs": "amorcage (BSP, AP)",
     "src/arch/x86_64/pat.rs": "restauration d'un IF leve a l'entree",
     "src/arch/x86_64/smp.rs": "fin d'amorcage, restauration",
@@ -123,9 +136,22 @@ def verifie(racine: Path) -> list[str]:
             fautes.append(f"{revenant} est revenu : le quantum noyau coupe un fil noyau n'importe ou")
 
     e = src[EXCEPTIONS]
-    i = e.find("x86_64::instructions::interrupts::enable();")
-    if i < 0 or "if from_user(&stack) {" not in e[max(0, i - 80):i]:
-        fautes.append(f"{EXCEPTIONS} : IF rouvert dans un gestionnaire hors faute venue de l'espace utilisateur")
+    sites = [m.start() for m in OUVRE_IF.finditer(e)]
+    if not sites:
+        fautes.append(f"{EXCEPTIONS} : la faute de page utilisateur ne rouvre plus IF")
+    for i in sites:
+        avant = e[max(0, i - 80):i]
+        if not re.search(r"if from_user\(&?stack\) \{\s*(x86_64::instructions::)?$", avant):
+            ligne = e.count("\n", 0, i) + 1
+            fautes.append(f"{EXCEPTIONS}:{ligne} : IF rouvert dans un gestionnaire hors faute venue de l'espace utilisateur")
+    idt = src[IDT]
+    for m in re.finditer(r"\.set_stack_index\(", idt):
+        instruction = idt[idt.rfind(";", 0, m.start()) + 1:m.start()]
+        if "IDT.double_fault" not in instruction:
+            fautes.append(f"{IDT} : pile IST hors de la double faute ({instruction.strip()[:60]})")
+    for v in VECTEURS_IF:
+        if not re.search(r"IDT\." + v + r"\.set_handler_fn\(\w+\);", idt):
+            fautes.append(f"{IDT} : {v} n'est plus installe sans IST (forme attendue introuvable)")
     for f in sorted((racine / "src").rglob("*.rs")):
         rel = str(f.relative_to(racine))
         texte = sans_commentaires(f.read_text(encoding="utf-8", errors="replace"))
@@ -176,6 +202,17 @@ def main() -> int:
         (TIMER, "    let interrupted_user = from_user(&stack);\n",
          "    let interrupted_user = from_user(&stack);\n    x86_64::instructions::interrupts::enable();\n"),
         (METRIQUES, "    crate::kernel::scheduler::preempt::log_reveil();\n", ""),
+        # 9. Une seconde reouverture, SANS condition, plus bas que la premiere.
+        (EXCEPTIONS, '    println!("exception: breakpoint (int3) capturee, on continue");\n',
+         '    println!("exception: breakpoint (int3) capturee, on continue");\n'
+         '    x86_64::instructions::interrupts::enable();\n'),
+        # 10. La sortie fatale rouvre IF sans relire l'origine de la faute.
+        (EXCEPTIONS, "    if from_user(stack) {\n        x86_64::instructions::interrupts::enable();\n    }\n",
+         "    x86_64::instructions::interrupts::enable();\n"),
+        # 11. Une pile IST sur un vecteur qui peut rouvrir IF et dormir.
+        (IDT, "IDT.general_protection_fault.set_handler_fn(general_protection_handler);",
+         "IDT.general_protection_fault.set_handler_fn(general_protection_handler)"
+         ".set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);"),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):

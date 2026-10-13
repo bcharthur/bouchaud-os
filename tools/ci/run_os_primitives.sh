@@ -13,6 +13,7 @@ cd tools/userland/out-sondes
 ./sendfile-probe
 ./renommage-probe
 ./faute-noncanonique-probe
+./faute-multifil-probe 1
 ./sigchld-multifil-probe
 ./sigmasque-fil-probe
 ./compta-stress-probe 5
@@ -21,7 +22,7 @@ cd ../../..
 
 SCENARIO=scenario-primitives
 mkdir -p "$SCENARIO/bin"
-for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe sigchld-multifil-probe sigmasque-fil-probe compta-stress-probe mtime-probe persist-course-probe; do
+for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe faute-multifil-probe sigchld-multifil-probe sigmasque-fil-probe compta-stress-probe mtime-probe persist-course-probe; do
   cp "tools/userland/out-sondes/$f" "$SCENARIO/bin/"
 done
 python3 - <<'PY'
@@ -40,6 +41,7 @@ strace echecs
 /bin/sendfile-probe
 /bin/renommage-probe
 /bin/faute-noncanonique-probe
+/bin/faute-multifil-probe 2
 /bin/sigchld-multifil-probe
 /bin/sigmasque-fil-probe
 /bin/compta-stress-probe 30
@@ -94,7 +96,7 @@ tail -c 262144 "$LOG"
 # AVANT les verdicts : un marqueur absent arrete le script (set -e), et
 # c'est justement quand un banc echoue qu'on a besoin de l'horloge.
 awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print substr($0, RSTART, RLENGTH) }' "$LOG"
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK SIGCHLD_MULTIFIL_OK SIGMASQUE_FIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK PERSIST_COURSE_OK \
+for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK 'FAUTE_MULTIFIL_OK essais=16' SIGCHLD_MULTIFIL_OK SIGMASQUE_FIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK PERSIST_COURSE_OK \
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done
