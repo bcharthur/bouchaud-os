@@ -449,6 +449,20 @@ static void imprime_console(u64 onglet, WebView::ConsoleOutput const& sortie)
         });
 }
 
+// BOUCHAUD_P19_NAVIGATION_TRACE_V1 -- une ligne par etape d'une navigation,
+// correlee par onglet et numero de navigation (`nav=`), avec le WebContent qui
+// l'a servie. `[LB:LOAD]` (BouchaudChrome) compte les rappels de chargement,
+// doublons compris : il ne dit ni l'URL ni le processus, et une rafale de
+// `start_duplicate` n'y distingue pas une vraie boucle de navigation d'un
+// rappel repete (P19 : `navigation_requests=3` pour treize `[LB:LOAD]`).
+// Jamais l'URL entiere : l'origine et la longueur du chemin separent une
+// boucle d'une redirection sans publier une adresse privee.
+static void trace_navigation(u64 onglet, u64 nav, StringView evenement, URL::URL const& url, pid_t pid)
+{
+    warnln("[LB:NAV-TRACE] onglet={} nav={} evt={} origine={} chemin_len={} pid={} t_ms={}", onglet, nav, evenement,
+        url.origin().serialize(), url.serialize_path().bytes().size(), pid, MonotonicTime::now().milliseconds());
+}
+
 void BrowserWindow::branche_vue(BouchaudWebView& vue)
 {
     auto const onglet = vue.onglet();
@@ -541,9 +555,20 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         }
         BouchaudChrome::set_title(onglet, texte);
     };
-    vue.on_url_change = [onglet](URL::URL const& url) {
+    vue.on_url_change = [this, onglet, vue_ptr = &vue](URL::URL const& url) {
+        trace_navigation(onglet, m_navigation_de_l_onglet.get(onglet).value_or(0), "commit"sv, url, vue_ptr->client().pid());
         BouchaudChrome::set_committed_url(onglet, url.serialize().to_byte_string());
     };
+    vue.add_navigation_listener({
+        .on_load_start = [this, onglet, vue_ptr = &vue](URL::URL const& url) {
+            auto& nav = m_navigation_de_l_onglet.ensure(onglet, []() -> u64 { return 0; });
+            ++nav;
+            trace_navigation(onglet, nav, "start"sv, url, vue_ptr->client().pid());
+        },
+        .on_load_finish = [this, onglet, vue_ptr = &vue](URL::URL const& url) {
+            trace_navigation(onglet, m_navigation_de_l_onglet.get(onglet).value_or(0), "finish"sv, url, vue_ptr->client().pid());
+        },
+    });
     vue.on_load_start = [onglet] {
         BouchaudChrome::set_loading(onglet, true, "chargement..."sv);
     };
@@ -616,6 +641,8 @@ void BrowserWindow::branche_vue(BouchaudWebView& vue)
         m_webcontent_de_l_onglet.set(onglet, vue_ptr->client().pid());
         warnln("[LB:CRASH] onglet={} webcontent=mort nouveau_pid={} t_ms={}", onglet, vue_ptr->client().pid(),
             MonotonicTime::now().milliseconds());
+        warnln("[LB:NAV-TRACE] onglet={} nav={} evt=crash origine=- chemin_len=0 pid={} t_ms={}", onglet,
+            m_navigation_de_l_onglet.get(onglet).value_or(0), vue_ptr->client().pid(), MonotonicTime::now().milliseconds());
         BouchaudChrome::termine_chargement_anormal(onglet, "moteur arrete"sv, true);
     };
 

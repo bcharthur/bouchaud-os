@@ -94,6 +94,9 @@ private:
     HashTable<u64> m_onglets_repris;
     // Le WebContent courant de chaque onglet (PROCESS_SWAP : ancien -> nouveau).
     HashMap<u64, pid_t> m_webcontent_de_l_onglet;
+    // BOUCHAUD_P19_NAVIGATION_TRACE_V1 : numero de la derniere navigation
+    // demarree, par onglet.
+    HashMap<u64, u64> m_navigation_de_l_onglet;
     RefPtr<Core::Timer> m_quitte_apres;
 
     // Seulement pour les bancs : journal cumulatif, conserve apres
