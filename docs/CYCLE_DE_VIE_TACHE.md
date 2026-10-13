@@ -165,10 +165,16 @@ traitee par le lot suivant (BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1).
 * Une fin de session (`tue_processus`, descendance de la racine) condamne
   sans attendre : un fil qui termine une attente noyau peut encore executer
   du code noyau apres le menage (jamais d'espace utilisateur).
-* Sur le coeur zero, la preemption directe d'une tache utilisateur est
-  differee (`BSP_DEFER_DIRECT_IRQ_PREEMPT_V8`) : un frere condamne qui calcule
-  sans appel systeme sur le BSP ne meurt qu'a son prochain appel. Meme
-  dependance qu'avant ce lot.
+* ~~Sur le coeur zero, la preemption directe d'une tache utilisateur est
+  differee (`BSP_DEFER_DIRECT_IRQ_PREEMPT_V8`)~~ -- RETIRE le 2026-10-13
+  (BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1) : un frere condamne qui calculait sans
+  appel systeme sur le BSP n'y mourait JAMAIS (faute-multifil-probe SMP8 :
+  vivant > 4 min) et, a SMP1, gelait tout l'espace utilisateur. Le coeur zero
+  preempte desormais une tache utilisateur comme les AP ; la mort a la
+  frontiere vaut sur tous les coeurs.
+* Une tache en `pause()` / `rt_sigsuspend` reste prete et n'atteignait pas la
+  frontiere : la boucle relit maintenant la condamnation
+  (BOUCHAUD_SIGSUSPEND_CONDAMNE_V1).
 * Les fins de fichier non livrees apres la mort d'un ecrivain (5 `perdus`
   dans la ligne de base) relevent de la fermeture des descripteurs : phase 9.
 

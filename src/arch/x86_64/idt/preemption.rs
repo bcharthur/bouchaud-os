@@ -16,10 +16,30 @@
 const PREEMPT_SOURCE_TIMER: u8 = 1;
 const PREEMPT_SOURCE_RESCHEDULE: u8 = 2;
 
-/// P0 diagnostic: direct `preempt_from_irq()` is disabled on logical CPU0.
-/// The next syscall return consumes NEED_RESCHED through the existing Linux
-/// dispatcher. AP CPUs keep immediate IRQ preemption.
-pub const BSP_DEFER_DIRECT_IRQ_PREEMPT_V8: bool = true;
+/// P0 diagnostic: direct `preempt_from_irq()` was disabled on logical CPU0.
+/// The next syscall return consumed NEED_RESCHED. AP CPUs kept immediate IRQ
+/// preemption.
+///
+/// BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 -- RETIRE (false).
+///
+/// Le diagnostic a rendu sa reponse : le gel global du bureau n'etait PAS la
+/// preemption directe du BSP, c'etait l'emission serie en hard IRQ (9f7c5cf8,
+/// « fin du gel global »). Le mode restait pourtant actif, avec le cout que
+/// son propre lot annoncait (« une tache CPU-bound sur CPU0 peut avoir une
+/// tranche trop longue ») -- et ce cout n'est pas borne, il est infini :
+///
+///   * un fil qui calcule sans appel systeme sur CPU0 n'y est JAMAIS preempte :
+///     a SMP1, il gele tout l'espace utilisateur (faute-multifil-probe : les
+///     autres fils du processus ne demarrent jamais, aucune faute n'a lieu) ;
+///   * condamne (exit_group d'un frere, SIGKILL), il ne meurt JAMAIS : la mort
+///     « a la frontiere » passe par cette preemption (SMP8 : tid 153 a 100 %
+///     en ring 3 sur CPU0, condamne, vivant > 4 min ; son pere, pret dans la
+///     file du coeur 0, affame pendant que six coeurs dorment).
+///
+/// Le coeur zero preempte donc une tache utilisateur comme les AP. Les
+/// compteurs `[PREEMPT-IRQ]` restent : `bsp_defer=0`, `bsp_deferred` doit
+/// rester nul.
+pub const BSP_DEFER_DIRECT_IRQ_PREEMPT_V8: bool = false;
 
 static PREEMPT_IRQ_REQUESTS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
