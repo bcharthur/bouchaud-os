@@ -27,6 +27,22 @@ class ReliabilityTests(unittest.TestCase):
         findings, _ = scan_text("[LOCKDEP] acquisitions=270 violations=2 max_depth=3\n")
         self.assertEqual(findings[0].kind, "lockdep")
 
+    def test_lockdep_panic_payload_is_reported(self):
+        # Soak 38217842305 : la ligne utile est celle qui SUIT « panicked at ».
+        journal = (
+            "[09:41:27][ 34%:  0%:  1%][FPS: --] *** KERNEL PANIC *** cpu=1\n"
+            "[09:41:27][ 34%:  0%:  1%][FPS: --] panicked at src/kernel/process/thread/courant.rs:276:5:\n"
+            "LOCKDEP inversion cpu=1 held_rank=40 acquiring=scheduler-transition(1) at src/x.rs:1\n"
+        )
+        findings, _ = scan_text(journal)
+        panique = [f for f in findings if "panicked at" in f.text][0]
+        self.assertIn("held_rank=40", panique.context[0])
+        self.assertTrue(any(f.kind == "lockdep" for f in findings))
+
+    def test_lockdep_release_without_acquisition_is_fatal(self):
+        findings, _ = scan_text("LOCKDEP release without acquisition: scheduler-transition\n")
+        self.assertEqual(findings[0].kind, "lockdep")
+
     def test_bkl_uaf_diagnostic_token_is_benign(self):
         findings, _ = scan_text("[BKL-DETACHED] uaf=2 task=1 tid=101 pid=5\n")
         self.assertEqual(findings, ())

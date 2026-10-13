@@ -84,7 +84,7 @@ def run_one(qemu: str, bootimage: Path, cpus: int, seconds: int, memory_mb: int,
         "disque": str(disque_cycle) if disque_cycle is not None else None,
         "log_bytes": scan.bytes,
         "fatal_findings": [
-            {"kind": f.kind, "line": f.line, "text": f.text}
+            {"kind": f.kind, "line": f.line, "text": f.text, "context": list(f.context)}
             for f in scan.findings
         ],
         "required_markers_missing": list(scan.required_markers_missing),
@@ -122,6 +122,8 @@ def main() -> int:
         print(f"{state} SMP{result['cpus']} log={result['log_bytes']} octets timeout={result['timed_out']} rc={result['returncode']}")
         for finding in result["fatal_findings"]:
             print(f"  {finding['kind']}:{finding['line']}: {finding['text']}")
+            for suite in finding.get("context", []):
+                print(f"    | {suite}")
         for marker in result["required_markers_missing"]:
             print(f"  marqueur absent: {marker}")
 

@@ -28,7 +28,12 @@ FATAL_PATTERNS = (
     #   [LOCKDEP] acquisitions=270 violations=0 max_depth=1
     ("lockdep", re.compile(
         r"\bLOCKDEP\b.*(?:\bFATAL\b|\bPANIC\b|\bVIOLATION\b(?!S=0\b)|"
-        r"\bviolations=[1-9][0-9]*\b)|lock order inversion",
+        r"\bviolations=[1-9][0-9]*\b)|lock order inversion|"
+        # Les messages de panique de `kernel::sync::lockdep` eux-memes
+        # (BOUCHAUD_PANIQUE_LISIBLE_V1). Soak 38217842305 : seule la ligne
+        # `panicked at .../courant.rs:276:5` a ete rapportee ; la classe tenue
+        # (`held_rank=`), qui dit QUEL verrou, etait la ligne suivante.
+        r"\bLOCKDEP (?:inversion|release without acquisition|stack overflow)\b",
         re.I,
     )),
     # `uaf=` occurs in BKL detached diagnostics and is not by itself a UAF.
@@ -52,6 +57,10 @@ class Finding:
     kind: str
     line: int
     text: str
+    # Les lignes qui suivent une panique : son message. Bornees.
+    context: tuple[str, ...] = ()
+
+CONTEXTE_PANIQUE = 3
 
 @dataclass(frozen=True)
 class ScanResult:
@@ -75,7 +84,10 @@ def scan_text(
     for number, line in enumerate(lines, 1):
         for kind, pattern in FATAL_PATTERNS:
             if pattern.search(line):
-                findings.append(Finding(kind, number, line[:500]))
+                context: tuple[str, ...] = ()
+                if kind == "kernel_panic" and "panicked at" in line:
+                    context = tuple(l[:500] for l in lines[number:number + CONTEXTE_PANIQUE])
+                findings.append(Finding(kind, number, line[:500], context))
                 break
     missing = tuple(marker for marker in required_markers if marker not in text)
     return tuple(findings), missing

@@ -107,6 +107,8 @@ def main() -> int:
         if not result["ok"]:
             for finding in result["fatal_findings"]:
                 print(f"  {finding['kind']}:{finding['line']}: {finding['text']}")
+                for suite in finding.get("context", []):
+                    print(f"    | {suite}")
             for marker in result["required_markers_missing"]:
                 print(f"  marqueur absent: {marker}")
             if not result["qemu_exit_ok"]:
