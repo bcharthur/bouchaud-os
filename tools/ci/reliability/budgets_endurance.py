@@ -67,7 +67,7 @@ PREFIXE_CONSOLE = re.compile(r"^(?:\[[^\]]*\]){2}\[FPS:[^\]]*\] ")
 # Ce qu'une sonde dit d'une verification ROUGE (`  - nom : detail`), et ses
 # mesures de latence (ordonnanceur-probe).
 LIGNE_ECHEC = re.compile(r"^\s+- \S")
-LIGNE_LATENCE = re.compile(r"^\s+(sans charge|sous charge)[^\n]*median")
+LIGNE_LATENCE = re.compile(r"^\s+(au repos|sans charge|sous charge)[^\n]*median")
 
 
 def details_sondes(texte: str) -> list[list[str]]:
