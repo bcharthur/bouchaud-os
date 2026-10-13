@@ -526,6 +526,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MKDIR => file::sys_mkdir(args[0], args[1] as u32),
         MKDIRAT => file::sys_mkdirat(args[0] as i32, args[1], args[2] as u32),
         UNLINK => file::sys_unlink(args[0]),
+        RMDIR => file::sys_rmdir(args[0]),
         UNLINKAT => file::sys_unlinkat(args[0] as i32, args[1], args[2] as u32),
         RENAME => file::sys_rename(args[0], args[1]),
         RENAMEAT => file::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0),

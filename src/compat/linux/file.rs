@@ -23,6 +23,8 @@ use crate::kernel::task;
 
 /// `AT_FDCWD` : chemin relatif au repertoire courant.
 pub const AT_FDCWD: i32 = -100;
+/// `unlinkat` : retirer un REPERTOIRE (sinon, un fichier).
+pub const AT_REMOVEDIR: u32 = 0x200;
 
 const O_ACCMODE: u32 = 3;
 const O_WRONLY: u32 = 1;
@@ -1948,7 +1950,17 @@ pub fn sys_unlink(path_addr: u64) -> i64 {
     sys_unlinkat(AT_FDCWD, path_addr, 0)
 }
 
-pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
+/// `rmdir`. BOUCHAUD_RMDIR_V1 : l'appel n'etait pas aiguille (ENOSYS) ; musl
+/// `remove()` fait `unlink` puis, sur EISDIR, `rmdir`.
+pub fn sys_rmdir(path_addr: u64) -> i64 {
+    sys_unlinkat(AT_FDCWD, path_addr, AT_REMOVEDIR)
+}
+
+pub fn sys_unlinkat(dirfd: i32, path_addr: u64, flags: u32) -> i64 {
+    if flags & !AT_REMOVEDIR != 0 {
+        return -errno::EINVAL;
+    }
+    let retire_repertoire = flags & AT_REMOVEDIR != 0;
     let raw_path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => path,
         None => return -errno::EFAULT,
@@ -1975,7 +1987,17 @@ pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
             if backing::is_disk_backed(node) {
                 return -errno::EROFS;
             }
-            if fs.nodes[node].kind == NodeKind::Dir && !fs.is_empty_dir(node) {
+            // BOUCHAUD_RMDIR_V1 : la semantique POSIX de `AT_REMOVEDIR`. Le
+            // drapeau etait ignore : `unlink` retirait un repertoire vide, et
+            // `unlinkat(AT_REMOVEDIR)` un fichier.
+            let est_repertoire = fs.nodes[node].kind == NodeKind::Dir;
+            if retire_repertoire && !est_repertoire {
+                return -errno::ENOTDIR;
+            }
+            if !retire_repertoire && est_repertoire {
+                return -errno::EISDIR;
+            }
+            if est_repertoire && !fs.is_empty_dir(node) {
                 return -errno::ENOTEMPTY;
             }
             // BOUCHAUD_MTIME_STABLE_V1 : une entree en moins, le repertoire change.
