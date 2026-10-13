@@ -23,7 +23,7 @@
 | P4 | Défilement asynchrone, chaîne molette | `ea3f7fe5` (06/10) | smoke `6e881bae` (TCG) : chaîne verte | DONE_AT_TCG. Le rouge Nightly était un défaut de banc (`bf4a40b5`) | PENDING |
 | P5 | WebWorker, cycle de vie | `14c6c7ec` (06/10) | robustesse + ordre worker `6e881bae` | DONE_AT_TCG/KVM | PENDING |
 | P6 | Bac à sable, rôles, NNP | `43777a81` (matrice) | os-primitives `6e881bae` : `MATRICE_ROLES_OK` | DONE_AT_TCG (refus réels) | PENDING |
-| P7 | Profil, SQLite, renameat, cache HTTP persistant | `2711537c` ; `aa50aeba` (comptage RAMFS), `c9963ae1` (rmdir) | cache-SQL `4401bcec` ; ATA intégrité TCG/KVM ; `noeuds-churn-probe` (session, TCG) | DONE_AT_TCG/KVM ; coupure d'alimentation non simulée ; RAMFS : panique de comptage corrigée | PENDING |
+| P7 | Profil, SQLite, renameat, cache HTTP persistant | `2711537c` ; `aa50aeba` (comptage RAMFS), `c9963ae1` (rmdir) | cache-SQL `4401bcec` ; ATA intégrité TCG/KVM ; `NOEUDS_CHURN_OK cycles=8000` en invité, os-primitives `7ffedd2b` | DONE_AT_TCG/KVM ; coupure d'alimentation non simulée ; RAMFS : panique de comptage corrigée | PENDING |
 | P8 | Audio LibMedia → `/dev/dsp` | `5f42214e` | AC'97 QEMU seulement | PARTIAL — HDA non écrit | BLOCKED (HDA) |
 | P9 | Multi-WebContent, isolation de site, OOPIF, mémoire | `bc814259` ; `d36e9c72`, `e38d3022`…`d6a39aee` | mémoire `4401bcec` (KVM) : `MEMOIRE_BORNEE`, WebContent phase 2 −772 Kio ; `6e881bae` : −856 Kio | VERIFIED_AT_KVM (`4401bcec`, deux SHA consécutifs) ; robustesse 8/9 à qualifier | PENDING |
 | P10 | GPU | `0e1a5797` (virtio-PCI) | os-primitives TCG/KVM : `GET_DISPLAY_INFO` | BLOCKED (scanout 2D, 3D, AMD non écrits) | BLOCKED |
@@ -35,7 +35,7 @@
 | P16 | Cycle de vie BRDP (`BOUCHAUD_P16_BRDP_LIFECYCLE_V1`, `net/diag_distant`) | `b16a6fd6` | banc jeton BRDP (`9d34d368`) | PARTIAL ; seul marqueur P16 du dépôt | PENDING (RTL8168) |
 | P17 | Reprise IPC Ladybird | patcher `prepare-p17-*` **jamais versionné** (`373e268a`) | — | UNKNOWN : fonctionnalité réelle non retrouvée dans le code versionné | — |
 | P18 | Sous-lots : gardien de services (`P18_SERVICE_GUARDIAN_V1`, `services/gardien.rs`), reprise des fils (`P18_CHILD_RECOVERY_V1`), RX RTL8168 (`P18_RX_*`), auto-guérison réseau, `/proc` dynamique | `b16a6fd6` | crash-services `6e881bae` (KVM) | PARTIAL par sous-lot ; RX physique non prouvé | PENDING |
-| P19 | Crash Guard ring 3 ; ONE-LOADER ; chargement par onglet ; build WSL/CRLF ; cluster zéro 8 pages (feature) | `8e1bdf97` (12/10) | Crash Guard : TCG SMP1/4/8 (session) ; ONE-LOADER : STATIC | EXPERIMENTAL — voir détail | NOT_TESTED |
+| P19 | Crash Guard ring 3 ; ONE-LOADER ; chargement par onglet ; build WSL/CRLF ; cluster zéro 8 pages (feature) | `8e1bdf97` (12/10) | Crash Guard : os-primitives `7ffedd2b` (38448072600) TCG SMP1/SMP4/SMP8 **et KVM SMP4 (24 essais)** ; ONE-LOADER : STATIC | Crash Guard **VERIFIED_AT_KVM** ; ONE-LOADER, cluster 8 pages : EXPERIMENTAL — voir détail | NOT_TESTED |
 
 ## Détail des lots ouverts ou modifiés dans cette session
 
@@ -52,9 +52,12 @@
 - **Garde** : `tools/verifie-preemption-noyau.py` (11 tests négatifs).
 - **Régression** : `tools/userland/faute-multifil-probe.c`,
   `tools/ci/run_faute_multifil.sh`, os-primitives (SMP4 TCG/KVM, SMP1, SMP8).
-- **Preuves** : TCG SMP1/4/8 locales (session) ; KVM : CI à lire.
-- **Limites** : statut de mort toujours SIGSEGV (Linux : SIGILL/SIGFPE) ;
-  #SS non provoqué par la sonde (QEMU TCG).
+- **Preuves** : TCG SMP1/4/8 locales ; CI os-primitives `7ffedd2b`
+  (run 38448072600) : `FAUTE_MULTIFIL_OK` SMP1 (16), SMP4 (16, en invité),
+  SMP8 (16), **KVM SMP4 (24)**, chaque fils tué par le signal Linux exact
+  (SIGILL, SIGFPE, SIGSEGV) depuis `7518bec0`.
+- **Limites** : #SS non provoqué par la sonde (QEMU TCG) ; pas de preuve
+  physique.
 - **Clôture** : CI same-HEAD verte (os-primitives TCG+KVM, Reliability).
 
 ### P19 — ONE-LOADER / chargement par onglet
@@ -84,7 +87,7 @@
 |---|---|---|
 | Panique lockdep `courant.rs:276` (soak 20 min, main `788c5446`, 1/6) | OUVERT, non reproduit : 0/17 local, soak 20 min CI `4401bcec` vert (38442953058) | répéter le soak sur chaque HEAD ; message `held_at=` désormais publié |
 | `ordonnanceur-probe` gain interactif faible en SMP4/8 | INSTRUIT, non corrigé. Hypothèse « réveil interactif sans IPI quand l'occupant est normal » (`reveil.rs::decide` → `DemandeDifferee`) testée : IPI immédiat Interactive→Normale, A/B QEMU-TCG SMP8 (8 passes A, 4 passes B, alternées) : médiane interactive 3,3–4,2 ms (A) contre 3,6–4,6 ms (B), p99 non meilleur, B 1 vérification rouge / 4 → **aucun gain, changement retiré**. Cause la plus probable : 8 vCPU TCG sur 4 cœurs hôtes (l'hôte ordonnance les vCPU). En SMP1 la bande interactive fonctionne (médiane −70 %) | mesurer sous KVM avec vCPU ≤ cœurs hôtes avant tout changement de politique |
-| `ordonnanceur-probe` en endurance hebdo (CI) | CAUSE NOMMÉE (38442965822) : « n'aggrave pas le pire cas » compare deux maxima isolés ; marge de bruit au repos `de64dbf9` | rejouer l'endurance hebdo après push |
+| `ordonnanceur-probe` en endurance hebdo (CI) | **ROUGE, OUVERT** sur `7ffedd2b` (38448087567, tranches de 30 min) malgré la marge de bruit `de64dbf9` : cycles rouges SMP1 1/14, SMP2 1/4, SMP4 1/3, SMP8 1/1. Toujours la même vérification (« n'aggrave pas le pire cas ») : un seul échantillon interactif sur 300 à 6,7–18,8 ms, alors que médiane et p99 interactifs sont meilleurs que la classe normale (SMP8 : p99 aussi rouge, 8 vCPU sur 4 cœurs hôtes). Le quantum vaut 4 ms (`SCHED_QUANTUM_TICKS=4`, 1 000 Hz) : 13 ms en SMP1 dépasse trois quanta, c'est un **vrai retard** (hôte TCG ou section noyau non préemptible), pas une attente par conception → critère **laissé strict**. Fait voisin : `[SCHED-NG-PIRE]` montre au démarrage (t≈1,1–2,5 s, CPU0) des attentes prêtes de 54–89 ms, interactives comme normales | instrumenter la sonde pour dater son pire échantillon et le corréler aux traces noyau (`SCHED-NG-PIRE`, IRQ masquées), puis mesurer sous KVM |
 | BKL | ABSENT (0 acquisition) | ne pas rouvrir |
 | RTL8168 premier bouclage (physique) | OUVERT | TRIGKEY seulement |
 | Compositor remplacé KVM A (`3658af04`) | non revu depuis ; A/B vert à `6e881bae` | surveiller `created=1` dans chaque campagne |
