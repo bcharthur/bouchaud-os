@@ -460,7 +460,7 @@ static void imprime_console(u64 onglet, WebView::ConsoleOutput const& sortie)
 static void trace_navigation(u64 onglet, u64 nav, StringView evenement, URL::URL const& url, pid_t pid)
 {
     warnln("[LB:NAV-TRACE] onglet={} nav={} evt={} origine={} chemin_len={} pid={} t_ms={}", onglet, nav, evenement,
-        url.origin().serialize(), url.serialize_path().bytes().size(), pid, MonotonicTime::now().milliseconds());
+        url.origin().serialize(), url.serialize_path().byte_count(), pid, MonotonicTime::now().milliseconds());
 }
 
 void BrowserWindow::branche_vue(BouchaudWebView& vue)
