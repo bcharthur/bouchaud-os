@@ -231,7 +231,15 @@ fn sys_sigsuspend(set: u64) -> i64 {
             fil.masque_signaux.range(crate::kernel::signal::SignalState::masque_permis(mask));
         }
     }
-    while !task::signal_pending() {
+    // BOUCHAUD_SIGSUSPEND_CONDAMNE_V1 : une tache condamnee (exit_group d'un
+    // frere, kill du processus) reste PRETE ici -- elle cede et attend, elle
+    // ne se bloque pas -- et le tueur la laisse donc mourir « a la frontiere »
+    // (`action_tueur` : Pret -> Frontiere). Cette boucle ne rendait jamais la
+    // main sans signal : la frontiere n'arrivait pas, et `exit_group` attendait
+    // ce fil indefiniment (faute-multifil-probe : faute d'un frere, fil
+    // principal en pause(), processus vivant 30 s jusqu'au SIGKILL du banc).
+    // Condamnee, elle sort : la sortie d'appel systeme la retire.
+    while !task::signal_pending() && !task::condamnee_courante() {
         task::yield_now();
         task::attends_interruption();
     }
