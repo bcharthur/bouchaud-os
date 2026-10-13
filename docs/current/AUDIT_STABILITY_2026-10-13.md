@@ -93,7 +93,19 @@ performance, endurance 10 min TCG, endurance KVM A/B, endurance 20 min KVM
 `cd65aa45` (correctif d'extinction) : **sites réels verts** (la panique
 d'extinction a disparu), smoke, cache/SQL, WPT, mémoire, ordre worker, crash
 des services, piège Compositor, performance verts ; robustesse 8/9 (WCYCLE,
-inchangé). Les autres verdicts de ce SHA sont dans le handoff.
+inchangé). Primitives (dont le nouveau banc d'extinction, SMP1 et SMP4 :
+`EXTINCTION_CONTENTION_BANC_OK`), endurance 10 min TCG, endurance 20 min KVM,
+CI Fast, Integration, Reliability V3 **avec soak 20 min**, IPC, SCM,
+Security : **verts**. Endurance KVM A/B : bras « profil RIP actif » vert ;
+bras « coupé » rouge sur **une** vérification, « chaque cycle conclu
+(?/57) » : le champ `cycles_conclus=` manquait à la ligne
+`HOST_ENDURANCE_FIN`, tronquée par l'entrelacement série
+(`PROFIL_RIP_JETONS_INVALIDES n=53` ; le même bras publie un `p99=17 ms`
+absurde). Indicateurs réels verts (57/57 workers, 57/57 cadres, aucune
+panique ni faute). **Défaut d'analyse du banc**, pas du produit ; le critère
+n'est pas relâché. Correctif à faire dans le banc : émettre
+`cycles_conclus` sur sa propre ligne courte, ou relire la ligne si elle est
+incomplète.
 
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
