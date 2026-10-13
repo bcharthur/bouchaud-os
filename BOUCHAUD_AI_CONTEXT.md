@@ -1,5 +1,12 @@
 # Bouchaud OS — contexte de référence pour humain ou IA
 
+> **Mise à jour du 13 octobre 2026 : lire d'abord
+> [le handoff actif](docs/current/HANDOFF_CLAUDE_ACTIVE.md)**, puis
+> [l'audit de stabilité](docs/current/AUDIT_STABILITY_2026-10-13.md) et
+> [le registre P1→P19](docs/current/P_LOTS_REGISTER.md). Le reste de ce
+> fichier décrit le HEAD `3658af04` du 8 octobre.
+
+
 **Branche :** `claude/ladybird-observability-performance`  
 **HEAD technique testé :** `3658af04f05e04edf732cc086ddc890faaf88c52`  
 **Ladybird upstream :** `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6`  

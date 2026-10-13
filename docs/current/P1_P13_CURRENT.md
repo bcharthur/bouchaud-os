@@ -1,5 +1,10 @@
 # P1 → P13
 
+> **PÉRIMÉ pour le HEAD courant** : ce fichier décrit `3658af04` (8 octobre).
+> État par lot et preuves à jour : [`P_LOTS_REGISTER.md`](P_LOTS_REGISTER.md) ;
+> rouges et correctifs du 13 octobre : [`AUDIT_STABILITY_2026-10-13.md`](AUDIT_STABILITY_2026-10-13.md).
+
+
 | Lot | Sujet | État |
 |---|---|---|
 | P1 | UI Bouchaud / BrowserHost | DONE / QEMU |

@@ -1,10 +1,19 @@
 # Documentation courante Bouchaud OS
 
+> **Reprise : commencer par [`HANDOFF_CLAUDE_ACTIVE.md`](HANDOFF_CLAUDE_ACTIVE.md)**,
+> puis [`AUDIT_STABILITY_2026-10-13.md`](AUDIT_STABILITY_2026-10-13.md) et le
+> [registre des lots P1→P19](P_LOTS_REGISTER.md). `STATUS_CURRENT.md` et
+> `P1_P13_CURRENT.md` décrivent encore le HEAD `3658af04` (8 octobre).
+
+
 Ce dossier est **additif**. Il complète la documentation détaillée déjà
 présente sans la remplacer.
 
 ## Index
 
+- `HANDOFF_CLAUDE_ACTIVE.md` (reprise)
+- `AUDIT_STABILITY_2026-10-13.md`
+- `P_LOTS_REGISTER.md`
 - `STATUS_CURRENT.md`
 - `P1_P13_CURRENT.md`
 - `ARCHITECTURE_CURRENT.md`

@@ -1,5 +1,10 @@
 # État courant
 
+> **PÉRIMÉ pour le HEAD courant** : ce fichier décrit `3658af04` (8 octobre).
+> État par lot et preuves à jour : [`P_LOTS_REGISTER.md`](P_LOTS_REGISTER.md) ;
+> rouges et correctifs du 13 octobre : [`AUDIT_STABILITY_2026-10-13.md`](AUDIT_STABILITY_2026-10-13.md).
+
+
 HEAD technique testé : `3658af04f05e04edf732cc086ddc890faaf88c52`, 8 octobre 2026.
 Le commit de cette mise à jour est documentaire. [Handoff complet et preuves](HANDOFF_CODEX_2026-10-08.md).
 
