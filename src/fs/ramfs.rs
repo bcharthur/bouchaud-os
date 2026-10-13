@@ -390,6 +390,25 @@ impl FileSystem {
         true
     }
 
+    /// Rend un nœud nomme (unlink, rmdir, rm, renommage qui ecrase).
+    ///
+    /// BOUCHAUD_RAMFS_COMPTE_NOEUDS_V1 -- le SEUL chemin de liberation d'un
+    /// nœud, avec `libere_anonyme`. Sept sites ecrivaient `used = false`
+    /// eux-memes : le miroir `USED_NODES_RELAXED`, incremente a chaque
+    /// allocation, n'etait jamais decremente par eux. Il ne faisait que
+    /// monter, jusqu'a l'assertion d'`alloc_node` -- KERNEL PANIC « used-node
+    /// accounting overflow » apres ~4 096 creations cumulees, table pourtant a
+    /// moitie vide (os-primitives 38442948204, persist-course-probe, TCG).
+    pub fn libere_noeud(&mut self, idx: usize) {
+        if idx == 0 || idx >= MAX_NODES || !self.nodes[idx].used {
+            return;
+        }
+        self.nodes[idx].used = false;
+        self.nodes[idx].content = Vec::new();
+        let old = USED_NODES_RELAXED.fetch_sub(1, Ordering::Relaxed);
+        assert!(old != 0, "ramfs: used-node accounting underflow");
+    }
+
     pub fn touch_at(&mut self, parent: usize, name: &str) -> Result<usize, &'static str> {
         if self.nodes[parent].kind != NodeKind::Dir {
             return Err("parent not a directory");

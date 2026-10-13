@@ -1010,8 +1010,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
             if !fs.can(fs.nodes[node].parent, PERM_W) {
                 return errno::ACCES;
             }
-            fs.nodes[node].used = false;
-            fs.nodes[node].content = Vec::new();
+            fs.libere_noeud(node);
             errno::SUCCESS
         },
     )
@@ -1041,7 +1040,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
             if !fs.can(fs.nodes[node].parent, PERM_W) {
                 return errno::ACCES;
             }
-            fs.nodes[node].used = false;
+            fs.libere_noeud(node);
             errno::SUCCESS
         },
     )
@@ -1074,8 +1073,7 @@ fn build_linker(engine: &Engine) -> Linker<HostState> {
                     return errno::EXIST;
                 }
                 // Ecrase le fichier destination, comme rename(2).
-                fs.nodes[dst].used = false;
-                fs.nodes[dst].content = Vec::new();
+                fs.libere_noeud(dst);
             }
             fs.nodes[node].parent = new_parent;
             if !fs.nodes[node].set_name(new_name) {

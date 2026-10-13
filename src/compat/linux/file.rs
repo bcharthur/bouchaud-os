@@ -1981,8 +1981,7 @@ pub fn sys_unlinkat(dirfd: i32, path_addr: u64, _flags: u32) -> i64 {
             // BOUCHAUD_MTIME_STABLE_V1 : une entree en moins, le repertoire change.
             let parent = fs.nodes[node].parent;
             fs.touche(parent);
-            fs.nodes[node].used = false;
-            fs.nodes[node].content = Vec::new();
+            fs.libere_noeud(node);
             0
         }
         Some(_) => -errno::EBUSY,
@@ -2097,8 +2096,7 @@ pub fn sys_renameat2(olddirfd: i32, from_addr: u64, newdirfd: i32, to_addr: u64,
         Action::Rien => 0,
         Action::Deplacer | Action::Remplacer => {
             if let (Action::Remplacer, Some(c)) = (action, cible) {
-                fs.nodes[c].used = false;
-                fs.nodes[c].content = Vec::new();
+                fs.libere_noeud(c);
             }
             // BOUCHAUD_MTIME_STABLE_V1 : les deux repertoires changent.
             let ancien_parent = fs.nodes[s].parent;
