@@ -281,5 +281,5 @@ tools/userland/out-horloge/
 # BOUCHAUD_FAUTE_MULTIFIL_V1 (tools/ci/run_faute_multifil.sh)
 /scenario-faute-multifil/
 /faute-multifil.img
-/serie-faute-multifil.log
+/serie-faute-multifil*.log
 tools/userland/out-faute-multifil/

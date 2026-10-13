@@ -73,6 +73,18 @@ jobs:
         run: |
           tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           BO_QEMU_KVM=1 tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
+        # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
+        # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
+        # survit et le processus meurt. SMP1 met tout sur le coeur zero : un
+        # fil de calcul pur doit y etre preempte, et y mourir condamne.
+        run: |
+          BO_SMP=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
+          cp serie-faute-multifil.log serie-faute-multifil-smp1.log
+          BO_SMP=8 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
+          cp serie-faute-multifil.log serie-faute-multifil-smp8.log
+          BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
+          cp serie-faute-multifil.log serie-faute-multifil-kvm.log
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -90,4 +102,5 @@ jobs:
             serie-horloge-*.log
             serie-ata-integrite-*.log
             serie-virtio-*.log
+            serie-faute-multifil-*.log
           if-no-files-found: warn
