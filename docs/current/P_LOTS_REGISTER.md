@@ -71,13 +71,19 @@
 ### P19 — LibJS `Value.cpp:484`
 
 - Ouvert, cause non établie. Ne pas retirer `VERIFY_NOT_REACHED`.
+- Instrumenté (`BOUCHAUD_LIBJS_VALEUR_DIAGNOSTIC_V1`,
+  `tools/ladybird/prepare-libjs-valeur-diagnostic.py`) : avant l'assertion,
+  une ligne `[LB:JSVALEUR] tag= encodage= famille=vide|accesseur|inconnue pid=`.
+  `vide`/`accesseur` → défaut du moteur (amont) ; `inconnue` → mémoire
+  corrompue (premier suspect : noyau). Vérifié STATIC (clang `-fsyntax-only`
+  sur le fichier patché + contrôle négatif) ; compilation réelle : build CI.
 
 ### Transverses ouverts
 
 | Sujet | État | Preuve / prochaine expérience |
 |---|---|---|
 | Panique lockdep `courant.rs:276` (soak 20 min, main `788c5446`, 1/6) | OUVERT, non reproduit : 0/17 local, soak 20 min CI `4401bcec` vert (38442953058) | répéter le soak sur chaque HEAD ; message `held_at=` désormais publié |
-| `ordonnanceur-probe` gain interactif faible en SMP4/8 | OUVERT (signal réel possible : préemption de réveil inter-cœurs) | 6 passes SMP8 locales ; à instruire |
+| `ordonnanceur-probe` gain interactif faible en SMP4/8 | INSTRUIT, non corrigé. Hypothèse « réveil interactif sans IPI quand l'occupant est normal » (`reveil.rs::decide` → `DemandeDifferee`) testée : IPI immédiat Interactive→Normale, A/B QEMU-TCG SMP8 (8 passes A, 4 passes B, alternées) : médiane interactive 3,3–4,2 ms (A) contre 3,6–4,6 ms (B), p99 non meilleur, B 1 vérification rouge / 4 → **aucun gain, changement retiré**. Cause la plus probable : 8 vCPU TCG sur 4 cœurs hôtes (l'hôte ordonnance les vCPU). En SMP1 la bande interactive fonctionne (médiane −70 %) | mesurer sous KVM avec vCPU ≤ cœurs hôtes avant tout changement de politique |
 | `ordonnanceur-probe` en endurance hebdo (CI) | CAUSE NOMMÉE (38442965822) : « n'aggrave pas le pire cas » compare deux maxima isolés ; marge de bruit au repos `de64dbf9` | rejouer l'endurance hebdo après push |
 | BKL | ABSENT (0 acquisition) | ne pas rouvrir |
 | RTL8168 premier bouclage (physique) | OUVERT | TRIGKEY seulement |

@@ -52,6 +52,9 @@ python3 tools/ladybird/prepare-compositor-memoire.py "$SRC"
 python3 tools/ladybird/prepare-echange-processus.py "$SRC"
 python3 tools/ladybird/prepare-gc-retention-proof.py "$SRC"
 python3 tools/ladybird/prepare-cache-journal.py "$SRC"
+# BOUCHAUD_LIBJS_VALEUR_DIAGNOSTIC_V1 : l'assertion Value.cpp:484 nomme la
+# famille de la valeur (vide / accesseur / inconnue) AVANT de se declencher.
+python3 tools/ladybird/prepare-libjs-valeur-diagnostic.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1
 #
