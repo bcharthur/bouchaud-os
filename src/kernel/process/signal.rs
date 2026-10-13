@@ -42,6 +42,7 @@ pub const SIGINT: u32 = 2;
 pub const SIGQUIT: u32 = 3;
 pub const SIGILL: u32 = 4;
 pub const SIGABRT: u32 = 6;
+pub const SIGBUS: u32 = 7;
 pub const SIGFPE: u32 = 8;
 pub const SIGKILL: u32 = 9;
 pub const SIGSEGV: u32 = 11;
@@ -180,6 +181,7 @@ pub fn name(signal: u32) -> &'static str {
         SIGQUIT => "SIGQUIT",
         SIGILL => "SIGILL",
         SIGABRT => "SIGABRT",
+        SIGBUS => "SIGBUS",
         SIGFPE => "SIGFPE",
         SIGKILL => "SIGKILL",
         SIGSEGV => "SIGSEGV",

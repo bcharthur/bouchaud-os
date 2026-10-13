@@ -206,7 +206,7 @@ impl Drop for GsGuard {
     }
 }
 
-fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+fn kill_faulting_task(reason: &str, signal: u32, stack: &InterruptStackFrame) -> ! {
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
     // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
@@ -270,7 +270,12 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     if from_user(stack) {
         x86_64::instructions::interrupts::enable();
     }
-    crate::kernel::task::exit_group(139)
+    // BOUCHAUD_SIGNAL_DE_FAUTE_V1 : le signal que Linux delivre pour cette
+    // exception (#UD SIGILL, #DE SIGFPE, #SS SIGBUS, #GP/#PF SIGSEGV), pas
+    // SIGSEGV pour toutes : un parent (le navigateur pour ses services) lit
+    // la cause dans `WTERMSIG`. Le code `128 + signal` est l'encodage de mort
+    // par signal que `wait4` relit.
+    crate::kernel::task::exit_group(128 + signal as i32)
 }
 
 /// Balaie au plus 8 Kio de pile utilisateur au-dessus de `rsp` et publie les
@@ -345,7 +350,7 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("faute de protection generale", &stack);
+        kill_faulting_task("faute de protection generale", crate::kernel::signal::SIGSEGV, &stack);
     }
     releve_faute_fatale("GENERAL PROTECTION FAULT", &stack, code);
     panic!("EXCEPTION: general protection fault (code {})\n{:#?}", code, stack);
@@ -365,7 +370,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("instruction illegale", &stack);
+        kill_faulting_task("instruction illegale", crate::kernel::signal::SIGILL, &stack);
     }
     releve_faute_fatale("INVALID OPCODE", &stack, 0);
     panic!("EXCEPTION: instruction illegale\n{:#?}", stack);
@@ -385,7 +390,7 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("division par zero", &stack);
+        kill_faulting_task("division par zero", crate::kernel::signal::SIGFPE, &stack);
     }
     releve_faute_fatale("DIVIDE ERROR", &stack, 0);
     panic!("EXCEPTION: division par zero\n{:#?}", stack);
@@ -405,7 +410,7 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("faute de pile", &stack);
+        kill_faulting_task("faute de pile", crate::kernel::signal::SIGBUS, &stack);
     }
     releve_faute_fatale("STACK SEGMENT FAULT", &stack, code);
     panic!("EXCEPTION: faute de segment de pile (code {})", code);
@@ -486,7 +491,7 @@ extern "x86-interrupt" fn page_fault_handler(
         // Pas de `account_fault_exit` ici : `kill_faulting_task` ne rend pas
         // la main. `install()` reecrira `COMPTA_EN_NOYAU` depuis le
         // `in_kernel` de la tache entrante a la prochaine commutation.
-        kill_faulting_task("faute de page", &stack);
+        kill_faulting_task("faute de page", crate::kernel::signal::SIGSEGV, &stack);
     }
 
     serial_println!("[cpu] page fault @ {:#x} code {:?}", addr, code);

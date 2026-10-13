@@ -25,7 +25,8 @@
  *   nul     #PF  (ecriture a l'adresse 0 ; deja IF=1 dans le noyau)
  *
  * Le pere attend chaque fils au plus 30 s (sondage borne). Exige : chaque
- * fils meurt d'un signal, aucun ne survit, aucun ne sort normalement.
+ * fils meurt du signal que Linux delivre pour cette exception (SIGILL, SIGFPE,
+ * SIGSEGV, SIGSEGV), aucun ne survit, aucun ne sort normalement.
  *
  * Usage : faute-multifil-probe [tours]   (defaut 3)
  * Sortie : FAUTE_MULTIFIL_OK essais=N  ou  FAUTE_MULTIFIL_ECHEC n=...
@@ -44,6 +45,8 @@
 
 enum { UD2, DIV, CLI, NUL, GENRES };
 static const char *const NOMS[GENRES] = { "ud2", "div", "cli", "nul" };
+/* Le signal que Linux delivre pour chaque exception (BOUCHAUD_SIGNAL_DE_FAUTE_V1). */
+static const int SIGNAUX[GENRES] = { SIGILL, SIGFPE, SIGSEGV, SIGSEGV };
 
 static atomic_int prets;
 static int tube[2];
@@ -162,7 +165,7 @@ int main(int argc, char **argv)
                     struct timespec t = { 0, 10 * 1000 * 1000 };
                     nanosleep(&t, NULL);
                 }
-                int ok = r == p && WIFSIGNALED(st);
+                int ok = r == p && WIFSIGNALED(st) && WTERMSIG(st) == SIGNAUX[genre];
                 if (r == 0) {
                     kill(p, SIGKILL);
                     waitpid(p, &st, 0);
