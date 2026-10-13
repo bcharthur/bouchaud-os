@@ -47,6 +47,30 @@ ne fait fauter que des processus mono-fil. La nouvelle sonde
 `faute-multifil-probe` les attrape tous les trois (os-primitives, et étape
 SMP1/SMP8/KVM dédiée).
 
+### 3 bis. Trouvés par la campagne same-HEAD `4401bcec` (et corrigés après)
+
+| BUG | Sévérité | Symptôme | Cause | Preuve avant → après | Commit |
+|---|---|---|---|---|---|
+| RAMFS-CPT | P0 | KERNEL PANIC `ramfs.rs:279` « used-node accounting overflow » (os-primitives TCG, persist-course-probe) | le miroir `USED_NODES_RELAXED` n'était décrémenté par aucun des 7 sites qui libèrent un nœud (unlink, rename écrasant, rm/rmdir shell, WASI) ; panique après ~4 096 créations cumulées | `noeuds-churn-probe` : panique → 8 000 cycles OK (TCG SMP4) | `aa50aeba` |
+| RMDIR | P1 | `rmdir()` → ENOSYS ; `unlink` retirait un répertoire | appel 84 non aiguillé ; `AT_REMOVEDIR` ignoré | sonde : errno 38 → OK | `c9963ae1` |
+| SIG-FAUTE | P2 | toute faute ring 3 tuait par SIGSEGV | `exit_group(139)` fixe | ud2 4, div 8, cli 11, nul 11 (TCG) | `7518bec0` |
+| ENDURANCE | P1 | endurance hebdo rouge | `ordonnanceur-probe` « n'aggrave pas le pire cas » : comparaison de deux maxima isolés (CI SMP1 : p99 2,5× meilleur, pire +1,3 ms) | marge = pire au repos du même run ; la vérification de queue (p99) reste stricte | `de64dbf9` |
+| WCYCLE | à qualifier | robustesse : « processus Ladybird sortis 8/9 » | INCONNU (le banc ne nommait pas le PID) | le banc nomme désormais l'absent | `018da229` |
+
+Campagne `4401bcec` (lue) : CI Fast, Integration, Native IPC, SCM_RIGHTS,
+Security Runtime **verts** ; Reliability V3 matrice SMP1/2/4/8 **verte** ;
+Ladybird : build, smoke, cache/SQL, WPT, sites, crash des services, ordre
+worker, piège Compositor, endurance TCG 10 min, endurance KVM A/B
+(stabilité + performance), performance, **mémoire `MEMOIRE_BORNEE`** (WebContent
+phase 2 −772 Kio, Compositor 2/2/4623 Kio, 20/20 swaps) **verts** ; rouges :
+os-primitives (RAMFS-CPT), robustesse (WCYCLE).
+
+Qualifications longues sur `4401bcec` (lues) : **soak hébergé 20 min vert**
+(Reliability V3 38442953058, job 115457035763 : aucune panique, aucun
+`held_at=` — la panique `courant.rs:276` ne se reproduit toujours pas : 0/1 en
+CI, 0/17 en local) ; **endurance 20 min sous KVM verte** (38442948204, job
+115454974323) — premier passage long après le retrait du report BSP V8.
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |

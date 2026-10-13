@@ -18,18 +18,18 @@
 | Lot | Périmètre réel (vérifié dans le code) | Introduction | Dernière preuve | État | Physique |
 |---|---|---|---|---|---|
 | P1 | UI Bouchaud (`BouchaudBrowserHost`) ; chrome hors WebContent (`BOUCHAUD_UI_CHROME_OWNER browser`, `BOUCHAUD_UI_WEBCONTENT_CHROME 0`) | `0ae5cf42` (06/10) | smoke `6e881bae` (TCG) | DONE_AT_TCG | PENDING |
-| P2 | Compositor → WM, surfaces, cycle de vie, mémoire Compositor | lot LB P1-3 ; `1f4aaefd` (listes retenues) | mémoire `6e881bae` (KVM) : 2 ctx / 2 surfaces / 4623 Kio stables, 20/20 | VERIFIED_AT_KVM (historique) — à requalifier | PENDING |
+| P2 | Compositor → WM, surfaces, cycle de vie, mémoire Compositor | lot LB P1-3 ; `1f4aaefd` (listes retenues) | mémoire `4401bcec` (KVM, session) : 2 ctx / 2 surfaces / 4623 Kio en M0, M1, M2 ; 20/20 ; A/B KVM vert | VERIFIED_AT_KVM (`4401bcec`) | PENDING |
 | P3 | Damage / composition partielle | lot LB P1-3 | smoke `6e881bae` (TCG) | DONE_AT_TCG ; exactitude des régions non mesurée par sonde aux frontières | PENDING |
 | P4 | Défilement asynchrone, chaîne molette | `ea3f7fe5` (06/10) | smoke `6e881bae` (TCG) : chaîne verte | DONE_AT_TCG. Le rouge Nightly était un défaut de banc (`bf4a40b5`) | PENDING |
 | P5 | WebWorker, cycle de vie | `14c6c7ec` (06/10) | robustesse + ordre worker `6e881bae` | DONE_AT_TCG/KVM | PENDING |
 | P6 | Bac à sable, rôles, NNP | `43777a81` (matrice) | os-primitives `6e881bae` : `MATRICE_ROLES_OK` | DONE_AT_TCG (refus réels) | PENDING |
-| P7 | Profil, SQLite, renameat, cache HTTP persistant | `2711537c` | cache-SQL `6e881bae` ; ATA intégrité TCG/KVM | DONE_AT_TCG/KVM ; coupure d'alimentation non simulée | PENDING |
+| P7 | Profil, SQLite, renameat, cache HTTP persistant | `2711537c` ; `aa50aeba` (comptage RAMFS), `c9963ae1` (rmdir) | cache-SQL `4401bcec` ; ATA intégrité TCG/KVM ; `noeuds-churn-probe` (session, TCG) | DONE_AT_TCG/KVM ; coupure d'alimentation non simulée ; RAMFS : panique de comptage corrigée | PENDING |
 | P8 | Audio LibMedia → `/dev/dsp` | `5f42214e` | AC'97 QEMU seulement | PARTIAL — HDA non écrit | BLOCKED (HDA) |
-| P9 | Multi-WebContent, isolation de site, OOPIF, mémoire | `bc814259` ; `d36e9c72`, `e38d3022`…`d6a39aee` | mémoire `6e881bae` : `MEMOIRE_BORNEE`, WebContent phase 2 −856 Kio | VERIFIED_AT_KVM (historique) — à requalifier | PENDING |
+| P9 | Multi-WebContent, isolation de site, OOPIF, mémoire | `bc814259` ; `d36e9c72`, `e38d3022`…`d6a39aee` | mémoire `4401bcec` (KVM) : `MEMOIRE_BORNEE`, WebContent phase 2 −772 Kio ; `6e881bae` : −856 Kio | VERIFIED_AT_KVM (`4401bcec`, deux SHA consécutifs) ; robustesse 8/9 à qualifier | PENDING |
 | P10 | GPU | `0e1a5797` (virtio-PCI) | os-primitives TCG/KVM : `GET_DISPLAY_INFO` | BLOCKED (scanout 2D, 3D, AMD non écrits) | BLOCKED |
 | P11 | WPT | — | `6e881bae` : `LADYBIRD_WPT_OK` | DONE sur corpus courant | n/a |
 | P12 | Documentation / handoff | — | — | PARTIAL : `STATUS_CURRENT` et `P1_P13_CURRENT` décrivent `3658af04` | n/a |
-| P13 | Convergence (verdict unique same-HEAD) | `3658af04` (exigence) | `6e881bae` : Ladybird 16/16 vert **mais** CI Fast + Reliability rouges | PARTIAL — campagne complète au HEAD de session à lire | PENDING |
+| P13 | Convergence (verdict unique same-HEAD) | `3658af04` (exigence) | `4401bcec` : CI Fast, Integration, IPC, Security, Reliability SMP verts ; Ladybird 14/16 (os-primitives : panique ramfs ; robustesse 8/9) | PARTIAL — rejouer après `aa50aeba`… | PENDING |
 | P14 | — | aucun commit, aucun fichier, aucun marqueur | — | **NON_REPÉRÉ** (méthode : `git log --all --grep`, `git grep`, marqueurs) | — |
 | P15 | Forensique des blocages navigateur (`BOUCHAUD_P15_BROWSER_HANG_FORENSICS`, `thread/forensic.rs`) | `b16a6fd6` (28/09) ; `forensic.rs` reconstitué `0e4c6b91` | en service dans tous les bancs (lignes `forensic_syscall_result`) | VERIFIED_AT_TCG (observabilité) ; coût hot-path non mesuré | PENDING |
 | P16 | Cycle de vie BRDP (`BOUCHAUD_P16_BRDP_LIFECYCLE_V1`, `net/diag_distant`) | `b16a6fd6` | banc jeton BRDP (`9d34d368`) | PARTIAL ; seul marqueur P16 du dépôt | PENDING (RTL8168) |
@@ -76,8 +76,9 @@
 
 | Sujet | État | Preuve / prochaine expérience |
 |---|---|---|
-| Panique lockdep `courant.rs:276` (soak 20 min, main `788c5446`, 1/6) | OUVERT, non reproduit (11/11 local) | Reliability V3 `workflow_dispatch` sur la branche |
-| `ordonnanceur-probe` 1/4 en endurance hebdo (CI) | OUVERT, non reproduit local | Endurance `workflow_dispatch` ; le rapport nomme la vérification |
+| Panique lockdep `courant.rs:276` (soak 20 min, main `788c5446`, 1/6) | OUVERT, non reproduit : 0/17 local, soak 20 min CI `4401bcec` vert (38442953058) | répéter le soak sur chaque HEAD ; message `held_at=` désormais publié |
+| `ordonnanceur-probe` gain interactif faible en SMP4/8 | OUVERT (signal réel possible : préemption de réveil inter-cœurs) | 6 passes SMP8 locales ; à instruire |
+| `ordonnanceur-probe` en endurance hebdo (CI) | CAUSE NOMMÉE (38442965822) : « n'aggrave pas le pire cas » compare deux maxima isolés ; marge de bruit au repos `de64dbf9` | rejouer l'endurance hebdo après push |
 | BKL | ABSENT (0 acquisition) | ne pas rouvrir |
 | RTL8168 premier bouclage (physique) | OUVERT | TRIGKEY seulement |
 | Compositor remplacé KVM A (`3658af04`) | non revu depuis ; A/B vert à `6e881bae` | surveiller `created=1` dans chaque campagne |
