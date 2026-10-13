@@ -85,6 +85,16 @@ jobs:
           cp serie-faute-multifil.log serie-faute-multifil-smp8.log
           BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
           cp serie-faute-multifil.log serie-faute-multifil-kvm.log
+      - name: Extinction pendant que des orphelins tiennent le disque -- SMP1 et SMP4 (TCG)
+        # BOUCHAUD_EXTINCTION_FIL_NOYAU_V1 : l'autorun s'eteint depuis le
+        # contexte d'amorcage (aucune tache) ; la persistance y attend des
+        # verrous dormants tenus par des processus encore vivants. Sans fil
+        # noyau d'extinction : panique « parking demande hors de toute tache ».
+        run: |
+          BO_SMP=1 tools/ci/run_extinction_contention.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          cp serie-extinction-contention.log serie-extinction-contention-smp1.log
+          BO_SMP=4 tools/ci/run_extinction_contention.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          cp serie-extinction-contention.log serie-extinction-contention-smp4.log
       - name: Persistance -- un cache qui deborde n'emporte pas /persist (deux demarrages)
         run: tools/ci/run_persist_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Audio -- l'horloge OSS de /dev/dsp avance au rythme du son joue (AC'97 emule)
@@ -103,4 +113,5 @@ jobs:
             serie-ata-integrite-*.log
             serie-virtio-*.log
             serie-faute-multifil-*.log
+            serie-extinction-contention-*.log
           if-no-files-found: warn

@@ -15,6 +15,7 @@
 //! n'avaient rien coupe.
 
 use crate::arch::x86_64::ports::{outb, outw};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// Code passe au peripherique `isa-debug-exit` quand tout s'est bien passe.
 ///
@@ -192,7 +193,51 @@ pub fn shutdown_avec_raison(code: u8, raison: &str) -> ! {
             .unwrap_or(-1),
         crate::kernel::timer::monotonic_ms(),
     );
+    // BOUCHAUD_EXTINCTION_FIL_NOYAU_V1
+    //
+    // L'EXTINCTION DORT PARFOIS, ET DORMIR DEMANDE UNE TACHE.
+    //
+    // `persistance::synchronise` prend un verrou dormant (`TRANSACTION`) puis
+    // le controleur ATA ; contestes, tous deux se garent sur une `WaitQueue`.
+    // L'autorun appelle pourtant l'extinction depuis le contexte d'amorcage,
+    // ou `CURRENT` vaut `NO_TASK` : un processus orphelin qui ecrit encore
+    // sous /persist -- un service Ladybird qui survit au navigateur -- suffit
+    // a faire paniquer la machine au lieu de l'eteindre (sites reels, run
+    // 38475302676 ; `extinction-contention-probe`, SMP1) :
+    //
+    //     panicked at src/kernel/process/thread/blocage.rs:105:5:
+    //     task: parking demande hors de toute tache
+    //
+    // Le bureau a deja la reponse (`window_manager::run`) : le travail qui
+    // peut dormir tourne dans un vrai fil noyau. Ici de meme, et seulement
+    // quand c'est necessaire ET possible : aucune tache courante, coeur zero
+    // (`run_noyau` y epingle son fil), interruptions ouvertes. Partout
+    // ailleurs -- une tache qui demande l'arret, un coeur secondaire --, le
+    // chemin d'avant est garde a la lettre. `run_noyau` ne rend la main que
+    // s'il n'a pas pu creer le fil : l'extinction se fait alors en place,
+    // comme avant, plutot que pas du tout.
+    if crate::kernel::task::try_current().is_none()
+        && crate::arch::x86_64::usermode::cpu_index() == 0
+        && crate::arch::x86_64::cpu::interrupts_enabled()
+    {
+        CODE_EXTINCTION.store(code, Ordering::Release);
+        crate::serial_println!("[kernel] extinction: contexte sans tache, confiee a un fil noyau");
+        let rendu = crate::kernel::task::run_noyau(fil_extinction, "extinction");
+        crate::serial_println!(
+            "[kernel] extinction: fil noyau impossible (rendu={}), extinction en place",
+            rendu
+        );
+    }
     shutdown_interne(code)
+}
+
+/// Le code de sortie transmis au fil d'extinction.
+static CODE_EXTINCTION: AtomicU8 = AtomicU8::new(0);
+
+/// Corps du fil noyau d'extinction : une vraie tache, qui peut attendre un
+/// verrou dormant ou le disque.
+fn fil_extinction() -> ! {
+    shutdown_interne(CODE_EXTINCTION.load(Ordering::Acquire))
 }
 
 /// Extinction dont la raison n'a pas ete transmise.

@@ -283,3 +283,7 @@ tools/userland/out-horloge/
 /faute-multifil.img
 /serie-faute-multifil*.log
 tools/userland/out-faute-multifil/
+/scenario-extinction-contention/
+/extinction-contention.img
+/serie-extinction-contention*.log
+tools/userland/out-extinction-contention/
