@@ -16,6 +16,23 @@ OUT=${2:?usage: run_ladybird_browser_host.sh BOOTIMAGE NATIVE_DIR}
 # de fichier, ni d'URL, ni de comportement.
 SUFFIXE=${BO_SMOKE_SUFFIXE:-}
 
+# BOUCHAUD_BANC_PREREQUIS_V1 -- UN OUTIL DE BANC ABSENT N'EST PAS UN MAILLON
+# PRODUIT ROUGE.
+#
+# Nightly 38378134772 (et 38231350694, 38127619243) : le job n'installait ni
+# `socat` ni `nc`. Sans `socat`, le moniteur QEMU est injoignable : aucune
+# molette n'etait envoyee, en silence, et le verdict accusait le premier
+# maillon du produit (`defilement maillon=wm_vers_navigateur`, WM `souris=0`).
+# Sans `nc`, le second site (guestfwd) n'existe pas. Le banc refuse donc de
+# demarrer sans eux, et le dit -- avant de consommer un demarrage QEMU.
+for outil in socat nc; do
+  if ! command -v "$outil" >/dev/null 2>&1; then
+    echo "banc incomplet : '$outil' absent (moniteur QEMU / second site) -- installer socat et netcat-openbsd" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=banc_prerequis manque=$outil"
+    exit 1
+  fi
+done
+
 for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
   test -f "$OUT/$f"
   file "$OUT/$f"

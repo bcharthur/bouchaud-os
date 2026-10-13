@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 file socat
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
       - name: Cache Cargo noyau
         uses: actions/cache@v4
         with:
