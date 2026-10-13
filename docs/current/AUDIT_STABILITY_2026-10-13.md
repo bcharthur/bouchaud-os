@@ -107,6 +107,17 @@ n'est pas relâché. Correctif à faire dans le banc : émettre
 `cycles_conclus` sur sa propre ligne courte, ou relire la ligne si elle est
 incomplète.
 
+### 3 quater. Campagne `fa387b28` (HEAD de fin de session, lue)
+
+Noyau identique à `c2b17a36` (`cd65aa45` + journal `SESSION_EMPORTE`).
+
+| Verdict | Détail |
+|---|---|
+| **Verts** | CI Fast ; Reliability V3 **avec soak 20 min** (5ᵉ soak vert d'affilée, panique `courant.rs:276` jamais revue) ; Native IPC ; SCM_RIGHTS ; Security ; Ladybird : build, smoke, cache/SQL, WPT, **sites réels**, **robustesse (9/9, première fois)**, mémoire, ordre worker, piège Compositor, performance, endurance 10 min TCG, **endurance KVM A/B**, endurance 20 min KVM |
+| **Rouge — Integration, os-primitives** | `persist-course-probe` (racine, 3 fils) : `PROCESS_FAULT` ×3 au même `rip` (`printf_core+0`, un `push`) avec `cr2=0x45` → `PROCESS_DEATH code=139`. Vert sur `7ffedd2b`, `d466c9ff`, `cd65aa45` ; **non reproduit en local** (12/12, TCG SMP4). Une faute de `push` en `0x45` est incohérente : soupçon d'attribution de faute (`cr2`/`rip`) ou d'état de fil (base FS) — **candidat P0, ouvert** |
+| **Rouge — primitives / audio OSS** | H3a « ODELAY honnête par écritures de 256 trames » : `pire_exces_odelay=7` trames une fois (AC'97 émulé, TCG) ; H1, H2, H3b, H4, H5 verts. Vert sur les SHA précédents ; **ouvert** |
+| **Rouge — crash des services** | 3 vérifications ImageDecoder « pid ? » : la ligne `SERVICE_CRASH_REQUEST ... pid=1<ESC>6...` a été coupée par l'entrelacement série. Le noyau a vu mourir le pid 16 (`PROCESS_DEATH`), le navigateur l'a récolté et relancé (pid 20). **Défaut d'analyse du banc** (même classe que `HOST_ENDURANCE_FIN`) |
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |
