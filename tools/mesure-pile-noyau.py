@@ -103,8 +103,49 @@ def analyse(texte: str):
     return trames, appels
 
 
+# BOUCHAUD_PILE_PROFONDEUR_DETERMINISTE_V1
+#
+# La memoisation de `profondeur_max` retient le resultat d'un noeud des que sa
+# PIRE chaine n'est pas coupee par une recursion -- meme si une autre branche
+# l'a ete. Ce resultat depend donc du chemin d'arrivee, c'est-a-dire de l'ordre
+# de parcours. Cet ordre etait celui d'un `set` : il changeait avec
+# PYTHONHASHSEED, et le garde aussi -- sur un meme binaire, 2 graines vertes
+# sur 8, la chaine `window_manager::boucle` mesuree a 61 288 ou 63 320 octets
+# pour une pile de 61 440. Un garde-fou qui depend d'une graine aleatoire est
+# un faux vert en attente.
+#
+# Le calcul exact (plus longue chaine sans repetition) est exponentiel : un
+# seul cycle du noyau compte 95 fonctions (boite noire, panique, xHCI, serie).
+# Chaque parcours rend une chaine REELLE du graphe d'appels, donc une borne
+# INFERIEURE vraie. On en fait plusieurs, dans des ordres fixes, et on garde la
+# pire : deterministe, et jamais moins severe que le meilleur des parcours.
+ORDRES = 32
+
+
+def ordres_de_parcours(appels):
+    """Les ORDRES tables d'appels, chacune dans un ordre fixe et reproductible."""
+    import random
+    tables = []
+    for k in range(ORDRES):
+        hasard = random.Random(k)
+        table = {}
+        for nom in sorted(appels):
+            fils = sorted(appels[nom])
+            if k == 1:
+                fils.reverse()
+            elif k >= 2:
+                hasard.shuffle(fils)
+            table[nom] = fils
+        tables.append(table)
+    return tables
+
+
 def profondeur_max(trames, appels, depart, vus=None, memo=None):
-    """Profondeur de la pire chaine partant de `depart`, et cette chaine."""
+    """Profondeur de la pire chaine partant de `depart`, et cette chaine.
+
+    `appels` doit etre une table a listes ORDONNEES (voir `ordres_de_parcours`)
+    pour que le resultat soit reproductible.
+    """
     if memo is None:
         memo = {}
     if vus is None:
@@ -182,13 +223,15 @@ def main() -> int:
 
     if args.racine:
         print("PROFONDEUR DES CHAINES DEPUIS LES POINTS D'ENTREE")
-        memo = {}
-        mesures = []
-        for motif in args.racine:
-            for nom in trames:
-                if motif in nom:
-                    total, chaine = profondeur_max(trames, appels, nom, None, memo)
-                    mesures.append((total, nom, chaine))
+        racines = sorted({nom for motif in args.racine for nom in trames if motif in nom})
+        pires = {}
+        for table in ordres_de_parcours(appels):
+            memo = {}
+            for nom in racines:
+                total, chaine = profondeur_max(trames, table, nom, None, memo)
+                if nom not in pires or total > pires[nom][0]:
+                    pires[nom] = (total, chaine)
+        mesures = [(total, nom, chaine) for nom, (total, chaine) in pires.items()]
         mesures.sort(reverse=True)
         vus = set()
         for total, nom, chaine in mesures:
