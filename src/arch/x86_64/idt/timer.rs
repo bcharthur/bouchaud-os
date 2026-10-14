@@ -7,16 +7,22 @@
 // fluide, tandis que les scans/diagnostics lourds sont exclus du hard IRQ BSP
 // lorsque plusieurs CPU sont réellement disponibles.
 /// BOUCHAUD_ATTRIBUTION_REVEIL_V1 : a la sortie du gestionnaire (tous ses
-/// chemins, commutation comprise), la section masquee depuis son entree.
+/// chemins, commutation comprise), la section masquee depuis la derniere
+/// entree d'interruption SUR LE COEUR OU L'ON SORT.
+///
+/// Le coeur est lu A LA SORTIE, pas a l'entree : un gestionnaire qui a
+/// commute ne reprend que lorsque sa tache est reelue -- peut-etre sur un
+/// autre coeur. Le coeur de l'entree designerait alors l'emplacement d'un
+/// autre coeur, et la duree serait fausse (vu en endurance SMP8 : 10 ms
+/// « masquees » imputees au quantum).
 struct SortieIrqMesuree {
-    cpu: usize,
     vecteur: u8,
 }
 
 impl Drop for SortieIrqMesuree {
     fn drop(&mut self) {
         crate::kernel::attribution_reveil::sortie_irq(
-            self.cpu,
+            crate::arch::x86_64::usermode::cpu_index(),
             crate::arch::x86_64::cpu::rdtsc(),
             self.vecteur,
             crate::kernel::timer::cycles_par_ms(),
@@ -31,7 +37,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     let interrupted_user = from_user(&stack);
     let blackbox_cpu = crate::arch::x86_64::usermode::cpu_index();
     crate::kernel::attribution_reveil::entree_irq(blackbox_cpu, entree_tsc);
-    let _sortie_mesuree = SortieIrqMesuree { cpu: blackbox_cpu, vecteur: InterruptIndex::Timer.as_u8() };
+    let _sortie_mesuree = SortieIrqMesuree { vecteur: InterruptIndex::Timer.as_u8() };
     let _blackbox_irq = crate::kernel::blackbox::timer_irq(
         blackbox_cpu,
         stack.instruction_pointer.as_u64(),

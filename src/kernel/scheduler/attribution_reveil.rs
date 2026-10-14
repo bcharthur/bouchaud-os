@@ -371,6 +371,18 @@ pub fn sortie_irq(cpu: usize, tsc: u64, vecteur: u8, cycles_par_ms: u64) {
     note_section_masquee(cpu, debut, tsc, SITE_VECTEUR | vecteur as u64, cycles_par_ms);
 }
 
+/// Commutation faite HORS d'une interruption (`schedule()` volontaire) : la
+/// tache entrante peut reprendre au milieu d'un gestionnaire suspendu sans
+/// qu'aucune entree d'interruption n'ait eu lieu sur ce coeur depuis. Son
+/// `sortie_irq` lirait une entree perimee ; on l'efface, et cette sortie-la
+/// n'est pas mesuree plutot que mal mesuree.
+#[inline]
+pub fn commutation_hors_irq(cpu: usize) {
+    if cpu < CPUS_SUIVIS {
+        ENTREE_IRQ_TSC[cpu].store(0, Ordering::Relaxed);
+    }
+}
+
 /// La section masquee terminee sur `cpu` au plus `fenetre_cyc` avant `tsc`.
 fn section_juste_avant(cpu: usize, tsc: u64, fenetre_cyc: u64) -> (u64, u64) {
     let fin = FIN_MASQUEE_TSC[cpu].load(Ordering::Relaxed);

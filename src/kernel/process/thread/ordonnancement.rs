@@ -393,6 +393,13 @@ fn switch_to(from: usize, to: usize) {
     };
 
     note_commutation_registre(unsafe { (*from_ptr).tid });
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : hors interruption, l'entree d'IRQ de
+    // ce coeur ne concerne pas la tache entrante. Une commutation faite DEPUIS
+    // un gestionnaire a IF baisse (les gestionnaires ne le relevent jamais :
+    // `verifie-preemption-noyau.py`) ; un `schedule()` volontaire, IF leve.
+    if cpu::interrupts_enabled() {
+        crate::kernel::attribution_reveil::commutation_hors_irq(cpu_id);
+    }
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
     complete_switch_handoff();
 }

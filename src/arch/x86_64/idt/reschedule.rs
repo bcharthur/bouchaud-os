@@ -10,7 +10,7 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : section masquee du quantum / de l'IPI.
     let cpu_mesure = crate::arch::x86_64::usermode::cpu_index();
     crate::kernel::attribution_reveil::entree_irq(cpu_mesure, entree_tsc);
-    let _sortie_mesuree = SortieIrqMesuree { cpu: cpu_mesure, vecteur: smp::RESCHEDULE_VECTOR };
+    let _sortie_mesuree = SortieIrqMesuree { vecteur: smp::RESCHEDULE_VECTOR };
     // BOUCHAUD_TIMER_DEUX_MODES_V1
     //
     // Meme frontiere que pour IRQ0, et pour la meme raison : tout ce qui suit

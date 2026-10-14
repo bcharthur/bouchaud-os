@@ -161,3 +161,18 @@ fn sortie_irq_mesure_depuis_l_entree() {
     assert_eq!(m.pire_site, SITE_VECTEUR | 0xf1);
     assert_eq!(m.signalees, 1);
 }
+
+#[test]
+fn une_sortie_apres_commutation_volontaire_n_est_pas_mesuree() {
+    // Un gestionnaire suspendu (il avait commute), repris par un `schedule()`
+    // volontaire : aucune entree d'IRQ recente sur ce coeur. Mesurer depuis
+    // l'entree perimee inventerait une longue section masquee.
+    let _g = GLOBAUX.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = releve_masquage();
+    entree_irq(3, 1_000);
+    commutation_hors_irq(3);
+    sortie_irq(3, 50_000_000, 0xf1, 1_000_000);
+    let m = releve_masquage();
+    assert_eq!(m.pire_cyc, 0);
+    assert_eq!(m.signalees, 0);
+}
