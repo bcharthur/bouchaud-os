@@ -38,6 +38,8 @@ tools/userland/userland-manifest.json
 # deja de la meme nature que `primitives.img` ou `health.img` : un artefact,
 # jamais une source.
 /scenario.img
+# Captures et journaux du banc de scanout virtio-gpu (run_virtio_gpu_scanout.sh)
+/scanout-virtio*/
 
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/

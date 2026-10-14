@@ -73,6 +73,14 @@ jobs:
         run: |
           tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           BO_QEMU_KVM=1 tools/ci/run_virtio_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: P10 -- scanout virtio-gpu 2D, verifie aux pixels (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_GPU_2D_V1 : mire exacte au pixel, 7 refus avec leur
+        # code, bureau presente par virtio-gpu sans BGA et identique au bureau
+        # BGA, repli sans ecran. Scanout 2D seulement : aucune acceleration,
+        # aucune 3D -- P10 n'est pas termine.
+        run: |
+          SCANOUT_SORTIE=$PWD/scanout-virtio tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-virtio-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
         # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
         # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
@@ -112,6 +120,8 @@ jobs:
             serie-horloge-*.log
             serie-ata-integrite-*.log
             serie-virtio-*.log
+            scanout-virtio*/serie-*.log
+            scanout-virtio*/capture-*.ppm
             serie-faute-multifil-*.log
             serie-extinction-contention-*.log
           if-no-files-found: warn
