@@ -423,8 +423,19 @@ Pour mémoire, mesure CI de `e9f94b3e` **avec** LOT_V1, en µs (BGA / virtio) :
 | bande | 1 / 20 | 27 / 64 |
 | tuile | 1 / 20 | 7 / 30 |
 
-La mesure KVM de BARRIERE_V1 viendra du run os-primitives qui suit ce
-correctif.
+La mesure KVM de BARRIERE_V1 **n'existe pas encore**. Les deux campagnes qui
+devaient la produire ont sauté les pas P10 : un rouge du pas série, plus haut
+dans le même job, arrêtait tous les pas suivants.
+
+| SHA | Run | Pas série KVM |
+|---|---|---|
+| `748322af` | 38603003639 | 719/720 lignes |
+| `1413289b` | 38608429652 | 717/720 lignes |
+
+Les pas P10 tournent désormais même après un rouge plus haut
+(`if: !cancelled()`), et le job reste rouge. La cause de ce rouge série est
+corrigée par `BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1`. Aucun chiffre KVM n'est
+donc annoncé ici.
 
 Pixels inchangés, local [QEMU-TCG] :
 
@@ -438,7 +449,8 @@ reste à consolider avant toute 3D :
 
 - une file d'interruptions au lieu du scrutin ;
 - un tampon de présentation double, pour ne plus copier sous le verrou ;
-- la mesure KVM de BARRIERE_V1 (CI, au SHA de ce correctif).
+- la mesure KVM de BARRIERE_V1 : en attente d'une campagne où les pas P10
+  tournent (voir plus haut).
 
 ## 5. Ce que P10 ne prétend pas
 

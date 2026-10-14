@@ -41,6 +41,15 @@ Commits de la session, dans l'ordre :
 | `01f3063a` | **P10** : transfert + flush sous une seule sonnette |
 | `45e761ee` | attribution : section masquée mesurée sur le cœur de sortie |
 | `e9f94b3e` | docs : BGA/virtio, endurance (trois causes) |
+| `80ef1e76` | docs : endurance `1ad75bfc`, robustesse 9/9, registre, handoff |
+| `c97a50af` | **P10** : barrière `VIRTIO_GPU_FLAG_FENCE` sur chaque commande, une seule en vol, réponse jugée (groupement retiré) |
+| `748322af` | docs P10 : barrière, coût mesuré (TCG) |
+| `c80dcd81` | attribution V2 : ventilation de chaque réveil en retard |
+| `4d7e1577` | `ordonnanceur-probe` : QUALIFIE_OK / QUALIFIE_ECHEC / NON_QUALIFIANT, preuve chiffrée (faux vert fermé) |
+| `db82926c` | variante d'IPI au réveil, **désactivée par défaut**, A/B KVM |
+| `1413289b` | jeton série : borne sur l'absence de progrès (insuffisant, voir 2 quater) |
+| `30c7620b` | docs audit §3 septies (rectifié depuis, §3 octies) |
+| *(soir, voir `git log`)* | jeton série : **jamais sans jeton hors panique** (lignes différées) ; **preuve de l'hôte** (temps volé KVM, comptes du fil, enregistreur des sommeils) ; A/B V2 ; CI ; docs |
 
 ## 2. Corrigé pendant la session, avec la preuve
 
@@ -88,6 +97,17 @@ ring 3 ; aucun fil noyau coupé). Inverse un choix de conception explicite
 (`une_tache_ordinaire_ne_coupe_personne`) ; cause n° 3 de l'endurance SMPn.
 Non appliquée.
 
+## 2 quater. Revue du 14 octobre (soir) : P13, A/B, jeton série
+
+Détail et chiffres : `AUDIT_STABILITY_2026-10-13.md` §3 octies.
+
+| Point de la revue | Fait | Preuve | État |
+|---|---|---|---|
+| 1. Méthode de preuve P13 sous KVM, sans attribuer toute absence de tic à QEMU | `BOUCHAUD_PREUVE_HOTE_V1` : temps volé publié par KVM ; absence externe **seulement prouvée**, sinon inexpliquée et comptée contre le noyau ; comptes du fil rangés à l'entrée de chaque sommeil (toute la fenêtre de la sonde) ; neuf limites de mesure écrites | tests hôte (attribution 31, vol 4, verdicts C++ 48) ; gardes ; local TCG : SMP1 2/2 et SMP4 2/2 QUALIFIE_OK ; instrument dans la plage de référence au p95 | CI KVM SMP1/2/4/8 **à lire** |
+| 2. A/B : un bras NON_QUALIFIANT ne compte jamais ; quorum ; AB/BA | `BOUCHAUD_AB_REVEIL_IPI_V2` | `test_ab_reveil_ipi.py` 8 cas ; ancien A/B local rejoué : NON_CONCLUANT | CI KVM SMP4/SMP8 **à lire** ; politique par défaut inchangée |
+| 3. Jeton série : jamais sans jeton hors panique ; détenteur suspendu | `BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1` : lignes différées entières, vidées avant la ligne suivante ; panique seule = disponibilité | modèle hôte du détenteur suspendu 30 s ; banc en invité 3 s (TCG) : 600/600, 6 différées, 0 sans jeton | CI TCG 3 s + KVM 12 s **à lire** |
+| 4. Valider `1413289b` | campagne lue en entier | rouge série KVM (717/720) → corrigé ; pas P10 sautés → tournent désormais après un rouge ; endurance SMP4 QUALIFIE_ECHEC (fenêtre aveugle), SMP8 NON_QUALIFIANT | mesure KVM de BARRIERE_V1 **absente** |
+
 ## 3. P10 — scanout virtio-gpu 2D
 
 Prouvé sous **QEMU-TCG et QEMU-KVM** (os-primitives `585fc0a0`, KVM :
@@ -105,10 +125,11 @@ présentation). Mutation `presente()` sans transfert ni flush → banc rouge.
 1. **S1 `persist-course-probe`** (`cr2=0x45` sur un `push`, `fa387b28`) :
    vert sur `ed3a1bc3` (Integration, os-primitives KVM). Les nouveaux champs
    nommeront la prochaine occurrence.
-2. **Endurance hebdo / `ordonnanceur-probe`** : SMP1/2/4 verts sur `1ad75bfc` ;
-   SMP8 rouge (émulateur + préemption au réveil, décision ouverte). Critère
-   inchangé. La sonde peut aussi passer à vide quand des tics perdus polluent
-   la phase au repos (signalé, non modifié).
+2. **Endurance hebdo / `ordonnanceur-probe`** : sur `1413289b`, SMP1/2
+   verts, SMP4 rouge (QUALIFIE_ECHEC, au moins 1,2 ms de la queue hors de
+   l'instrument d'alors), SMP8 rouge (NON_QUALIFIANT). Sous TCG, rien ne
+   prouve l'hôte : P13 se qualifie sous KVM (pas « méthode de preuve P13 »).
+   SMP8 n'est qualifiable que sur ≥ 8 cœurs libres. Critère inchangé.
 3. **Panique lockdep `courant.rs:276`** : jamais revue.
 4. **LibJS `Value.cpp:484`** : instrumenté, pas observé.
 5. **P8 HDA, P10 3D/AMD** non écrits ; **P14** non repéré ; **P17** non retrouvé.
@@ -116,8 +137,15 @@ présentation). Mutation `presente()` sans transfert ni flush → banc rouge.
 ## 5. Prochaine commande exacte
 
 ```bash
-# Lire la campagne du HEAD poussé (os-primitives : pas « Console serie » KVM,
-# pas « P10 -- scanout virtio-gpu 2D » TCG/KVM ; Ladybird : crash des services)
+# Lire la campagne du HEAD poussé. Dans le job « primitives / probes » :
+#   - « Console serie » : 4 démarrages (TCG, KVM 1 800 o, TCG suspendu 3 s,
+#     KVM suspendu 12 s) -- ligne « bilan : » et lignes_differees/perdues ;
+#   - « P10 -- BGA contre virtio-gpu » (TCG puis KVM) : la mesure KVM de
+#     BARRIERE_V1 ; « P10 -- reponse etrangere », « ATTACH_BACKING sans reponse » ;
+#   - « methode de preuve P13 sous KVM » : un marqueur par topologie
+#     (ORDONNANCEUR_ATTRIBUTION_OK qualifie P13, ORDONNANCEUR_TEMOIN_INSTRUMENT
+#     dit pourquoi pas), lignes « comptes » (prouves, inexpliques, vol_hote) ;
+#   - « A/B » : AB_REVEIL_IPI : CONVAINCANT / NON_CONVAINCANT / NON_CONCLUANT.
 gh api "repos/bcharthur/bouchaud-os/actions/runs?branch=claude/ladybird-observability-performance&per_page=10"
 ```
 
@@ -133,6 +161,8 @@ B=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
 tools/ci/run_virtio_gpu_scanout.sh $B
 tools/ci/run_serie_entrelacement.sh $B            # 3 x 200 lignes
 tools/ci/run_serie_entrelacement.sh $B 6 120 120 1800
+BANC_SUSPENSION_MS=3000 tools/ci/run_serie_entrelacement.sh $B   # detenteur suspendu
+tools/ci/run_ordonnanceur_attribution.sh $B 2 1                  # preuve P13 (TCG : sans preuve de l'hote)
 tools/ci/run_oss_horloge.sh $B
 ```
 

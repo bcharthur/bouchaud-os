@@ -298,33 +298,44 @@ Local [QEMU-TCG] SMP1 :
 | 1 | 2 passes QUALIFIE_OK, en 2 puis 1 tentative ; un témoin dont le pire passe de 6 683 µs (tous) à 3 281 µs (propres) |
 | 2 (appariement restreint à la série) | 2 passes QUALIFIE_OK, en 2 tentatives chacune |
 
-**2. SMP8 : contention de l'émulateur, retard de réveil, politique
-d'élection, séparés.**
+**2. SMP8 : retards répartis par étape — sans preuve de l'hôte.**
+
+> **Rectificatif (revue du 14 octobre, soir).** La première rédaction de ce
+> paragraphe concluait « environ 77 % de contention de l'émulateur ». C'était
+> faux dans sa forme. L'instrument d'alors (V2) classait **externe** toute
+> absence de battement que le noyau n'expliquait pas par une section masquée :
+> il concluait de l'absence d'explication, pas d'une preuve. Ces 77 % sont des
+> absences **non masquées et non prouvées**. Depuis
+> `BOUCHAUD_PREUVE_HOTE_V1` (§3 octies), elles sont classées **inexpliquées**
+> et comptent contre le noyau. Sous TCG, aucune preuve n'existe.
 
 Local [QEMU-TCG] SMP8 : 8 vCPU sur 4 cœurs hôte, 2 passes, 6 tentatives,
-toutes NON_QUALIFIANT. Entre 118 et 145 réveils sur 300 sont contaminés par
-phase sous charge.
+toutes NON_QUALIFIANT. Entre 118 et 145 réveils sur 300 dépassaient le seuil
+de « contamination » de V2 par phase sous charge.
 
-Part de la somme des retards de plus d'1 ms, phase interactive :
+Part de la somme des retards de plus d'1 ms, phase interactive. Les libellés
+« externe » sont ceux de V2, à lire « non masqué, non prouvé » :
 
-| Cause | Part | Réveils > 1 ms |
+| Cause (libellé V2) | Part | Réveils > 1 ms |
 |---|---|---|
-| **élection externe** (le vCPU qui élit absent) | **56,9 %** | 526 |
-| **livraison externe** (PIT absent) | **20,3 %** | 302 |
+| élection « externe » (le vCPU qui élit sans battement) | 56,9 % | 526 |
+| livraison « externe » (PIT sans battement) | 20,3 % | 302 |
 | élection, politique (tâche prête, cœur présent) | 8,5 % | 97 |
 | détection, retard de réveil du noyau | 6,3 % | 86 |
-| reprise, et sa part externe | 2,4 % + 4,7 % | 16 + 44 |
+| reprise, et sa part « externe » | 2,4 % + 4,7 % | 16 + 44 |
 | masquage par le noyau | 0,8 % | 17 |
 
-Le rouge SMP8 sous TCG est donc à environ 77 % de la **contention de
-l'émulateur**. Il n'est pas qualifiable sur ces runners ; la sonde le dit
-désormais (NON_QUALIFIANT) au lieu de rendre un rouge ou un vert.
+Ce que l'on peut affirmer sans preuve de l'hôte : 8 vCPU occupés sur 4 cœurs
+hôte ne peuvent pas tous tourner. Ce que l'on ne peut pas affirmer : que
+chaque absence observée vient de là. La sonde rend NON_QUALIFIANT, ce qui
+n'est ni un vert ni un rouge du noyau.
 
-En SMP1 sous TCG, à l'inverse, le retard sous charge normale est à 80 % la
-**politique d'élection** (29 réveils > 1 ms, pire 1,8 ms), sans contention.
+En SMP1 sous TCG, le retard sous charge normale est à 80 % la **politique
+d'élection** (29 réveils > 1 ms, pire 1,8 ms). Aucune absence n'y est
+mêlée.
 
-La part SMP8 sous **KVM** viendra du bras `defaut` des pas A/B
-d'os-primitives.
+La part SMP8 sous **KVM**, avec preuve de l'hôte, est mesurée par le pas
+« méthode de preuve P13 » d'os-primitives (§3 octies).
 
 **3. Variante expérimentale d'IPI au réveil (`db82926c`, DÉSACTIVÉE par
 défaut).**
@@ -351,6 +362,192 @@ est publiée.
 
 Ce rouge a sauté les pas virtio-gpu de `748322af` (BARRIERE_V1) : leur preuve
 CI est à prendre sur `1413289b`.
+
+### 3 octies. Revue du 14 octobre (soir) — campagne `1413289b`, preuve P13, A/B, jeton série
+
+**Campagne `1413289b`** (lue en entier) :
+
+| Workflow | Run | Résultat |
+|---|---|---|
+| CI Fast | 38608428998 | vert |
+| Integration | 38608429633 | vert |
+| Reliability V3 | 38608429885 | vert |
+| SCM_RIGHTS | 38608429264 | vert |
+| ladybird-native-browser | 38608429652 | **rouge**, détail ci-dessous |
+| Endurance hebdomadaire (30 min/tranche) | 38608465766 | SMP1 et SMP2 **verts** ; SMP4 **rouge** cycle 8 ; SMP8 **rouge** cycle 1 |
+
+Détail de ladybird-native-browser :
+
+- robustesse, endurances 10 min / KVM / 20 min KVM, smoke, wpt, sites réels
+  et performance : verts ;
+- primitives **rouge** au pas série KVM (717/720 lignes, 3 émissions sans
+  jeton) ; les pas P10 et ordonnanceur ont été **sautés**.
+
+Le rouge SMP4 de l'endurance est un **QUALIFIE_ECHEC** sur 299 réveils
+propres sur 300 : p99 interactif 4 048 µs contre 3 217 µs en normal. Le pire
+vu par le noyau, de l'échéance au retour, valait 2 065 µs ; le pire vu par la
+sonde, 5 311 µs. Au moins 1,2 ms de la queue tombait hors de tout instrument
+(fenêtre en ring 3), arrondi compris. L'ancienne sonde ne remesurait rien :
+ce rouge était possible avant aussi. Sous TCG, il n'est attribuable ni au
+noyau ni à l'hôte (voir la méthode ci-dessous).
+
+**1. Méthode de preuve P13 sous KVM (`BOUCHAUD_PREUVE_HOTE_V1`).**
+
+*Preuve positive.* Chaque vCPU demande à KVM de publier son temps volé
+(`MSR_KVM_STEAL_TIME`, détection CPUID `KVMKVMKVM` + fonction 5). C'est la
+`run_delay` de son fil sur l'hôte : le temps où il était prêt sans être
+exécuté. Le noyau la lit à chaque battement (PIT, quantum local).
+
+Une absence de battement est :
+
+| Cause | Condition |
+|---|---|
+| **masquée** | la section masquée qui la clôt en couvre la moitié (le noyau) |
+| **externe** | le vol prouvé en couvre la moitié |
+| **inexpliquée** | ni l'un ni l'autre ; elle compte **contre le noyau** |
+
+Le vol retenu vaut le vol mesuré moins une période, borné par l'absence : il
+peut sous-estimer, jamais excuser trop. Un journal incomplet ne prouve rien,
+et le réveil reste compté. Sous TCG, aucune absence n'est jamais externe.
+
+*Toute la fenêtre de la sonde.* Le noyau tient pour chaque fil des cumuls
+(`ComptesFil`) : externe, inexpliqué et masqué des étapes livraison et
+élection de chaque sommeil, et temps prêt non élu.
+
+À l'**entrée** de chaque sommeil de la sonde, il range six entiers :
+l'échéance, l'instant d'entrée et ces cumuls.
+
+Les absences closes pendant que la sonde tenait son cœur sont rangées par le
+gestionnaire de battement lui-même, pour le seul fil armé (1 024 places,
+atomiques seules), avec l'instant de leur fin et rognées au début de sa
+tranche. Le journal global (256 absences, tous cœurs) débordait en une
+phase de 5 s à SMP4 sous TCG. `/proc/self/fil` rend le tout en fin de
+série.
+
+Deux entrées consécutives encadrent un réveil, retour en ring 3 et lecture
+d'horloge compris. Les sommeils reviennent **dans l'ordre** aux réveils qui
+ont dormi. L'échéance du noyau, dérivée des tics, n'est pas dans l'horloge
+de la sonde quand des tics se perdent : apparier sur elle laissait 183
+sommeils sans réveil sous TCG.
+
+*Verdict.*
+
+- Sous KVM, un réveil n'est écarté que si l'hôte **prouve** l'avoir retardé
+  de plus d'1 ms. Un retard inexpliqué est compté.
+- Sans preuve (TCG), les réveils écartés sont ceux au retard inexpliqué. Un
+  désaccord entre « tous » et « propres » rend NON_QUALIFIANT : jamais OK,
+  jamais un échec imputé.
+- La règle « OK seulement si tous ET propres passent » est inchangée. Une
+  exclusion ne peut donc jamais fabriquer un vert ; elle peut seulement
+  rendre une mesure non qualifiante.
+
+*CI.* Pas « méthode de preuve P13 » d'os-primitives : KVM à SMP1, 2, 4 et
+8, 2 passes chacun. Il exige la preuve de l'hôte à chaque phase, des
+verdicts explicites et aucun échec qualifié.
+
+*Tests.*
+
+| Suite | Contenu |
+|---|---|
+| `test_attribution_reveil` | 30 tests |
+| `test_vol_hote` | 4 |
+| `test_ordonnanceur_verdict.cpp` | 45 vérifications, dont « KVM, 3 réveils inexpliqués → QUALIFIE_ECHEC » et « TCG, les mêmes → NON_QUALIFIANT » ; 5 mutations de la règle, toutes rouges |
+| garde `verifie-sonde-ordonnanceur` | 18 négatifs |
+
+**Limites de la mesure** (ce que la méthode ne voit pas, et dans quel sens
+cela pèse) :
+
+| # | Limite | Effet | Sens |
+|---|---|---|---|
+| 1 | `nanosleep` compte en millisecondes : échéance arrondie, base de 0 à 2 ms (médiane au repos ~1,4 ms) | variance commune aux trois phases | neutre |
+| 2 | Le vol KVM ne couvre pas le temps où le vCPU tourne hors de l'invité (sorties vers QEMU : port série, MMIO), ni le délai d'injection d'un temporisateur dans un vCPU arrêté sur `hlt` | classé « inexpliqué », compté contre le noyau | faux rouge possible, jamais faux vert |
+| 3 | Vol < ~1 ms : aucune absence journalisée (période + 1 ms de tolérance) | ignoré | contre le noyau |
+| 4 | Journal global de 256 absences (ventilation des sommeils) et liste du fil armé de 1 024 absences ; si l'une déborde, la phase est non jugeable | jamais d'exclusion | NON_QUALIFIANT |
+| 5 | La fenêtre d'un réveil va de l'entrée de son sommeil à celle du suivant : elle déborde du calcul de l'échéance suivante (quelques µs) | un vol tombé là écarterait ce réveil | NON_QUALIFIANT au pire |
+| 6 | Un réveil sans sommeil (la sonde était en retard) partage l'intervalle du précédent | ses parts sont celles de l'intervalle | conservateur |
+| 7 | Mesurer perturbe. V1 relisait `/proc/self/fil` après chaque réveil ; V2 parcourait le journal à chaque entrée de sommeil | phase normale gonflée, interactive intacte : biais **vers le vert**. Corrigé : six entiers rangés à l'entrée, journal lu une fois (chiffres ci-dessous) | résidu à confirmer |
+| 8 | Runners GitHub à 4 cœurs : à SMP8, 8 vCPU occupés ne tiennent pas sur 4 cœurs | le vol est prouvé, la phase devient non jugeable au-delà de 15 réveils prouvés ; SMP8 n'est qualifiable que sur ≥ 8 cœurs libres | NON_QUALIFIANT prouvé |
+| 9 | TCG ne publie aucun vol | l'endurance hebdomadaire (TCG) ne qualifie P13 que si aucun retard inexpliqué ne décide | P13 se qualifie sous KVM |
+
+*Coût de l'instrument* (local [QEMU-TCG] SMP1, même environnement, sonde
+d'interface sous 8 calculs, phase normale) :
+
+| Version | Médiane | p95 | Interactif, médiane |
+|---|---|---|---|
+| Sans enregistreur (4 passes, noyaux avant et après) | 5,2–5,7 ms | 8,7–11,1 ms | 1,3–1,5 ms |
+| V1, relecture après chaque réveil | ~7 ms | 45–76 ms | 1,5 ms |
+| V2, journal parcouru à chaque entrée | 7,8 ms | 17 ms | 1,5 ms |
+| **Retenue** (six entiers, journal à la lecture) | 6,0–6,1 ms | 10,8–11,5 ms | 1,5 ms |
+
+Le p95 de la version retenue est dans la plage de référence. La médiane
+reste 0,4 à 0,9 ms au-dessus, sur deux passes : un coût résiduel n'est pas
+exclu.
+
+*Verdicts locaux de l'image finale* ([QEMU-TCG], sans preuve de l'hôte,
+2 passes par topologie) :
+
+| Topologie | Verdicts | Tentatives | Ce que dit la tentative non qualifiante |
+|---|---|---|---|
+| SMP1 | 2 QUALIFIE_OK | 2 | — |
+| SMP4 | 2 QUALIFIE_OK | 4 | « au repos : 16 réveils retardés sans explication sur 300 (plus de 15), aucune preuve de l'hôte », remesurée |
+
+Dans les deux cas : 300 sommeils appariés, journal complet, aucun échec
+qualifié.
+
+L'environnement local a changé en cours de journée (redémarrage du
+conteneur vers 21 h 20) : vers 19 h, la même sonde sur l'ancien noyau donnait
+une médiane de 2,6 à 2,9 ms. Les chiffres ne se comparent qu'au sein d'une
+même session.
+
+**2. A/B de la variante d'IPI (`BOUCHAUD_AB_REVEIL_IPI_V2`).**
+
+- 6 tours, ordre **AB aux tours impairs, BA aux pairs** ; les positions sont
+  imprimées par bras.
+- Une passe **NON_QUALIFIANT n'est comptée pour aucun bras**. Les critères
+  (inchangés) se calculent sur les seuls **tours appariés**, les deux bras
+  qualifiés.
+- Quorum : max(3, 2/3 des tours). En dessous, le verdict est
+  **NON_CONCLUANT**, pas NON_CONVAINCANT.
+- Sous KVM, la preuve de l'hôte est exigée.
+- Rejoué sur l'A/B local du soir, le banc rend NON_CONCLUANT (0 tour
+  apparié). L'ancien banc avait rendu « NON_CONVAINCANT (équité) », calculé
+  sur des bras non qualifiés.
+- Tests : `test_ab_reveil_ipi.py`, 8 cas. Le garde de la variante compte 10
+  négatifs.
+- Politique par défaut **inchangée**.
+
+**3. Jeton série (`BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1`).** Les 3 lignes
+émises sans jeton de `1413289b` venaient de **contextes masqués** (le noyau
+qui journalise une faute), à leur borne courte. La règle de progrès de
+`1413289b` ne couvrait que les appelants interruptibles.
+
+Désormais :
+
+- hors panique, une ligne sans jeton n'est **jamais émise** : borne d'un
+  contexte masqué, renoncement d'un appelant interruptible ou réentrance ;
+- elle est **rangée entière** dans l'anneau de son cœur (4 Kio). Le
+  détenteur suivant vide les anneaux **avant** sa propre ligne, ce qui garde
+  l'ordre de chaque écrivain ;
+- un anneau plein **perd** la ligne, comptée, jamais coupée ;
+- seul le gestionnaire de panique bascule le journal (`passe_en_panique`) :
+  la disponibilité prime alors, et la ligne sort sans jeton (comptée) ;
+- le bilan série publie `lignes_differees`, `lignes_perdues` et
+  `lignes_vidangees`, après vidange.
+
+Tests :
+
+| Test | Résultat |
+|---|---|
+| Hôte, `test_differees` (6) | modèle du détenteur suspendu 30 s au milieu de sa ligne : aucune ligne coupée, 330 lignes différées puis vidées dans l'ordre. Débordement : lignes perdues comptées, jamais coupées. Panique : émission sans jeton, comptée |
+| Garde `verifie-jeton-serie` | 21 négatifs |
+| Banc en invité `serie-detenteur-suspendu` (un fil noyau prend le jeton et le garde, interruptions masquées, au milieu d'une ligne), local [QEMU-TCG] SMP4, 3 s | 600/600 lignes intactes, ligne du détenteur entière, 6 lignes différées puis vidées, 0 sans jeton, 0 perdue |
+| Banc normal | 600/600, 0 différée |
+
+La CI lance aussi 12 s sous KVM, au-delà du plafond de 10 s.
+
+**4. CI.** Les bancs P10 et ordonnanceur d'os-primitives tournent même après
+un rouge plus haut (`if: !cancelled()`) : deux campagnes de suite, un rouge
+série avait masqué la preuve P10. Le job reste rouge. Délai porté à 80 min.
 
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
