@@ -133,6 +133,10 @@ pub struct Task {
     pub reveil_par: EcheanceAtomique,
     /// Son pire reveil de sommeil depuis le dernier `/proc/self/reveil`.
     pub attribution_reveil: crate::kernel::attribution_reveil::Registre,
+    /// BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de ses reveils en
+    /// retard, et la liste de ceux que le temps manquant hors de l'invite a
+    /// contamines.
+    pub ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation,
     entree_noyau: Option<fn() -> !>,
 }
 

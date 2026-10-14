@@ -62,6 +62,7 @@ impl Task {
             reveil_elu_ns: EcheanceAtomique::neuf(0),
             reveil_par: EcheanceAtomique::neuf(0),
             attribution_reveil: crate::kernel::attribution_reveil::Registre::neuf(),
+            ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation::neuf(),
             entree_noyau: None,
         });
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);

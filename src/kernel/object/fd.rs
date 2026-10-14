@@ -601,7 +601,7 @@ fn proc_reveil() -> Vec<u8> {
             format!("{}:{}", l.file(), l.line())
         }
     };
-    format!(
+    let ligne1 = format!(
         "reveils={} pire_total_us={} tardif_us={} attente_us={} reprise_us={} dormi_ms={} tics_vus={} \
          sans_balayage={} cpu={} a_ms={} tardifs_gt_5ms={} attentes_gt_1ms={} sommeils_tics_manquants={} \
          tic_ecart_pire_us={} tic_rip={:#x} tic_ring3={} tic_cpu={} tic_a_ms={} tic_ecarts_gt_2ms={} \
@@ -613,7 +613,37 @@ fn proc_reveil() -> Vec<u8> {
         us(t.pire_ns), t.rip, t.ring3 as u8, t.cpu, t.a_ns / 1_000_000, t.signales,
         cyc_us(m.avant_ecart_cyc), site(m.avant_ecart_site), cyc_us(m.pire_cyc), site(m.pire_site), m.signalees,
         par,
-    ).into_bytes()
+    );
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : seconde ligne, la ventilation des
+    // reveils en retard de plus d'une milliseconde depuis le releve precedent
+    // (`n:somme_us:pire_us` par part, n = reveils dont la part depassait le
+    // seuil), et la liste des reveils CONTAMINES (`echeance_us:externe_us`).
+    let v = crate::kernel::task::current().ventilation_reveil.releve();
+    let (externes, masquees) = crate::kernel::attribution_reveil::absences_comptees();
+    let part = |c: crate::kernel::attribution_reveil::ReleveCompteur| format!("{}:{}:{}", c.n, us(c.somme_ns), us(c.pire_ns));
+    let mut liste = alloc::string::String::new();
+    for (i, (echeance_us, externe_us)) in v.liste[..v.listes].iter().enumerate() {
+        if i > 0 {
+            liste.push(',');
+        }
+        liste.push_str(&format!("{}:{}", echeance_us, externe_us));
+    }
+    if liste.is_empty() {
+        liste.push('-');
+    }
+    let ligne2 = format!(
+        "ventilation seuil_us={} ventiles={} contamines={} incompletes={} livraison_externe={} livraison_masquee={} \
+         detection={} election={} election_externe={} reprise={} reprise_externe={} \
+         absences_externes_boot={} absences_masquees_boot={} liste_tronquee={} liste={}\n",
+        crate::kernel::attribution_reveil::SEUIL_CONTAMINATION_NS / 1000,
+        v.ventiles, v.contamines, v.incompletes,
+        part(v.livraison_externe), part(v.livraison_masquee), part(v.detection), part(v.election),
+        part(v.election_externe), part(v.reprise), part(v.reprise_externe),
+        externes, masquees, (v.contamines as usize > v.listes) as u8, liste,
+    );
+    let mut sortie = ligne1.into_bytes();
+    sortie.extend_from_slice(ligne2.as_bytes());
+    sortie
 }
 
 fn proc_stat_global() -> Vec<u8> {

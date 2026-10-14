@@ -205,6 +205,15 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
         };
         let d = crate::kernel::attribution_reveil::decompose(&mesure);
         current().attribution_reveil.note(&d, mesure.reprise_ns, local_cpu() as u64, current().reveil_par.charge());
+        // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : un retard au-dela du seuil est
+        // ventile (livraison, detection, election, reprise ; externe ou non).
+        if d.total_ns > crate::kernel::attribution_reveil::SEUIL_CONTAMINATION_NS {
+            use crate::kernel::attribution_reveil as ar;
+            let mut absences = [ar::Absence::default(); 16];
+            let (n, incomplet) = ar::absences_entre(mesure.echeance_ns, mesure.reprise_ns, &mut absences);
+            let v = ar::ventile(&mesure, &d, local_cpu() as u32, &absences[..n], incomplet);
+            current().ventilation_reveil.note(&v, mesure.echeance_ns);
+        }
     }
     // Echeance passee sans reveil : annuler le parking (sans effet si un
     // reveilleur l'a deja fait).
