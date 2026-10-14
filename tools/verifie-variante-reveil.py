@@ -12,7 +12,11 @@ Regles :
   3. la variante ne pose jamais de demande ciblee : son bras dans
      `publish_ready` appelle `request_cpu`, jamais `demande_ciblee` (aucun
      domaine de preemption des fils noyau) ;
-  4. la CI mesure l'A/B sous KVM.
+  4. la CI mesure l'A/B sous KVM ;
+  5. BOUCHAUD_AB_REVEIL_IPI_V2 : l'A/B alterne l'ordre (AB aux tours impairs,
+     BA aux pairs) ; seules les passes QUALIFIEES comptent, par tours
+     APPARIES, avec un quorum -- sinon NON_CONCLUANT ; sous KVM, la preuve de
+     l'hote est exigee.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -27,6 +31,8 @@ FICHIERS = {
     "shell": RACINE / "src/shell/mod.rs",
     "test": RACINE / "tools/smp/test_reveil_cible.rs",
     "flux": RACINE / ".github/workflows/os-primitives.yml",
+    "ab": RACINE / "tools/ci/run_ab_reveil_ipi.sh",
+    "analyse": RACINE / "tools/ci/analyse_ab_reveil_ipi.py",
 }
 INTERRUPTEUR = ("static VARIANTE_IPI_INTERACTIVE: core::sync::atomic::AtomicBool = "
                 "core::sync::atomic::AtomicBool::new(false);")
@@ -63,8 +69,19 @@ def verifie(t: dict, sources_src: str) -> list:
     if "preempt::request_cpu(target)" not in b or "demande_ciblee" in b or "smp::reschedule_cpu(target)" not in b:
         fautes.append("creation.rs : le bras de la variante pose une demande ciblee ou n'envoie pas son IPI.")
     if t["flux"].count("BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh") != 2 \
-            or not re.search(r"BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh \S+ \d+ 8\n", t["flux"]):
+            or not re.search(r"BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh \S+ \d+ 8( \|\| r=1)?\n", t["flux"]):
         fautes.append("os-primitives.yml : l'A/B de la variante n'est plus mesure sous KVM (SMP4 et SMP8).")
+    ab, an = t["ab"], t["analyse"]
+    if 'if [ $((t % 2)) = 1 ]; then ordre="defaut ipi-interactive"; else ordre="ipi-interactive defaut"; fi' not in ab \
+            or "    for v in $ordre; do" not in ab:
+        fautes.append("run_ab_reveil_ipi.sh : l'ordre des bras n'alterne plus (AB/BA).")
+    if 'r["qualifie"] = r["verdict"] in ("QUALIFIE_OK", "QUALIFIE_ECHEC")' not in an \
+            or 'v[D]["qualifie"] and v[X]["qualifie"]' not in an:
+        fautes.append("analyse_ab_reveil_ipi.py : une passe NON_QUALIFIANT peut compter, ou un bras non apparie.")
+    if "quorum = max(3, math.ceil(2 * tours / 3))" not in an or "if len(paires) < quorum:" not in an:
+        fautes.append("analyse_ab_reveil_ipi.py : plus de quorum de tours apparies (NON_CONCLUANT).")
+    if 'if nom == "kvm" and r["preuve"] != {"kvm-steal"}:' not in an or "kvm-steal-time=on" not in ab:
+        fautes.append("A/B : sous KVM, la preuve de l'hote n'est plus exigee.")
     return fautes
 
 
@@ -97,6 +114,14 @@ def main() -> int:
         ("test", "assert_eq!(decide(&cible, &ordinaire()), Decision::DemandeDifferee);\n}",
          "assert_eq!(decide(&cible, &ordinaire()), Decision::DemandeAvecIpi);\n}"),
         ("flux", "BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh", "tools/ci/run_ab_reveil_ipi.sh"),
+        # 5 : toujours defaut d'abord
+        ("ab", 'else ordre="ipi-interactive defaut"; fi', 'else ordre="defaut ipi-interactive"; fi'),
+        # 5 : un NON_QUALIFIANT compte
+        ("analyse", 'r["qualifie"] = r["verdict"] in ("QUALIFIE_OK", "QUALIFIE_ECHEC")', 'r["qualifie"] = r["verdict"] is not None'),
+        # 5 : plus de quorum
+        ("analyse", "if len(paires) < quorum:", "if len(paires) < 1:"),
+        # 5 : sous KVM, sans preuve
+        ("analyse", 'if nom == "kvm" and r["preuve"] != {"kvm-steal"}:', 'if False:'),
     ]
     for n, (cle, a, b) in enumerate(negatifs, 1):
         if a not in t[cle]:
