@@ -683,6 +683,38 @@ fn expand_vars(seg: &str) -> String {
 /// `ordo-variante [defaut|ipi-interactive]` : affiche (et bascule) la variante
 /// de reveil. Sans argument, n'affiche que l'etat. Ligne serie lisible par
 /// les bancs A/B.
+// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- banc : `serie-detenteur-suspendu
+// <attente_ms> <duree_ms>` lance un fil noyau qui attend `attente_ms`, puis
+// prend le jeton serie et le garde `duree_ms` interruptions masquees, au
+// milieu d'une ligne (un processeur virtuel retire par l'hote). Rend la main
+// tout de suite.
+static SUSPENSION_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SUSPENSION_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn serie_detenteur_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+    SUSPENSION_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
+    SUSPENSION_DUREE_MS.store(lis(2, 3000).min(30_000), Ordering::Relaxed);
+    if !crate::kernel::task::spawn_noyau(fil_detenteur_suspendu, "serie-suspendu") {
+        crate::println!("serie-detenteur-suspendu : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+fn fil_detenteur_suspendu() -> ! {
+    use core::sync::atomic::Ordering;
+    let attente = SUSPENSION_ATTENTE_MS.load(Ordering::Relaxed);
+    let duree = SUSPENSION_DUREE_MS.load(Ordering::Relaxed);
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    let pris = crate::drivers::serial::banc_detenteur_suspendu(duree);
+    crate::serial_println!("SERIE_DETENTEUR_SUSPENDU_FAIT pris={} duree_ms={}", pris as u8, duree);
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
 fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
     if argc >= 2 {
@@ -778,6 +810,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),
+        "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

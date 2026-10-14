@@ -283,11 +283,12 @@ impl TamponFormat {
         Self { donnees: [0; FORMAT_BUFFER_SIZE], len: 0 }
     }
 
+    /// Emet le contenu sous le jeton serie, puis vide le tampon.
     fn vide(&mut self) {
         if self.len == 0 {
             return;
         }
-        ecris_octets(&self.donnees[..self.len]);
+        sous_jeton(&self.donnees[..self.len]);
         self.len = 0;
     }
 }
@@ -301,7 +302,7 @@ impl fmt::Write for TamponFormat {
                 // du jeton, le debordement ne doit pas sortir sans lui
                 // (BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1). La ligne sort en
                 // morceaux de 2 Kio, chacun entier.
-                sous_jeton(|| self.vide());
+                self.vide();
             }
             let place = self.donnees.len() - self.len;
             let n = place.min(reste.len());
@@ -376,6 +377,134 @@ static RENONCES_PLAFOND: AtomicU64 = AtomicU64::new(0);
 static RENONCES_RELANCES: AtomicU64 = AtomicU64::new(0);
 static ATTENTE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 static ECHEANCES_RENOUVELEES: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : hors panique, une ligne sans jeton
+// n'est jamais emise -- elle est rangee entiere dans l'anneau de son coeur,
+// et le prochain detenteur du jeton la vide avant sa propre ligne.
+const DIFFEREES_OCTETS: usize = 4096;
+static DIFFEREES: [super::differees::Anneau<DIFFEREES_OCTETS>; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { super::differees::Anneau::neuf() }; crate::arch::x86_64::smp::MAX_CPUS];
+static LIGNES_DIFFEREES: AtomicU64 = AtomicU64::new(0);
+static LIGNES_PERDUES: AtomicU64 = AtomicU64::new(0);
+static LIGNES_VIDANGEES: AtomicU64 = AtomicU64::new(0);
+static EN_PANIQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// `(differees, perdues faute de place, vidangees)` depuis le demarrage.
+pub fn lignes_differees() -> (u64, u64, u64) {
+    (
+        LIGNES_DIFFEREES.load(Ordering::Relaxed),
+        LIGNES_PERDUES.load(Ordering::Relaxed),
+        LIGNES_VIDANGEES.load(Ordering::Relaxed),
+    )
+}
+
+/// Le gestionnaire de panique bascule le journal : desormais la
+/// disponibilite prime sur l'integrite (`attente::repli`).
+pub fn passe_en_panique() {
+    EN_PANIQUE.store(true, Ordering::Release);
+}
+
+/// Vide, sous le jeton, les lignes differees de tous les coeurs (fin
+/// d'autorun, avant le bilan). Sans jeton a la borne, elles restent rangees.
+pub fn vidange_differees() {
+    if is_ready() {
+        sous_jeton(&[]);
+    }
+}
+
+/// Detenteur du jeton (ou panique) : les lignes differees, dans l'ordre de
+/// chaque coeur, chacune entiere.
+fn vide_differees() {
+    for anneau in DIFFEREES.iter() {
+        if !anneau.est_vide() {
+            let n = anneau.vide(ecris_octets);
+            LIGNES_VIDANGEES.fetch_add(n as u64, Ordering::Relaxed);
+        }
+    }
+}
+
+/// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- banc : un detenteur SUSPENDU.
+///
+/// Prend le jeton comme `sous_jeton`, ecrit la moitie d'une ligne, puis le
+/// garde `duree_ms` interruptions masquees sans rien emettre -- ce qu'est,
+/// vu de l'invite, un processeur virtuel que l'hote a retire au milieu d'une
+/// ligne --, en servant les shootdowns TLB qui l'attendent. Puis il finit sa
+/// ligne et rend le jeton. Pendant ce temps, aucune autre ligne ne doit sortir
+/// (`tools/ci/run_serie_entrelacement.sh`, mode `suspendu`). Rend `false` si le
+/// jeton n'a pas pu etre pris en une seconde.
+pub fn banc_detenteur_suspendu(duree_ms: u64) -> bool {
+    if !is_ready() {
+        return false;
+    }
+    let ouvertes = x86_64::instructions::interrupts::are_enabled();
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(BORNE_SANS_PROGRES_NS_BANC);
+    loop {
+        attend_jeton_libre(echeance);
+        x86_64::instructions::interrupts::disable();
+        let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+        if EMISSION.compare_exchange(0, moi, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            break;
+        }
+        if ouvertes {
+            x86_64::instructions::interrupts::enable();
+        }
+        if crate::kernel::timer::monotonic_ns() > echeance {
+            return false;
+        }
+    }
+    vide_differees();
+    ecris_octets(b"SERIE_DETENTEUR_SUSPENDU debut ");
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree_ms.saturating_mul(1_000_000));
+    while crate::kernel::timer::monotonic_ns() < fin {
+        crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+        core::hint::spin_loop();
+    }
+    let mut ligne = [0u8; 64];
+    let n = {
+        use core::fmt::Write;
+        let mut t = TamponPile { octets: &mut ligne, n: 0 };
+        let _ = write!(t, "et fin, tenu {} ms\n", duree_ms);
+        t.n
+    };
+    ecris_octets(&ligne[..n]);
+    EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);
+    EMISSION.store(0, Ordering::Release);
+    if ouvertes {
+        x86_64::instructions::interrupts::enable();
+    }
+    true
+}
+
+const BORNE_SANS_PROGRES_NS_BANC: u64 = 1_000_000_000;
+
+struct TamponPile<'a> {
+    octets: &'a mut [u8],
+    n: usize,
+}
+
+impl fmt::Write for TamponPile<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let b = s.as_bytes();
+        let k = b.len().min(self.octets.len() - self.n);
+        self.octets[self.n..self.n + k].copy_from_slice(&b[..k]);
+        self.n += k;
+        Ok(())
+    }
+}
+
+/// Range la ligne dans l'anneau de CE coeur. Interruptions masquees : un seul
+/// ecrivain par anneau.
+fn differe(octets: &[u8]) {
+    if octets.is_empty() {
+        return;
+    }
+    let cpu = crate::arch::x86_64::smp::cpu_index().min(DIFFEREES.len() - 1);
+    if DIFFEREES[cpu].range(octets) {
+        LIGNES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        LIGNES_PERDUES.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Pourquoi les emissions a la borne ont renonce au jeton :
 /// `(contexte masque, sans progres, plafond absolu, relances)`, la pire
@@ -478,7 +607,7 @@ pub fn _print(args: fmt::Arguments) {
     let mut sortie = TamponFormat::neuf();
     let _ = sortie.write_fmt(args);
 
-    sous_jeton(|| sortie.vide());
+    sortie.vide();
 }
 
 /// BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 -- la sortie d'un `write(2)` userland,
@@ -503,15 +632,17 @@ pub fn ecris_lignes(octets: &[u8]) {
     while !reste.is_empty() {
         let n = super::lots::longueur_ligne(reste, FORMAT_BUFFER_SIZE);
         let (ligne, suite) = reste.split_at(n);
-        sous_jeton(|| ecris_octets(ligne));
+        sous_jeton(ligne);
         reste = suite;
     }
 }
 
-/// Emet sous le jeton serie : interruptions masquees, jeton tenu par ce
-/// contexte du debut a la fin de `emet` (voir EMISSION).
-fn sous_jeton<F: FnOnce()>(emet: F) {
-    use super::attente::{a_l_echeance, Echeance, Renonce, BORNE_SANS_PROGRES_NS};
+/// Emet `octets` sous le jeton serie : interruptions masquees, jeton tenu par
+/// ce contexte du debut a la fin de la ligne (voir EMISSION). Sans le jeton,
+/// la ligne est differee entiere -- jamais emise hors panique
+/// (BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1). `octets` vide : vidange seule.
+fn sous_jeton(octets: &[u8]) {
+    use super::attente::{a_l_echeance, repli, Echeance, Renonce, Repli, BORNE_SANS_PROGRES_NS};
     let ouvertes = x86_64::instructions::interrupts::are_enabled();
     let debut_attente = crate::kernel::timer::monotonic_ns();
     let mut echeance = debut_attente.saturating_add(BORNE_SANS_PROGRES_NS);
@@ -520,7 +651,7 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
     // Plafond de retours dans la file, pour finir meme si l'horloge n'avance
     // pas encore (meme raison que le plafond de tours de la file).
     let mut relances = 0u32;
-    let pris = loop {
+    let issue = loop {
         // BOUCHAUD_SERIE_ATTENTE_DATEE_V1 : la file d'attente se fait AVANT de
         // masquer, sans rien tenir (voir `attend_jeton_libre`) ; la phase
         // masquee ne couvre que la course finale.
@@ -530,10 +661,11 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
         x86_64::instructions::interrupts::disable();
         // Relu a chaque tour : interruptions ouvertes, la tache a pu migrer.
         let moi = crate::arch::x86_64::smp::cpu_index() + 1;
-        // Attente BORNEE : le port sert aussi aux paniques et aux interruptions ;
-        // une ligne entrelacee vaut mieux qu'une machine qui se tait. Mais un
-        // appelant interruptible ne s'y resout qu'a l'echeance datee : avant,
-        // une course perdue le renvoie dans la file (COURSE_MASQUEE).
+        // Attente BORNEE : le port sert aussi aux paniques et aux
+        // interruptions. Un appelant interruptible ne renonce qu'a
+        // l'echeance datee : avant, une course perdue le renvoie dans la
+        // file (COURSE_MASQUEE). Renoncer ne veut plus dire emettre sans le
+        // jeton : voir `attente::repli`.
         let maintenant = crate::kernel::timer::monotonic_ns();
         let mut requeue = ouvertes && relances < 100_000 && maintenant < echeance;
         // BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : echeance passee. Si d'autres ont
@@ -574,7 +706,7 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
             core::hint::spin_loop();
         };
         match issue {
-            Some(pris) => break pris,
+            Some(pris) => break Some(pris),
             // Course perdue, rien n'est tenu : rouvrir et refaire la queue.
             None if requeue => {
                 relances += 1;
@@ -582,7 +714,6 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
                 continue;
             }
             None => {
-                EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
                 let cause = match (ouvertes, renonce) {
                     (false, _) => &RENONCES_MASQUEES,
                     (true, Some(Renonce::SansProgres)) => &RENONCES_SANS_PROGRES,
@@ -590,7 +721,7 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
                     (true, None) => &RENONCES_RELANCES,
                 };
                 cause.fetch_add(1, Ordering::Relaxed);
-                break false;
+                break None;
             }
         }
     };
@@ -598,19 +729,39 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
         let attente = crate::kernel::timer::monotonic_ns().saturating_sub(debut_attente);
         ATTENTE_PIRE_NS.fetch_max(attente, Ordering::Relaxed);
     }
-    // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : la ligne s'emet interruptions
-    // masquees. A SMP1 rien ne peut la preempter : sa duree est un retard
-    // impose a toute tache prete. On la mesure (pire, et combien > 2 ms).
-    let debut_emission = crate::kernel::timer::monotonic_ns();
-    emet();
-    let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_emission);
-    EMISSION_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
-    if duree > EMISSION_LONGUE_NS {
-        EMISSIONS_LONGUES.fetch_add(1, Ordering::Relaxed);
-    }
-    if pris {
-        EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);
-        EMISSION.store(0, Ordering::Release);
+    // Interruptions masquees jusqu'a la fin : rien ne s'intercale.
+    match issue {
+        Some(true) => {
+            // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : la ligne s'emet interruptions
+            // masquees. A SMP1 rien ne peut la preempter : sa duree est un
+            // retard impose a toute tache prete. On la mesure (pire, et
+            // combien > 2 ms). Les lignes differees passent AVANT : l'ordre de
+            // chaque ecrivain est garde.
+            let debut_emission = crate::kernel::timer::monotonic_ns();
+            vide_differees();
+            ecris_octets(octets);
+            let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_emission);
+            EMISSION_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
+            if duree > EMISSION_LONGUE_NS {
+                EMISSIONS_LONGUES.fetch_add(1, Ordering::Relaxed);
+            }
+            EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);
+            EMISSION.store(0, Ordering::Release);
+        }
+        // BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : sans le jeton -- borne d'un
+        // contexte masque, renoncement d'un appelant interruptible, ou
+        // reentrance sur le coeur qui le tient (la ligne en cours serait
+        // coupee) --, la ligne n'est JAMAIS emise hors panique.
+        Some(false) | None => match repli(EN_PANIQUE.load(Ordering::Acquire)) {
+            Repli::Differe => differe(octets),
+            Repli::EmetSansJeton => {
+                if !octets.is_empty() {
+                    EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
+                }
+                vide_differees();
+                ecris_octets(octets);
+            }
+        },
     }
     if ouvertes {
         x86_64::instructions::interrupts::enable();

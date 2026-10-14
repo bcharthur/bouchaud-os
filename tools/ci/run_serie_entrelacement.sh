@@ -13,6 +13,13 @@
 # melangee octet contre octet au prefixe d'une ligne du noyau.
 #
 # BO_SMP : coeurs (4 par defaut). BO_QEMU_KVM=1 : sous KVM.
+#
+# BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- BANC_SUSPENSION_MS=N : un fil noyau
+# prend le jeton 1,5 s apres le depart et le garde N ms interruptions masquees,
+# au milieu d'une ligne (un processeur virtuel retire par l'hote). Exige : sa
+# ligne entiere, aucune ligne sans jeton, des lignes differees puis videes.
+# Au-dela de ce que les anneaux tiennent (BANC_PERDUES_ADMISES=1), une ligne
+# peut manquer -- comptee perdue par le noyau --, jamais etre coupee.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_serie_entrelacement.sh BOOTIMAGE [ECRIVAINS LIGNES PROCESSUS CHARGE]}
@@ -34,11 +41,15 @@ rm -rf "$SCENARIO" "$IMAGE" "$LOG" tools/userland/out-serie-entrelacement
 (cd tools/userland && OUT=out-serie-entrelacement ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp tools/userland/out-serie-entrelacement/serie-entrelacement-probe "$SCENARIO/bin/"
-printf '/bin/serie-entrelacement-probe %s %s %s %s\necho SERIE_ENTRELACEMENT_AUTORUN_FIN\n' \
-  "$ECRIVAINS" "$LIGNES" "$PROCESSUS" "$CHARGE" > "$SCENARIO/autorun"
+SUSPENSION=${BANC_SUSPENSION_MS:-0}
+{
+  if [ "$SUSPENSION" -gt 0 ]; then echo "serie-detenteur-suspendu 1500 $SUSPENSION"; fi
+  printf '/bin/serie-entrelacement-probe %s %s %s %s\necho SERIE_ENTRELACEMENT_AUTORUN_FIN\n' \
+    "$ECRIVAINS" "$LIGNES" "$PROCESSUS" "$CHARGE"
+} > "$SCENARIO/autorun"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
-echo "SERIE_ENTRELACEMENT smp=${SMP} accel=${ACCEL} ecrivains=${ECRIVAINS} lignes=${LIGNES} processus=${PROCESSUS} charge=${CHARGE}"
+echo "SERIE_ENTRELACEMENT smp=${SMP} accel=${ACCEL} ecrivains=${ECRIVAINS} lignes=${LIGNES} processus=${PROCESSUS} charge=${CHARGE} suspension_ms=${SUSPENSION}"
 : > "$LOG"
 # shellcheck disable=SC2086
 qemu-system-x86_64 $ACCEL \
@@ -64,8 +75,22 @@ exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo 
 exige "aucune panique noyau" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$LOG'"
 exige "la sonde a fini, tous ses ecrivains a zero" grep -aq "SERIE_ENTRELACEMENT_FIN ecrivains=$ECRIVAINS lignes=$LIGNES processus=$PROCESSUS ecrivains_en_echec=0" "$LOG"
 exige "le noyau a ecrit pendant ce temps (fautes voulues)" grep -aq 'PROCESS_FAULT' "$LOG"
-exige "toutes les lignes intactes" python3 tools/ci/analyse_serie_entrelacement.py "$LOG" "$ECRIVAINS" "$LIGNES" "$CHARGE"
+ADMISES=""
+[ "${BANC_PERDUES_ADMISES:-0}" = 1 ] && ADMISES=--perdues-admises
+exige "toutes les lignes intactes" python3 tools/ci/analyse_serie_entrelacement.py "$LOG" "$ECRIVAINS" "$LIGNES" "$CHARGE" $ADMISES
 exige "aucune ligne emise sans le jeton ni en reentrance" grep -aqE 'BOUCHAUD_SERIE_BILAN emissions_a_la_borne=0 emissions_reentrees=0' "$LOG"
+# Le bilan lui-meme, pour le journal du job.
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_SERIE_BILAN' | tail -1 | sed 's/^.*BOUCHAUD_SERIE_BILAN/  bilan :/'
+if [ "${BANC_PERDUES_ADMISES:-0}" = 1 ]; then
+  exige "chaque ligne differee est videe ou comptee perdue" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=([0-9]+) lignes_perdues=[0-9]+ lignes_vidangees=\1'"
+else
+  exige "aucune ligne differee perdue, toutes videes avant le bilan" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=([0-9]+) lignes_perdues=0 lignes_vidangees=\1'"
+fi
+if [ "$SUSPENSION" -gt 0 ]; then
+  exige "le detenteur suspendu a tenu le jeton ${SUSPENSION} ms" grep -aq "SERIE_DETENTEUR_SUSPENDU_FAIT pris=1 duree_ms=${SUSPENSION}" "$LOG"
+  exige "sa ligne est sortie entiere" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | tr -d '\r' | grep -aqE '\] SERIE_DETENTEUR_SUSPENDU debut et fin, tenu ${SUSPENSION} ms\$'"
+  exige "la suspension a force des lignes differees" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=[1-9]'"
+fi
 if [ "$echecs" -eq 0 ]; then
   echo "SERIE_ENTRELACEMENT_BANC_OK"
 else

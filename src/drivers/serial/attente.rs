@@ -67,3 +67,35 @@ pub fn a_l_echeance(maintenant_ns: u64, debut_ns: u64, emissions_vues: u64, emis
         emissions_vues: emissions,
     }
 }
+
+/// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- ce que fait un appelant qui n'a pas
+/// obtenu le jeton : contexte masque a sa borne courte, appelant
+/// interruptible qui renonce (`a_l_echeance`), reentrance sur le coeur qui
+/// tient deja le jeton.
+///
+/// os-primitives 1413289b, KVM SMP4 (run 38608429652) : 717 lignes sur 720,
+/// `emissions_a_la_borne=3` -- la borne renouvelable de V1 ne couvrait pas
+/// les contextes MASQUES (le noyau qui journalise une faute de processus),
+/// dont la borne courte (quelques millisecondes) tombe sous la duree d'une
+/// ligne de 1 800 octets sous KVM. Emettre sans le jeton a la borne, c'etait
+/// casser la ligne d'un autre pour sauver la sienne.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Repli {
+    /// Fonctionnement normal : l'integrite des lignes prime. La ligne est
+    /// rangee ENTIERE dans l'anneau du coeur (`differees`) ; le prochain
+    /// detenteur du jeton vide les anneaux avant sa propre ligne. Un anneau
+    /// plein perd la ligne -- comptee, jamais entrelacee.
+    Differe,
+    /// Panique : la disponibilite du journal prime. Le detenteur est peut-
+    /// etre mort ; la ligne sort sans le jeton (comptee).
+    EmetSansJeton,
+}
+
+/// Le repli d'un appelant sans jeton. Pure.
+pub fn repli(panique: bool) -> Repli {
+    if panique {
+        Repli::EmetSansJeton
+    } else {
+        Repli::Differe
+    }
+}

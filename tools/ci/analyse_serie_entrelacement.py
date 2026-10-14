@@ -3,12 +3,17 @@
 
 BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1
 
-    analyse_serie_entrelacement.py JOURNAL_SERIE ECRIVAINS LIGNES [CHARGE]
+    analyse_serie_entrelacement.py JOURNAL_SERIE ECRIVAINS LIGNES [CHARGE] [--perdues-admises]
 
 Une ligne est INTACTE si, apres le prefixe de journal eventuel, elle est
 exactement celle que la sonde a ecrite (charge utile recalculee, numero repete
 en fin de ligne). Tout le reste est une ligne coupee ou melangee.
 Sortie 0 si les ECRIVAINS*LIGNES lignes sont toutes intactes, 1 sinon.
+
+BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : `--perdues-admises` (detenteur suspendu
+plus longtemps que les anneaux ne tiennent) admet des lignes MANQUANTES, a
+condition que le noyau les ait comptees perdues (`lignes_perdues` du bilan) ;
+une ligne coupee n'est jamais admise.
 """
 import re
 import sys
@@ -19,6 +24,8 @@ def attendue(e, n, octets):
 
 
 def main(argv):
+    perdues_admises = "--perdues-admises" in argv
+    argv = [a for a in argv if a != "--perdues-admises"]
     if len(argv) not in (4, 5):
         print(__doc__, file=sys.stderr)
         return 2
@@ -45,9 +52,17 @@ def main(argv):
     intactes = len({(e, n) for (e, n) in vues if e < ecrivains and n < lignes})
     bilan = re.findall(r"BOUCHAUD_SERIE_BILAN emissions_a_la_borne=(\d+) emissions_reentrees=(\d+)", texte)
     bornes = bilan[-1] if bilan else ("?", "?")
-    verdict = "OK" if intactes == total and not abimees else "ECHEC"
+    perdues = re.findall(r"BOUCHAUD_SERIE_BILAN .*? lignes_differees=(\d+) lignes_perdues=(\d+) lignes_vidangees=(\d+)", texte)
+    differees, perdues_n, vidangees = (int(x) for x in perdues[-1]) if perdues else (-1, -1, -1)
+    manquantes = total - intactes
+    if perdues_admises:
+        complet = perdues_n >= 0 and manquantes <= perdues_n
+    else:
+        complet = intactes == total
+    verdict = "OK" if complet and not abimees else "ECHEC"
     print(f"SERIE_ENTRELACEMENT_{verdict} intactes={intactes}/{total} abimees={len(abimees)} "
-          f"emissions_a_la_borne={bornes[0]} emissions_reentrees={bornes[1]}")
+          f"emissions_a_la_borne={bornes[0]} emissions_reentrees={bornes[1]} "
+          f"lignes_differees={differees} lignes_perdues={perdues_n} lignes_vidangees={vidangees}")
     for brute in abimees[:3]:
         print("  abimee : " + brute[:200].encode("unicode_escape").decode("ascii"))
     return 0 if verdict == "OK" else 1

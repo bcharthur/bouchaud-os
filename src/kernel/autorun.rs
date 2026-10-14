@@ -73,14 +73,21 @@ pub fn run_if_present() {
     // echeances renouvelees parce que d'autres emettaient.
     let (masquees, sans_progres, plafond, relances, attente_pire_ns, renouvelees) =
         crate::drivers::serial::renonces();
+    // BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : les lignes differees sortent
+    // AVANT le bilan, qui dit combien l'ont ete, combien ont ete perdues
+    // (anneau plein) et combien sont sorties.
+    crate::drivers::serial::vidange_differees();
+    let (differees, perdues, vidangees) = crate::drivers::serial::lignes_differees();
     crate::serial_println!(
         "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={} emission_masquee_pire_us={} emissions_masquees_plus_de_2ms={} \
-         renonces_masquees={} renonces_sans_progres={} renonces_plafond={} renonces_relances={} attente_pire_ms={} echeances_renouvelees={}",
+         renonces_masquees={} renonces_sans_progres={} renonces_plafond={} renonces_relances={} attente_pire_ms={} echeances_renouvelees={} \
+         lignes_differees={} lignes_perdues={} lignes_vidangees={}",
         crate::drivers::serial::emissions_a_la_borne(),
         crate::drivers::serial::emissions_reentrees(),
         pire_ns / 1000,
         longues,
         masquees, sans_progres, plafond, relances, attente_pire_ns / 1_000_000, renouvelees,
+        differees, perdues, vidangees,
     );
     vga::set_serial_mirror(false);
 

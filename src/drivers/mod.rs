@@ -87,6 +87,8 @@ pub mod serial {
     pub mod lots;
     #[path = "attente.rs"]
     pub mod attente;
+    #[path = "differees.rs"]
+    pub mod differees;
     #[path = "uart16550.rs"]
     mod uart16550;
     pub use uart16550::*;
