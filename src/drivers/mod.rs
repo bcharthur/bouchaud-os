@@ -7,6 +7,8 @@
 
 #[path = "audio/ac97.rs"]
 pub mod ac97;
+#[path = "audio/ac97_position.rs"]
+pub mod ac97_position;
 #[path = "block/ata.rs"]
 pub mod ata;
 #[path = "block/ata_bloc.rs"]

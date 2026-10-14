@@ -58,12 +58,10 @@ const NABM_GLOB_STA: u16 = 0x30;
 const CR_RUN: u8 = 0x01;
 const CR_RESET: u8 = 0x02;
 
-// Bits de `PO_SR`.
-const SR_DCH: u16 = 0x01; // le moteur DMA s'est arrete
-const SR_CELV: u16 = 0x02; // l'index courant est le dernier valide
-
-/// Nombre de descripteurs de la liste. Le materiel en impose 32.
-const DESCRIPTEURS: usize = 32;
+// Bits de `PO_SR` (`SR_DCH`, `SR_CELV`) et nombre de descripteurs (32, impose
+// par le materiel) : dans `ac97_position`, avec le releve coherent de la
+// position du moteur (BOUCHAUD_AC97_POSITION_COHERENTE_V1).
+use crate::drivers::ac97_position::{self as position, DESCRIPTEURS};
 
 /// Echantillons (paires gauche/droite) par tampon.
 ///
@@ -362,28 +360,31 @@ impl Ac97 {
             / FREQUENCE_NATIVE as usize
     }
 
+    /// Releve coherent de la position du moteur : `CIV`, `SR`, `PICB`, puis
+    /// `CIV` relu (BOUCHAUD_AC97_POSITION_COHERENTE_V1, voir `ac97_position`).
+    unsafe fn position(&self) -> position::Position {
+        let nabm = self.nabm;
+        position::lit_position(|registre| unsafe {
+            match registre {
+                position::Registre::Civ => inb(nabm + NABM_PO_CIV) as u16,
+                position::Registre::Sr => inw(nabm + NABM_PO_SR),
+                position::Registre::Picb => inw(nabm + NABM_PO_PICB),
+            }
+        })
+    }
+
     /// Trames natives que le materiel doit encore jouer.
+    ///
+    /// UN releve sert a la recolte ET au calcul : relire `CIV` entre les deux
+    /// laissait compter entier un descripteur deja joue, et le delai remontait
+    /// sans rien d'ecrit (H3a, `pire_exces_odelay=7`).
     unsafe fn trames_en_vol(&mut self) -> usize {
-        self.recolte();
         if !self.pret || self.en_vol == 0 {
             return 0;
         }
-        // Les descripteurs en vol, du plus ancien -- celui que le materiel joue
-        // -- au plus recent.
-        let premier = self.ecriture.wrapping_sub(self.en_vol) % DESCRIPTEURS;
-        let mut total = 0usize;
-        for k in 0..self.en_vol {
-            total += self.reelles[(premier + k) % DESCRIPTEURS] as usize;
-        }
-        // Le descripteur courant est entame : `PICB` compte les echantillons
-        // de 16 bits qui lui restent.
-        let courant = inb(self.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
-        if courant == premier {
-            let restants = inw(self.nabm + NABM_PO_PICB) as usize / 2;
-            let deja = (self.reelles[premier] as usize).saturating_sub(restants);
-            total = total.saturating_sub(deja);
-        }
-        total
+        let p = self.position();
+        self.recolte_selon(p);
+        position::trames_en_vol(&self.reelles, self.ecriture, self.en_vol, p)
     }
 
     unsafe fn libres(&mut self) -> usize {
@@ -519,25 +520,19 @@ impl Ac97 {
         if !self.pret || !self.en_lecture || self.en_vol == 0 {
             return;
         }
-        let etat = inw(self.nabm + NABM_PO_SR);
-        let courant = inb(self.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
-        let ecriture = self.ecriture % DESCRIPTEURS;
-        // BOUCHAUD_AC97_HORLOGE_V1 : le moteur s'arrete DE LUI-MEME apres le
-        // dernier descripteur valide (DCH + CELV), et `CIV` reste POINTE sur
-        // lui. La distance CIV -> ecriture vaut alors 1 alors que tout est
-        // joue : un descripteur restait compte en vol pour toujours, le delai
-        // ne revenait jamais a zero et `SYNC` ne pouvait pas finir.
-        let tout_joue = etat & SR_DCH != 0
-            && etat & SR_CELV != 0
-            && inw(self.nabm + NABM_PO_PICB) == 0
-            && (courant + 1) % DESCRIPTEURS == ecriture;
-        let occupes = if tout_joue {
-            0
-        } else if ecriture >= courant {
-            ecriture - courant
-        } else {
-            DESCRIPTEURS - courant + ecriture
-        };
+        let p = self.position();
+        self.recolte_selon(p);
+    }
+
+    /// La recolte d'apres un releve deja fait. BOUCHAUD_AC97_HORLOGE_V1 : le
+    /// moteur arrete apres le dernier descripteur valide (DCH + CELV) garde
+    /// `CIV` POINTE sur lui -- `position::occupes` le compte comme joue, sans
+    /// quoi le delai ne revenait jamais a zero et `SYNC` ne finissait pas.
+    fn recolte_selon(&mut self, p: position::Position) {
+        if !self.pret || !self.en_lecture || self.en_vol == 0 {
+            return;
+        }
+        let occupes = position::occupes(self.ecriture, p);
         if occupes < self.en_vol {
             let premier = self.ecriture.wrapping_sub(self.en_vol) % DESCRIPTEURS;
             for k in 0..(self.en_vol - occupes) {
@@ -559,23 +554,26 @@ impl Ac97 {
 /// ni ralentir sans qu'on l'entende, l'image si.
 pub fn position_echantillons() -> u64 {
     let mut etat = ETAT.lock();
-    unsafe {
-        etat.recolte();
-        if !etat.pret {
-            return 0;
-        }
-        if etat.en_vol == 0 {
-            return etat.echantillons_joues;
-        }
-        let premier = etat.ecriture.wrapping_sub(etat.en_vol) % DESCRIPTEURS;
-        let courant = inb(etat.nabm + NABM_PO_CIV) as usize % DESCRIPTEURS;
-        if courant != premier {
-            return etat.echantillons_joues;
-        }
-        let restants = inw(etat.nabm + NABM_PO_PICB) as u64 / 2;
-        etat.echantillons_joues
-            .saturating_add((etat.reelles[premier] as u64).saturating_sub(restants))
+    if !etat.pret {
+        return 0;
     }
+    if etat.en_vol == 0 || !etat.en_lecture {
+        return etat.echantillons_joues;
+    }
+    // Un seul releve pour la recolte et le descripteur entame
+    // (BOUCHAUD_AC97_POSITION_COHERENTE_V1) : l'horloge ne recule jamais.
+    let p = unsafe { etat.position() };
+    etat.recolte_selon(p);
+    if etat.en_vol == 0 {
+        return etat.echantillons_joues;
+    }
+    let premier = etat.ecriture.wrapping_sub(etat.en_vol) % DESCRIPTEURS;
+    if p.civ != premier {
+        return etat.echantillons_joues;
+    }
+    let restants = p.picb as u64 / 2;
+    etat.echantillons_joues
+        .saturating_add((etat.reelles[premier] as u64).saturating_sub(restants))
 }
 
 /// Vide la file : tout ce qui n'est pas encore joue est abandonne.
