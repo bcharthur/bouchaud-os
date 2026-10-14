@@ -21,6 +21,14 @@ p19-tcg-low-latency = []
 # reglage a l'execution laisserait la possibilite de l'armer par accident. Voir
 # `platform/pc/banc_io.rs` et `tools/ci/run_trigkey_ladybird_io_stress.sh`.
 banc-io = []
+# BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1).
+#
+# Le `RESOURCE_ATTACH_BACKING` du scanout du bureau part VERS le peripherique
+# (sonnette tiree), puis l'attente est declaree echue : exactement le cas ou
+# le peripherique a pu retenir l'adresse sans qu'on le sache. La memoire doit
+# etre conservee. Option de compilation, jamais dans `default` : voir
+# `tools/ci/run_virtio_gpu_dma_panne.sh`.
+banc-virtio-gpu-sans-reponse = []
 
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).

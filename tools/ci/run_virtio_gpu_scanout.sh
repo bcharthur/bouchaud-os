@@ -131,6 +131,11 @@ exige "bureau virtio vivant : l'horloge avance a l'ecran (presentations partiell
 MESURE=$(propre "$SORTIE/serie-virtio.log" | grep -a '\[GUI-VIRTIO-GPU\]' | tail -1 || true)
 echo "  mesure  ${MESURE:-aucune ligne [GUI-VIRTIO-GPU]}"
 exige "presentations virtio : aucune en echec, au moins une reussie" bash -c "echo '$MESURE' | grep -qE 'presents_ok=[1-9][0-9]* presents_echec=0 .* actif=1'"
+# BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1 : le compositeur presente depuis sa
+# tache, sans verrou tournant tenu -- il prend le verrou dormant (jamais de
+# presentation sautee) et peut ceder pendant l'attente.
+exige "presentations virtio : aucune sautee faute de verrou" bash -c "echo '$MESURE' | grep -qE ' sautes=0 cedes=[0-9]+ non_cedables=[0-9]+'"
+exige "aucune attente non cedable DANS une tache (verrou tournant tenu par un appelant)" bash -c "! grep -aq 'VIRTIO_GPU_ATTENTE non_cedable_en_tache' '$SORTIE'/serie-*.log"
 exige "ni BGA ni virtio : present() inactif, dit" grep -aq 'present() inactif (scanout=aucun)' "$SORTIE/serie-aucun.log"
 exige "aucune panique, aucun abandon du scanout" bash -c "! grep -aqE 'KERNEL PANIC|panicked at|VIRTIO_GPU_SCANOUT_ABANDON|VIRTIO_GPU_ECHEC' '$SORTIE'/serie-*.log"
 if [ "$echecs" -eq 0 ]; then

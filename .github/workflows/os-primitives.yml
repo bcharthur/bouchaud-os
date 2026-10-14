@@ -121,6 +121,18 @@ jobs:
           BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 120 120 1800 || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm.log
           exit $r
+      - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
+        # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
+        # part vers QEMU, puis l'attente est declaree echue. La memoire doit
+        # rester hors de l'allocateur (etat Inconnue), le bureau se replier,
+        # sans panique. DERNIER pas : il reconstruit l'image avec l'option, les
+        # pas precedents ont teste l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-sans-reponse
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -137,4 +149,5 @@ jobs:
             serie-faute-multifil-*.log
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
+            virtio-dma-panne*/serie.log
           if-no-files-found: warn

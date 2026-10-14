@@ -1509,11 +1509,13 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     let (presents_ok, presents_echec, pixels_virtio, ns_virtio) =
         crate::drivers::virtio_gpu::compteurs();
     if presents_ok + presents_echec > 0 {
+        let (sautes, cedes, non_cedables) = crate::drivers::virtio_gpu::compteurs_verrou();
         crate::serial_println!(
-            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={}",
+            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={}",
             presents_ok, presents_echec, pixels_virtio, ns_virtio,
             ns_virtio / presents_ok.max(1) / 1000,
             crate::drivers::virtio_gpu::actif() as u8,
+            sautes, cedes, non_cedables,
         );
     }
 

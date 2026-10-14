@@ -32,6 +32,7 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
+use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
 use crate::kernel::memory;
 
 const VENDEUR_VIRTIO: u16 = 0x1AF4;
@@ -325,13 +326,20 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 None
             }
         };
-        *GPU.lock() = Some(Peripherique {
-            file,
-            ecran: (largeur0, hauteur0),
-            autotest_ok,
-            scanout: None,
-            mire,
-        });
+        match verrou() {
+            Some(mut garde) => {
+                *garde = Some(Peripherique {
+                    file,
+                    ecran: (largeur0, hauteur0),
+                    autotest_ok,
+                    scanout: None,
+                    mire,
+                });
+            }
+            // Impossible au demarrage (personne d'autre ne le tient) ; si
+            // cela arrivait, le peripherique est oublie -- jamais un blocage.
+            None => crate::serial_println!("VIRTIO_GPU_ECHEC raison=verrou-occupe-a-la-sonde"),
+        }
     }
     Ok(())
 }
@@ -410,12 +418,21 @@ impl FileControle {
         write_volatile(dispo.add(1), self.prochain_dispo);
         fence(Ordering::SeqCst);
         write_volatile(self.sonnette as *mut u16, 0);
+        // BANC DE PANNE (option `banc-virtio-gpu-sans-reponse`, jamais dans
+        // une image livree) : la requete est PARTIE, on fait comme si sa
+        // reponse n'arrivait jamais.
+        #[cfg(feature = "banc-virtio-gpu-sans-reponse")]
+        if lit32(requete, 0) == CMD_RESOURCE_ATTACH_BACKING && lit32(requete, 24) == RESSOURCE_BUREAU {
+            crate::serial_println!("VIRTIO_GPU_INJECTION attache_bureau_sans_reponse (requete envoyee, attente declaree echue)");
+            self.cassee = true;
+            return Err(dma::SANS_REPONSE);
+        }
         // Anneau utilise : flags u16, idx u16, puis {id u32, len u32}.
         let util = self.util as *const u16;
         let attendu = self.dernier_util.wrapping_add(1);
-        if !crate::kernel::timer::attente_bornee(1000, || read_volatile(util.add(1)) == attendu) {
+        if !attente_reponse(1000, || read_volatile(util.add(1)) == attendu) {
             self.cassee = true;
-            return Err("commande-sans-reponse");
+            return Err(dma::SANS_REPONSE);
         }
         fence(Ordering::SeqCst);
         self.dernier_util = attendu;
@@ -425,6 +442,11 @@ impl FileControle {
     fn reponse(&self) -> *const u8 {
         (self.tampon_v + REPONSE) as *const u8
     }
+}
+
+#[cfg(feature = "banc-virtio-gpu-sans-reponse")]
+fn lit32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 fn pose32(b: &mut [u8], o: usize, v: u32) {
@@ -540,6 +562,50 @@ unsafe fn autotest_2d(f: &mut FileControle) -> Result<MireTenue, &'static str> {
     let cote = MIRE_COTE;
     let octets = (cote * cote * 4) as usize;
     let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-mire")?;
+    // BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : qui peut encore toucher cette memoire.
+    let mut memoire = Memoire::NonAttachee;
+    match autotest_2d_etapes(f, phys, virt, octets, &mut memoire) {
+        Ok(()) => Ok(MireTenue { physique: phys, octets, memoire }),
+        Err(e) => {
+            rend_si_sur(f, RESSOURCE_ESSAI, phys, octets, &mut memoire, "mire");
+            Err(e)
+        }
+    }
+}
+
+/// Note l'issue d'une commande qui n'attache ni ne detache la memoire suivie.
+fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'static str> {
+    *m = dma::apres_autre(*m, dma::issue(rendu));
+    rendu
+}
+
+/// Apres un echec : detacher si c'est possible, liberer la ressource, et ne
+/// rendre la memoire que si le peripherique ne peut plus la tenir. Sinon elle
+/// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
+/// dit pourquoi.
+unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) {
+    if *m == Memoire::Attachee {
+        *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+    }
+    let _ = suivie(m, libere(f, ressource));
+    if dma::peut_rendre(*m) {
+        memory::free_dma(phys, octets);
+    } else {
+        crate::serial_println!(
+            "VIRTIO_GPU_DMA memoire_conservee quoi={} octets={} etat={:?} (le peripherique peut encore la tenir)",
+            quoi, octets, *m
+        );
+    }
+}
+
+unsafe fn autotest_2d_etapes(
+    f: &mut FileControle,
+    phys: u64,
+    virt: *mut u8,
+    octets: usize,
+    m: &mut Memoire,
+) -> Result<(), &'static str> {
+    let cote = MIRE_COTE;
     let px = virt as *mut u32;
     for y in 0..cote {
         for x in 0..cote {
@@ -548,29 +614,31 @@ unsafe fn autotest_2d(f: &mut FileControle) -> Result<MireTenue, &'static str> {
         }
     }
     let tout = Rect { x: 0, y: 0, largeur: cote, hauteur: cote };
-    exige("creation", cree_2d(f, RESSOURCE_ESSAI, FORMAT_B8G8R8X8, cote, cote), RESP_OK_NODATA)?;
-    exige("attache", attache(f, RESSOURCE_ESSAI, phys, octets as u32), RESP_OK_NODATA)?;
-    exige("scanout", scanout(f, 0, RESSOURCE_ESSAI, tout), RESP_OK_NODATA)?;
-    exige("transfert", transfert(f, RESSOURCE_ESSAI, tout, 0), RESP_OK_NODATA)?;
-    exige("flush", vide(f, RESSOURCE_ESSAI, tout), RESP_OK_NODATA)?;
+    exige("creation", suivie(m, cree_2d(f, RESSOURCE_ESSAI, FORMAT_B8G8R8X8, cote, cote)), RESP_OK_NODATA)?;
+    let rendu = attache(f, RESSOURCE_ESSAI, phys, octets as u32);
+    *m = dma::apres_attache(*m, dma::issue(rendu));
+    exige("attache", rendu, RESP_OK_NODATA)?;
+    exige("scanout", suivie(m, scanout(f, 0, RESSOURCE_ESSAI, tout)), RESP_OK_NODATA)?;
+    exige("transfert", suivie(m, transfert(f, RESSOURCE_ESSAI, tout, 0)), RESP_OK_NODATA)?;
+    exige("flush", suivie(m, vide(f, RESSOURCE_ESSAI, tout)), RESP_OK_NODATA)?;
     crate::serial_println!("VIRTIO_GPU_2D positif creation+attache+scanout+transfert+flush ok ressource={} {}x{}", RESSOURCE_ESSAI, cote, cote);
 
     // Les refus : chacun avec son code.
     let mut negatifs = 0;
-    exige("negatif-format", cree_2d(f, 0x0BAD, 0, 8, 8), RESP_ERR_INVALID_PARAMETER)?;
+    exige("negatif-format", suivie(m, cree_2d(f, 0x0BAD, 0, 8, 8)), RESP_ERR_INVALID_PARAMETER)?;
     negatifs += 1;
-    exige("negatif-ressource-zero", cree_2d(f, 0, FORMAT_B8G8R8X8, 8, 8), RESP_ERR_INVALID_RESOURCE_ID)?;
+    exige("negatif-ressource-zero", suivie(m, cree_2d(f, 0, FORMAT_B8G8R8X8, 8, 8)), RESP_ERR_INVALID_RESOURCE_ID)?;
     negatifs += 1;
-    exige("negatif-doublon", cree_2d(f, RESSOURCE_ESSAI, FORMAT_B8G8R8X8, 8, 8), RESP_ERR_INVALID_RESOURCE_ID)?;
+    exige("negatif-doublon", suivie(m, cree_2d(f, RESSOURCE_ESSAI, FORMAT_B8G8R8X8, 8, 8)), RESP_ERR_INVALID_RESOURCE_ID)?;
     negatifs += 1;
-    exige("negatif-transfert-inconnue", transfert(f, RESSOURCE_INCONNUE, tout, 0), RESP_ERR_INVALID_RESOURCE_ID)?;
+    exige("negatif-transfert-inconnue", suivie(m, transfert(f, RESSOURCE_INCONNUE, tout, 0)), RESP_ERR_INVALID_RESOURCE_ID)?;
     negatifs += 1;
-    exige("negatif-flush-inconnue", vide(f, RESSOURCE_INCONNUE, tout), RESP_ERR_INVALID_RESOURCE_ID)?;
+    exige("negatif-flush-inconnue", suivie(m, vide(f, RESSOURCE_INCONNUE, tout)), RESP_ERR_INVALID_RESOURCE_ID)?;
     negatifs += 1;
-    exige("negatif-ecran", scanout(f, MAX_ECRANS as u32, RESSOURCE_ESSAI, tout), RESP_ERR_INVALID_SCANOUT_ID)?;
+    exige("negatif-ecran", suivie(m, scanout(f, MAX_ECRANS as u32, RESSOURCE_ESSAI, tout)), RESP_ERR_INVALID_SCANOUT_ID)?;
     negatifs += 1;
     let debordant = Rect { x: cote / 2, y: 0, largeur: cote, hauteur: cote };
-    exige("negatif-rect-hors-limites", transfert(f, RESSOURCE_ESSAI, debordant, 0), RESP_ERR_INVALID_PARAMETER)?;
+    exige("negatif-rect-hors-limites", suivie(m, transfert(f, RESSOURCE_ESSAI, debordant, 0)), RESP_ERR_INVALID_PARAMETER)?;
     negatifs += 1;
     crate::serial_println!("VIRTIO_GPU_2D negatifs refuses_avec_le_bon_code={}", negatifs);
 
@@ -583,25 +651,21 @@ unsafe fn autotest_2d(f: &mut FileControle) -> Result<MireTenue, &'static str> {
         "VIRTIO_GPU_2D mire_affichee ressource={} {}x{} quadrants={:#08x},{:#08x},{:#08x},{:#08x}",
         RESSOURCE_ESSAI, cote, cote, MIRE[0], MIRE[1], MIRE[2], MIRE[3]
     );
-    Ok(MireTenue { physique: phys, octets })
+    Ok(())
 }
 
 /// La ressource d'essai laissee a l'ecran par l'autotest.
 struct MireTenue {
     physique: u64,
     octets: usize,
+    /// `Attachee` quand l'autotest a reussi.
+    memoire: Memoire,
 }
 
 /// Rend la ressource d'essai (une fois que le bureau a son propre scanout).
-unsafe fn libere_mire(f: &mut FileControle, m: MireTenue) {
-    let detachee = detache(f, RESSOURCE_ESSAI);
-    let liberee = libere(f, RESSOURCE_ESSAI);
-    if detachee == Ok(RESP_OK_NODATA) && liberee == Ok(RESP_OK_NODATA) {
-        memory::free_dma(m.physique, m.octets);
-    } else {
-        // Le peripherique peut encore lire cette memoire : ne pas la rendre.
-        crate::serial_println!("VIRTIO_GPU_2D mire_non_liberee detache={:?} libere={:?}", detachee, liberee);
-    }
+/// La memoire n'est rendue que detachee AVEC reponse (voir `virtio_gpu_dma`).
+unsafe fn libere_mire(f: &mut FileControle, mut m: MireTenue) {
+    rend_si_sur(f, RESSOURCE_ESSAI, m.physique, m.octets, &mut m.memoire, "mire");
 }
 
 /// Le peripherique, une fois la controlq montee.
@@ -623,7 +687,98 @@ struct ScanoutBureau {
     octets: usize,
 }
 
-static GPU: crate::kernel::sync::SpinLock<Option<Peripherique>> = crate::kernel::sync::SpinLock::new(None);
+// BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1
+//
+// Le peripherique etait sous un `SpinLock`, tenu pendant des commandes
+// SYNCHRONES : deux par presentation (182 us sous KVM, 230 a 860 us sous
+// TCG), jusqu'a une seconde si le peripherique ne repond pas. Un `SpinLock`
+// tenu marque le coeur NON PREEMPTIBLE : aucune tache prete ne passait sur ce
+// coeur pendant ce temps, et l'attente elle-meme tournait a vide.
+//
+// Desormais un `SleepMutex` (le detenteur reste preemptible) et une attente
+// de reponse qui CEDE le processeur entre deux lectures (`attente_reponse`).
+// Hors de toute tache (sonde au demarrage) ou interruptions masquees, on ne
+// bloque jamais : `try_lock` seulement (voir `verrou`).
+static GPU: crate::kernel::sync::SleepMutex<Option<Peripherique>> = crate::kernel::sync::SleepMutex::new(None);
+
+/// Le verrou du peripherique, sans jamais s'endormir la ou c'est interdit.
+fn verrou() -> Option<crate::kernel::sync::SleepMutexGuard<'static, Option<Peripherique>>> {
+    if contexte_cedable() {
+        Some(GPU.lock())
+    } else {
+        GPU.try_lock()
+    }
+}
+
+/// Peut-on dormir ou ceder le processeur ici ? Une tache courante, les
+/// interruptions ouvertes, et AUCUN verrou tournant tenu par l'appelant (ni
+/// `preempt_count`, ni lecture du registre, ni shootdown en vol) : voir
+/// `preempt::cession_volontaire_sure`.
+fn contexte_cedable() -> bool {
+    crate::kernel::scheduler::preempt::cession_volontaire_sure()
+}
+
+/// Presentations sautees faute de pouvoir prendre le verrou sans bloquer.
+static PRESENTS_SAUTES: AtomicU64 = AtomicU64::new(0);
+/// Fois ou l'attente d'une reponse a cede le processeur.
+static ATTENTES_CEDEES: AtomicU64 = AtomicU64::new(0);
+/// Attentes de reponse faites dans un contexte ou ceder est interdit (elles
+/// tournent jusqu'a la reponse ou la borne).
+static ATTENTES_NON_CEDABLES: AtomicU64 = AtomicU64::new(0);
+/// ... dont celles faites DANS une tache (un appelant tient un verrou
+/// tournant ou a masque les interruptions). Attendu : zero.
+static NON_CEDABLES_EN_TACHE: AtomicU64 = AtomicU64::new(0);
+
+/// Rotation avant de ceder : sous KVM la reponse arrive en quelques dizaines
+/// de microsecondes ; ceder plus tot couterait un passage dans l'ordonnanceur
+/// a chaque commande.
+const ROTATION_AVANT_CEDER_NS: u64 = 50_000;
+
+/// Attend `predicat`, au plus `limite_ms`. Tourne d'abord (reponse rapide),
+/// puis CEDE le processeur entre deux lectures si le contexte le permet. Le
+/// plafond en cycles TSC garantit la fin meme si l'horloge monotone n'avance
+/// pas encore (sonde au demarrage).
+fn attente_reponse(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
+    let cedable = contexte_cedable();
+    if !cedable {
+        ATTENTES_NON_CEDABLES.fetch_add(1, Ordering::Relaxed);
+        // Hors tache (sonde et autotest au demarrage), c'est attendu. DANS une
+        // tache, c'est qu'un appelant tient un verrou tournant ou a masque les
+        // interruptions : on le dit (8 fois au plus), avec ce qui l'interdit.
+        if crate::kernel::task::in_user_task() {
+            let n = NON_CEDABLES_EN_TACHE.fetch_add(1, Ordering::Relaxed);
+            if n < 8 {
+                if let Some((c, irq)) = crate::kernel::scheduler::preempt::contexte_cession() {
+                    crate::serial_println!(
+                        "VIRTIO_GPU_ATTENTE non_cedable_en_tache n={} if={} irq={} preempt={} spin={} lockdep={} registre={} shootdown={} sortie={}",
+                        n, c.interruptions_ouvertes as u8, irq, c.preempt_count, c.verrous_simples,
+                        c.profondeur_lockdep, c.lectures_registre, c.shootdown_en_vol as u8, c.sortie_en_cours as u8
+                    );
+                }
+            }
+        }
+    }
+    let debut = crate::kernel::timer::monotonic_ns();
+    let limite_ns = limite_ms.saturating_mul(1_000_000);
+    let debut_tsc = crate::arch::x86_64::cpu::rdtsc();
+    // ~4 GHz au plus : un plafond large, jamais atteint avant l'horloge.
+    let plafond_cycles = limite_ms.saturating_mul(4_000_000).max(1_000_000);
+    loop {
+        if predicat() {
+            return true;
+        }
+        let ecoule = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+        if ecoule > limite_ns || crate::arch::x86_64::cpu::rdtsc().wrapping_sub(debut_tsc) > plafond_cycles {
+            return false;
+        }
+        if cedable && ecoule > ROTATION_AVANT_CEDER_NS {
+            ATTENTES_CEDEES.fetch_add(1, Ordering::Relaxed);
+            crate::kernel::task::yield_now();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
 
 /// Presentations reussies, echouees, et pixels transferes.
 static PRESENTS_OK: AtomicU64 = AtomicU64::new(0);
@@ -638,7 +793,7 @@ const ECHECS_AVANT_ABANDON: u64 = 8;
 /// Le peripherique est-il pret a servir de scanout (controlq montee ET
 /// autotest 2D reussi) ?
 pub fn pret() -> bool {
-    GPU.lock().as_ref().is_some_and(|p| p.autotest_ok)
+    verrou().is_some_and(|g| g.as_ref().is_some_and(|p| p.autotest_ok))
 }
 
 /// Le scanout virtio-gpu du bureau est-il actif ?
@@ -651,7 +806,10 @@ pub fn actif() -> bool {
 /// SET_SCANOUT sur l'ecran 0. `None` -- et une ligne qui dit pourquoi -- si
 /// le peripherique est absent, n'a pas passe l'autotest, ou refuse.
 pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)> {
-    let mut garde = GPU.lock();
+    let Some(mut garde) = verrou() else {
+        crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison=verrou-indisponible-sans-bloquer");
+        return None;
+    };
     let Some(p) = garde.as_mut() else {
         crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison=peripherique-absent");
         return None;
@@ -667,28 +825,25 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
         return None;
     };
     let tout = Rect { x: 0, y: 0, largeur: l, hauteur: h };
-    // La memoire n'est rendue que si le peripherique ne peut plus y ecrire :
-    // jamais attachee, ou detachee par un `RESOURCE_UNREF` accepte.
-    let mut attachee = false;
+    // BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : un `ATTACH_BACKING` SANS REPONSE
+    // laissait « jamais attachee » et la memoire etait rendue alors que le
+    // peripherique pouvait l'avoir retenue. L'etat est suivi commande par
+    // commande ; sur l'echec, `rend_si_sur` ne la rend que si plus rien ne
+    // peut la tenir.
+    let mut memoire = Memoire::NonAttachee;
     let etapes = unsafe {
-        exige("bureau-creation", cree_2d(&mut p.file, RESSOURCE_BUREAU, FORMAT_B8G8R8X8, l, h), RESP_OK_NODATA)
-            .and_then(|_| exige("bureau-attache", attache(&mut p.file, RESSOURCE_BUREAU, phys, octets as u32), RESP_OK_NODATA))
+        let f = &mut p.file;
+        exige("bureau-creation", suivie(&mut memoire, cree_2d(f, RESSOURCE_BUREAU, FORMAT_B8G8R8X8, l, h)), RESP_OK_NODATA)
             .and_then(|_| {
-                attachee = true;
-                exige("bureau-scanout", scanout(&mut p.file, 0, RESSOURCE_BUREAU, tout), RESP_OK_NODATA)
+                let rendu = attache(f, RESSOURCE_BUREAU, phys, octets as u32);
+                memoire = dma::apres_attache(memoire, dma::issue(rendu));
+                exige("bureau-attache", rendu, RESP_OK_NODATA)
             })
+            .and_then(|_| exige("bureau-scanout", suivie(&mut memoire, scanout(f, 0, RESSOURCE_BUREAU, tout)), RESP_OK_NODATA))
     };
     if let Err(e) = etapes {
         crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison={}", e);
-        let liberee = unsafe { libere(&mut p.file, RESSOURCE_BUREAU) } == Ok(RESP_OK_NODATA);
-        if !attachee || liberee {
-            memory::free_dma(phys, octets);
-        } else {
-            crate::serial_println!(
-                "VIRTIO_GPU_SCANOUT memoire_conservee octets={} (attachee, non detachee : le peripherique peut encore y ecrire)",
-                octets
-            );
-        }
+        unsafe { rend_si_sur(&mut p.file, RESSOURCE_BUREAU, phys, octets, &mut memoire, "bureau") };
         return None;
     }
     p.scanout = Some(ScanoutBureau { largeur: l, hauteur: h, physique: phys, octets });
@@ -712,7 +867,12 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
         return false;
     }
     let debut = crate::kernel::timer::monotonic_ns();
-    let mut garde = GPU.lock();
+    let Some(mut garde) = verrou() else {
+        // Contexte ou l'on ne peut pas attendre, verrou tenu ailleurs : la
+        // presentation est sautee et COMPTEE, pas tenue pour un echec.
+        PRESENTS_SAUTES.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
     let Some(p) = garde.as_mut() else { return false };
     let Some(s) = p.scanout else { return false };
     // Rogne au scanout : un rectangle hors limites serait refuse par l'hote
@@ -752,6 +912,16 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
 }
 
 static ECHECS_CONSECUTIFS: AtomicU64 = AtomicU64::new(0);
+
+/// `(presentations sautees faute de verrou, attentes ayant cede le
+/// processeur, attentes faites la ou ceder est interdit)`.
+pub fn compteurs_verrou() -> (u64, u64, u64) {
+    (
+        PRESENTS_SAUTES.load(Ordering::Relaxed),
+        ATTENTES_CEDEES.load(Ordering::Relaxed),
+        ATTENTES_NON_CEDABLES.load(Ordering::Relaxed),
+    )
+}
 
 /// `(presentations_ok, echecs, pixels_transferes, ns_total)`.
 pub fn compteurs() -> (u64, u64, u64, u64) {

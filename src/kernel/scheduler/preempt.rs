@@ -218,6 +218,39 @@ pub fn preemption_noyau_sure() -> bool {
         && contexte_noyau(false).map_or(false, |c| crate::kernel::preemption_noyau::contexte_sur(&c))
 }
 
+/// BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1
+///
+/// Un pilote qui ATTEND, dans son fil et hors de tout gestionnaire, peut-il
+/// ceder ce coeur ou s'y endormir maintenant ?
+///
+/// Les memes interdits que la preemption d'un fil noyau (`contexte_sur`) --
+/// aucun verrou tournant tenu, simple ou classe, aucun `preempt_count`, aucune
+/// lecture du registre, aucun shootdown en vol, pas de sortie en cours -- mais
+/// interruptions OUVERTES et aucune IRQ en cours : c'est le fil qui cede, pas
+/// une interruption qui le coupe. Ceder en tenant un `SpinLock` livrerait le
+/// coeur a une tache qui pourrait tourner dessus pendant que son porteur,
+/// pret, attend ce meme coeur.
+pub fn cession_volontaire_sure() -> bool {
+    if !crate::kernel::task::in_user_task() {
+        return false;
+    }
+    let Some(id) = local_id() else { return false; };
+    let Some(c) = contexte_noyau(false) else { return false; };
+    c.interruptions_ouvertes
+        && cpu_local::local(id).irq_depth() == 0
+        && crate::kernel::preemption_noyau::contexte_sur(&crate::kernel::preemption_noyau::Contexte {
+            interruptions_ouvertes: false,
+            ..c
+        })
+}
+
+/// Pourquoi `cession_volontaire_sure` refuse : le contexte lu et la
+/// profondeur d'IRQ (diagnostic, une ligne par refus journalise).
+pub fn contexte_cession() -> Option<(crate::kernel::preemption_noyau::Contexte, u32)> {
+    let id = local_id()?;
+    Some((contexte_noyau(false)?, cpu_local::local(id).irq_depth() as u32))
+}
+
 /// Ce que la decision pure lit de ce coeur, maintenant.
 fn contexte_noyau(demande_ciblee: bool) -> Option<crate::kernel::preemption_noyau::Contexte> {
     let id = local_id()?;
