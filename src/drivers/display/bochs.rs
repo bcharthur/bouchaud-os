@@ -742,6 +742,80 @@ pub fn leave() {
     crate::serial_println!("[gfx] retour mode texte");
 }
 
+// BOUCHAUD_BANC_PRESENTATION_V1
+//
+// BGA CONTRE VIRTIO-GPU 2D, SUR LA MEME CHARGE.
+//
+// Le bureau au repos ne presente presque rien (l'horloge, une fois par
+// seconde) : comparer les deux ecrans sur lui, c'est comparer deux silences.
+// Ce banc presente la MEME suite de trames sur l'ecran actif, par categorie,
+// et chronometre chaque `present_rect` -- copie vers l'ecran, plus, sous
+// virtio-gpu, `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` et leurs reponses.
+// Le dessin dans le tampon arriere n'est PAS compte : il est le meme pour
+// les deux ecrans.
+//
+// Ce que le banc ne mesure pas : quand l'hote AFFICHE la trame. Sous BGA,
+// rien ne le dit a l'invite (la VRAM est relue par l'affichage QEMU a son
+// rythme) ; sous virtio-gpu, la reponse au FLUSH dit que l'hote a mis a jour
+// sa surface -- c'est la seule latence de trame observable, et elle est
+// incluse dans le cout mesure.
+
+/// Une categorie : nom, rectangle, nombre de presentations.
+const BANC_CATEGORIES: [(&str, usize, usize, usize, usize, usize); 3] = [
+    ("plein", 0, 0, WIDTH, HEIGHT, 40),
+    ("bande", 0, 0, WIDTH, 30, 200),
+    ("tuile", 600, 300, 64, 64, 400),
+];
+
+/// `banc-present` : entre en mode graphique, presente, mesure, ressort.
+pub fn banc_presentation() {
+    enter();
+    if !is_active() {
+        crate::serial_println!("[BANC-PRESENT] ECHEC raison=aucun-ecran-actif");
+        return;
+    }
+    let ecran = if firmware_backend_installed() {
+        "gop"
+    } else if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        "virtio-gpu-2d"
+    } else {
+        "bga"
+    };
+    reset_clip();
+    let (ok0, echecs0, _, _) = crate::drivers::virtio_gpu::compteurs();
+    for (nom, x, y, l, h, n) in BANC_CATEGORIES {
+        let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n);
+        for i in 0..n {
+            // Une couleur differente a chaque trame : chaque presentation
+            // transporte des pixels qui ont change.
+            fill_rect(x, y, l, h, (i % 15 + 1) as u8);
+            let debut = crate::kernel::timer::monotonic_ns();
+            present_rect(x, y, l, h);
+            durees.push(crate::kernel::timer::monotonic_ns().saturating_sub(debut));
+        }
+        durees.sort_unstable();
+        let total: u64 = durees.iter().sum();
+        let moyen = total / n as u64;
+        let centile = |c: usize| durees[(n * c / 100).min(n - 1)];
+        let pixels = (l * h * n) as u64;
+        crate::serial_println!(
+            "[BANC-PRESENT] ecran={} categorie={} rect={}x{} n={} moyen_us={} p50_us={} p95_us={} max_us={} mpix_s={}",
+            ecran, nom, l, h, n,
+            moyen / 1000, centile(50) / 1000, centile(95) / 1000, durees[n - 1] / 1000,
+            if total == 0 { 0 } else { pixels.saturating_mul(1000) / total },
+        );
+    }
+    let (ok1, echecs1, _, _) = crate::drivers::virtio_gpu::compteurs();
+    crate::serial_println!(
+        "[BANC-PRESENT] ecran={} fin presentations_virtio_ok={} echecs_virtio={} actif={}",
+        ecran,
+        ok1.saturating_sub(ok0),
+        echecs1.saturating_sub(echecs0),
+        is_active() as u8,
+    );
+    leave();
+}
+
 fn reverse_bits(mut b: u8) -> u8 {
     let mut r = 0u8;
     for _ in 0..8 {

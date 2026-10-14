@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -746,6 +746,8 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "help" => { c::help(); 0 }
         "clear" => { vga::clear(); 0 }
         "desktop" | "gui" => { crate::gui::run(); vga::clear(); 0 }
+        // BOUCHAUD_BANC_PRESENTATION_V1 : BGA contre virtio-gpu, meme charge.
+        "banc-present" => { crate::drivers::gfx::banc_presentation(); vga::clear(); 0 }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }
