@@ -68,12 +68,19 @@ pub fn run_if_present() {
     // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : et la plus longue ligne emise
     // interruptions masquees -- un retard impose a toute tache prete.
     let (pire_ns, longues) = crate::drivers::serial::emissions_masquees();
+    // BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : pourquoi chaque emission a la
+    // borne a renonce, la pire attente d'un appelant interruptible, et les
+    // echeances renouvelees parce que d'autres emettaient.
+    let (masquees, sans_progres, plafond, relances, attente_pire_ns, renouvelees) =
+        crate::drivers::serial::renonces();
     crate::serial_println!(
-        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={} emission_masquee_pire_us={} emissions_masquees_plus_de_2ms={}",
+        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={} emission_masquee_pire_us={} emissions_masquees_plus_de_2ms={} \
+         renonces_masquees={} renonces_sans_progres={} renonces_plafond={} renonces_relances={} attente_pire_ms={} echeances_renouvelees={}",
         crate::drivers::serial::emissions_a_la_borne(),
         crate::drivers::serial::emissions_reentrees(),
         pire_ns / 1000,
         longues,
+        masquees, sans_progres, plafond, relances, attente_pire_ns / 1_000_000, renouvelees,
     );
     vga::set_serial_mirror(false);
 

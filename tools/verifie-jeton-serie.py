@@ -35,9 +35,16 @@ le SEUL chemin qui prend le jeton, et l'exigent de ses deux appelants :
      moins que le temps d'une ligne du gagnant : `pid=1\x1b6[ 90kmi[l...`
      (run 38482972584) ;
  12. le debordement du tampon de formatage (ligne > 2 Kio) se vide sous le
-     jeton.
+     jeton ;
+ 13. BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : l'echeance d'un appelant
+     interruptible est une seconde SANS PROGRES, renouvelee par
+     `attente::a_l_echeance` tant que d'autres emettent (le compteur
+     EMISSIONS_FAITES n'avance que sous le jeton), avec un plafond absolu
+     FINI ; chaque emission sans jeton garde sa cause. Run 38603003639 (KVM
+     SMP4) : une ligne emise sans jeton apres une seconde de file derriere
+     des emetteurs qui progressaient, au milieu de celle d'un autre.
 
-Fail-closed ; douze tests negatifs.
+Fail-closed ; quinze tests negatifs.
 """
 import re
 import sys
@@ -48,7 +55,8 @@ RACINE = Path(__file__).resolve().parent.parent
 UART = "src/drivers/serial/uart16550.rs"
 SONDE = "src/kernel/process/thread/diagnostic_stall.rs"
 CONSOLE = "src/compat/linux/file.rs"
-FICHIERS = (UART, SONDE, CONSOLE)
+ATTENTE = "src/drivers/serial/attente.rs"
+FICHIERS = (UART, SONDE, CONSOLE, ATTENTE)
 
 
 def sans_commentaires(t: str) -> str:
@@ -107,12 +115,27 @@ def verifie(racine: Path) -> list[str]:
     if p.count("interrupts::enable();") != 2 or not re.search(
             r"None if requeue => \{\s*relances \+= 1;\s*x86_64::instructions::interrupts::enable\(\);\s*continue;", p):
         fautes.append(f"{UART} : une course perdue ne rouvre plus et ne refait plus la queue (ou demasquage en trop)")
-    if not re.search(r"let requeue = ouvertes\s*&& relances < 100_000\s*&& crate::kernel::timer::monotonic_ns\(\) < echeance;", p) \
+    if not re.search(r"let mut requeue = ouvertes && relances < 100_000 && maintenant < echeance;", p) \
             or "let borne = if requeue { COURSE_MASQUEE } else { 100_000 };" not in p \
             or "attend_jeton_libre(echeance);" not in p:
         fautes.append(f"{UART} : l'attente n'est plus une seule echeance datee (file + courses)")
-    if not re.search(r"None => \{\s*EMISSIONS_A_LA_BORNE\.fetch_add\(1, Ordering::Relaxed\);\s*break false;", p):
-        fautes.append(f"{UART} : une emission sans jeton n'est plus comptee")
+    if not re.search(r"None => \{\s*EMISSIONS_A_LA_BORNE\.fetch_add\(1, Ordering::Relaxed\);.{0,700}?"
+                     r"cause\.fetch_add\(1, Ordering::Relaxed\);\s*break false;", p, re.S):
+        fautes.append(f"{UART} : une emission sans jeton n'est plus comptee (avec sa cause)")
+    # 13. Echeance sans progres, renouvelee seulement par a_l_echeance.
+    if not re.search(r"match a_l_echeance\(maintenant, debut_attente, emissions_vues, EMISSIONS_FAITES\.load\(Ordering::Relaxed\)\) \{"
+                     r"\s*Echeance::Renouvelee \{ echeance_ns, emissions_vues: vues \} => \{\s*echeance = echeance_ns;", p) \
+            or len(re.findall(r"\n\s*echeance = ", p)) != 1:
+        fautes.append(f"{UART} : l'echeance est renouvelee hors de attente::a_l_echeance (progres non verifie)")
+    if u.count("EMISSIONS_FAITES.fetch_add(") != 1 \
+            or not re.search(r"if pris \{\s*EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p):
+        fautes.append(f"{UART} : le progres est compte hors du jeton (une emission sans jeton renouvellerait l'attente)")
+    a = src[ATTENTE]
+    m = re.search(r"pub const PLAFOND_ABSOLU_NS: u64 = ([0-9_]+);", a)
+    if not m or int(m.group(1).replace("_", "")) > 60_000_000_000 \
+            or "return Echeance::Renonce(Renonce::Plafond);" not in a \
+            or "if emissions == emissions_vues {\n        return Echeance::Renonce(Renonce::SansProgres);" not in a:
+        fautes.append(f"{ATTENTE} : plafond absolu absent ou infini, ou absence de progres non renoncee")
     if "sous_jeton(|| self.vide());" not in corps(u, "write_str"):
         fautes.append(f"{UART} : le debordement du tampon de formatage se vide hors du jeton")
     if not cli < cas:
@@ -123,7 +146,7 @@ def verifie(racine: Path) -> list[str]:
         fautes.append(f"{UART} : les interruptions sont rouvertes sans avoir ete ouvertes a l'entree")
     if "let moi = crate::arch::x86_64::smp::cpu_index() + 1;" not in p:
         fautes.append(f"{UART} : le detenteur n'est plus `cpu_index() + 1` (zero doit rester « libre »)")
-    if p.count("EMISSION.store") != 1 or not re.search(r"if pris \{\s*EMISSION\.store\(0", p):
+    if p.count("EMISSION.store") != 1 or not re.search(r"if pris \{\s*EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p):
         fautes.append(f"{UART} : le jeton est rendu sans avoir ete pris, ou plusieurs fois")
     if not re.search(r"Err\(detenteur\) if detenteur == moi => \{\s*EMISSIONS_REENTREES\.fetch_add\(1, Ordering::Relaxed\);\s*break Some\(false\);", p):
         fautes.append(f"{UART} : la reentrance n'est plus comptee sans attendre")
@@ -182,6 +205,14 @@ def main() -> int:
         (UART, "            None if requeue => {\n                relances += 1;\n                x86_64::instructions::interrupts::enable();\n                continue;\n            }\n", ""),
         # debordement du tampon de formatage hors jeton
         (UART, "                sous_jeton(|| self.vide());", "                self.vide();"),
+        # le progres compte aussi les emissions SANS jeton
+        (UART, "    if pris {\n        EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);\n",
+         "    EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);\n    if pris {\n"),
+        # l'echeance renouvelee sans verifier de progres (retour a « attendre indefiniment »)
+        (UART, "            match a_l_echeance(maintenant, debut_attente, emissions_vues, EMISSIONS_FAITES.load(Ordering::Relaxed)) {",
+         "            match a_l_echeance(maintenant, maintenant, emissions_vues, emissions_vues.wrapping_add(1)) {"),
+        # plafond absolu infini
+        (ATTENTE, "pub const PLAFOND_ABSOLU_NS: u64 = 10_000_000_000;", "pub const PLAFOND_ABSOLU_NS: u64 = 18_446_744_073_709_551_615;"),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):

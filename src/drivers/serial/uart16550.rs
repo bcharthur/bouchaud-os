@@ -366,6 +366,31 @@ impl fmt::Write for SerialPort {
 static EMISSION: AtomicUsize = AtomicUsize::new(0);
 static EMISSIONS_REENTREES: AtomicU64 = AtomicU64::new(0);
 static EMISSIONS_A_LA_BORNE: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : les lignes emises sous le jeton (le
+// PROGRES que voit un appelant qui attend), et pourquoi chaque emission a la
+// borne a renonce.
+static EMISSIONS_FAITES: AtomicU64 = AtomicU64::new(0);
+static RENONCES_MASQUEES: AtomicU64 = AtomicU64::new(0);
+static RENONCES_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
+static RENONCES_PLAFOND: AtomicU64 = AtomicU64::new(0);
+static RENONCES_RELANCES: AtomicU64 = AtomicU64::new(0);
+static ATTENTE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static ECHEANCES_RENOUVELEES: AtomicU64 = AtomicU64::new(0);
+
+/// Pourquoi les emissions a la borne ont renonce au jeton :
+/// `(contexte masque, sans progres, plafond absolu, relances)`, la pire
+/// attente d'un appelant interruptible (ns) et le nombre d'echeances
+/// renouvelees parce que d'autres emettaient.
+pub fn renonces() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        RENONCES_MASQUEES.load(Ordering::Relaxed),
+        RENONCES_SANS_PROGRES.load(Ordering::Relaxed),
+        RENONCES_PLAFOND.load(Ordering::Relaxed),
+        RENONCES_RELANCES.load(Ordering::Relaxed),
+        ATTENTE_PIRE_NS.load(Ordering::Relaxed),
+        ECHEANCES_RENOUVELEES.load(Ordering::Relaxed),
+    )
+}
 
 /// Lignes emises alors que leur propre coeur tenait deja le jeton (reentrance
 /// par exception ou NMI). Attendu : 0.
@@ -417,9 +442,10 @@ fn attend_jeton_libre(echeance: u64) {
     }
 }
 
-/// Toute l'attente du jeton d'un appelant interruptible : file non masquee
-/// ET courses masquees, une seule echeance datee.
-const BORNE_ATTENTE_NS: u64 = 1_000_000_000;
+// L'attente du jeton d'un appelant interruptible -- file non masquee ET
+// courses masquees -- est bornee par `super::attente` : une seconde SANS
+// PROGRES, renouvelee tant que d'autres emettent, et un plafond absolu
+// (BOUCHAUD_SERIE_ATTENTE_PROGRES_V1).
 
 /// Course masquee d'un appelant interruptible, avant de retourner dans la file.
 ///
@@ -485,8 +511,12 @@ pub fn ecris_lignes(octets: &[u8]) {
 /// Emet sous le jeton serie : interruptions masquees, jeton tenu par ce
 /// contexte du debut a la fin de `emet` (voir EMISSION).
 fn sous_jeton<F: FnOnce()>(emet: F) {
+    use super::attente::{a_l_echeance, Echeance, Renonce, BORNE_SANS_PROGRES_NS};
     let ouvertes = x86_64::instructions::interrupts::are_enabled();
-    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(BORNE_ATTENTE_NS);
+    let debut_attente = crate::kernel::timer::monotonic_ns();
+    let mut echeance = debut_attente.saturating_add(BORNE_SANS_PROGRES_NS);
+    let mut emissions_vues = EMISSIONS_FAITES.load(Ordering::Relaxed);
+    let mut renonce: Option<Renonce> = None;
     // Plafond de retours dans la file, pour finir meme si l'horloge n'avance
     // pas encore (meme raison que le plafond de tours de la file).
     let mut relances = 0u32;
@@ -504,9 +534,23 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
         // une ligne entrelacee vaut mieux qu'une machine qui se tait. Mais un
         // appelant interruptible ne s'y resout qu'a l'echeance datee : avant,
         // une course perdue le renvoie dans la file (COURSE_MASQUEE).
-        let requeue = ouvertes
-            && relances < 100_000
-            && crate::kernel::timer::monotonic_ns() < echeance;
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let mut requeue = ouvertes && relances < 100_000 && maintenant < echeance;
+        // BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : echeance passee. Si d'autres ont
+        // emis depuis la precedente, le detenteur n'est pas perdu : nouvelle
+        // echeance, l'appelant refait la queue. Sinon (ou au plafond
+        // absolu), il renonce.
+        if ouvertes && relances < 100_000 && maintenant >= echeance && renonce.is_none() {
+            match a_l_echeance(maintenant, debut_attente, emissions_vues, EMISSIONS_FAITES.load(Ordering::Relaxed)) {
+                Echeance::Renouvelee { echeance_ns, emissions_vues: vues } => {
+                    echeance = echeance_ns;
+                    emissions_vues = vues;
+                    ECHEANCES_RENOUVELEES.fetch_add(1, Ordering::Relaxed);
+                    requeue = true;
+                }
+                Echeance::Renonce(r) => renonce = Some(r),
+            }
+        }
         let borne = if requeue { COURSE_MASQUEE } else { 100_000 };
         let mut tours = 0u32;
         let issue = loop {
@@ -539,10 +583,21 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
             }
             None => {
                 EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
+                let cause = match (ouvertes, renonce) {
+                    (false, _) => &RENONCES_MASQUEES,
+                    (true, Some(Renonce::SansProgres)) => &RENONCES_SANS_PROGRES,
+                    (true, Some(Renonce::Plafond)) => &RENONCES_PLAFOND,
+                    (true, None) => &RENONCES_RELANCES,
+                };
+                cause.fetch_add(1, Ordering::Relaxed);
                 break false;
             }
         }
     };
+    if ouvertes {
+        let attente = crate::kernel::timer::monotonic_ns().saturating_sub(debut_attente);
+        ATTENTE_PIRE_NS.fetch_max(attente, Ordering::Relaxed);
+    }
     // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : la ligne s'emet interruptions
     // masquees. A SMP1 rien ne peut la preempter : sa duree est un retard
     // impose a toute tache prete. On la mesure (pire, et combien > 2 ms).
@@ -554,6 +609,7 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
         EMISSIONS_LONGUES.fetch_add(1, Ordering::Relaxed);
     }
     if pris {
+        EMISSIONS_FAITES.fetch_add(1, Ordering::Relaxed);
         EMISSION.store(0, Ordering::Release);
     }
     if ouvertes {
