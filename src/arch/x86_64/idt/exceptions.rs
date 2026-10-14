@@ -206,7 +206,32 @@ impl Drop for GsGuard {
     }
 }
 
+/// Ce qu'une faute de page avait AU MOMENT ou elle est arrivee.
+///
+/// BOUCHAUD_FAUTE_CR2_A_L_ENTREE_V1 : CR2 etait relu ici, en fin de chemin.
+/// Pour un #PF ring 3, le gestionnaire a entre-temps rouvert les
+/// interruptions et peut avoir cede le coeur (`fault_retry_yield`) : une
+/// autre faute sur ce coeur reecrit CR2. Integration fa387b28 :
+/// `persist-course-probe`, trois fils « fautifs » a `printf_core+0` (un
+/// `push` sur leur pile) avec `cr2=0x45` -- adresse qu'un `push` ne peut pas
+/// toucher. Le chiffre publie n'etait pas celui de la faute.
+#[derive(Clone, Copy)]
+struct FautePage {
+    adresse: u64,
+    code: u64,
+    issue: &'static str,
+}
+
 fn kill_faulting_task(reason: &str, signal: u32, stack: &InterruptStackFrame) -> ! {
+    kill_faulting_task_avec(reason, signal, stack, None)
+}
+
+fn kill_faulting_task_avec(
+    reason: &str,
+    signal: u32,
+    stack: &InterruptStackFrame,
+    faute: Option<FautePage>,
+) -> ! {
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
     // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
@@ -215,7 +240,12 @@ fn kill_faulting_task(reason: &str, signal: u32, stack: &InterruptStackFrame) ->
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let cr2 = x86_64::registers::control::Cr2::read_raw();
+    // Pour un #PF : l'adresse lue a l'ENTREE du gestionnaire. Pour les autres
+    // exceptions, CR2 ne decrit rien ; il est relu comme avant.
+    let cr2 = match faute {
+        Some(f) => f.adresse,
+        None => x86_64::registers::control::Cr2::read_raw(),
+    };
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
         reason,
@@ -234,10 +264,19 @@ fn kill_faulting_task(reason: &str, signal: u32, stack: &InterruptStackFrame) ->
     let pid = crate::kernel::task::try_current().map(|t| t.process.pid).unwrap_or(0);
     // BOUCHAUD_SYMBOLISE_FAUTES_V1 : `base=` (fin de ligne) rapporte le rip
     // a l'image PIE ; tools/ci/symbolise_fautes.py le lit ici d'abord.
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
-        pid, reason, stack.instruction_pointer.as_u64(),
-        stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base()));
+    // Les champs du #PF viennent APRES `base=` : symbolise_fautes.py lit
+    // `cr2=... base=...` dans cet ordre.
+    match faute {
+        Some(f) => crate::kernel::dmesg::log_fmt(format_args!(
+            "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x} code={:#x} issue={} cr2_relu={:#x}",
+            pid, reason, stack.instruction_pointer.as_u64(),
+            stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base(),
+            f.code, f.issue, x86_64::registers::control::Cr2::read_raw())),
+        None => crate::kernel::dmesg::log_fmt(format_args!(
+            "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
+            pid, reason, stack.instruction_pointer.as_u64(),
+            stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base())),
+    }
     // BOUCHAUD_PILE_DE_FAUTE_V1 : le RIP seul nomme `ak_trap`, pas qui l'a
     // appele (run 37667817559 : Compositor, `ak_trap (??:?)`, rien d'autre).
     // Les adresses de retour sont sur la pile : on la balaie et on publie les
@@ -491,7 +530,19 @@ extern "x86-interrupt" fn page_fault_handler(
         // Pas de `account_fault_exit` ici : `kill_faulting_task` ne rend pas
         // la main. `install()` reecrira `COMPTA_EN_NOYAU` depuis le
         // `in_kernel` de la tache entrante a la prochaine commutation.
-        kill_faulting_task("faute de page", crate::kernel::signal::SIGSEGV, &stack);
+        let issue = match outcome {
+            crate::kernel::task::FaultOutcome::Invalid => "invalide",
+            crate::kernel::task::FaultOutcome::IoError => "erreur_es",
+            crate::kernel::task::FaultOutcome::Retired => "retiree",
+            crate::kernel::task::FaultOutcome::Retry => "reessai",
+            crate::kernel::task::FaultOutcome::Resolved => "resolue",
+        };
+        kill_faulting_task_avec(
+            "faute de page",
+            crate::kernel::signal::SIGSEGV,
+            &stack,
+            Some(FautePage { adresse: addr, code: code.bits(), issue }),
+        );
     }
 
     serial_println!("[cpu] page fault @ {:#x} code {:?}", addr, code);
