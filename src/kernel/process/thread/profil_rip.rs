@@ -127,6 +127,14 @@ fn profil_top(seaux: &mut Vec<(u64, u32, u64)>, combien: usize) -> String {
 /// Vide les anneaux et publie une ligne `[PERF-RIP]` par fil assez present.
 /// Depuis une tache, jamais depuis une IRQ.
 pub fn publie_profil_rip() {
+    publie_profil_rip_avec(&mut || {})
+}
+
+/// BOUCHAUD_POINT_COOPERATIF_V1 : `cede` est appele apres chaque ligne
+/// `[PERF-RIP]` (une par fil, une dizaine sous charge, ~11 ms d'emission
+/// serie d'un seul tenant sous TCG). Aucun verrou n'est tenu a ce moment :
+/// les echantillons sont deja copies dans `fils`.
+pub fn publie_profil_rip_avec(cede: &mut dyn FnMut()) {
     use alloc::collections::BTreeMap;
     let mut fils: BTreeMap<u32, ProfilFil> = BTreeMap::new();
     let mut vus = 0u64;
@@ -179,6 +187,7 @@ pub fn publie_profil_rip() {
             "[PERF-RIP] t={} pid={} tid={} image={} user={} noyau={} base={:#x} top={} topn={}",
             maintenant, fil.pid, tid, image, fil.user, fil.noyau, base, top, topn,
         );
+        cede();
     }
     crate::serial_println!(
         "[PERF-RIP-RESUME] t={} actif={} echantillons={} total={} perdus={}",

@@ -389,3 +389,64 @@ fn fire_alarms(maintenant_ticks: u64) {
 pub fn yield_now() {
     schedule();
 }
+
+// BOUCHAUD_POINT_COOPERATIF_V1
+//
+// UN FIL NOYAU N'EST PAS COUPE PAR LE QUANTUM : il ne quitte son coeur qu'a
+// ses points volontaires (BOUCHAUD_PREEMPTION_NOYAU_SURE_V1 -- le quantum
+// noyau qui le coupait n'importe ou a ete retire apres une panique). Pendant
+// qu'il tourne, le balayage des echeances ne passe pas non plus : une tache
+// dont le sommeil est echu attend qu'il rende la main.
+//
+// Mesure (BOUCHAUD_ATTRIBUTION_REVEIL_V1, `ordonnanceur-probe` SMP1 TCG) :
+// reveils de l'interface en retard de 6,7 a 13 ms, TOUS les tics presents,
+// reveillee par `services-metrics` -- dont le releve de 5 s tient le coeur 5
+// a 8 ms d'un seul tenant (26 ms au demarrage). Un releve par fenetre de
+// 4,8 s : exactement une valeur isolee par phase.
+//
+// Le point cooperatif cede le coeur, a un endroit choisi par le fil (aucun
+// verrou tenu), si c'est sur (`cession_volontaire_sure`), si le fil a tourne
+// au moins `SEGMENT_MIN_NS` depuis son point precedent, et si quelqu'un
+// attend : une tache prete sur ce coeur, ou une echeance de sommeil echue.
+
+/// En deca, on ne cede pas : un passage dans l'ordonnanceur couterait plus
+/// qu'il ne rend.
+const SEGMENT_MIN_NS: u64 = 1_000_000;
+
+static POINTS_PIRE_SEGMENT_NS: AtomicU64 = AtomicU64::new(0);
+static POINTS_PIRE_SITE: AtomicU64 = AtomicU64::new(0);
+static POINTS_CESSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Point cooperatif d'un fil noyau long. `depuis_ns` : l'instant du point
+/// precedent (ou du debut de l'activation), mis a jour ici.
+#[track_caller]
+pub fn point_cooperatif(depuis_ns: &mut u64) -> bool {
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let segment = maintenant.saturating_sub(*depuis_ns);
+    if segment > POINTS_PIRE_SEGMENT_NS.load(Ordering::Relaxed) {
+        POINTS_PIRE_SEGMENT_NS.store(segment, Ordering::Relaxed);
+        POINTS_PIRE_SITE.store(core::panic::Location::caller() as *const core::panic::Location<'static> as u64, Ordering::Relaxed);
+    }
+    if segment < SEGMENT_MIN_NS || !crate::kernel::scheduler::preempt::cession_volontaire_sure() {
+        return false;
+    }
+    let attendu = ready_count_cpu(local_cpu()) > 0 || PROCHAINE_ECHEANCE.doit_balayer(maintenant);
+    if !attendu {
+        *depuis_ns = maintenant;
+        return false;
+    }
+    POINTS_CESSIONS.fetch_add(1, Ordering::Relaxed);
+    schedule();
+    *depuis_ns = crate::kernel::timer::monotonic_ns();
+    true
+}
+
+/// `(pire segment ns, site du point qui l'a termine, cessions)` depuis le
+/// releve precedent ; remet le pire a zero.
+pub fn releve_points_cooperatifs() -> (u64, u64, u64) {
+    (
+        POINTS_PIRE_SEGMENT_NS.swap(0, Ordering::Relaxed),
+        POINTS_PIRE_SITE.swap(0, Ordering::Relaxed),
+        POINTS_CESSIONS.load(Ordering::Relaxed),
+    )
+}

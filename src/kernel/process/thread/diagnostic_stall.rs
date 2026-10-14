@@ -640,7 +640,12 @@ fn fil_diagnostic() -> ! {
 /// Sert ce que les interruptions ont capture : rapports de la veille
 /// d'attente vive, releve demande par la sonde. Depuis une tache.
 pub fn sert_diagnostic() {
+    // BOUCHAUD_POINT_COOPERATIF_V1 : un releve complet emet des dizaines de
+    // lignes ; le fil cede le coeur entre ses sections (jamais sous une
+    // lecture du registre : `point_cooperatif` le refuse).
+    let mut depuis = crate::kernel::timer::monotonic_ns();
     publie_rapports_veille();
+    point_cooperatif(&mut depuis);
     let demande = DIAG_DEMANDE.swap(0, Ordering::AcqRel);
     if demande & (1u64 << 63) == 0 {
         return;
@@ -670,16 +675,19 @@ pub fn sert_diagnostic() {
         syscall(13), syscall(16), syscall(19), syscall(22),
     );
 
+    point_cooperatif(&mut depuis);
     signale_taches_orphelines();
+    point_cooperatif(&mut depuis);
     if complet {
         crate::serial_println!(
             "[SCHED-DUMP] raison={} -- etat complet ci-dessous",
             nom_raison(raison, false),
         );
-        signale_etat_ordonnancement();
+        signale_etat_ordonnancement(&mut depuis);
     } else {
         resume_ordonnancement();
     }
+    point_cooperatif(&mut depuis);
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
@@ -982,7 +990,7 @@ fn resume_ordonnancement() {
     );
 }
 
-fn signale_etat_ordonnancement() {
+fn signale_etat_ordonnancement(depuis: &mut u64) {
     let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
     for cpu in 0..coeurs {
         let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
@@ -1006,6 +1014,8 @@ sommeils_abandonnes={} rip={:#x} rip_noyau={:#x} tlb_seq={} tlb_cibles={:#x} tlb
         );
     }
     for emplacement in 0..registre_longueur() {
+        // Apres la ligne de la tache precedente, garde de lecture rendue.
+        point_cooperatif(depuis);
         let Some(identite) = registre_id(emplacement) else { continue };
         let Some(tache) = registre_tache_id(identite) else { continue };
         if tache.state == TaskState::Zombie {

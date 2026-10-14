@@ -508,6 +508,19 @@ fn identifiant_instance(sortie: &mut [u8; 40], service: &str, pid: u32) -> usize
 static PASSES_SONDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub fn releve_si_du() {
+    releve_interne(None)
+}
+
+/// BOUCHAUD_POINT_COOPERATIF_V1 : point cooperatif du fil de mesures, nul
+/// hors de lui (le diagnostic distant appelle `releve_si_du` tel quel).
+#[track_caller]
+fn cede(depuis: &mut Option<&mut u64>) {
+    if let Some(d) = depuis.as_deref_mut() {
+        crate::kernel::task::point_cooperatif(d);
+    }
+}
+
+fn releve_interne(mut depuis: Option<&mut u64>) {
     const PERIODE_MS: u64 = 5_000;
     let maintenant = crate::kernel::timer::monotonic_ms();
     let dernier = SAMPLE_MS.load(Ordering::Acquire);
@@ -515,9 +528,12 @@ pub fn releve_si_du() {
         return;
     }
     let (mesures, total) = crate::kernel::task::mesure_processus();
+    cede(&mut depuis);
     observe(&mesures, total);
+    cede(&mut depuis);
     // BOUCHAUD_PROFIL_RIP_V1 : ou les fils passent leur temps, a chaque passe.
-    crate::kernel::task::publie_profil_rip();
+    crate::kernel::task::publie_profil_rip_avec(&mut || cede(&mut depuis));
+    cede(&mut depuis);
 
     // BOUCHAUD_C68_LES_SONDES_ETAIENT_AU_MAUVAIS_ENDROIT
     //
@@ -546,6 +562,7 @@ pub fn releve_si_du() {
         replie_user / 1_000_000,
         replie_noyau / 1_000_000,
     ));
+    cede(&mut depuis);
     let (bal_appels, bal_entrees, bal_ns, bal_pire, bal_candidats) =
         crate::kernel::clean_page_cache::balayage_stats();
     crate::kernel::dmesg::log_fmt(format_args!(
@@ -564,11 +581,28 @@ total_us={} pire_us={} candidats_suffisants={}",
         "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
         maintenant, yields, pire_chaine, reprises, chaines,
     ));
+    cede(&mut depuis);
     crate::kernel::task::publie_syscall_top(8);
+    cede(&mut depuis);
     // Qui lit le disque, et ce que coute l'attente du controleur. Meme
     // cadence : compteurs cumulatifs, un releve par minute.
     crate::fs::backing_attrib::publie(maintenant);
+    cede(&mut depuis);
     crate::drivers::ata::publie_controleur(maintenant);
+    // Le pire segment sans point cooperatif depuis le releve precedent.
+    let (pire_segment, site, cessions) = crate::kernel::task::releve_points_cooperatifs();
+    let site = if site == 0 {
+        alloc::string::String::from("-")
+    } else {
+        // SAFETY : `site` vient d'un `&'static Location` (`point_cooperatif`).
+        let l = unsafe { &*(site as usize as *const core::panic::Location<'static>) };
+        alloc::format!("{}:{}", l.file(), l.line())
+    };
+    crate::serial_println!(
+        "[POINTS-COOP] pire_segment_us={} site={} cessions={}",
+        pire_segment / 1000, site, cessions,
+    );
+    cede(&mut depuis);
     }
 
     // LES DEUX CALCULS DE `/proc/stat`, COTE A COTE.
@@ -585,6 +619,9 @@ total_us={} pire_us={} candidats_suffisants={}",
     //   temps_mort     ce que la seconde a deja perdu, a la nanoseconde
     //
     // `temps_mort` non nul veut dire que le second calcul ment deja.
+    //
+    // AUCUN point cooperatif d'ici a la fin : ces valeurs se comparent entre
+    // elles et doivent etre lues d'un seul tenant.
     let (vivants_user, vivants_sys) = crate::kernel::task::proc_cpu_somme_vivants();
     let (compteurs_user, compteurs_sys) = crate::kernel::task::proc_cpu_compteurs();
     // LES DEUX FACONS DE QUITTER LA SOMME DES VIVANTS, LUES ET NON PHOTOGRAPHIEES.
@@ -667,9 +704,14 @@ static FIL_MESURES_PROCESSUS: AtomicU8 = AtomicU8::new(0);
 
 fn fil_mesures_processus() -> ! {
     loop {
-        releve_si_du();
+        // BOUCHAUD_POINT_COOPERATIF_V1 : ce fil ne garde pas le coeur d'un
+        // seul tenant pendant tout son releve.
+        let mut depuis = crate::kernel::timer::monotonic_ns();
+        releve_interne(Some(&mut depuis));
+        crate::kernel::task::point_cooperatif(&mut depuis);
         // P18_SERVICE_GUARDIAN_V1: deux observateurs se couvrent mutuellement.
         crate::kernel::services::gardien::tour();
+        crate::kernel::task::point_cooperatif(&mut depuis);
         // BOUCHAUD_C72_CHECKPOINT_FAIL_SAFE
         //
         // Ce fil-ci et pas un autre : ni le compositeur, ni le reseau, ni le
