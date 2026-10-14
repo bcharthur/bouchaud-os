@@ -16,6 +16,21 @@ OUT=${2:?usage: run_ladybird_browser_host.sh BOOTIMAGE NATIVE_DIR}
 # de fichier, ni d'URL, ni de comportement.
 SUFFIXE=${BO_SMOKE_SUFFIXE:-}
 
+# BOUCHAUD_VIRTIO_GPU_2D_V1 -- QUEL ECRAN.
+#
+# `bga` (defaut) : la carte VGA standard de QEMU, rien ne change. `virtio` :
+# `-vga none` + virtio-gpu-pci ; le bureau, donc chaque trame du navigateur
+# composee par le gestionnaire de fenetres, est presente par
+# TRANSFER_TO_HOST_2D + RESOURCE_FLUSH. Le `screendump` du moniteur (sans
+# peripherique nomme) capture alors l'ecran virtio : la mire verifiee plus
+# bas y a ete presentee. Scanout 2D seulement, aucune acceleration.
+AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
+case "$AFFICHAGE" in
+    bga) ECRAN=() ;;
+    virtio) ECRAN=(-vga none -device virtio-gpu-pci) ;;
+    *) echo "BO_SMOKE_AFFICHAGE inconnu : $AFFICHAGE (bga ou virtio)" >&2; exit 2 ;;
+esac
+
 # BOUCHAUD_BANC_PREREQUIS_V1 -- UN OUTIL DE BANC ABSENT N'EST PAS UN MAILLON
 # PRODUIT ROUGE.
 #
@@ -275,6 +290,7 @@ qemu-system-x86_64 \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
+  ${ECRAN[@]+"${ECRAN[@]}"} \
   -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
 PID=$!
@@ -1044,6 +1060,32 @@ echo
 echo "== les six services, cote a cote =="
 python3 tools/ci/analyse-demarrage.py "$LOG" 2>/dev/null \
     | sed -n '/six services/,/^$/p' | head -12 || true
+
+# BOUCHAUD_VIRTIO_GPU_2D_V1 : en mode virtio, que ce soit BIEN le scanout
+# virtio-gpu qui ait presente, sans jamais abandonner ni echouer.
+if [ "$AFFICHAGE" = virtio ]; then
+    echo
+    echo "== affichage virtio-gpu =="
+    sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" \
+        | grep -aE 'BOUCHAUD_VIRTIO_GPU_SCANOUT_ACTIF|VIRTIO_GPU_SCANOUT|\[GUI-VIRTIO-GPU\]' \
+        | tail -4 | sed 's/^/  /' || true
+    if ! grep -aq 'BOUCHAUD_VIRTIO_GPU_SCANOUT_ACTIF' "$LOG"; then
+        echo "LADYBIRD_VIRTIO_ECHEC le scanout virtio-gpu n'a jamais ete actif" >&2
+        exit 1
+    fi
+    if grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON' "$LOG"; then
+        echo "LADYBIRD_VIRTIO_ECHEC le scanout virtio-gpu a abandonne" >&2
+        exit 1
+    fi
+    derniere=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" \
+        | grep -aoE '\[GUI-VIRTIO-GPU\] presents_ok=[0-9]+ presents_echec=[0-9]+ pixels_transferes=[0-9]+ ns_total=[0-9]+ us_par_present=[0-9]+' \
+        | tail -1 || true)
+    if ! echo "$derniere" | grep -qE 'presents_ok=[1-9][0-9]* presents_echec=0 '; then
+        echo "LADYBIRD_VIRTIO_ECHEC presentations : ${derniere:-aucun releve [GUI-VIRTIO-GPU]}" >&2
+        exit 1
+    fi
+    echo "LADYBIRD_VIRTIO_OK $derniere"
+fi
 
 # BOUCHAUD_P13_VERDICT_CONVERGENCE
 python3 tools/ci/ladybird_runtime_verdict.py "$LOG" \
