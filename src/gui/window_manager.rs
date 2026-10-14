@@ -1503,6 +1503,20 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         if dernier_ns == 0 { 0 } else { maintenant_ns.saturating_sub(dernier_ns) / 1_000_000 },
     );
 
+    // BOUCHAUD_VIRTIO_GPU_2D_V1 : quand l'ecran est le scanout virtio-gpu 2D,
+    // chaque presentation coute deux commandes au peripherique (transfert +
+    // flush). Ce qu'elles coutent se lit ici, au rythme du releve.
+    let (presents_ok, presents_echec, pixels_virtio, ns_virtio) =
+        crate::drivers::virtio_gpu::compteurs();
+    if presents_ok + presents_echec > 0 {
+        crate::serial_println!(
+            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={}",
+            presents_ok, presents_echec, pixels_virtio, ns_virtio,
+            ns_virtio / presents_ok.max(1) / 1000,
+            crate::drivers::virtio_gpu::actif() as u8,
+        );
+    }
+
     // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce que le compositeur a reellement fait,
     // et surtout ce qu'il n'a PAS fait. Une ligne par releve.
     crate::gui::reveil::publie();

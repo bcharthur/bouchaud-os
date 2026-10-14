@@ -466,6 +466,13 @@ pub fn lfb_phys() -> Option<u64> {
     if firmware_backend_installed() {
         return None;
     }
+    // BOUCHAUD_VIRTIO_GPU_2D_V1 : la memoire du scanout virtio n'est pas un
+    // ecran. Un pixel n'y devient visible qu'apres TRANSFER_TO_HOST_2D +
+    // RESOURCE_FLUSH, que seul le noyau emet. La ceder a un client ring 3
+    // donnerait un ecran fige sans un mot : on refuse (mmap -> ENODEV).
+    if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return None;
+    }
     let phys = LFB_PHYS.load(Ordering::Acquire);
     if phys == 0 {
         // Le mode HD n'a pas encore ete active : on interroge le PCI.
@@ -545,6 +552,12 @@ pub fn handoff_to_userland() -> bool {
     }
     if !is_active() {
         crate::serial_println!("[gfx] handoff userland impossible : BGA inactif");
+        return false;
+    }
+    if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        // Meme raison que `lfb_phys` : un client ring 3 n'a aucun moyen de
+        // presenter sur le scanout virtio-gpu 2D. Le bureau garde l'ecran.
+        crate::serial_println!("[gfx] handoff userland refuse : scanout virtio-gpu 2D (aucune presentation depuis le ring 3)");
         return false;
     }
     USERLAND_OWNS_DISPLAY.store(true, Ordering::Release);
@@ -628,14 +641,68 @@ fn enter_verrouille() {
                 crate::serial_println!("[gfx] BGA HD actif (1280x720x32, id={:#x})", id);
             }
             _ => {
-                LFB = core::ptr::null_mut();
-                HD_ACTIVE.store(false, Ordering::Release);
-                crate::drivers::gpu::deactivate();
-                crate::serial_println!("[gfx] BGA indisponible (id={:#x}) : present() inactif", id);
+                // BOUCHAUD_VIRTIO_GPU_2D_V1 : sans BGA, le scanout 2D
+                // virtio-gpu -- seulement si son autotest a reussi. Avec BGA,
+                // rien ne change (politique_scanout : BGA d'abord).
+                let choix = crate::drivers::politique_scanout::choisit(
+                    false,
+                    false,
+                    crate::drivers::virtio_gpu::pret(),
+                );
+                let virtio = if choix == crate::drivers::politique_scanout::Scanout::Virtio2d {
+                    crate::drivers::virtio_gpu::active_scanout(width(), height())
+                } else {
+                    None
+                };
+                match virtio {
+                    Some((memoire, physique)) => {
+                        LFB = memoire;
+                        LFB_PHYS.store(physique, Ordering::Release);
+                        VIRTIO_SCANOUT.store(true, Ordering::Release);
+                        HD_ACTIVE.store(true, Ordering::Release);
+                        crate::drivers::gpu::activate_virtio_2d(width(), height(), 32, physique);
+                        crate::serial_println!(
+                            "[gfx] BGA indisponible (id={:#x}) : scanout virtio-gpu 2D actif ({}x{}x32, aucune acceleration)",
+                            id, width(), height()
+                        );
+                    }
+                    None => {
+                        LFB = core::ptr::null_mut();
+                        VIRTIO_SCANOUT.store(false, Ordering::Release);
+                        HD_ACTIVE.store(false, Ordering::Release);
+                        crate::drivers::gpu::deactivate();
+                        crate::serial_println!(
+                            "[gfx] BGA indisponible (id={:#x}) : present() inactif (scanout={})",
+                            id, choix.label()
+                        );
+                    }
+                }
             }
         }
     }
     reset_clip();
+}
+
+/// Le bureau presente-t-il par le scanout virtio-gpu 2D (et non par BGA) ?
+///
+/// Vrai seulement apres `active_scanout` reussi, et tant que le peripherique
+/// repond : `virtio_gpu::presente` le retire apres des echecs consecutifs.
+static VIRTIO_SCANOUT: AtomicBool = AtomicBool::new(false);
+
+/// Apres une copie dans la memoire du scanout virtio : transfert + flush du
+/// rectangle. Sans effet avec BGA ou le GOP.
+#[inline]
+fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) {
+    if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    if !crate::drivers::virtio_gpu::presente(x, y, largeur, hauteur)
+        && !crate::drivers::virtio_gpu::actif()
+    {
+        // Abandon : le peripherique ne repond plus. Le bureau continue de
+        // composer, plus rien n'est presente -- et le journal l'a dit.
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+    }
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
@@ -799,6 +866,7 @@ pub fn present() {
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
     }
+    presente_virtio(0, 0, width(), height());
     crate::drivers::gpu::note_present(width() * height() * core::mem::size_of::<u32>());
 }
 
@@ -944,6 +1012,7 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // presentation, contre huit megaoctets qu'il rend visibles.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+    presente_virtio(x, y, count, y1 - y);
 
     NANOS_DANS_PRESENT.fetch_add(
         crate::kernel::timer::monotonic_ns().saturating_sub(debut_copie),
