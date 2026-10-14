@@ -219,6 +219,16 @@ Trois causes distinctes, chacune mesurée :
      (4 ms). Sans demande ciblée, le gestionnaire ne coupe que le ring 3 :
      il n'ouvre aucun domaine de préemption de fil noyau. À décider.
 
+**Endurance hebdomadaire `1ad75bfc` (run 38566147193, tranches de 30 min,
+critère inchangé)** :
+
+| Tranche | Résultat | Détail |
+|---|---|---|
+| SMP1 | **vert** | 46/46 cycles, sonde 4/4 vérifications à chaque cycle ; rouge au cycle 5 sur `585fc0a0` |
+| SMP2 | **vert** | `VERDICT : OK` ; rouge sur `585fc0a0` |
+| SMP4 | **vert** | `VERDICT : OK` ; rouge sur `585fc0a0` |
+| SMP8 | **rouge** | cycle 6. Interactive : pire 13,5 ms, dont **8,4 ms prêt → élu**, 85 attentes > 1 ms ; 741 écarts de tic > 2 ms dans la phase (vCPU en surnombre). Causes 2 et 3 |
+
 Le correctif de mesure `45e761ee` est venu après un faux relevé à SMP8
 (`masque_pire_us=9969 irq:0xf1`). La sortie d'un gestionnaire lit désormais le
 cœur courant, et une commutation volontaire efface l'entrée d'IRQ du cœur.

@@ -32,6 +32,15 @@ Commits de la session, dans l'ordre :
 | `bc8cbf83` | P10 : smoke Ladybird sur écran virtio-gpu (travail diagnostic) |
 | `9a7602e4` | BrowserHost : attente bornée de ses services avant de sortir (robustesse 8/9) |
 | `6335178b` | diagnostic : durée des émissions série interruptions masquées |
+| `a0e7bdd3` | docs : smoke Ladybird sur écran virtio-gpu |
+| `d1f6aae6` | **P10** : mémoire DMA jamais rendue après une commande sans réponse (état `Inconnue`, banc de panne injectée) ; verrou dormant du périphérique |
+| `e31f7f71` | docs P10 : DMA après timeout, audit du verrou |
+| `85952681` | ordonnanceur : attribution des retards de réveil (`/proc/self/reveil`, tics perdus, sections masquées) |
+| `1ad75bfc` | fils noyau : points coopératifs (`services-metrics`, `[PERF-RIP]`, `diag-noyau`) |
+| `e788a77b` | **P10** : banc BGA contre virtio-gpu 2D, même charge |
+| `01f3063a` | **P10** : transfert + flush sous une seule sonnette |
+| `45e761ee` | attribution : section masquée mesurée sur le cœur de sortie |
+| `e9f94b3e` | docs : BGA/virtio, endurance (trois causes) |
 
 ## 2. Corrigé pendant la session, avec la preuve
 
@@ -63,6 +72,22 @@ Endurance hebdomadaire `585fc0a0` (38533463034) : rouge SMP1/2/4/8 sur
 `ordonnanceur-probe` (valeurs isolées) ; l'hypothèse série est réfutée pour
 SMP1 (voir AUDIT 3 quinquies). Ouvert.
 
+## 2 ter. Revue du 14 octobre (P10 DMA, verrou ; stabilité)
+
+| Point | Fait | Preuve |
+|---|---|---|
+| DMA après `ATTACH_BACKING` sans réponse | état `NonAttachee/Attachee/Inconnue`, `free_dma` seulement si sûr | test d'hôte 7 cas ; **banc de panne injectée** (la requête part vers QEMU, l'attente est déclarée échue) vert TCG + KVM, `e31f7f71` run 38560386118 ; mutation rouge |
+| `GPU.lock()` tenu pendant une commande (≤ 1 s) | `SleepMutex` ; céder seulement si `cession_volontaire_sure` ; attente qui cède après 50 µs | banc scanout TCG + KVM avec « aucune sautée », « aucune attente non cédable en tâche » (`e31f7f71`) ; audit P10 §4 quater |
+| Robustesse Ladybird répétée | — | **9 passages verts consécutifs** (`a0e7bdd3` ×6, `e31f7f71`, `1ad75bfc`, `e9f94b3e`) |
+| Endurance `ordonnanceur-probe` | attribution ; fils noyau coopératifs | `1ad75bfc` (38566147193) : SMP1 **46/46**, SMP2, SMP4 **verts** (rouges sur `585fc0a0`) ; **SMP8 rouge** — tics perdus hors de l'invité + attente d'élection (audit §3 sexies) |
+| BGA contre virtio-gpu | `banc-present` ; transfert + flush groupés | local TCG : virtio 1,9× (plein écran) à 6,1× (tuile) BGA ; groupement −16 à −39 % ; CI TCG + KVM à lire |
+
+**Décision ouverte (pour Arthur)** : préemption au réveil d'une interactive non
+sensible sous son budget (IPI vers un cœur occupé par du calcul normal en
+ring 3 ; aucun fil noyau coupé). Inverse un choix de conception explicite
+(`une_tache_ordinaire_ne_coupe_personne`) ; cause n° 3 de l'endurance SMPn.
+Non appliquée.
+
 ## 3. P10 — scanout virtio-gpu 2D
 
 Prouvé sous **QEMU-TCG et QEMU-KVM** (os-primitives `585fc0a0`, KVM :
@@ -80,7 +105,10 @@ présentation). Mutation `presente()` sans transfert ni flush → banc rouge.
 1. **S1 `persist-course-probe`** (`cr2=0x45` sur un `push`, `fa387b28`) :
    vert sur `ed3a1bc3` (Integration, os-primitives KVM). Les nouveaux champs
    nommeront la prochaine occurrence.
-2. **Endurance hebdo / `ordonnanceur-probe`** : critère strict, ouvert.
+2. **Endurance hebdo / `ordonnanceur-probe`** : SMP1/2/4 verts sur `1ad75bfc` ;
+   SMP8 rouge (émulateur + préemption au réveil, décision ouverte). Critère
+   inchangé. La sonde peut aussi passer à vide quand des tics perdus polluent
+   la phase au repos (signalé, non modifié).
 3. **Panique lockdep `courant.rs:276`** : jamais revue.
 4. **LibJS `Value.cpp:484`** : instrumenté, pas observé.
 5. **P8 HDA, P10 3D/AMD** non écrits ; **P14** non repéré ; **P17** non retrouvé.
