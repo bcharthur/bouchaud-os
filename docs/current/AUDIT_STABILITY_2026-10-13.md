@@ -153,6 +153,76 @@ voulues de `sigchld-multifil-probe` (`code=0x6 issue=invalide`).
 `persist-course-probe` : vert dans Integration et os-primitives KVM sur
 `ed3a1bc3` ; la faute `cr2=0x45` n'est pas revue — **ouvert**.
 
+### 3 sexies. Endurance `ordonnanceur-probe` : attribution, trois causes
+
+**Critère inchangé.** La sonde exige deux choses :
+
+- la priorité interactive raccourcit la queue (p99 ou pire) ;
+- elle n'aggrave pas le pire cas au-delà du bruit au repos.
+
+Le relevé `[SCHED-NG-PIRE]` était un maximum sur tout le démarrage, et il
+désignait toujours le boot (54 ms à 1,1 s). L'attribution
+`BOUCHAUD_ATTRIBUTION_REVEIL_V1` (`85952681`) décompose le **pire réveil de
+chaque phase** :
+
+- échéance → prêt (balayage tardif) ;
+- prêt → élu (attente d'élection) ;
+- élu → reprise ;
+- tics du PIT vus contre millisecondes dormies ;
+- qui tenait le cœur au moment du réveil.
+
+Elle mesure aussi les sections masquées de l'invité (`SpinLockIrq`,
+gestionnaires du tic et du quantum), ainsi que celle qui précède le pire écart
+de tic. La sonde lit `/proc/self/reveil` à la fin de chaque phase, et le
+rapport d'endurance garde ces lignes.
+
+Trois causes distinctes, chacune mesurée :
+
+1. **Fils noyau non coopératifs (noyau, corrigé).** Local TCG SMP1 : réveils
+   en retard de 6,7 à 13 ms avec **tous** les tics présents, faits dans le
+   contexte de `services-metrics`. Son relevé de 5 s tenait le cœur 5 à
+   11 ms d'un seul tenant, dont `publie_profil_rip` (~11 ms d'émission
+   série). `diag-noyau` faisait de même avec son relevé complet. Un fil noyau
+   n'est pas coupé par le quantum, et le balayage des échéances attend qu'il
+   rende la main.
+   - Correctif `1ad75bfc`, `BOUCHAUD_POINT_COOPERATIF_V1` : points
+     coopératifs sûrs (`cession_volontaire_sure`), jamais dans le bloc
+     `[PROC-STAT]`.
+   - Après : pire segment 2,8 à 4,1 ms ; balayage tardif ≤ 2,4 ms quand
+     tous les tics sont là ; plus aucun réveil tardif dans le contexte de ces
+     fils. 6/6 passes locales vertes.
+2. **Tics perdus hors de l'invité (émulateur, non corrigeable dans le
+   noyau).** Écarts de 10 à 80 ms entre deux tics du PIT, finis en ring 3 ou
+   à l'idle, sans aucune section masquée juste avant (sections masquées de
+   l'invité : 1 à 4,3 ms au pire). Aucun gestionnaire ne retient l'EOI, et le
+   PIT n'est jamais reprogrammé. Échec reproduit localement : 68 ms de
+   retard, 3 tics en 81 ms de sommeil.
+   - À SMP8 sous TCG, 8 vCPU sur 4 cœurs hôte, on compte des centaines
+     d'écarts par phase.
+   - Ces mêmes tics perdus peuvent aussi rendre la sonde **vacuement
+     verte** : une phase « au repos » polluée relève le p95 de base, la
+     sonde juge « charge non mesurable » et ne vérifie plus la latence. Vu
+     localement (passe 2 du banc d'attribution). Mode de faux vert
+     préexistant, signalé, non modifié.
+   - Témoin sans émulation : banc `run_ordonnanceur_attribution.sh` sous
+     **KVM** SMP1 en CI os-primitives (3 passes, critère inchangé).
+3. **Pas de préemption au réveil pour une interactive non sensible
+   (politique, décision ouverte).** À SMPn, le pire réveil interactif est
+   dominé par l'**attente d'élection**. Endurance `1ad75bfc` SMP8 : 8,4 ms
+   prêt → élu, 85 attentes > 1 ms par phase ; local SMP4 : 4,8 ms.
+   - `reveil::decide` rend `DemandeDifferee` pour une interactive non
+     `latency_sensitive`, qui attend donc le prochain quantum du cœur cible,
+     même si celui-ci ne fait que du calcul normal en ring 3. C'est un choix
+     de conception explicite (test `une_tache_ordinaire_ne_coupe_personne`).
+   - Correctif possible, **non appliqué** : IPI vers un cœur occupé par une
+     tâche normale, quand l'interactive est sous son budget d'activation
+     (4 ms). Sans demande ciblée, le gestionnaire ne coupe que le ring 3 :
+     il n'ouvre aucun domaine de préemption de fil noyau. À décider.
+
+Le correctif de mesure `45e761ee` est venu après un faux relevé à SMP8
+(`masque_pire_us=9969 irq:0xf1`). La sortie d'un gestionnaire lit désormais le
+cœur courant, et une commutation volontaire efface l'entrée d'IRQ du cœur.
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |

@@ -281,6 +281,80 @@ Garde 7 : `SleepMutex`, un seul `GPU.lock()` dans `verrou()` avec repli
 `try_lock`, céder seulement par `cession_volontaire_sure`. 3 mutations rouges
 (retour au `SpinLock`, borne datée retirée, prédicat affaibli).
 
+## 4 quinquies. BGA contre virtio-gpu 2D, même charge ; commandes groupées
+
+`BOUCHAUD_BANC_PRESENTATION_V1`. Le bureau au repos ne présente presque rien
+(l'horloge, une fois par seconde) : comparer les deux écrans sur lui revient à
+comparer deux silences.
+
+La commande `banc-present` présente la **même** suite de trames sur l'écran
+actif, par catégorie :
+
+- plein écran 1280×720, 40 fois ;
+- bande 1280×30, 200 fois ;
+- tuile 64×64, 400 fois.
+
+Elle chronomètre chaque `present_rect` :
+
+- la copie vers l'écran ;
+- sous virtio-gpu, `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` et leurs réponses.
+
+Le dessin dans le tampon arrière n'est pas compté, car il est identique pour
+les deux écrans. Banc `tools/ci/run_banc_presentation.sh` : deux démarrages
+(`-vga std` ; `-vga none -device virtio-gpu-pci`), en CI os-primitives sous
+TCG puis KVM. Exigé : les trois catégories sur le bon écran ; sous virtio,
+640 présentations acceptées, aucun échec, scanout actif à la fin. Une
+`presente()` vidée de ses commandes rend la dernière exigence rouge.
+
+**Mesure locale [QEMU-TCG], avant regroupement** (`e788a77b`, moyenne / p95,
+en µs) :
+
+| Catégorie | BGA | virtio-gpu 2D | Rapport |
+|---|---|---|---|
+| plein 1280×720 | 1 892 / 2 729 | 3 506 / 7 161 | 1,9× |
+| bande 1280×30 | 74 / 106 | 179 / 318 | 2,4× |
+| tuile 64×64 | 23 / 36 | 141 / 197 | 6,1× |
+
+Lecture :
+
+- **coût fixe** : environ 115 µs par présentation pour les deux commandes
+  (deux sorties de la machine virtuelle, deux attentes de réponse), visibles
+  surtout sur les petits rectangles ;
+- **coût proportionnel** : la copie vers la mémoire DMA, puis la copie de
+  l'hôte vers sa surface (`TRANSFER_TO_HOST_2D`).
+
+**Latence de trame.** Sous virtio-gpu, la réponse au `FLUSH` dit que l'hôte a
+mis à jour sa surface ; elle est donc incluse dans le coût mesuré. Sous BGA,
+rien ne l'indique à l'invité : l'affichage de QEMU relit la VRAM à son propre
+rythme. La seule latence de trame observable par l'invité est donc celle de
+virtio-gpu.
+
+**Consolidation : `BOUCHAUD_VIRTIO_GPU_LOT_V1`** (`commande_double`). Le
+transfert et le flush d'une présentation partent sous **une** sonnette : deux
+chaînes de descripteurs, une notification, une attente bornée de
+`dernier_util + 2`. La file de contrôle est traitée dans l'ordre, donc le
+flush suit toujours le transfert. Sans réponse, la file est cassée et les deux
+issues valent `SANS_REPONSE`, comme pour une commande seule. L'autotest garde
+ses commandes une à une, pour vérifier chaque refus avec son code.
+
+A/B local [QEMU-TCG], 3 tours alternés, moyenne virtio :
+
+| Catégorie | Avant | Après | Écart |
+|---|---|---|---|
+| tuile 64×64 | 128 µs | 89 µs | −30 % |
+| bande 1280×30 | 227 µs | 138 µs | −39 % |
+| plein écran | 2 933 µs | 2 477 µs | −16 % |
+
+Le surcoût fixe sur BGA passe d'environ 115 à environ 75 µs. Les pixels sont
+inchangés : mire 3721/3721, bureau virtio = BGA 0,997, horloge vivante.
+
+Scanout 2D seulement : aucune accélération, aucune 3D, aucun Vulkan. Ce qui
+reste à consolider avant toute 3D :
+
+- une file d'interruptions au lieu du scrutin ;
+- un tampon de présentation double, pour ne plus copier sous le verrou ;
+- la mesure sous KVM (CI).
+
 ## 5. Ce que P10 ne prétend pas
 
 - Il n'y a ni WebGL, ni WebGPU, ni canvas accéléré. Le canvas 2D est peint en
