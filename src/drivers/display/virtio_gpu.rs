@@ -742,8 +742,13 @@ struct ScanoutBureau {
     largeur: u32,
     hauteur: u32,
     physique: u64,
+    virt: *mut u32,
     octets: usize,
 }
+
+// La memoire du scanout n'est touchee que sous le verrou du peripherique et
+// par le bureau qui l'a recue : le pointeur ne circule pas ailleurs.
+unsafe impl Send for ScanoutBureau {}
 
 // BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1
 //
@@ -877,6 +882,32 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
         return None;
     }
     let (l, h) = (largeur as u32, hauteur as u32);
+    // BOUCHAUD_VIRTIO_GPU_SCANOUT_CYCLE_V1 : un second `enter()` (bureau
+    // quitte puis relance, deux bancs dans le meme demarrage) recreait la
+    // ressource 1 sans avoir rendu la precedente. Le peripherique refusait
+    // (`RESP_ERR_INVALID_RESOURCE_ID`), et le chemin d'echec faisait UNREF de
+    // la ressource 1 -- l'ANCIENNE, encore a l'ecran : sa memoire DMA fuyait
+    // et le scanout s'eteignait ; un demarrage sur deux restait sans ecran.
+    // Meme geometrie : la ressource est reprise. Autre geometrie : l'ancienne
+    // est rendue d'abord (scanout eteint, DETACH, UNREF, memoire selon son
+    // etat).
+    if let Some(s) = p.scanout {
+        let tout = Rect { x: 0, y: 0, largeur: l, hauteur: h };
+        if s.largeur == l && s.hauteur == h {
+            let repris = exige("bureau-repris", unsafe { scanout(&mut p.file, 0, RESSOURCE_BUREAU, tout) }, RESP_OK_NODATA);
+            if let Err(e) = repris {
+                crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison={}", e);
+                return None;
+            }
+            ACTIF.store(true, Ordering::Release);
+            crate::serial_println!(
+                "BOUCHAUD_VIRTIO_GPU_SCANOUT_REPRIS {}x{} ressource={} memoire_phys={:#x} (meme ressource, aucune recreation)",
+                l, h, RESSOURCE_BUREAU, s.physique
+            );
+            return Some((s.virt, s.physique));
+        }
+        unsafe { rend_scanout(p, s) };
+    }
     let octets = largeur * hauteur * 4;
     let Some((phys, virt)) = memory::alloc_dma(octets) else {
         crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison=dma octets={}", octets);
@@ -904,7 +935,7 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
         unsafe { rend_si_sur(&mut p.file, RESSOURCE_BUREAU, phys, octets, &mut memoire, "bureau") };
         return None;
     }
-    p.scanout = Some(ScanoutBureau { largeur: l, hauteur: h, physique: phys, octets });
+    p.scanout = Some(ScanoutBureau { largeur: l, hauteur: h, physique: phys, virt: virt as *mut u32, octets });
     if let Some(m) = p.mire.take() {
         unsafe { libere_mire(&mut p.file, m) };
     }
@@ -914,6 +945,22 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
         l, h, RESSOURCE_BUREAU, phys, p.ecran.0, p.ecran.1
     );
     Some((virt as *mut u32, phys))
+}
+
+/// Rend le scanout du bureau : ecran eteint (SET_SCANOUT ressource 0),
+/// DETACH, UNREF ; la memoire n'est rendue que si le peripherique ne peut
+/// plus la tenir (`virtio_gpu_dma`).
+unsafe fn rend_scanout(p: &mut Peripherique, s: ScanoutBureau) {
+    ACTIF.store(false, Ordering::Release);
+    let eteint = scanout(&mut p.file, 0, 0, Rect { x: 0, y: 0, largeur: 0, hauteur: 0 });
+    let mut memoire = Memoire::Attachee;
+    memoire = dma::apres_autre(memoire, dma::issue(eteint));
+    rend_si_sur(&mut p.file, RESSOURCE_BUREAU, s.physique, s.octets, &mut memoire, "bureau-precedent");
+    p.scanout = None;
+    crate::serial_println!(
+        "VIRTIO_GPU_SCANOUT_RENDU {}x{} ressource={} memoire={:?}",
+        s.largeur, s.hauteur, RESSOURCE_BUREAU, memoire
+    );
 }
 
 /// Apres une copie du bureau dans la memoire du scanout : transfert du

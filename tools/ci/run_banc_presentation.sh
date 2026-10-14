@@ -29,7 +29,9 @@ fi
 SORTIE=${BANC_SORTIE:-$PWD/banc-presentation-$NOM}
 rm -rf "$SORTIE"
 mkdir -p "$SORTIE/scenario"
-printf 'banc-present\n' > "$SORTIE/scenario/autorun"
+# Deux bancs dans le meme demarrage : le second `enter()` reprend le scanout
+# (BOUCHAUD_VIRTIO_GPU_SCANOUT_CYCLE_V1 -- il echouait un demarrage sur deux).
+printf 'banc-present\nbanc-present\necho BANC_PRESENT_FIN\n' > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/banc.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)
 
 demarre() {
@@ -42,7 +44,11 @@ demarre() {
   local pid=$!
   local limite=$((SECONDS + 300))
   while kill -0 "$pid" 2>/dev/null && (( SECONDS < limite )); do
-    grep -aqE '\[BANC-PRESENT\] .*fin |\[BANC-PRESENT\] ECHEC|KERNEL PANIC|panicked at' "$log" && { sleep 1; break; }
+    # La SORTIE de `echo BANC_PRESENT_FIN`, pas l'echo de la commande.
+    if grep -aqE '\[BANC-PRESENT\] ECHEC|KERNEL PANIC|panicked at' "$log" \
+       || sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -a 'BANC_PRESENT_FIN' | grep -aqv '+ echo BANC_PRESENT_FIN'; then
+      sleep 1; break
+    fi
     sleep 1
   done
   kill -KILL "$pid" 2>/dev/null || true
@@ -79,8 +85,12 @@ for ecran in bga virtio; do
   done
   exige "$ecran : aucune panique" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$log'"
 done
-exige "virtio : 640 presentations acceptees, aucun echec, scanout actif a la fin" \
-  bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$SORTIE/serie-virtio.log' | grep -aqE '\[BANC-PRESENT\] ecran=virtio-gpu-2d fin presentations_virtio_ok=640 echecs_virtio=0 actif=1'"
+exige "virtio : 640 presentations acceptees, aucun echec, scanout actif a la fin -- deux bancs de suite" \
+  bash -c "[ \"\$(sed -E 's/\x1b\[[0-9;]*m//g' '$SORTIE/serie-virtio.log' | grep -acE '\[BANC-PRESENT\] ecran=virtio-gpu-2d fin presentations_virtio_ok=640 echecs_virtio=0 actif=1')\" = 2 ]"
+exige "virtio : le second banc reprend la ressource du bureau (aucune recreation)" \
+  grep -aq 'BOUCHAUD_VIRTIO_GPU_SCANOUT_REPRIS 1280x720 ressource=1' "$SORTIE/serie-virtio.log"
+exige "bga : deux bancs de suite" \
+  bash -c "[ \"\$(sed -E 's/\x1b\[[0-9;]*m//g' '$SORTIE/serie-bga.log' | grep -acE '\[BANC-PRESENT\] ecran=bga fin ')\" = 2 ]"
 if [ "$echecs" -eq 0 ]; then
   echo "BANC_PRESENTATION_OK accel=$NOM"
 else
