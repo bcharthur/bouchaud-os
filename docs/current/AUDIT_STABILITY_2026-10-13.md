@@ -233,6 +233,125 @@ Le correctif de mesure `45e761ee` est venu après un faux relevé à SMP8
 (`masque_pire_us=9969 irq:0xf1`). La sortie d'un gestionnaire lit désormais le
 cœur courant, et une commutation volontaire efface l'entrée d'IRQ du cœur.
 
+**Rectificatif (même jour, soir).** Le « témoin sans émulation » KVM SMP1 du
+run 38569175760 n'a **rien** prouvé. Ses trois passes rendaient
+« RESULTAT : 0 (2 passées) » sans aucune comparaison de priorité : voir
+§3 septies. L'affirmation « sous KVM la sonde ne rougit pas » est retirée.
+
+### 3 septies. Soir du 14 octobre — faux vert de la sonde, SMP8 attribué, jeton série
+
+**1. Faux vert d'`ordonnanceur-probe` (corrigé, `c80dcd81` + `4d7e1577`).**
+
+Témoin KVM SMP1, run 38569175760, passe 1 :
+
+| Phase | p95 | p99 | pire |
+|---|---|---|---|
+| au repos | 1 935 µs | 10 920 µs | 24 465 µs |
+| sous charge | 1 127 µs | — | — |
+
+La phase au repos compte aussi 34 absences du PIT de plus de 2 ms, closes en
+ring 0 hors de toute section masquée : c'est le vCPU arrêté sur `hlt` qui reçoit
+ses tics en retard.
+
+Le témoin étant plus lent que la charge, la porte « charge non mesurable »
+sautait les deux vérifications de priorité, et la sonde rendait 0. Un témoin
+contaminé gonflait en outre le bruit admis par la seconde vérification
+(`repos.pire`).
+
+Le correctif comporte deux parties.
+
+- **Noyau** (`BOUCHAUD_ATTRIBUTION_REVEIL_V2`) : chaque absence de battement
+  (PIT, quantum local de chaque cœur) est journalisée avec la section masquée
+  qui la clôt. Chaque sommeil en retard de plus d'1 ms est ventilé :
+  - livraison externe ou masquée ;
+  - détection ;
+  - élection (politique ou externe) ;
+  - reprise.
+
+  Un réveil dont la part externe dépasse 1 ms est **contaminé** et listé dans
+  `/proc/self/reveil`.
+- **Sonde** (`BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1`, critères inchangés) :
+  - chaque comparaison est jugée sur tous les réveils **et** sur les seuls
+    réveils propres, avec une ligne `PREUVE` chiffrée ;
+  - un désaccord, une phase non jugeable (plus de 15 réveils contaminés sur
+    300, liste tronquée, attribution absente) ou une charge sans effet
+    mesurable donnent **NON_QUALIFIANT** : code 2, jamais
+    « RESULTAT : 0 » ;
+  - au plus 3 tentatives, chacune imprimée ; un échec qualifié n'est jamais
+    remesuré.
+
+Tests :
+
+| Suite | Contenu |
+|---|---|
+| `test_attribution_reveil` | 24 tests |
+| `test_ordonnanceur_verdict.cpp` | 25 vérifications ; le témoin KVM rejoué donne NON_QUALIFIANT ; 6 mutations de la logique, toutes rouges |
+| `verifie-sonde-ordonnanceur` | 12 négatifs |
+
+Le pas KVM d'os-primitives juge désormais l'**instrument** : un verdict
+explicite et prouvé. Son marqueur dit qu'il ne qualifie pas P13.
+
+Local [QEMU-TCG] SMP1 :
+
+| Démarrage | Résultat |
+|---|---|
+| 1 | 2 passes QUALIFIE_OK, en 2 puis 1 tentative ; un témoin dont le pire passe de 6 683 µs (tous) à 3 281 µs (propres) |
+| 2 (appariement restreint à la série) | 2 passes QUALIFIE_OK, en 2 tentatives chacune |
+
+**2. SMP8 : contention de l'émulateur, retard de réveil, politique
+d'élection, séparés.**
+
+Local [QEMU-TCG] SMP8 : 8 vCPU sur 4 cœurs hôte, 2 passes, 6 tentatives,
+toutes NON_QUALIFIANT. Entre 118 et 145 réveils sur 300 sont contaminés par
+phase sous charge.
+
+Part de la somme des retards de plus d'1 ms, phase interactive :
+
+| Cause | Part | Réveils > 1 ms |
+|---|---|---|
+| **élection externe** (le vCPU qui élit absent) | **56,9 %** | 526 |
+| **livraison externe** (PIT absent) | **20,3 %** | 302 |
+| élection, politique (tâche prête, cœur présent) | 8,5 % | 97 |
+| détection, retard de réveil du noyau | 6,3 % | 86 |
+| reprise, et sa part externe | 2,4 % + 4,7 % | 16 + 44 |
+| masquage par le noyau | 0,8 % | 17 |
+
+Le rouge SMP8 sous TCG est donc à environ 77 % de la **contention de
+l'émulateur**. Il n'est pas qualifiable sur ces runners ; la sonde le dit
+désormais (NON_QUALIFIANT) au lieu de rendre un rouge ou un vert.
+
+En SMP1 sous TCG, à l'inverse, le retard sous charge normale est à 80 % la
+**politique d'élection** (29 réveils > 1 ms, pire 1,8 ms), sans contention.
+
+La part SMP8 sous **KVM** viendra du bras `defaut` des pas A/B
+d'os-primitives.
+
+**3. Variante expérimentale d'IPI au réveil (`db82926c`, DÉSACTIVÉE par
+défaut).**
+
+- `decide_selon` : sous `Defaut`, la décision est exactement `decide`
+  (vérifié sur tous les états). Sous la variante, une `DemandeDifferee` pour
+  une interactive sous budget, face à un occupant normal, devient demande
+  ordinaire + IPI. Elle ne passe jamais par `demande_ciblee` : aucun fil
+  noyau n'est préempté.
+- Bascule : `ordo-variante`.
+- Banc A/B `run_ab_reveil_ipi.sh`, critères déclarés avant la mesure :
+  latence, débit, équité, sûreté, robustesse.
+- Local [QEMU-TCG] SMP4, 2 tours : NON_CONVAINCANT (équité). Non décisif :
+  toutes les passes sont NON_QUALIFIANT sous TCG.
+- Politique par défaut **inchangée**. A/B KVM SMP4 et SMP8 en CI.
+
+**4. Jeton série (`1413289b`).** os-primitives `748322af`, KVM SMP4 : 719
+lignes sur 720, `emissions_a_la_borne=1`. Un appelant a attendu plus d'1 s
+derrière des émetteurs qui progressaient, puis a émis sans jeton.
+
+La borne porte désormais sur l'**absence de progrès** (1 s sans aucune
+ligne émise), avec un plafond absolu de 10 s. La cause de chaque renoncement
+est publiée.
+
+Ce rouge a sauté les pas virtio-gpu de `748322af` (BARRIERE_V1) : leur preuve
+CI est à prendre sur `1413289b`.
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |
