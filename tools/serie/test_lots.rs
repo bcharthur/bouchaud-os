@@ -24,7 +24,7 @@ extern crate alloc;
 #[path = "../../src/drivers/serial/lots.rs"]
 mod lots;
 
-use lots::{attendu, en_lots};
+use lots::{attendu, en_lots, longueur_ligne};
 
 /// Concatene ce que `en_lots` emet, pour une taille de tampon donnee.
 fn emis(octets: &[u8], taille: usize) -> alloc::vec::Vec<u8> {
@@ -140,4 +140,59 @@ fn les_lots_remplissent_le_tampon() {
         200usize.div_ceil(16),
         "200 octets par lots de 16 : treize attentes, pas deux cents"
     );
+}
+
+/// Decoupe d'un `write(2)` en segments, chacun emis sous le jeton.
+fn segments(octets: &[u8], max: usize) -> alloc::vec::Vec<&[u8]> {
+    let mut reste = octets;
+    let mut sortie = alloc::vec::Vec::new();
+    while !reste.is_empty() {
+        let n = longueur_ligne(reste, max);
+        assert!(n >= 1 && n <= reste.len(), "segment vide ou hors limites");
+        let (tete, queue) = reste.split_at(n);
+        sortie.push(tete);
+        reste = queue;
+    }
+    sortie
+}
+
+/// BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : aucune ligne coupee au milieu.
+///
+/// La ligne `[LB] SERVICE_CRASH_REQUEST ... pid=16 ...` sortait
+/// `pid=1<ESC>...6` : emise par lots de 64 sans le jeton, pendant que le
+/// processus tue faisait ecrire le noyau depuis un autre coeur.
+#[test]
+fn une_ligne_n_est_jamais_coupee() {
+    let entree = b"[LB] SERVICE_CRASH_REQUEST onglet=1 service=ImageDecoder pid=16 kill=ok trames=42 t_ms=1234\nsuite\n\nfin sans saut";
+    for max in [128usize, 256, 2048] {
+        let s = segments(entree, max);
+        assert_eq!(s.concat(), entree.to_vec(), "octets perdus ou reordonnes (max {max})");
+        assert_eq!(
+            s[0],
+            &entree[..entree.iter().position(|&o| o == b'\n').unwrap() + 1],
+            "la premiere ligne doit partir entiere (max {max})"
+        );
+        for seg in &s[..s.len() - 1] {
+            assert_eq!(seg.last(), Some(&b'\n'), "segment interieur sans saut de ligne (max {max})");
+        }
+        assert_eq!(*s.last().unwrap(), b"fin sans saut");
+    }
+}
+
+/// Une ligne plus longue que le tampon est coupee a la borne -- la phase
+/// interruptions masquees reste bornee -- et rien n'est perdu.
+#[test]
+fn une_ligne_trop_longue_est_bornee() {
+    let mut entree = alloc::vec![b'x'; 5000];
+    entree.push(b'\n');
+    let s = segments(&entree, 2048);
+    assert_eq!(s.iter().map(|x| x.len()).collect::<alloc::vec::Vec<_>>(), [2048, 2048, 905]);
+    assert_eq!(s.concat(), entree);
+}
+
+/// Une borne nulle ne doit pas bloquer la boucle de l'appelant.
+#[test]
+fn une_borne_nulle_avance_quand_meme() {
+    assert_eq!(longueur_ligne(b"ab\n", 0), 1);
+    assert_eq!(longueur_ligne(b"\n", 0), 1);
 }

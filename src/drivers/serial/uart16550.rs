@@ -297,7 +297,11 @@ impl fmt::Write for TamponFormat {
         let mut reste = s.as_bytes();
         while !reste.is_empty() {
             if self.len == self.donnees.len() {
-                self.vide();
+                // Ligne plus longue que le tampon : le formatage se fait hors
+                // du jeton, le debordement ne doit pas sortir sans lui
+                // (BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1). La ligne sort en
+                // morceaux de 2 Kio, chacun entier.
+                sous_jeton(|| self.vide());
             }
             let place = self.donnees.len() - self.len;
             let n = place.min(reste.len());
@@ -389,14 +393,12 @@ pub fn emissions_a_la_borne() -> u64 {
 /// pour finir meme si l'horloge n'avance pas encore. `_print` masque ensuite
 /// et prend le jeton comme avant : la phase masquee ne couvre plus que la
 /// course finale, et la ligne reste atomique.
-fn attend_jeton_libre() {
-    const BORNE_NS: u64 = 1_000_000_000;
-    let debut = crate::kernel::timer::monotonic_ns();
+fn attend_jeton_libre(echeance: u64) {
     let mut tours = 0u32;
     while EMISSION.load(Ordering::Relaxed) != 0 {
         tours = tours.wrapping_add(1);
         if tours > 50_000_000
-            || (tours % 256 == 0 && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > BORNE_NS)
+            || (tours % 256 == 0 && crate::kernel::timer::monotonic_ns() > echeance)
         {
             return;
         }
@@ -404,6 +406,30 @@ fn attend_jeton_libre() {
     }
 }
 
+/// Toute l'attente du jeton d'un appelant interruptible : file non masquee
+/// ET courses masquees, une seule echeance datee.
+const BORNE_ATTENTE_NS: u64 = 1_000_000_000;
+
+/// Course masquee d'un appelant interruptible, avant de retourner dans la file.
+///
+/// BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1. Quand le jeton parait libre, plusieurs
+/// coeurs masquent et courent ; un seul gagne. Les perdants attendaient
+/// ensuite, MASQUES, jusqu'a 100 000 tours -- quelques millisecondes -- puis
+/// emettaient SANS le jeton. Sous KVM chaque octet sur COM1 est une sortie de
+/// VM : une ligne de 2 Kio du gagnant dure plus que cette borne. Le perdant
+/// ecrivait alors en meme temps que lui, octet contre octet (run 38482972584 :
+/// `pid=1\x1b6[ 90kmi[l...`). Desormais le perdant rouvre les interruptions
+/// et refait la queue tant que l'echeance n'est pas passee.
+const COURSE_MASQUEE: u32 = 256;
+
+// JAMAIS EN LIGNE. Le tampon de formatage fait 2 Kio : en ligne, il entrait
+// dans la trame de CHAQUE appelant de `serial_println!`. Une fois `_print`
+// reduit a formater puis `sous_jeton`, LLVM l'a integre partout -- +2 Kio par
+// fonction qui journalise, +20 Kio sur la chaine `window_manager::boucle`
+// (61 288 a 63 320 octets pour une pile de 61 440 ; 43 272 a 43 880 avant).
+// Hors ligne, le tampon n'existe que dans la trame de `_print`, le temps de
+// l'appel (tools/verifie-pile-noyau-profondeur.py).
+#[inline(never)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     if !is_ready() {
@@ -415,40 +441,98 @@ pub fn _print(args: fmt::Arguments) {
     let mut sortie = TamponFormat::neuf();
     let _ = sortie.write_fmt(args);
 
-    let ouvertes = x86_64::instructions::interrupts::are_enabled();
-    // BOUCHAUD_SERIE_ATTENTE_DATEE_V1 : la file d'attente se fait AVANT de
-    // masquer, sans rien tenir (voir `attend_jeton_libre`) ; la phase masquee
-    // ne couvre plus que la course finale.
-    if ouvertes {
-        attend_jeton_libre();
+    sous_jeton(|| sortie.vide());
+}
+
+/// BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 -- la sortie d'un `write(2)` userland,
+/// ligne par ligne, chaque ligne sous le jeton.
+///
+/// `console_write` appelait `ecris_octets` SANS le jeton. Ses lots de 64
+/// octets se melaient donc aux lignes du noyau emises par un autre coeur :
+/// `[LB] SERVICE_CRASH_REQUEST ... pid=1<ESC>...6`, la ligne d'un processus
+/// coupee par le `PROCESS_DEATH` du processus qu'il venait de tuer. Le banc
+/// des services y lisait « pid ? » -- un rouge que le code ne meritait pas,
+/// et un journal qui mentait.
+///
+/// Le jeton est rendu entre deux lignes : une ligne du noyau passe entre
+/// elles, jamais au milieu. Une ligne plus longue que le tampon de formatage
+/// est coupee a sa taille, ce qui borne la phase interruptions masquees comme
+/// pour `_print`.
+pub fn ecris_lignes(octets: &[u8]) {
+    if !is_ready() {
+        return;
     }
-    x86_64::instructions::interrupts::disable();
-    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
-    // Attente BORNEE : le port sert aussi aux paniques et aux interruptions ;
-    // une ligne entrelacee vaut mieux qu'une machine qui se tait.
-    let mut tours = 0u32;
+    let mut reste = octets;
+    while !reste.is_empty() {
+        let n = super::lots::longueur_ligne(reste, FORMAT_BUFFER_SIZE);
+        let (ligne, suite) = reste.split_at(n);
+        sous_jeton(|| ecris_octets(ligne));
+        reste = suite;
+    }
+}
+
+/// Emet sous le jeton serie : interruptions masquees, jeton tenu par ce
+/// contexte du debut a la fin de `emet` (voir EMISSION).
+fn sous_jeton<F: FnOnce()>(emet: F) {
+    let ouvertes = x86_64::instructions::interrupts::are_enabled();
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(BORNE_ATTENTE_NS);
+    // Plafond de retours dans la file, pour finir meme si l'horloge n'avance
+    // pas encore (meme raison que le plafond de tours de la file).
+    let mut relances = 0u32;
     let pris = loop {
-        match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => break true,
-            Err(detenteur) if detenteur == moi => {
-                EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);
+        // BOUCHAUD_SERIE_ATTENTE_DATEE_V1 : la file d'attente se fait AVANT de
+        // masquer, sans rien tenir (voir `attend_jeton_libre`) ; la phase
+        // masquee ne couvre que la course finale.
+        if ouvertes {
+            attend_jeton_libre(echeance);
+        }
+        x86_64::instructions::interrupts::disable();
+        // Relu a chaque tour : interruptions ouvertes, la tache a pu migrer.
+        let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+        // Attente BORNEE : le port sert aussi aux paniques et aux interruptions ;
+        // une ligne entrelacee vaut mieux qu'une machine qui se tait. Mais un
+        // appelant interruptible ne s'y resout qu'a l'echeance datee : avant,
+        // une course perdue le renvoie dans la file (COURSE_MASQUEE).
+        let requeue = ouvertes
+            && relances < 100_000
+            && crate::kernel::timer::monotonic_ns() < echeance;
+        let borne = if requeue { COURSE_MASQUEE } else { 100_000 };
+        let mut tours = 0u32;
+        let issue = loop {
+            match EMISSION.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => break Some(true),
+                Err(detenteur) if detenteur == moi => {
+                    EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);
+                    break Some(false);
+                }
+                Err(_) => {}
+            }
+            // Interruptions masquees : servir soi-meme les shootdowns TLB qui
+            // attendent ce coeur, comme pendant l'emission.
+            if tours % 64 == 0 {
+                crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+            }
+            tours += 1;
+            if tours > borne {
+                break None;
+            }
+            core::hint::spin_loop();
+        };
+        match issue {
+            Some(pris) => break pris,
+            // Course perdue, rien n'est tenu : rouvrir et refaire la queue.
+            None if requeue => {
+                relances += 1;
+                x86_64::instructions::interrupts::enable();
+                continue;
+            }
+            None => {
+                EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
                 break false;
             }
-            Err(_) => {}
         }
-        // Interruptions masquees : servir soi-meme les shootdowns TLB qui
-        // attendent ce coeur, comme pendant l'emission.
-        if tours % 64 == 0 {
-            crate::arch::x86_64::smp::sert_shootdowns_en_attente();
-        }
-        tours += 1;
-        if tours > 100_000 {
-            EMISSIONS_A_LA_BORNE.fetch_add(1, Ordering::Relaxed);
-            break false;
-        }
-        core::hint::spin_loop();
     };
-    sortie.vide();
+    emet();
     if pris {
         EMISSION.store(0, Ordering::Release);
     }

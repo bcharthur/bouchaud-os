@@ -168,8 +168,12 @@ fn console_write(data: &[u8]) {
     //
     // En mode non interactif, `print!` recopie deja tout sur COM1 : ecrire ici
     // en plus afficherait chaque ligne du programme en double.
+    //
+    // BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : ligne par ligne sous le jeton
+    // serie, comme les lignes du noyau -- sans lui, une ligne du noyau emise
+    // par un autre coeur coupait la ligne du programme en deux.
     if !crate::drivers::vga::serial_mirror() {
-        crate::drivers::serial::ecris_octets(data);
+        crate::drivers::serial::ecris_lignes(data);
     }
     let text = String::from_utf8_lossy(data);
     crate::print!("{}", text);
