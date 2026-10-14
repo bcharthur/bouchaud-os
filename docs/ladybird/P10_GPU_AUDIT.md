@@ -281,7 +281,7 @@ Garde 7 : `SleepMutex`, un seul `GPU.lock()` dans `verrou()` avec repli
 `try_lock`, céder seulement par `cession_volontaire_sure`. 3 mutations rouges
 (retour au `SpinLock`, borne datée retirée, prédicat affaibli).
 
-## 4 quinquies. BGA contre virtio-gpu 2D, même charge ; commandes groupées
+## 4 quinquies. BGA contre virtio-gpu 2D, même charge ; groupement retiré
 
 `BOUCHAUD_BANC_PRESENTATION_V1`. Le bureau au repos ne présente presque rien
 (l'horloge, une fois par seconde) : comparer les deux écrans sur lui revient à
@@ -323,37 +323,122 @@ Lecture :
 - **coût proportionnel** : la copie vers la mémoire DMA, puis la copie de
   l'hôte vers sa surface (`TRANSFER_TO_HOST_2D`).
 
-**Latence de trame.** Sous virtio-gpu, la réponse au `FLUSH` dit que l'hôte a
-mis à jour sa surface ; elle est donc incluse dans le coût mesuré. Sous BGA,
+**Latence de trame.** Sous virtio-gpu, la réponse au `FLUSH` — barrière
+comprise, depuis BARRIERE_V1 ; sans elle, la spécification ne garantit rien —
+dit que l'hôte a mis à jour sa surface ; elle est donc incluse dans le coût
+mesuré. Sous BGA,
 rien ne l'indique à l'invité : l'affichage de QEMU relit la VRAM à son propre
 rythme. La seule latence de trame observable par l'invité est donc celle de
 virtio-gpu.
 
-**Consolidation : `BOUCHAUD_VIRTIO_GPU_LOT_V1`** (`commande_double`). Le
-transfert et le flush d'une présentation partent sous **une** sonnette : deux
-chaînes de descripteurs, une notification, une attente bornée de
-`dernier_util + 2`. La file de contrôle est traitée dans l'ordre, donc le
-flush suit toujours le transfert. Sans réponse, la file est cassée et les deux
-issues valent `SANS_REPONSE`, comme pour une commande seule. L'autotest garde
-ses commandes une à une, pour vérifier chaque refus avec son code.
+**Groupement `BOUCHAUD_VIRTIO_GPU_LOT_V1` (`01f3063a`) : retiré.** Il
+envoyait le transfert et le flush sous **une** sonnette, avec deux chaînes,
+puis attendait `dernier_util + 2`. Sa justification, « la file de contrôle
+est traitée dans l'ordre », est **fausse** au regard de la spécification
+(`virtio-spec`, `device-types/gpu/description.tex`) :
 
-A/B local [QEMU-TCG], 3 tours alternés, moyenne virtio :
+> The device MAY process controlq commands asynchronously and return them
+> to the driver before the processing is complete. If the driver needs to
+> know when the processing is finished it can set the
+> VIRTIO_GPU_FLAG_FENCE flag in the request. The device MUST finish the
+> processing before returning the command then.
 
-| Catégorie | Avant | Après | Écart |
+Rien n'y garantit un ordre de traitement. `VIRTIO_F_IN_ORDER` (bit 35) ne
+porte que sur l'ordre d'**utilisation** des tampons, et QEMU ne l'offre pas :
+`fonctionnalites_proposees=0x0000010130000002`. Le lot ne contrôlait pas non
+plus les identifiants des entrées utilisées. Un flush traité avant son
+transfert affiche un rectangle pas encore reçu. Un `DETACH_BACKING` rendu
+avant la fin de son traitement ne prouve pas que la mémoire est lâchée.
+
+**Remplacement : `BOUCHAUD_VIRTIO_GPU_BARRIERE_V1`**
+(`src/drivers/display/virtio_gpu_file.rs`, module pur) :
+
+- **toute** commande part avec `VIRTIO_GPU_FLAG_FENCE` et un `fence_id`
+  croissant, posés **avant** la sonnette ; sa réponse prouve que le
+  traitement est fini ;
+- **une seule** commande en vol (chaîne de tête 0), une seule sonnette dans
+  le pilote ; le flush ne part qu'après la réponse du transfert ;
+- chaque réponse est **jugée** (`file::juge`) :
+  - exactement une entrée utilisée de plus ;
+  - identifiant égal à la tête de chaîne ;
+  - longueur d'au moins un en-tête, et au plus la capacité du descripteur
+    écrivable ;
+  - drapeau `FENCE` renvoyé, avec le **même** `fence_id`.
+- l'attente se termine sur **tout** progrès de `used.idx`, toujours bornée
+  (1 s datée + plafond TSC). Une avance de deux entrées est une violation,
+  pas une réponse. `dernier_util` n'avance qu'après jugement ;
+- une violation (`VIRTIO_GPU_FILE violation=… commande=… barriere=…
+  attendue=…`) casse la file et rend `REPONSE_INVALIDE`. Elle pèse comme
+  `SANS_REPONSE` sur l'état DMA : mémoire `Inconnue`, jamais rendue.
+
+Ce que le jugement attrape, testé sur l'hôte
+(`tools/display/test_virtio_gpu_file.rs`, 12 tests) :
+
+- achèvement désordonné (id d'une autre chaîne) ;
+- réponse rendue avant la fin du traitement (sans barrière) ;
+- réponse tardive d'une commande précédente (barrière n − 1) ;
+- deux entrées d'un coup, ou aucune ;
+- réponse trop courte, ou plus longue que le descripteur ;
+- réponse laissée à zéro ;
+- rebouclage de `used.idx`.
+
+Côté invité, le banc de panne `tools/ci/run_virtio_gpu_reponse_etrangere.sh`
+utilise l'option `banc-virtio-gpu-reponse-etrangere`, hors `default`. Le
+premier transfert du bureau y est jugé contre la barrière d'une **autre**
+commande. Exigé :
+
+- la violation est nommée et chiffrée (`barriere_recue = attendue − 1`) ;
+- la file est cassée et le scanout abandonné **au premier échec** ;
+- aucune commande ne part sur la file cassée ;
+- le compositeur vit encore ;
+- aucune panique.
+
+Local [QEMU-TCG] : vert, `barriere=19 attendue=20`. En CI os-primitives :
+TCG puis KVM. Garde `verifie-virtio-pci` règle 9 : 21 mutations, toutes
+rouges (barrière absente ou posée après la sonnette, réponse non jugée,
+violation prise pour une réussite, file non cassée, indice consommé avant
+le jugement, seconde sonnette, groupement réintroduit, flush sans attendre
+le transfert, attente sur l'indice exact, injection hors option).
+
+**Le coût de la sûreté, mesuré, pas caché.** A/B local [QEMU-TCG] sur la
+même machine, 3 tours alternés : `80ef1e76` (LOT_V1) contre l'arbre
+BARRIERE_V1, moyenne virtio en µs :
+
+| Catégorie | LOT_V1 (3 tours) | BARRIERE_V1 (3 tours) | Écart des moyennes |
 |---|---|---|---|
-| tuile 64×64 | 128 µs | 89 µs | −30 % |
-| bande 1280×30 | 227 µs | 138 µs | −39 % |
-| plein écran | 2 933 µs | 2 477 µs | −16 % |
+| tuile 64×64 | 75 / 78 / 102 | 100 / 120 / 132 | +38 % (85 → 117) |
+| bande 1280×30 | 146 / 137 / 106 | 129 / 227 / 143 | +28 % (130 → 166), bruité |
+| plein écran | 1 701 / 1 821 / 2 106 | 1 766 / 1 845 / 2 127 | +2 % |
 
-Le surcoût fixe sur BGA passe d'environ 115 à environ 75 µs. Les pixels sont
-inchangés : mire 3721/3721, bureau virtio = BGA 0,997, horloge vivante.
+Le second aller-retour coûte environ 30 µs sur les petits rectangles, et
+rien de mesurable en plein écran. QEMU traitant ses commandes 2D de façon
+synchrone, la barrière elle-même ne coûte rien. Ce gain-là ne vaut pas une
+garantie d'ordre que la spécification ne donne pas.
+
+Pour mémoire, mesure CI de `e9f94b3e` **avec** LOT_V1, en µs (BGA / virtio) :
+
+| Catégorie | KVM | TCG |
+|---|---|---|
+| plein écran | 195 / 181 | 834 / 1 004 |
+| bande | 1 / 20 | 27 / 64 |
+| tuile | 1 / 20 | 7 / 30 |
+
+La mesure KVM de BARRIERE_V1 viendra du run os-primitives qui suit ce
+correctif.
+
+Pixels inchangés, local [QEMU-TCG] :
+
+- mire 3721/3721 ;
+- bureau virtio = BGA, 921 391/921 600 pixels ;
+- horloge vivante ;
+- 26 présentations, 0 échec, 0 sautée.
 
 Scanout 2D seulement : aucune accélération, aucune 3D, aucun Vulkan. Ce qui
 reste à consolider avant toute 3D :
 
 - une file d'interruptions au lieu du scrutin ;
 - un tampon de présentation double, pour ne plus copier sous le verrou ;
-- la mesure sous KVM (CI).
+- la mesure KVM de BARRIERE_V1 (CI, au SHA de ce correctif).
 
 ## 5. Ce que P10 ne prétend pas
 
