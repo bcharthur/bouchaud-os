@@ -228,6 +228,33 @@ class DetailsSondes(unittest.TestCase):
         self.assertTrue(blocs[0][1].startswith("attribution sous charge (interactif) : reveils=300"))
         self.assertIn("reveille_par=services-metrics", blocs[0][1])
 
+    def test_une_sonde_non_qualifiante_n_est_pas_une_reussite(self):
+        """BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : le temoin contamine du run
+        38569175760 ne donne plus « 0 echec » mais un NON_QUALIFIANT, avec ses
+        preuves."""
+        journal = "\n".join([
+            "  au repos                 median  1323 us  p95   1935 us  p99  10920 us  pire  24465 us",
+            "  ventilation au repos : seuil_us=1000 ventiles=12 contamines=6 incompletes=0 "
+            "livraison_externe=6:21000:3900 liste=1000016:3900",
+            "  PREUVE la charge degrade la latence (porte) : tout[p95 sous charge 1127 > p95 repos 1935"
+            " + plancher 2] = faux ; propre[...] = faux ; contamines repos=6 normal=0 interactif=1 sur 300"
+            " -> QUALIFIE_ECHEC",
+            "  tentative 3/3 : NON_QUALIFIANT : charge sans effet mesurable",
+            "VERDICT_SONDE : NON_QUALIFIANT tentatives=3 raison=charge sans effet mesurable",
+            "RESULTAT : NON_QUALIFIANT 0 verification(s) en echec, 2 non qualifiante(s) (2 passees)",
+        ])
+        resultats = budgets_endurance.RESULTAT.findall(journal)
+        self.assertEqual(resultats, [("NON_QUALIFIANT ", "0", "2", "2")])
+        blocs = budgets_endurance.details_sondes(journal)
+        self.assertEqual(len(blocs), 1)
+        self.assertTrue(any(l.startswith("PREUVE ") for l in blocs[0]))
+        self.assertTrue(any(l.startswith("ventilation au repos") for l in blocs[0]))
+        self.assertTrue(any(l.startswith("VERDICT_SONDE : NON_QUALIFIANT") for l in blocs[0]))
+
+    def test_l_ancienne_forme_reste_lue(self):
+        journal = "RESULTAT : 0 verification(s) en echec (4 passees)"
+        self.assertEqual(budgets_endurance.RESULTAT.findall(journal), [("", "0", "", "4")])
+
     def test_une_ligne_quelconque_n_est_pas_une_attribution(self):
         journal = "  attribution manquante\nRESULTAT : 0 verification(s) en echec (4 passees)"
         self.assertEqual(budgets_endurance.details_sondes(journal), [[]])

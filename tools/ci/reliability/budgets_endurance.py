@@ -55,7 +55,13 @@ CHECK_BUDGETS = RACINE / "tools" / "ci" / "check_budgets.py"
 
 # Ce que les familles de charge ecrivent. Relu ici pour le RAPPORT, jamais pour
 # le verdict de campagne : celui-la est deja dans `summary.json`.
-RESULTAT = re.compile(r"RESULTAT : (\d+) verification\(s\) en echec \((\d+)")
+# BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : une sonde qui n'a pas pu juger ecrit
+# `RESULTAT : NON_QUALIFIANT n verification(s) en echec, q non
+# qualifiante(s) (p passees)` -- jamais `RESULTAT : 0`, et ce n'est pas une
+# reussite.
+RESULTAT = re.compile(
+    r"RESULTAT : (NON_QUALIFIANT )?(\d+) verification\(s\) en echec"
+    r"(?:, (\d+) non qualifiante\(s\))? \((\d+)")
 PIRE = re.compile(r"\[SCHED-NG-PIRE\][^\n]*")
 FIN = re.compile(r"=== AUTORUN FIN === statut=(\d+)")
 ABSENT_REQUIS = re.compile(r"^\s*(\S+) : REQUIS mais absent", re.M)
@@ -73,6 +79,12 @@ LIGNE_LATENCE = re.compile(r"^\s+(au repos|sans charge|sous charge)[^\n]*median"
 # coeur). Un echec de latence sans elle ne dit pas s'il vient du noyau ou de
 # l'emulateur.
 LIGNE_ATTRIBUTION = re.compile(r"^\s+attribution [^:]+ : reveils=")
+# BOUCHAUD_ATTRIBUTION_REVEIL_V2 / BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : la
+# ventilation de chaque phase, la preuve chiffree de chaque comparaison, le
+# verdict de chaque tentative.
+LIGNE_QUALIFICATION = re.compile(
+    r"^\s+(ventilation [^:]+ : seuil_us=|PREUVE |phase non jugeable|tentative \d+/\d+ : )"
+    r"|^VERDICT_SONDE : ")
 
 
 def details_sondes(texte: str) -> list[list[str]]:
@@ -89,9 +101,10 @@ def details_sondes(texte: str) -> list[list[str]]:
     for brute in texte.splitlines():
         ligne = PREFIXE_CONSOLE.sub("", brute.rstrip("\r"))
         if RESULTAT.search(ligne):
-            blocs.append(courant[-16:])
+            blocs.append(courant[-40:])
             courant = []
-        elif LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne) or LIGNE_ATTRIBUTION.match(ligne):
+        elif (LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne) or LIGNE_ATTRIBUTION.match(ligne)
+              or LIGNE_QUALIFICATION.match(ligne)):
             courant.append(ligne.strip())
     return blocs
 
@@ -140,7 +153,9 @@ def releve_noyau(trace: Path) -> dict:
     fin = FIN.findall(texte)
     details = details_sondes(texte)
     resultats = [
-        {"echecs": int(e), "passees": int(t)} for e, t in RESULTAT.findall(texte)
+        {"echecs": int(e), "passees": int(t), "non_qualifiant": bool(nq),
+         "non_qualifiantes": int(q or 0)}
+        for nq, e, q, t in RESULTAT.findall(texte)
     ]
     for r, d in zip(resultats, details):
         r["details"] = d
@@ -251,8 +266,11 @@ def texte(rapport: dict) -> str:
             f"autorun_statut={noyau.get('autorun_statut')}"
         )
         for r in noyau.get("resultats_sondes", []):
-            lignes.append(f"     sonde : {r['echecs']} echec(s), {r['passees']} passee(s)")
-            if r["echecs"]:
+            lignes.append(
+                f"     sonde : {r['echecs']} echec(s), {r['passees']} passee(s)"
+                + (f", NON_QUALIFIANT ({r['non_qualifiantes']} non qualifiante(s))"
+                   if r.get("non_qualifiant") else ""))
+            if r["echecs"] or r.get("non_qualifiant"):
                 lignes.extend(f"       {d}" for d in r.get("details", []))
         for p in noyau.get("pire_attente", []):
             lignes.append(f"     {p}")
