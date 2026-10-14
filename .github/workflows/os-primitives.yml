@@ -14,7 +14,7 @@ concurrency:
 jobs:
   probes:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
@@ -109,19 +109,34 @@ jobs:
         run: tools/ci/run_oss_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Securite -- matrice des roles du navigateur par vrais appels systeme
         run: tools/ci/run_matrice_roles.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-      - name: Console serie -- lignes entieres pendant que le noyau ecrit (TCG, puis KVM lignes longues)
+      - name: Console serie -- lignes entieres pendant que le noyau ecrit, et detenteur du jeton suspendu (TCG, KVM)
         # BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : run 38482972584 (KVM), une
         # ligne du navigateur melangee octet contre octet a une ligne du noyau
-        # (`pid=1\x1b6[ 90kmi[l...`). Les deux demarrages tournent toujours ;
-        # le pas echoue si l'un des deux est rouge.
+        # (`pid=1\x1b6[ 90kmi[l...`). BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 :
+        # runs 38603003639 et 38608429652 (KVM), 1 puis 3 lignes emises sans
+        # le jeton par des contextes masques a leur borne courte ; hors
+        # panique, une ligne sans jeton est desormais differee entiere. Les
+        # deux derniers demarrages suspendent le detenteur du jeton au milieu
+        # d'une ligne, 3 s (TCG) puis 12 s (KVM, au-dela du plafond de 10 s ;
+        # des lignes peuvent y manquer, comptees perdues, jamais coupees).
+        # Tous les demarrages tournent ; le pas echoue si l'un est rouge.
         run: |
           r=0
           tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
           cp serie-entrelacement.log serie-entrelacement-tcg.log
           BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 120 120 1800 || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm.log
+          BANC_SUSPENSION_MS=3000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-suspendu.log
+          BANC_SUSPENSION_MS=12000 BANC_PERDUES_ADMISES=1 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-suspendu.log
           exit $r
       - name: P10 -- BGA contre virtio-gpu 2D, meme charge (TCG puis KVM)
+        # Les bancs qui suivent n'utilisent que l'image construite : un pas
+        # rouge plus haut ne doit plus masquer leurs resultats (runs
+        # 38603003639 et 38608429652 : le rouge serie a saute tous les pas
+        # P10). Le job reste rouge.
+        if: ${{ !cancelled() }}
         # BOUCHAUD_BANC_PRESENTATION_V1 : `banc-present` presente la meme
         # suite de trames (plein ecran, bande, tuile) sur l'ecran BGA puis sur
         # l'ecran virtio-gpu seul, et chronometre chaque presentation. Mesure,
@@ -129,33 +144,46 @@ jobs:
         run: |
           BANC_SORTIE=$PWD/banc-presentation-tcg tools/ci/run_banc_presentation.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           BANC_SORTIE=$PWD/banc-presentation-kvm BO_QEMU_KVM=1 tools/ci/run_banc_presentation.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-      - name: Ordonnanceur -- la sonde rend des verdicts explicites et prouves sous KVM SMP1 (instrument ; ne qualifie pas P13)
-        # BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : run 38569175760, ce pas
-        # rendait trois « RESULTAT : 0 » sans aucune comparaison -- le temoin
-        # au repos, contamine par des tics perdus (vCPU arrete sur hlt), etait
-        # plus lent que la phase sous charge. La sonde juge desormais chaque
-        # comparaison sur tous les reveils ET sur les seuls reveils propres
-        # (ventilation du noyau, BOUCHAUD_ATTRIBUTION_REVEIL_V2) et rend
-        # QUALIFIE_OK, QUALIFIE_ECHEC ou NON_QUALIFIANT. Ce pas juge
-        # l'INSTRUMENT : verdict par passe, cinq preuves chiffrees et trois
-        # ventilations par tentative, aucun echec qualifie. Un NON_QUALIFIANT
-        # y est accepte et nomme (ORDONNANCEUR_TEMOIN_INSTRUMENT ... ne
-        # qualifie pas P13) ; seul ORDONNANCEUR_ATTRIBUTION_OK est une preuve
-        # sur l'ordonnanceur.
+      - name: Ordonnanceur -- methode de preuve P13 sous KVM, SMP1, SMP2, SMP4, SMP8 (temps vole prouve par l'hote)
+        # BOUCHAUD_PREUVE_HOTE_V1. Run 38569175760 : trois « RESULTAT : 0 »
+        # sans comparaison (corrige, BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1).
+        # Run 38608465766 : SMP8 NON_QUALIFIANT des le premier cycle, mais
+        # « externe » y voulait dire « non masque » -- toute absence de tic
+        # etait mise au compte de QEMU. Desormais un reveil n'est ecarte que si
+        # l'hyperviseur PROUVE l'avoir retarde (MSR_KVM_STEAL_TIME, lu par le
+        # noyau a chaque battement) ; une absence inexpliquee compte contre le
+        # noyau. Les comptes du fil sont lus apres chaque reveil : toute la
+        # fenetre de la sonde, ring 3 compris. Le pas exige la preuve de
+        # l'hote a chaque phase, des verdicts explicites, aucun echec
+        # qualifie ; ORDONNANCEUR_ATTRIBUTION_OK par topologie qualifie P13,
+        # ORDONNANCEUR_TEMOIN_INSTRUMENT ne qualifie pas P13 (et dit pourquoi :
+        # vol de l'hote prouve, ou phase non jugeable).
+        if: ${{ !cancelled() }}
         run: |
-          ORDO_SORTIE=$PWD/ordonnanceur-attribution-kvm BO_QEMU_KVM=1 BANC_TEMOIN_INSTRUMENT=1 tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3 1
+          r=0
+          for smp in 1 2 4 8; do
+            ORDO_SORTIE=$PWD/ordonnanceur-attribution-kvm-smp$smp BO_QEMU_KVM=1 BANC_TEMOIN_INSTRUMENT=1 \
+              tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 $smp || r=1
+          done
+          exit $r
       - name: Ordonnanceur -- A/B de la variante experimentale d'IPI au reveil, KVM SMP4 puis SMP8 (mesure ; politique par defaut inchangee)
         # BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante est
         # DESACTIVEE par defaut ; `ordo-variante` la bascule le temps d'une
-        # passe. Quatre tours alternes par topologie, une tentative par
-        # passe, criteres declares dans le banc (latence, debit, equite,
-        # surete, robustesse). Le pas echoue sur un defaut d'instrument ou de
-        # surete (IPI de variante sous defaut, variante jamais exercee,
-        # panique) ; CONVAINCANT / NON_CONVAINCANT est une mesure.
+        # passe. BOUCHAUD_AB_REVEIL_IPI_V2 : six tours par topologie, ordre
+        # AB aux tours impairs et BA aux pairs, une tentative par passe ;
+        # seules les passes QUALIFIEES comptent, par tours apparies, quorum 4
+        # -- sinon NON_CONCLUANT. Criteres declares dans le banc (latence,
+        # debit, equite, surete, robustesse). Le pas echoue sur un defaut
+        # d'instrument ou de surete ; CONVAINCANT / NON_CONVAINCANT /
+        # NON_CONCLUANT est une mesure.
+        if: ${{ !cancelled() }}
         run: |
-          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4
-          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp8 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 8
+          r=0
+          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4 || r=1
+          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp8 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 8 || r=1
+          exit $r
       - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
+        if: ${{ !cancelled() }}
         # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
         # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
         # part vers QEMU, puis l'attente est declaree echue. La memoire doit
@@ -168,6 +196,7 @@ jobs:
           PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
           PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
       - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
+        if: ${{ !cancelled() }}
         # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
         # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
         # (une entree, id de tete, longueur, barriere identique). Noyau
