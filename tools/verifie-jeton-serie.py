@@ -167,7 +167,8 @@ def main() -> int:
         (UART, "                    EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    break Some(false);",
          "                    EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    EMISSION.store(0, Ordering::Release);\n                    break Some(false);"),
         # demasquage avant la remise du jeton
-        (UART, "    emet();\n    if pris {", "    if ouvertes {\n        x86_64::instructions::interrupts::enable();\n    }\n    emet();\n    if pris {"),
+        (UART, "    let debut_emission = crate::kernel::timer::monotonic_ns();\n    emet();",
+         "    if ouvertes {\n        x86_64::instructions::interrupts::enable();\n    }\n    let debut_emission = crate::kernel::timer::monotonic_ns();\n    emet();"),
         (UART, "            if tours > borne {", "            if false {"),
         (UART, "static EMISSIONS_REENTREES: AtomicU64", "static EMISSION_PRIORITAIRE: AtomicBool = AtomicBool::new(false);\nstatic EMISSIONS_REENTREES: AtomicU64"),
         (UART, "            if tours % 64 == 0 {\n                crate::arch::x86_64::smp::sert_shootdowns_en_attente();\n            }\n", ""),

@@ -65,10 +65,15 @@ pub fn run_if_present() {
     // BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : les lignes emises SANS le jeton
     // (attente a la borne) ou en reentrance sont des lignes possiblement
     // entrelacees. Chaque banc peut les compter ; attendu : 0 et 0.
+    // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : et la plus longue ligne emise
+    // interruptions masquees -- un retard impose a toute tache prete.
+    let (pire_ns, longues) = crate::drivers::serial::emissions_masquees();
     crate::serial_println!(
-        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={}",
+        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={} emission_masquee_pire_us={} emissions_masquees_plus_de_2ms={}",
         crate::drivers::serial::emissions_a_la_borne(),
         crate::drivers::serial::emissions_reentrees(),
+        pire_ns / 1000,
+        longues,
     );
     vga::set_serial_mirror(false);
 

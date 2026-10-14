@@ -378,6 +378,17 @@ pub fn emissions_a_la_borne() -> u64 {
     EMISSIONS_A_LA_BORNE.load(Ordering::Relaxed)
 }
 
+/// Une emission plus longue que ceci (interruptions masquees) est comptee.
+const EMISSION_LONGUE_NS: u64 = 2_000_000;
+static EMISSION_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static EMISSIONS_LONGUES: AtomicU64 = AtomicU64::new(0);
+
+/// `(pire duree d'une emission, interruptions masquees, en ns ; nombre
+/// d'emissions de plus de 2 ms)` depuis le demarrage.
+pub fn emissions_masquees() -> (u64, u64) {
+    (EMISSION_PIRE_NS.load(Ordering::Relaxed), EMISSIONS_LONGUES.load(Ordering::Relaxed))
+}
+
 /// BOUCHAUD_SERIE_ATTENTE_DATEE_V1 -- faire la queue SANS masquer.
 ///
 /// Le jeton attendait 100 000 `pause` interruptions masquees : 1 a 4 ms. Une
@@ -532,7 +543,16 @@ fn sous_jeton<F: FnOnce()>(emet: F) {
             }
         }
     };
+    // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : la ligne s'emet interruptions
+    // masquees. A SMP1 rien ne peut la preempter : sa duree est un retard
+    // impose a toute tache prete. On la mesure (pire, et combien > 2 ms).
+    let debut_emission = crate::kernel::timer::monotonic_ns();
     emet();
+    let duree = crate::kernel::timer::monotonic_ns().saturating_sub(debut_emission);
+    EMISSION_PIRE_NS.fetch_max(duree, Ordering::Relaxed);
+    if duree > EMISSION_LONGUE_NS {
+        EMISSIONS_LONGUES.fetch_add(1, Ordering::Relaxed);
+    }
     if pris {
         EMISSION.store(0, Ordering::Release);
     }
