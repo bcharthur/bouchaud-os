@@ -169,6 +169,10 @@ pub enum Decision {
     DemandeDifferee,
     /// Rien de plus : le coeur n'est pas adressable.
     MiseEnFile,
+    /// VARIANTE EXPERIMENTALE (`Variante::IpiInteractive`, desactivee par
+    /// defaut) : demande ORDINAIRE + IPI. Jamais `demande_ciblee` : le
+    /// gestionnaire ne coupe que le ring 3, aucun fil noyau n'est preempte.
+    DemandeAvecIpi,
 }
 
 /// Le cout d'un coeur pour une tache sensible. Plus bas vaut mieux.
@@ -286,6 +290,72 @@ pub fn decide(cible: &Coeur, reveille: &Reveille) -> Decision {
     // pour une tache utilisateur, seule categorie a laquelle ces deux
     // mecanismes s'appliquent.
     Decision::DemandeDifferee
+}
+
+// ===========================================================================
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : une variante, DESACTIVEE par
+// defaut, pour une experience A/B -- pas une politique.
+//
+// Endurance `1ad75bfc` SMP8 : le pire reveil interactif est domine par
+// l'attente d'election (8,4 ms pret -> elu ; 85 attentes de plus d'une
+// milliseconde par phase). `decide` rend `DemandeDifferee` pour une
+// interactive non sensible : elle attend le prochain quantum du coeur cible,
+// meme quand celui-ci ne fait que du calcul normal en ring 3 -- choix de
+// conception verrouille par `une_tache_ordinaire_ne_coupe_personne`.
+//
+// La variante envoie l'IPI que cette demande attend, quand TOUT est vrai :
+//   * la tache reveillee est `Interactive` et sous son budget d'activation
+//     (une interactive qui calcule ne coupe personne) ;
+//   * l'occupant du coeur cible est de classe `Normale` et non sensible ;
+//   * `decide` aurait rendu `DemandeDifferee` (coeur en ligne, au travail).
+// La demande reste ORDINAIRE (`request_cpu`) : le gestionnaire de
+// replanification ne commute que s'il a interrompu le ring 3. Aucun domaine
+// de preemption des fils noyau n'est ouvert.
+//
+// La politique par defaut ne change qu'avec un A/B KVM convaincant (latence,
+// equite, debit, surete). Bascule : commande `ordo-variante`.
+
+/// La politique de reveil en vigueur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Variante {
+    /// La politique livree.
+    Defaut,
+    /// L'experience : IPI pour une interactive sous budget face a du calcul
+    /// normal.
+    IpiInteractive,
+}
+
+static VARIANTE_IPI_INTERACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// La variante active (`Defaut` au demarrage).
+#[inline]
+pub fn variante() -> Variante {
+    if VARIANTE_IPI_INTERACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+        Variante::IpiInteractive
+    } else {
+        Variante::Defaut
+    }
+}
+
+/// Bascule la variante (commande `ordo-variante`, bancs A/B).
+pub fn choisit_variante(v: Variante) {
+    VARIANTE_IPI_INTERACTIVE.store(v == Variante::IpiInteractive, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `decide`, sous une variante. Sous `Defaut`, exactement `decide`.
+pub fn decide_selon(cible: &Coeur, reveille: &Reveille, variante: Variante) -> Decision {
+    let d = decide(cible, reveille);
+    if variante != Variante::IpiInteractive || d != Decision::DemandeDifferee {
+        return d;
+    }
+    if reveille.classe == Classe::Interactive
+        && reveille.consomme_ns < BUDGET_ACTIVATION_NS
+        && cible.occupant_classe == Classe::Normale
+        && !cible.occupant_sensible
+    {
+        return Decision::DemandeAvecIpi;
+    }
+    d
 }
 
 /// Le coeur le plus charge en taches EN ATTENTE, pour le secours par vol.

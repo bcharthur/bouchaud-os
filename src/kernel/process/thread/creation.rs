@@ -414,7 +414,8 @@ fn publish_ready(index: usize) {
     core::sync::atomic::fence(Ordering::SeqCst);
 
     let etat = etat_coeur_reveil(target, u64::MAX, crate::kernel::timer::monotonic_ns());
-    match crate::kernel::scheduler::reveil::decide(&etat, &reveille) {
+    let variante = crate::kernel::scheduler::reveil::variante();
+    match crate::kernel::scheduler::reveil::decide_selon(&etat, &reveille, variante) {
         ReveilDecision::ReveilImmediat => {
             crate::kernel::scheduler::preempt::request_cpu(target);
             crate::kernel::scheduler::preempt::note_reveil_immediat();
@@ -440,6 +441,16 @@ fn publish_ready(index: usize) {
         }
         ReveilDecision::MiseEnFile => {
             crate::kernel::scheduler::preempt::note_reveil_en_file();
+        }
+        ReveilDecision::DemandeAvecIpi => {
+            // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL (desactivee par
+            // defaut) : la demande ORDINAIRE de `DemandeDifferee`, jamais
+            // ciblee -- le gestionnaire ne coupe que le ring 3 --, plus l'IPI
+            // qui la sert sans attendre le quantum du coeur.
+            crate::kernel::scheduler::preempt::request_cpu(target);
+            crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
+            crate::kernel::scheduler::preempt::note_ipi_reveil();
+            smp::reschedule_cpu(target);
         }
     }
 }

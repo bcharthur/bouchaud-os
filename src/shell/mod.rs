@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -680,6 +680,33 @@ fn expand_vars(seg: &str) -> String {
 }
 
 /// Execute un script : chaque ligne non vide (et non commentaire `#`) est lancee.
+/// `ordo-variante [defaut|ipi-interactive]` : affiche (et bascule) la variante
+/// de reveil. Sans argument, n'affiche que l'etat. Ligne serie lisible par
+/// les bancs A/B.
+fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
+    use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
+    if argc >= 2 {
+        match argv[1] {
+            "defaut" => choisit_variante(Variante::Defaut),
+            "ipi-interactive" => choisit_variante(Variante::IpiInteractive),
+            autre => {
+                crate::println!("ordo-variante : variante inconnue {} (defaut | ipi-interactive)", autre);
+                return 1;
+            }
+        }
+    }
+    let r = crate::kernel::scheduler::preempt::stats_reveil();
+    let nom = match variante() {
+        Variante::Defaut => "defaut",
+        Variante::IpiInteractive => "ipi-interactive",
+    };
+    crate::serial_println!(
+        "ORDO_VARIANTE reveil={} ipi_variante={} differes={} cibles={} immediats={} ipi={} preempt_noyau={}",
+        nom, r.ipi_variante, r.differes, r.cibles, r.immediats, r.ipi_envoyes, r.preemptions_noyau
+    );
+    0
+}
+
 fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if argc < 2 { println!("usage: run <script>"); return 1; }
     let fs = ramfs::fs();
@@ -748,6 +775,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "desktop" | "gui" => { crate::gui::run(); vga::clear(); 0 }
         // BOUCHAUD_BANC_PRESENTATION_V1 : BGA contre virtio-gpu, meme charge.
         "banc-present" => { crate::drivers::gfx::banc_presentation(); vga::clear(); 0 }
+        // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
+        // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
+        "ordo-variante" => ordo_variante(argc, &argv),
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

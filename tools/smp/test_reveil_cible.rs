@@ -35,8 +35,8 @@
 mod reveil;
 
 use reveil::{
-    choisit_coeur, decide, pression_de_secours, Classe, Coeur, Decision, Reveille,
-    BUDGET_ACTIVATION_NS, RESIDENCE_MINIMALE_NS,
+    choisit_coeur, choisit_variante, decide, decide_selon, pression_de_secours, variante, Classe, Coeur,
+    Decision, Reveille, Variante, BUDGET_ACTIVATION_NS, RESIDENCE_MINIMALE_NS,
 };
 
 // ===========================================================================
@@ -416,6 +416,11 @@ impl Sim {
                     }
                     Decision::DemandeDifferee => {
                         self.coeurs[cible].need_resched = true;
+                    }
+                    // Comme le noyau : demande ordinaire + IPI, jamais ciblee.
+                    Decision::DemandeAvecIpi => {
+                        self.coeurs[cible].need_resched = true;
+                        self.coeurs[cible].ipi = true;
                     }
                     Decision::MiseEnFile => {}
                 }
@@ -803,4 +808,106 @@ fn le_vol_recupere_une_interactive_oubliee() {
     ciblee.joue(10_000);
     assert_eq!(ciblee.vols, 1);
     assert!(ciblee.taches[1].travail_total_us > 0);
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante, desactivee par
+// defaut.
+
+/// Tous les etats de coeur et toutes les taches reveillees qui comptent.
+fn tous_les_cas() -> Vec<(Coeur, Reveille)> {
+    let mut coeurs = vec![coeur_libre()];
+    let mut hors_ligne = coeur_libre();
+    hors_ligne.en_ligne = false;
+    coeurs.push(hors_ligne);
+    for classe in [Classe::Normale, Classe::Interactive] {
+        for occupant_sensible in [false, true] {
+            for residence in [0, RESIDENCE_MINIMALE_NS - 1, RESIDENCE_MINIMALE_NS, 50_000_000] {
+                coeurs.push(coeur_occupe(classe, occupant_sensible, residence));
+            }
+        }
+    }
+    let mut taches = Vec::new();
+    for classe in [Classe::Normale, Classe::Interactive] {
+        for sensible in [false, true] {
+            for consomme_ns in [0, BUDGET_ACTIVATION_NS - 1, BUDGET_ACTIVATION_NS, 50_000_000] {
+                taches.push(Reveille { classe, sensible, consomme_ns });
+            }
+        }
+    }
+    let mut cas = Vec::new();
+    for c in &coeurs {
+        for t in &taches {
+            cas.push((*c, *t));
+        }
+    }
+    cas
+}
+
+#[test]
+fn la_variante_est_desactivee_au_demarrage() {
+    assert_eq!(variante(), Variante::Defaut);
+}
+
+#[test]
+fn sous_defaut_la_politique_est_exactement_decide() {
+    for (c, t) in tous_les_cas() {
+        assert_eq!(decide_selon(&c, &t, Variante::Defaut), decide(&c, &t), "{c:?} {t:?}");
+    }
+}
+
+#[test]
+fn la_variante_ne_change_que_la_demande_differee_d_une_interactive_sous_budget_face_a_du_calcul() {
+    let mut changes = 0;
+    for (c, t) in tous_les_cas() {
+        let d = decide(&c, &t);
+        let v = decide_selon(&c, &t, Variante::IpiInteractive);
+        if v == d {
+            continue;
+        }
+        changes += 1;
+        assert_eq!(d, Decision::DemandeDifferee, "{c:?} {t:?}");
+        assert_eq!(v, Decision::DemandeAvecIpi, "{c:?} {t:?}");
+        assert_eq!(t.classe, Classe::Interactive);
+        assert!(t.consomme_ns < BUDGET_ACTIVATION_NS);
+        assert_eq!(c.occupant_classe, Classe::Normale);
+        assert!(!c.occupant_sensible && c.en_ligne && !c.inactif);
+    }
+    assert!(changes > 0, "la variante doit changer au moins un cas");
+}
+
+#[test]
+fn la_variante_n_ouvre_jamais_la_preemption_ciblee() {
+    // Seule `PreemptionCiblee` autorise la preemption d'un fil noyau. La
+    // variante ne la rend jamais la ou `decide` ne la rendait pas.
+    for (c, t) in tous_les_cas() {
+        if decide_selon(&c, &t, Variante::IpiInteractive) == Decision::PreemptionCiblee {
+            assert_eq!(decide(&c, &t), Decision::PreemptionCiblee, "{c:?} {t:?}");
+        }
+    }
+}
+
+#[test]
+fn sous_la_variante_l_ordinaire_face_au_calcul_recoit_l_ipi() {
+    let cible = coeur_occupe(Classe::Normale, false, 50_000_000);
+    assert_eq!(decide_selon(&cible, &ordinaire(), Variante::IpiInteractive), Decision::DemandeAvecIpi);
+    // Une interactive qui calcule (au-dela du budget) ne coupe toujours
+    // personne.
+    let mut calcule = ordinaire();
+    calcule.consomme_ns = BUDGET_ACTIVATION_NS;
+    assert_eq!(decide_selon(&cible, &calcule, Variante::IpiInteractive), Decision::DemandeDifferee);
+    // Une normale ne coupe personne.
+    let normale = Reveille { classe: Classe::Normale, sensible: false, consomme_ns: 0 };
+    assert_eq!(decide_selon(&cible, &normale, Variante::IpiInteractive), Decision::DemandeDifferee);
+    // Un occupant interactif n'est pas coupe par un pair ordinaire.
+    let pair = coeur_occupe(Classe::Interactive, false, 50_000_000);
+    assert_eq!(decide_selon(&pair, &ordinaire(), Variante::IpiInteractive), Decision::DemandeDifferee);
+}
+
+#[test]
+fn la_bascule_revient_au_defaut() {
+    choisit_variante(Variante::IpiInteractive);
+    assert_eq!(variante(), Variante::IpiInteractive);
+    choisit_variante(Variante::Defaut);
+    assert_eq!(variante(), Variante::Defaut);
 }

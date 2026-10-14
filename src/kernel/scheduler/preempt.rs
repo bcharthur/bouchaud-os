@@ -76,6 +76,8 @@ static REVEILS_CIBLES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_DIFFERES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_EN_FILE: AtomicU64 = AtomicU64::new(0);
 static IPI_REVEIL_ENVOYES: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : IPI envoyes par la variante.
+static REVEILS_IPI_VARIANTE: AtomicU64 = AtomicU64::new(0);
 static PREEMPTIONS_NOYAU_ACCORDEES: AtomicU64 = AtomicU64::new(0);
 static PREEMPTIONS_NOYAU_REFUSEES: AtomicU64 = AtomicU64::new(0);
 static PLACEMENTS_DEPLACES: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +93,8 @@ pub struct StatsReveil {
     pub preemptions_noyau: u64,
     pub preemptions_noyau_refusees: u64,
     pub placements_deplaces: u64,
+    /// IPI envoyes par la variante experimentale (zero sous `Defaut`).
+    pub ipi_variante: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -323,6 +327,7 @@ pub fn note_reveil_cible() { REVEILS_CIBLES.fetch_add(1, Ordering::Relaxed); }
 pub fn note_reveil_differe() { REVEILS_DIFFERES.fetch_add(1, Ordering::Relaxed); }
 pub fn note_reveil_en_file() { REVEILS_EN_FILE.fetch_add(1, Ordering::Relaxed); }
 pub fn note_ipi_reveil() { IPI_REVEIL_ENVOYES.fetch_add(1, Ordering::Relaxed); }
+pub fn note_reveil_ipi_variante() { REVEILS_IPI_VARIANTE.fetch_add(1, Ordering::Relaxed); }
 pub fn note_placement_deplace() { PLACEMENTS_DEPLACES.fetch_add(1, Ordering::Relaxed); }
 
 pub fn stats_reveil() -> StatsReveil {
@@ -335,6 +340,7 @@ pub fn stats_reveil() -> StatsReveil {
         preemptions_noyau: PREEMPTIONS_NOYAU_ACCORDEES.load(Ordering::Relaxed),
         preemptions_noyau_refusees: PREEMPTIONS_NOYAU_REFUSEES.load(Ordering::Relaxed),
         placements_deplaces: PLACEMENTS_DEPLACES.load(Ordering::Relaxed),
+        ipi_variante: REVEILS_IPI_VARIANTE.load(Ordering::Relaxed),
     }
 }
 
