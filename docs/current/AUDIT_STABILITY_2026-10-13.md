@@ -118,6 +118,21 @@ Noyau identique à `c2b17a36` (`cd65aa45` + journal `SESSION_EMPORTE`).
 | **Rouge — primitives / audio OSS** | H3a « ODELAY honnête par écritures de 256 trames » : `pire_exces_odelay=7` trames une fois (AC'97 émulé, TCG) ; H1, H2, H3b, H4, H5 verts. Vert sur les SHA précédents ; **ouvert** |
 | **Rouge — crash des services** | 3 vérifications ImageDecoder « pid ? » : la ligne `SERVICE_CRASH_REQUEST ... pid=1<ESC>6...` a été coupée par l'entrelacement série. Le noyau a vu mourir le pid 16 (`PROCESS_DEATH`), le navigateur l'a récolté et relancé (pid 20). **Défaut d'analyse du banc** (même classe que `HOST_ENDURANCE_FIN`) |
 
+### 3 quinquies. Session du 14 octobre — reproductions et causes racines
+
+| Défaut | Reproduction AVANT correctif | Cause racine | Correctif | Preuve après |
+|---|---|---|---|---|
+| **Lignes série mêlées** (crash des services « pid ? », `HOST_ENDURANCE_FIN` tronquée, marqueurs absents, « mort du Compositor » sur une ligne collée) | `ed3a1bc3`, os-primitives **KVM** (run 38526727278) : `BOUCHAUD_SERIE_BILAN emissions_a_la_borne=397` en UN démarrage, ligne collée `NOM_LONG_OK echecs=0[PERF-RIP]`, marqueur `FAUTE_MULTIFIL_OK` absent ; crash des services `pid ?` 2/2 (38482972584, 38526727278) ; endurance 20 min KVM `PROFIL_RIP_JETONS_INVALIDES n=235` | quand le jeton paraît libre, plusieurs cœurs masquent et courent ; les perdants attendaient **masqués** 100 000 tours puis émettaient **sans** jeton — sous KVM, moins que le temps d'une ligne du gagnant (un octet = une sortie de VM). Aussi : `console_write` hors miroir et débordement > 2 Kio sans jeton | `4f253ab6` : course perdue → interruptions rouvertes, retour dans la file (échéance datée unique 1 s) ; `ecris_lignes` ; débordement sous jeton ; `_print` hors ligne. Garde 12 négatifs | TCG : 600/600, 720/720 lignes, 0 à la borne (TCG ne reproduit pas la course). **KVM `585fc0a0`** (run 38530194699) : 720/720 lignes de 1 800 o, `emissions_a_la_borne=0` ; os-primitives KVM ×3 vert ; crash des services **vert** (rouge 2/2 avant) |
+| **ODELAY AC'97 +7 trames** (H3a) | `fa387b28` (CI, une fois) ; test d'hôte : la séquence rejouée donne **exactement +7** avec l'ancien calcul | `CIV` lu dans `recolte`, relu, puis `PICB` : un descripteur fini entre deux lectures est compté entier | `e2ddacb1` : relevé `CIV, SR, PICB, CIV` cohérent, un seul relevé pour récolte, délai et horloge | hôte 5/5 ; banc OSS TCG 3/3 local + CI `585fc0a0`, `pire_exces_odelay=0` |
+| **Garde de profondeur de pile non déterministe** | même binaire : 2 graines `PYTHONHASHSEED` vertes sur 8 (61 288 / 63 320 octets pour 61 440) | mémoïsation d'un nœud dont une branche avait été coupée par la récursion : dépend de l'ordre d'un `set` | `3188476a` : 32 parcours d'ordres fixes, pire chaîne retenue | déterministe (43 992 pour toutes les graines) ; mutation `_print` en ligne → rouge pour toutes |
+| **+20 Kio de pile noyau** (introduit puis retiré dans la session) | chaîne `window_manager::boucle` 61 288–63 320 octets (43 272–43 880 avant) | `_print` réduit à formater + `sous_jeton` : LLVM l'intégrait à chaque `serial_println!`, son tampon de 2 Kio dans chaque trame | `#[inline(never)]` (dans `4f253ab6`) | 43 992 octets |
+
+Le diagnostic `PROCESS_FAULT` (`9766869d`) publie maintenant `cr2` lu à
+l'entrée, `code`, `issue` et `cr2_relu` ; vu en CI KVM sur les fautes
+voulues de `sigchld-multifil-probe` (`code=0x6 issue=invalide`).
+`persist-course-probe` : vert dans Integration et os-primitives KVM sur
+`ed3a1bc3` ; la faute `cr2=0x45` n'est pas revue — **ouvert**.
+
 ## 4. Inventaire de vérité (affirmation → preuve → état au HEAD courant)
 
 | Affirmation historique | Preuve vérifiée + SHA | État au HEAD courant |

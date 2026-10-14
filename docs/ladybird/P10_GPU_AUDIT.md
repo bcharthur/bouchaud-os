@@ -142,9 +142,10 @@ peints par le processeur, aucune commande 3D, aucun VIRGL, aucun contexte.
 | Politique : GOP > BGA > virtio-gpu 2D (si autotest vert) > aucun | `politique_scanout.rs` | [HÔTE] 5 tests ; [QEMU-TCG] |
 | Bureau présenté par virtio-gpu sans BGA (`-vga none`) : chaque `present`/`present_rect` devient transfert + flush du rectangle | `bochs.rs` | [QEMU-TCG] capture 1280×720 identique au bureau BGA, 921 404/921 600 pixels (seule l'horloge diffère) |
 | Présentation continue | banc | [QEMU-TCG] deux captures à 3 s : l'horloge a changé à l'écran (`SCANOUT_VIVANT_OK`) |
-| Repli : ni BGA ni virtio → `present() inactif (scanout=aucun)`, pas de panique ; BGA présent → le bureau reste sur BGA | banc | [QEMU-TCG] |
+| Repli : ni BGA ni virtio → `present() inactif (scanout=aucun)`, pas de panique ; BGA présent → le bureau reste sur BGA | banc | [QEMU-TCG] [QEMU-KVM] |
+| Commande sans réponse : file cassée, scanout abandonné à la première présentation ; mémoire DMA rendue seulement si détachée | `3a4a31e5` | [STATIQUE] (QEMU ne cesse pas de répondre) |
 | `/dev/fb0` : `mmap` et cession au ring 3 **refusés** sur ce scanout (un client n'y a aucun moyen de présenter) | `bochs.rs` | [STATIQUE] |
-| Mesure | `[GUI-VIRTIO-GPU]` | [QEMU-TCG] 25 présentations en 30 s, 0 échec, **449 µs** par présentation (bureau au repos : 1 plein écran + l'horloge) |
+| Mesure | `[GUI-VIRTIO-GPU]` | [QEMU-TCG] 25 présentations en 30 s, 0 échec, 449 µs par présentation en local, 228 µs en CI ; [QEMU-KVM] 182 µs (bureau au repos : 1 plein écran + l'horloge) |
 
 Banc : `tools/ci/run_virtio_gpu_scanout.sh` (os-primitives, TCG puis KVM).
 Contre le faux vert : chaque démarrage doit atteindre son point de capture,
@@ -152,10 +153,25 @@ une capture absente est un échec, un aplat ne vaut pas une image, et une
 mutation (`presente()` sans transfert ni flush) rend le banc **rouge**
 (0/921 600 pixels, horloge figée).
 
-Ce qui manque encore pour dire « le bureau sur virtio-gpu » au-delà de QEMU :
+**Preuve CI, os-primitives `585fc0a0` (run 38530194699, job 115739969599)** :
 
-- la preuve **KVM** (étape os-primitives, pas encore lue) ;
-- un client ring 3 qui peint `/dev/fb0` (refusé, voir plus haut) ;
+| | TCG | KVM |
+|---|---|---|
+| mire | 3721/3721 | 3721/3721 |
+| bureau virtio = bureau BGA | 921 313/921 600 | 921 130/921 600 |
+| horloge vivante (pixels changés) | 135 (76 horloge) | 83 (83 horloge) |
+| présentations / échecs | 26 / 0 | 28 / 0 |
+| coût d'une présentation | 228 µs | **182 µs** |
+
+**État : scanout virtio-gpu 2D VERIFIED_AT_KVM (QEMU).** P10 reste BLOCKED :
+aucune accélération, aucune 3D, aucun GPU AMD.
+
+Ce qui manque encore pour dire « le bureau sur virtio-gpu » au-delà :
+
+- Ladybird sous `-vga none -device virtio-gpu-pci` : il présente par le
+  gestionnaire de fenêtres (`/dev/fb0` des clients est redirigé vers une
+  surface composée), donc par ce même chemin, mais aucun banc ne l'a montré ;
+- un client ring 3 qui peint `/dev/fb0` directement (refusé, voir plus haut) ;
 - les interruptions : les commandes sont scrutées, bornées à 1 s ;
 - et rien de tout cela ne concerne la Trigkey (Radeon Vega, pas virtio).
 

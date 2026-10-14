@@ -1,93 +1,107 @@
-# Handoff actif — Claude (session du 13 octobre 2026)
+# Handoff actif — Claude (session du 14 octobre 2026)
 
 > Source vivante de reprise. Les handoffs datés (`HANDOFF_CLAUDE_P19_2026-10-12.md`,
-> `HANDOFF_CODEX_2026-10-08.md`) restent l'historique ; ce fichier dit où en
-> est le travail **maintenant**. Chaque verdict cite le run qui l'a produit ;
-> rien ici n'annonce un résultat futur.
+> `HANDOFF_CODEX_2026-10-08.md`) et la version du 13 octobre (dans l'historique
+> Git de ce fichier) restent l'historique ; ce fichier dit où en est le travail
+> **maintenant**. Chaque verdict cite le run qui l'a produit ; rien ici
+> n'annonce un résultat futur.
 
 ## 1. Git
 
 | | |
 |---|---|
 | Dépôt / branche | `bcharthur/bouchaud-os` / `claude/ladybird-observability-performance` (jamais `main`) |
-| Base de session | `0a83f182` (remote au démarrage) ; `main` = `788c5446` |
-| HEAD de code campagné | `fa387b28` (noyau = `cd65aa45` + journal `SESSION_EMPORTE`) ; le commit qui ajoute ce fichier ne contient que de la documentation |
-| Interdits respectés | aucun reset/clean/force-push/rebase ; aucun artefact binaire versionné ; aucun secret journalisé |
+| Base de session | `77cba441` (remote au démarrage) |
+| Ordre de mission | message du 14 octobre (le « fichier joint » annoncé n'était pas joint ; exécuté d'après le texte) |
+| Interdits respectés | aucun reset/clean/force-push/rebase ; aucun artefact binaire versionné (captures `.ppm`, journaux et images ignorés) ; aucun secret journalisé |
+
+Commits de la session, dans l'ordre :
+
+| SHA | Objet |
+|---|---|
+| `9766869d` | faute de page fatale : `cr2` lu à l'entrée, `code`, `issue`, `cr2_relu`, VMA voisines (diagnostic S1) |
+| `05b542bf` | **P10** : scanout virtio-gpu 2D (ressources, mémoire, transfert, présentation, 7 refus, repli BGA) |
+| `dc4005f9` | **P10** : banc du scanout vérifié aux pixels, en CI (TCG puis KVM) |
+| `ed3a1bc3` | sonde + banc des lignes série entières, bilan série — **reproduction AVANT correctif** |
+| `3188476a` | garde de profondeur de pile déterministe |
+| `4f253ab6` | lignes série entières (course perdue → file ; userland et débordements sous jeton ; `_print` hors ligne) |
+| `e2ddacb1` | ODELAY AC'97 sur un relevé cohérent (H3a) |
+| `585fc0a0` | docs P10 (P10 reste BLOCKED) |
+| `3a4a31e5` | P10 : file virtio cassée après une commande sans réponse ; DMA rendue seulement si sûre |
 
 ## 2. Corrigé pendant la session, avec la preuve
 
-| Bug | Cause racine | Avant → après | Niveau atteint |
-|---|---|---|---|
-| Garde préemption 166/167 | réouverture d'IF P19 non bornée au ring 3 | → 169/169, 11 tests négatifs | STATIC |
-| Crash Guard multi-fils (P0) | `exit_group` avec IF=0 → `schedule()` | KERNEL PANIC → `FAUTE_MULTIFIL_OK` | **KVM** (os-primitives `7ffedd2b` 38448072600 ; TCG SMP1/4/8 + KVM SMP4) |
-| Fil frère en `pause()` immortel | `sys_sigsuspend` ne relisait pas la condamnation | 8/8 immortels → 0 | KVM (même run) |
-| CPU0 ne préempte pas l'utilisateur (P0) | report diagnostic V8 jamais retiré | gel SMP1, immortel SMP8 → 24/24 | KVM ; soak 20 min vert ×5 |
-| Panique RAMFS « used-node accounting overflow » (P0) | miroir de comptage jamais décrémenté | panique → `NOEUDS_CHURN_OK cycles=8000` | TCG en invité (CI) |
-| `rmdir` → ENOSYS | appel non aiguillé, `AT_REMOVEDIR` ignoré | → OK | TCG (CI) |
-| Signal de mort des fautes ring 3 | `exit_group(139)` fixe | SIGILL/SIGFPE/SIGSEGV exacts | KVM (CI) |
-| **Panique d'extinction** « parking demandé hors de toute tâche » (P0) | l'autorun s'éteint sans tâche courante ; la persistance y attend un verrou dormant tenu par un processus vivant | SMP1 3/3 panique → 5/5 propres ; sites réels rouges → verts | **TCG CI** (`EXTINCTION_CONTENTION_BANC_OK` SMP1+SMP4, `cd65aa45`) |
-| Nightly `wm_vers_navigateur` | banc sans socat/nc | défaut de banc | HOST |
-| Build Ladybird `7ffedd2b` | `bytes()` sur String temporaire (code de session) | → build vert | CI |
-| Endurance KVM « ?/57 » | ligne FIN tronquée par l'entrelacement série | ligne courte + repli (rouge si absente) | banc, simulé |
+| Défaut | Avant → après | Niveau |
+|---|---|---|
+| Lignes série mêlées (crash des services `pid ?`, marqueurs absents, lignes collées) | KVM `ed3a1bc3` : **397** émissions sans jeton en un démarrage → KVM `585fc0a0` : 720/720 lignes de 1 800 o, **0** sans jeton | **KVM** |
+| ODELAY AC'97 +7 trames (H3a) | test d'hôte : +7 exact avec l'ancien calcul → 0 ; banc OSS 3/3 local + CI `585fc0a0` | HOST + TCG |
+| Garde de pile dépendant de `PYTHONHASHSEED` | 2/8 graines vertes → déterministe ; mutation rouge pour toutes | HOST |
+| +20 Kio de pile (introduit par la session, retiré avant push) | 63 320 → 43 992 octets (budget 61 440) | STATIC |
+| `cr2` relu tard dans `PROCESS_FAULT` | champs `code= issue= cr2_relu=` vus en CI KVM | KVM (format) |
 
-Diagnostics ajoutés (sans changement de comportement) : lockdep `held_at=`,
-panique lisible dans le soak, `[LB:NAV-TRACE]`, `[LB:JSVALEUR]` (LibJS
-`Value.cpp:484`, assertion conservée), `SORTIE_ABSENTE`, `SESSION_EMPORTE`.
+## 2 bis. Campagne same-HEAD `585fc0a0` (lue)
 
-## 3. Campagne de fin de session — `fa387b28`
+| Workflow | Run | Résultat |
+|---|---|---|
+| CI Fast | 38530194633 | vert |
+| Reliability V3 (soak) | 38530194629 | vert |
+| Integration | 38530194636 | vert |
+| ladybird-native-browser | 38530194699 | **16/16 verts**, dont verdict de convergence, crash des services (rouge 2/2 avant), endurance 20 min KVM (rouge avant), os-primitives TCG+KVM (rouge avant) |
+| Native IPC, SCM_RIGHTS, Security | relancés à la main sur ce SHA | voir la mise à jour suivante |
 
-Verts : CI Fast, Reliability V3 avec **soak 20 min**, Native IPC, SCM_RIGHTS,
-Security ; Ladybird 13/16 : build, smoke, cache/SQL, WPT, sites réels,
-**robustesse 9/9**, mémoire (P2/P9), ordre worker, piège Compositor,
-performance, endurance 10 min TCG, endurance KVM A/B, endurance 20 min KVM.
+Deuxième passage (`rerun`, attempt 2) lancé sur le MÊME SHA pour la
+reproductibilité. Tant qu'il n'est pas lu, la baseline est « verte une fois ».
 
-Rouges (détail : `AUDIT_STABILITY_2026-10-13.md` §3 quater) :
-1. **Integration / `persist-course-probe`** : 3 fils fautent au même `rip`
-   (`printf_core+0`, un `push`) avec `cr2=0x45`. Incohérent pour un `push` →
-   soupçon d'attribution de faute ou d'état de fil. Vert sur 3 SHA
-   précédents, 0/12 en local. **Candidat P0 ouvert.**
-2. **Audio OSS H3a** : `pire_exces_odelay=7` trames une fois. Ouvert.
-3. **Crash des services** : `pid ?` (ligne série tronquée) — défaut de banc.
+## 3. P10 — scanout virtio-gpu 2D
 
-## 4. Rouges et inconnues restants (hors campagne)
+Prouvé sous **QEMU-TCG et QEMU-KVM** (os-primitives `585fc0a0`, KVM :
+mire 3721/3721, bureau 921 130/921 600, 28 présentations sans échec,
+182 µs chacune) : autotest 2D (positif + 7 refus
+avec leur code), mire 64×64 exacte au pixel (3721/3721), bureau présenté par
+virtio-gpu sans BGA identique au bureau BGA (921 404/921 600 pixels), horloge
+vivante à l'écran, repli sans écran, mesure `[GUI-VIRTIO-GPU]` (449–531 µs par
+présentation). Mutation `presente()` sans transfert ni flush → banc rouge.
+**Pas une accélération, pas de 3D. P10 = BLOCKED.** Détail :
+`docs/ladybird/P10_GPU_AUDIT.md` §4 bis.
 
-1. **Endurance hebdo / `ordonnanceur-probe`** (38448087567) : un échantillon
-   interactif isolé > pire normal + bruit ; 13 ms en SMP1 > 3 quanta. Critère
-   laissé strict ; hypothèse « IPI de réveil » mesurée sans effet, retirée.
-2. **Panique lockdep `courant.rs:276`** : jamais revue (5 soaks CI 20 min,
-   17 cycles locaux). `held_at=` publié si elle revient.
-3. **LibJS `Value.cpp:484`** : instrumenté et compilé ; pas encore observé.
-4. **ONE-LOADER** : STATIC seulement (une preuve discriminante exige une
-   capture PENDANT le chargement).
-5. **P8 HDA, P10 scanout 2D/3D** non écrits ; **P14** non repéré ;
-   **P17** non retrouvé dans le code versionné.
+## 4. Ouverts
+
+1. **S1 `persist-course-probe`** (`cr2=0x45` sur un `push`, `fa387b28`) :
+   vert sur `ed3a1bc3` (Integration, os-primitives KVM). Les nouveaux champs
+   nommeront la prochaine occurrence.
+2. **Endurance hebdo / `ordonnanceur-probe`** : critère strict, ouvert.
+3. **Panique lockdep `courant.rs:276`** : jamais revue.
+4. **LibJS `Value.cpp:484`** : instrumenté, pas observé.
+5. **P8 HDA, P10 3D/AMD** non écrits ; **P14** non repéré ; **P17** non retrouvé.
 
 ## 5. Prochaine commande exacte
 
 ```bash
-# 1. Le candidat P0 : répéter persist-course-probe sous la CI (Integration)
-gh api -X POST repos/bcharthur/bouchaud-os/actions/workflows/integration.yml/dispatches \
-  -f ref=claude/ladybird-observability-performance
-# 2. Puis instrumenter PROCESS_FAULT (fs_base, octets à rip) si le rouge revient.
+# Lire la campagne du HEAD poussé (os-primitives : pas « Console serie » KVM,
+# pas « P10 -- scanout virtio-gpu 2D » TCG/KVM ; Ladybird : crash des services)
+gh api "repos/bcharthur/bouchaud-os/actions/runs?branch=claude/ladybird-observability-performance&per_page=10"
 ```
 
 Règle CI apprise : ne jamais relancer `os-primitives.yml` à la main pendant un
-run `ladybird-native-browser` (même groupe de concurrence : le job
-`primitives / probes` du run Ladybird est annulé, vu sur 38447976372).
+run `ladybird-native-browser` (même groupe de concurrence). Un push qui touche
+`src/**` annule les runs Reliability et Ladybird en cours de la branche.
 
 Reproductions locales (TCG) :
 
 ```bash
 cargo bootimage
-BO_SMP=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
-BO_SMP=1 tools/ci/run_extinction_contention.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+B=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+tools/ci/run_virtio_gpu_scanout.sh $B
+tools/ci/run_serie_entrelacement.sh $B            # 3 x 200 lignes
+tools/ci/run_serie_entrelacement.sh $B 6 120 120 1800
+tools/ci/run_oss_horloge.sh $B
 ```
 
 ## 6. Physique (TRIGKEY)
 
-Aucun test physique, aucun flash, aucune modification du démarrage. L'image
-de référence se prend dans l'artefact `bouchaud-ladybird-native-browser`
-(avec `BOUCHAUD_ARTIFACT_MANIFEST.json`) d'un run Ladybird **entièrement
-vert**, puis `docs/current/RELEASE_TRIGKEY_CHECKLIST.md`. Aucun run de cette
-session n'est entièrement vert : **pas d'image TRIGKEY recommandée**.
-Flash et démarrage : Arthur seulement. `PHYSICAL_STATUS=BLOCKED`.
+Aucun test physique, aucun flash, aucune modification du démarrage.
+`virtio-gpu (QEMU) ≠ GPU de la Trigkey`. La campagne `585fc0a0` est verte
+une fois ; tant que le second passage n'est pas lu et que l'image n'a pas
+été contrôlée selon `RELEASE_TRIGKEY_CHECKLIST.md`, **pas d'image TRIGKEY
+recommandée**. Flash et
+démarrage : Arthur seulement. `PHYSICAL_STATUS=BLOCKED`.

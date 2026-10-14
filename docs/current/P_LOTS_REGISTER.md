@@ -3,15 +3,17 @@
 > Inventaire vérifiable, pas une liste de souhaits. Un lot n'est `DONE_AT_<niveau>`
 > que si son critère est prouvé **à ce niveau** sur un SHA nommé. Un lot vert
 > historiquement qui casse au HEAD redevient `REGRESSED`. Niveaux : STATIC,
-> HOST, TCG, KVM, PHYSICAL. Mis à jour le 2026-10-13.
+> HOST, TCG, KVM, PHYSICAL. Mis à jour le 2026-10-14.
 >
 > États : UNKNOWN · NOT_STARTED · PARTIAL · EXPERIMENTAL · BLOCKED ·
 > VERIFIED_AT_LEVEL · DONE_AT_LEVEL · REGRESSED · NON_REPÉRÉ.
 >
-> « Dernière preuve » : le SHA du dernier run qui a exercé le critère. La
-> campagne same-HEAD de la session du 13 octobre (après `ba8c68ff`) est la
-> prochaine référence : tant qu'elle n'est pas lue, l'état ci-dessous reste
-> celui du SHA cité.
+> « Dernière preuve » : le SHA du dernier run qui a exercé le critère.
+> Référence same-HEAD du 14 octobre : **`585fc0a0`**, CI Fast (38530194633),
+> Reliability V3 (38530194629), Integration (38530194636) et
+> ladybird-native-browser (38530194699, **16/16 jobs dont le verdict de
+> convergence et os-primitives TCG+KVM**) verts. Native IPC, SCM_RIGHTS et
+> Security Runtime relancés à la main sur ce même SHA (voir HANDOFF).
 
 ## Synthèse
 
@@ -24,12 +26,12 @@
 | P5 | WebWorker, cycle de vie | `14c6c7ec` (06/10) | robustesse + ordre worker `6e881bae` | DONE_AT_TCG/KVM | PENDING |
 | P6 | Bac à sable, rôles, NNP | `43777a81` (matrice) | os-primitives `6e881bae` : `MATRICE_ROLES_OK` | DONE_AT_TCG (refus réels) | PENDING |
 | P7 | Profil, SQLite, renameat, cache HTTP persistant | `2711537c` ; `aa50aeba` (comptage RAMFS), `c9963ae1` (rmdir) | cache-SQL `4401bcec` ; ATA intégrité TCG/KVM ; `NOEUDS_CHURN_OK cycles=8000` en invité, os-primitives `7ffedd2b` | DONE_AT_TCG/KVM ; coupure d'alimentation non simulée ; RAMFS : panique de comptage corrigée | PENDING |
-| P8 | Audio LibMedia → `/dev/dsp` | `5f42214e` | AC'97 QEMU seulement | PARTIAL — HDA non écrit | BLOCKED (HDA) |
+| P8 | Audio LibMedia → `/dev/dsp` | `5f42214e` ; ODELAY cohérent `e2ddacb1` | AC'97 QEMU : banc OSS `585fc0a0` (H1–H6, `pire_exces_odelay=0`) | PARTIAL — HDA non écrit ; défaut H3a corrigé (relevé `CIV/PICB` incohérent) | BLOCKED (HDA) |
 | P9 | Multi-WebContent, isolation de site, OOPIF, mémoire | `bc814259` ; `d36e9c72`, `e38d3022`…`d6a39aee` | mémoire `4401bcec` (KVM) : `MEMOIRE_BORNEE`, WebContent phase 2 −772 Kio ; `6e881bae` : −856 Kio | VERIFIED_AT_KVM (`4401bcec`, `d466c9ff` : `MEMOIRE_BORNEE`) ; robustesse 8/9 : le processus qui ne sort pas est le **Compositor** (voir transverses) | PENDING |
-| P10 | GPU | `0e1a5797` (virtio-PCI) | os-primitives TCG/KVM : `GET_DISPLAY_INFO` | BLOCKED (scanout 2D, 3D, AMD non écrits) | BLOCKED |
+| P10 | GPU | `0e1a5797` (virtio-PCI) ; scanout 2D `05b542bf`, `3a4a31e5` | os-primitives `585fc0a0` TCG **et KVM** : mire exacte au pixel, bureau virtio = bureau BGA (921 130/921 600), horloge vivante, 7 refus, repli ; 182 µs par présentation (KVM) | **BLOCKED** : scanout 2D VERIFIED_AT_KVM (QEMU) ; aucune accélération, 3D et GPU AMD non écrits | BLOCKED |
 | P11 | WPT | — | `6e881bae` : `LADYBIRD_WPT_OK` | DONE sur corpus courant | n/a |
 | P12 | Documentation / handoff | — | — | PARTIAL : `STATUS_CURRENT` et `P1_P13_CURRENT` décrivent `3658af04` | n/a |
-| P13 | Convergence (verdict unique same-HEAD) | `3658af04` (exigence) | `fa387b28` : 13/16 jobs Ladybird + CI Fast, Reliability (soak), IPC, SCM, Security verts ; rouges : Integration (`persist-course-probe`), audio OSS H3a, crash des services (banc) | **PARTIAL** — pas de verdict unique vert ; endurance hebdo `ordonnanceur-probe` rouge | PENDING |
+| P13 | Convergence (verdict unique same-HEAD) | `3658af04` (exigence) | **`585fc0a0`** : Ladybird 16/16 (verdict de convergence vert), CI Fast, Reliability V3 (soak), Integration verts. Les trois rouges de `fa387b28` ont une cause racine corrigée : lignes série mêlées (`4f253ab6`, reproduit à 397 émissions sans jeton sous KVM), ODELAY (`e2ddacb1`) ; `persist-course-probe` vert sans correctif (ouvert) | **VERIFIED_AT_KVM sur `585fc0a0`** (une campagne ; IPC/SCM/Security relancés à la main) ; endurance hebdo `ordonnanceur-probe` non rejouée | PENDING |
 | P14 | — | aucun commit, aucun fichier, aucun marqueur | — | **NON_REPÉRÉ** (méthode : `git log --all --grep`, `git grep`, marqueurs) | — |
 | P15 | Forensique des blocages navigateur (`BOUCHAUD_P15_BROWSER_HANG_FORENSICS`, `thread/forensic.rs`) | `b16a6fd6` (28/09) ; `forensic.rs` reconstitué `0e4c6b91` | en service dans tous les bancs (lignes `forensic_syscall_result`) | VERIFIED_AT_TCG (observabilité) ; coût hot-path non mesuré | PENDING |
 | P16 | Cycle de vie BRDP (`BOUCHAUD_P16_BRDP_LIFECYCLE_V1`, `net/diag_distant`) | `b16a6fd6` | banc jeton BRDP (`9d34d368`) | PARTIAL ; seul marqueur P16 du dépôt | PENDING (RTL8168) |
