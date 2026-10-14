@@ -32,6 +32,8 @@ pub mod virtio_gpu;
 /// BOUCHAUD_VIRTIO_GPU_2D_V1 : qui presente le bureau (GOP > BGA > virtio-gpu 2D), pur et teste sur l'hote.
 #[path = "display/virtio_gpu_dma.rs"]
 pub mod virtio_gpu_dma;
+#[path = "display/virtio_gpu_file.rs"]
+pub mod virtio_gpu_file;
 #[path = "display/politique_scanout.rs"]
 pub mod politique_scanout;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir

@@ -149,6 +149,20 @@ jobs:
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
           PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
           PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+      - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
+        # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
+        # (une entree, id de tete, longueur, barriere identique). Noyau
+        # compile avec `banc-virtio-gpu-reponse-etrangere` : le premier
+        # transfert du bureau est juge contre la barriere d'une autre
+        # commande. La violation doit etre nommee et chiffree, la file
+        # cassee, le scanout abandonne au premier echec, le bureau vivant.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-reponse-etrangere
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -166,6 +180,7 @@ jobs:
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
             virtio-dma-panne*/serie.log
+            virtio-reponse-etrangere*/serie.log
             ordonnanceur-attribution-*/serie.log
             banc-presentation-*/serie-*.log
           if-no-files-found: warn

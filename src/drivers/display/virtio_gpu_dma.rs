@@ -26,7 +26,8 @@
 //!
 //!   * `Acceptee` (reponse OK) ; `Refusee` (le peripherique a REPONDU par une
 //!     erreur : il n'a rien retenu) ;
-//!   * `SansReponse` : la requete est partie, la reponse n'est pas venue ;
+//!   * `SansReponse` : la requete est partie, la reponse n'est pas venue --
+//!     ou n'etait pas celle de la commande (`REPONSE_INVALIDE`) ;
 //!   * `NonEnvoyee` : la requete n'est jamais partie (file deja cassee,
 //!     requete trop longue) -- le peripherique ne l'a pas vue.
 //!
@@ -38,6 +39,11 @@ pub const REPONSE_OK: u32 = 0x1100;
 /// Erreur rendue par la file quand l'attente bornee echoue : la requete est
 /// partie, le peripherique l'a peut-etre traitee.
 pub const SANS_REPONSE: &str = "commande-sans-reponse";
+/// Erreur rendue par la file quand la reponse n'est pas celle de la commande
+/// en vol (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : entree utilisee inattendue,
+/// barriere absente ou differente). La requete est partie, et rien ne dit ce
+/// que le peripherique en a fait : meme issue qu'une commande sans reponse.
+pub const REPONSE_INVALIDE: &str = "reponse-invalide";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Memoire {
@@ -59,7 +65,7 @@ pub fn issue(rendu: Result<u32, &str>) -> Issue {
     match rendu {
         Ok(REPONSE_OK) => Issue::Acceptee,
         Ok(_) => Issue::Refusee,
-        Err(e) if e == SANS_REPONSE => Issue::SansReponse,
+        Err(e) if e == SANS_REPONSE || e == REPONSE_INVALIDE => Issue::SansReponse,
         Err(_) => Issue::NonEnvoyee,
     }
 }

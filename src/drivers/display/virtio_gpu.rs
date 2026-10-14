@@ -33,6 +33,7 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
+use crate::drivers::virtio_gpu_file as file;
 use crate::kernel::memory;
 
 const VENDEUR_VIRTIO: u16 = 0x1AF4;
@@ -270,6 +271,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             prochain_dispo: 0,
             dernier_util: 0,
             cassee: false,
+            barriere: 0,
         };
         let _ = (desc_p, dispo_p, util_p);
 
@@ -380,6 +382,9 @@ struct FileControle {
     /// (`dernier_util + 1`) serait d'ailleurs deja satisfaite. On ne
     /// renvoie donc plus rien sur cette file.
     cassee: bool,
+    /// BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : le dernier `fence_id` envoye. Chaque
+    /// commande en porte un nouveau ; sa reponse doit le rendre.
+    barriere: u64,
 }
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
@@ -389,6 +394,13 @@ const REQUETE_MAX: usize = REPONSE;
 impl FileControle {
     /// Envoie une requete et attend sa reponse (scrute, borne a 1 s). Rend le
     /// genre de la reponse (`RESP_OK_*` ou `RESP_ERR_*`).
+    ///
+    /// BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : UNE seule commande en vol, toujours
+    /// avec `VIRTIO_GPU_FLAG_FENCE` -- sa reponse prouve que le traitement est
+    /// fini (la specification permet sinon de la rendre AVANT). La reponse
+    /// est jugee par `virtio_gpu_file::juge` ; une reponse qui n'est pas celle
+    /// de la commande en vol casse la file (`REPONSE_INVALIDE`, issue tenue
+    /// pour inconnue).
     unsafe fn commande(&mut self, requete: &[u8], longueur_reponse: usize) -> Result<u32, &'static str> {
         if self.cassee {
             return Err("file-sans-reponse");
@@ -396,8 +408,13 @@ impl FileControle {
         if requete.len() > REQUETE_MAX || longueur_reponse > PAGE - REPONSE {
             return Err("commande-trop-longue");
         }
+        if requete.len() < file::ENTETE as usize || longueur_reponse < file::ENTETE as usize {
+            return Err("commande-trop-courte");
+        }
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
+        self.barriere = self.barriere.wrapping_add(1);
+        file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);
         core::ptr::write_bytes(tampon.add(REPONSE), 0, longueur_reponse);
         let desc = self.desc as *mut u8;
         let pose = |i: usize, adresse: u64, longueur: u32, drapeaux: u16, suivant: u16| {
@@ -428,93 +445,64 @@ impl FileControle {
             return Err(dma::SANS_REPONSE);
         }
         // Anneau utilise : flags u16, idx u16, puis {id u32, len u32}.
+        // L'attente se termine sur TOUT progres de `idx` : une avance de plus
+        // d'une entree est une violation, pas une reponse.
         let util = self.util as *const u16;
-        let attendu = self.dernier_util.wrapping_add(1);
-        if !attente_reponse(1000, || read_volatile(util.add(1)) == attendu) {
+        let dernier = self.dernier_util;
+        if !attente_reponse(1000, || read_volatile(util.add(1)) != dernier) {
             self.cassee = true;
             return Err(dma::SANS_REPONSE);
         }
         fence(Ordering::SeqCst);
-        self.dernier_util = attendu;
-        Ok(read_volatile(tampon.add(REPONSE) as *const u32))
+        let avance = read_volatile(util.add(1)).wrapping_sub(dernier);
+        let element = (self.util + 4 + 8 * (dernier % self.taille) as usize) as *const u32;
+        let utilise = file::Utilise { id: read_volatile(element), len: read_volatile(element.add(1)) };
+        let reponse = tampon.add(REPONSE);
+        let genre = read_volatile(reponse as *const u32);
+        let drapeaux = read_volatile(reponse.add(file::DECALAGE_DRAPEAUX) as *const u32);
+        let barriere = core::ptr::read_unaligned(reponse.add(file::DECALAGE_BARRIERE) as *const u64);
+        #[allow(unused_mut)]
+        let mut attendue = self.barriere;
+        // BANC DE PANNE (option `banc-virtio-gpu-reponse-etrangere`, jamais
+        // dans une image livree) : le premier transfert du bureau est juge
+        // contre une barriere qui n'est pas la sienne -- la reponse d'une
+        // autre commande.
+        #[cfg(feature = "banc-virtio-gpu-reponse-etrangere")]
+        if lit_genre(requete) == CMD_TRANSFER_TO_HOST_2D
+            && lit32(requete, 48) == RESSOURCE_BUREAU
+            && !INJECTION_ETRANGERE_FAITE.swap(true, Ordering::Relaxed)
+        {
+            crate::serial_println!("VIRTIO_GPU_INJECTION reponse_etrangere (transfert du bureau juge contre une autre barriere)");
+            attendue = attendue.wrapping_add(1);
+        }
+        if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {
+            // La file ne sert plus : rien de ce qu'elle rendrait ensuite ne
+            // pourrait etre rattache a une commande.
+            self.cassee = true;
+            crate::serial_println!(
+                "VIRTIO_GPU_FILE violation={} commande={:#x} avance={} id={} len={} drapeaux={:#x} barriere={} attendue={}",
+                v.nom(), lit_genre(requete), avance, utilise.id, utilise.len, drapeaux, barriere, attendue
+            );
+            return Err(dma::REPONSE_INVALIDE);
+        }
+        self.dernier_util = dernier.wrapping_add(1);
+        Ok(genre)
     }
 
     fn reponse(&self) -> *const u8 {
         (self.tampon_v + REPONSE) as *const u8
     }
-
-    /// BOUCHAUD_VIRTIO_GPU_LOT_V1 : DEUX commandes sous UNE sonnette.
-    ///
-    /// Une presentation, c'est `TRANSFER_TO_HOST_2D` puis `RESOURCE_FLUSH`.
-    /// Envoyees une a une, chacune paie une sortie de la machine virtuelle
-    /// (la sonnette) et une attente de reponse : le banc de presentation
-    /// mesure ~120 us fixes par presentation sous TCG, la moitie pour rien.
-    ///
-    /// Deux chaines (descripteurs 0-1 et 2-3, requetes et reponses a des
-    /// adresses distinctes du meme tampon), publiees ensemble dans l'anneau
-    /// disponible, une seule notification, une seule attente bornee de
-    /// `dernier_util + 2`. La file de controle est traitee DANS L'ORDRE par le
-    /// peripherique : le flush suit le transfert, comme avant. Sans reponse :
-    /// file cassee, les deux issues valent SANS_REPONSE -- la meme regle que
-    /// `commande`.
-    unsafe fn commande_double(
-        &mut self,
-        a: &[u8],
-        b: &[u8],
-        longueur_reponse: usize,
-    ) -> (Result<u32, &'static str>, Result<u32, &'static str>) {
-        if self.cassee {
-            return (Err("file-sans-reponse"), Err("file-sans-reponse"));
-        }
-        if a.len() > LOT_REQUETE_MAX || b.len() > LOT_REQUETE_MAX || longueur_reponse > LOT_REPONSE_MAX || self.taille < 4 {
-            return (Err("commande-trop-longue"), Err("commande-trop-longue"));
-        }
-        let tampon = self.tampon_v as *mut u8;
-        core::ptr::copy_nonoverlapping(a.as_ptr(), tampon, a.len());
-        core::ptr::copy_nonoverlapping(b.as_ptr(), tampon.add(LOT_REQUETE_MAX), b.len());
-        core::ptr::write_bytes(tampon.add(REPONSE), 0, longueur_reponse);
-        core::ptr::write_bytes(tampon.add(REPONSE + LOT_REPONSE_MAX), 0, longueur_reponse);
-        let desc = self.desc as *mut u8;
-        let pose = |i: usize, adresse: u64, longueur: u32, drapeaux: u16, suivant: u16| {
-            let d = desc.add(i * 16);
-            write_volatile(d as *mut u64, adresse);
-            write_volatile(d.add(8) as *mut u32, longueur);
-            write_volatile(d.add(12) as *mut u16, drapeaux);
-            write_volatile(d.add(14) as *mut u16, suivant);
-        };
-        pose(0, self.tampon_p, a.len() as u32, DESC_SUIVANT, 1);
-        pose(1, self.tampon_p + REPONSE as u64, longueur_reponse as u32, DESC_ECRIT_PAR_LE_PERIPHERIQUE, 0);
-        pose(2, self.tampon_p + LOT_REQUETE_MAX as u64, b.len() as u32, DESC_SUIVANT, 3);
-        pose(3, self.tampon_p + (REPONSE + LOT_REPONSE_MAX) as u64, longueur_reponse as u32, DESC_ECRIT_PAR_LE_PERIPHERIQUE, 0);
-        let dispo = self.dispo as *mut u16;
-        write_volatile(dispo.add(2 + (self.prochain_dispo % self.taille) as usize), 0);
-        write_volatile(dispo.add(2 + (self.prochain_dispo.wrapping_add(1) % self.taille) as usize), 2);
-        fence(Ordering::SeqCst);
-        self.prochain_dispo = self.prochain_dispo.wrapping_add(2);
-        write_volatile(dispo.add(1), self.prochain_dispo);
-        fence(Ordering::SeqCst);
-        write_volatile(self.sonnette as *mut u16, 0);
-        let util = self.util as *const u16;
-        let attendu = self.dernier_util.wrapping_add(2);
-        if !attente_reponse(1000, || read_volatile(util.add(1)) == attendu) {
-            self.cassee = true;
-            return (Err(dma::SANS_REPONSE), Err(dma::SANS_REPONSE));
-        }
-        fence(Ordering::SeqCst);
-        self.dernier_util = attendu;
-        (
-            Ok(read_volatile(tampon.add(REPONSE) as *const u32)),
-            Ok(read_volatile(tampon.add(REPONSE + LOT_REPONSE_MAX) as *const u32)),
-        )
-    }
 }
 
-/// Un lot : chaque requete dans sa moitie de la premiere moitie du tampon,
-/// chaque reponse dans un quart de la seconde.
-const LOT_REQUETE_MAX: usize = REPONSE / 2;
-const LOT_REPONSE_MAX: usize = (PAGE - REPONSE) / 2;
+/// Le genre d'une requete (pour le journal).
+fn lit_genre(requete: &[u8]) -> u32 {
+    u32::from_le_bytes([requete[0], requete[1], requete[2], requete[3]])
+}
 
-#[cfg(feature = "banc-virtio-gpu-sans-reponse")]
+#[cfg(feature = "banc-virtio-gpu-reponse-etrangere")]
+static INJECTION_ETRANGERE_FAITE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(feature = "banc-virtio-gpu-sans-reponse", feature = "banc-virtio-gpu-reponse-etrangere"))]
 fn lit32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
@@ -586,25 +574,6 @@ unsafe fn transfert(f: &mut FileControle, ressource: u32, r: Rect, decalage: u64
     pose64(&mut q, 40, decalage);
     pose32(&mut q, 48, ressource);
     f.commande(&q, ENTETE)
-}
-
-/// Transfert puis flush du meme rectangle, sous une seule sonnette.
-unsafe fn transfert_et_vide(
-    f: &mut FileControle,
-    ressource: u32,
-    r: Rect,
-    decalage: u64,
-) -> (Result<u32, &'static str>, Result<u32, &'static str>) {
-    let mut t = [0u8; 56];
-    pose32(&mut t, 0, CMD_TRANSFER_TO_HOST_2D);
-    pose_rect(&mut t, 24, r);
-    pose64(&mut t, 40, decalage);
-    pose32(&mut t, 48, ressource);
-    let mut v = [0u8; 48];
-    pose32(&mut v, 0, CMD_RESOURCE_FLUSH);
-    pose_rect(&mut v, 24, r);
-    pose32(&mut v, 40, ressource);
-    f.commande_double(&t, &v, ENTETE)
 }
 
 unsafe fn vide(f: &mut FileControle, ressource: u32, r: Rect) -> Result<u32, &'static str> {
@@ -973,10 +942,14 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
     }
     let r = Rect { x: x as u32, y: y as u32, largeur: (x1 - x) as u32, hauteur: (y1 - y) as u32 };
     let decalage = ((y * s.largeur as usize + x) * 4) as u64;
-    // BOUCHAUD_VIRTIO_GPU_LOT_V1 : les deux commandes sous une sonnette.
+    // BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : le flush ne part qu'apres la reponse
+    // -- barriere comprise, donc traitement FINI -- du transfert. Rien dans
+    // la specification ne garantit qu'une file de controle soit traitee dans
+    // l'ordre : les deux commandes sous une sonnette (BOUCHAUD_VIRTIO_GPU_LOT_V1)
+    // pouvaient afficher le rectangle avant de l'avoir recu.
     let ok = unsafe {
-        let (t, v) = transfert_et_vide(&mut p.file, RESSOURCE_BUREAU, r, decalage);
-        t == Ok(RESP_OK_NODATA) && v == Ok(RESP_OK_NODATA)
+        transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage) == Ok(RESP_OK_NODATA)
+            && vide(&mut p.file, RESSOURCE_BUREAU, r) == Ok(RESP_OK_NODATA)
     };
     if ok {
         PRESENTS_OK.fetch_add(1, Ordering::Relaxed);
