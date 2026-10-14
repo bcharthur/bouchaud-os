@@ -210,5 +210,29 @@ class ContratDesTraces(unittest.TestCase):
         self.assertNotEqual(fini.returncode, 0, fini.stdout)
 
 
+class DetailsSondes(unittest.TestCase):
+    """BOUCHAUD_ATTRIBUTION_REVEIL_V1 : un echec de latence garde l'attribution."""
+
+    def test_l_attribution_accompagne_les_latences(self):
+        prefixe = "[14:18:44][ 34%:  0%:  1%][FPS: --] "
+        journal = "\n".join([
+            prefixe + "  sous charge (interactif) median  1062 us  p95   1569 us  p99   1855 us  pire   9333 us",
+            prefixe + "  attribution sous charge (interactif) : reveils=300 pire_total_us=9301 tardif_us=9026 "
+                      "attente_us=237 reveille_par=services-metrics:pid=11:tid=107:noyau=1:irq=0",
+            prefixe + "  - et n'aggrave pas le pire cas au-dela du bruit au repos : pire sans 5284 / avec 9333 us",
+            prefixe + "RESULTAT : 1 verification(s) en echec (3 passees)",
+        ])
+        blocs = budgets_endurance.details_sondes(journal)
+        self.assertEqual(len(blocs), 1)
+        self.assertEqual(len(blocs[0]), 3)
+        self.assertTrue(blocs[0][1].startswith("attribution sous charge (interactif) : reveils=300"))
+        self.assertIn("reveille_par=services-metrics", blocs[0][1])
+
+    def test_une_ligne_quelconque_n_est_pas_une_attribution(self):
+        journal = "  attribution manquante\nRESULTAT : 0 verification(s) en echec (4 passees)"
+        self.assertEqual(budgets_endurance.details_sondes(journal), [[]])
+
+
+
 if __name__ == "__main__":
     unittest.main()

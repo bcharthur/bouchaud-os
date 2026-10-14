@@ -122,6 +122,17 @@ pub struct Task {
     /// publication est donc exactement ce que l'activation PRECEDENTE a
     /// consomme. C'est le budget qui desarme le privilege.
     pub budget_reveil_ns: EcheanceAtomique,
+    /// BOUCHAUD_ATTRIBUTION_REVEIL_V1 : l'instant ou le balayage des
+    /// echeances a rendu cette tache prete (0 : pas encore, pour le sommeil
+    /// en cours) ...
+    pub reveil_pret_ns: EcheanceAtomique,
+    /// ... et sa premiere election apres cet instant.
+    pub reveil_elu_ns: EcheanceAtomique,
+    /// ... et qui tenait le coeur quand le balayage l'a reveillee
+    /// (`attribution_reveil::empaquete_par`).
+    pub reveil_par: EcheanceAtomique,
+    /// Son pire reveil de sommeil depuis le dernier `/proc/self/reveil`.
+    pub attribution_reveil: crate::kernel::attribution_reveil::Registre,
     entree_noyau: Option<fn() -> !>,
 }
 

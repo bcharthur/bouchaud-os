@@ -111,6 +111,8 @@ pub mod cycle_vie;
 // BOUCHAUD_PREEMPTION_NOYAU_SURE_V1 : la decision pure, partagee avec le test hote.
 #[path = "scheduler/preemption_noyau.rs"]
 pub mod preemption_noyau;
+#[path = "scheduler/attribution_reveil.rs"]
+pub mod attribution_reveil;
 #[path = "process/signal.rs"]
 pub mod signal;
 pub mod sync;

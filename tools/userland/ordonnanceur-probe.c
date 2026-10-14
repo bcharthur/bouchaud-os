@@ -53,6 +53,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,7 +110,34 @@ struct latence {
     long long p95;
     long long p99;
     long long pire;
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : ce que le noyau dit du PIRE reveil de
+    // cette serie -- echeance -> pret (balayage tardif), pret -> elu
+    // (attente d'election), elu -> reprise, tics du PIT manquants, et le pire
+    // ecart entre deux tics avec le RIP qu'interrompt le tic qui le termine.
+    // Lu UNE fois, apres la serie : la mesure n'en est pas perturbee. Vide
+    // hors de Bouchaud (Linux n'a pas ce fichier).
+    char attribution[640];
 };
+
+// Ouvre `/proc/self/reveil` : le noyau y rend, puis remet a zero, le pire
+// reveil de sommeil du fil depuis la lecture precedente.
+static void releve_attribution(char *sortie, size_t taille)
+{
+    sortie[0] = '\0';
+    int fd = open("/proc/self/reveil", O_RDONLY);
+    if (fd < 0)
+        return;
+    ssize_t lus = read(fd, sortie, taille - 1);
+    close(fd);
+    if (lus <= 0) {
+        sortie[0] = '\0';
+        return;
+    }
+    sortie[lus] = '\0';
+    char *fin = strchr(sortie, '\n');
+    if (fin)
+        *fin = '\0';
+}
 
 // La granularite reelle de l'horloge : le plus petit ecart non nul entre deux
 // lectures consecutives. Rien de ce que la sonde mesure en dessous de cette
@@ -140,6 +168,8 @@ static long long granularite_us(void)
 static void mesure_interface(struct latence *sortie)
 {
     long long retards[REVEILS];
+    // Remise a zero : seuls les reveils de cette serie compteront.
+    releve_attribution(sortie->attribution, sizeof sortie->attribution);
     long long attendu = maintenant_us();
 
     for (int i = 0; i < REVEILS; i++) {
@@ -156,6 +186,7 @@ static void mesure_interface(struct latence *sortie)
         long long reel = maintenant_us();
         retards[i] = reel > attendu ? reel - attendu : 0;
     }
+    releve_attribution(sortie->attribution, sizeof sortie->attribution);
 
     // Tri par insertion : trois cents valeurs, la simplicite vaut mieux ici.
     for (int i = 1; i < REVEILS; i++) {
@@ -174,6 +205,8 @@ static void imprime(const char *libelle, const struct latence *l)
 {
     printf("  %-24s median %5lld us  p95 %6lld us  p99 %6lld us  pire %6lld us\n",
            libelle, l->median, l->p95, l->p99, l->pire);
+    if (l->attribution[0])
+        printf("  attribution %s : %s\n", libelle, l->attribution);
 }
 
 // Un processus de calcul : une boucle qui ne se bloque jamais. Il ecrit son

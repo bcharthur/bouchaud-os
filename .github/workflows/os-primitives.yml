@@ -121,6 +121,14 @@ jobs:
           BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 120 120 1800 || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm.log
           exit $r
+      - name: Ordonnanceur -- attribution des retards de reveil, SMP1 sous KVM (critere de la sonde inchange)
+        # BOUCHAUD_ATTRIBUTION_REVEIL_V1 : l'endurance hebdomadaire (TCG)
+        # rougit sur `ordonnanceur-probe` un reveil sur plusieurs centaines.
+        # Attribue : fils noyau non cooperatifs (corrige, points cooperatifs)
+        # et tics du PIT perdus hors de l'invite sous TCG. Sous KVM, ces
+        # derniers ne doivent pas exister : trois passes, chacune RESULTAT : 0.
+        run: |
+          ORDO_SORTIE=$PWD/ordonnanceur-attribution-kvm BO_QEMU_KVM=1 tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3 1
       - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
         # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
         # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
@@ -150,4 +158,5 @@ jobs:
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
             virtio-dma-panne*/serie.log
+            ordonnanceur-attribution-*/serie.log
           if-no-files-found: warn

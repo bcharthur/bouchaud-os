@@ -68,6 +68,11 @@ PREFIXE_CONSOLE = re.compile(r"^(?:\[[^\]]*\]){2}\[FPS:[^\]]*\] ")
 # mesures de latence (ordonnanceur-probe).
 LIGNE_ECHEC = re.compile(r"^\s+- \S")
 LIGNE_LATENCE = re.compile(r"^\s+(au repos|sans charge|sous charge)[^\n]*median")
+# BOUCHAUD_ATTRIBUTION_REVEIL_V1 : ce que le noyau dit du pire reveil de chaque
+# phase (balayage tardif, attente d'election, tics perdus, qui tenait le
+# coeur). Un echec de latence sans elle ne dit pas s'il vient du noyau ou de
+# l'emulateur.
+LIGNE_ATTRIBUTION = re.compile(r"^\s+attribution [^:]+ : reveils=")
 
 
 def details_sondes(texte: str) -> list[list[str]]:
@@ -84,9 +89,9 @@ def details_sondes(texte: str) -> list[list[str]]:
     for brute in texte.splitlines():
         ligne = PREFIXE_CONSOLE.sub("", brute.rstrip("\r"))
         if RESULTAT.search(ligne):
-            blocs.append(courant[-12:])
+            blocs.append(courant[-16:])
             courant = []
-        elif LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne):
+        elif LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne) or LIGNE_ATTRIBUTION.match(ligne):
             courant.append(ligne.strip())
     return blocs
 

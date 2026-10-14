@@ -4,8 +4,13 @@
 // it was running userland, the same BSP-defer policy applies.
 
 extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFrame) {
+    let entree_tsc = crate::arch::x86_64::cpu::rdtsc();
     smp::note_premiere_irq(smp::RESCHEDULE_VECTOR, stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : section masquee du quantum / de l'IPI.
+    let cpu_mesure = crate::arch::x86_64::usermode::cpu_index();
+    crate::kernel::attribution_reveil::entree_irq(cpu_mesure, entree_tsc);
+    let _sortie_mesuree = SortieIrqMesuree { cpu: cpu_mesure, vecteur: smp::RESCHEDULE_VECTOR };
     // BOUCHAUD_TIMER_DEUX_MODES_V1
     //
     // Meme frontiere que pour IRQ0, et pour la meme raison : tout ce qui suit

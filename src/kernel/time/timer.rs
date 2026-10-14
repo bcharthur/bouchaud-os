@@ -316,6 +316,11 @@ pub fn timer_enabled() -> bool {
     interrupts::enabled()
 }
 
+/// Cycles TSC par milliseconde (0 avant la calibration).
+pub fn cycles_par_ms() -> u64 {
+    TSC_HZ.load(Ordering::Acquire) / 1000
+}
+
 pub fn tsc_hz() -> Option<u64> {
     let hz = TSC_HZ.load(Ordering::Acquire);
     (hz != 0).then_some(hz)

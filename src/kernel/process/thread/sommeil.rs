@@ -160,6 +160,12 @@ fn dort(ticks: u64, interruptible: bool) {
 fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : les instants de CE sommeil.
+    let entree_ns = crate::kernel::timer::monotonic_ns();
+    let tics_entree = crate::kernel::timer::ticks();
+    current().reveil_pret_ns.range(0);
+    current().reveil_elu_ns.range(0);
+    current().reveil_par.range(0);
     current().wake_deadline_ns.range(deadline);
     // BOUCHAUD_CYCLE_DE_VIE_V1 : le sommeil est interruptible -- `nanosleep`,
     // et les attentes par tick des appels systeme. Les fils noyau, qui s'en
@@ -187,6 +193,19 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
         }
     }
     current().wake_deadline_ns.range(0);
+    {
+        let mesure = crate::kernel::attribution_reveil::Mesure {
+            echeance_ns: deadline,
+            entree_ns,
+            pret_ns: current().reveil_pret_ns.charge(),
+            elu_ns: current().reveil_elu_ns.charge(),
+            reprise_ns: crate::kernel::timer::monotonic_ns(),
+            tics_entree,
+            tics_reprise: crate::kernel::timer::ticks(),
+        };
+        let d = crate::kernel::attribution_reveil::decompose(&mesure);
+        current().attribution_reveil.note(&d, mesure.reprise_ns, local_cpu() as u64, current().reveil_par.charge());
+    }
     // Echeance passee sans reveil : annuler le parking (sans effet si un
     // reveilleur l'a deja fait).
     termine_attente();
@@ -261,6 +280,18 @@ fn wake_sleepers() {
     if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
     }
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : qui tient le coeur pendant ce balayage.
+    let par = {
+        let cur = current_index_raw();
+        let en_irq = crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu())
+            .map_or(false, |id| crate::arch::x86_64::cpu_local::local(id).irq_depth() > 0);
+        if cur < tasks().len() {
+            let t = &tasks()[cur];
+            crate::kernel::attribution_reveil::empaquete_par(t.process.pid as u64, t.tid as u64, t.noyau, en_irq)
+        } else {
+            0
+        }
+    };
     for index in 0..tasks().len() {
         let registre = tasks();
         let task = &registre[index];
@@ -275,6 +306,10 @@ fn wake_sleepers() {
             // sienne en reprenant la main. Une echeance perimee sur une tache
             // Ready est sans effet : le reveil exige Blocked -> Ready.
             task.futex_key.range(0);
+            // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : echeance -> pret.
+            task.reveil_elu_ns.range(0);
+            task.reveil_par.range(par);
+            task.reveil_pret_ns.range(now);
             publish_ready(index);
         }
     }

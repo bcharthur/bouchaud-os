@@ -58,6 +58,10 @@ impl Task {
             migrable: false,
             latency_sensitive: DrapeauAtomique::neuf(false),
             budget_reveil_ns: EcheanceAtomique::neuf(0),
+            reveil_pret_ns: EcheanceAtomique::neuf(0),
+            reveil_elu_ns: EcheanceAtomique::neuf(0),
+            reveil_par: EcheanceAtomique::neuf(0),
+            attribution_reveil: crate::kernel::attribution_reveil::Registre::neuf(),
             entree_noyau: None,
         });
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);

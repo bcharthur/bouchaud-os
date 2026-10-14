@@ -181,6 +181,10 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
         );
         task.ready_since_ns.range(0);
     }
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : pret -> elu.
+    if task.reveil_pret_ns != 0 && task.reveil_elu_ns == 0 {
+        task.reveil_elu_ns.range(now);
+    }
 
     if task.last_cpu != u8::MAX && task.last_cpu.charge() as usize != cpu_id {
         CPU_MIGRATIONS[cpu_id].fetch_add(1, Ordering::Relaxed);

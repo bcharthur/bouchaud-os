@@ -6,11 +6,32 @@
 // Les reveils restent actifs a chaque tick sur CPU0 pour garder le bureau
 // fluide, tandis que les scans/diagnostics lourds sont exclus du hard IRQ BSP
 // lorsque plusieurs CPU sont réellement disponibles.
+/// BOUCHAUD_ATTRIBUTION_REVEIL_V1 : a la sortie du gestionnaire (tous ses
+/// chemins, commutation comprise), la section masquee depuis son entree.
+struct SortieIrqMesuree {
+    cpu: usize,
+    vecteur: u8,
+}
+
+impl Drop for SortieIrqMesuree {
+    fn drop(&mut self) {
+        crate::kernel::attribution_reveil::sortie_irq(
+            self.cpu,
+            crate::arch::x86_64::cpu::rdtsc(),
+            self.vecteur,
+            crate::kernel::timer::cycles_par_ms(),
+        );
+    }
+}
+
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
+    let entree_tsc = crate::arch::x86_64::cpu::rdtsc();
     smp::note_premiere_irq(InterruptIndex::Timer.as_u8(), stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
     let interrupted_user = from_user(&stack);
     let blackbox_cpu = crate::arch::x86_64::usermode::cpu_index();
+    crate::kernel::attribution_reveil::entree_irq(blackbox_cpu, entree_tsc);
+    let _sortie_mesuree = SortieIrqMesuree { cpu: blackbox_cpu, vecteur: InterruptIndex::Timer.as_u8() };
     let _blackbox_irq = crate::kernel::blackbox::timer_irq(
         blackbox_cpu,
         stack.instruction_pointer.as_u64(),
@@ -18,6 +39,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     );
 
     timer::tick();
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : un tic perdu, et ce qu'il interrompt.
+    crate::kernel::attribution_reveil::note_tic_tsc(
+        blackbox_cpu,
+        timer::monotonic_ns(),
+        entree_tsc,
+        stack.instruction_pointer.as_u64(),
+        interrupted_user,
+        crate::kernel::timer::cycles_par_ms(),
+    );
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 2);
 
     let idle = crate::arch::x86_64::cpu::account_timer_tick(interrupted_user);

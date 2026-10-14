@@ -523,6 +523,12 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
         let pid = crate::kernel::task::current_process().pid;
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
     }
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
+    // appelant depuis la lecture precedente, decompose, et le pire ecart
+    // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
+    if path == "/proc/self/reveil" {
+        return Some(FdKind::Instantane(Arc::new(proc_reveil())));
+    }
     if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
     }
@@ -560,6 +566,54 @@ fn proc_pid_stat_depuis_chemin(path: &str) -> Option<u32> {
         return None;
     }
     pid.parse::<u32>().ok()
+}
+
+fn proc_reveil() -> Vec<u8> {
+    use alloc::format;
+    let r = crate::kernel::task::current().attribution_reveil.releve();
+    let t = crate::kernel::attribution_reveil::releve_tics();
+    let m = crate::kernel::attribution_reveil::releve_masquage();
+    // Le nom est resolu ICI, hors interruption : le balayage n'a garde que
+    // pid et tid.
+    let par = match crate::kernel::attribution_reveil::depaquete_par(r.par) {
+        None => alloc::string::String::from("-"),
+        Some((pid, tid, noyau, en_irq)) => {
+            let nom = crate::kernel::task::proc_processus_cumul(pid as u32)
+                .map(|c| c.nom.rsplit('/').next().unwrap_or("").replace(' ', "_"))
+                .unwrap_or_else(|| alloc::string::String::from("?"));
+            format!("{}:pid={}:tid={}:noyau={}:irq={}", nom, pid, tid, noyau as u8, en_irq as u8)
+        }
+    };
+    let us = |ns: u64| ns / 1000;
+    let cyc_us = |c: u64| match crate::kernel::timer::cycles_par_ms() {
+        0 => 0,
+        par_ms => c.saturating_mul(1000) / par_ms,
+    };
+    let site = |s: u64| -> alloc::string::String {
+        use crate::kernel::attribution_reveil::SITE_VECTEUR;
+        if s == 0 {
+            alloc::string::String::from("-")
+        } else if s & SITE_VECTEUR != 0 {
+            format!("irq:{:#x}", s & 0xff)
+        } else {
+            // SAFETY : `s` vient d'un `&'static Location` (SpinLockIrq).
+            let l = unsafe { &*(s as usize as *const core::panic::Location<'static>) };
+            format!("{}:{}", l.file(), l.line())
+        }
+    };
+    format!(
+        "reveils={} pire_total_us={} tardif_us={} attente_us={} reprise_us={} dormi_ms={} tics_vus={} \
+         sans_balayage={} cpu={} a_ms={} tardifs_gt_5ms={} attentes_gt_1ms={} sommeils_tics_manquants={} \
+         tic_ecart_pire_us={} tic_rip={:#x} tic_ring3={} tic_cpu={} tic_a_ms={} tic_ecarts_gt_2ms={} \
+         masque_avant_ecart_us={} masque_avant_ecart_site={} masque_pire_us={} masque_pire_site={} masques_gt_1ms={} \
+         reveille_par={}\n",
+        r.reveils, us(r.pire.total_ns), us(r.pire.tardif_ns), us(r.pire.attente_ns), us(r.pire.reprise_ns),
+        r.pire.dormi_ms, r.pire.tics_vus, r.pire.sans_balayage as u8, r.cpu, r.a_ns / 1_000_000,
+        r.tardifs_signales, r.attentes_signalees, r.sommeils_tics_manquants,
+        us(t.pire_ns), t.rip, t.ring3 as u8, t.cpu, t.a_ns / 1_000_000, t.signales,
+        cyc_us(m.avant_ecart_cyc), site(m.avant_ecart_site), cyc_us(m.pire_cyc), site(m.pire_site), m.signalees,
+        par,
+    ).into_bytes()
 }
 
 fn proc_stat_global() -> Vec<u8> {
