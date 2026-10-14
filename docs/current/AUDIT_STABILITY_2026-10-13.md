@@ -127,6 +127,26 @@ Noyau identique à `c2b17a36` (`cd65aa45` + journal `SESSION_EMPORTE`).
 | **Garde de profondeur de pile non déterministe** | même binaire : 2 graines `PYTHONHASHSEED` vertes sur 8 (61 288 / 63 320 octets pour 61 440) | mémoïsation d'un nœud dont une branche avait été coupée par la récursion : dépend de l'ordre d'un `set` | `3188476a` : 32 parcours d'ordres fixes, pire chaîne retenue | déterministe (43 992 pour toutes les graines) ; mutation `_print` en ligne → rouge pour toutes |
 | **+20 Kio de pile noyau** (introduit puis retiré dans la session) | chaîne `window_manager::boucle` 61 288–63 320 octets (43 272–43 880 avant) | `_print` réduit à formater + `sous_jeton` : LLVM l'intégrait à chaque `serial_println!`, son tampon de 2 Kio dans chaque trame | `#[inline(never)]` (dans `4f253ab6`) | 43 992 octets |
 
+**Second passage, même SHA `585fc0a0` (attempt 2)** : CI Fast, Integration,
+Reliability V3, os-primitives (TCG+KVM), endurance 20 min KVM verts ;
+Ladybird **14/16** : **robustesse rouge** (et donc le verdict de convergence) (cycle des workers 8/9 : le Compositor, qui avait annoncé
+`COMPOSITOR_EXIT` à 31,414 s, est emporté par la fin de session à 31,417 s
+— `SESSION_EMPORTE`, état `Ready`). Cause : le BrowserHost, racine de la
+session, sortait sans attendre ses services. Correctif `9a7602e4` : attente
+bornée (3 s) des fils après la fermeture des services ; un service qui ne
+sort pas reste nommé par le banc. **La baseline n'est donc pas encore
+reproductible** : vert 1/2 sur `585fc0a0`.
+
+**Endurance hebdomadaire sur `585fc0a0`** (38533463034, tranches de 30 min) :
+rouge aux quatre topologies, toujours sur `ordonnanceur-probe`, un cycle sur
+plusieurs : SMP1 cycle 5 (interactif pire 9 333 µs pour normal 5 284 µs +
+bruit 2 134 µs ; p99 interactif 1 855 µs, normal 4 816 µs), SMP8 cycle 1
+(prêt non élu 55–72 ms : vCPU en surnombre sur 4 cœurs hôte). Hypothèse
+« ligne série émise interruptions masquées » **mesurée et réfutée pour
+SMP1** (`6335178b`, local TCG) : pire émission masquée 3 624 µs (3 au-delà
+de 2 ms) quand la sonde voit des pires de 13–36 ms et 14,8 ms au repos. La
+cause des valeurs isolées reste **ouverte** ; critère laissé strict.
+
 Le diagnostic `PROCESS_FAULT` (`9766869d`) publie maintenant `cr2` lu à
 l'entrée, `code`, `issue` et `cr2_relu` ; vu en CI KVM sur les fautes
 voulues de `sigchld-multifil-probe` (`code=0x6 issue=invalide`).

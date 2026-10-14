@@ -28,6 +28,10 @@ Commits de la session, dans l'ordre :
 | `e2ddacb1` | ODELAY AC'97 sur un relevé cohérent (H3a) |
 | `585fc0a0` | docs P10 (P10 reste BLOCKED) |
 | `3a4a31e5` | P10 : file virtio cassée après une commande sans réponse ; DMA rendue seulement si sûre |
+| `37edd525` | docs : campagne `585fc0a0` |
+| `bc8cbf83` | P10 : smoke Ladybird sur écran virtio-gpu (travail diagnostic) |
+| `9a7602e4` | BrowserHost : attente bornée de ses services avant de sortir (robustesse 8/9) |
+| `6335178b` | diagnostic : durée des émissions série interruptions masquées |
 
 ## 2. Corrigé pendant la session, avec la preuve
 
@@ -47,10 +51,17 @@ Commits de la session, dans l'ordre :
 | Reliability V3 (soak) | 38530194629 | vert |
 | Integration | 38530194636 | vert |
 | ladybird-native-browser | 38530194699 | **16/16 verts**, dont verdict de convergence, crash des services (rouge 2/2 avant), endurance 20 min KVM (rouge avant), os-primitives TCG+KVM (rouge avant) |
-| Native IPC, SCM_RIGHTS, Security | relancés à la main sur ce SHA | voir la mise à jour suivante |
+| Native IPC, SCM_RIGHTS, Security | 38533251632, 38533254763, 38533257831 (relancés à la main) | verts |
 
-Deuxième passage (`rerun`, attempt 2) lancé sur le MÊME SHA pour la
-reproductibilité. Tant qu'il n'est pas lu, la baseline est « verte une fois ».
+**Second passage, même SHA (attempt 2)** : Ladybird 14/16 — tout vert sauf
+robustesse (et le verdict de convergence qui en dépend) (cycle des workers 8/9 : Compositor emporté par la fin de session
+3 ms après son `COMPOSITOR_EXIT`). Corrigé dans `9a7602e4` (le BrowserHost
+attend ses services, borné). **Baseline : verte 1 fois sur 2** — pas encore
+reproductible.
+
+Endurance hebdomadaire `585fc0a0` (38533463034) : rouge SMP1/2/4/8 sur
+`ordonnanceur-probe` (valeurs isolées) ; l'hypothèse série est réfutée pour
+SMP1 (voir AUDIT 3 quinquies). Ouvert.
 
 ## 3. P10 — scanout virtio-gpu 2D
 
