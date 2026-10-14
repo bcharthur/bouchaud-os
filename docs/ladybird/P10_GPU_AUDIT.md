@@ -143,7 +143,7 @@ peints par le processeur, aucune commande 3D, aucun VIRGL, aucun contexte.
 | Bureau présenté par virtio-gpu sans BGA (`-vga none`) : chaque `present`/`present_rect` devient transfert + flush du rectangle | `bochs.rs` | [QEMU-TCG] capture 1280×720 identique au bureau BGA, 921 404/921 600 pixels (seule l'horloge diffère) |
 | Présentation continue | banc | [QEMU-TCG] deux captures à 3 s : l'horloge a changé à l'écran (`SCANOUT_VIVANT_OK`) |
 | Repli : ni BGA ni virtio → `present() inactif (scanout=aucun)`, pas de panique ; BGA présent → le bureau reste sur BGA | banc | [QEMU-TCG] [QEMU-KVM] |
-| Commande sans réponse : file cassée, scanout abandonné à la première présentation ; mémoire DMA rendue seulement si détachée | `3a4a31e5` | [STATIQUE] (QEMU ne cesse pas de répondre) |
+| Commande sans réponse : file cassée, scanout abandonné à la première présentation ; mémoire DMA rendue seulement si l'état est sûr (§4 ter) | `virtio_gpu_dma.rs` | [HÔTE] 7 tests ; [QEMU-TCG] banc de panne injectée |
 | `/dev/fb0` : `mmap` et cession au ring 3 **refusés** sur ce scanout (un client n'y a aucun moyen de présenter) | `bochs.rs` | [STATIQUE] |
 | Mesure | `[GUI-VIRTIO-GPU]` | [QEMU-TCG] 25 présentations en 30 s, 0 échec, 449 µs par présentation en local, 228 µs en CI ; [QEMU-KVM] 182 µs (bureau au repos : 1 plein écran + l'horloge) |
 
@@ -168,12 +168,118 @@ aucune accélération, aucune 3D, aucun GPU AMD.
 
 Ce qui manque encore pour dire « le bureau sur virtio-gpu » au-delà :
 
-- Ladybird sous `-vga none -device virtio-gpu-pci` : il présente par le
-  gestionnaire de fenêtres (`/dev/fb0` des clients est redirigé vers une
-  surface composée), donc par ce même chemin, mais aucun banc ne l'a montré ;
+- ~~Ladybird sous `-vga none -device virtio-gpu-pci`~~ : **montré** par le
+  travail `browser-host smoke sur virtio-gpu` (`a0e7bdd3`, run 38536498356,
+  job 115761496106, TCG) : scanout virtio actif, 204 présentations, 0 échec,
+  38,4 Mpixels transférés (861 µs par présentation), mire du navigateur
+  vérifiée sur l'écran virtio (`surface=1`), `LADYBIRD_CONVERGENCE_OK`. Ce
+  travail est diagnostic (hors du verdict de convergence) ;
 - un client ring 3 qui peint `/dev/fb0` directement (refusé, voir plus haut) ;
 - les interruptions : les commandes sont scrutées, bornées à 1 s ;
 - et rien de tout cela ne concerne la Trigkey (Radeon Vega, pas virtio).
+
+## 4 ter. Mémoire DMA après une commande sans réponse
+
+`BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1` (revue du 14 octobre, priorité haute).
+
+**Le défaut.** `active_scanout` rendait sa mémoire DMA si elle n'avait
+« jamais été attachée », un booléen posé seulement quand `ATTACH_BACKING`
+répondait OK. Si l'attente bornée de la réponse échouait, le booléen restait
+faux. Pourtant la requête était partie et le périphérique avait pu retenir
+l'adresse. La mémoire était alors rendue à l'allocateur et réutilisée, alors
+que le périphérique pouvait encore y lire (transfert) ou y écrire. Le même
+raisonnement valait pour la mire de l'autotest.
+
+**Le modèle** (`src/drivers/display/virtio_gpu_dma.rs`, module pur). Chaque
+tampon a un état : `NonAttachee`, `Attachee` ou `Inconnue`. Chaque commande a
+une issue :
+
+- `Acceptee` ;
+- `Refusee` (le périphérique a répondu par une erreur) ;
+- `SansReponse` (la requête est partie, la réponse n'est pas venue) ;
+- `NonEnvoyee` (file déjà cassée, requête trop longue).
+
+Les transitions sont les suivantes :
+
+- un `ATTACH_BACKING` ou un `DETACH_BACKING` sans réponse rend l'état
+  `Inconnue` ;
+- une autre commande sans réponse sur une mémoire attachée la rend aussi
+  `Inconnue` (un transfert peut encore la lire) ;
+- `Inconnue` est **absorbant** ;
+- un détachement refusé ne libère rien.
+
+`free_dma` n'existe qu'à un endroit, `rend_si_sur`, derrière
+`dma::peut_rendre` (`NonAttachee` seulement). Sinon la mémoire est
+**conservée** et le journal le dit : `VIRTIO_GPU_DMA memoire_conservee quoi=…
+octets=… etat=…`. Une fuite bornée (3,6 Mo au pire, une fois, la file étant
+cassée ensuite) vaut mieux qu'une corruption.
+
+| Preuve | Niveau |
+|---|---|
+| `tools/display/test_virtio_gpu_dma.rs` : 7 tests, dont le scénario du défaut. Le modèle de l'ancienne décision (`!attachee \|\| liberee`) y rendait la mémoire ; le nouveau la garde. | [HÔTE] |
+| **Banc de panne injectée** `tools/ci/run_virtio_gpu_dma_panne.sh`. Le noyau est compilé avec l'option `banc-virtio-gpu-sans-reponse` (jamais dans `default`, garde 8). La requête `ATTACH_BACKING` du bureau **part vers QEMU**, qui la reçoit et retient l'adresse, puis l'attente est déclarée échue. Exigé : scanout refusé à l'attache, `memoire_conservee quoi=bureau octets=3686400 etat=Inconnue`, bureau replié (`present() inactif`), aucune panique. | [QEMU-TCG] local ; CI os-primitives TCG + KVM |
+| Mutation : l'attache sans réponse laisse l'état inchangé (l'ancien comportement). Le banc de panne passe **rouge** (`la memoire du bureau est CONSERVEE` → ECHEC). | [QEMU-TCG] local |
+| Garde `verifie-virtio-pci.py`, règles 6 et 8 : un seul `free_dma`, derrière `peut_rendre` ; l'issue de l'attache suivie (scanout et mire) ; l'injection confinée à l'option et passée en CI. 5 mutations rouges (8 pour toute la garde). | [STATIQUE] |
+
+## 4 quater. Verrou du périphérique pendant une commande synchrone
+
+`BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1` (revue du 14 octobre).
+
+**Audit de l'ancien code.** `static GPU: SpinLock<Option<Peripherique>>` était
+tenu pendant toute la commande, réponse comprise. L'attente était bornée à
+1 s.
+
+- **Ordonnanceur.** Un `SpinLock` marque son cœur non préemptible
+  (`verrous_simples`) : le tic refuse d'y commuter. Chaque présentation
+  immobilisait donc son cœur pendant ses deux commandes, 182 µs (KVM) à
+  861 µs (TCG, Ladybird). Avec un périphérique muet, l'immobilisation durait
+  **1 s par commande**. En SMP1, c'était tout le système qui se figeait. Un
+  second demandeur sur un autre cœur tournait lui aussi, non préemptible :
+  deux cœurs perdus.
+- **Interruptions.** Elles ne sont pas masquées (`SpinLock` ne fait pas
+  `cli`). Les gestionnaires passaient, mais tout ce qui demande une élection
+  (réveils, préemption ciblée) attendait la fin de la commande sur ce cœur.
+- **Fluidité.** Au rythme du bureau (≤ 60 présentations/s), 1 à 5 % d'un cœur
+  étaient non préemptibles. C'était sans effet visible au repos, mais une
+  latence d'élection s'ajoutait à chaque présentation pendant une rafale.
+
+**Correctif.**
+
+- `SleepMutex` (le demandeur concurrent dort au lieu de tourner), pris par
+  `verrou()`, et seulement ainsi.
+- `lock()` n'est utilisé que si céder est sûr. La condition est
+  `preempt::cession_volontaire_sure()`, nouvelle : les interdits de la
+  préemption d'un fil noyau (aucun verrou tournant tenu, ni `preempt_count`,
+  ni lecture du registre, ni shootdown, ni sortie en cours), mais IF ouvert et
+  hors IRQ.
+- Ailleurs, c'est `try_lock()` : la sonde au démarrage (sans tâche) passe ;
+  une présentation qui ne peut pas prendre le verrou sans bloquer est
+  **sautée et comptée**.
+- L'attente de réponse (`attente_reponse`) tourne 50 µs, puis **cède** le
+  cœur entre deux lectures si le contexte le permet. Sa borne datée (1 s) et
+  son plafond TSC sont inchangés.
+
+La ligne `[GUI-VIRTIO-GPU]` porte désormais `sautes=`, `cedes=` et
+`non_cedables=`. Une attente non cédable **dans une tâche** signifierait
+qu'un appelant tient un verrou tournant : elle est journalisée
+(`VIRTIO_GPU_ATTENTE non_cedable_en_tache`, avec ce qui l'interdit) et le
+banc l'exige absente.
+
+| Mesure locale [QEMU-TCG], bureau au repos, 30 s | Avant (SpinLock) | Après |
+|---|---|---|
+| présentations / échecs | 25 / 0 | 24 / 0 |
+| coût d'une présentation | 449–531 µs | 399–530 µs (3 démarrages) |
+| présentations sautées | — | 0 |
+| attentes non cédables dans une tâche | non mesuré | **0** (les 13 non cédables sont la sonde et l'autotest, hors tâche) |
+
+Le diagnostic temporaire de chaque refus a montré `spin=0` partout : aucune
+présentation n'est faite sous un verrou tournant. La première version du
+correctif (IF + tâche seulement) aurait donc été sûre **ici**, mais pas par
+construction. La condition complète le garantit.
+
+Garde 7 : `SleepMutex`, un seul `GPU.lock()` dans `verrou()` avec repli
+`try_lock`, céder seulement par `cession_volontaire_sure`. 3 mutations rouges
+(retour au `SpinLock`, borne datée retirée, prédicat affaibli).
 
 ## 5. Ce que P10 ne prétend pas
 
