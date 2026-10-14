@@ -34,6 +34,9 @@ pub mod virtio_gpu;
 pub mod virtio_gpu_dma;
 #[path = "display/virtio_gpu_file.rs"]
 pub mod virtio_gpu_file;
+/// BOUCHAUD_VIRTIO_GPU_IRQ_V1 (P10+.1) : achevement par interruption MSI-X, pur et teste sur l'hote.
+#[path = "display/virtio_gpu_irq.rs"]
+pub mod virtio_gpu_irq;
 #[path = "display/politique_scanout.rs"]
 pub mod politique_scanout;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir

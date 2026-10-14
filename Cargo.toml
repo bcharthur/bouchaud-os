@@ -38,6 +38,16 @@ banc-virtio-gpu-sans-reponse = []
 # panique. Jamais dans `default` : voir
 # `tools/ci/run_virtio_gpu_reponse_etrangere.sh`.
 banc-virtio-gpu-reponse-etrangere = []
+# BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_IRQ_V1, P10+.1).
+#
+# Sous attente par interruption : (1) l'entree MSI-X est masquee pendant
+# dix attentes -- interruptions perdues, la relecture de secours doit
+# trouver chaque reponse ; (2) des interruptions parasites sur le vecteur
+# -- aucune ne doit achever une commande ; (3) une
+# attente dont la reponse n'est jamais vue -- echeance, file cassee, scanout
+# abandonne, bureau vivant. Jamais dans `default` : voir
+# `tools/ci/run_virtio_gpu_irq_pannes.sh`.
+banc-virtio-gpu-irq-pannes = []
 
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).

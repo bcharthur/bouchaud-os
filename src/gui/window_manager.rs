@@ -1510,12 +1510,17 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         crate::drivers::virtio_gpu::compteurs();
     if presents_ok + presents_echec > 0 {
         let (sautes, cedes, non_cedables) = crate::drivers::virtio_gpu::compteurs_verrou();
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : l'attente par interruption, au meme rythme.
+        let i = crate::drivers::virtio_gpu::compteurs_irq();
         crate::serial_println!(
-            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={}",
+            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={} \
+             irq_armee={} irq_voulue={} irq={} irq_sans_progres={} dormantes={} sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={}",
             presents_ok, presents_echec, pixels_virtio, ns_virtio,
             ns_virtio / presents_ok.max(1) / 1000,
             crate::drivers::virtio_gpu::actif() as u8,
             sautes, cedes, non_cedables,
+            i.armee as u8, i.voulue as u8, i.irq, i.irq_sans_progres, i.attentes_dormantes, i.sommeils,
+            i.reveils_sans_progres, i.vus_par_relecture, i.echues,
         );
     }
 

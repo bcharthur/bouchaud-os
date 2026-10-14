@@ -29,16 +29,18 @@
 //! (1af4:1050) ; sans lui, une ligne et rien d'autre.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
 use crate::drivers::virtio_gpu_file as file;
+use crate::drivers::virtio_gpu_irq::{self as irq, Reveil, Strategie};
 use crate::kernel::memory;
 
 const VENDEUR_VIRTIO: u16 = 0x1AF4;
 const PERIPHERIQUE_GPU: u16 = 0x1040 + 16;
 const CAP_VENDEUR: u8 = 0x09;
+const CAP_MSIX: u8 = 0x11;
 
 const CFG_COMMUNE: u8 = 1;
 const CFG_NOTIFICATION: u8 = 2;
@@ -57,6 +59,8 @@ const VERSION_1: u64 = 1 << 32;
 
 // Configuration commune (virtio 1.x, 4.1.4.3).
 const DEVICE_FEATURE_SELECT: usize = 0x00;
+const MSIX_CONFIG: usize = 0x10;
+const QUEUE_MSIX_VECTOR: usize = 0x1A;
 const DEVICE_FEATURE: usize = 0x04;
 const DRIVER_FEATURE_SELECT: usize = 0x08;
 const DRIVER_FEATURE: usize = 0x0C;
@@ -124,6 +128,8 @@ struct Capacites {
     notification: Option<(usize, u32)>,
     isr: bool,
     peripherique: bool,
+    /// BOUCHAUD_VIRTIO_GPU_IRQ_V1 : decalage de la capacite MSI-X.
+    msix: Option<u8>,
 }
 
 /// L'adresse virtuelle d'un emplacement (bar, decalage) d'une capacite.
@@ -140,10 +146,14 @@ fn adresse(dev: &PciDevice, bar: u8, decalage: u32) -> Option<usize> {
 }
 
 fn capacites(dev: &PciDevice) -> Capacites {
-    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: false };
+    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: false, msix: None };
     let mut liste = [pci::Capacite { identifiant: 0, decalage: 0 }; 16];
     let n = pci::capacites_de(dev, &mut liste);
     for cap in &liste[..n] {
+        if cap.identifiant == CAP_MSIX && c.msix.is_none() {
+            c.msix = Some(cap.decalage);
+            continue;
+        }
         if cap.identifiant != CAP_VENDEUR {
             continue;
         }
@@ -250,8 +260,31 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         commune.e64(QUEUE_DRIVER, dispo_p);
         commune.e64(QUEUE_DEVICE, util_p);
         let decalage_sonnette = commune.l16(QUEUE_NOTIFY_OFF) as usize * multiplicateur as usize;
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : le vecteur MSI-X de la controlq, avant
+        // de l'activer. Un refus laisse la scrutation bornee, et le dit.
+        let irq_armee = match c.msix {
+            Some(cap) => match arme_msix(dev, cap, &commune) {
+                Ok((apic, entrees)) => {
+                    UTIL_IDX.store(util_v as usize + 2, Ordering::Release);
+                    crate::serial_println!(
+                        "VIRTIO_GPU_IRQ msix vecteur={:#04x} apic={} entrees={} controlq=0 (achevement par interruption)",
+                        irq::VECTEUR, apic, entrees
+                    );
+                    true
+                }
+                Err(raison) => {
+                    crate::serial_println!("VIRTIO_GPU_IRQ indisponible raison={} (scrutation bornee)", raison);
+                    false
+                }
+            },
+            None => {
+                crate::serial_println!("VIRTIO_GPU_IRQ indisponible raison=pas-de-msix (scrutation bornee)");
+                false
+            }
+        };
         commune.e16(QUEUE_ENABLE, 1);
         commune.e8(DEVICE_STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+        IRQ_ARMEE.store(irq_armee, Ordering::Release);
         crate::serial_println!(
             "VIRTIO_GPU_INIT fonctionnalites_proposees={:#018x} retenues={:#018x} files={} controlq={}/{}",
             proposees, retenues, files, taille, taille_max
@@ -449,7 +482,7 @@ impl FileControle {
         // d'une entree est une violation, pas une reponse.
         let util = self.util as *const u16;
         let dernier = self.dernier_util;
-        if !attente_reponse(1000, || read_volatile(util.add(1)) != dernier) {
+        if !attente_achevement(1000, || read_volatile(util.add(1)) != dernier) {
             self.cassee = true;
             return Err(dma::SANS_REPONSE);
         }
@@ -840,6 +873,262 @@ fn attente_reponse(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
         } else {
             core::hint::spin_loop();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_VIRTIO_GPU_IRQ_V1 -- achevement par interruption (P10+.1)
+// ---------------------------------------------------------------------------
+//
+// Voir `virtio_gpu_irq.rs` pour le modele. Ici : l'armement MSI-X, le
+// gestionnaire (appele par `idt/virtio_gpu.rs`) et l'attente dormante.
+
+/// Le peripherique a accepte le vecteur de la controlq.
+static IRQ_ARMEE: AtomicBool = AtomicBool::new(false);
+/// La politique : dormir sur l'interruption quand c'est possible (commande
+/// `gpu-irq on|off`, pour l'A/B). Desactivee par defaut tant que l'A/B KVM
+/// n'a pas montre le gain (BOUCHAUD_VIRTIO_GPU_IRQ_V1, P10+.1).
+static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);
+/// L'adresse virtuelle de `used.idx` (0 avant l'armement).
+static UTIL_IDX: AtomicUsize = AtomicUsize::new(0);
+/// L'entree 0 de la table MSI-X (banc de panne : la masquer).
+#[cfg_attr(not(feature = "banc-virtio-gpu-irq-pannes"), allow(dead_code))]
+static ENTREE_MSIX: AtomicUsize = AtomicUsize::new(0);
+/// Le dernier `used.idx` vu par le gestionnaire.
+static IRQ_VU: AtomicU16 = AtomicU16::new(0);
+/// La file des achevements : le gestionnaire la reveille, l'attendant y dort.
+static ACHEVEMENTS: crate::kernel::sync::WaitQueue = crate::kernel::sync::WaitQueue::new();
+
+static IRQ_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IRQ_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
+static ATTENTES_DORMANTES: AtomicU64 = AtomicU64::new(0);
+static ACHEVES_EN_ROTATION: AtomicU64 = AtomicU64::new(0);
+static SOMMEILS: AtomicU64 = AtomicU64::new(0);
+static REVEILS_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
+static VUS_PAR_RELECTURE: AtomicU64 = AtomicU64::new(0);
+static ATTENTES_DORMANTES_ECHUES: AtomicU64 = AtomicU64::new(0);
+
+/// Rotation avant de dormir : sous KVM la reponse arrive en quelques
+/// dizaines de microsecondes, un sommeil couterait plus qu'il n'epargne.
+const ROTATION_IRQ_NS: u64 = 20_000;
+/// Le filet d'une interruption perdue : la reponse est relue au plus tard a
+/// ce rythme, et chaque achevement vu ainsi est compte.
+const RELECTURE_NS: u64 = 2_000_000;
+
+/// Programme l'entree 0 de la table MSI-X vers le LAPIC de ce coeur, associe
+/// la controlq a cette entree, et active MSI-X. Rend (apic, entrees).
+///
+/// L'entree est masquee pendant sa programmation et la fonction masquee
+/// pendant l'association ; un refus du peripherique (`queue_msix_vector`
+/// relu different) desactive MSI-X et laisse la scrutation.
+unsafe fn arme_msix(dev: &PciDevice, cap: u8, commune: &Region) -> Result<(u32, u16), &'static str> {
+    let mot0 = pci::config_lit32(dev, cap);
+    let controle = (mot0 >> 16) as u16;
+    let entrees = (controle & 0x7FF) + 1;
+    let (bir, decalage) = irq::emplacement_table(pci::config_lit32(dev, cap.saturating_add(4)));
+    let table = adresse(dev, bir, decalage).ok_or("msix-table-hors-bar-memoire")?;
+    let apic = crate::arch::x86_64::smp::hardware_apic_id() as u32;
+    let (adresse_bas, adresse_haut, donnee) = irq::message(apic, irq::VECTEUR).ok_or("msix-apic-hors-format-xapic")?;
+    let entree = table as *mut u32;
+    write_volatile(entree.add(3), 1);
+    write_volatile(entree, adresse_bas);
+    write_volatile(entree.add(1), adresse_haut);
+    write_volatile(entree.add(2), donnee);
+    let ecrit_controle = |c: u16| pci::config_ecrit32(dev, cap, (mot0 & 0xFFFF) | (u32::from(c) << 16));
+    ecrit_controle(controle | irq::MSIX_ACTIVE | irq::MSIX_MASQUE_FONCTION);
+    commune.e16(MSIX_CONFIG, irq::AUCUN_VECTEUR);
+    commune.e16(QUEUE_SELECT, 0);
+    commune.e16(QUEUE_MSIX_VECTOR, 0);
+    if commune.l16(QUEUE_MSIX_VECTOR) != 0 {
+        commune.e16(QUEUE_MSIX_VECTOR, irq::AUCUN_VECTEUR);
+        ecrit_controle(controle & !irq::MSIX_ACTIVE);
+        return Err("vecteur-refuse-par-le-peripherique");
+    }
+    write_volatile(entree.add(3), 0);
+    ecrit_controle((controle | irq::MSIX_ACTIVE) & !irq::MSIX_MASQUE_FONCTION);
+    ENTREE_MSIX.store(entree as usize, Ordering::Release);
+    Ok((apic, entrees))
+}
+
+/// Le gestionnaire de `irq::VECTEUR` (contexte d'interruption) : compter,
+/// reperer une interruption sans progres, reveiller. Aucun verrou, aucune
+/// commande, aucune impression.
+pub fn interruption() {
+    IRQ_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let p = UTIL_IDX.load(Ordering::Acquire);
+    if p != 0 {
+        let idx = unsafe { read_volatile(p as *const u16) };
+        let vu = IRQ_VU.swap(idx, Ordering::Relaxed);
+        if !irq::progres(vu, idx) {
+            IRQ_SANS_PROGRES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    ACHEVEMENTS.wake_all();
+}
+
+/// Le monde de l'attente dormante : l'horloge monotone et la file des
+/// achevements. Le ticket est pris AVANT la derniere relecture.
+struct MondeNoyau;
+
+impl irq::Dormeur for MondeNoyau {
+    fn maintenant(&mut self) -> u64 {
+        crate::kernel::timer::monotonic_ns()
+    }
+    fn dors(&mut self, jusqu_a: u64, pret: &mut dyn FnMut() -> bool) -> Reveil {
+        let ticket = ACHEVEMENTS.ticket();
+        if pret() {
+            return Reveil::DejaPret;
+        }
+        // BANC DE PANNE : une interruption parasite APRES le ticket, alors que
+        // la reponse n'est pas la -- elle reveille, et ne doit rien achever.
+        #[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+        if pannes::parasite_due() {
+            pannes::parasite();
+        }
+        // Une borne qui a croise l'interruption n'est pas une interruption
+        // perdue : le ticket dit si un reveil a ete signale.
+        if ACHEVEMENTS.wait_until_noyau(ticket, jusqu_a) || ACHEVEMENTS.signale_depuis(ticket) {
+            Reveil::Interruption
+        } else {
+            Reveil::Borne
+        }
+    }
+}
+
+/// Attend une reponse : sommeil sur l'interruption si tout le permet
+/// (`irq::strategie`), sinon la scrutation bornee d'avant.
+fn attente_achevement(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
+    let strategie = irq::strategie(
+        contexte_cedable(),
+        IRQ_ARMEE.load(Ordering::Acquire),
+        IRQ_VOULUE.load(Ordering::Relaxed),
+    );
+    if strategie == Strategie::Scrute {
+        return attente_reponse(limite_ms, predicat);
+    }
+    let rang = ATTENTES_DORMANTES.fetch_add(1, Ordering::Relaxed) + 1;
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(limite_ms.saturating_mul(1_000_000));
+    #[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+    let aveugle = pannes::avant_attente(rang);
+    #[cfg(not(feature = "banc-virtio-gpu-irq-pannes"))]
+    let aveugle = { let _ = rang; false };
+    // BANC DE PANNE : une reponse jamais vue (la vraie arrive, l'attente ne
+    // la lit pas) -- l'echeance doit finir l'attente.
+    let mut lit = || !aveugle && predicat();
+    let b = irq::attend(&mut lit, &mut MondeNoyau, echeance, ROTATION_IRQ_NS, RELECTURE_NS);
+    if b.vu_en_rotation {
+        ACHEVES_EN_ROTATION.fetch_add(1, Ordering::Relaxed);
+    }
+    SOMMEILS.fetch_add(u64::from(b.sommeils), Ordering::Relaxed);
+    REVEILS_SANS_PROGRES.fetch_add(u64::from(b.reveils_sans_progres), Ordering::Relaxed);
+    if b.vu_par_relecture {
+        VUS_PAR_RELECTURE.fetch_add(1, Ordering::Relaxed);
+    }
+    if !b.reussi {
+        ATTENTES_DORMANTES_ECHUES.fetch_add(1, Ordering::Relaxed);
+    }
+    b.reussi
+}
+
+/// BANC DE PANNE (option `banc-virtio-gpu-irq-pannes`, jamais dans une image
+/// livree) : les trois pannes de l'attente par interruption, par rang
+/// d'attente dormante.
+#[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+mod pannes {
+    use super::*;
+
+    /// Attentes [MASQUE_DEBUT, MASQUE_FIN) : entree MSI-X masquee.
+    const MASQUE_DEBUT: u64 = 4;
+    const MASQUE_FIN: u64 = 14;
+    /// Attentes [PARASITES_DEBUT, PARASITES_FIN) : une parasite par sommeil.
+    const PARASITES_DEBUT: u64 = 16;
+    const PARASITES_FIN: u64 = 22;
+    /// L'attente dont la reponse n'est jamais vue.
+    const AVEUGLE: u64 = 26;
+
+    static RANG: AtomicU64 = AtomicU64::new(0);
+    static PARASITES: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn parasite() {
+        PARASITES.fetch_add(1, Ordering::Relaxed);
+        crate::arch::x86_64::smp::ipi_vers_soi(irq::VECTEUR);
+    }
+
+    fn masque(oui: bool) {
+        let e = ENTREE_MSIX.load(Ordering::Acquire);
+        if e != 0 {
+            unsafe { write_volatile((e as *mut u32).add(3), oui as u32) };
+        }
+    }
+
+    /// Rend vrai si cette attente doit etre aveugle.
+    pub(super) fn avant_attente(rang: u64) -> bool {
+        RANG.store(rang, Ordering::Relaxed);
+        if rang == MASQUE_DEBUT {
+            masque(true);
+            crate::serial_println!("VIRTIO_GPU_INJECTION irq_masquee attentes={}..{}", MASQUE_DEBUT, MASQUE_FIN);
+        } else if rang == MASQUE_FIN {
+            masque(false);
+            crate::serial_println!("VIRTIO_GPU_INJECTION irq_demasquee");
+        } else if rang == PARASITES_DEBUT {
+            crate::serial_println!("VIRTIO_GPU_INJECTION irq_parasites attentes={}..{}", PARASITES_DEBUT, PARASITES_FIN);
+        } else if rang == PARASITES_FIN {
+            crate::serial_println!(
+                "VIRTIO_GPU_INJECTION irq_parasites_fin envoyees={}", PARASITES.load(Ordering::Relaxed)
+            );
+        } else if rang == AVEUGLE {
+            crate::serial_println!("VIRTIO_GPU_INJECTION reponse_jamais_vue attente={} (echeance attendue)", AVEUGLE);
+        }
+        // Une parasite certaine par attente de la fenetre (hors de tout
+        // sommeil), en plus de celle envoyee pendant un sommeil (`dors`).
+        if (PARASITES_DEBUT..PARASITES_FIN).contains(&rang) {
+            parasite();
+        }
+        rang == AVEUGLE
+    }
+
+    pub(super) fn parasite_due() -> bool {
+        (PARASITES_DEBUT..PARASITES_FIN).contains(&RANG.load(Ordering::Relaxed))
+    }
+}
+
+/// La politique d'attente (commande `gpu-irq`). Rend l'etat precedent.
+pub fn veut_irq(oui: bool) -> bool {
+    IRQ_VOULUE.swap(oui, Ordering::Relaxed)
+}
+
+/// Ce que l'achevement par interruption a fait.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompteursIrq {
+    pub armee: bool,
+    pub voulue: bool,
+    pub irq: u64,
+    pub irq_sans_progres: u64,
+    pub attentes_dormantes: u64,
+    pub acheves_en_rotation: u64,
+    pub sommeils: u64,
+    pub reveils_sans_progres: u64,
+    pub vus_par_relecture: u64,
+    pub echues: u64,
+    /// Scrutation : cessions et attentes non cedables (voir `compteurs_verrou`).
+    pub cessions: u64,
+    pub non_cedables: u64,
+}
+
+pub fn compteurs_irq() -> CompteursIrq {
+    CompteursIrq {
+        armee: IRQ_ARMEE.load(Ordering::Acquire),
+        voulue: IRQ_VOULUE.load(Ordering::Relaxed),
+        irq: IRQ_TOTAL.load(Ordering::Relaxed),
+        irq_sans_progres: IRQ_SANS_PROGRES.load(Ordering::Relaxed),
+        attentes_dormantes: ATTENTES_DORMANTES.load(Ordering::Relaxed),
+        acheves_en_rotation: ACHEVES_EN_ROTATION.load(Ordering::Relaxed),
+        sommeils: SOMMEILS.load(Ordering::Relaxed),
+        reveils_sans_progres: REVEILS_SANS_PROGRES.load(Ordering::Relaxed),
+        vus_par_relecture: VUS_PAR_RELECTURE.load(Ordering::Relaxed),
+        echues: ATTENTES_DORMANTES_ECHUES.load(Ordering::Relaxed),
+        cessions: ATTENTES_CEDEES.load(Ordering::Relaxed),
+        non_cedables: ATTENTES_NON_CEDABLES.load(Ordering::Relaxed),
     }
 }
 

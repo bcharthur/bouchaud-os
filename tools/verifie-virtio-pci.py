@@ -50,6 +50,7 @@ FLUX = RACINE / ".github/workflows/os-primitives.yml"
 OPTION = "banc-virtio-gpu-sans-reponse"
 GARDE_INJECTION = '#[cfg(feature = "' + OPTION + '")]\n        if lit32(requete, 0) == CMD_RESOURCE_ATTACH_BACKING'
 OPTION_ETRANGERE = "banc-virtio-gpu-reponse-etrangere"
+GARDE_PANNES_IRQ = '#[cfg(feature = "banc-virtio-gpu-irq-pannes")]\nmod pannes {'
 GARDE_ETRANGERE = '#[cfg(feature = "' + OPTION_ETRANGERE + '")]\n        if lit_genre(requete) == CMD_TRANSFER_TO_HOST_2D'
 POSE = "file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);"
 SONNETTE = "write_volatile(self.sonnette as *mut u16, 0);"
@@ -86,8 +87,14 @@ def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "") -> 
     if not attente or "ecoule > limite_ns" not in attente or "plafond_cycles" not in attente \
             or "return false;" not in attente:
         fautes.append("virtio_gpu.rs : attente_reponse n'est plus bornee (date ET plafond TSC).")
-    if "attente_reponse(1000, || read_volatile(util.add(1)) != dernier)" not in s:
-        fautes.append("virtio_gpu.rs : la reponse de la controlq n'est plus attendue par attente_reponse borne.")
+    # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : la controlq attend par `attente_achevement`,
+    # qui scrute par `attente_reponse` (bornee ci-dessus) ou dort jusqu'a une
+    # echeance de `limite_ms` (verifie-virtio-gpu-irq.py).
+    achevement = corps(s, "attente_achevement")
+    if "attente_achevement(1000, || read_volatile(util.add(1)) != dernier)" not in s \
+            or "return attente_reponse(limite_ms, predicat);" not in achevement \
+            or "limite_ms.saturating_mul(1_000_000)" not in achevement:
+        fautes.append("virtio_gpu.rs : la reponse de la controlq n'est plus attendue de facon bornee.")
     hors_attente = s.replace(attente, "") if attente else s
     if re.search(r"\bloop\s*\{", hors_attente):
         fautes.append("virtio_gpu.rs : boucle `loop` nue hors d'attente_reponse (attente non bornee).")
@@ -117,8 +124,20 @@ def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "") -> 
         fautes.append("virtio_gpu.rs : le verrou est pris hors de verrou() ou sans repli try_lock.")
     if "crate::kernel::scheduler::preempt::cession_volontaire_sure()" not in corps(s, "contexte_cedable"):
         fautes.append("virtio_gpu.rs : ceder/dormir n'est plus soumis a cession_volontaire_sure (SpinLock tenu ?).")
-    # 8. Injection de panne
-    if s.count("VIRTIO_GPU_INJECTION") != 2 or s.count(GARDE_INJECTION) != 1 \
+    # 8. Injection de panne. Les pannes de l'attente par interruption vivent
+    # dans `mod pannes`, compile seulement avec leur option (BOUCHAUD_VIRTIO_GPU_IRQ_V1).
+    pannes = ""
+    i = s.find(GARDE_PANNES_IRQ)
+    if i >= 0:
+        j = s.find("\n}\n", i)
+        pannes = s[i:j + 3] if j > 0 else ""
+    if pannes and pannes.count("VIRTIO_GPU_INJECTION") and s.count(GARDE_PANNES_IRQ) == 1:
+        s_hors = s.replace(pannes, "")
+    else:
+        s_hors = s
+        if "mod pannes" in s:
+            fautes.append("virtio_gpu.rs : les pannes de l'attente par interruption ne sont plus confinees a leur option.")
+    if s_hors.count("VIRTIO_GPU_INJECTION") != 2 or s.count(GARDE_INJECTION) != 1 \
             or s.count("VIRTIO_GPU_INJECTION attache_bureau_sans_reponse") != 1:
         fautes.append("virtio_gpu.rs : l'injection de panne n'est plus confinee a l'option " + OPTION + ".")
     if s.count(GARDE_ETRANGERE) != 1 or s.count("VIRTIO_GPU_INJECTION reponse_etrangere") != 1 \
@@ -202,6 +221,8 @@ def main() -> int:
          "            // pourrait etre rattache a une commande."),
         # indice consomme avant le jugement
         ("let dernier = self.dernier_util;", "let dernier = self.dernier_util;\n        " + AVANCE),
+        # les pannes de l'attente par interruption compilees dans toute image
+        (GARDE_PANNES_IRQ, "mod pannes {"),
         # groupement reintroduit
         ("fn reponse(&self)", "unsafe fn commande_double(&mut self) {}\n\n    fn reponse(&self)"),
         # seconde sonnette (deux commandes en vol)

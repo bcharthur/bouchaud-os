@@ -401,6 +401,24 @@ unsafe fn enable_local_apic() {
     }
 }
 
+/// Une interruption fixe vers CE coeur (raccourci « self »). Sert aux bancs
+/// de panne : une interruption parasite sur un vecteur de peripherique
+/// (BOUCHAUD_VIRTIO_GPU_IRQ_V1).
+#[allow(dead_code)]
+pub fn ipi_vers_soi(vecteur: u8) {
+    unsafe {
+        let (x2, lapic) = local_apic();
+        let low = vecteur as u32 | (1 << 18);
+        if x2 {
+            usermode::write_msr(X2APIC_ICR, low as u64);
+        } else {
+            lapic_write(lapic, LAPIC_ICR_HIGH, 0);
+            lapic_write(lapic, LAPIC_ICR_LOW, low);
+            wait_xapic_delivery(lapic);
+        }
+    }
+}
+
 unsafe fn send_all_excluding_self(low: u32) {
     let (x2, lapic) = local_apic();
     let low = low | (3 << 18); // shorthand: all excluding self

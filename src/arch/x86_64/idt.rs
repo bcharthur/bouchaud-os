@@ -44,6 +44,8 @@ pub fn init() {
         IDT[smp::RESCHEDULE_VECTOR as usize].set_handler_fn(reschedule_interrupt_handler);
         IDT[smp::PANIC_STOP_VECTOR as usize].set_handler_fn(panic_stop_handler);
         IDT[smp::TLB_SHOOTDOWN_VECTOR as usize].set_handler_fn(tlb_shootdown_interrupt_handler);
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : achevements virtio-gpu (MSI-X vers le LAPIC).
+        IDT[crate::drivers::virtio_gpu_irq::VECTEUR as usize].set_handler_fn(virtio_gpu_interrupt_handler);
         // Les vecteurs qu'un x86 physique produit sans qu'on les demande :
         // #NP (porte absente), les deux parasites du 8259 et celui du LAPIC.
         // Voir `idt/imprevus.rs` pour ce que leur absence coutait.
@@ -84,3 +86,4 @@ include!("idt/reschedule.rs");
 include!("idt/keyboard.rs");
 include!("idt/storage.rs");
 include!("idt/mouse.rs");
+include!("idt/virtio_gpu.rs");

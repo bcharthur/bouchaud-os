@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -715,6 +715,27 @@ fn fil_detenteur_suspendu() -> ! {
     }
 }
 
+fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => { crate::drivers::virtio_gpu::veut_irq(true); }
+            "off" => { crate::drivers::virtio_gpu::veut_irq(false); }
+            autre => {
+                crate::println!("gpu-irq : {} inconnu (on | off)", autre);
+                return 1;
+            }
+        }
+    }
+    let c = crate::drivers::virtio_gpu::compteurs_irq();
+    crate::serial_println!(
+        "GPU_IRQ armee={} voulue={} irq={} irq_sans_progres={} attentes_dormantes={} acheves_en_rotation={} \
+         sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={} cessions={} non_cedables={}",
+        c.armee as u8, c.voulue as u8, c.irq, c.irq_sans_progres, c.attentes_dormantes, c.acheves_en_rotation,
+        c.sommeils, c.reveils_sans_progres, c.vus_par_relecture, c.echues, c.cessions, c.non_cedables
+    );
+    0
+}
+
 fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
     if argc >= 2 {
@@ -806,7 +827,17 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "clear" => { vga::clear(); 0 }
         "desktop" | "gui" => { crate::gui::run(); vga::clear(); 0 }
         // BOUCHAUD_BANC_PRESENTATION_V1 : BGA contre virtio-gpu, meme charge.
-        "banc-present" => { crate::drivers::gfx::banc_presentation(); vga::clear(); 0 }
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : `banc-present tache` mesure depuis une
+        // tache noyau (contexte du bureau), ou l'attente peut ceder ou dormir.
+        "banc-present" => {
+            crate::drivers::gfx::banc_presentation(argc >= 2 && argv[1] == "tache");
+            vga::clear();
+            0
+        }
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : attente des reponses virtio-gpu par
+        // interruption (on) ou par scrutation (off), pour l'A/B ; sans
+        // argument, l'etat et les compteurs.
+        "gpu-irq" => gpu_irq(argc, &argv),
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),

@@ -768,12 +768,35 @@ const BANC_CATEGORIES: [(&str, usize, usize, usize, usize, usize); 3] = [
 ];
 
 /// `banc-present` : entre en mode graphique, presente, mesure, ressort.
-pub fn banc_presentation() {
+///
+/// `banc-present` mesure depuis le contexte d'amorcage (ou l'attente d'une
+/// reponse ne peut que tourner) ; `banc-present tache` depuis une tache
+/// noyau epinglee au coeur zero, comme le bureau (`run_noyau`) -- le seul
+/// contexte ou l'attente peut ceder ou dormir (BOUCHAUD_VIRTIO_GPU_IRQ_V1).
+pub fn banc_presentation(en_tache: bool) {
     enter();
     if !is_active() {
         crate::serial_println!("[BANC-PRESENT] ECHEC raison=aucun-ecran-actif");
         return;
     }
+    reset_clip();
+    if en_tache {
+        let code = crate::kernel::task::run_noyau(fil_banc_presentation, "banc-present");
+        if code != 0 {
+            crate::serial_println!("[BANC-PRESENT] ECHEC raison=tache-du-banc code={}", code);
+        }
+    } else {
+        mesure_categories("amorcage");
+    }
+    leave();
+}
+
+fn fil_banc_presentation() -> ! {
+    mesure_categories("tache");
+    crate::kernel::task::exit_current(0)
+}
+
+fn mesure_categories(contexte: &str) {
     let ecran = if firmware_backend_installed() {
         "gop"
     } else if VIRTIO_SCANOUT.load(Ordering::Acquire) {
@@ -781,10 +804,28 @@ pub fn banc_presentation() {
     } else {
         "bga"
     };
-    reset_clip();
+    // Ce que l'attente d'une reponse fera ICI (meme decision que le pilote).
+    let c0 = crate::drivers::virtio_gpu::compteurs_irq();
+    let attente = if ecran != "virtio-gpu-2d" {
+        "-"
+    } else if crate::drivers::virtio_gpu_irq::strategie(
+        crate::kernel::scheduler::preempt::cession_volontaire_sure(),
+        c0.armee,
+        c0.voulue,
+    ) == crate::drivers::virtio_gpu_irq::Strategie::Dort
+    {
+        "irq"
+    } else {
+        "scrute"
+    };
     let (ok0, echecs0, _, _) = crate::drivers::virtio_gpu::compteurs();
     for (nom, x, y, l, h, n) in BANC_CATEGORIES {
         let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n);
+        let avant = crate::drivers::virtio_gpu::compteurs_irq();
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : ce que l'attente coute au coeur ou
+        // tourne le banc -- la part de temps ou il est reste INACTIF.
+        let coeur = crate::arch::x86_64::usermode::cpu_index();
+        let (inactif0, horloge0) = (crate::arch::x86_64::cpu::idle_ns(coeur), crate::kernel::timer::monotonic_ns());
         for i in 0..n {
             // Une couleur differente a chaque trame : chaque presentation
             // transporte des pixels qui ont change.
@@ -793,27 +834,42 @@ pub fn banc_presentation() {
             present_rect(x, y, l, h);
             durees.push(crate::kernel::timer::monotonic_ns().saturating_sub(debut));
         }
+        let apres = crate::drivers::virtio_gpu::compteurs_irq();
+        let inactif = crate::arch::x86_64::cpu::idle_ns(coeur).saturating_sub(inactif0);
+        let horloge = crate::kernel::timer::monotonic_ns().saturating_sub(horloge0).max(1);
         durees.sort_unstable();
         let total: u64 = durees.iter().sum();
         let moyen = total / n as u64;
         let centile = |c: usize| durees[(n * c / 100).min(n - 1)];
         let pixels = (l * h * n) as u64;
         crate::serial_println!(
-            "[BANC-PRESENT] ecran={} categorie={} rect={}x{} n={} moyen_us={} p50_us={} p95_us={} max_us={} mpix_s={}",
+            "[BANC-PRESENT] ecran={} categorie={} rect={}x{} n={} moyen_us={} p50_us={} p95_us={} max_us={} mpix_s={} \
+             contexte={} attente={} cessions={} sommeils={} irq={} irq_sans_progres={} vus_par_relecture={} echues={} \
+             coeur={} inactif_pour_mille={}",
             ecran, nom, l, h, n,
             moyen / 1000, centile(50) / 1000, centile(95) / 1000, durees[n - 1] / 1000,
             if total == 0 { 0 } else { pixels.saturating_mul(1000) / total },
+            contexte, attente,
+            apres.cessions - avant.cessions,
+            apres.sommeils - avant.sommeils,
+            apres.irq - avant.irq,
+            apres.irq_sans_progres - avant.irq_sans_progres,
+            apres.vus_par_relecture - avant.vus_par_relecture,
+            apres.echues - avant.echues,
+            coeur,
+            inactif.saturating_mul(1000) / horloge,
         );
     }
     let (ok1, echecs1, _, _) = crate::drivers::virtio_gpu::compteurs();
     crate::serial_println!(
-        "[BANC-PRESENT] ecran={} fin presentations_virtio_ok={} echecs_virtio={} actif={}",
+        "[BANC-PRESENT] ecran={} fin presentations_virtio_ok={} echecs_virtio={} actif={} contexte={} attente={}",
         ecran,
         ok1.saturating_sub(ok0),
         echecs1.saturating_sub(echecs0),
         is_active() as u8,
+        contexte,
+        attente,
     );
-    leave();
 }
 
 fn reverse_bits(mut b: u8) -> u8 {

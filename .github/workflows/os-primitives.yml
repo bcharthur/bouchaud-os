@@ -14,7 +14,7 @@ concurrency:
 jobs:
   probes:
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
@@ -144,6 +144,20 @@ jobs:
         run: |
           BANC_SORTIE=$PWD/banc-presentation-tcg tools/ci/run_banc_presentation.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           BANC_SORTIE=$PWD/banc-presentation-kvm BO_QEMU_KVM=1 tools/ci/run_banc_presentation.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: P10+.1 -- A/B attente des reponses virtio-gpu, scrutation contre interruption MSI-X (TCG puis KVM)
+        if: ${{ !cancelled() }}
+        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : un demarrage, six tours AB/BA de
+        # `banc-present tache` (contexte du bureau) sous `gpu-irq off` et
+        # `gpu-irq on`. Criteres declares dans analyse_banc_irq_gpu.py
+        # (surete, part inactive du coeur, latence p50/p95, relecture,
+        # quorum). Le pas echoue sur un defaut de surete ou d'instrument ;
+        # CONVAINCANT / NON_CONVAINCANT / NON_CONCLUANT est une mesure. La
+        # politique par defaut (scrutation) ne change qu'avec un KVM CONVAINCANT.
+        run: |
+          r=0
+          BANC_SORTIE=$PWD/banc-irq-gpu-tcg tools/ci/run_banc_irq_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          BANC_SORTIE=$PWD/banc-irq-gpu-kvm BO_QEMU_KVM=1 tools/ci/run_banc_irq_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          exit $r
       - name: Ordonnanceur -- methode de preuve P13 sous KVM, SMP1, SMP2, SMP4, SMP8 (temps vole prouve par l'hote)
         # BOUCHAUD_PREUVE_HOTE_V1. Run 38569175760 : trois « RESULTAT : 0 »
         # sans comparaison (corrige, BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1).
@@ -210,6 +224,21 @@ jobs:
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
           ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
           ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+      - name: P10+.1 -- pannes de l'attente par interruption, MSI-X masque, parasites, reponse jamais vue (TCG puis KVM)
+        if: ${{ !cancelled() }}
+        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : noyau compile avec
+        # `banc-virtio-gpu-irq-pannes`, bureau sous `gpu-irq on`. Interruptions
+        # perdues rattrapees par la relecture, parasites sans progres et sans
+        # presentation refusee, attente aveugle finie a son echeance, file
+        # cassee, scanout abandonne, compositeur vivant, aucune panique.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-irq-pannes
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-irq-pannes.bin
+          r=0
+          PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -231,4 +260,6 @@ jobs:
             ordonnanceur-attribution-*/serie.log
             ab-reveil-ipi-*/serie.log
             banc-presentation-*/serie-*.log
+            banc-irq-gpu-*/serie.log
+            virtio-irq-pannes*/serie.log
           if-no-files-found: warn
