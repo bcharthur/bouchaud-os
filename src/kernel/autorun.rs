@@ -62,6 +62,14 @@ pub fn run_if_present() {
     let status = crate::shell::run_batch(&script);
 
     crate::println!("{} statut={}", END, status);
+    // BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : les lignes emises SANS le jeton
+    // (attente a la borne) ou en reentrance sont des lignes possiblement
+    // entrelacees. Chaque banc peut les compter ; attendu : 0 et 0.
+    crate::serial_println!(
+        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={}",
+        crate::drivers::serial::emissions_a_la_borne(),
+        crate::drivers::serial::emissions_reentrees(),
+    );
     vga::set_serial_mirror(false);
 
     // LE SUSPECT PRINCIPAL de l'arret du run #347 : quand le script autorun

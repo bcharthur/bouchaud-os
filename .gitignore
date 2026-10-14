@@ -289,3 +289,7 @@ tools/userland/out-faute-multifil/
 /extinction-contention.img
 /serie-extinction-contention*.log
 tools/userland/out-extinction-contention/
+/scenario-serie-entrelacement/
+/serie-entrelacement.img
+/serie-entrelacement*.log
+tools/userland/out-serie-entrelacement/

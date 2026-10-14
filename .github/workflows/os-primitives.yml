@@ -109,6 +109,18 @@ jobs:
         run: tools/ci/run_oss_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Securite -- matrice des roles du navigateur par vrais appels systeme
         run: tools/ci/run_matrice_roles.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Console serie -- lignes entieres pendant que le noyau ecrit (TCG, puis KVM lignes longues)
+        # BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : run 38482972584 (KVM), une
+        # ligne du navigateur melangee octet contre octet a une ligne du noyau
+        # (`pid=1\x1b6[ 90kmi[l...`). Les deux demarrages tournent toujours ;
+        # le pas echoue si l'un des deux est rouge.
+        run: |
+          r=0
+          tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg.log
+          BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 120 120 1800 || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm.log
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -124,4 +136,5 @@ jobs:
             scanout-virtio*/capture-*.ppm
             serie-faute-multifil-*.log
             serie-extinction-contention-*.log
+            serie-entrelacement-*.log
           if-no-files-found: warn
