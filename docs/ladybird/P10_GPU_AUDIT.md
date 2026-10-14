@@ -1,6 +1,6 @@
-# P10 — GPU : audit, verdict BLOCKED, premier composant
+# P10 — GPU : audit, verdict BLOCKED, premiers composants
 
-> État au 2026-10-08, HEAD `c63a328e`, Ladybird épinglé
+> État au 2026-10-08, HEAD `c63a328e` (section 4 bis : 2026-10-14, `05b542bf`), Ladybird épinglé
 > `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6`. Niveau de preuve de chaque
 > constat entre crochets : **[STATIQUE]** (lu dans le code), **[QEMU-TCG]**
 > (vu sur un noyau qui tourne).
@@ -28,7 +28,7 @@ qu'il s'agisse du GPU, du réseau ou du disque.
 | Affichage Trigkey | GOP UEFI 1920×1080/32 bpp (`src/platform/pc/reference_gop.rs`) | physique, docs Trigkey |
 | Énumération PCI | parcours derrière les ponts, capacités (`capacites_de`), BAR 64 bits (`bar_decode`), MSI-X déjà programmé par RTL8168 et xHCI | [STATIQUE] |
 | virtio | **aucun** pilote ; `pci.rs` ne connaît que le nom du vendeur `0x1AF4` | [STATIQUE] |
-| `-device virtio-gpu-pci` sous QEMU | énuméré (`[PCI-NG] peripheriques=7` au lieu de 6), aucun pilote ne s'y attache, le bureau reste sur BGA | [QEMU-TCG] boot local du 2026-10-08 |
+| `-device virtio-gpu-pci` sous QEMU | au 2026-10-08 : énuméré, aucun pilote. Depuis : transport (section 4) puis scanout 2D (section 4 bis) ; avec BGA, le bureau reste sur BGA | [QEMU-TCG] |
 | Ladybird, Compositor | `initialize_gpu_backend()` n'est appelé que sans `--force-cpu-painting` ; sous Bouchaud l'option est toujours passée | [STATIQUE] `Services/Compositor/main.cpp` |
 | Ladybird, build | `browser-vcpkg.sh` retire `vulkan`, `vulkan-headers` et `vulkan-memory-allocator` du manifeste, et la construction échoue s'ils y réapparaissent | [STATIQUE] |
 
@@ -127,9 +127,37 @@ Sans `-device virtio-gpu-pci` : une ligne `VIRTIO_GPU absent`, rien d'autre.
 L'aller-retour est scruté (pas d'interruption) et borné à 1 s. La preuve
 QEMU-KVM vient de l'étape os-primitives.
 
-Un **virtio-gpu 2D** qui affiche le bureau à la place de BGA serait l'étape
-suivante. Il ne ferait pas passer P10 en DONE, puisqu'il n'y a toujours pas
-d'accélération. Il faut le dire comme ça, et ne pas le présenter autrement.
+## 4 bis. Deuxième composant : scanout virtio-gpu 2D (sans accélération)
+
+`BOUCHAUD_VIRTIO_GPU_2D_V1`, au-dessus du transport (inchangé). Il **remplace
+BGA** quand BGA manque. Il n'accélère rien : le bureau et Ladybird restent
+peints par le processeur, aucune commande 3D, aucun VIRGL, aucun contexte.
+**P10 reste BLOCKED.**
+
+| Pièce | Où | Preuve |
+|---|---|---|
+| Commandes 2D synchrones : `RESOURCE_CREATE_2D`, `ATTACH_BACKING` (DMA contiguë), `SET_SCANOUT`, `TRANSFER_TO_HOST_2D`, `RESOURCE_FLUSH`, `DETACH_BACKING`, `RESOURCE_UNREF` | `virtio_gpu.rs` | [QEMU-TCG] |
+| Autotest au démarrage : chemin positif complet, **7 refus** chacun avec son code (format 0, ressource 0, doublon, transfert et flush sur ressource inconnue, scanout 16, rectangle hors limites) | `virtio_gpu.rs` | [QEMU-TCG] `VIRTIO_GPU_2D negatifs refuses_avec_le_bon_code=7` |
+| Mire 64×64 à l'écran virtio, **exacte au pixel** (capture `screendump` du moniteur QEMU) | banc | [QEMU-TCG] `SCANOUT_MIRE_OK pixels_exacts=3721/3721` |
+| Politique : GOP > BGA > virtio-gpu 2D (si autotest vert) > aucun | `politique_scanout.rs` | [HÔTE] 5 tests ; [QEMU-TCG] |
+| Bureau présenté par virtio-gpu sans BGA (`-vga none`) : chaque `present`/`present_rect` devient transfert + flush du rectangle | `bochs.rs` | [QEMU-TCG] capture 1280×720 identique au bureau BGA, 921 404/921 600 pixels (seule l'horloge diffère) |
+| Présentation continue | banc | [QEMU-TCG] deux captures à 3 s : l'horloge a changé à l'écran (`SCANOUT_VIVANT_OK`) |
+| Repli : ni BGA ni virtio → `present() inactif (scanout=aucun)`, pas de panique ; BGA présent → le bureau reste sur BGA | banc | [QEMU-TCG] |
+| `/dev/fb0` : `mmap` et cession au ring 3 **refusés** sur ce scanout (un client n'y a aucun moyen de présenter) | `bochs.rs` | [STATIQUE] |
+| Mesure | `[GUI-VIRTIO-GPU]` | [QEMU-TCG] 25 présentations en 30 s, 0 échec, **449 µs** par présentation (bureau au repos : 1 plein écran + l'horloge) |
+
+Banc : `tools/ci/run_virtio_gpu_scanout.sh` (os-primitives, TCG puis KVM).
+Contre le faux vert : chaque démarrage doit atteindre son point de capture,
+une capture absente est un échec, un aplat ne vaut pas une image, et une
+mutation (`presente()` sans transfert ni flush) rend le banc **rouge**
+(0/921 600 pixels, horloge figée).
+
+Ce qui manque encore pour dire « le bureau sur virtio-gpu » au-delà de QEMU :
+
+- la preuve **KVM** (étape os-primitives, pas encore lue) ;
+- un client ring 3 qui peint `/dev/fb0` (refusé, voir plus haut) ;
+- les interruptions : les commandes sont scrutées, bornées à 1 s ;
+- et rien de tout cela ne concerne la Trigkey (Radeon Vega, pas virtio).
 
 ## 5. Ce que P10 ne prétend pas
 
