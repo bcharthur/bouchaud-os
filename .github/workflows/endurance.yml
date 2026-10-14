@@ -119,6 +119,7 @@ jobs:
             --memory-mb 4096 \
             --disque endurance-scenario/endurance.img \
             --require-fichier endurance-scenario/marqueurs-endurance.txt \
+            --marqueur-sonde ENDURANCE_ORDONNANCEUR_OK \
             --out-dir endurance-tranche-${{ matrix.tranche }}
       - name: Verdict (campagne / budgets / metriques absentes / noyau)
         if: always()

@@ -34,7 +34,11 @@ ICI = Path(__file__).resolve().parent
 sys.path.insert(0, str(ICI))
 
 import budgets_endurance  # noqa: E402
+import etat_cycle  # noqa: E402
+import logscan  # noqa: E402
 import qemu_matrix  # noqa: E402
+
+FIN_OK = "=== AUTORUN FIN === statut=0"
 
 TRACE_COMPLETE = "\n".join([
     "ENDURANCE_MEMOIRE_OK",
@@ -208,6 +212,160 @@ class ContratDesTraces(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertNotEqual(fini.returncode, 0, fini.stdout)
+
+
+PREFIXE = "[22:10:30][ 97%:  0%:  2%][FPS: --] "
+LIGNE_SONDE = "/bin/ordonnanceur-probe 8 && echo ENDURANCE_ORDONNANCEUR_OK"
+
+
+def trace_sonde(verdict: str, statut: int, autres_ok: bool = True, emis: bool = False) -> str:
+    """Un cycle ou la famille de la sonde est echoee (« + ... ») puis jugee."""
+    lignes = [
+        PREFIXE + "+ echo ENDURANCE_MEMOIRE_DEBUT && /bin/mmstress 4 512 4 && echo ENDURANCE_MEMOIRE_OK",
+    ]
+    if autres_ok:
+        lignes.append(PREFIXE + "ENDURANCE_MEMOIRE_OK")
+    lignes += [
+        PREFIXE + "+ echo ENDURANCE_ORDONNANCEUR_DEBUT && " + LIGNE_SONDE,
+        PREFIXE + "ENDURANCE_ORDONNANCEUR_DEBUT",
+        PREFIXE + f"VERDICT_SONDE : {verdict} tentatives=3 raison=phase non jugeable (126 reveils)",
+    ]
+    if emis:
+        lignes.append(PREFIXE + "ENDURANCE_ORDONNANCEUR_OK")
+    lignes += [
+        PREFIXE + "+ echo ENDURANCE_CYCLE_FIN",
+        PREFIXE + "ENDURANCE_CYCLE_FIN",
+        f"=== AUTORUN FIN === statut={statut}",
+    ]
+    return "\n".join(lignes) + "\n"
+
+
+class MarqueursEmis(unittest.TestCase):
+    """BOUCHAUD_MARQUEUR_HORS_ECHO_V1 : l'echo d'une commande n'est pas un marqueur."""
+
+    def test_un_marqueur_seulement_echoe_est_absent(self):
+        _, absents = logscan.scan_text(trace_sonde("NON_QUALIFIANT", 2),
+                                       required_markers=["ENDURANCE_ORDONNANCEUR_OK"])
+        self.assertEqual(absents, ("ENDURANCE_ORDONNANCEUR_OK",))
+
+    def test_un_marqueur_emis_est_present(self):
+        _, absents = logscan.scan_text(trace_sonde("QUALIFIE_OK", 0, emis=True),
+                                       required_markers=["ENDURANCE_ORDONNANCEUR_OK", "ENDURANCE_MEMOIRE_OK"])
+        self.assertEqual(absents, ())
+
+    def test_l_echo_colore_est_reconnu(self):
+        colore = ("\x1b[90m[\x1b[36m18:35:57\x1b[90m][\x1b[33m 50\x1b[90m%:\x1b[32m  0\x1b[90m%:"
+                  "\x1b[32m  1\x1b[90m%][FPS:\x1b[90m --\x1b[90m] \x1b[0m+ " + LIGNE_SONDE)
+        self.assertTrue(logscan.est_echo_de_commande(colore))
+        self.assertTrue(logscan.est_echo_de_commande("+ " + LIGNE_SONDE))
+        self.assertFalse(logscan.est_echo_de_commande(PREFIXE + "ENDURANCE_ORDONNANCEUR_OK"))
+        self.assertFalse(logscan.est_echo_de_commande("=== AUTORUN FIN === statut=0"))
+
+
+class CycleNonQualifiant(unittest.TestCase):
+    """BOUCHAUD_ENDURANCE_NON_QUALIFIANT_V1 : ni reussite, ni echec du noyau."""
+
+    MARQUEURS = ["ENDURANCE_MEMOIRE_OK", "ENDURANCE_ORDONNANCEUR_OK", "ENDURANCE_CYCLE_FIN", FIN_OK]
+
+    def resultat(self, texte: str, timed_out: bool = False, fatals: int = 0) -> dict:
+        _, absents = logscan.scan_text(texte, required_markers=self.MARQUEURS)
+        return {"ok": not absents and not fatals and not timed_out, "timed_out": timed_out,
+                "qemu_exit_ok": True, "returncode": 0,
+                "fatal_findings": [{"kind": "kernel_panic"}] * fatals,
+                "required_markers_missing": list(absents)}
+
+    def etat(self, texte: str, **k) -> str:
+        return etat_cycle.etat_du_cycle(self.resultat(texte, **k), texte, "ENDURANCE_ORDONNANCEUR_OK")[0]
+
+    def test_sonde_non_qualifiante_seule(self):
+        texte = trace_sonde("NON_QUALIFIANT", 2)
+        etat, raison = etat_cycle.etat_du_cycle(self.resultat(texte), texte, "ENDURANCE_ORDONNANCEUR_OK")
+        self.assertEqual(etat, "NON_QUALIFIANT")
+        self.assertIn("126 reveils", raison)
+
+    def test_un_echec_qualifie_reste_un_echec(self):
+        self.assertEqual(self.etat(trace_sonde("QUALIFIE_ECHEC", 1)), "ECHEC")
+
+    def test_une_autre_famille_en_echec_reste_un_echec(self):
+        self.assertEqual(self.etat(trace_sonde("NON_QUALIFIANT", 2, autres_ok=False)), "ECHEC")
+
+    def test_une_panique_reste_un_echec(self):
+        self.assertEqual(self.etat(trace_sonde("NON_QUALIFIANT", 2), fatals=1), "ECHEC")
+
+    def test_un_cycle_coupe_reste_un_echec(self):
+        self.assertEqual(self.etat(trace_sonde("NON_QUALIFIANT", 2), timed_out=True), "ECHEC")
+
+    def test_un_statut_autre_que_2_reste_un_echec(self):
+        self.assertEqual(self.etat(trace_sonde("NON_QUALIFIANT", 3)), "ECHEC")
+
+    def test_sans_sonde_designee_tout_rate_est_un_echec(self):
+        texte = trace_sonde("NON_QUALIFIANT", 2)
+        self.assertEqual(etat_cycle.etat_du_cycle(self.resultat(texte), texte, None)[0], "ECHEC")
+
+    def test_verdict_de_campagne(self):
+        v = etat_cycle.verdict_campagne
+        self.assertEqual(v(["OK", "OK"]), "OK")
+        self.assertEqual(v(["OK", "NON_QUALIFIANT"]), "NON_QUALIFIANT")
+        self.assertEqual(v(["NON_QUALIFIANT", "ECHEC"]), "ECHEC")
+        self.assertEqual(v([]), "ECHEC")
+        self.assertEqual([etat_cycle.code_de_sortie(x) for x in ("OK", "NON_QUALIFIANT", "ECHEC")], [0, 2, 1])
+
+
+class CampagneNonQualifiante(unittest.TestCase):
+    """Le vrai `soak.py` puis le vrai `budgets_endurance.py` sur des cycles NON_QUALIFIANT."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.image = self.tmp / "boot.bin"
+        self.image.write_bytes(b"\0" * 512)
+        self.disque = self.tmp / "scenario.img"
+        self.disque.write_bytes(b"\0" * 512)
+        self.marqueurs = self.tmp / "marqueurs.txt"
+        self.marqueurs.write_text("\n".join(CycleNonQualifiant.MARQUEURS) + "\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def soak_sonde(self, contenu: str) -> tuple[int, Path, dict]:
+        faux = faux_qemu(self.tmp, contenu, 0)
+        sortie = self.tmp / "tranche"
+        env = dict(os.environ, PATH=f"{faux.parent}{os.pathsep}{os.environ['PATH']}")
+        fini = subprocess.run([
+            sys.executable, str(ICI / "soak.py"), str(self.image),
+            "--cpus", "8", "--duration-seconds", "5", "--cycle-seconds", "2",
+            "--out-dir", str(sortie), "--require-fichier", str(self.marqueurs),
+            "--disque", str(self.disque), "--marqueur-sonde", "ENDURANCE_ORDONNANCEUR_OK",
+        ], env=env, cwd=self.tmp, capture_output=True, text=True)
+        return fini.returncode, sortie, json.loads((sortie / "summary.json").read_text())
+
+    def test_la_campagne_continue_et_rend_non_qualifiant(self):
+        rc, sortie, resume = self.soak_sonde(trace_sonde("NON_QUALIFIANT", 2))
+        self.assertEqual(rc, 2)
+        # Le faux qemu rend la main tout de suite : bien plus de deux cycles.
+        self.assertGreaterEqual(len(resume["cycles"]), 2, "la campagne s'est arretee au premier cycle")
+        self.assertEqual(resume["non_qualifiants"], len(resume["cycles"]))
+        self.assertEqual(resume["verdict"], "NON_QUALIFIANT")
+        self.assertFalse(resume["ok"])
+        budgets = faux_check_budgets(self.tmp, 0, "execution : 9/9 grandeur(s) mesuree(s)")
+        rapport = budgets_endurance.juge(sortie, budgets)
+        self.assertEqual(rapport["verdict"], "NON_QUALIFIANT")
+        self.assertFalse(rapport["ok"])
+        self.assertEqual(rapport["fautes"], [])
+        self.assertTrue(all("NON_QUALIFIANT" in f for f in rapport["non_qualifies"]))
+        self.assertNotIn("noyau", " ".join(rapport["non_qualifies"]).split("--")[0])
+
+    def test_un_budget_depasse_dans_un_cycle_non_qualifiant_est_un_echec(self):
+        _, sortie, _ = self.soak_sonde(trace_sonde("NON_QUALIFIANT", 2))
+        budgets = faux_check_budgets(self.tmp, 1, "  ready_latency_max_ms : REQUIS mais absent de x")
+        rapport = budgets_endurance.juge(sortie, budgets)
+        self.assertEqual(rapport["verdict"], "ECHEC")
+
+    def test_un_echec_qualifie_arrete_la_campagne(self):
+        rc, _, resume = self.soak_sonde(trace_sonde("QUALIFIE_ECHEC", 1))
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(resume["cycles"]), 1)
+        self.assertEqual(resume["verdict"], "ECHEC")
 
 
 class DetailsSondes(unittest.TestCase):

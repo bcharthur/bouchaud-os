@@ -50,6 +50,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from etat_cycle import ECHEC, NON_QUALIFIANT, OK, code_de_sortie  # noqa: E402
+
 RACINE = Path(__file__).resolve().parents[3]
 CHECK_BUDGETS = RACINE / "tools" / "ci" / "check_budgets.py"
 
@@ -169,11 +172,15 @@ def releve_noyau(trace: Path) -> dict:
 def juge(dossier: Path, check_budgets: Path) -> dict:
     resume = dossier / "summary.json"
     fautes: list[str] = []
-    rapport: dict = {"dossier": str(dossier), "fautes": fautes}
+    # BOUCHAUD_ENDURANCE_NON_QUALIFIANT_V1 : ce qui n'a pas pu etre JUGE, a
+    # part de ce qui a echoue. Jamais un succes ; jamais impute au noyau.
+    non_qualifies: list[str] = []
+    rapport: dict = {"dossier": str(dossier), "fautes": fautes, "non_qualifies": non_qualifies}
 
     if not resume.is_file():
         fautes.append(f"campagne : {resume} absent -- soak.py n'a pas tourne jusqu'au bout")
         rapport["ok"] = False
+        rapport["verdict"] = ECHEC
         return rapport
     donnees = json.loads(resume.read_text(encoding="utf-8"))
     cycles = donnees.get("cycles", [])
@@ -181,6 +188,7 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
     rapport["campagne"] = {
         "cycles": len(cycles),
         "reussis": reussis,
+        "non_qualifiants": sum(1 for c in cycles if c.get("etat") == NON_QUALIFIANT),
         "tronques_evites": donnees.get("cycles_tronques_evites"),
         "cpus": donnees.get("cpus"),
         "disque": donnees.get("disque"),
@@ -195,9 +203,13 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
 
     rapport["cycles"] = []
     for index, cycle in enumerate(cycles, 1):
+        # Un resume sans `etat` (avant V1) : tout cycle rate est un echec.
+        etat = cycle.get("etat") or (OK if cycle.get("ok") else ECHEC)
         fiche: dict = {
             "index": index,
             "ok": bool(cycle.get("ok")),
+            "etat": etat,
+            "raison": cycle.get("raison", ""),
             "log_publie": cycle.get("log"),
             "qemu_rc": cycle.get("returncode"),
             "timeout": cycle.get("timed_out"),
@@ -205,7 +217,12 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
             "marqueurs_absents": cycle.get("required_markers_missing", []),
         }
         rapport["cycles"].append(fiche)
-        if not fiche["ok"]:
+        if etat == NON_QUALIFIANT and not fiche["ok"]:
+            non_qualifies.append(
+                f"qualification : cycle {index} NON_QUALIFIANT -- sonde : {fiche['raison']} "
+                f"(rien d'impute au noyau ; jamais une reussite)"
+            )
+        elif not fiche["ok"]:
             fautes.append(
                 f"noyau : cycle {index} en echec "
                 f"({len(fiche['fatals'])} faute(s) fatale(s), "
@@ -230,7 +247,8 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
                 f"({len(budgets['requis_absents'])} requis absent(s))"
             )
 
-    rapport["ok"] = not fautes
+    rapport["verdict"] = ECHEC if fautes else (NON_QUALIFIANT if non_qualifies else OK)
+    rapport["ok"] = rapport["verdict"] == OK
     return rapport
 
 
@@ -240,7 +258,8 @@ def texte(rapport: dict) -> str:
     if campagne:
         lignes.append(
             f"1. CAMPAGNE     : {campagne['cycles']} cycle(s) execute(s), "
-            f"{campagne['reussis']} reussi(s), SMP{campagne['cpus']}, "
+            f"{campagne['reussis']} reussi(s), {campagne['non_qualifiants']} NON_QUALIFIANT(s), "
+            f"SMP{campagne['cpus']}, "
             f"{campagne['marqueurs_exiges']} marqueur(s) exige(s), "
             f"tronques evites={campagne['tronques_evites']}"
         )
@@ -261,7 +280,7 @@ def texte(rapport: dict) -> str:
             )
         noyau = fiche.get("noyau", {})
         lignes.append(
-            f"4. NOYAU c{fiche['index']:<5}: ok={fiche['ok']} fatals={len(fiche['fatals'])} "
+            f"4. NOYAU c{fiche['index']:<5}: etat={fiche['etat']} ok={fiche['ok']} fatals={len(fiche['fatals'])} "
             f"marqueurs_absents={fiche['marqueurs_absents']} "
             f"autorun_statut={noyau.get('autorun_statut')}"
         )
@@ -276,8 +295,9 @@ def texte(rapport: dict) -> str:
             lignes.append(f"     {p}")
         if fiche.get("budgets_sortie") and fiche["budgets"]["rc"] != 0:
             lignes.extend("     | " + l for l in fiche["budgets_sortie"].rstrip().splitlines())
-    lignes.append("VERDICT : " + ("OK" if rapport["ok"] else "ECHEC"))
+    lignes.append("VERDICT : " + rapport.get("verdict", OK if rapport["ok"] else ECHEC))
     lignes.extend("  - " + f for f in rapport["fautes"])
+    lignes.extend("  - " + f for f in rapport.get("non_qualifies", []))
     return "\n".join(lignes)
 
 
@@ -297,7 +317,7 @@ def main() -> int:
     if resume_gh:
         with open(resume_gh, "a", encoding="utf-8") as f:
             f.write("```\n" + rendu + "\n```\n")
-    return 0 if rapport["ok"] else 1
+    return code_de_sortie(rapport["verdict"])
 
 
 if __name__ == "__main__":
