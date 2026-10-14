@@ -529,6 +529,11 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     if path == "/proc/self/reveil" {
         return Some(FdKind::Instantane(Arc::new(proc_reveil())));
     }
+    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
+    // chaque reveil par la sonde (jamais remis a zero).
+    if path == "/proc/self/fil" {
+        return Some(FdKind::Instantane(Arc::new(proc_fil())));
+    }
     if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
     }
@@ -617,33 +622,84 @@ fn proc_reveil() -> Vec<u8> {
     // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : seconde ligne, la ventilation des
     // reveils en retard de plus d'une milliseconde depuis le releve precedent
     // (`n:somme_us:pire_us` par part, n = reveils dont la part depassait le
-    // seuil), et la liste des reveils CONTAMINES (`echeance_us:externe_us`).
+    // seuil). BOUCHAUD_PREUVE_HOTE_V1 : « externe » = prouve par l'hote ;
+    // les parts ni masquees ni prouvees sont « inexpliquees ».
     let v = crate::kernel::task::current().ventilation_reveil.releve();
-    let (externes, masquees) = crate::kernel::attribution_reveil::absences_comptees();
+    let (externes, masquees, inexpliquees) = crate::kernel::attribution_reveil::absences_comptees();
     let part = |c: crate::kernel::attribution_reveil::ReleveCompteur| format!("{}:{}:{}", c.n, us(c.somme_ns), us(c.pire_ns));
-    let mut liste = alloc::string::String::new();
-    for (i, (echeance_us, externe_us)) in v.liste[..v.listes].iter().enumerate() {
-        if i > 0 {
-            liste.push(',');
-        }
-        liste.push_str(&format!("{}:{}", echeance_us, externe_us));
-    }
-    if liste.is_empty() {
-        liste.push('-');
-    }
     let ligne2 = format!(
-        "ventilation seuil_us={} ventiles={} contamines={} incompletes={} livraison_externe={} livraison_masquee={} \
-         detection={} election={} election_externe={} reprise={} reprise_externe={} \
-         absences_externes_boot={} absences_masquees_boot={} liste_tronquee={} liste={}\n",
+        "ventilation seuil_us={} preuve_hote={} ventiles={} contamines={} inexpliques={} incompletes={} \
+         livraison_externe={} livraison_masquee={} livraison_inexpliquee={} detection={} election={} \
+         election_externe={} election_inexpliquee={} reprise={} reprise_externe={} reprise_inexpliquee={} \
+         absences_externes_boot={} absences_masquees_boot={} absences_inexpliquees_boot={}\n",
         crate::kernel::attribution_reveil::SEUIL_CONTAMINATION_NS / 1000,
-        v.ventiles, v.contamines, v.incompletes,
-        part(v.livraison_externe), part(v.livraison_masquee), part(v.detection), part(v.election),
-        part(v.election_externe), part(v.reprise), part(v.reprise_externe),
-        externes, masquees, (v.contamines as usize > v.listes) as u8, liste,
+        preuve_hote(),
+        v.ventiles, v.contamines, v.inexpliques, v.incompletes,
+        part(v.livraison_externe), part(v.livraison_masquee), part(v.livraison_inexpliquee),
+        part(v.detection), part(v.election), part(v.election_externe), part(v.election_inexpliquee),
+        part(v.reprise), part(v.reprise_externe), part(v.reprise_inexpliquee),
+        externes, masquees, inexpliquees,
     );
     let mut sortie = ligne1.into_bytes();
     sortie.extend_from_slice(ligne2.as_bytes());
     sortie
+}
+
+/// `kvm-steal` si l'hyperviseur publie le vol d'au moins un coeur, sinon
+/// `absente` (TCG, materiel nu) : aucune absence n'y est prouvee externe.
+fn preuve_hote() -> &'static str {
+    if crate::kernel::vol_hote::disponible() { "kvm-steal" } else { "absente" }
+}
+
+/// BOUCHAUD_PREUVE_HOTE_V1 : les cumuls du fil appelant
+/// (`attribution_reveil::ComptesFil`) et le vol cumule de tous les coeurs ;
+/// puis, depuis l'ouverture precedente, les sommeils que l'enregistreur a
+/// ranges pour ce fil (`sommeils n=K perdus=L`, puis K lignes `echeance_us
+/// entree_us externe_ns inexplique_ns masque_ns pret_ns`) et les absences de
+/// son coeur closes pendant qu'il le tenait (`absences n=A incomplet=0|1`,
+/// puis A lignes `fin_us E|M|I part_ns`). L'ouverture REARME l'enregistreur :
+/// la sonde ouvre avant sa serie, puis apres.
+fn proc_fil() -> Vec<u8> {
+    use crate::kernel::attribution_reveil::{Cause, ENREGISTREUR};
+    use alloc::format;
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let tache = crate::kernel::task::indice_courant();
+    let f = crate::kernel::task::current().comptes_fil.cumuls();
+    let (vol_total, coeurs) = crate::kernel::vol_hote::vole_total_ns();
+    let mut sommeils = alloc::string::String::new();
+    let mut n = 0usize;
+    let perdus = ENREGISTREUR.lis(tache, |s| {
+        n += 1;
+        sommeils.push_str(&format!(
+            "{} {} {} {} {} {}\n",
+            s.echeance_ns / 1000, s.entree_ns / 1000, s.comptes.externe_ns, s.comptes.inexplique_ns,
+            s.comptes.masque_ns, s.comptes.pret_ns
+        ));
+    });
+    // Les absences closes pendant que le fil tenait son coeur, rangees par
+    // le gestionnaire de battement depuis l'armement.
+    let mut absences = alloc::string::String::new();
+    let mut na = 0usize;
+    let incomplet = ENREGISTREUR.lis_absences(tache, |a| {
+        let cause = match a.cause {
+            Cause::Externe => 'E',
+            Cause::Masquee => 'M',
+            Cause::Inexpliquee => 'I',
+        };
+        absences.push_str(&format!("{} {} {}\n", a.fin_ns / 1000, cause, a.part_ns));
+        na += 1;
+    });
+    ENREGISTREUR.arme(tache, maintenant);
+    let mut sortie = format!(
+        "fil preuve_hote={} externe_ns={} inexplique_ns={} masque_ns={} pret_ns={} incompletes={} \
+         vol_total_ns={} vol_coeurs={} a_ns={}\nsommeils n={} perdus={}\n",
+        preuve_hote(), f.externe_ns, f.inexplique_ns, f.masque_ns, f.pret_ns, f.incompletes,
+        vol_total, coeurs, maintenant, n, perdus,
+    );
+    sortie.push_str(&sommeils);
+    sortie.push_str(&format!("absences n={} incomplet={}\n", na, incomplet as u8));
+    sortie.push_str(&absences);
+    sortie.into_bytes()
 }
 
 fn proc_stat_global() -> Vec<u8> {

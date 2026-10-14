@@ -167,6 +167,16 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
     current().reveil_elu_ns.range(0);
     current().reveil_par.range(0);
     current().wake_deadline_ns.range(deadline);
+    // BOUCHAUD_PREUVE_HOTE_V1 : le fil arme range l'echeance et ses comptes
+    // a l'entree du sommeil (echeance deja fixee : rien ne la deplace).
+    {
+        use crate::kernel::attribution_reveil as ar;
+        let tache = indice_courant();
+        if ar::ENREGISTREUR.arme_pour(tache) {
+            let comptes = current().comptes_fil.cumuls();
+            ar::ENREGISTREUR.note(tache, &ar::Sommeil { echeance_ns: deadline, entree_ns, comptes });
+        }
+    }
     // BOUCHAUD_CYCLE_DE_VIE_V1 : le sommeil est interruptible -- `nanosleep`,
     // et les attentes par tick des appels systeme. Les fils noyau, qui s'en
     // servent aussi, ne sont jamais condamnes. C'etait ICI l'ecriture qui
@@ -212,7 +222,10 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
             let mut absences = [ar::Absence::default(); 16];
             let (n, incomplet) = ar::absences_entre(mesure.echeance_ns, mesure.reprise_ns, &mut absences);
             let v = ar::ventile(&mesure, &d, local_cpu() as u32, &absences[..n], incomplet);
-            current().ventilation_reveil.note(&v, mesure.echeance_ns);
+            current().ventilation_reveil.note(&v);
+            // BOUCHAUD_PREUVE_HOTE_V1 : livraison + election dans les comptes
+            // cumules du fil ; la reprise, le journal l'impute (fil installe).
+            current().comptes_fil.note_ventilation(&v);
         }
     }
     // Echeance passee sans reveil : annuler le parking (sans effet si un

@@ -83,7 +83,7 @@ LIGNE_ATTRIBUTION = re.compile(r"^\s+attribution [^:]+ : reveils=")
 # ventilation de chaque phase, la preuve chiffree de chaque comparaison, le
 # verdict de chaque tentative.
 LIGNE_QUALIFICATION = re.compile(
-    r"^\s+(ventilation [^:]+ : seuil_us=|PREUVE |phase non jugeable|tentative \d+/\d+ : )"
+    r"^\s+(ventilation [^:]+ : seuil_us=|comptes [^:]+ : preuve_hote=|PREUVE |phase non jugeable|tentative \d+/\d+ : )"
     r"|^VERDICT_SONDE : ")
 
 

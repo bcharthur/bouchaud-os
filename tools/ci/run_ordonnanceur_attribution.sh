@@ -23,7 +23,11 @@
 # (ne qualifie pas P13)`. Seul `ORDONNANCEUR_ATTRIBUTION_OK` (toutes les
 # passes QUALIFIE_OK) est une preuve sur l'ordonnanceur.
 #
-# BO_QEMU_KVM=1 : sous KVM.
+# BO_QEMU_KVM=1 : sous KVM, avec le temps vole publie par l'hote
+# (BOUCHAUD_PREUVE_HOTE_V1) : chaque phase doit l'avoir (`preuve_hote=kvm-steal`),
+# sans quoi rien n'est prouve externe et le banc echoue (defaut d'instrument).
+# C'est la methode de preuve de P13 : sous KVM, un reveil n'est ecarte que si
+# l'hote PROUVE l'avoir retarde ; tout le reste compte contre le noyau.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_ordonnanceur_attribution.sh BOOTIMAGE [PASSES] [SMP]}
@@ -33,7 +37,7 @@ ACCEL="-cpu max"
 NOM=tcg
 if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
   [ -w /dev/kvm ] || { echo "BO_QEMU_KVM=1 mais /dev/kvm inaccessible" >&2; exit 1; }
-  ACCEL="-enable-kvm -cpu host"
+  ACCEL="-enable-kvm -cpu host,kvm-steal-time=on"
   NOM=kvm
 fi
 SORTIE=${ORDO_SORTIE:-$PWD/ordonnanceur-attribution-$NOM}
@@ -62,7 +66,7 @@ done
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 propre() { sed -E 's/\x1b\[[0-9;]*m//g; s/^(\[[^]]*\]){2}\[FPS:[^]]*\] //' "$1"; }
-propre "$LOG" | grep -aE '^  (au repos|sous charge)|^  attribution|^  ventilation|^  phase non jugeable|^  PREUVE|^  tentative|^  - |^VERDICT_SONDE|^RESULTAT|\[POINTS-COOP\]' | sed 's/^/  /' || true
+propre "$LOG" | grep -aE '^  (au repos|sous charge)|^  attribution|^  ventilation|^  comptes|^  phase non jugeable|^  PREUVE|^  tentative|^  - |^VERDICT_SONDE|^RESULTAT|\[POINTS-COOP\]' | sed 's/^/  /' || true
 
 echecs=0
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs=$((echecs + 1)); fi; }
@@ -80,9 +84,18 @@ exige "un verdict explicite par passe : $VERDICTS/$PASSES" test "$VERDICTS" = "$
 exige "cinq preuves chiffrees par tentative : $PREUVES/$((TENTATIVES * 5))" test "$PREUVES" = "$((TENTATIVES * 5))"
 exige "le noyau a ventile chaque phase : $VENTILEES/$((TENTATIVES * 3))" test "$VENTILEES" = "$((TENTATIVES * 3))"
 exige "le noyau a attribue chaque phase : $ATTRIBUEES/$((TENTATIVES * 3))" test "$ATTRIBUEES" = "$((TENTATIVES * 3))"
+COMPTES=$(compte '^  comptes [^:]+ : preuve_hote=(kvm-steal|absente) ')
+exige "les comptes du fil rapportes pour chaque phase (sommeils ranges a leur entree) : $COMPTES/$((TENTATIVES * 3))" test "$COMPTES" = "$((TENTATIVES * 3))"
+PROUVEES=$(compte '^  comptes [^:]+ : preuve_hote=kvm-steal ')
+if [ "$NOM" = kvm ]; then
+  exige "sous KVM, la preuve de l'hote est publiee a chaque phase : $PROUVEES/$((TENTATIVES * 3))" test "$PROUVEES" = "$((TENTATIVES * 3))"
+  PREUVE=kvm-steal
+else
+  PREUVE=absente
+fi
 exige "aucun echec qualifie : $ECHECS" test "$ECHECS" = 0
 exige "aucune panique" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$LOG'"
-BILAN="passes=$PASSES smp=$SMP accel=$NOM qualifie_ok=$OK non_qualifiant=$NONQ qualifie_echec=$ECHECS tentatives=$TENTATIVES"
+BILAN="passes=$PASSES smp=$SMP accel=$NOM preuve_hote=$PREUVE qualifie_ok=$OK non_qualifiant=$NONQ qualifie_echec=$ECHECS tentatives=$TENTATIVES"
 if [ "$echecs" -ne 0 ]; then
   echo "ORDONNANCEUR_ATTRIBUTION_ECHEC n=$echecs $BILAN"
   exit 1

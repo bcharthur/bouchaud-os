@@ -16,11 +16,19 @@ lent que la phase sous charge. Regles :
      les deux comparaisons de priorite NON_QUALIFIANTES ;
   4. le noyau ventile chaque sommeil en retard (`ventile` dans
      `dort_jusqua`), journalise les absences du PIT et du quantum local, et
-     `/proc/self/reveil` rend la ligne `ventilation` et la liste ;
+     `/proc/self/reveil` rend la ligne `ventilation` ;
   5. le banc d'attribution sort en 2 sur un NON_QUALIFIANT, sauf
      BANC_TEMOIN_INSTRUMENT=1, dont le marqueur dit qu'il ne qualifie pas
      P13 ; l'endurance n'imprime son marqueur que sur le code 0 de la sonde ;
      le rapport d'endurance lit la forme NON_QUALIFIANT.
+
+  6. BOUCHAUD_PREUVE_HOTE_V1 : une absence n'est EXTERNE que si le temps vole
+     publie par l'hote (KVM) en couvre la moitie -- sinon elle est
+     inexpliquee et compte contre le noyau ; un journal incomplet ne prouve
+     rien ; les battements lisent le vol et la tache installee ; la sonde
+     lit les comptes de son fil (`/proc/self/fil`) apres chaque reveil et
+     n'ecarte, sous preuve de l'hote, que les reveils prouves ; le banc
+     exige la preuve sous KVM.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -39,6 +47,7 @@ FICHIERS = {
     "endurance": RACINE / "tools/ci/fabrique-scenario-endurance.sh",
     "rapport": RACINE / "tools/ci/reliability/budgets_endurance.py",
     "flux": RACINE / ".github/workflows/os-primitives.yml",
+    "tic": RACINE / "src/arch/x86_64/idt/timer.rs",
 }
 
 RETOUR_NQ = re.compile(
@@ -89,15 +98,50 @@ def verifie(t: dict) -> list:
         fautes.append("ordonnanceur-probe.c : une porte non qualifiee ne rend plus les comparaisons NON_QUALIFIANTES.")
     # 4. Le noyau ventile et le dit.
     if "ar::ventile(&mesure, &d, local_cpu() as u32, &absences[..n], incomplet)" not in t["sommeil"] \
-            or "current().ventilation_reveil.note(&v, mesure.echeance_ns)" not in t["sommeil"]:
+            or "current().ventilation_reveil.note(&v);" not in t["sommeil"] \
+            or "current().comptes_fil.note_ventilation(&v);" not in t["sommeil"]:
         fautes.append("sommeil.rs : un sommeil en retard n'est plus ventile.")
     if "journalise_absence(&a)" not in corps(t["attribution"], "note_tic_tsc"):
         fautes.append("attribution_reveil.rs : les absences du PIT ne sont plus journalisees.")
     if "crate::kernel::attribution_reveil::note_quantum(" not in t["replanif"]:
         fautes.append("reschedule.rs : les absences du quantum local ne sont plus journalisees.")
     pr = corps(t["fd"], "proc_reveil")
-    if "ventilation_reveil.releve()" not in pr or '"ventilation seuil_us={}' not in pr or "liste={}" not in pr:
-        fautes.append("fd.rs : /proc/self/reveil ne rend plus la ventilation et la liste des contamines.")
+    if "ventilation_reveil.releve()" not in pr or '"ventilation seuil_us={} preuve_hote={}' not in pr:
+        fautes.append("fd.rs : /proc/self/reveil ne rend plus la ventilation ni la preuve de l'hote.")
+    # 6. La preuve de l'hote.
+    at = t["attribution"]
+    if not re.search(r"\} else if self\.vole_ns\.saturating_mul\(2\) >= d \{\s*Cause::Externe\s*\} else \{\s*Cause::Inexpliquee", at):
+        fautes.append("attribution_reveil.rs : une absence est externe sans le vol prouve de l'hote.")
+    if not re.search(r"pub fn contamine\(&self\) -> bool \{\s*self\.externe_ns\(\) > SEUIL_CONTAMINATION_NS\s*\}", at):
+        fautes.append("attribution_reveil.rs : un reveil est ecarte sans preuve (journal incomplet, ou autre).")
+    if "let vole_ns = vole_ns.map_or(0, |v| v.saturating_sub(periode_ns).min(duree));" not in at:
+        fautes.append("attribution_reveil.rs : le vol retenu n'est plus borne par l'absence (moins une periode).")
+    if "crate::kernel::vol_hote::vole_ns(blackbox_cpu)," not in t["tic"] \
+            or "crate::kernel::task::courant_imputable(blackbox_cpu)," not in t["tic"] \
+            or "crate::kernel::vol_hote::vole_ns(cpu_mesure)," not in t["replanif"]:
+        fautes.append("timer.rs / reschedule.rs : les battements ne lisent plus le vol de l'hote ou la tache installee.")
+    if "ph->contamine[i] = (char)(prouve || (!ph->preuve_hote && inexplique));" not in fin:
+        fautes.append("ordonnanceur-probe.c : sous preuve de l'hote, un reveil inexplique est ecarte (le noyau excuse).")
+    mi = corps(s, "mesure_interface")
+    boucle = mi[mi.find("for (int i = 0; i < REVEILS; i++) {"):mi.find("    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes de fin")]
+    if "comptes = comptes && lis_fil(&ph->final, ph) && ph->n_sommeils > 0;" not in mi or "repartit(ph);" not in mi:
+        fautes.append("ordonnanceur-probe.c : les sommeils ranges par le noyau ne sont plus relus et repartis.")
+    if not boucle or re.search(r"\b(lis_fil|open|read|releve_attribution)\(", boucle):
+        fautes.append("ordonnanceur-probe.c : un appel s'ajoute entre deux reveils (l'instrument perturbe la mesure).")
+    if "ar::ENREGISTREUR.note(tache, &ar::Sommeil { echeance_ns: deadline, entree_ns, comptes });" not in t["sommeil"] \
+            or "let comptes = current().comptes_fil.cumuls();" not in t["sommeil"] \
+            or re.search(r"absences_|parcourt_journal|\.releve\(",
+                         t["sommeil"][t["sommeil"].find("le fil arme range"):t["sommeil"].find("ar::ENREGISTREUR.note(")]):
+        fautes.append("sommeil.rs : le noyau ne range plus l'echeance et les comptes a l'entree du sommeil.")
+    if "ENREGISTREUR.note_absence(a);" not in corps(t["attribution"], "journalise_absence") \
+            or "ENREGISTREUR.lis_absences(tache," not in t["fd"]:
+        fautes.append("attribution / fd.rs : les absences du fil arme ne sont plus rangees pour lui (journal global seul).")
+    if "fn proc_fil()" not in t["fd"] or '"/proc/self/fil"' not in t["fd"]:
+        fautes.append("fd.rs : /proc/self/fil a disparu.")
+    if 'exige "sous KVM, la preuve de l\'hote est publiee a chaque phase' not in t["banc"] \
+            or 'test "$PROUVEES" = "$((TENTATIVES * 3))"' not in t["banc"] \
+            or "kvm-steal-time=on" not in t["banc"]:
+        fautes.append("run_ordonnanceur_attribution.sh : sous KVM, le banc n'exige plus la preuve de l'hote.")
     # 5. Consommateurs.
     banc = t["banc"]
     if 'echo "ORDONNANCEUR_ATTRIBUTION_NON_QUALIFIANT $BILAN"\n  exit 2' not in banc \
@@ -141,13 +185,30 @@ def main() -> int:
         ("sonde", "prio->propre.pire <= normale->propre.pire + repos->propre.pire",
          "prio->propre.pire <= normale->propre.pire + repos->tout.pire"),
         # le noyau ne ventile plus
-        ("sommeil", "            current().ventilation_reveil.note(&v, mesure.echeance_ns);\n", ""),
+        ("sommeil", "            current().ventilation_reveil.note(&v);\n", ""),
         # le PIT ne journalise plus
         ("attribution", "            journalise_absence(&a);\n        }\n    }\n", "        }\n    }\n"),
         # le quantum ne journalise plus
         ("replanif", "    crate::kernel::attribution_reveil::note_quantum(", "    let _ = ("),
-        # la liste disparait de /proc/self/reveil
-        ("fd", "liste_tronquee={} liste={}", "liste_tronquee={} liste_absente={}"),
+        # 6 : une absence non masquee redevient externe sans preuve
+        ("attribution", "        } else if self.vole_ns.saturating_mul(2) >= d {", "        } else if true {"),
+        # 6 : un journal incomplet ecarte a nouveau le reveil
+        ("attribution", "        self.externe_ns() > SEUIL_CONTAMINATION_NS\n", "        self.incomplete || self.externe_ns() > SEUIL_CONTAMINATION_NS\n"),
+        # 6 : la sonde ecarte les inexpliques meme sous preuve de l'hote
+        ("sonde", "(prouve || (!ph->preuve_hote && inexplique))", "(prouve || inexplique)"),
+        # 6 : la sonde relit ses comptes apres chaque reveil (perturbe la mesure)
+        ("sonde", "        ph->retard[i] = reel > attendu ? reel - attendu : 0;\n    }",
+         "        ph->retard[i] = reel > attendu ? reel - attendu : 0;\n        lis_fil(&depart, NULL);\n    }"),
+        # 6 : le noyau ne range plus les sommeils
+        ("sommeil", "            ar::ENREGISTREUR.note(tache, &ar::Sommeil { echeance_ns: deadline, entree_ns, comptes });\n", ""),
+        # 6 : le journal reparcouru a chaque entree de sommeil (perturbe la mesure)
+        ("sommeil", "let comptes = current().comptes_fil.cumuls();", "let comptes = current().comptes_fil.cumuls(); let _ = ar::absences_closes_entre(0, entree_ns, tache, &mut [ar::Absence::default(); 8]);"),
+        # 6 : les absences du fil arme ne sont plus rangees pour lui
+        ("attribution", "    ENREGISTREUR.note_absence(a);\n", ""),
+        # 6 : le PIT ne lit plus le vol de l'hote
+        ("tic", "crate::kernel::vol_hote::vole_ns(blackbox_cpu),", "None,"),
+        # 6 : sous KVM, le banc se passe de la preuve
+        ("banc", 'test "$PROUVEES" = "$((TENTATIVES * 3))"', "true"),
         # le banc prend un NON_QUALIFIANT pour une reussite
         ("banc", 'echo "ORDONNANCEUR_ATTRIBUTION_NON_QUALIFIANT $BILAN"\n  exit 2',
          'echo "ORDONNANCEUR_ATTRIBUTION_NON_QUALIFIANT $BILAN"\n  exit 0'),

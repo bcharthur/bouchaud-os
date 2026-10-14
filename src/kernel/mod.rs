@@ -125,6 +125,8 @@ pub mod task;
 pub mod accord_horloges;
 #[path = "time/timer.rs"]
 pub mod timer;
+#[path = "time/vol_hote.rs"]
+pub mod vol_hote;
 #[path = "memory/vma.rs"]
 pub mod vma;
 #[path = "memory/frames_libres.rs"]

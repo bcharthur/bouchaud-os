@@ -1166,6 +1166,8 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
     gdt::init_ap(cpu);
     idt::load_ap();
     usermode::init_ap(cpu);
+    // BOUCHAUD_PREUVE_HOTE_V1 : la page du vol est deja allouee par le BSP.
+    crate::kernel::vol_hote::active_ce_coeur(cpu);
     unsafe { enable_local_apic(); }
 
     let bit = 1usize << cpu;

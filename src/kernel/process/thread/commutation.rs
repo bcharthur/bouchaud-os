@@ -171,6 +171,8 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
         "task: cursor CPU encore arme hors CPU tid={}", task.tid);
 
     if task.ready_since_ns != 0 {
+        // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.
+        task.comptes_fil.note_pret(now.saturating_sub(task.ready_since_ns.charge()));
         crate::kernel::scheduler::latency::record_attribue(
             now.saturating_sub(task.ready_since_ns.charge()),
             task.priorite == Priorite::Interactive,

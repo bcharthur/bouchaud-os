@@ -47,6 +47,8 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         entree_tsc,
         smp::SCHED_QUANTUM_TICKS * 1_000_000,
         crate::kernel::timer::cycles_par_ms(),
+        crate::kernel::vol_hote::vole_ns(cpu_mesure),
+        crate::kernel::task::courant_imputable(cpu_mesure),
     );
 
     let mut preempt_now = false;

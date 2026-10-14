@@ -53,6 +53,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
         stack.instruction_pointer.as_u64(),
         interrupted_user,
         crate::kernel::timer::cycles_par_ms(),
+        // BOUCHAUD_PREUVE_HOTE_V1 : le vol prouve de l'hote et la tache
+        // installee. Atomiques et memoire publiee par l'hote : rien qui
+        // suppose une tache.
+        crate::kernel::vol_hote::vole_ns(blackbox_cpu),
+        crate::kernel::task::courant_imputable(blackbox_cpu),
     );
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 2);
 

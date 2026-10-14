@@ -61,12 +61,26 @@
 //
 // Desormais :
 //
-//   * le noyau dit, pour chaque reveil en retard, quelle part vient du temps
-//     qui manquait HORS de l'invite (`/proc/self/reveil`, seconde ligne,
-//     BOUCHAUD_ATTRIBUTION_REVEIL_V2) et liste les reveils CONTAMINES ;
-//   * la sonde apparie chacun a l'un de ses reveils et juge chaque
-//     comparaison deux fois : sur TOUS ses reveils, et sur les seuls reveils
-//     PROPRES. Une ligne `PREUVE` chiffree accompagne chaque comparaison ;
+//   * le noyau range, a l'ENTREE de chaque sommeil de la sonde, son echeance
+//     et les comptes cumules de son fil (`/proc/self/fil`,
+//     BOUCHAUD_PREUVE_HOTE_V1) ; la sonde les relit UNE fois apres la serie.
+//     Deux entrees consecutives encadrent un reveil sur TOUTE sa fenetre
+//     (sommeil, election, retour en ring 3, lecture d'horloge) : combien
+//     l'hote l'a retarde -- PREUVE a l'appui, le temps vole publie par KVM --,
+//     combien d'absences de battement restent inexpliquees, combien le noyau
+//     a masque, combien le fil a attendu pret. (Relire apres chaque reveil
+//     ajoutait trois appels systeme -- trois points de preemption -- entre
+//     l'horloge et le sommeil : la phase normale passait de 4 a 45-76 ms de
+//     p95 sous TCG SMP1, la phase interactive ne bougeait pas. L'instrument
+//     changeait ce qu'il mesurait, dans le sens qui facilite le vert.)
+//   * la sonde juge chaque comparaison deux fois : sur TOUS ses reveils, et
+//     sur les reveils PROPRES. Sous KVM (`preuve_hote=kvm-steal`), un reveil
+//     n'est ecarte que si l'hote PROUVE l'avoir retarde de plus d'une
+//     milliseconde ; un retard inexplique reste compte contre le noyau. Sans
+//     preuve de l'hote (TCG), rien ne peut etre prouve externe : les propres
+//     sont les reveils sans retard inexplique, et un desaccord des deux
+//     jugements ne qualifie rien. Une ligne `PREUVE` chiffree accompagne
+//     chaque comparaison ;
 //   * trois verdicts : QUALIFIE_OK, QUALIFIE_ECHEC (les deux jugements
 //     echouent), NON_QUALIFIANT (raison donnee : les deux jugements
 //     different, une phase est trop contaminee pour etre jugee, la charge ne
@@ -122,13 +136,15 @@ static long long maintenant_us(void)
 // Il durait 2 s, pour une mesure qui en durait alors moins d'une.
 #define CALCUL_SECONDES ((REVEILS * PERIODE_US) / 1000000 + 2)
 
-// Au-dela de 5 % de reveils contamines (15 sur 300), le p95 d'une phase n'est
+// Au-dela de 5 % de reveils ecartes (15 sur 300), le p95 d'une phase n'est
 // plus encadre par des reveils propres : la phase ne peut pas etre jugee.
 #define CONTAMINES_MAX ((REVEILS * 5) / 100)
-// L'echeance du noyau est celle de la sonde arrondie a la milliseconde
-// SUPERIEURE (`nanosleep` compte en millisecondes) : fenetre d'appariement.
-#define APPARIE_AVANT_US 500
-#define APPARIE_APRES_US 2500
+// Une part au-dela d'une milliseconde ecarte (ou signale) un reveil.
+#define SEUIL_NS 1000000LL
+// Les sommeils que le noyau peut ranger (SOMMEILS_ENREGISTRES = 512), et les
+// absences de son journal (JOURNAL_ABSENCES = 256).
+#define SOMMEILS_MAX 512
+#define ABSENCES_MAX 256
 
 // Ce qu'une serie de reveils apprend. Les quantiles hauts comptent plus que la
 // mediane : une interface dont une trame sur vingt arrive en retard se voit,
@@ -141,12 +157,60 @@ struct latence {
     long long pire;
 };
 
-// Une phase : ses reveils, ce que le noyau en dit, et ses quantiles sur TOUS
-// les reveils et sur les seuls reveils PROPRES.
+// Les comptes cumules du fil, tels que `/proc/self/fil` les rend.
+struct compte_fil {
+    int preuve_hote; // 1 : kvm-steal ; 0 : absente
+    long long externe_ns;
+    long long inexplique_ns;
+    long long masque_ns;
+    long long pret_ns;
+    long long incompletes;
+    long long vol_total_ns;
+    long long vol_coeurs;
+    long long a_ns;
+};
+
+// Un sommeil range par le noyau : son echeance et les comptes du fil a son
+// entree.
+struct sommeil_noyau {
+    long long echeance_us;
+    long long entree_us;
+    long long externe_ns;
+    long long inexplique_ns;
+    long long masque_ns;
+    long long pret_ns;
+};
+
+// Une phase : ses reveils, ce que le noyau dit de CHACUN, et ses quantiles
+// sur TOUS les reveils et sur les seuls reveils PROPRES.
 struct phase {
     const char *nom;
     long long attendu[REVEILS];
     long long retard[REVEILS];
+    // BOUCHAUD_PREUVE_HOTE_V1 : les sommeils ranges par le noyau, les comptes
+    // a la fin de la serie, et par reveil la difference des comptes entre
+    // l'entree de son sommeil et celle du suivant (ns).
+    struct sommeil_noyau sommeils[SOMMEILS_MAX];
+    int n_sommeils;
+    long long sommeils_perdus;
+    // Les absences du coeur de la sonde closes pendant qu'elle le tenait :
+    // instant de fin, cause (E prouvee, M masquee, I inexpliquee), part (ns).
+    long long absence_fin_us[ABSENCES_MAX];
+    char absence_cause[ABSENCES_MAX];
+    long long absence_part_ns[ABSENCES_MAX];
+    int n_absences;
+    int absences_incompletes;
+    // Le reveil i a-t-il dormi (un sommeil range lui revient) ?
+    char dormi[REVEILS];
+    struct compte_fil final;
+    // Ecart entre sommeils ranges et reveils dormis (0 attendu).
+    int non_apparies;
+    int sans_sommeil;
+    long long externe[REVEILS];
+    long long inexplique[REVEILS];
+    long long masque[REVEILS];
+    long long pret[REVEILS];
+    // Ecarte : prouve retarde par l'hote (ou, sans preuve, inexplique).
     char contamine[REVEILS];
     struct latence tout;
     struct latence propre;
@@ -154,18 +218,19 @@ struct phase {
     // de la serie. Lu UNE fois, apres la serie : la mesure n'en est pas
     // perturbee.
     char attribution[700];
-    // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de chaque reveil en
-    // retard et la liste des reveils contamines.
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de la serie (resume).
     char ventilation[1800];
     int attribution_presente;
-    long long contamines_noyau;
-    int liste_tronquee;
-    int apparies;
-    int non_apparies;
-    // Annonces hors de la fenetre de la serie : d'autres sommeils du meme
-    // fil (dans un appel systeme avant le premier reveil mesure), qui ne
-    // portent sur aucun echantillon. Comptees, imprimees, jamais appariees.
-    int hors_fenetre;
+    // Les comptes du fil ont ete lus apres chaque reveil.
+    int comptes_presents;
+    int preuve_hote;
+    long long incompletes;
+    // Reveils prouves retardes par l'hote, et retardes sans explication.
+    int prouves;
+    int inexpliques;
+    int ecartes;
+    // Le vol de l'hote sur toute la serie, en pour mille du temps des coeurs.
+    long long vol_pour_mille;
     // Vide si la phase peut etre jugee ; sinon, pourquoi pas.
     char non_jugeable[160];
 };
@@ -231,46 +296,140 @@ static long long champ(const char *ligne, const char *cle)
     return p ? atoll(p + strlen(cle)) : -1;
 }
 
-// Apparie chaque reveil contamine annonce par le noyau a un reveil de la
-// sonde. Un reveil annonce DANS la fenetre de la serie qui ne s'apparie a
-// rien rend la phase non jugeable : la sonde ne saurait pas lequel exclure.
-static void apparie(struct phase *ph)
+// Lit `/proc/self/fil` : les comptes CUMULES du fil, puis, si `ph`, les
+// sommeils que le noyau a ranges depuis l'ouverture precedente. L'ouverture
+// rearme l'enregistreur. Rend 0 si le fichier manque (hors de Bouchaud).
+static char brut_fil[40000];
+
+static int lis_fil(struct compte_fil *c, struct phase *ph)
 {
-    memset(ph->contamine, 0, sizeof ph->contamine);
-    ph->apparies = 0;
-    ph->non_apparies = 0;
-    ph->hors_fenetre = 0;
-    long long fenetre_debut = ph->attendu[0] - PERIODE_US;
-    long long fenetre_fin = ph->attendu[REVEILS - 1] + APPARIE_APRES_US;
-    ph->contamines_noyau = champ(ph->ventilation, "contamines=");
-    ph->liste_tronquee = champ(ph->ventilation, "liste_tronquee=") == 1;
-    const char *l = strstr(ph->ventilation, "liste=");
-    if (!l)
-        return;
-    l += 6;
-    while (*l && *l != ' ' && *l != '-') {
-        long long echeance = atoll(l);
-        int trouve = 0;
-        if (echeance < fenetre_debut || echeance > fenetre_fin) {
-            ph->hors_fenetre++;
-            trouve = 1;
-        }
-        for (int i = 0; !trouve && i < REVEILS; i++) {
-            if (echeance >= ph->attendu[i] - APPARIE_AVANT_US
-                && echeance <= ph->attendu[i] + APPARIE_APRES_US) {
-                if (!ph->contamine[i])
-                    ph->apparies++;
-                ph->contamine[i] = 1;
-                trouve = 1;
-                break;
-            }
-        }
-        if (!trouve)
-            ph->non_apparies++;
-        const char *v = strchr(l, ',');
-        if (!v)
+    int fd = open("/proc/self/fil", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t lus = 0;
+    for (;;) {
+        ssize_t r = read(fd, brut_fil + lus, sizeof brut_fil - 1 - (size_t)lus);
+        if (r <= 0)
             break;
-        l = v + 1;
+        lus += r;
+        if ((size_t)lus >= sizeof brut_fil - 1)
+            break;
+    }
+    close(fd);
+    if (lus <= 0)
+        return 0;
+    brut_fil[lus] = '\0';
+    if (strncmp(brut_fil, "fil ", 4) != 0)
+        return 0;
+    char *seconde = strchr(brut_fil, '\n');
+    if (!seconde)
+        return 0;
+    *seconde++ = '\0';
+    c->preuve_hote = strstr(brut_fil, "preuve_hote=kvm-steal") != NULL;
+    c->externe_ns = champ(brut_fil, "externe_ns=");
+    c->inexplique_ns = champ(brut_fil, "inexplique_ns=");
+    c->masque_ns = champ(brut_fil, "masque_ns=");
+    c->pret_ns = champ(brut_fil, "pret_ns=");
+    c->incompletes = champ(brut_fil, "incompletes=");
+    c->vol_total_ns = champ(brut_fil, "vol_total_ns=");
+    c->vol_coeurs = champ(brut_fil, "vol_coeurs=");
+    c->a_ns = champ(brut_fil, "a_ns=");
+    if (c->externe_ns < 0 || c->inexplique_ns < 0 || c->masque_ns < 0 || c->pret_ns < 0 || c->a_ns <= 0)
+        return 0;
+    if (!ph)
+        return 1;
+    if (strncmp(seconde, "sommeils n=", 11) != 0)
+        return 0;
+    long long annonces = champ(seconde, "n=");
+    ph->sommeils_perdus = champ(seconde, "perdus=");
+    ph->n_sommeils = 0;
+    char *l = strchr(seconde, '\n');
+    while (l && *++l && strncmp(l, "absences ", 9) != 0 && ph->n_sommeils < SOMMEILS_MAX) {
+        struct sommeil_noyau *z = &ph->sommeils[ph->n_sommeils];
+        if (sscanf(l, "%lld %lld %lld %lld %lld %lld", &z->echeance_us, &z->entree_us, &z->externe_ns,
+                   &z->inexplique_ns, &z->masque_ns, &z->pret_ns) != 6)
+            break;
+        ph->n_sommeils++;
+        l = strchr(l, '\n');
+    }
+    // Une liste tronquee (tampon, ou ligne illisible) ne doit pas passer
+    // pour complete.
+    if (ph->n_sommeils != annonces || ph->sommeils_perdus < 0 || !l || strncmp(l, "absences n=", 11) != 0)
+        return 0;
+    long long absences = champ(l, "n=");
+    ph->absences_incompletes = champ(l, "incomplet=") != 0;
+    ph->n_absences = 0;
+    l = strchr(l, '\n');
+    while (l && *++l && ph->n_absences < ABSENCES_MAX) {
+        char cause = 0;
+        if (sscanf(l, "%lld %c %lld", &ph->absence_fin_us[ph->n_absences], &cause,
+                   &ph->absence_part_ns[ph->n_absences]) != 3)
+            break;
+        ph->absence_cause[ph->n_absences++] = cause;
+        l = strchr(l, '\n');
+    }
+    return ph->n_absences == absences;
+}
+
+// Repartit les comptes entre les reveils (pure ; testee sur l'hote). Les
+// sommeils ranges reviennent, DANS L'ORDRE, aux reveils qui ont dormi : la
+// sonde sait lesquels (`dormi`), et compter suffit -- l'echeance du noyau,
+// derivee des tics, n'est pas dans l'horloge de la sonde quand des tics se
+// perdent. L'intervalle d'un reveil va de l'entree de son sommeil a celle du
+// suivant (ou a la fin de la serie) : les cumuls y avancent de ses parts
+// livraison et election, et les absences closes dedans, pendant que la sonde
+// tenait son coeur, s'y ajoutent selon leur cause. Un reveil qui n'a pas
+// dormi (deja en retard) tombe dans l'intervalle du precedent et le partage.
+// Autant de sommeils que de reveils dormis, ou rien n'est reparti.
+static void repartit(struct phase *ph)
+{
+    memset(ph->externe, 0, sizeof ph->externe);
+    memset(ph->inexplique, 0, sizeof ph->inexplique);
+    memset(ph->masque, 0, sizeof ph->masque);
+    memset(ph->pret, 0, sizeof ph->pret);
+    ph->non_apparies = ph->sans_sommeil = 0;
+    int dormis = 0;
+    for (int i = 0; i < REVEILS; i++)
+        dormis += ph->dormi[i] != 0;
+    if (dormis != ph->n_sommeils) {
+        // Sommeils en trop ou en moins : on ne sait pas lequel revient a qui.
+        ph->non_apparies = ph->n_sommeils > dormis ? ph->n_sommeils - dormis : dormis - ph->n_sommeils;
+        return;
+    }
+    int k = -1;
+    for (int i = 0; i < REVEILS; i++) {
+        if (ph->dormi[i])
+            k++;
+        else
+            ph->sans_sommeil++;
+        if (k < 0)
+            continue;
+        const struct sommeil_noyau *a = &ph->sommeils[k];
+        long long be, bi, bm, bp, fin_us;
+        if (k + 1 < ph->n_sommeils) {
+            const struct sommeil_noyau *b = &ph->sommeils[k + 1];
+            be = b->externe_ns; bi = b->inexplique_ns; bm = b->masque_ns; bp = b->pret_ns;
+            fin_us = b->entree_us;
+        } else {
+            be = ph->final.externe_ns; bi = ph->final.inexplique_ns;
+            bm = ph->final.masque_ns; bp = ph->final.pret_ns;
+            fin_us = ph->final.a_ns / 1000;
+        }
+        ph->externe[i] = be - a->externe_ns;
+        ph->inexplique[i] = bi - a->inexplique_ns;
+        ph->masque[i] = bm - a->masque_ns;
+        ph->pret[i] = bp - a->pret_ns;
+        for (int z = 0; z < ph->n_absences; z++) {
+            if (ph->absence_fin_us[z] < a->entree_us || ph->absence_fin_us[z] >= fin_us)
+                continue;
+            long long part = ph->absence_part_ns[z];
+            if (ph->absence_cause[z] == 'E')
+                ph->externe[i] += part;
+            else if (ph->absence_cause[z] == 'M')
+                ph->masque[i] += part;
+            else
+                ph->inexplique[i] += part;
+        }
     }
 }
 
@@ -302,8 +461,13 @@ static void finalise_phase(struct phase *ph);
 // ne l'est pas.
 static void mesure_interface(struct phase *ph)
 {
-    // Remise a zero : seuls les reveils de cette serie compteront.
+    // Remise a zero : seuls les reveils de cette serie compteront. La
+    // lecture de `/proc/self/fil` arme l'enregistreur des sommeils.
     releve_attribution(ph);
+    struct compte_fil depart;
+    memset(&depart, 0, sizeof depart);
+    memset(&ph->final, 0, sizeof ph->final);
+    int comptes = lis_fil(&depart, NULL);
     long long attendu = maintenant_us();
 
     for (int i = 0; i < REVEILS; i++) {
@@ -311,6 +475,7 @@ static void mesure_interface(struct phase *ph)
         ph->attendu[i] = attendu;
         long long avant = maintenant_us();
         long long reste = attendu - avant;
+        ph->dormi[i] = reste > 0;
         if (reste > 0) {
             struct timespec duree = {
                 .tv_sec = reste / 1000000,
@@ -321,16 +486,43 @@ static void mesure_interface(struct phase *ph)
         long long reel = maintenant_us();
         ph->retard[i] = reel > attendu ? reel - attendu : 0;
     }
+    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes de fin et les sommeils ranges,
+    // lus APRES la serie : rien ne s'est ajoute entre deux reveils.
+    comptes = comptes && lis_fil(&ph->final, ph) && ph->n_sommeils > 0;
+    ph->comptes_presents = comptes;
+    ph->preuve_hote = comptes ? depart.preuve_hote : 0;
+    ph->incompletes = comptes ? ph->final.incompletes - depart.incompletes : 0;
+    ph->vol_pour_mille = 0;
+    if (comptes && ph->final.vol_coeurs > 0 && ph->final.a_ns > depart.a_ns)
+        ph->vol_pour_mille = (ph->final.vol_total_ns - depart.vol_total_ns) * 1000
+                             / ((ph->final.a_ns - depart.a_ns) * ph->final.vol_coeurs);
+    if (comptes)
+        repartit(ph);
     ph->attribution_presente = releve_attribution(ph) && ph->ventilation[0];
     finalise_phase(ph);
 }
 
-// Ce qu'une serie de reveils mesuree permet de juger : appariement des
-// reveils contamines, quantiles sur tous et sur les propres, et si la phase
-// peut etre jugee. Pure (testee sur l'hote : test_ordonnanceur_verdict.cpp).
+// Ce qu'une serie de reveils mesuree permet de juger : les reveils a
+// ecarter, les quantiles sur tous et sur les propres, et si la phase peut
+// etre jugee. Pure (testee sur l'hote : test_ordonnanceur_verdict.cpp).
 static void finalise_phase(struct phase *ph)
 {
-    apparie(ph);
+    // BOUCHAUD_PREUVE_HOTE_V1 : quels reveils ecarter.
+    //   * preuve de l'hote (KVM) : ceux que l'hote a PROUVE retarder de plus
+    //     d'une milliseconde. Un retard inexplique reste compte : le noyau
+    //     n'est jamais excuse sans preuve ;
+    //   * aucune preuve (TCG) : rien n'est prouve externe ; on ecarte les
+    //     reveils retardes sans explication, et un desaccord des deux
+    //     jugements rend NON_QUALIFIANT -- jamais OK, jamais un echec impute.
+    ph->prouves = ph->inexpliques = ph->ecartes = 0;
+    for (int i = 0; i < REVEILS; i++) {
+        int prouve = ph->comptes_presents && ph->externe[i] > SEUIL_NS;
+        int inexplique = ph->comptes_presents && !prouve && ph->inexplique[i] > SEUIL_NS;
+        ph->prouves += prouve;
+        ph->inexpliques += inexplique;
+        ph->contamine[i] = (char)(prouve || (!ph->preuve_hote && inexplique));
+        ph->ecartes += ph->contamine[i];
+    }
 
     quantiles(ph->retard, REVEILS, &ph->tout);
     long long propres[REVEILS];
@@ -344,19 +536,22 @@ static void finalise_phase(struct phase *ph)
     if (!ph->attribution_presente)
         snprintf(ph->non_jugeable, sizeof ph->non_jugeable,
                  "%s : attribution du noyau absente (/proc/self/reveil)", ph->nom);
-    else if (ph->liste_tronquee)
+    else if (!ph->comptes_presents)
         snprintf(ph->non_jugeable, sizeof ph->non_jugeable,
-                 "%s : %lld reveils contamines annonces, liste tronquee", ph->nom,
-                 ph->contamines_noyau);
-    else if (ph->apparies > CONTAMINES_MAX)
+                 "%s : comptes du fil absents (/proc/self/fil)", ph->nom);
+    else if (ph->sommeils_perdus > 0 || ph->non_apparies > 0 || ph->absences_incompletes)
         snprintf(ph->non_jugeable, sizeof ph->non_jugeable,
-                 "%s : %d reveils contamines sur %d (plus de %d)", ph->nom,
-                 ph->apparies, REVEILS, CONTAMINES_MAX);
-    else if (ph->non_apparies > 0)
+                 "%s : comptes du noyau inexploitables (%lld sommeils perdus, ecart de %d sommeils, journal %s)",
+                 ph->nom, ph->sommeils_perdus, ph->non_apparies,
+                 ph->absences_incompletes ? "incomplet" : "complet");
+    else if (ph->prouves > CONTAMINES_MAX)
         snprintf(ph->non_jugeable, sizeof ph->non_jugeable,
-                 "%s : %d reveil(s) contamine(s) dans la serie non apparie(s)"
-                 " (%d apparies, %lld annonces)",
-                 ph->nom, ph->non_apparies, ph->apparies, ph->contamines_noyau);
+                 "%s : %d reveils retardes par l'hote, preuve kvm-steal, sur %d (plus de %d)",
+                 ph->nom, ph->prouves, REVEILS, CONTAMINES_MAX);
+    else if (ph->ecartes > CONTAMINES_MAX)
+        snprintf(ph->non_jugeable, sizeof ph->non_jugeable,
+                 "%s : %d reveils retardes sans explication sur %d (plus de %d), aucune preuve de l'hote",
+                 ph->nom, ph->ecartes, REVEILS, CONTAMINES_MAX);
 }
 
 static void imprime(const struct phase *ph)
@@ -364,9 +559,27 @@ static void imprime(const struct phase *ph)
     printf("  %-24s median %5lld us  p95 %6lld us  p99 %6lld us  pire %6lld us\n",
            ph->nom, ph->tout.median, ph->tout.p95, ph->tout.p99, ph->tout.pire);
     printf("  %-24s median %5lld us  p95 %6lld us  p99 %6lld us  pire %6lld us"
-           "  [propres %d/%d, hors_fenetre=%d]\n",
+           "  [propres %d/%d, regle=%s]\n",
            ph->nom, ph->propre.median, ph->propre.p95, ph->propre.p99, ph->propre.pire,
-           ph->propre.n, REVEILS, ph->hors_fenetre);
+           ph->propre.n, REVEILS, ph->preuve_hote ? "preuve-hote" : "sans-preuve");
+    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes de la serie, sommes sur ses
+    // reveils (us), et le vol de l'hote sur tous les coeurs.
+    long long ext = 0, inx = 0, msq = 0, prt = 0, pire_inx = 0;
+    for (int i = 0; i < REVEILS; i++) {
+        ext += ph->externe[i];
+        inx += ph->inexplique[i];
+        msq += ph->masque[i];
+        prt += ph->pret[i];
+        if (ph->inexplique[i] > pire_inx)
+            pire_inx = ph->inexplique[i];
+    }
+    printf("  comptes %s : preuve_hote=%s prouves=%d inexpliques=%d ecartes=%d externe_us=%lld"
+           " inexplique_us=%lld inexplique_pire_us=%lld masque_us=%lld pret_us=%lld incompletes=%lld"
+           " vol_hote_pour_mille=%lld sommeils=%d sans_sommeil=%d absences=%d\n",
+           ph->nom, ph->comptes_presents ? (ph->preuve_hote ? "kvm-steal" : "absente") : "?",
+           ph->prouves, ph->inexpliques, ph->ecartes, ext / 1000, inx / 1000, pire_inx / 1000,
+           msq / 1000, prt / 1000, ph->incompletes, ph->vol_pour_mille, ph->n_sommeils,
+           ph->sans_sommeil, ph->n_absences);
     if (ph->attribution[0])
         printf("  attribution %s : %s\n", ph->nom, ph->attribution);
     if (ph->ventilation[0])
@@ -546,9 +759,10 @@ static enum verdict evalue(const struct phase *repos_, const struct phase *norma
 {
     const struct phase *repos = repos_, *normale = normale_, *prio = prio_;
     memset(b, 0, sizeof *b);
-    char contamines[96], raison[200], t[200], p[200];
-    snprintf(contamines, sizeof contamines, "repos=%d normal=%d interactif=%d sur %d",
-             repos->apparies, normale->apparies, prio->apparies, REVEILS);
+    char contamines[128], raison[200], t[200], p[200];
+    snprintf(contamines, sizeof contamines, "ecartes repos=%d normal=%d interactif=%d sur %d (%s)",
+             repos->ecartes, normale->ecartes, prio->ecartes, REVEILS,
+             repos->preuve_hote ? "preuve-hote" : "sans-preuve");
 
     // 0. La porte. Le test n'a de sens que si la charge degrade reellement la
     // latence, au-dela de ce que l'horloge sait distinguer. Sans cela,

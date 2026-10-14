@@ -137,6 +137,8 @@ pub struct Task {
     /// retard, et la liste de ceux que le temps manquant hors de l'invite a
     /// contamines.
     pub ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation,
+    /// BOUCHAUD_PREUVE_HOTE_V1 : comptes cumules du fil (`/proc/self/fil`).
+    pub comptes_fil: crate::kernel::attribution_reveil::ComptesFil,
     entree_noyau: Option<fn() -> !>,
 }
 
