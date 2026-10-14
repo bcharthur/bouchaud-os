@@ -268,6 +268,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             tampon_v: tamp_v as usize,
             prochain_dispo: 0,
             dernier_util: 0,
+            cassee: false,
         };
         let _ = (desc_p, dispo_p, util_p);
 
@@ -363,6 +364,14 @@ struct FileControle {
     prochain_dispo: u16,
     /// Dernier indice de l'anneau utilise deja consomme.
     dernier_util: u16,
+    /// Une commande est restee sans reponse : la file n'est plus utilisable.
+    ///
+    /// Le peripherique peut encore lire la requete ou ecrire la reponse de
+    /// cette commande-la. Reutiliser les descripteurs 0 et 1 et le tampon
+    /// melerait sa reponse tardive a la commande suivante, dont l'attente
+    /// (`dernier_util + 1`) serait d'ailleurs deja satisfaite. On ne
+    /// renvoie donc plus rien sur cette file.
+    cassee: bool,
 }
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
@@ -373,6 +382,9 @@ impl FileControle {
     /// Envoie une requete et attend sa reponse (scrute, borne a 1 s). Rend le
     /// genre de la reponse (`RESP_OK_*` ou `RESP_ERR_*`).
     unsafe fn commande(&mut self, requete: &[u8], longueur_reponse: usize) -> Result<u32, &'static str> {
+        if self.cassee {
+            return Err("file-sans-reponse");
+        }
         if requete.len() > REQUETE_MAX || longueur_reponse > PAGE - REPONSE {
             return Err("commande-trop-longue");
         }
@@ -402,6 +414,7 @@ impl FileControle {
         let util = self.util as *const u16;
         let attendu = self.dernier_util.wrapping_add(1);
         if !crate::kernel::timer::attente_bornee(1000, || read_volatile(util.add(1)) == attendu) {
+            self.cassee = true;
             return Err("commande-sans-reponse");
         }
         fence(Ordering::SeqCst);
@@ -654,17 +667,28 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
         return None;
     };
     let tout = Rect { x: 0, y: 0, largeur: l, hauteur: h };
+    // La memoire n'est rendue que si le peripherique ne peut plus y ecrire :
+    // jamais attachee, ou detachee par un `RESOURCE_UNREF` accepte.
+    let mut attachee = false;
     let etapes = unsafe {
         exige("bureau-creation", cree_2d(&mut p.file, RESSOURCE_BUREAU, FORMAT_B8G8R8X8, l, h), RESP_OK_NODATA)
             .and_then(|_| exige("bureau-attache", attache(&mut p.file, RESSOURCE_BUREAU, phys, octets as u32), RESP_OK_NODATA))
-            .and_then(|_| exige("bureau-scanout", scanout(&mut p.file, 0, RESSOURCE_BUREAU, tout), RESP_OK_NODATA))
+            .and_then(|_| {
+                attachee = true;
+                exige("bureau-scanout", scanout(&mut p.file, 0, RESSOURCE_BUREAU, tout), RESP_OK_NODATA)
+            })
     };
     if let Err(e) = etapes {
         crate::serial_println!("VIRTIO_GPU_SCANOUT refuse raison={}", e);
-        unsafe {
-            let _ = libere(&mut p.file, RESSOURCE_BUREAU);
+        let liberee = unsafe { libere(&mut p.file, RESSOURCE_BUREAU) } == Ok(RESP_OK_NODATA);
+        if !attachee || liberee {
+            memory::free_dma(phys, octets);
+        } else {
+            crate::serial_println!(
+                "VIRTIO_GPU_SCANOUT memoire_conservee octets={} (attachee, non detachee : le peripherique peut encore y ecrire)",
+                octets
+            );
         }
-        memory::free_dma(phys, octets);
         return None;
     }
     p.scanout = Some(ScanoutBureau { largeur: l, hauteur: h, physique: phys, octets });
@@ -711,9 +735,14 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
     } else {
         PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);
         let n = ECHECS_CONSECUTIFS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= ECHECS_AVANT_ABANDON {
+        // Une commande sans reponse casse la file : inutile d'attendre encore
+        // sept fois une seconde, verrou tenu, pour le constater.
+        if p.file.cassee {
             ACTIF.store(false, Ordering::Release);
-            crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON echecs_consecutifs={}", n);
+            crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse echecs_consecutifs={}", n);
+        } else if n >= ECHECS_AVANT_ABANDON {
+            ACTIF.store(false, Ordering::Release);
+            crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=refus echecs_consecutifs={}", n);
         }
     }
     NS_PRESENT.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(debut), Ordering::Relaxed);
