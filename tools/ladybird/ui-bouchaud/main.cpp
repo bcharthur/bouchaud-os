@@ -22,13 +22,58 @@
 #include <LibWebView/Settings.h>
 #include <UI/Bouchaud/Application.h>
 
+#include <cerrno>
+#include <signal.h>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
+
+// BOUCHAUD_HOTE_ATTEND_SES_SERVICES_V1
+//
+// Fermer les services ne suffit pas : chacun recoit son EOF et sort A SON
+// RYTHME. L'hote est la racine de la session ; s'il sort avant eux, le noyau
+// emporte les retardataires (SESSION_EMPORTE). Second passage de 585fc0a0
+// (robustesse, cycle des workers, 8/9) : le Compositor avait annonce
+// COMPOSITOR_EXIT a 31,414 s, la fin de session l'a tue a 31,417 s -- une
+// sortie propre perdue de trois millisecondes.
+//
+// L'hote attend donc, BORNE, que ses fils sortent, et dit combien il en a
+// recoltes et s'il en reste. Un service qui ne sort pas dans la borne est
+// nomme par le banc, comme avant : rien n'est masque.
+void attend_les_services()
+{
+    constexpr int borne_ms = 3000;
+    constexpr int pas_ms = 10;
+    // La boucle d'evenements n'existe plus : SIGCHLD reprend son action par
+    // defaut (les fils restent recoltables par waitpid).
+    signal(SIGCHLD, SIG_DFL);
+    int recoltes = 0;
+    int attente_ms = 0;
+    bool restants = true;
+    while (attente_ms < borne_ms) {
+        int statut = 0;
+        pid_t fils = waitpid(-1, &statut, WNOHANG);
+        if (fils > 0) {
+            ++recoltes;
+            continue;
+        }
+        if (fils < 0 && errno == EINTR)
+            continue;
+        if (fils < 0) {
+            restants = false; // ECHILD : plus aucun fils
+            break;
+        }
+        usleep(pas_ms * 1000);
+        attente_ms += pas_ms;
+    }
+    warnln("[ladybird-bouchaud] BROWSER_HOST_ARRET fils_recoltes={} attente_ms={} fils_restants={}",
+        recoltes, attente_ms, restants ? "oui"sv : "non"sv);
+}
 
 int env_dimension(char const* name, int fallback)
 {
@@ -243,5 +288,6 @@ ErrorOr<int> ladybird_main(Main::Arguments)
         warnln("[ladybird-bouchaud] BROWSER_HOST_EXIT boucle_quittee code={}", code);
     }
     warnln("[ladybird-bouchaud] BROWSER_HOST_ARRET services fermes");
+    attend_les_services();
     return code;
 }
