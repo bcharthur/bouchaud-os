@@ -154,5 +154,13 @@ class Ab(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class FinDuScenario(unittest.TestCase):
+    def test_la_trace_de_l_echo_ne_vaut_pas_fin(self):
+        texte = scenario(6, lambda t, v: ("QUALIFIE_OK", 2000, 4000) if v == "defaut" else ("QUALIFIE_OK", 1400, 3500))
+        texte = texte.replace("\nAB_REVEIL_FIN", "\n+ echo AB_REVEIL_FIN")
+        _, verdict, code = analyse_ab.analyse(texte, 6, "4", "kvm")
+        self.assertEqual((verdict, code), ("ECHEC", 1))
+
+
 if __name__ == "__main__":
     unittest.main()

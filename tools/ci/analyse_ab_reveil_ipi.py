@@ -94,7 +94,9 @@ def analyse(texte, tours, smp, nom):
         fautes.append("surete : la variante n'a jamais envoye d'IPI (pas exercee)")
     if re.search(r"KERNEL PANIC|panicked at", texte):
         fautes.append("surete : panique")
-    if "AB_REVEIL_FIN" not in texte:
+    # La SORTIE de `echo AB_REVEIL_FIN`, pas sa trace (`+ echo AB_REVEIL_FIN`) :
+    # la trace s'imprime avant l'execution et ne prouve rien.
+    if not any(l.strip() == "AB_REVEIL_FIN" for l in lignes):
         fautes.append("le scenario n'est pas alle au bout")
     if len(bras) != 2 * tours:
         fautes.append(f"{len(bras)} passes sur {2 * tours}")
