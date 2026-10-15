@@ -911,3 +911,88 @@ fn la_bascule_revient_au_defaut() {
     choisit_variante(Variante::Defaut);
     assert_eq!(variante(), Variante::Defaut);
 }
+
+// ===========================================================================
+// BOUCHAUD_CESSION_PAR_CLASSE_V1 : la courante au quantum
+// ===========================================================================
+
+use reveil::{cession, Cession};
+
+#[test]
+fn une_interactive_sous_budget_garde_son_coeur_face_a_des_normales() {
+    assert_eq!(cession(Classe::Interactive, 50_000, 0, 2), Cession::Garde);
+}
+
+#[test]
+fn une_interactive_cede_a_une_interactive_en_attente() {
+    // Le tourniquet de sa classe : la regle ne protege que contre une classe
+    // qui passe APRES.
+    assert_eq!(cession(Classe::Interactive, 50_000, 1, 2), Cession::Cede);
+    assert_eq!(cession(Classe::Interactive, 50_000, 1, 0), Cession::Cede);
+}
+
+#[test]
+fn une_interactive_qui_calcule_redevient_preemptible() {
+    // Anti-famine : au-dela du budget d'activation, la normale passe.
+    assert_eq!(cession(Classe::Interactive, BUDGET_ACTIVATION_NS, 0, 1), Cession::Cede);
+    assert_eq!(cession(Classe::Interactive, BUDGET_ACTIVATION_NS - 1, 0, 1), Cession::Garde);
+}
+
+#[test]
+fn une_normale_cede_toujours_quand_quelqu_un_attend() {
+    assert_eq!(cession(Classe::Normale, 0, 0, 1), Cession::Cede);
+    assert_eq!(cession(Classe::Normale, 0, 1, 0), Cession::Cede);
+}
+
+#[test]
+fn rien_a_ceder_quand_personne_n_attend() {
+    assert_eq!(cession(Classe::Interactive, 0, 0, 0), Cession::RienEnAttente);
+    assert_eq!(cession(Classe::Normale, u64::MAX, 0, 0), Cession::RienEnAttente);
+}
+
+/// Rejoue un coeur : une interactive periodique (reveil toutes les
+/// `periode_ns`, `travail_ns` de calcul avant d'ecrire son horodatage) et un
+/// calcul normal permanent, un quantum de 4 ms a phase fixe. Rend le pire
+/// retard entre l'election de l'interactive et son horodatage.
+fn pire_apres_election(par_classe: bool) -> u64 {
+    const QUANTUM: u64 = 4_000_000;
+    let (periode, travail) = (16_000_000u64, 30_000u64);
+    let mut pire = 0;
+    // Toutes les phases du reveil par rapport au quantum, au pas de 10 us.
+    let mut decalage = 0;
+    while decalage < QUANTUM {
+        let elu = periode + decalage; // l'interactive est elue ici
+        let prochain_quantum = (elu / QUANTUM + 1) * QUANTUM;
+        let fin = elu + travail;
+        let horodatage = if prochain_quantum < fin {
+            // Le quantum tombe pendant son travail : sous budget, seules des
+            // normales attendent.
+            match (par_classe, cession(Classe::Interactive, prochain_quantum - elu, 0, 1)) {
+                (true, Cession::Garde) => fin,
+                // Historique : elle cede au calcul et n'est reelue qu'au
+                // quantum suivant.
+                _ => prochain_quantum + QUANTUM + (fin - prochain_quantum),
+            }
+        } else {
+            fin
+        };
+        pire = pire.max(horodatage - elu);
+        decalage += 10_000;
+    }
+    pire
+}
+
+#[test]
+fn le_quantum_ne_coupe_plus_une_interactive_pour_un_calcul_normal() {
+    let historique = pire_apres_election(false);
+    let par_classe = pire_apres_election(true);
+    // Historique : un quantum entier perdu au pire (4 ms + le travail).
+    assert!(historique >= 4_000_000, "historique {historique}");
+    // Par classe : le travail seul.
+    assert_eq!(par_classe, 30_000);
+}
+
+#[test]
+fn la_cession_par_classe_est_la_politique_par_defaut() {
+    assert!(reveil::cession_par_classe());
+}

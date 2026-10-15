@@ -180,22 +180,6 @@ jobs:
               tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 $smp || r=1
           done
           exit $r
-      - name: Ordonnanceur -- A/B de la variante experimentale d'IPI au reveil, KVM SMP4 puis SMP8 (mesure ; politique par defaut inchangee)
-        # BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante est
-        # DESACTIVEE par defaut ; `ordo-variante` la bascule le temps d'une
-        # passe. BOUCHAUD_AB_REVEIL_IPI_V2 : six tours par topologie, ordre
-        # AB aux tours impairs et BA aux pairs, une tentative par passe ;
-        # seules les passes QUALIFIEES comptent, par tours apparies, quorum 4
-        # -- sinon NON_CONCLUANT. Criteres declares dans le banc (latence,
-        # debit, equite, surete, robustesse). Le pas echoue sur un defaut
-        # d'instrument ou de surete ; CONVAINCANT / NON_CONVAINCANT /
-        # NON_CONCLUANT est une mesure.
-        if: ${{ !cancelled() }}
-        run: |
-          r=0
-          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4 || r=1
-          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp8 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 8 || r=1
-          exit $r
       - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
         if: ${{ !cancelled() }}
         # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
@@ -258,8 +242,73 @@ jobs:
             virtio-dma-panne*/serie.log
             virtio-reponse-etrangere*/serie.log
             ordonnanceur-attribution-*/serie.log
-            ab-reveil-ipi-*/serie.log
             banc-presentation-*/serie-*.log
             banc-irq-gpu-*/serie.log
             virtio-irq-pannes*/serie.log
+          if-no-files-found: warn
+
+  # Les A/B d'ordonnancement, en parallele des sondes : chacun est un
+  # demarrage KVM de plusieurs minutes, et le job des sondes approchait sa
+  # borne de 95 minutes (pas P10+.1 sous TCG).
+  ordonnanceur-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: primitives-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Ordonnanceur -- A/B de la variante experimentale d'IPI au reveil, KVM SMP4 puis SMP8 (mesure ; politique par defaut inchangee)
+        # BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante est
+        # DESACTIVEE par defaut ; `ordo-variante` la bascule le temps d'une
+        # passe. BOUCHAUD_AB_REVEIL_IPI_V2 : six tours par topologie, ordre
+        # AB aux tours impairs et BA aux pairs, une tentative par passe ;
+        # seules les passes QUALIFIEES comptent, par tours apparies, quorum 4
+        # -- sinon NON_CONCLUANT. Criteres declares dans le banc (latence,
+        # debit, equite, surete, robustesse). Le pas echoue sur un defaut
+        # d'instrument ou de surete ; CONVAINCANT / NON_CONVAINCANT /
+        # NON_CONCLUANT est une mesure.
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4 || r=1
+          AB_SORTIE=$PWD/ab-reveil-ipi-kvm-smp8 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 8 || r=1
+          exit $r
+      - name: Ordonnanceur -- A/B cession au quantum par classe contre historique, KVM SMP4 (mesure ; politique par defaut classe)
+        # BOUCHAUD_CESSION_PAR_CLASSE_V1 : `pick_next` ne regardait pas la
+        # tache courante ; au quantum et aux points surs, une interactive sous
+        # budget cedait son coeur a un calcul normal (endurance f23a1247 SMP4,
+        # cycle 11). Six tours AB/BA, une passe par bras ; seules les passes
+        # QUALIFIEES comptent, par tours apparies, quorum 4. Criteres declares
+        # dans analyse_ab_cession.py (latence, debit, equite, robustesse). Le
+        # pas echoue sur un defaut (cession gardee sous historique, inversion
+        # sous classe, bascule non relevee, preuve de l'hote absente, panique).
+        if: ${{ !cancelled() }}
+        run: |
+          AB_SORTIE=$PWD/ab-cession-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_cession.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-primitives-ordonnanceur-ab
+          path: |
+            ab-reveil-ipi-*/serie.log
+            ab-cession-*/serie.log
           if-no-files-found: warn

@@ -373,3 +373,68 @@ pub fn decide_selon(cible: &Coeur, reveille: &Reveille, variante: Variante) -> D
 pub fn pression_de_secours(attente_interactive: usize, attente_normale: usize) -> usize {
     attente_interactive.saturating_add(attente_normale)
 }
+
+// ===========================================================================
+// BOUCHAUD_CESSION_PAR_CLASSE_V1 : qui cede son coeur au quantum, et a qui.
+//
+// `pick_next` tire la tete de la file locale -- interactive d'abord -- sans
+// regarder la tache COURANTE, qui n'est pas en file. Au quantum
+// (`preempt_from_irq`) comme a un point sur (`preempt::safe_point`), une
+// interactive qui venait d'etre elue cedait donc son coeur au premier calcul
+// NORMAL en attente, et n'etait reelue qu'au quantum suivant de ce coeur :
+// jusqu'a 4 ms perdues par une tache de la classe qui passe en premier, au
+// hasard de la phase du quantum.
+//
+// Endurance f23a1247, SMP4, cycle 11 : QUALIFIE_ECHEC de la sonde
+// d'ordonnancement, « la priorite interactive raccourcit la queue » -- pire
+// interactif 5 954 us, dont le noyau n'explique que 2 422 (echeance -> retour
+// en ring 3) : 3,5 ms tombent APRES le retour, la ou un quantum peut couper la
+// sonde pour un calcul normal. Meme verification rouge sur 1413289b et
+// 7ffedd2b (`P_LOTS_REGISTER`, ligne ordonnanceur-probe).
+//
+// La regle : une interactive SOUS SON BUDGET D'ACTIVATION garde son coeur
+// tant que seules des normales attendent. Elle cede a une interactive en
+// attente (tourniquet de sa classe), et des qu'elle a consomme son budget --
+// la meme borne que le privilege de reveil (`BUDGET_ACTIVATION_NS`) : une
+// interactive qui calcule redevient preemptible, la normale n'est jamais
+// affamee au-dela d'un budget par activation.
+
+/// Ce que la tache courante fait de son coeur au quantum ou a un point sur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cession {
+    /// Personne n'attend sur ce coeur.
+    RienEnAttente,
+    /// Elle cede : une tache de sa classe (ou d'une classe qui passe avant)
+    /// attend, ou son activation a depasse le budget.
+    Cede,
+    /// Elle garde le coeur : interactive sous budget, seules des normales
+    /// attendent.
+    Garde,
+}
+
+/// La regle, pure. `consomme_ns` : le temps processeur de l'activation en
+/// cours (depuis la derniere publication de la tache).
+pub fn cession(courante: Classe, consomme_ns: u64, attente_interactive: usize, attente_normale: usize) -> Cession {
+    if attente_interactive == 0 && attente_normale == 0 {
+        return Cession::RienEnAttente;
+    }
+    if courante == Classe::Interactive && attente_interactive == 0 && consomme_ns < BUDGET_ACTIVATION_NS {
+        return Cession::Garde;
+    }
+    Cession::Cede
+}
+
+/// La politique de cession en vigueur : `true` (par defaut) applique la
+/// regle, `false` rend le comportement historique (la courante cede a toute
+/// tache en attente) -- pour l'A/B seulement (`ordo-cession`).
+static CESSION_PAR_CLASSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+#[inline]
+pub fn cession_par_classe() -> bool {
+    CESSION_PAR_CLASSE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bascule la politique de cession (commande `ordo-cession`, bancs A/B).
+pub fn choisit_cession_par_classe(oui: bool) {
+    CESSION_PAR_CLASSE.store(oui, core::sync::atomic::Ordering::Relaxed);
+}

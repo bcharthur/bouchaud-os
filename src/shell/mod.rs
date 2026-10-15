@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "gpu-irq", "reveil-precis", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -755,6 +755,26 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+fn ordo_cession(argc: usize, argv: &[&str; 12]) -> i32 {
+    use crate::kernel::scheduler::reveil::{cession_par_classe, choisit_cession_par_classe};
+    if argc >= 2 {
+        match argv[1] {
+            "classe" => choisit_cession_par_classe(true),
+            "historique" => choisit_cession_par_classe(false),
+            autre => {
+                crate::println!("ordo-cession : {} inconnu (classe | historique)", autre);
+                return 1;
+            }
+        }
+    }
+    let (gardees, inversees) = crate::kernel::task::compteurs_cession();
+    crate::serial_println!(
+        "ORDO_CESSION politique={} gardees={} inversees={}",
+        if cession_par_classe() { "classe" } else { "historique" }, gardees, inversees
+    );
+    0
+}
+
 fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
     let mut grace_ms = 0;
@@ -870,6 +890,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),
+        // BOUCHAUD_CESSION_PAR_CLASSE_V1 : la cession au quantum par classe
+        // (defaut) ou historique, pour l'A/B ; sans argument, les compteurs.
+        "ordo-cession" => ordo_cession(argc, &argv),
         "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }

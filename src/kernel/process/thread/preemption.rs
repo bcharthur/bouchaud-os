@@ -84,6 +84,12 @@ pub fn preempt_from_irq() {
         termine_transition_ordonnanceur();
         return;
     }
+    // BOUCHAUD_CESSION_PAR_CLASSE_V1 : une interactive sous budget ne cede
+    // pas son coeur a un calcul normal (`scheduler::reveil::cession`).
+    if courante_garde_le_coeur(cur, cpu_id) {
+        termine_transition_ordonnanceur();
+        return;
+    }
 
     let Some(next) = pick_next(cur, cpu_id) else {
         termine_transition_ordonnanceur();
