@@ -37,7 +37,7 @@ mkdir -p "$SORTIE/scenario"
 # BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : SCANOUT_TAMPON=direct fait
 # composer le bureau directement dans la memoire du scanout (sans effet sous
 # BGA) ; les memes pixels sont exiges, et zero octet copie.
-TAMPON=${SCANOUT_TAMPON:-copie}
+TAMPON=${SCANOUT_TAMPON:-direct}
 # BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : SCANOUT_TRAME=on fait soumettre
 # chaque trame du bureau d'un bloc ; les memes pixels sont exiges.
 TRAME=${SCANOUT_TRAME:-off}

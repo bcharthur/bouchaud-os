@@ -8,8 +8,9 @@ Un demarrage (`-vga none -device virtio-gpu-pci`), TOURS tours ; chaque tour
 passe `banc-present tache` sous `gpu-tampon copie` et `gpu-tampon direct`,
 ordre AB aux tours impairs, BA aux pairs.
 
-CRITERES DECLARES AVANT LA MESURE KVM (la politique par defaut -- copie -- ne
-change qu'avec un A/B KVM CONVAINCANT) :
+CRITERES DECLARES AVANT LA MESURE KVM (la politique par defaut est passee a la
+composition directe sur l'A/B KVM CONVAINCANT de 77e0e5de, run 38704459647 ; un
+A/B KVM NON_CONVAINCANT la rend a la copie) :
 
   surete     chaque banc : 640 presentations acceptees, aucun echec, scanout
              actif a la fin ; sous `direct` : zero octet copie dans chaque
@@ -110,7 +111,7 @@ def analyse(texte, tours, nom):
     for txt, ok in criteres:
         sortie.append(f"  {'ok     ' if ok else 'ECHOUE '} {txt}")
     verdict = "CONVAINCANT" if all(ok for _, ok in criteres) else "NON_CONVAINCANT"
-    sortie.append(f"BANC_TAMPON : {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut inchangee : copie)")
+    sortie.append(f"BANC_TAMPON : {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut : direct depuis 77e0e5de ; un KVM NON_CONVAINCANT la rend a la copie)")
     return sortie, verdict, 0
 
 

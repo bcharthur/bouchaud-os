@@ -7,7 +7,8 @@
 # Un demarrage `-vga none -device virtio-gpu-pci`, TOURS tours (6 par defaut)
 # de `banc-present tache` sous `gpu-tampon copie` et `gpu-tampon direct`,
 # ordre AB aux tours impairs, BA aux pairs (chaque banc refait `enter()`, qui
-# prend la politique). Le demarrage finit sous `copie`.
+# prend la politique). Le demarrage finit sous `direct` (la politique par
+# defaut depuis l'A/B KVM CONVAINCANT de 77e0e5de).
 #
 # Criteres declares dans tools/ci/analyse_banc_tampon.py. ECHEC sur un defaut
 # de surete (copie en direct, acces pendant un transfert, presentation en
@@ -39,7 +40,7 @@ mkdir -p "$SORTIE/scenario"
       echo "gpu-tampon"
     done
   done
-  echo "gpu-tampon copie"
+  echo "gpu-tampon direct"
   echo "echo AB_TAMPON_FIN"
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/banc.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)

@@ -5,8 +5,9 @@ peut la lire, et chaque copie d'une trame est comptee
 
 Regles :
 
-  1. la composition directe est DESACTIVEE par defaut :
-     `TAMPON_DIRECT_VOULU` est un `AtomicBool::new(false)`, ecrit seulement
+  1. la composition directe est la politique par defaut depuis l'A/B KVM
+     CONVAINCANT de 77e0e5de (run 38704459647, cite par la statique) :
+     `TAMPON_DIRECT_VOULU` est un `AtomicBool::new(true)`, ecrit seulement
      par `veut_tampon_direct`, appele seulement par la commande `gpu-tampon` ;
      toute entree en mode graphique repart en copie avant de decider ;
   2. `presente` passe la memoire en `Transfert` (`tampons::soumet`) AVANT le
@@ -36,7 +37,7 @@ FICHIERS = {
     "flux": RACINE / ".github/workflows/os-primitives.yml",
     "analyse": RACINE / "tools/ci/analyse_banc_tampon.py",
 }
-DEFAUT = "static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(false);"
+DEFAUT = "static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(true);"
 REPART = "fn enter_verrouille() {\n    TAMPON_DIRECT.store(false, Ordering::Release);"
 SOUMET = ("    let Some(en_vol) = tampons::soumet(etat_tampon()) else {\n"
           "        PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);\n        return false;\n    };\n"
@@ -65,8 +66,8 @@ def corps(texte: str, signature: str) -> str:
 
 def verifie(t: dict, src: str) -> list:
     fautes = []
-    if t["gfx"].count(DEFAUT) != 1:
-        fautes.append("bochs.rs : la composition directe n'est plus desactivee par defaut.")
+    if t["gfx"].count(DEFAUT) != 1 or "CONVAINCANT de 77e0e5de (run\n// 38704459647" not in t["gfx"]:
+        fautes.append("bochs.rs : la composition directe (A/B KVM 38704459647) n'est plus le defaut, ou la preuve n'est plus citee.")
     ecrit = t["gfx"].count("TAMPON_DIRECT_VOULU.swap(") + t["gfx"].count("TAMPON_DIRECT_VOULU.store(")
     if ecrit != 1 or "TAMPON_DIRECT_VOULU.swap(oui" not in corps(t["gfx"], "pub fn veut_tampon_direct("):
         fautes.append("bochs.rs : la politique est ecrite ailleurs que par veut_tampon_direct.")
@@ -114,7 +115,7 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
-        ("direct par defaut", "gfx", DEFAUT, DEFAUT.replace("false", "true")),
+        ("copie par defaut", "gfx", DEFAUT, DEFAUT.replace("true", "false")),
         ("entree sans retour en copie", "gfx", REPART, "fn enter_verrouille() {"),
         ("transfert sans etat", "gpu", "    pose_etat_tampon(en_vol);", ""),
         ("fin sans reponse oubliee", "gpu", "tampons::Fin::SansReponse } else", "tampons::Fin::Achevee } else"),
@@ -152,7 +153,7 @@ def main() -> int:
         for f in fautes:
             print(f"verifie-virtio-gpu-tampons: {f}")
         return 1
-    print("verifie-virtio-gpu-tampons: OK (copie par defaut, memoire tenue en Transfert autour du transfert, "
+    print("verifie-virtio-gpu-tampons: OK (direct par defaut (A/B KVM 38704459647), memoire tenue en Transfert autour du transfert, "
           "acces comptes, abandon sans reecriture, copies comptees, regle pure, CI KVM ; 13 negatifs)")
     return 0
 

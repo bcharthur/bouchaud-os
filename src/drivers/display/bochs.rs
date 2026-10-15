@@ -96,11 +96,16 @@ fn rgb(index: u8) -> u32 {
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
 // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composer DIRECTEMENT dans la
-// memoire DMA du scanout virtio-gpu, sans tampon arriere ni copie. Voulu par
-// `gpu-tampon direct` (DESACTIVE par defaut : la politique ne change qu'avec un
-// A/B KVM), pris a `enter()` si le scanout virtio est monte. Le bureau n'y
-// ecrit que si aucun transfert n'est en vol (`virtio_gpu::tampon_ecrivable`).
-static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(false);
+// memoire DMA du scanout virtio-gpu, sans tampon arriere ni copie. Pris a
+// `enter()` si le scanout virtio est monte ; `gpu-tampon copie|direct` pour
+// l'A/B. ACTIVE par defaut depuis l'A/B KVM CONVAINCANT de 77e0e5de (run
+// 38704459647, job gpu-tampon, 6/6 tours AB/BA : p50 plein ecran 428 -> 232,5
+// us, bande 116 -> 110, tuile 72 -> 70 ; pixels TCG et KVM identiques au
+// bureau BGA, 0 octet copie, 0 acces pendant un transfert). La CI rejoue l'A/B
+// a chaque campagne : un KVM NON_CONVAINCANT rend le defaut a la copie. Le
+// bureau n'y ecrit que si aucun transfert n'est en vol
+// (`virtio_gpu::tampon_ecrivable`).
+static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(true);
 static TAMPON_DIRECT: AtomicBool = AtomicBool::new(false);
 /// Octets copies du tampon arriere vers l'ecran (BGA, ou virtio en copie).
 static OCTETS_COPIES: AtomicU64 = AtomicU64::new(0);
