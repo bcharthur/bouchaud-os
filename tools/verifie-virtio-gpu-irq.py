@@ -13,8 +13,9 @@ Regles :
   3. on ne dort que si `irq::strategie` le permet (contexte cedable,
      vecteur accepte, politique) ; sinon la scrutation bornee d'avant ;
   4. l'armement relit `queue_msix_vector` et desactive MSI-X sur un refus ;
-  5. la politique par defaut reste la SCRUTATION (`IRQ_VOULUE` faux) tant
-     qu'un A/B KVM n'est pas CONVAINCANT -- changer ce defaut exige de
+  5. la politique par defaut est l'INTERRUPTION (`IRQ_VOULUE` vrai) depuis
+     l'A/B KVM CONVAINCANT de f23a1247 (run 38697040371) -- le commentaire
+     de la statique doit citer ce run ; la rendre a la scrutation exige de
      changer ce garde-fou, avec la preuve ;
   6. la CI mesure l'A/B sous KVM et rejoue les pannes (option de banc hors
      `default`).
@@ -70,8 +71,10 @@ def verifie(t: dict) -> list:
     m = corps(t["pilote"], "unsafe fn arme_msix(")
     if "if commune.l16(QUEUE_MSIX_VECTOR) != 0 {" not in m or "ecrit_controle(controle & !irq::MSIX_ACTIVE);" not in m:
         fautes.append("arme_msix() : un refus du peripherique n'est plus detecte ou MSI-X reste actif.")
-    if "static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);" not in t["pilote"]:
-        fautes.append("politique par defaut : l'attente par interruption est activee sans A/B KVM CONVAINCANT.")
+    if "static IRQ_VOULUE: AtomicBool = AtomicBool::new(true);" not in t["pilote"] \
+            or "CONVAINCANT de f23a1247 (run 38697040371" not in t["pilote"]:
+        fautes.append("politique par defaut : l'interruption (A/B KVM CONVAINCANT, run 38697040371) n'est plus le defaut, "
+                      "ou la preuve n'est plus citee.")
     if "BO_QEMU_KVM=1 tools/ci/run_banc_irq_gpu.sh" not in t["flux"] \
             or "cargo bootimage --features banc-virtio-gpu-irq-pannes" not in t["flux"] \
             or "BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh" not in t["flux"]:
@@ -104,7 +107,7 @@ def main() -> int:
         ("pilote", "    if strategie == Strategie::Scrute {\n        return attente_reponse(limite_ms, predicat);\n    }", ""),
         ("pur", "if cedable && armee && voulue {", "if armee && voulue {"),
         ("pilote", "        ecrit_controle(controle & !irq::MSIX_ACTIVE);\n", ""),
-        ("pilote", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(true);"),
+        ("pilote", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(true);", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);"),
         ("flux", "BO_QEMU_KVM=1 tools/ci/run_banc_irq_gpu.sh", "tools/ci/run_banc_irq_gpu.sh"),
         ("cargo", 'default = ["legacy-boot"]', 'default = ["legacy-boot", "banc-virtio-gpu-irq-pannes"]'),
     ]
@@ -118,7 +121,7 @@ def main() -> int:
             print(f"virtio-gpu irq : le test negatif {n} ne rougit pas ({cle}) -- garde inoperant")
             return 1
     print(f"[OK] virtio-gpu irq : gestionnaire sans verrou ni impression, ticket avant relecture, sommeil seulement "
-          f"si cedable/arme/voulu, refus MSI-X detecte, scrutation par defaut, A/B KVM et pannes en CI "
+          f"si cedable/arme/voulu, refus MSI-X detecte, interruption par defaut (A/B KVM 38697040371), A/B KVM et pannes en CI "
           f"(negatifs={len(negatifs)})")
     return 0
 

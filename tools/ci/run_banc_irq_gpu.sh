@@ -8,7 +8,8 @@
 # suite de trames (`banc-present tache` : plein ecran, bande, tuile) depuis une
 # tache noyau epinglee au coeur zero -- le contexte du bureau --, sous les deux
 # politiques (`gpu-irq off` puis `on` aux tours impairs, l'inverse aux pairs).
-# Le demarrage finit sous la politique par defaut (scrutation).
+# Le demarrage finit sous la politique par defaut (interruption, depuis
+# l'A/B KVM CONVAINCANT de f23a1247).
 #
 # Criteres et verdicts : tools/ci/analyse_banc_irq_gpu.py (declares avant la
 # mesure). Le banc ECHOUE sur un defaut de surete ou d'instrument ;
@@ -39,7 +40,7 @@ mkdir -p "$SORTIE/scenario"
       echo "banc-present tache"
     done
   done
-  echo "gpu-irq off"
+  echo "gpu-irq on"
   echo "echo GPU_AB_FIN"
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/banc.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)

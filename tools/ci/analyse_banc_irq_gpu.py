@@ -8,8 +8,9 @@ Un seul demarrage, TOURS tours ; chaque tour presente la meme suite de trames
 (`banc-present tache`, contexte du bureau) sous les deux politiques
 d'attente, dans un ordre alterne (AB aux tours impairs, BA aux pairs).
 
-CRITERES DECLARES AVANT LA MESURE (la politique par defaut -- scrutation --
-ne change qu'avec un A/B KVM CONVAINCANT) :
+CRITERES DECLARES AVANT LA MESURE (la politique par defaut est passee a
+l'interruption sur l'A/B KVM CONVAINCANT de f23a1247, run 38697040371 ; un A/B
+KVM NON_CONVAINCANT la rend a la scrutation) :
 
   surete     chaque bras de chaque tour : 640 presentations acceptees, aucun
              echec, aucune attente echue, scanout actif ; aucune panique ;
@@ -135,7 +136,7 @@ def analyse(texte, tours, nom):
     if len(paires) < QUORUM:
         return sortie + [f"GPU_IRQ_AB NON_CONCLUANT accel={nom} tours={len(paires)}/{tours}"], "NON_CONCLUANT", 0
     verdict = "CONVAINCANT" if all(ok for _, ok in criteres) else "NON_CONVAINCANT"
-    sortie.append(f"GPU_IRQ_AB {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut inchangee : scrutation)")
+    sortie.append(f"GPU_IRQ_AB {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut : interruption depuis f23a1247 ; un KVM NON_CONVAINCANT la rend a la scrutation)")
     return sortie, verdict, 0
 
 

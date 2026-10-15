@@ -887,9 +887,14 @@ fn attente_reponse(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> bool {
 /// Le peripherique a accepte le vecteur de la controlq.
 static IRQ_ARMEE: AtomicBool = AtomicBool::new(false);
 /// La politique : dormir sur l'interruption quand c'est possible (commande
-/// `gpu-irq on|off`, pour l'A/B). Desactivee par defaut tant que l'A/B KVM
-/// n'a pas montre le gain (BOUCHAUD_VIRTIO_GPU_IRQ_V1, P10+.1).
-static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);
+/// `gpu-irq on|off`, pour l'A/B). ACTIVEE par defaut depuis l'A/B KVM
+/// CONVAINCANT de f23a1247 (run 38697040371, 6/6 tours AB/BA : latences au
+/// niveau de la scrutation, coeur inactif 201 pour mille en plein ecran
+/// contre 0, aucune interruption perdue sur 3 840 presentations ; pannes
+/// MSI-X masque / parasites / aveugle vertes sous TCG et KVM). La CI rejoue
+/// l'A/B a chaque campagne : un KVM NON_CONVAINCANT rend le defaut a la
+/// scrutation (BOUCHAUD_VIRTIO_GPU_IRQ_V1, P10+.1).
+static IRQ_VOULUE: AtomicBool = AtomicBool::new(true);
 /// L'adresse virtuelle de `used.idx` (0 avant l'armement).
 static UTIL_IDX: AtomicUsize = AtomicUsize::new(0);
 /// L'entree 0 de la table MSI-X (banc de panne : la masquer).
