@@ -992,6 +992,8 @@ impl irq::Dormeur for MondeNoyau {
         if pannes::parasite_due() {
             pannes::parasite();
         }
+        #[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+        pannes::note_sommeil();
         // Une borne qui a croise l'interruption n'est pas une interruption
         // perdue : le ticket dit si un reveil a ete signale.
         if ACHEVEMENTS.wait_until_noyau(ticket, jusqu_a) || ACHEVEMENTS.signale_depuis(ticket) {
@@ -1021,6 +1023,14 @@ fn attente_achevement(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> boo
     let aveugle = { let _ = rang; false };
     // BANC DE PANNE : une reponse jamais vue (la vraie arrive, l'attente ne
     // la lit pas) -- l'echeance doit finir l'attente.
+    // BANC DE PANNE : pendant la fenetre masquee, la reponse reste invisible
+    // jusqu'au premier sommeil -- une reponse tardive dont l'interruption est
+    // perdue. Sous TCG, QEMU traite souvent la commande pendant l'ecriture de
+    // la sonnette : sans cela, la reponse etait deja la et l'injection
+    // n'exercait rien (run 38704459647, vus_par_relecture=0).
+    #[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+    let mut lit = || !aveugle && !pannes::reponse_cachee() && predicat();
+    #[cfg(not(feature = "banc-virtio-gpu-irq-pannes"))]
     let mut lit = || !aveugle && predicat();
     let b = irq::attend(&mut lit, &mut MondeNoyau, echeance, ROTATION_IRQ_NS, RELECTURE_NS);
     if b.vu_en_rotation {
@@ -1055,6 +1065,17 @@ mod pannes {
 
     static RANG: AtomicU64 = AtomicU64::new(0);
     static PARASITES: AtomicU64 = AtomicU64::new(0);
+    /// L'attente en cours a-t-elle deja dormi ?
+    static DORMI: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn note_sommeil() {
+        DORMI.store(true, Ordering::Relaxed);
+    }
+
+    /// Fenetre masquee : la reponse n'est visible qu'apres un premier sommeil.
+    pub(super) fn reponse_cachee() -> bool {
+        (MASQUE_DEBUT..MASQUE_FIN).contains(&RANG.load(Ordering::Relaxed)) && !DORMI.load(Ordering::Relaxed)
+    }
 
     pub(super) fn parasite() {
         PARASITES.fetch_add(1, Ordering::Relaxed);
@@ -1071,6 +1092,7 @@ mod pannes {
     /// Rend vrai si cette attente doit etre aveugle.
     pub(super) fn avant_attente(rang: u64) -> bool {
         RANG.store(rang, Ordering::Relaxed);
+        DORMI.store(false, Ordering::Relaxed);
         if rang == MASQUE_DEBUT {
             masque(true);
             crate::serial_println!("VIRTIO_GPU_INJECTION irq_masquee attentes={}..{}", MASQUE_DEBUT, MASQUE_FIN);

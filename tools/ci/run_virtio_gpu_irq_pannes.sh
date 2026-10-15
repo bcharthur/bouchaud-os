@@ -9,7 +9,7 @@
 #
 #   1. l'entree MSI-X masquee pendant dix attentes : les interruptions sont
 #      PERDUES ; chaque reponse doit etre trouvee par la relecture de secours
-#      (`vus_par_relecture` > 0), sans echec de presentation ;
+#      (`vus_par_relecture` >= 10, une par attente masquee), sans echec de presentation ;
 #   2. des interruptions parasites sur le vecteur (au moins six : une avant
 #      chaque attente de la fenetre, plus une pendant le sommeil quand il a
 #      lieu) : toutes comptees sans progres, aucune presentation refusee --
@@ -63,7 +63,10 @@ exige "le scanout virtio-gpu etait actif" grep -aq 'BOUCHAUD_VIRTIO_GPU_SCANOUT_
 exige "les trois injections ont eu lieu" bash -c "grep -aq 'VIRTIO_GPU_INJECTION irq_masquee' '$LOG' && grep -aq 'VIRTIO_GPU_INJECTION irq_demasquee' '$LOG' && grep -aq 'VIRTIO_GPU_INJECTION irq_parasites' '$LOG' && grep -aq 'VIRTIO_GPU_INJECTION reponse_jamais_vue' '$LOG'"
 echo "  preuve  dernier releve apres l'abandon : $APRES"
 exige "attente par interruption effective (attentes dormantes > 0)" test "$(val "$APRES" dormantes)" -gt 0 2>/dev/null
-exige "interruptions perdues : reponses trouvees par la relecture (vus_par_relecture > 0)" test "$(val "$APRES" vus_par_relecture)" -gt 0 2>/dev/null
+# La reponse d'une attente masquee n'est visible qu'apres un premier sommeil
+# (injection deterministe, run 38704459647) : chacune des dix est retrouvee
+# par la relecture.
+exige "interruptions perdues : les dix reponses masquees trouvees par la relecture (vus_par_relecture >= 10)" test "$(val "$APRES" vus_par_relecture)" -ge 10 2>/dev/null
 ENVOYEES=$(propre | grep -aoE 'irq_parasites_fin envoyees=[0-9]+' | head -1 | cut -d= -f2)
 echo "  preuve  parasites envoyees=${ENVOYEES:-?} ; reveils sans progres=$(val "$APRES" reveils_sans_progres) (selon l'instant : la reponse est souvent deja la)"
 exige "parasites : au moins six envoyees, toutes comptees sans progres par le gestionnaire" \
