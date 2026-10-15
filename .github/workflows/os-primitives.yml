@@ -2,7 +2,18 @@ name: os-primitives (debug)
 
 on:
   workflow_dispatch:
+    inputs:
+      p13_strict:
+        description: 'Exiger la qualification P13, pas seulement des bancs executes'
+        type: boolean
+        required: false
+        default: false
   workflow_call:
+    inputs:
+      p13_strict:
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -226,6 +237,20 @@ jobs:
           PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
           PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
           exit $r
+      # Mode normal : publication du diagnostic, sans modifier la CI produit.
+      # Mode manuel p13_strict=true : les NON_QUALIFIANT deviennent bloquants.
+      - name: P13 -- qualification stricte ordonnanceur KVM SMP1/2/4
+        if: ${{ !cancelled() }}
+        env:
+          P13_STRICT: ${{ inputs.p13_strict && '1' || '0' }}
+        run: |
+          mode=report
+          [ "$P13_STRICT" != 1 ] || mode=strict
+          r=0
+          for smp in 1 2 4; do
+            python3 tools/ci/qualifie_p13.py attribution "ordonnanceur-attribution-kvm-smp${smp}/serie.log" --smp "$smp" --passes 2 --mode "$mode" || r=1
+          done
+          exit "$r"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -321,6 +346,18 @@ jobs:
           AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1 || r=1
           AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4 || r=1
           exit $r
+      - name: P13 -- qualification stricte A/B reveil precis KVM SMP1/4
+        if: ${{ !cancelled() }}
+        env:
+          P13_STRICT: ${{ inputs.p13_strict && '1' || '0' }}
+        run: |
+          mode=report
+          [ "$P13_STRICT" != 1 ] || mode=strict
+          r=0
+          for smp in 1 4; do
+            python3 tools/ci/qualifie_p13.py ab "ab-reveil-precis-kvm-smp${smp}/serie.log" --smp "$smp" --passes 4 --mode "$mode" || r=1
+          done
+          exit "$r"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

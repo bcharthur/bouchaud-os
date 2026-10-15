@@ -92,6 +92,20 @@ class AbReveilPrecis(unittest.TestCase):
         self.assertEqual((v, c), ("DEFAUT", 1))
 
 
+    def test_non_qualifiant_on_ne_prouve_pas_un_gain(self):
+        lignes, v, c = a.analyse(journal(on={"verdict": "NON_QUALIFIANT"}), 4, "1", "kvm")
+        self.assertEqual((v, c), ("NON_CONCLUANT", 0))
+        self.assertTrue(any("apparies_qualifies=0/4" in ligne for ligne in lignes))
+
+    def test_non_qualifiant_off_ne_prouve_pas_un_gain(self):
+        _, v, c = a.analyse(journal(off={"verdict": "NON_QUALIFIANT"}), 4, "4", "kvm")
+        self.assertEqual((v, c), ("NON_CONCLUANT", 0))
+
+    def test_paires_sans_quorum_qualifie_non_concluantes(self):
+        texte = journal().replace("VERDICT_SONDE : QUALIFIE_OK", "VERDICT_SONDE : NON_QUALIFIANT", 1)
+        _, v, c = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((v, c), ("NON_CONCLUANT", 0))
+
 class DelimitationDuBras(unittest.TestCase):
     def test_restauration_finale_ne_contamine_pas_le_dernier_off(self):
         texte = journal() + P + "+ reveil-precis on\n" + P + (
