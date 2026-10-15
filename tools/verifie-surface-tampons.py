@@ -65,6 +65,7 @@ PREPARE = ("    if (!prepare_arriere()) {", "    auto canvas_or_error = mapped_s
 CAPACITE = "put32(hello + 8, s.tampons.nombre == 2 ? BouchaudTampons::CAPACITE_DEUX_TAMPONS : 0u);"
 TAMPON_TRAME = "auto const tampon = s.tampons.nombre == 2 ? s.tampons.arriere : 0;"
 LIBERE = "if (size >= 8 && s.tampons.libere(static_cast<int>(read_u32(payload, 4))))"
+REJEU_UNIQUE = "    s.tampons.rejeu_fait(t);\n    auto const pas = static_cast<size_t>(s.surface_stride);"
 EQUIVALENCE = "la face egale la surface unique, pixel a pixel"
 TESTS = ("un_client_conforme_n_ecrit_jamais_dans_la_face", "le_client_retrouve_toujours_un_tampon_libre",
          "une_liberation_qui_n_a_pas_pu_partir_reste_due", "la_negociation_exige_l_offre_et_la_capacite")
@@ -145,6 +146,11 @@ def verifie(t: dict, src: str) -> list:
         fautes.append("chrome : FrameReady ne nomme plus le tampon arriere.")
     if LIBERE not in t["chrome"]:
         fautes.append("chrome : une Liberation ne passe plus par BouchaudTampons::libere.")
+    if REJEU_UNIQUE not in corps_haut(t["chrome"], "inline bool prepare_arriere(") \
+            or "|| rejoue[t])" not in t["pur_chrome"]:
+        fautes.append("chrome : le rejeu peut ecraser une trame peinte mais pas annoncee (rejeu unique par preparation).")
+    if "annonce ratee puis nouvelle trame" not in t["test_chrome"]:
+        fautes.append("test_tampons.cpp : le cas de l'annonce ratee n'est plus teste.")
     if any(m in t["pur_chrome"] for m in ("#include <AK", "#include <Lib", "static_cast<u8*>")):
         fautes.append("BouchaudTampons.h : la regle n'est plus pure (AK/Lib).")
     if EQUIVALENCE not in t["test_chrome"] or "le client n'a jamais ecrit la face" not in t["test_chrome"]:
@@ -181,6 +187,8 @@ def negatifs(t: dict, src: str) -> list:
         ("capacite toujours annoncee", "chrome", CAPACITE, "put32(hello + 8, BouchaudTampons::CAPACITE_DEUX_TAMPONS);"),
         ("trame sur le tampon 0", "chrome", TAMPON_TRAME, "auto const tampon = 0;"),
         ("liberation ignoree", "chrome", LIBERE, "if (false)"),
+        ("rejeu repete", "chrome", "    s.tampons.rejeu_fait(t);\n", ""),
+        ("rejeu sans memoire", "pur_chrome", "|| rejoue[t])", ")"),
         ("equivalence retiree", "test_chrome", EQUIVALENCE, "x"),
         ("smoke double retire", "flux_lb", "BO_SMOKE_SURFACE: double", "BO_SMOKE_SURFACE: simple"),
     ]
@@ -213,7 +221,7 @@ def main() -> int:
         return 1
     print("verifie-surface-tampons: OK (offre et mesure off par defaut, contrat negocie a la poignee de main, "
           "hors surface refuse, liberations jamais perdues, composition sur la face, regle pure, banc TCG+KVM, "
-          "chrome Ladybird a deux tampons ; 22 negatifs)")
+          "chrome Ladybird a deux tampons ; 24 negatifs)")
     return 0
 
 

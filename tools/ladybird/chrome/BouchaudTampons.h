@@ -47,6 +47,11 @@ struct Client {
     Rect publie_face {};
     /// Le tampon en cours de preparation (-1 : aucun libre).
     int arriere { 0 };
+    /// Le rejeu de ce tampon est deja fait depuis sa derniere annonce. Une
+    /// annonce RATEE (canal plein) laisse le tampon arriere tel quel : un
+    /// second rejeu depuis la face y ecraserait ce qui a ete peint et que le
+    /// suivi du chrome croit present.
+    bool rejoue[2] { false, false };
 
     /// La regle du noyau (`Tampons::negocie`) : deux tampons seulement si le
     /// gestionnaire les offre ET si le client les veut.
@@ -84,13 +89,20 @@ struct Client {
     /// premiere trame, ou si `t` est la face.
     constexpr Rect rejeu(int t, int largeur, int hauteur) const
     {
-        if (nombre == 1 || face < 0 || t == face || t < 0 || t > 1)
+        if (nombre == 1 || face < 0 || t == face || t < 0 || t > 1 || rejoue[t])
             return {};
         // Un tampon qui n'a jamais porte de trame ne contient rien d'utile :
         // il recoit toute la surface.
         if (!deja_annonce[t])
             return Rect { 0, 0, largeur, hauteur };
         return publie_face;
+    }
+
+    /// Le rejeu calcule par `rejeu(t)` vient d'etre recopie dans `t`.
+    constexpr void rejeu_fait(int t)
+    {
+        if (nombre == 2 && t >= 0 && t <= 1 && t != face)
+            rejoue[t] = true;
     }
 
     /// La trame peinte dans `t` vient d'etre annoncee avec `publie`.
@@ -100,6 +112,7 @@ struct Client {
             return;
         libre[t] = false;
         deja_annonce[t] = true;
+        rejoue[t] = false;
         face = t;
         publie_face = publie;
     }

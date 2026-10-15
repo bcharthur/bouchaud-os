@@ -1182,6 +1182,12 @@ inline void send_frame_ready(DamageRect damage)
     put32(frame + 0, FENETRE);
     // Le tampon peint : en V1 toujours 0 ; en V2 l'arriere, qui devient la face.
     auto const tampon = s.tampons.nombre == 2 ? s.tampons.arriere : 0;
+    // Aucun tampon arriere choisi : rien n'a ete peint pour cette annonce. Ne
+    // jamais annoncer un tampon au hasard -- la trame reste due.
+    if (tampon < 0) {
+        s.trame_a_republier = true;
+        return;
+    }
     put32(frame + 4, static_cast<u32>(tampon < 0 ? 0 : tampon));
     put32(frame + 8, static_cast<u32>(damage.x));
     put32(frame + 12, static_cast<u32>(damage.y));
@@ -1283,6 +1289,9 @@ inline bool prepare_arriere()
     auto r = s.tampons.rejeu(t, s.surface_width, s.surface_height);
     if (r.vide() || s.tampons.face < 0)
         return true;
+    // Une seule fois par preparation : une annonce ratee laisse ce tampon
+    // arriere, et ce qui y est peint ne doit pas etre ecrase (test_tampons).
+    s.tampons.rejeu_fait(t);
     auto const pas = static_cast<size_t>(s.surface_stride);
     auto const octets_tampon = pas * static_cast<size_t>(s.surface_alloc_height);
     auto const* face = s.surface_mapping + static_cast<size_t>(s.tampons.face) * octets_tampon;

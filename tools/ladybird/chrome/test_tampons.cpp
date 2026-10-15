@@ -90,6 +90,34 @@ int main()
     }
 
     {
+        // Une annonce RATEE (canal plein), puis une nouvelle composition dans
+        // le meme tampon arriere : ce qui a deja ete peint ne doit pas etre
+        // ecrase par un second rejeu depuis la face -- le suivi du chrome le
+        // croit present et ne le repeindra pas.
+        Client c = Client::negocie(2, true);
+        Surface tampons[2], reference;
+        int t = c.choisit();
+        tampons[t].peint(Rect { 0, 0, L, H }, 0x111111);
+        reference.peint(Rect { 0, 0, L, H }, 0x111111);
+        c.annonce(t, Rect { 0, 0, L, H });
+        // Trame 2 : peinte, annonce ratee.
+        t = c.choisit();
+        tampons[t].copie_depuis(tampons[c.face], c.rejeu(t, L, H));
+        c.rejeu_fait(t);
+        tampons[t].peint(Rect { 2, 2, 5, 5 }, 0x222222);
+        reference.peint(Rect { 2, 2, 5, 5 }, 0x222222);
+        // Trame 3 : meme tampon (pas annonce), nouveau dessin, annonce reussie.
+        int t3 = c.choisit();
+        tampons[t3].copie_depuis(tampons[c.face], c.rejeu(t3, L, H));
+        c.rejeu_fait(t3);
+        tampons[t3].peint(Rect { 20, 10, 3, 3 }, 0x333333);
+        reference.peint(Rect { 20, 10, 3, 3 }, 0x333333);
+        c.annonce(t3, Rect { 0, 0, L, H });
+        verifie(t3 == t && tampons[c.face].px == reference.px,
+            "annonce ratee puis nouvelle trame : rien de ce qui etait peint n'est ecrase");
+    }
+
+    {
         // L'equivalence pixel a pixel : deux tampons + rejeu == une surface
         // unique, trame apres trame, la face etant ce que le gestionnaire lit.
         uint32_t graine = 0x9E3779B9u;
@@ -104,6 +132,7 @@ int main()
         for (int essai = 0; essai < 200 && ok; ++essai) {
             Client c = Client::negocie(2, true);
             Surface tampons[2], reference;
+            Rect publie_en_attente {};
             for (int trame = 1; trame < 60 && ok; ++trame) {
                 int t = c.choisit();
                 if (t < 0) {
@@ -114,16 +143,23 @@ int main()
                 if (t == c.face)
                     ecrit_face = true;
                 tampons[t].copie_depuis(tampons[c.face < 0 ? t : c.face], c.rejeu(t, L, H));
+                c.rejeu_fait(t);
                 int x = static_cast<int>(alea() % L), y = static_cast<int>(alea() % H);
                 Rect r { x, y, 1 + static_cast<int>(alea() % (L - x)), 1 + static_cast<int>(alea() % (H - y)) };
                 uint32_t couleur = alea() | 1;
                 tampons[t].peint(r, couleur);
                 reference.peint(r, couleur);
-                c.annonce(t, r);
+                publie_en_attente = publie_en_attente.englobe(r);
+                // Une annonce sur quatre echoue (canal plein) : la suivante
+                // republie tout ce qui a ete peint depuis.
+                if (alea() % 4 == 0)
+                    continue;
+                c.annonce(t, publie_en_attente);
+                publie_en_attente = {};
                 ok = tampons[c.face].px == reference.px;
             }
         }
-        verifie(ok, "200 x 60 trames aleatoires : la face egale la surface unique, pixel a pixel");
+        verifie(ok, "200 x 60 trames aleatoires (une annonce sur quatre ratee) : la face egale la surface unique, pixel a pixel");
         verifie(!ecrit_face, "le client n'a jamais ecrit la face");
     }
 
