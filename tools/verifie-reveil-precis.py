@@ -31,6 +31,7 @@ FICHIERS = {
     "smp": RACINE / "src/arch/x86_64/smp.rs",
     "idle": RACINE / "src/arch/x86_64/cpu/idle/scheduler.rs",
     "shell": RACINE / "src/shell/mod.rs",
+    "flux": RACINE / ".github/workflows/os-primitives.yml",
     "pur": RACINE / "src/kernel/time/reveil_precis.rs",
     "test": RACINE / "tools/smp/test_reveil_precis.rs",
     "analyse": RACINE / "tools/ci/analyse_ab_reveil_precis.py",
@@ -89,6 +90,8 @@ def verifie(t: dict, sources_src: str) -> list:
                   'b["v"] == "off" and delta != 0'):
         if jalon not in t["analyse"]:
             fautes.append(f"analyse A/B : critere retire ({jalon}).")
+    if 'AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1' not in t["flux"]:
+        fautes.append("CI : l'A/B KVM n'est plus mesure dans os-primitives.")
     return fautes
 
 
@@ -98,6 +101,7 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("A/B KVM retire de la CI", "flux", 'AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1', ""),
         ("interrupteur arme au demarrage", "smp", INTERRUPTEUR, INTERRUPTEUR.replace("false", "true")),
         ("armement sorti du hlt", "idle", "    smp::arme_reveil_precis_avant_hlt();\n", ""),
         ("retrait oublie", "idle", "    smp::retire_reveil_precis_apres_hlt();\n", ""),
@@ -135,7 +139,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique off au demarrage, armement autour du hlt, quantum restaure, "
-          "decision pure testee, A/B a criteres declares ; 10 negatifs)")
+          "decision pure testee, A/B a criteres declares ; 11 negatifs)")
     return 0
 
 

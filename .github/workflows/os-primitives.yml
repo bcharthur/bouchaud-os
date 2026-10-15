@@ -304,6 +304,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           AB_SORTIE=$PWD/ab-cession-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_cession.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4
+      - name: P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 (mesure ; politique par defaut off)
+        # BOUCHAUD_REVEIL_PRECIS_V1 : sous KVM le minuteur local est en mode
+        # TSC-deadline. Quatre tours AB/BA de `ordonnanceur-probe 8 1` sous
+        # `reveil-precis off` et `on`. Criteres declares dans
+        # analyse_ab_reveil_precis.py. La politique (off) ne change qu'avec un
+        # A/B KVM CONVAINCANT.
+        if: ${{ !cancelled() }}
+        run: |
+          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -311,4 +320,5 @@ jobs:
           path: |
             ab-reveil-ipi-*/serie.log
             ab-cession-*/serie.log
+            ab-reveil-precis-*/serie.log
           if-no-files-found: warn
