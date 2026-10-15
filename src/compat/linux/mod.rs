@@ -1045,9 +1045,29 @@ fn timespec_ms(addr: u64) -> Option<u64> {
     Some(total_ns.div_ceil(1_000_000).max(1))
 }
 
+/// Lit un `struct timespec` utilisateur, en nanosecondes EXACTES.
+///
+/// BOUCHAUD_SOMMEIL_NS_V1 : les sommeils (`nanosleep`, `clock_nanosleep`)
+/// arrondissaient la duree au millieme SUPERIEUR (`timespec_ms`) puis
+/// l'echeance n'etait vue qu'au tick : un sommeil de 15,2 ms durait au moins
+/// 16 ms, puis jusqu'au tick suivant. Run 38645396730 (KVM, sonde
+/// d'ordonnanceur, periode 16 ms) : retard au repos median 1,3 ms, p95
+/// 1,9 ms -- plus que sous charge (0,6 / 1,0 ms) ; la sonde concluait
+/// « charge sans effet mesurable » a toutes les topologies. Une duree non
+/// nulle reste non nulle (POSIX : dormir AU MOINS la duree demandee) ; une
+/// duree nulle reste nulle.
+fn timespec_ns(addr: u64) -> Option<u64> {
+    if addr == 0 {
+        return None;
+    }
+    let seconds = user_read_u64(addr)?;
+    let nanos = user_read_u64(addr + 8)?;
+    Some(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+}
+
 /// `nanosleep` : la duree demandee est toujours **relative**.
 fn sys_nanosleep(request: u64, remain: u64) -> i64 {
-    let reste = dors_ms(timespec_ms(request).unwrap_or(0));
+    let reste = dors_ns(timespec_ns(request).unwrap_or(0));
     ecrit_reste(remain, reste)
 }
 
@@ -1074,39 +1094,40 @@ fn sys_clock_nanosleep(clock: i32, flags: u64, request: u64, remain: u64) -> i64
     const CLOCK_REALTIME: i32 = 0;
     const CLOCK_REALTIME_ALARM: i32 = 8;
 
-    let demande = match timespec_ms(request) {
-        Some(ms) => ms,
+    // BOUCHAUD_SOMMEIL_NS_V1 : en nanosecondes exactes.
+    let demande = match timespec_ns(request) {
+        Some(ns) => ns,
         None => return -errno::EFAULT,
     };
 
     if flags & TIMER_ABSTIME != 0 {
         let maintenant = match clock {
-            CLOCK_REALTIME | CLOCK_REALTIME_ALARM => realtime_ms(),
-            _ => crate::kernel::timer::monotonic_ms(),
+            CLOCK_REALTIME | CLOCK_REALTIME_ALARM => realtime_ns(),
+            _ => crate::kernel::timer::monotonic_ns(),
         };
         // Une echeance deja passee rend la main tout de suite. `remain` n'est
         // pas ecrit dans cette forme : Linux ne le remplit que pour un sommeil
         // relatif, l'echeance etant deja connue de l'appelant.
-        return match dors_ms(demande.saturating_sub(maintenant)) {
+        return match dors_ns(demande.saturating_sub(maintenant)) {
             Some(_) => -errno::EINTR,
             None => 0,
         };
     }
 
-    let reste = dors_ms(demande);
+    let reste = dors_ns(demande);
     ecrit_reste(remain, reste)
 }
 
-/// Dort `ms` millisecondes, en cedant simplement le CPU sous le tick.
+/// Dort `ns` nanosecondes (BOUCHAUD_SOMMEIL_NS_V1) : l'echeance est
+/// `maintenant + ns`, sans arrondi. Zero cede le processeur et rend la main.
 ///
 /// Rend le temps non dormi si un signal gere a interrompu le sommeil.
-fn dors_ms(ms: u64) -> Option<u64> {
-    let ticks = crate::kernel::timer::ms_to_ticks(ms);
-    if ticks == 0 {
+fn dors_ns(ns: u64) -> Option<u64> {
+    if ns == 0 {
         task::yield_now();
         None
     } else {
-        task::sleep_ticks_signalable(ticks)
+        task::sleep_ns_signalable(ns)
     }
 }
 

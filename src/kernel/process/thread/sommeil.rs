@@ -128,7 +128,18 @@ pub(crate) fn sleep_ticks_noyau(ticks: u64) {
 /// d'une seconde, des la mort de son premier fils. Linux ne reveille pas un
 /// sommeil pour un signal ignore, et rend EINTR pour un signal gere.
 pub fn sleep_ticks_signalable(ticks: u64) -> Option<u64> {
-    let deadline = echeance_pour(ticks);
+    sleep_jusqua_signalable(echeance_pour(ticks), ticks)
+}
+
+/// BOUCHAUD_SOMMEIL_NS_V1 : le meme sommeil, a une echeance EXACTE
+/// (`maintenant + ns`), sans arrondi au tick. `ns` est non nul.
+pub fn sleep_ns_signalable(ns: u64) -> Option<u64> {
+    let deadline = crate::kernel::timer::monotonic_ns().saturating_add(ns.max(1));
+    // Les ticks ne servent plus qu'au journal du sommeil (forensique).
+    sleep_jusqua_signalable(deadline, ns.div_ceil(1_000_000).max(1))
+}
+
+fn sleep_jusqua_signalable(deadline: u64, ticks: u64) -> Option<u64> {
     loop {
         // Parking refuse : la tache ne peut plus dormir -- elle est morte
         // (`exit_group` d'un autre fil). Rendre la main tout de suite, comme

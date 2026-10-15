@@ -127,6 +127,24 @@ def main():
                 "a une milliseconde ferait dormir un appel non bloquant."
             )
 
+    # BOUCHAUD_SOMMEIL_NS_V1 : les sommeils lisent la duree en nanosecondes
+    # EXACTES et dorment jusqu'a `maintenant + ns` ; une duree non nulle n'est
+    # jamais un sommeil nul, une duree nulle n'endort pas. L'arrondi au
+    # millieme superieur ajoutait en moyenne 0,5 ms a chaque sommeil (run
+    # 38645396730 : retard au repos superieur au retard sous charge).
+    ns = corps(source, "fn timespec_ns(")
+    dors = corps(source, "fn dors_ns(")
+    nano = corps(source, "fn sys_nanosleep(")
+    horloge_ns = corps(source, "fn sys_clock_nanosleep(")
+    if ns is None or "div_ceil" in ns or "1_000_000)" in ns:
+        fautes.append("mod.rs : `timespec_ns` absent, ou la duree d'un sommeil est de nouveau arrondie.")
+    if dors is None or "if ns == 0 {" not in dors or "sleep_ns_signalable(ns)" not in dors:
+        fautes.append("mod.rs : `dors_ns` absent, ou une duree nulle endort / une duree non nulle ne dort plus.")
+    if nano is None or "dors_ns(timespec_ns(" not in nano:
+        fautes.append("mod.rs : `nanosleep` n'est plus a la nanoseconde exacte.")
+    if horloge_ns is None or "timespec_ns(request)" not in horloge_ns or "dors_ms(" in horloge_ns:
+        fautes.append("mod.rs : `clock_nanosleep` n'est plus a la nanoseconde exacte.")
+
     # BOUCHAUD_HORLOGE_MURALE_UNIQUE_V1 : UNE horloge murale. `realtime_ns`
     # pose l'ancre ; `realtime_ms` (et donc `unix_time`, les dates de
     # fichier) en derive, sans jamais recompter les ticks du PIT -- sinon
@@ -173,7 +191,8 @@ def main():
     print(
         "horloge utilisateur : clock_gettime en nanosecondes sur les deux "
         "horloges, timespec decoupe sans arrondi a la milliseconde, duree "
-        "demandee jamais tronquee a zero, duree nulle preservee"
+        "demandee jamais tronquee a zero, duree nulle preservee, sommeils a "
+        "la nanoseconde exacte"
     )
     return 0
 
