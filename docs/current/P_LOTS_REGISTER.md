@@ -45,11 +45,12 @@
 | Sous-lot | État | Preuve | Clôture |
 |---|---|---|---|
 | P10+.0 baseline GPU | VERIFIED_AT_KVM (QEMU) sur `c7018e56` | 38645396730 | rejouer sur le HEAD P10+.1 |
-| P10+.1 achèvement par interruption | **VERIFIED_AT_KVM (QEMU), une campagne** ; défaut = **interruption** depuis ce lot | [38697040371](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040371) : A/B KVM **CONVAINCANT** 6/6 (inactif plein 201,5 ‰ contre 0, latences au niveau, 0 interruption perdue / 3 840) ; pannes TCG+KVM vertes ; TCG NON_CONVAINCANT (pas de gain processeur) | le reproduire à la campagne suivante (sinon défaut rendu à la scrutation) |
-| P10+.2 copies réduites | IMPLEMENTED_LOCAL (`0cc556a5`, `7c19ff46`), défaut = copie | local TCG : pixels identiques, 0 octet copié, A/B CONVAINCANT (plein 3 328 → 1 049 µs) | A/B KVM CONVAINCANT pour changer le défaut |
+| P10+.1 achèvement par interruption | **VERIFIED_AT_KVM (QEMU), reproduit sur deux campagnes** ; défaut = interruption (`43f55f9c`) | A/B KVM CONVAINCANT sur f23a1247 (38697040371) et 77e0e5de (38704459647, inactif plein 136 ‰, 0 relecture) ; pannes TCG+KVM (injection déterministe depuis `9519547b`) | rejouée à chaque campagne |
+| P10+.2 copies réduites | **VERIFIED_AT_KVM (QEMU), une campagne** ; défaut = **composition directe** (`2a7ce3ed`) | 38704459647 job gpu-tampon : pixels TCG+KVM = bureau BGA, 0 octet copié, 0 accès en transfert ; A/B KVM CONVAINCANT (plein 428 → 232,5 µs) | reproduire l'A/B KVM ; sinon défaut rendu à la copie |
+| P10+.3 soumission par trame | IMPLEMENTED_LOCAL (`43c05361` plan pur, `d1d92cab` compositeur), défaut = off | local TCG : pixels identiques, A/B CONVAINCANT (16 → 5 commandes par trame, p50 4 245 → 2 141 µs) | A/B KVM (job gpu-tampon) |
 | P10+.3 → P10+.6 | NOT_STARTED / PHYSICAL_PENDING | — | prérequis P10+.2 / P10+.4 |
 | P13+ réveil précis | EXPERIMENTAL, OFF (`3929746a`) ; arrondi des sommeils corrigé (`856db7b5`) | A/B local TCG SMP1 4 tours : **AB_REVEIL_PRECIS_ECHEC** (p50 repos 886 → 524 µs mais p99 3 229 → 4 075, un QUALIFIE_ECHEC sous on) | A/B KVM SMP1 (TSC-deadline, `bb22f8d5`) ; puis P13 KVM SMP1/2/4 qualifiés |
-| P13 cession par classe | **corrigé** (`20e87dae`), politique par défaut | endurance f23a1247 SMP4 cycle 11 (cause) ; A/B local TCG SMP4 : 903–912 inversions par passe en historique, 0 sous classe | A/B KVM SMP4 (job `ordonnanceur-ab`), endurance 30 min SMP1/2/4 |
+| P13 cession par classe | **corrigé** (`20e87dae`), défaut | endurance 77e0e5de : **SMP4 et SMP2 verts** ; KVM SMP4 : 916–919 inversions/passe en historique, 0 sous classe ; A/B NON_CONCLUANT (porte « charge sans effet ») | qualifier P13 (réveil précis) |
 
 ## Détail des lots ouverts ou modifiés dans cette session
 

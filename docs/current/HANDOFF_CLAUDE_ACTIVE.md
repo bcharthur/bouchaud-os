@@ -4,7 +4,7 @@
 > les handoffs datés restent l'historique. Chaque verdict cite le run qui l'a
 > produit ; rien ici n'annonce un résultat futur.
 
-## 0. Point de contrôle (15 octobre, fin de matinée)
+## 0. Point de contrôle (15 octobre, après la campagne 77e0e5de)
 
 | | |
 |---|---|
@@ -30,16 +30,29 @@ Commits de la session (au-dessus de `c7018e56`) :
 | `7c19ff46` | P10+.2b : composition directe dans la mémoire du scanout (**OFF**), copies comptées | TCG local : pixels = bureau BGA, 0 octet copié, A/B CONVAINCANT (plein 3 328 → 1 049 µs) ; KVM en CI à lire |
 | `e275b543` | diag : trace `+ echo AB_REVEIL_FIN` ≠ fin (A/B IPI) | HOST |
 | `43c05361` | P10+.3a : plan de soumission par trame (pur, 7 tests) | HOST |
-| *(lot suivant)* | P10+.1 : **interruption par défaut** (A/B KVM CONVAINCANT) ; docs | garde mis à jour ; banc BGA/virtio local vert |
+| `43f55f9c` | P10+.1 : **interruption par défaut** | **CI KVM** : A/B CONVAINCANT reproduit sur 77e0e5de (inactif 136 ‰) |
+| `77e0e5de` | docs (campagne f23a1247) | — |
+| `d1d92cab` | P10+.3b : le compositeur soumet chaque trame d'un bloc (`gpu-trame`, **OFF**) | TCG local : pixels identiques, A/B CONVAINCANT (16 → 5 commandes/trame) ; KVM en CI à lire |
+| `2a7ce3ed` | P10+.2 : **composition directe par défaut** | **CI KVM** : A/B copie/direct CONVAINCANT (plein 428 → 232,5 µs), pixels TCG+KVM ; pannes locales vertes avec ce défaut |
+| `9519547b` | diag : injection « interruption perdue » déterministe (critère durci à ≥ 10) | TCG local 10/10 |
+| `35b6be1e` | diag : analyseurs A/B robustes aux lignes entrelacées par le noyau | 3 tests rouges sur l'ancien code |
+| *(ce lot)* | docs : campagne 77e0e5de (audit §8), registre, feuille de route, handoff | — |
 
 ### Campagne `f23a1247` (lue) — détail : `AUDIT_STABILITY_2026-10-15.md` §7
 
 - verts : CI Fast, Integration, Reliability ; ladybird-native-browser **tous jobs verts** (primitives comprises) ;
 - endurance 38697057637 : SMP1 vert, SMP2 NON_QUALIFIANT (13/29, « charge sans effet »), **SMP4 ÉCHEC cycle 11 → cause trouvée, `20e87dae`**, SMP8 NON_QUALIFIANT 24/24 (poursuivie).
 
+### Campagne `77e0e5de` (lue) — détail : audit §8
+
+- verts : CI Fast, Integration, Reliability, tous les jobs Ladybird, `primitives / gpu-tampon` ;
+- **endurance SMP1, SMP2, SMP4 verts** (le rouge SMP4 ne se reproduit pas après `20e87dae`), SMP8 NON_QUALIFIANT poursuivi ;
+- deux rouges d'instrument, corrigés : pannes P10+.1 sous TCG (`9519547b`), lecture de l'A/B réveil précis sous KVM (`35b6be1e`).
+
 ### Ouverts, par priorité
 
-1. **Lire la campagne du HEAD poussé** : job `ordonnanceur-ab` (A/B cession KVM SMP4, A/B réveil précis KVM SMP1, A/B IPI), job `gpu-tampon` (pixels en direct TCG+KVM, A/B copie/direct TCG+KVM), A/B P10+.1 KVM (doit rester CONVAINCANT, sinon défaut rendu à la scrutation), endurance SMP1/2/4/8 (SMP4 ne doit plus rougir ; SMP8 NON_QUALIFIANT poursuivi).
+0. **Lire la campagne du HEAD poussé après 77e0e5de** : A/B réveil précis KVM SMP1 (enfin lisible), A/B trame KVM (P10+.3b), A/B copie/direct (doit rester CONVAINCANT avec le défaut direct), pannes P10+.1 déterministes TCG+KVM, endurance.
+1. *(historique)* **Lire la campagne du HEAD poussé** : job `ordonnanceur-ab` (A/B cession KVM SMP4, A/B réveil précis KVM SMP1, A/B IPI), job `gpu-tampon` (pixels en direct TCG+KVM, A/B copie/direct TCG+KVM), A/B P10+.1 KVM (doit rester CONVAINCANT, sinon défaut rendu à la scrutation), endurance SMP1/2/4/8 (SMP4 ne doit plus rougir ; SMP8 NON_QUALIFIANT poursuivi).
 2. **P13 qualifié** : la détection au tic garde le repos au-dessus de la charge sous KVM ; lire l'A/B KVM du réveil précis (TSC-deadline). S'il est CONVAINCANT, l'activer par défaut puis rejouer P13 KVM SMP1/2/4.
 3. **P10+.2** : si l'A/B KVM copie/direct est CONVAINCANT, basculer le défaut (garde `verifie-virtio-gpu-tampons.py` à changer avec la preuve).
 4. **P10+.3b** : brancher le plan de trame (`virtio_gpu_trame::planifie`) dans le compositeur (`debut_trame`/`fin_trame` autour de la boucle des régions), compter les commandes par trame, latence de trame p50/p95/p99, A/B KVM.

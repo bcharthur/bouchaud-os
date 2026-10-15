@@ -170,3 +170,31 @@ Nouveaux jobs du workflow des primitives : `ordonnanceur-ab` (A/B IPI déplacé,
 A/B cession KVM SMP4, A/B réveil précis KVM SMP1) et `gpu-tampon` (pixels en
 composition directe et A/B copie/direct, TCG puis KVM), en parallèle des sondes
 (le job des sondes a duré 59 min sur 95).
+
+## 8. Campagne `77e0e5de` — lue
+
+| Run | Workflow | Résultat |
+|---|---|---|
+| [38704459510](https://github.com/bcharthur/bouchaud-os/actions/runs/38704459510) | CI Fast | vert |
+| [38704459411](https://github.com/bcharthur/bouchaud-os/actions/runs/38704459411) | Integration | vert |
+| [38704459481](https://github.com/bcharthur/bouchaud-os/actions/runs/38704459481) | Reliability V3 | vert |
+| [38704459647](https://github.com/bcharthur/bouchaud-os/actions/runs/38704459647) | ladybird-native-browser | **rouge** : tous les jobs Ladybird verts ; `primitives / gpu-tampon` vert ; `primitives / probes` rouge (un pas, §8.2) ; `primitives / ordonnanceur-ab` rouge (un pas, §8.2) ; verdict de convergence rouge par conséquence (`causes=primitives=failure`) |
+| [38704473612](https://github.com/bcharthur/bouchaud-os/actions/runs/38704473612) | Endurance 30 min / tranche (TCG) | **SMP1, SMP2, SMP4 verts** ; SMP8 NON_QUALIFIANT (code 2), cycles poursuivis |
+
+### 8.1 Ce qui est démontré
+
+- **Endurance SMP4 verte** après `20e87dae` (cession par classe) — le rouge de f23a1247 ne se reproduit pas ; SMP2 vert aussi.
+- **P10+.1, A/B KVM : CONVAINCANT pour la deuxième campagne de suite** (6/6 : p50 plein 182 → 174 µs, cœur inactif 136 ‰ contre 0, 0 achèvement vu sans interruption sur 3 840). Le défaut « interruption » (`43f55f9c`) est reproduit.
+- **P10+.2, job `gpu-tampon`** : pixels en composition directe TCG 918 494 / 921 600 et KVM 921 336 / 921 600, 0 octet copié, 0 accès pendant un transfert ; **A/B copie/direct KVM CONVAINCANT** 6/6 (p50 plein écran 428 → 232,5 µs, bande 116 → 110, tuile 72 → 70) et TCG CONVAINCANT (1 922 → 282,5). → défaut basculé sur la composition directe (`2a7ce3ed`), les trois bancs de pannes verts en local avec ce défaut.
+- **Cession par classe sous KVM SMP4** : 916–919 inversions par passe sous la politique historique, 0 sous la nouvelle (≈ 302 cessions gardées par passe) — le mécanisme est confirmé sous KVM. L'A/B rend NON_CONCLUANT (0 tour apparié qualifié : la porte « charge sans effet » de la sonde, comme pour l'A/B IPI).
+- P13 KVM SMP1/2/4/8 : `ORDONNANCEUR_TEMOIN_INSTRUMENT` aux quatre topologies (inchangé, non qualifié). Pixels P10 (copie) TCG+KVM, BGA/virtio ×2, `ATTACH_BACKING` sans réponse, réponse étrangère : verts.
+
+### 8.2 Les deux rouges et leur cause
+
+| Pas | Cause | Correction |
+|---|---|---|
+| probes : pannes P10+.1 (TCG) | `vus_par_relecture=0` sous TCG (4 sous KVM) : QEMU traite souvent la commande pendant l'écriture de la sonnette, la réponse était déjà là, l'injection « MSI-X masqué » n'était pas exercée — critère dépendant du hasard | `9519547b` : injection déterministe (réponse invisible jusqu'au premier sommeil de chaque attente masquée) ; critère **durci** à `>= 10` ; local TCG 10/10 |
+| ordonnanceur-ab : A/B réveil précis KVM SMP1 | « mesure incomplète » pour 6 bras sur 8 : l'analyseur exigeait la ligne brute de la sonde terminée après « pire N us », or le noyau écrit ses relevés sur la même ligne sous KVM. Sûreté pourtant tenue (7 636–9 117 armements sous on, 0 sous off) | `35b6be1e` : les trois analyseurs A/B lisent la ligne de la sonde n'importe où dans la ligne, valeurs PROPRES ; 3 tests rouges sur les anciens analyseurs |
+
+Aucun critère n'est affaibli ; le résultat de l'A/B du réveil précis sous KVM
+reste **à mesurer** (campagne suivante).
