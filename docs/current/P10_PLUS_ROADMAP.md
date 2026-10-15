@@ -32,8 +32,8 @@ ne peut plus la tenir (`virtio_gpu_dma`), repli BGA/GOP (`politique_scanout`).
 | Jalon | État | Preuve | Reste à faire |
 |---|---|---|---|
 | **P10+.0** baseline sûre et mesurée | **VERIFIED_AT_KVM** (QEMU) sur `c7018e56` | os-primitives 38645396730 : transport, mire au pixel 3 721/3 721, bureau = BGA 921 375/921 600, 7 refus, `ATTACH_BACKING` sans réponse (mémoire conservée), réponse étrangère (file cassée), BGA/virtio TCG+KVM 640/640 ; KVM : plein 399 µs (p95 472), bande 102 (121), tuile 43 (62) | rejouer sur le HEAD qui porte P10+.1 ; Ladybird réel sur virtio (smoke diagnostic vert, 202 présentations) |
-| **P10+.1** achèvement par interruption | **IMPLEMENTED_LOCAL** (`daa5df34`) ; politique par défaut : **scrutation** | MSI-X armé (3 entrées, vecteur 0x50) ; A/B local TCG 6 tours : 0 cession sous interruption (médianes en scrutation 1 304 / 650 / 426), 0 interruption perdue, **NON_CONVAINCANT** (gain processeur plein écran 53 ‰ seulement, p95 bande/tuile dégradé) ; pannes TCG : 4 réponses rattrapées par la relecture (MSI-X masqué), 6 parasites sans progrès, attente aveugle échue à 1 s, abandon, bureau vivant | A/B **KVM** (CI) ; si CONVAINCANT, basculer le défaut (et le garde) avec la preuve ; sinon régler la rotation (20 µs) sur la mesure KVM, jamais sur TCG |
-| **P10+.2** double tampon, copies réduites | NOT_STARTED | — | voir « Conception P10+.2 » |
+| **P10+.1** achèvement par interruption | **VERIFIED_AT_KVM (QEMU)** sur `f23a1247` (une campagne) ; politique par défaut : **interruption** depuis ce lot | [38697040371](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040371) : A/B KVM 6/6 **CONVAINCANT** (p50 plein 358 → 346 µs, bande 125,5 → 115, tuile 72 → 72 ; cœur inactif plein 201,5 ‰ contre 0 ; 0 achèvement vu sans interruption sur 3 840) ; pannes TCG+KVM vertes ; TCG : NON_CONVAINCANT (aucun gain processeur sous TCG) | reproduire l'A/B KVM (la CI le rejoue) ; un NON_CONVAINCANT rend le défaut à la scrutation |
+| **P10+.2** double tampon, copies réduites | **IMPLEMENTED_LOCAL** (`0cc556a5` règle pure, `7c19ff46` composition directe) ; politique par défaut : **copie** | règle de possession pure (8 tests) ; composition directe dans la mémoire DMA du scanout (`gpu-tampon direct`) : pixels TCG identiques au bureau BGA (921 268/921 600), 0 octet copié, 0 accès pendant un transfert ; A/B TCG 6 tours **CONVAINCANT** : p50 plein écran 3 328 → 1 049 µs, bande 269 → 202, tuile 175 → 142 | A/B **KVM** (job `gpu-tampon`) avant tout changement de défaut ; double tampon à deux ressources (bascule `SET_SCANOUT`, rejeu des dommages par âge) seulement si une soumission asynchrone le justifie |
 | **P10+.3** interface Compositor/WM ↔ GPU | NOT_STARTED | — | contrat de surface typé, soumission des dommages sans capture, latence de trame p50/p95/p99 |
 | **P10+.4** capacités 3D (virgl/venus) en bac à sable | NOT_STARTED | QEMU propose `0x0000010130000002` : VERSION_1, et des bits que le pilote **refuse** (aucune 3D négociée) | audit des QEMU des runners (rutabaga/virgl disponibles ?), preuve de raster GPU d'une primitive, OFF par défaut |
 | **P10+.5** WebGL/Skia accéléré | NOT_STARTED, **BLOCKED** par P10+.4 | — | contrat CPU/GPU avec `HeadlessWebView`, processus GPU, perte de périphérique |
@@ -62,7 +62,29 @@ ne peut plus la tenir (`virtio_gpu_dma`), repli BGA/GOP (`politique_scanout`).
 - Non testé : reset du périphérique, retrait à chaud (pas de QMP dans les
   bancs), plusieurs files en vol (une seule par conception).
 
-## Conception P10+.2 (à écrire, prochain incrément)
+## P10+.2 — ce qui est écrit
+
+- `src/drivers/display/virtio_gpu_tampons.rs` (pur, `tools/display/test_virtio_gpu_tampons.rs`, 8 tests) :
+  états `Composition → Transfert → Composition` (réponse, barrière comprise)
+  ou `Inconnu` (sans réponse, absorbant) ; seconde soumission refusée ; mode
+  `Direct` seulement voulu, mémoire suffisante, tampon non inconnu ;
+  `a_rejouer` (âge d'un tampon, pour un double tampon) et `octets_copies`.
+- `virtio_gpu::presente` tient la mémoire en `Transfert` autour du
+  `TRANSFER_TO_HOST_2D` ; le flush ne part qu'après une réponse OK.
+- `gfx` : `gpu-tampon direct|copie` (pris au prochain `enter()`), `back()`
+  rend la mémoire du scanout en composition directe et **compte** tout accès
+  pendant un transfert ; `present`/`present_rect` comptent les octets copiés
+  et présentés sans copie ; l'abandon du scanout en quitte la mémoire (plus
+  aucune écriture, en copie comme en direct).
+- Pourquoi un seul tampon d'abord : en 2D l'hôte ne lit la mémoire invitée
+  que pendant le transfert, et `presente` est synchrone ; deux ressources
+  n'apportent rien tant que la soumission n'est pas asynchrone — et coûtent
+  le rejeu des dommages (une copie, comptée par `octets_copies`).
+- Pas encore : soumission asynchrone (composer la trame suivante pendant le
+  transfert), double tampon à deux ressources, Ladybird (le scanout virtio
+  refuse le passage de l'écran au ring 3).
+
+## Conception P10+.2 (historique de la conception)
 
 Mesure qui motive : sous KVM la présentation plein écran coûte ≈ 400 µs, dont
 la **copie CPU** de 3,7 Mo de `BACK` vers la mémoire DMA. Objectifs :

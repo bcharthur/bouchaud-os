@@ -4,54 +4,61 @@
 > les handoffs datés restent l'historique. Chaque verdict cite le run qui l'a
 > produit ; rien ici n'annonce un résultat futur.
 
-## 0. Point de contrôle (15 octobre)
+## 0. Point de contrôle (15 octobre, fin de matinée)
 
 | | |
 |---|---|
 | Branche | `claude/ladybird-observability-performance` (jamais `main`) |
 | Base de session | `c7018e56` (HEAD de référence de l'ordre de mission) |
 | Ordre de mission | `MISSION_CLAUDE_SUPER_P_PLUS_2026-10-15.md` (archive jointe, lue en entier) |
-| Interdits respectés | aucun reset/clean/force-push/rebase destructif ; deux `--amend` sur des commits **locaux non poussés** (message corrigé, garde dédoublonné) ; aucun binaire versionné ; aucune action physique TRIGKEY |
-| Worktree de mesure | `git worktree` détaché à `c7018e56` dans le scratchpad (banc « avant ») — hors dépôt, sans effet sur la branche |
+| Interdits respectés | aucun reset/clean/force-push/rebase destructif ; `--amend` seulement sur des commits **locaux non poussés** ; aucun binaire versionné ; aucune action physique TRIGKEY ; aucun push pendant une campagne en cours |
 
 Commits de la session (au-dessus de `c7018e56`) :
 
 | SHA | Objet | Niveau de preuve à ce jour |
 |---|---|---|
-| `18dc70b8` | endurance : marqueurs émis seulement (faux témoin de l'écho `+`), NON_QUALIFIANT distinct d'un échec, campagne poursuivie | HOST (15 tests, mutations) |
-| `2238d8b9` | **fix P10** : scanout du bureau repris/rendu à chaque `enter()` | TCG local (avant : ÉCHEC n=2, après : 2×640) |
-| `daa5df34` | **P10+.1** : achèvement virtio-gpu par MSI-X, attente dormante bornée, A/B, pannes | HOST + TCG local ; **KVM à lire** |
-| `81570c88` | diag A/B IPI V3 : départ du compteur relevé dans le bras après bascule + grâce 50 ms | HOST |
-| `856db7b5` | **fix P13** : `nanosleep`/`clock_nanosleep` à la nanoseconde exacte | TCG local (médiane repos 1,34 → 0,91 ms) |
-| *(ce commit)* | docs : audit 15/10, registre, P10 §4 sexies, `P10_PLUS_ROADMAP.md`, baseline NOT_ESTABLISHED, handoff | — |
+| `18dc70b8` | endurance : marqueurs émis seulement, NON_QUALIFIANT distinct d'un échec, campagne poursuivie | **CI** : SMP8 NON_QUALIFIANT 24/24 cycles, campagne poursuivie (38697057637) |
+| `2238d8b9` | fix P10 : scanout repris/rendu à chaque `enter()` | **CI TCG+KVM** (`SCANOUT_REPRIS`, 2×640, 38697040371) |
+| `daa5df34` | P10+.1 : achèvement virtio-gpu par MSI-X | **CI** : A/B KVM **CONVAINCANT** 6/6, pannes TCG+KVM vertes |
+| `81570c88` | diag A/B IPI V3 | **CI** : aucun défaut de sûreté (NON_CONCLUANT, 0 passe qualifiée) |
+| `856db7b5` | fix P13 : sommeils à la nanoseconde | **CI KVM** : TEMOIN_INSTRUMENT, repos p95 ≈ 970 µs, charge ≈ 270 µs |
+| `f23a1247` | docs (audit, registre, feuille de route P10+, baseline NOT_ESTABLISHED) | — |
+| `3929746a` | P13+ réveil à l'échéance exacte (expérimental, **OFF**) | TCG local : A/B ÉCHEC selon ses critères ; A/B KVM SMP1 en CI à lire |
+| `20e87dae` | **fix P13 : cession par classe** (une interactive sous budget ne cède plus son cœur à un calcul normal au quantum / point sûr) — cause du rouge SMP4 | 7 tests hôte ; TCG local : 903–912 inversions/passe → 0 ; A/B KVM SMP4 en CI à lire |
+| `bb22f8d5` | ci : A/B KVM SMP1 du réveil précis | — |
+| `0cc556a5` | P10+.2a : possession de la mémoire du scanout (pur, 8 tests) | HOST |
+| `7c19ff46` | P10+.2b : composition directe dans la mémoire du scanout (**OFF**), copies comptées | TCG local : pixels = bureau BGA, 0 octet copié, A/B CONVAINCANT (plein 3 328 → 1 049 µs) ; KVM en CI à lire |
+| `e275b543` | diag : trace `+ echo AB_REVEIL_FIN` ≠ fin (A/B IPI) | HOST |
+| `43c05361` | P10+.3a : plan de soumission par trame (pur, 7 tests) | HOST |
+| *(lot suivant)* | P10+.1 : **interruption par défaut** (A/B KVM CONVAINCANT) ; docs | garde mis à jour ; banc BGA/virtio local vert |
 
-### Campagne `c7018e56` (lue) — détail : `AUDIT_STABILITY_2026-10-15.md`
+### Campagne `f23a1247` (lue) — détail : `AUDIT_STABILITY_2026-10-15.md` §7
 
-- verts : CI Fast 38645396551, Integration 38645396809, Reliability 38645396934, SCM 38645396562 ;
-  Ladybird 38645396730 tous jobs verts **sauf** le pas A/B IPI de primitives ;
-- primitives : série 4 démarrages verts (KVM 12 s : 30 différées / 30 vidées / 0 perdue) ;
-  P10 TCG+KVM verts (**première mesure KVM de BARRIERE_V1**) ; P13 KVM : TEMOIN_INSTRUMENT aux 4 topologies ;
-- endurance 38645418495 : SMP1, SMP2 verts, SMP4 vert **40/40 cycles**, SMP8 NON_QUALIFIANT (TCG).
+- verts : CI Fast, Integration, Reliability ; ladybird-native-browser **tous jobs verts** (primitives comprises) ;
+- endurance 38697057637 : SMP1 vert, SMP2 NON_QUALIFIANT (13/29, « charge sans effet »), **SMP4 ÉCHEC cycle 11 → cause trouvée, `20e87dae`**, SMP8 NON_QUALIFIANT 24/24 (poursuivie).
 
 ### Ouverts, par priorité
 
-1. **Lire la campagne du HEAD poussé** (A/B P10+.1 KVM, pannes P10+.1 KVM, BGA/virtio double, P13 KVM avec sommeils ns, A/B IPI V3) et une endurance hebdo (SMP8 doit rester NON_QUALIFIANT **et** poursuivre ses cycles).
-2. **P13+ réveil précis** : la détection des échéances au tick (≤ 1 ms) garde le repos au-dessus de la charge sous KVM ; concevoir le minuteur à l'échéance (LAPIC TSC-deadline au repos, multiplexé avec le quantum), test hôte de la décision, banc KVM.
-3. **P10+.2** double tampon : conception dans `P10_PLUS_ROADMAP.md` ; commencer par la machine d'état des tampons (pure, testée hôte).
-4. Émission série masquée jusqu'à 60–170 ms sous KVM dans les bancs à fautes volontaires (bilan) : décider le report systématique hors panique.
-5. Inchangés : `persist-course-probe`, `courant.rs:276`, LibJS `Value.cpp:484`, RTL8168, Compositor 8/9 (registre).
+1. **Lire la campagne du HEAD poussé** : job `ordonnanceur-ab` (A/B cession KVM SMP4, A/B réveil précis KVM SMP1, A/B IPI), job `gpu-tampon` (pixels en direct TCG+KVM, A/B copie/direct TCG+KVM), A/B P10+.1 KVM (doit rester CONVAINCANT, sinon défaut rendu à la scrutation), endurance SMP1/2/4/8 (SMP4 ne doit plus rougir ; SMP8 NON_QUALIFIANT poursuivi).
+2. **P13 qualifié** : la détection au tic garde le repos au-dessus de la charge sous KVM ; lire l'A/B KVM du réveil précis (TSC-deadline). S'il est CONVAINCANT, l'activer par défaut puis rejouer P13 KVM SMP1/2/4.
+3. **P10+.2** : si l'A/B KVM copie/direct est CONVAINCANT, basculer le défaut (garde `verifie-virtio-gpu-tampons.py` à changer avec la preuve).
+4. **P10+.3b** : brancher le plan de trame (`virtio_gpu_trame::planifie`) dans le compositeur (`debut_trame`/`fin_trame` autour de la boucle des régions), compter les commandes par trame, latence de trame p50/p95/p99, A/B KVM.
+5. SMP2 NON_QUALIFIANT en CI mais QUALIFIE_OK localement (TCG SMP2, HEAD corrigé) : à relire sur la prochaine endurance.
+6. Émission série masquée 60–170 ms sous KVM (bancs à fautes) ; boucles d'attente `grep …_FIN` qui s'arrêtent sur la trace de l'écho (sans effet sur les verdicts, à aligner) : `run_ata_integrite.sh`, `run_faute_multifil.sh`, `run_ordonnanceur_attribution.sh`, `run_banc_irq_gpu.sh`.
+7. Inchangés : `persist-course-probe`, `courant.rs:276`, LibJS `Value.cpp:484`, RTL8168, Compositor 8/9 (registre).
 
 ### Commandes exactes de reprise
 
 ```bash
 git fetch origin claude/ladybird-observability-performance && git status --short --branch
 cargo bootimage                                     # image livrée
-tools/ci/run_architecture_guards.sh                 # 173/173 attendu
-tools/ci/run_host_tests.sh                          # 115/115 suites Rust + Python
-tools/ci/run_banc_irq_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6   # A/B P10+.1 (TCG)
-cargo bootimage --features banc-virtio-gpu-irq-pannes && \
-  tools/ci/run_virtio_gpu_irq_pannes.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-BANC_TEMOIN_INSTRUMENT=1 tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 1
+tools/ci/run_architecture_guards.sh                 # 176/176 attendu
+tools/ci/run_host_tests.sh                          # toutes suites Rust + Python
+tools/ci/run_ab_cession.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4          # A/B cession (TCG)
+tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1    # A/B réveil précis (TCG)
+tools/ci/run_banc_tampon.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6           # A/B copie/direct (TCG)
+SCANOUT_TAMPON=direct tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+tools/ci/run_banc_irq_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6          # A/B P10+.1 (TCG)
 ```
 
 ---

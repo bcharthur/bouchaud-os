@@ -110,3 +110,63 @@ ladybird-native-browser (primitives : A/B P10+.1 TCG/KVM, pannes P10+.1
 TCG/KVM, BGA/virtio double, P13 KVM avec sommeils ns, A/B IPI V3), et une
 endurance hebdomadaire (SMP8 doit sortir NON_QUALIFIANT et continuer ses
 cycles, jamais vert).
+
+## 7. Campagne `f23a1247` — lue (15 octobre, matin)
+
+| Run | Workflow | Résultat |
+|---|---|---|
+| [38697040246](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040246) | CI Fast | vert |
+| [38697040138](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040138) | Integration | vert |
+| [38697040370](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040370) | Reliability V3 | vert |
+| [38697040371](https://github.com/bcharthur/bouchaud-os/actions/runs/38697040371) | ladybird-native-browser | **vert** : tous les jobs Ladybird (endurances 10 min, KVM, 20 min KVM, robustesse, sites réels, WPT, smokes BGA et virtio, cache/SQL, mémoire, ordre worker, politique de crash, piège Compositor, performance) et primitives (job 116295952133, tous les pas) |
+| [38697057637](https://github.com/bcharthur/bouchaud-os/actions/runs/38697057637) | Endurance 30 min / tranche (TCG) | SMP1 **vert** ; SMP2 **NON_QUALIFIANT** (13 cycles sur 29) ; SMP4 **ÉCHEC** (cycle 11) ; SMP8 **NON_QUALIFIANT** (24/24 cycles, campagne poursuivie comme exigé) |
+
+### 7.1 Primitives (job 116295952133, 59 min)
+
+- **P10+.1, A/B scrutation/interruption** (6 tours AB/BA par accélérateur) :
+  - TCG : NON_CONVAINCANT (latences dans les seuils, aucun gain processeur : sous TCG le cœur ne dort jamais pendant l'attente) ;
+  - **KVM : CONVAINCANT**, 6/6 tours. p50 plein 358 → 346 µs, bande 125,5 → 115, tuile 72 → 72 ; p95 dans les seuils ; cœur **inactif 201,5 ‰** en plein écran (0 en scrutation), 353,5 ‰ en bande ; **0 achèvement vu sans interruption sur 3 840 présentations**.
+  → défaut basculé sur l'interruption (`IRQ_VOULUE` vrai, commentaire et garde citent ce run). La CI rejoue l'A/B à chaque campagne : un KVM NON_CONVAINCANT rend le défaut à la scrutation.
+- **Pannes P10+.1** TCG et KVM vertes (MSI-X masqué rattrapé par la relecture, parasites comptés sans progrès, attente aveugle échue une fois, abandon, bureau vivant). `ATTACH_BACKING` sans réponse et réponse étrangère : verts TCG et KVM.
+- **BGA/virtio, deux bancs par démarrage** : 640/640 deux fois, `SCANOUT_REPRIS` TCG et KVM (le correctif `2238d8b9` tient en CI). KVM virtio : plein 448 µs (p95 602), bande 128 (164), tuile 78 (113).
+- **P13 KVM SMP1/2/4/8 (sommeils à la nanoseconde)** : `ORDONNANCEUR_TEMOIN_INSTRUMENT` aux quatre topologies, 0 QUALIFIE_ECHEC, preuve de l'hôte 18/18 phases. SMP1 : repos médiane 410–500 µs, p95 ≈ 970 µs ; **sous charge normale médiane ≈ 215 µs, p95 ≈ 270 µs**. La charge *raccourcit* le retard : sous charge, chaque point d'ordonnancement balaie les échéances, au repos seul le tic (1 ms) le fait. C'est exactement la cible de P13+ (réveil à l'échéance) ; P13 **non qualifié**.
+- **A/B IPI V3** : NON_CONCLUANT à SMP4 et SMP8 (0 passe qualifiée, même porte « charge sans effet ») ; **aucun défaut de sûreté** (le relevé dans le bras, V3, tient).
+- Série : quatre démarrages verts (KVM 12 s : différées toutes vidées, aucune perdue).
+
+### 7.2 Endurance : le rouge SMP4 et sa cause
+
+Cycle 11 de SMP4 : `QUALIFIE_ECHEC` de la sonde, « la priorité interactive
+raccourcit la queue » (p99 3 095 contre 2 580 µs, pire 5 954 contre 3 078 µs).
+Le noyau n'explique que 2 422 µs du pire réveil (échéance → retour en ring 3) :
+**3,5 ms tombent après le retour**. Cause trouvée dans le code : `pick_next`
+tire la tête de la file locale sans regarder la tâche **courante** ; au quantum
+(`preempt_from_irq`) comme à un point sûr (`safe_point`), une interactive tout
+juste élue cédait son cœur au premier calcul **normal** en attente et
+attendait le quantum suivant. Correctif `20e87dae` (cession par classe, défaut) ;
+A/B local TCG SMP4 : 903–912 inversions par passe sous la politique historique,
+0 sous la nouvelle. Même vérification rouge sur `1413289b` et `7ffedd2b` :
+c'était une intermittence, pas une régression de `f23a1247`.
+
+SMP2 NON_QUALIFIANT : la sonde juge la charge « sans effet mesurable » (p95 sous
+charge 743–964 µs ≤ p95 au repos 776–1 048 µs) — la même signature que P13 KVM
+(détection au tic au repos). Reproduit localement sur le HEAD corrigé (TCG
+SMP2, deux passes) : **QUALIFIE_OK** les deux fois (repos p95 1 232 / 1 393 µs,
+normale 4 008 / 4 055, interactive 908 / 956) — l'écart CI/local n'est pas
+expliqué ; à relire sur la prochaine endurance.
+
+### 7.3 Ce qui part avec la campagne suivante
+
+| Commit | Objet | Preuve locale |
+|---|---|---|
+| `3929746a` | P13+ réveil à l'échéance exacte (expérimental, OFF) | A/B TCG SMP1 4 tours : ÉCHEC selon ses critères (p99) — non qualifié |
+| `20e87dae` | fix P13 : cession par classe au quantum et aux points sûrs | 7 tests hôte, A/B TCG SMP4, OS_PRIMITIVES_OK local |
+| `bb22f8d5` | ci : A/B KVM SMP1 du réveil précis | — |
+| `0cc556a5`, `7c19ff46` | P10+.2 : composition directe dans la mémoire du scanout (OFF) | pixels identiques au bureau BGA, 0 octet copié, A/B TCG CONVAINCANT (plein 3 328 → 1 049 µs) |
+| `43c05361` | P10+.3a : plan de soumission par trame (pur) | 7 tests hôte |
+| `e275b543` | diag : la trace `+ echo AB_REVEIL_FIN` ne vaut plus fin (A/B IPI) | test négatif |
+| *(ce lot)* | P10+.1 : interruption par défaut (A/B KVM CONVAINCANT ci-dessus) | garde et A/B mis à jour |
+
+Nouveaux jobs du workflow des primitives : `ordonnanceur-ab` (A/B IPI déplacé,
+A/B cession KVM SMP4, A/B réveil précis KVM SMP1) et `gpu-tampon` (pixels en
+composition directe et A/B copie/direct, TCG puis KVM), en parallèle des sondes
+(le job des sondes a duré 59 min sur 95).
