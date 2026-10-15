@@ -1044,6 +1044,8 @@ fn attente_achevement(limite_ms: u64, mut predicat: impl FnMut() -> bool) -> boo
     if !b.reussi {
         ATTENTES_DORMANTES_ECHUES.fetch_add(1, Ordering::Relaxed);
     }
+    #[cfg(feature = "banc-virtio-gpu-irq-pannes")]
+    pannes::apres_attente(rang, b.reussi);
     b.reussi
 }
 
@@ -1065,6 +1067,14 @@ mod pannes {
 
     static RANG: AtomicU64 = AtomicU64::new(0);
     static PARASITES: AtomicU64 = AtomicU64::new(0);
+    /// Parasites envoyees HORS VOL (aucune commande en vol, aucune MSI-X en
+    /// attente) et celles qui ont produit exactement un passage du
+    /// gestionnaire sans progres. Run 38732049308 (KVM) : une parasite
+    /// envoyee pendant qu'une reponse arrivait a fusionne avec la vraie MSI-X
+    /// (un vecteur n'a qu'une place dans l'IRR) -- un seul passage, qui voyait
+    /// du progres ; le compte strict ne vaut donc que hors vol.
+    static HORS_VOL: AtomicU64 = AtomicU64::new(0);
+    static HORS_VOL_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
     /// L'attente en cours a-t-elle deja dormi ?
     static DORMI: AtomicBool = AtomicBool::new(false);
 
@@ -1103,7 +1113,10 @@ mod pannes {
             crate::serial_println!("VIRTIO_GPU_INJECTION irq_parasites attentes={}..{}", PARASITES_DEBUT, PARASITES_FIN);
         } else if rang == PARASITES_FIN {
             crate::serial_println!(
-                "VIRTIO_GPU_INJECTION irq_parasites_fin envoyees={}", PARASITES.load(Ordering::Relaxed)
+                "VIRTIO_GPU_INJECTION irq_parasites_fin envoyees={} hors_vol={} hors_vol_sans_progres={}",
+                PARASITES.load(Ordering::Relaxed),
+                HORS_VOL.load(Ordering::Relaxed),
+                HORS_VOL_SANS_PROGRES.load(Ordering::Relaxed)
             );
         } else if rang == AVEUGLE {
             crate::serial_println!("VIRTIO_GPU_INJECTION reponse_jamais_vue attente={} (echeance attendue)", AVEUGLE);
@@ -1118,6 +1131,43 @@ mod pannes {
 
     pub(super) fn parasite_due() -> bool {
         (PARASITES_DEBUT..PARASITES_FIN).contains(&RANG.load(Ordering::Relaxed))
+    }
+
+    /// Apres une attente reussie de la fenetre : une parasite HORS VOL. Une
+    /// seule commande est en vol a la fois (BARRIERE_V1) et elle est achevee ;
+    /// on attend d'abord que le gestionnaire ait vu le dernier indice de la
+    /// file (la MSI-X de cette reponse est servie), puis on envoie la parasite
+    /// et on attend qu'elle soit servie : elle seule a pu faire ce passage, qui
+    /// ne doit voir AUCUN progres. Contexte cedable (IF=1) : garanti par la
+    /// strategie dormante.
+    pub(super) fn apres_attente(rang: u64, reussi: bool) {
+        if !reussi || !(PARASITES_DEBUT..PARASITES_FIN).contains(&rang) {
+            return;
+        }
+        let p = UTIL_IDX.load(Ordering::Acquire);
+        if p == 0 {
+            return;
+        }
+        let borne = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000);
+        while IRQ_VU.load(Ordering::Relaxed) != unsafe { read_volatile(p as *const u16) } {
+            if crate::kernel::timer::monotonic_ns() > borne {
+                // La MSI-X de cette reponse n'est pas servie : pas de parasite
+                // hors vol cette fois (le compte `hors_vol` le dira).
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        let avant = IRQ_SANS_PROGRES.load(Ordering::Relaxed);
+        let total = IRQ_TOTAL.load(Ordering::Relaxed);
+        HORS_VOL.fetch_add(1, Ordering::Relaxed);
+        crate::arch::x86_64::smp::ipi_vers_soi(irq::VECTEUR);
+        let borne = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000);
+        while IRQ_TOTAL.load(Ordering::Relaxed) == total && crate::kernel::timer::monotonic_ns() <= borne {
+            core::hint::spin_loop();
+        }
+        if IRQ_TOTAL.load(Ordering::Relaxed) == total + 1 && IRQ_SANS_PROGRES.load(Ordering::Relaxed) == avant + 1 {
+            HORS_VOL_SANS_PROGRES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 

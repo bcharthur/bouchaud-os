@@ -10,11 +10,13 @@
 #   1. l'entree MSI-X masquee pendant dix attentes : les interruptions sont
 #      PERDUES ; chaque reponse doit etre trouvee par la relecture de secours
 #      (`vus_par_relecture` >= 10, une par attente masquee), sans echec de presentation ;
-#   2. des interruptions parasites sur le vecteur (au moins six : une avant
-#      chaque attente de la fenetre, plus une pendant le sommeil quand il a
-#      lieu) : toutes comptees sans progres, aucune presentation refusee --
-#      elles n'achevent rien (la preuve deterministe du reveil parasite pendant
-#      un sommeil est le test hote `interruption_parasite_n_acheve_rien`) ;
+#   2. des interruptions parasites sur le vecteur, EN VOL (avant chaque
+#      attente de la fenetre et pendant le sommeil : preuve, elles peuvent
+#      fusionner avec la vraie MSI-X) et HORS VOL (apres chaque achevement de
+#      la fenetre, MSI-X servie : au moins six, chacune exactement un passage
+#      du gestionnaire sans progres) ; aucune presentation refusee -- elles
+#      n'achevent rien (la preuve deterministe du reveil parasite pendant un
+#      sommeil est le test hote `interruption_parasite_n_acheve_rien`) ;
 #   3. une attente dont la reponse n'est jamais vue : elle finit a son
 #      echeance (`echues=1`), la file est cassee, le scanout abandonne au
 #      premier echec, le compositeur tourne encore. Aucune panique.
@@ -67,10 +69,19 @@ exige "attente par interruption effective (attentes dormantes > 0)" test "$(val 
 # (injection deterministe, run 38704459647) : chacune des dix est retrouvee
 # par la relecture.
 exige "interruptions perdues : les dix reponses masquees trouvees par la relecture (vus_par_relecture >= 10)" test "$(val "$APRES" vus_par_relecture)" -ge 10 2>/dev/null
-ENVOYEES=$(propre | grep -aoE 'irq_parasites_fin envoyees=[0-9]+' | head -1 | cut -d= -f2)
-echo "  preuve  parasites envoyees=${ENVOYEES:-?} ; reveils sans progres=$(val "$APRES" reveils_sans_progres) (selon l'instant : la reponse est souvent deja la)"
-exige "parasites : au moins six envoyees, toutes comptees sans progres par le gestionnaire" \
-  bash -c "[ '${ENVOYEES:-0}' -ge 6 ] && [ '$(val "$APRES" irq_sans_progres)' -ge '${ENVOYEES:-0}' ]" 2>/dev/null
+# Deux sortes de parasites. EN VOL (pendant un sommeil) : elle reveille
+# l'attente, qui doit se rendormir -- mais elle peut fusionner avec la vraie
+# MSI-X de la reponse (un vecteur n'a qu'une place dans l'IRR : run
+# 38732049308, KVM, 9 envoyees pour 8 passages sans progres), le compte n'est
+# donc qu'une preuve. HORS VOL (apres l'achevement, MSI-X servie) : rien ne
+# peut fusionner, chacune doit produire exactement un passage sans progres.
+FIN=$(propre | grep -aoE 'irq_parasites_fin envoyees=[0-9]+ hors_vol=[0-9]+ hors_vol_sans_progres=[0-9]+' | head -1)
+ENVOYEES=$(echo "$FIN" | grep -oE 'envoyees=[0-9]+' | cut -d= -f2)
+HORS_VOL=$(echo "$FIN" | grep -oE 'hors_vol=[0-9]+' | cut -d= -f2)
+HORS_VOL_VUES=$(echo "$FIN" | grep -oE 'hors_vol_sans_progres=[0-9]+' | cut -d= -f2)
+echo "  preuve  parasites en vol=${ENVOYEES:-?} ; reveils sans progres=$(val "$APRES" reveils_sans_progres) ; irq sans progres=$(val "$APRES" irq_sans_progres) (une parasite en vol peut fusionner avec la reponse)"
+exige "parasites hors vol : au moins six, chacune un passage du gestionnaire sans progres (${HORS_VOL_VUES:-?}/${HORS_VOL:-?})" \
+  bash -c "[ '${HORS_VOL:-0}' -ge 6 ] && [ '${HORS_VOL_VUES:--1}' = '${HORS_VOL:-0}' ]" 2>/dev/null
 exige "une seule attente echue (la reponse jamais vue)" test "$(val "$APRES" echues)" = 1
 exige "un seul echec de presentation (la reponse jamais vue), au moins 5 acceptees avant" \
   bash -c "[ '$(val "$APRES" presents_echec)' = 1 ] && [ '$(val "$APRES" presents_ok)' -ge 5 ]" 2>/dev/null
