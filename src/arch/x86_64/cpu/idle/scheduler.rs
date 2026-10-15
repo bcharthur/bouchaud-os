@@ -117,7 +117,12 @@ pub fn commit_scheduler_idle() {
     }
 
     idle_trace_phase(cpu, IDLE_PHASE_SCHED_HLT);
+    // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur local sur la plus proche
+    // echeance de sommeil (interruptions encore coupees), retire au retour
+    // s'il n'a pas servi.
+    smp::arme_reveil_precis_avant_hlt();
     unsafe { asm!("sti; hlt", options(nostack)); }
+    smp::retire_reveil_precis_apres_hlt();
     idle_exit(cpu);
     SCHED_WAKES[cpu].fetch_add(1, Ordering::Relaxed);
     idle_trace_phase(cpu, IDLE_PHASE_RUNNING);

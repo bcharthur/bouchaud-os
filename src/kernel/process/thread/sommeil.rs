@@ -276,6 +276,13 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
 static PROCHAINE_ECHEANCE: crate::kernel::echeances::Echeances =
     crate::kernel::echeances::Echeances::neuve();
 
+/// La plus proche echeance de sommeil connue (borne inferieure ;
+/// `echeances::JAMAIS` pendant un balayage). BOUCHAUD_REVEIL_PRECIS_V1 : un
+/// coeur qui s'endort arme son minuteur dessus.
+pub fn prochaine_echeance_ns() -> u64 {
+    PROCHAINE_ECHEANCE.borne()
+}
+
 /// Declare une echeance. A appeler POUR CHAQUE `wake_deadline_ns` non nul.
 ///
 /// `tools/verifie-echeances.py` refuse une ecriture qui ne passerait pas par

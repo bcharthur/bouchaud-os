@@ -301,6 +301,12 @@ fn detect_tsc_features() -> (bool, bool) {
     (invariant, rdtscp)
 }
 
+/// Le TSC de l'instant monotone `ns` (inverse de `monotonic_ns`), `None`
+/// tant que la frequence du TSC est inconnue. BOUCHAUD_REVEIL_PRECIS_V1.
+pub fn tsc_pour_ns(ns: u64) -> Option<u64> {
+    crate::kernel::reveil_precis::tsc_de(ns, BOOT_TSC.load(Ordering::Acquire), TSC_HZ.load(Ordering::Acquire))
+}
+
 /// Convertit une duree en millisecondes en nombre de ticks, arrondi au
 /// superieur pour ne jamais rendre la main trop tot.
 pub fn ms_to_ticks(ms: u64) -> u64 {

@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "gpu-irq", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "reveil-precis", "ordo-variante", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -736,6 +736,25 @@ fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => { crate::arch::x86_64::smp::veut_reveil_precis(true); }
+            "off" => { crate::arch::x86_64::smp::veut_reveil_precis(false); }
+            autre => {
+                crate::println!("reveil-precis : {} inconnu (on | off)", autre);
+                return 1;
+            }
+        }
+    }
+    let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
+    crate::serial_println!(
+        "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={}",
+        voulu as u8, mode, armes, retires
+    );
+    0
+}
+
 fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
     let mut grace_ms = 0;
@@ -845,6 +864,9 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // interruption (on) ou par scrutation (off), pour l'A/B ; sans
         // argument, l'etat et les compteurs.
         "gpu-irq" => gpu_irq(argc, &argv),
+        // BOUCHAUD_REVEIL_PRECIS_V1 : reveil a l'echeance exacte au repos
+        // (on) ou au tick/quantum (off), pour l'A/B ; sans argument, l'etat.
+        "reveil-precis" => reveil_precis(argc, &argv),
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),

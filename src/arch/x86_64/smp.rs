@@ -684,18 +684,36 @@ pub fn arm_local_scheduler_timer() {
     // decider AVANT toute ecriture, et non le seul drapeau « un timer local
     // est actif ».
     match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
-        MODE_LAPIC_PERIODIQUE => {}
+        MODE_LAPIC_PERIODIQUE => {
+            // BOUCHAUD_REVEIL_PRECIS_V1 : un compte raccourci pour une
+            // echeance de sommeil est remplace par celui du quantum.
+            let cpu = cpu_index();
+            if cpu < MAX_CPUS && ARME_PRECIS[cpu].swap(false, Ordering::Relaxed) {
+                let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+                if compte != 0 {
+                    unsafe {
+                        let (x2, lapic) = local_apic();
+                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
+                    }
+                }
+            }
+        }
         MODE_TSC_DEADLINE => {
             if let Some(hz) = crate::kernel::timer::tsc_hz() {
                 let delta = (hz as u128)
                     .saturating_mul(SCHED_QUANTUM_TICKS as u128)
                     .div_ceil(1000)
                     .min(u64::MAX as u128) as u64;
+                let echeance = crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1));
                 unsafe {
-                    usermode::write_msr(
-                        IA32_TSC_DEADLINE,
-                        crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1)),
-                    );
+                    usermode::write_msr(IA32_TSC_DEADLINE, echeance);
+                }
+                // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur porte le quantum ;
+                // tout armement precis est remplace.
+                let cpu = cpu_index();
+                if cpu < MAX_CPUS {
+                    ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
+                    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
                 }
             }
         }
@@ -762,6 +780,103 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
         battants, coeurs, mode_timer_local(),
     );
     (battants, coeurs)
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_REVEIL_PRECIS_V1 (P13+) -- reveil a l'echeance exacte au repos
+// ---------------------------------------------------------------------------
+
+/// Ce que le minuteur local porte (TSC), par coeur.
+static ARME_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+/// Le minuteur porte une echeance de SOMMEIL (et non le quantum).
+static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// La politique (`reveil-precis on|off`). Desactivee par defaut tant qu'un
+/// A/B KVM n'a pas montre le gain.
+static REVEIL_PRECIS: AtomicBool = AtomicBool::new(false);
+static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
+static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
+
+/// Juste avant `hlt`, interruptions coupees : arme le minuteur local sur la
+/// plus proche echeance de sommeil si elle precede le quantum.
+pub fn arme_reveil_precis_avant_hlt() {
+    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) || !REVEIL_PRECIS.load(Ordering::Relaxed) {
+        return;
+    }
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let borne = crate::kernel::task::prochaine_echeance_ns();
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
+        // Mode periodique (QEMU TCG) : un compte initial plus court, qui
+        // redemarre le minuteur ; le quantum est restaure a son declenchement
+        // (`arm_local_scheduler_timer`) ou au retour de `hlt`.
+        let quantum = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+        unsafe {
+            let (x2, lapic) = local_apic();
+            let restant = timer_local_courant(x2, lapic);
+            let compte = crate::kernel::reveil_precis::decide_compte(
+                true,
+                borne,
+                crate::kernel::timer::monotonic_ns(),
+                restant,
+                u64::from(quantum) / SCHED_QUANTUM_TICKS,
+            );
+            if let Some(c) = compte {
+                timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, c);
+                ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
+                REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        return;
+    }
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    let cible = crate::kernel::reveil_precis::decide(
+        REVEIL_PRECIS.load(Ordering::Relaxed),
+        borne,
+        crate::kernel::timer::monotonic_ns(),
+        crate::arch::x86_64::cpu::rdtsc(),
+        ARME_TSC[cpu].load(Ordering::Relaxed),
+        crate::kernel::timer::tsc_pour_ns(borne),
+    );
+    if let Some(tsc) = cible {
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, tsc) };
+        ARME_TSC[cpu].store(tsc, Ordering::Relaxed);
+        ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
+        REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Au retour de `hlt` : un armement precis encore en place (le coeur a ete
+/// reveille par autre chose) est retire -- le quantum est rearme. Le minuteur
+/// ne tombera jamais sur une tache en cours pour une echeance qui n'est pas
+/// la sienne.
+pub fn retire_reveil_precis_apres_hlt() {
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    if ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+        REVEILS_PRECIS_RETIRES.fetch_add(1, Ordering::Relaxed);
+        arm_local_scheduler_timer();
+    }
+}
+
+/// La politique du reveil precis ; rend l'etat precedent.
+pub fn veut_reveil_precis(oui: bool) -> bool {
+    REVEIL_PRECIS.swap(oui, Ordering::Relaxed)
+}
+
+/// `(voulu, mode du minuteur local, armes, retires avant d'avoir servi)`.
+pub fn compteurs_reveil_precis() -> (bool, &'static str, u64, u64) {
+    (
+        REVEIL_PRECIS.load(Ordering::Relaxed),
+        mode_timer_local(),
+        REVEILS_PRECIS_ARMES.load(Ordering::Relaxed),
+        REVEILS_PRECIS_RETIRES.load(Ordering::Relaxed),
+    )
 }
 
 pub fn local_scheduler_timer_enabled() -> bool {
