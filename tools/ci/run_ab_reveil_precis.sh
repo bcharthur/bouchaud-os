@@ -42,6 +42,8 @@ cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
       echo "reveil-precis $v"
       echo "/bin/ordonnanceur-probe 8 1"
       echo "reveil-precis"
+      # Marqueur reel APRES le releve final du bras, AVANT la restauration globale.
+      echo "echo AB_PRECIS_BRAS_FIN tour=$t reveil=$v"
     done
   done
   echo "reveil-precis on"

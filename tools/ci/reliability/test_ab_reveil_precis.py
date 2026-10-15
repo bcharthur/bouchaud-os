@@ -25,6 +25,8 @@ def bras(t, v, repos=(900, 1600, 2500, 4000), inter=(600, 1000, 1500, 3000), ver
         P + "  sous charge (interactif) median %5d us  p95 %6d us  p99 %6d us  pire %6d us  [propres 300/300, regle=preuve-hote]" % inter,
         P + f"VERDICT_SONDE : {verdict} tentatives=1",
         P + f"REVEIL_PRECIS voulu={voulu} minuteur=tsc-deadline armes={armes[1]} retires_avant_service=0",
+        P + f"+ echo AB_PRECIS_BRAS_FIN tour={t} reveil={v}",
+        P + f"AB_PRECIS_BRAS_FIN tour={t} reveil={v}",
     ]
 
 
@@ -88,6 +90,30 @@ class AbReveilPrecis(unittest.TestCase):
     def test_panique_est_un_defaut(self):
         _, v, c = a.analyse(journal() + "panicked at x\n", 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
+
+
+class DelimitationDuBras(unittest.TestCase):
+    def test_restauration_finale_ne_contamine_pas_le_dernier_off(self):
+        texte = journal() + P + "+ reveil-precis on\n" + P + (
+            "REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=2000 retires_avant_service=0"
+        ) + "\n" + P + "AB_PRECIS_FIN\n"
+        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((verdict, code), ("CONVAINCANT", 0))
+
+    def test_absence_fin_bras_est_un_defaut(self):
+        fermeture = P + "AB_PRECIS_BRAS_FIN tour=4 reveil=off\n"
+        texte = journal().replace(fermeture, "", 1)
+        self.assertNotEqual(texte, journal())
+        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((verdict, code), ("DEFAUT", 1))
+
+    def test_fausse_fin_trace_shell_n_est_pas_acceptee(self):
+        fermeture = P + "AB_PRECIS_BRAS_FIN tour=4 reveil=off\n"
+        texte = journal().replace(fermeture, "", 1)
+        # Le journal garde "+ echo ...", qui ne suffit pas.
+        self.assertIn(P + "+ echo AB_PRECIS_BRAS_FIN", texte)
+        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((verdict, code), ("DEFAUT", 1))
 
 
 class LignesEntrelacees(unittest.TestCase):
