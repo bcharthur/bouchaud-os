@@ -853,6 +853,70 @@ jobs:
             convergence-browser-host-virtio.json
           if-no-files-found: warn
 
+  browser-host-smoke-surface-double:
+    name: ladybird / browser-host smoke, surface a deux tampons (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Smoke BrowserHost sur Bouchaud OS, surface client a deux tampons
+        # BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d) : `gui-surface double`
+        # avant `desktop` ; le chrome doit retenir le contrat et recevoir des
+        # liberations, en plus de tout ce que le smoke de reference exige.
+        env:
+          BO_SMOKE_SURFACE: double
+          BO_SMOKE_SUFFIXE: -double
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        # `surface-browser-host.ppm` est la capture du moniteur QEMU. Le
+        # verdict de mire dit « absente » sans jamais montrer ce qui a ete
+        # capture ; sans le fichier, on ne peut ni verifier le verdict ni voir
+        # CE QUI s'est affiche a la place.
+        #
+        # Dans un bloc `|`, une ligne commencant par `#` n'est pas un
+        # commentaire mais un motif de chemin : ce commentaire-ci est donc
+        # dehors, a sa place.
+        with:
+          name: ladybird-browser-host-smoke-double-logs
+          path: |
+            serie-browser-host-double.log
+            fixture-browser-host-double.log
+            surface-browser-host-double.ppm
+            surface-browser-host-double-t*.ppm
+            surface-tentatives*.txt
+            convergence-browser-host-double.json
+          if-no-files-found: warn
+
   # ==========================================================================
   # BOUCHAUD_C44_DEUX_STATUTS_REELS
   # ==========================================================================

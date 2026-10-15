@@ -19,7 +19,14 @@ Regles :
   5. la composition lit la FACE (`copie_ligne_de(client.face(), ...)`), et
      nulle part la surface autrement ;
   6. la regle est pure et testee (`tools/gui/test_surface_tampons.rs`) ; la
-     CI joue le banc de dechirure sous TCG et KVM, criteres declares.
+     CI joue le banc de dechirure sous TCG et KVM, criteres declares ;
+  7. cote chrome Ladybird (P10+.3d) : la regle pure `BouchaudTampons.h` est
+     testee sur l'hote (equivalence pixel a pixel avec une surface unique) ;
+     chaque composition passe par `prepare_arriere()` AVANT de prendre la
+     toile ; la capacite n'est annoncee que si deux tampons sont retenus ;
+     `FrameReady` nomme le tampon arriere ; une `Liberation` passe par
+     `libere` ; un smoke Ladybird de diagnostic tourne sous `gui-surface
+     double`.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -36,6 +43,10 @@ FICHIERS = {
     "shell": RACINE / "src/shell/mod.rs",
     "flux": RACINE / ".github/workflows/os-primitives.yml",
     "analyse": RACINE / "tools/ci/analyse_banc_dechirure.py",
+    "chrome": RACINE / "tools/ladybird/chrome/BouchaudChrome.h",
+    "pur_chrome": RACINE / "tools/ladybird/chrome/BouchaudTampons.h",
+    "test_chrome": RACINE / "tools/ladybird/chrome/test_tampons.cpp",
+    "flux_lb": RACINE / ".github/workflows/ladybird-native-browser.yml",
 }
 OFFRE = "static SURFACE_DOUBLE_OFFERTE: AtomicBool = AtomicBool::new(false);"
 MESURE = "static MESURE_DECHIRURE: AtomicBool = AtomicBool::new(false);"
@@ -50,6 +61,11 @@ APRES = "        self.envoie_liberations();\n        trame_prete\n    }"
 FACE = "surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);"
 CI = ("tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin",
       "BO_QEMU_KVM=1 tools/ci/run_banc_dechirure.sh")
+PREPARE = ("    if (!prepare_arriere()) {", "    auto canvas_or_error = mapped_surface();")
+CAPACITE = "put32(hello + 8, s.tampons.nombre == 2 ? BouchaudTampons::CAPACITE_DEUX_TAMPONS : 0u);"
+TAMPON_TRAME = "auto const tampon = s.tampons.nombre == 2 ? s.tampons.arriere : 0;"
+LIBERE = "if (size >= 8 && s.tampons.libere(static_cast<int>(read_u32(payload, 4))))"
+EQUIVALENCE = "la face egale la surface unique, pixel a pixel"
 TESTS = ("un_client_conforme_n_ecrit_jamais_dans_la_face", "le_client_retrouve_toujours_un_tampon_libre",
          "une_liberation_qui_n_a_pas_pu_partir_reste_due", "la_negociation_exige_l_offre_et_la_capacite")
 
@@ -62,6 +78,15 @@ def corps(texte: str, signature: str) -> str:
     fin2 = texte.find("\n}\n", i)
     fins = [f for f in (fin, fin2) if f > 0]
     return texte[i:min(fins) + 6] if fins else ""
+
+
+def corps_haut(texte: str, signature: str) -> str:
+    """Le corps d'une fonction de premier niveau (jusqu'a la `}` en colonne 0)."""
+    i = texte.find(signature)
+    if i < 0:
+        return ""
+    fin = texte.find("\n}\n", i)
+    return texte[i:fin + 3] if fin > 0 else ""
 
 
 def verifie(t: dict, src: str) -> list:
@@ -106,6 +131,26 @@ def verifie(t: dict, src: str) -> list:
     for jalon in ('bi["mixtes"] != 0', "QUORUM = 4", "temoin = mixtes_v1 > 0", "LECTURES_MIN = 20"):
         if jalon not in t["analyse"]:
             fautes.append(f"analyse du banc : critere retire ({jalon}).")
+    # 7. Le chrome Ladybird.
+    for signature in ("inline bool compose_page(", "inline bool compose_toolbar_only("):
+        c = corps_haut(t["chrome"], signature)
+        i, j = c.find(PREPARE[0]), c.find(PREPARE[1])
+        if i < 0 or j < 0 or i > j:
+            fautes.append(f"chrome : {signature.split('(')[0]} prend la toile sans preparer le tampon arriere.")
+    if '#include "BouchaudTampons.h"' not in t["chrome"]:
+        fautes.append("chrome : la regle BouchaudTampons n'est plus incluse.")
+    if CAPACITE not in t["chrome"]:
+        fautes.append("chrome : la capacite deux tampons est annoncee sans contrat retenu.")
+    if TAMPON_TRAME not in t["chrome"]:
+        fautes.append("chrome : FrameReady ne nomme plus le tampon arriere.")
+    if LIBERE not in t["chrome"]:
+        fautes.append("chrome : une Liberation ne passe plus par BouchaudTampons::libere.")
+    if any(m in t["pur_chrome"] for m in ("#include <AK", "#include <Lib", "static_cast<u8*>")):
+        fautes.append("BouchaudTampons.h : la regle n'est plus pure (AK/Lib).")
+    if EQUIVALENCE not in t["test_chrome"] or "le client n'a jamais ecrit la face" not in t["test_chrome"]:
+        fautes.append("test_tampons.cpp : l'equivalence pixel a pixel n'est plus verifiee.")
+    if "BO_SMOKE_SURFACE: double" not in t["flux_lb"]:
+        fautes.append("CI : le smoke Ladybird sous deux tampons n'est plus joue.")
     return fautes
 
 
@@ -131,6 +176,13 @@ def negatifs(t: dict, src: str) -> list:
         ("dechirure toleree en v2", "analyse", 'bi["mixtes"] != 0', "False"),
         ("temoin retire", "analyse", "temoin = mixtes_v1 > 0", "temoin = True"),
         ("commande debranchee", "shell", '"gui-surface" => gui_surface(argc, &argv),', ""),
+        ("chrome sans preparation", "chrome", "    if (!prepare_arriere()) {\n        s.composition_differee = true;",
+         "    if (false) {\n        s.composition_differee = true;"),
+        ("capacite toujours annoncee", "chrome", CAPACITE, "put32(hello + 8, BouchaudTampons::CAPACITE_DEUX_TAMPONS);"),
+        ("trame sur le tampon 0", "chrome", TAMPON_TRAME, "auto const tampon = 0;"),
+        ("liberation ignoree", "chrome", LIBERE, "if (false)"),
+        ("equivalence retiree", "test_chrome", EQUIVALENCE, "x"),
+        ("smoke double retire", "flux_lb", "BO_SMOKE_SURFACE: double", "BO_SMOKE_SURFACE: simple"),
     ]
     echecs = []
     for nom, cle, avant, apres in mutations:
@@ -160,7 +212,8 @@ def main() -> int:
             print(f"verifie-surface-tampons: {f}")
         return 1
     print("verifie-surface-tampons: OK (offre et mesure off par defaut, contrat negocie a la poignee de main, "
-          "hors surface refuse, liberations jamais perdues, composition sur la face, regle pure, banc TCG+KVM ; 16 negatifs)")
+          "hors surface refuse, liberations jamais perdues, composition sur la face, regle pure, banc TCG+KVM, "
+          "chrome Ladybird a deux tampons ; 22 negatifs)")
     return 0
 
 

@@ -121,6 +121,18 @@ case "${BO_SMOKE_PROFIL_RIP:-}" in
 esac
 echo "BO_SMOKE_PROFIL_RIP valeur=${BO_SMOKE_PROFIL_RIP:-defaut}"
 
+# BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d) : `BO_SMOKE_SURFACE=double`
+# fait offrir deux tampons au navigateur (`gui-surface double` avant
+# `desktop`). Le smoke exige alors que le contrat soit RETENU des deux cotes
+# et que le chrome recoive des liberations. Absent : rien n'est ecrit.
+LIGNE_SURFACE=""
+case "${BO_SMOKE_SURFACE:-}" in
+  simple|double) LIGNE_SURFACE="gui-surface ${BO_SMOKE_SURFACE}" ;;
+  "") ;;
+  *) echo "BO_SMOKE_SURFACE=${BO_SMOKE_SURFACE} : simple ou double" >&2; exit 2 ;;
+esac
+echo "BO_SMOKE_SURFACE valeur=${BO_SMOKE_SURFACE:-defaut}"
+
 cat > "$SCENARIO/autorun" <<AUTORUN
 uname
 df
@@ -141,6 +153,9 @@ echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
+fi
+if [ -n "$LIGNE_SURFACE" ]; then
+  sed -i "1i $LIGNE_SURFACE" "$SCENARIO/autorun"
 fi
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 
@@ -1085,6 +1100,31 @@ if [ "$AFFICHAGE" = virtio ]; then
         exit 1
     fi
     echo "LADYBIRD_VIRTIO_OK $derniere"
+fi
+
+# BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : sous `BO_SMOKE_SURFACE=double`, le
+# contrat a deux tampons doit etre retenu par le noyau ET par le chrome, et le
+# chrome doit avoir recu des liberations (sinon il aurait peint sans jamais
+# changer de tampon -- ou se serait fige).
+if [ "${BO_SMOKE_SURFACE:-}" = double ]; then
+    echo
+    echo "== contrat de surface a deux tampons =="
+    propre=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG")
+    grep -aE 'GUI_SURFACE_CONTRAT|\[LB:UI\] tampons|M11_RENDER_STATS' <<< "$propre" | tail -4 | sed 's/^/  /' || true
+    if ! grep -aqE 'GUI_SURFACE_CONTRAT pid=[0-9]+ offerts=2 capacites=0x1 tampons=2' <<< "$propre"; then
+        echo "LADYBIRD_SURFACE_ECHEC le noyau n'a pas retenu deux tampons" >&2
+        exit 1
+    fi
+    if ! grep -aqE '\[LB:UI\] tampons offerts=2 retenus=2' <<< "$propre"; then
+        echo "LADYBIRD_SURFACE_ECHEC le chrome n'a pas retenu deux tampons" >&2
+        exit 1
+    fi
+    stats=$(grep -aoE 'M11_RENDER_STATS .* tampons=2 liberations=[0-9]+ attentes=[0-9]+ rejeu_px=[0-9]+' <<< "$propre" | tail -1 || true)
+    if ! grep -qE 'liberations=[1-9][0-9]* ' <<< "$stats"; then
+        echo "LADYBIRD_SURFACE_ECHEC aucune liberation recue par le chrome (${stats:-aucun releve})" >&2
+        exit 1
+    fi
+    echo "LADYBIRD_SURFACE_DOUBLE_OK $stats"
 fi
 
 # BOUCHAUD_P13_VERDICT_CONVERGENCE

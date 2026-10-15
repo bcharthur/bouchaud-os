@@ -48,6 +48,14 @@
 // a chaque CI, alors que le reste de ce fichier ne tourne que dans QEMU.
 #include "BouchaudDegat.h"
 
+// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d)
+//
+// Les deux tampons de la surface, cote client : ne jamais ecrire la face que
+// le gestionnaire lit, rejouer depuis elle avant de peindre. Pur, verifie sur
+// l'hote par `tools/ladybird/chrome/test_tampons.cpp`. Sans effet tant que le
+// bureau n'offre qu'un tampon (`gui-surface simple`, le defaut).
+#include "BouchaudTampons.h"
+
 // BOUCHAUD_CHROME_V18_ZOOM
 //
 // Les crans de zoom. Meme raison d'etre que BouchaudDegat.h : de l'arithmetique
@@ -642,6 +650,16 @@ struct State {
     // fois évite mmap/munmap et les shootdowns TLB à chaque frame chrome/page.
     u8* surface_mapping { nullptr };
     size_t surface_mapping_bytes { 0 };
+    // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : tampons offerts par le bureau
+    // (BO_SURFACE_TAMPONS), contrat retenu, et une composition differee faute
+    // de tampon libre (son degat est garde, jamais perdu).
+    int tampons_offerts { 1 };
+    BouchaudTampons::Client tampons {};
+    bool composition_differee { false };
+    BouchaudDegat::Rect degat_differe {};
+    u64 tampons_liberations { 0 };
+    u64 tampons_attentes { 0 };
+    u64 tampons_rejeu_px { 0 };
 
     // BOUCHAUD_C22_ONGLETS
     //
@@ -1058,7 +1076,7 @@ inline void send_handshake()
     if (s.handshake_done)
         return;
 
-    u8 hello[8] {};
+    u8 hello[12] {};
     auto put32 = [](u8* out, u32 value) {
         out[0] = static_cast<u8>(value);
         out[1] = static_cast<u8>(value >> 8);
@@ -1067,6 +1085,10 @@ inline void send_handshake()
     };
     put32(hello + 0, 1);
     put32(hello + 4, static_cast<u32>(getpid()));
+    // Le troisieme mot : les capacites. La regle du noyau retient deux
+    // tampons si et seulement si il les a offerts ET si ce mot les annonce --
+    // la meme regle que `BouchaudTampons::Client::negocie`.
+    put32(hello + 8, s.tampons.nombre == 2 ? BouchaudTampons::CAPACITE_DEUX_TAMPONS : 0u);
     if (!send_message(Genre::Hello, hello, sizeof(hello))) {
         warnln("[ladybird-bouchaud] M11_GUI_HELLO_FAILED errno={}", errno);
         return;
@@ -1130,9 +1152,10 @@ inline void log_render_stats_if_due()
     if (s.published_frames == 0 || (s.published_frames % 16) != 0)
         return;
     outln("[ladybird-bouchaud] M11_RENDER_STATS full={} partiel={} toolbar={} page={} "
-          "sans_effet={} pixels={}",
+          "sans_effet={} pixels={} tampons={} liberations={} attentes={} rejeu_px={}",
         s.chrome_full_frames, s.chrome_partial_frames, s.chrome_toolbar_frames,
-        s.page_frames, s.page_frames_sans_effet, s.chrome_pixels_written);
+        s.page_frames, s.page_frames_sans_effet, s.chrome_pixels_written,
+        s.tampons.nombre, s.tampons_liberations, s.tampons_attentes, s.tampons_rejeu_px);
 }
 
 inline void send_frame_ready(DamageRect damage)
@@ -1157,7 +1180,9 @@ inline void send_frame_ready(DamageRect damage)
         out[3] = static_cast<u8>(value >> 24);
     };
     put32(frame + 0, FENETRE);
-    put32(frame + 4, 0); // tampon
+    // Le tampon peint : en V1 toujours 0 ; en V2 l'arriere, qui devient la face.
+    auto const tampon = s.tampons.nombre == 2 ? s.tampons.arriere : 0;
+    put32(frame + 4, static_cast<u32>(tampon < 0 ? 0 : tampon));
     put32(frame + 8, static_cast<u32>(damage.x));
     put32(frame + 12, static_cast<u32>(damage.y));
     put32(frame + 16, static_cast<u32>(damage.width));
@@ -1169,6 +1194,7 @@ inline void send_frame_ready(DamageRect damage)
         return;
     }
     s.trame_a_republier = false;
+    s.tampons.annonce(tampon, BouchaudTampons::Rect { damage.x, damage.y, damage.width, damage.height });
     ++s.published_frames;
     log_render_stats_if_due();
     // BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
@@ -1209,7 +1235,10 @@ inline Optional<Canvas> mapped_surface()
     auto height_rows = static_cast<size_t>(s.surface_alloc_height);
     if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
         return {};
-    auto bytes = stride_bytes * height_rows;
+    // Tous les tampons offerts, dans le meme mappage : le tampon `t` commence
+    // a `t * pas * hauteur` (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1).
+    auto offerts = static_cast<size_t>(s.tampons_offerts == 2 ? 2 : 1);
+    auto bytes = stride_bytes * height_rows * offerts;
     if (bytes == 0)
         return {};
     if (!s.surface_mapping) {
@@ -1226,7 +1255,48 @@ inline Optional<Canvas> mapped_surface()
         warnln("[ladybird-bouchaud] M11_SURFACE_GEOMETRY_CHANGED old={} new={}", s.surface_mapping_bytes, bytes);
         return {};
     }
-    return Canvas { s.surface_mapping, s.surface_width, s.surface_height, s.surface_stride };
+    auto const arriere = s.tampons.nombre == 2 ? s.tampons.arriere : 0;
+    if (arriere < 0)
+        return {};
+    auto const octets_tampon = stride_bytes * height_rows;
+    return Canvas { s.surface_mapping + static_cast<size_t>(arriere) * octets_tampon,
+        s.surface_width, s.surface_height, s.surface_stride };
+}
+
+/// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : avant toute peinture, choisit le
+/// tampon arriere et y rejoue depuis la face ce que la derniere trame a
+/// publie. Faux s'il faut attendre une `Liberation` -- rien n'est alors ecrit.
+/// En V1, toujours vrai et sans effet.
+inline bool prepare_arriere()
+{
+    auto& s = state();
+    if (s.tampons.nombre != 2)
+        return true;
+    auto const t = s.tampons.choisit();
+    if (t < 0) {
+        ++s.tampons_attentes;
+        return false;
+    }
+    auto canvas_or_error = mapped_surface();
+    if (!canvas_or_error.has_value())
+        return false;
+    auto r = s.tampons.rejeu(t, s.surface_width, s.surface_height);
+    if (r.vide() || s.tampons.face < 0)
+        return true;
+    auto const pas = static_cast<size_t>(s.surface_stride);
+    auto const octets_tampon = pas * static_cast<size_t>(s.surface_alloc_height);
+    auto const* face = s.surface_mapping + static_cast<size_t>(s.tampons.face) * octets_tampon;
+    auto* arriere = s.surface_mapping + static_cast<size_t>(t) * octets_tampon;
+    auto const x0 = clamp(r.x, 0, s.surface_alloc_width);
+    auto const y0 = clamp(r.y, 0, s.surface_alloc_height);
+    auto const x1 = clamp(r.x + r.w, x0, s.surface_alloc_width);
+    auto const y1 = clamp(r.y + r.h, y0, s.surface_alloc_height);
+    for (int y = y0; y < y1; ++y) {
+        auto const decalage = static_cast<size_t>(y) * pas + static_cast<size_t>(x0) * 4;
+        memcpy(arriere + decalage, face + decalage, static_cast<size_t>(x1 - x0) * 4);
+    }
+    s.tampons_rejeu_px += static_cast<u64>(x1 - x0) * static_cast<u64>(y1 - y0);
+    return true;
 }
 
 inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 color)
@@ -2491,6 +2561,14 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         return false;
     }
 
+    // Aucun tampon libre (le gestionnaire lit encore les deux) : le degat est
+    // GARDE et la trame recomposee des la prochaine `Liberation` (`tick`).
+    if (!prepare_arriere()) {
+        s.composition_differee = true;
+        s.degat_differe = s.degat_differe.englobe(degat);
+        return false;
+    }
+
     auto canvas_or_error = mapped_surface();
     if (!canvas_or_error.has_value())
         return false;
@@ -2648,6 +2726,11 @@ inline bool compose_toolbar_only()
     auto& s = state();
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
         return false;
+    // Pas de tampon libre : la recomposition de chrome reste due (`tick`).
+    if (!prepare_arriere()) {
+        ++s.chrome_frames_pending;
+        return false;
+    }
 
     auto canvas_or_error = mapped_surface();
     if (!canvas_or_error.has_value())
@@ -4499,6 +4582,12 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
             s.presse_papiers = builder.to_byte_string();
         }
         break;
+    case Genre::Liberation:
+        // Le gestionnaire ne lira plus ce tampon. Une liberation inattendue
+        // (V1, face, deja libre) ne change rien : `libere` la refuse.
+        if (size >= 8 && s.tampons.libere(static_cast<int>(read_u32(payload, 4))))
+            ++s.tampons_liberations;
+        break;
     case Genre::CloseRequest:
         outln("[ladybird-bouchaud] M11_CLOSE_REQUEST");
         if (s.on_close)
@@ -4583,6 +4672,14 @@ inline void tick()
     drain();
 
     auto& s = state();
+    // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : une trame differee faute de
+    // tampon libre repart avec tout son degat des qu'une `Liberation` est lue.
+    if (s.composition_differee && s.tampons.choisit() >= 0) {
+        s.composition_differee = false;
+        auto degat = s.degat_differe;
+        s.degat_differe = {};
+        compose_page(degat);
+    }
     ++s.chargement_horloge; // horloge GUI, aucun repaint de page force
     auto const* actif = onglet_de_la_page(page_active());
     auto const& suivi = actif ? actif->chargement : s.chargement_initial;
@@ -4653,6 +4750,11 @@ inline void initialize_from_environment()
     s.surface_width = s.surface_alloc_width;
     s.surface_height = s.surface_alloc_height;
     s.surface_stride = environment_int("BO_SURFACE_STRIDE", s.surface_alloc_width * 4);
+    // Le bureau offre deux tampons sous `gui-surface double` seulement ; le
+    // chrome les retient alors (regle du noyau, `Tampons::negocie`).
+    s.tampons_offerts = environment_int("BO_SURFACE_TAMPONS", 1) == 2 ? 2 : 1;
+    s.tampons = BouchaudTampons::Client::negocie(s.tampons_offerts, true);
+    outln("[LB:UI] tampons offerts={} retenus={}", s.tampons_offerts, s.tampons.nombre);
 
     if (s.gui_fd >= 0) {
         auto flags = fcntl(s.gui_fd, F_GETFL, 0);
