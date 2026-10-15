@@ -4,7 +4,7 @@
 > les handoffs datés restent l'historique. Chaque verdict cite le run qui l'a
 > produit ; rien ici n'annonce un résultat futur.
 
-## 0. Point de contrôle (15 octobre, après la campagne 77e0e5de)
+## 0. Point de contrôle (15 octobre, après la campagne b6c99032 ; campagne 0c1e9e5c en cours)
 
 | | |
 |---|---|
@@ -36,7 +36,17 @@ Commits de la session (au-dessus de `c7018e56`) :
 | `2a7ce3ed` | P10+.2 : **composition directe par défaut** | **CI KVM** : A/B copie/direct CONVAINCANT (plein 428 → 232,5 µs), pixels TCG+KVM ; pannes locales vertes avec ce défaut |
 | `9519547b` | diag : injection « interruption perdue » déterministe (critère durci à ≥ 10) | TCG local 10/10 |
 | `35b6be1e` | diag : analyseurs A/B robustes aux lignes entrelacées par le noyau | 3 tests rouges sur l'ancien code |
-| *(ce lot)* | docs : campagne 77e0e5de (audit §8), registre, feuille de route, handoff | — |
+| `b6c99032` | docs : campagne 77e0e5de (audit §8), registre, feuille de route, handoff | — |
+| `4834217a` | diag : attentes de fin des bancs sur la sortie de `echo …_FIN`, plus sa trace | TCG local |
+| `b0bfd187` | P13+ : mode périodique (TCG) du réveil précis = expérience à part, OFF | TCG local : 0 armement sans `periodique`, 6 637 avec |
+| `ada19b78` | **P13+ / P10+.3b : défauts sur preuve KVM** — réveil précis on (TSC-deadline **sous hyperviseur** ; matériel nu OFF), une trame/une soumission on | **CI KVM** b6c99032 (38732049308) : A/B réveil précis SMP1 CONVAINCANT, A/B trame CONVAINCANT ; TCG local : pixels défaut 921 303, trame off 921 320 |
+| `65fb83ab` | diag : l'A/B réveil précis recopie la ventilation des réveils au repos | tests hôte |
+| `617b5383` | P10+.3c surface client à deux tampons (**offre OFF, GELÉ**) | TCG local : banc de déchirure CONVAINCANT ; tests hôte |
+| `d2b80a9a` | P10+.3d chrome Ladybird à deux tampons (**actif seulement sous l'offre, GELÉ**) | tests C++ hôte, clang ; aucune preuve Ladybird réelle |
+| `ef83b830` | **diag banc P10+.1 pannes** : compte strict sur des parasites hors vol — cause du rouge `probes` de b6c99032 | TCG local 6/6 ; KVM sur 0c1e9e5c |
+| `d378ce42` | fix P10+.3d (désactivé) : une annonce ratée ne fait plus écraser la trame peinte | test hôte rouge avant, vert après ; clang |
+| `0c1e9e5c` | ci : banc de déchirure P10+.3c non bloquant tant que le lot est gelé | — |
+| *(ce lot)* | docs : campagne b6c99032 (audit §9), registre, feuille de route, handoff | — |
 
 ### Campagne `f23a1247` (lue) — détail : `AUDIT_STABILITY_2026-10-15.md` §7
 
@@ -49,9 +59,21 @@ Commits de la session (au-dessus de `c7018e56`) :
 - **endurance SMP1, SMP2, SMP4 verts** (le rouge SMP4 ne se reproduit pas après `20e87dae`), SMP8 NON_QUALIFIANT poursuivi ;
 - deux rouges d'instrument, corrigés : pannes P10+.1 sous TCG (`9519547b`), lecture de l'A/B réveil précis sous KVM (`35b6be1e`).
 
+### Campagne `b6c99032` (lue) — détail : audit §9
+
+- verts : CI Fast, Integration, Reliability ; les 15 jobs Ladybird ; `gpu-tampon` (P10+.2 reproduit, P10+.3b CONVAINCANT KVM) ; `ordonnanceur-ab` (réveil précis KVM SMP1 CONVAINCANT) ; endurance SMP1/2/4 ;
+- **rouge** : `primitives / probes`, pas « pannes P10+.1 », bras KVM : critère des parasites dépendant de l'instant (fusion IRR, 38 = 30 + 9 − 1) → banc corrigé `ef83b830`, TCG local vert, **KVM à lire sur 0c1e9e5c** ;
+- SMP8 NON_QUALIFIANT (fatals=0), comme avant.
+
+### Campagne `0c1e9e5c` (en cours, ne rien pousser avant sa fin)
+
+Integration 38740053963, CI Fast 38740053796, Reliability 38740053781, ladybird-native-browser 38740053894 (`cancel-in-progress` : un push l'annule), endurance 30 min/tranche 38740096534 (`workflow_dispatch`). À lire : pannes P10+.1 KVM (nouveau critère), A/B réveil précis KVM SMP1 **et SMP4** sous le nouveau défaut + ventilation au repos (`diag tour …`), A/B trame et copie/direct (défauts on/direct), P13 KVM SMP1/2/4/8 avec réveil précis par défaut, A/B IPI et cession, endurance SMP1/2/4 et SMP8 ; P10+.3c (banc de déchirure, non bloquant) et P10+.3d (smoke Ladybird `BO_SMOKE_SURFACE=double`, diagnostic) : **gelés**, lus comme preuves seulement.
+
 ### Ouverts, par priorité
 
-0. **Lire la campagne du HEAD poussé après 77e0e5de** : A/B réveil précis KVM SMP1 (enfin lisible), A/B trame KVM (P10+.3b), A/B copie/direct (doit rester CONVAINCANT avec le défaut direct), pannes P10+.1 déterministes TCG+KVM, endurance.
+0. **Phase de stabilisation (consigne du 15/10 après-midi)** : aucune nouvelle fonctionnalité ; P10+.3c/d gelés et OFF. Ordre : rouge courant → qualification P13 (réveil précis, A/B IPI, cession, endurances SMP1/2/4, limite SMP8) → reproductibilité de la baseline.
+1. **P13 non qualifié sous KVM** : même réveil précis actif, la queue au repos (p95 ≈ 850 µs) dépasse la charge et ferme la porte « charge sans effet ». Deux hypothèses non départagées (cœur occupé par un fil noyau à l'échéance ; minuteur tiré avant que l'horloge monotone l'atteigne, puis échéance « trop proche » non réarmée) : lire `diag tour … ventilation au repos` sur 0c1e9e5c avant toute correction.
+2. *(historique)* **Lire la campagne du HEAD poussé après 77e0e5de** : A/B réveil précis KVM SMP1 (enfin lisible), A/B trame KVM (P10+.3b), A/B copie/direct (doit rester CONVAINCANT avec le défaut direct), pannes P10+.1 déterministes TCG+KVM, endurance.
 1. *(historique)* **Lire la campagne du HEAD poussé** : job `ordonnanceur-ab` (A/B cession KVM SMP4, A/B réveil précis KVM SMP1, A/B IPI), job `gpu-tampon` (pixels en direct TCG+KVM, A/B copie/direct TCG+KVM), A/B P10+.1 KVM (doit rester CONVAINCANT, sinon défaut rendu à la scrutation), endurance SMP1/2/4/8 (SMP4 ne doit plus rougir ; SMP8 NON_QUALIFIANT poursuivi).
 2. **P13 qualifié** : la détection au tic garde le repos au-dessus de la charge sous KVM ; lire l'A/B KVM du réveil précis (TSC-deadline). S'il est CONVAINCANT, l'activer par défaut puis rejouer P13 KVM SMP1/2/4.
 3. **P10+.2** : si l'A/B KVM copie/direct est CONVAINCANT, basculer le défaut (garde `verifie-virtio-gpu-tampons.py` à changer avec la preuve).

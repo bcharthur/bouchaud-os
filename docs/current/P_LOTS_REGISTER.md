@@ -3,8 +3,8 @@
 > Inventaire vérifiable, pas une liste de souhaits. Un lot n'est `DONE_AT_<niveau>`
 > que si son critère est prouvé **à ce niveau** sur un SHA nommé. Un lot vert
 > historiquement qui casse au HEAD redevient `REGRESSED`. Niveaux : STATIC,
-> HOST, TCG, KVM, PHYSICAL. Mis à jour le 2026-10-15 (campagne `c7018e56` lue :
-> `docs/current/AUDIT_STABILITY_2026-10-15.md`).
+> HOST, TCG, KVM, PHYSICAL. Mis à jour le 2026-10-15 (campagnes `c7018e56`,
+> `f23a1247`, `77e0e5de`, `b6c99032` lues : `docs/current/AUDIT_STABILITY_2026-10-15.md`).
 >
 > États : UNKNOWN · NOT_STARTED · PARTIAL · EXPERIMENTAL · BLOCKED ·
 > VERIFIED_AT_LEVEL · DONE_AT_LEVEL · REGRESSED · NON_REPÉRÉ.
@@ -46,11 +46,13 @@
 |---|---|---|---|
 | P10+.0 baseline GPU | VERIFIED_AT_KVM (QEMU) sur `c7018e56` | 38645396730 | rejouer sur le HEAD P10+.1 |
 | P10+.1 achèvement par interruption | **VERIFIED_AT_KVM (QEMU), reproduit sur deux campagnes** ; défaut = interruption (`43f55f9c`) | A/B KVM CONVAINCANT sur f23a1247 (38697040371) et 77e0e5de (38704459647, inactif plein 136 ‰, 0 relecture) ; pannes TCG+KVM (injection déterministe depuis `9519547b`) | rejouée à chaque campagne |
-| P10+.2 copies réduites | **VERIFIED_AT_KVM (QEMU), une campagne** ; défaut = **composition directe** (`2a7ce3ed`) | 38704459647 job gpu-tampon : pixels TCG+KVM = bureau BGA, 0 octet copié, 0 accès en transfert ; A/B KVM CONVAINCANT (plein 428 → 232,5 µs) | reproduire l'A/B KVM ; sinon défaut rendu à la copie |
-| P10+.3 soumission par trame | IMPLEMENTED_LOCAL (`43c05361` plan pur, `d1d92cab` compositeur), défaut = off | local TCG : pixels identiques, A/B CONVAINCANT (16 → 5 commandes par trame, p50 4 245 → 2 141 µs) | A/B KVM (job gpu-tampon) |
-| P10+.3 → P10+.6 | NOT_STARTED / PHYSICAL_PENDING | — | prérequis P10+.2 / P10+.4 |
-| P13+ réveil précis | EXPERIMENTAL, OFF (`3929746a`) ; arrondi des sommeils corrigé (`856db7b5`) | A/B local TCG SMP1 4 tours : **AB_REVEIL_PRECIS_ECHEC** (p50 repos 886 → 524 µs mais p99 3 229 → 4 075, un QUALIFIE_ECHEC sous on) | A/B KVM SMP1 (TSC-deadline, `bb22f8d5`) ; puis P13 KVM SMP1/2/4 qualifiés |
-| P13 cession par classe | **corrigé** (`20e87dae`), défaut | endurance 77e0e5de : **SMP4 et SMP2 verts** ; KVM SMP4 : 916–919 inversions/passe en historique, 0 sous classe ; A/B NON_CONCLUANT (porte « charge sans effet ») | qualifier P13 (réveil précis) |
+| P10+.2 copies réduites | **VERIFIED_AT_KVM (QEMU), reproduit sur deux campagnes** ; défaut = **composition directe** (`2a7ce3ed`) | 77e0e5de (38704459647, plein 428 → 232,5 µs) puis b6c99032 ([38732049308](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049308), job gpu-tampon : KVM CONVAINCANT 6/6, plein 176 → 113,5 µs ; TCG CONVAINCANT ; pixels KVM 921 314/921 600, 0 octet copié) | rejoué à chaque campagne |
+| P10+.3b une trame, une soumission | **VERIFIED_AT_KVM (QEMU), une campagne** ; défaut = **on** (`ada19b78`) | 38732049308 job gpu-tampon : A/B KVM CONVAINCANT 6/6 (16 → 5 commandes par trame, p50 474 → 177,5 µs, p95 550 → 237,5), TCG CONVAINCANT ; pixels TCG 921 272 / KVM 921 362 sur 921 600 | reproduire l'A/B KVM ; un NON_CONVAINCANT rend le défaut à off |
+| P10+.3c surface client à deux tampons (contrat Compositor ↔ WM) | **GELÉ** (stabilisation) ; IMPLEMENTED_LOCAL (`617b5383`), offre = off ; banc CI non bloquant (`0c1e9e5c`) | local TCG SMP2, banc de déchirure 4/4 : **CONVAINCANT** — v1 51 à 75 compositions mixtes sur 77 à 111, v2 **0** sur 68 à 105, une libération par trame, débit 15,1 contre 14,4 lues/s | banc TCG+KVM en CI (job gpu-tampon) ; défaut de l'offre seulement sur KVM CONVAINCANT |
+| P10+.3d chrome Ladybird à deux tampons | **GELÉ** ; IMPLEMENTED_LOCAL (`d2b80a9a`, perte de pixels sur annonce ratée corrigée `d378ce42`), actif seulement sous l'offre | `BouchaudTampons.h` testé sur l'hôte (équivalence pixel à pixel, 200 × 60 trames) ; clang `-fsyntax-only` du chrome propre | job Ladybird de diagnostic `BO_SMOKE_SURFACE=double` (contrat retenu des deux côtés, libérations reçues) |
+| P10+.4 → P10+.6 | NOT_STARTED / PHYSICAL_PENDING | — | prérequis P10+.3 / P10+.4 |
+| P13+ réveil précis | **VERIFIED_AT_KVM SMP1 (QEMU), une campagne** ; défaut = **on, TSC-deadline sous hyperviseur** (`ada19b78`) ; mode périodique (TCG) et matériel nu = expériences à part, OFF (`b0bfd187`, `ada19b78`) | 38732049308 job ordonnanceur-ab : A/B KVM SMP1 **CONVAINCANT** 4/4 (repos p50 461 → 39 µs, p95 943,5 → 852, p99 1 007,5 → 1 016,5, interactif p95 29,5 → 28,5 ; 8 239–8 672 armements sous on, 0 sous off) | A/B KVM SMP1 + SMP4 rejoués ; la queue au repos (p95 ≈ 850 µs) reste à attribuer (`65fb83ab`) avant toute qualification P13 |
+| P13 cession par classe | **corrigé** (`20e87dae`), défaut | endurances 77e0e5de **et b6c99032** : SMP1, SMP2, SMP4 verts ; KVM SMP4 : 918 inversions/passe en historique, 0 sous classe ; A/B NON_CONCLUANT deux campagnes (porte « charge sans effet ») | qualifier P13 : la queue au repos sous KVM bloque encore la porte |
 
 ## Détail des lots ouverts ou modifiés dans cette session
 
@@ -111,3 +113,4 @@
 | BKL | ABSENT (0 acquisition) | ne pas rouvrir |
 | RTL8168 premier bouclage (physique) | OUVERT | TRIGKEY seulement |
 | Compositor remplacé KVM A (`3658af04`) | non revu depuis ; A/B vert à `6e881bae` | surveiller `created=1` dans chaque campagne |
+| Banc pannes P10+.1, critère « parasites » rouge sous KVM (b6c99032, [job 116411938282](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049308/job/116411938282)) | **CAUSE ÉTABLIE, banc corrigé** (`ef83b830`) : une parasite en vol fusionne dans l'IRR avec la vraie MSI-X (38 = 30 + 9 − 1) ; critère strict désormais sur des parasites hors vol, chacune exactement un passage sans progrès | local TCG 6/6 vert ; **KVM à lire** sur `0c1e9e5c` |

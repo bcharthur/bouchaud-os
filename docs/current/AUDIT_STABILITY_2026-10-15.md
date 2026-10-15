@@ -198,3 +198,33 @@ composition directe et A/B copie/direct, TCG puis KVM), en parallèle des sondes
 
 Aucun critère n'est affaibli ; le résultat de l'A/B du réveil précis sous KVM
 reste **à mesurer** (campagne suivante).
+
+## 9. Campagne `b6c99032` — lue (15 octobre, après-midi)
+
+| Run | Workflow | Résultat |
+|---|---|---|
+| [38732049394](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049394) | CI Fast | vert |
+| [38732049305](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049305) | Integration | vert |
+| [38732049327](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049327) | Reliability V3 | vert |
+| [38732049308](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049308) | ladybird-native-browser | **rouge** : les 15 jobs Ladybird verts (construction, smoke, robustesse, sites réels, WPT, endurances 10 min, KVM et 20 min KVM, cache/SQL, mémoire, crash des services, ordre worker, piège du Compositor, performance, smoke virtio-gpu) ; `primitives / gpu-tampon` et `primitives / ordonnanceur-ab` verts ; **`primitives / probes` rouge** (un pas, §9.2) ; verdict de convergence rouge par conséquence |
+| [38732054379](https://github.com/bcharthur/bouchaud-os/actions/runs/38732054379) | Endurance 30 min / tranche (TCG) | **SMP1, SMP2, SMP4 verts** ; SMP8 **NON_QUALIFIANT** (`fatals=0` ; 22 cycles, porte de la sonde non qualifiée faute de preuve de l'hôte sous TCG — rien d'imputé au noyau, jamais une réussite) |
+
+### 9.1 Ce qui est démontré
+
+- **P13+ réveil précis, A/B KVM SMP1 : CONVAINCANT** 4/4 (job ordonnanceur-ab) : retard au repos p50 461 → 39 µs, p95 943,5 → 852, p99 1 007,5 → 1 016,5 (borne 1,25×), interactif sous charge p95 29,5 → 28,5 ; 8 239–8 672 armements par passe `on`, 0 sous `off`. → défaut **on**, borné au domaine prouvé (TSC-deadline sous hyperviseur ; mode périodique TCG et matériel nu restent OFF) : `b0bfd187`, `ada19b78`. Toutes les passes restent NON_QUALIFIANT (porte « charge sans effet ») : la queue au repos (p95 ≈ 850 µs) n'est pas résorbée — attribution publiée par `65fb83ab`.
+- **P10+.2, A/B copie/direct KVM : CONVAINCANT pour la deuxième campagne** (plein 176 → 113,5 µs, bande 55 → 52, tuile 56,5 → 50) ; TCG CONVAINCANT ; pixels direct TCG 921 255 / KVM 921 314 sur 921 600, 0 octet copié. Défaut « direct » reproduit.
+- **P10+.3b, A/B une trame / une soumission KVM : CONVAINCANT** 6/6 (16 → 5 commandes par trame, p50 474 → 177,5 µs, p95 550 → 237,5), TCG CONVAINCANT ; pixels TCG 921 272 / KVM 921 362. → défaut **on** (`ada19b78`), l'ancien chemin reste mesuré aux pixels (`SCANOUT_TRAME=off`, copie et direct ; local TCG 921 320 / 921 600).
+- **Endurance SMP4 verte pour la deuxième campagne** depuis la cession par classe (`20e87dae`).
+- A/B IPI (KVM SMP4, SMP8) et cession (KVM SMP4) : NON_CONCLUANT, 0 tour apparié qualifié (porte de la sonde). La cession par classe reste confirmée mécaniquement : 918 inversions/passe en historique, 0 sous classe.
+
+### 9.2 Le rouge : `primitives / probes`, pas « P10+.1 — pannes de l'attente par interruption », bras KVM
+
+- **Image testée** : `b6c99032a8caec12d7117405c16a9eb5de5da182`, option `banc-virtio-gpu-irq-pannes`, job [116411938282](https://github.com/bcharthur/bouchaud-os/actions/runs/38732049308/job/116411938282) (12:05–12:54 UTC). Artefacts (`os-primitives-debug`, id 11974813169) non récupérables depuis la session (hôte blob refusé) ; le journal du pas suffit.
+- **Critère violé (seul)** : « parasites : au moins six envoyées, toutes comptées sans progrès par le gestionnaire » — `envoyees=9`, `irq_sans_progres=8`, `irq=38`. Bras TCG du même pas : vert (`envoyees=6`, `irq_sans_progres=6`, `irq=36`). Tous les autres critères tenus aux deux bras (relectures 10/10, une seule attente échue, un seul échec de présentation, abandon propre, aucune panique).
+- **Cause** : les parasites étaient envoyées pendant qu'une commande était en vol. Un vecteur n'a qu'une place dans l'IRR : une parasite en attente et la vraie MSI-X de la réponse **fusionnent** en un seul passage du gestionnaire, qui voit du progrès. Les compteurs le montrent : les MSI-X réelles valent 30 (TCG : 36 − 6) ; KVM : 38 = 30 + 9 − **1** fusion, et 9 − 1 = 8 passages sans progrès. L'hypothèse inverse (parasite voyant le progrès, MSI-X ensuite sans progrès) donnerait 39 et 9 : rejetée. Le critère dépendait de l'instant ; le pilote n'est pas en cause.
+- **Correction du banc** (`ef83b830`, option de banc seulement) : une parasite **hors vol** après chaque achèvement de la fenêtre (MSI-X de la réponse servie, une seule commande en vol), qui doit produire **exactement** un passage et un seul sans progrès ; critère : ≥ 6, toutes exactes. Les parasites en vol restent envoyées et publiées comme preuve (elles exercent le réveil sans progrès).
+- **Avant / après (TCG local)** : avant, critère dépendant de l'instant (vert TCG, rouge KVM) ; après, `hors_vol=6 hors_vol_sans_progres=6`, `irq=42` (30 + 6 en vol + 6 hors vol), `VIRTIO_GPU_IRQ_PANNES_BANC_OK`. **KVM : campagne `0c1e9e5c`.**
+
+### 9.3 P10+.3c / P10+.3d — gelés
+
+Surface client à deux tampons (`617b5383`, `d2b80a9a`) : **OFF par défaut**, aucune extension pendant la stabilisation. Revue du chemin « composition qui échoue ou se reporte » du chrome : une annonce `FrameReady` ratée faisait rejouer deux fois le tampon arrière et écraser des pixels peints mais pas annoncés — reproduit par test hôte (2 cas rouges), corrigé (`d378ce42`). Le report faute de tampon libre garde son dégât (aucune perte). Preuves acquises : tests hôte, analyse clang, banc de déchirure **local TCG** CONVAINCANT. **Non acquises** : banc KVM, smoke Ladybird réel sous `gui-surface double` (job de diagnostic, hors verdict) ; le banc de déchirure est non bloquant (`0c1e9e5c`) tant que le lot est gelé.
