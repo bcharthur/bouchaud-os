@@ -50,7 +50,7 @@ ACCES = ("        if !crate::drivers::virtio_gpu::tampon_ecrivable() {\n"
          "            ACCES_EN_TRANSFERT.fetch_add(1, Ordering::Relaxed);\n        }")
 ABANDON = "        VIRTIO_SCANOUT.store(false, Ordering::Release);\n        quitte_memoire_scanout();"
 QUITTE = "        LFB = core::ptr::null_mut();\n    }\n}"
-CI = ("SCANOUT_TAMPON=direct BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh",
+CI = ("SCANOUT_TAMPON=direct SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh",
       "BO_QEMU_KVM=1 tools/ci/run_banc_tampon.sh")
 TESTS = ("aucune_ecriture_pendant_un_transfert", "un_transfert_sans_reponse_rend_le_tampon_inconnu_pour_toujours",
          "les_copies_d_une_trame_sont_comptees", "aucun_ecrivain_ne_passe_pendant_un_transfert_quelle_que_soit_la_fin")

@@ -7,7 +7,7 @@
 # Un demarrage `-vga none -device virtio-gpu-pci`, TOURS tours (6 par defaut)
 # de `banc-trame` (100 trames de bureau, 8 regions) sous `gpu-trame off` et
 # `gpu-trame on`, ordre AB aux tours impairs, BA aux pairs. Le demarrage finit
-# sous `off`. Criteres declares dans tools/ci/analyse_banc_trame.py ; ECHEC sur
+# sous `on` (le defaut depuis b6c99032). Criteres : tools/ci/analyse_banc_trame.py ; ECHEC sur
 # un defaut de surete, CONVAINCANT / NON_CONVAINCANT / NON_CONCLUANT est une
 # mesure.
 #
@@ -35,7 +35,7 @@ mkdir -p "$SORTIE/scenario"
       echo "banc-trame"
     done
   done
-  echo "gpu-trame off"
+  echo "gpu-trame on"
   echo "echo AB_TRAME_FIN"
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/banc.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)

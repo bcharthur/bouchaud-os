@@ -648,6 +648,10 @@ fn init_local_scheduler_timer() -> bool {
             let lvt = RESCHEDULE_VECTOR as u32 | LVT_TSC_DEADLINE;
             timer_local_ecrit(x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER, lvt);
         }
+        SOUS_HYPERVISEUR.store(
+            unsafe { core::arch::x86_64::__cpuid(1) }.ecx & (1 << 31) != 0,
+            Ordering::Release,
+        );
         MODE_TIMER_LOCAL.store(MODE_TSC_DEADLINE, Ordering::Release);
         arm_local_scheduler_timer();
         return true;
@@ -790,14 +794,26 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
 static ARME_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
 /// Le minuteur porte une echeance de SOMMEIL (et non le quantum).
 static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-/// La politique (`reveil-precis on|off`). Desactivee par defaut tant qu'un
-/// A/B KVM n'a pas montre le gain.
-static REVEIL_PRECIS: AtomicBool = AtomicBool::new(false);
+/// La politique (`reveil-precis on|off`). ACTIVE par defaut depuis l'A/B KVM
+/// CONVAINCANT de b6c99032 (run 38732049308, job ordonnanceur-ab, SMP1, 4/4
+/// tours : retard au repos p50 461 -> 39 us, p95 943,5 -> 852, p99 1 007,5 ->
+/// 1 016,5, interactif p95 29,5 -> 28,5 ; 8 239 a 8 672 armements par passe
+/// `on`, 0 sous `off`). La CI rejoue l'A/B a chaque campagne ; un KVM
+/// NON_CONVAINCANT la rend a `off`. Le domaine prouve est le TSC-deadline
+/// SOUS HYPERVISEUR : le mode periodique et le materiel nu restent des
+/// experiences a part, chacune OFF (voir les deux statiques qui suivent).
+static REVEIL_PRECIS: AtomicBool = AtomicBool::new(true);
 /// Le mode PERIODIQUE (QEMU TCG, compte LAPIC raccourci) est une experience
 /// distincte : son A/B local a echoue a ses criteres (3929746a, p99 au repos)
 /// ; il n'arme rien sans `reveil-precis periodique on`, meme si la politique
 /// generale est active. Le mode TSC-deadline n'en depend pas.
 static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);
+/// Le TSC-deadline sur MATERIEL NU n'a aucune preuve (PHYSICAL_PENDING) : il
+/// n'arme rien sans `reveil-precis materiel on`, meme politique active.
+static REVEIL_PRECIS_MATERIEL: AtomicBool = AtomicBool::new(false);
+/// CPUID.1:ECX[31], lu une fois a l'armement du minuteur local : un CPUID
+/// dans la boucle d'inactivite couterait une sortie de VM par `hlt`.
+static SOUS_HYPERVISEUR: AtomicBool = AtomicBool::new(false);
 static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
 
@@ -839,6 +855,9 @@ pub fn arme_reveil_precis_avant_hlt() {
         return;
     }
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
         return;
     }
     let cible = crate::kernel::reveil_precis::decide(
@@ -886,6 +905,17 @@ pub fn veut_reveil_precis_periodique(oui: bool) -> bool {
 /// Le mode periodique est-il autorise ?
 pub fn reveil_precis_periodique() -> bool {
     REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed)
+}
+
+/// Le TSC-deadline sur materiel nu (`reveil-precis materiel on|off`). Rend
+/// l'etat precedent.
+pub fn veut_reveil_precis_materiel(oui: bool) -> bool {
+    REVEIL_PRECIS_MATERIEL.swap(oui, Ordering::Relaxed)
+}
+
+/// `(materiel nu autorise, sous hyperviseur)`.
+pub fn reveil_precis_domaine() -> (bool, bool) {
+    (REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed), SOUS_HYPERVISEUR.load(Ordering::Relaxed))
 }
 
 /// `(voulu, mode du minuteur local, armes, retires avant d'avoir servi)`.

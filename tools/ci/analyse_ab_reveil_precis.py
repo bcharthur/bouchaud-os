@@ -9,8 +9,9 @@ pairs). Ce qui est compare : le RETARD DE REVEIL AU REPOS (la phase ou le
 coeur dort et ou seul le minuteur peut reveiller), et que la charge n'en
 souffre pas.
 
-CRITERES DECLARES AVANT LA MESURE (la politique par defaut -- off -- ne
-change qu'avec un A/B KVM CONVAINCANT) :
+CRITERES DECLARES AVANT LA MESURE (la politique par defaut est passee a `on`
+sur l'A/B KVM CONVAINCANT de b6c99032, run 38732049308 ; un A/B KVM
+NON_CONVAINCANT la rend a `off`) :
 
   surete     chaque passe rend un verdict ; aucune panique ; aucun
              QUALIFIE_ECHEC sous `on` ; armements precis > 0 pendant les bras
@@ -130,7 +131,7 @@ def analyse(texte, tours, smp, nom):
         return sortie, "NON_CONCLUANT", 0
     verdict = "CONVAINCANT" if all(ok for _, ok in criteres) else "NON_CONVAINCANT"
     sortie.append(f"AB_REVEIL_PRECIS : {verdict} accel={nom} smp={smp} tours={len(paires)}/{tours} "
-                  f"(politique par defaut inchangee : off)")
+                  f"(politique par defaut : on depuis b6c99032 ; un KVM NON_CONVAINCANT la rend a off)")
     return sortie, verdict, 0
 
 

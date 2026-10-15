@@ -82,8 +82,8 @@ jobs:
           # BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : la copie (tampon arriere) reste
           # prouvee aux pixels ; la composition directe, desormais par defaut,
           # l'est dans le job `gpu-tampon`.
-          SCANOUT_SORTIE=$PWD/scanout-virtio SCANOUT_TAMPON=copie tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-          SCANOUT_SORTIE=$PWD/scanout-virtio-kvm SCANOUT_TAMPON=copie BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-virtio SCANOUT_TAMPON=copie SCANOUT_TRAME=off tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-virtio-kvm SCANOUT_TAMPON=copie SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
         # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
         # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
@@ -307,15 +307,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           AB_SORTIE=$PWD/ab-cession-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_cession.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 4
-      - name: P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 (mesure ; politique par defaut off)
+      - name: P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 puis SMP4 (politique par defaut on depuis b6c99032)
         # BOUCHAUD_REVEIL_PRECIS_V1 : sous KVM le minuteur local est en mode
         # TSC-deadline. Quatre tours AB/BA de `ordonnanceur-probe 8 1` sous
         # `reveil-precis off` et `on`. Criteres declares dans
-        # analyse_ab_reveil_precis.py. La politique (off) ne change qu'avec un
-        # A/B KVM CONVAINCANT.
+        # analyse_ab_reveil_precis.py. Defaut `on` depuis l'A/B KVM SMP1
+        # CONVAINCANT de b6c99032 (run 38732049308) ; un KVM NON_CONVAINCANT le
+        # rend a `off`. SMP4 : le defaut s'applique a tous les coeurs, la
+        # preuve d'origine n'en avait qu'un.
         if: ${{ !cancelled() }}
         run: |
-          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1
+          r=0
+          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1 || r=1
+          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4 || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -360,8 +365,8 @@ jobs:
         # bureau BGA, horloge vivante, aucune presentation en echec), plus :
         # zero octet copie, aucun acces au tampon pendant un transfert.
         run: |
-          SCANOUT_SORTIE=$PWD/scanout-direct-tcg SCANOUT_TAMPON=direct tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-          SCANOUT_SORTIE=$PWD/scanout-direct-kvm SCANOUT_TAMPON=direct BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-direct-tcg SCANOUT_TAMPON=direct SCANOUT_TRAME=off tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-direct-kvm SCANOUT_TAMPON=direct SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: P10+.2b -- A/B copie contre composition directe, banc de presentation (TCG puis KVM ; politique par defaut copie)
         # Six tours AB/BA de `banc-present tache`. Criteres declares dans
         # analyse_banc_tampon.py (surete, plein ecran, partiels, quorum). Le
@@ -382,11 +387,11 @@ jobs:
         run: |
           SCANOUT_SORTIE=$PWD/scanout-trame-tcg SCANOUT_TRAME=on tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           SCANOUT_SORTIE=$PWD/scanout-trame-kvm SCANOUT_TRAME=on BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-      - name: P10+.3b -- A/B deux commandes par region contre une trame, une soumission (TCG puis KVM ; politique par defaut off)
+      - name: P10+.3b -- A/B deux commandes par region contre une trame, une soumission (TCG puis KVM ; politique par defaut on depuis b6c99032)
         # Six tours AB/BA de `banc-trame` (100 trames de bureau, 8 regions).
         # Criteres declares dans analyse_banc_trame.py (surete, commandes,
         # latence p50/p95, quorum). ECHEC sur un defaut de surete ; le reste
-        # est une mesure. La politique ne change qu'avec un KVM CONVAINCANT.
+        # est une mesure. Un KVM NON_CONVAINCANT rend la politique a off.
         if: ${{ !cancelled() }}
         run: |
           r=0

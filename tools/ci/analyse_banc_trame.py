@@ -9,8 +9,9 @@ passe `banc-trame` (100 trames de bureau typiques, 8 regions) sous
 trame : quelques transferts, un flush), ordre AB aux tours impairs, BA aux
 pairs.
 
-CRITERES DECLARES AVANT LA MESURE KVM (la politique par defaut -- off -- ne
-change qu'avec un A/B KVM CONVAINCANT) :
+CRITERES DECLARES AVANT LA MESURE KVM (la politique par defaut est passee a
+`on` sur l'A/B KVM CONVAINCANT de b6c99032, run 38732049308 ; un A/B KVM
+NON_CONVAINCANT la rend a `off`) :
 
   surete     chaque banc : 100 trames, aucun echec, scanout actif ; sous `on`,
              une presentation par trame ; sous `off`, une par region ;
@@ -101,7 +102,7 @@ def analyse(texte, tours, nom):
     for txt, ok in criteres:
         sortie.append(f"  {'ok     ' if ok else 'ECHOUE '} {txt}")
     verdict = "CONVAINCANT" if all(ok for _, ok in criteres) else "NON_CONVAINCANT"
-    sortie.append(f"BANC_TRAME : {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut inchangee : off)")
+    sortie.append(f"BANC_TRAME : {verdict} accel={nom} tours={len(paires)}/{tours} (politique par defaut : on depuis b6c99032 ; un KVM NON_CONVAINCANT la rend a off)")
     return sortie, verdict, 0
 
 

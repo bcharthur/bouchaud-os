@@ -3,8 +3,10 @@
 
 Regles :
 
-  1. la soumission par trame est DESACTIVEE par defaut (`TRAME_VOULUE` faux,
-     ecrit seulement par `veut_trame`, appele seulement par `gpu-trame`) ;
+  1. la soumission par trame est ACTIVE par defaut depuis l'A/B KVM
+     CONVAINCANT de b6c99032 (run 38732049308, cite par la statique) :
+     `TRAME_VOULUE` vrai, ecrit seulement par `veut_trame`, appele seulement
+     par `gpu-trame` ; la CI garde le chemin d'avant (`SCANOUT_TRAME=off`) ;
   2. `presente_trame` ne flushe qu'APRES la reponse du dernier transfert, un
      seul flush par trame, et tient la memoire en `Transfert` autour de
      chaque transfert (meme regle que `presente`) ;
@@ -31,7 +33,9 @@ FICHIERS = {
     "flux": RACINE / ".github/workflows/os-primitives.yml",
     "analyse": RACINE / "tools/ci/analyse_banc_trame.py",
 }
-DEFAUT = "static TRAME_VOULUE: AtomicBool = AtomicBool::new(false);"
+DEFAUT = "static TRAME_VOULUE: AtomicBool = AtomicBool::new(true);"
+PREUVE = "CONVAINCANT de\n// b6c99032 (run 38732049308"
+ANCIEN = "SCANOUT_TAMPON=direct SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh"
 FLUSH = ("    // Le flush, une fois, apres la reponse du DERNIER transfert.\n    if ok {\n"
          "        if let Some(f) = rogne(plan.flush) {\n"
          "            ok = unsafe { vide(&mut p.file, RESSOURCE_BUREAU, f) } == Ok(RESP_OK_NODATA);")
@@ -57,8 +61,10 @@ def corps(texte: str, signature: str) -> str:
 
 def verifie(t: dict, src: str) -> list:
     fautes = []
-    if t["gfx"].count(DEFAUT) != 1:
-        fautes.append("bochs.rs : la soumission par trame n'est plus desactivee par defaut.")
+    if t["gfx"].count(DEFAUT) != 1 or PREUVE not in t["gfx"]:
+        fautes.append("bochs.rs : la soumission par trame n'est plus active par defaut, ou la preuve KVM (run 38732049308) n'est plus citee.")
+    if ANCIEN not in t["flux"]:
+        fautes.append("CI : le chemin d'avant (deux commandes par region) n'est plus mesure (SCANOUT_TRAME=off).")
     ecrit = t["gfx"].count("TRAME_VOULUE.swap(") + t["gfx"].count("TRAME_VOULUE.store(")
     if ecrit != 1 or "TRAME_VOULUE.swap(oui" not in corps(t["gfx"], "pub fn veut_trame("):
         fautes.append("bochs.rs : la politique est ecrite ailleurs que par veut_trame.")
@@ -98,7 +104,9 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
-        ("trame par defaut", "gfx", DEFAUT, DEFAUT.replace("false", "true")),
+        ("trame desactivee par defaut", "gfx", DEFAUT, DEFAUT.replace("true", "false")),
+        ("preuve plus citee", "gfx", PREUVE, "CONVAINCANT"),
+        ("ancien chemin plus mesure", "flux", ANCIEN, "true"),
         ("flush sans attendre", "gpu", ARRET, "        let _ = rendu;"),
         ("flush par transfert", "gpu", "        pixels += u64::from(r.largeur) * u64::from(r.hauteur);",
          "        pixels += u64::from(r.largeur) * u64::from(r.hauteur);\n        let _ = unsafe { vide(&mut p.file, RESSOURCE_BUREAU, r) };"),
@@ -135,8 +143,8 @@ def main() -> int:
         for f in fautes:
             print(f"verifie-virtio-gpu-trame: {f}")
         return 1
-    print("verifie-virtio-gpu-trame: OK (off par defaut, un flush apres le dernier transfert, memoire tenue, "
-          "verrou relache avant la soumission, aucune region perdue, compositeur encadre, plan pur, CI KVM ; 12 negatifs)")
+    print("verifie-virtio-gpu-trame: OK (on par defaut (A/B KVM 38732049308), ancien chemin mesure, un flush apres le dernier transfert, memoire tenue, "
+          "verrou relache avant la soumission, aucune region perdue, compositeur encadre, plan pur, CI KVM ; 15 negatifs)")
     return 0
 
 

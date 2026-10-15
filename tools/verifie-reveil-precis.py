@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Le reveil a l'echeance exacte au repos reste une experience
+"""Le reveil a l'echeance exacte au repos, borne a ce qui est prouve
 (BOUCHAUD_REVEIL_PRECIS_V1, P13+).
 
 Regles :
 
-  1. desactive au demarrage : `REVEIL_PRECIS` est un `AtomicBool::new(false)`,
-     ecrit seulement par `veut_reveil_precis`, appele seulement par la
-     commande shell `reveil-precis` ;
+  1. ACTIF par defaut depuis l'A/B KVM CONVAINCANT de b6c99032 (run
+     38732049308, cite par la statique) : `REVEIL_PRECIS` est un
+     `AtomicBool::new(true)`, ecrit seulement par `veut_reveil_precis`,
+     appele seulement par la commande shell `reveil-precis`. Le domaine
+     prouve est le TSC-deadline SOUS HYPERVISEUR : le mode periodique (TCG)
+     et le materiel nu sont deux experiences a part, chacune OFF, exigee
+     avant tout armement dans son domaine, basculee par le shell seul ;
+     l'hyperviseur est lu une fois a l'armement du minuteur, jamais dans la
+     boucle d'inactivite ;
   2. l'armement se fait juste avant `sti; hlt` (interruptions encore
      coupees) et il est retire juste apres : `commit_scheduler_idle` appelle
      `arme_reveil_precis_avant_hlt` puis `retire_reveil_precis_apres_hlt`
@@ -36,7 +42,11 @@ FICHIERS = {
     "test": RACINE / "tools/smp/test_reveil_precis.rs",
     "analyse": RACINE / "tools/ci/analyse_ab_reveil_precis.py",
 }
-INTERRUPTEUR = "static REVEIL_PRECIS: AtomicBool = AtomicBool::new(false);"
+INTERRUPTEUR = "static REVEIL_PRECIS: AtomicBool = AtomicBool::new(true);"
+PREUVE = "CONVAINCANT de b6c99032 (run 38732049308"
+MATERIEL_OFF = "static REVEIL_PRECIS_MATERIEL: AtomicBool = AtomicBool::new(false);"
+MATERIEL_EXIGE = ("    if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {\n"
+                  "        return;\n    }\n    let cible = crate::kernel::reveil_precis::decide(")
 PERIODIQUE_OFF = "static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);"
 PERIODIQUE_EXIGE = ("    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {\n"
                     "        if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {\n            return;\n        }")
@@ -61,8 +71,16 @@ def corps(texte: str, signature: str) -> str:
 
 def verifie(t: dict, sources_src: str) -> list:
     fautes = []
-    if t["smp"].count(INTERRUPTEUR) != 1:
-        fautes.append("smp.rs : le reveil precis n'est plus desactive au demarrage.")
+    if t["smp"].count(INTERRUPTEUR) != 1 or PREUVE not in t["smp"]:
+        fautes.append("smp.rs : le reveil precis n'est plus actif par defaut, ou la preuve KVM (run 38732049308) n'est plus citee.")
+    if t["smp"].count(MATERIEL_OFF) != 1 or MATERIEL_EXIGE not in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt("):
+        fautes.append("smp.rs : le TSC-deadline sur materiel nu n'est plus une experience a part, desactivee.")
+    if "__cpuid" in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt(") \
+            or "SOUS_HYPERVISEUR.store(" not in corps(t["smp"], "fn init_local_scheduler_timer("):
+        fautes.append("smp.rs : l'hyperviseur n'est plus lu une fois a l'armement du minuteur (CPUID dans la boucle d'inactivite ?).")
+    mat = [l for l in sources_src.splitlines() if "veut_reveil_precis_materiel(" in l and "pub fn " not in l]
+    if len(mat) != 1 or "argv[2] == \"on\"" not in mat[0]:
+        fautes.append("le materiel nu est bascule ailleurs que par `reveil-precis materiel`.")
     # Le mode periodique (TCG) a echoue a son A/B local : experience a part,
     # OFF, exigee avant tout armement periodique, basculee par le shell seul.
     if t["smp"].count(PERIODIQUE_OFF) != 1 or PERIODIQUE_EXIGE not in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt("):
@@ -115,7 +133,10 @@ def negatifs(t: dict, src: str) -> list:
         ("periodique sans autorisation", "smp", PERIODIQUE_EXIGE,
          "    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {"),
         ("A/B KVM retire de la CI", "flux", 'AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1', ""),
-        ("interrupteur arme au demarrage", "smp", INTERRUPTEUR, INTERRUPTEUR.replace("false", "true")),
+        ("reveil precis desactive par defaut", "smp", INTERRUPTEUR, INTERRUPTEUR.replace("true", "false")),
+        ("preuve plus citee", "smp", PREUVE, "CONVAINCANT"),
+        ("materiel nu actif par defaut", "smp", MATERIEL_OFF, MATERIEL_OFF.replace("false", "true")),
+        ("materiel nu sans autorisation", "smp", MATERIEL_EXIGE, "    let cible = crate::kernel::reveil_precis::decide("),
         ("armement sorti du hlt", "idle", "    smp::arme_reveil_precis_avant_hlt();\n", ""),
         ("retrait oublie", "idle", "    smp::retire_reveil_precis_apres_hlt();\n", ""),
         ("quantum periodique non restaure", "smp", PERIODIQUE, PERIODIQUE.replace("swap(false", "load(")),
@@ -151,8 +172,8 @@ def main() -> int:
         for f in fautes:
             print(f"verifie-reveil-precis: {f}")
         return 1
-    print("verifie-reveil-precis: OK (politique off au demarrage, armement autour du hlt, quantum restaure, "
-          "decision pure testee, periodique a part, A/B a criteres declares ; 13 negatifs)")
+    print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
+          "decision pure testee, periodique et materiel nu a part, A/B a criteres declares ; 17 negatifs)")
     return 0
 
 

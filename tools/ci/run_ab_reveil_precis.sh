@@ -6,7 +6,8 @@
 # Un seul demarrage, TOURS tours (4 par defaut) ; chaque tour passe
 # `ordonnanceur-probe 8 1` sous `reveil-precis off` et `on`, ordre alterne
 # (AB aux tours impairs, BA aux pairs). Le releve `reveil-precis` encadre
-# chaque passe. Le demarrage finit sous `off` (la politique par defaut).
+# chaque passe. Le demarrage finit sous `on` (la politique par defaut depuis
+# b6c99032).
 #
 # Criteres et verdicts : tools/ci/analyse_ab_reveil_precis.py (declares
 # avant la mesure). ECHEC sur un defaut de surete ou d'instrument ;
@@ -43,7 +44,7 @@ cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
       echo "reveil-precis"
     done
   done
-  echo "reveil-precis off"
+  echo "reveil-precis on"
   echo "echo AB_PRECIS_FIN"
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/ab.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)

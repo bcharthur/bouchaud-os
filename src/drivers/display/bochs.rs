@@ -119,10 +119,13 @@ static ACCES_EN_TRANSFERT: AtomicU64 = AtomicU64::new(0);
 // `debut_trame` et `fin_trame`, `present_rect` (virtio seulement) copie comme
 // avant mais DIFFERE les commandes ; `fin_trame` soumet le plan
 // (`virtio_gpu_trame::planifie`) : quelques transferts, UN flush. Voulu par
-// `gpu-trame on` (DESACTIVE par defaut : la politique ne change qu'avec un A/B
-// KVM). Le verrou ne protege que la liste ; il n'est jamais tenu pendant une
-// commande.
-static TRAME_VOULUE: AtomicBool = AtomicBool::new(false);
+// `gpu-trame on|off`. ACTIVE par defaut depuis l'A/B KVM CONVAINCANT de
+// b6c99032 (run 38732049308, job gpu-tampon, 6/6 tours : 16 -> 5 commandes par
+// trame, p50 474 -> 177,5 us, p95 550 -> 237,5 ; TCG CONVAINCANT ; pixels du
+// bureau identiques a BGA 921 362/921 600). La CI rejoue l'A/B ; un KVM
+// NON_CONVAINCANT la rend a `off`. Le verrou ne protege que la liste ; il
+// n'est jamais tenu pendant une commande.
+static TRAME_VOULUE: AtomicBool = AtomicBool::new(true);
 const TRAME_REGIONS_MAX: usize = 32;
 /// Le cout d'une commande, en pixels transferes (mesure KVM : ~20 us par
 /// commande, ~0,4 ns par pixel).
