@@ -30,8 +30,12 @@ import statistics
 import sys
 
 QUORUM = 4
-QUANT = re.compile(r"^\s+(au repos|sous charge \((?:normal|interactif)\))\s+median\s+(\d+) us\s+p95\s+(\d+) us"
-                   r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s*$")
+# Les valeurs PROPRES (ligne `[propres ...]`), comme les A/B IPI et cession.
+# Cherchee n'importe ou dans la ligne : sous KVM, le noyau ecrit des releves
+# (`[SCHED-TACHE] ...`) sur la meme ligne que la sonde (run 38704459647 : six
+# bras sur huit sans mesure lue).
+QUANT = re.compile(r"(au repos|sous charge \((?:normal|interactif)\))\s+median\s+(\d+) us\s+p95\s+(\d+) us"
+                   r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
 BRAS = re.compile(r"^AB_PRECIS tour=(\d+) reveil=(on|off)$")
 COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
 
@@ -51,7 +55,7 @@ def analyse(texte, tours, smp, nom):
             continue
         if courant is None:
             continue
-        q = QUANT.match(l)
+        q = QUANT.search(l)
         if q:
             courant["q"][q.group(1)] = tuple(int(x) for x in q.groups()[1:])
         m = re.match(r"^VERDICT_SONDE : (\S+)", l)

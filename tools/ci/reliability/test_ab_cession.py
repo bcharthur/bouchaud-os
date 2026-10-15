@@ -108,5 +108,13 @@ class AbCession(unittest.TestCase):
         self.assertEqual((v, c), ("NON_CONCLUANT", 0), "\n".join(sortie))
 
 
+class LignesEntrelacees(unittest.TestCase):
+    def test_tours_de_calcul_lus_derriere_une_ligne_du_noyau(self):
+        texte = journal(6, mieux).replace("                           90000 tours de calcul",
+                                          "[SCHED-RESUME] coeurs=4                           90000 tours de calcul")
+        _, v, c = a.analyse(texte, 6, "4", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

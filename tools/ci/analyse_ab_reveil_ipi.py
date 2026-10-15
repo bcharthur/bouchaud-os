@@ -32,17 +32,17 @@ def analyse(texte, tours, smp, nom):
             continue
         if courant is not None:
             courant["lignes"].append(l)
-    QUANT = re.compile(r"^\s+(sous charge \((?:normal|interactif)\)|au repos)\s+median\s+(\d+) us\s+p95\s+(\d+) us"
+    QUANT = re.compile(r"(sous charge \((?:normal|interactif)\)|au repos)\s+median\s+(\d+) us\s+p95\s+(\d+) us"
                        r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
     fautes = []
     for b in bras:
         r = {"verdict": None, "ipi_variante": None, "ipi_depart": None, "bascule": None, "preuve": set()}
         tours_vus = []
         for l in b["lignes"]:
-            q = QUANT.match(l)
+            q = QUANT.search(l)
             if q:
                 r[q.group(1)] = tuple(int(x) for x in q.groups()[1:])
-            m = re.match(r"^\s+(\d+) tours de calcul", l)
+            m = re.search(r"(\d+) tours de calcul", l)
             if m:
                 tours_vus.append(int(m.group(1)))
             m = re.match(r"^VERDICT_SONDE : (\S+)", l)

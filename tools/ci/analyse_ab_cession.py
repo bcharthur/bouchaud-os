@@ -33,7 +33,7 @@ import re
 import statistics
 import sys
 
-QUANT = re.compile(r"^\s+(sous charge \((?:normal|interactif)\)|au repos)\s+median\s+(\d+) us\s+p95\s+(\d+) us"
+QUANT = re.compile(r"(sous charge \((?:normal|interactif)\)|au repos)\s+median\s+(\d+) us\s+p95\s+(\d+) us"
                    r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
 COMPTEURS = re.compile(r"ORDO_CESSION politique=(\S+) gardees=(\d+) inversees=(\d+)")
 H, C = "historique", "classe"
@@ -55,10 +55,10 @@ def analyse(texte, tours, smp, nom):
             continue
         if courant is None:
             continue
-        q = QUANT.match(l)
+        q = QUANT.search(l)
         if q:
             courant["q"][q.group(1)] = tuple(int(x) for x in q.groups()[1:])
-        m = re.match(r"^\s+(\d+) tours de calcul", l)
+        m = re.search(r"(\d+) tours de calcul", l)
         if m:
             courant["tours"].append(int(m.group(1)))
         m = re.match(r"^VERDICT_SONDE : (\S+)", l)

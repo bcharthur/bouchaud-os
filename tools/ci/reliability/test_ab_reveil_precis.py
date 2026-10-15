@@ -22,6 +22,7 @@ def bras(t, v, repos=(900, 1600, 2500, 4000), inter=(600, 1000, 1500, 3000), ver
         P + "  au repos                 median %5d us  p95 %6d us  p99 %6d us  pire %6d us" % repos,
         P + "  au repos                 median %5d us  p95 %6d us  p99 %6d us  pire %6d us  [propres 300/300, regle=preuve-hote]" % repos,
         P + "  sous charge (interactif) median %5d us  p95 %6d us  p99 %6d us  pire %6d us" % inter,
+        P + "  sous charge (interactif) median %5d us  p95 %6d us  p99 %6d us  pire %6d us  [propres 300/300, regle=preuve-hote]" % inter,
         P + f"VERDICT_SONDE : {verdict} tentatives=1",
         P + f"REVEIL_PRECIS voulu={voulu} minuteur=tsc-deadline armes={armes[1]} retires_avant_service=0",
     ]
@@ -86,6 +87,22 @@ class AbReveilPrecis(unittest.TestCase):
 
     def test_panique_est_un_defaut(self):
         _, v, c = a.analyse(journal() + "panicked at x\n", 4, "1", "kvm")
+        self.assertEqual((v, c), ("DEFAUT", 1))
+
+
+class LignesEntrelacees(unittest.TestCase):
+    """Run 38704459647 : sous KVM le noyau ecrit sur la ligne de la sonde ;
+    six bras sur huit etaient rendus « mesure incomplete »."""
+
+    def test_une_ligne_interrompue_par_le_noyau_est_lue(self):
+        texte = journal().replace("regle=preuve-hote]", "regle=preuve-hote[SCHED-TACHE] tid=103 slot=3 etat=Blocked")
+        texte = texte.replace("  sous charge (interactif) median", "[kernel] RUN_NOYAU  sous charge (interactif) median")
+        _, v, c = a.analyse(texte, 4, "1", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+
+    def test_sans_ligne_propre_la_mesure_reste_incomplete(self):
+        texte = "\n".join(l for l in journal().splitlines() if "[propres" not in l) + "\n"
+        _, v, c = a.analyse(texte, 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
 
