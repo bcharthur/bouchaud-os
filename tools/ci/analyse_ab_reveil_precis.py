@@ -51,7 +51,7 @@ def analyse(texte, tours, smp, nom):
     for l in lignes:
         m = BRAS.match(l)
         if m:
-            courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None, "compteurs": []}
+            courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None, "compteurs": [], "diag": []}
             bras.append(courant)
             continue
         if courant is None:
@@ -65,6 +65,13 @@ def analyse(texte, tours, smp, nom):
         m = COMPTEUR.search(l)
         if m:
             courant["compteurs"].append((int(m.group(1)), m.group(2), int(m.group(3))))
+        # Diagnostic seulement (aucun effet sur le verdict) : ce que le noyau
+        # dit des reveils en retard au repos -- qui tenait le coeur, quelle
+        # etape a coute. Run 38732049308 : sous `on`, p50 39 us mais p95 852 ;
+        # la queue reste a attribuer.
+        d = re.search(r"(attribution|ventilation|comptes) au repos : .*", l)
+        if d:
+            courant["diag"].append(d.group(0)[:400])
     minuteur = "?"
     for b in bras:
         nb = f"tour {b['tour']} {b['v']}"
@@ -105,6 +112,10 @@ def analyse(texte, tours, smp, nom):
         r = b["q"].get("au repos", (0, 0, 0, 0))
         i = b["q"].get("sous charge (interactif)", (0, 0, 0, 0))
         sortie.append(f"  {b['tour']:<5}{b['v']:<5}{str(b['verdict']):<16}{r[0]:>10}{r[1]:>7}{r[2]:>8}{r[3]:>8}{i[1]:>10}{b.get('armes', 0):>8}")
+
+    for b in bras:
+        for d in b["diag"]:
+            sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
 
     def med(v, phase, k):
         return statistics.median([par_tour[t][v]["q"][phase][k] for t in paires]) if paires else 0
