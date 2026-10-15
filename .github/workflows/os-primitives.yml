@@ -18,8 +18,11 @@ on:
 permissions:
   contents: read
 
+# A reusable os-primitives call inherits github.workflow from the caller.
+# Isolate standalone dispatch from Ladybird's reusable call: neither can
+# cancel the other's KVM evidence. Keep only same-workflow replacement.
 concurrency:
-  group: os-primitives-debug-${{ github.ref }}
+  group: os-primitives-debug-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
