@@ -452,6 +452,35 @@ reste à consolider avant toute 3D :
 - la mesure KVM de BARRIERE_V1 : en attente d'une campagne où les pas P10
   tournent (voir plus haut).
 
+## 4 sexies. Mesure KVM de BARRIERE_V1, cycle du scanout, P10+.1 (15 octobre)
+
+**Mesure KVM enfin produite** (run [38645396730](https://github.com/bcharthur/bouchaud-os/actions/runs/38645396730),
+`c7018e56`, os-primitives) — les pas P10 tournent désormais même après un
+rouge plus haut :
+
+| µs par présentation | BGA moy | virtio moy | BGA p95 | virtio p95 |
+|---|---|---|---|---|
+| KVM plein 1280×720 | 328 | 399 | 198 | 472 |
+| KVM bande 1280×30 | 3 | 102 | 3 | 121 |
+| KVM tuile 64×64 | 2 | 43 | 2 | 62 |
+
+640/640 présentations acceptées (TCG et KVM), mire exacte 3 721/3 721,
+bureau virtio = bureau BGA à 921 375/921 600 pixels (KVM), `GET_DISPLAY_INFO`
+71 µs (KVM). Panne `ATTACH_BACKING` et réponse étrangère : vertes TCG et KVM.
+Le scanout 2D avec BARRIERE_V1 est **VERIFIED_AT_KVM (QEMU)**.
+
+**Défaut trouvé et corrigé** (`2238d8b9`, BOUCHAUD_VIRTIO_GPU_SCANOUT_CYCLE_V1) :
+un second `enter()` dans le même démarrage recréait la ressource 1 sans avoir
+rendu la précédente ; QEMU refusait (`0x1203`) et le chemin d'échec faisait
+UNREF de l'ancienne ressource, encore à l'écran (fuite DMA, écran éteint).
+Banc BGA/virtio désormais à deux présentations par démarrage : ÉCHEC n=2 sur
+`c7018e56`, vert après le correctif.
+
+**P10+.1 écrit** (`daa5df34`, BOUCHAUD_VIRTIO_GPU_IRQ_V1) : achèvement par
+MSI-X, attente dormante bornée, repli scrutation ; politique par défaut :
+scrutation, jusqu'à un A/B KVM CONVAINCANT. Détail, chiffres locaux et
+conception P10+.2 : `docs/current/P10_PLUS_ROADMAP.md`.
+
 ## 5. Ce que P10 ne prétend pas
 
 - Il n'y a ni WebGL, ni WebGPU, ni canvas accéléré. Le canvas 2D est peint en

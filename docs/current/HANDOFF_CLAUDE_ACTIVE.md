@@ -1,4 +1,62 @@
-# Handoff actif — Claude (session du 14 octobre 2026)
+# Handoff actif — Claude (session du 15 octobre 2026, ordre de mission SUPER P+)
+
+> Source vivante de reprise. La section « Session du 14 octobre » plus bas et
+> les handoffs datés restent l'historique. Chaque verdict cite le run qui l'a
+> produit ; rien ici n'annonce un résultat futur.
+
+## 0. Point de contrôle (15 octobre)
+
+| | |
+|---|---|
+| Branche | `claude/ladybird-observability-performance` (jamais `main`) |
+| Base de session | `c7018e56` (HEAD de référence de l'ordre de mission) |
+| Ordre de mission | `MISSION_CLAUDE_SUPER_P_PLUS_2026-10-15.md` (archive jointe, lue en entier) |
+| Interdits respectés | aucun reset/clean/force-push/rebase destructif ; deux `--amend` sur des commits **locaux non poussés** (message corrigé, garde dédoublonné) ; aucun binaire versionné ; aucune action physique TRIGKEY |
+| Worktree de mesure | `git worktree` détaché à `c7018e56` dans le scratchpad (banc « avant ») — hors dépôt, sans effet sur la branche |
+
+Commits de la session (au-dessus de `c7018e56`) :
+
+| SHA | Objet | Niveau de preuve à ce jour |
+|---|---|---|
+| `18dc70b8` | endurance : marqueurs émis seulement (faux témoin de l'écho `+`), NON_QUALIFIANT distinct d'un échec, campagne poursuivie | HOST (15 tests, mutations) |
+| `2238d8b9` | **fix P10** : scanout du bureau repris/rendu à chaque `enter()` | TCG local (avant : ÉCHEC n=2, après : 2×640) |
+| `daa5df34` | **P10+.1** : achèvement virtio-gpu par MSI-X, attente dormante bornée, A/B, pannes | HOST + TCG local ; **KVM à lire** |
+| `81570c88` | diag A/B IPI V3 : départ du compteur relevé dans le bras après bascule + grâce 50 ms | HOST |
+| `856db7b5` | **fix P13** : `nanosleep`/`clock_nanosleep` à la nanoseconde exacte | TCG local (médiane repos 1,34 → 0,91 ms) |
+| *(ce commit)* | docs : audit 15/10, registre, P10 §4 sexies, `P10_PLUS_ROADMAP.md`, baseline NOT_ESTABLISHED, handoff | — |
+
+### Campagne `c7018e56` (lue) — détail : `AUDIT_STABILITY_2026-10-15.md`
+
+- verts : CI Fast 38645396551, Integration 38645396809, Reliability 38645396934, SCM 38645396562 ;
+  Ladybird 38645396730 tous jobs verts **sauf** le pas A/B IPI de primitives ;
+- primitives : série 4 démarrages verts (KVM 12 s : 30 différées / 30 vidées / 0 perdue) ;
+  P10 TCG+KVM verts (**première mesure KVM de BARRIERE_V1**) ; P13 KVM : TEMOIN_INSTRUMENT aux 4 topologies ;
+- endurance 38645418495 : SMP1, SMP2 verts, SMP4 vert **40/40 cycles**, SMP8 NON_QUALIFIANT (TCG).
+
+### Ouverts, par priorité
+
+1. **Lire la campagne du HEAD poussé** (A/B P10+.1 KVM, pannes P10+.1 KVM, BGA/virtio double, P13 KVM avec sommeils ns, A/B IPI V3) et une endurance hebdo (SMP8 doit rester NON_QUALIFIANT **et** poursuivre ses cycles).
+2. **P13+ réveil précis** : la détection des échéances au tick (≤ 1 ms) garde le repos au-dessus de la charge sous KVM ; concevoir le minuteur à l'échéance (LAPIC TSC-deadline au repos, multiplexé avec le quantum), test hôte de la décision, banc KVM.
+3. **P10+.2** double tampon : conception dans `P10_PLUS_ROADMAP.md` ; commencer par la machine d'état des tampons (pure, testée hôte).
+4. Émission série masquée jusqu'à 60–170 ms sous KVM dans les bancs à fautes volontaires (bilan) : décider le report systématique hors panique.
+5. Inchangés : `persist-course-probe`, `courant.rs:276`, LibJS `Value.cpp:484`, RTL8168, Compositor 8/9 (registre).
+
+### Commandes exactes de reprise
+
+```bash
+git fetch origin claude/ladybird-observability-performance && git status --short --branch
+cargo bootimage                                     # image livrée
+tools/ci/run_architecture_guards.sh                 # 173/173 attendu
+tools/ci/run_host_tests.sh                          # 115/115 suites Rust + Python
+tools/ci/run_banc_irq_gpu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6   # A/B P10+.1 (TCG)
+cargo bootimage --features banc-virtio-gpu-irq-pannes && \
+  tools/ci/run_virtio_gpu_irq_pannes.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+BANC_TEMOIN_INSTRUMENT=1 tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 1
+```
+
+---
+
+# Session du 14 octobre 2026 (historique)
 
 > Source vivante de reprise. Les handoffs datés (`HANDOFF_CLAUDE_P19_2026-10-12.md`,
 > `HANDOFF_CODEX_2026-10-08.md`) et la version du 13 octobre (dans l'historique
