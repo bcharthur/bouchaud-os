@@ -41,6 +41,9 @@ pub mod virtio_gpu_irq;
 /// copies par trame (pur, teste sur l'hote).
 #[path = "display/virtio_gpu_tampons.rs"]
 pub mod virtio_gpu_tampons;
+/// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3a) : une trame, une soumission (pur, teste sur l'hote).
+#[path = "display/virtio_gpu_trame.rs"]
+pub mod virtio_gpu_trame;
 #[path = "display/politique_scanout.rs"]
 pub mod politique_scanout;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir
