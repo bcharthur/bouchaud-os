@@ -793,6 +793,11 @@ static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; 
 /// La politique (`reveil-precis on|off`). Desactivee par defaut tant qu'un
 /// A/B KVM n'a pas montre le gain.
 static REVEIL_PRECIS: AtomicBool = AtomicBool::new(false);
+/// Le mode PERIODIQUE (QEMU TCG, compte LAPIC raccourci) est une experience
+/// distincte : son A/B local a echoue a ses criteres (3929746a, p99 au repos)
+/// ; il n'arme rien sans `reveil-precis periodique on`, meme si la politique
+/// generale est active. Le mode TSC-deadline n'en depend pas.
+static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);
 static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
 
@@ -808,6 +813,9 @@ pub fn arme_reveil_precis_avant_hlt() {
     }
     let borne = crate::kernel::task::prochaine_echeance_ns();
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
+        if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {
+            return;
+        }
         // Mode periodique (QEMU TCG) : un compte initial plus court, qui
         // redemarre le minuteur ; le quantum est restaure a son declenchement
         // (`arm_local_scheduler_timer`) ou au retour de `hlt`.
@@ -867,6 +875,17 @@ pub fn retire_reveil_precis_apres_hlt() {
 /// La politique du reveil precis ; rend l'etat precedent.
 pub fn veut_reveil_precis(oui: bool) -> bool {
     REVEIL_PRECIS.swap(oui, Ordering::Relaxed)
+}
+
+/// Le mode periodique du reveil precis (`reveil-precis periodique on|off`).
+/// Rend l'etat precedent.
+pub fn veut_reveil_precis_periodique(oui: bool) -> bool {
+    REVEIL_PRECIS_PERIODIQUE.swap(oui, Ordering::Relaxed)
+}
+
+/// Le mode periodique est-il autorise ?
+pub fn reveil_precis_periodique() -> bool {
+    REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed)
 }
 
 /// `(voulu, mode du minuteur local, armes, retires avant d'avoir servi)`.

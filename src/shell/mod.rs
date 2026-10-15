@@ -781,16 +781,20 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
         match argv[1] {
             "on" => { crate::arch::x86_64::smp::veut_reveil_precis(true); }
             "off" => { crate::arch::x86_64::smp::veut_reveil_precis(false); }
+            // Le mode periodique (TCG) : une experience a part.
+            "periodique" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::arch::x86_64::smp::veut_reveil_precis_periodique(argv[2] == "on");
+            }
             autre => {
-                crate::println!("reveil-precis : {} inconnu (on | off)", autre);
+                crate::println!("reveil-precis : {} inconnu (on | off | periodique on|off)", autre);
                 return 1;
             }
         }
     }
     let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
     crate::serial_println!(
-        "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={}",
-        voulu as u8, mode, armes, retires
+        "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={} periodique={}",
+        voulu as u8, mode, armes, retires, crate::arch::x86_64::smp::reveil_precis_periodique() as u8
     );
     0
 }

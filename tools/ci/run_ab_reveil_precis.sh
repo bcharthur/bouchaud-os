@@ -31,6 +31,9 @@ mkdir -p "$SORTIE/scenario/bin"
 (cd tools/userland && OUT="$SORTIE/sondes" ./build.sh musl >/dev/null)
 cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
 {
+  # Sous TCG le minuteur est periodique : son mode du reveil precis est une
+  # experience a part (OFF par defaut), autorisee ici pour etre mesuree.
+  if [ "$NOM" = tcg ]; then echo "reveil-precis periodique on"; fi
   for t in $(seq "$TOURS"); do
     if [ $((t % 2)) = 1 ]; then ordre="off on"; else ordre="on off"; fi
     for v in $ordre; do

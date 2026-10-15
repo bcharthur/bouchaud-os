@@ -37,6 +37,9 @@ FICHIERS = {
     "analyse": RACINE / "tools/ci/analyse_ab_reveil_precis.py",
 }
 INTERRUPTEUR = "static REVEIL_PRECIS: AtomicBool = AtomicBool::new(false);"
+PERIODIQUE_OFF = "static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);"
+PERIODIQUE_EXIGE = ("    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {\n"
+                    "        if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {\n            return;\n        }")
 HLT = 'unsafe { asm!("sti; hlt", options(nostack)); }'
 AUTOUR_HLT = ("    smp::arme_reveil_precis_avant_hlt();\n"
               "    " + HLT + "\n"
@@ -60,6 +63,13 @@ def verifie(t: dict, sources_src: str) -> list:
     fautes = []
     if t["smp"].count(INTERRUPTEUR) != 1:
         fautes.append("smp.rs : le reveil precis n'est plus desactive au demarrage.")
+    # Le mode periodique (TCG) a echoue a son A/B local : experience a part,
+    # OFF, exigee avant tout armement periodique, basculee par le shell seul.
+    if t["smp"].count(PERIODIQUE_OFF) != 1 or PERIODIQUE_EXIGE not in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt("):
+        fautes.append("smp.rs : le mode periodique du reveil precis n'est plus une experience a part, desactivee.")
+    per = [l for l in sources_src.splitlines() if "veut_reveil_precis_periodique(" in l and "pub fn " not in l]
+    if len(per) != 1 or "argv[2] == \"on\"" not in per[0]:
+        fautes.append("le mode periodique est bascule ailleurs que par `reveil-precis periodique`.")
     ecritures = t["smp"].count("REVEIL_PRECIS.swap(") + t["smp"].count("REVEIL_PRECIS.store(")
     if ecritures != 1 or "REVEIL_PRECIS.swap(oui, Ordering::Relaxed)" not in corps(t["smp"], "pub fn veut_reveil_precis("):
         fautes.append("smp.rs : la politique est ecrite ailleurs que par veut_reveil_precis.")
@@ -101,6 +111,9 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("periodique actif par defaut", "smp", PERIODIQUE_OFF, PERIODIQUE_OFF.replace("false", "true")),
+        ("periodique sans autorisation", "smp", PERIODIQUE_EXIGE,
+         "    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {"),
         ("A/B KVM retire de la CI", "flux", 'AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1', ""),
         ("interrupteur arme au demarrage", "smp", INTERRUPTEUR, INTERRUPTEUR.replace("false", "true")),
         ("armement sorti du hlt", "idle", "    smp::arme_reveil_precis_avant_hlt();\n", ""),
@@ -139,7 +152,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique off au demarrage, armement autour du hlt, quantum restaure, "
-          "decision pure testee, A/B a criteres declares ; 11 negatifs)")
+          "decision pure testee, periodique a part, A/B a criteres declares ; 13 negatifs)")
     return 0
 
 
