@@ -95,6 +95,20 @@ fn rgb(index: u8) -> u32 {
 
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
+// BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composer DIRECTEMENT dans la
+// memoire DMA du scanout virtio-gpu, sans tampon arriere ni copie. Voulu par
+// `gpu-tampon direct` (DESACTIVE par defaut : la politique ne change qu'avec un
+// A/B KVM), pris a `enter()` si le scanout virtio est monte. Le bureau n'y
+// ecrit que si aucun transfert n'est en vol (`virtio_gpu::tampon_ecrivable`).
+static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(false);
+static TAMPON_DIRECT: AtomicBool = AtomicBool::new(false);
+/// Octets copies du tampon arriere vers l'ecran (BGA, ou virtio en copie).
+static OCTETS_COPIES: AtomicU64 = AtomicU64::new(0);
+/// Octets presentes sans copie (virtio en composition directe).
+static OCTETS_DIRECTS: AtomicU64 = AtomicU64::new(0);
+/// Acces au tampon du bureau alors que l'hote pouvait lire la memoire du
+/// scanout (transfert en vol) : doit rester nul.
+static ACCES_EN_TRANSFERT: AtomicU64 = AtomicU64::new(0);
 // BOUCHAUD_GFX_DRAPEAUX_ATOMIQUES_V1
 //
 // Ces trois drapeaux etaient des `static mut` ecrits par le bureau (sous le
@@ -606,6 +620,7 @@ pub fn enter() {
 }
 
 fn enter_verrouille() {
+    TAMPON_DIRECT.store(false, Ordering::Release);
     if firmware_backend_installed() {
         let canvas_width = width();
         let canvas_height = height();
@@ -658,6 +673,21 @@ fn enter_verrouille() {
                     Some((memoire, physique)) => {
                         LFB = memoire;
                         LFB_PHYS.store(physique, Ordering::Release);
+                        let mode = crate::drivers::virtio_gpu_tampons::mode(
+                            TAMPON_DIRECT_VOULU.load(Ordering::Acquire),
+                            !memoire.is_null(),
+                            if crate::drivers::virtio_gpu::tampon_ecrivable() {
+                                crate::drivers::virtio_gpu_tampons::Etat::Composition
+                            } else {
+                                crate::drivers::virtio_gpu_tampons::Etat::Inconnu
+                            },
+                        );
+                        if mode == crate::drivers::virtio_gpu_tampons::Mode::Direct {
+                            // Le bureau compose dans la memoire du scanout :
+                            // le tampon arriere (3,7 Mo) n'a plus d'objet.
+                            BACK = None;
+                            TAMPON_DIRECT.store(true, Ordering::Release);
+                        }
                         VIRTIO_SCANOUT.store(true, Ordering::Release);
                         HD_ACTIVE.store(true, Ordering::Release);
                         crate::drivers::gpu::activate_virtio_2d(width(), height(), 32, physique);
@@ -702,6 +732,7 @@ fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) {
         // Abandon : le peripherique ne repond plus. Le bureau continue de
         // composer, plus rien n'est presente -- et le journal l'a dit.
         VIRTIO_SCANOUT.store(false, Ordering::Release);
+        quitte_memoire_scanout();
     }
 }
 
@@ -819,7 +850,9 @@ fn mesure_categories(contexte: &str) {
         "scrute"
     };
     let (ok0, echecs0, _, _) = crate::drivers::virtio_gpu::compteurs();
+    let tampon = if TAMPON_DIRECT.load(Ordering::Acquire) { "direct" } else { "copie" };
     for (nom, x, y, l, h, n) in BANC_CATEGORIES {
+        let (_, _, copies0, directs0, acces0) = compteurs_tampon();
         let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n);
         let avant = crate::drivers::virtio_gpu::compteurs_irq();
         // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : ce que l'attente coute au coeur ou
@@ -845,7 +878,7 @@ fn mesure_categories(contexte: &str) {
         crate::serial_println!(
             "[BANC-PRESENT] ecran={} categorie={} rect={}x{} n={} moyen_us={} p50_us={} p95_us={} max_us={} mpix_s={} \
              contexte={} attente={} cessions={} sommeils={} irq={} irq_sans_progres={} vus_par_relecture={} echues={} \
-             coeur={} inactif_pour_mille={}",
+             coeur={} inactif_pour_mille={} tampon={} octets_copies={} octets_directs={} acces_en_transfert={}",
             ecran, nom, l, h, n,
             moyen / 1000, centile(50) / 1000, centile(95) / 1000, durees[n - 1] / 1000,
             if total == 0 { 0 } else { pixels.saturating_mul(1000) / total },
@@ -858,6 +891,10 @@ fn mesure_categories(contexte: &str) {
             apres.echues - avant.echues,
             coeur,
             inactif.saturating_mul(1000) / horloge,
+            tampon,
+            compteurs_tampon().2 - copies0,
+            compteurs_tampon().3 - directs0,
+            compteurs_tampon().4 - acces0,
         );
     }
     let (ok1, echecs1, _, _) = crate::drivers::virtio_gpu::compteurs();
@@ -938,7 +975,53 @@ unsafe fn write_regs_text(crtc: &[u8; 25], gc: &[u8; 9], ac: &[u8; 21]) {
 // --- Dessin sur le double-buffer (32 bits) ----------------------------------
 
 fn back() -> &'static mut [u32] {
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        if !crate::drivers::virtio_gpu::tampon_ecrivable() {
+            ACCES_EN_TRANSFERT.fetch_add(1, Ordering::Relaxed);
+        }
+        let lfb = unsafe { LFB };
+        if lfb.is_null() {
+            return &mut [];
+        }
+        // La memoire DMA du scanout couvre `width() x height()` pixels
+        // (`active_scanout` l'a allouee pour cette geometrie).
+        return unsafe { core::slice::from_raw_parts_mut(lfb, width() * height()) };
+    }
     unsafe { BACK.as_mut().map(|v| v.as_mut_slice()).unwrap_or(&mut []) }
+}
+
+/// `gpu-tampon direct|copie` : la politique, prise au prochain `enter()`.
+/// Rend la precedente.
+pub fn veut_tampon_direct(oui: bool) -> bool {
+    TAMPON_DIRECT_VOULU.swap(oui, Ordering::AcqRel)
+}
+
+/// `(voulu, actif, octets copies, octets presentes sans copie, acces pendant
+/// un transfert)`.
+pub fn compteurs_tampon() -> (bool, bool, u64, u64, u64) {
+    (
+        TAMPON_DIRECT_VOULU.load(Ordering::Acquire),
+        TAMPON_DIRECT.load(Ordering::Acquire),
+        OCTETS_COPIES.load(Ordering::Relaxed),
+        OCTETS_DIRECTS.load(Ordering::Relaxed),
+        ACCES_EN_TRANSFERT.load(Ordering::Relaxed),
+    )
+}
+
+/// Le scanout virtio est abandonne : sa memoire peut encore etre lue par
+/// l'hote (transfert sans reponse) et ne doit plus etre ecrite. En
+/// composition directe, le bureau repart sur un tampon arriere -- l'image
+/// courante y est recopiee (lire la memoire est sans danger).
+fn quitte_memoire_scanout() {
+    unsafe {
+        if TAMPON_DIRECT.swap(false, Ordering::AcqRel) && !LFB.is_null() {
+            let n = width() * height();
+            let mut v = vec![0u32; n];
+            core::ptr::copy_nonoverlapping(LFB, v.as_mut_ptr(), n);
+            BACK = Some(v);
+        }
+        LFB = core::ptr::null_mut();
+    }
 }
 
 pub fn clear(color: u8) {
@@ -993,8 +1076,16 @@ pub fn present() {
     if buf.is_empty() { return; }
     let lfb = unsafe { LFB };
     if lfb.is_null() { return; }
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
+    let octets = (width() * height() * core::mem::size_of::<u32>()) as u64;
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : le bureau a compose dans la
+        // memoire du scanout ; aucune copie.
+        OCTETS_DIRECTS.fetch_add(octets, Ordering::Relaxed);
+    } else {
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
+        }
+        OCTETS_COPIES.fetch_add(octets, Ordering::Relaxed);
     }
     presente_virtio(0, 0, width(), height());
     crate::drivers::gpu::note_present(width() * height() * core::mem::size_of::<u32>());
@@ -1116,7 +1207,13 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // chaque seconde -- `last_present_rect=0,0,1280,30` --, la barre des taches
     // a chaque changement de fenetre, et l'ecran entier a chaque apparition.
     // Trente appels deviennent un, sept cent vingt deviennent un.
-    if count == width() {
+    let octets = (count * (y1 - y) * core::mem::size_of::<u32>()) as u64;
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : le rectangle est deja dans la
+        // memoire du scanout (memoire ordinaire, coherente pour le DMA) :
+        // aucune copie, seul le transfert part.
+        OCTETS_DIRECTS.fetch_add(octets, Ordering::Relaxed);
+    } else if count == width() {
         let offset = y * width();
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1129,6 +1226,9 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
                 core::ptr::copy_nonoverlapping(buf.as_ptr().add(offset), lfb.add(offset), count);
             }
         }
+    }
+    if !TAMPON_DIRECT.load(Ordering::Acquire) {
+        OCTETS_COPIES.fetch_add(octets, Ordering::Relaxed);
     }
     // LA BARRIERE, SANS LAQUELLE L'ECRITURE COMBINEE SE RETOURNE CONTRE NOUS.
     //

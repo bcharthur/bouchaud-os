@@ -1512,15 +1512,19 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         let (sautes, cedes, non_cedables) = crate::drivers::virtio_gpu::compteurs_verrou();
         // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : l'attente par interruption, au meme rythme.
         let i = crate::drivers::virtio_gpu::compteurs_irq();
+        let t = crate::drivers::gfx::compteurs_tampon();
         crate::serial_println!(
             "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={} \
-             irq_armee={} irq_voulue={} irq={} irq_sans_progres={} dormantes={} sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={}",
+             irq_armee={} irq_voulue={} irq={} irq_sans_progres={} dormantes={} sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={} \
+             tampon={} octets_copies={} octets_directs={} acces_en_transfert={}",
             presents_ok, presents_echec, pixels_virtio, ns_virtio,
             ns_virtio / presents_ok.max(1) / 1000,
             crate::drivers::virtio_gpu::actif() as u8,
             sautes, cedes, non_cedables,
             i.armee as u8, i.voulue as u8, i.irq, i.irq_sans_progres, i.attentes_dormantes, i.sommeils,
             i.reveils_sans_progres, i.vus_par_relecture, i.echues,
+            // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : la composition et ses copies.
+            if t.1 { "direct" } else { "copie" }, t.2, t.3, t.4,
         );
     }
 

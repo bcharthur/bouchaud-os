@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "gpu-irq", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -736,6 +736,26 @@ fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+fn gpu_tampon(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "direct" => { crate::drivers::gfx::veut_tampon_direct(true); }
+            "copie" => { crate::drivers::gfx::veut_tampon_direct(false); }
+            autre => {
+                crate::println!("gpu-tampon : {} inconnu (direct | copie)", autre);
+                return 1;
+            }
+        }
+    }
+    let (voulu, actif, copies, directs, acces) = crate::drivers::gfx::compteurs_tampon();
+    crate::serial_println!(
+        "GPU_TAMPON voulu={} actif={} octets_copies={} octets_directs={} acces_en_transfert={} etat={}",
+        if voulu { "direct" } else { "copie" }, actif as u8, copies, directs, acces,
+        crate::drivers::virtio_gpu::etat_tampon_nom()
+    );
+    0
+}
+
 fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
         match argv[1] {
@@ -887,6 +907,10 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // BOUCHAUD_REVEIL_PRECIS_V1 : reveil a l'echeance exacte au repos
         // (on) ou au tick/quantum (off), pour l'A/B ; sans argument, l'etat.
         "reveil-precis" => reveil_precis(argc, &argv),
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composition directe dans
+        // la memoire du scanout virtio (direct) ou tampon arriere + copie
+        // (copie, defaut), prise au prochain `enter()` ; sans argument, l'etat.
+        "gpu-tampon" => gpu_tampon(argc, &argv),
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),

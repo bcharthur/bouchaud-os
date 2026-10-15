@@ -322,3 +322,61 @@ jobs:
             ab-cession-*/serie.log
             ab-reveil-precis-*/serie.log
           if-no-files-found: warn
+
+  # P10+.2b : composition directe dans la memoire du scanout virtio-gpu, en
+  # parallele des sondes (deux demarrages par accelerateur).
+  gpu-tampon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: primitives-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: P10+.2b -- bureau compose directement dans la memoire du scanout, verifie aux pixels (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : `gpu-tampon direct` avant `desktop`.
+        # Les memes exigences que le pas P10 aux pixels (mire, bureau virtio =
+        # bureau BGA, horloge vivante, aucune presentation en echec), plus :
+        # zero octet copie, aucun acces au tampon pendant un transfert.
+        run: |
+          SCANOUT_SORTIE=$PWD/scanout-direct-tcg SCANOUT_TAMPON=direct tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-direct-kvm SCANOUT_TAMPON=direct BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: P10+.2b -- A/B copie contre composition directe, banc de presentation (TCG puis KVM ; politique par defaut copie)
+        # Six tours AB/BA de `banc-present tache`. Criteres declares dans
+        # analyse_banc_tampon.py (surete, plein ecran, partiels, quorum). Le
+        # pas echoue sur un defaut de surete ; CONVAINCANT / NON_CONVAINCANT /
+        # NON_CONCLUANT est une mesure. La politique ne change qu'avec un KVM
+        # CONVAINCANT.
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          BANC_SORTIE=$PWD/banc-tampon-tcg tools/ci/run_banc_tampon.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          BANC_SORTIE=$PWD/banc-tampon-kvm BO_QEMU_KVM=1 tools/ci/run_banc_tampon.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          exit $r
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-primitives-gpu-tampon
+          path: |
+            scanout-direct-*/serie-*.log
+            scanout-direct-*/capture-*.ppm
+            banc-tampon-*/serie.log
+          if-no-files-found: warn

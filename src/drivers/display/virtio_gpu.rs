@@ -29,12 +29,13 @@
 //! (1af4:1050) ; sans lui, une ligne et rien d'autre.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
 use crate::drivers::virtio_gpu_file as file;
 use crate::drivers::virtio_gpu_irq::{self as irq, Reveil, Strategie};
+use crate::drivers::virtio_gpu_tampons as tampons;
 use crate::kernel::memory;
 
 const VENDEUR_VIRTIO: u16 = 0x1AF4;
@@ -1278,15 +1279,23 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
     }
     let r = Rect { x: x as u32, y: y as u32, largeur: (x1 - x) as u32, hauteur: (y1 - y) as u32 };
     let decalage = ((y * s.largeur as usize + x) * 4) as u64;
+    // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : pendant le transfert, l'hote
+    // lit la memoire du scanout -- le bureau qui y compose directement ne doit
+    // pas y ecrire (`tampon_ecrivable`). Sans reponse : plus jamais ecrite.
+    let Some(en_vol) = tampons::soumet(etat_tampon()) else {
+        PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    pose_etat_tampon(en_vol);
     // BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : le flush ne part qu'apres la reponse
     // -- barriere comprise, donc traitement FINI -- du transfert. Rien dans
     // la specification ne garantit qu'une file de controle soit traitee dans
     // l'ordre : les deux commandes sous une sonnette (BOUCHAUD_VIRTIO_GPU_LOT_V1)
     // pouvaient afficher le rectangle avant de l'avoir recu.
-    let ok = unsafe {
-        transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage) == Ok(RESP_OK_NODATA)
-            && vide(&mut p.file, RESSOURCE_BUREAU, r) == Ok(RESP_OK_NODATA)
-    };
+    let rendu = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage) };
+    let fin = if dma::issue(rendu) == dma::Issue::SansReponse { tampons::Fin::SansReponse } else { tampons::Fin::Achevee };
+    pose_etat_tampon(tampons::acheve(en_vol, fin));
+    let ok = rendu == Ok(RESP_OK_NODATA) && unsafe { vide(&mut p.file, RESSOURCE_BUREAU, r) } == Ok(RESP_OK_NODATA);
     if ok {
         PRESENTS_OK.fetch_add(1, Ordering::Relaxed);
         PIXELS_TRANSFERES.fetch_add(u64::from(r.largeur) * u64::from(r.hauteur), Ordering::Relaxed);
@@ -1311,6 +1320,43 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
 }
 
 static ECHECS_CONSECUTIFS: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : l'etat de la memoire du scanout
+// (`virtio_gpu_tampons::Etat`), ecrit sous le verrou du peripherique par
+// `presente`, lu sans verrou par le bureau avant d'y ecrire.
+static ETAT_TAMPON: AtomicU8 = AtomicU8::new(0);
+
+fn etat_tampon() -> tampons::Etat {
+    match ETAT_TAMPON.load(Ordering::Acquire) {
+        0 => tampons::Etat::Composition,
+        1 => tampons::Etat::Transfert,
+        _ => tampons::Etat::Inconnu,
+    }
+}
+
+fn pose_etat_tampon(e: tampons::Etat) {
+    let v = match e {
+        tampons::Etat::Composition => 0,
+        tampons::Etat::Transfert => 1,
+        tampons::Etat::Inconnu => 2,
+    };
+    ETAT_TAMPON.store(v, Ordering::Release);
+}
+
+/// Le bureau peut-il ecrire la memoire du scanout (aucun transfert en vol,
+/// aucun transfert reste sans reponse) ?
+pub fn tampon_ecrivable() -> bool {
+    tampons::peut_ecrire(etat_tampon())
+}
+
+/// L'etat de la memoire du scanout, pour les releves.
+pub fn etat_tampon_nom() -> &'static str {
+    match etat_tampon() {
+        tampons::Etat::Composition => "composition",
+        tampons::Etat::Transfert => "transfert",
+        tampons::Etat::Inconnu => "inconnu",
+    }
+}
 
 /// `(presentations sautees faute de verrou, attentes ayant cede le
 /// processeur, attentes faites la ou ceder est interdit)`.

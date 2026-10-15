@@ -57,8 +57,12 @@ SONNETTE = "write_volatile(self.sonnette as *mut u16, 0);"
 JUGE = "if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {"
 AVANCE = "self.dernier_util = dernier.wrapping_add(1);"
 DEPLACEMENT = "<barriere deplacee apres la sonnette>"
-SEQUENTIEL = re.compile(r"transfert\(&mut p\.file, RESSOURCE_BUREAU, r, decalage\) == Ok\(RESP_OK_NODATA\)\s*"
-                        r"&& vide\(&mut p\.file, RESSOURCE_BUREAU, r\) == Ok\(RESP_OK_NODATA\)")
+# BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : la reponse du transfert est gardee (`rendu`)
+# pour l'etat de la memoire du scanout ; le flush ne part toujours qu'apres
+# une reponse OK (court-circuit du `&&`).
+SEQUENTIEL = re.compile(r"let rendu = unsafe \{ transfert\(&mut p\.file, RESSOURCE_BUREAU, r, decalage\) \};[^;]*;[^;]*;\s*"
+                        r"let ok = rendu == Ok\(RESP_OK_NODATA\)\s*"
+                        r"&& unsafe \{ vide\(&mut p\.file, RESSOURCE_BUREAU, r\) \} == Ok\(RESP_OK_NODATA\)")
 
 
 def corps(texte: str, nom: str) -> str:
@@ -228,8 +232,8 @@ def main() -> int:
         # seconde sonnette (deux commandes en vol)
         ("    fn reponse(&self)", "    unsafe fn sonne(&self) { " + SONNETTE + " }\n\n    fn reponse(&self)"),
         # flush envoye sans attendre la reponse du transfert
-        ("transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage) == Ok(RESP_OK_NODATA)\n            && vide(",
-         "{ let _ = transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage); true }\n            && vide("),
+        ("let ok = rendu == Ok(RESP_OK_NODATA) && unsafe { vide(",
+         "let ok = true && unsafe { vide("),
     ]
     def mute(a, b):
         if a == DEPLACEMENT:
