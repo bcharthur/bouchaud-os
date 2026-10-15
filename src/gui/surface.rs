@@ -43,6 +43,10 @@ pub struct Surface {
     /// n'est impose, Qt s'accommode de tout pas et un pas simple evite une
     /// deuxieme verite sur la geometrie.
     pub pas: usize,
+    /// Nombre de tampons (1, ou 2 pour le contrat a deux tampons,
+    /// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1) : le tampon `t` commence a
+    /// l'octet `t * octets()` du meme nœud.
+    pub tampons: usize,
     /// Frames physiques, indexees par numero de page.
     frames: Vec<u64>,
 }
@@ -55,11 +59,18 @@ impl Surface {
     /// il reste la possibilite d'afficher un message, et pas au milieu de la
     /// premiere trame du navigateur.
     pub fn nouvelle(largeur: usize, hauteur: usize) -> Option<Surface> {
-        if largeur == 0 || hauteur == 0 {
+        Surface::nouvelle_tampons(largeur, hauteur, 1)
+    }
+
+    /// Alloue `tampons` tampons consecutifs de `largeur` x `hauteur` dans le
+    /// meme nœud (1 ou 2 ; toute autre valeur est refusee).
+    pub fn nouvelle_tampons(largeur: usize, hauteur: usize, tampons: usize) -> Option<Surface> {
+        if largeur == 0 || hauteur == 0 || tampons == 0
+            || tampons > crate::gui::surface_tampons::TAMPONS_MAX {
             return None;
         }
         let pas = largeur * 4;
-        let octets = pas.checked_mul(hauteur)?;
+        let octets = pas.checked_mul(hauteur)?.checked_mul(tampons)?;
         let pages = (octets + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
         let node = crate::fs::ramfs::fs().cree_anonyme("bo-surface").ok()?;
@@ -67,7 +78,7 @@ impl Surface {
         // echoue a mi-chemin, `Drop` rendra proprement ce qui a ete pris.
         partage::ouvre(node);
 
-        let mut surface = Surface { node, largeur, hauteur, pas, frames: Vec::new() };
+        let mut surface = Surface { node, largeur, hauteur, pas, tampons, frames: Vec::new() };
         surface.frames.reserve(pages);
         for numero in 0..pages {
             match partage::page(node, numero as u64) {
@@ -88,7 +99,7 @@ impl Surface {
         Some(surface)
     }
 
-    /// Taille en octets.
+    /// Taille d'UN tampon en octets.
     pub fn octets(&self) -> usize {
         self.pas * self.hauteur
     }
@@ -136,12 +147,17 @@ impl Surface {
     /// La copie se fait par tranches de page, avec `copy_nonoverlapping` — un
     /// `memcpy` par tranche plutot qu'une boucle par pixel.
     pub fn copie_ligne(&self, y: usize, x: usize, compte: usize, dst: &mut [u32]) {
-        if y >= self.hauteur || x >= self.largeur {
+        self.copie_ligne_de(0, y, x, compte, dst)
+    }
+
+    /// `copie_ligne`, lue dans le tampon `tampon` (rien hors des tampons).
+    pub fn copie_ligne_de(&self, tampon: usize, y: usize, x: usize, compte: usize, dst: &mut [u32]) {
+        if tampon >= self.tampons || y >= self.hauteur || x >= self.largeur {
             return;
         }
         let compte = compte.min(self.largeur - x).min(dst.len());
         let mut restant = compte * 4;
-        let mut octet = y * self.pas + x * 4;
+        let mut octet = tampon * self.octets() + y * self.pas + x * 4;
         let mut ecrit = 0usize; // octets deja copies
         let destination = dst.as_mut_ptr() as *mut u8;
         while restant > 0 {

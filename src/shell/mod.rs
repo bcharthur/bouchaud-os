@@ -776,6 +776,31 @@ fn gpu_tampon(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// `gui-surface [simple|double] | gui-surface mesure on|off` : le contrat de
+/// surface offert aux PROCHAINS clients (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1)
+/// et l'instrument du banc de dechirure.
+fn gui_surface(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "simple" => { crate::gui::client::offre_surface_double(false); }
+            "double" => { crate::gui::client::offre_surface_double(true); }
+            "mesure" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::gui::client::mesure_dechirure(argv[2] == "on");
+            }
+            autre => {
+                crate::println!("gui-surface : {} inconnu (simple | double | mesure on|off)", autre);
+                return 1;
+            }
+        }
+    }
+    let (double, mesure) = crate::gui::client::politique_surface();
+    crate::serial_println!(
+        "GUI_SURFACE offre={} mesure={}",
+        if double { "double" } else { "simple" }, mesure as u8
+    );
+    0
+}
+
 fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
         match argv[1] {
@@ -950,6 +975,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // la memoire du scanout virtio (direct) ou tampon arriere + copie
         // (copie, defaut), prise au prochain `enter()` ; sans argument, l'etat.
         "gpu-tampon" => gpu_tampon(argc, &argv),
+        "gui-surface" => gui_surface(argc, &argv),
         // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
         // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
         "ordo-variante" => ordo_variante(argc, &argv),

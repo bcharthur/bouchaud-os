@@ -843,7 +843,10 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
             continue;
         }
         let pris = destination.len();
-        surface.copie_ligne(y - zy, colonne, pris, destination);
+        // La FACE : avec deux tampons (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1),
+        // jamais celui dans lequel le client peut ecrire.
+        surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);
+        client.note_lecture(destination);
     }
     fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
 

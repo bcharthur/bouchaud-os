@@ -8,16 +8,47 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::Cell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::gui::jauge::Jauge;
 use crate::gui::protocole::{self as proto, Genre, Lecture, Rect};
 use crate::gui::silence::VerdictProtocole;
 use crate::gui::surface::Surface;
+use crate::gui::surface_tampons::{self as tampons, Issue, Tampons};
 use crate::kernel::fd::{Canal, FdKind, FileDesc, CAPACITE_CANAL};
 use crate::kernel::sync::SpinLock;
 use crate::kernel::task::{self, EcranVirtuel, Priorite};
 
 pub const CHEMIN_NAVIGATEUR: &str = "/bo-navigateur";
+
+// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3c) -- le contrat a deux tampons
+// est OFFERT au lancement d'un client seulement sous cette politique (OFF par
+// defaut : elle double la memoire de la surface, et ne change de defaut
+// qu'avec un A/B KVM CONVAINCANT). Il n'est RETENU que si le client annonce la
+// capacite dans `Hello` ; sinon le contrat V1 reste entier. Basculee par la
+// commande `gui-surface` seule.
+static SURFACE_DOUBLE_OFFERTE: AtomicBool = AtomicBool::new(false);
+// Instrument du banc de dechirure (`gui-surface mesure on`) : chaque lecture
+// de la surface par le compositeur verifie que la trame lue est uniforme --
+// la sonde du banc peint des trames d'une seule couleur. OFF : coute une
+// lecture par pixel lu.
+static MESURE_DECHIRURE: AtomicBool = AtomicBool::new(false);
+
+/// `gui-surface simple|double` ; rend l'etat precedent.
+pub fn offre_surface_double(oui: bool) -> bool {
+    SURFACE_DOUBLE_OFFERTE.swap(oui, Ordering::Relaxed)
+}
+
+/// `gui-surface mesure on|off` ; rend l'etat precedent.
+pub fn mesure_dechirure(oui: bool) -> bool {
+    MESURE_DECHIRURE.swap(oui, Ordering::Relaxed)
+}
+
+/// `(offre double, mesure)`.
+pub fn politique_surface() -> (bool, bool) {
+    (SURFACE_DOUBLE_OFFERTE.load(Ordering::Relaxed), MESURE_DECHIRURE.load(Ordering::Relaxed))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Etat {
@@ -67,6 +98,29 @@ pub struct Client {
     a_le_focus: bool,
     /// La generation du presse-papiers que ce client possede deja.
     generation_presse_papiers: u64,
+    /// Le contrat de tampons retenu (V1 tant que `Hello` n'a pas annonce
+    /// mieux). Voir `gui::surface_tampons`.
+    tampons: Tampons,
+    /// Les comptes du contrat de surface, publies par `GUI_SURFACE_BILAN`.
+    pub bilan: BilanSurface,
+    /// Instrument du banc de dechirure, pour le tour de composition en cours :
+    /// (surface lue, couleur de reference, trame mixte). `Cell` : la
+    /// composition ne tient le client qu'en lecture.
+    dechirure: Cell<(bool, u32, bool)>,
+    mesure: bool,
+}
+
+/// Ce que le contrat de surface a vu pendant la vie d'un client.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BilanSurface {
+    pub trames: u64,
+    pub liberations: u64,
+    pub liberations_retardees: u64,
+    pub hors_bornes: u64,
+    pub ecritures_sur_face: u64,
+    pub ecritures_sans_liberation: u64,
+    pub compositions_lues: u64,
+    pub compositions_mixtes: u64,
 }
 
 impl Client {
@@ -91,8 +145,10 @@ impl Client {
             ));
         }
 
-        let surface = Surface::nouvelle(largeur, hauteur)
+        let (offre_double, mesure) = politique_surface();
+        let surface = Surface::nouvelle_tampons(largeur, hauteur, if offre_double { 2 } else { 1 })
             .ok_or_else(|| "surface partagee impossible (memoire)".to_string())?;
+        let tampons_offerts = surface.tampons;
         let vers_client = Canal::neuf();
         let vers_wm = Canal::neuf();
         vers_wm.lock().reveille_compositeur = true;
@@ -142,6 +198,9 @@ impl Client {
                 alloc::format!("BO_SURFACE_WIDTH={}", largeur_px),
                 alloc::format!("BO_SURFACE_HEIGHT={}", hauteur_px),
                 alloc::format!("BO_SURFACE_STRIDE={}", pas),
+                // Le tampon `t` commence a l'octet `t * pas * hauteur`. Un
+                // client V1 ignore la variable et n'ecrit que le premier.
+                alloc::format!("BO_SURFACE_TAMPONS={}", tampons_offerts),
                 alloc::format!("BO_GUI_FD={}", fd_gui),
                 alloc::format!(
                     "QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}",
@@ -265,6 +324,10 @@ impl Client {
             debut: crate::kernel::timer::ticks(),
             a_le_focus: false,
             generation_presse_papiers: 0,
+            tampons: Tampons::simple(),
+            bilan: BilanSurface::default(),
+            dechirure: Cell::new((false, 0, false)),
+            mesure,
         };
         client.annonce_surface();
         Ok(client)
@@ -470,6 +533,7 @@ impl Client {
     }
 
     pub fn pompe(&mut self) -> bool {
+        self.clot_composition();
         self.vide_touches();
         {
             let mut canal = self.vers_wm.lock();
@@ -508,7 +572,64 @@ impl Client {
                 }
             }
         }
+        self.envoie_liberations();
         trame_prete
+    }
+
+    /// Envoie les `Liberation` dues. Une liberation qui ne part pas (canal
+    /// plein) reste due et repart au tour suivant : un client qui attend un
+    /// tampon ne doit jamais attendre une liberation perdue.
+    fn envoie_liberations(&mut self) {
+        while let Some(t) = self.tampons.a_liberer() {
+            let charge = proto::Liberation { fenetre: proto::FENETRE_PRINCIPALE, tampon: t }.encode();
+            if !self.envoie(Genre::Liberation, &charge) {
+                self.bilan.liberations_retardees += 1;
+                break;
+            }
+            self.tampons.liberation_envoyee(t);
+            self.bilan.liberations += 1;
+        }
+    }
+
+    /// Le tampon que le compositeur lit.
+    pub fn face(&self) -> usize {
+        self.tampons.face()
+    }
+
+    /// Instrument du banc : la composition vient de lire `pixels` de la face.
+    pub fn note_lecture(&self, pixels: &[u32]) {
+        if !self.mesure || pixels.is_empty() {
+            return;
+        }
+        let (mut vu, mut reference, mut mixte) = self.dechirure.get();
+        if !vu {
+            vu = true;
+            reference = pixels[0];
+        }
+        if !mixte {
+            let mut i = 0;
+            while i < pixels.len() {
+                if pixels[i] != reference {
+                    mixte = true;
+                    break;
+                }
+                i += 4;
+            }
+            if pixels[pixels.len() - 1] != reference {
+                mixte = true;
+            }
+        }
+        self.dechirure.set((vu, reference, mixte));
+    }
+
+    fn clot_composition(&mut self) {
+        let (vu, _, mixte) = self.dechirure.replace((false, 0, false));
+        if vu {
+            self.bilan.compositions_lues += 1;
+            if mixte {
+                self.bilan.compositions_mixtes += 1;
+            }
+        }
     }
 
     pub fn protocole_actif(&self) -> bool {
@@ -532,6 +653,13 @@ impl Client {
         match genre {
             Genre::Hello => {
                 self.marque_protocole_actif();
+                // La poignee de main fixe le contrat de tampons, une fois.
+                let capacites = tampons::capacites_hello(charge);
+                self.tampons = Tampons::negocie(self.surface.tampons, capacites);
+                crate::serial_println!(
+                    "GUI_SURFACE_CONTRAT pid={} offerts={} capacites={:#x} tampons={}",
+                    self.pid, self.surface.tampons, capacites, self.tampons.nombre()
+                );
                 crate::kernel::dmesg::log_fmt(format_args!(
                     "gui: client pid={} parle le protocole v{}",
                     self.pid,
@@ -559,7 +687,22 @@ impl Client {
             }
             Genre::Damage | Genre::FrameReady => {
                 let degat = if genre == Genre::FrameReady {
-                    proto::Trame::decode(charge).map(|trame| trame.degat)
+                    let trame = proto::Trame::decode(charge);
+                    if let Some(trame) = trame {
+                        // Le tampon annonce devient la face -- ou la trame est
+                        // refusee s'il n'existe pas.
+                        self.bilan.trames += 1;
+                        match self.tampons.trame_prete(trame.tampon) {
+                            Issue::Acceptee => {}
+                            Issue::HorsBornes => {
+                                self.bilan.hors_bornes += 1;
+                                return false;
+                            }
+                            Issue::EcritureSurFace => self.bilan.ecritures_sur_face += 1,
+                            Issue::EcritureSansLiberation => self.bilan.ecritures_sans_liberation += 1,
+                        }
+                    }
+                    trame.map(|trame| trame.degat)
                 } else if charge.len() >= 20 {
                     Rect::decode(&charge[4..20])
                 } else {
@@ -849,6 +992,17 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        self.clot_composition();
+        if self.mesure || self.surface.tampons > 1 {
+            let b = self.bilan;
+            crate::serial_println!(
+                "GUI_SURFACE_BILAN pid={} offerts={} tampons={} trames={} liberations={} liberations_retardees={} \
+                 hors_bornes={} ecritures_sur_face={} ecritures_sans_liberation={} compositions_lues={} compositions_mixtes={}",
+                self.pid, self.surface.tampons, self.tampons.nombre(), b.trames, b.liberations,
+                b.liberations_retardees, b.hors_bornes, b.ecritures_sur_face, b.ecritures_sans_liberation,
+                b.compositions_lues, b.compositions_mixtes
+            );
+        }
         self.termine();
     }
 }

@@ -79,6 +79,7 @@ pub fn pose_echelle_affichage(echelle: u32) -> u32 {
     ancienne
 }
 pub mod surface;
+pub mod surface_tampons;
 pub mod desktop;
 pub mod stage2_preview;
 pub mod event;

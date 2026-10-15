@@ -398,6 +398,20 @@ jobs:
           BANC_SORTIE=$PWD/banc-trame-tcg tools/ci/run_banc_trame.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
           BANC_SORTIE=$PWD/banc-trame-kvm BO_QEMU_KVM=1 tools/ci/run_banc_trame.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
           exit $r
+      - name: P10+.3c banc de dechirure (contrat a deux tampons, TCG + KVM, SMP2)
+        # BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1. Un demarrage par bras, quatre
+        # tours v1/v2 alternes : la sonde `surface-probe` (installee en
+        # /bo-navigateur) peint des trames unies ; l'instrument du compositeur
+        # compte les compositions qui ont lu une trame mixte. Criteres declares
+        # dans analyse_banc_dechirure.py (surete v2, temoin v1, debit, quorum).
+        # L'offre de deux tampons ne change de defaut qu'avec un KVM
+        # CONVAINCANT.
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          AB_SORTIE=$PWD/banc-dechirure-tcg tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
+          AB_SORTIE=$PWD/banc-dechirure-kvm BO_QEMU_KVM=1 tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -409,4 +423,5 @@ jobs:
             scanout-trame-*/serie-*.log
             scanout-trame-*/capture-*.ppm
             banc-trame-*/serie.log
+            banc-dechirure-*/serie.log
           if-no-files-found: warn

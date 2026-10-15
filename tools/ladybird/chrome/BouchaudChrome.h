@@ -260,6 +260,10 @@ enum Genre : u16 {
     /// seulement quand il a change. Il n'existe pas de message de LECTURE :
     /// voir `src/gui/presse_papiers.rs` pour ce que cette absence ferme.
     PressePapiers = 0x107,
+    /// Le gestionnaire ne lira plus ce tampon (contrat a deux tampons,
+    /// `src/gui/surface_tampons.rs`). Recu seulement si `Hello` annonce la
+    /// capacite ; le chrome ne l'annonce pas encore.
+    Liberation = 0x108,
 };
 
 // Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans
