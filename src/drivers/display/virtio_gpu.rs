@@ -36,6 +36,7 @@ use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
 use crate::drivers::virtio_gpu_file as file;
 use crate::drivers::virtio_gpu_irq::{self as irq, Reveil, Strategie};
 use crate::drivers::virtio_gpu_tampons as tampons;
+use crate::drivers::virtio_gpu_trame as trame;
 use crate::kernel::memory;
 
 const VENDEUR_VIRTIO: u16 = 0x1AF4;
@@ -1325,6 +1326,88 @@ pub fn presente(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
 }
 
 static ECHECS_CONSECUTIFS: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) -- une trame, une soumission.
+static TRAMES_SOUMISES: AtomicU64 = AtomicU64::new(0);
+static COMMANDES_TRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Presente une trame entiere : les transferts du plan
+/// (`virtio_gpu_trame::planifie`), chacun apres la reponse du precedent, puis
+/// UN flush sur l'union de la trame, apres la reponse du dernier transfert.
+/// Meme tenue de la memoire (`Transfert` autour de chaque transfert), meme
+/// jugement d'echec et d'abandon que `presente`.
+pub fn presente_trame(plan: &trame::Plan) -> bool {
+    if !actif() {
+        return false;
+    }
+    if plan.nb == 0 {
+        return true;
+    }
+    let debut = crate::kernel::timer::monotonic_ns();
+    let Some(mut garde) = verrou() else {
+        PRESENTS_SAUTES.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let Some(p) = garde.as_mut() else { return false };
+    let Some(s) = p.scanout else { return false };
+    let rogne = |r: tampons::Rect| -> Option<Rect> {
+        let x1 = (r.x + r.largeur).min(s.largeur);
+        let y1 = (r.y + r.hauteur).min(s.hauteur);
+        (r.x < x1 && r.y < y1).then_some(Rect { x: r.x, y: r.y, largeur: x1 - r.x, hauteur: y1 - r.y })
+    };
+    let mut ok = true;
+    let mut pixels = 0u64;
+    let mut commandes = 0u64;
+    for t in plan.transferts() {
+        let Some(r) = rogne(*t) else { continue };
+        let decalage = ((r.y as usize * s.largeur as usize + r.x as usize) * 4) as u64;
+        let Some(en_vol) = tampons::soumet(etat_tampon()) else {
+            ok = false;
+            break;
+        };
+        pose_etat_tampon(en_vol);
+        let rendu = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, r, decalage) };
+        let fin = if dma::issue(rendu) == dma::Issue::SansReponse { tampons::Fin::SansReponse } else { tampons::Fin::Achevee };
+        pose_etat_tampon(tampons::acheve(en_vol, fin));
+        commandes += 1;
+        if rendu != Ok(RESP_OK_NODATA) {
+            ok = false;
+            break;
+        }
+        pixels += u64::from(r.largeur) * u64::from(r.hauteur);
+    }
+    // Le flush, une fois, apres la reponse du DERNIER transfert.
+    if ok {
+        if let Some(f) = rogne(plan.flush) {
+            ok = unsafe { vide(&mut p.file, RESSOURCE_BUREAU, f) } == Ok(RESP_OK_NODATA);
+            commandes += 1;
+        }
+    }
+    TRAMES_SOUMISES.fetch_add(1, Ordering::Relaxed);
+    COMMANDES_TRAMES.fetch_add(commandes, Ordering::Relaxed);
+    if ok {
+        PRESENTS_OK.fetch_add(1, Ordering::Relaxed);
+        PIXELS_TRANSFERES.fetch_add(pixels, Ordering::Relaxed);
+        ECHECS_CONSECUTIFS.store(0, Ordering::Relaxed);
+    } else {
+        PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);
+        let n = ECHECS_CONSECUTIFS.fetch_add(1, Ordering::Relaxed) + 1;
+        if p.file.cassee {
+            ACTIF.store(false, Ordering::Release);
+            crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse echecs_consecutifs={}", n);
+        } else if n >= ECHECS_AVANT_ABANDON {
+            ACTIF.store(false, Ordering::Release);
+            crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=refus echecs_consecutifs={}", n);
+        }
+    }
+    NS_PRESENT.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(debut), Ordering::Relaxed);
+    ok
+}
+
+/// `(trames soumises d'un bloc, commandes envoyees pour elles)`.
+pub fn compteurs_trame() -> (u64, u64) {
+    (TRAMES_SOUMISES.load(Ordering::Relaxed), COMMANDES_TRAMES.load(Ordering::Relaxed))
+}
 
 // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : l'etat de la memoire du scanout
 // (`virtio_gpu_tampons::Etat`), ecrit sous le verrou du peripherique par

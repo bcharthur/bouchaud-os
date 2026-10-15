@@ -109,6 +109,99 @@ static OCTETS_DIRECTS: AtomicU64 = AtomicU64::new(0);
 /// Acces au tampon du bureau alors que l'hote pouvait lire la memoire du
 /// scanout (transfert en vol) : doit rester nul.
 static ACCES_EN_TRANSFERT: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : une trame, une soumission. Entre
+// `debut_trame` et `fin_trame`, `present_rect` (virtio seulement) copie comme
+// avant mais DIFFERE les commandes ; `fin_trame` soumet le plan
+// (`virtio_gpu_trame::planifie`) : quelques transferts, UN flush. Voulu par
+// `gpu-trame on` (DESACTIVE par defaut : la politique ne change qu'avec un A/B
+// KVM). Le verrou ne protege que la liste ; il n'est jamais tenu pendant une
+// commande.
+static TRAME_VOULUE: AtomicBool = AtomicBool::new(false);
+const TRAME_REGIONS_MAX: usize = 32;
+/// Le cout d'une commande, en pixels transferes (mesure KVM : ~20 us par
+/// commande, ~0,4 ns par pixel).
+const COUT_COMMANDE_PX: u64 = 32_768;
+struct Trame {
+    ouverte: bool,
+    regions: [crate::drivers::virtio_gpu_tampons::Rect; TRAME_REGIONS_MAX],
+    n: usize,
+}
+static TRAME: crate::kernel::sync::SpinLock<Trame> = crate::kernel::sync::SpinLock::new(Trame {
+    ouverte: false,
+    regions: [crate::drivers::virtio_gpu_tampons::Rect::vide(); TRAME_REGIONS_MAX],
+    n: 0,
+});
+static TRAMES_FERMEES: AtomicU64 = AtomicU64::new(0);
+static REGIONS_DIFFEREES: AtomicU64 = AtomicU64::new(0);
+
+/// `gpu-trame on|off` : la politique ; rend la precedente.
+pub fn veut_trame(oui: bool) -> bool {
+    TRAME_VOULUE.swap(oui, Ordering::AcqRel)
+}
+
+/// Ouvre une trame (sans effet hors virtio ou si la politique est off).
+pub fn debut_trame() {
+    if !TRAME_VOULUE.load(Ordering::Acquire) || !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    let mut trame = TRAME.lock();
+    trame.ouverte = true;
+    trame.n = 0;
+}
+
+/// Ferme la trame : soumet le plan de ses regions. Sans trame ouverte, rien.
+pub fn fin_trame() {
+    let (plan, n) = {
+        let mut trame = TRAME.lock();
+        if !trame.ouverte {
+            return;
+        }
+        trame.ouverte = false;
+        let n = trame.n;
+        (crate::drivers::virtio_gpu_trame::planifie(&trame.regions[..n], COUT_COMMANDE_PX), n)
+    };
+    TRAMES_FERMEES.fetch_add(1, Ordering::Relaxed);
+    REGIONS_DIFFEREES.fetch_add(n as u64, Ordering::Relaxed);
+    if plan.nb == 0 || !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    if !crate::drivers::virtio_gpu::presente_trame(&plan) && !crate::drivers::virtio_gpu::actif() {
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+        quitte_memoire_scanout();
+    }
+}
+
+/// `(voulue, trames fermees, regions differees)`.
+pub fn compteurs_trame() -> (bool, u64, u64) {
+    (
+        TRAME_VOULUE.load(Ordering::Acquire),
+        TRAMES_FERMEES.load(Ordering::Relaxed),
+        REGIONS_DIFFEREES.load(Ordering::Relaxed),
+    )
+}
+
+/// Dans une trame ouverte, retient le rectangle (rend vrai) ; sinon faux --
+/// l'appelant presente tout de suite.
+fn differe_dans_la_trame(x: usize, y: usize, l: usize, h: usize) -> bool {
+    if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return false;
+    }
+    let mut trame = TRAME.lock();
+    if !trame.ouverte {
+        return false;
+    }
+    let r = crate::drivers::virtio_gpu_tampons::Rect { x: x as u32, y: y as u32, largeur: l as u32, hauteur: h as u32 };
+    if trame.n < TRAME_REGIONS_MAX {
+        let n = trame.n;
+        trame.regions[n] = r;
+        trame.n += 1;
+    } else {
+        // Liste pleine : le rectangle rejoint le dernier (couverture gardee).
+        trame.regions[TRAME_REGIONS_MAX - 1] = trame.regions[TRAME_REGIONS_MAX - 1].union(r);
+    }
+    true
+}
 // BOUCHAUD_GFX_DRAPEAUX_ATOMIQUES_V1
 //
 // Ces trois drapeaux etaient des `static mut` ecrits par le bureau (sous le
@@ -822,6 +915,72 @@ pub fn banc_presentation(en_tache: bool) {
     leave();
 }
 
+// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : une trame de bureau typique --
+// barre du haut et horloge, barre des taches, deux tuiles voisines, curseur,
+// titre et corps d'une fenetre -- presentee 100 fois, chronometree de
+// `debut_trame` a la fin de sa soumission.
+const BANC_TRAME_REGIONS: [(usize, usize, usize, usize); 8] = [
+    (0, 0, WIDTH, 30),
+    (1180, 5, 90, 20),
+    (0, HEIGHT - 30, WIDTH, 30),
+    (100, 100, 64, 64),
+    (164, 100, 64, 64),
+    (640, 360, 16, 16),
+    (300, 200, 400, 24),
+    (300, 224, 400, 200),
+];
+const BANC_TRAME_N: usize = 100;
+
+/// `banc-trame` : entre en mode graphique, mesure depuis une tache noyau
+/// (contexte du bureau), ressort.
+pub fn banc_trame() {
+    enter();
+    if !is_active() {
+        crate::serial_println!("[BANC-TRAME] ECHEC raison=aucun-ecran-actif");
+        return;
+    }
+    reset_clip();
+    let code = crate::kernel::task::run_noyau(fil_banc_trame, "banc-trame");
+    if code != 0 {
+        crate::serial_println!("[BANC-TRAME] ECHEC raison=tache-du-banc code={}", code);
+    }
+    leave();
+}
+
+fn fil_banc_trame() -> ! {
+    let ecran = if VIRTIO_SCANOUT.load(Ordering::Acquire) { "virtio-gpu-2d" } else { "autre" };
+    let trame = if TRAME_VOULUE.load(Ordering::Acquire) { "on" } else { "off" };
+    let (ok0, echecs0, pixels0, _) = crate::drivers::virtio_gpu::compteurs();
+    let (_, commandes0) = crate::drivers::virtio_gpu::compteurs_trame();
+    let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(BANC_TRAME_N);
+    for i in 0..BANC_TRAME_N {
+        let debut = crate::kernel::timer::monotonic_ns();
+        debut_trame();
+        for (x, y, l, h) in BANC_TRAME_REGIONS {
+            fill_rect(x, y, l, h, (i % 15 + 1) as u8);
+            present_rect(x, y, l, h);
+        }
+        fin_trame();
+        durees.push(crate::kernel::timer::monotonic_ns().saturating_sub(debut));
+    }
+    let (ok1, echecs1, pixels1, _) = crate::drivers::virtio_gpu::compteurs();
+    let (_, commandes1) = crate::drivers::virtio_gpu::compteurs_trame();
+    durees.sort_unstable();
+    let n = durees.len();
+    let centile = |c: usize| durees[(n * c / 100).min(n - 1)] / 1000;
+    // Hors trame, chaque presentation reussie a coute deux commandes.
+    let presentations = ok1.saturating_sub(ok0);
+    let commandes = if trame == "on" { commandes1.saturating_sub(commandes0) } else { presentations * 2 };
+    crate::serial_println!(
+        "[BANC-TRAME] ecran={} trame={} n={} regions={} p50_us={} p95_us={} p99_us={} max_us={} commandes={} \
+         commandes_par_trame_x10={} presentations_ok={} echecs={} pixels={} actif={}",
+        ecran, trame, n, BANC_TRAME_REGIONS.len(), centile(50), centile(95), centile(99), durees[n - 1] / 1000,
+        commandes, commandes * 10 / n as u64, presentations, echecs1.saturating_sub(echecs0),
+        pixels1.saturating_sub(pixels0), crate::drivers::virtio_gpu::actif() as u8,
+    );
+    crate::kernel::task::exit_current(0)
+}
+
 fn fil_banc_presentation() -> ! {
     mesure_categories("tache");
     crate::kernel::task::exit_current(0)
@@ -1242,7 +1401,9 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // presentation, contre huit megaoctets qu'il rend visibles.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
-    presente_virtio(x, y, count, y1 - y);
+    if !differe_dans_la_trame(x, y, count, y1 - y) {
+        presente_virtio(x, y, count, y1 - y);
+    }
 
     NANOS_DANS_PRESENT.fetch_add(
         crate::kernel::timer::monotonic_ns().saturating_sub(debut_copie),

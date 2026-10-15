@@ -38,7 +38,10 @@ mkdir -p "$SORTIE/scenario"
 # composer le bureau directement dans la memoire du scanout (sans effet sous
 # BGA) ; les memes pixels sont exiges, et zero octet copie.
 TAMPON=${SCANOUT_TAMPON:-copie}
-printf 'gpu-tampon %s\ndesktop\n' "$TAMPON" > "$SORTIE/scenario/autorun"
+# BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : SCANOUT_TRAME=on fait soumettre
+# chaque trame du bureau d'un bloc ; les memes pixels sont exiges.
+TRAME=${SCANOUT_TRAME:-off}
+printf 'gpu-tampon %s\ngpu-trame %s\ndesktop\n' "$TAMPON" "$TRAME" > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/bureau.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)
 echo "SCANOUT_ACCEL ${ACCEL}"
 
@@ -142,10 +145,17 @@ exige "presentations virtio : aucune sautee faute de verrou" bash -c "echo '$MES
 exige "aucune attente non cedable DANS une tache (verrou tournant tenu par un appelant)" bash -c "! grep -aq 'VIRTIO_GPU_ATTENTE non_cedable_en_tache' '$SORTIE'/serie-*.log"
 if [ "$TAMPON" = direct ]; then
   exige "composition directe : le bureau virtio compose dans la memoire du scanout, zero octet copie, aucun acces pendant un transfert" \
-    bash -c "echo '$MESURE' | grep -qE ' tampon=direct octets_copies=0 octets_directs=[1-9][0-9]* acces_en_transfert=0'"
+    bash -c "echo '$MESURE' | grep -qE ' tampon=direct octets_copies=0 octets_directs=[1-9][0-9]* acces_en_transfert=0 '"
 else
   exige "copie : le bureau virtio copie son tampon arriere (politique par defaut)" \
-    bash -c "echo '$MESURE' | grep -qE ' tampon=copie octets_copies=[1-9][0-9]* octets_directs=0 acces_en_transfert=0'"
+    bash -c "echo '$MESURE' | grep -qE ' tampon=copie octets_copies=[1-9][0-9]* octets_directs=0 acces_en_transfert=0 '"
+fi
+if [ "$TRAME" = on ]; then
+  exige "une trame, une soumission : le bureau soumet ses trames d'un bloc" \
+    bash -c "echo '$MESURE' | grep -qE ' trame=on trames=[1-9][0-9]* regions_differees=[1-9][0-9]*'"
+else
+  exige "deux commandes par region (politique par defaut) : aucune trame soumise d'un bloc" \
+    bash -c "echo '$MESURE' | grep -qE ' trame=off trames=0 regions_differees=0'"
 fi
 exige "ni BGA ni virtio : present() inactif, dit" grep -aq 'present() inactif (scanout=aucun)' "$SORTIE/serie-aucun.log"
 exige "aucune panique, aucun abandon du scanout" bash -c "! grep -aqE 'KERNEL PANIC|panicked at|VIRTIO_GPU_SCANOUT_ABANDON|VIRTIO_GPU_ECHEC' '$SORTIE'/serie-*.log"

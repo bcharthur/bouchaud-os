@@ -1235,6 +1235,9 @@ fn boucle() {
                 // rectangle : ses bornes ne dependent pas du rectangle.
                 plan_de_scene(&wins, menu_open, (mxu, myu), &mut calques);
 
+                // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
+                // les regions de la trame partent d'un bloc a `fin_trame`.
+                fb::debut_trame();
                 for region in degats.regions().iter().copied() {
                     let present = proto_rect_ecran(region);
                     if present.vide() {
@@ -1270,6 +1273,7 @@ fn boucle() {
                     );
                     crate::gui::degats::note_presentation(present);
                 }
+                fb::fin_trame();
 
                 crate::kernel::timer::mark_frame();
                 reveil::note_trame(horloge_seule);
@@ -1513,10 +1517,11 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : l'attente par interruption, au meme rythme.
         let i = crate::drivers::virtio_gpu::compteurs_irq();
         let t = crate::drivers::gfx::compteurs_tampon();
+        let tr = crate::drivers::gfx::compteurs_trame();
         crate::serial_println!(
             "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={} \
              irq_armee={} irq_voulue={} irq={} irq_sans_progres={} dormantes={} sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={} \
-             tampon={} octets_copies={} octets_directs={} acces_en_transfert={}",
+             tampon={} octets_copies={} octets_directs={} acces_en_transfert={} trame={} trames={} regions_differees={}",
             presents_ok, presents_echec, pixels_virtio, ns_virtio,
             ns_virtio / presents_ok.max(1) / 1000,
             crate::drivers::virtio_gpu::actif() as u8,
@@ -1525,6 +1530,8 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
             i.reveils_sans_progres, i.vus_par_relecture, i.echues,
             // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : la composition et ses copies.
             if t.1 { "direct" } else { "copie" }, t.2, t.3, t.4,
+            // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : les trames soumises d'un bloc.
+            if tr.0 { "on" } else { "off" }, tr.1, tr.2,
         );
     }
 

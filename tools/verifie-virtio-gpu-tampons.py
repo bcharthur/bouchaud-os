@@ -83,7 +83,12 @@ def verifie(t: dict, src: str) -> list:
         fautes.append("virtio_gpu.rs : la memoire n'est plus tenue en Transfert autour du TRANSFER_TO_HOST_2D.")
     if ACCES not in corps(t["gfx"], "fn back() -> &'static mut [u32] {"):
         fautes.append("bochs.rs : un acces au tampon pendant un transfert n'est plus compte.")
-    if t["gfx"].count(ABANDON) != 1 or QUITTE not in corps(t["gfx"], "fn quitte_memoire_scanout("):
+    # Chaque abandon du scanout par le bureau (presentation ou fin de trame)
+    # en quitte la memoire.
+    abandons = t["gfx"].count("\n        VIRTIO_SCANOUT.store(false, Ordering::Release);\n")
+    if abandons < 1 or t["gfx"].count(ABANDON) != abandons \
+            or ABANDON not in corps(t["gfx"], "fn presente_virtio(") \
+            or QUITTE not in corps(t["gfx"], "fn quitte_memoire_scanout("):
         fautes.append("bochs.rs : l'abandon du scanout n'en quitte plus la memoire.")
     for f in ("pub fn present() {", "pub fn present_rect("):
         c = corps(t["gfx"], f)

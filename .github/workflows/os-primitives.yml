@@ -371,6 +371,25 @@ jobs:
           BANC_SORTIE=$PWD/banc-tampon-tcg tools/ci/run_banc_tampon.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
           BANC_SORTIE=$PWD/banc-tampon-kvm BO_QEMU_KVM=1 tools/ci/run_banc_tampon.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
           exit $r
+      - name: P10+.3b -- une trame, une soumission, verifie aux pixels (TCG puis KVM)
+        # BOUCHAUD_VIRTIO_GPU_TRAME_V1 : `gpu-trame on` avant `desktop`. Memes
+        # exigences de pixels que le pas P10, plus : le bureau a soumis ses
+        # trames d'un bloc (transferts planifies, un flush).
+        if: ${{ !cancelled() }}
+        run: |
+          SCANOUT_SORTIE=$PWD/scanout-trame-tcg SCANOUT_TRAME=on tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          SCANOUT_SORTIE=$PWD/scanout-trame-kvm SCANOUT_TRAME=on BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: P10+.3b -- A/B deux commandes par region contre une trame, une soumission (TCG puis KVM ; politique par defaut off)
+        # Six tours AB/BA de `banc-trame` (100 trames de bureau, 8 regions).
+        # Criteres declares dans analyse_banc_trame.py (surete, commandes,
+        # latence p50/p95, quorum). ECHEC sur un defaut de surete ; le reste
+        # est une mesure. La politique ne change qu'avec un KVM CONVAINCANT.
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          BANC_SORTIE=$PWD/banc-trame-tcg tools/ci/run_banc_trame.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          BANC_SORTIE=$PWD/banc-trame-kvm BO_QEMU_KVM=1 tools/ci/run_banc_trame.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -379,4 +398,7 @@ jobs:
             scanout-direct-*/serie-*.log
             scanout-direct-*/capture-*.ppm
             banc-tampon-*/serie.log
+            scanout-trame-*/serie-*.log
+            scanout-trame-*/capture-*.ppm
+            banc-trame-*/serie.log
           if-no-files-found: warn
