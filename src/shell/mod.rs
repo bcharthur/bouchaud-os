@@ -738,6 +738,7 @@ fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
 
 fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
+    let mut grace_ms = 0;
     if argc >= 2 {
         match argv[1] {
             "defaut" => choisit_variante(Variante::Defaut),
@@ -747,6 +748,12 @@ fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
                 return 1;
             }
         }
+        // BOUCHAUD_AB_REVEIL_IPI_V3 : DELAI DE GRACE avant le releve. Un
+        // reveil decide sur un autre coeur sous l'ancienne politique (lue
+        // juste avant la bascule) peut compter son IPI apres elle ; le releve
+        // qui suit sert de depart au bras, et ne doit pas l'inclure.
+        grace_ms = 50;
+        let _ = crate::kernel::timer::attente_bornee(grace_ms, || false);
     }
     let r = crate::kernel::scheduler::preempt::stats_reveil();
     let nom = match variante() {
@@ -754,8 +761,8 @@ fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
         Variante::IpiInteractive => "ipi-interactive",
     };
     crate::serial_println!(
-        "ORDO_VARIANTE reveil={} ipi_variante={} differes={} cibles={} immediats={} ipi={} preempt_noyau={}",
-        nom, r.ipi_variante, r.differes, r.cibles, r.immediats, r.ipi_envoyes, r.preemptions_noyau
+        "ORDO_VARIANTE reveil={} ipi_variante={} differes={} cibles={} immediats={} ipi={} preempt_noyau={} grace_ms={}",
+        nom, r.ipi_variante, r.differes, r.cibles, r.immediats, r.ipi_envoyes, r.preemptions_noyau, grace_ms
     );
     0
 }

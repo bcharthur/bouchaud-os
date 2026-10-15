@@ -36,7 +36,7 @@ def analyse(texte, tours, smp, nom):
                        r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
     fautes = []
     for b in bras:
-        r = {"verdict": None, "ipi_variante": None, "preuve": set()}
+        r = {"verdict": None, "ipi_variante": None, "ipi_depart": None, "bascule": None, "preuve": set()}
         tours_vus = []
         for l in b["lignes"]:
             q = QUANT.match(l)
@@ -53,6 +53,10 @@ def analyse(texte, tours, smp, nom):
                 r["preuve"].add(m.group(1))
                 r["vol"] = max(r.get("vol", 0), int(m.group(2)))
             m = re.search(r"ORDO_VARIANTE reveil=(\S+) ipi_variante=(\d+)", l)
+            # BOUCHAUD_AB_REVEIL_IPI_V3 : le releve de la bascule (avant le
+            # verdict) est le depart, celui qui suit le verdict la fin.
+            if m and r["verdict"] is None and r["ipi_depart"] is None:
+                r["bascule"], r["ipi_depart"] = m.group(1), int(m.group(2))
             if m and r["verdict"] is not None and r["ipi_variante"] is None:
                 r["ipi_variante"] = int(m.group(2))
         if len(tours_vus) >= 2:
@@ -65,16 +69,28 @@ def analyse(texte, tours, smp, nom):
         if nom == "kvm" and r["preuve"] != {"kvm-steal"}:
             fautes.append(f"tour {b['tour']} {b['variante']} : sous KVM sans preuve de l'hote ({sorted(r['preuve']) or '-'})")
 
-    # Surete : les compteurs cumules d'IPI de variante.
+    # Surete : les IPI de variante PENDANT chaque bras, du releve de sa
+    # bascule (apres le delai de grace) au releve qui suit la sonde.
+    # BOUCHAUD_AB_REVEIL_IPI_V3 -- run 38645396730 : le depart etait la fin du
+    # bras precedent, releve SOUS LA VARIANTE avant la bascule ; deux IPI
+    # envoyees dans cet intervalle etaient imputees au bras `defaut` suivant.
+    envoyees = 0
     precedent = 0
     for b in bras:
-        c = b["r"].get("ipi_variante")
-        if c is None:
+        r = b["r"]
+        if r["ipi_depart"] is None or r["bascule"] != b["variante"]:
+            fautes.append(f"tour {b['tour']} {b['variante']} : bascule non relevee dans le bras "
+                          f"(releve={r['bascule']})")
             continue
-        if b["variante"] == "defaut" and c - precedent != 0:
-            fautes.append(f"surete : {c - precedent} IPI de variante sous defaut (tour {b['tour']})")
-        precedent = c
-    if precedent == 0:
+        if r["ipi_variante"] is None:
+            continue
+        delta = r["ipi_variante"] - r["ipi_depart"]
+        if b["variante"] == "defaut" and delta != 0:
+            fautes.append(f"surete : {delta} IPI de variante sous defaut (tour {b['tour']})")
+        if b["variante"] != "defaut":
+            envoyees += delta
+        precedent = r["ipi_variante"]
+    if envoyees == 0:
         fautes.append("surete : la variante n'a jamais envoye d'IPI (pas exercee)")
     if re.search(r"KERNEL PANIC|panicked at", texte):
         fautes.append("surete : panique")
@@ -118,7 +134,7 @@ def analyse(texte, tours, smp, nom):
                  f"p99 median {p99[0]} -> {p99[1]} us (seuil {0.8 * p99[0]:.0f}), pire median {pire[0]} -> {pire[1]} us"),
                 ("debit", debit[1] >= 0.95 * debit[0], f"tours (phase interactive) {debit[0]} -> {debit[1]}"),
                 ("equite", abs(equite[1] - equite[0]) <= 0.05 * equite[0], f"tours (phase normale) {equite[0]} -> {equite[1]}"),
-                ("surete", True, f"ipi_variante={precedent}, 0 sous defaut, aucune panique"),
+                ("surete", True, f"ipi_variante={precedent} ({envoyees} pendant les bras variante), 0 sous defaut, aucune panique"),
                 ("robustesse", echecs_variante == 0, f"QUALIFIE_ECHEC sous la variante : {echecs_variante}"),
             ]
             for nom_c, ok, detail in criteres:

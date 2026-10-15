@@ -15,9 +15,12 @@ analyse_ab = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(analyse_ab)
 
 
-def passe(tour, variante, verdict, p99, pire, tours_int=100000, tours_norm=100000, ipi=0, preuve="kvm-steal"):
+def passe(tour, variante, verdict, p99, pire, tours_int=100000, tours_norm=100000, ipi=0, preuve="kvm-steal",
+          depart=None):
+    depart = ipi if depart is None else depart
     return "\n".join([
         f"AB_BRAS tour={tour} variante={variante}",
+        f"ORDO_VARIANTE reveil={variante} ipi_variante={depart} differes=0 cibles=0 immediats=0 ipi=0 preempt_noyau=0 grace_ms=50",
         f"  sous charge (normal)     median  1500 us  p95  2000 us  p99  {p99 + 500} us  pire  {pire + 500} us  [propres 300/300, regle=preuve-hote]",
         f"  {tours_norm} tours de calcul",
         f"  sous charge (interactif) median  1200 us  p95  1800 us  p99  {p99} us  pire  {pire} us  [propres 300/300, regle=preuve-hote]",
@@ -39,10 +42,11 @@ def scenario(tours, mesure):
     for t in range(1, tours + 1):
         ordre = ["defaut", "ipi-interactive"] if t % 2 else ["ipi-interactive", "defaut"]
         for v in ordre:
+            depart = ipi
             if v == "ipi-interactive":
                 ipi += 10
             verdict, p99, pire = mesure(t, v)
-            passes.append(passe(t, v, verdict, p99, pire, ipi=ipi))
+            passes.append(passe(t, v, verdict, p99, pire, ipi=ipi, depart=depart))
     return journal(passes)
 
 
@@ -106,6 +110,39 @@ class Ab(unittest.TestCase):
         texte = texte.replace("reveil=defaut ipi_variante=40", "reveil=defaut ipi_variante=41", 1)
         verdict, code, _ = self.verdict(texte)
         self.assertEqual((verdict, code), ("ECHEC", 1))
+
+    def test_une_ipi_avant_la_bascule_n_est_pas_imputee_au_bras_defaut(self):
+        """Run 38645396730 : deux IPI sous la variante, entre la fin de son
+        bras et la bascule, etaient comptees au bras `defaut` suivant. Le
+        depart du bras est desormais son propre releve, apres la bascule."""
+        texte = scenario(6, lambda t, v: ("QUALIFIE_OK", 2000, 4000))
+        # Tour 4 (BA) : variante (10 -> 40) puis defaut ; deux IPI avant la
+        # bascule : le releve de la bascule vaut 42, la fin 42.
+        texte = texte.replace(
+            "AB_BRAS tour=4 variante=defaut\nORDO_VARIANTE reveil=defaut ipi_variante=40 ",
+            "AB_BRAS tour=4 variante=defaut\nORDO_VARIANTE reveil=defaut ipi_variante=42 ", 1)
+        i = texte.index("AB_BRAS tour=4 variante=defaut")
+        j = texte.index("VERDICT_SONDE", i)
+        texte = texte[:j] + texte[j:].replace("reveil=defaut ipi_variante=40 ", "reveil=defaut ipi_variante=42 ", 1)
+        verdict, code, sortie = self.verdict(texte)
+        self.assertEqual(code, 0, sortie)
+
+    def test_une_ipi_pendant_le_bras_defaut_reste_un_defaut_de_surete(self):
+        texte = scenario(6, lambda t, v: ("QUALIFIE_OK", 2000, 4000))
+        i = texte.index("AB_BRAS tour=4 variante=defaut")
+        j = texte.index("VERDICT_SONDE", i)
+        texte = texte[:j] + texte[j:].replace("reveil=defaut ipi_variante=40 ", "reveil=defaut ipi_variante=41 ", 1)
+        verdict, code, sortie = self.verdict(texte)
+        self.assertEqual((verdict, code), ("ECHEC", 1))
+        self.assertIn("1 IPI de variante sous defaut (tour 4)", sortie)
+
+    def test_une_bascule_non_relevee_est_un_defaut_d_instrument(self):
+        texte = scenario(6, lambda t, v: ("QUALIFIE_OK", 2000, 4000))
+        texte = texte.replace("AB_BRAS tour=2 variante=defaut\nORDO_VARIANTE reveil=defaut",
+                              "AB_BRAS tour=2 variante=defaut\nORDO_VARIANTE reveil=ipi-interactive", 1)
+        verdict, code, sortie = self.verdict(texte)
+        self.assertEqual((verdict, code), ("ECHEC", 1))
+        self.assertIn("bascule non relevee", sortie)
 
     def test_sous_kvm_une_passe_sans_preuve_de_l_hote_est_un_defaut_d_instrument(self):
         texte = scenario(6, lambda t, v: ("QUALIFIE_OK", 2000, 4000)).replace("preuve_hote=kvm-steal", "preuve_hote=absente", 1)

@@ -28,8 +28,9 @@
 #               variante >= 0,95 x defaut ;
 #   equite      mediane des tours pendant la phase NORMALE (ou la variante ne
 #               doit rien changer) : ecart <= 5 % ;
-#   surete      `ipi_variante` reste a zero sous `defaut`, avance sous la
-#               variante ; aucune panique ;
+#   surete      `ipi_variante` n'avance pas pendant un bras `defaut` (entre
+#               le releve de la bascule, apres un delai de grace, et celui
+#               qui suit la sonde), avance sous la variante ; aucune panique ;
 #   robustesse  chaque passe rend un verdict explicite ; aucun QUALIFIE_ECHEC
 #               sous la variante.
 #
@@ -65,8 +66,11 @@ cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
     # AB aux tours impairs, BA aux tours pairs.
     if [ $((t % 2)) = 1 ]; then ordre="defaut ipi-interactive"; else ordre="ipi-interactive defaut"; fi
     for v in $ordre; do
-      echo "ordo-variante $v"
+      # BOUCHAUD_AB_REVEIL_IPI_V3 : la bascule appartient au bras. Son releve
+      # (apres un delai de grace) est le DEPART du compteur d'IPI de variante,
+      # le releve qui suit la sonde en est la FIN.
       echo "echo AB_BRAS tour=$t variante=$v"
+      echo "ordo-variante $v"
       echo "/bin/ordonnanceur-probe 8 1"
       echo "ordo-variante"
     done
