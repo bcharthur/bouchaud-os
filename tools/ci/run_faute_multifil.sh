@@ -46,7 +46,11 @@ PID=$!
 LIMITE=$((SECONDS + 600))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
-  grep -aqE 'FAUTE_MULTIFIL_FIN|KERNEL PANIC|panicked at' "$LOG" && { sleep 2; break; }
+  # La sortie de `echo`, pas sa trace (`+ echo FAUTE_MULTIFIL_FIN`).
+  if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'FAUTE_MULTIFIL_FIN' | grep -aqv '+ echo FAUTE_MULTIFIL_FIN'; then
+    sleep 2; break
+  fi
   sleep 1
 done
 kill -TERM "$PID" 2>/dev/null || true

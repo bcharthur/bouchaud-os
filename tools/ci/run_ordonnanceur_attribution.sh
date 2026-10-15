@@ -60,7 +60,11 @@ PID=$!
 # Jusqu'a trois tentatives par passe (une NON_QUALIFIANTE est remesuree).
 LIMITE=$((SECONDS + 120 + PASSES * 360))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
-  grep -aqE 'ORDO_ATTRIBUTION_FIN|KERNEL PANIC|panicked at' "$LOG" && { sleep 2; break; }
+  # La sortie de `echo`, pas sa trace (`+ echo ORDO_ATTRIBUTION_FIN`).
+  if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'ORDO_ATTRIBUTION_FIN' | grep -aqv '+ echo ORDO_ATTRIBUTION_FIN'; then
+    sleep 2; break
+  fi
   sleep 2
 done
 kill -KILL "$PID" 2>/dev/null || true

@@ -54,7 +54,11 @@ demarre() {
   local pid=$! limite=$((SECONDS + 300))
   while kill -0 "$pid" 2>/dev/null; do
     if (( SECONDS >= limite )); then echo "ECHEANCE atteinte ($nom)" >&2; break; fi
-    grep -aqE 'ATA_INTEGRITE_FIN|KERNEL PANIC|panicked at' "$log" && { sleep 1; break; }
+    # La sortie de `echo`, pas sa trace (`+ echo ATA_INTEGRITE_FIN`).
+    if grep -aqE 'KERNEL PANIC|panicked at' "$log" \
+       || sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -a 'ATA_INTEGRITE_FIN' | grep -aqv '+ echo ATA_INTEGRITE_FIN'; then
+      sleep 1; break
+    fi
     sleep 1
   done
   kill -TERM "$pid" 2>/dev/null || true
