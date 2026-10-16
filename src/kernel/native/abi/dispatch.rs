@@ -129,6 +129,19 @@ fn channel_recv(args: [u64; 6]) -> Result<u64> {
     }
 
     let message = channel.recv()?;
+    // ARCH_P1_IPC_RECV_ATOMIC: front_sizes() and recv() are distinct lock
+    // acquisitions. Another receiver can change the front in between.
+    // Never copy a message larger than the actual user-supplied capacities.
+    if message.bytes.len() > data_cap || message.handles.len() > handles_cap {
+        let meta = RecvMeta { bytes: message.bytes.len() as u64,
+                              handles: message.handles.len() as u64 };
+        // Always restore the original message, including on invalid meta ptr.
+        channel.requeue_front(message);
+        if meta_ptr != 0 {
+            super::usercopy::write(meta_ptr, &meta.bytes_le())?;
+        }
+        return Err(Error::BufferTooSmall);
+    }
     let entries: Vec<Entry> = message.handles.iter().map(|item| Entry {
         object: Arc::clone(&item.object),
         rights: item.rights,
@@ -146,16 +159,19 @@ fn channel_recv(args: [u64; 6]) -> Result<u64> {
     // close any just-installed handles so they cannot leak.
     if let Err(error) = super::usercopy::write(args[1], &message.bytes) {
         for id in installed { let _ = table.close(id); }
+        channel.requeue_front(message);
         return Err(error);
     }
     if let Err(error) = super::usercopy::write_handles(args[3], &installed) {
         for id in installed { let _ = table.close(id); }
+        channel.requeue_front(message);
         return Err(error);
     }
     if meta_ptr != 0 {
         let meta = RecvMeta { bytes: message.bytes.len() as u64, handles: installed.len() as u64 };
         if let Err(error) = super::usercopy::write(meta_ptr, &meta.bytes_le()) {
             for id in installed { let _ = table.close(id); }
+            channel.requeue_front(message);
             return Err(error);
         }
     }
@@ -306,10 +322,16 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
             let entry = handle::current_table().lookup_kind(
                 HandleId::from_raw(args[0]), Rights::WRITE, ObjectKind::SharedRegion
             )?;
-            let data = super::usercopy::read(args[2], args[3] as usize)?;
+            let offset = args[1] as usize;
+            let length = args[3] as usize;
             match entry.object.as_ref() {
                 Object::SharedRegion(region) => {
-                    region.write(args[1] as usize, &data)?;
+                    // ARCH_P1_SHM_PRECHECK: never copy user-controlled data
+                    // for an out-of-bounds write to a fixed-size SHM object.
+                    let end = offset.checked_add(length).ok_or(Error::InvalidArgument)?;
+                    if end > region.len() { return Err(Error::InvalidArgument); }
+                    let data = super::usercopy::read(args[2], length)?;
+                    region.write(offset, &data)?;
                     Ok(data.len() as u64)
                 }
                 _ => Err(Error::WrongType),

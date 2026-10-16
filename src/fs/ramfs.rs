@@ -254,6 +254,16 @@ impl FileSystem {
             );
         }
 
+        // Product M1: manifestes natifs (l'OS ne revendique pas la persistance ici).
+        if apps != 0 {
+            if let Ok(n) = self.touch_at(apps, "notes.bapp") {
+                self.write_node(n, "name=Bouchaud Notes\nexec=notes\ntype=gui\npermission=normal");
+            }
+            if let Ok(n) = self.touch_at(apps, "insights.bapp") {
+                self.write_node(n, "name=Bouchaud Insights\nexec=insights\ntype=gui\npermission=normal");
+            }
+        }
+
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
         self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help, ou desktop pour le bureau graphique.");
 

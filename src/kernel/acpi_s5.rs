@@ -135,9 +135,14 @@ unsafe fn trouve_fadt(rsdp: u64) -> Option<u64> {
 /// d'ou les deux lectures.
 unsafe fn lit_fadt(fadt: u64) -> Option<(u16, u16, u64, u16, u8)> {
     let len = longueur(fadt)?;
-    if len < 132 {
+    // ACPI 1.0 FADT is 116 bytes. Rejecting len<132 breaks QEMU/PIIX4
+    // even though the legacy DSDT and PM1 fields we read are inside 116.
+    // Extended GAS fields are guarded independently below.
+    if len < 116 {
+        crate::serial_println!("BOUCHAUD_M11_ACPI_FADT_REJECT length={} min=116", len);
         return None;
     }
+    crate::serial_println!("BOUCHAUD_M11_ACPI_FADT_LENGTH length={} legacy_supported=1", len);
     let smi_cmd = lit32(fadt + 48) as u16;
     let acpi_enable = lit8(fadt + 52);
     let mut pm1a = lit32(fadt + 64) as u16;
@@ -167,9 +172,18 @@ unsafe fn lit_fadt(fadt: u64) -> Option<(u16, u16, u64, u16, u8)> {
             }
         }
     }
-    if pm1a == 0 {
+    // A missing PM1a must never cause a guessed I/O write on hardware.
+    if pm1a == 0 || dsdt == 0 {
+        crate::serial_println!(
+            "BOUCHAUD_M11_ACPI_FADT_MISSING pm1a={:#x} pm1b={:#x} dsdt={:#x} len={}",
+            pm1a, pm1b, dsdt, len,
+        );
         return None;
     }
+    crate::serial_println!(
+        "BOUCHAUD_M11_ACPI_FADT_FIELDS pm1a={:#x} pm1b={:#x} dsdt={:#x} len={}",
+        pm1a, pm1b, dsdt, len,
+    );
     Some((pm1a, pm1b, dsdt, smi_cmd, acpi_enable))
 }
 

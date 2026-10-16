@@ -506,6 +506,8 @@ fn boucle() {
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
     crate::serial_println!("[gui] window manager demarre (fil noyau)");
+    crate::serial_println!("BOUCHAUD_PRODUCT_M11_ACTIVE compositor_frame_ms={} blind_ms={} persistence_notes=1",
+        politique::PERIODE_TRAME_MS, politique::REPOS_MUET_MS);
     crate::serial_println!(
         "[GUI-RENDER-CONTRACT] mode={} titlebar={} shadow={} rounded={} window_bounds=outer+shadow",
         diagnostic_mode_name(), TITLE_H,
@@ -1192,7 +1194,7 @@ fn boucle() {
         let mut horloge_seule = false;
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
-            for w in wins.iter().filter(|w| !w.min && matches!(w.app, App::Services | App::Monitor)) {
+            for w in wins.iter().filter(|w| !w.min && matches!(w.app, App::Services | App::Monitor | App::Insights)) {
                 degats.ajoute(Origine::Client, window::zone_utile(w));
             }
             horloge_seule = !sale;
@@ -1779,21 +1781,23 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// une toutes les dix secondes, pour qu'une longue session ne noie pas la
 /// console.
 fn temoin_composition(pompe_t_ms: u64) {
+    // BOUCHAUD_M12_MEGA_V1 : auparavant >2000 lignes par session.
+    // Compteur exhaustif, emission 1/10s, sans allocation ni spam serie.
     use core::sync::atomic::{AtomicU64, Ordering};
     static DERNIER_MS: AtomicU64 = AtomicU64::new(0);
-    static EMIS: AtomicU64 = AtomicU64::new(0);
-    let emis = EMIS.load(Ordering::Relaxed);
-    let intervalle = if emis < 2048 { 250 } else { 10_000 };
+    static VUES: AtomicU64 = AtomicU64::new(0);
+    static DERNIERE_VUE: AtomicU64 = AtomicU64::new(0);
+    let vues = VUES.fetch_add(1, Ordering::Relaxed) + 1;
     let maintenant = crate::kernel::timer::monotonic_ms();
     let dernier = DERNIER_MS.load(Ordering::Relaxed);
-    if emis != 0 && maintenant.saturating_sub(dernier) < intervalle {
+    if dernier != 0 && maintenant.saturating_sub(dernier) < 10_000 {
         return;
     }
     DERNIER_MS.store(maintenant, Ordering::Relaxed);
-    EMIS.store(emis + 1, Ordering::Relaxed);
+    let precedent = DERNIERE_VUE.swap(vues, Ordering::Relaxed);
     crate::serial_println!(
-        "GUI_COMPOSITION_NAVIGATEUR pompe_t_ms={} fin_t_ms={} n={}",
-        pompe_t_ms, maintenant, emis + 1
+        "[M12-GUI-COMPOSITION] total={} depuis_dernier={} pompe_t_ms={} fin_t_ms={}",
+        vues, vues.saturating_sub(precedent), pompe_t_ms, maintenant,
     );
 }
 
