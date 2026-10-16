@@ -1,5 +1,5 @@
-# Lecture SEULE des propriétés Windows de la machine sur laquelle on lance ceci.
-# A lancer SUR LE TRIGKEY avant d'éteindre Windows, pas sur le PC développeur.
+# Lecture SEULE des proprietes Windows de la machine sur laquelle on lance ceci.
+# A lancer SUR LE TRIGKEY avant d'eteindre Windows, pas sur le PC developpeur.
 [CmdletBinding()]
 param([string]$Output = (Join-Path (Get-Location).Path 'trigkey-inventaire.json'))
 $ErrorActionPreference = 'Stop'
@@ -21,10 +21,10 @@ $payload = [pscustomobject]@{
     network = $network
     display = $display
     input_devices = $inputDevices
-    warning = 'Inventaire Windows seulement : ne prouve PAS que Bouchaud OS possède les pilotes'
+    warning = 'Inventaire Windows seulement : ne prouve PAS que Bouchaud OS possede les pilotes'
 }
 $destination = [System.IO.Path]::GetFullPath($Output)
-if (Test-Path -LiteralPath $destination) { throw "Refus d'écraser un inventaire existant : $destination" }
+if (Test-Path -LiteralPath $destination) { throw "Refus d'ecraser un inventaire existant : $destination" }
 $payload | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $destination -Encoding UTF8
 Write-Host "TRIGKEY_INVENTAIRE_ECRIT $destination" -ForegroundColor Green
-Write-Host 'Aucun disque, partition, périphérique ou firmware modifié.'
+Write-Host 'Aucun disque, partition, peripherique ou firmware modifie.'
