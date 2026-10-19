@@ -16,13 +16,13 @@ import re
 import sys
 from pathlib import Path
 
-from analyse_ab_reveil_precis import analyse
+from analyse_ab_reveil_precis import analyse, BRAS, FIN_BRAS
 
 PREFIXE = re.compile(r"^(?:\[[^\]]*\]){2}\[FPS:[^\]]*\] ")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 SONDE = re.compile(r"^VERDICT_SONDE : (\S+)")
 COMPTE_HOTE = re.compile(r"^\s+comptes [^:]+ : preuve_hote=(\S+)")
-MINUTEUR = re.compile(r"REVEIL_PRECIS voulu=[01] minuteur=(\S+) armes=")
+MINUTEUR = re.compile(r"REVEIL_PRECIS voulu=([01]) minuteur=(\S+) armes=")
 
 
 def lignes_invite(texte: str) -> list[str]:
@@ -75,9 +75,32 @@ def inspecte_ab(texte: str, smp: int, tours: int) -> list[str]:
     for i, statut in enumerate(v, 1):
         if statut != "QUALIFIE_OK":
             fautes.append(f"bras {i} : {statut} (attendu QUALIFIE_OK)")
-    minuteurs = [m.group(1) for l in ls if (m := MINUTEUR.search(l))]
-    if len(minuteurs) != 4 * tours or any(m != "tsc-deadline" for m in minuteurs):
-        fautes.append(f"minuteur KVM TSC-deadline non prouve sur les deux releves de chaque bras ({len(minuteurs)}/{4*tours})")
+    # The autorun intentionally restores the default policy after the last arm.
+    # That REVEIL_PRECIS line is not a measurement of any arm. Qualify exactly
+    # the two counter snapshots delimited by each executed AB_PRECIS/FIN pair,
+    # never a global count that can reject a valid restoration (17 vs 16).
+    bras_minuteurs = []
+    courant = None
+    for ligne in ls:
+        debut = BRAS.match(ligne)
+        if debut:
+            courant = [int(debut.group(1)), debut.group(2), []]
+            bras_minuteurs.append(courant)
+            continue
+        if FIN_BRAS.match(ligne):
+            courant = None
+            continue
+        releve = MINUTEUR.search(ligne) if courant is not None else None
+        if releve:
+            courant[2].append((int(releve.group(1)), releve.group(2)))
+    if len(bras_minuteurs) != 2 * tours:
+        fautes.append(f"bras minuteur identifies {len(bras_minuteurs)}/{2 * tours}")
+    for tour, mode, releves in bras_minuteurs:
+        attendu = 1 if mode == "on" else 0
+        if len(releves) != 2:
+            fautes.append(f"tour {tour} {mode} : releves minuteur {len(releves)}/2")
+        elif any(voulu != attendu or timer != "tsc-deadline" for voulu, timer in releves):
+            fautes.append(f"tour {tour} {mode} : minuteur KVM TSC-deadline ou politique non prouves")
     if smp not in (1, 4):
         fautes.append(f"SMP{smp} hors perimetre A/B strict 1/4")
     return fautes

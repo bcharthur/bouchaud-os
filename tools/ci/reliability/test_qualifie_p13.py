@@ -42,6 +42,28 @@ class ABEveilStrict(unittest.TestCase):
         texte = journal() + P + "AB_PRECIS_FIN\n"
         self.assertEqual(q.inspecte_ab(texte, 1, 4), [])
 
+    def test_restauration_finale_ne_compte_pas_dans_les_bras(self):
+        # The scenario performs an extra REVEIL_PRECIS read when restoring
+        # the default mode; the eight actual arms still have two readings.
+        texte = (journal()
+                 + P + "REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=999999 retires_avant_service=0\\n"
+                 + P + "AB_PRECIS_FIN\\n")
+        self.assertEqual(q.inspecte_ab(texte, 1, 4), [])
+
+    def test_minuteur_pit_dans_un_bras_est_refuse(self):
+        texte = (journal().replace("minuteur=tsc-deadline", "minuteur=pit", 1)
+                 + P + "AB_PRECIS_FIN\\n")
+        fautes = q.inspecte_ab(texte, 1, 4)
+        self.assertTrue(any("minuteur" in f for f in fautes), fautes)
+
+    def test_un_releve_par_bras_est_refuse(self):
+        lignes = journal().splitlines()
+        index = next(i for i, l in enumerate(lignes) if "REVEIL_PRECIS voulu=" in l)
+        del lignes[index]
+        texte = "\\n".join(lignes) + "\\n" + P + "AB_PRECIS_FIN\\n"
+        fautes = q.inspecte_ab(texte, 1, 4)
+        self.assertTrue(any("releves minuteur" in f for f in fautes), fautes)
+
     def test_non_qualifiant_ne_prouve_pas_de_gain(self):
         texte = journal(on={"verdict": "NON_QUALIFIANT"}) + P + "AB_PRECIS_FIN\n"
         self.assertTrue(q.inspecte_ab(texte, 1, 4))
