@@ -64,6 +64,7 @@ if ($CommeTrigkey) {
         '-netdev','user,id=net0', '-device','e1000,netdev=net0'
     )
     Write-Host 'QEMU_PROFIL=COMME_TRIGKEY (hardware emule, PAS validation physique)'
+    Write-Host 'Ce profil ne reproduit PAS le materiel physique : CPU emule, xHCI QEMU different du controleur AMD, clavier et souris USB simples au lieu du recepteur Logitech unifie, NVMe virtuel.' -ForegroundColor Yellow
 } else { $ArgsQemu += @('-net','none') }
 $ArgsQemu += @(Get-BouchaudInputArguments -InputMode $InputMode -Pointer $Pointer)
 $ArgsQemu += @(Get-BouchaudDisplayArguments -QemuExe $QemuExe -Display $Display -Fullscreen:$Fullscreen)

@@ -84,7 +84,10 @@ ANCRE = re.compile(
     CONSOLE + r"HOST_SURFACE_MIRE_PEINTE battement=(\w+)(?: decodees=(\d)/3)?")
 INSEREE = re.compile(CONSOLE + r"HOST_SURFACE_MIRE_INSEREE")
 TRAME = re.compile(r"(?:BROWSER_HOST_M11_TRAME page|\[LB:FRAME\] onglet)=\d+ seq=(\d+)(?: t=(\d+))?")
-COMPOSITION = re.compile(r"GUI_COMPOSITION_NAVIGATEUR pompe_t_ms=(\d+)")
+COMPOSITION = re.compile(
+    r"(?:GUI_COMPOSITION_NAVIGATEUR|\[M12-GUI-COMPOSITION\] "
+    r"total=\d+ depuis_dernier=\d+) pompe_t_ms=(\d+)"
+)
 MARGE = 2
 SUIVANTES = 3
 
@@ -373,6 +376,22 @@ def autotest():
                    (d['action'], d['seq'], d['voulue']), ('capturer', 14, 14))
     echecs += _cas('capture with wrong pixels never passes',
                    decide(late, [(14, 'absente')], fin=True)['verdict'], 'absente')
+
+    # C7D7: M12 compression renamed the composition witness, but the
+    # capture trigger still expected the old serial spelling. The three
+    # browser-host smokes were false-red (non_composee) without capturing.
+    nouveau = late.replace(
+        'GUI_COMPOSITION_NAVIGATEUR pompe_t_ms=20200 fin_t_ms=20215 n=30',
+        '[M12-GUI-COMPOSITION] total=50 depuis_dernier=2 pompe_t_ms=20200 fin_t_ms=20215')
+    echecs += _cas('M12 composition reelle: capture obligatoire, jamais succes sans pixels',
+                   (decide(nouveau, [])['action'], decide(nouveau, [])['seq']),
+                   ('capturer', 14))
+    sans_temoins = nouveau.replace(
+        '[M12-GUI-COMPOSITION] total=50 depuis_dernier=2 pompe_t_ms=20200 fin_t_ms=20215', '')
+    echecs += _cas('M12 sans composition: rouge conserve',
+                   decide(sans_temoins, [], fin=True)['verdict'], 'non_composee')
+    echecs += _cas('M12 composition mais mauvais pixels: rouge conserve',
+                   decide(nouveau, [(14, 'absente')], fin=True)['verdict'], 'absente')
 
     if echecs:
         print(f"surface/declencheur : {echecs} cas en echec", file=sys.stderr)
