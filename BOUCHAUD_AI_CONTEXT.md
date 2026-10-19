@@ -1,5 +1,9 @@
 # Bouchaud OS — contexte de référence pour humain ou IA
 
+> **ETAT ACTUEL, 19 OCTOBRE 2026 :** lire [P13_CLOSEOUT_2026-10-19.md](docs/current/P13_CLOSEOUT_2026-10-19.md), puis [STATUS_CURRENT](docs/current/STATUS_CURRENT.md). Les tableaux du 8 octobre ci-dessous sont historiques. Cinq workflows verts sur `f5692b7`, mais P13 STRICT KVM **NON_QUALIFIANT** / **NON_CONCLUANT**; gel global SMP8 deja diagnostique/corrige en QEMU, pas de nouveau travail a faire sur ces sondes. `main` intact, PR #226 en brouillon.
+
+
+
 > **Mise à jour du 13 octobre 2026 : lire d'abord
 > [le handoff actif](docs/current/HANDOFF_CLAUDE_ACTIVE.md)**, puis
 > [l'audit de stabilité](docs/current/AUDIT_STABILITY_2026-10-13.md) et
