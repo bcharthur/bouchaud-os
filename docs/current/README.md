@@ -1,35 +1,7 @@
-# Documentation courante Bouchaud OS
+# Documentation courante Bouchaud OS — 19 octobre 2026
 
-> **Reprise : commencer par [`HANDOFF_CLAUDE_ACTIVE.md`](HANDOFF_CLAUDE_ACTIVE.md)**,
-> puis [`AUDIT_STABILITY_2026-10-13.md`](AUDIT_STABILITY_2026-10-13.md) et le
-> [registre des lots P1→P19](P_LOTS_REGISTER.md). `STATUS_CURRENT.md` et
-> `P1_P13_CURRENT.md` décrivent encore le HEAD `3658af04` (8 octobre).
+**Lire en premier [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md)**, puis [STATUS_CURRENT.md](STATUS_CURRENT.md), [BOUCHAUD_STABLE_BASELINE.md](BOUCHAUD_STABLE_BASELINE.md), [HANDOFF_CLAUDE_ACTIVE.md](HANDOFF_CLAUDE_ACTIVE.md) et [P_LOTS_REGISTER.md](P_LOTS_REGISTER.md).
 
+Le SHA `f5692b7` a cinq grands workflows verts; le correctif d'analyse P13 `4d279ff` et les docs suivantes sont a revalider selon le SHA. Le gel global SMP8 a deja ete attribue et corrige dans le code, voir [Scheduler NG](../../docs/SCHEDULER_NG.md). **P13 KVM strict demeure NON_QUALIFIANT / NON_CONCLUANT**, la baseline reste **NOT_ESTABLISHED**.
 
-Ce dossier est **additif**. Il complète la documentation détaillée déjà
-présente sans la remplacer.
-
-## Index
-
-- `HANDOFF_CLAUDE_ACTIVE.md` (reprise)
-- `AUDIT_STABILITY_2026-10-13.md`
-- `P_LOTS_REGISTER.md`
-- `STATUS_CURRENT.md`
-- `P1_P13_CURRENT.md`
-- `ARCHITECTURE_CURRENT.md`
-- `TRIGKEY_REFERENCE.md`
-- `BOUCHAUD_NAVIGATEUR.md`
-- `KERNEL_RUNTIME.md`
-- `NETWORK_STORAGE.md`
-- `GRAPHICS_AUDIO_INPUT.md`
-- `SECURITY_MODEL.md`
-- `OBSERVABILITY_RELIABILITY.md`
-- `CI_AND_PROOFS.md`
-- `HISTORY_AND_DECISIONS.md`
-- `MODERNITY_AND_DIFFERENTIATION.md`
-- `ROADMAP_CURRENT.md`
-- `KNOWN_LIMITATIONS.md`
-- `DEPENDENCIES_AND_LICENSES.md`
-- `GLOSSARY.md`
-- `RELEASE_TRIGKEY_CHECKLIST.md`
-- `AI_HANDOFF_TEMPLATE.md`
+Les pages historiques des 8, 13 et 15 octobre ne sont pas des statuts actuels. Seules les preuves du meme SHA et de la meme machine peuvent fonder une qualification. Niveaux distincts : STATIC, HOST, QEMU TCG, QEMU KVM, PHYSICAL.
