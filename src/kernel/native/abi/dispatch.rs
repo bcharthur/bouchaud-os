@@ -142,6 +142,23 @@ fn channel_recv(args: [u64; 6]) -> Result<u64> {
         }
         return Err(Error::BufferTooSmall);
     }
+    // BOUCHAUD_MATURITY_IPC_PREFLIGHT_V1: preflight copyout BEFORE installing handles.
+    // This avoids deterministically invalid outputs leaving transient handles.
+    // Memory mappings can still change: existing rollback below is essential.
+    let copyout_preflight = (|| -> Result<()> {
+        super::usercopy::validate_write(args[1], message.bytes.len())?;
+        super::usercopy::validate_write(
+            args[3], message.handles.len().checked_mul(8).ok_or(Error::TooLarge)?,
+        )?;
+        if meta_ptr != 0 {
+            super::usercopy::validate_write(meta_ptr, RecvMeta::BYTE_LEN)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = copyout_preflight {
+        channel.requeue_front(message);
+        return Err(error);
+    }
     let entries: Vec<Entry> = message.handles.iter().map(|item| Entry {
         object: Arc::clone(&item.object),
         rights: item.rights,
