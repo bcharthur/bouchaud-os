@@ -8,7 +8,7 @@ Les commits `7d6c944b` et `cbbd5ec0` (20/10) modifient le chemin de reveil : **t
 |---|---|
 | CI Fast, Reliability, Integration, Native IPC, Ladybird au meme SHA | **PASS** sur `f5692b7` : runs 39296905594, 39296905455, 39296905800, 39296905774, 39296905493. Ladybird 20/20 jobs verts |
 | Gel global QEMU SMP8 | 4/9 gels >=200ms -> 0/15 apres corrections IRQ/serie; preuve limitee |
-| P13 KVM SMP1/2/4 strict | **NON QUALIFIE** : attribution `NON_QUALIFIANT` en mode `P13_STRICT: 0` |
+| P13 KVM SMP1/2/4 strict | **PARTIEL** : `59e384ce` SMP1 `P13_STRICT_OK` (39387288347) ; SMP2/4 `NON_QUALIFIANT` (charge sans effet) ; a rejouer sur le SHA courant |
 | A/B reveil precis KVM SMP1/4 | **NON CONCLUANT** : 0/4 paires qualifies |
 | SMP8 KVM dedie >=8 CPU | **NON PROUVE** ; runner `bouchaud-kvm8` necessaire |
 | Trois campagnes independantes meme SHA | **NON PROUVEES** |

@@ -18,7 +18,7 @@
 
 ## Actualisation P13 du 20 octobre 2026
 
-Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Cause du `NON_QUALIFIANT` KVM (run 39308093631, `2582cde9`) : « charge sans effet mesurable » parce que le repos reveille plus tard que la charge (SMP1 p95 917 contre 212 us). Deux defauts noyau : `cbbd5ec0` (echeance due/dans la marge non armee puis `hlt` jusqu'au tic) et `7d6c944b` (pas d'IPI vers le coeur d'une tache bloquee restee installee). Niveau : **HOST + TCG** (futex-pingpong TCG SMP4 2 857 -> 95 us ; invariants scheduler-ng-banc tenus). **KVM : a mesurer.** P13 reste **PARTIAL**.
+Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Cause du `NON_QUALIFIANT` KVM (run 39308093631, `2582cde9`) : « charge sans effet mesurable » parce que le repos reveille plus tard que la charge (SMP1 p95 917 contre 212 us). Deux defauts noyau : `cbbd5ec0` (echeance due/dans la marge non armee puis `hlt` jusqu'au tic) et `7d6c944b` (pas d'IPI vers le coeur d'une tache bloquee restee installee). Niveau : **HOST + TCG** (futex-pingpong TCG SMP4 2 857 -> 95 us ; invariants scheduler-ng-banc tenus). **KVM (`59e384ce`, runs 39387288347 / 39387289004)** : repos p95 SMP1 851-955 -> 134-144 us ; attribution SMP1 **P13_STRICT_OK** ; SMP2/4 NON_QUALIFIANT (charge sans effet) ; SMP8 contamine ; A/B non qualifiable par construction (bras `off`) ; 2 QUALIFIE_ECHEC SMP4 ouverts. `2f2868c5` : HOST+TCG. P13 reste **PARTIAL**.
 
 ## Actualisation P13 du 19 octobre 2026
 
