@@ -188,10 +188,6 @@ class LignesEntrelacees(unittest.TestCase):
         self.assertEqual((v, c), ("DEFAUT", 1))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RaisonDesBrasNonQualifies(unittest.TestCase):
     def test_raison_recopiee_verdict_inchange(self):
         texte = journal(off={"verdict": "NON_QUALIFIANT"}).replace(
@@ -200,3 +196,6 @@ class RaisonDesBrasNonQualifies(unittest.TestCase):
         sortie, v, c = a.analyse(texte, 4, "1", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
         self.assertTrue(any(x.startswith("  raison tour 1 off : NON_QUALIFIANT charge sans effet") for x in sortie))
+
+if __name__ == "__main__":
+    unittest.main()

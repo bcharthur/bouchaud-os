@@ -36,7 +36,7 @@ def analyse(texte, tours, smp, nom):
                        r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
     fautes = []
     for b in bras:
-        r = {"verdict": None, "ipi_variante": None, "ipi_depart": None, "bascule": None, "preuve": set()}
+        r = {"verdict": None, "ipi_variante": None, "ipi_depart": None, "bascule": None, "preuve": set(), "detail": []}
         tours_vus = []
         for l in b["lignes"]:
             q = QUANT.search(l)
@@ -48,6 +48,13 @@ def analyse(texte, tours, smp, nom):
             m = re.match(r"^VERDICT_SONDE : (\S+)", l)
             if m:
                 r["verdict"] = m.group(1)
+            # Diagnostic seulement : la comparaison de la sonde qui n'a pas
+            # rendu QUALIFIE_OK, recopiee pour un bras non qualifie (le journal
+            # serie n'est pas toujours lisible hors du job ; run 39424044836 :
+            # quatre bras `defaut` NON_QUALIFIANT sans cause lisible).
+            d = re.search(r"PREUVE (.*-> (?:QUALIFIE_ECHEC|NON_QUALIFIANT).*)$", l)
+            if d:
+                r["detail"].append(d.group(1)[:320])
             m = re.match(r"^\s+comptes .* : preuve_hote=(\S+) .*vol_hote_pour_mille=(-?\d+)", l)
             if m:
                 r["preuve"].add(m.group(1))
@@ -109,6 +116,10 @@ def analyse(texte, tours, smp, nom):
         i = r.get("sous charge (interactif)", (0, 0, 0, 0))
         sortie.append(f"  {b['tour']:<5}{b['position']:<4}{b['variante']:<17}{str(r['verdict']):<16}{i[2]:>7}{i[3]:>8}"
               f"{r.get('tours_interactif', 0):>11}{r.get('tours_normal', 0):>11}{r.get('vol', 0):>8}‰")
+    for b in bras:
+        if b["r"]["verdict"] != "QUALIFIE_OK":
+            for d in b["r"]["detail"]:
+                sortie.append(f"  detail tour {b['tour']} {b['variante']} : {d}")
 
     # Les tours APPARIES : les deux bras qualifies dans le meme tour.
     par_tour = {}

@@ -162,5 +162,27 @@ class FinDuScenario(unittest.TestCase):
         self.assertEqual((verdict, code), ("ECHEC", 1))
 
 
+class DetailDesBrasNonQualifies(unittest.TestCase):
+    """Diagnostic seulement : la comparaison qui a echoue est recopiee pour un
+    bras non QUALIFIE_OK ; le verdict n'en depend pas."""
+
+    def test_preuve_recopiee_verdict_inchange(self):
+        def m(t, v):
+            return ("NON_QUALIFIANT", 1000, 2000) if (t, v) == (3, "defaut") else ("QUALIFIE_OK", 1000, 2000)
+        base = scenario(6, m)
+        preuve = ("  PREUVE la priorite interactive raccourcit la queue de latence : non jugee -> NON_QUALIFIANT : "
+                  "porte non qualifiee (contamines ecartes repos=40)")
+        ok = "  PREUVE la charge degrade la latence (porte) : tout[...] = vrai ; propre[...] = vrai -> QUALIFIE_OK"
+        lignes = base.splitlines()
+        i = max(k for k, l in enumerate(lignes) if l == "AB_BRAS tour=3 variante=defaut")
+        lignes[i + 1:i + 1] = [preuve, ok]
+        sortie, v, c = analyse_ab.analyse("\n".join(lignes) + "\n", 6, "4", "kvm")
+        _, v0, c0 = analyse_ab.analyse(base, 6, "4", "kvm")
+        self.assertEqual((v, c), (v0, c0))
+        details = [x for x in sortie if x.startswith("  detail tour 3 defaut")]
+        self.assertEqual(len(details), 1)
+        self.assertIn("porte non qualifiee", details[0])
+        self.assertFalse(any("detail tour 3 ipi-interactive" in x for x in sortie))
+
 if __name__ == "__main__":
     unittest.main()
