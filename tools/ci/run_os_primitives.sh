@@ -69,7 +69,28 @@ LOG=serie-primitives.log
 # toujours lisibles ; le journal du job, si). Imprime EN DERNIER : l'API ne
 # rend que la fin d'un journal de job.
 ELF="$(dirname "$BOOT")/bouchaud-os"
-trap 'rc=$?; if [ "$rc" -ne 0 ]; then python3 tools/ci/symbolise_noyau.py "$LOG" "$ELF"; fi; exit "$rc"' EXIT
+# BOUCHAUD_PRIMITIVES_ECHEC_LISIBLE_V1 : les sondes mortes en echec et LEURS
+# fautes, lues sur le journal ENTIER. Run 39455898970 (ca968270) :
+# COMPTA_STRESS_OK absent, AUTORUN statut=139, et la mort de la sonde tombait
+# avant les 256 Kio publies -- rien pour la classer. Les fautes volontaires
+# des autres sondes (fils tues expres) ne sont pas recopiees : seulement
+# celles des racines (ppid=0) mortes en code non nul.
+racines_en_echec() {
+  python3 - "$LOG" <<'PY'
+import re, sys
+lignes = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[1], errors="replace").read()).splitlines()
+morts = [l for l in lignes if re.search(r"PROCESS_DEATH .*\bppid=0 ", l) and not re.search(r" code=0 ", l)]
+pids = {m.group(1) for l in morts for m in [re.search(r"\bpid=(\d+)", l)] if m}
+sortie = [l for l in lignes
+          if l in morts
+          or (lambda m: m is not None and m.group(1) in pids)(re.search(r"PROCESS_FAULT(?:_PILE)? pid=(\d+)", l))
+          or re.search(r"\b[A-Z_]+_(ECHEC|FAIL)\b|COMPTA_(RECUL|DEPASSE|STRESS) |AUTORUN FIN", l)]
+print("== racines mortes en echec et leurs fautes (journal entier) ==")
+for l in sortie[:40]:
+    print("  " + l[:400])
+PY
+}
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then python3 tools/ci/symbolise_noyau.py "$LOG" "$ELF" || true; racines_en_echec || true; fi; exit "$rc"' EXIT
 # BO_QEMU_KVM=1 : memes sondes sous KVM (-cpu host). La course que
 # compta-stress-probe fabrique depend du rythme reel des vCPU : sous TCG les
 # coeurs avancent par tranches emulees, sous KVM ils tournent en parallele
