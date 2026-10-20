@@ -102,6 +102,7 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
             if interrupted_user {
                 preempt_now = true;
             } else if !crate::kernel::task::current_is_kernel_task() {
+                crate::kernel::task::note_renonce_battement_local(crate::kernel::task::RENONCE_DIFFEREE_APPEL);
                 crate::kernel::task::request_deferred_preempt();
             } else if crate::kernel::scheduler::preempt::accorde_preemption_noyau() {
                 // BOUCHAUD_P0_REVEIL_CIBLE_V1 -- LA DEUXIEME EXCLUSION
@@ -130,6 +131,7 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
                 preempt_now = true;
                 preempt_ciblee = true;
             } else {
+                crate::kernel::task::note_renonce_battement_local(crate::kernel::task::RENONCE_DIFFEREE_FIL_NOYAU);
                 crate::kernel::task::request_deferred_preempt();
             }
         }

@@ -711,19 +711,110 @@ static PIRE_DERRIERE_UTILISATEUR_OCCUPANT: AtomicUsize = AtomicUsize::new(NO_TAS
 // celui du voleur, pas celui qui l'a fait attendre.
 static PIRE_DERRIERE_NOYAU_OU: AtomicUsize = AtomicUsize::new(0);
 static PIRE_DERRIERE_UTILISATEUR_OU: AtomicUsize = AtomicUsize::new(0);
+// Battements du vecteur de replanification recus par le coeur d'election
+// pendant l'attente du pire cas : 0 = elue sans battement (blocage, point sur),
+// 1 = elue au premier (une attente bien au-dela du quantum dit alors que ce
+// battement a ete retarde), >= 2 = des battements sont passes sans l'elire.
+static PIRE_DERRIERE_NOYAU_BATTEMENTS: AtomicU64 = AtomicU64::new(0);
+static PIRE_DERRIERE_UTILISATEUR_BATTEMENTS: AtomicU64 = AtomicU64::new(0);
+// Le dernier battement du coeur d'election au pire cas : intervalle depuis le
+// precedent, part masquee, vol de l'hote (us), et la derniere raison pour
+// laquelle un battement de ce coeur n'a pas commute.
+static PIRE_DERRIERE_NOYAU_BATTEMENT: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static PIRE_DERRIERE_UTILISATEUR_BATTEMENT: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+// BOUCHAUD_ATTENTE_INTERACTIVE_CLASSEE_V1 : TOUTE attente pret -> elu d'une
+// interactive utilisateur au-dela d'une milliseconde, classee par ce qui l'a
+// terminee. Volee : elle a attendu sur une autre file. b0 : elue sans
+// battement (blocage, cession, point sur). b1 : elue au premier battement,
+// lui-meme a l'heure (le quantum). b1r : elue au premier battement, mais il
+// est arrive plus d'une milliseconde apres le quantum (interruption retardee :
+// voir la part masquee et le vol du pire cas). b2 : au moins un battement est
+// passe sans l'elire (politique ou renoncement).
+const ATTENTE_LONGUE_CLASSEE_NS: u64 = 1_000_000;
+static LONGUES_VOLEES: AtomicU64 = AtomicU64::new(0);
+static LONGUES_B0: AtomicU64 = AtomicU64::new(0);
+static LONGUES_B1: AtomicU64 = AtomicU64::new(0);
+static LONGUES_B1_RETARD: AtomicU64 = AtomicU64::new(0);
+static LONGUES_B2: AtomicU64 = AtomicU64::new(0);
+
+// Pourquoi un battement n'a pas commute (derniere raison, par coeur).
+pub const RENONCE_TRANSITION: u8 = 1;
+pub const RENONCE_PORTE: u8 = 2;
+pub const RENONCE_ANTICIPE: u8 = 3;
+pub const RENONCE_FILE_VIDE: u8 = 4;
+pub const RENONCE_GARDE: u8 = 5;
+pub const RENONCE_RIEN: u8 = 6;
+pub const RENONCE_MEME: u8 = 7;
+pub const RENONCE_DIFFEREE_APPEL: u8 = 8;
+pub const RENONCE_DIFFEREE_FIL_NOYAU: u8 = 9;
+static RENONCE_RAISON: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+static RENONCES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+
+#[inline]
+fn note_renonce_battement(cpu: usize, raison: u8) {
+    if cpu < MAX_CPUS {
+        RENONCE_RAISON[cpu].store(raison, Ordering::Relaxed);
+    }
+    RENONCES[raison as usize % 10].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Depuis le gestionnaire du vecteur de replanification (coeur local).
+#[inline]
+pub fn note_renonce_battement_local(raison: u8) {
+    note_renonce_battement(local_cpu(), raison);
+}
+
+fn nom_renonce(code: u64) -> &'static str {
+    match code as u8 {
+        RENONCE_TRANSITION => "transition",
+        RENONCE_PORTE => "porte",
+        RENONCE_ANTICIPE => "anticipe",
+        RENONCE_FILE_VIDE => "file_vide",
+        RENONCE_GARDE => "garde",
+        RENONCE_RIEN => "rien",
+        RENONCE_MEME => "meme",
+        RENONCE_DIFFEREE_APPEL => "differee_appel",
+        RENONCE_DIFFEREE_FIL_NOYAU => "differee_fil_noyau",
+        _ => "-",
+    }
+}
 
 /// A l'election d'une interactive utilisateur : `attente_ns` pret -> elu,
 /// `derriere_noyau` -- l'occupant precedent du coeur etait un fil noyau,
 /// `occupant` -- son emplacement.
-fn note_attente_interactive(attente_ns: u64, derriere_noyau: bool, occupant: usize, cpu: usize, volee: bool) {
+fn note_attente_interactive(
+    attente_ns: u64,
+    derriere_noyau: bool,
+    occupant: usize,
+    cpu: usize,
+    volee: bool,
+    battements: u64,
+) {
     if attente_ns <= ATTENTE_INTERACTIVE_LONGUE_NS {
         return;
     }
-    let (compte, pire, qui, ou) = if derriere_noyau {
-        (&ATTENTES_DERRIERE_NOYAU, &PIRE_DERRIERE_NOYAU_NS, &PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_NOYAU_OU)
+    let (intervalle, masque, vole) = crate::kernel::attribution_reveil::dernier_battement(cpu);
+    if attente_ns > ATTENTE_LONGUE_CLASSEE_NS {
+        let classe = if volee {
+            &LONGUES_VOLEES
+        } else if battements == 0 {
+            &LONGUES_B0
+        } else if battements == 1 {
+            let quantum_ns = crate::arch::x86_64::smp::SCHED_QUANTUM_TICKS * 1_000_000;
+            if intervalle > quantum_ns + 1_000_000 { &LONGUES_B1_RETARD } else { &LONGUES_B1 }
+        } else {
+            &LONGUES_B2
+        };
+        classe.fetch_add(1, Ordering::Relaxed);
+    }
+    let (compte, pire, qui, ou, bat, detail) = if derriere_noyau {
+        (&ATTENTES_DERRIERE_NOYAU, &PIRE_DERRIERE_NOYAU_NS, &PIRE_DERRIERE_NOYAU_OCCUPANT,
+         &PIRE_DERRIERE_NOYAU_OU, &PIRE_DERRIERE_NOYAU_BATTEMENTS, &PIRE_DERRIERE_NOYAU_BATTEMENT)
     } else {
         (&ATTENTES_DERRIERE_UTILISATEUR, &PIRE_DERRIERE_UTILISATEUR_NS,
-         &PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU)
+         &PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU,
+         &PIRE_DERRIERE_UTILISATEUR_BATTEMENTS, &PIRE_DERRIERE_UTILISATEUR_BATTEMENT)
     };
     compte.fetch_add(1, Ordering::Relaxed);
     // Deux pires concurrents peuvent croiser leurs occupants : diagnostic
@@ -731,16 +822,26 @@ fn note_attente_interactive(attente_ns: u64, derriere_noyau: bool, occupant: usi
     if pire.fetch_max(attente_ns, Ordering::Relaxed) < attente_ns {
         qui.store(occupant, Ordering::Relaxed);
         ou.store((cpu & 0xff) | ((volee as usize) << 8), Ordering::Relaxed);
+        bat.store(battements, Ordering::Relaxed);
+        detail[0].store(intervalle / 1000, Ordering::Relaxed);
+        detail[1].store(masque / 1000, Ordering::Relaxed);
+        detail[2].store(if vole == u64::MAX { u64::MAX } else { vole / 1000 }, Ordering::Relaxed);
+        detail[3].store(
+            if cpu < MAX_CPUS { RENONCE_RAISON[cpu].load(Ordering::Relaxed) as u64 } else { 0 },
+            Ordering::Relaxed,
+        );
     }
 }
 
 /// `[occupant derriere noyau, occupant derriere utilisateur]` du pire cas,
-/// `tid:nom@cpuN[:volee]` (nom sans espace), `-` si aucun ou si l'emplacement est vide.
+/// `tid:nom@cpuN:bK[:volee]` (K battements pendant l'attente ; nom sans espace), `-` si aucun ou si l'emplacement est vide.
 /// L'emplacement a pu etre recycle depuis : le nom est celui de son occupant
 /// AU RELEVE -- un fil noyau, lui, ne meurt guere.
 pub fn occupants_attente_interactive() -> [String; 2] {
-    [(&PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_NOYAU_OU),
-     (&PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU)].map(|(qui, ou)| {
+    [(&PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_NOYAU_OU, &PIRE_DERRIERE_NOYAU_BATTEMENTS,
+      &PIRE_DERRIERE_NOYAU_BATTEMENT),
+     (&PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU,
+      &PIRE_DERRIERE_UTILISATEUR_BATTEMENTS, &PIRE_DERRIERE_UTILISATEUR_BATTEMENT)].map(|(qui, ou, bat, detail)| {
         let index = qui.load(Ordering::Relaxed);
         if index == NO_TASK {
             return String::from("-");
@@ -751,11 +852,36 @@ pub fn occupants_attente_interactive() -> [String; 2] {
         match table.get(index) {
             Some(tache) => {
                 let nom = tache.process.metadata.lock().name.replace(' ', "_");
-                alloc::format!("{}:{}@cpu{}{}", tache.tid, nom, cpu, if volee { ":volee" } else { "" })
+                let vole = detail[2].load(Ordering::Relaxed);
+                alloc::format!(
+                    "{}:{}@cpu{}:b{}{}:int{}:masq{}:vol{}:renonce_{}",
+                    tache.tid, nom, cpu, bat.load(Ordering::Relaxed),
+                    if volee { ":volee" } else { "" },
+                    detail[0].load(Ordering::Relaxed), detail[1].load(Ordering::Relaxed),
+                    if vole == u64::MAX { alloc::string::String::from("?") } else { alloc::format!("{}", vole) },
+                    nom_renonce(detail[3].load(Ordering::Relaxed)),
+                )
             }
             None => String::from("-"),
         }
     })
+}
+
+/// Attentes de plus d'une milliseconde, classees (BOUCHAUD_ATTENTE_INTERACTIVE_CLASSEE_V1) :
+/// `[volees, b0, b1, b1_retard, b2]`, cumuls depuis le demarrage.
+pub fn attentes_longues_classees() -> [u64; 5] {
+    [
+        LONGUES_VOLEES.load(Ordering::Relaxed),
+        LONGUES_B0.load(Ordering::Relaxed),
+        LONGUES_B1.load(Ordering::Relaxed),
+        LONGUES_B1_RETARD.load(Ordering::Relaxed),
+        LONGUES_B2.load(Ordering::Relaxed),
+    ]
+}
+
+/// Battements qui n'ont pas commute, par raison (indice = code `RENONCE_*`).
+pub fn renonces_battement() -> [u64; 10] {
+    core::array::from_fn(|i| RENONCES[i].load(Ordering::Relaxed))
 }
 
 /// `[derriere noyau, derriere utilisateur, pire noyau ns, pire utilisateur ns,

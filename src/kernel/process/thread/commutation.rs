@@ -180,6 +180,8 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
                 CURRENT[cpu_id].load(Ordering::Acquire),
                 cpu_id,
                 task.file_au_pret.charge() as usize != cpu_id,
+                crate::kernel::attribution_reveil::battements(cpu_id)
+                    .saturating_sub(task.battements_au_pret.charge()),
             );
         }
         // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.

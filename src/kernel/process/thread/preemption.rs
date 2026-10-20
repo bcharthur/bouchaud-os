@@ -39,6 +39,7 @@ pub fn preempt_from_irq(anticipe: bool) {
     // comportement historique et il est correct. Seule la porte sans
     // passation appartient a quelqu'un d'autre.
     if transition_ouverte_sans_passation(local_cpu()) {
+        note_renonce_battement(local_cpu(), RENONCE_TRANSITION);
         stall_site_clear();
         request_deferred_preempt();
         return;
@@ -60,6 +61,7 @@ pub fn preempt_from_irq(anticipe: bool) {
 
     complete_switch_handoff();
     if !commence_transition_ordonnanceur() {
+        note_renonce_battement(local_cpu(), RENONCE_PORTE);
         stall_site_clear();
         request_deferred_preempt();
         return;
@@ -82,6 +84,7 @@ pub fn preempt_from_irq(anticipe: bool) {
         && !crate::kernel::scheduler::preempt::pending()
         && !crate::kernel::scheduler::preempt::demande_ciblee_pendante()
     {
+        note_renonce_battement(local_cpu(), RENONCE_ANTICIPE);
         termine_transition_ordonnanceur();
         return;
     }
@@ -93,21 +96,25 @@ pub fn preempt_from_irq(anticipe: bool) {
     // Le pull distant reste réservé au chemin schedule() lorsque la tâche
     // courante s'est réellement bloquée.
     if ready_count_cpu(cpu_id) == 0 {
+        note_renonce_battement(cpu_id, RENONCE_FILE_VIDE);
         termine_transition_ordonnanceur();
         return;
     }
     // BOUCHAUD_CESSION_PAR_CLASSE_V1 : une interactive sous budget ne cede
     // pas son coeur a un calcul normal (`scheduler::reveil::cession`).
     if courante_garde_le_coeur(cur, cpu_id) {
+        note_renonce_battement(cpu_id, RENONCE_GARDE);
         termine_transition_ordonnanceur();
         return;
     }
 
     let Some(next) = pick_next(cur, cpu_id) else {
+        note_renonce_battement(cpu_id, RENONCE_RIEN);
         termine_transition_ordonnanceur();
         return;
     };
     if next == cur {
+        note_renonce_battement(cpu_id, RENONCE_MEME);
         termine_transition_ordonnanceur();
         return;
     }

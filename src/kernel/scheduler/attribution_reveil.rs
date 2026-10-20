@@ -880,6 +880,39 @@ pub fn absences_comptees() -> (u64, u64, u64) {
 }
 
 static DERNIER_QUANTUM_NS: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(0) }; CPUS_SUIVIS];
+// BOUCHAUD_ATTENTE_INTERACTIVE_OCCUPANT_V1 : battements du vecteur de
+// replanification par coeur (quantum ou tir anticipe), pour dire combien en
+// sont passes pendant l'attente d'une interactive.
+static BATTEMENTS: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(0) }; CPUS_SUIVIS];
+
+/// Battements du vecteur de replanification recus par `cpu` depuis le boot.
+pub fn battements(cpu: usize) -> u64 {
+    if cpu >= CPUS_SUIVIS {
+        return 0;
+    }
+    BATTEMENTS[cpu].load(Ordering::Relaxed)
+}
+
+// Le dernier battement de chaque coeur : l'intervalle depuis le precedent, la
+// part masquee juste avant (section qui l'a retenu) et le vol de l'hote sur
+// cet intervalle. Lus a l'election d'une interactive restee longtemps prete :
+// un battement elu en retard dit POURQUOI il etait en retard.
+static DERNIER_INTERVALLE_NS: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(0) }; CPUS_SUIVIS];
+static DERNIER_MASQUE_NS: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(0) }; CPUS_SUIVIS];
+static DERNIER_VOLE_NS: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(u64::MAX) }; CPUS_SUIVIS];
+
+/// `(intervalle ns, masque ns, vol ns ou u64::MAX si inconnu)` du dernier
+/// battement de `cpu`.
+pub fn dernier_battement(cpu: usize) -> (u64, u64, u64) {
+    if cpu >= CPUS_SUIVIS {
+        return (0, 0, u64::MAX);
+    }
+    (
+        DERNIER_INTERVALLE_NS[cpu].load(Ordering::Relaxed),
+        DERNIER_MASQUE_NS[cpu].load(Ordering::Relaxed),
+        DERNIER_VOLE_NS[cpu].load(Ordering::Relaxed),
+    )
+}
 // BOUCHAUD_PREUVE_HOTE_V1 : le vol cumule lu au battement precedent, par
 // source (u64::MAX : pas de lecture).
 static DERNIER_VOL_TIC: [AtomicU64; CPUS_SUIVIS] = [const { AtomicU64::new(u64::MAX) }; CPUS_SUIVIS];
@@ -892,11 +925,17 @@ pub fn note_quantum(cpu: usize, maintenant: u64, tsc: u64, periode_ns: u64, cycl
     if cpu >= CPUS_SUIVIS {
         return;
     }
+    BATTEMENTS[cpu].fetch_add(1, Ordering::Relaxed);
     let precedent = DERNIER_QUANTUM_NS[cpu].swap(maintenant, Ordering::Relaxed);
     let vole_avant = DERNIER_VOL_QUANTUM[cpu].swap(vole.unwrap_or(u64::MAX), Ordering::Relaxed);
     let (duree, _) = section_juste_avant(cpu, tsc, cycles_par_ms / 10);
     let masque_ns = if cycles_par_ms == 0 { 0 } else { duree.saturating_mul(1_000_000) / cycles_par_ms };
     let vole_ns = vol_entre(vole_avant, vole);
+    if precedent != 0 {
+        DERNIER_INTERVALLE_NS[cpu].store(maintenant.saturating_sub(precedent), Ordering::Relaxed);
+    }
+    DERNIER_MASQUE_NS[cpu].store(masque_ns, Ordering::Relaxed);
+    DERNIER_VOLE_NS[cpu].store(vole_ns.unwrap_or(u64::MAX), Ordering::Relaxed);
     if let Some(a) = absence_de(cpu as u32, SOURCE_QUANTUM, precedent, maintenant, periode_ns, masque_ns, vole_ns, courant) {
         journalise_absence(&a);
     }

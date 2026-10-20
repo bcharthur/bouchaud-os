@@ -231,6 +231,27 @@ class OccupantDuPireCas(unittest.TestCase):
         self.assertTrue(any(x.startswith("  noyau tour 1 on : ") and x.endswith(
             "occupant_noyau=7:usb-hid occupant_utilisateur=-") for x in sortie), sortie)
 
+    def test_classement_des_attentes_recopie(self):
+        # BOUCHAUD_ATTENTE_INTERACTIVE_CLASSEE_V1 : les cumuls par classe et par
+        # raison de renoncement sont des differences ; l'occupant garde ses
+        # battements, l'intervalle, la part masquee, le vol et la raison.
+        n = [0]
+        def releve(m):
+            n[0] += 1
+            return (f"retires_avant_service=0 tirs={n[0]} longues_b2={3 * n[0]} longues_b1_retard={n[0]} "
+                    f"renonce_differee_appel={100 * n[0]} occupant_noyau=- "
+                    f"occupant_utilisateur=140:/bin/ordonnanceur-probe@cpu0:b2:int1941:masq25:vol?:renonce_differee_appel")
+        import re
+        texte = re.sub("retires_avant_service=0", releve, journal())
+        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+        ligne = next(x for x in sortie if x.startswith("  noyau tour 1 off : "))
+        self.assertIn("longues_b2=+3", ligne)
+        self.assertIn("longues_b1_retard=+1", ligne)
+        self.assertIn("renonce_differee_appel=+100", ligne)
+        self.assertTrue(ligne.endswith(
+            "occupant_utilisateur=140:/bin/ordonnanceur-probe@cpu0:b2:int1941:masq25:vol?:renonce_differee_appel"), ligne)
+
 
 if __name__ == "__main__":
     unittest.main()

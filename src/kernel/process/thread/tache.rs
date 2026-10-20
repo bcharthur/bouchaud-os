@@ -52,6 +52,9 @@ pub struct Task {
     /// l'election ; sans ce champ, l'occupant du voleur passerait pour celui
     /// qui a fait attendre. Diagnostic seulement.
     pub file_au_pret: CoeurAtomique,
+    /// Battements du vecteur de replanification de cette file a la
+    /// publication (meme diagnostic).
+    pub battements_au_pret: EcheanceAtomique,
     pub last_cpu: CoeurAtomique,
     pub on_cpu: CoeurSigneAtomique,
     switching_out: DrapeauAtomique,

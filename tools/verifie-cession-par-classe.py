@@ -42,7 +42,8 @@ REGLE = ("    if courante == Classe::Interactive && attente_interactive == 0 "
          "&& consomme_ns < BUDGET_ACTIVATION_NS {\n        return Cession::Garde;\n    }")
 DEFAUT = ("static CESSION_PAR_CLASSE: core::sync::atomic::AtomicBool = "
           "core::sync::atomic::AtomicBool::new(true);")
-IRQ = ("    if courante_garde_le_coeur(cur, cpu_id) {\n        termine_transition_ordonnanceur();\n"
+IRQ = ("    if courante_garde_le_coeur(cur, cpu_id) {\n        note_renonce_battement(cpu_id, RENONCE_GARDE);\n"
+       "        termine_transition_ordonnanceur();\n"
        "        return;\n    }\n\n    let Some(next) = pick_next(cur, cpu_id) else {")
 POINT = ("    if crate::kernel::task::courante_garde_le_coeur_local() {\n        return false;\n    }\n"
          "    let switched = crate::kernel::task::schedule();")

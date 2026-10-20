@@ -49,7 +49,12 @@ DIAG_NOMS = ("tirs", "bornes_propres", "ipi_pendant_arme", "armes_dus", "refus_q
              "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us",
              "armes_occupes", "tirs_anticipes", "avances_occupees",
              "attentes_noyau", "attentes_utilisateur", "attente_noyau_pire_us", "attente_utilisateur_pire_us",
-             "cessions_interactives")
+             "cessions_interactives",
+             # BOUCHAUD_ATTENTE_INTERACTIVE_CLASSEE_V1 : attentes > 1 ms par cause, et
+             # battements qui n'ont pas commute, par raison.
+             "longues_volees", "longues_b0", "longues_b1", "longues_b1_retard", "longues_b2",
+             "renonce_anticipe", "renonce_file_vide", "renonce_garde", "renonce_rien", "renonce_meme",
+             "renonce_transition", "renonce_porte", "renonce_differee_appel", "renonce_differee_fil_noyau")
 MAXIMA = ("serie_pire_us", "attente_noyau_pire_us", "attente_utilisateur_pire_us")
 
 

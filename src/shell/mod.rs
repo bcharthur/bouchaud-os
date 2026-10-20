@@ -832,6 +832,8 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     let occupe = crate::arch::x86_64::smp::compteurs_reveil_occupe();
     let attente = crate::kernel::task::compteurs_attente_interactive();
     let occupants = crate::kernel::task::occupants_attente_interactive();
+    let longues = crate::kernel::task::attentes_longues_classees();
+    let renonces = crate::kernel::task::renonces_battement();
     crate::serial_println!(
         "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={} periodique={} materiel={} hyperviseur={} \
          tirs={} bornes_propres={} ipi_pendant_arme={} armes_dus={} refus_quantum_avant={} \
@@ -839,12 +841,18 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
          installes_ipi={} installes_eveilles={} serie_longues={} serie_pire_us={} \
          armes_occupes={} tirs_anticipes={} avances_occupees={} \
          attentes_noyau={} attentes_utilisateur={} attente_noyau_pire_us={} attente_utilisateur_pire_us={} \
-         cessions_interactives={} occupant_noyau={} occupant_utilisateur={}",
+         cessions_interactives={} longues_volees={} longues_b0={} longues_b1={} longues_b1_retard={} longues_b2={} \
+         renonce_anticipe={} renonce_file_vide={} renonce_garde={} renonce_rien={} renonce_meme={} \
+         renonce_transition={} renonce_porte={} renonce_differee_appel={} renonce_differee_fil_noyau={} \
+         occupant_noyau={} occupant_utilisateur={}",
         voulu as u8, mode, armes, retires, crate::arch::x86_64::smp::reveil_precis_periodique() as u8,
         materiel as u8, hyperviseur as u8,
         d[0], d[1], d[3], d[4], d[5], d[6], d[7], tardifs[0], tardifs[1], tardifs[2], tardifs[3],
         installes.0, installes.1, serie.1, serie.0 / 1000, occupe.0, occupe.1, occupe.2,
         attente[0], attente[1], attente[2] / 1000, attente[3] / 1000, attente[4],
+        longues[0], longues[1], longues[2], longues[3], longues[4],
+        renonces[3], renonces[4], renonces[5], renonces[6], renonces[7],
+        renonces[1], renonces[2], renonces[8], renonces[9],
         occupants[0], occupants[1]
     );
     0
