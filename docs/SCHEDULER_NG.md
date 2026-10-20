@@ -249,6 +249,8 @@ il ne sert pas a classer (essaye puis retire).
 | tache installee rendue prete : son coeur ne dort pas | IPI ou relecture apres `IDLE` | `verifie-poignee-idle.py` |
 | aucun BKL, aucun verrou global d'ordonnanceur | tenu | `verifie-ordonnanceur-sans-bkl.py`, `verifie-bkl-supprime.py` |
 | fin de fichier / EPIPE des la derniere extremite fermee, par tout chemin | `ferme_hors_verrou` | `verifie-eof-hors-close.py`, `eof-fermeture-probe` |
+| le temps CPU d'un processus ne recule jamais (`/proc/<pid>/stat`, `/proc/stat`) | instant du repli lu DANS la section (`37f481c4`) : A/B causal 35 -> 0 reculs, 8/8 passes | `verifie-compta-seqlock.py` (regle 5), `compta-stress-probe` |
+| `POLLOUT` sur un tube ou un socketpair : une ecriture de PIPE_BUF octets passe | seuil `place >= PIPE_BUF` (`f7ecba30`) | `verifie-tube-atomique.py` (regle 4), `TUBE_POLLOUT` |
 
 ## 5. Ouvert
 

@@ -26,6 +26,8 @@ Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Cause du `NON_QUA
 
 **KVM `d02e8294` (run 39447650575, 20/10)** : SMP2 `P13_STRICT_OK` reproduit ; SMP1 1/2 et SMP4 1/2, echecs dus a l'emission serie masquee (`vide_differees`) ; atomicite des tubes (`89c25e13`) et statut `wait4` (`160de485`) **VERIFIED_AT_KVM** (os-primitives KVM x3). Decision humaine : chantier console serie (closeout §6.4).
 
+**Ladybird `d02e8294` + deux defauts (soir du 20/10)** : jobs Ladybird reels verts (push 39447642999) ; diagnostic memoire rouge 2/2 runs, correctif candidat `f7ecba30` (`POLLOUT` seulement si une ecriture de PIPE_BUF passe ; sonde `TUBE_POLLOUT` avant 10 refus / apres 0) -- **CODE_COMPLETE**, lien memoire non prouve. Comptabilite CPU : recul de `utime` (instant du repli lu hors section), `37f481c4`, A/B causal 35 -> 0 reculs, 8/8 -- **CODE_COMPLETE** (TCG). Ouverts : compta-stress SIGSEGV (CI TCG 1 fois), A/B precis SMP4 `on` QUALIFIE_ECHEC x3. Closeout §4 sexies.
+
 ## Actualisation P13 du 19 octobre 2026
 
 Cette section [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md) prime sur les SHA et etats historiques du tableau ci-dessous. Sur `f5692b7`, CI Fast, Integration, Reliability, Native IPC et Ladybird 20/20 sont verts. Les gels QEMU SMP8 >=200ms passent de 4/9 a 0/15 apres traitement du jeton serie + hard IRQ, d'apres `docs/SCHEDULER_NG.md`. **P13 reste PARTIAL:** attribution KVM SMP1/2/4 `NON_QUALIFIANT`, A/B reveil precis KVM SMP1/4 `NON_CONCLUANT` 0/4, SMP8 KVM dedie non prouve; correction qualificateur `4d279ff` (17/16) ne change pas ces donnees. GPU direct/tuiles KVM NON_CONVAINCANT. Baseline globale NOT_ESTABLISHED.
