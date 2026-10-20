@@ -74,7 +74,7 @@ def analyse(texte, tours, smp, nom):
             if courant is not None:
                 fautes.append(f"tour {courant['tour']} {courant['v']} : bras precedent non ferme")
             courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None,
-                       "compteurs": [], "diag": [], "noyau": [], "ferme": False}
+                       "compteurs": [], "diag": [], "noyau": [], "detail": [], "ferme": False}
             bras.append(courant)
             continue
         m = FIN_BRAS.match(l)
@@ -111,6 +111,14 @@ def analyse(texte, tours, smp, nom):
         d = re.search(r"(attribution|ventilation|comptes) au repos : .*", l)
         if d:
             courant["diag"].append(d.group(0)[:400])
+        # Diagnostic seulement : la comparaison de la sonde qui a echoue,
+        # chiffres compris. Run 39447642999 (d02e8294, KVM SMP4) : deux
+        # QUALIFIE_ECHEC sous `on` au repos irreprochable (pire 154 us), sans
+        # que le job dise quel critere -- le journal serie n'est pas lisible
+        # hors du job. Comme les A/B IPI et cession.
+        d = re.search(r"PREUVE (.*-> QUALIFIE_ECHEC.*)$", l)
+        if d:
+            courant["detail"].append(d.group(1)[:400])
     if courant is not None:
         fautes.append(f"tour {courant['tour']} {courant['v']} : bras final non ferme")
     minuteur = "?"
@@ -168,6 +176,14 @@ def analyse(texte, tours, smp, nom):
             sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
         if b["verdict"] != "QUALIFIE_OK" and b.get("raison"):
             sortie.append(f"  raison tour {b['tour']} {b['v']} : {b['verdict']} {b['raison']}")
+        if b["verdict"] == "QUALIFIE_ECHEC":
+            for d in b["detail"]:
+                sortie.append(f"  preuve tour {b['tour']} {b['v']} : {d}")
+            phases = [(n, b["q"][c]) for n, c in (("normal", "sous charge (normal)"),
+                                                  ("interactif", "sous charge (interactif)")) if c in b["q"]]
+            if phases:
+                sortie.append(f"  charge tour {b['tour']} {b['v']} : " + " ; ".join(
+                    f"{n} p50 {q[0]} p95 {q[1]} p99 {q[2]} pire {q[3]}" for n, q in phases))
         # Les compteurs du noyau entre le releve d'avant et celui d'apres la
         # sonde (l'avance maximale est un maximum cumule : sa valeur finale).
         if len(b["noyau"]) >= 2:

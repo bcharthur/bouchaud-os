@@ -197,5 +197,28 @@ class RaisonDesBrasNonQualifies(unittest.TestCase):
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
         self.assertTrue(any(x.startswith("  raison tour 1 off : NON_QUALIFIANT charge sans effet") for x in sortie))
 
+class PreuveDesEchecsQualifies(unittest.TestCase):
+    def test_critere_et_charge_recopies_verdict_inchange(self):
+        texte = journal(on={"verdict": "QUALIFIE_ECHEC"})
+        texte = texte.replace(
+            "VERDICT_SONDE : QUALIFIE_ECHEC tentatives=1",
+            "  sous charge (normal)     median   500 us  p95    900 us  p99   1200 us  pire   1500 us"
+            "  [propres 300/300, regle=preuve-hote]\n"
+            + P + "  PREUVE et n'aggrave pas le pire cas au-dela du bruit au repos : tout[pire avec 3900"
+            " <= sans 1500 + bruit au repos 2000] = faux ; propre[pire avec 3900 <= sans 1500 + bruit au"
+            " repos 2000] = faux ; contamines ecartes repos=0 normal=0 interactif=0 sur 300 (preuve-hote)"
+            " -> QUALIFIE_ECHEC\n" + P + "VERDICT_SONDE : QUALIFIE_ECHEC tentatives=1", 1)
+        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((v, c), ("DEFAUT", 1))
+        self.assertTrue(any(x.startswith("  preuve tour 1 on : et n'aggrave pas le pire cas") and
+                            x.endswith("-> QUALIFIE_ECHEC") for x in sortie), sortie)
+        self.assertIn("  charge tour 1 on : normal p50 500 p95 900 p99 1200 pire 1500 ; "
+                      "interactif p50 600 p95 1000 p99 1500 pire 3000", sortie)
+
+    def test_rien_pour_un_bras_qualifie_ok(self):
+        sortie, _, _ = a.analyse(journal(), 4, "4", "kvm")
+        self.assertFalse(any(x.startswith(("  preuve tour", "  charge tour")) for x in sortie))
+
+
 if __name__ == "__main__":
     unittest.main()
