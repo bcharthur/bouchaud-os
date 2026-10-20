@@ -404,7 +404,10 @@ pub fn schedule() -> bool {
                 // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
                 cpu::prepare_scheduler_idle();
                 termine_transition_ordonnanceur();
-                cpu::commit_scheduler_idle();
+                // BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1 : la tache reste
+                // installee pendant le `hlt` ; un reveilleur d'un autre coeur
+                // ne l'a pas mise en file. Relire son etat apres `IDLE`.
+                cpu::commit_scheduler_idle_sauf(|| tasks()[cur].state == TaskState::Ready);
                 if rearmer {
                     rearme_compta_apres_idle();
                 }

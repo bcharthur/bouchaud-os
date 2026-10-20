@@ -27,6 +27,10 @@ CE QUI EST VERIFIE
      vide pas le tampon d'ecriture.
   3. `commit_scheduler_idle` relit la file AVANT son `hlt`. Sans cette
      relecture, l'ordre memoire ne sert a rien : il n'y a rien a lire.
+  4. BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1 : la tache bloquee de `schedule()`
+     reste installee pendant le `hlt`. Le reveilleur envoie l'IPI a son coeur
+     s'il dort (`reveille_coeur_installe`), et le dormeur relit l'etat de sa
+     tache apres `IDLE` (`commit_scheduler_idle_sauf`).
 
 Les trois sont necessaires ensemble. En retirer une seule rouvre la fenetre,
 et le symptome est un noyau qui se fige sans rien imprimer -- c'est la
@@ -43,6 +47,7 @@ RACINE = Path(__file__).resolve().parent.parent
 ETAT = RACINE / "src" / "arch" / "x86_64" / "cpu" / "idle" / "etat.rs"
 ORDONNANCEUR = RACINE / "src" / "arch" / "x86_64" / "cpu" / "idle" / "scheduler.rs"
 CREATION = RACINE / "src" / "kernel" / "process" / "thread" / "creation.rs"
+ORDONNANCEMENT = RACINE / "src" / "kernel" / "process" / "thread" / "ordonnancement.rs"
 
 
 def sans_commentaires(texte: str) -> str:
@@ -100,13 +105,45 @@ def main() -> int:
             "    un `mov` et ne vide pas le tampon d'ecriture."
         )
 
-    sommeil = corps(ORDONNANCEUR, "pub fn commit_scheduler_idle(")
+    entree = corps(ORDONNANCEUR, "pub fn commit_scheduler_idle(")
+    if "hlt" in entree or "commit_scheduler_idle_sauf(" not in entree:
+        fautes.append(
+            "commit_scheduler_idle ne delegue plus a commit_scheduler_idle_sauf :\n"
+            "    deux chemins vers `hlt`, un seul serait verifie."
+        )
+    sommeil = corps(ORDONNANCEUR, "pub fn commit_scheduler_idle_sauf(")
     avant_hlt = sommeil.split("hlt")[0]
     if "file_non_vide_essai" not in avant_hlt:
         fautes.append(
             "commit_scheduler_idle atteint `hlt` sans relire la file.\n"
             "    L'ordre memoire ne sert alors a rien : il n'y a rien a lire, et\n"
             "    le coeur s'endort avec une tache en file."
+        )
+    if "reveillee()" not in avant_hlt:
+        fautes.append(
+            "commit_scheduler_idle_sauf atteint `hlt` sans relire l'etat de la\n"
+            "    tache installee (BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1)."
+        )
+
+    # BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1 : la tache bloquee reste installee
+    # pendant le `hlt` de `schedule()`. Le reveilleur ne la met pas en file ;
+    # il doit reveiller son coeur (IPI s'il dort), et le dormeur doit relire
+    # l'etat de sa tache apres avoir publie IDLE.
+    installee = corps(CREATION, "fn reveille_coeur_installe(")
+    if "is_idle(" not in installee or "reschedule_cpu(" not in installee:
+        fautes.append(
+            "reveille_coeur_installe n'envoie plus d'IPI au coeur endormi sous\n"
+            "    sa tache : un reveil venu d'un autre coeur attend son quantum."
+        )
+    if "reveille_coeur_installe(" not in reveil.split("enqueue_bande")[0]:
+        fautes.append(
+            "publish_ready refuse une tache installee sans reveiller son coeur."
+        )
+    planif = corps(ORDONNANCEMENT, "pub fn schedule(")
+    if not re.search(r"commit_scheduler_idle_sauf\(\s*\|\|\s*tasks\(\)\[cur\]\.state\s*==\s*TaskState::Ready\s*\)", planif):
+        fautes.append(
+            "schedule() s'endort dans le contexte de sa tache sans relire son\n"
+            "    etat apres IDLE : un reveilleur qui a lu IDLE faux est perdu."
         )
 
     if fautes:
@@ -120,7 +157,7 @@ def main() -> int:
         return 1
 
     print("ok  poignee de main complete : publication SeqCst, barriere du "
-          "reveilleur, relecture avant hlt")
+          "reveilleur, relecture avant hlt, coeur d'une tache installee reveille")
     return 0
 
 

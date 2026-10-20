@@ -286,6 +286,60 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
     }
 }
 
+// BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1
+//
+// Une tache qui se bloque et dont le coeur n'a rien d'autre a elire RESTE
+// INSTALLEE : `schedule()` fait `hlt` dans son contexte (`on_cpu` = ce coeur).
+// `publish_ready` la refusait alors sans rien faire -- a juste titre pour la
+// mise en file (elle n'est pas a placer, elle reprendra sur place), a tort pour
+// le coeur : personne ne le reveillait. Un reveil venu d'un AUTRE coeur
+// (balayage des echeances, futex, IPC) attendait la prochaine interruption de
+// ce coeur-la -- le quantum, jusqu'a 4 ms sur un AP. Run 39308093631, A/B KVM
+// SMP4 : pire reveil au repos `tardif_us=44 reprise_us=952` (rendue prete en
+// 44 us par un autre coeur, reprise pres d'une milliseconde plus tard).
+//
+// Motif croise, comme `idle_enter` / `commit_scheduler_idle` : le reveilleur
+// ecrit l'etat (`Blocked -> Ready`, SeqCst), barriere, puis lit `IDLE` du
+// coeur ; le dormeur publie `IDLE` (SeqCst), puis relit l'etat de SA tache
+// avant `hlt` (`schedule`, `commit_scheduler_idle_sauf`). Au moins l'un voit
+// l'autre : ou bien l'IPI part, ou bien le coeur ne s'endort pas.
+//
+// Une tache en cours de passation (`switching_out`) n'est pas concernee : son
+// coeur est eveille et `complete_switch_handoff` la republiera.
+static REVEILS_INSTALLES_IPI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static REVEILS_INSTALLES_EVEILLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn reveille_coeur_installe(index: usize) {
+    if tasks()[index].switching_out.charge() {
+        return;
+    }
+    let coeur = tasks()[index].on_cpu.charge();
+    if coeur < 0 {
+        return;
+    }
+    let coeur = coeur as usize;
+    if coeur == local_cpu() {
+        // Reveil depuis une interruption de CE coeur : le retour de
+        // l'interruption reprend apres le `hlt`, la tache relit son etat.
+        return;
+    }
+    if cpu::is_idle(coeur) {
+        REVEILS_INSTALLES_IPI.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::scheduler::preempt::note_ipi_reveil();
+        smp::reschedule_cpu(coeur);
+    } else {
+        REVEILS_INSTALLES_EVEILLES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `(IPI envoyes a un coeur endormi sous sa tache, coeur deja eveille)`.
+pub fn compteurs_reveils_installes() -> (u64, u64) {
+    (
+        REVEILS_INSTALLES_IPI.load(Ordering::Relaxed),
+        REVEILS_INSTALLES_EVEILLES.load(Ordering::Relaxed),
+    )
+}
+
 /// Publie une tache prete, exactement une fois, dans une runqueue physique.
 ///
 /// # BOUCHAUD_P0_REVEIL_CIBLE_V1 -- ce que cette fonction faisait, et ce que
@@ -320,9 +374,13 @@ fn publish_ready(index: usize) {
     // une lecture -- au moins l'un voit l'autre, et la tache est publiee
     // (au pire deux fois : la file deduplique). `tools/smp/test_passation_reveil.rs`.
     core::sync::atomic::fence(Ordering::SeqCst);
-    if index >= tasks().len() || tasks()[index].state != TaskState::Ready
-        || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
-    { return; }
+    if index >= tasks().len() || tasks()[index].state != TaskState::Ready {
+        return;
+    }
+    if tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge() {
+        reveille_coeur_installe(index);
+        return;
+    }
 
     let maintenant = crate::kernel::timer::monotonic_ns();
     if tasks()[index].ready_since_ns == 0 {
