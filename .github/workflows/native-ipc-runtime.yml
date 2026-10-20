@@ -37,7 +37,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dedoublonne:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V1 : le run PR d'une branche de ce depot
+    # refait-il le run push du MEME arbre (tete = fusion, run push vivant) ?
+    # Voir tools/ci/dedoublonne_pr.py. Les jobs racines en dependent et
+    # tournent si la decision manque (`!cancelled()`). Pas sur les workflows
+    # dont un gate est un check requis de `main` (configure_protection.ps1) :
+    # un job saute y compterait comme reussi.
+    name: dedoublonne push/PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      doublon: ${{ steps.decision.outputs.doublon }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENEMENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          DEPOT: ${{ github.repository }}
+          DEPOT_TETE: ${{ github.event.pull_request.head.repo.full_name }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          FUSION: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/dedoublonne_pr.py
+          else
+            echo "DEDOUBLONNE doublon=false raison=evenement $EVENEMENT"
+            echo doublon=false >> "$GITHUB_OUTPUT"
+          fi
+
   native-ipc-runtime:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.doublon != 'true' }}
     name: native-ipc-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 15

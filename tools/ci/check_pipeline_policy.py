@@ -84,6 +84,55 @@ soak = need(
     ),
 )
 
+# BOUCHAUD_CI_UN_BUILD_PAR_SHA_V1 : le run PR saute ce que le run push du
+# MEME arbre teste deja (tools/ci/dedoublonne_pr.py). Deux regles :
+#  * jamais sur un workflow dont un gate est un check requis de `main` -- un
+#    job saute y compterait comme reussi ;
+#  * ailleurs, AUCUN job racine hors du dedoublonnage : un job sans `needs`
+#    tournerait deux fois, et un gate `always()` qui ne lit pas la decision
+#    rendrait vert un run dont tout a ete saute.
+def jobs_de(texte: str) -> dict[str, list[str]]:
+    blocs: dict[str, list[str]] = {}
+    courant = None
+    dans_jobs = False
+    for ligne in texte.split("\n"):
+        if ligne == "jobs:":
+            dans_jobs = True
+            continue
+        if not dans_jobs:
+            continue
+        if ligne and not ligne.startswith(" ") and not ligne.startswith("#"):
+            break
+        if ligne.startswith("  ") and not ligne.startswith("   ") and ligne.rstrip().endswith(":") and not ligne.strip().startswith("#"):
+            courant = ligne.strip()[:-1]
+            blocs[courant] = []
+        elif courant:
+            blocs[courant].append(ligne)
+    return blocs
+
+for name in ("ci.yml", "integration.yml", "reliability-v3.yml"):
+    if "dedoublonne" in (root / name).read_text(encoding="utf-8"):
+        errors.append(f"{name}: porte un gate requis -- pas de dedoublonnage push/PR")
+for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
+    texte = (root / name).read_text(encoding="utf-8")
+    blocs = jobs_de(texte)
+    if "dedoublonne" not in blocs or "python3 tools/ci/dedoublonne_pr.py" not in "\n".join(blocs["dedoublonne"]):
+        errors.append(f"{name}: job dedoublonne absent")
+        continue
+    for job, bloc in blocs.items():
+        if job == "dedoublonne":
+            continue
+        corps = "\n".join(bloc)
+        besoins = [l for l in bloc if l.startswith("    needs:")]
+        conditions = [l for l in bloc if l.startswith("    if:")]
+        if not besoins:
+            errors.append(f"{name}: job racine {job} hors dedoublonnage")
+        elif "dedoublonne" in besoins[0]:
+            if not conditions or "needs.dedoublonne.outputs.doublon != 'true'" not in conditions[0]:
+                errors.append(f"{name}: {job} depend de dedoublonne sans lire sa decision")
+        if any("always()" in c or "!cancelled()" in c for c in conditions) and "dedoublonne" not in (besoins[0] if besoins else ""):
+            errors.append(f"{name}: {job} tourne malgre un saut sans lire la decision")
+
 if "continue-on-error: true" in reliability:
     errors.append("reliability-v3.yml: aucun test de fiabilite ne doit etre informatif")
 if "continue-on-error: true" in release:

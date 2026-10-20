@@ -109,10 +109,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dedoublonne:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V1 : le run PR d'une branche de ce depot
+    # refait-il le run push du MEME arbre (tete = fusion, run push vivant) ?
+    # Voir tools/ci/dedoublonne_pr.py. Les jobs racines en dependent et
+    # tournent si la decision manque (`!cancelled()`). Pas sur les workflows
+    # dont un gate est un check requis de `main` (configure_protection.ps1) :
+    # un job saute y compterait comme reussi.
+    name: dedoublonne push/PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      doublon: ${{ steps.decision.outputs.doublon }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENEMENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          DEPOT: ${{ github.repository }}
+          DEPOT_TETE: ${{ github.event.pull_request.head.repo.full_name }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          FUSION: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/dedoublonne_pr.py
+          else
+            echo "DEDOUBLONNE doublon=false raison=evenement $EVENEMENT"
+            echo doublon=false >> "$GITHUB_OUTPUT"
+          fi
+
   primitives:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.doublon != 'true' }}
     uses: ./.github/workflows/os-primitives.yml
 
   build:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.doublon != 'true' }}
     name: ladybird / build once
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -704,8 +747,8 @@ jobs:
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     name: ladybird / verdict de convergence
-    needs: [build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
-    if: always()
+    needs: [dedoublonne, build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
+    if: ${{ always() && needs.dedoublonne.outputs.doublon != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
