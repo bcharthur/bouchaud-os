@@ -426,9 +426,19 @@ fn recalcule_echeance() {
     // et non comparer les deux tels quels, ce qui est precisement l'erreur que
     // `fire_alarms` portait.
     let par_tick = 1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND;
+    // BOUCHAUD_REVEIL_DU_V1 : une alarme n'echoit qu'au TIC (`fire_alarms`
+    // compare des tics). Quand les tics retardent sur l'horloge monotone
+    // (ecarts de tic sous KVM), son equivalent en nanosecondes est deja passe
+    // sans qu'elle soit servable : une borne due sans rien a servir, qu'un
+    // coeur au repos armerait a chaque marge jusqu'au tic suivant. Elle ne
+    // peut pas echoir avant le prochain tic : sa borne ne descend pas sous
+    // `maintenant + un tic` -- dans ce cas seulement : une alarme encore a
+    // venir garde sa borne exacte.
+    let maintenant = crate::kernel::timer::monotonic_ns();
     let alarmes = ALARMES.lock();
     for (_, echeance_ticks) in alarmes.iter() {
         let echeance = echeance_ticks.saturating_mul(par_tick);
+        let echeance = if echeance <= maintenant { maintenant.saturating_add(par_tick) } else { echeance };
         if echeance < minimum {
             minimum = echeance;
         }
