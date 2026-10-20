@@ -702,7 +702,11 @@ pub fn arm_local_scheduler_timer() {
                 }
             }
         }
-        MODE_TSC_DEADLINE => {
+        // Interruptions coupees : le MSR et l'etat qui le decrit (`ARME_TSC`,
+        // `QUANTUM_TSC`, `ARME_OCCUPE`) changent ensemble -- l'appel au retour
+        // de `hlt` se fait interruptions ouvertes, et le gestionnaire du meme
+        // coeur rearme aussi.
+        MODE_TSC_DEADLINE => ::x86_64::instructions::interrupts::without_interrupts(|| {
             if let Some(hz) = crate::kernel::timer::tsc_hz() {
                 let delta = (hz as u128)
                     .saturating_mul(SCHED_QUANTUM_TICKS as u128)
@@ -733,7 +737,7 @@ pub fn arm_local_scheduler_timer() {
                     ARMES_OCCUPES.fetch_add(1, Ordering::Relaxed);
                 }
             }
-        }
+        }),
         _ => {}
     }
 }
