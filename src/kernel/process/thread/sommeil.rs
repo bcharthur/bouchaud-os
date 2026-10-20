@@ -283,6 +283,22 @@ pub fn prochaine_echeance_ns() -> u64 {
     PROCHAINE_ECHEANCE.borne()
 }
 
+/// L'echeance de la tache BLOQUEE installee sur ce coeur (0 : aucune).
+/// BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1 : lue juste avant `hlt`, interruptions
+/// coupees -- la tache, installee, ne peut ni changer de coeur ni etre
+/// recyclee. Une echeance perimee sur une tache prete est ignoree.
+pub fn echeance_tache_installee() -> u64 {
+    let index = current_index_raw();
+    if index == NO_TASK || index >= tasks().len() {
+        return 0;
+    }
+    let tache = &tasks()[index];
+    if tache.state != TaskState::Blocked {
+        return 0;
+    }
+    tache.wake_deadline_ns.charge()
+}
+
 /// Declare une echeance. A appeler POUR CHAQUE `wake_deadline_ns` non nul.
 ///
 /// `tools/verifie-echeances.py` refuse une ecriture qui ne passerait pas par

@@ -54,6 +54,22 @@ pub fn tsc_de(ns: u64, boot_tsc: u64, hz: u64) -> Option<u64> {
     u64::try_from(tsc).ok()
 }
 
+/// La borne a armer sur CE coeur (BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1) : la
+/// plus proche de la borne globale des sommeils et de l'echeance de la tache
+/// bloquee installee sur ce coeur (`propre`, 0 : aucune).
+///
+/// La borne globale vaut `JAMAIS` pendant le balayage d'un AUTRE coeur. Un
+/// coeur qui s'endort a ce moment n'armait rien -- meme pour la tache qui
+/// dort chez lui : son reveil passait alors par le balayage d'un autre coeur
+/// puis par un IPI, soit le reveil d'un processeur virtuel arrete (run
+/// 39387288347, KVM SMP4 : `refus_sans_borne` ~10 % des armements, reprises
+/// au repos de 113 a 382 us). L'echeance propre ne depend d'aucun balayage.
+pub fn borne_du_coeur(globale: u64, propre: u64) -> u64 {
+    let globale = if globale == 0 { JAMAIS } else { globale };
+    let propre = if propre == 0 { JAMAIS } else { propre };
+    globale.min(propre)
+}
+
 /// Pourquoi une echeance n'est PAS armee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refus {

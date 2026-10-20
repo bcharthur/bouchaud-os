@@ -82,9 +82,9 @@ def verifie(t: dict, sources_src: str) -> list:
     fautes = []
     if t["smp"].count(INTERRUPTEUR) != 1 or PREUVE not in t["smp"]:
         fautes.append("smp.rs : le reveil precis n'est plus actif par defaut, ou la preuve KVM (run 38732049308) n'est plus citee.")
-    if t["smp"].count(MATERIEL_OFF) != 1 or MATERIEL_EXIGE not in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt("):
+    if t["smp"].count(MATERIEL_OFF) != 1 or MATERIEL_EXIGE not in corps(t["smp"], "fn arme_reveil_precis_sous_drapeau("):
         fautes.append("smp.rs : le TSC-deadline sur materiel nu n'est plus une experience a part, desactivee.")
-    if "__cpuid" in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt(") \
+    if "__cpuid" in corps(t["smp"], "fn arme_reveil_precis_sous_drapeau(") \
             or "SOUS_HYPERVISEUR.store(" not in corps(t["smp"], "fn init_local_scheduler_timer("):
         fautes.append("smp.rs : l'hyperviseur n'est plus lu une fois a l'armement du minuteur (CPUID dans la boucle d'inactivite ?).")
     mat = [l for l in sources_src.splitlines() if "veut_reveil_precis_materiel(" in l and "pub fn " not in l]
@@ -92,13 +92,13 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("le materiel nu est bascule ailleurs que par `reveil-precis materiel`.")
     # Le mode periodique (TCG) a echoue a son A/B local : experience a part,
     # OFF, exigee avant tout armement periodique, basculee par le shell seul.
-    if t["smp"].count(PERIODIQUE_OFF) != 1 or PERIODIQUE_EXIGE not in corps(t["smp"], "pub fn arme_reveil_precis_avant_hlt("):
+    if t["smp"].count(PERIODIQUE_OFF) != 1 or PERIODIQUE_EXIGE not in corps(t["smp"], "fn arme_reveil_precis_sous_drapeau("):
         fautes.append("smp.rs : le mode periodique du reveil precis n'est plus une experience a part, desactivee.")
     per = [l for l in sources_src.splitlines() if "veut_reveil_precis_periodique(" in l and "pub fn " not in l]
     if len(per) != 1 or "argv[2] == \"on\"" not in per[0]:
         fautes.append("le mode periodique est bascule ailleurs que par `reveil-precis periodique`.")
     ecritures = t["smp"].count("REVEIL_PRECIS.swap(") + t["smp"].count("REVEIL_PRECIS.store(")
-    if ecritures != 1 or "REVEIL_PRECIS.swap(oui, Ordering::Relaxed)" not in corps(t["smp"], "pub fn veut_reveil_precis("):
+    if ecritures != 1 or "REVEIL_PRECIS.swap(oui, Ordering::SeqCst)" not in corps(t["smp"], "pub fn veut_reveil_precis("):
         fautes.append("smp.rs : la politique est ecrite ailleurs que par veut_reveil_precis.")
     appels = [l for l in sources_src.splitlines() if "veut_reveil_precis(" in l and "pub fn veut_reveil_precis" not in l]
     if len(appels) != 2 or any("crate::arch::x86_64::smp::veut_reveil_precis(" not in l for l in appels) \

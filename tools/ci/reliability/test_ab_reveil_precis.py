@@ -141,7 +141,7 @@ class DiagnosticNoyau(unittest.TestCase):
         for l in base.splitlines():
             if "REVEIL_PRECIS voulu=" in l:
                 n += 1
-                l += (f" periodique=0 materiel=0 hyperviseur=1 tirs={n * 10} tirs_avant_cible={n} avance_max_ns=1500 "
+                l += (f" periodique=0 materiel=0 hyperviseur=1 tirs={n * 10} bornes_propres={n * 7} "
                       f"ipi_pendant_arme=0 armes_dus={n * 2} refus_quantum_avant={n * 3} refus_sans_borne=0 "
                       f"refus_autres=0 tardifs_soi={n} tardifs_autre={n * 4} tardifs_irq=0 tardifs_inactif=0 "
                       f"installes_ipi={n * 5} installes_eveilles=0 serie_longues={n} serie_pire_us=4321")
@@ -152,7 +152,7 @@ class DiagnosticNoyau(unittest.TestCase):
         self.assertEqual(len(lignes), 1)
         self.assertIn("tirs=+10", lignes[0])
         self.assertIn("tardifs_autre=+4", lignes[0])
-        self.assertIn("avance_max_ns=1500", lignes[0])
+        self.assertIn("bornes_propres=+7", lignes[0])
         self.assertIn("installes_ipi=+5", lignes[0])
         self.assertIn("serie_longues=+1", lignes[0])
         self.assertIn("serie_pire_us=4321", lignes[0])
@@ -190,3 +190,13 @@ class LignesEntrelacees(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RaisonDesBrasNonQualifies(unittest.TestCase):
+    def test_raison_recopiee_verdict_inchange(self):
+        texte = journal(off={"verdict": "NON_QUALIFIANT"}).replace(
+            "VERDICT_SONDE : NON_QUALIFIANT tentatives=1",
+            "VERDICT_SONDE : NON_QUALIFIANT tentatives=1 raison=charge sans effet mesurable : p95 sous charge 212")
+        sortie, v, c = a.analyse(texte, 4, "1", "kvm")
+        self.assertEqual((v, c), ("NON_CONCLUANT", 0))
+        self.assertTrue(any(x.startswith("  raison tour 1 off : NON_QUALIFIANT charge sans effet") for x in sortie))

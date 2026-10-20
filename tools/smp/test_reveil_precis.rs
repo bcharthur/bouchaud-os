@@ -187,3 +187,18 @@ fn decide_est_le_motif_sans_le_motif() {
                    "borne {borne}");
     }
 }
+
+#[test]
+fn l_echeance_propre_sert_quand_la_borne_globale_est_en_balayage() {
+    // BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1 : pendant le balayage d'un autre
+    // coeur, la borne globale vaut JAMAIS ; la tache installee ici garde la
+    // sienne.
+    use reveil_precis::borne_du_coeur;
+    assert_eq!(borne_du_coeur(JAMAIS, 5_000_000), 5_000_000);
+    assert_eq!(borne_du_coeur(0, 5_000_000), 5_000_000);
+    assert_eq!(borne_du_coeur(3_000_000, 5_000_000), 3_000_000, "la plus proche des deux");
+    assert_eq!(borne_du_coeur(7_000_000, 5_000_000), 5_000_000);
+    assert_eq!(borne_du_coeur(7_000_000, 0), 7_000_000, "aucune tache installee");
+    assert_eq!(borne_du_coeur(JAMAIS, 0), JAMAIS);
+    assert_eq!(borne_du_coeur(0, 0), JAMAIS);
+}

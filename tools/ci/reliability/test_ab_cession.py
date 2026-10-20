@@ -118,3 +118,25 @@ class LignesEntrelacees(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetailDesBrasNonQualifies(unittest.TestCase):
+    """Diagnostic seulement : la comparaison qui a echoue est recopiee pour un
+    bras non QUALIFIE_OK ; le verdict n'en depend pas."""
+
+    def test_preuve_en_echec_recopiee_verdict_inchange(self):
+        def m(t, v):
+            return ("QUALIFIE_ECHEC", 2500, 4000) if (t, v) == (6, "classe") else mieux(t, v)
+        base = journal(6, m)
+        preuve = (P + "  PREUVE et n'aggrave pas le pire cas au-dela du bruit au repos : tout[pire avec 754 <= sans 300 "
+                  "+ bruit au repos 200] = faux ; propre[...] = faux ; contamines x -> QUALIFIE_ECHEC")
+        ok = P + "  PREUVE le calcul n'est pas affame : tout[...] = vrai ; propre[...] = vrai ; contamines x -> QUALIFIE_OK"
+        lignes = base.splitlines()
+        i = max(k for k, l in enumerate(lignes) if "AB_CESSION tour=6 politique=classe" in l)
+        lignes[i + 1:i + 1] = [preuve, ok]
+        sortie, v, c = a.analyse("\n".join(lignes) + "\n", 6, "4", "kvm")
+        _, v0, c0 = a.analyse(base, 6, "4", "kvm")
+        self.assertEqual((v, c), (v0, c0))
+        details = [x for x in sortie if x.startswith("  detail tour 6 classe")]
+        self.assertEqual(len(details), 1)
+        self.assertIn("pire avec 754", details[0])

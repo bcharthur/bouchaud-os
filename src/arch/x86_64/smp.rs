@@ -794,6 +794,9 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
 static ARME_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
 /// Le minuteur porte une echeance de SOMMEIL (et non le quantum).
 static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// Ce coeur est entre la lecture de la politique et la fin de son armement
+/// (BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1).
+static EN_ARMEMENT: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 /// La politique (`reveil-precis on|off`). ACTIVE par defaut depuis l'A/B KVM
 /// CONVAINCANT de b6c99032 (run 38732049308, job ordonnanceur-ab, SMP1, 4/4
 /// tours : retard au repos p50 461 -> 39 us, p95 943,5 -> 852, p99 1 007,5 ->
@@ -817,21 +820,18 @@ static SOUS_HYPERVISEUR: AtomicBool = AtomicBool::new(false);
 static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
 
-// DIAGNOSTIC de la queue au repos (run 38732049308 : p50 39 us mais p95
-// 852 us sous `on`). Deux hypotheses a departager PAR MESURE :
-//   * le minuteur tire AVANT la cible : la boucle d'attente se rendort, et
-//     l'echeance, desormais a moins de `MARGE_NS`, n'est plus armee -- le
-//     reveil attend le tic suivant ;
-//   * le coeur n'est pas au repos a l'echeance (un autre fil tourne) : aucun
-//     armement precis, le reveil attend le prochain balayage.
-// Aucun effet sur la politique : des compteurs, publies par `reveil-precis`.
-/// Interruptions du vecteur local recues alors qu'une echeance PRECISE etait
-/// armee, et parmi elles : minuteur effectivement tire (MSR remis a zero) mais
-/// TSC encore AVANT la cible ; IPI arrives pendant l'armement (MSR encore arme).
+// DIAGNOSTIC de la queue au repos (compteurs publies par `reveil-precis`,
+// differences par bras dans l'A/B ; aucun effet sur la politique). Run
+// 39387288347 (KVM) : 0 a 6 tirs avant la cible sur 300 000, la queue venait
+// des echeances dues non armees (BOUCHAUD_REVEIL_DU_V1) et des reveils
+// inter-coeurs sans IPI (BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1).
+/// Entrees du vecteur local pendant un armement precis : a la cible ou apres
+/// (le minuteur a tire), et avant elle (IPI, ou tir premature, non separes).
 static TIRS_PRECIS: AtomicU64 = AtomicU64::new(0);
-static TIRS_AVANT_CIBLE: AtomicU64 = AtomicU64::new(0);
-static AVANCE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 static IPI_PENDANT_ARME: AtomicU64 = AtomicU64::new(0);
+/// Armements faits sur l'echeance de la tache installee alors que la borne
+/// globale etait indisponible (balayage d'un autre coeur).
+static BORNES_PROPRES: AtomicU64 = AtomicU64::new(0);
 /// Echeances DUES au moment d'armer, armees a `maintenant + MARGE_NS`
 /// (BOUCHAUD_REVEIL_DU_V1 ; avant : refusees, servies au tic suivant).
 static ARMES_DUS: AtomicU64 = AtomicU64::new(0);
@@ -841,8 +841,13 @@ static REFUS_SANS_BORNE: AtomicU64 = AtomicU64::new(0);
 static REFUS_AUTRES: AtomicU64 = AtomicU64::new(0);
 
 /// A l'entree du gestionnaire du vecteur local, AVANT tout rearmement :
-/// classe l'interruption si une echeance precise etait armee. Une lecture de
-/// MSR seulement dans ce cas (une par reveil precis).
+/// classe l'interruption si une echeance precise etait armee, par le seul TSC
+/// d'entree. (La premiere version relisait `IA32_TSC_DEADLINE` pour separer
+/// un tir d'un IPI : une sortie de VM de plus sur CHAQUE reveil precis, sur
+/// le chemin meme qu'elle mesurait -- run 39387288347, repos p50 54-55 us
+/// contre 39 us avant l'instrument. Les tirs avant la cible y etaient de 0 a
+/// 6 sur 300 000 : une entree avant la cible est desormais comptee comme un
+/// IPI, sans relecture.)
 pub fn note_entree_vecteur_local(entree_tsc: u64) {
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
         return;
@@ -851,30 +856,20 @@ pub fn note_entree_vecteur_local(entree_tsc: u64) {
     if cpu >= MAX_CPUS || !ARME_PRECIS[cpu].load(Ordering::Relaxed) {
         return;
     }
-    // Le mode TSC-deadline desarme le minuteur et remet le MSR a zero quand
-    // il tire : non nul, l'echeance attend encore -- cette interruption est
-    // un IPI de replanification.
-    if usermode::read_msr(IA32_TSC_DEADLINE) != 0 {
+    if entree_tsc >= ARME_TSC[cpu].load(Ordering::Relaxed) {
+        TIRS_PRECIS.fetch_add(1, Ordering::Relaxed);
+    } else {
         IPI_PENDANT_ARME.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    TIRS_PRECIS.fetch_add(1, Ordering::Relaxed);
-    let cible = ARME_TSC[cpu].load(Ordering::Relaxed);
-    if entree_tsc < cible {
-        TIRS_AVANT_CIBLE.fetch_add(1, Ordering::Relaxed);
-        let par_ms = crate::kernel::timer::cycles_par_ms().max(1);
-        let avance_ns = ((cible - entree_tsc) as u128 * 1_000_000 / par_ms as u128).min(u64::MAX as u128) as u64;
-        AVANCE_MAX_NS.fetch_max(avance_ns, Ordering::Relaxed);
     }
 }
 
-/// `(tirs, avant cible, avance max ns, IPI pendant l'armement, armes dus,
+/// `(tirs, bornes propres, 0, entrees avant la cible (IPI), armes dus,
 /// refus quantum avant, refus sans borne, refus autres)`.
 pub fn diagnostic_reveil_precis() -> [u64; 8] {
     [
         TIRS_PRECIS.load(Ordering::Relaxed),
-        TIRS_AVANT_CIBLE.load(Ordering::Relaxed),
-        AVANCE_MAX_NS.load(Ordering::Relaxed),
+        BORNES_PROPRES.load(Ordering::Relaxed),
+        0,
         IPI_PENDANT_ARME.load(Ordering::Relaxed),
         ARMES_DUS.load(Ordering::Relaxed),
         REFUS_QUANTUM_AVANT.load(Ordering::Relaxed),
@@ -886,14 +881,34 @@ pub fn diagnostic_reveil_precis() -> [u64; 8] {
 /// Juste avant `hlt`, interruptions coupees : arme le minuteur local sur la
 /// plus proche echeance de sommeil si elle precede le quantum.
 pub fn arme_reveil_precis_avant_hlt() {
-    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) || !REVEIL_PRECIS.load(Ordering::Relaxed) {
+    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) {
         return;
     }
     let cpu = cpu_index();
     if cpu >= MAX_CPUS {
         return;
     }
-    let borne = crate::kernel::task::prochaine_echeance_ns();
+    // BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1 : le drapeau est pose AVANT de lire
+    // la politique ; `veut_reveil_precis` change la politique PUIS attend les
+    // drapeaux. Motif croise : un armement decide sous l'ancienne politique
+    // est termine quand la bascule rend la main.
+    EN_ARMEMENT[cpu].store(true, Ordering::SeqCst);
+    arme_reveil_precis_sous_drapeau(cpu);
+    EN_ARMEMENT[cpu].store(false, Ordering::Release);
+}
+
+fn arme_reveil_precis_sous_drapeau(cpu: usize) {
+    if !REVEIL_PRECIS.load(Ordering::SeqCst) {
+        return;
+    }
+    // BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1 : aussi l'echeance de la tache
+    // installee ici, qui ne depend pas du balayage d'un autre coeur.
+    let globale = crate::kernel::task::prochaine_echeance_ns();
+    let propre = crate::kernel::task::echeance_tache_installee();
+    let borne = crate::kernel::reveil_precis::borne_du_coeur(globale, propre);
+    if propre != 0 && (globale == crate::kernel::reveil_precis::JAMAIS || globale == 0) {
+        BORNES_PROPRES.fetch_add(1, Ordering::Relaxed);
+    }
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
         if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {
             return;
@@ -971,8 +986,22 @@ pub fn retire_reveil_precis_apres_hlt() {
 }
 
 /// La politique du reveil precis ; rend l'etat precedent.
+///
+/// BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1 : rend la main quand aucun coeur ne
+/// termine plus un armement decide sous l'ancienne politique. Sans cette
+/// attente, un coeur dont l'ecriture du MSR (une sortie de VM) chevauchait la
+/// bascule comptait un armement dans le bras `off` de l'A/B (run 39387289004,
+/// KVM SMP4 : « 1 armement precis sous off »). Borne : 50 ms (un processeur
+/// virtuel retire par l'hote ne fige pas le shell).
 pub fn veut_reveil_precis(oui: bool) -> bool {
-    REVEIL_PRECIS.swap(oui, Ordering::Relaxed)
+    let avant = REVEIL_PRECIS.swap(oui, Ordering::SeqCst);
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(50_000_000);
+    for drapeau in EN_ARMEMENT.iter() {
+        while drapeau.load(Ordering::SeqCst) && crate::kernel::timer::monotonic_ns() < echeance {
+            core::hint::spin_loop();
+        }
+    }
+    avant
 }
 
 /// Le mode periodique du reveil precis (`reveil-precis periodique on|off`).

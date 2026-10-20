@@ -42,14 +42,20 @@ BRAS = re.compile(r"^AB_PRECIS tour=(\d+) reveil=(on|off)$")
 FIN_BRAS = re.compile(r"^AB_PRECIS_BRAS_FIN tour=(\d+) reveil=(on|off)$")
 COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
 # Diagnostic de la queue au repos (cumuls du noyau ; differences par bras).
-DIAG = re.compile(r"tirs=(\d+) tirs_avant_cible=(\d+) avance_max_ns=(\d+) ipi_pendant_arme=(\d+) "
-                  r"armes_dus=(\d+) refus_quantum_avant=(\d+) refus_sans_borne=(\d+) refus_autres=(\d+) "
-                  r"tardifs_soi=(\d+) tardifs_autre=(\d+) tardifs_irq=(\d+) tardifs_inactif=(\d+)"
-                  r"(?: installes_ipi=(\d+) installes_eveilles=(\d+))?"
-                  r"(?: serie_longues=(\d+) serie_pire_us=(\d+))?")
-DIAG_NOMS = ("tirs", "avant_cible", "avance_max_ns", "ipi_pendant_arme", "armes_dus", "refus_quantum_avant",
+# Lu cle par cle sur la ligne REVEIL_PRECIS : un champ absent (noyau plus
+# ancien) vaut 0. `serie_pire_us` est un maximum cumule : sa valeur finale.
+DIAG_NOMS = ("tirs", "bornes_propres", "ipi_pendant_arme", "armes_dus", "refus_quantum_avant",
              "refus_sans_borne", "refus_autres", "tardifs_soi", "tardifs_autre", "tardifs_irq", "tardifs_inactif",
              "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us")
+MAXIMA = ("serie_pire_us",)
+
+
+def diag_noyau(ligne):
+    """Les compteurs de diagnostic d'une ligne REVEIL_PRECIS, ou None."""
+    if "tirs=" not in ligne:
+        return None
+    vals = dict(re.findall(r"\b(\w+)=(\d+)\b", ligne))
+    return tuple(int(vals.get(n, 0)) for n in DIAG_NOMS)
 
 
 def analyse(texte, tours, smp, nom):
@@ -84,15 +90,17 @@ def analyse(texte, tours, smp, nom):
         q = QUANT.search(l)
         if q:
             courant["q"][q.group(1)] = tuple(int(x) for x in q.groups()[1:])
-        m = re.match(r"^VERDICT_SONDE : (\S+)", l)
+        m = re.match(r"^VERDICT_SONDE : (\S+)(?: tentatives=\d+)?(?: raison=(.*))?", l)
         if m:
             courant["verdict"] = m.group(1)
+            if m.group(2):
+                courant["raison"] = m.group(2)[:300]
         m = COMPTEUR.search(l)
         if m:
             courant["compteurs"].append((int(m.group(1)), m.group(2), int(m.group(3))))
-            n = DIAG.search(l)
-            if n:
-                courant["noyau"].append(tuple(int(x or 0) for x in n.groups()))
+            n = diag_noyau(l)
+            if n is not None:
+                courant["noyau"].append(n)
         # Diagnostic seulement (aucun effet sur le verdict) : ce que le noyau
         # dit des reveils en retard au repos -- qui tenait le coeur, quelle
         # etape a coute. Run 38732049308 : sous `on`, p50 39 us mais p95 852 ;
@@ -155,11 +163,13 @@ def analyse(texte, tours, smp, nom):
     for b in bras:
         for d in b["diag"]:
             sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
+        if b["verdict"] != "QUALIFIE_OK" and b.get("raison"):
+            sortie.append(f"  raison tour {b['tour']} {b['v']} : {b['verdict']} {b['raison']}")
         # Les compteurs du noyau entre le releve d'avant et celui d'apres la
         # sonde (l'avance maximale est un maximum cumule : sa valeur finale).
         if len(b["noyau"]) >= 2:
             a, z = b["noyau"][0], b["noyau"][-1]
-            parts = [f"{n}={z[i]}" if n in ("avance_max_ns", "serie_pire_us") else f"{n}=+{z[i] - a[i]}"
+            parts = [f"{n}={z[i]}" if n in MAXIMA else f"{n}=+{z[i] - a[i]}"
                      for i, n in enumerate(DIAG_NOMS)]
             sortie.append(f"  noyau tour {b['tour']} {b['v']} : " + " ".join(parts))
 

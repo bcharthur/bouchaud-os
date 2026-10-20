@@ -50,7 +50,7 @@ def analyse(texte, tours, smp, nom):
         if m:
             t = int(m.group(1))
             courant = {"tour": t, "v": m.group(2), "position": sum(1 for b in bras if b["tour"] == t),
-                       "q": {}, "verdict": None, "compteurs": [], "tours": [], "preuve": set()}
+                       "q": {}, "verdict": None, "compteurs": [], "tours": [], "preuve": set(), "detail": []}
             bras.append(courant)
             continue
         if courant is None:
@@ -64,6 +64,12 @@ def analyse(texte, tours, smp, nom):
         m = re.match(r"^VERDICT_SONDE : (\S+)", l)
         if m:
             courant["verdict"] = m.group(1)
+        # Diagnostic seulement : les comparaisons de la sonde qui n'ont pas
+        # rendu QUALIFIE_OK, recopiees pour un bras non qualifie (le journal
+        # serie n'est pas toujours lisible hors du job).
+        d = re.search(r"PREUVE (.*-> (?:QUALIFIE_ECHEC|NON_QUALIFIANT).*)$", l)
+        if d:
+            courant["detail"].append(d.group(1)[:320])
         m = re.match(r"^\s+comptes .* : preuve_hote=(\S+) ", l)
         if m:
             courant["preuve"].add(m.group(1))
@@ -117,6 +123,10 @@ def analyse(texte, tours, smp, nom):
         sortie.append(f"  {b['tour']:<5}{b['position']:<4}{b['v']:<12}{str(b['verdict']):<16}{i[2]:>7}{i[3]:>8}"
                       f"{b.get('tours_interactif', 0):>11}{b.get('tours_normal', 0):>11}{b.get('gardees', 0):>9}"
                       f"{b.get('inversees', 0):>10}")
+    for b in bras:
+        if b["verdict"] != "QUALIFIE_OK":
+            for d in b["detail"]:
+                sortie.append(f"  detail tour {b['tour']} {b['v']} : {d}")
     par_tour = {}
     for b in bras:
         par_tour.setdefault(b["tour"], {})[b["v"]] = b

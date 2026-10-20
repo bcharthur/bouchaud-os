@@ -831,12 +831,12 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     let serie = crate::drivers::serial::emissions_masquees();
     crate::serial_println!(
         "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={} periodique={} materiel={} hyperviseur={} \
-         tirs={} tirs_avant_cible={} avance_max_ns={} ipi_pendant_arme={} armes_dus={} refus_quantum_avant={} \
+         tirs={} bornes_propres={} ipi_pendant_arme={} armes_dus={} refus_quantum_avant={} \
          refus_sans_borne={} refus_autres={} tardifs_soi={} tardifs_autre={} tardifs_irq={} tardifs_inactif={} \
          installes_ipi={} installes_eveilles={} serie_longues={} serie_pire_us={}",
         voulu as u8, mode, armes, retires, crate::arch::x86_64::smp::reveil_precis_periodique() as u8,
         materiel as u8, hyperviseur as u8,
-        d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], tardifs[0], tardifs[1], tardifs[2], tardifs[3],
+        d[0], d[1], d[3], d[4], d[5], d[6], d[7], tardifs[0], tardifs[1], tardifs[2], tardifs[3],
         installes.0, installes.1, serie.1, serie.0 / 1000
     );
     0
