@@ -47,8 +47,10 @@ COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
 DIAG_NOMS = ("tirs", "bornes_propres", "ipi_pendant_arme", "armes_dus", "refus_quantum_avant",
              "refus_sans_borne", "refus_autres", "tardifs_soi", "tardifs_autre", "tardifs_irq", "tardifs_inactif",
              "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us",
-             "armes_occupes", "tirs_anticipes", "avances_occupees")
-MAXIMA = ("serie_pire_us",)
+             "armes_occupes", "tirs_anticipes", "avances_occupees",
+             "attentes_noyau", "attentes_utilisateur", "attente_noyau_pire_us", "attente_utilisateur_pire_us",
+             "cessions_interactives")
+MAXIMA = ("serie_pire_us", "attente_noyau_pire_us", "attente_utilisateur_pire_us")
 
 
 def diag_noyau(ligne):

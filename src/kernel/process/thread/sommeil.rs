@@ -646,6 +646,13 @@ static POINTS_CESSIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Point cooperatif d'un fil noyau long. `depuis_ns` : l'instant du point
 /// precedent (ou du debut de l'activation), mis a jour ici.
+///
+/// BOUCHAUD_CESSION_INTERACTIVE_V1 : une INTERACTIVE en attente dans la file
+/// de ce coeur fait ceder sans le plancher de `SEGMENT_MIN_NS`. Sa demande de
+/// preemption, ordinaire, ne coupe pas un fil noyau : elle attendait la fin
+/// d'un segment d'au moins une milliseconde. Run 39424044836 (KVM SMP4) : pire
+/// reveil interactif sous charge 476 et 760 us, detection a l'heure
+/// (`tardif_us=1`), attente pret -> elu 466 et 679 us -- QUALIFIE_ECHEC.
 #[track_caller]
 pub fn point_cooperatif(depuis_ns: &mut u64) -> bool {
     let maintenant = crate::kernel::timer::monotonic_ns();
@@ -654,18 +661,69 @@ pub fn point_cooperatif(depuis_ns: &mut u64) -> bool {
         POINTS_PIRE_SEGMENT_NS.store(segment, Ordering::Relaxed);
         POINTS_PIRE_SITE.store(core::panic::Location::caller() as *const core::panic::Location<'static> as u64, Ordering::Relaxed);
     }
-    if segment < SEGMENT_MIN_NS || !crate::kernel::scheduler::preempt::cession_volontaire_sure() {
+    let interactive_attend = crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu())
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file().0 > 0)
+        .unwrap_or(false);
+    if (segment < SEGMENT_MIN_NS && !interactive_attend)
+        || !crate::kernel::scheduler::preempt::cession_volontaire_sure()
+    {
         return false;
     }
-    let attendu = ready_count_cpu(local_cpu()) > 0 || PROCHAINE_ECHEANCE.doit_balayer(maintenant);
+    let attendu = interactive_attend
+        || ready_count_cpu(local_cpu()) > 0
+        || PROCHAINE_ECHEANCE.doit_balayer(maintenant);
     if !attendu {
         *depuis_ns = maintenant;
         return false;
     }
     POINTS_CESSIONS.fetch_add(1, Ordering::Relaxed);
+    if segment < SEGMENT_MIN_NS {
+        CESSIONS_INTERACTIVES.fetch_add(1, Ordering::Relaxed);
+    }
     schedule();
     *depuis_ns = crate::kernel::timer::monotonic_ns();
     true
+}
+
+// BOUCHAUD_ATTENTE_INTERACTIVE_V1 : une interactive UTILISATEUR restee prete
+// plus de `ATTENTE_INTERACTIVE_LONGUE_NS` avant son election -- derriere un fil
+// noyau (que sa demande ordinaire ne coupe pas) ou derriere une tache
+// utilisateur ? Cumuls et pires, poses a l'election (atomiques, aucune
+// emission), publies par `reveil-precis` hors IRQ. Un compteur nul n'innocente
+// rien : il dit seulement qu'aucune attente n'a passe le seuil.
+const ATTENTE_INTERACTIVE_LONGUE_NS: u64 = 200_000;
+static ATTENTES_DERRIERE_NOYAU: AtomicU64 = AtomicU64::new(0);
+static ATTENTES_DERRIERE_UTILISATEUR: AtomicU64 = AtomicU64::new(0);
+static PIRE_DERRIERE_NOYAU_NS: AtomicU64 = AtomicU64::new(0);
+static PIRE_DERRIERE_UTILISATEUR_NS: AtomicU64 = AtomicU64::new(0);
+/// Cessions d'un point cooperatif AVANT le plancher, pour une interactive.
+static CESSIONS_INTERACTIVES: AtomicU64 = AtomicU64::new(0);
+
+/// A l'election d'une interactive utilisateur : `attente_ns` pret -> elu,
+/// `derriere_noyau` -- l'occupant precedent du coeur etait un fil noyau.
+fn note_attente_interactive(attente_ns: u64, derriere_noyau: bool) {
+    if attente_ns <= ATTENTE_INTERACTIVE_LONGUE_NS {
+        return;
+    }
+    let (compte, pire) = if derriere_noyau {
+        (&ATTENTES_DERRIERE_NOYAU, &PIRE_DERRIERE_NOYAU_NS)
+    } else {
+        (&ATTENTES_DERRIERE_UTILISATEUR, &PIRE_DERRIERE_UTILISATEUR_NS)
+    };
+    compte.fetch_add(1, Ordering::Relaxed);
+    pire.fetch_max(attente_ns, Ordering::Relaxed);
+}
+
+/// `[derriere noyau, derriere utilisateur, pire noyau ns, pire utilisateur ns,
+/// cessions interactives]`, cumuls depuis le demarrage.
+pub fn compteurs_attente_interactive() -> [u64; 5] {
+    [
+        ATTENTES_DERRIERE_NOYAU.load(Ordering::Relaxed),
+        ATTENTES_DERRIERE_UTILISATEUR.load(Ordering::Relaxed),
+        PIRE_DERRIERE_NOYAU_NS.load(Ordering::Relaxed),
+        PIRE_DERRIERE_UTILISATEUR_NS.load(Ordering::Relaxed),
+        CESSIONS_INTERACTIVES.load(Ordering::Relaxed),
+    ]
 }
 
 /// `(pire segment ns, site du point qui l'a termine, cessions)` depuis le

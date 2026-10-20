@@ -171,6 +171,14 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
         "task: cursor CPU encore arme hors CPU tid={}", task.tid);
 
     if task.ready_since_ns != 0 {
+        // BOUCHAUD_ATTENTE_INTERACTIVE_V1 : `install` n'a pas encore tourne,
+        // CURRENT_IS_KERNEL designe l'occupant PRECEDENT de ce coeur.
+        if task.priorite == Priorite::Interactive && !task.noyau {
+            note_attente_interactive(
+                now.saturating_sub(task.ready_since_ns.charge()),
+                CURRENT_IS_KERNEL[cpu_id].load(Ordering::Acquire),
+            );
+        }
         // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.
         task.comptes_fil.note_pret(now.saturating_sub(task.ready_since_ns.charge()));
         crate::kernel::scheduler::latency::record_attribue(
