@@ -98,6 +98,13 @@ static PREEMPT_IRQ_BSP_CIBLEES: core::sync::atomic::AtomicU64 =
 /// jamais.
 #[inline]
 fn dispatch_irq_preempt(source: u8, force: bool) {
+    dispatch_irq_preempt_anticipe(source, force, false);
+}
+
+/// `anticipe` : tir du minuteur local pour un sommeil interactif, quantum non
+/// echu (BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1) -- la commutation n'a lieu que si
+/// une demande vise ce coeur.
+fn dispatch_irq_preempt_anticipe(source: u8, force: bool, anticipe: bool) {
     use core::sync::atomic::Ordering;
 
     PREEMPT_IRQ_REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -124,7 +131,7 @@ fn dispatch_irq_preempt(source: u8, force: bool) {
     PREEMPT_IRQ_ACTIVE_SINCE_NS[cpu].store(now, Ordering::Release);
     PREEMPT_IRQ_ACTIVE[cpu].store(true, Ordering::Release);
 
-    crate::kernel::task::preempt_from_irq();
+    crate::kernel::task::preempt_from_irq(anticipe);
 
     // This boundary executes on every normal/early return from the task layer.
     // It closes the stale `site=41` ambiguity that V7 exposed.

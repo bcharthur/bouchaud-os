@@ -202,3 +202,15 @@ fn l_echeance_propre_sert_quand_la_borne_globale_est_en_balayage() {
     assert_eq!(borne_du_coeur(JAMAIS, 0), JAMAIS);
     assert_eq!(borne_du_coeur(0, 0), JAMAIS);
 }
+
+#[test]
+fn coeur_occupe_borne_interactive() {
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : la borne, ou une marge si elle est due.
+    use reveil_precis::echeance_occupee;
+    let maintenant = 10_000_000;
+    assert_eq!(echeance_occupee(JAMAIS, maintenant), None);
+    assert_eq!(echeance_occupee(0, maintenant), None);
+    assert_eq!(echeance_occupee(maintenant + 700_000, maintenant), Some(maintenant + 700_000));
+    assert_eq!(echeance_occupee(maintenant, maintenant), Some(maintenant + MARGE_NS), "due : une marge, pas un tir immediat");
+    assert_eq!(echeance_occupee(1, maintenant), Some(maintenant + MARGE_NS));
+}

@@ -70,6 +70,17 @@ pub fn borne_du_coeur(globale: u64, propre: u64) -> u64 {
     globale.min(propre)
 }
 
+/// L'instant a armer sur un coeur OCCUPE pour la borne des sommeils
+/// interactifs (BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1) : la borne elle-meme, ou
+/// `maintenant + MARGE_NS` si elle est deja due (une borne perimee ne fait pas
+/// tirer le minuteur en boucle). `None` sans borne.
+pub fn echeance_occupee(borne_ns: u64, maintenant_ns: u64) -> Option<u64> {
+    if borne_ns == JAMAIS || borne_ns == 0 {
+        return None;
+    }
+    Some(if borne_ns <= maintenant_ns { maintenant_ns.saturating_add(MARGE_NS) } else { borne_ns })
+}
+
 /// Pourquoi une echeance n'est PAS armee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refus {

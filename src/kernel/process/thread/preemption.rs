@@ -5,7 +5,7 @@
 /// On ne commute que si une autre tache est prete : sinon on economise deux
 /// changements de contexte par tick.
 
-pub fn preempt_from_irq() {
+pub fn preempt_from_irq(anticipe: bool) {
     debug_assert!(
         !cpu::interrupts_enabled(),
         "task: preempt_from_irq appelee hors contexte IRQ"
@@ -73,6 +73,18 @@ pub fn preempt_from_irq() {
     }
 
     wake_sleepers_depuis_irq();
+
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : un tir anticipe sert un sommeil, pas
+    // la fin du quantum. Sans demande pour ce coeur (la tache reveillee a ete
+    // placee ailleurs, ou ne preempte pas), la tache courante garde le reste
+    // de son quantum : aucune rotation des calculs a chaque reveil servi.
+    if anticipe
+        && !crate::kernel::scheduler::preempt::pending()
+        && !crate::kernel::scheduler::preempt::demande_ciblee_pendante()
+    {
+        termine_transition_ordonnanceur();
+        return;
+    }
 
     let cpu_id = local_cpu();
     // Une IRQ de quantum signifie que la tâche courante est encore runnable :

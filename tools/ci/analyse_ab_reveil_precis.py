@@ -46,7 +46,8 @@ COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
 # ancien) vaut 0. `serie_pire_us` est un maximum cumule : sa valeur finale.
 DIAG_NOMS = ("tirs", "bornes_propres", "ipi_pendant_arme", "armes_dus", "refus_quantum_avant",
              "refus_sans_borne", "refus_autres", "tardifs_soi", "tardifs_autre", "tardifs_irq", "tardifs_inactif",
-             "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us")
+             "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us",
+             "armes_occupes", "tirs_anticipes", "avances_occupees")
 MAXIMA = ("serie_pire_us",)
 
 

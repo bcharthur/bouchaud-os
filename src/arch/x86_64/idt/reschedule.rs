@@ -39,8 +39,16 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     // BOUCHAUD_REVEIL_PRECIS_V1, diagnostic : classer l'interruption AVANT
     // que le quantum ne remplace l'echeance armee.
     smp::note_entree_vecteur_local(entree_tsc);
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : classe AVANT tout rearmement. Un tir
+    // anticipe (sommeil interactif, quantum non echu) ne met pas fin au
+    // quantum : ni nouveau quantum, ni temps impute, ni rotation sans demande.
+    let anticipe = smp::tir_anticipe(entree_tsc);
     if smp::local_scheduler_timer_enabled() {
-        smp::arm_local_scheduler_timer();
+        if anticipe {
+            smp::rearme_reste_du_quantum();
+        } else {
+            smp::arm_local_scheduler_timer();
+        }
     }
     // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : le battement du quantum local ; une
     // absence au-dela de sa periode est journalisee.
@@ -77,7 +85,7 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         // Le handler du PIT posait deja la garde -- `if !idle` -- et c'est la
         // meme ici. Le drapeau est encore vrai pendant le handler : il n'est
         // rendu qu'apres le retour du `hlt`.
-        if !crate::arch::x86_64::cpu::is_idle(
+        if !anticipe && !crate::arch::x86_64::cpu::is_idle(
             crate::arch::x86_64::cpu::hardware_cpu_index(),
         ) {
             crate::kernel::task::echantillonne_quantum(
@@ -128,6 +136,6 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     }
 
     if preempt_now {
-        dispatch_irq_preempt(PREEMPT_SOURCE_RESCHEDULE, preempt_ciblee);
+        dispatch_irq_preempt_anticipe(PREEMPT_SOURCE_RESCHEDULE, preempt_ciblee, anticipe);
     }
 }

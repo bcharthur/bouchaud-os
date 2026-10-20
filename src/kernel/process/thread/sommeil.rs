@@ -305,16 +305,85 @@ pub fn echeance_tache_installee() -> u64 {
 /// ici : une echeance inconnue du raccourci ne serait jamais servie.
 pub(crate) fn arme_echeance(deadline_ns: u64) {
     PROCHAINE_ECHEANCE.arme(deadline_ns);
+    arme_si_interactive(deadline_ns);
+}
+
+// BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1
+//
+// Sur un coeur OCCUPE, un sommeil n'etait detecte qu'au tic du PIT (1 ms,
+// coeur zero) ou au quantum (4 ms) : le reveil precis ne servait qu'un coeur
+// au repos. Run 39387282034 (KVM SMP4, attribution) : « PREUVE et n'aggrave
+// pas le pire cas au-dela du bruit au repos : pire avec 881 <= sans 225 +
+// bruit au repos 330 = faux » -> QUALIFIE_ECHEC. Le calendrier absolu d'une
+// tache periodique derive lentement par rapport au tic : son decalage de
+// phase balaie la milliseconde, et un reveil sur cent attend presque un tic
+// entier.
+//
+// La borne des sommeils INTERACTIFS, par coeur d'attache (`runq_cpu`) : un
+// coeur occupe arme son minuteur sur la plus proche de cette borne et de la
+// fin de son quantum (`smp::arm_local_scheduler_timer`). C'est une indication
+// de latence, pas un mecanisme de reveil : une borne perimee ou perdue ramene
+// au tic, jamais a un reveil perdu -- le balayage des echeances reste la seule
+// voie de reveil. Les taches de classe normale gardent la granularite du tic.
+static PROCHAINE_INTERACTIVE: [core::sync::atomic::AtomicU64; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(crate::kernel::echeances::JAMAIS) };
+        crate::arch::x86_64::smp::MAX_CPUS];
+
+/// La plus proche echeance d'un sommeil interactif attache a `cpu`
+/// (`echeances::JAMAIS` : aucune connue).
+pub fn prochaine_echeance_interactive_ns(cpu: usize) -> u64 {
+    PROCHAINE_INTERACTIVE
+        .get(cpu)
+        .map_or(crate::kernel::echeances::JAMAIS, |b| b.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// La tache courante pose une echeance : interactive, elle entre dans la borne
+/// de son coeur d'attache, et ce coeur -- le sien, puisqu'elle y tourne --
+/// avance son minuteur s'il portait plus tard.
+fn arme_si_interactive(deadline_ns: u64) {
+    if deadline_ns == 0 {
+        return;
+    }
+    let index = current_index_raw();
+    if index == NO_TASK || index >= tasks().len() {
+        return;
+    }
+    let tache = &tasks()[index];
+    if tache.priorite.charge() != Priorite::Interactive {
+        return;
+    }
+    let coeur = tache.runq_cpu.charge() as usize;
+    if let Some(borne) = PROCHAINE_INTERACTIVE.get(coeur) {
+        borne.fetch_min(deadline_ns, core::sync::atomic::Ordering::Relaxed);
+    }
+    if coeur == local_cpu() {
+        crate::arch::x86_64::smp::avance_pour_sommeil_interactif(deadline_ns);
+    }
 }
 
 /// Recalcule la borne exactement, apres un balayage.
 fn recalcule_echeance() {
     let mut minimum = crate::kernel::echeances::JAMAIS;
+    let mut interactives = [crate::kernel::echeances::JAMAIS; crate::arch::x86_64::smp::MAX_CPUS];
     for index in 0..tasks().len() {
         let echeance = tasks()[index].wake_deadline_ns.charge();
-        if tasks()[index].state == TaskState::Blocked && echeance != 0 && echeance < minimum {
-            minimum = echeance;
+        if tasks()[index].state == TaskState::Blocked && echeance != 0 {
+            if echeance < minimum {
+                minimum = echeance;
+            }
+            if tasks()[index].priorite.charge() == Priorite::Interactive {
+                let coeur = tasks()[index].runq_cpu.charge() as usize;
+                if coeur < interactives.len() && echeance < interactives[coeur] {
+                    interactives[coeur] = echeance;
+                }
+            }
         }
+    }
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : remises a JAMAIS au debut du balayage
+    // (`wake_sleepers`), recalees ici par `fetch_min` -- une pose concurrente
+    // n'est pas ecrasee.
+    for (borne, valeur) in PROCHAINE_INTERACTIVE.iter().zip(interactives.iter()) {
+        borne.fetch_min(*valeur, core::sync::atomic::Ordering::Relaxed);
     }
     // Les alarmes vivent en TICKS ; la borne est en nanosecondes. Convertir --
     // et non comparer les deux tels quels, ce qui est precisement l'erreur que
@@ -368,6 +437,11 @@ fn wake_sleepers() {
     // Le raccourci : une charge atomique au lieu d'un balayage complet.
     if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
+    }
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : la borne interactive repart de zero ;
+    // `recalcule_echeance` la recale exactement.
+    for borne in PROCHAINE_INTERACTIVE.iter() {
+        borne.store(crate::kernel::echeances::JAMAIS, core::sync::atomic::Ordering::Relaxed);
     }
     let cur_balayage = current_index_raw();
     let source_irq = BALAYAGE_IRQ
