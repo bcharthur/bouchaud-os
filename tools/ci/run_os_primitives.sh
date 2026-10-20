@@ -83,7 +83,7 @@ morts = [l for l in lignes if re.search(r"PROCESS_DEATH .*\bppid=0 ", l) and not
 pids = {m.group(1) for l in morts for m in [re.search(r"\bpid=(\d+)", l)] if m}
 sortie = [l for l in lignes
           if l in morts
-          or (lambda m: m is not None and m.group(1) in pids)(re.search(r"PROCESS_FAULT(?:_PILE)? pid=(\d+)", l))
+          or (lambda m: m is not None and m.group(1) in pids)(re.search(r"PROCESS_FAULT(?:_PILE|_DETAIL)? pid=(\d+)", l))
           or re.search(r"\b[A-Z_]+_(ECHEC|FAIL)\b|COMPTA_(RECUL|DEPASSE|STRESS) |AUTORUN FIN", l)]
 print("== racines mortes en echec et leurs fautes (journal entier) ==")
 for l in sortie[:40]:
@@ -139,8 +139,17 @@ if ! grep -aF 'piege_niveau1' pile-faute.log; then
   # Ce que le noyau a publie pour le fils `piege`, et ce que l'outil en a
   # fait : de quoi trancher entre pile vide, image inconnue, ligne abimee.
   echo "PILE_DE_FAUTE_ECHEC piege_niveau1 absent de la pile symbolisee" >&2
-  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/PROCESS_FAULT(_PILE)? pid=/ && n++ < 8 { print "  " substr($0, 1, 400) }' >&2
+  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/PROCESS_FAULT(_PILE|_DETAIL)? pid=/ && n++ < 8 { print "  " substr($0, 1, 400) }' >&2
   awk '/FAUTE_SYMBOLE .*instruction illegale/ { on = 1 } on && n++ < 24 { print "  " $0 }' pile-faute.log >&2
+  exit 1
+fi
+# BOUCHAUD_FAUTE_DETAIL_V1 : le meme fils `piege` meurt sur ud2 (0f 0b) ; la
+# ligne de detail doit nommer CES octets a son rip. Sans ce temoin, une ligne
+# qui lirait la mauvaise adresse (ou rien) passerait inapercue jusqu'a la
+# prochaine faute S1 -- celle qu'elle doit justement classer.
+if ! sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aqE 'PROCESS_FAULT_DETAIL pid=[0-9]+ tid=[0-9]+ cpu=[0-9]+ fs_base=0x[0-9a-f]+ fs_base_range=0x[0-9a-f]+ insn=0f0b'; then
+  echo "FAUTE_DETAIL_ECHEC aucune ligne de detail ne nomme l'ud2 du fils piege" >&2
+  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'PROCESS_FAULT_DETAIL' | head -8 >&2 || true
   exit 1
 fi
 # BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la

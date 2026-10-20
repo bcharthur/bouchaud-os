@@ -277,6 +277,7 @@ fn kill_faulting_task_avec(
             pid, reason, stack.instruction_pointer.as_u64(),
             stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base())),
     }
+    faute_detail(pid, stack.instruction_pointer.as_u64());
     // BOUCHAUD_PILE_DE_FAUTE_V1 : le RIP seul nomme `ak_trap`, pas qui l'a
     // appele (run 37667817559 : Compositor, `ak_trap (??:?)`, rien d'autre).
     // Les adresses de retour sont sur la pile : on la balaie et on publie les
@@ -326,6 +327,38 @@ fn kill_faulting_task_avec(
 /// faute, ni lecture disque ; la premiere page absente arrete le balayage.
 /// Heuristique assumee -- des valeurs de pointeurs de fonction peuvent s'y
 /// glisser -- mais les adresses de retour y sont, dans l'ordre des appels.
+/// BOUCHAUD_FAUTE_DETAIL_V1 : S1 (persist-course-probe `fa387b28`,
+/// compta-stress-probe `ca968270`, CI TCG seulement) -- trois fils fautent au
+/// meme `rip` (`printf_core+0`, un `push`) avec `cr2=0x45`, ce qu'un `push`
+/// ne peut pas produire avec une pile saine. Le fil, sa base FS (le registre
+/// ET la valeur rangee par l'ordonnanceur) et les octets de l'instruction
+/// disent si la faute est mal attribuee (autre instruction, autre fil) ou si
+/// l'etat du fil est abime (base TLS perdue a la commutation).
+fn faute_detail(pid: u32, rip: u64) {
+    let Some(tache) = crate::kernel::task::try_current() else { return };
+    let mut octets = [0u8; 16];
+    // Jusqu'a la fin de la page : la suivante peut ne pas exister. Un `rip`
+    // hors de la moitie utilisateur (saut non canonique de
+    // faute-noncanonique-probe) ne se lit pas : ni debordement, ni octet du
+    // noyau dans le journal.
+    let longueur = ((rip | 0xfff).saturating_add(1).saturating_sub(rip) as usize).min(octets.len());
+    let lus = rip < 0x0000_8000_0000_0000
+        && tache.process.mm.lock().space.read(rip, &mut octets[..longueur]);
+    let mut insn = alloc::string::String::new();
+    if lus {
+        for o in &octets[..longueur] {
+            let _ = core::fmt::Write::write_fmt(&mut insn, format_args!("{:02x}", o));
+        }
+    } else {
+        insn.push('?');
+    }
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PROCESS_FAULT_DETAIL pid={} tid={} cpu={} fs_base={:#x} fs_base_range={:#x} insn={}",
+        pid, tache.tid, crate::arch::x86_64::usermode::cpu_index(),
+        crate::arch::x86_64::usermode::fs_base(), tache.fs_base, insn,
+    ));
+}
+
 fn pile_de_faute(pid: u32, rsp: u64, base: u64) {
     const OCTETS: u64 = 8192;
     const MAX: usize = 32;
