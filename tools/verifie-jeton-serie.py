@@ -118,7 +118,8 @@ def verifie(racine: Path) -> list[str]:
     if "sous_jeton(ligne);" not in lignes or "longueur_ligne(" not in lignes or "ecris_octets(" in lignes:
         fautes.append(f"{UART} : `ecris_lignes` n'emet plus chaque ligne sous le jeton")
     console = corps(src[CONSOLE], "console_write")
-    if "serial::ecris_lignes(data)" not in console or re.search(r"\becris_octets\(", console):
+    # BOUCHAUD_CONSOLE_POINT_SUR_V1 : une ligne a la fois (`ecris_lignes(ligne)`).
+    if not re.search(r"serial::ecris_lignes\((?:data|ligne)\)", console) or re.search(r"\becris_octets\(", console):
         fautes.append(f"{CONSOLE} : `console_write` contourne le jeton serie (ecris_octets direct)")
     cli = position(p, "interrupts::disable();")
     cas = position(p, "compare_exchange_weak(0, moi,")
@@ -234,7 +235,7 @@ def main() -> int:
         (UART, "static EMISSIONS_REENTREES: AtomicU64", "static EMISSION_PRIORITAIRE: AtomicBool = AtomicBool::new(false);\nstatic EMISSIONS_REENTREES: AtomicU64"),
         (UART, "            if tours % 64 == 0 {\n                crate::arch::x86_64::smp::sert_shootdowns_en_attente();\n            }\n", ""),
         # la sortie userland retourne a des lots hors jeton
-        (CONSOLE, "crate::drivers::serial::ecris_lignes(data);", "crate::drivers::serial::ecris_octets(data);"),
+        (CONSOLE, "crate::drivers::serial::ecris_lignes(ligne);", "crate::drivers::serial::ecris_octets(ligne);"),
         (UART, "        sous_jeton(ligne);", "        ecris_octets(ligne);"),
         # emission de _print hors du jeton
         (UART, "        sous_jeton(&self.donnees[..self.len]);", "        ecris_octets(&self.donnees[..self.len]);"),

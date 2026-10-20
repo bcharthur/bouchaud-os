@@ -172,11 +172,28 @@ fn console_write(data: &[u8]) {
     // BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : ligne par ligne sous le jeton
     // serie, comme les lignes du noyau -- sans lui, une ligne du noyau emise
     // par un autre coeur coupait la ligne du programme en deux.
-    if !crate::drivers::vga::serial_mirror() {
-        crate::drivers::serial::ecris_lignes(data);
+    //
+    // BOUCHAUD_CONSOLE_POINT_SUR_V1 : et un point sur de preemption ENTRE deux
+    // lignes. L'ecriture entiere tenait le coeur en mode noyau, que la demande
+    // ordinaire d'une tache prete ne coupe pas : run 39424044836 (KVM), un
+    // `writev` sur la console a tenu le coeur 0 jusqu'a 349 ms, une
+    // interactive prete derriere lui 62 ms ; banc ABCD TCG, 247 attentes
+    // interactives > 200 us derriere un appel systeme (pire 9,9 ms). Les
+    // lignes restent entieres (une fin de ligne ne coupe aucune sequence
+    // UTF-8) ; seules des lignes d'autres coeurs peuvent s'intercaler.
+    let mut reste = data;
+    while !reste.is_empty() {
+        let fin = reste.iter().position(|&o| o == b'\n').map_or(reste.len(), |i| i + 1);
+        let (ligne, suite) = reste.split_at(fin);
+        if !crate::drivers::vga::serial_mirror() {
+            crate::drivers::serial::ecris_lignes(ligne);
+        }
+        crate::print!("{}", String::from_utf8_lossy(ligne));
+        reste = suite;
+        if !reste.is_empty() {
+            let _ = crate::kernel::scheduler::preempt::safe_point();
+        }
     }
-    let text = String::from_utf8_lossy(data);
-    crate::print!("{}", text);
 }
 
 /// Lit la console (clavier). Bloque jusqu'a disposer d'au moins un octet.
