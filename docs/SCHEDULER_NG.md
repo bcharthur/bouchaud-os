@@ -199,6 +199,11 @@ que sous charge 212 us -- la sonde ne pouvait rien qualifier. Deux causes :
 |---|---|---|---|
 | echeance due ou a < `MARGE_NS` (20 us) : armement refuse, puis `hlt` jusqu'au tic (1 ms) ou au quantum (4 ms) | armee exactement (dans la marge) ou a `maintenant + MARGE_NS` (due) ; jamais en boucle | `cbbd5ec0` | HOST 15/15 ; KVM a mesurer |
 | tache bloquee restee installee (son coeur fait `hlt` dans son contexte) : `publish_ready` sortait sans IPI, le reveil inter-coeurs attendait le quantum | IPI si le coeur est `IDLE` ; le dormeur relit l'etat de sa tache apres `IDLE` (motif croise) | `7d6c944b` | TCG SMP4 futex-pingpong 2 857 -> 95 us ; SMP2 ~974 -> ~69 us ; 0 reveil perdu |
+| coeur s'endormant pendant le balayage d'un autre coeur (borne JAMAIS) : rien d'arme pour SA tache | min(borne globale, echeance de la tache installee) | `2f2868c5` | KVM a mesurer |
+| sommeil interactif sur coeur OCCUPE detecte au tic (pire 881 us, QUALIFIE_ECHEC SMP4) | borne interactive par coeur, minuteur = min(quantum, borne), tir anticipe sans quantum impute ni rotation | `bcfd9b82` | KVM a mesurer |
+
+KVM (`59e384ce`) : repos p95 SMP1 851-955 -> 134-144 us, SMP4 177-416 ->
+140-155 us ; attribution SMP1 `P13_STRICT_OK` (39387288347).
 
 ## 4. Invariants
 
