@@ -221,6 +221,13 @@ fil noyau -- jamais au milieu du mode noyau (BOUCHAUD_PREEMPTION_NOYAU_SURE_V1).
 | le point cooperatif d'un fil noyau ne cedait qu'apres 1 ms de segment, meme a une interactive | cede sans plancher si une interactive attend dans la file locale (toujours sous `cession_volontaire_sure`) | `5721e711` | HOST+TCG ; KVM a mesurer |
 | `write(2)` console : l'ecriture entiere en mode noyau (`writev` jusqu'a 349 ms sur le coeur 0, KVM) | point sur entre deux lignes (lignes entieres, jeton serie inchange) | `30fb0a4b` | `run_serie_entrelacement` OK ; KVM a mesurer |
 
+TCG SMP4, `run_ordonnanceur_attribution.sh` 2 passes (sans minuterie
+TSC-deadline, donc sans reveil precis sur coeur occupe) : avant (`160de485`)
+QUALIFIE_OK en 3 tentatives, pire interactif 6,9 / 3,4 / 4,5 ms (attente
+d'election du pire 5,7 / 3,0 ms) ; apres (HEAD) QUALIFIE_OK en 2 tentatives,
+pire 3,9 / 2,6 ms (attente 3,6 / 2,0 ms), `cessions_interactives=87`.
+Tirages uniques : indicatif, KVM tranche.
+
 Instrument : `attentes_noyau` / `attentes_utilisateur` et leurs pires (prets
 -> elu > 200 us d'une interactive utilisateur, classes par l'occupant
 precedent du coeur), `cessions_interactives` -- ligne `REVEIL_PRECIS`.
