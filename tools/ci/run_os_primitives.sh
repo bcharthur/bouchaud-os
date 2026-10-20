@@ -147,7 +147,10 @@ fi
 # ligne de detail doit nommer CES octets a son rip. Sans ce temoin, une ligne
 # qui lirait la mauvaise adresse (ou rien) passerait inapercue jusqu'a la
 # prochaine faute S1 -- celle qu'elle doit justement classer.
-if ! sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aqE 'PROCESS_FAULT_DETAIL pid=[0-9]+ tid=[0-9]+ cpu=[0-9]+ fs_base=0x[0-9a-f]+ fs_base_range=0x[0-9a-f]+ insn=0f0b'; then
+# Sans tube : sous `pipefail`, `grep -q` sort au premier match et `sed`, qui
+# ecrit encore, meurt de SIGPIPE -- le pipeline echoue sur une ligne PRESENTE
+# (run 39503091649). Les couleurs ne precedent que le prefixe de la ligne.
+if ! grep -aqE 'PROCESS_FAULT_DETAIL pid=[0-9]+ tid=[0-9]+ cpu=[0-9]+ fs_base=0x[0-9a-f]+ fs_base_range=0x[0-9a-f]+ insn=0f0b' "$LOG"; then
   echo "FAUTE_DETAIL_ECHEC aucune ligne de detail ne nomme l'ud2 du fils piege" >&2
   sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'PROCESS_FAULT_DETAIL' | head -8 >&2 || true
   exit 1
