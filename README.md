@@ -1,5 +1,25 @@
 # Bouchaud OS
 
+> **Experimental bare-metal Rust OS, not a Windows/Linux replacement yet.**
+> The kernel, memory manager, native ABI, Linux compatibility, Ladybird-based
+> browser and graphical desktop are developed here. The browser is based on
+> Ladybird; its upstream origin and patches are acknowledged in this repo.
+
+### Start here (for humans)
+
+- **What runs**: x86_64 UEFI/legacy builds, native ring3 syscalls and a desktop;
+  support depends on the chosen configuration and actual runtime evidence.
+- **What is not ready**: general-purpose persistent disk filesystem, full
+  hardware drivers/power management, guaranteed uptime and universal devices.
+- **Build**: `cargo build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features uefi-boot,reference-desktop` (configured Rust toolchain needed).
+- **Run on Windows**: after creating the Trigkey image, use
+  `tools/reference/run-trigkey-single-usb-qemu.ps1 -SkipBuild`.
+- **Architecture truth**: [current architecture review](docs/current/ARCHITECTURE_PRODUCT_TRUTH.md).
+- **Tests**: `tools/ci/run_architecture_guards.sh` and `tools/test.sh`;
+  HOST/QEMU/PHYSICAL are **different** proof levels.
+- **Contribute**: start with `docs/current/` and `BOUCHAUD_AI_CONTEXT.md` for
+  technical history; never treat those internal handoffs as a quickstart.
+
 Bouchaud OS est un système d'exploitation expérimental **bare-metal écrit from
 scratch en Rust** (`no_std`, x86_64). Il possède son propre noyau, son
 ordonnanceur SMP, sa mémoire virtuelle, ses processus, ses primitives IPC, son

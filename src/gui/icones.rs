@@ -187,11 +187,41 @@ fn dessine_services_vectoriel(x: usize, y: usize, cote: usize) {
     }
 }
 
+
+// Product M1 : deux icones vectorielles natives, aucun asset PNG ajoute.
+fn dessine_product_vectoriel(index: usize, x: usize, y: usize, cote: usize) {
+    if cote == 0 || !crate::gui::framebuffer::decoupe_touche(x, y, cote, cote) { return; }
+    for py in 0..cote {
+        for px in 0..cote {
+            let nx = px * 1000 / cote;
+            let ny = py * 1000 / cote;
+            let (couleur, dedans) = if index == 6 {
+                if nx > 160 && nx < 840 && ny > 90 && ny < 940 {
+                    let ligne = nx > 290 && nx < 740 && (250..830).contains(&ny)
+                        && ((ny - 250) % 145) < 38;
+                    (if ligne { 0x2a5795 } else { 0xf5f8ff }, true)
+                } else { (0, false) }
+            } else {
+                let bar = (nx > 140 && nx < 310 && ny > 530 && ny < 875)
+                    || (nx > 330 && nx < 500 && ny > 350 && ny < 875)
+                    || (nx > 520 && nx < 690 && ny > 215 && ny < 875)
+                    || (nx > 710 && nx < 870 && ny > 435 && ny < 875);
+                (0x55d6bb, bar)
+            };
+            if dedans { crate::gui::framebuffer::blend_rgb(x + px, y + py, couleur, 255); }
+        }
+    }
+}
+
 /// Pose l'icone `index`, coin superieur gauche en `(x, y)`.
 ///
 /// Ne dessine rien si l'image manque : une icone absente vaut mieux qu'un
 /// carre gris, et le fond du bureau est deja peint dessous.
 pub fn dessine(index: usize, x: usize, y: usize, cote: usize) {
+    if index == 6 || index == 7 {
+        dessine_product_vectoriel(index, x, y, cote);
+        return;
+    }
     if index == 5 {
         dessine_services_vectoriel(x, y, cote);
         return;
@@ -226,6 +256,8 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
         1 => Some(3), // Fichiers
         5 => Some(4), // Rustpad
         crate::gui::window::KIND_SERVICES => Some(5),
+        crate::gui::window::KIND_NOTES => Some(6),
+        crate::gui::window::KIND_INSIGHTS => Some(7),
         _ => None,
     }
 }
@@ -244,6 +276,8 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Files { .. } => 3,
         App::Rustpad { .. } => 4,
         App::Services => 5,
+        App::Notes { .. } => 6,
+        App::Insights => 7,
         App::Monitor | App::Journal { .. } => return None,
     })
 }

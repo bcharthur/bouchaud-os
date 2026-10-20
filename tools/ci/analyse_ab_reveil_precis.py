@@ -22,6 +22,7 @@ NON_CONVAINCANT la rend a `off`) :
   charge     mediane des p95 interactifs sous charge : on <= 1,10 x off ;
   quorum     au moins 4 tours complets, sinon NON_CONCLUANT.
 
+Seules les paires QUALIFIE_OK comptent dans le quorum et les latences.
 Sortie 1 sur un defaut de surete ou d'instrument ; 0 sinon (CONVAINCANT,
 NON_CONVAINCANT, NON_CONCLUANT sont des mesures). Teste :
 tools/ci/reliability/test_ab_reveil_precis.py.
@@ -38,6 +39,7 @@ QUORUM = 4
 QUANT = re.compile(r"(au repos|sous charge \((?:normal|interactif)\))\s+median\s+(\d+) us\s+p95\s+(\d+) us"
                    r"\s+p99\s+(\d+) us\s+pire\s+(\d+) us\s+\[propres")
 BRAS = re.compile(r"^AB_PRECIS tour=(\d+) reveil=(on|off)$")
+FIN_BRAS = re.compile(r"^AB_PRECIS_BRAS_FIN tour=(\d+) reveil=(on|off)$")
 COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
 
 
@@ -51,8 +53,22 @@ def analyse(texte, tours, smp, nom):
     for l in lignes:
         m = BRAS.match(l)
         if m:
-            courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None, "compteurs": [], "diag": []}
+            if courant is not None:
+                fautes.append(f"tour {courant['tour']} {courant['v']} : bras precedent non ferme")
+            courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None,
+                       "compteurs": [], "diag": [], "ferme": False}
             bras.append(courant)
+            continue
+        m = FIN_BRAS.match(l)
+        if m:
+            if courant is None:
+                fautes.append("fin de bras sans debut")
+            elif int(m.group(1)) != courant["tour"] or m.group(2) != courant["v"]:
+                fautes.append(f"fermeture du mauvais bras : {m.group(0)}")
+                courant = None
+            else:
+                courant["ferme"] = True
+                courant = None
             continue
         if courant is None:
             continue
@@ -72,9 +88,13 @@ def analyse(texte, tours, smp, nom):
         d = re.search(r"(attribution|ventilation|comptes) au repos : .*", l)
         if d:
             courant["diag"].append(d.group(0)[:400])
+    if courant is not None:
+        fautes.append(f"tour {courant['tour']} {courant['v']} : bras final non ferme")
     minuteur = "?"
     for b in bras:
         nb = f"tour {b['tour']} {b['v']}"
+        if not b["ferme"]:
+            fautes.append(f"{nb} : marqueur de fermeture absent")
         if b["verdict"] is None:
             fautes.append(f"{nb} : passe sans verdict")
         if b["v"] == "on" and b["verdict"] == "QUALIFIE_ECHEC":
@@ -82,8 +102,8 @@ def analyse(texte, tours, smp, nom):
         if "au repos" not in b["q"] or "sous charge (interactif)" not in b["q"]:
             fautes.append(f"{nb} : mesure incomplete")
         # Le releve de la bascule (avant la sonde) et celui qui la suit.
-        if len(b["compteurs"]) < 2:
-            fautes.append(f"{nb} : compteurs de reveil precis absents")
+        if len(b["compteurs"]) != 2:
+            fautes.append(f"{nb} : exactement deux compteurs attendus, trouves {len(b['compteurs'])}")
             continue
         (voulu0, minuteur, armes0), (voulu1, _, armes1) = b["compteurs"][0], b["compteurs"][-1]
         attendu = 1 if b["v"] == "on" else 0
@@ -105,8 +125,15 @@ def analyse(texte, tours, smp, nom):
         if b["verdict"] is not None and "au repos" in b["q"] and "sous charge (interactif)" in b["q"]:
             par_tour.setdefault(b["tour"], {})[b["v"]] = b
     paires = sorted(t for t, d in par_tour.items() if set(d) == {"on", "off"})
+    # Une mesure NON_QUALIFIANT est informative, jamais une preuve.
+    # Comparer seulement les deux bras QUALIFIE_OK du meme tour.
+    paires_qualifiees = [t for t in paires
+                          if par_tour[t]["on"]["verdict"] == "QUALIFIE_OK"
+                          and par_tour[t]["off"]["verdict"] == "QUALIFIE_OK"]
 
     sortie.append(f"  A/B reveil precis, {nom} SMP{smp}, minuteur {minuteur} : {len(paires)}/{tours} tours complets")
+    sortie.append(f"  tours qualifies : {len(paires_qualifiees)}/{tours} "
+                  f"(tours mesures {len(paires)}/{tours}, quorum {QUORUM})")
     sortie.append(f"  {'tour':<5}{'bras':<5}{'verdict':<16}{'repos p50':>10}{'p95':>7}{'p99':>8}{'pire':>8}{'inter p95':>10}{'armes':>8}")
     for b in bras:
         r = b["q"].get("au repos", (0, 0, 0, 0))
@@ -118,9 +145,9 @@ def analyse(texte, tours, smp, nom):
             sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
 
     def med(v, phase, k):
-        return statistics.median([par_tour[t][v]["q"][phase][k] for t in paires]) if paires else 0
+        return statistics.median([par_tour[t][v]["q"][phase][k] for t in paires_qualifiees]) if paires_qualifiees else 0
     criteres = []
-    if paires:
+    if paires_qualifiees:
         p50 = (med("off", "au repos", 0), med("on", "au repos", 0))
         p95 = (med("off", "au repos", 1), med("on", "au repos", 1))
         p99 = (med("off", "au repos", 2), med("on", "au repos", 2))
@@ -137,8 +164,10 @@ def analyse(texte, tours, smp, nom):
         sortie.extend(f"  DEFAUT {f}" for f in fautes)
         sortie.append(f"AB_REVEIL_PRECIS_ECHEC n={len(fautes)} accel={nom} smp={smp}")
         return sortie, "DEFAUT", 1
-    if len(paires) < QUORUM:
-        sortie.append(f"AB_REVEIL_PRECIS : NON_CONCLUANT accel={nom} smp={smp} tours={len(paires)}/{tours}")
+    if len(paires_qualifiees) < QUORUM:
+        sortie.append(f"AB_REVEIL_PRECIS : NON_CONCLUANT accel={nom} smp={smp} "
+                      f"apparies_qualifies={len(paires_qualifiees)}/{tours} "
+                      f"tours_mesures={len(paires)}/{tours} (quorum {QUORUM})")
         return sortie, "NON_CONCLUANT", 0
     verdict = "CONVAINCANT" if all(ok for _, ok in criteres) else "NON_CONVAINCANT"
     sortie.append(f"AB_REVEIL_PRECIS : {verdict} accel={nom} smp={smp} tours={len(paires)}/{tours} "

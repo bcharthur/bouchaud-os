@@ -422,13 +422,36 @@ for token in (
 ):
     req(token in ladybird_verify, f"validation image Ladybird incomplete: {token}")
 
-for token in (
-    '-machine", "pc"',
-    "if=ide,index=0",
-    "if=ide,index=1",
-    "e1000,netdev=net0",
-    "12288",
-):
-    req(token in ladybird_run, f"runner Ladybird incomplet: {token}")
+# Le runner construit ses arguments PowerShell dans $ArgsQemu, et non
+# dans l'ancienne syntaxe Python de liste de paires double-quotees.
+# Verifier la sémantique de la ligne QEMU plutot que son style de guillemets.
+def verifier_contrat_qemu_ladybird(source: str) -> list[str]:
+    def paire(option: str, valeur: str) -> bool:
+        motif = r"['\"]" + re.escape(option) + r"['\"]\s*,\s*['\"]" + re.escape(valeur) + r"['\"]"
+        return re.search(motif, source) is not None
+
+    erreurs = []
+    def exige(vrai: bool, raison: str) -> None:
+        if not vrai:
+            erreurs.append(raison)
+
+    exige(paire("-machine", "pc"), "QEMU n'utilise plus la machine pc")
+    exige(bool(re.search(r"['\"]-drive['\"]\s*,\s*['\"]if=ide,index=0,media=disk,format=raw,file=\$Image,snapshot=on['\"]", source)),
+          "disque système IDE 0 en snapshot manquant")
+    exige(bool(re.search(r"['\"]-drive['\"]\s*,\s*['\"]if=ide,index=1,media=disk,format=raw,file=\$LadybirdImage,snapshot=on['\"]", source)),
+          "disque Ladybird IDE 1 en snapshot manquant")
+    exige(paire("-netdev", "user,id=net0") and paire("-device", "e1000,netdev=net0"),
+          "reseau e1000/slirp manquant")
+    exige(bool(re.search(r"\[int\]\$RamMiB\s*=\s*12288\b", source)) and
+          bool(re.search(r"['\"]-m['\"]\s*,\s*['\"]?\$RamMiB['\"]?", source)),
+          "RAM par defaut 12288 MiB non transmise à QEMU")
+    exige("Get-BouchaudInputArguments -InputMode $InputMode -Pointer $Pointer" in source,
+          "les arguments USB/PS2 ne sont plus appliques")
+    exige("Invoke-BouchaudQemu -QemuExe $QemuExe -Arguments $ArgsQemu" in source,
+          "assemblage QEMU non transmis au lanceur")
+    return erreurs
+
+for erreur in verifier_contrat_qemu_ladybird(ladybird_run):
+    req(False, "runner Ladybird incomplet: " + erreur)
 
 print("BOUCHAUD_STAGE2_GUARD_FINAL_V2_OK")

@@ -16,6 +16,10 @@
 > convergence et os-primitives TCG+KVM**) verts. Native IPC, SCM_RIGHTS et
 > Security Runtime relancés à la main sur ce même SHA (voir HANDOFF).
 
+## Actualisation P13 du 19 octobre 2026
+
+Cette section [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md) prime sur les SHA et etats historiques du tableau ci-dessous. Sur `f5692b7`, CI Fast, Integration, Reliability, Native IPC et Ladybird 20/20 sont verts. Les gels QEMU SMP8 >=200ms passent de 4/9 a 0/15 apres traitement du jeton serie + hard IRQ, d'apres `docs/SCHEDULER_NG.md`. **P13 reste PARTIAL:** attribution KVM SMP1/2/4 `NON_QUALIFIANT`, A/B reveil precis KVM SMP1/4 `NON_CONCLUANT` 0/4, SMP8 KVM dedie non prouve; correction qualificateur `4d279ff` (17/16) ne change pas ces donnees. GPU direct/tuiles KVM NON_CONVAINCANT. Baseline globale NOT_ESTABLISHED.
+
 ## Synthèse
 
 | Lot | Périmètre réel (vérifié dans le code) | Introduction | Dernière preuve | État | Physique |

@@ -108,10 +108,11 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-pub(crate) const MENU: [(&str, usize); 11] = [
+pub(crate) const MENU: [(&str, usize); 13] = [
     ("Ladybird", KIND_NAVIGATEUR),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3), ("Services", KIND_SERVICES),
     ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
+    ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS),
     ("Quitter", usize::MAX),
     ("Redemarrer", KIND_REDEMARRER),
     ("Eteindre", KIND_ETEINDRE),
@@ -134,26 +135,33 @@ pub(crate) const KIND_REDEMARRER: usize = usize::MAX - 1;
 pub(crate) const KIND_ETEINDRE: usize = usize::MAX - 2;
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 6] = [
+pub(crate) const ICONS: [(&str, usize); 8] = [
     ("Ladybird", KIND_NAVIGATEUR),
     ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5), ("Services", KIND_SERVICES),
+    ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 6] = [
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 8] = [
     (16, 42), (16, 132), (16, 222), (16, 312), (16, 402), (106, 42),
+    (106, 132), (106, 222),
 ];
 
 /// Etat applicatif porte par une fenetre.
-pub(crate) const KIND_SERVICES: usize = 7;
+// Chaque application dispose d'un identifiant UNIQUE (Journal = 7).
+pub(crate) const KIND_SERVICES: usize = 8;
+pub(crate) const KIND_NOTES: usize = 9;
+pub(crate) const KIND_INSIGHTS: usize = 10;
 
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
-    Files { cur: usize, scroll: i32, selected: Option<usize> },
+    Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History },
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
+    Notes { state: crate::gui::apps::notes::NotesState },
+    Insights,
     /// La trace du noyau, lisible sur la machine elle-meme.
     Journal { state: crate::gui::apps::journal::JournalState },
     /// Fenetre d'un client ring 3 : le contenu vient de sa surface partagee.
@@ -428,7 +436,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
             App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home }),
         1 => Win::new("Fichiers".to_string(), x, y, 420, 320,
             crate::gui::windowing::WindowFlags::STANDARD,
-            App::Files { cur: home, scroll: 0, selected: None }),
+            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new() }),
         4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
             crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
@@ -438,6 +446,11 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         // hors de l'ecran et les colonnes de droite coupees par le bord : une
         // fenetre dimensionnee pour six lignes Ladybird ne montre pas une
         // pile de soixante-sept services.
+        KIND_NOTES => Win::new("Bouchaud Notes".to_string(), x, y, 680, 520,
+            crate::gui::windowing::WindowFlags::STANDARD,
+            App::Notes { state: crate::gui::apps::notes::NotesState::new(home) }),
+        KIND_INSIGHTS => Win::new("Bouchaud Insights".to_string(), x, y, 660, 490,
+            crate::gui::windowing::WindowFlags::STANDARD, App::Insights),
         KIND_SERVICES => Win::new("Services".to_string(), x, y, 900, 560,
             crate::gui::windowing::WindowFlags::STANDARD, App::Services),
         KIND_JOURNAL => Win::new("Journal — TOUT".to_string(), x, y, 760, 460,

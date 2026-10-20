@@ -396,6 +396,19 @@ pub fn calibrate() {
         // ligne le dit par sa source.
         let retenue = TSC_HZ.load(Ordering::Acquire);
         let selon_ticks = cycles_per_ms.saturating_mul(1000);
+        // BOUCHAUD_M12_MEGA_V1: qualite explicitement non prouvee sous TCG.
+        // Aucun basculement d'horloge automatique au runtime sans tests SMP.
+        let ratio_pm = if retenue == 0 { 0 } else {
+            selon_ticks.saturating_mul(1000) / retenue
+        };
+        crate::serial_println!(
+            "BOUCHAUD_M12_CLOCK_QUALITY status={} ratio_per_mille={} source={} verdict=diagnostic_only",
+            if retenue == 0 { "unknown" }
+            else if (900..=1100).contains(&ratio_pm) { "candidate" }
+            else { "degraded" },
+            ratio_pm,
+            nom_source(TSC_SOURCE.load(Ordering::Acquire)),
+        );
         crate::serial_println!(
             "BOUCHAUD_TSC_CONTROLE hz={} source={} hz_selon_ticks={} rapport_pour_mille={} cycles_par_ms={}",
             retenue,

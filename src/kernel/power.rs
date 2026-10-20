@@ -318,7 +318,11 @@ fn shutdown_interne(code: u8) -> ! {
     if !complet {
         rapporte_echec(&vidage, persisted as i64);
     }
+    // BOUCHAUD_M12_MEGA_V1: frontiere UI/IO/ACPI prouvee par etapes.
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE before_finish complete={}", complet as u8);
     crate::gui::power_screen::finish(complet);
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE after_finish");
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE before_emulator_ports code={}", code);
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.
@@ -337,10 +341,12 @@ fn shutdown_interne(code: u8) -> ! {
     //
     // En dernier parce que sous QEMU les conventions ci-dessus ont deja coupe,
     // et que sur une vraie machine elles n'ont rien fait du tout.
+    crate::serial_println!("BOUCHAUD_M12_ACPI_S5_ATTEMPT disponible={}", crate::kernel::acpi_s5::disponible() as u8);
     if crate::kernel::acpi_s5::eteint() {
         // `eteint` ne rend la main que sur echec : ce chemin n'est pas atteint.
         halt()
     }
+    crate::serial_println!("BOUCHAUD_M12_ACPI_S5_RETURNED power_still_on=1");
     crate::serial_println!(
         "[kernel] extinction: aucune voie n'a coupe le courant (acpi={})",
         crate::kernel::acpi_s5::disponible() as u8,

@@ -22,6 +22,14 @@
 /// quelque chose à dessiner**. Au repos, le compositeur continue de dormir :
 /// composer une image identique à la précédente cent vingt fois par seconde
 /// ne se voit pas et chauffe la machine.
+// Product M1.1 A/B: the Stage2 reference-desktop is single-vCPU by default.
+// GUI composition is a non-preemptible kernel thread (see window_manager.rs).
+// Give HID/WebContent opportunities to run by bounding GUI composition to
+// ~60 Hz. This is a CPU CONTENTION EXPERIMENT, not proof of better FPS.
+// Non-Stage2 profiles keep the original 8ms policy.
+#[cfg(feature = "reference-desktop")]
+pub const PERIODE_TRAME_MS: u64 = 16;
+#[cfg(not(feature = "reference-desktop"))]
 pub const PERIODE_TRAME_MS: u64 = 8;
 
 /// Rafraîchissement de l'horloge/indicateurs visibles.
@@ -95,6 +103,9 @@ pub const REACTIVITE_MUETTE_MS: u64 = 600;
 /// plus qu'avant), et cent vingt pendant les six cents millisecondes qui
 /// suivent une entree, ou le plafond de trame s'applique seul. Le jour ou le
 /// navigateur parlera le protocole, cette constante n'aura plus d'objet.
+#[cfg(feature = "reference-desktop")]
+pub const REPOS_MUET_MS: u64 = 32;
+#[cfg(not(feature = "reference-desktop"))]
 pub const REPOS_MUET_MS: u64 = 16;
 
 #[derive(Clone, Copy, Debug, Default)]

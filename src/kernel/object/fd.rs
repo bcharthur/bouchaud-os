@@ -704,15 +704,46 @@ fn proc_fil() -> Vec<u8> {
 
 fn proc_stat_global() -> Vec<u8> {
     use alloc::format;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    // BOUCHAUD_PROC_STAT_PUBLICATION_MONOTONE_V1
+    // Deux open("/proc/stat") concurrents peuvent calculer puis publier
+    // leurs instantanes dans des ordres differents (KVM 38778345917 :
+    // utime 1337 -> 1336). Chaque champ cumulatif doit etre linearise.
+    // Les valeurs brutes et leurs anomalies restent diagnostiquees par
+    // proc_cpu_cumul() / PROC_STAT_RECUL, sans etre remplacees ici en interne.
+    static USER_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static SYSTEM_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static IDLE_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
+
     let c = crate::kernel::task::proc_cpu_cumul();
+    let user_avant = USER_PUBLIE_NS.fetch_max(c.user_ns, Ordering::AcqRel);
+    let system_avant = SYSTEM_PUBLIE_NS.fetch_max(c.system_ns, Ordering::AcqRel);
+    let idle_avant = IDLE_PUBLIE_NS.fetch_max(c.idle_ns, Ordering::AcqRel);
+    let user_ns = user_avant.max(c.user_ns);
+    let system_ns = system_avant.max(c.system_ns);
+    let idle_ns = idle_avant.max(c.idle_ns);
+    if user_ns != c.user_ns || system_ns != c.system_ns || idle_ns != c.idle_ns {
+        let corrections = CORRECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Les premieres preuves sont conservees ; pas de log a chaque
+        // lecture de /proc/stat en regime soutenu.
+        if corrections <= 8 {
+            crate::serial_println!(
+                "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
+                corrections, c.user_ns, user_ns, c.system_ns, system_ns,
+                c.idle_ns, idle_ns,
+            );
+        }
+    }
     // Format Linux : user nice system idle iowait irq softirq steal guest guest_nice.
     // Ladybird ne somme que user/system/idle/irq/softirq. Les categories que
     // Bouchaud ne distingue pas sont zero, pas inventees.
     format!(
         "cpu  {} 0 {} {} 0 0 0 0 0 0\n",
-        proc_ticks(c.user_ns),
-        proc_ticks(c.system_ns),
-        proc_ticks(c.idle_ns),
+        proc_ticks(user_ns),
+        proc_ticks(system_ns),
+        proc_ticks(idle_ns),
     ).into_bytes()
 }
 
