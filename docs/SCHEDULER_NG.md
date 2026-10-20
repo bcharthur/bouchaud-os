@@ -205,6 +205,28 @@ que sous charge 212 us -- la sonde ne pouvait rien qualifier. Deux causes :
 KVM (`59e384ce`) : repos p95 SMP1 851-955 -> 134-144 us, SMP4 177-416 ->
 140-155 us ; attribution SMP1 `P13_STRICT_OK` (39387288347).
 
+KVM (`d097281d`, 39424044836) : attribution SMP1 et SMP2 `P13_STRICT_OK` ;
+A/B bras `on` SMP4 repos p95 159-170 us, p99 199-208 us. SMP4
+`QUALIFIE_ECHEC` : detection a l'heure, mais attente pret -> elu 466/679 us.
+
+### Election d'une interactive sur un coeur en mode noyau (BOUCHAUD_CESSION_INTERACTIVE_V1, BOUCHAUD_CONSOLE_POINT_SUR_V1, 20/10)
+
+Une tache utilisateur n'est jamais `latency_sensitive` : son reveil sur un
+coeur occupe rend une demande ORDINAIRE, servie au prochain passage en
+anneau 3, au point sur de retour d'appel systeme, ou au point cooperatif d'un
+fil noyau -- jamais au milieu du mode noyau (BOUCHAUD_PREEMPTION_NOYAU_SURE_V1).
+
+| defaut | correction | commit | preuve |
+|---|---|---|---|
+| le point cooperatif d'un fil noyau ne cedait qu'apres 1 ms de segment, meme a une interactive | cede sans plancher si une interactive attend dans la file locale (toujours sous `cession_volontaire_sure`) | `5721e711` | HOST+TCG ; KVM a mesurer |
+| `write(2)` console : l'ecriture entiere en mode noyau (`writev` jusqu'a 349 ms sur le coeur 0, KVM) | point sur entre deux lignes (lignes entieres, jeton serie inchange) | `30fb0a4b` | `run_serie_entrelacement` OK ; KVM a mesurer |
+
+Instrument : `attentes_noyau` / `attentes_utilisateur` et leurs pires (prets
+-> elu > 200 us d'une interactive utilisateur, classes par l'occupant
+precedent du coeur), `cessions_interactives` -- ligne `REVEIL_PRECIS`.
+Un marqueur d'appel systeme PAR COEUR n'est pas permute a la commutation :
+il ne sert pas a classer (essaye puis retire).
+
 ## 4. Invariants
 
 | invariant | etat | garde |
@@ -215,6 +237,7 @@ KVM (`59e384ce`) : repos p95 SMP1 851-955 -> 134-144 us, SMP4 177-416 ->
 | aucun reveil futex perdu | 0 | banc `reveils_perdus` |
 | tache installee rendue prete : son coeur ne dort pas | IPI ou relecture apres `IDLE` | `verifie-poignee-idle.py` |
 | aucun BKL, aucun verrou global d'ordonnanceur | tenu | `verifie-ordonnanceur-sans-bkl.py`, `verifie-bkl-supprime.py` |
+| fin de fichier / EPIPE des la derniere extremite fermee, par tout chemin | `ferme_hors_verrou` | `verifie-eof-hors-close.py`, `eof-fermeture-probe` |
 
 ## 5. Ouvert
 
