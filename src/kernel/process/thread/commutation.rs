@@ -178,6 +178,8 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
                 now.saturating_sub(task.ready_since_ns.charge()),
                 CURRENT_IS_KERNEL[cpu_id].load(Ordering::Acquire),
                 CURRENT[cpu_id].load(Ordering::Acquire),
+                cpu_id,
+                task.file_au_pret.charge() as usize != cpu_id,
             );
         }
         // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.

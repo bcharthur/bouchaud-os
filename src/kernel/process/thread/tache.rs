@@ -47,6 +47,11 @@ pub struct Task {
     pub priorite: PrioriteAtomique,
     pub affinity_mask: u64,
     pub runq_cpu: CoeurAtomique,
+    /// BOUCHAUD_ATTENTE_INTERACTIVE_OCCUPANT_V1 : la file choisie a la
+    /// publication. Le vol reecrit `runq_cpu` vers le coeur voleur avant
+    /// l'election ; sans ce champ, l'occupant du voleur passerait pour celui
+    /// qui a fait attendre. Diagnostic seulement.
+    pub file_au_pret: CoeurAtomique,
     pub last_cpu: CoeurAtomique,
     pub on_cpu: CoeurSigneAtomique,
     switching_out: DrapeauAtomique,

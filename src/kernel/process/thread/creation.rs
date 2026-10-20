@@ -24,6 +24,7 @@ impl Task {
             priorite: PrioriteAtomique::neuve(Priorite::Normale),
             affinity_mask: 0,
             runq_cpu: CoeurAtomique::neuf(u8::MAX),
+            file_au_pret: CoeurAtomique::neuf(u8::MAX),
             last_cpu: CoeurAtomique::neuf(u8::MAX),
             on_cpu: CoeurSigneAtomique::neuf(-1),
             switching_out: DrapeauAtomique::neuf(false),
@@ -432,6 +433,7 @@ fn publish_ready(index: usize) {
     };
 
     tasks()[index].runq_cpu.range(target as u8);
+    tasks()[index].file_au_pret.range(target as u8);
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
         // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
         // heriter de l'entree laissee par son occupant precedent.

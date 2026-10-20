@@ -706,42 +706,52 @@ static CESSIONS_INTERACTIVES: AtomicU64 = AtomicU64::new(0);
 // resolu par `reveil-precis`, hors IRQ.
 static PIRE_DERRIERE_NOYAU_OCCUPANT: AtomicUsize = AtomicUsize::new(NO_TASK);
 static PIRE_DERRIERE_UTILISATEUR_OCCUPANT: AtomicUsize = AtomicUsize::new(NO_TASK);
+// Le coeur d'election du pire cas, et bit 8 : la tache a ete VOLEE (publiee
+// sur une autre file). Volee, elle a attendu ailleurs : l'occupant nomme est
+// celui du voleur, pas celui qui l'a fait attendre.
+static PIRE_DERRIERE_NOYAU_OU: AtomicUsize = AtomicUsize::new(0);
+static PIRE_DERRIERE_UTILISATEUR_OU: AtomicUsize = AtomicUsize::new(0);
 
 /// A l'election d'une interactive utilisateur : `attente_ns` pret -> elu,
 /// `derriere_noyau` -- l'occupant precedent du coeur etait un fil noyau,
 /// `occupant` -- son emplacement.
-fn note_attente_interactive(attente_ns: u64, derriere_noyau: bool, occupant: usize) {
+fn note_attente_interactive(attente_ns: u64, derriere_noyau: bool, occupant: usize, cpu: usize, volee: bool) {
     if attente_ns <= ATTENTE_INTERACTIVE_LONGUE_NS {
         return;
     }
-    let (compte, pire, qui) = if derriere_noyau {
-        (&ATTENTES_DERRIERE_NOYAU, &PIRE_DERRIERE_NOYAU_NS, &PIRE_DERRIERE_NOYAU_OCCUPANT)
+    let (compte, pire, qui, ou) = if derriere_noyau {
+        (&ATTENTES_DERRIERE_NOYAU, &PIRE_DERRIERE_NOYAU_NS, &PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_NOYAU_OU)
     } else {
-        (&ATTENTES_DERRIERE_UTILISATEUR, &PIRE_DERRIERE_UTILISATEUR_NS, &PIRE_DERRIERE_UTILISATEUR_OCCUPANT)
+        (&ATTENTES_DERRIERE_UTILISATEUR, &PIRE_DERRIERE_UTILISATEUR_NS,
+         &PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU)
     };
     compte.fetch_add(1, Ordering::Relaxed);
     // Deux pires concurrents peuvent croiser leurs occupants : diagnostic
     // seulement, aucun verdict n'en depend.
     if pire.fetch_max(attente_ns, Ordering::Relaxed) < attente_ns {
         qui.store(occupant, Ordering::Relaxed);
+        ou.store((cpu & 0xff) | ((volee as usize) << 8), Ordering::Relaxed);
     }
 }
 
 /// `[occupant derriere noyau, occupant derriere utilisateur]` du pire cas,
-/// `tid:nom` (nom sans espace), `-` si aucun ou si l'emplacement est vide.
+/// `tid:nom@cpuN[:volee]` (nom sans espace), `-` si aucun ou si l'emplacement est vide.
 /// L'emplacement a pu etre recycle depuis : le nom est celui de son occupant
 /// AU RELEVE -- un fil noyau, lui, ne meurt guere.
 pub fn occupants_attente_interactive() -> [String; 2] {
-    [&PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OCCUPANT].map(|qui| {
+    [(&PIRE_DERRIERE_NOYAU_OCCUPANT, &PIRE_DERRIERE_NOYAU_OU),
+     (&PIRE_DERRIERE_UTILISATEUR_OCCUPANT, &PIRE_DERRIERE_UTILISATEUR_OU)].map(|(qui, ou)| {
         let index = qui.load(Ordering::Relaxed);
         if index == NO_TASK {
             return String::from("-");
         }
+        let ou = ou.load(Ordering::Relaxed);
+        let (cpu, volee) = (ou & 0xff, ou >> 8 != 0);
         let table = tasks();
         match table.get(index) {
             Some(tache) => {
                 let nom = tache.process.metadata.lock().name.replace(' ', "_");
-                alloc::format!("{}:{}", tache.tid, nom)
+                alloc::format!("{}:{}@cpu{}{}", tache.tid, nom, cpu, if volee { ":volee" } else { "" })
             }
             None => String::from("-"),
         }
