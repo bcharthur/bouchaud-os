@@ -312,9 +312,10 @@ fn kill_faulting_task_avec(
     // BOUCHAUD_SIGNAL_DE_FAUTE_V1 : le signal que Linux delivre pour cette
     // exception (#UD SIGILL, #DE SIGFPE, #SS SIGBUS, #GP/#PF SIGSEGV), pas
     // SIGSEGV pour toutes : un parent (le navigateur pour ses services) lit
-    // la cause dans `WTERMSIG`. Le code `128 + signal` est l'encodage de mort
-    // par signal que `wait4` relit.
-    crate::kernel::task::exit_group(128 + signal as i32)
+    // la cause dans `WTERMSIG`. Le code `128 + signal` reste celui des
+    // journaux ; `wait4` lit la mort par signal sur son drapeau
+    // (BOUCHAUD_STATUT_SORTIE_V1).
+    crate::kernel::task::exit_group_par_signal(signal as i32)
 }
 
 /// Balaie au plus 8 Kio de pile utilisateur au-dessus de `rsp` et publie les

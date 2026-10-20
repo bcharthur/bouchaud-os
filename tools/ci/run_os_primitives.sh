@@ -21,11 +21,12 @@ cd tools/userland/out-sondes
 ./mtime-probe
 ./eof-fermeture-probe 1
 ./tube-atomicite-probe 300
+./statut-sortie-probe
 cd ../../..
 
 SCENARIO=scenario-primitives
 mkdir -p "$SCENARIO/bin"
-for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe faute-multifil-probe noeuds-churn-probe sigchld-multifil-probe sigmasque-fil-probe compta-stress-probe mtime-probe persist-course-probe eof-fermeture-probe tube-atomicite-probe; do
+for f in verrous-probe exec-fd-probe wal-probe disque-probe nom-long-probe session-probe sendfile-probe renommage-probe faute-noncanonique-probe faute-multifil-probe noeuds-churn-probe sigchld-multifil-probe sigmasque-fil-probe compta-stress-probe mtime-probe persist-course-probe eof-fermeture-probe tube-atomicite-probe statut-sortie-probe; do
   cp "tools/userland/out-sondes/$f" "$SCENARIO/bin/"
 done
 python3 - <<'PY'
@@ -53,6 +54,7 @@ strace echecs
 /bin/persist-course-probe
 /bin/eof-fermeture-probe 2
 /bin/tube-atomicite-probe 300
+/bin/statut-sortie-probe
 /bin/session-probe 4
 echo SESSION_INVITE_REVENUE
 strace off
@@ -102,7 +104,7 @@ tail -c 262144 "$LOG"
 # AVANT les verdicts : un marqueur absent arrete le script (set -e), et
 # c'est justement quand un banc echoue qu'on a besoin de l'horloge.
 awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print substr($0, RSTART, RLENGTH) }' "$LOG"
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK 'FAUTE_MULTIFIL_OK essais=16' 'NOEUDS_CHURN_OK cycles=8000' SIGCHLD_MULTIFIL_OK SIGMASQUE_FIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK PERSIST_COURSE_OK 'EOF_FERMETURE_OK cas=6 tours=2' 'TUBE_ATOMICITE_OK tailles=3 ecrivains=4 tours=300' \
+for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK 'FAUTE_MULTIFIL_OK essais=16' 'NOEUDS_CHURN_OK cycles=8000' SIGCHLD_MULTIFIL_OK SIGMASQUE_FIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK PERSIST_COURSE_OK 'EOF_FERMETURE_OK cas=6 tours=2' 'TUBE_ATOMICITE_OK tailles=3 ecrivains=4 tours=300' 'STATUT_SORTIE_OK cas=11' \
               'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
   grep -aF "$marker" "$LOG"
 done

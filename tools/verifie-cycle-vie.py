@@ -172,9 +172,10 @@ def verifie(racine: Path) -> list[str]:
     #    mourir eux-memes dans cette attente.
     if not avant(src[PROC], "task::terminate_sibling_threads();", "task::attend_extinction_freres();"):
         fautes.append(f"{PROC} : execve remplace l'image avant la mort des freres")
-    eg = corps(src[VIE], "exit_group")
+    # BOUCHAUD_STATUT_SORTIE_V1 : le corps d'`exit_group` est `sortie_du_groupe`.
+    eg = corps(src[VIE], "sortie_du_groupe")
     if not avant(eg, "marque_zombie(task);", "attend_extinction_freres();") \
-            or not avant(eg, "attend_extinction_freres();", "exit_current(code)"):
+            or not avant(eg, "attend_extinction_freres();", "sortie_du_fil(code, par_signal)"):
         fautes.append(f"{VIE} : exit_group rapporte la fin du processus avant la mort des freres")
     if "sleep_ticks_noyau(1)" not in corps(src[VIE], "attend_extinction_freres"):
         fautes.append(f"{VIE} : l'attente des freres est interruptible")

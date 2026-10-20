@@ -68,7 +68,13 @@ pub struct ProcessMetadata {
 /// RECLAME le groupe -- `exit_group` ou `execve` -- et va tuer les autres.
 /// Pose sous ce verrou, relu sous ce verrou : c'est ce qui remplace la
 /// serialisation que le gros verrou donnait a ces appels.
-pub struct ProcessLifecycle { pub exit_code: i32, pub zombie: bool, pub threads: usize, pub groupe_en_sortie: bool }
+///
+/// `par_signal` (BOUCHAUD_STATUT_SORTIE_V1) : le processus est MORT d'un
+/// signal ; `exit_code` vaut alors `128 + signal` (la convention des shells,
+/// gardee pour les journaux). Pose sous ce verrou AVEC `exit_code` : `wait4`
+/// ne devine plus une mort par signal d'un code >= 128, qu'un `exit(130)`
+/// produit aussi.
+pub struct ProcessLifecycle { pub exit_code: i32, pub par_signal: bool, pub zombie: bool, pub threads: usize, pub groupe_en_sortie: bool }
 
 pub struct Process {
     pub pid: u32,

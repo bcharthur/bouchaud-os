@@ -3,6 +3,12 @@
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
+    sortie_du_fil(code, false)
+}
+
+/// `exit_current`, en disant si le code est celui d'une mort par signal
+/// (`128 + signal`, BOUCHAUD_STATUT_SORTIE_V1).
+fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
     // BOUCHAUD_C70_UNE_SONDE_NE_RALENTIT_PAS_CE_QU_ELLE_MESURE
     //
     // Les sondes globales de mort de processus sont publiees PLUS BAS, hors
@@ -43,6 +49,7 @@ pub fn exit_current(code: i32) -> ! {
             lifecycle.threads -= 1;
         }
         lifecycle.exit_code = code;
+        lifecycle.par_signal = par_signal;
         // BOUCHAUD_GROUPE_RECLAME_V1 : UNE seule transition vers le dernier fil.
         // `exit_group` remet `threads` a 1 ; un fil deja compte sorti pouvait
         // alors retrouver `threads == 0` et demonter le processus une seconde
@@ -482,12 +489,12 @@ fn notify_parent_of_exit_for(parent_pid: u32) {
 }
 
 /// Recense les processus fils zombies d'un pid donne.
-pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32)> {
+pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32, bool)> {
     let mut out = Vec::new();
     for process in processes().iter() {
         let lifecycle = process.lifecycle.lock();
         if process.parent == parent_pid && lifecycle.zombie {
-            out.push((process.pid, lifecycle.exit_code));
+            out.push((process.pid, lifecycle.exit_code, lifecycle.par_signal));
         }
     }
     out
@@ -569,6 +576,16 @@ pub fn tue_si_groupe_reclame(process: &Arc<Process>, index: usize, tid: u32) {
 
 /// Termine tous les threads du processus courant (`exit_group`).
 pub fn exit_group(code: i32) -> ! {
+    sortie_du_groupe(code, false)
+}
+
+/// Le processus courant meurt du signal `signal` : code `128 + signal` pour
+/// les journaux, et `wait4` rendra WTERMSIG (BOUCHAUD_STATUT_SORTIE_V1).
+pub fn exit_group_par_signal(signal: i32) -> ! {
+    sortie_du_groupe(128 + signal, true)
+}
+
+fn sortie_du_groupe(code: i32, par_signal: bool) -> ! {
     // BOUCHAUD_GROUPE_RECLAME_V1 : un seul fil demonte le groupe.
     if !reclame_groupe() {
         retire_perdant_du_groupe();
@@ -591,7 +608,7 @@ pub fn exit_group(code: i32) -> ! {
     // de 1 a 0 et rendra le processus zombie/recoltable par `wait4`.
     process.lifecycle.lock().threads = 1;
 
-    exit_current(code)
+    sortie_du_fil(code, par_signal)
 }
 
 /// Lance une tache depuis le fil noyau et attend la fin du programme.
@@ -1086,6 +1103,8 @@ pub fn tue_processus(pid: u32, code: i32) {
             } else {
                 lifecycle.threads = 0;
                 lifecycle.exit_code = code;
+                // Appelants internes : 0 (fin imposee) ou 128 + signal (137).
+                lifecycle.par_signal = code >= 128;
                 lifecycle.zombie = true;
                 true
             }

@@ -58,7 +58,7 @@ def verifie(racine: Path) -> list[str]:
     except OSError as e:
         return [f"lecture impossible : {e}"]
     fautes = []
-    ec = corps(src[VIE], "exit_current")
+    ec = corps(src[VIE], "sortie_du_fil")  # corps d'exit_current (BOUCHAUD_STATUT_SORTIE_V1)
     if not avant(ec, "ferme_descripteurs(&current().process);", "notify_parent_of_exit();"):
         fautes.append(f"{VIE} : exit_current previent le parent avant de fermer les descripteurs")
     tp = corps(src[VIE], "tue_processus")

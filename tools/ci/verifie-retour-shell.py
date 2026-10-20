@@ -48,7 +48,9 @@ def sans_commentaires(texte: str) -> str:
 
 
 def corps_exit(texte: str) -> str | None:
-    debut = texte.find("pub fn exit_current(")
+    # BOUCHAUD_STATUT_SORTIE_V1 : le corps de `exit_current` est dans
+    # `sortie_du_fil`, qui porte aussi le drapeau de mort par signal.
+    debut = texte.find("fn sortie_du_fil(")
     if debut < 0:
         return None
     i = texte.find("{", debut)

@@ -1368,7 +1368,7 @@ fn sys_kill(signal: u64) -> i64 {
     const SIGSEGV: u64 = 11;
     const SIGTERM: u64 = 15;
     if matches!(signal, SIGABRT | SIGKILL | SIGSEGV | SIGTERM) {
-        task::exit_group(128 + signal as i32);
+        task::exit_group_par_signal(signal as i32);
     }
     0
 }

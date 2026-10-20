@@ -113,7 +113,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             partages, limite_as, promesses, clean_pages })),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
-        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, zombie: false, threads: 1, groupe_en_sortie: false }),
+        lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(child_signals),
         temps_recycle: task::TempsRecycle::neuf(),
         appels: task::AppelsSyscall::neuf(),
@@ -478,6 +478,16 @@ duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}"
     unsafe { usermode::resume_usermode(&frame) }
 }
 
+/// Le statut que rend `wait4` (BOUCHAUD_STATUT_SORTIE_V1) : `code << 8` pour
+/// une sortie, le signal seul pour une mort par signal (`code` = 128 + signal).
+pub fn statut_wait(code: i32, par_signal: bool) -> u32 {
+    if par_signal {
+        (code as u32).wrapping_sub(128) & 0x7F
+    } else {
+        ((code as u32) & 0xFF) << 8
+    }
+}
+
 /// `wait4` : attend la fin d'un processus fils.
 pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 {
     const WNOHANG: u32 = 1;
@@ -487,24 +497,21 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         let zombies = task::zombie_children(parent_pid);
         let found = zombies
             .iter()
-            .find(|(child, _)| pid <= 0 || *child == pid as u32)
+            .find(|(child, _, _)| pid <= 0 || *child == pid as u32)
             .copied();
 
-        if let Some((child_pid, code)) = found {
+        if let Some((child_pid, code, par_signal)) = found {
             // BOUCHAUD_WAIT4_RECOLTE_UNIQUE_V1 : seul le fil qui retire le zombie
             // le rend ; un autre fil du meme parent l'a peut-etre deja recolte.
             if !task::collect_child(child_pid) {
                 continue;
             }
             if status_addr != 0 {
-                // Encodage `wait` : octet de poids faible = cause, octet
-                // suivant = code de sortie. Un code >= 128 signale une mort par
-                // signal, comme le fait `kill_faulting_task`.
-                let status = if code >= 128 {
-                    (code as u32 - 128) & 0x7F
-                } else {
-                    ((code as u32) & 0xFF) << 8
-                };
+                // Encodage `wait` : octet de poids faible = signal, octet
+                // suivant = code de sortie. BOUCHAUD_STATUT_SORTIE_V1 : la
+                // mort par signal se lit sur `par_signal`, pas sur le code --
+                // un `exit(130)` n'est pas un SIGINT, ni `exit(128)` un succes.
+                let status = statut_wait(code, par_signal);
                 user_write_u32(status_addr, status);
             }
             return child_pid as i64;
@@ -544,7 +551,7 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let deja_la = task::zombie_children(parent_pid)
             .iter()
-            .any(|(child, _)| pid <= 0 || *child == pid as u32);
+            .any(|(child, _, _)| pid <= 0 || *child == pid as u32);
         if deja_la || !task::has_children(parent_pid) {
             // Annule le parking. Si le fils a gagne le CAS entre-temps, il
             // nous remet pret lui-meme ; dans les deux cas on reboucle.
@@ -651,7 +658,7 @@ pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
         None => {
             // Trame illisible : le gestionnaire a corrompu sa pile, il n'y a
             // aucun etat coherent ou revenir.
-            task::exit_group(128 + signal::SIGSEGV as i32)
+            task::exit_group_par_signal(signal::SIGSEGV as i32)
         }
     }
 }
@@ -761,7 +768,7 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
                         "[signal] {} non intercepte : processus termine",
                         signal::name(signal)
                     );
-                    task::exit_group(128 + signal as i32);
+                    task::exit_group_par_signal(signal as i32);
                 }
             }
         }
@@ -769,12 +776,12 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         // gestionnaire installe (rt_sigaction le refuse deja, ceinture et
         // bretelles).
         if signal == signal::SIGKILL || signal == signal::SIGSTOP {
-            task::exit_group(128 + signal as i32);
+            task::exit_group_par_signal(signal as i32);
         }
 
         if !signal::deliver(frame, signal, &action, blocked) {
             crate::serial_println!("[signal] pile utilisateur inaccessible : processus termine");
-            task::exit_group(128 + signal::SIGSEGV as i32);
+            task::exit_group_par_signal(signal::SIGSEGV as i32);
         }
 
         {
