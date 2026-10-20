@@ -337,6 +337,43 @@ pub fn prochaine_echeance_interactive_ns(cpu: usize) -> u64 {
         .map_or(crate::kernel::echeances::JAMAIS, |b| b.load(core::sync::atomic::Ordering::Relaxed))
 }
 
+/// La borne interactive de `cpu` si elle est echue a `maintenant_ns`,
+/// recalculee d'abord sur les seules taches attachees a ce coeur.
+///
+/// Une interactive reveillee AUTREMENT (futex, signal) avant son echeance
+/// laisse sa borne perimee ; le balayage global, lui, n'est pas du (la borne
+/// globale a ete recalee sans elle) et ne la recalculerait pas. Sans ce
+/// recalcul, le coeur occupe s'armerait a `maintenant + MARGE_NS` en boucle
+/// jusqu'au prochain balayage -- une tempete d'interruptions. Appele avec les
+/// interruptions coupees (armement du minuteur local).
+pub fn borne_interactive_a_jour(cpu: usize, maintenant_ns: u64) -> u64 {
+    let Some(borne) = PROCHAINE_INTERACTIVE.get(cpu) else {
+        return crate::kernel::echeances::JAMAIS;
+    };
+    let valeur = borne.load(core::sync::atomic::Ordering::Relaxed);
+    if valeur == crate::kernel::echeances::JAMAIS || valeur > maintenant_ns {
+        return valeur;
+    }
+    let mut minimum = crate::kernel::echeances::JAMAIS;
+    for index in 0..tasks().len() {
+        let tache = &tasks()[index];
+        let echeance = tache.wake_deadline_ns.charge();
+        if echeance != 0
+            && tache.state == TaskState::Blocked
+            && tache.priorite.charge() == Priorite::Interactive
+            && tache.runq_cpu.charge() as usize == cpu
+            && echeance < minimum
+        {
+            minimum = echeance;
+        }
+    }
+    // Une tache attachee a ce coeur qui s'endort pendant ce recalcul y tourne
+    // elle-meme : elle a publie `Blocked` et son echeance avant d'armer, et
+    // cette boucle la voit. Un `store` ne perd donc rien d'ici.
+    borne.store(minimum, core::sync::atomic::Ordering::Relaxed);
+    minimum
+}
+
 /// La tache courante pose une echeance : interactive, elle entre dans la borne
 /// de son coeur d'attache, et ce coeur -- le sien, puisqu'elle y tourne --
 /// avance son minuteur s'il portait plus tard.

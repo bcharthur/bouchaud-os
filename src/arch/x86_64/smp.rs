@@ -761,8 +761,9 @@ fn cible_occupee(cpu: usize, tsc_maintenant: u64) -> Option<u64> {
     if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
         return None;
     }
-    let borne = crate::kernel::task::prochaine_echeance_interactive_ns(cpu);
-    let ns = crate::kernel::reveil_precis::echeance_occupee(borne, crate::kernel::timer::monotonic_ns())?;
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let borne = crate::kernel::task::borne_interactive_a_jour(cpu, maintenant);
+    let ns = crate::kernel::reveil_precis::echeance_occupee(borne, maintenant)?;
     let cible = crate::kernel::timer::tsc_pour_ns(ns)?;
     Some(cible.max(tsc_maintenant.saturating_add(1)))
 }
