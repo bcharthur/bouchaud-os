@@ -24,6 +24,8 @@ Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Cause du `NON_QUA
 
 **KVM `d097281d` (run 39424044836, 20/10)** : attribution SMP1 et **SMP2** `P13_STRICT_OK` ; SMP4 `QUALIFIE_ECHEC` 2/2 (attente pret -> elu 466/679 us derriere un coeur en mode noyau ; correctifs `5721e711`, `30fb0a4b` HOST+TCG, KVM a mesurer) ; A/B reveil precis bras `on` 8/8 OK, cession CONVAINCANT, IPI NON_CONCLUANT ; Ladybird push 20/20 vert. P13 reste **PARTIAL**.
 
+**KVM `d02e8294` (run 39447650575, 20/10)** : SMP2 `P13_STRICT_OK` reproduit ; SMP1 1/2 et SMP4 1/2, echecs dus a l'emission serie masquee (`vide_differees`) ; atomicite des tubes (`89c25e13`) et statut `wait4` (`160de485`) **VERIFIED_AT_KVM** (os-primitives KVM x3). Decision humaine : chantier console serie (closeout §6.4).
+
 ## Actualisation P13 du 19 octobre 2026
 
 Cette section [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md) prime sur les SHA et etats historiques du tableau ci-dessous. Sur `f5692b7`, CI Fast, Integration, Reliability, Native IPC et Ladybird 20/20 sont verts. Les gels QEMU SMP8 >=200ms passent de 4/9 a 0/15 apres traitement du jeton serie + hard IRQ, d'apres `docs/SCHEDULER_NG.md`. **P13 reste PARTIAL:** attribution KVM SMP1/2/4 `NON_QUALIFIANT`, A/B reveil precis KVM SMP1/4 `NON_CONCLUANT` 0/4, SMP8 KVM dedie non prouve; correction qualificateur `4d279ff` (17/16) ne change pas ces donnees. GPU direct/tuiles KVM NON_CONVAINCANT. Baseline globale NOT_ESTABLISHED.

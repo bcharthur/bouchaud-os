@@ -228,6 +228,10 @@ d'election du pire 5,7 / 3,0 ms) ; apres (HEAD) QUALIFIE_OK en 2 tentatives,
 pire 3,9 / 2,6 ms (attente 3,6 / 2,0 ms), `cessions_interactives=87`.
 Tirages uniques : indicatif, KVM tranche.
 
+KVM (`d02e8294`, 39447650575) : SMP4 attribution 1/2 (0/2 avant) ; attentes
+interactives > 200 us : 1 derriere un fil noyau, 2 derriere l'utilisateur (pire 742 us) -- l'election n'est plus
+le facteur dominant ; la passe en echec perd 16,6 ms en REPRISE dans `vide_differees` (emission serie masquee).
+
 Instrument : `attentes_noyau` / `attentes_utilisateur` et leurs pires (prets
 -> elu > 200 us d'une interactive utilisateur, classes par l'occupant
 precedent du coeur), `cessions_interactives` -- ligne `REVEIL_PRECIS`.
