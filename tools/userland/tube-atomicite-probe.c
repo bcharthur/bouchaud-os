@@ -25,6 +25,12 @@
  * une sequence qui saute, un compte faux : ECHEC. R parcourt 100, 512 et
  * 4096 (= PIPE_BUF).
  *
+ * Chaque taille passe deux fois : en `write`, puis en `writev` a deux
+ * vecteurs coupes au milieu de l'enregistrement -- la forme de la vidange
+ * stdio de musl. Un `writev` de PIPE_BUF octets ou moins est UNE ecriture
+ * (POSIX) : servi vecteur par vecteur, un autre ecrivain passerait entre les
+ * deux moities.
+ *
  *     tube-atomicite-probe [TOURS]
  *
  * POLLOUT ET ECRITURE TOUT-OU-RIEN
@@ -37,7 +43,7 @@
  * puis vide par tranches de 700 : chaque fois que POLLOUT est annonce, une
  * ecriture de PIPE_BUF octets doit passer entiere ; tube vide, POLLOUT est du.
  *
- * Verdict : `TUBE_ATOMICITE_OK tailles=3 ecrivains=N tours=T` ; sinon
+ * Verdict : `TUBE_ATOMICITE_OK tailles=3 ecrivains=N tours=T modes=2` ; sinon
  * `TUBE_ATOMICITE_FAIL` et code 1. Tourne aussi sur Linux (reference).
  */
 #define _GNU_SOURCE
@@ -49,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -65,8 +72,9 @@ static long long maintenant_ms(void)
     return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
-/* Un ecrivain : `tours` enregistrements de `r` octets, chacun en UN write. */
-static void ecrivain(int fd, int id, int tours, int r)
+/* Un ecrivain : `tours` enregistrements de `r` octets, chacun en UN write
+ * (ou UN writev a deux vecteurs si `vecteurs`). */
+static void ecrivain(int fd, int id, int tours, int r, int vecteurs)
 {
     unsigned char e[PIPE_BUF];
     int partielles = 0;
@@ -76,7 +84,13 @@ static void ecrivain(int fd, int id, int tours, int r)
         e[2] = (unsigned char)((s >> 8) & 0xff);
         e[3] = (unsigned char)((s >> 16) & 0xff);
         e[4] = (unsigned char)((s >> 24) & 0xff);
-        ssize_t n = write(fd, e, (size_t)r);
+        ssize_t n;
+        if (vecteurs) {
+            struct iovec v[2] = { { e, (size_t)(r / 2) }, { e + r / 2, (size_t)(r - r / 2) } };
+            n = writev(fd, v, 2);
+        } else {
+            n = write(fd, e, (size_t)r);
+        }
         if (n != r) {
             /* Une ecriture partielle d'au plus PIPE_BUF octets est deja la
              * faute ; la completer comme le ferait un programme ordinaire
@@ -99,7 +113,7 @@ static void ecrivain(int fd, int id, int tours, int r)
     _exit(partielles ? 100 + (partielles > 27 ? 27 : partielles) : 0);
 }
 
-static void une_taille(int r, int tours)
+static void une_taille(int r, int tours, int vecteurs)
 {
     int c[2];
     if (pipe(c) != 0) {
@@ -112,7 +126,7 @@ static void une_taille(int r, int tours)
         fils[i] = fork();
         if (fils[i] == 0) {
             close(c[0]);
-            ecrivain(c[1], i, tours, r);
+            ecrivain(c[1], i, tours, r, vecteurs);
         }
     }
     close(c[1]);
@@ -158,10 +172,10 @@ static void une_taille(int r, int tours)
     }
     free(flux);
     int bon = lus == attendus && melanges == 0 && sauts == 0 && statuts_partiels == 0 && statuts_faux == 0;
-    printf("TUBE_ATOMICITE r=%d octets=%ld/%ld melanges=%ld sauts=%ld ecritures_partielles=%d "
+    printf("TUBE_ATOMICITE r=%d mode=%s octets=%ld/%ld melanges=%ld sauts=%ld ecritures_partielles=%d "
            "ecrivains_en_erreur=%d ms=%lld %s\n",
-           r, lus, attendus, melanges, sauts, statuts_partiels, statuts_faux, maintenant_ms() - t0,
-           bon ? "ok" : "ECHEC");
+           r, vecteurs ? "writev" : "write", lus, attendus, melanges, sauts, statuts_partiels, statuts_faux,
+           maintenant_ms() - t0, bon ? "ok" : "ECHEC");
     if (!bon)
         echecs++;
 }
@@ -225,13 +239,14 @@ int main(int argc, char **argv)
     }
     signal(SIGPIPE, SIG_IGN);
     static const int tailles[] = { 100, 512, PIPE_BUF };
-    for (int i = 0; i < 3; i++)
-        une_taille(tailles[i], tours);
+    for (int vecteurs = 0; vecteurs < 2; vecteurs++)
+        for (int i = 0; i < 3; i++)
+            une_taille(tailles[i], tours, vecteurs);
     coherence_poll();
     if (echecs) {
         printf("TUBE_ATOMICITE_FAIL echecs=%d\n", echecs);
         return 1;
     }
-    printf("TUBE_ATOMICITE_OK tailles=3 ecrivains=%d tours=%d\n", ECRIVAINS, tours);
+    printf("TUBE_ATOMICITE_OK tailles=3 ecrivains=%d tours=%d modes=2\n", ECRIVAINS, tours);
     return 0;
 }
