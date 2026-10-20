@@ -72,7 +72,7 @@ pub fn preempt_from_irq() {
         return;
     }
 
-    wake_sleepers();
+    wake_sleepers_depuis_irq();
 
     let cpu_id = local_cpu();
     // Une IRQ de quantum signifie que la tâche courante est encore runnable :

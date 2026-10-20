@@ -25,8 +25,21 @@
 
 /// « Aucune echeance en vue » (`echeances::JAMAIS`).
 pub const JAMAIS: u64 = u64::MAX;
-/// En deca, armer couterait plus qu'attendre : le coeur ne s'endort pas
-/// vraiment, et une echeance deja due sera vue au prochain balayage.
+/// Delai donne a une echeance DEJA DUE au moment d'armer (BOUCHAUD_REVEIL_DU_V1).
+///
+/// Ce n'est plus un seuil de refus. Jusqu'ici une echeance due, ou a moins de
+/// cette marge, n'etait pas armee : « le prochain balayage la servira ». Mais
+/// le coeur faisait quand meme `hlt`, et le prochain balayage etait la
+/// prochaine interruption -- le tic du PIT (1 ms, coeur zero) ou le quantum
+/// (4 ms). Run 39308093631 (KVM, reveil precis actif) : retard au repos p50
+/// 35-51 us, p95 851-955 us -- un reveil sur vingt attendait le tic. La sonde
+/// rendait « charge sans effet » (repos p95 917 us > charge p95 212 us) : le
+/// coeur AU REPOS reveillait plus tard que le coeur charge.
+///
+/// Desormais une echeance dans la marge est armee EXACTEMENT, et une echeance
+/// due l'est a `maintenant + MARGE_NS` : jamais plus d'une marge de retard,
+/// et une borne perimee (due mais sans tache a servir) ne peut faire tirer le
+/// minuteur qu'une fois par marge -- pas en boucle.
 pub const MARGE_NS: u64 = 20_000;
 
 /// Le TSC qui correspond a l'instant monotone `ns`, avec l'horloge
@@ -41,12 +54,81 @@ pub fn tsc_de(ns: u64, boot_tsc: u64, hz: u64) -> Option<u64> {
     u64::try_from(tsc).ok()
 }
 
+/// Pourquoi une echeance n'est PAS armee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refus {
+    /// Politique desactivee.
+    Politique,
+    /// Aucune echeance connue (ou balayage en cours sur un autre coeur : il
+    /// recale la borne et l'armera lui-meme en s'endormant).
+    SansBorne,
+    /// Frequence du TSC inconnue.
+    CibleInconnue,
+    /// Meme `maintenant + MARGE_NS` est deja passe sur ce TSC : horloges
+    /// incoherentes, rien de sur a armer.
+    DejaPasse,
+    /// Le quantum arme tombe avant l'echeance : il reste arme.
+    QuantumAvant,
+}
+
+/// Ce qui est arme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Armement {
+    /// Le TSC a ecrire dans `IA32_TSC_DEADLINE`.
+    pub tsc: u64,
+    /// L'echeance etait deja due (ou sa cible deja passee sur ce TSC) :
+    /// armee a `maintenant + MARGE_NS`.
+    pub due: bool,
+}
+
+/// `decide`, avec le motif du refus.
+///
+/// `cible_tsc` : `tsc_de(borne_ns)` ; `plancher_tsc` :
+/// `tsc_de(maintenant_ns + MARGE_NS)`.
+pub fn decide_motif(
+    voulu: bool,
+    borne_ns: u64,
+    maintenant_ns: u64,
+    tsc_maintenant: u64,
+    arme_tsc: u64,
+    cible_tsc: Option<u64>,
+    plancher_tsc: Option<u64>,
+) -> Result<Armement, Refus> {
+    if !voulu {
+        return Err(Refus::Politique);
+    }
+    if borne_ns == JAMAIS || borne_ns == 0 {
+        return Err(Refus::SansBorne);
+    }
+    let armement = if borne_ns <= maintenant_ns {
+        Armement { tsc: plancher_tsc.ok_or(Refus::CibleInconnue)?, due: true }
+    } else {
+        let cible = cible_tsc.ok_or(Refus::CibleInconnue)?;
+        if cible > tsc_maintenant {
+            Armement { tsc: cible, due: false }
+        } else {
+            // Ecart entre l'horloge monotone et le TSC de CE coeur : la cible
+            // est passee alors que la borne ne l'est pas. Le plancher garde la
+            // meme cadence qu'une echeance due.
+            Armement { tsc: plancher_tsc.ok_or(Refus::CibleInconnue)?, due: true }
+        }
+    };
+    if armement.tsc <= tsc_maintenant {
+        return Err(Refus::DejaPasse);
+    }
+    if armement.tsc >= arme_tsc {
+        return Err(Refus::QuantumAvant);
+    }
+    Ok(armement)
+}
+
 /// L'echeance TSC a armer avant `hlt`, ou `None` pour laisser le quantum.
 ///
 /// `borne_ns` : la plus proche echeance de sommeil connue (borne inferieure ;
 /// `JAMAIS` pendant un balayage) ; `maintenant_ns` / `tsc_maintenant` :
 /// l'heure ; `arme_tsc` : ce que le minuteur local porte deja (le quantum) ;
-/// `cible_tsc` : `tsc_de(borne_ns)` ; `voulu` : la politique.
+/// `cible_tsc` : `tsc_de(borne_ns)` ; `plancher_tsc` :
+/// `tsc_de(maintenant_ns + MARGE_NS)` ; `voulu` : la politique.
 pub fn decide(
     voulu: bool,
     borne_ns: u64,
@@ -54,24 +136,20 @@ pub fn decide(
     tsc_maintenant: u64,
     arme_tsc: u64,
     cible_tsc: Option<u64>,
+    plancher_tsc: Option<u64>,
 ) -> Option<u64> {
-    if !voulu || borne_ns == JAMAIS || borne_ns == 0 {
-        return None;
-    }
-    if borne_ns <= maintenant_ns.saturating_add(MARGE_NS) {
-        return None;
-    }
-    let cible = cible_tsc?;
-    if cible <= tsc_maintenant || cible >= arme_tsc {
-        return None;
-    }
-    Some(cible)
+    decide_motif(voulu, borne_ns, maintenant_ns, tsc_maintenant, arme_tsc, cible_tsc, plancher_tsc)
+        .ok()
+        .map(|a| a.tsc)
 }
 
 /// La meme decision pour un minuteur local en mode PERIODIQUE (QEMU TCG n'a
 /// pas TSC-deadline) : le compte a ecrire pour tirer a l'echeance, si elle
 /// precede ce qui reste du compte courant. `comptes_par_ms` : la frequence du
 /// minuteur apres son diviseur. Le quantum est restaure au declenchement.
+///
+/// Experience OFF (`reveil-precis periodique on`) : elle garde l'ancien refus
+/// dans la marge, que BOUCHAUD_REVEIL_DU_V1 ne change que pour le TSC-deadline.
 pub fn decide_compte(
     voulu: bool,
     borne_ns: u64,

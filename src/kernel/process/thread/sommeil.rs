@@ -314,15 +314,52 @@ fn recalcule_echeance() {
     PROCHAINE_ECHEANCE.recale(minimum);
 }
 
+// DIAGNOSTIC de la queue au repos (BOUCHAUD_REVEIL_PRECIS_V1) : les reveils
+// rendus plus de `SEUIL_TARDIF_NS` apres leur echeance, classes par le
+// contexte du balayage qui les rend -- la tache elle-meme au retour de son
+// `hlt` (`soi`), une autre tache (`autre` : le coeur n'etait pas au repos),
+// ou une interruption (`irq`), ou la boucle d'un coeur sans tache
+// (`inactif`). La source IRQ est DECLAREE par le chemin de preemption
+// (`balayage_depuis_irq`), pas deduite. Aucun effet sur l'ordonnancement.
+const SEUIL_TARDIF_NS: u64 = 200_000;
+static TARDIFS_SOI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TARDIFS_AUTRE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TARDIFS_IRQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TARDIFS_INACTIF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BALAYAGE_IRQ: [core::sync::atomic::AtomicBool; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::smp::MAX_CPUS];
+
+/// `wake_sleepers` appele depuis le chemin de preemption (IRQ du quantum).
+fn wake_sleepers_depuis_irq() {
+    let cpu = local_cpu();
+    if cpu < BALAYAGE_IRQ.len() {
+        BALAYAGE_IRQ[cpu].store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    wake_sleepers();
+    if cpu < BALAYAGE_IRQ.len() {
+        BALAYAGE_IRQ[cpu].store(false, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `(soi, autre, irq, inactif)` : reveils tardifs par contexte de balayage.
+pub fn compteurs_tardifs() -> [u64; 4] {
+    use core::sync::atomic::Ordering::Relaxed;
+    [TARDIFS_SOI.load(Relaxed), TARDIFS_AUTRE.load(Relaxed), TARDIFS_IRQ.load(Relaxed), TARDIFS_INACTIF.load(Relaxed)]
+}
+
 fn wake_sleepers() {
     let now = crate::kernel::timer::monotonic_ns();
     // Le raccourci : une charge atomique au lieu d'un balayage complet.
     if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
     }
+    let cur_balayage = current_index_raw();
+    let source_irq = BALAYAGE_IRQ
+        .get(local_cpu())
+        .map_or(false, |b| b.load(core::sync::atomic::Ordering::Relaxed));
     // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : qui tient le coeur pendant ce balayage.
     let par = {
-        let cur = current_index_raw();
+        let cur = cur_balayage;
         let en_irq = crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu())
             .map_or(false, |id| crate::arch::x86_64::cpu_local::local(id).irq_depth() > 0);
         if cur < tasks().len() {
@@ -346,6 +383,19 @@ fn wake_sleepers() {
             // sienne en reprenant la main. Une echeance perimee sur une tache
             // Ready est sans effet : le reveil exige Blocked -> Ready.
             task.futex_key.range(0);
+            let retard = now.saturating_sub(task.wake_deadline_ns.charge());
+            if retard > SEUIL_TARDIF_NS {
+                use core::sync::atomic::Ordering::Relaxed;
+                if source_irq {
+                    TARDIFS_IRQ.fetch_add(1, Relaxed);
+                } else if cur_balayage == NO_TASK {
+                    TARDIFS_INACTIF.fetch_add(1, Relaxed);
+                } else if cur_balayage == index {
+                    TARDIFS_SOI.fetch_add(1, Relaxed);
+                } else {
+                    TARDIFS_AUTRE.fetch_add(1, Relaxed);
+                }
+            }
             // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : echeance -> pret.
             task.reveil_elu_ns.range(0);
             task.reveil_par.range(par);

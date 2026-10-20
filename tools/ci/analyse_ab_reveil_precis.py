@@ -41,6 +41,15 @@ QUANT = re.compile(r"(au repos|sous charge \((?:normal|interactif)\))\s+median\s
 BRAS = re.compile(r"^AB_PRECIS tour=(\d+) reveil=(on|off)$")
 FIN_BRAS = re.compile(r"^AB_PRECIS_BRAS_FIN tour=(\d+) reveil=(on|off)$")
 COMPTEUR = re.compile(r"REVEIL_PRECIS voulu=(\d) minuteur=(\S+) armes=(\d+)")
+# Diagnostic de la queue au repos (cumuls du noyau ; differences par bras).
+DIAG = re.compile(r"tirs=(\d+) tirs_avant_cible=(\d+) avance_max_ns=(\d+) ipi_pendant_arme=(\d+) "
+                  r"armes_dus=(\d+) refus_quantum_avant=(\d+) refus_sans_borne=(\d+) refus_autres=(\d+) "
+                  r"tardifs_soi=(\d+) tardifs_autre=(\d+) tardifs_irq=(\d+) tardifs_inactif=(\d+)"
+                  r"(?: installes_ipi=(\d+) installes_eveilles=(\d+))?"
+                  r"(?: serie_longues=(\d+) serie_pire_us=(\d+))?")
+DIAG_NOMS = ("tirs", "avant_cible", "avance_max_ns", "ipi_pendant_arme", "armes_dus", "refus_quantum_avant",
+             "refus_sans_borne", "refus_autres", "tardifs_soi", "tardifs_autre", "tardifs_irq", "tardifs_inactif",
+             "installes_ipi", "installes_eveilles", "serie_longues", "serie_pire_us")
 
 
 def analyse(texte, tours, smp, nom):
@@ -56,7 +65,7 @@ def analyse(texte, tours, smp, nom):
             if courant is not None:
                 fautes.append(f"tour {courant['tour']} {courant['v']} : bras precedent non ferme")
             courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None,
-                       "compteurs": [], "diag": [], "ferme": False}
+                       "compteurs": [], "diag": [], "noyau": [], "ferme": False}
             bras.append(courant)
             continue
         m = FIN_BRAS.match(l)
@@ -81,6 +90,9 @@ def analyse(texte, tours, smp, nom):
         m = COMPTEUR.search(l)
         if m:
             courant["compteurs"].append((int(m.group(1)), m.group(2), int(m.group(3))))
+            n = DIAG.search(l)
+            if n:
+                courant["noyau"].append(tuple(int(x or 0) for x in n.groups()))
         # Diagnostic seulement (aucun effet sur le verdict) : ce que le noyau
         # dit des reveils en retard au repos -- qui tenait le coeur, quelle
         # etape a coute. Run 38732049308 : sous `on`, p50 39 us mais p95 852 ;
@@ -143,6 +155,13 @@ def analyse(texte, tours, smp, nom):
     for b in bras:
         for d in b["diag"]:
             sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
+        # Les compteurs du noyau entre le releve d'avant et celui d'apres la
+        # sonde (l'avance maximale est un maximum cumule : sa valeur finale).
+        if len(b["noyau"]) >= 2:
+            a, z = b["noyau"][0], b["noyau"][-1]
+            parts = [f"{n}={z[i]}" if n in ("avance_max_ns", "serie_pire_us") else f"{n}=+{z[i] - a[i]}"
+                     for i, n in enumerate(DIAG_NOMS)]
+            sortie.append(f"  noyau tour {b['tour']} {b['v']} : " + " ".join(parts))
 
     def med(v, phase, k):
         return statistics.median([par_tour[t][v]["q"][phase][k] for t in paires_qualifiees]) if paires_qualifiees else 0

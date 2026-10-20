@@ -23,7 +23,9 @@ Regles :
      periodique et efface `ARME_PRECIS` en mode TSC-deadline ;
   4. la decision reste pure et testee sur l'hote : `reveil_precis.rs` ne
      touche a aucun registre, et `tools/smp/test_reveil_precis.rs` couvre
-     l'echeance due, la politique desactivee et l'arrondi superieur du compte ;
+     l'echeance due (ARMEE a une marge, BOUCHAUD_REVEIL_DU_V1 -- elle
+     n'attend plus le tic), l'echeance dans la marge (armee exactement), la
+     politique desactivee et l'arrondi superieur du compte ;
   5. l'A/B a des criteres declares (`analyse_ab_reveil_precis.py`) : quorum
      de 4 tours, ordre AB/BA, armements nuls sous `off`.
 
@@ -46,7 +48,8 @@ INTERRUPTEUR = "static REVEIL_PRECIS: AtomicBool = AtomicBool::new(true);"
 PREUVE = "CONVAINCANT de b6c99032 (run 38732049308"
 MATERIEL_OFF = "static REVEIL_PRECIS_MATERIEL: AtomicBool = AtomicBool::new(false);"
 MATERIEL_EXIGE = ("    if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {\n"
-                  "        return;\n    }\n    let cible = crate::kernel::reveil_precis::decide(")
+                  "        return;\n    }\n    let maintenant = crate::kernel::timer::monotonic_ns();\n"
+                  "    let decision = crate::kernel::reveil_precis::decide_motif(")
 PERIODIQUE_OFF = "static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);"
 PERIODIQUE_EXIGE = ("    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {\n"
                     "        if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {\n            return;\n        }")
@@ -57,8 +60,14 @@ AUTOUR_HLT = ("    smp::arme_reveil_precis_avant_hlt();\n"
 PERIODIQUE = ("            if cpu < MAX_CPUS && ARME_PRECIS[cpu].swap(false, Ordering::Relaxed) {\n"
               "                let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);")
 TSC = "                    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);"
-TESTS = ("une_echeance_due_ou_trop_proche_n_est_pas_armee", "la_politique_desactivee_n_arme_jamais",
-         "periodique_le_compte_ne_tire_jamais_avant_l_echeance", "un_tsc_cible_deja_passe_n_est_pas_arme")
+# BOUCHAUD_REVEIL_DU_V1 : une echeance due ou dans la marge est ARMEE (au plus
+# une marge de retard, jamais en boucle) -- elle n'attend plus le tic.
+TESTS = ("une_echeance_dans_la_marge_est_armee_exactement", "une_echeance_due_est_armee_a_une_marge_jamais_en_boucle",
+         "la_politique_desactivee_n_arme_jamais", "periodique_le_compte_ne_tire_jamais_avant_l_echeance",
+         "un_tsc_cible_deja_passe_est_arme_au_plancher", "une_echeance_due_ne_depasse_pas_le_quantum")
+# La regle elle-meme, dans la decision pure : une echeance due n'est pas
+# refusee (elle est armee au plancher).
+DUE_ARMEE = "Armement { tsc: plancher_tsc.ok_or(Refus::CibleInconnue)?, due: true }"
 
 
 def corps(texte: str, signature: str) -> str:
@@ -97,7 +106,7 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("la politique est basculee ailleurs que par la commande reveil-precis.")
     if '"reveil-precis" => reveil_precis(argc, &argv),' not in t["shell"]:
         fautes.append("shell : la commande reveil-precis n'est plus branchee.")
-    sommeil = corps(t["idle"], "pub fn commit_scheduler_idle(")
+    sommeil = corps(t["idle"], "pub fn commit_scheduler_idle_sauf(")
     if sommeil.count(HLT) != 1 or sommeil.count(AUTOUR_HLT) != 1:
         fautes.append("idle : l'armement precis n'encadre plus le `sti; hlt` de commit_scheduler_idle.")
     for f in ("arme_reveil_precis_avant_hlt(", "retire_reveil_precis_apres_hlt("):
@@ -111,6 +120,8 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("smp.rs : le quantum TSC-deadline n'efface plus l'armement precis.")
     if any(m in t["pur"] for m in ("asm!", "write_msr", "unsafe", "static ")):
         fautes.append("reveil_precis.rs : la decision n'est plus pure.")
+    if t["pur"].count(DUE_ARMEE) != 2 or "Marge" in corps(t["pur"], "pub fn decide_motif("):
+        fautes.append("reveil_precis.rs : une echeance due n'est plus armee au plancher (le reveil attendrait le tic).")
     for nom in TESTS:
         if f"fn {nom}()" not in t["test"]:
             fautes.append(f"test hote absent : {nom}.")
@@ -136,13 +147,16 @@ def negatifs(t: dict, src: str) -> list:
         ("reveil precis desactive par defaut", "smp", INTERRUPTEUR, INTERRUPTEUR.replace("true", "false")),
         ("preuve plus citee", "smp", PREUVE, "CONVAINCANT"),
         ("materiel nu actif par defaut", "smp", MATERIEL_OFF, MATERIEL_OFF.replace("false", "true")),
-        ("materiel nu sans autorisation", "smp", MATERIEL_EXIGE, "    let cible = crate::kernel::reveil_precis::decide("),
+        ("materiel nu sans autorisation", "smp", MATERIEL_EXIGE,
+         "    let maintenant = crate::kernel::timer::monotonic_ns();\n    let decision = crate::kernel::reveil_precis::decide_motif("),
+        ("echeance due de nouveau refusee", "pur", DUE_ARMEE, "return Err(Refus::CibleInconnue)"),
         ("armement sorti du hlt", "idle", "    smp::arme_reveil_precis_avant_hlt();\n", ""),
         ("retrait oublie", "idle", "    smp::retire_reveil_precis_apres_hlt();\n", ""),
         ("quantum periodique non restaure", "smp", PERIODIQUE, PERIODIQUE.replace("swap(false", "load(")),
         ("armement TSC jamais efface", "smp", TSC, ""),
         ("decision impure", "pur", "pub fn decide(", "unsafe fn decide("),
-        ("test d'echeance due retire", "test", "fn une_echeance_due_ou_trop_proche_n_est_pas_armee()", "fn x()"),
+        ("test d'echeance due retire", "test", "fn une_echeance_due_est_armee_a_une_marge_jamais_en_boucle()", "fn x()"),
+        ("test de la marge retire", "test", "fn une_echeance_dans_la_marge_est_armee_exactement()", "fn x()"),
         ("quorum abaisse", "analyse", "QUORUM = 4", "QUORUM = 1"),
         ("commande debranchee", "shell", '"reveil-precis" => reveil_precis(argc, &argv),', ""),
     ]
@@ -173,7 +187,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee, periodique et materiel nu a part, A/B a criteres declares ; 17 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 19 negatifs)")
     return 0
 
 

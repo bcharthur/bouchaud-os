@@ -817,6 +817,72 @@ static SOUS_HYPERVISEUR: AtomicBool = AtomicBool::new(false);
 static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
 
+// DIAGNOSTIC de la queue au repos (run 38732049308 : p50 39 us mais p95
+// 852 us sous `on`). Deux hypotheses a departager PAR MESURE :
+//   * le minuteur tire AVANT la cible : la boucle d'attente se rendort, et
+//     l'echeance, desormais a moins de `MARGE_NS`, n'est plus armee -- le
+//     reveil attend le tic suivant ;
+//   * le coeur n'est pas au repos a l'echeance (un autre fil tourne) : aucun
+//     armement precis, le reveil attend le prochain balayage.
+// Aucun effet sur la politique : des compteurs, publies par `reveil-precis`.
+/// Interruptions du vecteur local recues alors qu'une echeance PRECISE etait
+/// armee, et parmi elles : minuteur effectivement tire (MSR remis a zero) mais
+/// TSC encore AVANT la cible ; IPI arrives pendant l'armement (MSR encore arme).
+static TIRS_PRECIS: AtomicU64 = AtomicU64::new(0);
+static TIRS_AVANT_CIBLE: AtomicU64 = AtomicU64::new(0);
+static AVANCE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static IPI_PENDANT_ARME: AtomicU64 = AtomicU64::new(0);
+/// Echeances DUES au moment d'armer, armees a `maintenant + MARGE_NS`
+/// (BOUCHAUD_REVEIL_DU_V1 ; avant : refusees, servies au tic suivant).
+static ARMES_DUS: AtomicU64 = AtomicU64::new(0);
+/// Refus d'armement, par motif (`reveil_precis::Refus`).
+static REFUS_QUANTUM_AVANT: AtomicU64 = AtomicU64::new(0);
+static REFUS_SANS_BORNE: AtomicU64 = AtomicU64::new(0);
+static REFUS_AUTRES: AtomicU64 = AtomicU64::new(0);
+
+/// A l'entree du gestionnaire du vecteur local, AVANT tout rearmement :
+/// classe l'interruption si une echeance precise etait armee. Une lecture de
+/// MSR seulement dans ce cas (une par reveil precis).
+pub fn note_entree_vecteur_local(entree_tsc: u64) {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS || !ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+        return;
+    }
+    // Le mode TSC-deadline desarme le minuteur et remet le MSR a zero quand
+    // il tire : non nul, l'echeance attend encore -- cette interruption est
+    // un IPI de replanification.
+    if usermode::read_msr(IA32_TSC_DEADLINE) != 0 {
+        IPI_PENDANT_ARME.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    TIRS_PRECIS.fetch_add(1, Ordering::Relaxed);
+    let cible = ARME_TSC[cpu].load(Ordering::Relaxed);
+    if entree_tsc < cible {
+        TIRS_AVANT_CIBLE.fetch_add(1, Ordering::Relaxed);
+        let par_ms = crate::kernel::timer::cycles_par_ms().max(1);
+        let avance_ns = ((cible - entree_tsc) as u128 * 1_000_000 / par_ms as u128).min(u64::MAX as u128) as u64;
+        AVANCE_MAX_NS.fetch_max(avance_ns, Ordering::Relaxed);
+    }
+}
+
+/// `(tirs, avant cible, avance max ns, IPI pendant l'armement, armes dus,
+/// refus quantum avant, refus sans borne, refus autres)`.
+pub fn diagnostic_reveil_precis() -> [u64; 8] {
+    [
+        TIRS_PRECIS.load(Ordering::Relaxed),
+        TIRS_AVANT_CIBLE.load(Ordering::Relaxed),
+        AVANCE_MAX_NS.load(Ordering::Relaxed),
+        IPI_PENDANT_ARME.load(Ordering::Relaxed),
+        ARMES_DUS.load(Ordering::Relaxed),
+        REFUS_QUANTUM_AVANT.load(Ordering::Relaxed),
+        REFUS_SANS_BORNE.load(Ordering::Relaxed),
+        REFUS_AUTRES.load(Ordering::Relaxed),
+    ]
+}
+
 /// Juste avant `hlt`, interruptions coupees : arme le minuteur local sur la
 /// plus proche echeance de sommeil si elle precede le quantum.
 pub fn arme_reveil_precis_avant_hlt() {
@@ -860,15 +926,28 @@ pub fn arme_reveil_precis_avant_hlt() {
     if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
         return;
     }
-    let cible = crate::kernel::reveil_precis::decide(
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let decision = crate::kernel::reveil_precis::decide_motif(
         REVEIL_PRECIS.load(Ordering::Relaxed),
         borne,
-        crate::kernel::timer::monotonic_ns(),
+        maintenant,
         crate::arch::x86_64::cpu::rdtsc(),
         ARME_TSC[cpu].load(Ordering::Relaxed),
         crate::kernel::timer::tsc_pour_ns(borne),
+        crate::kernel::timer::tsc_pour_ns(maintenant.saturating_add(crate::kernel::reveil_precis::MARGE_NS)),
     );
-    if let Some(tsc) = cible {
+    {
+        use crate::kernel::reveil_precis::Refus;
+        match decision {
+            Ok(a) if a.due => { ARMES_DUS.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::QuantumAvant) => { REFUS_QUANTUM_AVANT.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::SansBorne) => { REFUS_SANS_BORNE.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::Politique) | Ok(_) => {}
+            Err(_) => { REFUS_AUTRES.fetch_add(1, Ordering::Relaxed); }
+        }
+    }
+    if let Ok(armement) = decision {
+        let tsc = armement.tsc;
         unsafe { usermode::write_msr(IA32_TSC_DEADLINE, tsc) };
         ARME_TSC[cpu].store(tsc, Ordering::Relaxed);
         ARME_PRECIS[cpu].store(true, Ordering::Relaxed);

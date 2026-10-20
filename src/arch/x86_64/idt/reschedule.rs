@@ -36,6 +36,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         crate::kernel::task::GEL_SOURCE_QUANTUM,
     );
     smp::eoi_local();
+    // BOUCHAUD_REVEIL_PRECIS_V1, diagnostic : classer l'interruption AVANT
+    // que le quantum ne remplace l'echeance armee.
+    smp::note_entree_vecteur_local(entree_tsc);
     if smp::local_scheduler_timer_enabled() {
         smp::arm_local_scheduler_timer();
     }

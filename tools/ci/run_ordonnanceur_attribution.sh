@@ -47,7 +47,12 @@ mkdir -p "$SORTIE/scenario/bin"
 cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
 {
   echo "echo ORDO_ATTRIBUTION_DEBUT"
+  # Diagnostic seulement : les compteurs du reveil (armements, echeances dues,
+  # IPI vers une tache installee, emissions serie masquees) avant et apres les
+  # passes. `reveil-precis` sans argument ne change aucune politique.
+  echo "reveil-precis"
   for _ in $(seq "$PASSES"); do echo "/bin/ordonnanceur-probe 8"; done
+  echo "reveil-precis"
   echo "echo ORDO_ATTRIBUTION_FIN"
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/ordo.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)
@@ -70,7 +75,7 @@ done
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 propre() { sed -E 's/\x1b\[[0-9;]*m//g; s/^(\[[^]]*\]){2}\[FPS:[^]]*\] //' "$1"; }
-propre "$LOG" | grep -aE '^  (au repos|sous charge)|^  attribution|^  ventilation|^  comptes|^  phase non jugeable|^  PREUVE|^  tentative|^  - |^VERDICT_SONDE|^RESULTAT|\[POINTS-COOP\]' | sed 's/^/  /' || true
+propre "$LOG" | grep -aE '^  (au repos|sous charge)|^  attribution|^  ventilation|^  comptes|^  phase non jugeable|^  PREUVE|^  tentative|^  - |^VERDICT_SONDE|^RESULTAT|\[POINTS-COOP\]|REVEIL_PRECIS voulu=' | sed 's/^/  /' || true
 
 echecs=0
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs=$((echecs + 1)); fi; }

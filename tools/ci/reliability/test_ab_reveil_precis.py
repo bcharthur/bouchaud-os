@@ -130,6 +130,48 @@ class DelimitationDuBras(unittest.TestCase):
         self.assertEqual((verdict, code), ("DEFAUT", 1))
 
 
+class DiagnosticNoyau(unittest.TestCase):
+    """Les compteurs du noyau (queue au repos) : differences par bras, sans
+    effet sur le verdict."""
+
+    def test_differences_publiees_et_verdict_inchange(self):
+        base = journal()
+        texte = []
+        n = 0
+        for l in base.splitlines():
+            if "REVEIL_PRECIS voulu=" in l:
+                n += 1
+                l += (f" periodique=0 materiel=0 hyperviseur=1 tirs={n * 10} tirs_avant_cible={n} avance_max_ns=1500 "
+                      f"ipi_pendant_arme=0 armes_dus={n * 2} refus_quantum_avant={n * 3} refus_sans_borne=0 "
+                      f"refus_autres=0 tardifs_soi={n} tardifs_autre={n * 4} tardifs_irq=0 tardifs_inactif=0 "
+                      f"installes_ipi={n * 5} installes_eveilles=0 serie_longues={n} serie_pire_us=4321")
+            texte.append(l)
+        sortie, v, c = a.analyse("\n".join(texte) + "\n", 4, "1", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+        lignes = [x for x in sortie if x.startswith("  noyau tour 1 off")]
+        self.assertEqual(len(lignes), 1)
+        self.assertIn("tirs=+10", lignes[0])
+        self.assertIn("tardifs_autre=+4", lignes[0])
+        self.assertIn("avance_max_ns=1500", lignes[0])
+        self.assertIn("installes_ipi=+5", lignes[0])
+        self.assertIn("serie_longues=+1", lignes[0])
+        self.assertIn("serie_pire_us=4321", lignes[0])
+
+    def test_ligne_d_avant_les_compteurs_d_installation(self):
+        # Un noyau qui ne publie pas encore les champs optionnels : zero.
+        base = journal()
+        texte = []
+        for l in base.splitlines():
+            if "REVEIL_PRECIS voulu=" in l:
+                l += (" tirs=1 tirs_avant_cible=0 avance_max_ns=0 ipi_pendant_arme=0 armes_dus=0 "
+                      "refus_quantum_avant=0 refus_sans_borne=0 refus_autres=0 tardifs_soi=0 tardifs_autre=0 "
+                      "tardifs_irq=0 tardifs_inactif=0")
+            texte.append(l)
+        sortie, v, c = a.analyse("\n".join(texte) + "\n", 4, "1", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+        self.assertTrue(any("installes_ipi=+0" in x for x in sortie))
+
+
 class LignesEntrelacees(unittest.TestCase):
     """Run 38704459647 : sous KVM le noyau ecrit sur la ligne de la sonde ;
     six bras sur huit etaient rendus « mesure incomplete »."""
