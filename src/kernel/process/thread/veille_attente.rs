@@ -129,6 +129,13 @@ static VEILLE_PUBLIES: AtomicU32 = AtomicU32::new(0);
 
 /// Publie les rapports ranges par les interruptions. Depuis une tache.
 pub fn publie_rapports_veille() {
+    publie_rapports_veille_avec(&mut || {});
+}
+
+/// Meme chose, `cede` appele entre deux rapports (BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 :
+/// le fil de diagnostic y pose son point cooperatif).
+pub fn publie_rapports_veille_avec(cede: &mut dyn FnMut()) {
+    let mut premier = true;
     loop {
         let n = VEILLE_PUBLIES.load(Ordering::Acquire);
         if n >= VEILLE_RAPPORTS_MAX || VEILLE_RAPPORT_PRET[n as usize].load(Ordering::Acquire) == 0 {
@@ -140,6 +147,10 @@ pub fn publie_rapports_veille() {
         {
             continue;
         }
+        if !premier {
+            cede();
+        }
+        premier = false;
         let m: [u64; VEILLE_MOTS] =
             core::array::from_fn(|i| VEILLE_RAPPORT[n as usize][i].load(Ordering::Relaxed));
         crate::serial_println!(

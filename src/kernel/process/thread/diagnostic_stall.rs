@@ -659,7 +659,9 @@ pub fn sert_diagnostic() {
     // lignes ; le fil cede le coeur entre ses sections (jamais sous une
     // lecture du registre : `point_cooperatif` le refuse).
     let mut depuis = crate::kernel::timer::monotonic_ns();
-    publie_rapports_veille();
+    // BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 : un point entre deux rapports (29,7 ms
+    // d'un seul segment sous KVM SMP1, run 39479633757).
+    publie_rapports_veille_avec(&mut || { point_cooperatif(&mut depuis); });
     point_cooperatif(&mut depuis);
     let demande = DIAG_DEMANDE.swap(0, Ordering::AcqRel);
     if demande & (1u64 << 63) == 0 {
@@ -689,6 +691,7 @@ pub fn sert_diagnostic() {
         mots[5], mots[6], mots[7], mots[8], mots[9], mots[10], mots[11], mots[12],
         syscall(13), syscall(16), syscall(19), syscall(22),
     );
+    point_cooperatif(&mut depuis);
 
     // Le bilan HID est imprime depuis le fil diagnostique, jamais depuis IRQ.
     if !complet {
@@ -1026,6 +1029,13 @@ fn resume_ordonnancement() {
 fn signale_etat_ordonnancement(depuis: &mut u64) {
     let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
     for cpu in 0..coeurs {
+        // BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 : un point entre deux lignes, comme
+        // la boucle des taches ci-dessous. Sans lui, l'en-tete et les lignes
+        // de tous les coeurs partaient d'un seul segment : 54 a 127 ms de
+        // coeur tenu par ce fil sous KVM SMP8 (`[POINTS-COOP]
+        // site=diagnostic_stall.rs`, run 39479633757), une ligne serie y
+        // coutant jusqu'a 21 ms. Rien n'est tenu d'une iteration a l'autre.
+        point_cooperatif(depuis);
         let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
         let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
         crate::serial_println!(
