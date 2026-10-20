@@ -383,10 +383,19 @@ fn rearme_compta_apres_idle() {
 }
 
 fn account_slice_end(task: &Task) {
-    let now = crate::kernel::timer::monotonic_ns();
     // Une seule section : la tranche close ET le curseur remis a zero. Un
     // lecteur entre les deux compterait sinon du temps hors processeur.
     compta_section(task, || {
+        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1 : l'instant du repli se lit
+        // DANS la section, jamais avant. Lu avant, il precedait l'ouverture de
+        // la sequence : un vCPU suspendu par l'hote entre les deux -- IF=0 n'y
+        // peut rien -- laissait un lecteur voir la tranche encore vive et la
+        // compter jusqu'a SON instant, plus tardif ; le repli n'en versait
+        // ensuite que jusqu'au sien, et `utime` reculait (compta-stress, TCG
+        // SMP4 : « utime=1937<-1938 », 1 passe sur 8). Lu ici, apres la
+        // sequence impaire, il suit dans l'ordre de `LAST_MONOTONIC_NS` tout
+        // instant d'un lecteur qui a vu l'etat d'avant.
+        let now = crate::kernel::timer::monotonic_ns();
         account_until(task, now);
         task.last_account_ns.range(0);
         task.slice_start_ns.range(0);

@@ -33,10 +33,20 @@ sous KVM.
    ecrivain la casserait) ; `Task::new` initialise `compta_seq`.
 4. `lecture_compta` ne borne pas ses relectures : une borne rendrait, au bout
    du compte, la lecture dechiree.
+5. BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1 : l'instant passe a `account_until`
+   est lu DANS la meme section (`let now = ...monotonic_ns()` entre
+   l'ouverture de `compta_section(` et l'appel). Lu avant, un vCPU suspendu
+   entre la lecture et la section laissait un lecteur compter la tranche
+   vive jusqu'a un instant plus tardif que le repli : `utime` reculait
+   (compta-stress, TCG SMP4, 1 passe sur 8).
+
+Fail-closed ; tests negatifs par mutation d'une copie de `src/`.
 """
 
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -113,15 +123,15 @@ def enclosante(fns, position):
     return meilleure[0] if meilleure else None
 
 
-def main() -> int:
+def verifie(src: Path) -> list[str]:
     fautes = []
     vu_section = vu_lecture = vu_init = False
-    for fichier in sorted(SRC.rglob("*.rs")):
+    for fichier in sorted(src.rglob("*.rs")):
         brut = fichier.read_text(encoding="utf-8")
         if not any(mot in brut for mot in ("_cpu_ns", "last_account_ns", "COMPTA_", "CUMUL_", "account_until", "frontiere_compta")):
             continue
         code = sans_commentaires(brut)
-        relatif = fichier.relative_to(RACINE).as_posix()
+        relatif = fichier.relative_to(src.parent).as_posix()
         fns = list(fonctions(code))
         etendues = list(sections(code))
 
@@ -143,6 +153,15 @@ def main() -> int:
                 continue
             if not en_section(m.start()):
                 fautes.append(f"  {relatif}:{ligne(m.start())}  `account_until` appele hors `compta_section`")
+                continue
+            # Regle 5 : l'instant du repli est lu dans CETTE section, avant l'appel.
+            ouverture = max(a for a, b in etendues if a <= m.start() <= b)
+            arg = re.match(r"\s*[^,()]+,\s*(\w+)\s*\)", code[m.end():])
+            lu = arg and re.search(rf"\blet\s+{arg.group(1)}\s*=\s*crate::kernel::timer::monotonic_ns\(\)",
+                                   code[ouverture:m.start()])
+            if not lu:
+                fautes.append(f"  {relatif}:{ligne(m.start())}  l'instant passe a `account_until` n'est pas lu "
+                              "dans la section : un lecteur compterait la tranche au-dela du repli")
         for m in re.finditer(r"\bfrontiere_compta_bloc\s*\(", code):
             if code[max(0, m.start() - 3):m.start()] == "fn ":
                 continue
@@ -176,11 +195,54 @@ def main() -> int:
     if not vu_init:
         fautes.append("  `Task::new` n'initialise plus `compta_seq`")
 
+    return fautes
+
+
+COMPTA = "kernel/process/thread/comptabilite.rs"
+INSTANT = ("        let now = crate::kernel::timer::monotonic_ns();\n"
+           "        account_until(task, now);")
+
+
+def mutation(fichier: str, remplacements) -> bool:
+    """Vrai si la copie mutee est refusee ; faux si une mutation ne s'applique pas."""
+    with tempfile.TemporaryDirectory() as tmp:
+        copie = Path(tmp) / "src"
+        shutil.copytree(SRC, copie)
+        cible = copie / fichier
+        texte = cible.read_text(encoding="utf-8")
+        for avant, apres in remplacements:
+            if avant not in texte:
+                return False
+            texte = texte.replace(avant, apres, 1)
+        cible.write_text(texte, encoding="utf-8")
+        return bool(verifie(copie))
+
+
+def main() -> int:
+    fautes = verifie(SRC)
     if fautes:
         print("comptabilite CPU : regle du verrou de sequence violee")
         print("\n".join(fautes))
         return 1
-    print("comptabilite CPU : toutes les ecritures sous sequence")
+    negatifs = [
+        # L'ancien ordre : l'instant lu avant la section.
+        (COMPTA, [("fn account_slice_end(task: &Task) {\n",
+                   "fn account_slice_end(task: &Task) {\n    let now = crate::kernel::timer::monotonic_ns();\n"),
+                  (INSTANT, "        account_until(task, now);")]),
+        # Un instant qui n'est pas une lecture d'horloge.
+        (COMPTA, [(INSTANT, "        let now = task.last_account_ns.charge();\n        account_until(task, now);")]),
+        # Le repli hors section.
+        (COMPTA, [("    compta_section(task, || {\n        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1",
+                   "    (|| {\n        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1")]),
+        # Une section qui ne masque plus les interruptions.
+        (COMPTA, [("    interrupts::without_interrupts(|| {\n        let seq = task.compta_seq.charge();",
+                   "    (|| {\n        let seq = task.compta_seq.charge();")]),
+    ]
+    for n, (f, r) in enumerate(negatifs, 1):
+        if not mutation(f, r):
+            print(f"comptabilite CPU : le test negatif {n} ne rougit pas -- garde inoperant")
+            return 1
+    print(f"comptabilite CPU : toutes les ecritures sous sequence, instant du repli en section (negatifs={len(negatifs)})")
     return 0
 
 
