@@ -657,28 +657,30 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 return -errno::EBADF;
             }
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
-            let place = match attends_place(
+            // Ecriture courte au-dela de PIPE_BUF : on ecrit ce qui tient et on
+            // le dit. C'est la semantique POSIX d'un tube presque plein, et
+            // c'est elle qui donne sa contre-pression a l'appelant. Jusqu'a
+            // PIPE_BUF, tout ou rien (BOUCHAUD_TUBE_ATOMIQUE_V1).
+            //
+            // La place se juge et l'ecriture se fait sous le MEME verrou : la
+            // place relue hors verrou laissait deux ecrivains la prendre
+            // ensemble, et une ecriture partielle laissait un autre ecrivain
+            // se glisser entre ses deux moities (tube-atomicite-probe).
+            let ecrits = match attends_place(
                 || {
-                    let state = shared.lock();
+                    let mut state = shared.lock();
                     if state.readers == 0 {
-                        Capacite::Rompu
-                    } else {
-                        Capacite::Place(state.place())
+                        return Capacite::Rompu;
                     }
+                    let n = crate::kernel::fd::octets_admis(state.place(), data.len());
+                    state.buffer.extend_from_slice(&data[..n]);
+                    Capacite::Place(n)
                 },
                 non_bloquant,
             ) {
-                Ok(place) => place,
+                Ok(ecrits) => ecrits,
                 Err(erreur) => return erreur,
             };
-            // Ecriture courte : on ecrit ce qui tient et on le dit. C'est la
-            // semantique POSIX d'un tube presque plein, et c'est elle qui donne
-            // sa contre-pression a l'appelant — un `write` qui rendrait `count`
-            // sans avoir tout ecrit ferait perdre des octets en silence.
-            let mut state = shared.lock();
-            let ecrits = core::cmp::min(place, data.len());
-            state.buffer.extend_from_slice(&data[..ecrits]);
-            drop(state);
             crate::kernel::fd::notify_readiness();
             ecrits as i64
         }
@@ -705,25 +707,25 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         }
         FdKind::SocketPair(_, outbox) => {
             let non_bloquant = fd_flags(fd) & O_NONBLOCK != 0;
-            let place = match attends_place(
+            // Meme regle que le tube (BOUCHAUD_TUBE_ATOMIQUE_V1) : place jugee
+            // et octets ecrits sous le meme verrou, tout ou rien jusqu'a
+            // PIPE_BUF -- un message IPC court ne se coupe pas.
+            let ecrits = match attends_place(
                 || {
-                    let canal = outbox.lock();
+                    let mut canal = outbox.lock();
                     if canal.lecteurs == 0 {
-                        Capacite::Rompu
-                    } else {
-                        Capacite::Place(canal.place())
+                        return Capacite::Rompu;
                     }
+                    let n = crate::kernel::fd::octets_admis(canal.place(), data.len());
+                    canal.octets.extend_from_slice(&data[..n]);
+                    Capacite::Place(n)
                 },
                 non_bloquant,
             ) {
-                Ok(place) => place,
+                Ok(ecrits) => ecrits,
                 Err(erreur) => return erreur,
             };
-            let mut canal = outbox.lock();
-            let ecrits = core::cmp::min(place, data.len());
-            canal.octets.extend_from_slice(&data[..ecrits]);
-            let reveille = canal.reveille_compositeur;
-            drop(canal);
+            let reveille = ecrits != 0 && outbox.lock().reveille_compositeur;
             crate::kernel::fd::notify_readiness();
             // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : seul le canal client -> WM porte
             // ce drapeau. Un `write` de zero octet n'annonce rien.
@@ -779,8 +781,48 @@ pub fn sys_readv(fd: i32, iov: u64, count: usize) -> i64 {
     total
 }
 
+/// Les vecteurs d'un `writev`, rassembles s'ils sont plusieurs et tiennent en
+/// `PIPE_BUF` octets ; `None` sinon (chemin vecteur par vecteur).
+fn rassemble_court(iov: u64, count: usize) -> Option<Result<Vec<u8>, i64>> {
+    if !(2..=1024).contains(&count) {
+        return None;
+    }
+    let mut vecteurs = Vec::with_capacity(count);
+    let mut total = 0usize;
+    for index in 0..count {
+        let base = user_read_u64(iov + (index * 16) as u64)?;
+        let len = user_read_u64(iov + (index * 16) as u64 + 8)? as usize;
+        total = total.checked_add(len)?;
+        if total > crate::kernel::fd::PIPE_BUF {
+            return None;
+        }
+        vecteurs.push((base, len));
+    }
+    let mut data = Vec::with_capacity(total);
+    for (base, len) in vecteurs {
+        if len == 0 {
+            continue;
+        }
+        match user_read(base, len) {
+            Some(octets) => data.extend_from_slice(&octets),
+            None => return Some(Err(-errno::EFAULT)),
+        }
+    }
+    Some(Ok(data))
+}
+
 /// `writev` : le chemin qu'emprunte tout `printf` de musl.
 pub fn sys_writev(fd: i32, iov: u64, count: usize) -> i64 {
+    // BOUCHAUD_TUBE_ATOMIQUE_V1 : un `writev` est UNE ecriture. Jusqu'a
+    // PIPE_BUF octets en tout, ses vecteurs partent d'un seul `ecrit_octets` :
+    // musl vide son tampon stdio par un `writev` a deux vecteurs, qu'un autre
+    // ecrivain du meme tube coupait en deux.
+    if let Some(rassemble) = rassemble_court(iov, count) {
+        return match rassemble {
+            Ok(data) => ecrit_octets(fd, &data),
+            Err(erreur) => erreur,
+        };
+    }
     let mut total = 0i64;
     for index in 0..count {
         let base = match user_read_u64(iov + (index * 16) as u64) {
@@ -2751,9 +2793,10 @@ const POLLERR: u32 = 0x008;
 const POLLHUP: u32 = 0x010;
 const POLLOUT: u32 = 0x004;
 
-/// Ce qu'un canal repond quand on lui demande s'il accepte des octets.
+/// Ce qu'un canal repond quand on lui propose des octets.
 pub enum Capacite {
-    /// Place disponible, en octets (0 = sature).
+    /// Octets acceptes -- et deja ecrits (0 = sature, ou pas assez de place
+    /// pour une ecriture atomique).
     Place(usize),
     /// Plus personne ne lit : ecrire n'a plus de sens.
     Rompu,
@@ -2770,7 +2813,9 @@ pub enum Capacite {
 /// recoit une erreur au lieu de se figer.
 const ATTENTE_ECRITURE_MS: u64 = 5_000;
 
-/// Attend qu'un canal ait de la place. Rend la place obtenue, ou l'erreur.
+/// Attend qu'un canal accepte des octets. `etat` juge la place ET ecrit, sous
+/// le meme verrou (BOUCHAUD_TUBE_ATOMIQUE_V1) : `Place(n)` rend les `n`
+/// octets ecrits, `Place(0)` fait attendre. Rend le nombre ecrit, ou l'erreur.
 fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usize, i64> {
     let echeance = crate::kernel::timer::monotonic_ns()
         .saturating_add(ATTENTE_ECRITURE_MS.saturating_mul(1_000_000));

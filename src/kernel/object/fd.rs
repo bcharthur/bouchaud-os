@@ -295,6 +295,23 @@ pub struct Canal {
 /// bien apres que le producteur ait pris trop d'avance.
 pub const CAPACITE_CANAL: usize = 64 * 1024;
 
+/// Taille jusqu'a laquelle une ecriture dans un tube ou un canal est ATOMIQUE
+/// (POSIX `PIPE_BUF`, valeur de Linux) : ses octets ne sont jamais coupes ni
+/// melanges a ceux d'un autre ecrivain. BOUCHAUD_TUBE_ATOMIQUE_V1.
+pub const PIPE_BUF: usize = 4096;
+
+/// Ecrit `data` dans un tampon de canal de `place` octets libres, avec la
+/// regle d'atomicite : jusqu'a [`PIPE_BUF`] octets, tout ou rien (`0` = rien
+/// d'ecrit, attendre) ; au-dela, autant que la place le permet. Pure : rend
+/// le nombre d'octets a ecrire.
+pub fn octets_admis(place: usize, longueur: usize) -> usize {
+    if longueur <= PIPE_BUF {
+        if place >= longueur { longueur } else { 0 }
+    } else {
+        place.min(longueur)
+    }
+}
+
 /// Queue de changement de readiness des objets FD.
 ///
 /// La generation ferme le lost-wakeup entre le scan final de `poll` et le
