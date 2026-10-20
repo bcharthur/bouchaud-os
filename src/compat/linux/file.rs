@@ -1322,7 +1322,11 @@ pub fn sys_dup2(old: i32, new: i32) -> i64 {
         None => return -errno::EBADF,
     };
     desc.cloexec = false;
-    borrowed.set(new as usize, desc);
+    let ancien = borrowed.set(new as usize, desc);
+    drop(borrowed);
+    // BOUCHAUD_EOF_HORS_CLOSE_V1 : `new` etait peut-etre la derniere
+    // extremite d'un tube.
+    crate::kernel::fd::ferme_hors_verrou(ancien);
     new as i64
 }
 
@@ -1345,7 +1349,9 @@ pub fn sys_dup3(old: i32, new: i32, flags: u32) -> i64 {
         None => return -errno::EBADF,
     };
     desc.cloexec = flags & O_CLOEXEC != 0;
-    borrowed.set(new as usize, desc);
+    let ancien = borrowed.set(new as usize, desc);
+    drop(borrowed);
+    crate::kernel::fd::ferme_hors_verrou(ancien); // BOUCHAUD_EOF_HORS_CLOSE_V1
     new as i64
 }
 

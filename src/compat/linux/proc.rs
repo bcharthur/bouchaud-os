@@ -360,7 +360,10 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     // Releve TOT : `process` n'est plus empruntable au point no-return.
     let pid_journal = process.pid;
     process.metadata.lock().name = path;
-    process.files.lock().close_on_exec();
+    // BOUCHAUD_EOF_HORS_CLOSE_V1 : le pere de `posix_spawn` attend la fin de
+    // fichier de ce tube CLOEXEC pour savoir que l'exec a reussi.
+    let fermes = process.files.lock().close_on_exec();
+    crate::kernel::fd::ferme_hors_verrou(fermes);
     process.signals.lock().reset_for_exec();
     {
         // Nouvelle image, un seul fil : le groupe est rendu.

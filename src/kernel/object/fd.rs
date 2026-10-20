@@ -325,6 +325,31 @@ pub fn notify_readiness() {
     READINESS.wake_all();
 }
 
+/// Ferme des descripteurs retires d'une table, puis reveille les attentes de
+/// disponibilite (BOUCHAUD_EOF_HORS_CLOSE_V1).
+///
+/// `FdKind::release` decremente les extremites d'un tube ou d'un canal sans
+/// reveiller personne : un lecteur bloque sur un tube vide n'apprend la fin de
+/// fichier (ni un ecrivain bloque EPIPE) que par `notify_readiness`. `close()`
+/// l'appelait ; `execve` (FD_CLOEXEC, le motif de `posix_spawn`), `dup2` /
+/// `dup3` sur un numero ouvert et la mort d'un orphelin (aucun SIGCHLD) ne le
+/// faisaient pas. Le lecteur attendait la mort de l'ecrivain ou un evenement
+/// sans rapport -- eof-fermeture-probe, TCG SMP4 : 12 cas sur 18, fin de
+/// fichier a 3,2 s (mort du fils) ou 5 s (alarme) au lieu de 0,15 s.
+///
+/// Jamais sous le verrou de la table (rang `FdTable`) : le reveil prend la
+/// table des taches, de rang inferieur.
+pub fn ferme_hors_verrou(fermes: impl IntoIterator<Item = FileDesc>) {
+    let mut aucun = true;
+    for desc in fermes {
+        aucun = false;
+        drop(desc);
+    }
+    if !aucun {
+        notify_readiness();
+    }
+}
+
 impl Canal {
     /// Un canal neuf a exactement un lecteur et un ecrivain : les deux
     /// extremites creees ensemble par `socketpair()`.
@@ -437,12 +462,14 @@ impl FdTable {
         self.insert_at_least(desc, 0)
     }
 
-    /// Force un descripteur a un numero precis (`dup2`).
-    pub fn set(&mut self, fd: usize, desc: FileDesc) {
+    /// Force un descripteur a un numero precis (`dup2`) et rend celui qu'il
+    /// remplace, a fermer par [`ferme_hors_verrou`].
+    #[must_use = "l'ancien descripteur se ferme hors du verrou de la table (ferme_hors_verrou)"]
+    pub fn set(&mut self, fd: usize, desc: FileDesc) -> Option<FileDesc> {
         while self.entries.len() <= fd {
             self.entries.push(None);
         }
-        self.entries[fd] = Some(desc);
+        self.entries[fd].replace(desc)
     }
 
     /// Descripteur en lecture seule.
@@ -491,21 +518,26 @@ impl FdTable {
     }
 
     /// Retire TOUS les descripteurs, pour qu'ils soient fermes par
-    /// l'appelant -- hors du verrou de la table : la fermeture d'un tube
-    /// reveille ses lecteurs, et ne doit rien faire sous ce verrou.
+    /// l'appelant -- hors du verrou de la table ([`ferme_hors_verrou`]) : la
+    /// fermeture d'un tube reveille ses lecteurs, et ne doit rien faire sous
+    /// ce verrou.
     ///
     /// BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : appele a la mort du processus.
     pub fn prend_tout(&mut self) -> Vec<Option<FileDesc>> {
         core::mem::take(&mut self.entries)
     }
 
-    /// Ferme les descripteurs marques `FD_CLOEXEC` (appele par `execve`).
-    pub fn close_on_exec(&mut self) {
+    /// Retire les descripteurs marques `FD_CLOEXEC` (appele par `execve`),
+    /// a fermer par [`ferme_hors_verrou`].
+    #[must_use = "les descripteurs retires se ferment hors du verrou de la table (ferme_hors_verrou)"]
+    pub fn close_on_exec(&mut self) -> Vec<FileDesc> {
+        let mut retires = Vec::new();
         for slot in self.entries.iter_mut() {
             if slot.as_ref().map_or(false, |desc| desc.cloexec) {
-                *slot = None;
+                retires.extend(slot.take());
             }
         }
+        retires
     }
 }
 

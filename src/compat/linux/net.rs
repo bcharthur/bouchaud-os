@@ -1188,6 +1188,9 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
         };
         crate::kernel::fd::notify_readiness();
         if !user_write(base, &data) {
+            // Les droits recus meurent ici : peut-etre la derniere extremite
+            // d'un tube (BOUCHAUD_EOF_HORS_CLOSE_V1).
+            crate::kernel::fd::ferme_hors_verrou(recus);
             return -errno::EFAULT;
         }
         let mut installes: Vec<i32> = Vec::new();

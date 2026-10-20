@@ -1025,9 +1025,12 @@ fn releve_global_du() -> bool {
 /// fermer un tube reveille ses lecteurs, ce qui ne se fait pas sous le verrou
 /// d'une table. La table n'est jamais partagee entre processus (`fork` en
 /// fait une copie) : la vider ne touche que ce processus.
+///
+/// BOUCHAUD_EOF_HORS_CLOSE_V1 : le reveil ne passe plus par le SIGCHLD du
+/// pere -- un orphelin n'en a pas, et son lecteur attendait sans fin.
 pub fn ferme_descripteurs(process: &Arc<Process>) {
     let fermes = process.files.lock().prend_tout();
-    drop(fermes);
+    crate::kernel::fd::ferme_hors_verrou(fermes.into_iter().flatten());
 }
 
 /// Un processus et tous ses descendants, du plus proche au plus lointain.
