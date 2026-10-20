@@ -177,6 +177,7 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
             note_attente_interactive(
                 now.saturating_sub(task.ready_since_ns.charge()),
                 CURRENT_IS_KERNEL[cpu_id].load(Ordering::Acquire),
+                CURRENT[cpu_id].load(Ordering::Acquire),
             );
         }
         // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.

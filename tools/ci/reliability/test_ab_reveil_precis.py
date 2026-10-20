@@ -220,5 +220,17 @@ class PreuveDesEchecsQualifies(unittest.TestCase):
         self.assertFalse(any(x.startswith(("  preuve tour", "  charge tour")) for x in sortie))
 
 
+class OccupantDuPireCas(unittest.TestCase):
+    def test_occupant_recopie_verdict_inchange(self):
+        texte = journal().replace(
+            "retires_avant_service=0",
+            "retires_avant_service=0 tirs=1 attentes_noyau=1 attente_noyau_pire_us=5096 "
+            "occupant_noyau=7:usb-hid occupant_utilisateur=-")
+        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        self.assertEqual((v, c), ("CONVAINCANT", 0))
+        self.assertTrue(any(x.startswith("  noyau tour 1 on : ") and x.endswith(
+            "occupant_noyau=7:usb-hid occupant_utilisateur=-") for x in sortie), sortie)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -104,6 +104,11 @@ def analyse(texte, tours, smp, nom):
             n = diag_noyau(l)
             if n is not None:
                 courant["noyau"].append(n)
+            # BOUCHAUD_ATTENTE_INTERACTIVE_OCCUPANT_V1 : qui occupait le coeur
+            # au pire cas (texte, valeur finale du bras).
+            o = re.search(r"occupant_noyau=(\S+) occupant_utilisateur=(\S+)", l)
+            if o:
+                courant["occupants"] = o.groups()
         # Diagnostic seulement (aucun effet sur le verdict) : ce que le noyau
         # dit des reveils en retard au repos -- qui tenait le coeur, quelle
         # etape a coute. Run 38732049308 : sous `on`, p50 39 us mais p95 852 ;
@@ -190,6 +195,8 @@ def analyse(texte, tours, smp, nom):
             a, z = b["noyau"][0], b["noyau"][-1]
             parts = [f"{n}={z[i]}" if n in MAXIMA else f"{n}=+{z[i] - a[i]}"
                      for i, n in enumerate(DIAG_NOMS)]
+            if b.get("occupants"):
+                parts += [f"occupant_noyau={b['occupants'][0]}", f"occupant_utilisateur={b['occupants'][1]}"]
             sortie.append(f"  noyau tour {b['tour']} {b['v']} : " + " ".join(parts))
 
     def med(v, phase, k):
