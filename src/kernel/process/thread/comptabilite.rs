@@ -587,6 +587,13 @@ pub fn impute_syscall(nr: u64, ecoule: u64) {
 ///
 /// GLOBAL, et dit comme tel : ce sont tous les processus depuis le demarrage.
 pub fn publie_syscall_top(combien: usize) {
+    publie_syscall_top_avec(combien, &mut || {});
+}
+
+/// Meme chose, `cede` appele entre deux lignes (BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 :
+/// le fil de mesures y pose son point cooperatif ; sous KVM, les neuf lignes
+/// d'un seul segment tenaient le coeur 28 ms, run 39479638849).
+pub fn publie_syscall_top_avec(combien: usize, cede: &mut dyn FnMut()) {
     let mut total_ns = 0u64;
     let mut total_n = 0u64;
     for i in 0..SYSCALL_MAX {
@@ -605,6 +612,7 @@ ecoule_ms={} appels={} hors_table={}",
     // sortie de processus, et `combien` est petit.
     let mut plafond = u64::MAX;
     for _ in 0..combien {
+        cede();
         let mut meilleur = None;
         for i in 0..SYSCALL_MAX {
             let ns = SYSCALL_NS[i].load(Ordering::Relaxed);

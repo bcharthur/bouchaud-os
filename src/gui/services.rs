@@ -570,19 +570,24 @@ fn releve_interne(mut depuis: Option<&mut u64>) {
 total_us={} pire_us={} candidats_suffisants={}",
         maintenant, bal_appels, bal_entrees, bal_ns / 1_000, bal_pire / 1_000, bal_candidats,
     ));
+    // BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 : une ligne par segment. Trois lignes
+    // d'un seul tenant tenaient le coeur 17-19 ms sous KVM (`[POINTS-COOP]
+    // site=services.rs:584`, runs 39479633757 et 39479638849).
+    cede(&mut depuis);
     let (evites, en_table, recuperees) =
         crate::kernel::clean_page_cache::balayage_temoins();
     crate::kernel::dmesg::log_fmt(format_args!(
         "CACHE_BALAYAGE_TEMOINS scope=global evites={} entrees={} recuperees={}",
         evites, en_table, recuperees,
     ));
+    cede(&mut depuis);
     let (yields, pire_chaine, reprises, chaines) = crate::kernel::task::fault_retry_cumul();
     crate::kernel::dmesg::log_fmt(format_args!(
         "FAULT_REPRISE scope=global t={} yields={} pire_chaine={} reprises={} chaines={}",
         maintenant, yields, pire_chaine, reprises, chaines,
     ));
     cede(&mut depuis);
-    crate::kernel::task::publie_syscall_top(8);
+    crate::kernel::task::publie_syscall_top_avec(8, &mut || cede(&mut depuis));
     cede(&mut depuis);
     // Qui lit le disque, et ce que coute l'attente du controleur. Meme
     // cadence : compteurs cumulatifs, un releve par minute.
