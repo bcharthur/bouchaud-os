@@ -27,12 +27,24 @@
  *
  *     tube-atomicite-probe [TOURS]
  *
+ * POLLOUT ET ECRITURE TOUT-OU-RIEN
+ *
+ * `poll` annonce POLLOUT quand une ecriture de PIPE_BUF octets passe
+ * (semantique Linux). Annoncer POLLOUT des qu'il reste UN octet, face a une
+ * ecriture tout-ou-rien qui rend EAGAIN, fait tourner une boucle d'evenements
+ * non bloquante entre POLLOUT et EAGAIN -- ses messages s'accumulent en
+ * memoire. Le tube est rempli par ecritures de 1000 octets jusqu'a EAGAIN,
+ * puis vide par tranches de 700 : chaque fois que POLLOUT est annonce, une
+ * ecriture de PIPE_BUF octets doit passer entiere ; tube vide, POLLOUT est du.
+ *
  * Verdict : `TUBE_ATOMICITE_OK tailles=3 ecrivains=N tours=T` ; sinon
  * `TUBE_ATOMICITE_FAIL` et code 1. Tourne aussi sur Linux (reference).
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,6 +166,56 @@ static void une_taille(int r, int tours)
         echecs++;
 }
 
+static int pollout(int fd)
+{
+    struct pollfd p = { .fd = fd, .events = POLLOUT };
+    return poll(&p, 1, 0) == 1 && (p.revents & POLLOUT);
+}
+
+/* POLLOUT annonce => une ecriture de PIPE_BUF octets passe entiere. */
+static void coherence_poll(void)
+{
+    int c[2];
+    if (pipe(c) != 0) {
+        printf("TUBE_POLLOUT pipe errno=%d ECHEC\n", errno);
+        echecs++;
+        return;
+    }
+    fcntl(c[0], F_SETFL, O_NONBLOCK);
+    fcntl(c[1], F_SETFL, O_NONBLOCK);
+    static unsigned char tampon[PIPE_BUF];
+    memset(tampon, 'P', sizeof tampon);
+    long remplis = 0;
+    while (remplis < (16L << 20)) {
+        ssize_t n = write(c[1], tampon, 1000);
+        if (n < 0)
+            break;
+        remplis += n;
+    }
+    int plein_errno = errno;
+    int annonces = 0, refus_apres_pollout = 0;
+    for (int k = 0; k < 12; k++) {
+        if (pollout(c[1])) {
+            annonces++;
+            ssize_t n = write(c[1], tampon, PIPE_BUF);
+            if (n != PIPE_BUF)
+                refus_apres_pollout++;
+        }
+        if (read(c[0], tampon, 700) < 0)
+            break;
+    }
+    while (read(c[0], tampon, sizeof tampon) > 0)
+        ;
+    int vide_pret = pollout(c[1]);
+    close(c[0]);
+    close(c[1]);
+    int bon = plein_errno == EAGAIN && refus_apres_pollout == 0 && vide_pret;
+    printf("TUBE_POLLOUT rempli=%ld annonces=%d refus_apres_pollout=%d vide_pret=%d %s\n", remplis, annonces,
+           refus_apres_pollout, vide_pret, bon ? "ok" : "ECHEC");
+    if (!bon)
+        echecs++;
+}
+
 int main(int argc, char **argv)
 {
     int tours = argc > 1 ? atoi(argv[1]) : 300;
@@ -165,6 +227,7 @@ int main(int argc, char **argv)
     static const int tailles[] = { 100, 512, PIPE_BUF };
     for (int i = 0; i < 3; i++)
         une_taille(tailles[i], tours);
+    coherence_poll();
     if (echecs) {
         printf("TUBE_ATOMICITE_FAIL echecs=%d\n", echecs);
         return 1;

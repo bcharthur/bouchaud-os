@@ -2906,14 +2906,20 @@ fn writable(fd: i32) -> bool {
         // Un tube dont plus personne ne lit est « pret » : l'ecriture doit
         // echouer tout de suite en EPIPE, pas attendre une place qui ne
         // servira jamais.
+        //
+        // BOUCHAUD_TUBE_ATOMIQUE_V1 : « pret » = une ecriture de PIPE_BUF
+        // octets passe (semantique Linux). Une ecriture de n <= PIPE_BUF est
+        // tout ou rien : annoncer POLLOUT des qu'il reste UN octet ferait
+        // tourner une boucle d'evenements non bloquante entre POLLOUT et
+        // EAGAIN, ses messages s'accumulant en memoire.
         FdKind::Pipe(state, false) => {
             let state = state.lock();
-            state.readers == 0 || state.place() > 0
+            state.readers == 0 || state.place() >= crate::kernel::fd::PIPE_BUF
         }
         FdKind::Pipe(_, true) => false,
         FdKind::SocketPair(_, outbox) => {
             let canal = outbox.lock();
-            canal.lecteurs == 0 || canal.place() > 0
+            canal.lecteurs == 0 || canal.place() >= crate::kernel::fd::PIPE_BUF
         }
         // Les autres n'ont pas de tampon borne : ils acceptent toujours.
         _ => true,

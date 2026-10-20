@@ -19,7 +19,12 @@ enregistrements de 100 / 512 / 4096 octets melanges.
   2. tube ET canal (socketpair) : place jugee et octets ecrits DANS la meme
      fermeture passee a `attends_place`, sous un seul verrou ;
   3. `writev` rassemble ses vecteurs jusqu'a PIPE_BUF octets en une ecriture ;
-  4. la sonde tourne dans os-primitives.
+  4. `poll` n'annonce POLLOUT que si une ecriture de PIPE_BUF octets passe
+     (semantique Linux) : POLLOUT des qu'il reste UN octet, face a une
+     ecriture tout-ou-rien qui rend EAGAIN, fait tourner une boucle
+     d'evenements non bloquante entre POLLOUT et EAGAIN (defaut introduit
+     par la regle 1, corrige ensuite) ;
+  5. la sonde tourne dans os-primitives.
 
 Fail-closed ; tests negatifs.
 """
@@ -102,6 +107,18 @@ def verifie(racine: Path) -> list[str]:
     if rassemble is None or "total > crate::kernel::fd::PIPE_BUF" not in rassemble:
         fautes.append("rassemble_court n'est plus borne a PIPE_BUF")
 
+    pret = corps(fichier, "fn writable(fd: i32) -> bool")
+    if pret is None:
+        fautes.append("writable introuvable")
+    else:
+        for nom, entete, garde in (("tube", "FdKind::Pipe(state, false) =>",
+                                    "state.readers == 0 || state.place() >= crate::kernel::fd::PIPE_BUF"),
+                                   ("canal", "FdKind::SocketPair(_, outbox) =>",
+                                    "canal.lecteurs == 0 || canal.place() >= crate::kernel::fd::PIPE_BUF")):
+            branche = corps(pret, entete)
+            if branche is None or garde not in branche:
+                fautes.append(f"poll {nom} : POLLOUT n'exige plus PIPE_BUF octets libres")
+
     if "/bin/tube-atomicite-probe" not in t[PRIMITIVES] or "TUBE_ATOMICITE_OK" not in t[PRIMITIVES]:
         fautes.append("os-primitives ne lance plus tube-atomicite-probe")
     return fautes
@@ -137,6 +154,10 @@ def main() -> int:
         (FICHIER, "                    state.buffer.extend_from_slice(&data[..n]);\n                    Capacite::Place(n)",
          "                    Capacite::Place(n)"),
         (FICHIER, "    if let Some(rassemble) = rassemble_court(iov, count) {", "    if let Some(rassemble) = None::<Option<Result<Vec<u8>, i64>>>.flatten() {"),
+        (FICHIER, "state.readers == 0 || state.place() >= crate::kernel::fd::PIPE_BUF",
+         "state.readers == 0 || state.place() > 0"),
+        (FICHIER, "canal.lecteurs == 0 || canal.place() >= crate::kernel::fd::PIPE_BUF",
+         "canal.lecteurs == 0 || canal.place() > 0"),
         (PRIMITIVES, "/bin/tube-atomicite-probe", "/bin/true"),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
