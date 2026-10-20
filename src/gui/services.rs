@@ -682,8 +682,10 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         RELEVES_FAUTES_MANQUES.load(Ordering::Relaxed),
     );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
+    let invariants = crate::kernel::task::invariants_compta();
     crate::serial_println!(
-        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={} ticks_ms={} mono_ms={} index_coeur={}",
+        "[PROC-STAT] capacite_ms={} occupe_ms={} depassements={} pire_depassement_ms={} compta_relues={} replis_apic={} ticks_ms={} mono_ms={} index_coeur={} \
+tranches_gonflees={} pire_gonflement_us={} chevauchements={} pire_chevauchement_us={}",
         (crate::kernel::timer::monotonic_ns() / 1_000_000)
             .saturating_mul(c.online as u64),
         (c.user_ns.saturating_add(c.system_ns)) / 1_000_000,
@@ -698,6 +700,8 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         crate::kernel::timer::monotonic_ms(),
         // BOUCHAUD_CPU_INDEX_TSC_AUX_V1 : d'ou vient l'identite du coeur.
         crate::arch::x86_64::usermode::source_index_coeur(),
+        // BOUCHAUD_COMPTA_INVARIANTS_TRANCHE_V1
+        invariants[0], invariants[1] / 1000, invariants[2], invariants[3] / 1000,
     );
 }
 

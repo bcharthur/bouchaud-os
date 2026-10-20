@@ -61,6 +61,44 @@ fn compta_section<R>(task: &Task, corps: impl FnOnce() -> R) -> R {
     })
 }
 
+// BOUCHAUD_COMPTA_INVARIANTS_TRANCHE_V1
+//
+// I2 a ete viole une fois (compta-stress, hote surcharge : `COMPTA_DEPASSE
+// soi delta_ticks=8 borne=7 mur_ns=10713978`, au moins 17 ms de trop sur
+// 4 x 10,7 ms), sans mecanisme trouve a la lecture. Deux invariants du cote
+// ECRIVAIN, comptes et jamais asserts, departagent la prochaine occurrence :
+//   1. une tranche close ne verse jamais plus que son etendue murale
+//      (`slice_start_ns` -> repli) : les fragments la pavent exactement ;
+//   2. sur un coeur, une tranche ne s'arme jamais avant le dernier repli de
+//      ce coeur : deux taches ne se partagent pas le meme intervalle.
+// Nuls pendant une violation d'I2 : le sur-compte est du cote du LECTEUR
+// (l'agregation par processus), pas de l'imputation.
+static TRANCHES_GONFLEES: AtomicU64 = AtomicU64::new(0);
+static PIRE_GONFLEMENT_NS: AtomicU64 = AtomicU64::new(0);
+static CHEVAUCHEMENTS: AtomicU64 = AtomicU64::new(0);
+static PIRE_CHEVAUCHEMENT_NS: AtomicU64 = AtomicU64::new(0);
+static DERNIER_REPLI_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// A l'armement d'une tranche sur `cpu` a `now` (invariant 2).
+fn note_armement_compta(cpu: usize, now: u64) {
+    let repli = DERNIER_REPLI_NS[cpu].load(Ordering::Relaxed);
+    if now < repli {
+        CHEVAUCHEMENTS.fetch_add(1, Ordering::Relaxed);
+        PIRE_CHEVAUCHEMENT_NS.fetch_max(repli - now, Ordering::Relaxed);
+    }
+}
+
+/// `[tranches gonflees, pire gonflement ns, chevauchements, pire
+/// chevauchement ns]` depuis le demarrage.
+pub fn invariants_compta() -> [u64; 4] {
+    [
+        TRANCHES_GONFLEES.load(Ordering::Relaxed),
+        PIRE_GONFLEMENT_NS.load(Ordering::Relaxed),
+        CHEVAUCHEMENTS.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_NS.load(Ordering::Relaxed),
+    ]
+}
+
 /// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
 ///
 /// Toutes les frontières (syscall, préemption, blocage) utilisent le même
@@ -87,6 +125,13 @@ fn account_until(task: &Task, now: u64) {
         }
     }
     let elapsed = user.saturating_add(noyau);
+    // BOUCHAUD_COMPTA_INVARIANTS_TRANCHE_V1, invariant 1 : les fragments
+    // pavent la tranche, de l'armement au repli -- leur somme EST l'etendue.
+    let etendue = now.saturating_sub(task.slice_start_ns.charge());
+    if task.slice_start_ns.charge() != 0 && elapsed > etendue {
+        TRANCHES_GONFLEES.fetch_add(1, Ordering::Relaxed);
+        PIRE_GONFLEMENT_NS.fetch_max(elapsed - etendue, Ordering::Relaxed);
+    }
 
     task.user_cpu_ns.range(task.user_cpu_ns.charge().saturating_add(user));
     task.kernel_cpu_ns.range(task.kernel_cpu_ns.charge().saturating_add(noyau));
@@ -373,6 +418,7 @@ fn rearme_compta_apres_idle() {
         return;
     };
     compta_section(task, || {
+        note_armement_compta(cpu, now);
         task.last_account_ns.range(now);
         task.slice_start_ns.range(now);
         COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
@@ -399,6 +445,7 @@ fn account_slice_end(task: &Task) {
         account_until(task, now);
         task.last_account_ns.range(0);
         task.slice_start_ns.range(0);
+        DERNIER_REPLI_NS[local_cpu()].store(now, Ordering::Relaxed);
         // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon
         // le premier repli de la tache SUIVANTE lui attribuerait le temps
         // passe entre les deux.

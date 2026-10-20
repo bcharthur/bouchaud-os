@@ -224,6 +224,7 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     // BOUCHAUD_COMPTA_SEQLOCK_V1 : le curseur ET le bloc par CPU s'arment
     // sous la sequence -- un lecteur qui voit le curseur arme lit le bloc.
     compta_section(task, || {
+        note_armement_compta(cpu_id, now);
         task.slice_start_ns.range(now);
         task.last_account_ns.range(now);
         COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
