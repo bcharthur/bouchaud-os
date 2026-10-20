@@ -1,6 +1,8 @@
-# Baseline stable — Bouchaud OS (19 octobre 2026)
+# Baseline stable — Bouchaud OS (20 octobre 2026)
 
-**NOT_ESTABLISHED.** Voir [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
+**NOT_ESTABLISHED.** Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md) puis [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
+
+Les commits `7d6c944b` et `cbbd5ec0` (20/10) modifient le chemin de reveil : **toutes les preuves de `f5692b7` / `2582cde9` ci-dessous sont a refaire sur le nouveau SHA** avant toute qualification.
 
 | Critere | Etat / preuve |
 |---|---|

@@ -1,6 +1,8 @@
-# Etat courant Bouchaud OS — 19 octobre 2026
+# Etat courant Bouchaud OS — 20 octobre 2026
 
-**P13: PARTIAL. Baseline: NOT_ESTABLISHED.** Reference technique complete : [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
+**P13: PARTIAL. Baseline: NOT_ESTABLISHED.** Reference technique : [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md) (causes racines du `NON_QUALIFIANT` KVM), puis [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
+
+- **20/10 — cause du `NON_QUALIFIANT` trouvee dans le code** (run 39308093631) : au repos, le coeur reveillait plus tard que charge (KVM SMP1 p95 917 us contre 212 us). Deux defauts corriges : echeance due ou a < 20 us non armee puis `hlt` jusqu'au tic (`cbbd5ec0`, BOUCHAUD_REVEIL_DU_V1) ; tache bloquee restee installee sur un coeur en `hlt` jamais reveillee par IPI (`7d6c944b`, BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1). Preuves HOST + TCG (futex-pingpong SMP4 2 857 -> 95 us, SMP2 ~974 -> ~69 us, invariants du banc tenus). **KVM non encore mesure sur ces commits.**
 
 - Branche: `claude/ladybird-observability-performance`. Ne pas merger vers `main` avant qualification; [PR #226](https://github.com/bcharthur/bouchaud-os/pull/226) en brouillon.
 - Derniere campagne entiere sur un meme SHA connue verte: `f5692b70ea55349c0ac3e0beb5c8653a65b869ad` (CI Fast, Reliability V3, Integration, Native IPC Runtime, Ladybird; Ladybird 20 jobs verts).

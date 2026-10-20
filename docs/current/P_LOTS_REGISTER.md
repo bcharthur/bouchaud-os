@@ -16,6 +16,10 @@
 > convergence et os-primitives TCG+KVM**) verts. Native IPC, SCM_RIGHTS et
 > Security Runtime relancés à la main sur ce même SHA (voir HANDOFF).
 
+## Actualisation P13 du 20 octobre 2026
+
+Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Cause du `NON_QUALIFIANT` KVM (run 39308093631, `2582cde9`) : « charge sans effet mesurable » parce que le repos reveille plus tard que la charge (SMP1 p95 917 contre 212 us). Deux defauts noyau : `cbbd5ec0` (echeance due/dans la marge non armee puis `hlt` jusqu'au tic) et `7d6c944b` (pas d'IPI vers le coeur d'une tache bloquee restee installee). Niveau : **HOST + TCG** (futex-pingpong TCG SMP4 2 857 -> 95 us ; invariants scheduler-ng-banc tenus). **KVM : a mesurer.** P13 reste **PARTIAL**.
+
 ## Actualisation P13 du 19 octobre 2026
 
 Cette section [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md) prime sur les SHA et etats historiques du tableau ci-dessous. Sur `f5692b7`, CI Fast, Integration, Reliability, Native IPC et Ladybird 20/20 sont verts. Les gels QEMU SMP8 >=200ms passent de 4/9 a 0/15 apres traitement du jeton serie + hard IRQ, d'apres `docs/SCHEDULER_NG.md`. **P13 reste PARTIAL:** attribution KVM SMP1/2/4 `NON_QUALIFIANT`, A/B reveil precis KVM SMP1/4 `NON_CONCLUANT` 0/4, SMP8 KVM dedie non prouve; correction qualificateur `4d279ff` (17/16) ne change pas ces donnees. GPU direct/tuiles KVM NON_CONVAINCANT. Baseline globale NOT_ESTABLISHED.

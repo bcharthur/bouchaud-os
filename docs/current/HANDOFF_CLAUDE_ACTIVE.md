@@ -1,4 +1,6 @@
-# Handoff actif Claude — etat 19 octobre, archives du 15 octobre
+# Handoff actif Claude — etat 20 octobre, archives du 15 octobre
+
+> **20 octobre 2026 :** source de reprise [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md). Le `NON_QUALIFIANT` KVM de 39308093631 venait du noyau (repos plus lent que charge). Corriges : `7d6c944b` (IPI vers le coeur d'une tache installee en `hlt`) et `cbbd5ec0` (echeance due / dans la marge armee + compteurs diag par bras A/B). Prochaine etape : campagne `os-primitives` `p13_strict=true` sur le SHA pousse, lire attribution KVM SMP1/2/4 et A/B SMP1/4 ; ouvert : queue p99 KVM SMP1 (emissions serie masquees ?), SMP8 materiel.
 
 > **Handoff courant du 19 octobre 2026 :** [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md) est la source de reprise. Les travaux `sonde_gel.rs`, `verifie-releves-hors-irq.py`, `verifie-jeton-serie.py`, le diagnostic serie/registre, l'IPC et le temoin graphique M12 sont deja integres; **NE PAS LES RECODER**. Le run 39296905493 est vert fonctionnellement mais P13 reste non qualifie en strict (attribution KVM SMP1/2/4 et A/B SMP1/4). Le texte du 15 octobre ci-dessous est historique. Pas d'EEVDF avant qualif stabilite/latence.
 

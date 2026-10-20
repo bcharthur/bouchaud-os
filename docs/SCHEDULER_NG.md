@@ -190,6 +190,16 @@ Ouvert : la borne du jeton atteinte une fois sous A+B sans gel ; le
 demarrage A sans `FIN` ; usb-hid 732 ms (quantum retire) ; preemption ciblee
 du compositeur (cas preexistant).
 
+### Reveils au repos (BOUCHAUD_REVEIL_DU_V1, BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1, 20/10)
+
+Constat KVM (run 39308093631) : au repos, p95 de reveil 850-955 us (SMP1) alors
+que sous charge 212 us -- la sonde ne pouvait rien qualifier. Deux causes :
+
+| defaut | correction | commit | preuve |
+|---|---|---|---|
+| echeance due ou a < `MARGE_NS` (20 us) : armement refuse, puis `hlt` jusqu'au tic (1 ms) ou au quantum (4 ms) | armee exactement (dans la marge) ou a `maintenant + MARGE_NS` (due) ; jamais en boucle | `cbbd5ec0` | HOST 15/15 ; KVM a mesurer |
+| tache bloquee restee installee (son coeur fait `hlt` dans son contexte) : `publish_ready` sortait sans IPI, le reveil inter-coeurs attendait le quantum | IPI si le coeur est `IDLE` ; le dormeur relit l'etat de sa tache apres `IDLE` (motif croise) | `7d6c944b` | TCG SMP4 futex-pingpong 2 857 -> 95 us ; SMP2 ~974 -> ~69 us ; 0 reveil perdu |
+
 ## 4. Invariants
 
 | invariant | etat | garde |
@@ -198,6 +208,7 @@ du compositeur (cas preexistant).
 | fil d'un processus recolte jamais en espace utilisateur | 0 sur 52 demarrages | banc `ressuscites` |
 | tache prete jamais hors de toute file | 0 `[SCHED-ORPHELINE]` sur 16 | `verifie-passation-reveil.py` |
 | aucun reveil futex perdu | 0 | banc `reveils_perdus` |
+| tache installee rendue prete : son coeur ne dort pas | IPI ou relecture apres `IDLE` | `verifie-poignee-idle.py` |
 | aucun BKL, aucun verrou global d'ordonnanceur | tenu | `verifie-ordonnanceur-sans-bkl.py`, `verifie-bkl-supprime.py` |
 
 ## 5. Ouvert
