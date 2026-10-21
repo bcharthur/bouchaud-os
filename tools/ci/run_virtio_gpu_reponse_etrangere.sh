@@ -50,7 +50,7 @@ while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
 done
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
-sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aE 'VIRTIO_GPU_(INJECTION|FILE|SCANOUT)|\[GUI-VIRTIO-GPU\]|KERNEL PANIC|panicked' | sed 's/^/  /' | head -12 || true
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aE 'VIRTIO_GPU_(INJECTION|FILE|SCANOUT)|\[GUI-VIRTIO-GPU\]|KERNEL PANIC|panicked' | sed 's/^/  /' | awk 'NR<=12' || true
 
 echecs=0
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs=$((echecs + 1)); fi; }
@@ -59,7 +59,7 @@ exige "l'injection a eu lieu" grep -aq 'VIRTIO_GPU_INJECTION reponse_etrangere' 
 exige "la violation est nommee (barriere differente, transfert 0x105)" grep -aq 'VIRTIO_GPU_FILE violation=barriere-differente commande=0x105' "$LOG"
 ecart_barriere() {
   local l b a
-  l=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'VIRTIO_GPU_FILE violation=barriere-differente.*' | head -1)
+  l=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'VIRTIO_GPU_FILE violation=barriere-differente.*' | awk 'NR<=1')
   b=$(sed -nE 's/.* barriere=([0-9]+) .*/\1/p' <<<"$l")
   a=$(sed -nE 's/.* attendue=([0-9]+).*/\1/p' <<<"$l")
   echo "  preuve  barriere_recue=${b:-?} barriere_attendue=${a:-?}"

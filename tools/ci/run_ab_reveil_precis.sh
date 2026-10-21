@@ -59,7 +59,7 @@ PID=$!
 LIMITE=$((SECONDS + 180 + TOURS * 2 * 300))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
-     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_PRECIS_FIN' | grep -aqv '+ echo AB_PRECIS_FIN'; then
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_PRECIS_FIN' | grep -av '+ echo AB_PRECIS_FIN' >/dev/null; then
     sleep 2; break
   fi
   sleep 2

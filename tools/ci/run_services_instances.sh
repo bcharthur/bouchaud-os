@@ -63,7 +63,7 @@ mkdir -p "$SCENARIO"
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/WebContent" tools/userland/faux-navigateur.c 2>"$SORTIE/cc.log"; then
     echo "instances : la charge d'epreuve ne se compile pas ici, verification passee"
-    sed 's/^/    /' "$SORTIE/cc.log" | head -5
+    sed 's/^/    /' "$SORTIE/cc.log" | awk 'NR<=5'
     exit 0
 fi
 
@@ -98,7 +98,7 @@ ARBRE="$SORTIE/arbre"
 sed -n '/=== ARBRE ===/,/INSTANCES FIN/p' "$PROPRE" | sed -E 's/^(\[[^]]*\])+ //' > "$ARBRE"
 
 echo "=== l'arbre du navigateur ==="
-grep -A 10 -E "^  browser" "$ARBRE" | head -12
+grep -A 10 -E "^  browser" "$ARBRE" | awk 'NR<=12'
 
 # LA REGLE : des instances DISTINCTES, sous leur role.
 #

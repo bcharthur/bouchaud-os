@@ -116,7 +116,7 @@ mkdir -p "$SCENARIO"
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/tempete" tools/userland/tempete-fautes.c 2>"$SORTIE/cc.log"; then
     echo "tempete : la charge d'epreuve ne se compile pas ici, verification passee"
-    sed 's/^/    /' "$SORTIE/cc.log" | head -5
+    sed 's/^/    /' "$SORTIE/cc.log" | awk 'NR<=5'
     exit 0
 fi
 

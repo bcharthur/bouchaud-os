@@ -241,7 +241,7 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
     split(f[5], a, "="); app = a[2]; split(f[6], a, "="); top = a[2]
     if (!(pid in t0)) { t0[pid] = t; a0[pid] = app } ; t1[pid] = t; a1[pid] = app; im[pid] = img; tp[pid] = top
   }
-  END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | head -12
+  END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | awk 'NR<=12'
 # BOUCHAUD_PROFIL_RIP_V1 : ou les fils passent leur temps (RIP echantillonnes
 # au quantum, symbolises contre les binaires du run). Affichage seulement.
 # Pas de `| head` : sous `pipefail`, un producteur coupe par SIGPIPE ferait

@@ -94,7 +94,7 @@ if grep -aiEq '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|panicked at' "$NET"; then
     echo "panic pendant l'outillage H10" >&2
     exit 1
 fi
-echo "--- releve ---"; grep -aE 'H10_' "$NET" | sed 's/^.*\] //' | head -30; echo "--- fin ---"
+echo "--- releve ---"; grep -aE 'H10_' "$NET" | sed 's/^.*\] //' | awk 'NR<=30'; echo "--- fin ---"
 
 exige "$NET" 'H10_HWINFO_FIN' 'hwinfo rend la main'
 exige "$NET" 'H10_HWINFO_TIMER mode=' 'hwinfo nomme le mode de quantum local'
@@ -126,7 +126,7 @@ echo "=== QEMU H10, disque SANS partition Bouchaud ==="
 lance "$LOG.sans" -drive if=none,id=nvm,format=raw,file="$VIERGE" -device nvme,serial=h10,drive=nvm
 NETS="$RACINE/propre-sans.log"
 sed -e 's/\x1b\[[0-9;]*m//g' "$LOG.sans" > "$NETS"
-echo "--- releve ---"; grep -aE 'H10_DISKTEST' "$NETS" | sed 's/^.*\] //' | head -5; echo "--- fin ---"
+echo "--- releve ---"; grep -aE 'H10_DISKTEST' "$NETS" | sed 's/^.*\] //' | awk 'NR<=5'; echo "--- fin ---"
 
 exige "$NETS" 'H10_DISKTEST verdict=refuse .*raison=pas-de-partition-bouchaud' \
       'sans partition Bouchaud, l ecriture est REFUSEE'

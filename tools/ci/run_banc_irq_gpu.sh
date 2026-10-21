@@ -53,7 +53,7 @@ LIMITE=$((SECONDS + 120 + TOURS * 2 * 60))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   # La sortie de `echo`, pas sa trace (`+ echo GPU_AB_FIN`).
   if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
-     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'GPU_AB_FIN' | grep -aqv '+ echo GPU_AB_FIN'; then
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'GPU_AB_FIN' | grep -av '+ echo GPU_AB_FIN' >/dev/null; then
     sleep 2; break
   fi
   sleep 2

@@ -53,7 +53,7 @@ LIMITE=$((SECONDS + 180 + TOURS * 2 * 90))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   # La sortie de `echo`, pas sa trace (`+ echo AB_TAMPON_FIN`).
   if grep -aqE 'KERNEL PANIC|panicked at|\[BANC-PRESENT\] ECHEC' "$LOG" \
-     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_TAMPON_FIN' | grep -aqv '+ echo AB_TAMPON_FIN'; then
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_TAMPON_FIN' | grep -av '+ echo AB_TAMPON_FIN' >/dev/null; then
     sleep 2; break
   fi
   sleep 2

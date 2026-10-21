@@ -46,7 +46,7 @@ demarre() {
   while kill -0 "$pid" 2>/dev/null && (( SECONDS < limite )); do
     # La SORTIE de `echo BANC_PRESENT_FIN`, pas l'echo de la commande.
     if grep -aqE '\[BANC-PRESENT\] ECHEC|KERNEL PANIC|panicked at' "$log" \
-       || sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -a 'BANC_PRESENT_FIN' | grep -aqv '+ echo BANC_PRESENT_FIN'; then
+       || sed -E 's/\x1b\[[0-9;]*m//g' "$log" | grep -a 'BANC_PRESENT_FIN' | grep -av '+ echo BANC_PRESENT_FIN' >/dev/null; then
       sleep 1; break
     fi
     sleep 1

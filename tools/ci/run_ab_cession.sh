@@ -55,7 +55,7 @@ LIMITE=$((SECONDS + 180 + TOURS * 2 * 150))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   # La sortie de `echo`, pas sa trace (`+ echo AB_CESSION_FIN`).
   if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
-     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_CESSION_FIN' | grep -aqv '+ echo AB_CESSION_FIN'; then
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'AB_CESSION_FIN' | grep -av '+ echo AB_CESSION_FIN' >/dev/null; then
     sleep 2; break
   fi
   sleep 2

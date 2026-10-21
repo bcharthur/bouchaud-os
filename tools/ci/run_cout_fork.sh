@@ -147,7 +147,7 @@ done
 # `duplicate` prend ses frames sans les mettre a zero : une copie partielle
 # donnerait a l'enfant la memoire d'un autre processus, et le programme
 # continuerait de tourner sans rien dire.
-LIGNE_COPIE=$(grep 'COUT_FORK_COPIE' "$PROPRE" | head -1 || true)
+LIGNE_COPIE=$(grep 'COUT_FORK_COPIE' "$PROPRE" | awk 'NR<=1' || true)
 echo
 if [ -z "$LIGNE_COPIE" ]; then
     echo "cout fork : aucune verification de copie ; le contrat de la frame non mise a zero n'est pas teste" >&2
@@ -171,7 +171,7 @@ if [ -n "$LIGNES_EXEC" ]; then
     echo "$LIGNES_EXEC"
     echo
     echo "== etapes de l'execve, vues du noyau =="
-    grep 'PERF_EXECVE' "$PROPRE" | sed 's/^\[kernel\] //' | head -5
+    grep 'PERF_EXECVE' "$PROPRE" | sed 's/^\[kernel\] //' | awk 'NR<=5'
     if ! grep -q 'PERF_EXECVE' "$PROPRE"; then
         echo "cout fork : aucune ligne PERF_EXECVE ; le chemin sys_execve n'a pas ete pris" >&2
         echecs=$((echecs + 1))

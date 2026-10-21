@@ -51,7 +51,10 @@ done
 for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
   test -f "$OUT/$f"
   file "$OUT/$f"
-  ! readelf -l "$OUT/$f" | grep -q INTERP
+  # BOUCHAUD_PIPEFAIL_SANS_SIGPIPE_V1 : `! a | b` ne declenche jamais `set -e`
+  # (bash l'exclut) -- la verification etait inerte. Lue d'un fichier, sans tube.
+  readelf -l "$OUT/$f" > "/tmp/entetes-$f.txt"
+  if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
 done
 
 rm -rf scenario-browser-host ladybird-browser-host${SUFFIXE}.img \

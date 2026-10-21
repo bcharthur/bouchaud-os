@@ -53,10 +53,10 @@ done
 kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 propre() { sed -E 's/\x1b\[[0-9;]*m//g' "$LOG"; }
-propre | grep -aE 'VIRTIO_GPU_(IRQ|INJECTION|FILE|SCANOUT)|\[GUI-VIRTIO-GPU\]|KERNEL PANIC|panicked' | sed 's/^/  /' | head -16 || true
+propre | grep -aE 'VIRTIO_GPU_(IRQ|INJECTION|FILE|SCANOUT)|\[GUI-VIRTIO-GPU\]|KERNEL PANIC|panicked' | sed 's/^/  /' | awk 'NR<=16' || true
 # Le dernier releve, apres l'abandon.
 APRES=$(propre | sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' | grep -ao '\[GUI-VIRTIO-GPU\].*' | tail -1 || true)
-val() { echo "$1" | grep -oE " $2=[0-9]+" | head -1 | cut -d= -f2; }
+val() { echo "$1" | grep -oE " $2=[0-9]+" | awk 'NR<=1' | cut -d= -f2; }
 
 echecs=0
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs=$((echecs + 1)); fi; }
@@ -75,7 +75,7 @@ exige "interruptions perdues : les dix reponses masquees trouvees par la relectu
 # 38732049308, KVM, 9 envoyees pour 8 passages sans progres), le compte n'est
 # donc qu'une preuve. HORS VOL (apres l'achevement, MSI-X servie) : rien ne
 # peut fusionner, chacune doit produire exactement un passage sans progres.
-FIN=$(propre | grep -aoE 'irq_parasites_fin envoyees=[0-9]+ hors_vol=[0-9]+ hors_vol_sans_progres=[0-9]+' | head -1)
+FIN=$(propre | grep -aoE 'irq_parasites_fin envoyees=[0-9]+ hors_vol=[0-9]+ hors_vol_sans_progres=[0-9]+' | awk 'NR<=1')
 ENVOYEES=$(echo "$FIN" | grep -oE 'envoyees=[0-9]+' | cut -d= -f2)
 HORS_VOL=$(echo "$FIN" | grep -oE 'hors_vol=[0-9]+' | cut -d= -f2)
 HORS_VOL_VUES=$(echo "$FIN" | grep -oE 'hors_vol_sans_progres=[0-9]+' | cut -d= -f2)

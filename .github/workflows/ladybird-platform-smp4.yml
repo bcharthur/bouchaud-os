@@ -52,7 +52,8 @@ jobs:
           for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
             test -f "native-browser/$f"
             file "native-browser/$f"
-            ! readelf -l "native-browser/$f" | grep -q INTERP
+            readelf -l "native-browser/$f" > "/tmp/entetes-$f.txt"
+            if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
           done
           test -d native-browser/resources
       - name: Demarrer fixture plateforme

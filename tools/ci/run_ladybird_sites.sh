@@ -89,7 +89,7 @@ if grep -aq 'KERNEL PANIC' "$P"; then echo "panique noyau" >&2; exit 1; fi
 
 # Le passage de chaque site : les lignes entre son SITE_DEBUT et son SITE_FIN.
 passage() { awk -v n="$1" '$0 ~ "SITE_DEBUT nom="n"$" {on=1} on {print} $0 ~ "SITE_FIN nom="n" " {on=0}' "$P"; }
-champ() { echo "$1" | grep -oE "$2=[0-9a-f]+" | head -1 | cut -d= -f2; }
+champ() { echo "$1" | grep -oE "$2=[0-9a-f]+" | awk 'NR<=1' | cut -d= -f2; }
 
 echecs=()
 for s in $SITES; do

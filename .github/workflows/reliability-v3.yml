@@ -122,7 +122,7 @@ jobs:
               if ! BOUCHAUD_PROP_SEED="$seed" "/tmp/$nom" --test-threads=1 >"/tmp/$nom.out" 2>&1; then
                 echo "ECHEC $nom graine=$seed"
                 echo "  rejouable par : BOUCHAUD_PROP_SEED=$seed /tmp/$nom"
-                sed 's/^/    /' "/tmp/$nom.out" | head -30
+                sed 's/^/    /' "/tmp/$nom.out" | awk 'NR<=30'
                 echecs=$((echecs + 1))
                 break
               fi

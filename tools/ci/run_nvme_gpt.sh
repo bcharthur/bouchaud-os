@@ -167,7 +167,7 @@ INTERDITS=(
 for marqueur in "${INTERDITS[@]}"; do
   if grep -aFq "$marqueur" "$LOG"; then
     echo "marqueur interdit present : $marqueur" >&2
-    grep -aF "$marqueur" "$LOG" | head -n 3 >&2
+    grep -aF "$marqueur" "$LOG" | awk 'NR<=3' >&2
     echecs=$((echecs + 1))
   fi
 done

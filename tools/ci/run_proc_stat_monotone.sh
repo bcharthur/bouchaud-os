@@ -79,7 +79,7 @@ rm -rf "$SCENARIO"; mkdir -p "$SCENARIO"
 if ! "$CC" -O1 -static-pie -fPIE -nostdlib -nostartfiles -Wl,-z,noexecstack \
         -o "$SCENARIO/cumul" tools/userland/cumul-cpu.c 2>"$SORTIE/cc.log"; then
     echo "proc-stat : la charge d'epreuve ne se compile pas ici" >&2
-    sed 's/^/    /' "$SORTIE/cc.log" | head -5 >&2
+    sed 's/^/    /' "$SORTIE/cc.log" | awk 'NR<=5' >&2
     exit 1
 fi
 

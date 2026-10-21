@@ -48,7 +48,7 @@ while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
   # La sortie de `echo`, pas sa trace (`+ echo FAUTE_MULTIFIL_FIN`).
   if grep -aqE 'KERNEL PANIC|panicked at' "$LOG" \
-     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'FAUTE_MULTIFIL_FIN' | grep -aqv '+ echo FAUTE_MULTIFIL_FIN'; then
+     || sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'FAUTE_MULTIFIL_FIN' | grep -av '+ echo FAUTE_MULTIFIL_FIN' >/dev/null; then
     sleep 2; break
   fi
   sleep 1
