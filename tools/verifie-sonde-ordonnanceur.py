@@ -72,10 +72,14 @@ def corps(texte: str, nom: str) -> str:
 def verifie(t: dict) -> list:
     fautes = []
     s = t["sonde"]
-    # 1. Code 2 et forme NON_QUALIFIANT, avant toute forme qualifiee.
-    m = RETOUR_NQ.search(s)
-    if not m:
-        fautes.append("ordonnanceur-probe.c : NON_QUALIFIANT ne rend plus 2, ou sa ligne RESULTAT a change de forme.")
+    # 1. Code 2 et forme NON_QUALIFIANT, avant toute forme qualifiee -- pour
+    # CHAQUE sortie NON_QUALIFIANT (BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 en a
+    # ajoute une : horloge non verifiable).
+    sorties_nq = s.count('printf("RESULTAT : NON_QUALIFIANT ')
+    retours = list(RETOUR_NQ.finditer(s))
+    m = retours[-1] if retours else None
+    if not retours or len(retours) != sorties_nq:
+        fautes.append("ordonnanceur-probe.c : une sortie NON_QUALIFIANT ne rend plus 2, ou sa ligne RESULTAT a change de forme.")
     if s.count(RESULTAT_QUALIFIE) != 1 or (m and s.find(RESULTAT_QUALIFIE) < m.end()):
         fautes.append("ordonnanceur-probe.c : la forme « RESULTAT : n verification(s) » peut etre imprimee pour un NON_QUALIFIANT.")
     # 2. Deux jugements, reveils contamines exclus.
@@ -154,6 +158,17 @@ def verifie(t: dict) -> list:
         fautes.append("fabrique-scenario-endurance.sh : le marqueur de la sonde ne depend plus de son code de sortie.")
     if "(NON_QUALIFIANT )?" not in t["rapport"]:
         fautes.append("budgets_endurance.py : le rapport ne lit plus la forme NON_QUALIFIANT.")
+    # 7. BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 : le pas de l'horloge vient des
+    # seules paires propres (duree reelle au TSC), plafond absolu compris ;
+    # non verifiable -> NON_QUALIFIANT, jamais un plancher invente.
+    er = corps(s, "estime_resolution")
+    if not re.search(r"if \(d > seuil\) \{\s*r\.coupees\+\+;\s*continue;\s*\}", er) \
+            or not re.search(r"if \(seuil > PAIRE_PROPRE_MAX_US\)\s*seuil = PAIRE_PROPRE_MAX_US;", er) \
+            or not re.search(r"if \(ecart > 0\) \{\s*r\.avancees\+\+;\s*if \(r\.pas_us < 0 \|\| ecart < r\.pas_us\)\s*r\.pas_us = ecart;", er) \
+            or "granularite_us" in s:
+        fautes.append("ordonnanceur-probe.c : le pas de l'horloge peut venir d'une paire coupee par l'ordonnanceur.")
+    if not re.search(r"if \(h\.pas_us < 0\) \{.*?VERDICT_SONDE : NON_QUALIFIANT tentatives=0 raison=horloge non verifiable.*?return 2;\s*\}\s*long long grain = h\.pas_us;", s, re.S):
+        fautes.append("ordonnanceur-probe.c : une horloge non verifiable ne rend plus NON_QUALIFIANT (plancher invente).")
     return fautes
 
 
@@ -177,6 +192,15 @@ def main() -> int:
         # NON_QUALIFIANT rendu 0
         ("sonde", "               b.echecs, b.non_qualifiantes, b.ok);\n        return 2;",
          "               b.echecs, b.non_qualifiantes, b.ok);\n        return 0;"),
+        # horloge non verifiable rendue 0 (BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1)
+        ("sonde", "        printf(\"RESULTAT : NON_QUALIFIANT 0 verification(s) en echec, 0 non qualifiante(s) (0 passees)\\n\");\n        return 2;",
+         "        printf(\"RESULTAT : NON_QUALIFIANT 0 verification(s) en echec, 0 non qualifiante(s) (0 passees)\\n\");\n        return 0;"),
+        # horloge non verifiable : un plancher invente au lieu de NON_QUALIFIANT
+        ("sonde", "    if (h.pas_us < 0) {", "    if (h.pas_us < -1) {"),
+        # paires coupees prises pour le pas
+        ("sonde", "        if (d > seuil) {\n            r.coupees++;\n            continue;\n        }", "        if (d > seuil)\n            r.coupees++;"),
+        # plus de plafond absolu : toutes coupees, toutes dites propres
+        ("sonde", "    if (seuil > PAIRE_PROPRE_MAX_US)\n        seuil = PAIRE_PROPRE_MAX_US;\n", ""),
         # un desaccord tranche par « tous »
         ("sonde", "    } else {\n        v = NON_QUALIFIANT;", "    } else {\n        v = tout ? QUALIFIE_OK : QUALIFIE_ECHEC;"),
         # les contamines gardes dans les propres
