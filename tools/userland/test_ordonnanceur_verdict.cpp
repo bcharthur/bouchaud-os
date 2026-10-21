@@ -373,6 +373,106 @@ static void calcul_affame(void)
     VERIFIE(juge_tout(1000, 99, &b) == QUALIFIE_ECHEC, "moins d'un dixieme du travail : QUALIFIE_ECHEC");
 }
 
+// BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 -- le pas de l'horloge, jamais celui
+// de l'ordonnanceur. 1 000 cycles par us ; une paire propre dure 2 us.
+static const double CYCLES = 1000.0;
+
+static void paire(struct paire_horloge *q, long long a, long long ecart, long long duree_us, unsigned long long *tsc)
+{
+    q->tsc_avant = *tsc;
+    q->a_us = a;
+    q->b_us = a + ecart;
+    q->tsc_apres = *tsc + (unsigned long long)(duree_us * CYCLES);
+    *tsc = q->tsc_apres + 1000;
+}
+
+// L'estimateur d'avant (KVM SMP1, 3adcea3c) : plus petit ecart non nul sur les
+// huit premiers ecarts non nuls, sans regarder la duree reelle.
+static long long ancien_estimateur(const struct paire_horloge *p, int n)
+{
+    long long plus_petit = -1;
+    int vus = 0;
+    for (int i = 0; i < n && vus < 8; i++) {
+        long long d = p[i].b_us - p[i].a_us;
+        if (d > 0) {
+            vus++;
+            if (plus_petit < 0 || d < plus_petit)
+                plus_petit = d;
+        }
+        if (plus_petit == 1)
+            break;
+    }
+    return plus_petit < 0 ? 0 : plus_petit;
+}
+
+static struct paire_horloge banc_paires[2000];
+
+static void preemption_n_est_pas_un_pas(void)
+{
+    // Horloge a la microseconde ; 19 paires sur 20 coupees par l'ordonnanceur
+    // (2,3 ms entre les deux lectures), les propres voient 0 ou 1 us.
+    unsigned long long tsc = 1;
+    long long h = 1000000;
+    for (int i = 0; i < 2000; i++) {
+        if (i % 20 == 19)
+            paire(&banc_paires[i], h, i % 40 == 39 ? 1 : 0, 2, &tsc);
+        else
+            paire(&banc_paires[i], h, 2300, 2301, &tsc);
+        h += 3000;
+    }
+    // Reproduction de l'ancien defaut : la preemption prise pour le pas.
+    VERIFIE(ancien_estimateur(banc_paires, 2000) == 2300, "temoin : l'ancien estimateur rendait 2 300 us");
+    struct resolution_horloge r = estime_resolution(banc_paires, 2000, CYCLES);
+    VERIFIE(r.pas_us == 1, "preemption prise pour le pas de l'horloge");
+    VERIFIE(r.coupees == 1900 && r.propres == 100, "paires coupees mal comptees");
+    VERIFIE(r.appel_us == 2, "duree d'appel fausse");
+}
+
+static void horloge_grossiere(void)
+{
+    // Horloge a la milliseconde : les paires propres voient 0, ou 1 000 quand
+    // elles enjambent une marche. Le pas annonce est 1 000, pas 1.
+    unsigned long long tsc = 1;
+    long long h = 0;
+    for (int i = 0; i < 2000; i++) {
+        paire(&banc_paires[i], h, i % 50 == 7 ? 1000 : 0, 3, &tsc);
+        h += 1000 * (i % 50 == 7);
+    }
+    struct resolution_horloge r = estime_resolution(banc_paires, 2000, CYCLES);
+    VERIFIE(r.pas_us == 1000, "horloge grossiere annoncee fine");
+}
+
+static void toutes_coupees_non_verifiable(void)
+{
+    // Chaque paire coupee : la plus courte l'est aussi. Pas de pas, une raison.
+    unsigned long long tsc = 1;
+    for (int i = 0; i < 2000; i++)
+        paire(&banc_paires[i], 1000LL * i * 3, 2200 + (i % 5) * 100, 2200 + (i % 5) * 100, &tsc);
+    struct resolution_horloge r = estime_resolution(banc_paires, 2000, CYCLES);
+    VERIFIE(r.pas_us < 0 && r.raison[0], "paires toutes coupees : un pas invente");
+    VERIFIE(r.propres == 0, "paires coupees dites propres");
+}
+
+static void horloge_figee_non_verifiable(void)
+{
+    unsigned long long tsc = 1;
+    for (int i = 0; i < 2000; i++)
+        paire(&banc_paires[i], 5000, 0, 2, &tsc);
+    struct resolution_horloge r = estime_resolution(banc_paires, 2000, CYCLES);
+    VERIFIE(r.pas_us < 0 && r.propres == 2000, "horloge figee : un pas invente");
+}
+
+static void tsc_absent_ou_recul_non_verifiable(void)
+{
+    unsigned long long tsc = 1;
+    for (int i = 0; i < 100; i++)
+        paire(&banc_paires[i], 1000LL * i, 1, 2, &tsc);
+    VERIFIE(estime_resolution(banc_paires, 100, 0.0).pas_us < 0, "TSC non calibre : un pas invente");
+    banc_paires[50].b_us = banc_paires[50].a_us - 5;
+    VERIFIE(estime_resolution(banc_paires, 100, CYCLES).pas_us < 0, "horloge en recul : un pas invente");
+    VERIFIE(estime_resolution(banc_paires, 0, CYCLES).pas_us < 0, "aucune paire : un pas invente");
+}
+
 int main()
 {
     // Les verdicts imprimes par la sonde ne sont pas l'objet du test.
@@ -393,6 +493,11 @@ int main()
     attribution_ou_comptes_absents();
     repartition();
     calcul_affame();
+    preemption_n_est_pas_un_pas();
+    horloge_grossiere();
+    toutes_coupees_non_verifiable();
+    horloge_figee_non_verifiable();
+    tsc_absent_ou_recul_non_verifiable();
     fprintf(stderr, "%d verification(s), %d echec(s)\n", verifications, fautes);
     return fautes ? 1 : 0;
 }

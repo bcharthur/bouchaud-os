@@ -722,7 +722,6 @@ static const char *premiere_non_jugeable(const struct phase *a, const struct pha
     return "";
 }
 
-static long long granularite_us(void);
 static enum verdict evalue(const struct phase *repos, const struct phase *normale,
                            const struct phase *prio, unsigned long long tours_normale,
                            unsigned long long tours_prio, long long grain, struct bilan *b);
@@ -861,28 +860,130 @@ static enum verdict evalue(const struct phase *repos_, const struct phase *norma
     return QUALIFIE_OK;
 }
 
-// La granularite reelle de l'horloge : le plus petit ecart non nul entre deux
-// lectures consecutives. Rien de ce que la sonde mesure en dessous de cette
-// valeur n'a de sens, et le dire evite de commenter du bruit.
-static long long granularite_us(void)
+// BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 -- LE PAS DE L'HORLOGE, PAS CELUI DE
+// L'ORDONNANCEUR
+//
+// La granularite etait le plus petit ecart non nul entre deux lectures
+// consecutives, sur les huit premiers ecarts non nuls. Une lecture que
+// l'ordonnanceur coupe -- l'appel systeme rend la main a une autre tache
+// prete -- donne un ecart de plusieurs millisecondes, et si les huit paires
+// non nulles ont ete coupees, la sonde annoncait ce delai comme le pas de
+// l'horloge. KVM SMP1 (3adcea3c, A/B reveil precis) : « granularite » de
+// 1 030 a 2 531 us dans les DEUX bras, console active ou non, alors que
+// `monotonic_ns` lit le TSC a la nanoseconde ; le plancher de jugement (deux
+// grains) montait a 4,6 ms et rendait le verdict NON_QUALIFIANT.
+//
+// Desormais chaque paire est encadree par le TSC, lu en mode utilisateur.
+// Une paire est PROPRE si sa duree reelle reste proche de la plus courte
+// (deux appels systeme sans rien entre eux) ; seules les paires propres
+// disent le pas de l'horloge : le plus petit ecart non nul parmi elles. Les
+// paires coupees sont comptees, jamais prises pour le pas. Sans paire propre
+// qui avance, ou si le TSC ne se calibre pas sur l'horloge, la resolution est
+// NON VERIFIABLE -- la sonde le dit et ne juge pas (NON_QUALIFIANT), elle
+// n'invente pas un plancher.
+
+struct paire_horloge {
+    long long a_us, b_us;                 // deux lectures consecutives
+    unsigned long long tsc_avant, tsc_apres;
+};
+
+struct resolution_horloge {
+    long long pas_us;      // plus petit ecart non nul d'une paire propre ; -1 : non verifiable
+    long long appel_us;    // duree reelle de la paire la plus courte
+    int propres;           // paires dont la duree reelle reste proche de `appel_us`
+    int coupees;           // paires interrompues (duree reelle bien plus longue)
+    int avancees;          // paires propres dont l'horloge a avance
+    const char *raison;    // pourquoi le pas n'est pas verifiable
+};
+
+// Une paire est coupee au-dela de quatre fois la plus courte, plus 20 us --
+// et toujours au-dela de 500 us : si TOUTES les paires sont coupees, la plus
+// courte l'est aussi, et un seuil relatif seul les dirait toutes propres.
+#define PAIRE_COUPEE_FACTEUR 4
+#define PAIRE_COUPEE_MARGE_US 20
+#define PAIRE_PROPRE_MAX_US 500
+
+// Pure (testee sur l'hote : test_ordonnanceur_verdict.cpp). `cycles_par_us` :
+// le TSC calibre sur l'horloge elle-meme, sur un intervalle long.
+static struct resolution_horloge estime_resolution(const struct paire_horloge *p, int n, double cycles_par_us)
 {
-    long long plus_petit = -1;
-    int vus = 0;
-    // Borne volontairement basse : chaque tour coute deux appels systeme, et
-    // sous emulation cela se paie. Il suffit d'attraper quelques changements de
-    // valeur — un par tick — pour connaitre le pas de l'horloge.
-    for (int i = 0; i < 20000 && vus < 8; i++) {
-        long long a = maintenant_us();
-        long long b = maintenant_us();
-        if (b > a) {
-            vus++;
-            if (plus_petit < 0 || b - a < plus_petit)
-                plus_petit = b - a;
+    struct resolution_horloge r = { -1, -1, 0, 0, 0, "" };
+    if (n <= 0) {
+        r.raison = "aucune paire";
+        return r;
+    }
+    if (!(cycles_par_us > 0.0)) {
+        r.raison = "TSC non calibre sur l'horloge";
+        return r;
+    }
+    long long plus_courte = -1;
+    for (int i = 0; i < n; i++) {
+        if (p[i].tsc_apres < p[i].tsc_avant || p[i].b_us < p[i].a_us) {
+            r.raison = "horloge ou TSC en recul";
+            return r;
         }
-        if (plus_petit == 1)
+        long long d = (long long)((double)(p[i].tsc_apres - p[i].tsc_avant) / cycles_par_us);
+        if (plus_courte < 0 || d < plus_courte)
+            plus_courte = d;
+    }
+    r.appel_us = plus_courte;
+    long long seuil = plus_courte * PAIRE_COUPEE_FACTEUR + PAIRE_COUPEE_MARGE_US;
+    if (seuil > PAIRE_PROPRE_MAX_US)
+        seuil = PAIRE_PROPRE_MAX_US;
+    for (int i = 0; i < n; i++) {
+        long long d = (long long)((double)(p[i].tsc_apres - p[i].tsc_avant) / cycles_par_us);
+        if (d > seuil) {
+            r.coupees++;
+            continue;
+        }
+        r.propres++;
+        long long ecart = p[i].b_us - p[i].a_us;
+        if (ecart > 0) {
+            r.avancees++;
+            if (r.pas_us < 0 || ecart < r.pas_us)
+                r.pas_us = ecart;
+        }
+    }
+    if (r.propres == 0)
+        r.raison = "toutes les paires coupees par l'ordonnanceur";
+    else if (r.pas_us < 0)
+        r.raison = "aucune paire propre n'a vu l'horloge avancer";
+    return r;
+}
+
+static inline unsigned long long lit_tsc(void)
+{
+    unsigned int bas, haut;
+    __asm__ volatile("lfence; rdtsc" : "=a"(bas), "=d"(haut) :: "memory");
+    return ((unsigned long long)haut << 32) | bas;
+}
+
+#define PAIRES_HORLOGE 4000
+static struct paire_horloge paires_horloge[PAIRES_HORLOGE];
+
+// Mesure : calibre le TSC sur l'horloge (20 ms), puis jusqu'a 4 000 paires
+// encadrees, ou 300 ms. Resultat : `estime_resolution`.
+static struct resolution_horloge mesure_resolution(double *cycles_par_us)
+{
+    long long h0 = maintenant_us();
+    unsigned long long t0 = lit_tsc();
+    struct timespec dodo = { 0, 20 * 1000 * 1000 };
+    nanosleep(&dodo, 0);
+    long long h1 = maintenant_us();
+    unsigned long long t1 = lit_tsc();
+    *cycles_par_us = h1 > h0 && t1 > t0 ? (double)(t1 - t0) / (double)(h1 - h0) : 0.0;
+    int n = 0;
+    long long fin = maintenant_us() + 300000;
+    while (n < PAIRES_HORLOGE) {
+        struct paire_horloge *q = &paires_horloge[n++];
+        q->tsc_avant = lit_tsc();
+        q->a_us = maintenant_us();
+        q->b_us = maintenant_us();
+        q->tsc_apres = lit_tsc();
+        if (q->b_us > fin)
             break;
     }
-    return plus_petit < 0 ? 0 : plus_petit;
+    return estime_resolution(paires_horloge, n, *cycles_par_us);
 }
 
 int main(int argc, char **argv)
@@ -900,9 +1001,22 @@ int main(int argc, char **argv)
 
     printf("ordonnanceur-probe: latence de l'interface sous charge\n");
 
-    long long grain = granularite_us();
+    // BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 : le pas de l'horloge, recoupe par
+    // le TSC ; une preemption n'est jamais prise pour lui.
+    double cycles_par_us = 0.0;
+    struct resolution_horloge h = mesure_resolution(&cycles_par_us);
+    if (h.pas_us < 0) {
+        printf("  horloge : granularite non verifiable (%s) — appel %lld us, paires propres %d, coupees %d,"
+               " %.1f cycles/us\n", h.raison, h.appel_us, h.propres, h.coupees, cycles_par_us);
+        printf("VERDICT_SONDE : NON_QUALIFIANT tentatives=0 raison=horloge non verifiable : %s\n", h.raison);
+        printf("RESULTAT : NON_QUALIFIANT 0 verification(s) en echec, 0 non qualifiante(s) (0 passees)\n");
+        return 2;
+    }
+    long long grain = h.pas_us;
     printf("  horloge : granularite %lld us — periode visee %d us,"
-           " %d processus de calcul, %d tentative(s) au plus\n", grain, PERIODE_US, calculs, tentatives);
+           " %d processus de calcul, %d tentative(s) au plus ; appel %lld us, paires propres %d"
+           " (avancees %d), coupees %d, %.1f cycles/us\n", grain, PERIODE_US, calculs, tentatives,
+           h.appel_us, h.propres, h.avancees, h.coupees, cycles_par_us);
 
     struct bilan b;
     enum verdict v = NON_QUALIFIANT;
