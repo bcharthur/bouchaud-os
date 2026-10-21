@@ -944,6 +944,26 @@ pub fn realtime_ns() -> u64 {
         .saturating_add(ecoule_ns)
 }
 
+/// L'horloge murale SI son ancre est deja posee, sans jamais la poser.
+///
+/// BOUCHAUD_PREFIXE_SANS_CMOS_V1 : le prefixe de chaque ligne du journal lisait
+/// la RTC -- une trentaine d'acces aux ports CMOS 0x70/0x71 (index PUIS donnee,
+/// sans verrou), plus l'attente du bit de mise a jour, jusqu'a ~2 ms une fois
+/// par seconde. Sous le jeton, ces lectures etaient serialisees ; la console
+/// asynchrone construit le prefixe hors du jeton, sur plusieurs coeurs a la
+/// fois. Le journal lit donc l'horloge ancree, et la RTC seulement tant que
+/// l'ancre n'existe pas (il ne la pose pas : tres tot au demarrage, l'horloge
+/// monotone n'est pas encore celle qui doit porter l'heure de toute la session).
+pub fn realtime_ns_ancree() -> Option<u64> {
+    if EPOCH_POSEE.load(Ordering::Acquire) != 2 {
+        return None;
+    }
+    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
+    let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed);
+    let ecoule_ns = crate::kernel::timer::monotonic_ns().saturating_sub(base_ns);
+    Some(base_seconds.saturating_mul(1_000_000_000).saturating_add(ecoule_ns))
+}
+
 /// Secondes depuis l'epoch Unix.
 pub fn unix_time() -> u64 {
     realtime_ms() / 1000
