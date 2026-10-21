@@ -216,8 +216,10 @@ struct phase {
     struct latence propre;
     // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : ce que le noyau dit du PIRE reveil
     // de la serie. Lu UNE fois, apres la serie : la mesure n'en est pas
-    // perturbee.
-    char attribution[700];
+    // perturbee. 1 000 octets : la ligne tient jusqu'a ~640 octets depuis
+    // BOUCHAUD_REPRISE_DECOUPEE_V1 (trois champs en fin de ligne, que la
+    // troncature a 700 aurait emportes les premiers).
+    char attribution[1000];
     // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de la serie (resume).
     char ventilation[1800];
     int attribution_presente;
