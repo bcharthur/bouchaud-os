@@ -40,7 +40,9 @@ PROC = "src/compat/linux/proc.rs"
 VIE = "src/kernel/process/thread/lifecycle.rs"
 NET = "src/compat/linux/net.rs"
 PRIMITIVES = "tools/ci/run_os_primitives.sh"
-FICHIERS = (FD, FICHIER, PROC, VIE, NET, PRIMITIVES)
+# BOUCHAUD_VERDICT_OS_PRIMITIVES_V1 : le marqueur est exige par le verdict a part.
+VERDICT = "tools/ci/verdict_os_primitives.sh"
+FICHIERS = (VERDICT, FD, FICHIER, PROC, VIE, NET, PRIMITIVES)
 
 
 def corps(texte: str, entete: str) -> str | None:
@@ -120,7 +122,7 @@ def verifie(racine: Path) -> list[str]:
         if efault < 0 or recv.find("ferme_hors_verrou(recus)", efault) < 0:
             fautes.append("recvmsg : les droits abandonnes sur EFAULT ne reveillent plus")
 
-    if "/bin/eof-fermeture-probe" not in t[PRIMITIVES] or "EOF_FERMETURE_OK" not in t[PRIMITIVES]:
+    if "/bin/eof-fermeture-probe" not in t[PRIMITIVES] or "EOF_FERMETURE_OK" not in t[VERDICT]:
         fautes.append("os-primitives ne lance plus eof-fermeture-probe")
     return fautes
 

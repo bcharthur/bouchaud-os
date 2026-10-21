@@ -217,7 +217,7 @@ ITEMS = [
          "qemu:tools/ci/run_oss_horloge.sh:OSS_HORLOGE_CHAINE_OK",
          "boucle de PlaybackStreamBouchaud rejouee : horloge a 1,01-1,02 x le temps reel ; avant : figee a 0"),
     Item("Faute non canonique : programme tue, noyau vivant",
-         "qemu:tools/ci/run_os_primitives.sh:FAUTE_NONCANONIQUE_OK",
+         "qemu:tools/ci/verdict_os_primitives.sh:FAUTE_NONCANONIQUE_OK",
          "lecture, ecriture, saut vers 0xffff413f021ee480 : SIGSEGV ; avant : panique noyau"),
     Item("Matrice de securite des roles (vrais appels systeme)",
          "qemu:tools/ci/run_matrice_roles.sh:MATRICE_ROLES_OK",

@@ -37,7 +37,9 @@ RACINE = Path(__file__).resolve().parent.parent
 FD = "src/kernel/object/fd.rs"
 FICHIER = "src/compat/linux/file.rs"
 PRIMITIVES = "tools/ci/run_os_primitives.sh"
-FICHIERS = (FD, FICHIER, PRIMITIVES)
+# BOUCHAUD_VERDICT_OS_PRIMITIVES_V1 : le marqueur est exige par le verdict a part.
+VERDICT = "tools/ci/verdict_os_primitives.sh"
+FICHIERS = (VERDICT, FD, FICHIER, PRIMITIVES)
 
 
 def corps(texte: str, entete: str, depuis: int = 0) -> str | None:
@@ -119,7 +121,7 @@ def verifie(racine: Path) -> list[str]:
             if branche is None or garde not in branche:
                 fautes.append(f"poll {nom} : POLLOUT n'exige plus PIPE_BUF octets libres")
 
-    if "/bin/tube-atomicite-probe" not in t[PRIMITIVES] or "TUBE_ATOMICITE_OK" not in t[PRIMITIVES]:
+    if "/bin/tube-atomicite-probe" not in t[PRIMITIVES] or "TUBE_ATOMICITE_OK" not in t[VERDICT]:
         fautes.append("os-primitives ne lance plus tube-atomicite-probe")
     return fautes
 

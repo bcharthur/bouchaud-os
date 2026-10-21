@@ -87,7 +87,7 @@ qu'il reste a instrumenter.
 | Cache jetable de la persistance (decision) *(infra)* | **OK** | `HOST_RUNTIME` | `hote:test_cache_jetable` | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out |
 | Cache jetable de la persistance (deux demarrages) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_persist_cache.sh:PERSIST_CACHE_OK` | banc tools/ci/run_persist_cache.sh (marqueur PERSIST_CACHE_OK) |
 | Horloge audio OSS (AC'97, ODELAY/SYNC) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_oss_horloge.sh:OSS_HORLOGE_CHAINE_OK` | banc tools/ci/run_oss_horloge.sh (marqueur OSS_HORLOGE_CHAINE_OK) |
-| Faute non canonique : programme tue, noyau vivant *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_os_primitives.sh:FAUTE_NONCANONIQUE_OK` | banc tools/ci/run_os_primitives.sh (marqueur FAUTE_NONCANONIQUE_OK) |
+| Faute non canonique : programme tue, noyau vivant *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/verdict_os_primitives.sh:FAUTE_NONCANONIQUE_OK` | banc tools/ci/verdict_os_primitives.sh (marqueur FAUTE_NONCANONIQUE_OK) |
 | Matrice de securite des roles (vrais appels systeme) *(infra)* | **OK** | `QEMU_RUNTIME` | `qemu:tools/ci/run_matrice_roles.sh:MATRICE_ROLES_OK` | banc tools/ci/run_matrice_roles.sh (marqueur MATRICE_ROLES_OK) |
 | Ladybird construit | **OK** | `QEMU_RUNTIME` | `ci:ladybird-native-browser.yml:bouchaud-ladybird-native-browser` | artefact bouchaud-ladybird-native-browser produit au run 37526620689 |
 | BrowserHost demarre | **OK** | `QEMU_RUNTIME` | `ci-jalon:BROWSER_HOST_START` | atteint au run 37526620689 |

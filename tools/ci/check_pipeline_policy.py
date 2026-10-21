@@ -5,6 +5,7 @@ The checker intentionally validates properties, not exact line-for-line YAML.
 It prevents a green pipeline from silently becoming a skipped pipeline again.
 """
 from pathlib import Path
+import re
 import sys
 
 root = Path(".github/workflows")
@@ -132,6 +133,34 @@ for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
                 errors.append(f"{name}: {job} depend de dedoublonne sans lire sa decision")
         if any("always()" in c or "!cancelled()" in c for c in conditions) and "dedoublonne" not in (besoins[0] if besoins else ""):
             errors.append(f"{name}: {job} tourne malgre un saut sans lire la decision")
+
+# BOUCHAUD_PREUVE_INDEPENDANTE_V1 : dans os-primitives, une etape apres le
+# noyau construit tourne meme si une etape precedente a echoue. Run 39503091750 :
+# un temoin TCG rouge a fait sauter « Acces a /dev/kvm », et toute l'attribution
+# P13 KVM (SMP1/2/4/8) est tombee en « /dev/kvm inaccessible » -- zero preuve.
+# Le job reste rouge ; seules les preuves independantes sont conservees.
+for _job, _bloc in jobs_de((root / "os-primitives.yml").read_text(encoding="utf-8")).items():
+    _etapes, _courante = [], None
+    for _l in _bloc:
+        _m = re.match(r"^      - (?:name: (.*)|uses: .*|run: .*)$", _l)
+        if _m:
+            _courante = {"name": (_m.group(1) or "?").strip(), "lignes": []}
+            _etapes.append(_courante)
+        elif _courante is not None:
+            _courante["lignes"].append(_l)
+    _apres = False
+    for _e in _etapes:
+        _corps = "\n".join(_e["lignes"])
+        if "id: bootimage" in _corps:
+            _apres = True
+            continue
+        if not _apres:
+            continue
+        _si = next((l for l in _e["lignes"] if l.startswith("        if:")), "")
+        if "!cancelled()" not in _si and "always()" not in _si:
+            errors.append(f"os-primitives.yml: {_job} / {_e['name']} saute si une etape precedente echoue")
+    if not _apres:
+        errors.append(f"os-primitives.yml: {_job} sans etape `id: bootimage`")
 
 if "continue-on-error: true" in reliability:
     errors.append("reliability-v3.yml: aucun test de fiabilite ne doit etre informatif")

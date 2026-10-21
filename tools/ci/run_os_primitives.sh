@@ -120,19 +120,15 @@ kill -KILL "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 tail -c 262144 "$LOG"
 
-# BOUCHAUD_TSC_SOURCE_V1 : la frequence du TSC retenue, sa source, et le
-# controle par les ticks PIT (KVM : horloge monotone 4,5 fois trop rapide).
-# AVANT les verdicts : un marqueur absent arrete le script (set -e), et
-# c'est justement quand un banc echoue qu'on a besoin de l'horloge.
-awk '{ gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } match($0, /BOUCHAUD_TSC_(EARLY_CALIBRATION_OK|CONTROLE) .*/) { print substr($0, RSTART, RLENGTH) }' "$LOG"
-for marker in VERROUS_POSIX_OK EXEC_FD_OK WAL_PROBE_OK DISQUE_PROBE_OK NOM_LONG_OK SENDFILE_OK RENOMMAGE_OK FAUTE_NONCANONIQUE_OK 'FAUTE_MULTIFIL_OK essais=16' 'NOEUDS_CHURN_OK cycles=8000' SIGCHLD_MULTIFIL_OK SIGMASQUE_FIL_OK COMPTA_STRESS_OK MTIME_STABLE_OK PERSIST_COURSE_OK 'EOF_FERMETURE_OK cas=6 tours=2' 'TUBE_ATOMICITE_OK tailles=3 ecrivains=4 tours=300 modes=2' 'STATUT_SORTIE_OK cas=11' \
-              'SESSION_PERE_SORT fils=4' SESSION_INVITE_REVENUE PRIMITIVES_FIN; do
-  grep -aF "$marker" "$LOG"
-done
+# BOUCHAUD_VERDICT_OS_PRIMITIVES_V1 : marqueurs, temoin de faute detaillee,
+# statut de l'autorun, invariants de compta, panique, ATA -- un script a part,
+# rejoue sur des journaux canoniques par les tests hote.
+tools/ci/verdict_os_primitives.sh "$LOG"
 # BOUCHAUD_PILE_DE_FAUTE_V1 : le fils `piege` de faute-noncanonique-probe
 # meurt sur ud2 au bout de deux appels ; la pile publiee par le noyau a la
 # faute, symbolisee contre la sonde, doit nommer son appelant. C'est la meme
-# chaine qui nomme l'appelant d'un `ak_trap` de Ladybird.
+# chaine qui nomme l'appelant d'un `ak_trap` de Ladybird. (Il faut les
+# binaires du scenario : ce controle reste ici.)
 python3 tools/ci/symbolise_fautes.py "$LOG" "$SCENARIO/bin" > pile-faute.log
 grep -am1 -B2 -A8 'FAUTE_SYMBOLE .*faute-noncanonique' pile-faute.log || true
 if ! grep -aF 'piege_niveau1' pile-faute.log; then
@@ -141,29 +137,6 @@ if ! grep -aF 'piege_niveau1' pile-faute.log; then
   echo "PILE_DE_FAUTE_ECHEC piege_niveau1 absent de la pile symbolisee" >&2
   sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/PROCESS_FAULT(_PILE|_DETAIL)? pid=/ && n++ < 8 { print "  " substr($0, 1, 400) }' >&2
   awk '/FAUTE_SYMBOLE .*instruction illegale/ { on = 1 } on && n++ < 24 { print "  " $0 }' pile-faute.log >&2
-  exit 1
-fi
-# BOUCHAUD_FAUTE_DETAIL_V1 : le meme fils `piege` meurt sur ud2 (0f 0b) ; la
-# ligne de detail doit nommer CES octets a son rip. Sans ce temoin, une ligne
-# qui lirait la mauvaise adresse (ou rien) passerait inapercue jusqu'a la
-# prochaine faute S1 -- celle qu'elle doit justement classer.
-# Sans tube : sous `pipefail`, `grep -q` sort au premier match et `sed`, qui
-# ecrit encore, meurt de SIGPIPE -- le pipeline echoue sur une ligne PRESENTE
-# (run 39503091649). Les couleurs ne precedent que le prefixe de la ligne.
-if ! grep -aqE 'PROCESS_FAULT_DETAIL pid=[0-9]+ tid=[0-9]+ cpu=[0-9]+ fs_base=0x[0-9a-f]+ fs_base_range=0x[0-9a-f]+ insn=0f0b' "$LOG"; then
-  echo "FAUTE_DETAIL_ECHEC aucune ligne de detail ne nomme l'ud2 du fils piege" >&2
-  sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'PROCESS_FAULT_DETAIL' | head -8 >&2 || true
-  exit 1
-fi
-# BOUCHAUD_COMPTA_STRESS_V1 : ce que la sequence a du refaire (preuve que la
-# course a eu lieu), lu sur le dernier releve du noyau.
-awk 'match($0, /compta_relues=[0-9]+/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "compta_relues=absent") }' "$LOG"
-# BOUCHAUD_GS_NOYAU_EN_IRQ_V1 : recalculs de l'identite du coeur par CPUID.
-awk 'match($0, /replis_apic=[0-9]+( ticks_ms=[0-9]+ mono_ms=[0-9]+)?/) { v = substr($0, RSTART, RLENGTH) } END { print (v != "" ? v : "replis_apic=absent") }' "$LOG"
-if grep -aq 'KERNEL PANIC' "$LOG"; then echo "panique noyau" >&2; exit 1; fi
-if grep -aqE "ata: (lecture|ecriture) " "$LOG"; then
-  echo "Le pilote ATA a signale au moins une commande en echec" >&2
-  grep -aE "ata: (lecture|ecriture) " "$LOG" >&2
   exit 1
 fi
 echo OS_PRIMITIVES_OK

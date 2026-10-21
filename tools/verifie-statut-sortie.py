@@ -33,7 +33,9 @@ RACINE = Path(__file__).resolve().parent.parent
 VIE = "src/kernel/process/thread/lifecycle.rs"
 PROC = "src/compat/linux/proc.rs"
 PRIMITIVES = "tools/ci/run_os_primitives.sh"
-FICHIERS = (VIE, PROC, PRIMITIVES)
+# BOUCHAUD_VERDICT_OS_PRIMITIVES_V1 : le marqueur est exige par le verdict a part.
+VERDICT = "tools/ci/verdict_os_primitives.sh"
+FICHIERS = (VERDICT, VIE, PROC, PRIMITIVES)
 
 
 def corps(texte: str, entete: str) -> str | None:
@@ -91,7 +93,7 @@ def verifie(racine: Path) -> list[str]:
     if statut is None or "if par_signal" not in statut or "<< 8" not in statut:
         fautes.append("statut_wait ne distingue plus sortie et signal")
 
-    if "/bin/statut-sortie-probe" not in t[PRIMITIVES] or "STATUT_SORTIE_OK" not in t[PRIMITIVES]:
+    if "/bin/statut-sortie-probe" not in t[PRIMITIVES] or "STATUT_SORTIE_OK" not in t[VERDICT]:
         fautes.append("os-primitives ne lance plus statut-sortie-probe")
     return fautes
 
