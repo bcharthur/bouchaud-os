@@ -77,25 +77,42 @@ static TRANCHES_GONFLEES: AtomicU64 = AtomicU64::new(0);
 static PIRE_GONFLEMENT_NS: AtomicU64 = AtomicU64::new(0);
 static CHEVAUCHEMENTS: AtomicU64 = AtomicU64::new(0);
 static PIRE_CHEVAUCHEMENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Diagnostic : le site (`ARMEMENT_*`) et la tache du pire chevauchement.
+static PIRE_CHEVAUCHEMENT_SITE: AtomicU64 = AtomicU64::new(0);
+static PIRE_CHEVAUCHEMENT_TID: AtomicU64 = AtomicU64::new(0);
 static DERNIER_REPLI_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Reveils d'idle dont la tranche avait deja ete rearmee par une election
+/// (la tache a ete preemptee entre le `hlt` et son rearmement).
+static REARMES_DEJA_ARMES: AtomicU64 = AtomicU64::new(0);
+
+/// Sites d'armement d'une tranche (diagnostic de l'invariant 2).
+pub const ARMEMENT_ELECTION: u64 = 1;
+pub const ARMEMENT_APRES_IDLE: u64 = 2;
 
 /// A l'armement d'une tranche sur `cpu` a `now` (invariant 2).
-fn note_armement_compta(cpu: usize, now: u64) {
+fn note_armement_compta(cpu: usize, now: u64, site: u64, tid: u64) {
     let repli = DERNIER_REPLI_NS[cpu].load(Ordering::Relaxed);
     if now < repli {
         CHEVAUCHEMENTS.fetch_add(1, Ordering::Relaxed);
-        PIRE_CHEVAUCHEMENT_NS.fetch_max(repli - now, Ordering::Relaxed);
+        if repli - now > PIRE_CHEVAUCHEMENT_NS.fetch_max(repli - now, Ordering::Relaxed) {
+            PIRE_CHEVAUCHEMENT_SITE.store(site, Ordering::Relaxed);
+            PIRE_CHEVAUCHEMENT_TID.store(tid, Ordering::Relaxed);
+        }
     }
 }
 
 /// `[tranches gonflees, pire gonflement ns, chevauchements, pire
-/// chevauchement ns]` depuis le demarrage.
-pub fn invariants_compta() -> [u64; 4] {
+/// chevauchement ns, site du pire, tid du pire, rearmements evites]` depuis
+/// le demarrage.
+pub fn invariants_compta() -> [u64; 7] {
     [
         TRANCHES_GONFLEES.load(Ordering::Relaxed),
         PIRE_GONFLEMENT_NS.load(Ordering::Relaxed),
         CHEVAUCHEMENTS.load(Ordering::Relaxed),
         PIRE_CHEVAUCHEMENT_NS.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_SITE.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_TID.load(Ordering::Relaxed),
+        REARMES_DEJA_ARMES.load(Ordering::Relaxed),
     ]
 }
 
@@ -411,14 +428,32 @@ fn rearme_compta_apres_idle() {
     if index == NO_TASK {
         return;
     }
-    let now = crate::kernel::timer::monotonic_ns();
-    let cpu = local_cpu();
     let table = tasks();
     let Some(task) = table.get(index) else {
         return;
     };
     compta_section(task, || {
-        note_armement_compta(cpu, now);
+        // BOUCHAUD_COMPTA_REARME_EN_SECTION_V1 : l'instant ET le coeur se
+        // lisent ICI, interruptions masquees. Au retour du `hlt` les
+        // interruptions sont ouvertes : lus avant la section, un fil noyau
+        // preempte entre les deux (`accorde_preemption_noyau`) etait replie a
+        // un instant plus tardif, reelu plus tard -- ailleurs peut-etre --,
+        // puis rearme a l'instant PERIME et sur le bloc de son ANCIEN coeur.
+        // Sa tranche comptait alors le temps passe hors processeur, et le
+        // bloc d'un autre coeur etait ecrase sans sa sequence. Trouve par
+        // l'invariant 2 (os-primitives TCG, 21/10 : `chevauchements=1
+        // pire_chevauchement_us=5859`).
+        //
+        // Preemptee dans cette fenetre, la tache a ete rearmee par son
+        // election (`finalise_task_running`) : la tranche en cours est la
+        // bonne, on n'y touche pas.
+        if task.last_account_ns != 0 {
+            REARMES_DEJA_ARMES.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let now = crate::kernel::timer::monotonic_ns();
+        let cpu = local_cpu();
+        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE, task.tid as u64);
         task.last_account_ns.range(now);
         task.slice_start_ns.range(now);
         COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
