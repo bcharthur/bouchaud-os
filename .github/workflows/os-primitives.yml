@@ -148,8 +148,10 @@ jobs:
         # le jeton par des contextes masques a leur borne courte ; hors
         # panique, une ligne sans jeton est desormais differee entiere. Les
         # deux derniers demarrages suspendent le detenteur du jeton au milieu
-        # d'une ligne, 3 s (TCG) puis 12 s (KVM, au-dela du plafond de 10 s ;
-        # des lignes peuvent y manquer, comptees perdues, jamais coupees).
+        # d'une ligne, 3 s (TCG) puis 12 s (KVM, au-dela du plafond de 10 s).
+        # BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : les ecrivains attendent leur
+        # place au lieu de differer, les 12 s ne perdent plus aucune ligne
+        # (TCG SMP4 : 600/600, 0 perdue) -- l'admission des pertes est levee.
         # Tous les demarrages tournent ; le pas echoue si l'un est rouge.
         run: |
           r=0
@@ -159,8 +161,26 @@ jobs:
           cp serie-entrelacement.log serie-entrelacement-kvm.log
           BANC_SUSPENSION_MS=3000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
           cp serie-entrelacement.log serie-entrelacement-tcg-suspendu.log
-          BANC_SUSPENSION_MS=12000 BANC_PERDUES_ADMISES=1 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          BANC_SUSPENSION_MS=12000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm-suspendu.log
+          # BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : le flot sature reproduit sous
+          # TCG (port ralenti a 5 us/octet, le cout d'une sortie de VM) --
+          # 3adcea3c : 494/720, 323 perdues ; exige 720/720, aucune perdue,
+          # aucun doublon, aucune inversion, aucun repli.
+          BANC_SERIE_LENTE_NS=5000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 6 120 120 1800 || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-sature.log
+          # BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : le VERROU DE L'ANNEAU tenu 3 s
+          # interruptions masquees (vCPU retire au milieu d'un ajout) : aucune
+          # attente masquee au-dela de 50 ms, aucune ligne perdue, console
+          # toujours asynchrone. Sans la borne : 2,92 s masquees et repli.
+          BANC_VERROU_SUSPENDU_MS=3000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-verrou-suspendu.log
+          BANC_VERROU_SUSPENDU_MS=3000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-verrou-suspendu.log
+          # 12 s : au-dela de l'ancienne borne d'attente cedee (5 s, 417
+          # lignes perdues sous TCG) ; exige toujours 0 perdue.
+          BANC_VERROU_SUSPENDU_MS=12000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-verrou-suspendu-12s.log
           # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une panique n'emporte pas les
           # lignes qui attendaient dans l'anneau (asynchrone SMP2/SMP4 KVM,
           # synchrone, SMP1 ou l'autorun ne cede pas le coeur).
@@ -172,6 +192,13 @@ jobs:
           cp console-panique.log serie-entrelacement-panique-tcg-smp1.log
           BO_QEMU_KVM=1 BO_SMP=4 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 || r=1
           cp console-panique.log serie-entrelacement-panique-kvm-smp4.log
+          # BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 : 2 000 lignes, KVM SMP1 et
+          # SMP2 aussi -- dans l'ordre, une ligne differee ne double plus
+          # l'anneau (TCG SMP4 : la 1 615 avant la 1 282).
+          BO_QEMU_KVM=1 BO_SMP=2 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 || r=1
+          cp console-panique.log serie-entrelacement-panique-kvm-smp2.log
+          BO_QEMU_KVM=1 BO_SMP=1 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 || r=1
+          cp console-panique.log serie-entrelacement-panique-kvm-smp1.log
           exit $r
       - name: P10 -- BGA contre virtio-gpu 2D, meme charge (TCG puis KVM)
         # Les bancs qui suivent n'utilisent que l'image construite : un pas

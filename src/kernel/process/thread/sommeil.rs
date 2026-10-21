@@ -893,6 +893,21 @@ pub fn attentes_longues_classees() -> [u64; 5] {
     ]
 }
 
+/// Le dernier battement d'un coeur, vu d'ailleurs (diagnostic) : `(nombre
+/// d'IPI de quantum recues, adresse interrompue, interrompue en espace
+/// utilisateur, derniere raison de ne pas commuter -- code `RENONCE_*`)`.
+pub fn dernier_battement(cpu: usize) -> (u64, u64, bool, u8) {
+    if cpu >= MAX_CPUS {
+        return (0, 0, false, 0);
+    }
+    (
+        STALL_IPI_COUNT[cpu].load(Ordering::Acquire),
+        STALL_IPI_RIP[cpu].load(Ordering::Acquire),
+        STALL_IPI_USER[cpu].load(Ordering::Acquire) != 0,
+        RENONCE_RAISON[cpu].load(Ordering::Relaxed),
+    )
+}
+
 /// Battements qui n'ont pas commute, par raison (indice = code `RENONCE_*`).
 pub fn renonces_battement() -> [u64; 10] {
     core::array::from_fn(|i| RENONCES[i].load(Ordering::Relaxed))
@@ -918,4 +933,48 @@ pub fn releve_points_cooperatifs() -> (u64, u64, u64) {
         POINTS_PIRE_SITE.swap(0, Ordering::Relaxed),
         POINTS_CESSIONS.load(Ordering::Relaxed),
     )
+}
+
+/// BOUCHAUD_CONSOLE_REPLI_EXPLIQUE_V1 -- diagnostic hors IRQ : l'indice de la
+/// tache courante (pour qu'un fil noyau se nomme), l'occupant d'un coeur, et
+/// `tid:nom etat=E on_cpu=C file=F` d'une tache. Lectures seules.
+pub fn indice_tache_courante() -> usize {
+    current_index_raw()
+}
+
+pub fn occupant_coeur(cpu: usize) -> usize {
+    if cpu >= MAX_CPUS { NO_TASK } else { CURRENT[cpu].load(Ordering::Acquire) }
+}
+
+/// Etat brut d'une tache, sans allocation (diagnostic pris dans n'importe
+/// quel contexte) : `(etat, on_cpu, file)` ; etat 0 prete, 1 bloquee,
+/// 2 zombie, 9 introuvable.
+pub fn etat_tache_brut(index: usize) -> (u8, i8, u8) {
+    if index == NO_TASK {
+        return (9, -1, 0);
+    }
+    let table = tasks();
+    match table.get(index) {
+        Some(t) => (t.state.charge().code(), t.on_cpu.charge(), t.runq_cpu.charge()),
+        None => (9, -1, 0),
+    }
+}
+
+pub fn decrit_tache(index: usize) -> String {
+    if index == NO_TASK {
+        return String::from("-");
+    }
+    let table = tasks();
+    match table.get(index) {
+        Some(t) => alloc::format!(
+            "{}:{} etat={:?} on_cpu={} file={} noyau={}",
+            t.tid,
+            t.process.metadata.lock().name.replace(' ', "_"),
+            t.state.charge(),
+            t.on_cpu.charge(),
+            t.runq_cpu.charge(),
+            t.noyau as u8,
+        ),
+        None => String::from("?"),
+    }
 }

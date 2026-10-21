@@ -10,7 +10,7 @@
 //!   formateur série.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use crate::arch::x86_64::ports::{inb, outb};
 
 #[path = "sonde.rs"]
@@ -184,6 +184,17 @@ fn attends_place() {
     }
 }
 
+/// BOUCHAUD_SERIE_LENTE_BANC_V1 -- banc seulement (`serie-lente NS`, 0 par
+/// defaut) : chaque octet ecrit sur COM1 coute en plus NS nanosecondes
+/// d'attente active, pour reproduire sous TCG le cout du port sous KVM (une
+/// sortie de VM par octet, quelques microsecondes) et les flots qui le
+/// saturent (run 39602362503 : 6 ecrivains, lignes de 1 800 octets).
+static SERIE_LENTE_NS_PAR_OCTET: AtomicU64 = AtomicU64::new(0);
+
+pub fn regle_serie_lente(ns_par_octet: u64) {
+    SERIE_LENTE_NS_PAR_OCTET.store(ns_par_octet.min(1_000_000), Ordering::Relaxed);
+}
+
 fn write_lot(octets: &[u8]) {
     // Capture at the actual UART sink so prefixes and payload remain in the
     // same order as the bytes emitted on COM1.
@@ -210,6 +221,7 @@ fn write_lot(octets: &[u8]) {
     // shootdowns qui l'attendent. Sinon l'emetteur atteint sa borne de deux
     // secondes et arrete la machine pour une ligne de diagnostic.
     let masquees = !x86_64::instructions::interrupts::are_enabled();
+    let lent = SERIE_LENTE_NS_PAR_OCTET.load(Ordering::Relaxed);
     let mut pose = 0usize;
     while pose < octets.len() {
         if masquees {
@@ -220,6 +232,12 @@ fn write_lot(octets: &[u8]) {
         while pose < fin {
             unsafe { outb(COM1, octets[pose]); }
             pose += 1;
+            if lent != 0 {
+                let jusqua = crate::kernel::timer::monotonic_ns().saturating_add(lent);
+                while crate::kernel::timer::monotonic_ns() < jusqua {
+                    core::hint::spin_loop();
+                }
+            }
         }
     }
 }
@@ -471,15 +489,44 @@ pub fn vidange_differees() {
     }
 }
 
-/// Detenteur du jeton (ou panique) : les lignes differees, dans l'ordre de
-/// chaque coeur, chacune entiere.
+/// Detenteur du jeton (ou panique) : les lignes differees MURES, chacune
+/// entiere, la plus ancienne d'abord (BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1).
+/// Les autres attendent que l'anneau de la console ait atteint leur repere.
 fn vide_differees() {
-    for anneau in DIFFEREES.iter() {
-        if !anneau.est_vide() {
-            let n = anneau.vide(ecris_octets);
-            LIGNES_VIDANGEES.fetch_add(n as u64, Ordering::Relaxed);
+    while vide_differee_mure() {}
+}
+
+/// Le repere et l'enregistrement de tete d'un anneau de lignes differees :
+/// `(position, longueur, repere)`.
+fn tete_differee(anneau: &super::differees::Anneau<DIFFEREES_OCTETS>) -> Option<(usize, usize, usize)> {
+    let (t, n) = anneau.premier()?;
+    let mut repere = [0u8; DIFFEREE_REPERE];
+    let mut lus = 0usize;
+    anneau.lis(t, 0, DIFFEREE_REPERE.min(n), |m| {
+        repere[lus..lus + m.len()].copy_from_slice(m);
+        lus += m.len();
+    });
+    Some((t, n, u64::from_le_bytes(repere) as usize))
+}
+
+/// Detenteur du jeton (ou panique) : la ligne differee la plus ancienne dont
+/// le repere est atteint par la lecture de l'anneau de la console -- emise
+/// entiere, sans son repere, et retiree. `false` s'il n'y en a pas.
+fn vide_differee_mure() -> bool {
+    let lus = CONSOLE.lus();
+    let mut choix: Option<(usize, usize, usize, usize)> = None;
+    for (cpu, anneau) in DIFFEREES.iter().enumerate() {
+        if let Some((t, n, repere)) = tete_differee(anneau) {
+            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {
+                choix = Some((cpu, t, n, repere));
+            }
         }
     }
+    let Some((cpu, t, n, _)) = choix else { return false };
+    DIFFEREES[cpu].lis(t, DIFFEREE_REPERE.min(n), n, ecris_octets);
+    DIFFEREES[cpu].retire(t, n);
+    LIGNES_VIDANGEES.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- banc : un detenteur SUSPENDU.
@@ -537,6 +584,43 @@ pub fn banc_detenteur_suspendu(duree_ms: u64) -> bool {
 
 const BORNE_SANS_PROGRES_NS_BANC: u64 = 1_000_000_000;
 
+/// BOUCHAUD_CONSOLE_VERROU_BORNE_V1 -- banc : prend le verrou de l'anneau de
+/// la console et le GARDE `duree_ms` interruptions masquees, comme un
+/// detenteur dont le processeur virtuel serait retire par l'hote au milieu
+/// d'un ajout. Les autres coeurs ne doivent pas tourner plus de la borne :
+/// ils renoncent (`verrou_abandons`) et leurs lignes attendent dans l'anneau
+/// de leur coeur, que le fil vide sans ce verrou. Rend `false` si le verrou
+/// n'a pas pu etre pris en une seconde.
+pub fn banc_verrou_console_suspendu(duree_ms: u64) -> bool {
+    let ouvertes = x86_64::instructions::interrupts::are_enabled();
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(BORNE_SANS_PROGRES_NS_BANC);
+    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    loop {
+        x86_64::instructions::interrupts::disable();
+        if CONSOLE_VERROU.compare_exchange(0, moi, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            break;
+        }
+        if ouvertes {
+            x86_64::instructions::interrupts::enable();
+        }
+        if crate::kernel::timer::monotonic_ns() > echeance {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    CONSOLE_VERROU_GEN.fetch_add(1, Ordering::AcqRel);
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree_ms.saturating_mul(1_000_000));
+    while crate::kernel::timer::monotonic_ns() < fin {
+        crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+        core::hint::spin_loop();
+    }
+    CONSOLE_VERROU.store(0, Ordering::Release);
+    if ouvertes {
+        x86_64::instructions::interrupts::enable();
+    }
+    true
+}
+
 struct TamponPile<'a> {
     octets: &'a mut [u8],
     n: usize,
@@ -552,14 +636,32 @@ impl fmt::Write for TamponPile<'_> {
     }
 }
 
-/// Range la ligne dans l'anneau de CE coeur. Interruptions masquees : un seul
-/// ecrivain par anneau.
+/// BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 -- UNE LIGNE DIFFEREE NE DOUBLE PAS
+/// L'ANNEAU
+///
+/// Une ligne differee passait devant l'anneau de la console « une fois tous
+/// les 32 morceaux » : elle sortait AVANT des lignes plus anciennes du meme
+/// ecrivain encore dans l'anneau. Banc panique, rafale de 2 000 lignes, TCG
+/// SMP4 : la 1 615 entre la 1 281 et la 1 282 ; banc de saturation (avant
+/// la contre-pression) : 92 inversions. Desormais chaque ligne differee porte
+/// son REPERE -- la position d'ecriture de l'anneau de la console quand elle
+/// a ete differee -- et ne sort que lorsque la lecture de l'anneau l'a
+/// atteint : tout ce qui etait range avant elle est sorti, rien de ce qui l'a
+/// ete apres. Fusion exacte, en asynchrone, en synchrone et en panique.
+const DIFFEREE_REPERE: usize = 8;
+
+/// Range la ligne dans l'anneau de CE coeur, precedee de son repere.
+/// Interruptions masquees : un seul ecrivain par anneau.
 fn differe(octets: &[u8]) {
     if octets.is_empty() {
         return;
     }
     let cpu = crate::arch::x86_64::smp::cpu_index().min(DIFFEREES.len() - 1);
-    if DIFFEREES[cpu].range(octets) {
+    let repere = (CONSOLE.ecrits() as u64).to_le_bytes();
+    if DIFFEREES[cpu].range_morceaux(DIFFEREE_REPERE + octets.len(), |pose| {
+        pose(&repere);
+        pose(octets);
+    }) {
         LIGNES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
     } else {
         LIGNES_PERDUES.fetch_add(1, Ordering::Relaxed);
@@ -899,6 +1001,36 @@ const CONSOLE_SOMME_NS: u64 = 50_000_000;
 static CONSOLE: super::differees::Anneau<CONSOLE_OCTETS> = super::differees::Anneau::neuf();
 /// 0 libre ; `cpu_index() + 1` de l'ajouteur, interruptions masquees.
 static CONSOLE_VERROU: AtomicUsize = AtomicUsize::new(0);
+/// BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : l'attente du verrou de l'anneau,
+/// interruptions masquees, est BORNEE. Un detenteur legitime ne le tient que
+/// le temps d'une copie memoire (quelques microsecondes) ; au-dela, il est
+/// suspendu (processeur virtuel retire par l'hote, coeur arrete par NMI) et
+/// l'attendant renonce : sa ligne va dans l'anneau de son coeur.
+const CONSOLE_VERROU_BORNE_NS: u64 = 1_000_000;
+/// Un ecrivain qui PEUT CEDER le processeur (tache utilisateur, aucun verrou,
+/// interruptions ouvertes) attend interruptions OUVERTES, en cedant, jusqu'a
+/// cette borne : renoncer des la milliseconde remplissait l'anneau de 4 Kio
+/// de son coeur (banc verrou suspendu 3 s, SMP4 : 145 lignes perdues). A 5 s,
+/// une suspension de 12 s perdait encore 417 lignes (TCG SMP4) : passe la
+/// borne, tous les suivants renoncent, et leurs lignes de 1 800 octets
+/// debordent l'anneau de leur coeur. L'attente ne coute que la latence de
+/// l'ecrivain ; la borne reste finie -- un detenteur suspendu plus d'une
+/// minute est une machine perdue, pas une contention.
+const CONSOLE_VERROU_BORNE_CEDEE_NS: u64 = 60_000_000_000;
+/// Incrementee par chaque detenteur, sous le verrou : distingue une detention
+/// d'une autre.
+static CONSOLE_VERROU_GEN: AtomicU64 = AtomicU64::new(0);
+/// La generation dont un attendant a deja renonce : tant que le verrou est
+/// encore tenu par CETTE detention, les suivants renoncent sans attendre --
+/// une detention suspendue ne coute qu'une seule attente bornee.
+static CONSOLE_VERROU_GEN_ABANDONNEE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Idem pour les ecrivains qui cedent (borne longue depassee).
+static CONSOLE_VERROU_GEN_ABANDONNEE_CEDEE: AtomicU64 = AtomicU64::new(u64::MAX);
+static CONSOLE_VERROU_ABANDONS: AtomicU64 = AtomicU64::new(0);
+/// Attente la plus longue INTERRUPTIONS MASQUEES (bornee a la milliseconde).
+static CONSOLE_VERROU_ATTENTE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_VERROU_CEDEES: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_VERROU_CEDEE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 /// Sous `CONSOLE_VERROU` : le dernier octet range etait-il un saut de ligne ?
 static mut CONSOLE_DEBUT_LIGNE: bool = true;
 static CONSOLE_VOULUE: AtomicBool = AtomicBool::new(true);
@@ -907,9 +1039,63 @@ static CONSOLE_FIL_LANCE: AtomicBool = AtomicBool::new(false);
 static CONSOLE_FIL_ENDORMI: AtomicBool = AtomicBool::new(false);
 static CONSOLE_REPLI_SECURITE: AtomicBool = AtomicBool::new(false);
 static CONSOLE_DERNIER_PROGRES_NS: AtomicU64 = AtomicU64::new(0);
+/// BOUCHAUD_CONSOLE_REPLI_EXPLIQUE_V1 : le dernier tour du fil (qu'il ait
+/// emis ou non) et l'etat au moment du repli de securite -- un repli n'est
+/// jamais silencieux.
+static CONSOLE_FIL_VU_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_REPLI_MUET_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_REPLI_FIL_VU_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_REPLI_OCCUPATION: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_REPLI_JETON: AtomicUsize = AtomicUsize::new(0);
+static CONSOLE_REPLI_ENDORMI: AtomicBool = AtomicBool::new(false);
+static CONSOLE_REPLI_A_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_FIL_TACHE: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Ou en est chaque coeur dans le chemin d'un producteur (diagnostic du
+/// repli) : 0 hors console, 1 attente du verrou en cedant, 2 attente du
+/// verrou masquee, 3 aide a vider (cede), 4 aide a vider (ne cede pas),
+/// 5 jeton occupe pendant l'aide, 6 chemin synchrone, 7 tete de la file de
+/// place (vide et retente), 8 dans la file de place, pas en tete.
+static CONSOLE_PHASE: [AtomicU8; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { AtomicU8::new(0) }; crate::arch::x86_64::smp::MAX_CPUS];
+static CONSOLE_REPLI_PHASES: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
+/// Ou en est le fil `console` (diagnostic du repli) : 1 vide un morceau,
+/// 2 point cooperatif, 3 dort 1 ms (jeton occupe), 4 dort (anneau vide).
+static CONSOLE_FIL_PHASE: AtomicU8 = AtomicU8::new(0);
+static CONSOLE_REPLI_FIL_PHASE: AtomicU8 = AtomicU8::new(0);
+/// Au repli : `(etat, on_cpu, file)` du fil (`etat_tache_brut`).
+static CONSOLE_REPLI_FIL_ETAT: AtomicU8 = AtomicU8::new(9);
+static CONSOLE_REPLI_FIL_ON_CPU: AtomicU8 = AtomicU8::new(0xFF);
+static CONSOLE_REPLI_FIL_FILE: AtomicU8 = AtomicU8::new(0xFF);
+/// Duree REELLE du sommeil d'une milliseconde du fil sur jeton occupe, et
+/// d'un tour complet de la boucle interne (pire).
+static CONSOLE_FIL_SOMME_JETON_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_FIL_TOUR_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn phase(p: u8) {
+    let cpu = crate::arch::x86_64::smp::cpu_index();
+    if cpu < CONSOLE_PHASE.len() {
+        CONSOLE_PHASE[cpu].store(p, Ordering::Relaxed);
+    }
+}
+/// Au repli : la tache qui occupait chaque coeur (indices), pour nommer qui
+/// empechait le fil de tourner.
+static CONSOLE_REPLI_OCCUPANTS: [AtomicUsize; 4] = [const { AtomicUsize::new(usize::MAX) }; 4];
+/// Au repli, par coeur : depuis combien de temps l'occupant tient le coeur
+/// (ns), son appel systeme en cours, les dernieres adresses vues par le
+/// battement (toute, et en mode noyau), la file (interactives, normales).
+static CONSOLE_REPLI_TENU_NS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_APPEL: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_RIP: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_RIP_NOYAU: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_FILE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Au repli, par coeur : IPI de quantum recues, adresse et mode de la
+/// derniere, derniere raison de ne pas commuter (`RENONCE_*`).
+static CONSOLE_REPLI_IPI: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_IPI_RIP: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static CONSOLE_REPLI_IPI_MODE: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
 /// `cpu_index() + 1` du fil de vidange pendant qu'il tient le jeton.
 static VIDANGE_EN_COURS: AtomicUsize = AtomicUsize::new(0);
-static CONSOLE_TOUR_DIFFERE: AtomicU32 = AtomicU32::new(0);
 static CONSOLE_ATTENTE: crate::kernel::sync::WaitQueue = crate::kernel::sync::WaitQueue::new();
 static DANS_REVEIL_CONSOLE: [AtomicBool; crate::arch::x86_64::smp::MAX_CPUS] =
     [const { AtomicBool::new(false) }; crate::arch::x86_64::smp::MAX_CPUS];
@@ -931,6 +1117,35 @@ static CONSOLE_RETARD_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 static CONSOLE_OCCUPATION_PIRE: AtomicUsize = AtomicUsize::new(0);
 static CONSOLE_AJOUT_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 
+/// BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 -- anneau plein : qui peut ceder
+/// ATTEND sa place, dans l'ordre d'arrivee (`super::file_place`), sans
+/// echeance tant que la console avance ; qui ne le peut pas (interruption,
+/// verrou tenu, fil noyau) trouve la reserve d'urgence, que les premiers ne
+/// consomment jamais. KVM SMP4, flot sature (run 39602362503) : 135 lignes
+/// perdues ; TCG, port a 5 us/octet : 323 -- chaque producteur retentait pour
+/// son compte, un autre prenait la place qu'il venait de liberer, il renoncait
+/// a une seconde et sa ligne de 1 800 octets debordait l'anneau de 4 Kio de
+/// son coeur.
+const CONSOLE_RESERVE_URGENCE: usize = 8192;
+static CONSOLE_FILE_PLACE: super::file_place::FilePlace = super::file_place::FilePlace::neuve();
+/// Les attendants qui ne sont pas en tete dorment ici (2 ms au plus) ; chaque
+/// sortie de la file les reveille.
+static CONSOLE_PLACE_ATTENTE: crate::kernel::sync::WaitQueue = crate::kernel::sync::WaitQueue::new();
+static CONSOLE_CONTRE_PRESSIONS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_CONTRE_PRESSION_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_CONTRE_PRESSION_TOTALE_NS: AtomicU64 = AtomicU64::new(0);
+/// Tete de file figee plus de `CONSOLE_FIL_MUET_NS`, passee (attendu 0).
+static CONSOLE_PLACE_SAUTS: AtomicU64 = AtomicU64::new(0);
+/// Sorties de la file parce que la console est devenue synchrone (la ligne
+/// passe alors par le chemin synchrone, elle n'est pas perdue).
+static CONSOLE_PLACE_SYNCHRONES: AtomicU64 = AtomicU64::new(0);
+/// Contextes qui ne peuvent pas ceder et ont trouve l'anneau plein, reserve
+/// comprise (ils vident eux-memes, puis differeront).
+static CONSOLE_URGENCES: AtomicU64 = AtomicU64::new(0);
+/// Pourquoi une ligne de la console a fini dans l'anneau de son coeur.
+static CONSOLE_DIFFEREES_OCCUPE: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_DIFFEREES_URGENCE: AtomicU64 = AtomicU64::new(0);
+
 #[inline]
 fn console_active() -> bool {
     CONSOLE_VOULUE.load(Ordering::Acquire)
@@ -942,6 +1157,8 @@ fn console_active() -> bool {
 enum RefusConsole {
     Plein,
     Reentree,
+    /// Verrou tenu au-dela de `CONSOLE_VERROU_BORNE_NS` (detenteur suspendu).
+    Occupe,
 }
 
 /// Point d'entree de toute ligne normale (`_print`, `ecris_lignes`).
@@ -949,13 +1166,48 @@ fn emet(octets: &[u8]) {
     if !octets.is_empty() && console_active() {
         surveille_fil_console();
         if console_active() {
-            match range_console(octets) {
+            // BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : qui peut ceder laisse la
+            // reserve d'urgence, et ne double pas ceux qui attendent deja.
+            let cedable = x86_64::instructions::interrupts::are_enabled()
+                && crate::kernel::scheduler::preempt::cession_volontaire_sure();
+            let essai = if !cedable {
+                range_console(octets, 0)
+            } else if CONSOLE_FILE_PLACE.vide() {
+                range_console(octets, CONSOLE_RESERVE_URGENCE)
+            } else {
+                Err(RefusConsole::Plein)
+            };
+            match essai {
                 Ok(()) => {
                     reveille_vidange();
                     return;
                 }
+                // Il attend sa place, dans l'ordre : jamais d'echeance, jamais
+                // l'anneau de son coeur. Console devenue synchrone pendant
+                // l'attente : le chemin synchrone ci-dessous emet la ligne.
+                Err(RefusConsole::Plein) if cedable => {
+                    CONSOLE_PLEINES.fetch_add(1, Ordering::Relaxed);
+                    match attend_place(octets) {
+                        Ok(()) => {
+                            reveille_vidange();
+                            return;
+                        }
+                        Err(RefusConsole::Plein) => {}
+                        Err(RefusConsole::Reentree) => {
+                            CONSOLE_REENTREES.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(RefusConsole::Occupe) => {
+                            x86_64::instructions::interrupts::without_interrupts(|| differe(octets));
+                            CONSOLE_DIFFEREES_OCCUPE.fetch_add(1, Ordering::Relaxed);
+                            CONSOLE_REPLIS_DIFFERES.fetch_add(1, Ordering::Relaxed);
+                            reveille_vidange();
+                            return;
+                        }
+                    }
+                }
                 Err(RefusConsole::Plein) => {
                     CONSOLE_PLEINES.fetch_add(1, Ordering::Relaxed);
+                    CONSOLE_URGENCES.fetch_add(1, Ordering::Relaxed);
                     if aide_a_vider(octets) {
                         return;
                     }
@@ -963,6 +1215,7 @@ fn emet(octets: &[u8]) {
                     // milieu d'une ligne, ou un detenteur bloque) : la ligne
                     // attend, entiere, dans l'anneau de son coeur.
                     x86_64::instructions::interrupts::without_interrupts(|| differe(octets));
+                    CONSOLE_DIFFEREES_URGENCE.fetch_add(1, Ordering::Relaxed);
                     CONSOLE_REPLIS_DIFFERES.fetch_add(1, Ordering::Relaxed);
                     reveille_vidange();
                     return;
@@ -972,22 +1225,47 @@ fn emet(octets: &[u8]) {
                 Err(RefusConsole::Reentree) => {
                     CONSOLE_REENTREES.fetch_add(1, Ordering::Relaxed);
                 }
+                // BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : detenteur du verrou
+                // suspendu. La ligne attend, entiere, dans l'anneau de son
+                // coeur ; le fil la videra (il ne depend pas de ce verrou).
+                // Jamais sur le port sans le jeton.
+                Err(RefusConsole::Occupe) => {
+                    x86_64::instructions::interrupts::without_interrupts(|| differe(octets));
+                    CONSOLE_DIFFEREES_OCCUPE.fetch_add(1, Ordering::Relaxed);
+                    CONSOLE_REPLIS_DIFFERES.fetch_add(1, Ordering::Relaxed);
+                    reveille_vidange();
+                    return;
+                }
             }
         }
+    }
+    // BOUCHAUD_CONSOLE_REPLI_COOPERATIF_V1 : en repli (fil muet, ou console
+    // coupee pendant que l'anneau se vide), les lignes restees dans l'anneau
+    // passent avant -- par morceaux, interruptions OUVERTES, si l'appelant
+    // peut ceder. Sinon le chemin synchrone les videra toutes sous le jeton,
+    // interruptions masquees (banc verrou suspendu 3 s, SMP2 : 1,26 s).
+    if !octets.is_empty() && !console_active() && !EN_PANIQUE.load(Ordering::Acquire) && !CONSOLE.est_vide()
+        && crate::kernel::scheduler::preempt::cession_volontaire_sure()
+    {
+        vide_anneau_en_cedant();
     }
     sous_jeton(octets);
 }
 
 /// Range `octets` dans l'anneau, un prefixe a chaque debut de ligne, en UN
 /// enregistrement precede de son horodatage. Interruptions masquees le temps
-/// de la copie.
-fn range_console(octets: &[u8]) -> Result<(), RefusConsole> {
+/// de la copie. `reserve` octets doivent rester libres apres lui
+/// (BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : la reserve d'urgence, laissee par
+/// qui peut attendre).
+fn range_console(octets: &[u8], reserve: usize) -> Result<(), RefusConsole> {
     // Hors verrou : l'heure, les charges, les FPS (lus comme avant).
     let prefixe = crate::kernel::journal::prefixe();
+    // Lu interruptions encore ouvertes : peut-on attendre en cedant ?
+    let peut_ceder = crate::kernel::scheduler::preempt::cession_volontaire_sure();
     let ouvertes = x86_64::instructions::interrupts::are_enabled();
     x86_64::instructions::interrupts::disable();
     let debut = crate::kernel::timer::monotonic_ns();
-    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    let mut moi = crate::arch::x86_64::smp::cpu_index() + 1;
     let mut tours = 0u32;
     loop {
         match CONSOLE_VERROU.compare_exchange_weak(0, moi, Ordering::Acquire, Ordering::Relaxed) {
@@ -1000,21 +1278,71 @@ fn range_console(octets: &[u8]) -> Result<(), RefusConsole> {
             }
             Err(_) => {}
         }
+        let gen = CONSOLE_VERROU_GEN.load(Ordering::Acquire);
+        // BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : qui peut ceder attend
+        // interruptions OUVERTES en cedant (borne longue) ; seul l'essai du
+        // verrou se fait interruptions masquees.
+        if peut_ceder && ouvertes {
+            phase(1);
+            let attente = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+            if (tours == 0 && CONSOLE_VERROU_GEN_ABANDONNEE_CEDEE.load(Ordering::Acquire) == gen)
+                || attente > CONSOLE_VERROU_BORNE_CEDEE_NS
+            {
+                CONSOLE_VERROU_GEN_ABANDONNEE_CEDEE.store(gen, Ordering::Release);
+                CONSOLE_VERROU_ABANDONS.fetch_add(1, Ordering::Relaxed);
+                x86_64::instructions::interrupts::enable();
+                return Err(RefusConsole::Occupe);
+            }
+            if tours == 0 {
+                CONSOLE_VERROU_CEDEES.fetch_add(1, Ordering::Relaxed);
+            }
+            tours = tours.wrapping_add(1);
+            x86_64::instructions::interrupts::enable();
+            crate::kernel::task::yield_now();
+            x86_64::instructions::interrupts::disable();
+            // Elle a pu migrer : le detenteur s'identifie par SON coeur.
+            moi = crate::arch::x86_64::smp::cpu_index() + 1;
+            continue;
+        }
+        phase(2);
+        // Interruptions masquees : une detention dont un autre a deja
+        // renonce ne se re-attend pas ; sinon, au plus la borne.
+        let abandonnee = tours == 0 && CONSOLE_VERROU_GEN_ABANDONNEE.load(Ordering::Acquire) == gen;
+        if abandonnee
+            || (tours % 64 == 63
+                && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > CONSOLE_VERROU_BORNE_NS)
+        {
+            CONSOLE_VERROU_GEN_ABANDONNEE.store(gen, Ordering::Release);
+            CONSOLE_VERROU_ABANDONS.fetch_add(1, Ordering::Relaxed);
+            if ouvertes {
+                x86_64::instructions::interrupts::enable();
+            }
+            return Err(RefusConsole::Occupe);
+        }
         tours = tours.wrapping_add(1);
         if tours % 64 == 0 {
             crate::arch::x86_64::smp::sert_shootdowns_en_attente();
         }
         core::hint::spin_loop();
     }
+    CONSOLE_VERROU_GEN.fetch_add(1, Ordering::AcqRel);
+    phase(0);
+    let attendu = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+    if peut_ceder && ouvertes {
+        CONSOLE_VERROU_CEDEE_PIRE_NS.fetch_max(attendu, Ordering::Relaxed);
+    } else {
+        CONSOLE_VERROU_ATTENTE_PIRE_NS.fetch_max(attendu, Ordering::Relaxed);
+    }
     // SAFETY : CONSOLE_DEBUT_LIGNE n'est lu et ecrit que sous CONSOLE_VERROU.
     let debut_ligne = unsafe { CONSOLE_DEBUT_LIGNE };
     let total = CONSOLE_HORODATAGE
         + super::differees::longueur_prefixee(octets, prefixe.octets().len(), debut_ligne);
     let mut suivant = debut_ligne;
-    let fait = CONSOLE.range_morceaux(total, |pose| {
-        pose(&debut.to_le_bytes());
-        suivant = super::differees::pose_prefixee(octets, prefixe.octets(), debut_ligne, pose);
-    });
+    let fait = super::file_place::tient(CONSOLE_OCTETS - CONSOLE.occupation(), total, reserve)
+        && CONSOLE.range_morceaux(total, |pose| {
+            pose(&debut.to_le_bytes());
+            suivant = super::differees::pose_prefixee(octets, prefixe.octets(), debut_ligne, pose);
+        });
     if fait {
         unsafe { CONSOLE_DEBUT_LIGNE = suivant; }
         CONSOLE_LIGNES.fetch_add(1, Ordering::Relaxed);
@@ -1060,7 +1388,9 @@ fn reveille_vidange() {
 /// `run_console_panique.sh` : 190 lignes sur 600). Rend `false` si le jeton
 /// reste introuvable : tenu par CE coeur sans pouvoir ceder (une IRQ qui a
 /// interrompu le detenteur), ou au-dela de l'echeance (1 s interruptions
-/// ouvertes ; 20 ms masquees).
+/// ouvertes ; 20 ms masquees). Depuis BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1, le
+/// chemin des seuls contextes qui ne peuvent pas attendre (les autres font la
+/// queue dans `attend_place`) ; il dispose de la reserve d'urgence.
 fn aide_a_vider(octets: &[u8]) -> bool {
     let peut_ceder = crate::kernel::scheduler::preempt::cession_volontaire_sure();
     // Interruptions ouvertes (contexte de demarrage, verrou dormant) : on peut
@@ -1069,7 +1399,9 @@ fn aide_a_vider(octets: &[u8]) -> bool {
     let mut depuis = crate::kernel::timer::monotonic_ns();
     let echeance = depuis.saturating_add(if ouvertes { 1_000_000_000 } else { 20_000_000 });
     loop {
+        phase(if peut_ceder { 3 } else { 4 });
         if EN_PANIQUE.load(Ordering::Acquire) || crate::kernel::timer::monotonic_ns() > echeance {
+            phase(0);
             return false;
         }
         let emis = match vide_un_morceau() {
@@ -1078,9 +1410,11 @@ fn aide_a_vider(octets: &[u8]) -> bool {
                 true
             }
             Vidange::JetonOccupe => {
+                phase(5);
                 if peut_ceder {
                     crate::kernel::task::yield_now();
                 } else if EMISSION.load(Ordering::Relaxed) == crate::arch::x86_64::smp::cpu_index() + 1 {
+                    phase(0);
                     return false;
                 } else {
                     core::hint::spin_loop();
@@ -1094,18 +1428,97 @@ fn aide_a_vider(octets: &[u8]) -> bool {
         // rendu, l'appelant tournait 20 ms pour rien puis differait sa ligne,
         // qui doublait ensuite des lignes plus anciennes (banc
         // run_console_panique.sh SMP4 : 543 avant 197).
-        match range_console(octets) {
+        // Reserve d'urgence comprise : ce contexte ne peut pas attendre
+        // (BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1).
+        match range_console(octets, 0) {
             Ok(()) => {
+                phase(0);
                 reveille_vidange();
                 return true;
             }
-            Err(RefusConsole::Reentree) => return false,
+            // Verrou tenu par ce coeur, ou par un detenteur suspendu
+            // (BOUCHAUD_CONSOLE_VERROU_BORNE_V1) : l'appelant differe.
+            Err(RefusConsole::Reentree) | Err(RefusConsole::Occupe) => {
+                phase(0);
+                return false;
+            }
             Err(RefusConsole::Plein) => {}
         }
         if emis && peut_ceder {
             crate::kernel::task::point_cooperatif(&mut depuis);
         }
     }
+}
+
+/// BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : anneau plein -- ou d'autres attendent
+/// deja -- pour un producteur qui PEUT CEDER (tache utilisateur, aucun
+/// verrou, interruptions ouvertes). Il prend un ticket. A son tour, il vide
+/// lui-meme l'anneau par morceaux (sous le jeton, interruptions ouvertes, un
+/// point cooperatif entre deux) jusqu'a ce que sa ligne tienne en laissant la
+/// reserve d'urgence ; avant, il dort (2 ms au plus, reveille par chaque
+/// sortie de la file). Aucune echeance tant que la console est asynchrone :
+/// le fil ou la tete font avancer le port, la ligne attend au lieu de se
+/// perdre. `Ok` : rangee. `Err(Plein)` : la console est devenue synchrone
+/// (repli, arret, panique), l'appelant prend le chemin synchrone.
+/// `Err(Occupe)` : verrou de l'anneau tenu au-dela de sa borne.
+fn attend_place(octets: &[u8]) -> Result<(), RefusConsole> {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let ticket = CONSOLE_FILE_PLACE.prend();
+    CONSOLE_CONTRE_PRESSIONS.fetch_add(1, Ordering::Relaxed);
+    let mut depuis = debut;
+    let mut vu = CONSOLE_FILE_PLACE.servi();
+    let mut vu_depuis = debut;
+    let issue = loop {
+        if !console_active() {
+            CONSOLE_PLACE_SYNCHRONES.fetch_add(1, Ordering::Relaxed);
+            break Err(RefusConsole::Plein);
+        }
+        surveille_fil_console();
+        if CONSOLE_FILE_PLACE.a_son_tour(ticket) {
+            phase(7);
+            match range_console(octets, CONSOLE_RESERVE_URGENCE) {
+                Err(RefusConsole::Plein) => {}
+                autre => break autre,
+            }
+            match vide_un_morceau() {
+                Vidange::Emise | Vidange::Rien => {
+                    CONSOLE_VIDANGES_AIDEES.fetch_add(1, Ordering::Relaxed);
+                    crate::kernel::task::point_cooperatif(&mut depuis);
+                }
+                // Le fil emet sur un autre coeur : la place vient.
+                Vidange::JetonOccupe => crate::kernel::task::yield_now(),
+            }
+            continue;
+        }
+        // Une tete figee (sa tache detruite sans sortir de la file) ne bloque
+        // pas les suivants au-dela du delai d'un fil muet.
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let servi = CONSOLE_FILE_PLACE.servi();
+        if servi != vu {
+            vu = servi;
+            vu_depuis = maintenant;
+        } else if maintenant.saturating_sub(vu_depuis) > CONSOLE_FIL_MUET_NS
+            && CONSOLE_FILE_PLACE.saute(vu, ticket)
+        {
+            CONSOLE_PLACE_SAUTS.fetch_add(1, Ordering::Relaxed);
+            vu_depuis = maintenant;
+            continue;
+        }
+        phase(8);
+        let t = CONSOLE_PLACE_ATTENTE.ticket();
+        if !CONSOLE_FILE_PLACE.a_son_tour(ticket) {
+            let _ = CONSOLE_PLACE_ATTENTE.wait_until_noyau(t, maintenant.saturating_add(2_000_000));
+        }
+        depuis = crate::kernel::timer::monotonic_ns();
+    };
+    // Toute sortie, rangee ou non, fait avancer les suivants.
+    phase(0);
+    CONSOLE_FILE_PLACE.sort(ticket);
+    CONSOLE_PLACE_ATTENTE.wake_all();
+    let attendu = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+    CONSOLE_CONTRE_PRESSION_PIRE_NS.fetch_max(attendu, Ordering::Relaxed);
+    CONSOLE_CONTRE_PRESSION_TOTALE_NS.fetch_add(attendu, Ordering::Relaxed);
+    issue
 }
 
 /// Fil muet plus de deux secondes avec des lignes en attente : repli
@@ -1117,20 +1530,67 @@ fn surveille_fil_console() {
     let maintenant = crate::kernel::timer::monotonic_ns();
     let progres = CONSOLE_DERNIER_PROGRES_NS.load(Ordering::Relaxed);
     if progres != 0 && maintenant.saturating_sub(progres) > CONSOLE_FIL_MUET_NS {
-        CONSOLE_REPLI_SECURITE.store(true, Ordering::Release);
+        if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {
+            CONSOLE_REPLI_A_NS.store(maintenant, Ordering::Relaxed);
+            CONSOLE_REPLI_MUET_NS.store(maintenant.saturating_sub(progres), Ordering::Relaxed);
+            CONSOLE_REPLI_FIL_VU_NS.store(
+                maintenant.saturating_sub(CONSOLE_FIL_VU_NS.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
+            CONSOLE_REPLI_OCCUPATION.store(CONSOLE.occupation(), Ordering::Relaxed);
+            CONSOLE_REPLI_JETON.store(EMISSION.load(Ordering::Relaxed), Ordering::Relaxed);
+            CONSOLE_REPLI_ENDORMI.store(CONSOLE_FIL_ENDORMI.load(Ordering::Relaxed), Ordering::Relaxed);
+            CONSOLE_REPLI_FIL_PHASE.store(CONSOLE_FIL_PHASE.load(Ordering::Relaxed), Ordering::Relaxed);
+            let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(CONSOLE_FIL_TACHE.load(Ordering::Relaxed));
+            CONSOLE_REPLI_FIL_ETAT.store(etat, Ordering::Relaxed);
+            CONSOLE_REPLI_FIL_ON_CPU.store(on_cpu as u8, Ordering::Relaxed);
+            CONSOLE_REPLI_FIL_FILE.store(file, Ordering::Relaxed);
+            for (cpu, case) in CONSOLE_REPLI_OCCUPANTS.iter().enumerate() {
+                case.store(crate::kernel::task::occupant_coeur(cpu), Ordering::Relaxed);
+                let (_, _, depuis) = crate::kernel::task::profil_occupant(cpu);
+                CONSOLE_REPLI_TENU_NS[cpu].store(
+                    if depuis == 0 { 0 } else { maintenant.saturating_sub(depuis) },
+                    Ordering::Relaxed,
+                );
+                let (_, appel, _, _, _) = crate::kernel::task::stall_probe_context_pour(cpu);
+                CONSOLE_REPLI_APPEL[cpu].store(appel, Ordering::Relaxed);
+                let (rip, rip_noyau) = crate::kernel::task::rips_timer(cpu);
+                CONSOLE_REPLI_RIP[cpu].store(rip, Ordering::Relaxed);
+                CONSOLE_REPLI_RIP_NOYAU[cpu].store(rip_noyau, Ordering::Relaxed);
+                let (i, n) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+                    .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+                    .unwrap_or((0, 0));
+                CONSOLE_REPLI_FILE[cpu].store(((i as u64) << 32) | n as u64, Ordering::Relaxed);
+                let (ipi, ipi_rip, utilisateur, raison) = crate::kernel::task::dernier_battement(cpu);
+                CONSOLE_REPLI_IPI[cpu].store(ipi, Ordering::Relaxed);
+                CONSOLE_REPLI_IPI_RIP[cpu].store(ipi_rip, Ordering::Relaxed);
+                CONSOLE_REPLI_IPI_MODE[cpu].store(((utilisateur as u8) << 4) | (raison & 0xF), Ordering::Relaxed);
+                CONSOLE_REPLI_PHASES[cpu].store(CONSOLE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
     }
 }
 
 /// Le fil de vidange : une ligne, interruptions ouvertes, puis la main.
 fn fil_console() -> ! {
+    CONSOLE_FIL_TACHE.store(crate::kernel::task::indice_tache_courante(), Ordering::Relaxed);
     CONSOLE_DERNIER_PROGRES_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     CONSOLE_FIL_PRET.store(true, Ordering::Release);
     let mut depuis = crate::kernel::timer::monotonic_ns();
+    let mut precedent = 0u64;
     loop {
         let ticket = CONSOLE_ATTENTE.ticket();
         loop {
+            let tour = crate::kernel::timer::monotonic_ns();
+            CONSOLE_FIL_VU_NS.store(tour, Ordering::Relaxed);
+            if precedent != 0 {
+                CONSOLE_FIL_TOUR_PIRE_NS.fetch_max(tour.saturating_sub(precedent), Ordering::Relaxed);
+            }
+            precedent = tour;
+            CONSOLE_FIL_PHASE.store(1, Ordering::Relaxed);
             match vide_un_morceau() {
                 Vidange::Emise => {
+                    CONSOLE_FIL_PHASE.store(2, Ordering::Relaxed);
                     crate::kernel::task::point_cooperatif(&mut depuis);
                 }
                 // Un emetteur synchrone (repli, banc du detenteur suspendu)
@@ -1142,9 +1602,12 @@ fn fil_console() -> ! {
                     // repli synchrone attendrait le meme jeton).
                     CONSOLE_DERNIER_PROGRES_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
                     let t = CONSOLE_ATTENTE.ticket();
-                    let borne = crate::kernel::timer::monotonic_ns().saturating_add(1_000_000);
+                    let avant = crate::kernel::timer::monotonic_ns();
+                    let borne = avant.saturating_add(1_000_000);
+                    CONSOLE_FIL_PHASE.store(3, Ordering::Relaxed);
                     let _ = CONSOLE_ATTENTE.wait_until_noyau(t, borne);
                     depuis = crate::kernel::timer::monotonic_ns();
+                    CONSOLE_FIL_SOMME_JETON_PIRE_NS.fetch_max(depuis.saturating_sub(avant), Ordering::Relaxed);
                 }
                 Vidange::Rien => break,
             }
@@ -1155,8 +1618,11 @@ fn fil_console() -> ! {
         core::sync::atomic::fence(Ordering::SeqCst);
         if CONSOLE.est_vide() && differees_vides() {
             let borne = crate::kernel::timer::monotonic_ns().saturating_add(CONSOLE_SOMME_NS);
+            CONSOLE_FIL_PHASE.store(4, Ordering::Relaxed);
             let _ = CONSOLE_ATTENTE.wait_until_noyau(ticket, borne);
         }
+        // Le sommeil anneau vide ne compte pas comme un tour muet.
+        precedent = 0;
         CONSOLE_FIL_ENDORMI.store(false, Ordering::SeqCst);
         depuis = crate::kernel::timer::monotonic_ns();
     }
@@ -1212,21 +1678,17 @@ fn vide_un_morceau() -> Vidange {
     let mut fait = false;
     if !EN_PANIQUE.load(Ordering::SeqCst) {
         let debut = crate::kernel::timer::monotonic_ns();
-        // Une ligne differee ne passe devant l'anneau que s'il est vide, ou une
-        // fois tous les 32 morceaux (un flot continu ne l'affame pas) : elle a
-        // ete differee parce que l'anneau etait plein, elle est donc plus
-        // recente que tout ce qu'il contenait.
+        // BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 : une ligne differee passe
+        // devant la tete de l'anneau des que la lecture a atteint son repere
+        // -- ni avant (elle doublerait des lignes plus anciennes), ni apres
+        // (des lignes plus recentes la doubleraient) --, et jamais au milieu
+        // d'un enregistrement entame.
         let entame = CONSOLE_ENTAME.load(Ordering::Relaxed) != 0;
-        let tour_differe = !entame
-            && (CONSOLE_TOUR_DIFFERE.fetch_add(1, Ordering::Relaxed) % 32 == 31 || CONSOLE.est_vide());
-        if tour_differe {
-            fait = vide_une_differee();
+        if !entame {
+            fait = vide_differee_mure();
         }
         if !fait {
             fait = avance_tete(CONSOLE_MORCEAU, debut).is_some();
-        }
-        if !fait && !entame {
-            fait = vide_une_differee();
         }
         let fin = crate::kernel::timer::monotonic_ns();
         CONSOLE_MORCEAU_PIRE_NS.fetch_max(fin.saturating_sub(debut), Ordering::Relaxed);
@@ -1287,24 +1749,19 @@ fn finis_entame() {
     }
 }
 
-/// Detenteur du jeton : UNE ligne differee (le premier coeur qui en a),
-/// entiere. Chemin rare en mode asynchrone (anneau plein sans jeton,
-/// reentrance) : elle n'est pas decoupee.
-fn vide_une_differee() -> bool {
-    for anneau in DIFFEREES.iter() {
-        if anneau.vide_un(ecris_octets) {
-            LIGNES_VIDANGEES.fetch_add(1, Ordering::Relaxed);
-            return true;
-        }
-    }
-    false
-}
-
-/// Tout l'anneau, d'un coup : detenteur synchrone du jeton (console coupee ou
-/// repliee) et panique (sans jeton).
+/// Tout l'anneau, d'un coup, fusionne avec les lignes differees par leur
+/// repere (BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1) : detenteur synchrone du
+/// jeton (console coupee ou repliee) et panique (sans jeton).
 fn vide_console_entiere() {
     let maintenant = crate::kernel::timer::monotonic_ns();
-    while avance_tete(usize::MAX, maintenant).is_some() {}
+    loop {
+        if CONSOLE_ENTAME.load(Ordering::Relaxed) == 0 && vide_differee_mure() {
+            continue;
+        }
+        if avance_tete(usize::MAX, maintenant).is_none() {
+            break;
+        }
+    }
 }
 
 /// Attend (au plus `borne_ns`) que le fil ait tout emis : fin d'autorun, avant
@@ -1385,6 +1842,23 @@ pub fn vide_console_avant_arret() {
     }
 }
 
+/// BOUCHAUD_CONSOLE_REPLI_COOPERATIF_V1 : vide l'anneau par morceaux, sous le
+/// jeton, interruptions ouvertes, un point cooperatif entre deux -- pour un
+/// appelant qui peut ceder. Borne : 2 s.
+fn vide_anneau_en_cedant() {
+    let mut depuis = crate::kernel::timer::monotonic_ns();
+    let echeance = depuis.saturating_add(2_000_000_000);
+    while crate::kernel::timer::monotonic_ns() < echeance && !EN_PANIQUE.load(Ordering::Acquire) {
+        match vide_un_morceau() {
+            Vidange::Emise => {
+                crate::kernel::task::point_cooperatif(&mut depuis);
+            }
+            Vidange::Rien => return,
+            Vidange::JetonOccupe => crate::kernel::task::yield_now(),
+        }
+    }
+}
+
 /// `console-async on|off` : bascule a chaud (A/B). Couper attend que l'anneau
 /// soit vide ; les lignes suivantes sortent par le chemin synchrone.
 pub fn choisit_console_asynchrone(oui: bool) {
@@ -1424,21 +1898,99 @@ pub struct CompteursConsole {
     pub retard_pire_ns: u64,
     pub ajout_pire_ns: u64,
     pub occupation_pire: usize,
+    pub verrou_abandons: u64,
+    pub verrou_attente_pire_ns: u64,
+    pub verrou_cedees: u64,
+    pub verrou_cedee_pire_ns: u64,
 }
 
 /// `BOUCHAUD_CONSOLE_BILAN` : une ligne, lue par les bancs (fin d'autorun,
 /// `console-async etat`).
 pub fn journalise_bilan_console() {
     let c = compteurs_console();
+    // BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : le cout de l'attente (producteurs
+    // qui ont fait la queue, attente pire et moyenne) et chaque chemin qui
+    // peut finir dans l'anneau d'un coeur. Avant le bilan : les bancs
+    // arretent la machine deux secondes apres lui.
+    let attentes = CONSOLE_CONTRE_PRESSIONS.load(Ordering::Relaxed);
+    // BOUCHAUD_VGA_TEXTE_MESURE_V1 : la copie texte d'un `write(2)` et de
+    // chaque `println!`, interruptions masquees.
+    let (prises, tenu, attente, abandons, recopie) = crate::drivers::vga::mesures_console();
+    crate::serial_println!(
+        "BOUCHAUD_VGA_TEXTE prises={} tenu_pire_us={} attente_pire_us={} abandons={} recopie_pire_us={}",
+        prises, tenu / 1000, attente / 1000, abandons, recopie / 1000,
+    );
+    crate::serial_println!(
+        "BOUCHAUD_CONSOLE_CONTRE_PRESSION attentes={} attente_pire_us={} attente_moyenne_us={} sauts={} \
+         sorties_synchrones={} urgences={} differees_occupe={} differees_urgence={} reserve={} \
+         fil_tour_pire_us={} fil_somme_jeton_pire_us={}",
+        attentes,
+        CONSOLE_CONTRE_PRESSION_PIRE_NS.load(Ordering::Relaxed) / 1000,
+        CONSOLE_CONTRE_PRESSION_TOTALE_NS.load(Ordering::Relaxed) / 1000 / attentes.max(1),
+        CONSOLE_PLACE_SAUTS.load(Ordering::Relaxed),
+        CONSOLE_PLACE_SYNCHRONES.load(Ordering::Relaxed),
+        CONSOLE_URGENCES.load(Ordering::Relaxed),
+        CONSOLE_DIFFEREES_OCCUPE.load(Ordering::Relaxed),
+        CONSOLE_DIFFEREES_URGENCE.load(Ordering::Relaxed),
+        CONSOLE_RESERVE_URGENCE,
+        CONSOLE_FIL_TOUR_PIRE_NS.load(Ordering::Relaxed) / 1000,
+        CONSOLE_FIL_SOMME_JETON_PIRE_NS.load(Ordering::Relaxed) / 1000,
+    );
     crate::serial_println!(
         "BOUCHAUD_CONSOLE_BILAN active={} repli_securite={} lignes={} emises={} pleines={} \
          replis_differes={} vidanges_aidees={} reentrees={} differees_pendant_vidange={} reveils={} jeton_occupe={} ligne_pire_us={} \
-         morceau_pire_us={} retard_pire_us={} ajout_pire_us={} occupation_pire={} synchrones={} synchrone_pire_us={}",
+         morceau_pire_us={} retard_pire_us={} ajout_pire_us={} occupation_pire={} synchrones={} synchrone_pire_us={} \
+         verrou_abandons={} verrou_cedees={} verrou_cedee_pire_us={} verrou_attente_pire_us={} \
+         repli_a_ms={} repli_muet_ms={} repli_fil_vu_ms={} repli_occupation={} repli_jeton={} repli_fil_endormi={}",
         c.active as u8, c.repli_securite as u8, c.lignes, c.emises, c.pleines,
         c.replis_differes, c.vidanges_aidees, c.reentrees, c.differees_pendant_vidange, c.reveils, c.jeton_occupe,
         c.ligne_pire_ns / 1000, c.morceau_pire_ns / 1000, c.retard_pire_ns / 1000, c.ajout_pire_ns / 1000, c.occupation_pire,
         c.synchrones, c.synchrone_pire_ns / 1000,
+        c.verrou_abandons, c.verrou_cedees, c.verrou_cedee_pire_ns / 1000, c.verrou_attente_pire_ns / 1000,
+        CONSOLE_REPLI_A_NS.load(Ordering::Relaxed) / 1_000_000,
+        CONSOLE_REPLI_MUET_NS.load(Ordering::Relaxed) / 1_000_000,
+        CONSOLE_REPLI_FIL_VU_NS.load(Ordering::Relaxed) / 1_000_000,
+        CONSOLE_REPLI_OCCUPATION.load(Ordering::Relaxed),
+        CONSOLE_REPLI_JETON.load(Ordering::Relaxed),
+        CONSOLE_REPLI_ENDORMI.load(Ordering::Relaxed) as u8,
     );
+    if CONSOLE_REPLI_A_NS.load(Ordering::Relaxed) != 0 {
+        crate::serial_println!(
+            "BOUCHAUD_CONSOLE_REPLI phases={}{}{}{} fil_phase={} fil_etat={} fil_on_cpu={} fil_file={} \
+             fil=[{}] occupants=[{}] [{}] [{}] [{}]",
+            CONSOLE_REPLI_PHASES[0].load(Ordering::Relaxed),
+            CONSOLE_REPLI_PHASES[1].load(Ordering::Relaxed),
+            CONSOLE_REPLI_PHASES[2].load(Ordering::Relaxed),
+            CONSOLE_REPLI_PHASES[3].load(Ordering::Relaxed),
+            CONSOLE_REPLI_FIL_PHASE.load(Ordering::Relaxed),
+            CONSOLE_REPLI_FIL_ETAT.load(Ordering::Relaxed),
+            CONSOLE_REPLI_FIL_ON_CPU.load(Ordering::Relaxed) as i8,
+            CONSOLE_REPLI_FIL_FILE.load(Ordering::Relaxed),
+            crate::kernel::task::decrit_tache(CONSOLE_FIL_TACHE.load(Ordering::Relaxed)),
+            crate::kernel::task::decrit_tache(CONSOLE_REPLI_OCCUPANTS[0].load(Ordering::Relaxed)),
+            crate::kernel::task::decrit_tache(CONSOLE_REPLI_OCCUPANTS[1].load(Ordering::Relaxed)),
+            crate::kernel::task::decrit_tache(CONSOLE_REPLI_OCCUPANTS[2].load(Ordering::Relaxed)),
+            crate::kernel::task::decrit_tache(CONSOLE_REPLI_OCCUPANTS[3].load(Ordering::Relaxed)),
+        );
+        for cpu in 0..4 {
+            let file = CONSOLE_REPLI_FILE[cpu].load(Ordering::Relaxed);
+            crate::serial_println!(
+                "BOUCHAUD_CONSOLE_REPLI_COEUR cpu={} tenu_ms={} appel={} rip={:#x} rip_noyau={:#x} file_interactives={} file_normales={} \
+                 ipi={} ipi_rip={:#x} ipi_utilisateur={} renonce={}",
+                cpu,
+                CONSOLE_REPLI_TENU_NS[cpu].load(Ordering::Relaxed) / 1_000_000,
+                CONSOLE_REPLI_APPEL[cpu].load(Ordering::Relaxed) as i64,
+                CONSOLE_REPLI_RIP[cpu].load(Ordering::Relaxed),
+                CONSOLE_REPLI_RIP_NOYAU[cpu].load(Ordering::Relaxed),
+                file >> 32,
+                file & 0xFFFF_FFFF,
+                CONSOLE_REPLI_IPI[cpu].load(Ordering::Relaxed),
+                CONSOLE_REPLI_IPI_RIP[cpu].load(Ordering::Relaxed),
+                CONSOLE_REPLI_IPI_MODE[cpu].load(Ordering::Relaxed) >> 4,
+                CONSOLE_REPLI_IPI_MODE[cpu].load(Ordering::Relaxed) & 0xF,
+            );
+        }
+    }
 }
 
 pub fn compteurs_console() -> CompteursConsole {
@@ -1461,6 +2013,10 @@ pub fn compteurs_console() -> CompteursConsole {
         retard_pire_ns: CONSOLE_RETARD_PIRE_NS.load(Ordering::Relaxed),
         ajout_pire_ns: CONSOLE_AJOUT_PIRE_NS.load(Ordering::Relaxed),
         occupation_pire: CONSOLE_OCCUPATION_PIRE.load(Ordering::Relaxed),
+        verrou_abandons: CONSOLE_VERROU_ABANDONS.load(Ordering::Relaxed),
+        verrou_attente_pire_ns: CONSOLE_VERROU_ATTENTE_PIRE_NS.load(Ordering::Relaxed),
+        verrou_cedees: CONSOLE_VERROU_CEDEES.load(Ordering::Relaxed),
+        verrou_cedee_pire_ns: CONSOLE_VERROU_CEDEE_PIRE_NS.load(Ordering::Relaxed),
     }
 }
 

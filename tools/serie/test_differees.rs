@@ -409,3 +409,39 @@ fn un_enregistrement_se_lit_en_plusieurs_fois_meme_a_cheval_sur_la_fin() {
         assert!(a.premier().is_none() && a.est_vide());
     }
 }
+
+/// BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 : `ecrits` et `lus` ne reculent jamais,
+/// et un repere pris a `ecrits()` n'est atteint par `lus()` qu'une fois sortis
+/// tous les enregistrements ranges avant lui -- jamais pendant la lecture
+/// morceau par morceau du dernier d'entre eux.
+#[test]
+fn repere_atteint_quand_tout_ce_qui_precede_est_sorti() {
+    let a: Anneau<256> = Anneau::neuf();
+    assert_eq!((a.ecrits(), a.lus()), (0, 0));
+    let mut sortis = Vec::new();
+    let mut ranges = 0usize;
+    for tour in 0..200usize {
+        let ligne = format!("ligne {tour} {}\n", "x".repeat(tour % 17));
+        while !a.range(ligne.as_bytes()) {
+            let (t, n) = a.premier().expect("anneau plein donc non vide");
+            sortis.push(t);
+            a.retire(t, n);
+        }
+        ranges += 1;
+        let repere = a.ecrits();
+        assert!(repere >= a.lus());
+        // Tout ce qui precede le repere sort, un enregistrement a la fois ;
+        // le repere n'est atteint qu'apres le dernier, en entier.
+        while let Some((t, n)) = a.premier() {
+            assert!(a.lus() < repere, "repere atteint avant la fin de ce qui le precede");
+            a.lis(t, 0, n / 2, |_| {});
+            assert!(a.lus() < repere, "repere atteint au milieu d'un enregistrement");
+            a.retire(t, n);
+            sortis.push(t);
+        }
+        assert_eq!(a.lus(), repere);
+        assert_eq!(a.ecrits(), repere);
+    }
+    assert_eq!(sortis.len(), ranges);
+    assert!(sortis.windows(2).all(|w| w[0] < w[1]), "positions de lecture qui reculent");
+}

@@ -168,11 +168,14 @@ def verifie(racine: Path) -> list[str]:
     if not (position(src[AUTORUN], "crate::drivers::serial::vidange_differees();")
             < position(src[AUTORUN], '"BOUCHAUD_SERIE_BILAN') < 10**9) or "lignes_perdues={}" not in src[AUTORUN]:
         fautes.append(f"{AUTORUN} : le bilan serie ne vide plus les lignes differees avant, ou ne compte plus les perdues")
-    # Deux sites : la course masquee de `sous_jeton`, et l'anneau de la
-    # console plein dans un contexte qui ne peut pas ceder (`emet`,
-    # interruptions masquees : l'anneau du coeur n'a qu'un producteur).
-    if u.count("differe(octets)") != 2 or "fn differe(octets: &[u8])" not in u \
-            or "interrupts::without_interrupts(|| differe(octets));" not in corps(u, "emet"):
+    # Quatre sites : la course masquee de `sous_jeton` ; dans `emet`,
+    # interruptions masquees (l'anneau du coeur n'a qu'un producteur),
+    # l'anneau de la console plein dans un contexte qui ne peut pas ceder, et
+    # le verrou de l'anneau tenu par un detenteur suspendu
+    # (BOUCHAUD_CONSOLE_VERROU_BORNE_V1) -- ajout direct, ou pendant l'attente
+    # de place (BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1).
+    if u.count("differe(octets)") != 4 or "fn differe(octets: &[u8])" not in u \
+            or corps(u, "emet").count("interrupts::without_interrupts(|| differe(octets));") != 3:
         fautes.append(f"{UART} : une ligne est differee hors de la course masquee de sous_jeton")
     # 13. Echeance sans progres, renouvelee seulement par a_l_echeance.
     if not re.search(r"match a_l_echeance\(maintenant, debut_attente, emissions_vues, EMISSIONS_FAITES\.load\(Ordering::Relaxed\)\) \{"

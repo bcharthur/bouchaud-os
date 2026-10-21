@@ -91,6 +91,18 @@ impl<const N: usize> Anneau<N> {
         self.tete.load(Ordering::Acquire) == self.queue.load(Ordering::Acquire)
     }
 
+    /// BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 : octets ecrits depuis la
+    /// creation (croissant) -- le repere d'ordre d'un enregistrement.
+    pub fn ecrits(&self) -> usize {
+        self.queue.load(Ordering::Acquire)
+    }
+
+    /// Octets retires depuis la creation (croissant) : tout enregistrement
+    /// commence avant `lus()` est sorti en entier.
+    pub fn lus(&self) -> usize {
+        self.tete.load(Ordering::Acquire)
+    }
+
     /// Octets occupes (enregistrements et leurs longueurs).
     pub fn occupation(&self) -> usize {
         self.queue.load(Ordering::Acquire) - self.tete.load(Ordering::Acquire)

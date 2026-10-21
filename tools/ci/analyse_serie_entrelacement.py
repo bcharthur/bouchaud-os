@@ -14,6 +14,11 @@ BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : `--perdues-admises` (detenteur suspendu
 plus longtemps que les anneaux ne tiennent) admet des lignes MANQUANTES, a
 condition que le noyau les ait comptees perdues (`lignes_perdues` du bilan) ;
 une ligne coupee n'est jamais admise.
+
+BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 : une ligne DOUBLEE (deux fois la meme
+(ecrivain, numero)) ou une ligne qui sort AVANT une ligne plus ancienne du meme
+ecrivain est un echec, perdues admises ou non -- la console garde l'ordre de
+chaque ecrivain et n'emet une ligne qu'une fois.
 """
 import re
 import sys
@@ -37,6 +42,9 @@ def main(argv):
         print(f"SERIE_ENTRELACEMENT_ECHEC journal illisible : {e}")
         return 1
     vues = set()
+    doublees = 0
+    inversions = []
+    dernier = {}
     abimees = []
     for brute in texte.replace("\r", "").split("\n"):
         i = brute.find("SERIE_LIGNE")
@@ -45,7 +53,13 @@ def main(argv):
         ligne = brute[i:]
         m = re.match(r"SERIE_LIGNE e=(\d+) n=(\d{4}) ", ligne)
         if m and ligne == attendue(int(m.group(1)), int(m.group(2)), octets):
-            vues.add((int(m.group(1)), int(m.group(2))))
+            e, n = int(m.group(1)), int(m.group(2))
+            if (e, n) in vues:
+                doublees += 1
+            vues.add((e, n))
+            if e in dernier and n < dernier[e]:
+                inversions.append((e, dernier[e], n))
+            dernier[e] = max(n, dernier.get(e, -1))
         else:
             abimees.append(brute)
     total = ecrivains * lignes
@@ -59,10 +73,13 @@ def main(argv):
         complet = perdues_n >= 0 and manquantes <= perdues_n
     else:
         complet = intactes == total
-    verdict = "OK" if complet and not abimees else "ECHEC"
+    verdict = "OK" if complet and not abimees and not doublees and not inversions else "ECHEC"
     print(f"SERIE_ENTRELACEMENT_{verdict} intactes={intactes}/{total} abimees={len(abimees)} "
+          f"doublees={doublees} inversions={len(inversions)} "
           f"emissions_a_la_borne={bornes[0]} emissions_reentrees={bornes[1]} "
           f"lignes_differees={differees} lignes_perdues={perdues_n} lignes_vidangees={vidangees}")
+    for e, avant, n in inversions[:3]:
+        print(f"  inversion : ecrivain {e}, ligne {n:04d} apres {avant:04d}")
     for brute in abimees[:3]:
         print("  abimee : " + brute[:200].encode("unicode_escape").decode("ascii"))
     return 0 if verdict == "OK" else 1

@@ -715,6 +715,36 @@ fn fil_detenteur_suspendu() -> ! {
     }
 }
 
+/// BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : `serie-verrou-suspendu ATTENTE_MS
+/// DUREE_MS` -- un fil noyau prend le verrou de l'anneau de la console apres
+/// ATTENTE_MS et le garde DUREE_MS interruptions masquees.
+static VERROU_SUSPENDU_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERROU_SUSPENDU_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+    VERROU_SUSPENDU_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
+    VERROU_SUSPENDU_DUREE_MS.store(lis(2, 1000).min(30_000), Ordering::Relaxed);
+    if !crate::kernel::task::spawn_noyau(fil_verrou_suspendu, "verrou-suspendu") {
+        crate::println!("serie-verrou-suspendu : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+fn fil_verrou_suspendu() -> ! {
+    use core::sync::atomic::Ordering;
+    let attente = VERROU_SUSPENDU_ATTENTE_MS.load(Ordering::Relaxed);
+    let duree = VERROU_SUSPENDU_DUREE_MS.load(Ordering::Relaxed);
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);
+    crate::serial_println!("CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={}", pris as u8, duree);
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
 /// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : `console-async on|off|etat`, pour l'A/B.
 fn console_async(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
@@ -1045,6 +1075,15 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "ordo-cession" => ordo_cession(argc, &argv),
         "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
         "console-async" => console_async(argc, &argv),
+        "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
+        // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
+        // octet sur COM1 (le cout du port sous KVM, simule sous TCG).
+        "serie-lente" => {
+            let ns = if argc >= 2 { argv[1].parse::<u64>().unwrap_or(0) } else { 0 };
+            crate::drivers::serial::regle_serie_lente(ns);
+            crate::serial_println!("SERIE_LENTE ns_par_octet={}", ns);
+            0
+        }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

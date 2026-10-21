@@ -14,7 +14,16 @@ Le garde exige :
   2. `range_console` : interruptions masquees AVANT le verrou, verrou rendu
      AVANT de les rouvrir, reentrance du meme coeur refusee sans attendre,
      aucun acces au port (ni jeton, ni `ecris_octets`), publication par
-     `range_morceaux` (entiere ou absente) ;
+     `range_morceaux` (entiere ou absente) ; BOUCHAUD_CONSOLE_VERROU_BORNE_V1 :
+     l'attente du verrou, interruptions masquees, est BORNEE
+     (`CONSOLE_VERROU_BORNE_NS` <= 5 ms, puis `RefusConsole::Occupe`) -- un
+     detenteur suspendu (vCPU retire, coeur arrete) ne fait plus tourner les
+     autres coeurs sans fin -- et la ligne refusee va dans l'anneau de son
+     coeur (`differe`), jamais sur le port ; un ecrivain qui PEUT CEDER
+     attend interruptions OUVERTES en cedant (`yield_now`, borne
+     `CONSOLE_VERROU_BORNE_CEDEE_NS` <= 120 s : finie, et au-dela d'une
+     suspension de 12 s) -- seul l'essai du verrou est
+     masque ;
   3. `Anneau::range_morceaux` ne publie que si exactement `total` octets ont
      ete poses ;
   4. `vide_un_morceau` : preemption coupee avant le jeton, jeton essaye un
@@ -37,9 +46,12 @@ Le garde exige :
      replie dans l'anneau de son coeur que si le jeton est tenu par son propre
      coeur sans pouvoir ceder, ou introuvable a l'echeance (banc
      run_console_panique.sh : 190 lignes sur 600 perdues sans cela) ; une
-     ligne differee ne passe devant l'anneau que s'il est vide, ou une fois
-     tous les 32 enregistrements (plus d'alternance qui rompait l'ordre d'un
-     ecrivain), et jamais au milieu d'un enregistrement entame ; une attente
+     ligne differee porte son repere (BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 :
+     position d'ecriture de l'anneau) et ne sort que lorsque la lecture de
+     l'anneau l'a atteint -- ni avant, ni apres --, jamais au milieu d'un
+     enregistrement entame, le chemin synchrone et la panique fusionnant de
+     meme (rafale de 2 000 lignes, TCG SMP4 : la 1 615 avant la 1 282 quand
+     elle passait « une fois tous les 32 morceaux ») ; une attente
      de l'anneau vide d'un contexte qui ne peut pas ceder emet elle-meme
      (SMP1 : 5 s d'attente a vide et repli) ;
   7. fil muet : repli synchrone au-dela de `CONSOLE_FIL_MUET_NS` <= 5 s ;
@@ -58,6 +70,19 @@ Le garde exige :
      (sa ligne s'ecrivait au milieu sinon) ;
  11. le fil demarre (main.rs, stage2) ; l'autorun attend l'anneau vide avant
      le bilan et publie `BOUCHAUD_CONSOLE_BILAN` ; `console-async` existe.
+ 12. BOUCHAUD_CONSOLE_CONTRE_PRESSION_V1 -- anneau plein : un producteur qui
+     PEUT CEDER fait la queue (`attend_place`, ticket de `file_place`) au
+     lieu d'aider puis de renoncer a une echeance (KVM SMP4 : 135 lignes
+     perdues ; TCG, port a 5 us/octet : 323) : aucune echeance dans
+     l'attente -- elle ne sort que si la console devient synchrone ou sur
+     verrou suspendu --, toute sortie rend son ticket et reveille les
+     suivants, les non-tetes dorment en attente NON interruptible (une tache
+     condamnee meurt au parking sans derouler sa pile : son ticket bloquerait
+     la file), une tete figee est sautee ; un producteur qui peut ceder ne
+     double pas ceux qui attendent et laisse la RESERVE d'urgence
+     (`range_console(.., CONSOLE_RESERVE_URGENCE)`, verifiee dans
+     `range_console` par `file_place::tient`) aux contextes qui ne peuvent pas
+     attendre, seuls a passer par `aide_a_vider` (reserve comprise).
 
 Fail-closed ; chaque regle a son test negatif (mutation qui doit rougir).
 """
@@ -69,13 +94,14 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 UART = "src/drivers/serial/uart16550.rs"
 ANNEAU = "src/drivers/serial/differees.rs"
+FILE_PLACE = "src/drivers/serial/file_place.rs"
 EXC = "src/arch/x86_64/idt/exceptions.rs"
 POWER = "src/kernel/power.rs"
 MAIN = "src/main.rs"
 STAGE2 = "src/platform/pc/stage2.rs"
 AUTORUN = "src/kernel/autorun.rs"
 SHELL = "src/shell/mod.rs"
-FICHIERS = (UART, ANNEAU, EXC, POWER, MAIN, STAGE2, AUTORUN, SHELL)
+FICHIERS = (UART, ANNEAU, FILE_PLACE, EXC, POWER, MAIN, STAGE2, AUTORUN, SHELL)
 
 
 def sans_commentaires(t: str) -> str:
@@ -119,7 +145,7 @@ def verifie(racine: Path) -> list[str]:
     u = src[UART]
     # 1. emet
     e = corps(u, "emet")
-    if not e or pos(e, "console_active()") > pos(e, "range_console(octets)") \
+    if not e or pos(e, "console_active()") > pos(e, "range_console(octets, ") \
             or not re.search(r"\n    sous_jeton\(octets\);\n\}$", e) \
             or re.search(r"ecris_octets|write_lot|EMISSION\b", e):
         f.append(f"{UART} : `emet` contourne la console ou ecrit sur le port")
@@ -135,6 +161,31 @@ def verifie(racine: Path) -> list[str]:
         f.append(f"{UART} : la reentrance sur le verrou de la console attend au lieu d'etre refusee")
     if re.search(r"ecris_octets|write_lot|EMISSION\b|sous_jeton", r) or "CONSOLE.range_morceaux(total," not in r:
         f.append(f"{UART} : `range_console` touche le port, ou ne publie plus en un enregistrement")
+    borne = re.search(r"const CONSOLE_VERROU_BORNE_NS: u64 = ([0-9_]+);", u)
+    attente = r[pos(r, "loop {"):cas + 2000] if cas >= 0 else ""
+    if not borne or int(borne.group(1).replace("_", "")) > 5_000_000 \
+            or "monotonic_ns().saturating_sub(debut) > CONSOLE_VERROU_BORNE_NS" not in attente \
+            or "return Err(RefusConsole::Occupe);" not in attente:
+        f.append(f"{UART} : l'attente du verrou de la console, interruptions masquees, n'est plus bornee (<= 5 ms)")
+    cede = re.search(r"const CONSOLE_VERROU_BORNE_CEDEE_NS: u64 = ([0-9_]+);", u)
+    if not cede or int(cede.group(1).replace("_", "")) > 120_000_000_000 \
+            or not re.search(r"if peut_ceder && ouvertes \{.{0,900}?x86_64::instructions::interrupts::enable\(\);\s*"
+                             r"crate::kernel::task::yield_now\(\);\s*x86_64::instructions::interrupts::disable\(\);", r, re.S) \
+            or "attente > CONSOLE_VERROU_BORNE_CEDEE_NS" not in r:
+        f.append(f"{UART} : l'attente cedee du verrou de la console n'est plus interruptions ouvertes, ou plus bornee")
+    # BOUCHAUD_CONSOLE_REPLI_COOPERATIF_V1 : en repli, l'anneau passe par
+    # morceaux interruptions ouvertes avant le chemin synchrone, si l'on peut ceder.
+    vc = corps(u, "vide_anneau_en_cedant")
+    if pos(e, "cession_volontaire_sure()") > pos(e, "vide_anneau_en_cedant();") \
+            or pos(e, "vide_anneau_en_cedant();") > e.rfind("sous_jeton(octets);") \
+            or "vide_un_morceau()" not in vc or "echeance" not in vc or "interrupts::disable" in vc:
+        f.append(f"{UART} : en repli, l'anneau n'est plus vide par morceaux interruptions ouvertes avant le chemin synchrone")
+    # Chaque bras `Occupe` d'`emet` (ajout direct, attente de place) : la
+    # ligne va dans l'anneau de son coeur, jamais sur le port.
+    bras = [m.group(2) for m in re.finditer(r"(\n +)Err\(RefusConsole::Occupe\) => \{(.*?)\1\}", e, re.S)]
+    if len(bras) < 2 or any("differe(octets)" not in b or "return;" not in b
+                            or re.search(r"ecris_octets|sous_jeton|EMISSION\b", b) for b in bras):
+        f.append(f"{UART} : une ligne refusee par le verrou (detenteur suspendu) ne va plus dans l'anneau de son coeur")
     # 3. range_morceaux
     rm = corps(src[ANNEAU], "range_morceaux")
     if not re.search(r"if pose != total \{\s*return false;\s*\}\s*self\.queue\.store\(", rm):
@@ -185,21 +236,37 @@ def verifie(racine: Path) -> list[str]:
     ac = corps(u, "attend_console_vide")
     if "vide_un_morceau()" not in ac or re.search(r"else \{\s*core::hint::spin_loop\(\);\s*\}\s*\}\s*\}$", ac):
         f.append(f"{UART} : l'attente de l'anneau vide tourne a vide dans un contexte qui ne peut pas ceder (famine du fil)")
-    if not (pos(e, "if aide_a_vider(octets) {") < pos(e, "differe(octets)") < 10**9):
+    urgence = re.search(r"Err\(RefusConsole::Plein\) => \{\s*CONSOLE_PLEINES\.fetch_add\(1, Ordering::Relaxed\);\s*"
+                        r"CONSOLE_URGENCES\.fetch_add\(1, Ordering::Relaxed\);(.*?)\n                \}", e, re.S)
+    if not urgence or not (pos(urgence.group(1), "if aide_a_vider(octets) {") < pos(urgence.group(1), "differe(octets)") < 10**9):
         f.append(f"{UART} : anneau plein, l'appelant qui ne peut pas ceder differe au lieu d'aider a vider (lignes perdues)")
     av = corps(u, "aide_a_vider")
     if "vide_un_morceau()" not in av or "if emis && peut_ceder {\n            crate::kernel::task::point_cooperatif(&mut depuis);" not in av \
-            or "if ouvertes { 1_000_000_000 } else { 20_000_000 }" not in av or "range_console(octets)" not in av \
-            or pos(av, "Vidange::JetonOccupe =>") > pos(av, "match range_console(octets)") or re.search(r"\bcontinue\b", av) \
+            or "if ouvertes { 1_000_000_000 } else { 20_000_000 }" not in av or "range_console(octets, 0)" not in av \
+            or pos(av, "Vidange::JetonOccupe =>") > pos(av, "match range_console(octets, 0)") or re.search(r"\bcontinue\b", av) \
             or "EN_PANIQUE.load(Ordering::Acquire)" not in av \
-            or not re.search(r"\} else if EMISSION\.load\(Ordering::Relaxed\) == crate::arch::x86_64::smp::cpu_index\(\) \+ 1 \{\s*return false;", av):
+            or not re.search(r"\} else if EMISSION\.load\(Ordering::Relaxed\) == crate::arch::x86_64::smp::cpu_index\(\) \+ 1 \{\s*(?:phase\(0\);\s*)?return false;", av):
         f.append(f"{UART} : l'aide a la vidange n'est plus bornee, ou attend un jeton tenu par son propre coeur")
-    if not re.search(r"let tour_differe = !entame\s*&& \(CONSOLE_TOUR_DIFFERE\.fetch_add\(1, Ordering::Relaxed\) % 32 == 31 \|\| CONSOLE\.est_vide\(\)\);", v) \
-            or "if !fait && !entame {" not in v:
+    # BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V1 : une ligne differee porte son
+    # repere (position d'ecriture de l'anneau), ne sort que lorsque la lecture
+    # l'a atteint, la plus ancienne d'abord, avant la tete et jamais au milieu
+    # d'un enregistrement entame ; le chemin synchrone fusionne de meme.
+    dif = corps(u, "differe")
+    mure = corps(u, "vide_differee_mure")
+    entiere = corps(u, "vide_console_entiere")
+    if not re.search(r"if !entame \{\s*fait = vide_differee_mure\(\);\s*\}\s*if !fait \{\s*fait = avance_tete\(CONSOLE_MORCEAU, debut\)\.is_some\(\);\s*\}", v) \
+            or "let repere = (CONSOLE.ecrits() as u64).to_le_bytes();" not in dif \
+            or not re.search(r"range_morceaux\(DIFFEREE_REPERE \+ octets\.len\(\), \|pose\| \{\s*pose\(&repere\);\s*pose\(octets\);", dif) \
+            or "let lus = CONSOLE.lus();" not in mure \
+            or "if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {" not in mure \
+            or "DIFFEREES[cpu].lis(t, DIFFEREE_REPERE.min(n), n, ecris_octets);" not in mure \
+            or not re.search(r"if CONSOLE_ENTAME\.load\(Ordering::Relaxed\) == 0 && vide_differee_mure\(\) \{\s*continue;\s*\}", entiere) \
+            or not re.search(r"fn vide_differees\(\) \{\s*while vide_differee_mure\(\) \{\}\s*\}", u) \
+            or re.search(r"\.vide(_un)?\(ecris_octets\)", u):
         f.append(f"{UART} : les lignes differees passent devant l'anneau (ordre d'un ecrivain rompu)")
     # 7. fil muet
     muet = constante(u, "CONSOLE_FIL_MUET_NS")
-    if muet is None or muet > 5_000_000_000 or "CONSOLE_REPLI_SECURITE.store(true" not in corps(u, "surveille_fil_console") \
+    if muet is None or muet > 5_000_000_000 or not re.search(r"CONSOLE_REPLI_SECURITE\.(store\(true|swap\(true)", corps(u, "surveille_fil_console")) \
             or "surveille_fil_console();" not in e or "!CONSOLE_REPLI_SECURITE.load(" not in corps(u, "console_active"):
         f.append(f"{UART} : un fil muet n'est plus remplace par le chemin synchrone")
     # 8. panique, double faute, arret
@@ -249,6 +316,38 @@ def verifie(racine: Path) -> list[str]:
         f.append(f"{UART} : l'autorun publie son bilan avant que le fil ait tout emis")
     if '"console-async" => console_async(' not in src[SHELL]:
         f.append(f"{SHELL} : `console-async` absent (A/B impossible)")
+    # 12. contre-pression
+    if not re.search(r"let cedable = x86_64::instructions::interrupts::are_enabled\(\)\s*"
+                     r"&& crate::kernel::scheduler::preempt::cession_volontaire_sure\(\);\s*"
+                     r"let essai = if !cedable \{\s*range_console\(octets, 0\)\s*"
+                     r"\} else if CONSOLE_FILE_PLACE\.vide\(\) \{\s*range_console\(octets, CONSOLE_RESERVE_URGENCE\)\s*"
+                     r"\} else \{\s*Err\(RefusConsole::Plein\)\s*\};", e):
+        f.append(f"{UART} : un producteur qui peut ceder double la file, ou consomme la reserve d'urgence")
+    cede = re.search(r"Err\(RefusConsole::Plein\) if cedable => \{(.*?)\n                \}\n                Err\(RefusConsole::Plein\) => \{", e, re.S)
+    if not cede or "match attend_place(octets) {" not in cede.group(1) or "aide_a_vider" in cede.group(1) \
+            or not re.search(r"Err\(RefusConsole::Plein\) => \{\}", cede.group(1)):
+        f.append(f"{UART} : anneau plein, un producteur qui peut ceder n'attend pas sa place (echeance, puis ligne perdue)")
+    ap = corps(u, "attend_place")
+    corps_boucle = ap[pos(ap, "let issue = loop {"):pos(ap, "CONSOLE_FILE_PLACE.sort(ticket);")]
+    if not ap or re.search(r"echeance|BORNE|> debut|elapsed", corps_boucle) \
+            or len(re.findall(r"\bbreak\b", corps_boucle)) != 2 \
+            or not re.search(r"if !console_active\(\) \{\s*CONSOLE_PLACE_SYNCHRONES\.fetch_add\(1, Ordering::Relaxed\);\s*break Err\(RefusConsole::Plein\);", corps_boucle) \
+            or not re.search(r"match range_console\(octets, CONSOLE_RESERVE_URGENCE\) \{\s*Err\(RefusConsole::Plein\) => \{\}\s*autre => break autre,", corps_boucle):
+        f.append(f"{UART} : l'attente de place a une echeance (ligne perdue sous saturation) ou une sortie sans contrepartie")
+    if not (pos(ap, "let ticket = CONSOLE_FILE_PLACE.prend();") < pos(ap, "let issue = loop {")
+            < pos(ap, "CONSOLE_FILE_PLACE.sort(ticket);") < pos(ap, "CONSOLE_PLACE_ATTENTE.wake_all();") < 10**9):
+        f.append(f"{UART} : une sortie de la file de place ne rend pas son ticket (file bloquee) ou ne reveille pas les suivants")
+    if "CONSOLE_PLACE_ATTENTE.wait_until_noyau(" not in corps_boucle or re.search(r"\.wait_until\(|\.wait\(", corps_boucle):
+        f.append(f"{UART} : un attendant de la file dort en attente interruptible (tache condamnee : ticket jamais rendu)")
+    if not re.search(r"CONSOLE_FILE_PLACE\.saute\(vu, ticket\)", corps_boucle):
+        f.append(f"{UART} : une tete de file figee bloque les suivants sans fin")
+    rg = corps(u, "range_console")
+    if not re.search(r"let fait = super::file_place::tient\(CONSOLE_OCTETS - CONSOLE\.occupation\(\), total, reserve\)\s*&& CONSOLE\.range_morceaux\(", rg):
+        f.append(f"{UART} : `range_console` ignore la reserve d'urgence")
+    fp = src[FILE_PLACE]
+    if "self.servi.fetch_max(ticket.saturating_add(1), Ordering::AcqRel);" not in fp \
+            or "self.servi() >= ticket" not in fp or not re.search(r"vu < moi\s*&& self", fp):
+        f.append(f"{FILE_PLACE} : la file de place peut reculer, bloquer un ticket depasse ou sauter au-dela d'elle-meme")
     return f
 
 
@@ -268,15 +367,59 @@ def mutation(fichier: str, a: str, b: str) -> bool:
 
 
 NEGATIFS = [
+    # 2/12 : verrou suspendu pendant l'attente de place : ligne ecrite sur le port
+    (UART, "                        Err(RefusConsole::Occupe) => {\n                            x86_64::instructions::interrupts::without_interrupts(|| differe(octets));",
+     "                        Err(RefusConsole::Occupe) => {\n                            sous_jeton(octets);"),
+    # 12 : le producteur cedable aide puis renonce a l'echeance (avant)
+    (UART, "                    match attend_place(octets) {", "                    match aide_a_vider(octets) {"),
+    # 12 : il double la file
+    (UART, "            } else if CONSOLE_FILE_PLACE.vide() {", "            } else if true {"),
+    # 12 : il consomme la reserve d'urgence
+    (UART, "            } else if CONSOLE_FILE_PLACE.vide() {\n                range_console(octets, CONSOLE_RESERVE_URGENCE)",
+     "            } else if CONSOLE_FILE_PLACE.vide() {\n                range_console(octets, 0)"),
+    # 12 : echeance dans l'attente de place
+    (UART, "        surveille_fil_console();\n        if CONSOLE_FILE_PLACE.a_son_tour(ticket) {",
+     "        surveille_fil_console();\n        if crate::kernel::timer::monotonic_ns() > debut + 1_000_000_000 {\n            break Err(RefusConsole::Plein);\n        }\n        if CONSOLE_FILE_PLACE.a_son_tour(ticket) {"),
+    # 12 : ticket jamais rendu
+    (UART, "    phase(0);\n    CONSOLE_FILE_PLACE.sort(ticket);", "    phase(0);"),
+    # 12 : attente interruptible (tache condamnee : pile jamais deroulee)
+    (UART, "CONSOLE_PLACE_ATTENTE.wait_until_noyau(t,", "CONSOLE_PLACE_ATTENTE.wait_until(t,"),
+    # 12 : tete figee jamais sautee
+    (UART, "            && CONSOLE_FILE_PLACE.saute(vu, ticket)", "            && false"),
+    # 12 : reserve ignoree
+    (UART, "    let fait = super::file_place::tient(CONSOLE_OCTETS - CONSOLE.occupation(), total, reserve)\n        && CONSOLE.range_morceaux(",
+     "    let fait = CONSOLE.range_morceaux("),
+    # 12 : file qui recule
+    (FILE_PLACE, "self.servi.fetch_max(ticket.saturating_add(1), Ordering::AcqRel);", "self.servi.store(ticket.saturating_add(1), Ordering::Release);"),
+    # 12 : l'urgence (non cedable) differe sans aider
+    (UART, "                    CONSOLE_URGENCES.fetch_add(1, Ordering::Relaxed);\n                    if aide_a_vider(octets) {",
+     "                    CONSOLE_URGENCES.fetch_add(1, Ordering::Relaxed);\n                    if false {"),
     # 1 : emet ecrit directement
     (UART, "    sous_jeton(octets);\n}\n\n/// Range `octets`", "    ecris_octets(octets);\n}\n\n/// Range `octets`"),
     # 2 : verrou pris interruptions ouvertes
-    (UART, "    x86_64::instructions::interrupts::disable();\n    let debut = crate::kernel::timer::monotonic_ns();\n    let moi",
-     "    let debut = crate::kernel::timer::monotonic_ns();\n    let moi"),
+    (UART, "    x86_64::instructions::interrupts::disable();\n    let debut = crate::kernel::timer::monotonic_ns();\n    let mut moi",
+     "    let debut = crate::kernel::timer::monotonic_ns();\n    let mut moi"),
     # 2 : reentrance attendue
     (UART, "            Err(tenu) if tenu == moi => {", "            Err(tenu) if tenu == usize::MAX => {"),
     # 2 : le verrou rendu apres les interruptions
     (UART, "    CONSOLE_VERROU.store(0, Ordering::Release);\n    let duree", "    let duree"),
+    # 2 : attente du verrou sans borne (detenteur suspendu : coeurs figes IF=0)
+    (UART, "            || (tours % 64 == 63\n                && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > CONSOLE_VERROU_BORNE_NS)",
+     "            || (tours % 64 == 63 && false)"),
+    # 2 : ceder interruptions masquees
+    (UART, "            x86_64::instructions::interrupts::enable();\n            crate::kernel::task::yield_now();\n            x86_64::instructions::interrupts::disable();\n            // Elle a pu migrer",
+     "            crate::kernel::task::yield_now();\n            x86_64::instructions::interrupts::disable();\n            // Elle a pu migrer"),
+    # 2 : attente cedee sans borne
+    (UART, "                || attente > CONSOLE_VERROU_BORNE_CEDEE_NS\n", "                || false\n"),
+    # 2 : attente cedee bornee si loin qu'elle ne l'est plus (10 min)
+    (UART, "const CONSOLE_VERROU_BORNE_CEDEE_NS: u64 = 60_000_000_000;", "const CONSOLE_VERROU_BORNE_CEDEE_NS: u64 = 600_000_000_000;"),
+    # repli : l'anneau entier vide interruptions masquees par le chemin synchrone
+    (UART, "    {\n        vide_anneau_en_cedant();\n    }\n    sous_jeton(octets);", "    {\n    }\n    sous_jeton(octets);"),
+    # 2 : borne relevee a 50 ms
+    (UART, "const CONSOLE_VERROU_BORNE_NS: u64 = 1_000_000;", "const CONSOLE_VERROU_BORNE_NS: u64 = 50_000_000;"),
+    # 2 : ligne refusee par le verrou ecrite au lieu d'etre differee
+    (UART, "                    x86_64::instructions::interrupts::without_interrupts(|| differe(octets));\n                    CONSOLE_DIFFEREES_OCCUPE.fetch_add(1, Ordering::Relaxed);\n                    CONSOLE_REPLIS_DIFFERES.fetch_add(1, Ordering::Relaxed);\n                    reveille_vidange();\n                    return;\n                }\n            }",
+     "                    sous_jeton(octets);\n                    return;\n                }\n            }"),
     # 3 : enregistrement incomplet publie
     (ANNEAU, "        if pose != total {\n            return false;\n        }\n", ""),
     # 4 : l'enregistrement de tete n'est plus repris (repete depuis le debut)
@@ -284,7 +427,24 @@ NEGATIFS = [
     # 4 : le chemin synchrone ecrit au milieu d'une ligne entamee
     (UART, "            finis_entame();\n            vide_differees();", "            vide_differees();"),
     # 4 : une ligne differee au milieu d'un enregistrement entame
-    (UART, "        let tour_differe = !entame\n", "        let tour_differe = true\n"),
+    (UART, "        if !entame {\n            fait = vide_differee_mure();\n        }", "        fait = vide_differee_mure();"),
+    # 6 : une ligne differee sort avant que l'anneau ait atteint son repere
+    (UART, "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {",
+     "            if choix.map_or(true, |(_, _, _, r)| repere < r) {"),
+    # 6 : la plus recente d'abord
+    (UART, "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {",
+     "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere > r) {"),
+    # 6 : ligne differee sans repere
+    (UART, "    let repere = (CONSOLE.ecrits() as u64).to_le_bytes();", "    let repere = 0u64.to_le_bytes();"),
+    # 6 : le repere emis avec la ligne
+    (UART, "    DIFFEREES[cpu].lis(t, DIFFEREE_REPERE.min(n), n, ecris_octets);", "    DIFFEREES[cpu].lis(t, 0, n, ecris_octets);"),
+    # 6 : chemin synchrone : l'anneau entier avant les differees
+    (UART, "        if CONSOLE_ENTAME.load(Ordering::Relaxed) == 0 && vide_differee_mure() {\n            continue;\n        }\n", ""),
+    # 6 : toutes les differees d'un coup, mures ou non
+    (UART, "fn vide_differees() {\n    while vide_differee_mure() {}\n}", "fn vide_differees() {\n    for anneau in DIFFEREES.iter() {\n        anneau.vide(ecris_octets);\n    }\n}"),
+    # 6 : la differee passe apres la tete (des lignes plus recentes la doublent)
+    (UART, "        if !entame {\n            fait = vide_differee_mure();\n        }\n        if !fait {\n            fait = avance_tete(CONSOLE_MORCEAU, debut).is_some();\n        }",
+     "        fait = avance_tete(CONSOLE_MORCEAU, debut).is_some();\n        if !fait && !entame {\n            fait = vide_differee_mure();\n        }"),
     # 4 : jeton attendu sans borne
     (UART, "        if tours > 64 {\n            crate::kernel::scheduler::preempt::enable();\n            return Vidange::JetonOccupe;\n        }\n", ""),
     # 4 : emission interruptions masquees
@@ -310,15 +470,15 @@ NEGATIFS = [
     # 6 : anneau plein, plus d'aide a la vidange
     (UART, "                    if aide_a_vider(octets) {\n", "                    if false {\n"),
     # 6 : aide qui attend un jeton tenu par son propre coeur
-    (UART, "                } else if EMISSION.load(Ordering::Relaxed) == crate::arch::x86_64::smp::cpu_index() + 1 {\n                    return false;",
-     "                } else if false {\n                    return false;"),
+    (UART, "                } else if EMISSION.load(Ordering::Relaxed) == crate::arch::x86_64::smp::cpu_index() + 1 {\n                    phase(0);\n                    return false;",
+     "                } else if false {\n                    phase(0);\n                    return false;"),
     # 6 : l'aide ne retente plus sa place quand le jeton est pris (repli, ordre rompu)
     (UART, "                core::hint::spin_loop();\n                }\n                false\n            }\n        };",
      "                core::hint::spin_loop();\n                }\n                continue;\n            }\n        };"),
-    # 6 : retour a l'alternance anneau / differees
-    (UART, "fetch_add(1, Ordering::Relaxed) % 32 == 31 ||", "fetch_add(1, Ordering::Relaxed) % 2 == 1 ||"),
+    # 6 : retour a l'alternance anneau / differees (toute differee mure)
+    (UART, "    let lus = CONSOLE.lus();", "    let lus = usize::MAX;"),
     # 7 : plus de repli si le fil est muet
-    (UART, "        CONSOLE_REPLI_SECURITE.store(true, Ordering::Release);", "        let _ = maintenant;"),
+    (UART, "        if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {", "        if false {"),
     # 8 : panique sans poignee de main
     (UART, "    EN_PANIQUE.store(true, Ordering::SeqCst);", "    EN_PANIQUE.store(true, Ordering::Relaxed);"),
     # 8 : la panique vide l'anneau sans prendre le jeton (un autre coeur ecrit en meme temps)
