@@ -85,13 +85,15 @@ soak = need(
     ),
 )
 
-# BOUCHAUD_CI_UN_BUILD_PAR_SHA_V1 : le run PR saute ce que le run push du
-# MEME arbre teste deja (tools/ci/dedoublonne_pr.py). Deux regles :
-#  * jamais sur un workflow dont un gate est un check requis de `main` -- un
-#    job saute y compterait comme reussi ;
-#  * ailleurs, AUCUN job racine hors du dedoublonnage : un job sans `needs`
-#    tournerait deux fois, et un gate `always()` qui ne lit pas la decision
-#    rendrait vert un run dont tout a ete saute.
+# BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le run PR peut REFLETER le run push du meme
+# arbre (tools/ci/dedoublonne_pr.py) au lieu de le refaire -- jamais en sautant
+# son verdict. Regles :
+#  * jamais sur un workflow dont un gate est un check requis de `main` ;
+#  * aucun job racine hors du dedoublonnage, et toute racine lit `reutilise` ;
+#  * UN job de verdict, `if: always()`, qui contient le reflet
+#    (`dedoublonne_pr.py attend`) ET un verdict execute : il n'est jamais saute,
+#    et un run push en echec, annule ou saute le rend rouge ;
+#  * plus aucune lecture de la sortie V1 `doublon` (qui sautait le verdict).
 def jobs_de(texte: str) -> dict[str, list[str]]:
     blocs: dict[str, list[str]] = {}
     courant = None
@@ -117,9 +119,15 @@ for name in ("ci.yml", "integration.yml", "reliability-v3.yml"):
 for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
     texte = (root / name).read_text(encoding="utf-8")
     blocs = jobs_de(texte)
-    if "dedoublonne" not in blocs or "python3 tools/ci/dedoublonne_pr.py" not in "\n".join(blocs["dedoublonne"]):
-        errors.append(f"{name}: job dedoublonne absent")
+    if "dedoublonne" not in blocs or "python3 tools/ci/dedoublonne_pr.py" not in "\n".join(blocs["dedoublonne"]) \
+            or "reutilise:" not in "\n".join(blocs["dedoublonne"]):
+        errors.append(f"{name}: job dedoublonne absent ou sans sortie `reutilise`")
         continue
+    if re.search(r"outputs\.doublon\b", texte):
+        errors.append(f"{name}: lit encore la sortie V1 `doublon` (verdict saute)")
+    verdicts = [j for j, b in blocs.items() if "dedoublonne_pr.py attend" in "\n".join(b)]
+    if len(verdicts) != 1:
+        errors.append(f"{name}: il faut exactement un job de verdict qui reflete le run push ({verdicts})")
     for job, bloc in blocs.items():
         if job == "dedoublonne":
             continue
@@ -128,10 +136,19 @@ for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
         conditions = [l for l in bloc if l.startswith("    if:")]
         if not besoins:
             errors.append(f"{name}: job racine {job} hors dedoublonnage")
-        elif "dedoublonne" in besoins[0]:
-            if not conditions or "needs.dedoublonne.outputs.doublon != 'true'" not in conditions[0]:
+            continue
+        if job in verdicts:
+            if not conditions or conditions[0].strip() != "if: always()":
+                errors.append(f"{name}: le verdict {job} doit etre `if: always()` (jamais saute)")
+            if "if: needs.dedoublonne.outputs.reutilise != 'true'" not in corps:
+                errors.append(f"{name}: le verdict {job} n'a pas de verdict execute hors reutilisation")
+            if "dedoublonne" not in besoins[0]:
+                errors.append(f"{name}: le verdict {job} ne lit pas la decision")
+            continue
+        if "dedoublonne" in besoins[0]:
+            if not conditions or "needs.dedoublonne.outputs.reutilise != 'true'" not in conditions[0]:
                 errors.append(f"{name}: {job} depend de dedoublonne sans lire sa decision")
-        if any("always()" in c or "!cancelled()" in c for c in conditions) and "dedoublonne" not in (besoins[0] if besoins else ""):
+        if any("always()" in c or "!cancelled()" in c for c in conditions) and "dedoublonne" not in besoins[0]:
             errors.append(f"{name}: {job} tourne malgre un saut sans lire la decision")
 
 # BOUCHAUD_PREUVE_INDEPENDANTE_V1 : dans os-primitives, une etape apres le
