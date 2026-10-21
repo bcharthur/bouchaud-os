@@ -176,6 +176,8 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
     let tics_entree = crate::kernel::timer::ticks();
     current().reveil_pret_ns.range(0);
     current().reveil_elu_ns.range(0);
+    current().reveil_commute_ns.range(0);
+    current().reveil_passe_ns.range(0);
     current().reveil_par.range(0);
     current().wake_deadline_ns.range(deadline);
     // BOUCHAUD_PREUVE_HOTE_V1 : le fil arme range l'echeance et ses comptes
@@ -223,6 +225,8 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
             reprise_ns: crate::kernel::timer::monotonic_ns(),
             tics_entree,
             tics_reprise: crate::kernel::timer::ticks(),
+            commute_ns: current().reveil_commute_ns.charge(),
+            passe_ns: current().reveil_passe_ns.charge(),
         };
         let d = crate::kernel::attribution_reveil::decompose(&mesure);
         current().attribution_reveil.note(&d, mesure.reprise_ns, local_cpu() as u64, current().reveil_par.charge());
@@ -535,6 +539,8 @@ fn wake_sleepers() {
             }
             // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : echeance -> pret.
             task.reveil_elu_ns.range(0);
+            task.reveil_commute_ns.range(0);
+            task.reveil_passe_ns.range(0);
             task.reveil_par.range(par);
             task.reveil_pret_ns.range(now);
             publish_ready(index);
@@ -730,7 +736,9 @@ static PIRE_DERRIERE_UTILISATEUR_BATTEMENT: [AtomicU64; 4] = [const { AtomicU64:
 // lui-meme a l'heure (le quantum). b1r : elue au premier battement, mais il
 // est arrive plus d'une milliseconde apres le quantum (interruption retardee :
 // voir la part masquee et le vol du pire cas). b2 : au moins un battement est
-// passe sans l'elire (politique ou renoncement).
+// passe sans l'elire (politique ou renoncement). Le retard de b1r se mesure
+// sur l'attente de la tache, pas sur l'intervalle entre battements (qui compte
+// le repos du coeur).
 const ATTENTE_LONGUE_CLASSEE_NS: u64 = 1_000_000;
 static LONGUES_VOLEES: AtomicU64 = AtomicU64::new(0);
 static LONGUES_B0: AtomicU64 = AtomicU64::new(0);
@@ -801,8 +809,14 @@ fn note_attente_interactive(
         } else if battements == 0 {
             &LONGUES_B0
         } else if battements == 1 {
+            // BOUCHAUD_B1_RETARD_SANS_REPOS_V1 : le battement est en retard s'il
+            // arrive plus d'une milliseconde apres le quantum COMPTE DEPUIS QUE
+            // LA TACHE EST PRETE -- son attente. L'intervalle depuis le battement
+            // precedent comptait aussi le repos du coeur (aucun battement au
+            // repos) : run 39503091750, KVM SMP4, `b1_retard` sur usb-hid avec
+            // `int21382` (21 ms d'intervalle) pour une attente de quelques ms.
             let quantum_ns = crate::arch::x86_64::smp::SCHED_QUANTUM_TICKS * 1_000_000;
-            if intervalle > quantum_ns + 1_000_000 { &LONGUES_B1_RETARD } else { &LONGUES_B1 }
+            if attente_ns > quantum_ns + 1_000_000 { &LONGUES_B1_RETARD } else { &LONGUES_B1 }
         } else {
             &LONGUES_B2
         };

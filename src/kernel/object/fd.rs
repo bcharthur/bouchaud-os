@@ -660,13 +660,13 @@ fn proc_reveil() -> Vec<u8> {
          sans_balayage={} cpu={} a_ms={} tardifs_gt_5ms={} attentes_gt_1ms={} sommeils_tics_manquants={} \
          tic_ecart_pire_us={} tic_rip={:#x} tic_ring3={} tic_cpu={} tic_a_ms={} tic_ecarts_gt_2ms={} \
          masque_avant_ecart_us={} masque_avant_ecart_site={} masque_pire_us={} masque_pire_site={} masques_gt_1ms={} \
-         reveille_par={}\n",
+         reveille_par={} reprise_commutation_us={} reprise_passation_us={} reprise_retour_us={}\n",
         r.reveils, us(r.pire.total_ns), us(r.pire.tardif_ns), us(r.pire.attente_ns), us(r.pire.reprise_ns),
         r.pire.dormi_ms, r.pire.tics_vus, r.pire.sans_balayage as u8, r.cpu, r.a_ns / 1_000_000,
         r.tardifs_signales, r.attentes_signalees, r.sommeils_tics_manquants,
         us(t.pire_ns), t.rip, t.ring3 as u8, t.cpu, t.a_ns / 1_000_000, t.signales,
         cyc_us(m.avant_ecart_cyc), site(m.avant_ecart_site), cyc_us(m.pire_cyc), site(m.pire_site), m.signalees,
-        par,
+        par, us(r.pire.commutation_ns), us(r.pire.passation_ns), us(r.pire.retour_ns),
     );
     // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : seconde ligne, la ventilation des
     // reveils en retard de plus d'une milliseconde depuis le releve precedent

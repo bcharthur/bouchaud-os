@@ -55,6 +55,12 @@ pub struct Mesure {
     pub reprise_ns: u64,
     pub tics_entree: u64,
     pub tics_reprise: u64,
+    /// BOUCHAUD_REPRISE_DECOUPEE_V1 : le retour de `switch_context` dans la
+    /// tache elue (sa pile, son contexte), 0 si non note.
+    pub commute_ns: u64,
+    /// La fin de `complete_switch_handoff` (la passation de la tache
+    /// sortante, faite par la tache entrante), 0 si non notee.
+    pub passe_ns: u64,
 }
 
 /// Les parts d'un retard.
@@ -68,6 +74,13 @@ pub struct Decomposition {
     pub attente_ns: u64,
     /// elu -> reprise.
     pub reprise_ns: u64,
+    /// BOUCHAUD_REPRISE_DECOUPEE_V1 -- la reprise en trois : elu -> contexte
+    /// repris (`install`, `switch_context`), contexte repris -> passation
+    /// finie (`complete_switch_handoff`), passation -> retour dans
+    /// `dort_jusqua`. Instants absents ou incoherents : tout dans `retour_ns`.
+    pub commutation_ns: u64,
+    pub passation_ns: u64,
+    pub retour_ns: u64,
     /// Duree du sommeil entier, en millisecondes.
     pub dormi_ms: u64,
     /// Tics du PIT vus pendant le sommeil.
@@ -92,6 +105,9 @@ pub fn decompose(m: &Mesure) -> Decomposition {
             tardif_ns: total_ns,
             attente_ns: 0,
             reprise_ns: 0,
+            commutation_ns: 0,
+            passation_ns: 0,
+            retour_ns: 0,
             dormi_ms,
             tics_vus,
             tics_manquants,
@@ -99,11 +115,23 @@ pub fn decompose(m: &Mesure) -> Decomposition {
         };
     }
     let elu = if m.elu_ns >= m.pret_ns && m.elu_ns <= m.reprise_ns { m.elu_ns } else { m.pret_ns };
+    // Les instants de la reprise ne valent que dans l'ordre elu <= commute <=
+    // passe <= reprise ; sinon (non notes, ou d'une autre commutation) toute
+    // la reprise reste au retour, rien n'est invente.
+    let (commutation_ns, passation_ns, retour_ns) =
+        if m.commute_ns >= elu && m.passe_ns >= m.commute_ns && m.reprise_ns >= m.passe_ns && m.commute_ns != 0 {
+            (m.commute_ns - elu, m.passe_ns - m.commute_ns, m.reprise_ns - m.passe_ns)
+        } else {
+            (0, 0, m.reprise_ns - elu)
+        };
     Decomposition {
         total_ns,
         tardif_ns: m.pret_ns.saturating_sub(m.echeance_ns),
         attente_ns: elu - m.pret_ns,
         reprise_ns: m.reprise_ns - elu,
+        commutation_ns,
+        passation_ns,
+        retour_ns,
         dormi_ms,
         tics_vus,
         tics_manquants,
@@ -127,6 +155,9 @@ pub struct Registre {
     tardif_ns: AtomicU64,
     attente_ns: AtomicU64,
     reprise_ns: AtomicU64,
+    commutation_ns: AtomicU64,
+    passation_ns: AtomicU64,
+    retour_ns: AtomicU64,
     dormi_ms: AtomicU64,
     tics_vus: AtomicU64,
     sans_balayage: AtomicU64,
@@ -161,6 +192,9 @@ impl Registre {
             tardif_ns: AtomicU64::new(0),
             attente_ns: AtomicU64::new(0),
             reprise_ns: AtomicU64::new(0),
+            commutation_ns: AtomicU64::new(0),
+            passation_ns: AtomicU64::new(0),
+            retour_ns: AtomicU64::new(0),
             dormi_ms: AtomicU64::new(0),
             tics_vus: AtomicU64::new(0),
             sans_balayage: AtomicU64::new(0),
@@ -190,6 +224,9 @@ impl Registre {
             self.tardif_ns.store(d.tardif_ns, Ordering::Relaxed);
             self.attente_ns.store(d.attente_ns, Ordering::Relaxed);
             self.reprise_ns.store(d.reprise_ns, Ordering::Relaxed);
+            self.commutation_ns.store(d.commutation_ns, Ordering::Relaxed);
+            self.passation_ns.store(d.passation_ns, Ordering::Relaxed);
+            self.retour_ns.store(d.retour_ns, Ordering::Relaxed);
             self.dormi_ms.store(d.dormi_ms, Ordering::Relaxed);
             self.tics_vus.store(d.tics_vus, Ordering::Relaxed);
             self.sans_balayage.store(d.sans_balayage as u64, Ordering::Relaxed);
@@ -210,6 +247,9 @@ impl Registre {
                 tardif_ns: self.tardif_ns.swap(0, Ordering::Relaxed),
                 attente_ns: self.attente_ns.swap(0, Ordering::Relaxed),
                 reprise_ns: self.reprise_ns.swap(0, Ordering::Relaxed),
+                commutation_ns: self.commutation_ns.swap(0, Ordering::Relaxed),
+                passation_ns: self.passation_ns.swap(0, Ordering::Relaxed),
+                retour_ns: self.retour_ns.swap(0, Ordering::Relaxed),
                 dormi_ms,
                 tics_vus,
                 tics_manquants: dormi_ms.saturating_sub(tics_vus.saturating_add(1)),

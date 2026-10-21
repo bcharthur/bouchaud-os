@@ -136,6 +136,10 @@ pub struct Task {
     pub reveil_pret_ns: EcheanceAtomique,
     /// ... et sa premiere election apres cet instant.
     pub reveil_elu_ns: EcheanceAtomique,
+    /// BOUCHAUD_REPRISE_DECOUPEE_V1 : ... le retour de `switch_context` dans
+    /// cette tache apres l'election, puis la fin de `complete_switch_handoff`.
+    pub reveil_commute_ns: EcheanceAtomique,
+    pub reveil_passe_ns: EcheanceAtomique,
     /// ... et qui tenait le coeur quand le balayage l'a reveillee
     /// (`attribution_reveil::empaquete_par`).
     pub reveil_par: EcheanceAtomique,

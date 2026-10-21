@@ -26,6 +26,8 @@ fn mesure(echeance: u64, entree: u64, pret: u64, elu: u64, reprise: u64, tics: u
         reprise_ns: reprise,
         tics_entree: 1000,
         tics_reprise: 1000 + tics,
+        commute_ns: 0,
+        passe_ns: 0,
     }
 }
 
@@ -569,4 +571,41 @@ fn l_enregistreur_range_les_absences_du_seul_fil_arme_rognees_a_sa_tranche() {
     let mut n = 0;
     assert!(e.lis_absences(9, |_| n += 1), "plus d'absences que de place : incomplet");
     assert_eq!(n, ABSENCES_ENREGISTREES);
+}
+
+// BOUCHAUD_REPRISE_DECOUPEE_V1 : la reprise (elu -> retour) en trois segments.
+#[test]
+fn la_reprise_se_decoupe_en_commutation_passation_retour() {
+    let m = Mesure {
+        commute_ns: 125 * MS + 300_000 + 5_000,
+        passe_ns: 125 * MS + 300_000 + 1_205_000,
+        ..mesure(116 * MS, 100 * MS, 125 * MS, 125 * MS + 300_000, 125 * MS + 300_000 + 1_226_000, 25)
+    };
+    let d = decompose(&m);
+    assert_eq!(d.reprise_ns, 1_226_000);
+    assert_eq!((d.commutation_ns, d.passation_ns, d.retour_ns), (5_000, 1_200_000, 21_000));
+    assert_eq!(d.commutation_ns + d.passation_ns + d.retour_ns, d.reprise_ns);
+}
+
+#[test]
+fn reprise_sans_instants_ou_incoherents_reste_au_retour() {
+    // Non notes : rien n'est invente.
+    let d = decompose(&mesure(116 * MS, 100 * MS, 125 * MS, 125 * MS + 300_000, 126 * MS, 25));
+    assert_eq!((d.commutation_ns, d.passation_ns, d.retour_ns), (0, 0, 700_000));
+    // Instants d'une AUTRE commutation (avant l'election) : ignores.
+    let m = Mesure {
+        commute_ns: 120 * MS,
+        passe_ns: 120 * MS + 10,
+        ..mesure(116 * MS, 100 * MS, 125 * MS, 125 * MS + 300_000, 126 * MS, 25)
+    };
+    let d = decompose(&m);
+    assert_eq!((d.commutation_ns, d.passation_ns, d.retour_ns), (0, 0, 700_000));
+    // Passation apres la reprise : incoherent, ignore.
+    let m = Mesure {
+        commute_ns: 125 * MS + 400_000,
+        passe_ns: 127 * MS,
+        ..mesure(116 * MS, 100 * MS, 125 * MS, 125 * MS + 300_000, 126 * MS, 25)
+    };
+    let d = decompose(&m);
+    assert_eq!((d.commutation_ns, d.passation_ns, d.retour_ns), (0, 0, 700_000));
 }

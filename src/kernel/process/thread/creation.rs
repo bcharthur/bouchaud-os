@@ -62,6 +62,8 @@ impl Task {
             budget_reveil_ns: EcheanceAtomique::neuf(0),
             reveil_pret_ns: EcheanceAtomique::neuf(0),
             reveil_elu_ns: EcheanceAtomique::neuf(0),
+            reveil_commute_ns: EcheanceAtomique::neuf(0),
+            reveil_passe_ns: EcheanceAtomique::neuf(0),
             reveil_par: EcheanceAtomique::neuf(0),
             attribution_reveil: crate::kernel::attribution_reveil::Registre::neuf(),
             ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation::neuf(),

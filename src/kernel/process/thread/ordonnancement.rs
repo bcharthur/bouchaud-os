@@ -452,7 +452,18 @@ fn switch_to(from: usize, to: usize) {
         crate::kernel::attribution_reveil::commutation_hors_irq(cpu_id);
     }
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+    // BOUCHAUD_REPRISE_DECOUPEE_V1 : ici, `from_ptr` est la tache qui reprend
+    // (sa propre trame). Une election de reveil attend ses deux instants :
+    // contexte repris, puis passation de la sortante finie.
+    let elu = unsafe { (*from_ptr).reveil_elu_ns.charge() };
+    let reprend = elu != 0 && unsafe { (*from_ptr).reveil_commute_ns.charge() } == 0;
+    if reprend {
+        unsafe { (*from_ptr).reveil_commute_ns.range(crate::kernel::timer::monotonic_ns()); }
+    }
     complete_switch_handoff();
+    if reprend {
+        unsafe { (*from_ptr).reveil_passe_ns.range(crate::kernel::timer::monotonic_ns()); }
+    }
 }
 
 /// Abandonne la pile de la tache courante, terminee, et remet le coeur dans
