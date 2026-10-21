@@ -3,7 +3,8 @@
 > Inventaire vérifiable, pas une liste de souhaits. Un lot n'est `DONE_AT_<niveau>`
 > que si son critère est prouvé **à ce niveau** sur un SHA nommé. Un lot vert
 > historiquement qui casse au HEAD redevient `REGRESSED`. Niveaux : STATIC,
-> HOST, TCG, KVM, PHYSICAL. Mis à jour le 2026-10-15 (campagnes `c7018e56`,
+> HOST, TCG, KVM, PHYSICAL. Rattaché au registre de convergence le 2026-10-21 ;
+> tableau mis à jour le 2026-10-15 (campagnes `c7018e56`,
 > `f23a1247`, `77e0e5de`, `b6c99032` lues : `docs/current/AUDIT_STABILITY_2026-10-15.md`).
 >
 > États : UNKNOWN · NOT_STARTED · PARTIAL · EXPERIMENTAL · BLOCKED ·
@@ -15,6 +16,32 @@
 > ladybird-native-browser (38530194699, **16/16 jobs dont le verdict de
 > convergence et os-primitives TCG+KVM**) verts. Native IPC, SCM_RIGHTS et
 > Security Runtime relancés à la main sur ce même SHA (voir HANDOFF).
+
+## Actualisation du 21 octobre 2026 — rattachement au registre de convergence
+
+Source de vérité des défauts bloquants : [REGISTRE_CONVERGENCE.md](REGISTRE_CONVERGENCE.md)
+(une fiche par défaut : preuve initiale, mécanisme démontré, correctif,
+reproduction négative avant correctif, validation après, limites, statut).
+Ce registre-ci garde l'état des **lots** ; les sections et le tableau
+ci-dessous restent l'historique (du 15 au 20 octobre) et ne sont pas
+réécrits. Un lot ne passe pas `DONE` tant qu'un défaut ouvert du registre de
+convergence lui est rattaché.
+
+| Lot | Défauts du registre de convergence rattachés | Effet sur l'état du lot |
+|---|---|---|
+| P7 | C5 (`persist-course-probe` : 3 fils en faute à `printf_core+0`) | reste `DONE_AT_TCG/KVM` pour son critère, **défaut de stabilité ouvert** |
+| P9 | C7 (Compositor résiduel), C8 (mémoire WebContent), C10 (assertion LibJS) | reste `VERIFIED_AT_KVM` sur la mémoire bornée ; robustesse 8/9 ouverte (C7) |
+| P13 | C1 (console série) et C1f–C1i (saturation, queue SMP1, copie VGA, ordre des différées : correctifs TCG `1cb8e08a`, `cdba65db`, `ed52cf8e`, KVM à lire), C2 (reprise SMP4), C3 (préemption), C4 (protocole A/B), C5 (compta-stress), C6 / C6a (comptabilité CPU), C9 (`courant.rs:276`), C11 (`irq_depth`), C12 (préfixe CMOS) | **PARTIAL** — grille de sortie du registre de convergence non atteinte |
+| P15 | C12 (horodatage des journaux) | inchangé |
+
+Lots sans défaut bloquant rattaché mais non terminés (développements, pas
+des défauts) : P8 (HDA non écrit), P10 (3D, WebGL/WebGPU, pilotes physiques),
+P16/P18 (réseau physique RTL8168), P19 (ONE-LOADER, chargement par onglet).
+P14 : toujours **NON_REPÉRÉ** (aucun commit, fichier ni marqueur ; numéro
+probablement réservé — à confirmer par le propriétaire). P17 : **UNKNOWN**
+(patcher `prepare-p17-*` jamais versionné ; fonctionnalité à retrouver ou à
+réimplémenter et tester). Physique : aucun lot n'est qualifié sur le
+Trigkey.
 
 ## Actualisation P13 du 20 octobre 2026
 
