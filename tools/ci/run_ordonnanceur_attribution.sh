@@ -46,6 +46,9 @@ mkdir -p "$SORTIE/scenario/bin"
 (cd tools/userland && OUT="$SORTIE/sondes" ./build.sh musl >/dev/null)
 cp "$SORTIE/sondes/ordonnanceur-probe" "$SORTIE/scenario/bin/"
 {
+  # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : BANC_CONSOLE=off -- le bras temoin de
+  # l'A/B, console synchrone (le chemin d'avant), meme binaire.
+  if [ "${BANC_CONSOLE:-on}" = off ]; then echo "console-async off"; fi
   echo "echo ORDO_ATTRIBUTION_DEBUT"
   # Diagnostic seulement : les compteurs du reveil (armements, echeances dues,
   # IPI vers une tache installee, emissions serie masquees) avant et apres les

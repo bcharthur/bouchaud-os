@@ -293,3 +293,6 @@ tools/userland/out-extinction-contention/
 /serie-entrelacement.img
 /serie-entrelacement*.log
 tools/userland/out-serie-entrelacement/
+# run_console_panique.sh
+/scenario-console-panique/
+/console-panique.img

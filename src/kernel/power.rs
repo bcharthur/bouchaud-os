@@ -250,6 +250,9 @@ pub fn shutdown(code: u8) -> ! {
 }
 
 fn shutdown_interne(code: u8) -> ! {
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : les dernieres lignes avant de couper
+    // le courant ne dependent d'aucun fil.
+    crate::drivers::serial::arrete_console_asynchrone();
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
 
     // L'ENREGISTREUR DE VOL EN PREMIER, ET AVANT LA PERSISTANCE.
@@ -376,6 +379,7 @@ const CMD_8042: u16 = 0x64;
 /// L'enregistreur de vol est vide AVANT, comme a l'extinction : un
 /// redemarrage est une fin de session comme une autre.
 pub fn reboot() -> ! {
+    crate::drivers::serial::arrete_console_asynchrone();
     crate::serial_println!("[kernel] redemarrage demande");
     crate::gui::services::arrete();
     let _ = crate::kernel::blackbox::vide_avant_extinction("redemarrage");

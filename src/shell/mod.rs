@@ -715,6 +715,32 @@ fn fil_detenteur_suspendu() -> ! {
     }
 }
 
+/// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : `console-async on|off|etat`, pour l'A/B.
+fn console_async(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => crate::drivers::serial::choisit_console_asynchrone(true),
+            "off" => crate::drivers::serial::choisit_console_asynchrone(false),
+            "etat" => {}
+            // Banc (tools/ci/run_console_panique.sh) : N lignes numerotees
+            // d'un trait, pour qu'une panique les trouve dans l'anneau.
+            "rafale" => {
+                let n = if argc >= 3 { argv[2].parse::<u32>().unwrap_or(200) } else { 200 }.min(100_000);
+                for i in 1..=n {
+                    crate::serial_println!("CONSOLE_RAFALE {}/{} {}", i, n, "=".repeat(48));
+                }
+                return 0;
+            }
+            autre => {
+                crate::println!("console-async : {} inconnu (on | off | etat | rafale N)", autre);
+                return 1;
+            }
+        }
+    }
+    crate::drivers::serial::journalise_bilan_console();
+    0
+}
+
 fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
         match argv[1] {
@@ -834,6 +860,10 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     let occupants = crate::kernel::task::occupants_attente_interactive();
     let longues = crate::kernel::task::attentes_longues_classees();
     let renonces = crate::kernel::task::renonces_battement();
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : ce que la console impose encore -- le
+    // plus long morceau emis preemption coupee, et les emissions restees
+    // synchrones (interruptions masquees) une fois le fil pret.
+    let console = crate::drivers::serial::compteurs_console();
     crate::serial_println!(
         "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={} periodique={} materiel={} hyperviseur={} \
          tirs={} bornes_propres={} ipi_pendant_arme={} armes_dus={} refus_quantum_avant={} \
@@ -844,7 +874,8 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
          cessions_interactives={} longues_volees={} longues_b0={} longues_b1={} longues_b1_retard={} longues_b2={} \
          renonce_anticipe={} renonce_file_vide={} renonce_garde={} renonce_rien={} renonce_meme={} \
          renonce_transition={} renonce_porte={} renonce_differee_appel={} renonce_differee_fil_noyau={} \
-         occupant_noyau={} occupant_utilisateur={}",
+         occupant_noyau={} occupant_utilisateur={} \
+         console_async={} console_morceau_pire_us={} console_ligne_pire_us={} console_synchrones={} console_synchrone_pire_us={}",
         voulu as u8, mode, armes, retires, crate::arch::x86_64::smp::reveil_precis_periodique() as u8,
         materiel as u8, hyperviseur as u8,
         d[0], d[1], d[3], d[4], d[5], d[6], d[7], tardifs[0], tardifs[1], tardifs[2], tardifs[3],
@@ -853,7 +884,9 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
         longues[0], longues[1], longues[2], longues[3], longues[4],
         renonces[3], renonces[4], renonces[5], renonces[6], renonces[7],
         renonces[1], renonces[2], renonces[8], renonces[9],
-        occupants[0], occupants[1]
+        occupants[0], occupants[1],
+        console.active as u8, console.morceau_pire_ns / 1000, console.ligne_pire_ns / 1000,
+        console.synchrones, console.synchrone_pire_ns / 1000,
     );
     0
 }
@@ -1011,6 +1044,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // (defaut) ou historique, pour l'A/B ; sans argument, les compteurs.
         "ordo-cession" => ordo_cession(argc, &argv),
         "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
+        "console-async" => console_async(argc, &argv),
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

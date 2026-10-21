@@ -90,4 +90,147 @@ impl<const N: usize> Anneau<N> {
     pub fn est_vide(&self) -> bool {
         self.tete.load(Ordering::Acquire) == self.queue.load(Ordering::Acquire)
     }
+
+    /// Octets occupes (enregistrements et leurs longueurs).
+    pub fn occupation(&self) -> usize {
+        self.queue.load(Ordering::Acquire) - self.tete.load(Ordering::Acquire)
+    }
+
+    /// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : range UN enregistrement de `total`
+    /// octets ecrit en plusieurs morceaux (prefixe, puis contenu...). `ecrit`
+    /// recoit une fonction de pose a appeler dans l'ordre. L'enregistrement
+    /// n'est PUBLIE que si exactement `total` octets ont ete poses : une ligne
+    /// est entiere ou absente. Rend `false` -- rien de publie -- si elle ne
+    /// tient pas ou si le compte ne tombe pas juste. Ecrivain unique.
+    pub fn range_morceaux(&self, total: usize, ecrit: impl FnOnce(&mut dyn FnMut(&[u8]))) -> bool {
+        if total == 0 {
+            return true;
+        }
+        if total > u16::MAX as usize {
+            return false;
+        }
+        let q = self.queue.load(Ordering::Relaxed);
+        let t = self.tete.load(Ordering::Acquire);
+        if N - (q - t) < 2 + total {
+            return false;
+        }
+        let base = self.octets.get() as *mut u8;
+        let n = total as u16;
+        // SAFETY : ces positions sont libres (`q - t + 2 + total <= N`), le
+        // lecteur ne les lit qu'apres la publication de `queue`.
+        unsafe {
+            *base.add(q % N) = n as u8;
+            *base.add((q + 1) % N) = (n >> 8) as u8;
+        }
+        let mut pose = 0usize;
+        ecrit(&mut |morceau: &[u8]| {
+            for &b in morceau {
+                if pose < total {
+                    unsafe { *base.add((q + 2 + pose) % N) = b; }
+                }
+                pose += 1;
+            }
+        });
+        if pose != total {
+            return false;
+        }
+        self.queue.store(q + 2 + total, Ordering::Release);
+        true
+    }
+
+    /// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : l'enregistrement de tete, SANS le
+    /// retirer -- `(position, longueur)`. Avec `lis` et `retire`, un
+    /// enregistrement se lit en plusieurs fois, par des lecteurs successifs
+    /// (un seul a la fois). Lecteur unique.
+    pub fn premier(&self) -> Option<(usize, usize)> {
+        let t = self.tete.load(Ordering::Relaxed);
+        let q = self.queue.load(Ordering::Acquire);
+        if t >= q {
+            return None;
+        }
+        let base = self.octets.get() as *const u8;
+        // SAFETY : [t, t + 2) est publie (t < q).
+        let n = unsafe { *base.add(t % N) as usize | (*base.add((t + 1) % N) as usize) << 8 };
+        Some((t, n))
+    }
+
+    /// Les octets `[de, a)` de l'enregistrement en `t` (rendu par `premier`),
+    /// en un ou deux morceaux. Lecteur unique.
+    pub fn lis(&self, t: usize, de: usize, a: usize, mut emet: impl FnMut(&[u8])) {
+        if de >= a {
+            return;
+        }
+        let base = self.octets.get() as *const u8;
+        let debut = (t + 2 + de) % N;
+        let n = a - de;
+        let premier = n.min(N - debut);
+        // SAFETY : [t + 2 + de, t + 2 + a) est dans l'enregistrement publie.
+        unsafe {
+            emet(core::slice::from_raw_parts(base.add(debut), premier));
+            if n > premier {
+                emet(core::slice::from_raw_parts(base, n - premier));
+            }
+        }
+    }
+
+    /// Retire l'enregistrement en `t`, de `n` octets (rendu par `premier`).
+    /// Lecteur unique.
+    pub fn retire(&self, t: usize, n: usize) {
+        self.tete.store(t + 2 + n, Ordering::Release);
+    }
+
+    /// Vide UN enregistrement, s'il y en a un : `emet` le recoit en un ou deux
+    /// morceaux. Lecteur unique.
+    pub fn vide_un(&self, mut emet: impl FnMut(&[u8])) -> bool {
+        let t = self.tete.load(Ordering::Relaxed);
+        let q = self.queue.load(Ordering::Acquire);
+        if t >= q {
+            return false;
+        }
+        let base = self.octets.get() as *const u8;
+        let lis = |k: usize| unsafe { *base.add(k % N) };
+        let n = lis(t) as usize | (lis(t + 1) as usize) << 8;
+        let debut = (t + 2) % N;
+        let premier = n.min(N - debut);
+        // SAFETY : comme `vide`.
+        unsafe {
+            emet(core::slice::from_raw_parts(base.add(debut), premier));
+            if n > premier {
+                emet(core::slice::from_raw_parts(base, n - premier));
+            }
+        }
+        self.tete.store(t + 2 + n, Ordering::Release);
+        true
+    }
+}
+
+/// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : longueur de `octets` une fois un prefixe de
+/// `prefixe` octets pose devant chaque debut de ligne non vide. `debut_ligne` :
+/// le dernier octet range avant celui-ci etait-il un saut de ligne ?
+pub fn longueur_prefixee(octets: &[u8], prefixe: usize, mut debut_ligne: bool) -> usize {
+    let mut n = octets.len();
+    for &b in octets {
+        if debut_ligne && b != b'\n' {
+            n += prefixe;
+        }
+        debut_ligne = b == b'\n';
+    }
+    n
+}
+
+/// Pose `octets`, `prefixe` devant chaque debut de ligne non vide, dans
+/// l'ordre ; rend le nouvel etat « debut de ligne ». Le meme parcours que
+/// `longueur_prefixee` : `range_morceaux` recoit exactement ce qui a ete compte.
+pub fn pose_prefixee(octets: &[u8], prefixe: &[u8], mut debut_ligne: bool, pose: &mut dyn FnMut(&[u8])) -> bool {
+    let mut depuis = 0usize;
+    for (i, &b) in octets.iter().enumerate() {
+        if debut_ligne && b != b'\n' {
+            pose(&octets[depuis..i]);
+            pose(prefixe);
+            depuis = i;
+        }
+        debut_ligne = b == b'\n';
+    }
+    pose(&octets[depuis..]);
+    debut_ligne
 }

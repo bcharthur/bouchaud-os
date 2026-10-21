@@ -161,6 +161,17 @@ jobs:
           cp serie-entrelacement.log serie-entrelacement-tcg-suspendu.log
           BANC_SUSPENSION_MS=12000 BANC_PERDUES_ADMISES=1 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm-suspendu.log
+          # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une panique n'emporte pas les
+          # lignes qui attendaient dans l'anneau (asynchrone SMP2/SMP4 KVM,
+          # synchrone, SMP1 ou l'autorun ne cede pas le coeur).
+          BO_SMP=2 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp console-panique.log serie-entrelacement-panique-tcg-smp2.log
+          BANC_CONSOLE=off BO_SMP=2 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp console-panique.log serie-entrelacement-panique-tcg-off.log
+          BO_SMP=1 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp console-panique.log serie-entrelacement-panique-tcg-smp1.log
+          BO_QEMU_KVM=1 BO_SMP=4 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 || r=1
+          cp console-panique.log serie-entrelacement-panique-kvm-smp4.log
           exit $r
       - name: P10 -- BGA contre virtio-gpu 2D, meme charge (TCG puis KVM)
         # Les bancs qui suivent n'utilisent que l'image construite : un pas
@@ -209,6 +220,18 @@ jobs:
           for smp in 1 2 4 8; do
             ORDO_SORTIE=$PWD/ordonnanceur-attribution-kvm-smp$smp BO_QEMU_KVM=1 BANC_TEMOIN_INSTRUMENT=1 \
               tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 $smp || r=1
+          done
+          # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : bras temoin de l'A/B, console
+          # synchrone (`console-async off`), meme binaire, SMP1 et SMP4. Il
+          # ne juge rien (son verdict est imprime, jamais compte) : il dit ce
+          # que la console asynchrone a change, phase par phase.
+          for smp in 1 4; do
+            if ORDO_SORTIE=$PWD/ordonnanceur-attribution-console-off-kvm-smp$smp BO_QEMU_KVM=1 BANC_TEMOIN_INSTRUMENT=1 BANC_CONSOLE=off \
+              tools/ci/run_ordonnanceur_attribution.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2 $smp; then
+              echo "CONSOLE_OFF_TEMOIN smp=$smp sortie=0"
+            else
+              echo "CONSOLE_OFF_TEMOIN smp=$smp sortie=$? (temoin, non compte)"
+            fi
           done
           exit $r
       - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)

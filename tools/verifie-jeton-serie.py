@@ -52,7 +52,15 @@ le SEUL chemin qui prend le jeton, et l'exigent de ses deux appelants :
      SMP4) : une ligne emise sans jeton apres une seconde de file derriere
      des emetteurs qui progressaient, au milieu de celle d'un autre.
 
-Fail-closed ; vingt et un tests negatifs.
+BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : `_print` et `ecris_lignes` passent par
+`emet`, qui range la ligne dans l'anneau de la console (fil `console`) ou,
+console inactive, appelle `sous_jeton` -- les regles ci-dessus portent sur
+`sous_jeton` comme avant ; celles de l'anneau et du fil sont dans
+tools/verifie-console-asynchrone.py. La reentrance PENDANT LA VIDANGE du fil
+(une IRQ de son coeur, jeton tenu interruptions ouvertes) est attendue :
+comptee a part, sa ligne differee.
+
+Fail-closed ; vingt-deux tests negatifs.
 """
 import re
 import sys
@@ -109,13 +117,14 @@ def verifie(racine: Path) -> list[str]:
         return [f"{UART} : `fn sous_jeton` introuvable"]
     fmt = position(impr, "sortie.write_fmt(args)")
     if not fmt < position(impr, "sortie.vide();") < 10**9 \
-            or "sous_jeton(&self.donnees[..self.len]);" not in corps(u, "vide") \
+            or "emet(&self.donnees[..self.len]);" not in corps(u, "vide") \
             or "ecris_octets(" in corps(u, "vide"):
         fautes.append(f"{UART} : `_print` ne formate pas hors du jeton puis n'emet pas par sous_jeton")
     if re.search(r"interrupts::|EMISSION|ecris_octets\(", impr) or impr.count("vide()") != 1:
         fautes.append(f"{UART} : `_print` emet ou masque hors de sous_jeton")
     lignes = corps(u, "ecris_lignes")
-    if "sous_jeton(ligne);" not in lignes or "longueur_ligne(" not in lignes or "ecris_octets(" in lignes:
+    if "emet(ligne);" not in lignes or "longueur_ligne(" not in lignes or "ecris_octets(" in lignes \
+            or not re.search(r"\n    sous_jeton\(octets\);\n\}$", corps(u, "emet")):
         fautes.append(f"{UART} : `ecris_lignes` n'emet plus chaque ligne sous le jeton")
     console = corps(src[CONSOLE], "console_write")
     # BOUCHAUD_CONSOLE_POINT_SUR_V1 : une ligne a la fois (`ecris_lignes(ligne)`).
@@ -140,16 +149,17 @@ def verifie(racine: Path) -> list[str]:
             or not re.search(r"Repli::EmetSansJeton => \{\s*if !octets\.is_empty\(\) \{\s*EMISSIONS_A_LA_BORNE\.fetch_add\(1, Ordering::Relaxed\);", p):
         fautes.append(f"{UART} : un renoncement ou une emission sans jeton n'est plus compte (avec sa cause)")
     # 14. Jamais sans le jeton hors panique.
-    if "Some(false) | None => match repli(EN_PANIQUE.load(Ordering::Acquire)) {" not in p \
+    if "Some(false) | None => match repli(panique_ici()) {" not in p \
+            or not re.search(r"fn panique_ici\(\) -> bool \{\s*EN_PANIQUE\.load\(Ordering::Acquire\)\s*&& PANIQUE_COEUR\.load\(Ordering::Acquire\) == crate::arch::x86_64::smp::cpu_index\(\) \+ 1", u) \
             or "Repli::Differe => differe(octets)," not in p \
             or p.count("ecris_octets(octets);") != 2 \
             or position(p, "Repli::EmetSansJeton") > position(p, "ecris_octets(octets);", 2):
         fautes.append(f"{UART} : hors panique, une ligne sans jeton n'est plus differee (emise, ou reentrance emise)")
     if not re.search(r"pub fn repli\(panique: bool\) -> Repli \{\s*if panique \{\s*Repli::EmetSansJeton\s*\} else \{\s*Repli::Differe\s*\}", src[ATTENTE]):
         fautes.append(f"{ATTENTE} : `repli(false)` ne rend plus `Differe`")
-    if not re.search(r"Some\(true\) => \{.{0,900}?vide_differees\(\);\s*ecris_octets\(octets\);", p, re.S):
+    if not re.search(r"Some\(true\) => \{.{0,1400}?vide_differees\(\);\s*if !console_active\(\) && !EN_PANIQUE\.load\(Ordering::Acquire\) \{\s*vide_console_entiere\(\);\s*\}\s*ecris_octets\(octets\);", p, re.S):
         fautes.append(f"{UART} : le detenteur n'emet plus les lignes differees AVANT la sienne (ordre d'un ecrivain)")
-    if u.count("EN_PANIQUE.store(") != 1 or "EN_PANIQUE.store(true, Ordering::Release);" not in corps(u, "passe_en_panique"):
+    if u.count("EN_PANIQUE.store(") != 1 or "EN_PANIQUE.store(true, Ordering::SeqCst);" not in corps(u, "passe_en_panique"):
         fautes.append(f"{UART} : la bascule en panique est ecrite hors de `passe_en_panique`")
     panic = corps(src[PANIQUE], "panic")
     if not (position(panic, "idt::prends_la_panique(cpu)") < position(panic, "crate::drivers::serial::passe_en_panique();")
@@ -158,7 +168,11 @@ def verifie(racine: Path) -> list[str]:
     if not (position(src[AUTORUN], "crate::drivers::serial::vidange_differees();")
             < position(src[AUTORUN], '"BOUCHAUD_SERIE_BILAN') < 10**9) or "lignes_perdues={}" not in src[AUTORUN]:
         fautes.append(f"{AUTORUN} : le bilan serie ne vide plus les lignes differees avant, ou ne compte plus les perdues")
-    if u.count("differe(octets)") != 1 or "fn differe(octets: &[u8])" not in u:
+    # Deux sites : la course masquee de `sous_jeton`, et l'anneau de la
+    # console plein dans un contexte qui ne peut pas ceder (`emet`,
+    # interruptions masquees : l'anneau du coeur n'a qu'un producteur).
+    if u.count("differe(octets)") != 2 or "fn differe(octets: &[u8])" not in u \
+            or "interrupts::without_interrupts(|| differe(octets));" not in corps(u, "emet"):
         fautes.append(f"{UART} : une ligne est differee hors de la course masquee de sous_jeton")
     # 13. Echeance sans progres, renouvelee seulement par a_l_echeance.
     if not re.search(r"match a_l_echeance\(maintenant, debut_attente, emissions_vues, EMISSIONS_FAITES\.load\(Ordering::Relaxed\)\) \{"
@@ -167,7 +181,7 @@ def verifie(racine: Path) -> list[str]:
         fautes.append(f"{UART} : l'echeance est renouvelee hors de attente::a_l_echeance (progres non verifie)")
     progres = u.count("EMISSIONS_FAITES.fetch_add(")
     if progres < 1 or len(re.findall(r"EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0, Ordering::Release\);", u)) != progres \
-            or not re.search(r"Some\(true\) => \{.{0,900}?EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p, re.S):
+            or not re.search(r"Some\(true\) => \{.{0,1400}?EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p, re.S):
         fautes.append(f"{UART} : le progres est compte hors du jeton (une emission sans jeton renouvellerait l'attente)")
     a = src[ATTENTE]
     m = re.search(r"pub const PLAFOND_ABSOLU_NS: u64 = ([0-9_]+);", a)
@@ -185,9 +199,11 @@ def verifie(racine: Path) -> list[str]:
         fautes.append(f"{UART} : les interruptions sont rouvertes sans avoir ete ouvertes a l'entree")
     if "let moi = crate::arch::x86_64::smp::cpu_index() + 1;" not in p:
         fautes.append(f"{UART} : le detenteur n'est plus `cpu_index() + 1` (zero doit rester « libre »)")
-    if p.count("EMISSION.store") != 1 or not re.search(r"Some\(true\) => \{.{0,900}?EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p, re.S):
+    if p.count("EMISSION.store") != 1 or not re.search(r"Some\(true\) => \{.{0,1400}?EMISSIONS_FAITES\.fetch_add\(1, Ordering::Relaxed\);\s*EMISSION\.store\(0", p, re.S):
         fautes.append(f"{UART} : le jeton est rendu sans avoir ete pris, ou plusieurs fois")
-    if not re.search(r"Err\(detenteur\) if detenteur == moi => \{\s*EMISSIONS_REENTREES\.fetch_add\(1, Ordering::Relaxed\);\s*break Some\(false\);", p):
+    if not re.search(r"Err\(detenteur\) if detenteur == moi => \{\s*if VIDANGE_EN_COURS\.load\(Ordering::Relaxed\) == moi \{"
+                     r"\s*CONSOLE_DIFFEREES_VIDANGE\.fetch_add\(1, Ordering::Relaxed\);\s*\} else \{"
+                     r"\s*EMISSIONS_REENTREES\.fetch_add\(1, Ordering::Relaxed\);\s*\}\s*break Some\(false\);", p):
         fautes.append(f"{UART} : la reentrance n'est plus comptee sans attendre")
     if not re.search(r"if tours > borne \{\s*break None;", p):
         fautes.append(f"{UART} : l'attente du jeton n'est plus bornee")
@@ -226,19 +242,19 @@ def main() -> int:
         # jeton pris interruptions ouvertes
         (UART, "        x86_64::instructions::interrupts::disable();\n        // Relu", "        // Relu"),
         # retour a « meme coeur = passe sans attendre et emet »
-        (UART, "                    EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    break Some(false);",
-         "                    EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    EMISSION.store(0, Ordering::Release);\n                    break Some(false);"),
+        (UART, "                        EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    }\n                    break Some(false);",
+         "                        EMISSIONS_REENTREES.fetch_add(1, Ordering::Relaxed);\n                    }\n                    EMISSION.store(0, Ordering::Release);\n                    break Some(false);"),
         # demasquage avant la remise du jeton
-        (UART, "            let debut_emission = crate::kernel::timer::monotonic_ns();\n            vide_differees();",
-         "            x86_64::instructions::interrupts::enable();\n            let debut_emission = crate::kernel::timer::monotonic_ns();\n            vide_differees();"),
+        (UART, "            let debut_emission = crate::kernel::timer::monotonic_ns();\n            // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une ligne",
+         "            x86_64::instructions::interrupts::enable();\n            let debut_emission = crate::kernel::timer::monotonic_ns();\n            // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une ligne"),
         (UART, "            if tours > borne {", "            if false {"),
         (UART, "static EMISSIONS_REENTREES: AtomicU64", "static EMISSION_PRIORITAIRE: AtomicBool = AtomicBool::new(false);\nstatic EMISSIONS_REENTREES: AtomicU64"),
         (UART, "            if tours % 64 == 0 {\n                crate::arch::x86_64::smp::sert_shootdowns_en_attente();\n            }\n", ""),
         # la sortie userland retourne a des lots hors jeton
         (CONSOLE, "crate::drivers::serial::ecris_lignes(ligne);", "crate::drivers::serial::ecris_octets(ligne);"),
-        (UART, "        sous_jeton(ligne);", "        ecris_octets(ligne);"),
+        (UART, "        emet(ligne);", "        ecris_octets(ligne);"),
         # emission de _print hors du jeton
-        (UART, "        sous_jeton(&self.donnees[..self.len]);", "        ecris_octets(&self.donnees[..self.len]);"),
+        (UART, "        emet(&self.donnees[..self.len]);", "        ecris_octets(&self.donnees[..self.len]);"),
         # retour a « course perdue -> attente masquee jusqu'a la borne »
         (UART, "        let borne = if requeue { COURSE_MASQUEE } else { 100_000 };", "        let borne = 100_000;"),
         (UART, "            None if requeue => {\n                relances += 1;\n                x86_64::instructions::interrupts::enable();\n                continue;\n            }\n", ""),
@@ -259,10 +275,13 @@ def main() -> int:
         # 14 : la reentrance emet au milieu de la ligne du detenteur
         (UART, "        Some(false) | None => match repli(", "        Some(false) => ecris_octets(octets),\n        None => match repli("),
         # 14 : les lignes differees apres la sienne (ordre d'un ecrivain casse)
-        (UART, "            vide_differees();\n            ecris_octets(octets);\n            let duree",
-         "            ecris_octets(octets);\n            vide_differees();\n            let duree"),
+        (UART, "            vide_differees();\n            // BOUCHAUD_CONSOLE_ASYNCHRONE_V1",
+         "            ecris_octets(octets);\n            // BOUCHAUD_CONSOLE_ASYNCHRONE_V1"),
         # 14 : la panique ne bascule plus le journal
         (PANIQUE, "    crate::drivers::serial::passe_en_panique();\n", ""),
+        # 14 : en panique, tout coeur emet sans jeton (melange avec la vidange de l'anneau)
+        (UART, "    EN_PANIQUE.load(Ordering::Acquire)\n        && PANIQUE_COEUR.load(Ordering::Acquire) == crate::arch::x86_64::smp::cpu_index() + 1",
+         "    EN_PANIQUE.load(Ordering::Acquire)"),
         # 14 : le bilan ne vide plus les lignes differees
         (AUTORUN, "    crate::drivers::serial::vidange_differees();\n", ""),
     ]

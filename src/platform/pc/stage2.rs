@@ -567,6 +567,7 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // chemin de l'entree.
     // BOUCHAUD_RELEVES_HORS_IRQ_V1 : le fil qui imprime ce que les
     // interruptions capturent ; ce chemin ne rend jamais la main a main.rs.
+    crate::drivers::serial::demarre_console_asynchrone();
     crate::kernel::task::demarre_fil_diagnostic();
     crate::drivers::xhci_active::demarre_le_fil_blackbox();
 

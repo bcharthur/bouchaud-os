@@ -12,7 +12,8 @@
 # Run 38482972584 (KVM) : `pid=1\x1b6[ 90kmi[l...`, une ligne du navigateur
 # melangee octet contre octet au prefixe d'une ligne du noyau.
 #
-# BO_SMP : coeurs (4 par defaut). BO_QEMU_KVM=1 : sous KVM.
+# BO_SMP : coeurs (4 par defaut). BO_QEMU_KVM=1 : sous KVM. BO_QEMU_EXTRA :
+# options QEMU de diagnostic (ex. `-d cpu_reset -D reset.log`).
 #
 # BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- BANC_SUSPENSION_MS=N : un fil noyau
 # prend le jeton 1,5 s apres le depart et le garde N ms interruptions masquees,
@@ -55,14 +56,14 @@ echo "SERIE_ENTRELACEMENT smp=${SMP} accel=${ACCEL} ecrivains=${ECRIVAINS} ligne
 qemu-system-x86_64 $ACCEL \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$IMAGE" \
-  -m 2048 -smp "$SMP" -display none -no-reboot \
+  -m 2048 -smp "$SMP" -display none -no-reboot ${BO_QEMU_EXTRA:-} \
   -serial file:"$LOG" &
 PID=$!
 LIMITE=$((SECONDS + 600))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
   grep -aqE 'KERNEL PANIC|panicked at' "$LOG" && { sleep 2; break; }
-  grep -aq 'BOUCHAUD_SERIE_BILAN' "$LOG" && { sleep 2; break; }
+  grep -aq 'BOUCHAUD_CONSOLE_BILAN' "$LOG" && { sleep 2; break; }
   sleep 1
 done
 kill -TERM "$PID" 2>/dev/null || true
@@ -89,8 +90,15 @@ fi
 if [ "$SUSPENSION" -gt 0 ]; then
   exige "le detenteur suspendu a tenu le jeton ${SUSPENSION} ms" grep -aq "SERIE_DETENTEUR_SUSPENDU_FAIT pris=1 duree_ms=${SUSPENSION}" "$LOG"
   exige "sa ligne est sortie entiere" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | tr -d '\r' | grep -aqE '\] SERIE_DETENTEUR_SUSPENDU debut et fin, tenu ${SUSPENSION} ms\$'"
-  exige "la suspension a force des lignes differees" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=[1-9]'"
+  # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : console asynchrone, les lignes attendent
+  # dans l'anneau et le fil `console` bute sur le jeton (jeton_occupe) ;
+  # synchrone, elles sont differees comme avant.
+  exige "la suspension a retenu des lignes (differees, ou fil bloque par le jeton)" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=[1-9]|BOUCHAUD_CONSOLE_BILAN active=1 .* jeton_occupe=[1-9]'"
 fi
+# BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : console asynchrone active jusqu'au bout, sans
+# repli de securite (fil muet) ni reentrance sur le verrou de l'anneau.
+exige "console asynchrone active, sans repli ni reentrance" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'BOUCHAUD_CONSOLE_BILAN active=1 repli_securite=0 .* reentrees=0 '"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_CONSOLE_BILAN' | tail -1 | sed 's/^.*BOUCHAUD_CONSOLE_BILAN/  console :/' 
 if [ "$echecs" -eq 0 ]; then
   echo "SERIE_ENTRELACEMENT_BANC_OK"
 else

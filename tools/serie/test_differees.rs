@@ -237,3 +237,175 @@ fn en_panique_la_disponibilite_prime_et_c_est_compte() {
     let l = lignes(&s.port);
     assert!(l[0].starts_with("DETENTEUR ") && l[0].contains("MASQUE 0"), "la ligne du detenteur est coupee : {:?}", l[0]);
 }
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : l'enregistrement en morceaux et la
+// vidange une ligne a la fois.
+
+#[test]
+fn un_enregistrement_en_morceaux_est_entier_ou_absent() {
+    let a: Anneau<64> = Anneau::neuf();
+    // Prefixe puis contenu : un seul enregistrement.
+    assert!(a.range_morceaux(12, |pose| { pose(b"[pre] "); pose(b"ligne\n"); }));
+    // Compte faux (le producteur pose moins ou plus) : rien de publie.
+    assert!(!a.range_morceaux(10, |pose| pose(b"court\n")));
+    assert!(!a.range_morceaux(4, |pose| pose(b"trop long\n")));
+    let mut vu = Vec::new();
+    assert!(a.vide_un(|m| vu.extend_from_slice(m)));
+    assert_eq!(vu, b"[pre] ligne\n");
+    assert!(!a.vide_un(|_| panic!("rien ne doit rester")));
+    assert!(a.est_vide());
+}
+
+#[test]
+fn vide_un_rend_une_ligne_a_la_fois_dans_l_ordre_meme_quand_l_anneau_tourne() {
+    let a: Anneau<48> = Anneau::neuf();
+    for tour in 0..50u32 {
+        let l1 = format!("t{tour} un\n");
+        let l2 = format!("t{tour} deux et plus\n");
+        assert!(a.range_morceaux(l1.len(), |pose| pose(l1.as_bytes())));
+        assert!(a.range_morceaux(l2.len(), |pose| { let (x, y) = l2.as_bytes().split_at(3); pose(x); pose(y); }));
+        let mut premier = Vec::new();
+        assert!(a.vide_un(|m| premier.extend_from_slice(m)));
+        assert_eq!(premier, l1.as_bytes(), "tour {tour}");
+        let mut second = Vec::new();
+        assert!(a.vide_un(|m| second.extend_from_slice(m)));
+        assert_eq!(second, l2.as_bytes(), "tour {tour}");
+        assert_eq!(a.occupation(), 0);
+    }
+}
+
+#[test]
+fn un_enregistrement_qui_ne_tient_pas_est_refuse_sans_rien_abimer() {
+    let a: Anneau<32> = Anneau::neuf();
+    assert!(a.range_morceaux(20, |pose| pose(b"0123456789abcdefghi\n")));
+    assert!(!a.range_morceaux(20, |pose| pose(b"0123456789abcdefghi\n")), "plus de place");
+    assert_eq!(a.occupation(), 22);
+    let mut vu = Vec::new();
+    assert!(a.vide_un(|m| vu.extend_from_slice(m)));
+    assert_eq!(vu, b"0123456789abcdefghi\n");
+}
+
+// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 -- la console : des ecrivains de plusieurs
+// coeurs, serialises par un verrou le temps d'une copie, un enregistrement par
+// appel (horodatage de 8 octets, puis la ligne prefixee), un lecteur concurrent
+// (le fil `console`) qui ne voit jamais qu'une ligne entiere.
+
+use differees::{longueur_prefixee, pose_prefixee};
+
+fn prefixee(octets: &[u8], prefixe: &[u8], debut: bool) -> (Vec<u8>, bool) {
+    let mut sortie = Vec::new();
+    let suivant = pose_prefixee(octets, prefixe, debut, &mut |m| sortie.extend_from_slice(m));
+    assert_eq!(sortie.len(), longueur_prefixee(octets, prefixe.len(), debut), "compte et pose divergent");
+    (sortie, suivant)
+}
+
+#[test]
+fn un_prefixe_devant_chaque_ligne_non_vide_jamais_au_milieu() {
+    let p = b"[P] ";
+    assert_eq!(prefixee(b"a\nb\n", p, true), (b"[P] a\n[P] b\n".to_vec(), true));
+    // Ligne vide : pas de prefixe (comme `ecris_octets`).
+    assert_eq!(prefixee(b"\n\nc\n", p, true), (b"\n\n[P] c\n".to_vec(), true));
+    // `print!` sans saut de ligne : la suite ne recoit pas de second prefixe.
+    let (s1, d1) = prefixee(b"debut ", p, true);
+    let (s2, d2) = prefixee(b"fin\n", p, d1);
+    assert_eq!((s1, d1, s2, d2), (b"[P] debut ".to_vec(), false, b"fin\n".to_vec(), true));
+    assert_eq!(prefixee(b"", p, true), (Vec::new(), true));
+}
+
+#[test]
+fn console_plusieurs_ecrivains_un_lecteur_lignes_entieres_et_ordre_par_ecrivain() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    const ECRIVAINS: usize = 4;
+    const LIGNES: usize = 3000;
+    let anneau: Arc<Anneau<4096>> = Arc::new(Anneau::neuf());
+    let verrou = Arc::new(AtomicUsize::new(0));
+    let fini = Arc::new(AtomicBool::new(false));
+    let prefixe = b"\x1b[90m[12:00:00]\x1b[0m ";
+    let mut fils = Vec::new();
+    for e in 0..ECRIVAINS {
+        let (anneau, verrou) = (anneau.clone(), verrou.clone());
+        fils.push(std::thread::spawn(move || {
+            let mut pleines = 0u64;
+            for n in 0..LIGNES {
+                let ligne = format!("E{e} n={n} {}\n", "x".repeat((n * 7 + e) % 90));
+                loop {
+                    while verrou.compare_exchange_weak(0, e + 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                        std::hint::spin_loop();
+                    }
+                    let total = 8 + longueur_prefixee(ligne.as_bytes(), prefixe.len(), true);
+                    let fait = anneau.range_morceaux(total, |pose| {
+                        pose(&(n as u64).to_le_bytes());
+                        pose_prefixee(ligne.as_bytes(), prefixe, true, pose);
+                    });
+                    verrou.store(0, Ordering::Release);
+                    if fait {
+                        break;
+                    }
+                    pleines += 1;
+                    std::thread::yield_now();
+                }
+            }
+            pleines
+        }));
+    }
+    let lecteur = {
+        let (anneau, fini) = (anneau.clone(), fini.clone());
+        std::thread::spawn(move || {
+            let mut vues = vec![0usize; ECRIVAINS];
+            let mut total = 0usize;
+            loop {
+                let mut rec = Vec::new();
+                if anneau.vide_un(|m| rec.extend_from_slice(m)) {
+                    let (horo, ligne) = rec.split_at(8);
+                    let n = u64::from_le_bytes(horo.try_into().unwrap()) as usize;
+                    let texte = std::str::from_utf8(ligne).expect("ligne entiere");
+                    assert!(texte.starts_with("\x1b[90m[12:00:00]\x1b[0m E") && texte.ends_with('\n')
+                            && texte.matches('\n').count() == 1, "ligne abimee : {texte:?}");
+                    let e: usize = texte[prefixe.len() + 1..prefixe.len() + 2].parse().unwrap();
+                    assert!(texte.contains(&format!("E{e} n={n} ")), "horodatage d'une autre ligne : {texte:?}");
+                    assert_eq!(n, vues[e], "ordre de l'ecrivain {e} rompu");
+                    vues[e] += 1;
+                    total += 1;
+                } else if fini.load(Ordering::Acquire) && anneau.est_vide() {
+                    break;
+                }
+            }
+            (vues, total)
+        })
+    };
+    let pleines: u64 = fils.into_iter().map(|f| f.join().unwrap()).sum();
+    fini.store(true, Ordering::Release);
+    let (vues, total) = lecteur.join().unwrap();
+    assert_eq!(total, ECRIVAINS * LIGNES);
+    assert!(vues.iter().all(|&v| v == LIGNES));
+    // L'anneau de 4 Kio a deborde : la contre-pression a ete exercee.
+    assert!(pleines > 0, "l'anneau n'a jamais ete plein : le test n'exerce pas la contre-pression");
+}
+
+#[test]
+fn un_enregistrement_se_lit_en_plusieurs_fois_meme_a_cheval_sur_la_fin() {
+    // Plusieurs lecteurs successifs reprennent ou le precedent s'est arrete ;
+    // la tete n'avance qu'au retrait. L'anneau tourne : les enregistrements
+    // finissent par chevaucher la fin du tampon.
+    let a: Anneau<64> = Anneau::neuf();
+    for tour in 0..40usize {
+        let ligne = format!("tour {tour} {}\n", "z".repeat(tour % 23));
+        assert!(a.range(ligne.as_bytes()));
+        let (t, n) = a.premier().expect("un enregistrement");
+        assert_eq!(n, ligne.len());
+        let mut lu = Vec::new();
+        let mut de = 0;
+        while de < n {
+            let jusqu = (de + 5).min(n);
+            a.lis(t, de, jusqu, |m| lu.extend_from_slice(m));
+            de = jusqu;
+            // Rien n'est retire tant que l'enregistrement n'est pas fini.
+            assert_eq!(a.premier(), Some((t, n)));
+        }
+        assert_eq!(lu, ligne.as_bytes(), "tour {tour}");
+        a.retire(t, n);
+        assert!(a.premier().is_none() && a.est_vide());
+    }
+}

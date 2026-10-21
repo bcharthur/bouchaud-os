@@ -89,6 +89,7 @@ pub fn run_if_present() {
         masquees, sans_progres, plafond, relances, attente_pire_ns / 1_000_000, renouvelees,
         differees, perdues, vidangees,
     );
+    crate::drivers::serial::journalise_bilan_console();
     vga::set_serial_mirror(false);
 
     // LE SUSPECT PRINCIPAL de l'arret du run #347 : quand le script autorun

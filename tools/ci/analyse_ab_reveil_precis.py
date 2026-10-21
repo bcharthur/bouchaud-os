@@ -54,8 +54,11 @@ DIAG_NOMS = ("tirs", "bornes_propres", "ipi_pendant_arme", "armes_dus", "refus_q
              # battements qui n'ont pas commute, par raison.
              "longues_volees", "longues_b0", "longues_b1", "longues_b1_retard", "longues_b2",
              "renonce_anticipe", "renonce_file_vide", "renonce_garde", "renonce_rien", "renonce_meme",
-             "renonce_transition", "renonce_porte", "renonce_differee_appel", "renonce_differee_fil_noyau")
-MAXIMA = ("serie_pire_us", "attente_noyau_pire_us", "attente_utilisateur_pire_us")
+             "renonce_transition", "renonce_porte", "renonce_differee_appel", "renonce_differee_fil_noyau",
+             # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : diagnostic, aucun critere.
+             "console_morceau_pire_us", "console_ligne_pire_us", "console_synchrones", "console_synchrone_pire_us")
+MAXIMA = ("serie_pire_us", "attente_noyau_pire_us", "attente_utilisateur_pire_us",
+          "console_morceau_pire_us", "console_ligne_pire_us", "console_synchrone_pire_us")
 
 
 def diag_noyau(ligne):

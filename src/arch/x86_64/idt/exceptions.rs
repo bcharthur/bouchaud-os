@@ -30,6 +30,10 @@ pub fn prends_la_panique(cpu: usize) -> bool {
 }
 
 pub fn arret_definitif() -> ! {
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : les lignes que le fil `console`
+    // n'a pas encore emises sortent avant l'arret (hors panique, qui vide
+    // elle-meme).
+    crate::drivers::serial::vide_console_avant_arret();
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
@@ -169,6 +173,10 @@ extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, code:
         arret_definitif();
     }
 
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une double faute est une panique --
+    // les lignes en attente du fil `console` sortent d'abord, et les
+    // suivantes ne dependent plus d'aucun fil (les autres coeurs s'arretent).
+    crate::drivers::serial::passe_en_panique();
     releve_faute_fatale("DOUBLE FAULT", &stack, code);
     smp::arrete_les_autres_cpu();
     serial_println!("*** KERNEL PANIC *** double faute, cpu={}", cpu);
