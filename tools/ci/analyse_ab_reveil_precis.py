@@ -26,6 +26,15 @@ Seules les paires QUALIFIE_OK comptent dans le quorum et les latences.
 Sortie 1 sur un defaut de surete ou d'instrument ; 0 sinon (CONVAINCANT,
 NON_CONVAINCANT, NON_CONCLUANT sont des mesures). Teste :
 tools/ci/reliability/test_ab_reveil_precis.py.
+
+BOUCHAUD_AB_CINQ_PROPRIETES_V1 -- PROPOSITION, NON JUGE (P13_CLOSEOUT_2026-10-20
+§6.5). A cote du verdict historique, qui reste SEUL JUGE (code de sortie et
+`AB_REVEIL_PRECIS` inchanges), cinq verdicts separes, chacun avec sa mesure,
+son critere (les seuils existants, inchanges) et ses conditions
+NON_QUALIFIANT ; ligne `AB_PROPRIETES_V1`. Un NON_QUALIFIANT n'y devient
+jamais QUALIFIE_OK. La seule nouveaute de critere est la porte de P3 (bruit
+mesure au repos au lieu de 2 grains d'horloge, §6.2 a) : elle n'est
+appliquee qu'ici, et l'adopter pour juger reste une decision humaine.
 """
 import re
 import statistics
@@ -69,20 +78,153 @@ def diag_noyau(ligne):
     return tuple(int(vals.get(n, 0)) for n in DIAG_NOMS)
 
 
+# BOUCHAUD_AB_CINQ_PROPRIETES_V1 : ce que chaque bras dit de sa DERNIERE
+# tentative (la sonde remesure un NON_QUALIFIANT : seule la derniere compte).
+PHASES = ("au repos", "sous charge (normal)", "sous charge (interactif)")
+TENTATIVE = re.compile(r"^\s*tentative (\d+)/(\d+)$")
+TOURS_CALCUL = re.compile(r"^\s+(\d+) tours de calcul$")
+NON_JUGEABLE = re.compile(r"phase non jugeable -- (au repos|sous charge \((?:normal|interactif)\)) : (.*)$")
+ATTRIBUTION = re.compile(r"^\s*attribution (au repos|sous charge \((?:normal|interactif)\)) : ")
+GRAIN = re.compile(r"horloge : granularite (\d+) us")
+OK, ECHEC, NQ = "QUALIFIE_OK", "QUALIFIE_ECHEC", "NON_QUALIFIANT"
+
+
+def _p_neuf():
+    return {"q": {}, "tours": [], "non_jugeable": {}, "attribution": set()}
+
+
+def _phase_valide(p, phase):
+    """None si la phase est jugeable, sinon la raison."""
+    if phase not in p["q"]:
+        return f"{phase} : mesure absente"
+    if phase in p["non_jugeable"]:
+        return p["non_jugeable"][phase][:160]
+    return None
+
+
+def _agrege(par_bras, quorum):
+    """ECHEC si un bras qualifie echoue ; OK si au moins `quorum` bras
+    qualifies et aucun echec ; NON_QUALIFIANT sinon (jamais un succes)."""
+    echecs = [b for b, (v, _) in par_bras if v == ECHEC]
+    oks = [b for b, (v, _) in par_bras if v == OK]
+    if echecs:
+        return ECHEC, f"{len(echecs)} bras en echec, {len(oks)} qualifies OK sur {len(par_bras)}"
+    if len(oks) >= quorum:
+        return OK, f"{len(oks)}/{len(par_bras)} bras qualifies"
+    return NQ, f"{len(oks)}/{len(par_bras)} bras qualifies (quorum {quorum})"
+
+
+def cinq_proprietes(bras, tours, smp, nom, grain):
+    """Les cinq verdicts proposes (§6.5). N'influe sur RIEN d'autre."""
+    sortie = ["  proprietes (BOUCHAUD_AB_CINQ_PROPRIETES_V1, proposition closeout 20/10 §6.5, "
+              "NON JUGE : le verdict historique reste seul juge)"]
+    verdicts = {}
+    par_tour = {}
+    for b in bras:
+        par_tour.setdefault(b["tour"], {})[b["v"]] = b
+    paires = sorted(t for t, d in par_tour.items() if set(d) == {"on", "off"})
+
+    def med(ts, v, phase, k):
+        return statistics.median([par_tour[t][v]["p"]["q"][phase][k] for t in ts])
+
+    # P1 precision au repos : A/B sur les paires dont les DEUX phases au
+    # repos sont valides (jugeables, attribution presente) -- la porte de
+    # comparaison des priorites n'est pas la question de l'A/B (§6.1 a).
+    def valide_repos(b):
+        r = _phase_valide(b["p"], "au repos")
+        if r:
+            return r
+        if "au repos" not in b["p"]["attribution"]:
+            return "au repos : attribution absente"
+        return None
+    p1 = [t for t in paires if not valide_repos(par_tour[t]["on"]) and not valide_repos(par_tour[t]["off"])]
+    if len(p1) < QUORUM:
+        raisons = sorted({r for t in paires for v in ("on", "off") for r in [valide_repos(par_tour[t][v])] if r})
+        verdicts["P1"] = (NQ, f"paires valides {len(p1)}/{tours} (quorum {QUORUM})"
+                          + (f" : {raisons[0]}" if raisons else ""))
+    else:
+        p50 = (med(p1, "off", "au repos", 0), med(p1, "on", "au repos", 0))
+        p95 = (med(p1, "off", "au repos", 1), med(p1, "on", "au repos", 1))
+        p99 = (med(p1, "off", "au repos", 2), med(p1, "on", "au repos", 2))
+        c = [p50[1] <= 0.75 * p50[0], p95[1] <= p95[0], p99[1] <= 1.25 * p99[0]]
+        verdicts["P1"] = (OK if all(c) else ECHEC,
+                          f"paires {len(p1)}/{tours} : p50 on {p50[1]} <= 0,75 x off {p50[0]} ; "
+                          f"p95 on {p95[1]} <= off {p95[0]} ; p99 on {p99[1]} <= 1,25 x off {p99[0]}")
+
+    # P2 precision sous charge : p95 interactif, on <= 1,10 x off.
+    inter = "sous charge (interactif)"
+    p2 = [t for t in paires if not _phase_valide(par_tour[t]["on"]["p"], inter)
+          and not _phase_valide(par_tour[t]["off"]["p"], inter)]
+    if len(p2) < QUORUM:
+        verdicts["P2"] = (NQ, f"paires valides {len(p2)}/{tours} (quorum {QUORUM})")
+    else:
+        i95 = (med(p2, "off", inter, 1), med(p2, "on", inter, 1))
+        verdicts["P2"] = (OK if i95[1] <= 1.10 * i95[0] else ECHEC,
+                          f"paires {len(p2)}/{tours} : p95 interactif on {i95[1]} <= 1,10 x off {i95[0]}")
+
+    # P3, P4, P5 : par bras, sur la derniere tentative.
+    p3, p4, p5 = [], [], []
+    for b in bras:
+        nb = f"tour {b['tour']} {b['v']}"
+        p = b["p"]
+        manque = next((r for r in (_phase_valide(p, ph) for ph in PHASES) if r), None)
+        if manque:
+            p3.append((nb, (NQ, manque)))
+            p4.append((nb, (NQ, manque)))
+        else:
+            repos, normal, prio = p["q"]["au repos"], p["q"]["sous charge (normal)"], p["q"][inter]
+            # P3 : la priorite raccourcit la queue -- jugee seulement si la
+            # charge degrade la phase normale au-dela du BRUIT MESURE AU REPOS
+            # (p95 - p50 au repos), jamais sous 2 grains d'horloge (§6.2 a).
+            bruit = max(repos[1] - repos[0], 2 * grain if grain > 0 else 1000)
+            if normal[1] <= repos[1] + bruit:
+                p3.append((nb, (NQ, f"charge dans le bruit : p95 normal {normal[1]} <= p95 repos {repos[1]} "
+                                    f"+ bruit {bruit}")))
+            else:
+                ok = prio[2] < normal[2] or prio[3] < normal[3]
+                p3.append((nb, (OK if ok else ECHEC,
+                                f"p99 inter {prio[2]} < normal {normal[2]} ou pire inter {prio[3]} < normal {normal[3]}")))
+            # P4 : le pire cas n'est pas aggrave au-dela du bruit au repos.
+            ok = prio[3] <= normal[3] + repos[3]
+            p4.append((nb, (OK if ok else ECHEC,
+                            f"pire inter {prio[3]} <= normal {normal[3]} + pire repos {repos[3]}")))
+        # P5 : equite, independante de tout reveil.
+        if len(p["tours"]) < 2:
+            p5.append((nb, (NQ, "tours de calcul absents")))
+        else:
+            normale, prio_t = p["tours"][-2], p["tours"][-1]
+            ok = prio_t > 0 and (normale == 0 or prio_t * 10 >= normale)
+            p5.append((nb, (OK if ok else ECHEC, f"tours interactif {prio_t} > 0 et x 10 >= normal {normale}")))
+    for cle, liste in (("P3", p3), ("P4", p4), ("P5", p5)):
+        verdicts[cle] = _agrege(liste, QUORUM)
+        for nb, (v, txt) in liste:
+            if v != OK:
+                sortie.append(f"    {cle} {nb} : {v} -- {txt}")
+    noms = {"P1": "precision au repos", "P2": "precision sous charge", "P3": "gain de la priorite",
+            "P4": "pas d'aggravation du pire cas", "P5": "equite, non-famine"}
+    for cle in ("P1", "P2", "P3", "P4", "P5"):
+        v, txt = verdicts[cle]
+        sortie.append(f"  {cle} {noms[cle]} : {v} -- {txt}")
+    sortie.append("AB_PROPRIETES_V1 : " + " ".join(f"{k}={verdicts[k][0]}" for k in ("P1", "P2", "P3", "P4", "P5"))
+                  + f" accel={nom} smp={smp} (proposition, non juge)")
+    return sortie, {k: v for k, (v, _) in verdicts.items()}
+
+
 def analyse(texte, tours, smp, nom):
     sortie, fautes = [], []
     texte = re.sub(r"\x1b\[[0-9;]*m", "", texte)
     lignes = [re.sub(r"^(\[[^]]*\]){2}\[FPS:[^]]*\] ", "", l).rstrip("\r") for l in texte.splitlines()]
     if re.search(r"KERNEL PANIC|panicked at", texte):
         fautes.append("panique")
-    bras, courant = [], None
+    bras, courant, grain = [], None, 0
     for l in lignes:
         m = BRAS.match(l)
         if m:
             if courant is not None:
                 fautes.append(f"tour {courant['tour']} {courant['v']} : bras precedent non ferme")
             courant = {"tour": int(m.group(1)), "v": m.group(2), "q": {}, "verdict": None,
-                       "compteurs": [], "diag": [], "noyau": [], "detail": [], "ferme": False}
+                       "compteurs": [], "diag": [], "noyau": [], "detail": [], "ferme": False,
+                       "p": _p_neuf()}
             bras.append(courant)
             continue
         m = FIN_BRAS.match(l)
@@ -101,6 +243,22 @@ def analyse(texte, tours, smp, nom):
         q = QUANT.search(l)
         if q:
             courant["q"][q.group(1)] = tuple(int(x) for x in q.groups()[1:])
+            courant["p"]["q"][q.group(1)] = courant["q"][q.group(1)]
+        # BOUCHAUD_AB_CINQ_PROPRIETES_V1 : l'etat de la tentative en cours.
+        if TENTATIVE.match(l):
+            courant["p"] = _p_neuf()
+        m = GRAIN.search(l)
+        if m:
+            grain = int(m.group(1))
+        m = TOURS_CALCUL.match(l)
+        if m:
+            courant["p"]["tours"].append(int(m.group(1)))
+        m = NON_JUGEABLE.search(l)
+        if m:
+            courant["p"]["non_jugeable"][m.group(1)] = m.group(2)
+        m = ATTRIBUTION.match(l)
+        if m:
+            courant["p"]["attribution"].add(m.group(1))
         m = re.match(r"^VERDICT_SONDE : (\S+)(?: tentatives=\d+)?(?: raison=(.*))?", l)
         if m:
             courant["verdict"] = m.group(1)
@@ -223,6 +381,8 @@ def analyse(texte, tours, smp, nom):
         ]
         for txt, ok in criteres:
             sortie.append(f"  {'ok     ' if ok else 'ECHOUE '} {txt}")
+    # Imprimes avant le verdict historique, qui reste le dernier mot.
+    sortie.extend(cinq_proprietes(bras, tours, smp, nom, grain)[0])
     if fautes:
         sortie.extend(f"  DEFAUT {f}" for f in fautes)
         sortie.append(f"AB_REVEIL_PRECIS_ECHEC n={len(fautes)} accel={nom} smp={smp}")
