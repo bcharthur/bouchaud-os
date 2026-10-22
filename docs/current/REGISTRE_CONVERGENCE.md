@@ -47,6 +47,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C10 | Assertion LibJS `Value.cpp:484` | `OUVERT` | invariant violé ou corruption |
 | C11 | `irq_depth()` toujours nul | `CAUSE_CONFIRMEE` | comptage fiable des entrées/sorties d'IRQ |
 | C12 | Préfixe du journal : accès CMOS | `CORRIGE_TCG` | horodatage sous KVM |
+| C13 | Tâche sensible placée sur un cœur hors ordonnanceur (mm-ng6 SMP4 : `usb-hid` 126 ms) | `CORRIGE_HOTE` (politique pure) | mesure : budget mm-ng6 répété |
 
 ## P0 — bloquent P13
 
@@ -356,6 +357,7 @@ rouge sur l'image d'avant le correctif, pas une injection.
 | C10 Assertion LibJS `Value.cpp:484` | WebContent | inconnu | sonde `[LB:JSVALEUR]` | — | `OUVERT` |
 | C11 `irq_depth()` toujours nul | revue du 21/10 | `irq_enter`/`irq_exit` jamais appelés ; les gardes reposent sur IF=0 | — | — | `CAUSE_CONFIRMEE`, risque latent |
 | C12 Préfixe du journal : ~30 accès CMOS par ligne | revue du 21/10 | lecture RTC à chaque ligne, concurrente hors jeton | `24698aa1` | — | `CORRIGE_TCG` |
+| C13 Tâche sensible placée sur un cœur hors ordonnanceur | Integration PR 39740393249 (63b519a8, mm-ng6 SMP4) : `ready_latency_interactive_max_ms` 126,5 > 100 (p99 33,6, écart isolé ; le push du même SHA vert) ; `[SCHED-NG-PIRE] classe=interactive tid=104 cpu=0 pret 2471 ms élu 2598 ms`, `[SCHED-NG-ATTENTE-VIVE] cpu=0 cur_tid=0 idle=0` | le cœur zéro exécutait le shell de l'autorun hors de toute tâche ; le placement des tâches sensibles le classait « tâche de fond, peu coûteux » (rang 1) et y posait `usb-hid` (sensible), qui n'y est élu qu'au retour du shell | BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : un cœur ni endormi ni muni d'une tâche est le pire rang (4), retenu seulement à défaut de tout autre | test hôte `un_coeur_hors_ordonnanceur_n_est_retenu_qu_a_defaut` (rouge sans le correctif) | `CORRIGE_HOTE` ; limites : seulement pour les tâches sensibles sous budget ; un dépassement de budget ou une tâche non sensible garde le placement historique |
 
 ## Hors périmètre de ce registre (fonctionnalités, matériel)
 

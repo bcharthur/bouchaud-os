@@ -124,6 +124,14 @@ pub struct Coeur {
     pub attente_interactive: usize,
     /// Taches normales EN ATTENTE dans la file de ce coeur.
     pub attente_normale: usize,
+    /// BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : le coeur execute du code
+    /// HORS de toute tache (contexte de demarrage, shell de l'autorun) et ne
+    /// dort pas. Rien n'y sera elu avant son retour a l'ordonnanceur, et
+    /// aucune preemption ne l'y ramene. Run PR 39740393249 (mm-ng6 SMP4) :
+    /// `usb-hid`, sensible, pose sur le coeur zero dans cet etat -- classe
+    /// « tache de fond, peu couteux » -- y a attendu 126 ms
+    /// (`[SCHED-NG-ATTENTE-VIVE] cpu=0 cur_tid=0 idle=0`).
+    pub hors_ordonnanceur: bool,
 }
 
 /// La tache qu'on reveille.
@@ -188,6 +196,9 @@ fn cout(coeur: &Coeur, indice: usize, precedent: usize) -> (u8, usize, u8, usize
     // c'est celle-la qu'on protege en dernier.
     let rang = if coeur.inactif {
         0
+    } else if coeur.hors_ordonnanceur {
+        // Le pire : on ne sait pas quand il reviendra elire.
+        4
     } else if coeur.occupant_sensible {
         3
     } else {

@@ -67,6 +67,23 @@ fn coeur_occupe(classe: Classe, occupant_sensible: bool, residence_ns: u64) -> C
     }
 }
 
+/// BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : run PR 39740393249, `usb-hid`
+/// pose sur le coeur zero qui executait le shell hors de toute tache, 126 ms
+/// d'attente. Un coeur hors ordonnanceur n'est retenu qu'a defaut de tout
+/// autre -- meme un pair sensible, qui finira par ceder, passe avant.
+#[test]
+fn un_coeur_hors_ordonnanceur_n_est_retenu_qu_a_defaut() {
+    let hors = Coeur { en_ligne: true, autorise: true, inactif: false, hors_ordonnanceur: true, ..Coeur::default() };
+    let fond = coeur_occupe(Classe::Normale, false, 50_000_000);
+    let pair = coeur_occupe(Classe::Interactive, true, 50_000);
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, fond, fond, fond]), Some(1));
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, pair]), Some(1));
+    // Seul candidat (SMP1) : retenu quand meme, la tache attend son retour.
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors]), Some(0));
+    // Un coeur au repos reste le meilleur choix.
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, fond, coeur_libre()]), Some(2));
+}
+
 #[test]
 fn un_coeur_au_repos_se_reveille_immediatement() {
     assert_eq!(decide(&coeur_libre(), &sensible()), Decision::ReveilImmediat);
@@ -369,6 +386,7 @@ impl Sim {
             residence_ns: self.maintenant_us.saturating_sub(coeur.depuis_us) * 1_000,
             attente_interactive: coeur.interactive.len(),
             attente_normale: coeur.normale.len(),
+            hors_ordonnanceur: false,
         }
     }
 

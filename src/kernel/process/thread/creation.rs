@@ -287,6 +287,9 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
         residence_ns: if depuis_ns == 0 { 0 } else { maintenant_ns.saturating_sub(depuis_ns) },
         attente_interactive,
         attente_normale,
+        // BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : ni tache installee, ni
+        // sommeil -- le contexte de demarrage ou le shell tient le coeur.
+        hors_ordonnanceur: en_ligne && !cpu::is_idle(cpu) && occupant_coeur(cpu) == NO_TASK,
     }
 }
 
