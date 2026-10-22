@@ -296,3 +296,7 @@ tools/userland/out-serie-entrelacement/
 # run_console_panique.sh
 /scenario-console-panique/
 /console-panique.img
+# run_compta_injection.sh (banc C6a)
+/scenario-compta-injection/
+/compta-injection.img
+tools/userland/out-compta-injection/

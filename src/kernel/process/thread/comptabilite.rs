@@ -419,11 +419,85 @@ fn suspend_compta_pour_idle() -> bool {
     true
 }
 
+// BOUCHAUD_COMPTA_INJECTION_V1 -- BANC DE C6a SEULEMENT (`compta-injection`).
+//
+// Le defaut corrige par 3adcea3c (instant et coeur lus avant la section) ne
+// s'est vu qu'une fois (os-primitives TCG du 21/10). Pour le reproduire a
+// volonte : `fenetre` elargit l'intervalle entre le retour du `hlt` et le
+// rearmement -- attente interruptions OUVERTES, terminee par une cession
+// (`schedule`) : la tache sort du coeur la ou un fil noyau etait preempte.
+// `ancien` rejoue l'ordre d'avant 3adcea3c (`rearme_ancien_pour_banc`) :
+// la reproduction negative. Les deux sont nuls au demarrage ; seul
+// `regle_injection_compta` les pose.
+static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(0);
+static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);
+static INJECTION_FENETRES: AtomicU64 = AtomicU64::new(0);
+static INJECTION_CESSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// `compta-injection` : fenetre injectee (ns) et ordre d'avant le correctif.
+pub fn regle_injection_compta(fenetre_ns: u64, ancien: bool) {
+    INJECTION_ANCIEN.store(ancien, Ordering::Relaxed);
+    INJECTION_FENETRE_NS.store(fenetre_ns, Ordering::Relaxed);
+}
+
+/// `(fenetres injectees, cessions effectives dans la fenetre)`.
+pub fn compteurs_injection_compta() -> (u64, u64) {
+    (INJECTION_FENETRES.load(Ordering::Relaxed), INJECTION_CESSIONS.load(Ordering::Relaxed))
+}
+
+fn fenetre_injectee() {
+    let fenetre = INJECTION_FENETRE_NS.load(Ordering::Relaxed);
+    if fenetre == 0 {
+        return;
+    }
+    INJECTION_FENETRES.fetch_add(1, Ordering::Relaxed);
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(fenetre);
+    while crate::kernel::timer::monotonic_ns() < fin {
+        core::hint::spin_loop();
+    }
+    if schedule() {
+        INJECTION_CESSIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// L'ordre d'AVANT 3adcea3c, pour la reproduction negative seulement :
+/// instant et coeur lus avant la fenetre et la section, tranche rearmee sans
+/// regarder si l'election l'a deja fait.
+fn rearme_ancien_pour_banc() {
+    let index = current_index_raw();
+    if index == NO_TASK {
+        return;
+    }
+    let now = crate::kernel::timer::monotonic_ns();
+    let cpu = local_cpu();
+    fenetre_injectee();
+    let table = tasks();
+    let Some(task) = table.get(index) else {
+        return;
+    };
+    compta_section(task, || {
+        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE, task.tid as u64);
+        task.last_account_ns.range(now);
+        task.slice_start_ns.range(now);
+        COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+        COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_EN_NOYAU[cpu].store(task.in_kernel.charge(), Ordering::Relaxed);
+    });
+}
+
 /// Rearme la comptabilite de la tache courante apres un `hlt`.
 ///
 /// Le cote du mur -- noyau ou utilisateur -- est celui que le repli avait
 /// range dans la tache : un fil noyau qui dort repart du cote noyau.
 fn rearme_compta_apres_idle() {
+    if INJECTION_ANCIEN.load(Ordering::Relaxed) {
+        rearme_ancien_pour_banc();
+        return;
+    }
+    // BOUCHAUD_COMPTA_INJECTION_V1 : la meme fenetre, avant la section --
+    // le correctif doit la traverser sans chevauchement.
+    fenetre_injectee();
     let index = current_index_raw();
     if index == NO_TASK {
         return;

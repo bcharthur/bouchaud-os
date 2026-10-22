@@ -1084,6 +1084,24 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             crate::serial_println!("SERIE_LENTE ns_par_octet={}", ns);
             0
         }
+        // BOUCHAUD_COMPTA_INJECTION_V1 (banc C6a) : `compta-injection US
+        // [ancien|correctif]` -- fenetre injectee entre le `hlt` et le
+        // rearmement, ordre d'avant 3adcea3c ou corrige ; `etat` : compteurs.
+        "compta-injection" => {
+            if argc >= 2 && argv[1] != "etat" {
+                let us = argv[1].parse::<u64>().unwrap_or(0);
+                let ancien = argc >= 3 && argv[2] == "ancien";
+                crate::kernel::task::regle_injection_compta(us.saturating_mul(1000), ancien);
+                crate::serial_println!("COMPTA_INJECTION fenetre_us={} ordre={}", us, if ancien { "ancien" } else { "correctif" });
+            }
+            let (fenetres, cessions) = crate::kernel::task::compteurs_injection_compta();
+            let inv = crate::kernel::task::invariants_compta();
+            crate::serial_println!(
+                "COMPTA_INJECTION_ETAT fenetres={} cessions={} chevauchements={} pire_chevauchement_us={} rearmes_deja_armes={}",
+                fenetres, cessions, inv[2], inv[3] / 1000, inv[6],
+            );
+            0
+        }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

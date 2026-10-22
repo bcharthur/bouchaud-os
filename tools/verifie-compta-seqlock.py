@@ -45,6 +45,10 @@ sous KVM.
    preempte avant la section etait rearme, a sa reprise, a un instant perime
    et sur le bloc de son ancien coeur (invariant 2, os-primitives TCG 21/10 :
    `chevauchements=1 pire_chevauchement_us=5859`).
+7. BOUCHAUD_COMPTA_INJECTION_V1 : l'injection du banc de C6a
+   (`run_compta_injection.sh`) est INERTE par defaut -- fenetre nulle, ordre
+   corrige -- et ne se regle que par `regle_injection_compta` ; l'ordre d'avant
+   (`rearme_ancien_pour_banc`) n'est atteint que sous `INJECTION_ANCIEN`.
 
 Fail-closed ; tests negatifs par mutation d'une copie de `src/`.
 """
@@ -215,6 +219,17 @@ def verifie(src: Path) -> list[str]:
         fautes.append("  `Task::new` n'initialise plus `compta_seq`")
     if not vu_rearme[0]:
         fautes.append("  `rearme_compta_apres_idle` a disparu")
+    # Regle 7 : injection inerte par defaut, posee par un seul reglage.
+    c = (src / COMPTA).read_text(encoding="utf-8")
+    if "static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(0);" not in c \
+            or "static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);" not in c \
+            or len(re.findall(r"INJECTION_(FENETRE_NS|ANCIEN)\.store\(", c)) != 2 \
+            or not re.search(r"pub fn regle_injection_compta\(fenetre_ns: u64, ancien: bool\) \{\s*"
+                             r"INJECTION_ANCIEN\.store\(ancien, Ordering::Relaxed\);\s*"
+                             r"INJECTION_FENETRE_NS\.store\(fenetre_ns, Ordering::Relaxed\);", c) \
+            or len(re.findall(r"\brearme_ancien_pour_banc\(\)", c)) != 2 \
+            or not re.search(r"if INJECTION_ANCIEN\.load\(Ordering::Relaxed\) \{\s*rearme_ancien_pour_banc\(\);\s*return;", c):
+        fautes.append("  l'injection du banc C6a n'est plus inerte par defaut (ordre d'avant ou fenetre actifs sans reglage)")
 
     return fautes
 
@@ -267,6 +282,15 @@ def main() -> int:
         # Regle 6 : une tranche deja armee par l'election, ecrasee.
         (COMPTA, [("        if task.last_account_ns != 0 {\n            REARMES_DEJA_ARMES.fetch_add(1, Ordering::Relaxed);\n"
                    "            return;\n        }\n", "")]),
+        # Regle 7 : l'ordre d'avant actif par defaut.
+        (COMPTA, [("static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);",
+                   "static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(true);")]),
+        # Regle 7 : une fenetre injectee par defaut.
+        (COMPTA, [("static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(0);",
+                   "static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(2_000_000);")]),
+        # Regle 7 : l'ordre d'avant appele sans condition.
+        (COMPTA, [("    if INJECTION_ANCIEN.load(Ordering::Relaxed) {\n        rearme_ancien_pour_banc();\n        return;\n    }",
+                   "    rearme_ancien_pour_banc();\n    if INJECTION_ANCIEN.load(Ordering::Relaxed) {\n        return;\n    }")]),
         # Une section qui ne masque plus les interruptions.
         (COMPTA, [("    interrupts::without_interrupts(|| {\n        let seq = task.compta_seq.charge();",
                    "    (|| {\n        let seq = task.compta_seq.charge();")]),

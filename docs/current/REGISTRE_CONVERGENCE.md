@@ -39,7 +39,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C4 | A/B non qualifiable | `CAUSE_CONFIRMEE` | 3 campagnes en parallèle, décision humaine |
 | C5 | SIGSEGV compta-stress / persist-course | `OUVERT` | reproduction déterministe |
 | C6 | Surcomptage CPU (I2) | `OUVERT` | reproduction |
-| C6a | Chevauchement de tranche après idle | `CORRIGE_TCG` | injection, KVM |
+| C6a | Chevauchement de tranche après idle | `CORRIGE_TCG` (négative déterministe) | KVM |
 | C7 | Compositor résiduel | `OUVERT` | preuve de mort de tous les processus |
 | C8 | Croissance mémoire WebContent | `CORRIGE_TCG` (cause non confirmée) | plusieurs campagnes |
 | C9 | Panique `courant.rs:276` | `OUVERT` | contention de verrous, `held_at` |
@@ -271,8 +271,28 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Correctif** : `3adcea3c` (BOUCHAUD_COMPTA_REARME_EN_SECTION_V1).
 - **Validation après** : os-primitives TCG 3/3 (0 chevauchement), CI
   `3adcea3c` os-primitives TCG vert.
-- **Limites** : **pas de reproduction négative déterministe** (une seule
-  occurrence) ; à prouver par injection (élargir la fenêtre) et sous KVM.
+- **Négative déterministe** (BOUCHAUD_COMPTA_INJECTION_V1,
+  `tools/ci/run_compta_injection.sh`) : `compta-injection 2000 ancien|correctif`
+  élargit la fenêtre `hlt` → réarmement (2 ms interruptions ouvertes, puis
+  `schedule()`), pendant `compta-stress-probe 8`. `ancien` rejoue l'ordre
+  d'avant `3adcea3c`. Mesures (TCG, même image, deux démarrages par ligne) :
+
+  | Banc | `ancien` : chevauchements (pire) | `correctif` | Réarmements évités (`correctif`) |
+  |---|---|---|---|
+  | SMP2 (22/10, 1ʳᵉ série) | 13 (48 329 µs) | 0 | 11 |
+  | SMP2 (répétition) | 16 | 0 | 13 |
+  | SMP4 | 32 | 0 | 40 |
+  | SMP2 (image finale) | 9 (196 383 µs), `COMPTA_STRESS_ECHEC` (`COMPTA_DEPASSE global` ×2) | 0, `COMPTA_STRESS_OK` | 10 |
+  | SMP4 (image finale) | 23 (31 134 µs) | 0, `COMPTA_STRESS_OK` | 30 |
+  | SMP1 | `NON_QUALIFIANT` : `fenetres=0` (aucun réarmement avec tâche courante) | — | 0 |
+
+  L'ordre d'avant viole aussi l'invariant I2 **global** sous injection (SMP2) ;
+  il ne départage pas C6 (`COMPTA_DEPASSE soi`, tâche utilisateur), qui reste
+  ouvert. Injection inerte par défaut (fenêtre 0, ordre corrigé), posée par le
+  seul réglage `regle_injection_compta` : `verifie-compta-seqlock.py` règle 7,
+  9 négatifs. Banc ajouté à os-primitives (TCG SMP2 et SMP4 ; code 2 =
+  `NON_QUALIFIANT`, rouge).
+- **Limites** : pas encore mesuré sous KVM ; SMP1 non qualifiable par ce banc.
 
 ### C7 à C12
 

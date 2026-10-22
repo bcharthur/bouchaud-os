@@ -69,6 +69,24 @@ jobs:
             grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|SIGMASQUE_CAS|BOUCHAUD_TSC_|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
             cp serie-primitives.log "serie-primitives-kvm-${essai}.log"
           done
+      - name: Comptabilite -- rearmement apres idle, fenetre injectee, ordre d'avant contre correctif (TCG SMP2, SMP4)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_COMPTA_INJECTION_V1 (C6a) : le chevauchement corrige par
+        # 3adcea3c ne s'etait vu qu'une fois (TCG, 5 859 us). Une fenetre de
+        # 2 ms, terminee par une cession, est injectee entre le `hlt` et le
+        # rearmement : l'ordre d'avant DOIT chevaucher, le correctif jamais, et
+        # compta-stress-probe doit y rendre COMPTA_STRESS_OK. Une fenetre qui
+        # n'a jamais cede rend NON_QUALIFIANT (code 2) -- rouge ici, jamais
+        # vert. SMP1 n'est pas lance : aucun rearmement avec tache courante
+        # (fenetres=0), NON_QUALIFIANT par construction.
+        run: |
+          r=0
+          for smp in 2 4; do
+            BO_SMP=$smp tools/ci/run_compta_injection.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 8 || r=1
+            cp compta-injection-ancien.log "serie-compta-injection-smp${smp}-ancien.log"
+            cp compta-injection-correctif.log "serie-compta-injection-smp${smp}-correctif.log"
+          done
+          exit "$r"
       - name: Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_HORLOGE_AUDIT_V1 : chaque ligne serie horodatee a son
@@ -332,6 +350,7 @@ jobs:
             scanout-virtio*/serie-*.log
             scanout-virtio*/capture-*.ppm
             serie-faute-multifil-*.log
+            serie-compta-injection-*.log
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
             virtio-dma-panne*/serie.log
