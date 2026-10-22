@@ -51,7 +51,11 @@ Le garde exige :
      l'anneau l'a atteint -- ni avant, ni apres --, jamais au milieu d'un
      enregistrement entame, le chemin synchrone et la panique fusionnant de
      meme (rafale de 2 000 lignes, TCG SMP4 : la 1 615 avant la 1 282 quand
-     elle passait « une fois tous les 32 morceaux ») ; une attente
+     elle passait « une fois tous les 32 morceaux ») ; a repere egal
+     (console repliee : la position d'ecriture ne bouge plus), le NUMERO
+     D'ORDRE global decide, jamais l'ordre des coeurs
+     (BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2 ; 63b519a8 KVM : 0052 apres 0053) ;
+     une attente
      de l'anneau vide d'un contexte qui ne peut pas ceder emet elle-meme
      (SMP1 : 5 s d'attente a vide et repli) ;
   7. fil muet : repli synchrone au-dela de `CONSOLE_FIL_MUET_NS` <= 5 s ;
@@ -268,9 +272,12 @@ def verifie(racine: Path) -> list[str]:
     entiere = corps(u, "vide_console_entiere")
     if not re.search(r"if !entame \{\s*fait = vide_differee_mure\(\);\s*\}\s*if !fait \{\s*fait = avance_tete\(CONSOLE_MORCEAU, debut\)\.is_some\(\);\s*\}", v) \
             or "let repere = (CONSOLE.ecrits() as u64).to_le_bytes();" not in dif \
-            or not re.search(r"range_morceaux\(DIFFEREE_REPERE \+ octets\.len\(\), \|pose\| \{\s*pose\(&repere\);\s*pose\(octets\);", dif) \
-            or "let lus = CONSOLE.lus();" not in mure \
-            or "if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {" not in mure \
+            or not re.search(r"range_morceaux\(DIFFEREE_REPERE \+ octets\.len\(\), \|pose\| \{\s*pose\(&repere\);\s*pose\(&numero\);\s*pose\(octets\);", dif) \
+            or "let numero = DIFFEREE_NUMERO.fetch_add(1, Ordering::AcqRel).to_le_bytes();" not in dif \
+            or constante(u, "DIFFEREE_REPERE") != 16 \
+            or "let lus = CONSOLE.lus() as u64;" not in mure \
+            or "super::differees::plus_ancienne_mure(tetes, lus)" not in mure \
+            or "if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {" not in src[ANNEAU] \
             or "DIFFEREES[cpu].lis(t, DIFFEREE_REPERE.min(n), n, ecris_octets);" not in mure \
             or not re.search(r"if CONSOLE_ENTAME\.load\(Ordering::Relaxed\) == 0 && vide_differee_mure\(\) \{\s*continue;\s*\}", entiere) \
             or not re.search(r"fn vide_differees\(\) \{\s*while vide_differee_mure\(\) \{\}\s*\}", u) \
@@ -461,11 +468,16 @@ NEGATIFS = [
     # 4 : une ligne differee au milieu d'un enregistrement entame
     (UART, "        if !entame {\n            fait = vide_differee_mure();\n        }", "        fait = vide_differee_mure();"),
     # 6 : une ligne differee sort avant que l'anneau ait atteint son repere
-    (UART, "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {",
-     "            if choix.map_or(true, |(_, _, _, r)| repere < r) {"),
+    (ANNEAU, "        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {",
+     "        if choix.map_or(true, |(_, cle)| (repere, numero) < cle) {"),
     # 6 : la plus recente d'abord
-    (UART, "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {",
-     "            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere > r) {"),
+    (ANNEAU, "        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {",
+     "        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) > cle) {"),
+    # 6 (V2) : a repere egal, l'ordre des coeurs decide (63b519a8 : 0052 apres 0053)
+    (ANNEAU, "        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {",
+     "        if repere <= lus && choix.map_or(true, |(_, cle)| repere < cle.0) {"),
+    # 6 (V2) : numero d'ordre absent de l'enregistrement
+    (UART, "        pose(&repere);\n        pose(&numero);\n        pose(octets);", "        pose(&repere);\n        pose(octets);"),
     # 6 : ligne differee sans repere
     (UART, "    let repere = (CONSOLE.ecrits() as u64).to_le_bytes();", "    let repere = 0u64.to_le_bytes();"),
     # 6 : le repere emis avec la ligne
@@ -508,7 +520,7 @@ NEGATIFS = [
     (UART, "                core::hint::spin_loop();\n                }\n                false\n            }\n        };",
      "                core::hint::spin_loop();\n                }\n                continue;\n            }\n        };"),
     # 6 : retour a l'alternance anneau / differees (toute differee mure)
-    (UART, "    let lus = CONSOLE.lus();", "    let lus = usize::MAX;"),
+    (UART, "    let lus = CONSOLE.lus() as u64;", "    let lus = u64::MAX;"),
     # 7 : plus de repli si le fil est muet
     (UART, "    if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {", "    if false {"),
     # 8 : panique sans poignee de main

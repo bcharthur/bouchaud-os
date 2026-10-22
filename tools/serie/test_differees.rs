@@ -445,3 +445,102 @@ fn repere_atteint_quand_tout_ce_qui_precede_est_sorti() {
     assert_eq!(sortis.len(), ranges);
     assert!(sortis.windows(2).all(|w| w[0] < w[1]), "positions de lecture qui reculent");
 }
+
+/// BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2 : os-primitives 63b519a8 (KVM SMP4,
+/// jeton tenu 12 s, console repliee) -- « ecrivain 1, ligne 0052 apres 0053 ».
+/// Console repliee, la position d'ecriture de l'anneau ne bouge plus : toutes
+/// les lignes differees portent le meme repere. L'ecrivain a differe sa ligne
+/// 52 sur le coeur 2, puis, apres avoir change de coeur, sa ligne 53 sur le
+/// coeur 1. Departager par l'ordre des coeurs sortait 53 d'abord.
+#[test]
+fn a_repere_egal_l_ordre_d_arrivee_decide_jamais_l_ordre_des_coeurs() {
+    use differees::plus_ancienne_mure;
+    // (coeur, repere, numero) : 52 arrivee la premiere (numero 7) sur le
+    // coeur 2, 53 ensuite (numero 8) sur le coeur 1.
+    let tetes = [(1usize, 4096u64, 8u64), (2, 4096, 7)];
+    assert_eq!(plus_ancienne_mure(tetes.iter().copied(), 4096), Some(2), "53 doublerait 52");
+    // Sans numero (l'ancien format : egalite parfaite), le premier coeur
+    // gagnait -- c'est l'inversion observee.
+    let sans_numero = [(1usize, 4096u64, 0u64), (2, 4096, 0)];
+    assert_eq!(plus_ancienne_mure(sans_numero.iter().copied(), 4096), Some(1));
+}
+
+#[test]
+fn le_repere_prime_sur_le_numero_et_une_ligne_non_mure_attend() {
+    use differees::plus_ancienne_mure;
+    // Repere plus petit : sort d'abord, meme arrivee apres.
+    assert_eq!(plus_ancienne_mure([(0usize, 100u64, 9u64), (1, 200, 1)].into_iter(), 500), Some(0));
+    // Repere pas encore atteint par la lecture : jamais.
+    assert_eq!(plus_ancienne_mure([(0usize, 600u64, 1u64)].into_iter(), 500), None);
+    assert_eq!(plus_ancienne_mure([(0usize, 600u64, 1u64), (3, 500, 2)].into_iter(), 500), Some(3));
+    assert_eq!(plus_ancienne_mure(core::iter::empty(), 0), None);
+}
+
+/// Propriete : un ecrivain differe ses lignes une a une, en changeant de
+/// coeur au hasard, pendant que la position d'ecriture avance ou reste figee ;
+/// le lecteur sort toujours la plus ancienne mure. L'ordre de chaque
+/// ecrivain est garde.
+#[test]
+fn property_un_ecrivain_qui_change_de_coeur_garde_son_ordre() {
+    use differees::plus_ancienne_mure;
+    use std::collections::VecDeque;
+    let mut x: u64 = std::env::var("BOUCHAUD_PROP_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|s| s.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        .unwrap_or(0xD1FF_E2EE);
+    let mut alea = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for _ in 0..2_000 {
+        let coeurs = 1 + (alea() % 8) as usize;
+        let mut files: Vec<VecDeque<(u64, u64, (usize, u32))>> = vec![VecDeque::new(); coeurs];
+        let mut ecrits = 0u64;
+        let mut lus = 0u64;
+        let mut numero = 0u64;
+        let mut suivant = [0u32; 3];
+        let mut sortis: Vec<(usize, u32)> = Vec::new();
+        for _ in 0..60 {
+            match alea() % 4 {
+                // Une ligne differee par l'un des trois ecrivains, sur un coeur
+                // au hasard ; l'anneau avance ou reste fige (console repliee).
+                0 | 1 => {
+                    let e = (alea() % 3) as usize;
+                    let c = (alea() % coeurs as u64) as usize;
+                    files[c].push_back((ecrits, numero, (e, suivant[e])));
+                    numero += 1;
+                    suivant[e] += 1;
+                    if alea() % 2 == 0 {
+                        ecrits += 1 + alea() % 50;
+                    }
+                }
+                // La lecture de l'anneau avance.
+                2 => lus = (lus + alea() % 80).min(ecrits),
+                // Le lecteur sort ce qui est mur, la plus ancienne d'abord.
+                _ => {
+                    while let Some(c) = plus_ancienne_mure(
+                        files.iter().enumerate().filter_map(|(c, f)| f.front().map(|&(r, n, _)| (c, r, n))),
+                        lus,
+                    ) {
+                        sortis.push(files[c].pop_front().unwrap().2);
+                    }
+                }
+            }
+        }
+        lus = ecrits;
+        while let Some(c) = plus_ancienne_mure(
+            files.iter().enumerate().filter_map(|(c, f)| f.front().map(|&(r, n, _)| (c, r, n))),
+            lus,
+        ) {
+            sortis.push(files[c].pop_front().unwrap().2);
+        }
+        assert!(files.iter().all(|f| f.is_empty()));
+        for e in 0..3 {
+            let ordre: Vec<u32> = sortis.iter().filter(|(w, _)| *w == e).map(|(_, n)| *n).collect();
+            assert!(ordre.windows(2).all(|w| w[0] < w[1]), "ecrivain {e} : {ordre:?}");
+        }
+    }
+}

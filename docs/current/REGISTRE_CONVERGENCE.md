@@ -35,6 +35,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C1h | Copie VGA texte d'un `write(2)` : 762 ms interruptions masquées | `CORRIGE_TCG` | KVM (`recopie_pire_us`, `tenu_pire_us`) |
 | C1i | Ligne différée qui double l'anneau (ordre d'un écrivain rompu) | `CORRIGE_TCG` | KVM (paniques 2 000 lignes) |
 | C1j | Repli de sécurité sur un fil `console` vivant, en file sur un cœur suspendu (KVM SMP4, verrou 3 s) | `CORRIGE_TCG` (négative déterministe) | CI KVM : témoin + correctif + vraie panne |
+| C1k | Inversion d'ordre d'un écrivain entre lignes différées de même repère (KVM, jeton 12 s, repli) | `CORRIGE_HOTE` (négative déterministe sur la règle) | inversion non reproduite sous TCG ; CI KVM |
 | C2 | Reprise SMP4 KVM : 1 226 µs | `OUVERT` | segments KVM (run 39602362503) |
 | C3 | Attente interactive jusqu'au quantum | `OUVERT` | KVM après C1 ; renoncements |
 | C4 | A/B non qualifiable | `CAUSE_CONFIRMEE` | 3 campagnes en parallèle, décision humaine |
@@ -232,6 +233,34 @@ rouge sur l'image d'avant le correctif, pas une injection.
   TCG SMP4 pendant le gel (fil relogé, sans effet sur le verdict). Seule la
   console appelle le secours : l'équilibrage ordinaire et sa règle de ne pas
   voler un fil noyau sont inchangés. KVM à mesurer en CI.
+
+### C1k — Inversion d'ordre entre lignes différées de même repère
+
+- **Preuve initiale** : os-primitives `63b519a8` (run 39740388363), KVM SMP4,
+  détenteur du jeton suspendu 12 s : `inversions=1` — « écrivain 1, ligne
+  0052 après 0053 » —, `lignes_differees=12`, console repliée (C1j :
+  `fil_somme_jeton_pire_us=12004179`).
+- **Mécanisme démontré** : une ligne différée porte comme repère la position
+  d'écriture de l'anneau ; console repliée, cette position ne bouge plus et
+  toutes les différées ont le **même** repère. L'égalité se départageait par
+  l'ordre des cœurs (`repere < r` strict, parcours des cœurs dans l'ordre) :
+  un écrivain qui change de cœur entre deux lignes différées les voit sortir
+  inversées.
+- **Correctif** (BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2) : chaque différée porte
+  aussi un numéro d'ordre global (16 octets d'en-tête) ; la plus ancienne mûre
+  sort d'abord — plus petit repère, puis plus petit numéro. Règle pure
+  `differees::plus_ancienne_mure`.
+- **Négative** : `tools/serie/test_differees.rs` — le cas exact (52 sur le
+  cœur 2, 53 sur le cœur 1, même repère) et une propriété (2 000 tirages,
+  écrivains qui migrent, anneau figé ou non) ; tous deux **rouges** sur la
+  règle d'avant (repère seul, ordre des cœurs). Garde
+  `verifie-console-asynchrone.py` règle 6 : 2 négatifs de plus (69).
+- **Validation après (TCG)** : batterie console entière verte (paniques
+  2 000 SMP4 ×5/SMP2/SMP1, verrou 3/12 s, jeton 12 s, saturation 5 µs on/off,
+  défaut SMP1/2/4).
+- **Limites** : sous TCG, console off + jeton suspendu 6 s (9–12 différées)
+  n'a pas reproduit l'inversion (il faut une migration entre deux différées
+  d'un même écrivain) ; la preuve négative est au niveau de la règle.
 
 ### C1g — Queue de 5–6 ms au repos en SMP1 KVM, hors du sommeil
 

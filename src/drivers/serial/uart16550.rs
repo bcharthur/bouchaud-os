@@ -498,31 +498,36 @@ fn vide_differees() {
 
 /// Le repere et l'enregistrement de tete d'un anneau de lignes differees :
 /// `(position, longueur, repere)`.
-fn tete_differee(anneau: &super::differees::Anneau<DIFFEREES_OCTETS>) -> Option<(usize, usize, usize)> {
+/// `(position, longueur, repere, numero d'ordre)` de la tete d'un anneau de
+/// lignes differees.
+fn tete_differee(anneau: &super::differees::Anneau<DIFFEREES_OCTETS>) -> Option<(usize, usize, u64, u64)> {
     let (t, n) = anneau.premier()?;
-    let mut repere = [0u8; DIFFEREE_REPERE];
+    let mut entete = [0u8; DIFFEREE_REPERE];
     let mut lus = 0usize;
     anneau.lis(t, 0, DIFFEREE_REPERE.min(n), |m| {
-        repere[lus..lus + m.len()].copy_from_slice(m);
+        entete[lus..lus + m.len()].copy_from_slice(m);
         lus += m.len();
     });
-    Some((t, n, u64::from_le_bytes(repere) as usize))
+    let mut repere = [0u8; 8];
+    let mut numero = [0u8; 8];
+    repere.copy_from_slice(&entete[..8]);
+    numero.copy_from_slice(&entete[8..]);
+    Some((t, n, u64::from_le_bytes(repere), u64::from_le_bytes(numero)))
 }
 
 /// Detenteur du jeton (ou panique) : la ligne differee la plus ancienne dont
 /// le repere est atteint par la lecture de l'anneau de la console -- emise
 /// entiere, sans son repere, et retiree. `false` s'il n'y en a pas.
 fn vide_differee_mure() -> bool {
-    let lus = CONSOLE.lus();
-    let mut choix: Option<(usize, usize, usize, usize)> = None;
-    for (cpu, anneau) in DIFFEREES.iter().enumerate() {
-        if let Some((t, n, repere)) = tete_differee(anneau) {
-            if repere <= lus && choix.map_or(true, |(_, _, _, r)| repere < r) {
-                choix = Some((cpu, t, n, repere));
-            }
-        }
-    }
-    let Some((cpu, t, n, _)) = choix else { return false };
+    let lus = CONSOLE.lus() as u64;
+    // BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2 : plus petit repere, puis plus
+    // petit numero d'ordre -- jamais l'ordre des coeurs.
+    let tetes = DIFFEREES
+        .iter()
+        .enumerate()
+        .filter_map(|(cpu, anneau)| tete_differee(anneau).map(|(_, _, repere, numero)| (cpu, repere, numero)));
+    let Some(cpu) = super::differees::plus_ancienne_mure(tetes, lus) else { return false };
+    let Some((t, n, _, _)) = tete_differee(&DIFFEREES[cpu]) else { return false };
     DIFFEREES[cpu].lis(t, DIFFEREE_REPERE.min(n), n, ecris_octets);
     DIFFEREES[cpu].retire(t, n);
     LIGNES_VIDANGEES.fetch_add(1, Ordering::Relaxed);
@@ -648,7 +653,10 @@ impl fmt::Write for TamponPile<'_> {
 /// a ete differee -- et ne sort que lorsque la lecture de l'anneau l'a
 /// atteint : tout ce qui etait range avant elle est sorti, rien de ce qui l'a
 /// ete apres. Fusion exacte, en asynchrone, en synchrone et en panique.
-const DIFFEREE_REPERE: usize = 8;
+/// Repere (position d'ecriture de l'anneau, 8 octets) puis numero d'ordre
+/// global (8 octets) : BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2.
+const DIFFEREE_REPERE: usize = 16;
+static DIFFEREE_NUMERO: AtomicU64 = AtomicU64::new(0);
 
 /// Range la ligne dans l'anneau de CE coeur, precedee de son repere.
 /// Interruptions masquees : un seul ecrivain par anneau.
@@ -658,8 +666,10 @@ fn differe(octets: &[u8]) {
     }
     let cpu = crate::arch::x86_64::smp::cpu_index().min(DIFFEREES.len() - 1);
     let repere = (CONSOLE.ecrits() as u64).to_le_bytes();
+    let numero = DIFFEREE_NUMERO.fetch_add(1, Ordering::AcqRel).to_le_bytes();
     if DIFFEREES[cpu].range_morceaux(DIFFEREE_REPERE + octets.len(), |pose| {
         pose(&repere);
+        pose(&numero);
         pose(octets);
     }) {
         LIGNES_DIFFEREES.fetch_add(1, Ordering::Relaxed);

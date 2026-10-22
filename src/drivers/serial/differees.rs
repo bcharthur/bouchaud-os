@@ -246,3 +246,30 @@ pub fn pose_prefixee(octets: &[u8], prefixe: &[u8], mut debut_ligne: bool, pose:
     pose(&octets[depuis..]);
     debut_ligne
 }
+
+/// BOUCHAUD_CONSOLE_ORDRE_DIFFEREES_V2 -- LA PLUS ANCIENNE LIGNE DIFFEREE MURE.
+///
+/// Chaque ligne differee porte un repere -- la position d'ecriture de
+/// l'anneau de la console quand elle a ete differee -- et un numero d'ordre
+/// GLOBAL, pris a l'arrivee. Une ligne est mure quand la lecture de l'anneau
+/// a atteint son repere ; la plus ancienne sort d'abord : plus petit repere,
+/// puis plus petit numero.
+///
+/// Le numero manquait. Console repliee (ou verrou de l'anneau suspendu), la
+/// position d'ecriture n'avance plus : toutes les lignes differees portent le
+/// MEME repere, et l'egalite se departageait par l'ordre des coeurs. Un
+/// ecrivain qui changeait de coeur entre deux lignes differees les voyait
+/// sortir inversees -- os-primitives 63b519a8 (KVM SMP4, jeton tenu 12 s,
+/// repli) : « ecrivain 1, ligne 0052 apres 0053 », 12 lignes differees.
+///
+/// `candidats` : `(coeur, repere, numero)` de la tete de chaque anneau.
+/// Rend le coeur dont la tete sort maintenant, ou `None`.
+pub fn plus_ancienne_mure(candidats: impl Iterator<Item = (usize, u64, u64)>, lus: u64) -> Option<usize> {
+    let mut choix: Option<(usize, (u64, u64))> = None;
+    for (coeur, repere, numero) in candidats {
+        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {
+            choix = Some((coeur, (repere, numero)));
+        }
+    }
+    choix.map(|(coeur, _)| coeur)
+}

@@ -128,6 +128,10 @@ else
 fi
 if [ "$SUSPENSION" -gt 0 ]; then
   exige "le detenteur suspendu a tenu le jeton ${SUSPENSION} ms" grep -aq "SERIE_DETENTEUR_SUSPENDU_FAIT pris=1 duree_ms=${SUSPENSION}" "$LOG"
+  # Run 39740388363 (63b519a8, TCG) : ce controle a rougi sans que le job
+  # dise si le banc n'avait pas pris le jeton (pris=0) ou n'avait jamais
+  # tourne. La ligne, telle quelle (ou son absence), pour le journal.
+  echo "  banc : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'SERIE_DETENTEUR_SUSPENDU_FAIT\|SERIE_DETENTEUR_SUSPENDU debut' | sed 's/^.*SERIE_DETENTEUR/SERIE_DETENTEUR/' | tr '\n' ' ' | cut -c1-300 || true)"
   exige "sa ligne est sortie entiere" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | tr -d '\r' | grep -aqE '\] SERIE_DETENTEUR_SUSPENDU debut et fin, tenu ${SUSPENSION} ms\$'"
   # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : console asynchrone, les lignes attendent
   # dans l'anneau et le fil `console` bute sur le jeton (jeton_occupe) ;
@@ -136,6 +140,7 @@ if [ "$SUSPENSION" -gt 0 ]; then
 fi
 if [ "$VERROU_SUSPENDU" -gt 0 ]; then
   exige "le fil a tenu le verrou de l'anneau ${VERROU_SUSPENDU} ms" grep -aq "CONSOLE_VERROU_SUSPENDU_FAIT pris=1 duree_ms=${VERROU_SUSPENDU}" "$LOG"
+  echo "  banc : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'CONSOLE_VERROU_SUSPENDU_' | sed 's/^.*CONSOLE_VERROU/CONSOLE_VERROU/' | tr '\n' ' ' | cut -c1-300 || true)"
   exige "la suspension a ete subie (attentes cedees ou renoncements)" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'BOUCHAUD_CONSOLE_BILAN .* (verrou_abandons=[1-9][0-9]* |verrou_cedees=[1-9])'"
   exige "aucune attente du verrou interruptions masquees au-dela de 50 ms" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -a 'BOUCHAUD_CONSOLE_BILAN' | tail -1 | tr -d '\\r' | grep -qE 'verrou_attente_pire_us=([0-9]{1,4}|[1-4][0-9]{4})( |\$)'"
 fi
