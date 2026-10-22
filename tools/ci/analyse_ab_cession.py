@@ -70,6 +70,12 @@ def analyse(texte, tours, smp, nom):
         d = re.search(r"PREUVE (.*-> (?:QUALIFIE_ECHEC|NON_QUALIFIANT).*)$", l)
         if d:
             courant["detail"].append(d.group(1)[:320])
+        # Diagnostic seulement : la decomposition des pires reveils sous
+        # charge (run 39667691144 : deux QUALIFIE_ECHEC sous classe, pire
+        # 832 et 1 357 us, sans que le job dise ou le temps est passe).
+        d = re.search(r"(attribution|ventilation) sous charge \((?:normal|interactif)\) : .*", l)
+        if d:
+            courant.setdefault("diag_charge", []).append(d.group(0)[:1100])
         m = re.match(r"^\s+comptes .* : preuve_hote=(\S+) ", l)
         if m:
             courant["preuve"].add(m.group(1))
@@ -127,6 +133,12 @@ def analyse(texte, tours, smp, nom):
         if b["verdict"] != "QUALIFIE_OK":
             for d in b["detail"]:
                 sortie.append(f"  detail tour {b['tour']} {b['v']} : {d}")
+    # Les deux bras d'un tour ou l'un echoue : la comparaison se lit cote a cote.
+    tours_echec = {b["tour"] for b in bras if b["verdict"] == "QUALIFIE_ECHEC"}
+    for b in bras:
+        if b["tour"] in tours_echec:
+            for d in b.get("diag_charge", []):
+                sortie.append(f"  diag charge tour {b['tour']} {b['v']} : {d}")
     par_tour = {}
     for b in bras:
         par_tour.setdefault(b["tour"], {})[b["v"]] = b

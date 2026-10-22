@@ -282,6 +282,14 @@ def analyse(texte, tours, smp, nom):
         d = re.search(r"(attribution|ventilation|comptes) au repos : .*", l)
         if d:
             courant["diag"].append(d.group(0)[:400])
+        # Diagnostic seulement : la meme decomposition SOUS CHARGE, pour
+        # chaque bras. Run 39667691144 (6e8bf33e, KVM) : P2 (p95 interactif
+        # on 81 contre off 48) et P4 (pire interactif 854 us) en echec sans
+        # que le job dise ou le temps est passe -- les artefacts serie ne
+        # sont pas toujours lisibles hors du job.
+        d = re.search(r"(attribution|ventilation|comptes) sous charge \((?:normal|interactif)\) : .*", l)
+        if d:
+            courant.setdefault("diag_charge", []).append(d.group(0)[:1100])
         # Diagnostic seulement : la comparaison de la sonde qui a echoue,
         # chiffres compris. Run 39447642999 (d02e8294, KVM SMP4) : deux
         # QUALIFIE_ECHEC sous `on` au repos irreprochable (pire 154 us), sans
@@ -345,6 +353,8 @@ def analyse(texte, tours, smp, nom):
     for b in bras:
         for d in b["diag"]:
             sortie.append(f"  diag tour {b['tour']} {b['v']} : {d}")
+        for d in b.get("diag_charge", []):
+            sortie.append(f"  diag charge tour {b['tour']} {b['v']} : {d}")
         if b["verdict"] != "QUALIFIE_OK" and b.get("raison"):
             sortie.append(f"  raison tour {b['tour']} {b['v']} : {b['verdict']} {b['raison']}")
         if b["verdict"] == "QUALIFIE_ECHEC":
