@@ -83,6 +83,16 @@ Le garde exige :
      (`range_console(.., CONSOLE_RESERVE_URGENCE)`, verifiee dans
      `range_console` par `file_place::tient`) aux contextes qui ne peuvent pas
      attendre, seuls a passer par `aide_a_vider` (reserve comprise).
+ 13. BOUCHAUD_CONSOLE_FIL_SECOURS_V1 -- un fil vivant n'est pas un fil mort
+     (KVM SMP4, run 39667691144 : le fil, en file sur le coeur que le banc
+     masquait 3 s, pris pour mort a 2 s, repli) : le chien de garde reloge
+     d'abord un fil PRET sur un coeur muet (`secours_tache_coeur_muet`, seuil
+     `SECOURS_SEUIL_NS` <= 100 ms, secours actif par defaut) SANS rendre la
+     main -- un fil reloge qui reste muet est toujours juge ; puis soupcon et
+     confirmation BORNEE (`CONSOLE_FIL_CONFIRMATION_NS` <= 1 s) avant le
+     repli, jamais de repli sans soupcon prealable ; le secours ne reloge
+     jamais un fil noyau non migrable ni sans retirer son entree de la file
+     du coeur muet (`remove` avant `enqueue_bande`).
 
 Fail-closed ; chaque regle a son test negatif (mutation qui doit rougir).
 """
@@ -101,7 +111,9 @@ MAIN = "src/main.rs"
 STAGE2 = "src/platform/pc/stage2.rs"
 AUTORUN = "src/kernel/autorun.rs"
 SHELL = "src/shell/mod.rs"
-FICHIERS = (UART, ANNEAU, FILE_PLACE, EXC, POWER, MAIN, STAGE2, AUTORUN, SHELL)
+SECOURS = "src/kernel/scheduler/secours.rs"
+CREATION = "src/kernel/process/thread/creation.rs"
+FICHIERS = (UART, ANNEAU, FILE_PLACE, EXC, POWER, MAIN, STAGE2, AUTORUN, SHELL, SECOURS, CREATION)
 
 
 def sans_commentaires(t: str) -> str:
@@ -348,6 +360,26 @@ def verifie(racine: Path) -> list[str]:
     if "self.servi.fetch_max(ticket.saturating_add(1), Ordering::AcqRel);" not in fp \
             or "self.servi() >= ticket" not in fp or not re.search(r"vu < moi\s*&& self", fp):
         f.append(f"{FILE_PLACE} : la file de place peut reculer, bloquer un ticket depasse ou sauter au-dela d'elle-meme")
+    # 13. secours du fil pret sur un coeur muet, confirmation bornee du repli
+    sv = corps(u, "surveille_fil_console")
+    confirmation = constante(u, "CONSOLE_FIL_CONFIRMATION_NS")
+    seuil = constante(src[SECOURS], "SECOURS_SEUIL_NS")
+    i_secours = pos(sv, "secours_tache_coeur_muet(")
+    i_muet = pos(sv, "if muet <= CONSOLE_FIL_MUET_NS {")
+    i_soupcon = pos(sv, "CONSOLE_SOUPCON_NS.compare_exchange(soupcon, maintenant,")
+    i_confirme = pos(sv, "if maintenant.saturating_sub(soupcon) < CONSOLE_FIL_CONFIRMATION_NS {")
+    i_repli = pos(sv, "CONSOLE_REPLI_SECURITE.swap(true")
+    if confirmation is None or not 0 < confirmation <= 1_000_000_000 or seuil is None or not 0 < seuil <= 100_000_000 \
+            or not (i_secours < i_muet < i_soupcon < i_confirme < i_repli < 10**9) \
+            or "return" in sv[i_secours:i_muet] \
+            or not re.search(r"if soupcon <= progres \{", sv) \
+            or "static CONSOLE_SECOURS_VOULU: AtomicBool = AtomicBool::new(true);" not in u:
+        f.append(f"{UART} : le chien de garde du fil ne distingue plus un fil vivant (coeur suspendu) d'un fil mort, ou son repli n'est plus borne")
+    cr = corps(src[CREATION], "secours_tache_coeur_muet")
+    if not cr or not re.search(r"if tache\.noyau && !tache\.migrable \{\s*return None;", cr) \
+            or not (pos(cr, "secours_permis(") < pos(cr, ".remove(identite.en_mot())") < pos(cr, ".enqueue_bande(identite.en_mot(), bande)") < 10**9) \
+            or not re.search(r"if !crate::arch::x86_64::cpu_local::local\(id_donneur\)\.remove\(identite\.en_mot\(\)\) \{[^}]*return None;", cr):
+        f.append(f"{CREATION} : le secours d'un coeur muet reloge un fil non migrable, ou sans retirer son entree (double election)")
     return f
 
 
@@ -478,7 +510,7 @@ NEGATIFS = [
     # 6 : retour a l'alternance anneau / differees (toute differee mure)
     (UART, "    let lus = CONSOLE.lus();", "    let lus = usize::MAX;"),
     # 7 : plus de repli si le fil est muet
-    (UART, "        if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {", "        if false {"),
+    (UART, "    if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {", "    if false {"),
     # 8 : panique sans poignee de main
     (UART, "    EN_PANIQUE.store(true, Ordering::SeqCst);", "    EN_PANIQUE.store(true, Ordering::Relaxed);"),
     # 8 : la panique vide l'anneau sans prendre le jeton (un autre coeur ecrit en meme temps)
@@ -505,6 +537,22 @@ NEGATIFS = [
     (MAIN, "    drivers::serial::demarre_console_asynchrone();\n", ""),
     (AUTORUN, "    crate::drivers::serial::journalise_bilan_console();\n", ""),
     (UART, "        attend_console_vide(5_000_000_000);\n        sous_jeton(&[]);", "        sous_jeton(&[]);"),
+    # 13 : confirmation sans borne (le silence d'un fil mort n'est plus borne)
+    (UART, "const CONSOLE_FIL_CONFIRMATION_NS: u64 = 500_000_000;", "const CONSOLE_FIL_CONFIRMATION_NS: u64 = 60_000_000_000;"),
+    # 13 : un fil reloge n'est plus juge (le secours rend la main)
+    (UART, "            CONSOLE_FIL_SECOURS_PIRE_NS.fetch_max(muet, Ordering::Relaxed);\n        }",
+     "            CONSOLE_FIL_SECOURS_PIRE_NS.fetch_max(muet, Ordering::Relaxed);\n            return;\n        }"),
+    # 13 : repli immediat, sans soupcon ni confirmation (le cas du run 39667691144)
+    (UART, "    if maintenant.saturating_sub(soupcon) < CONSOLE_FIL_CONFIRMATION_NS {\n        return;\n    }\n", ""),
+    # 13 : secours desactive par defaut
+    (UART, "static CONSOLE_SECOURS_VOULU: AtomicBool = AtomicBool::new(true);", "static CONSOLE_SECOURS_VOULU: AtomicBool = AtomicBool::new(false);"),
+    # 13 : seuil du coeur muet au-dela du chien de garde
+    (SECOURS, "pub const SECOURS_SEUIL_NS: u64 = 20_000_000;", "pub const SECOURS_SEUIL_NS: u64 = 3_000_000_000;"),
+    # 13 : un fil noyau non migrable reloge
+    (CREATION, "    if tache.noyau && !tache.migrable {\n        return None;\n    }\n    let donneur", "    let donneur"),
+    # 13 : relogement sans retirer l'entree du coeur muet (deux files, double election)
+    (CREATION, "    if !crate::arch::x86_64::cpu_local::local(id_donneur).remove(identite.en_mot()) {",
+     "    if false && !crate::arch::x86_64::cpu_local::local(id_donneur).remove(identite.en_mot()) {"),
 ]
 
 

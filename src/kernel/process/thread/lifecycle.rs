@@ -774,6 +774,24 @@ pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) ->
     spawn_noyau_interne(entree, nom, priorite, false)
 }
 
+/// Lance un fil noyau EPINGLE au coeur `cpu` -- jamais migre, jamais
+/// reloge. Pour les bancs qui doivent frapper un coeur precis
+/// (BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : suspendre le coeur du fil `console`).
+/// `false` si le coeur n'est pas en ligne ou si la tache n'a pu etre creee.
+pub fn spawn_noyau_epingle(entree: fn() -> !, nom: &str, cpu: usize) -> bool {
+    if cpu >= 64 || online_affinity_mask() & (1u64 << cpu) == 0 {
+        return false;
+    }
+    let Some(process) = new_process(nom, 0) else {
+        return false;
+    };
+    let mut task = Task::new_kernel(process, entree);
+    task.priorite.range(Priorite::Normale);
+    task.affinity_mask = 1u64 << cpu;
+    register(task);
+    true
+}
+
 fn spawn_noyau_interne(
     entree: fn() -> !,
     nom: &str,

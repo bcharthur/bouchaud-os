@@ -1,0 +1,85 @@
+//! BOUCHAUD_SECOURS_COEUR_MUET_V1 -- une tache prete, en file sur un coeur qui
+//! ne commute plus, est relogee sur un coeur vivant. La POLITIQUE, pure.
+//!
+//! # Le defaut
+//!
+//! os-primitives KVM SMP4 (run 39667691144, 6e8bf33e), banc du verrou de
+//! l'anneau tenu 3 s interruptions masquees : 600/600 lignes intactes, mais
+//! `repli_securite=1` -- la console asynchrone s'est rabattue sur le chemin
+//! synchrone (`synchrones=1582`). Le fil `console` avait dormi une
+//! milliseconde (`jeton occupe`) ; ce sommeil a dure 3 001 297 us
+//! (`fil_somme_jeton_pire_us`). Reveille, il avait ete publie sur SON coeur
+//! -- le seul ou il ait jamais tourne -- et c'etait celui que le banc masquait.
+//! Un fil noyau n'est jamais vole (`runnable_steal`) : trois coeurs vivants
+//! a cote, personne ne pouvait le prendre. Le chien de garde, a 2 s, a pris ce
+//! fil vivant pour un fil mort.
+//!
+//! # La regle
+//!
+//! Un coeur est MUET quand son occupant y est installe depuis plus de
+//! `seuil` : interruptions masquees, processeur virtuel retire par l'hote,
+//! boucle sans point cooperatif. Un coeur qui respecte son quantum (4 ms au
+//! plus) ou ses points cooperatifs (1 ms) ne l'est jamais : une tache en file
+//! derriere lui le fait ceder bien avant. Une tache prete depuis plus de
+//! `seuil`, en file sur un coeur muet, peut etre relogee -- sur un coeur
+//! permis, vivant, de preference au repos, sinon le moins charge.
+//!
+//! Hors d'un coeur muet, rien ne change : l'equilibrage ordinaire, et sa
+//! regle de ne jamais voler un fil noyau, restent ceux d'avant. Le secours
+//! n'est appele que par qui sait qu'une tache DOIT progresser (le chien de
+//! garde de la console) ; il ne remplace pas son verdict : un fil qui ne
+//! progresse plus, meme reloge, reste un fil muet.
+//!
+//! Module pur : `tools/smp/test_secours_coeur_muet.rs` l'inclut tel quel.
+
+/// Au-dela, un occupant qui n'a pas cede son coeur est anormal : cinq quanta
+/// d'un AP, vingt points cooperatifs.
+pub const SECOURS_SEUIL_NS: u64 = 20_000_000;
+
+/// L'occupant du coeur y est-il installe depuis plus de `seuil_ns` ?
+/// `occupant_depuis_ns == 0` : coeur sans tache (au repos), jamais muet.
+pub fn coeur_muet(occupant_depuis_ns: u64, maintenant_ns: u64, seuil_ns: u64) -> bool {
+    occupant_depuis_ns != 0 && maintenant_ns.saturating_sub(occupant_depuis_ns) > seuil_ns
+}
+
+/// Une tache prete depuis `pret_depuis_ns`, en file derriere un occupant
+/// installe depuis `occupant_depuis_ns`, peut-elle etre relogee ?
+///
+/// Les deux attentes doivent passer le seuil : un occupant ancien qu'une
+/// tache tout juste prete va faire ceder n'est pas un coeur muet pour elle.
+pub fn secours_permis(occupant_depuis_ns: u64, pret_depuis_ns: u64, maintenant_ns: u64, seuil_ns: u64) -> bool {
+    coeur_muet(occupant_depuis_ns, maintenant_ns, seuil_ns)
+        && pret_depuis_ns != 0
+        && maintenant_ns.saturating_sub(pret_depuis_ns) > seuil_ns
+}
+
+/// Un coeur candidat a l'accueil, tel que l'appelant l'a lu.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Accueil {
+    /// L'affinite de la tache le permet.
+    pub permis: bool,
+    /// Le coeur dort, sans tache.
+    pub inactif: bool,
+    /// Le coeur est muet lui aussi.
+    pub muet: bool,
+    /// Taches en attente dans sa file.
+    pub attente: usize,
+}
+
+/// Le coeur d'accueil : jamais le donneur, jamais un coeur interdit ou muet ;
+/// un coeur au repos d'abord, sinon la file la plus courte (le plus petit
+/// indice a egalite).
+pub fn choisit_accueil(donneur: usize, coeurs: &[Accueil]) -> Option<usize> {
+    let mut meilleur: Option<(usize, (bool, usize))> = None;
+    for (cpu, c) in coeurs.iter().enumerate() {
+        if cpu == donneur || !c.permis || c.muet {
+            continue;
+        }
+        // Rang : inactif d'abord (`false` < `true`), puis l'attente.
+        let rang = (!c.inactif, c.attente);
+        if meilleur.map_or(true, |(_, r)| rang < r) {
+            meilleur = Some((cpu, rang));
+        }
+    }
+    meilleur.map(|(cpu, _)| cpu)
+}

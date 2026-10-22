@@ -34,6 +34,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C1g | Queue de 5–6 ms au repos en SMP1 KVM, hors du sommeil | `OUVERT` | granularité fausse corrigée (`cdba65db`) ; A/B console on/off KVM sur le HEAD final ; cause |
 | C1h | Copie VGA texte d'un `write(2)` : 762 ms interruptions masquées | `CORRIGE_TCG` | KVM (`recopie_pire_us`, `tenu_pire_us`) |
 | C1i | Ligne différée qui double l'anneau (ordre d'un écrivain rompu) | `CORRIGE_TCG` | KVM (paniques 2 000 lignes) |
+| C1j | Repli de sécurité sur un fil `console` vivant, en file sur un cœur suspendu (KVM SMP4, verrou 3 s) | `CORRIGE_TCG` (négative déterministe) | CI KVM : témoin + correctif + vraie panne |
 | C2 | Reprise SMP4 KVM : 1 226 µs | `OUVERT` | segments KVM (run 39602362503) |
 | C3 | Attente interactive jusqu'au quantum | `OUVERT` | KVM après C1 ; renoncements |
 | C4 | A/B non qualifiable | `CAUSE_CONFIRMEE` | 3 campagnes en parallèle, décision humaine |
@@ -179,6 +180,57 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Limites** : intermittent avant correctif (2/4) : la validation est
   statistique ; le contrôle d'ordre est désormais exigé par l'analyseur du
   banc d'entrelacement.
+
+### C1j — Repli de sécurité sur un fil `console` vivant (cœur suspendu)
+
+- **Preuve initiale** : os-primitives `6e8bf33e` (run 39667691144, job
+  119457010016), banc du verrou de l'anneau tenu 3 s, KVM SMP4 : 600/600
+  intactes, mais `active=0 repli_securite=1 synchrones=1582 verrou_abandons=5`.
+  `fil_somme_jeton_pire_us=3001297` : le « sommeil d'une milliseconde » du
+  fil sur jeton occupé a duré 3 s ; `repli_muet_ms=2000`.
+- **Mécanisme démontré** : réveillé (ou cédant à son point coopératif), le
+  fil, fil noyau, est publié sur SON cœur ; c'était celui que le banc
+  masquait. Un fil noyau n'est jamais volé (`runnable_steal`) : trois cœurs
+  vivants à côté, personne ne pouvait le prendre ; le chien de garde a pris ce
+  fil vivant pour un fil mort.
+- **Reproduction négative déterministe** : `BANC_VERROU_CIBLE=fil` (fil de
+  banc épinglé au cœur du fil, `spawn_noyau_epingle`), `BANC_SECOURS=off`.
+  TCG SMP4 et SMP2 : `repli_securite=1`, `synchrones=1557/1569`,
+  `repli_muet_ms=2501`, repli expliqué `fil_phase=2 fil_etat=0 (prêt)
+  fil_file=1`, occupant du cœur 1 : `verrou-suspendu`. Même signature que le
+  CI KVM.
+- **Correctif** (BOUCHAUD_SECOURS_COEUR_MUET_V1 + BOUCHAUD_CONSOLE_FIL_SECOURS_V1) :
+  trois situations distinguées par le chien de garde —
+  * contention normale : le fil progresse, rien ;
+  * cœur suspendu : fil PRÊT en file sur un cœur dont l'occupant est installé
+    depuis plus de 20 ms (`SECOURS_SEUIL_NS`) : relogé sur un cœur vivant
+    (`secours_tache_coeur_muet` : entrée retirée de la file du cœur muet,
+    posée ailleurs ; jamais un fil noyau non migrable) ;
+  * vrai blocage : silence > 2 s → soupçon, fil réveillé ; toujours muet
+    0,5 s plus tard → repli définitif (borne 2,5 s). Le soupçon distingue
+    aussi une machine entière suspendue (SMP1).
+  Politique pure testée sur l'hôte (`tools/smp/test_secours_coeur_muet.rs`,
+  propriété 50 000 tirages) ; garde `verifie-console-asynchrone.py` règle 13,
+  7 négatifs (67 au total).
+- **Validation après (TCG)** : cœur du fil suspendu 3 s, SMP4 et SMP2 :
+  `secours=1`, relogé après 20–22 ms, aucun repli, 600/600 ; 12 s SMP4 :
+  relogé après 21 ms, aucun repli ; SMP1, machine entière suspendue 3 s :
+  `soupcons=1`, levé, aucun repli.
+- **Vraie panne** (`BANC_FIL_GELE_MS=6000`, le fil cesse de progresser 6 s ;
+  producteurs lents, 80 ms par ligne, l'anneau ne se remplit jamais) : repli
+  expliqué (`fil_phase=5`), borné — silence 2 522–2 609 ms, confirmation
+  507–573 ms —, 180/180 lignes entières par le chemin synchrone, SMP4, SMP2,
+  SMP1, deux fois chacun. Fil gelé 6 s sous le flot ordinaire (anneau plein) :
+  les producteurs vident eux-mêmes, la console progresse, **aucun** repli
+  (600/600) — ce n'est pas une panne. Premier essai du banc avec le flot
+  ordinaire puis avec 100 lignes × 20 processus : l'anneau se remplissait par
+  les journaux de fautes du brasseur (68 Kio pour 20 processus), aucun repli —
+  le banc ne testait pas la panne ; corrigé (pas de 80 ms, 4 processus).
+- **Limites** : la règle « cœur muet » couvre aussi une contention extrême
+  (occupant > 20 ms alors qu'une tâche attend > 20 ms) : vu une fois sous
+  TCG SMP4 pendant le gel (fil relogé, sans effet sur le verdict). Seule la
+  console appelle le secours : l'équilibrage ordinaire et sa règle de ne pas
+  voler un fil noyau sont inchangés. KVM à mesurer en CI.
 
 ### C1g — Queue de 5–6 ms au repos en SMP1 KVM, hors du sommeil
 

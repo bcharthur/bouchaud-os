@@ -716,17 +716,36 @@ fn fil_detenteur_suspendu() -> ! {
 }
 
 /// BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : `serie-verrou-suspendu ATTENTE_MS
-/// DUREE_MS` -- un fil noyau prend le verrou de l'anneau de la console apres
-/// ATTENTE_MS et le garde DUREE_MS interruptions masquees.
+/// DUREE_MS [fil]` -- un fil noyau prend le verrou de l'anneau de la console
+/// apres ATTENTE_MS et le garde DUREE_MS interruptions masquees.
+///
+/// BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : avec `fil`, la suspension frappe LE
+/// COEUR DU FIL `console` (celui dans la file duquel il attend son tour) --
+/// le cas du run 39667691144 (KVM SMP4), rendu deterministe : le fil de banc
+/// est epingle a ce coeur, et verifie au moment de suspendre que le fil y
+/// est encore.
 static VERROU_SUSPENDU_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static VERROU_SUSPENDU_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERROU_SUSPENDU_CIBLE_FIL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static VERROU_SUSPENDU_FAIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
     let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
     VERROU_SUSPENDU_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
     VERROU_SUSPENDU_DUREE_MS.store(lis(2, 1000).min(30_000), Ordering::Relaxed);
-    if !crate::kernel::task::spawn_noyau(fil_verrou_suspendu, "verrou-suspendu") {
+    let cible_fil = argc > 3 && argv[3] == "fil";
+    VERROU_SUSPENDU_CIBLE_FIL.store(cible_fil, Ordering::Relaxed);
+    VERROU_SUSPENDU_FAIT.store(false, Ordering::Relaxed);
+    let lance = if cible_fil {
+        match crate::drivers::serial::coeur_du_fil_console() {
+            Some(coeur) => crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur),
+            None => false,
+        }
+    } else {
+        crate::kernel::task::spawn_noyau(fil_verrou_suspendu, "verrou-suspendu")
+    };
+    if !lance {
         crate::println!("serie-verrou-suspendu : fil noyau refuse");
         return 1;
     }
@@ -738,8 +757,29 @@ fn fil_verrou_suspendu() -> ! {
     let attente = VERROU_SUSPENDU_ATTENTE_MS.load(Ordering::Relaxed);
     let duree = VERROU_SUSPENDU_DUREE_MS.load(Ordering::Relaxed);
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    if VERROU_SUSPENDU_CIBLE_FIL.load(Ordering::Relaxed) {
+        // Epingle (`spawn_noyau_epingle`) : le coeur lu ici est celui ou le
+        // verrou sera pris. Le fil `console` y est-il encore en file ?
+        let ici = crate::arch::x86_64::smp::cpu_index();
+        let cible = crate::drivers::serial::coeur_du_fil_console();
+        let a_moi = cible == Some(ici) && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
+        if !a_moi {
+            crate::serial_println!(
+                "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={}",
+                ici, cible.map_or(-1, |c| c as i64)
+            );
+            loop {
+                crate::kernel::task::sleep_ticks(1000);
+            }
+        }
+    }
+    let ici = crate::arch::x86_64::smp::cpu_index();
     let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);
-    crate::serial_println!("CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={}", pris as u8, duree);
+    crate::serial_println!(
+        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={}",
+        pris as u8, duree, ici,
+        crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64)
+    );
     loop {
         crate::kernel::task::sleep_ticks(1000);
     }
@@ -752,6 +792,21 @@ fn console_async(argc: usize, argv: &[&str; 12]) -> i32 {
             "on" => crate::drivers::serial::choisit_console_asynchrone(true),
             "off" => crate::drivers::serial::choisit_console_asynchrone(false),
             "etat" => {}
+            // BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : relogement du fil pret sur un
+            // coeur muet (A/B), et banc de la vraie panne -- `gele-fil APRES_MS
+            // DUREE_MS` : le fil cesse de progresser, le chien de garde doit
+            // replier.
+            "secours" => {
+                let oui = !(argc >= 3 && argv[2] == "off");
+                crate::drivers::serial::choisit_secours_fil(oui);
+                crate::serial_println!("CONSOLE_SECOURS {}", if oui { "on" } else { "off" });
+            }
+            "gele-fil" => {
+                let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+                let (apres, duree) = (lis(2, 1500).min(600_000), lis(3, 6000).min(60_000));
+                crate::drivers::serial::banc_gele_fil_console(apres, duree);
+                crate::serial_println!("CONSOLE_GEL_FIL apres_ms={} duree_ms={}", apres, duree);
+            }
             // Banc (tools/ci/run_console_panique.sh) : N lignes numerotees
             // d'un trait, pour qu'une panique les trouve dans l'anneau.
             "rafale" => {
@@ -762,7 +817,7 @@ fn console_async(argc: usize, argv: &[&str; 12]) -> i32 {
                 return 0;
             }
             autre => {
-                crate::println!("console-async : {} inconnu (on | off | etat | rafale N)", autre);
+                crate::println!("console-async : {} inconnu (on | off | etat | rafale N | secours on|off | gele-fil APRES DUREE)", autre);
                 return 1;
             }
         }

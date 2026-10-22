@@ -17,9 +17,13 @@
  * ecrit alors PROCESS_EXIT / PROCESS_FAULT / FAULT_FATAL depuis d'autres
  * coeurs. Le banc relit le journal et exige les E*L lignes intactes.
  *
- * Usage : serie-entrelacement-probe [ecrivains] [lignes] [processus] [charge]
- *         (defaut 3 200 120 160 ; charge <= 1900 octets par ligne : une ligne
- *         longue tient le jeton longtemps, comme un releve du noyau)
+ * Usage : serie-entrelacement-probe [ecrivains] [lignes] [processus] [charge] [pas_ms]
+ *         (defaut 3 200 120 160 0 ; charge <= 1900 octets par ligne : une ligne
+ *         longue tient le jeton longtemps, comme un releve du noyau ; pas_ms :
+ *         pause entre deux lignes d'un ecrivain -- des producteurs LENTS, qui
+ *         ne remplissent jamais l'anneau de la console : le banc du fil gele,
+ *         BOUCHAUD_CONSOLE_FIL_SECOURS_V1, ou personne d'autre que le fil ne
+ *         vide)
  * Sortie : SERIE_ENTRELACEMENT_FIN ecrivains=E lignes=L processus=C
  */
 #include <stdio.h>
@@ -31,6 +35,7 @@
 #define CHARGE_MAX 1900
 
 static int charge_octets = 160;
+static int pas_ms = 0;
 
 static void ligne(int e, int n, char *tampon, size_t taille)
 {
@@ -49,6 +54,8 @@ static void ecrivain(int e, int lignes)
         size_t longueur = strlen(tampon);
         if (write(1, tampon, longueur) != (ssize_t)longueur)
             _exit(2);
+        if (pas_ms > 0)
+            usleep((useconds_t)pas_ms * 1000u);
     }
     _exit(0);
 }
@@ -77,6 +84,10 @@ int main(int argc, char **argv)
         charge_octets = atoi(argv[4]);
     if (charge_octets < 1 || charge_octets > CHARGE_MAX)
         charge_octets = 160;
+    if (argc > 5)
+        pas_ms = atoi(argv[5]);
+    if (pas_ms < 0 || pas_ms > 1000)
+        pas_ms = 0;
     pid_t b = fork();
     if (b == 0)
         brasseur(processus);

@@ -1059,7 +1059,8 @@ static CONSOLE_PHASE: [AtomicU8; crate::arch::x86_64::smp::MAX_CPUS] =
     [const { AtomicU8::new(0) }; crate::arch::x86_64::smp::MAX_CPUS];
 static CONSOLE_REPLI_PHASES: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
 /// Ou en est le fil `console` (diagnostic du repli) : 1 vide un morceau,
-/// 2 point cooperatif, 3 dort 1 ms (jeton occupe), 4 dort (anneau vide).
+/// 2 point cooperatif, 3 dort 1 ms (jeton occupe), 4 dort (anneau vide),
+/// 5 gele (banc de la vraie panne).
 static CONSOLE_FIL_PHASE: AtomicU8 = AtomicU8::new(0);
 static CONSOLE_REPLI_FIL_PHASE: AtomicU8 = AtomicU8::new(0);
 /// Au repli : `(etat, on_cpu, file)` du fil (`etat_tache_brut`).
@@ -1070,6 +1071,46 @@ static CONSOLE_REPLI_FIL_FILE: AtomicU8 = AtomicU8::new(0xFF);
 /// d'un tour complet de la boucle interne (pire).
 static CONSOLE_FIL_SOMME_JETON_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 static CONSOLE_FIL_TOUR_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_CONSOLE_FIL_SECOURS_V1 -- UN FIL VIVANT N'EST PAS UN FIL MORT.
+//
+// KVM SMP4, verrou de l'anneau tenu 3 s (run 39667691144) : le fil a dormi
+// une milliseconde sur le jeton occupe, et ce sommeil a dure 3 001 297 us --
+// reveille, il attendait dans la file du coeur que le banc masquait, et un
+// fil noyau n'est jamais vole. A 2 s, le chien de garde a pris ce fil vivant
+// pour un fil mort : repli synchrone, `synchrones=1582`.
+//
+// Trois situations, trois reponses :
+//   * contention normale -- le fil progresse (un morceau, ou le jeton vu
+//     occupe) : rien ;
+//   * coeur suspendu -- le fil est PRET, en file sur un coeur qui ne commute
+//     plus depuis `SECOURS_SEUIL_NS` : il est reloge sur un coeur vivant
+//     (`kernel::task::secours_tache_coeur_muet`) ;
+//   * vrai blocage -- le fil ne progresse plus depuis `CONSOLE_FIL_MUET_NS` :
+//     soupcon, le fil est reveille ; toujours muet `CONSOLE_FIL_CONFIRMATION_NS`
+//     plus tard, repli synchrone definitif. La duree du silence reste bornee
+//     (2,5 s), le chien de garde n'est jamais desarme.
+//
+// Le soupcon distingue aussi une machine entiere suspendue (SMP1, ou tous
+// les processeurs virtuels retires) : a la reprise, le premier producteur
+// voit un progres vieux de plusieurs secondes ; le fil, pret, progresse dans
+// la milliseconde et leve le soupcon.
+const CONSOLE_FIL_CONFIRMATION_NS: u64 = 500_000_000;
+/// `console-async secours on|off` : le secours, pour l'A/B (actif par defaut).
+static CONSOLE_SECOURS_VOULU: AtomicBool = AtomicBool::new(true);
+static CONSOLE_FIL_SECOURS: AtomicU64 = AtomicU64::new(0);
+/// Silence du fil au moment ou il a ete reloge (pire).
+static CONSOLE_FIL_SECOURS_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+/// Debut du soupcon en cours (0 : aucun). Leve des que le progres le depasse.
+static CONSOLE_SOUPCON_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_SOUPCONS: AtomicU64 = AtomicU64::new(0);
+/// Au repli : delai entre le soupcon et le repli.
+static CONSOLE_REPLI_SOUPCON_NS: AtomicU64 = AtomicU64::new(0);
+/// Banc de la vraie panne (`console-async gele-fil APRES DUREE`) : le fil
+/// cesse de progresser DUREE ms a partir de l'instant DEBUT.
+static CONSOLE_FIL_GEL_DEBUT_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_FIL_GEL_DUREE_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_FIL_GELS: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn phase(p: u8) {
@@ -1521,52 +1562,82 @@ fn attend_place(octets: &[u8]) -> Result<(), RefusConsole> {
     issue
 }
 
-/// Fil muet plus de deux secondes avec des lignes en attente : repli
-/// synchrone, et le detenteur suivant du jeton videra l'anneau.
+/// Le chien de garde du fil (BOUCHAUD_CONSOLE_FIL_SECOURS_V1) : un fil pret
+/// sur un coeur muet est reloge ; un fil muet plus de deux secondes est
+/// soupconne, reveille, puis -- toujours muet une demi-seconde plus tard --
+/// la console se replie sur le chemin synchrone, et le detenteur suivant du
+/// jeton videra l'anneau.
 fn surveille_fil_console() {
     if CONSOLE.est_vide() {
         return;
     }
     let maintenant = crate::kernel::timer::monotonic_ns();
     let progres = CONSOLE_DERNIER_PROGRES_NS.load(Ordering::Relaxed);
-    if progres != 0 && maintenant.saturating_sub(progres) > CONSOLE_FIL_MUET_NS {
-        if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {
-            CONSOLE_REPLI_A_NS.store(maintenant, Ordering::Relaxed);
-            CONSOLE_REPLI_MUET_NS.store(maintenant.saturating_sub(progres), Ordering::Relaxed);
-            CONSOLE_REPLI_FIL_VU_NS.store(
-                maintenant.saturating_sub(CONSOLE_FIL_VU_NS.load(Ordering::Relaxed)),
+    if progres == 0 {
+        return;
+    }
+    let muet = maintenant.saturating_sub(progres);
+    if muet > crate::kernel::scheduler::secours::SECOURS_SEUIL_NS && CONSOLE_SECOURS_VOULU.load(Ordering::Relaxed) {
+        let fil = CONSOLE_FIL_TACHE.load(Ordering::Relaxed);
+        if fil != usize::MAX
+            && crate::kernel::task::secours_tache_coeur_muet(fil, crate::kernel::scheduler::secours::SECOURS_SEUIL_NS).is_some()
+        {
+            CONSOLE_FIL_SECOURS.fetch_add(1, Ordering::Relaxed);
+            CONSOLE_FIL_SECOURS_PIRE_NS.fetch_max(muet, Ordering::Relaxed);
+        }
+    }
+    if muet <= CONSOLE_FIL_MUET_NS {
+        return;
+    }
+    // Soupcon : aucun en cours, ou le fil a progresse depuis le dernier.
+    let soupcon = CONSOLE_SOUPCON_NS.load(Ordering::Acquire);
+    if soupcon <= progres {
+        if CONSOLE_SOUPCON_NS.compare_exchange(soupcon, maintenant, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            CONSOLE_SOUPCONS.fetch_add(1, Ordering::Relaxed);
+            reveille_vidange();
+        }
+        return;
+    }
+    if maintenant.saturating_sub(soupcon) < CONSOLE_FIL_CONFIRMATION_NS {
+        return;
+    }
+    if !CONSOLE_REPLI_SECURITE.swap(true, Ordering::AcqRel) {
+        CONSOLE_REPLI_A_NS.store(maintenant, Ordering::Relaxed);
+        CONSOLE_REPLI_SOUPCON_NS.store(maintenant.saturating_sub(soupcon), Ordering::Relaxed);
+        CONSOLE_REPLI_MUET_NS.store(maintenant.saturating_sub(progres), Ordering::Relaxed);
+        CONSOLE_REPLI_FIL_VU_NS.store(
+            maintenant.saturating_sub(CONSOLE_FIL_VU_NS.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+        CONSOLE_REPLI_OCCUPATION.store(CONSOLE.occupation(), Ordering::Relaxed);
+        CONSOLE_REPLI_JETON.store(EMISSION.load(Ordering::Relaxed), Ordering::Relaxed);
+        CONSOLE_REPLI_ENDORMI.store(CONSOLE_FIL_ENDORMI.load(Ordering::Relaxed), Ordering::Relaxed);
+        CONSOLE_REPLI_FIL_PHASE.store(CONSOLE_FIL_PHASE.load(Ordering::Relaxed), Ordering::Relaxed);
+        let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(CONSOLE_FIL_TACHE.load(Ordering::Relaxed));
+        CONSOLE_REPLI_FIL_ETAT.store(etat, Ordering::Relaxed);
+        CONSOLE_REPLI_FIL_ON_CPU.store(on_cpu as u8, Ordering::Relaxed);
+        CONSOLE_REPLI_FIL_FILE.store(file, Ordering::Relaxed);
+        for (cpu, case) in CONSOLE_REPLI_OCCUPANTS.iter().enumerate() {
+            case.store(crate::kernel::task::occupant_coeur(cpu), Ordering::Relaxed);
+            let (_, _, depuis) = crate::kernel::task::profil_occupant(cpu);
+            CONSOLE_REPLI_TENU_NS[cpu].store(
+                if depuis == 0 { 0 } else { maintenant.saturating_sub(depuis) },
                 Ordering::Relaxed,
             );
-            CONSOLE_REPLI_OCCUPATION.store(CONSOLE.occupation(), Ordering::Relaxed);
-            CONSOLE_REPLI_JETON.store(EMISSION.load(Ordering::Relaxed), Ordering::Relaxed);
-            CONSOLE_REPLI_ENDORMI.store(CONSOLE_FIL_ENDORMI.load(Ordering::Relaxed), Ordering::Relaxed);
-            CONSOLE_REPLI_FIL_PHASE.store(CONSOLE_FIL_PHASE.load(Ordering::Relaxed), Ordering::Relaxed);
-            let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(CONSOLE_FIL_TACHE.load(Ordering::Relaxed));
-            CONSOLE_REPLI_FIL_ETAT.store(etat, Ordering::Relaxed);
-            CONSOLE_REPLI_FIL_ON_CPU.store(on_cpu as u8, Ordering::Relaxed);
-            CONSOLE_REPLI_FIL_FILE.store(file, Ordering::Relaxed);
-            for (cpu, case) in CONSOLE_REPLI_OCCUPANTS.iter().enumerate() {
-                case.store(crate::kernel::task::occupant_coeur(cpu), Ordering::Relaxed);
-                let (_, _, depuis) = crate::kernel::task::profil_occupant(cpu);
-                CONSOLE_REPLI_TENU_NS[cpu].store(
-                    if depuis == 0 { 0 } else { maintenant.saturating_sub(depuis) },
-                    Ordering::Relaxed,
-                );
-                let (_, appel, _, _, _) = crate::kernel::task::stall_probe_context_pour(cpu);
-                CONSOLE_REPLI_APPEL[cpu].store(appel, Ordering::Relaxed);
-                let (rip, rip_noyau) = crate::kernel::task::rips_timer(cpu);
-                CONSOLE_REPLI_RIP[cpu].store(rip, Ordering::Relaxed);
-                CONSOLE_REPLI_RIP_NOYAU[cpu].store(rip_noyau, Ordering::Relaxed);
-                let (i, n) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
-                    .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
-                    .unwrap_or((0, 0));
-                CONSOLE_REPLI_FILE[cpu].store(((i as u64) << 32) | n as u64, Ordering::Relaxed);
-                let (ipi, ipi_rip, utilisateur, raison) = crate::kernel::task::dernier_battement(cpu);
-                CONSOLE_REPLI_IPI[cpu].store(ipi, Ordering::Relaxed);
-                CONSOLE_REPLI_IPI_RIP[cpu].store(ipi_rip, Ordering::Relaxed);
-                CONSOLE_REPLI_IPI_MODE[cpu].store(((utilisateur as u8) << 4) | (raison & 0xF), Ordering::Relaxed);
-                CONSOLE_REPLI_PHASES[cpu].store(CONSOLE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
-            }
+            let (_, appel, _, _, _) = crate::kernel::task::stall_probe_context_pour(cpu);
+            CONSOLE_REPLI_APPEL[cpu].store(appel, Ordering::Relaxed);
+            let (rip, rip_noyau) = crate::kernel::task::rips_timer(cpu);
+            CONSOLE_REPLI_RIP[cpu].store(rip, Ordering::Relaxed);
+            CONSOLE_REPLI_RIP_NOYAU[cpu].store(rip_noyau, Ordering::Relaxed);
+            let (i, n) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+                .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+                .unwrap_or((0, 0));
+            CONSOLE_REPLI_FILE[cpu].store(((i as u64) << 32) | n as u64, Ordering::Relaxed);
+            let (ipi, ipi_rip, utilisateur, raison) = crate::kernel::task::dernier_battement(cpu);
+            CONSOLE_REPLI_IPI[cpu].store(ipi, Ordering::Relaxed);
+            CONSOLE_REPLI_IPI_RIP[cpu].store(ipi_rip, Ordering::Relaxed);
+            CONSOLE_REPLI_IPI_MODE[cpu].store(((utilisateur as u8) << 4) | (raison & 0xF), Ordering::Relaxed);
+            CONSOLE_REPLI_PHASES[cpu].store(CONSOLE_PHASE[cpu].load(Ordering::Relaxed), Ordering::Relaxed);
         }
     }
 }
@@ -1581,6 +1652,16 @@ fn fil_console() -> ! {
     loop {
         let ticket = CONSOLE_ATTENTE.ticket();
         loop {
+            // BOUCHAUD_CONSOLE_FIL_SECOURS_V1 -- banc de la vraie panne : le
+            // fil cesse de progresser (`console-async gele-fil`).
+            let gel = CONSOLE_FIL_GEL_DEBUT_NS.load(Ordering::Relaxed);
+            if gel != 0
+                && crate::kernel::timer::monotonic_ns() >= gel
+                && CONSOLE_FIL_GEL_DEBUT_NS.compare_exchange(gel, 0, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+            {
+                gele_fil_pour_banc(CONSOLE_FIL_GEL_DUREE_NS.load(Ordering::Relaxed));
+                precedent = 0;
+            }
             let tour = crate::kernel::timer::monotonic_ns();
             CONSOLE_FIL_VU_NS.store(tour, Ordering::Relaxed);
             if precedent != 0 {
@@ -1626,6 +1707,43 @@ fn fil_console() -> ! {
         CONSOLE_FIL_ENDORMI.store(false, Ordering::SeqCst);
         depuis = crate::kernel::timer::monotonic_ns();
     }
+}
+
+/// Banc de la vraie panne : le fil dort par tranches de 10 ms sans toucher
+/// l'anneau ni ses temoins de progres -- vivant pour l'ordonnanceur, muet
+/// pour la console. Le chien de garde doit replier, borne.
+fn gele_fil_pour_banc(duree_ns: u64) {
+    CONSOLE_FIL_GELS.fetch_add(1, Ordering::Relaxed);
+    CONSOLE_FIL_PHASE.store(5, Ordering::Relaxed);
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree_ns);
+    while crate::kernel::timer::monotonic_ns() < fin {
+        crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(10).max(1));
+    }
+}
+
+/// BOUCHAUD_CONSOLE_FIL_SECOURS_V1 -- banc : le coeur dans la file duquel le
+/// fil `console` attend son tour (`None` avant le fil).
+pub fn coeur_du_fil_console() -> Option<usize> {
+    let index = CONSOLE_FIL_TACHE.load(Ordering::Relaxed);
+    if index == usize::MAX {
+        return None;
+    }
+    let (etat, _, file) = crate::kernel::task::etat_tache_brut(index);
+    if etat == 9 { None } else { Some(file as usize) }
+}
+
+/// Banc de la vraie panne : dans `apres_ms`, le fil cesse de progresser
+/// `duree_ms`.
+pub fn banc_gele_fil_console(apres_ms: u64, duree_ms: u64) {
+    CONSOLE_FIL_GEL_DUREE_NS.store(duree_ms.saturating_mul(1_000_000), Ordering::Relaxed);
+    let debut = crate::kernel::timer::monotonic_ns().saturating_add(apres_ms.saturating_mul(1_000_000));
+    CONSOLE_FIL_GEL_DEBUT_NS.store(debut.max(1), Ordering::Release);
+}
+
+/// `console-async secours on|off` (A/B) : relogement du fil pret sur un coeur
+/// muet.
+pub fn choisit_secours_fil(oui: bool) {
+    CONSOLE_SECOURS_VOULU.store(oui, Ordering::Relaxed);
 }
 
 fn differees_vides() -> bool {
@@ -1941,7 +2059,8 @@ pub fn journalise_bilan_console() {
          replis_differes={} vidanges_aidees={} reentrees={} differees_pendant_vidange={} reveils={} jeton_occupe={} ligne_pire_us={} \
          morceau_pire_us={} retard_pire_us={} ajout_pire_us={} occupation_pire={} synchrones={} synchrone_pire_us={} \
          verrou_abandons={} verrou_cedees={} verrou_cedee_pire_us={} verrou_attente_pire_us={} \
-         repli_a_ms={} repli_muet_ms={} repli_fil_vu_ms={} repli_occupation={} repli_jeton={} repli_fil_endormi={}",
+         repli_a_ms={} repli_muet_ms={} repli_fil_vu_ms={} repli_occupation={} repli_jeton={} repli_fil_endormi={} \
+         secours_voulu={} secours={} secours_pire_ms={} relogees={} refus_entree={} soupcons={} repli_soupcon_ms={} gels={}",
         c.active as u8, c.repli_securite as u8, c.lignes, c.emises, c.pleines,
         c.replis_differes, c.vidanges_aidees, c.reentrees, c.differees_pendant_vidange, c.reveils, c.jeton_occupe,
         c.ligne_pire_ns / 1000, c.morceau_pire_ns / 1000, c.retard_pire_ns / 1000, c.ajout_pire_ns / 1000, c.occupation_pire,
@@ -1953,6 +2072,14 @@ pub fn journalise_bilan_console() {
         CONSOLE_REPLI_OCCUPATION.load(Ordering::Relaxed),
         CONSOLE_REPLI_JETON.load(Ordering::Relaxed),
         CONSOLE_REPLI_ENDORMI.load(Ordering::Relaxed) as u8,
+        CONSOLE_SECOURS_VOULU.load(Ordering::Relaxed) as u8,
+        CONSOLE_FIL_SECOURS.load(Ordering::Relaxed),
+        CONSOLE_FIL_SECOURS_PIRE_NS.load(Ordering::Relaxed) / 1_000_000,
+        crate::kernel::task::compteurs_secours_coeur_muet().0,
+        crate::kernel::task::compteurs_secours_coeur_muet().1,
+        CONSOLE_SOUPCONS.load(Ordering::Relaxed),
+        CONSOLE_REPLI_SOUPCON_NS.load(Ordering::Relaxed) / 1_000_000,
+        CONSOLE_FIL_GELS.load(Ordering::Relaxed),
     );
     if CONSOLE_REPLI_A_NS.load(Ordering::Relaxed) != 0 {
         crate::serial_println!(

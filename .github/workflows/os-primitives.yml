@@ -199,6 +199,31 @@ jobs:
           # lignes perdues sous TCG) ; exige toujours 0 perdue.
           BANC_VERROU_SUSPENDU_MS=12000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
           cp serie-entrelacement.log serie-entrelacement-kvm-verrou-suspendu-12s.log
+          # BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : le cas du run 39667691144 (KVM
+          # SMP4, 6e8bf33e) rendu deterministe -- la suspension frappe LE coeur
+          # dans la file duquel le fil `console` attend. Temoin (secours off) :
+          # le repli DOIT revenir. Correctif : le fil est reloge (secours>=1),
+          # aucun repli, 600/600.
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-coeur-du-fil-temoin.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-coeur-du-fil.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-coeur-du-fil-temoin.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-coeur-du-fil.log
+          # Le fil gele 6 s sous le flot ordinaire : les producteurs vident
+          # eux-memes l'anneau plein, la console progresse -- aucun repli.
+          BANC_FIL_GELE_MS=6000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-fil-gele-sature.log
+          # La vraie panne : le fil cesse de progresser 6 s, producteurs lents
+          # (80 ms par ligne, 4 processus : l'anneau ne se remplit jamais, personne d'autre ne le vide). Le chien de
+          # garde DOIT replier, explique, borne (silence 2-3 s, confirmation
+          # 0,5-1 s).
+          BANC_FIL_GELE_MS=6000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3 60 4 40 80 || r=1
+          cp serie-entrelacement.log serie-entrelacement-tcg-fil-gele.log
+          BANC_FIL_GELE_MS=6000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3 60 4 40 80 || r=1
+          cp serie-entrelacement.log serie-entrelacement-kvm-fil-gele.log
           # BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une panique n'emporte pas les
           # lignes qui attendaient dans l'anneau (asynchrone SMP2/SMP4 KVM,
           # synchrone, SMP1 ou l'autorun ne cede pas le coeur).
