@@ -178,6 +178,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     }
 
     arch::x86_64::init();
+    // BOUCHAUD_PREUVE_HOTE_V1 : sous KVM, l'hote publie le temps qu'il vole
+    // a ce coeur (sans effet ailleurs). Les AP le demandent a leur entree.
+    kernel::vol_hote::active_ce_coeur(0);
     if reference_bringup {
         kernel::dmesg::log("bringup: SMP/AP startup volontairement ignore");
     } else {
@@ -331,6 +334,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // service generique, pas un effet de bord du thread USB/blackbox.
     // BOUCHAUD_RELEVES_HORS_IRQ_V1 : le fil qui imprime ce que les
     // interruptions capturent (sonde d'ordonnancement, veille d'attente).
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : desormais une ligne attend dans un
+    // anneau, et le fil `console` l'emet interruptions ouvertes.
+    drivers::serial::demarre_console_asynchrone();
     kernel::task::demarre_fil_diagnostic();
     gui::services::demarre_fil_mesures_processus();
     drivers::xhci_active::demarre_le_fil_blackbox();

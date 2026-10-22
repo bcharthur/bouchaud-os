@@ -1,0 +1,74 @@
+name: P13 dedicated KVM qualification
+
+# Exclusively manually dispatched: a hosted 4-core runner is NOT proof for SMP8.
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: 'Baseline SMP1/2/4, qualification SMP8, or long SMP8 KVM endurance'
+        type: choice
+        required: true
+        default: 'baseline'
+        options:
+          - baseline
+          - smp8
+          - smp8-soak
+      minutes:
+        description: 'SMP8 endurance minutes (30/60/90/150)'
+        type: choice
+        required: true
+        default: '30'
+        options: ['30', '60', '90', '150']
+
+permissions:
+  contents: read
+
+# Dedicated runner MUST have this manually registered label and >=8 CPUs.
+# It will remain queued indefinitely if no trusted runner is configured.
+concurrency:
+  group: p13-dedicated-kvm
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: P13 / ${{ inputs.campaign }} / dedicated KVM
+    runs-on: [self-hosted, Linux, X64, bouchaud-kvm8]
+    timeout-minutes: 220
+    env:
+      BOUCHAUD_DEDICATED_HOST: 'YES'
+      P13_QUALIFICATION_OUT: p13-dedicated-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contrôle du véritable hôte KVM AVANT toute construction
+        run: |
+          python3 tools/ci/p13_kvm_host_preflight.py --min-cpus 8 --output p13-host-preflight.json
+      - name: Build noyau exact SHA
+        run: tools/ci/build_kernel.sh
+      - name: Qualification dédiée SMP1/2/4 ou SMP8
+        if: ${{ inputs.campaign != 'smp8-soak' }}
+        shell: bash
+        run: |
+          bash tools/ci/run_p13_dedicated_kvm.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            '${{ inputs.campaign }}'
+      - name: Endurance SMP8 sous KVM natif
+        if: ${{ inputs.campaign == 'smp8-soak' }}
+        shell: bash
+        run: |
+          tools/ci/fabrique-scenario-endurance.sh endurance-scenario
+          PYTHONPATH=tools/ci/reliability python3 tools/ci/p13_kvm_soak.py \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --disk endurance-scenario/endurance.img \
+            --markers endurance-scenario/marqueurs-endurance.txt \
+            --minutes '${{ inputs.minutes }}' \
+            --output p13-dedicated-soak-${{ github.run_id }}
+      - name: Publier toutes les preuves même si rouge
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p13-dedicated-evidence-${{ github.run_id }}
+          path: |
+            p13-host-preflight.json
+            p13-dedicated-*/**
+          if-no-files-found: warn
+          retention-days: 30

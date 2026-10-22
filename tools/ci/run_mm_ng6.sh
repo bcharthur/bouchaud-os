@@ -49,13 +49,19 @@ cat mm-ng6.log || true
 [ "$code" -ne 124 ] || { echo 'QEMU MM stress timed out' >&2; exit 1; }
 [ "$code" -eq 33 ] || { echo "unexpected QEMU guest exit code: $code (expected 33)" >&2; exit 1; }
 
+# BOUCHAUD_MARQUEUR_HORS_ECHO_V1 : le shell recopie chaque ligne du script
+# (« + ... && echo MMSTRESS_BASIC_OK ») avant de l'executer. Le marqueur est
+# donc dans le journal meme si mmstress echoue : on ne le cherche que sur les
+# lignes EMISES, jamais sur l'echo d'une commande.
+sed 's/\x1b\[[0-9;]*[A-Za-z]//g' mm-ng6.log \
+  | grep -avE '^[[:space:]]*(\[[0-9:]{8}\]\[[^]]*\]\[FPS:[^]]*\][[:space:]]*)?\+ ' > mm-ng6.emis.log || true
 for marker in \
   MMSTRESS_BASIC_BEGIN MMSTRESS_BASIC_OK \
   MMSTRESS_UNRELATED_BEGIN MMSTRESS_UNRELATED_OK \
   MMSTRESS_ABA_BEGIN MMSTRESS_ABA_OK \
   MMSTRESS_CHURN_BEGIN MMSTRESS_CHURN_OK_GUEST \
   MMSTRESS_NG6_ALL_DONE; do
-  grep -aF "$marker" mm-ng6.log
+  grep -aF "$marker" mm-ng6.emis.log || { echo "marqueur non emis : $marker" >&2; exit 1; }
  done
 grep -aF '=== AUTORUN FIN === statut=0' mm-ng6.log
 

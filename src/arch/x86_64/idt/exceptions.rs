@@ -30,6 +30,10 @@ pub fn prends_la_panique(cpu: usize) -> bool {
 }
 
 pub fn arret_definitif() -> ! {
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : les lignes que le fil `console`
+    // n'a pas encore emises sortent avant l'arret (hors panique, qui vide
+    // elle-meme).
+    crate::drivers::serial::vide_console_avant_arret();
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
@@ -169,6 +173,10 @@ extern "x86-interrupt" fn double_fault_handler(stack: InterruptStackFrame, code:
         arret_definitif();
     }
 
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : une double faute est une panique --
+    // les lignes en attente du fil `console` sortent d'abord, et les
+    // suivantes ne dependent plus d'aucun fil (les autres coeurs s'arretent).
+    crate::drivers::serial::passe_en_panique();
     releve_faute_fatale("DOUBLE FAULT", &stack, code);
     smp::arrete_les_autres_cpu();
     serial_println!("*** KERNEL PANIC *** double faute, cpu={}", cpu);
@@ -206,7 +214,32 @@ impl Drop for GsGuard {
     }
 }
 
-fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
+/// Ce qu'une faute de page avait AU MOMENT ou elle est arrivee.
+///
+/// BOUCHAUD_FAUTE_CR2_A_L_ENTREE_V1 : CR2 etait relu ici, en fin de chemin.
+/// Pour un #PF ring 3, le gestionnaire a entre-temps rouvert les
+/// interruptions et peut avoir cede le coeur (`fault_retry_yield`) : une
+/// autre faute sur ce coeur reecrit CR2. Integration fa387b28 :
+/// `persist-course-probe`, trois fils « fautifs » a `printf_core+0` (un
+/// `push` sur leur pile) avec `cr2=0x45` -- adresse qu'un `push` ne peut pas
+/// toucher. Le chiffre publie n'etait pas celui de la faute.
+#[derive(Clone, Copy)]
+struct FautePage {
+    adresse: u64,
+    code: u64,
+    issue: &'static str,
+}
+
+fn kill_faulting_task(reason: &str, signal: u32, stack: &InterruptStackFrame) -> ! {
+    kill_faulting_task_avec(reason, signal, stack, None)
+}
+
+fn kill_faulting_task_avec(
+    reason: &str,
+    signal: u32,
+    stack: &InterruptStackFrame,
+    faute: Option<FautePage>,
+) -> ! {
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
     // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
@@ -215,7 +248,12 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     // pouvoir publier sa panique. Ce qu'il faut ici a ses propres gardes :
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
-    let cr2 = x86_64::registers::control::Cr2::read_raw();
+    // Pour un #PF : l'adresse lue a l'ENTREE du gestionnaire. Pour les autres
+    // exceptions, CR2 ne decrit rien ; il est relu comme avant.
+    let cr2 = match faute {
+        Some(f) => f.adresse,
+        None => x86_64::registers::control::Cr2::read_raw(),
+    };
     crate::println!(
         "{} dans le programme utilisateur (rip={:#x}) : processus termine",
         reason,
@@ -234,10 +272,20 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
     let pid = crate::kernel::task::try_current().map(|t| t.process.pid).unwrap_or(0);
     // BOUCHAUD_SYMBOLISE_FAUTES_V1 : `base=` (fin de ligne) rapporte le rip
     // a l'image PIE ; tools/ci/symbolise_fautes.py le lit ici d'abord.
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
-        pid, reason, stack.instruction_pointer.as_u64(),
-        stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base()));
+    // Les champs du #PF viennent APRES `base=` : symbolise_fautes.py lit
+    // `cr2=... base=...` dans cet ordre.
+    match faute {
+        Some(f) => crate::kernel::dmesg::log_fmt(format_args!(
+            "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x} code={:#x} issue={} cr2_relu={:#x}",
+            pid, reason, stack.instruction_pointer.as_u64(),
+            stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base(),
+            f.code, f.issue, x86_64::registers::control::Cr2::read_raw())),
+        None => crate::kernel::dmesg::log_fmt(format_args!(
+            "PROCESS_FAULT pid={} reason={} rip={:#x} rsp={:#x} cr2={:#x} base={:#x}",
+            pid, reason, stack.instruction_pointer.as_u64(),
+            stack.stack_pointer.as_u64(), cr2, crate::kernel::vmm::user_load_base())),
+    }
+    faute_detail(pid, stack.instruction_pointer.as_u64());
     // BOUCHAUD_PILE_DE_FAUTE_V1 : le RIP seul nomme `ak_trap`, pas qui l'a
     // appele (run 37667817559 : Compositor, `ak_trap (??:?)`, rien d'autre).
     // Les adresses de retour sont sur la pile : on la balaie et on publie les
@@ -247,7 +295,36 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
         pid, reason, stack.instruction_pointer.as_u64(),
         stack.stack_pointer.as_u64(), cr2);
     crate::platform::pc::ecran_faute::sort_exception_resolue();
-    crate::kernel::task::exit_group(139)
+
+    // BOUCHAUD_P19_FATAL_USER_IRQ_EXIT_V1
+    // Les handlers `extern "x86-interrupt"` debutent avec IF=0. Apres un
+    // #UD/#GP/#DE/#SS ring 3, on ne revient pas par iretq : `exit_group`
+    // attend l'extinction des freres (`attend_extinction_freres` ->
+    // `sleep_ticks_noyau` -> schedule), et l'ordonnanceur exige IF=1 : un
+    // processus multi-fils emportait le noyau (`ordonnancement.rs`,
+    // « commutation demandee interruptions coupees », faute-multifil-probe).
+    // Le #PF utilisateur a deja cette remise en route (page_fault_handler).
+    //
+    // Pourquoi c'est sur ICI, et seulement pour une faute venue du ring 3 :
+    // une exception venue du ring 3 est une trappe SYNCHRONE, comme un appel
+    // systeme. Elle s'execute sur la pile noyau de la tache (RSP0 du TSS :
+    // aucun de ces vecteurs n'a d'IST, `idt.rs`), GS est deja celui du noyau
+    // (`GsGuard`), aucun verrou n'est tenu a ce point (la pile de faute et
+    // le diagnostic sont acheves), et une IRQ qui arrive voit CPL0 : elle
+    // traite ce contexte exactement comme un appel systeme en cours. Une
+    // faute du NOYAU n'arrive jamais ici (ses appelants exigent `from_user`)
+    // -- la condition le rend structurel, et `verifie-preemption-noyau.py` le
+    // garde.
+    if from_user(stack) {
+        x86_64::instructions::interrupts::enable();
+    }
+    // BOUCHAUD_SIGNAL_DE_FAUTE_V1 : le signal que Linux delivre pour cette
+    // exception (#UD SIGILL, #DE SIGFPE, #SS SIGBUS, #GP/#PF SIGSEGV), pas
+    // SIGSEGV pour toutes : un parent (le navigateur pour ses services) lit
+    // la cause dans `WTERMSIG`. Le code `128 + signal` reste celui des
+    // journaux ; `wait4` lit la mort par signal sur son drapeau
+    // (BOUCHAUD_STATUT_SORTIE_V1).
+    crate::kernel::task::exit_group_par_signal(signal as i32)
 }
 
 /// Balaie au plus 8 Kio de pile utilisateur au-dessus de `rsp` et publie les
@@ -258,6 +335,38 @@ fn kill_faulting_task(reason: &str, stack: &InterruptStackFrame) -> ! {
 /// faute, ni lecture disque ; la premiere page absente arrete le balayage.
 /// Heuristique assumee -- des valeurs de pointeurs de fonction peuvent s'y
 /// glisser -- mais les adresses de retour y sont, dans l'ordre des appels.
+/// BOUCHAUD_FAUTE_DETAIL_V1 : S1 (persist-course-probe `fa387b28`,
+/// compta-stress-probe `ca968270`, CI TCG seulement) -- trois fils fautent au
+/// meme `rip` (`printf_core+0`, un `push`) avec `cr2=0x45`, ce qu'un `push`
+/// ne peut pas produire avec une pile saine. Le fil, sa base FS (le registre
+/// ET la valeur rangee par l'ordonnanceur) et les octets de l'instruction
+/// disent si la faute est mal attribuee (autre instruction, autre fil) ou si
+/// l'etat du fil est abime (base TLS perdue a la commutation).
+fn faute_detail(pid: u32, rip: u64) {
+    let Some(tache) = crate::kernel::task::try_current() else { return };
+    let mut octets = [0u8; 16];
+    // Jusqu'a la fin de la page : la suivante peut ne pas exister. Un `rip`
+    // hors de la moitie utilisateur (saut non canonique de
+    // faute-noncanonique-probe) ne se lit pas : ni debordement, ni octet du
+    // noyau dans le journal.
+    let longueur = ((rip | 0xfff).saturating_add(1).saturating_sub(rip) as usize).min(octets.len());
+    let lus = rip < 0x0000_8000_0000_0000
+        && tache.process.mm.lock().space.read(rip, &mut octets[..longueur]);
+    let mut insn = alloc::string::String::new();
+    if lus {
+        for o in &octets[..longueur] {
+            let _ = core::fmt::Write::write_fmt(&mut insn, format_args!("{:02x}", o));
+        }
+    } else {
+        insn.push('?');
+    }
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PROCESS_FAULT_DETAIL pid={} tid={} cpu={} fs_base={:#x} fs_base_range={:#x} insn={}",
+        pid, tache.tid, crate::arch::x86_64::usermode::cpu_index(),
+        crate::arch::x86_64::usermode::fs_base(), tache.fs_base, insn,
+    ));
+}
+
 fn pile_de_faute(pid: u32, rsp: u64, base: u64) {
     const OCTETS: u64 = 8192;
     const MAX: usize = 32;
@@ -322,7 +431,7 @@ extern "x86-interrupt" fn general_protection_handler(stack: InterruptStackFrame,
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("faute de protection generale", &stack);
+        kill_faulting_task("faute de protection generale", crate::kernel::signal::SIGSEGV, &stack);
     }
     releve_faute_fatale("GENERAL PROTECTION FAULT", &stack, code);
     panic!("EXCEPTION: general protection fault (code {})\n{:#?}", code, stack);
@@ -342,7 +451,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack: InterruptStackFrame) {
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("instruction illegale", &stack);
+        kill_faulting_task("instruction illegale", crate::kernel::signal::SIGILL, &stack);
     }
     releve_faute_fatale("INVALID OPCODE", &stack, 0);
     panic!("EXCEPTION: instruction illegale\n{:#?}", stack);
@@ -362,7 +471,7 @@ extern "x86-interrupt" fn divide_error_handler(stack: InterruptStackFrame) {
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("division par zero", &stack);
+        kill_faulting_task("division par zero", crate::kernel::signal::SIGFPE, &stack);
     }
     releve_faute_fatale("DIVIDE ERROR", &stack, 0);
     panic!("EXCEPTION: division par zero\n{:#?}", stack);
@@ -382,7 +491,7 @@ extern "x86-interrupt" fn stack_segment_handler(stack: InterruptStackFrame, code
     // `exit_group` (lifecycle, lot B8), la console (son verrou borne), la
     // panique (`PANIC_GLOBAL`).
     if from_user(&stack) && crate::kernel::task::in_user_task() {
-        kill_faulting_task("faute de pile", &stack);
+        kill_faulting_task("faute de pile", crate::kernel::signal::SIGBUS, &stack);
     }
     releve_faute_fatale("STACK SEGMENT FAULT", &stack, code);
     panic!("EXCEPTION: faute de segment de pile (code {})", code);
@@ -463,7 +572,19 @@ extern "x86-interrupt" fn page_fault_handler(
         // Pas de `account_fault_exit` ici : `kill_faulting_task` ne rend pas
         // la main. `install()` reecrira `COMPTA_EN_NOYAU` depuis le
         // `in_kernel` de la tache entrante a la prochaine commutation.
-        kill_faulting_task("faute de page", &stack);
+        let issue = match outcome {
+            crate::kernel::task::FaultOutcome::Invalid => "invalide",
+            crate::kernel::task::FaultOutcome::IoError => "erreur_es",
+            crate::kernel::task::FaultOutcome::Retired => "retiree",
+            crate::kernel::task::FaultOutcome::Retry => "reessai",
+            crate::kernel::task::FaultOutcome::Resolved => "resolue",
+        };
+        kill_faulting_task_avec(
+            "faute de page",
+            crate::kernel::signal::SIGSEGV,
+            &stack,
+            Some(FautePage { adresse: addr, code: code.bits(), issue }),
+        );
     }
 
     serial_println!("[cpu] page fault @ {:#x} code {:?}", addr, code);

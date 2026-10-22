@@ -454,6 +454,8 @@ pub fn reveille_pour_signal(pid: u32) {
 pub fn kill_all(code: i32) {
     for task in tasks().iter() {
         marque_zombie(task);
-        task.process.lifecycle.lock().exit_code = code;
+        let mut lifecycle = task.process.lifecycle.lock();
+        lifecycle.exit_code = code;
+        lifecycle.par_signal = code >= 128; // appelants internes : 128 + signal
     }
 }

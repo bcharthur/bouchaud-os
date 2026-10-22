@@ -186,7 +186,10 @@ def main():
             "diagnostic_stall.rs : le resume compact a disparu. Il ne "
             "resterait que le silence ou le deluge."
         )
-    appel = stall_code.find("signale_etat_ordonnancement();")
+    # L'argument (le point cooperatif du fil, BOUCHAUD_POINT_COOPERATIF_V1)
+    # ne change rien a la regle : l'appel reste sous `if complet`.
+    m_appel = re.search(r"signale_etat_ordonnancement\([^()]*\);", stall_code)
+    appel = m_appel.start() if m_appel else -1
     garde = stall_code.rfind("if complet {", 0, appel) if appel != -1 else -1
     if appel == -1 or garde == -1 or appel - garde > 300:
         fautes.append(

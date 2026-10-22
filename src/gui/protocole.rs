@@ -73,6 +73,11 @@ pub enum Genre {
     /// Envoye au seul client qui a le foyer, et seulement quand le contenu a
     /// change depuis celui qu'il a deja recu.
     PressePapiers = 0x107,
+    /// Le gestionnaire ne lira plus ce tampon : le client peut y ecrire.
+    /// Charge : `fenetre:u32`, `tampon:u32`. Envoye SEULEMENT a un client qui
+    /// a annonce deux tampons dans `Hello` (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1,
+    /// voir `gui::surface_tampons`) : un client V1 ne le recoit jamais.
+    Liberation = 0x108,
 }
 
 impl Genre {
@@ -93,6 +98,7 @@ impl Genre {
             0x105 => Genre::Wheel,
             0x106 => Genre::CloseRequest,
             0x107 => Genre::PressePapiers,
+            0x108 => Genre::Liberation,
             _ => return None,
         })
     }
@@ -768,6 +774,28 @@ impl Trame {
             tampon: lit_u32(o, 4),
             degat: Rect::decode(&o[8..24])?,
         })
+    }
+}
+
+/// `Liberation` : le tampon `tampon` de la fenetre est rendu au client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Liberation {
+    pub fenetre: u32,
+    pub tampon: u32,
+}
+
+impl Liberation {
+    pub fn encode(&self) -> [u8; 8] {
+        let mut o = [0u8; 8];
+        o[0..4].copy_from_slice(&self.fenetre.to_le_bytes());
+        o[4..8].copy_from_slice(&self.tampon.to_le_bytes());
+        o
+    }
+    pub fn decode(o: &[u8]) -> Option<Liberation> {
+        if o.len() < 8 {
+            return None;
+        }
+        Some(Liberation { fenetre: lit_u32(o, 0), tampon: lit_u32(o, 4) })
     }
 }
 

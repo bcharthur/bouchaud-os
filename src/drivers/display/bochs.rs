@@ -95,6 +95,121 @@ fn rgb(index: u8) -> u32 {
 
 static mut BACK: Option<Vec<u32>> = None;
 static mut LFB: *mut u32 = core::ptr::null_mut();
+// BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composer DIRECTEMENT dans la
+// memoire DMA du scanout virtio-gpu, sans tampon arriere ni copie. Pris a
+// `enter()` si le scanout virtio est monte ; `gpu-tampon copie|direct` pour
+// l'A/B. ACTIVE par defaut depuis l'A/B KVM CONVAINCANT de 77e0e5de (run
+// 38704459647, job gpu-tampon, 6/6 tours AB/BA : p50 plein ecran 428 -> 232,5
+// us, bande 116 -> 110, tuile 72 -> 70 ; pixels TCG et KVM identiques au
+// bureau BGA, 0 octet copie, 0 acces pendant un transfert). La CI rejoue l'A/B
+// a chaque campagne : un KVM NON_CONVAINCANT rend le defaut a la copie. Le
+// bureau n'y ecrit que si aucun transfert n'est en vol
+// (`virtio_gpu::tampon_ecrivable`).
+static TAMPON_DIRECT_VOULU: AtomicBool = AtomicBool::new(true);
+static TAMPON_DIRECT: AtomicBool = AtomicBool::new(false);
+/// Octets copies du tampon arriere vers l'ecran (BGA, ou virtio en copie).
+static OCTETS_COPIES: AtomicU64 = AtomicU64::new(0);
+/// Octets presentes sans copie (virtio en composition directe).
+static OCTETS_DIRECTS: AtomicU64 = AtomicU64::new(0);
+/// Acces au tampon du bureau alors que l'hote pouvait lire la memoire du
+/// scanout (transfert en vol) : doit rester nul.
+static ACCES_EN_TRANSFERT: AtomicU64 = AtomicU64::new(0);
+
+// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : une trame, une soumission. Entre
+// `debut_trame` et `fin_trame`, `present_rect` (virtio seulement) copie comme
+// avant mais DIFFERE les commandes ; `fin_trame` soumet le plan
+// (`virtio_gpu_trame::planifie`) : quelques transferts, UN flush. Voulu par
+// `gpu-trame on|off`. ACTIVE par defaut depuis l'A/B KVM CONVAINCANT de
+// b6c99032 (run 38732049308, job gpu-tampon, 6/6 tours : 16 -> 5 commandes par
+// trame, p50 474 -> 177,5 us, p95 550 -> 237,5 ; TCG CONVAINCANT ; pixels du
+// bureau identiques a BGA 921 362/921 600). La CI rejoue l'A/B ; un KVM
+// NON_CONVAINCANT la rend a `off`. Le verrou ne protege que la liste ; il
+// n'est jamais tenu pendant une commande.
+static TRAME_VOULUE: AtomicBool = AtomicBool::new(true);
+const TRAME_REGIONS_MAX: usize = 32;
+/// Le cout d'une commande, en pixels transferes (mesure KVM : ~20 us par
+/// commande, ~0,4 ns par pixel).
+const COUT_COMMANDE_PX: u64 = 32_768;
+struct Trame {
+    ouverte: bool,
+    regions: [crate::drivers::virtio_gpu_tampons::Rect; TRAME_REGIONS_MAX],
+    n: usize,
+}
+static TRAME: crate::kernel::sync::SpinLock<Trame> = crate::kernel::sync::SpinLock::new(Trame {
+    ouverte: false,
+    regions: [crate::drivers::virtio_gpu_tampons::Rect::vide(); TRAME_REGIONS_MAX],
+    n: 0,
+});
+static TRAMES_FERMEES: AtomicU64 = AtomicU64::new(0);
+static REGIONS_DIFFEREES: AtomicU64 = AtomicU64::new(0);
+
+/// `gpu-trame on|off` : la politique ; rend la precedente.
+pub fn veut_trame(oui: bool) -> bool {
+    TRAME_VOULUE.swap(oui, Ordering::AcqRel)
+}
+
+/// Ouvre une trame (sans effet hors virtio ou si la politique est off).
+pub fn debut_trame() {
+    if !TRAME_VOULUE.load(Ordering::Acquire) || !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    let mut trame = TRAME.lock();
+    trame.ouverte = true;
+    trame.n = 0;
+}
+
+/// Ferme la trame : soumet le plan de ses regions. Sans trame ouverte, rien.
+pub fn fin_trame() {
+    let (plan, n) = {
+        let mut trame = TRAME.lock();
+        if !trame.ouverte {
+            return;
+        }
+        trame.ouverte = false;
+        let n = trame.n;
+        (crate::drivers::virtio_gpu_trame::planifie(&trame.regions[..n], COUT_COMMANDE_PX), n)
+    };
+    TRAMES_FERMEES.fetch_add(1, Ordering::Relaxed);
+    REGIONS_DIFFEREES.fetch_add(n as u64, Ordering::Relaxed);
+    if plan.nb == 0 || !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    if !crate::drivers::virtio_gpu::presente_trame(&plan) && !crate::drivers::virtio_gpu::actif() {
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+        quitte_memoire_scanout();
+    }
+}
+
+/// `(voulue, trames fermees, regions differees)`.
+pub fn compteurs_trame() -> (bool, u64, u64) {
+    (
+        TRAME_VOULUE.load(Ordering::Acquire),
+        TRAMES_FERMEES.load(Ordering::Relaxed),
+        REGIONS_DIFFEREES.load(Ordering::Relaxed),
+    )
+}
+
+/// Dans une trame ouverte, retient le rectangle (rend vrai) ; sinon faux --
+/// l'appelant presente tout de suite.
+fn differe_dans_la_trame(x: usize, y: usize, l: usize, h: usize) -> bool {
+    if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return false;
+    }
+    let mut trame = TRAME.lock();
+    if !trame.ouverte {
+        return false;
+    }
+    let r = crate::drivers::virtio_gpu_tampons::Rect { x: x as u32, y: y as u32, largeur: l as u32, hauteur: h as u32 };
+    if trame.n < TRAME_REGIONS_MAX {
+        let n = trame.n;
+        trame.regions[n] = r;
+        trame.n += 1;
+    } else {
+        // Liste pleine : le rectangle rejoint le dernier (couverture gardee).
+        trame.regions[TRAME_REGIONS_MAX - 1] = trame.regions[TRAME_REGIONS_MAX - 1].union(r);
+    }
+    true
+}
 // BOUCHAUD_GFX_DRAPEAUX_ATOMIQUES_V1
 //
 // Ces trois drapeaux etaient des `static mut` ecrits par le bureau (sous le
@@ -466,6 +581,13 @@ pub fn lfb_phys() -> Option<u64> {
     if firmware_backend_installed() {
         return None;
     }
+    // BOUCHAUD_VIRTIO_GPU_2D_V1 : la memoire du scanout virtio n'est pas un
+    // ecran. Un pixel n'y devient visible qu'apres TRANSFER_TO_HOST_2D +
+    // RESOURCE_FLUSH, que seul le noyau emet. La ceder a un client ring 3
+    // donnerait un ecran fige sans un mot : on refuse (mmap -> ENODEV).
+    if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return None;
+    }
     let phys = LFB_PHYS.load(Ordering::Acquire);
     if phys == 0 {
         // Le mode HD n'a pas encore ete active : on interroge le PCI.
@@ -547,6 +669,12 @@ pub fn handoff_to_userland() -> bool {
         crate::serial_println!("[gfx] handoff userland impossible : BGA inactif");
         return false;
     }
+    if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        // Meme raison que `lfb_phys` : un client ring 3 n'a aucun moyen de
+        // presenter sur le scanout virtio-gpu 2D. Le bureau garde l'ecran.
+        crate::serial_println!("[gfx] handoff userland refuse : scanout virtio-gpu 2D (aucune presentation depuis le ring 3)");
+        return false;
+    }
     USERLAND_OWNS_DISPLAY.store(true, Ordering::Release);
     crate::drivers::gpu::note_handoff(true);
     crate::serial_println!("[gfx] framebuffer cede au userland (BGA conserve)");
@@ -593,6 +721,7 @@ pub fn enter() {
 }
 
 fn enter_verrouille() {
+    TAMPON_DIRECT.store(false, Ordering::Release);
     if firmware_backend_installed() {
         let canvas_width = width();
         let canvas_height = height();
@@ -628,14 +757,84 @@ fn enter_verrouille() {
                 crate::serial_println!("[gfx] BGA HD actif (1280x720x32, id={:#x})", id);
             }
             _ => {
-                LFB = core::ptr::null_mut();
-                HD_ACTIVE.store(false, Ordering::Release);
-                crate::drivers::gpu::deactivate();
-                crate::serial_println!("[gfx] BGA indisponible (id={:#x}) : present() inactif", id);
+                // BOUCHAUD_VIRTIO_GPU_2D_V1 : sans BGA, le scanout 2D
+                // virtio-gpu -- seulement si son autotest a reussi. Avec BGA,
+                // rien ne change (politique_scanout : BGA d'abord).
+                let choix = crate::drivers::politique_scanout::choisit(
+                    false,
+                    false,
+                    crate::drivers::virtio_gpu::pret(),
+                );
+                let virtio = if choix == crate::drivers::politique_scanout::Scanout::Virtio2d {
+                    crate::drivers::virtio_gpu::active_scanout(width(), height())
+                } else {
+                    None
+                };
+                match virtio {
+                    Some((memoire, physique)) => {
+                        LFB = memoire;
+                        LFB_PHYS.store(physique, Ordering::Release);
+                        let mode = crate::drivers::virtio_gpu_tampons::mode(
+                            TAMPON_DIRECT_VOULU.load(Ordering::Acquire),
+                            !memoire.is_null(),
+                            if crate::drivers::virtio_gpu::tampon_ecrivable() {
+                                crate::drivers::virtio_gpu_tampons::Etat::Composition
+                            } else {
+                                crate::drivers::virtio_gpu_tampons::Etat::Inconnu
+                            },
+                        );
+                        if mode == crate::drivers::virtio_gpu_tampons::Mode::Direct {
+                            // Le bureau compose dans la memoire du scanout :
+                            // le tampon arriere (3,7 Mo) n'a plus d'objet.
+                            BACK = None;
+                            TAMPON_DIRECT.store(true, Ordering::Release);
+                        }
+                        VIRTIO_SCANOUT.store(true, Ordering::Release);
+                        HD_ACTIVE.store(true, Ordering::Release);
+                        crate::drivers::gpu::activate_virtio_2d(width(), height(), 32, physique);
+                        crate::serial_println!(
+                            "[gfx] BGA indisponible (id={:#x}) : scanout virtio-gpu 2D actif ({}x{}x32, aucune acceleration)",
+                            id, width(), height()
+                        );
+                    }
+                    None => {
+                        LFB = core::ptr::null_mut();
+                        VIRTIO_SCANOUT.store(false, Ordering::Release);
+                        HD_ACTIVE.store(false, Ordering::Release);
+                        crate::drivers::gpu::deactivate();
+                        crate::serial_println!(
+                            "[gfx] BGA indisponible (id={:#x}) : present() inactif (scanout={})",
+                            id, choix.label()
+                        );
+                    }
+                }
             }
         }
     }
     reset_clip();
+}
+
+/// Le bureau presente-t-il par le scanout virtio-gpu 2D (et non par BGA) ?
+///
+/// Vrai seulement apres `active_scanout` reussi, et tant que le peripherique
+/// repond : `virtio_gpu::presente` le retire apres des echecs consecutifs.
+static VIRTIO_SCANOUT: AtomicBool = AtomicBool::new(false);
+
+/// Apres une copie dans la memoire du scanout virtio : transfert + flush du
+/// rectangle. Sans effet avec BGA ou le GOP.
+#[inline]
+fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) {
+    if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return;
+    }
+    if !crate::drivers::virtio_gpu::presente(x, y, largeur, hauteur)
+        && !crate::drivers::virtio_gpu::actif()
+    {
+        // Abandon : le peripherique ne repond plus. Le bureau continue de
+        // composer, plus rien n'est presente -- et le journal l'a dit.
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+        quitte_memoire_scanout();
+    }
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
@@ -673,6 +872,208 @@ pub fn leave() {
     }
     crate::drivers::gpu::deactivate();
     crate::serial_println!("[gfx] retour mode texte");
+}
+
+// BOUCHAUD_BANC_PRESENTATION_V1
+//
+// BGA CONTRE VIRTIO-GPU 2D, SUR LA MEME CHARGE.
+//
+// Le bureau au repos ne presente presque rien (l'horloge, une fois par
+// seconde) : comparer les deux ecrans sur lui, c'est comparer deux silences.
+// Ce banc presente la MEME suite de trames sur l'ecran actif, par categorie,
+// et chronometre chaque `present_rect` -- copie vers l'ecran, plus, sous
+// virtio-gpu, `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` et leurs reponses.
+// Le dessin dans le tampon arriere n'est PAS compte : il est le meme pour
+// les deux ecrans.
+//
+// Ce que le banc ne mesure pas : quand l'hote AFFICHE la trame. Sous BGA,
+// rien ne le dit a l'invite (la VRAM est relue par l'affichage QEMU a son
+// rythme) ; sous virtio-gpu, la reponse au FLUSH dit que l'hote a mis a jour
+// sa surface -- c'est la seule latence de trame observable, et elle est
+// incluse dans le cout mesure.
+
+/// Une categorie : nom, rectangle, nombre de presentations.
+const BANC_CATEGORIES: [(&str, usize, usize, usize, usize, usize); 3] = [
+    ("plein", 0, 0, WIDTH, HEIGHT, 40),
+    ("bande", 0, 0, WIDTH, 30, 200),
+    ("tuile", 600, 300, 64, 64, 400),
+];
+
+/// `banc-present` : entre en mode graphique, presente, mesure, ressort.
+///
+/// `banc-present` mesure depuis le contexte d'amorcage (ou l'attente d'une
+/// reponse ne peut que tourner) ; `banc-present tache` depuis une tache
+/// noyau epinglee au coeur zero, comme le bureau (`run_noyau`) -- le seul
+/// contexte ou l'attente peut ceder ou dormir (BOUCHAUD_VIRTIO_GPU_IRQ_V1).
+pub fn banc_presentation(en_tache: bool) {
+    enter();
+    if !is_active() {
+        crate::serial_println!("[BANC-PRESENT] ECHEC raison=aucun-ecran-actif");
+        return;
+    }
+    reset_clip();
+    if en_tache {
+        let code = crate::kernel::task::run_noyau(fil_banc_presentation, "banc-present");
+        if code != 0 {
+            crate::serial_println!("[BANC-PRESENT] ECHEC raison=tache-du-banc code={}", code);
+        }
+    } else {
+        mesure_categories("amorcage");
+    }
+    leave();
+}
+
+// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : une trame de bureau typique --
+// barre du haut et horloge, barre des taches, deux tuiles voisines, curseur,
+// titre et corps d'une fenetre -- presentee 100 fois, chronometree de
+// `debut_trame` a la fin de sa soumission.
+const BANC_TRAME_REGIONS: [(usize, usize, usize, usize); 8] = [
+    (0, 0, WIDTH, 30),
+    (1180, 5, 90, 20),
+    (0, HEIGHT - 30, WIDTH, 30),
+    (100, 100, 64, 64),
+    (164, 100, 64, 64),
+    (640, 360, 16, 16),
+    (300, 200, 400, 24),
+    (300, 224, 400, 200),
+];
+const BANC_TRAME_N: usize = 100;
+
+/// `banc-trame` : entre en mode graphique, mesure depuis une tache noyau
+/// (contexte du bureau), ressort.
+pub fn banc_trame() {
+    enter();
+    if !is_active() {
+        crate::serial_println!("[BANC-TRAME] ECHEC raison=aucun-ecran-actif");
+        return;
+    }
+    reset_clip();
+    let code = crate::kernel::task::run_noyau(fil_banc_trame, "banc-trame");
+    if code != 0 {
+        crate::serial_println!("[BANC-TRAME] ECHEC raison=tache-du-banc code={}", code);
+    }
+    leave();
+}
+
+fn fil_banc_trame() -> ! {
+    let ecran = if VIRTIO_SCANOUT.load(Ordering::Acquire) { "virtio-gpu-2d" } else { "autre" };
+    let trame = if TRAME_VOULUE.load(Ordering::Acquire) { "on" } else { "off" };
+    let (ok0, echecs0, pixels0, _) = crate::drivers::virtio_gpu::compteurs();
+    let (_, commandes0) = crate::drivers::virtio_gpu::compteurs_trame();
+    let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(BANC_TRAME_N);
+    for i in 0..BANC_TRAME_N {
+        let debut = crate::kernel::timer::monotonic_ns();
+        debut_trame();
+        for (x, y, l, h) in BANC_TRAME_REGIONS {
+            fill_rect(x, y, l, h, (i % 15 + 1) as u8);
+            present_rect(x, y, l, h);
+        }
+        fin_trame();
+        durees.push(crate::kernel::timer::monotonic_ns().saturating_sub(debut));
+    }
+    let (ok1, echecs1, pixels1, _) = crate::drivers::virtio_gpu::compteurs();
+    let (_, commandes1) = crate::drivers::virtio_gpu::compteurs_trame();
+    durees.sort_unstable();
+    let n = durees.len();
+    let centile = |c: usize| durees[(n * c / 100).min(n - 1)] / 1000;
+    // Hors trame, chaque presentation reussie a coute deux commandes.
+    let presentations = ok1.saturating_sub(ok0);
+    let commandes = if trame == "on" { commandes1.saturating_sub(commandes0) } else { presentations * 2 };
+    crate::serial_println!(
+        "[BANC-TRAME] ecran={} trame={} n={} regions={} p50_us={} p95_us={} p99_us={} max_us={} commandes={} \
+         commandes_par_trame_x10={} presentations_ok={} echecs={} pixels={} actif={}",
+        ecran, trame, n, BANC_TRAME_REGIONS.len(), centile(50), centile(95), centile(99), durees[n - 1] / 1000,
+        commandes, commandes * 10 / n as u64, presentations, echecs1.saturating_sub(echecs0),
+        pixels1.saturating_sub(pixels0), crate::drivers::virtio_gpu::actif() as u8,
+    );
+    crate::kernel::task::exit_current(0)
+}
+
+fn fil_banc_presentation() -> ! {
+    mesure_categories("tache");
+    crate::kernel::task::exit_current(0)
+}
+
+fn mesure_categories(contexte: &str) {
+    let ecran = if firmware_backend_installed() {
+        "gop"
+    } else if VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        "virtio-gpu-2d"
+    } else {
+        "bga"
+    };
+    // Ce que l'attente d'une reponse fera ICI (meme decision que le pilote).
+    let c0 = crate::drivers::virtio_gpu::compteurs_irq();
+    let attente = if ecran != "virtio-gpu-2d" {
+        "-"
+    } else if crate::drivers::virtio_gpu_irq::strategie(
+        crate::kernel::scheduler::preempt::cession_volontaire_sure(),
+        c0.armee,
+        c0.voulue,
+    ) == crate::drivers::virtio_gpu_irq::Strategie::Dort
+    {
+        "irq"
+    } else {
+        "scrute"
+    };
+    let (ok0, echecs0, _, _) = crate::drivers::virtio_gpu::compteurs();
+    let tampon = if TAMPON_DIRECT.load(Ordering::Acquire) { "direct" } else { "copie" };
+    for (nom, x, y, l, h, n) in BANC_CATEGORIES {
+        let (_, _, copies0, directs0, acces0) = compteurs_tampon();
+        let mut durees: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(n);
+        let avant = crate::drivers::virtio_gpu::compteurs_irq();
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : ce que l'attente coute au coeur ou
+        // tourne le banc -- la part de temps ou il est reste INACTIF.
+        let coeur = crate::arch::x86_64::usermode::cpu_index();
+        let (inactif0, horloge0) = (crate::arch::x86_64::cpu::idle_ns(coeur), crate::kernel::timer::monotonic_ns());
+        for i in 0..n {
+            // Une couleur differente a chaque trame : chaque presentation
+            // transporte des pixels qui ont change.
+            fill_rect(x, y, l, h, (i % 15 + 1) as u8);
+            let debut = crate::kernel::timer::monotonic_ns();
+            present_rect(x, y, l, h);
+            durees.push(crate::kernel::timer::monotonic_ns().saturating_sub(debut));
+        }
+        let apres = crate::drivers::virtio_gpu::compteurs_irq();
+        let inactif = crate::arch::x86_64::cpu::idle_ns(coeur).saturating_sub(inactif0);
+        let horloge = crate::kernel::timer::monotonic_ns().saturating_sub(horloge0).max(1);
+        durees.sort_unstable();
+        let total: u64 = durees.iter().sum();
+        let moyen = total / n as u64;
+        let centile = |c: usize| durees[(n * c / 100).min(n - 1)];
+        let pixels = (l * h * n) as u64;
+        crate::serial_println!(
+            "[BANC-PRESENT] ecran={} categorie={} rect={}x{} n={} moyen_us={} p50_us={} p95_us={} max_us={} mpix_s={} \
+             contexte={} attente={} cessions={} sommeils={} irq={} irq_sans_progres={} vus_par_relecture={} echues={} \
+             coeur={} inactif_pour_mille={} tampon={} octets_copies={} octets_directs={} acces_en_transfert={}",
+            ecran, nom, l, h, n,
+            moyen / 1000, centile(50) / 1000, centile(95) / 1000, durees[n - 1] / 1000,
+            if total == 0 { 0 } else { pixels.saturating_mul(1000) / total },
+            contexte, attente,
+            apres.cessions - avant.cessions,
+            apres.sommeils - avant.sommeils,
+            apres.irq - avant.irq,
+            apres.irq_sans_progres - avant.irq_sans_progres,
+            apres.vus_par_relecture - avant.vus_par_relecture,
+            apres.echues - avant.echues,
+            coeur,
+            inactif.saturating_mul(1000) / horloge,
+            tampon,
+            compteurs_tampon().2 - copies0,
+            compteurs_tampon().3 - directs0,
+            compteurs_tampon().4 - acces0,
+        );
+    }
+    let (ok1, echecs1, _, _) = crate::drivers::virtio_gpu::compteurs();
+    crate::serial_println!(
+        "[BANC-PRESENT] ecran={} fin presentations_virtio_ok={} echecs_virtio={} actif={} contexte={} attente={}",
+        ecran,
+        ok1.saturating_sub(ok0),
+        echecs1.saturating_sub(echecs0),
+        is_active() as u8,
+        contexte,
+        attente,
+    );
 }
 
 fn reverse_bits(mut b: u8) -> u8 {
@@ -741,7 +1142,53 @@ unsafe fn write_regs_text(crtc: &[u8; 25], gc: &[u8; 9], ac: &[u8; 21]) {
 // --- Dessin sur le double-buffer (32 bits) ----------------------------------
 
 fn back() -> &'static mut [u32] {
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        if !crate::drivers::virtio_gpu::tampon_ecrivable() {
+            ACCES_EN_TRANSFERT.fetch_add(1, Ordering::Relaxed);
+        }
+        let lfb = unsafe { LFB };
+        if lfb.is_null() {
+            return &mut [];
+        }
+        // La memoire DMA du scanout couvre `width() x height()` pixels
+        // (`active_scanout` l'a allouee pour cette geometrie).
+        return unsafe { core::slice::from_raw_parts_mut(lfb, width() * height()) };
+    }
     unsafe { BACK.as_mut().map(|v| v.as_mut_slice()).unwrap_or(&mut []) }
+}
+
+/// `gpu-tampon direct|copie` : la politique, prise au prochain `enter()`.
+/// Rend la precedente.
+pub fn veut_tampon_direct(oui: bool) -> bool {
+    TAMPON_DIRECT_VOULU.swap(oui, Ordering::AcqRel)
+}
+
+/// `(voulu, actif, octets copies, octets presentes sans copie, acces pendant
+/// un transfert)`.
+pub fn compteurs_tampon() -> (bool, bool, u64, u64, u64) {
+    (
+        TAMPON_DIRECT_VOULU.load(Ordering::Acquire),
+        TAMPON_DIRECT.load(Ordering::Acquire),
+        OCTETS_COPIES.load(Ordering::Relaxed),
+        OCTETS_DIRECTS.load(Ordering::Relaxed),
+        ACCES_EN_TRANSFERT.load(Ordering::Relaxed),
+    )
+}
+
+/// Le scanout virtio est abandonne : sa memoire peut encore etre lue par
+/// l'hote (transfert sans reponse) et ne doit plus etre ecrite. En
+/// composition directe, le bureau repart sur un tampon arriere -- l'image
+/// courante y est recopiee (lire la memoire est sans danger).
+fn quitte_memoire_scanout() {
+    unsafe {
+        if TAMPON_DIRECT.swap(false, Ordering::AcqRel) && !LFB.is_null() {
+            let n = width() * height();
+            let mut v = vec![0u32; n];
+            core::ptr::copy_nonoverlapping(LFB, v.as_mut_ptr(), n);
+            BACK = Some(v);
+        }
+        LFB = core::ptr::null_mut();
+    }
 }
 
 pub fn clear(color: u8) {
@@ -796,9 +1243,18 @@ pub fn present() {
     if buf.is_empty() { return; }
     let lfb = unsafe { LFB };
     if lfb.is_null() { return; }
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
+    let octets = (width() * height() * core::mem::size_of::<u32>()) as u64;
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : le bureau a compose dans la
+        // memoire du scanout ; aucune copie.
+        OCTETS_DIRECTS.fetch_add(octets, Ordering::Relaxed);
+    } else {
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), lfb, width() * height());
+        }
+        OCTETS_COPIES.fetch_add(octets, Ordering::Relaxed);
     }
+    presente_virtio(0, 0, width(), height());
     crate::drivers::gpu::note_present(width() * height() * core::mem::size_of::<u32>());
 }
 
@@ -918,7 +1374,13 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // chaque seconde -- `last_present_rect=0,0,1280,30` --, la barre des taches
     // a chaque changement de fenetre, et l'ecran entier a chaque apparition.
     // Trente appels deviennent un, sept cent vingt deviennent un.
-    if count == width() {
+    let octets = (count * (y1 - y) * core::mem::size_of::<u32>()) as u64;
+    if TAMPON_DIRECT.load(Ordering::Acquire) {
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : le rectangle est deja dans la
+        // memoire du scanout (memoire ordinaire, coherente pour le DMA) :
+        // aucune copie, seul le transfert part.
+        OCTETS_DIRECTS.fetch_add(octets, Ordering::Relaxed);
+    } else if count == width() {
         let offset = y * width();
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -932,6 +1394,9 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
             }
         }
     }
+    if !TAMPON_DIRECT.load(Ordering::Acquire) {
+        OCTETS_COPIES.fetch_add(octets, Ordering::Relaxed);
+    }
     // LA BARRIERE, SANS LAQUELLE L'ECRITURE COMBINEE SE RETOURNE CONTRE NOUS.
     //
     // En ecriture combinee, les ecritures restent dans les tampons du
@@ -944,6 +1409,9 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // presentation, contre huit megaoctets qu'il rend visibles.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+    if !differe_dans_la_trame(x, y, count, y1 - y) {
+        presente_virtio(x, y, count, y1 - y);
+    }
 
     NANOS_DANS_PRESENT.fetch_add(
         crate::kernel::timer::monotonic_ns().saturating_sub(debut_copie),

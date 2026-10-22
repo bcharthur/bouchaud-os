@@ -90,6 +90,54 @@ pub fn pick_jetees(cpu: usize) -> (u64, u64) {
     )
 }
 
+// BOUCHAUD_CESSION_PAR_CLASSE_V1 : `pick_next` tire la tete de la file sans
+// regarder la tache COURANTE, qui n'y est pas. Au quantum et aux points surs,
+// la regle pure `scheduler::reveil::cession` decide d'abord si elle cede.
+static CESSIONS_GARDEES: AtomicU64 = AtomicU64::new(0);
+/// Sous la politique historique : les fois ou la regle aurait garde le coeur
+/// et ou la courante l'a cede a un calcul normal (l'inversion mesuree).
+static CESSIONS_INVERSEES: AtomicU64 = AtomicU64::new(0);
+
+/// La tache courante `cur` garde-t-elle le coeur `cpu` face a sa file ?
+fn courante_garde_le_coeur(cur: usize, cpu: usize) -> bool {
+    use crate::kernel::scheduler::reveil::{cession, cession_par_classe, Cession};
+    let table = tasks();
+    let Some(tache) = table.get(cur) else { return false; };
+    let classe = match tache.priorite.charge() {
+        Priorite::Interactive => ReveilClasse::Interactive,
+        Priorite::Normale => ReveilClasse::Normale,
+    };
+    // L'activation en cours : ce que les tranches closes depuis la derniere
+    // publication ont deja range, plus la tranche ouverte.
+    let debut = tache.slice_start_ns.charge();
+    let tranche = if debut == 0 { 0 } else { crate::kernel::timer::monotonic_ns().saturating_sub(debut) };
+    let consomme = tache.budget_reveil_ns.charge().saturating_add(tranche);
+    let (interactives, normales) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+        .unwrap_or((0, 0));
+    if cession(classe, consomme, interactives, normales) != Cession::Garde {
+        return false;
+    }
+    if cession_par_classe() {
+        CESSIONS_GARDEES.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        CESSIONS_INVERSEES.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+}
+
+/// Pour `preempt::safe_point` : la courante de CE coeur garde-t-elle la main ?
+pub fn courante_garde_le_coeur_local() -> bool {
+    let cur = current_index_raw();
+    cur != NO_TASK && courante_garde_le_coeur(cur, local_cpu())
+}
+
+/// `(gardees, inversees)` depuis le demarrage.
+pub fn compteurs_cession() -> (u64, u64) {
+    (CESSIONS_GARDEES.load(Ordering::Relaxed), CESSIONS_INVERSEES.load(Ordering::Relaxed))
+}
+
 fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
     let len = tasks().len();
     if len == 0 { return None; }
@@ -356,7 +404,10 @@ pub fn schedule() -> bool {
                 // BOUCHAUD_P0_IDLE_WAKE_HANDSHAKE_V14
                 cpu::prepare_scheduler_idle();
                 termine_transition_ordonnanceur();
-                cpu::commit_scheduler_idle();
+                // BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1 : la tache reste
+                // installee pendant le `hlt` ; un reveilleur d'un autre coeur
+                // ne l'a pas mise en file. Relire son etat apres `IDLE`.
+                cpu::commit_scheduler_idle_sauf(|| tasks()[cur].state == TaskState::Ready);
                 if rearmer {
                     rearme_compta_apres_idle();
                 }
@@ -393,8 +444,26 @@ fn switch_to(from: usize, to: usize) {
     };
 
     note_commutation_registre(unsafe { (*from_ptr).tid });
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : hors interruption, l'entree d'IRQ de
+    // ce coeur ne concerne pas la tache entrante. Une commutation faite DEPUIS
+    // un gestionnaire a IF baisse (les gestionnaires ne le relevent jamais :
+    // `verifie-preemption-noyau.py`) ; un `schedule()` volontaire, IF leve.
+    if cpu::interrupts_enabled() {
+        crate::kernel::attribution_reveil::commutation_hors_irq(cpu_id);
+    }
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
+    // BOUCHAUD_REPRISE_DECOUPEE_V1 : ici, `from_ptr` est la tache qui reprend
+    // (sa propre trame). Une election de reveil attend ses deux instants :
+    // contexte repris, puis passation de la sortante finie.
+    let elu = unsafe { (*from_ptr).reveil_elu_ns.charge() };
+    let reprend = elu != 0 && unsafe { (*from_ptr).reveil_commute_ns.charge() } == 0;
+    if reprend {
+        unsafe { (*from_ptr).reveil_commute_ns.range(crate::kernel::timer::monotonic_ns()); }
+    }
     complete_switch_handoff();
+    if reprend {
+        unsafe { (*from_ptr).reveil_passe_ns.range(crate::kernel::timer::monotonic_ns()); }
+    }
 }
 
 /// Abandonne la pile de la tache courante, terminee, et remet le coeur dans

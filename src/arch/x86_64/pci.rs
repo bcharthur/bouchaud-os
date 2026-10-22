@@ -65,6 +65,12 @@ pub fn config_lit32(d: &PciDevice, decalage: u8) -> u32 {
     config_read32(d.bus, d.slot, d.func, decalage)
 }
 
+/// Ecrit un mot de 32 bits de l'espace de configuration.
+/// BOUCHAUD_VIRTIO_GPU_IRQ_V1 : le registre de controle MSI-X s'y ecrit.
+pub fn config_ecrit32(d: &PciDevice, decalage: u8, valeur: u32) {
+    config_write32(d.bus, d.slot, d.func, decalage, valeur)
+}
+
 /// Lit un BAR (Base Address Register) brut, index 0..5.
 pub fn bar(d: &PciDevice, index: u8) -> u32 {
     config_read32(d.bus, d.slot, d.func, 0x10 + index * 4)

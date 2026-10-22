@@ -42,6 +42,12 @@ fn resident_range(addr: u64, len: usize, write: bool) -> bool {
     true
 }
 
+// BOUCHAUD_MATURITY_IPC_PREFLIGHT_V1: verify copyout destinations before acquiring handles.
+// This is an early failure check, NOT a lifetime pin or atomic usercopy.
+pub fn validate_write(addr: u64, len: usize) -> Result<()> {
+    if resident_range(addr, len, true) { Ok(()) } else { Err(Error::Fault) }
+}
+
 pub fn read(addr: u64, len: usize) -> Result<Vec<u8>> {
     if len == 0 { return Ok(Vec::new()); }
     if !resident_range(addr, len, false) { return Err(Error::Fault); }

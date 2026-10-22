@@ -301,6 +301,12 @@ fn detect_tsc_features() -> (bool, bool) {
     (invariant, rdtscp)
 }
 
+/// Le TSC de l'instant monotone `ns` (inverse de `monotonic_ns`), `None`
+/// tant que la frequence du TSC est inconnue. BOUCHAUD_REVEIL_PRECIS_V1.
+pub fn tsc_pour_ns(ns: u64) -> Option<u64> {
+    crate::kernel::reveil_precis::tsc_de(ns, BOOT_TSC.load(Ordering::Acquire), TSC_HZ.load(Ordering::Acquire))
+}
+
 /// Convertit une duree en millisecondes en nombre de ticks, arrondi au
 /// superieur pour ne jamais rendre la main trop tot.
 pub fn ms_to_ticks(ms: u64) -> u64 {
@@ -314,6 +320,11 @@ pub fn cycles_since_boot() -> u64 {
 
 pub fn timer_enabled() -> bool {
     interrupts::enabled()
+}
+
+/// Cycles TSC par milliseconde (0 avant la calibration).
+pub fn cycles_par_ms() -> u64 {
+    TSC_HZ.load(Ordering::Acquire) / 1000
 }
 
 pub fn tsc_hz() -> Option<u64> {
@@ -385,6 +396,19 @@ pub fn calibrate() {
         // ligne le dit par sa source.
         let retenue = TSC_HZ.load(Ordering::Acquire);
         let selon_ticks = cycles_per_ms.saturating_mul(1000);
+        // BOUCHAUD_M12_MEGA_V1: qualite explicitement non prouvee sous TCG.
+        // Aucun basculement d'horloge automatique au runtime sans tests SMP.
+        let ratio_pm = if retenue == 0 { 0 } else {
+            selon_ticks.saturating_mul(1000) / retenue
+        };
+        crate::serial_println!(
+            "BOUCHAUD_M12_CLOCK_QUALITY status={} ratio_per_mille={} source={} verdict=diagnostic_only",
+            if retenue == 0 { "unknown" }
+            else if (900..=1100).contains(&ratio_pm) { "candidate" }
+            else { "degraded" },
+            ratio_pm,
+            nom_source(TSC_SOURCE.load(Ordering::Acquire)),
+        );
         crate::serial_println!(
             "BOUCHAUD_TSC_CONTROLE hz={} source={} hz_selon_ticks={} rapport_pour_mille={} cycles_par_ms={}",
             retenue,

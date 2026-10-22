@@ -401,6 +401,24 @@ unsafe fn enable_local_apic() {
     }
 }
 
+/// Une interruption fixe vers CE coeur (raccourci « self »). Sert aux bancs
+/// de panne : une interruption parasite sur un vecteur de peripherique
+/// (BOUCHAUD_VIRTIO_GPU_IRQ_V1).
+#[allow(dead_code)]
+pub fn ipi_vers_soi(vecteur: u8) {
+    unsafe {
+        let (x2, lapic) = local_apic();
+        let low = vecteur as u32 | (1 << 18);
+        if x2 {
+            usermode::write_msr(X2APIC_ICR, low as u64);
+        } else {
+            lapic_write(lapic, LAPIC_ICR_HIGH, 0);
+            lapic_write(lapic, LAPIC_ICR_LOW, low);
+            wait_xapic_delivery(lapic);
+        }
+    }
+}
+
 unsafe fn send_all_excluding_self(low: u32) {
     let (x2, lapic) = local_apic();
     let low = low | (3 << 18); // shorthand: all excluding self
@@ -630,6 +648,10 @@ fn init_local_scheduler_timer() -> bool {
             let lvt = RESCHEDULE_VECTOR as u32 | LVT_TSC_DEADLINE;
             timer_local_ecrit(x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER, lvt);
         }
+        SOUS_HYPERVISEUR.store(
+            unsafe { core::arch::x86_64::__cpuid(1) }.ecx & (1 << 31) != 0,
+            Ordering::Release,
+        );
         MODE_TIMER_LOCAL.store(MODE_TSC_DEADLINE, Ordering::Release);
         arm_local_scheduler_timer();
         return true;
@@ -666,23 +688,176 @@ pub fn arm_local_scheduler_timer() {
     // decider AVANT toute ecriture, et non le seul drapeau « un timer local
     // est actif ».
     match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
-        MODE_LAPIC_PERIODIQUE => {}
-        MODE_TSC_DEADLINE => {
+        MODE_LAPIC_PERIODIQUE => {
+            // BOUCHAUD_REVEIL_PRECIS_V1 : un compte raccourci pour une
+            // echeance de sommeil est remplace par celui du quantum.
+            let cpu = cpu_index();
+            if cpu < MAX_CPUS && ARME_PRECIS[cpu].swap(false, Ordering::Relaxed) {
+                let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+                if compte != 0 {
+                    unsafe {
+                        let (x2, lapic) = local_apic();
+                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
+                    }
+                }
+            }
+        }
+        // Interruptions coupees : le MSR et l'etat qui le decrit (`ARME_TSC`,
+        // `QUANTUM_TSC`, `ARME_OCCUPE`) changent ensemble -- l'appel au retour
+        // de `hlt` se fait interruptions ouvertes, et le gestionnaire du meme
+        // coeur rearme aussi.
+        MODE_TSC_DEADLINE => ::x86_64::instructions::interrupts::without_interrupts(|| {
             if let Some(hz) = crate::kernel::timer::tsc_hz() {
                 let delta = (hz as u128)
                     .saturating_mul(SCHED_QUANTUM_TICKS as u128)
                     .div_ceil(1000)
                     .min(u64::MAX as u128) as u64;
+                let maintenant = crate::arch::x86_64::cpu::rdtsc();
+                let quantum = maintenant.saturating_add(delta.max(1));
+                let cpu = cpu_index();
+                // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : un sommeil interactif
+                // attache a ce coeur, echu avant la fin du quantum, avance le
+                // minuteur ; la fin du quantum reste connue (`QUANTUM_TSC`).
+                let (echeance, occupe) = match cible_occupee(cpu, maintenant) {
+                    Some(cible) if cible < quantum => (cible, true),
+                    _ => (quantum, false),
+                };
                 unsafe {
-                    usermode::write_msr(
-                        IA32_TSC_DEADLINE,
-                        crate::arch::x86_64::cpu::rdtsc().saturating_add(delta.max(1)),
-                    );
+                    usermode::write_msr(IA32_TSC_DEADLINE, echeance);
+                }
+                // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur porte le quantum ;
+                // tout armement precis est remplace.
+                if cpu < MAX_CPUS {
+                    ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
+                    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
+                    QUANTUM_TSC[cpu].store(quantum, Ordering::Relaxed);
+                    ARME_OCCUPE[cpu].store(occupe, Ordering::Relaxed);
+                }
+                if occupe {
+                    ARMES_OCCUPES.fetch_add(1, Ordering::Relaxed);
                 }
             }
-        }
+        }),
         _ => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 -- sommeils interactifs sur coeur occupe
+// ---------------------------------------------------------------------------
+
+/// La fin du quantum en cours, par coeur (TSC). Un tir AVANT elle n'est pas
+/// une fin de quantum.
+static QUANTUM_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Le minuteur porte une echeance de sommeil interactif, avant la fin du
+/// quantum, sur un coeur qui travaille.
+static ARME_OCCUPE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static ARMES_OCCUPES: AtomicU64 = AtomicU64::new(0);
+static TIRS_ANTICIPES: AtomicU64 = AtomicU64::new(0);
+static AVANCES_OCCUPEES: AtomicU64 = AtomicU64::new(0);
+
+/// Le TSC a armer sur ce coeur occupe pour les sommeils interactifs qui lui
+/// sont attaches, si la politique et le domaine le permettent.
+fn cible_occupee(cpu: usize, tsc_maintenant: u64) -> Option<u64> {
+    if cpu >= MAX_CPUS || !REVEIL_PRECIS.load(Ordering::Relaxed) {
+        return None;
+    }
+    if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
+        return None;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let borne = crate::kernel::task::borne_interactive_a_jour(cpu, maintenant);
+    let ns = crate::kernel::reveil_precis::echeance_occupee(borne, maintenant)?;
+    let cible = crate::kernel::timer::tsc_pour_ns(ns)?;
+    Some(cible.max(tsc_maintenant.saturating_add(1)))
+}
+
+/// A l'entree du vecteur local, AVANT tout rearmement : ce tir est-il
+/// anticipe -- echeance interactive armee, quantum non echu ? Un IPI recu dans
+/// la meme fenetre est traite de meme : il ne met pas fin au quantum non plus.
+pub fn tir_anticipe(entree_tsc: u64) -> bool {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return false;
+    }
+    let cpu = cpu_index();
+    let anticipe = cpu < MAX_CPUS
+        && ARME_OCCUPE[cpu].load(Ordering::Relaxed)
+        && entree_tsc < QUANTUM_TSC[cpu].load(Ordering::Relaxed);
+    if anticipe {
+        TIRS_ANTICIPES.fetch_add(1, Ordering::Relaxed);
+    }
+    anticipe
+}
+
+/// Apres un tir anticipe : rearme la fin du quantum EN COURS (pas un nouveau
+/// quantum : la tache courante n'a pas a gagner de temps a chaque sommeil
+/// servi), ou la prochaine echeance interactive si elle vient avant.
+pub fn rearme_reste_du_quantum() {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        arm_local_scheduler_timer();
+        return;
+    }
+    let cpu = cpu_index();
+    let maintenant = crate::arch::x86_64::cpu::rdtsc();
+    if cpu >= MAX_CPUS || QUANTUM_TSC[cpu].load(Ordering::Relaxed) <= maintenant {
+        arm_local_scheduler_timer();
+        return;
+    }
+    let quantum = QUANTUM_TSC[cpu].load(Ordering::Relaxed);
+    let (echeance, occupe) = match cible_occupee(cpu, maintenant) {
+        Some(cible) if cible < quantum => (cible, true),
+        _ => (quantum, false),
+    };
+    unsafe {
+        usermode::write_msr(IA32_TSC_DEADLINE, echeance);
+    }
+    ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
+    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
+    ARME_OCCUPE[cpu].store(occupe, Ordering::Relaxed);
+}
+
+/// Une tache interactive s'endort sur ce coeur, qui va executer autre chose :
+/// le minuteur est avance a son echeance s'il portait plus tard.
+pub fn avance_pour_sommeil_interactif(echeance_ns: u64) {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE
+        || !LOCAL_SCHED_TIMER.load(Ordering::Acquire)
+        || !REVEIL_PRECIS.load(Ordering::Relaxed)
+        || (!SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed))
+    {
+        return;
+    }
+    ::x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = cpu_index();
+        if cpu >= MAX_CPUS || ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+            return;
+        }
+        let maintenant = crate::arch::x86_64::cpu::rdtsc();
+        let Some(ns) = crate::kernel::reveil_precis::echeance_occupee(
+            echeance_ns,
+            crate::kernel::timer::monotonic_ns(),
+        ) else {
+            return;
+        };
+        let Some(cible) = crate::kernel::timer::tsc_pour_ns(ns) else { return };
+        let cible = cible.max(maintenant.saturating_add(1));
+        if cible < ARME_TSC[cpu].load(Ordering::Relaxed) && cible < QUANTUM_TSC[cpu].load(Ordering::Relaxed) {
+            unsafe {
+                usermode::write_msr(IA32_TSC_DEADLINE, cible);
+            }
+            ARME_TSC[cpu].store(cible, Ordering::Relaxed);
+            ARME_OCCUPE[cpu].store(true, Ordering::Relaxed);
+            AVANCES_OCCUPEES.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// `(armements occupes, tirs anticipes, avances a l'endormissement)`.
+pub fn compteurs_reveil_occupe() -> (u64, u64, u64) {
+    (
+        ARMES_OCCUPES.load(Ordering::Relaxed),
+        TIRS_ANTICIPES.load(Ordering::Relaxed),
+        AVANCES_OCCUPEES.load(Ordering::Relaxed),
+    )
 }
 
 /// Le mode de quantum local de ce coeur, pour le diagnostic.
@@ -744,6 +919,257 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
         battants, coeurs, mode_timer_local(),
     );
     (battants, coeurs)
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_REVEIL_PRECIS_V1 (P13+) -- reveil a l'echeance exacte au repos
+// ---------------------------------------------------------------------------
+
+/// Ce que le minuteur local porte (TSC), par coeur.
+static ARME_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+/// Le minuteur porte une echeance de SOMMEIL (et non le quantum).
+static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// Ce coeur est entre la lecture de la politique et la fin de son armement
+/// (BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1).
+static EN_ARMEMENT: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// La politique (`reveil-precis on|off`). ACTIVE par defaut depuis l'A/B KVM
+/// CONVAINCANT de b6c99032 (run 38732049308, job ordonnanceur-ab, SMP1, 4/4
+/// tours : retard au repos p50 461 -> 39 us, p95 943,5 -> 852, p99 1 007,5 ->
+/// 1 016,5, interactif p95 29,5 -> 28,5 ; 8 239 a 8 672 armements par passe
+/// `on`, 0 sous `off`). La CI rejoue l'A/B a chaque campagne ; un KVM
+/// NON_CONVAINCANT la rend a `off`. Le domaine prouve est le TSC-deadline
+/// SOUS HYPERVISEUR : le mode periodique et le materiel nu restent des
+/// experiences a part, chacune OFF (voir les deux statiques qui suivent).
+static REVEIL_PRECIS: AtomicBool = AtomicBool::new(true);
+/// Le mode PERIODIQUE (QEMU TCG, compte LAPIC raccourci) est une experience
+/// distincte : son A/B local a echoue a ses criteres (3929746a, p99 au repos)
+/// ; il n'arme rien sans `reveil-precis periodique on`, meme si la politique
+/// generale est active. Le mode TSC-deadline n'en depend pas.
+static REVEIL_PRECIS_PERIODIQUE: AtomicBool = AtomicBool::new(false);
+/// Le TSC-deadline sur MATERIEL NU n'a aucune preuve (PHYSICAL_PENDING) : il
+/// n'arme rien sans `reveil-precis materiel on`, meme politique active.
+static REVEIL_PRECIS_MATERIEL: AtomicBool = AtomicBool::new(false);
+/// CPUID.1:ECX[31], lu une fois a l'armement du minuteur local : un CPUID
+/// dans la boucle d'inactivite couterait une sortie de VM par `hlt`.
+static SOUS_HYPERVISEUR: AtomicBool = AtomicBool::new(false);
+static REVEILS_PRECIS_ARMES: AtomicU64 = AtomicU64::new(0);
+static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
+
+// DIAGNOSTIC de la queue au repos (compteurs publies par `reveil-precis`,
+// differences par bras dans l'A/B ; aucun effet sur la politique). Run
+// 39387288347 (KVM) : 0 a 6 tirs avant la cible sur 300 000, la queue venait
+// des echeances dues non armees (BOUCHAUD_REVEIL_DU_V1) et des reveils
+// inter-coeurs sans IPI (BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1).
+/// Entrees du vecteur local pendant un armement precis : a la cible ou apres
+/// (le minuteur a tire), et avant elle (IPI, ou tir premature, non separes).
+static TIRS_PRECIS: AtomicU64 = AtomicU64::new(0);
+static IPI_PENDANT_ARME: AtomicU64 = AtomicU64::new(0);
+/// Armements faits sur l'echeance de la tache installee alors que la borne
+/// globale etait indisponible (balayage d'un autre coeur).
+static BORNES_PROPRES: AtomicU64 = AtomicU64::new(0);
+/// Echeances DUES au moment d'armer, armees a `maintenant + MARGE_NS`
+/// (BOUCHAUD_REVEIL_DU_V1 ; avant : refusees, servies au tic suivant).
+static ARMES_DUS: AtomicU64 = AtomicU64::new(0);
+/// Refus d'armement, par motif (`reveil_precis::Refus`).
+static REFUS_QUANTUM_AVANT: AtomicU64 = AtomicU64::new(0);
+static REFUS_SANS_BORNE: AtomicU64 = AtomicU64::new(0);
+static REFUS_AUTRES: AtomicU64 = AtomicU64::new(0);
+
+/// A l'entree du gestionnaire du vecteur local, AVANT tout rearmement :
+/// classe l'interruption si une echeance precise etait armee, par le seul TSC
+/// d'entree. (La premiere version relisait `IA32_TSC_DEADLINE` pour separer
+/// un tir d'un IPI : une sortie de VM de plus sur CHAQUE reveil precis, sur
+/// le chemin meme qu'elle mesurait -- run 39387288347, repos p50 54-55 us
+/// contre 39 us avant l'instrument. Les tirs avant la cible y etaient de 0 a
+/// 6 sur 300 000 : une entree avant la cible est desormais comptee comme un
+/// IPI, sans relecture.)
+pub fn note_entree_vecteur_local(entree_tsc: u64) {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS || !ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+        return;
+    }
+    if entree_tsc >= ARME_TSC[cpu].load(Ordering::Relaxed) {
+        TIRS_PRECIS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        IPI_PENDANT_ARME.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `(tirs, bornes propres, 0, entrees avant la cible (IPI), armes dus,
+/// refus quantum avant, refus sans borne, refus autres)`.
+pub fn diagnostic_reveil_precis() -> [u64; 8] {
+    [
+        TIRS_PRECIS.load(Ordering::Relaxed),
+        BORNES_PROPRES.load(Ordering::Relaxed),
+        0,
+        IPI_PENDANT_ARME.load(Ordering::Relaxed),
+        ARMES_DUS.load(Ordering::Relaxed),
+        REFUS_QUANTUM_AVANT.load(Ordering::Relaxed),
+        REFUS_SANS_BORNE.load(Ordering::Relaxed),
+        REFUS_AUTRES.load(Ordering::Relaxed),
+    ]
+}
+
+/// Juste avant `hlt`, interruptions coupees : arme le minuteur local sur la
+/// plus proche echeance de sommeil si elle precede le quantum.
+pub fn arme_reveil_precis_avant_hlt() {
+    if !LOCAL_SCHED_TIMER.load(Ordering::Acquire) {
+        return;
+    }
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    // BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1 : le drapeau est pose AVANT de lire
+    // la politique ; `veut_reveil_precis` change la politique PUIS attend les
+    // drapeaux. Motif croise : un armement decide sous l'ancienne politique
+    // est termine quand la bascule rend la main.
+    EN_ARMEMENT[cpu].store(true, Ordering::SeqCst);
+    arme_reveil_precis_sous_drapeau(cpu);
+    EN_ARMEMENT[cpu].store(false, Ordering::Release);
+}
+
+fn arme_reveil_precis_sous_drapeau(cpu: usize) {
+    if !REVEIL_PRECIS.load(Ordering::SeqCst) {
+        return;
+    }
+    // BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1 : aussi l'echeance de la tache
+    // installee ici, qui ne depend pas du balayage d'un autre coeur.
+    let globale = crate::kernel::task::prochaine_echeance_ns();
+    let propre = crate::kernel::task::echeance_tache_installee();
+    let borne = crate::kernel::reveil_precis::borne_du_coeur(globale, propre);
+    if propre != 0 && (globale == crate::kernel::reveil_precis::JAMAIS || globale == 0) {
+        BORNES_PROPRES.fetch_add(1, Ordering::Relaxed);
+    }
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
+        if !REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed) {
+            return;
+        }
+        // Mode periodique (QEMU TCG) : un compte initial plus court, qui
+        // redemarre le minuteur ; le quantum est restaure a son declenchement
+        // (`arm_local_scheduler_timer`) ou au retour de `hlt`.
+        let quantum = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+        unsafe {
+            let (x2, lapic) = local_apic();
+            let restant = timer_local_courant(x2, lapic);
+            let compte = crate::kernel::reveil_precis::decide_compte(
+                true,
+                borne,
+                crate::kernel::timer::monotonic_ns(),
+                restant,
+                u64::from(quantum) / SCHED_QUANTUM_TICKS,
+            );
+            if let Some(c) = compte {
+                timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, c);
+                ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
+                REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        return;
+    }
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
+        return;
+    }
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let decision = crate::kernel::reveil_precis::decide_motif(
+        REVEIL_PRECIS.load(Ordering::Relaxed),
+        borne,
+        maintenant,
+        crate::arch::x86_64::cpu::rdtsc(),
+        ARME_TSC[cpu].load(Ordering::Relaxed),
+        crate::kernel::timer::tsc_pour_ns(borne),
+        crate::kernel::timer::tsc_pour_ns(maintenant.saturating_add(crate::kernel::reveil_precis::MARGE_NS)),
+    );
+    {
+        use crate::kernel::reveil_precis::Refus;
+        match decision {
+            Ok(a) if a.due => { ARMES_DUS.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::QuantumAvant) => { REFUS_QUANTUM_AVANT.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::SansBorne) => { REFUS_SANS_BORNE.fetch_add(1, Ordering::Relaxed); }
+            Err(Refus::Politique) | Ok(_) => {}
+            Err(_) => { REFUS_AUTRES.fetch_add(1, Ordering::Relaxed); }
+        }
+    }
+    if let Ok(armement) = decision {
+        let tsc = armement.tsc;
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, tsc) };
+        ARME_TSC[cpu].store(tsc, Ordering::Relaxed);
+        ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
+        ARME_OCCUPE[cpu].store(false, Ordering::Relaxed);
+        REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Au retour de `hlt` : un armement precis encore en place (le coeur a ete
+/// reveille par autre chose) est retire -- le quantum est rearme. Le minuteur
+/// ne tombera jamais sur une tache en cours pour une echeance qui n'est pas
+/// la sienne.
+pub fn retire_reveil_precis_apres_hlt() {
+    let cpu = cpu_index();
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    if ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+        REVEILS_PRECIS_RETIRES.fetch_add(1, Ordering::Relaxed);
+        arm_local_scheduler_timer();
+    }
+}
+
+/// La politique du reveil precis ; rend l'etat precedent.
+///
+/// BOUCHAUD_BASCULE_REVEIL_SYNCHRONE_V1 : rend la main quand aucun coeur ne
+/// termine plus un armement decide sous l'ancienne politique. Sans cette
+/// attente, un coeur dont l'ecriture du MSR (une sortie de VM) chevauchait la
+/// bascule comptait un armement dans le bras `off` de l'A/B (run 39387289004,
+/// KVM SMP4 : « 1 armement precis sous off »). Borne : 50 ms (un processeur
+/// virtuel retire par l'hote ne fige pas le shell).
+pub fn veut_reveil_precis(oui: bool) -> bool {
+    let avant = REVEIL_PRECIS.swap(oui, Ordering::SeqCst);
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(50_000_000);
+    for drapeau in EN_ARMEMENT.iter() {
+        while drapeau.load(Ordering::SeqCst) && crate::kernel::timer::monotonic_ns() < echeance {
+            core::hint::spin_loop();
+        }
+    }
+    avant
+}
+
+/// Le mode periodique du reveil precis (`reveil-precis periodique on|off`).
+/// Rend l'etat precedent.
+pub fn veut_reveil_precis_periodique(oui: bool) -> bool {
+    REVEIL_PRECIS_PERIODIQUE.swap(oui, Ordering::Relaxed)
+}
+
+/// Le mode periodique est-il autorise ?
+pub fn reveil_precis_periodique() -> bool {
+    REVEIL_PRECIS_PERIODIQUE.load(Ordering::Relaxed)
+}
+
+/// Le TSC-deadline sur materiel nu (`reveil-precis materiel on|off`). Rend
+/// l'etat precedent.
+pub fn veut_reveil_precis_materiel(oui: bool) -> bool {
+    REVEIL_PRECIS_MATERIEL.swap(oui, Ordering::Relaxed)
+}
+
+/// `(materiel nu autorise, sous hyperviseur)`.
+pub fn reveil_precis_domaine() -> (bool, bool) {
+    (REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed), SOUS_HYPERVISEUR.load(Ordering::Relaxed))
+}
+
+/// `(voulu, mode du minuteur local, armes, retires avant d'avoir servi)`.
+pub fn compteurs_reveil_precis() -> (bool, &'static str, u64, u64) {
+    (
+        REVEIL_PRECIS.load(Ordering::Relaxed),
+        mode_timer_local(),
+        REVEILS_PRECIS_ARMES.load(Ordering::Relaxed),
+        REVEILS_PRECIS_RETIRES.load(Ordering::Relaxed),
+    )
 }
 
 pub fn local_scheduler_timer_enabled() -> bool {
@@ -1166,6 +1592,8 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
     gdt::init_ap(cpu);
     idt::load_ap();
     usermode::init_ap(cpu);
+    // BOUCHAUD_PREUVE_HOTE_V1 : la page du vol est deja allouee par le BSP.
+    crate::kernel::vol_hote::active_ce_coeur(cpu);
     unsafe { enable_local_apic(); }
 
     let bit = 1usize << cpu;

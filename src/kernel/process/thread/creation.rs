@@ -24,6 +24,8 @@ impl Task {
             priorite: PrioriteAtomique::neuve(Priorite::Normale),
             affinity_mask: 0,
             runq_cpu: CoeurAtomique::neuf(u8::MAX),
+            file_au_pret: CoeurAtomique::neuf(u8::MAX),
+            battements_au_pret: EcheanceAtomique::neuf(0),
             last_cpu: CoeurAtomique::neuf(u8::MAX),
             on_cpu: CoeurSigneAtomique::neuf(-1),
             switching_out: DrapeauAtomique::neuf(false),
@@ -58,6 +60,14 @@ impl Task {
             migrable: false,
             latency_sensitive: DrapeauAtomique::neuf(false),
             budget_reveil_ns: EcheanceAtomique::neuf(0),
+            reveil_pret_ns: EcheanceAtomique::neuf(0),
+            reveil_elu_ns: EcheanceAtomique::neuf(0),
+            reveil_commute_ns: EcheanceAtomique::neuf(0),
+            reveil_passe_ns: EcheanceAtomique::neuf(0),
+            reveil_par: EcheanceAtomique::neuf(0),
+            attribution_reveil: crate::kernel::attribution_reveil::Registre::neuf(),
+            ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation::neuf(),
+            comptes_fil: crate::kernel::attribution_reveil::ComptesFil::neuf(),
             entree_noyau: None,
         });
         amorce_pile(&mut task, task_trampoline, 0x0000_0002);
@@ -277,7 +287,64 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
         residence_ns: if depuis_ns == 0 { 0 } else { maintenant_ns.saturating_sub(depuis_ns) },
         attente_interactive,
         attente_normale,
+        // BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : ni tache installee, ni
+        // sommeil -- le contexte de demarrage ou le shell tient le coeur.
+        hors_ordonnanceur: en_ligne && !cpu::is_idle(cpu) && occupant_coeur(cpu) == NO_TASK,
     }
+}
+
+// BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1
+//
+// Une tache qui se bloque et dont le coeur n'a rien d'autre a elire RESTE
+// INSTALLEE : `schedule()` fait `hlt` dans son contexte (`on_cpu` = ce coeur).
+// `publish_ready` la refusait alors sans rien faire -- a juste titre pour la
+// mise en file (elle n'est pas a placer, elle reprendra sur place), a tort pour
+// le coeur : personne ne le reveillait. Un reveil venu d'un AUTRE coeur
+// (balayage des echeances, futex, IPC) attendait la prochaine interruption de
+// ce coeur-la -- le quantum, jusqu'a 4 ms sur un AP. Run 39308093631, A/B KVM
+// SMP4 : pire reveil au repos `tardif_us=44 reprise_us=952` (rendue prete en
+// 44 us par un autre coeur, reprise pres d'une milliseconde plus tard).
+//
+// Motif croise, comme `idle_enter` / `commit_scheduler_idle` : le reveilleur
+// ecrit l'etat (`Blocked -> Ready`, SeqCst), barriere, puis lit `IDLE` du
+// coeur ; le dormeur publie `IDLE` (SeqCst), puis relit l'etat de SA tache
+// avant `hlt` (`schedule`, `commit_scheduler_idle_sauf`). Au moins l'un voit
+// l'autre : ou bien l'IPI part, ou bien le coeur ne s'endort pas.
+//
+// Une tache en cours de passation (`switching_out`) n'est pas concernee : son
+// coeur est eveille et `complete_switch_handoff` la republiera.
+static REVEILS_INSTALLES_IPI: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static REVEILS_INSTALLES_EVEILLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn reveille_coeur_installe(index: usize) {
+    if tasks()[index].switching_out.charge() {
+        return;
+    }
+    let coeur = tasks()[index].on_cpu.charge();
+    if coeur < 0 {
+        return;
+    }
+    let coeur = coeur as usize;
+    if coeur == local_cpu() {
+        // Reveil depuis une interruption de CE coeur : le retour de
+        // l'interruption reprend apres le `hlt`, la tache relit son etat.
+        return;
+    }
+    if cpu::is_idle(coeur) {
+        REVEILS_INSTALLES_IPI.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::scheduler::preempt::note_ipi_reveil();
+        smp::reschedule_cpu(coeur);
+    } else {
+        REVEILS_INSTALLES_EVEILLES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `(IPI envoyes a un coeur endormi sous sa tache, coeur deja eveille)`.
+pub fn compteurs_reveils_installes() -> (u64, u64) {
+    (
+        REVEILS_INSTALLES_IPI.load(Ordering::Relaxed),
+        REVEILS_INSTALLES_EVEILLES.load(Ordering::Relaxed),
+    )
 }
 
 /// Publie une tache prete, exactement une fois, dans une runqueue physique.
@@ -314,9 +381,13 @@ fn publish_ready(index: usize) {
     // une lecture -- au moins l'un voit l'autre, et la tache est publiee
     // (au pire deux fois : la file deduplique). `tools/smp/test_passation_reveil.rs`.
     core::sync::atomic::fence(Ordering::SeqCst);
-    if index >= tasks().len() || tasks()[index].state != TaskState::Ready
-        || tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge()
-    { return; }
+    if index >= tasks().len() || tasks()[index].state != TaskState::Ready {
+        return;
+    }
+    if tasks()[index].on_cpu >= 0 || tasks()[index].switching_out.charge() {
+        reveille_coeur_installe(index);
+        return;
+    }
 
     let maintenant = crate::kernel::timer::monotonic_ns();
     if tasks()[index].ready_since_ns == 0 {
@@ -368,6 +439,8 @@ fn publish_ready(index: usize) {
     };
 
     tasks()[index].runq_cpu.range(target as u8);
+    tasks()[index].file_au_pret.range(target as u8);
+    tasks()[index].battements_au_pret.range(crate::kernel::attribution_reveil::battements(target));
     if let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(target) {
         // L'IDENTITE, pas l'indice : un emplacement recycle ne doit pas
         // heriter de l'entree laissee par son occupant precedent.
@@ -409,7 +482,8 @@ fn publish_ready(index: usize) {
     core::sync::atomic::fence(Ordering::SeqCst);
 
     let etat = etat_coeur_reveil(target, u64::MAX, crate::kernel::timer::monotonic_ns());
-    match crate::kernel::scheduler::reveil::decide(&etat, &reveille) {
+    let variante = crate::kernel::scheduler::reveil::variante();
+    match crate::kernel::scheduler::reveil::decide_selon(&etat, &reveille, variante) {
         ReveilDecision::ReveilImmediat => {
             crate::kernel::scheduler::preempt::request_cpu(target);
             crate::kernel::scheduler::preempt::note_reveil_immediat();
@@ -436,7 +510,104 @@ fn publish_ready(index: usize) {
         ReveilDecision::MiseEnFile => {
             crate::kernel::scheduler::preempt::note_reveil_en_file();
         }
+        ReveilDecision::DemandeAvecIpi => {
+            // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL (desactivee par
+            // defaut) : la demande ORDINAIRE de `DemandeDifferee`, jamais
+            // ciblee -- le gestionnaire ne coupe que le ring 3 --, plus l'IPI
+            // qui la sert sans attendre le quantum du coeur.
+            crate::kernel::scheduler::preempt::request_cpu(target);
+            crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
+            crate::kernel::scheduler::preempt::note_ipi_reveil();
+            smp::reschedule_cpu(target);
+        }
     }
+}
+
+// BOUCHAUD_SECOURS_COEUR_MUET_V1 -- UNE TACHE PRETE EN FILE SUR UN COEUR QUI
+// NE COMMUTE PLUS
+//
+// Un fil noyau n'est jamais vole (`runnable_steal`), et une tache reveillee
+// est publiee sur son coeur precedent : si ce coeur cesse de commuter --
+// interruptions masquees, processeur virtuel retire par l'hote --, elle y
+// attend autant que lui. KVM SMP4, banc du verrou de l'anneau tenu 3 s : le
+// fil `console` y a attendu 3 s, trois coeurs vivants a cote, et le chien de
+// garde l'a pris pour mort (`kernel::scheduler::secours`).
+static SECOURS_RELOGEES: AtomicU64 = AtomicU64::new(0);
+static SECOURS_REFUS_ENTREE: AtomicU64 = AtomicU64::new(0);
+
+/// Reloge la tache `index` si elle est prete, en file sur un coeur muet
+/// (occupant installe depuis plus de `seuil_ns`) et prete elle-meme depuis
+/// plus de `seuil_ns` : retiree de cette file, posee sur un coeur vivant.
+/// Rend le coeur d'accueil, ou `None` (rien a faire, ou personne pour
+/// l'accueillir). N'importe quel contexte : atomiques et file sans verrou.
+///
+/// L'entree de file est la propriete : `remove` reussit pour un seul
+/// appelant, et l'election du coeur muet, s'il se reveille entre-temps, ne la
+/// trouve plus. S'il l'a deja prise, `remove` echoue et rien ne bouge.
+pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
+    use crate::kernel::scheduler::secours::{choisit_accueil, coeur_muet, secours_permis, Accueil};
+    let table = tasks();
+    let tache = table.get(index)?;
+    if tache.state != TaskState::Ready || tache.on_cpu >= 0 || tache.switching_out.charge() {
+        return None;
+    }
+    if tache.noyau && !tache.migrable {
+        return None;
+    }
+    let donneur = tache.runq_cpu.charge() as usize;
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let (_, _, occupant_depuis) = profil_occupant(donneur);
+    if !secours_permis(occupant_depuis, tache.ready_since_ns.charge(), maintenant, seuil_ns) {
+        return None;
+    }
+    let en_ligne = smp::schedulable_cpus().max(1).min(MAX_CPUS);
+    let mut coeurs = [Accueil::default(); MAX_CPUS];
+    for (cpu, c) in coeurs.iter_mut().enumerate().take(en_ligne) {
+        let (interactives, normales) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+            .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
+            .unwrap_or((0, 0));
+        *c = Accueil {
+            permis: allowed_on(tache, cpu),
+            inactif: cpu::is_idle(cpu),
+            muet: coeur_muet(profil_occupant(cpu).2, maintenant, seuil_ns),
+            attente: interactives + normales,
+        };
+    }
+    let cible = choisit_accueil(donneur, &coeurs[..en_ligne])?;
+    let identite = registre_id(index)?;
+    let (Some(id_donneur), Some(id_cible)) = (
+        crate::arch::x86_64::cpu_local::CpuId::from_index(donneur),
+        crate::arch::x86_64::cpu_local::CpuId::from_index(cible),
+    ) else {
+        return None;
+    };
+    if !crate::arch::x86_64::cpu_local::local(id_donneur).remove(identite.en_mot()) {
+        // L'entree n'y est plus : elue, volee, ou posee ailleurs.
+        SECOURS_REFUS_ENTREE.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    let bande = match tache.priorite.charge() {
+        Priorite::Interactive => crate::kernel::scheduler::runqueue::Bande::Interactive,
+        Priorite::Normale => crate::kernel::scheduler::runqueue::Bande::Normale,
+    };
+    tache.runq_cpu.range(cible as u8);
+    tache.file_au_pret.range(cible as u8);
+    crate::arch::x86_64::cpu_local::local(id_cible).enqueue_bande(identite.en_mot(), bande);
+    SECOURS_RELOGEES.fetch_add(1, Ordering::Relaxed);
+    // Meme motif croise que `publish_ready` : mise en file, barriere, puis
+    // lecture de l'etat du coeur d'accueil.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    crate::kernel::scheduler::preempt::request_cpu(cible);
+    if cpu::is_idle(cible) {
+        crate::kernel::scheduler::preempt::note_ipi_reveil();
+        smp::reschedule_cpu(cible);
+    }
+    Some(cible)
+}
+
+/// `(taches relogees, entrees deja parties)` du secours des coeurs muets.
+pub fn compteurs_secours_coeur_muet() -> (u64, u64) {
+    (SECOURS_RELOGEES.load(Ordering::Relaxed), SECOURS_REFUS_ENTREE.load(Ordering::Relaxed))
 }
 
 pub fn register(mut task: Box<Task>) -> usize {
@@ -446,10 +617,20 @@ pub fn register(mut task: Box<Task>) -> usize {
     if task.noyau && !task.migrable {
         // Les taches noyau historiques supposent le coeur zero, et rien ne
         // dit qu'elles y survivraient ailleurs. Le defaut reste donc leur
-        // comportement d'avant, a la lettre.
-        task.affinity_mask = 1;
-        task.runq_cpu.range(0);
-        task.last_cpu.range(0);
+        // comportement d'avant, a la lettre : `new_kernel` pose le masque 1.
+        // Seul `spawn_noyau_epingle` en pose un autre -- un coeur unique,
+        // demande explicitement (banc du coeur suspendu).
+        let demande = task.affinity_mask & online_affinity_mask();
+        if task.affinity_mask == 1 || demande.count_ones() != 1 {
+            task.affinity_mask = 1;
+            task.runq_cpu.range(0);
+            task.last_cpu.range(0);
+        } else {
+            let coeur = demande.trailing_zeros() as u8;
+            task.affinity_mask = demande;
+            task.runq_cpu.range(coeur);
+            task.last_cpu.range(coeur);
+        }
     } else if task.noyau {
         // UN TRAVAILLEUR NOYAU EPINGLE AU COEUR ZERO NE TOURNE PAS SI LE
         // COEUR ZERO N'EST PAS DANS L'ORDONNANCEUR.

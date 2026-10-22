@@ -55,6 +55,19 @@ pub fn prepare_scheduler_idle() {
 }
 
 pub fn commit_scheduler_idle() {
+    commit_scheduler_idle_sauf(|| false);
+}
+
+/// `commit_scheduler_idle`, qui renonce aussi a dormir si `reveillee()` --
+/// relue APRES la publication de `IDLE` -- est vraie.
+///
+/// BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1 : la moitie « dormeur » du motif
+/// croise. `schedule()` s'endort DANS le contexte de sa tache bloquee ; un
+/// reveilleur d'un autre coeur la rend prete puis lit `IDLE`. S'il l'a lu
+/// faux (nous n'etions pas encore declares), c'est cette relecture de l'etat
+/// de la tache qui voit son reveil. Sans elle, le coeur dormait jusqu'a son
+/// prochain quantum avec une tache prete installee.
+pub fn commit_scheduler_idle_sauf(reveillee: impl Fn() -> bool) {
     debug_assert!(
         !interrupts_enabled(),
         "cpu: commit_scheduler_idle requires IF=0"
@@ -93,7 +106,7 @@ pub fn commit_scheduler_idle() {
     let file_vide = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
         .and_then(|id| crate::arch::x86_64::cpu_local::local(id).file_non_vide_essai())
         == Some(false);
-    if !file_vide {
+    if !file_vide || reveillee() {
         SCHED_ABANDONS[cpu].fetch_add(1, Ordering::Relaxed);
         idle_exit(cpu);
         unsafe { asm!("sti", options(nomem, nostack)); }
@@ -117,7 +130,12 @@ pub fn commit_scheduler_idle() {
     }
 
     idle_trace_phase(cpu, IDLE_PHASE_SCHED_HLT);
+    // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur local sur la plus proche
+    // echeance de sommeil (interruptions encore coupees), retire au retour
+    // s'il n'a pas servi.
+    smp::arme_reveil_precis_avant_hlt();
     unsafe { asm!("sti; hlt", options(nostack)); }
+    smp::retire_reveil_precis_apres_hlt();
     idle_exit(cpu);
     SCHED_WAKES[cpu].fetch_add(1, Ordering::Relaxed);
     idle_trace_phase(cpu, IDLE_PHASE_RUNNING);

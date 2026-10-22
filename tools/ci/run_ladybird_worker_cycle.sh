@@ -149,6 +149,24 @@ lances=$(awk -v l="${l_sorti:-999999999}" 'NR < l && match($0, /PERF_EXECVE .*im
 # Les sorties sont observees dans la fenetre post-autorun bornee, jusqu'a la capture du journal.
 sortis=$(awk '/PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\// && match($0, / pid=[0-9]+/) { vu[substr($0, RSTART + 5, RLENGTH - 5)] = 1 } END { for (k in vu) n++; print n + 0 }' "$P")
 statut=$(grep -aoE 'WCYCLE_SORTI statut=[0-9]+' "$P" | head -1 | cut -d= -f2 || true)
+# BOUCHAUD_WCYCLE_SORTIE_NOMMEE_V1 -- QUEL processus manque, pas seulement
+# combien (robustesse 38442948204 : « 8/9 », sans le nom ni le PID, et
+# l'artefact n'est pas toujours lisible). Pour chacun : son image, et les
+# dernieres lignes du noyau qui le citent -- un vrai processus reste vivant
+# (faute, attente, extinction lente) se distingue d'une ligne `PROCESS_EXIT`
+# perdue a l'entrelacement serie (sa mort apparait alors sous une autre forme).
+manquants=$(awk -v l="${l_sorti:-999999999}" '
+  NR < l && match($0, /PERF_EXECVE .*image=\/usr\/libexec\/ladybird\/[A-Za-z]+ pid=[0-9]+/) {
+    s = substr($0, RSTART, RLENGTH); img = s; sub(/.*image=\/usr\/libexec\/ladybird\//, "", img); sub(/ .*/, "", img)
+    sub(/.*pid=/, "", s); lance[s] = img }
+  /PROCESS_EXIT t=[0-9]+ pid=[0-9]+ ppid=[0-9]+ image=\/usr\/libexec\/ladybird\// && match($0, / pid=[0-9]+/) {
+    sorti[substr($0, RSTART + 5, RLENGTH - 5)] = 1 }
+  END { for (k in lance) if (!(k in sorti)) printf "%s:%s ", k, lance[k] }' "$P")
+for m in $manquants; do
+  pid_m=${m%%:*}
+  echo "  SORTIE_ABSENTE pid=$pid_m image=${m#*:}"
+  grep -aE "pid=${pid_m}[^0-9]|\(${pid_m}\)" "$P" | grep -avE 'PERF-RIP|PERF-APPELS|PERF-PROC|FAULT_FILE_SNAPSHOT' | tail -6 | cut -c1-220 | sed 's/^/      /' || true
+done
 echo "WCYCLE_MESURE demarrage_w1_ms=$(champ "$w1" ms) pid_tue=${pid_w:-?} workers_vivants_au_crash=$(champ "$demande" workers_vivants) recus_6s=${r6:-?} recus_10s=${r10:-?} erreur_w1=$(champ "$crash" erreur) w2_ms=$(champ "$w2" ms) w4_ms=$(champ "$w4" ms) webworkers_crees=$crees vivants_a_la_sortie=$vivants webworkers_sortis_noyau_avant_sortie=$noyau_sortis ladybird_lances=$lances ladybird_sortis=$sortis statut=${statut:-?}"
 
 echo "== verdict =="

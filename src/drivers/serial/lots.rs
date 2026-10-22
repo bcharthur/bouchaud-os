@@ -67,3 +67,20 @@ pub fn attendu(octets: &[u8], sortie: &mut alloc::vec::Vec<u8>) {
         sortie.push(octet);
     }
 }
+
+/// Longueur du premier segment de `octets` a emettre d'un seul tenant.
+///
+/// BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1. Un `write(2)` du userland est emis
+/// LIGNE PAR LIGNE, chaque ligne sous le jeton serie : une ligne du noyau
+/// emise par un autre coeur passe entre deux lignes, jamais au milieu d'une.
+/// Le segment s'arrete apres le premier saut de ligne, ou a `max` octets
+/// pour une ligne plus longue que le tampon (borne la phase masquee), ou a
+/// la fin des octets. Toujours au moins un octet si `octets` n'est pas vide :
+/// la boucle de l'appelant avance a coup sur.
+pub fn longueur_ligne(octets: &[u8], max: usize) -> usize {
+    let borne = octets.len().min(max.max(1));
+    match octets[..borne].iter().position(|&o| o == b'\n') {
+        Some(i) => i + 1,
+        None => borne,
+    }
+}

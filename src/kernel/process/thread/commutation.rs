@@ -171,6 +171,21 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
         "task: cursor CPU encore arme hors CPU tid={}", task.tid);
 
     if task.ready_since_ns != 0 {
+        // BOUCHAUD_ATTENTE_INTERACTIVE_V1 : `install` n'a pas encore tourne,
+        // CURRENT_IS_KERNEL designe l'occupant PRECEDENT de ce coeur.
+        if task.priorite == Priorite::Interactive && !task.noyau {
+            note_attente_interactive(
+                now.saturating_sub(task.ready_since_ns.charge()),
+                CURRENT_IS_KERNEL[cpu_id].load(Ordering::Acquire),
+                CURRENT[cpu_id].load(Ordering::Acquire),
+                cpu_id,
+                task.file_au_pret.charge() as usize != cpu_id,
+                crate::kernel::attribution_reveil::battements(cpu_id)
+                    .saturating_sub(task.battements_au_pret.charge()),
+            );
+        }
+        // BOUCHAUD_PREUVE_HOTE_V1 : toute attente pret -> elu, cumulee.
+        task.comptes_fil.note_pret(now.saturating_sub(task.ready_since_ns.charge()));
         crate::kernel::scheduler::latency::record_attribue(
             now.saturating_sub(task.ready_since_ns.charge()),
             task.priorite == Priorite::Interactive,
@@ -180,6 +195,10 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
             now,
         );
         task.ready_since_ns.range(0);
+    }
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : pret -> elu.
+    if task.reveil_pret_ns != 0 && task.reveil_elu_ns == 0 {
+        task.reveil_elu_ns.range(now);
     }
 
     if task.last_cpu != u8::MAX && task.last_cpu.charge() as usize != cpu_id {
@@ -205,6 +224,7 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     // BOUCHAUD_COMPTA_SEQLOCK_V1 : le curseur ET le bloc par CPU s'arment
     // sous la sequence -- un lecteur qui voit le curseur arme lit le bloc.
     compta_section(task, || {
+        note_armement_compta(cpu_id, now, ARMEMENT_ELECTION, task.tid as u64);
         task.slice_start_ns.range(now);
         task.last_account_ns.range(now);
         COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);

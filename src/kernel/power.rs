@@ -15,6 +15,7 @@
 //! n'avaient rien coupe.
 
 use crate::arch::x86_64::ports::{outb, outw};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// Code passe au peripherique `isa-debug-exit` quand tout s'est bien passe.
 ///
@@ -192,7 +193,51 @@ pub fn shutdown_avec_raison(code: u8, raison: &str) -> ! {
             .unwrap_or(-1),
         crate::kernel::timer::monotonic_ms(),
     );
+    // BOUCHAUD_EXTINCTION_FIL_NOYAU_V1
+    //
+    // L'EXTINCTION DORT PARFOIS, ET DORMIR DEMANDE UNE TACHE.
+    //
+    // `persistance::synchronise` prend un verrou dormant (`TRANSACTION`) puis
+    // le controleur ATA ; contestes, tous deux se garent sur une `WaitQueue`.
+    // L'autorun appelle pourtant l'extinction depuis le contexte d'amorcage,
+    // ou `CURRENT` vaut `NO_TASK` : un processus orphelin qui ecrit encore
+    // sous /persist -- un service Ladybird qui survit au navigateur -- suffit
+    // a faire paniquer la machine au lieu de l'eteindre (sites reels, run
+    // 38475302676 ; `extinction-contention-probe`, SMP1) :
+    //
+    //     panicked at src/kernel/process/thread/blocage.rs:105:5:
+    //     task: parking demande hors de toute tache
+    //
+    // Le bureau a deja la reponse (`window_manager::run`) : le travail qui
+    // peut dormir tourne dans un vrai fil noyau. Ici de meme, et seulement
+    // quand c'est necessaire ET possible : aucune tache courante, coeur zero
+    // (`run_noyau` y epingle son fil), interruptions ouvertes. Partout
+    // ailleurs -- une tache qui demande l'arret, un coeur secondaire --, le
+    // chemin d'avant est garde a la lettre. `run_noyau` ne rend la main que
+    // s'il n'a pas pu creer le fil : l'extinction se fait alors en place,
+    // comme avant, plutot que pas du tout.
+    if crate::kernel::task::try_current().is_none()
+        && crate::arch::x86_64::usermode::cpu_index() == 0
+        && crate::arch::x86_64::cpu::interrupts_enabled()
+    {
+        CODE_EXTINCTION.store(code, Ordering::Release);
+        crate::serial_println!("[kernel] extinction: contexte sans tache, confiee a un fil noyau");
+        let rendu = crate::kernel::task::run_noyau(fil_extinction, "extinction");
+        crate::serial_println!(
+            "[kernel] extinction: fil noyau impossible (rendu={}), extinction en place",
+            rendu
+        );
+    }
     shutdown_interne(code)
+}
+
+/// Le code de sortie transmis au fil d'extinction.
+static CODE_EXTINCTION: AtomicU8 = AtomicU8::new(0);
+
+/// Corps du fil noyau d'extinction : une vraie tache, qui peut attendre un
+/// verrou dormant ou le disque.
+fn fil_extinction() -> ! {
+    shutdown_interne(CODE_EXTINCTION.load(Ordering::Acquire))
 }
 
 /// Extinction dont la raison n'a pas ete transmise.
@@ -205,6 +250,9 @@ pub fn shutdown(code: u8) -> ! {
 }
 
 fn shutdown_interne(code: u8) -> ! {
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : les dernieres lignes avant de couper
+    // le courant ne dependent d'aucun fil.
+    crate::drivers::serial::arrete_console_asynchrone();
     crate::serial_println!("[kernel] extinction demandee (code {})", code);
 
     // L'ENREGISTREUR DE VOL EN PREMIER, ET AVANT LA PERSISTANCE.
@@ -273,7 +321,11 @@ fn shutdown_interne(code: u8) -> ! {
     if !complet {
         rapporte_echec(&vidage, persisted as i64);
     }
+    // BOUCHAUD_M12_MEGA_V1: frontiere UI/IO/ACPI prouvee par etapes.
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE before_finish complete={}", complet as u8);
     crate::gui::power_screen::finish(complet);
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE after_finish");
+    crate::serial_println!("BOUCHAUD_M12_SHUTDOWN_STAGE before_emulator_ports code={}", code);
     unsafe {
         // Ne repond que si QEMU a ete lance avec `-device isa-debug-exit` ;
         // sinon l'ecriture part dans le vide, ce qui est sans consequence.
@@ -292,10 +344,12 @@ fn shutdown_interne(code: u8) -> ! {
     //
     // En dernier parce que sous QEMU les conventions ci-dessus ont deja coupe,
     // et que sur une vraie machine elles n'ont rien fait du tout.
+    crate::serial_println!("BOUCHAUD_M12_ACPI_S5_ATTEMPT disponible={}", crate::kernel::acpi_s5::disponible() as u8);
     if crate::kernel::acpi_s5::eteint() {
         // `eteint` ne rend la main que sur echec : ce chemin n'est pas atteint.
         halt()
     }
+    crate::serial_println!("BOUCHAUD_M12_ACPI_S5_RETURNED power_still_on=1");
     crate::serial_println!(
         "[kernel] extinction: aucune voie n'a coupe le courant (acpi={})",
         crate::kernel::acpi_s5::disponible() as u8,
@@ -325,6 +379,7 @@ const CMD_8042: u16 = 0x64;
 /// L'enregistreur de vol est vide AVANT, comme a l'extinction : un
 /// redemarrage est une fin de session comme une autre.
 pub fn reboot() -> ! {
+    crate::drivers::serial::arrete_console_asynchrone();
     crate::serial_println!("[kernel] redemarrage demande");
     crate::gui::services::arrete();
     let _ = crate::kernel::blackbox::vide_avant_extinction("redemarrage");

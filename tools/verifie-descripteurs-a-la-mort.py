@@ -58,14 +58,16 @@ def verifie(racine: Path) -> list[str]:
     except OSError as e:
         return [f"lecture impossible : {e}"]
     fautes = []
-    ec = corps(src[VIE], "exit_current")
+    ec = corps(src[VIE], "sortie_du_fil")  # corps d'exit_current (BOUCHAUD_STATUT_SORTIE_V1)
     if not avant(ec, "ferme_descripteurs(&current().process);", "notify_parent_of_exit();"):
         fautes.append(f"{VIE} : exit_current previent le parent avant de fermer les descripteurs")
     tp = corps(src[VIE], "tue_processus")
     if not avant(tp, "ferme_descripteurs(&process);", "notify_parent_of_exit_for(process.parent);"):
         fautes.append(f"{VIE} : tue_processus ne ferme pas les descripteurs avant de prevenir")
     fd = corps(src[VIE], "ferme_descripteurs")
-    if "process.files.lock().prend_tout();" not in fd or "drop(fermes);" not in fd:
+    # BOUCHAUD_EOF_HORS_CLOSE_V1 : fermer = `ferme_hors_verrou`, qui detruit
+    # puis reveille (verifie-eof-hors-close.py) ; un simple `drop` ne reveille pas.
+    if "let fermes = process.files.lock().prend_tout();" not in fd or "ferme_hors_verrou(fermes" not in fd:
         fautes.append(f"{VIE} : ferme_descripteurs ne ferme plus hors du verrou de la table")
     if "core::mem::take(&mut self.entries)" not in corps(src[FD], "prend_tout"):
         fautes.append(f"{FD} : prend_tout ne vide plus la table")
@@ -96,8 +98,8 @@ def main() -> int:
     negatifs = [
         (VIE, "        ferme_descripteurs(&current().process);\n", ""),
         (VIE, "            ferme_descripteurs(&process);\n", ""),
-        (VIE, "    let fermes = process.files.lock().prend_tout();\n    drop(fermes);",
-         "    let mut t = process.files.lock();\n    let fermes = t.prend_tout();\n    drop(fermes);"),
+        (VIE, "    let fermes = process.files.lock().prend_tout();\n    crate::kernel::fd::ferme_hors_verrou(",
+         "    let mut t = process.files.lock();\n    let fermes = t.prend_tout();\n    crate::kernel::fd::ferme_hors_verrou("),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):

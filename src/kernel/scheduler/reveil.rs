@@ -124,6 +124,14 @@ pub struct Coeur {
     pub attente_interactive: usize,
     /// Taches normales EN ATTENTE dans la file de ce coeur.
     pub attente_normale: usize,
+    /// BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : le coeur execute du code
+    /// HORS de toute tache (contexte de demarrage, shell de l'autorun) et ne
+    /// dort pas. Rien n'y sera elu avant son retour a l'ordonnanceur, et
+    /// aucune preemption ne l'y ramene. Run PR 39740393249 (mm-ng6 SMP4) :
+    /// `usb-hid`, sensible, pose sur le coeur zero dans cet etat -- classe
+    /// « tache de fond, peu couteux » -- y a attendu 126 ms
+    /// (`[SCHED-NG-ATTENTE-VIVE] cpu=0 cur_tid=0 idle=0`).
+    pub hors_ordonnanceur: bool,
 }
 
 /// La tache qu'on reveille.
@@ -169,6 +177,10 @@ pub enum Decision {
     DemandeDifferee,
     /// Rien de plus : le coeur n'est pas adressable.
     MiseEnFile,
+    /// VARIANTE EXPERIMENTALE (`Variante::IpiInteractive`, desactivee par
+    /// defaut) : demande ORDINAIRE + IPI. Jamais `demande_ciblee` : le
+    /// gestionnaire ne coupe que le ring 3, aucun fil noyau n'est preempte.
+    DemandeAvecIpi,
 }
 
 /// Le cout d'un coeur pour une tache sensible. Plus bas vaut mieux.
@@ -184,6 +196,9 @@ fn cout(coeur: &Coeur, indice: usize, precedent: usize) -> (u8, usize, u8, usize
     // c'est celle-la qu'on protege en dernier.
     let rang = if coeur.inactif {
         0
+    } else if coeur.hors_ordonnanceur {
+        // Le pire : on ne sait pas quand il reviendra elire.
+        4
     } else if coeur.occupant_sensible {
         3
     } else {
@@ -288,6 +303,72 @@ pub fn decide(cible: &Coeur, reveille: &Reveille) -> Decision {
     Decision::DemandeDifferee
 }
 
+// ===========================================================================
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : une variante, DESACTIVEE par
+// defaut, pour une experience A/B -- pas une politique.
+//
+// Endurance `1ad75bfc` SMP8 : le pire reveil interactif est domine par
+// l'attente d'election (8,4 ms pret -> elu ; 85 attentes de plus d'une
+// milliseconde par phase). `decide` rend `DemandeDifferee` pour une
+// interactive non sensible : elle attend le prochain quantum du coeur cible,
+// meme quand celui-ci ne fait que du calcul normal en ring 3 -- choix de
+// conception verrouille par `une_tache_ordinaire_ne_coupe_personne`.
+//
+// La variante envoie l'IPI que cette demande attend, quand TOUT est vrai :
+//   * la tache reveillee est `Interactive` et sous son budget d'activation
+//     (une interactive qui calcule ne coupe personne) ;
+//   * l'occupant du coeur cible est de classe `Normale` et non sensible ;
+//   * `decide` aurait rendu `DemandeDifferee` (coeur en ligne, au travail).
+// La demande reste ORDINAIRE (`request_cpu`) : le gestionnaire de
+// replanification ne commute que s'il a interrompu le ring 3. Aucun domaine
+// de preemption des fils noyau n'est ouvert.
+//
+// La politique par defaut ne change qu'avec un A/B KVM convaincant (latence,
+// equite, debit, surete). Bascule : commande `ordo-variante`.
+
+/// La politique de reveil en vigueur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Variante {
+    /// La politique livree.
+    Defaut,
+    /// L'experience : IPI pour une interactive sous budget face a du calcul
+    /// normal.
+    IpiInteractive,
+}
+
+static VARIANTE_IPI_INTERACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// La variante active (`Defaut` au demarrage).
+#[inline]
+pub fn variante() -> Variante {
+    if VARIANTE_IPI_INTERACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+        Variante::IpiInteractive
+    } else {
+        Variante::Defaut
+    }
+}
+
+/// Bascule la variante (commande `ordo-variante`, bancs A/B).
+pub fn choisit_variante(v: Variante) {
+    VARIANTE_IPI_INTERACTIVE.store(v == Variante::IpiInteractive, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `decide`, sous une variante. Sous `Defaut`, exactement `decide`.
+pub fn decide_selon(cible: &Coeur, reveille: &Reveille, variante: Variante) -> Decision {
+    let d = decide(cible, reveille);
+    if variante != Variante::IpiInteractive || d != Decision::DemandeDifferee {
+        return d;
+    }
+    if reveille.classe == Classe::Interactive
+        && reveille.consomme_ns < BUDGET_ACTIVATION_NS
+        && cible.occupant_classe == Classe::Normale
+        && !cible.occupant_sensible
+    {
+        return Decision::DemandeAvecIpi;
+    }
+    d
+}
+
 /// Le coeur le plus charge en taches EN ATTENTE, pour le secours par vol.
 ///
 /// `pression_volable` ne comptait que la bande normale, au motif qu'une tache
@@ -302,4 +383,69 @@ pub fn decide(cible: &Coeur, reveille: &Reveille) -> Decision {
 #[inline]
 pub fn pression_de_secours(attente_interactive: usize, attente_normale: usize) -> usize {
     attente_interactive.saturating_add(attente_normale)
+}
+
+// ===========================================================================
+// BOUCHAUD_CESSION_PAR_CLASSE_V1 : qui cede son coeur au quantum, et a qui.
+//
+// `pick_next` tire la tete de la file locale -- interactive d'abord -- sans
+// regarder la tache COURANTE, qui n'est pas en file. Au quantum
+// (`preempt_from_irq`) comme a un point sur (`preempt::safe_point`), une
+// interactive qui venait d'etre elue cedait donc son coeur au premier calcul
+// NORMAL en attente, et n'etait reelue qu'au quantum suivant de ce coeur :
+// jusqu'a 4 ms perdues par une tache de la classe qui passe en premier, au
+// hasard de la phase du quantum.
+//
+// Endurance f23a1247, SMP4, cycle 11 : QUALIFIE_ECHEC de la sonde
+// d'ordonnancement, « la priorite interactive raccourcit la queue » -- pire
+// interactif 5 954 us, dont le noyau n'explique que 2 422 (echeance -> retour
+// en ring 3) : 3,5 ms tombent APRES le retour, la ou un quantum peut couper la
+// sonde pour un calcul normal. Meme verification rouge sur 1413289b et
+// 7ffedd2b (`P_LOTS_REGISTER`, ligne ordonnanceur-probe).
+//
+// La regle : une interactive SOUS SON BUDGET D'ACTIVATION garde son coeur
+// tant que seules des normales attendent. Elle cede a une interactive en
+// attente (tourniquet de sa classe), et des qu'elle a consomme son budget --
+// la meme borne que le privilege de reveil (`BUDGET_ACTIVATION_NS`) : une
+// interactive qui calcule redevient preemptible, la normale n'est jamais
+// affamee au-dela d'un budget par activation.
+
+/// Ce que la tache courante fait de son coeur au quantum ou a un point sur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cession {
+    /// Personne n'attend sur ce coeur.
+    RienEnAttente,
+    /// Elle cede : une tache de sa classe (ou d'une classe qui passe avant)
+    /// attend, ou son activation a depasse le budget.
+    Cede,
+    /// Elle garde le coeur : interactive sous budget, seules des normales
+    /// attendent.
+    Garde,
+}
+
+/// La regle, pure. `consomme_ns` : le temps processeur de l'activation en
+/// cours (depuis la derniere publication de la tache).
+pub fn cession(courante: Classe, consomme_ns: u64, attente_interactive: usize, attente_normale: usize) -> Cession {
+    if attente_interactive == 0 && attente_normale == 0 {
+        return Cession::RienEnAttente;
+    }
+    if courante == Classe::Interactive && attente_interactive == 0 && consomme_ns < BUDGET_ACTIVATION_NS {
+        return Cession::Garde;
+    }
+    Cession::Cede
+}
+
+/// La politique de cession en vigueur : `true` (par defaut) applique la
+/// regle, `false` rend le comportement historique (la courante cede a toute
+/// tache en attente) -- pour l'A/B seulement (`ordo-cession`).
+static CESSION_PAR_CLASSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+#[inline]
+pub fn cession_par_classe() -> bool {
+    CESSION_PAR_CLASSE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bascule la politique de cession (commande `ordo-cession`, bancs A/B).
+pub fn choisit_cession_par_classe(oui: bool) {
+    CESSION_PAR_CLASSE.store(oui, core::sync::atomic::Ordering::Relaxed);
 }

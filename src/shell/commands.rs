@@ -803,7 +803,7 @@ pub fn rm(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("rm: permission denied");
         return 1;
     }
-    fs.nodes[idx].used = false;
+    fs.libere_noeud(idx);
     0
 }
 
@@ -832,7 +832,7 @@ pub fn rmdir(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("rmdir: permission denied");
         return 1;
     }
-    fs.nodes[idx].used = false;
+    fs.libere_noeud(idx);
     0
 }
 

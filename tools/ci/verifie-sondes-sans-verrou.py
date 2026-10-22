@@ -60,7 +60,8 @@ def controle(racine: Path) -> list:
     lc = racine / LIFECYCLE
     if not lc.exists():
         return [f"{LIFECYCLE} introuvable"]
-    exit_corps = corps_de(sans_commentaires(lc.read_text()), "pub fn exit_current(")
+    # BOUCHAUD_STATUT_SORTIE_V1 : le corps de `exit_current` est `sortie_du_fil`.
+    exit_corps = corps_de(sans_commentaires(lc.read_text()), "fn sortie_du_fil(")
     if exit_corps is None:
         return ["exit_current introuvable : le garde-fou ne controle plus rien"]
 

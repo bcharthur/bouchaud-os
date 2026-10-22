@@ -180,6 +180,12 @@ pub fn fault_cluster_stats() -> (u64, u64, u64, u64, u64, u64, u64) {
 // et reste bornee. Apres une longue sequence confirmee elle peut atteindre 32
 // pages (128 KiB), mais la pression memoire la rabat immediatement a 8 ou 2.
 const ZERO_CLUSTER_CPUS: usize = 64;
+// P19 PERF AB: default 32 pages on hardware; QEMU TCG opt-in: 8.
+// Prefaulting holds the MM lock while touching zeroed pages; this is
+// an EXPERIMENT, not a confirmed performance fix. Compare before/after.
+#[cfg(feature = "p19-tcg-low-latency")]
+const ZERO_CLUSTER_MAX_PAGES: u64 = 8;
+#[cfg(not(feature = "p19-tcg-low-latency"))]
 const ZERO_CLUSTER_MAX_PAGES: u64 = 32;
 static ZERO_EXPECTED_PML4: [AtomicU64; ZERO_CLUSTER_CPUS] =
     [const { AtomicU64::new(u64::MAX) }; ZERO_CLUSTER_CPUS];

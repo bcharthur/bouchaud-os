@@ -21,7 +21,7 @@ if [ -n "$BINAIRES" ] && [ -d "$BINAIRES" ]; then
   python3 "$(dirname "$0")/symbolise_fautes.py" "$JOURNAL" "$BINAIRES" || true
 fi
 propre=$(sed -E 's/\x1b\[[0-9;]*m//g' "$JOURNAL" | tr -d '\r')
-ligne=$(printf '%s\n' "$propre" | grep -anE 'KERNEL PANIC|panicked at|PANIC_' | head -1 | cut -d: -f1)
+ligne=$(printf '%s\n' "$propre" | grep -anE 'KERNEL PANIC|panicked at|PANIC_' | awk 'NR<=1' | cut -d: -f1)
 [ -n "$ligne" ] || exit 0
 echo
 echo "== panique noyau (journal $(basename "$JOURNAL"), ligne $ligne) =="

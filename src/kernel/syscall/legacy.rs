@@ -1,10 +1,10 @@
-//! Couche d'appels systeme (ABI) — socle.
+//! Interface historique de diagnostic interne (QUATRE commandes).
 //!
-//! Definit l'interface que les futures applications user-mode utiliseront pour
-//! demander des services au noyau (au lieu d'acceder directement au materiel).
-//! Aujourd'hui le dispatch est appele en interne ; quand le split user/kernel
-//! existera, ce point d'entree sera atteint via une interruption (`int 0x80`)
-//! ou `syscall`.
+//! CE MODULE N'EST PAS L'ABI RING3 EN PRODUCTION. La vraie transition
+//! ring0/ring3 (syscall/sysret) est dans arch/x86_64/usermode.rs ;
+//! les appels natifs versions sont dans kernel/native/abi/ et la
+//! compatibilite Linux/POSIX dans kernel/abi/. Ne pas deduire l'absence
+//! d'isolation de la seule taille de ce fichier.
 
 use crate::kernel::{scheduler, timer};
 
@@ -35,10 +35,10 @@ pub fn dispatch(call: Sys, arg: usize) -> isize {
 
 /// Liste les appels systeme disponibles (commande `syscalls`).
 pub fn print_table() {
-    crate::println!("Appels systeme (ABI Bouchaud OS):");
+    crate::println!("Appels historiques de diagnostic interne (pas ABI ring3):");
     crate::println!("  1 getpid       -> pid de la tache courante");
     crate::println!("  2 uptime       -> secondes depuis le boot");
     crate::println!("  3 ticks        -> ticks timer");
     crate::println!("  4 write_serial -> ecrit un octet sur COM1");
-    crate::println!("note: dispatch interne pour l'instant (int 0x80 a venir avec user-mode)");
+    crate::println!("ABI native ring3: kernel/native/abi/ ; route syscall: arch/x86_64/usermode.rs");
 }

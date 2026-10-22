@@ -35,8 +35,8 @@
 mod reveil;
 
 use reveil::{
-    choisit_coeur, decide, pression_de_secours, Classe, Coeur, Decision, Reveille,
-    BUDGET_ACTIVATION_NS, RESIDENCE_MINIMALE_NS,
+    choisit_coeur, choisit_variante, decide, decide_selon, pression_de_secours, variante, Classe, Coeur,
+    Decision, Reveille, Variante, BUDGET_ACTIVATION_NS, RESIDENCE_MINIMALE_NS,
 };
 
 // ===========================================================================
@@ -65,6 +65,23 @@ fn coeur_occupe(classe: Classe, occupant_sensible: bool, residence_ns: u64) -> C
         residence_ns,
         ..Coeur::default()
     }
+}
+
+/// BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : run PR 39740393249, `usb-hid`
+/// pose sur le coeur zero qui executait le shell hors de toute tache, 126 ms
+/// d'attente. Un coeur hors ordonnanceur n'est retenu qu'a defaut de tout
+/// autre -- meme un pair sensible, qui finira par ceder, passe avant.
+#[test]
+fn un_coeur_hors_ordonnanceur_n_est_retenu_qu_a_defaut() {
+    let hors = Coeur { en_ligne: true, autorise: true, inactif: false, hors_ordonnanceur: true, ..Coeur::default() };
+    let fond = coeur_occupe(Classe::Normale, false, 50_000_000);
+    let pair = coeur_occupe(Classe::Interactive, true, 50_000);
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, fond, fond, fond]), Some(1));
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, pair]), Some(1));
+    // Seul candidat (SMP1) : retenu quand meme, la tache attend son retour.
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors]), Some(0));
+    // Un coeur au repos reste le meilleur choix.
+    assert_eq!(choisit_coeur(0, &sensible(), &[hors, fond, coeur_libre()]), Some(2));
 }
 
 #[test]
@@ -369,6 +386,7 @@ impl Sim {
             residence_ns: self.maintenant_us.saturating_sub(coeur.depuis_us) * 1_000,
             attente_interactive: coeur.interactive.len(),
             attente_normale: coeur.normale.len(),
+            hors_ordonnanceur: false,
         }
     }
 
@@ -416,6 +434,11 @@ impl Sim {
                     }
                     Decision::DemandeDifferee => {
                         self.coeurs[cible].need_resched = true;
+                    }
+                    // Comme le noyau : demande ordinaire + IPI, jamais ciblee.
+                    Decision::DemandeAvecIpi => {
+                        self.coeurs[cible].need_resched = true;
+                        self.coeurs[cible].ipi = true;
                     }
                     Decision::MiseEnFile => {}
                 }
@@ -803,4 +826,191 @@ fn le_vol_recupere_une_interactive_oubliee() {
     ciblee.joue(10_000);
     assert_eq!(ciblee.vols, 1);
     assert!(ciblee.taches[1].travail_total_us > 0);
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante, desactivee par
+// defaut.
+
+/// Tous les etats de coeur et toutes les taches reveillees qui comptent.
+fn tous_les_cas() -> Vec<(Coeur, Reveille)> {
+    let mut coeurs = vec![coeur_libre()];
+    let mut hors_ligne = coeur_libre();
+    hors_ligne.en_ligne = false;
+    coeurs.push(hors_ligne);
+    for classe in [Classe::Normale, Classe::Interactive] {
+        for occupant_sensible in [false, true] {
+            for residence in [0, RESIDENCE_MINIMALE_NS - 1, RESIDENCE_MINIMALE_NS, 50_000_000] {
+                coeurs.push(coeur_occupe(classe, occupant_sensible, residence));
+            }
+        }
+    }
+    let mut taches = Vec::new();
+    for classe in [Classe::Normale, Classe::Interactive] {
+        for sensible in [false, true] {
+            for consomme_ns in [0, BUDGET_ACTIVATION_NS - 1, BUDGET_ACTIVATION_NS, 50_000_000] {
+                taches.push(Reveille { classe, sensible, consomme_ns });
+            }
+        }
+    }
+    let mut cas = Vec::new();
+    for c in &coeurs {
+        for t in &taches {
+            cas.push((*c, *t));
+        }
+    }
+    cas
+}
+
+#[test]
+fn la_variante_est_desactivee_au_demarrage() {
+    assert_eq!(variante(), Variante::Defaut);
+}
+
+#[test]
+fn sous_defaut_la_politique_est_exactement_decide() {
+    for (c, t) in tous_les_cas() {
+        assert_eq!(decide_selon(&c, &t, Variante::Defaut), decide(&c, &t), "{c:?} {t:?}");
+    }
+}
+
+#[test]
+fn la_variante_ne_change_que_la_demande_differee_d_une_interactive_sous_budget_face_a_du_calcul() {
+    let mut changes = 0;
+    for (c, t) in tous_les_cas() {
+        let d = decide(&c, &t);
+        let v = decide_selon(&c, &t, Variante::IpiInteractive);
+        if v == d {
+            continue;
+        }
+        changes += 1;
+        assert_eq!(d, Decision::DemandeDifferee, "{c:?} {t:?}");
+        assert_eq!(v, Decision::DemandeAvecIpi, "{c:?} {t:?}");
+        assert_eq!(t.classe, Classe::Interactive);
+        assert!(t.consomme_ns < BUDGET_ACTIVATION_NS);
+        assert_eq!(c.occupant_classe, Classe::Normale);
+        assert!(!c.occupant_sensible && c.en_ligne && !c.inactif);
+    }
+    assert!(changes > 0, "la variante doit changer au moins un cas");
+}
+
+#[test]
+fn la_variante_n_ouvre_jamais_la_preemption_ciblee() {
+    // Seule `PreemptionCiblee` autorise la preemption d'un fil noyau. La
+    // variante ne la rend jamais la ou `decide` ne la rendait pas.
+    for (c, t) in tous_les_cas() {
+        if decide_selon(&c, &t, Variante::IpiInteractive) == Decision::PreemptionCiblee {
+            assert_eq!(decide(&c, &t), Decision::PreemptionCiblee, "{c:?} {t:?}");
+        }
+    }
+}
+
+#[test]
+fn sous_la_variante_l_ordinaire_face_au_calcul_recoit_l_ipi() {
+    let cible = coeur_occupe(Classe::Normale, false, 50_000_000);
+    assert_eq!(decide_selon(&cible, &ordinaire(), Variante::IpiInteractive), Decision::DemandeAvecIpi);
+    // Une interactive qui calcule (au-dela du budget) ne coupe toujours
+    // personne.
+    let mut calcule = ordinaire();
+    calcule.consomme_ns = BUDGET_ACTIVATION_NS;
+    assert_eq!(decide_selon(&cible, &calcule, Variante::IpiInteractive), Decision::DemandeDifferee);
+    // Une normale ne coupe personne.
+    let normale = Reveille { classe: Classe::Normale, sensible: false, consomme_ns: 0 };
+    assert_eq!(decide_selon(&cible, &normale, Variante::IpiInteractive), Decision::DemandeDifferee);
+    // Un occupant interactif n'est pas coupe par un pair ordinaire.
+    let pair = coeur_occupe(Classe::Interactive, false, 50_000_000);
+    assert_eq!(decide_selon(&pair, &ordinaire(), Variante::IpiInteractive), Decision::DemandeDifferee);
+}
+
+#[test]
+fn la_bascule_revient_au_defaut() {
+    choisit_variante(Variante::IpiInteractive);
+    assert_eq!(variante(), Variante::IpiInteractive);
+    choisit_variante(Variante::Defaut);
+    assert_eq!(variante(), Variante::Defaut);
+}
+
+// ===========================================================================
+// BOUCHAUD_CESSION_PAR_CLASSE_V1 : la courante au quantum
+// ===========================================================================
+
+use reveil::{cession, Cession};
+
+#[test]
+fn une_interactive_sous_budget_garde_son_coeur_face_a_des_normales() {
+    assert_eq!(cession(Classe::Interactive, 50_000, 0, 2), Cession::Garde);
+}
+
+#[test]
+fn une_interactive_cede_a_une_interactive_en_attente() {
+    // Le tourniquet de sa classe : la regle ne protege que contre une classe
+    // qui passe APRES.
+    assert_eq!(cession(Classe::Interactive, 50_000, 1, 2), Cession::Cede);
+    assert_eq!(cession(Classe::Interactive, 50_000, 1, 0), Cession::Cede);
+}
+
+#[test]
+fn une_interactive_qui_calcule_redevient_preemptible() {
+    // Anti-famine : au-dela du budget d'activation, la normale passe.
+    assert_eq!(cession(Classe::Interactive, BUDGET_ACTIVATION_NS, 0, 1), Cession::Cede);
+    assert_eq!(cession(Classe::Interactive, BUDGET_ACTIVATION_NS - 1, 0, 1), Cession::Garde);
+}
+
+#[test]
+fn une_normale_cede_toujours_quand_quelqu_un_attend() {
+    assert_eq!(cession(Classe::Normale, 0, 0, 1), Cession::Cede);
+    assert_eq!(cession(Classe::Normale, 0, 1, 0), Cession::Cede);
+}
+
+#[test]
+fn rien_a_ceder_quand_personne_n_attend() {
+    assert_eq!(cession(Classe::Interactive, 0, 0, 0), Cession::RienEnAttente);
+    assert_eq!(cession(Classe::Normale, u64::MAX, 0, 0), Cession::RienEnAttente);
+}
+
+/// Rejoue un coeur : une interactive periodique (reveil toutes les
+/// `periode_ns`, `travail_ns` de calcul avant d'ecrire son horodatage) et un
+/// calcul normal permanent, un quantum de 4 ms a phase fixe. Rend le pire
+/// retard entre l'election de l'interactive et son horodatage.
+fn pire_apres_election(par_classe: bool) -> u64 {
+    const QUANTUM: u64 = 4_000_000;
+    let (periode, travail) = (16_000_000u64, 30_000u64);
+    let mut pire = 0;
+    // Toutes les phases du reveil par rapport au quantum, au pas de 10 us.
+    let mut decalage = 0;
+    while decalage < QUANTUM {
+        let elu = periode + decalage; // l'interactive est elue ici
+        let prochain_quantum = (elu / QUANTUM + 1) * QUANTUM;
+        let fin = elu + travail;
+        let horodatage = if prochain_quantum < fin {
+            // Le quantum tombe pendant son travail : sous budget, seules des
+            // normales attendent.
+            match (par_classe, cession(Classe::Interactive, prochain_quantum - elu, 0, 1)) {
+                (true, Cession::Garde) => fin,
+                // Historique : elle cede au calcul et n'est reelue qu'au
+                // quantum suivant.
+                _ => prochain_quantum + QUANTUM + (fin - prochain_quantum),
+            }
+        } else {
+            fin
+        };
+        pire = pire.max(horodatage - elu);
+        decalage += 10_000;
+    }
+    pire
+}
+
+#[test]
+fn le_quantum_ne_coupe_plus_une_interactive_pour_un_calcul_normal() {
+    let historique = pire_apres_election(false);
+    let par_classe = pire_apres_election(true);
+    // Historique : un quantum entier perdu au pire (4 ms + le travail).
+    assert!(historique >= 4_000_000, "historique {historique}");
+    // Par classe : le travail seul.
+    assert_eq!(par_classe, 30_000);
+}
+
+#[test]
+fn la_cession_par_classe_est_la_politique_par_defaut() {
+    assert!(reveil::cession_par_classe());
 }

@@ -506,6 +506,8 @@ fn boucle() {
         crate::serial_println!("BOUCHAUD_STAGE2_WINDOW_MANAGER_READY");
     }
     crate::serial_println!("[gui] window manager demarre (fil noyau)");
+    crate::serial_println!("BOUCHAUD_PRODUCT_M11_ACTIVE compositor_frame_ms={} blind_ms={} persistence_notes=1",
+        politique::PERIODE_TRAME_MS, politique::REPOS_MUET_MS);
     crate::serial_println!(
         "[GUI-RENDER-CONTRACT] mode={} titlebar={} shadow={} rounded={} window_bounds=outer+shadow",
         diagnostic_mode_name(), TITLE_H,
@@ -1006,15 +1008,21 @@ fn boucle() {
                 }
                 let zone = window::zone_jauge(w);
                 let App::Navigateur { client } = &mut w.app else { continue };
-                if client.tic_jauge(maintenant) {
+                // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
+                // On continue de mesurer les rafales de trames sans generer de
+                // repaint OS pour la navigation : seul le demarrage a une jauge.
+                let jauge_change = client.tic_jauge(maintenant);
+                let demarrage = client.etat == crate::gui::client::Etat::Demarrage;
+                if jauge_change && demarrage {
                     degats.ajoute(Origine::Client, zone);
                     sale = true;
                 }
-                jauge_visible |= client.jauge.visible();
+                jauge_visible |= demarrage && client.jauge.visible();
             }
         } else {
             jauge_visible = wins.iter().any(|w| !w.min
-                && matches!(&w.app, App::Navigateur { client } if client.jauge.visible()));
+                && matches!(&w.app, App::Navigateur { client }
+                    if client.etat == crate::gui::client::Etat::Demarrage && client.jauge.visible()));
         }
 
         // L'instant ou ce tour commence a lire les clients : tout `FrameReady`
@@ -1186,7 +1194,7 @@ fn boucle() {
         let mut horloge_seule = false;
         if maintenant.wrapping_sub(derniere_horloge) >= PERIODE_HORLOGE_MS {
             derniere_horloge = maintenant;
-            for w in wins.iter().filter(|w| !w.min && matches!(w.app, App::Services | App::Monitor)) {
+            for w in wins.iter().filter(|w| !w.min && matches!(w.app, App::Services | App::Monitor | App::Insights)) {
                 degats.ajoute(Origine::Client, window::zone_utile(w));
             }
             horloge_seule = !sale;
@@ -1229,6 +1237,9 @@ fn boucle() {
                 // rectangle : ses bornes ne dependent pas du rectangle.
                 plan_de_scene(&wins, menu_open, (mxu, myu), &mut calques);
 
+                // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
+                // les regions de la trame partent d'un bloc a `fin_trame`.
+                fb::debut_trame();
                 for region in degats.regions().iter().copied() {
                     let present = proto_rect_ecran(region);
                     if present.vide() {
@@ -1264,6 +1275,7 @@ fn boucle() {
                     );
                     crate::gui::degats::note_presentation(present);
                 }
+                fb::fin_trame();
 
                 crate::kernel::timer::mark_frame();
                 reveil::note_trame(horloge_seule);
@@ -1496,6 +1508,34 @@ fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
         dernier_ns,
         if dernier_ns == 0 { 0 } else { maintenant_ns.saturating_sub(dernier_ns) / 1_000_000 },
     );
+
+    // BOUCHAUD_VIRTIO_GPU_2D_V1 : quand l'ecran est le scanout virtio-gpu 2D,
+    // chaque presentation coute deux commandes au peripherique (transfert +
+    // flush). Ce qu'elles coutent se lit ici, au rythme du releve.
+    let (presents_ok, presents_echec, pixels_virtio, ns_virtio) =
+        crate::drivers::virtio_gpu::compteurs();
+    if presents_ok + presents_echec > 0 {
+        let (sautes, cedes, non_cedables) = crate::drivers::virtio_gpu::compteurs_verrou();
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : l'attente par interruption, au meme rythme.
+        let i = crate::drivers::virtio_gpu::compteurs_irq();
+        let t = crate::drivers::gfx::compteurs_tampon();
+        let tr = crate::drivers::gfx::compteurs_trame();
+        crate::serial_println!(
+            "[GUI-VIRTIO-GPU] presents_ok={} presents_echec={} pixels_transferes={} ns_total={} us_par_present={} actif={} sautes={} cedes={} non_cedables={} \
+             irq_armee={} irq_voulue={} irq={} irq_sans_progres={} dormantes={} sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={} \
+             tampon={} octets_copies={} octets_directs={} acces_en_transfert={} trame={} trames={} regions_differees={}",
+            presents_ok, presents_echec, pixels_virtio, ns_virtio,
+            ns_virtio / presents_ok.max(1) / 1000,
+            crate::drivers::virtio_gpu::actif() as u8,
+            sautes, cedes, non_cedables,
+            i.armee as u8, i.voulue as u8, i.irq, i.irq_sans_progres, i.attentes_dormantes, i.sommeils,
+            i.reveils_sans_progres, i.vus_par_relecture, i.echues,
+            // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : la composition et ses copies.
+            if t.1 { "direct" } else { "copie" }, t.2, t.3, t.4,
+            // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : les trames soumises d'un bloc.
+            if tr.0 { "on" } else { "off" }, tr.1, tr.2,
+        );
+    }
 
     // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : ce que le compositeur a reellement fait,
     // et surtout ce qu'il n'a PAS fait. Une ligne par releve.
@@ -1741,21 +1781,23 @@ fn fenetre_active(wins: &[Win]) -> Option<usize> {
 /// une toutes les dix secondes, pour qu'une longue session ne noie pas la
 /// console.
 fn temoin_composition(pompe_t_ms: u64) {
+    // BOUCHAUD_M12_MEGA_V1 : auparavant >2000 lignes par session.
+    // Compteur exhaustif, emission 1/10s, sans allocation ni spam serie.
     use core::sync::atomic::{AtomicU64, Ordering};
     static DERNIER_MS: AtomicU64 = AtomicU64::new(0);
-    static EMIS: AtomicU64 = AtomicU64::new(0);
-    let emis = EMIS.load(Ordering::Relaxed);
-    let intervalle = if emis < 2048 { 250 } else { 10_000 };
+    static VUES: AtomicU64 = AtomicU64::new(0);
+    static DERNIERE_VUE: AtomicU64 = AtomicU64::new(0);
+    let vues = VUES.fetch_add(1, Ordering::Relaxed) + 1;
     let maintenant = crate::kernel::timer::monotonic_ms();
     let dernier = DERNIER_MS.load(Ordering::Relaxed);
-    if emis != 0 && maintenant.saturating_sub(dernier) < intervalle {
+    if dernier != 0 && maintenant.saturating_sub(dernier) < 10_000 {
         return;
     }
     DERNIER_MS.store(maintenant, Ordering::Relaxed);
-    EMIS.store(emis + 1, Ordering::Relaxed);
+    let precedent = DERNIERE_VUE.swap(vues, Ordering::Relaxed);
     crate::serial_println!(
-        "GUI_COMPOSITION_NAVIGATEUR pompe_t_ms={} fin_t_ms={} n={}",
-        pompe_t_ms, maintenant, emis + 1
+        "[M12-GUI-COMPOSITION] total={} depuis_dernier={} pompe_t_ms={} fin_t_ms={}",
+        vues, vues.saturating_sub(precedent), pompe_t_ms, maintenant,
     );
 }
 

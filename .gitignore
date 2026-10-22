@@ -38,6 +38,8 @@ tools/userland/userland-manifest.json
 # deja de la meme nature que `primitives.img` ou `health.img` : un artefact,
 # jamais une source.
 /scenario.img
+# Captures et journaux du banc de scanout virtio-gpu (run_virtio_gpu_scanout.sh)
+/scanout-virtio*/
 
 # Artefacts du lanceur de sondes (tools/test.sh)
 tools/userland/test-out/
@@ -276,3 +278,25 @@ tools/userland/out-horloge/
 /scenario-ata-integrite/
 /ata-integrite.img
 /ata-integrite-blkdebug.conf
+# P19: caches de construction locaux, jamais versionnes
+/third_party/caches/
+# BOUCHAUD_FAUTE_MULTIFIL_V1 (tools/ci/run_faute_multifil.sh)
+/scenario-faute-multifil/
+/faute-multifil.img
+/serie-faute-multifil*.log
+tools/userland/out-faute-multifil/
+/scenario-extinction-contention/
+/extinction-contention.img
+/serie-extinction-contention*.log
+tools/userland/out-extinction-contention/
+/scenario-serie-entrelacement/
+/serie-entrelacement.img
+/serie-entrelacement*.log
+tools/userland/out-serie-entrelacement/
+# run_console_panique.sh
+/scenario-console-panique/
+/console-panique.img
+# run_compta_injection.sh (banc C6a)
+/scenario-compta-injection/
+/compta-injection.img
+tools/userland/out-compta-injection/

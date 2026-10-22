@@ -61,6 +61,61 @@ fn compta_section<R>(task: &Task, corps: impl FnOnce() -> R) -> R {
     })
 }
 
+// BOUCHAUD_COMPTA_INVARIANTS_TRANCHE_V1
+//
+// I2 a ete viole une fois (compta-stress, hote surcharge : `COMPTA_DEPASSE
+// soi delta_ticks=8 borne=7 mur_ns=10713978`, au moins 17 ms de trop sur
+// 4 x 10,7 ms), sans mecanisme trouve a la lecture. Deux invariants du cote
+// ECRIVAIN, comptes et jamais asserts, departagent la prochaine occurrence :
+//   1. une tranche close ne verse jamais plus que son etendue murale
+//      (`slice_start_ns` -> repli) : les fragments la pavent exactement ;
+//   2. sur un coeur, une tranche ne s'arme jamais avant le dernier repli de
+//      ce coeur : deux taches ne se partagent pas le meme intervalle.
+// Nuls pendant une violation d'I2 : le sur-compte est du cote du LECTEUR
+// (l'agregation par processus), pas de l'imputation.
+static TRANCHES_GONFLEES: AtomicU64 = AtomicU64::new(0);
+static PIRE_GONFLEMENT_NS: AtomicU64 = AtomicU64::new(0);
+static CHEVAUCHEMENTS: AtomicU64 = AtomicU64::new(0);
+static PIRE_CHEVAUCHEMENT_NS: AtomicU64 = AtomicU64::new(0);
+/// Diagnostic : le site (`ARMEMENT_*`) et la tache du pire chevauchement.
+static PIRE_CHEVAUCHEMENT_SITE: AtomicU64 = AtomicU64::new(0);
+static PIRE_CHEVAUCHEMENT_TID: AtomicU64 = AtomicU64::new(0);
+static DERNIER_REPLI_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Reveils d'idle dont la tranche avait deja ete rearmee par une election
+/// (la tache a ete preemptee entre le `hlt` et son rearmement).
+static REARMES_DEJA_ARMES: AtomicU64 = AtomicU64::new(0);
+
+/// Sites d'armement d'une tranche (diagnostic de l'invariant 2).
+pub const ARMEMENT_ELECTION: u64 = 1;
+pub const ARMEMENT_APRES_IDLE: u64 = 2;
+
+/// A l'armement d'une tranche sur `cpu` a `now` (invariant 2).
+fn note_armement_compta(cpu: usize, now: u64, site: u64, tid: u64) {
+    let repli = DERNIER_REPLI_NS[cpu].load(Ordering::Relaxed);
+    if now < repli {
+        CHEVAUCHEMENTS.fetch_add(1, Ordering::Relaxed);
+        if repli - now > PIRE_CHEVAUCHEMENT_NS.fetch_max(repli - now, Ordering::Relaxed) {
+            PIRE_CHEVAUCHEMENT_SITE.store(site, Ordering::Relaxed);
+            PIRE_CHEVAUCHEMENT_TID.store(tid, Ordering::Relaxed);
+        }
+    }
+}
+
+/// `[tranches gonflees, pire gonflement ns, chevauchements, pire
+/// chevauchement ns, site du pire, tid du pire, rearmements evites]` depuis
+/// le demarrage.
+pub fn invariants_compta() -> [u64; 7] {
+    [
+        TRANCHES_GONFLEES.load(Ordering::Relaxed),
+        PIRE_GONFLEMENT_NS.load(Ordering::Relaxed),
+        CHEVAUCHEMENTS.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_NS.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_SITE.load(Ordering::Relaxed),
+        PIRE_CHEVAUCHEMENT_TID.load(Ordering::Relaxed),
+        REARMES_DEJA_ARMES.load(Ordering::Relaxed),
+    ]
+}
+
 /// Avance une seule fois le curseur CPU de la tâche jusqu'à `now`.
 ///
 /// Toutes les frontières (syscall, préemption, blocage) utilisent le même
@@ -87,6 +142,13 @@ fn account_until(task: &Task, now: u64) {
         }
     }
     let elapsed = user.saturating_add(noyau);
+    // BOUCHAUD_COMPTA_INVARIANTS_TRANCHE_V1, invariant 1 : les fragments
+    // pavent la tranche, de l'armement au repli -- leur somme EST l'etendue.
+    let etendue = now.saturating_sub(task.slice_start_ns.charge());
+    if task.slice_start_ns.charge() != 0 && elapsed > etendue {
+        TRANCHES_GONFLEES.fetch_add(1, Ordering::Relaxed);
+        PIRE_GONFLEMENT_NS.fetch_max(elapsed - etendue, Ordering::Relaxed);
+    }
 
     task.user_cpu_ns.range(task.user_cpu_ns.charge().saturating_add(user));
     task.kernel_cpu_ns.range(task.kernel_cpu_ns.charge().saturating_add(noyau));
@@ -357,22 +419,115 @@ fn suspend_compta_pour_idle() -> bool {
     true
 }
 
-/// Rearme la comptabilite de la tache courante apres un `hlt`.
-///
-/// Le cote du mur -- noyau ou utilisateur -- est celui que le repli avait
-/// range dans la tache : un fil noyau qui dort repart du cote noyau.
-fn rearme_compta_apres_idle() {
+// BOUCHAUD_COMPTA_INJECTION_V1 -- BANC DE C6a SEULEMENT (`compta-injection`).
+//
+// Le defaut corrige par 3adcea3c (instant et coeur lus avant la section) ne
+// s'est vu qu'une fois (os-primitives TCG du 21/10). Pour le reproduire a
+// volonte : `fenetre` elargit l'intervalle entre le retour du `hlt` et le
+// rearmement -- attente interruptions OUVERTES, terminee par une cession
+// (`schedule`) : la tache sort du coeur la ou un fil noyau etait preempte.
+// `ancien` rejoue l'ordre d'avant 3adcea3c (`rearme_ancien_pour_banc`) :
+// la reproduction negative. Les deux sont nuls au demarrage ; seul
+// `regle_injection_compta` les pose.
+static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(0);
+static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);
+static INJECTION_FENETRES: AtomicU64 = AtomicU64::new(0);
+static INJECTION_CESSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// `compta-injection` : fenetre injectee (ns) et ordre d'avant le correctif.
+pub fn regle_injection_compta(fenetre_ns: u64, ancien: bool) {
+    INJECTION_ANCIEN.store(ancien, Ordering::Relaxed);
+    INJECTION_FENETRE_NS.store(fenetre_ns, Ordering::Relaxed);
+}
+
+/// `(fenetres injectees, cessions effectives dans la fenetre)`.
+pub fn compteurs_injection_compta() -> (u64, u64) {
+    (INJECTION_FENETRES.load(Ordering::Relaxed), INJECTION_CESSIONS.load(Ordering::Relaxed))
+}
+
+fn fenetre_injectee() {
+    let fenetre = INJECTION_FENETRE_NS.load(Ordering::Relaxed);
+    if fenetre == 0 {
+        return;
+    }
+    INJECTION_FENETRES.fetch_add(1, Ordering::Relaxed);
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(fenetre);
+    while crate::kernel::timer::monotonic_ns() < fin {
+        core::hint::spin_loop();
+    }
+    if schedule() {
+        INJECTION_CESSIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// L'ordre d'AVANT 3adcea3c, pour la reproduction negative seulement :
+/// instant et coeur lus avant la fenetre et la section, tranche rearmee sans
+/// regarder si l'election l'a deja fait.
+fn rearme_ancien_pour_banc() {
     let index = current_index_raw();
     if index == NO_TASK {
         return;
     }
     let now = crate::kernel::timer::monotonic_ns();
     let cpu = local_cpu();
+    fenetre_injectee();
     let table = tasks();
     let Some(task) = table.get(index) else {
         return;
     };
     compta_section(task, || {
+        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE, task.tid as u64);
+        task.last_account_ns.range(now);
+        task.slice_start_ns.range(now);
+        COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
+        COMPTA_USER_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_NOYAU_NS[cpu].store(0, Ordering::Relaxed);
+        COMPTA_EN_NOYAU[cpu].store(task.in_kernel.charge(), Ordering::Relaxed);
+    });
+}
+
+/// Rearme la comptabilite de la tache courante apres un `hlt`.
+///
+/// Le cote du mur -- noyau ou utilisateur -- est celui que le repli avait
+/// range dans la tache : un fil noyau qui dort repart du cote noyau.
+fn rearme_compta_apres_idle() {
+    if INJECTION_ANCIEN.load(Ordering::Relaxed) {
+        rearme_ancien_pour_banc();
+        return;
+    }
+    // BOUCHAUD_COMPTA_INJECTION_V1 : la meme fenetre, avant la section --
+    // le correctif doit la traverser sans chevauchement.
+    fenetre_injectee();
+    let index = current_index_raw();
+    if index == NO_TASK {
+        return;
+    }
+    let table = tasks();
+    let Some(task) = table.get(index) else {
+        return;
+    };
+    compta_section(task, || {
+        // BOUCHAUD_COMPTA_REARME_EN_SECTION_V1 : l'instant ET le coeur se
+        // lisent ICI, interruptions masquees. Au retour du `hlt` les
+        // interruptions sont ouvertes : lus avant la section, un fil noyau
+        // preempte entre les deux (`accorde_preemption_noyau`) etait replie a
+        // un instant plus tardif, reelu plus tard -- ailleurs peut-etre --,
+        // puis rearme a l'instant PERIME et sur le bloc de son ANCIEN coeur.
+        // Sa tranche comptait alors le temps passe hors processeur, et le
+        // bloc d'un autre coeur etait ecrase sans sa sequence. Trouve par
+        // l'invariant 2 (os-primitives TCG, 21/10 : `chevauchements=1
+        // pire_chevauchement_us=5859`).
+        //
+        // Preemptee dans cette fenetre, la tache a ete rearmee par son
+        // election (`finalise_task_running`) : la tranche en cours est la
+        // bonne, on n'y touche pas.
+        if task.last_account_ns != 0 {
+            REARMES_DEJA_ARMES.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let now = crate::kernel::timer::monotonic_ns();
+        let cpu = local_cpu();
+        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE, task.tid as u64);
         task.last_account_ns.range(now);
         task.slice_start_ns.range(now);
         COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
@@ -383,13 +538,23 @@ fn rearme_compta_apres_idle() {
 }
 
 fn account_slice_end(task: &Task) {
-    let now = crate::kernel::timer::monotonic_ns();
     // Une seule section : la tranche close ET le curseur remis a zero. Un
     // lecteur entre les deux compterait sinon du temps hors processeur.
     compta_section(task, || {
+        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1 : l'instant du repli se lit
+        // DANS la section, jamais avant. Lu avant, il precedait l'ouverture de
+        // la sequence : un vCPU suspendu par l'hote entre les deux -- IF=0 n'y
+        // peut rien -- laissait un lecteur voir la tranche encore vive et la
+        // compter jusqu'a SON instant, plus tardif ; le repli n'en versait
+        // ensuite que jusqu'au sien, et `utime` reculait (compta-stress, TCG
+        // SMP4 : « utime=1937<-1938 », 1 passe sur 8). Lu ici, apres la
+        // sequence impaire, il suit dans l'ordre de `LAST_MONOTONIC_NS` tout
+        // instant d'un lecteur qui a vu l'etat d'avant.
+        let now = crate::kernel::timer::monotonic_ns();
         account_until(task, now);
         task.last_account_ns.range(0);
         task.slice_start_ns.range(0);
+        DERNIER_REPLI_NS[local_cpu()].store(now, Ordering::Relaxed);
         // Le CPU n'a plus de tache a qui imputer le temps : on desarme, sinon
         // le premier repli de la tache SUIVANTE lui attribuerait le temps
         // passe entre les deux.
@@ -578,6 +743,13 @@ pub fn impute_syscall(nr: u64, ecoule: u64) {
 ///
 /// GLOBAL, et dit comme tel : ce sont tous les processus depuis le demarrage.
 pub fn publie_syscall_top(combien: usize) {
+    publie_syscall_top_avec(combien, &mut || {});
+}
+
+/// Meme chose, `cede` appele entre deux lignes (BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 :
+/// le fil de mesures y pose son point cooperatif ; sous KVM, les neuf lignes
+/// d'un seul segment tenaient le coeur 28 ms, run 39479638849).
+pub fn publie_syscall_top_avec(combien: usize, cede: &mut dyn FnMut()) {
     let mut total_ns = 0u64;
     let mut total_n = 0u64;
     for i in 0..SYSCALL_MAX {
@@ -596,6 +768,7 @@ ecoule_ms={} appels={} hors_table={}",
     // sortie de processus, et `combien` est petit.
     let mut plafond = u64::MAX;
     for _ in 0..combien {
+        cede();
         let mut meilleur = None;
         for i in 0..SYSCALL_MAX {
             let ns = SYSCALL_NS[i].load(Ordering::Relaxed);

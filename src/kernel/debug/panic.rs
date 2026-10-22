@@ -55,6 +55,11 @@ fn panic(info: &PanicInfo) -> ! {
     if !idt::prends_la_panique(cpu) {
         idt::arret_definitif();
     }
+    // BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : desormais la disponibilite du
+    // journal prime sur l'integrite des lignes. Un detenteur du jeton peut
+    // etre mort : a la borne, la ligne sort sans lui, apres les lignes
+    // differees.
+    crate::drivers::serial::passe_en_panique();
 
     // BOUCHAUD_C40_AUCUN_ARRET_SILENCIEUX
     //

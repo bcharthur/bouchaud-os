@@ -37,7 +37,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dedoublonne:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le run PR d'une branche de ce depot
+    # peut-il REFLETER le run push du meme arbre au lieu de le refaire ? Voir
+    # tools/ci/dedoublonne_pr.py. Les jobs racines en dependent et tournent si
+    # la decision manque (`!cancelled()`). Le job de verdict, lui, n'est JAMAIS
+    # saute : il attend la conclusion finale du run push et la reflete -- un
+    # echec bloque, un run annule ou saute ne prouve rien. Pas sur les
+    # workflows dont un gate est un check requis de `main`.
+    name: dedoublonne push/PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reutilise: ${{ steps.decision.outputs.reutilise }}
+      source_run: ${{ steps.decision.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENEMENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          DEPOT: ${{ github.repository }}
+          DEPOT_TETE: ${{ github.event.pull_request.head.repo.full_name }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          FUSION: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/dedoublonne_pr.py
+          else
+            echo "DEDOUBLONNE reutilise=false raison=evenement $EVENEMENT"
+            echo reutilise=false >> "$GITHUB_OUTPUT"
+          fi
+
   native-ipc-runtime:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: native-ipc-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -82,3 +125,39 @@ jobs:
             target/native-ipc-runtime-ci/native-ipc-runtime.log
           if-no-files-found: error
           retention-days: 14
+
+  native-ipc-verdict:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le verdict, jamais saute -- execute ici,
+    # ou reflete du run push du meme arbre.
+    name: native-ipc / verdict
+    needs: [dedoublonne, native-ipc-runtime]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.dedoublonne.outputs.reutilise == 'true'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - name: Verdict reflete du run push du meme arbre
+        if: needs.dedoublonne.outputs.reutilise == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          SOURCE: ${{ needs.dedoublonne.outputs.source_run }}
+        run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "native-ipc / verdict" --delai 6600 --pas 60
+      - name: Verdict execute
+        if: needs.dedoublonne.outputs.reutilise != 'true'
+        env:
+          R_RUNTIME: ${{ needs.native-ipc-runtime.result }}
+          R_DEDOUBLONNE: ${{ needs.dedoublonne.result }}
+        run: |
+          echo "native-ipc-runtime=$R_RUNTIME dedoublonne=$R_DEDOUBLONNE"
+          [ "$R_RUNTIME" = success ] || { echo "NATIVE_IPC_VERDICT_ECHEC runtime=$R_RUNTIME"; exit 1; }
+          echo NATIVE_IPC_VERDICT_OK

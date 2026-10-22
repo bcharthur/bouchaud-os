@@ -76,7 +76,7 @@ fn charge() -> (u8, u8, u8) {
 }
 
 // BOUCHAUD_V16_2_PREFIX_BUFFER
-struct Prefixe {
+pub struct Prefixe {
     donnees: [u8; PREFIXE_MAX],
     len: usize,
 }
@@ -86,7 +86,7 @@ impl Prefixe {
         Self { donnees: [0; PREFIXE_MAX], len: 0 }
     }
 
-    fn octets(&self) -> &[u8] {
+    pub fn octets(&self) -> &[u8] {
         &self.donnees[..self.len]
     }
 }
@@ -133,8 +133,37 @@ fn ajoute_fps(out: &mut Prefixe, valeur: Option<u16>) {
     }
 }
 
+/// BOUCHAUD_PREFIXE_SANS_CMOS_V1 : heure, minute, seconde locales du prefixe,
+/// lues sur l'horloge murale ancree (aucun acces CMOS) ; la RTC tant que
+/// l'ancre n'est pas posee.
+fn heure_locale() -> rtc::DateTime {
+    match crate::kernel::abi::realtime_ns_ancree() {
+        Some(ns) => {
+            let decalage = rtc::LOCAL_UTC_OFFSET_HOURS as i64 * 3600;
+            let s = ((ns / 1_000_000_000) as i64 + decalage).rem_euclid(86_400) as u32;
+            rtc::DateTime {
+                second: (s % 60) as u8,
+                minute: (s / 60 % 60) as u8,
+                hour: (s / 3600) as u8,
+                day: 0,
+                month: 0,
+                year: 0,
+            }
+        }
+        None => rtc::now(),
+    }
+}
+
 pub fn ecris_prefixe() {
-    let heure = rtc::now();
+    let out = prefixe();
+    crate::drivers::serial::ecris_octets_sans_prefixe(out.octets());
+}
+
+/// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : le prefixe d'une ligne, construit sur pile.
+/// La console asynchrone le pose A L'AJOUT de la ligne : l'heure est celle de
+/// l'evenement, pas celle de son emission par le fil de vidange.
+pub fn prefixe() -> Prefixe {
+    let heure = heure_locale();
     let (cpu, ram, disque) = charge();
     let frame = if PRET.load(Ordering::Acquire) {
         Some(crate::gui::frame_clock::snapshot())
@@ -168,6 +197,5 @@ pub fn ecris_prefixe() {
     ajoute_couleur(&mut out, GRIS);
     let _ = out.write_str("] ");
     ajoute_couleur(&mut out, RESET);
-
-    crate::drivers::serial::ecris_octets_sans_prefixe(out.octets());
+    out
 }

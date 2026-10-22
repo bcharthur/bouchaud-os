@@ -109,6 +109,78 @@ Classe de preuve : QEMU. Le jeton est pris meme sans COM1 (la machine de
 reference ecrit dans le tambour RAM) : le defaut 1 existe aussi en physique,
 avec une fenetre plus courte.
 
+### Console asynchrone (BOUCHAUD_CONSOLE_ASYNCHRONE_V1, 21/10)
+
+Une ligne s'emettait sous le jeton, interruptions masquees, apres les lignes
+differees de tous les coeurs : `serie_pire_us` 15 a 20 ms par bras de l'A/B
+KVM SMP4 (run 39503091750) -- cause mesuree des echecs stricts P13 a SMP1 et
+SMP4 (d02e8294 : detection en retard de 4,2 ms, reprise de 16,6 ms).
+
+Desormais (hors demarrage, panique, extinction et repli) :
+
+* l'appelant range sa ligne ENTIERE, prefixe compris (l'heure de
+  l'evenement), dans un anneau de 64 Kio, sous un verrou tenu le temps d'une
+  copie memoire, interruptions masquees ; un enregistrement par appel
+  (`range_morceaux` : entier ou absent) ;
+* le fil `console` (Normale, migrable) l'emet par morceaux de 16 octets,
+  chacun sous le jeton, preemption coupee, INTERRUPTIONS OUVERTES, jeton
+  rendu et point cooperatif entre deux ; l'enregistrement de tete est
+  reprenable (`CONSOLE_ENTAME`) : tout detenteur suivant -- le fil, un
+  producteur, le chemin synchrone, la panique -- le termine avant tout autre
+  octet. Le jeton n'est donc jamais tenu par une tache sortie du processeur.
+  Le fil dort sur une file d'attente (borne 50 ms) et n'est reveille que
+  d'un contexte qui peut publier une tache ;
+* anneau plein : le PRODUCTEUR paie -- il emet lui-meme, sous le jeton, les
+  lignes les plus anciennes une a la fois (par morceaux avec points
+  cooperatifs s'il peut ceder), puis range la sienne : la contre-pression du
+  chemin synchrone, dans le meme ordre. Repli dans l'anneau de son coeur
+  seulement si le jeton est introuvable ; fil muet plus de 2 s : repli
+  synchrone definitif (`repli_securite=1`) ;
+* une attente de l'anneau vide d'un contexte qui ne peut pas ceder
+  (l'autorun tourne dans le contexte de demarrage) emet elle-meme -- sinon,
+  en SMP1, le fil ne tournait jamais pendant l'attente (5 s a vide, repli) ;
+  une premiere version tenait le jeton entre les morceaux d'une ligne : en
+  SMP1, le fil preempte bloquait ce contexte et des lignes restaient en
+  attente a l'extinction -- d'ou l'enregistrement reprenable ;
+* panique et double faute : poignee de main avec le fil (`EN_PANIQUE` puis
+  `VIDANGE_EN_COURS`, SeqCst, 20 ms au plus) ; le coeur qui panique prend le
+  jeton et le GARDE (un detenteur legitime finit d'abord sa ligne et
+  l'enregistrement entame ; 200 ms au plus, puis il passe outre), vide
+  l'anneau AVANT le message ; il est le seul lecteur de l'anneau, les autres
+  coeurs different leurs lignes ; arret definitif d'un coeur : vidange sous
+  le jeton ; extinction et redemarrage : console arretee (anneau vide,
+  synchrone) en premier ;
+* le prefixe lit l'horloge murale ancree, plus la RTC (BOUCHAUD_PREFIXE_SANS_CMOS_V1 :
+  ~30 acces CMOS par ligne, index puis donnee sans verrou, et jusqu'a 2 ms
+  d'attente du bit de mise a jour).
+
+`console-async on|off|etat|rafale N` bascule a chaud (A/B) ;
+`BOUCHAUD_CONSOLE_BILAN` (fin d'autorun) et les champs `console_*` de
+`REVEIL_PRECIS` publient : morceau et ligne les plus longs, retard d'emission,
+anneau plein, replis, emissions restees synchrones. Gardes
+`verifie-console-asynchrone.py` (35 negatifs) et `verifie-jeton-serie.py`
+(22) ; tests hote `tools/serie/test_differees.rs` (12, dont 4 ecrivains + un
+lecteur concurrent : lignes entieres, ordre de chaque ecrivain, contre-pression
+exercee) ; bancs `run_serie_entrelacement.sh` (normal, suspendu) et
+`run_console_panique.sh` (600 lignes dans l'anneau, puis `panic-test` :
+aucune perdue, abimee ni dupliquee ; local TCG 8/8 en SMP4, SMP2, SMP1,
+synchrone).
+
+Mesure TCG (os-primitives, meme suite, meme duree invitee 1 min 44 s) :
+
+| | avant | apres |
+|---|---|---|
+| emission masquee pire | 28,6 ms | 6,5 ms (demarrage, avant le fil) |
+| emissions masquees > 2 ms | 5 497 | 36 (demarrage) |
+| attente pire du jeton | 67 ms | 0 |
+| emissions synchrones une fois le fil pret | -- | 0 |
+| lignes perdues | 0 | 0 (984 passees par l'anneau du coeur, toutes videes) |
+
+Classe de preuve : TCG. Le morceau TCG le plus long (13 a 23 ms pour 16
+octets) n'est pas un cout du port : il compte les IRQ servies pendant le
+morceau et les vCPU que l'hote ne fait pas tourner. La mesure qui decide est
+KVM (A/B `console-async on|off`), a venir.
+
 ### Quantum des fils noyau (BOUCHAUD_QUANTUM_NOYAU_V1)
 
 **RETIRE** (`000a99ef`, BOUCHAUD_PREEMPTION_NOYAU_SURE_V1). Couper un fil
@@ -190,6 +262,54 @@ Ouvert : la borne du jeton atteinte une fois sous A+B sans gel ; le
 demarrage A sans `FIN` ; usb-hid 732 ms (quantum retire) ; preemption ciblee
 du compositeur (cas preexistant).
 
+### Reveils au repos (BOUCHAUD_REVEIL_DU_V1, BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1, 20/10)
+
+Constat KVM (run 39308093631) : au repos, p95 de reveil 850-955 us (SMP1) alors
+que sous charge 212 us -- la sonde ne pouvait rien qualifier. Deux causes :
+
+| defaut | correction | commit | preuve |
+|---|---|---|---|
+| echeance due ou a < `MARGE_NS` (20 us) : armement refuse, puis `hlt` jusqu'au tic (1 ms) ou au quantum (4 ms) | armee exactement (dans la marge) ou a `maintenant + MARGE_NS` (due) ; jamais en boucle | `cbbd5ec0` | HOST 15/15 ; KVM a mesurer |
+| tache bloquee restee installee (son coeur fait `hlt` dans son contexte) : `publish_ready` sortait sans IPI, le reveil inter-coeurs attendait le quantum | IPI si le coeur est `IDLE` ; le dormeur relit l'etat de sa tache apres `IDLE` (motif croise) | `7d6c944b` | TCG SMP4 futex-pingpong 2 857 -> 95 us ; SMP2 ~974 -> ~69 us ; 0 reveil perdu |
+| coeur s'endormant pendant le balayage d'un autre coeur (borne JAMAIS) : rien d'arme pour SA tache | min(borne globale, echeance de la tache installee) | `2f2868c5` | KVM a mesurer |
+| sommeil interactif sur coeur OCCUPE detecte au tic (pire 881 us, QUALIFIE_ECHEC SMP4) | borne interactive par coeur, minuteur = min(quantum, borne), tir anticipe sans quantum impute ni rotation | `bcfd9b82` | KVM a mesurer |
+
+KVM (`59e384ce`) : repos p95 SMP1 851-955 -> 134-144 us, SMP4 177-416 ->
+140-155 us ; attribution SMP1 `P13_STRICT_OK` (39387288347).
+
+KVM (`d097281d`, 39424044836) : attribution SMP1 et SMP2 `P13_STRICT_OK` ;
+A/B bras `on` SMP4 repos p95 159-170 us, p99 199-208 us. SMP4
+`QUALIFIE_ECHEC` : detection a l'heure, mais attente pret -> elu 466/679 us.
+
+### Election d'une interactive sur un coeur en mode noyau (BOUCHAUD_CESSION_INTERACTIVE_V1, BOUCHAUD_CONSOLE_POINT_SUR_V1, 20/10)
+
+Une tache utilisateur n'est jamais `latency_sensitive` : son reveil sur un
+coeur occupe rend une demande ORDINAIRE, servie au prochain passage en
+anneau 3, au point sur de retour d'appel systeme, ou au point cooperatif d'un
+fil noyau -- jamais au milieu du mode noyau (BOUCHAUD_PREEMPTION_NOYAU_SURE_V1).
+
+| defaut | correction | commit | preuve |
+|---|---|---|---|
+| le point cooperatif d'un fil noyau ne cedait qu'apres 1 ms de segment, meme a une interactive | cede sans plancher si une interactive attend dans la file locale (toujours sous `cession_volontaire_sure`) | `5721e711` | HOST+TCG ; KVM a mesurer |
+| `write(2)` console : l'ecriture entiere en mode noyau (`writev` jusqu'a 349 ms sur le coeur 0, KVM) | point sur entre deux lignes (lignes entieres, jeton serie inchange) | `30fb0a4b` | `run_serie_entrelacement` OK ; KVM a mesurer |
+
+TCG SMP4, `run_ordonnanceur_attribution.sh` 2 passes (sans minuterie
+TSC-deadline, donc sans reveil precis sur coeur occupe) : avant (`160de485`)
+QUALIFIE_OK en 3 tentatives, pire interactif 6,9 / 3,4 / 4,5 ms (attente
+d'election du pire 5,7 / 3,0 ms) ; apres (HEAD) QUALIFIE_OK en 2 tentatives,
+pire 3,9 / 2,6 ms (attente 3,6 / 2,0 ms), `cessions_interactives=87`.
+Tirages uniques : indicatif, KVM tranche.
+
+KVM (`d02e8294`, 39447650575) : SMP4 attribution 1/2 (0/2 avant) ; attentes
+interactives > 200 us : 1 derriere un fil noyau, 2 derriere l'utilisateur (pire 742 us) -- l'election n'est plus
+le facteur dominant ; la passe en echec perd 16,6 ms en REPRISE dans `vide_differees` (emission serie masquee).
+
+Instrument : `attentes_noyau` / `attentes_utilisateur` et leurs pires (prets
+-> elu > 200 us d'une interactive utilisateur, classes par l'occupant
+precedent du coeur), `cessions_interactives` -- ligne `REVEIL_PRECIS`.
+Un marqueur d'appel systeme PAR COEUR n'est pas permute a la commutation :
+il ne sert pas a classer (essaye puis retire).
+
 ## 4. Invariants
 
 | invariant | etat | garde |
@@ -198,7 +318,11 @@ du compositeur (cas preexistant).
 | fil d'un processus recolte jamais en espace utilisateur | 0 sur 52 demarrages | banc `ressuscites` |
 | tache prete jamais hors de toute file | 0 `[SCHED-ORPHELINE]` sur 16 | `verifie-passation-reveil.py` |
 | aucun reveil futex perdu | 0 | banc `reveils_perdus` |
+| tache installee rendue prete : son coeur ne dort pas | IPI ou relecture apres `IDLE` | `verifie-poignee-idle.py` |
 | aucun BKL, aucun verrou global d'ordonnanceur | tenu | `verifie-ordonnanceur-sans-bkl.py`, `verifie-bkl-supprime.py` |
+| fin de fichier / EPIPE des la derniere extremite fermee, par tout chemin | `ferme_hors_verrou` | `verifie-eof-hors-close.py`, `eof-fermeture-probe` |
+| le temps CPU d'un processus ne recule jamais (`/proc/<pid>/stat`, `/proc/stat`) | instant du repli lu DANS la section (`37f481c4`) : A/B causal 35 -> 0 reculs, 8/8 passes | `verifie-compta-seqlock.py` (regle 5), `compta-stress-probe` |
+| `POLLOUT` sur un tube ou un socketpair : une ecriture de PIPE_BUF octets passe | seuil `place >= PIPE_BUF` (`f7ecba30`) | `verifie-tube-atomique.py` (regle 4), `TUBE_POLLOUT` |
 
 ## 5. Ouvert
 

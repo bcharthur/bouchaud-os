@@ -6,11 +6,38 @@
 // Les reveils restent actifs a chaque tick sur CPU0 pour garder le bureau
 // fluide, tandis que les scans/diagnostics lourds sont exclus du hard IRQ BSP
 // lorsque plusieurs CPU sont réellement disponibles.
+/// BOUCHAUD_ATTRIBUTION_REVEIL_V1 : a la sortie du gestionnaire (tous ses
+/// chemins, commutation comprise), la section masquee depuis la derniere
+/// entree d'interruption SUR LE COEUR OU L'ON SORT.
+///
+/// Le coeur est lu A LA SORTIE, pas a l'entree : un gestionnaire qui a
+/// commute ne reprend que lorsque sa tache est reelue -- peut-etre sur un
+/// autre coeur. Le coeur de l'entree designerait alors l'emplacement d'un
+/// autre coeur, et la duree serait fausse (vu en endurance SMP8 : 10 ms
+/// « masquees » imputees au quantum).
+struct SortieIrqMesuree {
+    vecteur: u8,
+}
+
+impl Drop for SortieIrqMesuree {
+    fn drop(&mut self) {
+        crate::kernel::attribution_reveil::sortie_irq(
+            crate::arch::x86_64::usermode::cpu_index(),
+            crate::arch::x86_64::cpu::rdtsc(),
+            self.vecteur,
+            crate::kernel::timer::cycles_par_ms(),
+        );
+    }
+}
+
 extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
+    let entree_tsc = crate::arch::x86_64::cpu::rdtsc();
     smp::note_premiere_irq(InterruptIndex::Timer.as_u8(), stack.instruction_pointer.as_u64(), stack.stack_pointer.as_u64());
     let _gs = GsGuard::enter(&stack);
     let interrupted_user = from_user(&stack);
     let blackbox_cpu = crate::arch::x86_64::usermode::cpu_index();
+    crate::kernel::attribution_reveil::entree_irq(blackbox_cpu, entree_tsc);
+    let _sortie_mesuree = SortieIrqMesuree { vecteur: InterruptIndex::Timer.as_u8() };
     let _blackbox_irq = crate::kernel::blackbox::timer_irq(
         blackbox_cpu,
         stack.instruction_pointer.as_u64(),
@@ -18,6 +45,20 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     );
 
     timer::tick();
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : un tic perdu, et ce qu'il interrompt.
+    crate::kernel::attribution_reveil::note_tic_tsc(
+        blackbox_cpu,
+        timer::monotonic_ns(),
+        entree_tsc,
+        stack.instruction_pointer.as_u64(),
+        interrupted_user,
+        crate::kernel::timer::cycles_par_ms(),
+        // BOUCHAUD_PREUVE_HOTE_V1 : le vol prouve de l'hote et la tache
+        // installee. Atomiques et memoire publiee par l'hote : rien qui
+        // suppose une tache.
+        crate::kernel::vol_hote::vole_ns(blackbox_cpu),
+        crate::kernel::task::courant_imputable(blackbox_cpu),
+    );
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 2);
 
     let idle = crate::arch::x86_64::cpu::account_timer_tick(interrupted_user);

@@ -366,13 +366,19 @@ impl<T: ?Sized> SpinLockIrq<T> {
 
     #[track_caller]
     pub fn lock(&self) -> SpinLockIrqGuard<'_, T> {
+        let site = core::panic::Location::caller();
         let restore_interrupts = Self::interrupts_enabled();
         unsafe { asm!("cli", options(nomem, nostack, preserves_flags)); }
+        // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : la section masquee la plus externe
+        // (celle qui rouvrira IF) est mesuree, attente du verrou comprise.
+        let debut_tsc = if restore_interrupts { crate::arch::x86_64::cpu::rdtsc() } else { 0 };
         let guard = self.inner.lock();
 
         SpinLockIrqGuard {
             guard: Some(guard),
             restore_interrupts,
+            debut_tsc,
+            site,
         }
     }
 
@@ -381,10 +387,14 @@ impl<T: ?Sized> SpinLockIrq<T> {
         let restore_interrupts = Self::interrupts_enabled();
         unsafe { asm!("cli", options(nomem, nostack, preserves_flags)); }
 
+        let site = core::panic::Location::caller();
+        let debut_tsc = if restore_interrupts { crate::arch::x86_64::cpu::rdtsc() } else { 0 };
         match self.inner.try_lock() {
             Some(guard) => Some(SpinLockIrqGuard {
                 guard: Some(guard),
                 restore_interrupts,
+                debut_tsc,
+                site,
             }),
             None => {
                 if restore_interrupts {
@@ -403,6 +413,9 @@ impl<T: ?Sized> SpinLockIrq<T> {
 pub struct SpinLockIrqGuard<'a, T: ?Sized> {
     guard: Option<SpinLockGuard<'a, T>>,
     restore_interrupts: bool,
+    /// TSC a la baisse d'IF (0 si IF etait deja baisse a la prise).
+    debut_tsc: u64,
+    site: &'static core::panic::Location<'static>,
 }
 
 impl<T: ?Sized> Deref for SpinLockIrqGuard<'_, T> {
@@ -426,9 +439,19 @@ impl<T: ?Sized> Drop for SpinLockIrqGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock before re-enabling interrupts. Otherwise an IRQ on
         // this CPU could immediately recurse into the protected structure.
+        let cpu = self.guard.as_ref().map(|g| g.lock.owner_cpu.load(Ordering::Relaxed));
         drop(self.guard.take());
 
         if self.restore_interrupts {
+            if let Some(cpu) = cpu {
+                crate::kernel::attribution_reveil::note_section_masquee(
+                    cpu,
+                    self.debut_tsc,
+                    crate::arch::x86_64::cpu::rdtsc(),
+                    self.site as *const core::panic::Location<'static> as u64,
+                    crate::kernel::timer::cycles_par_ms(),
+                );
+            }
             unsafe { asm!("sti", options(nomem, nostack, preserves_flags)); }
         }
     }

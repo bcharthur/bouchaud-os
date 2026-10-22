@@ -7,6 +7,8 @@
 
 #[path = "audio/ac97.rs"]
 pub mod ac97;
+#[path = "audio/ac97_position.rs"]
+pub mod ac97_position;
 #[path = "block/ata.rs"]
 pub mod ata;
 #[path = "block/ata_bloc.rs"]
@@ -27,6 +29,23 @@ pub mod display;
 /// BOUCHAUD_VIRTIO_PCI_V1 : transport virtio-PCI moderne et premier aller-retour virtio-gpu (P10).
 #[path = "display/virtio_gpu.rs"]
 pub mod virtio_gpu;
+/// BOUCHAUD_VIRTIO_GPU_2D_V1 : qui presente le bureau (GOP > BGA > virtio-gpu 2D), pur et teste sur l'hote.
+#[path = "display/virtio_gpu_dma.rs"]
+pub mod virtio_gpu_dma;
+#[path = "display/virtio_gpu_file.rs"]
+pub mod virtio_gpu_file;
+/// BOUCHAUD_VIRTIO_GPU_IRQ_V1 (P10+.1) : achevement par interruption MSI-X, pur et teste sur l'hote.
+#[path = "display/virtio_gpu_irq.rs"]
+pub mod virtio_gpu_irq;
+/// BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2) : possession de la memoire du scanout,
+/// copies par trame (pur, teste sur l'hote).
+#[path = "display/virtio_gpu_tampons.rs"]
+pub mod virtio_gpu_tampons;
+/// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3a) : une trame, une soumission (pur, teste sur l'hote).
+#[path = "display/virtio_gpu_trame.rs"]
+pub mod virtio_gpu_trame;
+#[path = "display/politique_scanout.rs"]
+pub mod politique_scanout;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir
 /// `network/anneau_rx.rs`. Aucun acces materiel, donc verifiable par un test
 /// hote sans demarrer la machine.
@@ -76,6 +95,12 @@ pub mod net;
 pub mod serial {
     #[path = "lots.rs"]
     pub mod lots;
+    #[path = "attente.rs"]
+    pub mod attente;
+    #[path = "differees.rs"]
+    pub mod differees;
+    #[path = "file_place.rs"]
+    pub mod file_place;
     #[path = "uart16550.rs"]
     mod uart16550;
     pub use uart16550::*;

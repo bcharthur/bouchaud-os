@@ -1,59 +1,24 @@
-# État courant
+# Etat courant Bouchaud OS — 21 octobre 2026
 
-HEAD technique testé : `3658af04f05e04edf732cc086ddc890faaf88c52`, 8 octobre 2026.
-Le commit de cette mise à jour est documentaire. [Handoff complet et preuves](HANDOFF_CODEX_2026-10-08.md).
+**P13: PARTIAL. Baseline: NOT_ESTABLISHED.** Registre ferme des defauts bloquants : [REGISTRE_CONVERGENCE.md](REGISTRE_CONVERGENCE.md) (une entree par defaut : preuve, cause, correctif, non-regression, statut ; aucune cloture sur un seul run vert).
 
-## Campagne du même HEAD
+- **21/10 (local, HOST+TCG ; KVM a mesurer)** : console serie asynchrone (`c6206281`, BOUCHAUD_CONSOLE_ASYNCHRONE_V1, C1) -- une ligne attend dans un anneau de 64 Kio et le fil `console` l'emet par morceaux de 16 octets interruptions ouvertes ; TCG os-primitives : emission masquee pire 28,6 -> 6,5 ms (demarrage), > 2 ms 5 497 -> 36, attente du jeton 67 ms -> 0 ; panique SMP4 8/8, SMP2, SMP1, synchrone : aucune ligne perdue, abimee ni dupliquee ; cinq defauts trouves par les bancs et corriges avant le commit (C1a-C1e). Prefixe du journal sans acces CMOS (`24698aa1`, C12). Reprise decoupee commutation/passation/retour publiee par `/proc/self/reveil` (`7b674b0d`, C2 : instrumentation seulement, aucun correctif avant localisation des 1 226 us KVM SMP4) ; `b1_retard` mesure sur l'attente de la tache (C3). A/B : cinq verdicts par propriete imprimes a cote du verdict historique, qui reste seul juge (`fc7e00b1`, C4 : decision humaine requise avant tout remplacement). Ouverts : C2, C3 (KVM), C5 SIGSEGV, C6 I2, C7, C9, C10. Reference technique : [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md) (causes racines du `NON_QUALIFIANT` KVM), puis [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
 
-| Workflow / groupe | Résultat |
-| --- | --- |
-| CI Fast | SUCCESS |
-| Reliability V3 | SUCCESS |
-| Integration | SUCCESS |
-| os-primitives | FAILURE : préfixe de pile corrompu par entrelacement série |
-| Ladybird build, smoke, cache/SQL, WPT, sites, robustesse | SUCCESS |
-| crash services, ordre worker, piège Compositor, performance | SUCCESS |
-| endurance TCG 10 min | SUCCESS : 108 cycles, 36/36 swaps |
-| endurance KVM 20 min | SUCCESS : 230 cycles, 76/76 swaps |
-| endurance KVM A/B | FAILURE : vrai remplacement du Compositor sur A ; B vert |
-| mémoire après onglets fermés | FAILURE : 20/20 swaps x2, croissance RSS WebContent |
-| convergence P13 | FAILURE : primitives, mémoire, KVM A/B |
+- **20/10 — cause du `NON_QUALIFIANT` trouvee dans le code** (run 39308093631) : au repos, le coeur reveillait plus tard que charge (KVM SMP1 p95 917 us contre 212 us). Deux defauts corriges : echeance due ou a < 20 us non armee puis `hlt` jusqu'au tic (`cbbd5ec0`, BOUCHAUD_REVEIL_DU_V1) ; tache bloquee restee installee sur un coeur en `hlt` jamais reveillee par IPI (`7d6c944b`, BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1). Preuves HOST + TCG (futex-pingpong SMP4 2 857 -> 95 us, SMP2 ~974 -> ~69 us, invariants du banc tenus).
+- **KVM sur `59e384ce`** (strict 39387288347 + PR 39387289004) : repos p95 SMP1 851-955 -> 134-144 us, SMP4 177-416 -> 140-155 us ; **attribution KVM SMP1 `P13_STRICT_OK`** (premiere fois) ; SMP2/4 `NON_QUALIFIANT` « charge sans effet » (repos ~ charge ~ 150-180 us) ; SMP8 contamine (steal). A/B : bras `on` 8/8 QUALIFIE_OK, bras `off` impossibles a qualifier par construction (decision humaine, voir P13_CLOSEOUT_2026-10-20 §5). Deux QUALIFIE_ECHEC SMP4 a elucider. Ladybird 20/20 jobs verts (pas de regression). `2f2868c5` (echeance propre, bascule synchrone, diag sans rdmsr) : HOST+TCG, KVM a mesurer.
+- **KVM sur `d097281d`** (strict 39424044836, push Ladybird 39423953091 **vert 20/20**) : attribution **SMP1 et SMP2 `P13_STRICT_OK`** (SMP2 pour la premiere fois) ; **SMP4 `QUALIFIE_ECHEC` 2/2** : reveil interactif detecte a l'heure mais 1 % attendent 0,5-0,7 ms leur election (coeur en mode noyau : fil noyau, appel systeme -- `writev` console jusqu'a 349 ms sur le coeur 0). Correctifs `5721e711` (point cooperatif) et `30fb0a4b` (point sur entre les lignes console) : HOST+TCG, KVM a mesurer. A/B reveil precis : bras `on` 8/8 QUALIFIE_OK (SMP4 p95 159-170 us) ; cession `CONVAINCANT` ; IPI `NON_CONCLUANT` (variante experimentale en QUALIFIE_ECHEC, defaut inchange).
+- **KVM sur `d02e8294`** (strict 39447650575) : attribution SMP2 `P13_STRICT_OK` (reproduit), SMP1 1/2, SMP4 1/2 (0/2 avant) ; les echecs d'attribution viennent de fenetres **serie interruptions masquees** (`vide_differees` : detection en retard 4,2 ms a SMP1, reprise 16,6 ms a SMP4) ; l'attente d'election SMP4 n'est plus dominante. A/B : 2 `QUALIFIE_ECHEC` sous politique par defaut sans decomposition lisible (cause non prouvee). os-primitives KVM x3 : EOF, atomicite des tubes et statut `wait4` **VERIFIED_AT_KVM**. **Decision humaine requise** : engager le chantier console serie (closeout §6.4).
+- **IPC / processus (20/10)** : trois defauts trouves par sonde et corriges (HOST+TCG) -- EOF/EPIPE perdu hors `close()` (`d097281d`), ecriture <= PIPE_BUF coupee entre ecrivains (`89c25e13`), `wait4` lisant `exit(128..255)` comme un signal, `exit(128)` rendu comme un succes (`160de485`). Detail : closeout §4 ter.
+- **Fin de nuit du 20/10 (local, HOST+TCG)** : chaque attente d'election d'une interactive est attribuee (battements recus, dernier battement : intervalle, part masquee, vol ; raison du renoncement) -- TCG pire 4,5-4,9 ms, aucune volee, les 13 ms d'`ed5602f4` restent a mesurer sous KVM ; faute d'un fil detaillee (`PROCESS_FAULT_DETAIL`) ; invariants d'imputation CPU comptes ; `writev` concurrent sur tube mesure ; CI : un seul build Ladybird par arbre. Proposition A/B en cinq verdicts (closeout §6.5, a valider). Closeout §4 octies.
+- **Soir du 20/10** : Ladybird push sur `d02e8294` (39447642999) -- tous les jobs Ladybird reels verts (smoke, endurances 10/20 min, robustesse, sites, WPT, performance) ; **diagnostic memoire rouge 2/2 runs** (WebContent +4,5 Mio dans une sous-execution), vert sur tous les SHA jusqu'a `d097281d`. Mecanisme candidat introduit par `89c25e13` : `POLLOUT` annonce des qu'il restait un octet face a une ecriture tout-ou-rien -> corrige `f7ecba30` (HOST+TCG, avant 10 refus apres POLLOUT, apres 0) ; lien non prouve avant un run Ladybird. Comptabilite CPU qui recule (`utime 1938 -> 1937`) : instant du repli lu hors section, corrige `37f481c4` (A/B causal : 35 reculs -> 0). Ouverts : compta-stress-probe SIGSEGV (1 fois CI TCG, non reproduit, releve ajoute `1bc9b21e`) ; A/B precis SMP4 `on` 3 `QUALIFIE_ECHEC` (critere recopie desormais, `64350f65`). Closeout §4 sexies.
 
-## Compositor et A/B
+- Branche: `claude/ladybird-observability-performance`. Ne pas merger vers `main` avant qualification; [PR #226](https://github.com/bcharthur/bouchaud-os/pull/226) en brouillon.
+- Derniere campagne entiere sur un meme SHA connue verte: `f5692b70ea55349c0ac3e0beb5c8653a65b869ad` (CI Fast, Reliability V3, Integration, Native IPC Runtime, Ladybird; Ladybird 20 jobs verts).
+- Analyseur strict P13 corrige avec `6bf0727` et `4d279ff` : le 17e relevé de retour a la politique par defaut ne compte plus dans les deux releves de chaque bras. Pas de seuil baisse.
+- KVM P13 attribution SMP1/2/4: `NON_QUALIFIANT`; A/B reveil precis SMP1/4: 0/4 tours qualifiés, `NON_CONCLUANT`. Les jobs peuvent etre verts sous `P13_STRICT: 0` sans qualifier P13.
+- Sonde gel, diagnostics hors hard IRQ et jeton serie deja integres: mesure QEMU SMP8 4/9 gels >=200ms avant vs 0/15 apres correctifs; ce n'est pas une garantie physique.
+- GPU P10+ direct/composition: banc tuiles KVM `NON_CONVAINCANT` dans 39296905493 (direct 58 us, copie 52 us).
+- Manquants: P13 strict sur hote KVM propre, SMP8 KVM >=8 CPU, trois campagnes au meme SHA, validations Trigkey.
+- Aucune nouvelle phase EEVDF/tickless, conteneurisation ou IA a substituer a la fermeture stabilite/performance.
 
-Le rouge historique « un seul Compositor (0) » était une ligne PERF_EXECVE
-entrelacée, alors que le PID 18 avait bien été créé. Pas de collecte tardive,
-de logs A/B mélangés ni de seuil à relâcher.
-
-La preuve repose maintenant sur des compteurs runtime cumulatifs répétés.
-Au nouveau run 37800200518, elle détecte un vrai remplacement PID 18 → 28 :
-sortie 0 autour de 40 s invité sur le bras A. Aucune assertion ou faute CPU
-lisible ; la fermeture du canal de contrôle est une hypothèse à diagnostiquer.
-Les 19/19 swaps et la performance réussissent sur les deux bras.
-
-## P2/P9 mémoire
-
-Les deux répétitions prouvent chacune 20/20 swaps distincts, fermetures et
-collecte des nouveaux WebContent. M1/M2 du Compositor : 2 → 2 contextes,
-2 → 2 surfaces, 4623 → 4623 KiB. Le RSS Compositor est stable en seconde phase.
-
-Le WebContent principal reste en croissance :
-69528 → 90820 → 102232 KiB, puis 69536 → 90876 → 102332 KiB.
-M0 reste inconclusif faute de trois relevés périodiques stables après le
-redimensionnement initial. L'ancien banc acceptait aussi des valeurs tronquées
-et des événements postérieurs au repère dans la même seconde ; ces erreurs
-sont corrigées, et une preuve absente ne donne plus de vert.
-
-**P2/P9 n'est pas DONE.** Les diagnostics PageHost/GC préparés mais non publiés
-comme code sont conservés avec le handoff. Le terminal est tombé hors ligne
-avant leur compilation et avant l'analyse complémentaire du vrai remplacement.
-
-## Suite
-
-Priorité : sortie du canal de contrôle Compositor, preuve os-primitives,
-puis lifecycle WebContent/GC et plateau mémoire reproductible.
-Rejouer toute la campagne au même HEAD avant P10.
-
-P10 inchangé : virtio-PCI moderne → control virtqueue → VERSION_1 →
-GET_DISPLAY_INFO. Ce n'est pas de l'accélération GPU.
-Aucun test TRIGKEY n'a été réalisé pendant cette reprise.
+Les anciens etats de `3658af04` restent disponibles dans l'historique Git, mais ne sont plus le statut courant.

@@ -264,9 +264,15 @@ def main():
 
     idt = lit(PREEMPTION_IDT, fautes)
     if idt is not None:
-        dispatch = corps(code_seul(idt), "fn dispatch_irq_preempt(source: u8, force: bool) {")
-        if dispatch is None:
+        # BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : `dispatch_irq_preempt` delegue au
+        # corps commun, qui porte aussi le tir anticipe ; c'est lui qui doit
+        # garder l'exception des demandes ciblees.
+        entree = corps(code_seul(idt), "fn dispatch_irq_preempt(source: u8, force: bool) {")
+        dispatch = corps(code_seul(idt), "fn dispatch_irq_preempt_anticipe(source: u8, force: bool, anticipe: bool) {")
+        if entree is None or dispatch is None:
             fautes.append("preemption.rs : `dispatch_irq_preempt` a change de signature.")
+        elif "dispatch_irq_preempt_anticipe(source, force, false)" not in entree:
+            fautes.append("preemption.rs : `dispatch_irq_preempt` ne delegue plus au corps commun.")
         elif "&& !force" not in dispatch:
             fautes.append(
                 "preemption.rs : le report diagnostic du BSP reprend les "

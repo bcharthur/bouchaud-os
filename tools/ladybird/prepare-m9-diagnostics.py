@@ -101,7 +101,12 @@ if "M9_BODY_READ_ERROR" not in data:
     new = '''            auto result = m_internal_stream_data->read_stream->read_some({ buffer, bytes_to_read });
             if (result.is_error() && (!result.error().is_errno() || (result.error().is_errno() && result.error().code() != EINTR))) {
 #if defined(BOUCHAUD_PORT)
-                if (getenv("BOUCHAUD_M9") != nullptr)
+                // BOUCHAUD_P19_M9_EAGAIN_NOISE: EAGAIN/EWOULDBLOCK are an expected
+                // nonblocking pipe-read state. Preserve the existing break/rearm
+                // behavior, but do not label it a fatal body-read error.
+                if (getenv("BOUCHAUD_M9") != nullptr
+                    && !(result.error().is_errno()
+                        && (result.error().code() == EAGAIN || result.error().code() == EWOULDBLOCK)))
                     outln("[ladybird-bouchaud] M9_BODY_READ_ERROR code={} delivered={}", result.error().code(), m_internal_stream_data->delivered_size);
 #endif
                 break;
@@ -133,6 +138,14 @@ if "M9_BODY_READ_ERROR" not in data:
     if old not in data:
         raise SystemExit("M9 diagnostics: Request read loop changed upstream")
     data = data.replace(old, new, 1)
+
+# BOUCHAUD_P19_M9_PREPARED_WORKTREE_MIGRATION
+if "M9_BODY_READ_ERROR" in data and "BOUCHAUD_P19_M9_EAGAIN_NOISE" not in data:
+    ancien_m9 = '                if (getenv("BOUCHAUD_M9") != nullptr)\n                    outln("[ladybird-bouchaud] M9_BODY_READ_ERROR code={} delivered={}", result.error().code(), m_internal_stream_data->delivered_size);'
+    nouveau_m9 = '                // BOUCHAUD_P19_M9_EAGAIN_NOISE: EAGAIN/EWOULDBLOCK are an expected\n                // nonblocking pipe-read state. Preserve the existing break/rearm\n                // behavior, but do not label it a fatal body-read error.\n                if (getenv("BOUCHAUD_M9") != nullptr\n                    && !(result.error().is_errno()\n                        && (result.error().code() == EAGAIN || result.error().code() == EWOULDBLOCK)))\n                    outln("[ladybird-bouchaud] M9_BODY_READ_ERROR code={} delivered={}", result.error().code(), m_internal_stream_data->delivered_size);'
+    if data.count(ancien_m9) != 1:
+        raise SystemExit("P19 M9: unknown previously prepared Request.cpp")
+    data = data.replace(ancien_m9, nouveau_m9, 1)
 
 request_cpp.write_text(data)
 

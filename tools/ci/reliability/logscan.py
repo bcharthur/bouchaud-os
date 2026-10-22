@@ -28,7 +28,12 @@ FATAL_PATTERNS = (
     #   [LOCKDEP] acquisitions=270 violations=0 max_depth=1
     ("lockdep", re.compile(
         r"\bLOCKDEP\b.*(?:\bFATAL\b|\bPANIC\b|\bVIOLATION\b(?!S=0\b)|"
-        r"\bviolations=[1-9][0-9]*\b)|lock order inversion",
+        r"\bviolations=[1-9][0-9]*\b)|lock order inversion|"
+        # Les messages de panique de `kernel::sync::lockdep` eux-memes
+        # (BOUCHAUD_PANIQUE_LISIBLE_V1). Soak 38217842305 : seule la ligne
+        # `panicked at .../courant.rs:276:5` a ete rapportee ; la classe tenue
+        # (`held_rank=`), qui dit QUEL verrou, etait la ligne suivante.
+        r"\bLOCKDEP (?:inversion|release without acquisition|stack overflow)\b",
         re.I,
     )),
     # `uaf=` occurs in BKL detached diagnostics and is not by itself a UAF.
@@ -52,6 +57,31 @@ class Finding:
     kind: str
     line: int
     text: str
+    # Les lignes qui suivent une panique : son message. Bornees.
+    context: tuple[str, ...] = ()
+
+CONTEXTE_PANIQUE = 3
+
+# BOUCHAUD_MARQUEUR_HORS_ECHO_V1 : `shell::run_batch` recopie chaque ligne
+# du script (« + ligne ») AVANT de l'executer. La ligne
+# `/bin/sonde && echo FAMILLE_OK` figure donc dans le journal que la sonde
+# reussisse ou non : cherche par sous-chaine, `FAMILLE_OK` etait TOUJOURS
+# present (endurance 38645418495, SMP8 : la sonde rend 2, son marqueur est
+# « trouve »). Un marqueur n'est present que sur une ligne EMISE, jamais sur
+# l'echo d'une commande.
+# La console prefixe ses lignes d'un etat colore (`[18:35:57][ 50%:  0%:
+#   1%][FPS: --] + desktop`) : on l'ote, couleurs comprises, avant de
+# reconnaitre l'echo.
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ECHO_COMMANDE = re.compile(r"^[\s\x00]*(?:\[\d\d:\d\d:\d\d\]\[[^\]]*\]\[FPS:[^\]]*\]\s*)?\+ ")
+
+
+def est_echo_de_commande(ligne: str) -> bool:
+    return ECHO_COMMANDE.match(ANSI.sub("", ligne)) is not None
+
+
+def lignes_emises(lines: Iterable[str]) -> str:
+    return "\n".join(l for l in lines if not est_echo_de_commande(l))
 
 @dataclass(frozen=True)
 class ScanResult:
@@ -75,9 +105,13 @@ def scan_text(
     for number, line in enumerate(lines, 1):
         for kind, pattern in FATAL_PATTERNS:
             if pattern.search(line):
-                findings.append(Finding(kind, number, line[:500]))
+                context: tuple[str, ...] = ()
+                if kind == "kernel_panic" and "panicked at" in line:
+                    context = tuple(l[:500] for l in lines[number:number + CONTEXTE_PANIQUE])
+                findings.append(Finding(kind, number, line[:500], context))
                 break
-    missing = tuple(marker for marker in required_markers if marker not in text)
+    emises = lignes_emises(lines)
+    missing = tuple(marker for marker in required_markers if marker not in emises)
     return tuple(findings), missing
 
 def scan_file(path: Path, *, required_markers: Iterable[str] = ()) -> ScanResult:

@@ -254,6 +254,16 @@ impl FileSystem {
             );
         }
 
+        // Product M1: manifestes natifs (l'OS ne revendique pas la persistance ici).
+        if apps != 0 {
+            if let Ok(n) = self.touch_at(apps, "notes.bapp") {
+                self.write_node(n, "name=Bouchaud Notes\nexec=notes\ntype=gui\npermission=normal");
+            }
+            if let Ok(n) = self.touch_at(apps, "insights.bapp") {
+                self.write_node(n, "name=Bouchaud Insights\nexec=insights\ntype=gui\npermission=normal");
+            }
+        }
+
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
         self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help, ou desktop pour le bureau graphique.");
 
@@ -388,6 +398,25 @@ impl FileSystem {
         let old = USED_NODES_RELAXED.fetch_sub(1, Ordering::Relaxed);
         assert!(old != 0, "ramfs: used-node accounting underflow");
         true
+    }
+
+    /// Rend un nœud nomme (unlink, rmdir, rm, renommage qui ecrase).
+    ///
+    /// BOUCHAUD_RAMFS_COMPTE_NOEUDS_V1 -- le SEUL chemin de liberation d'un
+    /// nœud, avec `libere_anonyme`. Sept sites ecrivaient `used = false`
+    /// eux-memes : le miroir `USED_NODES_RELAXED`, incremente a chaque
+    /// allocation, n'etait jamais decremente par eux. Il ne faisait que
+    /// monter, jusqu'a l'assertion d'`alloc_node` -- KERNEL PANIC « used-node
+    /// accounting overflow » apres ~4 096 creations cumulees, table pourtant a
+    /// moitie vide (os-primitives 38442948204, persist-course-probe, TCG).
+    pub fn libere_noeud(&mut self, idx: usize) {
+        if idx == 0 || idx >= MAX_NODES || !self.nodes[idx].used {
+            return;
+        }
+        self.nodes[idx].used = false;
+        self.nodes[idx].content = Vec::new();
+        let old = USED_NODES_RELAXED.fetch_sub(1, Ordering::Relaxed);
+        assert!(old != 0, "ramfs: used-node accounting underflow");
     }
 
     pub fn touch_at(&mut self, parent: usize, name: &str) -> Result<usize, &'static str> {

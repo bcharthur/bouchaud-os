@@ -15,14 +15,19 @@
 #   - peint mais uniforme          (variance ~0, une ou deux couleurs)
 #   - page reelle                  (variance et couleurs)
 #
-# Exige Example Domain. Wikipedia est MESURE (site externe lourd, sous TCG) :
-# son resultat est imprime et ne fait pas echouer le banc.
+# Exige Example Domain. Wikipedia et YouTube sont MESURES (sites externes
+# lourds, sous TCG) : leur resultat est imprime et ne fait pas echouer le banc.
+#
+# BOUCHAUD_P19_NAVIGATION_TRACE_V1 : pour chaque site, le resume des etapes
+# de navigation (`[LB:NAV-TRACE]` : start / commit / finish / crash, par
+# numero de navigation) separe une page qui ne progresse plus d'une page qui
+# recommence -- ce que la barre de chargement ne dit pas.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_ladybird_sites.sh BOOTIMAGE NATIVE_DIR}
 OUT=${2:?usage: run_ladybird_sites.sh BOOTIMAGE NATIVE_DIR}
 DUREE=${BO_SITES_DUREE_S:-90}
-SITES="example=https://example.com/ wikipedia=https://en.wikipedia.org/wiki/Main_Page"
+SITES="example=https://example.com/ wikipedia=https://en.wikipedia.org/wiki/Main_Page youtube=https://www.youtube.com/"
 
 SCENARIO=scenario-sites
 IMAGE=ladybird-sites.img
@@ -66,7 +71,8 @@ qemu-system-x86_64 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   -serial file:"$LOG" &
 PID=$!
-LIMITE=$((SECONDS + 2 * DUREE + 600))
+NB_SITES=$(echo $SITES | wc -w)
+LIMITE=$((SECONDS + NB_SITES * DUREE + 600))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
   grep -aq 'SITES_BANC_FIN\|KERNEL PANIC' "$LOG" && { sleep 2; break; }
@@ -83,7 +89,7 @@ if grep -aq 'KERNEL PANIC' "$P"; then echo "panique noyau" >&2; exit 1; fi
 
 # Le passage de chaque site : les lignes entre son SITE_DEBUT et son SITE_FIN.
 passage() { awk -v n="$1" '$0 ~ "SITE_DEBUT nom="n"$" {on=1} on {print} $0 ~ "SITE_FIN nom="n" " {on=0}' "$P"; }
-champ() { echo "$1" | grep -oE "$2=[0-9a-f]+" | head -1 | cut -d= -f2; }
+champ() { echo "$1" | grep -oE "$2=[0-9a-f]+" | awk 'NR<=1' | cut -d= -f2; }
 
 echecs=()
 for s in $SITES; do
@@ -109,6 +115,23 @@ for s in $SITES; do
   store=$(echo "$bloc" | grep -ac '\[LB\] STORE url=' || true)
   hit=$(echo "$bloc" | grep -ac '\[LB\] HIT url=' || true)
   echo "SITE nom=$nom url=$url verdict=$verdict load=$charge peint=$peint trames=$trames taille=${taille:-?} variance=${variance:-?} couleurs=${couleurs:-?} non_blanc_pct=${non_blanc:-?} cache_miss=$miss cache_store=$store cache_hit=$hit lignes_tls=$tls"
+  # Navigations : combien ont DEMARRE, ete validees (commit), FINI ; le plus
+  # de departs vers une meme origine (une vraie boucle s'y voit) ; plantages.
+  echo "$bloc" | awk -v nom="$nom" '
+    /\[LB:NAV-TRACE\]/ {
+      evt = ""; origine = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^evt=/) evt = substr($i, 5)
+        if ($i ~ /^origine=/) origine = substr($i, 9)
+      }
+      n[evt]++
+      if (evt == "start") { par_origine[origine]++; if (par_origine[origine] > pire) pire = par_origine[origine] }
+    }
+    END {
+      printf "  NAV_TRACE nom=%s starts=%d commits=%d finishes=%d crashes=%d max_starts_meme_origine=%d\n", \
+        nom, n["start"], n["commit"], n["finish"], n["crash"], pire
+    }'
+  echo "$bloc" | grep -aoE '\[LB:NAV-TRACE\].*' | awk 'NR <= 12 { print "    " $0 }' || true
   # awk lit tout le flux : pas de tube ferme avant la fin (SIGPIPE).
   echo "$bloc" | grep -aoE '\[LB:NAV\].*|\[LB\] (MISS|STORE|HIT) url=https://[^ ]{0,80}|M9_RS_[A-Z_]*(FAIL|ERR)[^ ]*.*|Request finished with error.*' | awk 'NR <= 8 { print "    " $0 }' || true
   if [ "$nom" = example ] && [ "$verdict" != page_reelle ]; then echecs+=("example:$verdict"); fi

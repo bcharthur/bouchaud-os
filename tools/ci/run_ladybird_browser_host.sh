@@ -16,10 +16,45 @@ OUT=${2:?usage: run_ladybird_browser_host.sh BOOTIMAGE NATIVE_DIR}
 # de fichier, ni d'URL, ni de comportement.
 SUFFIXE=${BO_SMOKE_SUFFIXE:-}
 
+# BOUCHAUD_VIRTIO_GPU_2D_V1 -- QUEL ECRAN.
+#
+# `bga` (defaut) : la carte VGA standard de QEMU, rien ne change. `virtio` :
+# `-vga none` + virtio-gpu-pci ; le bureau, donc chaque trame du navigateur
+# composee par le gestionnaire de fenetres, est presente par
+# TRANSFER_TO_HOST_2D + RESOURCE_FLUSH. Le `screendump` du moniteur (sans
+# peripherique nomme) capture alors l'ecran virtio : la mire verifiee plus
+# bas y a ete presentee. Scanout 2D seulement, aucune acceleration.
+AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
+case "$AFFICHAGE" in
+    bga) ECRAN=() ;;
+    virtio) ECRAN=(-vga none -device virtio-gpu-pci) ;;
+    *) echo "BO_SMOKE_AFFICHAGE inconnu : $AFFICHAGE (bga ou virtio)" >&2; exit 2 ;;
+esac
+
+# BOUCHAUD_BANC_PREREQUIS_V1 -- UN OUTIL DE BANC ABSENT N'EST PAS UN MAILLON
+# PRODUIT ROUGE.
+#
+# Nightly 38378134772 (et 38231350694, 38127619243) : le job n'installait ni
+# `socat` ni `nc`. Sans `socat`, le moniteur QEMU est injoignable : aucune
+# molette n'etait envoyee, en silence, et le verdict accusait le premier
+# maillon du produit (`defilement maillon=wm_vers_navigateur`, WM `souris=0`).
+# Sans `nc`, le second site (guestfwd) n'existe pas. Le banc refuse donc de
+# demarrer sans eux, et le dit -- avant de consommer un demarrage QEMU.
+for outil in socat nc; do
+  if ! command -v "$outil" >/dev/null 2>&1; then
+    echo "banc incomplet : '$outil' absent (moniteur QEMU / second site) -- installer socat et netcat-openbsd" >&2
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=banc_prerequis manque=$outil"
+    exit 1
+  fi
+done
+
 for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver; do
   test -f "$OUT/$f"
   file "$OUT/$f"
-  ! readelf -l "$OUT/$f" | grep -q INTERP
+  # BOUCHAUD_PIPEFAIL_SANS_SIGPIPE_V1 : `! a | b` ne declenche jamais `set -e`
+  # (bash l'exclut) -- la verification etait inerte. Lue d'un fichier, sans tube.
+  readelf -l "$OUT/$f" > "/tmp/entetes-$f.txt"
+  if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
 done
 
 rm -rf scenario-browser-host ladybird-browser-host${SUFFIXE}.img \
@@ -89,6 +124,18 @@ case "${BO_SMOKE_PROFIL_RIP:-}" in
 esac
 echo "BO_SMOKE_PROFIL_RIP valeur=${BO_SMOKE_PROFIL_RIP:-defaut}"
 
+# BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d) : `BO_SMOKE_SURFACE=double`
+# fait offrir deux tampons au navigateur (`gui-surface double` avant
+# `desktop`). Le smoke exige alors que le contrat soit RETENU des deux cotes
+# et que le chrome recoive des liberations. Absent : rien n'est ecrit.
+LIGNE_SURFACE=""
+case "${BO_SMOKE_SURFACE:-}" in
+  simple|double) LIGNE_SURFACE="gui-surface ${BO_SMOKE_SURFACE}" ;;
+  "") ;;
+  *) echo "BO_SMOKE_SURFACE=${BO_SMOKE_SURFACE} : simple ou double" >&2; exit 2 ;;
+esac
+echo "BO_SMOKE_SURFACE valeur=${BO_SMOKE_SURFACE:-defaut}"
+
 cat > "$SCENARIO/autorun" <<AUTORUN
 uname
 df
@@ -109,6 +156,9 @@ echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
+fi
+if [ -n "$LIGNE_SURFACE" ]; then
+  sed -i "1i $LIGNE_SURFACE" "$SCENARIO/autorun"
 fi
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 
@@ -258,6 +308,7 @@ qemu-system-x86_64 \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
+  ${ECRAN[@]+"${ECRAN[@]}"} \
   -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
 PID=$!
@@ -1027,6 +1078,57 @@ echo
 echo "== les six services, cote a cote =="
 python3 tools/ci/analyse-demarrage.py "$LOG" 2>/dev/null \
     | sed -n '/six services/,/^$/p' | head -12 || true
+
+# BOUCHAUD_VIRTIO_GPU_2D_V1 : en mode virtio, que ce soit BIEN le scanout
+# virtio-gpu qui ait presente, sans jamais abandonner ni echouer.
+if [ "$AFFICHAGE" = virtio ]; then
+    echo
+    echo "== affichage virtio-gpu =="
+    sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" \
+        | grep -aE 'BOUCHAUD_VIRTIO_GPU_SCANOUT_ACTIF|VIRTIO_GPU_SCANOUT|\[GUI-VIRTIO-GPU\]' \
+        | tail -4 | sed 's/^/  /' || true
+    if ! grep -aq 'BOUCHAUD_VIRTIO_GPU_SCANOUT_ACTIF' "$LOG"; then
+        echo "LADYBIRD_VIRTIO_ECHEC le scanout virtio-gpu n'a jamais ete actif" >&2
+        exit 1
+    fi
+    if grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON' "$LOG"; then
+        echo "LADYBIRD_VIRTIO_ECHEC le scanout virtio-gpu a abandonne" >&2
+        exit 1
+    fi
+    derniere=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" \
+        | grep -aoE '\[GUI-VIRTIO-GPU\] presents_ok=[0-9]+ presents_echec=[0-9]+ pixels_transferes=[0-9]+ ns_total=[0-9]+ us_par_present=[0-9]+' \
+        | tail -1 || true)
+    if ! echo "$derniere" | grep -qE 'presents_ok=[1-9][0-9]* presents_echec=0 '; then
+        echo "LADYBIRD_VIRTIO_ECHEC presentations : ${derniere:-aucun releve [GUI-VIRTIO-GPU]}" >&2
+        exit 1
+    fi
+    echo "LADYBIRD_VIRTIO_OK $derniere"
+fi
+
+# BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : sous `BO_SMOKE_SURFACE=double`, le
+# contrat a deux tampons doit etre retenu par le noyau ET par le chrome, et le
+# chrome doit avoir recu des liberations (sinon il aurait peint sans jamais
+# changer de tampon -- ou se serait fige).
+if [ "${BO_SMOKE_SURFACE:-}" = double ]; then
+    echo
+    echo "== contrat de surface a deux tampons =="
+    propre=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG")
+    grep -aE 'GUI_SURFACE_CONTRAT|\[LB:UI\] tampons|M11_RENDER_STATS' <<< "$propre" | tail -4 | sed 's/^/  /' || true
+    if ! grep -aqE 'GUI_SURFACE_CONTRAT pid=[0-9]+ offerts=2 capacites=0x1 tampons=2' <<< "$propre"; then
+        echo "LADYBIRD_SURFACE_ECHEC le noyau n'a pas retenu deux tampons" >&2
+        exit 1
+    fi
+    if ! grep -aqE '\[LB:UI\] tampons offerts=2 retenus=2' <<< "$propre"; then
+        echo "LADYBIRD_SURFACE_ECHEC le chrome n'a pas retenu deux tampons" >&2
+        exit 1
+    fi
+    stats=$(grep -aoE 'M11_RENDER_STATS .* tampons=2 liberations=[0-9]+ attentes=[0-9]+ rejeu_px=[0-9]+' <<< "$propre" | tail -1 || true)
+    if ! grep -qE 'liberations=[1-9][0-9]* ' <<< "$stats"; then
+        echo "LADYBIRD_SURFACE_ECHEC aucune liberation recue par le chrome (${stats:-aucun releve})" >&2
+        exit 1
+    fi
+    echo "LADYBIRD_SURFACE_DOUBLE_OK $stats"
+fi
 
 # BOUCHAUD_P13_VERDICT_CONVERGENCE
 python3 tools/ci/ladybird_runtime_verdict.py "$LOG" \

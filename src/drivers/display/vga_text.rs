@@ -22,11 +22,64 @@ pub const COLOR_CYAN: u8 = 0x0b;
 pub const COLOR_RED: u8 = 0x0c;
 pub const COLOR_YELLOW: u8 = 0x0e;
 
+const CELLULES: usize = VGA_WIDTH * VGA_HEIGHT;
+
+// BOUCHAUD_VGA_TEXTE_OMBRE_V1 -- L'ECRAN TEXTE VIT EN RAM
+//
+// Chaque cellule s'ecrivait directement dans 0xB8000, et chaque defilement
+// relisait puis recopiait les 1 920 cellules de l'ecran, octet par octet :
+// 7 680 acces MMIO -- autant de sorties de VM sous KVM, autant d'appels au
+// peripherique emule sous TCG --, une ligne de 1 800 octets en defilant 23.
+// Le tout sous le verrou de la console, INTERRUPTIONS MASQUEES. Banc de
+// saturation TCG SMP4 (port a 5 us/octet, six ecrivains) : verrou tenu
+// 762 ms, attendu 2,68 s ; les ecrivains restaient en mode noyau (preemption
+// differee, aucun point sur), le fil `console` pret dans la file de leur
+// coeur n'etait plus elu pendant 2 s, et la console passait en repli.
+//
+// Desormais l'ecran est une ombre en RAM : ecrire et defiler n'y sont que
+// des copies memoire, sous le verrou. La memoire texte n'est recopiee qu'APRES
+// le verrou, interruptions telles que l'appelant les avait : une image de
+// l'ombre est prise sous le verrou (4 Kio de RAM), puis ses lignes modifiees
+// partent sur 0xB8000 en mots de 32 bits, sans aucune lecture -- au plus
+// 1 000 ecritures au lieu de 7 680 acces par defilement. Un seul publieur a
+// la fois (`PUBLICATION_EN_COURS`) : qui le trouve occupe laisse ses lignes
+// sales et le lui signale, il repart avec une nouvelle image.
+//
+// Le defilement MATERIEL (registre d'origine du CRTC, memoire texte en
+// anneau) a ete essaye : sous QEMU l'ecran restait celui du BIOS. Rendu
+// verifie par `screendump` : ombre + recopie, identique au chemin d'avant.
 pub struct VgaWriter {
     row: usize,
     col: usize,
     color: u8,
+    /// L'ecran, en RAM : `couleur << 8 | caractere` par cellule.
+    cellules: [u16; CELLULES],
+    /// Lignes de l'ecran modifiees depuis la derniere image (bit = ligne).
+    lignes_sales: u32,
+    /// L'ombre a ete lue une fois sur l'ecran (ce que le BIOS y a laisse).
+    chargee: bool,
 }
+
+const TOUTES_LES_LIGNES: u32 = (1 << VGA_HEIGHT) - 1;
+
+/// L'image a recopier sur la memoire texte et ses lignes modifiees. Ecrite
+/// sous le verrou de la console par le SEUL detenteur de
+/// `PUBLICATION_EN_COURS`, lue par lui hors du verrou.
+struct Image {
+    cellules: core::cell::UnsafeCell<[u16; CELLULES]>,
+    lignes: core::cell::UnsafeCell<u32>,
+}
+// SAFETY : un seul detenteur du jeton `PUBLICATION_EN_COURS` y accede.
+unsafe impl Sync for Image {}
+static IMAGE: Image = Image {
+    cellules: core::cell::UnsafeCell::new([0; CELLULES]),
+    lignes: core::cell::UnsafeCell::new(0),
+};
+static PUBLICATION_EN_COURS: AtomicBool = AtomicBool::new(false);
+/// Pose AVANT d'essayer le jeton : un publieur qui le rend relit ce drapeau
+/// (ordre sequentiel), aucune ligne sale n'est oubliee.
+static PUBLICATION_DEMANDEE: AtomicBool = AtomicBool::new(false);
+static PUBLICATION_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 
 // BOUCHAUD_CONSOLE_VERROU_V1
 //
@@ -55,6 +108,9 @@ static CONSOLE: SpinLockIrq<Console> = SpinLockIrq::new(Console {
         row: 0,
         col: 0,
         color: COLOR_DEFAULT,
+        cellules: [0; CELLULES],
+        lignes_sales: 0,
+        chargee: false,
     },
     captures: alloc::vec::Vec::new(),
 });
@@ -65,17 +121,44 @@ const PRISE_CONSOLE_TENTATIVES: u32 = 1 << 22;
 /// Ecritures de console abandonnees faute d'avoir pu prendre le verrou.
 static CONSOLE_ABANDONS: AtomicU64 = AtomicU64::new(0);
 
+/// BOUCHAUD_VGA_TEXTE_MESURE_V1 : le verrou de la console est tenu
+/// INTERRUPTIONS MASQUEES. Prises, pire detention, pire attente (ns).
+static CONSOLE_PRISES: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_TENU_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+static CONSOLE_ATTENTE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Execute `f` sous le verrou de la console. `None` si la prise a echoue apres
 /// `PRISE_CONSOLE_TENTATIVES` essais : voir BOUCHAUD_CONSOLE_VERROU_V1.
 fn avec_console<R>(f: impl FnOnce(&mut Console) -> R) -> Option<R> {
+    let debut = crate::kernel::timer::monotonic_ns();
     for _ in 0..PRISE_CONSOLE_TENTATIVES {
         if let Some(mut console) = CONSOLE.try_lock() {
-            return Some(f(&mut console));
+            let pris = crate::kernel::timer::monotonic_ns();
+            let r = f(&mut console);
+            drop(console);
+            let fin = crate::kernel::timer::monotonic_ns();
+            CONSOLE_PRISES.fetch_add(1, Ordering::Relaxed);
+            CONSOLE_TENU_PIRE_NS.fetch_max(fin.saturating_sub(pris), Ordering::Relaxed);
+            CONSOLE_ATTENTE_PIRE_NS.fetch_max(pris.saturating_sub(debut), Ordering::Relaxed);
+            return Some(r);
         }
         core::hint::spin_loop();
     }
     CONSOLE_ABANDONS.fetch_add(1, Ordering::Relaxed);
     None
+}
+
+/// `(prises, pire detention interruptions masquees, pire attente, abandons,
+/// pire recopie sur la memoire texte hors du verrou)` de la console texte,
+/// depuis le demarrage (ns).
+pub fn mesures_console() -> (u64, u64, u64, u64, u64) {
+    (
+        CONSOLE_PRISES.load(Ordering::Relaxed),
+        CONSOLE_TENU_PIRE_NS.load(Ordering::Relaxed),
+        CONSOLE_ATTENTE_PIRE_NS.load(Ordering::Relaxed),
+        CONSOLE_ABANDONS.load(Ordering::Relaxed),
+        PUBLICATION_PIRE_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Ecritures de console abandonnees depuis le demarrage (diagnostic).
@@ -85,11 +168,9 @@ pub fn abandons_console() -> u64 {
 
 impl VgaWriter {
     fn clear(&mut self) {
-        for row in 0..VGA_HEIGHT {
-            for col in 0..VGA_WIDTH {
-                self.write_cell(row, col, b' ', self.color);
-            }
-        }
+        self.charge();
+        self.cellules.fill((self.color as u16) << 8 | b' ' as u16);
+        self.lignes_sales = TOUTES_LES_LIGNES;
         self.row = 0;
         self.col = 0;
     }
@@ -98,24 +179,46 @@ impl VgaWriter {
         self.color = color;
     }
 
-    fn write_cell(&self, row: usize, col: usize, byte: u8, color: u8) {
-        #[cfg(feature = "reference-desktop")]
-        {
-            // BOUCHAUD_STAGE2_NO_LEGACY_VGA_MMIO
-            // UEFI/GOP: 0xb8000 n'est pas un backend valide du reference device.
-            let _ = (row, col, byte, color);
+    fn write_cell(&mut self, row: usize, col: usize, byte: u8, color: u8) {
+        self.charge();
+        self.cellules[row * VGA_WIDTH + col] = (color as u16) << 8 | byte as u16;
+        self.lignes_sales |= 1 << row;
+    }
+
+    /// Une fois : l'ombre part de ce que l'ecran affiche deja.
+    fn charge(&mut self) {
+        if self.chargee {
             return;
         }
-
+        self.chargee = true;
         #[cfg(not(feature = "reference-desktop"))]
-        {
-            let offset = (row * VGA_WIDTH + col) * 2;
-            unsafe {
-                let ptr = (VGA_BUFFER + offset) as *mut u8;
-                core::ptr::write_volatile(ptr, byte);
-                core::ptr::write_volatile(ptr.add(1), color);
-            }
+        for (i, cellule) in self.cellules.iter_mut().enumerate() {
+            // SAFETY : 0xB8000 + 2 * i est dans la memoire texte (80 x 25).
+            *cellule = unsafe { core::ptr::read_volatile((VGA_BUFFER as *const u16).add(i)) };
         }
+    }
+
+    /// Sous le verrou de la console : s'il y a des lignes modifiees et que le
+    /// jeton de publication est libre, le prend, copie l'ombre dans `IMAGE`
+    /// et rend `true` -- l'appelant publiera HORS du verrou
+    /// (`publie_hors_verrou`). Jeton tenu ailleurs : les lignes restent
+    /// sales, son detenteur repartira avec une nouvelle image.
+    fn prepare_publication(&mut self) -> bool {
+        if self.lignes_sales == 0 {
+            return false;
+        }
+        PUBLICATION_DEMANDEE.store(true, Ordering::SeqCst);
+        if PUBLICATION_EN_COURS.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        PUBLICATION_DEMANDEE.store(false, Ordering::SeqCst);
+        // SAFETY : jeton tenu -- seul acces a `IMAGE`.
+        unsafe {
+            (*IMAGE.cellules.get()).copy_from_slice(&self.cellules);
+            *IMAGE.lignes.get() = self.lignes_sales;
+        }
+        self.lignes_sales = 0;
+        true
     }
 
     fn newline(&mut self) {
@@ -128,23 +231,11 @@ impl VgaWriter {
     }
 
     fn scroll(&mut self) {
-        for row in 1..VGA_HEIGHT {
-            for col in 0..VGA_WIDTH {
-                let src_offset = (row * VGA_WIDTH + col) * 2;
-                let dst_offset = ((row - 1) * VGA_WIDTH + col) * 2;
-                unsafe {
-                    let src = (VGA_BUFFER + src_offset) as *const u8;
-                    let dst = (VGA_BUFFER + dst_offset) as *mut u8;
-                    let ch = core::ptr::read_volatile(src);
-                    let color = core::ptr::read_volatile(src.add(1));
-                    core::ptr::write_volatile(dst, ch);
-                    core::ptr::write_volatile(dst.add(1), color);
-                }
-            }
-        }
-        for col in 0..VGA_WIDTH {
-            self.write_cell(VGA_HEIGHT - 1, col, b' ', self.color);
-        }
+        self.charge();
+        self.cellules.copy_within(VGA_WIDTH.., 0);
+        let vide = (self.color as u16) << 8 | b' ' as u16;
+        self.cellules[CELLULES - VGA_WIDTH..].fill(vide);
+        self.lignes_sales = TOUTES_LES_LIGNES;
         self.row = VGA_HEIGHT - 1;
         self.col = 0;
     }
@@ -185,16 +276,62 @@ impl fmt::Write for VgaWriter {
 
 /// Efface l'ecran et replace le curseur en haut a gauche.
 pub fn clear() {
-    avec_console(|console| {
+    let a_publier = avec_console(|console| {
         #[cfg(feature = "reference-desktop")]
         {
             console.vga.row = 0;
             console.vga.col = 0;
+            false
         }
 
         #[cfg(not(feature = "reference-desktop"))]
-        console.vga.clear();
+        {
+            console.vga.clear();
+            console.vga.prepare_publication()
+        }
     });
+    if a_publier == Some(true) {
+        publie_hors_verrou();
+    }
+}
+
+/// BOUCHAUD_VGA_TEXTE_OMBRE_V1 : detenteur du jeton de publication, HORS du
+/// verrou de la console : recopie les lignes modifiees de `IMAGE` sur la
+/// memoire texte, par mots de 32 bits, sans aucune lecture ; puis rend le
+/// jeton et repart si quelqu'un l'a trouve occupe entre-temps.
+fn publie_hors_verrou() {
+    loop {
+        let debut = crate::kernel::timer::monotonic_ns();
+        // BOUCHAUD_STAGE2_NO_LEGACY_VGA_MMIO : sous `reference-desktop`
+        // (UEFI/GOP), 0xB8000 n'est pas un backend valide.
+        #[cfg(not(feature = "reference-desktop"))]
+        {
+            // SAFETY : jeton tenu -- seul acces a `IMAGE`.
+            let (cellules, mut sales) = unsafe { (&*IMAGE.cellules.get(), *IMAGE.lignes.get()) };
+            while sales != 0 {
+                let ligne = sales.trailing_zeros() as usize;
+                sales &= sales - 1;
+                let source = &cellules[ligne * VGA_WIDTH..(ligne + 1) * VGA_WIDTH];
+                // 80 cellules par ligne : l'adresse reste alignee sur 4 octets.
+                let base = (VGA_BUFFER as *mut u32).wrapping_add(ligne * VGA_WIDTH / 2);
+                for (k, paire) in source.chunks_exact(2).enumerate() {
+                    // SAFETY : ligne < 25, dans la memoire texte 80 x 25.
+                    unsafe { core::ptr::write_volatile(base.add(k), paire[0] as u32 | (paire[1] as u32) << 16) };
+                }
+            }
+        }
+        PUBLICATION_PIRE_NS.fetch_max(
+            crate::kernel::timer::monotonic_ns().saturating_sub(debut),
+            Ordering::Relaxed,
+        );
+        PUBLICATION_EN_COURS.store(false, Ordering::SeqCst);
+        if !PUBLICATION_DEMANDEE.load(Ordering::SeqCst) {
+            return;
+        }
+        if avec_console(|console| console.vga.prepare_publication()) != Some(true) {
+            return;
+        }
+    }
 }
 
 /// Change la couleur d'affichage courante.
@@ -320,8 +457,12 @@ pub fn _print(args: fmt::Arguments) {
         if crate::drivers::gfx::is_active() {
             return;
         }
-        avec_console(|console| {
+        let a_publier = avec_console(|console| {
             let _ = console.vga.write_fmt(args);
+            console.vga.prepare_publication()
         });
+        if a_publier == Some(true) {
+            publie_hors_verrou();
+        }
     }
 }

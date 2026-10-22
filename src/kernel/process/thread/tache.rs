@@ -47,6 +47,14 @@ pub struct Task {
     pub priorite: PrioriteAtomique,
     pub affinity_mask: u64,
     pub runq_cpu: CoeurAtomique,
+    /// BOUCHAUD_ATTENTE_INTERACTIVE_OCCUPANT_V1 : la file choisie a la
+    /// publication. Le vol reecrit `runq_cpu` vers le coeur voleur avant
+    /// l'election ; sans ce champ, l'occupant du voleur passerait pour celui
+    /// qui a fait attendre. Diagnostic seulement.
+    pub file_au_pret: CoeurAtomique,
+    /// Battements du vecteur de replanification de cette file a la
+    /// publication (meme diagnostic).
+    pub battements_au_pret: EcheanceAtomique,
     pub last_cpu: CoeurAtomique,
     pub on_cpu: CoeurSigneAtomique,
     switching_out: DrapeauAtomique,
@@ -122,6 +130,27 @@ pub struct Task {
     /// publication est donc exactement ce que l'activation PRECEDENTE a
     /// consomme. C'est le budget qui desarme le privilege.
     pub budget_reveil_ns: EcheanceAtomique,
+    /// BOUCHAUD_ATTRIBUTION_REVEIL_V1 : l'instant ou le balayage des
+    /// echeances a rendu cette tache prete (0 : pas encore, pour le sommeil
+    /// en cours) ...
+    pub reveil_pret_ns: EcheanceAtomique,
+    /// ... et sa premiere election apres cet instant.
+    pub reveil_elu_ns: EcheanceAtomique,
+    /// BOUCHAUD_REPRISE_DECOUPEE_V1 : ... le retour de `switch_context` dans
+    /// cette tache apres l'election, puis la fin de `complete_switch_handoff`.
+    pub reveil_commute_ns: EcheanceAtomique,
+    pub reveil_passe_ns: EcheanceAtomique,
+    /// ... et qui tenait le coeur quand le balayage l'a reveillee
+    /// (`attribution_reveil::empaquete_par`).
+    pub reveil_par: EcheanceAtomique,
+    /// Son pire reveil de sommeil depuis le dernier `/proc/self/reveil`.
+    pub attribution_reveil: crate::kernel::attribution_reveil::Registre,
+    /// BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de ses reveils en
+    /// retard, et la liste de ceux que le temps manquant hors de l'invite a
+    /// contamines.
+    pub ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation,
+    /// BOUCHAUD_PREUVE_HOTE_V1 : comptes cumules du fil (`/proc/self/fil`).
+    pub comptes_fil: crate::kernel::attribution_reveil::ComptesFil,
     entree_noyau: Option<fn() -> !>,
 }
 

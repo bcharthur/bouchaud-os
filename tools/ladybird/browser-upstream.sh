@@ -52,6 +52,9 @@ python3 tools/ladybird/prepare-compositor-memoire.py "$SRC"
 python3 tools/ladybird/prepare-echange-processus.py "$SRC"
 python3 tools/ladybird/prepare-gc-retention-proof.py "$SRC"
 python3 tools/ladybird/prepare-cache-journal.py "$SRC"
+# BOUCHAUD_LIBJS_VALEUR_DIAGNOSTIC_V1 : l'assertion Value.cpp:484 nomme la
+# famille de la valeur (vide / accesseur / inconnue) AVANT de se declencher.
+python3 tools/ladybird/prepare-libjs-valeur-diagnostic.py "$SRC"
 python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # BOUCHAUD_P15_P17_P18_PATCHERS_ABSENTS_V1
 #
@@ -130,7 +133,7 @@ export PATH="$LLVM_BINDIR:$PATH"
 
 CLANG_MAJOR=$("$CLANGXX" -dumpversion | cut -d. -f1)
 if [ "$CLANG_MAJOR" -lt "$LLVM_VERSION" ]; then
-    echo "Clang trop ancien : $($CLANGXX --version | head -n1), LLVM ${LLVM_VERSION}+ requis" >&2
+    echo "Clang trop ancien : $($CLANGXX --version | awk 'NR<=1'), LLVM ${LLVM_VERSION}+ requis" >&2
     exit 1
 fi
 
@@ -144,8 +147,8 @@ mkdir -p "$CCACHE_DIR"
 ccache --max-size="${BO_CCACHE_MAXSIZE:-4G}" >/dev/null
 ccache --zero-stats >/dev/null || true
 
-say "Compilateur Ladybird : $($CLANGXX --version | head -n1)"
-say "Linker Ladybird      : $($LLD --version | head -n1)"
+say "Compilateur Ladybird : $($CLANGXX --version | awk 'NR<=1')"
+say "Linker Ladybird      : $($LLD --version | awk 'NR<=1')"
 say "ccache Ladybird      : $CCACHE ($CCACHE_DIR)"
 # Preflight volontairement minuscule : il teste exactement la famille de syntaxe
 # qui a casse AK::Optional au run #27. Si l'image runner fournit un Clang trop
@@ -171,14 +174,36 @@ EOF_CLANG_TEST
 # On epingle donc explicitement le toolchain declare par Ladybird et on masque
 # temporairement UNIQUEMENT la config Cargo du noyau pendant configure/build.
 # Un trap la restaure meme si CMake/Ninja/Cargo echoue.
-LADYBIRD_RUST_TOOLCHAIN=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/rust-toolchain.toml" | head -n1)
+LADYBIRD_RUST_TOOLCHAIN=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/rust-toolchain.toml" | awk 'NR<=1')
 [ -n "$LADYBIRD_RUST_TOOLCHAIN" ] || {
     echo "toolchain Rust Ladybird introuvable dans $SRC/rust-toolchain.toml" >&2
     exit 1
 }
 say "Rust Ladybird : $LADYBIRD_RUST_TOOLCHAIN"
-rustup toolchain install "$LADYBIRD_RUST_TOOLCHAIN" --profile minimal >/dev/null
-export RUSTUP_TOOLCHAIN="$LADYBIRD_RUST_TOOLCHAIN"
+# P19_RUST_TOOLCHAIN_ADAPTIVE_V1
+# WSL --exec bash does not load .profile; a user-installed rustup can be hidden.
+export PATH="$HOME/.cargo/bin:$PATH"
+if command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install "$LADYBIRD_RUST_TOOLCHAIN" --profile minimal >/dev/null
+    export RUSTUP_TOOLCHAIN="$LADYBIRD_RUST_TOOLCHAIN"
+    say "P19_RUSTUP_TOOLCHAIN_VERIFIED=$LADYBIRD_RUST_TOOLCHAIN"
+else
+    # Ubuntu can provide the exact pinned compiler without rustup. Accept it
+    # only with the correct host standard library and an available Cargo.
+    installed_release=$(rustc -vV | sed -n 's/^release: //p' | awk 'NR<=1')
+    if [ "$installed_release" != "$LADYBIRD_RUST_TOOLCHAIN" ]; then
+        echo "P19_RUST_TOOLCHAIN_MISSING: rustup unavailable, rustc=$installed_release expected=$LADYBIRD_RUST_TOOLCHAIN" >&2
+        echo 'Use the P19 preflight installer before re-running this build.' >&2
+        exit 42
+    fi
+    command -v cargo >/dev/null 2>&1 || { echo 'P19_CARGO_MISSING' >&2; exit 42; }
+    rust_host_libdir=$(rustc --print target-libdir)
+    if ! compgen -G "$rust_host_libdir/libstd-*.rlib" >/dev/null; then
+        echo "P19_RUST_HOST_STD_MISSING=$rust_host_libdir" >&2
+        exit 42
+    fi
+    say "P19_SYSTEM_RUST_VERIFIED=$installed_release"
+fi
 
 ROOT_CARGO_CONFIG="$ROOT/.cargo/config.toml"
 ROOT_CARGO_CONFIG_SAVED="$ROOT/.cargo/config.toml.bouchaud-kernel-saved"
@@ -199,7 +224,7 @@ fi
 # Ladybird, et aucune cible Bouchaud ne doit etre injectee par l'environnement.
 rustc -vV | tee "$BUILD/rustc-version.txt"
 rustc -vV | grep -F "release: $LADYBIRD_RUST_TOOLCHAIN"
-if env | grep -q '^CARGO_BUILD_TARGET=.*bouchaud'; then
+if env | grep '^CARGO_BUILD_TARGET=.*bouchaud' >/dev/null; then
     echo "CARGO_BUILD_TARGET Bouchaud fuit encore dans le build Ladybird" >&2
     exit 1
 fi
@@ -279,7 +304,7 @@ cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target generate_inter
 GEN_LAYOUT="$BUILD/bin/generate_interpreter_layout"
 [ -x "$GEN_LAYOUT" ] || { echo "generate_interpreter_layout non produit" >&2; exit 1; }
 file "$GEN_LAYOUT" | tee "$BUILD/generate-interpreter-layout.file.txt"
-if ! readelf -l "$GEN_LAYOUT" | grep -q 'INTERP'; then
+if ! readelf -l "$GEN_LAYOUT" | grep 'INTERP' >/dev/null; then
     echo "ERREUR: generate_interpreter_layout n'est pas un executable hote dynamique; un flag Bouchaud fuit encore" >&2
     readelf -l "$GEN_LAYOUT" >&2 || true
     exit 1
@@ -396,7 +421,7 @@ fi
 for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDriver BouchaudBrowserHost; do
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
-    if readelf -l "$OUT/$runtime" | grep -q 'INTERP'; then
+    if readelf -l "$OUT/$runtime" | grep 'INTERP' >/dev/null; then
         echo "ERREUR: $runtime contient encore un interpreteur ELF dynamique" >&2
         readelf -l "$OUT/$runtime" >&2 || true
         exit 1
@@ -416,7 +441,7 @@ printf 'charge utile Bouchaud : %s octets (%s Mio), plafond %s octets (%s Mio)\n
     "$CHARGE" "$((CHARGE / 1024 / 1024))" "$PLAFOND" "$((PLAFOND / 1024 / 1024))"
 if [ "$CHARGE" -gt "$PLAFOND" ]; then
     echo "ERREUR: la charge utile depasse ce que src/fs/tar.rs sait indexer sur hdb" >&2
-    du -b "$OUT"/* | sort -rn | head -12 >&2 || true
+    du -b "$OUT"/* | sort -rn | awk 'NR<=12' >&2 || true
     exit 1
 fi
 

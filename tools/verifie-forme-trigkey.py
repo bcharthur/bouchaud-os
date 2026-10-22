@@ -50,77 +50,66 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 RUNNER = RACINE / "tools/reference/run-reference-stage2.ps1"
+COMMUN = RACINE / "tools/reference/qemu-windows-common.ps1"
 
 
-def main():
-    if not RUNNER.exists():
-        print("  - fichier absent : %s" % RUNNER)
-        return 1
-    texte = RUNNER.read_text(encoding="utf-8")
-    fautes = []
+def verifier_contrat(texte: str, commun: str) -> list[str]:
+    """Check the transitive QEMU argv path, preserving SMP, xHCI, HID and NVMe."""
+    erreurs = []
+    def exige(vrai: bool, description: str) -> None:
+        if not vrai:
+            erreurs.append(description)
 
-    if "$CommeTrigkey" not in texte:
-        fautes.append(
-            "run-reference-stage2.ps1 : le profil `-CommeTrigkey` a disparu. "
-            "Sans lui, QEMU tourne a un seul coeur, sans xHCI et sans NVMe : "
-            "ni la frontiere SMP, ni le chemin USB HID, ni le disque ne sont "
-            "exerces, et l'image validee ne partage presque rien avec celle qui "
-            "tourne sur la machine."
-        )
-        print("forme trigkey : 1 probleme(s)")
-        for faute in fautes:
-            print("\n  - %s" % faute)
-        return 1
-
-    if not re.search(r"\$Coeurs\s*=\s*16", texte):
-        fautes.append(
-            "run-reference-stage2.ps1 : le profil ne donne plus seize coeurs. "
-            "La machine de reference en a seize, et c'est le nombre qui fait "
-            "tourner la garde d'amorcage SMP -- a un seul coeur elle n'existe "
-            "pas, et `SMP_HANDOFF_BEFORE_STI` ne sort jamais."
-        )
-
-    for motif, pourquoi in (
-        (r"qemu-xhci",
-         "sans controleur xHCI le systeme retombe sur le PS/2 "
-         "(`BOUCHAUD_STAGE2_ENTREE_DECIDEE ps2_clavier=1`) et tout le chemin "
-         "du clavier muet reste mort"),
-        (r"usb-kbd",
-         "un xHCI sans clavier ne prouve rien : c'est `evenements=` du point "
-         "de terminaison clavier qui doit pouvoir monter"),
-        (r"usb-mouse",
-         "la souris est le TEMOIN : sur la machine, elle marche pendant que "
-         "le clavier se tait, et c'est ce contraste qui oriente l'enquete"),
-        (r"-device\", \"nvme",
-         "sans NVMe, `BOUCHAUD_NVME_ABSENT` et le disque n'est jamais teste"),
+    exige("$CommeTrigkey" in texte and
+          bool(re.search(r"if\s*\(\$CommeTrigkey\)\s*\{", texte)),
+          "le profil explicite -CommeTrigkey a disparu")
+    exige(bool(re.search(r"if\s*\(\$Coeurs\s*-eq\s*0\)\s*\{\s*\$Coeurs\s*=\s*16", texte)),
+          "le profil Trigkey ne configure plus 16 coeurs")
+    exige(bool(re.search(r"['\"]-smp['\"]\s*,\s*['\"]?\$Coeurs", texte)),
+          "le parametre SMP n'est plus transmis a QEMU")
+    exige(bool(re.search(r"\[string\]\$InputMode\s*=\s*'usb'", texte)) and
+          bool(re.search(r"\[string\]\$Pointer\s*=\s*'mouse'", texte)),
+          "le profil d'entree par defaut n'est plus clavier+souris USB")
+    exige("qemu-windows-common.ps1" in texte and
+          bool(re.search(r"\.\s*\(Join-Path\s+\$PSScriptRoot\s+'qemu-windows-common.ps1'\)", texte)),
+          "la bibliotheque QEMU partagee n'est plus importee")
+    exige("Get-BouchaudInputArguments -InputMode $InputMode -Pointer $Pointer" in texte,
+          "le runner ne reprend plus les arguments xHCI/HID du helper")
+    exige("function Get-BouchaudInputArguments" in commun and
+          bool(re.search(r"if\s*\(\$InputMode\s*-eq\s*'usb'\)", commun)),
+          "helper USB absent ou branche USB inactif")
+    for motif, raison in (
+        (r"['\"]qemu-xhci,id=xhci['\"]", "controleur xHCI absent"),
+        (r"['\"]usb-kbd,bus=xhci\.0['\"]", "clavier USB absent"),
+        (r"usb-\$Pointer,bus=xhci\.0", "souris USB dynamique absente"),
     ):
-        if not re.search(motif, texte):
-            fautes.append(
-                "run-reference-stage2.ps1 : le profil ne branche plus `%s` -- %s."
-                % (motif.replace("\\", ""), pourquoi)
-            )
+        exige(bool(re.search(motif, commun)), raison)
+    exige("'-device','nvme,drive=nv,serial=BOUCHAUDTRIGKEY'" in texte and
+          "id=nv,file=$Nvme,format=raw,if=none,snapshot=on" in texte,
+          "NVMe virtuel Trigkey absent ou sans snapshot")
+    exige("Get-BouchaudDisplayArguments" in texte and
+          "Invoke-BouchaudQemu -QemuExe $QemuExe -Arguments $ArgsQemu" in texte,
+          "arguments QEMU construits mais non transmis au lanceur")
+    exige("ne reproduit PAS" in texte and "xHCI QEMU" in texte and
+          "recepteur Logitech" in texte and "NVMe virtuel" in texte,
+          "ecarts avec le materiel physique non documentes")
+    return erreurs
 
-    # Une forme proche n'est pas la machine, et le script doit le dire.
-    if "ne reproduit PAS" not in texte:
-        fautes.append(
-            "run-reference-stage2.ps1 : le profil ne dit plus ce qu'il ne "
-            "reproduit pas. Processeur emule, xHCI de QEMU et non l'AMD de la "
-            "TRIGKEY, clavier USB simple et non un recepteur Logitech unifie : "
-            "taire ces ecarts ferait prendre un QEMU vert pour une preuve "
-            "physique, ce qui est exactement l'erreur que le reste de ce depot "
-            "s'emploie a rendre impossible."
-        )
 
+def main() -> int:
+    for path in (RUNNER, COMMUN):
+        if not path.is_file():
+            print(f"forme trigkey : fichier absent : {path}")
+            return 1
+    texte = RUNNER.read_text(encoding="utf-8-sig")
+    commun = COMMUN.read_text(encoding="utf-8-sig")
+    fautes = verifier_contrat(texte, commun)
     if fautes:
-        print("forme trigkey : %d probleme(s)" % len(fautes))
+        print(f"forme trigkey : {len(fautes)} probleme(s)")
         for faute in fautes:
-            print("\n  - %s" % faute)
+            print("  - " + faute)
         return 1
-
-    print(
-        "forme trigkey : seize coeurs, xHCI avec clavier et souris, NVMe, et "
-        "les ecarts avec la vraie machine annonces"
-    )
+    print("forme trigkey : contrat 16 coeurs, USB HID xHCI, NVMe snapshot et ecarts physiques OK")
     return 0
 
 

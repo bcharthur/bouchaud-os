@@ -48,11 +48,20 @@
 // a chaque CI, alors que le reste de ce fichier ne tourne que dans QEMU.
 #include "BouchaudDegat.h"
 
+// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d)
+//
+// Les deux tampons de la surface, cote client : ne jamais ecrire la face que
+// le gestionnaire lit, rejouer depuis elle avant de peindre. Pur, verifie sur
+// l'hote par `tools/ladybird/chrome/test_tampons.cpp`. Sans effet tant que le
+// bureau n'offre qu'un tampon (`gui-surface simple`, le defaut).
+#include "BouchaudTampons.h"
+
 // BOUCHAUD_CHROME_V18_ZOOM
 //
 // Les crans de zoom. Meme raison d'etre que BouchaudDegat.h : de l'arithmetique
 // entiere sans dependance, donc verifiable sur l'hote par `test_zoom.cpp`.
 #include "BouchaudZoom.h"
+#include "BouchaudChargement.h" // BOUCHAUD_P19_LOADING_UNIFIED_V1
 
 // BOUCHAUD_CHROME_V19_CALQUES
 //
@@ -259,6 +268,10 @@ enum Genre : u16 {
     /// seulement quand il a change. Il n'existe pas de message de LECTURE :
     /// voir `src/gui/presse_papiers.rs` pour ce que cette absence ferme.
     PressePapiers = 0x107,
+    /// Le gestionnaire ne lira plus ce tampon (contrat a deux tampons,
+    /// `src/gui/surface_tampons.rs`). Recu seulement si `Hello` annonce la
+    /// capacite ; le chrome ne l'annonce pas encore.
+    Liberation = 0x108,
 };
 
 // Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans
@@ -637,6 +650,16 @@ struct State {
     // fois évite mmap/munmap et les shootdowns TLB à chaque frame chrome/page.
     u8* surface_mapping { nullptr };
     size_t surface_mapping_bytes { 0 };
+    // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : tampons offerts par le bureau
+    // (BO_SURFACE_TAMPONS), contrat retenu, et une composition differee faute
+    // de tampon libre (son degat est garde, jamais perdu).
+    int tampons_offerts { 1 };
+    BouchaudTampons::Client tampons {};
+    bool composition_differee { false };
+    BouchaudDegat::Rect degat_differe {};
+    u64 tampons_liberations { 0 };
+    u64 tampons_attentes { 0 };
+    u64 tampons_rejeu_px { 0 };
 
     // BOUCHAUD_C22_ONGLETS
     //
@@ -658,6 +681,7 @@ struct State {
         ByteString status { "pret" };
         bool secure { false };
         bool loading { false };
+        BouchaudChargement::Etat chargement; // BOUCHAUD_P19_LOADING_UNIFIED_V1
         int zoom_cran { BouchaudZoom::cran_neutre };
         ImagePage last_page;
     };
@@ -703,6 +727,8 @@ struct State {
     ByteString status { "pret" };
     bool loading { false };
     bool secure { false };
+    BouchaudChargement::Etat chargement_initial; // BOUCHAUD_P19_LOADING_UNIFIED_V1
+    uint64_t chargement_horloge { 0 };
 
     // Suivi du pointeur : le protocole GUI envoie un etat de boutons absolu,
     // pas des fronts. Les fronts se deduisent ici.
@@ -953,6 +979,11 @@ inline State::Onglet* onglet_de_la_page(u64 page_id)
     return nullptr;
 }
 
+// Fonctions implementees avec les evenements de navigation en fin de fichier.
+inline void set_loading(u64, bool, StringView);
+inline void commence_navigation_utilisateur();
+inline void termine_chargement_anormal(u64, StringView, bool);
+
 /// Le chrome est actif quand le gestionnaire de fenetres a confie une fenetre
 /// au navigateur : un canal GUI et une surface. Sans eux (banc headless), le
 /// navigateur tourne sans fenetre et rien n'est peint.
@@ -1045,7 +1076,7 @@ inline void send_handshake()
     if (s.handshake_done)
         return;
 
-    u8 hello[8] {};
+    u8 hello[12] {};
     auto put32 = [](u8* out, u32 value) {
         out[0] = static_cast<u8>(value);
         out[1] = static_cast<u8>(value >> 8);
@@ -1054,6 +1085,10 @@ inline void send_handshake()
     };
     put32(hello + 0, 1);
     put32(hello + 4, static_cast<u32>(getpid()));
+    // Le troisieme mot : les capacites. La regle du noyau retient deux
+    // tampons si et seulement si il les a offerts ET si ce mot les annonce --
+    // la meme regle que `BouchaudTampons::Client::negocie`.
+    put32(hello + 8, s.tampons.nombre == 2 ? BouchaudTampons::CAPACITE_DEUX_TAMPONS : 0u);
     if (!send_message(Genre::Hello, hello, sizeof(hello))) {
         warnln("[ladybird-bouchaud] M11_GUI_HELLO_FAILED errno={}", errno);
         return;
@@ -1117,9 +1152,10 @@ inline void log_render_stats_if_due()
     if (s.published_frames == 0 || (s.published_frames % 16) != 0)
         return;
     outln("[ladybird-bouchaud] M11_RENDER_STATS full={} partiel={} toolbar={} page={} "
-          "sans_effet={} pixels={}",
+          "sans_effet={} pixels={} tampons={} liberations={} attentes={} rejeu_px={}",
         s.chrome_full_frames, s.chrome_partial_frames, s.chrome_toolbar_frames,
-        s.page_frames, s.page_frames_sans_effet, s.chrome_pixels_written);
+        s.page_frames, s.page_frames_sans_effet, s.chrome_pixels_written,
+        s.tampons.nombre, s.tampons_liberations, s.tampons_attentes, s.tampons_rejeu_px);
 }
 
 inline void send_frame_ready(DamageRect damage)
@@ -1144,7 +1180,15 @@ inline void send_frame_ready(DamageRect damage)
         out[3] = static_cast<u8>(value >> 24);
     };
     put32(frame + 0, FENETRE);
-    put32(frame + 4, 0); // tampon
+    // Le tampon peint : en V1 toujours 0 ; en V2 l'arriere, qui devient la face.
+    auto const tampon = s.tampons.nombre == 2 ? s.tampons.arriere : 0;
+    // Aucun tampon arriere choisi : rien n'a ete peint pour cette annonce. Ne
+    // jamais annoncer un tampon au hasard -- la trame reste due.
+    if (tampon < 0) {
+        s.trame_a_republier = true;
+        return;
+    }
+    put32(frame + 4, static_cast<u32>(tampon < 0 ? 0 : tampon));
     put32(frame + 8, static_cast<u32>(damage.x));
     put32(frame + 12, static_cast<u32>(damage.y));
     put32(frame + 16, static_cast<u32>(damage.width));
@@ -1156,6 +1200,7 @@ inline void send_frame_ready(DamageRect damage)
         return;
     }
     s.trame_a_republier = false;
+    s.tampons.annonce(tampon, BouchaudTampons::Rect { damage.x, damage.y, damage.width, damage.height });
     ++s.published_frames;
     log_render_stats_if_due();
     // BOUCHAUD_CHROME_V18_DEGAT_PARTIEL
@@ -1196,7 +1241,10 @@ inline Optional<Canvas> mapped_surface()
     auto height_rows = static_cast<size_t>(s.surface_alloc_height);
     if (height_rows != 0 && stride_bytes > SIZE_MAX / height_rows)
         return {};
-    auto bytes = stride_bytes * height_rows;
+    // Tous les tampons offerts, dans le meme mappage : le tampon `t` commence
+    // a `t * pas * hauteur` (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1).
+    auto offerts = static_cast<size_t>(s.tampons_offerts == 2 ? 2 : 1);
+    auto bytes = stride_bytes * height_rows * offerts;
     if (bytes == 0)
         return {};
     if (!s.surface_mapping) {
@@ -1213,7 +1261,51 @@ inline Optional<Canvas> mapped_surface()
         warnln("[ladybird-bouchaud] M11_SURFACE_GEOMETRY_CHANGED old={} new={}", s.surface_mapping_bytes, bytes);
         return {};
     }
-    return Canvas { s.surface_mapping, s.surface_width, s.surface_height, s.surface_stride };
+    auto const arriere = s.tampons.nombre == 2 ? s.tampons.arriere : 0;
+    if (arriere < 0)
+        return {};
+    auto const octets_tampon = stride_bytes * height_rows;
+    return Canvas { s.surface_mapping + static_cast<size_t>(arriere) * octets_tampon,
+        s.surface_width, s.surface_height, s.surface_stride };
+}
+
+/// BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : avant toute peinture, choisit le
+/// tampon arriere et y rejoue depuis la face ce que la derniere trame a
+/// publie. Faux s'il faut attendre une `Liberation` -- rien n'est alors ecrit.
+/// En V1, toujours vrai et sans effet.
+inline bool prepare_arriere()
+{
+    auto& s = state();
+    if (s.tampons.nombre != 2)
+        return true;
+    auto const t = s.tampons.choisit();
+    if (t < 0) {
+        ++s.tampons_attentes;
+        return false;
+    }
+    auto canvas_or_error = mapped_surface();
+    if (!canvas_or_error.has_value())
+        return false;
+    auto r = s.tampons.rejeu(t, s.surface_width, s.surface_height);
+    if (r.vide() || s.tampons.face < 0)
+        return true;
+    // Une seule fois par preparation : une annonce ratee laisse ce tampon
+    // arriere, et ce qui y est peint ne doit pas etre ecrase (test_tampons).
+    s.tampons.rejeu_fait(t);
+    auto const pas = static_cast<size_t>(s.surface_stride);
+    auto const octets_tampon = pas * static_cast<size_t>(s.surface_alloc_height);
+    auto const* face = s.surface_mapping + static_cast<size_t>(s.tampons.face) * octets_tampon;
+    auto* arriere = s.surface_mapping + static_cast<size_t>(t) * octets_tampon;
+    auto const x0 = clamp(r.x, 0, s.surface_alloc_width);
+    auto const y0 = clamp(r.y, 0, s.surface_alloc_height);
+    auto const x1 = clamp(r.x + r.w, x0, s.surface_alloc_width);
+    auto const y1 = clamp(r.y + r.h, y0, s.surface_alloc_height);
+    for (int y = y0; y < y1; ++y) {
+        auto const decalage = static_cast<size_t>(y) * pas + static_cast<size_t>(x0) * 4;
+        memcpy(arriere + decalage, face + decalage, static_cast<size_t>(x1 - x0) * 4);
+    }
+    s.tampons_rejeu_px += static_cast<u64>(x1 - x0) * static_cast<u64>(y1 - y0);
+    return true;
 }
 
 inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 color)
@@ -1701,12 +1793,12 @@ inline void draw_onglets(Canvas const& canvas)
             // Un trait clair sur l'arete haute : c'est ce qui distingue
             // l'onglet actif au premier coup d'oeil, meme en vision
             // peripherique, la ou deux gris proches ne se distinguent pas.
-            fill_rect(canvas, boite.x, boite.y + 2, boite.w - 2, 2, color_glyph);
+            fill_rect(canvas, boite.x + 1, boite.y + 7, 2, boite.h - 12, color_glyph); // onglet actif, PAS une seconde barre de chargement
         }
 
         auto const fermeture = boite_fermeture_onglet(static_cast<int>(rang));
         auto const reserve = fermeture.vide() ? calque_marge : (fermeture.w + 2 * calque_marge);
-        auto const largeur_texte = boite.w - calque_marge - reserve;
+        auto const largeur_texte = boite.w - calque_marge - reserve - 12;
         if (largeur_texte > 0) {
             auto const& onglet = s.onglets[rang];
             // Le TITRE si le document en a un, l'adresse sinon : une page qui
@@ -1721,7 +1813,14 @@ inline void draw_onglets(Canvas const& canvas)
             auto const titre = est_actif ? s.title : onglet.titre;
             auto const adresse = est_actif ? s.committed_url : onglet.url;
             auto const libelle = titre.is_empty() ? adresse : titre;
-            draw_ui_text(canvas, boite.x + calque_marge,
+            // Un petit point remplace la deuxieme barre : un signal par onglet.
+            if (onglet.chargement.actif()) {
+                auto const couleur = (onglet.chargement.signale_rafale(s.chargement_horloge)
+                    || onglet.chargement.lent(s.chargement_horloge)) ? 0x00f59e0bu : 0x003b82f6u;
+                if ((s.chargement_horloge / 16) % 2 == 0)
+                    fill_rect(canvas, boite.x + 7, boite.y + 13, 5, 5, couleur);
+            }
+            draw_ui_text(canvas, boite.x + calque_marge + 12,
                 boite.y + (onglets_hauteur - ui_text_height) / 2 + 1,
                 libelle.view(), est_actif ? color_glyph : color_glyph_off, largeur_texte);
         }
@@ -1853,12 +1952,25 @@ inline void draw_toolbar(Canvas const& canvas)
 
     draw_favori(canvas);
 
-    // Indicateur visuel : bleu = navigation en cours, vert = page stabilisee.
-    // La ligne n'affiche volontairement aucun pourcentage fictif.
-    auto status_color = s.loading ? 0x3b82f6u : 0x22c55eu;
-    fill_rect(canvas, field_x + field_w - 9, button_top + 10, 5, 5, status_color);
-    if (s.loading)
-        fill_rect(canvas, field_x, toolbar_height - 3, field_w, 3, status_color);
+    // BOUCHAUD_P19_LOADING_UNIFIED_V1 : indicateur UNIQUE sous l'URL.
+    // Segment indetermine : sans octets totaux, on n'invente PAS un pourcentage.
+    auto const* onglet = onglet_de_la_page(page_active());
+    auto const& suivi = onglet ? onglet->chargement : s.chargement_initial;
+    if (field_w > 30 && suivi.actif()) {
+        auto const largeur = max(12, field_w / 5);
+        auto const periode = static_cast<uint64_t>(field_w + largeur);
+        auto const avance = static_cast<int>((s.chargement_horloge * 7u) % periode);
+        auto const debut = avance - largeur;
+        auto const gauche = max(0, debut);
+        auto const droite = min(field_w, avance);
+        if (droite > gauche)
+            fill_rect(canvas, field_x + gauche, toolbar_height - 3,
+                droite - gauche, 2,
+                suivi.signale_rafale(s.chargement_horloge) || suivi.lent(s.chargement_horloge)
+                    ? 0x00f59e0bu : 0x003b82f6u);
+    } else if (field_w > 30 && suivi.affiche_fin(s.chargement_horloge)) {
+        fill_rect(canvas, field_x, toolbar_height - 3, field_w, 2, 0x0022c55eu);
+    }
 }
 
 /// Tout ce que le chrome peint au-dessus de la page : barre et onglets.
@@ -2458,6 +2570,14 @@ inline bool compose_page(BouchaudDegat::Rect degat)
         return false;
     }
 
+    // Aucun tampon libre (le gestionnaire lit encore les deux) : le degat est
+    // GARDE et la trame recomposee des la prochaine `Liberation` (`tick`).
+    if (!prepare_arriere()) {
+        s.composition_differee = true;
+        s.degat_differe = s.degat_differe.englobe(degat);
+        return false;
+    }
+
     auto canvas_or_error = mapped_surface();
     if (!canvas_or_error.has_value())
         return false;
@@ -2615,6 +2735,11 @@ inline bool compose_toolbar_only()
     auto& s = state();
     if (s.surface_fd < 0 || s.gui_fd < 0 || s.surface_width <= 0 || s.surface_height <= 0)
         return false;
+    // Pas de tampon libre : la recomposition de chrome reste due (`tick`).
+    if (!prepare_arriere()) {
+        ++s.chrome_frames_pending;
+        return false;
+    }
 
     auto canvas_or_error = mapped_surface();
     if (!canvas_or_error.has_value())
@@ -2762,8 +2887,7 @@ inline void commit_address()
         return;
 
     defocus_address();
-    s.loading = true;
-    s.status = "chargement...";
+    commence_navigation_utilisateur();
     outln("[ladybird-bouchaud] M11_NAVIGATE url={}", target);
     if (s.on_navigate)
         s.on_navigate(target);
@@ -2886,6 +3010,8 @@ inline void ajoute_onglet(u64 page_id, ByteString const& url, bool activer)
     State::Onglet onglet;
     onglet.page_id = page_id;
     onglet.url = url;
+    if (premier)
+        onglet.chargement = s.chargement_initial;
     s.onglets.append(move(onglet));
     outln("[ladybird-bouchaud] M11_TAB_OPEN page={} total={}", page_id, s.onglets.size());
 
@@ -3624,8 +3750,7 @@ inline void active_entree_menu(int rang)
     switch (entree) {
     case MenuOuvrirLien:
         if (!lien.is_empty() && s.on_navigate) {
-            s.loading = true;
-            s.status = "chargement...";
+            commence_navigation_utilisateur();
             s.on_navigate(lien);
         }
         break;
@@ -3642,8 +3767,7 @@ inline void active_entree_menu(int rang)
             s.on_history_delta(1);
         break;
     case MenuRecharger:
-        s.loading = true;
-        s.status = "chargement...";
+        commence_navigation_utilisateur();
         if (s.on_reload)
             s.on_reload();
         break;
@@ -3788,10 +3912,13 @@ inline void handle_pointer(int x, int y, unsigned buttons)
                     s.on_history_delta(1);
             } else if (point_in_button(reload_button(), x, y)) {
                 outln("[ladybird-bouchaud] M11_RELOAD");
-                s.loading = true;
-                s.status = "chargement...";
-                if (s.on_reload)
-                    s.on_reload();
+                if (s.loading) {
+                    termine_chargement_anormal(page_active(), "arrete"sv, false);
+                    if (s.on_stop) s.on_stop();
+                } else {
+                    commence_navigation_utilisateur();
+                    if (s.on_reload) s.on_reload();
+                }
             } else if (BouchaudCalques::contient(boite_favori(), x, y)) {
                 bascule_favori();
             } else if (point_in_address_field(x, y)) {
@@ -4065,8 +4192,7 @@ inline bool raccourci_navigateur(u32 code, u32 code_point, u32 modifiers, bool a
         return true;
 
     if (rechargement) {
-        s.loading = true;
-        s.status = "chargement...";
+        commence_navigation_utilisateur();
         if (s.on_reload)
             s.on_reload();
         request_chrome_frame();
@@ -4363,8 +4489,7 @@ inline void handle_key(u32 code, u32 code_point, u32 modifiers, u32 pressed)
         // relachement le demanderait deux fois par frappe, et la seconde
         // porterait sur un chargement deja arrete.
         if (appui && s.loading) {
-            s.loading = false;
-            s.status = "arrete";
+            termine_chargement_anormal(page_active(), "arrete"sv, false);
             if (s.on_stop)
                 s.on_stop();
             // Ici le chrome change reellement ("arrete"), donc une seule
@@ -4466,6 +4591,12 @@ inline void handle_message(u16 kind, u8 const* payload, u32 size)
             s.presse_papiers = builder.to_byte_string();
         }
         break;
+    case Genre::Liberation:
+        // Le gestionnaire ne lira plus ce tampon. Une liberation inattendue
+        // (V1, face, deja libre) ne change rien : `libere` la refuse.
+        if (size >= 8 && s.tampons.libere(static_cast<int>(read_u32(payload, 4))))
+            ++s.tampons_liberations;
+        break;
     case Genre::CloseRequest:
         outln("[ladybird-bouchaud] M11_CLOSE_REQUEST");
         if (s.on_close)
@@ -4550,6 +4681,22 @@ inline void tick()
     drain();
 
     auto& s = state();
+    // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 : une trame differee faute de
+    // tampon libre repart avec tout son degat des qu'une `Liberation` est lue.
+    if (s.composition_differee && s.tampons.choisit() >= 0) {
+        s.composition_differee = false;
+        auto degat = s.degat_differe;
+        s.degat_differe = {};
+        compose_page(degat);
+    }
+    ++s.chargement_horloge; // horloge GUI, aucun repaint de page force
+    auto const* actif = onglet_de_la_page(page_active());
+    auto const& suivi = actif ? actif->chargement : s.chargement_initial;
+    if (suivi.actif() && s.chargement_horloge % 4 == 0)
+        request_chrome_frame(); // 15 fps maximum, chrome uniquement
+    if (suivi.phase == BouchaudChargement::Phase::Termine
+        && s.chargement_horloge == suivi.fin_tick + BouchaudChargement::TICKS_FADE)
+        request_chrome_frame(); // efface la bande de succes apres 224 ms
 
     // BOUCHAUD_CHROME_V19_CALQUES
     //
@@ -4612,6 +4759,11 @@ inline void initialize_from_environment()
     s.surface_width = s.surface_alloc_width;
     s.surface_height = s.surface_alloc_height;
     s.surface_stride = environment_int("BO_SURFACE_STRIDE", s.surface_alloc_width * 4);
+    // Le bureau offre deux tampons sous `gui-surface double` seulement ; le
+    // chrome les retient alors (regle du noyau, `Tampons::negocie`).
+    s.tampons_offerts = environment_int("BO_SURFACE_TAMPONS", 1) == 2 ? 2 : 1;
+    s.tampons = BouchaudTampons::Client::negocie(s.tampons_offerts, true);
+    outln("[LB:UI] tampons offerts={} retenus={}", s.tampons_offerts, s.tampons.nombre);
 
     if (s.gui_fd >= 0) {
         auto flags = fcntl(s.gui_fd, F_GETFL, 0);
@@ -4689,26 +4841,81 @@ inline void set_committed_url(u64 page_id, ByteString const& url)
     request_chrome_frame();
 }
 
+// BOUCHAUD_P19_LOADING_UNIFIED_V1 : unique entree pour les rappels LibWeb.
+// Les ressources secondaires n'ont aucun droit de reinitialiser l'etat visuel.
 inline void set_loading(u64 page_id, bool loading, StringView status)
 {
     auto& s = state();
-    if (page_id != page_active()) {
-        if (auto* onglet = onglet_de_la_page(page_id)) {
-            onglet->loading = loading;
-            onglet->status = status;
-            request_chrome_frame();
-        }
+    auto* onglet = onglet_de_la_page(page_id);
+    auto* suivi = onglet ? &onglet->chargement
+        : (s.onglets.is_empty() && page_id == page_active() ? &s.chargement_initial : nullptr);
+    if (!suivi)
+        return;
+    auto const evenement = loading
+        ? suivi->commence(s.chargement_horloge) : suivi->termine(s.chargement_horloge);
+    if (evenement == BouchaudChargement::Transition::DoublonDebut) {
+        if (suivi->debuts_doublons <= 3 || suivi->debuts_doublons % 16 == 0)
+            warnln("[LB:LOAD] page={} event=start_duplicate generation={} duplicates={} tic={}",
+                page_id, suivi->generation, suivi->debuts_doublons, s.chargement_horloge);
         return;
     }
-    // Un document qui commence a charger n'a plus de lien survole : celui
-    // qu'on affichait appartenait au document precedent, et LibWeb n'enverra
-    // pas de `unhover` pour un element qui n'existe plus. Sans cela la bulle
-    // resterait, et montrerait une adresse sans rapport avec ce qui est a
-    // l'ecran -- exactement ce contre quoi elle existe.
-    if (loading && !s.loading)
+    if (evenement == BouchaudChargement::Transition::DoublonFin)
+        return;
+    outln("[LB:LOAD] page={} event={} generation={} starts_10s={} loop_suspect={} tic={}",
+        page_id, loading ? "start"sv : "finish"sv, suivi->generation,
+        suivi->demarrages_fenetre, suivi->signale_rafale(s.chargement_horloge) ? 1 : 0,
+        s.chargement_horloge);
+    if (page_id == page_active()) {
+        if (loading && !s.loading)
+            clear_survol_url();
+        s.loading = suivi->actif();
+        s.status = status;
+    } else if (onglet) {
+        onglet->loading = suivi->actif();
+        onglet->status = status;
+    }
+    request_chrome_frame();
+}
+
+// Navigation demarree explicitement par l'utilisateur : un nouveau cycle,
+// distinct d'un doublon de callback upstream. Ne recharge JAMAIS la page ici.
+inline void commence_navigation_utilisateur()
+{
+    auto& s = state();
+    auto* onglet = onglet_de_la_page(page_active());
+    auto& suivi = onglet ? onglet->chargement : s.chargement_initial;
+    suivi.commence(s.chargement_horloge, true);
+    if (!s.loading)
         clear_survol_url();
-    s.loading = loading;
-    s.status = status;
+    s.loading = true;
+    s.status = "chargement...";
+    outln("[LB:LOAD] page={} event=user_start generation={} tic={}",
+        page_active(), suivi.generation, s.chargement_horloge);
+    request_chrome_frame();
+}
+
+inline void termine_chargement_anormal(u64 page_id, StringView status, bool echec)
+{
+    auto& s = state();
+    auto* onglet = onglet_de_la_page(page_id);
+    auto* suivi = onglet ? &onglet->chargement
+        : (s.onglets.is_empty() && page_id == page_active() ? &s.chargement_initial : nullptr);
+    if (!suivi)
+        return;
+    if (echec)
+        suivi->echec();
+    else
+        suivi->arrete();
+    if (page_id == page_active()) {
+        s.loading = false;
+        s.status = status;
+    } else if (onglet) {
+        onglet->loading = false;
+        onglet->status = status;
+    }
+    warnln("[LB:LOAD] page={} event={} generation={} tic={}",
+        page_id, echec ? "crash_or_error"sv : "stopped"sv,
+        suivi->generation, s.chargement_horloge);
     request_chrome_frame();
 }
 

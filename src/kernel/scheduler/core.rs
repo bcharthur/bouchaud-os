@@ -14,6 +14,7 @@ pub mod preempt;
 pub mod reveil;
 pub mod runqueue;
 pub mod equilibrage;
+pub mod secours;
 pub mod sonde_latence;
 
 pub use crate::kernel::task::OrdonnanceurStats;

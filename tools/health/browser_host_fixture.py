@@ -343,6 +343,11 @@ ENDURANCE_HTML = b"""<!doctype html><meta charset="utf-8"><title>endurance</titl
       else {
         if (onglet) onglet.close();
         console.log(`HOST_ENDURANCE_FIN cycles=${cycle} t_s=${s2} cadres_ok=${cadresOk} cadres_echus=${cadresEchus} workers_ok=${workersOk} onglets=${ongletsOuverts} onglets_fermes_par_ouvreur=${ongletsFermesParOuvreur} raf=${raf} lat_cadre_moy_ms=${Math.round(latTotal / Math.max(1, cadresOk))} lat_cadre_max_ms=${latMax} lat_cadre_p50_ms=${centile(0.5)} lat_cadre_p95_ms=${centile(0.95)} lat_cadre_p99_ms=${centile(0.99)} cycles_conclus=${cadresOk + cadresEchus} lat_doc_moy_ms=${Math.round(docTotal / Math.max(1, docN))} docs=${docN} lat_img_moy_ms=${Math.round(imgTotal / Math.max(1, imgN))} imgs=${imgN} retard_boucle_moy_ms=${Math.round(retardTotal / Math.max(1, retardN))} retard_boucle_max_ms=${Math.round(retardMax)}`);
+        // BOUCHAUD_ENDURANCE_CONCLUS_COURT_V1 : la ligne FIN fait ~500 octets
+        // et l'entrelacement serie en a deja tronque la fin (cd65aa45, bras
+        // profil coupe : cycles_conclus absent, verdict ?/57). Le compte qui
+        // decide de la stabilite est redit sur une ligne courte.
+        console.log(`HOST_ENDURANCE_CONCLUS cycles=${cycle} cycles_conclus=${cadresOk + cadresEchus}`);
       }
     };
   }

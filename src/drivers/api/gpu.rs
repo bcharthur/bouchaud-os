@@ -9,6 +9,9 @@
 pub enum Backend {
     None,
     BgaLinearFramebuffer,
+    /// BOUCHAUD_VIRTIO_GPU_2D_V1 : scanout virtio-gpu 2D (QEMU sans BGA).
+    /// Remplacant de BGA, AUCUNE acceleration.
+    Virtio2d,
 }
 
 impl Backend {
@@ -16,6 +19,7 @@ impl Backend {
         match self {
             Backend::None => "none",
             Backend::BgaLinearFramebuffer => "bga-lfb",
+            Backend::Virtio2d => "virtio-gpu-2d",
         }
     }
 }
@@ -48,6 +52,20 @@ static mut USERLAND_HANDOFF: bool = false;
 pub fn activate_bga(width: usize, height: usize, bpp: usize, scanout_phys: u64) {
     unsafe {
         BACKEND = Backend::BgaLinearFramebuffer;
+        ACTIVE = true;
+        WIDTH = width;
+        HEIGHT = height;
+        BPP = bpp;
+        SCANOUT_PHYS = scanout_phys;
+        USERLAND_HANDOFF = false;
+    }
+}
+
+/// Le bureau presente par le scanout virtio-gpu 2D : la memoire d'appui de la
+/// ressource tient lieu de framebuffer lineaire.
+pub fn activate_virtio_2d(width: usize, height: usize, bpp: usize, scanout_phys: u64) {
+    unsafe {
+        BACKEND = Backend::Virtio2d;
         ACTIVE = true;
         WIDTH = width;
         HEIGHT = height;

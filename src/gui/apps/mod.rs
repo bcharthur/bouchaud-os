@@ -10,6 +10,8 @@ pub mod calculator;
 pub mod file_explorer;
 pub mod journal;
 pub mod rustpad;
+pub mod notes;
+pub mod insights;
 pub mod system_info;
 pub mod services;
 pub mod terminal;
@@ -91,6 +93,7 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
         App::Rustpad { state } => rustpad::on_key(state, k),
+        App::Notes { state } => notes::on_key(state, k),
         App::Journal { state } => journal::on_key(state, k),
 
         _ => false,
@@ -112,6 +115,11 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
     let bx    = (w.x + 3).max(0) as usize;
     let by    = (w.y + TITLE_H + 2).max(0) as usize;
 
+    if let App::Notes { state } = &mut w.app {
+        notes::click(state, mx - bx as i32, my - by as i32);
+        return;
+    }
+
     if let App::Calc { expr } = &mut w.app {
         let bwi = (win_w - 6).max(1);
         let bhi = (win_h - TITLE_H - 4).max(1);
@@ -123,7 +131,7 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
 
     let window_x = w.window.x;
     let window_y = w.window.y;
-    if let App::Files { cur, scroll, selected } = &mut w.app {
+    if let App::Files { cur, scroll, selected, history } = &mut w.app {
         let bx  = (window_x + 3).max(0) as usize;
         let by  = (window_y + TITLE_H + 2).max(0) as usize;
         let bw  = (win_w - 6).max(1) as usize;
@@ -134,11 +142,31 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
         match tb_action {
             file_explorer::ToolbarAction::Up => {
                 let fs = ramfs::fs();
-                if *cur != 0 { *cur = fs.nodes[*cur].parent; *scroll = 0; *selected = None; }
+                if *cur != 0 {
+                    let parent = fs.nodes[*cur].parent;
+                    if fs.can(parent, ramfs::PERM_X) {
+                        history.visit(*cur, parent);
+                        *cur = parent; *scroll = 0; *selected = None;
+                    }
+                }
                 return;
             }
-            file_explorer::ToolbarAction::Back | file_explorer::ToolbarAction::Forward => {
-                // Navigation historique non implementee (placeholder)
+            file_explorer::ToolbarAction::Back => {
+                let fs = ramfs::fs();
+                if let Some(prev) = history.back(*cur, |idx| idx < ramfs::MAX_NODES &&
+                    fs.nodes[idx].used && fs.nodes[idx].kind == ramfs::NodeKind::Dir &&
+                    fs.can(idx, ramfs::PERM_X)) {
+                    *cur = prev; *scroll = 0; *selected = None;
+                }
+                return;
+            }
+            file_explorer::ToolbarAction::Forward => {
+                let fs = ramfs::fs();
+                if let Some(next) = history.forward(*cur, |idx| idx < ramfs::MAX_NODES &&
+                    fs.nodes[idx].used && fs.nodes[idx].kind == ramfs::NodeKind::Dir &&
+                    fs.can(idx, ramfs::PERM_X)) {
+                    *cur = next; *scroll = 0; *selected = None;
+                }
                 return;
             }
             file_explorer::ToolbarAction::None => {}
@@ -162,9 +190,9 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
             if idx >= entries.len() { *selected = None; return; }
             let (node, is_dir) = entries[idx];
             if node == usize::MAX {
-                *cur = fs.nodes[*cur].parent; *scroll = 0; *selected = None;
+                let parent = fs.nodes[*cur].parent; history.visit(*cur, parent); *cur = parent; *scroll = 0; *selected = None;
             } else if is_dir {
-                if fs.can(node, ramfs::PERM_X) { *cur = node; *scroll = 0; *selected = None; }
+                if fs.can(node, ramfs::PERM_X) { history.visit(*cur, node); *cur = node; *scroll = 0; *selected = None; }
             } else {
                 *selected = Some(idx);
             }
@@ -222,10 +250,12 @@ pub(crate) fn draw_app(w: &Win) {
     }
     match &w.app {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
-        App::Files { cur, scroll, selected } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
+        App::Files { cur, scroll, selected, .. } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Services                       => services::draw(bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
+        App::Insights                       => insights::draw(bx, by, bw, bh),
+        App::Notes { state }                => notes::draw(state, bx, by, bw, bh),
         App::Rustpad { state }              => rustpad::draw(state, bx, by, bw, bh),
         App::Journal { state }              => journal::draw(state, bx, by, bw, bh),
         // Le contenu d'un client ring 3 n'est pas dessine : il est *compose*.

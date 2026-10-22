@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -680,6 +680,353 @@ fn expand_vars(seg: &str) -> String {
 }
 
 /// Execute un script : chaque ligne non vide (et non commentaire `#`) est lancee.
+/// `ordo-variante [defaut|ipi-interactive]` : affiche (et bascule) la variante
+/// de reveil. Sans argument, n'affiche que l'etat. Ligne serie lisible par
+/// les bancs A/B.
+// BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 -- banc : `serie-detenteur-suspendu
+// <attente_ms> <duree_ms>` lance un fil noyau qui attend `attente_ms`, puis
+// prend le jeton serie et le garde `duree_ms` interruptions masquees, au
+// milieu d'une ligne (un processeur virtuel retire par l'hote). Rend la main
+// tout de suite.
+static SUSPENSION_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SUSPENSION_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn serie_detenteur_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+    SUSPENSION_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
+    SUSPENSION_DUREE_MS.store(lis(2, 3000).min(30_000), Ordering::Relaxed);
+    if !crate::kernel::task::spawn_noyau(fil_detenteur_suspendu, "serie-suspendu") {
+        crate::println!("serie-detenteur-suspendu : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+fn fil_detenteur_suspendu() -> ! {
+    use core::sync::atomic::Ordering;
+    let attente = SUSPENSION_ATTENTE_MS.load(Ordering::Relaxed);
+    let duree = SUSPENSION_DUREE_MS.load(Ordering::Relaxed);
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    let pris = crate::drivers::serial::banc_detenteur_suspendu(duree);
+    crate::serial_println!("SERIE_DETENTEUR_SUSPENDU_FAIT pris={} duree_ms={}", pris as u8, duree);
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
+/// BOUCHAUD_CONSOLE_VERROU_BORNE_V1 : `serie-verrou-suspendu ATTENTE_MS
+/// DUREE_MS [fil]` -- un fil noyau prend le verrou de l'anneau de la console
+/// apres ATTENTE_MS et le garde DUREE_MS interruptions masquees.
+///
+/// BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : avec `fil`, la suspension frappe LE
+/// COEUR DU FIL `console` (celui dans la file duquel il attend son tour) --
+/// le cas du run 39667691144 (KVM SMP4), rendu deterministe : le fil de banc
+/// est epingle a ce coeur, et verifie au moment de suspendre que le fil y
+/// est encore.
+static VERROU_SUSPENDU_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERROU_SUSPENDU_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VERROU_SUSPENDU_CIBLE_FIL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static VERROU_SUSPENDU_FAIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+    VERROU_SUSPENDU_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
+    VERROU_SUSPENDU_DUREE_MS.store(lis(2, 1000).min(30_000), Ordering::Relaxed);
+    let cible_fil = argc > 3 && argv[3] == "fil";
+    VERROU_SUSPENDU_CIBLE_FIL.store(cible_fil, Ordering::Relaxed);
+    VERROU_SUSPENDU_FAIT.store(false, Ordering::Relaxed);
+    let lance = if cible_fil {
+        match crate::drivers::serial::coeur_du_fil_console() {
+            Some(coeur) => crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur),
+            None => false,
+        }
+    } else {
+        crate::kernel::task::spawn_noyau(fil_verrou_suspendu, "verrou-suspendu")
+    };
+    if !lance {
+        crate::println!("serie-verrou-suspendu : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+fn fil_verrou_suspendu() -> ! {
+    use core::sync::atomic::Ordering;
+    let attente = VERROU_SUSPENDU_ATTENTE_MS.load(Ordering::Relaxed);
+    let duree = VERROU_SUSPENDU_DUREE_MS.load(Ordering::Relaxed);
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    if VERROU_SUSPENDU_CIBLE_FIL.load(Ordering::Relaxed) {
+        // Epingle (`spawn_noyau_epingle`) : le coeur lu ici est celui ou le
+        // verrou sera pris. Le fil `console` y est-il encore en file ?
+        let ici = crate::arch::x86_64::smp::cpu_index();
+        let cible = crate::drivers::serial::coeur_du_fil_console();
+        let a_moi = cible == Some(ici) && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
+        if !a_moi {
+            crate::serial_println!(
+                "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={}",
+                ici, cible.map_or(-1, |c| c as i64)
+            );
+            loop {
+                crate::kernel::task::sleep_ticks(1000);
+            }
+        }
+    }
+    let ici = crate::arch::x86_64::smp::cpu_index();
+    let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);
+    crate::serial_println!(
+        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={}",
+        pris as u8, duree, ici,
+        crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64)
+    );
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
+/// BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : `console-async on|off|etat`, pour l'A/B.
+fn console_async(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => crate::drivers::serial::choisit_console_asynchrone(true),
+            "off" => crate::drivers::serial::choisit_console_asynchrone(false),
+            "etat" => {}
+            // BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : relogement du fil pret sur un
+            // coeur muet (A/B), et banc de la vraie panne -- `gele-fil APRES_MS
+            // DUREE_MS` : le fil cesse de progresser, le chien de garde doit
+            // replier.
+            "secours" => {
+                let oui = !(argc >= 3 && argv[2] == "off");
+                crate::drivers::serial::choisit_secours_fil(oui);
+                crate::serial_println!("CONSOLE_SECOURS {}", if oui { "on" } else { "off" });
+            }
+            "gele-fil" => {
+                let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
+                let (apres, duree) = (lis(2, 1500).min(600_000), lis(3, 6000).min(60_000));
+                crate::drivers::serial::banc_gele_fil_console(apres, duree);
+                crate::serial_println!("CONSOLE_GEL_FIL apres_ms={} duree_ms={}", apres, duree);
+            }
+            // Banc (tools/ci/run_console_panique.sh) : N lignes numerotees
+            // d'un trait, pour qu'une panique les trouve dans l'anneau.
+            "rafale" => {
+                let n = if argc >= 3 { argv[2].parse::<u32>().unwrap_or(200) } else { 200 }.min(100_000);
+                for i in 1..=n {
+                    crate::serial_println!("CONSOLE_RAFALE {}/{} {}", i, n, "=".repeat(48));
+                }
+                return 0;
+            }
+            autre => {
+                crate::println!("console-async : {} inconnu (on | off | etat | rafale N | secours on|off | gele-fil APRES DUREE)", autre);
+                return 1;
+            }
+        }
+    }
+    crate::drivers::serial::journalise_bilan_console();
+    0
+}
+
+fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => { crate::drivers::virtio_gpu::veut_irq(true); }
+            "off" => { crate::drivers::virtio_gpu::veut_irq(false); }
+            autre => {
+                crate::println!("gpu-irq : {} inconnu (on | off)", autre);
+                return 1;
+            }
+        }
+    }
+    let c = crate::drivers::virtio_gpu::compteurs_irq();
+    crate::serial_println!(
+        "GPU_IRQ armee={} voulue={} irq={} irq_sans_progres={} attentes_dormantes={} acheves_en_rotation={} \
+         sommeils={} reveils_sans_progres={} vus_par_relecture={} echues={} cessions={} non_cedables={}",
+        c.armee as u8, c.voulue as u8, c.irq, c.irq_sans_progres, c.attentes_dormantes, c.acheves_en_rotation,
+        c.sommeils, c.reveils_sans_progres, c.vus_par_relecture, c.echues, c.cessions, c.non_cedables
+    );
+    0
+}
+
+fn gpu_trame(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => { crate::drivers::gfx::veut_trame(true); }
+            "off" => { crate::drivers::gfx::veut_trame(false); }
+            autre => {
+                crate::println!("gpu-trame : {} inconnu (on | off)", autre);
+                return 1;
+            }
+        }
+    }
+    let (voulue, trames, regions) = crate::drivers::gfx::compteurs_trame();
+    let (soumises, commandes) = crate::drivers::virtio_gpu::compteurs_trame();
+    crate::serial_println!(
+        "GPU_TRAME voulue={} trames={} regions={} soumises={} commandes={}",
+        if voulue { "on" } else { "off" }, trames, regions, soumises, commandes
+    );
+    0
+}
+
+fn gpu_tampon(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "direct" => { crate::drivers::gfx::veut_tampon_direct(true); }
+            "copie" => { crate::drivers::gfx::veut_tampon_direct(false); }
+            autre => {
+                crate::println!("gpu-tampon : {} inconnu (direct | copie)", autre);
+                return 1;
+            }
+        }
+    }
+    let (voulu, actif, copies, directs, acces) = crate::drivers::gfx::compteurs_tampon();
+    crate::serial_println!(
+        "GPU_TAMPON voulu={} actif={} octets_copies={} octets_directs={} acces_en_transfert={} etat={}",
+        if voulu { "direct" } else { "copie" }, actif as u8, copies, directs, acces,
+        crate::drivers::virtio_gpu::etat_tampon_nom()
+    );
+    0
+}
+
+/// `gui-surface [simple|double] | gui-surface mesure on|off` : le contrat de
+/// surface offert aux PROCHAINS clients (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1)
+/// et l'instrument du banc de dechirure.
+fn gui_surface(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "simple" => { crate::gui::client::offre_surface_double(false); }
+            "double" => { crate::gui::client::offre_surface_double(true); }
+            "mesure" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::gui::client::mesure_dechirure(argv[2] == "on");
+            }
+            autre => {
+                crate::println!("gui-surface : {} inconnu (simple | double | mesure on|off)", autre);
+                return 1;
+            }
+        }
+    }
+    let (double, mesure) = crate::gui::client::politique_surface();
+    crate::serial_println!(
+        "GUI_SURFACE offre={} mesure={}",
+        if double { "double" } else { "simple" }, mesure as u8
+    );
+    0
+}
+
+fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
+    if argc >= 2 {
+        match argv[1] {
+            "on" => { crate::arch::x86_64::smp::veut_reveil_precis(true); }
+            "off" => { crate::arch::x86_64::smp::veut_reveil_precis(false); }
+            // Le mode periodique (TCG) : une experience a part.
+            "periodique" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::arch::x86_64::smp::veut_reveil_precis_periodique(argv[2] == "on");
+            }
+            // Le TSC-deadline sur materiel nu : sans preuve, a part.
+            "materiel" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::arch::x86_64::smp::veut_reveil_precis_materiel(argv[2] == "on");
+            }
+            autre => {
+                crate::println!("reveil-precis : {} inconnu (on | off | periodique on|off | materiel on|off)", autre);
+                return 1;
+            }
+        }
+    }
+    let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
+    let (materiel, hyperviseur) = crate::arch::x86_64::smp::reveil_precis_domaine();
+    // Diagnostic de la queue au repos : cumuls, l'A/B en fait des differences.
+    let d = crate::arch::x86_64::smp::diagnostic_reveil_precis();
+    let tardifs = crate::kernel::task::compteurs_tardifs();
+    let installes = crate::kernel::task::compteurs_reveils_installes();
+    // Emissions serie > 2 ms interruptions masquees : sous KVM, chaque octet
+    // est une sortie vers QEMU ; a SMP1, c'est un retard impose a tout reveil.
+    let serie = crate::drivers::serial::emissions_masquees();
+    let occupe = crate::arch::x86_64::smp::compteurs_reveil_occupe();
+    let attente = crate::kernel::task::compteurs_attente_interactive();
+    let occupants = crate::kernel::task::occupants_attente_interactive();
+    let longues = crate::kernel::task::attentes_longues_classees();
+    let renonces = crate::kernel::task::renonces_battement();
+    // BOUCHAUD_CONSOLE_ASYNCHRONE_V1 : ce que la console impose encore -- le
+    // plus long morceau emis preemption coupee, et les emissions restees
+    // synchrones (interruptions masquees) une fois le fil pret.
+    let console = crate::drivers::serial::compteurs_console();
+    crate::serial_println!(
+        "REVEIL_PRECIS voulu={} minuteur={} armes={} retires_avant_service={} periodique={} materiel={} hyperviseur={} \
+         tirs={} bornes_propres={} ipi_pendant_arme={} armes_dus={} refus_quantum_avant={} \
+         refus_sans_borne={} refus_autres={} tardifs_soi={} tardifs_autre={} tardifs_irq={} tardifs_inactif={} \
+         installes_ipi={} installes_eveilles={} serie_longues={} serie_pire_us={} \
+         armes_occupes={} tirs_anticipes={} avances_occupees={} \
+         attentes_noyau={} attentes_utilisateur={} attente_noyau_pire_us={} attente_utilisateur_pire_us={} \
+         cessions_interactives={} longues_volees={} longues_b0={} longues_b1={} longues_b1_retard={} longues_b2={} \
+         renonce_anticipe={} renonce_file_vide={} renonce_garde={} renonce_rien={} renonce_meme={} \
+         renonce_transition={} renonce_porte={} renonce_differee_appel={} renonce_differee_fil_noyau={} \
+         occupant_noyau={} occupant_utilisateur={} \
+         console_async={} console_morceau_pire_us={} console_ligne_pire_us={} console_synchrones={} console_synchrone_pire_us={}",
+        voulu as u8, mode, armes, retires, crate::arch::x86_64::smp::reveil_precis_periodique() as u8,
+        materiel as u8, hyperviseur as u8,
+        d[0], d[1], d[3], d[4], d[5], d[6], d[7], tardifs[0], tardifs[1], tardifs[2], tardifs[3],
+        installes.0, installes.1, serie.1, serie.0 / 1000, occupe.0, occupe.1, occupe.2,
+        attente[0], attente[1], attente[2] / 1000, attente[3] / 1000, attente[4],
+        longues[0], longues[1], longues[2], longues[3], longues[4],
+        renonces[3], renonces[4], renonces[5], renonces[6], renonces[7],
+        renonces[1], renonces[2], renonces[8], renonces[9],
+        occupants[0], occupants[1],
+        console.active as u8, console.morceau_pire_ns / 1000, console.ligne_pire_ns / 1000,
+        console.synchrones, console.synchrone_pire_ns / 1000,
+    );
+    0
+}
+
+fn ordo_cession(argc: usize, argv: &[&str; 12]) -> i32 {
+    use crate::kernel::scheduler::reveil::{cession_par_classe, choisit_cession_par_classe};
+    if argc >= 2 {
+        match argv[1] {
+            "classe" => choisit_cession_par_classe(true),
+            "historique" => choisit_cession_par_classe(false),
+            autre => {
+                crate::println!("ordo-cession : {} inconnu (classe | historique)", autre);
+                return 1;
+            }
+        }
+    }
+    let (gardees, inversees) = crate::kernel::task::compteurs_cession();
+    crate::serial_println!(
+        "ORDO_CESSION politique={} gardees={} inversees={}",
+        if cession_par_classe() { "classe" } else { "historique" }, gardees, inversees
+    );
+    0
+}
+
+fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
+    use crate::kernel::scheduler::reveil::{choisit_variante, variante, Variante};
+    let mut grace_ms = 0;
+    if argc >= 2 {
+        match argv[1] {
+            "defaut" => choisit_variante(Variante::Defaut),
+            "ipi-interactive" => choisit_variante(Variante::IpiInteractive),
+            autre => {
+                crate::println!("ordo-variante : variante inconnue {} (defaut | ipi-interactive)", autre);
+                return 1;
+            }
+        }
+        // BOUCHAUD_AB_REVEIL_IPI_V3 : DELAI DE GRACE avant le releve. Un
+        // reveil decide sur un autre coeur sous l'ancienne politique (lue
+        // juste avant la bascule) peut compter son IPI apres elle ; le releve
+        // qui suit sert de depart au bras, et ne doit pas l'inclure.
+        grace_ms = 50;
+        let _ = crate::kernel::timer::attente_bornee(grace_ms, || false);
+    }
+    let r = crate::kernel::scheduler::preempt::stats_reveil();
+    let nom = match variante() {
+        Variante::Defaut => "defaut",
+        Variante::IpiInteractive => "ipi-interactive",
+    };
+    crate::serial_println!(
+        "ORDO_VARIANTE reveil={} ipi_variante={} differes={} cibles={} immediats={} ipi={} preempt_noyau={} grace_ms={}",
+        nom, r.ipi_variante, r.differes, r.cibles, r.immediats, r.ipi_envoyes, r.preemptions_noyau, grace_ms
+    );
+    0
+}
+
 fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if argc < 2 { println!("usage: run <script>"); return 1; }
     let fs = ramfs::fs();
@@ -746,6 +1093,70 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "help" => { c::help(); 0 }
         "clear" => { vga::clear(); 0 }
         "desktop" | "gui" => { crate::gui::run(); vga::clear(); 0 }
+        // BOUCHAUD_BANC_PRESENTATION_V1 : BGA contre virtio-gpu, meme charge.
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : `banc-present tache` mesure depuis une
+        // tache noyau (contexte du bureau), ou l'attente peut ceder ou dormir.
+        "banc-present" => {
+            crate::drivers::gfx::banc_presentation(argc >= 2 && argv[1] == "tache");
+            vga::clear();
+            0
+        }
+        // BOUCHAUD_VIRTIO_GPU_IRQ_V1 : attente des reponses virtio-gpu par
+        // interruption (on) ou par scrutation (off), pour l'A/B ; sans
+        // argument, l'etat et les compteurs.
+        "gpu-irq" => gpu_irq(argc, &argv),
+        // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : une trame, une soumission
+        // (on) ou deux commandes par region (off, defaut) ; sans argument,
+        // les compteurs. `banc-trame` : la trame type, chronometree.
+        "gpu-trame" => gpu_trame(argc, &argv),
+        "banc-trame" => {
+            crate::drivers::gfx::banc_trame();
+            vga::clear();
+            0
+        }
+        // BOUCHAUD_REVEIL_PRECIS_V1 : reveil a l'echeance exacte au repos
+        // (on) ou au tick/quantum (off), pour l'A/B ; sans argument, l'etat.
+        "reveil-precis" => reveil_precis(argc, &argv),
+        // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composition directe dans
+        // la memoire du scanout virtio (direct) ou tampon arriere + copie
+        // (copie, defaut), prise au prochain `enter()` ; sans argument, l'etat.
+        "gpu-tampon" => gpu_tampon(argc, &argv),
+        "gui-surface" => gui_surface(argc, &argv),
+        // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : bascule de la variante
+        // experimentale de reveil (desactivee par defaut), pour les bancs A/B.
+        "ordo-variante" => ordo_variante(argc, &argv),
+        // BOUCHAUD_CESSION_PAR_CLASSE_V1 : la cession au quantum par classe
+        // (defaut) ou historique, pour l'A/B ; sans argument, les compteurs.
+        "ordo-cession" => ordo_cession(argc, &argv),
+        "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
+        "console-async" => console_async(argc, &argv),
+        "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
+        // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
+        // octet sur COM1 (le cout du port sous KVM, simule sous TCG).
+        "serie-lente" => {
+            let ns = if argc >= 2 { argv[1].parse::<u64>().unwrap_or(0) } else { 0 };
+            crate::drivers::serial::regle_serie_lente(ns);
+            crate::serial_println!("SERIE_LENTE ns_par_octet={}", ns);
+            0
+        }
+        // BOUCHAUD_COMPTA_INJECTION_V1 (banc C6a) : `compta-injection US
+        // [ancien|correctif]` -- fenetre injectee entre le `hlt` et le
+        // rearmement, ordre d'avant 3adcea3c ou corrige ; `etat` : compteurs.
+        "compta-injection" => {
+            if argc >= 2 && argv[1] != "etat" {
+                let us = argv[1].parse::<u64>().unwrap_or(0);
+                let ancien = argc >= 3 && argv[2] == "ancien";
+                crate::kernel::task::regle_injection_compta(us.saturating_mul(1000), ancien);
+                crate::serial_println!("COMPTA_INJECTION fenetre_us={} ordre={}", us, if ancien { "ancien" } else { "correctif" });
+            }
+            let (fenetres, cessions) = crate::kernel::task::compteurs_injection_compta();
+            let inv = crate::kernel::task::invariants_compta();
+            crate::serial_println!(
+                "COMPTA_INJECTION_ETAT fenetres={} cessions={} chevauchements={} pire_chevauchement_us={} rearmes_deja_armes={}",
+                fenetres, cessions, inv[2], inv[3] / 1000, inv[6],
+            );
+            0
+        }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

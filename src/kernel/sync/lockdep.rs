@@ -5,7 +5,7 @@
 //! per-CPU stack and an inversion becomes an immediate, attributable failure in
 //! debug builds instead of a silent SMP deadlock.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use crate::arch::x86_64::smp;
 
 const MAX_HELD: usize = 16;
@@ -57,6 +57,26 @@ static DEPTH: [AtomicUsize; smp::MAX_CPUS] =
     [const { AtomicUsize::new(0) }; smp::MAX_CPUS];
 static STACK: [[AtomicU32; MAX_HELD]; smp::MAX_CPUS] =
     [const { [const { AtomicU32::new(0) }; MAX_HELD] }; smp::MAX_CPUS];
+/// BOUCHAUD_LOCKDEP_DETENTEUR_V1 -- le site source qui a PRIS chaque
+/// emplacement (`#[track_caller]` remonte jusqu'a l'appelant de
+/// `RankedSpinLock::lock`). Soak 38217842305 : une panique « inversion » a
+/// l'ouverture d'une transition d'ordonnanceur ne disait que le rang tenu,
+/// pas qui le tenait ; c'est pourtant la seule information qui departage un
+/// sommeil sous verrou d'une profondeur qui fuit. Un pointeur par prise.
+static SITE: [[AtomicPtr<core::panic::Location<'static>>; MAX_HELD]; smp::MAX_CPUS] =
+    [const { [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_HELD] }; smp::MAX_CPUS];
+
+/// Le site qui a pris l'emplacement `index` du coeur `c`, s'il est connu.
+fn site_tenu(c: usize, index: usize) -> (&'static str, u32) {
+    let p = SITE[c][index.min(MAX_HELD - 1)].load(Ordering::Acquire);
+    if p.is_null() {
+        return ("?", 0);
+    }
+    // SAFETY: `p` vient toujours de `Location::caller()`, une reference
+    // `'static` ; elle n'est jamais liberee ni ecrite.
+    let site = unsafe { &*p };
+    (site.file(), site.line())
+}
 /// Instant de prise, par emplacement de pile. Sert a la duree de DETENTION.
 static DEBUT_DETENTION_NS: [[AtomicU64; MAX_HELD]; smp::MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; MAX_HELD] }; smp::MAX_CPUS];
@@ -158,18 +178,25 @@ pub fn before_acquire(class: LockClass) {
     if previous >= class.rank() {
         VIOLATIONS.fetch_add(1, Ordering::Relaxed);
         #[cfg(debug_assertions)]
-        panic!(
-            "LOCKDEP inversion cpu={} held_rank={} acquiring={}({}) at {}:{}",
-            c,
-            previous,
-            class.name(),
-            class.rank(),
-            core::panic::Location::caller().file(),
-            core::panic::Location::caller().line(),
-        );
+        {
+            let (fichier_tenu, ligne_tenue) = site_tenu(c, depth.min(MAX_HELD) - 1);
+            panic!(
+                "LOCKDEP inversion cpu={} held_rank={} held_at={}:{} depth={} acquiring={}({}) at {}:{}",
+                c,
+                previous,
+                fichier_tenu,
+                ligne_tenue,
+                depth,
+                class.name(),
+                class.rank(),
+                core::panic::Location::caller().file(),
+                core::panic::Location::caller().line(),
+            );
+        }
     }
 }
 
+#[track_caller]
 pub fn acquired(class: LockClass) {
     let c = cpu();
     let depth = DEPTH[c].load(Ordering::Relaxed);
@@ -186,6 +213,10 @@ pub fn acquired(class: LockClass) {
         ATTENTE_MAX_NS.fetch_max(maintenant.saturating_sub(debut_attente), Ordering::Relaxed);
     }
     STACK[c][depth].store(class.rank() as u32, Ordering::Release);
+    SITE[c][depth].store(
+        core::panic::Location::caller() as *const _ as *mut core::panic::Location<'static>,
+        Ordering::Release,
+    );
     DEBUT_DETENTION_NS[c][depth].store(maintenant, Ordering::Release);
     IRQ_MASQUEES[c][depth].store(!interruptions_actives() as u32, Ordering::Release);
     DEPTH[c].store(depth + 1, Ordering::Release);

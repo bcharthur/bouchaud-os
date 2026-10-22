@@ -7,6 +7,43 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+
+// Product M1 : historique de navigation par fenetre, borne a 32 entrees.
+// Les inodes anciens sont revalides avant chaque navigation.
+pub(crate) struct History {
+    previous: Vec<usize>,
+    following: Vec<usize>,
+}
+impl History {
+    pub(crate) fn new() -> Self { Self { previous: Vec::new(), following: Vec::new() } }
+    pub(crate) fn visit(&mut self, current: usize, destination: usize) {
+        if current == destination { return; }
+        if self.previous.len() >= 32 { self.previous.remove(0); }
+        self.previous.push(current);
+        self.following.clear();
+    }
+    pub(crate) fn back(&mut self, current: usize, valid: impl Fn(usize) -> bool) -> Option<usize> {
+        while let Some(node) = self.previous.pop() {
+            if valid(node) {
+                if self.following.len() >= 32 { self.following.remove(0); }
+                self.following.push(current);
+                return Some(node);
+            }
+        }
+        None
+    }
+    pub(crate) fn forward(&mut self, current: usize, valid: impl Fn(usize) -> bool) -> Option<usize> {
+        while let Some(node) = self.following.pop() {
+            if valid(node) {
+                if self.previous.len() >= 32 { self.previous.remove(0); }
+                self.previous.push(current);
+                return Some(node);
+            }
+        }
+        None
+    }
+}
+
 pub(crate) const TOOLBAR_H: usize = 32;
 pub(crate) const STATUS_H:  usize = 24;
 pub(crate) const ICON_COL_W: usize = 96;

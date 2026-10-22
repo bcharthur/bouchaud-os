@@ -76,6 +76,8 @@ static REVEILS_CIBLES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_DIFFERES: AtomicU64 = AtomicU64::new(0);
 static REVEILS_EN_FILE: AtomicU64 = AtomicU64::new(0);
 static IPI_REVEIL_ENVOYES: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : IPI envoyes par la variante.
+static REVEILS_IPI_VARIANTE: AtomicU64 = AtomicU64::new(0);
 static PREEMPTIONS_NOYAU_ACCORDEES: AtomicU64 = AtomicU64::new(0);
 static PREEMPTIONS_NOYAU_REFUSEES: AtomicU64 = AtomicU64::new(0);
 static PLACEMENTS_DEPLACES: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +93,8 @@ pub struct StatsReveil {
     pub preemptions_noyau: u64,
     pub preemptions_noyau_refusees: u64,
     pub placements_deplaces: u64,
+    /// IPI envoyes par la variante experimentale (zero sous `Defaut`).
+    pub ipi_variante: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -218,6 +222,39 @@ pub fn preemption_noyau_sure() -> bool {
         && contexte_noyau(false).map_or(false, |c| crate::kernel::preemption_noyau::contexte_sur(&c))
 }
 
+/// BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1
+///
+/// Un pilote qui ATTEND, dans son fil et hors de tout gestionnaire, peut-il
+/// ceder ce coeur ou s'y endormir maintenant ?
+///
+/// Les memes interdits que la preemption d'un fil noyau (`contexte_sur`) --
+/// aucun verrou tournant tenu, simple ou classe, aucun `preempt_count`, aucune
+/// lecture du registre, aucun shootdown en vol, pas de sortie en cours -- mais
+/// interruptions OUVERTES et aucune IRQ en cours : c'est le fil qui cede, pas
+/// une interruption qui le coupe. Ceder en tenant un `SpinLock` livrerait le
+/// coeur a une tache qui pourrait tourner dessus pendant que son porteur,
+/// pret, attend ce meme coeur.
+pub fn cession_volontaire_sure() -> bool {
+    if !crate::kernel::task::in_user_task() {
+        return false;
+    }
+    let Some(id) = local_id() else { return false; };
+    let Some(c) = contexte_noyau(false) else { return false; };
+    c.interruptions_ouvertes
+        && cpu_local::local(id).irq_depth() == 0
+        && crate::kernel::preemption_noyau::contexte_sur(&crate::kernel::preemption_noyau::Contexte {
+            interruptions_ouvertes: false,
+            ..c
+        })
+}
+
+/// Pourquoi `cession_volontaire_sure` refuse : le contexte lu et la
+/// profondeur d'IRQ (diagnostic, une ligne par refus journalise).
+pub fn contexte_cession() -> Option<(crate::kernel::preemption_noyau::Contexte, u32)> {
+    let id = local_id()?;
+    Some((contexte_noyau(false)?, cpu_local::local(id).irq_depth() as u32))
+}
+
 /// Ce que la decision pure lit de ce coeur, maintenant.
 fn contexte_noyau(demande_ciblee: bool) -> Option<crate::kernel::preemption_noyau::Contexte> {
     let id = local_id()?;
@@ -290,6 +327,7 @@ pub fn note_reveil_cible() { REVEILS_CIBLES.fetch_add(1, Ordering::Relaxed); }
 pub fn note_reveil_differe() { REVEILS_DIFFERES.fetch_add(1, Ordering::Relaxed); }
 pub fn note_reveil_en_file() { REVEILS_EN_FILE.fetch_add(1, Ordering::Relaxed); }
 pub fn note_ipi_reveil() { IPI_REVEIL_ENVOYES.fetch_add(1, Ordering::Relaxed); }
+pub fn note_reveil_ipi_variante() { REVEILS_IPI_VARIANTE.fetch_add(1, Ordering::Relaxed); }
 pub fn note_placement_deplace() { PLACEMENTS_DEPLACES.fetch_add(1, Ordering::Relaxed); }
 
 pub fn stats_reveil() -> StatsReveil {
@@ -302,6 +340,7 @@ pub fn stats_reveil() -> StatsReveil {
         preemptions_noyau: PREEMPTIONS_NOYAU_ACCORDEES.load(Ordering::Relaxed),
         preemptions_noyau_refusees: PREEMPTIONS_NOYAU_REFUSEES.load(Ordering::Relaxed),
         placements_deplaces: PLACEMENTS_DEPLACES.load(Ordering::Relaxed),
+        ipi_variante: REVEILS_IPI_VARIANTE.load(Ordering::Relaxed),
     }
 }
 
@@ -353,6 +392,12 @@ pub fn safe_point() -> bool {
     }
     if requested != 0 {
         MAX_ATTENTE_NS.fetch_max(maintenant.saturating_sub(requested), Ordering::Relaxed);
+    }
+    // BOUCHAUD_CESSION_PAR_CLASSE_V1 : la meme regle qu'au quantum. La
+    // demande vient d'etre effacee : une interactive publiee APRES la lecture
+    // de la file la reposera (`publish_ready` met en file puis demande).
+    if crate::kernel::task::courante_garde_le_coeur_local() {
+        return false;
     }
     let switched = crate::kernel::task::schedule();
     if switched { SWITCHES.fetch_add(1, Ordering::Relaxed); }

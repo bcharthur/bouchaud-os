@@ -98,7 +98,7 @@ echo "journal serie : $(wc -c < "$LOG") octets"
 
 if grep -aiEq '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|panicked at' "$LOG"; then
     echo "panic/faute pendant le transport Bulk" >&2
-    grep -aiE 'PANIC|DOUBLE FAULT|panicked at' "$LOG" | head -5 >&2
+    grep -aiE 'PANIC|DOUBLE FAULT|panicked at' "$LOG" | awk 'NR<=5' >&2
     exit 1
 fi
 

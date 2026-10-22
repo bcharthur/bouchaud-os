@@ -43,7 +43,15 @@ set -e
 cat health.log
 printf 'qemu exit=%s\n' "$code"
 test "$code" -eq 33
-! grep -qi "panic" health.log
+# BOUCHAUD_PIPEFAIL_SANS_SIGPIPE_V1 : `! grep ...` seul sur sa ligne ne
+# declenche jamais `set -e` (bash l'exclut) : cette verification etait inerte.
+# Les marqueurs exacts d'une panique, pas « panic » insensible a la casse, qui
+# prendrait « aucune panique » pour une panique.
+if grep -aqE 'KERNEL PANIC|panicked at' health.log; then
+  echo "panique noyau dans health.log" >&2
+  grep -aE 'KERNEL PANIC|panicked at' health.log >&2 || true
+  exit 1
+fi
 grep -F "=== AUTORUN FIN === statut=0" health.log
 grep -F "HEALTH_COMPLETE" health.log
 python3 tools/health/verify_health.py --log health.log --report health-report.json

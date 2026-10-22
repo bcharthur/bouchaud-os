@@ -1011,56 +1011,53 @@ pub fn log_fault_mapping(adresse: u64) {
         return;
     }
 
+    // BOUCHAUD_FAUTE_CR2_A_L_ENTREE_V1 : le releve se fait SOUS le verrou de
+    // l'espace d'adressage, la publication APRES l'avoir rendu -- `dmesg`
+    // (journal serie, lu par les bancs) n'est pas pris sous `mm`. La ligne
+    // allait auparavant a la seule console VGA : invisible des bancs.
     let process = current_process();
-    let mut p = process.mm.lock();
+    let pid = process.pid;
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
-    let present = p.space.translate(page).is_some();
-    let writable = p.space.writable(page);
+    let (present, writable, region, voisines, nb_vmas) = {
+        let mut p = process.mm.lock();
+        let present = p.space.translate(page).is_some();
+        let writable = p.space.writable(page);
+        let region = crate::kernel::vma::trouve(&p.promesses, page)
+            .map(|r| (r.debut, r.fin, r.backing.label(), r.drapeaux));
+        let voisines = if region.is_none() {
+            let (avant, apres) = crate::kernel::vma::voisines(&p.promesses, page);
+            (
+                avant.map(|r| (r.debut, r.fin, r.backing.label(), r.drapeaux)),
+                apres.map(|r| (r.debut, r.fin, r.backing.label(), r.drapeaux)),
+            )
+        } else {
+            (None, None)
+        };
+        (present, writable, region, voisines, p.promesses.len())
+    };
+    let nom = process.metadata.lock().name.clone();
 
-    if let Some(region) = crate::kernel::vma::trouve(&p.promesses, page) {
-        crate::println!(
+    if let Some((debut, fin, backing, drapeaux)) = region {
+        crate::kernel::dmesg::log_fmt(format_args!(
             "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} vma={:#x}..{:#x} backing={} flags={:#x} present={} writable={}",
-            process.pid,
-            process.metadata.lock().name,
-            adresse,
-            page,
-            region.debut,
-            region.fin,
-            region.backing.label(),
-            region.drapeaux,
-            present,
-            writable
-        );
+            pid, nom, adresse, page, debut, fin, backing, drapeaux, present, writable
+        ));
     } else {
-        let (avant, apres) =
-            crate::kernel::vma::voisines(&p.promesses, page);
-        crate::println!(
+        crate::kernel::dmesg::log_fmt(format_args!(
             "[memfabric] FAULT_FATAL pid={} app={} addr={:#x} page={:#x} AUCUNE_VMA vmas={} present={} writable={}",
-            process.pid,
-            process.metadata.lock().name,
-            adresse,
-            page,
-            p.promesses.len(),
-            present,
-            writable
-        );
-        if let Some(region) = avant {
-            crate::println!(
+            pid, nom, adresse, page, nb_vmas, present, writable
+        ));
+        if let Some((debut, fin, backing, drapeaux)) = voisines.0 {
+            crate::kernel::dmesg::log_fmt(format_args!(
                 "[memfabric] vma precedente {:#x}..{:#x} backing={} flags={:#x}",
-                region.debut,
-                region.fin,
-                region.backing.label(),
-                region.drapeaux
-            );
+                debut, fin, backing, drapeaux
+            ));
         }
-        if let Some(region) = apres {
-            crate::println!(
+        if let Some((debut, fin, backing, drapeaux)) = voisines.1 {
+            crate::kernel::dmesg::log_fmt(format_args!(
                 "[memfabric] vma suivante {:#x}..{:#x} backing={} flags={:#x}",
-                region.debut,
-                region.fin,
-                region.backing.label(),
-                region.drapeaux
-            );
+                debut, fin, backing, drapeaux
+            ));
         }
     }
 }

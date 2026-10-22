@@ -62,6 +62,34 @@ pub fn run_if_present() {
     let status = crate::shell::run_batch(&script);
 
     crate::println!("{} statut={}", END, status);
+    // BOUCHAUD_SERIE_ECRITURE_ATOMIQUE_V1 : les lignes emises SANS le jeton
+    // (attente a la borne) ou en reentrance sont des lignes possiblement
+    // entrelacees. Chaque banc peut les compter ; attendu : 0 et 0.
+    // BOUCHAUD_SERIE_DUREE_MASQUEE_V1 : et la plus longue ligne emise
+    // interruptions masquees -- un retard impose a toute tache prete.
+    let (pire_ns, longues) = crate::drivers::serial::emissions_masquees();
+    // BOUCHAUD_SERIE_ATTENTE_PROGRES_V1 : pourquoi chaque emission a la
+    // borne a renonce, la pire attente d'un appelant interruptible, et les
+    // echeances renouvelees parce que d'autres emettaient.
+    let (masquees, sans_progres, plafond, relances, attente_pire_ns, renouvelees) =
+        crate::drivers::serial::renonces();
+    // BOUCHAUD_SERIE_JAMAIS_SANS_JETON_V1 : les lignes differees sortent
+    // AVANT le bilan, qui dit combien l'ont ete, combien ont ete perdues
+    // (anneau plein) et combien sont sorties.
+    crate::drivers::serial::vidange_differees();
+    let (differees, perdues, vidangees) = crate::drivers::serial::lignes_differees();
+    crate::serial_println!(
+        "BOUCHAUD_SERIE_BILAN emissions_a_la_borne={} emissions_reentrees={} emission_masquee_pire_us={} emissions_masquees_plus_de_2ms={} \
+         renonces_masquees={} renonces_sans_progres={} renonces_plafond={} renonces_relances={} attente_pire_ms={} echeances_renouvelees={} \
+         lignes_differees={} lignes_perdues={} lignes_vidangees={}",
+        crate::drivers::serial::emissions_a_la_borne(),
+        crate::drivers::serial::emissions_reentrees(),
+        pire_ns / 1000,
+        longues,
+        masquees, sans_progres, plafond, relances, attente_pire_ns / 1_000_000, renouvelees,
+        differees, perdues, vidangees,
+    );
+    crate::drivers::serial::journalise_bilan_console();
     vga::set_serial_mirror(false);
 
     // LE SUSPECT PRINCIPAL de l'arret du run #347 : quand le script autorun

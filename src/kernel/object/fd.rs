@@ -295,6 +295,23 @@ pub struct Canal {
 /// bien apres que le producteur ait pris trop d'avance.
 pub const CAPACITE_CANAL: usize = 64 * 1024;
 
+/// Taille jusqu'a laquelle une ecriture dans un tube ou un canal est ATOMIQUE
+/// (POSIX `PIPE_BUF`, valeur de Linux) : ses octets ne sont jamais coupes ni
+/// melanges a ceux d'un autre ecrivain. BOUCHAUD_TUBE_ATOMIQUE_V1.
+pub const PIPE_BUF: usize = 4096;
+
+/// Ecrit `data` dans un tampon de canal de `place` octets libres, avec la
+/// regle d'atomicite : jusqu'a [`PIPE_BUF`] octets, tout ou rien (`0` = rien
+/// d'ecrit, attendre) ; au-dela, autant que la place le permet. Pure : rend
+/// le nombre d'octets a ecrire.
+pub fn octets_admis(place: usize, longueur: usize) -> usize {
+    if longueur <= PIPE_BUF {
+        if place >= longueur { longueur } else { 0 }
+    } else {
+        place.min(longueur)
+    }
+}
+
 /// Queue de changement de readiness des objets FD.
 ///
 /// La generation ferme le lost-wakeup entre le scan final de `poll` et le
@@ -323,6 +340,31 @@ pub fn wait_readiness(ticket: WaitTicket, deadline_ns: Option<u64>) {
 
 pub fn notify_readiness() {
     READINESS.wake_all();
+}
+
+/// Ferme des descripteurs retires d'une table, puis reveille les attentes de
+/// disponibilite (BOUCHAUD_EOF_HORS_CLOSE_V1).
+///
+/// `FdKind::release` decremente les extremites d'un tube ou d'un canal sans
+/// reveiller personne : un lecteur bloque sur un tube vide n'apprend la fin de
+/// fichier (ni un ecrivain bloque EPIPE) que par `notify_readiness`. `close()`
+/// l'appelait ; `execve` (FD_CLOEXEC, le motif de `posix_spawn`), `dup2` /
+/// `dup3` sur un numero ouvert et la mort d'un orphelin (aucun SIGCHLD) ne le
+/// faisaient pas. Le lecteur attendait la mort de l'ecrivain ou un evenement
+/// sans rapport -- eof-fermeture-probe, TCG SMP4 : 12 cas sur 18, fin de
+/// fichier a 3,2 s (mort du fils) ou 5 s (alarme) au lieu de 0,15 s.
+///
+/// Jamais sous le verrou de la table (rang `FdTable`) : le reveil prend la
+/// table des taches, de rang inferieur.
+pub fn ferme_hors_verrou(fermes: impl IntoIterator<Item = FileDesc>) {
+    let mut aucun = true;
+    for desc in fermes {
+        aucun = false;
+        drop(desc);
+    }
+    if !aucun {
+        notify_readiness();
+    }
 }
 
 impl Canal {
@@ -437,12 +479,14 @@ impl FdTable {
         self.insert_at_least(desc, 0)
     }
 
-    /// Force un descripteur a un numero precis (`dup2`).
-    pub fn set(&mut self, fd: usize, desc: FileDesc) {
+    /// Force un descripteur a un numero precis (`dup2`) et rend celui qu'il
+    /// remplace, a fermer par [`ferme_hors_verrou`].
+    #[must_use = "l'ancien descripteur se ferme hors du verrou de la table (ferme_hors_verrou)"]
+    pub fn set(&mut self, fd: usize, desc: FileDesc) -> Option<FileDesc> {
         while self.entries.len() <= fd {
             self.entries.push(None);
         }
-        self.entries[fd] = Some(desc);
+        self.entries[fd].replace(desc)
     }
 
     /// Descripteur en lecture seule.
@@ -491,21 +535,26 @@ impl FdTable {
     }
 
     /// Retire TOUS les descripteurs, pour qu'ils soient fermes par
-    /// l'appelant -- hors du verrou de la table : la fermeture d'un tube
-    /// reveille ses lecteurs, et ne doit rien faire sous ce verrou.
+    /// l'appelant -- hors du verrou de la table ([`ferme_hors_verrou`]) : la
+    /// fermeture d'un tube reveille ses lecteurs, et ne doit rien faire sous
+    /// ce verrou.
     ///
     /// BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : appele a la mort du processus.
     pub fn prend_tout(&mut self) -> Vec<Option<FileDesc>> {
         core::mem::take(&mut self.entries)
     }
 
-    /// Ferme les descripteurs marques `FD_CLOEXEC` (appele par `execve`).
-    pub fn close_on_exec(&mut self) {
+    /// Retire les descripteurs marques `FD_CLOEXEC` (appele par `execve`),
+    /// a fermer par [`ferme_hors_verrou`].
+    #[must_use = "les descripteurs retires se ferment hors du verrou de la table (ferme_hors_verrou)"]
+    pub fn close_on_exec(&mut self) -> Vec<FileDesc> {
+        let mut retires = Vec::new();
         for slot in self.entries.iter_mut() {
             if slot.as_ref().map_or(false, |desc| desc.cloexec) {
-                *slot = None;
+                retires.extend(slot.take());
             }
         }
+        retires
     }
 }
 
@@ -522,6 +571,17 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     if path == "/proc/self/stat" {
         let pid = crate::kernel::task::current_process().pid;
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
+    }
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
+    // appelant depuis la lecture precedente, decompose, et le pire ecart
+    // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
+    if path == "/proc/self/reveil" {
+        return Some(FdKind::Instantane(Arc::new(proc_reveil())));
+    }
+    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
+    // chaque reveil par la sonde (jamais remis a zero).
+    if path == "/proc/self/fil" {
+        return Some(FdKind::Instantane(Arc::new(proc_fil())));
     }
     if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
@@ -562,17 +622,177 @@ fn proc_pid_stat_depuis_chemin(path: &str) -> Option<u32> {
     pid.parse::<u32>().ok()
 }
 
+fn proc_reveil() -> Vec<u8> {
+    use alloc::format;
+    let r = crate::kernel::task::current().attribution_reveil.releve();
+    let t = crate::kernel::attribution_reveil::releve_tics();
+    let m = crate::kernel::attribution_reveil::releve_masquage();
+    // Le nom est resolu ICI, hors interruption : le balayage n'a garde que
+    // pid et tid.
+    let par = match crate::kernel::attribution_reveil::depaquete_par(r.par) {
+        None => alloc::string::String::from("-"),
+        Some((pid, tid, noyau, en_irq)) => {
+            let nom = crate::kernel::task::proc_processus_cumul(pid as u32)
+                .map(|c| c.nom.rsplit('/').next().unwrap_or("").replace(' ', "_"))
+                .unwrap_or_else(|| alloc::string::String::from("?"));
+            format!("{}:pid={}:tid={}:noyau={}:irq={}", nom, pid, tid, noyau as u8, en_irq as u8)
+        }
+    };
+    let us = |ns: u64| ns / 1000;
+    let cyc_us = |c: u64| match crate::kernel::timer::cycles_par_ms() {
+        0 => 0,
+        par_ms => c.saturating_mul(1000) / par_ms,
+    };
+    let site = |s: u64| -> alloc::string::String {
+        use crate::kernel::attribution_reveil::SITE_VECTEUR;
+        if s == 0 {
+            alloc::string::String::from("-")
+        } else if s & SITE_VECTEUR != 0 {
+            format!("irq:{:#x}", s & 0xff)
+        } else {
+            // SAFETY : `s` vient d'un `&'static Location` (SpinLockIrq).
+            let l = unsafe { &*(s as usize as *const core::panic::Location<'static>) };
+            format!("{}:{}", l.file(), l.line())
+        }
+    };
+    let ligne1 = format!(
+        "reveils={} pire_total_us={} tardif_us={} attente_us={} reprise_us={} dormi_ms={} tics_vus={} \
+         sans_balayage={} cpu={} a_ms={} tardifs_gt_5ms={} attentes_gt_1ms={} sommeils_tics_manquants={} \
+         tic_ecart_pire_us={} tic_rip={:#x} tic_ring3={} tic_cpu={} tic_a_ms={} tic_ecarts_gt_2ms={} \
+         masque_avant_ecart_us={} masque_avant_ecart_site={} masque_pire_us={} masque_pire_site={} masques_gt_1ms={} \
+         reveille_par={} reprise_commutation_us={} reprise_passation_us={} reprise_retour_us={}\n",
+        r.reveils, us(r.pire.total_ns), us(r.pire.tardif_ns), us(r.pire.attente_ns), us(r.pire.reprise_ns),
+        r.pire.dormi_ms, r.pire.tics_vus, r.pire.sans_balayage as u8, r.cpu, r.a_ns / 1_000_000,
+        r.tardifs_signales, r.attentes_signalees, r.sommeils_tics_manquants,
+        us(t.pire_ns), t.rip, t.ring3 as u8, t.cpu, t.a_ns / 1_000_000, t.signales,
+        cyc_us(m.avant_ecart_cyc), site(m.avant_ecart_site), cyc_us(m.pire_cyc), site(m.pire_site), m.signalees,
+        par, us(r.pire.commutation_ns), us(r.pire.passation_ns), us(r.pire.retour_ns),
+    );
+    // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : seconde ligne, la ventilation des
+    // reveils en retard de plus d'une milliseconde depuis le releve precedent
+    // (`n:somme_us:pire_us` par part, n = reveils dont la part depassait le
+    // seuil). BOUCHAUD_PREUVE_HOTE_V1 : « externe » = prouve par l'hote ;
+    // les parts ni masquees ni prouvees sont « inexpliquees ».
+    let v = crate::kernel::task::current().ventilation_reveil.releve();
+    let (externes, masquees, inexpliquees) = crate::kernel::attribution_reveil::absences_comptees();
+    let part = |c: crate::kernel::attribution_reveil::ReleveCompteur| format!("{}:{}:{}", c.n, us(c.somme_ns), us(c.pire_ns));
+    let ligne2 = format!(
+        "ventilation seuil_us={} preuve_hote={} ventiles={} contamines={} inexpliques={} incompletes={} \
+         livraison_externe={} livraison_masquee={} livraison_inexpliquee={} detection={} election={} \
+         election_externe={} election_inexpliquee={} reprise={} reprise_externe={} reprise_inexpliquee={} \
+         absences_externes_boot={} absences_masquees_boot={} absences_inexpliquees_boot={}\n",
+        crate::kernel::attribution_reveil::SEUIL_CONTAMINATION_NS / 1000,
+        preuve_hote(),
+        v.ventiles, v.contamines, v.inexpliques, v.incompletes,
+        part(v.livraison_externe), part(v.livraison_masquee), part(v.livraison_inexpliquee),
+        part(v.detection), part(v.election), part(v.election_externe), part(v.election_inexpliquee),
+        part(v.reprise), part(v.reprise_externe), part(v.reprise_inexpliquee),
+        externes, masquees, inexpliquees,
+    );
+    let mut sortie = ligne1.into_bytes();
+    sortie.extend_from_slice(ligne2.as_bytes());
+    sortie
+}
+
+/// `kvm-steal` si l'hyperviseur publie le vol d'au moins un coeur, sinon
+/// `absente` (TCG, materiel nu) : aucune absence n'y est prouvee externe.
+fn preuve_hote() -> &'static str {
+    if crate::kernel::vol_hote::disponible() { "kvm-steal" } else { "absente" }
+}
+
+/// BOUCHAUD_PREUVE_HOTE_V1 : les cumuls du fil appelant
+/// (`attribution_reveil::ComptesFil`) et le vol cumule de tous les coeurs ;
+/// puis, depuis l'ouverture precedente, les sommeils que l'enregistreur a
+/// ranges pour ce fil (`sommeils n=K perdus=L`, puis K lignes `echeance_us
+/// entree_us externe_ns inexplique_ns masque_ns pret_ns`) et les absences de
+/// son coeur closes pendant qu'il le tenait (`absences n=A incomplet=0|1`,
+/// puis A lignes `fin_us E|M|I part_ns`). L'ouverture REARME l'enregistreur :
+/// la sonde ouvre avant sa serie, puis apres.
+fn proc_fil() -> Vec<u8> {
+    use crate::kernel::attribution_reveil::{Cause, ENREGISTREUR};
+    use alloc::format;
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let tache = crate::kernel::task::indice_courant();
+    let f = crate::kernel::task::current().comptes_fil.cumuls();
+    let (vol_total, coeurs) = crate::kernel::vol_hote::vole_total_ns();
+    let mut sommeils = alloc::string::String::new();
+    let mut n = 0usize;
+    let perdus = ENREGISTREUR.lis(tache, |s| {
+        n += 1;
+        sommeils.push_str(&format!(
+            "{} {} {} {} {} {}\n",
+            s.echeance_ns / 1000, s.entree_ns / 1000, s.comptes.externe_ns, s.comptes.inexplique_ns,
+            s.comptes.masque_ns, s.comptes.pret_ns
+        ));
+    });
+    // Les absences closes pendant que le fil tenait son coeur, rangees par
+    // le gestionnaire de battement depuis l'armement.
+    let mut absences = alloc::string::String::new();
+    let mut na = 0usize;
+    let incomplet = ENREGISTREUR.lis_absences(tache, |a| {
+        let cause = match a.cause {
+            Cause::Externe => 'E',
+            Cause::Masquee => 'M',
+            Cause::Inexpliquee => 'I',
+        };
+        absences.push_str(&format!("{} {} {}\n", a.fin_ns / 1000, cause, a.part_ns));
+        na += 1;
+    });
+    ENREGISTREUR.arme(tache, maintenant);
+    let mut sortie = format!(
+        "fil preuve_hote={} externe_ns={} inexplique_ns={} masque_ns={} pret_ns={} incompletes={} \
+         vol_total_ns={} vol_coeurs={} a_ns={}\nsommeils n={} perdus={}\n",
+        preuve_hote(), f.externe_ns, f.inexplique_ns, f.masque_ns, f.pret_ns, f.incompletes,
+        vol_total, coeurs, maintenant, n, perdus,
+    );
+    sortie.push_str(&sommeils);
+    sortie.push_str(&format!("absences n={} incomplet={}\n", na, incomplet as u8));
+    sortie.push_str(&absences);
+    sortie.into_bytes()
+}
+
 fn proc_stat_global() -> Vec<u8> {
     use alloc::format;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    // BOUCHAUD_PROC_STAT_PUBLICATION_MONOTONE_V1
+    // Deux open("/proc/stat") concurrents peuvent calculer puis publier
+    // leurs instantanes dans des ordres differents (KVM 38778345917 :
+    // utime 1337 -> 1336). Chaque champ cumulatif doit etre linearise.
+    // Les valeurs brutes et leurs anomalies restent diagnostiquees par
+    // proc_cpu_cumul() / PROC_STAT_RECUL, sans etre remplacees ici en interne.
+    static USER_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static SYSTEM_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static IDLE_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
+    static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
+
     let c = crate::kernel::task::proc_cpu_cumul();
+    let user_avant = USER_PUBLIE_NS.fetch_max(c.user_ns, Ordering::AcqRel);
+    let system_avant = SYSTEM_PUBLIE_NS.fetch_max(c.system_ns, Ordering::AcqRel);
+    let idle_avant = IDLE_PUBLIE_NS.fetch_max(c.idle_ns, Ordering::AcqRel);
+    let user_ns = user_avant.max(c.user_ns);
+    let system_ns = system_avant.max(c.system_ns);
+    let idle_ns = idle_avant.max(c.idle_ns);
+    if user_ns != c.user_ns || system_ns != c.system_ns || idle_ns != c.idle_ns {
+        let corrections = CORRECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Les premieres preuves sont conservees ; pas de log a chaque
+        // lecture de /proc/stat en regime soutenu.
+        if corrections <= 8 {
+            crate::serial_println!(
+                "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
+                corrections, c.user_ns, user_ns, c.system_ns, system_ns,
+                c.idle_ns, idle_ns,
+            );
+        }
+    }
     // Format Linux : user nice system idle iowait irq softirq steal guest guest_nice.
     // Ladybird ne somme que user/system/idle/irq/softirq. Les categories que
     // Bouchaud ne distingue pas sont zero, pas inventees.
     format!(
         "cpu  {} 0 {} {} 0 0 0 0 0 0\n",
-        proc_ticks(c.user_ns),
-        proc_ticks(c.system_ns),
-        proc_ticks(c.idle_ns),
+        proc_ticks(user_ns),
+        proc_ticks(system_ns),
+        proc_ticks(idle_ns),
     ).into_bytes()
 }
 

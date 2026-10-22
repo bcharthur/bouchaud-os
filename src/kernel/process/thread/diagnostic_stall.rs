@@ -557,8 +557,23 @@ pub fn stall_probe_from_timer() {
     // L'EVALUATION, elle, reste a la seconde : `bloque` se detecte avec la
     // meme latence qu'avant. C'est l'IMPRESSION qui change, pas la vigilance.
     let demande = RAISON_DUMP.swap(RaisonDump::Aucune as u8, Ordering::AcqRel);
-    let complet = bloque || demande != RaisonDump::Aucune as u8;
     let periode_resume = 30 * crate::kernel::timer::TICKS_PER_SECOND;
+    // M12: un dump de dizaines de lignes par pic HID aggrav(gr)ait les
+    // latences sous QEMU TCG. On garde les compteurs et la premiere preuve,
+    // puis au plus un dump par 30 secondes. Les fautes critiques sont intactes.
+    let est_hid = demande == RaisonDump::LatenceHid as u8;
+    let quota_hid = if est_hid {
+        M12_HID_DEMANDES.fetch_add(1, Ordering::Relaxed);
+        let avant = M12_HID_DERNIER_TICK.load(Ordering::Relaxed);
+        if avant == 0 || now.saturating_sub(avant) >= periode_resume {
+            M12_HID_DERNIER_TICK.store(now, Ordering::Relaxed);
+            true
+        } else {
+            M12_HID_QUOTAS.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    } else { true };
+    let complet = bloque || (demande != RaisonDump::Aucune as u8 && quota_hid);
     if !complet && now % periode_resume != 0 {
         return;
     }
@@ -640,7 +655,14 @@ fn fil_diagnostic() -> ! {
 /// Sert ce que les interruptions ont capture : rapports de la veille
 /// d'attente vive, releve demande par la sonde. Depuis une tache.
 pub fn sert_diagnostic() {
-    publie_rapports_veille();
+    // BOUCHAUD_POINT_COOPERATIF_V1 : un releve complet emet des dizaines de
+    // lignes ; le fil cede le coeur entre ses sections (jamais sous une
+    // lecture du registre : `point_cooperatif` le refuse).
+    let mut depuis = crate::kernel::timer::monotonic_ns();
+    // BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 : un point entre deux rapports (29,7 ms
+    // d'un seul segment sous KVM SMP1, run 39479633757).
+    publie_rapports_veille_avec(&mut || { point_cooperatif(&mut depuis); });
+    point_cooperatif(&mut depuis);
     let demande = DIAG_DEMANDE.swap(0, Ordering::AcqRel);
     if demande & (1u64 << 63) == 0 {
         return;
@@ -669,17 +691,33 @@ pub fn sert_diagnostic() {
         mots[5], mots[6], mots[7], mots[8], mots[9], mots[10], mots[11], mots[12],
         syscall(13), syscall(16), syscall(19), syscall(22),
     );
+    point_cooperatif(&mut depuis);
 
+    // Le bilan HID est imprime depuis le fil diagnostique, jamais depuis IRQ.
+    if !complet {
+        crate::serial_println!(
+            "[M12-HID-DIAG] demandes={} dumps={} quotas={} periode_s=30",
+            M12_HID_DEMANDES.load(Ordering::Relaxed),
+            M12_HID_DUMPS.load(Ordering::Relaxed),
+            M12_HID_QUOTAS.load(Ordering::Relaxed),
+        );
+    }
+    point_cooperatif(&mut depuis);
     signale_taches_orphelines();
+    point_cooperatif(&mut depuis);
     if complet {
+        if raison == RaisonDump::LatenceHid as u8 {
+            M12_HID_DUMPS.fetch_add(1, Ordering::Relaxed);
+        }
         crate::serial_println!(
             "[SCHED-DUMP] raison={} -- etat complet ci-dessous",
             nom_raison(raison, false),
         );
-        signale_etat_ordonnancement();
+        signale_etat_ordonnancement(&mut depuis);
     } else {
         resume_ordonnancement();
     }
+    point_cooperatif(&mut depuis);
     // Un CPU qui tourne sur un verrou tournant ne laisse aucune autre trace :
     // pas de faute, pas de changement de tache. Cette
     // ligne est la seule qui distingue un noyau bloque d'un noyau occupe, et
@@ -907,6 +945,12 @@ pub enum RaisonDump {
     Fatal = 4,
 }
 
+// BOUCHAUD_M12_MEGA_V1: quota exclusivement pour les dumps HID.
+// Les demandes manuelles, de reseau et fatales NE SONT JAMAIS filtrees.
+static M12_HID_DEMANDES: AtomicU64 = AtomicU64::new(0);
+static M12_HID_DUMPS: AtomicU64 = AtomicU64::new(0);
+static M12_HID_QUOTAS: AtomicU64 = AtomicU64::new(0);
+static M12_HID_DERNIER_TICK: AtomicU64 = AtomicU64::new(0);
 static RAISON_DUMP: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// Demande l'etat complet de l'ordonnancement au prochain passage de la sonde.
@@ -982,9 +1026,16 @@ fn resume_ordonnancement() {
     );
 }
 
-fn signale_etat_ordonnancement() {
+fn signale_etat_ordonnancement(depuis: &mut u64) {
     let coeurs = smp::schedulable_cpus().min(MAX_CPUS);
     for cpu in 0..coeurs {
+        // BOUCHAUD_DIAG_LIGNE_PAR_LIGNE_V1 : un point entre deux lignes, comme
+        // la boucle des taches ci-dessous. Sans lui, l'en-tete et les lignes
+        // de tous les coeurs partaient d'un seul segment : 54 a 127 ms de
+        // coeur tenu par ce fil sous KVM SMP8 (`[POINTS-COOP]
+        // site=diagnostic_stall.rs`, run 39479633757), une ligne serie y
+        // coutant jusqu'a 21 ms. Rien n'est tenu d'une iteration a l'autre.
+        point_cooperatif(depuis);
         let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu) else { continue };
         let (jetees_gen, jetees_non_eligibles) = pick_jetees(cpu);
         crate::serial_println!(
@@ -1006,6 +1057,8 @@ sommeils_abandonnes={} rip={:#x} rip_noyau={:#x} tlb_seq={} tlb_cibles={:#x} tlb
         );
     }
     for emplacement in 0..registre_longueur() {
+        // Apres la ligne de la tache precedente, garde de lecture rendue.
+        point_cooperatif(depuis);
         let Some(identite) = registre_id(emplacement) else { continue };
         let Some(tache) = registre_tache_id(identite) else { continue };
         if tache.state == TaskState::Zombie {

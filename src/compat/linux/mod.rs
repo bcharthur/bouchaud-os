@@ -231,7 +231,15 @@ fn sys_sigsuspend(set: u64) -> i64 {
             fil.masque_signaux.range(crate::kernel::signal::SignalState::masque_permis(mask));
         }
     }
-    while !task::signal_pending() {
+    // BOUCHAUD_SIGSUSPEND_CONDAMNE_V1 : une tache condamnee (exit_group d'un
+    // frere, kill du processus) reste PRETE ici -- elle cede et attend, elle
+    // ne se bloque pas -- et le tueur la laisse donc mourir « a la frontiere »
+    // (`action_tueur` : Pret -> Frontiere). Cette boucle ne rendait jamais la
+    // main sans signal : la frontiere n'arrivait pas, et `exit_group` attendait
+    // ce fil indefiniment (faute-multifil-probe : faute d'un frere, fil
+    // principal en pause(), processus vivant 30 s jusqu'au SIGKILL du banc).
+    // Condamnee, elle sort : la sortie d'appel systeme la retire.
+    while !task::signal_pending() && !task::condamnee_courante() {
         task::yield_now();
         task::attends_interruption();
     }
@@ -518,6 +526,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         MKDIR => file::sys_mkdir(args[0], args[1] as u32),
         MKDIRAT => file::sys_mkdirat(args[0] as i32, args[1], args[2] as u32),
         UNLINK => file::sys_unlink(args[0]),
+        RMDIR => file::sys_rmdir(args[0]),
         UNLINKAT => file::sys_unlinkat(args[0] as i32, args[1], args[2] as u32),
         RENAME => file::sys_rename(args[0], args[1]),
         RENAMEAT => file::sys_renameat2(args[0] as i32, args[1], args[2] as i32, args[3], 0),
@@ -935,6 +944,26 @@ pub fn realtime_ns() -> u64 {
         .saturating_add(ecoule_ns)
 }
 
+/// L'horloge murale SI son ancre est deja posee, sans jamais la poser.
+///
+/// BOUCHAUD_PREFIXE_SANS_CMOS_V1 : le prefixe de chaque ligne du journal lisait
+/// la RTC -- une trentaine d'acces aux ports CMOS 0x70/0x71 (index PUIS donnee,
+/// sans verrou), plus l'attente du bit de mise a jour, jusqu'a ~2 ms une fois
+/// par seconde. Sous le jeton, ces lectures etaient serialisees ; la console
+/// asynchrone construit le prefixe hors du jeton, sur plusieurs coeurs a la
+/// fois. Le journal lit donc l'horloge ancree, et la RTC seulement tant que
+/// l'ancre n'existe pas (il ne la pose pas : tres tot au demarrage, l'horloge
+/// monotone n'est pas encore celle qui doit porter l'heure de toute la session).
+pub fn realtime_ns_ancree() -> Option<u64> {
+    if EPOCH_POSEE.load(Ordering::Acquire) != 2 {
+        return None;
+    }
+    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed);
+    let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed);
+    let ecoule_ns = crate::kernel::timer::monotonic_ns().saturating_sub(base_ns);
+    Some(base_seconds.saturating_mul(1_000_000_000).saturating_add(ecoule_ns))
+}
+
 /// Secondes depuis l'epoch Unix.
 pub fn unix_time() -> u64 {
     realtime_ms() / 1000
@@ -1036,9 +1065,29 @@ fn timespec_ms(addr: u64) -> Option<u64> {
     Some(total_ns.div_ceil(1_000_000).max(1))
 }
 
+/// Lit un `struct timespec` utilisateur, en nanosecondes EXACTES.
+///
+/// BOUCHAUD_SOMMEIL_NS_V1 : les sommeils (`nanosleep`, `clock_nanosleep`)
+/// arrondissaient la duree au millieme SUPERIEUR (`timespec_ms`) puis
+/// l'echeance n'etait vue qu'au tick : un sommeil de 15,2 ms durait au moins
+/// 16 ms, puis jusqu'au tick suivant. Run 38645396730 (KVM, sonde
+/// d'ordonnanceur, periode 16 ms) : retard au repos median 1,3 ms, p95
+/// 1,9 ms -- plus que sous charge (0,6 / 1,0 ms) ; la sonde concluait
+/// « charge sans effet mesurable » a toutes les topologies. Une duree non
+/// nulle reste non nulle (POSIX : dormir AU MOINS la duree demandee) ; une
+/// duree nulle reste nulle.
+fn timespec_ns(addr: u64) -> Option<u64> {
+    if addr == 0 {
+        return None;
+    }
+    let seconds = user_read_u64(addr)?;
+    let nanos = user_read_u64(addr + 8)?;
+    Some(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+}
+
 /// `nanosleep` : la duree demandee est toujours **relative**.
 fn sys_nanosleep(request: u64, remain: u64) -> i64 {
-    let reste = dors_ms(timespec_ms(request).unwrap_or(0));
+    let reste = dors_ns(timespec_ns(request).unwrap_or(0));
     ecrit_reste(remain, reste)
 }
 
@@ -1065,39 +1114,40 @@ fn sys_clock_nanosleep(clock: i32, flags: u64, request: u64, remain: u64) -> i64
     const CLOCK_REALTIME: i32 = 0;
     const CLOCK_REALTIME_ALARM: i32 = 8;
 
-    let demande = match timespec_ms(request) {
-        Some(ms) => ms,
+    // BOUCHAUD_SOMMEIL_NS_V1 : en nanosecondes exactes.
+    let demande = match timespec_ns(request) {
+        Some(ns) => ns,
         None => return -errno::EFAULT,
     };
 
     if flags & TIMER_ABSTIME != 0 {
         let maintenant = match clock {
-            CLOCK_REALTIME | CLOCK_REALTIME_ALARM => realtime_ms(),
-            _ => crate::kernel::timer::monotonic_ms(),
+            CLOCK_REALTIME | CLOCK_REALTIME_ALARM => realtime_ns(),
+            _ => crate::kernel::timer::monotonic_ns(),
         };
         // Une echeance deja passee rend la main tout de suite. `remain` n'est
         // pas ecrit dans cette forme : Linux ne le remplit que pour un sommeil
         // relatif, l'echeance etant deja connue de l'appelant.
-        return match dors_ms(demande.saturating_sub(maintenant)) {
+        return match dors_ns(demande.saturating_sub(maintenant)) {
             Some(_) => -errno::EINTR,
             None => 0,
         };
     }
 
-    let reste = dors_ms(demande);
+    let reste = dors_ns(demande);
     ecrit_reste(remain, reste)
 }
 
-/// Dort `ms` millisecondes, en cedant simplement le CPU sous le tick.
+/// Dort `ns` nanosecondes (BOUCHAUD_SOMMEIL_NS_V1) : l'echeance est
+/// `maintenant + ns`, sans arrondi. Zero cede le processeur et rend la main.
 ///
 /// Rend le temps non dormi si un signal gere a interrompu le sommeil.
-fn dors_ms(ms: u64) -> Option<u64> {
-    let ticks = crate::kernel::timer::ms_to_ticks(ms);
-    if ticks == 0 {
+fn dors_ns(ns: u64) -> Option<u64> {
+    if ns == 0 {
         task::yield_now();
         None
     } else {
-        task::sleep_ticks_signalable(ticks)
+        task::sleep_ns_signalable(ns)
     }
 }
 
@@ -1338,7 +1388,7 @@ fn sys_kill(signal: u64) -> i64 {
     const SIGSEGV: u64 = 11;
     const SIGTERM: u64 = 15;
     if matches!(signal, SIGABRT | SIGKILL | SIGSEGV | SIGTERM) {
-        task::exit_group(128 + signal as i32);
+        task::exit_group_par_signal(signal as i32);
     }
     0
 }

@@ -68,7 +68,7 @@ def verifie(racine: Path) -> list[str]:
     except OSError as e:
         return [f"lecture impossible : {e}"]
     fautes = []
-    ec = corps(src, "exit_current")
+    ec = corps(src, "sortie_du_fil")  # corps d'exit_current (BOUCHAUD_STATUT_SORTIE_V1)
     if not bloc_garde(ec, "if releve_global { crate::kernel::dmesg::log_fmt", '"CPU_CUMUL scope=global'):
         fautes.append(f"{VIE} : CPU_CUMUL n'est plus derriere releve_global")
     for marque in ('"CACHE_BALAYAGE scope=global', '"CACHE_BALAYAGE_TEMOINS scope=global', '"FAULT_REPRISE scope=global'):

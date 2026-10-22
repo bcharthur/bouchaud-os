@@ -1,7 +1,8 @@
 name: ladybird-native-browser
 
 # Producteur CANONIQUE de l'artefact consomme par run.ps1.
-# Un commit de branche avec PR ne declenche que pull_request, jamais un doublon push.
+# Un push sur une branche avec PR declenche AUSSI pull_request : le run PR reflete
+# alors le run push du meme arbre (BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2, job dedoublonne).
 on:
   pull_request:
     paths:
@@ -109,10 +110,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dedoublonne:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le run PR d'une branche de ce depot
+    # peut-il REFLETER le run push du meme arbre au lieu de le refaire ? Voir
+    # tools/ci/dedoublonne_pr.py. Les jobs racines en dependent et tournent si
+    # la decision manque (`!cancelled()`). Le job de verdict, lui, n'est JAMAIS
+    # saute : il attend la conclusion finale du run push et la reflete -- un
+    # echec bloque, un run annule ou saute ne prouve rien. Pas sur les
+    # workflows dont un gate est un check requis de `main`.
+    name: dedoublonne push/PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reutilise: ${{ steps.decision.outputs.reutilise }}
+      source_run: ${{ steps.decision.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENEMENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          DEPOT: ${{ github.repository }}
+          DEPOT_TETE: ${{ github.event.pull_request.head.repo.full_name }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          FUSION: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/dedoublonne_pr.py
+          else
+            echo "DEDOUBLONNE reutilise=false raison=evenement $EVENEMENT"
+            echo reutilise=false >> "$GITHUB_OUTPUT"
+          fi
+
   primitives:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     uses: ./.github/workflows/os-primitives.yml
 
   build:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: ladybird / build once
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -292,7 +338,8 @@ jobs:
           for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
             test -f "$OUT/$f"
             file "$OUT/$f"
-            ! readelf -l "$OUT/$f" | grep -q INTERP
+            readelf -l "$OUT/$f" > "/tmp/entetes-$f.txt"
+            if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
           done
           test -x "$OUT/webcontent-bootstrap"
           test -f "$OUT/M9_CAPABLE"
@@ -704,13 +751,27 @@ jobs:
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     name: ladybird / verdict de convergence
-    needs: [build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
+    needs: [dedoublonne, build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # Reflet : le run push du meme arbre peut durer des heures (build froid).
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Verdict reflete du run push du meme arbre
+        if: needs.dedoublonne.outputs.reutilise == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          SOURCE: ${{ needs.dedoublonne.outputs.source_run }}
+        run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "ladybird / verdict de convergence" --delai 19200 --pas 60
       - name: Verdict
+        if: needs.dedoublonne.outputs.reutilise != 'true'
         env:
           R_PRIMITIVES: ${{ needs.primitives.result }}
           R_PERFORMANCE: ${{ needs.performance.result }}
@@ -785,6 +846,136 @@ jobs:
             surface-browser-host-t*.ppm
             surface-tentatives.txt
             convergence-browser-host.json
+          if-no-files-found: warn
+
+  # BOUCHAUD_VIRTIO_GPU_2D_V1 : le MEME smoke, ecran virtio-gpu (-vga none).
+  # Chaque trame du navigateur passe par le gestionnaire de fenetres puis par
+  # TRANSFER_TO_HOST_2D + RESOURCE_FLUSH ; la mire est verifiee sur l'ecran
+  # virtio. Diagnostic : hors du verdict de convergence tant qu'il n'a pas
+  # ete vu vert. Scanout 2D, aucune acceleration (P10 reste BLOCKED).
+  browser-host-smoke-virtio:
+    name: ladybird / browser-host smoke sur virtio-gpu (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Smoke BrowserHost sur Bouchaud OS, ecran virtio-gpu
+        env:
+          BO_SMOKE_AFFICHAGE: virtio
+          BO_SMOKE_SUFFIXE: -virtio
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        # `surface-browser-host.ppm` est la capture du moniteur QEMU. Le
+        # verdict de mire dit « absente » sans jamais montrer ce qui a ete
+        # capture ; sans le fichier, on ne peut ni verifier le verdict ni voir
+        # CE QUI s'est affiche a la place.
+        #
+        # Dans un bloc `|`, une ligne commencant par `#` n'est pas un
+        # commentaire mais un motif de chemin : ce commentaire-ci est donc
+        # dehors, a sa place.
+        with:
+          name: ladybird-browser-host-smoke-virtio-logs
+          path: |
+            serie-browser-host-virtio.log
+            fixture-browser-host-virtio.log
+            surface-browser-host-virtio.ppm
+            surface-browser-host-virtio-t*.ppm
+            surface-tentatives*.txt
+            convergence-browser-host-virtio.json
+          if-no-files-found: warn
+
+  browser-host-smoke-surface-double:
+    name: ladybird / browser-host smoke, surface a deux tampons (diagnostic)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+      - name: Smoke BrowserHost sur Bouchaud OS, surface client a deux tampons
+        # BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d) : `gui-surface double`
+        # avant `desktop` ; le chrome doit retenir le contrat et recevoir des
+        # liberations, en plus de tout ce que le smoke de reference exige.
+        env:
+          BO_SMOKE_SURFACE: double
+          BO_SMOKE_SUFFIXE: -double
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        # `surface-browser-host.ppm` est la capture du moniteur QEMU. Le
+        # verdict de mire dit « absente » sans jamais montrer ce qui a ete
+        # capture ; sans le fichier, on ne peut ni verifier le verdict ni voir
+        # CE QUI s'est affiche a la place.
+        #
+        # Dans un bloc `|`, une ligne commencant par `#` n'est pas un
+        # commentaire mais un motif de chemin : ce commentaire-ci est donc
+        # dehors, a sa place.
+        with:
+          name: ladybird-browser-host-smoke-double-logs
+          path: |
+            serie-browser-host-double.log
+            fixture-browser-host-double.log
+            surface-browser-host-double.ppm
+            surface-browser-host-double-t*.ppm
+            surface-tentatives*.txt
+            convergence-browser-host-double.json
           if-no-files-found: warn
 
   # ==========================================================================

@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import qemu_matrix
+from etat_cycle import ECHEC, NON_QUALIFIANT, code_de_sortie, etat_du_cycle, verdict_campagne
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -40,6 +41,10 @@ def main() -> int:
     # `tools/ci/fabrique-scenario-endurance.sh`.
     parser.add_argument("--disque", type=Path, default=None)
     parser.add_argument("--require-fichier", type=Path, default=None)
+    # BOUCHAUD_ENDURANCE_NON_QUALIFIANT_V1 : le marqueur de la famille dont la
+    # sonde peut rendre NON_QUALIFIANT. Un tel cycle n'est pas reussi, mais
+    # n'arrete pas la campagne : voir `etat_cycle.py`.
+    parser.add_argument("--marqueur-sonde", default=None)
     args = parser.parse_args()
 
     if args.duration_seconds <= 0 or args.cycle_seconds <= 0:
@@ -94,11 +99,16 @@ def main() -> int:
                 Path(result["disque"]).unlink(missing_ok=True)
             else:
                 result["disque_conserve"] = True
+        texte = Path(result["log"]).read_text(encoding="utf-8", errors="replace") \
+            if Path(result["log"]).is_file() else ""
+        etat, raison = etat_du_cycle(result, texte, args.marqueur_sonde)
+        result["etat"] = etat
+        result["raison"] = raison
         cycles.append(result)
-        etat = "OK" if result["ok"] else "ECHEC"
         print(
             f"cycle {index}: {etat} log={result['log_bytes']} octets "
             f"timeout={result['timed_out']} rc={result['returncode']}"
+            + (f" -- {raison}" if raison else "")
         )
         # LE DIAGNOSTIC, LA OU L'ECHEC SE PRODUIT.
         #
@@ -107,12 +117,17 @@ def main() -> int:
         if not result["ok"]:
             for finding in result["fatal_findings"]:
                 print(f"  {finding['kind']}:{finding['line']}: {finding['text']}")
+                for suite in finding.get("context", []):
+                    print(f"    | {suite}")
             for marker in result["required_markers_missing"]:
                 print(f"  marqueur absent: {marker}")
             if not result["qemu_exit_ok"]:
                 print(f"  QEMU a quitte avec le code {result['returncode']}")
             print(f"  journal complet : {result['log']}")
-            break
+            # Un cycle NON_QUALIFIANT n'a rien montre contre le noyau : la
+            # campagne continue, pour mesurer la stabilite. Un ECHEC l'arrete.
+            if etat == ECHEC:
+                break
 
     payload = {
         "schema": 3,
@@ -128,13 +143,16 @@ def main() -> int:
         # la duree demandee.
         "cycles_tronques_evites": tronques,
         "ok": bool(cycles) and all(c["ok"] for c in cycles),
+        "verdict": verdict_campagne([c["etat"] for c in cycles]),
+        "non_qualifiants": sum(1 for c in cycles if c["etat"] == NON_QUALIFIANT),
     }
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     reussis = sum(1 for c in cycles if c["ok"])
     print(
         f"soak : {reussis}/{len(cycles)} cycle(s) de {args.cycle_seconds}s en "
-        f"{payload['elapsed_seconds']}s"
+        f"{payload['elapsed_seconds']}s, {payload['non_qualifiants']} NON_QUALIFIANT(s), "
+        f"verdict {payload['verdict']}"
         + (f", {tronques} fin de campagne trop courte pour un cycle entier" if tronques else "")
     )
     if not cycles:
@@ -145,7 +163,7 @@ def main() -> int:
             "ECHEC: aucun cycle n'a tourne -- la duree demandee est plus "
             "courte qu'un cycle."
         )
-    return 0 if payload["ok"] else 1
+    return code_de_sortie(payload["verdict"])
 
 if __name__ == "__main__":
     raise SystemExit(main())

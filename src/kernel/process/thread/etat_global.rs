@@ -46,6 +46,30 @@ static CURRENT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(NO_TASK) }; 
 /// `live` couvre exactement ce que les compteurs par CPU retiennent. La somme
 /// rendue est identique a l'octet pres.
 static COMPTA_DEBUT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// BOUCHAUD_PREUVE_HOTE_V1 : l'indice + 1 de la tache courante (contexte
+/// de tache), tel que `courant_imputable` le range dans le journal.
+pub fn indice_courant() -> u32 {
+    let index = current_index_raw();
+    if index == NO_TASK || index >= u32::MAX as usize { 0 } else { index as u32 + 1 }
+}
+
+/// BOUCHAUD_PREUVE_HOTE_V1 : la tache installee sur `cpu` (indice + 1 ; 0 :
+/// aucune) et le debut de sa tranche en cours (aucune tranche armee : coeur
+/// arrete sur `hlt`, rien a imputer). Deux atomiques, rien d'autre :
+/// appelable en interruption, avant la frontiere du mode amorcage.
+pub fn courant_imputable(cpu: usize) -> crate::kernel::attribution_reveil::Courant {
+    use crate::kernel::attribution_reveil::Courant;
+    if cpu >= MAX_CPUS {
+        return Courant::default();
+    }
+    let depuis_ns = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
+    let index = CURRENT[cpu].load(Ordering::Acquire);
+    if depuis_ns == 0 || index == NO_TASK || index >= u32::MAX as usize {
+        return Courant::default();
+    }
+    Courant { tache: index as u32 + 1, depuis_ns }
+}
 /// Temps CUMULE par processeur, utilisateur et noyau, depuis le demarrage.
 ///
 /// BOUCHAUD_C29_PROC_STAT_CUMULATIF

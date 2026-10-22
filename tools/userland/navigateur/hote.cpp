@@ -301,6 +301,9 @@ enum Genre : uint16_t {
     Wheel = 0x105,
     CloseRequest = 0x106,
     PressePapiers = 0x107,
+    // Contrat a deux tampons seulement : cet hote n'annonce pas la capacite
+    // dans `Hello`, il ne recoit donc jamais ce message.
+    Liberation = 0x108,
 };
 
 /// Bits du champ `modificateurs` d'un message `Key`. Definis cote noyau dans

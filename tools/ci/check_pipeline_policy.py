@@ -5,6 +5,7 @@ The checker intentionally validates properties, not exact line-for-line YAML.
 It prevents a green pipeline from silently becoming a skipped pipeline again.
 """
 from pathlib import Path
+import re
 import sys
 
 root = Path(".github/workflows")
@@ -83,6 +84,100 @@ soak = need(
         "soak.py",
     ),
 )
+
+# BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le run PR peut REFLETER le run push du meme
+# arbre (tools/ci/dedoublonne_pr.py) au lieu de le refaire -- jamais en sautant
+# son verdict. Regles :
+#  * jamais sur un workflow dont un gate est un check requis de `main` ;
+#  * aucun job racine hors du dedoublonnage, et toute racine lit `reutilise` ;
+#  * UN job de verdict, `if: always()`, qui contient le reflet
+#    (`dedoublonne_pr.py attend`) ET un verdict execute : il n'est jamais saute,
+#    et un run push en echec, annule ou saute le rend rouge ;
+#  * plus aucune lecture de la sortie V1 `doublon` (qui sautait le verdict).
+def jobs_de(texte: str) -> dict[str, list[str]]:
+    blocs: dict[str, list[str]] = {}
+    courant = None
+    dans_jobs = False
+    for ligne in texte.split("\n"):
+        if ligne == "jobs:":
+            dans_jobs = True
+            continue
+        if not dans_jobs:
+            continue
+        if ligne and not ligne.startswith(" ") and not ligne.startswith("#"):
+            break
+        if ligne.startswith("  ") and not ligne.startswith("   ") and ligne.rstrip().endswith(":") and not ligne.strip().startswith("#"):
+            courant = ligne.strip()[:-1]
+            blocs[courant] = []
+        elif courant:
+            blocs[courant].append(ligne)
+    return blocs
+
+for name in ("ci.yml", "integration.yml", "reliability-v3.yml"):
+    if "dedoublonne" in (root / name).read_text(encoding="utf-8"):
+        errors.append(f"{name}: porte un gate requis -- pas de dedoublonnage push/PR")
+for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
+    texte = (root / name).read_text(encoding="utf-8")
+    blocs = jobs_de(texte)
+    if "dedoublonne" not in blocs or "python3 tools/ci/dedoublonne_pr.py" not in "\n".join(blocs["dedoublonne"]) \
+            or "reutilise:" not in "\n".join(blocs["dedoublonne"]):
+        errors.append(f"{name}: job dedoublonne absent ou sans sortie `reutilise`")
+        continue
+    if re.search(r"outputs\.doublon\b", texte):
+        errors.append(f"{name}: lit encore la sortie V1 `doublon` (verdict saute)")
+    verdicts = [j for j, b in blocs.items() if "dedoublonne_pr.py attend" in "\n".join(b)]
+    if len(verdicts) != 1:
+        errors.append(f"{name}: il faut exactement un job de verdict qui reflete le run push ({verdicts})")
+    for job, bloc in blocs.items():
+        if job == "dedoublonne":
+            continue
+        corps = "\n".join(bloc)
+        besoins = [l for l in bloc if l.startswith("    needs:")]
+        conditions = [l for l in bloc if l.startswith("    if:")]
+        if not besoins:
+            errors.append(f"{name}: job racine {job} hors dedoublonnage")
+            continue
+        if job in verdicts:
+            if not conditions or conditions[0].strip() != "if: always()":
+                errors.append(f"{name}: le verdict {job} doit etre `if: always()` (jamais saute)")
+            if "if: needs.dedoublonne.outputs.reutilise != 'true'" not in corps:
+                errors.append(f"{name}: le verdict {job} n'a pas de verdict execute hors reutilisation")
+            if "dedoublonne" not in besoins[0]:
+                errors.append(f"{name}: le verdict {job} ne lit pas la decision")
+            continue
+        if "dedoublonne" in besoins[0]:
+            if not conditions or "needs.dedoublonne.outputs.reutilise != 'true'" not in conditions[0]:
+                errors.append(f"{name}: {job} depend de dedoublonne sans lire sa decision")
+        if any("always()" in c or "!cancelled()" in c for c in conditions) and "dedoublonne" not in besoins[0]:
+            errors.append(f"{name}: {job} tourne malgre un saut sans lire la decision")
+
+# BOUCHAUD_PREUVE_INDEPENDANTE_V1 : dans os-primitives, une etape apres le
+# noyau construit tourne meme si une etape precedente a echoue. Run 39503091750 :
+# un temoin TCG rouge a fait sauter « Acces a /dev/kvm », et toute l'attribution
+# P13 KVM (SMP1/2/4/8) est tombee en « /dev/kvm inaccessible » -- zero preuve.
+# Le job reste rouge ; seules les preuves independantes sont conservees.
+for _job, _bloc in jobs_de((root / "os-primitives.yml").read_text(encoding="utf-8")).items():
+    _etapes, _courante = [], None
+    for _l in _bloc:
+        _m = re.match(r"^      - (?:name: (.*)|uses: .*|run: .*)$", _l)
+        if _m:
+            _courante = {"name": (_m.group(1) or "?").strip(), "lignes": []}
+            _etapes.append(_courante)
+        elif _courante is not None:
+            _courante["lignes"].append(_l)
+    _apres = False
+    for _e in _etapes:
+        _corps = "\n".join(_e["lignes"])
+        if "id: bootimage" in _corps:
+            _apres = True
+            continue
+        if not _apres:
+            continue
+        _si = next((l for l in _e["lignes"] if l.startswith("        if:")), "")
+        if "!cancelled()" not in _si and "always()" not in _si:
+            errors.append(f"os-primitives.yml: {_job} / {_e['name']} saute si une etape precedente echoue")
+    if not _apres:
+        errors.append(f"os-primitives.yml: {_job} sans etape `id: bootimage`")
 
 if "continue-on-error: true" in reliability:
     errors.append("reliability-v3.yml: aucun test de fiabilite ne doit etre informatif")

@@ -83,9 +83,9 @@ elf_etat() {
     local taille type rela relacount
     taille=$(stat -c %s "$f")
     type=$(readelf -h "$f" | awk '/Type:/ {print $2}')
-    rela=$(readelf -d "$f" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | head -1)
-    relacount=$(readelf -d "$f" 2>/dev/null | awk '/RELACOUNT/ {print $3}' | head -1)
-    relrsz=$(readelf -d "$f" 2>/dev/null | awk '/RELRSZ/ {gsub(/[^0-9]/,"",$3); print $3}' | head -1)
+    rela=$(readelf -d "$f" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | awk 'NR<=1')
+    relacount=$(readelf -d "$f" 2>/dev/null | awk '/RELACOUNT/ {print $3}' | awk 'NR<=1')
+    relrsz=$(readelf -d "$f" 2>/dev/null | awk '/RELRSZ/ {gsub(/[^0-9]/,"",$3); print $3}' | awk 'NR<=1')
     echo "ELF_VARIANTE nom=$nom type=${type:-?} bytes=$taille relasz=${rela:-0} relacount=${relacount:-0} relrsz=${relrsz:-0}"
 }
 
@@ -112,7 +112,7 @@ cmake -S "$SRC" -B "$BUILD" >/dev/null
 cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target WebWorker
 
 VARIANTE="$BUILD/bin/WebWorker"
-[ -f "$VARIANTE" ] || VARIANTE=$(find "$BUILD" -name WebWorker -type f -newer "$SORTIE/WebWorker" | head -1)
+[ -f "$VARIANTE" ] || VARIANTE=$(find "$BUILD" -name WebWorker -type f -newer "$SORTIE/WebWorker" | awk 'NR<=1')
 if [ -z "${VARIANTE:-}" ] || [ ! -f "$VARIANTE" ]; then
     echo "variante : WebWorker RELR introuvable apres le lien" >&2
     exit 1
@@ -132,19 +132,19 @@ elf_etat "$SORTIE/WebWorker.relr" relr
 # que le drapeau a pris est le deplacement de la table : `DT_RELR` apparait et
 # `.rela.dyn` s'effondre. Sans ces deux conditions, on mesurerait deux fois le
 # meme binaire en croyant comparer.
-if ! readelf -d "$SORTIE/WebWorker.relr" | grep -q "RELRSZ"; then
+if ! readelf -d "$SORTIE/WebWorker.relr" | grep "RELRSZ" >/dev/null; then
     echo "variante : aucun DT_RELR -- l'editeur de liens a ignore" >&2
     echo "           -z pack-relative-relocs ; rien a comparer." >&2
     exit 1
 fi
-RELA_REF=$(readelf -d "$SORTIE/WebWorker" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | head -1)
-RELA_VAR=$(readelf -d "$SORTIE/WebWorker.relr" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | head -1)
+RELA_REF=$(readelf -d "$SORTIE/WebWorker" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | awk 'NR<=1')
+RELA_VAR=$(readelf -d "$SORTIE/WebWorker.relr" 2>/dev/null | awk '/RELASZ/ {gsub(/[^0-9]/,"",$3); print $3}' | awk 'NR<=1')
 if [ "${RELA_VAR:-0}" -ge "${RELA_REF:-0}" ]; then
     echo "variante : .rela.dyn n'a pas diminue (${RELA_REF:-0} -> ${RELA_VAR:-0})" >&2
     echo "           le drapeau n'a pas pris sur la bonne cible." >&2
     exit 1
 fi
-if readelf -l "$SORTIE/WebWorker.relr" | grep -q INTERP; then
+if readelf -l "$SORTIE/WebWorker.relr" | grep INTERP >/dev/null; then
     echo "variante : PT_INTERP present dans un binaire cense etre statique" >&2
     exit 1
 fi

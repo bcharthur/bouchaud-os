@@ -131,10 +131,13 @@ def verifie(racine: Path) -> list[str]:
     # BOUCHAUD_SOMMEIL_SIGNAL_V1 : le corps du sommeil vit dans `dort_jusqua`
     # (une echeance fixe, pour que `nanosleep` se rendorme jusqu'a la MEME
     # echeance apres un reveil sans effet) ; `dort` et
-    # `sleep_ticks_signalable` y passent tous deux, interruptibles.
+    # `sleep_jusqua_signalable` (commun a `sleep_ticks_signalable` et, depuis
+    # BOUCHAUD_SOMMEIL_NS_V1, a `sleep_ns_signalable`) y passent, interruptibles.
     if "dort(ticks, true)" not in corps(src[SOMMEIL], "sleep_ticks") \
             or "dort_jusqua(" not in corps(src[SOMMEIL], "dort") \
-            or "dort_jusqua(deadline, ticks, true)" not in corps(src[SOMMEIL], "sleep_ticks_signalable") \
+            or "dort_jusqua(deadline, ticks, true)" not in corps(src[SOMMEIL], "sleep_jusqua_signalable") \
+            or "sleep_jusqua_signalable(" not in corps(src[SOMMEIL], "sleep_ticks_signalable") \
+            or "sleep_jusqua_signalable(" not in corps(src[SOMMEIL], "sleep_ns_signalable") \
             or "publie_parking(interruptible)" not in corps(src[SOMMEIL], "dort_jusqua"):
         fautes.append(f"{SOMMEIL} : le sommeil ne passe plus par le parking interruptible")
     if "publie_attente_interruptible()" not in corps(src[PROC], "sys_wait4"):
@@ -169,9 +172,10 @@ def verifie(racine: Path) -> list[str]:
     #    mourir eux-memes dans cette attente.
     if not avant(src[PROC], "task::terminate_sibling_threads();", "task::attend_extinction_freres();"):
         fautes.append(f"{PROC} : execve remplace l'image avant la mort des freres")
-    eg = corps(src[VIE], "exit_group")
+    # BOUCHAUD_STATUT_SORTIE_V1 : le corps d'`exit_group` est `sortie_du_groupe`.
+    eg = corps(src[VIE], "sortie_du_groupe")
     if not avant(eg, "marque_zombie(task);", "attend_extinction_freres();") \
-            or not avant(eg, "attend_extinction_freres();", "exit_current(code)"):
+            or not avant(eg, "attend_extinction_freres();", "sortie_du_fil(code, par_signal)"):
         fautes.append(f"{VIE} : exit_group rapporte la fin du processus avant la mort des freres")
     if "sleep_ticks_noyau(1)" not in corps(src[VIE], "attend_extinction_freres"):
         fautes.append(f"{VIE} : l'attente des freres est interruptible")

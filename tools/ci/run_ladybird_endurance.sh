@@ -241,7 +241,7 @@ awk '{ gsub(/\x1b\[[0-9;]*m/, "") }
     split(f[5], a, "="); app = a[2]; split(f[6], a, "="); top = a[2]
     if (!(pid in t0)) { t0[pid] = t; a0[pid] = app } ; t1[pid] = t; a1[pid] = app; im[pid] = img; tp[pid] = top
   }
-  END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | head -12
+  END { for (p in t0) { d = (t1[p] - t0[p]) / 1000; if (d >= 60) printf "  APPELS_TENDANCE pid=%s image=%s vie_s=%d appels_par_s=%d top=%s\n", p, im[p], d, (a1[p] - a0[p]) / d, tp[p] } }' "$LOG" | sort -t= -k6 -nr | awk 'NR<=12'
 # BOUCHAUD_PROFIL_RIP_V1 : ou les fils passent leur temps (RIP echantillonnes
 # au quantum, symbolises contre les binaires du run). Affichage seulement.
 # Pas de `| head` : sous `pipefail`, un producteur coupe par SIGPIPE ferait
@@ -282,6 +282,14 @@ fin=$(grep -aoE 'HOST_ENDURANCE_FIN cycles=[0-9]+ t_s=[0-9]+ cadres_ok=[0-9]+ ca
 val() { echo "$fin" | grep -oE "(^| )$1=-?[0-9]+" | head -1 | cut -d= -f2 || true; }
 cycles=$(val cycles); t_s=$(val t_s); cadres=$(val cadres_ok); echus=$(val cadres_echus); workers=$(val workers_ok); onglets=$(val onglets)
 conclus=$(val cycles_conclus)
+# BOUCHAUD_ENDURANCE_CONCLUS_COURT_V1 : si la longue ligne FIN est arrivee
+# tronquee (entrelacement serie), le meme compte est relu sur la ligne courte
+# que la page emet juste apres. Absent des deux : « ? », et le verdict reste
+# rouge -- rien n'est suppose.
+if [ -z "$conclus" ]; then
+  conclus=$(grep -aoE 'HOST_ENDURANCE_CONCLUS cycles=[0-9]+ cycles_conclus=[0-9]+' "$P" | head -1 | grep -oE 'cycles_conclus=[0-9]+' | cut -d= -f2 || true)
+  if [ -n "$conclus" ]; then echo "  (cycles_conclus relu sur HOST_ENDURANCE_CONCLUS : ligne FIN tronquee)"; fi
+fi
 echo " -- STABILITE --"
 exige "la page a fini (HOST_ENDURANCE_FIN)" test -n "$fin"
 exige "duree >= 95 % de ${DUREE} s (t_s=${t_s:-?})" test "${t_s:-0}" -ge $((DUREE * 95 / 100))

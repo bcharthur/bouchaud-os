@@ -12,6 +12,8 @@ legacy-boot = ["dep:bootloader"]
 uefi-boot = ["dep:bootloader_api"]
 reference-bringup = []
 reference-desktop = ["reference-bringup"]
+# P19 experimental QEMU TCG profile, opt-in; the physical default is unchanged.
+p19-tcg-low-latency = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #
 # Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la
@@ -19,6 +21,33 @@ reference-desktop = ["reference-bringup"]
 # reglage a l'execution laisserait la possibilite de l'armer par accident. Voir
 # `platform/pc/banc_io.rs` et `tools/ci/run_trigkey_ladybird_io_stress.sh`.
 banc-io = []
+# BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1).
+#
+# Le `RESOURCE_ATTACH_BACKING` du scanout du bureau part VERS le peripherique
+# (sonnette tiree), puis l'attente est declaree echue : exactement le cas ou
+# le peripherique a pu retenir l'adresse sans qu'on le sache. La memoire doit
+# etre conservee. Option de compilation, jamais dans `default` : voir
+# `tools/ci/run_virtio_gpu_dma_panne.sh`.
+banc-virtio-gpu-sans-reponse = []
+# BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1).
+#
+# Le premier `TRANSFER_TO_HOST_2D` du bureau est juge contre une barriere qui
+# n'est pas la sienne : exactement ce que verrait le pilote si le
+# peripherique rendait la reponse d'une autre commande (achevement
+# desordonne ou tardif). La file doit etre cassee, le scanout abandonne, sans
+# panique. Jamais dans `default` : voir
+# `tools/ci/run_virtio_gpu_reponse_etrangere.sh`.
+banc-virtio-gpu-reponse-etrangere = []
+# BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_IRQ_V1, P10+.1).
+#
+# Sous attente par interruption : (1) l'entree MSI-X est masquee pendant
+# dix attentes -- interruptions perdues, la relecture de secours doit
+# trouver chaque reponse ; (2) des interruptions parasites sur le vecteur
+# -- aucune ne doit achever une commande ; (3) une
+# attente dont la reponse n'est jamais vue -- echeance, file cassee, scanout
+# abandonne, bureau vivant. Jamais dans `default` : voir
+# `tools/ci/run_virtio_gpu_irq_pannes.sh`.
+banc-virtio-gpu-irq-pannes = []
 
 [dependencies]
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).

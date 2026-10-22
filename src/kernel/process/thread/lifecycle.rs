@@ -3,6 +3,12 @@
 /// Si d'autres threads du programme tournent encore, on bascule sur eux ;
 /// sinon, retour au fil noyau qui a lance le programme.
 pub fn exit_current(code: i32) -> ! {
+    sortie_du_fil(code, false)
+}
+
+/// `exit_current`, en disant si le code est celui d'une mort par signal
+/// (`128 + signal`, BOUCHAUD_STATUT_SORTIE_V1).
+fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
     // BOUCHAUD_C70_UNE_SONDE_NE_RALENTIT_PAS_CE_QU_ELLE_MESURE
     //
     // Les sondes globales de mort de processus sont publiees PLUS BAS, hors
@@ -43,6 +49,7 @@ pub fn exit_current(code: i32) -> ! {
             lifecycle.threads -= 1;
         }
         lifecycle.exit_code = code;
+        lifecycle.par_signal = par_signal;
         // BOUCHAUD_GROUPE_RECLAME_V1 : UNE seule transition vers le dernier fil.
         // `exit_group` remet `threads` a 1 ; un fil deja compte sorti pouvait
         // alors retrouver `threads == 0` et demonter le processus une seconde
@@ -193,6 +200,24 @@ total_us={} pire_us={} candidats_suffisants={}",
                 }
                 let pid = tasks()[index].process.pid;
                 if descend_de(pid, racine) {
+                    // BOUCHAUD_SESSION_EMPORTE_V1 : chaque tache condamnee
+                    // par la fin de session est NOMMEE. Elle meurt ensuite a
+                    // son attente ou a sa frontiere, sans passer par
+                    // `exit_current` -- donc sans `PROCESS_EXIT`. Sans cette
+                    // ligne, un banc qui compte les `PROCESS_EXIT` ne pouvait
+                    // pas distinguer « emporte par la session » de « jamais
+                    // sorti » (robustesse 8/9 : `SORTIE_ABSENTE
+                    // image=Compositor`). Ce n'est PAS une preuve de mort :
+                    // c'est l'acte de condamnation, date et nomme.
+                    crate::kernel::dmesg::log_fmt(format_args!(
+                        "SESSION_EMPORTE t={} racine={} pid={} tid={} image={} etat={:?}",
+                        crate::kernel::timer::monotonic_ms(),
+                        racine,
+                        pid,
+                        tasks()[index].tid,
+                        tasks()[index].process.metadata.lock().name,
+                        tasks()[index].state,
+                    ));
                     marque_zombie(&tasks()[index]);
                     emportes += 1;
                 }
@@ -464,12 +489,12 @@ fn notify_parent_of_exit_for(parent_pid: u32) {
 }
 
 /// Recense les processus fils zombies d'un pid donne.
-pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32)> {
+pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32, bool)> {
     let mut out = Vec::new();
     for process in processes().iter() {
         let lifecycle = process.lifecycle.lock();
         if process.parent == parent_pid && lifecycle.zombie {
-            out.push((process.pid, lifecycle.exit_code));
+            out.push((process.pid, lifecycle.exit_code, lifecycle.par_signal));
         }
     }
     out
@@ -551,6 +576,16 @@ pub fn tue_si_groupe_reclame(process: &Arc<Process>, index: usize, tid: u32) {
 
 /// Termine tous les threads du processus courant (`exit_group`).
 pub fn exit_group(code: i32) -> ! {
+    sortie_du_groupe(code, false)
+}
+
+/// Le processus courant meurt du signal `signal` : code `128 + signal` pour
+/// les journaux, et `wait4` rendra WTERMSIG (BOUCHAUD_STATUT_SORTIE_V1).
+pub fn exit_group_par_signal(signal: i32) -> ! {
+    sortie_du_groupe(128 + signal, true)
+}
+
+fn sortie_du_groupe(code: i32, par_signal: bool) -> ! {
     // BOUCHAUD_GROUPE_RECLAME_V1 : un seul fil demonte le groupe.
     if !reclame_groupe() {
         retire_perdant_du_groupe();
@@ -573,7 +608,7 @@ pub fn exit_group(code: i32) -> ! {
     // de 1 a 0 et rendra le processus zombie/recoltable par `wait4`.
     process.lifecycle.lock().threads = 1;
 
-    exit_current(code)
+    sortie_du_fil(code, par_signal)
 }
 
 /// Lance une tache depuis le fil noyau et attend la fin du programme.
@@ -737,6 +772,24 @@ pub fn spawn_noyau_sensible(entree: fn() -> !, nom: &str, priorite: Priorite) ->
 
 pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
     spawn_noyau_interne(entree, nom, priorite, false)
+}
+
+/// Lance un fil noyau EPINGLE au coeur `cpu` -- jamais migre, jamais
+/// reloge. Pour les bancs qui doivent frapper un coeur precis
+/// (BOUCHAUD_CONSOLE_FIL_SECOURS_V1 : suspendre le coeur du fil `console`).
+/// `false` si le coeur n'est pas en ligne ou si la tache n'a pu etre creee.
+pub fn spawn_noyau_epingle(entree: fn() -> !, nom: &str, cpu: usize) -> bool {
+    if cpu >= 64 || online_affinity_mask() & (1u64 << cpu) == 0 {
+        return false;
+    }
+    let Some(process) = new_process(nom, 0) else {
+        return false;
+    };
+    let mut task = Task::new_kernel(process, entree);
+    task.priorite.range(Priorite::Normale);
+    task.affinity_mask = 1u64 << cpu;
+    register(task);
+    true
 }
 
 fn spawn_noyau_interne(
@@ -1007,9 +1060,12 @@ fn releve_global_du() -> bool {
 /// fermer un tube reveille ses lecteurs, ce qui ne se fait pas sous le verrou
 /// d'une table. La table n'est jamais partagee entre processus (`fork` en
 /// fait une copie) : la vider ne touche que ce processus.
+///
+/// BOUCHAUD_EOF_HORS_CLOSE_V1 : le reveil ne passe plus par le SIGCHLD du
+/// pere -- un orphelin n'en a pas, et son lecteur attendait sans fin.
 pub fn ferme_descripteurs(process: &Arc<Process>) {
     let fermes = process.files.lock().prend_tout();
-    drop(fermes);
+    crate::kernel::fd::ferme_hors_verrou(fermes.into_iter().flatten());
 }
 
 /// Un processus et tous ses descendants, du plus proche au plus lointain.
@@ -1065,6 +1121,8 @@ pub fn tue_processus(pid: u32, code: i32) {
             } else {
                 lifecycle.threads = 0;
                 lifecycle.exit_code = code;
+                // Appelants internes : 0 (fin imposee) ou 128 + signal (137).
+                lifecycle.par_signal = code >= 128;
                 lifecycle.zombie = true;
                 true
             }

@@ -36,7 +36,7 @@ for source in $(find tools -name 'test_*.rs' | sort); do
     if ! rustc --edition 2021 --test -o "$SORTIE/$nom" "$source" \
             >"$SORTIE/$nom.compile" 2>&1; then
         echo "COMPILATION"
-        sed 's/^/    /' "$SORTIE/$nom.compile" | head -12
+        sed 's/^/    /' "$SORTIE/$nom.compile" | awk 'NR<=12'
         echecs=$((echecs + 1))
         continue
     fi
@@ -45,7 +45,7 @@ for source in $(find tools -name 'test_*.rs' | sort); do
         echo "$(echo "$resultat" | grep -m1 'test result' || echo ok)"
     else
         echo "ECHEC"
-        echo "$resultat" | grep -A8 '^failures:' | head -24 | sed 's/^/    /'
+        echo "$resultat" | grep -A8 '^failures:' | awk 'NR<=24' | sed 's/^/    /'
         echecs=$((echecs + 1))
     fi
 done
@@ -85,7 +85,7 @@ for source in $(find tools -name 'test_*.cpp' | sort); do
     if ! "$COMPILATEUR" -std=c++20 -Wall -Wextra -Werror \
             -o "$SORTIE/$nom" "$source" >"$SORTIE/$nom.compile" 2>&1; then
         echo "COMPILATION"
-        sed 's/^/    /' "$SORTIE/$nom.compile" | head -12
+        sed 's/^/    /' "$SORTIE/$nom.compile" | awk 'NR<=12'
         echecs=$((echecs + 1))
         continue
     fi
@@ -94,7 +94,7 @@ for source in $(find tools -name 'test_*.cpp' | sort); do
         echo "$(echo "$resultat" | tail -1)"
     else
         echo "ECHEC"
-        echo "$resultat" | grep -A2 'ECHEC' | head -24 | sed 's/^/    /'
+        echo "$resultat" | grep -A2 'ECHEC' | awk 'NR<=24' | sed 's/^/    /'
         echecs=$((echecs + 1))
     fi
 done

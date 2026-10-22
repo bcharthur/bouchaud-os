@@ -50,18 +50,66 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from etat_cycle import ECHEC, NON_QUALIFIANT, OK, code_de_sortie  # noqa: E402
+
 RACINE = Path(__file__).resolve().parents[3]
 CHECK_BUDGETS = RACINE / "tools" / "ci" / "check_budgets.py"
 
 # Ce que les familles de charge ecrivent. Relu ici pour le RAPPORT, jamais pour
 # le verdict de campagne : celui-la est deja dans `summary.json`.
-RESULTAT = re.compile(r"RESULTAT : (\d+) verification\(s\) en echec \((\d+)")
+# BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : une sonde qui n'a pas pu juger ecrit
+# `RESULTAT : NON_QUALIFIANT n verification(s) en echec, q non
+# qualifiante(s) (p passees)` -- jamais `RESULTAT : 0`, et ce n'est pas une
+# reussite.
+RESULTAT = re.compile(
+    r"RESULTAT : (NON_QUALIFIANT )?(\d+) verification\(s\) en echec"
+    r"(?:, (\d+) non qualifiante\(s\))? \((\d+)")
 PIRE = re.compile(r"\[SCHED-NG-PIRE\][^\n]*")
 FIN = re.compile(r"=== AUTORUN FIN === statut=(\d+)")
 ABSENT_REQUIS = re.compile(r"^\s*(\S+) : REQUIS mais absent", re.M)
 ABSENT_OPTIONNEL = re.compile(r"^\s*(\S+) : absent du journal", re.M)
 MESUREES = re.compile(r"execution : (\d+)/(\d+) grandeur\(s\) mesuree\(s\)")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Le prefixe d'horodatage de la console (`[19:40:24][ 97%:  0%:  2%][FPS: --] `).
+PREFIXE_CONSOLE = re.compile(r"^(?:\[[^\]]*\]){2}\[FPS:[^\]]*\] ")
+# Ce qu'une sonde dit d'une verification ROUGE (`  - nom : detail`), et ses
+# mesures de latence (ordonnanceur-probe).
+LIGNE_ECHEC = re.compile(r"^\s+- \S")
+LIGNE_LATENCE = re.compile(r"^\s+(au repos|sans charge|sous charge)[^\n]*median")
+# BOUCHAUD_ATTRIBUTION_REVEIL_V1 : ce que le noyau dit du pire reveil de chaque
+# phase (balayage tardif, attente d'election, tics perdus, qui tenait le
+# coeur). Un echec de latence sans elle ne dit pas s'il vient du noyau ou de
+# l'emulateur.
+LIGNE_ATTRIBUTION = re.compile(r"^\s+attribution [^:]+ : reveils=")
+# BOUCHAUD_ATTRIBUTION_REVEIL_V2 / BOUCHAUD_SONDE_ORDO_QUALIFICATION_V1 : la
+# ventilation de chaque phase, la preuve chiffree de chaque comparaison, le
+# verdict de chaque tentative.
+LIGNE_QUALIFICATION = re.compile(
+    r"^\s+(ventilation [^:]+ : seuil_us=|comptes [^:]+ : preuve_hote=|PREUVE |phase non jugeable|tentative \d+/\d+ : )"
+    r"|^VERDICT_SONDE : ")
+
+
+def details_sondes(texte: str) -> list[list[str]]:
+    """Pour chaque ligne RESULTAT, les lignes d'echec et de latence qui la precedent.
+
+    BOUCHAUD_ENDURANCE_ECHEC_NOMME_V1 -- Endurance hebdomadaire 38130602802 :
+    « sonde : 1 echec(s), 3 passee(s) » sur les quatre topologies, et rien de
+    plus dans le journal du job ; l'artefact, lui, n'est pas toujours lisible.
+    Un echec qui ne dit pas QUELLE verification a rougi oblige a relancer la
+    campagne pour l'apprendre.
+    """
+    blocs: list[list[str]] = []
+    courant: list[str] = []
+    for brute in texte.splitlines():
+        ligne = PREFIXE_CONSOLE.sub("", brute.rstrip("\r"))
+        if RESULTAT.search(ligne):
+            blocs.append(courant[-40:])
+            courant = []
+        elif (LIGNE_ECHEC.match(ligne) or LIGNE_LATENCE.match(ligne) or LIGNE_ATTRIBUTION.match(ligne)
+              or LIGNE_QUALIFICATION.match(ligne)):
+            courant.append(ligne.strip())
+    return blocs
 
 
 def trace_du_cycle(resume: Path, cycle: dict) -> Path | None:
@@ -106,11 +154,17 @@ def evalue_budgets(trace: Path, check_budgets: Path) -> dict:
 def releve_noyau(trace: Path) -> dict:
     texte = ANSI.sub("", trace.read_text(encoding="utf-8", errors="replace"))
     fin = FIN.findall(texte)
+    details = details_sondes(texte)
+    resultats = [
+        {"echecs": int(e), "passees": int(t), "non_qualifiant": bool(nq),
+         "non_qualifiantes": int(q or 0)}
+        for nq, e, q, t in RESULTAT.findall(texte)
+    ]
+    for r, d in zip(resultats, details):
+        r["details"] = d
     return {
         "autorun_statut": int(fin[-1]) if fin else None,
-        "resultats_sondes": [
-            {"echecs": int(e), "passees": int(t)} for e, t in RESULTAT.findall(texte)
-        ],
+        "resultats_sondes": resultats,
         "pire_attente": PIRE.findall(texte),
     }
 
@@ -118,11 +172,15 @@ def releve_noyau(trace: Path) -> dict:
 def juge(dossier: Path, check_budgets: Path) -> dict:
     resume = dossier / "summary.json"
     fautes: list[str] = []
-    rapport: dict = {"dossier": str(dossier), "fautes": fautes}
+    # BOUCHAUD_ENDURANCE_NON_QUALIFIANT_V1 : ce qui n'a pas pu etre JUGE, a
+    # part de ce qui a echoue. Jamais un succes ; jamais impute au noyau.
+    non_qualifies: list[str] = []
+    rapport: dict = {"dossier": str(dossier), "fautes": fautes, "non_qualifies": non_qualifies}
 
     if not resume.is_file():
         fautes.append(f"campagne : {resume} absent -- soak.py n'a pas tourne jusqu'au bout")
         rapport["ok"] = False
+        rapport["verdict"] = ECHEC
         return rapport
     donnees = json.loads(resume.read_text(encoding="utf-8"))
     cycles = donnees.get("cycles", [])
@@ -130,6 +188,7 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
     rapport["campagne"] = {
         "cycles": len(cycles),
         "reussis": reussis,
+        "non_qualifiants": sum(1 for c in cycles if c.get("etat") == NON_QUALIFIANT),
         "tronques_evites": donnees.get("cycles_tronques_evites"),
         "cpus": donnees.get("cpus"),
         "disque": donnees.get("disque"),
@@ -144,9 +203,13 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
 
     rapport["cycles"] = []
     for index, cycle in enumerate(cycles, 1):
+        # Un resume sans `etat` (avant V1) : tout cycle rate est un echec.
+        etat = cycle.get("etat") or (OK if cycle.get("ok") else ECHEC)
         fiche: dict = {
             "index": index,
             "ok": bool(cycle.get("ok")),
+            "etat": etat,
+            "raison": cycle.get("raison", ""),
             "log_publie": cycle.get("log"),
             "qemu_rc": cycle.get("returncode"),
             "timeout": cycle.get("timed_out"),
@@ -154,7 +217,12 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
             "marqueurs_absents": cycle.get("required_markers_missing", []),
         }
         rapport["cycles"].append(fiche)
-        if not fiche["ok"]:
+        if etat == NON_QUALIFIANT and not fiche["ok"]:
+            non_qualifies.append(
+                f"qualification : cycle {index} NON_QUALIFIANT -- sonde : {fiche['raison']} "
+                f"(rien d'impute au noyau ; jamais une reussite)"
+            )
+        elif not fiche["ok"]:
             fautes.append(
                 f"noyau : cycle {index} en echec "
                 f"({len(fiche['fatals'])} faute(s) fatale(s), "
@@ -179,7 +247,8 @@ def juge(dossier: Path, check_budgets: Path) -> dict:
                 f"({len(budgets['requis_absents'])} requis absent(s))"
             )
 
-    rapport["ok"] = not fautes
+    rapport["verdict"] = ECHEC if fautes else (NON_QUALIFIANT if non_qualifies else OK)
+    rapport["ok"] = rapport["verdict"] == OK
     return rapport
 
 
@@ -189,7 +258,8 @@ def texte(rapport: dict) -> str:
     if campagne:
         lignes.append(
             f"1. CAMPAGNE     : {campagne['cycles']} cycle(s) execute(s), "
-            f"{campagne['reussis']} reussi(s), SMP{campagne['cpus']}, "
+            f"{campagne['reussis']} reussi(s), {campagne['non_qualifiants']} NON_QUALIFIANT(s), "
+            f"SMP{campagne['cpus']}, "
             f"{campagne['marqueurs_exiges']} marqueur(s) exige(s), "
             f"tronques evites={campagne['tronques_evites']}"
         )
@@ -210,18 +280,24 @@ def texte(rapport: dict) -> str:
             )
         noyau = fiche.get("noyau", {})
         lignes.append(
-            f"4. NOYAU c{fiche['index']:<5}: ok={fiche['ok']} fatals={len(fiche['fatals'])} "
+            f"4. NOYAU c{fiche['index']:<5}: etat={fiche['etat']} ok={fiche['ok']} fatals={len(fiche['fatals'])} "
             f"marqueurs_absents={fiche['marqueurs_absents']} "
             f"autorun_statut={noyau.get('autorun_statut')}"
         )
         for r in noyau.get("resultats_sondes", []):
-            lignes.append(f"     sonde : {r['echecs']} echec(s), {r['passees']} passee(s)")
+            lignes.append(
+                f"     sonde : {r['echecs']} echec(s), {r['passees']} passee(s)"
+                + (f", NON_QUALIFIANT ({r['non_qualifiantes']} non qualifiante(s))"
+                   if r.get("non_qualifiant") else ""))
+            if r["echecs"] or r.get("non_qualifiant"):
+                lignes.extend(f"       {d}" for d in r.get("details", []))
         for p in noyau.get("pire_attente", []):
             lignes.append(f"     {p}")
         if fiche.get("budgets_sortie") and fiche["budgets"]["rc"] != 0:
             lignes.extend("     | " + l for l in fiche["budgets_sortie"].rstrip().splitlines())
-    lignes.append("VERDICT : " + ("OK" if rapport["ok"] else "ECHEC"))
+    lignes.append("VERDICT : " + rapport.get("verdict", OK if rapport["ok"] else ECHEC))
     lignes.extend("  - " + f for f in rapport["fautes"])
+    lignes.extend("  - " + f for f in rapport.get("non_qualifies", []))
     return "\n".join(lignes)
 
 
@@ -241,7 +317,7 @@ def main() -> int:
     if resume_gh:
         with open(resume_gh, "a", encoding="utf-8") as f:
             f.write("```\n" + rendu + "\n```\n")
-    return 0 if rapport["ok"] else 1
+    return code_de_sortie(rapport["verdict"])
 
 
 if __name__ == "__main__":

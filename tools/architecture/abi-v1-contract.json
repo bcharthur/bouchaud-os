@@ -1,0 +1,34 @@
+{
+  "version": {"ABI_MAJOR": 1, "ABI_MINOR": 0},
+  "syscalls": {
+    "VERSION": 0, "HANDLE_CLOSE": 1, "HANDLE_DUP": 2,
+    "HANDLE_INFO": 3, "HANDLE_COUNT": 4,
+    "CHANNEL_CREATE": 16, "CHANNEL_SEND": 17, "CHANNEL_RECV": 18,
+    "CHANNEL_SEND_ATTENUE": 19,
+    "EVENT_CREATE": 32, "EVENT_SIGNAL": 33, "EVENT_RESET": 34,
+    "EVENT_QUERY": 35,
+    "WAITSET_CREATE": 48, "WAITSET_ADD": 49,
+    "WAITSET_REMOVE": 50, "WAITSET_POLL": 51,
+    "SHM_CREATE": 64, "SHM_SIZE": 65, "SHM_READ": 66, "SHM_WRITE": 67
+  },
+  "errors": {
+    "InvalidCall": 1, "InvalidArgument": 2, "BadHandle": 3,
+    "WrongType": 4, "AccessDenied": 5, "WouldBlock": 6,
+    "BufferTooSmall": 7, "QueueFull": 8, "PeerClosed": 9,
+    "NoSpace": 10, "Fault": 11, "TooLarge": 12, "NotFound": 13
+  },
+  "object_kinds": {
+    "Channel": 1, "Event": 2, "WaitSet": 3, "SharedRegion": 4,
+    "LegacyFile": 256, "LegacyWindow": 257,
+    "LegacySocket": 258, "LegacyDevice": 259
+  },
+  "rights_bits": {
+    "READ": 0, "WRITE": 1, "SIGNAL": 2, "MAP": 3,
+    "DUP": 4, "TRANSFER": 5, "INSPECT": 6, "WAIT": 7
+  },
+  "wire": {
+    "RecvMeta": ["bytes:u64", "handles:u64"],
+    "HandleInfo": ["kind:u32", "rights:u32", "signals:u32", "reserved:u32"],
+    "WaitEvent": ["key:u64", "signals:u32", "reserved:u32"]
+  }
+}

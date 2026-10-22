@@ -40,6 +40,8 @@ pub use legacy::{
     note_pixels_dessines,
     dernier_present_rect,
     lfb_present_generation,
+    debut_trame,
+    fin_trame,
     trace_present,
     height,
     width,
