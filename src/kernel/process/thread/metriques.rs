@@ -627,8 +627,9 @@ pub struct ProcProcessusCumul {
 // Ancien code: fetch_max(timestamp) puis deux swap independants => faux reculs
 // lorsque deux lecteurs concurrents terminent dans un ordre different.
 // N'impacte aucune valeur de /proc/stat ni aucun compteur de temps CPU.
-static DERNIER_CUMUL_DIAG: crate::kernel::sync::SpinLockIrq<(u64, u64, u64)> =
-    crate::kernel::sync::SpinLockIrq::new((0, 0, 0));
+// (scan_end, user, system, scan_start); retain the raw diagnostics.
+static DERNIER_CUMUL_DIAG: crate::kernel::sync::SpinLockIrq<(u64, u64, u64, u64)> =
+    crate::kernel::sync::SpinLockIrq::new((0, 0, 0, 0));
 
 /// Comptabilite CPU d'une tache, lue d'un seul tenant.
 ///
@@ -667,7 +668,9 @@ struct LectureCompta {
 /// interruptions et ne contiennent aucune attente, et aucun lecteur ne tourne
 /// en contexte d'interruption. Une attente anormalement longue est signalee
 /// une fois (`[COMPTA] LECTEUR_ATTEND`).
-fn lecture_compta(task: &Task, now: u64) -> LectureCompta {
+// P13_V14_COHERENT_TASK_CLOCK: scan start is not a valid timestamp for a
+// task's CPU sequence sampled later. Keep the caller's window separately.
+fn lecture_compta(task: &Task, _scan_start_ns: u64) -> LectureCompta {
     let mut essais = 0u64;
     loop {
         let avant = task.compta_seq.charge();
@@ -689,10 +692,13 @@ fn lecture_compta(task: &Task, now: u64) -> LectureCompta {
                 let acc_noyau = COMPTA_NOYAU_NS[c].load(Ordering::Relaxed);
                 let debut = COMPTA_DEBUT_NS[c].load(Ordering::Relaxed);
                 let en_noyau = COMPTA_EN_NOYAU[c].load(Ordering::Relaxed);
+                // P13_V14_COHERENT_TASK_CLOCK: time is read INSIDE the
+                // CPU sequence verified below, as in proc_cpu_cumul().
+                let now_cpu = crate::kernel::timer::monotonic_ns();
                 core::sync::atomic::fence(Ordering::Acquire);
                 let b2 = COMPTA_SEQ_CPU[c].load(Ordering::Relaxed);
                 bloc_coherent = b1 & 1 == 0 && b1 == b2;
-                let fragment = if debut != 0 { now.saturating_sub(debut) } else { 0 };
+                let fragment = if debut != 0 { now_cpu.saturating_sub(debut) } else { 0 };
                 vivant_user = acc_user.saturating_add(if en_noyau { 0 } else { fragment });
                 vivant_noyau = acc_noyau.saturating_add(if en_noyau { fragment } else { 0 });
             }
@@ -866,8 +872,15 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
     let mut pire_live = 0u64;
     let mut pire_coeur = usize::MAX;
     let mut pire_noyau = false;
+    // P13_V11_SNAPSHOT_ACCEPTED: copies accepted by each CPU seqlock,
+    // never fresh atomic reads after the scan has finished.
+    // tuple: (seq, cumul_user, cumul_kernel, pending_user, pending_kernel,
+    //         debut, mode_kernel, now_cpu, live_user, live_kernel)
+    let mut proof = [(0u64, 0u64, 0u64, 0u64, 0u64,
+                      0u64, false, 0u64, 0u64, 0u64); MAX_CPUS];
+    let scan_start_v11 = crate::kernel::timer::monotonic_ns();
     for cpu in 0..MAX_CPUS {
-        let (cu, cn, vu, vn) = loop {
+        let (seq_v11, cu, cn, au, an, debut_v11, mode_v11, time_v11, vu, vn) = loop {
             let s1 = COMPTA_SEQ_CPU[cpu].load(Ordering::Acquire);
             if s1 & 1 != 0 {
                 core::hint::spin_loop();
@@ -890,8 +903,10 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
             let fragment = if debut != 0 { now_cpu.saturating_sub(debut) } else { 0 };
             let vu = acc_user.saturating_add(if en_noyau { 0 } else { fragment });
             let vn = acc_noyau.saturating_add(if en_noyau { fragment } else { 0 });
-            break (cu, cn, vu, vn);
+            break (s1, cu, cn, acc_user, acc_noyau, debut, en_noyau, now_cpu, vu, vn);
         };
+        proof[cpu] = (seq_v11, cu, cn, au, an, debut_v11,
+                      mode_v11, time_v11, vu, vn);
         cumul_user_seul = cumul_user_seul.saturating_add(cu);
         cumul_sys_seul = cumul_sys_seul.saturating_add(cn);
         live_user = live_user.saturating_add(vu);
@@ -927,16 +942,40 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         let recul = {
             let mut precedent = DERNIER_CUMUL_DIAG.lock();
             if now > precedent.0 {
+                let overlapping = scan_start_v11 < precedent.0;
                 let recul = (user_ns < precedent.1 || system_ns < precedent.2)
-                    .then_some((precedent.1, precedent.2));
-                *precedent = (now, user_ns, system_ns);
+                    .then_some((precedent.1, precedent.2, precedent.0, overlapping));
+                *precedent = (now, user_ns, system_ns, scan_start_v11);
                 recul
             } else {
                 None
             }
         };
         // Jamais imprimer en tenant un spinlock IRQ-safe.
-        if let Some((avant_user, avant_sys)) = recul {
+        if let Some((avant_user, avant_sys, previous_end, overlapping)) = recul {
+            // P13_V14_SCAN_CLASS: distinguish overlapping read windows from
+            // regressions between causally ordered (non-overlapping) scans.
+            // No value, threshold, or original PROC_STAT_RECUL line is hidden.
+            crate::serial_println!(
+                "P13_V14_SCAN_CLASS overlap={} previous_end={} scan_start={} scan_end={} raw_user={} prev_user={} raw_sys={} prev_sys={}",
+                overlapping as u8, previous_end, scan_start_v11, now,
+                user_ns, avant_user, system_ns, avant_sys,
+            );
+            // Report the ACTUAL per-CPU snapshots used in this calculation.
+            // Never acquire writer locks or re-read CUMUL_* outside the seq.
+            crate::serial_println!(
+                "P13_V11_PROOF_BEGIN scan_start={} scan_end={} online={} raw_u={} raw_s={} prev_u={} prev_s={}",
+                scan_start_v11, now, online, user_ns, system_ns, avant_user, avant_sys,
+            );
+            for cpu in 0..MAX_CPUS {
+                let (seq, cu, cn, au, an, debut, kernel, sampled, vu, vn) = proof[cpu];
+                crate::serial_println!(
+                    "P13_V11_PROOF_CPU cpu={} online={} seq={} cumul_u={} cumul_s={} pending_u={} pending_s={} debut={} kernel={} sampled={} live_u={} live_s={} total_u={} total_s={}",
+                    cpu, (cpu < online) as u8, seq, cu, cn, au, an, debut, kernel as u8,
+                    sampled, vu, vn, cu.saturating_add(vu), cn.saturating_add(vn),
+                );
+            }
+            crate::serial_println!("P13_V11_PROOF_END");
             crate::serial_println!(
                 "PROC_STAT_RECUL t_ns={} user_ns={} avant_user_ns={} \
 sys_ns={} avant_sys_ns={} cumul_user={} cumul_sys={} live_user={} live_sys={} \

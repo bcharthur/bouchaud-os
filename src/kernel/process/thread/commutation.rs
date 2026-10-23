@@ -224,10 +224,17 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
     // BOUCHAUD_COMPTA_SEQLOCK_V1 : le curseur ET le bloc par CPU s'arment
     // sous la sequence -- un lecteur qui voit le curseur arme lit le bloc.
     compta_section(task, || {
-        note_armement_compta(cpu_id, now, ARMEMENT_ELECTION, task.tid as u64);
-        task.slice_start_ns.range(now);
-        task.last_account_ns.range(now);
-        COMPTA_DEBUT_NS[cpu_id].store(now, Ordering::Relaxed);
+        // P13_V12_ARMEMENT_HORLOGE_EN_SECTION : le `now` de l'election
+        // precede les mises a jour du scheduler et l'ouverture du seqlock.
+        // Sous TCG/KVM, le vCPU peut etre suspendu dans cet intervalle :
+        // publier ce timestamp ancien comptabilise un temps ou la tache
+        // n'etait pas encore armee. Comme pour `account_slice_end` et le
+        // retour de `hlt`, lire l'instant DANS la section comptable.
+        let compta_now = crate::kernel::timer::monotonic_ns();
+        note_armement_compta(cpu_id, compta_now, ARMEMENT_ELECTION, task.tid as u64);
+        task.slice_start_ns.range(compta_now);
+        task.last_account_ns.range(compta_now);
+        COMPTA_DEBUT_NS[cpu_id].store(compta_now, Ordering::Relaxed);
         COMPTA_USER_NS[cpu_id].store(0, Ordering::Relaxed);
         COMPTA_NOYAU_NS[cpu_id].store(0, Ordering::Relaxed);
         COMPTA_EN_NOYAU[cpu_id].store(task.in_kernel.charge(), Ordering::Relaxed);
