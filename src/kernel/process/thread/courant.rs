@@ -265,18 +265,22 @@ fn rsp_courant_passation() -> u64 {
 /// scheduler a besoin, sans bloquer les autres CPU.
 #[inline]
 fn commence_transition_ordonnanceur() -> bool {
-    let cpu = local_cpu();
-    if TRANSITION_ORDONNANCEUR[cpu]
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        TRANSITIONS_ORDONNANCEUR_REFUSEES.fetch_add(1, Ordering::Relaxed);
-        return false;
-    }
-    crate::kernel::sync::lockdep::before_acquire(LockClass::SchedulerTransition);
-    crate::kernel::sync::lockdep::acquired(LockClass::SchedulerTransition);
-    TRANSITIONS_ORDONNANCEUR.fetch_add(1, Ordering::Relaxed);
-    true
+    // L'identite du CPU, la porte et lockdep forment une seule operation
+    // locale : un fil noyau ne doit pas migrer au milieu de celle-ci.
+    interrupts::without_interrupts(|| {
+        let cpu = local_cpu();
+        if TRANSITION_ORDONNANCEUR[cpu]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            TRANSITIONS_ORDONNANCEUR_REFUSEES.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        crate::kernel::sync::lockdep::before_acquire(LockClass::SchedulerTransition);
+        crate::kernel::sync::lockdep::acquired(LockClass::SchedulerTransition);
+        TRANSITIONS_ORDONNANCEUR.fetch_add(1, Ordering::Relaxed);
+        true
+    })
 }
 
 /// Une transition est-elle OUVERTE sur ce CPU sans passation a terminer ?
@@ -305,10 +309,13 @@ pub(super) fn transition_ouverte_sans_passation(cpu: usize) -> bool {
 /// verifier une passation deja acquittee.
 #[inline]
 fn termine_transition_ordonnanceur() {
-    let cpu = local_cpu();
-    if TRANSITION_ORDONNANCEUR[cpu].swap(false, Ordering::AcqRel) {
-        crate::kernel::sync::lockdep::released(LockClass::SchedulerTransition);
-    }
+    // Meme invariant CPU-local pour rendre la porte et acquitter lockdep.
+    interrupts::without_interrupts(|| {
+        let cpu = local_cpu();
+        if TRANSITION_ORDONNANCEUR[cpu].swap(false, Ordering::AcqRel) {
+            crate::kernel::sync::lockdep::released(LockClass::SchedulerTransition);
+        }
+    });
 }
 
 /// Prepare la sortie d'une tache SANS la publier.

@@ -753,41 +753,39 @@ fn proc_fil() -> Vec<u8> {
 
 fn proc_stat_global() -> Vec<u8> {
     use alloc::format;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use crate::kernel::sync::SpinLockIrq;
 
-    // BOUCHAUD_PROC_STAT_PUBLICATION_MONOTONE_V1
-    // Deux open("/proc/stat") concurrents peuvent calculer puis publier
-    // leurs instantanes dans des ordres differents (KVM 38778345917 :
-    // utime 1337 -> 1336). Chaque champ cumulatif doit etre linearise.
-    // Les valeurs brutes et leurs anomalies restent diagnostiquees par
-    // proc_cpu_cumul() / PROC_STAT_RECUL, sans etre remplacees ici en interne.
-    static USER_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
-    static SYSTEM_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
-    static IDLE_PUBLIE_NS: AtomicU64 = AtomicU64::new(0);
-    static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
+    // P13_COHERENT_PUBLICATION_EXPERIMENT_V4
+    // A/B experimental: one publication lock for the whole triple.
+    // The lock is IRQ-safe; the raw snapshot is taken BEFORE acquisition.
+    // We do not hold this global lock while traversing task/CPU accounting.
+    // This preserves field monotonicity and makes each published tuple atomic.
+    static PUBLIE: SpinLockIrq<(u64, u64, u64, u64)> =
+        SpinLockIrq::new((0, 0, 0, 0));
 
     let c = crate::kernel::task::proc_cpu_cumul();
-    let user_avant = USER_PUBLIE_NS.fetch_max(c.user_ns, Ordering::AcqRel);
-    let system_avant = SYSTEM_PUBLIE_NS.fetch_max(c.system_ns, Ordering::AcqRel);
-    let idle_avant = IDLE_PUBLIE_NS.fetch_max(c.idle_ns, Ordering::AcqRel);
-    let user_ns = user_avant.max(c.user_ns);
-    let system_ns = system_avant.max(c.system_ns);
-    let idle_ns = idle_avant.max(c.idle_ns);
-    if user_ns != c.user_ns || system_ns != c.system_ns || idle_ns != c.idle_ns {
-        let corrections = CORRECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
-        // Les premieres preuves sont conservees ; pas de log a chaque
-        // lecture de /proc/stat en regime soutenu.
-        if corrections <= 8 {
-            crate::serial_println!(
-                "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
-                corrections, c.user_ns, user_ns, c.system_ns, system_ns,
-                c.idle_ns, idle_ns,
-            );
+    let (user_ns, system_ns, idle_ns, correction) = {
+        let mut state = PUBLIE.lock();
+        let u = state.0.max(c.user_ns);
+        let s = state.1.max(c.system_ns);
+        let i = state.2.max(c.idle_ns);
+        if u != c.user_ns || s != c.system_ns || i != c.idle_ns {
+            state.3 = state.3.saturating_add(1);
         }
+        state.0 = u;
+        state.1 = s;
+        state.2 = i;
+        (u, s, i, if u != c.user_ns || s != c.system_ns || i != c.idle_ns {
+            state.3
+        } else { 0 })
+    };
+    if correction > 0 && correction <= 8 {
+        crate::serial_println!(
+            "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
+            correction, c.user_ns, user_ns, c.system_ns, system_ns,
+            c.idle_ns, idle_ns,
+        );
     }
-    // Format Linux : user nice system idle iowait irq softirq steal guest guest_nice.
-    // Ladybird ne somme que user/system/idle/irq/softirq. Les categories que
-    // Bouchaud ne distingue pas sont zero, pas inventees.
     format!(
         "cpu  {} 0 {} {} 0 0 0 0 0 0\n",
         proc_ticks(user_ns),

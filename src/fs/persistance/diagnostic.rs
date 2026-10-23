@@ -9,6 +9,15 @@ pub fn log_transaction_stats() {
         TX_WRITTEN.load(Ordering::Relaxed), TX_SKIPPED.load(Ordering::Relaxed),
         TX_MAX_NS.load(Ordering::Relaxed),
     );
+    // P13_FSYNC_PHASE_V6: lock and barrier components.
+    crate::serial_println!(
+        "[PERSIST-PHASE] lock_ns={} lock_max_ns={} barrier_ns={} barrier_max_ns={} slow_calls={}",
+        TX_LOCK_WAIT_NS.load(Ordering::Relaxed),
+        TX_LOCK_WAIT_MAX_NS.load(Ordering::Relaxed),
+        TX_BARRIER_NS.load(Ordering::Relaxed),
+        TX_BARRIER_MAX_NS.load(Ordering::Relaxed),
+        TX_SLOW_CALLS.load(Ordering::Relaxed),
+    );
     // BOUCHAUD_C5_COMMIT_AB_V1
     //
     // La GENERATION est ce qui distingue l'ancien etat du neuf. La publier

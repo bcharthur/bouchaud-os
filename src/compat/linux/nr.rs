@@ -51,6 +51,7 @@ pub const FCNTL: u64 = 72;
 pub const SYNC: u64 = 162;
 pub const FSYNC: u64 = 74;
 pub const FDATASYNC: u64 = 75;
+pub const TRUNCATE: u64 = 76;
 pub const FTRUNCATE: u64 = 77;
 pub const GETDENTS: u64 = 78;
 pub const GETCWD: u64 = 79;
@@ -231,6 +232,7 @@ pub fn name(number: u64) -> &'static str {
         KILL => "kill",
         UNAME => "uname",
         FCNTL => "fcntl",
+        TRUNCATE => "truncate",
         FTRUNCATE => "ftruncate",
         FSYNC => "fsync",
         FDATASYNC => "fdatasync",
@@ -366,7 +368,7 @@ _ => "?",
 /// Appels systeme implementes, regroupes par famille (commande `syscalls`).
 pub fn print_implemented() {
     let groups: [(&str, &[u64]); 9] = [
-        ("E/S", &[READ, WRITE, OPEN, OPENAT, CLOSE, LSEEK, READV, WRITEV, PREAD64, PWRITE64, DUP, DUP2, DUP3, PIPE, PIPE2, FCNTL, IOCTL, FTRUNCATE]),
+        ("E/S", &[READ, WRITE, OPEN, OPENAT, CLOSE, LSEEK, READV, WRITEV, PREAD64, PWRITE64, DUP, DUP2, DUP3, PIPE, PIPE2, FCNTL, IOCTL, TRUNCATE, FTRUNCATE]),
         ("fichiers", &[STAT, LSTAT, FSTAT, NEWFSTATAT, STATX, ACCESS, FACCESSAT, READLINK, READLINKAT, GETDENTS64, GETCWD, CHDIR, MKDIR, UNLINK, RENAME, RENAMEAT, RENAMEAT2]),
         ("attente", &[POLL, PPOLL, SELECT, EPOLL_CREATE1, EPOLL_CTL, EPOLL_WAIT, EVENTFD2, TIMERFD_CREATE, TIMERFD_SETTIME, TIMERFD_GETTIME]),
         ("memoire", &[BRK, MMAP, MUNMAP, MPROTECT, MREMAP, MADVISE, MSYNC]),

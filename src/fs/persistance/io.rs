@@ -106,7 +106,12 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     // `false`, on continue avec la garantie d'ordre seule -- celle qu'on avait
     // avant --, et le compteur permet de le SAVOIR autrement qu'apres une
     // coupure de courant.
+    // P13_FSYNC_PHASE_V6: retain the mandatory durability barrier.
+    let barrier_start = crate::kernel::timer::monotonic_ns();
     volume_barriere();
+    let barrier_ns = crate::kernel::timer::monotonic_ns().saturating_sub(barrier_start);
+    TX_BARRIER_NS.fetch_add(barrier_ns, Ordering::Relaxed);
+    TX_BARRIER_MAX_NS.fetch_max(barrier_ns, Ordering::Relaxed);
 
     // LE COMMIT. Un seul secteur, ecrit dans l'emplacement de superbloc que le
     // montage courant n'utilise PAS. Tant qu'il n'a pas ete ecrit, le systeme
@@ -132,7 +137,12 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     // rester en cache, et `fsync` rendrait la main en annoncant durable un
     // etat qui ne l'est pas encore. C'est la promesse que `fsync` fait a son
     // appelant, pas une precaution supplementaire.
+    // P13_FSYNC_PHASE_V6: retain the mandatory durability barrier.
+    let barrier_start = crate::kernel::timer::monotonic_ns();
     volume_barriere();
+    let barrier_ns = crate::kernel::timer::monotonic_ns().saturating_sub(barrier_start);
+    TX_BARRIER_NS.fetch_add(barrier_ns, Ordering::Relaxed);
+    TX_BARRIER_MAX_NS.fetch_max(barrier_ns, Ordering::Relaxed);
     // Le commit a eu lieu : l'etat V1 vient d'etre remplace d'un seul secteur,
     // et il n'y a plus rien a preserver.
     oublie_la_v1();

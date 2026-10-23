@@ -2216,6 +2216,42 @@ pub fn sys_renameat2(olddirfd: i32, from_addr: u64, newdirfd: i32, to_addr: u64,
     }
 }
 
+/// Linux truncate(2) (syscall 76): reduction/extension via chemin.
+/// Resolution et mutation sont sous une seule prise RAMFS (anti-recyclage inode).
+pub fn sys_truncate(path_addr: u64, length: u64) -> i64 {
+    let raw = match crate::kernel::abi::resolve_user_path(path_addr) {
+        Some(path) => path,
+        None => return -errno::EFAULT,
+    };
+    let path = match absolute_at(AT_FDCWD, raw.as_str()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    if length > ramfs::MAX_FILE_SIZE as u64 {
+        return -errno::EFBIG;
+    }
+    // Les controles DAC et sandbox doivent porter sur l'ecriture du fichier.
+    if let Err(code) = security_recheck_open(path.as_str(), O_WRONLY) {
+        return code;
+    }
+    let mut fs = ramfs::fs();
+    let Some(node) = fs.resolve(path.as_str(), 0) else {
+        return -errno::ENOENT;
+    };
+    if node >= fs.nodes.len() || !fs.nodes[node].used {
+        return -errno::ENOENT;
+    }
+    if fs.nodes[node].kind != NodeKind::File {
+        return -errno::EISDIR;
+    }
+    if backing::is_disk_backed(node) {
+        return -errno::EROFS;
+    }
+    fs.nodes[node].content.resize(length as usize, 0);
+    fs.touche(node);
+    0
+}
+
 /// `ftruncate`.
 pub fn sys_ftruncate(fd: i32, length: usize) -> i64 {
     let process = task::current_process();

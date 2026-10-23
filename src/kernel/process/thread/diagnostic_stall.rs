@@ -747,7 +747,7 @@ pub fn sert_diagnostic() {
     let ipi_age = |cpu: usize| {
         let count = STALL_IPI_COUNT[cpu].load(Ordering::Acquire);
         let tick = STALL_IPI_TICK[cpu].load(Ordering::Acquire);
-        if count == 0 { 0 } else { now.wrapping_sub(tick) }
+        if count == 0 { 0 } else { now.saturating_sub(tick) }
     };
     crate::serial_println!(
         "[SMP-IPI] t={} c0={}/{}ms/{:#x}/u{} c1={}/{}ms/{:#x}/u{} c2={}/{}ms/{:#x}/u{} c3={}/{}ms/{:#x}/u{}",

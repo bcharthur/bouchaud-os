@@ -94,22 +94,38 @@ int main(void)
     for (int i = 0; i < MUTATEURS; i++)
         pthread_create(&fils[i], NULL, mutateur, (void *)(long)i);
 
+    /* P13_PERSIST_OBSERVABILITY_20261022 — aucune modification du verdict. */
+    long fsync_duree_max_ms = 0, fsync_duree_total_ms = 0;
+    long fsync_succes = 0, fsync_echecs = 0;
+    long ouvertures_echec = 0, ecritures_echec = 0;
     long fsyncs = 0, echecs = 0, dernier = -1;
     long t0 = maintenant_ms();
     while (maintenant_ms() - t0 < SECONDES * 1000) {
         int fd = open(DOSSIER "/temoin", O_CREAT | O_WRONLY | O_TRUNC, 0644);
         if (fd < 0) {
             echecs++;
+            ouvertures_echec++;
             continue;
         }
         char ligne[32];
         int n = snprintf(ligne, sizeof ligne, "%ld\n", fsyncs);
-        if (write(fd, ligne, (size_t)n) != n)
+        if (write(fd, ligne, (size_t)n) != n) {
             echecs++;
-        if (fsync(fd) != 0)
+            ecritures_echec++;
+        }
+        long avant_fsync = maintenant_ms();
+        int fsync_rc = fsync(fd);
+        long duree_fsync = maintenant_ms() - avant_fsync;
+        if (duree_fsync < 0) duree_fsync = 0;
+        fsync_duree_total_ms += duree_fsync;
+        if (duree_fsync > fsync_duree_max_ms) fsync_duree_max_ms = duree_fsync;
+        if (fsync_rc != 0) {
             echecs++;
-        else
+            fsync_echecs++;
+        } else {
+            fsync_succes++;
             dernier = fsyncs;
+        }
         close(fd);
         fsyncs++;
     }
@@ -130,6 +146,10 @@ int main(void)
     int ok = echecs == 0 && fsyncs >= 10 && total >= 100 && temoin_ok;
     printf("PERSIST_COURSE fsyncs=%ld mutations=%ld echecs=%ld temoin=%s\n", fsyncs, total, echecs,
         temoin_ok ? "ok" : "ECHEC");
+    printf("P13_PERSIST_DETAIL fsync_succes=%ld fsync_echecs=%ld fsync_max_ms=%ld fsync_total_ms=%ld "
+           "ouvertures_echec=%ld ecritures_echec=%ld duree_cible_ms=%d\n",
+           fsync_succes, fsync_echecs, fsync_duree_max_ms, fsync_duree_total_ms,
+           ouvertures_echec, ecritures_echec, SECONDES * 1000);
     printf(ok ? "PERSIST_COURSE_OK\n" : "PERSIST_COURSE_ECHEC\n");
     return ok ? 0 : 1;
 }

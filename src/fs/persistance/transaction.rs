@@ -23,3 +23,10 @@ static TX_COMMITS: AtomicU64 = AtomicU64::new(0);
 static TX_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TX_MONTAGES_V1: AtomicU64 = AtomicU64::new(0);
 static TX_SUPERBLOCS_REJETES: AtomicU64 = AtomicU64::new(0);
+
+// P13_FSYNC_PHASE_V6: passive statistics only.
+static TX_LOCK_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static TX_LOCK_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static TX_BARRIER_NS: AtomicU64 = AtomicU64::new(0);
+static TX_BARRIER_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static TX_SLOW_CALLS: AtomicU64 = AtomicU64::new(0);

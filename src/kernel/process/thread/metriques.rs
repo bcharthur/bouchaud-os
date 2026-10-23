@@ -623,9 +623,12 @@ pub struct ProcProcessusCumul {
 /// (`verifie-sondes-sans-verrou.py`). Reste une fenetre etroite entre deux
 /// lecteurs presque simultanes ; c'est un diagnostic, la valeur rendue ne
 /// depend pas de lui.
-static DERNIER_CUMUL_INSTANT: AtomicU64 = AtomicU64::new(0);
-static DERNIER_CUMUL_USER_NS: AtomicU64 = AtomicU64::new(0);
-static DERNIER_CUMUL_SYS_NS: AtomicU64 = AtomicU64::new(0);
+// P13_V9_DIAG_ATOMIQUE: les trois champs appartiennent au MEME releve.
+// Ancien code: fetch_max(timestamp) puis deux swap independants => faux reculs
+// lorsque deux lecteurs concurrents terminent dans un ordre different.
+// N'impacte aucune valeur de /proc/stat ni aucun compteur de temps CPU.
+static DERNIER_CUMUL_DIAG: crate::kernel::sync::SpinLockIrq<(u64, u64, u64)> =
+    crate::kernel::sync::SpinLockIrq::new((0, 0, 0));
 
 /// Comptabilite CPU d'une tache, lue d'un seul tenant.
 ///
@@ -818,7 +821,9 @@ pub fn proc_cpu_zombies() -> (u64, usize, usize) {
 }
 
 pub fn proc_cpu_cumul() -> ProcCpuCumul {
-    let now = crate::kernel::timer::monotonic_ns();
+    // P13_SMP8_SCAN_TIMESTAMP_V7: sample the timestamp inside the per-CPU
+    // seqlock read and use scan-end time for global capacity/diagnostic.
+    // This avoids assigning post-start committed CPU time to a pre-scan clock.
     let online = smp::schedulable_cpus().max(1).min(MAX_CPUS);
 
     // BOUCHAUD_C29_PROC_STAT_CUMULATIF
@@ -874,12 +879,15 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
             let acc_noyau = COMPTA_NOYAU_NS[cpu].load(Ordering::Relaxed);
             let debut = COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed);
             let en_noyau = COMPTA_EN_NOYAU[cpu].load(Ordering::Relaxed);
+            // Time belongs to this CPU's coherent reading, not to the
+            // beginning of a potentially long SMP8 scan.
+            let now_cpu = crate::kernel::timer::monotonic_ns();
             core::sync::atomic::fence(Ordering::Acquire);
             if COMPTA_SEQ_CPU[cpu].load(Ordering::Relaxed) != s1 {
                 core::hint::spin_loop();
                 continue;
             }
-            let fragment = if debut != 0 { now.saturating_sub(debut) } else { 0 };
+            let fragment = if debut != 0 { now_cpu.saturating_sub(debut) } else { 0 };
             let vu = acc_user.saturating_add(if en_noyau { 0 } else { fragment });
             let vn = acc_noyau.saturating_add(if en_noyau { fragment } else { 0 });
             break (cu, cn, vu, vn);
@@ -905,20 +913,30 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         (0, 0)
     };
 
+    // Snapshot end is later than each per-CPU reading; all capacity
+    // checks and published diagnostic timestamps use this endpoint.
+    let now = crate::kernel::timer::monotonic_ns();
+
     // LE RECUL SE PHOTOGRAPHIE AU MOMENT OU IL SE PRODUIT.
     //
     // Le banc `run_proc_stat_monotone.sh` le detecte a la relecture, quand
     // l'etat qui l'expliquait a disparu. Ici, tout est encore la.
     {
-        let (avant_user, avant_sys, plus_recent) =
-            if DERNIER_CUMUL_INSTANT.fetch_max(now, Ordering::AcqRel) <= now {
-                let avant_user = DERNIER_CUMUL_USER_NS.swap(user_ns, Ordering::AcqRel);
-                let avant_sys = DERNIER_CUMUL_SYS_NS.swap(system_ns, Ordering::AcqRel);
-                (avant_user, avant_sys, DERNIER_CUMUL_INSTANT.load(Ordering::Acquire) == now)
+        // Comparaison et mise a jour serialisees: la lecture ne peut pas
+        // prendre le timestamp d'un echantillon et les valeurs d'un autre.
+        let recul = {
+            let mut precedent = DERNIER_CUMUL_DIAG.lock();
+            if now > precedent.0 {
+                let recul = (user_ns < precedent.1 || system_ns < precedent.2)
+                    .then_some((precedent.1, precedent.2));
+                *precedent = (now, user_ns, system_ns);
+                recul
             } else {
-                (0, 0, false)
-            };
-        if plus_recent && (user_ns < avant_user || system_ns < avant_sys) {
+                None
+            }
+        };
+        // Jamais imprimer en tenant un spinlock IRQ-safe.
+        if let Some((avant_user, avant_sys)) = recul {
             crate::serial_println!(
                 "PROC_STAT_RECUL t_ns={} user_ns={} avant_user_ns={} \
 sys_ns={} avant_sys_ns={} cumul_user={} cumul_sys={} live_user={} live_sys={} \

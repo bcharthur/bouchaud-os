@@ -899,7 +899,7 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
                 break st;
             }
             tours += 1;
-            if tours % 256 == 0 {
+            if tours % 32 == 0 {
                 let avant = crate::kernel::timer::monotonic_ns();
                 point_sur();
                 let cede = crate::kernel::timer::monotonic_ns().saturating_sub(avant);

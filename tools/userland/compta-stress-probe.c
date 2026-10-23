@@ -159,9 +159,14 @@ static void verifie(struct suivi *v, const char *quoi, long pid, unsigned long l
         long long mur = b - v->a;
         unsigned long long borne = (unsigned long long)((long double)borne_cpu * mur / tick_ns) + 3;
         if ((u + s) >= (v->u + v->s) && d > borne) {
-            if (atomic_fetch_add(&depassements, 1) < 8)
+            if (atomic_fetch_add(&depassements, 1) < 8) {
                 printf("COMPTA_DEPASSE %s pid=%ld delta_ticks=%llu borne=%llu mur_ns=%lld cpu=%d\n", quoi, pid, d, borne, mur,
                     borne_cpu);
+                // Preuves brutes : ne changent ni les lectures, ni la borne, ni le verdict.
+                printf("COMPTA_DEPASSE_DETAIL %s pid=%ld ancien_u=%llu ancien_s=%llu nouveau_u=%llu nouveau_s=%llu "
+                       "ancien_a_ns=%lld nouveau_a_ns=%lld nouveau_b_ns=%lld tick_ns=%ld marge_ticks=3\n",
+                       quoi, pid, v->u, v->s, u, s, v->a, a, b, tick_ns);
+            }
         }
     }
     v->amorce = 1;

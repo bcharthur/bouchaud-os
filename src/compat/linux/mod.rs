@@ -543,6 +543,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         INOTIFY_INIT1 => -errno::ENOSYS,
         STATFS => file::sys_statfs(args[0], args[1]),
         FSTATFS => file::sys_fstatfs(args[0] as i32, args[1]),
+        TRUNCATE => file::sys_truncate(args[0], args[1]),
         FTRUNCATE => file::sys_ftruncate(args[0] as i32, args[1] as usize),
         DUP => file::sys_dup(args[0] as i32),
         DUP2 => file::sys_dup2(args[0] as i32, args[1] as i32),
