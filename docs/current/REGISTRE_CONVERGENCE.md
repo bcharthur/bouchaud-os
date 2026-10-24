@@ -37,8 +37,8 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C1j | Repli de sécurité sur un fil `console` vivant, en file sur un cœur suspendu (KVM SMP4, verrou 3 s) | `CORRIGE_TCG` (négative déterministe) | CI KVM : témoin + correctif + vraie panne |
 | C1k | Inversion d'ordre d'un écrivain entre lignes différées de même repère (KVM, jeton 12 s, repli) | `CORRIGE_HOTE` (négative déterministe sur la règle) | inversion non reproduite sous TCG ; CI KVM |
 | C2 | Reprise SMP4 KVM : 1 226 µs | `OUVERT` | segments KVM (run 39602362503) |
-| C3 | Attente interactive jusqu'au quantum | `OUVERT` | KVM après C1 ; renoncements |
-| C4 | A/B non qualifiable | `CAUSE_CONFIRMEE` | 3 campagnes en parallèle, décision humaine |
+| C3 | Attente interactive jusqu'au quantum | `CORRIGE_TCG` (partiel) | IPI ordinaire immédiat face au calcul utilisateur ; attente résiduelle 4 349 µs, KVM absent |
+| C4 | A/B non qualifiable | `CORRIGE_TCG` | décisions du 24/10 intégrées ; trois campagnes strictes KVM au même SHA |
 | C5 | SIGSEGV compta-stress / persist-course | `OUVERT` | reproduction déterministe |
 | C6 | Surcomptage CPU (I2) | `OUVERT` | reproduction |
 | C6a | Chevauchement de tranche après idle | `CORRIGE_TCG` (négative déterministe) | KVM |
@@ -46,7 +46,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C8 | Croissance mémoire WebContent | `CORRIGE_TCG` (cause non confirmée) | plusieurs campagnes |
 | C9 | Panique `courant.rs:276` | `OUVERT` | contention de verrous, `held_at` |
 | C10 | Assertion LibJS `Value.cpp:484` | `OUVERT` | invariant violé ou corruption |
-| C11 | `irq_depth()` toujours nul | `CAUSE_CONFIRMEE` | comptage fiable des entrées/sorties d'IRQ |
+| C11 | `irq_depth()` toujours nul | `CORRIGE_TCG` | entrées/sorties et changements de pile intégrés avant `080d67ea` ; qualification KVM |
 | C12 | Préfixe du journal : accès CMOS | `CORRIGE_TCG` | horodatage sous KVM |
 | C13 | Tâche sensible placée sur un cœur hors ordonnanceur (mm-ng6 SMP4 : `usb-hid` 126 ms) | `CORRIGE_HOTE` (politique pure) | mesure : budget mm-ng6 répété |
 
@@ -278,6 +278,8 @@ rouge sur l'image d'avant le correctif, pas une injection.
   à mesurer : copie VGA texte (C1h) et repli (C1f), présents dans les deux
   bras.
 - **À faire** : A/B console on/off KVM SMP1 sur le HEAD final.
+- **Mesure TCG du 24/10** : pire réveil interactif brut `on` 3 355 µs
+  (`080d67ea`) puis 3 667 µs après `25c0c2ba` : C1g reste **OUVERT**.
 - **Limites** : un seul run par SHA.
 
 ### C2 — Reprise d'une interactive SMP4 KVM : 1 226 µs
@@ -289,7 +291,11 @@ rouge sur l'image d'avant le correctif, pas une injection.
   reprise en commutation, passation, retour (`/proc/self/reveil`) ; la sonde
   lit la ligne sur 1 000 octets (`c31fe38f`). Aucun correctif avant le
   segment dominant.
-- **Limites** : attend les données KVM de 39602362503.
+- **Mesure TCG du 24/10** : reprise interactive ventilée maximale
+  3 823 → 291 µs lors de la mission précédente, puis 978 µs avec
+  `25c0c2ba`. Deux passes qualifiées mais progrès non monotone : **OUVERT**.
+- **Limites** : aucune nouvelle preuve KVM ; les retards inexpliqués ne
+  sont pas attribués à l'hôte.
 
 ### C3 — Attente interactive jusqu'au quantum (4 ms, 13 ms vus)
 
@@ -300,7 +306,16 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Constat** `3adcea3c` : A/B précis SMP4, tour 2 `on` `QUALIFIE_ECHEC` (pire
   571 µs contre 314 + 185) — déjà vu de façon intermittente sur `ed5602f4`,
   vert sur `571b4978` : un échantillon de chaque côté, pas de conclusion.
-- **Limites** : KVM après C1 à lire.
+- **Correctif livré** `25c0c2ba` : une interactive sous budget publiée
+  derrière du calcul utilisateur normal envoie un IPI ordinaire ; la
+  politique antérieure ne posait que `need_resched`. Les pairs interactifs,
+  le budget, les continuations BSP et la préemption noyau gardent leurs
+  exclusions. Un IPI par publication, aucune relance au refus.
+- **Validation** : 39 tests de politique et gardes négatifs ; attribution
+  TCG SMP4, deux passes : `election_inexpliquee` maximale 7 871 → 4 349 µs ;
+  attente utilisateur diagnostique 8 158 → 4 490 µs. Les 7 871 µs ne sont
+  pas entièrement expliquées par le mécanisme corrigé.
+- **Limites** : attente résiduelle, reprise variable, pas de clôture KVM.
 
 ## P1 — méthode
 
@@ -309,14 +324,17 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Preuve initiale** : 0/4 paires valides ; tirages dans le bruit (~100 µs).
 - **Mécanisme démontré** : le bras `off` ne peut pas ouvrir la porte « la
   charge dégrade » ; comparaison sous le bruit (closeout 20/10 §6.1, §6.2).
-- **Correctif** : `fc7e00b1` (BOUCHAUD_AB_CINQ_PROPRIETES_V1) — cinq verdicts
-  imprimés à côté du verdict historique, qui reste **seul juge**.
-- **Négative** : 12 tests dont chaque propriété qui tombe sur son défaut ;
-  6 mutations détectées.
-- **Première campagne** (`3adcea3c`) : SMP4 `P1=OK P2=ECHEC P3=OK P4=ECHEC
-  P5=OK` ; SMP1 `P1=ECHEC P2=ECHEC P3=NON_QUALIFIANT P4=OK P5=OK`.
-- **Limites** : deux campagnes de plus, puis décision humaine (porte de P3 =
-  bruit au repos, §6.2 a).
+- **Correctif livré** : décisions du 24 octobre : `on` doit qualifier ;
+  `off` est un contrôle négatif ; P3 n'est comparable qu'au-dessus du bruit
+  mesuré au repos. Le verdict historique reste publié, pas effacé.
+- **Validation TCG** : `080d67ea`, 8/8 bras, P1–P5 verts, P2 488/556,5 µs.
+  Après `25c0c2ba` : 8/8 bras, P1–P5 verts, P2 574/594,5 µs (−3,45 %).
+  Seuil P2 1,10 inchangé ; ce second résultat n'établit pas un gain absolu
+  du p95 par rapport au premier.
+- **Limites** : le job `primitives.ordonnanceur-ab` du run 40129187265 est
+  rouge à l'étape A/B KVM SMP1/SMP4 (sortie 1). Journal inaccessible depuis
+  le cloud : API Forbidden, interface publique « Sign in to view logs ».
+  Critère causal inconnu ; aucune clôture KVM.
 
 ## Stabilité
 
@@ -340,6 +358,11 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Mécanisme** : **inconnu** (recul de `utime` corrigé `37f481c4` ; C6a ne
   concerne que les fils noyau).
 - **Reproduction** : non reproduit (campagne C5 ci-dessus : 0 dépassement).
+- **Scénario utilisateur** `3f6289dc` : 200 cycles calcul/syscall/sommeil,
+  concurrent utilisateur ; la borne retire 400 ms de sommeil demandé du
+  temps mur. SMP4 TCG : 14 ticks consommés, borne 26 ; puis stress de 8 s,
+  7 532 lectures, 0 recul, 0 dépassement. Aucun correctif comptable déduit
+  artificiellement de ce succès : C6 reste **OUVERT, non reproduit**.
 
 ### C6a — Chevauchement de tranche après idle
 
@@ -384,7 +407,7 @@ rouge sur l'image d'avant le correctif, pas une injection.
 | C8 Croissance mémoire WebContent | diagnostic rouge 2/2 sur `d02e8294` | POLLOUT incohérent corrigé (`f7ecba30`), lien non démontré | `f7ecba30` | sonde `TUBE_POLLOUT` avant 10 refus | `CORRIGE_TCG` ; vert sur `ed5602f4` et `3adcea3c` |
 | C9 Panique `courant.rs:276` | endurance ancienne, isolée | inconnu | — | — | `OUVERT` |
 | C10 Assertion LibJS `Value.cpp:484` | WebContent | inconnu | sonde `[LB:JSVALEUR]` | — | `OUVERT` |
-| C11 `irq_depth()` toujours nul | revue du 21/10 | `irq_enter`/`irq_exit` jamais appelés ; les gardes reposent sur IF=0 | — | — | `CAUSE_CONFIRMEE`, risque latent |
+| C11 `irq_depth()` toujours nul | revue du 21/10 | suivi absent des handlers et des changements de pile | intégré avant `469d8c76`, conservé sur `080d67ea` | gardes IRQ et banc contexte SMP1/4 | `CORRIGE_TCG`, KVM à qualifier |
 | C12 Préfixe du journal : ~30 accès CMOS par ligne | revue du 21/10 | lecture RTC à chaque ligne, concurrente hors jeton | `24698aa1` | — | `CORRIGE_TCG` |
 | C13 Tâche sensible placée sur un cœur hors ordonnanceur | Integration PR 39740393249 (63b519a8, mm-ng6 SMP4) : `ready_latency_interactive_max_ms` 126,5 > 100 (p99 33,6, écart isolé ; le push du même SHA vert) ; `[SCHED-NG-PIRE] classe=interactive tid=104 cpu=0 pret 2471 ms élu 2598 ms`, `[SCHED-NG-ATTENTE-VIVE] cpu=0 cur_tid=0 idle=0` | le cœur zéro exécutait le shell de l'autorun hors de toute tâche ; le placement des tâches sensibles le classait « tâche de fond, peu coûteux » (rang 1) et y posait `usb-hid` (sensible), qui n'y est élu qu'au retour du shell | BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : un cœur ni endormi ni muni d'une tâche est le pire rang (4), retenu seulement à défaut de tout autre | test hôte `un_coeur_hors_ordonnanceur_n_est_retenu_qu_a_defaut` (rouge sans le correctif) | `CORRIGE_HOTE` ; limites : seulement pour les tâches sensibles sous budget ; un dépassement de budget ou une tâche non sensible garde le placement historique |
 
@@ -393,3 +416,30 @@ rouge sur l'image d'avant le correctif, pas une injection.
 SMP8 KVM (hôte ≥ 8 CPU libres), P10+.3c/d (gelé), GPU 3D, RTL8168/Trigkey,
 P16/P17/P18/P19, audio HDA : suivis par `P_LOTS_REGISTER.md`, aucun
 développement tant que les P0 ne sont pas clos.
+
+## Qualification du candidat du 24 octobre 2026
+
+Les cinq workflows CI Fast, Integration, Reliability V3, Native IPC Runtime
+et Console sont verts sur `080d67ea`. Le run canonique
+[40129187265](https://github.com/bcharthur/bouchaud-os/actions/runs/40129187265)
+porte un rouge confirmé `primitives.ordonnanceur-ab` ; la compilation
+Ladybird et `primitives.probes` étaient encore en cours au contrôle.
+`primitives.gpu-tampon` est vert. Aucun scénario actuel réussi ne ferme C7
+ou C10 ; un journal inaccessible n'est pas un diagnostic de crash.
+
+Le lanceur `tools/ci/run_p13_campaigns.sh FULL_SHA [SORTIE_NEUVE]` crée un
+checkout isolé du commit, construit l'image, vérifie son hash et conserve
+quinze verdicts stricts dans trois campagnes séparées. Baseline : quatre
+CPU alloués ; SMP8 : huit. Accès KVM testé par ioctl et création de VM,
+quota et charge contrôlés avant chaque campagne. Aucun TCG de substitution.
+Commande depuis un checkout propre, sur Linux équipé de rustup, musl-tools,
+build-essential et qemu-system-x86 :
+
+```sh
+BOUCHAUD_DEDICATED_HOST=YES bash tools/ci/run_p13_campaigns.sh "$(git rev-parse HEAD)"
+```
+
+Cloud courant : affinité 5 CPU, quota 4 CPU, `/dev/kvm` absent ; précontrôle
+refusé. Inventaire des runners distant refusé par l'API. Les tests hôte de
+l'orchestration utilisent des fixtures explicitement fictives, jamais des
+preuves KVM. P13 reste **PARTIAL**.
