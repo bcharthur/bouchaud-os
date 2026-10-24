@@ -1,0 +1,61 @@
+name: P13 Console Sync Proof
+
+on:
+  push:
+    branches:
+      - audit/p13-console-sync-ci-20261024
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p13-console-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tcg-four-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Check script syntax
+        run: bash -n tools/ci/run_serie_entrelacement.sh
+      - name: Compile actual kernel
+        run: tools/ci/build_kernel.sh
+      - name: Replay four original TCG failures
+        shell: bash
+        run: |
+          set -uo pipefail
+          BOOT=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          mkdir -p p13-console-proof
+          failures=0
+          run_one() {
+            local tag="$1"
+            shift
+            echo "::group::${tag}"
+            if "$@" "$BOOT"; then
+              echo "P13_CONSOLE_CASE_OK case=${tag}"
+            else
+              echo "P13_CONSOLE_CASE_FAIL case=${tag}"
+              failures=$((failures+1))
+            fi
+            if test -s serie-entrelacement.log; then
+              cp serie-entrelacement.log "p13-console-proof/${tag}.log"
+            fi
+            echo "::endgroup::"
+          }
+          run_one detenteur-tcg-3s env BANC_SUSPENSION_MS=3000 tools/ci/run_serie_entrelacement.sh
+          run_one verrou-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 tools/ci/run_serie_entrelacement.sh
+          run_one temoin-sans-secours-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh
+          run_one secours-fil-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh
+          echo "P13_CONSOLE_FOUR_RESULT failures=${failures}"
+          test "$failures" -eq 0
+      - name: Preserve guest logs regardless of verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p13-console-four-tcg-logs
+          path: p13-console-proof/*.log
+          if-no-files-found: warn
