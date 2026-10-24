@@ -377,6 +377,7 @@ pub fn compteurs_reveils_installes() -> (u64, u64) {
 ///   3. LA DEMANDE CIBLEE. Elle seule ouvre la preemption d'un fil noyau, et
 ///      seulement pour une tache sensible restee sous son budget.
 fn publish_ready(index: usize) {
+    let _cout = crate::kernel::reveil_cout::Mesure::commence(7);
     // BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1 : le reveilleur vient d'ecrire
     // l'etat (`Blocked -> Ready`) ; sa lecture de `on_cpu` / `switching_out`
     // ne doit pas passer devant. Pendant de la barriere de
@@ -526,8 +527,9 @@ fn publish_ready(index: usize) {
             if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {
                 crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
             }
-            // Le balayage precede deja l'election, y compris depuis
-            // schedule(). Un auto-IPI imbrique retarderait cette election.
+            // Le balayage precede deja l'election, y compris depuis schedule.
+            // Appel logiciel redondant : reschedule_cpu filtre lui-meme les
+            // destinations locales avant toute ecriture APIC.
             if !reveil_servi_localement(target) {
                 crate::kernel::scheduler::preempt::note_ipi_reveil();
                 smp::reschedule_cpu(target);

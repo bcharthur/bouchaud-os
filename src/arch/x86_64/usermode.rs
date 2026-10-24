@@ -252,6 +252,7 @@ pub fn set_kernel_stack(top: u64) {
 }
 
 pub fn read_msr(msr: u32) -> u64 {
+    let _cout = crate::kernel::reveil_cout::Mesure::commence(8);
     let (high, low): (u32, u32);
     unsafe {
         asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high,
@@ -260,6 +261,7 @@ pub fn read_msr(msr: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 pub unsafe fn write_msr(msr: u32, value: u64) {
+    let _cout = crate::kernel::reveil_cout::Mesure::commence(9);
     asm!("wrmsr", in("ecx") msr, in("eax") (value & 0xFFFF_FFFF) as u32,
          in("edx") (value >> 32) as u32, options(nomem, nostack, preserves_flags));
 }

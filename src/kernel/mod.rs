@@ -130,6 +130,8 @@ pub mod vol_hote;
 /// BOUCHAUD_REVEIL_PRECIS_V1 (P13+) : quelle echeance armer avant `hlt` (pur, teste sur l'hote).
 #[path = "time/reveil_precis.rs"]
 pub mod reveil_precis;
+#[path = "time/reveil_cout.rs"]
+pub mod reveil_cout;
 #[path = "memory/vma.rs"]
 pub mod vma;
 #[path = "memory/frames_libres.rs"]

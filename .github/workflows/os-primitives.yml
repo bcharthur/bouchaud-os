@@ -463,11 +463,21 @@ jobs:
             python3 tools/ci/qualifie_p13.py ab "ab-reveil-precis-kvm-smp${smp}/serie.log" --smp "$smp" --passes 4 --mode "$mode" || r=1
           done
           exit "$r"
+      - name: P13 -- cout du chemin de reveil, boots de diagnostic distincts
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          r=0
+          for smp in 1 4; do
+            BO_QEMU_KVM=1 tools/ci/run_reveil_cout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$smp" "reveil-cout-kvm-smp$smp" || r=1
+          done
+          exit "$r"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: os-primitives-reveil-precis
-          path: ab-reveil-precis-*/serie.log
+          path: |
+            ab-reveil-precis-*/serie.log
+            reveil-cout-*/serie.log
           if-no-files-found: warn
 
   ordonnanceur-ab:

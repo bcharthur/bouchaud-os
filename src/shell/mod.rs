@@ -948,6 +948,9 @@ fn gui_surface(argc: usize, argv: &[&str; 12]) -> i32 {
 fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
         match argv[1] {
+            "cout" if argc >= 3 && (argv[2] == "on" || argv[2] == "off") => {
+                crate::kernel::reveil_cout::active(argv[2] == "on");
+            }
             "on" => { crate::arch::x86_64::smp::veut_reveil_precis(true); }
             "off" => { crate::arch::x86_64::smp::veut_reveil_precis(false); }
             // Le mode periodique (TCG) : une experience a part.
@@ -959,12 +962,20 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
                 crate::arch::x86_64::smp::veut_reveil_precis_materiel(argv[2] == "on");
             }
             autre => {
-                crate::println!("reveil-precis : {} inconnu (on | off | periodique on|off | materiel on|off)", autre);
+                crate::println!("reveil-precis : {} inconnu (on | off | periodique on|off | materiel on|off | cout on|off)", autre);
                 return 1;
             }
         }
     }
     let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
+    if crate::kernel::reveil_cout::actif() {
+        for site in 0..crate::kernel::reveil_cout::N {
+            let (appels, cycles, maximum) = crate::kernel::reveil_cout::releve(site);
+            crate::serial_println!("REVEIL_COUT diagnostic=1 site={} appels={} cycles={} maximum={} hz={}",
+                crate::kernel::reveil_cout::NOMS[site], appels, cycles, maximum,
+                crate::kernel::timer::tsc_hz().unwrap_or(0));
+        }
+    }
     let timer = crate::arch::x86_64::smp::diagnostic_timer_local();
     crate::serial_println!(
         "REVEIL_TIMER_LOCAL cpu={} lvt={:#x} deadline_tsc={} arme_tsc={} quantum_tsc={}",

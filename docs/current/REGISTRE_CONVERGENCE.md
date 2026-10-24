@@ -653,3 +653,47 @@ refuse quatre mutations qui retirent parking, ticket, exclusion ou reveil.
 Ce correctif local n'attribue pas sans journal detaille le rouge CI exact.
 Les changements bloc declenchent desormais aussi la chaine canonique
 Ladybird ; Integration publie les comptes NVMe sans modifier son verdict.
+
+### Reprise du 25 octobre : cout des scans et correction du diagnostic IPI
+
+Le SHA distant `45247ce15fb3dd967bec86f12b67980dc98be24e` contient bien le
+correctif NVMe. Integration `40138825247`, console `40138824946`, CI Fast et
+Reliability sont verts. KVM `40138824904` reste rouge : P2 SMP1 62/35,5 us,
+SMP4 154,5/102,5 us ; P4 SMP4 tour 3 on 1150 > 367 + 152 us. L'attribution
+situe ce dernier retard surtout avant Ready (1053 us), puis 87 us avant
+l'election et 1 us en reprise. Cela ne prouve pas encore une cause racine.
+
+**Rectification des paragraphes precedents** : reschedule_cpu excluait deja
+les destinations locales avant l'ecriture APIC. `auto_ipi_evites` ne compte
+pas des interruptions materielles economisees, mais des appels logiciels
+elides. L'hypothese d'auto-IPI materiels imbriques expliquant P2 est retiree.
+Le nom historique du compteur reste pour comparer les journaux. Les tirs
+precis et anticipes se recoupent et ne doivent pas etre additionnes.
+
+Le candidat suivant supprime les prises imbriquees du registre dans deux
+scans, sans allonger leur portee et sans changer le reveil. Un profileur
+opt-in mesure les operations reelles dans des boots distincts de la
+qualification. Le temps de suspension d'une continuation IRQ est exclu du
+segment mesure. L'identite du dormeur est publiee hors serie chronometree ;
+`reveille_par` reste l'auteur du reveil. La branche d'audit demande maintenant
+explicitement p13_strict=true au workflow reutilisable.
+
+Validation avant push : 40 tests de politique, 19 tests du timer, 59
+verifications C++ du verdict, 38 tests Python A/B et 43 mutations du garde.
+BIOS/UEFI et contextes SMP1/SMP4 passent, C6 utilisateur passe 9852 lectures
+sans recul/depassement, console 4/4 avec relogement reel. L'A/B TCG SMP1
+qualifie 8/8 bras et passe P1-P5 : P2 on/off 378/434 us (precedent essai
+496/409 us). Le diagnostic TCG se termine avec les compteurs attendus ;
+ses mesures ne qualifient pas P13. La preuve KVM du candidat reste requise.
+
+Comparaisons exhaustives de reference, hypotheses et commandes de reprise :
+[document de reprise du 25 octobre](../p13-reprise-20261025.md).
+
+Le TCG SMP4 du meme candidat reste NON_CONVAINCANT, 6/8 bras valides : P4
+tour 1 on 6046 > 3694 + 2173 us et tour 1 off non qualifiant. L'attribution
+conserve un pire sommeil brut 18157 us, dont 17962 avant election, 126 de
+reprise ; pid32/tid128, CPU0, reveille hors IRQ par pid42/tid138. Cette pointe
+brute est plus haute que la precedente et n'est pas escamotee. Les quantiles
+sur les quatre couples complets sont meilleurs (p95 on/off 534,5/518,5 contre
+580/509,5), mais seuls trois couples restent valides : aucune qualification
+SMP4 ni stabilisation C3 n'est annoncee. Le KVM du candidat doit trancher.

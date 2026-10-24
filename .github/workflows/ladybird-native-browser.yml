@@ -126,8 +126,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ladybird-native-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # L'audit conserve les preuves de chaque SHA, y compris un build Ladybird
+  # encore en cours quand le candidat suivant est pousse.
+  group: ladybird-native-${{ github.event.pull_request.number || github.ref }}${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
 jobs:
   dedoublonne:
@@ -175,6 +177,8 @@ jobs:
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     uses: ./.github/workflows/os-primitives.yml
+    with:
+      p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
   build:
     needs: dedoublonne

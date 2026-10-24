@@ -1296,6 +1296,7 @@ pub fn take_need_resched() -> bool {
 }
 
 pub fn request_deferred_preempt() {
+    crate::kernel::reveil_cout::compte(11);
     DEFERRED_PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
     set_need_resched();
 }

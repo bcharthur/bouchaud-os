@@ -371,16 +371,21 @@ pub fn borne_interactive_a_jour(cpu: usize, maintenant_ns: u64) -> u64 {
         return valeur;
     }
     let mut minimum = crate::kernel::echeances::JAMAIS;
-    for index in 0..tasks().len() {
-        let tache = &tasks()[index];
-        let echeance = tache.wake_deadline_ns.charge();
-        if echeance != 0
-            && tache.state == TaskState::Blocked
-            && tache.priorite.charge() == Priorite::Interactive
-            && tache.runq_cpu.charge() as usize == cpu
-            && echeance < minimum
-        {
-            minimum = echeance;
+    // Le temporaire du for gardait deja une vue pendant toute la boucle.
+    // La reutiliser evite une prise/liberation IRQ masquee par emplacement.
+    {
+        let _cout = crate::kernel::reveil_cout::Mesure::commence(4);
+        let registre = tasks();
+        for tache in registre.iter() {
+            let echeance = tache.wake_deadline_ns.charge();
+            if echeance != 0
+                && tache.state == TaskState::Blocked
+                && tache.priorite.charge() == Priorite::Interactive
+                && tache.runq_cpu.charge() as usize == cpu
+                && echeance < minimum
+            {
+                minimum = echeance;
+            }
         }
     }
     // Une tache attachee a ce coeur qui s'endort pendant ce recalcul y tourne
@@ -416,6 +421,7 @@ fn arme_si_interactive(deadline_ns: u64) {
 
 /// Recalcule la borne exactement, apres un balayage.
 fn recalcule_echeance() {
+    let _cout = crate::kernel::reveil_cout::Mesure::commence(3);
     let mut minimum = crate::kernel::echeances::JAMAIS;
     let mut interactives = [crate::kernel::echeances::JAMAIS; crate::arch::x86_64::smp::MAX_CPUS];
     {
@@ -506,6 +512,8 @@ fn reveil_servi_localement(cible: usize) -> bool {
 }
 
 pub fn auto_ipi_evites() -> u64 {
+    // Nom historique conserve dans les journaux : compte les appels locaux
+    // elides, PAS des IPI materiels. reschedule_cpu refusait deja cpu==local.
     AUTO_IPI_EVITES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
@@ -565,6 +573,7 @@ fn wake_sleepers() {
     if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
     }
+    let _cout = crate::kernel::reveil_cout::Mesure::commence(2);
     // Comme la borne globale : retirer seulement les bornes dues AVANT
     // le scan, puis fetch_min. Un armement concurrent ne peut être écrasé.
     for borne in PROCHAINES_PAR_COEUR.iter() {
@@ -591,40 +600,44 @@ fn wake_sleepers() {
             0
         }
     };
-    for index in 0..tasks().len() {
+    {
+        // Meme portee de garde qu'auparavant ; aucune vue ne traverse les
+        // alarmes ni une commutation. Seules les reprises imbriquees disparaissent.
         let registre = tasks();
-        let task = &registre[index];
-        if task.wake_deadline_ns != 0
-            && now >= task.wake_deadline_ns.charge()
-            && task.state.reveille()
-        {
-            // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : l'echeance n'est PAS
-            // effacee ici. La tache, reveillee, peut s'etre deja reparquee
-            // avec une NOUVELLE echeance ; l'effacer apres coup la
-            // transformerait en attente infinie. Chaque attente efface la
-            // sienne en reprenant la main. Une echeance perimee sur une tache
-            // Ready est sans effet : le reveil exige Blocked -> Ready.
-            task.futex_key.range(0);
-            let retard = now.saturating_sub(task.wake_deadline_ns.charge());
-            if retard > SEUIL_TARDIF_NS {
-                use core::sync::atomic::Ordering::Relaxed;
-                if source_irq {
-                    TARDIFS_IRQ.fetch_add(1, Relaxed);
-                } else if cur_balayage == NO_TASK {
-                    TARDIFS_INACTIF.fetch_add(1, Relaxed);
-                } else if cur_balayage == index {
-                    TARDIFS_SOI.fetch_add(1, Relaxed);
-                } else {
-                    TARDIFS_AUTRE.fetch_add(1, Relaxed);
+        for index in 0..registre.len() {
+            let task = &registre[index];
+            if task.wake_deadline_ns != 0
+                && now >= task.wake_deadline_ns.charge()
+                && task.state.reveille()
+            {
+                // BOUCHAUD_REVEIL_SANS_EFFACER_LA_CLE_V1 : l'echeance n'est PAS
+                // effacee ici. La tache, reveillee, peut s'etre deja reparquee
+                // avec une NOUVELLE echeance ; l'effacer apres coup la
+                // transformerait en attente infinie. Chaque attente efface la
+                // sienne en reprenant la main. Une echeance perimee sur une tache
+                // Ready est sans effet : le reveil exige Blocked -> Ready.
+                task.futex_key.range(0);
+                let retard = now.saturating_sub(task.wake_deadline_ns.charge());
+                if retard > SEUIL_TARDIF_NS {
+                    use core::sync::atomic::Ordering::Relaxed;
+                    if source_irq {
+                        TARDIFS_IRQ.fetch_add(1, Relaxed);
+                    } else if cur_balayage == NO_TASK {
+                        TARDIFS_INACTIF.fetch_add(1, Relaxed);
+                    } else if cur_balayage == index {
+                        TARDIFS_SOI.fetch_add(1, Relaxed);
+                    } else {
+                        TARDIFS_AUTRE.fetch_add(1, Relaxed);
+                    }
                 }
+                // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : echeance -> pret.
+                task.reveil_elu_ns.range(0);
+                task.reveil_commute_ns.range(0);
+                task.reveil_passe_ns.range(0);
+                task.reveil_par.range(par);
+                task.reveil_pret_ns.range(now);
+                publie_depuis_balayage(index);
             }
-            // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : echeance -> pret.
-            task.reveil_elu_ns.range(0);
-            task.reveil_commute_ns.range(0);
-            task.reveil_passe_ns.range(0);
-            task.reveil_par.range(par);
-            task.reveil_pret_ns.range(now);
-            publie_depuis_balayage(index);
         }
     }
     fire_alarms(crate::kernel::timer::ticks());
