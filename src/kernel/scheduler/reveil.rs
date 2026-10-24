@@ -194,11 +194,11 @@ fn cout(coeur: &Coeur, indice: usize, precedent: usize) -> (u8, usize, u8, usize
     // un coeur au repos ne coute rien ; une tache de fond coute peu ; une
     // interactive coute une reponse ; un pair sensible coute SA latence, et
     // c'est celle-la qu'on protege en dernier.
-    let rang = if coeur.inactif {
-        0
-    } else if coeur.hors_ordonnanceur {
+    let rang = if coeur.hors_ordonnanceur {
         // Le pire : on ne sait pas quand il reviendra elire.
         4
+    } else if coeur.inactif {
+        0
     } else if coeur.occupant_sensible {
         3
     } else {
@@ -228,11 +228,21 @@ fn cout(coeur: &Coeur, indice: usize, precedent: usize) -> (u8, usize, u8, usize
 /// coeurs dont un ou deux travaillent, c'est le cas NORMAL, et c'est lui qui
 /// ramene 6,78 s a quelques microsecondes.
 pub fn choisit_coeur(precedent: usize, reveille: &Reveille, coeurs: &[Coeur]) -> Option<usize> {
-    let mut selection = Selection::neuve(precedent, reveille.privilegiee());
+    let actif = coeurs.get(precedent)
+        .map(|c| replace_necessaire(reveille, c)).unwrap_or(reveille.privilegiee());
+    let mut selection = Selection::neuve(precedent, actif);
     for (indice, coeur) in coeurs.iter().enumerate() {
         selection.propose(indice, coeur);
     }
     selection.retenu()
+}
+
+/// A CPU running the BSP continuation cannot elect even if it briefly halts.
+/// Avoid it for ordinary interactive wakeups too; this grants no privilege
+/// to preempt kernel code and does not change an available historical CPU.
+pub fn replace_necessaire(reveille: &Reveille, precedent: &Coeur) -> bool {
+    reveille.privilegiee()
+        || (reveille.classe == Classe::Interactive && precedent.hors_ordonnanceur)
 }
 
 /// Le meme choix, EN FLOT : un coeur a la fois, sans tableau.

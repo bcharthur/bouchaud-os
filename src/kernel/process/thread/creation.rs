@@ -419,7 +419,9 @@ fn publish_ready(index: usize) {
         choose_runq_cpu(tasks()[index].affinity_mask) as usize
     };
 
-    let target = if reveille.privilegiee() {
+    let target = if crate::kernel::scheduler::reveil::replace_necessaire(
+        &reveille, &etat_coeur_reveil(historique, tasks()[index].affinity_mask, maintenant),
+    ) {
         let masque = tasks()[index].affinity_mask;
         let en_ligne = smp::schedulable_cpus().max(1).min(MAX_CPUS);
         let mut selection = ReveilSelection::neuve(precedent, true);

@@ -85,6 +85,27 @@ fn un_coeur_hors_ordonnanceur_n_est_retenu_qu_a_defaut() {
 }
 
 #[test]
+fn bsp_halte_hors_ordonnanceur_ne_devient_pas_un_coeur_disponible() {
+    let bsp = Coeur { hors_ordonnanceur: true, ..coeur_libre() };
+    let fond = coeur_occupe(Classe::Normale, false, 0);
+    for tache in [sensible(), ordinaire(), Reveille {
+        consomme_ns: BUDGET_ACTIVATION_NS + 1, ..sensible()
+    }] {
+        assert_eq!(choisit_coeur(0, &tache, &[bsp, fond]), Some(1));
+        // Affinity remains mandatory, including the pinned SMP1 case.
+        assert_eq!(choisit_coeur(0, &tache, &[bsp, Coeur { autorise: false, ..fond }]), Some(0));
+    }
+}
+
+#[test]
+fn interactive_ordinaire_garde_un_coeur_historique_disponible() {
+    assert_eq!(choisit_coeur(0, &ordinaire(), &[coeur_libre(), coeur_libre()]), None);
+    let normal = Reveille { classe: Classe::Normale, ..ordinaire() };
+    let bsp = Coeur { hors_ordonnanceur: true, ..coeur_libre() };
+    assert_eq!(choisit_coeur(0, &normal, &[bsp, coeur_libre()]), None);
+}
+
+#[test]
 fn un_coeur_au_repos_se_reveille_immediatement() {
     assert_eq!(decide(&coeur_libre(), &sensible()), Decision::ReveilImmediat);
     assert_eq!(decide(&coeur_libre(), &ordinaire()), Decision::ReveilImmediat);
