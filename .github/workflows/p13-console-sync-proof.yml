@@ -35,12 +35,16 @@ jobs:
             local tag="$1"
             shift
             echo "::group::${tag}"
-            if "$@" "$BOOT"; then
+            local status=0
+            local runner="p13-console-proof/${tag}.runner.log"
+            if "$@" "$BOOT" 2>&1 | tee "$runner"; then
               echo "P13_CONSOLE_CASE_OK case=${tag}"
             else
+              status=$?
               echo "P13_CONSOLE_CASE_FAIL case=${tag}"
               failures=$((failures+1))
             fi
+            python3 tools/ci/publie_p13_console.py "$tag" "$status" "$runner"
             if test -s serie-entrelacement.log; then
               cp serie-entrelacement.log "p13-console-proof/${tag}.log"
             fi
