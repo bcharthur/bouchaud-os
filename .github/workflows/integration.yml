@@ -16,7 +16,7 @@ on:
       # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
       # `main` ni sa protection.
   push:
-    branches: [main, 'claude/**', 'feat/**']
+    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
     paths:
       - 'src/**'
       - 'tools/**'

@@ -45,6 +45,15 @@ on:
       - 'src/kernel/process/**'
       - 'src/kernel/memory/**'
       - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/kernel/sync/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/smp.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'tools/ci/analyse_ab_reveil_precis.py'
+      - 'tools/ci/qualifie_p13.py'
       - 'src/compat/linux/**'
       - 'src/kernel/navigateur/**'
       - 'src/gui/services.rs'
@@ -53,7 +62,7 @@ on:
       - 'src/kernel/native/**'
   push:
     # BOUCHAUD_P13_BUILD_SUR_BRANCHES
-    branches: [main, 'claude/**', 'feat/**']
+    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
     paths:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
@@ -94,6 +103,15 @@ on:
       - 'src/kernel/process/**'
       - 'src/kernel/memory/**'
       - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/kernel/sync/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/smp.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'tools/ci/analyse_ab_reveil_precis.py'
+      - 'tools/ci/qualifie_p13.py'
       - 'src/compat/linux/**'
       - 'src/kernel/navigateur/**'
       - 'src/gui/services.rs'

@@ -3,6 +3,14 @@ name: Native IPC Runtime
 on:
   pull_request:
     paths:
+      - 'src/kernel/process/**'
+      - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'src/arch/x86_64/smp.rs'
       - 'src/arch/x86_64/usermode.rs'
       - 'src/kernel/native/**'
       - 'src/kernel/object/handle.rs'
@@ -15,8 +23,16 @@ on:
       - 'tools/ci/reliability/**'
       - '.github/workflows/native-ipc-runtime.yml'
   push:
-    branches: [main, 'claude/**', 'feat/**']
+    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
     paths:
+      - 'src/kernel/process/**'
+      - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'src/arch/x86_64/smp.rs'
       - 'src/arch/x86_64/usermode.rs'
       - 'src/kernel/native/**'
       - 'src/kernel/object/handle.rs'
