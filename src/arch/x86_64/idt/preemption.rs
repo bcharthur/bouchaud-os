@@ -109,6 +109,12 @@ fn dispatch_irq_preempt_anticipe(source: u8, force: bool, anticipe: bool) {
 
     PREEMPT_IRQ_REQUESTS.fetch_add(1, Ordering::Relaxed);
     let cpu = crate::arch::x86_64::cpu::hardware_cpu_index();
+    let local = crate::arch::x86_64::cpu_local::local(
+        crate::arch::x86_64::cpu_local::CpuId::from_index(cpu).unwrap());
+    if local.irq_depth() != 1 {
+        crate::kernel::task::request_deferred_preempt();
+        return;
+    }
 
     if force && cpu == 0 {
         PREEMPT_IRQ_BSP_CIBLEES.fetch_add(1, Ordering::Relaxed);
@@ -166,6 +172,10 @@ pub fn log_preempt_irq_diagnostic() {
 
     let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);
     for cpu in 0..online {
+        let local = crate::arch::x86_64::cpu_local::local(
+            crate::arch::x86_64::cpu_local::CpuId::from_index(cpu).unwrap());
+        crate::serial_println!("[IRQ-CONTEXT] cpu={} depth={} entries={} maximum={}",
+            cpu, local.irq_depth(), local.irq_context.entries(), local.irq_context.maximum());
         let active = PREEMPT_IRQ_ACTIVE[cpu].load(Ordering::Acquire);
         let since = PREEMPT_IRQ_ACTIVE_SINCE_NS[cpu].load(Ordering::Acquire);
         let last_return = PREEMPT_IRQ_LAST_RETURN_NS[cpu].load(Ordering::Acquire);

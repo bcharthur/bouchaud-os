@@ -1,7 +1,19 @@
 // --- Changement de contexte --------------------------------------------------
 
+unsafe fn switch_context(from: *mut u64, to: u64) {
+    use crate::arch::x86_64::cpu_local::{self, CpuId};
+    let enabled = interrupts::are_enabled();
+    interrupts::disable();
+    let depth = cpu_local::local(CpuId::from_index(local_cpu()).unwrap()).irq_context.suspend();
+    // depth and IF are saved on the outgoing stack. The raw frame always
+    // saves IF=0: no interrupt may observe the incoming stack before restore.
+    switch_context_raw(from, to);
+    cpu_local::local(CpuId::from_index(local_cpu()).unwrap()).irq_context.restore(depth);
+    if enabled { interrupts::enable(); }
+}
+
 #[unsafe(naked)]
-unsafe extern "C" fn switch_context(from: *mut u64, to: u64) {
+unsafe extern "C" fn switch_context_raw(from: *mut u64, to: u64) {
     core::arch::naked_asm!(
         "pushfq", "push r15", "push r14", "push r13", "push r12", "push rbx", "push rbp",
         "mov [rdi], rsp", "mov rsp, rsi",

@@ -150,7 +150,7 @@ pub struct CpuLocal {
 
     current_task: AtomicUsize,
     need_resched: AtomicBool,
-    irq_depth: AtomicU32,
+    pub(crate) irq_context: super::irq_context::IrqContext,
     preempt_count: AtomicU32,
     // BOUCHAUD_P0_REVEIL_CIBLE_V1
     //
@@ -228,7 +228,7 @@ impl CpuLocal {
             thread_id: AtomicU32::new(0),
             current_task: AtomicUsize::new(NO_TASK),
             need_resched: AtomicBool::new(false),
-            irq_depth: AtomicU32::new(0),
+            irq_context: super::irq_context::IrqContext::new(),
             preempt_count: AtomicU32::new(0),
             verrous_simples: AtomicU32::new(0),
             run_queue: FileCpu::neuve(),
@@ -261,16 +261,15 @@ impl CpuLocal {
     }
 
     pub fn irq_enter(&self) {
-        self.irq_depth.fetch_add(1, Ordering::Relaxed);
+        self.irq_context.enter();
     }
 
     pub fn irq_exit(&self) {
-        let old = self.irq_depth.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(old != 0, "cpu_local: irq_depth underflow");
+        self.irq_context.exit();
     }
 
     pub fn irq_depth(&self) -> u32 {
-        self.irq_depth.load(Ordering::Relaxed)
+        self.irq_context.depth()
     }
 
     pub fn preempt_disable(&self) {

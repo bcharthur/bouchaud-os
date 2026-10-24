@@ -1,0 +1,46 @@
+#[path = "../../src/arch/x86_64/irq_context.rs"]
+mod irq_context;
+use irq_context::IrqContext;
+
+#[test]
+fn nested_handlers_balance_without_erasing_the_outer_irq() {
+    let cpu = IrqContext::new();
+    cpu.enter(); cpu.enter();
+    assert_eq!(cpu.depth(), 2);
+    cpu.exit(); assert_eq!(cpu.depth(), 1);
+    cpu.exit(); assert_eq!(cpu.depth(), 0);
+    assert_eq!(cpu.entries(), 2);
+    assert_eq!(cpu.maximum(), 2);
+}
+
+#[test]
+fn suspended_irq_follows_its_stack_across_cpus_and_idle() {
+    let a = IrqContext::new(); let b = IrqContext::new();
+    a.enter();
+    let saved = a.suspend();
+    assert_eq!(a.depth(), 0); // fresh task / idle on the old CPU
+    a.enter(); a.exit(); // unrelated IRQ must not inherit the suspended one
+    b.restore(saved);
+    b.enter(); b.exit(); // nested interrupt after migration
+    assert_eq!(b.depth(), 1);
+    b.exit();
+    assert_eq!((a.depth(), b.depth()), (0, 0));
+}
+
+#[test]
+fn terminated_irq_stack_does_not_poison_the_next_task() {
+    let cpu = IrqContext::new();
+    cpu.enter(); let _abandoned = cpu.suspend();
+    cpu.restore(0);
+    assert_eq!(cpu.depth(), 0);
+}
+
+#[test]
+#[should_panic(expected = "irq_depth underflow")]
+fn unmatched_exit_is_rejected() { IrqContext::new().exit(); }
+
+#[test]
+#[should_panic(expected = "inherited another IRQ context")]
+fn restoring_over_a_live_frame_is_rejected() {
+    let cpu = IrqContext::new(); cpu.enter(); cpu.restore(1);
+}

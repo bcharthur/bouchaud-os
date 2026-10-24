@@ -215,7 +215,8 @@ pub fn preemption_noyau_sure() -> bool {
     let local = cpu_local::local(id);
     // Les conditions historiques, lues en clair ; puis le contexte complet de
     // la decision pure (registre, shootdown, IF).
-    local.preempt_count() == 0
+    local.irq_depth() == 1
+        && local.preempt_count() == 0
         && local.verrous_simples() == 0
         && crate::kernel::sync::lockdep::depth() == 0
         && !crate::kernel::task::sortie_en_cours_locale()

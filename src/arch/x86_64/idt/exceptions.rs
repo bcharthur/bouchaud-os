@@ -202,12 +202,20 @@ impl GsGuard {
         if swapped {
             unsafe { crate::arch::x86_64::usermode::swapgs() };
         }
+        crate::arch::x86_64::cpu_local::local(
+            crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
+        ).irq_enter();
         GsGuard { swapped }
     }
 }
 
 impl Drop for GsGuard {
     fn drop(&mut self) {
+        // A suspended handler may resume on another CPU. switch_context
+        // restored this stack's depth there before allowing interrupts.
+        crate::arch::x86_64::cpu_local::local(
+            crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
+        ).irq_exit();
         if self.swapped {
             unsafe { crate::arch::x86_64::usermode::swapgs() };
         }
