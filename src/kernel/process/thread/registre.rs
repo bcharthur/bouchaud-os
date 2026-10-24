@@ -269,7 +269,6 @@ impl RegistreLecture {
                 interrupts::enable();
             }
             if pris {
-                crate::kernel::reveil_cout::registre_pris();
                 return Self;
             }
             core::hint::spin_loop();

@@ -528,7 +528,6 @@ pub fn reschedule_cpu(cpu: usize) {
     }
     let Some(id) = cpu_local::CpuId::from_index(cpu) else { return; };
     let Some(target) = cpu_local::descriptor(id) else { return; };
-    let _cout = crate::kernel::reveil_cout::Mesure::commence(10);
     unsafe {
         let (x2, lapic) = local_apic();
         if x2 {
@@ -744,7 +743,6 @@ pub fn arm_local_scheduler_timer() {
                     _ => (quantum, false),
                 };
                 unsafe {
-                    let _cout = crate::kernel::reveil_cout::Mesure::commence(0);
                     usermode::write_msr(IA32_TSC_DEADLINE, echeance);
                 }
                 // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur porte le quantum ;
@@ -823,7 +821,6 @@ pub fn tir_anticipe(entree_tsc: u64) -> bool {
 /// quantum : la tache courante n'a pas a gagner de temps a chaque sommeil
 /// servi), ou la prochaine echeance interactive si elle vient avant.
 pub fn rearme_reste_du_quantum() {
-    let _cout = crate::kernel::reveil_cout::Mesure::commence(1);
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
         let cpu = cpu_index();
         if !PERIODIQUE_COURT[cpu].load(Ordering::Relaxed) { return; }
@@ -860,10 +857,7 @@ pub fn rearme_reste_du_quantum() {
         _ => (quantum, false),
     };
     if echeance != ARME_TSC[cpu].load(Ordering::Relaxed) || echeance <= maintenant {
-        unsafe {
-            let _cout = crate::kernel::reveil_cout::Mesure::commence(0);
-            usermode::write_msr(IA32_TSC_DEADLINE, echeance);
-        }
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, echeance); }
     }
     ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
     ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
@@ -896,7 +890,6 @@ pub fn avance_pour_sommeil_interactif(echeance_ns: u64) {
         let cible = cible.max(maintenant.saturating_add(1));
         if cible < ARME_TSC[cpu].load(Ordering::Relaxed) && cible < QUANTUM_TSC[cpu].load(Ordering::Relaxed) {
             unsafe {
-                let _cout = crate::kernel::reveil_cout::Mesure::commence(0);
                 usermode::write_msr(IA32_TSC_DEADLINE, cible);
             }
             ARME_TSC[cpu].store(cible, Ordering::Relaxed);
@@ -1184,10 +1177,7 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
     }
     if let Ok(armement) = decision {
         let tsc = armement.tsc;
-        unsafe {
-            let _cout = crate::kernel::reveil_cout::Mesure::commence(0);
-            usermode::write_msr(IA32_TSC_DEADLINE, tsc)
-        };
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, tsc) };
         ARME_TSC[cpu].store(tsc, Ordering::Relaxed);
         ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
         ARME_OCCUPE[cpu].store(false, Ordering::Relaxed);

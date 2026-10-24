@@ -377,7 +377,6 @@ pub fn compteurs_reveils_installes() -> (u64, u64) {
 ///   3. LA DEMANDE CIBLEE. Elle seule ouvre la preemption d'un fil noyau, et
 ///      seulement pour une tache sensible restee sous son budget.
 fn publish_ready(index: usize) {
-    let _cout = crate::kernel::reveil_cout::Mesure::commence(7);
     // BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1 : le reveilleur vient d'ecrire
     // l'etat (`Blocked -> Ready`) ; sa lecture de `on_cpu` / `switching_out`
     // ne doit pas passer devant. Pendant de la barriere de

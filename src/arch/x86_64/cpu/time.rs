@@ -13,7 +13,6 @@ pub fn interrupts_enabled() -> bool {
 }
 
 pub fn rdtsc() -> u64 {
-    crate::kernel::reveil_cout::compte(12);
     let lo: u32;
     let hi: u32;
     unsafe {

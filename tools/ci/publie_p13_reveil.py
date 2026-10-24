@@ -20,8 +20,6 @@ def diagnostic(raw, smp):
             continue
         if 'AB_PRECIS tour=' in line:
             report.append(line[line.index('AB_PRECIS tour='):])
-        elif 'ORDONNANCEUR_IDENTITE ' in line:
-            report.append(line[line.index('ORDONNANCEUR_IDENTITE '):])
         elif 'REVEIL_TIMER_LOCAL ' in line:
             report.append(line[line.index('REVEIL_TIMER_LOCAL '):])
         elif 'REVEIL_PRECIS voulu=' in line:

@@ -105,7 +105,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1001,9 +1000,6 @@ int main(int argc, char **argv)
         tentatives = 5;
 
     printf("ordonnanceur-probe: latence de l'interface sous charge\n");
-    // Identite du dormeur, distincte de reveille_par (l'auteur du reveil).
-    // Hors des series chronometrees : aucun syscall ajoute entre les reveils.
-    printf("ORDONNANCEUR_IDENTITE pid=%ld tid=%ld\n", (long)getpid(), syscall(SYS_gettid));
 
     // BOUCHAUD_SONDE_RESOLUTION_HORLOGE_V1 : le pas de l'horloge, recoupe par
     // le TSC ; une preemption n'est jamais prise pour lui.

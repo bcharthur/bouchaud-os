@@ -670,7 +670,7 @@ elides. L'hypothese d'auto-IPI materiels imbriques expliquant P2 est retiree.
 Le nom historique du compteur reste pour comparer les journaux. Les tirs
 precis et anticipes se recoupent et ne doivent pas etre additionnes.
 
-Le candidat suivant supprime les prises imbriquees du registre dans deux
+Le candidat 291d6b4d (retire apres mesure ci-dessous) supprime les prises imbriquees du registre dans deux
 scans, sans allonger leur portee et sans changer le reveil. Un profileur
 opt-in mesure les operations reelles dans des boots distincts de la
 qualification. Le temps de suspension d'une continuation IRQ est exclu du
@@ -697,3 +697,29 @@ brute est plus haute que la precedente et n'est pas escamotee. Les quantiles
 sur les quatre couples complets sont meilleurs (p95 on/off 534,5/518,5 contre
 580/509,5), mais seuls trois couples restent valides : aucune qualification
 SMP4 ni stabilisation C3 n'est annoncee. Le KVM du candidat doit trancher.
+
+
+### Retrait du candidat 291d6b4d apres mesure KVM stricte
+
+Run 40142054551, job 121015675494 : A/B et qualificateur strict rouges.
+P2 SMP1 58/16,5 us, SMP4 102,5/63,5 us : baisse absolue mais toujours hors
+contrat. P1 SMP1 echoue ; P3 SMP4 echoue et P4 SMP4 compte trois bras on
+en echec, contre un sur 45247ce1. Seulement 5/8 bras valides en SMP4.
+Console CI 40142054544 : 3/4, temoin secours off avec 1218 lignes differees
+perdues ; le secours on reloge bien (secours=1, relogees=1), sans perte.
+Le candidat est retire par commit inverse, en conservant ses preuves et
+le correctif NVMe de reference. Aucune causalite individuelle des changements
+n'est pretendue. Restent le commentaire IPI corrige, p13_strict=true sur
+la branche et la concurrence canonique par SHA qui conserve Ladybird.
+
+Le profilage KVM separe observe 47100 ecritures deadline sous on contre
+4295 sous off en SMP1, environ 5 us par ecriture. P4 tour3 SMP4 du candidat
+attribue 1060 us a la commutation. Ce sont des pistes mesurees, pas encore
+une cause racine prouvee de P2/P4. Comparaisons de tous les bras, limitations,
+preuves et prochaines commandes : docs/p13-reprise-20261025.md. P13 PARTIAL.
+
+Le retour compile BIOS/UEFI, passe contextes SMP1/4, C6 utilisateur (8200
+lectures sans recul/depassement) et les quatre replays TCG (600/600 chacun,
+dernier secours=1, relogees=1). L'isolation par SHA sur la branche d'audit
+est etendue au workflow reutilisable pour ne pas annuler les preuves en
+cours lors du retrait. Aucune nouvelle qualification KVM n'est presume.

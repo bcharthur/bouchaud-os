@@ -11,7 +11,6 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     let cpu_mesure = crate::arch::x86_64::usermode::cpu_index();
     crate::kernel::attribution_reveil::entree_irq(cpu_mesure, entree_tsc);
     let _sortie_mesuree = SortieIrqMesuree { vecteur: smp::RESCHEDULE_VECTOR };
-    let cout_irq = crate::kernel::reveil_cout::Mesure::commence(5);
     // BOUCHAUD_TIMER_DEUX_MODES_V1
     //
     // Meme frontiere que pour IRQ0, et pour la meme raison : tout ce qui suit
@@ -155,9 +154,6 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         }
     }
 
-    // Une pile IRQ peut etre garee par dispatch. Ne jamais compter cette
-    // suspension comme du traitement actif de l'interruption.
-    drop(cout_irq);
     if preempt_now {
         dispatch_irq_preempt_anticipe(PREEMPT_SOURCE_RESCHEDULE, preempt_ciblee, anticipe);
     }

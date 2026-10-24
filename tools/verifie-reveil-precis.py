@@ -36,8 +36,6 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 FICHIERS = {
-    "cout": RACINE / "src/kernel/time/reveil_cout.rs",
-    "banc_ab": RACINE / "tools/ci/run_ab_reveil_precis.sh",
     "creation": RACINE / "src/kernel/process/thread/creation.rs",
     "replanif": RACINE / "src/arch/x86_64/idt/reschedule.rs",
     "sommeil": RACINE / "src/kernel/process/thread/sommeil.rs",
@@ -84,19 +82,6 @@ def corps(texte: str, signature: str) -> str:
 
 def verifie(t: dict, sources_src: str) -> list:
     fautes = []
-    if "static ACTIF: AtomicBool = AtomicBool::new(false);" not in t["cout"] or "actif().then(estampille)" not in t["cout"]:
-        fautes.append("cout : le profilage doit rester opt-in, sans lecture TSC supplementaire quand desactive.")
-    irq = corps(t["replanif"], 'fn reschedule_interrupt_handler(')
-    if not 0 <= irq.find('drop(cout_irq);') < irq.find('dispatch_irq_preempt_anticipe('):
-        fautes.append("cout : le temps d'une continuation garee ne doit pas etre compte comme travail IRQ.")
-    if 'reveil-precis cout on' in t['banc_ab']:
-        fautes.append("cout : la qualification A/B ne doit pas activer le profileur.")
-    if not 0 <= t['flux'].find('name: P13 -- qualification stricte A/B reveil precis KVM SMP1/4') < t['flux'].find('name: P13 -- cout du chemin de reveil, boots de diagnostic distincts'):
-        fautes.append("cout : le diagnostic doit avoir son boot distinct apres la qualification.")
-    if 'for index in 0..registre.len()' not in corps(t['sommeil'], 'fn wake_sleepers('):
-        fautes.append("scan : reutiliser la vue du registre pendant le balayage des echeances.")
-    if 'for tache in registre.iter()' not in corps(t['sommeil'], 'pub fn borne_interactive_a_jour('):
-        fautes.append("scan : reutiliser la vue du registre pendant le recalcul interactif.")
     if t["smp"].count(INTERRUPTEUR) != 1 or PREUVE not in t["smp"]:
         fautes.append("smp.rs : le reveil precis n'est plus actif par defaut, ou la preuve KVM (run 38732049308) n'est plus citee.")
     if t["smp"].count(MATERIEL_OFF) != 1 or MATERIEL_EXIGE not in corps(t["smp"], "fn arme_reveil_precis_sous_drapeau("):
@@ -198,13 +183,6 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
-        ("cout actif par defaut", "cout", "static ACTIF: AtomicBool = AtomicBool::new(false);", "static ACTIF: AtomicBool = AtomicBool::new(true);"),
-        ("horloge du cout toujours lue", "cout", "actif().then(estampille)", "Some(estampille())"),
-        ("cout inclut la pile garee", "replanif", "drop(cout_irq);", ""),
-        ("profilage dans qualification", "banc_ab", 'set -euo pipefail', 'set -euo pipefail\n# reveil-precis cout on'),
-        ("boot diagnostic non distingue", "flux", 'name: P13 -- cout du chemin de reveil, boots de diagnostic distincts', 'name: Cout'),
-        ("vue reprise par emplacement", "sommeil", 'for index in 0..registre.len()', 'for index in 0..tasks().len()'),
-        ("vue interactive reprise", "sommeil", 'for tache in registre.iter()', 'for tache in tasks().iter()'),
         ("publication locale non declaree", "sommeil", "            publie_depuis_balayage(index);", "            publish_ready(index);"),
         ("service local hors election", "sommeil", "BALAYAGE_IRQ[cpu].load(Relaxed) || transition_ouverte_sans_passation(cpu)", "true"),
         ("service local jamais rendu", "sommeil", "PUBLICATION_DANS_BALAYAGE[self.cpu].store(self.avant, Relaxed);", ""),
@@ -271,7 +249,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 43 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 36 negatifs)")
     return 0
 
 
