@@ -592,6 +592,9 @@ pub struct ProcCpuCumul {
     pub system_ns: u64,
     pub idle_ns: u64,
     pub online: usize,
+    // Instantane de chaque CPU accepte sous son seqlock; NE PAS confondre
+    // avec un releve global simultane. (timestamp, user, system).
+    per_cpu_samples: [(u64, u64, u64); MAX_CPUS],
 }
 
 #[derive(Clone, Debug)]
@@ -1068,8 +1071,124 @@ pire_live_ns={} pire_tid={} pire_pid={} pire_noyau={} online={}",
         DEPASSEMENT_PIRE_NS.fetch_max(occupe - capacite, Ordering::Relaxed);
     }
     let idle_ns = capacite.saturating_sub(occupe);
-    ProcCpuCumul { user_ns, system_ns, idle_ns, online }
+    ProcCpuCumul { user_ns, system_ns, idle_ns, online, per_cpu_samples: causal_cpu }
 }
+
+
+// P13_P0_V16_PER_CPU_PUBLICATION
+// Un scan SMP n'est pas une photographie atomique globale : le CPU 7 peut
+// etre echantillonne avant CPU 0 dans un autre scan concurrent. Comparer les
+// triplets GLOBAUX (V15) faisait ainsi reculer artificiellement l'idle.
+//
+// Chaque CPU fournit deja (timestamp, user, system) sous SON seqlock. Le
+// point publie par CPU est coherent : idle = sampled_ns - (user + system).
+// Accepter uniquement un successeur causal et physiquement admissible pour
+// CE CPU, puis sommer les derniers points complets acceptes. Ce n'est PAS
+// une fusion de maxima par composant. Les samples invalides sont conserves
+// dans le journal et restent bloquants pour la qualification P13.
+#[derive(Clone, Copy)]
+struct P13PubCpu {
+    stamp_ns: u64,
+    user_ns: u64,
+    system_ns: u64,
+    idle_ns: u64,
+    valid: bool,
+}
+const P13_PUB_CPU_ZERO: P13PubCpu = P13PubCpu {
+    stamp_ns: 0, user_ns: 0, system_ns: 0, idle_ns: 0, valid: false,
+};
+struct P13PubState {
+    per_cpu: [P13PubCpu; MAX_CPUS],
+    online: usize,
+    anomalies: u64,
+}
+static P13_PUBLIE_PAR_CPU: crate::kernel::sync::SpinLockIrq<P13PubState> =
+    crate::kernel::sync::SpinLockIrq::new(P13PubState {
+        per_cpu: [P13_PUB_CPU_ZERO; MAX_CPUS],
+        online: 0,
+        anomalies: 0,
+    });
+
+/// Vue /proc/stat construite depuis les derniers triplets entiers et causaux
+/// par CPU. La vue brute `proc_cpu_cumul` demeure distincte et instrumentee.
+/// Une violation physique n'est JAMAIS requalifiee en succes par ce cache.
+pub fn proc_cpu_publie() -> ProcCpuCumul {
+    let raw = proc_cpu_cumul();
+    // Ne jamais imprimer sous verrou IRQ-safe. Un seul verrou court pour
+    // tous les CPU; aucun CPU writer/seqlock n'est acquis ici.
+    let (answer, invalid, topology_change) = {
+        let mut state = P13_PUBLIE_PAR_CPU.lock();
+        let old_online = state.online;
+        state.online = raw.online;
+        let topology_change = old_online != 0 && old_online != raw.online;
+        let mut invalid = [None; MAX_CPUS];
+        for cpu in 0..raw.online {
+            let (stamp, u, s) = raw.per_cpu_samples[cpu];
+            let old = state.per_cpu[cpu];
+            // Les deux lectures successives peuvent etre entrelacees. Ne
+            // comparer les valeurs que lorsque le timestamp de CE CPU avance.
+            let busy = u.checked_add(s);
+            let idle = busy.and_then(|v| stamp.checked_sub(v));
+            // Un scan perime doit etre ignore, mais jamais si son propre
+            // triplet viole deja la capacite physique (preuve conservable).
+            if old.valid && stamp <= old.stamp_ns && stamp != 0 && idle.is_some() {
+                continue;
+            }
+            // Raisons : 1 recul user/system, 2 capacite physique depassee,
+            // 3 recul idle du meme CPU, 4 horodatage non valide.
+            let reason = if stamp == 0 { 4 }
+                else if old.valid && (u < old.user_ns || s < old.system_ns) { 1 }
+                else if idle.is_none() { 2 }
+                else if old.valid && idle.unwrap_or(0) < old.idle_ns { 3 }
+                else { 0 };
+            if reason != 0 {
+                state.anomalies = state.anomalies.saturating_add(1);
+                invalid[cpu] = Some((state.anomalies, cpu, reason, stamp, u, s,
+                    old.stamp_ns, old.user_ns, old.system_ns, old.idle_ns));
+                // Conserver le triplet PRECEDENT coherent de ce coeur.
+                // Ce rejet est un signal bloquant, pas une reparation du noyau.
+                continue;
+            }
+            state.per_cpu[cpu] = P13PubCpu {
+                stamp_ns: stamp, user_ns: u, system_ns: s,
+                idle_ns: idle.unwrap_or(0), valid: true,
+            };
+        }
+        let mut u_total = 0u64;
+        let mut s_total = 0u64;
+        let mut i_total = 0u64;
+        // Conserver les contributions des CPU anciennement en ligne. Les
+        // transitions hotplug ne sont PAS qualifiees (marqueur explicite).
+        for cpu in state.per_cpu.iter() {
+            if cpu.valid {
+                u_total = u_total.saturating_add(cpu.user_ns);
+                s_total = s_total.saturating_add(cpu.system_ns);
+                i_total = i_total.saturating_add(cpu.idle_ns);
+            }
+        }
+        let answer = ProcCpuCumul {
+            user_ns: u_total, system_ns: s_total, idle_ns: i_total,
+            online: raw.online, per_cpu_samples: raw.per_cpu_samples,
+        };
+        (answer, invalid, topology_change)
+    };
+    if topology_change {
+        crate::serial_println!(
+            "P13_P16_TOPOLOGY_UNQUALIFIED online={} (physical idle across hotplug not qualified)",
+            raw.online,
+        );
+    }
+    for issue in invalid.iter().flatten() {
+        let &(n, cpu, reason, stamp, u, s, prev_stamp, prev_u, prev_s, prev_idle) = issue;
+        crate::serial_println!(
+            "P13_P16_CORE_INVALID n={} cpu={} reason={} stamp={} u={} s={} prev_stamp={} prev_u={} prev_s={} prev_idle={} raw_global_u={} raw_global_s={} raw_global_idle={}",
+            n, cpu, reason, stamp, u, s, prev_stamp, prev_u, prev_s,
+            prev_idle, raw.user_ns, raw.system_ns, raw.idle_ns,
+        );
+    }
+    answer
+}
+
 
 pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
     let now = crate::kernel::timer::monotonic_ns();
