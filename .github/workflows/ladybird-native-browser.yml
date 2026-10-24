@@ -59,6 +59,7 @@ on:
       - 'src/gui/services.rs'
       - 'src/kernel/services/**'
       - 'src/drivers/api/gpu.rs'
+      - 'src/drivers/block/**'
       - 'src/kernel/native/**'
   push:
     # BOUCHAUD_P13_BUILD_SUR_BRANCHES
@@ -117,6 +118,7 @@ on:
       - 'src/gui/services.rs'
       - 'src/kernel/services/**'
       - 'src/drivers/api/gpu.rs'
+      - 'src/drivers/block/**'
       - 'src/kernel/native/**'
   workflow_dispatch:
 

@@ -243,6 +243,22 @@ jobs:
       # echoue si la profondeur retombe a un, ou si un emplacement fuit.
       - name: Profondeur de file reellement atteinte
         run: tools/ci/run_nvme_parallele.sh image/bootimage-bouchaud-os.bin target/nvme-parallele-ci/nvme-parallele.log
+      - name: Publier le diagnostic de profondeur NVMe
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('target/nvme-parallele-ci/nvme-parallele.log')
+          if path.is_file():
+              raw = re.sub(r'\x1b\[[0-9;]*m', '', path.read_text(errors='replace'))
+              lines = [line for line in raw.splitlines() if any(key in line for key in (
+                  'NVME_PARALLELE', 'SCHED-NG-ATTENTE-VIVE', 'KERNEL PANIC', 'panicked at'))]
+              for start in range(0, len(lines), 4):
+                  message = '\n'.join(lines[start:start + 4])
+                  message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::notice title=NVMe profondeur {start // 4 + 1}::{message}')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
