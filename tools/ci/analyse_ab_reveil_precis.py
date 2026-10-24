@@ -85,7 +85,8 @@ OK, ECHEC, NQ = "QUALIFIE_OK", "QUALIFIE_ECHEC", "NON_QUALIFIANT"
 
 
 def _p_neuf():
-    return {"q": {}, "tours": [], "non_jugeable": {}, "attribution": set(), "effectifs": {}}
+    return {"q": {}, "tours": [], "non_jugeable": {}, "attribution": set(),
+            "reveils_attribues": {}, "effectifs": {}}
 
 
 def _phase_valide(p, phase):
@@ -259,6 +260,9 @@ def analyse_historique(texte, tours, smp, nom, preuves=None):
         m = ATTRIBUTION.match(l)
         if m:
             courant["p"]["attribution"].add(m.group(1))
+            compte = re.search(r"\breveils=(\d+)\b", l)
+            if compte:
+                courant["p"]["reveils_attribues"][m.group(1)] = int(compte[1])
         m = re.match(r"^VERDICT_SONDE : (\S+)(?: tentatives=\d+)?(?: raison=(.*))?", l)
         if m:
             courant["verdict"] = m.group(1)
@@ -420,6 +424,8 @@ def qualifie_bras(b):
             raisons.append(raison)
         if phase not in p["attribution"]:
             raisons.append(f"{phase}: attribution absente")
+        if p["reveils_attribues"].get(phase, 0) <= 0:
+            raisons.append(f"{phase}: aucun reveil effectivement attribue")
         n, total, regle = p["effectifs"].get(phase, (0, 0, "?"))
         if not (0 < n <= total) or (total - n) * 20 >= total:
             raisons.append(f"{phase}: effectifs/contamination invalides {n}/{total}")
@@ -492,7 +498,8 @@ def analyse(texte, tours, smp, nom, politique="decisions-20261024"):
         for phase in PHASES:
             n, total, regle = b["p"]["effectifs"].get(phase, (0, 0, "?"))
             sortie.append(f"  preuve {identite} phase={phase} quantiles_us={b['p']['q'].get(phase)} "
-                          f"propres={n} total={total} exclus={total-n} regle={regle}")
+                          f"propres={n} total={total} exclus={total-n} regle={regle} "
+                          f"attribues={b['p']['reveils_attribues'].get(phase, 0)}")
         sortie.extend(f"  {identite}: {r}" for r in raisons)
         if p3 == NQ and v == OK:
             sortie.append(f"  {identite}: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)")

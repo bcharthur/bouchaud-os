@@ -5,7 +5,7 @@ from test_ab_reveil_precis import P, a, journal5
 
 
 def journal(**kwargs):
-    texte = journal5(**kwargs)
+    texte = journal5(**kwargs).replace("attribution au repos :", "attribution au repos : reveils=300")
     for phase in a.PHASES[1:]:
         texte = texte.replace(P + "VERDICT_SONDE", P + f"  attribution {phase} : reveils=300\n" + P + "VERDICT_SONDE")
     return texte
@@ -74,6 +74,7 @@ class PolitiqueAdoptee(unittest.TestCase):
         }
         for phase in a.PHASES:
             mutations[f"attribution_{phase}"] = valide.replace(f"attribution {phase} :", f"absente {phase} :", 1)
+            mutations[f"attribution_vide_{phase}"] = valide.replace(f"attribution {phase} : reveils=300", f"attribution {phase} : reveils=0", 1)
             mutations[f"mesure_{phase}"] = "\n".join(l for l in valide.splitlines() if not (phase in l and "median" in l))
             mutations[f"non_jugeable_{phase}"] = valide.replace("VERDICT_SONDE", f"  phase non jugeable -- {phase} : attribution incomplete\n" + P + "VERDICT_SONDE", 1)
         for nom, texte in mutations.items():
