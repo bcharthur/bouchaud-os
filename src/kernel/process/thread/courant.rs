@@ -604,9 +604,17 @@ pub fn running_user_cpu_mask() -> u64 {
 /// Tous les champs qu'un autre coeur touche sont atomiques : les ecrire par une
 /// reference partagee est correct, et c'est ce que font tous les appelants. Le
 /// contenu prive -- pile noyau, contexte, zone FPU -- ne s'atteint plus par ici.
+// P13_DIAG: preserve the caller of a NO_TASK lifecycle violation without
+// weakening the assertion. Remove only after the root cause is qualified.
+#[track_caller]
 pub fn current() -> &'static Task {
     let index = current_index_raw();
-    assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
+    assert!(
+        index != NO_TASK,
+        "task: aucune tache active sur ce CPU appelant={}:{}",
+        core::panic::Location::caller().file(),
+        core::panic::Location::caller().line(),
+    );
     // Le recycleur exige `on_cpu < 0`; la tache courante est donc stable tant
     // que cette continuation s'execute.
     let pointeur = EMPLACEMENTS[index].tache.load(Ordering::Acquire);
