@@ -24,7 +24,7 @@ pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 limite=$((SECONDS + 180))
 while kill -0 "$pid" 2>/dev/null && ((SECONDS < limite)); do
-  if grep -aqE 'KERNEL PANIC|panicked at|COMPTA_STRESS_(OK|ECHEC)' "$OUT/serie.log"; then break; fi
+  if grep -aqE 'KERNEL PANIC|panicked at|PROCESS_FAULT(_DETAIL|_PILE)? pid=|COMPTA_STRESS_(OK|ECHEC)' "$OUT/serie.log"; then break; fi
   sleep 1
 done
 kill -KILL "$pid" 2>/dev/null || true
@@ -34,9 +34,9 @@ python3 - "$OUT/serie.log" <<'PY'
 import re, sys
 s = re.sub(r'\x1b\[[0-9;]*m', '', open(sys.argv[1], errors='replace').read())
 for line in s.splitlines():
-    if re.search(r'COMPTA_(FRONTIERES|STRESS|DEPASSE|RECUL)|PROCESS_FAULT_DETAIL|panicked at', line): print(line)
+    if re.search(r'COMPTA_(FRONTIERES|STRESS|DEPASSE|RECUL)|PROCESS_FAULT(?:_DETAIL|_PILE)? pid=|panicked at', line): print(line)
 ok = all(x in s for x in ('COMPTA_FRONTIERES_OK', 'COMPTA_STRESS_OK'))
-ok = ok and not re.search(r'KERNEL PANIC|panicked at|COMPTA_\w*ECHEC|COMPTA_DEPASSE|COMPTA_RECUL', s)
+ok = ok and not re.search(r'KERNEL PANIC|panicked at|PROCESS_FAULT(?:_DETAIL|_PILE)? pid=|COMPTA_\w*ECHEC|COMPTA_DEPASSE|COMPTA_RECUL', s)
 print('COMPTA_UTILISATEUR_' + ('OK' if ok else 'ECHEC'))
 sys.exit(0 if ok else 1)
 PY

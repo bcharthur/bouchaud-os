@@ -69,6 +69,14 @@ jobs:
             grep -aE 'COMPTA_STRESS |SIGCHLD_CAS|SIGMASQUE_CAS|BOUCHAUD_TSC_|compta_relues=|PRIMITIVES_ACCEL|OS_PRIMITIVES_OK' "primitives-kvm-${essai}.log"
             cp serie-primitives.log "serie-primitives-kvm-${essai}.log"
           done
+      - name: C6 -- frontieres utilisateur, sommeil et preemption, KVM SMP1/4
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          r=0
+          for smp in 1 4; do
+            COMPTA_SORTIE="$PWD/compta-utilisateur-kvm-smp${smp}" BO_QEMU_KVM=1 tools/ci/run_compta_utilisateur.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$smp" || r=1
+          done
+          exit "$r"
       - name: Comptabilite -- rearmement apres idle, fenetre injectee, ordre d'avant contre correctif (TCG SMP2, SMP4)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_COMPTA_INJECTION_V1 (C6a) : le chevauchement corrige par
@@ -376,6 +384,7 @@ jobs:
             scanout-virtio*/capture-*.ppm
             serie-faute-multifil-*.log
             serie-compta-injection-*.log
+            compta-utilisateur-kvm-smp*/serie.log
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
             virtio-dma-panne*/serie.log
