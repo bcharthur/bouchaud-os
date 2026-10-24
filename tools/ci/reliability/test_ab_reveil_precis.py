@@ -49,62 +49,62 @@ def journal(tours=4, on=None, off=None, inverse=False):
 
 class AbReveilPrecis(unittest.TestCase):
     def test_convaincant(self):
-        _, v, c = a.analyse(journal(), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(), 4, "1", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
 
     def test_queue_degradee_non_convaincant(self):
-        _, v, _ = a.analyse(journal(on={"repos": (300, 500, 112000, 144000)}), 4, "1", "kvm")
+        _, v, _ = a.analyse_historique(journal(on={"repos": (300, 500, 112000, 144000)}), 4, "1", "kvm")
         self.assertEqual(v, "NON_CONVAINCANT")
 
     def test_charge_degradee_non_convaincant(self):
-        _, v, _ = a.analyse(journal(on={"inter": (600, 1500, 2000, 3000)}), 4, "1", "kvm")
+        _, v, _ = a.analyse_historique(journal(on={"inter": (600, 1500, 2000, 3000)}), 4, "1", "kvm")
         self.assertEqual(v, "NON_CONVAINCANT")
 
     def test_gain_insuffisant_non_convaincant(self):
-        _, v, _ = a.analyse(journal(on={"repos": (800, 1500, 2400, 4000)}), 4, "1", "kvm")
+        _, v, _ = a.analyse_historique(journal(on={"repos": (800, 1500, 2400, 4000)}), 4, "1", "kvm")
         self.assertEqual(v, "NON_CONVAINCANT")
 
     def test_moins_de_quatre_tours_non_concluant(self):
-        _, v, c = a.analyse(journal(tours=3), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(tours=3), 4, "1", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
 
     def test_aucun_armement_sous_on_est_un_defaut(self):
-        _, v, c = a.analyse(journal(on={"armes": (0, 0)}), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(on={"armes": (0, 0)}), 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
     def test_armement_sous_off_est_un_defaut(self):
-        _, v, c = a.analyse(journal(off={"armes": (0, 3)}), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(off={"armes": (0, 3)}), 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
     def test_echec_qualifie_sous_on_est_un_defaut(self):
-        _, v, c = a.analyse(journal(on={"verdict": "QUALIFIE_ECHEC"}), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(on={"verdict": "QUALIFIE_ECHEC"}), 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
     def test_politique_non_basculee_est_un_defaut(self):
-        _, v, c = a.analyse(journal(on={"voulu": 0}), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(on={"voulu": 0}), 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
     def test_ordre_non_alterne_est_un_defaut(self):
-        _, v, c = a.analyse(journal(inverse=True), 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal(inverse=True), 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
     def test_panique_est_un_defaut(self):
-        _, v, c = a.analyse(journal() + "panicked at x\n", 4, "1", "kvm")
+        _, v, c = a.analyse_historique(journal() + "panicked at x\n", 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
 
     def test_non_qualifiant_on_ne_prouve_pas_un_gain(self):
-        lignes, v, c = a.analyse(journal(on={"verdict": "NON_QUALIFIANT"}), 4, "1", "kvm")
+        lignes, v, c = a.analyse_historique(journal(on={"verdict": "NON_QUALIFIANT"}), 4, "1", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
         self.assertTrue(any("apparies_qualifies=0/4" in ligne for ligne in lignes))
 
     def test_non_qualifiant_off_ne_prouve_pas_un_gain(self):
-        _, v, c = a.analyse(journal(off={"verdict": "NON_QUALIFIANT"}), 4, "4", "kvm")
+        _, v, c = a.analyse_historique(journal(off={"verdict": "NON_QUALIFIANT"}), 4, "4", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
 
     def test_paires_sans_quorum_qualifie_non_concluantes(self):
         texte = journal().replace("VERDICT_SONDE : QUALIFIE_OK", "VERDICT_SONDE : NON_QUALIFIANT", 1)
-        _, v, c = a.analyse(texte, 4, "4", "kvm")
+        _, v, c = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
 
 class DelimitationDuBras(unittest.TestCase):
@@ -112,14 +112,14 @@ class DelimitationDuBras(unittest.TestCase):
         texte = journal() + P + "+ reveil-precis on\n" + P + (
             "REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=2000 retires_avant_service=0"
         ) + "\n" + P + "AB_PRECIS_FIN\n"
-        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        _, verdict, code = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((verdict, code), ("CONVAINCANT", 0))
 
     def test_absence_fin_bras_est_un_defaut(self):
         fermeture = P + "AB_PRECIS_BRAS_FIN tour=4 reveil=off\n"
         texte = journal().replace(fermeture, "", 1)
         self.assertNotEqual(texte, journal())
-        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        _, verdict, code = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((verdict, code), ("DEFAUT", 1))
 
     def test_fausse_fin_trace_shell_n_est_pas_acceptee(self):
@@ -127,7 +127,7 @@ class DelimitationDuBras(unittest.TestCase):
         texte = journal().replace(fermeture, "", 1)
         # Le journal garde "+ echo ...", qui ne suffit pas.
         self.assertIn(P + "+ echo AB_PRECIS_BRAS_FIN", texte)
-        _, verdict, code = a.analyse(texte, 4, "4", "kvm")
+        _, verdict, code = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((verdict, code), ("DEFAUT", 1))
 
 
@@ -147,7 +147,7 @@ class DiagnosticNoyau(unittest.TestCase):
                       f"refus_autres=0 tardifs_soi={n} tardifs_autre={n * 4} tardifs_irq=0 tardifs_inactif=0 "
                       f"installes_ipi={n * 5} installes_eveilles=0 serie_longues={n} serie_pire_us=4321")
             texte.append(l)
-        sortie, v, c = a.analyse("\n".join(texte) + "\n", 4, "1", "kvm")
+        sortie, v, c = a.analyse_historique("\n".join(texte) + "\n", 4, "1", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
         lignes = [x for x in sortie if x.startswith("  noyau tour 1 off")]
         self.assertEqual(len(lignes), 1)
@@ -168,7 +168,7 @@ class DiagnosticNoyau(unittest.TestCase):
                       "refus_quantum_avant=0 refus_sans_borne=0 refus_autres=0 tardifs_soi=0 tardifs_autre=0 "
                       "tardifs_irq=0 tardifs_inactif=0")
             texte.append(l)
-        sortie, v, c = a.analyse("\n".join(texte) + "\n", 4, "1", "kvm")
+        sortie, v, c = a.analyse_historique("\n".join(texte) + "\n", 4, "1", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
         self.assertTrue(any("installes_ipi=+0" in x for x in sortie))
 
@@ -180,12 +180,12 @@ class LignesEntrelacees(unittest.TestCase):
     def test_une_ligne_interrompue_par_le_noyau_est_lue(self):
         texte = journal().replace("regle=preuve-hote]", "regle=preuve-hote[SCHED-TACHE] tid=103 slot=3 etat=Blocked")
         texte = texte.replace("  sous charge (interactif) median", "[kernel] RUN_NOYAU  sous charge (interactif) median")
-        _, v, c = a.analyse(texte, 4, "1", "kvm")
+        _, v, c = a.analyse_historique(texte, 4, "1", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
 
     def test_sans_ligne_propre_la_mesure_reste_incomplete(self):
         texte = "\n".join(l for l in journal().splitlines() if "[propres" not in l) + "\n"
-        _, v, c = a.analyse(texte, 4, "1", "kvm")
+        _, v, c = a.analyse_historique(texte, 4, "1", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
 
 
@@ -194,7 +194,7 @@ class RaisonDesBrasNonQualifies(unittest.TestCase):
         texte = journal(off={"verdict": "NON_QUALIFIANT"}).replace(
             "VERDICT_SONDE : NON_QUALIFIANT tentatives=1",
             "VERDICT_SONDE : NON_QUALIFIANT tentatives=1 raison=charge sans effet mesurable : p95 sous charge 212")
-        sortie, v, c = a.analyse(texte, 4, "1", "kvm")
+        sortie, v, c = a.analyse_historique(texte, 4, "1", "kvm")
         self.assertEqual((v, c), ("NON_CONCLUANT", 0))
         self.assertTrue(any(x.startswith("  raison tour 1 off : NON_QUALIFIANT charge sans effet") for x in sortie))
 
@@ -209,7 +209,7 @@ class PreuveDesEchecsQualifies(unittest.TestCase):
             " <= sans 1500 + bruit au repos 2000] = faux ; propre[pire avec 3900 <= sans 1500 + bruit au"
             " repos 2000] = faux ; contamines ecartes repos=0 normal=0 interactif=0 sur 300 (preuve-hote)"
             " -> QUALIFIE_ECHEC\n" + P + "VERDICT_SONDE : QUALIFIE_ECHEC tentatives=1", 1)
-        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        sortie, v, c = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((v, c), ("DEFAUT", 1))
         self.assertTrue(any(x.startswith("  preuve tour 1 on : et n'aggrave pas le pire cas") and
                             x.endswith("-> QUALIFIE_ECHEC") for x in sortie), sortie)
@@ -217,7 +217,7 @@ class PreuveDesEchecsQualifies(unittest.TestCase):
                       "interactif p50 600 p95 1000 p99 1500 pire 3000", sortie)
 
     def test_rien_pour_un_bras_qualifie_ok(self):
-        sortie, _, _ = a.analyse(journal(), 4, "4", "kvm")
+        sortie, _, _ = a.analyse_historique(journal(), 4, "4", "kvm")
         self.assertFalse(any(x.startswith(("  preuve tour", "  charge tour")) for x in sortie))
 
 
@@ -227,7 +227,7 @@ class OccupantDuPireCas(unittest.TestCase):
             "retires_avant_service=0",
             "retires_avant_service=0 tirs=1 attentes_noyau=1 attente_noyau_pire_us=5096 "
             "occupant_noyau=7:usb-hid occupant_utilisateur=-")
-        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        sortie, v, c = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
         self.assertTrue(any(x.startswith("  noyau tour 1 on : ") and x.endswith(
             "occupant_noyau=7:usb-hid occupant_utilisateur=-") for x in sortie), sortie)
@@ -244,7 +244,7 @@ class OccupantDuPireCas(unittest.TestCase):
                     f"occupant_utilisateur=140:/bin/ordonnanceur-probe@cpu0:b2:int1941:masq25:vol?:renonce_differee_appel")
         import re
         texte = re.sub("retires_avant_service=0", releve, journal())
-        sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+        sortie, v, c = a.analyse_historique(texte, 4, "4", "kvm")
         self.assertEqual((v, c), ("CONVAINCANT", 0))
         ligne = next(x for x in sortie if x.startswith("  noyau tour 1 off : "))
         self.assertIn("longues_b2=+3", ligne)
@@ -291,7 +291,7 @@ def journal5(tours=4, on=None, off=None):
 
 
 def proprietes(texte):
-    sortie, v, c = a.analyse(texte, 4, "4", "kvm")
+    sortie, v, c = a.analyse_historique(texte, 4, "4", "kvm")
     ligne = next(x for x in sortie if x.startswith("AB_PROPRIETES_V1 : "))
     return dict(re.findall(r"(P\d)=(\S+)", ligne)), v, c, sortie
 

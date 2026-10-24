@@ -22,19 +22,14 @@ NON_CONVAINCANT la rend a `off`) :
   charge     mediane des p95 interactifs sous charge : on <= 1,10 x off ;
   quorum     au moins 4 tours complets, sinon NON_CONCLUANT.
 
-Seules les paires QUALIFIE_OK comptent dans le quorum et les latences.
-Sortie 1 sur un defaut de surete ou d'instrument ; 0 sinon (CONVAINCANT,
-NON_CONVAINCANT, NON_CONCLUANT sont des mesures). Teste :
-tools/ci/reliability/test_ab_reveil_precis.py.
-
-BOUCHAUD_AB_CINQ_PROPRIETES_V1 -- PROPOSITION, NON JUGE (P13_CLOSEOUT_2026-10-20
-§6.5). A cote du verdict historique, qui reste SEUL JUGE (code de sortie et
-`AB_REVEIL_PRECIS` inchanges), cinq verdicts separes, chacun avec sa mesure,
-son critere (les seuils existants, inchanges) et ses conditions
-NON_QUALIFIANT ; ligne `AB_PROPRIETES_V1`. Un NON_QUALIFIANT n'y devient
-jamais QUALIFIE_OK. La seule nouveaute de critere est la porte de P3 (bruit
-mesure au repos au lieu de 2 grains d'horloge, §6.2 a) : elle n'est
-appliquee qu'ici, et l'adopter pour juger reste une decision humaine.
+Politique decisions-20261024 (docs/p13/DECISIONS_2026-10-24.md) : le bras
+on doit qualifier ; off est un controle negatif valide. P3 n'est comparable
+que si p95 normal > p95 repos + max(0, p95 repos - p50 repos), sur les
+observations propres du meme bras. Sinon P3 reste NON_QUALIFIANT, visible
+et non bloquant si les autres proprietes sont qualifiees. Aucun seuil
+P1/P2/P4/P5 n'est modifie. Le verdict historique est conserve en parallele.
+Un defaut d'instrument ou un echec applicable retourne 1 ; NON_CONCLUANT
+reste une mesure incomplete, refusee par la porte stricte qualifie_p13.py.
 """
 import re
 import statistics
@@ -90,7 +85,7 @@ OK, ECHEC, NQ = "QUALIFIE_OK", "QUALIFIE_ECHEC", "NON_QUALIFIANT"
 
 
 def _p_neuf():
-    return {"q": {}, "tours": [], "non_jugeable": {}, "attribution": set()}
+    return {"q": {}, "tours": [], "non_jugeable": {}, "attribution": set(), "effectifs": {}}
 
 
 def _phase_valide(p, phase):
@@ -114,10 +109,12 @@ def _agrege(par_bras, quorum):
     return NQ, f"{len(oks)}/{len(par_bras)} bras qualifies (quorum {quorum})"
 
 
-def cinq_proprietes(bras, tours, smp, nom, grain):
-    """Les cinq verdicts proposes (§6.5). N'influe sur RIEN d'autre."""
+def cinq_proprietes(bras, tours, smp, nom, grain, politique=False):
+    """Les cinq proprietes, avec leur statut et les mesures par bras."""
     sortie = ["  proprietes (BOUCHAUD_AB_CINQ_PROPRIETES_V1, proposition closeout 20/10 §6.5, "
               "NON JUGE : le verdict historique reste seul juge)"]
+    if politique:
+        sortie = ["  proprietes (decisions-20261024, P3 non comparable reste NON_QUALIFIANT)"]
     verdicts = {}
     par_tour = {}
     for b in bras:
@@ -175,8 +172,8 @@ def cinq_proprietes(bras, tours, smp, nom, grain):
             repos, normal, prio = p["q"]["au repos"], p["q"]["sous charge (normal)"], p["q"][inter]
             # P3 : la priorite raccourcit la queue -- jugee seulement si la
             # charge degrade la phase normale au-dela du BRUIT MESURE AU REPOS
-            # (p95 - p50 au repos), jamais sous 2 grains d'horloge (§6.2 a).
-            bruit = max(repos[1] - repos[0], 2 * grain if grain > 0 else 1000)
+            # (p95 - p50 au repos), sans constante de remplacement (D-6.2 a).
+            bruit = max(0, repos[1] - repos[0])
             if normal[1] <= repos[1] + bruit:
                 p3.append((nb, (NQ, f"charge dans le bruit : p95 normal {normal[1]} <= p95 repos {repos[1]} "
                                     f"+ bruit {bruit}")))
@@ -206,11 +203,11 @@ def cinq_proprietes(bras, tours, smp, nom, grain):
         v, txt = verdicts[cle]
         sortie.append(f"  {cle} {noms[cle]} : {v} -- {txt}")
     sortie.append("AB_PROPRIETES_V1 : " + " ".join(f"{k}={verdicts[k][0]}" for k in ("P1", "P2", "P3", "P4", "P5"))
-                  + f" accel={nom} smp={smp} (proposition, non juge)")
+                  + f" accel={nom} smp={smp}" + ("" if politique else " (historique, diagnostic)"))
     return sortie, {k: v for k, (v, _) in verdicts.items()}
 
 
-def analyse(texte, tours, smp, nom):
+def analyse_historique(texte, tours, smp, nom, preuves=None):
     sortie, fautes = [], []
     texte = re.sub(r"\x1b\[[0-9;]*m", "", texte)
     lignes = [re.sub(r"^(\[[^]]*\]){2}\[FPS:[^]]*\] ", "", l).rstrip("\r") for l in texte.splitlines()]
@@ -244,6 +241,9 @@ def analyse(texte, tours, smp, nom):
         if q:
             courant["q"][q.group(1)] = tuple(int(x) for x in q.groups()[1:])
             courant["p"]["q"][q.group(1)] = courant["q"][q.group(1)]
+            effectifs = re.search(r"\[propres (\d+)/(\d+), regle=([^\]]+)\]", l)
+            if effectifs:
+                courant["p"]["effectifs"][q.group(1)] = (int(effectifs[1]), int(effectifs[2]), effectifs[3])
         # BOUCHAUD_AB_CINQ_PROPRIETES_V1 : l'etat de la tentative en cours.
         if TENTATIVE.match(l):
             courant["p"] = _p_neuf()
@@ -300,6 +300,8 @@ def analyse(texte, tours, smp, nom):
             courant["detail"].append(d.group(1)[:400])
     if courant is not None:
         fautes.append(f"tour {courant['tour']} {courant['v']} : bras final non ferme")
+    if preuves is not None:
+        preuves.extend(bras)
     minuteur = "?"
     for b in bras:
         nb = f"tour {b['tour']} {b['v']}"
@@ -407,6 +409,111 @@ def analyse(texte, tours, smp, nom):
                   f"(politique par defaut : on depuis b6c99032 ; un KVM NON_CONVAINCANT la rend a off)")
     return sortie, verdict, 0
 
+
+
+def qualifie_bras(b):
+    """D-6.1/6.2: judge applicable properties without rewriting historical evidence."""
+    p, raisons = b["p"], []
+    for phase in PHASES:
+        raison = _phase_valide(p, phase)
+        if raison:
+            raisons.append(raison)
+        if phase not in p["attribution"]:
+            raisons.append(f"{phase}: attribution absente")
+        n, total, regle = p["effectifs"].get(phase, (0, 0, "?"))
+        if not (0 < n <= total) or (total - n) * 20 >= total:
+            raisons.append(f"{phase}: effectifs/contamination invalides {n}/{total}")
+        if regle not in ("preuve-hote", "sans-preuve"):
+            raisons.append(f"{phase}: regle d'exclusion inconnue")
+        q = p["q"].get(phase)
+        if q is not None and not (0 <= q[0] <= q[1] <= q[2] <= q[3]):
+            raisons.append(f"{phase}: quantiles incoherents")
+    if b["verdict"] not in (OK, NQ, ECHEC):
+        raisons.append("verdict historique absent ou inconnu")
+    if len(p["tours"]) != 2:
+        raisons.append("effectifs de calcul incomplets")
+    if raisons:
+        return NQ, NQ, raisons
+
+    repos, normal, inter = (p["q"][ph] for ph in PHASES)
+    bruit = max(0, repos[1] - repos[0])
+    effet = normal[1] > repos[1] + bruit
+    p3 = (OK if inter[2] < normal[2] or inter[3] < normal[3] else ECHEC) if effet else NQ
+    p4 = inter[3] <= normal[3] + repos[3]
+    normale, priorite = p["tours"]
+    p5 = priorite > 0 and (normale == 0 or priorite * 10 >= normale)
+    if p3 == ECHEC:
+        raisons.append("P3: priorite sans benefice au-dessus du bruit")
+    if not p4:
+        raisons.append("P4: pire cas aggrave")
+    if not p5:
+        raisons.append("P5: famine du calcul")
+    # An unexplained historical failure is never silently discarded. The
+    # sole reinterpretable failure is an explicitly attributed priority
+    # comparison below the *measured* noise floor, with P4/P5 still checked.
+    if b["verdict"] == ECHEC:
+        details = b["detail"]
+        seulement_p3 = details and all(
+            d.startswith("la priorite interactive raccourcit la queue de latence :") for d in details)
+        if effet or not seulement_p3:
+            raisons.append("echec historique non explique par la seule porte P3")
+    if b["verdict"] == NQ:
+        # D-6.1: only the negative control may lack strict qualification.
+        # An unexplained NQ (clock, attribution, disagreement) is not noise.
+        if b["v"] == "on" or effet or "charge sans effet mesurable :" not in b.get("raison", ""):
+            return NQ, p3, raisons + ["non-qualification historique non admissible pour ce bras"]
+    return (ECHEC if raisons else OK), p3, raisons
+
+
+def analyse(texte, tours, smp, nom, politique="decisions-20261024"):
+    bras = []
+    historique, ancien, code = analyse_historique(texte, tours, smp, nom, bras)
+    if politique == "historique":
+        return historique, ancien, code
+    if politique != "decisions-20261024":
+        raise ValueError("politique A/B inconnue")
+    # Preserve the old verdict alongside the new gate, unmodified in meaning.
+    sortie = [s.replace("AB_REVEIL_PRECIS", "AB_REVEIL_PRECIS_HISTORIQUE") for s in historique]
+    sortie.append("AB_POLITIQUE : decisions-20261024 bruit_repos=max(0,p95-p50) unites=us")
+    structure = [s for s in historique if s.startswith("  DEFAUT ")
+                 and not s.endswith("QUALIFIE_ECHEC sous le reveil precis")]
+    if any(b["tour"] not in range(1, tours + 1) for b in bras):
+        structure.append("  DEFAUT numero de tour hors protocole")
+    if structure:
+        sortie.extend(structure)
+        sortie.append(f"AB_REVEIL_PRECIS_ECHEC n={len(structure)} accel={nom} smp={smp}")
+        return sortie, "DEFAUT", 1
+    valides, inconnus, echecs = [], [], []
+    for b in bras:
+        v, p3, raisons = qualifie_bras(b)
+        identite = f"tour={b['tour']} bras={b['v']}"
+        role = "politique-active" if b["v"] == "on" else "controle-negatif"
+        sortie.append(f"AB_BRAS_POLITIQUE {identite} role={role} verdict={v} P3={p3} historique={b['verdict']}")
+        for phase in PHASES:
+            n, total, regle = b["p"]["effectifs"].get(phase, (0, 0, "?"))
+            sortie.append(f"  preuve {identite} phase={phase} quantiles_us={b['p']['q'].get(phase)} "
+                          f"propres={n} total={total} exclus={total-n} regle={regle}")
+        sortie.extend(f"  {identite}: {r}" for r in raisons)
+        if p3 == NQ and v == OK:
+            sortie.append(f"  {identite}: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)")
+        if v == ECHEC:
+            echecs.append(identite)
+        elif v == NQ:
+            inconnus.append(identite)
+        else:
+            valides.append(b)
+    proprietes, verdicts = cinq_proprietes(valides, tours, smp, nom, 0, politique=True)
+    sortie.extend(s.replace("AB_PROPRIETES_V1", "AB_PROPRIETES_POLITIQUE") for s in proprietes)
+    if echecs or any(verdicts[k] == ECHEC for k in ("P1", "P2", "P4", "P5")):
+        verdict, code = "NON_CONVAINCANT", 1
+    elif (inconnus or len(bras) != 2 * tours or tours < QUORUM
+          or any(verdicts[k] != OK for k in ("P1", "P2", "P4", "P5"))):
+        verdict, code = "NON_CONCLUANT", 0
+    else:
+        verdict, code = "CONVAINCANT", 0
+    sortie.append(f"AB_REVEIL_PRECIS : {verdict} accel={nom} smp={smp} politique=decisions-20261024 "
+                  f"bras_valides={len(valides)}/{2*tours}")
+    return sortie, verdict, code
 
 def main():
     journal, tours, smp, nom = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]

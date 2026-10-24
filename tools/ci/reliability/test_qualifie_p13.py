@@ -7,7 +7,7 @@ CI = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CI))
 
 import qualifie_p13 as q  # noqa: E402
-from test_ab_reveil_precis import P, journal  # noqa: E402
+from test_ab_politique import P, journal, controle_negatif  # noqa: E402
 
 
 def attrib(verdicts=("QUALIFIE_OK", "QUALIFIE_OK"), preuves=6, fini=True):
@@ -38,6 +38,9 @@ class AttributionStricte(unittest.TestCase):
 
 
 class ABEveilStrict(unittest.TestCase):
+    def test_controle_negatif_valide_selon_decision_adoptee(self):
+        self.assertEqual(q.inspecte_ab(controle_negatif() + P + "AB_PRECIS_FIN\n", 4, 4), [])
+
     def test_convaincant_et_qualifie(self):
         texte = journal() + P + "AB_PRECIS_FIN\n"
         self.assertEqual(q.inspecte_ab(texte, 1, 4), [])

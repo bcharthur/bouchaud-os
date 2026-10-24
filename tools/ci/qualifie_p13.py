@@ -67,14 +67,11 @@ def inspecte_ab(texte: str, smp: int, tours: int) -> list[str]:
     if code != 0 or verdict != "CONVAINCANT":
         fautes.append(f"A/B = {verdict} (attendu CONVAINCANT sans defaut)")
         fautes.extend(s.strip() for s in rapport if s.strip().startswith(("DEFAUT", "ECHOUE")))
-    # Deux bras par tour. La qualification est obligatoire meme lorsque les
-    # valeurs de latence ont l'air favorables.
+    # Role-specific qualification and missing evidence are enforced by analyse().
+    # Never require the negative control's historical policy verdict to be OK.
     v = [m.group(1) for l in ls if (m := SONDE.match(l))]
     if len(v) != 2 * tours:
         fautes.append(f"verdicts par bras {len(v)}/{2 * tours}")
-    for i, statut in enumerate(v, 1):
-        if statut != "QUALIFIE_OK":
-            fautes.append(f"bras {i} : {statut} (attendu QUALIFIE_OK)")
     # The autorun intentionally restores the default policy after the last arm.
     # That REVEIL_PRECIS line is not a measurement of any arm. Qualify exactly
     # the two counter snapshots delimited by each executed AB_PRECIS/FIN pair,
