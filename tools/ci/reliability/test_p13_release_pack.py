@@ -44,6 +44,13 @@ class KvmPreflight(unittest.TestCase):
         self.assertIsNone(host.quota_cpus('max 100000'))
         self.assertEqual(host.quota_cpus('erreur'), 0)
 
+    def test_four_allocated_cpus_only_qualify_baseline(self):
+        self.assertEqual(host.controle(4, 4.0, 4, True, [], True, 1.0), [])
+        self.assertTrue(host.controle(4, 4.0, 8, True, [], True, 1.0))
+        self.assertTrue(host.controle(8, 4.0, 8, True, [], True, 1.0))
+        self.assertTrue(host.controle(8, 4.0, 4, True, [], True, 7.0))
+        self.assertTrue(host.controle(4, 4.0, 4, False, [], True, 1.0))
+
     def test_shared_host_refused(self):
         faults = host.controle(8, 8.0, 8, True, [], False, 1.0)
         self.assertTrue(any('dédié' in f for f in faults))

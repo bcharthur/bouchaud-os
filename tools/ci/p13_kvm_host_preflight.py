@@ -7,6 +7,7 @@ prétend pas mesurer le temps volé : seul le journal invité peut le faire.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import platform
@@ -41,8 +42,9 @@ def controle(allowed: int, quota: float | None, min_cpus: int, kvm: bool, tools:
         errors.append("/dev/kvm inexistant ou inaccessible en lecture/écriture")
     if tools:
         errors.append("outils absents : " + ", ".join(tools))
-    if allowed > 0 and load > allowed * max_load_ratio:
-        errors.append(f"charge hôte élevée au contrôle : {load:.2f} > {allowed * max_load_ratio:.2f}")
+    effective = min(allowed, quota) if quota is not None else allowed
+    if effective > 0 and load > effective * max_load_ratio:
+        errors.append(f"charge hôte élevée au contrôle : {load:.2f} > {effective * max_load_ratio:.2f}")
     return errors
 
 
@@ -58,7 +60,19 @@ def main() -> int:
     quota = quota_cpus(p.read_text()) if p.exists() else None
     required = ["qemu-system-x86_64", "python3", "bash", "gcc", "git"]
     missing = [t for t in required if not shutil.which(t)]
-    kvm = os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
+    kvm = False
+    kvm_error = None
+    try:
+        # A device node and mode bits alone do not prove ioctl access (cgroup,
+        # nested virtualization). Create and close a real empty VM as well.
+        with open("/dev/kvm", "r+b", buffering=0) as device:
+            if fcntl.ioctl(device, 0xAE00, 0) != 12:  # KVM_GET_API_VERSION
+                raise OSError("version API KVM inattendue")
+            vm = fcntl.ioctl(device, 0xAE01, 0)  # KVM_CREATE_VM
+            os.close(vm)
+            kvm = True
+    except OSError as error:
+        kvm_error = str(error)
     load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     dedicated = os.environ.get("BOUCHAUD_DEDICATED_HOST") == "YES"
     errors = controle(len(affinity), quota, ns.min_cpus, kvm, missing, dedicated, load)
@@ -69,7 +83,7 @@ def main() -> int:
         errors.append("Git HEAD absent, impossible de relier les preuves à un SHA")
     info = {"sha": sha, "uname": platform.uname()._asdict(), "allowed_cpu_ids": affinity,
             "allowed_count": len(affinity), "cpu_quota": quota, "host_load_1m": load,
-            "kvm_accessible": kvm, "dedicated_confirmed_by_operator": dedicated,
+            "kvm_accessible": kvm, "kvm_error": kvm_error, "dedicated_confirmed_by_operator": dedicated,
             "minimum_cpu": ns.min_cpus, "errors": errors, "status": "PRECHECK_OK" if not errors else "PRECHECK_REFUSED"}
     ns.output.parent.mkdir(parents=True, exist_ok=True)
     ns.output.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

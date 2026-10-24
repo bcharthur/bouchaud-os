@@ -12,7 +12,9 @@ OUT=${P13_QUALIFICATION_OUT:-"$PWD/p13-dedicated-${MODE}"}
 [[ ! -e "$OUT" ]] || { echo "Dossier sortie existe deja $OUT (conserver les preuves)" >&2; exit 2; }
 mkdir -p "$OUT"
 # La garde est AVANT les tests et enregistre le SHA et le type d'hote.
-python3 tools/ci/p13_kvm_host_preflight.py --min-cpus 8 --output "$OUT/host.json"
+MIN_CPUS=4
+[[ "$MODE" != smp8 ]] || MIN_CPUS=8
+python3 tools/ci/p13_kvm_host_preflight.py --min-cpus "$MIN_CPUS" --output "$OUT/host.json"
 sha256sum "$BOOT" > "$OUT/bootimage.sha256"
 git rev-parse HEAD > "$OUT/git-head.txt"
 cp /proc/stat "$OUT/host-proc-stat-avant.txt"

@@ -23,7 +23,7 @@ on:
 permissions:
   contents: read
 
-# Dedicated runner MUST have this manually registered label and >=8 CPUs.
+# Baseline: trusted 4-CPU allocation. SMP8/soak: trusted 8-CPU allocation.
 # It will remain queued indefinitely if no trusted runner is configured.
 concurrency:
   group: p13-dedicated-kvm
@@ -32,8 +32,8 @@ concurrency:
 jobs:
   qualify:
     name: P13 / ${{ inputs.campaign }} / dedicated KVM
-    runs-on: [self-hosted, Linux, X64, bouchaud-kvm8]
-    timeout-minutes: 220
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.campaign == 'baseline' && 'bouchaud-kvm4' || 'bouchaud-kvm8' }}"]
+    timeout-minutes: 600
     env:
       BOUCHAUD_DEDICATED_HOST: 'YES'
       P13_QUALIFICATION_OUT: p13-dedicated-${{ github.run_id }}
@@ -41,11 +41,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Contrôle du véritable hôte KVM AVANT toute construction
         run: |
-          python3 tools/ci/p13_kvm_host_preflight.py --min-cpus 8 --output p13-host-preflight.json
+          python3 tools/ci/p13_kvm_host_preflight.py --min-cpus '${{ inputs.campaign == 'baseline' && 4 || 8 }}' --output "$RUNNER_TEMP/p13-host-preflight.json"
+      - name: Trois campagnes baseline indépendantes au SHA exact
+        if: ${{ inputs.campaign == 'baseline' }}
+        run: bash tools/ci/run_p13_campaigns.sh '${{ github.sha }}' "$PWD/p13-dedicated-${{ github.run_id }}"
       - name: Build noyau exact SHA
+        if: ${{ inputs.campaign != 'baseline' }}
         run: tools/ci/build_kernel.sh
       - name: Qualification dédiée SMP1/2/4 ou SMP8
-        if: ${{ inputs.campaign != 'smp8-soak' }}
+        if: ${{ inputs.campaign == 'smp8' }}
         shell: bash
         run: |
           bash tools/ci/run_p13_dedicated_kvm.sh \
@@ -68,7 +72,8 @@ jobs:
         with:
           name: p13-dedicated-evidence-${{ github.run_id }}
           path: |
-            p13-host-preflight.json
+            ${{ runner.temp }}/p13-host-preflight.json
             p13-dedicated-*/**
+            !p13-dedicated-*/source/**
           if-no-files-found: warn
           retention-days: 30
