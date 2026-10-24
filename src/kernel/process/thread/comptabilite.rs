@@ -506,6 +506,12 @@ fn rearme_compta_apres_idle() {
     let Some(task) = table.get(index) else {
         return;
     };
+    arme_tranche_comptable(task, ARMEMENT_APRES_IDLE);
+}
+
+/// Single opening boundary for election, migration and idle return. Caller
+/// owns this task; the clock, owner and cursors are read under the seqlock.
+fn arme_tranche_comptable(task: &Task, site: u64) {
     compta_section(task, || {
         // BOUCHAUD_COMPTA_REARME_EN_SECTION_V1 : l'instant ET le coeur se
         // lisent ICI, interruptions masquees. Au retour du `hlt` les
@@ -522,12 +528,21 @@ fn rearme_compta_apres_idle() {
         // election (`finalise_task_running`) : la tranche en cours est la
         // bonne, on n'y touche pas.
         if task.last_account_ns != 0 {
+            assert_eq!(site, ARMEMENT_APRES_IDLE, "compta: election d'une tranche deja ouverte");
             REARMES_DEJA_ARMES.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let now = crate::kernel::timer::monotonic_ns();
         let cpu = local_cpu();
-        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE, task.tid as u64);
+        assert_eq!(task.on_cpu.charge(), cpu as i8, "compta: ouverture par un autre coeur");
+        // The negative-control injection deliberately leaves a cursor on
+        // its former CPU after migration. Let that arm reach its overlap
+        // counters; the shipped path must never overwrite another owner.
+        if !INJECTION_ANCIEN.load(Ordering::Relaxed) {
+            assert_eq!(COMPTA_DEBUT_NS[cpu].load(Ordering::Relaxed), 0,
+                "compta: ouverture sur la tranche d'un autre proprietaire");
+        }
+        note_armement_compta(cpu, now, site, task.tid as u64);
         task.last_account_ns.range(now);
         task.slice_start_ns.range(now);
         COMPTA_DEBUT_NS[cpu].store(now, Ordering::Relaxed);
@@ -551,6 +566,8 @@ fn account_slice_end(task: &Task) {
         // sequence impaire, il suit dans l'ordre de `LAST_MONOTONIC_NS` tout
         // instant d'un lecteur qui a vu l'etat d'avant.
         let now = crate::kernel::timer::monotonic_ns();
+        if task.last_account_ns == 0 { return; }
+        assert_eq!(task.on_cpu.charge(), local_cpu() as i8, "compta: fermeture par un autre coeur");
         account_until(task, now);
         task.last_account_ns.range(0);
         task.slice_start_ns.range(0);

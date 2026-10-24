@@ -181,7 +181,11 @@ def verifie(src: Path) -> list[str]:
 
         for nom, debut, fin in fns:
             corps = code[debut:fin]
-            if nom == "rearme_compta_apres_idle":
+            if nom == "rearme_compta_apres_idle" and "arme_tranche_comptable(task, ARMEMENT_APRES_IDLE)" not in corps:
+                fautes.append("rearmement idle hors transition comptable commune")
+            if nom == "finalise_task_running" and "arme_tranche_comptable(task, ARMEMENT_ELECTION)" not in corps:
+                fautes.append("election hors transition comptable commune")
+            if nom == "arme_tranche_comptable":
                 vu_rearme[0] = True
                 s = corps.find("compta_section(")
                 lecture = corps.find("crate::kernel::timer::monotonic_ns()")
@@ -236,6 +240,8 @@ def verifie(src: Path) -> list[str]:
 
 COMPTA = "kernel/process/thread/comptabilite.rs"
 INSTANT = ("        let now = crate::kernel::timer::monotonic_ns();\n"
+           "        if task.last_account_ns == 0 { return; }\n"
+           '        assert_eq!(task.on_cpu.charge(), local_cpu() as i8, "compta: fermeture par un autre coeur");\n'
            "        account_until(task, now);")
 
 
@@ -270,18 +276,14 @@ def main() -> int:
         # Le repli hors section.
         (COMPTA, [("    compta_section(task, || {\n        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1",
                    "    (|| {\n        // BOUCHAUD_COMPTA_INSTANT_EN_SECTION_V1")]),
-        # Regle 6 : l'instant du rearmement lu avant la section (l'ancien ordre).
-        (COMPTA, [("    let table = tasks();\n    let Some(task) = table.get(index) else {\n        return;\n    };\n"
-                   "    compta_section(task, || {\n        // BOUCHAUD_COMPTA_REARME_EN_SECTION_V1",
-                   "    let now = crate::kernel::timer::monotonic_ns();\n    let cpu = local_cpu();\n"
-                   "    let table = tasks();\n    let Some(task) = table.get(index) else {\n        return;\n    };\n"
-                   "    compta_section(task, || {\n        // BOUCHAUD_COMPTA_REARME_EN_SECTION_V1"),
+        # The common opening must sample time inside its own sequence.
+        (COMPTA, [("fn arme_tranche_comptable(task: &Task, site: u64) {\n",
+                   "fn arme_tranche_comptable(task: &Task, site: u64) {\n    let now = crate::kernel::timer::monotonic_ns();\n"),
                   ("        let now = crate::kernel::timer::monotonic_ns();\n        let cpu = local_cpu();\n"
-                   "        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE",
-                   "        note_armement_compta(cpu, now, ARMEMENT_APRES_IDLE")]),
-        # Regle 6 : une tranche deja armee par l'election, ecrasee.
-        (COMPTA, [("        if task.last_account_ns != 0 {\n            REARMES_DEJA_ARMES.fetch_add(1, Ordering::Relaxed);\n"
-                   "            return;\n        }\n", "")]),
+                   "        assert_eq!(task.on_cpu.charge()", "        let cpu = local_cpu();\n        assert_eq!(task.on_cpu.charge()")]),
+        (COMPTA, [("        if task.last_account_ns != 0 {", "        if false {")]),
+        (COMPTA, [("arme_tranche_comptable(task, ARMEMENT_APRES_IDLE);", "rearme_ancien_pour_banc();")]),
+        ("kernel/process/thread/commutation.rs", [("arme_tranche_comptable(task, ARMEMENT_ELECTION);", "")]),
         # Regle 7 : l'ordre d'avant actif par defaut.
         (COMPTA, [("static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);",
                    "static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(true);")]),
