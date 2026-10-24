@@ -48,8 +48,8 @@ jobs:
           }
           run_one detenteur-tcg-3s env BANC_SUSPENSION_MS=3000 tools/ci/run_serie_entrelacement.sh
           run_one verrou-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 tools/ci/run_serie_entrelacement.sh
-          run_one temoin-sans-secours-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh
-          run_one secours-fil-tcg-3s env BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh
+          run_one temoin-sans-secours-tcg-6s env BANC_VERROU_SUSPENDU_MS=6000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh
+          run_one secours-fil-tcg-6s env BANC_VERROU_SUSPENDU_MS=6000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh
           echo "P13_CONSOLE_FOUR_RESULT failures=${failures}"
           test "$failures" -eq 0
       - name: Preserve guest logs regardless of verdict
