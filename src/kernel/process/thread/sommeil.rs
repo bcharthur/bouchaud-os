@@ -105,14 +105,14 @@ pub fn echeance_pour(ticks: u64) -> u64 {
 }
 
 pub fn sleep_ticks(ticks: u64) {
-    dort(ticks, true)
+    avec_tache(|| dort(ticks, true))
 }
 
 /// Sommeil NON interruptible : une tache condamnee le termine au lieu d'y
 /// mourir. Pour les attentes du noyau qui doivent aller a leur terme meme
 /// pendant une mort imposee (`attend_extinction_freres`).
 pub(crate) fn sleep_ticks_noyau(ticks: u64) {
-    dort(ticks, false)
+    avec_tache(|| dort(ticks, false))
 }
 
 /// Sommeil de `nanosleep` : ne rend la main avant l'echeance que pour un
@@ -169,6 +169,7 @@ fn dort(ticks: u64, interruptible: bool) {
 
 /// Rend `false` si le parking a ete refuse (la tache ne peut plus dormir).
 fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
+    exige_tache_courante();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_begin_if_idle(WAIT_SLEEP, deadline, ticks);
     // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : les instants de CE sommeil.

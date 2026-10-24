@@ -11,6 +11,23 @@
 //! `exit_current` et dans la boucle idle, et `tools/smp/test_continuation.rs`
 //! la rejoue contre l'ancien protocole.
 
+/// NO_TASK is not a task identity: the BSP caller and scheduler idle have
+/// different rights. Only the former may create a scoped blocking task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContexteExecution {
+    Tache(usize),
+    ContinuationBsp,
+    Idle,
+}
+
+pub fn contexte(cpu: usize, tache: Option<usize>, continuation_garee: bool) -> ContexteExecution {
+    match tache {
+        Some(index) => ContexteExecution::Tache(index),
+        None if cpu == 0 && !continuation_garee => ContexteExecution::ContinuationBsp,
+        None => ContexteExecution::Idle,
+    }
+}
+
 /// Ou va la pile d'une tache qui vient de mourir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Destination {

@@ -622,6 +622,8 @@ fn sortie_du_groupe(code: i32, par_signal: bool) -> ! {
 /// effacerait l'identite de la tache appelante. Les appelants verifient
 /// [`in_user_task`] avant d'arriver ici — voir `exec::exec_image`.
 pub fn run(mut first: Box<Task>) -> i32 {
+    assert_eq!(contexte_execution(), ContexteExecution::ContinuationBsp,
+        "run: seule la continuation BSP peut attendre une racine");
     // BOUCHAUD_RUN_PORTE_TRANSITION_V1
     //
     // `run` et `run_noyau` prenaient le gros verrou. Ce qu'il protegeait
@@ -848,6 +850,8 @@ pub fn run_noyau(entree: fn() -> !, nom: &str) -> i32 {
         crate::kernel::dmesg::log("task: run_noyau imbrique refuse");
         return -1;
     }
+    assert_eq!(contexte_execution(), ContexteExecution::ContinuationBsp,
+        "run_noyau: lancement synchrone depuis idle");
     let process = match new_process(nom, 0) {
         Some(process) => process,
         None => return -1,

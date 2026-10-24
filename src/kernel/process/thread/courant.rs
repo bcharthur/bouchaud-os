@@ -608,13 +608,7 @@ pub fn running_user_cpu_mask() -> u64 {
 // weakening the assertion. Remove only after the root cause is qualified.
 #[track_caller]
 pub fn current() -> &'static Task {
-    let index = current_index_raw();
-    assert!(
-        index != NO_TASK,
-        "task: aucune tache active sur ce CPU appelant={}:{}",
-        core::panic::Location::caller().file(),
-        core::panic::Location::caller().line(),
-    );
+    let index = exige_tache_courante();
     // Le recycleur exige `on_cpu < 0`; la tache courante est donc stable tant
     // que cette continuation s'execute.
     let pointeur = EMPLACEMENTS[index].tache.load(Ordering::Acquire);
@@ -633,8 +627,7 @@ pub fn current() -> &'static Task {
 /// drapeau -- mais la prendre est ce qui rend le `&mut` legitime plutot que
 /// simplement plausible.
 pub fn current_exclusif() -> GardeTache {
-    let index = current_index_raw();
-    assert!(index != NO_TASK, "task: aucune tache active sur ce CPU");
+    let index = exige_tache_courante();
     registre_exclusif_attente(index).expect("registre: tache courante absente")
 }
 

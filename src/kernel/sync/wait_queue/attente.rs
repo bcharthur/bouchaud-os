@@ -62,6 +62,11 @@ impl WaitQueue {
         if self.point.ticket() != ticket.0 {
             return true;
         }
+        crate::kernel::task::avec_tache(|| self.attend_dans_tache(ticket, deadline_ns, interruptible))
+    }
+
+    fn attend_dans_tache(&self, ticket: WaitTicket, deadline_ns: Option<u64>, interruptible: bool) -> bool {
+        if self.point.ticket() != ticket.0 { return true; }
 
         // Un seul chemin depuis que le gros verrou n'existe plus
         // (BOUCHAUD_BKL_SUPPRIME_V1) : la branche LEGACY servait les appelants
