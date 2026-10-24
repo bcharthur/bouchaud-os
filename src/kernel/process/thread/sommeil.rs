@@ -478,6 +478,18 @@ fn wake_sleepers_depuis_irq() {
     }
 }
 
+/// Service due sleeps before deciding whether an interrupted kernel task
+/// has a targeted preemption request. Otherwise the request can never exist:
+/// it is published by the wakeup that used to require preemption first.
+/// The same lock/registry/IRQ and handoff exclusions as stack preemption
+/// apply to this earlier scan; an unsafe context keeps its deferred path.
+pub fn sert_echeances_au_vecteur_local() {
+    if !crate::kernel::scheduler::preempt::preemption_noyau_sure()
+        || transition_ouverte_sans_passation(local_cpu())
+    { return; }
+    wake_sleepers_depuis_irq();
+}
+
 /// `(soi, autre, irq, inactif)` : reveils tardifs par contexte de balayage.
 pub fn compteurs_tardifs() -> [u64; 4] {
     use core::sync::atomic::Ordering::Relaxed;

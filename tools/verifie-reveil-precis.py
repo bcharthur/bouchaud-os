@@ -36,6 +36,8 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 FICHIERS = {
+    "replanif": RACINE / "src/arch/x86_64/idt/reschedule.rs",
+    "sommeil": RACINE / "src/kernel/process/thread/sommeil.rs",
     "smp": RACINE / "src/arch/x86_64/smp.rs",
     "idle": RACINE / "src/arch/x86_64/cpu/idle/scheduler.rs",
     "shell": RACINE / "src/shell/mod.rs",
@@ -120,6 +122,14 @@ def verifie(t: dict, sources_src: str) -> list:
     start = armer.find("LAPIC_TIMER_INITIAL, compte);")
     if not 0 <= stop < periodic < start:
         fautes.append("le compteur court doit etre desarme avant le passage en mode periodique")
+    service = "crate::kernel::task::sert_echeances_au_vecteur_local();"
+    irq = t["replanif"]
+    if not 0 <= irq.find(service) < irq.find("smp::rearme_reste_du_quantum();") < irq.find("accorde_preemption_noyau()"):
+        fautes.append("le vecteur local decide ou rearme avant de publier les dormeurs dus")
+    scan = corps(t["sommeil"], "pub fn sert_echeances_au_vecteur_local(")
+    for garde in ("!crate::kernel::scheduler::preempt::preemption_noyau_sure()", "transition_ouverte_sans_passation(local_cpu())"):
+        if not 0 <= scan.find(garde) < scan.find("wake_sleepers_depuis_irq();"):
+            fautes.append("le service des echeances contourne les exclusions de preemption")
     retrait = corps(t["smp"], "pub fn retire_reveil_precis_apres_hlt(")
     if "rearme_reste_du_quantum();" not in retrait or "arm_local_scheduler_timer();" in retrait:
         fautes.append("le retour idle recommence le quantum au lieu de restaurer son reste")
@@ -149,6 +159,9 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("dormeurs servis trop tard", "replanif", "    crate::kernel::task::sert_echeances_au_vecteur_local();", ""),
+        ("service IRQ sous verrou", "sommeil", "!crate::kernel::scheduler::preempt::preemption_noyau_sure()", "false"),
+        ("service pendant passation", "sommeil", "transition_ouverte_sans_passation(local_cpu())", "false"),
         ("compte court restaure en periodique", "smp", "                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, 0);", ""),
         ("retour idle prolonge le quantum", "smp", "            rearme_reste_du_quantum();", "            arm_local_scheduler_timer();"),
 
@@ -199,7 +212,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 20 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 23 negatifs)")
     return 0
 
 
