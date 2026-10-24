@@ -160,7 +160,9 @@ def verifie(racine: Path) -> list[str]:
     if "self.attend(ticket, None, true)" not in corps(src[ATTENTE], "wait") \
             or "self.attend(ticket, None, false)" not in corps(src[ATTENTE], "wait_noyau"):
         fautes.append(f"{ATTENTE} : l'interruptibilite par defaut des WaitQueue a change")
-    att = corps(src[ATTENTE], "attend")
+    att = corps(src[ATTENTE], "attend_dans_tache")
+    if "avec_tache(|| self.attend_dans_tache(" not in corps(src[ATTENTE], "attend"):
+        fautes.append(f"{ATTENTE} : l'attente contourne le contexte de tache")
     if not avant(att, "drop(inscrit);", "meurt_au_parking()"):
         fautes.append(f"{ATTENTE} : une tache qui meurt au parking garde son inscription")
     for fichier, n in NOYAU.items():
@@ -213,6 +215,8 @@ def main() -> int:
         print("\n".join("  " + f for f in fautes))
         return 1
     negatifs = [
+        (ATTENTE, "                drop(inscrit);", ""),
+        (ATTENTE, "avec_tache(|| self.attend_dans_tache(", "avec_tache(|| self.autre_attente("),
         # L'ancienne ecriture libre revient dans le sommeil.
         (SOMMEIL, "    match publie_parking(interruptible) {", "    current().state.range(TaskState::Blocked);\n    match publie_parking(interruptible) {"),
         # Le tueur ecrit Zombie sur une tache qui s'execute.

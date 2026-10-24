@@ -43,10 +43,10 @@ REGLE = ("    if courante == Classe::Interactive && attente_interactive == 0 "
 DEFAUT = ("static CESSION_PAR_CLASSE: core::sync::atomic::AtomicBool = "
           "core::sync::atomic::AtomicBool::new(true);")
 IRQ = ("    if courante_garde_le_coeur(cur, cpu_id) {\n        note_renonce_battement(cpu_id, RENONCE_GARDE);\n"
-       "        termine_transition_ordonnanceur();\n"
+       "        termine_transition_ordonnanceur();\n        stall_site_clear();\n"
        "        return;\n    }\n\n    let Some(next) = pick_next(cur, cpu_id) else {")
-POINT = ("    if crate::kernel::task::courante_garde_le_coeur_local() {\n        return false;\n    }\n"
-         "    let switched = crate::kernel::task::schedule();")
+POINT = ("    if crate::kernel::task::courante_garde_le_coeur_local() {\n"
+         "        local.request_resched();\n        return false;\n    }")
 INVERSION = "        CESSIONS_INVERSEES.fetch_add(1, Ordering::Relaxed);\n        false"
 TESTS = ("une_interactive_sous_budget_garde_son_coeur_face_a_des_normales",
          "une_interactive_cede_a_une_interactive_en_attente",
@@ -72,8 +72,11 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("shell : la commande ordo-cession n'est plus branchee.")
     if t["irq"].count(IRQ) != 1:
         fautes.append("preempt_from_irq : la regle n'est plus consultee avant pick_next.")
-    if t["point"].count(POINT) != 1:
-        fautes.append("safe_point : la regle n'est plus consultee avant schedule().")
+    point = t["point"]
+    ordre = [point.find(jalon) for jalon in (
+        "local.clear_resched();", POINT, "REQUEST_NS[index].swap", "let switched = crate::kernel::task::schedule();")]
+    if point.count(POINT) != 1 or min(ordre) < 0 or ordre != sorted(ordre):
+        fautes.append("safe_point : la cession refusee doit conserver sa demande avant toute consommation ou election.")
     if t["ordo"].count(INVERSION) != 1:
         fautes.append("ordonnancement.rs : la politique historique ne compte plus ses inversions.")
     if "cession(classe, consomme, interactives, normales)" not in t["ordo"] \
@@ -99,6 +102,8 @@ def negatifs(t: dict, src: str) -> list:
         ("historique par defaut", "reveil", DEFAUT, DEFAUT.replace("new(true)", "new(false)")),
         ("quantum sans regle", "irq", "    if courante_garde_le_coeur(cur, cpu_id) {", "    if false {"),
         ("point sur sans regle", "point", "    if crate::kernel::task::courante_garde_le_coeur_local() {", "    if false {"),
+        ("demande perdue au refus", "point", "        local.request_resched();\n        return false;", "        return false;"),
+        ("horodatage consomme avant decision", "point", "    local.clear_resched();", "    let _ = REQUEST_NS[index].swap(0, Ordering::AcqRel);\n    local.clear_resched();"),
         ("inversions non comptees", "ordo", INVERSION, "        false"),
         ("tranche ouverte oubliee", "ordo", "tache.budget_reveil_ns.charge().saturating_add(tranche)",
          "tache.budget_reveil_ns.charge()"),
@@ -130,7 +135,7 @@ def main() -> int:
             print(f"verifie-cession-par-classe: {f}")
         return 1
     print("verifie-cession-par-classe: OK (regle pure bornee par le budget, quantum et point sur, "
-          "classe par defaut, inversions comptees en historique ; 11 negatifs)")
+          "classe par defaut, inversions comptees en historique ; 13 negatifs)")
     return 0
 
 

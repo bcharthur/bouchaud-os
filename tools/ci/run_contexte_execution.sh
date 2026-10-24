@@ -21,6 +21,9 @@ for smp in 1 4; do
     grep -aq 'CONTEXTE_LIFECYCLE_OK service_hors_session_preserve=1' "$log"
     grep -aq 'CONTEXTE_IRQ_OK profondeur=0 entrees=' "$log"
     grep -aq '=== AUTORUN FIN === statut=0' "$log"
-    ! grep -aqE 'KERNEL PANIC|panicked at|irq_depth underflow' "$log"
+    if grep -aqE 'KERNEL PANIC|panicked at|irq_depth underflow' "$log"; then
+        echo "CONTEXTE_EXECUTION_ECHEC smp=$smp panique ou profondeur IRQ invalide" >&2
+        exit 1
+    fi
     echo "CONTEXTE_EXECUTION_OK smp=$smp"
 done

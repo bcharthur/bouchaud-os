@@ -58,7 +58,7 @@ need("tools/ci/ladybird_runtime_verdict.py", "LADYBIRD_CONVERGENCE_OK", "WORKER_
 # Le vrai artefact doit etre lie au HEAD + upstream et re-verifie apres download.
 workflow = need(
     ".github/workflows/ladybird-native-browser.yml",
-    "branches: [main, 'claude/**', 'feat/**']",
+    "branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']",
     "artifact_manifest.py create",
     "artifact_manifest.py verify",
     "BOUCHAUD_ARTIFACT_MANIFEST.json",
