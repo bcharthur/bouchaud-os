@@ -14,7 +14,7 @@ def diagnostic(raw, smp):
         'AB_REVEIL_PRECIS :', 'AB_BRAS_POLITIQUE ', '  preuve tour=', '  tour='))))
     clean = re.sub(r'\x1b\[[0-9;]*m', '', raw)
     keys = ('voulu', 'minuteur', 'armes', 'armes_occupes', 'avances_occupees',
-            'tirs', 'tirs_anticipes', 'refus_quantum_avant', 'refus_sans_borne', 'refus_autres')
+            'tirs', 'tirs_anticipes', 'auto_ipi_evites', 'refus_quantum_avant', 'refus_sans_borne', 'refus_autres')
     for line in clean.splitlines():
         if '+ echo ' in line:
             continue

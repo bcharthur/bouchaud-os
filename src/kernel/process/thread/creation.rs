@@ -492,14 +492,18 @@ fn publish_ready(index: usize) {
         ReveilDecision::ReveilImmediat => {
             crate::kernel::scheduler::preempt::request_cpu(target);
             crate::kernel::scheduler::preempt::note_reveil_immediat();
-            crate::kernel::scheduler::preempt::note_ipi_reveil();
-            smp::reschedule_cpu(target);
+            if !reveil_servi_localement(target) {
+                crate::kernel::scheduler::preempt::note_ipi_reveil();
+                smp::reschedule_cpu(target);
+            }
         }
         ReveilDecision::PreemptionCiblee => {
             crate::kernel::scheduler::preempt::demande_ciblee(target);
             crate::kernel::scheduler::preempt::note_reveil_cible();
-            crate::kernel::scheduler::preempt::note_ipi_reveil();
-            smp::reschedule_cpu(target);
+            if !reveil_servi_localement(target) {
+                crate::kernel::scheduler::preempt::note_ipi_reveil();
+                smp::reschedule_cpu(target);
+            }
         }
         ReveilDecision::DemandeDifferee => {
             crate::kernel::scheduler::preempt::request_cpu(target);
@@ -507,7 +511,7 @@ fn publish_ready(index: usize) {
             // Le comportement historique, INCHANGE : un coeur qui vient de
             // s'endormir entre la mise en file et ici recoit quand meme son
             // IPI. C'est la relecture, pas la decision, qui ferme la course.
-            if etat.inactif {
+            if etat.inactif && !reveil_servi_localement(target) {
                 crate::kernel::scheduler::preempt::note_ipi_reveil();
                 smp::reschedule_cpu(target);
             }
@@ -522,10 +526,9 @@ fn publish_ready(index: usize) {
             if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {
                 crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
             }
-            // Le balayage du vecteur local précède déjà l'élection (ou le
-            // report vers le point sûr). Un auto-IPI ne ferait que repasser
-            // dans le même handler et réexaminer le même minuteur TSC.
-            if !reveil_servi_dans_irq_locale(target) {
+            // Le balayage precede deja l'election, y compris depuis
+            // schedule(). Un auto-IPI imbrique retarderait cette election.
+            if !reveil_servi_localement(target) {
                 crate::kernel::scheduler::preempt::note_ipi_reveil();
                 smp::reschedule_cpu(target);
             }

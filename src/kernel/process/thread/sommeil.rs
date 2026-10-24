@@ -488,12 +488,45 @@ static TARDIFS_INACTIF: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 static BALAYAGE_IRQ: [core::sync::atomic::AtomicBool; crate::arch::x86_64::smp::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::smp::MAX_CPUS];
 
-/// Seulement le balayage exécuté par le chemin de préemption local : une
-/// autre IRQ, un autre CPU ou un réveil depuis une tâche doit notifier.
-fn reveil_servi_dans_irq_locale(cible: usize) -> bool {
+static PUBLICATION_DANS_BALAYAGE: [core::sync::atomic::AtomicBool; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::smp::MAX_CPUS];
+static AUTO_IPI_EVITES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Le balayage local est suivi d'une election (schedule/idle/sortie) ou du
+/// traitement de preemption du vecteur local. Les publications ordinaires
+/// et les destinations distantes conservent leur notification.
+fn reveil_servi_localement(cible: usize) -> bool {
     let cpu = local_cpu();
-    crate::kernel::scheduler::reveil::election_locale_en_cours(
-        cible, cpu, BALAYAGE_IRQ[cpu].load(core::sync::atomic::Ordering::Relaxed))
+    let servi = crate::kernel::scheduler::reveil::election_locale_en_cours(
+        cible, cpu, PUBLICATION_DANS_BALAYAGE[cpu].load(core::sync::atomic::Ordering::Relaxed));
+    if servi {
+        AUTO_IPI_EVITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    servi
+}
+
+pub fn auto_ipi_evites() -> u64 {
+    AUTO_IPI_EVITES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Seulement depuis wake_sleepers. Sa vue du registre interdit de migrer
+/// pendant publish_ready ; celui-ci ne commute pas. Le garde restaure aussi
+/// la valeur precedente si un balayage imbrique publie un autre reveil.
+fn publie_depuis_balayage(index: usize) {
+    use core::sync::atomic::Ordering::Relaxed;
+    struct Publication { cpu: usize, avant: bool }
+    impl Drop for Publication {
+        fn drop(&mut self) {
+            PUBLICATION_DANS_BALAYAGE[self.cpu].store(self.avant, Relaxed);
+        }
+    }
+    let cpu = local_cpu();
+    debug_assert!(BALAYAGE_IRQ[cpu].load(Relaxed) || transition_ouverte_sans_passation(cpu),
+        "publication sans election locale apres le balayage");
+    let _publication = Publication {
+        cpu, avant: PUBLICATION_DANS_BALAYAGE[cpu].swap(true, Relaxed),
+    };
+    publish_ready(index);
 }
 
 /// `wake_sleepers` appele depuis le chemin de preemption (IRQ du quantum).
@@ -591,7 +624,7 @@ fn wake_sleepers() {
             task.reveil_passe_ns.range(0);
             task.reveil_par.range(par);
             task.reveil_pret_ns.range(now);
-            publish_ready(index);
+            publie_depuis_balayage(index);
         }
     }
     fire_alarms(crate::kernel::timer::ticks());

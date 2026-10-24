@@ -36,6 +36,7 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 FICHIERS = {
+    "creation": RACINE / "src/kernel/process/thread/creation.rs",
     "replanif": RACINE / "src/arch/x86_64/idt/reschedule.rs",
     "sommeil": RACINE / "src/kernel/process/thread/sommeil.rs",
     "smp": RACINE / "src/arch/x86_64/smp.rs",
@@ -130,6 +131,15 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("une echeance n'est pas publiee au CPU qui s'endort")
     if "borne.recale(echeance);" not in corps(t["sommeil"], "fn recalcule_echeance("):
         fautes.append("le scan oublie de recaler les echeances locales")
+    publication = corps(t["sommeil"], "fn publie_depuis_balayage(")
+    if "publie_depuis_balayage(index);" not in corps(t["sommeil"], "fn wake_sleepers(") \
+            or "BALAYAGE_IRQ[cpu].load(Relaxed) || transition_ouverte_sans_passation(cpu)" not in publication \
+            or "PUBLICATION_DANS_BALAYAGE[self.cpu].store(self.avant, Relaxed);" not in publication:
+        fautes.append("le service local n'est plus borne a une publication suivie d'election, ou fuit apres elle")
+    if "cible, cpu, PUBLICATION_DANS_BALAYAGE[cpu].load(" not in corps(t["sommeil"], "fn reveil_servi_localement("):
+        fautes.append("la suppression d'auto-IPI ignore sa destination ou son contexte")
+    if corps(t["creation"], "fn publish_ready(").count("!reveil_servi_localement(target)") != 4:
+        fautes.append("un chemin de notification emet encore un auto-IPI pendant sa propre election")
     service = "crate::kernel::task::sert_echeances_au_vecteur_local();"
     irq = t["replanif"]
     reelection = ("let reelection = !anticipe\n"
@@ -173,6 +183,11 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("publication locale non declaree", "sommeil", "            publie_depuis_balayage(index);", "            publish_ready(index);"),
+        ("service local hors election", "sommeil", "BALAYAGE_IRQ[cpu].load(Relaxed) || transition_ouverte_sans_passation(cpu)", "true"),
+        ("service local jamais rendu", "sommeil", "PUBLICATION_DANS_BALAYAGE[self.cpu].store(self.avant, Relaxed);", ""),
+        ("notifications toujours supprimees", "sommeil", "cible, cpu, PUBLICATION_DANS_BALAYAGE[cpu].load(core::sync::atomic::Ordering::Relaxed)", "cible, cpu, true"),
+        ("auto-IPI sur reveil immediat", "creation", "if !reveil_servi_localement(target) {", "if true {"),
         ("tir anticipe invente une demande", "replanif", " && (interrupted_user || reelection)", ""),
         ("demande ordinaire oubliee", "replanif", "            || crate::kernel::scheduler::preempt::pending()\n", ""),
         ("echeance differee oubliee", "replanif", "crate::kernel::task::prochaine_echeance_ns() <= crate::kernel::timer::monotonic_ns()", "false"),
@@ -234,7 +249,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 31 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 36 negatifs)")
     return 0
 
 

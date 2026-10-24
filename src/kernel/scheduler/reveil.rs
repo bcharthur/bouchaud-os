@@ -186,10 +186,10 @@ pub enum Decision {
     DemandeAvecIpi,
 }
 
-/// Un balayage de préemption local sert déjà sa propre publication. Le
-/// drapeau est posé par ce chemin précis, jamais par une IRQ quelconque.
-pub fn election_locale_en_cours(cible: usize, courant: usize, balayage_irq: bool) -> bool {
-    cible == courant && balayage_irq
+/// Un balayage suivi d'election sert deja sa propre publication. Ce drapeau
+/// ne designe ni une IRQ quelconque, ni toute transition de l'ordonnanceur.
+pub fn election_locale_en_cours(cible: usize, courant: usize, publication_dans_balayage: bool) -> bool {
+    cible == courant && publication_dans_balayage
 }
 
 /// Le cout d'un coeur pour une tache sensible. Plus bas vaut mieux.
