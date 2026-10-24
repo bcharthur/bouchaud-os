@@ -614,3 +614,42 @@ dépassement. Les quatre replays TCG passent, 600/600 lignes chacun ;
 le secours actif reloge effectivement une tâche (`secours=1 relogees=1`,
 20 ms), le contrôle négatif confirme son repli après 500 ms.
 Ces résultats ne constituent pas une qualification KVM de P2/P4.
+
+### `a2b5e594` : auto-IPI supprimes, latence encore rouge ; attente NVMe reproduite
+
+KVM `40137907568`, job `121003485608` : tous les armements `on` existent,
+mais P1 SMP1 reste rouge (`p99 on/off=4842/3286 us`), ainsi que P2
+(`62,5/36,5 us` SMP1, `149/102 us` SMP4). P4 SMP4 tour 2 on echoue encore :
+788 us contre normal 329 + repos 202 us, 300/300 propres. Cette fois,
+l'attribution du pire reveil place 770 us dans l'attente d'election, 2 us
+dans la reprise. La baisse absolue de certaines mesures ne respecte pas
+encore les criteres relatifs ; aucun defaut de latence n'est clos.
+
+La console CI `40137907585` reste 4/4, 600/600, secours CPU 3 -> 0 en 20 ms.
+L'attribution TCG SMP4 passe 2/2 sans tentative ecartee, attente d'election
+inexpliquee maximale 3587 us et reprise 287 us. Mais l'A/B TCG SMP4 conserve
+un P4 rouge (pire 16209 us, election inexpliquee 7897 us) ; l'A/B TCG SMP1
+qualifie ses huit bras mais echoue P2 (496/409 us). Ces mesures differentes
+restent toutes conservees, sans substitution des seules passes vertes.
+
+Integration `40137907516` echoue sur la profondeur NVMe, apres les montages
+i440fx/q35 reussis. Le rouge est reproduit au deuxieme de trois demarrages
+locaux : `fini=0 reussies=24 echecs=0 libres=4`, un lecteur Ready sur CPU0
+avec `cur_tid=0 idle=0`, expiration de 30 s. Le RIP interrompu designe le
+predicat de `sonde_parallele` dans `attente_bornee`. La continuation BSP
+attend activement le lecteur qu'elle empeche d'elire ; aucun emplacement
+NVMe n'est perdu dans cette reproduction.
+
+La sonde utilise maintenant WaitQueue, dont le parking passe par le contexte
+centralise `avec_tache`. Le dernier lecteur publie sa fin puis reveille
+l'attente ; le ticket precede la relecture, et une expiration ne permet
+plus de remettre a zero les comptes de lecteurs encore vivants. Le pilote
+conserve ses attentes materielles bornees, et le banc tous ses criteres.
+Apres correction : BIOS/UEFI compilent ; trois demarrages SMP4, neuf passages
+32/32 lectures, profondeur 4 atteinte a chaque demarrage, zero attente
+faute d'emplacement ; SMP1 termine aussi trois passages 32/32 (sans utiliser
+ce dernier essai comme preuve de profondeur concurrente). Le garde NVMe
+refuse quatre mutations qui retirent parking, ticket, exclusion ou reveil.
+Ce correctif local n'attribue pas sans journal detaille le rouge CI exact.
+Les changements bloc declenchent desormais aussi la chaine canonique
+Ladybird ; Integration publie les comptes NVMe sans modifier son verdict.
