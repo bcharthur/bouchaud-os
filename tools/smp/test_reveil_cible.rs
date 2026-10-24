@@ -1056,3 +1056,13 @@ fn reveil_interactif_utilisateur_n_attend_pas_le_quantum_du_calcul() {
         assert_eq!(decide(&calcul, &tache), Decision::DemandeDifferee);
     }
 }
+
+#[test]
+fn seule_l_election_locale_economise_son_auto_ipi() {
+    for cible in 0..4 {
+        for courant in 0..4 {
+            assert!(!reveil::election_locale_en_cours(cible, courant, false));
+            assert_eq!(reveil::election_locale_en_cours(cible, courant, true), cible == courant);
+        }
+    }
+}

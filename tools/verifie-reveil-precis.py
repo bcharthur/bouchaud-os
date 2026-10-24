@@ -122,6 +122,14 @@ def verifie(t: dict, sources_src: str) -> list:
     start = armer.find("LAPIC_TIMER_INITIAL, compte);")
     if not 0 <= stop < periodic < start:
         fautes.append("le compteur court doit etre desarme avant le passage en mode periodique")
+    if "crate::arch::x86_64::cpu::is_idle(cpu)" not in corps(t["smp"], "fn cible_occupee("):
+        fautes.append("le rearmement occupe vole l'echeance du chemin idle")
+    if "prochaine_echeance_du_coeur(cpu)" not in corps(t["smp"], "fn arme_reveil_precis_sous_drapeau("):
+        fautes.append("le timer idle arme des echeances appartenant aux autres coeurs")
+    if "PROCHAINES_PAR_COEUR[local_cpu()].arme(deadline_ns);" not in corps(t["sommeil"], "pub(crate) fn arme_echeance("):
+        fautes.append("une echeance n'est pas publiee au CPU qui s'endort")
+    if "borne.recale(echeance);" not in corps(t["sommeil"], "fn recalcule_echeance("):
+        fautes.append("le scan oublie de recaler les echeances locales")
     service = "crate::kernel::task::sert_echeances_au_vecteur_local();"
     irq = t["replanif"]
     if not 0 <= irq.find(service) < irq.find("smp::rearme_reste_du_quantum();") < irq.find("accorde_preemption_noyau()"):
@@ -159,6 +167,10 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("borne locale non publiee", "sommeil", "    PROCHAINES_PAR_COEUR[local_cpu()].arme(deadline_ns);", ""),
+        ("borne locale non recalee", "sommeil", "                borne.recale(echeance);", ""),
+        ("tous les CPU arment le meme sommeil", "smp", "prochaine_echeance_du_coeur(cpu)", "prochaine_echeance_ns()"),
+        ("rearmement occupe pendant idle", "smp", "|| crate::arch::x86_64::cpu::is_idle(cpu)", "|| false"),
         ("dormeurs servis trop tard", "replanif", "    crate::kernel::task::sert_echeances_au_vecteur_local();", ""),
         ("service IRQ sous verrou", "sommeil", "!crate::kernel::scheduler::preempt::preemption_noyau_sure()", "false"),
         ("service pendant passation", "sommeil", "transition_ouverte_sans_passation(local_cpu())", "false"),
@@ -212,7 +224,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 23 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 27 negatifs)")
     return 0
 
 

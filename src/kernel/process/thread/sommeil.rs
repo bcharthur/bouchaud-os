@@ -283,9 +283,19 @@ static PROCHAINE_ECHEANCE: crate::kernel::echeances::Echeances =
 
 /// La plus proche echeance de sommeil connue (borne inferieure ;
 /// `echeances::JAMAIS` pendant un balayage). BOUCHAUD_REVEIL_PRECIS_V1 : un
-/// coeur qui s'endort arme son minuteur dessus.
+/// le balayage consulte cette borne ; les timers idle utilisent la borne locale.
 pub fn prochaine_echeance_ns() -> u64 {
     PROCHAINE_ECHEANCE.borne()
+}
+
+// Le balayage reste global, mais un CPU idle n'arme que les sommeils qui
+// lui sont attachés. Armer la borne globale sur chaque AP faisait tirer
+// plusieurs timers KVM pour un seul dormeur (puis un IPI vers son CPU).
+static PROCHAINES_PAR_COEUR: [crate::kernel::echeances::Echeances; MAX_CPUS] =
+    [const { crate::kernel::echeances::Echeances::neuve() }; MAX_CPUS];
+
+pub fn prochaine_echeance_du_coeur(cpu: usize) -> u64 {
+    PROCHAINES_PAR_COEUR.get(cpu).map_or(crate::kernel::echeances::JAMAIS, |b| b.borne())
 }
 
 /// L'echeance de la tache BLOQUEE installee sur ce coeur (0 : aucune).
@@ -310,6 +320,7 @@ pub fn echeance_tache_installee() -> u64 {
 /// ici : une echeance inconnue du raccourci ne serait jamais servie.
 pub(crate) fn arme_echeance(deadline_ns: u64) {
     PROCHAINE_ECHEANCE.arme(deadline_ns);
+    PROCHAINES_PAR_COEUR[local_cpu()].arme(deadline_ns);
     arme_si_interactive(deadline_ns);
 }
 
@@ -410,6 +421,10 @@ fn recalcule_echeance() {
     for index in 0..tasks().len() {
         let echeance = tasks()[index].wake_deadline_ns.charge();
         if tasks()[index].state == TaskState::Blocked && echeance != 0 {
+            let coeur = tasks()[index].runq_cpu.charge() as usize;
+            if let Some(borne) = PROCHAINES_PAR_COEUR.get(coeur) {
+                borne.recale(echeance);
+            }
             if echeance < minimum {
                 minimum = echeance;
             }
@@ -444,6 +459,7 @@ fn recalcule_echeance() {
     for (_, echeance_ticks) in alarmes.iter() {
         let echeance = echeance_ticks.saturating_mul(par_tick);
         let echeance = if echeance <= maintenant { maintenant.saturating_add(par_tick) } else { echeance };
+        PROCHAINES_PAR_COEUR[0].recale(echeance);
         if echeance < minimum {
             minimum = echeance;
         }
@@ -465,6 +481,14 @@ static TARDIFS_IRQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 static TARDIFS_INACTIF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static BALAYAGE_IRQ: [core::sync::atomic::AtomicBool; crate::arch::x86_64::smp::MAX_CPUS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; crate::arch::x86_64::smp::MAX_CPUS];
+
+/// Seulement le balayage exécuté par le chemin de préemption local : une
+/// autre IRQ, un autre CPU ou un réveil depuis une tâche doit notifier.
+fn reveil_servi_dans_irq_locale(cible: usize) -> bool {
+    let cpu = local_cpu();
+    crate::kernel::scheduler::reveil::election_locale_en_cours(
+        cible, cpu, BALAYAGE_IRQ[cpu].load(core::sync::atomic::Ordering::Relaxed))
+}
 
 /// `wake_sleepers` appele depuis le chemin de preemption (IRQ du quantum).
 fn wake_sleepers_depuis_irq() {
@@ -501,6 +525,11 @@ fn wake_sleepers() {
     // Le raccourci : une charge atomique au lieu d'un balayage complet.
     if !PROCHAINE_ECHEANCE.commence_balayage(now) {
         return;
+    }
+    // Comme la borne globale : retirer seulement les bornes dues AVANT
+    // le scan, puis fetch_min. Un armement concurrent ne peut être écrasé.
+    for borne in PROCHAINES_PAR_COEUR.iter() {
+        borne.commence_balayage(now);
     }
     // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : la borne interactive repart de zero ;
     // `recalcule_echeance` la recale exactement.
@@ -583,6 +612,7 @@ pub fn set_alarm(deadline: u64) -> u64 {
         // La borne est en nanosecondes, l'alarme en ticks.
         let par_tick = 1_000_000_000 / crate::kernel::timer::TICKS_PER_SECOND;
         arme_echeance(deadline.saturating_mul(par_tick));
+        PROCHAINES_PAR_COEUR[0].arme(deadline.saturating_mul(par_tick));
     }
     previous
 }

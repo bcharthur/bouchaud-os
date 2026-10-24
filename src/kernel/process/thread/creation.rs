@@ -522,8 +522,13 @@ fn publish_ready(index: usize) {
             if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {
                 crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
             }
-            crate::kernel::scheduler::preempt::note_ipi_reveil();
-            smp::reschedule_cpu(target);
+            // Le balayage du vecteur local précède déjà l'élection (ou le
+            // report vers le point sûr). Un auto-IPI ne ferait que repasser
+            // dans le même handler et réexaminer le même minuteur TSC.
+            if !reveil_servi_dans_irq_locale(target) {
+                crate::kernel::scheduler::preempt::note_ipi_reveil();
+                smp::reschedule_cpu(target);
+            }
         }
     }
 }

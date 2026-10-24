@@ -782,7 +782,14 @@ static AVANCES_OCCUPEES: AtomicU64 = AtomicU64::new(0);
 /// Le TSC a armer sur ce coeur occupe pour les sommeils interactifs qui lui
 /// sont attaches, si la politique et le domaine le permettent.
 fn cible_occupee(cpu: usize, tsc_maintenant: u64) -> Option<u64> {
-    if cpu >= MAX_CPUS || !REVEIL_PRECIS.load(Ordering::Relaxed) {
+    // L'IRQ du timer traverse aussi HLT. Y réarmer la borne « occupée »
+    // vole la prochaine échéance au chemin idle : décide_motif la refuse
+    // ensuite comme QuantumAvant, bien que ce soit un sommeil déjà armé.
+    // Pendant l'idle, restaurer le quantum ; seul l'armement avant HLT
+    // choisit la borne globale/propre. Aucun changement de mode LVT ici.
+    if cpu >= MAX_CPUS || !REVEIL_PRECIS.load(Ordering::Relaxed)
+        || crate::arch::x86_64::cpu::is_idle(cpu)
+    {
         return None;
     }
     if !SOUS_HYPERVISEUR.load(Ordering::Relaxed) && !REVEIL_PRECIS_MATERIEL.load(Ordering::Relaxed) {
@@ -1057,6 +1064,25 @@ pub fn diagnostic_reveil_precis() -> [u64; 8] {
     ]
 }
 
+/// Relevé ponctuel du CPU de la commande, hors de la sonde chronométrée.
+/// Le mode logiciel ne suffit pas à prouver les bits LVT effectivement lus.
+pub fn diagnostic_timer_local() -> (usize, u32, u64, u64, u64) {
+    ::x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = cpu_index();
+        let (lvt, deadline) = unsafe {
+            let (x2, lapic) = local_apic();
+            let lvt = if x2 { usermode::read_msr(X2APIC_LVT_TIMER) as u32 }
+                else { lapic_read(lapic, LAPIC_LVT_TIMER) };
+            let deadline = if tsc_deadline_supported() {
+                usermode::read_msr(IA32_TSC_DEADLINE)
+            } else { 0 };
+            (lvt, deadline)
+        };
+        (cpu, lvt, deadline, ARME_TSC[cpu].load(Ordering::Relaxed),
+            QUANTUM_TSC[cpu].load(Ordering::Relaxed))
+    })
+}
+
 /// Juste avant `hlt`, interruptions coupees : arme le minuteur local sur la
 /// plus proche echeance de sommeil si elle precede le quantum.
 pub fn arme_reveil_precis_avant_hlt() {
@@ -1080,9 +1106,9 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
     if !REVEIL_PRECIS.load(Ordering::SeqCst) {
         return;
     }
-    // BOUCHAUD_REVEIL_ECHEANCE_PROPRE_V1 : aussi l'echeance de la tache
-    // installee ici, qui ne depend pas du balayage d'un autre coeur.
-    let globale = crate::kernel::task::prochaine_echeance_ns();
+    // Borne des sommeils attachés à ce CPU, puis échéance de sa tâche
+    // installée : cette dernière reste disponible pendant un scan distant.
+    let globale = crate::kernel::task::prochaine_echeance_du_coeur(cpu);
     let propre = crate::kernel::task::echeance_tache_installee();
     let borne = crate::kernel::reveil_precis::borne_du_coeur(globale, propre);
     if propre != 0 && (globale == crate::kernel::reveil_precis::JAMAIS || globale == 0) {

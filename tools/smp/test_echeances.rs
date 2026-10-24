@@ -255,3 +255,16 @@ fn un_dormeur_sans_echeance_ne_force_aucun_balayage() {
     }
     assert!(modele.attentes.is_empty(), "zero n'entre pas dans le modele");
 }
+
+#[test]
+fn un_sommeil_local_ne_fait_pas_tirer_les_autres_coeurs() {
+    let bornes: [echeances::Echeances; 4] = core::array::from_fn(|_| echeances::Echeances::neuve());
+    bornes[2].arme(100);
+    for cpu in [0, 1, 3] { assert_eq!(bornes[cpu].borne(), echeances::JAMAIS); }
+    assert_eq!(bornes[2].borne(), 100);
+    assert!(bornes[2].commence_balayage(100));
+    // Un nouveau sommeil pendant le scan survit au recalage du précédent.
+    bornes[2].arme(150);
+    bornes[2].recale(300);
+    assert_eq!(bornes[2].borne(), 150);
+}

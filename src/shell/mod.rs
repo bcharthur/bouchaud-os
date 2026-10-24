@@ -965,6 +965,10 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
         }
     }
     let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
+    let timer = crate::arch::x86_64::smp::diagnostic_timer_local();
+    crate::serial_println!(
+        "REVEIL_TIMER_LOCAL cpu={} lvt={:#x} deadline_tsc={} arme_tsc={} quantum_tsc={}",
+        timer.0, timer.1, timer.2, timer.3, timer.4);
     let (materiel, hyperviseur) = crate::arch::x86_64::smp::reveil_precis_domaine();
     // Diagnostic de la queue au repos : cumuls, l'A/B en fait des differences.
     let d = crate::arch::x86_64::smp::diagnostic_reveil_precis();
