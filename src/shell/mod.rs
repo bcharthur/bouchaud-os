@@ -814,7 +814,17 @@ fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
             crate::serial_println!("SERIE_BANC_ATTEND_ECHEC type={} raison=timeout", kind);
             return 1;
         }
-        crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(10));
+        // The autorun command may execute on the BSP bootstrap continuation
+        // (CURRENT=NO_TASK). sleep_ticks() requires an installed Task and
+        // panics there. Use a bounded wait that is safe even outside a task.
+        // Kernel injection workers created via spawn_noyau are migratable.
+        if crate::kernel::task::in_user_task() {
+            crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(10));
+        } else {
+            let _ = crate::kernel::timer::attente_bornee(10, || {
+                result.load(Ordering::Acquire) != 0
+            });
+        }
     }
 }
 
