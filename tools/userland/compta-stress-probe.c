@@ -311,8 +311,63 @@ static void *compte_coeurs(void *arg)
     return NULL;
 }
 
+/* C6 utilisateur : un seul fil mesuré, un concurrent sur son CPU, et des
+ * frontières calcul/syscall/sommeil. La borne retire les sommeils demandés
+ * du temps mur : un curseur laissé armé pendant nanosleep devient visible.
+ * Même marge de quantification de trois ticks que l'invariant I2. */
+static int frontieres_utilisateur(void)
+{
+    pid_t concurrent = fork();
+    if (concurrent < 0) return 1;
+    if (concurrent == 0) {
+        volatile unsigned long x = 0;
+        long long fin_calcul = maintenant_ns() + 5000000000LL;
+        while (maintenant_ns() < fin_calcul) x++;
+        _exit(0);
+    }
+    unsigned long long u0 = 0, s0 = 0, u = 0, s = 0;
+    struct suivi suivi = { 0 };
+    long long debut = maintenant_ns(), sommeils = 0;
+    int ok = lit_stat("/proc/self/stat", &u0, &s0) == 0;
+    int tours = 0;
+    for (; ok && tours < 200; tours++) {
+        long long calcul_fin = maintenant_ns() + 200000;
+        volatile unsigned long x = 0;
+        while (maintenant_ns() < calcul_fin) x++;
+        (void)getpid();
+        sched_yield();
+        struct timespec reste = { 0, 2000000 };
+        while (nanosleep(&reste, &reste) != 0) {
+            if (errno != EINTR) { ok = 0; break; }
+        }
+        if (!ok) break;
+        sommeils += 2000000;
+        long long a = maintenant_ns();
+        ok = lit_stat("/proc/self/stat", &u, &s) == 0;
+        long long b = maintenant_ns();
+        if (ok) verifie(&suivi, "frontieres", getpid(), u, s, a, b, 1);
+    }
+    long long mur = maintenant_ns() - debut;
+    unsigned long long borne = (unsigned long long)((mur - sommeils) / tick_ns) + 3;
+    unsigned long long delta = (u + s) - (u0 + s0);
+    ok = ok && tours == 200 && u >= u0 && s >= s0 && delta > 0 && delta <= borne
+        && atomic_load(&reculs) == 0 && atomic_load(&depassements) == 0;
+    kill(concurrent, SIGKILL);
+    waitpid(concurrent, NULL, 0);
+    printf("COMPTA_FRONTIERES tours=%d delta_ticks=%llu borne=%llu mur_ns=%lld sommeil_ns=%lld reculs=%ld depassements=%ld\n",
+        tours, delta, borne, mur, sommeils, atomic_load(&reculs), atomic_load(&depassements));
+    puts(ok ? "COMPTA_FRONTIERES_OK" : "COMPTA_FRONTIERES_ECHEC");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "frontieres") == 0) {
+        setvbuf(stdout, NULL, _IONBF, 0);
+        long hz = sysconf(_SC_CLK_TCK);
+        if (hz > 0) tick_ns = 1000000000L / hz;
+        return frontieres_utilisateur();
+    }
     int secondes = argc > 1 ? atoi(argv[1]) : 30;
     if (secondes <= 0)
         secondes = 30;
