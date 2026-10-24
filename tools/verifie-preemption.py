@@ -65,6 +65,12 @@ def main() -> int:
 
     source = PREEMPT.read_text(encoding="utf-8")
     corps = corps_de_safe_point(source)
+    # A refused election must not consume the pending request or its age.
+    garde = corps.find("courante_garde_le_coeur_local()")
+    rendu = corps.find("local.request_resched();", garde)
+    horloge = corps.find("REQUEST_NS[index].swap")
+    if min(garde, rendu, horloge) < 0 or not garde < rendu < horloge:
+        fautes.append("preempt.rs : une cession refusee perd sa demande ou son horodatage")
     if not corps:
         fautes.append("preempt.rs : `safe_point()` a disparu ; plus rien ne sert les preemptions differees.")
     else:

@@ -372,7 +372,9 @@ pub fn safe_point() -> bool {
         note_refus(index);
         return false;
     }
-    if local.preempt_count() != 0 || crate::kernel::sync::lockdep::depth() != 0 {
+    if local.preempt_count() != 0 || crate::kernel::sync::lockdep::depth() != 0
+        || !cession_volontaire_sure()
+    {
         BLOCKED_PREEMPT.fetch_add(1, Ordering::Relaxed);
         note_refus(index);
         return false;
@@ -384,6 +386,14 @@ pub fn safe_point() -> bool {
     }
 
     local.clear_resched();
+    // Clear BEFORE observing the queue, so a concurrent publication remains
+    // visible. Keeping the CPU is a deferral, not service: preserve both the
+    // request and its original timestamps until a later safe point/quantum.
+    // This is a local flag only; restoring it sends no IPI.
+    if crate::kernel::task::courante_garde_le_coeur_local() {
+        local.request_resched();
+        return false;
+    }
     let requested = REQUEST_NS[index].swap(0, Ordering::AcqRel);
     let refuse = REFUS_NS[index].swap(0, Ordering::AcqRel);
     let maintenant = crate::kernel::timer::monotonic_ns();
@@ -393,12 +403,6 @@ pub fn safe_point() -> bool {
     }
     if requested != 0 {
         MAX_ATTENTE_NS.fetch_max(maintenant.saturating_sub(requested), Ordering::Relaxed);
-    }
-    // BOUCHAUD_CESSION_PAR_CLASSE_V1 : la meme regle qu'au quantum. La
-    // demande vient d'etre effacee : une interactive publiee APRES la lecture
-    // de la file la reposera (`publish_ready` met en file puis demande).
-    if crate::kernel::task::courante_garde_le_coeur_local() {
-        return false;
     }
     let switched = crate::kernel::task::schedule();
     if switched { SWITCHES.fetch_add(1, Ordering::Relaxed); }
