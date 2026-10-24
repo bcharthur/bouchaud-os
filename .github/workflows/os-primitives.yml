@@ -459,6 +459,9 @@ jobs:
           AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1 || r=1
           AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4 || r=1
           exit $r
+      - name: P13 -- publier les verdicts et registres du timer dans les annotations
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: python3 tools/ci/publie_p13_reveil.py
       - name: P13 -- qualification stricte A/B reveil precis KVM SMP1/4
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         env:
