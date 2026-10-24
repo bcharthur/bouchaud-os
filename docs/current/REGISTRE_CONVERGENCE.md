@@ -573,3 +573,44 @@ run `40134718112` n'a publié que trois des sept blocs SMP4. Chaque topologie
 a maintenant sa propre étape de publication, et l'A/B précis son propre
 job, sans suppression des A/B expérimentaux. Les analyseurs et leurs
 seuils restent inchangés. Le verdict P13 reste **PARTIAL**.
+
+### `7ad8c543` : deux A/B KVM encore rouges
+
+Les runs `40136548809` (canonique) et `40136589584` (déclenchement manuel
+indépendant) portent le même SHA. P2 demeure rouge : p95 interactif on/off
+SMP1 `109/60,5` puis `69,5/44 µs`, SMP4 `178,5/140,5` puis
+`157,5/111,5 µs`. P1 SMP1 échoue dans le canonique (`p99=5014,5/3511,5`),
+passe dans le manuel (`5299,5/4316`) ; cette variation ne clôt pas C1g.
+
+Le canonique reproduit aussi **P4 SMP4, tour 2 on** : pire interactif
+1131 µs contre normal 449 µs et repos 204 µs, 300/300 échantillons propres.
+L'attribution mesure 1020 µs de reprise, dont 1019 µs dans le segment
+commutation. Le verdict global reste rouge : le bilan calculé sur les
+sept autres bras ne peut effacer ce huitième bras en échec. Le manuel
+passe P4 ; ce succès indépendant n'efface pas non plus la régression.
+
+La console CI `40136548810` passe 4/4, 600/600 lignes par cas, secours
+CPU 2 → 0 en 20 ms et contrôle sans secours replié après confirmation de
+500 ms. C6 utilisateur KVM SMP1/4 et C6a passent dans les deux runs.
+L'attribution TCG obtient deux passes qualifiées en trois tentatives ; en
+conservant la tentative non qualifiante, l'attente d'élection inexpliquée
+atteint 7108 µs et la reprise 1260 µs. C2/C3 restent ouverts. Le nouveau
+multifil TCG passe 24/24 sans reproduire C5.
+
+Le correctif suivant supprime les auto-IPI pendant les publications du
+balayage déjà suivi d'une élection locale. Le précédent ne couvrait que
+`DemandeAvecIpi` dans le balayage IRQ : `ReveilImmediat`, `PreemptionCiblee`
+et le balayage de `schedule()` pouvaient encore notifier le CPU qui était
+déjà en train de servir la demande. Le contexte est borné par un garde,
+restauré après publication ; les demandes restent posées et les IPI vers
+un autre CPU restent envoyés. `auto_ipi_evites` rend l'exécution observable.
+Les 40 tests de politique et 36 mutations du garde du réveil passent ;
+l'effet sur P2/P4 exige une nouvelle mesure KVM, sans modifier l'analyseur.
+
+Validation locale du correctif d'auto-IPI : BIOS/UEFI compilent, contexte
+SMP1/SMP4 passe et observe respectivement 7/3 notifications évitées. C6
+utilisateur SMP4 passe 200 cycles, 10 522 lectures, zéro régression ou
+dépassement. Les quatre replays TCG passent, 600/600 lignes chacun ;
+le secours actif reloge effectivement une tâche (`secours=1 relogees=1`,
+20 ms), le contrôle négatif confirme son repli après 500 ms.
+Ces résultats ne constituent pas une qualification KVM de P2/P4.
