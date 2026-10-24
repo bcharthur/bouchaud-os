@@ -418,19 +418,25 @@ fn arme_si_interactive(deadline_ns: u64) {
 fn recalcule_echeance() {
     let mut minimum = crate::kernel::echeances::JAMAIS;
     let mut interactives = [crate::kernel::echeances::JAMAIS; crate::arch::x86_64::smp::MAX_CPUS];
-    for index in 0..tasks().len() {
-        let echeance = tasks()[index].wake_deadline_ns.charge();
-        if tasks()[index].state == TaskState::Blocked && echeance != 0 {
-            let coeur = tasks()[index].runq_cpu.charge() as usize;
-            if let Some(borne) = PROCHAINES_PAR_COEUR.get(coeur) {
-                borne.recale(echeance);
-            }
-            if echeance < minimum {
-                minimum = echeance;
-            }
-            if tasks()[index].priorite.charge() == Priorite::Interactive {
-                let coeur = tasks()[index].runq_cpu.charge() as usize;
-                if coeur < interactives.len() && echeance < interactives[coeur] {
+    {
+        // Le temporaire de `for ... tasks().len()` gardait deja le registre
+        // pendant tout le scan. Reprendre tasks() pour chaque champ ajoutait
+        // autant de prises/liberations imbriquees, toutes IRQ masquees.
+        // Une vue explicite garde la MEME portee et tombe avant ALARMES.
+        let registre = tasks();
+        for tache in registre.iter() {
+            let echeance = tache.wake_deadline_ns.charge();
+            if tache.state == TaskState::Blocked && echeance != 0 {
+                let coeur = tache.runq_cpu.charge() as usize;
+                if let Some(borne) = PROCHAINES_PAR_COEUR.get(coeur) {
+                    borne.recale(echeance);
+                }
+                if echeance < minimum {
+                    minimum = echeance;
+                }
+                if tache.priorite.charge() == Priorite::Interactive
+                    && coeur < interactives.len() && echeance < interactives[coeur]
+                {
                     interactives[coeur] = echeance;
                 }
             }
