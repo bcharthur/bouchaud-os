@@ -473,3 +473,42 @@ irrégulière : C1g/C2 ne sont pas clos et aucune suspension hôte n'est prouvé
 A/B TCG SMP1 après `8777274c` : 476/555 µs (on/off, −14,23 %),
 8/8 bras valides, P1–P5 verts. Le pire réveil brut interactif `on` vaut 8392 µs.
 Ces valeurs ne remplacent pas les échecs KVM du SHA précédent.
+
+### Retour KVM sur `7e5943f6` et coût de l'identité CPU
+
+Run canonique `40132770745`, job `120987948156` : le défaut d'armement n'est
+plus reproduit, 8/8 bras valides sur SMP1 et SMP4. Les relevés matériels LVT
+valent `0x400f1` (TSC-deadline), avec un MSR deadline programmé. Cela ne clôt
+pas la latence : SMP1 P1 p99 `on=5514,5 / off=4233 µs` est rouge ; P2 reste
+rouge sur SMP1 (`65,5 / 45,5 µs`) et SMP4 (`165,5 / 123 µs`). P3/P4/P5
+passent selon les décisions adoptées ; les contrôles non comparables ne
+deviennent pas des preuves de priorité. Aucun seuil n'a changé.
+
+Le chemin `smp::cpu_index()` contournait la primitive commune et relisait
+les MSR GS, y compris dans les opérations répétées du timer précis. Il
+utilise désormais le chemin TSC_AUX vérifié de `usermode::cpu_index()` ; les
+replis GS/APIC d'amorçage sont conservés. Six mutations négatives protègent
+cette délégation et la validation de l'identité. Son effet sur P1/P2 doit
+encore être mesuré sous KVM. Les A/B précis sont exécutés avant les A/B
+expérimentaux dans le même job ; aucune épreuve n'est supprimée.
+
+Les annotations KVM longues ont été tronquées dans la vue publique après
+le début du tour 3. Leur publication est maintenant découpée sans perte,
+avec les quantiles et l'attribution par bras ; l'analyseur reste inchangé.
+
+Compléments TCG sur le code de `9e662f7c` : SMP1 8/8 bras valides,
+P2 `498,5 / 482 µs`, pire interactif brut `on=9097 µs` ; SMP4
+**NON_CONCLUANT**, 6/8 bras valides (deux contrôles non exploitables), malgré
+quatre bras `on` qualifiés. L'attente d'élection inexpliquée interactive
+`on` remonte à 4584 µs dans cet A/B : les 2964 µs de l'attribution précédente
+ne constituent pas une borne stable.
+
+Le scénario C6 utilisateur SMP1/4 passe sous KVM dans le run `40132770745`,
+ainsi que les trois démarrages de primitives et les injections C6a. C5 reste
+non reproduit (nouveau banc TCG multifil 24/24). Sur `9e662f7c`, CI Fast,
+Integration, Reliability V3 et Console Sync Proof sont verts. La console
+donne 4/4, 600/600 lignes, `secours=1 relogees=1`, CPU 3 → 1
+(run `40133365331`), mais le secours atteint 1495 ms. Un replay du run
+`40132770698` avait échoué avec le même code noyau ; son journal inaccessible
+ne permet pas d'en attribuer la cause. La qualification stricte et la
+convergence Ladybird restent ouvertes.
