@@ -30,6 +30,21 @@ fn conversion_inverse_de_l_horloge_monotone() {
 }
 
 #[test]
+fn conversion_ne_programme_jamais_avant_l_echeance_monotone() {
+    // Le TSC calibre n'est pas necessairement un nombre entier de GHz.
+    // Verifier l'horloge effective a la cible, puis au cycle precedent :
+    // on veut le PREMIER cycle ou le sommeil est reellement echu.
+    for hz in [10_000_000u64, 2_300_000_001, 3_579_545_123] {
+        for ns in [1u64, 7, 999, 1_000_001, 123_456_789] {
+            let cycles = tsc_de(ns, BOOT, hz).unwrap() - BOOT;
+            let horloge = |c: u64| c as u128 * 1_000_000_000 / hz as u128;
+            assert!(horloge(cycles) >= ns as u128, "tir avant l'echeance : hz={hz} ns={ns}");
+            assert!(horloge(cycles - 1) < ns as u128, "retard evitable : hz={hz} ns={ns}");
+        }
+    }
+}
+
+#[test]
 fn une_echeance_avant_le_quantum_est_armee() {
     let maintenant = 10_000_000;
     let borne = maintenant + 700_000; // dans 0,7 ms

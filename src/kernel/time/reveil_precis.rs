@@ -56,13 +56,14 @@ pub fn reste_compte(quantum_ns: u64, maintenant_ns: u64, comptes_par_ms: u64) ->
 }
 
 /// Le TSC qui correspond a l'instant monotone `ns`, avec l'horloge
-/// `monotonic_ns = (tsc - boot) * 1e9 / hz`. `None` si `hz` est inconnu ou si
-/// le resultat deborde.
+/// `monotonic_ns = (tsc - boot) * 1e9 / hz`. Arrondi au premier cycle ou
+/// l'horloge atteint `ns` : arrondir vers le bas peut faire tirer avant que
+/// le sommeil soit echu. `None` si `hz` est inconnu ou si le resultat deborde.
 pub fn tsc_de(ns: u64, boot_tsc: u64, hz: u64) -> Option<u64> {
     if hz == 0 {
         return None;
     }
-    let cycles = (ns as u128).checked_mul(hz as u128)? / 1_000_000_000u128;
+    let cycles = (ns as u128).checked_mul(hz as u128)?.div_ceil(1_000_000_000u128);
     let tsc = (boot_tsc as u128).checked_add(cycles)?;
     u64::try_from(tsc).ok()
 }
