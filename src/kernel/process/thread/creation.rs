@@ -284,6 +284,8 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
         inactif: cpu::is_idle(cpu),
         occupant_sensible: sensible,
         occupant_classe: if interactive { ReveilClasse::Interactive } else { ReveilClasse::Normale },
+        occupant_utilisateur: en_ligne && occupant_coeur(cpu) != NO_TASK
+            && !CURRENT_IS_KERNEL[cpu].load(Ordering::Acquire),
         residence_ns: if depuis_ns == 0 { 0 } else { maintenant_ns.saturating_sub(depuis_ns) },
         attente_interactive,
         attente_normale,
@@ -514,12 +516,12 @@ fn publish_ready(index: usize) {
             crate::kernel::scheduler::preempt::note_reveil_en_file();
         }
         ReveilDecision::DemandeAvecIpi => {
-            // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL (desactivee par
-            // defaut) : la demande ORDINAIRE de `DemandeDifferee`, jamais
-            // ciblee -- le gestionnaire ne coupe que le ring 3 --, plus l'IPI
-            // qui la sert sans attendre le quantum du coeur.
+            // Demande ordinaire : le ring 3 peut céder immédiatement, le
+            // ring 0 garde les mêmes exclusions et points sûrs.
             crate::kernel::scheduler::preempt::request_cpu(target);
-            crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
+            if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {
+                crate::kernel::scheduler::preempt::note_reveil_ipi_variante();
+            }
             crate::kernel::scheduler::preempt::note_ipi_reveil();
             smp::reschedule_cpu(target);
         }

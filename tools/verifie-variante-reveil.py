@@ -7,8 +7,8 @@ Regles :
   1. desactivee au demarrage : l'interrupteur est un `AtomicBool::new(false)`,
      et seule la commande shell `ordo-variante` le bascule ;
   2. sous `Defaut`, la decision est EXACTEMENT `decide` -- et `decide` garde
-     sa politique : une interactive non sensible ne coupe personne
-     (`une_tache_ordinaire_ne_coupe_personne`) ;
+     ses exclusions : une interactive non sensible ne préempte pas un fil noyau
+     (`une_tache_ordinaire_ne_preempte_pas_un_fil_noyau`) ;
   3. la variante ne pose jamais de demande ciblee : son bras dans
      `publish_ready` appelle `request_cpu`, jamais `demande_ciblee` (aucun
      domaine de preemption des fils noyau) ;
@@ -61,10 +61,10 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("shell : la commande ordo-variante a disparu.")
     if DEFAUT_INCHANGE not in t["reveil"]:
         fautes.append("reveil.rs : sous Defaut, decide_selon n'est plus exactement decide.")
-    if not re.search(r"fn une_tache_ordinaire_ne_coupe_personne\(\) \{\s*let cible = coeur_occupe\(Classe::Normale, "
+    if not re.search(r"fn une_tache_ordinaire_ne_preempte_pas_un_fil_noyau\(\) \{\s*let cible = coeur_occupe\(Classe::Normale, "
                      r"false, 50_000_000\);\s*assert_eq!\(decide\(&cible, &ordinaire\(\)\), Decision::DemandeDifferee\);",
                      t["test"]):
-        fautes.append("test_reveil_cible.rs : la politique par defaut n'est plus verrouillee (une_tache_ordinaire_ne_coupe_personne).")
+        fautes.append("test_reveil_cible.rs : la politique par defaut n'est plus verrouillee (une_tache_ordinaire_ne_preempte_pas_un_fil_noyau).")
     b = bras(t["creation"])
     if "preempt::request_cpu(target)" not in b or "demande_ciblee" in b or "smp::reschedule_cpu(target)" not in b:
         fautes.append("creation.rs : le bras de la variante pose une demande ciblee ou n'envoie pas son IPI.")
@@ -108,9 +108,9 @@ def main() -> int:
         ("reveil", DEFAUT_INCHANGE,
          "    let d = decide(cible, reveille);\n    if d != Decision::DemandeDifferee {\n        return d;\n    }"),
         ("creation", "            crate::kernel::scheduler::preempt::request_cpu(target);\n"
-                     "            crate::kernel::scheduler::preempt::note_reveil_ipi_variante();",
+                     "            if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {",
          "            crate::kernel::scheduler::preempt::demande_ciblee(target);\n"
-         "            crate::kernel::scheduler::preempt::note_reveil_ipi_variante();"),
+         "            if variante == crate::kernel::scheduler::reveil::Variante::IpiInteractive {"),
         ("test", "assert_eq!(decide(&cible, &ordinaire()), Decision::DemandeDifferee);\n}",
          "assert_eq!(decide(&cible, &ordinaire()), Decision::DemandeAvecIpi);\n}"),
         ("flux", "BO_QEMU_KVM=1 tools/ci/run_ab_reveil_ipi.sh", "tools/ci/run_ab_reveil_ipi.sh"),

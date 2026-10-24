@@ -118,6 +118,9 @@ pub struct Coeur {
     pub occupant_sensible: bool,
     /// La classe de l'occupant.
     pub occupant_classe: Classe,
+    /// Une tâche utilisateur est installée (pas une continuation ni un fil noyau).
+    /// L'IPI ordinaire ne préempte que son ring 3 ou son prochain point sûr.
+    pub occupant_utilisateur: bool,
     /// Depuis combien de temps l'occupant tient-il le coeur ?
     pub residence_ns: u64,
     /// Taches interactives EN ATTENTE dans la file de ce coeur.
@@ -177,8 +180,8 @@ pub enum Decision {
     DemandeDifferee,
     /// Rien de plus : le coeur n'est pas adressable.
     MiseEnFile,
-    /// VARIANTE EXPERIMENTALE (`Variante::IpiInteractive`, desactivee par
-    /// defaut) : demande ORDINAIRE + IPI. Jamais `demande_ciblee` : le
+    /// Demande ORDINAIRE + IPI pour une interactive derrière du calcul
+    /// utilisateur, ou sous la variante expérimentale. Jamais `demande_ciblee` : le
     /// gestionnaire ne coupe que le ring 3, aucun fil noyau n'est preempte.
     DemandeAvecIpi,
 }
@@ -305,11 +308,21 @@ pub fn decide(cible: &Coeur, reveille: &Reveille) -> Decision {
         }
         return Decision::PreemptionCiblee;
     }
-    // Le comportement historique, inchange : mise en file et demande differee.
-    // Une tache normale ne coupe personne, et une interactive non sensible
-    // attend le prochain point sur ou le prochain quantum -- ce qui FONCTIONNE
-    // pour une tache utilisateur, seule categorie a laquelle ces deux
-    // mecanismes s'appliquent.
+    // Une interactive sous budget ne doit pas attendre le quantum d'un
+    // calcul utilisateur normal. La demande reste ordinaire : aucun droit
+    // de préemption noyau supplémentaire, même si l'occupant change avant
+    // la livraison. Un IPI par publication, aucune réémission au refus.
+    if cible.occupant_utilisateur && !cible.hors_ordonnanceur
+        && reveille.classe == Classe::Interactive
+        && reveille.consomme_ns < BUDGET_ACTIVATION_NS
+        && cible.occupant_classe == Classe::Normale && !cible.occupant_sensible
+    {
+        return Decision::DemandeAvecIpi;
+    }
+    // Les autres publications conservent la demande differee.
+    // Une normale, une interactive hors budget ou derrière un pair attend
+    // le prochain point sûr ou quantum. Les fils noyau conservent leur
+    // domaine de préemption ciblée.
     Decision::DemandeDifferee
 }
 

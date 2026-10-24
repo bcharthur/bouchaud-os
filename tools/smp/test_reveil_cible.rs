@@ -135,7 +135,7 @@ fn un_pair_sensible_garde_sa_tranche_minimale() {
 }
 
 #[test]
-fn une_tache_ordinaire_ne_coupe_personne() {
+fn une_tache_ordinaire_ne_preempte_pas_un_fil_noyau() {
     let cible = coeur_occupe(Classe::Normale, false, 50_000_000);
     assert_eq!(decide(&cible, &ordinaire()), Decision::DemandeDifferee);
 }
@@ -404,6 +404,7 @@ impl Sim {
             inactif: coeur.inactif(),
             occupant_sensible,
             occupant_classe,
+            occupant_utilisateur: false,
             residence_ns: self.maintenant_us.saturating_sub(coeur.depuis_us) * 1_000,
             attente_interactive: coeur.interactive.len(),
             attente_normale: coeur.normale.len(),
@@ -862,7 +863,9 @@ fn tous_les_cas() -> Vec<(Coeur, Reveille)> {
     for classe in [Classe::Normale, Classe::Interactive] {
         for occupant_sensible in [false, true] {
             for residence in [0, RESIDENCE_MINIMALE_NS - 1, RESIDENCE_MINIMALE_NS, 50_000_000] {
-                coeurs.push(coeur_occupe(classe, occupant_sensible, residence));
+                let kernel = coeur_occupe(classe, occupant_sensible, residence);
+                coeurs.push(kernel);
+                coeurs.push(Coeur { occupant_utilisateur: true, ..kernel });
             }
         }
     }
@@ -1034,4 +1037,22 @@ fn le_quantum_ne_coupe_plus_une_interactive_pour_un_calcul_normal() {
 #[test]
 fn la_cession_par_classe_est_la_politique_par_defaut() {
     assert!(reveil::cession_par_classe());
+}
+
+#[test]
+fn reveil_interactif_utilisateur_n_attend_pas_le_quantum_du_calcul() {
+    let calcul = Coeur { occupant_utilisateur: true,
+        ..coeur_occupe(Classe::Normale, false, 50_000_000) };
+    assert_eq!(decide(&calcul, &ordinaire()), Decision::DemandeAvecIpi);
+    // La voie ordinaire ne donne jamais le privilège de préemption noyau.
+    for exclu in [Coeur { occupant_utilisateur: false, ..calcul },
+                  Coeur { hors_ordonnanceur: true, ..calcul },
+                  Coeur { occupant_classe: Classe::Interactive, ..calcul },
+                  Coeur { occupant_sensible: true, ..calcul }] {
+        assert_eq!(decide(&exclu, &ordinaire()), Decision::DemandeDifferee);
+    }
+    for tache in [Reveille { consomme_ns: BUDGET_ACTIVATION_NS, ..ordinaire() },
+                  Reveille { classe: Classe::Normale, ..ordinaire() }] {
+        assert_eq!(decide(&calcul, &tache), Decision::DemandeDifferee);
+    }
 }
