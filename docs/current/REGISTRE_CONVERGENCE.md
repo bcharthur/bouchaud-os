@@ -512,3 +512,64 @@ donne 4/4, 600/600 lignes, `secours=1 relogees=1`, CPU 3 → 1
 `40132770698` avait échoué avec le même code noyau ; son journal inaccessible
 ne permet pas d'en attribuer la cause. La qualification stricte et la
 convergence Ladybird restent ouvertes.
+
+### Candidat `44080fab` : résultats KVM et corrections suivantes
+
+Run canonique `40134718112`, job `120993791199` : 8/8 bras valides en
+SMP1 et SMP4, sans défaut d'armement. Le chemin d'identité CPU rapide réduit
+la médiane au repos, mais ne clôt pas les régressions :
+
+| Mesure KVM (on / off, µs) | SMP1 | SMP4 |
+| --- | --- | --- |
+| P1 médiane au repos | 29,5 / 451 | 30,5 / 404 |
+| P1 p95 au repos | 51,5 / 975,5 | 63 / 954 |
+| P1 p99 au repos | 4415 / 3181,5 — **ÉCHEC** | 230,5 / 1029 — OK |
+| P2 p95 interactif | 70 / 21,5 — **ÉCHEC** | 106,5 / 73,5 — **ÉCHEC** |
+
+P3/P4/P5 passent selon les décisions inchangées ; P3 ne dispose que de
+quatre bras comparables sur huit. Les quatre contrôles dans le bruit ne
+sont pas présentés comme des comparaisons qualifiées. C1g demeure hors du
+sommeil : en SMP1, les pires attributions au repos restent vers 1,1 ms
+alors que les quantiles bruts atteignent plusieurs millisecondes.
+
+Sur ce SHA, CI Fast, Reliability V3, Integration, Native IPC et Console
+Sync Proof passent. La console CI donne 4/4, 600/600 lignes par cas et
+`secours=1 relogees=1`, CPU 1 → 0, secours maximal 84 ms
+(run `40134718158`). C6 utilisateur KVM SMP1/4 et C6a passent aussi.
+La compilation Ladybird n'était pas terminée ; aucun nouveau résultat
+Compositor ne peut être déduit de ces succès.
+
+Les mesures TCG ne ferment pas la latence : l'A/B SMP1 du code
+`44080fab` est NON_CONCLUANT (6/8 bras valides) ; l'attribution SMP4 donne
+une passe QUALIFIE_ECHEC, une NON_QUALIFIANT, avec une attente d'élection
+inexpliquée jusqu'à 16281 µs. Aucun retard n'est attribué à l'hôte sans
+preuve. L'A/B SMP4 après regroupement des lectures du registre reste
+NON_CONCLUANT (5/8 bras valides).
+
+Corrections supplémentaires, dont l'effet KVM reste à vérifier :
+
+- Le recalcul des échéances utilise une vue du registre, au lieu de
+  reprendre un garde pour chaque champ. Le temporaire de l'ancienne
+  expression `for … tasks().len()` protégeait déjà le scan entier : la
+  nouvelle vue conserve cette portée et tombe avant le verrou des alarmes.
+- La conversion nanosecondes → TSC arrondit au premier cycle où l'horloge
+  atteint l'échéance. Le test avec des fréquences non entières en GHz
+  échoue sur l'ancienne conversion et passe avec le correctif (19 tests).
+- Un tir anticipé sans candidat ne fabrique plus de demande différée en
+  contexte noyau. Les demandes ordinaires/ciblées, les échéances encore
+  dues après un scan refusé et le retrait des tâches condamnées en ring 3
+  restent servis. Les seuils et le domaine de préemption sont inchangés.
+- Un nouveau rouge console local est reproduit : sans secours, tous les
+  producteurs pouvaient attendre six secondes dans `range_console` sans
+  consulter le chien de garde (`soupcons=1 repli=0`). La boucle coopérative
+  le consulte désormais IRQ ouvertes, hors verrou, et sort vers le repli
+  s'il est confirmé. Les quatre replays suivants passent, 600/600 chacun :
+  contrôle négatif `repli=1`, confirmation 500 ms ; secours actif
+  `secours=1 relogees=1`, CPU 3 → 1, 20 ms. Ce diagnostic local n'attribue
+  pas rétrospectivement le rouge CI dont le journal reste inaccessible.
+
+Les annotations publiques sont plafonnées à dix notices par étape : le
+run `40134718112` n'a publié que trois des sept blocs SMP4. Chaque topologie
+a maintenant sa propre étape de publication, et l'A/B précis son propre
+job, sans suppression des A/B expérimentaux. Les analyseurs et leurs
+seuils restent inchangés. Le verdict P13 reste **PARTIAL**.
