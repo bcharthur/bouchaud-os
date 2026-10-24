@@ -148,6 +148,14 @@ def verifie(racine: Path) -> list[str]:
         fautes.append(f"{COMMUTATION} : reouverture IF hors restauration conditionnelle")
     if "local.irq_depth() == 1" not in corps(src[PREEMPT], "preemption_noyau_sure"):
         fautes.append(f"{PREEMPT} : preemption depuis une IRQ imbriquee possible")
+    # Every returning IDT entry, including spurious IRQs, participates.
+    # The two terminal panic handlers never resume a task or return by IRET.
+    for f in (racine / "src/arch/x86_64/idt").glob("*.rs"):
+        texte = sans_commentaires(f.read_text())
+        for nom in re.findall(r'extern "x86-interrupt" fn (\w+)\(', texte):
+            if nom not in ("panic_stop_handler", "double_fault_handler"):
+                if "GsGuard::enter(&stack)" not in corps(texte, nom):
+                    fautes.append(f"{f.name}:{nom} : entree/sortie IRQ non suivie")
 
     e = src[EXCEPTIONS]
     sites = [m.start() for m in OUVRE_IF.finditer(e)]
@@ -206,6 +214,8 @@ def main() -> int:
         print("\n".join("  " + f for f in fautes))
         return 1
     negatifs = [
+        (EXCEPTIONS, 'fn breakpoint_handler(stack: InterruptStackFrame) {\n    let _gs = GsGuard::enter(&stack);',
+         'fn breakpoint_handler(stack: InterruptStackFrame) {'),
         (COMMUTATION, "if enabled { interrupts::enable(); }", "interrupts::enable();"),
         (COMMUTATION, "irq_context.restore(depth);", "irq_context.restore(0);"),
         (COMMUTATION, "irq_context.suspend();", "irq_context.depth();"),

@@ -119,6 +119,7 @@ unsafe fn applique_fin(fin: FinInterruption) {
 
 /// IRQ7 : le parasite le plus banal d'un vrai PC, et le plus absent de QEMU.
 extern "x86-interrupt" fn pic_parasite_maitre_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     smp::note_premiere_irq(
         VECTEUR_PIC_PARASITE_MAITRE,
         stack.instruction_pointer.as_u64(),
@@ -139,6 +140,7 @@ extern "x86-interrupt" fn pic_parasite_maitre_handler(stack: InterruptStackFrame
 /// un EOI inconditionnel a l'esclave : sur un parasite, cela acquitte une
 /// interruption que l'esclave n'avait pas mise en service.
 extern "x86-interrupt" fn pic_parasite_esclave_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     smp::note_premiere_irq(
         VECTEUR_PIC_PARASITE_ESCLAVE,
         stack.instruction_pointer.as_u64(),
@@ -163,6 +165,7 @@ extern "x86-interrupt" fn pic_parasite_esclave_handler(stack: InterruptStackFram
 /// **n'attend aucun EOI**. En envoyer un acquitterait l'interruption reellement
 /// en cours.
 extern "x86-interrupt" fn lapic_parasite_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     smp::note_premiere_irq(
         VECTEUR_LAPIC_PARASITE,
         stack.instruction_pointer.as_u64(),
@@ -177,6 +180,7 @@ extern "x86-interrupt" fn lapic_parasite_handler(stack: InterruptStackFrame) {
 /// PUBLIE, puis rend la main apres avoir retire du controleur l'interruption
 /// qui n'a pas pu etre livree, sans quoi elle serait represente indefiniment.
 extern "x86-interrupt" fn segment_not_present_handler(stack: InterruptStackFrame, code: u64) {
+    let _gs = GsGuard::enter(&stack);
     let rip = stack.instruction_pointer.as_u64();
     let rsp = stack.stack_pointer.as_u64();
     let cpu = smp::cpu_index();

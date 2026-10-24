@@ -1,4 +1,5 @@
 extern "x86-interrupt" fn breakpoint_handler(stack: InterruptStackFrame) {
+    let _gs = GsGuard::enter(&stack);
     // Chemin de faute FATALE : ce gestionnaire tue la tache fautive ou
     // panique. BOUCHAUD_FAUTE_SANS_BKL_V1 : il prenait le gros verrou « pour
     // la coherence du diagnostic ». Ce verrou ne gelait plus rien -- aucun
