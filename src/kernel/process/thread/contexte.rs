@@ -74,6 +74,9 @@ pub(crate) fn avec_tache<F: FnOnce() -> R, R>(operation: F) -> R {
 
 pub fn banc_contexte_bsp() -> i32 {
     assert_eq!(contexte_execution(), ContexteExecution::ContinuationBsp);
+    let local = crate::arch::x86_64::cpu_local::local(
+        crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu()).unwrap());
+    let entrees = local.irq_context.entries();
     let debut = crate::kernel::timer::monotonic_ns();
     sleep_ticks(2);
     assert!(crate::kernel::timer::monotonic_ns() >= debut + 2_000_000);
@@ -91,6 +94,11 @@ pub fn banc_contexte_bsp() -> i32 {
     assert!(processes().iter().any(|p| p.pid == survivant),
         "run_noyau a detruit un service hors session");
     crate::kernel::process::kill(survivant);
+    assert_eq!(local.irq_depth(), 0, "profondeur IRQ abandonnee sur la continuation BSP");
+    assert!(local.irq_context.entries() > entrees, "aucune entree IRQ suivie");
+    assert!(local.irq_context.maximum() >= 1);
+    crate::serial_println!("CONTEXTE_IRQ_OK profondeur=0 entrees={} maximum={}",
+        local.irq_context.entries(), local.irq_context.maximum());
     crate::serial_println!("CONTEXTE_LIFECYCLE_OK service_hors_session_preserve=1");
     crate::serial_println!("CONTEXTE_BSP_OK sommeil=1 waitqueue=1 retour_sans_tache=1");
     0

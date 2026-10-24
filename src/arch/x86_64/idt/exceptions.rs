@@ -158,8 +158,10 @@ pub fn releve_contexte_courant(cpu: usize, rsp_connu: Option<u64>) {
         syscall_nr, phase, site, aux, tache,
     );
     serial_println!(
-        "[FAULT] need_resched={} irq_profondeur=<non suivi>",
+        "[FAULT] need_resched={} irq_profondeur={}",
         crate::kernel::task::besoin_de_replanifier(),
+        crate::arch::x86_64::cpu_local::local(
+            crate::arch::x86_64::cpu_local::CpuId::from_index(cpu).unwrap()).irq_depth(),
     );
 }
 

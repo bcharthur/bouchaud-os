@@ -49,7 +49,8 @@ EXCEPTIONS = "src/arch/x86_64/idt/exceptions.rs"
 TIMER = "src/arch/x86_64/idt/timer.rs"
 SMPF = "src/arch/x86_64/smp.rs"
 IDT = "src/arch/x86_64/idt.rs"
-FICHIERS = (PREEMPT, PUR, ORDO, METRIQUES, EXCEPTIONS, TIMER, SMPF, IDT)
+COMMUTATION = "src/kernel/process/thread/commutation.rs"
+FICHIERS = (PREEMPT, PUR, ORDO, METRIQUES, EXCEPTIONS, TIMER, SMPF, IDT, COMMUTATION)
 # Les vecteurs dont le gestionnaire peut rouvrir IF (faute venue du ring 3).
 VECTEURS_IF = ("page_fault", "general_protection_fault", "invalid_opcode",
                "divide_error", "stack_segment_fault")
@@ -67,6 +68,7 @@ IF_AUTORISES = {
     "src/drivers/input/ps2_keyboard.rs": "attente en tache",
     "src/drivers/serial/uart16550.rs": "restauration d'un IF leve a l'entree",
     "src/kernel/memory/virtual.rs": "attente de quiescence en tache",
+    COMMUTATION: "restauration du IF de la pile reprise, apres restauration irq_depth",
     "src/kernel/process/thread/registre.rs": "restauration d'un IF leve a l'entree",
     "src/kernel/sync/spinlock.rs": "restauration d'un IF leve a la prise",
     "src/net/transport/tcp.rs": "attente en tache",
@@ -135,6 +137,18 @@ def verifie(racine: Path) -> list[str]:
         if revenant in src[PREEMPT] or revenant in src[ORDO]:
             fautes.append(f"{revenant} est revenu : le quantum noyau coupe un fil noyau n'importe ou")
 
+    commutation = corps(src[COMMUTATION], "switch_context")
+    etapes = ["let enabled = interrupts::are_enabled();", "interrupts::disable();",
+              "irq_context.suspend();", "switch_context_raw(from, to);",
+              "irq_context.restore(depth);", "if enabled { interrupts::enable(); }"]
+    positions = [commutation.find(e) for e in etapes]
+    if min(positions) < 0 or positions != sorted(positions):
+        fautes.append(f"{COMMUTATION} : IF/irq_depth ne suivent plus la pile commutee")
+    if len(OUVRE_IF.findall(src[COMMUTATION])) != 1:
+        fautes.append(f"{COMMUTATION} : reouverture IF hors restauration conditionnelle")
+    if "local.irq_depth() == 1" not in corps(src[PREEMPT], "preemption_noyau_sure"):
+        fautes.append(f"{PREEMPT} : preemption depuis une IRQ imbriquee possible")
+
     e = src[EXCEPTIONS]
     sites = [m.start() for m in OUVRE_IF.finditer(e)]
     if not sites:
@@ -192,6 +206,10 @@ def main() -> int:
         print("\n".join("  " + f for f in fautes))
         return 1
     negatifs = [
+        (COMMUTATION, "if enabled { interrupts::enable(); }", "interrupts::enable();"),
+        (COMMUTATION, "irq_context.restore(depth);", "irq_context.restore(0);"),
+        (COMMUTATION, "irq_context.suspend();", "irq_context.depth();"),
+        (PREEMPT, "local.irq_depth() == 1", "local.irq_depth() <= 1"),
         (PUR, "        && c.lectures_registre == 0\n", "\n"),
         (PUR, "        && !c.shootdown_en_vol\n", "\n"),
         (PUR, "        && !c.interruptions_ouvertes\n", "\n"),
