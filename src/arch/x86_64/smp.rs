@@ -329,16 +329,13 @@ pub fn hardware_apic_id() -> usize {
 
 /// Dense Bouchaud logical CPU index.
 ///
-/// GS carries the logical CpuId after usermode::init_cpu(). The APIC fallback is
-/// used only during early bring-up and is translated through the CPU registry.
+/// Use the same verified TSC_AUX fast path as the scheduler. The shared
+/// implementation retains validated GS and logical APIC fallback during boot.
+/// Calling cpu_index_from_gs directly here made every timer operation read
+/// serializing MSRs even after RDPID/RDTSCP identification was available.
+#[inline]
 pub fn cpu_index() -> usize {
-    if let Some(via_gs) = usermode::cpu_index_from_gs() {
-        return via_gs;
-    }
-
-    cpu_local::logical_for_apic(hardware_apic_id() as u32)
-        .map(|id| id.as_usize())
-        .unwrap_or(0)
+    usermode::cpu_index()
 }
 
 pub fn discovered_cpus() -> usize {
