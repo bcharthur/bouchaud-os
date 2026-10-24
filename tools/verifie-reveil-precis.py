@@ -57,8 +57,7 @@ HLT = 'unsafe { asm!("sti; hlt", options(nostack)); }'
 AUTOUR_HLT = ("    smp::arme_reveil_precis_avant_hlt();\n"
               "    " + HLT + "\n"
               "    smp::retire_reveil_precis_apres_hlt();\n")
-PERIODIQUE = ("            if cpu < MAX_CPUS && ARME_PRECIS[cpu].swap(false, Ordering::Relaxed) {\n"
-              "                let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);")
+PERIODIQUE = "let court = PERIODIQUE_COURT[cpu].swap(false, Ordering::Relaxed);"
 TSC = "                    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);"
 # BOUCHAUD_REVEIL_DU_V1 : une echeance due ou dans la marge est ARMEE (au plus
 # une marge de retard, jamais en boucle) -- elle n'attend plus le tic.
@@ -116,6 +115,16 @@ def verifie(t: dict, sources_src: str) -> list:
     armer = corps(t["smp"], "pub fn arm_local_scheduler_timer(")
     if PERIODIQUE not in armer:
         fautes.append("smp.rs : le quantum periodique n'est plus restaure apres un compte de sommeil.")
+    stop = armer.find("LAPIC_TIMER_INITIAL, 0);")
+    periodic = armer.find("RESCHEDULE_VECTOR as u32 | LVT_PERIODIQUE")
+    start = armer.find("LAPIC_TIMER_INITIAL, compte);")
+    if not 0 <= stop < periodic < start:
+        fautes.append("le compteur court doit etre desarme avant le passage en mode periodique")
+    retrait = corps(t["smp"], "pub fn retire_reveil_precis_apres_hlt(")
+    if "rearme_reste_du_quantum();" not in retrait or "arm_local_scheduler_timer();" in retrait:
+        fautes.append("le retour idle recommence le quantum au lieu de restaurer son reste")
+    if "avant_quantum(" not in corps(t["smp"], "pub fn tir_anticipe("):
+        fautes.append("un IPI precoce est pris pour un quantum expire")
     if TSC not in armer:
         fautes.append("smp.rs : le quantum TSC-deadline n'efface plus l'armement precis.")
     if any(m in t["pur"] for m in ("asm!", "write_msr", "unsafe", "static ")):
@@ -140,6 +149,9 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("compte court restaure en periodique", "smp", "                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, 0);", ""),
+        ("retour idle prolonge le quantum", "smp", "            rearme_reste_du_quantum();", "            arm_local_scheduler_timer();"),
+
         ("periodique actif par defaut", "smp", PERIODIQUE_OFF, PERIODIQUE_OFF.replace("false", "true")),
         ("periodique sans autorisation", "smp", PERIODIQUE_EXIGE,
          "    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {"),
@@ -187,7 +199,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 19 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 20 negatifs)")
     return 0
 
 

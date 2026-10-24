@@ -214,3 +214,18 @@ fn coeur_occupe_borne_interactive() {
     assert_eq!(echeance_occupee(maintenant, maintenant), Some(maintenant + MARGE_NS), "due : une marge, pas un tir immediat");
     assert_eq!(echeance_occupee(1, maintenant), Some(maintenant + MARGE_NS));
 }
+#[test]
+fn interruptions_precoces_ne_consomment_pas_le_quantum() {
+    use reveil_precis::{avant_quantum, reste_compte};
+    let quantum = 4_000_000;
+    // PIT wakes HLT at 1, 2 and 3 ms; old cancellation extended it to 7 ms.
+    for ms in 1..4 {
+        let now = ms * 1_000_000;
+        assert!(avant_quantum(now, quantum));
+        assert_eq!(reste_compte(quantum, now, 1000), ((4 - ms) * 1000) as u32);
+    }
+    assert!(!avant_quantum(quantum, quantum));
+    assert!(!avant_quantum(0, 0));
+    assert_eq!(reste_compte(quantum, quantum + 10, 1000), 1);
+    assert_eq!(reste_compte(1001, 0, 1000), 2); // never round a deadline down
+}

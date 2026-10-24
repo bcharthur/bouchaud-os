@@ -42,6 +42,19 @@ pub const JAMAIS: u64 = u64::MAX;
 /// minuteur qu'une fois par marge -- pas en boucle.
 pub const MARGE_NS: u64 = 20_000;
 
+/// An IPI or sleep wakeup before the saved boundary is not a quantum tick.
+/// Applies to both LAPIC backends, including an idle sleep's deadline.
+pub fn avant_quantum(maintenant: u64, quantum: u64) -> bool {
+    quantum != 0 && maintenant < quantum
+}
+
+/// Restore only the remaining interval, never grant a fresh quantum after
+/// a device IRQ interrupts HLT. An overdue boundary fires at the next count.
+pub fn reste_compte(quantum_ns: u64, maintenant_ns: u64, comptes_par_ms: u64) -> u32 {
+    ((quantum_ns.saturating_sub(maintenant_ns) as u128 * comptes_par_ms as u128)
+        .div_ceil(1_000_000)).clamp(1, u32::MAX as u128) as u32
+}
+
 /// Le TSC qui correspond a l'instant monotone `ns`, avec l'horloge
 /// `monotonic_ns = (tsc - boot) * 1e9 / hz`. `None` si `hz` est inconnu ou si
 /// le resultat deborde.

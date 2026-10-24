@@ -52,15 +52,17 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     }
     // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : le battement du quantum local ; une
     // absence au-dela de sa periode est journalisee.
-    crate::kernel::attribution_reveil::note_quantum(
-        cpu_mesure,
-        crate::kernel::timer::monotonic_ns(),
-        entree_tsc,
-        smp::SCHED_QUANTUM_TICKS * 1_000_000,
-        crate::kernel::timer::cycles_par_ms(),
-        crate::kernel::vol_hote::vole_ns(cpu_mesure),
-        crate::kernel::task::courant_imputable(cpu_mesure),
-    );
+    if !anticipe {
+        crate::kernel::attribution_reveil::note_quantum(
+            cpu_mesure,
+            crate::kernel::timer::monotonic_ns(),
+            entree_tsc,
+            smp::SCHED_QUANTUM_TICKS * 1_000_000,
+            crate::kernel::timer::cycles_par_ms(),
+            crate::kernel::vol_hote::vole_ns(cpu_mesure),
+            crate::kernel::task::courant_imputable(cpu_mesure),
+        );
+    }
 
     let mut preempt_now = false;
     let mut preempt_ciblee = false;

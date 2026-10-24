@@ -75,6 +75,11 @@ const MODE_LAPIC_PERIODIQUE: u8 = 2;
 /// calibration coute une fenetre d'attente.
 static LAPIC_COMPTE_QUANTUM: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+// The periodic backend temporarily uses one-shot mode for a sleep deadline.
+// Keep the original quantum boundary across PIT/device/IPI wakeups.
+static QUANTUM_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static PERIODIQUE_COURT: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static PRECIS_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static LAPIC_HZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 const TRAMPOLINE_PHYS: u64 = 0x8000;
@@ -676,6 +681,8 @@ fn init_local_scheduler_timer() -> bool {
         // dernier, une fois le vecteur et le mode en place.
         timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
     }
+    QUANTUM_NS[cpu_index()].store(crate::kernel::timer::monotonic_ns()
+        .saturating_add(SCHED_QUANTUM_TICKS * 1_000_000), Ordering::Relaxed);
     MODE_TIMER_LOCAL.store(MODE_LAPIC_PERIODIQUE, Ordering::Release);
     true
 }
@@ -688,20 +695,36 @@ pub fn arm_local_scheduler_timer() {
     // decider AVANT toute ecriture, et non le seul drapeau « un timer local
     // est actif ».
     match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
-        MODE_LAPIC_PERIODIQUE => {
-            // BOUCHAUD_REVEIL_PRECIS_V1 : un compte raccourci pour une
-            // echeance de sommeil est remplace par celui du quantum.
+        MODE_LAPIC_PERIODIQUE => ::x86_64::instructions::interrupts::without_interrupts(|| {
             let cpu = cpu_index();
-            if cpu < MAX_CPUS && ARME_PRECIS[cpu].swap(false, Ordering::Relaxed) {
-                let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
-                if compte != 0 {
-                    unsafe {
-                        let (x2, lapic) = local_apic();
+            let compte = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+            let now = crate::kernel::timer::monotonic_ns();
+            let court = PERIODIQUE_COURT[cpu].swap(false, Ordering::Relaxed);
+            ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
+            PRECIS_NS[cpu].store(0, Ordering::Relaxed);
+            if compte != 0 {
+                unsafe {
+                    let (x2, lapic) = local_apic();
+                    let restant = if court {
+                        // Disable the short one-shot count before restoring periodic
+                        // mode. Otherwise an overdue count (possibly 1) becomes a
+                        // periodic timer until the next write; QEMU's timer thread
+                        // can loop on that interval and prevent the vCPU progressing.
+                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, 0);
+                        timer_local_ecrit(x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER,
+                            RESCHEDULE_VECTOR as u32 | LVT_PERIODIQUE);
                         timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
-                    }
+                        compte
+                    } else {
+                        // The hardware already reloaded it: preserve its phase.
+                        timer_local_courant(x2, lapic)
+                    };
+                    let ns = (u64::from(restant) * SCHED_QUANTUM_TICKS * 1_000_000)
+                        .div_ceil(u64::from(compte));
+                    QUANTUM_NS[cpu].store(now.saturating_add(ns.max(1)), Ordering::Relaxed);
                 }
             }
-        }
+        }),
         // Interruptions coupees : le MSR et l'etat qui le decrit (`ARME_TSC`,
         // `QUANTUM_TSC`, `ARME_OCCUPE`) changent ensemble -- l'appel au retour
         // de `hlt` se fait interruptions ouvertes, et le gestionnaire du meme
@@ -776,13 +799,14 @@ fn cible_occupee(cpu: usize, tsc_maintenant: u64) -> Option<u64> {
 /// anticipe -- echeance interactive armee, quantum non echu ? Un IPI recu dans
 /// la meme fenetre est traite de meme : il ne met pas fin au quantum non plus.
 pub fn tir_anticipe(entree_tsc: u64) -> bool {
-    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
-        return false;
-    }
     let cpu = cpu_index();
-    let anticipe = cpu < MAX_CPUS
-        && ARME_OCCUPE[cpu].load(Ordering::Relaxed)
-        && entree_tsc < QUANTUM_TSC[cpu].load(Ordering::Relaxed);
+    let anticipe = match MODE_TIMER_LOCAL.load(Ordering::Acquire) {
+        MODE_TSC_DEADLINE => crate::kernel::reveil_precis::avant_quantum(
+            entree_tsc, QUANTUM_TSC[cpu].load(Ordering::Relaxed)),
+        MODE_LAPIC_PERIODIQUE => crate::kernel::reveil_precis::avant_quantum(
+            crate::kernel::timer::monotonic_ns(), QUANTUM_NS[cpu].load(Ordering::Relaxed)),
+        _ => false,
+    };
     if anticipe {
         TIRS_ANTICIPES.fetch_add(1, Ordering::Relaxed);
     }
@@ -793,10 +817,30 @@ pub fn tir_anticipe(entree_tsc: u64) -> bool {
 /// quantum : la tache courante n'a pas a gagner de temps a chaque sommeil
 /// servi), ou la prochaine echeance interactive si elle vient avant.
 pub fn rearme_reste_du_quantum() {
-    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
-        arm_local_scheduler_timer();
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
+        let cpu = cpu_index();
+        if !PERIODIQUE_COURT[cpu].load(Ordering::Relaxed) { return; }
+        let precis = ARME_PRECIS[cpu].swap(false, Ordering::Relaxed);
+        // A final one-shot can arrive just before the software boundary due
+        // to count conversion. Rearm it if exhausted; an ordinary IPI with
+        // a live remaining timer needs no register write.
+        if !precis {
+            let restant = unsafe { let (x2, lapic) = local_apic(); timer_local_courant(x2, lapic) };
+            if restant != 0 { return; }
+        }
+        PRECIS_NS[cpu].store(0, Ordering::Relaxed);
+        let now = crate::kernel::timer::monotonic_ns();
+        let compte = crate::kernel::reveil_precis::reste_compte(
+            QUANTUM_NS[cpu].load(Ordering::Relaxed), now,
+            u64::from(LAPIC_COMPTE_QUANTUM.load(Ordering::Relaxed)) / SCHED_QUANTUM_TICKS);
+        unsafe {
+            let (x2, lapic) = local_apic();
+            timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
+        }
+        // Still one-shot: only QuantumExpired restores periodic mode.
         return;
     }
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE { return; }
     let cpu = cpu_index();
     let maintenant = crate::arch::x86_64::cpu::rdtsc();
     if cpu >= MAX_CPUS || QUANTUM_TSC[cpu].load(Ordering::Relaxed) <= maintenant {
@@ -808,8 +852,8 @@ pub fn rearme_reste_du_quantum() {
         Some(cible) if cible < quantum => (cible, true),
         _ => (quantum, false),
     };
-    unsafe {
-        usermode::write_msr(IA32_TSC_DEADLINE, echeance);
+    if echeance != ARME_TSC[cpu].load(Ordering::Relaxed) || echeance <= maintenant {
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, echeance); }
     }
     ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
     ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
@@ -1051,18 +1095,30 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
         // Mode periodique (QEMU TCG) : un compte initial plus court, qui
         // redemarre le minuteur ; le quantum est restaure a son declenchement
         // (`arm_local_scheduler_timer`) ou au retour de `hlt`.
+        if ARME_PRECIS[cpu].load(Ordering::Relaxed)
+            && PRECIS_NS[cpu].load(Ordering::Relaxed) == borne { return; }
         let quantum = LAPIC_COMPTE_QUANTUM.load(Ordering::Acquire);
+        let now = crate::kernel::timer::monotonic_ns();
         unsafe {
             let (x2, lapic) = local_apic();
             let restant = timer_local_courant(x2, lapic);
             let compte = crate::kernel::reveil_precis::decide_compte(
                 true,
                 borne,
-                crate::kernel::timer::monotonic_ns(),
+                now,
                 restant,
                 u64::from(quantum) / SCHED_QUANTUM_TICKS,
             );
             if let Some(c) = compte {
+                if !PERIODIQUE_COURT[cpu].load(Ordering::Relaxed) {
+                    let ns = (u64::from(restant) * SCHED_QUANTUM_TICKS * 1_000_000)
+                        .div_ceil(u64::from(quantum));
+                    QUANTUM_NS[cpu].store(now.saturating_add(ns), Ordering::Relaxed);
+                    timer_local_ecrit(x2, lapic, X2APIC_LVT_TIMER, LAPIC_LVT_TIMER,
+                        RESCHEDULE_VECTOR as u32);
+                    PERIODIQUE_COURT[cpu].store(true, Ordering::Relaxed);
+                }
+                PRECIS_NS[cpu].store(borne, Ordering::Relaxed);
                 timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, c);
                 ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
                 REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);
@@ -1111,14 +1167,13 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
 /// ne tombera jamais sur une tache en cours pour une echeance qui n'est pas
 /// la sienne.
 pub fn retire_reveil_precis_apres_hlt() {
-    let cpu = cpu_index();
-    if cpu >= MAX_CPUS {
-        return;
-    }
-    if ARME_PRECIS[cpu].load(Ordering::Relaxed) {
-        REVEILS_PRECIS_RETIRES.fetch_add(1, Ordering::Relaxed);
-        arm_local_scheduler_timer();
-    }
+    ::x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = cpu_index();
+        if cpu < MAX_CPUS && ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+            REVEILS_PRECIS_RETIRES.fetch_add(1, Ordering::Relaxed);
+            rearme_reste_du_quantum();
+        }
+    });
 }
 
 /// La politique du reveil precis ; rend l'etat precedent.
