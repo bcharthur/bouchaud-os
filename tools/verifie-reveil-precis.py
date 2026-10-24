@@ -132,6 +132,12 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("le scan oublie de recaler les echeances locales")
     service = "crate::kernel::task::sert_echeances_au_vecteur_local();"
     irq = t["replanif"]
+    reelection = ("let reelection = !anticipe\n"
+                  "            || crate::kernel::scheduler::preempt::pending()\n"
+                  "            || crate::kernel::scheduler::preempt::demande_ciblee_pendante()\n"
+                  "            || crate::kernel::task::prochaine_echeance_ns() <= crate::kernel::timer::monotonic_ns();")
+    if reelection not in irq or "if crate::kernel::task::in_user_task() && (interrupted_user || reelection) {" not in irq:
+        fautes.append("un tir anticipe invente une demande noyau, perd une demande pendante ou ferme le retrait ring 3")
     if not 0 <= irq.find(service) < irq.find("smp::rearme_reste_du_quantum();") < irq.find("accorde_preemption_noyau()"):
         fautes.append("le vecteur local decide ou rearme avant de publier les dormeurs dus")
     scan = corps(t["sommeil"], "pub fn sert_echeances_au_vecteur_local(")
@@ -167,6 +173,10 @@ def sources() -> str:
 
 def negatifs(t: dict, src: str) -> list:
     mutations = [
+        ("tir anticipe invente une demande", "replanif", " && (interrupted_user || reelection)", ""),
+        ("demande ordinaire oubliee", "replanif", "            || crate::kernel::scheduler::preempt::pending()\n", ""),
+        ("echeance differee oubliee", "replanif", "crate::kernel::task::prochaine_echeance_ns() <= crate::kernel::timer::monotonic_ns()", "false"),
+        ("retrait ring 3 differe", "replanif", "(interrupted_user || reelection)", "reelection"),
         ("borne locale non publiee", "sommeil", "    PROCHAINES_PAR_COEUR[local_cpu()].arme(deadline_ns);", ""),
         ("borne locale non recalee", "sommeil", "                borne.recale(echeance);", ""),
         ("tous les CPU arment le meme sommeil", "smp", "prochaine_echeance_du_coeur(cpu)", "prochaine_echeance_ns()"),
@@ -224,7 +234,7 @@ def main() -> int:
             print(f"verifie-reveil-precis: {f}")
         return 1
     print("verifie-reveil-precis: OK (politique on par defaut (A/B KVM 38732049308), TSC-deadline sous hyperviseur seul, armement autour du hlt, quantum restaure, "
-          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 27 negatifs)")
+          "decision pure testee (echeance due armee), periodique et materiel nu a part, A/B a criteres declares ; 31 negatifs)")
     return 0
 
 

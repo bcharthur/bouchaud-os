@@ -104,7 +104,18 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         // ce qui voit un coeur zero pris.
         crate::kernel::task::veille_attentes_vives();
 
-        if crate::kernel::task::in_user_task() {
+        // Un tir precis avant le quantum peut seulement reveiller la tache
+        // deja installee, sans publier de candidat. En contexte noyau, il
+        // ne doit pas fabriquer need_resched : cela imposait une election
+        // au retour du sommeil/appel, meme sans demande de la politique.
+        // Conserver toute demande existante et une echeance encore due
+        // (scan refuse sous verrou). Le chemin ring 3 reste aussi ouvert
+        // pour retirer une tache condamnee avant son test anticipe.
+        let reelection = !anticipe
+            || crate::kernel::scheduler::preempt::pending()
+            || crate::kernel::scheduler::preempt::demande_ciblee_pendante()
+            || crate::kernel::task::prochaine_echeance_ns() <= crate::kernel::timer::monotonic_ns();
+        if crate::kernel::task::in_user_task() && (interrupted_user || reelection) {
             if interrupted_user {
                 preempt_now = true;
             } else if !crate::kernel::task::current_is_kernel_task() {
