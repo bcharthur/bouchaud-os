@@ -398,6 +398,78 @@ jobs:
   # Les A/B d'ordonnancement, en parallele des sondes : chacun est un
   # demarrage KVM de plusieurs minutes, et le job des sondes approchait sa
   # borne de 95 minutes (pas P10+.1 sous TCG).
+  # Les annotations publiques ne deviennent visibles qu'a la fin du job.
+  # Isoler la regression P13 des A/B experimentaux donne son verdict des
+  # SMP1/4 termines, sans attendre les autres mesures ni en retirer aucune.
+  reveil-precis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: primitives-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        id: bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Acces a /dev/kvm
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 puis SMP4 (politique par defaut on depuis b6c99032)
+        # BOUCHAUD_REVEIL_PRECIS_V1 : sous KVM le minuteur local est en mode
+        # TSC-deadline. Quatre tours AB/BA de `ordonnanceur-probe 8 1` sous
+        # `reveil-precis off` et `on`. Criteres declares dans
+        # analyse_ab_reveil_precis.py. Defaut `on` depuis l'A/B KVM SMP1
+        # CONVAINCANT de b6c99032 (run 38732049308) ; un KVM NON_CONVAINCANT le
+        # rend a `off`. SMP4 : le defaut s'applique a tous les coeurs, la
+        # preuve d'origine n'en avait qu'un.
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          r=0
+          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1 || r=1
+          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4 || r=1
+          exit $r
+      # GitHub conserve au plus dix notices par etape. Une topologie par
+      # etape preserve aussi les compteurs des derniers bras SMP4.
+      - name: P13 -- publier les verdicts et registres SMP1
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: python3 tools/ci/publie_p13_reveil.py --smp 1
+      - name: P13 -- publier les verdicts et registres SMP4
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: python3 tools/ci/publie_p13_reveil.py --smp 4
+      - name: P13 -- qualification stricte A/B reveil precis KVM SMP1/4
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        env:
+          P13_STRICT: ${{ inputs.p13_strict && '1' || '0' }}
+        run: |
+          mode=report
+          [ "$P13_STRICT" != 1 ] || mode=strict
+          r=0
+          for smp in 1 4; do
+            python3 tools/ci/qualifie_p13.py ab "ab-reveil-precis-kvm-smp${smp}/serie.log" --smp "$smp" --passes 4 --mode "$mode" || r=1
+          done
+          exit "$r"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-primitives-reveil-precis
+          path: ab-reveil-precis-*/serie.log
+          if-no-files-found: warn
+
   ordonnanceur-ab:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -426,36 +498,6 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      # Measure the P13 regression first; all other A/B cases still run.
-      - name: P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 puis SMP4 (politique par defaut on depuis b6c99032)
-        # BOUCHAUD_REVEIL_PRECIS_V1 : sous KVM le minuteur local est en mode
-        # TSC-deadline. Quatre tours AB/BA de `ordonnanceur-probe 8 1` sous
-        # `reveil-precis off` et `on`. Criteres declares dans
-        # analyse_ab_reveil_precis.py. Defaut `on` depuis l'A/B KVM SMP1
-        # CONVAINCANT de b6c99032 (run 38732049308) ; un KVM NON_CONVAINCANT le
-        # rend a `off`. SMP4 : le defaut s'applique a tous les coeurs, la
-        # preuve d'origine n'en avait qu'un.
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        run: |
-          r=0
-          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp1 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 1 || r=1
-          AB_SORTIE=$PWD/ab-reveil-precis-kvm-smp4 BO_QEMU_KVM=1 tools/ci/run_ab_reveil_precis.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 4 || r=1
-          exit $r
-      - name: P13 -- publier les verdicts et registres du timer dans les annotations
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        run: python3 tools/ci/publie_p13_reveil.py
-      - name: P13 -- qualification stricte A/B reveil precis KVM SMP1/4
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        env:
-          P13_STRICT: ${{ inputs.p13_strict && '1' || '0' }}
-        run: |
-          mode=report
-          [ "$P13_STRICT" != 1 ] || mode=strict
-          r=0
-          for smp in 1 4; do
-            python3 tools/ci/qualifie_p13.py ab "ab-reveil-precis-kvm-smp${smp}/serie.log" --smp "$smp" --passes 4 --mode "$mode" || r=1
-          done
-          exit "$r"
       - name: Ordonnanceur -- A/B de la variante experimentale d'IPI au reveil, KVM SMP4 puis SMP8 (mesure ; politique par defaut inchangee)
         # BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : la variante est
         # DESACTIVEE par defaut ; `ordo-variante` la bascule le temps d'une
@@ -491,7 +533,6 @@ jobs:
           path: |
             ab-reveil-ipi-*/serie.log
             ab-cession-*/serie.log
-            ab-reveil-precis-*/serie.log
           if-no-files-found: warn
 
   # P10+.2b : composition directe dans la memoire du scanout virtio-gpu, en

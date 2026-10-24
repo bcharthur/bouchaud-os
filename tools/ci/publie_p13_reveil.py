@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Expose existing evidence in public job annotations; never changes a verdict."""
 from pathlib import Path
+import argparse
 import re
 import sys
 from analyse_ab_reveil_precis import analyse
@@ -44,7 +45,10 @@ def blocs(report, limite=3000):
 
 
 def main():
-    for smp in (1, 4):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--smp', type=int, choices=(1, 4))
+    args = parser.parse_args()
+    for smp in ((args.smp,) if args.smp else (1, 4)):
         path = Path(f'ab-reveil-precis-kvm-smp{smp}/serie.log')
         if not path.is_file():
             print(f'::warning title=P13 KVM SMP{smp}::Journal absent : {path}')
