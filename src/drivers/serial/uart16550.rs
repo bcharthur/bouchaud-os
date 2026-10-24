@@ -1349,6 +1349,15 @@ fn range_console(octets: &[u8], reserve: usize) -> Result<(), RefusConsole> {
             }
             tours = tours.wrapping_add(1);
             x86_64::instructions::interrupts::enable();
+            // Tous les producteurs peuvent attendre ici pendant que le
+            // coeur du fil console est muet. Sans surveillance dans cette
+            // boucle, ni le secours ni la confirmation du repli ne sont
+            // servis avant la liberation du verrou. Aucun verrou n'est
+            // acquis ici, et le contexte cedable a ete verifie plus haut.
+            surveille_fil_console();
+            if !console_active() {
+                return Err(RefusConsole::Plein);
+            }
             crate::kernel::task::yield_now();
             x86_64::instructions::interrupts::disable();
             // Elle a pu migrer : le detenteur s'identifie par SON coeur.

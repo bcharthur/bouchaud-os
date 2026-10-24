@@ -186,9 +186,10 @@ def verifie(racine: Path) -> list[str]:
     cede = re.search(r"const CONSOLE_VERROU_BORNE_CEDEE_NS: u64 = ([0-9_]+);", u)
     if not cede or int(cede.group(1).replace("_", "")) > 120_000_000_000 \
             or not re.search(r"if peut_ceder && ouvertes \{.{0,900}?x86_64::instructions::interrupts::enable\(\);\s*"
+                             r"surveille_fil_console\(\);\s*if !console_active\(\) \{\s*return Err\(RefusConsole::Plein\);\s*\}\s*"
                              r"crate::kernel::task::yield_now\(\);\s*x86_64::instructions::interrupts::disable\(\);", r, re.S) \
             or "attente > CONSOLE_VERROU_BORNE_CEDEE_NS" not in r:
-        f.append(f"{UART} : l'attente cedee du verrou de la console n'est plus interruptions ouvertes, ou plus bornee")
+        f.append(f"{UART} : l'attente cedee du verrou perd les IRQ ouvertes, la borne ou la surveillance du fil")
     # BOUCHAUD_CONSOLE_REPLI_COOPERATIF_V1 : en repli, l'anneau passe par
     # morceaux interruptions ouvertes avant le chemin synchrone, si l'on peut ceder.
     vc = corps(u, "vide_anneau_en_cedant")
@@ -446,8 +447,12 @@ NEGATIFS = [
     (UART, "            || (tours % 64 == 63\n                && crate::kernel::timer::monotonic_ns().saturating_sub(debut) > CONSOLE_VERROU_BORNE_NS)",
      "            || (tours % 64 == 63 && false)"),
     # 2 : ceder interruptions masquees
-    (UART, "            x86_64::instructions::interrupts::enable();\n            crate::kernel::task::yield_now();\n            x86_64::instructions::interrupts::disable();\n            // Elle a pu migrer",
-     "            crate::kernel::task::yield_now();\n            x86_64::instructions::interrupts::disable();\n            // Elle a pu migrer"),
+    (UART, "            surveille_fil_console();\n            if !console_active() {",
+     "            if !console_active() {"),
+    (UART, "            surveille_fil_console();\n            if !console_active() {\n                return Err(RefusConsole::Plein);\n            }",
+     "            surveille_fil_console();"),
+    (UART, "            surveille_fil_console();\n            if !console_active() {",
+     "            x86_64::instructions::interrupts::disable();\n            surveille_fil_console();\n            if !console_active() {"),
     # 2 : attente cedee sans borne
     (UART, "                || attente > CONSOLE_VERROU_BORNE_CEDEE_NS\n", "                || false\n"),
     # 2 : attente cedee bornee si loin qu'elle ne l'est plus (10 min)
