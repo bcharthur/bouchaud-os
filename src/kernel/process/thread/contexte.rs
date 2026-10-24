@@ -81,6 +81,17 @@ pub fn banc_contexte_bsp() -> i32 {
     let limite = crate::kernel::timer::monotonic_ns() + 2_000_000;
     assert!(!file.wait_until_noyau(file.ticket(), limite));
     assert_eq!(contexte_execution(), ContexteExecution::ContinuationBsp);
+    fn service() -> ! { loop { sleep_ticks(2); } }
+    fn racine() -> ! { exit_current(0) }
+    assert!(spawn_noyau(service, "banc-service-survivant"));
+    let survivant = processes().into_iter()
+        .find(|p| p.metadata.lock().name == "banc-service-survivant")
+        .expect("service de banc absent").pid;
+    assert_eq!(run_noyau(racine, "banc-racine-ephemere"), 0);
+    assert!(processes().iter().any(|p| p.pid == survivant),
+        "run_noyau a detruit un service hors session");
+    crate::kernel::process::kill(survivant);
+    crate::serial_println!("CONTEXTE_LIFECYCLE_OK service_hors_session_preserve=1");
     crate::serial_println!("CONTEXTE_BSP_OK sommeil=1 waitqueue=1 retour_sans_tache=1");
     0
 }

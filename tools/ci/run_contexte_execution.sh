@@ -17,6 +17,7 @@ for smp in 1 4; do
     set -e
     test "$rc" -eq 33
     grep -aq 'CONTEXTE_BSP_OK sommeil=1 waitqueue=1 retour_sans_tache=1' "$log"
+    grep -aq 'CONTEXTE_LIFECYCLE_OK service_hors_session_preserve=1' "$log"
     grep -aq '=== AUTORUN FIN === statut=0' "$log"
     ! grep -aqE 'KERNEL PANIC|panicked at|irq_depth underflow' "$log"
     echo "CONTEXTE_EXECUTION_OK smp=$smp"

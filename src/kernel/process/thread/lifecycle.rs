@@ -951,7 +951,12 @@ processus_vivants={}",
     }
 
     reap();
-    for stale in processes().iter() {
+    // Snapshot the entire session before killing a parent: descendants must
+    // still be discoverable. System services are not owned by this launch.
+    let condamnes: Vec<_> = processes().into_iter()
+        .filter(|p| p.pid == pid || descend_de(p.pid, pid))
+        .collect();
+    for stale in condamnes {
         // Chaque mise a mort est nommee : c'est le seul endroit ou l'on sait
         // encore QUI a ete tue et POURQUOI -- parce que le fil appelant est
         // revenu, pas parce que ce processus avait fini.
@@ -964,7 +969,6 @@ processus_vivants={}",
         ));
         crate::kernel::process::kill(stale.pid);
     }
-    PROCESSES.lock().clear();
     crate::kernel::process::kill(pid);
     code
 }
