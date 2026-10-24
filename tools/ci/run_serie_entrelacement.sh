@@ -81,8 +81,13 @@ MODE_CONSOLE=${BANC_CONSOLE:-on}
   if [ "$SECOURS" = off ]; then echo "console-async secours off"; fi
   if [ "$FIL_GELE" -gt 0 ]; then echo "console-async gele-fil 500 $FIL_GELE"; fi
   if [ "$VERROU_SUSPENDU" -gt 0 ]; then echo "serie-verrou-suspendu 1500 $VERROU_SUSPENDU $VERROU_CIBLE"; fi
-  printf '/bin/serie-entrelacement-probe %s %s %s %s %s\necho SERIE_ENTRELACEMENT_AUTORUN_FIN\n' \
+  printf '/bin/serie-entrelacement-probe %s %s %s %s %s\n' \
     "$ECRIVAINS" "$LIGNES" "$PROCESSUS" "$CHARGE" "$PAS_MS"
+  # Strict join: only emit final autorun snapshot after guest injection succeeds.
+  if [ "$SUSPENSION" -gt 0 ]; then echo 'serie-banc-attend detenteur'; fi
+  if [ "$VERROU_SUSPENDU" -gt 0 ]; then echo 'serie-banc-attend verrou'; fi
+  if [ "$SUSPENSION" -gt 0 ] || [ "$VERROU_SUSPENDU" -gt 0 ]; then echo 'console-async etat'; fi
+  echo 'echo SERIE_ENTRELACEMENT_AUTORUN_FIN'
 } > "$SCENARIO/autorun"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
@@ -99,10 +104,15 @@ LIMITE=$((SECONDS + 600))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
   grep -aqE 'KERNEL PANIC|panicked at' "$LOG" && { sleep 2; break; }
+  grep -aq 'SERIE_BANC_ATTEND_ECHEC' "$LOG" && { echo 'INJECTION_CONSOLE_ECHEC' >&2; sleep 2; break; }
   # Le bilan de FIN d'autorun : `console-async off` en imprime un aussi, au
   # depart (bras temoin) -- s'arreter dessus coupait la sonde a 26 s.
-  awk '/SERIE_ENTRELACEMENT_AUTORUN_FIN/ { fin = 1 } fin && /BOUCHAUD_CONSOLE_BILAN/ { vu = 1 } END { exit !vu }' "$LOG" \
-    && { sleep 2; break; }
+  if awk '/SERIE_ENTRELACEMENT_AUTORUN_FIN/ { fin = 1 } fin && /BOUCHAUD_CONSOLE_BILAN/ { vu = 1 } END { exit !vu }' "$LOG"; then
+    if [ "$SUSPENSION" -gt 0 ] && ! grep -aq 'SERIE_BANC_ATTEND_OK type=detenteur' "$LOG"; then sleep 1; continue; fi
+    if [ "$VERROU_SUSPENDU" -gt 0 ] && ! grep -aq 'SERIE_BANC_ATTEND_OK type=verrou' "$LOG"; then sleep 1; continue; fi
+    sleep 2
+    break
+  fi
   sleep 1
 done
 kill -TERM "$PID" 2>/dev/null || true
@@ -127,6 +137,7 @@ else
   exige "aucune ligne differee perdue, toutes videes avant le bilan" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=([0-9]+) lignes_perdues=0 lignes_vidangees=\1'"
 fi
 if [ "$SUSPENSION" -gt 0 ]; then
+  exige "la barriere noyau a confirme le detenteur" grep -aq 'SERIE_BANC_ATTEND_OK type=detenteur' "$LOG"
   exige "le detenteur suspendu a tenu le jeton ${SUSPENSION} ms" grep -aq "SERIE_DETENTEUR_SUSPENDU_FAIT pris=1 duree_ms=${SUSPENSION}" "$LOG"
   # Run 39740388363 (63b519a8, TCG) : ce controle a rougi sans que le job
   # dise si le banc n'avait pas pris le jeton (pris=0) ou n'avait jamais
@@ -139,6 +150,7 @@ if [ "$SUSPENSION" -gt 0 ]; then
   exige "la suspension a retenu des lignes (differees, ou fil bloque par le jeton)" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'lignes_differees=[1-9]|BOUCHAUD_CONSOLE_BILAN active=1 .* jeton_occupe=[1-9]'"
 fi
 if [ "$VERROU_SUSPENDU" -gt 0 ]; then
+  exige "la barriere noyau a confirme le verrou" grep -aq 'SERIE_BANC_ATTEND_OK type=verrou' "$LOG"
   exige "le fil a tenu le verrou de l'anneau ${VERROU_SUSPENDU} ms" grep -aq "CONSOLE_VERROU_SUSPENDU_FAIT pris=1 duree_ms=${VERROU_SUSPENDU}" "$LOG"
   echo "  banc : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'CONSOLE_VERROU_SUSPENDU_' | sed 's/^.*CONSOLE_VERROU/CONSOLE_VERROU/' | tr '\n' ' ' | cut -c1-300 || true)"
   exige "la suspension a ete subie (attentes cedees ou renoncements)" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'BOUCHAUD_CONSOLE_BILAN .* (verrou_abandons=[1-9][0-9]* |verrou_cedees=[1-9])'"
