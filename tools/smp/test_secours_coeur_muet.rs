@@ -101,6 +101,27 @@ fn personne_pour_accueillir() {
     assert_eq!(choisit_accueil(0, &coeurs), None);
 }
 
+#[test]
+fn dormant_installe_depuis_longtemps_reste_un_accueil_vivant() {
+    let c = secours::accueil(true, true, false, 1, 3_000_000_000, 20_000_000, 0);
+    assert!(!c.muet);
+    assert_eq!(choisit_accueil(0, &[accueil(true, false, true, 0), c]), Some(1));
+}
+
+#[test]
+fn continuation_bsp_ne_devient_pas_un_scheduler_parce_qu_elle_attend() {
+    let c = secours::accueil(true, true, true, 0, 3_000_000_000, 20_000_000, 0);
+    assert!(!c.permis);
+    assert_eq!(choisit_accueil(1, &[c, accueil(true, false, true, 1)]), None);
+}
+
+#[test]
+fn occupant_actif_sans_progression_reste_exclu() {
+    let c = secours::accueil(true, false, false, 1, 3_000_000_000, 20_000_000, 0);
+    assert!(c.muet);
+    assert_eq!(choisit_accueil(0, &[accueil(true, false, true, 1), c]), None);
+}
+
 /// Propriete, graines : l'accueil retenu respecte toujours les trois
 /// interdits, et aucun coeur permis ne le bat au rang.
 #[test]

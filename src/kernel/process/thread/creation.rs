@@ -289,7 +289,8 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
         attente_normale,
         // BOUCHAUD_PLACEMENT_HORS_ORDONNANCEUR_V1 : ni tache installee, ni
         // sommeil -- le contexte de demarrage ou le shell tient le coeur.
-        hors_ordonnanceur: en_ligne && !cpu::is_idle(cpu) && occupant_coeur(cpu) == NO_TASK,
+        hors_ordonnanceur: en_ligne && cpu == 0 && occupant_coeur(cpu) == NO_TASK
+            && CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_LIBRE,
     }
 }
 
@@ -545,7 +546,7 @@ static SECOURS_REFUS_ENTREE: AtomicU64 = AtomicU64::new(0);
 /// appelant, et l'election du coeur muet, s'il se reveille entre-temps, ne la
 /// trouve plus. S'il l'a deja prise, `remove` echoue et rien ne bouge.
 pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
-    use crate::kernel::scheduler::secours::{choisit_accueil, coeur_muet, secours_permis, Accueil};
+    use crate::kernel::scheduler::secours::{choisit_accueil, accueil, secours_permis, Accueil};
     let table = tasks();
     let tache = table.get(index)?;
     if tache.state != TaskState::Ready || tache.on_cpu >= 0 || tache.switching_out.charge() {
@@ -566,12 +567,9 @@ pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
         let (interactives, normales) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
             .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
             .unwrap_or((0, 0));
-        *c = Accueil {
-            permis: allowed_on(tache, cpu),
-            inactif: cpu::is_idle(cpu),
-            muet: coeur_muet(profil_occupant(cpu).2, maintenant, seuil_ns),
-            attente: interactives + normales,
-        };
+        let etat = etat_coeur_reveil(cpu, tache.affinity_mask, maintenant);
+        *c = accueil(allowed_on(tache, cpu), etat.inactif, etat.hors_ordonnanceur,
+            profil_occupant(cpu).2, maintenant, seuil_ns, interactives + normales);
     }
     let cible = choisit_accueil(donneur, &coeurs[..en_ligne])?;
     let identite = registre_id(index)?;
@@ -598,10 +596,10 @@ pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
     // lecture de l'etat du coeur d'accueil.
     core::sync::atomic::fence(Ordering::SeqCst);
     crate::kernel::scheduler::preempt::request_cpu(cible);
-    if cpu::is_idle(cible) {
-        crate::kernel::scheduler::preempt::note_ipi_reveil();
-        smp::reschedule_cpu(cible);
-    }
+    // An occupied recipient also needs the reschedule interrupt. Otherwise
+    // relocation merely changes which queue waits for the next quantum.
+    crate::kernel::scheduler::preempt::note_ipi_reveil();
+    smp::reschedule_cpu(cible);
     Some(cible)
 }
 

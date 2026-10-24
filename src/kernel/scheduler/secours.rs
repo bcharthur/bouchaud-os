@@ -66,6 +66,19 @@ pub struct Accueil {
     pub attente: usize,
 }
 
+/// A sleeping task can remain installed across HLT for seconds. Its old
+/// installation timestamp is not evidence that the CPU stopped scheduling.
+/// Conversely the BSP shell is not an idle scheduler, even while it waits.
+pub fn accueil(permis: bool, inactif: bool, hors_ordonnanceur: bool,
+    occupant_depuis: u64, maintenant: u64, seuil: u64, attente: usize) -> Accueil {
+    Accueil {
+        permis: permis && !hors_ordonnanceur,
+        inactif,
+        muet: !inactif && coeur_muet(occupant_depuis, maintenant, seuil),
+        attente,
+    }
+}
+
 /// Le coeur d'accueil : jamais le donneur, jamais un coeur interdit ou muet ;
 /// un coeur au repos d'abord, sinon la file la plus courte (le plus petit
 /// indice a egalite).
