@@ -55,15 +55,22 @@ def corps_de(texte: str, entete: str) -> str | None:
     return None
 
 
-def controle(racine: Path) -> list:
+def controle(racine: Path, sortie_source: str | None = None) -> list:
     erreurs = []
     lc = racine / LIFECYCLE
     if not lc.exists():
         return [f"{LIFECYCLE} introuvable"]
     # BOUCHAUD_STATUT_SORTIE_V1 : le corps de `exit_current` est `sortie_du_fil`.
-    exit_corps = corps_de(sans_commentaires(lc.read_text()), "fn sortie_du_fil(")
+    exit_corps = corps_de(sans_commentaires(lc.read_text() if sortie_source is None else sortie_source), "fn sortie_du_fil(")
     if exit_corps is None:
         return ["exit_current introuvable : le garde-fou ne controle plus rien"]
+
+    # The coherent CPU scan has its own diagnostic lock. Its only call is
+    # explicitly outside the lifecycle critical section and rate-limited.
+    appel_cpu = "publie_cpu_cumul_sortie(pid_sortant);"
+    if exit_corps.count(appel_cpu) != 1 or (
+        "if dernier_thread && releve_global {\n        " + appel_cpu) not in exit_corps:
+        erreurs.append("le diagnostic CPU de sortie n'est plus differe et limite hors lifecycle")
 
     # Les sondes appelees sur ce chemin, sous la forme crate::kernel::MODULE::fn()
     appels = set(re.findall(
@@ -124,14 +131,31 @@ def test_negatif() -> list:
     return []
 
 
+def test_sortie_cpu() -> list:
+    source = (RACINE / LIFECYCLE).read_text()
+    appel = "        publie_cpu_cumul_sortie(pid_sortant);\n"
+    if source.count(appel) != 1:
+        return ["mutation du diagnostic CPU inapplicable"]
+    sans = source.replace(appel, "", 1)
+    mutations = [
+        sans.replace("        let mut lifecycle = process.lifecycle.lock();",
+            "        let mut lifecycle = process.lifecycle.lock();\n" + appel, 1),
+        sans.replace("    if dernier_thread && releve_global {", appel + "    if dernier_thread && releve_global {", 1),
+    ]
+    for m in mutations:
+        if not any("diagnostic CPU" in e for e in controle(RACINE, m)):
+            return ["diagnostic CPU sous verrou ou sans limitation non detecte"]
+    return []
+
+
 def main() -> int:
-    erreurs = controle(RACINE) + test_negatif()
+    erreurs = controle(RACINE) + test_negatif() + test_sortie_cpu()
     if erreurs:
         for e in erreurs:
             print(f"SONDES_SANS_VERROU_FAIL {e}")
         print(f"SONDES_SANS_VERROU_VERDICT echec erreurs={len(erreurs)}")
         return 1
-    print("SONDES_SANS_VERROU_VERDICT ok chemin=exit_current negatif=1")
+    print("SONDES_SANS_VERROU_VERDICT ok chemin=exit_current negatif=3")
     return 0
 
 

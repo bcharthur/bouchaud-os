@@ -69,7 +69,10 @@ def verifie(racine: Path) -> list[str]:
         return [f"lecture impossible : {e}"]
     fautes = []
     ec = corps(src, "sortie_du_fil")  # corps d'exit_current (BOUCHAUD_STATUT_SORTIE_V1)
-    if not bloc_garde(ec, "if releve_global { crate::kernel::dmesg::log_fmt", '"CPU_CUMUL scope=global'):
+    cpu = corps(src, "publie_cpu_cumul_sortie")
+    if not bloc_garde(ec, "if dernier_thread && releve_global {", "publie_cpu_cumul_sortie(pid_sortant);") \
+            or src.count("publie_cpu_cumul_sortie(") != 2 \
+            or '"CPU_CUMUL scope=global' not in cpu:
         fautes.append(f"{VIE} : CPU_CUMUL n'est plus derriere releve_global")
     for marque in ('"CACHE_BALAYAGE scope=global', '"CACHE_BALAYAGE_TEMOINS scope=global', '"FAULT_REPRISE scope=global'):
         if not bloc_garde(ec, "if dernier_thread && releve_global {", marque):
@@ -78,8 +81,9 @@ def verifie(racine: Path) -> list[str]:
                    '"CLEAN_PAGE_CACHE_GLOBAL scope=global', "backing_attrib::publie(", "ata::publie_controleur("):
         if not bloc_garde(ec, "    if releve_global {\n", marque):
             fautes.append(f"{VIE} : {marque} n'est plus derriere releve_global")
-    if ec.count("scope=global") != 7:
-        fautes.append(f"{VIE} : {ec.count('scope=global')} releves scope=global dans exit_current (7 attendus)")
+    globaux = ec.count("scope=global") + cpu.count("scope=global")
+    if globaux != 7:
+        fautes.append(f"{VIE} : {globaux} releves scope=global dans exit_current et son diagnostic CPU (7 attendus)")
     if '"PROCESS_EXIT t={}' not in ec or "FAULT_FILE_BREAKDOWN" not in ec:
         fautes.append(f"{VIE} : un fait propre au processus a disparu de la sortie")
     if bloc_garde(ec, "if releve_global {", '"PROCESS_EXIT t={}'):
@@ -109,6 +113,7 @@ def main() -> int:
         print("\n".join("  " + f for f in fautes))
         return 1
     negatifs = [
+        ('"CPU_CUMUL scope=global', '"CPU_SUPPRIME scope=global'),
         ("    if releve_global {\n        let (dr, db, dn, dw)", "    {\n        let (dr, db, dn, dw)"),
         ("const RELEVE_GLOBAL_PERIODE_MS: u64 = 1_000;", "const RELEVE_GLOBAL_PERIODE_MS: u64 = 10;"),
         ("    if dernier_thread && releve_global {", "    if dernier_thread {"),
