@@ -690,12 +690,16 @@ fn expand_vars(seg: &str) -> String {
 // tout de suite.
 static SUSPENSION_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static SUSPENSION_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+// P13_CONSOLE_SYNC: 0=pending, 1=done, 2=failed; never infer success from a timeout.
+static SUSPENSION_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+static VERROU_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 fn serie_detenteur_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
     let lis = |i: usize, defaut: u64| if argc > i { argv[i].parse::<u64>().unwrap_or(defaut) } else { defaut };
     SUSPENSION_ATTENTE_MS.store(lis(1, 2000).min(600_000), Ordering::Relaxed);
     SUSPENSION_DUREE_MS.store(lis(2, 3000).min(30_000), Ordering::Relaxed);
+    SUSPENSION_RESULTAT.store(0, Ordering::Release);
     if !crate::kernel::task::spawn_noyau(fil_detenteur_suspendu, "serie-suspendu") {
         crate::println!("serie-detenteur-suspendu : fil noyau refuse");
         return 1;
@@ -710,6 +714,7 @@ fn fil_detenteur_suspendu() -> ! {
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
     let pris = crate::drivers::serial::banc_detenteur_suspendu(duree);
     crate::serial_println!("SERIE_DETENTEUR_SUSPENDU_FAIT pris={} duree_ms={}", pris as u8, duree);
+    SUSPENSION_RESULTAT.store(if pris { 1 } else { 2 }, Ordering::Release);
     loop {
         crate::kernel::task::sleep_ticks(1000);
     }
@@ -737,6 +742,7 @@ fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     let cible_fil = argc > 3 && argv[3] == "fil";
     VERROU_SUSPENDU_CIBLE_FIL.store(cible_fil, Ordering::Relaxed);
     VERROU_SUSPENDU_FAIT.store(false, Ordering::Relaxed);
+    VERROU_RESULTAT.store(0, Ordering::Release);
     let lance = if cible_fil {
         match crate::drivers::serial::coeur_du_fil_console() {
             Some(coeur) => crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur),
@@ -768,6 +774,7 @@ fn fil_verrou_suspendu() -> ! {
                 "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={}",
                 ici, cible.map_or(-1, |c| c as i64)
             );
+            VERROU_RESULTAT.store(2, Ordering::Release);
             loop {
                 crate::kernel::task::sleep_ticks(1000);
             }
@@ -780,8 +787,34 @@ fn fil_verrou_suspendu() -> ! {
         pris as u8, duree, ici,
         crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64)
     );
+    VERROU_RESULTAT.store(if pris { 1 } else { 2 }, Ordering::Release);
     loop {
         crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
+/// P13_CONSOLE_SYNC: guest-side join barrier for the asynchronous kernel injection.
+/// A missing, refused or stuck injection can never qualify the test as green.
+fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let kind = if argc > 1 { argv[1] } else { "?" };
+    let result = match kind {
+        "detenteur" => &SUSPENSION_RESULTAT,
+        "verrou" => &VERROU_RESULTAT,
+        _ => { crate::serial_println!("SERIE_BANC_ATTEND_ECHEC raison=type-inconnu"); return 1; }
+    };
+    let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
+    loop {
+        match result.load(Ordering::Acquire) {
+            1 => { crate::serial_println!("SERIE_BANC_ATTEND_OK type={}", kind); return 0; }
+            2 => { crate::serial_println!("SERIE_BANC_ATTEND_ECHEC type={} raison=injection-refusee", kind); return 1; }
+            _ => {}
+        }
+        if crate::kernel::timer::monotonic_ns() >= limite {
+            crate::serial_println!("SERIE_BANC_ATTEND_ECHEC type={} raison=timeout", kind);
+            return 1;
+        }
+        crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(10));
     }
 }
 
@@ -1129,6 +1162,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // (defaut) ou historique, pour l'A/B ; sans argument, les compteurs.
         "ordo-cession" => ordo_cession(argc, &argv),
         "serie-detenteur-suspendu" => serie_detenteur_suspendu(argc, &argv),
+        "serie-banc-attend" => serie_banc_attend(argc, &argv),
         "console-async" => console_async(argc, &argv),
         "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
         // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
