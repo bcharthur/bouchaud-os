@@ -1619,6 +1619,7 @@ const SONDE_LECTURES: u64 = 8;
 
 /// Lecteurs encore vivants.
 static SONDE_RESTANTS: AtomicU32 = AtomicU32::new(0);
+static SONDE_FIN: crate::kernel::sync::WaitQueue = crate::kernel::sync::WaitQueue::new();
 /// Lectures reussies, tous lecteurs confondus.
 static SONDE_REUSSIES: AtomicU64 = AtomicU64::new(0);
 /// Lectures echouees.
@@ -1643,7 +1644,9 @@ fn sonde_lecteur() -> ! {
             }
         }
     }
-    SONDE_RESTANTS.fetch_sub(1, Ordering::Release);
+    if SONDE_RESTANTS.fetch_sub(1, Ordering::Release) == 1 {
+        SONDE_FIN.wake_all();
+    }
     crate::kernel::task::exit_current(0)
 }
 
@@ -1665,10 +1668,17 @@ pub fn sonde_parallele() {
         crate::serial_println!("NVME_PARALLELE_ABSENT");
         return;
     }
+    // Un passage expire ne permet pas d'ecraser les comptes de lecteurs
+    // encore vivants. Ils doivent rendre leur propre generation de travail.
+    if SONDE_RESTANTS.compare_exchange(0, SONDE_LECTEURS as u32,
+        Ordering::AcqRel, Ordering::Acquire).is_err()
+    {
+        crate::serial_println!("NVME_PARALLELE_ECHEC raison=lecteurs-encore-vivants");
+        return;
+    }
     PROFONDEUR_MAX.store(0, Ordering::Relaxed);
     SONDE_REUSSIES.store(0, Ordering::Relaxed);
     SONDE_ECHECS.store(0, Ordering::Relaxed);
-    SONDE_RESTANTS.store(SONDE_LECTEURS as u32, Ordering::Release);
 
     let mut lances = 0usize;
     for _ in 0..SONDE_LECTEURS {
@@ -1683,9 +1693,19 @@ pub fn sonde_parallele() {
         return;
     }
 
-    let fini = crate::kernel::timer::attente_bornee(30_000, || {
-        SONDE_RESTANTS.load(Ordering::Acquire) == 0
-    });
+    // Le shell peut etre une continuation BSP, sans tache courante. Une
+    // attente active y affame le lecteur place sur CPU0 (24/32 lectures,
+    // quatre emplacements libres, puis expiration a 30 s). WaitQueue passe
+    // par avec_tache : CPU0 peut elire ce lecteur, meme a SMP1. Le ticket
+    // precede la relecture, et les reveils parasites reexaminent le predicat.
+    let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
+    let fini = loop {
+        let ticket = SONDE_FIN.ticket();
+        if SONDE_RESTANTS.load(Ordering::Acquire) == 0 { break true; }
+        if !SONDE_FIN.wait_until_noyau(ticket, limite) {
+            break SONDE_RESTANTS.load(Ordering::Acquire) == 0;
+        }
+    };
 
     let (emplacements, libres, profondeur, attentes) = file_stats();
     crate::serial_println!(

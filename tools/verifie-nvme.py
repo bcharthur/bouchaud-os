@@ -786,6 +786,18 @@ def regle_profondeur_reelle(pilote, suivi, test_suivi, fautes):
             "deux emplacements ensemble."
         )
     else:
+        if "attente_bornee(" in sonde or "SONDE_FIN.wait_until_noyau(ticket, limite)" not in sonde:
+            fautes.append("nvme.rs : la sonde doit garer la continuation BSP via WaitQueue, sans attente active qui affame CPU0.")
+        ticket = sonde.find("let ticket = SONDE_FIN.ticket();")
+        predicat = sonde.find("SONDE_RESTANTS.load(Ordering::Acquire) == 0", ticket)
+        attente = sonde.find("SONDE_FIN.wait_until_noyau(ticket, limite)", predicat)
+        if not (0 <= ticket < predicat < attente):
+            fautes.append("nvme.rs : le ticket doit preceder le predicat puis le parking pour ne pas perdre la fin des lecteurs.")
+        if "SONDE_RESTANTS.compare_exchange(0, SONDE_LECTEURS as u32," not in sonde:
+            fautes.append("nvme.rs : un passage ne doit pas ecraser les comptes de lecteurs encore vivants.")
+        lecteur = corps(pilote, "fn sonde_lecteur()") or ""
+        if "SONDE_RESTANTS.fetch_sub(1, Ordering::Release) == 1" not in lecteur or "SONDE_FIN.wake_all();" not in lecteur:
+            fautes.append("nvme.rs : le dernier lecteur doit publier sa fin et reveiller l'attente.")
         # LA SONDE MESURE, LE SCENARIO JUGE.
         #
         # Une lecture NVMe emulee dure quelques microsecondes : le premier
