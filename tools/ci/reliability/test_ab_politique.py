@@ -1,5 +1,7 @@
 """Adopted P13 policy: complete evidence, negative mutations, no false greens."""
 import unittest
+import inspect
+import types
 
 from test_ab_reveil_precis import P, a, journal5
 
@@ -87,6 +89,32 @@ class PolitiqueAdoptee(unittest.TestCase):
                        {"inter": (600, 1000, 7000, 13000)},
                        {"tours": (1000, 0)}):
             self.assertEqual(self.analyse(journal(on=change))[1], "NON_CONVAINCANT")
+
+    def test_mutations_de_la_porte_sont_detectees(self):
+        # Execute deliberately broken analyser code against the same negative
+        # evidence. A mutation surviving the corpus invalidates this test.
+        mutations = [
+            ([("if not (0 < n <= total) or (total - n) * 20 >= total:", "if False:")],
+             controle_negatif().replace("300/300", "285/300", 1)),
+            ([("if p[\"reveils_attribues\"].get(phase, 0) <= 0:", "if False:")],
+             controle_negatif().replace("reveils=300", "reveils=0", 1)),
+            ([("effet = normal[1] > repos[1] + bruit", "effet = False")],
+             journal(on={"normal": (300, 701, 900, 2000), "inter": (300, 700, 1000, 2100)})),
+            ([("p4 = inter[3] <= normal[3] + repos[3]", "p4 = True"),
+              ("ok = prio[3] <= normal[3] + repos[3]", "ok = True")],
+             journal(on={"normal": (300, 700, 900, 2000), "inter": (300, 700, 1000, 5000)})),
+        ]
+        for numero, (changements, negatif) in enumerate(mutations):
+            with self.subTest(mutation=numero):
+                self.assertNotEqual(self.analyse(negatif)[1], "CONVAINCANT")
+                source = inspect.getsource(a)
+                for avant, apres in changements:
+                    self.assertIn(avant, source)
+                    source = source.replace(avant, apres)
+                mutant = types.ModuleType("analyse_mutante")
+                exec(compile(source, "<analyse_mutante>", "exec"), mutant.__dict__)
+                # Each injected fault would produce the forbidden false green.
+                self.assertEqual(mutant.analyse(negatif, 4, "4", "kvm")[1], "CONVAINCANT")
 
 
 if __name__ == "__main__":
