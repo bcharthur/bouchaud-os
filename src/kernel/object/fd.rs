@@ -755,35 +755,44 @@ fn proc_stat_global() -> Vec<u8> {
     use alloc::format;
     use crate::kernel::sync::SpinLockIrq;
 
-    // P13_COHERENT_PUBLICATION_EXPERIMENT_V4
-    // A/B experimental: one publication lock for the whole triple.
-    // The lock is IRQ-safe; the raw snapshot is taken BEFORE acquisition.
-    // We do not hold this global lock while traversing task/CPU accounting.
-    // This preserves field monotonicity and makes each published tuple atomic.
+    // P13_P0_V15_ATOMIC_TUPLE: never fabricate a triplet by mixing three
+    // independent component maxima from different CPU scans. A late/overlap
+    // snapshot can be rejected AS A WHOLE; the previously accepted snapshot
+    // was itself real. The raw candidate and rejection are still logged.
+    // The lock protects only this tiny publication, NOT the SMP scan.
     static PUBLIE: SpinLockIrq<(u64, u64, u64, u64)> =
         SpinLockIrq::new((0, 0, 0, 0));
 
     let c = crate::kernel::task::proc_cpu_cumul();
-    let (user_ns, system_ns, idle_ns, correction) = {
+    let (user_ns, system_ns, idle_ns, rejection) = {
         let mut state = PUBLIE.lock();
-        let u = state.0.max(c.user_ns);
-        let s = state.1.max(c.system_ns);
-        let i = state.2.max(c.idle_ns);
-        if u != c.user_ns || s != c.system_ns || i != c.idle_ns {
+        if c.user_ns < state.0 || c.system_ns < state.1 || c.idle_ns < state.2 {
+            // Reject the complete inconsistent sample. Do NOT combine a new
+            // system count with an old user count, or invent busy time.
             state.3 = state.3.saturating_add(1);
+            (state.0, state.1, state.2, state.3)
+        } else {
+            state.0 = c.user_ns;
+            state.1 = c.system_ns;
+            state.2 = c.idle_ns;
+            (c.user_ns, c.system_ns, c.idle_ns, 0)
         }
-        state.0 = u;
-        state.1 = s;
-        state.2 = i;
-        (u, s, i, if u != c.user_ns || s != c.system_ns || i != c.idle_ns {
-            state.3
-        } else { 0 })
     };
-    if correction > 0 && correction <= 8 {
+    if rejection > 0 {
+        // Preserve the historic correction marker for existing dashboards;
+        // the full rejected tuple is emitted separately for forensic proof.
+        if rejection <= 8 {
+            crate::serial_println!(
+                "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
+                rejection, c.user_ns, user_ns, c.system_ns, system_ns,
+                c.idle_ns, idle_ns,
+            );
+        }
+        // Preserve every rejection; P0 evidence cannot silently omit one.
         crate::serial_println!(
-            "PROC_STAT_MONOTONIE_CORRECTION n={} user_brut={} user_publie={} sys_brut={} sys_publie={} idle_brut={} idle_publie={}",
-            correction, c.user_ns, user_ns, c.system_ns, system_ns,
-            c.idle_ns, idle_ns,
+            "P13_P0_TUPLE_REJECTED n={} raw_u={} raw_s={} raw_idle={} kept_u={} kept_s={} kept_idle={}",
+            rejection, c.user_ns, c.system_ns, c.idle_ns,
+            user_ns, system_ns, idle_ns,
         );
     }
     format!(

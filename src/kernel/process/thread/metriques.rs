@@ -627,9 +627,22 @@ pub struct ProcProcessusCumul {
 // Ancien code: fetch_max(timestamp) puis deux swap independants => faux reculs
 // lorsque deux lecteurs concurrents terminent dans un ordre different.
 // N'impacte aucune valeur de /proc/stat ni aucun compteur de temps CPU.
-// (scan_end, user, system, scan_start); retain the raw diagnostics.
-static DERNIER_CUMUL_DIAG: crate::kernel::sync::SpinLockIrq<(u64, u64, u64, u64)> =
-    crate::kernel::sync::SpinLockIrq::new((0, 0, 0, 0));
+// P13_P0_V15_CORE_CAUSAL: compare snapshots of the SAME CPU only when
+// their individual sampling timestamps are causally ordered. An SMP8 scan
+// is not a simultaneous snapshot of all eight CPU cores.
+#[derive(Clone, Copy)]
+struct P13RawDiagnostic {
+    end_ns: u64,
+    user_ns: u64,
+    system_ns: u64,
+    // (sampled_ns, raw_user_total, raw_system_total) for each CPU.
+    per_cpu: [(u64, u64, u64); MAX_CPUS],
+}
+static DERNIER_CUMUL_DIAG: crate::kernel::sync::SpinLockIrq<P13RawDiagnostic> =
+    crate::kernel::sync::SpinLockIrq::new(P13RawDiagnostic {
+        end_ns: 0, user_ns: 0, system_ns: 0,
+        per_cpu: [(0, 0, 0); MAX_CPUS],
+    });
 
 /// Comptabilite CPU d'une tache, lue d'un seul tenant.
 ///
@@ -879,6 +892,7 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
     let mut proof = [(0u64, 0u64, 0u64, 0u64, 0u64,
                       0u64, false, 0u64, 0u64, 0u64); MAX_CPUS];
     let scan_start_v11 = crate::kernel::timer::monotonic_ns();
+    let mut causal_cpu = [(0u64, 0u64, 0u64); MAX_CPUS];
     for cpu in 0..MAX_CPUS {
         let (seq_v11, cu, cn, au, an, debut_v11, mode_v11, time_v11, vu, vn) = loop {
             let s1 = COMPTA_SEQ_CPU[cpu].load(Ordering::Acquire);
@@ -907,6 +921,7 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
         };
         proof[cpu] = (seq_v11, cu, cn, au, an, debut_v11,
                       mode_v11, time_v11, vu, vn);
+        causal_cpu[cpu] = (time_v11, cu.saturating_add(vu), cn.saturating_add(vn));
         cumul_user_seul = cumul_user_seul.saturating_add(cu);
         cumul_sys_seul = cumul_sys_seul.saturating_add(cn);
         live_user = live_user.saturating_add(vu);
@@ -939,20 +954,58 @@ pub fn proc_cpu_cumul() -> ProcCpuCumul {
     {
         // Comparaison et mise a jour serialisees: la lecture ne peut pas
         // prendre le timestamp d'un echantillon et les valeurs d'un autre.
-        let recul = {
+        let audit = {
             let mut precedent = DERNIER_CUMUL_DIAG.lock();
-            if now > precedent.0 {
-                let overlapping = scan_start_v11 < precedent.0;
-                let recul = (user_ns < precedent.1 || system_ns < precedent.2)
-                    .then_some((precedent.1, precedent.2, precedent.0, overlapping));
-                *precedent = (now, user_ns, system_ns, scan_start_v11);
-                recul
+            if now > precedent.end_ns {
+                let overlapping = scan_start_v11 < precedent.end_ns;
+                let mut reversed_stamps = 0u64;
+                let mut reversed_core_values = 0u64;
+                let mut first_core = None;
+                for cpu in 0..MAX_CPUS {
+                    let (stamp, u, s) = causal_cpu[cpu];
+                    let (old_stamp, old_u, old_s) = precedent.per_cpu[cpu];
+                    if old_stamp == 0 { continue; }
+                    if stamp < old_stamp {
+                        reversed_stamps |= 1u64 << cpu;
+                    } else if stamp > old_stamp && (u < old_u || s < old_s) {
+                        reversed_core_values |= 1u64 << cpu;
+                        if first_core.is_none() {
+                            first_core = Some((cpu, old_stamp, stamp, old_u, u, old_s, s));
+                        }
+                    }
+                }
+                let global_recul = user_ns < precedent.user_ns
+                    || system_ns < precedent.system_ns;
+                let audit = (global_recul || reversed_core_values != 0).then_some((
+                    precedent.user_ns, precedent.system_ns, precedent.end_ns,
+                    overlapping, global_recul, reversed_stamps, reversed_core_values,
+                    first_core,
+                ));
+                *precedent = P13RawDiagnostic {
+                    end_ns: now, user_ns, system_ns, per_cpu: causal_cpu,
+                };
+                audit
             } else {
                 None
             }
         };
-        // Jamais imprimer en tenant un spinlock IRQ-safe.
-        if let Some((avant_user, avant_sys, previous_end, overlapping)) = recul {
+        // Never serialize/print while holding this IRQ-safe diagnostic lock.
+        if let Some((avant_user, avant_sys, previous_end, overlapping,
+                     global_recul, reversed_stamps, reversed_core_values,
+                     first_core)) = audit {
+            crate::serial_println!(
+                "P13_P0_CORE_AUDIT overlap={} global_recul={} inverted_stamp_mask={:#x} core_recul_mask={:#x} scan_start={} scan_end={}",
+                overlapping as u8, global_recul as u8, reversed_stamps,
+                reversed_core_values, scan_start_v11, now,
+            );
+            if let Some((cpu, old_stamp, stamp, old_u, u, old_s, s)) = first_core {
+                crate::serial_println!(
+                    "P13_P0_CORE_RECUL cpu={} prev_stamp={} stamp={} prev_u={} u={} prev_s={} s={}",
+                    cpu, old_stamp, stamp, old_u, u, old_s, s,
+                );
+            }
+            if global_recul {
+
             // P13_V14_SCAN_CLASS: distinguish overlapping read windows from
             // regressions between causally ordered (non-overlapping) scans.
             // No value, threshold, or original PROC_STAT_RECUL line is hidden.
@@ -992,6 +1045,7 @@ pire_live_ns={} pire_tid={} pire_pid={} pire_noyau={} online={}",
                     CUMUL_NOYAU_NS[cpu].load(Ordering::Relaxed),
                 );
             }
+            } // global_recul: raw diagnostic preserved, never clamped.
         }
     }
     let capacite = now.saturating_mul(online as u64);

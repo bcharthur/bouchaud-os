@@ -71,6 +71,7 @@ pub fn preempt_from_irq(anticipe: bool) {
     let cur = current_index_raw();
     if cur == NO_TASK {
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     }
 
@@ -86,6 +87,7 @@ pub fn preempt_from_irq(anticipe: bool) {
     {
         note_renonce_battement(local_cpu(), RENONCE_ANTICIPE);
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     }
 
@@ -98,6 +100,7 @@ pub fn preempt_from_irq(anticipe: bool) {
     if ready_count_cpu(cpu_id) == 0 {
         note_renonce_battement(cpu_id, RENONCE_FILE_VIDE);
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     }
     // BOUCHAUD_CESSION_PAR_CLASSE_V1 : une interactive sous budget ne cede
@@ -105,17 +108,20 @@ pub fn preempt_from_irq(anticipe: bool) {
     if courante_garde_le_coeur(cur, cpu_id) {
         note_renonce_battement(cpu_id, RENONCE_GARDE);
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     }
 
     let Some(next) = pick_next(cur, cpu_id) else {
         note_renonce_battement(cpu_id, RENONCE_RIEN);
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     };
     if next == cur {
         note_renonce_battement(cpu_id, RENONCE_MEME);
         termine_transition_ordonnanceur();
+        stall_site_clear();
         return;
     }
 
