@@ -334,7 +334,11 @@ rouge sur l'image d'avant le correctif, pas une injection.
 - **Limites** : le job `primitives.ordonnanceur-ab` du run 40129187265 est
   rouge à l'étape A/B KVM SMP1/SMP4 (sortie 1). Journal inaccessible depuis
   le cloud : API Forbidden, interface publique « Sign in to view logs ».
-  Critère causal inconnu ; aucune clôture KVM.
+  Diagnostic communiqué ensuite par l'opérateur : SMP1 tours 3/4 `on`,
+  aucun armement précis ; P1 p99 3 631,5 µs contre 1 630 µs. SMP4 P2
+  65,5/43 µs (+52,3 %) ; tour 3 P3/P4 rouges, pire interactif propre
+  1 093 µs contre 470 + 158 µs. Ce sont des rouges KVM réels, non effacés
+  par les succès TCG. Les compteurs détaillés avant/après restent absents ici.
 
 ## Stabilité
 
@@ -443,3 +447,29 @@ Cloud courant : affinité 5 CPU, quota 4 CPU, `/dev/kvm` absent ; précontrôle
 refusé. Inventaire des runners distant refusé par l'API. Les tests hôte de
 l'orchestration utilisent des fixtures explicitement fictives, jamais des
 preuves KVM. P13 reste **PARTIAL**.
+
+### Correctifs après le diagnostic KVM communiqué
+
+Le réarmement « occupé » est désormais exclu pendant l'idle ; le chemin
+avant HLT garde la responsabilité des échéances de sommeil. Le timer idle
+utilise une borne par CPU, au lieu de faire armer la même borne globale par
+tous les AP. Le balayage reste global, avec fetch_min pour conserver les
+armements concurrents et les alarmes du BSP. Un IPI ordinaire n'est plus
+réémis vers le CPU dont l'IRQ de préemption sert déjà cette publication.
+Aucun compteur d'armement ni critère d'analyse n'a été modifié pour faire
+passer une mesure.
+
+Un relevé ponctuel `REVEIL_TIMER_LOCAL` montre les vrais registres LVT et
+TSC-deadline du CPU de la commande, distincts du mode logiciel déclaré.
+Les annotations du job canonique publient les verdicts et les compteurs
+existants, y compris en cas d'échec. La disparition des armements KVM et
+P2/P3/P4 ne seront déclarés corrigés qu'après ces mesures sur le nouveau SHA.
+
+Attribution TCG après ces changements : deux passes qualifiées en trois
+tentatives ; maximum `election_inexpliquee` 2 964 µs, reprise ventilée
+1 755 µs (toutes tentatives conservées). L'attente baisse, la reprise reste
+irrégulière : C1g/C2 ne sont pas clos et aucune suspension hôte n'est prouvée.
+
+A/B TCG SMP1 après `8777274c` : 476/555 µs (on/off, −14,23 %),
+8/8 bras valides, P1–P5 verts. Le pire réveil brut interactif `on` vaut 8392 µs.
+Ces valeurs ne remplacent pas les échecs KVM du SHA précédent.
