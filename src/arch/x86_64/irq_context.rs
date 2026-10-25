@@ -23,8 +23,8 @@ impl IrqContext {
             .expect("irq_depth underflow");
     }
 
-    /// Une faute SYNCHRONE venue de ring 3 continue sur la pile de la tache,
-    /// comme un syscall, avant de rouvrir IF. Elle n'est plus une IRQ active
+    /// Une faute SYNCHRONE fatale venue de ring 3 continue sur sa pile,
+    /// hors du peuplement et avec IF masque ici. Elle n'est plus une IRQ active
     /// pendant ses attentes. Interdit pour une exception noyau/IRQ imbriquee.
     pub fn quitte_trappe_utilisateur(&self) {
         assert_eq!(self.depth(), 1, "user trap nested in an IRQ context");

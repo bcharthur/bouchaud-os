@@ -163,22 +163,25 @@ def verifie(racine: Path) -> list[str]:
         fautes.append(f"{EXCEPTIONS} : la faute de page utilisateur ne rouvre plus IF")
     for i in sites:
         avant = e[max(0, i - 160):i]
-        if not re.search(r"if from_user\(&?stack\) \{\s*(?:_gs\.trappe_utilisateur\(\);\s*)?(x86_64::instructions::)?$", avant):
+        if not re.search(r"if from_user\(&?stack\) \{\s*(x86_64::instructions::)?$", avant):
             ligne = e.count("\n", 0, i) + 1
             fautes.append(f"{EXCEPTIONS}:{ligne} : IF rouvert dans un gestionnaire hors faute venue de l'espace utilisateur")
     pf = corps(e, "page_fault_handler")
-    passage = "if from_user(&stack) {\n        _gs.trappe_utilisateur();\n        x86_64::instructions::interrupts::enable();\n    }"
-    if e.count("_gs.trappe_utilisateur();") != 1 or passage not in pf:
-        fautes.append("seule la faute de page ring 3 peut quitter son contexte IRQ avant STI")
-    if not 0 <= pf.find("Cr2::read_raw()") < pf.find(passage):
-        fautes.append("CR2 doit etre capture avant le passage de la trappe en contexte tache")
+    passage = "x86_64::instructions::interrupts::without_interrupts(|| _gs.trappe_utilisateur());"
+    fin_resolue = pf.find("return;", pf.find("FaultOutcome::Resolved"))
+    if e.count("_gs.trappe_utilisateur()") != 1 or passage not in pf:
+        fautes.append("la continuation fatale seule doit quitter IRQ, IF masque")
+    if not 0 <= pf.find("Cr2::read_raw()") < fin_resolue < pf.find(passage) < pf.find("log_fault_mapping(addr)"):
+        fautes.append("sortie IRQ avant fin du peuplement ou apres les diagnostics fatals")
+    if "if from_user(&stack) && crate::kernel::task::in_user_task() {" not in pf[:pf.find(passage)]:
+        fautes.append("continuation fatale hors tache utilisateur")
     if "assert!(self.swapped && self.irq_active);" not in corps(e, "trappe_utilisateur"):
         fautes.append("une exception noyau peut quitter le contexte IRQ")
     drop = corps(e, "drop")
     if not 0 <= drop.find("interrupts::disable();") < drop.find("swapgs()") or "if self.irq_active {" not in drop:
         fautes.append("retour GS avec IF ouvert ou double sortie IRQ apres trappe utilisateur")
-    if not 0 <= pf.find("FaultOutcome::Resolved") < pf.find("preempt::safe_point();") < pf.find("return;", pf.find("FaultOutcome::Resolved")):
-        fautes.append("la faute resolue rentre en ring 3 sans servir la preemption differee")
+    if "preempt::safe_point();" in pf:
+        fautes.append("point sur de retour #PF non qualifie reintroduit")
     idt = src[IDT]
     for m in re.finditer(r"\.set_stack_index\(", idt):
         instruction = idt[idt.rfind(";", 0, m.start()) + 1:m.start()]
@@ -227,11 +230,12 @@ def main() -> int:
         print("\n".join("  " + f for f in fautes))
         return 1
     negatifs = [
-        (EXCEPTIONS, "        _gs.trappe_utilisateur();\n", ""),
+        (EXCEPTIONS, "        x86_64::instructions::interrupts::without_interrupts(|| _gs.trappe_utilisateur());\n", ""),
         (EXCEPTIONS, "assert!(self.swapped && self.irq_active);", "assert!(self.irq_active);"),
         (EXCEPTIONS, "        x86_64::instructions::interrupts::disable();\n", ""),
         (EXCEPTIONS, "        if self.irq_active {", "        if true {"),
-        (EXCEPTIONS, "            let _ = crate::kernel::scheduler::preempt::safe_point();\n", ""),
+        (EXCEPTIONS, "            crate::kernel::task::account_fault_exit(mur_avant_faute);", "            let _ = crate::kernel::scheduler::preempt::safe_point();\n            crate::kernel::task::account_fault_exit(mur_avant_faute);"),
+        (EXCEPTIONS, "        crate::kernel::task::stall_pf_fail(addr);", "        _gs.trappe_utilisateur();\n        crate::kernel::task::stall_pf_fail(addr);"),
         (EXCEPTIONS, 'fn breakpoint_handler(stack: InterruptStackFrame) {\n    let _gs = GsGuard::enter(&stack);',
          'fn breakpoint_handler(stack: InterruptStackFrame) {'),
         (COMMUTATION, "if enabled { interrupts::enable(); }", "interrupts::enable();"),

@@ -36,12 +36,12 @@ fn terminated_irq_stack_does_not_poison_the_next_task() {
 }
 
 #[test]
-fn user_page_fault_becomes_a_sleepable_task_before_sti() {
+fn fatal_user_page_fault_becomes_a_sleepable_continuation() {
     let a = IrqContext::new(); let b = IrqContext::new();
-    a.enter(); // GS et CR2 sont captures avec IF=0.
+    a.enter(); // Le peuplement garde IRQ ; la continuation fatale le quitte avec IF=0.
     a.quitte_trappe_utilisateur();
-    assert_eq!(a.depth(), 0, "console et point sur exigent zero IRQ");
-    a.enter(); // timer reel pendant le peuplement utilisateur
+    assert_eq!(a.depth(), 0, "la contre-pression console exige zero IRQ");
+    a.enter(); // timer reel pendant les diagnostics fatals
     assert_eq!(a.depth(), 1, "timer non imbrique dans une IRQ materielle");
     a.enter(); assert_eq!(a.depth(), 2); // vraie imbrication reste interdite
     a.exit(); a.exit();

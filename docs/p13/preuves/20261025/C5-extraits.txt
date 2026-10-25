@@ -1,0 +1,63 @@
+# Extraits C5 — preuves rouges conservees, sans attribution causale
+
+Les journaux complets et images sont dans target/p13-architecture-20261025.
+Banc : 48 fautes attendues, puis persist-course-probe, puis dmesg.
+Les PROCESS_FAULT suivants concernent la sonde de persistance (pid=64).
+Le code de cette sonde est identique entre variantes ; la classe exacte de faute varie.
+
+dmesg-integration
+sha256 journal=dc41db0531b60675db743a96c351378b0e9b1b69bb961b349cd026d2489971f1
+[13:08:17][ 49%:  0%:  2%][FPS: --] FAUTE_MULTIFIL_OK essais=48
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000404ebe rsp=0x404000046d58 cr2=0x403ffa227d73 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x403ffa227d73
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=3 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=0090f30f1efa41554154554889f531f6
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000046d58 adresses=0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x4000004131b8
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000404ebe rsp=0x40400006ad58 cr2=0x403ffa24bd73 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x403ffa24bd73
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=3 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=0090f30f1efa41554154554889f531f6
+[13:08:18][ 49%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x40400006ad58 adresses=0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:08:18][ 25%:  0%:  2%][FPS: --] === AUTORUN FIN === statut=139
+
+persist-abd7-2
+sha256 journal=f0e866dca2d001aa80510200e524e9346a26a35a76f153d48da373cf6adfb6bd
+[13:12:40][ 55%:  0%:  2%][FPS: --] FAUTE_MULTIFIL_OK essais=48
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=instruction illegale rip=0x400000403aa6 rsp=0x5ffbfffff5c8 cr2=0x40400006af20 base=0x400000400000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=328 cpu=0 fs_base=0x400000413698 fs_base_range=0x400000413698 insn=1f84000000000066662e0f1f84000000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x5ffbfffff5c8 adresses=0x400000404bb8,0x400000409079,0x400000404e9f,0x400000404d50,0x400000402143,0x400000406679,0x400000413698,0x400000401e53,0x400000401e69,0x400000406278,0x400000401215,0x400000401060,0x400000401d3f,0x4000004014ea,0x400000400040,0x4000004014d4
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000403a40 rsp=0x404000022a88 cr2=0x0 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x0
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=2 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=41574531db4989f741564989fe415541
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000022a88 adresses=0x400000404cb5,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=instruction illegale rip=0x400000403aa6 rsp=0x404000046a88 cr2=0x400000404e10 base=0x400000400000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=1 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=1f84000000000066662e0f1f84000000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000046a88 adresses=0x400000404bb8,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x4000004131b8
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=instruction illegale rip=0x400000403aa6 rsp=0x40400006aa88 cr2=0x0 base=0x400000400000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=2 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=1f84000000000066662e0f1f84000000
+[13:12:40][ 55%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x40400006aa88 adresses=0x400000404bb8,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:12:40][ 45%:  0%:  2%][FPS: --] === AUTORUN FIN === statut=132
+
+persist-sans-point-2
+sha256 journal=957fb2a6b36f3702ab39498d165e7e46711962fb33899a9b42957b714da42d7f
+[13:17:40][ 90%:  0%:  2%][FPS: --] FAUTE_MULTIFIL_OK essais=48
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de protection generale rip=0x400000404b8b rsp=0x40400006aba8 cr2=0x40400008ef20 base=0x400000400000
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=2 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=0f2944244048c7442460000000000f29
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x40400006aba8 adresses=0x4000004056c0,0x400000413140,0x400000409000,0x400000404e9f,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de protection generale rip=0x400000404b8b rsp=0x404000022ba8 cr2=0x400000412000 base=0x400000400000
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=1 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=0f2944244048c7442460000000000f29
+[13:17:40][ 90%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000022ba8 adresses=0x4000004056c0,0x400000413140,0x400000409000,0x400000404e9f,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:17:40][ 90%:  0%:  2%][FPS: --] === AUTORUN FIN === statut=139
+
+persist-fatale-3
+sha256 journal=fd5406906b1755eb9847162427d314c20db53f2f0d9233dc0ce8cdb40cafcf94
+[13:22:06][ 80%:  0%:  2%][FPS: --] FAUTE_MULTIFIL_OK essais=48
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000403a40 rsp=0x404000046a88 cr2=0x0 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x0
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=0 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=41574531db4989f741564989fe415541
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000046a88 adresses=0x400000404cb5,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000403a40 rsp=0x404000022a88 cr2=0x0 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x0
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=3 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=41574531db4989f741564989fe415541
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x404000022a88 adresses=0x400000404cb5,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT pid=64 reason=faute de page rip=0x400000403a40 rsp=0x40400006aa88 cr2=0x0 base=0x400000400000 code=0x4 issue=invalide cr2_relu=0x0
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=1 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=41574531db4989f741564989fe415541
+[13:22:06][ 80%:  0%:  2%][FPS: --] [kernel] PROCESS_FAULT_PILE pid=64 image=/bin/persist-course-probe base=0x400000400000 rsp=0x40400006aa88 adresses=0x400000404cb5,0x400000409000,0x400000413140,0x400000409000,0x400000404e9f,0x400000404d50,0x400000402143,0x4000004056c0,0x4000004019af,0x400000413698,0x40000040573e,0x4000004137d0,0x4000004061c0,0x4000004018d0,0x400000413698,0x4000004131b8
+[13:22:07][ 24%:  0%:  2%][FPS: --] === AUTORUN FIN === statut=139
+
+sha256 sonde=10b2b23839be1b2e7c34ab01ebacb4242e81aa35fa116ae6d8f643142213d014
+
+addr2line/objdump : 0x3a40 printf_core, octets 41 57 = push r15 ; 0x4b8b vfprintf, movaps xmm0,[rsp+0x40] ; 0x4ebe dernier octet du call __stack_chk_fail dans vsnprintf. Les octets releves par le diagnostic correspondent au fichier. La faute de lecture CR2=0 a printf_core+0 reste inexpliquee.

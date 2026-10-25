@@ -211,8 +211,8 @@ impl GsGuard {
         GsGuard { swapped, irq_active: true }
     }
 
-    /// Seulement pour une faute de page issue de ring 3, apres sauvegarde
-    /// de CR2 et avant STI. Les vraies IRQ gardent enter/exit et leur EOI.
+    /// Continuation fatale d'une faute de page ring 3, apres abandon du
+    /// peuplement. Les vraies IRQ gardent enter/exit et leur EOI.
     fn trappe_utilisateur(&mut self) {
         assert!(self.swapped && self.irq_active);
         debug_assert!(!x86_64::instructions::interrupts::are_enabled());
@@ -549,7 +549,6 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::kernel::task::stall_pf_begin(addr);
 
     if from_user(&stack) {
-        _gs.trappe_utilisateur();
         x86_64::instructions::interrupts::enable();
     }
 
@@ -582,10 +581,6 @@ extern "x86-interrupt" fn page_fault_handler(
             // dire a chaque page peuplee a la demande.
             crate::kernel::task::retire_current_if_zombie();
             crate::platform::pc::ecran_faute::sort_exception_resolue();
-            // Meme frontiere que la sortie de syscall : une demande recue
-            // pendant le peuplement ne doit pas attendre le prochain tick.
-            // Les verrous du VMM sont rendus et le contexte IRQ a ete quitte.
-            let _ = crate::kernel::scheduler::preempt::safe_point();
             crate::kernel::task::account_fault_exit(mur_avant_faute);
             return;
         }
@@ -594,6 +589,11 @@ extern "x86-interrupt" fn page_fault_handler(
             crate::kernel::task::retire_current_if_zombie();
         }
 
+        // Le peuplement est fini et cette continuation ne revient jamais
+        // en ring 3. Autoriser la contre-pression des diagnostics, hors VMM.
+        // Garder le contexte historique pendant les fautes resolubles : son
+        // elargissement reste non qualifie (persist-course intermittent).
+        x86_64::instructions::interrupts::without_interrupts(|| _gs.trappe_utilisateur());
         crate::kernel::task::stall_pf_fail(addr);
         crate::kernel::task::log_fault_mapping(addr);
         crate::println!(
