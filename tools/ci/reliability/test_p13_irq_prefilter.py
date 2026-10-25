@@ -32,7 +32,7 @@ class TestPrefiltre(unittest.TestCase):
             with self.subTest(mutation=i):
                 self.assertFalse(safe(m))
     def test_bash_runner_parameter_expansion(self):
-        root = P.parents[3]
+        root = Path(__file__).resolve().parents[3]
         runner = (root / "tools/ci/run_p13_irq_prefilter_validation.sh").read_text()
         host = (root / "tools/smp/test-irq-deadline-prefilter.sh").read_text()
         self.assertIn('mode="${1:-host}"', runner)
