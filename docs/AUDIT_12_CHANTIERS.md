@@ -42,7 +42,7 @@ lui fait confiance.
 | Sites d'acquisition du gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **6** |
 | Garde-fous d'architecture | **155** |
-| Suites de test hote | **123** |
+| Suites de test hote | **124** |
 | W^X applique au chargement ELF | **oui** |
 | Canari de pile noyau | **oui** |
 <!-- MESURE-CHANTIERS:FIN -->
