@@ -49,3 +49,31 @@ fn reveil_hlt_suivi_d_un_autre_sommeil() {
     e.arme(90);
     assert!(e.doit_balayer(90));
 }
+
+#[path = "../../src/kernel/scheduler/preemption_noyau.rs"]
+mod preemption_noyau;
+
+#[test]
+fn garde_smp_garde_toutes_les_exclusions_existantes() {
+    use preemption_noyau::{contexte_sur, decide, Contexte};
+    let sur = Contexte {
+        demande_ciblee: true,
+        preempt_count: 0,
+        verrous_simples: 0,
+        profondeur_lockdep: 0,
+        lectures_registre: 0,
+        shootdown_en_vol: false,
+        sortie_en_cours: false,
+        interruptions_ouvertes: false,
+    };
+    assert!(contexte_sur(&sur));
+    assert!(decide(&sur));
+    assert!(!decide(&Contexte { demande_ciblee: false, ..sur }));
+    assert!(!contexte_sur(&Contexte { preempt_count: 1, ..sur }));
+    assert!(!contexte_sur(&Contexte { verrous_simples: 1, ..sur }));
+    assert!(!contexte_sur(&Contexte { profondeur_lockdep: 1, ..sur }));
+    assert!(!contexte_sur(&Contexte { lectures_registre: 1, ..sur }));
+    assert!(!contexte_sur(&Contexte { shootdown_en_vol: true, ..sur }));
+    assert!(!contexte_sur(&Contexte { sortie_en_cours: true, ..sur }));
+    assert!(!contexte_sur(&Contexte { interruptions_ouvertes: true, ..sur }));
+}
