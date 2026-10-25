@@ -547,6 +547,20 @@ fn wake_sleepers_depuis_irq() {
 /// The same lock/registry/IRQ and handoff exclusions as stack preemption
 /// apply to this earlier scan; an unsafe context keeps its deferred path.
 pub fn sert_echeances_au_vecteur_local() {
+    // P13_P2_IRQ_PREFILTRE_V1 : le vecteur local transporte a la fois le
+    // timer TSC-deadline et les IPI. La plupart de ses entrees ne portent
+    // aucun sommeil du. Ne pas parcourir tout le contexte de preemption
+    // (irq_depth, lockdep, registre, shootdown) avant une simple borne
+    // atomique. Une borne trop ancienne provoque un examen de trop, jamais
+    // un reveil perdu ; toute nouvelle echeance est publiee par fetch_min.
+    // Ne PAS prendre la borne avec commence_balayage ici : seul wake_sleepers
+    // peut revendiquer et recalculer le minimum sous ses verrous habituels.
+    if !PROCHAINE_ECHEANCE.doit_balayer(crate::kernel::timer::monotonic_ns()) {
+        return;
+    }
+    // En cas d'echeance due, les interdictions de preemption et de
+    // commutation restent strictement identiques. Une IRQ sous SpinLock,
+    // lockdep, garde de registre ou shootdown ne lance pas de scan.
     if !crate::kernel::scheduler::preempt::preemption_noyau_sure()
         || transition_ouverte_sans_passation(local_cpu())
     { return; }
