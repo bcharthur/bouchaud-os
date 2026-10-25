@@ -26,6 +26,35 @@ plusieurs campagnes indépendantes) · `CLOS`.
 
 ## Synthèse
 
+Mise à jour du 25/10, HEAD technique `7526efe6` : **P13 reste PARTIAL**.
+Le [document de reprise](../p13-reprise-20261025.md) conserve les comparaisons
+KVM, les candidats retirés, les commandes et les preuves rouges. Le contrôleur
+one-shot est centralisé, mais P2 n'est pas résolu. Le candidat de faute large
+`abd7f807` est réduit à la continuation fatale : pas d'ouverture générale du
+peuplement ni de nouveau point sûr au retour #PF sur le HEAD conservé.
+
+Console : le contrôle OFF CI `40186341131` perd 1260 lignes. Le suivi IRQ
+empêchait ses diagnostics de faute utilisateur de bénéficier de la
+contre-pression existante. Le correctif quitte ce contexte, IF masqué, après
+abandon du peuplement. Quatre replays locaux finaux et trois répétitions OFF
+passent sans perte ; secours=1/relogees=1 en 20 ms. Le candidat large a aussi
+ses quatre replays CI verts (`40187123850`) ; ne pas les substituer à une
+qualification KVM. La version finale 7526efe6 passe également les quatre
+replays CI (`40189081941`), ainsi que CI Fast (`40189081918`). Le verrou dmesg remplace séparément un static mut
+partagé sans synchronisation ; son implication dans C5 n'est pas démontrée.
+
+Le GS utilisateur est désormais restauré avec IF masqué. Cette fenêtre
+d'instructions était incorrecte ; elle n'est pas revendiquée comme cause
+prouvée de C5. Les seuils/quorums et les exclusions de préemption restent
+inchangés. Il manque toujours les trois campagnes strictes KVM dédiées.
+
+Le KVM final `7526efe6`, run `40189082195`, est rouge : P1/P2 échouent en
+SMP1 ; P2 échoue sur les quatre paires SMP4 et P4 sur le bras ON tour 3.
+Ce rejet laisse 7/8 bras valides et rend P1/P2/P3 non qualifiants en SMP4.
+Le vert P4 des sept bras restants n'annule pas l'échec du huitième. P5 passe.
+TCG final : SMP1 CONVAINCANT 8/8 ; SMP4 NON_CONCLUANT 5/8. Les annotations
+et les quantiles des quatre SHAs figurent dans le document de reprise.
+
 | # | Défaut | Statut | Ce qui manque |
 |---|---|---|---|
 | C1 | Console série : émission interruptions masquées | `CORRIGE_TCG` | KVM : l'étape « Console série » d'os-primitives a échoué sur `3adcea3c` (flot saturé KVM, 586/720 : expliqué par C1f/C1h) ; A/B console on/off KVM |
@@ -39,7 +68,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 | C2 | Reprise SMP4 KVM : 1 226 µs | `OUVERT` | segments KVM (run 39602362503) |
 | C3 | Attente interactive jusqu'au quantum | `CORRIGE_TCG` (partiel) | IPI ordinaire immédiat face au calcul utilisateur ; attente résiduelle 4 349 µs, KVM absent |
 | C4 | A/B non qualifiable | `CORRIGE_TCG` | décisions du 24/10 intégrées ; trois campagnes strictes KVM au même SHA |
-| C5 | SIGSEGV compta-stress / persist-course | `OUVERT` | reproduction déterministe |
+| C5 | SIGSEGV compta-stress / persist-course | `OUVERT` | reproduit le 25/10 ; cause et correctif manquants |
 | C6 | Surcomptage CPU (I2) | `OUVERT` | reproduction |
 | C6a | Chevauchement de tranche après idle | `CORRIGE_TCG` (négative déterministe) | KVM |
 | C7 | Compositor résiduel | `OUVERT` | preuve de mort de tous les processus |
@@ -344,11 +373,23 @@ rouge sur l'image d'avant le correctif, pas une injection.
 
 ### C5 — SIGSEGV `compta-stress-probe` et `persist-course-probe`
 
+- **Nouvelle reproduction, 25/10** : 48 morts multi-fils puis
+  persist-course SMP4 TCG. `abd7f807` : 1 rouge / 4 ; avec dmesg synchronisé :
+  1/4 ; sans point sûr de retour #PF : 1/6 ; continuation fatale seule : 1/6.
+  e4216531 : non reproduit en 5 essais, pas une clôture. Le banc canonique
+  `tools/ci/run_faute_persistance.sh` conserve toutes les répétitions et
+  vérifie aussi 64 lignes cohérentes de dmesg ; deux essais additionnels verts
+  n'effacent pas les rouges. [Captures et empreintes](../p13/preuves/20261025/C5-extraits.txt).
+- **Limite nouvelle** : printf_core+0, instruction lue `push r15`, mais faute
+  de lecture CR2=0 ; autres occurrences au milieu d'une instruction ou sur
+  movaps avec pile mal alignée. La cause demeure inconnue. Aucune attribution
+  à QEMU, au timer ou à dmesg n'est établie par ces seules traces.
+
 - **Preuve initiale** : CI TCG, intermittent ; `persist-course` : trois fils
   en faute à `printf_core+0`, `cr2=0x45`.
 - **Mécanisme** : **inconnu**. Écarté par revue : RSP utilisateur au
   `syscall`, TLS du `clone`, double cartographie d'une page à la demande.
-- **Reproduction** : **non reproduit** — 45 passes os-primitives antérieures
+- **Historique au 21/10** : **non reproduit** — 45 passes os-primitives antérieures
   et 40 itérations ciblées du 21/10 (section d'os-primitives qui mène aux deux
   sondes, SMP4 TCG, deux instances simultanées + compilation : 0 mort, 0
   dépassement I2).
@@ -356,6 +397,11 @@ rouge sur l'image d'avant le correctif, pas une injection.
   `PROCESS_FAULT_DETAIL` attend la prochaine occurrence CI.
 
 ### C6 — Surcomptage CPU (invariant I2)
+
+- **Essai ciblé du 25/10** : version finale, 9573 lectures, 12350 changements
+  d'affinité, 49404 commutations, 420 fils ; zéro recul/dépassement. Frontière
+  utilisateur 14 ticks pour borne 20, 400 ms de sommeil. C6 reste ouvert au
+  niveau du contrat ; un stress vert n'explique pas l'ancien dépassement.
 
 - **Preuve initiale** : `COMPTA_DEPASSE soi delta_ticks=8 borne=7` sous
   surcharge hôte (compta-stress, tâche **utilisateur**).

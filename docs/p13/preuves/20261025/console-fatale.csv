@@ -1,0 +1,8 @@
+cas,intactes,perdues,active,repli,secours,relogees,secours_pire_ms,verdict
+detenteur-tcg-3s,600/600,0,1,0,0,0,0,OK
+verrou-tcg-3s,600/600,0,1,0,1,1,20,OK
+temoin-sans-secours-tcg-6s,600/600,0,0,1,0,0,0,OK
+secours-fil-tcg-6s,600/600,0,1,0,1,1,20,OK
+temoin-repetition-1,600/600,0,0,1,0,0,0,OK
+temoin-repetition-2,600/600,0,0,1,0,0,0,OK
+temoin-repetition-3,600/600,0,0,1,0,0,0,OK

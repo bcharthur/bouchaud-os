@@ -1,0 +1,193 @@
+sha,smp,tour,politique,phase,p50_us,p95_us,p99_us,max_propre_us
+b95043b5,1,1,off,au repos,479.0,941.0,2950.0,4268.0
+b95043b5,1,1,off,sous charge (normal),146.0,188.0,356.0,1738.0
+b95043b5,1,1,off,sous charge (interactif),8.0,18.0,375.0,1032.0
+b95043b5,1,1,on,au repos,26.0,44.0,4616.0,5014.0
+b95043b5,1,1,on,sous charge (normal),146.0,199.0,2881.0,5939.0
+b95043b5,1,1,on,sous charge (interactif),25.0,48.0,410.0,1188.0
+b95043b5,1,2,on,au repos,26.0,41.0,3539.0,4691.0
+b95043b5,1,2,on,sous charge (normal),149.0,183.0,3353.0,5122.0
+b95043b5,1,2,on,sous charge (interactif),24.0,53.0,156.0,1028.0
+b95043b5,1,2,off,au repos,411.0,903.0,2902.0,5044.0
+b95043b5,1,2,off,sous charge (normal),142.0,180.0,3033.0,3557.0
+b95043b5,1,2,off,sous charge (interactif),7.0,16.0,502.0,946.0
+b95043b5,1,3,off,au repos,512.0,974.0,1775.0,4120.0
+b95043b5,1,3,off,sous charge (normal),142.0,177.0,2030.0,2714.0
+b95043b5,1,3,off,sous charge (interactif),7.0,18.0,176.0,1082.0
+b95043b5,1,3,on,au repos,27.0,46.0,5526.0,5592.0
+b95043b5,1,3,on,sous charge (normal),153.0,191.0,3423.0,6412.0
+b95043b5,1,3,on,sous charge (interactif),25.0,53.0,814.0,1163.0
+b95043b5,1,4,on,au repos,27.0,39.0,3529.0,5857.0
+b95043b5,1,4,on,sous charge (normal),151.0,201.0,5356.0,6582.0
+b95043b5,1,4,on,sous charge (interactif),26.0,44.0,343.0,579.0
+b95043b5,1,4,off,au repos,498.0,974.0,3663.0,4409.0
+b95043b5,1,4,off,sous charge (normal),146.0,186.0,1454.0,4463.0
+b95043b5,1,4,off,sous charge (interactif),8.0,15.0,55.0,1051.0
+b95043b5,4,1,off,au repos,470.0,947.0,1010.0,1031.0
+b95043b5,4,1,off,sous charge (normal),94.0,120.0,137.0,144.0
+b95043b5,4,1,off,sous charge (interactif),19.0,58.0,85.0,109.0
+b95043b5,4,1,on,au repos,28.0,44.0,61.0,135.0
+b95043b5,4,1,on,sous charge (normal),95.0,130.0,144.0,147.0
+b95043b5,4,1,on,sous charge (interactif),69.0,94.0,113.0,123.0
+b95043b5,4,2,on,au repos,26.0,47.0,64.0,68.0
+b95043b5,4,2,on,sous charge (normal),94.0,124.0,140.0,178.0
+b95043b5,4,2,on,sous charge (interactif),69.0,103.0,809.0,994.0
+b95043b5,4,2,off,au repos,416.0,917.0,974.0,983.0
+b95043b5,4,2,off,sous charge (normal),97.0,134.0,160.0,168.0
+b95043b5,4,2,off,sous charge (interactif),18.0,65.0,82.0,112.0
+b95043b5,4,3,off,au repos,443.0,952.0,1024.0,1035.0
+b95043b5,4,3,off,sous charge (normal),98.0,128.0,157.0,163.0
+b95043b5,4,3,off,sous charge (interactif),18.0,66.0,92.0,391.0
+b95043b5,4,3,on,au repos,27.0,56.0,70.0,96.0
+b95043b5,4,3,on,sous charge (normal),97.0,131.0,183.0,954.0
+b95043b5,4,3,on,sous charge (interactif),68.0,93.0,127.0,834.0
+b95043b5,4,4,on,au repos,27.0,43.0,52.0,53.0
+b95043b5,4,4,on,sous charge (normal),89.0,125.0,145.0,170.0
+b95043b5,4,4,on,sous charge (interactif),68.0,126.0,200.0,275.0
+b95043b5,4,4,off,au repos,360.0,976.0,1252.0,1572.0
+b95043b5,4,4,off,sous charge (normal),92.0,127.0,144.0,174.0
+b95043b5,4,4,off,sous charge (interactif),18.0,61.0,82.0,321.0
+e4216531,1,1,off,au repos,478.0,963.0,2736.0,4319.0
+e4216531,1,1,off,sous charge (normal),321.0,393.0,1543.0,2644.0
+e4216531,1,1,off,sous charge (interactif),14.0,34.0,634.0,914.0
+e4216531,1,1,on,au repos,47.0,146.0,5413.0,6022.0
+e4216531,1,1,on,sous charge (normal),327.0,415.0,5618.0,6737.0
+e4216531,1,1,on,sous charge (interactif),35.0,66.0,568.0,1099.0
+e4216531,1,2,on,au repos,48.0,143.0,4252.0,5871.0
+e4216531,1,2,on,sous charge (normal),335.0,413.0,5788.0,6768.0
+e4216531,1,2,on,sous charge (interactif),36.0,64.0,534.0,865.0
+e4216531,1,2,off,au repos,449.0,980.0,4065.0,5100.0
+e4216531,1,2,off,sous charge (normal),323.0,420.0,5832.0,6185.0
+e4216531,1,2,off,sous charge (interactif),14.0,40.0,928.0,1110.0
+e4216531,1,3,off,au repos,462.0,957.0,3483.0,3667.0
+e4216531,1,3,off,sous charge (normal),318.0,388.0,2067.0,4178.0
+e4216531,1,3,off,sous charge (interactif),13.0,29.0,760.0,1000.0
+e4216531,1,3,on,au repos,48.0,147.0,4876.0,5992.0
+e4216531,1,3,on,sous charge (normal),334.0,415.0,4883.0,6829.0
+e4216531,1,3,on,sous charge (interactif),36.0,57.0,93.0,163.0
+e4216531,1,4,on,au repos,48.0,138.0,5574.0,5942.0
+e4216531,1,4,on,sous charge (normal),330.0,434.0,5920.0,6430.0
+e4216531,1,4,on,sous charge (interactif),36.0,67.0,547.0,1103.0
+e4216531,1,4,off,au repos,443.0,964.0,3915.0,4774.0
+e4216531,1,4,off,sous charge (normal),318.0,393.0,2889.0,5231.0
+e4216531,1,4,off,sous charge (interactif),14.0,32.0,871.0,1166.0
+e4216531,4,1,off,au repos,366.0,936.0,1019.0,1036.0
+e4216531,4,1,off,sous charge (normal),182.0,243.0,271.0,360.0
+e4216531,4,1,off,sous charge (interactif),34.0,121.0,217.0,1155.0
+e4216531,4,1,on,au repos,46.0,113.0,147.0,169.0
+e4216531,4,1,on,sous charge (normal),181.0,236.0,332.0,1824.0
+e4216531,4,1,on,sous charge (interactif),106.0,158.0,199.0,368.0
+e4216531,4,2,on,au repos,46.0,115.0,144.0,181.0
+e4216531,4,2,on,sous charge (normal),181.0,234.0,328.0,491.0
+e4216531,4,2,on,sous charge (interactif),106.0,153.0,191.0,200.0
+e4216531,4,2,off,au repos,413.0,950.0,1003.0,1037.0
+e4216531,4,2,off,sous charge (normal),181.0,250.0,655.0,1015.0
+e4216531,4,2,off,sous charge (interactif),28.0,95.0,121.0,176.0
+e4216531,4,3,off,au repos,398.0,924.0,986.0,1031.0
+e4216531,4,3,off,sous charge (normal),181.0,236.0,278.0,309.0
+e4216531,4,3,off,sous charge (interactif),29.0,98.0,139.0,194.0
+e4216531,4,3,on,au repos,46.0,116.0,160.0,616.0
+e4216531,4,3,on,sous charge (normal),181.0,237.0,277.0,297.0
+e4216531,4,3,on,sous charge (interactif),106.0,158.0,181.0,564.0
+e4216531,4,4,on,au repos,46.0,125.0,156.0,161.0
+e4216531,4,4,on,sous charge (normal),180.0,269.0,373.0,549.0
+e4216531,4,4,on,sous charge (interactif),104.0,146.0,174.0,196.0
+e4216531,4,4,off,au repos,467.0,935.0,1001.0,1041.0
+e4216531,4,4,off,sous charge (normal),185.0,243.0,645.0,656.0
+e4216531,4,4,off,sous charge (interactif),28.0,102.0,145.0,343.0
+abd7f807,1,1,off,au repos,384.0,973.0,2950.0,4676.0
+abd7f807,1,1,off,sous charge (normal),269.0,328.0,407.0,2791.0
+abd7f807,1,1,off,sous charge (interactif),13.0,26.0,712.0,1041.0
+abd7f807,1,1,on,au repos,32.0,64.0,5222.0,5615.0
+abd7f807,1,1,on,sous charge (normal),278.0,349.0,5292.0,6284.0
+abd7f807,1,1,on,sous charge (interactif),28.0,81.0,477.0,1010.0
+abd7f807,1,2,on,au repos,32.0,57.0,3251.0,5376.0
+abd7f807,1,2,on,sous charge (normal),277.0,357.0,5396.0,6353.0
+abd7f807,1,2,on,sous charge (interactif),30.0,85.0,337.0,645.0
+abd7f807,1,2,off,au repos,391.0,976.0,3767.0,4478.0
+abd7f807,1,2,off,sous charge (normal),273.0,338.0,5566.0,5631.0
+abd7f807,1,2,off,sous charge (interactif),13.0,26.0,683.0,1068.0
+abd7f807,1,3,off,au repos,449.0,979.0,2772.0,4469.0
+abd7f807,1,3,off,sous charge (normal),277.0,338.0,1733.0,3739.0
+abd7f807,1,3,off,sous charge (interactif),13.0,26.0,49.0,933.0
+abd7f807,1,3,on,au repos,32.0,61.0,5357.0,5569.0
+abd7f807,1,3,on,sous charge (normal),285.0,350.0,5232.0,6344.0
+abd7f807,1,3,on,sous charge (interactif),28.0,79.0,584.0,1000.0
+abd7f807,1,4,on,au repos,32.0,51.0,3245.0,4920.0
+abd7f807,1,4,on,sous charge (normal),278.0,347.0,5675.0,6296.0
+abd7f807,1,4,on,sous charge (interactif),28.0,80.0,127.0,1039.0
+abd7f807,1,4,off,au repos,511.0,994.0,3774.0,4317.0
+abd7f807,1,4,off,sous charge (normal),279.0,339.0,2491.0,3541.0
+abd7f807,1,4,off,sous charge (interactif),12.0,25.0,184.0,537.0
+abd7f807,4,1,off,au repos,377.0,908.0,990.0,1034.0
+abd7f807,4,1,off,sous charge (normal),143.0,184.0,212.0,227.0
+abd7f807,4,1,off,sous charge (interactif),26.0,84.0,110.0,131.0
+abd7f807,4,1,on,au repos,32.0,56.0,79.0,199.0
+abd7f807,4,1,on,sous charge (normal),143.0,188.0,227.0,237.0
+abd7f807,4,1,on,sous charge (interactif),82.0,112.0,147.0,357.0
+abd7f807,4,2,on,au repos,31.0,57.0,92.0,95.0
+abd7f807,4,2,on,sous charge (normal),141.0,184.0,231.0,982.0
+abd7f807,4,2,on,sous charge (interactif),84.0,121.0,148.0,185.0
+abd7f807,4,2,off,au repos,428.0,947.0,1022.0,1053.0
+abd7f807,4,2,off,sous charge (normal),144.0,185.0,210.0,247.0
+abd7f807,4,2,off,sous charge (interactif),24.0,75.0,99.0,345.0
+abd7f807,4,3,off,au repos,393.0,921.0,1025.0,1047.0
+abd7f807,4,3,off,sous charge (normal),143.0,183.0,214.0,547.0
+abd7f807,4,3,off,sous charge (interactif),27.0,82.0,118.0,133.0
+abd7f807,4,3,on,au repos,32.0,65.0,81.0,86.0
+abd7f807,4,3,on,sous charge (normal),143.0,184.0,261.0,326.0
+abd7f807,4,3,on,sous charge (interactif),83.0,115.0,780.0,1028.0
+abd7f807,4,4,on,au repos,31.0,61.0,74.0,80.0
+abd7f807,4,4,on,sous charge (normal),146.0,195.0,294.0,960.0
+abd7f807,4,4,on,sous charge (interactif),82.0,111.0,126.0,139.0
+abd7f807,4,4,off,au repos,400.0,945.0,1022.0,1034.0
+abd7f807,4,4,off,sous charge (normal),144.0,183.0,193.0,213.0
+abd7f807,4,4,off,sous charge (interactif),25.0,76.0,124.0,911.0
+7526efe6,1,1,off,au repos,393.0,971.0,3117.0,4220.0
+7526efe6,1,1,off,sous charge (normal),321.0,399.0,1566.0,3476.0
+7526efe6,1,1,off,sous charge (interactif),14.0,38.0,631.0,996.0
+7526efe6,1,1,on,au repos,49.0,148.0,5625.0,6023.0
+7526efe6,1,1,on,sous charge (normal),333.0,413.0,5439.0,6117.0
+7526efe6,1,1,on,sous charge (interactif),35.0,61.0,469.0,538.0
+7526efe6,1,2,on,au repos,47.0,134.0,5372.0,5964.0
+7526efe6,1,2,on,sous charge (normal),333.0,418.0,6029.0,6640.0
+7526efe6,1,2,on,sous charge (interactif),36.0,59.0,338.0,1129.0
+7526efe6,1,2,off,au repos,493.0,988.0,4534.0,5487.0
+7526efe6,1,2,off,sous charge (normal),324.0,457.0,4741.0,5180.0
+7526efe6,1,2,off,sous charge (interactif),14.0,36.0,963.0,1133.0
+7526efe6,1,3,off,au repos,426.0,964.0,2362.0,4932.0
+7526efe6,1,3,off,sous charge (normal),324.0,405.0,1912.0,3969.0
+7526efe6,1,3,off,sous charge (interactif),14.0,37.0,755.0,997.0
+7526efe6,1,3,on,au repos,48.0,139.0,5541.0,5925.0
+7526efe6,1,3,on,sous charge (normal),334.0,418.0,5327.0,6514.0
+7526efe6,1,3,on,sous charge (interactif),36.0,64.0,775.0,876.0
+7526efe6,1,4,on,au repos,48.0,141.0,5676.0,5997.0
+7526efe6,1,4,on,sous charge (normal),329.0,424.0,5249.0,6659.0
+7526efe6,1,4,on,sous charge (interactif),36.0,68.0,742.0,786.0
+7526efe6,1,4,off,au repos,410.0,986.0,3897.0,4861.0
+7526efe6,1,4,off,sous charge (normal),326.0,410.0,4343.0,4962.0
+7526efe6,1,4,off,sous charge (interactif),14.0,32.0,650.0,888.0
+7526efe6,4,1,off,au repos,430.0,937.0,1026.0,1073.0
+7526efe6,4,1,off,sous charge (normal),181.0,239.0,275.0,283.0
+7526efe6,4,1,off,sous charge (interactif),28.0,118.0,164.0,551.0
+7526efe6,4,1,on,au repos,49.0,136.0,160.0,178.0
+7526efe6,4,1,on,sous charge (normal),183.0,255.0,480.0,1318.0
+7526efe6,4,1,on,sous charge (interactif),108.0,145.0,185.0,290.0
+7526efe6,4,2,on,au repos,48.0,116.0,137.0,147.0
+7526efe6,4,2,on,sous charge (normal),181.0,248.0,392.0,1315.0
+7526efe6,4,2,on,sous charge (interactif),105.0,150.0,190.0,752.0
+7526efe6,4,2,off,au repos,431.0,980.0,1070.0,1108.0
+7526efe6,4,2,off,sous charge (normal),181.0,230.0,479.0,1187.0
+7526efe6,4,2,off,sous charge (interactif),32.0,110.0,146.0,297.0
+7526efe6,4,3,off,au repos,433.0,958.0,1015.0,1148.0
+7526efe6,4,3,off,sous charge (normal),180.0,240.0,275.0,334.0
+7526efe6,4,3,off,sous charge (interactif),31.0,119.0,333.0,975.0
+7526efe6,4,3,on,au repos,46.0,122.0,166.0,194.0
+7526efe6,4,3,on,sous charge (normal),185.0,242.0,287.0,288.0
+7526efe6,4,3,on,sous charge (interactif),104.0,156.0,191.0,994.0
+7526efe6,4,4,on,au repos,46.0,116.0,143.0,165.0
+7526efe6,4,4,on,sous charge (normal),180.0,250.0,335.0,1453.0
+7526efe6,4,4,on,sous charge (interactif),102.0,151.0,179.0,194.0
+7526efe6,4,4,off,au repos,401.0,918.0,1002.0,1035.0
+7526efe6,4,4,off,sous charge (normal),191.0,245.0,727.0,848.0
+7526efe6,4,4,off,sous charge (interactif),33.0,107.0,168.0,942.0

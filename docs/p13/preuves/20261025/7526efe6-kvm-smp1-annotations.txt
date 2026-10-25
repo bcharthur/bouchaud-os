@@ -1,0 +1,100 @@
+  P1 precision au repos : QUALIFIE_ECHEC -- paires 4/4 : p50 on 48.0 <= 0,75 x off 418.0 ; p95 on 140.0 <= off 978.5 ; p99 on 5583.0 <= 1,25 x off 3507.0
+  P2 precision sous charge : QUALIFIE_ECHEC -- paires 4/4 : p95 interactif on 62.5 <= 1,10 x off 36.5
+  P3 gain de la priorite : QUALIFIE_OK -- 4/8 bras qualifies
+  P4 pas d'aggravation du pire cas : QUALIFIE_OK -- 8/8 bras qualifies
+  P5 equite, non-famine : QUALIFIE_OK -- 8/8 bras qualifies
+AB_BRAS_POLITIQUE tour=1 bras=off role=controle-negatif verdict=QUALIFIE_OK P3=NON_QUALIFIANT historique=NON_QUALIFIANT
+  preuve tour=1 bras=off phase=au repos quantiles_us=(393, 971, 3117, 4220) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=1 bras=off phase=sous charge (normal) quantiles_us=(321, 399, 1566, 3476) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=1 bras=off phase=sous charge (interactif) quantiles_us=(14, 38, 631, 996) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  tour=1 bras=off: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)
+AB_BRAS_POLITIQUE tour=1 bras=on role=politique-active verdict=QUALIFIE_OK P3=QUALIFIE_OK historique=QUALIFIE_OK
+  preuve tour=1 bras=on phase=au repos quantiles_us=(49, 148, 5625, 6023) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=1 bras=on phase=sous charge (normal) quantiles_us=(333, 413, 5439, 6117) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=1 bras=on phase=sous charge (interactif) quantiles_us=(35, 61, 469, 538) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+AB_BRAS_POLITIQUE tour=2 bras=on role=politique-active verdict=QUALIFIE_OK P3=QUALIFIE_OK historique=QUALIFIE_OK
+  preuve tour=2 bras=on phase=au repos quantiles_us=(47, 134, 5372, 5964) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=2 bras=on phase=sous charge (normal) quantiles_us=(333, 418, 6029, 6640) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=2 bras=on phase=sous charge (interactif) quantiles_us=(36, 59, 338, 1129) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+AB_BRAS_POLITIQUE tour=2 bras=off role=controle-negatif verdict=QUALIFIE_OK P3=NON_QUALIFIANT historique=NON_QUALIFIANT
+  preuve tour=2 bras=off phase=au repos quantiles_us=(493, 988, 4534, 5487) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=2 bras=off phase=sous charge (normal) quantiles_us=(324, 457, 4741, 5180) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=2 bras=off phase=sous charge (interactif) quantiles_us=(14, 36, 963, 1133) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  tour=2 bras=off: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)
+AB_BRAS_POLITIQUE tour=3 bras=off role=controle-negatif verdict=QUALIFIE_OK P3=NON_QUALIFIANT historique=NON_QUALIFIANT
+  preuve tour=3 bras=off phase=au repos quantiles_us=(426, 964, 2362, 4932) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=3 bras=off phase=sous charge (normal) quantiles_us=(324, 405, 1912, 3969) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=3 bras=off phase=sous charge (interactif) quantiles_us=(14, 37, 755, 997) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  tour=3 bras=off: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)
+AB_BRAS_POLITIQUE tour=3 bras=on role=politique-active verdict=QUALIFIE_OK P3=QUALIFIE_OK historique=QUALIFIE_OK
+  preuve tour=3 bras=on phase=au repos quantiles_us=(48, 139, 5541, 5925) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=3 bras=on phase=sous charge (normal) quantiles_us=(334, 418, 5327, 6514) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=3 bras=on phase=sous charge (interactif) quantiles_us=(36, 64, 775, 876) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+AB_BRAS_POLITIQUE tour=4 bras=on role=politique-active verdict=QUALIFIE_OK P3=QUALIFIE_OK historique=QUALIFIE_OK
+  preuve tour=4 bras=on phase=au repos quantiles_us=(48, 141, 5676, 5997) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=4 bras=on phase=sous charge (normal) quantiles_us=(329, 424, 5249, 6659) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=4 bras=on phase=sous charge (interactif) quantiles_us=(36, 68, 742, 786) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+AB_BRAS_POLITIQUE tour=4 bras=off role=controle-negatif verdict=QUALIFIE_OK P3=NON_QUALIFIANT historique=NON_QUALIFIANT
+  preuve tour=4 bras=off phase=au repos quantiles_us=(410, 986, 3897, 4861) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=4 bras=off phase=sous charge (normal) quantiles_us=(326, 410, 4343, 4962) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  preuve tour=4 bras=off phase=sous charge (interactif) quantiles_us=(14, 32, 650, 888) propres=300 total=300 exclus=0 regle=preuve-hote attribues=300
+  tour=4 bras=off: P3 NON_QUALIFIANT charge dans le bruit mesure (non bloquant, jamais OK)
+AB_REVEIL_PRECIS : NON_CONVAINCANT accel=kvm smp=1 politique=decisions-20261024 bras_valides=8/8
+AB_PRECIS tour=1 reveil=off
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=33054586108 arme_tsc=33054586108 quantum_tsc=33054586108
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=0 armes_occupes=0 avances_occupees=0 tirs=0 tirs_anticipes=0 auto_ipi_evites=0 refus_quantum_avant=0 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=1023 tardif_us=1017 attente_us=5 reprise_us=1 dormi_ms=11 tics_vus=11 sans_balayage=0 cpu=0 a_ms=3358 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=82 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=989 tardif_us=984 attente_us=3 reprise_us=1 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=17365 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=89 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=75408858348 arme_tsc=75408858348 quantum_tsc=75408858348
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=0 armes_occupes=0 avances_occupees=0 tirs=0 tirs_anticipes=0 auto_ipi_evites=15017 refus_quantum_avant=0 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=1 reveil=on
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=75487780247 arme_tsc=75487780247 quantum_tsc=75487780247
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=0 armes_occupes=0 avances_occupees=0 tirs=0 tirs_anticipes=0 auto_ipi_evites=15017 refus_quantum_avant=0 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=1286 tardif_us=1278 attente_us=6 reprise_us=1 dormi_ms=9 tics_vus=10 sans_balayage=0 cpu=0 a_ms=22428 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=290 masque_pire_site=irq:0xf1 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=530 tardif_us=525 attente_us=3 reprise_us=1 dormi_ms=16 tics_vus=16 sans_balayage=0 cpu=0 a_ms=32424 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=135 masque_pire_site=src/kernel/memory/pages_tas.rs:213 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=118264868578 arme_tsc=118264868578 quantum_tsc=118267559159
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=3949 armes_occupes=3019 avances_occupees=8080 tirs=2631 tirs_anticipes=20644 auto_ipi_evites=30829 refus_quantum_avant=6807 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=2 reveil=on
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=118369409760 arme_tsc=118369409760 quantum_tsc=118376680175
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=3949 armes_occupes=3030 avances_occupees=8080 tirs=2631 tirs_anticipes=20975 auto_ipi_evites=30829 refus_quantum_avant=6807 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=990 tardif_us=982 attente_us=7 reprise_us=1 dormi_ms=8 tics_vus=9 sans_balayage=0 cpu=0 a_ms=37459 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=2418 tic_rip=0x16cae48 tic_ring3=0 tic_cpu=0 tic_a_ms=38858 tic_ecarts_gt_2ms=1 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=81 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=1119 tardif_us=1114 attente_us=3 reprise_us=2 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=52429 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=2361 tic_rip=0x16bf3e5 tic_ring3=0 tic_cpu=0 tic_a_ms=52910 tic_ecarts_gt_2ms=1 masque_avant_ecart_us=0 masque_avant_ecart_site=src/kernel/process/thread/commutation.rs:112 masque_pire_us=93 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=160997772616 arme_tsc=160997772616 quantum_tsc=160998362102
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=8283 armes_occupes=6005 avances_occupees=16305 tirs=5551 tirs_anticipes=41429 auto_ipi_evites=46649 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=2 reveil=off
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=161103352377 arme_tsc=161103352377 quantum_tsc=161107171282
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=8283 armes_occupes=6016 avances_occupees=16305 tirs=5551 tirs_anticipes=41763 auto_ipi_evites=46649 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=1072 tardif_us=1064 attente_us=7 reprise_us=1 dormi_ms=11 tics_vus=11 sans_balayage=0 cpu=0 a_ms=57507 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=124 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=1123 tardif_us=1113 attente_us=9 reprise_us=1 dormi_ms=17 tics_vus=17 sans_balayage=0 cpu=0 a_ms=67488 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=2017 tic_rip=0x4000004036fc tic_ring3=1 tic_cpu=0 tic_a_ms=68975 tic_ecarts_gt_2ms=1 masque_avant_ecart_us=0 masque_avant_ecart_site=src/kernel/process/thread/commutation.rs:112 masque_pire_us=81 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=203653877459 arme_tsc=203653877459 quantum_tsc=203653877459
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=8283 armes_occupes=6016 avances_occupees=16305 tirs=5551 tirs_anticipes=41764 auto_ipi_evites=61765 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=3 reveil=off
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=203732877415 arme_tsc=203732877415 quantum_tsc=203732877415
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=8283 armes_occupes=6016 avances_occupees=16305 tirs=5551 tirs_anticipes=41764 auto_ipi_evites=61765 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=1013 tardif_us=1008 attente_us=2 reprise_us=1 dormi_ms=17 tics_vus=17 sans_balayage=0 cpu=0 a_ms=74743 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=109 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=usb-hid:pid=8:tid=104:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=989 tardif_us=983 attente_us=3 reprise_us=1 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=87621 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=2407 tic_rip=0x4000004036f5 tic_ring3=1 tic_cpu=0 tic_a_ms=87056 tic_ecarts_gt_2ms=1 masque_avant_ecart_us=0 masque_avant_ecart_site=src/kernel/process/thread/commutation.rs:112 masque_pire_us=83 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=246278262619 arme_tsc=246278262619 quantum_tsc=246278262619
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=8283 armes_occupes=6016 avances_occupees=16305 tirs=5551 tirs_anticipes=41764 auto_ipi_evites=76918 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=3 reveil=on
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=246357392548 arme_tsc=246357392548 quantum_tsc=246357392548
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=8283 armes_occupes=6016 avances_occupees=16305 tirs=5551 tirs_anticipes=41764 auto_ipi_evites=76918 refus_quantum_avant=13560 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=950 tardif_us=943 attente_us=6 reprise_us=1 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=90027 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=2000 tic_rip=0x16cae48 tic_ring3=0 tic_cpu=0 tic_a_ms=93085 tic_ecarts_gt_2ms=1 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=79 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=869 tardif_us=863 attente_us=3 reprise_us=2 dormi_ms=16 tics_vus=16 sans_balayage=0 cpu=0 a_ms=102629 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=83 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=289036737552 arme_tsc=289036737552 quantum_tsc=289039159809
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=12402 armes_occupes=9009 avances_occupees=24720 tirs=8318 tirs_anticipes=62083 auto_ipi_evites=92748 refus_quantum_avant=20281 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=4 reveil=on
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=289138763702 arme_tsc=289138763702 quantum_tsc=289138763702
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=12402 armes_occupes=9019 avances_occupees=24720 tirs=8318 tirs_anticipes=62411 auto_ipi_evites=92748 refus_quantum_avant=20281 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=907 tardif_us=838 attente_us=68 reprise_us=1 dormi_ms=8 tics_vus=9 sans_balayage=0 cpu=0 a_ms=107646 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=89 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=778 tardif_us=773 attente_us=3 reprise_us=1 dormi_ms=16 tics_vus=16 sans_balayage=0 cpu=0 a_ms=120017 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=79 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=331817225905 arme_tsc=331817225905 quantum_tsc=331825417739
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=16774 armes_occupes=12014 avances_occupees=32932 tirs=11268 tirs_anticipes=83063 auto_ipi_evites=108573 refus_quantum_avant=26982 refus_sans_borne=0 refus_autres=0
+AB_PRECIS tour=4 reveil=off
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=331919698770 arme_tsc=331919698770 quantum_tsc=331924538271
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=16774 armes_occupes=12024 avances_occupees=32932 tirs=11268 tirs_anticipes=83390 auto_ipi_evites=108573 refus_quantum_avant=26982 refus_sans_borne=0 refus_autres=0
+attribution au repos : reveils=300 pire_total_us=1026 tardif_us=980 attente_us=44 reprise_us=1 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=129288 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=81 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=usb-hid:pid=8:tid=104:noyau=1:irq=0 reprise_commutation_us=1 reprise_passation_us=0 reprise_retour_us=0
+attribution sous charge (interactif) : reveils=300 pire_total_us=881 tardif_us=877 attente_us=2 reprise_us=1 dormi_ms=16 tics_vus=17 sans_balayage=0 cpu=0 a_ms=137737 tardifs_gt_5ms=0 attentes_gt_1ms=0 sommeils_tics_manquants=0 tic_ecart_pire_us=0 tic_rip=0x0 tic_ring3=0 tic_cpu=0 tic_a_ms=0 tic_ecarts_gt_2ms=0 masque_avant_ecart_us=0 masque_avant_ecart_site=- masque_pire_us=80 masque_pire_site=src/drivers/network/e1000.rs:333 masques_gt_1ms=0 reveille_par=console:pid=10:tid=106:noyau=1:irq=0 reprise_commutation_us=0 reprise_passation_us=0 reprise_retour_us=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=374367561573 arme_tsc=374367561573 quantum_tsc=374367561573
+REVEIL_PRECIS voulu=0 minuteur=tsc-deadline armes=16774 armes_occupes=12024 avances_occupees=32932 tirs=11268 tirs_anticipes=83391 auto_ipi_evites=123871 refus_quantum_avant=26982 refus_sans_borne=0 refus_autres=0
+REVEIL_TIMER_LOCAL cpu=0 lvt=0x400f1 deadline_tsc=374416773963 arme_tsc=374416773963 quantum_tsc=374416773963
+REVEIL_PRECIS voulu=1 minuteur=tsc-deadline armes=16774 armes_occupes=12024 avances_occupees=32932 tirs=11268 tirs_anticipes=83391 auto_ipi_evites=123871 refus_quantum_avant=26982 refus_sans_borne=0 refus_autres=0
