@@ -197,7 +197,7 @@ fn from_user(stack: &InterruptStackFrame) -> bool {
     stack.code_segment & 3 == 3
 }
 
-struct GsGuard { swapped: bool }
+struct GsGuard { swapped: bool, irq_active: bool }
 
 impl GsGuard {
     fn enter(stack: &InterruptStackFrame) -> Self {
@@ -208,17 +208,33 @@ impl GsGuard {
         crate::arch::x86_64::cpu_local::local(
             crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
         ).irq_enter();
-        GsGuard { swapped }
+        GsGuard { swapped, irq_active: true }
+    }
+
+    /// Seulement pour une faute de page issue de ring 3, apres sauvegarde
+    /// de CR2 et avant STI. Les vraies IRQ gardent enter/exit et leur EOI.
+    fn trappe_utilisateur(&mut self) {
+        assert!(self.swapped && self.irq_active);
+        debug_assert!(!x86_64::instructions::interrupts::are_enabled());
+        crate::arch::x86_64::cpu_local::local(
+            crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
+        ).irq_context.quitte_trappe_utilisateur();
+        self.irq_active = false;
     }
 }
 
 impl Drop for GsGuard {
     fn drop(&mut self) {
+        // La faute utilisateur a pu rouvrir IF. Aucune IRQ CPL0 ne doit
+        // arriver apres SWAPGS avec le GS utilisateur ; IRET restaure IF.
+        x86_64::instructions::interrupts::disable();
         // A suspended handler may resume on another CPU. switch_context
         // restored this stack's depth there before allowing interrupts.
-        crate::arch::x86_64::cpu_local::local(
-            crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
-        ).irq_exit();
+        if self.irq_active {
+            crate::arch::x86_64::cpu_local::local(
+                crate::arch::x86_64::cpu_local::CpuId::from_index(usermode::cpu_index()).unwrap()
+            ).irq_exit();
+        }
         if self.swapped {
             unsafe { crate::arch::x86_64::usermode::swapgs() };
         }
@@ -512,7 +528,7 @@ extern "x86-interrupt" fn page_fault_handler(
     stack: InterruptStackFrame,
     code: PageFaultErrorCode,
 ) {
-    let _gs = GsGuard::enter(&stack);
+    let mut _gs = GsGuard::enter(&stack);
     // BOUCHAUD_C66 : tout ce qui suit est du temps NOYAU. Sans cette
     // frontiere, l'attente d'une lecture ATA declenchee par une faute etait
     // comptee comme du calcul utilisateur -- et faisait lire `user_ms=92250
@@ -533,6 +549,7 @@ extern "x86-interrupt" fn page_fault_handler(
     crate::kernel::task::stall_pf_begin(addr);
 
     if from_user(&stack) {
+        _gs.trappe_utilisateur();
         x86_64::instructions::interrupts::enable();
     }
 
@@ -565,6 +582,10 @@ extern "x86-interrupt" fn page_fault_handler(
             // dire a chaque page peuplee a la demande.
             crate::kernel::task::retire_current_if_zombie();
             crate::platform::pc::ecran_faute::sort_exception_resolue();
+            // Meme frontiere que la sortie de syscall : une demande recue
+            // pendant le peuplement ne doit pas attendre le prochain tick.
+            // Les verrous du VMM sont rendus et le contexte IRQ a ete quitte.
+            let _ = crate::kernel::scheduler::preempt::safe_point();
             crate::kernel::task::account_fault_exit(mur_avant_faute);
             return;
         }

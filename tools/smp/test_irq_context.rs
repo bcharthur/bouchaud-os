@@ -36,6 +36,29 @@ fn terminated_irq_stack_does_not_poison_the_next_task() {
 }
 
 #[test]
+fn user_page_fault_becomes_a_sleepable_task_before_sti() {
+    let a = IrqContext::new(); let b = IrqContext::new();
+    a.enter(); // GS et CR2 sont captures avec IF=0.
+    a.quitte_trappe_utilisateur();
+    assert_eq!(a.depth(), 0, "console et point sur exigent zero IRQ");
+    a.enter(); // timer reel pendant le peuplement utilisateur
+    assert_eq!(a.depth(), 1, "timer non imbrique dans une IRQ materielle");
+    a.enter(); assert_eq!(a.depth(), 2); // vraie imbrication reste interdite
+    a.exit(); a.exit();
+    let saved = a.suspend(); b.restore(saved);
+    assert_eq!(b.depth(), 0, "la faute peut attendre et migrer comme un syscall");
+    b.enter(); b.exit();
+    assert_eq!((a.depth(), b.depth()), (0, 0));
+}
+
+#[test]
+#[should_panic(expected = "user trap nested in an IRQ context")]
+fn a_kernel_fault_nested_in_an_irq_cannot_become_a_user_task() {
+    let cpu = IrqContext::new(); cpu.enter(); cpu.enter();
+    cpu.quitte_trappe_utilisateur();
+}
+
+#[test]
 #[should_panic(expected = "irq_depth underflow")]
 fn unmatched_exit_is_rejected() { IrqContext::new().exit(); }
 
