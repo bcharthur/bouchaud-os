@@ -742,13 +742,15 @@ pub fn arm_local_scheduler_timer() {
                     Some(cible) if cible < quantum => (cible, true),
                     _ => (quantum, false),
                 };
-                unsafe {
-                    usermode::write_msr(IA32_TSC_DEADLINE, echeance);
-                }
+                // Nouveau quantum : invalider l'ancienne programmation,
+                // meme si une horloge de test rend la meme cible.
+                ETAT_DEADLINE[cpu].store(crate::kernel::reveil_precis::EtatDeadline::Invalide as u8, Ordering::Relaxed);
+                programme_deadline(cpu, echeance, if occupe {
+                    crate::kernel::reveil_precis::EtatDeadline::Interactif
+                } else { crate::kernel::reveil_precis::EtatDeadline::Quantum });
                 // BOUCHAUD_REVEIL_PRECIS_V1 : le minuteur porte le quantum ;
                 // tout armement precis est remplace.
                 if cpu < MAX_CPUS {
-                    ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
                     ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
                     QUANTUM_TSC[cpu].store(quantum, Ordering::Relaxed);
                     ARME_OCCUPE[cpu].store(occupe, Ordering::Relaxed);
@@ -856,10 +858,9 @@ pub fn rearme_reste_du_quantum() {
         Some(cible) if cible < quantum => (cible, true),
         _ => (quantum, false),
     };
-    if echeance != ARME_TSC[cpu].load(Ordering::Relaxed) || echeance <= maintenant {
-        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, echeance); }
-    }
-    ARME_TSC[cpu].store(echeance, Ordering::Relaxed);
+    programme_deadline(cpu, echeance, if occupe {
+        crate::kernel::reveil_precis::EtatDeadline::Interactif
+    } else { crate::kernel::reveil_precis::EtatDeadline::Quantum });
     ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
     ARME_OCCUPE[cpu].store(occupe, Ordering::Relaxed);
 }
@@ -889,10 +890,7 @@ pub fn avance_pour_sommeil_interactif(echeance_ns: u64) {
         let Some(cible) = crate::kernel::timer::tsc_pour_ns(ns) else { return };
         let cible = cible.max(maintenant.saturating_add(1));
         if cible < ARME_TSC[cpu].load(Ordering::Relaxed) && cible < QUANTUM_TSC[cpu].load(Ordering::Relaxed) {
-            unsafe {
-                usermode::write_msr(IA32_TSC_DEADLINE, cible);
-            }
-            ARME_TSC[cpu].store(cible, Ordering::Relaxed);
+            programme_deadline(cpu, cible, crate::kernel::reveil_precis::EtatDeadline::Interactif);
             ARME_OCCUPE[cpu].store(true, Ordering::Relaxed);
             AVANCES_OCCUPEES.fetch_add(1, Ordering::Relaxed);
         }
@@ -975,6 +973,26 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
 
 /// Ce que le minuteur local porte (TSC), par coeur.
 static ARME_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static ETAT_DEADLINE: [core::sync::atomic::AtomicU8; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_CPUS];
+
+/// Unique ecriture du MSR one-shot. Tous les appelants sont sur le CPU
+/// proprietaire, IF=0 ; aucun autre CPU ni NMI ne programme ce timer.
+/// L'etat n'est publie arme qu'APRES l'ecriture effective. Une IRQ en attente
+/// n'invalide pas une nouvelle cible future : sa consommation est observee
+/// conservativement par le TSC, jamais deduite du vecteur partage.
+fn programme_deadline(cpu: usize, cible: u64, motif: crate::kernel::reveil_precis::EtatDeadline) {
+    use crate::kernel::reveil_precis::{EtatDeadline, doit_programmer};
+    debug_assert!(!::x86_64::instructions::interrupts::are_enabled());
+    debug_assert!(motif.arme() && cible != 0);
+    let maintenant = crate::arch::x86_64::cpu::rdtsc();
+    let etat = EtatDeadline::depuis(ETAT_DEADLINE[cpu].load(Ordering::Relaxed));
+    if doit_programmer(etat, ARME_TSC[cpu].load(Ordering::Relaxed), cible, maintenant) {
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, cible); }
+    }
+    ARME_TSC[cpu].store(cible, Ordering::Relaxed);
+    ETAT_DEADLINE[cpu].store(motif as u8, Ordering::Relaxed);
+}
 /// Le minuteur porte une echeance de SOMMEIL (et non le quantum).
 static ARME_PRECIS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 /// Ce coeur est entre la lecture de la politique et la fin de son armement
@@ -1009,7 +1027,8 @@ static REVEILS_PRECIS_RETIRES: AtomicU64 = AtomicU64::new(0);
 // des echeances dues non armees (BOUCHAUD_REVEIL_DU_V1) et des reveils
 // inter-coeurs sans IPI (BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1).
 /// Entrees du vecteur local pendant un armement precis : a la cible ou apres
-/// (le minuteur a tire), et avant elle (IPI, ou tir premature, non separes).
+/// (cause materielle indeterminee), et avant elle (IPI ou ancienne IRQ).
+/// Ce compteur temporel ne prouve pas une expiration materielle distincte.
 static TIRS_PRECIS: AtomicU64 = AtomicU64::new(0);
 static IPI_PENDANT_ARME: AtomicU64 = AtomicU64::new(0);
 /// Armements faits sur l'echeance de la tache installee alors que la borne
@@ -1030,13 +1049,19 @@ static REFUS_AUTRES: AtomicU64 = AtomicU64::new(0);
 /// le chemin meme qu'elle mesurait -- run 39387288347, repos p50 54-55 us
 /// contre 39 us avant l'instrument. Les tirs avant la cible y etaient de 0 a
 /// 6 sur 300 000 : une entree avant la cible est desormais comptee comme un
-/// IPI, sans relecture.)
+/// entree precoce, sans relecture ni preuve de sa cause.)
 pub fn note_entree_vecteur_local(entree_tsc: u64) {
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
         return;
     }
     let cpu = cpu_index();
-    if cpu >= MAX_CPUS || !ARME_PRECIS[cpu].load(Ordering::Relaxed) {
+    if cpu >= MAX_CPUS { return; }
+    // Observation temporelle conservative, pas une identification timer/IPI.
+    let etat = crate::kernel::reveil_precis::EtatDeadline::depuis(ETAT_DEADLINE[cpu].load(Ordering::Relaxed));
+    let observe = crate::kernel::reveil_precis::observe_deadline(etat,
+        ARME_TSC[cpu].load(Ordering::Relaxed), entree_tsc);
+    ETAT_DEADLINE[cpu].store(observe as u8, Ordering::Relaxed);
+    if !ARME_PRECIS[cpu].load(Ordering::Relaxed) {
         return;
     }
     if entree_tsc >= ARME_TSC[cpu].load(Ordering::Relaxed) {
@@ -1177,8 +1202,7 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
     }
     if let Ok(armement) = decision {
         let tsc = armement.tsc;
-        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, tsc) };
-        ARME_TSC[cpu].store(tsc, Ordering::Relaxed);
+        programme_deadline(cpu, tsc, crate::kernel::reveil_precis::EtatDeadline::Idle);
         ARME_PRECIS[cpu].store(true, Ordering::Relaxed);
         ARME_OCCUPE[cpu].store(false, Ordering::Relaxed);
         REVEILS_PRECIS_ARMES.fetch_add(1, Ordering::Relaxed);

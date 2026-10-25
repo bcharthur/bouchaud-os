@@ -42,6 +42,49 @@ pub const JAMAIS: u64 = u64::MAX;
 /// minuteur qu'une fois par marge -- pas en boucle.
 pub const MARGE_NS: u64 = 20_000;
 
+/// Etat logiciel du one-shot local. Une ancienne valeur TSC ne prouve pas
+/// que le materiel porte encore cette echeance. L'appelant possede le CPU,
+/// interruptions masquees, depuis la decision jusqu'a l'ecriture effective.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EtatDeadline {
+    NonProgramme = 0,
+    Quantum = 1,
+    Interactif = 2,
+    Idle = 3,
+    Expire = 4,
+    Invalide = 5,
+}
+
+impl EtatDeadline {
+    pub fn depuis(code: u8) -> Self {
+        match code {
+            1 => Self::Quantum, 2 => Self::Interactif, 3 => Self::Idle,
+            4 => Self::Expire, 5 => Self::Invalide, _ => Self::NonProgramme,
+        }
+    }
+
+    pub fn arme(self) -> bool {
+        matches!(self, Self::Quantum | Self::Interactif | Self::Idle)
+    }
+}
+
+/// Une entree du vecteur partage ne dit PAS si le timer ou un IPI l'a
+/// provoquee. Une cible passee n'est plus reutilisable, quelle que soit la
+/// cause de l'entree. Une cible future reste armee, meme si l'IRQ livree est
+/// celle d'une ancienne programmation. Aucun RDMSR n'est necessaire.
+pub fn observe_deadline(etat: EtatDeadline, cible: u64, maintenant: u64) -> EtatDeadline {
+    if etat.arme() && cible <= maintenant { EtatDeadline::Expire } else { etat }
+}
+
+/// Seule elision autorisee : meme cible, encore future et connue armee.
+/// Une invalidation (nouveau quantum/contexte), une expiration ou un
+/// desarmement imposent une ecriture, meme si les valeurs TSC sont egales.
+/// Une cible plus proche OU plus lointaine doit aussi etre programmee.
+pub fn doit_programmer(etat: EtatDeadline, ancienne: u64, nouvelle: u64, maintenant: u64) -> bool {
+    !observe_deadline(etat, ancienne, maintenant).arme() || ancienne != nouvelle
+}
+
 /// An IPI or sleep wakeup before the saved boundary is not a quantum tick.
 /// Applies to both LAPIC backends, including an idle sleep's deadline.
 pub fn avant_quantum(maintenant: u64, quantum: u64) -> bool {

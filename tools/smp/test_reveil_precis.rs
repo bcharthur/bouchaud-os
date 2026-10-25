@@ -4,6 +4,113 @@
 mod reveil_precis;
 
 use reveil_precis::{decide, decide_compte, decide_motif, tsc_de, Armement, Refus, JAMAIS, MARGE_NS};
+use reveil_precis::{EtatDeadline as Etat, doit_programmer, observe_deadline};
+
+#[test]
+fn one_shot_une_valeur_memorisee_ne_prouve_pas_un_armement() {
+    for etat in [Etat::NonProgramme, Etat::Expire, Etat::Invalide] {
+        assert!(doit_programmer(etat, 100, 100, 20), "{etat:?}");
+    }
+    for code in [0, 4, 5, 255] {
+        assert!(doit_programmer(Etat::depuis(code), 100, 100, 20));
+    }
+}
+
+#[test]
+fn one_shot_rearme_apres_expiration_meme_si_la_cible_est_identique() {
+    for motif in [Etat::Quantum, Etat::Interactif, Etat::Idle] {
+        for now in [100, 101, 1_000] {
+            assert_eq!(observe_deadline(motif, 100, now), Etat::Expire);
+            assert!(doit_programmer(motif, 100, 100, now));
+        }
+    }
+}
+
+#[test]
+fn one_shot_ipi_avant_deadline_ne_consomme_pas_la_programmation() {
+    for motif in [Etat::Quantum, Etat::Interactif, Etat::Idle] {
+        assert_eq!(observe_deadline(motif, 100, 99), motif);
+        assert!(!doit_programmer(motif, 100, 100, 99));
+        // Meme resultat pour une ancienne IRQ timer livree apres rearmement.
+        assert_eq!(observe_deadline(motif, 200, 101), motif);
+    }
+}
+
+#[test]
+fn one_shot_ipi_et_timer_simultanes_restent_a_rearmer() {
+    let etat = observe_deadline(Etat::Interactif, 100, 100);
+    assert!(doit_programmer(etat, 100, 200, 100));
+    assert!(doit_programmer(etat, 100, 100, 100));
+}
+
+#[test]
+fn one_shot_cible_changee_plus_proche_ou_plus_lointaine() {
+    for cible in [50, 200] {
+        assert!(doit_programmer(Etat::Quantum, 100, cible, 20));
+    }
+}
+
+#[test]
+fn one_shot_nouveau_quantum_invalide_meme_une_cible_future() {
+    assert!(!doit_programmer(Etat::Quantum, 100, 100, 20));
+    assert!(doit_programmer(Etat::Invalide, 100, 100, 20));
+}
+
+#[test]
+fn one_shot_retour_hlt_et_politique_off_restaurent_le_quantum() {
+    // IPI reveille le CPU avant son sommeil precis ; OFF annule le sommeil.
+    let etat = observe_deadline(Etat::Idle, 100, 50);
+    assert!(doit_programmer(etat, 100, 400, 50));
+    assert!(!doit_programmer(Etat::Quantum, 400, 400, 60));
+    assert!(doit_programmer(Etat::Quantum, 400, 120, 60), "nouveau sommeil ON");
+}
+
+#[test]
+fn one_shot_preemption_refusee_garde_une_relance_bornee() {
+    let maintenant = 10_000_000;
+    // Le balayage refuse sous verrou ne doit ni oublier le sommeil du, ni
+    // reutiliser son MSR consomme. Le plancher existant borne les relances.
+    let cible = t(echeance_occupee_pour_test(maintenant, maintenant));
+    assert!(cible > t(maintenant));
+    assert!(doit_programmer(Etat::Expire, t(maintenant), cible, t(maintenant)));
+    // Apres publication au point sur, la borne disparait et le quantum revient.
+    assert_eq!(reveil_precis::echeance_occupee(JAMAIS, maintenant), None);
+    assert!(doit_programmer(Etat::Interactif, cible, t(maintenant + 4_000_000), t(maintenant)));
+}
+
+fn echeance_occupee_pour_test(borne: u64, now: u64) -> u64 {
+    reveil_precis::echeance_occupee(borne, now).unwrap()
+}
+
+#[test]
+fn one_shot_modele_materiel_smp1_smp4_aucune_elision_sans_timer_vivant() {
+    // Modele independant : le materiel consomme le one-shot quand le temps
+    // passe. Les CPU ne partagent ni etat ni cible. Un IPI n'y change rien.
+    for ncpu in [1, 4] {
+        let mut etats = [Etat::NonProgramme; 4];
+        let mut memoires = [0u64; 4];
+        let mut materiel = [None; 4];
+        let mut graine = 0x95a0_1234u64;
+        for now in 1..20_000u64 {
+            for cible in &mut materiel[..ncpu] {
+                if cible.map_or(false, |v| v <= now) { *cible = None; }
+            }
+            graine = graine.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let cpu = (graine as usize >> 8) % ncpu;
+            let event = graine % 5;
+            if event == 0 { etats[cpu] = Etat::Invalide; }
+            if event == 1 { etats[cpu] = observe_deadline(etats[cpu], memoires[cpu], now); }
+            let cible = if event == 2 { memoires[cpu] } else { now + 1 + (graine >> 32) % 50 };
+            if doit_programmer(etats[cpu], memoires[cpu], cible, now) {
+                materiel[cpu] = if cible > now { Some(cible) } else { None };
+            } else {
+                assert_eq!(materiel[cpu], Some(cible), "CPU{cpu} t={now} : reveil perdu");
+            }
+            memoires[cpu] = cible;
+            etats[cpu] = Etat::Interactif;
+        }
+    }
+}
 
 const HZ: u64 = 2_000_000_000; // 2 GHz : 2 cycles par ns
 const BOOT: u64 = 1_000_000;
