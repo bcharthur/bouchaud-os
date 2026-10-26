@@ -1,0 +1,161 @@
+{
+  "version": "P13_EVIDENCE_MINI_V1",
+  "source": "Archive utilisateur BOUCHAUD-P13-PREUVES-ET-SOURCES-20261026.zip / RAPPORT_CLAUDE_V4.md",
+  "date": "2026-10-26",
+  "warning": "Resume diagnostique des quantiles, pas la source primaire; les 7 logs serie.log ne sont pas commits. Aucun statut NON_QUALIFIANT n'est converti en OK.",
+  "bras_par_campagne": 8,
+  "pire_echantillons_par_campagne": 24,
+  "aucune_baseline_qualifiee": true,
+  "mesures": [
+    {
+      "name": "avance_off-kvm-smp4",
+      "smp": 4,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        73,
+        74,
+        72,
+        69
+      ],
+      "p95_interactif_off_us": [
+        43,
+        38,
+        46,
+        41
+      ],
+      "verdict": "NON_CONVAINCANT",
+      "P2": "QUALIFIE_ECHEC"
+    },
+    {
+      "name": "candidat-kvm-smp1",
+      "smp": 1,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        49,
+        40,
+        43,
+        46
+      ],
+      "p95_interactif_off_us": [
+        21,
+        22,
+        18,
+        19
+      ],
+      "verdict": "NON_CONVAINCANT",
+      "P2": "QUALIFIE_ECHEC"
+    },
+    {
+      "name": "candidat-kvm-smp2",
+      "smp": 2,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        70,
+        63,
+        73,
+        71
+      ],
+      "p95_interactif_off_us": [
+        16,
+        24,
+        33,
+        34
+      ],
+      "verdict": "NON_CONVAINCANT",
+      "P2": "QUALIFIE_ECHEC",
+      "strict": "NON_EFFECTUE"
+    },
+    {
+      "name": "candidat-kvm-smp4",
+      "smp": 4,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        76,
+        72,
+        73,
+        71
+      ],
+      "p95_interactif_off_us": [
+        41,
+        54,
+        45,
+        38
+      ],
+      "verdict": "NON_CONCLUANT",
+      "P2": "NON_QUALIFIANT",
+      "bras_admissibles": 7
+    },
+    {
+      "name": "cible_off-kvm-smp1",
+      "smp": 1,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        24,
+        19,
+        24,
+        29
+      ],
+      "p95_interactif_off_us": [
+        25,
+        18,
+        18,
+        12
+      ],
+      "verdict": "NON_CONVAINCANT",
+      "P2": "QUALIFIE_ECHEC"
+    },
+    {
+      "name": "cible_off-kvm-smp4",
+      "smp": 4,
+      "head": "60803b8ed7bac84becd769c9492c60ed70df3638",
+      "p95_interactif_on_us": [
+        52,
+        51,
+        47,
+        50
+      ],
+      "p95_interactif_off_us": [
+        47,
+        39,
+        41,
+        47
+      ],
+      "verdict": "NON_CONCLUANT",
+      "P2": "NON_QUALIFIANT",
+      "bras_admissibles": 7
+    },
+    {
+      "name": "idle-kvm-smp4",
+      "smp": 4,
+      "head": "f90e3a4aa56902cd40f092030fcf21bd830ccc90",
+      "p95_interactif_on_us": [
+        49,
+        43,
+        44,
+        43
+      ],
+      "p95_interactif_off_us": [
+        41,
+        46,
+        35,
+        44
+      ],
+      "verdict": "NON_CONCLUANT",
+      "P2": "NON_QUALIFIANT",
+      "bras_admissibles": 7,
+      "p4": {
+        "tour": 3,
+        "bras": "on",
+        "pire_inter_us": 402,
+        "pire_normal_us": 147,
+        "pire_repos_us": 119,
+        "seuil_us": 266,
+        "depassement_us": 136,
+        "sample_index": 171,
+        "pret_ns": 83491,
+        "contamine": 0,
+        "non_apparies": 0
+      }
+    }
+  ]
+}
