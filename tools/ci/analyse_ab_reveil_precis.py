@@ -511,6 +511,14 @@ def analyse(texte, tours, smp, nom, politique="decisions-20261024"):
             valides.append(b)
     proprietes, verdicts = cinq_proprietes(valides, tours, smp, nom, 0, politique=True)
     sortie.extend(s.replace("AB_PROPRIETES_V1", "AB_PROPRIETES_POLITIQUE") for s in proprietes)
+    # P13_AUDIT_COUVERTURE_V1 : P1/P2/P4/P5 peuvent etre OK sur le
+    # sous-ensemble admissible, mais une campagne 7/8 n'est pas 8/8.
+    # Ce diagnostic explicite n'influence aucun critere ni code de sortie.
+    if len(valides) != 2 * tours:
+        sortie.append(
+            f"AB_COUVERTURE_NON_EXHAUSTIVE bras_valides={len(valides)}/{2*tours} "
+            "proprietes_calculees_sur_sous_ensemble=1 campagne_non_qualifiee=1"
+        )
     if echecs or any(verdicts[k] == ECHEC for k in ("P1", "P2", "P4", "P5")):
         verdict, code = "NON_CONVAINCANT", 1
     elif (inconnus or len(bras) != 2 * tours or tours < QUORUM
