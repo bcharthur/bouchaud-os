@@ -51,3 +51,6 @@
 Implémenter une correction précise et réversible du scheduler, en conservant la préemption, les protections mémoire, le quantum et tous les seuils ; compiler et effectuer les tests hôte pertinents ; KVM SMP1/SMP4 (SMP2 en diagnostic) avec analyse stricte du même bootimage ; corriger chaque dépassement P4 ; puis geler un SHA et exécuter les campagnes de convergence requises. **Un bras non qualifié ne vaut jamais un bras vert.**
 
 *Le ZIP intégral des sources/journaux se trouve dans la conversation de remise d'Arthur et en copie sur son poste Windows ; il n'a pas été envoyé sur GitHub.*
+## Provenance de la sonde instrumentée
+
+Le lanceur V3 exécutait `run_ab_reveil_precis.sh` **depuis le worktree `bouchaud-p13-sonde-pire-20261026`**, tandis que chaque `bootimage` provenait du worktree de la variante testée. Ainsi les 24 marqueurs `P13_PIRE_ECHANTILLON` par campagne proviennent de **la sonde userspace instrumentée**, sans impliquer que `tools/userland/ordonnanceur-probe.c` soit modifié dans le HEAD du candidat. Garder les deux identités distinctes pour toute reproduction ; reconstruire le bootimage Rust après chaque changement de noyau. Le contrôle statique `STATIC_CHECK ... True` du V3 est une vérification de présence textuelle, **pas** une preuve d'absence de course SMP.
