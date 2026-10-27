@@ -1851,7 +1851,33 @@ fn avance_tete(budget: usize, maintenant: u64) -> Option<bool> {
     }
     let de = deja.max(CONSOLE_HORODATAGE).min(n);
     let a = de.saturating_add(budget).min(n);
-    CONSOLE.lis(t, de, a, ecris_octets_sans_prefixe);
+    // P13_CONSOLE_MORCEAU_CEDE_V1 : le morceau du fil (budget borne) s'arrete
+    // des qu'une interactive attend ce coeur, apres au moins un octet. Il est
+    // emis preemption coupee : sous KVM chaque octet coute deux sorties de VM
+    // (LSR puis THR), et 16 octets tenaient le coeur jusqu'a 785-1638 us
+    // (`console_morceau_pire_us`, A/B KVM) pendant qu'une interactive prete
+    // attendait son election. Le reste de l'enregistrement reprend a
+    // `CONSOLE_ENTAME` au morceau suivant : memes octets, meme ordre. Les
+    // chemins synchrone et de panique (`usize::MAX`) ne s'arretent jamais.
+    let cede = budget != usize::MAX;
+    let mut emis = 0usize;
+    let mut arret = false;
+    CONSOLE.lis(t, de, a, |morceau| {
+        if !cede {
+            ecris_octets_sans_prefixe(morceau);
+            emis += morceau.len();
+            return;
+        }
+        for octet in morceau {
+            if arret {
+                return;
+            }
+            ecris_octets_sans_prefixe(core::slice::from_ref(octet));
+            emis += 1;
+            arret = crate::kernel::task::interactive_attend_ici();
+        }
+    });
+    let a = de + emis;
     if a < n {
         CONSOLE_ENTAME.store(a, Ordering::Relaxed);
         return Some(false);

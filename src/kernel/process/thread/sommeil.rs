@@ -395,6 +395,19 @@ pub fn borne_interactive_a_jour(cpu: usize, maintenant_ns: u64) -> u64 {
     minimum
 }
 
+/// P13_CONSOLE_MORCEAU_CEDE_V1 : une interactive attend-elle CE coeur (en
+/// file, ou echeance interactive echue) ? Lectures atomiques seulement --
+/// appelable preemption coupee, entre deux octets de console. Une borne
+/// echue perimee est recalculee au point cooperatif suivant.
+pub fn interactive_attend_ici() -> bool {
+    let cpu = local_cpu();
+    let en_file = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file().0)
+        .unwrap_or(0);
+    crate::kernel::scheduler::reveil::interactive_attend(
+        en_file, prochaine_echeance_interactive_ns(cpu), crate::kernel::timer::monotonic_ns())
+}
+
 /// Le minimum exact des echeances interactives attachees a `cpu`, lu sur le
 /// registre.
 fn minimum_interactif(cpu: usize) -> u64 {
@@ -806,8 +819,11 @@ pub fn point_cooperatif(depuis_ns: &mut u64) -> bool {
     // reveils interactifs `detection` 1002 a 1175 us, `reveille_par=console`,
     // dans les deux bras de l'A/B KVM SMP1 (run 40479932972). La borne n'est
     // recalculee sur le registre que si elle est echue et la cession sure.
+    // Recalculee meme au-dela du plancher : une borne echue mais perimee
+    // (interactive reveillee autrement) ne doit pas survivre au point, sans
+    // quoi `interactive_attend_ici` couperait chaque morceau de console.
     let mut borne_interactive = crate::kernel::echeances::JAMAIS;
-    if en_file == 0 && segment < SEGMENT_MIN_NS
+    if en_file == 0
         && prochaine_echeance_interactive_ns(cpu) <= maintenant
         && crate::kernel::scheduler::preempt::cession_volontaire_sure()
     {
