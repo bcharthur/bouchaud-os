@@ -341,17 +341,20 @@ pub(crate) fn arme_echeance(deadline_ns: u64) {
 // de latence, pas un mecanisme de reveil : une borne perimee ou perdue ramene
 // au tic, jamais a un reveil perdu -- le balayage des echeances reste la seule
 // voie de reveil. Les taches de classe normale gardent la granularite du tic.
-static PROCHAINE_INTERACTIVE: [core::sync::atomic::AtomicU64; crate::arch::x86_64::smp::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(crate::kernel::echeances::JAMAIS) };
-        crate::arch::x86_64::smp::MAX_CPUS];
+static PROCHAINE_INTERACTIVE: [crate::kernel::echeances::Echeances; crate::arch::x86_64::smp::MAX_CPUS] =
+    [const { crate::kernel::echeances::Echeances::neuve() }; crate::arch::x86_64::smp::MAX_CPUS];
 
 /// La plus proche echeance d'un sommeil interactif attache a `cpu`
 /// (`echeances::JAMAIS` : aucune connue).
 pub fn prochaine_echeance_interactive_ns(cpu: usize) -> u64 {
     PROCHAINE_INTERACTIVE
         .get(cpu)
-        .map_or(crate::kernel::echeances::JAMAIS, |b| b.load(core::sync::atomic::Ordering::Relaxed))
+        .map_or(crate::kernel::echeances::JAMAIS, |b| b.borne())
 }
+
+/// Balayages en cours (`wake_sleepers`) : entre leur remise a JAMAIS des
+/// bornes interactives et leur recalage (P13_BORNE_INTERACTIVE_PENDANT_BALAYAGE_V1).
+static BALAYAGES_INTERACTIFS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// La borne interactive de `cpu` si elle est echue a `maintenant_ns`,
 /// recalculee d'abord sur les seules taches attachees a ce coeur.
@@ -362,14 +365,39 @@ pub fn prochaine_echeance_interactive_ns(cpu: usize) -> u64 {
 /// recalcul, le coeur occupe s'armerait a `maintenant + MARGE_NS` en boucle
 /// jusqu'au prochain balayage -- une tempete d'interruptions. Appele avec les
 /// interruptions coupees (armement du minuteur local).
+///
+/// P13_BORNE_INTERACTIVE_PENDANT_BALAYAGE_V1 : pendant un balayage (d'un
+/// autre coeur, ou de `schedule()` sur celui-ci, interruptions ouvertes), la
+/// borne publiee vaut JAMAIS jusqu'au recalage. Le coeur qui armait dans
+/// cette fenetre n'armait que son quantum : l'interactive attendait le
+/// balayage suivant (`tardif_us` 997 et 1159, bras `on` de l'A/B KVM SMP4,
+/// run 40136589584). Il complete donc la borne par le minimum exact de ses
+/// propres attentes, sans le publier : le balayage recale lui-meme.
 pub fn borne_interactive_a_jour(cpu: usize, maintenant_ns: u64) -> u64 {
     let Some(borne) = PROCHAINE_INTERACTIVE.get(cpu) else {
         return crate::kernel::echeances::JAMAIS;
     };
-    let valeur = borne.load(core::sync::atomic::Ordering::Relaxed);
+    let valeur = borne.borne();
+    // La remise a JAMAIS suit l'increment : qui la voit voit le balayage.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    if BALAYAGES_INTERACTIFS.load(core::sync::atomic::Ordering::SeqCst) != 0 {
+        return crate::kernel::echeances::borne_pendant_balayage(
+            valeur, minimum_interactif(cpu), maintenant_ns);
+    }
     if valeur == crate::kernel::echeances::JAMAIS || valeur > maintenant_ns {
         return valeur;
     }
+    let minimum = minimum_interactif(cpu);
+    // Une tache attachee a ce coeur qui s'endort pendant ce recalcul y tourne
+    // elle-meme : elle a publie `Blocked` et son echeance avant d'armer, et
+    // cette boucle la voit. Un `store` ne perd donc rien d'ici.
+    borne.remplace(minimum);
+    minimum
+}
+
+/// Le minimum exact des echeances interactives attachees a `cpu`, lu sur le
+/// registre.
+fn minimum_interactif(cpu: usize) -> u64 {
     let mut minimum = crate::kernel::echeances::JAMAIS;
     for index in 0..tasks().len() {
         let tache = &tasks()[index];
@@ -383,10 +411,6 @@ pub fn borne_interactive_a_jour(cpu: usize, maintenant_ns: u64) -> u64 {
             minimum = echeance;
         }
     }
-    // Une tache attachee a ce coeur qui s'endort pendant ce recalcul y tourne
-    // elle-meme : elle a publie `Blocked` et son echeance avant d'armer, et
-    // cette boucle la voit. Un `store` ne perd donc rien d'ici.
-    borne.store(minimum, core::sync::atomic::Ordering::Relaxed);
     minimum
 }
 
@@ -407,7 +431,7 @@ fn arme_si_interactive(deadline_ns: u64) {
     }
     let coeur = tache.runq_cpu.charge() as usize;
     if let Some(borne) = PROCHAINE_INTERACTIVE.get(coeur) {
-        borne.fetch_min(deadline_ns, core::sync::atomic::Ordering::Relaxed);
+        borne.arme(deadline_ns);
     }
     if coeur == local_cpu() {
         crate::arch::x86_64::smp::avance_pour_sommeil_interactif(deadline_ns);
@@ -442,11 +466,11 @@ fn recalcule_echeance() {
             }
         }
     }
-    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : remises a JAMAIS au debut du balayage
-    // (`wake_sleepers`), recalees ici par `fetch_min` -- une pose concurrente
-    // n'est pas ecrasee.
+    // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : retirees au debut du balayage si
+    // echues (`wake_sleepers`), recalees ici par `fetch_min` -- une pose
+    // concurrente n'est pas ecrasee.
     for (borne, valeur) in PROCHAINE_INTERACTIVE.iter().zip(interactives.iter()) {
-        borne.fetch_min(*valeur, core::sync::atomic::Ordering::Relaxed);
+        borne.recale(*valeur);
     }
     // Les alarmes vivent en TICKS ; la borne est en nanosecondes. Convertir --
     // et non comparer les deux tels quels, ce qui est precisement l'erreur que
@@ -585,9 +609,13 @@ fn wake_sleepers() {
         borne.commence_balayage(now);
     }
     // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : la borne interactive repart de zero ;
-    // `recalcule_echeance` la recale exactement.
+    // `recalcule_echeance` la recale exactement. La remise a JAMAIS AVANT le
+    // scan est ce qui preserve un armement concurrent (fetch_min contre
+    // JAMAIS) ; pendant le scan, les coeurs qui arment la completent
+    // (P13_BORNE_INTERACTIVE_PENDANT_BALAYAGE_V1, `borne_interactive_a_jour`).
+    BALAYAGES_INTERACTIFS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     for borne in PROCHAINE_INTERACTIVE.iter() {
-        borne.store(crate::kernel::echeances::JAMAIS, core::sync::atomic::Ordering::Relaxed);
+        borne.remplace(crate::kernel::echeances::JAMAIS);
     }
     let cur_balayage = current_index_raw();
     let source_irq = BALAYAGE_IRQ
@@ -643,6 +671,9 @@ fn wake_sleepers() {
     }
     fire_alarms(crate::kernel::timer::ticks());
     recalcule_echeance();
+    // Les bornes interactives sont recalees : les coeurs qui arment se
+    // fient de nouveau a elles seules.
+    BALAYAGES_INTERACTIFS.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Echeance du prochain `SIGALRM` par processus : (pid, tick).

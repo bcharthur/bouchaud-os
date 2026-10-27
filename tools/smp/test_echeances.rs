@@ -268,3 +268,115 @@ fn un_sommeil_local_ne_fait_pas_tirer_les_autres_coeurs() {
     bornes[2].recale(300);
     assert_eq!(bornes[2].borne(), 150);
 }
+
+// ─── P13_BORNE_INTERACTIVE_PENDANT_BALAYAGE_V1 ─────────────────────────────
+//
+// Les bornes interactives par coeur d'attache (`PROCHAINE_INTERACTIVE`,
+// `sommeil.rs`). Un balayage les remet a JAMAIS avant de lire le registre
+// (pour qu'un armement concurrent survive au recalage), puis les recale.
+// Pendant ce temps, un coeur C qui arme son minuteur (`cible_occupee`) lit sa
+// borne. Propriete : toute echeance interactive de C que le balayage en cours
+// NE sert PAS (echeance > `maintenant` du balayage) reste couverte par ce que
+// C arme : `vue(C) <= echeance`. Sinon C n'arme que son quantum et
+// l'interactive attend le balayage suivant (tic du PIT, quantum) : le
+// `tardif_us` ~1 ms des bras `on` KVM SMP4 (run 40136589584).
+
+/// Ce que le coeur qui arme retient pendant un balayage : le correctif
+/// (completee par le minimum exact du registre) ou l'historique (la borne
+/// publiee seule).
+type VuePendantBalayage = fn(publiee: u64, exacte: u64, maintenant: u64) -> u64;
+
+fn vue_corrigee(publiee: u64, exacte: u64, maintenant: u64) -> u64 {
+    echeances::borne_pendant_balayage(publiee, exacte, maintenant)
+}
+
+fn vue_historique(publiee: u64, _exacte: u64, _maintenant: u64) -> u64 {
+    publiee
+}
+
+/// Rejoue des sommeils interactifs attaches a quatre coeurs et des
+/// balayages ; rend la premiere violation observee PENDANT un balayage.
+fn premiere_violation(vue: VuePendantBalayage) -> Option<String> {
+    const COEURS: usize = 4;
+    for graine in [3u64, 11, 4242, 65_537] {
+        let mut suite = Suite(graine);
+        let bornes: [Echeances; COEURS] = core::array::from_fn(|_| Echeances::neuve());
+        // Le registre : (coeur, tache) -> echeance interactive en attente.
+        let mut attentes: BTreeMap<(usize, usize), u64> = BTreeMap::new();
+        let mut maintenant = 0u64;
+        for _ in 0..5_000 {
+            maintenant += suite.suivant() % 50;
+            let coeur = (suite.suivant() % COEURS as u64) as usize;
+            let tache = (suite.suivant() % 6) as usize;
+            if suite.suivant() % 3 != 0 {
+                // `arme_si_interactive` : la tache s'endort sur son coeur.
+                let echeance = maintenant + 1 + suite.suivant() % 400;
+                attentes.insert((coeur, tache), echeance);
+                bornes[coeur].arme(echeance);
+                continue;
+            }
+            // `wake_sleepers` : remise a JAMAIS avant le scan.
+            for borne in bornes.iter() {
+                borne.remplace(JAMAIS);
+            }
+            // La fenetre : chaque coeur arme son minuteur maintenant.
+            for c in 0..COEURS {
+                let exacte = attentes.iter().filter(|(&(k, _), _)| k == c)
+                    .map(|(_, &e)| e).min().unwrap_or(JAMAIS);
+                let vue_c = vue(bornes[c].borne(), exacte, maintenant);
+                for (&(k, t), &e) in attentes.iter() {
+                    if k == c && e > maintenant && vue_c > e {
+                        return Some(format!("graine {graine} : coeur {c} tache {t} echeance {e} \
+                                             invisible pendant le balayage de {maintenant} (vue {vue_c})"));
+                    }
+                }
+            }
+            // Le scan sert les echues, puis `recalcule_echeance`.
+            attentes.retain(|_, e| maintenant < *e);
+            let mut minima = [JAMAIS; COEURS];
+            for (&(c, _), &e) in attentes.iter() {
+                minima[c] = minima[c].min(e);
+            }
+            for (borne, minimum) in bornes.iter().zip(minima) {
+                borne.recale(minimum);
+            }
+            for (&(c, _), &e) in attentes.iter() {
+                assert!(bornes[c].borne() <= e, "borne trop tardive apres recalage");
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn un_balayage_en_cours_ne_masque_aucune_echeance_interactive() {
+    if let Some(violation) = premiere_violation(vue_corrigee) {
+        panic!("{violation}");
+    }
+}
+
+/// Mutation executable : la lecture historique (borne publiee seule) DOIT
+/// etre detectee, sinon le test ci-dessus ne prouve rien.
+#[test]
+fn la_lecture_historique_de_la_borne_est_detectee() {
+    assert!(premiere_violation(vue_historique).is_some(),
+            "la borne remise a JAMAIS pendant le balayage n'est plus detectee");
+}
+
+/// Le cas exact du trou : A est echue (le scan la sert), B attend plus loin
+/// sur le meme coeur. Pendant le scan, seule B compte.
+#[test]
+fn une_echeance_non_echue_reste_armable_derriere_une_echue() {
+    let (a, b, maintenant) = (100u64, 504u64, 167u64);
+    assert!(a <= maintenant && b > maintenant);
+    // Borne remise a JAMAIS par le scan ; le registre contient encore A et B.
+    assert_eq!(vue_corrigee(JAMAIS, a.min(b), maintenant), a,
+               "A, encore bloquee, est due : le coeur s'arme a la marge");
+    // Une fois A servie (retiree du registre) : B.
+    assert_eq!(vue_corrigee(JAMAIS, b, maintenant), b);
+    assert_eq!(vue_historique(JAMAIS, b, maintenant), JAMAIS);
+    // Un armement concurrent plus proche que le registre est garde ; une
+    // borne publiee echue (perimee) cede au registre.
+    assert_eq!(vue_corrigee(300, b, maintenant), 300);
+    assert_eq!(vue_corrigee(150, b, maintenant), b);
+}

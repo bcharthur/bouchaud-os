@@ -108,6 +108,14 @@ impl Echeances {
         self.prochaine.fetch_min(minimum_ns, Ordering::AcqRel);
     }
 
+    /// Remplace la borne par un minimum recalcule par le SEUL proprietaire de
+    /// la borne (`borne_interactive_a_jour`, sur son coeur, interruptions
+    /// coupees), quand elle etait echue. Un balayage concurrent ne fait que
+    /// `commence_balayage` (seulement si echue) puis `recale` (fetch_min).
+    pub fn remplace(&self, minimum_ns: u64) {
+        self.prochaine.store(minimum_ns, Ordering::Relaxed);
+    }
+
     /// La borne courante. Pour les diagnostics et les tests.
     pub fn borne(&self) -> u64 {
         self.prochaine.load(Ordering::Relaxed)
@@ -118,4 +126,17 @@ impl Default for Echeances {
     fn default() -> Self {
         Self::neuve()
     }
+}
+
+/// Ce qu'un coeur peut armer pendant un balayage en cours
+/// (P13_BORNE_INTERACTIVE_PENDANT_BALAYAGE_V1).
+///
+/// Le balayage remet la borne publiee a JAMAIS avant de lire le registre --
+/// c'est ce qui preserve un armement concurrent -- et ne la recale qu'a la
+/// fin. Entre les deux, `publiee` ne couvre plus les attentes en cours :
+/// seul le minimum `exacte`, lu sur le registre par le coeur lui-meme, les
+/// couvre. Une `publiee` future (armement concurrent) est gardee si elle est
+/// plus proche ; une `publiee` echue est perimee et cede a `exacte`.
+pub fn borne_pendant_balayage(publiee: u64, exacte: u64, maintenant_ns: u64) -> u64 {
+    if publiee > maintenant_ns { publiee.min(exacte) } else { exacte }
 }
