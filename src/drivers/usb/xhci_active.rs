@@ -5993,17 +5993,29 @@ fn fil_hid() -> ! {
             t1,
         );
         poll_mesure(t1);
-        // T0 DU TOUR SUIVANT, calcule par la MEME fonction que `sleep_ticks`
-        // arme -- recopier la formule ici mentirait le jour ou la cadence du
-        // timer change, et le mensonge accuserait l'ordonnanceur.
-        echeance = crate::kernel::task::echeance_pour(1);
-        // UN TICK, SOIT UNE MILLISECONDE.
+        // UN TICK, SOIT UNE MILLISECONDE, QUAND UN HID EST SERVI.
         //
         // C'est la cadence d'une souris USB rapide. Scruter plus vite ne
         // gagnerait rien -- le peripherique ne produit pas plus -- et
         // couterait un coeur ; scruter plus lentement se sentirait au
         // pointeur.
-        crate::kernel::task::sleep_ticks(1);
+        //
+        // P13_HID_SANS_PERIPHERIQUE_V1 : SANS HID, `poll_mesure` rend la main
+        // sans rien lire (`poll_interne`), et le fil -- Interactive, sensible
+        // a la latence, epingle au coeur zero -- se reveillait quand meme
+        // mille fois par seconde. Sous le reveil precis, chaque sommeil d'un
+        // tick armait un tir sur le coeur zero occupe et le preemptait par
+        // demande ciblee : A/B KVM sans aucun controleur USB, SMP1, ~8 300
+        // avances et ~8 600 renoncements « fil noyau » de plus par bras `on`.
+        // Le balayage des branchements a sa propre periode (200 ms en temps) :
+        // la pause d'oisivete ne fait que l'allonger de 25 ms au plus, et la
+        // milliseconde revient des qu'un clavier ou une souris est enumere.
+        let ticks = politique_xhci::ticks_apres_tour_hid(hid_polling());
+        // T0 DU TOUR SUIVANT, calcule par la MEME fonction que `sleep_ticks`
+        // arme -- recopier la formule ici mentirait le jour ou la cadence du
+        // timer change, et le mensonge accuserait l'ordonnanceur.
+        echeance = crate::kernel::task::echeance_pour(ticks);
+        crate::kernel::task::sleep_ticks(ticks);
     }
 }
 

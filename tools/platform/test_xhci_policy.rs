@@ -19,3 +19,12 @@ fn aucun_rearmement_sur_contexte_running_ou_disabled() {
         assert!(politique::recuperable(etat));
     }
 }
+
+#[test]
+fn le_fil_hid_garde_la_milliseconde_seulement_quand_un_hid_est_servi() {
+    assert_eq!(politique::ticks_apres_tour_hid(true), 1);
+    assert_eq!(politique::ticks_apres_tour_hid(false), politique::PAUSE_HID_OISIF_TICKS);
+    // La pause n'ajoute pas plus qu'un huitieme a la periode de balayage
+    // des branchements (200 ms), et reste bien au-dessus du tick.
+    assert!(politique::PAUSE_HID_OISIF_TICKS > 1 && politique::PAUSE_HID_OISIF_TICKS * 8 <= 200);
+}
