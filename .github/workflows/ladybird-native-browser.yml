@@ -1,6 +1,17 @@
 name: ladybird-native-browser
 
 # Producteur CANONIQUE de l'artefact consomme par run.ps1.
+#
+# BOUCHAUD_CI_PALIERS_V1 -- deux paliers, jamais confondus :
+#   qualification  workflow_dispatch (defaut) et branche d'audit : build
+#                  Ladybird complet dans le run, primitives P13 (os-primitives)
+#                  appelees, job « verdict de convergence », CONVERGENCE_OK.
+#   developpement  push / pull_request / dispatch palier=developpement : memes
+#                  epreuves Ladybird et memes seuils ; l'artefact est REUTILISE
+#                  d'un run aux entrees de build identiques s'il existe
+#                  (tools/ci/ladybird_provenance.py), les primitives P13 sont
+#                  jouees par p13-primitives-noyau.yml. Job « verdict
+#                  integration developpement », jamais CONVERGENCE_OK.
 # Un push sur une branche avec PR declenche AUSSI pull_request : le run PR reflete
 # alors le run push du meme arbre (BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2, job dedoublonne).
 on:
@@ -9,12 +20,15 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
-      - '.github/workflows/os-primitives.yml'
+      # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
+      - 'tools/ci/ladybird_empreinte.py'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/verifie_artefact_ladybird.sh'
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
@@ -68,12 +82,15 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
-      - '.github/workflows/os-primitives.yml'
+      # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
       - 'tools/ci/ladybird_cache_fixture.py'
       - 'tools/ci/verdict_convergence.py'
+      - 'tools/ci/ladybird_empreinte.py'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/verifie_artefact_ladybird.sh'
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
@@ -121,6 +138,12 @@ on:
       - 'src/drivers/block/**'
       - 'src/kernel/native/**'
   workflow_dispatch:
+    inputs:
+      palier:
+        description: 'qualification (build complet + primitives P13 + verdict de convergence) ou developpement (artefact reutilisable, sans P13)'
+        type: choice
+        options: [qualification, developpement]
+        default: qualification
 
 permissions:
   contents: read
@@ -174,15 +197,49 @@ jobs:
           fi
 
   primitives:
+    # Les sondes P13 (~80 min-runner) ne dependent pas de Ladybird : en
+    # developpement elles tournent via p13-primitives-noyau.yml, sur les seuls
+    # chemins noyau. Ici : qualification uniquement.
     needs: dedoublonne
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') }}
     uses: ./.github/workflows/os-primitives.yml
     with:
       p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
-  build:
+  provenance:
+    # BOUCHAUD_LADYBIRD_PROVENANCE_V1 : construire, ou reutiliser l'artefact
+    # d'un run aux entrees de build identiques (meme recette, meme upstream).
+    # Mesure : 4 empreintes distinctes sur 60 runs (13-27/10), et au moins
+    # cinq builds complets de 100-136 min pour la seule empreinte e38206db.
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
+    name: ladybird / provenance de l'artefact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      mode: ${{ steps.decision.outputs.mode }}
+      source_run: ${{ steps.decision.outputs.source_run }}
+      empreinte: ${{ steps.decision.outputs.empreinte }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Garde de l'empreinte (la recette ne lit rien hors empreinte)
+        run: python3 tools/ci/ladybird_empreinte.py garde
+      - id: decision
+        name: Decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
+        run: python3 tools/ci/ladybird_provenance.py
+
+  build:
+    needs: [dedoublonne, provenance]
+    # Repli sur build si la decision manque : couteux, jamais faux.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode != 'reutilise' }}
     name: ladybird / build once
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -316,6 +373,11 @@ jobs:
       # illisible. Le journal est donc conserve, et les diagnostics recopies A
       # LA FIN, la ou on les lira.
       - name: Construire Ladybird
+        # BOUCHAUD_CI_CACHES_SURVIVENT_V1 : un depassement du delai du JOB
+        # annule le job, et `!cancelled()` saute alors toutes les sauvegardes
+        # de cache -- le run suivant repart de zero. Un delai d'ETAPE echoue
+        # l'etape sans annuler le job : les sauvegardes passent.
+        timeout-minutes: 150
         run: |
           set -o pipefail
           tools/ladybird/native-browser-final.sh --cible 2>&1 \
@@ -355,6 +417,26 @@ jobs:
         if: always()
         run: ccache -s || true
 
+      # BOUCHAUD_CI_CACHES_SURVIVENT_V1 : sauvegardes AVANT les publications.
+      # Une publication bloquee jusqu'au delai du job ne les emporte plus.
+      - name: Sauvegarder le build incremental
+        if: ${{ !cancelled() && steps.ninja.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/ladybird-browser-src
+            third_party/build-ladybird-browser-bouchaud
+          key: ${{ steps.ninja.outputs.cache-primary-key }}
+
+      # Les objets reussis servent meme si une autre unite a echoue.
+      # Successful objects are reusable even when another translation unit fails.
+      - name: Sauvegarder ccache meme apres erreur
+        if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
       - name: Verifier les artefacts runtime
         run: |
           set -eux
@@ -390,6 +472,9 @@ jobs:
       # disponible a la main (`tools/ladybird/build-variante-relr.sh`).
 
       - name: Publier Ladybird natif
+        # 434 Mo, 58 fichiers, 18 s mesurees (run 40528051026). Borne : une
+        # publication bloquee echoue en 20 min au lieu de consommer le job.
+        timeout-minutes: 20
         uses: actions/upload-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -403,6 +488,7 @@ jobs:
       - name: Corpus WPT
         run: python3 tools/ladybird/wpt/prepare-corpus.py third_party/ladybird-browser-src third_party/wpt-corpus
       - name: Publier le corpus WPT
+        timeout-minutes: 10
         uses: actions/upload-artifact@v4
         with:
           name: bouchaud-wpt-corpus
@@ -410,28 +496,99 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Sauvegarder le build incremental
-        if: ${{ !cancelled() && steps.ninja.outcome == 'success' }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            third_party/ladybird-browser-src
-            third_party/build-ladybird-browser-bouchaud
-          key: ${{ steps.ninja.outputs.cache-primary-key }}
 
-      # Successful objects are reusable even when another translation unit fails.
-      - name: Sauvegarder ccache meme apres erreur
-        if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/ccache
-          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
+  reutilise:
+    # BOUCHAUD_LADYBIRD_PROVENANCE_V1 : l'artefact d'un run anterieur aux
+    # entrees identiques est telecharge, REVERIFIE (manifeste + liaison par
+    # empreinte recalculee depuis git), puis republie dans CE run sous le meme
+    # nom : les jobs consommateurs, run.ps1 et les workflows qui le
+    # telechargent restent inchanges.
+    needs: [dedoublonne, provenance]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode == 'reutilise' }}
+    name: ladybird / artefact reutilise (entrees identiques)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 15
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ needs.provenance.outputs.source_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 5
+        with:
+          name: bouchaud-wpt-corpus
+          path: wpt-corpus
+          run-id: ${{ needs.provenance.outputs.source_run }}
+          github-token: ${{ github.token }}
+      - name: Verifier l'artefact reutilise (manifeste + entrees identiques)
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Volume et empaquetage (diagnostic)
+        run: |
+          set -euo pipefail
+          printf 'ARTEFACT_VOLUME fichiers=%s octets=%s\n' "$(find native-browser -type f | wc -l)" "$(du -sb native-browser | cut -f1)"
+          debut=$(date +%s.%N)
+          tar -C native-browser --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - . \
+            | zstd -q -T0 -10 --long=31 -o /tmp/ladybird.tar.zst
+          fin=$(date +%s.%N)
+          printf 'ARTEFACT_TAR_ZSTD10_LONG31 octets=%s secondes=%.1f\n' "$(stat -c %s /tmp/ladybird.tar.zst)" "$(echo "$fin - $debut" | bc)"
+          rm -f /tmp/ladybird.tar.zst
+      - name: Republier Ladybird natif
+        timeout-minutes: 20
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Republier le corpus WPT
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-wpt-corpus
+          path: wpt-corpus/
+          if-no-files-found: error
+          retention-days: 14
+
+  artefact:
+    # Point de rendez-vous : exactement UN producteur a reussi, et la liaison
+    # que chaque consommateur exigera en decoule (tete ou entrees).
+    needs: [dedoublonne, provenance, build, reutilise]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && (needs.build.result == 'success' || needs.reutilise.result == 'success') }}
+    name: ladybird / artefact disponible
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      liaison: ${{ steps.liaison.outputs.liaison }}
+    steps:
+      - id: liaison
+        env:
+          R_BUILD: ${{ needs.build.result }}
+          R_REUTILISE: ${{ needs.reutilise.result }}
+          MODE: ${{ needs.provenance.outputs.mode }}
+        run: |
+          echo "build=$R_BUILD reutilise=$R_REUTILISE decision=$MODE"
+          if [ "$R_BUILD" = success ] && [ "$R_REUTILISE" = skipped ]; then
+            echo liaison=tete >> "$GITHUB_OUTPUT"
+          elif [ "$R_REUTILISE" = success ] && [ "$R_BUILD" = skipped ] && [ "$MODE" = reutilise ]; then
+            echo liaison=entrees >> "$GITHUB_OUTPUT"
+          else
+            echo "LADYBIRD_PROVENANCE_INCOHERENTE" >&2
+            exit 1
+          fi
 
   wpt:
     # BOUCHAUD_WPT_V1 (P11) : Ladybird SUR Bouchaud contre Ladybird sous Linux.
     name: ladybird / wpt
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -462,11 +619,7 @@ jobs:
           name: bouchaud-wpt-corpus
           path: wpt-corpus
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: WPT sur Bouchaud OS
         run: tools/ci/run_ladybird_wpt.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser wpt-corpus
       - name: Rapport et journaux
@@ -483,7 +636,7 @@ jobs:
     # BOUCHAUD_CACHE_REDEMARRAGE_V1 (convergence P2) : cache HTTP disque et
     # base SQL a travers un redemarrage complet du navigateur.
     name: ladybird / cache et SQL apres redemarrage
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -510,11 +663,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Cache HTTP et SQLite apres redemarrage du navigateur
         run: tools/ci/run_ladybird_cache.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -531,7 +680,7 @@ jobs:
     # BOUCHAUD_ENDURANCE_V1 : 10 minutes de cycle de vie (cadres, workers,
     # onglets cross-site) sans crash du Compositor.
     name: ladybird / endurance 10 min
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -558,11 +707,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Executant -- processeurs et acceleration (diagnostic)
         # Les bancs lancent QEMU SANS -enable-kvm (TCG, emulation logicielle) :
         # les cadences mesurees (rAF, chargement des cadres) en dependent.
@@ -591,7 +736,7 @@ jobs:
     # DIAGNOSTIC (hors verdict de convergence) : il dit ce que coute
     # l'emulation TCG dans les cadences mesurees par l'endurance.
     name: ladybird / endurance sous KVM (stabilite + performance)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -618,11 +763,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Executant -- processeurs et acceleration (diagnostic)
         # Les bancs lancent QEMU SANS -enable-kvm (TCG, emulation logicielle) :
         # les cadences mesurees (rAF, chargement des cadres) en dependent.
@@ -672,7 +813,7 @@ jobs:
     # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
     # de l'autre site et le Compositor vivent, le navigateur le remplace.
     name: ladybird / robustesse (crash d'un rendu, cadres isoles, cycle des workers)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -699,11 +840,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Crash d'un rendu sur Bouchaud OS
         run: tools/ci/run_ladybird_crash_rendu.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 90
       - name: Isolation des cadres (BOUCHAUD_SITE_ISOLATION=iframe)
@@ -730,7 +867,7 @@ jobs:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)
     # en HTTPS reel, sonde de pixels sur la trame du Compositor.
     name: ladybird / sites reels
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -757,11 +894,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Sites reels sur Bouchaud OS
         run: tools/ci/run_ladybird_sites.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -774,8 +907,10 @@ jobs:
 
   convergence:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
-    name: ladybird / verdict de convergence
-    needs: [dedoublonne, build, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
+    # Le NOM depend du palier : un vert de developpement ne peut pas etre lu
+    # comme une convergence (run-bouchaud-ladybird-ci.ps1 cherche ce nom).
+    name: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}
+    needs: [dedoublonne, provenance, build, reutilise, artefact, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
     if: always()
     runs-on: ubuntu-24.04
     # Reflet : le run push du meme arbre peut durer des heures (build froid).
@@ -793,10 +928,15 @@ jobs:
           TETE: ${{ github.event.pull_request.head.sha }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           SOURCE: ${{ needs.dedoublonne.outputs.source_run }}
-        run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "ladybird / verdict de convergence" --delai 19200 --pas 60
+          # Le run push reflete porte le nom de SON palier (audit : qualification).
+          JOB_VERDICT: ${{ github.head_ref == 'audit/p13-console-sync-ci-20261024' && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}
+        run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "$JOB_VERDICT" --delai 19200 --pas 60
       - name: Verdict
         if: needs.dedoublonne.outputs.reutilise != 'true'
         env:
+          BOUCHAUD_PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
+          PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}
+          R_REUTILISE: ${{ needs.reutilise.result }}
           R_PRIMITIVES: ${{ needs.primitives.result }}
           R_PERFORMANCE: ${{ needs.performance.result }}
           R_MEMOIRE: ${{ needs.memoire-onglets.result }}
@@ -816,7 +956,7 @@ jobs:
 
   browser-host-smoke:
     name: ladybird / browser-host smoke
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -843,11 +983,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Smoke BrowserHost sur Bouchaud OS
         run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -879,7 +1015,7 @@ jobs:
   # ete vu vert. Scanout 2D, aucune acceleration (P10 reste BLOCKED).
   browser-host-smoke-virtio:
     name: ladybird / browser-host smoke sur virtio-gpu (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -906,11 +1042,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Smoke BrowserHost sur Bouchaud OS, ecran virtio-gpu
         env:
           BO_SMOKE_AFFICHAGE: virtio
@@ -940,7 +1072,7 @@ jobs:
 
   browser-host-smoke-surface-double:
     name: ladybird / browser-host smoke, surface a deux tampons (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -967,11 +1099,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Smoke BrowserHost sur Bouchaud OS, surface client a deux tampons
         # BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3d) : `gui-surface double`
         # avant `desktop` ; le chrome doit retenir le contrat et recevoir des
@@ -1058,7 +1186,7 @@ jobs:
 
   ordre-worker:
     name: ladybird / ordre worker (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1072,6 +1200,8 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Deux demarrages froids, ordres inverses
         run: tools/ci/run_worker_ordre.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Journaux
@@ -1093,7 +1223,7 @@ jobs:
     # RIP alterne : frequence, bras, role du profil, et pour chaque faute la
     # pile symbolisee publiee par le noyau (BOUCHAUD_PILE_DE_FAUTE_V1).
     name: ladybird / piege du Compositor (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -1108,11 +1238,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Huit demarrages froids, bras http et blob, profil alterne
         run: tools/ci/run_compositor_piege.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 4
       - name: Journaux
@@ -1134,7 +1260,7 @@ jobs:
     # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
     # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
     name: ladybird / memoire apres onglets fermes (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
@@ -1149,11 +1275,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Acces a /dev/kvm
         run: |
           sudo chmod 666 /dev/kvm
@@ -1215,7 +1337,7 @@ jobs:
     # SIGSEGV dans le meme demarrage : remplacant unique, reprise de la page,
     # le Compositor relance presente encore, aucune corruption noyau.
     name: ladybird / politique de crash des services (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1230,11 +1352,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Acces a /dev/kvm
         run: |
           sudo chmod 666 /dev/kvm
@@ -1260,7 +1378,7 @@ jobs:
     # proportionnel a la duree), memoire du Compositor ([LB:MEM]) et pentes
     # RSS sur toute la duree.
     name: ladybird / endurance 20 min sous KVM (diagnostic)
-    needs: build
+    needs: artefact
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1275,11 +1393,7 @@ jobs:
           name: bouchaud-ladybird-native-browser
           path: native-browser
       - name: Verifier le manifeste de l'artefact telecharge
-        run: |
-          python3 tools/ladybird/artifact_manifest.py verify \
-            --root native-browser \
-            --upstream third_party/UPSTREAM.md \
-            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Acces a /dev/kvm
         run: |
           sudo chmod 666 /dev/kvm

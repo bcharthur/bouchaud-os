@@ -1,0 +1,50 @@
+name: p13-primitives-noyau
+
+# BOUCHAUD_CI_PALIERS_V1 -- palier « integration ciblee » des sondes P13.
+#
+# os-primitives.yml reste un workflow REUTILISABLE et manuel (contrat de
+# tools/ci/check_pipeline_policy.py). Jusqu'ici, la seule chose qui le jouait
+# sur un push noyau etait ladybird-native-browser.yml : chaque modification du
+# navigateur relancait ~80 min-runner de sondes P13, et chaque modification du
+# noyau relancait 2 h 15 de build Ladybird pour obtenir ces memes sondes.
+#
+# Ce workflow les decouple : un push qui touche le noyau (memes chemins que le
+# declencheur Ladybird, plus os-primitives lui-meme) joue les sondes, en mode
+# p13_strict=false comme avant sur ces branches. La qualification stricte
+# reste celle de ladybird-native-browser.yml palier=qualification (et de la
+# branche d'audit, qui ne passe donc pas ici : pas de double execution).
+on:
+  push:
+    branches: [main, 'claude/**', 'feat/**']
+    paths:
+      - '.github/workflows/os-primitives.yml'
+      - '.github/workflows/p13-primitives-noyau.yml'
+      - 'src/kernel/process/**'
+      - 'src/kernel/memory/**'
+      - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/kernel/sync/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/smp.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'tools/ci/analyse_ab_reveil_precis.py'
+      - 'tools/ci/qualifie_p13.py'
+      - 'src/compat/linux/**'
+      - 'src/kernel/navigateur/**'
+      - 'src/gui/services.rs'
+      - 'src/kernel/services/**'
+      - 'src/drivers/api/gpu.rs'
+      - 'src/drivers/block/**'
+      - 'src/kernel/native/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  primitives:
+    uses: ./.github/workflows/os-primitives.yml
+    with:
+      p13_strict: false
