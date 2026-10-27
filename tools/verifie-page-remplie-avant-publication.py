@@ -47,10 +47,41 @@ def corps(source: str, signature: str) -> str:
     return ""
 
 
+BANC = '#[cfg(feature = "banc-c5-ordre-historique")]'
+
+
+def hors_banc(source: str) -> str:
+    """Le texte sans les blocs de l'option de banc (jamais dans `default`)."""
+    sortie, i = [], 0
+    while True:
+        j = source.find(BANC, i)
+        if j < 0:
+            sortie.append(source[i:])
+            return "".join(sortie)
+        sortie.append(source[i:j])
+        k = source.find("{", j)
+        if source[j + len(BANC):k].strip():
+            # attribut sur une instruction sans bloc : sauter jusqu'au `;`
+            i = source.find(";", j) + 1
+            continue
+        profondeur = 0
+        for n in range(k, len(source)):
+            if source[n] == "{":
+                profondeur += 1
+            elif source[n] == "}":
+                profondeur -= 1
+                if profondeur == 0:
+                    i = n + 1
+                    break
+
+
 def verifie(t: dict) -> list:
     fautes = []
+    t = dict(t, faute=hors_banc(t["faute"]))
     f = corps(t["vm"], "pub fn map_new_frame_accounted(")
     a, c, b, p = f.find("alloc_frame_a_recouvrir()"), f.find(COPIE), f.find(BARRIERE), f.find(PUBLIE)
+    if "if self.pages.remove(&frame) {\n            free_frame(frame);" not in f:
+        fautes.append("map_new_frame_accounted : frame non rendue si la publication est refusee")
     if not 0 <= a < c < b < p:
         fautes.append("map_new_frame_accounted : la PTE n'est pas publiee apres la copie et la barriere")
     if "contenu.len() != PAGE_SIZE as usize" not in f:
@@ -72,9 +103,10 @@ def negatifs(t: dict) -> list:
     mutations = [
         ("barriere retiree", "vm", BARRIERE, ""),
         ("page partielle acceptee", "vm", "contenu.len() != PAGE_SIZE as usize", "contenu.len() > PAGE_SIZE as usize"),
+        ("frame gardee sur refus", "vm", "if self.pages.remove(&frame) {\n            free_frame(frame);", "if self.pages.remove(&frame) {\n            let _ = frame;"),
         ("repli historique", "faute", APPEL, "mm.space.map_alloc_accounted(\n                page,\n                &page_data,"),
-        ("ecriture apres publication", "faute", "                return FaultOutcome::IoError;\n            }\n            note.map(",
-         "                return FaultOutcome::IoError;\n            }\n            mm.space.write(page, &page_data);\n            note.map("),
+        ("ecriture apres publication", "faute", "            // BANC DE COURSE C5 : l'ordre d'avant",
+         "            mm.space.write(page, &page_data);\n            // BANC DE COURSE C5 : l'ordre d'avant"),
     ]
     echecs = []
     for nom, cle, avant, apres in mutations:
@@ -104,7 +136,7 @@ def main() -> int:
         print(f"ECHEC {faute}")
     if fautes:
         return 1
-    print("page remplie avant publication : ok (5 mutations detectees)")
+    print("page remplie avant publication : ok (6 mutations detectees)")
     return 0
 
 

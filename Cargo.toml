@@ -29,6 +29,16 @@ banc-io = []
 # etre conservee. Option de compilation, jamais dans `default` : voir
 # `tools/ci/run_virtio_gpu_dma_panne.sh`.
 banc-virtio-gpu-sans-reponse = []
+# BANC DE COURSE C5 (P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1).
+#
+# Elargit a 2 ms la fenetre de publication d'une page privee chargee a la
+# demande : `banc-c5-ordre-historique` rejoue l'ordre d'avant le correctif (PTE
+# presente sur une frame vierge, PUIS copie) ; `banc-c5-fenetre-corrigee`
+# garde l'ordre corrige (copie, PUIS PTE) avec la meme attente. Reproduction
+# negative et controle sous KVM. Jamais dans `default` : voir
+# `tools/ci/run_faute_persistance.sh` et `.github/workflows/p13-c5-console-kvm.yml`.
+banc-c5-ordre-historique = []
+banc-c5-fenetre-corrigee = []
 # BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1).
 #
 # Le premier `TRANSFER_TO_HOST_2D` du bureau est juge contre une barriere qui

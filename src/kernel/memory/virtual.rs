@@ -306,6 +306,15 @@ pub fn alloc_frame() -> Option<u64> {
     Some(phys)
 }
 
+/// BANC DE COURSE C5 (options `banc-c5-*`, jamais dans `default`).
+#[cfg(any(feature = "banc-c5-ordre-historique", feature = "banc-c5-fenetre-corrigee"))]
+fn attente_banc_c5() {
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(2_000_000);
+    while crate::kernel::timer::monotonic_ns() < fin {
+        core::hint::spin_loop();
+    }
+}
+
 /// Rend une frame a l'allocateur.
 // BOUCHAUD_P2_FREE_FRAME_O1_V1
 //
@@ -1176,6 +1185,12 @@ impl AddressSpace {
         self.map(virt, phys, (flags & !PTE_RSS_KIND_MASK) | kind.bits())
     }
 
+    /// BANC DE COURSE C5 : elargit la fenetre de publication (2 ms).
+    #[cfg(any(feature = "banc-c5-ordre-historique", feature = "banc-c5-fenetre-corrigee"))]
+    pub fn attente_banc_c5_publique() {
+        attente_banc_c5();
+    }
+
     /// P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1 : mappe sur `virt` (aligne page)
     /// une frame NEUVE dont le contenu est `contenu`, recopie AVANT que la PTE
     /// ne devienne presente.
@@ -1211,8 +1226,18 @@ impl AddressSpace {
             );
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        #[cfg(feature = "banc-c5-fenetre-corrigee")]
+        attente_banc_c5();
         self.pages.insert(frame);
-        self.map_accounted(virt, frame, flags, kind)
+        if self.map_accounted(virt, frame, flags, kind) {
+            return true;
+        }
+        // Publication refusee : la frame n'a jamais ete visible, elle est
+        // rendue tout de suite plutot qu'a la destruction de l'espace.
+        if self.pages.remove(&frame) {
+            free_frame(frame);
+        }
+        false
     }
 
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).

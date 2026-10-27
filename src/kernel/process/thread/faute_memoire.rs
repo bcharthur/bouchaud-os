@@ -957,6 +957,7 @@ fn peuple_page_loader(
             // P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1 : la page est complete AVANT
             // que sa PTE ne soit presente. Un fil frere l'execute sans faute
             // des la publication (C5).
+            #[cfg(not(feature = "banc-c5-ordre-historique"))]
             if !mm.space.map_new_frame_accounted(
                 page,
                 &page_data,
@@ -964,6 +965,21 @@ fn peuple_page_loader(
                 crate::kernel::vmm::ResidentKind::FilePrivate,
             ) {
                 return FaultOutcome::IoError;
+            }
+            // BANC DE COURSE C5 : l'ordre d'avant le correctif, fenetre elargie
+            // -- la reproduction negative, jamais dans une image livree.
+            #[cfg(feature = "banc-c5-ordre-historique")]
+            {
+                if !mm.space.map_alloc_accounted(
+                    page,
+                    crate::kernel::vmm::PAGE_SIZE,
+                    effective.drapeaux,
+                    crate::kernel::vmm::ResidentKind::FilePrivate,
+                ) {
+                    return FaultOutcome::IoError;
+                }
+                crate::kernel::vmm::AddressSpace::attente_banc_c5_publique();
+                let _ = mm.space.write(page, &page_data);
             }
             note.map(crate::kernel::timer::monotonic_ns().saturating_sub(avant_map));
             FAULTS_FILE.fetch_add(1, Ordering::Relaxed);
