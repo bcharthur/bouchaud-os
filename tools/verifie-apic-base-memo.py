@@ -76,8 +76,8 @@ def negatifs(smp: str, autres: str) -> list:
         ("memo jamais posee", "            memo.store(apic_base, Ordering::Relaxed);\n", ""),
         ("memo globale", "APIC_BASE_MEMO.get(cpu_index())", "APIC_BASE_MEMO.get(0)"),
         ("bascule x2APIC", "            apic_base |= APIC_ENABLE;", "            apic_base |= APIC_ENABLE | X2APIC_ENABLE;"),
-        ("EOI relit le MSR", "pub fn eoi_local() {\n    unsafe {\n",
-         "pub fn eoi_local() {\n    unsafe {\n        let _ = usermode::read_msr(IA32_APIC_BASE);\n"),
+        ("EOI relit le MSR", "            usermode::write_msr(X2APIC_EOI, 0);",
+         "            let _ = usermode::read_msr(IA32_APIC_BASE);\n            usermode::write_msr(X2APIC_EOI, 0);"),
     ]
     echecs = []
     for nom, avant, apres in mutations:

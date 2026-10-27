@@ -7,6 +7,7 @@
 pub mod ports;
 pub mod cpu;
 pub mod cpu_local; // BOUCHAUD_SMP_NG1_CPU_FOUNDATION
+pub mod eoi_pv; // P13_EOI_PARAVIRTUALISE_V1
 pub mod irq_context;
 pub mod pat; // BOUCHAUD_PAT_ECRITURE_COMBINEE_V1
 pub mod gdt;

@@ -181,6 +181,8 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // BOUCHAUD_PREUVE_HOTE_V1 : sous KVM, l'hote publie le temps qu'il vole
     // a ce coeur (sans effet ailleurs). Les AP le demandent a leur entree.
     kernel::vol_hote::active_ce_coeur(0);
+    // P13_EOI_PARAVIRTUALISE_V1 : sous KVM, l'EOI sans sortie de VM.
+    arch::x86_64::eoi_pv::active_ce_coeur(0);
     if reference_bringup {
         kernel::dmesg::log("bringup: SMP/AP startup volontairement ignore");
     } else {

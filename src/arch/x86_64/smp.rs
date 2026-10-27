@@ -507,6 +507,11 @@ pub fn tlb_relances() -> (u64, u64) {
 }
 
 pub fn eoi_local() {
+    // P13_EOI_PARAVIRTUALISE_V1 : sous KVM, l'hote peut dispenser cette
+    // interruption de l'ecriture EOI (une sortie de VM de moins par IRQ).
+    if crate::arch::x86_64::eoi_pv::eoi_dispense(cpu_index()) {
+        return;
+    }
     unsafe {
         let (x2, lapic) = local_apic();
         if x2 {
@@ -1739,6 +1744,7 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
     usermode::init_ap(cpu);
     // BOUCHAUD_PREUVE_HOTE_V1 : la page du vol est deja allouee par le BSP.
     crate::kernel::vol_hote::active_ce_coeur(cpu);
+    crate::arch::x86_64::eoi_pv::active_ce_coeur(cpu);
     unsafe { enable_local_apic(); }
 
     let bit = 1usize << cpu;
