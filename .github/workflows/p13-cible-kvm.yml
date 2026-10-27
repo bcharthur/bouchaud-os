@@ -1,0 +1,224 @@
+name: p13-cible-kvm
+
+# Validation CIBLEE sous KVM des correctifs de la nouvelle baseline P13, chacun
+# avec sa reproduction NEGATIVE compilee depuis le MEME arbre (option de banc,
+# jamais dans `default`) :
+#
+#   C5       page privee chargee a la demande remplie AVANT sa PTE
+#            (banc-c5-ordre-historique : rouge attendu, signature C5) ;
+#   console  lignes differees qui font de la place au lieu de se perdre
+#            (banc-console-sans-contre-pression : pertes attendues) ;
+#   reveil   tache reveillee jamais laissee sur un coeur qui n'elit pas
+#            (banc-reveil-historique : dormeur bloque attendu).
+#
+# Un temoin VERT est un echec : le banc ne prouverait plus rien. Declenchement
+# manuel seulement ; ne remplace ni os-primitives ni la qualification P13.
+on:
+  workflow_dispatch:
+    inputs:
+      repetitions:
+        description: 'Tours C5 sur l''image livree'
+        type: string
+        required: false
+        default: '24'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p13-cible-kvm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  c5:
+    name: C5 -- page remplie avant sa PTE (KVM SMP4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: p13-cible-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            p13-cible-${{ runner.os }}-
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Images (livree, ordre historique, fenetre corrigee)
+        run: |
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-c5-ordre-historique
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-historique.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-c5-fenetre-corrigee
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-fenetre.bin
+          for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-c5.txt
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
+      - name: Reproduction negative (ordre historique, fenetre 2 ms) -- rouge attendu
+        run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-historique.bin 6 rouge "$PWD/c5-kvm-historique"
+      - name: Controle (ordre corrige, meme fenetre 2 ms) -- vert attendu
+        if: ${{ !cancelled() }}
+        run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-fenetre.bin 6 vert "$PWD/c5-kvm-fenetre"
+      - name: Image livree -- vert attendu
+        if: ${{ !cancelled() }}
+        run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-livree.bin "${{ inputs.repetitions }}" vert "$PWD/c5-kvm-livree"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-c5-${{ github.run_id }}
+          path: |
+            identite-c5.txt
+            c5-kvm-*.txt
+            c5-kvm-*/identite.txt
+            c5-kvm-*/tour-*/verdict.txt
+          if-no-files-found: warn
+
+  console:
+    name: console -- lignes differees sous verrou suspendu (KVM SMP2/SMP4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: p13-cible-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            p13-cible-${{ runner.os }}-
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Images (livree, temoin sans contre-pression)
+        run: |
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-console-sans-contre-pression
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-temoin.bin
+          for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-console.txt
+          if grep -aq BOUCHAUD_IMAGE_TEMOIN boot-livree.bin; then echo BANNIERE_TEMOIN_DANS_LA_LIVREE >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-console-sans-contre-pression' boot-temoin.bin
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
+      - name: Temoin -- rafale masquee pendant le verrou suspendu 3 s, pertes attendues (SMP4)
+        run: |
+          if BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-temoin.bin; then
+            echo "TEMOIN_VERT_INATTENDU : le banc ne prouve plus le correctif" >&2; exit 1
+          fi
+          cp serie-entrelacement.log console-kvm-temoin-smp4.log
+          grep -aqE 'lignes_perdues=[1-9]' console-kvm-temoin-smp4.log
+      - name: Livree -- rafale masquee, coeur quelconque et coeur du fil, SMP2 et SMP4 (0 perte exigee)
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          for smp in 2 4; do
+            BO_SMP=$smp BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
+            cp serie-entrelacement.log console-kvm-rafale-smp$smp.log
+            BO_SMP=$smp BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
+            cp serie-entrelacement.log console-kvm-rafale-coeur-du-fil-smp$smp.log
+          done
+          exit $r
+      - name: Livree -- suspensions volontaires du detenteur (jeton 12 s, verrou 12 s), SMP2 et SMP4
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          for smp in 2 4; do
+            BO_SMP=$smp BANC_SUSPENSION_MS=12000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
+            cp serie-entrelacement.log console-kvm-jeton-12s-smp$smp.log
+            BO_SMP=$smp BANC_VERROU_SUSPENDU_MS=12000 BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
+            cp serie-entrelacement.log console-kvm-verrou-12s-smp$smp.log
+          done
+          exit $r
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-console-${{ github.run_id }}
+          path: |
+            identite-console.txt
+            console-kvm-*.log
+          if-no-files-found: warn
+
+  reveil:
+    name: reveil -- tache reveillee derriere un coeur muet (KVM SMP2/SMP4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: p13-cible-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            p13-cible-${{ runner.os }}-
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Images (livree, temoin regle historique)
+        run: |
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-reveil-historique
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-temoin.bin
+          for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-reveil.txt
+          if grep -aq BOUCHAUD_IMAGE_TEMOIN boot-livree.bin; then echo BANNIERE_TEMOIN_DANS_LA_LIVREE >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique' boot-temoin.bin
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
+      - name: Temoin -- dormeur bloque derriere le coeur masque, attendu (SMP2, SMP4)
+        run: |
+          r=0
+          for smp in 2 4; do
+            set +e
+            BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-temoin.bin 3000
+            code=$?
+            set -e
+            cp reveil-coeur-muet.log temoin-reveil-kvm-smp$smp.log
+            # ECHEC (1) exige : OK (0) ne prouverait plus rien, NON_QUALIFIANT
+            # (2) dit que la reproduction n'a pas ete atteinte.
+            if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL smp=$smp code=$code (ECHEC attendu : 1)" >&2; r=1; fi
+          done
+          exit $r
+      - name: Livree -- le dormeur progresse pendant le masquage, 3 x SMP2, 3 x SMP4
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          for smp in 2 4; do for i in 1 2 3; do
+            BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-livree.bin 3000 || r=1
+            cp reveil-coeur-muet.log production-reveil-kvm-smp$smp-$i.log
+          done; done
+          exit $r
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-reveil-production-${{ github.run_id }}
+          path: |
+            identite-reveil.txt
+            production-reveil-kvm-*.log
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-reveil-temoin-${{ github.run_id }}
+          path: |
+            identite-reveil.txt
+            temoin-reveil-kvm-*.log
+          if-no-files-found: warn
