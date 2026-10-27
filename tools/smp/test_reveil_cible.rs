@@ -1066,3 +1066,17 @@ fn seule_l_election_locale_economise_son_auto_ipi() {
         }
     }
 }
+
+// P13_COOPERATIF_ECHEANCE_INTERACTIVE_V1 : au point cooperatif d'un fil
+// noyau, une interactive dont l'echeance est echue leve le plancher de
+// segment comme une interactive en file.
+#[test]
+fn une_echeance_interactive_echue_leve_le_plancher_comme_une_interactive_en_file() {
+    use reveil::interactive_attend;
+    const JAMAIS: u64 = u64::MAX;
+    assert!(interactive_attend(1, JAMAIS, 1_000), "en file");
+    assert!(interactive_attend(0, 1_000, 1_000), "echue a l'instant exact");
+    assert!(interactive_attend(0, 400, 1_000), "echue depuis longtemps");
+    assert!(!interactive_attend(0, 1_001, 1_000), "future : le plancher s'applique");
+    assert!(!interactive_attend(0, JAMAIS, u64::MAX - 1), "aucune echeance");
+}

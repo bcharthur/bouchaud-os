@@ -439,6 +439,18 @@ pub fn pression_de_secours(attente_interactive: usize, attente_normale: usize) -
 // interactive qui calcule redevient preemptible, la normale n'est jamais
 // affamee au-dela d'un budget par activation.
 
+/// Une interactive attend-elle ce coeur, au point cooperatif d'un fil noyau ?
+///
+/// BOUCHAUD_CESSION_INTERACTIVE_V1 : une interactive EN FILE leve le
+/// plancher de segment. P13_COOPERATIF_ECHEANCE_INTERACTIVE_V1 : une
+/// interactive dont l'echeance de sommeil est ECHUE aussi -- elle n'est pas
+/// en file parce que le balayage de l'IRQ a ete refuse pendant la section
+/// non preemptible de ce fil. `borne_ns` : la plus proche echeance
+/// interactive attachee au coeur, a jour (`JAMAIS` : aucune).
+pub fn interactive_attend(en_file: usize, borne_ns: u64, maintenant_ns: u64) -> bool {
+    en_file > 0 || borne_ns <= maintenant_ns
+}
+
 /// Ce que la tache courante fait de son coeur au quantum ou a un point sur.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cession {

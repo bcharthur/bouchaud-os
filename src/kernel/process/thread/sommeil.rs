@@ -794,16 +794,36 @@ pub fn point_cooperatif(depuis_ns: &mut u64) -> bool {
         POINTS_PIRE_SEGMENT_NS.store(segment, Ordering::Relaxed);
         POINTS_PIRE_SITE.store(core::panic::Location::caller() as *const core::panic::Location<'static> as u64, Ordering::Relaxed);
     }
-    let interactive_attend = crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu())
-        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file().0 > 0)
-        .unwrap_or(false);
+    let cpu = local_cpu();
+    let en_file = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file().0)
+        .unwrap_or(0);
+    // P13_COOPERATIF_ECHEANCE_INTERACTIVE_V1 : une interactive dont l'echeance
+    // est ECHUE attend ce coeur autant qu'une interactive en file. Elle n'y
+    // est pas parce que le balayage de l'IRQ a ete refuse : ce fil coupait la
+    // preemption (morceau de `console`). Sans cela le fil enchainait ses
+    // morceaux jusqu'au plancher d'une milliseconde avant de balayer : pires
+    // reveils interactifs `detection` 1002 a 1175 us, `reveille_par=console`,
+    // dans les deux bras de l'A/B KVM SMP1 (run 40479932972). La borne n'est
+    // recalculee sur le registre que si elle est echue et la cession sure.
+    let mut borne_interactive = crate::kernel::echeances::JAMAIS;
+    if en_file == 0 && segment < SEGMENT_MIN_NS
+        && prochaine_echeance_interactive_ns(cpu) <= maintenant
+        && crate::kernel::scheduler::preempt::cession_volontaire_sure()
+    {
+        borne_interactive = ::x86_64::instructions::interrupts::without_interrupts(|| {
+            borne_interactive_a_jour(cpu, maintenant)
+        });
+    }
+    let interactive_attend = crate::kernel::scheduler::reveil::interactive_attend(
+        en_file, borne_interactive, maintenant);
     if (segment < SEGMENT_MIN_NS && !interactive_attend)
         || !crate::kernel::scheduler::preempt::cession_volontaire_sure()
     {
         return false;
     }
     let attendu = interactive_attend
-        || ready_count_cpu(local_cpu()) > 0
+        || ready_count_cpu(cpu) > 0
         || PROCHAINE_ECHEANCE.doit_balayer(maintenant);
     if !attendu {
         *depuis_ns = maintenant;
