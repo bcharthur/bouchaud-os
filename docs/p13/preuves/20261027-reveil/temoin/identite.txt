@@ -1,0 +1,1 @@
+IMAGE role=temoin sha_source=e9a69382a78706a373306dbf33458ea2e212037c features=banc-reveil-historique sha256=889d5b4b5d90bec1b658d3855b24ac53b496b79c9a6e714bba4257d90b583e5b banniere_temoin=1

@@ -299,6 +299,14 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
     }
 }
 
+/// Banc P13_REVEIL_COEUR_MUET_V1 : ce coeur dort-il DANS l'ordonnanceur --
+/// donc pret a elire une tache qu'on y poserait ? Un BSP arrete hors
+/// ordonnanceur (shell de l'autorun) ne compte pas.
+pub fn coeur_electeur_au_repos(cpu: usize) -> bool {
+    let etat = etat_coeur_reveil(cpu, u64::MAX, crate::kernel::timer::monotonic_ns());
+    etat.en_ligne && etat.inactif && !etat.hors_ordonnanceur
+}
+
 // BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1
 //
 // Une tache qui se bloque et dont le coeur n'a rien d'autre a elire RESTE

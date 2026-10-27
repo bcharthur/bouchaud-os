@@ -1,0 +1,23 @@
+IMAGE role=production sha_source=e9a69382a78706a373306dbf33458ea2e212037c features=default sha256=fd3a1b5f42e81b8d6d529aa8dda19bbb729c61f70c5353fedbf244cbc05e8606 banniere_temoin=0
+IMAGE role=temoin sha_source=e9a69382a78706a373306dbf33458ea2e212037c features=banc-reveil-historique sha256=889d5b4b5d90bec1b658d3855b24ac53b496b79c9a6e714bba4257d90b583e5b banniere_temoin=1
+production reveil smp2 1 rc=0 REVEIL_COEUR_MUET_OK tours=764 ecart_max_ms=6 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=25
+temoin reveil smp2 1 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3019 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=7
+production reveil smp2 2 rc=0 REVEIL_COEUR_MUET_OK tours=1469 ecart_max_ms=17 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=30
+temoin reveil smp2 2 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3001 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=20
+production reveil smp2 3 rc=0 REVEIL_COEUR_MUET_OK tours=761 ecart_max_ms=31 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=31
+temoin reveil smp2 3 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3004 | autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=30
+production reveil smp4 1 rc=0 REVEIL_COEUR_MUET_OK tours=1672 ecart_max_ms=42 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=25
+temoin reveil smp4 1 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3001 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=21
+production reveil smp4 2 rc=0 REVEIL_COEUR_MUET_OK tours=1721 ecart_max_ms=8 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=29
+temoin reveil smp4 2 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3001 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=27
+production reveil smp4 3 rc=0 REVEIL_COEUR_MUET_OK tours=1715 ecart_max_ms=12 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=27
+temoin reveil smp4 3 rc=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3002 | autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=25
+temoin coeur-du-fil secours=off 1 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+temoin coeur-du-fil secours=on 1 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+temoin coeur-du-fil secours=off 2 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+temoin coeur-du-fil secours=on 2 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+production console-verrou smp2 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+production console-rafale smp2 rc=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0
+production console-verrou smp4 rc=0 SERIE_ENTRELACEMENT_BANC_OK
+production console-rafale smp4 rc=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0
+FIN

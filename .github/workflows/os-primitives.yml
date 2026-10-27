@@ -53,6 +53,34 @@ jobs:
       - name: Primitives sur Bouchaud OS
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      # P13_REVEIL_COEUR_MUET_V1 -- IMAGE TEMOIN, NON LIVRABLE, NON QUALIFIABLE.
+      #
+      # `banc-reveil-historique` retablit la regle de placement au reveil
+      # d'avant le correctif. Elle ne sert qu'aux bancs qui doivent IMMOBILISER
+      # une tache derriere un coeur muet : la preuve negative du reveil, et les
+      # deux bancs « coeur du fil » du secours de la console. Construite dans
+      # un repertoire de build A PART (`target-temoin`) : l'image qualifiee,
+      # verifiee identique avant et apres, n'est jamais remplacee. La banniere
+      # BOUCHAUD_IMAGE_TEMOIN n'existe que dans le binaire temoin.
+      - name: Image temoin banc-reveil-historique (build separe, non livrable)
+        id: temoin
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          avant=$(sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | cut -d' ' -f1)
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-reveil-historique
+          apres=$(sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | cut -d' ' -f1)
+          mkdir -p temoin-reveil-historique
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin temoin-reveil-historique/boot-temoin.bin
+          temoin=$(sha256sum temoin-reveil-historique/boot-temoin.bin | cut -d' ' -f1)
+          {
+            echo "IMAGE role=production sha_source=$GITHUB_SHA features=default sha256=$apres"
+            echo "IMAGE role=temoin sha_source=$GITHUB_SHA features=banc-reveil-historique sha256=$temoin livrable=non qualifiable=non"
+          } | tee temoin-reveil-historique/identite.txt
+          [ "$avant" = "$apres" ] || { echo "IMAGE_QUALIFIEE_MODIFIEE_PAR_LE_TEMOIN" >&2; exit 1; }
+          [ "$temoin" != "$apres" ] || { echo "IMAGE_TEMOIN_IDENTIQUE_A_LA_QUALIFIEE" >&2; exit 1; }
+          if grep -aq BOUCHAUD_IMAGE_TEMOIN target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin; then echo "BANNIERE_TEMOIN_DANS_L_IMAGE_QUALIFIEE" >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique' temoin-reveil-historique/boot-temoin.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -213,14 +241,23 @@ jobs:
           # dans la file duquel le fil `console` attend. Temoin (secours off) :
           # le repli DOIT revenir. Correctif : le fil est reloge (secours>=1),
           # aucun repli, 600/600.
-          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
-          cp serie-entrelacement.log serie-entrelacement-tcg-coeur-du-fil-temoin.log
-          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
-          cp serie-entrelacement.log serie-entrelacement-tcg-coeur-du-fil.log
-          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
-          cp serie-entrelacement.log serie-entrelacement-kvm-coeur-du-fil-temoin.log
-          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
-          cp serie-entrelacement.log serie-entrelacement-kvm-coeur-du-fil.log
+          # P13_REVEIL_COEUR_MUET_V1 : sur l'image qualifiee, le fil `console`
+          # n'est plus laisse derriere un coeur tenu par un fil noyau (placement
+          # au reveil, vol des fils migrables) -- ces bancs ne peuvent plus l'y
+          # immobiliser (CONSOLE_VERROU_SUSPENDU_HORS_CIBLE). Ils prouvent le
+          # SECOURS de la console sur l'IMAGE TEMOIN (`banc-reveil-historique`,
+          # pas « Image temoin » ci-dessus), commandes et exigences inchangees ;
+          # leurs journaux vont dans l'artefact temoin, a part.
+          T=temoin-reveil-historique/boot-temoin.bin
+          test -f "$T" || { echo "IMAGE_TEMOIN_ABSENTE" >&2; exit 1; }
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg-coeur-du-fil-temoin.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg-coeur-du-fil.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-kvm-coeur-du-fil-temoin.log
+          BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-kvm-coeur-du-fil.log
           # Le fil gele 6 s sous le flot ordinaire : les producteurs vident
           # eux-memes l'anneau plein, la console progresse -- aucun repli.
           BANC_FIL_GELE_MS=6000 tools/ci/run_serie_entrelacement.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin || r=1
@@ -251,6 +288,33 @@ jobs:
           cp console-panique.log serie-entrelacement-panique-kvm-smp2.log
           BO_QEMU_KVM=1 BO_SMP=1 tools/ci/run_console_panique.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2000 || r=1
           cp console-panique.log serie-entrelacement-panique-kvm-smp1.log
+          exit $r
+      - name: Reveil -- fil noyau migrable derriere un coeur muet, production et temoin (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # P13_REVEIL_COEUR_MUET_V1 : un fil noyau migrable dort un tick a la
+        # fois, un fil epingle masque SON coeur 3 s (docs/p13/REVEIL_COEUR_MUET.md).
+        # Image qualifiee : OK exige (le dormeur progresse, ni double election,
+        # ni incoherence on_cpu, le fil epingle n'est jamais vole). Image
+        # temoin : ECHEC exige (le dormeur bloque) -- la preuve negative.
+        # NON_QUALIFIANT (code 2, reproduction non atteinte) n'est jamais vert.
+        run: |
+          r=0
+          for accel in 0 1; do for smp in 2 4; do
+            nom=$([ $accel = 1 ] && echo kvm || echo tcg)-smp$smp
+            BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3000 || r=1
+            cp reveil-coeur-muet.log "serie-reveil-coeur-muet-$nom.log"
+          done; done
+          T=temoin-reveil-historique/boot-temoin.bin
+          if [ ! -f "$T" ]; then echo "IMAGE_TEMOIN_ABSENTE" >&2; exit 1; fi
+          for accel in 0 1; do
+            nom=$([ $accel = 1 ] && echo kvm || echo tcg)-smp4
+            set +e
+            BO_QEMU_KVM=$accel BO_SMP=4 tools/ci/run_reveil_coeur_muet.sh "$T" 3000
+            code=$?
+            set -e
+            cp reveil-coeur-muet.log "temoin-reveil-historique/serie-reveil-coeur-muet-$nom.log"
+            if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL_$nom code=$code (ECHEC attendu : 1)" >&2; r=1; fi
+          done
           exit $r
       - name: P10 -- BGA contre virtio-gpu 2D, meme charge (TCG puis KVM)
         # Les bancs qui suivent n'utilisent que l'image construite : un pas
@@ -370,12 +434,23 @@ jobs:
             python3 tools/ci/qualifie_p13.py attribution "ordonnanceur-attribution-kvm-smp${smp}/serie.log" --smp "$smp" --passes 2 --mode "$mode" || r=1
           done
           exit "$r"
+      # Preuves de l'IMAGE TEMOIN : un artefact a part, jamais melange a celles
+      # de l'image qualifiee.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-primitives-temoin-reveil-historique
+          path: |
+            temoin-reveil-historique/identite.txt
+            temoin-reveil-historique/*.log
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: os-primitives-debug
           path: |
             serie-primitives.log
+            serie-reveil-coeur-muet-*.log
             serie-primitives-kvm-*.log
             serie-persist-cache-*.log
             serie-horloge-*.log

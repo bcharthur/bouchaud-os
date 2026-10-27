@@ -54,6 +54,39 @@ cœur masque les interruptions 3 s. Témoin compilé du même arbre :
 Aucune durée du banc n'a été modifiée entre les deux bras : même image,
 même scénario, seule la règle compilée diffère.
 
+## Protocole retenu : image témoin dédiée (option 2)
+
+Le correctif rend inexécutables, sur l'image qualifiée, les quatre bancs
+« cœur du fil » de l'étape console d'os-primitives : ils immobilisent le fil
+`console` derrière un cœur masqué pour prouver son secours dédié, et ce fil
+est désormais replacé dès qu'un fil noyau occupe son cœur
+(`CONSOLE_VERROU_SUSPENDU_HORS_CIBLE`, échec sans faux vert).
+
+- **Noyau livré** : correctif actif par défaut, sans interrupteur
+  d'exécution ; aucun contournement accessible.
+- **Image témoin** `banc-reveil-historique` : option de compilation de test,
+  jamais dans `default`, qui ne rétablit QUE l'ancienne règle de placement au
+  réveil et l'exclusion des fils noyau du vol. Construite dans
+  `target-temoin` ; os-primitives vérifie que l'image qualifiée garde la même
+  empreinte avant et après, qu'elle ne contient pas la bannière
+  `BOUCHAUD_IMAGE_TEMOIN`, et journalise SHA source, features et empreinte des
+  deux images (`temoin-reveil-historique/identite.txt`). Ses preuves vont
+  dans l'artefact séparé `os-primitives-temoin-reveil-historique`.
+- Les quatre bancs « cœur du fil » tournent sur cette image, commandes,
+  critères et seuils inchangés.
+- `run_reveil_coeur_muet.sh` est une étape obligatoire : OK exigé sur l'image
+  qualifiée (TCG et KVM, SMP2 et SMP4), ECHEC (code 1) exigé sur le témoin ;
+  `NON_QUALIFIANT` (code 2, reproduction non atteinte) n'est jamais vert.
+
+### Résultats TCG (preuves : `docs/p13/preuves/20261027-reveil/`)
+
+| Banc | Image | Résultat |
+|---|---|---|
+| réveil, SMP2 et SMP4, ×3 | production | 6/6 OK, 761–1 721 tours, écart 6–42 ms, autre cœur au repos vu, 0 double élection, 0 incohérence, fil épinglé jamais volé |
+| réveil, SMP2 et SMP4, ×3 | témoin | 6/6 ECHEC attendu, 0 tour, écart 3 001–3 019 ms |
+| cœur du fil, secours off / on, ×2 | témoin | 4/4 OK (repli témoin revenu ; relogement par le secours) |
+| console verrou suspendu et rafale, SMP2 et SMP4 | production | 4/4 OK, 0 ligne perdue |
+
 ## Correctif
 
 1. **Placement** (`reveil::portee_replacement`, pur, testé sur l'hôte) :

@@ -303,3 +303,4 @@ tools/userland/out-compta-injection/
 scenario-reveil-coeur-muet/
 reveil-coeur-muet.img
 reveil-coeur-muet.log
+/target-temoin

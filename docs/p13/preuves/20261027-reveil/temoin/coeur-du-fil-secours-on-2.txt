@@ -1,0 +1,21 @@
+SERIE_ENTRELACEMENT smp=4 accel=-cpu max ecrivains=3 lignes=200 processus=120 charge=160 pas_ms=0 suspension_ms=0 verrou_suspendu_ms=3000 serie_lente_ns=0 console=on verrou_cible=fil secours=on fil_gele_ms=0
+  ok      aucune panique noyau
+  ok      la sonde a fini, tous ses ecrivains a zero
+  ok      le noyau a ecrit pendant ce temps (fautes voulues)
+SERIE_ENTRELACEMENT_OK intactes=600/600 abimees=0 doublees=0 inversions=0 emissions_a_la_borne=0 emissions_reentrees=0 lignes_differees=2 lignes_perdues=0 lignes_vidangees=2
+  ok      toutes les lignes intactes
+  ok      aucune ligne emise sans le jeton ni en reentrance
+  bilan : emissions_a_la_borne=0 emissions_reentrees=0 emission_masquee_pire_us=3371 emissions_masquees_plus_de_2ms=2 renonces_masquees=0 renonces_sans_progres=0 renonces_plafond=0 renonces_relances=0 attente_pire_ms=0 echeances_renouvelees=0 lignes_differees=2 lignes_perdues=0 lignes_vidangees=2
+  ok      aucune ligne differee perdue, toutes videes avant le bilan
+  ok      la barriere noyau a confirme le verrou
+  ok      le fil a tenu le verrou de l'anneau 3000 ms
+  banc : CONSOLE_VERROU_SUSPENDU_FAIT pris=1 duree_ms=3000 coeur=1 coeur_du_fil_apres=3 
+  ok      la suspension a ete subie (attentes cedees ou renoncements)
+  ok      aucune attente du verrou interruptions masquees au-dela de 50 ms
+  ok      la suspension a frappe le coeur du fil console
+  ok      le fil pret sur le coeur suspendu a ete reloge (secours>=1)
+  ok      console asynchrone active, sans repli ni reentrance
+  console : active=1 repli_securite=0 lignes=1944 emises=1943 pleines=638 replis_differes=2 vidanges_aidees=6026 reentrees=0 differees_pendant_vidange=0 reveils=8 jeton_occupe=327 ligne_pire_us=22506 morceau_pire_us=8319 retard_pire_us=3004732 ajout_pire_us=3000125 occupation_pire=59751 synchrones=0 synchrone_pire_us=0 verrou_abandons=2 verrou_cedees=26 verrou_cedee_pire_us=3000108 verrou_attente_pire_us=257 repli_a_ms=0 repli_muet_ms=0 repli_fil_vu_ms=0 repli_occupation=0 repli_jeton=0 repli_fil_endormi=0 secours_voulu=1 secours=2 secours_pire_ms=20 relogees=2 refus_entree=1 soupcons=0 repli_soupcon_ms=0 gels=0
+  contre-pression : attentes=638 attente_pire_us=3006147 attente_moyenne_us=38149 sauts=1 sorties_synchrones=0 urgences=0 differees_occupe=2 differees_urgence=0 reserve=8192 fil_tour_pire_us=21596 fil_somme_jeton_pire_us=12342 differees_place_faite=0 differee_place_pire_us=0
+  vga texte : prises=1685 tenu_pire_us=995 attente_pire_us=545 abandons=0 recopie_pire_us=13358
+SERIE_ENTRELACEMENT_BANC_OK

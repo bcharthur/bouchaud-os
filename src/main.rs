@@ -101,6 +101,14 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
         kernel::blackbox::BUILD_COMMIT,
         kernel::blackbox::BUILD_LOTS,
     );
+    // IMAGE TEMOIN : une option de banc (jamais dans `default`) rend l'image
+    // non livrable et non qualifiable. Elle le dit avant tout, et la chaine
+    // n'existe QUE dans ces images -- un `grep -a` sur le binaire livre doit
+    // la trouver absente.
+    #[cfg(feature = "banc-reveil-historique")]
+    crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique livrable=non qualifiable=non");
+    #[cfg(feature = "banc-console-sans-contre-pression")]
+    crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-console-sans-contre-pression livrable=non qualifiable=non");
     kernel::services::declare_arbre();
     kernel::services::phase("sys");
     if boot_info.firmware == boot::FirmwareKind::Uefi {

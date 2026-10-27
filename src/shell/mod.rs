@@ -854,6 +854,18 @@ static DORMEUR_ECART_MAX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic:
 static DORMEUR_MASQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static DORMEUR_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static DORMEUR_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// Coherence de l'election du dormeur : deux executions simultanees de son
+/// corps (double election), ou un tour ou `on_cpu` ne designe pas le coeur
+/// qui l'execute.
+static DORMEUR_EN_COURS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static DORMEUR_DOUBLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DORMEUR_INCOHERENCES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Le temoin EPINGLE (non migrable) sur le coeur masque : il ne doit jamais
+/// tourner ailleurs, ni pendant le masquage.
+static EPINGLE_COEUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+static EPINGLE_HORS_COEUR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static EPINGLE_TOURS_MASQUE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static EPINGLE_TOURS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
@@ -872,9 +884,17 @@ fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
 
 fn fil_dormeur() -> ! {
     use core::sync::atomic::Ordering;
-    DORMEUR_TACHE.store(crate::kernel::task::indice_tache_courante(), Ordering::Release);
+    let moi = crate::kernel::task::indice_tache_courante();
+    DORMEUR_TACHE.store(moi, Ordering::Release);
     loop {
         crate::kernel::task::sleep_ticks(1);
+        if DORMEUR_EN_COURS.swap(true, Ordering::AcqRel) {
+            DORMEUR_DOUBLES.fetch_add(1, Ordering::AcqRel);
+        }
+        let (_, sur, _) = crate::kernel::task::etat_tache_brut(moi);
+        if sur < 0 || sur as usize != crate::arch::x86_64::smp::cpu_index() {
+            DORMEUR_INCOHERENCES.fetch_add(1, Ordering::AcqRel);
+        }
         let maintenant = crate::kernel::timer::monotonic_ns();
         let avant = DORMEUR_DERNIER_NS.swap(maintenant, Ordering::AcqRel);
         if DORMEUR_MASQUE.load(Ordering::Acquire) {
@@ -882,6 +902,22 @@ fn fil_dormeur() -> ! {
         }
         if avant != 0 {
             DORMEUR_ECART_MAX_NS.fetch_max(maintenant.saturating_sub(avant), Ordering::AcqRel);
+        }
+        DORMEUR_EN_COURS.store(false, Ordering::Release);
+    }
+}
+
+/// Temoin epingle (`spawn_noyau_epingle`, non migrable) sur le coeur masque.
+fn fil_dormeur_epingle() -> ! {
+    use core::sync::atomic::Ordering;
+    loop {
+        crate::kernel::task::sleep_ticks(1);
+        EPINGLE_TOURS.fetch_add(1, Ordering::AcqRel);
+        if crate::arch::x86_64::smp::cpu_index() != EPINGLE_COEUR.load(Ordering::Acquire) {
+            EPINGLE_HORS_COEUR.fetch_add(1, Ordering::AcqRel);
+        }
+        if DORMEUR_MASQUE.load(Ordering::Acquire) {
+            EPINGLE_TOURS_MASQUE.fetch_add(1, Ordering::AcqRel);
         }
     }
 }
@@ -893,8 +929,10 @@ fn fil_dormeur_pilote() -> ! {
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(500));
     let index = DORMEUR_TACHE.load(Ordering::Acquire);
     let (etat, _, coeur) = crate::kernel::task::etat_tache_brut(index);
+    EPINGLE_COEUR.store(coeur as usize, Ordering::Release);
     if index == usize::MAX || etat == 9
         || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_masqueur, "dormeur-masqueur", coeur as usize)
+        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_epingle, "dormeur-epingle", coeur as usize)
     {
         crate::serial_println!("SERIE_DORMEUR_MASQUE_ECHEC raison=masqueur-refuse");
         DORMEUR_RESULTAT.store(2, Ordering::Release);
@@ -925,11 +963,22 @@ fn fil_dormeur_masqueur() -> ! {
     }
     let tours_avant = DORMEUR_TOURS.load(Ordering::Acquire);
     DORMEUR_ECART_MAX_NS.store(0, Ordering::Release);
+    // Condition de reproduction : un AUTRE coeur, dans l'ordonnanceur, vu au
+    // repos PENDANT le masquage -- un coeur qui aurait pu prendre le dormeur.
+    // Sans lui, le banc ne demontre rien (NON_QUALIFIANT).
+    let en_ligne = crate::arch::x86_64::smp::schedulable_cpus().min(64);
+    let mut vus_au_repos = 0u64;
+    let epingle_avant = EPINGLE_TOURS.load(Ordering::Acquire);
     x86_64::instructions::interrupts::without_interrupts(|| {
         DORMEUR_MASQUE.store(true, Ordering::Release);
         let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree.saturating_mul(1_000_000));
         while crate::kernel::timer::monotonic_ns() < fin {
             crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+            for c in 0..en_ligne {
+                if c != ici && crate::kernel::task::coeur_electeur_au_repos(c) {
+                    vus_au_repos |= 1u64 << c;
+                }
+            }
             core::hint::spin_loop();
         }
         DORMEUR_MASQUE.store(false, Ordering::Release);
@@ -941,9 +990,17 @@ fn fil_dormeur_masqueur() -> ! {
         .saturating_sub(DORMEUR_DERNIER_NS.load(Ordering::Acquire));
     let ecart_ms = DORMEUR_ECART_MAX_NS.load(Ordering::Acquire).max(silence) / 1_000_000;
     let (_, _, coeur_apres) = crate::kernel::task::etat_tache_brut(DORMEUR_TACHE.load(Ordering::Acquire));
+    // Laisser le temoin epingle reprendre apres le masquage.
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(50));
     crate::serial_println!(
-        "SERIE_DORMEUR_MASQUE coeur={} masque_ms={} tours_pendant={} ecart_max_ms={} coeur_du_dormeur_apres={}",
-        ici, duree, tours, ecart_ms, coeur_apres
+        "SERIE_DORMEUR_MASQUE coeur={} masque_ms={} tours_pendant={} ecart_max_ms={} coeur_du_dormeur_apres={} \
+         cible_atteinte=1 coeurs={} autres_coeurs_au_repos={} doubles={} incoherences={} \
+         epingle_tours_masque={} epingle_hors_coeur={} epingle_tours_apres={}",
+        ici, duree, tours, ecart_ms, coeur_apres,
+        en_ligne, vus_au_repos.count_ones(),
+        DORMEUR_DOUBLES.load(Ordering::Acquire), DORMEUR_INCOHERENCES.load(Ordering::Acquire),
+        EPINGLE_TOURS_MASQUE.load(Ordering::Acquire), EPINGLE_HORS_COEUR.load(Ordering::Acquire),
+        EPINGLE_TOURS.load(Ordering::Acquire).saturating_sub(epingle_avant)
     );
     DORMEUR_RESULTAT.store(1, Ordering::Release);
     loop {

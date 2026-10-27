@@ -1,0 +1,1 @@
+IMAGE role=production sha_source=e9a69382a78706a373306dbf33458ea2e212037c features=default sha256=fd3a1b5f42e81b8d6d529aa8dda19bbb729c61f70c5353fedbf244cbc05e8606 banniere_temoin=0

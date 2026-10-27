@@ -20,7 +20,14 @@ Regles :
   5. le bras temoin `banc-reveil-historique` n'existe que sous son option,
      absente de `default` ;
   6. tests hote presents ; l'assertion qui consacrait le defaut (une normale
-     garde un historique hors ordonnanceur) n'existe plus.
+     garde un historique hors ordonnanceur) n'existe plus ;
+  7. IMAGE TEMOIN (option 2) : la banniere BOUCHAUD_IMAGE_TEMOIN n'est
+     compilee que sous l'option ; tout workflow qui construit
+     `banc-reveil-historique` le fait dans `target-temoin` ; os-primitives
+     verifie l'image qualifiee inchangee et sans banniere, joue les quatre
+     bancs « coeur du fil » sur l'image temoin, exige OK du banc de reveil sur
+     l'image qualifiee et ECHEC (code 1, jamais 2) sur le temoin, et publie
+     les preuves temoin dans un artefact a part.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -35,7 +42,14 @@ F = {
     "ordo": RACINE / "src/kernel/process/thread/ordonnancement.rs",
     "test": RACINE / "tools/smp/test_reveil_cible.rs",
     "cargo": RACINE / "Cargo.toml",
+    "main": RACINE / "src/main.rs",
+    "osp": RACINE / ".github/workflows/os-primitives.yml",
+    "banc": RACINE / "tools/ci/run_reveil_coeur_muet.sh",
 }
+WORKFLOWS = RACINE / ".github/workflows"
+OFF = "target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin"
+BANNIERE = ('#[cfg(feature = "banc-reveil-historique")]\n'
+            '    crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique livrable=non qualifiable=non");')
 BANC = "banc-reveil-historique"
 PORTEE = (f'#[cfg(not(feature = "{BANC}"))]\n'
           "pub fn portee_replacement(reveille: &Reveille, precedent: &Coeur) -> Option<Portee> {\n"
@@ -107,6 +121,31 @@ def verifie(t: dict) -> list:
     code_test = "\n".join(l for l in t["test"].split("\n") if not l.lstrip().startswith("//"))
     if DEFAUT in code_test:
         f.append("test hote : l'assertion qui consacrait le defaut est revenue")
+    # 7. image temoin
+    if BANNIERE not in t["main"] or t["main"].count("BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique") != 1:
+        f.append("main.rs : banniere temoin absente ou hors de son option")
+    flux = dict(t["workflows"])
+    flux["os-primitives.yml"] = t["osp"]
+    for nom, texte in flux.items():
+        for ligne in texte.split("\n"):
+            if "--features banc-reveil-historique" in ligne and "CARGO_TARGET_DIR=target-temoin" not in ligne:
+                f.append(f"{nom} : image temoin construite dans le repertoire de l'image qualifiee")
+    osp = t["osp"]
+    for attendu in ('[ "$avant" = "$apres" ] || { echo "IMAGE_QUALIFIEE_MODIFIEE_PAR_LE_TEMOIN"',
+                    f"if grep -aq BOUCHAUD_IMAGE_TEMOIN {OFF}; then",
+                    "if [ \"$code\" != 1 ]; then echo \"TEMOIN_REVEIL_$nom",
+                    f"BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh {OFF} 3000 || r=1",
+                    "name: os-primitives-temoin-reveil-historique"):
+        if attendu not in osp:
+            f.append(f"os-primitives : protocole temoin incomplet ({attendu[:50]})")
+    fil = [l for l in osp.split("\n") if "BANC_VERROU_CIBLE=fil" in l and "run_serie_entrelacement.sh" in l]
+    if len(fil) != 4 or any('run_serie_entrelacement.sh "$T"' not in l for l in fil):
+        f.append("os-primitives : un banc « coeur du fil » ne tourne pas sur l'image temoin")
+    banc = t["banc"]
+    for attendu in ('echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 2',
+                    'exige "aucune double election du dormeur"', 'exige "le fil epingle n\'a jamais tourne hors de son coeur"'):
+        if attendu not in banc:
+            f.append(f"banc de reveil : exigence ou non-qualifiant absent ({attendu[:40]})")
     return f
 
 
@@ -127,6 +166,17 @@ def negatifs(t: dict) -> tuple:
         ("vol hors affinite", "ordo", "        && (!task.noyau || task.migrable)\n        && task.runq_cpu.charge() as usize != cpu\n        && allowed_on(task, cpu)\n}",
          "        && (!task.noyau || task.migrable)\n        && task.runq_cpu.charge() as usize != cpu\n}"),
         ("temoin dans default", "cargo", 'default = ["legacy-boot"]', f'default = ["legacy-boot", "{BANC}"]'),
+        ("banniere temoin dans l'image livree", "main", BANNIERE,
+         '    crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique livrable=non qualifiable=non");'),
+        ("temoin construit sur l'image qualifiee", "osp", "CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-reveil-historique",
+         "cargo bootimage --features banc-reveil-historique"),
+        ("qualifiee modifiee toleree", "osp", '[ "$avant" = "$apres" ] || { echo "IMAGE_QUALIFIEE_MODIFIEE_PAR_LE_TEMOIN" >&2; exit 1; }', "true"),
+        ("coeur du fil sur l'image qualifiee", "osp",
+         'BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh "$T" || r=1\n          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg',
+         f'BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh {OFF} || r=1\n          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg'),
+        ("temoin non qualifiant accepte", "osp", 'if [ "$code" != 1 ]; then', 'if [ "$code" = 0 ]; then'),
+        ("non-qualifiant vert", "banc", 'echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 2',
+         'echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 0'),
         ("assertion du defaut retablie", "test",
          "fn interactive_ordinaire_garde_un_coeur_historique_disponible() {\n",
          "fn interactive_ordinaire_garde_un_coeur_historique_disponible() {\n    let bsp = Coeur { hors_ordonnanceur: true, ..coeur_libre() };\n"
@@ -146,6 +196,7 @@ def negatifs(t: dict) -> tuple:
 
 def main() -> int:
     t = {cle: p.read_text(encoding="utf-8") for cle, p in F.items()}
+    t["workflows"] = {p.name: p.read_text(encoding="utf-8") for p in sorted(WORKFLOWS.glob("*.yml"))}
     fautes = verifie(t)
     echecs, n = negatifs(t)
     for faute in fautes + echecs:
