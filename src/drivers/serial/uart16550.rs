@@ -734,6 +734,7 @@ static DIFFEREES_PLACE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Un essai pour liberer de la place dans les anneaux de lignes differees :
 /// `false` s'il faut renoncer (panique, jeton tenu par ce coeur, borne).
+#[cfg(not(feature = "banc-console-sans-contre-pression"))]
 fn fait_place_differee(debut: u64) -> bool {
     if EN_PANIQUE.load(Ordering::Acquire) {
         return false;
@@ -749,6 +750,14 @@ fn fait_place_differee(debut: u64) -> bool {
         core::hint::spin_loop();
     }
     true
+}
+
+/// BANC TEMOIN (option `banc-console-sans-contre-pression`, jamais dans
+/// `default`) : le comportement d'avant le correctif -- anneau du coeur plein,
+/// la ligne est perdue. Reproduction negative a image egale.
+#[cfg(feature = "banc-console-sans-contre-pression")]
+fn fait_place_differee(_debut: u64) -> bool {
+    false
 }
 
 /// `(rangees apres avoir fait place, pire duree en ns)`.

@@ -36,9 +36,15 @@ banc-virtio-gpu-sans-reponse = []
 # presente sur une frame vierge, PUIS copie) ; `banc-c5-fenetre-corrigee`
 # garde l'ordre corrige (copie, PUIS PTE) avec la meme attente. Reproduction
 # negative et controle sous KVM. Jamais dans `default` : voir
-# `tools/ci/run_faute_persistance.sh` et `.github/workflows/p13-c5-console-kvm.yml`.
+# `tools/ci/run_faute_persistance.sh` et `.github/workflows/p13-cible-kvm.yml`.
 banc-c5-ordre-historique = []
 banc-c5-fenetre-corrigee = []
+# BANC TEMOIN CONSOLE (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1).
+#
+# Retire la contre-pression des lignes differees : anneau du coeur plein, la
+# ligne est perdue, comme avant le correctif. Reproduction negative du banc
+# `BANC_RAFALE_MASQUEE` a image egale. Jamais dans `default`.
+banc-console-sans-contre-pression = []
 # BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1).
 #
 # Le premier `TRANSFER_TO_HOST_2D` du bureau est juge contre une barriere qui

@@ -23,6 +23,8 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 F = RACINE / "src/drivers/serial/uart16550.rs"
+CARGO = RACINE / "Cargo.toml"
+BANC = "banc-console-sans-contre-pression"
 
 
 def corps(source: str, signature: str) -> str:
@@ -41,7 +43,7 @@ def corps(source: str, signature: str) -> str:
     return ""
 
 
-def verifie(s: str) -> list:
+def verifie(s: str, cargo: str) -> list:
     fautes = []
     d = corps(s, "fn differe(octets: &[u8]) {")
     boucle = d.find("loop {")
@@ -66,10 +68,20 @@ def verifie(s: str) -> list:
         fautes.append("borne de 20 ms modifiee")
     if "const DIFFEREES_OCTETS: usize = 4096;" not in s:
         fautes.append("taille de l'anneau differe modifiee : le correctif ne doit pas etre un tampon plus grand")
+    # Banc temoin : le retrait de la contre-pression n'existe que sous l'option
+    # de banc, jamais dans `default`, et seule la fonction de banc la retire.
+    if f'#[cfg(not(feature = "{BANC}"))]\nfn fait_place_differee(debut: u64) -> bool {{' not in s:
+        fautes.append("fait_place_differee : la contre-pression n'est pas la version de l'image livree")
+    if s.count("fn fait_place_differee(") != 2 or \
+            f'#[cfg(feature = "{BANC}")]\nfn fait_place_differee(_debut: u64) -> bool {{\n    false\n}}' not in s:
+        fautes.append("banc temoin console : autre definition que le retrait sous option")
+    defaut = re.search(r"^default = \[(.*)\]$", cargo, re.M)
+    if not defaut or BANC in defaut.group(1) or f"\n{BANC} = []\n" not in cargo:
+        fautes.append("banc temoin console dans `default`, ou option absente")
     return fautes
 
 
-def negatifs(s: str) -> list:
+def negatifs(s: str, cargo: str) -> list:
     mutations = [
         ("perte immediate", "if total + 2 > DIFFEREES_OCTETS || !fait_place_differee(debut) {",
          "if true {"),
@@ -79,25 +91,29 @@ def negatifs(s: str) -> list:
         ("cede en contexte masque", "    if let Vidange::JetonOccupe = vide_un_morceau() {\n        core::hint::spin_loop();",
          "    if let Vidange::JetonOccupe = vide_un_morceau() {\n        crate::kernel::task::yield_now();"),
         ("tampon agrandi", "const DIFFEREES_OCTETS: usize = 4096;", "const DIFFEREES_OCTETS: usize = 65536;"),
+        ("temoin dans l'image livree", f'#[cfg(not(feature = "{BANC}"))]\nfn fait_place_differee(debut', "fn fait_place_differee(debut"),
     ]
     echecs = []
     for nom, avant, apres in mutations:
         if avant not in s:
             echecs.append(f"mutation inapplicable : {nom}")
             continue
-        if not verifie(s.replace(avant, apres, 1)):
+        if not verifie(s.replace(avant, apres, 1), cargo):
             echecs.append(f"mutation non detectee : {nom}")
+    if not verifie(s, cargo.replace('default = ["legacy-boot"]', f'default = ["legacy-boot", "{BANC}"]', 1)):
+        echecs.append("mutation non detectee : temoin dans default")
     return echecs
 
 
 def main() -> int:
     s = F.read_text(encoding="utf-8")
-    fautes = verifie(s) + negatifs(s)
+    cargo = CARGO.read_text(encoding="utf-8")
+    fautes = verifie(s, cargo) + negatifs(s, cargo)
     for faute in fautes:
         print(f"ECHEC {faute}")
     if fautes:
         return 1
-    print("lignes differees : contre-pression sans sommeil, bornee : ok (6 mutations detectees)")
+    print("lignes differees : contre-pression sans sommeil, bornee : ok (8 mutations detectees)")
     return 0
 
 
