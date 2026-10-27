@@ -2,7 +2,9 @@ name: ladybird-native-browser
 
 # Producteur CANONIQUE de l'artefact consomme par run.ps1.
 #
-# BOUCHAUD_CI_PALIERS_V1 -- deux paliers, jamais confondus :
+# BOUCHAUD_CI_PALIERS_V2 -- deux paliers, jamais confondus. Les exigences de
+# chaque palier sont dans tools/ci/contrat_paliers.py (source unique), et
+# tools/verifie-ci-paliers.py SIMULE ce workflow pour chaque palier :
 #   qualification  workflow_dispatch (defaut) et branche d'audit : build
 #                  Ladybird complet dans le run, primitives P13 (os-primitives)
 #                  appelees, job « verdict de convergence », CONVERGENCE_OK.
@@ -29,6 +31,8 @@ on:
       - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/ladybird_provenance.py'
       - 'tools/ci/verifie_artefact_ladybird.sh'
+      - 'tools/ci/contrat_paliers.py'
+      - 'tools/ci/simule_paliers.py'
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
@@ -91,6 +95,8 @@ on:
       - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/ladybird_provenance.py'
       - 'tools/ci/verifie_artefact_ladybird.sh'
+      - 'tools/ci/contrat_paliers.py'
+      - 'tools/ci/simule_paliers.py'
       - 'tools/ci/run_ladybird_endurance.sh'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'tools/ci/analyse_memoire.py'
@@ -588,7 +594,11 @@ jobs:
   wpt:
     # BOUCHAUD_WPT_V1 (P11) : Ladybird SUR Bouchaud contre Ladybird sous Linux.
     name: ladybird / wpt
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -636,7 +646,11 @@ jobs:
     # BOUCHAUD_CACHE_REDEMARRAGE_V1 (convergence P2) : cache HTTP disque et
     # base SQL a travers un redemarrage complet du navigateur.
     name: ladybird / cache et SQL apres redemarrage
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -680,7 +694,11 @@ jobs:
     # BOUCHAUD_ENDURANCE_V1 : 10 minutes de cycle de vie (cadres, workers,
     # onglets cross-site) sans crash du Compositor.
     name: ladybird / endurance 10 min
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -736,7 +754,11 @@ jobs:
     # DIAGNOSTIC (hors verdict de convergence) : il dit ce que coute
     # l'emulation TCG dans les cadences mesurees par l'endurance.
     name: ladybird / endurance sous KVM (stabilite + performance)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -813,7 +835,11 @@ jobs:
     # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
     # de l'autre site et le Compositor vivent, le navigateur le remplace.
     name: ladybird / robustesse (crash d'un rendu, cadres isoles, cycle des workers)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -867,7 +893,11 @@ jobs:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)
     # en HTTPS reel, sonde de pixels sur la trame du Compositor.
     name: ladybird / sites reels
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -936,6 +966,8 @@ jobs:
         env:
           BOUCHAUD_PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
           PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}
+          R_PROVENANCE: ${{ needs.provenance.result }}
+          R_ARTEFACT: ${{ needs.artefact.result }}
           R_REUTILISE: ${{ needs.reutilise.result }}
           R_PRIMITIVES: ${{ needs.primitives.result }}
           R_PERFORMANCE: ${{ needs.performance.result }}
@@ -956,7 +988,11 @@ jobs:
 
   browser-host-smoke:
     name: ladybird / browser-host smoke
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1015,7 +1051,11 @@ jobs:
   # ete vu vert. Scanout 2D, aucune acceleration (P10 reste BLOCKED).
   browser-host-smoke-virtio:
     name: ladybird / browser-host smoke sur virtio-gpu (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1072,7 +1112,11 @@ jobs:
 
   browser-host-smoke-surface-double:
     name: ladybird / browser-host smoke, surface a deux tampons (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1148,7 +1192,8 @@ jobs:
   # rouge de performance par-dessus un rouge fonctionnel n'informe personne.
   performance:
     name: ladybird / performance
-    needs: browser-host-smoke
+    needs: [dedoublonne, browser-host-smoke]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.browser-host-smoke.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1186,7 +1231,11 @@ jobs:
 
   ordre-worker:
     name: ladybird / ordre worker (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1223,7 +1272,11 @@ jobs:
     # RIP alterne : frequence, bras, role du profil, et pour chaque faute la
     # pile symbolisee publiee par le noyau (BOUCHAUD_PILE_DE_FAUTE_V1).
     name: ladybird / piege du Compositor (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -1260,7 +1313,11 @@ jobs:
     # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
     # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
     name: ladybird / memoire apres onglets fermes (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
@@ -1337,7 +1394,11 @@ jobs:
     # SIGSEGV dans le meme demarrage : remplacant unique, reprise de la page,
     # le Compositor relance presente encore, aucune corruption noyau.
     name: ladybird / politique de crash des services (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1378,7 +1439,11 @@ jobs:
     # proportionnel a la duree), memoire du Compositor ([LB:MEM]) et pentes
     # RSS sur toute la duree.
     name: ladybird / endurance 20 min sous KVM (diagnostic)
-    needs: artefact
+    needs: [dedoublonne, artefact]
+    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
+    # condition explicite, le success() implicite de GitHub porte sur tous les
+    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

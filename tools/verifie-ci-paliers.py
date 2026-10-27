@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paliers CI et provenance de l'artefact Ladybird (BOUCHAUD_CI_PALIERS_V1).
+"""Paliers CI et provenance de l'artefact Ladybird (BOUCHAUD_CI_PALIERS_V2).
 
 Un run de developpement peut reutiliser l'artefact Ladybird d'un run aux
 entrees identiques et ne joue pas les sondes P13 : il ne doit JAMAIS pouvoir
@@ -15,26 +15,49 @@ Regles :
   4. la reutilisation telecharge depuis le run source, puis REVERIFIE
      (liaison `entrees`) AVANT de republier ;
   5. le rendez-vous `artefact` exige un producteur et un seul ;
-  6. chaque job qui joue l'artefact attend `artefact` et le verifie avec la
-     liaison qu'il publie, apres le telechargement ;
-  7. le verdict porte le palier : nom distinct hors qualification,
-     BOUCHAUD_PALIER, provenance et resultat de la reutilisation transmis ;
-     verdict_convergence.py n'imprime CONVERGENCE_OK qu'en qualification ;
+  6. chaque job qui joue l'artefact attend `artefact` ET exige explicitement
+     `needs.artefact.result == 'success'` sous `!cancelled()` (sinon le
+     success() implicite herite du saut de build/reutilise : run
+     40554668634), puis le verifie avec la liaison publiee ;
+  7. le contrat (tools/ci/contrat_paliers.py) et le workflow sont les memes :
+     chaque epreuve du contrat est transmise au verdict par
+     `R_X: ${{ needs.<job>.result }}` et attendue par lui ; une epreuve
+     hors-run en developpement est exclue de ce palier par sa condition ; les
+     epreuves requises dans les DEUX paliers sont epinglees ici ;
+     verdict_convergence.py juge avec ce contrat et n'imprime CONVERGENCE_OK
+     qu'en qualification ;
   8. p13-primitives-noyau.yml joue os-primitives sur TOUS les chemins noyau
-     du declencheur Ladybird, hors branche d'audit (deja qualifiee).
+     du declencheur Ladybird, hors branche d'audit (deja qualifiee) ;
+  9. SIMULATION (tools/ci/simule_paliers.py) : pour chaque palier, toutes les
+     epreuves requises sont jouees et le verdict est vert ; pour chaque panne
+     injectee, le verdict est rouge.
 
 Fail-closed ; tests negatifs par mutation.
 """
 import re
 import sys
+import types
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(RACINE / "tools/ci"))
+import simule_paliers  # noqa: E402
+
 F = {
     "lb": RACINE / ".github/workflows/ladybird-native-browser.yml",
     "p13": RACINE / ".github/workflows/p13-primitives-noyau.yml",
     "verdict": RACINE / "tools/ci/verdict_convergence.py",
+    "contrat": RACINE / "tools/ci/contrat_paliers.py",
 }
+# Epreuves requises en qualification ET en developpement : le palier de
+# developpement garde les memes epreuves Ladybird. Les retirer d'un palier
+# exige de modifier CETTE liste, visiblement.
+REQUISES_PARTOUT = {
+    "provenance", "artefact", "performance", "memoire-onglets", "ordre-worker", "crash-services",
+    "compositor-piege", "endurance-longue", "browser-host-smoke", "cache", "wpt", "endurance",
+    "endurance-kvm", "sites", "crash-rendu",
+}
+HORS_RUN_DEV = {"primitives"}
 Q = ("(github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') "
      "|| github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024'")
 LIAISON = 'tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser'
@@ -79,8 +102,18 @@ def index(liste, pred) -> int:
     return next((i for i, e in enumerate(liste) if pred(e)), -1)
 
 
+def charge_contrat(texte: str):
+    m = types.ModuleType("contrat_paliers_verifie")
+    exec(compile(texte, "contrat_paliers.py", "exec"), m.__dict__)
+    return m
+
+
 def verifie(t: dict) -> list:
     f = []
+    try:
+        c = charge_contrat(t["contrat"])
+    except Exception as exc:  # contrat illisible : tout le reste est sans objet
+        return [f"contrat illisible : {exc}"]
     lb = t["lb"]
     j = jobs(lb)
     # 1
@@ -138,29 +171,46 @@ def verifie(t: dict) -> list:
         if i_dl < 0:
             continue
         i_v = index(es, lambda x: LIAISON in x[1])
-        if not re.search(r"^    needs: artefact$", entete(bloc), re.M) or not i_dl < i_v:
-            f.append(f"{nom} : joue l'artefact sans l'attendre ou sans le verifier")
+        e_job = entete(bloc)
+        if not re.search(r"^    needs: \[dedoublonne, artefact\]$", e_job, re.M) or not i_dl < i_v \
+                or "if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}" not in e_job:
+            f.append(f"{nom} : joue l'artefact sans l'attendre explicitement ou sans le verifier")
     # 7
     conv = j.get("convergence", "")
     if f"name: ${{{{ ({Q}) && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}}}" not in conv:
         f.append("verdict : meme nom en developpement qu'en qualification")
+    besoins = re.search(r"^    needs: \[(.*)\]$", conv, re.M)
+    attendus = {b.strip() for b in besoins.group(1).split(",")} if besoins else set()
+    paires = [(e.cle, e.job) for e in c.EPREUVES] + list(c.PRODUCTEURS.values())
     for attendu in (f"BOUCHAUD_PALIER: ${{{{ ({Q}) && 'qualification' || 'developpement' }}}}",
-                    "PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}",
-                    "R_REUTILISE: ${{ needs.reutilise.result }}",
-                    "R_BUILD: ${{ needs.build.result }}", "R_PRIMITIVES: ${{ needs.primitives.result }}"):
+                    "PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}"):
         if attendu not in conv:
             f.append(f"verdict : {attendu.split(':')[0]} non transmis")
-    besoins = re.search(r"^    needs: \[(.*)\]$", conv, re.M)
-    if not besoins or not {"provenance", "build", "reutilise", "artefact", "primitives"} <= {
-            b.strip() for b in besoins.group(1).split(",")}:
-        f.append("verdict : n'attend pas la provenance et ses producteurs")
+    for cle, job in paires:
+        if f"          {cle}: ${{{{ needs.{job}.result }}}}\n" not in conv or job not in attendus:
+            f.append(f"verdict : {cle} (job {job}) non transmis ou non attendu -- contrat et workflow divergent")
+    transmis = set(re.findall(r"^          (R_[A-Z_]+): ", conv, re.M))
+    if transmis != {cle for cle, _ in paires}:
+        f.append(f"verdict : variables hors contrat {sorted(transmis - {cle for cle, _ in paires})}")
+    requises = {e.job for e in c.EPREUVES if all(x == c.REQUIS for x in e.exigence.values())}
+    if requises != REQUISES_PARTOUT:
+        f.append(f"contrat : epreuves requises dans les deux paliers modifiees {sorted(requises ^ REQUISES_PARTOUT)}")
+    hors = {e.job for e in c.EPREUVES if e.exigence.get(c.DEVELOPPEMENT) == c.HORS_RUN}
+    if hors != HORS_RUN_DEV or any(e.exigence.get(c.QUALIFICATION) != c.REQUIS for e in c.EPREUVES):
+        f.append("contrat : une epreuve n'est plus requise en qualification, ou une autre sort du developpement")
+    for job in hors:
+        if f"&& ({Q})" not in entete(j.get(job, "")):
+            f.append(f"{job} : hors-run en developpement selon le contrat, mais pas exclu par sa condition")
+    if c.MODES_PERMIS.get(c.QUALIFICATION) != ("construit",):
+        f.append("contrat : qualification acceptee sans build canonique")
+    if c.NOM_VERDICT.get(c.QUALIFICATION) != "ladybird / verdict de convergence" \
+            or c.NOM_VERDICT.get(c.DEVELOPPEMENT) == c.NOM_VERDICT.get(c.QUALIFICATION):
+        f.append("contrat : noms de verdict confondus")
     v = t["verdict"]
     corps = v[v.find("def main()"):]
-    if 'if os.environ.get("BOUCHAUD_PALIER") == "qualification":\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")' not in corps \
-            or v.count('print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")') != 1:
-        f.append("verdict_convergence.py : CONVERGENCE_OK hors qualification")
-    if 'if palier == "qualification" and mode != "construit":' not in v:
-        f.append("verdict_convergence.py : qualification acceptee sans build complet")
+    if 'if os.environ.get("BOUCHAUD_PALIER") == contrat.QUALIFICATION:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")' not in corps \
+            or v.count('print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")') != 1 or "juge = contrat.juge" not in v:
+        f.append("verdict_convergence.py : ne juge pas avec le contrat, ou CONVERGENCE_OK hors qualification")
     # 8
     p13 = t["p13"]
     if "uses: ./.github/workflows/os-primitives.yml" not in p13 or "audit/" in p13.split("paths:", 1)[0]:
@@ -170,6 +220,11 @@ def verifie(t: dict) -> list:
     couverts = set(re.findall(r"^      - '([^']+)'$", p13, re.M))
     if not noyau or not noyau <= couverts:
         f.append(f"p13-primitives-noyau : chemins noyau non couverts {sorted(noyau - couverts)}")
+    # 9
+    try:
+        f += [f"simulation : {e}" for e in simule_paliers.controle(lb, c)]
+    except Exception as exc:
+        f.append(f"simulation impossible : {exc}")
     return f
 
 
@@ -191,17 +246,37 @@ def negatifs(t: dict) -> list:
         ("deux producteurs acceptes", "lb", '&& [ "$R_REUTILISE" = skipped ]; then', "; then"),
         ("consommateur non verifie", "lb", f"        run: {LIAISON}\n      - name: WPT sur Bouchaud OS",
          "        run: true\n      - name: WPT sur Bouchaud OS"),
-        ("consommateur sur build seul", "lb", "    name: ladybird / sites reels\n    needs: artefact\n",
-         "    name: ladybird / sites reels\n    needs: build\n"),
+        ("consommateur sans condition explicite (run 40554668634)", "lb",
+         "    name: ladybird / sites reels\n    needs: [dedoublonne, artefact]\n",
+         "    name: ladybird / sites reels\n    needs: artefact\n"),
+        ("performance sans condition explicite", "lb",
+         "    needs: [dedoublonne, browser-host-smoke]\n    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.browser-host-smoke.result == 'success' }}\n",
+         "    needs: browser-host-smoke\n"),
+        ("epreuve requise retiree des besoins du verdict", "lb",
+         "crash-services, compositor-piege, endurance-longue]", "crash-services, compositor-piege]"),
+        ("artefact non transmis au verdict", "lb", "          R_ARTEFACT: ${{ needs.artefact.result }}\n", ""),
+        ("epreuve transmise sous un autre job", "lb", "          R_WPT: ${{ needs.wpt.result }}",
+         "          R_WPT: ${{ needs.cache.result }}"),
+        ("primitives jouees en developpement", "lb",
+         "needs.dedoublonne.outputs.reutilise != 'true' && (" + Q + ") }}\n    uses:",
+         "needs.dedoublonne.outputs.reutilise != 'true' && (true) }}\n    uses:"),
+        ("contrat : WPT hors-run en developpement", "contrat",
+         '_partout("R_WPT", "wpt", "WPT smoke (50 fichiers, compares a Linux)"),',
+         'Epreuve("R_WPT", "wpt", "WPT", {QUALIFICATION: REQUIS, DEVELOPPEMENT: HORS_RUN}),'),
+        ("contrat : primitives hors-run en qualification", "contrat",
+         "{QUALIFICATION: REQUIS, DEVELOPPEMENT: HORS_RUN}),", "{QUALIFICATION: HORS_RUN, DEVELOPPEMENT: HORS_RUN}),"),
+        ("contrat : qualification sur artefact reutilise", "contrat",
+         'MODES_PERMIS = {QUALIFICATION: ("construit",),', 'MODES_PERMIS = {QUALIFICATION: ("construit", "reutilise"),'),
+        ("contrat : skipped accepte pour un requis", "contrat",
+         '        attendu = "success" if exigence == REQUIS else "skipped"\n        ok = resultat == attendu\n',
+         '        attendu = "success" if exigence == REQUIS else "skipped"\n        ok = resultat in (attendu, "skipped")\n'),
         ("verdict au nom unique", "lb", "'ladybird / verdict integration developpement' }}\n    needs:",
          "'ladybird / verdict de convergence' }}\n    needs:"),
         ("palier non transmis", "lb", "          BOUCHAUD_PALIER: ", "          BOUCHAUD_PALIER_X: "),
         ("reutilisation non transmise", "lb", "          R_REUTILISE: ${{ needs.reutilise.result }}\n          R_PRIMITIVES",
          "          R_PRIMITIVES"),
-        ("convergence en developpement", "verdict", 'if os.environ.get("BOUCHAUD_PALIER") == "qualification":\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")',
+        ("convergence en developpement", "verdict", 'if os.environ.get("BOUCHAUD_PALIER") == contrat.QUALIFICATION:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")',
          'if True:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")'),
-        ("qualification sur artefact reutilise", "verdict", 'if palier == "qualification" and mode != "construit":',
-         'if False:'),
         ("chemin noyau oublie", "p13", "      - 'src/kernel/scheduler/**'\n", ""),
         ("audit double", "p13", "branches: [main, 'claude/**', 'feat/**']",
          "branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']"),
