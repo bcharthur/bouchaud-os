@@ -1,0 +1,19 @@
+Candidat p13/candidat-20261027b, arbre 94449f6b (e58e150c + CI + C5 + console + reveil).
+TCG local, image livree et temoin banc-reveil-historique construits du meme arbre
+(temoin dans target-temoin). Hote : run_host_tests 126/126, garde-fous 198/198.
+
+production  reveil coeur muet SMP2           OK      (code 0)
+production  reveil coeur muet SMP4           OK      (code 0)
+production  console rafale masquee SMP2      OK      400/400, 0 perdue
+production  console rafale masquee SMP4      OK      400/400, 0 perdue
+production  C5 image livree, 3 tours         vert
+temoin      reveil coeur muet SMP2           ECHEC attendu (code 1)
+temoin      reveil coeur muet SMP4           ECHEC attendu (code 1)
+temoin      rafale sur le coeur du fil SMP4  OK      secours=1 relogees=1, 0 perdue
+temoin      rafale sur le coeur du fil SMP2  ECHEC   secours>=1 : condition inatteignable
+            (le seul autre coeur execute le shell qui emet la rafale, hors
+            ordonnanceur ; secours_voulu=1 secours=0 ; 400/400, 0 perdue).
+            Retire de p13-cible-kvm, non compte comme vert.
+production  rafale sur le coeur du fil SMP2  ECHEC   secours>=1 : le correctif de
+            reveil replace le fil avant le secours (secours_voulu=1 secours=0,
+            400/400, 0 perdue ; journal non archive) -- raison de l'image temoin (option 2).

@@ -1,0 +1,1 @@
+IMAGE fichier=boot-temoin-reveil.bin sha_source=94449f6b sha256=afb3c4b5527067f869ed21c0b52f3dd41eed692d5ac85ff65b40d899a40f45d5 features=banc-reveil-historique livrable=non qualifiable=non

@@ -1,0 +1,1 @@
+IMAGE fichier=boot-livree.bin sha_source=94449f6b sha256=95221bdfea0d3b4c747d5c426f2f6342bd634bfb10297029856be82ec99bce37 features=default

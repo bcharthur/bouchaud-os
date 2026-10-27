@@ -1,0 +1,10 @@
+FAUTE_PERSISTANCE_TOUR_OK tour=1 accel=tcg smp=4
+manque=[] fatal=0 faute_inattendue=0 instantane=64/64
+FAUTE_PERSISTANCE_OK
+FAUTE_PERSISTANCE_TOUR_OK tour=2 accel=tcg smp=4
+manque=[] fatal=0 faute_inattendue=0 instantane=64/64
+FAUTE_PERSISTANCE_OK
+FAUTE_PERSISTANCE_TOUR_OK tour=3 accel=tcg smp=4
+manque=[] fatal=0 faute_inattendue=0 instantane=64/64
+FAUTE_PERSISTANCE_OK
+FAUTE_PERSISTANCE_BILAN repetitions=3 echecs=0 accel=tcg smp=4 sortie=/tmp/claude-0/cand-tcg/c5-livree

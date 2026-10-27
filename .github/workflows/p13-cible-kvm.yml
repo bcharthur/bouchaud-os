@@ -107,15 +107,18 @@ jobs:
             p13-cible-${{ runner.os }}-
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
-      - name: Images (livree, temoin sans contre-pression)
+      - name: Images (livree, temoin sans contre-pression, temoin regle de reveil historique)
         run: |
           tools/ci/build_kernel.sh
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
           CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-console-sans-contre-pression
           cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-temoin.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-reveil-historique
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-temoin-reveil.bin
           for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-console.txt
           if grep -aq BOUCHAUD_IMAGE_TEMOIN boot-livree.bin; then echo BANNIERE_TEMOIN_DANS_LA_LIVREE >&2; exit 1; fi
           grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-console-sans-contre-pression' boot-temoin.bin
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique' boot-temoin-reveil.bin
       - name: Acces a /dev/kvm
         run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
       - name: Temoin -- rafale masquee pendant le verrou suspendu 3 s, pertes attendues (SMP4)
@@ -125,17 +128,28 @@ jobs:
           fi
           cp serie-entrelacement.log console-kvm-temoin-smp4.log
           grep -aqE 'lignes_perdues=[1-9]' console-kvm-temoin-smp4.log
-      - name: Livree -- rafale masquee, coeur quelconque et coeur du fil, SMP2 et SMP4 (0 perte exigee)
+      - name: Livree -- rafale masquee pendant le verrou suspendu, SMP2 et SMP4 (0 perte exigee)
         if: ${{ !cancelled() }}
         run: |
           r=0
           for smp in 2 4; do
             BO_SMP=$smp BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
             cp serie-entrelacement.log console-kvm-rafale-smp$smp.log
-            BO_SMP=$smp BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-livree.bin || r=1
-            cp serie-entrelacement.log console-kvm-rafale-coeur-du-fil-smp$smp.log
           done
           exit $r
+      # Coeur du fil : le banc exige que le SECOURS dedie de la console reloge le
+      # fil (secours>=1). Sur la livree, le correctif de reveil le replace avant
+      # (P13_REVEIL_COEUR_MUET_V1) : ce banc tourne donc sur l'image temoin de la
+      # regle historique, comme les bancs coeur du fil d'os-primitives, criteres
+      # inchanges. SMP4 seulement : en SMP2 l'autre coeur execute le shell qui
+      # emet la rafale, hors ordonnanceur -- le secours n'a aucun coeur ou
+      # reloger (secours_voulu=1 secours=0, 0 ligne perdue), condition du banc
+      # inatteignable, pas un vert a forcer.
+      - name: Temoin reveil historique -- rafale masquee sur le coeur du fil, SMP4 (secours et 0 perte exiges)
+        if: ${{ !cancelled() }}
+        run: |
+          BO_SMP=4 BO_QEMU_KVM=1 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_RAFALE_MASQUEE=400 tools/ci/run_serie_entrelacement.sh boot-temoin-reveil.bin
+          cp serie-entrelacement.log temoin-reveil-console-kvm-rafale-coeur-du-fil-smp4.log
       - name: Livree -- suspensions volontaires du detenteur (jeton 12 s, verrou 12 s), SMP2 et SMP4
         if: ${{ !cancelled() }}
         run: |
@@ -154,6 +168,14 @@ jobs:
           path: |
             identite-console.txt
             console-kvm-*.log
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-console-temoin-reveil-${{ github.run_id }}
+          path: |
+            identite-console.txt
+            temoin-reveil-console-kvm-*.log
           if-no-files-found: warn
 
   reveil:

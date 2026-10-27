@@ -1,0 +1,12 @@
+REVEIL_COEUR_MUET smp=4 accel=-cpu max masque_ms=3000
+IMAGE sha256=afb3c4b5527067f869ed21c0b52f3dd41eed692d5ac85ff65b40d899a40f45d5 build=94449f6b7cba temoin=banc-reveil-historique,
+SERIE_DORMEUR_MASQUE coeur=2 masque_ms=3000 tours_pendant=0 ecart_max_ms=3001 coeur_du_dormeur_apres=2 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=28
+  ok      aucune panique noyau
+  ECHEC   le dormeur migrable a progresse pendant le masquage (>= 1 tour / 10 ms)
+  ECHEC   aucun ecart > 100 ms entre deux tours (pas de famine)
+  ok      aucune double election du dormeur
+  ok      on_cpu designe toujours le coeur qui execute le dormeur
+  ok      le fil epingle n'a jamais tourne hors de son coeur
+  ok      le fil epingle n'a pas tourne pendant le masquage de son coeur
+  ok      le fil epingle a repris apres le masquage
+REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3001
