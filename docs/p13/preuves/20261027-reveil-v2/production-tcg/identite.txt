@@ -1,0 +1,1 @@
+IMAGE boot-livree sha256=77e546234e9d6f0c78c683e492da42395577c5e7c2d7298cfb438f3f4644361e features=default

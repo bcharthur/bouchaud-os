@@ -1,0 +1,2 @@
+IMAGE boot-temoin-reveil sha256=ef8a4c096dbf60b1037abf53dd8871e03caa5826863242300d87282b70adbbe3 features=banc-reveil-historique livrable=non qualifiable=non
+IMAGE boot-temoin-console sha256=87a36a50ebd32ab508680c5f4abfbd1f615a973d25aa9023587bf317f7d7082e features=banc-console-sans-contre-pression livrable=non qualifiable=non

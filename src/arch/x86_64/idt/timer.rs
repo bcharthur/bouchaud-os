@@ -156,6 +156,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
     crate::kernel::task::stall_probe_from_timer();
     // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : une lecture atomique par tic.
     crate::kernel::task::veille_attentes_vives();
+    // P13_REVEIL_COEUR_MUET_V2 : un coeur vivant reloge les taches pretes en
+    // file sur un coeur muet ; une lecture par coeur dans le cas courant.
+    crate::kernel::task::secours_coeurs_muets();
     crate::kernel::blackbox::timer_stage(blackbox_cpu, 4);
 
     let mut preempt_now = false;

@@ -383,7 +383,13 @@ def verifie(racine: Path) -> list[str]:
             or not re.search(r"if soupcon <= progres \{", sv) \
             or "static CONSOLE_SECOURS_VOULU: AtomicBool = AtomicBool::new(true);" not in u:
         f.append(f"{UART} : le chien de garde du fil ne distingue plus un fil vivant (coeur suspendu) d'un fil mort, ou son repli n'est plus borne")
-    cr = corps(src[CREATION], "secours_tache_coeur_muet")
+    # P13_REVEIL_COEUR_MUET_V2 : le relogement vit dans `reloge_tache_coeur_muet`,
+    # partage par le chien de garde de la console et l'ordonnanceur ; le
+    # secours de la console doit y passer, et ses gardes y restent.
+    secours_console = corps(src[CREATION], "secours_tache_coeur_muet")
+    cr = corps(src[CREATION], "reloge_tache_coeur_muet")
+    if not secours_console or "reloge_tache_coeur_muet(index, seuil_ns)?" not in secours_console:
+        f.append(f"{CREATION} : le secours de la console ne passe plus par le relogement garde")
     if not cr or not re.search(r"if tache\.noyau && !tache\.migrable \{\s*return None;", cr) \
             or not (pos(cr, "secours_permis(") < pos(cr, ".remove(identite.en_mot())") < pos(cr, ".enqueue_bande(identite.en_mot(), bande)") < 10**9) \
             or not re.search(r"if !crate::arch::x86_64::cpu_local::local\(id_donneur\)\.remove\(identite\.en_mot\(\)\) \{[^}]*return None;", cr):

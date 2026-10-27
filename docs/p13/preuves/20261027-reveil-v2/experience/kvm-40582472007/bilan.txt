@@ -1,0 +1,2 @@
+[36;1mecho "BILAN ok=$ok echec=$ko non_qualifiant=$nq"[0m
+BILAN ok=32 echec=8 non_qualifiant=0

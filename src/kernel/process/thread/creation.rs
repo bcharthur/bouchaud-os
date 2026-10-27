@@ -582,6 +582,14 @@ static SECOURS_REFUS_ENTREE: AtomicU64 = AtomicU64::new(0);
 /// appelant, et l'election du coeur muet, s'il se reveille entre-temps, ne la
 /// trouve plus. S'il l'a deja prise, `remove` echoue et rien ne bouge.
 pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
+    let cible = reloge_tache_coeur_muet(index, seuil_ns)?;
+    SECOURS_RELOGEES.fetch_add(1, Ordering::Relaxed);
+    Some(cible)
+}
+
+/// Le relogement lui-meme, sans compte : chaque appelant compte le sien
+/// (`secours` de la console = SES relogements).
+fn reloge_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
     use crate::kernel::scheduler::secours::{choisit_accueil, accueil, secours_permis, Accueil};
     let table = tasks();
     let tache = table.get(index)?;
@@ -627,7 +635,6 @@ pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
     tache.runq_cpu.range(cible as u8);
     tache.file_au_pret.range(cible as u8);
     crate::arch::x86_64::cpu_local::local(id_cible).enqueue_bande(identite.en_mot(), bande);
-    SECOURS_RELOGEES.fetch_add(1, Ordering::Relaxed);
     // Meme motif croise que `publish_ready` : mise en file, barriere, puis
     // lecture de l'etat du coeur d'accueil.
     core::sync::atomic::fence(Ordering::SeqCst);
@@ -642,6 +649,71 @@ pub fn secours_tache_coeur_muet(index: usize, seuil_ns: u64) -> Option<usize> {
 /// `(taches relogees, entrees deja parties)` du secours des coeurs muets.
 pub fn compteurs_secours_coeur_muet() -> (u64, u64) {
     (SECOURS_RELOGEES.load(Ordering::Relaxed), SECOURS_REFUS_ENTREE.load(Ordering::Relaxed))
+}
+
+// P13_REVEIL_COEUR_MUET_V2 -- LE SECOURS PAR L'ORDONNANCEUR LUI-MEME
+//
+// KVM SMP2, run 40582472007 (8 demarrages sur 30) : le dormeur, fil noyau
+// migrable, publie sur le coeur zero au moment ou le banc le masquait (son
+// occupant, un fil noyau, n'etait pas au repos ; aucun coeur au repos :
+// replacement refuse, coeur historique garde). Il y est reste 193 a 420 ms.
+// Le coeur un n'a jamais cesse d'elire -- battements a l'heure, vol de
+// l'hote <= 53 us -- mais il servait la console et ses voisins : jamais au
+// repos, donc jamais de vol (`pick_next` ne vole que sur file vide). Le
+// secours des coeurs muets existait, teste ; seul le chien de garde de la
+// console l'appelait.
+//
+// Chaque coeur vivant, a son battement (tic du BSP, vecteur local des AP),
+// reloge desormais les taches pretes en file sur un coeur muet, au sens de
+// `kernel::scheduler::secours` : occupant installe depuis plus de
+// `SECOURS_SEUIL_NS` (cinq quanta), tache prete depuis plus longtemps encore.
+// Memes gardes que le chien de garde : fils noyau epingles jamais deplaces,
+// affinite respectee, coeur d'accueil vivant et permis, propriete de
+// l'entree par `remove`. Cas courant : une lecture par coeur, aucun parcours.
+static SECOURS_ORDONNANCEUR_RELOGEES: AtomicU64 = AtomicU64::new(0);
+static SECOURS_ORDONNANCEUR_EN_COURS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(not(feature = "banc-reveil-historique"))]
+pub fn secours_coeurs_muets() {
+    use crate::kernel::scheduler::secours::{coeurs_muets, SECOURS_SEUIL_NS};
+    let maintenant = crate::kernel::timer::monotonic_ns();
+    let en_ligne = smp::schedulable_cpus().max(1).min(MAX_CPUS).min(64);
+    let mut coeurs = [(0u64, false); MAX_CPUS];
+    for (cpu, c) in coeurs.iter_mut().enumerate().take(en_ligne) {
+        let file = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+            .and_then(|id| crate::arch::x86_64::cpu_local::local(id).file_non_vide_essai())
+            .unwrap_or(false);
+        *c = (profil_occupant(cpu).2, file);
+    }
+    let muets = coeurs_muets(&coeurs[..en_ligne], maintenant, SECOURS_SEUIL_NS);
+    if muets == 0 || SECOURS_ORDONNANCEUR_EN_COURS.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let table = tasks();
+    for index in 0..table.len() {
+        let tache = &table[index];
+        if tache.state != TaskState::Ready || tache.on_cpu >= 0 {
+            continue;
+        }
+        let file = tache.runq_cpu.charge() as usize;
+        if file >= 64 || muets & (1 << file) == 0 {
+            continue;
+        }
+        if reloge_tache_coeur_muet(index, SECOURS_SEUIL_NS).is_some() {
+            SECOURS_ORDONNANCEUR_RELOGEES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    SECOURS_ORDONNANCEUR_EN_COURS.store(false, Ordering::Release);
+}
+
+/// BANC TEMOIN (option `banc-reveil-historique`) : l'ordonnanceur ne
+/// secourt personne ; seul le chien de garde de la console le fait.
+#[cfg(feature = "banc-reveil-historique")]
+pub fn secours_coeurs_muets() {}
+
+/// Taches relogees par l'ordonnanceur depuis un coeur muet.
+pub fn compteur_secours_ordonnanceur() -> u64 {
+    SECOURS_ORDONNANCEUR_RELOGEES.load(Ordering::Relaxed)
 }
 
 pub fn register(mut task: Box<Task>) -> usize {

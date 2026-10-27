@@ -9,7 +9,7 @@
 #[path = "../../src/kernel/scheduler/secours.rs"]
 mod secours;
 
-use secours::{choisit_accueil, coeur_muet, secours_permis, Accueil, SECOURS_SEUIL_NS};
+use secours::{choisit_accueil, coeur_muet, coeurs_muets, secours_permis, Accueil, SECOURS_SEUIL_NS};
 
 const MS: u64 = 1_000_000;
 
@@ -166,3 +166,39 @@ fn property_accueil_respecte_les_interdits_et_le_rang() {
         }
     }
 }
+
+// P13_REVEIL_COEUR_MUET_V2 : les coeurs que l'ordonnanceur secourt a chaque
+// battement.
+
+#[test]
+fn le_coeur_masque_par_un_fil_noyau_est_designe_des_qu_il_a_une_file() {
+    // Run 40582472007, KVM SMP2 : le coeur zero tenu par le masqueur depuis
+    // 21 ms, le dormeur dans sa file ; le coeur un sert la console (occupant
+    // installe depuis 1 ms).
+    let t = 10_000 * MS;
+    let coeurs = [(t - 21 * MS, true), (t - MS, true)];
+    assert_eq!(coeurs_muets(&coeurs, t, SECOURS_SEUIL_NS), 0b01);
+}
+
+#[test]
+fn un_coeur_muet_sans_file_n_a_rien_a_rendre() {
+    let t = 10_000 * MS;
+    assert_eq!(coeurs_muets(&[(t - 500 * MS, false)], t, SECOURS_SEUIL_NS), 0);
+}
+
+#[test]
+fn ni_le_repos_ni_le_quantum_ne_designent_un_coeur() {
+    // Au repos (aucun occupant), ou occupant installe depuis un quantum ou
+    // exactement le seuil : jamais designe, file pleine ou non.
+    let t = 10_000 * MS;
+    let coeurs = [(0, true), (t - 4 * MS, true), (t - SECOURS_SEUIL_NS, true)];
+    assert_eq!(coeurs_muets(&coeurs, t, SECOURS_SEUIL_NS), 0);
+}
+
+#[test]
+fn plusieurs_coeurs_muets_sont_tous_designes() {
+    let t = 10_000 * MS;
+    let coeurs = [(t - 30 * MS, true), (0, true), (t - 3_000 * MS, true), (t - 25 * MS, false)];
+    assert_eq!(coeurs_muets(&coeurs, t, SECOURS_SEUIL_NS), 0b0101);
+}
+

@@ -106,6 +106,9 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
         // BOUCHAUD_VEILLE_ATTENTE_VIVE_V1 : les AP veillent aussi -- c'est
         // ce qui voit un coeur zero pris.
         crate::kernel::task::veille_attentes_vives();
+        // P13_REVEIL_COEUR_MUET_V2 : un coeur vivant reloge les taches pretes en
+        // file sur un coeur muet ; une lecture par coeur dans le cas courant.
+        crate::kernel::task::secours_coeurs_muets();
 
         // Un tir precis avant le quantum peut seulement reveiller la tache
         // deja installee, sans publier de candidat. En contexte noyau, il

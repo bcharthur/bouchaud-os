@@ -1,0 +1,226 @@
+smp2-1 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2895 ecart_max_ms=7 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=40
+smp2-1 code=0 DORMEUR_ECART debut_us=-871 fin_us=6177 duree_us=7048 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-1 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-1 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=262 fin_us=3000011 duree_us=2999749 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-1 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=136 fin_us=3000070 duree_us=2999933 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-1 code=0 REVEIL_COEUR_MUET_OK tours=2895 ecart_max_ms=7
+smp2-2 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2901 ecart_max_ms=3 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=32
+smp2-2 code=0 DORMEUR_ECART debut_us=3032726 fin_us=3040144 duree_us=7417 coeur_avant=1 coeur_apres=0 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-2 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp2-2 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=3033025 fin_us=3040014 duree_us=6989 masque_us=9 vole_us=0 cause=Inexpliquee tache=0
+smp2-2 code=0 REVEIL_COEUR_MUET_OK tours=2901 ecart_max_ms=3
+smp2-3 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2880 ecart_max_ms=21 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=40
+smp2-3 code=0 DORMEUR_ECART debut_us=-140 fin_us=20941 duree_us=21081 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-3 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-3 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=51 fin_us=3000008 duree_us=2999957 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-3 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=562 fin_us=3000058 duree_us=2999496 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-3 code=0 REVEIL_COEUR_MUET_OK tours=2880 ecart_max_ms=21
+smp2-4 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2828 ecart_max_ms=77 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=33
+smp2-4 code=0 DORMEUR_ECART debut_us=-535 fin_us=77050 duree_us=77586 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-4 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-4 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=291 fin_us=3000010 duree_us=2999719 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-4 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=1924 fin_us=3000233 duree_us=2998308 masque_us=9 vole_us=0 cause=Inexpliquee tache=15
+smp2-4 code=0 REVEIL_COEUR_MUET_OK tours=2828 ecart_max_ms=77
+smp2-5 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2884 ecart_max_ms=18 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=33
+smp2-5 code=0 DORMEUR_ECART debut_us=-737 fin_us=18051 duree_us=18788 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-5 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-5 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=777 fin_us=3000010 duree_us=2999232 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-5 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2338 fin_us=3000044 duree_us=2997705 masque_us=13 vole_us=0 cause=Inexpliquee tache=15
+smp2-5 code=0 REVEIL_COEUR_MUET_OK tours=2884 ecart_max_ms=18
+smp2-6 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2567 ecart_max_ms=385 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=35
+smp2-6 code=1 DORMEUR_ECART debut_us=-439 fin_us=385421 duree_us=385861 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 39 34 ] preuve_hote=kvm-steal
+smp2-6 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-6 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=427 fin_us=3000008 duree_us=2999580 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-6 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=462 fin_us=3000080 duree_us=2999618 masque_us=10 vole_us=0 cause=Inexpliquee tache=15
+smp2-6 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2567 ecart_max_ms=385
+smp2-7 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2574 ecart_max_ms=371 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=34
+smp2-7 code=1 DORMEUR_ECART debut_us=-852 fin_us=370685 duree_us=371538 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 18 11 ] preuve_hote=kvm-steal
+smp2-7 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-7 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=592 fin_us=3000008 duree_us=2999416 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-7 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=190 fin_us=3000101 duree_us=2999910 masque_us=10 vole_us=0 cause=Inexpliquee tache=15
+smp2-7 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2574 ecart_max_ms=371
+smp2-8 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2885 ecart_max_ms=19 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=36
+smp2-8 code=0 DORMEUR_ECART debut_us=-62 fin_us=19606 duree_us=19669 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-8 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-8 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=885 fin_us=3000009 duree_us=2999123 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-8 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2032 fin_us=3000067 duree_us=2998035 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-8 code=0 REVEIL_COEUR_MUET_OK tours=2885 ecart_max_ms=19
+smp2-9 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2876 ecart_max_ms=21 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=35
+smp2-9 code=0 DORMEUR_ECART debut_us=-277 fin_us=20740 duree_us=21018 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 7 ] preuve_hote=kvm-steal
+smp2-9 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-9 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=608 fin_us=3000009 duree_us=2999401 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-9 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=360 fin_us=3000120 duree_us=2999759 masque_us=8 vole_us=0 cause=Inexpliquee tache=15
+smp2-9 code=0 REVEIL_COEUR_MUET_OK tours=2876 ecart_max_ms=21
+smp2-10 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2835 ecart_max_ms=73 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=39
+smp2-10 code=0 DORMEUR_ECART debut_us=-590 fin_us=73304 duree_us=73894 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 7 0 ] preuve_hote=kvm-steal
+smp2-10 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-10 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=333 fin_us=3000008 duree_us=2999674 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-10 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=1750 fin_us=3000060 duree_us=2998309 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-10 code=0 REVEIL_COEUR_MUET_OK tours=2835 ecart_max_ms=73
+smp2-11 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2884 ecart_max_ms=20 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=38
+smp2-11 code=0 DORMEUR_ECART debut_us=-141 fin_us=20638 duree_us=20779 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 8 0 ] preuve_hote=kvm-steal
+smp2-11 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-11 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=310 fin_us=3000009 duree_us=2999698 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-11 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=524 fin_us=3000069 duree_us=2999545 masque_us=11 vole_us=0 cause=Inexpliquee tache=15
+smp2-11 code=0 REVEIL_COEUR_MUET_OK tours=2884 ecart_max_ms=20
+smp2-12 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2880 ecart_max_ms=24 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=36
+smp2-12 code=0 DORMEUR_ECART debut_us=-986 fin_us=23048 duree_us=24035 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-12 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-12 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=646 fin_us=3000007 duree_us=2999361 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-12 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=77 fin_us=3000060 duree_us=2999983 masque_us=9 vole_us=0 cause=Inexpliquee tache=15
+smp2-12 code=0 REVEIL_COEUR_MUET_OK tours=2880 ecart_max_ms=24
+smp2-13 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2567 ecart_max_ms=380 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=27
+smp2-13 code=1 DORMEUR_ECART debut_us=-93 fin_us=380264 duree_us=380358 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 21 0 ] preuve_hote=kvm-steal
+smp2-13 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-13 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=583 fin_us=3000006 duree_us=2999423 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-13 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=207 fin_us=3000054 duree_us=2999846 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-13 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2567 ecart_max_ms=380
+smp2-14 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2898 ecart_max_ms=3 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=34
+smp2-14 code=0 DORMEUR_ECART debut_us=3020128 fin_us=3028883 duree_us=8754 coeur_avant=0 coeur_apres=0 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-14 code=0 DORMEUR_ECART_ABSENCES n=0 incomplet=0
+smp2-14 code=0 REVEIL_COEUR_MUET_OK tours=2898 ecart_max_ms=3
+smp2-15 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2836 ecart_max_ms=68 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=32
+smp2-15 code=0 DORMEUR_ECART debut_us=-870 fin_us=67229 duree_us=68100 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 7 7 ] preuve_hote=kvm-steal
+smp2-15 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-15 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=625 fin_us=3000008 duree_us=2999382 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-15 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=258 fin_us=3000065 duree_us=2999806 masque_us=12 vole_us=0 cause=Inexpliquee tache=15
+smp2-15 code=0 REVEIL_COEUR_MUET_OK tours=2836 ecart_max_ms=68
+smp2-16 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2585 ecart_max_ms=365 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=40
+smp2-16 code=1 DORMEUR_ECART debut_us=-190 fin_us=365627 duree_us=365818 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 29 26 ] preuve_hote=kvm-steal
+smp2-16 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-16 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=855 fin_us=3000018 duree_us=2999163 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-16 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=59 fin_us=3000074 duree_us=3000014 masque_us=10 vole_us=0 cause=Inexpliquee tache=15
+smp2-16 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2585 ecart_max_ms=365
+smp2-17 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2882 ecart_max_ms=21 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=40
+smp2-17 code=0 DORMEUR_ECART debut_us=-713 fin_us=20481 duree_us=21194 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-17 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-17 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=60 fin_us=3000008 duree_us=2999948 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-17 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=305 fin_us=3000056 duree_us=2999750 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-17 code=0 REVEIL_COEUR_MUET_OK tours=2882 ecart_max_ms=21
+smp2-18 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2881 ecart_max_ms=15 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=29
+smp2-18 code=0 DORMEUR_ECART debut_us=-237 fin_us=15337 duree_us=15575 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-18 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-18 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=705 fin_us=3000008 duree_us=2999303 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-18 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=276 fin_us=3000080 duree_us=2999804 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-18 code=0 REVEIL_COEUR_MUET_OK tours=2881 ecart_max_ms=15
+smp2-19 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2522 ecart_max_ms=420 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=36
+smp2-19 code=1 DORMEUR_ECART debut_us=-1006 fin_us=419647 duree_us=420653 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 8 25 ] preuve_hote=kvm-steal
+smp2-19 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-19 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=23 fin_us=3000010 duree_us=2999986 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-19 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=3986 fin_us=3000129 duree_us=2996143 masque_us=10 vole_us=0 cause=Inexpliquee tache=15
+smp2-19 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2522 ecart_max_ms=420
+smp2-20 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2881 ecart_max_ms=20 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=36
+smp2-20 code=0 DORMEUR_ECART debut_us=-803 fin_us=20053 duree_us=20857 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-20 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-20 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=478 fin_us=3000008 duree_us=2999530 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-20 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=53 fin_us=3000062 duree_us=3000008 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-20 code=0 REVEIL_COEUR_MUET_OK tours=2881 ecart_max_ms=20
+smp2-21 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2887 ecart_max_ms=2 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=18
+smp2-21 code=0 DORMEUR_ECART debut_us=3020137 fin_us=3049060 duree_us=28923 coeur_avant=0 coeur_apres=0 vol_hote_us=[ 0 12 ] preuve_hote=kvm-steal
+smp2-21 code=0 DORMEUR_ECART_ABSENCES n=0 incomplet=0
+smp2-21 code=0 REVEIL_COEUR_MUET_OK tours=2887 ecart_max_ms=2
+smp2-22 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2727 ecart_max_ms=193 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=38
+smp2-22 code=1 DORMEUR_ECART debut_us=-415 fin_us=192927 duree_us=193343 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-22 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-22 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=178 fin_us=3000010 duree_us=2999832 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-22 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2076 fin_us=3000047 duree_us=2997970 masque_us=14 vole_us=0 cause=Inexpliquee tache=15
+smp2-22 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2727 ecart_max_ms=193
+smp2-23 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2893 ecart_max_ms=2 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=39
+smp2-23 code=0 DORMEUR_ECART debut_us=417293 fin_us=419440 duree_us=2146 coeur_avant=1 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-23 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-23 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=33 fin_us=3000010 duree_us=2999976 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-23 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2157 fin_us=3000065 duree_us=2997907 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-23 code=0 REVEIL_COEUR_MUET_OK tours=2893 ecart_max_ms=2
+smp2-24 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2891 ecart_max_ms=18 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=34
+smp2-24 code=0 DORMEUR_ECART debut_us=-526 fin_us=18440 duree_us=18966 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-24 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-24 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=513 fin_us=3000010 duree_us=2999497 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-24 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2076 fin_us=3000140 duree_us=2998064 masque_us=8 vole_us=0 cause=Inexpliquee tache=15
+smp2-24 code=0 REVEIL_COEUR_MUET_OK tours=2891 ecart_max_ms=18
+smp2-25 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2826 ecart_max_ms=77 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=35
+smp2-25 code=0 DORMEUR_ECART debut_us=-607 fin_us=77198 duree_us=77806 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 53 0 ] preuve_hote=kvm-steal
+smp2-25 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-25 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=811 fin_us=3000007 duree_us=2999196 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-25 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2048 fin_us=3000881 duree_us=2998833 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-25 code=0 REVEIL_COEUR_MUET_OK tours=2826 ecart_max_ms=77
+smp2-26 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2832 ecart_max_ms=77 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=32
+smp2-26 code=0 DORMEUR_ECART debut_us=-486 fin_us=77422 duree_us=77908 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 0 ] preuve_hote=kvm-steal
+smp2-26 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-26 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=953 fin_us=3000007 duree_us=2999054 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-26 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=3286 fin_us=3000056 duree_us=2996769 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-26 code=0 REVEIL_COEUR_MUET_OK tours=2832 ecart_max_ms=77
+smp2-27 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2795 ecart_max_ms=78 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=36
+smp2-27 code=0 DORMEUR_ECART debut_us=-21 fin_us=78682 duree_us=78704 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 6 ] preuve_hote=kvm-steal
+smp2-27 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-27 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=300 fin_us=3000011 duree_us=2999710 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-27 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=301 fin_us=3000099 duree_us=2999797 masque_us=12 vole_us=0 cause=Inexpliquee tache=15
+smp2-27 code=0 REVEIL_COEUR_MUET_OK tours=2795 ecart_max_ms=78
+smp2-28 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2580 ecart_max_ms=368 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=28
+smp2-28 code=1 DORMEUR_ECART debut_us=-886 fin_us=368090 duree_us=368977 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 22 27 ] preuve_hote=kvm-steal
+smp2-28 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-28 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=243 fin_us=3000010 duree_us=2999766 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-28 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=180 fin_us=3000062 duree_us=2999882 masque_us=7 vole_us=0 cause=Inexpliquee tache=15
+smp2-28 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2580 ecart_max_ms=368
+smp2-29 code=1 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2569 ecart_max_ms=383 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=27
+smp2-29 code=1 DORMEUR_ECART debut_us=-452 fin_us=382614 duree_us=383067 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 22 0 ] preuve_hote=kvm-steal
+smp2-29 code=1 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-29 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=375 fin_us=3000008 duree_us=2999632 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-29 code=1 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=25 fin_us=3000064 duree_us=3000038 masque_us=6 vole_us=0 cause=Inexpliquee tache=15
+smp2-29 code=1 REVEIL_COEUR_MUET_ECHEC n=1 tours=2569 ecart_max_ms=383
+smp2-30 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2878 ecart_max_ms=18 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=2 autres_coeurs_au_repos=1 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=42
+smp2-30 code=0 DORMEUR_ECART debut_us=-173 fin_us=18228 duree_us=18402 coeur_avant=0 coeur_apres=1 vol_hote_us=[ 0 16 ] preuve_hote=kvm-steal
+smp2-30 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp2-30 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=774 fin_us=3000008 duree_us=2999234 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp2-30 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=1902 fin_us=3000044 duree_us=2998141 masque_us=13 vole_us=0 cause=Inexpliquee tache=15
+smp2-30 code=0 REVEIL_COEUR_MUET_OK tours=2878 ecart_max_ms=18
+smp4-1 code=0 SERIE_DORMEUR_MASQUE coeur=3 masque_ms=3000 tours_pendant=2922 ecart_max_ms=3 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=47
+smp4-1 code=0 DORMEUR_ECART debut_us=1018853 fin_us=1022036 duree_us=3183 coeur_avant=1 coeur_apres=1 vol_hote_us=[ 0 2119 0 0 ] preuve_hote=kvm-steal
+smp4-1 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp4-1 code=0 DORMEUR_ECART_ABSENCE cpu=1 source=2 debut_us=1020812 fin_us=1021989 duree_us=1176 masque_us=0 vole_us=0 cause=Inexpliquee tache=0
+smp4-1 code=0 DORMEUR_ECART_ABSENCE cpu=3 source=2 debut_us=1940 fin_us=3000013 duree_us=2998072 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-1 code=0 REVEIL_COEUR_MUET_OK tours=2922 ecart_max_ms=3
+smp4-2 code=0 SERIE_DORMEUR_MASQUE coeur=2 masque_ms=3000 tours_pendant=2914 ecart_max_ms=2 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-2 code=0 DORMEUR_ECART debut_us=5310942 fin_us=5314322 duree_us=3380 coeur_avant=0 coeur_apres=3 vol_hote_us=[ 0 0 0 2676 ] preuve_hote=kvm-steal
+smp4-2 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp4-2 code=0 DORMEUR_ECART_ABSENCE cpu=3 source=2 debut_us=5312412 fin_us=5314290 duree_us=1877 masque_us=0 vole_us=0 cause=Inexpliquee tache=0
+smp4-2 code=0 REVEIL_COEUR_MUET_OK tours=2914 ecart_max_ms=2
+smp4-3 code=0 SERIE_DORMEUR_MASQUE coeur=2 masque_ms=3000 tours_pendant=2913 ecart_max_ms=8 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-3 code=0 DORMEUR_ECART debut_us=2665712 fin_us=2673895 duree_us=8183 coeur_avant=0 coeur_apres=0 vol_hote_us=[ 0 0 0 0 ] preuve_hote=kvm-steal
+smp4-3 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp4-3 code=0 DORMEUR_ECART_ABSENCE cpu=2 source=2 debut_us=361 fin_us=3000015 duree_us=2999654 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-3 code=0 REVEIL_COEUR_MUET_OK tours=2913 ecart_max_ms=8
+smp4-4 code=0 SERIE_DORMEUR_MASQUE coeur=1 masque_ms=3000 tours_pendant=2912 ecart_max_ms=3 coeur_du_dormeur_apres=2 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-4 code=0 DORMEUR_ECART debut_us=2110024 fin_us=2113249 duree_us=3225 coeur_avant=0 coeur_apres=2 vol_hote_us=[ 0 0 1694 0 ] preuve_hote=kvm-steal
+smp4-4 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp4-4 code=0 DORMEUR_ECART_ABSENCE cpu=1 source=2 debut_us=379 fin_us=3000016 duree_us=2999636 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-4 code=0 REVEIL_COEUR_MUET_OK tours=2912 ecart_max_ms=3
+smp4-5 code=0 SERIE_DORMEUR_MASQUE coeur=0 masque_ms=3000 tours_pendant=2934 ecart_max_ms=2 coeur_du_dormeur_apres=2 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=29
+smp4-5 code=0 DORMEUR_ECART debut_us=2066110 fin_us=2068751 duree_us=2640 coeur_avant=1 coeur_apres=1 vol_hote_us=[ 0 0 0 0 ] preuve_hote=kvm-steal
+smp4-5 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp4-5 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=1 debut_us=71 fin_us=3000008 duree_us=2999936 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-5 code=0 DORMEUR_ECART_ABSENCE cpu=0 source=2 debut_us=2410 fin_us=3000043 duree_us=2997632 masque_us=13 vole_us=0 cause=Inexpliquee tache=15
+smp4-5 code=0 REVEIL_COEUR_MUET_OK tours=2934 ecart_max_ms=2
+smp4-6 code=0 SERIE_DORMEUR_MASQUE coeur=1 masque_ms=3000 tours_pendant=2903 ecart_max_ms=3 coeur_du_dormeur_apres=2 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-6 code=0 DORMEUR_ECART debut_us=1911960 fin_us=1915815 duree_us=3855 coeur_avant=2 coeur_apres=2 vol_hote_us=[ 0 0 2829 0 ] preuve_hote=kvm-steal
+smp4-6 code=0 DORMEUR_ECART_ABSENCES n=2 incomplet=0
+smp4-6 code=0 DORMEUR_ECART_ABSENCE cpu=2 source=2 debut_us=1913730 fin_us=1915810 duree_us=2080 masque_us=0 vole_us=0 cause=Inexpliquee tache=0
+smp4-6 code=0 DORMEUR_ECART_ABSENCE cpu=1 source=2 debut_us=622 fin_us=3000013 duree_us=2999391 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-6 code=0 REVEIL_COEUR_MUET_OK tours=2903 ecart_max_ms=3
+smp4-7 code=0 SERIE_DORMEUR_MASQUE coeur=2 masque_ms=3000 tours_pendant=2905 ecart_max_ms=3 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=47
+smp4-7 code=0 DORMEUR_ECART debut_us=5890878 fin_us=5894538 duree_us=3660 coeur_avant=3 coeur_apres=3 vol_hote_us=[ 185 0 0 2601 ] preuve_hote=kvm-steal
+smp4-7 code=0 DORMEUR_ECART_ABSENCES n=0 incomplet=0
+smp4-7 code=0 REVEIL_COEUR_MUET_OK tours=2905 ecart_max_ms=3
+smp4-8 code=0 SERIE_DORMEUR_MASQUE coeur=1 masque_ms=3000 tours_pendant=2902 ecart_max_ms=6 coeur_du_dormeur_apres=3 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-8 code=0 DORMEUR_ECART debut_us=2763693 fin_us=2770171 duree_us=6477 coeur_avant=0 coeur_apres=0 vol_hote_us=[ 28 0 0 0 ] preuve_hote=kvm-steal
+smp4-8 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp4-8 code=0 DORMEUR_ECART_ABSENCE cpu=1 source=2 debut_us=872 fin_us=3000014 duree_us=2999142 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+smp4-8 code=0 REVEIL_COEUR_MUET_OK tours=2902 ecart_max_ms=6
+smp4-9 code=0 SERIE_DORMEUR_MASQUE coeur=3 masque_ms=3000 tours_pendant=2902 ecart_max_ms=3 coeur_du_dormeur_apres=2 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-9 code=0 DORMEUR_ECART debut_us=4297325 fin_us=4305772 duree_us=8447 coeur_avant=2 coeur_apres=0 vol_hote_us=[ 0 0 0 0 ] preuve_hote=kvm-steal
+smp4-9 code=0 DORMEUR_ECART_ABSENCES n=0 incomplet=0
+smp4-9 code=0 REVEIL_COEUR_MUET_OK tours=2902 ecart_max_ms=3
+smp4-10 code=0 SERIE_DORMEUR_MASQUE coeur=3 masque_ms=3000 tours_pendant=2915 ecart_max_ms=2 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=48
+smp4-10 code=0 DORMEUR_ECART debut_us=6002821 fin_us=6005759 duree_us=2937 coeur_avant=1 coeur_apres=1 vol_hote_us=[ 10 1910 1960 0 ] preuve_hote=kvm-steal
+smp4-10 code=0 DORMEUR_ECART_ABSENCES n=1 incomplet=0
+smp4-10 code=0 DORMEUR_ECART_ABSENCE cpu=2 source=2 debut_us=6001863 fin_us=6003759 duree_us=1896 masque_us=0 vole_us=0 cause=Inexpliquee tache=0
+smp4-10 code=0 REVEIL_COEUR_MUET_OK tours=2915 ecart_max_ms=2

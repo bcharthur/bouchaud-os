@@ -122,3 +122,82 @@ fil noyau quand un cœur dort, et rend les fils noyau migrables volables. Il
 ne peut qu'abréger des attentes Ready → élu ; il doit néanmoins passer la
 qualification stricte complète (P2/P4, équité, débit, non-famine) avant
 d'entrer dans une baseline : aucun seuil n'est modifié.
+
+## V2 -- deux causes residuelles, attribuees puis corrigees
+
+Run KVM cible 40576409173 (8f472da7) : 1 echec sur 6 en production, KVM SMP2,
+`ecart_max_ms=602`. Run d'experience 40582472007 (branche
+`exp/reveil-ecart-kvm`, image de production instrumentee, banc seulement) :
+**SMP2 8/30 en echec (193 a 420 ms), SMP4 10/10**. Le job etait vert : c'est
+la collecte qui reussissait, pas les criteres (`BILAN ok=32 echec=8`).
+
+### Cause 1 -- tache en file sur un coeur muet, aucun coeur au repos (P13_REVEIL_COEUR_MUET_V2)
+
+Preuves (journal du run 40582472007, `preuves/20261027-reveil-v2/experience/kvm-40582472007/`) :
+
+- Dans les 30 essais SMP2, le pire ecart est le PREMIER : il commence 0 a 1 ms
+  avant le masquage, dormeur sur le coeur 0 avant, sur le coeur 1 apres. Sa
+  duree seule varie : 7-24 ms, 68-78 ms (verts mais anormaux), 193, 365-420 ms.
+- Vol de l'hote sur l'intervalle (`MSR_KVM_STEAL_TIME`, `kvm-steal-time=on`) :
+  <= 53 us par coeur. **Aucune absence de battement du coeur 1** pendant
+  l'ecart : toutes les absences journalisees sont celles du coeur 0, masque
+  par le banc. L'hote est exclu ; le coeur 1 elisait.
+- Observateur (le masqueur, a chaque tour de sa boucle masquee), essai 19
+  (420 ms) : le dormeur est `Ready`, `on_cpu=-1`, **en file sur le coeur 0**
+  des t=1 us, et n'en bouge plus ; le coeur 1 n'est **jamais au repos** --
+  son occupant est l'indice 6, le fil `console` (videe de son arriere), en
+  alternance avec `diag-noyau`, `net-rx-poll`, `usb-hid`,
+  `services-metrics`, `bouchaud-telemetrie` ; ses battements arrivent toutes
+  les 4 ms.
+
+Chaine : l'echeance du dormeur est servie par le tic du coeur 1 ; a la
+publication, l'historique (coeur 0) est tenu par un fil noyau -> portee
+`Inactifs` ; aucun coeur au repos (console) -> l'historique est garde ;
+`pick_next` ne vole que sur file VIDE, et le coeur 1 en a toujours une. La
+tache attend que la console ait fini. En SMP4, un coeur au repos existe
+toujours : 13/13.
+
+Sur le coeur 0, les absences classees `Inexpliquee` (masque_us 0-10 pour 3 s)
+sont un angle mort de l'instrument, pas un fait du noyau : la section
+`without_interrupts` du masqueur n'est pas une section que
+`section_juste_avant` mesure ; elle est voulue par le banc.
+
+Correctif : chaque coeur vivant, a son battement (tic du BSP, vecteur local
+des AP), reloge les taches pretes en file sur un coeur muet. Regle et
+relogement EXISTANTS (`kernel::scheduler::secours`, testes ; appeles jusqu'ici
+par le seul chien de garde de la console) : occupant installe depuis plus de
+`SECOURS_SEUIL_NS` (20 ms, cinq quanta), tache prete depuis plus longtemps ;
+fils noyau epingles jamais deplaces, affinite respectee, coeur d'accueil
+vivant et permis, propriete de l'entree par `remove`, barriere puis IPI.
+Cas courant : une lecture par coeur (`coeurs_muets`), aucun parcours. Compteur
+propre : le `secours` de la console reste le sien. Absent de l'image temoin
+`banc-reveil-historique` (qui doit rester rouge).
+
+### Cause 2 -- tache Blocked sans source de reveil (P13_SOMMEIL_SANS_SOURCE_V1)
+
+Vue en cherchant la premiere, en TCG SMP4 (avant ET apres le correctif 1,
+1 essai sur ~8) : silence de 0,3 a 2,6 s jusqu'a la fin du masquage, le
+dormeur `Blocked`, `on_cpu=-1`, sans echeance. Detecteur par etape
+(experience, `preuves/.../experience/tcg-detecteur/`) :
+`sorties_bloquees=20 pertes_irq=1 phase=6 pret_us=-1`.
+
+`dort_jusqua` sort aussi de sa boucle sur l'echeance passee sans que le
+balayage ait reveille la tache (encore `Blocked`) ; elle effacait l'echeance,
+puis ne terminait l'attente qu'apres la ventilation du reveil. Une preemption
+ciblee depuis l'interruption (`preempt_from_irq`) dans cette fenetre commutait
+une tache `Blocked`, sans echeance, hors de toute file : perdue.
+
+Correctif : terminer l'attente AVANT d'effacer l'echeance ; de meme,
+`annule_park_courant` reveille avant d'effacer cle et echeance. Les autres
+parkings a echeance n'effacent qu'apres la sortie de `Blocked`.
+TCG SMP4 avec les deux correctifs : 20/20, 0 perte, 59 a 134 sorties
+bloquees par essai (la fenetre est franchie, sans perte).
+
+### Ce qui protege (V2)
+
+- `tools/smp/test_secours_coeur_muet.rs` : 17 tests (4 nouveaux, `coeurs_muets`).
+- `tools/verifie-secours-coeurs-muets.py` (11 mutations),
+  `tools/verifie-sommeil-source-reveil.py` (5 mutations) ;
+  `verifie-console-asynchrone.py` lit les gardes du relogement la ou il vit.
+- `p13-cible-kvm.yml` : banc du reveil sur la livree 10 x SMP2 et 5 x SMP4,
+  temoin toujours rouge.

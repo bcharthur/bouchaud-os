@@ -1,0 +1,32 @@
+REVEIL_COEUR_MUET smp=4 accel=-cpu max masque_ms=3000
+IMAGE sha256=3903217e28f9c3d698af12b36d910e825ba98a23632bd6fb9d22ae15152e5318 build=4dcc34162876 temoin=aucun
+SERIE_DORMEUR_MASQUE coeur=2 masque_ms=3000 tours_pendant=262 ecart_max_ms=2568 coeur_du_dormeur_apres=1 cible_atteinte=1 coeurs=4 autres_coeurs_au_repos=3 doubles=0 incoherences=0 epingle_tours_masque=0 epingle_hors_coeur=0 epingle_tours_apres=25
+DORMEUR_ECART debut_us=286056 fin_us=298455 duree_us=12398 coeur_avant=0 coeur_apres=0 vol_hote_us=[ - - - - ] preuve_hote=absente secours_ordonnanceur=0
+DORMEUR_ECART_ABSENCES n=1 incomplet=0
+DORMEUR_PERTE sorties_bloquees=20 pertes_irq=1 pertes_schedule=0 derniere_us=436491 phase=6 pret_us=-1
+DORMEUR_ECART_ABSENCE cpu=2 source=2 debut_us=2241 fin_us=3000483 duree_us=2998241 masque_us=0 vole_us=0 cause=Inexpliquee tache=15
+DORMEUR_TACHE indice=0 100:net-rx-poll etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=1 101:net-lien etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=2 102:bouchaud-auditd etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=3 103:bouchaud-telemetrie etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=4 104:usb-hid etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=5 105:usb-repli etat=Blocked on_cpu=3 file=3 noyau=1
+DORMEUR_TACHE indice=6 106:console etat=Ready on_cpu=1 file=1 noyau=1
+DORMEUR_TACHE indice=7 107:diag-noyau etat=Blocked on_cpu=-1 file=3 noyau=1
+DORMEUR_TACHE indice=8 108:services-metrics etat=Blocked on_cpu=-1 file=2 noyau=1
+DORMEUR_TACHE indice=9 109:blackbox etat=Blocked on_cpu=-1 file=0 noyau=1
+DORMEUR_TACHE indice=10 110:prechauffage etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=11 111:dormeur etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=12 112:dormeur-pilote etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=13 293:bsp-attente etat=Zombie on_cpu=-1 file=0 noyau=1
+DORMEUR_TACHE indice=14 147:dormeur-masqueur etat=Ready on_cpu=2 file=2 noyau=1
+DORMEUR_TACHE indice=15 148:dormeur-epingle etat=Ready on_cpu=-1 file=2 noyau=1
+  ok      aucune panique noyau
+  ECHEC   le dormeur migrable a progresse pendant le masquage (>= 1 tour / 10 ms)
+  ECHEC   aucun ecart > 100 ms entre deux tours (pas de famine)
+  ok      aucune double election du dormeur
+  ok      on_cpu designe toujours le coeur qui execute le dormeur
+  ok      le fil epingle n'a jamais tourne hors de son coeur
+  ok      le fil epingle n'a pas tourne pendant le masquage de son coeur
+  ok      le fil epingle a repris apres le masquage
+REVEIL_COEUR_MUET_ECHEC n=2 tours=262 ecart_max_ms=2568

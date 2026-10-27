@@ -141,11 +141,14 @@ pub(crate) fn prepare_park_current_on_detached(
 /// en attendant un reveil qui a deja eu lieu.
 pub(crate) fn annule_park_courant() {
     let task = current();
+    // `Blocked -> Ready` ; sans effet si un reveilleur l'a deja fait.
+    // P13_SOMMEIL_SANS_SOURCE_V1 : AVANT d'effacer la cle et l'echeance --
+    // une tache `Blocked` sans l'une ni l'autre, commutee par une preemption
+    // depuis l'interruption, ne serait plus reveillee par personne.
+    task.state.reveille();
     task.wait_queue_key.range(0);
     task.wake_deadline_ns.range(0);
     task.attente_interruptible.range(false);
-    // `Blocked -> Ready` ; sans effet si un reveilleur l'a deja fait.
-    task.state.reveille();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_WAIT_QUEUE);
 }

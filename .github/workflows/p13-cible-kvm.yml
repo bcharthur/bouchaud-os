@@ -18,7 +18,7 @@ name: p13-cible-kvm
 on:
   push:
     branches:
-      - p13/candidat-20261027b
+      - p13/candidat-20261027c
   workflow_dispatch:
     inputs:
       repetitions:
@@ -224,11 +224,14 @@ jobs:
             if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL smp=$smp code=$code (ECHEC attendu : 1)" >&2; r=1; fi
           done
           exit $r
-      - name: Livree -- le dormeur progresse pendant le masquage, 3 x SMP2, 3 x SMP4
+      # 10 x SMP2, 5 x SMP4 : l'ecart residuel corrige par
+      # P13_REVEIL_COEUR_MUET_V2 sortait 8 fois sur 30 en SMP2 (run
+      # 40582472007) ; trois repetitions ne le voyaient qu'une fois sur trois.
+      - name: Livree -- le dormeur progresse pendant le masquage, 10 x SMP2, 5 x SMP4
         if: ${{ !cancelled() }}
         run: |
           r=0
-          for smp in 2 4; do for i in 1 2 3; do
+          for smp in 2 4; do n=10; [ "$smp" = 4 ] && n=5; for i in $(seq 1 "$n"); do
             BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-livree.bin 3000 || r=1
             cp reveil-coeur-muet.log production-reveil-kvm-smp$smp-$i.log
           done; done

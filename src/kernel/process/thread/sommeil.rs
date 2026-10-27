@@ -216,6 +216,24 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
             break;
         }
     }
+    // P13_SOMMEIL_SANS_SOURCE_V1 -- UNE TACHE BLOQUEE GARDE TOUJOURS UNE
+    // SOURCE DE REVEIL.
+    //
+    // La boucle sort aussi sur l'echeance passee SANS que le balayage ait
+    // reveille la tache (le `hlt` de `schedule()` rendu par un IPI ou une
+    // autre interruption, balayage refuse pendant celui d'un autre coeur) :
+    // elle est alors encore `Blocked`. L'echeance etait effacee ICI, et
+    // l'attente n'etait terminee (`Blocked -> Ready`) qu'apres la
+    // ventilation du reveil. Entre les deux, une preemption ciblee depuis
+    // l'interruption (`preempt_from_irq`) commutait une tache `Blocked`, sans
+    // echeance, hors de toute file : plus rien ne pouvait la reveiller.
+    // TCG SMP4, banc du dormeur (exp/reveil-ecart-kvm, detecteur par etape) :
+    // sortie bloquee 20 fois en 3 s, perdue une fois a cette etape
+    // (`pertes_irq=1`), muette jusqu'a la fin du banc.
+    //
+    // Terminer l'attente AVANT d'effacer l'echeance : une preemption avant
+    // ce point trouve une echeance passee, que le prochain balayage sert.
+    termine_attente();
     current().wake_deadline_ns.range(0);
     {
         let mesure = crate::kernel::attribution_reveil::Mesure {
@@ -244,9 +262,6 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
             current().comptes_fil.note_ventilation(&v);
         }
     }
-    // Echeance passee sans reveil : annuler le parking (sans effet si un
-    // reveilleur l'a deja fait).
-    termine_attente();
     // BOUCHAUD_P15_BROWSER_HANG_FORENSICS
     forensic_wait_clear(WAIT_SLEEP);
     true

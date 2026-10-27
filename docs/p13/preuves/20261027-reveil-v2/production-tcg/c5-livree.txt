@@ -1,0 +1,2 @@
+C5_CIBLE accel=tcg image=77e546234e9d6f0c tours=3 verts=3 rouges=0 rouges_signature_c5=0 attendu=vert
+C5_CIBLE_OK

@@ -26,9 +26,20 @@
 //!
 //! Hors d'un coeur muet, rien ne change : l'equilibrage ordinaire, et sa
 //! regle de ne jamais voler un fil noyau, restent ceux d'avant. Le secours
-//! n'est appele que par qui sait qu'une tache DOIT progresser (le chien de
-//! garde de la console) ; il ne remplace pas son verdict : un fil qui ne
-//! progresse plus, meme reloge, reste un fil muet.
+//! ne remplace pas le verdict d'un chien de garde : un fil qui ne progresse
+//! plus, meme reloge, reste un fil muet.
+//!
+//! # P13_REVEIL_COEUR_MUET_V2 -- l'ordonnanceur l'appelle lui-meme
+//!
+//! Le secours n'etait appele que par le chien de garde de la console. Toute
+//! autre tache prete en file sur un coeur muet attendait qu'un coeur VOISIN
+//! se mette au repos pour la voler (`pick_next` ne vole que sur file vide).
+//! KVM SMP2, run 40582472007 : le dormeur, publie sur le coeur zero que le
+//! banc masquait, y est reste 193 a 420 ms (8 demarrages sur 30), le coeur un
+//! jamais au repos -- il servait la console et ses voisins, battements a
+//! l'heure, vol de l'hote nul. Desormais chaque coeur vivant, a son
+//! battement, reloge les taches que cette regle designe
+//! ([`coeurs_muets`] puis `secours_tache_coeur_muet`).
 //!
 //! Module pur : `tools/smp/test_secours_coeur_muet.rs` l'inclut tel quel.
 
@@ -95,4 +106,18 @@ pub fn choisit_accueil(donneur: usize, coeurs: &[Accueil]) -> Option<usize> {
         }
     }
     meilleur.map(|(cpu, _)| cpu)
+}
+
+/// Les coeurs dont une tache en file peut etre secourue : file non vide et
+/// occupant installe depuis plus de `seuil_ns` ([`coeur_muet`]). Un masque
+/// (bit `cpu`) ; vide dans le cas courant, qui ne coute alors qu'une lecture
+/// par coeur. `coeurs[cpu] = (occupant_depuis_ns, file_non_vide)`.
+pub fn coeurs_muets(coeurs: &[(u64, bool)], maintenant_ns: u64, seuil_ns: u64) -> u64 {
+    let mut masque = 0u64;
+    for (cpu, &(depuis, file)) in coeurs.iter().enumerate().take(64) {
+        if file && coeur_muet(depuis, maintenant_ns, seuil_ns) {
+            masque |= 1 << cpu;
+        }
+    }
+    masque
 }

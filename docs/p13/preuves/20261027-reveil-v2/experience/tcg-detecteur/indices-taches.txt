@@ -1,0 +1,3 @@
+DORMEUR_TACHE indice=6 106:console etat=Ready on_cpu=1 file=1 noyau=1
+DORMEUR_TACHE indice=11 111:dormeur etat=Blocked on_cpu=-1 file=1 noyau=1
+DORMEUR_TACHE indice=14 147:dormeur-masqueur etat=Ready on_cpu=2 file=2 noyau=1

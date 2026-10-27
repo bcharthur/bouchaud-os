@@ -1,0 +1,14 @@
+reveil-prod-smp2 code=0 REVEIL_COEUR_MUET_OK tours=764 ecart_max_ms=48  
+reveil-temoin-smp2 code=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3023  
+console-rafale-smp2 code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=0
+reveil-prod-smp4 code=0 REVEIL_COEUR_MUET_OK tours=1705 ecart_max_ms=15  
+reveil-temoin-smp4 code=1 REVEIL_COEUR_MUET_ECHEC n=2 tours=0 ecart_max_ms=3001  
+console-rafale-smp4 code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=0
+console-temoin-sans-cp-smp4 code=1 SERIE_ENTRELACEMENT_BANC_ECHEC n=2 lignes_perdues=376  secours=0
+console-coeur-du-fil-temoin-reveil-smp4 code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=1
+coeur-du-fil-secours-off code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=0
+coeur-du-fil-secours-on code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=1
+console-jeton-12s-smp2 code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=0
+console-verrou-12s-smp2 code=0 SERIE_ENTRELACEMENT_BANC_OK lignes_perdues=0  secours=0
+c5-livree code=0   
+FIN
