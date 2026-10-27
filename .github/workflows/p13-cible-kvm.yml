@@ -11,9 +11,14 @@ name: p13-cible-kvm
 #   reveil   tache reveillee jamais laissee sur un coeur qui n'elit pas
 #            (banc-reveil-historique : dormeur bloque attendu).
 #
-# Un temoin VERT est un echec : le banc ne prouverait plus rien. Declenchement
-# manuel seulement ; ne remplace ni os-primitives ni la qualification P13.
+# Un temoin VERT est un echec : le banc ne prouverait plus rien. Ne remplace
+# ni os-primitives ni la qualification P13. Declenchement manuel, ou push sur
+# la seule branche candidate (un workflow absent de main n'est pas
+# dispatchable ; meme precedent que p13-console-sync-proof.yml).
 on:
+  push:
+    branches:
+      - p13/candidat-20261027b
   workflow_dispatch:
     inputs:
       repetitions:
@@ -69,7 +74,7 @@ jobs:
         run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-fenetre.bin 6 vert "$PWD/c5-kvm-fenetre"
       - name: Image livree -- vert attendu
         if: ${{ !cancelled() }}
-        run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-livree.bin "${{ inputs.repetitions }}" vert "$PWD/c5-kvm-livree"
+        run: BO_QEMU_KVM=1 tools/ci/run_c5_cible.sh boot-livree.bin "${{ inputs.repetitions || '24' }}" vert "$PWD/c5-kvm-livree"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
