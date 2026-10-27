@@ -1,0 +1,46 @@
+# C5 -- preuves locales (TCG SMP4, tools/ci/run_faute_persistance.sh)
+serie-1 image=206522b90c37cdb8... verts=12 rouges=0
+serie-2 image=206522b90c37cdb8... verts=22 rouges=2
+avant-d8-1 image=5021eaf5445f0710... verts=11 rouges=1
+fenetre-ancien image=8166635f79c4a9b9... verts=3 rouges=3
+fenetre-corrige image=fc920072cd9bf8e8... verts=6 rouges=0
+corrige-36 image=acb6abb595cbad2d... verts=36 rouges=0
+
+## signatures des rouges
+-- serie-2/tour-12
+u] faute de protection generale en ring 3 : rip=0x400000406284 rsp=0x404000022a90 cr2=0x4000004036b0 flags=0x287
+u] faute de protection generale en ring 3 : rip=0x400000406284 rsp=0x40400006aa90 cr2=0x0 flags=0x287
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=3 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=f4c3662e0f1f840000000000f30f1efa
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=1 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=f4c3662e0f1f840000000000f30f1efa
+-- serie-2/tour-3
+u] instruction illegale en ring 3 : rip=0x400000403710 rsp=0x404000022a98 cr2=0x4000004036b0 flags=0xa47
+u] instruction illegale en ring 3 : rip=0x400000403710 rsp=0x404000046a98 cr2=0x4000004036b0 flags=0x282
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=2 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=c484c00f844f0500004d89ebeb0f6690
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=3 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=c484c00f844f0500004d89ebeb0f6690
+-- avant-d8-1/tour-6
+u] instruction illegale en ring 3 : rip=0x400000403710 rsp=0x404000022a98 cr2=0x4000004036b0 flags=0x282
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=1 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=c484c00f844f0500004d89ebeb0f6690
+u] instruction illegale en ring 3 : rip=0x400000403710 rsp=0x404000046a98 cr2=0x404000046f20 flags=0x282
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=0 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=c484c00f844f0500004d89ebeb0f6690
+-- fenetre-ancien/tour-1
+u] instruction illegale en ring 3 : rip=0x400000404002 rsp=0x40400006aa98 cr2=0x400000402025 flags=0x282
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=2 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=feffff488b4424604c8d8424ab000000
+u] faute de page en ring 3 : rip=0x400000403a98 rsp=0x404000046a98 cr2=0x403fffe5ece9 flags=0xa47
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=2 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=44d189e981e1fffffefff7c500200000
+-- fenetre-ancien/tour-3
+u] faute de page en ring 3 : rip=0x400000402025 rsp=0x5ffbfffff8a0 cr2=0x0 flags=0x246
+u] faute de page en ring 3 : rip=0x400000402025 rsp=0x40400006ad60 cr2=0x0 flags=0x246
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=331 cpu=1 fs_base=0x40400006af38 fs_base_range=0x40400006af38 insn=64488b042528000000488944241831c0
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=328 cpu=0 fs_base=0x400000412698 fs_base_range=0x400000412698 insn=64488b042528000000488944241831c0
+-- fenetre-ancien/tour-6
+u] faute de page en ring 3 : rip=0x400000402025 rsp=0x404000046d60 cr2=0x0 flags=0x246
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=330 cpu=1 fs_base=0x404000046f38 fs_base_range=0x404000046f38 insn=64488b042528000000488944241831c0
+u] faute de page en ring 3 : rip=0x400000402025 rsp=0x404000022d60 cr2=0x0 flags=0x246
+rnel] PROCESS_FAULT_DETAIL pid=64 tid=329 cpu=1 fs_base=0x404000022f38 fs_base_range=0x404000022f38 insn=64488b042528000000488944241831c0
+206522b90c37cdb8eaae8841f97dd417fb4a338d8f6f4290484f95730bed30dc  /tmp/claude-0/c5/boot-e58e150c.bin
+22279c4d53e8dc11329ae04abda5223a3e3a5328
+5021eaf5445f0710007959bc2c525381488e11d17bfd2adba5cfddb6f876ecf9  /tmp/claude-0/c5/boot-22279c4d.bin
+8166635f79c4a9b91ee5c16b3f5d268b1c42b1ff56c4bc70260dddb1496c5d1f  /tmp/claude-0/c5/boot-fenetre-ancien.bin
+acb6abb595cbad2dc020ee08783d128ee68d94703dbd50bc0b6b775ffbe53fdb  /tmp/claude-0/c5/boot-c5-corrige.bin
+e58e150c78c24d3ceccc4ddc47edbba9b33ebd9e
+fc920072cd9bf8e81d8d60c9a1f87e1fab9e26ad217ad43bfd588d98a366b82b  /tmp/claude-0/c5/boot-fenetre-corrige.bin

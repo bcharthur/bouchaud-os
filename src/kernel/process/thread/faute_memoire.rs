@@ -954,19 +954,15 @@ fn peuple_page_loader(
                 return FaultOutcome::Retry;
             }
             if mm.space.translate(page).is_some() { return FaultOutcome::Resolved; }
-            if !mm.space.map_alloc_accounted(
+            // P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1 : la page est complete AVANT
+            // que sa PTE ne soit presente. Un fil frere l'execute sans faute
+            // des la publication (C5).
+            if !mm.space.map_new_frame_accounted(
                 page,
-                crate::kernel::vmm::PAGE_SIZE,
+                &page_data,
                 effective.drapeaux,
                 crate::kernel::vmm::ResidentKind::FilePrivate,
             ) {
-                return FaultOutcome::IoError;
-            }
-            if !mm.space.write(page, &page_data) {
-                let retirement = mm.space.prepare_unmap(page, crate::kernel::vmm::PAGE_SIZE);
-                drop(mm);
-                retirement.invalidation().execute();
-                processus.mm.lock().space.finish_unmap(retirement);
                 return FaultOutcome::IoError;
             }
             note.map(crate::kernel::timer::monotonic_ns().saturating_sub(avant_map));

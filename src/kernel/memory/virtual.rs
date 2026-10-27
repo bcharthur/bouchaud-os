@@ -1176,6 +1176,45 @@ impl AddressSpace {
         self.map(virt, phys, (flags & !PTE_RSS_KIND_MASK) | kind.bits())
     }
 
+    /// P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1 : mappe sur `virt` (aligne page)
+    /// une frame NEUVE dont le contenu est `contenu`, recopie AVANT que la PTE
+    /// ne devienne presente.
+    ///
+    /// `map_alloc_accounted` puis `write` publiait une frame vierge, puis la
+    /// remplissait. Le verrou Mm n'exclut que les autres fautes : un fil frere
+    /// qui EXECUTE la page sur un autre coeur ne fait pas de faute -- la PTE est
+    /// presente -- et lit des zeros (`00 00` = `add [rax], al`) ou un contenu a
+    /// moitie copie (C5 : RIP au milieu d'une instruction, `hlt` de musl,
+    /// `CR2=0`, deux freres tues ensemble). Ici, la copie precede la PTE ; la
+    /// barriere interdit au compilateur de deplacer les ecritures du contenu
+    /// apres celle de la PTE (x86 garde l'ordre des ecritures pour les autres
+    /// coeurs et pour leurs parcours de table).
+    pub fn map_new_frame_accounted(
+        &mut self,
+        virt: u64,
+        contenu: &[u8],
+        flags: u64,
+        kind: ResidentKind,
+    ) -> bool {
+        if virt & (PAGE_SIZE - 1) != 0 || contenu.len() != PAGE_SIZE as usize {
+            return false;
+        }
+        let frame = match alloc_frame_a_recouvrir() {
+            Some(f) => f,
+            None => return false,
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                contenu.as_ptr(),
+                memory::phys_to_virt(frame),
+                PAGE_SIZE as usize,
+            );
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        self.pages.insert(frame);
+        self.map_accounted(virt, frame, flags, kind)
+    }
+
     /// Alloue et mappe `len` octets a partir de `virt` (arrondi a la page).
     /// Les pages deja presentes sont conservees (mmap peut recouvrir).
     pub fn map_alloc(&mut self, virt: u64, len: u64, flags: u64) -> bool {
