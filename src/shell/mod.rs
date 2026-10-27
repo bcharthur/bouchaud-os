@@ -793,6 +793,49 @@ fn fil_verrou_suspendu() -> ! {
     }
 }
 
+/// P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1 -- banc : `serie-rafale-masquee N`.
+///
+/// La commande attend (sans dormir) que le banc `serie-verrou-suspendu` tienne
+/// le verrou de l'anneau, puis emet N lignes numerotees INTERRUPTIONS MASQUEES : la
+/// classe de producteur qui ne peut ni ceder ni attendre (exceptions, lignes
+/// du noyau sous verrou -- `PROCESS_FAULT`, `CHILD_AFTER_FORK`...). Campagne
+/// 1/3 du 27/10 (run 40527372224, TCG SMP4) : 1 284 lignes de cette classe
+/// rangees dans l'anneau de 4 Kio de leur coeur pendant la suspension, 8
+/// perdues. Ici, le chevauchement n'est plus laisse au hasard.
+static RAFALE_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RAFALE_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+fn serie_rafale_masquee(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let n = if argc > 1 { argv[1].parse::<u64>().unwrap_or(400) } else { 400 }.clamp(1, 10_000);
+    RAFALE_N.store(n, Ordering::Relaxed);
+    RAFALE_RESULTAT.store(0, Ordering::Release);
+    // L'autorun attend ici, sans dormir, que le banc tienne le verrou : aucun
+    // fil a reveiller, la rafale ne depend que de la suspension elle-meme.
+    let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
+    while !crate::drivers::serial::banc_verrou_tenu() {
+        if crate::kernel::timer::monotonic_ns() >= limite {
+            crate::serial_println!("SERIE_RAFALE_MASQUEE_FAIT n=0 pendant_suspension=0 raison=verrou-jamais-tenu");
+            RAFALE_RESULTAT.store(2, Ordering::Release);
+            return 1;
+        }
+        core::hint::spin_loop();
+    }
+    let mut pendant = 0u64;
+    for i in 1..=n {
+        let tenu = crate::drivers::serial::banc_verrou_tenu();
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::serial_println!("SERIE_RAFALE_MASQUEE {}/{} {}", i, n, "#".repeat(80));
+        });
+        if tenu {
+            pendant += 1;
+        }
+    }
+    crate::serial_println!("SERIE_RAFALE_MASQUEE_FAIT n={} pendant_suspension={}", n, pendant);
+    RAFALE_RESULTAT.store(if pendant > 0 { 1 } else { 2 }, Ordering::Release);
+    0
+}
+
 /// P13_CONSOLE_SYNC: guest-side join barrier for the asynchronous kernel injection.
 /// A missing, refused or stuck injection can never qualify the test as green.
 fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
@@ -801,6 +844,7 @@ fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
     let result = match kind {
         "detenteur" => &SUSPENSION_RESULTAT,
         "verrou" => &VERROU_RESULTAT,
+        "rafale" => &RAFALE_RESULTAT,
         _ => { crate::serial_println!("SERIE_BANC_ATTEND_ECHEC raison=type-inconnu"); return 1; }
     };
     let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
@@ -1170,6 +1214,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "serie-banc-attend" => serie_banc_attend(argc, &argv),
         "console-async" => console_async(argc, &argv),
         "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
+        "serie-rafale-masquee" => serie_rafale_masquee(argc, &argv),
         // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
         // octet sur COM1 (le cout du port sous KVM, simule sous TCG).
         "serie-lente" => {

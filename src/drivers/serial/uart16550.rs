@@ -596,6 +596,14 @@ const BORNE_SANS_PROGRES_NS_BANC: u64 = 1_000_000_000;
 /// ils renoncent (`verrou_abandons`) et leurs lignes attendent dans l'anneau
 /// de leur coeur, que le fil vide sans ce verrou. Rend `false` si le verrou
 /// n'a pas pu etre pris en une seconde.
+/// Banc : le verrou de l'anneau est-il tenu, en ce moment, par
+/// `banc_verrou_console_suspendu` (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1) ?
+static BANC_VERROU_TENU: AtomicBool = AtomicBool::new(false);
+
+pub fn banc_verrou_tenu() -> bool {
+    BANC_VERROU_TENU.load(Ordering::Acquire)
+}
+
 pub fn banc_verrou_console_suspendu(duree_ms: u64) -> bool {
     let ouvertes = x86_64::instructions::interrupts::are_enabled();
     let echeance = crate::kernel::timer::monotonic_ns().saturating_add(BORNE_SANS_PROGRES_NS_BANC);
@@ -614,11 +622,13 @@ pub fn banc_verrou_console_suspendu(duree_ms: u64) -> bool {
         core::hint::spin_loop();
     }
     CONSOLE_VERROU_GEN.fetch_add(1, Ordering::AcqRel);
+    BANC_VERROU_TENU.store(true, Ordering::Release);
     let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree_ms.saturating_mul(1_000_000));
     while crate::kernel::timer::monotonic_ns() < fin {
         crate::arch::x86_64::smp::sert_shootdowns_en_attente();
         core::hint::spin_loop();
     }
+    BANC_VERROU_TENU.store(false, Ordering::Release);
     CONSOLE_VERROU.store(0, Ordering::Release);
     if ouvertes {
         x86_64::instructions::interrupts::enable();

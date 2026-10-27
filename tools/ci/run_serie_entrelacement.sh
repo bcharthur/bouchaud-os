@@ -69,6 +69,11 @@ VERROU_SUSPENDU=${BANC_VERROU_SUSPENDU_MS:-0}
 VERROU_CIBLE=${BANC_VERROU_CIBLE:-}
 SECOURS=${BANC_SECOURS:-on}
 FIL_GELE=${BANC_FIL_GELE_MS:-0}
+# P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1 -- BANC_RAFALE_MASQUEE=N (avec
+# BANC_VERROU_SUSPENDU_MS) : N lignes du noyau, interruptions masquees,
+# emises PENDANT la suspension du verrou de l'anneau. Chacune doit sortir
+# entiere, dans l'ordre, et aucune ligne differee ne doit etre perdue.
+RAFALE=${BANC_RAFALE_MASQUEE:-0}
 # BOUCHAUD_SERIE_LENTE_BANC_V1 -- BANC_SERIE_LENTE_NS=N : N ns de plus par
 # octet sur COM1, le cout du port sous KVM reproduit sous TCG (flot sature).
 SERIE_LENTE=${BANC_SERIE_LENTE_NS:-0}
@@ -81,11 +86,13 @@ MODE_CONSOLE=${BANC_CONSOLE:-on}
   if [ "$SECOURS" = off ]; then echo "console-async secours off"; fi
   if [ "$FIL_GELE" -gt 0 ]; then echo "console-async gele-fil 500 $FIL_GELE"; fi
   if [ "$VERROU_SUSPENDU" -gt 0 ]; then echo "serie-verrou-suspendu 1500 $VERROU_SUSPENDU $VERROU_CIBLE"; fi
+  if [ "$RAFALE" -gt 0 ]; then echo "serie-rafale-masquee $RAFALE"; fi
   printf '/bin/serie-entrelacement-probe %s %s %s %s %s\n' \
     "$ECRIVAINS" "$LIGNES" "$PROCESSUS" "$CHARGE" "$PAS_MS"
   # Strict join: only emit final autorun snapshot after guest injection succeeds.
   if [ "$SUSPENSION" -gt 0 ]; then echo 'serie-banc-attend detenteur'; fi
   if [ "$VERROU_SUSPENDU" -gt 0 ]; then echo 'serie-banc-attend verrou'; fi
+  if [ "$RAFALE" -gt 0 ]; then echo 'serie-banc-attend rafale'; fi
   if [ "$SUSPENSION" -gt 0 ] || [ "$VERROU_SUSPENDU" -gt 0 ]; then echo 'console-async etat'; fi
   echo 'echo SERIE_ENTRELACEMENT_AUTORUN_FIN'
 } > "$SCENARIO/autorun"
@@ -110,6 +117,7 @@ while kill -0 "$PID" 2>/dev/null; do
   if awk '/SERIE_ENTRELACEMENT_AUTORUN_FIN/ { fin = 1 } fin && /BOUCHAUD_CONSOLE_BILAN/ { vu = 1 } END { exit !vu }' "$LOG"; then
     if [ "$SUSPENSION" -gt 0 ] && ! grep -aq 'SERIE_BANC_ATTEND_OK type=detenteur' "$LOG"; then sleep 1; continue; fi
     if [ "$VERROU_SUSPENDU" -gt 0 ] && ! grep -aq 'SERIE_BANC_ATTEND_OK type=verrou' "$LOG"; then sleep 1; continue; fi
+    if [ "$RAFALE" -gt 0 ] && ! grep -aqE 'SERIE_BANC_ATTEND_(OK|ECHEC) type=rafale' "$LOG"; then sleep 1; continue; fi
     sleep 2
     break
   fi
@@ -155,6 +163,11 @@ if [ "$VERROU_SUSPENDU" -gt 0 ]; then
   echo "  banc : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'CONSOLE_VERROU_SUSPENDU_' | sed 's/^.*CONSOLE_VERROU/CONSOLE_VERROU/' | tr '\n' ' ' | cut -c1-300 || true)"
   exige "la suspension a ete subie (attentes cedees ou renoncements)" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'BOUCHAUD_CONSOLE_BILAN .* (verrou_abandons=[1-9][0-9]* |verrou_cedees=[1-9])'"
   exige "aucune attente du verrou interruptions masquees au-dela de 50 ms" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -a 'BOUCHAUD_CONSOLE_BILAN' | tail -1 | tr -d '\\r' | grep -qE 'verrou_attente_pire_us=([0-9]{1,4}|[1-4][0-9]{4})( |\$)'"
+fi
+if [ "$RAFALE" -gt 0 ]; then
+  exige "la rafale masquee a commence pendant la suspension" grep -aq 'SERIE_BANC_ATTEND_OK type=rafale' "$LOG"
+  echo "  rafale : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'SERIE_RAFALE_MASQUEE_FAIT' | sed 's/^.*SERIE_RAFALE/SERIE_RAFALE/' | tr -d '\r' | head -1)"
+  exige "les ${RAFALE} lignes de la rafale sont sorties entieres et dans l'ordre" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | tr -d '\r' | grep -aoE 'SERIE_RAFALE_MASQUEE [0-9]+/${RAFALE} #+\$' | awk -v n=${RAFALE} '{ split(\$2, a, \"/\"); if (length(\$3) != 80 || a[1] != k + 1) bad = 1; k = a[1] } END { exit !(k == n && !bad) }'"
 fi
 # Le bilan de fin, sans couleurs : les exigences ci-dessous le lisent.
 BILAN=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_CONSOLE_BILAN' | tail -1 | tr -d '\r' || true)
