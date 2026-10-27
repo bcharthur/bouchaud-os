@@ -57,7 +57,7 @@ use crate::kernel::sync::lockdep::LockClass;
 // ces alias disent d'ou elle vient sans allonger chaque site d'appel.
 use crate::kernel::scheduler::reveil::{
     Classe as ReveilClasse, Coeur as ReveilCoeur, Decision as ReveilDecision,
-    Reveille as ReveilTache, Selection as ReveilSelection,
+    Publication as ReveilPublication, Reveille as ReveilTache, Selection as ReveilSelection,
 };
 pub use crate::kernel::vma::{Backing as PromesseBacking, Vma as Promesse};
 

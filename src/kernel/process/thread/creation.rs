@@ -377,6 +377,11 @@ pub fn compteurs_reveils_installes() -> (u64, u64) {
 ///   3. LA DEMANDE CIBLEE. Elle seule ouvre la preemption d'un fil noyau, et
 ///      seulement pour une tache sensible restee sous son budget.
 fn publish_ready(index: usize) {
+    publie_pret(index, ReveilPublication::Reveil);
+}
+
+/// `publish_ready`, en disant ce qui est publie (P13_REMISE_SANS_DEMANDE_V1).
+fn publie_pret(index: usize, publication: ReveilPublication) {
     // BOUCHAUD_PASSATION_REVEIL_ORDONNES_V1 : le reveilleur vient d'ecrire
     // l'etat (`Blocked -> Ready`) ; sa lecture de `on_cpu` / `switching_out`
     // ne doit pas passer devant. Pendant de la barriere de
@@ -506,8 +511,12 @@ fn publish_ready(index: usize) {
             }
         }
         ReveilDecision::DemandeDifferee => {
-            crate::kernel::scheduler::preempt::request_cpu(target);
-            crate::kernel::scheduler::preempt::note_reveil_differe();
+            // P13_REMISE_SANS_DEMANDE_V1 : la sortante remise dans la file du
+            // coeur qui vient d'elire ne redemande pas d'election.
+            if crate::kernel::scheduler::reveil::demande_differee_posee(publication, target == local_cpu()) {
+                crate::kernel::scheduler::preempt::request_cpu(target);
+                crate::kernel::scheduler::preempt::note_reveil_differe();
+            }
             // Le comportement historique, INCHANGE : un coeur qui vient de
             // s'endormir entre la mise en file et ici recoit quand meme son
             // IPI. C'est la relecture, pas la decision, qui ferme la course.

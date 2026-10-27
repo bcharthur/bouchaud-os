@@ -96,7 +96,7 @@ def main() -> int:
             "    manquent."
         )
 
-    reveil = corps(CREATION, "fn publish_ready(")
+    reveil = corps(CREATION, "fn publie_pret(")
     avant_is_idle = reveil.split("is_idle(")[0]
     if "fence(Ordering::SeqCst)" not in avant_is_idle:
         fautes.append(

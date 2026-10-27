@@ -63,7 +63,7 @@ def verifie(racine: Path) -> list[str]:
     i, j, k = h.find("task.switching_out.range(false);"), h.find(BARRIERE), h.find("task.state == TaskState::Ready")
     if min(i, j, k) < 0 or not i < j < k:
         fautes.append(f"{COURANT} : la passation lit l'etat sans barriere apres ses ecritures")
-    p = corps(src[CREATION], "publish_ready")
+    p = corps(src[CREATION], "publie_pret")
     b, l = p.find(BARRIERE), p.find("tasks()[index].state")
     if b < 0 or l < 0 or b > l:
         fautes.append(f"{CREATION} : publish_ready lit on_cpu/switching_out sans barriere")

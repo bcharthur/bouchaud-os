@@ -333,6 +333,47 @@ pub fn decide(cible: &Coeur, reveille: &Reveille) -> Decision {
 }
 
 // ===========================================================================
+// P13_REMISE_SANS_DEMANDE_V1 : la tache SORTANTE d'une commutation n'est pas
+// un reveil.
+//
+// `complete_switch_handoff` republie la sortante par `publish_ready`, le
+// chemin des reveils. Preemptee ou cedee, elle etait deja prete : elle
+// retourne dans la file du coeur qui vient d'elire, derriere l'entrante, et
+// `decide` rend `DemandeDifferee` -- qui posait `need_resched` sur CE coeur.
+// Chaque commutation redemandait donc une commutation : l'entrante cedait au
+// premier point sur, la sortante suivante redemandait, et ainsi de suite. Un
+// calcul qui fait un appel systeme toutes les vingt microsecondes ne gardait
+// son coeur que jusqu'au suivant, pas un quantum (releve TCG SMP1 sous
+// `ordonnanceur-probe 8 1` : 65 396 demandes posees par cette republication en
+// une passe, contre 2 792 par les balayages de sommeils et 1 333 par le
+// quantum). C'est aussi ce qui reveillait si vite le bras `off` de l'A/B :
+// chaque sortie d'appel systeme d'un calcul passait par `schedule()`, donc par
+// `wake_sleepers` -- 260 des 300 reveils interactifs servis par
+// `preempt::safe_point`.
+//
+// La regle : une REMISE sur le coeur local ne pose aucune demande differee.
+// Elle attend le quantum, ou toute demande posee par un vrai reveil. Une
+// remise placee sur un AUTRE coeur y arrive comme une nouvelle tache, et une
+// sortante rendue prete PENDANT la commutation (reveil concurrent, publie
+// ici faute de pouvoir l'etre plus tot) reste un reveil : elles gardent la
+// demande. Les autres decisions (IPI au coeur endormi, demande ciblee,
+// interactive derriere un calcul) sont inchangees.
+
+/// Ce qu'une publication rend pret.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Publication {
+    /// Une tache qui sort d'une attente (`Blocked -> Ready`).
+    Reveil,
+    /// La sortante d'une commutation, deja prete quand elle a ete commutee.
+    Remise,
+}
+
+/// `DemandeDifferee` pose-t-elle sa demande sur le coeur `cible` ?
+pub fn demande_differee_posee(publication: Publication, cible_locale: bool) -> bool {
+    publication == Publication::Reveil || !cible_locale
+}
+
+// ===========================================================================
 // BOUCHAUD_REVEIL_IPI_INTERACTIF_EXPERIMENTAL : une variante, DESACTIVEE par
 // defaut, pour une experience A/B -- pas une politique.
 //

@@ -139,7 +139,7 @@ def verifie(t: dict, sources_src: str) -> list:
         fautes.append("le service local n'est plus borne a une publication suivie d'election, ou fuit apres elle")
     if "cible, cpu, PUBLICATION_DANS_BALAYAGE[cpu].load(" not in corps(t["sommeil"], "fn reveil_servi_localement("):
         fautes.append("la suppression d'auto-IPI ignore sa destination ou son contexte")
-    if corps(t["creation"], "fn publish_ready(").count("!reveil_servi_localement(target)") != 4:
+    if corps(t["creation"], "fn publie_pret(").count("!reveil_servi_localement(target)") != 4:
         fautes.append("un chemin de notification emet encore un auto-IPI pendant sa propre election")
     service = "crate::kernel::task::sert_echeances_au_vecteur_local();"
     irq = t["replanif"]

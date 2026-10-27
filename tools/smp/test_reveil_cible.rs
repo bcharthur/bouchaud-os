@@ -1080,3 +1080,77 @@ fn une_echeance_interactive_echue_leve_le_plancher_comme_une_interactive_en_file
     assert!(!interactive_attend(0, 1_001, 1_000), "future : le plancher s'applique");
     assert!(!interactive_attend(0, JAMAIS, u64::MAX - 1), "aucune echeance");
 }
+
+// ===========================================================================
+// P13_REMISE_SANS_DEMANDE_V1 : la sortante d'une commutation n'est pas un
+// reveil
+// ===========================================================================
+
+#[test]
+fn seule_une_remise_sur_le_coeur_local_ne_pose_pas_de_demande() {
+    use reveil::{demande_differee_posee, Publication};
+    assert!(!demande_differee_posee(Publication::Remise, true));
+    assert!(demande_differee_posee(Publication::Remise, false), "placee ailleurs : une arrivee");
+    assert!(demande_differee_posee(Publication::Reveil, true), "reveil concurrent publie a la passation");
+    assert!(demande_differee_posee(Publication::Reveil, false));
+}
+
+/// Un coeur, `calculs` taches normales qui font un appel systeme (un point
+/// sur) toutes les `appel_us`, un quantum de `quantum_us`. A la commutation,
+/// la sortante est remise en file selon `pose` ; un reveil ordinaire arrive a
+/// `reveil_us`. Rend (commutations, attente du reveil en us).
+fn rejoue_un_coeur_charge(
+    pose: impl Fn(reveil::Publication, bool) -> bool,
+    calculs: u64,
+    appel_us: u64,
+    quantum_us: u64,
+    duree_us: u64,
+    reveil_us: u64,
+) -> (u64, u64) {
+    use reveil::Publication;
+    let mut need_resched = false;
+    let mut commutations = 0;
+    let mut fin_quantum = quantum_us;
+    let mut attente_reveil = u64::MAX;
+    let mut reveil_en_file = false;
+    let mut t = 0;
+    assert!(calculs >= 2);
+    while t < duree_us {
+        t += appel_us;
+        if !reveil_en_file && attente_reveil == u64::MAX && t >= reveil_us {
+            // Le reveil d'une tache normale derriere un calcul : DemandeDifferee.
+            reveil_en_file = true;
+            need_resched |= pose(Publication::Reveil, true);
+        }
+        let au_point_sur = need_resched;
+        let au_quantum = t >= fin_quantum;
+        if au_point_sur || au_quantum {
+            need_resched = false;
+            commutations += 1;
+            fin_quantum = t + quantum_us;
+            if reveil_en_file {
+                attente_reveil = t - reveil_us;
+                reveil_en_file = false;
+            }
+            // La sortante, deja prete, retourne dans la file de CE coeur.
+            need_resched |= pose(Publication::Remise, true);
+        }
+    }
+    (commutations, attente_reveil)
+}
+
+#[test]
+fn la_remise_ne_transforme_plus_chaque_appel_systeme_en_commutation() {
+    // `ordonnanceur-probe 8 1` : huit calculs, un appel toutes les ~25 us.
+    let (calculs, appel, quantum, duree, reveil_us) = (8, 25, 4_000, 1_000_000, 500_123);
+    let (historique, attente_h) =
+        rejoue_un_coeur_charge(|_, _| true, calculs, appel, quantum, duree, reveil_us);
+    let (corrige, attente_c) =
+        rejoue_un_coeur_charge(reveil::demande_differee_posee, calculs, appel, quantum, duree, reveil_us);
+    // Le defaut : une commutation a chaque appel systeme.
+    assert!(historique >= duree / appel * 9 / 10, "historique {historique}");
+    // Corrige : le quantum, plus le reveil -- deux ordres de grandeur de moins.
+    assert!(corrige <= duree / quantum + 2, "corrige {corrige}");
+    // Un vrai reveil reste servi au point sur suivant, dans les deux cas.
+    assert!(attente_h <= appel && attente_c <= appel, "attentes {attente_h} {attente_c}");
+}

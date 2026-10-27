@@ -182,6 +182,11 @@ static CURRENT_PROCESS: [SpinLockIrq<Option<Arc<Process>>>; MAX_CPUS] =
 /// `mov rsp, rsi` de switch_context, jamais apres le seul `mov [rdi], rsp`.
 static SWITCH_PENDING: [AtomicUsize; MAX_CPUS] =
     [const { AtomicUsize::new(NO_TASK) }; MAX_CPUS];
+/// P13_REMISE_SANS_DEMANDE_V1 : la sortante de `SWITCH_PENDING` etait-elle
+/// deja prete a la preparation (preemptee ou cedee) ? Sinon elle se bloquait,
+/// et une publication a la completion est un reveil concurrent.
+static SWITCH_REMISE: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
 /// Porte locale du changement de contexte.
 ///
 /// Le BKL serialisait aussi, par accident, une tache et l'IRQ qui l'interrompt

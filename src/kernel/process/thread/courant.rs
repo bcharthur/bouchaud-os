@@ -348,7 +348,10 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
-        Ok(_) => task.switching_out.range(true),
+        Ok(_) => {
+            SWITCH_REMISE[cpu].store(task.state == TaskState::Ready, Ordering::Relaxed);
+            task.switching_out.range(true)
+        }
         Err(previous) => panic!(
             "task: passation precedente non terminee cpu={} pending={} nouveau={}",
             cpu, previous, index
@@ -429,10 +432,13 @@ fn complete_switch_handoff() {
         task.state == TaskState::Ready
     };
 
+    // Lue AVANT de rendre la case : la prochaine preparation sur ce coeur
+    // la reecrit.
+    let remise = SWITCH_REMISE[cpu].load(Ordering::Relaxed);
     SWITCH_PENDING[cpu].store(NO_TASK, Ordering::Release);
 
     if publish {
-        publish_ready(outgoing);
+        publie_pret(outgoing, if remise { ReveilPublication::Remise } else { ReveilPublication::Reveil });
     }
     termine_transition_ordonnanceur();
 }

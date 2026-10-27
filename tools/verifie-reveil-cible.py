@@ -187,7 +187,7 @@ def main():
     creation = lit(CREATION, fautes)
     if creation is not None:
         pur = code_seul(creation)
-        publie = corps(pur, "fn publish_ready(index: usize) {")
+        publie = corps(pur, "fn publie_pret(index: usize, publication: ReveilPublication) {")
         if publie is None:
             fautes.append("creation.rs : `publish_ready` est introuvable.")
         else:
