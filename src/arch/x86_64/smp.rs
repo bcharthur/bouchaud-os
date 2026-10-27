@@ -381,12 +381,43 @@ unsafe fn wait_xapic_delivery(base: *mut u8) {
     }
 }
 
+// P13_APIC_BASE_SANS_RDMSR_V1
+//
+// `IA32_APIC_BASE` (adresse et mode xAPIC/x2APIC) ne change plus apres
+// `enable_local_apic` : le noyau ne bascule jamais le mode x2APIC, et le bit
+// d'activation n'est jamais efface. Pourtant `local_apic()` le relisait par
+// RDMSR a CHAQUE `eoi_local()` -- chaque entree du vecteur 0xF1 (quantum,
+// tir precis, IPI), du shootdown, du GPU -- et a chaque `reschedule_cpu()`.
+// Sous KVM, ce MSR n'est jamais en lecture directe : une sortie de VM par
+// IRQ et par IPI, sur le chemin echeance -> pret -> elu (doublement couteuse
+// en virtualisation imbriquee, celle des runners CI et de WSL2). C'est le
+// chemin du P2 : sur un coeur occupe, chaque reveil interactif precis paie
+// l'entree du vecteur (EOI) et, en SMP, l'IPI vers son coeur.
+//
+// La valeur est memorisee PAR COEUR a la premiere lecture, APIC active (le
+// mode est par coeur : un firmware peut laisser le BSP en x2APIC et les AP
+// en xAPIC). Premiere lecture : le BSP, ou un AP apres `usermode::init_ap`
+// (GS et TSC_AUX poses, `cpu_index()` est le sien) -- aucun AP ne touche son
+// APIC avant. En SMP1, `init_probe` rend la main avant `enable_local_apic` :
+// memoriser la, et non dans `enable_local_apic`, couvre aussi ce cas.
+static APIC_BASE_MEMO: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
 unsafe fn local_apic() -> (bool, *mut u8) {
-    let mut apic_base = usermode::read_msr(IA32_APIC_BASE);
-    if apic_base & APIC_ENABLE == 0 {
-        apic_base |= APIC_ENABLE;
-        usermode::write_msr(IA32_APIC_BASE, apic_base);
-    }
+    let memo = APIC_BASE_MEMO.get(cpu_index());
+    let connue = memo.map_or(0, |m| m.load(Ordering::Relaxed));
+    let apic_base = if connue & APIC_ENABLE != 0 {
+        connue
+    } else {
+        let mut apic_base = usermode::read_msr(IA32_APIC_BASE);
+        if apic_base & APIC_ENABLE == 0 {
+            apic_base |= APIC_ENABLE;
+            usermode::write_msr(IA32_APIC_BASE, apic_base);
+        }
+        if let Some(memo) = memo {
+            memo.store(apic_base, Ordering::Relaxed);
+        }
+        apic_base
+    };
     let x2 = apic_base & X2APIC_ENABLE != 0;
     let phys = apic_base & 0x000f_ffff_ffff_f000;
     (x2, memory::phys_to_virt(phys))
