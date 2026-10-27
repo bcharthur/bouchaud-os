@@ -166,7 +166,7 @@ if [ "$VERROU_SUSPENDU" -gt 0 ]; then
 fi
 if [ "$RAFALE" -gt 0 ]; then
   exige "la rafale masquee a commence pendant la suspension" grep -aq 'SERIE_BANC_ATTEND_OK type=rafale' "$LOG"
-  echo "  rafale : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'SERIE_RAFALE_MASQUEE_FAIT' | sed 's/^.*SERIE_RAFALE/SERIE_RAFALE/' | tr -d '\r' | head -1)"
+  echo "  rafale : $(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'SERIE_RAFALE_MASQUEE_FAIT' | sed 's/^.*SERIE_RAFALE/SERIE_RAFALE/' | tr -d '\r' | sed -n 1p)"
   exige "les ${RAFALE} lignes de la rafale sont sorties entieres et dans l'ordre" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | tr -d '\r' | grep -aoE 'SERIE_RAFALE_MASQUEE [0-9]+/${RAFALE} #+\$' | awk -v n=${RAFALE} '{ split(\$2, a, \"/\"); if (length(\$3) != 80 || a[1] != k + 1) bad = 1; k = a[1] } END { exit !(k == n && !bad) }'"
 fi
 # Le bilan de fin, sans couleurs : les exigences ci-dessous le lisent.

@@ -482,7 +482,7 @@ NEGATIFS = [
     (ANNEAU, "        if repere <= lus && choix.map_or(true, |(_, cle)| (repere, numero) < cle) {",
      "        if repere <= lus && choix.map_or(true, |(_, cle)| repere < cle.0) {"),
     # 6 (V2) : numero d'ordre absent de l'enregistrement
-    (UART, "        pose(&repere);\n        pose(&numero);\n        pose(octets);", "        pose(&repere);\n        pose(octets);"),
+    (UART, "            pose(&repere);\n            pose(&numero);\n            pose(octets);", "            pose(&repere);\n            pose(octets);"),
     # 6 : ligne differee sans repere
     (UART, "    let repere = (CONSOLE.ecrits() as u64).to_le_bytes();", "    let repere = 0u64.to_le_bytes();"),
     # 6 : le repere emis avec la ligne

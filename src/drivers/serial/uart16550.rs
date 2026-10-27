@@ -670,22 +670,93 @@ static DIFFEREE_NUMERO: AtomicU64 = AtomicU64::new(0);
 
 /// Range la ligne dans l'anneau de CE coeur, precedee de son repere.
 /// Interruptions masquees : un seul ecrivain par anneau.
+///
+/// P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1 : anneau du coeur plein, la ligne
+/// n'est plus perdue d'emblee. Le producteur -- qui ne peut ni ceder ni
+/// attendre le fil : interruptions masquees, verrou tenu, exception -- fait
+/// lui-meme de la place, comme `aide_a_vider` pour l'anneau principal :
+/// `vide_un_morceau` emet, sous le jeton, la ligne la plus ancienne de la
+/// console (ligne differee mure, sinon un morceau de la tete), puis il retente.
+/// Campagne 1/3 du 27/10 (run 40527372224) et banc `BANC_RAFALE_MASQUEE` :
+/// pendant un verrou d'anneau suspendu 3 s, chaque ligne de cette classe
+/// renonce au verrou et se range ici ; l'anneau de 4 Kio deborde (8 lignes
+/// perdues en CI, 377 sur 400 au banc).
+///
+/// Bornes, inchangees par rapport a `aide_a_vider` en contexte masque : au
+/// plus `DIFFEREE_PLACE_BORNE_NS` d'essais, chaque morceau emis sous le jeton
+/// et rendu aussitot ; aucun sommeil, aucune attente du fil `console` (le
+/// jeton occupe, il retente : le detenteur libere justement de la place) ;
+/// jamais si CE coeur tient le jeton ou vide deja (une IRQ sur le detenteur
+/// s'attendrait elle-meme) ; jamais en panique (son chemin synchrone vide
+/// tout). Une ligne trop longue pour l'anneau est perdue comme avant. L'ordre
+/// est garde : le repere et le numero sont pris a la pose effective.
 fn differe(octets: &[u8]) {
     if octets.is_empty() {
         return;
     }
     let cpu = crate::arch::x86_64::smp::cpu_index().min(DIFFEREES.len() - 1);
-    let repere = (CONSOLE.ecrits() as u64).to_le_bytes();
-    let numero = DIFFEREE_NUMERO.fetch_add(1, Ordering::AcqRel).to_le_bytes();
-    if DIFFEREES[cpu].range_morceaux(DIFFEREE_REPERE + octets.len(), |pose| {
-        pose(&repere);
-        pose(&numero);
-        pose(octets);
-    }) {
-        LIGNES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
-    } else {
-        LIGNES_PERDUES.fetch_add(1, Ordering::Relaxed);
+    let total = DIFFEREE_REPERE + octets.len();
+    let mut debut = 0u64;
+    loop {
+        let repere = (CONSOLE.ecrits() as u64).to_le_bytes();
+        let numero = DIFFEREE_NUMERO.fetch_add(1, Ordering::AcqRel).to_le_bytes();
+        if DIFFEREES[cpu].range_morceaux(DIFFEREE_REPERE + octets.len(), |pose| {
+            pose(&repere);
+            pose(&numero);
+            pose(octets);
+        }) {
+            LIGNES_DIFFEREES.fetch_add(1, Ordering::Relaxed);
+            if debut != 0 {
+                DIFFEREES_PLACE_FAITE.fetch_add(1, Ordering::Relaxed);
+                DIFFEREES_PLACE_PIRE_NS.fetch_max(
+                    crate::kernel::timer::monotonic_ns().saturating_sub(debut),
+                    Ordering::Relaxed,
+                );
+            }
+            return;
+        }
+        if debut == 0 {
+            debut = crate::kernel::timer::monotonic_ns();
+        }
+        if total + 2 > DIFFEREES_OCTETS || !fait_place_differee(debut) {
+            LIGNES_PERDUES.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
     }
+}
+
+/// Au plus 20 ms d'essais, la borne des contextes masques d'`aide_a_vider`.
+const DIFFEREE_PLACE_BORNE_NS: u64 = 20_000_000;
+/// Lignes differees rangees apres avoir fait de la place (sans le correctif,
+/// perdues), et la pire duree pour y parvenir.
+static DIFFEREES_PLACE_FAITE: AtomicU64 = AtomicU64::new(0);
+static DIFFEREES_PLACE_PIRE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Un essai pour liberer de la place dans les anneaux de lignes differees :
+/// `false` s'il faut renoncer (panique, jeton tenu par ce coeur, borne).
+fn fait_place_differee(debut: u64) -> bool {
+    if EN_PANIQUE.load(Ordering::Acquire) {
+        return false;
+    }
+    let moi = crate::arch::x86_64::smp::cpu_index() + 1;
+    if EMISSION.load(Ordering::Acquire) == moi || VIDANGE_EN_COURS.load(Ordering::Acquire) == moi {
+        return false;
+    }
+    if crate::kernel::timer::monotonic_ns().saturating_sub(debut) > DIFFEREE_PLACE_BORNE_NS {
+        return false;
+    }
+    if let Vidange::JetonOccupe = vide_un_morceau() {
+        core::hint::spin_loop();
+    }
+    true
+}
+
+/// `(rangees apres avoir fait place, pire duree en ns)`.
+pub fn differees_place_faite() -> (u64, u64) {
+    (
+        DIFFEREES_PLACE_FAITE.load(Ordering::Relaxed),
+        DIFFEREES_PLACE_PIRE_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Pourquoi les emissions a la borne ont renonce au jeton :
@@ -2070,7 +2141,7 @@ pub fn journalise_bilan_console() {
     crate::serial_println!(
         "BOUCHAUD_CONSOLE_CONTRE_PRESSION attentes={} attente_pire_us={} attente_moyenne_us={} sauts={} \
          sorties_synchrones={} urgences={} differees_occupe={} differees_urgence={} reserve={} \
-         fil_tour_pire_us={} fil_somme_jeton_pire_us={}",
+         fil_tour_pire_us={} fil_somme_jeton_pire_us={} differees_place_faite={} differee_place_pire_us={}",
         attentes,
         CONSOLE_CONTRE_PRESSION_PIRE_NS.load(Ordering::Relaxed) / 1000,
         CONSOLE_CONTRE_PRESSION_TOTALE_NS.load(Ordering::Relaxed) / 1000 / attentes.max(1),
@@ -2082,6 +2153,8 @@ pub fn journalise_bilan_console() {
         CONSOLE_RESERVE_URGENCE,
         CONSOLE_FIL_TOUR_PIRE_NS.load(Ordering::Relaxed) / 1000,
         CONSOLE_FIL_SOMME_JETON_PIRE_NS.load(Ordering::Relaxed) / 1000,
+        DIFFEREES_PLACE_FAITE.load(Ordering::Relaxed),
+        DIFFEREES_PLACE_PIRE_NS.load(Ordering::Relaxed) / 1000,
     );
     crate::serial_println!(
         "BOUCHAUD_CONSOLE_BILAN active={} repli_securite={} lignes={} emises={} pleines={} \
