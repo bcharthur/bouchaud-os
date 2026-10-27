@@ -135,6 +135,11 @@ pub struct Coeur {
     /// « tache de fond, peu couteux » -- y a attendu 126 ms
     /// (`[SCHED-NG-ATTENTE-VIVE] cpu=0 cur_tid=0 idle=0`).
     pub hors_ordonnanceur: bool,
+    /// P13_REVEIL_COEUR_MUET_V1 : l'occupant installe est un FIL NOYAU. Une
+    /// demande differee ne le fait ceder qu'a son prochain point cooperatif
+    /// -- jamais s'il masque les interruptions, si son processeur virtuel est
+    /// retire par l'hote, ou s'il n'en atteint pas.
+    pub occupant_noyau: bool,
 }
 
 /// La tache qu'on reveille.
@@ -237,21 +242,79 @@ fn cout(coeur: &Coeur, indice: usize, precedent: usize) -> (u8, usize, u8, usize
 /// coeurs dont un ou deux travaillent, c'est le cas NORMAL, et c'est lui qui
 /// ramene 6,78 s a quelques microsecondes.
 pub fn choisit_coeur(precedent: usize, reveille: &Reveille, coeurs: &[Coeur]) -> Option<usize> {
-    let actif = coeurs.get(precedent)
-        .map(|c| replace_necessaire(reveille, c)).unwrap_or(reveille.privilegiee());
-    let mut selection = Selection::neuve(precedent, actif);
+    let portee = match coeurs.get(precedent) {
+        Some(c) => portee_replacement(reveille, c),
+        None => reveille.privilegiee().then_some(Portee::Tous),
+    };
+    let mut selection = Selection::avec_portee(precedent, portee);
     for (indice, coeur) in coeurs.iter().enumerate() {
         selection.propose(indice, coeur);
     }
     selection.retenu()
 }
 
-/// A CPU running the BSP continuation cannot elect even if it briefly halts.
-/// Avoid it for ordinary interactive wakeups too; this grants no privilege
-/// to preempt kernel code and does not change an available historical CPU.
+/// Jusqu'ou chercher un autre coeur que l'historique.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Portee {
+    /// Tout coeur permis, au meilleur cout : l'historique ne peut pas elire
+    /// (hors ordonnanceur), ou la tache est privilegiee.
+    Tous,
+    /// Un coeur AU REPOS seulement, sinon l'historique : celui-ci est tenu
+    /// par un fil noyau que la demande differee ne fait pas ceder a coup sur.
+    Inactifs,
+}
+
+/// P13_REVEIL_COEUR_MUET_V1 -- faut-il chercher un autre coeur que
+/// l'historique, et jusqu'ou ?
+///
+/// # Le defaut
+///
+/// Une tache reveillee etait posee sur son coeur historique avec une simple
+/// demande differee, sauf privilege ou interactive face a un coeur hors
+/// ordonnanceur. Mais une demande differee n'est servie que par l'occupant :
+///
+///   * un coeur HORS ORDONNANCEUR (shell de l'autorun, contexte de
+///     demarrage) n'elit rien avant son retour, quelle que soit la classe de
+///     la tache -- SMP2, banc de la rafale masquee : le fil `verrou-suspendu`
+///     (normal) pose sur le coeur zero, ou le shell l'attendait en boucle,
+///     y a attendu 30 s, le coeur un au repos ;
+///   * un coeur tenu par un FIL NOYAU ne cede qu'a son point cooperatif --
+///     jamais s'il masque les interruptions ou si l'hote retire le vCPU --,
+///     et un fil noyau en file n'est vole par personne.
+///
+/// La tache etait PRETE et publiee ; aucun chemin ne la menait a un
+/// processeur. C'est le reveil « perdu » : pas dans les structures, entre la
+/// demande et la reprise.
+///
+/// # La regle
+///
+/// Privilegiee, ou historique hors ordonnanceur : tout coeur permis, au
+/// meilleur cout. Historique tenu par un fil noyau : un coeur au repos s'il
+/// en est un -- deplacer vers un autre coeur occupe ne garantit rien de plus
+/// et coute une migration. Sinon : l'historique, comme avant.
+#[cfg(not(feature = "banc-reveil-historique"))]
+pub fn portee_replacement(reveille: &Reveille, precedent: &Coeur) -> Option<Portee> {
+    if reveille.privilegiee() || precedent.hors_ordonnanceur {
+        Some(Portee::Tous)
+    } else if precedent.occupant_noyau && !precedent.inactif {
+        Some(Portee::Inactifs)
+    } else {
+        None
+    }
+}
+
+/// BANC TEMOIN (option `banc-reveil-historique`, jamais dans `default`) : la
+/// regle d'avant P13_REVEIL_COEUR_MUET_V1 -- privilege, ou interactive face
+/// a un coeur hors ordonnanceur. Reproduction negative a image egale.
+#[cfg(feature = "banc-reveil-historique")]
+pub fn portee_replacement(reveille: &Reveille, precedent: &Coeur) -> Option<Portee> {
+    (reveille.privilegiee() || (reveille.classe == Classe::Interactive && precedent.hors_ordonnanceur))
+        .then_some(Portee::Tous)
+}
+
+/// Faut-il chercher un autre coeur que l'historique ?
 pub fn replace_necessaire(reveille: &Reveille, precedent: &Coeur) -> bool {
-    reveille.privilegiee()
-        || (reveille.classe == Classe::Interactive && precedent.hors_ordonnanceur)
+    portee_replacement(reveille, precedent).is_some()
 }
 
 /// Le meme choix, EN FLOT : un coeur a la fois, sans tableau.
@@ -268,6 +331,7 @@ pub fn replace_necessaire(reveille: &Reveille, precedent: &Coeur) -> bool {
 pub struct Selection {
     precedent: usize,
     actif: bool,
+    inactifs_seulement: bool,
     meilleur: Option<(usize, (u8, usize, u8, usize))>,
 }
 
@@ -276,12 +340,26 @@ impl Selection {
     /// rien : l'appelant garde son placement historique.
     #[inline]
     pub const fn neuve(precedent: usize, actif: bool) -> Self {
-        Self { precedent, actif, meilleur: None }
+        Self { precedent, actif, inactifs_seulement: false, meilleur: None }
+    }
+
+    /// `None` : la selection ne retient rien. `Inactifs` : seuls les coeurs
+    /// au repos sont candidats.
+    #[inline]
+    pub const fn avec_portee(precedent: usize, portee: Option<Portee>) -> Self {
+        match portee {
+            None => Self::neuve(precedent, false),
+            Some(Portee::Tous) => Self::neuve(precedent, true),
+            Some(Portee::Inactifs) => Self { precedent, actif: true, inactifs_seulement: true, meilleur: None },
+        }
     }
 
     #[inline]
     pub fn propose(&mut self, indice: usize, coeur: &Coeur) {
         if !self.actif || !coeur.en_ligne || !coeur.autorise {
+            return;
+        }
+        if self.inactifs_seulement && (!coeur.inactif || coeur.hors_ordonnanceur) {
             return;
         }
         let cout = cout(coeur, indice, self.precedent);

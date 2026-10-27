@@ -836,6 +836,121 @@ fn serie_rafale_masquee(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// P13_REVEIL_COEUR_MUET_V1 -- banc : `serie-dormeur-masque DUREE_MS`.
+///
+/// Un fil noyau MIGRABLE (`dormeur`) dort un tick a la fois et compte ses
+/// tours. Un second fil, EPINGLE sur le coeur ou le dormeur est en file,
+/// masque les interruptions DUREE_MS ms -- un vCPU retire par l'hote, une
+/// longue section masquee. Le dormeur se reveille toutes les millisecondes ;
+/// sa publication vise son coeur historique, dont l'occupant ne cede pas.
+///
+/// Avant P13_REVEIL_COEUR_MUET_V1 : publie sur ce coeur, jamais vole (fil
+/// noyau), le dormeur ne fait AUCUN tour pendant le masquage. Apres : il
+/// est place sur un coeur au repos, ou vole par lui, et continue.
+static DORMEUR_TACHE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+static DORMEUR_TOURS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DORMEUR_DERNIER_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DORMEUR_ECART_MAX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DORMEUR_MASQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static DORMEUR_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DORMEUR_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let duree = if argc > 1 { argv[1].parse::<u64>().unwrap_or(3000) } else { 3000 }.clamp(10, 30_000);
+    DORMEUR_DUREE_MS.store(duree, Ordering::Relaxed);
+    DORMEUR_RESULTAT.store(0, Ordering::Release);
+    DORMEUR_TACHE.store(usize::MAX, Ordering::Release);
+    if !crate::kernel::task::spawn_noyau(fil_dormeur, "dormeur")
+        || !crate::kernel::task::spawn_noyau(fil_dormeur_pilote, "dormeur-pilote")
+    {
+        crate::println!("serie-dormeur-masque : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+fn fil_dormeur() -> ! {
+    use core::sync::atomic::Ordering;
+    DORMEUR_TACHE.store(crate::kernel::task::indice_tache_courante(), Ordering::Release);
+    loop {
+        crate::kernel::task::sleep_ticks(1);
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let avant = DORMEUR_DERNIER_NS.swap(maintenant, Ordering::AcqRel);
+        if DORMEUR_MASQUE.load(Ordering::Acquire) {
+            DORMEUR_TOURS.fetch_add(1, Ordering::AcqRel);
+        }
+        if avant != 0 {
+            DORMEUR_ECART_MAX_NS.fetch_max(maintenant.saturating_sub(avant), Ordering::AcqRel);
+        }
+    }
+}
+
+/// Lance le masqueur EPINGLE sur le coeur du dormeur, une fois celui-ci
+/// installe (500 ms).
+fn fil_dormeur_pilote() -> ! {
+    use core::sync::atomic::Ordering;
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(500));
+    let index = DORMEUR_TACHE.load(Ordering::Acquire);
+    let (etat, _, coeur) = crate::kernel::task::etat_tache_brut(index);
+    if index == usize::MAX || etat == 9
+        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_masqueur, "dormeur-masqueur", coeur as usize)
+    {
+        crate::serial_println!("SERIE_DORMEUR_MASQUE_ECHEC raison=masqueur-refuse");
+        DORMEUR_RESULTAT.store(2, Ordering::Release);
+    }
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
+fn fil_dormeur_masqueur() -> ! {
+    use core::sync::atomic::Ordering;
+    let ici = crate::arch::x86_64::smp::cpu_index();
+    let duree = DORMEUR_DUREE_MS.load(Ordering::Relaxed);
+    // Le masquage ne prouve quelque chose que si le dormeur est en file ICI.
+    let mut essais = 0u32;
+    loop {
+        let (_, _, coeur) = crate::kernel::task::etat_tache_brut(DORMEUR_TACHE.load(Ordering::Acquire));
+        if coeur as usize == ici {
+            break;
+        }
+        essais += 1;
+        if essais > 400 {
+            crate::serial_println!("SERIE_DORMEUR_MASQUE_ECHEC raison=dormeur-hors-cible coeur={} dormeur={}", ici, coeur);
+            DORMEUR_RESULTAT.store(2, Ordering::Release);
+            loop { crate::kernel::task::sleep_ticks(1000); }
+        }
+        crate::kernel::task::sleep_ticks(1);
+    }
+    let tours_avant = DORMEUR_TOURS.load(Ordering::Acquire);
+    DORMEUR_ECART_MAX_NS.store(0, Ordering::Release);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        DORMEUR_MASQUE.store(true, Ordering::Release);
+        let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree.saturating_mul(1_000_000));
+        while crate::kernel::timer::monotonic_ns() < fin {
+            crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+            core::hint::spin_loop();
+        }
+        DORMEUR_MASQUE.store(false, Ordering::Release);
+    });
+    let tours = DORMEUR_TOURS.load(Ordering::Acquire).saturating_sub(tours_avant);
+    // L'ecart compte aussi le silence EN COURS a la fin du masquage : un
+    // dormeur bloque tout du long n'a jamais mesure son propre ecart.
+    let silence = crate::kernel::timer::monotonic_ns()
+        .saturating_sub(DORMEUR_DERNIER_NS.load(Ordering::Acquire));
+    let ecart_ms = DORMEUR_ECART_MAX_NS.load(Ordering::Acquire).max(silence) / 1_000_000;
+    let (_, _, coeur_apres) = crate::kernel::task::etat_tache_brut(DORMEUR_TACHE.load(Ordering::Acquire));
+    crate::serial_println!(
+        "SERIE_DORMEUR_MASQUE coeur={} masque_ms={} tours_pendant={} ecart_max_ms={} coeur_du_dormeur_apres={}",
+        ici, duree, tours, ecart_ms, coeur_apres
+    );
+    DORMEUR_RESULTAT.store(1, Ordering::Release);
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
 /// P13_CONSOLE_SYNC: guest-side join barrier for the asynchronous kernel injection.
 /// A missing, refused or stuck injection can never qualify the test as green.
 fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
@@ -845,6 +960,7 @@ fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
         "detenteur" => &SUSPENSION_RESULTAT,
         "verrou" => &VERROU_RESULTAT,
         "rafale" => &RAFALE_RESULTAT,
+        "dormeur" => &DORMEUR_RESULTAT,
         _ => { crate::serial_println!("SERIE_BANC_ATTEND_ECHEC raison=type-inconnu"); return 1; }
     };
     let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
@@ -1215,6 +1331,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "console-async" => console_async(argc, &argv),
         "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
         "serie-rafale-masquee" => serie_rafale_masquee(argc, &argv),
+        "serie-dormeur-masque" => serie_dormeur_masque(argc, &argv),
         // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
         // octet sur COM1 (le cout du port sous KVM, simule sous TCG).
         "serie-lente" => {

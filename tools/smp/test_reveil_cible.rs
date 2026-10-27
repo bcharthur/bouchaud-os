@@ -101,8 +101,71 @@ fn bsp_halte_hors_ordonnanceur_ne_devient_pas_un_coeur_disponible() {
 fn interactive_ordinaire_garde_un_coeur_historique_disponible() {
     assert_eq!(choisit_coeur(0, &ordinaire(), &[coeur_libre(), coeur_libre()]), None);
     let normal = Reveille { classe: Classe::Normale, ..ordinaire() };
-    let bsp = Coeur { hors_ordonnanceur: true, ..coeur_libre() };
-    assert_eq!(choisit_coeur(0, &normal, &[bsp, coeur_libre()]), None);
+    assert_eq!(choisit_coeur(0, &normal, &[coeur_libre(), coeur_libre()]), None);
+    // Occupant UTILISATEUR : son quantum le fait ceder, rien ne change.
+    let calcul = Coeur { occupant_utilisateur: true, ..coeur_occupe(Classe::Normale, false, 50_000_000) };
+    assert_eq!(choisit_coeur(0, &normal, &[calcul, coeur_libre()]), None);
+}
+
+// P13_REVEIL_COEUR_MUET_V1 -- le reveil « perdu » entre la demande et la
+// reprise.
+//
+// Cette assertion figurait dans le test ci-dessus :
+//
+//     let bsp = Coeur { hors_ordonnanceur: true, ..coeur_libre() };
+//     assert_eq!(choisit_coeur(0, &normal, &[bsp, coeur_libre()]), None);
+//
+// Elle consacrait le defaut : une tache NORMALE gardait un coeur historique
+// hors ordonnanceur, qui n'elit rien avant le retour du shell. Banc de la
+// rafale masquee, TCG SMP2 (2 demarrages sur 3) : le fil `verrou-suspendu`
+// (normal, `rq=0`) y a attendu 30 s, pendant que le shell attendait LUI en
+// boucle, le coeur un au repos.
+
+#[test]
+fn une_normale_quitte_un_historique_hors_ordonnanceur() {
+    let normal = Reveille { classe: Classe::Normale, ..ordinaire() };
+    let bsp_halte = Coeur { hors_ordonnanceur: true, ..coeur_libre() };
+    let bsp_actif = Coeur { en_ligne: true, autorise: true, inactif: false, hors_ordonnanceur: true, ..Coeur::default() };
+    let fond = coeur_occupe(Classe::Normale, false, 50_000_000);
+    for bsp in [bsp_halte, bsp_actif] {
+        assert_eq!(choisit_coeur(0, &normal, &[bsp, coeur_libre()]), Some(1));
+        // Meme un coeur occupe vaut mieux : lui, il elira.
+        assert_eq!(choisit_coeur(0, &normal, &[bsp, fond]), Some(1));
+        // L'affinite reste imperative : seul candidat, il est garde.
+        assert_eq!(choisit_coeur(0, &normal, &[bsp, Coeur { autorise: false, ..fond }]), Some(0));
+    }
+}
+
+#[test]
+fn un_historique_tenu_par_un_fil_noyau_cede_la_place_a_un_coeur_au_repos() {
+    let noyau = Coeur { occupant_noyau: true, ..coeur_occupe(Classe::Normale, false, 50_000_000) };
+    let fond = coeur_occupe(Classe::Normale, false, 50_000_000);
+    for tache in [Reveille { classe: Classe::Normale, ..ordinaire() }, ordinaire()] {
+        // Un coeur au repos : la tache y va, reveil immediat.
+        assert_eq!(choisit_coeur(0, &tache, &[noyau, fond, coeur_libre()]), Some(2));
+        assert_eq!(decide(&coeur_libre(), &tache), Decision::ReveilImmediat);
+        // Aucun coeur au repos : l'historique, comme avant -- une migration
+        // vers un autre coeur occupe ne garantit rien de plus.
+        assert_eq!(choisit_coeur(0, &tache, &[noyau, fond, fond]), None);
+        // Un coeur au repos INTERDIT ne compte pas, ni un BSP halte hors
+        // ordonnanceur (il n'elit pas).
+        assert_eq!(choisit_coeur(0, &tache, &[noyau, Coeur { autorise: false, ..coeur_libre() }]), None);
+        assert_eq!(choisit_coeur(0, &tache, &[noyau, Coeur { hors_ordonnanceur: true, ..coeur_libre() }]), None);
+    }
+}
+
+#[test]
+fn portee_du_replacement() {
+    use reveil::{portee_replacement, Portee};
+    let normal = Reveille { classe: Classe::Normale, ..ordinaire() };
+    let noyau = Coeur { occupant_noyau: true, ..coeur_occupe(Classe::Normale, false, 1) };
+    assert_eq!(portee_replacement(&normal, &noyau), Some(Portee::Inactifs));
+    // Un fil noyau installe mais coeur au repos (il dort dans `schedule`) :
+    // le reveil y est immediat, rien a chercher.
+    assert_eq!(portee_replacement(&normal, &Coeur { inactif: true, ..noyau }), None);
+    assert_eq!(portee_replacement(&normal, &Coeur { hors_ordonnanceur: true, ..coeur_libre() }), Some(Portee::Tous));
+    assert_eq!(portee_replacement(&sensible(), &coeur_libre()), Some(Portee::Tous));
+    assert_eq!(portee_replacement(&normal, &coeur_occupe(Classe::Normale, false, 1)), None);
 }
 
 #[test]
@@ -409,6 +472,10 @@ impl Sim {
             attente_interactive: coeur.interactive.len(),
             attente_normale: coeur.normale.len(),
             hors_ordonnanceur: false,
+            // La simulation rejoue la politique de CIBLAGE des taches
+            // sensibles ; le replacement des taches ordinaires derriere un
+            // fil noyau a ses propres tests (P13_REVEIL_COEUR_MUET_V1).
+            occupant_noyau: false,
         }
     }
 

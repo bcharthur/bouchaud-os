@@ -45,6 +45,13 @@ banc-c5-fenetre-corrigee = []
 # ligne est perdue, comme avant le correctif. Reproduction negative du banc
 # `BANC_RAFALE_MASQUEE` a image egale. Jamais dans `default`.
 banc-console-sans-contre-pression = []
+# BANC TEMOIN REVEIL (P13_REVEIL_COEUR_MUET_V1).
+#
+# Retablit la regle de placement au reveil d'avant le correctif (historique
+# garde sauf privilege ou interactive face a un coeur hors ordonnanceur) et
+# l'exclusion de tout fil noyau du vol. Reproduction negative de
+# `tools/ci/run_reveil_coeur_muet.sh` a image egale. Jamais dans `default`.
+banc-reveil-historique = []
 # BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1).
 #
 # Le premier `TRANSFER_TO_HOST_2D` du bureau est juge contre une barriere qui

@@ -293,6 +293,9 @@ fn etat_coeur_reveil(cpu: usize, masque_affinite: u64, maintenant_ns: u64) -> Re
         // sommeil -- le contexte de demarrage ou le shell tient le coeur.
         hors_ordonnanceur: en_ligne && cpu == 0 && occupant_coeur(cpu) == NO_TASK
             && CONTINUATION_ETAT.load(Ordering::Acquire) == CONTINUATION_LIBRE,
+        // P13_REVEIL_COEUR_MUET_V1 : un fil noyau tient le coeur.
+        occupant_noyau: en_ligne && occupant_coeur(cpu) != NO_TASK
+            && CURRENT_IS_KERNEL[cpu].load(Ordering::Acquire),
     }
 }
 
@@ -426,12 +429,15 @@ fn publie_pret(index: usize, publication: ReveilPublication) {
         choose_runq_cpu(tasks()[index].affinity_mask) as usize
     };
 
-    let target = if crate::kernel::scheduler::reveil::replace_necessaire(
+    // P13_REVEIL_COEUR_MUET_V1 : historique hors ordonnanceur, ou tenu par
+    // un fil noyau -- la demande differee n'y serait peut-etre jamais servie.
+    let portee = crate::kernel::scheduler::reveil::portee_replacement(
         &reveille, &etat_coeur_reveil(historique, tasks()[index].affinity_mask, maintenant),
-    ) {
+    );
+    let target = if portee.is_some() {
         let masque = tasks()[index].affinity_mask;
         let en_ligne = smp::schedulable_cpus().max(1).min(MAX_CPUS);
-        let mut selection = ReveilSelection::neuve(precedent, true);
+        let mut selection = ReveilSelection::avec_portee(precedent, portee);
         for cpu_id in 0..en_ligne {
             selection.propose(cpu_id, &etat_coeur_reveil(cpu_id, masque, maintenant));
         }

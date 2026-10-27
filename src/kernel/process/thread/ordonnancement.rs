@@ -27,6 +27,25 @@ fn runnable_local(task: &Task, cpu: usize) -> bool {
         && allowed_on(task, cpu)
 }
 
+/// P13_REVEIL_COEUR_MUET_V1 : un fil noyau MIGRABLE se vole comme une tache
+/// utilisateur. `migrable` est la declaration qu'il ne depend d'aucun coeur
+/// (`spawn_noyau` : placement libre a l'enregistrement, secours des coeurs
+/// muets). L'exclure du vol le laissait en file derriere un occupant qui ne
+/// cede pas -- interruptions masquees, vCPU retire, fil sans point
+/// cooperatif --, trois coeurs au repos a cote. Les fils noyau historiques
+/// (non migrables) restent epingles par leur affinite et ne se volent pas.
+#[cfg(not(feature = "banc-reveil-historique"))]
+fn runnable_steal(task: &Task, cpu: usize) -> bool {
+    task.state == TaskState::Ready
+        && task.on_cpu < 0
+        && !task.switching_out.charge()
+        && (!task.noyau || task.migrable)
+        && task.runq_cpu.charge() as usize != cpu
+        && allowed_on(task, cpu)
+}
+
+/// BANC TEMOIN (option `banc-reveil-historique`) : aucun fil noyau ne se vole.
+#[cfg(feature = "banc-reveil-historique")]
 fn runnable_steal(task: &Task, cpu: usize) -> bool {
     task.state == TaskState::Ready
         && task.on_cpu < 0
