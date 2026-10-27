@@ -822,17 +822,26 @@ pub fn tir_anticipe(entree_tsc: u64) -> bool {
 /// Apres un tir anticipe : rearme la fin du quantum EN COURS (pas un nouveau
 /// quantum : la tache courante n'a pas a gagner de temps a chaque sommeil
 /// servi), ou la prochaine echeance interactive si elle vient avant.
-pub fn rearme_reste_du_quantum() {
+///
+/// P13_QUANTUM_ECHU_PENDANT_TIR_V1 : rend `false` quand le quantum a expire
+/// entre l'entree du vecteur et ce rearmement (balayage des dormeurs, IPI
+/// tombe juste avant la fin) : un quantum NEUF est alors arme, et l'entree
+/// est une fin de quantum. Le gestionnaire la classait encore « anticipee »
+/// sur le TSC d'entree : ni imputation du quantum, ni rotation
+/// (`preempt_from_irq` renoncait sans demande), et la tache courante
+/// enchainait un second quantum. Le mode periodique ne donne jamais de
+/// quantum neuf ici (le reste echu tire au compte suivant) : `true`.
+pub fn rearme_reste_du_quantum() -> bool {
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) == MODE_LAPIC_PERIODIQUE {
         let cpu = cpu_index();
-        if !PERIODIQUE_COURT[cpu].load(Ordering::Relaxed) { return; }
+        if !PERIODIQUE_COURT[cpu].load(Ordering::Relaxed) { return true; }
         let precis = ARME_PRECIS[cpu].swap(false, Ordering::Relaxed);
         // A final one-shot can arrive just before the software boundary due
         // to count conversion. Rearm it if exhausted; an ordinary IPI with
         // a live remaining timer needs no register write.
         if !precis {
             let restant = unsafe { let (x2, lapic) = local_apic(); timer_local_courant(x2, lapic) };
-            if restant != 0 { return; }
+            if restant != 0 { return true; }
         }
         PRECIS_NS[cpu].store(0, Ordering::Relaxed);
         let now = crate::kernel::timer::monotonic_ns();
@@ -844,14 +853,16 @@ pub fn rearme_reste_du_quantum() {
             timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, compte);
         }
         // Still one-shot: only QuantumExpired restores periodic mode.
-        return;
+        return true;
     }
-    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE { return; }
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE { return true; }
     let cpu = cpu_index();
     let maintenant = crate::arch::x86_64::cpu::rdtsc();
-    if cpu >= MAX_CPUS || QUANTUM_TSC[cpu].load(Ordering::Relaxed) <= maintenant {
+    if cpu >= MAX_CPUS
+        || !crate::kernel::reveil_precis::avant_quantum(maintenant, QUANTUM_TSC[cpu].load(Ordering::Relaxed))
+    {
         arm_local_scheduler_timer();
-        return;
+        return false;
     }
     let quantum = QUANTUM_TSC[cpu].load(Ordering::Relaxed);
     let (echeance, occupe) = match cible_occupee(cpu, maintenant) {
@@ -863,6 +874,7 @@ pub fn rearme_reste_du_quantum() {
     } else { crate::kernel::reveil_precis::EtatDeadline::Quantum });
     ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
     ARME_OCCUPE[cpu].store(occupe, Ordering::Relaxed);
+    true
 }
 
 /// Une tache interactive s'endort sur ce coeur, qui va executer autre chose :

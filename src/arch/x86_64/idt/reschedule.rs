@@ -42,14 +42,17 @@ extern "x86-interrupt" fn reschedule_interrupt_handler(stack: InterruptStackFram
     // BOUCHAUD_REVEIL_PRECIS_OCCUPE_V1 : classe AVANT tout rearmement. Un tir
     // anticipe (sommeil interactif, quantum non echu) ne met pas fin au
     // quantum : ni nouveau quantum, ni temps impute, ni rotation sans demande.
-    let anticipe = smp::tir_anticipe(entree_tsc);
+    let mut anticipe = smp::tir_anticipe(entree_tsc);
     // Publish due sleepers BEFORE rearming and evaluating targeted kernel
     // preemption. Rearming an unserved deadline generated repeated early
     // IRQs while the kernel occupant had no ready candidate to preempt for.
     crate::kernel::task::sert_echeances_au_vecteur_local();
     if smp::local_scheduler_timer_enabled() {
         if anticipe {
-            smp::rearme_reste_du_quantum();
+            // P13_QUANTUM_ECHU_PENDANT_TIR_V1 : un quantum echu depuis
+            // l'entree est remplace par un neuf -- c'est alors une fin de
+            // quantum (imputation, battement, rotation), pas un tir anticipe.
+            anticipe = smp::rearme_reste_du_quantum();
         } else {
             smp::arm_local_scheduler_timer();
         }

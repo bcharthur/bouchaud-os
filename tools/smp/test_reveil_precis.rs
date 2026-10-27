@@ -351,3 +351,28 @@ fn interruptions_precoces_ne_consomment_pas_le_quantum() {
     assert_eq!(reste_compte(quantum, quantum + 10, 1000), 1);
     assert_eq!(reste_compte(1001, 0, 1000), 2); // never round a deadline down
 }
+
+/// P13_QUANTUM_ECHU_PENDANT_TIR_V1 : la classe d'une entree du vecteur local
+/// se decide au TSC d'entree, puis se REVISE au rearmement. Une entree
+/// anticipee (tir interactif, IPI) dont le traitement depasse la fin du
+/// quantum recoit un quantum neuf (`arm_local_scheduler_timer`) : elle est
+/// alors une fin de quantum. La garder « anticipee » faisait enchainer deux
+/// quanta a la tache courante sans imputation ni rotation.
+fn classe_au_rearmement(entree: u64, rearmement: u64, quantum: u64) -> bool {
+    use reveil_precis::avant_quantum;
+    // `tir_anticipe` puis `rearme_reste_du_quantum` (TSC-deadline).
+    avant_quantum(entree, quantum) && avant_quantum(rearmement, quantum)
+}
+
+#[test]
+fn un_quantum_echu_pendant_le_traitement_redevient_une_fin_de_quantum() {
+    let quantum = 4_000_000;
+    // Tir interactif a 3,98 ms ; balayage de 30 us : le quantum expire.
+    assert!(!classe_au_rearmement(3_980_000, 4_010_000, quantum));
+    // Meme tir, traitement court : le reste du quantum est conserve.
+    assert!(classe_au_rearmement(3_980_000, 3_990_000, quantum));
+    // Rearmement a la borne exacte : echu (borne exclusive, comme l'entree).
+    assert!(!classe_au_rearmement(3_980_000, quantum, quantum));
+    // Une entree deja echue ne redevient jamais anticipee.
+    assert!(!classe_au_rearmement(quantum, quantum - 1, quantum));
+}

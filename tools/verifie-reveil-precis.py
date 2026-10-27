@@ -66,7 +66,8 @@ TSC = "                    ARME_PRECIS[cpu].store(false, Ordering::Relaxed);"
 # une marge de retard, jamais en boucle) -- elle n'attend plus le tic.
 TESTS = ("une_echeance_dans_la_marge_est_armee_exactement", "une_echeance_due_est_armee_a_une_marge_jamais_en_boucle",
          "la_politique_desactivee_n_arme_jamais", "periodique_le_compte_ne_tire_jamais_avant_l_echeance",
-         "un_tsc_cible_deja_passe_est_arme_au_plancher", "une_echeance_due_ne_depasse_pas_le_quantum")
+         "un_tsc_cible_deja_passe_est_arme_au_plancher", "une_echeance_due_ne_depasse_pas_le_quantum",
+         "un_quantum_echu_pendant_le_traitement_redevient_une_fin_de_quantum")
 # La regle elle-meme, dans la decision pure : une echeance due n'est pas
 # refusee (elle est armee au plancher).
 DUE_ARMEE = "Armement { tsc: plancher_tsc.ok_or(Refus::CibleInconnue)?, due: true }"
@@ -154,6 +155,11 @@ def verifie(t: dict, sources_src: str) -> list:
     for garde in ("!crate::kernel::scheduler::preempt::preemption_noyau_sure()", "transition_ouverte_sans_passation(local_cpu())"):
         if not 0 <= scan.find(garde) < scan.find("wake_sleepers_depuis_irq();"):
             fautes.append("le service des echeances contourne les exclusions de preemption")
+    # P13_QUANTUM_ECHU_PENDANT_TIR_V1 : la classe anticipee est revisee au
+    # rearmement ; un quantum neuf rend une fin de quantum.
+    if "anticipe = smp::rearme_reste_du_quantum();" not in irq \
+            or "        arm_local_scheduler_timer();\n        return false;" not in corps(t["smp"], "pub fn rearme_reste_du_quantum("):
+        fautes.append("un quantum echu pendant un tir anticipe est accorde sans fin de quantum")
     retrait = corps(t["smp"], "pub fn retire_reveil_precis_apres_hlt(")
     if "rearme_reste_du_quantum();" not in retrait or "arm_local_scheduler_timer();" in retrait:
         fautes.append("le retour idle recommence le quantum au lieu de restaurer son reste")
@@ -200,6 +206,8 @@ def negatifs(t: dict, src: str) -> list:
         ("service IRQ sous verrou", "sommeil", "!crate::kernel::scheduler::preempt::preemption_noyau_sure()", "false"),
         ("service pendant passation", "sommeil", "transition_ouverte_sans_passation(local_cpu())", "false"),
         ("compte court restaure en periodique", "smp", "                        timer_local_ecrit(x2, lapic, X2APIC_TIMER_INITIAL, LAPIC_TIMER_INITIAL, 0);", ""),
+        ("quantum neuf garde anticipe", "replanif", "anticipe = smp::rearme_reste_du_quantum();", "smp::rearme_reste_du_quantum();"),
+        ("quantum neuf annonce conserve", "smp", "        arm_local_scheduler_timer();\n        return false;", "        arm_local_scheduler_timer();\n        return true;"),
         ("retour idle prolonge le quantum", "smp", "            rearme_reste_du_quantum();", "            arm_local_scheduler_timer();"),
 
         ("periodique actif par defaut", "smp", PERIODIQUE_OFF, PERIODIQUE_OFF.replace("false", "true")),
