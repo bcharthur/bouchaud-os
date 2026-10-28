@@ -69,5 +69,24 @@ class LigneComplete(unittest.TestCase):
         self.assertTrue(motif_du_banc().endswith(dernier + "=[0-9]+$"), dernier)
 
 
+class ApresAbandon(unittest.TestCase):
+    """Les bancs irq-pannes et reponse-etrangere : les releves apres
+    l'abandon, entiers seulement."""
+
+    def test_un_fragment_apres_l_abandon_n_est_ni_compte_ni_juge(self):
+        abandon = ENTIERE.replace(b"presents_ok=26 presents_echec=0", b"presents_ok=0 presents_echec=1") \
+            .replace(b"actif=1", b"actif=0")
+        donnees = abandon + b"\r\n" + abandon + b"\r\n" + TRONQUE
+        retenues = lc.toutes(donnees, motif_du_banc())
+        self.assertEqual(len(retenues), 2)
+        self.assertTrue(all("actif=0 " in r for r in retenues))
+
+    def test_les_deux_bancs_jugent_des_lignes_entieres(self):
+        for nom in ("run_virtio_gpu_irq_pannes.sh", "run_virtio_gpu_reponse_etrangere.sh"):
+            texte = (RACINE / "tools/ci" / nom).read_text(encoding="utf-8")
+            self.assertIn("ligne_complete.py \"$SORTIE/apres-abandon.log\" \"$TELEMETRIE\" --toutes", texte, nom)
+            self.assertNotIn("grep -ac '\\[GUI-VIRTIO-GPU\\]'", texte, nom)
+
+
 if __name__ == "__main__":
     unittest.main()

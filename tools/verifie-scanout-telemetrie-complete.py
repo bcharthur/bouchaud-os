@@ -30,7 +30,11 @@ F = {
     "banc": RACINE / "tools/ci/run_virtio_gpu_scanout.sh",
     "outil": RACINE / "tools/ci/ligne_complete.py",
     "test": RACINE / "tools/ci/reliability/test_ligne_complete.py",
+    "pannes": RACINE / "tools/ci/run_virtio_gpu_irq_pannes.sh",
+    "etrangere": RACINE / "tools/ci/run_virtio_gpu_reponse_etrangere.sh",
 }
+APRES = 'python3 tools/ci/ligne_complete.py "$SORTIE/apres-abandon.log" "$TELEMETRIE" --toutes'
+COMPTE = "grep -ac '\\[GUI-VIRTIO-GPU\\]'"
 MOTIF = "TELEMETRIE='\\[GUI-VIRTIO-GPU\\] presents_ok=.* regions_differees=[0-9]+$'"
 ATTENTE = '        python3 tools/ci/ligne_complete.py "$log" "$FINAL" && break'
 LANCE = 'SECONDE=3 FINAL="$TELEMETRIE" demarre virtio'
@@ -57,6 +61,9 @@ def verifie(t: dict) -> list:
         fautes.append("banc : sans ligne entiere, le refus explicite ne precede plus les controles des compteurs.")
     if FRAGMENT not in t["outil"]:
         fautes.append("ligne_complete.py : le fragment final (sans saut de ligne) n'est plus ecarte.")
+    for cle in ("pannes", "etrangere"):
+        if APRES not in t[cle] or MOTIF not in t[cle] or COMPTE in t[cle]:
+            fautes.append(f"{cle} : les releves apres l'abandon ne sont plus des lignes entieres.")
     if "def test_le_fragment_du_run_40715886448_est_refuse(" not in t["test"]:
         fautes.append("temoin negatif absent : test_le_fragment_du_run_40715886448_est_refuse.")
     return fautes
@@ -71,6 +78,8 @@ def negatifs(t: dict) -> tuple:
          "MESURE=$(propre \"$SORTIE/serie-virtio.log\" | grep -a '\\[GUI-VIRTIO-GPU\\]' | tail -1 \\\n  | sed"),
         ("refus retire", "banc", REFUS + "\n", ""),
         ("fragment final retenu", "outil", FRAGMENT, "    for brut in morceaux:"),
+        ("pannes : compte au grep", "pannes", APRES, "grep -ac '\\[GUI-VIRTIO-GPU\\]' \"$LOG\""),
+        ("etrangere : compte au grep", "etrangere", APRES, "grep -ac '\\[GUI-VIRTIO-GPU\\]' \"$LOG\""),
         ("temoin retire", "test", "def test_le_fragment_du_run_40715886448_est_refuse(", "def test_x("),
     ]
     echecs = []

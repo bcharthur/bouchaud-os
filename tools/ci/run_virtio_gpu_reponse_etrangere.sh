@@ -38,12 +38,18 @@ qemu-system-x86_64 $ACCEL -drive format=raw,file="$BOOT" -drive format=raw,file=
   -m 2048 -smp 2 -display none -no-reboot -vga none -device virtio-gpu-pci \
   -serial file:"$LOG" &
 PID=$!
+# P10_TELEMETRIE_COMPLETE_V1 : les releves du compositeur APRES l'abandon,
+# ENTIERS seulement (QEMU est tue au fil de l'eau ; run 40715886448 : ligne
+# coupee a `us_par_present=250 ac`).
+TELEMETRIE='\[GUI-VIRTIO-GPU\] presents_ok=.* regions_differees=[0-9]+$'
+apres_abandon() { sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' "$LOG" > "$SORTIE/apres-abandon.log"
+  python3 tools/ci/ligne_complete.py "$SORTIE/apres-abandon.log" "$TELEMETRIE" --toutes || true; }
 LIMITE=$((SECONDS + 240))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   grep -aqE 'KERNEL PANIC|panicked at' "$LOG" && break
   # Apres l'abandon, attendre deux releves du compositeur : il doit tourner.
   if grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON' "$LOG" \
-     && [ "$(sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' "$LOG" | grep -ac '\[GUI-VIRTIO-GPU\]')" -ge 2 ]; then
+     && [ "$(apres_abandon | grep -c .)" -ge 2 ]; then
     sleep 2; break
   fi
   sleep 1
@@ -68,8 +74,8 @@ ecart_barriere() {
 exige "la reponse rendue porte la barriere d'une autre commande (attendue - 1)" ecart_barriere
 exige "le scanout est abandonne (file cassee) au premier echec" grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse echecs_consecutifs=1' "$LOG"
 exige "aucune commande apres l'abandon (un seul echec de presentation)" \
-  bash -c "! sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,\$p' '$LOG' | grep -a '\[GUI-VIRTIO-GPU\]' | grep -avE 'presents_ok=0 presents_echec=1 .* actif=0 '"
-exige "le compositeur tourne encore apres l'abandon (deux releves)" bash -c "[ \"\$(sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,\$p' '$LOG' | grep -ac '\[GUI-VIRTIO-GPU\]')\" -ge 2 ]"
+  bash -c "[ -n \"\$1\" ] && ! printf '%s\n' \"\$1\" | grep -avE 'presents_ok=0 presents_echec=1 .* actif=0 '" _ "$(apres_abandon)"
+exige "le compositeur tourne encore apres l'abandon (deux releves entiers)" test "$(apres_abandon | grep -c .)" -ge 2
 exige "aucune panique" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$LOG'"
 if [ "$echecs" -eq 0 ]; then
   echo "VIRTIO_GPU_REPONSE_ETRANGERE_BANC_OK"

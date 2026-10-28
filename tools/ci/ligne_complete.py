@@ -3,6 +3,7 @@
 
     ligne_complete.py JOURNAL REGEX              # code 0 si une telle ligne existe
     ligne_complete.py JOURNAL REGEX --derniere   # l'imprime (la derniere), code 1 sinon
+    ligne_complete.py JOURNAL REGEX --toutes     # les imprime toutes, code 1 si aucune
 
 P10_TELEMETRIE_COMPLETE_V1. QEMU ecrit la serie dans un fichier au fil de
 l'eau ; un banc qui arrete QEMU des que le DEBUT d'une ligne apparait peut
@@ -29,17 +30,18 @@ def lignes_completes(donnees: bytes):
         yield ANSI.sub(b"", brut).rstrip(b"\r").decode("utf-8", "replace")
 
 
-def derniere(donnees: bytes, motif: str):
+def toutes(donnees: bytes, motif: str):
     expr = re.compile(motif)
-    trouvee = None
-    for ligne in lignes_completes(donnees):
-        if expr.search(ligne):
-            trouvee = ligne
-    return trouvee
+    return [ligne for ligne in lignes_completes(donnees) if expr.search(ligne)]
+
+
+def derniere(donnees: bytes, motif: str):
+    retenues = toutes(donnees, motif)
+    return retenues[-1] if retenues else None
 
 
 def main(argv) -> int:
-    if len(argv) not in (3, 4) or (len(argv) == 4 and argv[3] != "--derniere"):
+    if len(argv) not in (3, 4) or (len(argv) == 4 and argv[3] not in ("--derniere", "--toutes")):
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     try:
@@ -47,11 +49,11 @@ def main(argv) -> int:
             donnees = f.read()
     except OSError:
         return 1
-    ligne = derniere(donnees, argv[2])
-    if ligne is None:
+    retenues = toutes(donnees, argv[2])
+    if not retenues:
         return 1
     if len(argv) == 4:
-        print(ligne)
+        print("\n".join(retenues if argv[3] == "--toutes" else retenues[-1:]))
     return 0
 
 

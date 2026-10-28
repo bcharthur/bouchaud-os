@@ -41,11 +41,17 @@ qemu-system-x86_64 $ACCEL -drive format=raw,file="$BOOT" -drive format=raw,file=
   -m 2048 -smp 2 -display none -no-reboot -vga none -device virtio-gpu-pci \
   -serial file:"$LOG" &
 PID=$!
+# P10_TELEMETRIE_COMPLETE_V1 : les releves du compositeur APRES l'abandon,
+# ENTIERS seulement (QEMU est tue au fil de l'eau ; run 40715886448 : ligne
+# coupee a `us_par_present=250 ac`).
+TELEMETRIE='\[GUI-VIRTIO-GPU\] presents_ok=.* regions_differees=[0-9]+$'
+apres_abandon() { sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' "$LOG" > "$SORTIE/apres-abandon.log"
+  python3 tools/ci/ligne_complete.py "$SORTIE/apres-abandon.log" "$TELEMETRIE" --toutes || true; }
 LIMITE=$((SECONDS + 300))
 while kill -0 "$PID" 2>/dev/null && (( SECONDS < LIMITE )); do
   grep -aqE 'KERNEL PANIC|panicked at' "$LOG" && break
   if grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON' "$LOG" \
-     && [ "$(sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' "$LOG" | grep -ac '\[GUI-VIRTIO-GPU\]')" -ge 2 ]; then
+     && [ "$(apres_abandon | grep -c .)" -ge 2 ]; then
     sleep 2; break
   fi
   sleep 1
@@ -55,7 +61,7 @@ wait "$PID" 2>/dev/null || true
 propre() { sed -E 's/\x1b\[[0-9;]*m//g' "$LOG"; }
 propre | grep -aE 'VIRTIO_GPU_(IRQ|INJECTION|FILE|SCANOUT)|\[GUI-VIRTIO-GPU\]|KERNEL PANIC|panicked' | sed 's/^/  /' | awk 'NR<=16' || true
 # Le dernier releve, apres l'abandon.
-APRES=$(propre | sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,$p' | grep -ao '\[GUI-VIRTIO-GPU\].*' | tail -1 || true)
+APRES=$(apres_abandon | tail -1 | grep -ao '\[GUI-VIRTIO-GPU\].*' || true)
 val() { echo "$1" | grep -oE " $2=[0-9]+" | awk 'NR<=1' | cut -d= -f2; }
 
 echecs=0
@@ -86,7 +92,7 @@ exige "une seule attente echue (la reponse jamais vue)" test "$(val "$APRES" ech
 exige "un seul echec de presentation (la reponse jamais vue), au moins 5 acceptees avant" \
   bash -c "[ '$(val "$APRES" presents_echec)' = 1 ] && [ '$(val "$APRES" presents_ok)' -ge 5 ]" 2>/dev/null
 exige "le scanout est abandonne (file cassee) au premier echec" grep -aq 'VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse echecs_consecutifs=1' "$LOG"
-exige "le compositeur tourne encore apres l'abandon (deux releves)" bash -c "[ \"\$(sed -n '/VIRTIO_GPU_SCANOUT_ABANDON/,\$p' '$LOG' | grep -ac '\[GUI-VIRTIO-GPU\]')\" -ge 2 ]"
+exige "le compositeur tourne encore apres l'abandon (deux releves entiers)" test "$(apres_abandon | grep -c .)" -ge 2
 exige "aucune panique" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$LOG'"
 if [ "$echecs" -eq 0 ]; then
   echo "VIRTIO_GPU_IRQ_PANNES_BANC_OK"
