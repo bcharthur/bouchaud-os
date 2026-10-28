@@ -1075,6 +1075,8 @@ mod pannes {
     /// du progres ; le compte strict ne vaut donc que hors vol.
     static HORS_VOL: AtomicU64 = AtomicU64::new(0);
     static HORS_VOL_SANS_PROGRES: AtomicU64 = AtomicU64::new(0);
+    /// Silence exige avant une parasite hors vol (BOUCHAUD_P10_HORS_VOL_SILENCE_V1).
+    const SILENCE_NS: u64 = 200_000;
     /// L'attente en cours a-t-elle deja dormi ?
     static DORMI: AtomicBool = AtomicBool::new(false);
 
@@ -1154,6 +1156,31 @@ mod pannes {
                 // La MSI-X de cette reponse n'est pas servie : pas de parasite
                 // hors vol cette fois (le compte `hors_vol` le dira).
                 return;
+            }
+            core::hint::spin_loop();
+        }
+        // BOUCHAUD_P10_HORS_VOL_SILENCE_V1 : `IRQ_VU == used.idx` ne prouve
+        // pas que la MSI-X de CETTE reponse a ete servie. Une parasite de la
+        // meme attente, servie apres l'ecriture de `used.idx` et avant la
+        // MSI-X, avance `IRQ_VU` elle-meme ; la MSI-X tardive tombait alors
+        // dans la fenetre (run 40528051026, KVM, 5/6 ; exp/p10-pannes-hors-vol,
+        // KVM, 10 rouges sur 600, toutes apres une parasite « voleuse »).
+        // Hors vol = aucune commande en vol ET aucun passage du gestionnaire
+        // depuis SILENCE_NS : la tardive arrive avant et relance le silence.
+        // Meme borne (2 ms) ; le critere du banc ne change pas.
+        let mut vu = IRQ_TOTAL.load(Ordering::Relaxed);
+        let mut calme = crate::kernel::timer::monotonic_ns().saturating_add(SILENCE_NS);
+        while crate::kernel::timer::monotonic_ns() < calme {
+            let total = IRQ_TOTAL.load(Ordering::Relaxed);
+            if total != vu {
+                // Un passage : le silence repart, sous la meme borne. Sans
+                // silence avant la borne, pas de parasite hors vol cette fois
+                // (le compte `hors_vol` le dira).
+                if crate::kernel::timer::monotonic_ns() > borne {
+                    return;
+                }
+                vu = total;
+                calme = crate::kernel::timer::monotonic_ns().saturating_add(SILENCE_NS);
             }
             core::hint::spin_loop();
         }

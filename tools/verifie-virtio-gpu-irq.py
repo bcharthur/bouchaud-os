@@ -79,6 +79,15 @@ def verifie(t: dict) -> list:
             or "cargo bootimage --features banc-virtio-gpu-irq-pannes" not in t["flux"] \
             or "BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh" not in t["flux"]:
         fautes.append("os-primitives.yml : l'A/B KVM ou le banc de pannes n'est plus execute.")
+    # BOUCHAUD_P10_HORS_VOL_SILENCE_V1 : une parasite n'est hors vol qu'apres un
+    # silence du gestionnaire, mesure AVANT de l'envoyer (exp/p10-pannes-hors-vol).
+    h = corps(t["pilote"], "    pub(super) fn apres_attente(rang: u64, reussi: bool) {")
+    s_, e_ = h.find("let mut calme = crate::kernel::timer::monotonic_ns().saturating_add(SILENCE_NS);"), h.find("HORS_VOL.fetch_add(1, Ordering::Relaxed);")
+    if min(s_, e_) < 0 or not s_ < e_ or "const SILENCE_NS: u64 = 200_000;" not in t["pilote"] \
+            or "if total != vu {" not in h \
+            or "calme = crate::kernel::timer::monotonic_ns().saturating_add(SILENCE_NS);\n            }" not in h:
+        fautes.append("banc de pannes : la parasite hors vol n'attend plus un silence du gestionnaire "
+                      "(BOUCHAUD_P10_HORS_VOL_SILENCE_V1) -- une MSI-X tardive retombe dans la fenetre.")
     defaut = re.search(r"^default = \[([^\]]*)\]", t["cargo"], re.M)
     if not defaut or "banc-virtio-gpu-irq-pannes" in defaut.group(1) or "banc-virtio-gpu-irq-pannes = []" not in t["cargo"]:
         fautes.append("Cargo.toml : l'option de banc est absente ou dans `default`.")
@@ -110,6 +119,8 @@ def main() -> int:
         ("pilote", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(true);", "static IRQ_VOULUE: AtomicBool = AtomicBool::new(false);"),
         ("flux", "BO_QEMU_KVM=1 tools/ci/run_banc_irq_gpu.sh", "tools/ci/run_banc_irq_gpu.sh"),
         ("cargo", 'default = ["legacy-boot"]', 'default = ["legacy-boot", "banc-virtio-gpu-irq-pannes"]'),
+        ("pilote", "            if total != vu {", "            if false {"),
+        ("pilote", "    const SILENCE_NS: u64 = 200_000;", "    const SILENCE_NS: u64 = 0;"),
     ]
     for n, (cle, a, b) in enumerate(negatifs, 1):
         if a not in t[cle]:
@@ -121,7 +132,8 @@ def main() -> int:
             print(f"virtio-gpu irq : le test negatif {n} ne rougit pas ({cle}) -- garde inoperant")
             return 1
     print(f"[OK] virtio-gpu irq : gestionnaire sans verrou ni impression, ticket avant relecture, sommeil seulement "
-          f"si cedable/arme/voulu, refus MSI-X detecte, interruption par defaut (A/B KVM 38697040371), A/B KVM et pannes en CI "
+          f"si cedable/arme/voulu, refus MSI-X detecte, interruption par defaut (A/B KVM 38697040371), A/B KVM et pannes en CI, "
+          f"parasite hors vol apres silence "
           f"(negatifs={len(negatifs)})")
     return 0
 
