@@ -256,3 +256,63 @@ jobs:
             identite-reveil.txt
             temoin-reveil-kvm-*.log
           if-no-files-found: warn
+
+  # C19 (P13_ENTREE_VALIDE_JAMAIS_JETEE_V1) : une entree de file consommee puis
+  # rejetee par l'election est remise. `banc-rejet-election` fait rejeter N
+  # entrees ELIGIBLES de taches utilisateur pendant que la sonde des ecrivains
+  # fait naitre et mourir des processus sur tous les coeurs.
+  election:
+    name: election -- tache prete jamais perdue sur un rejet (TCG/KVM SMP4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: p13-cible-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            p13-cible-${{ runner.os }}-
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Images (livree, banc de rejet)
+        run: |
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-rejet-election
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-rejet.bin
+          for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-election.txt
+          if grep -aq BOUCHAUD_IMAGE_TEMOIN boot-livree.bin; then echo BANNIERE_TEMOIN_DANS_LA_LIVREE >&2; exit 1; fi
+          if grep -aq ORDO_REJET_INJECTE boot-livree.bin; then echo BANC_DE_REJET_DANS_LA_LIVREE >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-rejet-election' boot-rejet.bin
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
+      # Le temoin DOIT signaler la tache perdue ([SCHED-ORPHELINE]) : un temoin
+      # vert ne prouverait plus rien.
+      - name: Temoin sans remise -- tache prete perdue attendue (KVM SMP4)
+        run: |
+          BO_QEMU_KVM=1 REJET_SORTIE="$PWD/election-kvm-temoin-smp4" tools/ci/run_rejet_election.sh boot-rejet.bin sans-remise 50
+      - name: Correctif -- chaque rejet remis, sonde finie (TCG SMP4, KVM SMP4 x3)
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          REJET_SORTIE="$PWD/election-tcg-remise-smp4" tools/ci/run_rejet_election.sh boot-rejet.bin remise 50 || r=1
+          for i in 1 2 3; do
+            BO_QEMU_KVM=1 REJET_SORTIE="$PWD/election-kvm-remise-smp4-$i" tools/ci/run_rejet_election.sh boot-rejet.bin remise 50 || r=1
+          done
+          exit $r
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-election-${{ github.run_id }}
+          path: |
+            identite-election.txt
+            election-*/serie.log
+          if-no-files-found: warn
