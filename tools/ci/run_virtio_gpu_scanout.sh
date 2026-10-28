@@ -71,7 +71,10 @@ capture() {
 
 # demarre NOM ATTENTE_REGEX DELAI_APRES CAPTURE_DEVICE ARGS_QEMU...
 #   SECONDE=N   : seconde capture N secondes apres la premiere (capture-NOM-2)
-#   FINAL=REGEX : apres les captures, attendre encore cette ligne (<= 90 s)
+#   FINAL=REGEX : apres les captures, attendre encore cette ligne, ENTIEREMENT
+#                 ecrite (<= 90 s) -- P10_TELEMETRIE_COMPLETE_V1 : QEMU etait tue
+#                 des le debut de la ligne ; run 40715886448 (77665751, direct
+#                 KVM) : `... us_par_present=250 ac`, quatre controles en echec.
 demarre() {
   local nom=$1 attente=$2 apres=$3 tete=$4; shift 4
   local log="$SORTIE/serie-$nom.log" mon="$SOCKETS/$nom.sock"
@@ -102,7 +105,7 @@ demarre() {
       local fin=$((SECONDS + 90))
       while kill -0 "$pid" 2>/dev/null && (( SECONDS < fin )); do
         grep -aqE 'KERNEL PANIC|panicked at' "$log" && break
-        grep -aqE "$FINAL" "$log" && break
+        python3 tools/ci/ligne_complete.py "$log" "$FINAL" && break
         sleep 1
       done
     fi
@@ -114,7 +117,10 @@ demarre() {
 
 demarre mire 'BOUCHAUD_VIRTIO_GPU_2D_AUTOTEST_OK|VIRTIO_GPU_2D_AUTOTEST_ECHEC|VIRTIO_GPU_ECHEC' 2 vgpu \
   -device virtio-gpu-pci,id=vgpu
-SECONDE=3 FINAL='\[GUI-VIRTIO-GPU\]' demarre virtio '\[gui\] window manager demarre' 8 vgpu \
+# La ligne de telemetrie du compositeur, ENTIERE : son dernier champ, puis
+# la fin de ligne (`ligne_complete.py` ne retient que les lignes terminees).
+TELEMETRIE='\[GUI-VIRTIO-GPU\] presents_ok=.* regions_differees=[0-9]+$'
+SECONDE=3 FINAL="$TELEMETRIE" demarre virtio '\[gui\] window manager demarre' 8 vgpu \
   -vga none -device virtio-gpu-pci,id=vgpu -drive format=raw,file="$SORTIE/bureau.img"
 demarre bga '\[gui\] window manager demarre' 8 - \
   -drive format=raw,file="$SORTIE/bureau.img"
@@ -135,14 +141,22 @@ exige "sans BGA, le bureau prend le scanout virtio-gpu 2D" grep -aq 'BOUCHAUD_VI
 exige "bureau virtio : capture 1280x720" python3 tools/ci/analyse_scanout.py taille "$SORTIE/capture-virtio.ppm" 1280 720
 exige "bureau virtio = bureau BGA (pixels)" python3 tools/ci/analyse_scanout.py compare "$SORTIE/capture-virtio.ppm" "$SORTIE/capture-bga.ppm"
 exige "bureau virtio vivant : l'horloge avance a l'ecran (presentations partielles)" python3 tools/ci/analyse_scanout.py vivant "$SORTIE/capture-virtio.ppm" "$SORTIE/capture-virtio-2.ppm"
-MESURE=$(propre "$SORTIE/serie-virtio.log" | grep -a '\[GUI-VIRTIO-GPU\]' | tail -1 || true)
-echo "  mesure  ${MESURE:-aucune ligne [GUI-VIRTIO-GPU]}"
+exige "aucune attente non cedable DANS une tache (verrou tournant tenu par un appelant)" bash -c "! grep -aq 'VIRTIO_GPU_ATTENTE non_cedable_en_tache' '$SORTIE'/serie-*.log"
+# P10_TELEMETRIE_COMPLETE_V1 : la derniere ligne ENTIERE, jamais un fragment.
+MESURE=$(python3 tools/ci/ligne_complete.py "$SORTIE/serie-virtio.log" "$TELEMETRIE" --derniere \
+  | sed -E 's/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' || true)
+echo "  mesure  ${MESURE:-aucune ligne [GUI-VIRTIO-GPU] entiere}"
+# Sans ligne entiere, les compteurs ne sont PAS juges : un seul refus, qui dit
+# pourquoi -- pas quatre defauts GPU imputes a un fragment.
+exige "telemetrie [GUI-VIRTIO-GPU] entierement ecrite (sinon les compteurs ne sont pas juges)" test -n "$MESURE"
+if [ -z "$MESURE" ]; then
+  echo "  TELEMETRIE_INCOMPLETE derniere=$(propre "$SORTIE/serie-virtio.log" | grep -ao '\[GUI-VIRTIO-GPU\].*' | tail -1 | cut -c1-200)"
+else
 exige "presentations virtio : aucune en echec, au moins une reussie" bash -c "echo '$MESURE' | grep -qE 'presents_ok=[1-9][0-9]* presents_echec=0 .* actif=1'"
 # BOUCHAUD_VIRTIO_GPU_VERROU_DORMANT_V1 : le compositeur presente depuis sa
 # tache, sans verrou tournant tenu -- il prend le verrou dormant (jamais de
 # presentation sautee) et peut ceder pendant l'attente.
 exige "presentations virtio : aucune sautee faute de verrou" bash -c "echo '$MESURE' | grep -qE ' sautes=0 cedes=[0-9]+ non_cedables=[0-9]+'"
-exige "aucune attente non cedable DANS une tache (verrou tournant tenu par un appelant)" bash -c "! grep -aq 'VIRTIO_GPU_ATTENTE non_cedable_en_tache' '$SORTIE'/serie-*.log"
 if [ "$TAMPON" = direct ]; then
   exige "composition directe : le bureau virtio compose dans la memoire du scanout, zero octet copie, aucun acces pendant un transfert" \
     bash -c "echo '$MESURE' | grep -qE ' tampon=direct octets_copies=0 octets_directs=[1-9][0-9]* acces_en_transfert=0 '"
@@ -156,6 +170,7 @@ if [ "$TRAME" = on ]; then
 else
   exige "deux commandes par region (SCANOUT_TRAME=off) : aucune trame soumise d'un bloc" \
     bash -c "echo '$MESURE' | grep -qE ' trame=off trames=0 regions_differees=0'"
+fi
 fi
 exige "ni BGA ni virtio : present() inactif, dit" grep -aq 'present() inactif (scanout=aucun)' "$SORTIE/serie-aucun.log"
 exige "aucune panique, aucun abandon du scanout" bash -c "! grep -aqE 'KERNEL PANIC|panicked at|VIRTIO_GPU_SCANOUT_ABANDON|VIRTIO_GPU_ECHEC' '$SORTIE'/serie-*.log"
