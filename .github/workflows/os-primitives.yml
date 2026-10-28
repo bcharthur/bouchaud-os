@@ -301,18 +301,22 @@ jobs:
           r=0
           for accel in 0 1; do for smp in 2 4; do
             nom=$([ $accel = 1 ] && echo kvm || echo tcg)-smp$smp
-            BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3000 || r=1
+            # Un essai NON_QUALIFIANT est remesure (3 essais au plus), jamais
+            # compte ; un ECHEC n'est jamais rejoue (BANC_TENTATIVES).
+            BANC_TENTATIVES=3 BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3000 || r=1
             cp reveil-coeur-muet.log "serie-reveil-coeur-muet-$nom.log"
+            for e in reveil-coeur-muet-t*.log; do [ -f "$e" ] && mv "$e" "serie-reveil-coeur-muet-$nom-${e#reveil-coeur-muet-}"; done
           done; done
           T=temoin-reveil-historique/boot-temoin.bin
           if [ ! -f "$T" ]; then echo "IMAGE_TEMOIN_ABSENTE" >&2; exit 1; fi
           for accel in 0 1; do
             nom=$([ $accel = 1 ] && echo kvm || echo tcg)-smp4
             set +e
-            BO_QEMU_KVM=$accel BO_SMP=4 tools/ci/run_reveil_coeur_muet.sh "$T" 3000
+            BANC_TENTATIVES=3 BO_QEMU_KVM=$accel BO_SMP=4 tools/ci/run_reveil_coeur_muet.sh "$T" 3000
             code=$?
             set -e
             cp reveil-coeur-muet.log "temoin-reveil-historique/serie-reveil-coeur-muet-$nom.log"
+            for e in reveil-coeur-muet-t*.log; do [ -f "$e" ] && mv "$e" "temoin-reveil-historique/serie-reveil-coeur-muet-$nom-${e#reveil-coeur-muet-}"; done
             if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL_$nom code=$code (ECHEC attendu : 1)" >&2; r=1; fi
           done
           exit $r

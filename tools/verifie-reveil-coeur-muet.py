@@ -134,7 +134,7 @@ def verifie(t: dict) -> list:
     for attendu in ('[ "$avant" = "$apres" ] || { echo "IMAGE_QUALIFIEE_MODIFIEE_PAR_LE_TEMOIN"',
                     f"if grep -aq BOUCHAUD_IMAGE_TEMOIN {OFF}; then",
                     "if [ \"$code\" != 1 ]; then echo \"TEMOIN_REVEIL_$nom",
-                    f"BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh {OFF} 3000 || r=1",
+                    f"BANC_TENTATIVES=3 BO_QEMU_KVM=$accel BO_SMP=$smp tools/ci/run_reveil_coeur_muet.sh {OFF} 3000 || r=1",
                     "name: os-primitives-temoin-reveil-historique"):
         if attendu not in osp:
             f.append(f"os-primitives : protocole temoin incomplet ({attendu[:50]})")
@@ -142,6 +142,13 @@ def verifie(t: dict) -> list:
     if len(fil) != 4 or any('run_serie_entrelacement.sh "$T"' not in l for l in fil):
         f.append("os-primitives : un banc « coeur du fil » ne tourne pas sur l'image temoin")
     banc = t["banc"]
+    # Remesure : seul un NON_QUALIFIANT (2) est rejoue, au plus trois fois ;
+    # epuisee, elle reste NON_QUALIFIANTE.
+    for attendu in ('case "$TENTATIVES" in 1|2|3) ;; *)',
+                    '    if [ "$code" != 2 ]; then exit "$code"; fi\n  done\n'
+                    '  echo "REVEIL_COEUR_MUET_NON_QUALIFIANT tentatives=$TENTATIVES (reproduction jamais atteinte)"\n  exit 2\n'):
+        if attendu not in banc:
+            f.append("banc de reveil : la remesure rejoue autre chose qu'un non-qualifiant, ou le rend vert")
     for attendu in ('echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 2',
                     'exige "aucune double election du dormeur"', 'exige "le fil epingle n\'a jamais tourne hors de son coeur"'):
         if attendu not in banc:
@@ -175,6 +182,11 @@ def negatifs(t: dict) -> tuple:
          'BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh "$T" || r=1\n          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg',
          f'BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh {OFF} || r=1\n          cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg'),
         ("temoin non qualifiant accepte", "osp", 'if [ "$code" != 1 ]; then', 'if [ "$code" = 0 ]; then'),
+        ("remesure d'un echec", "banc", '    if [ "$code" != 2 ]; then exit "$code"; fi', '    if [ "$code" = 0 ]; then exit 0; fi'),
+        ("remesure epuisee verte", "banc",
+         '  echo "REVEIL_COEUR_MUET_NON_QUALIFIANT tentatives=$TENTATIVES (reproduction jamais atteinte)"\n  exit 2',
+         '  echo "REVEIL_COEUR_MUET_NON_QUALIFIANT tentatives=$TENTATIVES (reproduction jamais atteinte)"\n  exit 0'),
+        ("remesure sans borne", "banc", 'case "$TENTATIVES" in 1|2|3) ;; *)', 'case "$TENTATIVES" in *) ;; 0)'),
         ("non-qualifiant vert", "banc", 'echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 2',
          'echo "REVEIL_COEUR_MUET_NON_QUALIFIANT raisons=${nq# }"\n  exit 0'),
         ("assertion du defaut retablie", "test",

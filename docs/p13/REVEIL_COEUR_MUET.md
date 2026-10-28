@@ -201,3 +201,36 @@ bloquees par essai (la fenetre est franchie, sans perte).
   `verifie-console-asynchrone.py` lit les gardes du relogement la ou il vit.
 - `p13-cible-kvm.yml` : banc du reveil sur la livree 10 x SMP2 et 5 x SMP4,
   temoin toujours rouge.
+
+### A/B KVM entrelace (run 40590879833, meme runner)
+
+A = 4dcc3416 (sans correctif), B = 3276302f (les deux correctifs ;
+instrumentation de banc identique). Criteres inchanges ; un non-qualifiant ne
+compte ni comme succes ni comme echec.
+
+| Bras | SMP2 OK / ECHEC / non qualifiants | SMP4 |
+|---|---|---|
+| A | 13 / **2** / 5 | 10/10 |
+| B | **18 / 0** / 2 | 10/10 |
+
+Les deux non-qualifiants de B (essais 7 et 16), et les cinq de A : le
+masqueur est tombe sur le coeur UN ; l'autre coeur est alors le BSP, qui
+execute le shell de l'autorun hors ordonnanceur et n'est donc jamais un coeur
+electeur au repos (`autres_coeurs_au_repos=0`) -- la condition de reproduction
+du banc n'est pas atteinte, `REVEIL_COEUR_MUET_NON_QUALIFIANT
+raisons=aucun-autre-coeur-au-repos` (code 2). Dans ces deux essais de B, sans
+qu'ils comptent : aucune panique, 0 double election, 0 incoherence `on_cpu`,
+fil epingle jamais deplace, 0 perte, ecart max 50 et 49 ms.
+
+### Remesure des non-qualifiants (BANC_TENTATIVES)
+
+Run p13-cible-kvm 40595084969 (487d1b45) : 14 essais qualifiants OK sur 14,
+un non-qualifiant (SMP2, meme cause) -- le pas exigeait le code 0 de chaque
+repetition, donc rouge. Ce cas tombe 10 a 25 % des demarrages SMP2 : exiger
+dix repetitions sans un seul non-qualifiant rendrait le pas rouge sans
+defaut. Le protocole existant de `run_ordonnanceur_attribution.sh` est
+applique tel quel (`BANC_TENTATIVES=3`) : un NON_QUALIFIANT est remesure, au
+plus trois essais, jamais compte ; un ECHEC n'est jamais rejoue ; trois
+non-qualifiants de suite restent NON_QUALIFIANT (rouge). Chaque essai est
+archive. Utilise par p13-cible-kvm et os-primitives (production et temoin) ;
+`verifie-reveil-coeur-muet.py` le verrouille (19 mutations).

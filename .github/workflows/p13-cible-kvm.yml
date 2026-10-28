@@ -215,10 +215,11 @@ jobs:
           r=0
           for smp in 2 4; do
             set +e
-            BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-temoin.bin 3000
+            BANC_TENTATIVES=3 BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-temoin.bin 3000
             code=$?
             set -e
             cp reveil-coeur-muet.log temoin-reveil-kvm-smp$smp.log
+            for e in reveil-coeur-muet-t*.log; do [ -f "$e" ] && mv "$e" "temoin-reveil-kvm-smp$smp-${e#reveil-coeur-muet-}"; done
             # ECHEC (1) exige : OK (0) ne prouverait plus rien, NON_QUALIFIANT
             # (2) dit que la reproduction n'a pas ete atteinte.
             if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL smp=$smp code=$code (ECHEC attendu : 1)" >&2; r=1; fi
@@ -232,8 +233,11 @@ jobs:
         run: |
           r=0
           for smp in 2 4; do n=10; [ "$smp" = 4 ] && n=5; for i in $(seq 1 "$n"); do
-            BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-livree.bin 3000 || r=1
+            # NON_QUALIFIANT remesure (3 essais au plus), jamais compte ; un
+            # ECHEC n'est jamais rejoue (BANC_TENTATIVES, run 40595084969).
+            BANC_TENTATIVES=3 BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-livree.bin 3000 || r=1
             cp reveil-coeur-muet.log production-reveil-kvm-smp$smp-$i.log
+            for e in reveil-coeur-muet-t*.log; do [ -f "$e" ] && mv "$e" "production-reveil-kvm-smp$smp-$i-${e#reveil-coeur-muet-}"; done
           done; done
           exit $r
       - uses: actions/upload-artifact@v4

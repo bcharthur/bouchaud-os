@@ -17,10 +17,33 @@
 # Code 0 : OK ; 1 : ECHEC. Le banc n'a aucun seuil P13 : il oppose 0 tour a
 # des centaines.
 # BO_SMP (2 par defaut), BO_QEMU_KVM=1 : sous KVM.
+#
+# BANC_TENTATIVES=N (1 par defaut, 3 au plus) : protocole de remesure de
+# run_ordonnanceur_attribution.sh. Un essai NON_QUALIFIANT (code 2 : la
+# reproduction n'a pas ete atteinte -- en SMP2, masqueur sur le coeur un, le
+# seul autre coeur est le BSP hors ordonnanceur) est REMESURE, jamais compte ;
+# un ECHEC (code 1) ou un OK (code 0) arrete la serie et en est le verdict.
+# N essais non qualifiants de suite : NON_QUALIFIANT (code 2). Chaque essai
+# est garde (reveil-coeur-muet-tN.log).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_reveil_coeur_muet.sh BOOTIMAGE [MASQUE_MS]}
 MASQUE=${2:-3000}
+TENTATIVES=${BANC_TENTATIVES:-1}
+case "$TENTATIVES" in 1|2|3) ;; *) echo "BANC_TENTATIVES=$TENTATIVES hors de 1..3" >&2; exit 1;; esac
+if [ "$TENTATIVES" -gt 1 ]; then
+  for t in $(seq 1 "$TENTATIVES"); do
+    set +e
+    BANC_TENTATIVES=1 "$PWD/tools/ci/run_reveil_coeur_muet.sh" "$BOOT" "$MASQUE"
+    code=$?
+    set -e
+    cp reveil-coeur-muet.log "reveil-coeur-muet-t$t.log" 2>/dev/null || true
+    echo "REVEIL_COEUR_MUET_TENTATIVE t=$t/$TENTATIVES code=$code"
+    if [ "$code" != 2 ]; then exit "$code"; fi
+  done
+  echo "REVEIL_COEUR_MUET_NON_QUALIFIANT tentatives=$TENTATIVES (reproduction jamais atteinte)"
+  exit 2
+fi
 SMP=${BO_SMP:-2}
 ACCEL="-cpu max"
 if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
