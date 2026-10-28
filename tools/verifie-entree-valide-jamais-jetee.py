@@ -33,6 +33,7 @@ F = {
     "diag": RACINE / "src/kernel/process/thread/diagnostic_stall.rs",
     "cargo": RACINE / "Cargo.toml",
     "banc": RACINE / "tools/ci/run_rejet_election.sh",
+    "main": RACINE / "src/main.rs",
 }
 CONDITION = "    if tache.state != TaskState::Ready || tache.on_cpu >= 0 || tache.switching_out.charge() {\n        return;\n    }"
 ABSENTE = "    if file.file_contient(mot) == Some(true) {\n        return;\n    }"
@@ -49,6 +50,8 @@ NEUTRE = ("#[cfg(not(feature = \"banc-rejet-election\"))]\n#[inline(always)]\n"
           "fn banc_rejette(_tache: &Task) -> bool {\n    false\n}")
 TEMOIN = "exige \"temoin : une tache prete perdue est signalee ([SCHED-ORPHELINE])\" grep -aq '\\[SCHED-ORPHELINE\\] total=' \"$LOG\""
 CORRIGE = "exige \"chaque rejet injecte remis (remises ${REMISES:-?} >= injectes ${INJECTES:-?})\" test \"${REMISES:-0}\" -ge \"${INJECTES:-1}\""
+BANNIERE = (OPTION + "\n    crate::serial_println!(\"BOUCHAUD_IMAGE_TEMOIN feature=banc-rejet-election "
+            "livrable=non qualifiable=non\");")
 SONDE = "exige \"la sonde a fini, tous ses ecrivains a zero\""
 
 
@@ -99,6 +102,8 @@ def verifie(t: dict) -> list:
         fautes.append("Cargo.toml : l'option banc-rejet-election ne doit exister que hors de default.")
     if TEMOIN not in t["banc"] or CORRIGE not in t["banc"] or SONDE not in t["banc"]:
         fautes.append("run_rejet_election.sh : l'exigence du temoin ou du bras corrige a change.")
+    if BANNIERE not in t["main"] or "grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-rejet-election'" not in t["banc"]:
+        fautes.append("banc : l'image de banc ne se declare plus non livrable, ou le banc ne l'exige plus.")
     return fautes
 
 
@@ -122,6 +127,7 @@ def negatifs(t: dict) -> tuple:
         ("temoin assoupli", "banc", TEMOIN, "exige \"temoin\" true"),
         ("remises non exigees", "banc", CORRIGE, "exige \"remises\" true"),
         ("sonde non exigee", "banc", SONDE, "exige \"sonde\""),
+        ("banniere hors option", "main", BANNIERE, BANNIERE.split("\n", 1)[1]),
     ]
     echecs = []
     for nom, cle, avant, apres in mutations:

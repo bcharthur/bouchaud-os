@@ -40,6 +40,10 @@ cp tools/userland/out-rejet-election/serie-entrelacement-probe "$SORTIE/scenario
 } > "$SORTIE/scenario/autorun"
 (cd tools/userland && IMAGE="$SORTIE/disque.img" ./mkdisk.sh "$SORTIE/scenario" >/dev/null)
 cp "$BOOT" "$SORTIE/boot.bin"
+# L'image doit porter l'option : sans elle, `ordo-rejet-injecte` n'existe pas
+# et le banc ne mesurerait rien.
+grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-rejet-election' "$SORTIE/boot.bin" \
+  || { echo "REJET_ELECTION : image sans l'option banc-rejet-election" >&2; exit 2; }
 LOG="$SORTIE/serie.log"
 : > "$LOG"
 echo "REJET_ELECTION smp=$SMP accel=$ACCEL bras=$BRAS rejets=$N"

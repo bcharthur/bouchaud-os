@@ -109,6 +109,8 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-reveil-historique livrable=non qualifiable=non");
     #[cfg(feature = "banc-console-sans-contre-pression")]
     crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-console-sans-contre-pression livrable=non qualifiable=non");
+    #[cfg(feature = "banc-rejet-election")]
+    crate::serial_println!("BOUCHAUD_IMAGE_TEMOIN feature=banc-rejet-election livrable=non qualifiable=non");
     kernel::services::declare_arbre();
     kernel::services::phase("sys");
     if boot_info.firmware == boot::FirmwareKind::Uefi {
