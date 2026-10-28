@@ -90,9 +90,24 @@ fn local_cpu() -> usize {
     usermode::cpu_index().min(MAX_CPUS - 1)
 }
 
+// BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1 -- C14 (registre de convergence).
+//
+// `CURRENT[local_cpu()]` se lit en DEUX temps : le coeur, puis sa case. Avec
+// les interruptions ouvertes, une preemption entre les deux -- permise a un
+// fil noyau autour du `hlt` (`accorde_preemption_noyau`) -- le migre, et il lit
+// la case de son ANCIEN coeur : la tache qui y tourne maintenant, pas lui.
+// `rearme_compta_apres_idle` et `suspend_compta_pour_idle`, qui lisent l'indice
+// interruptions ouvertes, ouvraient ou fermaient alors la comptabilite d'une
+// AUTRE tache, depuis un autre coeur : paniques `compta: ecrivain concurrent`
+// (la victime) et `compta: ouverture par un autre coeur` (le fautif), TCG SMP2,
+// campagne 2/3 40664393044 et 2 demarrages sur 576 (40675459416).
+// Interruptions masquees, le coeur et sa case sont lus sans migration possible ;
+// l'indice rendu est alors celui de la tache qui s'execute, et il le reste
+// apres une migration (c'est elle qui migre). Meme forme que
+// `contexte_execution`.
 #[inline]
 fn current_index_raw() -> usize {
-    CURRENT[local_cpu()].load(Ordering::Acquire)
+    interrupts::without_interrupts(|| CURRENT[local_cpu()].load(Ordering::Acquire))
 }
 
 /// Contexte uniquement atomique, lu au moment exact ou un CPU

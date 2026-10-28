@@ -11,7 +11,11 @@
 # cession), pendant que compta-stress-probe fait dormir, ceder et migrer ses
 # fils. Deux demarrages, meme fenetre :
 #   * `ancien`    -- l'ordre d'avant le correctif : il DOIT chevaucher ;
-#   * `correctif` -- le code livre : 0 chevauchement exige.
+#   * `correctif` -- le code livre : 0 chevauchement exige ;
+#   * `dechiree`  -- BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1 (C14) : l'indice de la
+#     tache courante lu en deux temps, la fenetre entre le coeur et sa case.
+#     Il DOIT montrer le defaut : une panique `compta:` (ecrivain concurrent,
+#     ouverture ou fermeture par un autre coeur) ou un chevauchement.
 # Une fenetre qui n'a jamais cede ne prouve rien : NON_QUALIFIANT (code 2).
 #
 # BO_SMP : coeurs (2 par defaut). BO_QEMU_KVM=1 : sous KVM.
@@ -61,8 +65,16 @@ bras() { # ordre -> journal compta-injection-ORDRE.log
 echo "COMPTA_INJECTION smp=${SMP} accel=${ACCEL} fenetre_us=${FENETRE} duree_s=${DUREE}"
 bras ancien
 bras correctif
+# Le temoin depend d'une migration PENDANT la fenetre : jusqu'a trois
+# demarrages, arret au premier qui montre le defaut (local : 5 sur 6 du premier
+# coup). Trois temoins muets : ECHEC.
+for t in 1 2 3; do
+  bras dechiree
+  echo "COMPTA_INJECTION_DECHIREE_TENTATIVE t=$t/3 $(grep -aoE -m1 'compta: [a-z ]+' compta-injection-dechiree.log || true)"
+  grep -aqE 'compta: ' compta-injection-dechiree.log && break
+done
 
-python3 - compta-injection-ancien.log compta-injection-correctif.log <<'EOF'
+python3 - compta-injection-ancien.log compta-injection-correctif.log compta-injection-dechiree.log <<'EOF'
 import re, sys
 def etat(chemin):
     t = re.sub(r"\x1b\[[0-9;]*m", "", open(chemin, encoding="utf-8", errors="replace").read())
@@ -98,5 +110,20 @@ if ap[5] != "OK":
 if fautes:
     print("COMPTA_INJECTION_ECHEC " + " ; ".join(fautes))
     sys.exit(1)
-print(f"COMPTA_INJECTION_OK ancien={av[2]} chevauchement(s) (sonde {av[5]}) correctif=0 cessions={ap[1]} rearmes_evites={ap[4]} sonde=OK")
+# C14 : le temoin de la lecture dechiree. Une panique `compta:` EST le defaut.
+td = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[3], encoding="utf-8", errors="replace").read())
+pd = re.search(r"compta: [a-z ]+", td)
+ed = re.findall(r"COMPTA_INJECTION_ETAT fenetres=(\d+) cessions=(\d+) chevauchements=(\d+)", td)
+if pd:
+    temoin = f"panique « {pd.group(0).strip()} »"
+elif ed and int(ed[-1][2]) > 0:
+    temoin = f"chevauchements={ed[-1][2]}"
+elif ed and int(ed[-1][1]) == 0:
+    print("COMPTA_INJECTION_NON_QUALIFIANT dechiree : la fenetre n'a jamais cede")
+    sys.exit(2)
+else:
+    print("COMPTA_INJECTION_ECHEC dechiree : la lecture en deux temps n'a pas montre le defaut (temoin muet)")
+    sys.exit(1)
+print(f"  dechiree  : {temoin}")
+print(f"COMPTA_INJECTION_OK dechiree={temoin} ancien={av[2]} chevauchement(s) (sonde {av[5]}) correctif=0 cessions={ap[1]} rearmes_evites={ap[4]} sonde=OK")
 EOF

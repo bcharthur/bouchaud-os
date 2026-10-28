@@ -431,6 +431,9 @@ fn suspend_compta_pour_idle() -> bool {
 // `regle_injection_compta` les pose.
 static INJECTION_FENETRE_NS: AtomicU64 = AtomicU64::new(0);
 static INJECTION_ANCIEN: AtomicBool = AtomicBool::new(false);
+/// BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1 -- reproduction negative de C14 : le
+/// rearmement lit l'indice en deux temps, la fenetre ENTRE le coeur et sa case.
+static INJECTION_DECHIREE: AtomicBool = AtomicBool::new(false);
 static INJECTION_FENETRES: AtomicU64 = AtomicU64::new(0);
 static INJECTION_CESSIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -438,6 +441,12 @@ static INJECTION_CESSIONS: AtomicU64 = AtomicU64::new(0);
 pub fn regle_injection_compta(fenetre_ns: u64, ancien: bool) {
     INJECTION_ANCIEN.store(ancien, Ordering::Relaxed);
     INJECTION_FENETRE_NS.store(fenetre_ns, Ordering::Relaxed);
+}
+
+/// `compta-injection US dechiree` : l'indice lu en deux temps (C14). Pose
+/// avant `regle_injection_compta`, seul reglage de la fenetre.
+pub fn regle_injection_compta_dechiree(dechiree: bool) {
+    INJECTION_DECHIREE.store(dechiree, Ordering::Relaxed);
 }
 
 /// `(fenetres injectees, cessions effectives dans la fenetre)`.
@@ -486,6 +495,23 @@ fn rearme_ancien_pour_banc() {
     });
 }
 
+/// La lecture d'avant BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1, pour la
+/// reproduction negative seulement : le coeur, la fenetre (qui cede), puis la
+/// case de ce coeur -- peut-etre plus le sien.
+fn rearme_dechire_pour_banc() {
+    let cpu = local_cpu();
+    fenetre_injectee();
+    let index = CURRENT[cpu].load(Ordering::Acquire);
+    if index == NO_TASK {
+        return;
+    }
+    let table = tasks();
+    let Some(task) = table.get(index) else {
+        return;
+    };
+    arme_tranche_comptable(task, ARMEMENT_APRES_IDLE);
+}
+
 /// Rearme la comptabilite de la tache courante apres un `hlt`.
 ///
 /// Le cote du mur -- noyau ou utilisateur -- est celui que le repli avait
@@ -493,6 +519,10 @@ fn rearme_ancien_pour_banc() {
 fn rearme_compta_apres_idle() {
     if INJECTION_ANCIEN.load(Ordering::Relaxed) {
         rearme_ancien_pour_banc();
+        return;
+    }
+    if INJECTION_DECHIREE.load(Ordering::Relaxed) {
+        rearme_dechire_pour_banc();
         return;
     }
     // BOUCHAUD_COMPTA_INJECTION_V1 : la meme fenetre, avant la section --

@@ -1404,8 +1404,11 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             if argc >= 2 && argv[1] != "etat" {
                 let us = argv[1].parse::<u64>().unwrap_or(0);
                 let ancien = argc >= 3 && argv[2] == "ancien";
+                let dechiree = argc >= 3 && argv[2] == "dechiree";
+                crate::kernel::task::regle_injection_compta_dechiree(dechiree);
                 crate::kernel::task::regle_injection_compta(us.saturating_mul(1000), ancien);
-                crate::serial_println!("COMPTA_INJECTION fenetre_us={} ordre={}", us, if ancien { "ancien" } else { "correctif" });
+                crate::serial_println!("COMPTA_INJECTION fenetre_us={} ordre={}", us,
+                    if ancien { "ancien" } else if dechiree { "dechiree" } else { "correctif" });
             }
             let (fenetres, cessions) = crate::kernel::task::compteurs_injection_compta();
             let inv = crate::kernel::task::invariants_compta();
