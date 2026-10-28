@@ -1841,6 +1841,23 @@ pub fn coeur_du_fil_console() -> Option<usize> {
     if etat == 9 { None } else { Some(file as usize) }
 }
 
+/// P13_TEMOIN_CONSOLE_PRECONDITION_V1 -- banc : le fil `console` ATTEND-il
+/// dans la file de `coeur` -- pret, hors d'execution --, avec des lignes dans
+/// l'anneau ? C'est la precondition du cas 39667691144 : un fil qui a du
+/// travail et qu'un coeur tenu empeche de le faire. `coeur_du_fil_console`
+/// ne la dit pas : la file d'un fil endormi, anneau vide, reste renseignee.
+/// Rend aussi `(etat, on_cpu, file, occupation)` pour le journal du banc.
+pub fn fil_console_attend_avec_travail(coeur: usize) -> (bool, u8, i8, u8, usize) {
+    let index = CONSOLE_FIL_TACHE.load(Ordering::Relaxed);
+    if index == usize::MAX {
+        return (false, 9, -1, 0, 0);
+    }
+    let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(index);
+    let occupation = CONSOLE.occupation();
+    // `etat == 0` : pret (`TaskState::Ready`) ; `on_cpu < 0` : pas en cours.
+    (etat == 0 && on_cpu < 0 && file as usize == coeur && occupation > 0, etat, on_cpu, file, occupation)
+}
+
 /// Banc de la vraie panne : dans `apres_ms`, le fil cesse de progresser
 /// `duree_ms`.
 pub fn banc_gele_fil_console(apres_ms: u64, duree_ms: u64) {

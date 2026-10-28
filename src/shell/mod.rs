@@ -733,6 +733,10 @@ static VERROU_SUSPENDU_ATTENTE_MS: core::sync::atomic::AtomicU64 = core::sync::a
 static VERROU_SUSPENDU_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static VERROU_SUSPENDU_CIBLE_FIL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static VERROU_SUSPENDU_FAIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// P13_TEMOIN_CONSOLE_PRECONDITION_V1 : l'attente de la precondition, bornee.
+/// Sous le flot du banc, le fil revient dans la file en quelques
+/// microsecondes ; deux secondes sans lui, c'est qu'il n'y reviendra pas.
+const VERROU_PRECONDITION_BORNE_NS: u64 = 2_000_000_000;
 
 fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
@@ -763,16 +767,38 @@ fn fil_verrou_suspendu() -> ! {
     let attente = VERROU_SUSPENDU_ATTENTE_MS.load(Ordering::Relaxed);
     let duree = VERROU_SUSPENDU_DUREE_MS.load(Ordering::Relaxed);
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
+    let mut precondition_us = 0u64;
     if VERROU_SUSPENDU_CIBLE_FIL.load(Ordering::Relaxed) {
         // Epingle (`spawn_noyau_epingle`) : le coeur lu ici est celui ou le
         // verrou sera pris. Le fil `console` y est-il encore en file ?
+        //
+        // P13_TEMOIN_CONSOLE_PRECONDITION_V1 : « en file » ne suffisait pas.
+        // La file d'un fil ENDORMI, anneau vide, reste renseignee : le verrou
+        // etait alors pris sur un anneau vide, que les ecrivains ne pouvaient
+        // plus remplir (ils renoncent et different), et le chien de garde --
+        // qui ne surveille qu'un anneau non vide -- n'avait rien a voir.
+        // Campagne 3/3 40672022728 (9311ad3c) et 40701963055 (70a2a313), bras
+        // temoin TCG SMP4 : `soupcons=0`, `verrou_abandons=1287`, aucun repli.
+        // Le fil de banc tient donc son coeur -- fil noyau, que le quantum ne
+        // coupe pas -- jusqu'a ce que le fil `console` y attende, PRET, avec
+        // des lignes dans l'anneau ; borne, et l'attente est publiee. Passe la
+        // borne, rien n'est suspendu : le banc echoue (HORS_CIBLE), il ne
+        // conclut jamais sans sa precondition.
         let ici = crate::arch::x86_64::smp::cpu_index();
-        let cible = crate::drivers::serial::coeur_du_fil_console();
-        let a_moi = cible == Some(ici) && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
+        let debut = crate::kernel::timer::monotonic_ns();
+        let borne = debut.saturating_add(VERROU_PRECONDITION_BORNE_NS);
+        let mut vu = crate::drivers::serial::fil_console_attend_avec_travail(ici);
+        while !vu.0 && crate::kernel::timer::monotonic_ns() < borne {
+            core::hint::spin_loop();
+            vu = crate::drivers::serial::fil_console_attend_avec_travail(ici);
+        }
+        precondition_us = crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1000;
+        let a_moi = vu.0 && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
         if !a_moi {
+            let (_, etat, on_cpu, file, anneau) = vu;
             crate::serial_println!(
-                "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={}",
-                ici, cible.map_or(-1, |c| c as i64)
+                "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={} etat_fil={} on_cpu={} anneau={} attente_us={}",
+                ici, file, etat, on_cpu, anneau, precondition_us
             );
             VERROU_RESULTAT.store(2, Ordering::Release);
             loop {
@@ -783,9 +809,10 @@ fn fil_verrou_suspendu() -> ! {
     let ici = crate::arch::x86_64::smp::cpu_index();
     let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);
     crate::serial_println!(
-        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={}",
+        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={} precondition_us={}",
         pris as u8, duree, ici,
-        crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64)
+        crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64),
+        precondition_us
     );
     VERROU_RESULTAT.store(if pris { 1 } else { 2 }, Ordering::Release);
     loop {
