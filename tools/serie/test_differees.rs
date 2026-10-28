@@ -322,10 +322,15 @@ fn console_plusieurs_ecrivains_un_lecteur_lignes_entieres_et_ordre_par_ecrivain(
     let anneau: Arc<Anneau<4096>> = Arc::new(Anneau::neuf());
     let verrou = Arc::new(AtomicUsize::new(0));
     let fini = Arc::new(AtomicBool::new(false));
+    // Le lecteur n'attaque l'anneau qu'une fois celui-ci trouve plein par un
+    // ecrivain : la contre-pression est exercee a coup sur, quel que soit
+    // l'ordonnancement des fils de l'hote (un lecteur trop rapide la faisait
+    // parfois manquer -- run hote du 28/10, `pleines == 0`).
+    let plein_vu = Arc::new(AtomicBool::new(false));
     let prefixe = b"\x1b[90m[12:00:00]\x1b[0m ";
     let mut fils = Vec::new();
     for e in 0..ECRIVAINS {
-        let (anneau, verrou) = (anneau.clone(), verrou.clone());
+        let (anneau, verrou, plein_vu) = (anneau.clone(), verrou.clone(), plein_vu.clone());
         fils.push(std::thread::spawn(move || {
             let mut pleines = 0u64;
             for n in 0..LIGNES {
@@ -344,6 +349,7 @@ fn console_plusieurs_ecrivains_un_lecteur_lignes_entieres_et_ordre_par_ecrivain(
                         break;
                     }
                     pleines += 1;
+                    plein_vu.store(true, Ordering::Release);
                     std::thread::yield_now();
                 }
             }
@@ -351,8 +357,11 @@ fn console_plusieurs_ecrivains_un_lecteur_lignes_entieres_et_ordre_par_ecrivain(
         }));
     }
     let lecteur = {
-        let (anneau, fini) = (anneau.clone(), fini.clone());
+        let (anneau, fini, plein_vu) = (anneau.clone(), fini.clone(), plein_vu.clone());
         std::thread::spawn(move || {
+            while !plein_vu.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
             let mut vues = vec![0usize; ECRIVAINS];
             let mut total = 0usize;
             loop {
