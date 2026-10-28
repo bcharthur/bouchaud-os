@@ -153,3 +153,13 @@ dans le run et le lie à son HEAD.
   `test_verdict_convergence_paliers.py` (11 tests, dont chaque épreuve requise
   × {failure, cancelled, skipped, absente} × chaque palier, et la reproduction
   du run 40554668634).
+
+## Qualification stricte (P13_QUALIFICATION_STRICTE_V1, 28/10)
+
+Une qualification (`workflow_dispatch`, palier `qualification`) appelle
+`os-primitives` avec `p13_strict: true`, comme la branche d'audit. Avant, un
+dispatch de qualification sur un candidat jouait les sondes P13 NON strictes :
+le critere de sortie de la decision du 24/10 (« les 15 jobs de convergence et
+`P13_STRICT_OK` SMP1/2/4 a chaque campagne ») n'etait satisfaisable sur aucune
+branche candidate. `tools/verifie-ci-paliers.py` le verrouille (mutation
+« qualification non stricte »).

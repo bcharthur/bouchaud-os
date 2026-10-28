@@ -122,6 +122,10 @@ def verifie(t: dict) -> list:
     prim = entete(j.get("primitives", ""))
     if "uses: ./.github/workflows/os-primitives.yml" not in prim or f"&& ({Q})" not in prim:
         f.append("primitives P13 appelees hors qualification")
+    # P13_QUALIFICATION_STRICTE_V1 : en qualification, les sondes P13 sont
+    # strictes -- la meme condition Q que le palier, pas la seule branche d'audit.
+    if f"p13_strict: ${{{{ {Q} }}}}" not in j.get("primitives", ""):
+        f.append("primitives : une qualification n'exige pas P13_STRICT_OK (sondes strictes reservees a l'audit)")
     # 2
     prov = j.get("provenance", "")
     if "python3 tools/ci/ladybird_empreinte.py garde" not in prov or "python3 tools/ci/ladybird_provenance.py" not in prov \
@@ -234,6 +238,8 @@ def negatifs(t: dict) -> list:
         ("dispatch en developpement par defaut", "lb", "        default: qualification\n", "        default: developpement\n"),
         ("primitives toujours", "lb", f"needs.dedoublonne.outputs.reutilise != 'true' && ({Q}) }}}}\n    uses:",
          "needs.dedoublonne.outputs.reutilise != 'true' }}\n    uses:"),
+        ("qualification non stricte", "lb", f"p13_strict: ${{{{ {Q} }}}}",
+         "p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}"),
         ("garde d'empreinte retiree", "lb", garde_ligne, "        run: true\n"),
         ("build ignore la decision", "lb", "needs.provenance.outputs.mode != 'reutilise' }}", "true }}"),
         ("delai d'etape retire", "lb", "        timeout-minutes: 150\n        run: |", "        run: |"),

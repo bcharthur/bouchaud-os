@@ -210,7 +210,12 @@ jobs:
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') }}
     uses: ./.github/workflows/os-primitives.yml
     with:
-      p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
+      # P13_QUALIFICATION_STRICTE_V1 : une qualification est STRICTE, ou elle
+      # n'est pas une qualification. La decision du 24/10 exige les 15 jobs ET
+      # P13_STRICT_OK sous KVM a chaque campagne ; la sonde n'etait stricte que
+      # sur la branche d'audit, si bien qu'aucun candidat ne pouvait satisfaire
+      # le critere (dispatch qualification = sondes non strictes).
+      p13_strict: ${{ (github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
   provenance:
     # BOUCHAUD_LADYBIRD_PROVENANCE_V1 : construire, ou reutiliser l'artefact
