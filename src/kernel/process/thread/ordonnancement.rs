@@ -99,6 +99,95 @@ static PICK_JETEE_GENERATION: [AtomicU64; MAX_CPUS] =
 static PICK_JETEE_NON_ELIGIBLE: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(0) }; MAX_CPUS];
 
+// P13_ENTREE_VALIDE_JAMAIS_JETEE_V1 -- UNE TACHE PRETE N'EST JAMAIS PERDUE
+// PAR CELUI QUI CONSOMME SON ENTREE
+//
+// `pick_next` (election locale) et le vol consomment une entree de file, puis
+// la jugent. Une entree rejetee n'etait remise nulle part : si la tache etait
+// encore PRETE, non revendiquee, hors commutation, elle n'etait plus dans
+// aucune file et ne serait plus jamais elue. Banc console TCG SMP4 du 28/10
+// (temoin `banc-reveil-historique`, rafale sur le coeur du fil) : la sonde
+// des ecrivains, `[SCHED-ORPHELINE] tid=117 ... rq=3 en_file=Some(false)
+// jetees_non_eligibles=1` -- le seul rejet du coeur 3 de tout le demarrage --,
+// machine figee jusqu'a l'echeance du banc. La ligne de base en connaissait
+// deja (`CYCLE_DE_VIE_TACHE.md` §4, 2 rapports sur 15 demarrages).
+//
+// L'une des conditions d'eligibilite etait fausse un instant au moment du
+// rejet, vraie ensuite. Quelle que soit celle-la, celui qui a CONSOMME
+// l'entree en porte la responsabilite : si la tache est, apres coup, prete,
+// non revendiquee, hors commutation, et absente de la file de son coeur, il
+// l'y remet. Une remise en trop est sans danger -- l'election revérifie
+// l'eligibilite et revendique par compare-exchange ; une file deduplique --,
+// une remise manquee fige la machine. Chaque remise est comptee
+// (`[SCHED-RESUME] ... remises=`).
+static PICK_REMISES: AtomicU64 = AtomicU64::new(0);
+
+pub fn pick_remises() -> u64 {
+    PICK_REMISES.load(Ordering::Relaxed)
+}
+
+// BANC (option `banc-rejet-election`) : rejets injectes et temoin sans remise.
+#[cfg(feature = "banc-rejet-election")]
+static BANC_REJETS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "banc-rejet-election")]
+static BANC_REJETS_FAITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "banc-rejet-election")]
+static BANC_SANS_REMISE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "banc-rejet-election")]
+pub fn banc_regle_rejets(n: u64, sans_remise: bool) {
+    BANC_SANS_REMISE.store(sans_remise, Ordering::Release);
+    BANC_REJETS.store(n, Ordering::Release);
+}
+
+#[cfg(feature = "banc-rejet-election")]
+pub fn banc_rejets_faits() -> u64 {
+    BANC_REJETS_FAITS.load(Ordering::Relaxed)
+}
+
+/// Une entree ELIGIBLE de tache utilisateur, rejetee quand meme (banc).
+#[cfg(feature = "banc-rejet-election")]
+fn banc_rejette(tache: &Task) -> bool {
+    if tache.noyau {
+        return false;
+    }
+    let pris = BANC_REJETS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+        .is_ok();
+    if pris {
+        BANC_REJETS_FAITS.fetch_add(1, Ordering::Relaxed);
+    }
+    pris
+}
+
+#[cfg(not(feature = "banc-rejet-election"))]
+#[inline(always)]
+fn banc_rejette(_tache: &Task) -> bool {
+    false
+}
+
+fn remet_si_perdue(tache: &Task, mot: u64) {
+    #[cfg(feature = "banc-rejet-election")]
+    if BANC_SANS_REMISE.load(Ordering::Acquire) {
+        return;
+    }
+    if tache.state != TaskState::Ready || tache.on_cpu >= 0 || tache.switching_out.charge() {
+        return;
+    }
+    let rq = tache.runq_cpu.charge() as usize;
+    let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(rq) else { return };
+    let file = crate::arch::x86_64::cpu_local::local(id);
+    if file.file_contient(mot) == Some(true) {
+        return;
+    }
+    if file.enqueue_bande(mot, bande_de(tache)) {
+        PICK_REMISES.fetch_add(1, Ordering::Relaxed);
+        if rq != local_cpu() && cpu::is_idle(rq) {
+            smp::reschedule_cpu(rq);
+        }
+    }
+}
+
 pub fn pick_jetees(cpu: usize) -> (u64, u64) {
     if cpu >= MAX_CPUS {
         return (0, 0);
@@ -195,14 +284,16 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
             };
             if identite.emplacement() < len
                 && runnable_local(&tache, cpu)
+                && !banc_rejette(&tache)
                 && revendique_candidate(&tache, cpu)
             {
                 return Some(identite.emplacement());
             }
             // L'entree vient d'etre CONSOMMEE et n'est pas servie. La tache
-            // n'est plus dans aucune file : si elle etait encore eligible,
-            // elle vient d'etre perdue.
+            // n'est plus dans aucune file : si elle est encore eligible, elle
+            // y est remise (P13_ENTREE_VALIDE_JAMAIS_JETEE_V1).
             PICK_JETEE_NON_ELIGIBLE[cpu.min(MAX_CPUS - 1)].fetch_add(1, Ordering::Relaxed);
+            remet_si_perdue(&tache, mot);
         }
     }
 
@@ -289,9 +380,12 @@ fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
         }
     }
     if !revendique_candidate(&candidate, cpu) {
-        // La tache a ete revendiquee ou retiree pendant le vol. L'identite
-        // consommee ne doit pas etre remise dans la file du donneur.
+        // La tache a ete revendiquee ou retiree pendant le vol : l'identite
+        // consommee n'est PAS remise aveuglement chez le donneur. Mais si la
+        // tache est restee prete et libre, elle n'est plus dans aucune file :
+        // P13_ENTREE_VALIDE_JAMAIS_JETEE_V1, elle y est remise.
         STEAL_REJECT_COURSE[cpu].fetch_add(1, Ordering::Relaxed);
+        remet_si_perdue(&candidate, mot);
         return None;
     }
     candidate.runq_cpu.range(cpu as u8);

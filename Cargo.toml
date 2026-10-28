@@ -52,6 +52,14 @@ banc-console-sans-contre-pression = []
 # l'exclusion de tout fil noyau du vol. Reproduction negative de
 # `tools/ci/run_reveil_coeur_muet.sh` a image egale. Jamais dans `default`.
 banc-reveil-historique = []
+# BANC DE REJET A L'ELECTION (P13_ENTREE_VALIDE_JAMAIS_JETEE_V1).
+#
+# `ordo-rejet-injecte N [sans-remise]` : l'election locale rejette N entrees
+# pourtant eligibles de taches utilisateur -- la condition un instant fausse
+# du C19. `sans-remise` retablit la perte d'avant le correctif (temoin
+# negatif) ; sans lui, chaque entree rejetee doit etre remise. Jamais dans
+# `default` : voir `tools/ci/run_rejet_election.sh`.
+banc-rejet-election = []
 # BANC DE PANNE VIRTIO-GPU (BOUCHAUD_VIRTIO_GPU_BARRIERE_V1).
 #
 # Le premier `TRANSFER_TO_HOST_2D` du bureau est juge contre une barriere qui

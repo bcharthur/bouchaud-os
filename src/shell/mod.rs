@@ -1498,6 +1498,22 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             );
             0
         }
+        // P13_ENTREE_VALIDE_JAMAIS_JETEE_V1 (option `banc-rejet-election`) :
+        // `ordo-rejet-injecte N [sans-remise]`, puis `ordo-rejet-injecte etat`.
+        #[cfg(feature = "banc-rejet-election")]
+        "ordo-rejet-injecte" => {
+            if argc >= 2 && argv[1] != "etat" {
+                let n = argv[1].parse::<u64>().unwrap_or(0);
+                let sans_remise = argc >= 3 && argv[2] == "sans-remise";
+                crate::kernel::task::banc_regle_rejets(n, sans_remise);
+                crate::serial_println!("ORDO_REJET_INJECTE n={} remise={}", n, if sans_remise { "non" } else { "oui" });
+            }
+            crate::serial_println!(
+                "ORDO_REJET_ETAT injectes={} remises={}",
+                crate::kernel::task::banc_rejets_faits(), crate::kernel::task::pick_remises(),
+            );
+            0
+        }
         "version" => { c::version(); 0 }
         "uname" => { c::uname(); 0 }
         "sysinfo" => { c::sysinfo(); 0 }

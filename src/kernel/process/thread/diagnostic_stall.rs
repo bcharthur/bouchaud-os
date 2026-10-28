@@ -1036,8 +1036,8 @@ fn resume_ordonnancement() {
         }
     }
     crate::serial_println!(
-        "[SCHED-RESUME] coeurs={} au_repos={} en_file={} taches={} pretes={} bloquees={} sur_coeur={}",
-        coeurs, au_repos, en_file, vivantes, pretes, bloquees, sur_coeur,
+        "[SCHED-RESUME] coeurs={} au_repos={} en_file={} taches={} pretes={} bloquees={} sur_coeur={} remises={}",
+        coeurs, au_repos, en_file, vivantes, pretes, bloquees, sur_coeur, pick_remises(),
     );
 }
 
