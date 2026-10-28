@@ -1059,6 +1059,57 @@ fn rien_a_ceder_quand_personne_n_attend() {
     assert_eq!(cession(Classe::Normale, u64::MAX, 0, 0), Cession::RienEnAttente);
 }
 
+// ===========================================================================
+// P13_ACTIVATION_MINIMALE_V1 : la demande jugee quand elle est servie
+// ===========================================================================
+
+use reveil::activation_garde;
+
+#[test]
+fn une_tache_utilisateur_reprise_garde_son_coeur_face_a_des_normales() {
+    assert!(activation_garde(true, 20_000, 0, 1));
+    assert!(activation_garde(true, 0, 0, 3));
+}
+
+#[test]
+fn l_activation_minimale_ne_protege_pas_un_fil_noyau() {
+    assert!(!activation_garde(false, 0, 0, 1));
+}
+
+#[test]
+fn une_interactive_en_attente_coupe_l_activation_minimale() {
+    assert!(!activation_garde(true, 0, 1, 0));
+    assert!(!activation_garde(true, 0, 1, 2));
+}
+
+#[test]
+fn une_activation_qui_dure_redevient_preemptible() {
+    // Anti-famine : la normale en attente passe apres une milliseconde.
+    assert!(!activation_garde(true, RESIDENCE_MINIMALE_NS, 0, 1));
+    assert!(activation_garde(true, RESIDENCE_MINIMALE_NS - 1, 0, 1));
+}
+
+#[test]
+fn rien_a_garder_quand_personne_n_attend() {
+    assert!(!activation_garde(true, 0, 0, 0));
+}
+
+/// Le cas mesure (run 40694203600, KVM SMP1) : la sonde au repos reprend
+/// sur place ; `console`, normal, a ete publie 4 a 33 us plus tot avec une
+/// demande differee. En fin d'appel systeme, 20 us apres la reprise, la
+/// regle de cession seule fait ceder la sonde (premier vol) ; l'activation
+/// minimale la garde. Juge sur l'horloge de l'INSTALLATION -- 16 ms de
+/// sommeil compris --, la meme regle l'aurait laissee ceder : c'est
+/// pourquoi la residence vient de la reprise.
+#[test]
+fn la_sonde_reprise_ne_cede_plus_a_console() {
+    let (interactives, normales) = (0, 1);
+    assert_eq!(cession(Classe::Normale, 20_000, interactives, normales), Cession::Cede);
+    assert!(activation_garde(true, 20_000, interactives, normales));
+    let depuis_installation = 16_000_000 + 20_000;
+    assert!(!activation_garde(true, depuis_installation, interactives, normales));
+}
+
 /// Rejoue un coeur : une interactive periodique (reveil toutes les
 /// `periode_ns`, `travail_ns` de calcul avant d'ecrire son horodatage) et un
 /// calcul normal permanent, un quantum de 4 ms a phase fixe. Rend le pire

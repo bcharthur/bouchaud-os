@@ -212,9 +212,8 @@ pub fn handle(frame: &mut TrapFrame) {
 
     // Preemption differee : le timer a pu marquer un besoin de commutation
     // pendant l'appel, ou l'appel a pu reveiller une tache plus prioritaire.
-    if task::take_need_resched() {
-        task::yield_now();
-    }
+    // P13_ACTIVATION_MINIMALE_V1 : servie selon la regle de cession.
+    task::sert_demande_differee();
 
     // Dernier moment ou la trame ring 3 est modifiable : c'est ici que se
     // livrent les signaux en attente.

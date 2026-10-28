@@ -62,10 +62,12 @@
 /// fils sensibles qui se reveillent en meme temps se prendraient sinon le
 /// coeur a chaque publication, et passeraient leur budget en commutations.
 ///
-/// Un occupant NON sensible n'est pas protege par cette borne : il est
-/// protege par la sienne, celle de son quantum, et ceder une milliseconde a
-/// une tache qui en consomme cent soixante microsecondes ne lui coute rien de
-/// mesurable.
+/// Un occupant NON sensible n'est pas protege par cette borne a la
+/// publication : il l'est quand la demande est servie, si c'est une tache
+/// utilisateur et que seules des normales attendent (`activation_garde`,
+/// P13_ACTIVATION_MINIMALE_V1). Lui faire ceder « une milliseconde » a un fil
+/// noyau normal coute en fait ce que dure le segment de ce fil -- au moins
+/// `SEGMENT_MIN_NS` du point cooperatif.
 pub const RESIDENCE_MINIMALE_NS: u64 = 1_000_000;
 
 /// Budget d'activation d'une tache sensible a la latence.
@@ -593,6 +595,41 @@ pub fn cession(courante: Classe, consomme_ns: u64, attente_interactive: usize, a
         return Cession::Garde;
     }
     Cession::Cede
+}
+
+// P13_ACTIVATION_MINIMALE_V1 -- LA DEMANDE EST JUGEE QUAND ELLE EST SERVIE
+//
+// Un fil noyau normal (`console`) publie en demande differee faisait ceder la
+// sonde au repos a peine reveillee : elle perdait son coeur deux fois de suite,
+// ~1,1 ms chaque fois (le plancher `SEGMENT_MIN_NS` du point cooperatif), et
+// P1 tombait (campagne 3/3, 40672022728 : p99 SMP4 1 312 > 1 262,5 us).
+//
+// Le premier correctif (d8095136) retenait la demande A LA PUBLICATION, si
+// l'occupant d'alors etait une tache utilisateur elue depuis moins de
+// `RESIDENCE_MINIMALE_NS`. Mesure inefficace (40686065848), et l'instrument
+// dit pourquoi (40694203600, KVM SMP1, 40 pires au repos sur 40) : la regle
+// est retenue 6 602 fois, mais les 81 vols suivent tous une demande qu'elle a
+// laissee passer -- occupant noyau a la publication (5 593 fois), ou
+// residence >= 1 ms (8 675 fois). Une sonde qui dort sans que son coeur
+// commute RESTE INSTALLEE (BOUCHAUD_REVEIL_TACHE_INSTALLEE_V1) : sa
+// « residence » comptait son sommeil. Et la demande n'est pas servie a la
+// publication, mais plus tard, a la sonde qui vient de reprendre :
+//   * premier vol, 4 a 33 us apres la demande, en fin d'appel systeme
+//     (`take_need_resched` -> `yield_now`, sans aucune regle) ;
+//   * second vol, la MEME demande (age = duree du premier + ~10 us), au
+//     `safe_point` qui suit, ou une normale cede toujours.
+//
+// La decision appartient donc au moment ou la courante est sommee de ceder,
+// avec l'horloge de SON activation (election, ou reprise sur place apres un
+// sommeil) : une tache utilisateur qui a pris ou repris son coeur depuis moins
+// de `RESIDENCE_MINIMALE_NS` le garde tant que seules des normales attendent.
+// Une interactive en attente la coupe comme avant ; une activation qui
+// calcule redevient preemptible apres une milliseconde.
+
+/// La regle, pure. `utilisateur` : la courante est une tache utilisateur ;
+/// `residence_ns` : depuis son election ou sa reprise sur place.
+pub fn activation_garde(utilisateur: bool, residence_ns: u64, attente_interactive: usize, attente_normale: usize) -> bool {
+    utilisateur && attente_interactive == 0 && attente_normale > 0 && residence_ns < RESIDENCE_MINIMALE_NS
 }
 
 /// La politique de cession en vigueur : `true` (par defaut) applique la

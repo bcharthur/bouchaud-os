@@ -1245,8 +1245,9 @@ fn ordo_cession(argc: usize, argv: &[&str; 12]) -> i32 {
     }
     let (gardees, inversees) = crate::kernel::task::compteurs_cession();
     crate::serial_println!(
-        "ORDO_CESSION politique={} gardees={} inversees={}",
-        if cession_par_classe() { "classe" } else { "historique" }, gardees, inversees
+        "ORDO_CESSION politique={} gardees={} inversees={} activations={}",
+        if cession_par_classe() { "classe" } else { "historique" }, gardees, inversees,
+        crate::kernel::task::activations_gardees()
     );
     0
 }

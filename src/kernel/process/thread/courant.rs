@@ -34,6 +34,19 @@ fn set_current_profil(sensible: bool, interactive: bool, depuis_ns: u64) {
     CURRENT_DEPUIS_NS[cpu].store(depuis_ns, Ordering::Release);
 }
 
+/// P13_ACTIVATION_MINIMALE_V1 : la tache installee de CE coeur reprend sur
+/// place apres un sommeil sans commutation. Son activation commence ici :
+/// sans cela, la residence lue par la cession comptait son sommeil.
+///
+/// Le coeur et sa case sont lus interruptions masquees : une migration entre
+/// les deux ecrirait le profil de l'occupant d'un AUTRE coeur.
+#[inline]
+fn note_reprise_installee() {
+    ::x86_64::instructions::interrupts::without_interrupts(|| {
+        CURRENT_DEPUIS_NS[local_cpu()].store(crate::kernel::timer::monotonic_ns(), Ordering::Release);
+    });
+}
+
 /// Ce coeur n'execute plus de tache.
 #[inline]
 fn efface_current_profil() {

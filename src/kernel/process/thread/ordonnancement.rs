@@ -116,10 +116,14 @@ static CESSIONS_GARDEES: AtomicU64 = AtomicU64::new(0);
 /// Sous la politique historique : les fois ou la regle aurait garde le coeur
 /// et ou la courante l'a cede a un calcul normal (l'inversion mesuree).
 static CESSIONS_INVERSEES: AtomicU64 = AtomicU64::new(0);
+/// P13_ACTIVATION_MINIMALE_V1 : les fois ou seule l'activation minimale a
+/// garde le coeur (une tache utilisateur reprise depuis moins d'une
+/// milliseconde, face a des normales).
+static ACTIVATIONS_GARDEES: AtomicU64 = AtomicU64::new(0);
 
 /// La tache courante `cur` garde-t-elle le coeur `cpu` face a sa file ?
 fn courante_garde_le_coeur(cur: usize, cpu: usize) -> bool {
-    use crate::kernel::scheduler::reveil::{cession, cession_par_classe, Cession};
+    use crate::kernel::scheduler::reveil::{activation_garde, cession, cession_par_classe, Cession};
     let table = tasks();
     let Some(tache) = table.get(cur) else { return false; };
     let classe = match tache.priorite.charge() {
@@ -128,14 +132,24 @@ fn courante_garde_le_coeur(cur: usize, cpu: usize) -> bool {
     };
     // L'activation en cours : ce que les tranches closes depuis la derniere
     // publication ont deja range, plus la tranche ouverte.
+    let maintenant = crate::kernel::timer::monotonic_ns();
     let debut = tache.slice_start_ns.charge();
-    let tranche = if debut == 0 { 0 } else { crate::kernel::timer::monotonic_ns().saturating_sub(debut) };
+    let tranche = if debut == 0 { 0 } else { maintenant.saturating_sub(debut) };
     let consomme = tache.budget_reveil_ns.charge().saturating_add(tranche);
     let (interactives, normales) = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
         .map(|id| crate::arch::x86_64::cpu_local::local(id).attente_file())
         .unwrap_or((0, 0));
+    // P13_ACTIVATION_MINIMALE_V1 : l'horloge de l'activation en cours --
+    // `install`, ou la reprise sur place (`note_reprise_installee`).
+    let depuis = profil_occupant(cpu).2;
+    let residence = if depuis == 0 { u64::MAX } else { maintenant.saturating_sub(depuis) };
     if cession(classe, consomme, interactives, normales) != Cession::Garde {
-        return false;
+        if !activation_garde(!tache.noyau, residence, interactives, normales) {
+            return false;
+        }
+        if cession_par_classe() {
+            ACTIVATIONS_GARDEES.fetch_add(1, Ordering::Relaxed);
+        }
     }
     if cession_par_classe() {
         CESSIONS_GARDEES.fetch_add(1, Ordering::Relaxed);
@@ -155,6 +169,11 @@ pub fn courante_garde_le_coeur_local() -> bool {
 /// `(gardees, inversees)` depuis le demarrage.
 pub fn compteurs_cession() -> (u64, u64) {
     (CESSIONS_GARDEES.load(Ordering::Relaxed), CESSIONS_INVERSEES.load(Ordering::Relaxed))
+}
+
+/// P13_ACTIVATION_MINIMALE_V1 : gardes dues a la seule activation minimale.
+pub fn activations_gardees() -> u64 {
+    ACTIVATIONS_GARDEES.load(Ordering::Relaxed)
 }
 
 fn pick_next(_after: usize, cpu: usize) -> Option<usize> {
@@ -427,6 +446,11 @@ pub fn schedule() -> bool {
                 // installee pendant le `hlt` ; un reveilleur d'un autre coeur
                 // ne l'a pas mise en file. Relire son etat apres `IDLE`.
                 cpu::commit_scheduler_idle_sauf(|| tasks()[cur].state == TaskState::Ready);
+                // P13_ACTIVATION_MINIMALE_V1 : reveillee, elle reprend sur
+                // place -- son activation commence ici, pas a son `install`.
+                if tasks()[cur].state == TaskState::Ready {
+                    note_reprise_installee();
+                }
                 if rearmer {
                     rearme_compta_apres_idle();
                 }

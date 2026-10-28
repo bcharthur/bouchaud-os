@@ -351,9 +351,7 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
                 crate::kernel::native::abi::handle(&mut *frame);
 
                 // The Linux dispatcher normally owns this common ring3 tail.
-                if crate::kernel::task::take_need_resched() {
-                    crate::kernel::task::yield_now();
-                }
+                crate::kernel::task::sert_demande_differee();
                 crate::kernel::abi::proc::deliver_pending(&mut *frame);
             } else {
                 crate::kernel::abi::handle(&mut *frame);
@@ -361,9 +359,7 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
         }
         crate::kernel::security::syscall::GateDecision::Return(result) => {
             (*frame).rax = result as u64;
-            if crate::kernel::task::take_need_resched() {
-                crate::kernel::task::yield_now();
-            }
+            crate::kernel::task::sert_demande_differee();
             crate::kernel::abi::proc::deliver_pending(&mut *frame);
         }
     }

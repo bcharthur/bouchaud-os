@@ -765,6 +765,24 @@ pub fn yield_now() {
     schedule();
 }
 
+/// La demande differee, servie en fin d'appel systeme.
+///
+/// P13_ACTIVATION_MINIMALE_V1 : elle passe par la MEME regle de cession que
+/// `preempt::safe_point`. Ce chemin cedait sans condition (`yield_now`), et
+/// c'est par lui que `console` prenait la sonde a peine reprise (premier vol,
+/// run 40694203600). Une cession refusee GARDE la demande : la fin d'appel
+/// suivante la rejuge.
+pub fn sert_demande_differee() {
+    if !take_need_resched() {
+        return;
+    }
+    if courante_garde_le_coeur_local() {
+        set_need_resched();
+        return;
+    }
+    yield_now();
+}
+
 // BOUCHAUD_POINT_COOPERATIF_V1
 //
 // UN FIL NOYAU N'EST PAS COUPE PAR LE QUANTUM : il ne quitte son coeur qu'a
