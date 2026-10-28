@@ -737,6 +737,13 @@ static VERROU_SUSPENDU_FAIT: core::sync::atomic::AtomicBool = core::sync::atomic
 /// Sous le flot du banc, le fil revient dans la file en quelques
 /// microsecondes ; deux secondes sans lui, c'est qu'il n'y reviendra pas.
 const VERROU_PRECONDITION_BORNE_NS: u64 = 2_000_000_000;
+/// P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1 : le coeur revendique par l'un des fils
+/// de banc (un par coeur), `usize::MAX` tant que personne ; `usize::MAX - 1` :
+/// personne a la borne, le refus est dit une fois.
+static VERROU_REVENDIQUE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+/// Une rafale masquee attend le verrou pour emettre : le travail du fil
+/// viendra APRES la prise, pas avant.
+static RAFALE_ARMEE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
@@ -746,12 +753,18 @@ fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     let cible_fil = argc > 3 && argv[3] == "fil";
     VERROU_SUSPENDU_CIBLE_FIL.store(cible_fil, Ordering::Relaxed);
     VERROU_SUSPENDU_FAIT.store(false, Ordering::Relaxed);
+    VERROU_REVENDIQUE.store(usize::MAX, Ordering::Relaxed);
     VERROU_RESULTAT.store(0, Ordering::Release);
+    // P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1 : un fil de banc EPINGLE PAR COEUR.
+    // Le coeur du fil `console` lu ici, 1,5 s avant la suspension, n'etait
+    // pas toujours le sien au moment de suspendre (TCG local : banc epingle
+    // au coeur 3, fil attache au coeur 1). Celui des fils de banc dont le
+    // coeur porte le fil a ce moment-la le revendique ; les autres s'effacent.
     let lance = if cible_fil {
-        match crate::drivers::serial::coeur_du_fil_console() {
-            Some(coeur) => crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur),
-            None => false,
-        }
+        crate::drivers::serial::coeur_du_fil_console().is_some()
+            && (0..64).fold(false, |un, coeur| {
+                crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur) || un
+            })
     } else {
         crate::kernel::task::spawn_noyau(fil_verrou_suspendu, "verrou-suspendu")
     };
@@ -762,6 +775,13 @@ fn serie_verrou_suspendu(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// Un fil de banc qui n'a plus rien a faire : il dort, sans tenir de coeur.
+fn parque_fil_de_banc() -> ! {
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
 fn fil_verrou_suspendu() -> ! {
     use core::sync::atomic::Ordering;
     let attente = VERROU_SUSPENDU_ATTENTE_MS.load(Ordering::Relaxed);
@@ -769,9 +789,6 @@ fn fil_verrou_suspendu() -> ! {
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(attente));
     let mut precondition_us = 0u64;
     if VERROU_SUSPENDU_CIBLE_FIL.load(Ordering::Relaxed) {
-        // Epingle (`spawn_noyau_epingle`) : le coeur lu ici est celui ou le
-        // verrou sera pris. Le fil `console` y est-il encore en file ?
-        //
         // P13_TEMOIN_CONSOLE_PRECONDITION_V1 : « en file » ne suffisait pas.
         // La file d'un fil ENDORMI, anneau vide, reste renseignee : le verrou
         // etait alors pris sur un anneau vide, que les ecrivains ne pouvaient
@@ -779,31 +796,61 @@ fn fil_verrou_suspendu() -> ! {
         // qui ne surveille qu'un anneau non vide -- n'avait rien a voir.
         // Campagne 3/3 40672022728 (9311ad3c) et 40701963055 (70a2a313), bras
         // temoin TCG SMP4 : `soupcons=0`, `verrou_abandons=1287`, aucun repli.
-        // Le fil de banc tient donc son coeur -- fil noyau, que le quantum ne
-        // coupe pas -- jusqu'a ce que le fil `console` y attende, PRET, avec
-        // des lignes dans l'anneau ; borne, et l'attente est publiee. Passe la
-        // borne, rien n'est suspendu : le banc echoue (HORS_CIBLE), il ne
-        // conclut jamais sans sa precondition.
+        //
+        // P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1 : deux temps, bornes ensemble.
+        //   1. REVENDIQUER le coeur ou le fil est attache (sa file), hors
+        //      d'execution -- un seul fil de banc gagne ; les autres
+        //      s'effacent. On sonde en dormant : un coeur non revendique
+        //      reste libre pour les ecrivains.
+        //   2. TENIR ce coeur -- fil noyau, que le quantum ne coupe pas --
+        //      jusqu'a ce que le fil y attende, PRET, avec du travail : des
+        //      lignes dans l'anneau, ou une rafale masquee armee, qui
+        //      n'emettra qu'apres la prise (KVM 40770950829 : la rafale
+        //      attendait le verrou, le banc attendait l'anneau -- `anneau=0`,
+        //      `attente_us=2000000`, aucune injection).
+        // Passe la borne, rien n'est suspendu : un seul HORS_CIBLE, resultat
+        // 2, le banc echoue ; il ne conclut jamais sans sa precondition.
         let ici = crate::arch::x86_64::smp::cpu_index();
         let debut = crate::kernel::timer::monotonic_ns();
         let borne = debut.saturating_add(VERROU_PRECONDITION_BORNE_NS);
-        let mut vu = crate::drivers::serial::fil_console_attend_avec_travail(ici);
-        while !vu.0 && crate::kernel::timer::monotonic_ns() < borne {
-            core::hint::spin_loop();
-            vu = crate::drivers::serial::fil_console_attend_avec_travail(ici);
+        while VERROU_REVENDIQUE.load(Ordering::Acquire) == usize::MAX
+            && crate::kernel::timer::monotonic_ns() < borne
+        {
+            if crate::drivers::serial::fil_console_attache_a(ici)
+                && VERROU_REVENDIQUE.compare_exchange(usize::MAX, ici, Ordering::AcqRel, Ordering::Acquire).is_ok()
+            {
+                break;
+            }
+            crate::kernel::task::sleep_ticks(1);
+        }
+        let revendique = VERROU_REVENDIQUE.load(Ordering::Acquire);
+        if revendique != ici && revendique != usize::MAX {
+            // Un autre fil de banc tient le coeur du fil, ou a deja dit le refus.
+            parque_fil_de_banc();
+        }
+        let mut vu = crate::drivers::serial::fil_console_attend_avec_travail(ici, RAFALE_ARMEE.load(Ordering::Acquire));
+        if revendique == ici {
+            while !vu.0 && crate::kernel::timer::monotonic_ns() < borne {
+                core::hint::spin_loop();
+                vu = crate::drivers::serial::fil_console_attend_avec_travail(ici, RAFALE_ARMEE.load(Ordering::Acquire));
+            }
         }
         precondition_us = crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1000;
-        let a_moi = vu.0 && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
+        let a_moi = revendique == ici && vu.0 && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);
         if !a_moi {
-            let (_, etat, on_cpu, file, anneau) = vu;
-            crate::serial_println!(
-                "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={} etat_fil={} on_cpu={} anneau={} attente_us={}",
-                ici, file, etat, on_cpu, anneau, precondition_us
-            );
-            VERROU_RESULTAT.store(2, Ordering::Release);
-            loop {
-                crate::kernel::task::sleep_ticks(1000);
+            // Le refus est dit UNE fois : par le fil qui tenait le coeur, ou,
+            // si aucun n'a pu revendiquer, par le premier a la borne.
+            let rapporteur = revendique == ici
+                || VERROU_REVENDIQUE.compare_exchange(usize::MAX, usize::MAX - 1, Ordering::AcqRel, Ordering::Acquire).is_ok();
+            if rapporteur {
+                let (_, etat, on_cpu, file, anneau) = vu;
+                crate::serial_println!(
+                    "CONSOLE_VERROU_SUSPENDU_HORS_CIBLE coeur={} coeur_du_fil={} etat_fil={} on_cpu={} anneau={} rafale_armee={} attente_us={}",
+                    ici, file, etat, on_cpu, anneau, RAFALE_ARMEE.load(Ordering::Acquire) as u8, precondition_us
+                );
+                VERROU_RESULTAT.store(2, Ordering::Release);
             }
+            parque_fil_de_banc();
         }
     }
     let ici = crate::arch::x86_64::smp::cpu_index();
@@ -837,6 +884,9 @@ fn serie_rafale_masquee(argc: usize, argv: &[&str; 12]) -> i32 {
     let n = if argc > 1 { argv[1].parse::<u64>().unwrap_or(400) } else { 400 }.clamp(1, 10_000);
     RAFALE_N.store(n, Ordering::Relaxed);
     RAFALE_RESULTAT.store(0, Ordering::Release);
+    // P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1 : le banc du verrou sait que le travail
+    // du fil viendra de cette rafale, apres la prise.
+    RAFALE_ARMEE.store(true, Ordering::Release);
     // L'autorun attend ici, sans dormir, que le banc tienne le verrou : aucun
     // fil a reveiller, la rafale ne depend que de la suspension elle-meme.
     let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
@@ -844,6 +894,7 @@ fn serie_rafale_masquee(argc: usize, argv: &[&str; 12]) -> i32 {
         if crate::kernel::timer::monotonic_ns() >= limite {
             crate::serial_println!("SERIE_RAFALE_MASQUEE_FAIT n=0 pendant_suspension=0 raison=verrou-jamais-tenu");
             RAFALE_RESULTAT.store(2, Ordering::Release);
+            RAFALE_ARMEE.store(false, Ordering::Release);
             return 1;
         }
         core::hint::spin_loop();
@@ -860,6 +911,7 @@ fn serie_rafale_masquee(argc: usize, argv: &[&str; 12]) -> i32 {
     }
     crate::serial_println!("SERIE_RAFALE_MASQUEE_FAIT n={} pendant_suspension={}", n, pendant);
     RAFALE_RESULTAT.store(if pendant > 0 { 1 } else { 2 }, Ordering::Release);
+    RAFALE_ARMEE.store(false, Ordering::Release);
     0
 }
 

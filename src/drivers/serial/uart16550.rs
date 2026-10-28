@@ -1842,12 +1842,17 @@ pub fn coeur_du_fil_console() -> Option<usize> {
 }
 
 /// P13_TEMOIN_CONSOLE_PRECONDITION_V1 -- banc : le fil `console` ATTEND-il
-/// dans la file de `coeur` -- pret, hors d'execution --, avec des lignes dans
-/// l'anneau ? C'est la precondition du cas 39667691144 : un fil qui a du
-/// travail et qu'un coeur tenu empeche de le faire. `coeur_du_fil_console`
-/// ne la dit pas : la file d'un fil endormi, anneau vide, reste renseignee.
+/// dans la file de `coeur` -- pret, hors d'execution --, avec du travail ?
+/// C'est la precondition du cas 39667691144 : un fil qui a du travail et
+/// qu'un coeur tenu empeche de le faire. `coeur_du_fil_console` ne la dit
+/// pas : la file d'un fil endormi, anneau vide, reste renseignee.
+///
+/// Le travail : des lignes dans l'anneau, ou -- P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1
+/// -- `travail_a_venir`, une rafale masquee armee qui n'emettra qu'une fois le
+/// verrou pris (elle l'attend) : dans ce bras, exiger un anneau non vide AVANT
+/// le verrou etait un interblocage (KVM 40770950829, TCG local).
 /// Rend aussi `(etat, on_cpu, file, occupation)` pour le journal du banc.
-pub fn fil_console_attend_avec_travail(coeur: usize) -> (bool, u8, i8, u8, usize) {
+pub fn fil_console_attend_avec_travail(coeur: usize, travail_a_venir: bool) -> (bool, u8, i8, u8, usize) {
     let index = CONSOLE_FIL_TACHE.load(Ordering::Relaxed);
     if index == usize::MAX {
         return (false, 9, -1, 0, 0);
@@ -1855,7 +1860,21 @@ pub fn fil_console_attend_avec_travail(coeur: usize) -> (bool, u8, i8, u8, usize
     let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(index);
     let occupation = CONSOLE.occupation();
     // `etat == 0` : pret (`TaskState::Ready`) ; `on_cpu < 0` : pas en cours.
-    (etat == 0 && on_cpu < 0 && file as usize == coeur && occupation > 0, etat, on_cpu, file, occupation)
+    (etat == 0 && on_cpu < 0 && file as usize == coeur && (occupation > 0 || travail_a_venir),
+     etat, on_cpu, file, occupation)
+}
+
+/// P13_TEMOIN_CONSOLE_SUIT_LE_FIL_V1 -- banc : le fil `console` est-il
+/// attache a `coeur` (sa file), hors d'execution, pret ou endormi ? Un fil
+/// ainsi attache, reveille, est publie sur ce coeur (placement historique de
+/// l'image temoin) : le coeur qui le tient le retient.
+pub fn fil_console_attache_a(coeur: usize) -> bool {
+    let index = CONSOLE_FIL_TACHE.load(Ordering::Relaxed);
+    if index == usize::MAX {
+        return false;
+    }
+    let (etat, on_cpu, file) = crate::kernel::task::etat_tache_brut(index);
+    (etat == 0 || etat == 1) && on_cpu < 0 && file as usize == coeur
 }
 
 /// Banc de la vraie panne : dans `apres_ms`, le fil cesse de progresser
