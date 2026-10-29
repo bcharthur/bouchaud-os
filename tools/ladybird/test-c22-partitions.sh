@@ -27,7 +27,7 @@ cp "$T/arbre/AK/kmalloc.cpp" "$T/kmalloc-correctif.cpp"
 printf '#include <cstdio>\n#include <cstdlib>\nextern "C" __attribute__((noreturn)) void ak_verification_failed(char const* m) { fprintf(stderr, "VERIFY %%s\\n", m); abort(); }\n' > "$T/stub.cpp"
 cc -O2 -DNDEBUG -c "$MI/src/static.c" -I"$MI/include" -o "$T/mimalloc.o"
 for v in origine correctif; do
-  g++ -std=c++23 -O2 -I"$LB" -I"$MI/include" tools/ladybird/test_c22_partitions.cpp "$T/kmalloc-$v.cpp" "$T/stub.cpp" "$T/mimalloc.o" -lpthread -o "$T/test-$v"
+  g++ -std=c++23 -O2 -I"$LB" -I"$MI/include" tools/ladybird/c22_partitions_fixture.cpp "$T/kmalloc-$v.cpp" "$T/stub.cpp" "$T/mimalloc.o" -lpthread -o "$T/test-$v"
 done
 echecs=0
 juge() {
