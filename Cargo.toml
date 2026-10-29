@@ -52,6 +52,12 @@ banc-console-sans-contre-pression = []
 # l'exclusion de tout fil noyau du vol. Reproduction negative de
 # `tools/ci/run_reveil_coeur_muet.sh` a image egale. Jamais dans `default`.
 banc-reveil-historique = []
+# P13_MINUTEUR_PERIME_V1 (C23) : banc, `serie-minuteur-perdu` met le minuteur
+# local dans l'etat releve par 40812095472 (seule seconde ecriture du MSR,
+# hors livree). Temoin : en plus, le minuteur mort n'est jamais releve
+# (comportement de 2d850401). Jamais dans `default`.
+banc-minuteur-perdu = []
+banc-minuteur-historique = ["banc-minuteur-perdu"]
 # BANC DE REJET A L'ELECTION (P13_ENTREE_VALIDE_JAMAIS_JETEE_V1).
 #
 # `ordo-rejet-injecte N [sans-remise]` : l'election locale rejette N entrees

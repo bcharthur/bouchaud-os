@@ -977,6 +977,77 @@ fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// P13_MINUTEUR_PERIME_V1 (C23) -- banc : `serie-minuteur-perdu DUREE_MS`.
+///
+/// Un fil EPINGLE au coeur zero (le coeur du releve fige de 40812095472) met
+/// son minuteur local dans l'etat observe (`banc_perd_tir` : MSR a 0, echeance
+/// logicielle passee), verifie 20 ms plus tard, sans s'endormir, que l'etat a
+/// tenu, puis dort un tick a la fois DUREE_MS ms -- chaque entree d'idle arme
+/// le reveil precis. Publie les tirs, les quantums recus, les minuteurs
+/// releves et l'etat final du minuteur.
+#[cfg(feature = "banc-minuteur-perdu")]
+static MINUTEUR_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "banc-minuteur-perdu")]
+static MINUTEUR_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "banc-minuteur-perdu")]
+fn serie_minuteur_perdu(argc: usize, argv: &[&str; 12]) -> i32 {
+    use core::sync::atomic::Ordering;
+    let duree = if argc > 1 { argv[1].parse::<u64>().unwrap_or(3000) } else { 3000 }.clamp(100, 30_000);
+    MINUTEUR_DUREE_MS.store(duree, Ordering::Relaxed);
+    MINUTEUR_RESULTAT.store(0, Ordering::Release);
+    if !crate::kernel::task::spawn_noyau_epingle(fil_minuteur_perdu, "minuteur-perdu", 0) {
+        crate::println!("serie-minuteur-perdu : fil noyau refuse");
+        return 1;
+    }
+    0
+}
+
+#[cfg(feature = "banc-minuteur-perdu")]
+fn fil_minuteur_perdu() -> ! {
+    use core::sync::atomic::Ordering;
+    let duree = MINUTEUR_DUREE_MS.load(Ordering::Relaxed);
+    let releve = || {
+        let d = crate::arch::x86_64::smp::diagnostic_reveil_precis();
+        (d[0], d[5], crate::kernel::task::quantums_recus(0), crate::arch::x86_64::smp::minuteurs_perimes())
+    };
+    crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(300));
+    let avant = releve();
+    let Some(cible) = crate::arch::x86_64::smp::banc_perd_tir() else {
+        crate::serial_println!("SERIE_MINUTEUR_PERDU_ECHEC raison=pas-de-tsc-deadline");
+        MINUTEUR_RESULTAT.store(2, Ordering::Release);
+        loop { crate::kernel::task::sleep_ticks(1000); }
+    };
+    // 20 ms interruptions ouvertes SANS dormir : aucune entree d'idle.
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(20_000_000);
+    while crate::kernel::timer::monotonic_ns() < fin {
+        core::hint::spin_loop();
+    }
+    let t = crate::arch::x86_64::smp::diagnostic_timer_local();
+    let tenue = t.0 == 0 && t.2 == 0 && t.3 == cible;
+    let apres_injection = releve();
+    let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree.saturating_mul(1_000_000));
+    while crate::kernel::timer::monotonic_ns() < fin {
+        crate::kernel::task::sleep_ticks(1);
+    }
+    let apres = releve();
+    let t2 = crate::arch::x86_64::smp::diagnostic_timer_local();
+    let maintenant = crate::arch::x86_64::cpu::rdtsc();
+    let vivant = t2.2 != 0 || t2.3 > maintenant;
+    crate::serial_println!(
+        "SERIE_MINUTEUR_PERDU coeur={} duree_ms={} injection_tenue={} tirs={} quantums={} releves={} \
+         refus_quantum_avant={} quantums_pendant_injection={} vivant_a_la_fin={} deadline_tsc={} arme_tsc={} quantum_tsc={}",
+        t.0, duree, tenue as u8,
+        apres.0.saturating_sub(apres_injection.0), apres.2.saturating_sub(apres_injection.2),
+        apres.3.saturating_sub(avant.3), apres.1.saturating_sub(apres_injection.1),
+        apres_injection.2.saturating_sub(avant.2), vivant as u8, t2.2, t2.3, t2.4
+    );
+    MINUTEUR_RESULTAT.store(1, Ordering::Release);
+    loop {
+        crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
 fn fil_dormeur() -> ! {
     use core::sync::atomic::Ordering;
     let moi = crate::kernel::task::indice_tache_courante();
@@ -1157,6 +1228,8 @@ fn serie_banc_attend(argc: usize, argv: &[&str; 12]) -> i32 {
         "verrou" => &VERROU_RESULTAT,
         "rafale" => &RAFALE_RESULTAT,
         "dormeur" => &DORMEUR_RESULTAT,
+        #[cfg(feature = "banc-minuteur-perdu")]
+        "minuteur" => &MINUTEUR_RESULTAT,
         _ => { crate::serial_println!("SERIE_BANC_ATTEND_ECHEC raison=type-inconnu"); return 1; }
     };
     let limite = crate::kernel::timer::monotonic_ns().saturating_add(30_000_000_000);
@@ -1323,8 +1396,8 @@ fn reveil_precis(argc: usize, argv: &[&str; 12]) -> i32 {
     let (voulu, mode, armes, retires) = crate::arch::x86_64::smp::compteurs_reveil_precis();
     let timer = crate::arch::x86_64::smp::diagnostic_timer_local();
     crate::serial_println!(
-        "REVEIL_TIMER_LOCAL cpu={} lvt={:#x} deadline_tsc={} arme_tsc={} quantum_tsc={}",
-        timer.0, timer.1, timer.2, timer.3, timer.4);
+        "REVEIL_TIMER_LOCAL cpu={} lvt={:#x} deadline_tsc={} arme_tsc={} quantum_tsc={} minuteurs_releves={}",
+        timer.0, timer.1, timer.2, timer.3, timer.4, crate::arch::x86_64::smp::minuteurs_perimes());
     let (materiel, hyperviseur) = crate::arch::x86_64::smp::reveil_precis_domaine();
     // Diagnostic de la queue au repos : cumuls, l'A/B en fait des differences.
     let d = crate::arch::x86_64::smp::diagnostic_reveil_precis();
@@ -1529,6 +1602,8 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "serie-verrou-suspendu" => serie_verrou_suspendu(argc, &argv),
         "serie-rafale-masquee" => serie_rafale_masquee(argc, &argv),
         "serie-dormeur-masque" => serie_dormeur_masque(argc, &argv),
+        #[cfg(feature = "banc-minuteur-perdu")]
+        "serie-minuteur-perdu" => serie_minuteur_perdu(argc, &argv),
         // BOUCHAUD_SERIE_LENTE_BANC_V1 : `serie-lente NS` -- NS ns de plus par
         // octet sur COM1 (le cout du port sous KVM, simule sous TCG).
         "serie-lente" => {

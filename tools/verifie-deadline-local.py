@@ -9,8 +9,13 @@ pure = (ROOT / 'src/kernel/time/reveil_precis.rs').read_text()
 test = (ROOT / 'tools/smp/test_reveil_precis.rs').read_text()
 smp = (ROOT / 'src/arch/x86_64/smp.rs').read_text()
 writer = 'usermode::write_msr(IA32_TSC_DEADLINE, cible);'
-assert smp.count('usermode::write_msr(IA32_TSC_DEADLINE,') == 1
-assert smp.count('ARME_TSC[cpu].store(') == 1
+# P13_MINUTEUR_PERIME_V1 (C23) : le seul autre ecrivain est le banc
+# `banc_perd_tir`, compile sous l'option `banc-minuteur-perdu` seulement.
+banc = smp.split('#[cfg(feature = "banc-minuteur-perdu")]\npub fn banc_perd_tir() -> Option<u64> {', 1)
+livree = banc[0] + (banc[1].split('\n}\n', 1)[1] if len(banc) == 2 else '')
+assert len(banc) == 2 and banc[1].split('\n}\n', 1)[0].count('usermode::write_msr(IA32_TSC_DEADLINE, 0)') == 1
+assert livree.count('usermode::write_msr(IA32_TSC_DEADLINE,') == 1
+assert livree.count('ARME_TSC[cpu].store(') == 1
 body = smp.split('fn programme_deadline(', 1)[1].split('\n}', 1)[0]
 assert '!::x86_64::instructions::interrupts::are_enabled()' in body
 assert body.index('doit_programmer(') < body.index(writer) < body.index('ARME_TSC[cpu].store(')

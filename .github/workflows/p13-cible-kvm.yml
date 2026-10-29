@@ -331,3 +331,70 @@ jobs:
             identite-election.txt
             election-*/serie.log
           if-no-files-found: warn
+  minuteur:
+    # P13_MINUTEUR_PERIME_V1 (C23) : confirmation stricte 40812095472
+    # (2d850401), A/B reveil precis KVM SMP1 tour 4 `on` -- minuteur local
+    # mort (`deadline_tsc=0`, `arme_tsc` fige), tout armement precis refuse.
+    name: minuteur -- un tir perdu du minuteur local ne le tue pas (KVM SMP1/SMP4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: p13-cible-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            p13-cible-${{ runner.os }}-
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Images (livree, banc correctif, temoin minuteur historique)
+        run: |
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livree.bin
+          CARGO_TARGET_DIR=target-banc cargo bootimage --features banc-minuteur-perdu
+          cp target-banc/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-banc.bin
+          CARGO_TARGET_DIR=target-temoin cargo bootimage --features banc-minuteur-historique
+          cp target-temoin/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-temoin.bin
+          for f in boot-*.bin; do echo "IMAGE fichier=$f sha_source=$GITHUB_SHA sha256=$(sha256sum $f | cut -d' ' -f1)"; done | tee identite-minuteur.txt
+          if grep -aq BOUCHAUD_IMAGE_TEMOIN boot-livree.bin; then echo BANNIERE_TEMOIN_DANS_LA_LIVREE >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-minuteur-perdu' boot-banc.bin
+          if grep -aq 'feature=banc-minuteur-historique' boot-banc.bin; then echo TEMOIN_DANS_LE_BANC >&2; exit 1; fi
+          grep -aq 'BOUCHAUD_IMAGE_TEMOIN feature=banc-minuteur-historique' boot-temoin.bin
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && ls -l /dev/kvm
+      - name: Temoin -- le minuteur mort n'est jamais releve, ECHEC attendu (SMP1)
+        run: |
+          set +e
+          BANC_TENTATIVES=3 BO_SMP=1 BO_QEMU_KVM=1 tools/ci/run_minuteur_perdu.sh boot-temoin.bin 3000
+          code=$?
+          set -e
+          cp minuteur-perdu.log temoin-minuteur-kvm-smp1.log
+          # ECHEC (1) exige : OK ne prouverait plus rien, NON_QUALIFIANT dit
+          # que l'etat observe n'a pas ete reproduit.
+          if [ "$code" != 1 ]; then echo "TEMOIN_MINUTEUR code=$code (ECHEC attendu : 1)" >&2; exit 1; fi
+      - name: Correctif -- le minuteur est releve, 3 x SMP1, 3 x SMP4
+        if: ${{ !cancelled() }}
+        run: |
+          r=0
+          for smp in 1 4; do for i in 1 2 3; do
+            BANC_TENTATIVES=3 BO_SMP=$smp BO_QEMU_KVM=1 tools/ci/run_minuteur_perdu.sh boot-banc.bin 3000 || r=1
+            cp minuteur-perdu.log production-minuteur-kvm-smp$smp-$i.log
+          done; done
+          exit $r
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: p13-cible-minuteur-${{ github.run_id }}
+          path: |
+            identite-minuteur.txt
+            temoin-minuteur-kvm-*.log
+            production-minuteur-kvm-*.log
+          if-no-files-found: warn

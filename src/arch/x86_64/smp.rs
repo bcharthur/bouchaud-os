@@ -1180,6 +1180,7 @@ pub fn arme_reveil_precis_avant_hlt() {
 /// reprogrammerait plus (le quantum ne se rearme qu'au vecteur, le reveil
 /// precis se jugeait contre cette echeance morte). Le quantum est rearme a
 /// l'entree d'idle, politique de reveil precis active ou non.
+#[cfg(not(feature = "banc-minuteur-historique"))]
 fn releve_minuteur_perime(cpu: usize) {
     if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
         return;
@@ -1194,9 +1195,21 @@ fn releve_minuteur_perime(cpu: usize) {
     }
 }
 
+/// BANC TEMOIN (option `banc-minuteur-historique`) : le minuteur mort n'est
+/// jamais releve -- le comportement de `2d850401`.
+#[cfg(feature = "banc-minuteur-historique")]
+fn releve_minuteur_perime(_cpu: usize) {}
+
 /// La borne a laquelle comparer une nouvelle cible (P13_MINUTEUR_PERIME_V1).
+#[cfg(not(feature = "banc-minuteur-historique"))]
 fn porte(arme_tsc: u64, tsc_maintenant: u64) -> u64 {
     crate::kernel::reveil_precis::porte_vivante(arme_tsc, tsc_maintenant)
+}
+
+/// BANC TEMOIN : l'echeance programmee, meme passee (comportement d'avant).
+#[cfg(feature = "banc-minuteur-historique")]
+fn porte(arme_tsc: u64, _tsc_maintenant: u64) -> u64 {
+    arme_tsc
 }
 
 /// Minuteurs morts releves a l'entree d'idle (P13_MINUTEUR_PERIME_V1).
@@ -1204,6 +1217,33 @@ static MINUTEURS_PERIMES: AtomicU64 = AtomicU64::new(0);
 
 pub fn minuteurs_perimes() -> u64 {
     MINUTEURS_PERIMES.load(Ordering::Relaxed)
+}
+
+/// BANC P13_MINUTEUR_PERIME_V1 (option `banc-minuteur-perdu`, jamais dans la
+/// livree : seule autre ecriture du MSR) : met CE coeur dans l'etat releve par la
+/// confirmation 40812095472 -- le MSR ne porte plus rien (ecrit a 0), l'etat
+/// logiciel croit une echeance interactive armee juste avant la fin du
+/// quantum. Rend la cible injectee, `None` hors TSC-deadline.
+#[cfg(feature = "banc-minuteur-perdu")]
+pub fn banc_perd_tir() -> Option<u64> {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return None;
+    }
+    ::x86_64::instructions::interrupts::without_interrupts(|| {
+        let cpu = cpu_index();
+        if cpu >= MAX_CPUS {
+            return None;
+        }
+        let maintenant = crate::arch::x86_64::cpu::rdtsc();
+        unsafe { usermode::write_msr(IA32_TSC_DEADLINE, 0); }
+        let cible = maintenant.saturating_add(1);
+        ARME_TSC[cpu].store(cible, Ordering::Relaxed);
+        QUANTUM_TSC[cpu].store(cible.saturating_add(1), Ordering::Relaxed);
+        ETAT_DEADLINE[cpu].store(crate::kernel::reveil_precis::EtatDeadline::Interactif as u8, Ordering::Relaxed);
+        ARME_PRECIS[cpu].store(false, Ordering::Relaxed);
+        ARME_OCCUPE[cpu].store(true, Ordering::Relaxed);
+        Some(cible)
+    })
 }
 
 fn arme_reveil_precis_sous_drapeau(cpu: usize) {
