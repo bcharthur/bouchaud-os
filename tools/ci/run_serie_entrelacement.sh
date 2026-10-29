@@ -57,6 +57,14 @@
 # REMESURE, un OK ou un ECHEC arrete la serie ; N essais non qualifiants de
 # suite : NON_QUALIFIANT (code 2). Chaque essai est garde
 # (serie-entrelacement-tN.log).
+#
+# P13_TEMOIN_CONSOLE_ECRIVAINS_LENTS_V1 (C24) -- le temoin se lance sous
+# producteurs LENTS (`3 60 4 40 80`, comme la vraie panne du fil gele) : sous
+# le flot ordinaire, TCG CI, les ecrivains differaient puis vidaient eux-memes
+# (confirmation 40812095472 : `aides_pendant=1353/1668/1602`, trois
+# NON_QUALIFIANT). Lents, l'anneau ne sature jamais et rien n'est differe : le
+# fil est seul a pouvoir vider PAR CONSTRUCTION ; `aides_pendant` reste la
+# mesure qui le verifie.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_serie_entrelacement.sh BOOTIMAGE [ECRIVAINS LIGNES PROCESSUS CHARGE PAS_MS]}

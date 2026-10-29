@@ -80,9 +80,9 @@ NQ_SORTIE = ("if [ \"$echecs\" -eq 0 ] && [ \"${NON_QUALIFIANT:-0}\" = 1 ]; then
 BORNE_ESSAIS = 'case "$TENTATIVES" in 1|2|3) ;; *)'
 REMESURE = '    if [ "$code" != 2 ]; then exit "$code"; fi'
 CI_TCG = ('BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off '
-          'tools/ci/run_serie_entrelacement.sh "$T" || r=1')
+          'tools/ci/run_serie_entrelacement.sh "$T" 3 60 4 40 80 || r=1')
 CI_KVM = ('BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 '
-          'tools/ci/run_serie_entrelacement.sh "$T" || r=1')
+          'tools/ci/run_serie_entrelacement.sh "$T" 3 60 4 40 80 || r=1')
 PAR_COEUR = 'crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur) || un'
 ARME = "    RAFALE_ARMEE.store(true, Ordering::Release);"
 DESARME = "RAFALE_ARMEE.store(false, Ordering::Release);"
@@ -145,7 +145,8 @@ def verifie(t: dict) -> list:
         fautes.append("run_serie_entrelacement.sh : la remesure n'est plus bornee a 3 essais, ou remesure autre "
                       "chose que le code 2.")
     if CI_TCG not in t["ci"] or CI_KVM not in t["ci"]:
-        fautes.append("os-primitives.yml : les bras temoin cible fil ne demandent plus 3 essais.")
+        fautes.append("os-primitives.yml : les bras temoin cible fil ne demandent plus 3 essais, ou plus sous "
+                      "producteurs lents (le fil seul a pouvoir vider, C24).")
     return fautes
 
 
@@ -184,6 +185,8 @@ def negatifs(t: dict) -> tuple:
         ("essais sans borne", "banc", BORNE_ESSAIS, 'case "$TENTATIVES" in [0-9]*) ;; *)'),
         ("echec remesure", "banc", REMESURE, '    if [ "$code" = 0 ]; then exit 0; fi'),
         ("ci sans remesure", "ci", CI_KVM, CI_KVM.replace("BANC_TENTATIVES=3 ", "")),
+        ("temoin tcg sous flot ordinaire", "ci", CI_TCG, CI_TCG.replace(' 3 60 4 40 80', '')),
+        ("temoin kvm sous flot ordinaire", "ci", CI_KVM, CI_KVM.replace(' 3 60 4 40 80', '')),
         ("rafale jamais desarmee", "shell", "            RAFALE_ARMEE.store(false, Ordering::Release);\n            return 1;",
          "            return 1;"),
         ("rafale armee ailleurs", "shell", "fn parque_fil_de_banc() -> ! {",

@@ -250,11 +250,16 @@ jobs:
           # leurs journaux vont dans l'artefact temoin, a part.
           T=temoin-reveil-historique/boot-temoin.bin
           test -f "$T" || { echo "IMAGE_TEMOIN_ABSENTE" >&2; exit 1; }
-          BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          # P13_TEMOIN_CONSOLE_ECRIVAINS_LENTS_V1 (C24) : les bras TEMOIN (secours
+          # off) sous producteurs LENTS, comme la vraie panne du fil gele : l'anneau
+          # ne sature jamais, aucun ecrivain ne differe -- le fil est SEUL a pouvoir
+          # vider, par construction (confirmation 40812095472 : sous le flot
+          # ordinaire, TCG, aides_pendant=1353/1668/1602, trois NON_QUALIFIANT).
+          BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off tools/ci/run_serie_entrelacement.sh "$T" 3 60 4 40 80 || r=1
           cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg-coeur-du-fil-temoin.log
           BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil tools/ci/run_serie_entrelacement.sh "$T" || r=1
           cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-tcg-coeur-du-fil.log
-          BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh "$T" || r=1
+          BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh "$T" 3 60 4 40 80 || r=1
           cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-kvm-coeur-du-fil-temoin.log
           BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BO_QEMU_KVM=1 tools/ci/run_serie_entrelacement.sh "$T" || r=1
           cp serie-entrelacement.log temoin-reveil-historique/serie-entrelacement-kvm-coeur-du-fil.log
