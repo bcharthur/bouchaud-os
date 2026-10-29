@@ -856,10 +856,11 @@ fn fil_verrou_suspendu() -> ! {
     let ici = crate::arch::x86_64::smp::cpu_index();
     let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);
     crate::serial_println!(
-        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={} precondition_us={}",
+        "CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={} precondition_us={} aides_pendant={}",
         pris as u8, duree, ici,
         crate::drivers::serial::coeur_du_fil_console().map_or(-1, |c| c as i64),
-        precondition_us
+        precondition_us,
+        crate::drivers::serial::banc_aides_pendant()
     );
     VERROU_RESULTAT.store(if pris { 1 } else { 2 }, Ordering::Release);
     loop {

@@ -600,6 +600,18 @@ const BORNE_SANS_PROGRES_NS_BANC: u64 = 1_000_000_000;
 /// `banc_verrou_console_suspendu` (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1) ?
 static BANC_VERROU_TENU: AtomicBool = AtomicBool::new(false);
 
+/// P13_TEMOIN_CONSOLE_FIL_SEUL_V1 -- banc : morceaux EMIS par un autre que le
+/// fil `console` pendant que `banc_verrou_console_suspendu` tient le verrou.
+/// L'anneau se vide sans ce verrou (`avance_tete`, `vide_differee_mure`) :
+/// un producteur qui aide fait vraiment progresser la console, et le chien de
+/// garde a raison de ne pas replier. Le temoin du repli (fil seul sur un
+/// coeur suspendu) n'est donc reproduit que si ce compte reste nul.
+static BANC_AIDES_PENDANT: AtomicU64 = AtomicU64::new(0);
+
+pub fn banc_aides_pendant() -> u64 {
+    BANC_AIDES_PENDANT.load(Ordering::Acquire)
+}
+
 pub fn banc_verrou_tenu() -> bool {
     BANC_VERROU_TENU.load(Ordering::Acquire)
 }
@@ -622,6 +634,7 @@ pub fn banc_verrou_console_suspendu(duree_ms: u64) -> bool {
         core::hint::spin_loop();
     }
     CONSOLE_VERROU_GEN.fetch_add(1, Ordering::AcqRel);
+    BANC_AIDES_PENDANT.store(0, Ordering::Release);
     BANC_VERROU_TENU.store(true, Ordering::Release);
     let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree_ms.saturating_mul(1_000_000));
     while crate::kernel::timer::monotonic_ns() < fin {
@@ -1956,6 +1969,15 @@ fn vide_un_morceau() -> Vidange {
         let fin = crate::kernel::timer::monotonic_ns();
         CONSOLE_MORCEAU_PIRE_NS.fetch_max(fin.saturating_sub(debut), Ordering::Relaxed);
         CONSOLE_DERNIER_PROGRES_NS.store(fin, Ordering::Relaxed);
+        // Avant le repli seulement : replie, le chemin synchrone vide l'anneau
+        // par d'autres que le fil -- c'est le repli lui-meme, pas une aide.
+        if fait
+            && BANC_VERROU_TENU.load(Ordering::Acquire)
+            && console_active()
+            && crate::kernel::task::indice_tache_courante() != CONSOLE_FIL_TACHE.load(Ordering::Relaxed)
+        {
+            BANC_AIDES_PENDANT.fetch_add(1, Ordering::Relaxed);
+        }
     }
     VIDANGE_EN_COURS.store(0, Ordering::SeqCst);
     // Progres vu des emetteurs synchrones : le jeton a ete rendu.
