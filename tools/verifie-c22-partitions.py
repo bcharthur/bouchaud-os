@@ -28,8 +28,9 @@ def verifie(prep: str, chaine: str) -> list[str]:
         fautes.append("proprietaire non retenu a la creation")
     if "heap.store(heap, std::memory_order_release)" not in prep or "load(std::memory_order_acquire)" not in prep:
         fautes.append("publication du tas sans release/acquire")
-    if 'getenv(\\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\\")' not in prep or "if (!temoin) {" not in prep:
-        fautes.append("temoin absent ou non conditionnel")
+    kmalloc = prep.split('    # BOUCHAUD_C22_DOCUMENT_COLLECTE_V2', 1)[0]
+    if 'getenv(\\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\\")' not in kmalloc or '"    if (!temoin) {\\n"' not in kmalloc:
+        fautes.append("temoin AK/kmalloc absent ou non conditionnel")
     if "    mi_collect(true);\\n" not in prep:
         fautes.append("la collecte du tas par defaut a disparu")
     if re.search(r"mi_collect\(false\)|mi_heap_destroy|mi_heap_delete", prep):
