@@ -225,6 +225,20 @@ jobs:
             if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL smp=$smp code=$code (ECHEC attendu : 1)" >&2; r=1; fi
           done
           exit $r
+      # P13_REVEIL_CIBLE_ADMISSIBLE_V1 (C21) : le coeur un en SMP2 n'a aucun
+      # AP electeur hors de lui ; impose, il DOIT etre refuse -- NON_QUALIFIANT
+      # (code 2), jamais vert ni ECHEC (KVM cible 40812092788 : trois tirages
+      # sur ce coeur, trois NON_QUALIFIANT).
+      - name: Precondition -- une cible sans electeur est refusee (SMP2, coeur un impose)
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          BANC_DORMEUR_COEUR=1 BO_SMP=2 BO_QEMU_KVM=1 tools/ci/run_reveil_coeur_muet.sh boot-livree.bin 3000
+          code=$?
+          set -e
+          cp reveil-coeur-muet.log precondition-reveil-kvm-smp2-coeur1.log
+          grep -aq 'SERIE_DORMEUR_MASQUE_ECHEC raison=cible-inadmissible coeur=1 coeurs=2' precondition-reveil-kvm-smp2-coeur1.log
+          if [ "$code" != 2 ]; then echo "PRECONDITION_REVEIL code=$code (NON_QUALIFIANT attendu : 2)" >&2; exit 1; fi
       # 10 x SMP2, 5 x SMP4 : l'ecart residuel corrige par
       # P13_REVEIL_COEUR_MUET_V2 sortait 8 fois sur 30 en SMP2 (run
       # 40582472007) ; trois repetitions ne le voyaient qu'une fois sur trois.
@@ -247,6 +261,7 @@ jobs:
           path: |
             identite-reveil.txt
             production-reveil-kvm-*.log
+            precondition-reveil-kvm-*.log
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
