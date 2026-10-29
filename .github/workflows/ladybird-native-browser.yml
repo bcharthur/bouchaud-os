@@ -1342,42 +1342,29 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Deux mesures puis attribution GC uniquement si elles restent rouges
+      - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
         env:
           BO_QEMU_KVM: "1"
         run: |
-          rc=0
-          for essai in 1 2; do
-            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-${essai}.sortie" 2>&1 || rc=1
-            cat "memoire-${essai}.sortie"
-            cp serie-memoire.log "serie-memoire-${essai}.log"
-            cp fixture-memoire.log "fixture-memoire-${essai}.log"
+          for bras in correctif temoin; do
+            for essai in 1 2 3 4 5 6; do
+              t=0; [ "$bras" = temoin ] && t=1
+              BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
+              cp serie-memoire.log "serie-memoire-$bras-$essai.log"
+              {
+                echo "=== $bras $essai rc=$rc ==="
+                grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
+                echo "LB_C22 lignes=$(grep -ac '\[LB:C22\] collecte' serie-memoire.log) partitions=$(grep -ao '\[LB:C22\] collecte partitions=[0-9]* temoin=[01]' serie-memoire.log | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+                echo "C22_ESSAI bras=$bras essai=$essai rc=$rc"
+              } >> c22-validation.txt
+            done
           done
-
-          if [ "$rc" -ne 0 ]; then
-            echo "=== preuve GC retention separee : le verdict memoire reste celui des deux runs precedents ==="
-            diag_run_rc=0
-            BO_GC_RETENTION_PROOF=1 tools/ci/run_ladybird_memoire.sh               target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10               > gc-retention.sortie 2>&1 || diag_run_rc=$?
-            cat gc-retention.sortie
-            cp serie-memoire.log serie-gc-retention.log
-            cp fixture-memoire.log fixture-gc-retention.log
-
-            diag_ok=0
-            grep -aq 'HOST_MEMOIRE_FIN' serie-gc-retention.log || diag_ok=1
-            python3 tools/ci/preuve_swaps.py serie-gc-retention.log 10 || diag_ok=1
-            ! grep -aq 'KERNEL PANIC' serie-gc-retention.log || diag_ok=1
-            ! grep -aqE 'VERIFICATION FAILED|UNEXPECTED ERROR|ASSERTION FAILED' serie-gc-retention.log || diag_ok=1
-            ! grep -aq 'PROCESS_FAULT pid=' serie-gc-retention.log || diag_ok=1
-            python3 tools/ci/analyse_gc_retention.py serie-gc-retention.log || diag_ok=1
-
-            echo "GC_RETENTION_DIAGNOSTIC run_rc=$diag_run_rc proof_rc=$diag_ok"
-            if [ "$diag_ok" -ne 0 ]; then
-              rc=1
-            fi
-          else
-            echo "GC_RETENTION_DIAGNOSTIC_SKIP raison=memoire_deja_bornee"
-          fi
-          exit "$rc"
+          cat c22-validation.txt
+          f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
+          f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
+          t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
+          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6"
+          [ "$f_vert" = 6 ] && [ "$t_rouge" -ge 1 ]
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4

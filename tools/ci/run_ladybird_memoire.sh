@@ -44,6 +44,12 @@ cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.c
 
 URL="http://10.0.2.2:18082/memoire.html?n=$N"
 GC_RETENTION_GUEST_EXPORT=""
+# C22, VALIDATION SEULEMENT : BO_C22_TEMOIN=1 retablit le comportement
+# d'origine des tas partitionnes dans le meme binaire (temoin negatif).
+C22_TEMOIN_GUEST_EXPORT=""
+if [ "${BO_C22_TEMOIN:-0}" = 1 ]; then
+  C22_TEMOIN_GUEST_EXPORT="export BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE=1"
+fi
 if [ "${BO_GC_RETENTION_PROOF:-0}" = 1 ]; then
   GC_RETENTION_GUEST_EXPORT="export BOUCHAUD_GC_RETENTION_PROOF=1"
 fi
@@ -59,6 +65,7 @@ export BOUCHAUD_LB_MEMORY_PROOF=1
 export BOUCHAUD_LB_MEMORY_TRIM_TAIL=1
 export LIBGC_LOG_LEVEL=1
 ${GC_RETENTION_GUEST_EXPORT}
+${C22_TEMOIN_GUEST_EXPORT}
 export BOUCHAUD_M9_URL='$URL'
 desktop
 AUTORUN
