@@ -24,9 +24,9 @@
 # Exige :
 #   * l'etat injecte a tenu (`injection_tenue=1`, aucun quantum pendant) --
 #     sinon NON_QUALIFIANT (code 2), jamais vert ;
-#   * le minuteur est releve (`releves>=1`), le quantum bat de nouveau
-#     (`quantums>0`), les tirs precis reprennent (`tirs>0`), il est vivant a
-#     la fin.
+#   * le quantum bat de nouveau (`quantums>0`), les tirs precis reprennent
+#     (`tirs>0`), le minuteur est vivant a la fin ; `releves` (le releve a
+#     l'inactivite, un des deux chemins du correctif) est publie.
 # Image temoin `banc-minuteur-historique` : ces exigences DOIVENT echouer
 # (code 1 : tirs=0, quantums=0, minuteur mort a la fin).
 # Code 0 : OK ; 1 : ECHEC ; 2 : NON_QUALIFIANT. TSC-deadline requis : KVM.
@@ -114,7 +114,13 @@ fi
 echecs=0
 exige() { local quoi=$1; shift; if "$@"; then echo "  ok      $quoi"; else echo "  ECHEC   $quoi"; echecs=$((echecs + 1)); fi; }
 exige "aucune panique noyau" bash -c "! grep -aqE 'KERNEL PANIC|panicked at' '$LOG'"
-exige "le minuteur mort est releve (releves >= 1)" test "$(champ releves)" -ge 1
+# Le relevé a l'inactivite (`releves`) n'est que l'un des deux chemins du
+# correctif : en SMP1 l'avance d'un sommeil interactif, jugee contre la borne
+# VIVANTE, reprogramme le minuteur avant que l'inactivite ait a le relever
+# (KVM cible 40822176701 : `releves=0`, quantum et tirs repris ; SMP4 :
+# `releves=1`). Le banc juge le defaut -- minuteur mort, reveil precis refuse
+# -- et non le chemin : `releves` est publie, pas exige.
+echo "  info    minuteurs releves a l'inactivite : $(champ releves)"
 exige "le quantum bat de nouveau (quantums > 0)" test "$(champ quantums)" -gt 0
 exige "les tirs precis reprennent (tirs > 0)" test "$(champ tirs)" -gt 0
 exige "le minuteur est vivant a la fin" test "$(champ vivant_a_la_fin)" = 1

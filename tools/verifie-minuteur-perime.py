@@ -18,7 +18,8 @@ Regles :
      releve, l'echeance morte reste la borne) n'existe que sous son option,
      absente de `default`, avec sa banniere ;
   4. le banc : injection verifiee (sinon NON_QUALIFIANT, jamais vert),
-     exigences (releve, quantum, tirs, vivant) ; p13-cible-kvm exige ECHEC
+     exigences (quantum, tirs, vivant) jugeant le defaut, `releves` publie
+     (un des deux chemins du correctif) ; p13-cible-kvm exige ECHEC
      du temoin et joue la livree en SMP1 et SMP4 ;
   5. tests hote presents.
 
@@ -64,7 +65,7 @@ TESTS = ("une_echeance_passee_ne_porte_plus_rien", "le_cas_observe_est_arme_avec
 NQ = ('[ "$(champ injection_tenue)" = 1 ] || nq="$nq injection-non-tenue"',
       '[ "$(champ quantums_pendant_injection)" = 0 ] || nq="$nq quantum-pendant-injection"',
       '  echo "MINUTEUR_PERDU_NON_QUALIFIANT raisons=${nq# }"\n  exit 2')
-EXIGENCES = ('exige "le minuteur mort est releve (releves >= 1)" test "$(champ releves)" -ge 1',
+EXIGENCES = ('echo "  info    minuteurs releves a l\'inactivite : $(champ releves)"',
              'exige "le quantum bat de nouveau (quantums > 0)" test "$(champ quantums)" -gt 0',
              'exige "les tirs precis reprennent (tirs > 0)" test "$(champ tirs)" -gt 0',
              'exige "le minuteur est vivant a la fin" test "$(champ vivant_a_la_fin)" = 1')
@@ -169,7 +170,9 @@ def negatifs(t: dict) -> tuple:
         ("test retire", "test", "fn le_cas_observe_est_arme_avec_la_porte_vivante_et_refuse_sans()", "fn x()"),
         ("injection non verifiee", "banc", NQ[0], "true"),
         ("non qualifiant vert", "banc", NQ[2], '  echo "MINUTEUR_PERDU_NON_QUALIFIANT raisons=${nq# }"\n  exit 0'),
-        ("releve non exige", "banc", EXIGENCES[0], "true"),
+        ("releve non publie", "banc", EXIGENCES[0], "true"),
+        ("quantum non exige", "banc", EXIGENCES[1], "true"),
+        ("vivant non exige", "banc", EXIGENCES[3], "true"),
         ("tirs non exiges", "banc", EXIGENCES[2], "true"),
         ("echec remesure", "banc", REMESURE, '    if [ "$code" = 0 ]; then exit 0; fi'),
         ("temoin accepte vert", "ci", CI_TEMOIN, 'if [ "$code" = 2 ]; then exit 1; fi'),
