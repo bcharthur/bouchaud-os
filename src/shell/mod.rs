@@ -934,6 +934,9 @@ static DORMEUR_ECART_MAX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic:
 static DORMEUR_MASQUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static DORMEUR_DUREE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static DORMEUR_RESULTAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// Coeur impose a la cible du masquage (`serie-dormeur-masque MS COEUR`),
+/// `usize::MAX` sinon : le temoin negatif de P13_REVEIL_CIBLE_ADMISSIBLE_V1.
+static DORMEUR_COEUR_FORCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 /// Coherence de l'election du dormeur : deux executions simultanees de son
 /// corps (double election), ou un tour ou `on_cpu` ne designe pas le coeur
 /// qui l'execute.
@@ -951,6 +954,8 @@ fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
     use core::sync::atomic::Ordering;
     let duree = if argc > 1 { argv[1].parse::<u64>().unwrap_or(3000) } else { 3000 }.clamp(10, 30_000);
     DORMEUR_DUREE_MS.store(duree, Ordering::Relaxed);
+    let force = if argc > 2 { argv[2].parse::<usize>().unwrap_or(usize::MAX) } else { usize::MAX };
+    DORMEUR_COEUR_FORCE.store(force, Ordering::Relaxed);
     DORMEUR_RESULTAT.store(0, Ordering::Release);
     DORMEUR_TACHE.store(usize::MAX, Ordering::Release);
     if !crate::kernel::task::spawn_noyau(fil_dormeur, "dormeur")
@@ -1002,17 +1007,61 @@ fn fil_dormeur_epingle() -> ! {
     }
 }
 
+/// P13_REVEIL_CIBLE_ADMISSIBLE_V1 : masquer `coeur` ne peut reproduire le
+/// defaut que s'il reste, hors de lui, un coeur qui ELIT -- un AP (le BSP, 0,
+/// est tenu hors ordonnanceur par le shell de l'autorun, et
+/// `coeur_electeur_au_repos` ne le compte pas). En SMP2, le coeur un n'en a
+/// aucun : masque, il donnait `autres_coeurs_au_repos=0` (NON_QUALIFIANT)
+/// -- trois fois de suite au KVM cible 40812092788 (2d850401).
+fn cible_masquage_admissible(coeur: usize, en_ligne: usize) -> bool {
+    coeur < en_ligne && (1..en_ligne).any(|c| c != coeur)
+}
+
 /// Lance le masqueur EPINGLE sur le coeur du dormeur, une fois celui-ci
-/// installe (500 ms).
+/// installe (500 ms) ET sur un coeur ou la reproduction est atteignable
+/// (`cible_masquage_admissible`) : sinon le pilote attend que le dormeur,
+/// migrable, en change -- 5 s au plus, puis refus (NON_QUALIFIANT, jamais
+/// vert). Un coeur impose (`DORMEUR_COEUR_FORCE`) n'est jamais remplace : le
+/// temoin negatif.
 fn fil_dormeur_pilote() -> ! {
     use core::sync::atomic::Ordering;
     crate::kernel::task::sleep_ticks(crate::kernel::timer::ms_to_ticks(500));
     let index = DORMEUR_TACHE.load(Ordering::Acquire);
-    let (etat, _, coeur) = crate::kernel::task::etat_tache_brut(index);
-    EPINGLE_COEUR.store(coeur as usize, Ordering::Release);
+    let en_ligne = crate::arch::x86_64::smp::schedulable_cpus().min(64);
+    let force = DORMEUR_COEUR_FORCE.load(Ordering::Relaxed);
+    let debut = crate::kernel::timer::monotonic_ns();
+    let limite = debut.saturating_add(5_000_000_000);
+    let mut ecartees = 0u64;
+    let (mut etat, _, mut coeur) = crate::kernel::task::etat_tache_brut(index);
+    let mut cible = if force != usize::MAX { force } else { coeur as usize };
+    while index != usize::MAX && etat != 9 && !cible_masquage_admissible(cible, en_ligne) {
+        ecartees += 1;
+        if force != usize::MAX || crate::kernel::timer::monotonic_ns() >= limite {
+            break;
+        }
+        crate::kernel::task::sleep_ticks(1);
+        (etat, _, coeur) = crate::kernel::task::etat_tache_brut(index);
+        cible = coeur as usize;
+    }
+    let attente_ms = crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1_000_000;
+    if index != usize::MAX && etat != 9 && !cible_masquage_admissible(cible, en_ligne) {
+        crate::serial_println!(
+            "SERIE_DORMEUR_MASQUE_ECHEC raison=cible-inadmissible coeur={} coeurs={} ecartees={} attente_ms={} force={}",
+            cible, en_ligne, ecartees, attente_ms, (force != usize::MAX) as u8
+        );
+        DORMEUR_RESULTAT.store(2, Ordering::Release);
+        loop {
+            crate::kernel::task::sleep_ticks(1000);
+        }
+    }
+    crate::serial_println!(
+        "SERIE_DORMEUR_CIBLE coeur={} coeurs={} ecartees={} attente_ms={} force={}",
+        cible, en_ligne, ecartees, attente_ms, (force != usize::MAX) as u8
+    );
+    EPINGLE_COEUR.store(cible, Ordering::Release);
     if index == usize::MAX || etat == 9
-        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_masqueur, "dormeur-masqueur", coeur as usize)
-        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_epingle, "dormeur-epingle", coeur as usize)
+        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_masqueur, "dormeur-masqueur", cible)
+        || !crate::kernel::task::spawn_noyau_epingle(fil_dormeur_epingle, "dormeur-epingle", cible)
     {
         crate::serial_println!("SERIE_DORMEUR_MASQUE_ECHEC raison=masqueur-refuse");
         DORMEUR_RESULTAT.store(2, Ordering::Release);

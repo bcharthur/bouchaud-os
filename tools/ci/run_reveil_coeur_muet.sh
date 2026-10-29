@@ -25,6 +25,14 @@
 # un ECHEC (code 1) ou un OK (code 0) arrete la serie et en est le verdict.
 # N essais non qualifiants de suite : NON_QUALIFIANT (code 2). Chaque essai
 # est garde (reveil-coeur-muet-tN.log).
+#
+# P13_REVEIL_CIBLE_ADMISSIBLE_V1 : le pilote ne masque que le coeur du
+# dormeur ou un AP reste electeur hors de lui (`SERIE_DORMEUR_CIBLE`), et
+# attend sinon que le dormeur en change ; la remesure ne rejoue plus un tirage
+# perdu d'avance (KVM cible 40812092788 : coeur un en SMP2, trois fois). Le
+# test de reproduction ci-dessous est INCHANGE.
+# BANC_DORMEUR_COEUR=C : impose la cible (temoin negatif) -- un coeur
+# inadmissible est refuse, NON_QUALIFIANT (code 2), jamais vert.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_reveil_coeur_muet.sh BOOTIMAGE [MASQUE_MS]}
@@ -56,7 +64,7 @@ LOG=reveil-coeur-muet.log
 rm -rf "$SCENARIO" "$IMAGE" "$LOG"
 mkdir -p "$SCENARIO"
 {
-  echo "serie-dormeur-masque $MASQUE"
+  echo "serie-dormeur-masque $MASQUE ${BANC_DORMEUR_COEUR:-}"
   echo 'serie-banc-attend dormeur'
   echo 'echo REVEIL_COEUR_MUET_AUTORUN_FIN'
 } > "$SCENARIO/autorun"
@@ -80,6 +88,7 @@ ligne=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'SERIE_DORMEUR_MASQUE coe
 champ() { echo "$ligne" | grep -oE "(^| )$1=[0-9]+" | sed -n '1s/.*=//p' || true; }
 temoin=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'BOUCHAUD_IMAGE_TEMOIN feature=[a-z0-9-]*' | sed 's/.*feature=//' | sort -u | tr '\n' ',' || true)
 echo "IMAGE sha256=$(sha256sum "$BOOT" | cut -c1-64) build=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'BOUCHAUD_BUILD commit=[^ ]*' | sed -n 1p | sed 's/.*commit=//') temoin=${temoin:-aucun}"
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' | grep -aoE 'SERIE_DORMEUR_(CIBLE|MASQUE_ECHEC) .*' | sed -n 1p || true
 echo "${ligne:-SERIE_DORMEUR_MASQUE absent}"
 
 # 1. Conditions de REPRODUCTION : sans elles le banc ne demontre rien.
@@ -87,6 +96,7 @@ echo "${ligne:-SERIE_DORMEUR_MASQUE absent}"
 nq=""
 [ "$SMP" -ge 2 ] || nq="$nq smp<2"
 grep -aq 'SERIE_BANC_ATTEND_OK type=dormeur' "$LOG" || nq="$nq barriere-dormeur"
+grep -aq 'SERIE_DORMEUR_MASQUE_ECHEC raison=cible-inadmissible' "$LOG" && nq="$nq cible-inadmissible"
 [ -n "$ligne" ] || nq="$nq ligne-absente"
 [ "$(champ cible_atteinte)" = 1 ] || nq="$nq cible-non-atteinte"
 [ "${ligne:+x}" = x ] && [ "$(champ autres_coeurs_au_repos)" -ge 1 ] 2>/dev/null || nq="$nq aucun-autre-coeur-au-repos"
