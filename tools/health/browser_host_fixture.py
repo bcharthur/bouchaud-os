@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json as _json
 import struct
 import time
@@ -34,7 +34,21 @@ import images_fixtures as _img
 # navigateur ne peut pas trancher : une image reservie l'a-t-elle ete depuis
 # la memoire, ou retelechargee ?
 from collections import defaultdict as _defaultdict
+from threading import Lock as _Lock
 REQUETES = _defaultdict(int)
+_REQUETES_VERROU = _Lock()
+
+
+def _compte(chemin):
+    """Increment atomiquement: plusieurs clients peuvent servir en parallele."""
+    with _REQUETES_VERROU:
+        REQUETES[chemin] += 1
+        return REQUETES[chemin]
+
+
+def _lit_compteur(chemin):
+    with _REQUETES_VERROU:
+        return REQUETES.get(chemin, 0)
 
 # LA MIRE DE SURFACE : trois aplats de couleur PURE.
 #
@@ -1852,6 +1866,11 @@ HTML = r'''<!doctype html>
 </script></body>'''
 
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        # Une requete incomplete ne doit pas immobiliser indefiniment son fil.
+        self.connection.settimeout(15)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/pixel.png":
@@ -1884,13 +1903,13 @@ class Handler(BaseHTTPRequestHandler):
         }.get(path)
         if batterie is not None:
             corps, genre = batterie
-            REQUETES[path] += 1
+            rang = _compte(path)
             self.send_response(200)
             self.send_header("Content-Type", genre)
             self.send_header("Content-Length", str(len(corps)))
             self.end_headers()
             self.wfile.write(corps)
-            print(f"BROWSER_HOST_FIXTURE_BATTERIE path={path} rang={REQUETES[path]}", flush=True)
+            print(f"BROWSER_HOST_FIXTURE_BATTERIE path={path} rang={rang}", flush=True)
             return
         if path == "/worker.js":
             # CE QUE LE SERVEUR VOIT, ET CE QUE CELA ELIMINE.
@@ -1913,7 +1932,7 @@ class Handler(BaseHTTPRequestHandler):
             # La DUREE de service, elle, l'est -- c'est pour cela qu'elle est
             # publiee separement de l'instant.
             debut = time.monotonic()
-            REQUETES["worker.js"] += 1
+            rang = _compte("worker.js")
             self.send_response(200)
             self.send_header("Content-Type", "text/javascript")
             self.send_header("Content-Length", str(len(WORKER_JS)))
@@ -1922,7 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             print(
                 f"BROWSER_HOST_FIXTURE_WORKER_OK path=/worker.js"
-                f" rang={REQUETES['worker.js']}"
+                f" rang={rang}"
                 f" octets={len(WORKER_JS)}"
                 f" service_ms={(time.monotonic() - debut) * 1000:.1f}"
                 f" hote_s={time.monotonic():.3f}",
@@ -1930,7 +1949,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/reutilise.png":
-            REQUETES["reutilise.png"] += 1
+            rang = _compte("reutilise.png")
             octets = MIRE["/mire/rouge.png"]
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -1940,7 +1959,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "max-age=300")
             self.end_headers()
             self.wfile.write(octets)
-            print(f"BROWSER_HOST_FIXTURE_REUTILISE requetes={REQUETES['reutilise.png']}", flush=True)
+            print(f"BROWSER_HOST_FIXTURE_REUTILISE requetes={rang}", flush=True)
             return
         if path in MIRE:
             octets = MIRE[path]
@@ -1954,7 +1973,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in _img.PAR_CHEMIN:
             entree = _img.PAR_CHEMIN[path]
-            REQUETES[entree["fichier"]] += 1
+            rang = _compte(entree["fichier"])
             self.send_response(200)
             self.send_header("Content-Type", entree["mime"])
             self.send_header("Content-Length", str(len(entree["octets"])))
@@ -1965,7 +1984,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(entree["octets"])
             print(f"BROWSER_HOST_FIXTURE_IMAGE id={entree['id']} nom={entree['nom']} "
-                  f"octets={len(entree['octets'])} requetes={REQUETES[entree['fichier']]}", flush=True)
+                  f"octets={len(entree['octets'])} requetes={rang}", flush=True)
             return
         if path == "/favicon.ico":
             self.send_response(200)
@@ -1978,7 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/compteur":
             from urllib.parse import parse_qs, urlparse
             fichier = parse_qs(urlparse(self.path).query).get("fichier", [""])[0]
-            corps = str(REQUETES.get(fichier, 0)).encode()
+            corps = str(_lit_compteur(fichier)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(corps)))
@@ -2040,4 +2059,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[fixture]", fmt % args, flush=True)
 
-HTTPServer(("0.0.0.0", 18082), Handler).serve_forever()
+# BOUCHAUD_FIXTURE_HOL_V1: une connexion acceptee avec en-tetes partiels
+# bloquait le serveur mono-thread. Les requetes /pixel.png et /endurance-relais
+# s'accumulaient sans reponse (endurance KVM 40900916639, id=282+).
+# Le serveur concurrent traite les autres demandes independamment.
+def creer_serveur(adresse=("0.0.0.0", 18082)):
+    return ThreadingHTTPServer(adresse, Handler)
+
+
+if __name__ == "__main__":
+    creer_serveur().serve_forever()
