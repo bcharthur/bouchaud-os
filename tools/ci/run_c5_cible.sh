@@ -18,6 +18,11 @@ rouges=$(grep -c 'FAUTE_PERSISTANCE_TOUR_ECHEC' "$SORTIE.txt" || true)
 signes=$(grep -c "manque=\['PERSIST_COURSE_OK'\] fatal=0 faute_inattendue=1" "$SORTIE.txt" || true)
 accel=tcg; [[ ${BO_QEMU_KVM:-0} == 1 ]] && accel=kvm
 echo "C5_CIBLE accel=$accel image=$(sha256sum "$IMAGE" | cut -c1-16) tours=$N verts=$verts rouges=$rouges rouges_signature_c5=$signes attendu=$ATTENDU"
+# Chaque tour rouge et son verdict, dans le journal du job : un rouge sans
+# la signature C5 doit pouvoir s'attribuer sans l'artefact (KVM cible
+# 40822176701 : temoin 4 rouges, 3 signes, verdict du 4e invisible).
+awk '/FAUTE_PERSISTANCE_TOUR_OK/{n=0} /FAUTE_PERSISTANCE_TOUR_ECHEC/{n=12} n>0{print "  rouge : " $0; n--}' "$SORTIE.txt" | head -60 || true
+grep -rahE 'PROCESS_FAULT|KERNEL PANIC|panicked at' "$SORTIE" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | tr -d '\r' | sort | uniq -c | sort -rn | head -12 | sed 's/^/  faute : /' || true
 if [[ $ATTENDU == rouge ]]; then
   [[ $rouges -ge 1 && $signes -eq $rouges && $((verts + rouges)) -eq $N ]] && { echo C5_CIBLE_OK; exit 0; }
 else
