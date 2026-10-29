@@ -66,6 +66,12 @@ for essai in $(seq 1 "$N"); do
       inconclus=$((inconclus + 1))
       echo "    essai non conclusif (smoke=$smoke) ; fin de sortie :"
       tail -8 "$sortie" | sed 's/^/      /'
+      # La batterie de workers (P5) : quels tests ont abouti, lesquels non, et
+      # le cycle de vie des WebWorker dans le journal serie.
+      echo "      batterie et workers (journal serie) :"
+      sed -E 's/\x1b\[[0-9;]*m//g' "$journal" 2>/dev/null | tr -d '\r' \
+        | grep -aE 'HOST_WORKER_|HOST_SCROLL_PRET|WORKER_ETAPE|PERF_EXECVE .*WebWorker|PROCESS_(EXIT|DEATH|FAULT).*WebWorker|\[LB:WORKER|SPAWN_ETAPE' \
+        | awk 'NR <= 80 { print "        " substr($0, 1, 220) }' || true
     fi
   done
 done
