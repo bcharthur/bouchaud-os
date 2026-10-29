@@ -16,7 +16,12 @@
 #
 # `serie-minuteur-perdu` met le minuteur du coeur zero dans CET etat (MSR a 0,
 # echeance logicielle passee), verifie 20 ms plus tard, sans dormir, qu'il a
-# tenu, puis dort un tick a la fois DUREE_MS ms (3000 par defaut). Exige :
+# tenu, puis dort un tick a la fois DUREE_MS ms (3000 par defaut). Pendant ce
+# temps, le shell attend `/bin/ordonnanceur-probe 8 1`, la sonde de l'A/B ou
+# la panne a ete vue : le coeur zero passe par l'inactivite de l'ordonnanceur
+# (le shell qui dort hors ordonnanceur n'y passe pas -- premier essai KVM
+# 40819500995 : `releves=0 tirs=0`, minuteur ranime par un autre chemin).
+# Exige :
 #   * l'etat injecte a tenu (`injection_tenue=1`, aucun quantum pendant) --
 #     sinon NON_QUALIFIANT (code 2), jamais vert ;
 #   * le minuteur est releve (`releves>=1`), le quantum bat de nouveau
@@ -50,16 +55,19 @@ SMP=${BO_SMP:-1}
 ACCEL="-cpu max"
 if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
   [ -w /dev/kvm ] || { echo "BO_QEMU_KVM=1 mais /dev/kvm inaccessible" >&2; exit 1; }
-  ACCEL="-enable-kvm -cpu host"
+  ACCEL="-enable-kvm -cpu host,kvm-steal-time=on"
 fi
 SCENARIO=scenario-minuteur-perdu
 IMAGE=minuteur-perdu.img
 LOG=minuteur-perdu.log
 rm -rf "$SCENARIO" "$IMAGE" "$LOG"
-mkdir -p "$SCENARIO"
+mkdir -p "$SCENARIO/bin"
+(cd tools/userland && OUT=out-minuteur-perdu ./build.sh musl >/dev/null)
+cp tools/userland/out-minuteur-perdu/ordonnanceur-probe "$SCENARIO/bin/"
 {
   echo 'reveil-precis on'
   echo "serie-minuteur-perdu $DUREE"
+  echo '/bin/ordonnanceur-probe 8 1'
   echo 'serie-banc-attend minuteur'
   echo 'echo MINUTEUR_PERDU_AUTORUN_FIN'
 } > "$SCENARIO/autorun"
@@ -72,7 +80,7 @@ echo "MINUTEUR_PERDU smp=$SMP accel=$ACCEL duree_ms=$DUREE"
 qemu-system-x86_64 $ACCEL -drive format=raw,file="$BOOT" -drive format=raw,file="$IMAGE" \
   -m 1024 -smp "$SMP" -display none -no-reboot ${BO_QEMU_EXTRA:-} -serial file:"$LOG" &
 PID=$!
-LIMITE=$((SECONDS + 180))
+LIMITE=$((SECONDS + 240))
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
   grep -aqE 'KERNEL PANIC|panicked at' "$LOG" && { sleep 2; break; }
@@ -87,6 +95,7 @@ champ() { echo "$ligne" | grep -oE "(^| )$1=[0-9]+" | sed -n '1s/.*=//p' || true
 temoin=$(propre | grep -ao 'BOUCHAUD_IMAGE_TEMOIN feature=[a-z0-9-]*' | sed 's/.*feature=//' | sort -u | tr '\n' ',' || true)
 echo "IMAGE sha256=$(sha256sum "$BOOT" | cut -c1-64) build=$(propre | grep -ao 'BOUCHAUD_BUILD commit=[^ ]*' | sed -n 1p | sed 's/.*commit=//') temoin=${temoin:-aucun}"
 echo "${ligne:-SERIE_MINUTEUR_PERDU absent}"
+propre | grep -aoE '(SERIE_BANC_ATTEND_[A-Z]+|SERIE_MINUTEUR_PERDU_ECHEC|ORDONNANCEUR_[A-Z_]+|MINUTEUR_PERDU_AUTORUN_FIN)( [^ ]*){0,4}' | sed 's/^/  serie : /' | head -8 || true
 
 # 1. Conditions de reproduction : l'etat observe a ete injecte et a tenu.
 nq=""
