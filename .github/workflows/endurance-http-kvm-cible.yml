@@ -1,0 +1,81 @@
+name: Endurance HTTP KVM ciblee
+
+# Une seule validation du correctif fixture HTTP apres C22.
+# Reutilise le build Ladybird originel 40900916639 et verifie ses entrees.
+# Ne declenche aucun des 15 jobs du pipeline Ladybird.
+on:
+  push:
+    branches: ['fix/endurance-fixture-hol-20261029']
+    paths:
+      - '.github/workflows/endurance-http-kvm-cible.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  endurance-http:
+    name: KVM 1200s avec Ladybird reutilise
+    runs-on: ubuntu-24.04
+    timeout-minutes: 48
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Regression fixture HTTP sans VM
+        run: python3 -m unittest discover -s tools/ci/reliability -p test_fixture_concurrence.py -v
+
+      - name: Dependances QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+
+      - name: Cache de compilation noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: endurance-http-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            reliability-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+
+      - name: Bootimage Bouchaud OS
+        run: tools/ci/build_kernel.sh
+
+      - name: Telecharger le build Ladybird existant
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          repository: ${{ github.repository }}
+          run-id: 40900916639
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: native-browser
+
+      - name: Verifier l'identite des sources et du binaire Ladybird
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+
+      - name: Autoriser KVM
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Rejouer exactement le contrat d'endurance longue
+        env:
+          BO_QEMU_KVM: "1"
+        run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 1200
+
+      - name: Conserver les preuves meme si rouge
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: endurance-http-kvm-preuves
+          path: |
+            serie-endurance.log
+            serie-endurance.log.propre
+            fixture-endurance.log
+          if-no-files-found: warn
