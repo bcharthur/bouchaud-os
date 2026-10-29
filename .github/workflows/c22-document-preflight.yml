@@ -1,0 +1,27 @@
+name: C22 document witness preflight
+
+on:
+  push:
+    branches: ['fix/endurance-fixture-hol-20261029']
+    paths:
+      - 'tools/ladybird/prepare-c22-partitions.py'
+      - 'tools/ladybird/test-c22-partitions.sh'
+      - 'tools/verifie-c22-partitions.py'
+      - 'tools/ci/reliability/preuve_c22_document.py'
+      - '.github/workflows/c22-document-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    name: C22 temoin negatif - C++ rapide
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Garde et mutations negatives C22
+        run: python3 tools/verifie-c22-partitions.py
+      - name: Compilation du crochet et execution des deux bras
+        run: python3 tools/ci/reliability/preuve_c22_document.py

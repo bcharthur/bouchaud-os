@@ -36,9 +36,14 @@ def verifie(prep: str, chaine: str) -> list[str]:
         fautes.append("operation de tas interdite (collecte faible ou destruction)")
     if '"Libraries/LibWeb/DOM/Document.cpp"' not in prep:
         fautes.append("Document::destroy non prepare")
-    if '"    ak_kmalloc_collect();\\n"' not in prep:
+    doc = prep.split('    document = Path(', 1)[1] if '    document = Path(' in prep else ''
+    if '"            ak_kmalloc_collect();\\n"' not in doc:
         fautes.append("collecte mimalloc non appelee depuis Document::destroy")
-    if "BOUCHAUD_C22_DOCUMENT_COLLECTE_V2" not in prep:
+    if 'getenv(\\\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\\\")' not in doc or '"        if (!temoin) {\\n"' not in doc:
+        fautes.append("collecte Document::destroy active sous temoin historique")
+    if "[LB:C22] document_destroy collecte duree_us=" not in doc or "clock_gettime(CLOCK_MONOTONIC" not in doc:
+        fautes.append("point de collecte Document sans preuve de cout")
+    if "BOUCHAUD_C22_DOCUMENT_COLLECTE_V2" not in doc:
         fautes.append("repere C22 Document absent")
     appels = re.findall(r"python3 tools/ladybird/(prepare-[\w-]+\.py)", chaine)
     if "prepare-c22-partitions.py" not in appels:
@@ -60,7 +65,9 @@ MUTATIONS = [
     ("CHAINE", 'python3 tools/ladybird/prepare-c22-partitions.py "$SRC"\n', ""),
     ("PREP", "mi_heap_collect(heap, true);", "mi_heap_destroy(heap);"),
     ("PREP", '"Libraries/LibWeb/DOM/Document.cpp"', '"LibWeb/DOM/Document.cpp"'),
-    ("PREP", '"    ak_kmalloc_collect();\\n"', '"    // collecte manquante\\n"'),
+    ("PREP", '"            ak_kmalloc_collect();\\n"', '"            // collecte manquante\\n"'),
+    ("PREP", '"        if (!temoin) {\\n"', '"        if (true) {\\n"'),
+    ("PREP", 'document_destroy collecte duree_us=', 'document_destroy autre_mesure='),
 ]
 
 

@@ -127,7 +127,10 @@ def main() -> int:
         document,
         "#include <AK/Time.h>\n",
         "#include <AK/Time.h>\n"
-        "#include <AK/kmalloc.h> // BOUCHAUD_C22_DOCUMENT_COLLECTE_V2\n",
+        "#include <AK/kmalloc.h> // BOUCHAUD_C22_DOCUMENT_COLLECTE_V2\n"
+        "#include <cstdio>\n"
+        "#include <cstdlib>\n"
+        "#include <time.h>\n",
     )
     remplace(
         document,
@@ -138,7 +141,22 @@ def main() -> int:
         "    // liberes par le demontage doivent rendre leurs pages maintenant,\n"
         "    // sans attendre un balayage GC qui peut arriver apres le repere M2.\n"
         "    // Collecte mimalloc uniquement, depuis le fil proprietaire.\n"
-        "    ak_kmalloc_collect();\n"
+        "    // Temoin historique : aucune collecte ajoutee dans ce Document.\n"
+        "    {\n"
+        "        static bool const temoin = getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\") != nullptr;\n"
+        "        static bool const preuve = getenv(\"BOUCHAUD_LB_MEMORY_PROOF\") != nullptr;\n"
+        "        if (!temoin) {\n"
+        "            struct timespec debut {}, fin {};\n"
+        "            if (preuve)\n"
+        "                clock_gettime(CLOCK_MONOTONIC, &debut);\n"
+        "            ak_kmalloc_collect();\n"
+        "            if (preuve) {\n"
+        "                clock_gettime(CLOCK_MONOTONIC, &fin);\n"
+        "                long duree_us = (fin.tv_sec - debut.tv_sec) * 1000000L + (fin.tv_nsec - debut.tv_nsec) / 1000;\n"
+        "                fprintf(stderr, \"[LB:C22] document_destroy collecte duree_us=%ld\\n\", duree_us);\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
         "}\n",
     )
 
