@@ -937,7 +937,9 @@ pub fn avance_pour_sommeil_interactif(echeance_ns: u64) {
         };
         let Some(cible) = crate::kernel::timer::tsc_pour_ns(ns) else { return };
         let cible = cible.max(maintenant.saturating_add(1));
-        if cible < ARME_TSC[cpu].load(Ordering::Relaxed) && cible < QUANTUM_TSC[cpu].load(Ordering::Relaxed) {
+        if cible < porte(ARME_TSC[cpu].load(Ordering::Relaxed), maintenant)
+            && cible < porte(QUANTUM_TSC[cpu].load(Ordering::Relaxed), maintenant)
+        {
             programme_deadline(cpu, cible, crate::kernel::reveil_precis::EtatDeadline::Interactif);
             ARME_OCCUPE[cpu].store(true, Ordering::Relaxed);
             AVANCES_OCCUPEES.fetch_add(1, Ordering::Relaxed);
@@ -1168,8 +1170,40 @@ pub fn arme_reveil_precis_avant_hlt() {
     // drapeaux. Motif croise : un armement decide sous l'ancienne politique
     // est termine quand la bascule rend la main.
     EN_ARMEMENT[cpu].store(true, Ordering::SeqCst);
+    releve_minuteur_perime(cpu);
     arme_reveil_precis_sous_drapeau(cpu);
     EN_ARMEMENT[cpu].store(false, Ordering::Release);
+}
+
+/// P13_MINUTEUR_PERIME_V1 (C23) : un minuteur dont l'echeance armee est
+/// depassee d'un quantum sans entree du vecteur a perdu son tir ; rien ne le
+/// reprogrammerait plus (le quantum ne se rearme qu'au vecteur, le reveil
+/// precis se jugeait contre cette echeance morte). Le quantum est rearme a
+/// l'entree d'idle, politique de reveil precis active ou non.
+fn releve_minuteur_perime(cpu: usize) {
+    if MODE_TIMER_LOCAL.load(Ordering::Acquire) != MODE_TSC_DEADLINE {
+        return;
+    }
+    let etat = crate::kernel::reveil_precis::EtatDeadline::depuis(ETAT_DEADLINE[cpu].load(Ordering::Relaxed));
+    let quantum = crate::kernel::timer::cycles_par_ms().saturating_mul(SCHED_QUANTUM_TICKS);
+    if crate::kernel::reveil_precis::minuteur_perime(etat, ARME_TSC[cpu].load(Ordering::Relaxed),
+        crate::arch::x86_64::cpu::rdtsc(), quantum)
+    {
+        MINUTEURS_PERIMES.fetch_add(1, Ordering::Relaxed);
+        arm_local_scheduler_timer();
+    }
+}
+
+/// La borne a laquelle comparer une nouvelle cible (P13_MINUTEUR_PERIME_V1).
+fn porte(arme_tsc: u64, tsc_maintenant: u64) -> u64 {
+    crate::kernel::reveil_precis::porte_vivante(arme_tsc, tsc_maintenant)
+}
+
+/// Minuteurs morts releves a l'entree d'idle (P13_MINUTEUR_PERIME_V1).
+static MINUTEURS_PERIMES: AtomicU64 = AtomicU64::new(0);
+
+pub fn minuteurs_perimes() -> u64 {
+    MINUTEURS_PERIMES.load(Ordering::Relaxed)
 }
 
 fn arme_reveil_precis_sous_drapeau(cpu: usize) {
@@ -1234,7 +1268,8 @@ fn arme_reveil_precis_sous_drapeau(cpu: usize) {
         borne,
         maintenant,
         crate::arch::x86_64::cpu::rdtsc(),
-        ARME_TSC[cpu].load(Ordering::Relaxed),
+        // P13_MINUTEUR_PERIME_V1 : une echeance passee ne porte plus rien.
+        porte(ARME_TSC[cpu].load(Ordering::Relaxed), crate::arch::x86_64::cpu::rdtsc()),
         crate::kernel::timer::tsc_pour_ns(borne),
         crate::kernel::timer::tsc_pour_ns(maintenant.saturating_add(crate::kernel::reveil_precis::MARGE_NS)),
     );

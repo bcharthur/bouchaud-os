@@ -77,6 +77,30 @@ pub fn observe_deadline(etat: EtatDeadline, cible: u64, maintenant: u64) -> Etat
     if etat.arme() && cible <= maintenant { EtatDeadline::Expire } else { etat }
 }
 
+/// P13_MINUTEUR_PERIME_V1 (C23) -- CE QUE LE MINUTEUR PORTE ENCORE.
+///
+/// `ARME_TSC` dit ce qui a ete programme, pas ce qui reste a tirer. Une
+/// echeance PASSEE ne porte plus rien : elle a tire (le vecteur va passer ou
+/// est passe) ou son tir s'est perdu. La comparer a une nouvelle cible
+/// refusait tout armement « quantum avant » pour toujours. Confirmation
+/// stricte 40812095472 (2d850401, KVM SMP1, tour 4 `on`) :
+/// `deadline_tsc=0 arme_tsc=286824508404` fige d'un releve a l'autre,
+/// `tirs=+0 refus_quantum_avant=+4656` -- le coeur ne vivait plus que du PIT.
+/// Rend la borne a laquelle comparer : la cible armee si elle est encore
+/// future, `u64::MAX` (rien d'arme) sinon.
+pub fn porte_vivante(arme_tsc: u64, tsc_maintenant: u64) -> u64 {
+    if arme_tsc > tsc_maintenant { arme_tsc } else { u64::MAX }
+}
+
+/// P13_MINUTEUR_PERIME_V1 : une echeance connue armee, depassee de plus d'un
+/// quantum, sans que le vecteur local l'ait observee (il l'aurait marquee
+/// `Expire` ou reprogrammee) -- son tir est perdu, le minuteur est mort.
+/// Une echeance a peine passee n'en est pas une : son interruption peut
+/// attendre, interruptions coupees, la fin de la section en cours.
+pub fn minuteur_perime(etat: EtatDeadline, arme_tsc: u64, tsc_maintenant: u64, quantum_cycles: u64) -> bool {
+    etat.arme() && quantum_cycles != 0 && arme_tsc.saturating_add(quantum_cycles) < tsc_maintenant
+}
+
 /// Seule elision autorisee : meme cible, encore future et connue armee.
 /// Une invalidation (nouveau quantum/contexte), une expiration ou un
 /// desarmement imposent une ecriture, meme si les valeurs TSC sont egales.

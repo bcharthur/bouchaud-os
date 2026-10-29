@@ -5,6 +5,7 @@ mod reveil_precis;
 
 use reveil_precis::{decide, decide_compte, decide_motif, tsc_de, Armement, Refus, JAMAIS, MARGE_NS};
 use reveil_precis::{EtatDeadline as Etat, doit_programmer, observe_deadline};
+use reveil_precis::{minuteur_perime, porte_vivante};
 
 #[test]
 fn one_shot_une_valeur_memorisee_ne_prouve_pas_un_armement() {
@@ -375,4 +376,56 @@ fn un_quantum_echu_pendant_le_traitement_redevient_une_fin_de_quantum() {
     assert!(!classe_au_rearmement(3_980_000, quantum, quantum));
     // Une entree deja echue ne redevient jamais anticipee.
     assert!(!classe_au_rearmement(quantum, quantum - 1, quantum));
+}
+
+// P13_MINUTEUR_PERIME_V1 (C23) : confirmation stricte 40812095472, KVM SMP1,
+// `deadline_tsc=0 arme_tsc=286824508404 quantum_tsc=286832699547` fige.
+
+#[test]
+fn une_echeance_passee_ne_porte_plus_rien() {
+    assert_eq!(porte_vivante(1_000, 999), 1_000);
+    assert_eq!(porte_vivante(1_000, 1_000), u64::MAX);
+    assert_eq!(porte_vivante(1_000, 5_000), u64::MAX);
+}
+
+#[test]
+fn le_cas_observe_est_arme_avec_la_porte_vivante_et_refuse_sans() {
+    // Le releve fige du tour 4 : tout armement precis etait refuse.
+    let arme = 286_824_508_404u64;
+    let maintenant_tsc = arme + 2_000_000_000; // ~0,8 s plus tard
+    let maintenant = (maintenant_tsc - BOOT) / 2; // en ns, horloge des tests
+    let borne = maintenant + 700_000;
+    let cible = t(borne);
+    assert_eq!(
+        decide_motif(true, borne, maintenant, maintenant_tsc, arme, Some(cible), p(maintenant)),
+        Err(Refus::QuantumAvant),
+        "le defaut : une cible passee refuse un armement futur"
+    );
+    let a = decide_motif(true, borne, maintenant, maintenant_tsc, porte_vivante(arme, maintenant_tsc), Some(cible), p(maintenant));
+    assert_eq!(a, Ok(Armement { tsc: cible, due: false }));
+}
+
+#[test]
+fn un_quantum_vivant_plus_proche_reste_arme() {
+    let maintenant = 10_000_000;
+    let quantum = t(maintenant + 4_000_000);
+    let borne = maintenant + 6_000_000;
+    assert_eq!(
+        decide_motif(true, borne, maintenant, t(maintenant), porte_vivante(quantum, t(maintenant)), Some(t(borne)), p(maintenant)),
+        Err(Refus::QuantumAvant)
+    );
+}
+
+#[test]
+fn minuteur_perime_seulement_au_dela_d_un_quantum_et_arme() {
+    let q = 8_000_000;
+    for etat in [Etat::Quantum, Etat::Interactif, Etat::Idle] {
+        assert!(!minuteur_perime(etat, 1_000, 1_000 + q, q), "{etat:?} : a peine un quantum");
+        assert!(minuteur_perime(etat, 1_000, 1_001 + q, q), "{etat:?}");
+        assert!(!minuteur_perime(etat, 5_000, 1_000, q), "{etat:?} : futur");
+    }
+    for etat in [Etat::NonProgramme, Etat::Expire, Etat::Invalide] {
+        assert!(!minuteur_perime(etat, 1_000, 1_000_000_000, q), "{etat:?} : rien d'arme");
+    }
+    assert!(!minuteur_perime(Etat::Quantum, 1_000, u64::MAX, 0), "frequence inconnue");
 }
