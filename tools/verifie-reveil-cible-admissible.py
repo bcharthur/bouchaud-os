@@ -30,6 +30,8 @@ from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 F = {
+    "creation": RACINE / "src/kernel/process/thread/creation.rs",
+    "cycle": RACINE / "src/kernel/process/thread/lifecycle.rs",
     "shell": RACINE / "src/shell/mod.rs",
     "banc": RACINE / "tools/ci/run_reveil_coeur_muet.sh",
     "ci": RACINE / ".github/workflows/p13-cible-kvm.yml",
@@ -56,6 +58,17 @@ CI_ARME = "BANC_DORMEUR_COEUR=1 BO_SMP=2 BO_QEMU_KVM=1 tools/ci/run_reveil_coeur
 CI_LIGNE = "grep -aq 'SERIE_DORMEUR_MASQUE_ECHEC raison=cible-inadmissible coeur=1 coeurs=2' precondition-reveil-kvm-smp2-coeur1.log"
 CI_CODE = 'if [ "$code" != 2 ]; then echo "PRECONDITION_REVEIL code=$code (NON_QUALIFIANT attendu : 2)" >&2; exit 1; fi'
 CI_PREUVE = "            precondition-reveil-kvm-*.log"
+# P13_REVEIL_CIBLE_ADMISSIBLE_V2 : le dormeur nait, migrable, sur le plus haut
+# coeur admissible (KVM cible 40816132661 : temoin SMP2 ne sortant jamais du
+# coeur un, trois refus apres 5 s).
+NAISSANCE = ("        (0..en_ligne).rev().find(|&c| cible_masquage_admissible(c, en_ligne)).unwrap_or(0)\n"
+             "    };\n"
+             '    if !crate::kernel::task::spawn_noyau_migrable_sur(fil_dormeur, "dormeur", initial)')
+PLACE = ("        let impose = coeur_initial.filter(|&c| c < 64 && task.affinity_mask & (1u64 << c) != 0);\n"
+         "        task.runq_cpu.range(impose.unwrap_or_else(|| choose_runq_cpu(task.affinity_mask)));")
+ORDINAIRE = "pub fn register(task: Box<Task>) -> usize {\n    register_place(task, None)\n}"
+MIGRABLE_SUR = ("pub fn spawn_noyau_migrable_sur(entree: fn() -> !, nom: &str, cpu: usize) -> bool {\n"
+                "    spawn_noyau_interne(entree, nom, Priorite::Normale, false, u8::try_from(cpu).ok())\n}")
 
 
 def corps(source: str, signature: str) -> str:
@@ -98,6 +111,13 @@ def verifie(t: dict) -> list:
                       "AVANT le masqueur, ou un refus ne rend plus 2 sans masquer.")
     if pilote.count("spawn_noyau_epingle(") != 2 or "coeur as usize)" in pilote.split(REFUS)[-1]:
         fautes.append("fil_dormeur_pilote : le masqueur ou le fil epingle ne visent plus la cible verifiee.")
+    if NAISSANCE not in corps(t["shell"], "fn serie_dormeur_masque(") or 'spawn_noyau(fil_dormeur,' in t["shell"]:
+        fautes.append("serie_dormeur_masque : le dormeur ne nait plus, migrable, sur le plus haut coeur admissible.")
+    if PLACE not in corps(t["creation"], "pub fn register_place(") or ORDINAIRE not in t["creation"]:
+        fautes.append("creation.rs : le coeur initial impose n'est plus limite a la premiere file d'une tache "
+                      "migrable, ou le placement ordinaire a change.")
+    if MIGRABLE_SUR not in t["cycle"] or "task.migrable = true;" not in corps(t["cycle"], "fn spawn_noyau_interne("):
+        fautes.append("lifecycle.rs : `spawn_noyau_migrable_sur` n'est plus un fil migrable a coeur initial.")
     b = t["banc"]
     for quoi, extrait in (("le test de reproduction a change", REPRODUCTION),
                           ("un refus n'est plus NON_QUALIFIANT", NQ_REFUS),
@@ -139,6 +159,14 @@ def negatifs(t: dict) -> tuple:
         ("ci accepte le vert", "ci", CI_CODE, 'if [ "$code" = 1 ]; then exit 1; fi'),
         ("ci sans ligne de refus", "ci", CI_LIGNE, "true"),
         ("ci sans preuve", "ci", CI_PREUVE + "\n", ""),
+        ("dormeur au placement ordinaire", "shell", 'spawn_noyau_migrable_sur(fil_dormeur, "dormeur", initial)',
+         'spawn_noyau(fil_dormeur, "dormeur")'),
+        ("dormeur sur le plus bas coeur", "shell", "(0..en_ligne).rev().find(", "(0..en_ligne).find("),
+        ("coeur initial hors ligne accepte", "creation", "coeur_initial.filter(|&c| c < 64 && task.affinity_mask & (1u64 << c) != 0)",
+         "coeur_initial"),
+        ("placement ordinaire impose", "creation", "    register_place(task, None)\n", "    register_place(task, Some(0))\n"),
+        ("migrable_sur epingle", "cycle", "spawn_noyau_interne(entree, nom, Priorite::Normale, false, u8::try_from(cpu).ok())",
+         "spawn_noyau_interne(entree, nom, Priorite::Normale, false, None)"),
     ]
     echecs = []
     for nom, cle, avant, apres in mutations:

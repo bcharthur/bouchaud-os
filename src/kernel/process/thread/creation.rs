@@ -716,7 +716,16 @@ pub fn compteur_secours_ordonnanceur() -> u64 {
     SECOURS_ORDONNANCEUR_RELOGEES.load(Ordering::Relaxed)
 }
 
-pub fn register(mut task: Box<Task>) -> usize {
+pub fn register(task: Box<Task>) -> usize {
+    register_place(task, None)
+}
+
+/// `register`, avec un coeur INITIAL impose a une tache noyau MIGRABLE
+/// (P13_REVEIL_CIBLE_ADMISSIBLE_V2, banc du reveil derriere un coeur muet :
+/// le dormeur doit naitre sur un coeur ou la reproduction est atteignable).
+/// La tache reste migrable : seule sa premiere file change. `None`, ou un
+/// coeur hors ligne : le placement ordinaire (le moins charge).
+pub fn register_place(mut task: Box<Task>, coeur_initial: Option<u8>) -> usize {
     // Lot B8 : plus de gros verrou. La tache est encore a nous seuls (Box) ;
     // la SEULE section critique du chemin est l'insertion dans le registre,
     // sous son propre verrou (voir plus bas), puis `publish_ready`.
@@ -751,7 +760,8 @@ pub fn register(mut task: Box<Task>) -> usize {
         // Une tache qui se declare migrable est donc placee comme n'importe
         // quelle autre : sur le coeur le moins charge parmi ceux en ligne.
         task.affinity_mask = online_affinity_mask();
-        task.runq_cpu.range(choose_runq_cpu(task.affinity_mask));
+        let impose = coeur_initial.filter(|&c| c < 64 && task.affinity_mask & (1u64 << c) != 0);
+        task.runq_cpu.range(impose.unwrap_or_else(|| choose_runq_cpu(task.affinity_mask)));
         task.last_cpu.range(u8::MAX);
     } else {
         if task.affinity_mask == 0 {

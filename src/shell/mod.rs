@@ -958,7 +958,17 @@ fn serie_dormeur_masque(argc: usize, argv: &[&str; 12]) -> i32 {
     DORMEUR_COEUR_FORCE.store(force, Ordering::Relaxed);
     DORMEUR_RESULTAT.store(0, Ordering::Release);
     DORMEUR_TACHE.store(usize::MAX, Ordering::Release);
-    if !crate::kernel::task::spawn_noyau(fil_dormeur, "dormeur")
+    // P13_REVEIL_CIBLE_ADMISSIBLE_V2 : le dormeur, MIGRABLE, nait sur le plus
+    // haut coeur admissible (ou sur le coeur impose). Le placement ordinaire
+    // le posait en SMP2 sur le coeur un ; l'image temoin, regle historique,
+    // ne l'en sortait jamais (KVM cible 40816132661 : trois refus
+    // `cible-inadmissible` apres 5 s, NON_QUALIFIANT au lieu de l'ECHEC du
+    // temoin).
+    let en_ligne = crate::arch::x86_64::smp::schedulable_cpus().min(64);
+    let initial = if force < en_ligne { force } else {
+        (0..en_ligne).rev().find(|&c| cible_masquage_admissible(c, en_ligne)).unwrap_or(0)
+    };
+    if !crate::kernel::task::spawn_noyau_migrable_sur(fil_dormeur, "dormeur", initial)
         || !crate::kernel::task::spawn_noyau(fil_dormeur_pilote, "dormeur-pilote")
     {
         crate::println!("serie-dormeur-masque : fil noyau refuse");

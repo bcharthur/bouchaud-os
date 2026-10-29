@@ -730,11 +730,20 @@ pub fn spawn_noyau(entree: fn() -> !, nom: &str) -> bool {
 /// aujourd'hui ; l'audio, le compositeur et tout service temps reel souple la
 /// demanderont par le meme appel.
 pub fn spawn_noyau_sensible(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
-    spawn_noyau_interne(entree, nom, priorite, true)
+    spawn_noyau_interne(entree, nom, priorite, true, None)
 }
 
 pub fn spawn_noyau_priorite(entree: fn() -> !, nom: &str, priorite: Priorite) -> bool {
-    spawn_noyau_interne(entree, nom, priorite, false)
+    spawn_noyau_interne(entree, nom, priorite, false, None)
+}
+
+/// Lance un fil noyau MIGRABLE dont la PREMIERE file est le coeur `cpu`
+/// (P13_REVEIL_CIBLE_ADMISSIBLE_V2) : pour les bancs qui doivent faire naitre
+/// une tache ou leur reproduction est atteignable, sans l'epingler. `false`
+/// si la tache n'a pu etre creee ; un coeur hors ligne rend le placement
+/// ordinaire.
+pub fn spawn_noyau_migrable_sur(entree: fn() -> !, nom: &str, cpu: usize) -> bool {
+    spawn_noyau_interne(entree, nom, Priorite::Normale, false, u8::try_from(cpu).ok())
 }
 
 /// Lance un fil noyau EPINGLE au coeur `cpu` -- jamais migre, jamais
@@ -760,6 +769,7 @@ fn spawn_noyau_interne(
     nom: &str,
     priorite: Priorite,
     latency_sensitive: bool,
+    coeur_initial: Option<u8>,
 ) -> bool {
     // AUCUN GROS VERROU ICI, ET C'EST DELIBERE.
     //
@@ -800,7 +810,7 @@ fn spawn_noyau_interne(
     // d'appelant. Il se declare donc migrable.
     task.migrable = true;
     task.latency_sensitive.range(latency_sensitive);
-    register(task);
+    register_place(task, coeur_initial);
     true
 }
 
