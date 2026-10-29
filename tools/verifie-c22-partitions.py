@@ -34,6 +34,12 @@ def verifie(prep: str, chaine: str) -> list[str]:
         fautes.append("la collecte du tas par defaut a disparu")
     if re.search(r"mi_collect\(false\)|mi_heap_destroy|mi_heap_delete", prep):
         fautes.append("operation de tas interdite (collecte faible ou destruction)")
+    if '"Libraries/LibWeb/DOM/Document.cpp"' not in prep:
+        fautes.append("Document::destroy non prepare")
+    if '"    ak_kmalloc_collect();\\n"' not in prep:
+        fautes.append("collecte mimalloc non appelee depuis Document::destroy")
+    if "BOUCHAUD_C22_DOCUMENT_COLLECTE_V2" not in prep:
+        fautes.append("repere C22 Document absent")
     appels = re.findall(r"python3 tools/ladybird/(prepare-[\w-]+\.py)", chaine)
     if "prepare-c22-partitions.py" not in appels:
         fautes.append("preparateur non appele par la chaine")
@@ -53,6 +59,8 @@ MUTATIONS = [
     ("PREP", "    mi_collect(true);\\n\",\n    )", "    mi_collect(false);\\n\",\n    )"),
     ("CHAINE", 'python3 tools/ladybird/prepare-c22-partitions.py "$SRC"\n', ""),
     ("PREP", "mi_heap_collect(heap, true);", "mi_heap_destroy(heap);"),
+    ("PREP", '"Libraries/LibWeb/DOM/Document.cpp"', '"LibWeb/DOM/Document.cpp"'),
+    ("PREP", '"    ak_kmalloc_collect();\\n"', '"    // collecte manquante\\n"'),
 ]
 
 

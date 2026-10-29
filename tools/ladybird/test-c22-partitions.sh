@@ -15,10 +15,14 @@ LB=${1:?usage: test-c22-partitions.sh ARBRE_LADYBIRD SOURCES_MIMALLOC}
 MI=${2:?usage: test-c22-partitions.sh ARBRE_LADYBIRD SOURCES_MIMALLOC}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/arbre/AK"
+mkdir -p "$T/arbre/AK" "$T/arbre/Libraries/LibWeb/DOM"
+cp "$LB/Libraries/LibWeb/DOM/Document.cpp" "$T/arbre/Libraries/LibWeb/DOM/Document.cpp"
 cp "$LB/AK/kmalloc.cpp" "$T/kmalloc-origine.cpp"
 cp "$LB/AK/kmalloc.cpp" "$T/arbre/AK/kmalloc.cpp"
 python3 tools/ladybird/prepare-c22-partitions.py "$T/arbre"
+# Le correctif doit etre relie au demontage du Document, PAS uniquement au GC.
+grep -qF "    ak_kmalloc_collect();" "$T/arbre/Libraries/LibWeb/DOM/Document.cpp"
+grep -qF "BOUCHAUD_C22_DOCUMENT_COLLECTE_V2" "$T/arbre/Libraries/LibWeb/DOM/Document.cpp"
 cp "$T/arbre/AK/kmalloc.cpp" "$T/kmalloc-correctif.cpp"
 printf '#include <cstdio>\n#include <cstdlib>\nextern "C" __attribute__((noreturn)) void ak_verification_failed(char const* m) { fprintf(stderr, "VERIFY %%s\\n", m); abort(); }\n' > "$T/stub.cpp"
 cc -O2 -DNDEBUG -c "$MI/src/static.c" -I"$MI/include" -o "$T/mimalloc.o"

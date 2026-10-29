@@ -118,6 +118,30 @@ def main() -> int:
         "\n"
         "    mi_collect(true);\n",
     )
+    # BOUCHAUD_C22_DOCUMENT_COLLECTE_V2 : les noeuds Layout/Painting
+    # sont detruits par Document::destroy() (comptage de references), sans
+    # attendre un cycle GC. Collecter les heaps sur ce meme fil apres la
+    # destruction (aucun GC JS force, aucune allocation vivante liberee).
+    document = Path(sys.argv[1]).resolve() / "Libraries/LibWeb/DOM/Document.cpp"
+    remplace(
+        document,
+        "#include <AK/Time.h>\n",
+        "#include <AK/Time.h>\n"
+        "#include <AK/kmalloc.h> // BOUCHAUD_C22_DOCUMENT_COLLECTE_V2\n",
+    )
+    remplace(
+        document,
+        "    // FIXME: 11. For each workletGlobalScope in document's worklet global scopes, terminate workletGlobalScope.\n}\n",
+        "    // FIXME: 11. For each workletGlobalScope in document's worklet global scopes, terminate workletGlobalScope.\n"
+        "\n"
+        "    // BOUCHAUD_C22_DOCUMENT_COLLECTE_V2 : les objets Layout/Painting\n"
+        "    // liberes par le demontage doivent rendre leurs pages maintenant,\n"
+        "    // sans attendre un balayage GC qui peut arriver apres le repere M2.\n"
+        "    // Collecte mimalloc uniquement, depuis le fil proprietaire.\n"
+        "    ak_kmalloc_collect();\n"
+        "}\n",
+    )
+
     return 0
 
 
