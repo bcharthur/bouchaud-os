@@ -50,6 +50,9 @@ python3 tools/ladybird/prepare-compositor-lien.py "$SRC"
 python3 tools/ladybird/prepare-control-channel-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-compositor-memoire.py "$SRC"
 python3 tools/ladybird/prepare-echange-processus.py "$SRC"
+# BOUCHAUD_C22_PARTITIONS_COLLECTEES_V1 : les tas mimalloc partitionnes
+# (layout, paintables...) rendent leurs pages videes apres chaque balayage GC.
+python3 tools/ladybird/prepare-c22-partitions.py "$SRC"
 python3 tools/ladybird/prepare-gc-retention-proof.py "$SRC"
 python3 tools/ladybird/prepare-cache-journal.py "$SRC"
 # BOUCHAUD_LIBJS_VALEUR_DIAGNOSTIC_V1 : l'assertion Value.cpp:484 nomme la
