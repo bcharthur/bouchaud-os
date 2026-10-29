@@ -42,9 +42,39 @@
 # ses producteurs eux-memes (`attend_place`), la console progresse alors sans
 # le fil -- ce n'est pas une panne, et le chien de garde a raison de ne pas
 # replier (banc sature, fil gele 6 s : aucun repli, 600/600).
+#
+# P13_TEMOIN_CONSOLE_FIL_SEUL_V1 -- bras temoin (cible fil, BANC_SECOURS=off).
+# L'anneau se vide SANS son verrou : pendant la suspension, un producteur qui
+# aide (`attend_place`, `fait_place_differee`) fait vraiment progresser la
+# console, et le chien de garde a raison de ne pas replier (campagne 3/3
+# 40802102934, TCG SMP4 : `verrou_abandons=1271`, `differees_place_faite=1066`,
+# `soupcons=0`). Le temoin n'est reproduit que si le fil est SEUL a pouvoir
+# vider : le noyau compte les morceaux emis par un autre que le fil pendant la
+# suspension (`aides_pendant=` sur la ligne FAIT). Repli revenu : temoin OK.
+# Sans repli, `aides_pendant>0` : NON_QUALIFIANT (code 2, la precondition
+# n'a pas tenu, jamais compte) ; `aides_pendant=0` : ECHEC (code 1).
+# BANC_TENTATIVES=N (1 par defaut, 3 au plus) : un essai NON_QUALIFIANT est
+# REMESURE, un OK ou un ECHEC arrete la serie ; N essais non qualifiants de
+# suite : NON_QUALIFIANT (code 2). Chaque essai est garde
+# (serie-entrelacement-tN.log).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_serie_entrelacement.sh BOOTIMAGE [ECRIVAINS LIGNES PROCESSUS CHARGE PAS_MS]}
+TENTATIVES=${BANC_TENTATIVES:-1}
+case "$TENTATIVES" in 1|2|3) ;; *) echo "BANC_TENTATIVES=$TENTATIVES hors de 1..3" >&2; exit 1;; esac
+if [ "$TENTATIVES" -gt 1 ]; then
+  for t in $(seq 1 "$TENTATIVES"); do
+    set +e
+    BANC_TENTATIVES=1 "$PWD/tools/ci/run_serie_entrelacement.sh" "$@"
+    code=$?
+    set -e
+    cp serie-entrelacement.log "serie-entrelacement-t$t.log" 2>/dev/null || true
+    echo "SERIE_ENTRELACEMENT_TENTATIVE t=$t/$TENTATIVES code=$code"
+    if [ "$code" != 2 ]; then exit "$code"; fi
+  done
+  echo "SERIE_ENTRELACEMENT_NON_QUALIFIANT tentatives=$TENTATIVES (le fil n'a jamais ete seul a vider)"
+  exit 2
+fi
 ECRIVAINS=${2:-3}
 LIGNES=${3:-200}
 PROCESSUS=${4:-120}
@@ -198,8 +228,19 @@ elif [ "$FIL_GELE" -gt 0 ]; then
   exige "confirmation bornee : 500 <= repli_soupcon_ms (${soupcon:-?}) <= 1 000" bash -c "[ -n '$soupcon' ] && [ '$soupcon' -ge 500 ] && [ '$soupcon' -le 1000 ]"
 elif [ "$SECOURS" = off ] && [ "$VERROU_CIBLE" = fil ]; then
   # Bras temoin : sans relogement, le fil reste dans la file du coeur
-  # suspendu -- le defaut du run 39667691144 doit revenir.
-  exige "sans secours, le repli revient (temoin du defaut)" bash -c "printf '%s\n' \"\$1\" | grep -qE 'BOUCHAUD_CONSOLE_BILAN active=0 repli_securite=1 '" _ "$BILAN"
+  # suspendu -- le defaut du run 39667691144 doit revenir, si le fil est
+  # seul a pouvoir vider (P13_TEMOIN_CONSOLE_FIL_SEUL_V1).
+  AIDES=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'CONSOLE_VERROU_SUSPENDU_FAIT pris=1 .* aides_pendant=[0-9]+' | tail -1 | sed -E 's/.*aides_pendant=//' || true)
+  exige "la precondition est mesuree (aides_pendant= sur la ligne FAIT)" test -n "$AIDES"
+  # shellcheck source=classe_temoin_console.sh
+  . tools/ci/classe_temoin_console.sh
+  CLASSE=$(classe_temoin_console "$BILAN" "$AIDES")
+  if [ "$CLASSE" = NON_QUALIFIANT ]; then
+    echo "  NON_QUALIFIANT  le fil n'etait pas seul a vider : aides_pendant=$AIDES (la console a progresse sans lui)"
+    NON_QUALIFIANT=1
+  else
+    exige "sans secours, le repli revient (temoin du defaut)" bash -c "printf '%s\n' \"\$1\" | grep -qE 'BOUCHAUD_CONSOLE_BILAN active=0 repli_securite=1 '" _ "$BILAN"
+  fi
 elif [ "$MODE_CONSOLE" != off ]; then
   exige "console asynchrone active, sans repli ni reentrance" bash -c "sed -E 's/\x1b\[[0-9;]*m//g' '$LOG' | grep -aqE 'BOUCHAUD_CONSOLE_BILAN active=1 repli_securite=0 .* reentrees=0 '"
 fi
@@ -208,7 +249,10 @@ sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_CONSOLE_BILAN' | tail -1
 # (anneau plein) et les chemins qui finissent dans l'anneau d'un coeur.
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_CONSOLE_CONTRE_PRESSION' | tail -1 | sed 's/^.*BOUCHAUD_CONSOLE_CONTRE_PRESSION/  contre-pression :/'
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a 'BOUCHAUD_VGA_TEXTE' | tail -1 | sed 's/^.*BOUCHAUD_VGA_TEXTE/  vga texte :/'
-if [ "$echecs" -eq 0 ]; then
+if [ "$echecs" -eq 0 ] && [ "${NON_QUALIFIANT:-0}" = 1 ]; then
+  echo "SERIE_ENTRELACEMENT_NON_QUALIFIANT aides_pendant=$AIDES"
+  exit 2
+elif [ "$echecs" -eq 0 ]; then
   echo "SERIE_ENTRELACEMENT_BANC_OK"
 else
   echo "SERIE_ENTRELACEMENT_BANC_ECHEC n=$echecs"

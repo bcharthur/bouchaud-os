@@ -29,7 +29,14 @@ Regles :
   5. seule `serie-rafale-masquee` arme le travail a venir, et le desarme a
      chacune de ses sorties ;
   6. l'attente est publiee (`precondition_us=`) ; l'exigence du temoin est
-     intacte (sans secours, le repli DOIT revenir).
+     intacte (sans secours, le repli DOIT revenir) ;
+  7. P13_TEMOIN_CONSOLE_FIL_SEUL_V1 (campagne 3/3 40802102934, 2a151fef) :
+     l'anneau se vide sans son verrou, un producteur qui aide fait progresser
+     la console. Le noyau compte les morceaux EMIS par un autre que le fil
+     pendant la suspension (remis a zero a la prise, publie sur la ligne
+     FAIT). Le bras temoin n'est NON_QUALIFIANT (code 2, jamais vert) que sans
+     repli ET avec ce compte non nul ; il n'est remesure que 3 fois au plus,
+     sur le seul code 2 ; les deux bras temoin de la CI demandent 3 essais.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -41,6 +48,8 @@ F = {
     "uart": RACINE / "src/drivers/serial/uart16550.rs",
     "shell": RACINE / "src/shell/mod.rs",
     "banc": RACINE / "tools/ci/run_serie_entrelacement.sh",
+    "ci": RACINE / ".github/workflows/os-primitives.yml",
+    "classe": RACINE / "tools/ci/classe_temoin_console.sh",
 }
 REGLE = "(etat == 0 && on_cpu < 0 && file as usize == coeur && (occupation > 0 || travail_a_venir),"
 ATTACHE = "(etat == 0 || etat == 1) && on_cpu < 0 && file as usize == coeur"
@@ -55,7 +64,25 @@ BOUCLE = ("            while !vu.0 && crate::kernel::timer::monotonic_ns() < bor
 A_MOI = "        let a_moi = revendique == ici && vu.0 && !VERROU_SUSPENDU_FAIT.swap(true, Ordering::AcqRel);"
 REFUS = "                VERROU_RESULTAT.store(2, Ordering::Release);\n            }\n            parque_fil_de_banc();"
 PRISE = "    let pris = crate::drivers::serial::banc_verrou_console_suspendu(duree);"
-PUBLIE = "\"CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={} precondition_us={}\","
+PUBLIE = ("\"CONSOLE_VERROU_SUSPENDU_FAIT pris={} duree_ms={} coeur={} coeur_du_fil_apres={} "
+          "precondition_us={} aides_pendant={}\",")
+# P13_TEMOIN_CONSOLE_FIL_SEUL_V1
+AIDE = ("        if fait\n            && BANC_VERROU_TENU.load(Ordering::Acquire)\n            && console_active()\n"
+        "            && crate::kernel::task::indice_tache_courante() != CONSOLE_FIL_TACHE.load(Ordering::Relaxed)\n"
+        "        {\n            BANC_AIDES_PENDANT.fetch_add(1, Ordering::Relaxed);")
+REMISE = "    BANC_AIDES_PENDANT.store(0, Ordering::Release);\n    BANC_VERROU_TENU.store(true, Ordering::Release);"
+CLASSE = ("  CLASSE=$(classe_temoin_console \"$BILAN\" \"$AIDES\")\n"
+          "  if [ \"$CLASSE\" = NON_QUALIFIANT ]; then")
+FONCTION = ("  elif printf '%s\\n' \"$bilan\" | grep -qE 'BOUCHAUD_CONSOLE_BILAN active=0 repli_securite=1 '; then\n"
+            "    echo OK\n  elif [ \"$aides\" -gt 0 ]; then\n    echo NON_QUALIFIANT\n  else\n    echo ECHEC")
+NQ_SORTIE = ("if [ \"$echecs\" -eq 0 ] && [ \"${NON_QUALIFIANT:-0}\" = 1 ]; then\n"
+             "  echo \"SERIE_ENTRELACEMENT_NON_QUALIFIANT aides_pendant=$AIDES\"\n  exit 2")
+BORNE_ESSAIS = 'case "$TENTATIVES" in 1|2|3) ;; *)'
+REMESURE = '    if [ "$code" != 2 ]; then exit "$code"; fi'
+CI_TCG = ('BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off '
+          'tools/ci/run_serie_entrelacement.sh "$T" || r=1')
+CI_KVM = ('BANC_TENTATIVES=3 BANC_VERROU_SUSPENDU_MS=3000 BANC_VERROU_CIBLE=fil BANC_SECOURS=off BO_QEMU_KVM=1 '
+          'tools/ci/run_serie_entrelacement.sh "$T" || r=1')
 PAR_COEUR = 'crate::kernel::task::spawn_noyau_epingle(fil_verrou_suspendu, "verrou-suspendu", coeur) || un'
 ARME = "    RAFALE_ARMEE.store(true, Ordering::Release);"
 DESARME = "RAFALE_ARMEE.store(false, Ordering::Release);"
@@ -103,6 +130,22 @@ def verifie(t: dict) -> list:
         fautes.append("rafale : seule serie-rafale-masquee arme le travail a venir, et le desarme a chaque sortie.")
     if TEMOIN not in t["banc"]:
         fautes.append("run_serie_entrelacement.sh : l'exigence du temoin (le repli revient) a change.")
+    if AIDE not in corps(t["uart"], "fn vide_un_morceau(") \
+            or REMISE not in corps(t["uart"], "pub fn banc_verrou_console_suspendu("):
+        fautes.append("uart16550.rs : les morceaux emis par un autre que le fil pendant la suspension ne sont "
+                      "plus comptes, ou plus remis a zero a la prise.")
+    b = t["banc"]
+    ordre = [b.find(j) for j in (CLASSE, TEMOIN)]
+    if min(ordre) < 0 or ordre != sorted(ordre) or NQ_SORTIE not in b:
+        fautes.append("run_serie_entrelacement.sh : le temoin n'est plus NON_QUALIFIANT (code 2) que sans repli "
+                      "ET avec des aides.")
+    if FONCTION not in t["classe"] or 'echo ECHEC\n  elif printf' not in t["classe"]:
+        fautes.append("classe_temoin_console.sh : le classement n'est plus OK (repli) / NON_QUALIFIANT (aides) / ECHEC.")
+    if BORNE_ESSAIS not in b or REMESURE not in b:
+        fautes.append("run_serie_entrelacement.sh : la remesure n'est plus bornee a 3 essais, ou remesure autre "
+                      "chose que le code 2.")
+    if CI_TCG not in t["ci"] or CI_KVM not in t["ci"]:
+        fautes.append("os-primitives.yml : les bras temoin cible fil ne demandent plus 3 essais.")
     return fautes
 
 
@@ -125,7 +168,22 @@ def negatifs(t: dict) -> tuple:
         ("attente sans borne", "shell", "            while !vu.0 && crate::kernel::timer::monotonic_ns() < borne {",
          "            while !vu.0 {"),
         ("refus sans resultat", "shell", REFUS, "            }\n            parque_fil_de_banc();"),
-        ("attente non publiee", "shell", " precondition_us={}\",", "\","),
+        ("attente non publiee", "shell", " precondition_us={} aides_pendant={}\",", " aides_pendant={}\","),
+        ("aides non publiees", "shell", " aides_pendant={}\",", "\","),
+        ("aide comptee apres le repli", "uart", "            && console_active()\n", ""),
+        ("aide comptee meme sans emission", "uart", "        if fait\n            && BANC_VERROU_TENU",
+         "        if BANC_VERROU_TENU"),
+        ("aide du fil comptee", "uart",
+         "            && crate::kernel::task::indice_tache_courante() != CONSOLE_FIL_TACHE.load(Ordering::Relaxed)\n",
+         ""),
+        ("compte jamais remis a zero", "uart", "    BANC_AIDES_PENDANT.store(0, Ordering::Release);\n", ""),
+        ("non qualifiant meme sans aide", "classe", '  elif [ "$aides" -gt 0 ]; then', "  elif true; then"),
+        ("repli ignore", "classe", "    echo OK\n", "    echo NON_QUALIFIANT\n"),
+        ("temoin du banc perd la fonction", "banc", '  CLASSE=$(classe_temoin_console "$BILAN" "$AIDES")', '  CLASSE=NON_QUALIFIANT'),
+        ("non qualifiant compte vert", "banc", "aides_pendant=$AIDES\"\n  exit 2", "aides_pendant=$AIDES\"\n  exit 0"),
+        ("essais sans borne", "banc", BORNE_ESSAIS, 'case "$TENTATIVES" in [0-9]*) ;; *)'),
+        ("echec remesure", "banc", REMESURE, '    if [ "$code" = 0 ]; then exit 0; fi'),
+        ("ci sans remesure", "ci", CI_KVM, CI_KVM.replace("BANC_TENTATIVES=3 ", "")),
         ("rafale jamais desarmee", "shell", "            RAFALE_ARMEE.store(false, Ordering::Release);\n            return 1;",
          "            return 1;"),
         ("rafale armee ailleurs", "shell", "fn parque_fil_de_banc() -> ! {",
