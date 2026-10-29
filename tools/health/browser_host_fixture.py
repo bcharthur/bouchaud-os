@@ -2063,8 +2063,8 @@ class Handler(BaseHTTPRequestHandler):
 # bloquait le serveur mono-thread. Les requetes /pixel.png et /endurance-relais
 # s'accumulaient sans reponse (endurance KVM 40900916639, id=282+).
 # Le serveur concurrent traite les autres demandes independamment.
-def creer_serveur(adresse=("0.0.0.0", 18082)):
-    return ThreadingHTTPServer(adresse, Handler)
+def creer_serveur(adresse=("0.0.0.0", 18082), gestionnaire=Handler):
+    return ThreadingHTTPServer(adresse, gestionnaire)
 
 
 if __name__ == "__main__":

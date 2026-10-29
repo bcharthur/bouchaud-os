@@ -3,7 +3,6 @@
 import importlib.util
 import socket
 import threading
-import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer
@@ -28,7 +27,15 @@ class FixtureConcurrence(unittest.TestCase):
         cls.fixture = _importe_fixture()
 
     def _exerce(self, fabrique, doit_repondre):
-        serveur = fabrique(("127.0.0.1", 0))
+        accepte = threading.Event()
+        source = self.fixture.Handler
+
+        class HandlerAvecAccuse(source):
+            def setup(self):
+                super().setup()
+                accepte.set()
+
+        serveur = fabrique(("127.0.0.1", 0), HandlerAvecAccuse)
         fil = threading.Thread(target=serveur.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         fil.start()
         adresse = serveur.server_address
@@ -36,12 +43,12 @@ class FixtureConcurrence(unittest.TestCase):
         try:
             # Historique mono-thread: une connexion avec en-tetes incomplets
             # immobilise le service de toutes les autres requetes.
-            bloqueur.sendall(b"GET /pixel.png HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n")
-            time.sleep(0.10)
+            bloqueur.sendall(b"GET /pixel.png HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            self.assertTrue(accepte.wait(2), "connexion bloquante non acceptee")
             reponse = False
             try:
-                with urlopen(f"http://127.0.0.1:{adresse[1]}/pixel.png", timeout=0.5) as page:
-                    reponse = page.status == 200 and page.read().startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+                with urlopen(f"http://127.0.0.1:{adresse[1]}/pixel.png", timeout=1.0) as page:
+                    reponse = page.status == 200 and page.read().startswith(b"\x89PNG\r\n\x1a\n")
             except TimeoutError:
                 pass
             self.assertEqual(reponse, doit_repondre)
@@ -52,7 +59,7 @@ class FixtureConcurrence(unittest.TestCase):
             fil.join(timeout=2)
 
     def test_blocage_historique_et_correction(self):
-        self._exerce(lambda addr: HTTPServer(addr, self.fixture.Handler), False)
+        self._exerce(lambda addr, handler: HTTPServer(addr, handler), False)
         self._exerce(self.fixture.creer_serveur, True)
 
     def test_compteurs_exacts_sous_concurrence(self):

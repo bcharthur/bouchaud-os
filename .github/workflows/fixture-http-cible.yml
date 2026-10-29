@@ -1,0 +1,25 @@
+name: Fixture HTTP concurrente ciblee
+
+on:
+  push:
+    branches: ['fix/endurance-fixture-hol-20261029']
+    paths:
+      - 'tools/health/browser_host_fixture.py'
+      - 'tools/ci/reliability/test_fixture_concurrence.py'
+      - '.github/workflows/fixture-http-cible.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-http:
+    name: Regression HTTP mono-thread vs concurrent
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntaxe du serveur et du test
+        run: python3 -m py_compile tools/health/browser_host_fixture.py tools/ci/reliability/test_fixture_concurrence.py
+      - name: Temoins negatif et positif + compteurs concurrents
+        run: python3 -m unittest discover -s tools/ci/reliability -p 'test_fixture_concurrence.py' -v
