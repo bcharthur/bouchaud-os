@@ -361,6 +361,36 @@ user_ms={} sys_ms={}",
                                 usage.file_private / 1024, usage.shared / 1024,
                                 usage.device / 1024, usage.untracked / 1024, vma
                             );
+                            // Inventaire de VMA anonymes en lecture seule.
+                            // Echantillonne toutes les 5 secondes au plus pour
+                            // ne pas inonder la console ni perturber le banc.
+                            static DERNIER_INVENTAIRE_MS: AtomicU64 = AtomicU64::new(0);
+                            let now = crate::kernel::timer::monotonic_ms();
+                            let last = DERNIER_INVENTAIRE_MS.load(Ordering::Relaxed);
+                            if now.saturating_sub(last) >= 5_000
+                                && DERNIER_INVENTAIRE_MS.compare_exchange(
+                                    last, now, Ordering::AcqRel, Ordering::Relaxed
+                                ).is_ok()
+                            {
+                                let mm = process.mm.lock();
+                                crate::serial_println!(
+                                    "[C22:VMA-BEGIN] t={} pid={} total={}",
+                                    now, row.pid, mm.promesses.len()
+                                );
+                                for vma in mm.promesses.iter() {
+                                    if matches!(vma.backing, crate::kernel::vma::Backing::Zero)
+                                        && vma.fin > vma.debut
+                                        && vma.fin - vma.debut >= 1024 * 1024
+                                    {
+                                        crate::serial_println!(
+                                            "[C22:VMA] t={} pid={} id={} start={:#x} end={:#x} size_kio={} type=zero",
+                                            now, row.pid, vma.id, vma.debut, vma.fin,
+                                            (vma.fin - vma.debut) / 1024
+                                        );
+                                    }
+                                }
+                                crate::serial_println!("[C22:VMA-END] t={} pid={}", now, row.pid);
+                            }
                         }
                     }
                     // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui fait tourner sa
