@@ -71,6 +71,16 @@ jobs:
                 echo "C22_ESSAI bras=$bras essai=$essai rc=$rc"
               } >> c22-validation.txt
               { echo "=== chronologie $bras $essai rc=$rc ==="; python3 tools/ci/c22_chronologie.py serie-memoire.log 70 || true; } >> c22-chronologie.txt
+              # Un candidat ROUGE ne sera jamais qualifie par un meilleur temoin.
+              # Arreter immediatement pour ne pas gaspiller les autres essais
+              # ni les 6 tests negatifs. Les journaux deja produits sont
+              # conserves par upload-artifact if:always() ci-dessous.
+              if [ "$bras" = correctif ] && [ "$rc" -ne 0 ]; then
+                echo "::error::C22_CANDIDAT_ECHEC_PRECOCE essai=$essai rc=$rc"
+                grep -E 'MEMOIRE_PROCESSUS .*image=WebContent|MEMOIRE_CROISSANCE|MEMOIRE_INCONCLUSIF|LADYBIRD_MEMOIRE_ECHEC' "memoire-$bras-$essai.sortie" || true
+                cat c22-validation.txt
+                exit 1
+              fi
             done
           done
           cat c22-chronologie.txt
