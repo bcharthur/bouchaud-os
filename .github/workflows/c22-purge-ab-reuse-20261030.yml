@@ -1,0 +1,61 @@
+name: C22 A/B allocator purge sur artefact immuable
+# Diagnostic uniquement, n'est jamais une qualification C22/P13.
+on:
+  push:
+    branches: ['fix/p13-c22-preuves-20261030']
+    paths: ['.github/workflows/c22-purge-ab-reuse-20261030.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  c22-purge-ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prerequis QEMU et KVM
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+          sudo chmod 666 /dev/kvm
+      - name: Noyau candidate
+        run: tools/ci/build_kernel.sh
+      - name: Reutiliser Ladybird de 41044772229 (sans compilation C++)
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 41044772229
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          github-token: ${{ github.token }}
+      - name: Lier par empreinte l'artefact du build original
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: A/B purge - 2 references et 6 candidats (aucun seuil modifie)
+        env:
+          BO_QEMU_KVM: '1'
+        run: |
+          set -uo pipefail
+          : > c22-ab-resultats.txt
+          for bras in reference purge_immediate; do
+            n=2
+            if [ "$bras" = purge_immediate ]; then n=6; fi
+            for essai in $(seq 1 "$n"); do
+              purge=0
+              if [ "$bras" = purge_immediate ]; then purge=1; fi
+              BO_C22_MIMALLOC_PURGE="$purge" tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "c22-$bras-$essai.txt" 2>&1
+              rc=$?
+              cp serie-memoire.log "serie-$bras-$essai.log"
+              echo "C22_AB bras=$bras essai=$essai rc=$rc" | tee -a c22-ab-resultats.txt
+              grep -E 'MEMOIRE_PROCESSUS .*image=WebContent|MEMOIRE_CROISSANCE|MEMOIRE_BORNEE|MEMOIRE_INCONCLUSIF' "c22-$bras-$essai.txt" | tee -a c22-ab-resultats.txt || true
+            done
+          done
+          echo C22_AB_DIAGNOSTIC_SEUL_PAS_QUALIFICATION
+      - name: Archiver tous les bras meme si rouge
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-purge-ab-preuves
+          path: |
+            c22-ab-resultats.txt
+            c22-*.txt
+            serie-*.log
+          if-no-files-found: warn
