@@ -11,20 +11,35 @@ FIELDS = ("rss", "anon", "fichier", "partage", "device", "sans_type", "vma")
 
 def analyser(texte):
     lignes = ANSI.sub("", texte).splitlines()
-    indicateurs = {}
-    fenetres = {0: [], 1: [], 2: []}
-    phase = -1
-    for ligne in lignes:
+    reperes = {}
+    categories = []
+    perf = []
+    proc = re.compile(r"\\[PERF-PROC\\] t=(\\d+) pid=(\\d+) image=(\\S+) rss_kio=(\\d+)")
+    for idx, ligne in enumerate(lignes):
         m = REP.search(ligne)
         if m:
-            phase = int(m.group(1))
+            reperes.setdefault(int(m.group(1)), idx)
         m = RSS.search(ligne)
-        if m and int(m.group(2)) == 20 and phase >= 0:
-            fenetres[phase].append(tuple(map(int, m.groups()[2:])))
+        if m and int(m.group(2)) == 20:
+            categories.append((idx, int(m.group(1)), tuple(map(int, m.groups()[2:]))))
+        m = proc.search(ligne)
+        if m and int(m.group(2)) == 20 and m.group(3).split("/")[-1] == "WebContent":
+            perf.append((idx, int(m.group(1)), int(m.group(4))))
+    if set(reperes) != {0, 1, 2} or not reperes[0] < reperes[1] < reperes[2]:
+        raise ValueError(f"reperes absents ou desordonnes: {reperes}")
+    if not categories:
+        raise ValueError("aucune categorie C22:RSS dans ce journal (historique RSS seulement)")
+    indicateurs = {}
     for phase in range(3):
-        if not fenetres[phase]:
-            raise ValueError(f"releve C22:RSS manquant apres M{phase}")
-        indicateurs[phase] = fenetres[phase][-1]
+        # Le banc contractuel choisit le dernier releve strictement AVANT le repere.
+        precedent = [v for i, t, v in categories if i < reperes[phase]]
+        controle = [(t, rss) for i, t, rss in perf if i < reperes[phase]]
+        if not precedent or not controle:
+            raise ValueError(f"M{phase}: releve frais avant repere absent")
+        valeurs = precedent[-1]
+        if valeurs[0] != controle[-1][1] or valeurs[0] != sum(valeurs[1:6]):
+            raise ValueError(f"M{phase}: C22:RSS et PERF-PROC incoherents")
+        indicateurs[phase] = valeurs
     return indicateurs
 
 def main():
