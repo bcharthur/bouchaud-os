@@ -1,0 +1,80 @@
+name: C22 ChatGPT - KVM strict, un seul essai
+on:
+  push:
+    branches: ['chatgpt/active']
+    paths:
+      - '.github/workflows/c22-chatgpt-kvm-once.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  c22-unique:
+    name: C22 KVM / candidat, 10 onglets par phase
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prouver les sources du SHA unique
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          python3 -m unittest discover -s tools/ci/reliability -p 'test_c22_*.py' -v
+          python3 tools/verifie-c22-partitions.py
+          bash -n tools/ci/run_ladybird_memoire.sh
+      - name: Installer QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: c22-one-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            c22-one-rust-${{ runner.os }}-
+            reliability-host-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Compiler le noyau du SHA, pas Ladybird C++
+        run: tools/ci/build_kernel.sh
+      - name: Reutiliser Ladybird lie aux entrees de compilation
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: 41077304303
+          github-token: ${{ github.token }}
+      - name: Controler le manifeste et KVM
+        run: |
+          bash tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -w /dev/kvm
+          echo "C22_SHA=${{ github.sha }}"
+          sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Test C22 sans modification des seuils, stop au premier echec
+        env:
+          BO_QEMU_KVM: '1'
+          BO_C22_TEMOIN: '0'
+        run: |
+          set +e
+          bash tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > memoire-correctif-1.sortie 2>&1
+          rc=$?
+          set -e
+          tail -n 120 memoire-correctif-1.sortie || true
+          echo "C22_UNIQUE_VERDICT sha=${{ github.sha }} rc=$rc"
+          exit "$rc"
+      - name: Archiver les preuves, y compris en rouge
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-unique-${{ github.sha }}
+          path: |
+            memoire-correctif-1.sortie
+            serie-memoire.log
+            serie-memoire.log.propre
+            fixture-memoire.log
+          if-no-files-found: warn
