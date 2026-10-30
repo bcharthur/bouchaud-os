@@ -39,6 +39,25 @@ class C22ClosureTests(unittest.TestCase):
         self.assertNotIn("pthread_equal", partition_patcher)
         self.assertNotIn("std::atomic<mi_heap_t*>", partition_patcher)
 
+    def test_memory_fixture_waits_for_cross_origin_child(self):
+        root = SRC.parents[2]
+        fixture = (root / "health" / "browser_host_fixture.py").read_text(encoding="utf-8")
+        self.assertIn('event.origin === "http://10.0.2.100:18082"', fixture)
+        self.assertIn("HOST_MEMOIRE_ENFANT_PRET", fixture)
+        self.assertIn("HOST_MEMOIRE_ENFANT_OK", fixture)
+        self.assertIn("HOST_MEMOIRE_ECHEC", fixture)
+        self.assertIn("window.removeEventListener", fixture)
+        runner = (root / "ci" / "run_ladybird_memoire.sh").read_text(encoding="utf-8")
+        self.assertIn("verdict=enfant_non_prouve", runner)
+
+    def test_c22_rss_and_perf_share_one_snapshot(self):
+        root = SRC.parents[2]
+        services = (root.parent / "src" / "gui" / "services.rs").read_text(encoding="utf-8")
+        self.assertIn("let c22_snapshot = if base ==", services)
+        self.assertIn("let rss_mesure = c22_snapshot.as_ref()", services)
+        self.assertIn("rss_mesure / 1024", services)
+        self.assertIn("if let Some((process, usage, vma)) = c22_snapshot", services)
+
     def test_source_patch_has_valid_python_ast(self):
         self.assertTrue(any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in ast.walk(self.tree)))
 
