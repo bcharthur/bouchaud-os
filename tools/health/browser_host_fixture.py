@@ -391,34 +391,21 @@ MEMOIRE_HTML = b"""<!doctype html><meta charset="utf-8"><title>memoire</title>
     for (let i = 1; i <= n; i++) {
       const t0 = performance.now();
       const token = `mem${phase}_${i}`;
-      let enfantPret = false;
-      const enfantCharge = event => {
-        // Le message vient du navigateur enfant APRES navigation cross-site.
-        // Une ouverture about:blank fermee avant son swap ne vaut pas un cycle.
-        if (event.origin === "http://10.0.2.100:18082" &&
-            event.data === `HOST_MEMOIRE_ENFANT_PRET ${token}`)
-          enfantPret = true;
-      };
-      window.addEventListener("message", enfantCharge);
       const o = window.open(`/endurance-relais.html?cycle=${token}`, "_blank");
       if (!o) {
-        window.removeEventListener("message", enfantCharge);
         console.log(`HOST_MEMOIRE_ECHEC phase=${phase} i=${i} raison=ouverture_refusee`);
         return;
       }
+      // Apres un process swap, window.opener/postMessage peut ne pas etre
+      // relie entre les deux WebContent. La preuve d'une navigation cross-site
+      // est la trace native [LB] PROCESS_SWAP, verifiee strictement par le banc.
+      // Ne PAS accepter un simple message JS comme preuve de swap.
       let ferme = "ouvreur";
       while (performance.now() - t0 < garde) {
-        if (enfantPret && o.closed) { ferme = "lui_meme"; break; }
+        if (o.closed) { ferme = "lui_meme"; break; }
         await pause(250);
       }
-      window.removeEventListener("message", enfantCharge);
-      if (!enfantPret) {
-        if (!o.closed) o.close();
-        console.log(`HOST_MEMOIRE_ECHEC phase=${phase} i=${i} raison=navigation_autre_site_non_prouvee`);
-        return;
-      }
       if (!o.closed) o.close();
-      console.log(`HOST_MEMOIRE_ENFANT_OK phase=${phase} i=${i} origine=10.0.2.100`);
       console.log(`HOST_MEMOIRE_ONGLET phase=${phase} i=${i} ms=${Math.round(performance.now() - t0)} ferme=${ferme}`);
       etat(`phase ${phase} onglet ${i}/${n}`);
       await pause(1000);
@@ -439,10 +426,6 @@ ENDURANCE_RELAIS_HTML = b"""<!doctype html><meta charset="utf-8"><title>relais</
 ENDURANCE_ENFANT_HTML = b"""<!doctype html><meta charset="utf-8"><title>enfant</title>
 <body style="margin:0;background:#cfe">onglet enfant<canvas id="c" width="200" height="60"></canvas><script>
   console.log(`HOST_ENDURANCE_ENFANT ${location.search} origine=${location.origin}`);
-  // Handshake C22, uniquement pour le scenario memoire (pas d'effets en endurance).
-  const token = new URLSearchParams(location.search).get("cycle") || "";
-  if (token.startsWith("mem") && window.opener)
-    window.opener.postMessage(`HOST_MEMOIRE_ENFANT_PRET ${token}`, "http://10.0.2.2:18082");
   // Il se ferme lui-meme : apres le changement de processus, la fenetre que
   // tient l'ouvreur ne le joint plus forcement.
   setTimeout(() => window.close(), 3000);
