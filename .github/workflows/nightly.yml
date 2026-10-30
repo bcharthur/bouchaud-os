@@ -2,13 +2,8 @@ name: Nightly Full
 
 # Campagne lourde: jamais sur chaque commit. Elle valide le noyau courant de
 # main et le dernier artefact Ladybird canonique reussi de main.
+# No costly automatic Nightly on gate-only changes; preserve schedule/dispatch.
 on:
-  push:
-    branches: ['chatgpt/active']
-    paths:
-      - '.github/workflows/p13-final-candidate.yml'
-      - '.github/workflows/c22-runtime-purge-reuse.yml'
-      - 'tools/ci/c22_ab_verdict.py'
   schedule:
     - cron: '30 2 * * *'
   workflow_dispatch:
