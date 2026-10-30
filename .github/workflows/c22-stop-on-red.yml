@@ -51,8 +51,17 @@ jobs:
           set -uo pipefail
           verdict=pas_de_rouge
           for essai in 1 2 3 4 5 6; do
-            BO_C22_TEMOIN=0 tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "c22-$essai.sortie" 2>&1
-            rc=$?
+            # GitHub execute ses steps avec -e : recuperer le code via
+            # if/else AVANT de copier les preuves du test rouge.
+            if BO_C22_TEMOIN=0 tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "c22-$essai.sortie" 2>&1; then
+              rc=0
+            else
+              rc=$?
+            fi
+            if [ ! -s serie-memoire.log ]; then
+              echo "C22_PREUVE_ABSENTE essai=$essai" >&2
+              exit 2
+            fi
             cp serie-memoire.log "c22-$essai.log"
             echo "C22_ESSAI essai=$essai rc=$rc"
             grep -E "MEMOIRE_PROCESSUS.*image=WebContent|MEMOIRE_BORNEE|MEMOIRE_CROISSANCE" "c22-$essai.sortie" || true
@@ -63,6 +72,8 @@ jobs:
             fi
           done
           echo "C22_REPRO_VERDICT $verdict"
+          # Succes de ce job = rouge reproduit AVEC diagnostic complet.
+          # Ce verdict ne signifie PAS correction C22 qualifiee.
           [ "$verdict" = rouge_reproduit ]
       - name: Conserver tous les journaux
         if: always()
