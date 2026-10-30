@@ -7,6 +7,8 @@ on:
     branches: ['chatgpt/active']
     paths:
       - '.github/workflows/p13-final-candidate.yml'
+      - '.github/workflows/c22-runtime-purge-reuse.yml'
+      - 'tools/ci/c22_ab_verdict.py'
   schedule:
     - cron: '30 2 * * *'
   workflow_dispatch:
