@@ -39,16 +39,19 @@ class C22ClosureTests(unittest.TestCase):
         self.assertNotIn("pthread_equal", partition_patcher)
         self.assertNotIn("std::atomic<mi_heap_t*>", partition_patcher)
 
-    def test_memory_fixture_waits_for_cross_origin_child(self):
+    def test_memory_fixture_keeps_native_swap_proof_authoritative(self):
         tools = SRC.parents[1]
         fixture = (tools / "health" / "browser_host_fixture.py").read_text(encoding="utf-8")
-        self.assertIn('event.origin === "http://10.0.2.100:18082"', fixture)
-        self.assertIn("HOST_MEMOIRE_ENFANT_PRET", fixture)
-        self.assertIn("HOST_MEMOIRE_ENFANT_OK", fixture)
-        self.assertIn("HOST_MEMOIRE_ECHEC", fixture)
-        self.assertIn("window.removeEventListener", fixture)
+        self.assertIn('HOST_MEMOIRE_ONGLET phase=', fixture)
+        self.assertIn('HOST_MEMOIRE_ECHEC phase=', fixture)
+        self.assertIn('raison=ouverture_refusee', fixture)
+        # A cross-process window.opener/postMessage is not a reliable
+        # substitute for the native WebContent swap + cleanup proof.
+        self.assertNotIn('HOST_MEMOIRE_ENFANT_PRET', fixture)
+        self.assertNotIn('navigation_autre_site_non_prouvee', fixture)
         runner = (tools / "ci" / "run_ladybird_memoire.sh").read_text(encoding="utf-8")
-        self.assertIn("verdict=enfant_non_prouve", runner)
+        self.assertIn('verdict=enfant_non_prouve', runner)
+        self.assertIn('verifie-preuve-swaps.py', runner)
 
     def test_c22_rss_and_perf_share_one_snapshot(self):
         repo = SRC.parents[2]
