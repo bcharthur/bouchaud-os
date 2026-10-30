@@ -54,10 +54,8 @@ def main() -> int:
         kmalloc,
         "#    include <mimalloc.h>\n#endif\n",
         "#    include <mimalloc.h>\n"
-        "#    include <atomic>   // BOUCHAUD_C22_PARTITIONS_COLLECTEES_V1\n"
-        "#    include <cstdio>\n"
+        "#    include <cstdio>  // BOUCHAUD_C22_PARTITIONS_PAR_FIL_V2\n"
         "#    include <cstdlib>\n"
-        "#    include <pthread.h>\n"
         "#endif\n",
     )
     remplace(
@@ -65,20 +63,16 @@ def main() -> int:
         "static thread_local mi_heap_t* s_string_heap = nullptr;\n",
         "static thread_local mi_heap_t* s_string_heap = nullptr;\n"
         "\n"
-        "// BOUCHAUD_C22_PARTITIONS_COLLECTEES_V1 : les tas partages entre appels\n"
-        "// (ArrayBuffer, JSObjectStorage, Layout, Painting) retiennent leur fil\n"
-        "// proprietaire, pour que ak_kmalloc_collect() les collecte depuis CE fil.\n"
-        "struct BouchaudPartitionHeap {\n"
-        "    std::atomic<mi_heap_t*> heap { nullptr };\n"
-        "    pthread_t owner {};\n"
-        "};\n"
-        "static BouchaudPartitionHeap s_bouchaud_partitions[4];\n"
+        "// BOUCHAUD_C22_PARTITIONS_PAR_FIL_V2: mimalloc heaps belong to\n"
+        "// their creating thread. Do not publish one heap globally for\n"
+        "// allocations from multiple threads. Keep one heap per partition\n"
+        "// PER THREAD, and collect it only from that thread.\n"
+        "static thread_local mi_heap_t* s_bouchaud_partitions[4] = { nullptr, nullptr, nullptr, nullptr };\n"
         "\n"
         "static mi_heap_t* bouchaud_partition_new(size_t index)\n"
         "{\n"
         "    auto* heap = mi_heap_new();\n"
-        "    s_bouchaud_partitions[index].owner = pthread_self();\n"
-        "    s_bouchaud_partitions[index].heap.store(heap, std::memory_order_release);\n"
+        "    s_bouchaud_partitions[index] = heap;\n"
         "    return heap;\n"
         "}\n",
     )
@@ -86,7 +80,7 @@ def main() -> int:
         remplace(
             kmalloc,
             f"        static mi_heap_t* {nom} = mi_heap_new();\n",
-            f"        static mi_heap_t* {nom} = bouchaud_partition_new({index});\n",
+            f"        static thread_local mi_heap_t* {nom} = bouchaud_partition_new({index});\n",
         )
     remplace(
         kmalloc,
@@ -105,12 +99,11 @@ def main() -> int:
         "    static bool const preuve = getenv(\"BOUCHAUD_LB_MEMORY_PROOF\") != nullptr;\n"
         "    int collectes = 0;\n"
         "    if (!temoin) {\n"
-        "        for (auto& partition : s_bouchaud_partitions) {\n"
-        "            auto* heap = partition.heap.load(std::memory_order_acquire);\n"
-        "            if (heap && pthread_equal(partition.owner, pthread_self())) {\n"
-        "                mi_heap_collect(heap, true);\n"
-        "                ++collectes;\n"
-        "            }\n"
+        "        for (auto* heap : s_bouchaud_partitions) {\n"
+        "            if (!heap)\n"
+        "                continue;\n"
+        "            mi_heap_collect(heap, true);\n"
+        "            ++collectes;\n"
         "        }\n"
         "    }\n"
         "    if (preuve)\n"
