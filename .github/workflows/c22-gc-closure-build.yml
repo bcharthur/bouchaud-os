@@ -328,8 +328,111 @@ jobs:
           f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
           f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
           t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
-          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6"
-          [ "$f_vert" = 6 ] && [ "$f_rouge" = 0 ] && [ "$t_rouge" -ge 1 ]
+          # Le temoin n'est probant que si la croissance memoire est la SEULE
+          # cause de rouge. Un QEMU mort, une panique, des swaps manquants ou
+          # MEMOIRE_INCONCLUSIF ne prouvent PAS la regression historique.
+          t_memoire=0
+          t_invalide=0
+          for essai in 1 2 3 4 5 6; do
+            sortie="memoire-temoin-$essai.sortie"
+            if grep -q "^C22_ESSAI bras=temoin essai=$essai rc=0$" c22-validation.txt; then
+              continue
+            fi
+            if grep -q "^C22_ESSAI bras=temoin essai=$essai rc=1$" c22-validation.txt \
+              && grep -Eq '^MEMOIRE_CROISSANCE n=[1-9][0-9]*
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-memoire
+          path: |
+            serie-memoire*.log
+            fixture-memoire*.log
+            memoire-*.sortie
+            c22-validation.txt
+            c22-chronologie.txt
+            serie-gc-retention.log
+            fixture-gc-retention.log
+            gc-retention.sortie
+          if-no-files-found: warn
+
+
+  nightly-smoke:
+    name: Nightly / produit Ladybird du SHA C22
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prerequis produit Nightly
+        run: tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: c22-nightly-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            diag-c22-rust-${{ runner.os }}-
+            nightly-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Compiler uniquement le noyau du SHA de ce run
+        run: tools/ci/build_kernel.sh
+      - name: Recuperer Ladybird produit dans ce meme run
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste et le HEAD exact
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          tools/ci/verifie_artefact_ladybird.sh tete native-browser
+      - name: Smoke du produit Ladybird Nightly
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Preuves produit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-nightly-produit
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
+
+  c22-nightly-gate:
+    name: Gate C22 + Nightly / SHA unique
+    if: always()
+    needs: [build, memoire-onglets, nightly-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail-closed sur les trois emplois
+        env:
+          BUILD: ${{ needs.build.result }}
+          C22: ${{ needs.memoire-onglets.result }}
+          NIGHTLY: ${{ needs.nightly-smoke.result }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "P13_ETATS build=$BUILD c22=$C22 nightly=$NIGHTLY sha=$SHA"
+          test "$BUILD" = success
+          test "$C22" = success
+          test "$NIGHTLY" = success
+          echo "P13_C22_NIGHTLY_SAME_SHA_OK sha=$SHA"
+          echo "P13_QUALIFICATION_STRICTE_ENCORE_REQUISE sha=$SHA"
+ "$sortie" \
+              && grep -q '^  ECHEC   memoire :' "$sortie" \
+              && [ "$(grep -c '^  ECHEC' "$sortie" || true)" = 1 ] \
+              && ! grep -q 'MEMOIRE_INCONCLUSIF' "$sortie"; then
+              t_memoire=$((t_memoire + 1))
+            else
+              t_invalide=$((t_invalide + 1))
+              echo "::error::Temoin $essai : echec non memoire ou preuve inconclusive"
+            fi
+          done
+          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6 temoin_memoire=$t_memoire temoin_invalides=$t_invalide"
+          [ "$f_vert" = 6 ] && [ "$f_rouge" = 0 ] && [ "$t_memoire" -ge 1 ] && [ "$t_invalide" = 0 ]
           echo "C22_CONTRACTUEL_6X6_OK sha=${{ github.sha }}"
       - name: Journaux
         if: always()
