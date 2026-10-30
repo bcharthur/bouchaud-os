@@ -164,7 +164,7 @@ jobs:
             fixture-browser-host.log
           if-no-files-found: warn
 
-  c22-nightly-gate:
+  c22-runtime-verdict:
     name: Gate C22 + Nightly / SHA unique / artefact lie
     if: always()
     needs: [memoire-onglets, nightly-smoke]
