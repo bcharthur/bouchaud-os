@@ -15,7 +15,7 @@ jobs:
   build:
     name: ladybird / build once
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 115
     steps:
       - uses: actions/checkout@v4
 
@@ -151,7 +151,7 @@ jobs:
         # annule le job, et `!cancelled()` saute alors toutes les sauvegardes
         # de cache -- le run suivant repart de zero. Un delai d'ETAPE echoue
         # l'etape sans annuler le job : les sauvegardes passent.
-        timeout-minutes: 52
+        timeout-minutes: 92
         run: |
           set -o pipefail
           tools/ladybird/native-browser-final.sh --cible 2>&1 \
@@ -280,7 +280,7 @@ jobs:
     # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
     # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
     # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
-    name: ladybird / memoire apres onglets fermes (diagnostic)
+    name: C22 / memoire contractuelle 6x6, temoin historique
     needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 42
@@ -301,6 +301,10 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
+      - name: Verifier le SHA exact du code teste
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          echo "C22_PROVENANCE_SHA sha=${{ github.sha }}"
       - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
         env:
           BO_QEMU_KVM: "1"
@@ -325,7 +329,8 @@ jobs:
           f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
           t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
           echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6"
-          [ "$f_vert" = 6 ] && [ "$t_rouge" -ge 1 ]
+          [ "$f_vert" = 6 ] && [ "$f_rouge" = 0 ] && [ "$t_rouge" -ge 1 ]
+          echo "C22_CONTRACTUEL_6X6_OK sha=${{ github.sha }}"
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
@@ -340,3 +345,68 @@ jobs:
             gc-retention.sortie
           if-no-files-found: warn
 
+
+  nightly-smoke:
+    name: Nightly / produit Ladybird du SHA C22
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prerequis produit Nightly
+        run: tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: c22-nightly-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            diag-c22-rust-${{ runner.os }}-
+            nightly-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Compiler uniquement le noyau du SHA de ce run
+        run: tools/ci/build_kernel.sh
+      - name: Recuperer Ladybird produit dans ce meme run
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste et le HEAD exact
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          tools/ci/verifie_artefact_ladybird.sh tete native-browser
+      - name: Smoke du produit Ladybird Nightly
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Preuves produit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-nightly-produit
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
+
+  c22-nightly-gate:
+    name: Gate C22 + Nightly / SHA unique
+    if: always()
+    needs: [build, memoire-onglets, nightly-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail-closed sur les trois emplois
+        env:
+          BUILD: ${{ needs.build.result }}
+          C22: ${{ needs.memoire-onglets.result }}
+          NIGHTLY: ${{ needs.nightly-smoke.result }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "P13_ETATS build=$BUILD c22=$C22 nightly=$NIGHTLY sha=$SHA"
+          test "$BUILD" = success
+          test "$C22" = success
+          test "$NIGHTLY" = success
+          echo "P13_C22_NIGHTLY_SAME_SHA_OK sha=$SHA"
+          echo "P13_QUALIFICATION_STRICTE_ENCORE_REQUISE sha=$SHA"

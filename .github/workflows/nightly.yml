@@ -133,9 +133,12 @@ jobs:
           # Ne retenir que les runs dont l'archive est encore presente.
           candidates="$REQUESTED"
           if [ -z "$candidates" ]; then
-            candidates=$(gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow ladybird-native-browser.yml --branch main \
-              --limit 40 --json databaseId --jq '.[].databaseId')
+            # Chercher les artefacts reellement disponibles, y compris
+            # ceux d'une validation C22 sur branche candidate. Le smoke
+            # refuse ensuite tout artefact dont les ENTREES ne correspondent
+            # pas au HEAD courant : aucune confiance dans le nom seul.
+            candidates=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false) | .workflow_run.id] | unique | reverse | .[]')
           fi
           choix=""
           for run in $candidates; do
@@ -277,12 +280,11 @@ jobs:
           printf '%-12s %s\n' kernel "$KERNEL" core "$CORE" dns "$DNS" resolve "$RESOLVE" ladybird "$LADYBIRD"
           printf '%-12s %s\n' win-ascii "$WINDOWS_ASCII" win-syntax "$WINDOWS_SYNTAX"
 
-          for r in "$KERNEL" "$CORE" "$DNS" "$RESOLVE"; do
-            [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
+          # Aucune validation facultative ou skipped : sans artefact
+          # Ladybird compatible, Nightly DOIT rester rouge (fail-closed).
+          for r in "$KERNEL" "$CORE" "$DNS" "$RESOLVE" "$LADYBIRD"; do
+            [ "$r" = success ] || { echo "::error::Nightly invalide : resultat=$r"; exit 1; }
           done
-
-          # Si aucun artefact Ladybird n'existe, le smoke est skipped.
-          [ "$LADYBIRD" != failure ] && [ "$LADYBIRD" != cancelled ] || exit 1
 
           # La dette Windows est reportee, pas bloquante pour ce nightly.
           echo NIGHTLY_GATE_OK

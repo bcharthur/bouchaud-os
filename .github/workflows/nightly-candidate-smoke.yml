@@ -1,10 +1,7 @@
 name: Nightly Ladybird candidate - provenance et smoke rapide
+# Ancienne epreuve manuelle : ne plus la declencher automatiquement.
+# Le smoke du meme SHA est maintenant dans c22-gc-closure-build.yml.
 on:
-  push:
-    branches: ['p13/qualification-c22-nightly-20261030']
-    paths:
-      - '.github/workflows/nightly-candidate-smoke.yml'
-      - '.github/workflows/c22-gc-closure-build.yml'
   workflow_dispatch:
 permissions:
   contents: read
