@@ -1,0 +1,140 @@
+name: P13 final - single SHA strict gates
+on:
+  push:
+    branches: ['chatgpt/active']
+    paths:
+      - '.github/workflows/p13-final-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p13-final-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  hosted-primitives-strict:
+    name: P13 / hosted diagnostic and strict primitives
+    uses: ./.github/workflows/os-primitives.yml
+    with:
+      p13_strict: true
+
+  dedicated-three-campaigns:
+    name: P13 / 3 independent SMP1-2-4 campaigns / dedicated KVM4
+    runs-on: [self-hosted, Linux, X64, bouchaud-kvm4]
+    timeout-minutes: 600
+    env:
+      BOUCHAUD_DEDICATED_HOST: 'YES'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact candidate, dedicated KVM and run three campaigns
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 tools/ci/p13_kvm_host_preflight.py --min-cpus 4 --output "$RUNNER_TEMP/p13-preflight-kvm4.json"
+          bash tools/ci/run_p13_campaigns.sh "$GITHUB_SHA" "$PWD/target/p13-three-campaigns-$GITHUB_RUN_ID"
+      - name: Publish original evidence even when red
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p13-three-campaigns-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/p13-preflight-kvm4.json
+            target/p13-three-campaigns-*/host.json
+            target/p13-three-campaigns-*/image.sha256
+            target/p13-three-campaigns-*/resultats.txt
+            target/p13-three-campaigns-*/echecs.txt
+            target/p13-three-campaigns-*/campagne-*.log
+            target/p13-three-campaigns-*/campagne-*/*.strict.log
+            target/p13-three-campaigns-*/campagne-*/*.stdout.log
+            target/p13-three-campaigns-*/campagne-*/diagnostic.json
+            target/p13-three-campaigns-*/campagne-*/diagnostic.md
+          if-no-files-found: warn
+
+  dedicated-smp8:
+    name: P13 / SMP8 qualification and 30min endurance / dedicated KVM8
+    runs-on: [self-hosted, Linux, X64, bouchaud-kvm8]
+    timeout-minutes: 240
+    env:
+      BOUCHAUD_DEDICATED_HOST: 'YES'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify dedicated 8-core host before building
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 tools/ci/p13_kvm_host_preflight.py --min-cpus 8 --output "$RUNNER_TEMP/p13-preflight-kvm8.json"
+      - name: Build image once from exact SHA
+        shell: bash
+        run: tools/ci/build_kernel.sh
+      - name: Qualify SMP8 on the delivered kernel
+        shell: bash
+        env:
+          P13_QUALIFICATION_OUT: ${{ github.workspace }}/target/p13-smp8-${{ github.run_id }}
+        run: |
+          bash tools/ci/run_p13_dedicated_kvm.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin smp8
+      - name: Run original 30-minute SMP8 endurance
+        shell: bash
+        run: |
+          tools/ci/fabrique-scenario-endurance.sh endurance-scenario
+          PYTHONPATH=tools/ci/reliability python3 tools/ci/p13_kvm_soak.py \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --disk endurance-scenario/endurance.img \
+            --markers endurance-scenario/marqueurs-endurance.txt \
+            --minutes 30 \
+            --output "target/p13-smp8-soak-$GITHUB_RUN_ID"
+      - name: Publish original SMP8 evidence even when red
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p13-smp8-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/p13-preflight-kvm8.json
+            target/p13-smp8-*/**
+          if-no-files-found: warn
+
+  final-gate:
+    name: P13 / final SHA gate (no missing proof accepted)
+    needs: [hosted-primitives-strict, dedicated-three-campaigns, dedicated-smp8]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Compare strict results AND independent C22 and Nightly runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOSTED: ${{ needs.hosted-primitives-strict.result }}
+          BASELINE: ${{ needs.dedicated-three-campaigns.result }}
+          SMP8: ${{ needs.dedicated-smp8.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'P13_GATES hosted=%s baseline=%s smp8=%s sha=%s\n' "$HOSTED" "$BASELINE" "$SMP8" "$GITHUB_SHA"
+          test "$HOSTED" = success
+          test "$BASELINE" = success
+          test "$SMP8" = success
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" > "$RUNNER_TEMP/p13-runs.json"
+          python3 - "$RUNNER_TEMP/p13-runs.json" "$GITHUB_SHA" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding='utf-8'))
+          sha = sys.argv[2]
+          expected = [
+              'C22 runtime purge - REUSE binaire natif + noyau actuel',
+              'Nightly Full',
+          ]
+          for name in expected:
+              matches = [r for r in data.get('workflow_runs', [])
+                         if r.get('name') == name and r.get('head_sha') == sha and r.get('event') == 'push']
+              print('P13_EXTERNAL_GATE', name, [(r['id'], r['status'], r['conclusion']) for r in matches])
+              if not matches or not any(r['status'] == 'completed' and r['conclusion'] == 'success'
+                                        for r in matches):
+                  raise SystemExit('P13_NON_QUALIFIE: '+name+' sans run vert sur le SHA')
+          print('P13_FINAL_STRICT_OK sha='+sha)
+          PY
