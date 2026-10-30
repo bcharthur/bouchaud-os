@@ -347,6 +347,22 @@ user_ms={} sys_ms={}",
                         cpu_user_ms,
                         cpu_sys_ms,
                     );
+                    // BOUCHAUD_C22_RSS_CATEGORIES_DIAG : snapshot en lecture seule
+                    // de WebContent, au meme rythme que PERF-PROC. Ne change
+                    // aucun seuil, mapping, ni chemin d'allocation.
+                    if base == "WebContent" {
+                        if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
+                            let usage = crate::kernel::resource::memory_usage(&process);
+                            let vma = { process.mm.lock().promesses.len() };
+                            crate::serial_println!(
+                                "[C22:RSS] t={} pid={} rss_kio={} anon_kio={} fichier_kio={} partage_kio={} device_kio={} sans_type_kio={} vma={}",
+                                crate::kernel::timer::monotonic_ms(),
+                                row.pid, usage.rss / 1024, usage.anonymous / 1024,
+                                usage.file_private / 1024, usage.shared / 1024,
+                                usage.device / 1024, usage.untracked / 1024, vma
+                            );
+                        }
+                    }
                     // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui fait tourner sa
                     // boucle d'evenements a vide se voit a ses appels.
                     if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
