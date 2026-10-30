@@ -4,8 +4,8 @@ from pathlib import Path
 import ast
 import unittest
 
-SRC = Path(__file__).resolve().parents[3] / "ladybird" / "prepare-echange-processus.py"
-# tests resides at tools/ci/reliability/, project root is parents[3]
+SRC = Path(__file__).resolve().parents[2] / "ladybird" / "prepare-echange-processus.py"
+# tests reside under tools/ci/reliability; tools/ is parents[2]
 
 class C22ClosureTests(unittest.TestCase):
     @classmethod
