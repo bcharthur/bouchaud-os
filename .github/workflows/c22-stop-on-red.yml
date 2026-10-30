@@ -1,0 +1,75 @@
+name: C22 Reproduction Stop-on-Red
+on:
+  push:
+    branches: ['diag/c22-categories-fast-20261030']
+    paths:
+      - '.github/workflows/c22-stop-on-red.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  c22:
+    name: Memory C22 jusqu'au premier rouge (6 max)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 32
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Dependances QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: diag-c22-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage seulement
+        run: tools/ci/build_kernel.sh
+      - name: Reutiliser Ladybird C22 du run 40940855247
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 40940855247
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier l'empreinte de provenance
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Activer KVM
+        run: sudo chmod 666 /dev/kvm
+      - name: Reproduire C22 avec fail-closed, arret au rouge
+        env:
+          BO_QEMU_KVM: "1"
+        run: |
+          set -uo pipefail
+          verdict=pas_de_rouge
+          for essai in 1 2 3 4 5 6; do
+            BO_C22_TEMOIN=0 tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "c22-$essai.sortie" 2>&1
+            rc=$?
+            cp serie-memoire.log "c22-$essai.log"
+            echo "C22_ESSAI essai=$essai rc=$rc"
+            grep -E "MEMOIRE_PROCESSUS.*image=WebContent|MEMOIRE_BORNEE|MEMOIRE_CROISSANCE" "c22-$essai.sortie" || true
+            python3 tools/ci/c22_rss_forensic.py "c22-$essai.log" --label "$essai" || exit 2
+            if [ "$rc" != 0 ]; then
+              verdict=rouge_reproduit
+              break
+            fi
+          done
+          echo "C22_REPRO_VERDICT $verdict"
+          [ "$verdict" = rouge_reproduit ]
+      - name: Conserver tous les journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-stop-on-red
+          path: |
+            c22-*.log
+            c22-*.sortie
+          if-no-files-found: error
