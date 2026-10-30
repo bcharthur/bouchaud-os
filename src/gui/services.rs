@@ -381,7 +381,6 @@ user_ms={} sys_ms={}",
                                     for vma in mm.promesses.iter() {
                                         if matches!(vma.backing, crate::kernel::vma::Backing::Zero)
                                             && vma.fin > vma.debut
-                                            && vma.fin - vma.debut >= 1024 * 1024
                                         {
                                             items.push((vma.id, vma.debut, vma.fin));
                                         }

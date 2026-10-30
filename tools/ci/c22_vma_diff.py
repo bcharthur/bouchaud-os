@@ -35,8 +35,15 @@ def compare(log: str, pid=20):
             raise ValueError(f"aucun inventaire VMA complet avant M{phase}")
         before.append(candidates[-1])
     m1, m2 = before
+    if m1[2] != len(m1[3]) or m2[2] != len(m2[3]):
+        # Les inventaires listent seulement les VMA anonymes : leurs totaux
+        # globaux peuvent etre superieurs. Publier la couverture au lieu de
+        # presenter un diff vide comme une preuve de non-changement.
+        print(f"C22_VMA_COUVERTURE M1={len(m1[3])}/{m1[2]} M2={len(m2[3])}/{m2[2]}")
     added = {k:v for k,v in m2[3].items() if k not in m1[3]}
     removed = {k:v for k,v in m1[3].items() if k not in m2[3]}
+    if m1[2] != m2[2] and not (added or removed):
+        raise ValueError("delta VMA total sans changement parmi les VMA anonymes : type non anonyme ou relevé trop ancien")
     return m1, m2, added, removed
 
 def main():
