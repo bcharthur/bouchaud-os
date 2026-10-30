@@ -4,6 +4,7 @@ on:
     branches: ['p13/qualification-c22-nightly-20261030']
     paths:
       - '.github/workflows/c22-purge-ab.yml'
+      - 'tools/ci/run_ladybird_memoire.sh'
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,6 +29,10 @@ jobs:
           restore-keys: |
             diag-c22-rust-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - name: Preflight scripts executables
+        run: |
+          test -x tools/ci/run_ladybird_memoire.sh
+          bash -n tools/ci/run_ladybird_memoire.sh
       - name: Bootimage de CE SHA
         run: tools/ci/build_kernel.sh
       - name: Ladybird C22 deja construit
