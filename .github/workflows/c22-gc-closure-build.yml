@@ -1,0 +1,342 @@
+name: C22 GC post-discard - build cache et validation 6x6
+# Une seule reconstruction inevitable apres changement C++ Document.cpp.
+# P13 endurance/scheduler non relances, aucun autre job Ladybird.
+on:
+  push:
+    branches: ['p13/qualification-c22-nightly-20261030']
+    paths:
+      - '.github/workflows/c22-gc-closure-build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: ladybird / build once
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regressions des analyseurs de preuves runtime
+        run: |
+          python3 -m unittest discover -s tools/ci/reliability -p test_c22_gc_closure.py -v
+          python3 tools/ci/verifie-preuve-compositor.py
+          python3 tools/ci/verifie-preuve-memoire.py
+          python3 tools/ci/verifie-preuve-gc-retention.py
+          python3 tools/ci/verifie-p13-lifecycle-closure.py
+          python3 tools/ci/verifie-preuve-swaps.py
+
+      - name: Toolchain C/C++
+        id: toolchain
+        run: |
+          tools/ci/apt-installe.sh \
+            build-essential pkg-config python3 python3-dev python3-venv perl \
+            clang lld ccache cmake ninja-build rsync git curl wget gnupg lsb-release zip unzip tar xz-utils file \
+            autoconf autoconf-archive automake libtool libltdl-dev gettext m4 \
+            nasm bison flex libssl-dev libedit-dev linux-libc-dev mesa-common-dev ca-certificates
+          LLVM_VERSION=20
+          if ! command -v "clang-${LLVM_VERSION}" >/dev/null 2>&1; then
+            CODENAME="$(lsb_release -sc)"
+            wget -qO /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+            sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-snapshot.gpg.gpg /tmp/llvm-snapshot.gpg.key
+            echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.gpg] https://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" \
+              | sudo tee /etc/apt/sources.list.d/llvm-${LLVM_VERSION}.list
+            tools/ci/apt-installe.sh "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" "llvm-${LLVM_VERSION}"
+          fi
+          clang-20 --version
+          ld.lld-20 --version
+          ccache --version
+          identity=$({ clang-20 --version; gcc --version; cmake --version; ld.lld-20 --version; ldd --version; } | sha256sum | cut -d' ' -f1)
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Verifier la reutilisation des sources
+        run: python3 tools/ladybird/test-incremental-source.py
+
+      - name: Cache Cargo Ladybird
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ladybird-cargo-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/native-browser-final.sh') }}
+          restore-keys: ladybird-cargo-${{ runner.os }}-
+
+      - name: Cache source Ladybird
+        id: source
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/ladybird
+          key: ladybird-source-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
+
+      - name: Cache vcpkg navigateur
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-manifest
+            third_party/vcpkg-browser-installed
+            ~/.cache/vcpkg
+          key: ladybird-vcpkg-v4-${{ runner.os }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('tools/ladybird/browser-vcpkg.sh', 'tools/ladybird/triplets/**', 'third_party/UPSTREAM.md', 'tools/ladybird/patches/**') }}
+          restore-keys: |
+            ladybird-vcpkg-v4-${{ runner.os }}-${{ steps.toolchain.outputs.identity }}-
+            ladybird-vcpkg-v3-${{ runner.os }}-
+
+      - name: Dependances navigateur
+        run: tools/ladybird/browser-vcpkg.sh
+
+      # Checkpoint expensive dependencies BEFORE compiling the browser.
+      - name: Sauvegarder les dependances pretes
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/vcpkg-gfx
+            third_party/vcpkg-downloads
+            third_party/vcpkg-browser-manifest
+            third_party/vcpkg-browser-installed
+            ~/.cache/vcpkg
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Sauvegarder la source
+        if: steps.source.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/ladybird
+          key: ${{ steps.source.outputs.cache-primary-key }}
+
+      # ccache est le cache incremental principal. Contrairement au build tree
+      # complet, il reste compact et reutilisable quand quelques TU changent.
+      - name: Cache ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ladybird-ccache-v2-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ladybird-ccache-v2-${{ runner.os }}-${{ hashFiles('third_party/UPSTREAM.md') }}-
+            ladybird-ccache-v2-${{ runner.os }}-
+
+      # Both paths must travel together: Ninja records source timestamps.
+      # Changes are reapplied to a fresh tree and checksum-synced before CMake.
+      - name: Restaurer le build incremental Ninja
+        id: ninja
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ladybird-browser-src
+            third_party/build-ladybird-browser-bouchaud
+          key: ladybird-ninja-v1-${{ runner.os }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/browser-upstream.sh', 'tools/ladybird/browser-vcpkg.sh', 'tools/ladybird/triplets/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ladybird-ninja-v1-${{ runner.os }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('third_party/UPSTREAM.md', 'tools/ladybird/browser-upstream.sh', 'tools/ladybird/browser-vcpkg.sh', 'tools/ladybird/triplets/**') }}-
+
+      - name: Statistiques ccache avant
+        run: ccache -s || true
+
+      # Le journal de ninja fait cinq mille lignes, et une erreur de
+      # compilation tombe AU MILIEU : les cibles encore en vol continuent de
+      # s'afficher apres elle, sur des centaines de lignes. Une interface qui
+      # ne rend que la fin du journal -- l'API des journaux de job en est une --
+      # ne montre donc jamais le diagnostic, seulement
+      # « ninja: build stopped: cannot make progress ».
+      #
+      # C'est arrive : une construction rouge dont l'erreur etait litteralement
+      # illisible. Le journal est donc conserve, et les diagnostics recopies A
+      # LA FIN, la ou on les lira.
+      - name: Construire Ladybird
+        # BOUCHAUD_CI_CACHES_SURVIVENT_V1 : un depassement du delai du JOB
+        # annule le job, et `!cancelled()` saute alors toutes les sauvegardes
+        # de cache -- le run suivant repart de zero. Un delai d'ETAPE echoue
+        # l'etape sans annuler le job : les sauvegardes passent.
+        timeout-minutes: 52
+        run: |
+          set -o pipefail
+          tools/ladybird/native-browser-final.sh --cible 2>&1 \
+            | tee /tmp/ladybird-build.log
+
+      - name: Diagnostics de compilation
+        if: failure()
+        run: |
+          set +e
+          echo "=== blocs FAILED, recopies depuis le milieu du journal ==="
+          grep -n -A 40 '^FAILED:' /tmp/ladybird-build.log | head -250
+          echo
+          echo "=== toutes les lignes d'erreur ==="
+          grep -n -E 'error:|Error [0-9]+' /tmp/ladybird-build.log | head -80
+          exit 0
+
+      - name: Marquer la capacite UI V16
+        run: |
+          printf 'Bouchaud V16 chrome=fontconfig+svg loading=1\n' > third_party/native-browser-bouchaud/V16_UI_CAPABLE
+
+      # BOUCHAUD_ARTEFACT_PERIME_V2
+      #
+      # Un marqueur PAR generation, et non un marqueur unique qu'on reecrit.
+      # `V16_UI_CAPABLE` dit « ce chrome a des icones SVG et du texte Skia » ;
+      # il continue de le dire, et un artefact d'aujourd'hui le porte encore.
+      # Ce qu'il ne peut pas dire, c'est « ce chrome a des onglets » -- et un
+      # artefact d'avant ce lot passerait le controle de completude avec ses
+      # seuls anciens marqueurs, resterait en place, et l'utilisateur
+      # chercherait le defaut dans le code des onglets, qui est ecrit.
+      #
+      # C'est exactement le defaut que V16 avait deja coute une fois.
+      - name: Marquer la capacite UI V19
+        run: |
+          printf 'Bouchaud V19 onglets=1 recherche=1 presse-papiers=1 menu=1 telechargements=1 favoris=1\n' > third_party/native-browser-bouchaud/V19_UI_CAPABLE
+
+      - name: Statistiques ccache apres
+        if: always()
+        run: ccache -s || true
+
+      # BOUCHAUD_CI_CACHES_SURVIVENT_V1 : sauvegardes AVANT les publications.
+      # Une publication bloquee jusqu'au delai du job ne les emporte plus.
+      - name: Sauvegarder le build incremental
+        if: ${{ !cancelled() && steps.ninja.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/ladybird-browser-src
+            third_party/build-ladybird-browser-bouchaud
+          key: ${{ steps.ninja.outputs.cache-primary-key }}
+
+      # Les objets reussis servent meme si une autre unite a echoue.
+      # Successful objects are reusable even when another translation unit fails.
+      - name: Sauvegarder ccache meme apres erreur
+        if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      - name: Verifier les artefacts runtime
+        run: |
+          set -eux
+          OUT=third_party/native-browser-bouchaud
+          for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder Compositor WebWorker WebDriver; do
+            test -f "$OUT/$f"
+            file "$OUT/$f"
+            readelf -l "$OUT/$f" > "/tmp/entetes-$f.txt"
+            if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
+          done
+          test -x "$OUT/webcontent-bootstrap"
+          test -f "$OUT/M9_CAPABLE"
+          test -d "$OUT/resources"
+          # V16 n'est plus un workflow: c'est une capacite de l'artefact canonique.
+          if [ -f "$OUT/V16_UI_CAPABLE" ]; then cat "$OUT/V16_UI_CAPABLE"; fi
+          if [ -f "$OUT/V19_UI_CAPABLE" ]; then cat "$OUT/V19_UI_CAPABLE"; fi
+          du -sh "$OUT"
+
+      # BOUCHAUD_P13_MANIFESTE_ARTEFACT
+      - name: Manifeste reproductible de l'artefact
+        run: |
+          python3 tools/ladybird/artifact_manifest.py create \
+            --root third_party/native-browser-bouchaud \
+            --upstream third_party/UPSTREAM.md \
+            --output third_party/native-browser-bouchaud/BOUCHAUD_ARTIFACT_MANIFEST.json
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root third_party/native-browser-bouchaud \
+            --upstream third_party/UPSTREAM.md \
+            --manifest third_party/native-browser-bouchaud/BOUCHAUD_ARTIFACT_MANIFEST.json
+
+      # L'etape « Variante RELR de WebWorker » a ete retiree avec le job
+      # `variante-elf` : voir BOUCHAUD_C68 plus bas. Le relink reste
+      # disponible a la main (`tools/ladybird/build-variante-relr.sh`).
+
+      - name: Publier Ladybird natif
+        # 434 Mo, 58 fichiers, 18 s mesurees (run 40528051026). Borne : une
+        # publication bloquee echoue en 20 min au lieu de consommer le job.
+        timeout-minutes: 20
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: third_party/native-browser-bouchaud/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
+      # BOUCHAUD_WPT_V1 (P11) : le corpus WPT vient de l'arbre EXACT qui vient
+      # d'etre construit -- memes tests, memes resultats attendus.
+      - name: Corpus WPT
+        run: python3 tools/ladybird/wpt/prepare-corpus.py third_party/ladybird-browser-src third_party/wpt-corpus
+      - name: Publier le corpus WPT
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-wpt-corpus
+          path: third_party/wpt-corpus/
+          if-no-files-found: error
+          retention-days: 14
+
+
+
+  memoire-onglets:
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- deux repetitions de mesure intactes.
+    # Si elles sont rouges, une troisieme repetition active dump_graph() uniquement
+    # pour attribuer la retention, sans contaminer M0/M1/M2 des deux mesures.
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- DIAGNOSTIC (hors verdict de convergence
+    # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
+    # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
+    # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
+    name: ladybird / memoire apres onglets fermes (diagnostic)
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh tete native-browser
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
+        env:
+          BO_QEMU_KVM: "1"
+        run: |
+          for bras in correctif temoin; do
+            for essai in 1 2 3 4 5 6; do
+              t=0; [ "$bras" = temoin ] && t=1
+              BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
+              cp serie-memoire.log "serie-memoire-$bras-$essai.log"
+              {
+                echo "=== $bras $essai rc=$rc ==="
+                grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
+                echo "LB_C22 lignes=$(grep -ac '\[LB:C22\] collecte' serie-memoire.log) partitions=$(grep -ao '\[LB:C22\] collecte partitions=[0-9]* temoin=[01]' serie-memoire.log | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+                echo "C22_ESSAI bras=$bras essai=$essai rc=$rc"
+              } >> c22-validation.txt
+              { echo "=== chronologie $bras $essai rc=$rc ==="; python3 tools/ci/c22_chronologie.py serie-memoire.log 70 || true; } >> c22-chronologie.txt
+            done
+          done
+          cat c22-chronologie.txt
+          cat c22-validation.txt
+          f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
+          f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
+          t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
+          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6"
+          [ "$f_vert" = 6 ] && [ "$t_rouge" -ge 1 ]
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-memoire
+          path: |
+            serie-memoire*.log
+            fixture-memoire*.log
+            memoire-*.sortie
+            serie-gc-retention.log
+            fixture-gc-retention.log
+            gc-retention.sortie
+          if-no-files-found: warn
+
