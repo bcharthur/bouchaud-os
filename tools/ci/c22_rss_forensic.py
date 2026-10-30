@@ -14,7 +14,7 @@ def analyser(texte):
     reperes = {}
     categories = []
     perf = []
-    proc = re.compile(r"\\[PERF-PROC\\] t=(\\d+) pid=(\\d+) image=(\\S+) rss_kio=(\\d+)")
+    proc = re.compile(r"\[PERF-PROC\] t=(\d+) pid=(\d+) image=(\S+) rss_kio=(\d+)")
     for idx, ligne in enumerate(lignes):
         m = REP.search(ligne)
         if m:
