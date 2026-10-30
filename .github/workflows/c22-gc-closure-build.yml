@@ -5,7 +5,16 @@ on:
   push:
     branches:
       - 'p13/qualification-c22-nightly-20261030'
-      - 'fix/p13-c22-thread-local-heaps-20261030'
+    paths:
+      - '.github/workflows/c22-gc-closure-build.yml'
+      - 'tools/ladybird/prepare-c22-partitions.py'
+      - 'tools/ci/reliability/test_c22_gc_closure.py'
+  # La PR a pour base la branche qui a sauve Ninja/ccache au run 41044772229.
+  # Les caches Actions sont scopes par ref : les pushes d'une branche soeur
+  # n'y ont pas acces et provoquent une reconstruction complete.
+  pull_request:
+    branches:
+      - 'p13/qualification-c22-nightly-20261030'
     paths:
       - '.github/workflows/c22-gc-closure-build.yml'
       - 'tools/ladybird/prepare-c22-partitions.py'
@@ -139,6 +148,21 @@ jobs:
 
       - name: Statistiques ccache avant
         run: ccache -s || true
+
+      # BOUCHAUD_C22_CACHE_FAIL_FAST : 41059850060 a perdu 116 min de CI.
+      # Ref de branche soeur => 0 cache Ninja/ccache => 2223/2788 puis annule.
+      # Avant de consacrer des ressources au C++, exiger un cache utilisable.
+      - name: Cache de compilation obligatoire
+        env:
+          NINJA_CACHE_KEY: ${{ steps.ninja.outputs.cache-matched-key }}
+          CCACHE_CACHE_KEY: ${{ steps.ccache.outputs.cache-matched-key }}
+        run: |
+          if [ -z "$NINJA_CACHE_KEY" ] && [ -z "$CCACHE_CACHE_KEY" ]; then
+            echo "::error::C22_CACHE_ABSENT - ne pas reconstruire Ladybird pendant 2 heures sans cache"
+            echo "Relancer uniquement via une PR basee sur p13/qualification-c22-nightly-20261030 (cache 41044772229)"
+            exit 1
+          fi
+          echo "C22_CACHE_PRET ninja=${NINJA_CACHE_KEY:-non} ccache=${CCACHE_CACHE_KEY:-non}"
 
       # Le journal de ninja fait cinq mille lignes, et une erreur de
       # compilation tombe AU MILIEU : les cibles encore en vol continuent de
