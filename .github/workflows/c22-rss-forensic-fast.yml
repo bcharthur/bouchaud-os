@@ -1,0 +1,76 @@
+name: C22 RSS forensic rapide (artefact reutilise)
+on:
+  push:
+    branches: ['diag/c22-categories-fast-20261030']
+    paths:
+      - '.github/workflows/c22-rss-forensic-fast.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  c22-rss:
+    name: C22 2 correctifs + 1 temoin, sans rebuild Ladybird
+    runs-on: ubuntu-24.04
+    timeout-minutes: 26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Dependances QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: diag-c22-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-
+            reliability-host-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Compiler uniquement le noyau / bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Reutiliser le binaire Ladybird 40940855247
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 40940855247
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier provenance exacte des entrees de build
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Activer KVM
+        run: sudo chmod 666 /dev/kvm
+      - name: Memoires ciblees, echec conserve comme preuve
+        env:
+          BO_QEMU_KVM: "1"
+        run: |
+          set -uo pipefail
+          for cas in correctif-1 correctif-2 temoin-1; do
+            if [[ "$cas" == temoin* ]]; then t=1; else t=0; fi
+            BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "$cas.sortie" 2>&1
+            rc=$?
+            cp serie-memoire.log "$cas.log"
+            echo "C22_DIAG_CAS cas=$cas rc=$rc"
+            grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE' "$cas.sortie" || true
+            python3 tools/ci/c22_rss_forensic.py "$cas.log" --label "$cas" || exit 2
+          done
+          echo "C22_DIAGNOSTIC_TERMINE qualifiant=non"
+      - name: Conserver journaux pour analyse causale
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-rss-forensic
+          path: |
+            correctif-*.log
+            correctif-*.sortie
+            temoin-*.log
+            temoin-*.sortie
+          if-no-files-found: warn
