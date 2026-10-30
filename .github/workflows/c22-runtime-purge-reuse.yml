@@ -1,0 +1,183 @@
+name: C22 runtime purge - REUSE binaire natif + noyau actuel
+# Ne recompile JAMAIS Ladybird. Le binaire WebContent provient du
+# run 41077304303, SHA b726cfb0; verifie l'empreinte de ses sources
+# contre le SHA de ce run. Ne compile que le noyau puis 6x6 + Nightly.
+on:
+  pull_request:
+    branches: ['p13/qualification-c22-nightly-20261030']
+    paths:
+      - 'src/gui/client.rs'
+      - '.github/workflows/c22-runtime-purge-reuse.yml'
+      - 'tools/ci/reliability/test_c22_purge_runtime.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  memoire-onglets:
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- deux repetitions de mesure intactes.
+    # Si elles sont rouges, une troisieme repetition active dump_graph() uniquement
+    # pour attribuer la retention, sans contaminer M0/M1/M2 des deux mesures.
+    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- DIAGNOSTIC (hors verdict de convergence
+    # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
+    # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
+    # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
+    name: C22 / memoire contractuelle 6x6, temoin historique
+    runs-on: ubuntu-24.04
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preflight - politique mimalloc du navigateur produit
+        run: python3 -m unittest discover -s tools/ci/reliability -p test_c22_purge_runtime.py -v
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: 41077304303
+          github-token: ${{ github.token }}
+      - name: Verifier le manifeste et les entrees natives inchangees
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Verifier le SHA exact du code teste
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          echo "C22_PROVENANCE_SHA sha=${{ github.sha }}"
+      - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
+        env:
+          BO_QEMU_KVM: "1"
+        run: |
+          for bras in correctif temoin; do
+            for essai in 1 2 3 4 5 6; do
+              t=0; [ "$bras" = temoin ] && t=1
+              BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
+              cp serie-memoire.log "serie-memoire-$bras-$essai.log"
+              {
+                echo "=== $bras $essai rc=$rc ==="
+                grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
+                echo "LB_C22 lignes=$(grep -ac '\[LB:C22\] collecte' serie-memoire.log) partitions=$(grep -ao '\[LB:C22\] collecte partitions=[0-9]* temoin=[01]' serie-memoire.log | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+                echo "C22_ESSAI bras=$bras essai=$essai rc=$rc"
+              } >> c22-validation.txt
+              { echo "=== chronologie $bras $essai rc=$rc ==="; python3 tools/ci/c22_chronologie.py serie-memoire.log 70 || true; } >> c22-chronologie.txt
+            done
+          done
+          cat c22-chronologie.txt
+          cat c22-validation.txt
+          f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
+          f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
+          t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
+          # Une simple erreur QEMU n'est pas un temoin de croissance memoire.
+          t_memoire=0
+          t_invalide=0
+          for essai in 1 2 3 4 5 6; do
+            sortie="memoire-temoin-$essai.sortie"
+            if grep -q "C22_ESSAI bras=temoin essai=$essai rc=0" c22-validation.txt; then
+              continue
+            fi
+            if grep -q "C22_ESSAI bras=temoin essai=$essai rc=1" c22-validation.txt \
+              && grep -q 'MEMOIRE_CROISSANCE n=' "$sortie" \
+              && grep -q '  ECHEC   memoire :' "$sortie" \
+              && [ "$(grep -c '  ECHEC' "$sortie" || true)" = 1 ] \
+              && ! grep -q 'MEMOIRE_INCONCLUSIF' "$sortie"; then
+              t_memoire=$((t_memoire + 1))
+            else
+              t_invalide=$((t_invalide + 1))
+              echo "::error::Temoin $essai : rouge non-memoire ou inconclusif"
+            fi
+          done
+          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6 temoin_memoire=$t_memoire temoin_invalides=$t_invalide"
+          # INTERDICTION de faire "test && test && test" suivi d'un echo :
+          # sous bash -e, l'echec d'un element non-terminal de && est ignore.
+          if [ "$f_vert" -ne 6 ] || [ "$f_rouge" -ne 0 ] || [ "$t_memoire" -lt 1 ] || [ "$t_invalide" -ne 0 ]; then
+            echo "::error::C22_CONTRACTUEL_6X6_ECHEC correctif=$f_vert/6 rouges=$f_rouge temoin_memoire=$t_memoire temoin_invalides=$t_invalide"
+            exit 1
+          fi
+          echo "C22_CONTRACTUEL_6X6_OK sha=${{ github.sha }}"
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-memoire
+          path: |
+            serie-memoire*.log
+            fixture-memoire*.log
+            memoire-*.sortie
+            c22-validation.txt
+            c22-chronologie.txt
+            serie-gc-retention.log
+            fixture-gc-retention.log
+            gc-retention.sortie
+          if-no-files-found: warn
+
+
+  nightly-smoke:
+    name: Nightly / produit Ladybird du SHA C22
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prerequis produit Nightly
+        run: tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: c22-nightly-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            diag-c22-rust-${{ runner.os }}-
+            nightly-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Compiler uniquement le noyau du SHA de ce run
+        run: tools/ci/build_kernel.sh
+      - name: Recuperer Ladybird produit dans ce meme run
+        uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: 41077304303
+          github-token: ${{ github.token }}
+      - name: Verifier le manifeste et le HEAD exact
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Smoke du produit Ladybird Nightly
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Preuves produit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-nightly-produit
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
+
+  c22-nightly-gate:
+    name: Gate C22 + Nightly / SHA unique / artefact lie
+    if: always()
+    needs: [memoire-onglets, nightly-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail-closed sur les trois emplois
+        env:
+          C22: ${{ needs.memoire-onglets.result }}
+          NIGHTLY: ${{ needs.nightly-smoke.result }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "P13_ETATS c22=$C22 nightly=$NIGHTLY sha=$SHA"
+          test "$C22" = success
+          test "$NIGHTLY" = success
+          echo "P13_C22_NIGHTLY_SAME_SHA_OK sha=$SHA"
+          echo "P13_QUALIFICATION_STRICTE_ENCORE_REQUISE sha=$SHA"
