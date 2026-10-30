@@ -103,6 +103,11 @@ DEBUT=$SECONDS
 verdict=inconnu
 while kill -0 "$PID" 2>/dev/null; do
   if grep -aq 'HOST_MEMOIRE_FIN' "$LOG"; then verdict=fini; break; fi
+  # Fail-closed : un enfant qui n'a jamais charge le site B n'est PAS
+  # un swap. Ne pas attendre tout le plafond sur un banc deja invalide.
+  if grep -aq 'HOST_MEMOIRE_ECHEC' "$LOG"; then verdict=enfant_non_prouve; break; fi
+  if grep -aq 'exec-world-writable' "$LOG"; then verdict=permissions_exec; break; fi
+  if grep -aq 'Could not launch any of' "$LOG"; then verdict=ladybird_lancement; break; fi
   if grep -aq 'KERNEL PANIC' "$LOG"; then verdict=panique; break; fi
   if (( SECONDS - DEBUT > PLAFOND )); then verdict=plafond; break; fi
   sleep 5
