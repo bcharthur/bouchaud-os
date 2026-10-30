@@ -340,6 +340,8 @@ jobs:
             serie-memoire*.log
             fixture-memoire*.log
             memoire-*.sortie
+            c22-validation.txt
+            c22-chronologie.txt
             serie-gc-retention.log
             fixture-gc-retention.log
             gc-retention.sortie
