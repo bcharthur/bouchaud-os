@@ -1,10 +1,14 @@
 name: C22 analyser - tests rapides
 on:
   push:
-    branches: ['diag/c22-categories-fast-20261030']
+    branches: ['diag/c22-categories-fast-20261030', 'chatgpt/active']
     paths:
       - 'tools/ci/c22_rss_forensic.py'
       - 'tools/ci/reliability/test_c22_rss_forensic.py'
+      - 'tools/ci/reliability/test_c22_gc_closure.py'
+      - 'tools/health/browser_host_fixture.py'
+      - 'tools/ci/run_ladybird_memoire.sh'
+      - 'src/gui/services.rs'
       - '.github/workflows/c22-analyser-tests.yml'
 permissions:
   contents: read
@@ -14,4 +18,6 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest discover -s tools/ci/reliability -p test_c22_rss_forensic.py -v
+      - run: python3 -m unittest discover -s tools/ci/reliability -p 'test_c22_*.py' -v
+      - run: python3 -m py_compile tools/health/browser_host_fixture.py tools/ci/c22_rss_forensic.py
+      - run: bash -n tools/ci/run_ladybird_memoire.sh
