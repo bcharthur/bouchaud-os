@@ -2,23 +2,50 @@ name: C22 runtime purge - REUSE binaire natif + noyau actuel
 # Ne recompile JAMAIS Ladybird. Le binaire WebContent provient du
 # run 41077304303, SHA b726cfb0; verifie l'empreinte de ses sources
 # contre le SHA de ce run. Ne compile que le noyau puis 6x6 + Nightly.
+# Heavy C22 6x6 campaign runs ONLY when a verified fresh native producer is supplied.
+# An automatic push/PR run has no safe native_run_id and must never use an obsolete binary.
 on:
-  push:
-    branches: ['chatgpt/active']
-    paths:
-      - '.github/workflows/p13-final-candidate.yml'
-  pull_request:
-    branches: ['p13/qualification-c22-nightly-20261030']
-    paths:
-      - 'src/gui/client.rs'
-      - '.github/workflows/c22-runtime-purge-reuse.yml'
-      - 'tools/ci/reliability/test_c22_purge_runtime.py'
   workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: 'Successful ladybird-native-browser run containing native binary to test'
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
 
 jobs:
+  preflight-producer:
+    name: C22 / validate native producer BEFORE any KVM or kernel build
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Require a successful native Ladybird build with a real artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$NATIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::Missing numeric native_run_id"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" > "$RUNNER_TEMP/c22-native-run.json"
+          python3 - "$RUNNER_TEMP/c22-native-run.json" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1], encoding='utf-8'))
+          if r.get('name') != 'ladybird-native-browser' or r.get('status') != 'completed' or r.get('conclusion') != 'success':
+              raise SystemExit('C22_NATIVE_PRODUCTEUR_NON_QUALIFIE: need completed successful native run')
+          print('C22_NATIVE_PRODUCTEUR_OK run='+str(r['id'])+' sha='+r['head_sha'])
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/c22-native-artifacts.json"
+          python3 - "$RUNNER_TEMP/c22-native-artifacts.json" <<'PY'
+          import json, sys
+          artifacts = json.load(open(sys.argv[1], encoding='utf-8')).get('artifacts', [])
+          if not any(a.get('name') == 'bouchaud-ladybird-native-browser' and not a.get('expired') for a in artifacts):
+              raise SystemExit('C22_NATIVE_ARTIFACT_ABSENT')
+          print('C22_NATIVE_ARTIFACT_OK')
+          PY
+
   memoire-onglets:
     # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- deux repetitions de mesure intactes.
     # Si elles sont rouges, une troisieme repetition active dump_graph() uniquement
@@ -28,6 +55,7 @@ jobs:
     # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
     # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
     name: C22 / memoire contractuelle 6x6, temoin historique
+    needs: [preflight-producer]
     runs-on: ubuntu-24.04
     timeout-minutes: 42
     steps:
@@ -43,7 +71,7 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
-          run-id: 41077304303
+          run-id: ${{ inputs.native_run_id }}
           github-token: ${{ github.token }}
       - name: Verifier le manifeste et les entrees natives inchangees
         run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
@@ -112,6 +140,7 @@ jobs:
 
   nightly-smoke:
     name: Nightly / produit Ladybird du SHA C22
+    needs: [preflight-producer]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -138,7 +167,7 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
-          run-id: 41077304303
+          run-id: ${{ inputs.native_run_id }}
           github-token: ${{ github.token }}
       - name: Verifier le manifeste et le HEAD exact
         run: |
@@ -159,16 +188,18 @@ jobs:
   c22-runtime-verdict:
     name: Gate C22 + Nightly / SHA unique / artefact lie
     if: always()
-    needs: [memoire-onglets, nightly-smoke]
+    needs: [preflight-producer, memoire-onglets, nightly-smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Fail-closed sur les trois emplois
         env:
+          PREFLIGHT: ${{ needs.preflight-producer.result }}
           C22: ${{ needs.memoire-onglets.result }}
           NIGHTLY: ${{ needs.nightly-smoke.result }}
           SHA: ${{ github.sha }}
         run: |
           echo "P13_ETATS c22=$C22 nightly=$NIGHTLY sha=$SHA"
+          test "$PREFLIGHT" = success
           test "$C22" = success
           test "$NIGHTLY" = success
           echo "P13_C22_NIGHTLY_SAME_SHA_OK sha=$SHA"
