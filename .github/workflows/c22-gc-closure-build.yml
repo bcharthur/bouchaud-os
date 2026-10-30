@@ -348,7 +348,12 @@ jobs:
             fi
           done
           echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6 temoin_memoire=$t_memoire temoin_invalides=$t_invalide"
-          [ "$f_vert" = 6 ] && [ "$f_rouge" = 0 ] && [ "$t_memoire" -ge 1 ] && [ "$t_invalide" = 0 ]
+          # INTERDICTION de faire "test && test && test" suivi d'un echo :
+          # sous bash -e, l'echec d'un element non-terminal de && est ignore.
+          if [ "$f_vert" -ne 6 ] || [ "$f_rouge" -ne 0 ] || [ "$t_memoire" -lt 1 ] || [ "$t_invalide" -ne 0 ]; then
+            echo "::error::C22_CONTRACTUEL_6X6_ECHEC correctif=$f_vert/6 rouges=$f_rouge temoin_memoire=$t_memoire temoin_invalides=$t_invalide"
+            exit 1
+          fi
           echo "C22_CONTRACTUEL_6X6_OK sha=${{ github.sha }}"
       - name: Journaux
         if: always()
