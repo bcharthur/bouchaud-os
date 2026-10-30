@@ -127,18 +127,41 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.ladybird_run_id }}
         run: |
-          RUN="$REQUESTED"
-          if [ -z "$RUN" ]; then
-            RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ladybird-native-browser.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          set -euo pipefail
+          # Un run SUCCESS peut ne plus posseder d'artefact (retention 14j).
+          # Un telechargement aveugle donnait un Nightly rouge hors produit.
+          # Ne retenir que les runs dont l'archive est encore presente.
+          candidates="$REQUESTED"
+          if [ -z "$candidates" ]; then
+            candidates=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow ladybird-native-browser.yml --branch main \
+              --limit 40 --json databaseId --jq '.[].databaseId')
           fi
-          if [ -n "$RUN" ]; then
-            echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "Ladybird run=$RUN"
-          else
+          choix=""
+          for run in $candidates; do
+            if ! [[ "$run" =~ ^[0-9]+$ ]]; then
+              echo "Identifiant Ladybird invalide: $run" >&2
+              exit 2
+            fi
+            if ! meta=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length'); then
+              echo "Impossible de verifier les artefacts de $run" >&2
+              exit 2
+            fi
+            if [ "$meta" -gt 0 ]; then
+              choix="$run"
+              break
+            fi
+            echo "Ladybird run=$run ignore (artefact absent/expire)"
+          done
+          if [ -z "$choix" ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo 'Aucun artefact Ladybird main disponible.'
+            echo "::error::Aucun artefact Ladybird canonique disponible. Produire le binaire avant le Nightly."
+            exit 1
           fi
+          echo "run_id=$choix" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "Ladybird run=$choix avec artefact disponible"
 
   ladybird-smoke:
     name: nightly / Ladybird product
@@ -163,6 +186,8 @@ jobs:
           path: native-browser
           run-id: ${{ needs.resolve-ladybird.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verifier la provenance de l'artefact et les entrees du SHA
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
       - run: tools/ci/run_ladybird_browser_host.sh image/bootimage-bouchaud-os.bin native-browser
       - uses: actions/upload-artifact@v4
         if: always()
