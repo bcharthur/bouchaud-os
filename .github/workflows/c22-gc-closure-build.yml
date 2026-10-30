@@ -9,16 +9,9 @@ on:
       - '.github/workflows/c22-gc-closure-build.yml'
       - 'tools/ladybird/prepare-c22-partitions.py'
       - 'tools/ci/reliability/test_c22_gc_closure.py'
-  # La PR a pour base la branche qui a sauve Ninja/ccache au run 41044772229.
-  # Les caches Actions sont scopes par ref : les pushes d'une branche soeur
-  # n'y ont pas acces et provoquent une reconstruction complete.
-  pull_request:
-    branches:
-      - 'p13/qualification-c22-nightly-20261030'
-    paths:
-      - '.github/workflows/c22-gc-closure-build.yml'
-      - 'tools/ladybird/prepare-c22-partitions.py'
-      - 'tools/ci/reliability/test_c22_gc_closure.py'
+  # La reconstruction native est reservee aux pushes sur la branche de
+  # qualification. Les PR utilisent le contrat C22 REUSE en reutilisant
+  # exclusivement un artefact lie par empreinte, et non un nouveau build C++.
   workflow_dispatch:
 permissions:
   contents: read
