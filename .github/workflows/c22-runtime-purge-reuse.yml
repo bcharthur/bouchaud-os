@@ -3,6 +3,10 @@ name: C22 runtime purge - REUSE binaire natif + noyau actuel
 # run 41077304303, SHA b726cfb0; verifie l'empreinte de ses sources
 # contre le SHA de ce run. Ne compile que le noyau puis 6x6 + Nightly.
 on:
+  push:
+    branches: ['chatgpt/active']
+    paths:
+      - '.github/workflows/p13-final-candidate.yml'
   pull_request:
     branches: ['p13/qualification-c22-nightly-20261030']
     paths:
