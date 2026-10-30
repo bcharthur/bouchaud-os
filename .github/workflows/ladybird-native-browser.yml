@@ -81,7 +81,7 @@ on:
       - 'src/kernel/native/**'
   push:
     # BOUCHAUD_P13_BUILD_SUR_BRANCHES
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
+    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024', 'chatgpt/active']
     paths:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
