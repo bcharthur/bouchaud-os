@@ -4,6 +4,10 @@ on:
     branches: ['chatgpt/active']
     paths:
       - '.github/workflows/c22-chatgpt-kvm-once.yml'
+      - 'tools/health/browser_host_fixture.py'
+      - 'tools/ci/run_ladybird_memoire.sh'
+      - 'tools/ci/reliability/test_c22_gc_closure.py'
+      - 'src/gui/services.rs'
   workflow_dispatch:
 
 permissions:
