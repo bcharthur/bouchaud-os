@@ -28,6 +28,17 @@ class C22ClosureTests(unittest.TestCase):
         s=self.code
         self.assertNotIn("MEMOIRE_BORNEE=1",s)
         self.assertNotIn("g2 > 4096",s)
+    def test_partition_heaps_thread_affinity(self):
+        # mi_heap_new() n'est pas partageable comme un tas global entre fils.
+        partition_patcher = (SRC.parent / "prepare-c22-partitions.py").read_text(encoding="utf-8")
+        ast.parse(partition_patcher)
+        self.assertIn("BOUCHAUD_C22_PARTITIONS_PAR_FIL_V2", partition_patcher)
+        self.assertIn("static thread_local mi_heap_t* s_bouchaud_partitions[4]", partition_patcher)
+        self.assertIn("static thread_local mi_heap_t* {nom}", partition_patcher)
+        self.assertIn("for (auto* heap : s_bouchaud_partitions)", partition_patcher)
+        self.assertNotIn("pthread_equal", partition_patcher)
+        self.assertNotIn("std::atomic<mi_heap_t*>", partition_patcher)
+
     def test_source_patch_has_valid_python_ast(self):
         self.assertTrue(any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in ast.walk(self.tree)))
 
