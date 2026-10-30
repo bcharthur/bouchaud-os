@@ -1,13 +1,13 @@
 name: C22 ChatGPT - KVM strict, un seul essai
+# Fail-closed: no automatic run against a stale hard-coded Ladybird artifact.
+# Dispatch only after the matching native producer is successfully built.
 on:
-  push:
-    branches: ['chatgpt/active']
-    paths:
-      - '.github/workflows/c22-chatgpt-kvm-once.yml'
-      - 'tools/health/browser_host_fixture.py'
-      - 'tools/ci/run_ladybird_memoire.sh'
-      - 'src/gui/services.rs'
   workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: 'Successful ladybird-native-browser run carrying the NEW native binary'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +26,22 @@ jobs:
           python3 -m unittest discover -s tools/ci/reliability -p 'test_c22_*.py' -v
           python3 tools/verifie-c22-partitions.py
           bash -n tools/ci/run_ladybird_memoire.sh
+      - name: Verify native producer before kernel build or artifact download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$NATIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::native_run_id is missing or not numeric"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" > "$RUNNER_TEMP/c22-native-run.json"
+          python3 - "$RUNNER_TEMP/c22-native-run.json" <<'PY'
+          import json, sys
+          run = json.load(open(sys.argv[1], encoding='utf-8'))
+          if run.get('name') != 'ladybird-native-browser' or run.get('status') != 'completed' or run.get('conclusion') != 'success':
+              raise SystemExit('C22_NATIVE_PRODUCTEUR_NON_QUALIFIE: requires completed success ladybird-native-browser run')
+          print('C22_NATIVE_PRODUCTEUR_OK run_id='+str(run['id'])+' sha='+run['head_sha'])
+          PY
       - name: Installer QEMU
         run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Cache Rust
@@ -48,7 +64,7 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
-          run-id: 41077304303
+          run-id: ${{ inputs.native_run_id }}
           github-token: ${{ github.token }}
       - name: Controler le manifeste et KVM
         run: |
