@@ -51,7 +51,7 @@ class C22ClosureTests(unittest.TestCase):
         self.assertNotIn('navigation_autre_site_non_prouvee', fixture)
         runner = (tools / "ci" / "run_ladybird_memoire.sh").read_text(encoding="utf-8")
         self.assertIn('verdict=enfant_non_prouve', runner)
-        self.assertIn('verifie-preuve-swaps.py', runner)
+        self.assertIn('preuve_swaps.py', runner)
 
     def test_c22_rss_and_perf_share_one_snapshot(self):
         repo = SRC.parents[2]
