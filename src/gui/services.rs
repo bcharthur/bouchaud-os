@@ -372,22 +372,31 @@ user_ms={} sys_ms={}",
                                     last, now, Ordering::AcqRel, Ordering::Relaxed
                                 ).is_ok()
                             {
-                                let mm = process.mm.lock();
+                                // Copie bornee sous mm, puis journalise APRES
+                                // liberation du verrou : jamais de sortie serie
+                                // pendant le verrouillage de l'espace memoire.
+                                let (total, entrees) = {
+                                    let mm = process.mm.lock();
+                                    let mut items = alloc::vec::Vec::new();
+                                    for vma in mm.promesses.iter() {
+                                        if matches!(vma.backing, crate::kernel::vma::Backing::Zero)
+                                            && vma.fin > vma.debut
+                                            && vma.fin - vma.debut >= 1024 * 1024
+                                        {
+                                            items.push((vma.id, vma.debut, vma.fin));
+                                        }
+                                    }
+                                    (mm.promesses.len(), items)
+                                };
                                 crate::serial_println!(
                                     "[C22:VMA-BEGIN] t={} pid={} total={}",
-                                    now, row.pid, mm.promesses.len()
+                                    now, row.pid, total
                                 );
-                                for vma in mm.promesses.iter() {
-                                    if matches!(vma.backing, crate::kernel::vma::Backing::Zero)
-                                        && vma.fin > vma.debut
-                                        && vma.fin - vma.debut >= 1024 * 1024
-                                    {
-                                        crate::serial_println!(
-                                            "[C22:VMA] t={} pid={} id={} start={:#x} end={:#x} size_kio={} type=zero",
-                                            now, row.pid, vma.id, vma.debut, vma.fin,
-                                            (vma.fin - vma.debut) / 1024
-                                        );
-                                    }
+                                for (id, debut, fin) in entrees {
+                                    crate::serial_println!(
+                                        "[C22:VMA] t={} pid={} id={} start={:#x} end={:#x} size_kio={} type=zero",
+                                        now, row.pid, id, debut, fin, (fin - debut) / 1024
+                                    );
                                 }
                                 crate::serial_println!("[C22:VMA-END] t={} pid={}", now, row.pid);
                             }
