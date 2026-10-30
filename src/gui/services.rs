@@ -306,6 +306,36 @@ lost_samples_global={}",
                 if detail.is_none() {
                     RELEVES_FAUTES_MANQUES.fetch_add(1, Ordering::Relaxed);
                 }
+                // C22: la disponibilite de la comptabilite des fautes
+                // ne conditionne pas la disponibilite du RSS. Le livre de
+                // fautes utilise try_lock et peut renvoyer None sous charge.
+                // Ne pas inventer des fautes=0 : declarer "indisponibles",
+                // mais fournir les mesures memoire autonomes.
+                if detail.is_none() && matches!(base, "WebContent" | "Compositor" | "ImageDecoder" | "RequestServer") {
+                    if base == "WebContent" {
+                        if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
+                            let usage = crate::kernel::resource::memory_usage(&process);
+                            let vma = { process.mm.lock().promesses.len() };
+                            let now = crate::kernel::timer::monotonic_ms();
+                            crate::serial_println!(
+                                "[PERF-PROC] t={} pid={} image={} rss_kio={} vss_kio={} taches={} fautes=indisponibles",
+                                now, row.pid, base, usage.rss / 1024, row.vss_octets / 1024, row.taches
+                            );
+                            crate::serial_println!(
+                                "[C22:RSS] t={} pid={} rss_kio={} anon_kio={} fichier_kio={} partage_kio={} device_kio={} sans_type_kio={} vma={}",
+                                now, row.pid, usage.rss / 1024, usage.anonymous / 1024,
+                                usage.file_private / 1024, usage.shared / 1024,
+                                usage.device / 1024, usage.untracked / 1024, vma
+                            );
+                        }
+                    } else {
+                        crate::serial_println!(
+                            "[PERF-PROC] t={} pid={} image={} rss_kio={} vss_kio={} taches={} fautes=indisponibles",
+                            crate::kernel::timer::monotonic_ms(), row.pid, base,
+                            row.rss_octets / 1024, row.vss_octets / 1024, row.taches
+                        );
+                    }
+                }
                 if let Some(par_categorie) = detail {
                     use crate::kernel::fautes::Categorie;
                     let c = |categorie: Categorie| par_categorie[categorie.rang()];
