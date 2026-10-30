@@ -176,7 +176,24 @@ impl Client {
             // reference lui fait attendre un delai d'attente par page.
             crate::net::resolveur_compile(),
         );
-        let base = crate::kernel::exec::shell_environment();
+        // BOUCHAUD_C22_PURGE_PRODUIT_V1 : profil mimalloc applique au vrai
+        // navigateur et a ses services enfants, avant l initialisation de
+        // l allocateur dans leurs executables. A/B KVM 41059155818 : 6/6
+        // pour 0/1 ; la correction native seule restait a 5/6.
+        // Ne pas limiter cette politique au banc C22.
+        // Le temoin historique est INTACT : son export desactive la purge.
+        // Les valeurs exportees explicitement conservent la priorite.
+        let mut base = crate::kernel::exec::shell_environment();
+        if chemin == CHEMIN_NAVIGATEUR
+            && !base.iter().any(|entry| entry == "BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE=1")
+        {
+            if !base.iter().any(|entry| entry.starts_with("MIMALLOC_PURGE_DELAY=")) {
+                base.push("MIMALLOC_PURGE_DELAY=0".to_string());
+            }
+            if !base.iter().any(|entry| entry.starts_with("MIMALLOC_PURGE_DECOMMITS=")) {
+                base.push("MIMALLOC_PURGE_DECOMMITS=1".to_string());
+            }
+        }
 
         let surface_node = surface.node;
         let (largeur_px, hauteur_px, pas) =
