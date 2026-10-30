@@ -324,6 +324,23 @@ lost_samples_global={}",
                     let (cpu_user_ms, cpu_sys_ms) = crate::kernel::task::proc_processus_cumul(row.pid)
                         .map(|c| (c.user_ns / 1_000_000, c.system_ns / 1_000_000))
                         .unwrap_or((0, 0));
+                    // C22: un meme instantane alimente PERF-PROC et C22:RSS.
+                    // Deux mesures MM successives n'etaient pas egales quand les
+                    // pages etaient allouees entre les sorties serie; le banc
+                    // rendait alors INCONCLUSIF meme si le navigateur vivait.
+                    // Aucune modification des allocations ni des seuils.
+                    let c22_snapshot = if base == "WebContent" {
+                        crate::kernel::task::process_by_pid(row.pid).map(|process| {
+                            let usage = crate::kernel::resource::memory_usage(&process);
+                            let vma = { process.mm.lock().promesses.len() };
+                            (process, usage, vma)
+                        })
+                    } else {
+                        None
+                    };
+                    let rss_mesure = c22_snapshot.as_ref()
+                        .map(|(_, usage, _)| usage.rss)
+                        .unwrap_or(row.rss_octets);
                     crate::serial_println!(
                         "[PERF-PROC] t={} pid={} image={} rss_kio={} vss_kio={} taches={} \
 fautes={} total_us={} pire_us={} \
@@ -332,7 +349,7 @@ user_ms={} sys_ms={}",
                         crate::kernel::timer::monotonic_ms(),
                         row.pid,
                         base,
-                        row.rss_octets / 1024,
+                        rss_mesure / 1024,
                         row.vss_octets / 1024,
                         row.taches,
                         total.nombre,
@@ -350,10 +367,7 @@ user_ms={} sys_ms={}",
                     // BOUCHAUD_C22_RSS_CATEGORIES_DIAG : snapshot en lecture seule
                     // de WebContent, au meme rythme que PERF-PROC. Ne change
                     // aucun seuil, mapping, ni chemin d'allocation.
-                    if base == "WebContent" {
-                        if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
-                            let usage = crate::kernel::resource::memory_usage(&process);
-                            let vma = { process.mm.lock().promesses.len() };
+                    if let Some((process, usage, vma)) = c22_snapshot {
                             crate::serial_println!(
                                 "[C22:RSS] t={} pid={} rss_kio={} anon_kio={} fichier_kio={} partage_kio={} device_kio={} sans_type_kio={} vma={}",
                                 crate::kernel::timer::monotonic_ms(),
@@ -399,7 +413,6 @@ user_ms={} sys_ms={}",
                                 }
                                 crate::serial_println!("[C22:VMA-END] t={} pid={}", now, row.pid);
                             }
-                        }
                     }
                     // BOUCHAUD_APPELS_PAR_PROCESSUS_V1 : qui fait tourner sa
                     // boucle d'evenements a vide se voit a ses appels.
