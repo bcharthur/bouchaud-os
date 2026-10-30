@@ -1,11 +1,7 @@
 name: P13 final - single SHA strict gates
+# Dispatch only after native C22 and Nightly were both run on the same SHA.
+# Do not queue dedicated-host jobs for workflow-only edits.
 on:
-  push:
-    branches: ['chatgpt/active']
-    paths:
-      - '.github/workflows/p13-final-candidate.yml'
-      - '.github/workflows/c22-runtime-purge-reuse.yml'
-      - 'tools/ci/c22_ab_verdict.py'
   workflow_dispatch:
 
 permissions:
@@ -127,13 +123,13 @@ jobs:
           import json, sys
           data = json.load(open(sys.argv[1], encoding='utf-8'))
           sha = sys.argv[2]
-          expected = [
-              'C22 runtime purge - REUSE binaire natif + noyau actuel',
-              'Nightly Full',
-          ]
-          for name in expected:
+          expected = {
+              'C22 runtime purge - REUSE binaire natif + noyau actuel': {'workflow_dispatch'},
+              'Nightly Full': {'workflow_dispatch'},
+          }
+          for name, events in expected.items():
               matches = [r for r in data.get('workflow_runs', [])
-                         if r.get('name') == name and r.get('head_sha') == sha and r.get('event') == 'push']
+                         if r.get('name') == name and r.get('head_sha') == sha and r.get('event') in events]
               print('P13_EXTERNAL_GATE', name, [(r['id'], r['status'], r['conclusion']) for r in matches])
               if not matches or not any(r['status'] == 'completed' and r['conclusion'] == 'success'
                                         for r in matches):
