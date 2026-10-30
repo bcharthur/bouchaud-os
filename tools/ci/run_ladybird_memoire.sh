@@ -53,6 +53,14 @@ fi
 if [ "${BO_GC_RETENTION_PROOF:-0}" = 1 ]; then
   GC_RETENTION_GUEST_EXPORT="export BOUCHAUD_GC_RETENTION_PROOF=1"
 fi
+# C22 A/B : verifier une hypothese de purge mimalloc sans recompiler
+# le navigateur. Ce profil est EXPERIMENTAL, pas une qualification produit.
+# Interdit cote temoin historique : il doit rester un temoin negatif intact.
+C22_PURGE_GUEST_EXPORT=""
+if [ "${BO_C22_MIMALLOC_PURGE:-0}" = 1 ] && [ "${BO_C22_TEMOIN:-0}" != 1 ]; then
+  C22_PURGE_GUEST_EXPORT='export MIMALLOC_PURGE_DELAY=0
+export MIMALLOC_PURGE_DECOMMITS=1'
+fi
 cat > "$SCENARIO/autorun" <<AUTORUN
 echo "=== Bouchaud memoire ==="
 export BO_AUTOSTART_BROWSER=1
@@ -66,6 +74,7 @@ export BOUCHAUD_LB_MEMORY_TRIM_TAIL=1
 export LIBGC_LOG_LEVEL=1
 ${GC_RETENTION_GUEST_EXPORT}
 ${C22_TEMOIN_GUEST_EXPORT}
+${C22_PURGE_GUEST_EXPORT}
 export BOUCHAUD_M9_URL='$URL'
 desktop
 AUTORUN

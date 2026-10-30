@@ -1,0 +1,87 @@
+name: C22 A-B purge mimalloc KVM (preuve courte)
+on:
+  push:
+    branches: ['p13/qualification-c22-nightly-20261030']
+    paths:
+      - '.github/workflows/c22-purge-ab.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  c22-purge:
+    name: C22 6 correctifs purge + 4 temoins, fail closed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 33
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: diag-c22-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            diag-c22-rust-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage de CE SHA
+        run: tools/ci/build_kernel.sh
+      - name: Ladybird C22 deja construit
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 40940855247
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier les entrees du binaire
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: KVM
+        run: sudo chmod 666 /dev/kvm
+      - name: A/B corrige contre temoin; preuve 6/6 sans relaxation
+        env:
+          BO_QEMU_KVM: "1"
+        shell: bash
+        run: |
+          set -uo pipefail
+          : > c22-purge-bilan.txt
+          v=0
+          t=0
+          for bras in correctif temoin; do
+            for essai in 1 2 3 4 5 6; do
+              if [ "$bras" = temoin ] && [ "$essai" -gt 4 ]; then break; fi
+              if [ "$bras" = correctif ]; then
+                export BO_C22_MIMALLOC_PURGE=1 BO_C22_TEMOIN=0
+              else
+                export BO_C22_MIMALLOC_PURGE=0 BO_C22_TEMOIN=1
+              fi
+              if tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "c22-$bras-$essai.sortie" 2>&1; then rc=0; else rc=$?; fi
+              if [ -s serie-memoire.log ]; then cp serie-memoire.log "c22-$bras-$essai.log"; else echo C22_PREUVE_ABSENTE; exit 2; fi
+              echo "C22_PURGE_ESSAI bras=$bras essai=$essai rc=$rc" | tee -a c22-purge-bilan.txt
+              grep 'MEMOIRE_PROCESSUS .*image=WebContent' "c22-$bras-$essai.sortie" | tail -1 | tee -a c22-purge-bilan.txt || true
+              if [ "$bras" = correctif ]; then
+                if [ "$rc" -eq 0 ]; then v=$((v+1)); else echo C22_PURGE_ROUGE_CORRECTIF; break; fi
+              else
+                if [ "$rc" -eq 1 ]; then t=$((t+1)); fi
+                if [ "$t" -ge 1 ]; then break; fi
+              fi
+            done
+            if [ "$bras" = correctif ] && [ "$v" -ne 6 ]; then break; fi
+          done
+          echo "C22_PURGE_RESULTAT correctif_verts=$v/6 temoin_rouges=$t/4"
+          echo "C22_PURGE_RESULTAT correctif_verts=$v/6 temoin_rouges=$t/4" >> c22-purge-bilan.txt
+          [ "$v" -eq 6 ] && [ "$t" -ge 1 ]
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c22-purge-ab
+          path: |
+            c22-purge-bilan.txt
+            c22-*.sortie
+            c22-*.log
+          if-no-files-found: warn
