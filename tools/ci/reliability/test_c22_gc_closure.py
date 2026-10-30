@@ -28,6 +28,19 @@ class C22ClosureTests(unittest.TestCase):
         s=self.code
         self.assertNotIn("MEMOIRE_BORNEE=1",s)
         self.assertNotIn("g2 > 4096",s)
+    def test_deferred_gc_after_close_is_retried_not_silently_dropped(self):
+        s = self.code
+        self.assertIn("BOUCHAUD_C22_GC_DEFERRED_RETRY_V1", s)
+        self.assertIn("bouchaud_c22_collect_after_discard(*owning_heap);", s)
+        self.assertIn("bouchaud_c22_collect_after_discard(owning_heap);", s)
+        self.assertIn('after_discard_gc deferred=1 rescheduled=1', s)
+        self.assertIn('after_discard_gc deferred=0 completed=1', s)
+        self.assertNotIn("'                if (owning_heap->is_gc_deferred())\\n'\\n"
+                         "        '                    return;\\n'", s)
+        # The generated C++ helper uses actual newlines, never backslash-n literals.
+        self.assertNotIn(r'"namespace Web::HTML {\\n"', s)
+        self.assertIn('"namespace Web::HTML {\\n"', s)
+
     def test_partition_heaps_thread_affinity(self):
         # mi_heap_new() n'est pas partageable comme un tas global entre fils.
         partition_patcher = (SRC.parent / "prepare-c22-partitions.py").read_text(encoding="utf-8")
