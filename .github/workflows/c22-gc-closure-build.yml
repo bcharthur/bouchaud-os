@@ -3,9 +3,13 @@ name: C22 GC post-discard - build cache et validation 6x6
 # P13 endurance/scheduler non relances, aucun autre job Ladybird.
 on:
   push:
-    branches: ['p13/qualification-c22-nightly-20261030']
+    branches:
+      - 'p13/qualification-c22-nightly-20261030'
+      - 'fix/p13-c22-thread-local-heaps-20261030'
     paths:
       - '.github/workflows/c22-gc-closure-build.yml'
+      - 'tools/ladybird/prepare-c22-partitions.py'
+      - 'tools/ci/reliability/test_c22_gc_closure.py'
   workflow_dispatch:
 permissions:
   contents: read
