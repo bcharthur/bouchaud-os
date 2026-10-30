@@ -4,6 +4,8 @@ on:
     branches: ['diag/c22-categories-fast-20261030']
     paths:
       - '.github/workflows/c22-stop-on-red.yml'
+      - 'src/gui/services.rs'
+      - 'tools/ci/c22_vma_diff.py'
 permissions:
   contents: read
   actions: read
@@ -66,6 +68,7 @@ jobs:
             echo "C22_ESSAI essai=$essai rc=$rc"
             grep -E "MEMOIRE_PROCESSUS.*image=WebContent|MEMOIRE_BORNEE|MEMOIRE_CROISSANCE" "c22-$essai.sortie" || true
             python3 tools/ci/c22_rss_forensic.py "c22-$essai.log" --label "$essai" || exit 2
+            python3 tools/ci/c22_vma_diff.py "c22-$essai.log" --label "$essai" || exit 2
             if [ "$rc" != 0 ]; then
               verdict=rouge_reproduit
               break
