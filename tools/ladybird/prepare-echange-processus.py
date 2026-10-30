@@ -443,6 +443,42 @@ def main() -> int:
         "    ak_kmalloc_collect();\n"
         "}\n",
     )
+    # BOUCHAUD_C22_GC_APRES_FERMETURE_V1 : l'ancien document peut
+    # etre libere apres unload, mais sa collection JS reste incrementale.
+    # Un cycle de GC apres la sortie du callback de fermeture retire les
+    # cellules devenues inaccessibles AVANT de purger les tas natifs. Il
+    # n'est pas possible de le faire dans Document::destroy() : le callback
+    # et ses captures gardent encore les objets vivants a cet instant.
+    nav = racine / "Libraries/LibWeb/HTML/LocalTraversableNavigable.cpp"
+    remplace(
+        nav,
+        "#include <LibGC/RootVector.h>\\n",
+        "#include <LibGC/RootVector.h>\\n"
+        "#include <LibGC/Heap.h> // BOUCHAUD_C22_GC_APRES_FERMETURE_V1\\n"
+        "#include <AK/kmalloc.h>\\n"
+        "#include <cstdlib>\\n",
+    )
+    remplace(
+        nav,
+        '        dbgln("[LB] PAGE_DISCARD_END navigable={}", id());\\n',
+        '        dbgln("[LB] PAGE_DISCARD_END navigable={}", id());\\n'
+        '        // BOUCHAUD_C22_GC_APRES_FERMETURE_V1: le callback actuel\\n'
+        '        // porte encore [this, browsing_context]. Differer une fois\\n'
+        '        // qu il a rendu les racines GC: le callback differe ne\\n'
+        '        // capture AUCUN objet GC ni pointeur de page fermee.\\n'
+        '        if (!getenv("BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE")) {\\n'
+        '            auto* owning_heap = &heap();\\n'
+        '            Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(*owning_heap, [owning_heap] {\\n'
+        '                if (owning_heap->is_gc_deferred())\\n'
+        '                    return;\\n'
+        '                owning_heap->set_incremental_sweep_enabled(false);\\n'
+        '                owning_heap->collect_garbage();\\n'
+        '                owning_heap->set_incremental_sweep_enabled(true);\\n'
+        '                ak_kmalloc_collect();\\n'
+        '            }));\\n'
+        '        }\\n',
+    )
+
     return 0
 
 
