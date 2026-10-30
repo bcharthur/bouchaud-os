@@ -1,0 +1,63 @@
+name: Nightly Ladybird candidate - provenance et smoke rapide
+on:
+  push:
+    branches: ['p13/qualification-c22-nightly-20261030']
+    paths:
+      - '.github/workflows/nightly-candidate-smoke.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  nightly-ladybird:
+    name: Nightly / Ladybird product, artefact present et lie
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reproduire la verification d'artefact du Nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN=40940855247
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length')
+          [ "$count" -ge 1 ] || { echo "artefact perime/absent"; exit 1; }
+          echo "NIGHTLY_ARTIFACT_RESOLVED run=$RUN"
+      - name: Prerequis Nightly
+        run: tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: diag-c22-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            diag-c22-rust-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage de la candidate
+        run: tools/ci/build_kernel.sh
+      - name: Telecharger Ladybird verifie
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 40940855247
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Manifeste, SHA et entrees exactes
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: Smoke produit Nightly
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-candidate-ladybird-logs
+          path: |
+            serie-browser-host.log
+            fixture-browser-host.log
+          if-no-files-found: warn
