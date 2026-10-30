@@ -6,6 +6,7 @@ on:
       - 'tools/ci/c22_rss_forensic.py'
       - 'tools/ci/reliability/test_c22_rss_forensic.py'
       - 'tools/ci/reliability/test_c22_gc_closure.py'
+      - 'tools/ladybird/prepare-echange-processus.py'
       - 'tools/health/browser_host_fixture.py'
       - 'tools/ci/run_ladybird_memoire.sh'
       - 'src/gui/services.rs'
