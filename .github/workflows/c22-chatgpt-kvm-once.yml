@@ -1,11 +1,11 @@
 name: C22 ChatGPT - KVM strict, un seul essai
 # Fail-closed: no automatic run against a stale hard-coded Ladybird artifact.
-# Dispatch only after the matching native producer is successfully built.
+# Smoke only: accept a successful native build and artifact even when the memory\n# diagnostic makes the overall producer red. This is NOT C22 qualification.
 on:
   workflow_dispatch:
     inputs:
       native_run_id:
-        description: 'Successful ladybird-native-browser run carrying the NEW native binary'
+        description: 'Ladybird run with a verified native build/artifact (diagnostic may be red); smoke only'
         required: true
         type: string
 
@@ -26,7 +26,7 @@ jobs:
           python3 -m unittest discover -s tools/ci/reliability -p 'test_c22_*.py' -v
           python3 tools/verifie-c22-partitions.py
           bash -n tools/ci/run_ladybird_memoire.sh
-      - name: Verify native producer before kernel build or artifact download
+      - name: Verify smoke-eligible native artifact before kernel build or download
         env:
           GH_TOKEN: ${{ github.token }}
           NATIVE_RUN_ID: ${{ inputs.native_run_id }}
@@ -35,13 +35,13 @@ jobs:
           set -euo pipefail
           [[ "$NATIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::native_run_id is missing or not numeric"; exit 1; }
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" > "$RUNNER_TEMP/c22-native-run.json"
-          python3 - "$RUNNER_TEMP/c22-native-run.json" <<'PY'
-          import json, sys
-          run = json.load(open(sys.argv[1], encoding='utf-8'))
-          if run.get('name') != 'ladybird-native-browser' or run.get('status') != 'completed' or run.get('conclusion') != 'success':
-              raise SystemExit('C22_NATIVE_PRODUCTEUR_NON_QUALIFIE: requires completed success ladybird-native-browser run')
-          print('C22_NATIVE_PRODUCTEUR_OK run_id='+str(run['id'])+' sha='+run['head_sha'])
-          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/c22-native-jobs.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/c22-native-artifacts.json"
+          python3 tools/ci/c22_native_preflight.py \
+            "$RUNNER_TEMP/c22-native-run.json" \
+            "$RUNNER_TEMP/c22-native-jobs.json" \
+            "$RUNNER_TEMP/c22-native-artifacts.json" \
+            "$NATIVE_RUN_ID" "$GITHUB_REPOSITORY"
       - name: Installer QEMU
         run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Cache Rust
