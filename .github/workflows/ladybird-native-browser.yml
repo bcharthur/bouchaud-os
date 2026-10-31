@@ -1342,6 +1342,8 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
+      - name: C22 A-Z — selftest forensique, sans KVM
+        run: python3 tools/ci/c22_forensic_end_to_end.py --selftest
       - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
         env:
           BO_QEMU_KVM: "1"
@@ -1351,6 +1353,7 @@ jobs:
               t=0; [ "$bras" = temoin ] && t=1
               BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
               cp serie-memoire.log "serie-memoire-$bras-$essai.log"
+              python3 tools/ci/c22_forensic_end_to_end.py "serie-memoire-$bras-$essai.log" --verdict "memoire-$bras-$essai.sortie" --out "c22-az-$bras-$essai" > "c22-az-$bras-$essai.sortie" 2>&1 || echo "C22_AZ_ANALYSE_FAILED bras=$bras essai=$essai"
               {
                 echo "=== $bras $essai rc=$rc ==="
                 grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
@@ -1376,6 +1379,10 @@ jobs:
             serie-memoire*.log
             fixture-memoire*.log
             memoire-*.sortie
+            c22-az-*/**
+            c22-az-*.sortie
+            c22-validation.txt
+            c22-chronologie.txt
             serie-gc-retention.log
             fixture-gc-retention.log
             gc-retention.sortie
