@@ -1349,8 +1349,10 @@ jobs:
           for bras in correctif temoin; do
             for essai in 1 2 3 4 5 6; do
               t=0; [ "$bras" = temoin ] && t=1
-              BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
+              BO_C22_TEMOIN=$t BO_C22_V9_STATS=1 tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
               cp serie-memoire.log "serie-memoire-$bras-$essai.log"
+              python3 tools/ci/c22_v9_ci_forensic.py "serie-memoire-$bras-$essai.log" --verdict "memoire-$bras-$essai.sortie" --out "c22-v9-$bras-$essai" || true
+              echo "C22_V9_ATLAS bras=$bras essai=$essai chemin=c22-v9-$bras-$essai/rapport.md"
               {
                 echo "=== $bras $essai rc=$rc ==="
                 grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
@@ -1376,6 +1378,9 @@ jobs:
             serie-memoire*.log
             fixture-memoire*.log
             memoire-*.sortie
+            c22-v9-*/**
+            c22-validation.txt
+            c22-chronologie.txt
             serie-gc-retention.log
             fixture-gc-retention.log
             gc-retention.sortie
