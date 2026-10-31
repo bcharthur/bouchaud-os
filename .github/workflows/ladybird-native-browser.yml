@@ -1363,6 +1363,18 @@ jobs:
               { echo "=== chronologie $bras $essai rc=$rc ==="; python3 tools/ci/c22_chronologie.py serie-memoire.log 70 || true; } >> c22-chronologie.txt
             done
           done
+          # Separate diagnostic sample: GC allocation census and roots. Non qualifying:
+          # never mixes with the 6x6 M0/M1/M2 time series or historical witness.
+          BO_QEMU_KVM=1 BO_C22_TEMOIN=0 BO_C22_AZ_DIAGNOSTIC=1 BO_GC_RETENTION_PROOF=1 \
+            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 \
+            > c22-az-detail.sortie 2>&1 && c22_az_rc=0 || c22_az_rc=$?
+          if [ -f serie-memoire.log ]; then
+            cp serie-memoire.log serie-memoire-az-detail.log
+            python3 tools/ci/c22_forensic_end_to_end.py serie-memoire-az-detail.log \
+              --verdict c22-az-detail.sortie --out c22-az-detail > c22-az-detail-analyse.sortie 2>&1 \
+              || echo "C22_AZ_DETAIL_ANALYSE_FAILED"
+          fi
+          echo "C22_AZ_DETAIL_RC=$c22_az_rc (diagnostic only; not a contractual green)"
           cat c22-chronologie.txt
           cat c22-validation.txt
           f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
@@ -1382,6 +1394,7 @@ jobs:
             c22-az-*/**
             c22-az-*.sortie
             c22-validation.txt
+            c22-az-detail*.sortie
             c22-chronologie.txt
             serie-gc-retention.log
             fixture-gc-retention.log
