@@ -41,6 +41,14 @@ class C22ClosureTests(unittest.TestCase):
         self.assertNotIn(r'"namespace Web::HTML {\\n"', s)
         self.assertIn('"namespace Web::HTML {\\n"', s)
 
+    def test_bounded_second_event_loop_pass_after_callback_roots_drop(self):
+        s = self.code
+        self.assertIn("bool final_pass = false", s)
+        self.assertIn("if (!final_pass)", s)
+        self.assertIn("bouchaud_c22_collect_after_discard(owning_heap, true);", s)
+        self.assertIn("POST-CALLBACK QUIESCENCE", s)
+        self.assertIn("if (owning_heap.is_gc_deferred())", s)
+
     def test_partition_heaps_thread_affinity(self):
         # mi_heap_new() n'est pas partageable comme un tas global entre fils.
         partition_patcher = (SRC.parent / "prepare-c22-partitions.py").read_text(encoding="utf-8")
