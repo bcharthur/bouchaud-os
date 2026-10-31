@@ -41,7 +41,8 @@ def verify(run, job_data, artifact_data, expected_run_id, repository):
             "SHA producteur invalide")
 
     jobs = job_data.get("jobs", [])
-    require(isinstance(jobs, list) and 0 < len(jobs) <= 100\n            and job_data.get("total_count", len(jobs)) == len(jobs),
+    require(isinstance(jobs, list) and 0 < len(jobs) <= 100
+            and job_data.get("total_count", len(jobs)) == len(jobs),
             "liste de jobs absente ou tronquee")
     by_name = {job.get("name"): job for job in jobs}
     require(len(by_name) == len(jobs), "noms de jobs dupliques")
@@ -78,7 +79,8 @@ def verify(run, job_data, artifact_data, expected_run_id, repository):
     require(isinstance(artifact.get("size_in_bytes"), int)
             and artifact["size_in_bytes"] > 0,
             "archive native vide")
-    require(isinstance(artifact.get("digest"), str)\n            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]) is not None,
+    require(isinstance(artifact.get("digest"), str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]) is not None,
             "empreinte d'archive absente")
     if artifact.get("workflow_run") is not None:
         require(artifact["workflow_run"].get("id") == run["id"],
