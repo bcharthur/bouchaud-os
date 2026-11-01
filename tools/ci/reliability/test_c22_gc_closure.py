@@ -32,9 +32,14 @@ class C22ClosureTests(unittest.TestCase):
         s = self.code
         self.assertIn("BOUCHAUD_C22_GC_DEFERRED_RETRY_V1", s)
         self.assertIn("bouchaud_c22_collect_after_discard(*owning_heap);", s)
-        self.assertIn("bouchaud_c22_collect_after_discard(owning_heap);", s)
+        # V20.2 : le retry doit transmettre final_pass, y compris si le GC
+        # reste differe. Refuser la regression a l'ancien appel sans argument.
+        self.assertIn("GC::create_function(owning_heap, [owning_heap_ptr = &owning_heap, final_pass] {", s)
+        self.assertIn("bouchaud_c22_collect_after_discard(*owning_heap_ptr, final_pass);", s)
+        self.assertNotIn("bouchaud_c22_collect_after_discard(owning_heap);", s)
         self.assertIn('after_discard_gc deferred=1 rescheduled=1', s)
-        self.assertIn('after_discard_gc deferred=0 completed=1', s)
+        self.assertIn('after_discard_gc deferred=0 completed=1 version=V20', s)
+        self.assertIn('after_discard_gc scheduled=1 version=V20', s)
         self.assertNotIn("'                if (owning_heap->is_gc_deferred())\\n'\\n"
                          "        '                    return;\\n'", s)
         # The generated C++ helper uses actual newlines, never backslash-n literals.
