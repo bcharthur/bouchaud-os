@@ -127,17 +127,55 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.ladybird_run_id }}
         run: |
-          RUN="$REQUESTED"
-          if [ -z "$RUN" ]; then
-            RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ladybird-native-browser.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          set -euo pipefail
+          # Un run reussi peut ne pas avoir publie son artefact binaire.
+          # Verifier l'artefact reel plutot que le statut du workflow.
+          artifact_present() {
+            local run_id="$1"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length' \
+              | grep -Eq '^[1-9][0-9]*$'
+          }
+          RUN=""
+          if [ -n "$REQUESTED" ]; then
+            if [[ ! "$REQUESTED" =~ ^[0-9]+$ ]]; then
+              echo "::error::ladybird_run_id doit etre un identifiant numerique"
+              exit 1
+            fi
+            source_branch="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REQUESTED" --jq '.head_branch')"
+            if [ "$source_branch" != main ]; then
+              echo "::error::Un nightly main ne peut utiliser un binaire de $source_branch"
+              exit 1
+            fi
+            if ! artifact_present "$REQUESTED"; then
+              echo "::error::Artefact Ladybird absent ou expire pour run $REQUESTED"
+              exit 1
+            fi
+            RUN="$REQUESTED"
+          else
+            # Le build peut avoir publie un binaire avant un echec C22 ;
+            # parcourir les derniers runs termines pour le retrouver.
+            while IFS= read -r candidate; do
+              if [ -n "$candidate" ] && artifact_present "$candidate"; then
+                RUN="$candidate"
+                break
+              fi
+            done < <(
+              gh run list --repo "$GITHUB_REPOSITORY" \
+                --workflow ladybird-native-browser.yml --branch main \
+                --status completed --limit 50 --json databaseId \
+                --jq '.[].databaseId'
+            )
           fi
           if [ -n "$RUN" ]; then
             echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
             echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "Ladybird run=$RUN"
+            echo "Ladybird run=$RUN artefact=present"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo 'Aucun artefact Ladybird main disponible.'
+            echo "::warning::NIGHTLY_LADYBIRD_NOT_VERIFIED : aucun artefact compatible sur main"
+            echo "Pour regenerer: gh workflow run ladybird-native-browser.yml --ref main"
+            echo "### Ladybird : NON VERIFIE (artefact absent)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   ladybird-smoke:
@@ -255,6 +293,11 @@ jobs:
           done
 
           # Si aucun artefact Ladybird n'existe, le smoke est skipped.
+          # Un smoke saute reste non qualifie ; ne pas le presenter comme valide.
+          if [ "$LADYBIRD" = skipped ]; then
+            echo "::warning::NIGHTLY_LADYBIRD_NOT_VERIFIED : job saute"
+            echo "### Ladybird : NON VERIFIE (job saute)" >> "$GITHUB_STEP_SUMMARY"
+          fi
           [ "$LADYBIRD" != failure ] && [ "$LADYBIRD" != cancelled ] || exit 1
 
           # La dette Windows est reportee, pas bloquante pour ce nightly.
