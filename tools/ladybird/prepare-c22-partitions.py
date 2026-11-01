@@ -109,6 +109,15 @@ def main() -> int:
         "    if (preuve)\n"
         "        fprintf(stderr, \"[LB:C22] collecte partitions=%d temoin=%d\\n\", collectes, temoin ? 1 : 0);\n"
         "\n"
+        "    // C22 A-Z: opt-in mimalloc census, diagnostic only (never 6x6).\n"
+        "    if (preuve && getenv(\"BOUCHAUD_LB_C22_V9_STATS\")) {\n"
+        "        static thread_local unsigned c22_stats_cycles = 0;\n"
+        "        if ((++c22_stats_cycles % 16u) == 0u) {\n"
+        "            fprintf(stderr, \"[LB:C22:V9] heap_stats_begin cycle=%u\\n\", c22_stats_cycles);\n"
+        "            mi_stats_print(nullptr);\n"
+        "            fprintf(stderr, \"[LB:C22:V9] heap_stats_end cycle=%u\\n\", c22_stats_cycles);\n"
+        "        }\n"
+        "    }\n"
         "    mi_collect(true);\n",
     )
     # BOUCHAUD_C22_DOCUMENT_COLLECTE_V2 : les noeuds Layout/Painting
