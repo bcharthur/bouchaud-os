@@ -222,7 +222,7 @@ def selftest():
     assert no_allocator["native_allocator"]==0  # no false mimalloc coverage from generic 'commit'
     rows,mem,peaks,_=examine("not a memory verdict")
     assert not rows and not mem and not peaks
-    sample="\\n".join([
+    sample="\n".join([
         "61.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=1 n=10",
         "[C22:RSS] t=61000 pid=20 rss_kio=70000 anon_kio=10000 fichier_kio=59000 partage_kio=100 vma=1",
         "[C22:VMA] t=61000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
