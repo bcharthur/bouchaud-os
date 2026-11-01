@@ -32,6 +32,56 @@ use crate::kernel::vmm::{self, PAGE_SIZE};
 
 static CLEAN_WRITE_REJECTS: AtomicU64 = AtomicU64::new(0);
 
+// C22 isolated forensic probe: the failing KVM trials have an extra 132-KiB
+// anonymous VMA at this address. Observe the syscall that creates or releases
+// it; do NOT infer allocator ownership from the VMA address alone.
+// Diagnostic branch only; the 6x6 verdict and RSS limit are untouched.
+const C22_SUSPECT_VMA_START: u64 = 0x4000_0be1_b000;
+const C22_SUSPECT_VMA_END: u64 = 0x4000_0be3_c000;
+static C22_VMA_TRACE_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+fn c22_trace_vma_syscall(
+    pid: u32,
+    operation: &str,
+    address: u64,
+    length: u64,
+    prot: u32,
+    flags_or_advice: u32,
+    result: i64,
+) {
+    if pid != 20 {
+        return;
+    }
+    let overlaps_suspect = address < C22_SUSPECT_VMA_END
+        && address.saturating_add(length) > C22_SUSPECT_VMA_START;
+    if length != 33 * PAGE_SIZE && !overlaps_suspect {
+        return;
+    }
+    // Bounded serial traffic: instrumentation must not itself create a
+    // multi-second console backlog or perturb the scheduler under test.
+    let seq = C22_VMA_TRACE_EVENTS.fetch_add(1, Ordering::Relaxed);
+    if seq >= 64 {
+        if seq == 64 {
+            crate::serial_println!("[C22:MMAP] truncated=1 limit=64");
+        }
+        return;
+    }
+    let tid = task::try_current().map(|thread| thread.tid).unwrap_or(0);
+    crate::serial_println!(
+        "[C22:MMAP] seq={} t_ns={} pid={} tid={} op={} addr={:#x} len={} prot={:#x} flags_or_advice={:#x} result={}",
+        seq,
+        crate::kernel::timer::monotonic_ns(),
+        pid,
+        tid,
+        operation,
+        address,
+        length,
+        prot,
+        flags_or_advice,
+        result,
+    );
+}
+
 fn execute_process_invalidation(
     _process: &Arc<task::Process>,
     invalidation: vmm::TlbInvalidation,
@@ -454,6 +504,7 @@ pub fn sys_mmap(
         }
     }
 
+    c22_trace_vma_syscall(process_rc.pid, "mmap", base, length, prot, flags, base as i64);
     base as i64
 }
 
@@ -501,6 +552,7 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     for key in clean_liberes {
         crate::kernel::clean_page_cache::release(key);
     }
+    c22_trace_vma_syscall(process.pid, "munmap", addr, length, 0, 0, 0);
     0
 }
 
@@ -750,6 +802,7 @@ pub fn sys_madvise(addr: u64, length: u64, advice: i32) -> i64 {
         }
     }
     task::vm_phase_set(task::VM_HORS, 0);
+    c22_trace_vma_syscall(process.pid, "madvise", addr, length, 0, advice as u32, 0);
     0
 }
 
