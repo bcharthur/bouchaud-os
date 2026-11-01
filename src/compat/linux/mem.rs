@@ -185,7 +185,7 @@ pub fn prot_to_flags(prot: u32) -> u64 {
 pub fn sys_brk(addr: u64) -> i64 {
     let process = task::current_process();
     let mut retirement = None;
-    let result = {
+    let (result, old_brk) = {
         let mut borrowed = process.mm.lock();
         if addr == 0 || addr < borrowed.brk_start {
             return borrowed.brk as i64;
@@ -223,13 +223,29 @@ pub fn sys_brk(addr: u64) -> i64 {
             }
         }
         borrowed.brk = addr;
-        addr as i64
+        (addr as i64, current)
     };
 
     if let Some((retirement, pml4, start, len)) = retirement {
         task::retire_fault_range(pml4, start, len);
         execute_process_invalidation(&process, retirement.invalidation());
         process.mm.lock().space.finish_unmap(retirement);
+    }
+    // A growing brk can create an anonymous VMA without invoking mmap.
+    // Trace only the aligned changed range, outside the MM lock. The same
+    // 132-KiB/overlap filter and bounded serial budget apply.
+    let new_brk = result as u64;
+    if new_brk != old_brk {
+        let (low, high, operation) = if new_brk > old_brk {
+            (old_brk, new_brk, "brk_grow")
+        } else {
+            (new_brk, old_brk, "brk_shrink")
+        };
+        let start = low.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let end = high.saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if end > start {
+            c22_trace_vma_syscall(process.pid, operation, start, end - start, 0, 0, result);
+        }
     }
     result
 }
