@@ -651,6 +651,9 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     if let Some(invalidation) = invalidation {
         execute_process_invalidation(&process_rc, invalidation);
     }
+    // A VMA may be split by mprotect without a new mmap. Keep this
+    // diagnostic on the successful path, after releasing the MM lock.
+    c22_trace_vma_syscall(process_rc.pid, "mprotect", addr, length, prot, 0, 0);
     0
 }
 
