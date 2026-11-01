@@ -68,7 +68,7 @@ fn c22_trace_vma_syscall(
     }
     let tid = task::try_current().map(|thread| thread.tid).unwrap_or(0);
     crate::serial_println!(
-        "[C22:MMAP] seq={} t_ns={} pid={} tid={} op={} addr={:#x} len={} prot={:#x} flags_or_advice={:#x} result={}",
+        "[C22:MMAP] seq={} t_ns={} pid={} tid={} op={} addr={:#x} len={} size_kio={} prot={:#x} flags_or_advice={:#x} result={}",
         seq,
         crate::kernel::timer::monotonic_ns(),
         pid,
@@ -76,6 +76,7 @@ fn c22_trace_vma_syscall(
         operation,
         address,
         length,
+        length / 1024,
         prot,
         flags_or_advice,
         result,
