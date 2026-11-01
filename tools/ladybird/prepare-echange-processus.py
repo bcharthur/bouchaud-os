@@ -473,8 +473,8 @@ def main() -> int:
         "        if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\"))\n"
         "            dbgln(\"[LB:C22] after_discard_gc deferred=1 rescheduled=1\");\n"
         "        Platform::EventLoopPlugin::the().deferred_invoke(\n"
-        "            GC::create_function(owning_heap, [&owning_heap] {\n"
-        "                bouchaud_c22_collect_after_discard(owning_heap);\n"
+        "            GC::create_function(owning_heap, [owning_heap_ptr = &owning_heap, final_pass] {\n"
+        "                bouchaud_c22_collect_after_discard(*owning_heap_ptr, final_pass);\n"
         "            }));\n"
         "        return;\n"
         "    }\n"
@@ -483,7 +483,7 @@ def main() -> int:
         "    owning_heap.set_incremental_sweep_enabled(true);\n"
         "    ak_kmalloc_collect();\n"
         "    if (getenv(\"BOUCHAUD_LB_MEMORY_PROOF\"))\n"
-        "        dbgln(\"[LB:C22] after_discard_gc deferred=0 completed=1\");\n"
+        "        dbgln(\"[LB:C22] after_discard_gc deferred=0 completed=1 version=V20\");\n"
         "    // C22 POST-CALLBACK QUIESCENCE: the current deferred callback is itself\n"
         "    // a live GC root during this collection. A second, bounded event-loop\n"
         "    // turn allows roots released at callback exit to be swept as well.\n"
@@ -505,6 +505,8 @@ def main() -> int:
         '        // qu il a rendu les racines GC: le callback differe ne\n'
         '        // capture AUCUN objet GC ni pointeur de page fermee.\n'
         '        if (!getenv("BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE")) {\n'
+        '            if (getenv("BOUCHAUD_LB_MEMORY_PROOF"))\n'
+        '                dbgln("[LB:C22] after_discard_gc scheduled=1 version=V20");\n'
         '            auto* owning_heap = &heap();\n'
         '            Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(*owning_heap, [owning_heap] {\n'
         '                bouchaud_c22_collect_after_discard(*owning_heap);\n'

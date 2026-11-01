@@ -50,6 +50,24 @@ python3 tools/ladybird/prepare-compositor-lien.py "$SRC"
 python3 tools/ladybird/prepare-control-channel-diagnostics.py "$SRC"
 python3 tools/ladybird/prepare-compositor-memoire.py "$SRC"
 python3 tools/ladybird/prepare-echange-processus.py "$SRC"
+# BOUCHAUD_C22_NATIVE_POSTGC_V20_GUARD: verifier le vrai source C++ qui sera compile.
+python3 - "$SRC/Libraries/LibWeb/HTML/LocalTraversableNavigable.cpp" <<'PY_C22_NATIVE_GUARD'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+if not p.is_file():
+    raise SystemExit('C22_NATIVE_GUARD_FAIL cpp_missing')
+s = p.read_text(encoding='utf-8')
+required = [
+    'bouchaud_c22_collect_after_discard(*owning_heap_ptr, final_pass);',
+    'after_discard_gc scheduled=1 version=V20',
+    'after_discard_gc deferred=0 completed=1 version=V20',
+]
+missing = [item for item in required if item not in s]
+if missing:
+    raise SystemExit('C22_NATIVE_GUARD_FAIL missing=' + repr(missing))
+print('C22_NATIVE_GUARD_OK gc_final_pass_preserved=1 runtime_markers=2')
+PY_C22_NATIVE_GUARD
 # BOUCHAUD_C22_PARTITIONS_COLLECTEES_V1 : les tas mimalloc partitionnes
 # (layout, paintables...) rendent leurs pages videes apres chaque balayage GC.
 python3 tools/ladybird/prepare-c22-partitions.py "$SRC"
@@ -361,6 +379,22 @@ mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name WebDriver -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
+# BOUCHAUD_C22_NATIVE_POSTGC_V20_BINARY_GUARD: fail-closed on emitted executable,
+# not just on source strings or stale source-tree markers.
+python3 - "$OUT/WebContent" <<'PY_C22_WEB_BINARY_GUARD'
+from pathlib import Path
+import hashlib,sys
+p=Path(sys.argv[1])
+if not p.is_file() or p.stat().st_size == 0:
+    raise SystemExit('C22_NATIVE_BINARY_GUARD_FAIL WebContent missing')
+s=p.read_bytes()
+required=[b'after_discard_gc scheduled=1 version=V20',
+          b'after_discard_gc deferred=0 completed=1 version=V20']
+missing=[v.decode() for v in required if v not in s]
+if missing:
+    raise SystemExit('C22_NATIVE_BINARY_GUARD_FAIL missing=' + repr(missing))
+print('C22_NATIVE_BINARY_GUARD_OK sha256='+hashlib.sha256(s).hexdigest())
+PY_C22_WEB_BINARY_GUARD
 [ -x "$OUT/RequestServer" ] || { echo "RequestServer non produit (reseau requis)" >&2; exit 1; }
 [ -x "$OUT/ImageDecoder" ] || { echo "ImageDecoder non produit (images requises)" >&2; exit 1; }
 [ -x "$OUT/BouchaudBrowserHost" ] || { echo "BouchaudBrowserHost non produit" >&2; exit 1; }
