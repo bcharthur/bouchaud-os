@@ -1490,10 +1490,21 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
+      - name: C22 endurance — selftest causal, sans KVM
+        run: python3 tools/ci/c22_endurance_causality.py --selftest
       - name: Endurance 1 200 s sous KVM
         env:
           BO_QEMU_KVM: "1"
         run: tools/ci/run_ladybird_endurance.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 1200
+      - name: C22 endurance — preuve causale post-mortem, meme si rouge
+        if: always()
+        run: |
+          if [ -f serie-endurance.log ] && [ -f fixture-endurance.log ]; then
+            python3 tools/ci/c22_endurance_causality.py serie-endurance.log \
+              --fixture fixture-endurance.log --out c22-endurance-causality
+          else
+            echo "C22_ENDURANCE_CAUSALITY_GAP missing serial or fixture"
+          fi
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
@@ -1502,4 +1513,5 @@ jobs:
           path: |
             serie-endurance.log
             fixture-endurance.log
+            c22-endurance-causality/**
           if-no-files-found: warn
