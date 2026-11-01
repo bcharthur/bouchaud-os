@@ -1375,6 +1375,19 @@ jobs:
               || echo "C22_AZ_DETAIL_ANALYSE_FAILED"
           fi
           echo "C22_AZ_DETAIL_RC=$c22_az_rc (diagnostic only; not a contractual green)"
+          # Discriminating A/B: force mimalloc purge in a separate non-qualifying
+          # sample, same native binary. Never apply to the 6x6 or the witness.
+          BO_QEMU_KVM=1 BO_C22_TEMOIN=0 BO_C22_MIMALLOC_PURGE=1 BO_GC_RETENTION_PROOF=0 \
+            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 \
+            > c22-az-purge.sortie 2>&1 && c22_purge_rc=0 || c22_purge_rc=$?
+          if [ -f serie-memoire.log ]; then
+            cp serie-memoire.log serie-memoire-az-purge.log
+            python3 tools/ci/c22_forensic_end_to_end.py serie-memoire-az-purge.log \
+              --verdict c22-az-purge.sortie --out c22-az-purge > c22-az-purge-analyse.sortie 2>&1 \
+              || echo "C22_AZ_PURGE_ANALYSE_FAILED"
+          fi
+          echo "C22_AZ_PURGE_RC=$c22_purge_rc (diagnostic A/B only; not a contractual green)"
+
           cat c22-chronologie.txt
           cat c22-validation.txt
           f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
