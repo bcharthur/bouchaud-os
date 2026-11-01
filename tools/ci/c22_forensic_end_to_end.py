@@ -96,7 +96,7 @@ def resident_vma_delta(serial):
         r"start=(0x[0-9a-fA-F]+)\s+end=(0x[0-9a-fA-F]+)\s+"
         r"size_kio=(\d+)\s+type=(\w+)"
     )
-    marks, rss, vmas = {}, {}, defaultdict(dict)
+    marks, rss, vmas, vma_expected, vma_complete = {}, {}, defaultdict(dict), {}, set()
     for raw in serial.splitlines():
         line = ansi.sub("", raw)
         if (m := mark.search(line)):
@@ -105,16 +105,23 @@ def resident_vma_delta(serial):
             rss[int(m[1])] = dict(rss_kio=int(m[2]), anon_kio=int(m[3]),
                                   fichier_kio=int(m[4]), partage_kio=int(m[5]),
                                   vma_count=int(m[6]))
+        if (m := re.search(r"\[C22:VMA-BEGIN\]\s+t=(\d+)\s+pid=20\s+total=(\d+)", line)):
+            vma_expected[int(m[1])] = int(m[2])
         if (m := vma_re.search(line)):
             vmas[int(m[1])][m[2]] = dict(size_kio=int(m[4]), type=m[5])
+        if (m := re.search(r"\[C22:VMA-END\]\s+t=(\d+)\s+pid=20", line)):
+            vma_complete.add(int(m[1]))
     result = dict(phase_markers_ms=marks, rss_samples=[
         dict(t_ms=t, **values) for t, values in sorted(rss.items())])
     if not all(x in marks for x in (1, 2)) or not rss:
         result["comparison"] = "missing_M1_M2_or_RSS"
         return result
-    chosen = {phase: min(rss, key=lambda t: abs(t - marks[phase])) for phase in (1, 2)}
-    if any(abs(chosen[p] - marks[p]) > 6000 for p in (1, 2)):
-        result["comparison"] = "no_RSS_within_6s_of_phase"
+    # A post-marker RSS sample includes subsequent browser activity and must
+    # never be attributed to the M1/M2 marker. The 5-second sampler can land
+    # on either side; use the most recent snapshot at or before each marker.
+    chosen = {phase: max((t for t in rss if t <= marks[phase]), default=None) for phase in (1, 2)}
+    if any(chosen[p] is None or marks[p] - chosen[p] > 6000 for p in (1, 2)):
+        result["comparison"] = "no_preceding_RSS_within_6s_of_phase"
         return result
     t1, t2 = chosen[1], chosen[2]
     result["m1"] = dict(t_ms=t1, **rss[t1])
@@ -123,9 +130,15 @@ def resident_vma_delta(serial):
         key: rss[t2][key] - rss[t1][key]
         for key in ("rss_kio", "anon_kio", "fichier_kio", "partage_kio")
     }
-    map_times = {p: min(vmas, key=lambda t: abs(t - chosen[p])) for p in (1, 2)} if vmas else {}
-    if len(map_times) != 2 or any(abs(map_times[p] - chosen[p]) > 6000 for p in (1, 2)):
-        result["vma_comparison"] = "no_VMA_snapshot_near_RSS"
+    # The kernel publishes VMA and RSS in the same sampling pass. Require
+    # identical timestamps and a complete BEGIN/END snapshot: otherwise a
+    # truncated serial capture can fabricate added or removed mappings.
+    map_times = {p: chosen[p] for p in (1, 2) if chosen[p] in vmas}
+    if len(map_times) != 2:
+        result["vma_comparison"] = "no_VMA_snapshot_at_RSS_timestamp"
+        return result
+    if any(t not in vma_complete or len(vmas[t]) != vma_expected.get(t, -1) for t in map_times.values()):
+        result["vma_comparison"] = "incomplete_VMA_snapshot"
         return result
     a, b = vmas[map_times[1]], vmas[map_times[2]]
     added = [dict(start=k, **v) for k, v in b.items() if k not in a]
@@ -234,14 +247,23 @@ def selftest():
     sample="\n".join([
         "61.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=1 n=10",
         "[C22:RSS] t=61000 pid=20 rss_kio=70000 anon_kio=10000 fichier_kio=59000 partage_kio=100 vma=1",
+        "[C22:VMA-BEGIN] t=61000 pid=20 total=1",
         "[C22:VMA] t=61000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
+        "[C22:VMA-END] t=61000 pid=20",
         "95.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=2 n=10",
         "[C22:RSS] t=95000 pid=20 rss_kio=71100 anon_kio=11100 fichier_kio=59000 partage_kio=100 vma=2",
+        "[C22:VMA-BEGIN] t=95000 pid=20 total=2",
         "[C22:VMA] t=95000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
         "[C22:VMA] t=95000 pid=20 id=2 start=0x4000 end=0x6000 size_kio=8 type=zero",
+        "[C22:VMA-END] t=95000 pid=20",
+        # Regression: nearest-sample would incorrectly choose these post-marker
+        # samples and invent an RSS decrease plus a missing VMA.
+        "[C22:RSS] t=65000 pid=20 rss_kio=71000 anon_kio=11000 fichier_kio=59000 partage_kio=100 vma=1",
+        "[C22:RSS] t=100000 pid=20 rss_kio=69000 anon_kio=9000 fichier_kio=59000 partage_kio=100 vma=1",
     ])
     delta=resident_vma_delta(sample)
     assert delta["delta_kio"]["anon_kio"]==1100
+    assert delta["m1"]["t_ms"]==61000 and delta["m2"]["t_ms"]==95000
     assert len(delta["vma_comparison"]["added"])==1
     print("C22_FORENSIC_AZ_SELFTEST_OK")
     return 0
