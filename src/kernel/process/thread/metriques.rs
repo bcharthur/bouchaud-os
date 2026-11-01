@@ -960,7 +960,21 @@ pire_live_ns={} pire_tid={} pire_pid={} pire_noyau={} online={}",
     ProcCpuCumul { user_ns, system_ns, idle_ns, online }
 }
 
+// BOUCHAUD_PROC_STAT_PROCESS_SNAPSHOT_V1
+//
+// COMPTA_SEQ protege chaque tache, mais pas la somme du processus :
+// deux lecteurs de /proc/<pid>/stat peuvent parcourir les memes threads
+// dans des ordres temporels croises. Sous KVM, le run 41299852290 a
+// expose une baisse de 1 tick de utime (2302 -> 2301) sur 599100 lectures.
+//
+// Serialiser uniquement l'agregation /proc/<pid>/stat : aucun compteur
+// source n'est modifie ou bride, aucune tolerance du banc n'est ajoutee.
+// Le verrou est libere AVANT les verrous MM/metadata et le formatage.
+static PROC_PROCESSUS_SNAPSHOT: SpinLock<()> = SpinLock::new(());
+
 pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
+    let snapshot = PROC_PROCESSUS_SNAPSHOT.lock();
+    // L'heure doit etre prise APRES le verrou, jamais pendant l'attente.
     let now = crate::kernel::timer::monotonic_ns();
     let mut user_ns = 0u64;
     let mut system_ns = 0u64;
@@ -1028,6 +1042,8 @@ pub fn proc_processus_cumul(pid: u32) -> Option<ProcProcessusCumul> {
         system_ns = system_ns.saturating_add(lu.noyau_ns).saturating_add(lu.vivant_noyau);
     }
 
+    // Sortir de la section avant la marche des tables de pages.
+    drop(snapshot);
     let processus = processus?;
     let usage = crate::kernel::resource::memory_usage(&processus);
     // BOUCHAUD_V13_2_PROC_METADATA_LIFETIME
