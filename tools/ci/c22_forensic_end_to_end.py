@@ -130,22 +130,22 @@ def resident_vma_delta(serial):
         key: rss[t2][key] - rss[t1][key]
         for key in ("rss_kio", "anon_kio", "fichier_kio", "partage_kio")
     }
-    # The kernel publishes VMA and RSS in the same sampling pass. Require
-    # identical timestamps and a complete BEGIN/END snapshot: otherwise a
-    # truncated serial capture can fabricate added or removed mappings.
-    map_times = {p: chosen[p] for p in (1, 2) if chosen[p] in vmas}
-    if len(map_times) != 2:
-        result["vma_comparison"] = "no_VMA_snapshot_at_RSS_timestamp"
-        return result
-    if any(t not in vma_complete or len(vmas[t]) != vma_expected.get(t, -1) for t in map_times.values()):
-        result["vma_comparison"] = "incomplete_VMA_snapshot"
+    # VMA dumps are less frequent than RSS (e.g. no dump at t=60005).
+    # Choose the latest *completed* VMA dump BEFORE each selected RSS sample.
+    # BEGIN total=all VMAs, while [C22:VMA] lists only selected mappings:
+    # do not compare emitted entries against the unfiltered total.
+    valid_vma = {t for t in vmas if t in vma_complete and t in vma_expected}
+    map_times = {p: max((t for t in valid_vma if t <= chosen[p]), default=None)
+                 for p in (1, 2)}
+    if any(map_times[p] is None or chosen[p] - map_times[p] > 10000 for p in (1, 2)):
+        result["vma_comparison"] = "no_complete_preceding_VMA_within_10s"
         return result
     a, b = vmas[map_times[1]], vmas[map_times[2]]
     added = [dict(start=k, **v) for k, v in b.items() if k not in a]
     removed = [dict(start=k, **v) for k, v in a.items() if k not in b]
     result["vma_comparison"] = dict(m1_t_ms=map_times[1], m2_t_ms=map_times[2],
         added=added, removed=removed, added_virtual_kio=sum(x["size_kio"] for x in added),
-        warning="Virtual VMA size is NOT physical RSS; existing mappings may gain resident pages.")
+        warning="VMA dumps may precede RSS by up to 10s and list selected mappings only. Virtual VMA size is NOT physical RSS; existing mappings may gain resident pages.")
     return result
 
 
@@ -265,6 +265,8 @@ def selftest():
     assert delta["delta_kio"]["anon_kio"]==1100
     assert delta["m1"]["t_ms"]==61000 and delta["m2"]["t_ms"]==95000
     assert len(delta["vma_comparison"]["added"])==1
+    incomplete=resident_vma_delta(sample.replace("[C22:VMA-END] t=95000 pid=20", ""))
+    assert incomplete["vma_comparison"]=="no_complete_preceding_VMA_within_10s"
     print("C22_FORENSIC_AZ_SELFTEST_OK")
     return 0
 
