@@ -58,11 +58,24 @@ need("tools/ci/ladybird_runtime_verdict.py", "LADYBIRD_CONVERGENCE_OK", "WORKER_
 # Le vrai artefact doit etre lie au HEAD + upstream et re-verifie apres download.
 workflow = need(
     ".github/workflows/ladybird-native-browser.yml",
-    "branches: [main, 'claude/**', 'feat/**']",
     "artifact_manifest.py create",
     "artifact_manifest.py verify",
     "BOUCHAUD_ARTIFACT_MANIFEST.json",
 )
+# Verify required protected branch patterns without requiring a byte-for-byte
+# list: extra maintained branches must not make CI red.
+branch_lists = re.findall(r"^\\s*branches:\\s*\\[([^\\]]+)\\]", workflow, re.M)
+required_branches = {"main", "claude/**", "feat/**"}
+parsed_branch_sets = [
+    {part.strip().strip("\\\"'") for part in line.split(",")}
+    for line in branch_lists
+]
+if not any(required_branches.issubset(branches) for branches in parsed_branch_sets):
+    errors.append(
+        ".github/workflows/ladybird-native-browser.yml: "
+        "protected branches main, claude/**, feat/** absent"
+    )
+
 need("tools/ladybird/artifact_manifest.py", "PT_INTERP", "sha256_tree", "bouchaud_head")
 
 # P4 : sampler hors xHCI + recyclage des instances historiques.
