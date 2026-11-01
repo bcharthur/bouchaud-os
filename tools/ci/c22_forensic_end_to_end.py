@@ -72,10 +72,68 @@ def examine(serial, verdict=""):
                               magnitude_kio=entry["g2"],pid=entry["pid"],evidence=entry))
     return records,memory,peaks,counts
 
+def resident_vma_delta(serial):
+    """Compare actual guest PID20 RSS/VMA snapshots nearest to M1 and M2.
+
+    A VMA size is virtual capacity, NOT resident bytes. The guest does not
+    currently export per-VMA resident page counts or allocation call stacks.
+    """
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    mark = re.compile(r"(\d+\.\d+)\s+WebContent\(20\):.*HOST_MEMOIRE_REPERE\s+m=([12])\b")
+    rss_re = re.compile(
+        r"\[C22:RSS\]\s+t=(\d+)\s+pid=20\s+rss_kio=(\d+)\s+"
+        r"anon_kio=(\d+)\s+fichier_kio=(\d+)\s+partage_kio=(\d+).*?\bvma=(\d+)"
+    )
+    vma_re = re.compile(
+        r"\[C22:VMA\]\s+t=(\d+)\s+pid=20\s+id=\d+\s+"
+        r"start=(0x[0-9a-fA-F]+)\s+end=(0x[0-9a-fA-F]+)\s+"
+        r"size_kio=(\d+)\s+type=(\w+)"
+    )
+    marks, rss, vmas = {}, {}, defaultdict(dict)
+    for raw in serial.splitlines():
+        line = ansi.sub("", raw)
+        if (m := mark.search(line)):
+            marks.setdefault(int(m[2]), round(float(m[1]) * 1000))
+        if (m := rss_re.search(line)):
+            rss[int(m[1])] = dict(rss_kio=int(m[2]), anon_kio=int(m[3]),
+                                  fichier_kio=int(m[4]), partage_kio=int(m[5]),
+                                  vma_count=int(m[6]))
+        if (m := vma_re.search(line)):
+            vmas[int(m[1])][m[2]] = dict(size_kio=int(m[4]), type=m[5])
+    result = dict(phase_markers_ms=marks, rss_samples=[
+        dict(t_ms=t, **values) for t, values in sorted(rss.items())])
+    if not all(x in marks for x in (1, 2)) or not rss:
+        result["comparison"] = "missing_M1_M2_or_RSS"
+        return result
+    chosen = {phase: min(rss, key=lambda t: abs(t - marks[phase])) for phase in (1, 2)}
+    if any(abs(chosen[p] - marks[p]) > 6000 for p in (1, 2)):
+        result["comparison"] = "no_RSS_within_6s_of_phase"
+        return result
+    t1, t2 = chosen[1], chosen[2]
+    result["m1"] = dict(t_ms=t1, **rss[t1])
+    result["m2"] = dict(t_ms=t2, **rss[t2])
+    result["delta_kio"] = {
+        key: rss[t2][key] - rss[t1][key]
+        for key in ("rss_kio", "anon_kio", "fichier_kio", "partage_kio")
+    }
+    map_times = {p: min(vmas, key=lambda t: abs(t - chosen[p])) for p in (1, 2)} if vmas else {}
+    if len(map_times) != 2 or any(abs(map_times[p] - chosen[p]) > 6000 for p in (1, 2)):
+        result["vma_comparison"] = "no_VMA_snapshot_near_RSS"
+        return result
+    a, b = vmas[map_times[1]], vmas[map_times[2]]
+    added = [dict(start=k, **v) for k, v in b.items() if k not in a]
+    removed = [dict(start=k, **v) for k, v in a.items() if k not in b]
+    result["vma_comparison"] = dict(m1_t_ms=map_times[1], m2_t_ms=map_times[2],
+        added=added, removed=removed, added_virtual_kio=sum(x["size_kio"] for x in added),
+        warning="Virtual VMA size is NOT physical RSS; existing mappings may gain resident pages.")
+    return result
+
+
 def build(serial_path,verdict_path,output):
     serial=Path(serial_path).read_text(encoding="utf-8",errors="replace")
     verdict=Path(verdict_path).read_text(encoding="utf-8",errors="replace") if verdict_path and Path(verdict_path).exists() else ""
     records,memory,peaks,counts=examine(serial,verdict)
+    resident=resident_vma_delta(serial)
     output=Path(output)
     output.mkdir(parents=True,exist_ok=True)
     with (output/"events.csv").open("w",newline="",encoding="utf-8") as f:
@@ -94,6 +152,7 @@ def build(serial_path,verdict_path,output):
       "source":str(serial_path),"verdict_source":str(verdict_path or ""),
       "rss_limit_kio":RSS_LIMIT_KIO,
       "processes":memory,"peaks":peaks,"windows":windows,
+      "resident_vma_delta":resident,
       "coverage":{category:dict(observed=counts[category]>0,events=counts[category])
                   for category in CATEGORIES},
       "inference_limitations":[
@@ -110,6 +169,20 @@ def build(serial_path,verdict_path,output):
       "## Processus / RSS"]
     for m in memory:
         md.append(f"- PID {m['pid']} {m['role']}: M0={m['m0']} M1={m['m1']} M2={m['m2']} KiB; g2={m['g2']} KiB; verdict={m['verdict']} (evidence {m['line']})")
+    md.extend(["","## PID20 anonymous RSS and VMA change M1 -> M2"])
+    if "delta_kio" in resident:
+        md.append("RSS delta (KiB): " + ", ".join(
+            f"{k}={v}" for k,v in resident["delta_kio"].items()))
+        vma = resident.get("vma_comparison", {})
+        if isinstance(vma, dict):
+            md.append(f"New VMAs: {len(vma['added'])}, removed: {len(vma['removed'])}, "
+                      f"new virtual KiB: {vma['added_virtual_kio']} (NOT resident KiB)")
+            for item in vma["added"][:20]:
+                md.append(f"- added virtual mapping {item['start']} size={item['size_kio']} KiB type={item['type']}")
+        else:
+            md.append(f"VMA evidence incomplete: {vma}")
+    else:
+        md.append(f"RSS comparison incomplete: {resident.get('comparison', 'unknown')}")
     md.extend(["","## System coverage, actually observed"])
     for category, amount in counts.items():
         md.append(f"- {category}: {amount} serial records")
@@ -149,6 +222,18 @@ def selftest():
     assert no_allocator["native_allocator"]==0  # no false mimalloc coverage from generic 'commit'
     rows,mem,peaks,_=examine("not a memory verdict")
     assert not rows and not mem and not peaks
+    sample="\\n".join([
+        "61.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=1 n=10",
+        "[C22:RSS] t=61000 pid=20 rss_kio=70000 anon_kio=10000 fichier_kio=59000 partage_kio=100 vma=1",
+        "[C22:VMA] t=61000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
+        "95.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=2 n=10",
+        "[C22:RSS] t=95000 pid=20 rss_kio=71100 anon_kio=11100 fichier_kio=59000 partage_kio=100 vma=2",
+        "[C22:VMA] t=95000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
+        "[C22:VMA] t=95000 pid=20 id=2 start=0x4000 end=0x6000 size_kio=8 type=zero",
+    ])
+    delta=resident_vma_delta(sample)
+    assert delta["delta_kio"]["anon_kio"]==1100
+    assert len(delta["vma_comparison"]["added"])==1
     print("C22_FORENSIC_AZ_SELFTEST_OK")
     return 0
 
