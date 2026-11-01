@@ -199,6 +199,12 @@ jobs:
           path: native-browser
           run-id: ${{ needs.resolve-ladybird.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verifier la provenance et l'integrite du binaire Ladybird
+        run: |
+          python3 tools/ladybird/artifact_manifest.py verify \
+            --root native-browser \
+            --upstream third_party/UPSTREAM.md \
+            --manifest native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json
       - run: tools/ci/run_ladybird_browser_host.sh image/bootimage-bouchaud-os.bin native-browser
       - uses: actions/upload-artifact@v4
         if: always()
