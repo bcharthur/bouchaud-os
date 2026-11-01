@@ -54,7 +54,11 @@ fn c22_trace_vma_syscall(
     }
     let overlaps_suspect = address < C22_SUSPECT_VMA_END
         && address.saturating_add(length) > C22_SUSPECT_VMA_START;
-    if length != 33 * PAGE_SIZE && !overlaps_suspect {
+    // Record all successful brk changes for PID 20, including sub-page
+    // extensions. A brk call may precede the 132-KiB VMA by many smaller
+    // increments; filtering exclusively on 33 pages loses that history.
+    let brk_change = operation == "brk_grow" || operation == "brk_shrink";
+    if !brk_change && length != 33 * PAGE_SIZE && !overlaps_suspect {
         return;
     }
     // Bounded serial traffic: instrumentation must not itself create a
