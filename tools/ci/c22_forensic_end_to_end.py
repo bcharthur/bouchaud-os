@@ -17,7 +17,7 @@ CATEGORIES = {
     "threads_scheduler": (r"\b(?:SCHED|SCHEDULER|IPI|WAKE|WAIT|TIMER|THREAD|READY|BLOCKED)\b", r"\[(?:P2|P4|P13)(?::|\])"),
     "ipc": (r"\bIPC\b", r"\b(?:CHANNEL|SOCKET|SENDMSG|RECVMSG|PIPE)\b"),
     "vma_physical": (r"\b(?:VMA|RSS|PRESENT|PAGE_FAULT|MAPPING|MUNMAP|MADVISE|MMAP)\b", r"\[(?:PERF-MEM|PERF-VMA|C22:VMA)"),
-    "native_allocator": (r"\b(?:mimalloc|mi_heap|mi_collect|heap_stats|malloc|free|purge|commit|decommit)\b", r"\[LB:MI_(?:STATS|HEAP|PURGE)\]"),
+    "native_allocator": (r"\[LB:MI_(?:STATS|HEAP|PURGE)\]", r"\bmimalloc:\s*(?:heap|stats|purge|reserved|committed)\b"),
     "gc_dom": (r"\b(?:GC_RETENTION|GC:|LIBGC|Garbage collection|Live cells|Document|PAGE_DISCARD|PageClient|ROOT_PATH)\b",),
     "rendering": (r"\b(?:COMPOSITOR|CONTEXT_CREATE|CONTEXT_DESTROY|PAINT|SKIA|GPU|FRAMEBUFFER|BACKING_STORE|SURFACE)\b",),
     "network_worker": (r"\b(?:WEBWORKER|WEB_WORKER|RequestServer|ImageDecoder|PROCESS_SWAP|NETWORK|FETCH|DNS|HTTP)\b",),
@@ -140,8 +140,13 @@ def selftest():
     assert any(p["mechanism"]=="contract_rss_overgrowth" for p in peaks)
     assert counts["ipc"]>=1 and counts["threads_scheduler"]>=1 and counts["gc_dom"]>=1
     assert counts["native_allocator"]>=1  # synthetic heap marker is explicit
-    _,_,_,no_allocator=examine("[LB:C22] collecte partitions=3 temoin=0")
-    assert no_allocator["native_allocator"]==0  # C22 collection is not allocator telemetry
+    _,_,_,no_allocator=examine("\n".join([
+        "[LB:C22] collecte partitions=3 temoin=0",
+        "[LB:NAV-TRACE] evt=commit pid=20",
+        "BOUCHAUD_BUILD commit=12345",
+        "[LB] PAGE_DISCARD pid=20",
+    ]))
+    assert no_allocator["native_allocator"]==0  # no false mimalloc coverage from generic 'commit'
     rows,mem,peaks,_=examine("not a memory verdict")
     assert not rows and not mem and not peaks
     print("C22_FORENSIC_AZ_SELFTEST_OK")
