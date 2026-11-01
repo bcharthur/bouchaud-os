@@ -131,7 +131,7 @@ def build(serial_path,verdict_path,output):
 
 def selftest():
     log="\n".join(["HOST_MEMOIRE_REPERE phase=M1","[PERF-PROC] pid=20 image=WebContent rss_kio=70000",
-    "[LB:C22] heap=General live_bytes=6781408","[LB:GC] Live cells: 8195",
+    "[LB:MI_STATS] heap=General live_bytes=6781408","[LB:GC] Live cells: 8195",
     "[C22:VMA] pid=20 start=0x404000000000 delta_present_kio=908",
     "[IPC] pid=20 send","[SCHED] pid=20 wake","[LB] CONTEXT_DESTROY ctx=3",
     "MEMOIRE_PROCESSUS pid=20 image=WebContent m0_kio=67180 m1_kio=71768 m2_kio=72812 g1_kio=4588 g2_kio=1044 verdict=croissance"])
