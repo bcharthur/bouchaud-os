@@ -64,10 +64,10 @@ workflow = need(
 )
 # Verify required protected branch patterns without requiring a byte-for-byte
 # list: extra maintained branches must not make CI red.
-branch_lists = re.findall(r"^\\s*branches:\\s*\\[([^\\]]+)\\]", workflow, re.M)
+branch_lists = re.findall(r"^\s*branches:\s*\[([^\]]+)\]", workflow, re.M)
 required_branches = {"main", "claude/**", "feat/**"}
 parsed_branch_sets = [
-    {part.strip().strip("\\\"'") for part in line.split(",")}
+    {part.strip().strip('"').strip("'") for part in line.split(",")}
     for line in branch_lists
 ]
 if not any(required_branches.issubset(branches) for branches in parsed_branch_sets):
