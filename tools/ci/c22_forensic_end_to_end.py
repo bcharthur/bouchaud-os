@@ -17,7 +17,7 @@ CATEGORIES = {
     "threads_scheduler": (r"\b(?:SCHED|SCHEDULER|IPI|WAKE|WAIT|TIMER|THREAD|READY|BLOCKED)\b", r"\[(?:P2|P4|P13)(?::|\])"),
     "ipc": (r"\bIPC\b", r"\b(?:CHANNEL|SOCKET|SENDMSG|RECVMSG|PIPE)\b"),
     "vma_physical": (r"\b(?:VMA|RSS|PRESENT|PAGE_FAULT|MAPPING|MUNMAP|MADVISE|MMAP)\b", r"\[(?:PERF-MEM|PERF-VMA|C22:VMA)"),
-    "native_allocator": (r"\[LB:MI_(?:STATS|HEAP|PURGE)\]", r"\bmimalloc:\s*(?:heap|stats|purge|reserved|committed)\b"),
+    "native_allocator": (r"\[LB:MI_(?:STATS|HEAP|PURGE)\]", r"\[LB:C22:V9\]\s+heap_stats_(?:begin|end)", r"\bmimalloc:\s*(?:heap|stats|purge|reserved|committed)\b"),
     "gc_dom": (r"\b(?:GC_RETENTION|GC:|LIBGC|Garbage collection|Live cells|Document|PAGE_DISCARD|PageClient|ROOT_PATH)\b",),
     "rendering": (r"\b(?:COMPOSITOR|CONTEXT_CREATE|CONTEXT_DESTROY|PAINT|SKIA|GPU|FRAMEBUFFER|BACKING_STORE|SURFACE)\b",),
     "network_worker": (r"\b(?:WEBWORKER|WEB_WORKER|RequestServer|ImageDecoder|PROCESS_SWAP|NETWORK|FETCH|DNS|HTTP)\b",),
@@ -31,8 +31,15 @@ RSS_LIMIT_KIO = 1024
 def examine(serial, verdict=""):
     records, memory, peaks = [], [], []
     counts = Counter()
+    inside_native_stats = False
     for line_no, raw in enumerate(serial.splitlines(), 1):
+        if "[LB:C22:V9] heap_stats_begin" in raw:
+            inside_native_stats = True
         tags = [name for name, regexes in PATTERNS.items() if any(p.search(raw) for p in regexes)]
+        if inside_native_stats and "native_allocator" not in tags:
+            tags.append("native_allocator")
+        if "[LB:C22:V9] heap_stats_end" in raw:
+            inside_native_stats = False
         if not tags:
             continue
         kv = dict(KV.findall(raw))
@@ -213,6 +220,8 @@ def selftest():
     assert any(p["mechanism"]=="contract_rss_overgrowth" for p in peaks)
     assert counts["ipc"]>=1 and counts["threads_scheduler"]>=1 and counts["gc_dom"]>=1
     assert counts["native_allocator"]>=1  # synthetic heap marker is explicit
+    _,_,_,native_block=examine("[LB:C22:V9] heap_stats_begin cycle=16\nreserved: 123\n[LB:C22:V9] heap_stats_end cycle=16")
+    assert native_block["native_allocator"]==3
     _,_,_,no_allocator=examine("\n".join([
         "[LB:C22] collecte partitions=3 temoin=0",
         "[LB:NAV-TRACE] evt=commit pid=20",
