@@ -80,7 +80,7 @@ def examine(serial, verdict=""):
     return records,memory,peaks,counts
 
 def resident_vma_delta(serial):
-    """Compare actual guest PID20 RSS/VMA snapshots nearest to M1 and M2.
+    """Compare complete guest PID20 RSS/VMA snapshots preceding M1 and M2.
 
     A VMA size is virtual capacity, NOT resident bytes. The guest does not
     currently export per-VMA resident page counts or allocation call stacks.
@@ -245,12 +245,12 @@ def selftest():
     rows,mem,peaks,_=examine("not a memory verdict")
     assert not rows and not mem and not peaks
     sample="\n".join([
-        "61.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=1 n=10",
+        "63.100 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=1 n=10",
         "[C22:RSS] t=61000 pid=20 rss_kio=70000 anon_kio=10000 fichier_kio=59000 partage_kio=100 vma=1",
         "[C22:VMA-BEGIN] t=61000 pid=20 total=1",
         "[C22:VMA] t=61000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
         "[C22:VMA-END] t=61000 pid=20",
-        "95.200 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=2 n=10",
+        "98.400 WebContent(20): (js log) HOST_MEMOIRE_REPERE m=2 n=10",
         "[C22:RSS] t=95000 pid=20 rss_kio=71100 anon_kio=11100 fichier_kio=59000 partage_kio=100 vma=2",
         "[C22:VMA-BEGIN] t=95000 pid=20 total=2",
         "[C22:VMA] t=95000 pid=20 id=1 start=0x1000 end=0x3000 size_kio=8 type=zero",
