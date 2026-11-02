@@ -1310,26 +1310,19 @@ jobs:
           if-no-files-found: warn
 
   memoire-onglets:
-    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- deux repetitions de mesure intactes.
-    # Si elles sont rouges, une troisieme repetition active dump_graph() uniquement
-    # pour attribuer la retention, sans contaminer M0/M1/M2 des deux mesures.
-    # BOUCHAUD_MEMOIRE_ONGLETS_V1 -- DIAGNOSTIC (hors verdict de convergence
-    # tant que le banc n'a pas fait ses preuves). Deux phases identiques de 10
-    # onglets autre site ouverts puis fermes : fuite (croissance en phase 2
-    # comme en phase 1) ou cache borne ? Et les objets vivants du Compositor.
-    name: ladybird / memoire apres onglets fermes (diagnostic)
+    # C22: six independent, real KVM runs of the V29 candidate. No historical
+    # negative witness in the blocking CI. Same 10 tabs/phase, real M0/M1/M2
+    # RSS verdict and unchanged 1024 KiB ceiling in analyse_memoire.py.
+    # Fail closed on QEMU, process, marker, memory or artefact errors.
+    name: ladybird / C22 memoire 6x6 candidat (KVM strict)
     needs: [dedoublonne, artefact]
-    # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
-    # condition explicite, le success() implicite de GitHub porte sur tous les
-    # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 48
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + outils
-        run: |
-          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
       - name: Bootimage
         run: tools/ci/build_kernel.sh
       - uses: actions/download-artifact@v4
@@ -1340,62 +1333,48 @@ jobs:
         run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Acces a /dev/kvm
         run: |
-          sudo chmod 666 /dev/kvm
-          ls -l /dev/kvm
-      - name: C22 A-Z — selftest forensique, sans KVM
-        run: python3 tools/ci/c22_forensic_end_to_end.py --selftest
-      - name: C22 -- validation, 6 repetitions correctif puis 6 temoin (meme binaire)
+          test -w /dev/kvm || sudo chmod 666 /dev/kvm
+          test -w /dev/kvm
+      - name: C22 -- 6/6 stricts sur le candidat, sans temoin historique
         env:
           BO_QEMU_KVM: "1"
         run: |
-          for bras in correctif temoin; do
-            for essai in 1 2 3 4 5 6; do
-              t=0; [ "$bras" = temoin ] && t=1
-              BO_C22_TEMOIN=$t tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 > "memoire-$bras-$essai.sortie" 2>&1 && rc=0 || rc=$?
-              cp serie-memoire.log "serie-memoire-$bras-$essai.log"
-              python3 tools/ci/c22_forensic_end_to_end.py "serie-memoire-$bras-$essai.log" --verdict "memoire-$bras-$essai.sortie" --out "c22-az-$bras-$essai" > "c22-az-$bras-$essai.sortie" 2>&1 || echo "C22_AZ_ANALYSE_FAILED bras=$bras essai=$essai"
-              {
-                echo "=== $bras $essai rc=$rc ==="
-                grep -h 'MEMOIRE_PROCESSUS .*image=WebContent\|MEMOIRE_BORNEE\|MEMOIRE_CROISSANCE\|MEMOIRE_INCONCLUSIF\|MEMOIRE_[A-Z_]*ECHEC' "memoire-$bras-$essai.sortie" || true
-                echo "LB_C22 lignes=$(grep -ac '\[LB:C22\] collecte' serie-memoire.log) partitions=$(grep -ao '\[LB:C22\] collecte partitions=[0-9]* temoin=[01]' serie-memoire.log | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
-                echo "C22_ESSAI bras=$bras essai=$essai rc=$rc"
-              } >> c22-validation.txt
-              { echo "=== chronologie $bras $essai rc=$rc ==="; python3 tools/ci/c22_chronologie.py serie-memoire.log 70 || true; } >> c22-chronologie.txt
-            done
+          set -euo pipefail
+          : > c22-validation.txt
+          for essai in 1 2 3 4 5 6; do
+            echo "C22_TRIAL_BEGIN sha=${{ github.sha }} essai=$essai"
+            rc=0
+            BO_C22_TEMOIN=0 tools/ci/run_ladybird_memoire.sh \
+              target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+              native-browser 10 > "memoire-correctif-$essai.sortie" 2>&1 || rc=$?
+            if [ ! -s serie-memoire.log ]; then
+              echo "::error::C22 absence de journal invite essai=$essai"
+              exit 2
+            fi
+            cp serie-memoire.log "serie-memoire-correctif-$essai.log"
+            {
+              grep -E 'MEMOIRE_PROCESSUS .*image=WebContent|MEMOIRE_BORNEE|MEMOIRE_CROISSANCE|MEMOIRE_INCONCLUSIF|LADYBIRD_MEMOIRE_(OK|ECHEC)' "memoire-correctif-$essai.sortie" || true
+              echo "C22_ESSAI bras=correctif essai=$essai rc=$rc"
+            } | tee -a c22-validation.txt
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::C22 candidat rouge au tour $essai rc=$rc"
+              tail -n 120 "memoire-correctif-$essai.sortie"
+              exit 1
+            fi
+            if ! grep -q 'MEMOIRE_PROCESSUS .*image=WebContent .*verdict=borne' "memoire-correctif-$essai.sortie"; then
+              echo "::error::C22 mesure WebContent bornee absente essai=$essai"
+              exit 1
+            fi
+            if ! grep -q '^LADYBIRD_MEMOIRE_OK n_par_phase=10$' "memoire-correctif-$essai.sortie"; then
+              echo "::error::C22 preuve native de fin de banc absente essai=$essai"
+              exit 1
+            fi
           done
-          # Separate diagnostic sample: GC allocation census and roots. Non qualifying:
-          # never mixes with the 6x6 M0/M1/M2 time series or historical witness.
-          BO_QEMU_KVM=1 BO_C22_TEMOIN=0 BO_C22_AZ_DIAGNOSTIC=1 BO_GC_RETENTION_PROOF=1 \
-            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 \
-            > c22-az-detail.sortie 2>&1 && c22_az_rc=0 || c22_az_rc=$?
-          if [ -f serie-memoire.log ]; then
-            cp serie-memoire.log serie-memoire-az-detail.log
-            python3 tools/ci/c22_forensic_end_to_end.py serie-memoire-az-detail.log \
-              --verdict c22-az-detail.sortie --out c22-az-detail > c22-az-detail-analyse.sortie 2>&1 \
-              || echo "C22_AZ_DETAIL_ANALYSE_FAILED"
-          fi
-          echo "C22_AZ_DETAIL_RC=$c22_az_rc (diagnostic only; not a contractual green)"
-          # Discriminating A/B: force mimalloc purge in a separate non-qualifying
-          # sample, same native binary. Never apply to the 6x6 or the witness.
-          BO_QEMU_KVM=1 BO_C22_TEMOIN=0 BO_C22_MIMALLOC_PURGE=1 BO_GC_RETENTION_PROOF=0 \
-            tools/ci/run_ladybird_memoire.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 10 \
-            > c22-az-purge.sortie 2>&1 && c22_purge_rc=0 || c22_purge_rc=$?
-          if [ -f serie-memoire.log ]; then
-            cp serie-memoire.log serie-memoire-az-purge.log
-            python3 tools/ci/c22_forensic_end_to_end.py serie-memoire-az-purge.log \
-              --verdict c22-az-purge.sortie --out c22-az-purge > c22-az-purge-analyse.sortie 2>&1 \
-              || echo "C22_AZ_PURGE_ANALYSE_FAILED"
-          fi
-          echo "C22_AZ_PURGE_RC=$c22_purge_rc (diagnostic A/B only; not a contractual green)"
-
-          cat c22-chronologie.txt
-          cat c22-validation.txt
-          f_vert=$(grep -c 'C22_ESSAI bras=correctif .* rc=0' c22-validation.txt || true)
-          f_rouge=$(grep -c 'C22_ESSAI bras=correctif .* rc=1' c22-validation.txt || true)
-          t_rouge=$(grep -c 'C22_ESSAI bras=temoin .* rc=1' c22-validation.txt || true)
-          echo "C22_VALIDATION correctif_verts=$f_vert/6 correctif_rouges=$f_rouge temoin_rouges=$t_rouge/6"
-          [ "$f_vert" = 6 ] && [ "$t_rouge" -ge 1 ]
-      - name: Journaux
+          f_vert=$(grep -c '^C22_ESSAI bras=correctif essai=[1-6] rc=0$' c22-validation.txt || true)
+          echo "C22_VALIDATION correctif_verts=$f_vert/6 temoin_historique=retire_du_gate"
+          test "$f_vert" -eq 6
+          echo "C22_CONTRACTUEL_6X6_OK sha=${{ github.sha }}"
+      - name: Journaux C22 (meme en echec)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -1403,15 +1382,8 @@ jobs:
           path: |
             serie-memoire*.log
             fixture-memoire*.log
-            memoire-*.sortie
-            c22-az-*/**
-            c22-az-*.sortie
+            memoire-correctif-*.sortie
             c22-validation.txt
-            c22-az-detail*.sortie
-            c22-chronologie.txt
-            serie-gc-retention.log
-            fixture-gc-retention.log
-            gc-retention.sortie
           if-no-files-found: warn
 
   crash-services:
