@@ -185,6 +185,68 @@ def main() -> int:
         "    abort();\n",
     )
 
+    # BOUCHAUD_C22_V28_STOP_BLINK_TIMER: the constructor starts a repeating
+    # cursor timer whose closure captures Document*. Stop it on final destruction;
+    # do not alter the historical C22 witness, whose old behavior is intentional.
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "    // 2. Abort document.\n"
+        "    abort();\n",
+        "    // 2. Abort document.\n"
+        "    abort();\n"
+        "    // BOUCHAUD_C22_V28_STOP_BLINK_TIMER: no repeating Document callback after destroy.\n"
+        "    if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\") && m_cursor_blink_timer)\n"
+        "        m_cursor_blink_timer->stop();\n",
+    )
+
+    # BOUCHAUD_C22_V29_RELEASE_COMPLETED_REQUEST_ROOTS
+    # In the pinned Ladybird, Request::stop()/did_transfer() call
+    # defer_teardown(), but normal completion does not. The unbuffered
+    # request on_finish wrapper intentionally waits for ALL delivered bytes.
+    # After its user callback, release GC::Root callbacks and streams in a
+    # deferred event-loop turn, never before user-visible body completion.
+    # Historical C22 witness retains its original behavior.
+    remplace(
+        racine / "Libraries/LibRequests/Request.cpp",
+        "#include <LibRequests/Request.h>\n",
+        "#include <LibRequests/Request.h>\n"
+        "#include <cstdlib> // BOUCHAUD_C22_V29_RELEASE_COMPLETED_REQUEST_ROOTS\n",
+    )
+    remplace(
+        racine / "Libraries/LibRequests/Request.cpp",
+        "            user_on_finish(m_internal_stream_data->total_size, m_internal_stream_data->timing_info, m_internal_stream_data->network_error);\n",
+        "            user_on_finish(m_internal_stream_data->total_size, m_internal_stream_data->timing_info, m_internal_stream_data->network_error);\n"
+        "            // BOUCHAUD_C22_V29_RELEASE_COMPLETED_REQUEST_ROOTS: this\n"
+        "            // executes only after the complete response body was delivered.\n"
+        "            // Unlike stop(), normal completion otherwise leaves GC::Root\n"
+        "            // callbacks attached to a Request kept alive by its Response.\n"
+        "            if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\"))\n"
+        "                defer_teardown();\n",
+    )
+    # A stopped timer is still a strong edge Document -> Timer; erase that
+    # edge on the candidate only. reset_cursor_blink_cycle() may be called by
+    # delayed teardown notifications: never dereference the cleared timer.
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "    if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\") && m_cursor_blink_timer)\n"
+        "        m_cursor_blink_timer->stop();\n",
+        "    // BOUCHAUD_C22_V29_DROP_DESTROYED_DOCUMENT_TIMER: stop and detach.\n"
+        "    if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\") && m_cursor_blink_timer) {\n"
+        "        m_cursor_blink_timer->stop();\n"
+        "        m_cursor_blink_timer = nullptr;\n"
+        "        m_previously_repainted_cursor_position = nullptr;\n"
+        "    }\n",
+    )
+    remplace(
+        racine / "Libraries/LibWeb/DOM/Document.cpp",
+        "    if (!HTML::Window::in_test_mode())\n"
+        "        m_cursor_blink_timer->restart();\n",
+        "    // BOUCHAUD_C22_V29_DROP_DESTROYED_DOCUMENT_TIMER: a discarded document\n"
+        "    // can receive late lifecycle notifications; do not restart a null timer.\n"
+        "    if (!HTML::Window::in_test_mode() && m_cursor_blink_timer)\n"
+        "        m_cursor_blink_timer->restart();\n",
+    )
+
     # BOUCHAUD_P13_PAGECLIENT_DISCARD_V5 : une fermeture peut laisser un WindowProxy
     # atteignable par le JS de l'ouvreur (Promise/GeneratorObject). Ce proxy garde
     # le Page GC, qui ne doit plus garder un PageClient ferme une fois la fermeture
