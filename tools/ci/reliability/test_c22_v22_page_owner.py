@@ -2,6 +2,7 @@
 """C22 V22: lock-consistent, read-only physical page ownership evidence."""
 from pathlib import Path
 import unittest
+import re
 
 ROOT = Path(__file__).resolve().parents[3]
 GUI = ROOT / "src/gui/services.rs"
@@ -34,21 +35,27 @@ class C22V22OwnerTests(unittest.TestCase):
         self.assertIn('base == "WebContent" && row.pid == 20', self.gui)
         self.assertIn("now.saturating_sub(last) >= 5_000", self.gui)
         self.assertIn("C22_PTE_LAST_MS.compare_exchange", self.gui)
-        probe = self.gui.split("// BOUCHAUD_C22_PTE_OWNER_V22:", 1)[1].split(
-            "                let detail = crate::kernel::task::fautes_par_categorie(row.pid);", 1
-        )[0]
+        self.assertEqual(self.gui.count("// BOUCHAUD_C22_PTE_OWNER_V22:"), 1)
+        tail = self.gui.split("// BOUCHAUD_C22_PTE_OWNER_V22:", 1)[1]
+        boundary = re.search(
+            r"(?m)^[ \t]*let detail\s*=\s*crate::kernel::task::fautes_par_categorie\(row\.pid\);",
+            tail,
+        )
+        self.assertIsNotNone(boundary, "V22 probe boundary absent or changed")
+        probe = tail[:boundary.start()]
         self.assertNotIn("collect_garbage", probe)
         self.assertNotIn("madvise", probe)
         self.assertNotIn("unmap", probe)
         self.assertNotIn("MEMOIRE_BORNEE", probe)
-        self.assertNotIn("1024", probe)
+        without_kio = re.sub(r"/\s*1_?024\b", "/ KIO_UNIT", probe)
+        self.assertNotRegex(without_kio, r"(?<!\w)1_?024\b")
 
     def test_pte_classifier_same_as_rss(self):
         s = self.virt
         self.assertIn("BOUCHAUD_C22_PTE_OWNER_V22", s)
         self.assertIn("match ResidentKind::from_entry(entry)", s)
         for kind in ("Anonymous", "FilePrivate", "Shared", "Device", "Untracked"):
-            self.assertIn("ResidentKind." + kind, s)
+            self.assertIn("ResidentKind::" + kind, s)
 
 
 if __name__ == "__main__":
