@@ -21,13 +21,11 @@ def need(path: Path, needles: tuple[str, ...]):
             errors.append(f"{path}: contrat absent: {needle}")
     return text
 
+# Only the reusable scheduler/primitives qualification is a mandatory standalone
+# manual workflow. Historical debug standalones were removed: equivalent checks
+# run in Integration, Ladybird native, Nightly or Reliability V3.
 manual_only = {
-    "system-health.yml",
     "os-primitives.yml",
-    "mm-ng6-smp4.yml",
-    "ladybird-browser-host.yml",
-    "ladybird-platform-smp4.yml",
-    "ladybird-native-browser-v16.yml",
 }
 for name in manual_only:
     path = root / name
