@@ -1374,6 +1374,18 @@ impl AddressSpace {
         self.resident
     }
 
+    /// BOUCHAUD_C22_PTE_OWNER_V22: existing PTE classification, no faults or mappings.
+    /// Classification is shared with the kernel's resident RSS accounting.
+    pub fn c22_rss_class_entry(entry: u64) -> usize {
+        match ResidentKind::from_entry(entry) {
+            ResidentKind::Anonymous => 0,
+            ResidentKind::FilePrivate => 1,
+            ResidentKind::Shared => 2,
+            ResidentKind::Device => 3,
+            ResidentKind::Untracked => 4,
+        }
+    }
+
     /// Enumere les pages utilisateur mappees : (adresse virtuelle, entree).
     ///
     /// Parcourt les quatre niveaux du creneau utilisateur. Sert a `fork`, qui

@@ -58,6 +58,27 @@ def main() -> int:
         "#    include <cstdlib>\n"
         "#endif\n",
     )
+    # BOUCHAUD_C22_V26_RECLAIM_EMPTY_PAGES: the pinned Ladybird upstream
+    # cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6 has NO existing
+    # mi_option_set_default call in AK/kmalloc.cpp. Install a static
+    # configuration in the mimalloc-only branch before the allocator is used.
+    # Witness: no changes to mimalloc options at all.
+    remplace(
+        kmalloc,
+        "#else\n\nvoid* ak_kcalloc(size_t count, size_t size)\n",
+        "#else\n\n"
+        "// BOUCHAUD_C22_V26_RECLAIM_EMPTY_PAGES: candidate-only policy.\n"
+        "static struct BouchaudC22AllocatorPolicy {\n"
+        "    BouchaudC22AllocatorPolicy()\n"
+        "    {\n"
+        "        if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\")) {\n"
+        "            mi_option_set_default(mi_option_purge_decommits, 1);\n"
+        "            mi_option_set_default(mi_option_purge_delay, 0);\n"
+        "        }\n"
+        "    }\n"
+        "} s_bouchaud_c22_allocator_policy;\n"
+        "\nvoid* ak_kcalloc(size_t count, size_t size)\n",
+    )
     remplace(
         kmalloc,
         "static thread_local mi_heap_t* s_string_heap = nullptr;\n",

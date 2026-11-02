@@ -302,6 +302,81 @@ lost_samples_global={}",
                     }
                 }
 
+                // BOUCHAUD_C22_PTE_OWNER_V22: read-only, one low-volume snapshot
+                // every >= 5 s. PTEs, VMAs and RSS counters come from the same
+                // mm lock; no page fault, allocation inside guest address space,
+                // GC scheduling, threshold or process lifetime modification.
+                if base == "WebContent" && row.pid == 20 {
+                    static C22_PTE_LAST_MS: AtomicU64 = AtomicU64::new(0);
+                    let now = crate::kernel::timer::monotonic_ms();
+                    let last = C22_PTE_LAST_MS.load(Ordering::Relaxed);
+                    if now.saturating_sub(last) >= 5_000
+                        && C22_PTE_LAST_MS.compare_exchange(
+                            last, now, Ordering::AcqRel, Ordering::Relaxed
+                        ).is_ok()
+                    {
+                        if let Some(process) = crate::kernel::task::process_by_pid(row.pid) {
+                            let (regions, pages, resident) = {
+                                let mm = process.mm.lock();
+                                (mm.promesses.clone(), mm.space.iter_user_pages(), mm.space.resident_stats())
+                            };
+                            const TARGETS: [u64; 3] = [
+                                0x4040_0000_0000, 0x4440_038d_0000, 0x4440_036d_0000,
+                            ];
+                            let mut ids = [0u64; 3];
+                            let mut sizes = [0u64; 3];
+                            for (i, target) in TARGETS.iter().enumerate() {
+                                if let Some(region) = regions.iter().find(|r|
+                                    r.debut == *target && r.fin > r.debut
+                                        && matches!(r.backing, crate::kernel::vma::Backing::Zero)
+                                ) {
+                                    ids[i] = region.id;
+                                    sizes[i] = (region.fin - region.debut) / 4096;
+                                }
+                            }
+                            let mut totals = [0u64; 5];
+                            let mut target_pages = [0u64; 3];
+                            let page_count = pages.len() as u64;
+                            for (addr, pte) in pages {
+                                let kind = crate::kernel::vmm::AddressSpace::c22_rss_class_entry(pte);
+                                totals[kind] += 1;
+                                if kind == 0 {
+                                    // Effective VMA ownership is last-overlay-wins.
+                                    if let Some(owner) = regions.iter().rev().find(|r|
+                                        r.debut <= addr && addr < r.fin
+                                    ) {
+                                        for i in 0..3 {
+                                            if ids[i] != 0 && owner.id == ids[i]
+                                                && owner.debut == TARGETS[i]
+                                            {
+                                                target_pages[i] += 1;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let chosen = target_pages.iter().sum::<u64>();
+                            let other_anon = totals[0].saturating_sub(chosen);
+                            let exact = page_count == resident.total_pages
+                                && totals == [
+                                    resident.anonymous_pages, resident.file_private_pages,
+                                    resident.shared_pages, resident.device_pages,
+                                    resident.untracked_pages
+                                ] && chosen <= totals[0];
+                            let scan_ms = crate::kernel::timer::monotonic_ms().saturating_sub(now);
+                            crate::serial_println!(
+                                "[C22:PAGE-OWNER-V22] t={} pid={} rss={} anon={} file={} shared={} device={} other_kind={} a32={} a32id={} a32len={} b2={} b2id={} b2len={} c2={} c2id={} c2len={} other_anon={} exact={} scan_ms={}",
+                                now, row.pid, page_count,
+                                totals[0], totals[1], totals[2], totals[3], totals[4],
+                                target_pages[0], ids[0], sizes[0],
+                                target_pages[1], ids[1], sizes[1],
+                                target_pages[2], ids[2], sizes[2],
+                                other_anon, exact as u8, scan_ms
+                            );
+                        }
+                    }
+                }
                 let detail = crate::kernel::task::fautes_par_categorie(row.pid);
                 if detail.is_none() {
                     RELEVES_FAUTES_MANQUES.fetch_add(1, Ordering::Relaxed);
