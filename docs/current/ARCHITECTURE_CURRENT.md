@@ -46,4 +46,4 @@ Le premier candidat de démonstration est **un petit service d'observation/healt
 
 ## Dette du port Ladybird
 
-Au relevé : 26 scripts `tools/ladybird/prepare-*.py` dans l'arbre. Parmi les plus volumineux : `prepare-compositor-lien.py`, `prepare-echange-processus.py`, `prepare-full-browser-host.py`, `prepare-m9-diagnostics.py`, `prepare-gc-retention-proof.py`. Risque : remplacements de chaînes dépendants des ancres upstream. Cible : SHA upstream épinglé + plate-forme Bouchaud + patch-stack minimale + instrumentation optionnelle. **Ne pas convertir mécaniquement les 26 scripts avant tests natifs.**
+Au relevé : 25 scripts `tools/ladybird/prepare-*.py` dans l'arbre. Parmi les plus volumineux : `prepare-compositor-lien.py`, `prepare-echange-processus.py`, `prepare-full-browser-host.py`, `prepare-m9-diagnostics.py`, `prepare-gc-retention-proof.py`. Risque : remplacements de chaînes dépendants des ancres upstream. Cible : SHA upstream épinglé + plate-forme Bouchaud + patch-stack minimale + instrumentation optionnelle. **Ne pas convertir mécaniquement les 26 scripts avant tests natifs.**
