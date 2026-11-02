@@ -58,6 +58,21 @@ def main() -> int:
         "#    include <cstdlib>\n"
         "#endif\n",
     )
+    # BOUCHAUD_C22_V26_RECLAIM_EMPTY_PAGES: request physical decommit for
+    # empty mimalloc pages in the candidate. The historical witness keeps
+    # the original upstream allocator policy in the same binary.
+    # This does not release live allocations or change the RSS threshold.
+    remplace(
+        kmalloc,
+        "        mi_option_set_default(mi_option_purge_decommits, 0);\n",
+        "        // BOUCHAUD_C22_V26_RECLAIM_EMPTY_PAGES: candidate-only.\n"
+        "        if (!getenv(\"BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE\")) {\n"
+        "            mi_option_set_default(mi_option_purge_decommits, 1);\n"
+        "            mi_option_set_default(mi_option_purge_delay, 0);\n"
+        "        } else {\n"
+        "            mi_option_set_default(mi_option_purge_decommits, 0);\n"
+        "        }\n",
+    )
     remplace(
         kmalloc,
         "static thread_local mi_heap_t* s_string_heap = nullptr;\n",
