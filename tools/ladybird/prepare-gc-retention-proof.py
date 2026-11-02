@@ -64,6 +64,7 @@ struct BouchaudGcNode {
 };
 
 static u64 s_bouchaud_last_gc_retention_detached = 0;
+static u64 s_bouchaud_c22_doc_post_detached_ticks = 0;
 
 static bool bouchaud_gc_root_is_conservative(StringView root)
 {
@@ -225,6 +226,73 @@ static void bouchaud_trace_pageclient_retention(size_t active_pages, u64 detache
         ++paths;
     }
 
+    // C22 V27: a PageClient can already be finalized while an entire
+    // closed Document tree remains strongly rooted. Count Documents and
+    // recover the *shortest* root path, not only PageClient root paths.
+    // Opt-in diagnostics ONLY; never part of the contractual 6x6 run.
+    if (getenv("BOUCHAUD_C22_DOC_ROOT_PROOF")) {
+        size_t documents = 0;
+        size_t rooted_documents = 0;
+        size_t strong_documents = 0;
+        size_t conservative_documents = 0;
+        size_t emitted = 0;
+        constexpr size_t doc_path_limit = 24;
+        for (auto const& [address, node] : nodes) {
+            if (!node.class_name.contains("Document"sv))
+                continue;
+            ++documents;
+            auto label = root_label.get(address);
+            auto frame = root_frame.get(address);
+            if (!label.has_value()) {
+                if (emitted < doc_path_limit) {
+                    dbgln("[LB:C22:DOC_PATH] pid={} detached={} target={} class={} root=NO_PATH depth=0 path={} END",
+                        Core::System::getpid(), detached, address, node.class_name, node.class_name);
+                    ++emitted;
+                }
+                continue;
+            }
+            ++rooted_documents;
+            if (bouchaud_gc_root_is_conservative(label->bytes_as_string_view()))
+                ++conservative_documents;
+            else
+                ++strong_documents;
+            if (emitted >= doc_path_limit)
+                continue;
+            Vector<String> classes;
+            String current = address;
+            for (size_t depth = 0; depth < 80; ++depth) {
+                auto current_node = nodes.get(current);
+                if (!current_node.has_value())
+                    break;
+                classes.append(current_node->class_name);
+                auto parent_entry = parent.get(current);
+                if (!parent_entry.has_value() || *parent_entry == current)
+                    break;
+                current = *parent_entry;
+            }
+            StringBuilder path;
+            for (size_t i = classes.size(); i > 0; --i) {
+                if (i != classes.size())
+                    path.append('>');
+                path.append(classes[i - 1]);
+            }
+            String frame_label;
+            if (frame.has_value() && *frame >= 0) {
+                auto index = static_cast<size_t>(*frame);
+                if (index < stack_frame_labels.size())
+                    frame_label = stack_frame_labels[index];
+            }
+            dbgln("[LB:C22:DOC_PATH] pid={} detached={} target={} class={} root={} frame_label={} depth={} path={} END",
+                Core::System::getpid(), detached, address, node.class_name, *label, frame_label, classes.size(), MUST(path.to_string()));
+            ++emitted;
+        }
+        for (size_t copy = 0; copy < 3; ++copy) {
+            dbgln("[LB:C22:DOC_SUMMARY] pid={} detached={} active={} documents={} rooted={} strong={} conservative={} printed={} END",
+                Core::System::getpid(), detached, active_pages, documents, rooted_documents, strong_documents,
+                conservative_documents, emitted);
+        }
+    }
+
     auto retained = pageclients > active_pages ? pageclients - active_pages : 0;
     auto rooted = pageclients - unknown;
     // Trois ecritures independantes : une ligne serie entrelacee ne peut pas
@@ -250,6 +318,14 @@ static void bouchaud_trace_pageclient_retention(size_t active_pages, u64 detache
         "                && (s_bouchaud_pages_detached == 10 || s_bouchaud_pages_detached == 20)\n"
         "                && s_bouchaud_pages_detached != s_bouchaud_last_gc_retention_detached) {\n"
         "                s_bouchaud_last_gc_retention_detached = s_bouchaud_pages_detached;\n"
+        "                bouchaud_trace_pageclient_retention(m_pages.size(), s_bouchaud_pages_detached);\n"
+        "            }\n"
+        "            // Post-discard snapshot only after callbacks and scheduled GC had\n"
+        "            // time to quiesce. One late root graph, not a periodic poll.\n"
+        "            // Diagnostic-only env is absent from both contractual 6x6 arms.\n"
+        "            if (getenv(\"BOUCHAUD_C22_DOC_ROOT_PROOF\")\n"
+        "                && s_bouchaud_pages_detached == 20\n"
+        "                && ++s_bouchaud_c22_doc_post_detached_ticks == 12) {\n"
         "                bouchaud_trace_pageclient_retention(m_pages.size(), s_bouchaud_pages_detached);\n"
         "            }\n"
         "        });\n"
