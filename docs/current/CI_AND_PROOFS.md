@@ -6,8 +6,8 @@ STATIC → HOST → TCG → KVM → PHYSICAL. Pas d'inférence entre niveaux. `N
 
 | Workflow | Run | SHA | Event | Résultat au relevé | Qualification réelle / limites |
 |---|---:|---|---|---|---|
-| CI Fast | 41534263901 | `ba4244fea534` | push main | in_progress | Garde syntaxe, hôte et politique ; ne qualifie pas SMP8/physique |
-| Reliability V3 | 41534263911 | `ba4244fea534` | push main | in_progress | Matrice, tests hôte/fiabilité ; ne suffit pas au gate P13 |
+| CI Fast | 41534263901 | `ba4244fea534` | push main | success | Garde syntaxe, hôte et politique ; ne qualifie pas SMP8/physique |
+| Reliability V3 | 41534263911 | `ba4244fea534` | push main | success | Matrice, tests hôte/fiabilité ; ne suffit pas au gate P13 |
 | CI Fast | 41532849519 | b8436617 | push main | success | SHA antérieur ; pas preuve du HEAD |
 | Reliability V3 | 41532849530 | b8436617 | push main | success | SHA antérieur |
 | Integration | 41532849374 | b8436617 | push main | success | SHA antérieur |
@@ -19,14 +19,14 @@ STATIC → HOST → TCG → KVM → PHYSICAL. Pas d'inférence entre niveaux. `N
 | ladybird-native-browser | 41530447823 | `5c3cd43a7a2a` | push main | in_progress | Build/diagnostic produit, non conclusion finale au relevé |
 | p13-primitives-noyau | 41530447865 | `5c3cd43a7a2a` | push main | in_progress | Ne confondre avec gate strict final |
 | userland-legacy | 41530447851 | `5c3cd43a7a2a` | push main | in_progress | Fabrique legacy, distinct des services ring3 canoniques |
-| ladybird-native-browser | 41518023294 | `5c3cd43a7a2a` | pull_request | success | C22 6/6 KVM ; palier développement, **pas** convergence P13 |
+| ladybird-native-browser | 41518023294 | head `5c3cd43a7a2a`; checkout `84105df8bf1c` | pull_request | success | C22 6/6 KVM ; le job a testé le merge SHA synthétique, **pas** une convergence P13 ni une preuve main same-SHA |
 | Nightly Full | 41424125876 | 788c5446 | schedule | failure | Artefact Ladybird absent ; ancien SHA |
 | Nightly Full | 41475434027 | 47d96f0c | workflow_dispatch | success | Autre SHA V26 : ne qualifie pas main |
 | Endurance hebdomadaire | UNKNOWN | UNKNOWN | schedule/manual | UNKNOWN | Aucune preuve actuelle récupérée sur ce HEAD |
 | P13 dedicated KVM | UNKNOWN | UNKNOWN | dispatch | UNKNOWN | Rien de concluant sur ce SHA |
 | P13 final | UNKNOWN | UNKNOWN | dispatch | UNKNOWN | `P13_FINAL_STRICT_OK` non démontré |
 
-Les identifiants ci-dessus sont des **runs réels**, pas des simulations. Les durées détaillées, tous les jobs skipped et la provenance binaire au niveau artefact restent **UNKNOWN** lorsqu'ils n'ont pas été inspectés individuellement. En particulier, l'artefact de `41518023294` doit être vérifié par `tools/ci/verifie_artefact_ladybird.sh` lors de toute réutilisation.
+Les identifiants ci-dessus sont des **runs réels**, pas des simulations. Pour les événements `pull_request`, distinguer systématiquement le `head_sha` exposé par le run du `github.sha`/checkout de merge synthétique réellement exécuté. Les durées détaillées, tous les jobs skipped et la provenance binaire au niveau artefact restent **UNKNOWN** lorsqu'ils n'ont pas été inspectés individuellement. En particulier, l'artefact de `41518023294` doit être vérifié par `tools/ci/verifie_artefact_ladybird.sh` lors de toute réutilisation.
 
 ## C22 V29 — dossier causal compact
 
@@ -42,7 +42,7 @@ CORRECTIF:  tools/ladybird/prepare-echange-processus.py, sections
             defer_teardown() après user_on_finish ; stop + detach timer et garde anti-restart.
 AVANT      : témoin historique intermittent ; GitHub 41511176390 6/6 candidat vert,
             0/6 témoin rouge => ancien gate échouait sans échec produit.
-APRÈS      : 41518023294, 6/6 KVM sur V29, croissance 144..164 Kio, borne 1024 Kio.
+APRÈS      : 41518023294, head source 5c3cd43a, checkout/merge SHA 84105df8, 6/6 KVM sur V29, croissance 144..164 Kio, borne 1024 Kio.
 LIMITES    : pas de preuve PHYSICAL ; pas de preuve que toute fuite générale est supprimée ;
             durée/couverture limitées à la fixture et aux 10 onglets/phase.
 ```

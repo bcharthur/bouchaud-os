@@ -77,6 +77,6 @@ Attention : `os-primitives` est à la fois manuel et réutilisable ; le supprime
 - C22 : [run 41518023294](https://github.com/bcharthur/bouchaud-os/actions/runs/41518023294), journal du job mémoire, preuve 6/6.
 - P13 : `tools/ci/run_p13_campaigns.sh FULL_SHA` en hôte dédié KVM4 ; `tools/ci/run_p13_dedicated_kvm.sh BOOT smp8` et `tools/ci/p13_kvm_soak.py --minutes 30` sur KVM8.
 - Contrôle court : `python3 tools/ci/check_pipeline_policy.py` et `python3 -m unittest discover -s tools/ci/reliability -p 'test_p13_final_gate.py' -v`.
-- Vérification du snapshot : `python3 tools/ci/check_status_snapshot.py` (retour 2 volontaire si commit différent du snapshot).
+- Vérification du snapshot : `python3 tools/ci/check_status_snapshot.py`. Le contrôle accepte le HEAD observé ou un descendant ne modifiant que `docs/current/**` et ce vérificateur ; toute modification runtime/CI hors de ce périmètre rend le snapshot obsolète (retour 2).
 
 **Rapport à considérer comme audit STATIC et de CI, pas nouvelle preuve KVM/PHYSICAL.**

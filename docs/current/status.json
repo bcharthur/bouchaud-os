@@ -39,15 +39,18 @@
       144,
       164
     ],
-    "physical": "UNKNOWN"
+    "physical": "UNKNOWN",
+    "source_head_sha": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
+    "execution_checkout_sha": "84105df8bf1ca1cf31cb8da6eaab50e43a96383d",
+    "run_event": "pull_request"
   },
   "ci": {
     "fast": {
-      "status": "IN_PROGRESS",
+      "status": "PASS",
       "run_id": 41534263901
     },
     "reliability": {
-      "status": "IN_PROGRESS",
+      "status": "PASS",
       "run_id": 41534263911
     },
     "integration": {

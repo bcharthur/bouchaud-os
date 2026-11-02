@@ -13,10 +13,10 @@
 ## B. Baseline réellement démontrée
 
 ```text
-FAST=PASS sur 5c3cd43a et b8436617; IN_PROGRESS sur ba4244fe au relevé
+FAST=PASS sur `ba4244fe` / run 41534263901 ; Reliability V3=PASS sur `ba4244fe` / run 41534263911
 RUNTIME=PASS Native IPC 41530447729, Security Runtime 41530447803, sur 5c3cd43a
 BROWSER=PASS developpement sur 5c3cd43a / run 41518023294; qualification complète UNKNOWN
-C22=CLOSED_AT_KVM sur 5c3cd43a / 41518023294 / 6x6, 144..164 KiB < 1024 KiB
+C22=CLOSED_AT_KVM pour le head source `5c3cd43a`; run 41518023294 / 6x6, checkout PR `84105df8`, 144..164 KiB < 1024 KiB
 P13=PARTIAL (pas de P13_FINAL_STRICT_OK same-SHA)
 PHYSICAL=UNKNOWN sur HEAD actuel
 NIGHTLY=UNKNOWN sur HEAD actuel; ancien main rouge 41424125876
@@ -24,7 +24,7 @@ NIGHTLY=UNKNOWN sur HEAD actuel; ancien main rouge 41424125876
 
 ## C. Véritablement fermé
 
-- Correctif C22 V29 intégré à main le 02/11, contrat produit 6/6 KVM validé sur SHA précis `5c3cd43a7a2a1c258388f9a81967abecdce51068`. Deux séries locales 6/6 supplémentaires signalées.
+- Correctif C22 V29 intégré à main le 02/11. Le run PR `41518023294` a `head_sha=5c3cd43a7a2a1c258388f9a81967abecdce51068`, mais le job a exécuté le checkout/merge SHA synthétique GitHub `84105df8bf1ca1cf31cb8da6eaab50e43a96383d`; contrat produit 6/6 KVM. Deux séries locales 6/6 supplémentaires sont signalées. Ne pas appeler cela une preuve « same-SHA main » tant que le run push de `5c3cd43a` n'a pas fini son job C22.
 - 11 workflows C22 obsolètes retirés du code puis désactivés ; branches expérimentales C22 anciennes supprimées avec tag d'archive `archive/c22-v9-ci-forensic-20261102`.
 - **Ne PAS rouvrir le témoin négatif intermittent comme gate bloquant.**
 
@@ -78,7 +78,7 @@ NIGHTLY=UNKNOWN sur HEAD actuel; ancien main rouge 41424125876
 
 ### 5 — Dette Ladybird et mise à jour (P1)
 
-- **Symptôme :** 26 `prepare-*.py`, ancres texte fragiles.
+- **Symptôme :** 25 `prepare-*.py`, ancres texte fragiles.
 - **Code :** `tools/ladybird/prepare-echange-processus.py`, `prepare-compositor-lien.py`, `prepare-full-browser-host.py`, `prepare-gc-retention-proof.py`.
 - **Court :** `find tools/ladybird -name 'prepare-*.py' | sort`.
 - **Vert :** matrice ancres/fichiers/symboles/catégories, une conversion de patch isolée seulement si preuve d'équivalence, sans changement d'upstream au même moment.

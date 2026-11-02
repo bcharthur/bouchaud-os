@@ -25,5 +25,5 @@ Les historiques dans `docs/current` **ne sont pas supprimés** : les liens et pr
 - `main` n'a pas de protection — défaut de processus P0. Recommandation : PR requise, checks `fast-gate`, `integration-gate`, `reliability-gate` stables ; pas de force push, pas de suppression. Les autres checks (IPC/security/browser) doivent être obligatoires seulement si les chemins concernés les déclenchent de manière garantie, sinon les rulesets peuvent bloquer les PR sans rapport. Configuration administrative non réalisée.
 - Le niveau PHYSICAL Trigkey sur HEAD actuel reste UNKNOWN.
 - Le gate final P13 est présent ; son exécution réussie et le couple runners KVM4/KVM8 ne sont pas prouvés.
-- `docs/current/status.json` est un **snapshot**, jamais un substitut à GitHub. L'outil de vérification le refuse si le HEAD local diffère.
+- `docs/current/status.json` est un **snapshot**, jamais un substitut à GitHub. Le vérificateur accepte le HEAD observé ou un descendant purement documentaire de cette préparation ; il refuse tout descendant ayant modifié un fichier runtime/CI hors `docs/current/**` et `tools/ci/check_status_snapshot.py`.
 - Aucun nettoyage destructif complémentaire n'a été entrepris.
