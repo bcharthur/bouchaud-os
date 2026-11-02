@@ -1,7 +1,15 @@
-# Documentation courante Bouchaud OS — 20 octobre 2026
+# Bouchaud OS — START HERE (2026-11-02)
 
-**Lire en premier [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md)** (causes racines de la queue de reveil, correctifs `7d6c944b` / `cbbd5ec0`), puis [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md), puis [STATUS_CURRENT.md](STATUS_CURRENT.md), [BOUCHAUD_STABLE_BASELINE.md](BOUCHAUD_STABLE_BASELINE.md), [HANDOFF_CLAUDE_ACTIVE.md](HANDOFF_CLAUDE_ACTIVE.md) et [P_LOTS_REGISTER.md](P_LOTS_REGISTER.md).
+**Source de vérité active** — vérifier toujours `git rev-parse HEAD` et les CI avant d'utiliser les états ci-dessous.
 
-Le SHA `f5692b7` a cinq grands workflows verts; le correctif d'analyse P13 `4d279ff` et les docs suivantes sont a revalider selon le SHA. Le gel global SMP8 a deja ete attribue et corrige dans le code, voir [Scheduler NG](../../docs/SCHEDULER_NG.md). **P13 KVM strict demeure NON_QUALIFIANT / NON_CONCLUANT**, la baseline reste **NOT_ESTABLISHED**.
+1. [STATUS_CURRENT.md](STATUS_CURRENT.md) : état vérifié du dépôt et de la baseline.
+2. [ARCHITECTURE_CURRENT.md](ARCHITECTURE_CURRENT.md) : architecture et chemins de code.
+3. [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) : limites produit et preuves absentes.
+4. [CI_AND_PROOFS.md](CI_AND_PROOFS.md) : runs, niveaux de preuve, commandes et risques de faux verts.
+5. **[CLAUDE_NEXT_MISSION.md](CLAUDE_NEXT_MISSION.md) : ordre de mission demain.**
 
-Les pages historiques des 8, 13 et 15 octobre ne sont pas des statuts actuels. Seules les preuves du meme SHA et de la meme machine peuvent fonder une qualification. Niveaux distincts : STATIC, HOST, QEMU TCG, QEMU KVM, PHYSICAL.
+[status.json](status.json) est un instantané daté, **pas** un statut qui se réactualise automatiquement. Le rapport de préparation est [REMISE_EN_ORDRE_2026-11-02.md](REMISE_EN_ORDRE_2026-11-02.md).
+
+Les autres pages de `docs/current/`, notamment les dossiers P13 d'octobre, `HANDOFF_CLAUDE_ACTIVE` et `REGISTRE_CONVERGENCE`, sont **archives historiques logiques** : elles ne définissent plus le statut actif. Elles restent en place pour préserver les liens et les preuves, sans opération de déplacement massive. Aucune suppression d'historique Git.
+
+Niveaux de preuve distincts : STATIC, HOST, TCG, KVM, PHYSICAL. Un workflow vert ne transforme pas un niveau en un autre.

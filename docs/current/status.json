@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-02",
+  "observed_main_head": "ba4244fea53434de84ce532bf9f6d7ae5a95342e",
+  "head_kind": "snapshot_before_prep_branch",
+  "default_branch": "main",
+  "main_protected": false,
+  "baseline_status": "PARTIAL",
+  "ladybird_upstream": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
+  "p_lots": {
+    "P1": "UNKNOWN",
+    "P2": "UNKNOWN",
+    "P3": "UNKNOWN",
+    "P4": "UNKNOWN",
+    "P5": "UNKNOWN",
+    "P6": "UNKNOWN",
+    "P7": "UNKNOWN",
+    "P8": "UNKNOWN",
+    "P9": "UNKNOWN",
+    "P10": "UNKNOWN",
+    "P11": "UNKNOWN",
+    "P12": "UNKNOWN",
+    "P13": "PARTIAL",
+    "P14": "UNKNOWN",
+    "P15": "UNKNOWN",
+    "P16": "UNKNOWN",
+    "P17": "UNKNOWN",
+    "P18": "UNKNOWN",
+    "P19": "UNKNOWN"
+  },
+  "C22": {
+    "status": "CLOSED_AT_KVM",
+    "tested_sha": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
+    "run_id": 41518023294,
+    "passes": 6,
+    "total": 6,
+    "threshold_kib": 1024,
+    "observed_growth_m2_m1_kib": [
+      144,
+      164
+    ],
+    "physical": "UNKNOWN",
+    "source_head_sha": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
+    "execution_checkout_sha": "84105df8bf1ca1cf31cb8da6eaab50e43a96383d",
+    "run_event": "pull_request"
+  },
+  "ci": {
+    "fast": {
+      "status": "PASS",
+      "run_id": 41534263901
+    },
+    "reliability": {
+      "status": "PASS",
+      "run_id": 41534263911
+    },
+    "integration": {
+      "status": "PASS_PRIOR_SHA",
+      "run_id": 41532849374
+    },
+    "ipc": {
+      "status": "PASS_PRIOR_SHA",
+      "run_id": 41530447729
+    },
+    "security": {
+      "status": "PASS_PRIOR_SHA",
+      "run_id": 41530447803
+    },
+    "browser": {
+      "status": "PASS_DEVELOPMENT_PRIOR_SHA",
+      "run_id": 41518023294
+    },
+    "nightly": {
+      "status": "UNKNOWN_CURRENT_SHA",
+      "last_known_failure_id": 41424125876
+    }
+  },
+  "hardware": {
+    "trigkey": "UNKNOWN_CURRENT_SHA",
+    "nvme": "UNKNOWN_CURRENT_SHA",
+    "rtl8168": "UNKNOWN_CURRENT_SHA",
+    "xhci": "UNKNOWN_CURRENT_SHA",
+    "audio": "UNKNOWN_CURRENT_SHA",
+    "gpu": "VIRTIO_2D_CODE_PRESENT_PHYSICAL_UNKNOWN"
+  },
+  "limitations": [
+    "P13 strict KVM4+KVM8 same-SHA",
+    "main branch protection absent",
+    "PHYSICAL current HEAD unproved",
+    "durable storage power-loss unproved"
+  ]
+}
