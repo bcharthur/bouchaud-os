@@ -150,3 +150,94 @@ pub fn plan(
 pub const fn se_recouvrent(plan: &Plan) -> bool {
     plan.esp_premier <= plan.systeme_dernier && plan.systeme_premier <= plan.esp_dernier
 }
+
+// ===========================================================================
+// BOUCHAUD_DISPOSITION_AB_V1 -- le disque A/B, sans code destructif
+// ===========================================================================
+//
+//   ESP     FAT32 : le shim (BOOTX64.EFI) seul -- le Bouchaud Loader. Il ne
+//           porte plus de noyau : rien a y reecrire lors d'une mise a jour.
+//   META    brut, 1 Mio : le bloc d'amorcage A/B, deux copies (LBA 0 et 1 de
+//           la partition, update-core). Une partition a lui seul, pour qu'une
+//           ecriture de metadonnees ne touche jamais un systeme de fichiers.
+//   SYS_A   FAT32 : un systeme amorcable COMPLET (chargeur, noyau, boot.json,
+//   SYS_B   ramdisk). Le shim charge le chargeur DEPUIS la partition du slot
+//           choisi ; bootloader 0.11 lit alors noyau et ramdisk sur le meme
+//           peripherique. Les deux slots ont la meme taille : n'importe quelle
+//           version doit pouvoir aller dans n'importe lequel.
+//   STATE   le reste : la persistance (zone `fs::persistance` a la fin).
+//
+// Tailles :
+//   * ESP : ESP_MINIMUM_MIO (le seuil FAT32 conforme, voir plus haut) ; le
+//     shim fait quelques centaines de Kio ;
+//   * META : 1 Mio, une unite d'alignement ; deux secteurs suffisent, le reste
+//     est reserve (journal de boot futur) ;
+//   * slot : charge + ESP_MARGE_MIO, plancher ESP_MINIMUM_MIO -- la meme regle
+//     que l'ESP actuelle, qui porte aujourd'hui exactement cette charge ;
+//   * STATE : au moins le quadruple de la zone de persistance (meme regle que
+//     la partition systeme actuelle).
+
+/// Taille de la partition META, en mebioctets.
+pub const META_MIO: u64 = 1;
+
+/// Ou vont les cinq partitions (bornes INCLUSES, en blocs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanAB {
+    pub esp: (u64, u64),
+    pub meta: (u64, u64),
+    pub slot_a: (u64, u64),
+    pub slot_b: (u64, u64),
+    pub etat: (u64, u64),
+}
+
+impl PlanAB {
+    pub const fn partitions(&self) -> [(u64, u64); 5] {
+        [self.esp, self.meta, self.slot_a, self.slot_b, self.etat]
+    }
+}
+
+/// Calcule la disposition A/B. `octets_slot` est ce qu'un slot doit porter
+/// (chargeur + noyau + configuration + ramdisk). `None` si le disque ne peut
+/// pas tout porter : refuser plutot que de rogner un slot ou la persistance.
+pub fn plan_ab(
+    premier_utilisable: u64,
+    dernier_utilisable: u64,
+    taille_bloc: usize,
+    octets_slot: u64,
+) -> Option<PlanAB> {
+    if taille_bloc == 0 || premier_utilisable > dernier_utilisable {
+        return None;
+    }
+    let par_mio = blocs_par_mio(taille_bloc);
+    let slot_mio = octets_slot.div_ceil(1024 * 1024).checked_add(ESP_MARGE_MIO)?.max(ESP_MINIMUM_MIO);
+
+    let mut curseur = aligne(premier_utilisable, taille_bloc);
+    let mut pose = |mio: u64| -> Option<(u64, u64)> {
+        let premier = aligne(curseur, taille_bloc);
+        let dernier = premier.checked_add(mio.checked_mul(par_mio)?)?.checked_sub(1)?;
+        if dernier > dernier_utilisable { return None; }
+        curseur = dernier.checked_add(1)?;
+        Some((premier, dernier))
+    };
+    let esp = pose(ESP_MINIMUM_MIO)?;
+    let meta = pose(META_MIO)?;
+    let slot_a = pose(slot_mio)?;
+    let slot_b = pose(slot_mio)?;
+    let etat_premier = aligne(curseur, taille_bloc);
+    let etat_minimum = (SECTEURS_PERSISTANCE * 512 * 4).div_ceil(taille_bloc as u64);
+    if etat_premier.checked_add(etat_minimum)? > dernier_utilisable {
+        return None;
+    }
+    Some(PlanAB { esp, meta, slot_a, slot_b, etat: (etat_premier, dernier_utilisable) })
+}
+
+/// Deux partitions quelconques du plan se recouvrent-elles ?
+pub fn plan_ab_se_recouvre(plan: &PlanAB) -> bool {
+    let p = plan.partitions();
+    for i in 0..p.len() {
+        for j in (i + 1)..p.len() {
+            if p[i].0 <= p[j].1 && p[j].0 <= p[i].1 { return true; }
+        }
+    }
+    false
+}
