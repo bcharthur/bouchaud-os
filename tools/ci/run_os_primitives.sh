@@ -88,6 +88,18 @@ sortie = [l for l in lignes
 print("== racines mortes en echec et leurs fautes (journal entier) ==")
 for l in sortie[:40]:
     print("  " + l[:400])
+# BOUCHAUD_SIGCHLD_ECHEC_LISIBLE_V1 : run 41648148378 n'a laisse dans le
+# journal du job que `SIGCHLD_MULTIFIL_ECHEC n=1` ; l'artefact n'etait pas
+# lisible. Le cas fautif, son reveil, et ce que le noyau a publie pour les
+# FILS des racines en echec (sortie du dernier fil = zombie ? mort ?), pour
+# trancher « jamais zombie » / « zombie sans SIGCHLD » / « recolte ratee ».
+cas = [l for l in lignes if re.search(r"SIGCHLD_CAS .* ECHEC\s*$|SIGCHLD_ATTENTE ", l)]
+fils = [l for l in lignes if any(re.search(rf"\bppid={p}\b", l) for p in pids)
+        and re.search(r"PROCESS_(EXIT|DEATH|FAULT)", l)]
+if cas or fils:
+    print("== cas en echec et fils des racines en echec ==")
+    for l in (cas + fils)[:60]:
+        print("  " + l[:400])
 PY
 }
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then python3 tools/ci/symbolise_noyau.py "$LOG" "$ELF" || true; racines_en_echec || true; fi; exit "$rc"' EXIT
