@@ -67,6 +67,8 @@ pub enum Element {
     Fenetre(usize),
     /// Menu deroulant.
     Menu,
+    /// Centre de controle Atelier (verre, jamais opaque).
+    Centre,
     /// Barre des taches.
     BarreTaches,
     /// Curseur logiciel. Jamais opaque : il a des bords transparents.

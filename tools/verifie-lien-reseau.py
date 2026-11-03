@@ -233,13 +233,48 @@ def main():
         fautes.append(
             "widgets.rs : le libelle n'affiche plus le nom du reseau."
         )
+    # L'ETAT SE LIT PAR LA FORME (BOUCHAUD_ATELIER_BARRE_HAUTE_V2).
+    #
+    # Jusqu'a l'increment Atelier A, la prise etait dessinee en rectangles et
+    # l'etat deconnecte portait une barre oblique : ce garde exigeait la
+    # branche `if etat != EtatReseau::Connecte` DANS `dessine_reseau`. La regle
+    # reste la meme -- l'etat ne doit pas se lire que par la couleur -- mais la
+    # forme vient maintenant de glyphes Lucide DISTINCTS, choisis par
+    # `glyphe_reseau`. Le garde verifie donc :
+    #   * que le choix du glyphe depend de l'etat connecte / non connecte ;
+    #   * que les glyphes connecte, debranche et alerte sont trois fichiers
+    #     differents (un meme PNG teinte autrement ne serait que de la couleur) ;
+    #   * que `dessine_reseau` pose ce glyphe et ne redessine rien a la main.
     dessin = corps(widgets, "fn dessine_reseau(")
-    if dessin is None or "if etat != EtatReseau::Connecte" not in dessin:
+    choix = corps(widgets, "fn glyphe_reseau(")
+    if dessin is None or choix is None \
+            or "if etat != EtatReseau::Connecte" not in choix \
+            or "glyphe_reseau(" not in dessin:
         fautes.append(
             "widgets.rs : l'etat deconnecte ne se distingue plus autrement que "
             "par la couleur. Un ecran mal regle, ou un daltonien, ne verrait "
-            "aucune difference -- la barre oblique est ce qui rend l'etat "
+            "aucune difference -- c'est la FORME du glyphe qui rend l'etat "
             "lisible sans elle."
+        )
+    else:
+        for symbole in ("SYMBOLE_ETHERNET_16", "SYMBOLE_DEBRANCHE_16", "SYMBOLE_ALERTE_16"):
+            if symbole not in choix:
+                fautes.append("widgets.rs : `glyphe_reseau` ne choisit plus %s." % symbole)
+        if "fill_rect_rgb" in dessin or "pixel_rgb" in dessin:
+            fautes.append(
+                "widgets.rs : `dessine_reseau` redessine un pictogramme a la "
+                "main. Les glyphes sont des assets Lucide traces au manifeste."
+            )
+    assets = (RACINE / "src/gui/atelier/assets.rs").read_text(encoding="utf-8")
+    fichiers = {}
+    for nom in ("SYMBOLE_ETHERNET_16", "SYMBOLE_DEBRANCHE_16", "SYMBOLE_ALERTE_16"):
+        m = re.search(r"pub const %s: &\[u8\] =\s*include_bytes!\(\"([^\"]+)\"\)" % nom, assets)
+        fichiers[nom] = m.group(1) if m else None
+    if None in fichiers.values() or len(set(fichiers.values())) != 3:
+        fautes.append(
+            "atelier/assets.rs : les glyphes connecte, debranche et alerte ne "
+            "sont plus trois fichiers distincts. Le meme dessin teinte "
+            "autrement ne se distingue que par la couleur."
         )
     nom = corps(net, "pub fn nom_reseau()")
     if nom is None:
@@ -382,7 +417,7 @@ def main():
                 "Deux mises en page pour une seule barre, et tout element "
                 "ajoute a droite finit dessous." % quoi
             )
-    topbar = corps(widgets, "fn draw_topbar()")
+    topbar = corps(widgets, "fn draw_topbar(")
     if topbar is None or "let mut droite" not in topbar \
             or topbar.count("droite = droite.saturating_sub") < 2:
         fautes.append(
@@ -396,6 +431,16 @@ def main():
             "widgets.rs : le compteur de trames n'est plus dans la mise en "
             "page unique ; il reviendra se poser par-dessus."
         )
+    # Le compteur de trames ne s'affiche plus qu'en mode diagnostic
+    # (BOUCHAUD_ATELIER_REGLAGES_V1). Il reste DANS la mise en page unique :
+    # le jour ou on le montre, il prend sa place au lieu de se poser dessus.
+    if topbar is not None and "frame_clock::snapshot()" in topbar:
+        bloc_fps = topbar[topbar.index("frame_clock::snapshot()") - 200:topbar.index("frame_clock::snapshot()") + 600]
+        if "reglages::diagnostic()" not in bloc_fps or "droite = droite.saturating_sub" not in bloc_fps:
+            fautes.append(
+                "widgets.rs : le compteur de trames n'est plus soumis au mode "
+                "diagnostic, ou ne recule plus le curseur de droite."
+            )
 
     # --- LE NAVIGATEUR DOIT RECEVOIR LE VRAI RESOLVEUR ---------------------
     #

@@ -23,6 +23,6 @@ pub(crate) use legacy::*;
 /// Le compteur vit maintenant dans la mise en page unique de la barre, qui
 /// avance de la droite vers la gauche et ou chaque element prend la largeur
 /// qu'il occupe reellement.
-pub(crate) fn draw_barre_haute() {
-    legacy::draw_barre_haute();
+pub(crate) fn draw_barre_haute(centre_ouvert: bool, mx: i32, my: i32) {
+    legacy::draw_barre_haute(centre_ouvert, mx, my);
 }

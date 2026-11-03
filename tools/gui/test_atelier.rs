@@ -1,5 +1,6 @@
 //! Contrats purs du design system Atelier (BOUCHAUD_ATELIER_JETONS_V1,
-//! BOUCHAUD_ATELIER_MOUVEMENT_V1, BOUCHAUD_ATELIER_DOCK_V1).
+//! BOUCHAUD_ATELIER_MOUVEMENT_V1, BOUCHAUD_ATELIER_DOCK_V1,
+//! BOUCHAUD_ATELIER_CENTRE_V1).
 //!
 //! Inclut les modules TELS QUELS : ce sont les memes octets que le noyau
 //! compile.
@@ -14,6 +15,8 @@ mod jetons;
 mod mouvement;
 #[path = "../../src/gui/atelier/dock.rs"]
 mod dock;
+#[path = "../../src/gui/atelier/centre.rs"]
+mod centre;
 #[path = "../../src/gui/protocole.rs"]
 mod protocole;
 #[path = "../../src/gui/disposition.rs"]
@@ -181,4 +184,99 @@ fn le_test_d_impact_suit_la_cellule() {
     assert!(c.contient(c.x + c.w - 1, c.y + c.h - 1));
     assert!(!c.contient(c.x + c.w, c.y));
     assert!(!c.contient(c.x - 1, c.y));
+}
+
+// ─── Centre de controle ───────────────────────────────────────────────────
+
+const ECRANS_CENTRE: [(u32, u32); 3] = [(1280, 720), (1920, 1080), (2560, 1600)];
+
+fn dans(petite: dock::Boite, grande: dock::Boite) -> bool {
+    petite.x >= grande.x && petite.y >= grande.y
+        && petite.x + petite.w <= grande.x + grande.w
+        && petite.y + petite.h <= grande.y + grande.h
+}
+
+#[test]
+fn le_centre_tient_entre_la_barre_et_le_dock() {
+    for (l, h) in ECRANS_CENTRE {
+        let c = centre::cadre(l, disposition::HAUTEUR_BARRE);
+        assert!(c.x >= 0 && c.x + c.w <= l as i32, "{l}x{h}");
+        assert!(c.y > disposition::HAUTEUR_BARRE as i32);
+        assert!(c.y + c.h + centre::OMBRE < h as i32 - disposition::HAUTEUR_ZONE_DOCK as i32,
+            "{l}x{h} : le centre deborde sur le dock");
+    }
+}
+
+#[test]
+fn l_empreinte_contient_le_panneau_et_son_ombre() {
+    for (l, _) in ECRANS_CENTRE {
+        let c = centre::cadre(l, 30);
+        let e = centre::empreinte(l, 30);
+        assert!(dans(c, e));
+        assert_eq!(e.x, c.x - centre::OMBRE);
+        assert_eq!(e.y, c.y - centre::OMBRE);
+        assert_eq!(e.w, c.w + 2 * centre::OMBRE);
+        assert_eq!(e.h, c.h + 2 * centre::OMBRE);
+    }
+}
+
+#[test]
+fn chaque_action_est_dans_le_panneau_et_aucune_ne_se_chevauche() {
+    for (l, _) in ECRANS_CENTRE {
+        let c = centre::cadre(l, 30);
+        let boites: Vec<dock::Boite> =
+            centre::ACTIONS.iter().map(|a| centre::boite_action(l, 30, *a)).collect();
+        for (i, b) in boites.iter().enumerate() {
+            assert!(b.w > 0 && b.h > 0, "{:?} vide", centre::ACTIONS[i]);
+            assert!(dans(*b, c), "{:?} hors du panneau", centre::ACTIONS[i]);
+            for (k, o) in boites.iter().enumerate().skip(i + 1) {
+                let chevauche = b.x < o.x + o.w && o.x < b.x + b.w
+                    && b.y < o.y + o.h && o.y < b.y + b.h;
+                assert!(!chevauche, "{:?} et {:?}", centre::ACTIONS[i], centre::ACTIONS[k]);
+            }
+        }
+    }
+}
+
+#[test]
+fn le_survol_et_le_clic_designent_la_boite_peinte() {
+    // Chaque pixel de chaque boite designe SON action, et aucun pixel hors
+    // des boites ne designe quoi que ce soit.
+    let l = 1280;
+    let c = centre::cadre(l, 30);
+    for y in c.y - 2..c.y + c.h + 2 {
+        for x in c.x - 2..c.x + c.w + 2 {
+            let attendu = centre::ACTIONS.iter().copied()
+                .find(|a| centre::boite_action(l, 30, *a).contient(x, y));
+            assert_eq!(centre::action_sous(l, 30, x, y), attendu, "({x},{y})");
+            if attendu.is_some() {
+                assert!(centre::dans_panneau(l, 30, x, y));
+            }
+        }
+    }
+}
+
+#[test]
+fn les_blocs_se_suivent_sans_se_chevaucher() {
+    let c = centre::cadre(1280, 30);
+    let mut bas = c.y;
+    for (bloc, h) in centre::BLOCS {
+        let b = centre::bloc(1280, 30, bloc);
+        assert_eq!(b.h, h as i32);
+        assert!(b.y >= bas, "{bloc:?}");
+        bas = b.y + b.h;
+    }
+    assert_eq!(bas + centre::REMBOURRAGE, c.y + c.h, "le dernier bloc ferme le panneau");
+}
+
+#[test]
+fn le_bouton_de_la_barre_reste_dans_la_barre_et_a_droite() {
+    for (l, _) in ECRANS_CENTRE {
+        for grappe in [40u32, 180, 320] {
+            let b = centre::bouton_barre(l, 30, grappe);
+            assert!(b.y >= 0 && b.y + b.h <= 30);
+            assert_eq!(b.x + b.w + centre::BOUTON_MARGE, l as i32);
+            assert_eq!(b.w, grappe as i32 + 2 * centre::BOUTON_REMBOURRAGE);
+        }
+    }
 }

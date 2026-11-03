@@ -171,6 +171,7 @@ fn ajoute_transition(degats: &mut Degats, transition: &crate::gui::windowing::Tr
 fn plan_de_scene(
     wins: &[Win],
     menu_open: bool,
+    centre_ouvert: bool,
     souris: (usize, usize),
     calques: &mut Vec<Calque>,
 ) {
@@ -222,6 +223,11 @@ fn plan_de_scene(
         ));
     }
 
+    if centre_ouvert {
+        // Du VERRE : jamais opaque, pour la meme raison que les barres.
+        calques.push(Calque::transparent(Element::Centre, empreinte_centre()));
+    }
+
     calques.push(Calque::transparent(Element::BarreTaches, barre_taches_rect()));
     calques.push(Calque::transparent(
         Element::Curseur,
@@ -234,6 +240,7 @@ fn dessine_calque(
     calque: &Calque,
     wins: &[Win],
     menu_open: bool,
+    centre_ouvert: bool,
     souris: (usize, usize),
     mx: i32,
     my: i32,
@@ -242,13 +249,14 @@ fn dessine_calque(
         Element::Fond => widgets::draw_fond(),
         Element::Filigrane => widgets::draw_filigrane(),
         Element::Icone(index) => widgets::draw_icone(index),
-        Element::BarreHaute => widgets::draw_barre_haute(),
+        Element::BarreHaute => widgets::draw_barre_haute(centre_ouvert, mx, my),
         Element::Fenetre(index) => {
             if let Some(w) = wins.get(index) {
                 widgets::draw_fenetre(w, widgets::indice_focus(wins) == Some(index));
             }
         }
         Element::Menu => widgets::draw_menu(mx, my),
+        Element::Centre => widgets::draw_centre(mx, my),
         Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
         Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
     }
@@ -372,6 +380,32 @@ fn render_geometry(w: &Win) -> crate::gui::windowing::WindowRenderGeometry {
 
 fn proto_from_window_rect(rect: crate::gui::windowing::Rect) -> Rect {
     Rect::neuf(rect.x, rect.y, rect.width, rect.height)
+}
+
+/// Ce que le centre de controle peut peindre, ombre comprise.
+/// (BOUCHAUD_ATELIER_CENTRE_V1 : bornes du calque ET de chaque degat.)
+fn empreinte_centre() -> Rect {
+    depuis_boite(crate::gui::atelier::centre::empreinte(fb::width() as u32, BAR_H as u32))
+}
+
+/// Une action du centre, telle que la peint `widgets::draw_centre`.
+fn rect_action_centre(action: crate::gui::atelier::centre::Action) -> Rect {
+    depuis_boite(crate::gui::atelier::centre::boite_action(fb::width() as u32, BAR_H as u32, action))
+}
+
+fn depuis_boite(b: crate::gui::atelier::dock::Boite) -> Rect {
+    Rect::neuf(b.x, b.y, b.w.max(0) as u32, b.h.max(0) as u32)
+}
+
+/// Ouvre ou ferme le centre. Ce qu'il couvrait redevient bureau (ombre
+/// comprise), et le bouton de la barre change de voile.
+fn bascule_centre(centre_ouvert: &mut bool, ouvert: bool, degats: &mut Degats) {
+    if *centre_ouvert == ouvert {
+        return;
+    }
+    *centre_ouvert = ouvert;
+    degats.ajoute(Origine::Menu, empreinte_centre());
+    degats.ajoute(Origine::BarreHaute, barre_haute_rect());
 }
 
 /// Idem pour le menu deroulant.
@@ -522,6 +556,12 @@ fn boucle() {
     let home = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut wins: Vec<Win> = Vec::new();
     let mut menu_open = false;
+    // BOUCHAUD_ATELIER_CENTRE_V1 : le centre de controle, ouvert depuis la
+    // barre du haut. Exclusif avec le menu Applications.
+    let mut centre_ouvert = false;
+    let mut survol_centre: Option<crate::gui::atelier::centre::Action> = None;
+    let mut survol_bouton_centre = false;
+    crate::gui::atelier::reglages::charge();
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
     // Position du pointeur a l'appui qui a ouvert le glissement en cours.
@@ -668,7 +708,7 @@ fn boucle() {
             // que sur l'appui. Fermer une fenetre sur le relachement d'Echap la
             // fermerait une seconde fois, et une application du noyau
             // insererait chaque caractere en double.
-            if !evenement.appui && client_actif && !menu_open {
+            if !evenement.appui && client_actif && !menu_open && !centre_ouvert {
                 if let Some(index) = actif {
                     if let App::Navigateur { client } = &mut wins[index].app {
                         envoie_touche(client, evenement);
@@ -688,6 +728,13 @@ fn boucle() {
                 continue;
             }
             if !evenement.appui {
+                continue;
+            }
+            if k == Key::Other && centre_ouvert {
+                // Echap ferme d'abord le centre de controle, et rien d'autre.
+                bascule_centre(&mut centre_ouvert, false, &mut degats);
+                sale = true;
+                TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             if k == Key::Other && (menu_open || !client_actif) {
@@ -919,6 +966,7 @@ fn boucle() {
             );
             let sans_glissement = drag.is_none();
             handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
+                &mut centre_ouvert,
                 &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
             if sans_glissement && drag.is_some() {
                 depart_glissement = (mx, my);
@@ -969,6 +1017,33 @@ fn boucle() {
                 degats.ajoute(origine_de(cible), rect);
             }
             survol_menu = nouveau_survol;
+            sale = true;
+        }
+
+        // Survol du centre de controle et de son bouton : meme contrat
+        // (BOUCHAUD_GUI_HOVER_CONTRAT_V1). Les boites viennent de
+        // `atelier::centre`, celles que peint `draw_centre` et que lit le clic.
+        // Le bouton n'est mesure que pres de la barre : sa largeur depend du
+        // libelle reseau, qu'on ne recalcule pas a chaque tour pour rien.
+        let pres_barre = my < BAR_H as i32;
+        if pres_barre || survol_bouton_centre {
+            let survole = pres_barre && widgets::bouton_centre().hit(mx, my);
+            if survole != survol_bouton_centre {
+                survol_bouton_centre = survole;
+                degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+                sale = true;
+            }
+        }
+        let nouveau_centre = if centre_ouvert {
+            crate::gui::atelier::centre::action_sous(fb::width() as u32, BAR_H as u32, mx, my)
+        } else {
+            None
+        };
+        if nouveau_centre != survol_centre {
+            for action in [survol_centre, nouveau_centre].into_iter().flatten() {
+                degats.ajoute(Origine::Menu, rect_action_centre(action));
+            }
+            survol_centre = nouveau_centre;
             sale = true;
         }
 
@@ -1243,7 +1318,7 @@ fn boucle() {
                 //
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
-                plan_de_scene(&wins, menu_open, (mxu, myu), &mut calques);
+                plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
                 // les regions de la trame partent d'un bloc a `fin_trame`.
@@ -1271,7 +1346,7 @@ fn boucle() {
                         if !scene::doit_dessiner(calque, &present) {
                             continue;
                         }
-                        dessine_calque(calque, &wins, menu_open, (mxu, myu), mx, my);
+                        dessine_calque(calque, &wins, menu_open, centre_ouvert, (mxu, myu), mx, my);
                         dessines += 1;
                     }
                     reveil::note_culling(calques.len(), debut, dessines);
@@ -2136,6 +2211,7 @@ fn handle_click(
     title_clicks: &mut crate::gui::windowing::DoubleClickDetector,
     wins: &mut Vec<Win>,
     menu_open: &mut bool,
+    centre_ouvert: &mut bool,
     drag: &mut Option<Drag>,
     quit: &mut bool,
     home: usize,
@@ -2149,6 +2225,47 @@ fn handle_click(
     // choix par defaut : il reste reserve a ce qui change vraiment la majorite
     // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
     // qu'elle decouvre n'est connu de personne d'autre.
+    // BOUCHAUD_ATELIER_CENTRE_V1
+    //
+    // Centre ouvert : un clic sur une action la declenche ; un clic dans le
+    // panneau hors action ne fait rien ; un clic AILLEURS ferme le centre et
+    // s'arrete la -- comme le menu, il ne traverse pas vers ce qui est dessous.
+    if *centre_ouvert {
+        use crate::gui::atelier::centre as c;
+        let (l, b) = (fb::width() as u32, BAR_H as u32);
+        match c::action_sous(l, b, mx, my) {
+            Some(c::Action::Diagnostic) => {
+                crate::gui::atelier::reglages::bascule_diagnostic();
+                degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+                degats.ajoute(Origine::Menu, rect_action_centre(c::Action::Diagnostic));
+                return;
+            }
+            // Les memes chemins que le menu Applications : ecrire ce que la
+            // session a produit, puis couper. Ils ne reviennent jamais.
+            Some(c::Action::Eteindre) => {
+                crate::gui::power_screen::begin();
+                crate::kernel::power::shutdown_avec_raison(crate::kernel::power::EXIT_OK, "centre_eteindre");
+            }
+            Some(c::Action::Redemarrer) => {
+                crate::gui::power_screen::begin();
+                crate::kernel::power::reboot();
+            }
+            Some(c::Action::QuitterBureau) => {
+                crate::serial_println!("BOUCHAUD_BUREAU_FIN raison=centre_quitter");
+                *quit = true;
+                return;
+            }
+            None => {}
+        }
+        if !c::dans_panneau(l, b, mx, my) {
+            bascule_centre(centre_ouvert, false, degats);
+        }
+        return;
+    }
+    if widgets::bouton_centre().hit(mx, my) && !*menu_open {
+        bascule_centre(centre_ouvert, true, degats);
+        return;
+    }
     if *menu_open {
         let mut fenetre_ouverte = false;
         // BOUCHAUD_GUI_HOVER_CONTRAT_V1

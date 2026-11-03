@@ -167,6 +167,7 @@ fn couleur(element: Element) -> u32 {
         Element::BarreHaute => 0x0d_1a30,
         Element::Fenetre(i) => 0x11_1827 + (i as u32 + 1) * 0x10_0000,
         Element::Menu => 0x13_1c2e,
+        Element::Centre => 0x22_2a3c,
         Element::BarreTaches => 0x18_2440,
         Element::Curseur => 0xff_ffff,
     }
@@ -204,7 +205,7 @@ impl Scene {
                 tampon.remplit(&cadre, c, clip);
             }
             // Ne remplissent pas leur boite : jamais opaques.
-            Element::Filigrane | Element::Icone(_) | Element::Curseur => {
+            Element::Filigrane | Element::Icone(_) | Element::Curseur | Element::Centre => {
                 tampon.tramage(&calque.bornes_dessin, c, clip);
             }
         }

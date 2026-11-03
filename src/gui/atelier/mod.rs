@@ -15,9 +15,11 @@
 //!   * [`dock`]      geometrie pure du dock flottant ;
 //!   * [`fond`]      fond d'ecran (photographie), decode une fois puis recopie ;
 //!   * [`assets`]    logo, symboles et fond embarques (manifeste verifie) ;
-//!   * [`matiere`]   peintres de matieres (verre, ombre douce, fenetre).
+//!   * [`matiere`]   peintres de matieres (verre, ombre douce, fenetre) ;
+//!   * [`centre`]    geometrie pure du centre de controle ;
+//!   * [`reglages`]  reglages reels du bureau (mode diagnostic).
 //!
-//! Les trois premiers ne connaissent ni le framebuffer ni l'allocateur : les
+//! `jetons`, `mouvement`, `dock` et `centre` ne connaissent ni le framebuffer ni l'allocateur : les
 //! tests d'hote les incluent tels quels (`tools/gui/test_atelier.rs`).
 //!
 //! # Ce qu'il ne fait pas
@@ -34,3 +36,5 @@ pub mod fond;
 pub mod matiere;
 pub mod assets;
 pub mod echelle;
+pub mod centre;
+pub mod reglages;
