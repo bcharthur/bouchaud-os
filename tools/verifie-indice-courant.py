@@ -10,8 +10,11 @@ Regles :
      appelee seulement sous `INJECTION_DECHIREE` (banc `compta-injection
      dechiree`, jamais pose au demarrage) ;
   3. le banc la rejoue en CI : `run_compta_injection.sh` lance le bras
-     `dechiree`, et exige qu'il MONTRE le defaut (panique `compta:` ou
-     chevauchement).
+     `dechiree`, et exige qu'il MONTRE le defaut (panique `compta:`,
+     chevauchement, ou sa cause : `lectures_etrangeres`) ;
+  4. BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1 : la condition fautive est
+     forcee, le temoin est joue UNE fois -- pas de nouvel essai pour avoir
+     plus de chances.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -57,9 +60,13 @@ def verifie(t: dict) -> list:
     if "static INJECTION_DECHIREE: AtomicBool = AtomicBool::new(false);" not in t["compta"] \
             or t["compta"].count("INJECTION_DECHIREE.store(") != 1:
         fautes.append("INJECTION_DECHIREE : posee au demarrage")
-    if "bras dechiree" not in t["banc"] or "compta-injection-dechiree.log" not in t["banc"] \
+    if "\nbras dechiree\n" not in t["banc"] or "compta-injection-dechiree.log" not in t["banc"] \
             or "COMPTA_INJECTION_ECHEC dechiree" not in t["banc"]:
         fautes.append("run_compta_injection.sh : le temoin de la lecture dechiree n'est plus joue ou plus juge")
+    if t["banc"].count("bras dechiree") != 1 or "lectures_etrangeres=" not in t["banc"]:
+        fautes.append("run_compta_injection.sh : temoin rejoue ou cause non jugee")
+    if "TEMOIN_MIGRATIONS_FORCEES.fetch_add(1" not in corps(t["compta"], "fn rearme_dechire_pour_banc() {"):
+        fautes.append("rearme_dechire_pour_banc : la condition fautive n'est plus forcee")
     if "tools/ci/run_compta_injection.sh" not in t["flux"]:
         fautes.append("os-primitives.yml : le banc de comptabilite n'est plus joue")
     return fautes
@@ -74,7 +81,10 @@ def main() -> int:
          "    rearme_dechire_pour_banc();\n    if INJECTION_DECHIREE.load(Ordering::Relaxed) {\n        return;\n    }"),
         ("injection posee au demarrage", "compta", "static INJECTION_DECHIREE: AtomicBool = AtomicBool::new(false);",
          "static INJECTION_DECHIREE: AtomicBool = AtomicBool::new(true);"),
-        ("temoin non joue", "banc", "  bras dechiree\n", "  true\n"),
+        ("temoin non joue", "banc", "\nbras dechiree\n", "\ntrue\n"),
+        ("temoin rejoue au hasard", "banc", "\nbras dechiree\n", "\nbras dechiree\nbras dechiree\n"),
+        ("condition non forcee", "compta", "TEMOIN_MIGRATIONS_FORCEES.fetch_add(1, Ordering::Relaxed);\n            (ici + 1) % en_ligne",
+         "(ici + 1) % en_ligne"),
         ("temoin non juge", "banc", "COMPTA_INJECTION_ECHEC dechiree", "COMPTA_INJECTION_OK dechiree"),
     ]
     for nom, cle, avant, apres in mutations:
