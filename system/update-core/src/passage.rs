@@ -126,13 +126,18 @@ pub enum RefusCommit {
 ///   Ok(Some(n)) : the booted candidate becomes active and Good; persist `n`.
 ///   Ok(None)    : the booted slot is already the good active slot: nothing to
 ///                 write (this includes the fallback case where a candidate
-///                 was pending but the ACTIVE slot ran -- it stays pending).
+///                 was pending but the ACTIVE slot ran -- it stays pending --
+///                 and an install into the other slot started meanwhile).
 ///   Err(_)      : refuse, write nothing.
 pub fn commit_sante(p: &Passage, e: &Enregistrement) -> Result<Option<Enregistrement>, RefusCommit> {
+    // Already the good active slot: confirming it writes nothing, whatever
+    // changed in the record since the boot (an install into the OTHER slot
+    // rewrites META while this system runs -- found by the QEMU update bench).
+    if e.actif == p.slot && e.slot(p.slot).etat == Etat::Bon { return Ok(None); }
+    // Promoting a candidate is only valid on the very record it booted from.
     if e.sequence != p.sequence_meta { return Err(RefusCommit::MetaChangee); }
     match e.slot(p.slot).etat {
         Etat::Candidat { .. } if p.raison == Raison::CandidatEssaiConsomme => Ok(Some(e.sante_ok(p.slot))),
-        Etat::Bon if e.actif == p.slot => Ok(None),
         _ => Err(RefusCommit::SlotNiCandidatNiActif),
     }
 }

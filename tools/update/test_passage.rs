@@ -94,9 +94,26 @@ fn meta_modifiee_depuis_le_boot_refuse() {
     let (p, disque) = loader(&e, true);
     let ailleurs = disque.sante_ko(Slot::B);
     assert_eq!(commit_sante(&p, &ailleurs), Err(RefusCommit::MetaChangee));
-    // Replaying the same handoff after a commit is refused too.
+    // Replaying the same handoff after a commit writes nothing: B is now the
+    // good active slot.
     let n = commit_sante(&p, &disque).unwrap().unwrap();
-    assert_eq!(commit_sante(&p, &n), Err(RefusCommit::MetaChangee));
+    assert_eq!(commit_sante(&p, &n), Ok(None));
+}
+
+#[test]
+fn installation_pendant_le_boot_n_empeche_pas_de_confirmer_l_actif() {
+    // Regression (QEMU bench mise-a-jour): A runs, updated begins installing
+    // into B -> META rewritten (sequence +1). Confirming A must still succeed
+    // and write nothing; promoting a candidate on a changed record must not.
+    let e = Enregistrement::initial(Slot::A, V1);
+    let (p, disque) = loader(&e, true);
+    assert_eq!((p.slot, p.raison), (Slot::A, Raison::Actif));
+    let pendant = disque.commence_installation(Slot::B, Slot::A).unwrap();
+    assert_ne!(pendant.sequence, p.sequence_meta);
+    assert_eq!(commit_sante(&p, &pendant), Ok(None));
+    let apres = pendant.marque_candidat(Slot::B, V2, V2, 3).unwrap();
+    assert_eq!(commit_sante(&p, &apres), Ok(None), "A stays the good slot; B stays Candidate");
+    assert_eq!(apres.slot(Slot::B).etat, Etat::Candidat { essais: 3 });
 }
 
 #[test]
@@ -171,3 +188,4 @@ fn exploration_le_commit_ne_produit_jamais_un_actif_non_bon() {
     assert!(commits > 0 && vus.len() > 10, "exploration too small: commits={commits} etats={}", vus.len());
     println!("etats={} commits={commits}", vus.len());
 }
+
