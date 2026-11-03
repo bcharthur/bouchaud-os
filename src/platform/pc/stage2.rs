@@ -234,6 +234,15 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::arch::x86_64::pci::init();
     point_de_controle("pci");
 
+    // BOUCHAUD_LOADER_AB_V1 : candidats de banc (jamais livres).
+    #[cfg(feature = "banc-ab-panique")]
+    panic!("BOUCHAUD_AB_CANDIDAT_PANIQUE_VOLONTAIRE");
+    #[cfg(feature = "banc-ab-gel")]
+    {
+        crate::serial_println!("BOUCHAUD_AB_CANDIDAT_GEL_VOLONTAIRE");
+        loop { core::hint::spin_loop(); }
+    }
+
     // Inventaire physique read-only. Les rapports sont crees dans
     // /diagnostics avant les pilotes reseau/USB actifs.
     crate::platform::pc::hardware_probe::run(boot, framebuffer);
