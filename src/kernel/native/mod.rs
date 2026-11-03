@@ -10,6 +10,7 @@
 //! namespace here before the Linux compatibility dispatcher.
 
 pub mod abi;
+pub mod activite;
 pub mod event;
 pub mod handle;
 pub mod io;
@@ -17,6 +18,7 @@ pub mod ipc;
 pub mod memory;
 pub mod network;
 pub mod object;
+pub mod process;
 pub mod scheduler;
 pub mod shm;
 pub mod sync;

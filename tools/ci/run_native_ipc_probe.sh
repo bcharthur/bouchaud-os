@@ -123,14 +123,14 @@ python3 tools/ci/reliability/logscan.py "$LOG"
 
 required=(
   'NATIVE_IPC_AUTORUN_BEGIN'
-  '[NATIVE-IPC-RING3] ABI=1.0'
+  '[NATIVE-IPC-RING3] ABI=1.1'
   '[NATIVE-IPC-RING3] CHANNEL_OK'
   '[NATIVE-IPC-RING3] HANDLE_TRANSFER_OK'
   '[NATIVE-IPC-RING3] EVENT_WAITSET_OK'
   '[NATIVE-IPC-RING3] RIGHTS_OK'
   '[NATIVE-IPC-RING3] SHM_OK'
   '[NATIVE-IPC-RING3] OK'
-  '[NATIVE-IPC] ABI=1.0'
+  '[NATIVE-IPC] ABI=1.1'
   '[NATIVE-IPC] OK'
   '[COMPOSITED] ok   surface accordee, region transferee attenuee'
   '[COMPOSITED] ok   les pixels ecrits par le client sont ceux que le compositeur compose'

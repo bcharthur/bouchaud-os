@@ -131,6 +131,8 @@ jobs:
         run: |
           python3 tools/verifie-ui-bouchaud.py
           python3 tools/verifie-chain-ladybird.py
+          # Aucun patch Ladybird hors chaine sans etre declare OBSOLETE.
+          python3 tools/ladybird/inventaire_patchs.py --verifie --md /dev/null
           python3 tools/verifie-lifecycle-pages.py
           # Fixtures et bancs : un script qui ne compile pas tuait quatre
           # jobs Ladybird en deux minutes (run 37589065373).
@@ -148,6 +150,27 @@ jobs:
       # cette affirmation de redevenir fausse.
       - name: Compositeur ring 3 (compilation freestanding)
         run: bash userland/services/composited/build.sh
+
+      # BOUCHAUD_NATIVE_SERVICES_V1 : l'ABI native a UNE description C (le
+      # SDK) et UN contrat gele ; les deux sont compares au noyau ici, et les
+      # programmes natifs (service, superviseur, sonde de cycles) doivent
+      # compiler W^X sans symbole non resolu. L'execution est dans
+      # native-ipc-runtime.
+      # BOUCHAUD_UPDATE_AB_V1 : coupure a chaque octet et a chaque etape,
+      # exploration exhaustive ; le module de production est inclus tel quel.
+      - name: Mise a jour A/B (preuve hote)
+        run: |
+          rustc --edition 2021 --test tools/update/test_ab.rs -o target-test-ab
+          ./target-test-ab
+      - name: SDK natif et contrat ABI (statique + compilation)
+        run: |
+          python3 tools/verifie-contrat-abi-v1.py
+          python3 tools/ci/verifie_sdk_abi.py
+          B=userland/libs/bouchaud-sdk/build-program.sh
+          $B target/sdk/healthd userland/services/healthd/healthd.c
+          $B target/sdk/serviced userland/services/serviced/serviced.c
+          $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
+          $B target/sdk/native-process-probe userland/tests/native-process-probe.c
 
   browser-engine:
     name: browser / engine tests

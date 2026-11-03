@@ -71,6 +71,28 @@ fn cpu_brand() -> String {
     if brand.is_empty() { cpu_vendor() } else { brand }
 }
 
+/// CPUID.1 decoded as the SDM/APM define it: (family, model, stepping, raw eax).
+///
+/// BOUCHAUD_HWPROBE_FMS_V1 : la reference Trigkey est documentee tantot
+/// « Ryzen 7 5700U » (Zen 2, famille 17h, modele 68h), tantot « 5800H »
+/// (Zen 3, famille 19h, modele 50h). La chaine de marque se lit et se recopie ;
+/// la signature famille/modele/stepping tranche sans interpretation.
+pub fn cpu_signature() -> (u32, u32, u32, u32) {
+    let eax = unsafe { __cpuid(1) }.eax;
+    let stepping = eax & 0xf;
+    let base_model = (eax >> 4) & 0xf;
+    let base_family = (eax >> 8) & 0xf;
+    let ext_model = (eax >> 16) & 0xf;
+    let ext_family = (eax >> 20) & 0xff;
+    let family = if base_family == 0xf { base_family + ext_family } else { base_family };
+    let model = if base_family == 0x6 || base_family == 0xf {
+        (ext_model << 4) | base_model
+    } else {
+        base_model
+    };
+    (family, model, stepping, eax)
+}
+
 fn logical_cpus_reported() -> u32 {
     let max = unsafe { __cpuid(0) }.eax;
     if max < 1 {

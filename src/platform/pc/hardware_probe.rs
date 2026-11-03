@@ -118,6 +118,15 @@ pub fn run(boot: &'static BootInfo, framebuffer: FramebufferInfo) {
     let _ = writeln!(hardware, "BOUCHAUD OS PHYSICAL HARDWARE PROBE V1");
     let _ = writeln!(hardware, "cpu.brand={}", metrics.cpu_brand);
     let _ = writeln!(hardware, "cpu.vendor={}", metrics.cpu_vendor);
+    let (famille, modele, stepping, signature) =
+        crate::platform::pc::reference_metrics::cpu_signature();
+    let _ = writeln!(hardware, "cpu.family={:#x}", famille);
+    let _ = writeln!(hardware, "cpu.model={:#x}", modele);
+    let _ = writeln!(hardware, "cpu.stepping={}", stepping);
+    let _ = writeln!(hardware, "cpu.signature_eax={:#010x}", signature);
+    crate::serial_println!(
+        "BOUCHAUD_HWPROBE_CPUID brand=\"{}\" family={:#x} model={:#x} stepping={} eax={:#010x}",
+        metrics.cpu_brand, famille, modele, stepping, signature);
     let _ = writeln!(hardware, "cpu.logical_reported={}", metrics.logical_cpus_reported);
     let _ = writeln!(hardware, "cpu.tsc_mhz={}", metrics.tsc_mhz.unwrap_or(0));
     let _ = writeln!(hardware, "memory.usable_bytes={}", metrics.usable_memory_bytes);

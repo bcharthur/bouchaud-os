@@ -1,0 +1,530 @@
+[
+  {
+    "script": "prepare-browser-source.py",
+    "ordre_ligne": 37,
+    "applique": true,
+    "octets": 4269,
+    "fichiers_upstream": [
+      "AK/Platform.h",
+      "Meta/CMake/compile_options.cmake",
+      "Services/WebContent/CMakeLists.txt"
+    ],
+    "ancres_bouchaud": 4,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-m9-source.py",
+    "ordre_ligne": 38,
+    "applique": true,
+    "octets": 7345,
+    "fichiers_upstream": [
+      "Libraries/LibRequests/Request.cpp",
+      "Libraries/LibRequests/RequestClient.cpp"
+    ],
+    "ancres_bouchaud": 4,
+    "marqueurs_emis": 6,
+    "marqueurs_verifies_ci": 1,
+    "exemples_verifies": [
+      "M9_BODY_DRAIN_DONE"
+    ],
+    "categorie_proposee": "TEMPORARY",
+    "signaux": [
+      "nom=jalon_date"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-m9-diagnostics.py",
+    "ordre_ligne": 39,
+    "applique": true,
+    "octets": 16845,
+    "fichiers_upstream": [
+      "Libraries/LibRequests/Request.cpp",
+      "Services/RequestServer/ConnectionFromClient.cpp",
+      "Services/RequestServer/Request.cpp"
+    ],
+    "ancres_bouchaud": 5,
+    "marqueurs_emis": 15,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-m16-dns.py",
+    "ordre_ligne": 40,
+    "applique": true,
+    "octets": 11196,
+    "fichiers_upstream": [
+      "Libraries/LibDNS/Resolver.h"
+    ],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 11,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-dns-une-question.py",
+    "ordre_ligne": 41,
+    "applique": true,
+    "octets": 4800,
+    "fichiers_upstream": [
+      "Libraries/LibDNS/Resolver.h",
+      "Services/RequestServer/ConnectionFromClient.cpp",
+      "Services/RequestServer/Request.cpp"
+    ],
+    "ancres_bouchaud": 0,
+    "marqueurs_emis": 5,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-fonts-systeme.py",
+    "ordre_ligne": 42,
+    "applique": true,
+    "octets": 3143,
+    "fichiers_upstream": [
+      "Services/WebContent/main.cpp"
+    ],
+    "ancres_bouchaud": 1,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-v16-fonts.py",
+    "ordre_ligne": 43,
+    "applique": true,
+    "octets": 8149,
+    "fichiers_upstream": [
+      "Libraries/LibGfx/Font/PathFontProvider.cpp",
+      "Libraries/LibWeb/Platform/FontPlugin.cpp",
+      "Services/WebContent/main.cpp"
+    ],
+    "ancres_bouchaud": 4,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-tls-diagnostic.py",
+    "ordre_ligne": 44,
+    "applique": true,
+    "octets": 8326,
+    "fichiers_upstream": [
+      "Services/RequestServer/Request.cpp",
+      "Services/RequestServer/Request.h"
+    ],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-browser-runtime-link.py",
+    "ordre_ligne": 45,
+    "applique": true,
+    "octets": 11026,
+    "fichiers_upstream": [
+      "Libraries/LibWebView/Utilities.cpp",
+      "Services/Compositor/CMakeLists.txt",
+      "Services/ImageDecoder/CMakeLists.txt",
+      "Services/RequestServer/CMakeLists.txt",
+      "Services/WebContent/CMakeLists.txt",
+      "Services/WebDriver/CMakeLists.txt",
+      "Services/WebWorker/CMakeLists.txt"
+    ],
+    "ancres_bouchaud": 6,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-sandbox-bouchaud.py",
+    "ordre_ligne": 46,
+    "applique": true,
+    "octets": 2122,
+    "fichiers_upstream": [],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-audio-bouchaud.py",
+    "ordre_ligne": 47,
+    "applique": true,
+    "octets": 2560,
+    "fichiers_upstream": [
+      "Libraries/LibMedia/Audio/PlaybackStreamBouchaud.cpp",
+      "Libraries/LibMedia/CMakeLists.txt",
+      "Meta/CMake/audio.cmake"
+    ],
+    "ancres_bouchaud": 3,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-worker-terminate.py",
+    "ordre_ligne": 48,
+    "applique": true,
+    "octets": 8249,
+    "fichiers_upstream": [
+      "Libraries/LibWeb/DOM",
+      "Libraries/LibWeb/HTML"
+    ],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-compositor-lien.py",
+    "ordre_ligne": 49,
+    "applique": true,
+    "octets": 34647,
+    "fichiers_upstream": [
+      "Libraries/LibCore/EventLoopImplementationUnix.cpp",
+      "Libraries/LibWebView",
+      "Services/Compositor",
+      "Services/WebContent"
+    ],
+    "ancres_bouchaud": 10,
+    "marqueurs_emis": 20,
+    "marqueurs_verifies_ci": 6,
+    "exemples_verifies": [
+      "[LB:COMPOSITOR_STATE] seq",
+      "[LB] COMPOSITOR_LINK_GIVE_UP",
+      "[LB] CONTEXT_DESTROY"
+    ],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-control-channel-diagnostics.py",
+    "ordre_ligne": 50,
+    "applique": true,
+    "octets": 11357,
+    "fichiers_upstream": [
+      "Libraries/LibIPC/Connection.cpp",
+      "Libraries/LibIPC/Connection.h",
+      "Libraries/LibIPC/ConnectionFromClient.h",
+      "Libraries/LibIPC/TransportSocket.cpp",
+      "Libraries/LibIPC/TransportSocket.h",
+      "Libraries/LibWebView/CompositorClient.cpp",
+      "Services/Compositor/ConnectionFromClient.cpp"
+    ],
+    "ancres_bouchaud": 1,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-compositor-memoire.py",
+    "ordre_ligne": 51,
+    "applique": true,
+    "octets": 8164,
+    "fichiers_upstream": [
+      "Services/Compositor"
+    ],
+    "ancres_bouchaud": 3,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 1,
+    "exemples_verifies": [
+      "[LB:MEM] ev"
+    ],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-echange-processus.py",
+    "ordre_ligne": 52,
+    "applique": true,
+    "octets": 30698,
+    "fichiers_upstream": [
+      "Libraries/LibGC/BlockAllocator.cpp",
+      "Libraries/LibGC/Heap.cpp",
+      "Libraries/LibGC/HeapBlock.cpp",
+      "Libraries/LibGC/HeapBlock.h",
+      "Libraries/LibJS/Console.h",
+      "Libraries/LibRequests/Request.cpp",
+      "Libraries/LibWeb/DOM/Document.cpp",
+      "Libraries/LibWeb/HTML/LocalTraversableNavigable.cpp",
+      "Libraries/LibWeb/HTML/LocalTraversableNavigable.h",
+      "Libraries/LibWeb/Page/Page.cpp",
+      "Libraries/LibWeb/Page/Page.h",
+      "Libraries/LibWebView/ViewImplementation.cpp",
+      "Services/WebContent/ConnectionFromClient.cpp",
+      "Services/WebContent/ConnectionFromClient.h",
+      "Services/WebContent/PageClient.cpp",
+      "Services/WebContent/PageHost.cpp",
+      "Services/WebContent/PageHost.h",
+      "Services/WebContent/WebContentServer.ipc"
+    ],
+    "ancres_bouchaud": 17,
+    "marqueurs_emis": 14,
+    "marqueurs_verifies_ci": 2,
+    "exemples_verifies": [
+      "[LB:PAGE_STATE] pid",
+      "[LB] PAGE_DISCARD"
+    ],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-c22-partitions.py",
+    "ordre_ligne": 73,
+    "applique": true,
+    "octets": 9035,
+    "fichiers_upstream": [
+      "AK/kmalloc.cpp",
+      "Libraries/LibWeb/DOM/Document.cpp"
+    ],
+    "ancres_bouchaud": 8,
+    "marqueurs_emis": 2,
+    "marqueurs_verifies_ci": 2,
+    "exemples_verifies": [
+      "[LB:C22] collecte",
+      "[LB:C22] document_destroy"
+    ],
+    "categorie_proposee": "UPSTREAMABLE",
+    "signaux": [
+      "nom=correctif_generique"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-gc-retention-proof.py",
+    "ordre_ligne": 74,
+    "applique": true,
+    "octets": 14072,
+    "fichiers_upstream": [
+      "Libraries/LibWeb/Layout/Node.cpp",
+      "Libraries/LibWeb/Platform/Timer.cpp",
+      "Services/WebContent/PageHost",
+      "Services/WebContent/PageHost.cpp"
+    ],
+    "ancres_bouchaud": 4,
+    "marqueurs_emis": 2,
+    "marqueurs_verifies_ci": 2,
+    "exemples_verifies": [
+      "[LB:GC_PATH] pid",
+      "[LB:GC_SUMMARY] pid"
+    ],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-cache-journal.py",
+    "ordre_ligne": 75,
+    "applique": true,
+    "octets": 5723,
+    "fichiers_upstream": [
+      "Libraries/LibHTTP/Cache"
+    ],
+    "ancres_bouchaud": 1,
+    "marqueurs_emis": 6,
+    "marqueurs_verifies_ci": 2,
+    "exemples_verifies": [
+      "[LB] HIT",
+      "[LB] STORE"
+    ],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-libjs-valeur-diagnostic.py",
+    "ordre_ligne": 78,
+    "applique": true,
+    "octets": 3019,
+    "fichiers_upstream": [
+      "Libraries/LibJS/Runtime/Value.cpp"
+    ],
+    "ancres_bouchaud": 1,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "DIAGNOSTIC",
+    "signaux": [
+      "nom=diagnostic"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-full-browser-host.py",
+    "ordre_ligne": 79,
+    "applique": true,
+    "octets": 20987,
+    "fichiers_upstream": [
+      "Libraries/LibCore/Platform/ProcessStatisticsLinux.cpp",
+      "Libraries/LibCore/Process.cpp",
+      "Libraries/LibWebView/Utilities.cpp",
+      "Libraries/LibWebView/WebContentClient.cpp",
+      "Libraries/LibWebView/WorkerProcessManager.cpp",
+      "Services/WebWorker/main.cpp"
+    ],
+    "ancres_bouchaud": 8,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-network-live.py",
+    "ordre_ligne": 95,
+    "applique": true,
+    "octets": 5576,
+    "fichiers_upstream": [
+      "Services/RequestServer/BouchaudResolver.h",
+      "Services/RequestServer/ConnectionFromClient.cpp",
+      "Services/RequestServer/Request.cpp",
+      "Services/WebContent/ConnectionFromClient.cpp",
+      "Services/WebContent/main.cpp"
+    ],
+    "ancres_bouchaud": 8,
+    "marqueurs_emis": 0,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-ui-bouchaud.py",
+    "ordre_ligne": 96,
+    "applique": true,
+    "octets": 3629,
+    "fichiers_upstream": [
+      "Services/CMakeLists.txt",
+      "Services/WebContent",
+      "UI/Bouchaud"
+    ],
+    "ancres_bouchaud": 3,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "PLATFORM",
+    "signaux": [
+      "nom=integration_plateforme"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-m13-dns-diagnostics.py",
+    "ordre_ligne": null,
+    "applique": false,
+    "octets": 11454,
+    "fichiers_upstream": [
+      "Libraries/LibDNS/Resolver.h"
+    ],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 19,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "OBSOLETE",
+    "signaux": [
+      "hors_chaine: instrumentation M13 remplacee par prepare-m16-dns.py (AUDIT_PREPARATEURS.md)"
+    ],
+    "statut": "a confirmer"
+  },
+  {
+    "script": "prepare-m14-dns-retry-fix.py",
+    "ordre_ligne": null,
+    "applique": false,
+    "octets": 3363,
+    "fichiers_upstream": [
+      "Libraries/LibDNS/Resolver.h"
+    ],
+    "ancres_bouchaud": 2,
+    "marqueurs_emis": 1,
+    "marqueurs_verifies_ci": 0,
+    "exemples_verifies": [],
+    "categorie_proposee": "OBSOLETE",
+    "signaux": [
+      "hors_chaine: retransmission LibDNS M14, plus appliquee depuis M16 (AUDIT_PREPARATEURS.md)"
+    ],
+    "statut": "a confirmer"
+  }
+]

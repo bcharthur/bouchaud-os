@@ -271,6 +271,23 @@ fn gate_native(number: u64, args: [u64; 6]) -> GateDecision {
         return GateDecision::Return(NativeError::AccessDenied.neg());
     }
 
+    // BOUCHAUD_NATIVE_PROCESS_SPAWN_V1 : lancer un fils AVEC des handles est
+    // un transfert de capacites, soumis a la meme porte qu'un envoi sur canal.
+    // Le droit de lancer tout court est verifie plus loin, sur le chemin
+    // d'exec, par `execution::authorize_node` (profil de l'APPELANT).
+    if number == crate::kernel::native::abi::numbers::PROCESS_SPAWN
+        && args[3] != 0
+        && !security.capabilities.contains(Capabilities::IPC_TRANSFER)
+    {
+        audit::deny(
+            security.pid,
+            security.credentials.euid,
+            "native-spawn-handle-transfer",
+            args[3],
+        );
+        return GateDecision::Return(NativeError::AccessDenied.neg());
+    }
+
     if number == crate::kernel::native::abi::numbers::HANDLE_DUP
         && args[1] as u32 & crate::kernel::native::abi::Rights::TRANSFER.0 != 0
         && !security.capabilities.contains(Capabilities::IPC_TRANSFER)

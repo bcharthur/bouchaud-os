@@ -105,6 +105,10 @@ threads_before={} threads_after=0 reason=dernier_thread",
         // eof-avant-recolte 0/10, racine-avant-descendants 0/5, a tous les
         // SMP). Les objets eux-memes vivent tant qu'un autre les tient.
         ferme_descripteurs(&current().process);
+        // BOUCHAUD_NATIVE_HANDLES_A_LA_MORT_V1 : meme regle pour les handles
+        // natifs, puis le fait de la mort pour les objets Process qui la
+        // surveillent.
+        libere_natif_a_la_mort(current().process.pid, code);
         // P18_SERVICE_GUARDIAN_V1. Hors du verrou lifecycle: aucune
         // serialisation, allocation ou relance sous le verrou de sortie.
         let process = &current().process;
@@ -1042,6 +1046,25 @@ fn releve_global_du() -> bool {
 ///
 /// BOUCHAUD_EOF_HORS_CLOSE_V1 : le reveil ne passe plus par le SIGCHLD du
 /// pere -- un orphelin n'en a pas, et son lecteur attendait sans fin.
+/// BOUCHAUD_NATIVE_HANDLES_A_LA_MORT_V1
+///
+/// La table de handles natifs d'un processus n'etait JAMAIS liberee a sa
+/// mort : `registry::release_process` n'avait aucun appelant, et seule la
+/// maintenance opportuniste -- une fois toutes les 256 syscalls natives, de
+/// N'IMPORTE QUEL processus -- finissait par la reclamer. Un canal dont le
+/// detenteur etait mort ne montrait donc PEER_CLOSED a son pair qu'au gre de
+/// l'activite native du reste de la machine : sur une machine calme, jamais.
+/// C'est exactement le defaut que BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 a corrige
+/// pour les tubes ; la regle est la meme.
+///
+/// Ordre : liberer les handles (les pairs voient PEER_CLOSED), puis publier
+/// la mort aux objets Process (TERMINATED). Un superviseur qui voit
+/// TERMINATED voit donc deja les canaux du mort fermes.
+fn libere_natif_a_la_mort(pid: u32, code: i32) {
+    crate::kernel::native::handle::registry::release_process(pid);
+    crate::kernel::native::process::note_exit(pid, code);
+}
+
 pub fn ferme_descripteurs(process: &Arc<Process>) {
     let fermes = process.files.lock().prend_tout();
     crate::kernel::fd::ferme_hors_verrou(fermes.into_iter().flatten());
@@ -1125,6 +1148,7 @@ pub fn tue_processus(pid: u32, code: i32) {
             // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : meme regle qu'une sortie
             // volontaire -- fermer avant de prevenir le parent.
             ferme_descripteurs(&process);
+            libere_natif_a_la_mort(pid, code);
             notify_parent_of_exit_for(process.parent);
         }
     }

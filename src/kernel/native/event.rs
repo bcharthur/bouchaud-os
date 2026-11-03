@@ -14,7 +14,9 @@ impl Event {
 
     pub fn signal(&self) -> u64 {
         self.signaled.store(true, Ordering::Release);
-        self.sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        super::activite::publie();
+        sequence
     }
 
     pub fn reset(&self) -> u64 {

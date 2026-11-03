@@ -30,11 +30,27 @@ pub fn print_table() {
 
 /// Cree un processus vide (espace d'adressage neuf, descripteurs standards).
 pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
+    let uid = crate::users::session().uid() as u32;
+    new_process_avec(name, cwd, 0, uid, uid)
+}
+
+/// Meme chose, pour un FILS explicite : parent et identite fixes par
+/// l'appelant.
+///
+/// BOUCHAUD_NATIVE_SPAWN_FILIATION_V1 : un processus lance par
+/// `bo_process_spawn` est le fils de celui qui le lance, avec SON uid/gid --
+/// pas l'uid de session. Sinon un processus ayant abaisse son uid lancerait
+/// un fils avec l'identite de la session (root) : une elevation de
+/// privileges par simple lancement. La filiation est aussi ce qui permet a
+/// `security::policy::inherit` de confiner le fils comme apres fork+exec.
+pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
+    -> Option<Arc<Process>>
+{
     let space = AddressSpace::new()?;
-    let pid = crate::kernel::process::spawn(name, crate::users::session().uid());
+    let pid = crate::kernel::process::spawn(name, uid.min(u16::MAX as u32) as u16);
     let process = Arc::new(Process {
         pid,
-        parent: 0,
+        parent,
         resource_group_id: pid,
         resource_group_name: name.to_string(),
         mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
@@ -42,8 +58,8 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
             limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
-            uid: crate::users::session().uid() as u32,
-            gid: crate::users::session().uid() as u32, ecran: None }),
+            uid,
+            gid, ecran: None }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
         temps_recycle: TempsRecycle::neuf(),

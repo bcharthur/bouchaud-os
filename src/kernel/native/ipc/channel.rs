@@ -42,6 +42,16 @@ impl ChannelEndpoint {
     #[inline]
     fn peer(&self) -> usize { 1 - self.side }
 
+    /// Les deux extremites appartiennent-elles au MEME canal ?
+    ///
+    /// BOUCHAUD_NATIVE_CANAL_SANS_CYCLE_V1 : une extremite envoyee dans son
+    /// propre canal finit dans une file que le canal possede ; la file tient
+    /// l'extremite qui tient l'etat qui tient la file. Rien n'est plus jamais
+    /// libere, et le pair ne verra jamais PEER_CLOSED. L'envoi est refuse.
+    pub fn same_channel(&self, other: &ChannelEndpoint) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     pub fn send(&self, message: Message) -> Result<usize> {
         let bytes = message.bytes.len();
         let target = self.peer();
@@ -56,6 +66,8 @@ impl ChannelEndpoint {
 
         state.queued_bytes[target] += bytes;
         state.queues[target].push_back(message);
+        drop(state);
+        crate::kernel::native::activite::publie();
         Ok(bytes)
     }
 
@@ -82,10 +94,13 @@ impl ChannelEndpoint {
     }
 
     pub fn requeue_front(&self, message: Message) {
-        let mut state = self.state.inner.lock();
-        state.queued_bytes[self.side] =
-            state.queued_bytes[self.side].saturating_add(message.bytes.len());
-        state.queues[self.side].push_front(message);
+        {
+            let mut state = self.state.inner.lock();
+            state.queued_bytes[self.side] =
+                state.queued_bytes[self.side].saturating_add(message.bytes.len());
+            state.queues[self.side].push_front(message);
+        }
+        crate::kernel::native::activite::publie();
     }
 
     pub fn signals(&self) -> Signals {
@@ -105,7 +120,11 @@ impl ChannelEndpoint {
 
 impl Drop for ChannelEndpoint {
     fn drop(&mut self) {
-        let mut state = self.state.inner.lock();
-        state.closed[self.side] = true;
+        {
+            let mut state = self.state.inner.lock();
+            state.closed[self.side] = true;
+        }
+        // Le pair voit PEER_CLOSED : c'est une montee de signal.
+        crate::kernel::native::activite::publie();
     }
 }

@@ -1,26 +1,44 @@
-# État courant — relevé GitHub du 2026-11-02
+# État courant — relevé du 2026-11-03
 
 ```text
-BOUCHAUD_CURRENT_HEAD=ba4244fea53434de84ce532bf9f6d7ae5a95342e
-DATE=2026-11-02
-MAIN_PROTECTED=false
-OPEN_PRS=0
-ACTIVE_BRANCHES=6
-LAST_FULL_GREEN_SHA=UNKNOWN
-CURRENT_BLOCKING_RED=UNKNOWN (aucun échec confirmé sur le HEAD au relevé)
+MAIN_HEAD=c1e55da99dcc411f45ee68ebd285d91205f82067   (runtime identique à 5c3cd43a ; diff = docs + CI)
+CANDIDAT_CAP_A=c1e55da (main, figé pendant les campagnes)
+BRANCHE_TRAVAIL=claude/cap-stable-platform-20261103
+MAIN_PROTECTED=false   (ruleset prêt : tools/github/ruleset-main.json, non appliqué : pas d'API d'administration dans la session)
+BASELINE=NOT_ESTABLISHED
+P13=PARTIAL — BLOQUÉ : aucun runner self-hosted bouchaud-kvm4 / bouchaud-kvm8
+PHYSICAL=PHYSICAL_PENDING (protocole : TRIGKEY_CAMPAIGN.md)
 ```
 
-**Ce HEAD est le dernier commit GitHub observé AVANT création de la branche de préparation.** CI Fast `41534263901` et Reliability V3 `41534263911` y sont désormais `success`; cela ne constitue toujours pas une qualification globale P13/Nightly/PHYSICAL. En présence d'une nouvelle poussée, ce tableau est obsolète et doit être régénéré par inspection des Actions.
+Source machine : [status.json](status.json) — **instantané, pas mis à jour automatiquement.**
 
-- Branche par défaut : `main`. Commit du HEAD : `chore(ci): remove completed one-shot cleanup workflow after verified branch prune`; parent `ae24afad871ff78e6e260dd0f18ff1d36e255c51`; date du commit : 2026-11-02T22:05:55Z.
-- **Protection de main : NON**, information signalée P0 de processus. Ne pas travailler directement sur main.
-- Branches observées : `main`, `chatgpt/active`, `fix/nightly-ladybird-artifact-20261101`, `fix/proc-processus-snapshot-kvm-20261101`, et deux `backup/main-before-*`. Les deux PR de fix sont **fermées** lors de ce relevé ; leurs branches ne sont pas pour autant intégrées.
-- PR ouvertes : 0 au relevé initial (la PR de cette préparation s'ajoutera).
-- C22 : **CLOSED_AT_KVM** pour son contrat candidat 6/6 seulement. Le run PR `41518023294` référence le head source `5c3cd43a7a2a1c258388f9a81967abecdce51068`, mais le job a exécuté le checkout/merge SHA synthétique `84105df8bf1ca1cf31cb8da6eaab50e43a96383d` ; mémoire 6/6, croissance M2−M1 de 144 à 164 Kio sous le plafond 1024 Kio. Ce n'est donc pas une preuve « main same-SHA » au sens strict. Deux campagnes locales 6/6 supplémentaires rapportées par le mainteneur. Pas de validation PHYSICAL.
-- P13 : **PARTIAL** ; primitives et sous-composants historiquement verts, mais absence de `P13_FINAL_STRICT_OK` sur le HEAD actuel avec KVM4 dédié, KVM8 dédié, SMP8 30 minutes, Nightly et SHA unique. Ne pas transposer des verts sur un autre commit.
-- Nightly Full : dernier échec connu sur ancien `main` (`41424125876`), et run vert sur ancien candidat V26 (`41475434027`) — **aucun Nightly vert prouvé sur le HEAD actuel**.
-- Livraison : la documentation et les workflows de la branche de préparation ne sont pas fusionnés sur `main`.
+## Candidat `main@c1e55da` — preuves same-SHA
 
-La propriété **LAST_FULL_GREEN_SHA=UNKNOWN** est volontaire : CI Fast/Integration/Reliability verts sur `b8436617` (runs 41532849519 / 41532849374 / 41532849530), mais cela n'est pas une qualification globale P13/Nightly/physique.
+| Gate | Run | Résultat | Remarque |
+|---|---:|---|---|
+| CI Fast | 41539949788 | PASS | push main |
+| Integration | 41539949905 | PASS | push main |
+| Reliability V3 | 41539949936 | PASS | push main |
+| Native IPC | 41592664152 | PASS | dispatch same-SHA |
+| Security Runtime | 41592667159 | PASS | dispatch same-SHA |
+| Nightly Full | 41592645380 | PASS | 9/9 jobs exécutés, smoke Ladybird produit + provenance artefact (run 41530447823, empreinte d'entrées) |
+| Ladybird qualification (C22 6×6, primitives P13 strictes, convergence) | 41592642065 | EN COURS au relevé | |
+| Endurance (tranches 90 min) | 41592677703 | EN COURS au relevé | |
+| C5 KVM (témoin rouge / fenêtre / image ×24) | 41596509318 | EN COURS au relevé | revue statique : [C5_REVIEW_2026-11-03.md](C5_REVIEW_2026-11-03.md) |
+| P13 final (KVM4 ×3 campagnes + KVM8 30 min) | — | **NON EXÉCUTABLE** | 4 runs antérieurs annulés après 24 h en file : runners absents |
+| PHYSICAL Trigkey | — | PENDING | intervention humaine |
 
-Lire [CI_AND_PROOFS.md](CI_AND_PROOFS.md) pour les preuves et limites.
+**Run Ladybird 41530447823 (push `5c3cd43a`) : FAIL non produit.** Seul job rouge : « piège du Compositor (diagnostic) », terminé à 6 min avec l'étape encore `in_progress`, étape `always()` des journaux jamais exécutée, journaux 404 → perte du runner (infrastructure). Même arbre vert en 20 min (run PR 41518023294). Classé **NON_QUALIFIANT**, ni PASS ni défaut produit ; rejoué par la qualification 41592642065.
+
+## Ce qui a changé sur la branche de travail (2026-11-03)
+
+- **Défaut sécurité corrigé** : un programme ring 3 non privilégié faisait paniquer le noyau en 2 appels (waitset qui se surveille → `SpinLock recursive acquisition`). Reproduit en TCG, corrigé, test permanent.
+- **Défaut cycle de vie corrigé** : les handles natifs d'un processus mort n'étaient jamais libérés à sa mort (`PEER_CLOSED` dépendant de l'activité du reste de la machine).
+- **ABI native 1.1** ([NATIVE_ABI.md](NATIVE_ABI.md)) : spawn filié et confiné, objet Process, attente bloquante, temps.
+- **Premier service ring 3 supervisé** (`healthd` + `serviced`) : crash réel, hang, budget, arrêt, aucune fuite ; SMP1/2/4/8 TCG + CI.
+- **SDK natif** `userland/libs/bouchaud-sdk` (en-tête unique vérifié contre le noyau).
+- **Mise à jour A/B** prouvée sur hôte ([UPDATE_RECOVERY.md](UPDATE_RECOVERY.md)), non branchée au chargeur.
+- **Image Trigkey traçable** + signature CPUID ; protocole physique exact.
+- **Matrice Ladybird générée** ([../ladybird/PATCH_MATRIX.md](../ladybird/PATCH_MATRIX.md)).
+
+Ces changements **ne font pas partie du candidat** `c1e55da` : ils seront qualifiés sur leur propre SHA après fusion.

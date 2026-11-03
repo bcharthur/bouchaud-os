@@ -28,11 +28,19 @@ pub const WAITSET_CREATE: u64 = NATIVE_BASE + 0x30;
 pub const WAITSET_ADD: u64 = NATIVE_BASE + 0x31;
 pub const WAITSET_REMOVE: u64 = NATIVE_BASE + 0x32;
 pub const WAITSET_POLL: u64 = NATIVE_BASE + 0x33;
+/// Attente BLOQUANTE, level-triggered, avec echeance (ABI 1.1).
+pub const WAITSET_WAIT: u64 = NATIVE_BASE + 0x34;
 
 pub const SHM_CREATE: u64 = NATIVE_BASE + 0x40;
 pub const SHM_SIZE: u64 = NATIVE_BASE + 0x41;
 pub const SHM_READ: u64 = NATIVE_BASE + 0x42;
 pub const SHM_WRITE: u64 = NATIVE_BASE + 0x43;
+
+pub const PROCESS_SPAWN: u64 = NATIVE_BASE + 0x50;
+pub const PROCESS_INFO: u64 = NATIVE_BASE + 0x51;
+pub const PROCESS_KILL: u64 = NATIVE_BASE + 0x52;
+
+pub const TIME_NOW: u64 = NATIVE_BASE + 0x60;
 
 #[inline]
 pub const fn is_native(number: u64) -> bool {
@@ -58,10 +66,15 @@ pub const fn name(number: u64) -> &'static str {
         WAITSET_ADD => "bo_waitset_add",
         WAITSET_REMOVE => "bo_waitset_remove",
         WAITSET_POLL => "bo_waitset_poll",
+        WAITSET_WAIT => "bo_waitset_wait",
         SHM_CREATE => "bo_shm_create",
         SHM_SIZE => "bo_shm_size",
         SHM_READ => "bo_shm_read",
         SHM_WRITE => "bo_shm_write",
+        PROCESS_SPAWN => "bo_process_spawn",
+        PROCESS_INFO => "bo_process_info",
+        PROCESS_KILL => "bo_process_kill",
+        TIME_NOW => "bo_time_now",
         _ => "bo_unknown",
     }
 }
