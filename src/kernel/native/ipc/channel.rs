@@ -42,6 +42,16 @@ impl ChannelEndpoint {
     #[inline]
     fn peer(&self) -> usize { 1 - self.side }
 
+    /// Les deux extremites appartiennent-elles au MEME canal ?
+    ///
+    /// BOUCHAUD_NATIVE_CANAL_SANS_CYCLE_V1 : une extremite envoyee dans son
+    /// propre canal finit dans une file que le canal possede ; la file tient
+    /// l'extremite qui tient l'etat qui tient la file. Rien n'est plus jamais
+    /// libere, et le pair ne verra jamais PEER_CLOSED. L'envoi est refuse.
+    pub fn same_channel(&self, other: &ChannelEndpoint) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     pub fn send(&self, message: Message) -> Result<usize> {
         let bytes = message.bytes.len();
         let target = self.peer();

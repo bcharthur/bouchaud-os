@@ -92,6 +92,15 @@ fn channel_send_avec_masques(args: [u64; 6], masques_ptr: u64) -> Result<u64> {
     for (index, id) in ids.iter().enumerate() {
         let masque = masques.get(index).copied().unwrap_or(Rights::TOUS);
         let entry = table.export(*id, masque)?;
+        // BOUCHAUD_NATIVE_CANAL_SANS_CYCLE_V1 : ni l'extremite emettrice, ni
+        // son pair, ne traversent leur propre canal (cycle de references).
+        if let (Object::Channel(sender), Object::Channel(moved)) =
+            (endpoint.object.as_ref(), entry.object.as_ref())
+        {
+            if sender.same_channel(moved) {
+                return Err(Error::InvalidArgument);
+            }
+        }
         transferred.push(TransferredHandle { object: entry.object, rights: entry.rights });
     }
 
