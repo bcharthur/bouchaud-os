@@ -166,6 +166,10 @@ jobs:
           # secteurs dechires, coupure a chaque frontiere (§8), mutations.
           rustc --edition 2021 --test tools/update/test_durabilite.rs -o target-test-durabilite
           ./target-test-durabilite
+          # Passage chargeur -> noyau et decision de commit de sante : le
+          # noyau ne confirme que le slot que le chargeur a REELLEMENT booste.
+          rustc --edition 2021 --test tools/update/test_passage.rs -o target-test-passage
+          ./target-test-passage
       - name: SDK natif et contrat ABI (statique + compilation)
         run: |
           python3 tools/verifie-contrat-abi-v1.py
@@ -175,6 +179,7 @@ jobs:
           $B target/sdk/serviced userland/services/serviced/serviced.c
           $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
           $B target/sdk/native-process-probe userland/tests/native-process-probe.c
+          $B target/sdk/healthd-defaillant userland/tests/healthd-defaillant.c
 
   browser-engine:
     name: browser / engine tests

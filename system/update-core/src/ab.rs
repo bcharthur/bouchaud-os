@@ -197,7 +197,7 @@ impl Enregistrement {
 pub const OCTETS: usize = 96;
 const MAGIC: [u8; 8] = *b"BOAB0001";
 
-fn crc32(octets: &[u8]) -> u32 {
+pub(crate) fn crc32(octets: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &o in octets {
         crc ^= o as u32;
