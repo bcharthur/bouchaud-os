@@ -170,6 +170,11 @@ jobs:
           # noyau ne confirme que le slot que le chargeur a REELLEMENT booste.
           rustc --edition 2021 --test tools/update/test_passage.rs -o target-test-passage
           ./target-test-passage
+          # Chaine de confiance : Ed25519 + SHA-512 (no_std) contre RFC 8032 et
+          # OpenSSL, manifeste canonique strict, cle de confiance -> signature
+          # -> empreinte. Cles generees au test, jamais stockees.
+          rustc --edition 2021 -O --test tools/update/test_signature.rs -o target-test-signature
+          ./target-test-signature
       - name: SDK natif et contrat ABI (statique + compilation)
         run: |
           python3 tools/verifie-contrat-abi-v1.py
