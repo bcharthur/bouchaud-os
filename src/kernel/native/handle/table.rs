@@ -104,19 +104,35 @@ impl HandleTable {
         Ok(entry)
     }
 
-    fn close_locked(inner: &mut Inner, id: HandleId) -> Result<()> {
+    fn close_locked(inner: &mut Inner, id: HandleId) -> Result<Entry> {
         let index = Self::index(id)?;
         let slot = inner.slots.get_mut(index).ok_or(Error::BadHandle)?;
-        if slot.generation != id.generation() || slot.entry.is_none() {
+        if slot.generation != id.generation() {
             return Err(Error::BadHandle);
         }
-        slot.entry = None;
+        let entry = slot.entry.take().ok_or(Error::BadHandle)?;
         inner.live = inner.live.saturating_sub(1);
+        Ok(entry)
+    }
+
+    /// Close one handle. The object reference is released AFTER the table
+    /// lock: a destructor (channel endpoint, process object reaping a zombie)
+    /// never runs under it.
+    pub fn close(&self, id: HandleId) -> Result<()> {
+        let entry = Self::close_locked(&mut self.inner.lock(), id)?;
+        drop(entry);
         Ok(())
     }
 
-    pub fn close(&self, id: HandleId) -> Result<()> {
-        Self::close_locked(&mut self.inner.lock(), id)
+    /// Close every handle (process death). Same rule: destructors run after
+    /// the lock is released.
+    pub fn clear(&self) {
+        let entries: Vec<Entry> = {
+            let mut inner = self.inner.lock();
+            inner.live = 0;
+            inner.slots.iter_mut().filter_map(|slot| slot.entry.take()).collect()
+        };
+        drop(entries);
     }
 
     pub fn duplicate(&self, id: HandleId, requested: Rights) -> Result<HandleId> {

@@ -25,8 +25,28 @@ pub fn table_for(pid: u32) -> Arc<HandleTable> {
     table
 }
 
+/// Drop a dead process' handle table.
+///
+/// The table is detached under the registry lock and dropped AFTER it: the
+/// objects it frees (channel endpoints, process objects that may reap a
+/// zombie) must never run their destructors under the registry lock.
 pub fn release_process(pid: u32) {
-    REGISTRY.lock().retain(|row| row.pid != pid);
+    let detached: Vec<Arc<HandleTable>> = {
+        let mut registry = REGISTRY.lock();
+        let mut out = Vec::new();
+        registry.retain(|row| {
+            if row.pid == pid {
+                out.push(Arc::clone(&row.table));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    };
+    for table in detached {
+        table.clear();
+    }
 }
 
 /// Opportunistic lifecycle reclamation.
@@ -44,7 +64,19 @@ pub fn maintenance() {
     let mut pids = Vec::with_capacity(alive.len());
     for process in alive { pids.push(process.pid); }
 
-    REGISTRY.lock().retain(|row| pids.iter().any(|pid| *pid == row.pid));
+    let detached: Vec<Arc<HandleTable>> = {
+        let mut registry = REGISTRY.lock();
+        let mut out = Vec::new();
+        registry.retain(|row| {
+            let alive = pids.iter().any(|pid| *pid == row.pid);
+            if !alive { out.push(Arc::clone(&row.table)); }
+            alive
+        });
+        out
+    };
+    for table in detached {
+        table.clear();
+    }
 }
 
 pub fn registered_processes() -> usize { REGISTRY.lock().len() }
