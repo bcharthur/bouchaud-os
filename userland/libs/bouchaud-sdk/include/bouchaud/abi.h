@@ -51,6 +51,10 @@ typedef unsigned long      bo_usize;
 #define BO_NR_TIME_NOW            (BO_NATIVE_BASE + 0x60)
 #define BO_NR_UPDATE_STATE        (BO_NATIVE_BASE + 0x70)
 #define BO_NR_UPDATE_COMMIT_HEALTH (BO_NATIVE_BASE + 0x71)
+#define BO_NR_UPDATE_INSTALL_BEGIN (BO_NATIVE_BASE + 0x72)
+#define BO_NR_UPDATE_INSTALL_WRITE (BO_NATIVE_BASE + 0x73)
+#define BO_NR_UPDATE_INSTALL_FINISH (BO_NATIVE_BASE + 0x74)
+#define BO_NR_UPDATE_INSTALL_VERIFY (BO_NATIVE_BASE + 0x75)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1

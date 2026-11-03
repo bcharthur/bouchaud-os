@@ -479,6 +479,48 @@ fn update_commit_health(args: [u64; 6]) -> Result<u64> {
     }
 }
 
+fn refus_install(r: crate::kernel::update::RefusInstall) -> Error {
+    match r {
+        crate::kernel::update::RefusInstall::Refuse(_) => Error::AccessDenied,
+        crate::kernel::update::RefusInstall::Argument(_) => Error::InvalidArgument,
+        // The device failed: reported as a fault of the operation.
+        crate::kernel::update::RefusInstall::Io(_) => Error::Fault,
+    }
+}
+
+fn update_install_begin(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let cible = match args[1] { 0 => bouchaud_update_core::Slot::A, 1 => bouchaud_update_core::Slot::B,
+                                _ => return Err(Error::InvalidArgument) };
+    crate::kernel::update::installation_commence(cible).map_err(refus_install)?;
+    Ok(0)
+}
+
+/// At most 1 MiB per call: bounded kernel copy.
+fn update_install_write(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let len = args[3] as usize;
+    if len == 0 || len > 1024 * 1024 { return Err(Error::TooLarge); }
+    let donnees = super::usercopy::read(args[2], len)?;
+    crate::kernel::update::installation_ecrit(args[1], &donnees).map_err(refus_install)?;
+    Ok(0)
+}
+
+fn update_install_verify(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    crate::kernel::update::installation_verifie(args[1]).map_err(refus_install)
+}
+
+fn update_install_finish(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let brut = super::usercopy::read(args[1], 32)?;
+    let mut empreinte = [0u8; 32];
+    empreinte.copy_from_slice(&brut);
+    let essais = u8::try_from(args[3]).map_err(|_| Error::InvalidArgument)?;
+    crate::kernel::update::installation_termine(empreinte, args[2], essais).map_err(refus_install)?;
+    Ok(0)
+}
+
 fn process_kill(args: [u64; 6]) -> Result<u64> {
     let entry = handle::current_table().lookup_kind(
         HandleId::from_raw(args[0]), Rights::SIGNAL, ObjectKind::Process
@@ -624,6 +666,10 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
 
         numbers::UPDATE_STATE => update_state(args),
         numbers::UPDATE_COMMIT_HEALTH => update_commit_health(args),
+        numbers::UPDATE_INSTALL_BEGIN => update_install_begin(args),
+        numbers::UPDATE_INSTALL_WRITE => update_install_write(args),
+        numbers::UPDATE_INSTALL_FINISH => update_install_finish(args),
+        numbers::UPDATE_INSTALL_VERIFY => update_install_verify(args),
 
         _ => Err(Error::InvalidCall),
     }

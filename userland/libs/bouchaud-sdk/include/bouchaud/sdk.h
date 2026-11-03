@@ -168,6 +168,20 @@ static inline bo_i64 bo_update_state(bo_handle_t cap, struct bo_update_state *ou
 /* 0: booted candidate committed (durable); 1: already the good active slot. */
 static inline bo_i64 bo_update_commit_health(bo_handle_t cap)
 { return bo__sys6(BO_NR_UPDATE_COMMIT_HEALTH, cap, 0, 0, 0, 0, 0); }
+/* Install into the INACTIVE slot (right UPDATE_INSTALL, updated only).
+ * write: offset and len block-aligned (4096 is always safe), len <= 1 MiB.
+ * finish: every byte must have been read back by verify; SHA-256 compared. */
+static inline bo_i64 bo_update_install_begin(bo_handle_t cap, bo_u32 target_slot)
+{ return bo__sys6(BO_NR_UPDATE_INSTALL_BEGIN, cap, target_slot, 0, 0, 0, 0); }
+static inline bo_i64 bo_update_install_write(bo_handle_t cap, bo_u64 off, const void *buf, bo_u64 len)
+{ return bo__sys6(BO_NR_UPDATE_INSTALL_WRITE, cap, off, (bo_u64)buf, len, 0, 0); }
+/* Read back the next chunk (<= 1 MiB) of the first `len` bytes into the
+ * kernel's running SHA-256; returns the bytes left (0: done). Call until 0,
+ * answering the supervisor in between, then finish. */
+static inline bo_i64 bo_update_install_verify(bo_handle_t cap, bo_u64 len)
+{ return bo__sys6(BO_NR_UPDATE_INSTALL_VERIFY, cap, len, 0, 0, 0, 0); }
+static inline bo_i64 bo_update_install_finish(bo_handle_t cap, const bo_u8 sha256[32], bo_u64 len, bo_u32 attempts)
+{ return bo__sys6(BO_NR_UPDATE_INSTALL_FINISH, cap, (bo_u64)sha256, len, attempts, 0, 0); }
 
 /* ---- console / exit (isolated Linux-compatible edge) ------------------- */
 
@@ -187,6 +201,14 @@ static inline void bo_puts(const char *s) { bo_write(s, bo_strlen(s)); }
 #define BO_WAIT_NOHANG 1
 static inline bo_i64 bo_posix_wait4(bo_i64 pid, int *status, int options)
 { return bo__sys6(61 /* wait4 */, (bo_u64)pid, (bo_u64)status, (bo_u64)(bo_i64)options, 0, 0, 0); }
+
+/* Minimal POSIX file access (x86_64 numbers). -errno on failure. */
+static inline bo_i64 bo_posix_open(const char *path, int flags)
+{ return bo__sys6(2 /* open */, (bo_u64)path, (bo_u64)(bo_i64)flags, 0, 0, 0, 0); }
+static inline bo_i64 bo_posix_read(bo_i64 fd, void *buf, bo_u64 len)
+{ return bo__sys6(0 /* read */, (bo_u64)fd, (bo_u64)buf, len, 0, 0, 0); }
+static inline bo_i64 bo_posix_close(bo_i64 fd)
+{ return bo__sys6(3 /* close */, (bo_u64)fd, 0, 0, 0, 0, 0); }
 
 void bo_put_i64(bo_i64 v);
 void bo_put_u64(bo_u64 v);

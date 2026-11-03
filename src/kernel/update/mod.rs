@@ -203,8 +203,9 @@ pub const DROITS_SUPERVISEUR: crate::kernel::native::abi::types::Rights =
             | crate::kernel::native::abi::types::Rights::TRANSFER.0,
     );
 
-/// Starts `/bin/serviced system` with ONE bootstrap handle: the update
-/// capability. No syscall creates that object; this is its only origin.
+/// Starts `/bin/serviced system` with two bootstrap handles: the health
+/// capability and the install capability. No syscall creates an Update
+/// object; this is its only origin.
 ///
 /// No supervisor in the slot -> nobody can declare health -> a candidate is
 /// never committed and the loader rolls it back. That is the intended,
@@ -217,12 +218,15 @@ pub fn lance_superviseur() -> Option<u32> {
     }
     let argv = [SUPERVISEUR.to_string(), "system".to_string()];
     let env = [String::from("PATH=/bin:/usr/bin")];
+    // Two capabilities: [0] health (kept by serviced), [1] install (passed
+    // on to updated, never used by serviced itself).
     let mut prepare = |process: &crate::kernel::task::Process| -> alloc::vec::Vec<String> {
-        match crate::kernel::native::handle::install_for(
-            process.pid, crate::kernel::native::object::Object::Update, DROITS_SUPERVISEUR,
-        ) {
-            Ok(id) => alloc::vec![alloc::format!("BO_BOOTSTRAP={}", id.raw())],
-            Err(_) => alloc::vec![],
+        use crate::kernel::native::{handle, object::Object};
+        let sante = handle::install_for(process.pid, Object::Update, DROITS_SUPERVISEUR);
+        let install = handle::install_for(process.pid, Object::Update, DROITS_INSTALLATION);
+        match (sante, install) {
+            (Ok(a), Ok(b)) => alloc::vec![alloc::format!("BO_BOOTSTRAP={},{}", a.raw(), b.raw())],
+            _ => alloc::vec![],
         }
     };
     match crate::kernel::exec::lance_detache(SUPERVISEUR, &argv, &env, 0, &mut prepare) {
@@ -236,3 +240,190 @@ pub fn lance_superviseur() -> Option<u32> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Installation into the INACTIVE slot (right UPDATE_INSTALL, held by updated)
+// ---------------------------------------------------------------------------
+//
+// Three steps, and nothing else reaches the disk:
+//   begin(target)      policy: commence_installation(target, running) -- the
+//                      running slot and the active slot are refused (I5, I6);
+//                      the slot becomes Empty on disk BEFORE any byte of it is
+//                      overwritten, so a cut mid-write never leaves a slot the
+//                      loader would boot;
+//   write(off, data)   block-aligned, bounded to THAT slot's partition: no
+//                      offset reaches META, the other slot or user data;
+//   verify(len)        real flush once, then read the slot back ONE CHUNK per
+//                      call into a running SHA-256 (a long readback in one
+//                      syscall starved the caller's heartbeats: QEMU bench);
+//   finish(sha, len)   all `len` bytes read back, SHA-256 must equal `sha`,
+//                      then marque_candidat.
+//
+// The session belongs to the process that called begin. Any other process
+// -- including a restarted updated -- must begin again; a write from a dead
+// owner's late syscall can no longer land in a new session (QEMU bench: a
+// killed updated's in-flight finish completed inside its successor's
+// session).
+
+/// Why an install step is refused (mapped to ABI errors by the dispatcher).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusInstall {
+    /// Policy or capability state: wrong slot, no begin, out of the slot.
+    Refuse(&'static str),
+    /// Malformed request (alignment, size).
+    Argument(&'static str),
+    /// The device failed (write, flush, read back).
+    Io(&'static str),
+}
+
+#[derive(Clone, Copy)]
+struct Installation {
+    proprietaire: u32,
+    /// Bytes already read back into VERIFICATION (0: not started).
+    verifie: u64,
+    cible: Slot,
+    volume: Volume,
+    taille_bloc: usize,
+    premier: u64,
+    octets: u64,
+}
+
+static INSTALLATION: SpinLock<Option<Installation>> = SpinLock::new(None);
+static VERIFICATION: SpinLock<Option<crate::net::security::tls::sha256::Sha256>> = SpinLock::new(None);
+
+fn appelant() -> u32 { crate::kernel::task::current_process().pid }
+
+/// The session, if the caller owns it.
+fn session() -> Result<Installation, RefusInstall> {
+    let inst = (*INSTALLATION.lock()).ok_or(RefusInstall::Refuse("sans_begin"))?;
+    if inst.proprietaire != appelant() { return Err(RefusInstall::Refuse("session_d_un_autre_processus")); }
+    Ok(inst)
+}
+
+fn note_refus(etape: &str, r: RefusInstall) -> RefusInstall {
+    let raison = match r { RefusInstall::Refuse(x) | RefusInstall::Argument(x) | RefusInstall::Io(x) => x };
+    crate::serial_println!("BOUCHAUD_UPDATE_INSTALL_REFUS etape={} raison={}", etape, raison);
+    r
+}
+
+pub fn installation_commence(cible: Slot) -> Result<(), RefusInstall> {
+    let r = (|| {
+        let p = passage().ok_or(RefusInstall::Refuse("sans_passage"))?;
+        let mut m = trouve_meta(&p).map_err(RefusInstall::Refuse)?;
+        let e = lit(&mut m).map_err(RefusInstall::Io)?;
+        // The policy, not this module, says which targets are acceptable.
+        let n = e.commence_installation(cible, p.slot).map_err(|refus| RefusInstall::Refuse(match refus {
+            uc::Refus::CibleEnCoursDExecution => "cible_en_cours_d_execution",
+            uc::Refus::CibleActive => "cible_active",
+            uc::Refus::CandidatEnCours => "candidat_en_cours",
+            _ => "etat_inattendu",
+        }))?;
+        let type_cible = guid_type(disque::type_du_slot(cible));
+        let (parts, _) = gpt::lit_table(&mut m.support).map_err(|_| RefusInstall::Io("gpt"))?;
+        let part = parts.iter().find(|x| x.type_guid == type_cible).ok_or(RefusInstall::Refuse("slot_introuvable"))?;
+        let inst = Installation {
+            proprietaire: appelant(), verifie: 0,
+            cible, volume: m.support.volume, taille_bloc: m.support.taille_bloc,
+            premier: part.premier, octets: part.blocs() * m.support.taille_bloc as u64,
+        };
+        persiste(&mut m, &n).map_err(RefusInstall::Io)?;
+        *VERIFICATION.lock() = None;
+        *INSTALLATION.lock() = Some(inst);
+        crate::serial_println!("BOUCHAUD_UPDATE_INSTALL_BEGIN cible={} octets={}", slot_texte(cible), inst.octets);
+        Ok(())
+    })();
+    r.map_err(|e| note_refus("begin", e))
+}
+
+pub fn installation_ecrit(decalage: u64, donnees: &[u8]) -> Result<(), RefusInstall> {
+    let r = (|| {
+        let inst = session()?;
+        let t = inst.taille_bloc as u64;
+        if donnees.is_empty() || decalage % t != 0 || donnees.len() as u64 % t != 0 {
+            return Err(RefusInstall::Argument("non_aligne"));
+        }
+        let fin = decalage.checked_add(donnees.len() as u64).ok_or(RefusInstall::Refuse("hors_slot"))?;
+        if fin > inst.octets { return Err(RefusInstall::Refuse("hors_slot")); }
+        let n = donnees.len() / inst.taille_bloc;
+        // Any write invalidates a readback in progress.
+        if let Some(i) = INSTALLATION.lock().as_mut() { i.verifie = 0; }
+        *VERIFICATION.lock() = None;
+        if bloc::ecrit(inst.volume, inst.premier + decalage / t, n, donnees).blocs() != n {
+            return Err(RefusInstall::Io("ecriture"));
+        }
+        Ok(())
+    })();
+    r.map_err(|e| note_refus("write", e))
+}
+
+/// Reads back the next chunk (at most 1 MiB) of the first `longueur` bytes
+/// of the target slot into the running SHA-256. Returns the bytes still to
+/// read back (0: done). The first call flushes the device.
+pub fn installation_verifie(longueur: u64) -> Result<u64, RefusInstall> {
+    let r = (|| {
+        let inst = session()?;
+        if longueur == 0 || longueur > inst.octets { return Err(RefusInstall::Argument("longueur")); }
+        if inst.verifie == 0 {
+            if !bloc::vidange(inst.volume) { return Err(RefusInstall::Io("vidange")); }
+            *VERIFICATION.lock() = Some(crate::net::security::tls::sha256::Sha256::new());
+        }
+        if inst.verifie >= longueur { return Ok(0); }
+        let t = inst.taille_bloc as u64;
+        let reste = longueur - inst.verifie;
+        let blocs = ((reste + t - 1) / t).min(1024 * 1024 / t) as usize;
+        let mut tampon = vec![0u8; blocs * inst.taille_bloc];
+        if bloc::lit(inst.volume, inst.premier + inst.verifie / t, blocs, &mut tampon).blocs() != blocs {
+            return Err(RefusInstall::Io("relecture"));
+        }
+        let utile = (tampon.len() as u64).min(reste) as usize;
+        {
+            let mut v = VERIFICATION.lock();
+            let h = v.as_mut().ok_or(RefusInstall::Refuse("verification_interrompue"))?;
+            h.update(&tampon[..utile]);
+        }
+        let mut g = INSTALLATION.lock();
+        let i = g.as_mut().filter(|i| i.proprietaire == inst.proprietaire)
+            .ok_or(RefusInstall::Refuse("session_perdue"))?;
+        i.verifie += utile as u64;
+        Ok(longueur - i.verifie)
+    })();
+    r.map_err(|e| note_refus("verify", e))
+}
+
+pub fn installation_termine(empreinte: [u8; 32], longueur: u64, essais: u8) -> Result<(), RefusInstall> {
+    let r = (|| {
+        let inst = session()?;
+        // Only what the DISK holds counts: every byte must have been read back.
+        if longueur == 0 || inst.verifie != longueur { return Err(RefusInstall::Refuse("relecture_incomplete")); }
+        // A refused finish (wrong digest) leaves the readback intact.
+        let relue = VERIFICATION.lock().as_ref().ok_or(RefusInstall::Refuse("relecture_incomplete"))?.clone().finalize();
+        let p = passage().ok_or(RefusInstall::Refuse("sans_passage"))?;
+        let mut m = trouve_meta(&p).map_err(RefusInstall::Refuse)?;
+        let e = lit(&mut m).map_err(RefusInstall::Io)?;
+        let n = e.marque_candidat(inst.cible, empreinte, relue, essais).map_err(|refus| RefusInstall::Refuse(match refus {
+            uc::Refus::ImageNonVerifiee => "empreinte_differente",
+            uc::Refus::EssaisNuls => "essais_nuls",
+            uc::Refus::CibleActive => "cible_active",
+            _ => "etat_inattendu",
+        }))?;
+        persiste(&mut m, &n).map_err(RefusInstall::Io)?;
+        *INSTALLATION.lock() = None;
+        *VERIFICATION.lock() = None;
+        crate::serial_println!(
+            "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible={} octets={} essais={} empreinte={:02x}{:02x}{:02x}{:02x}",
+            slot_texte(inst.cible), longueur, essais, relue[0], relue[1], relue[2], relue[3]
+        );
+        Ok(())
+    })();
+    r.map_err(|e| note_refus("finish", e))
+}
+
+/// Rights the kernel grants for `updated` (handed to serviced, which only
+/// passes it on): INSPECT | UPDATE_INSTALL | TRANSFER. No DUP, no
+/// UPDATE_HEALTH.
+pub const DROITS_INSTALLATION: crate::kernel::native::abi::types::Rights =
+    crate::kernel::native::abi::types::Rights(
+        crate::kernel::native::abi::types::Rights::INSPECT.0
+            | crate::kernel::native::abi::types::Rights::UPDATE_INSTALL.0
+            | crate::kernel::native::abi::types::Rights::TRANSFER.0,
+    );
