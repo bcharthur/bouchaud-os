@@ -115,6 +115,25 @@ pub fn from_bootloader_api(api: &'static mut ApiBootInfo) -> &'static BootInfo {
             _ => MemoryRegionKind::Reserved,
         };
 
+        // BOUCHAUD_BOOT_HANDOFF_V1 : la page que le chargeur A/B a laissee,
+        // dans le type de memoire reserve aux chargeurs d'OS. Copiee ICI, une
+        // fois, tant que la correspondance physique du chargeur est garantie ;
+        // la region reste Reserved (jamais rendue a l'allocateur).
+        if region.kind == ApiMemoryRegionKind::UnknownUefi(
+            bouchaud_update_core::passage::TYPE_MEMOIRE,
+        ) {
+            if let Some(decalage) = api.physical_memory_offset.as_ref().copied() {
+                let n = bouchaud_update_core::passage::OCTETS;
+                let mut brut = [0u8; bouchaud_update_core::passage::OCTETS];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (decalage + region.start) as *const u8, brut.as_mut_ptr(), n,
+                    );
+                }
+                crate::kernel::update::note_passage_brut(&brut);
+            }
+        }
+
         unsafe {
             MEMORY_REGIONS[count] = MemoryRegion {
                 start: region.start,

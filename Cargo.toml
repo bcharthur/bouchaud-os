@@ -39,6 +39,12 @@ banc-virtio-gpu-sans-reponse = []
 # `tools/ci/run_faute_persistance.sh` et `.github/workflows/p13-cible-kvm.yml`.
 banc-c5-ordre-historique = []
 banc-c5-fenetre-corrigee = []
+# BOUCHAUD_LOADER_AB_V1 : candidats VOLONTAIREMENT defectueux pour la preuve
+# negative du rollback A/B (tools/ci/run_ab_rollback.sh). Jamais dans `default`,
+# jamais dans une image livree : le candidat panique (ou gele) avant toute
+# notion de sante, a chaque boot.
+banc-ab-panique = []
+banc-ab-gel = []
 # BANC TEMOIN CONSOLE (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1).
 #
 # Retire la contre-pression des lignes differees : anneau du coeur plein, la
@@ -87,6 +93,9 @@ banc-virtio-gpu-reponse-etrangere = []
 banc-virtio-gpu-irq-pannes = []
 
 [dependencies]
+# BOUCHAUD_UPDATE_CORE_V1 : la politique A/B (no_std, sans allocation), la meme
+# que celle du chargeur. Le noyau n'en porte que le MECANISME (kernel::update).
+bouchaud-update-core = { path = "system/update-core" }
 # Allocateur de tas pour activer `alloc` (Vec/String/BTreeMap).
 linked_list_allocator = "0.10"
 

@@ -143,6 +143,12 @@ pub struct Task {
     /// ... et qui tenait le coeur quand le balayage l'a reveillee
     /// (`attribution_reveil::empaquete_par`).
     pub reveil_par: EcheanceAtomique,
+    /// BOUCHAUD_IPC_ATTRIBUTION_V1 (instrumentation SEULE, aucune decision
+    /// d'ordonnancement ne la lit) : a chaque election, l'instant de mise en
+    /// file (`ready_since_ns`) et l'instant d'election, gardes pour que
+    /// l'attente native qui reprend puisse decouper sa latence.
+    pub ipc_file_ns: EcheanceAtomique,
+    pub ipc_elu_ns: EcheanceAtomique,
     /// Son pire reveil de sommeil depuis le dernier `/proc/self/reveil`.
     pub attribution_reveil: crate::kernel::attribution_reveil::Registre,
     /// BOUCHAUD_ATTRIBUTION_REVEIL_V2 : la ventilation de ses reveils en

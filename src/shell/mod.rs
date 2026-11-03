@@ -221,6 +221,7 @@ pub const COMMANDS: &[&str] = &[
     "python", "python3", "pip", "pip3", "python-selftest",
     "pybrowser",
     "exec", "elfinfo", "usermode", "poll-selftest", "tasks", "vmstat", "strace", "profil-rip",
+    "ipc-attribution",
 ];
 
 /// Operateur reliant un segment de commande au precedent.
@@ -1984,6 +1985,8 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // H10 -- la machine de reference et sa preuve.
         "hwinfo" => { crate::platform::pc::trigkey::hwinfo(); 0 }
         "hwtest" => { crate::platform::pc::trigkey::hwtest(); 0 }
+        // BOUCHAUD_IPC_ATTRIBUTION_V1 : ou passe le temps d'un reveil natif.
+        "ipc-attribution" => { crate::kernel::native::activite::publie_attribution(); 0 }
         "bootlog" => { crate::platform::pc::trigkey::bootlog(); 0 }
         "nvmetest" => { crate::platform::pc::trigkey::nvmetest(); 0 }
         "disktest" => { crate::platform::pc::trigkey::disktest(argc, &argv); 0 }

@@ -234,6 +234,15 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::arch::x86_64::pci::init();
     point_de_controle("pci");
 
+    // BOUCHAUD_LOADER_AB_V1 : candidats de banc (jamais livres).
+    #[cfg(feature = "banc-ab-panique")]
+    panic!("BOUCHAUD_AB_CANDIDAT_PANIQUE_VOLONTAIRE");
+    #[cfg(feature = "banc-ab-gel")]
+    {
+        crate::serial_println!("BOUCHAUD_AB_CANDIDAT_GEL_VOLONTAIRE");
+        loop { core::hint::spin_loop(); }
+    }
+
     // Inventaire physique read-only. Les rapports sont crees dans
     // /diagnostics avant les pilotes reseau/USB actifs.
     crate::platform::pc::hardware_probe::run(boot, framebuffer);
@@ -535,6 +544,18 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // compositeur le rendait absent partout ou le compositeur ne demarre pas.
     // Voir la note d'amorcage equivalente dans `main.rs`.
     crate::platform::pc::installation::lance_le_montage_differe();
+
+    // BOUCHAUD_UPDATE_MECANISME_V1 : le superviseur systeme (ring 3) part
+    // AVANT le bureau, avec la seule capacite de mise a jour. C'est lui -- et
+    // pas le bureau, pas Ladybird -- qui declare le boot sain ; sans lui, un
+    // candidat n'est jamais confirme et le chargeur le retire.
+    crate::kernel::update::journalise_boot();
+    // BOUCHAUD_RECOVERY_V1 : le chargeur a choisi RECOVERY -> console texte,
+    // ni superviseur, ni bureau, ni Ladybird. Ne revient jamais.
+    if crate::kernel::update::en_recovery() {
+        crate::kernel::update::recovery::run();
+    }
+    crate::kernel::update::lance_superviseur();
 
     // LE MODE DE SECOURS EST CONSULTE ICI, ET NULLE PART AILLEURS.
     //

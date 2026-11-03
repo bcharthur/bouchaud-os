@@ -121,16 +121,21 @@ trap - EXIT
 
 python3 tools/ci/reliability/logscan.py "$LOG"
 
+# The version the kernel DECLARES (types.rs), not a literal that goes stale at
+# every minor bump: the probes must report exactly that.
+ABI_TY=src/kernel/native/abi/types.rs
+ABI_ATTENDU="$(sed -n 's/^pub const ABI_MAJOR: u16 = \([0-9]*\);/\1/p' "$ABI_TY").$(sed -n 's/^pub const ABI_MINOR: u16 = \([0-9]*\);/\1/p' "$ABI_TY")"
+[[ "$ABI_ATTENDU" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "NATIVE_IPC_FAIL version ABI illisible: $ABI_ATTENDU" >&2; exit 1; }
 required=(
   'NATIVE_IPC_AUTORUN_BEGIN'
-  '[NATIVE-IPC-RING3] ABI=1.1'
+  "[NATIVE-IPC-RING3] ABI=$ABI_ATTENDU"
   '[NATIVE-IPC-RING3] CHANNEL_OK'
   '[NATIVE-IPC-RING3] HANDLE_TRANSFER_OK'
   '[NATIVE-IPC-RING3] EVENT_WAITSET_OK'
   '[NATIVE-IPC-RING3] RIGHTS_OK'
   '[NATIVE-IPC-RING3] SHM_OK'
   '[NATIVE-IPC-RING3] OK'
-  '[NATIVE-IPC] ABI=1.1'
+  "[NATIVE-IPC] ABI=$ABI_ATTENDU"
   '[NATIVE-IPC] OK'
   '[COMPOSITED] ok   surface accordee, region transferee attenuee'
   '[COMPOSITED] ok   les pixels ecrits par le client sont ceux que le compositeur compose'

@@ -11,6 +11,8 @@ pub enum Object {
     WaitSet(WaitSet),
     SharedRegion(SharedRegion),
     Process(ProcessRef),
+    /// Capacite de mise a jour : aucun etat, tout est dans le droit porte.
+    Update,
     Legacy(ObjectKind),
 }
 
@@ -22,6 +24,7 @@ impl Object {
             Self::WaitSet(_) => ObjectKind::WaitSet,
             Self::SharedRegion(_) => ObjectKind::SharedRegion,
             Self::Process(_) => ObjectKind::Process,
+            Self::Update => ObjectKind::Update,
             Self::Legacy(kind) => *kind,
         }
     }
@@ -33,6 +36,7 @@ impl Object {
             Self::WaitSet(waitset) => waitset.signals(),
             Self::SharedRegion(region) => region.signals(),
             Self::Process(process) => process.signals(),
+            Self::Update => Signals::NONE,
             Self::Legacy(_) => Signals::NONE,
         }
     }

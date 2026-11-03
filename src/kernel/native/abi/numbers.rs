@@ -42,6 +42,20 @@ pub const PROCESS_KILL: u64 = NATIVE_BASE + 0x52;
 
 pub const TIME_NOW: u64 = NATIVE_BASE + 0x60;
 
+/// BOUCHAUD_UPDATE_MECANISME_V1 (ABI 1.2) : sur une capacite Update.
+/// Etat du boot (passage du chargeur + bloc META) ; exige INSPECT.
+pub const UPDATE_STATE: u64 = NATIVE_BASE + 0x70;
+/// Declarer le boot courant sain : commit du candidat booste ; exige
+/// UPDATE_HEALTH. Le noyau n'accepte que ce que `passage::commit_sante` accepte.
+pub const UPDATE_COMMIT_HEALTH: u64 = NATIVE_BASE + 0x71;
+/// Installation dans le slot INACTIF ; exigent UPDATE_INSTALL. begin(cible),
+/// write(decalage, tampon, longueur), finish(empreinte*, longueur, essais).
+pub const UPDATE_INSTALL_BEGIN: u64 = NATIVE_BASE + 0x72;
+pub const UPDATE_INSTALL_WRITE: u64 = NATIVE_BASE + 0x73;
+pub const UPDATE_INSTALL_FINISH: u64 = NATIVE_BASE + 0x74;
+/// Relecture incrementale (au plus 1 Mio par appel) ; rend les octets restants.
+pub const UPDATE_INSTALL_VERIFY: u64 = NATIVE_BASE + 0x75;
+
 #[inline]
 pub const fn is_native(number: u64) -> bool {
     number >= NATIVE_BASE && number <= NATIVE_LAST
@@ -75,6 +89,12 @@ pub const fn name(number: u64) -> &'static str {
         PROCESS_INFO => "bo_process_info",
         PROCESS_KILL => "bo_process_kill",
         TIME_NOW => "bo_time_now",
+        UPDATE_STATE => "bo_update_state",
+        UPDATE_COMMIT_HEALTH => "bo_update_commit_health",
+        UPDATE_INSTALL_BEGIN => "bo_update_install_begin",
+        UPDATE_INSTALL_WRITE => "bo_update_install_write",
+        UPDATE_INSTALL_FINISH => "bo_update_install_finish",
+        UPDATE_INSTALL_VERIFY => "bo_update_install_verify",
         _ => "bo_unknown",
     }
 }

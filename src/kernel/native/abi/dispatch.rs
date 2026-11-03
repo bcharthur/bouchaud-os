@@ -7,7 +7,7 @@ use super::numbers;
 use super::types::{
     Error, HandleId, ObjectKind, Result, Rights, ABI_VERSION_PACKED,
 };
-use super::wire::{HandleInfo, ProcessInfo, RecvMeta, SpawnResult, WaitEvent,
+use super::wire::{HandleInfo, ProcessInfo, RecvMeta, SpawnResult, UpdateState, WaitEvent,
                   PROCESS_RUNNING, PROCESS_TERMINATED};
 use crate::kernel::native::event::Event;
 use crate::kernel::native::handle::{self, Entry};
@@ -300,7 +300,10 @@ fn waitset_wait(args: [u64; 6]) -> Result<u64> {
             return Err(Error::TimedOut);
         }
         let echeance = deadline.min(now.saturating_add(TRANCHE_NS));
-        let _ = crate::kernel::native::activite::attend(ticket, echeance);
+        let reveil = crate::kernel::native::activite::attend(ticket, echeance);
+        // BOUCHAUD_IPC_ATTRIBUTION_V1 : mesure seule.
+        crate::kernel::native::activite::note_reprise(
+            matches!(reveil, crate::kernel::sync::WaitSourceWake::Signaled));
         if crate::kernel::task::signal_interrompt_attente() {
             return Ok(0);
         }
@@ -435,6 +438,89 @@ fn process_info(args: [u64; 6]) -> Result<u64> {
         _ => return Err(Error::WrongType),
     };
     super::usercopy::write(args[1], &info.bytes_le())?;
+    Ok(0)
+}
+
+// BOUCHAUD_UPDATE_MECANISME_V1 (ABI 1.2). Le droit est verifie AVANT toute
+// entree-sortie : un handle sans le droit ne touche jamais le disque.
+fn update_state(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::INSPECT, ObjectKind::Update)?;
+    super::usercopy::validate_write(args[1], UpdateState::BYTE_LEN)?;
+    let e = crate::kernel::update::etat().map_err(|_| Error::NotFound)?;
+    let etat = |s| match e.enregistrement.slot(s).etat {
+        bouchaud_update_core::Etat::Vide => 0,
+        bouchaud_update_core::Etat::Candidat { .. } => 1,
+        bouchaud_update_core::Etat::Bon => 2,
+        bouchaud_update_core::Etat::Mauvais => 3,
+    };
+    use bouchaud_update_core::Slot;
+    let info = UpdateState {
+        booted_slot: e.passage.slot as u32,
+        boot_reason: e.passage.raison as u32,
+        attempts_left: e.passage.essais_restants as u32,
+        active_slot: e.enregistrement.actif as u32,
+        state_a: etat(Slot::A),
+        state_b: etat(Slot::B),
+        meta_sequence: e.enregistrement.sequence,
+        boot_id: e.passage.boot_id,
+    };
+    super::usercopy::write(args[1], &info.bytes_le())?;
+    Ok(0)
+}
+
+/// 0 = the booted candidate is committed (durable), 1 = already the good
+/// active slot. A refusal (no handoff, record changed, no real flush, ...)
+/// is ACCESS_DENIED for the policy cases and NOT_FOUND when there is no A/B
+/// layout at all.
+fn update_commit_health(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_HEALTH, ObjectKind::Update)?;
+    match crate::kernel::update::commit_sante() {
+        Ok(crate::kernel::update::Commit::Committe) => Ok(0),
+        Ok(crate::kernel::update::Commit::DejaSain) => Ok(1),
+        Err("sans_passage") | Err("meta_introuvable") | Err("meta_sans_identite") => Err(Error::NotFound),
+        Err(_) => Err(Error::AccessDenied),
+    }
+}
+
+fn refus_install(r: crate::kernel::update::RefusInstall) -> Error {
+    match r {
+        crate::kernel::update::RefusInstall::Refuse(_) => Error::AccessDenied,
+        crate::kernel::update::RefusInstall::Argument(_) => Error::InvalidArgument,
+        // The device failed: reported as a fault of the operation.
+        crate::kernel::update::RefusInstall::Io(_) => Error::Fault,
+    }
+}
+
+fn update_install_begin(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let cible = match args[1] { 0 => bouchaud_update_core::Slot::A, 1 => bouchaud_update_core::Slot::B,
+                                _ => return Err(Error::InvalidArgument) };
+    crate::kernel::update::installation_commence(cible).map_err(refus_install)?;
+    Ok(0)
+}
+
+/// At most 1 MiB per call: bounded kernel copy.
+fn update_install_write(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let len = args[3] as usize;
+    if len == 0 || len > 1024 * 1024 { return Err(Error::TooLarge); }
+    let donnees = super::usercopy::read(args[2], len)?;
+    crate::kernel::update::installation_ecrit(args[1], &donnees).map_err(refus_install)?;
+    Ok(0)
+}
+
+fn update_install_verify(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    crate::kernel::update::installation_verifie(args[1]).map_err(refus_install)
+}
+
+fn update_install_finish(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
+    let brut = super::usercopy::read(args[1], 32)?;
+    let mut empreinte = [0u8; 32];
+    empreinte.copy_from_slice(&brut);
+    let essais = u8::try_from(args[3]).map_err(|_| Error::InvalidArgument)?;
+    crate::kernel::update::installation_termine(empreinte, args[2], essais).map_err(refus_install)?;
     Ok(0)
 }
 
@@ -580,6 +666,13 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
         numbers::PROCESS_KILL => process_kill(args),
 
         numbers::TIME_NOW => Ok(crate::kernel::native::time::monotonic_ns() & (i64::MAX as u64)),
+
+        numbers::UPDATE_STATE => update_state(args),
+        numbers::UPDATE_COMMIT_HEALTH => update_commit_health(args),
+        numbers::UPDATE_INSTALL_BEGIN => update_install_begin(args),
+        numbers::UPDATE_INSTALL_WRITE => update_install_write(args),
+        numbers::UPDATE_INSTALL_FINISH => update_install_finish(args),
+        numbers::UPDATE_INSTALL_VERIFY => update_install_verify(args),
 
         _ => Err(Error::InvalidCall),
     }

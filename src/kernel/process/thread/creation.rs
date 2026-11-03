@@ -62,6 +62,8 @@ impl Task {
             budget_reveil_ns: EcheanceAtomique::neuf(0),
             reveil_pret_ns: EcheanceAtomique::neuf(0),
             reveil_elu_ns: EcheanceAtomique::neuf(0),
+            ipc_file_ns: EcheanceAtomique::neuf(0),
+            ipc_elu_ns: EcheanceAtomique::neuf(0),
             reveil_commute_ns: EcheanceAtomique::neuf(0),
             reveil_passe_ns: EcheanceAtomique::neuf(0),
             reveil_par: EcheanceAtomique::neuf(0),

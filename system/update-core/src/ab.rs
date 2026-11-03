@@ -1,7 +1,8 @@
 // Mise a jour atomique A/B : la logique PURE (BOUCHAUD_UPDATE_AB_V1).
 //
 // Ce fichier ne connait ni le NVMe, ni l'ESP, ni le chargeur : seulement des
-// octets et des etats. Il est inclus tel quel par tools/update/test_ab.rs,
+// octets et des etats. Crate system/update-core ; il est inclus tel quel par
+// tools/update/test_ab.rs et tools/update/test_durabilite.rs,
 // qui le met en echec sur machine hote (coupure d'alimentation a chaque octet
 // d'ecriture du bloc d'amorcage, a chaque etape d'une mise a jour, boucles de
 // crash). C'est le meme motif que installation/disposition.rs : ce qui decide
@@ -20,7 +21,10 @@
 //   I3  un candidat n'est boote qu'un nombre BORNE de fois sans health check ;
 //   I4  une ecriture coupee du bloc d'amorcage rend l'ancien ou le nouvel
 //       enregistrement, jamais un melange (deux copies, sequence + CRC) ;
-//   I5  le slot actif n'est jamais la cible d'une installation.
+//   I5  le slot actif n'est jamais la cible d'une installation ;
+//   I6  le slot EN COURS D'EXECUTION n'est jamais la cible d'une
+//       installation (running_slot != update_target). Pendant le boot d'un
+//       candidat, le slot qui tourne n'est pas l'actif : I5 ne suffit pas.
 
 /// Les deux emplacements systeme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,8 +71,10 @@ pub struct Enregistrement {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refus {
-    /// I5 : on n'ecrit jamais par-dessus le systeme qui tourne.
+    /// I5 : on n'ecrit jamais par-dessus le systeme actif (repli connu bon).
     CibleActive,
+    /// I6 : on n'ecrit jamais par-dessus le systeme qui TOURNE.
+    CibleEnCoursDExecution,
     /// L'image ecrite ne correspond pas a l'empreinte annoncee.
     ImageNonVerifiee,
     /// Un candidat est deja en attente : finir (commit/rollback) d'abord.
@@ -99,7 +105,8 @@ impl Enregistrement {
     /// Etape 1 : declarer que le slot inactif va etre ecrit. Il devient Vide
     /// AVANT la premiere ecriture d'image : une coupure pendant l'ecriture
     /// laisse un slot Vide, jamais un slot « Bon » a moitie ecrit.
-    pub fn commence_installation(&self, cible: Slot) -> Result<Self, Refus> {
+    pub fn commence_installation(&self, cible: Slot, en_cours: Slot) -> Result<Self, Refus> {
+        if cible == en_cours { return Err(Refus::CibleEnCoursDExecution); }
         if cible == self.actif { return Err(Refus::CibleActive); }
         if matches!(self.slot(cible).etat, Etat::Candidat { .. }) {
             return Err(Refus::CandidatEnCours);
@@ -190,7 +197,7 @@ impl Enregistrement {
 pub const OCTETS: usize = 96;
 const MAGIC: [u8; 8] = *b"BOAB0001";
 
-fn crc32(octets: &[u8]) -> u32 {
+pub(crate) fn crc32(octets: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &o in octets {
         crc ^= o as u32;

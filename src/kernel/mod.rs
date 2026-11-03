@@ -43,12 +43,6 @@ pub mod elf;
 pub mod loader;
 #[path = "process/exec.rs"]
 pub mod exec;
-/// Mise a jour atomique A/B : logique pure, prouvee sur hote
-/// (tools/update/test_ab.rs). Pas encore branchee au chargeur : voir
-/// docs/current/UPDATE_RECOVERY.md.
-#[path = "update/ab.rs"]
-#[allow(dead_code)]
-pub mod update_ab;
 #[path = "object/fd.rs"]
 pub mod fd;
 #[path = "object/handle.rs"]
@@ -125,6 +119,8 @@ pub mod sync;
 #[path = "syscall/legacy.rs"]
 pub mod syscall;
 pub mod sysroot;
+// BOUCHAUD_UPDATE_MECANISME_V1 : passage du chargeur, commit de sante sur META.
+pub mod update;
 #[path = "process/thread.rs"]
 pub mod task;
 #[path = "time/accord.rs"]

@@ -1,7 +1,7 @@
 {
   "version": {
     "ABI_MAJOR": 1,
-    "ABI_MINOR": 1
+    "ABI_MINOR": 2
   },
   "syscalls": {
     "VERSION": 0,
@@ -29,7 +29,13 @@
     "PROCESS_SPAWN": 80,
     "PROCESS_INFO": 81,
     "PROCESS_KILL": 82,
-    "TIME_NOW": 96
+    "TIME_NOW": 96,
+    "UPDATE_STATE": 112,
+    "UPDATE_COMMIT_HEALTH": 113,
+    "UPDATE_INSTALL_BEGIN": 114,
+    "UPDATE_INSTALL_WRITE": 115,
+    "UPDATE_INSTALL_FINISH": 116,
+    "UPDATE_INSTALL_VERIFY": 117
   },
   "errors": {
     "InvalidCall": 1,
@@ -56,7 +62,8 @@
     "LegacyWindow": 257,
     "LegacySocket": 258,
     "LegacyDevice": 259,
-    "Process": 5
+    "Process": 5,
+    "Update": 6
   },
   "rights_bits": {
     "READ": 0,
@@ -66,7 +73,9 @@
     "DUP": 4,
     "TRANSFER": 5,
     "INSPECT": 6,
-    "WAIT": 7
+    "WAIT": 7,
+    "UPDATE_HEALTH": 8,
+    "UPDATE_INSTALL": 9
   },
   "wire": {
     "RecvMeta": [

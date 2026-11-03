@@ -205,7 +205,136 @@ fn emet_charge_installation(
     Ok(())
 }
 
+
+// ===========================================================================
+// BOUCHAUD_DISQUE_AB_V1 -- l'image A/B : ESP (shim) + META + SYS_A + SYS_B
+// ===========================================================================
+//
+// Les GUID de type sont ceux de system/update-core/src/disque.rs (le shim les
+// cherche ; le noyau les reconnaitra). Ils sont recopies ici en texte parce que
+// ce constructeur est copie hors du depot par plusieurs scripts et ne peut pas
+// dependre d'un chemin relatif. Une divergence n'est pas silencieuse : le shim
+// ne trouverait pas META, retomberait en amorcage historique, et
+// tools/ci/run_ab_rollback.sh echouerait (aucun BOUCHAUD_AB_BOOT).
+const GUID_META: &str = "B0DC8A5D-0002-4B0D-9E21-424F55434844";
+const GUID_SLOT_A: &str = "B0DC8A5D-0003-4B0D-9E21-424F55434844";
+const GUID_SLOT_B: &str = "B0DC8A5D-0004-4B0D-9E21-424F55434844";
+const GUID_RECOVERY: &str = "B0DC8A5D-0005-4B0D-9E21-424F55434844";
+
+fn fat_depuis(fichiers: &[(&str, &Path)], sortie: &Path) -> Result<u64, Box<dyn Error>> {
+    let mut besoin = 0u64;
+    for (_, chemin) in fichiers { besoin += fs::metadata(chemin)?.len(); }
+    let taille = round_up_mib(besoin + FAT_MIN_HEADROOM.max(besoin / 32));
+    let fichier = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(sortie)?;
+    fichier.set_len(taille)?;
+    fatfs::format_volume(&fichier, fatfs::FormatVolumeOptions::new()
+        .fat_type(fatfs::FatType::Fat32).bytes_per_cluster(4096).volume_label(*b"BOUCHAUDOS!"))?;
+    let fsys = fatfs::FileSystem::new(&fichier, fatfs::FsOptions::new())?;
+    {
+        let racine = fsys.root_dir();
+        for (cible, source) in fichiers {
+            let mut dir = racine.clone();
+            let morceaux: Vec<&str> = cible.split('/').collect();
+            for m in &morceaux[..morceaux.len() - 1] {
+                dir = match dir.open_dir(m) { Ok(d) => d, Err(_) => dir.create_dir(m)? };
+            }
+            copy_into_fat(&dir, morceaux[morceaux.len() - 1], source)?;
+        }
+    }
+    fsys.unmount()?;
+    Ok(taille)
+}
+
+/// Un slot = le contenu de `--charge-installation` (sans shim) : le chargeur
+/// (`bootx64.efi`), le noyau, la configuration, et le ramdisk s'il existe.
+fn fat_de_slot(charge: &Path, sortie: &Path) -> Result<u64, Box<dyn Error>> {
+    let chargeur = if charge.join("bouchaud-loader.efi").is_file() { charge.join("bouchaud-loader.efi") } else { charge.join("bootx64.efi") };
+    let noyau = charge.join("kernel-x86_64");
+    let config = charge.join("boot.json");
+    let ramdisk = charge.join("ramdisk");
+    let mut fichiers: Vec<(&str, &Path)> = vec![
+        ("efi/boot/bouchaud-loader.efi", &chargeur),
+        ("kernel-x86_64", &noyau),
+        ("boot.json", &config),
+    ];
+    if ramdisk.is_file() { fichiers.push(("ramdisk", &ramdisk)); }
+    for (_, f) in &fichiers { if !f.is_file() { return Err(format!("slot: fichier absent {}", f.display()).into()); } }
+    fat_depuis(&fichiers, sortie)
+}
+
+fn cree_disque_ab(sortie: &Path, shim: &Path, meta: &Path, charge_a: &Path, charge_b: &Path, charge_r: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let esp = temp.path().join("esp.img");
+    let sa = temp.path().join("slot-a.img");
+    let sb = temp.path().join("slot-b.img");
+    fat_depuis(&[("efi/boot/bootx64.efi", shim)], &esp)?;
+    fat_de_slot(charge_a, &sa)?;
+    fat_de_slot(charge_b, &sb)?;
+    let sr = temp.path().join("recovery.img");
+    if let Some(r) = charge_r { fat_de_slot(r, &sr)?; }
+    let meta_octets = fs::metadata(meta)?.len();
+    if meta_octets != MIB { return Err("META doit faire exactement 1 Mio (tools/update/meta.rs)".into()); }
+    let mut parts: Vec<(&str, &Path, gpt::partition_types::Type)> = vec![
+        ("BOUCHAUD-ESP", &esp, gpt::partition_types::EFI),
+        ("BOUCHAUD-META", meta, gpt::partition_types::Type { guid: GUID_META, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }),
+        ("BOUCHAUD-SYS-A", &sa, gpt::partition_types::Type { guid: GUID_SLOT_A, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }),
+        ("BOUCHAUD-SYS-B", &sb, gpt::partition_types::Type { guid: GUID_SLOT_B, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }),
+    ];
+    // BOUCHAUD_RECOVERY_V1 : partition RECOVERY optionnelle, apres les slots.
+    if charge_r.is_some() {
+        parts.push(("BOUCHAUD-RECOVERY", &sr, gpt::partition_types::Type { guid: GUID_RECOVERY, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }));
+    }
+    let mut total = 2 * MIB;
+    for (_, f, _) in &parts { total += round_up_mib(fs::metadata(f)?.len()) + MIB; }
+    let mut disque = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(sortie)?;
+    disque.set_len(total)?;
+    let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from((total / 512) - 1).unwrap_or(0xFF_FF_FF_FF));
+    mbr.overwrite_lba0(&mut disque)?;
+    let bloc = gpt::disk::LogicalBlockSize::Lb512;
+    let mut table = gpt::GptConfig::new().writable(true).initialized(false).logical_block_size(bloc)
+        .create_from_device(Box::new(&mut disque), None)?;
+    table.update_partitions(Default::default())?;
+    let mut ids = Vec::new();
+    for (nom, f, ty) in &parts {
+        ids.push(table.add_partition(nom, round_up_mib(fs::metadata(f)?.len()), ty.clone(), 0, Some(2048))?);
+    }
+    let mut debuts = Vec::new();
+    for id in &ids {
+        let p = table.partitions().get(id).ok_or("partition absente")?;
+        debuts.push((p.first_lba, p.bytes_start(bloc).map_err(|e| format!("{e:?}"))?));
+    }
+    table.write()?;
+    for ((nom, f, _), (lba, debut)) in parts.iter().zip(debuts) {
+        disque.seek(io::SeekFrom::Start(debut))?;
+        io::copy(&mut File::open(f)?, &mut disque)?;
+        println!("BOUCHAUD_AB_PARTITION nom={nom} premier_lba={lba} octets={}", fs::metadata(f)?.len());
+    }
+    println!("BOUCHAUD_DISQUE_AB_OK {}", sortie.display());
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    {
+        let tous: Vec<_> = env::args_os().collect();
+        if tous.len() >= 2 && tous[1] == *"--disque-ab" {
+            if tous.len() != 7 && tous.len() != 8 {
+                return Err("usage: image-builder --disque-ab <sortie.img> <shim.efi> <meta.img> <charge-slot-a> <charge-slot-b> [charge-recovery]".into());
+            }
+            let p = |i: usize| PathBuf::from(&tous[i]);
+            let r = if tous.len() == 8 { Some(p(7)) } else { None };
+            return cree_disque_ab(&p(2), &p(3), &p(4), &p(5), &p(6), r.as_deref());
+        }
+        // BOUCHAUD_UPDATED_V1 : l'image d'un slot seule -- ce que la chaine de
+        // release livre a `updated`, octet pour octet ce que --disque-ab pose.
+        if tous.len() >= 2 && tous[1] == *"--image-slot" {
+            if tous.len() != 4 {
+                return Err("usage: image-builder --image-slot <charge-slot> <sortie.img>".into());
+            }
+            let octets = fat_de_slot(&PathBuf::from(&tous[2]), &PathBuf::from(&tous[3]))?;
+            println!("BOUCHAUD_IMAGE_SLOT_OK octets={octets} {}", PathBuf::from(&tous[3]).display());
+            return Ok(());
+        }
+    }
     let mut args = env::args_os();
     let _program = args.next();
     let usage = "usage: image-builder <kernel-elf> <output-image> [min-width min-height] [ramdisk] [preboot-shim]\n       image-builder --charge-installation <kernel-elf> <dossier> [min-width min-height] [preboot-shim]";

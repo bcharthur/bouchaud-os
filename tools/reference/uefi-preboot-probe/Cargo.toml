@@ -6,3 +6,5 @@ publish = false
 
 [dependencies]
 uefi = { version = "=0.37.0", features = ["alloc", "global_allocator", "panic_handler"] }
+# BOUCHAUD_LOADER_AB_V1 : la politique A/B, une seule source.
+bouchaud-update-core = { path = "../../../system/update-core" }

@@ -163,6 +163,12 @@ pub fn trace_capacite() -> usize {
     TRACE_BYTES
 }
 
+/// Un octet recu sur COM1, sans attendre. Seule la console de recovery lit
+/// COM1 (BOUCHAUD_RECOVERY_V1) : rien d'autre ne consomme la reception.
+pub fn lit_octet() -> Option<u8> {
+    unsafe { if inb(COM1 + 5) & 1 != 0 { Some(inb(COM1)) } else { None } }
+}
+
 pub fn is_ready() -> bool {
     unsafe { INITIALISED }
 }

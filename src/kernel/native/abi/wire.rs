@@ -80,6 +80,35 @@ impl SpawnResult {
 pub const PROCESS_RUNNING: u32 = 1;
 pub const PROCESS_TERMINATED: u32 = 2;
 
+/// BOUCHAUD_UPDATE_MECANISME_V1 : `bo_update_state` (ABI 1.2). Slots : 0 = A,
+/// 1 = B. Etats : 0 vide, 1 candidat, 2 bon, 3 mauvais.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct UpdateState {
+    pub booted_slot: u32,
+    pub boot_reason: u32,
+    pub attempts_left: u32,
+    pub active_slot: u32,
+    pub state_a: u32,
+    pub state_b: u32,
+    pub meta_sequence: u64,
+    pub boot_id: u64,
+}
+
+impl UpdateState {
+    pub const BYTE_LEN: usize = 40;
+    pub fn bytes_le(self) -> [u8; Self::BYTE_LEN] {
+        let mut out = [0u8; Self::BYTE_LEN];
+        for (i, v) in [self.booted_slot, self.boot_reason, self.attempts_left,
+                       self.active_slot, self.state_a, self.state_b].iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        out[24..32].copy_from_slice(&self.meta_sequence.to_le_bytes());
+        out[32..40].copy_from_slice(&self.boot_id.to_le_bytes());
+        out
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct ProcessInfo {

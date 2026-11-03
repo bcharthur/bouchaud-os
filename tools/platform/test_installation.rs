@@ -436,3 +436,52 @@ fn ecrit_l_image_pour_fsck_et_mtools() {
     let esp = r.disque.plage(r.plan.esp_premier, r.plan.esp_blocs());
     std::fs::write(&chemin, &esp).expect("image ecrite");
 }
+
+// ---- BOUCHAUD_DISPOSITION_AB_V1 ------------------------------------------
+
+#[test]
+fn le_plan_ab_porte_cinq_partitions_alignees_sans_recouvrement() {
+    for (gio, bloc) in [(64u64, 512usize), (256, 512), (512, 4096), (2048, 4096)] {
+        let (premier, dernier) = bornes(gio * 1024 * 1024 * 1024 / bloc as u64, bloc);
+        let p = plan_ab(premier, dernier, bloc, 700 * 1024 * 1024).expect("plan A/B");
+        assert!(!plan_ab_se_recouvre(&p), "{gio} Gio / {bloc}");
+        for (a, b) in p.partitions() {
+            assert_eq!(a % blocs_par_mio(bloc), 0, "alignement {gio} Gio / {bloc}");
+            assert!(a >= premier && b <= dernier && a <= b);
+        }
+        assert_eq!(p.etat.1, dernier, "la persistance prend le reste");
+    }
+}
+
+#[test]
+fn les_deux_slots_ont_exactement_la_meme_taille() {
+    let (premier, dernier) = bornes(128 * 1024 * 1024 * 1024 / 512, 512);
+    for charge in [1u64, 300 << 20, 900 << 20, 3 << 30] {
+        let p = plan_ab(premier, dernier, 512, charge).unwrap();
+        assert_eq!(p.slot_a.1 - p.slot_a.0, p.slot_b.1 - p.slot_b.0);
+        let octets = (p.slot_a.1 - p.slot_a.0 + 1) * 512;
+        assert!(octets >= charge + ESP_MARGE_MIO * 1024 * 1024, "marge du slot");
+        assert!(octets >= ESP_MINIMUM_MIO * 1024 * 1024, "plancher FAT32 du slot");
+    }
+}
+
+#[test]
+fn la_meta_tient_ses_deux_copies_et_reste_separee_des_fs() {
+    let (premier, dernier) = bornes(64 * 1024 * 1024 * 1024 / 4096, 4096);
+    let p = plan_ab(premier, dernier, 4096, 500 << 20).unwrap();
+    let blocs_meta = p.meta.1 - p.meta.0 + 1;
+    assert!(blocs_meta >= 2, "deux copies");
+    assert_eq!(blocs_meta * 4096, META_MIO * 1024 * 1024);
+    assert!(p.meta.0 > p.esp.1 && p.meta.1 < p.slot_a.0);
+}
+
+#[test]
+fn un_disque_trop_petit_pour_l_ab_est_refuse() {
+    // 2 Gio : ESP 512 + META 1 + 2 x 1 Gio de slots ne laissent pas la
+    // persistance minimale (512 Mio).
+    let (premier, dernier) = bornes(2 * 1024 * 1024 * 1024 / 512, 512);
+    assert!(plan_ab(premier, dernier, 512, 800 << 20).is_none());
+    assert!(plan_ab(10, 5, 512, 1).is_none());
+    assert!(plan_ab(0, u64::MAX, 0, 1).is_none());
+    assert!(plan_ab(0, 1 << 40, 512, u64::MAX).is_none(), "charge absurde");
+}
