@@ -316,6 +316,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let p = |i: usize| PathBuf::from(&tous[i]);
             return cree_disque_ab(&p(2), &p(3), &p(4), &p(5), &p(6));
         }
+        // BOUCHAUD_UPDATED_V1 : l'image d'un slot seule -- ce que la chaine de
+        // release livre a `updated`, octet pour octet ce que --disque-ab pose.
+        if tous.len() >= 2 && tous[1] == *"--image-slot" {
+            if tous.len() != 4 {
+                return Err("usage: image-builder --image-slot <charge-slot> <sortie.img>".into());
+            }
+            let octets = fat_de_slot(&PathBuf::from(&tous[2]), &PathBuf::from(&tous[3]))?;
+            println!("BOUCHAUD_IMAGE_SLOT_OK octets={octets} {}", PathBuf::from(&tous[3]).display());
+            return Ok(());
+        }
     }
     let mut args = env::args_os();
     let _program = args.next();

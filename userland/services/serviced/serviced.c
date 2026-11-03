@@ -96,6 +96,8 @@ struct service {
     bo_u64       running_at;
     int          want_running;
     int          critical;            /* part of the system health contract */
+    bo_handle_t  extra;               /* second bootstrap handle, or 0 */
+    bo_u32       extra_mask;          /* rights it crosses the spawn with */
 };
 
 static struct service svc[MAX_SERVICES];
@@ -178,8 +180,8 @@ static void release(struct service *s)
 static int start(struct service *s)
 {
     bo_handle_t pair[2];
-    bo_handle_t give[1];
-    bo_u32 mask[1];
+    bo_handle_t give[2];
+    bo_u32 mask[2];
     struct bo_spawn_result r;
     char hello[64];
     bo_usize n;
@@ -191,7 +193,9 @@ static int start(struct service *s)
      * channel. It may not duplicate or pass it on. */
     mask[0] = BO_RIGHT_READ | BO_RIGHT_WRITE | BO_RIGHT_WAIT;
     s->spawned_at = now();
-    rc = bo_process_spawn(s->path, bo_strlen(s->path), give, 1, mask, &r);
+    give[1] = s->extra;
+    mask[1] = s->extra_mask;
+    rc = bo_process_spawn(s->path, bo_strlen(s->path), give, s->extra ? 2 : 1, mask, &r);
     /* Our copy of the child's end must go, or the channel would outlive the
      * child and PEER_CLOSED would never rise. */
     bo_handle_close(pair[1]);
@@ -602,10 +606,12 @@ static int qualify(void)
 
 /* ---- system mode -------------------------------------------------------- */
 
-/* Health contract v1: these services must all be Running, without a death,
- * for HEALTH_WINDOW before the boot is declared healthy. updated and logd
- * join this list when they exist; the version moves with it. */
-#define CRITICAL_PROFILE  1
+/* Health contract v2: these services must all be Running, without a death,
+ * for HEALTH_WINDOW before the boot is declared healthy:
+ *   health   (/bin/healthd)  liveness of the native platform itself
+ *   updated  (/bin/updated)  a system that cannot update is not healthy
+ * logd joins this list when it exists; the version moves with it. */
+#define CRITICAL_PROFILE  2
 #define HEALTH_WINDOW     (3000 * MS)
 #define HEALTH_DEADLINE   (90000 * MS)
 
@@ -659,14 +665,21 @@ static void say_update_state(bo_handle_t cap)
 
 static int system_mode(const struct bo_start *start)
 {
-    struct bo_handle_info info;
-    bo_handle_t cap = 0;
+    struct bo_handle_info info, info2;
+    bo_handle_t cap = 0, install = 0;
     bo_u64 t0, healthy_since = 0;
     int committed = 0, k;
 
-    if (start->bootstrap_count == 1 && bo_handle_info(start->bootstrap[0], &info) == 0
-        && info.kind == BO_KIND_UPDATE)
+    /* [0] health capability (kept), [1] install capability (passed to
+     * updated only). Recognised by kind AND rights, never by position alone. */
+    info.rights = 0;
+    if (start->bootstrap_count >= 1 && bo_handle_info(start->bootstrap[0], &info) == 0
+        && info.kind == BO_KIND_UPDATE && (info.rights & BO_RIGHT_UPDATE_HEALTH))
         cap = start->bootstrap[0];
+    if (start->bootstrap_count >= 2 && bo_handle_info(start->bootstrap[1], &info2) == 0
+        && info2.kind == BO_KIND_UPDATE && (info2.rights & BO_RIGHT_UPDATE_INSTALL)
+        && !(info2.rights & BO_RIGHT_UPDATE_HEALTH))
+        install = start->bootstrap[1];
     bo_say("SERVICED_SYSTEM_BEGIN");
     kv("profile", CRITICAL_PROFILE);
     kv("capability", cap ? 1 : 0);
@@ -676,6 +689,15 @@ static int system_mode(const struct bo_start *start)
 
     add_service("health", "/bin/healthd", -1);
     svc[0].critical = 1;
+    add_service("updated", "/bin/updated", 0);
+    svc[1].critical = 1;
+    /* updated may install and inspect; it may not pass the capability on
+     * (no TRANSFER) nor duplicate it, and it never gets UPDATE_HEALTH. */
+    svc[1].extra = install;
+    svc[1].extra_mask = BO_RIGHT_INSPECT | BO_RIGHT_UPDATE_INSTALL;
+    bo_say("SERVICED_INSTALL_CAPABILITY");
+    kv("present", install ? 1 : 0);
+    bo_say("\n");
     t0 = now();
     sys_to(SYS_STARTING, cap ? "capability_ok" : "no_update_capability");
 
