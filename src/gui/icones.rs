@@ -37,6 +37,8 @@ pub const TAILLE_BUREAU: usize = 56;
 
 /// Cote d'une icone dans une barre ou un menu.
 pub const TAILLE_PETITE: usize = 18;
+/// Cote d'une icone dans le dock Atelier (`atelier::dock::ICONE`).
+pub const TAILLE_DOCK: usize = 40;
 
 /// Les images, dans l'ordre de `window::ICONS`.
 const SOURCES: [&[u8]; 5] = [
@@ -55,15 +57,17 @@ struct Prete {
     pixels: Vec<u32>,
 }
 
-/// Cache par (image, taille). Deux tailles suffisent : le bureau et les barres.
+/// Cache par (image, taille) : le bureau, les barres et le dock.
 ///
 /// `static mut` sur le meme regime que le reste du bureau (`window::ICON_POSITIONS`,
 /// `ramfs::fs`) : le gestionnaire de fenetres est un fil unique, et c'est lui
 /// seul qui dessine. Aucun chemin d'interruption ne passe ici.
-static mut CACHE: [[Option<Prete>; 2]; NOMBRE] = [const { [None, None] }; NOMBRE];
+static mut CACHE: [[Option<Prete>; 3]; NOMBRE] = [const { [None, None, None] }; NOMBRE];
 
 fn rang(cote: usize) -> usize {
-    if cote == TAILLE_PETITE { 1 } else { 0 }
+    // Un emplacement PAR TAILLE posee : partager un emplacement entre deux
+    // tailles rendrait l'image de la premiere demandee aux deux.
+    if cote == TAILLE_PETITE { 1 } else if cote == TAILLE_DOCK { 2 } else { 0 }
 }
 
 /// Decode, reduit et retient l'icone `index` a la taille `cote`.

@@ -110,6 +110,8 @@ pub mod window;
 pub mod window_manager;
 pub mod windowing;
 pub mod theme;
+/// Bouchaud OS Experience 2.0 -- design system Atelier.
+pub mod atelier;
 pub mod graphics;
 
 pub mod texte;
