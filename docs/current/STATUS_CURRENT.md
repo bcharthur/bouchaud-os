@@ -1,44 +1,51 @@
-# État courant — relevé du 2026-11-03
+# État courant — relevé du 2026-11-03 (fin de mission ATOMIC PLATFORM)
 
 ```text
-MAIN_HEAD=c1e55da99dcc411f45ee68ebd285d91205f82067   (runtime identique à 5c3cd43a ; diff = docs + CI)
-CANDIDAT_CAP_A=c1e55da (main, figé pendant les campagnes)
-BRANCHE_TRAVAIL=claude/cap-stable-platform-20261103
-MAIN_PROTECTED=false   (ruleset prêt : tools/github/ruleset-main.json, non appliqué : pas d'API d'administration dans la session)
-BASELINE=NOT_ESTABLISHED
-P13=PARTIAL — BLOQUÉ : aucun runner self-hosted bouchaud-kvm4 / bouchaud-kvm8
-PHYSICAL=PHYSICAL_PENDING (protocole : TRIGKEY_CAMPAIGN.md)
+MAIN_HEAD=d3b55d17429d49daf4284fedf84e5c904a40a9e3   (fusion PR #239)
+BRANCHE_TRAVAIL=claude/atomic-platform-20261103      (non fusionnée ; HEAD : git rev-parse origin/claude/atomic-platform-20261103)
+MAIN_PROTECTED=false   (ruleset prêt : tools/github/ruleset-main.json)
+P13=SMP1/2/4 endurance PASS ; SMP8 PENDING_DEDICATED_KVM8 — BLOCKED_BY_RUNNER_PROVISIONING
+PHYSICAL=NOT_STARTED (protocole : TRIGKEY_CAMPAIGN.md §2 et §2bis A/B)
 ```
 
 Source machine : [status.json](status.json) — **instantané, pas mis à jour automatiquement.**
 
-## Candidat `main@c1e55da` — preuves same-SHA
+## Verdicts de la mission ATOMIC PLATFORM (§49–50)
 
-| Gate | Run | Résultat | Remarque |
-|---|---:|---|---|
-| CI Fast | 41539949788 | PASS | push main |
-| Integration | 41539949905 | PASS | push main |
-| Reliability V3 | 41539949936 | PASS | push main |
-| Native IPC | 41592664152 | PASS | dispatch same-SHA |
-| Security Runtime | 41592667159 | PASS | dispatch same-SHA |
-| Nightly Full | 41592645380 | PASS | 9/9 jobs exécutés, smoke Ladybird produit + provenance artefact (run 41530447823, empreinte d'entrées) |
-| Ladybird qualification (C22 6×6, primitives P13 strictes, convergence) | 41592642065 | EN COURS au relevé | |
-| Endurance (tranches 90 min) | 41592677703 | EN COURS au relevé | |
-| C5 KVM (témoin rouge / fenêtre / image ×24) | 41596509318 | EN COURS au relevé | revue statique : [C5_REVIEW_2026-11-03.md](C5_REVIEW_2026-11-03.md) |
-| P13 final (KVM4 ×3 campagnes + KVM8 30 min) | — | **NON EXÉCUTABLE** | 4 runs antérieurs annulés après 24 h en file : runners absents |
-| PHYSICAL Trigkey | — | PENDING | intervention humaine |
+| Verdict | Résultat | Niveau | Preuve |
+|---|---|---|---|
+| UPDATE_AB_CORE | PASS | HOST | `tools/update/test_{ab,durabilite,passage}.rs` (CI Fast) |
+| LOADER_AB | PASS | TCG | `run_ab_rollback.sh` `panique` `gel` `meta-0` `meta-1` `meta-2` |
+| BOOT_ATTEMPT_PERSISTENCE | PASS | HOST + TCG | mutation « boot avant flush » détectée ; SIGKILL à chaque boot |
+| HEALTH_COMMIT | PASS | TCG | `sante` `B+ B=` |
+| AUTO_ROLLBACK | PASS | TCG | `panique`/`gel` `B B B A A`, `sante-ko` `B- B- B- A= A=` |
+| UPDATED_RING3 | PASS | TCG | `mise-a-jour` `A* B+ B=` |
+| UPDATE_CAPABILITIES | PASS | TCG | 16 refus/contrôles observés en ring 3 |
+| SIGNED_MANIFEST | **PARTIAL** | TCG | HASH VALID vérifié sur la machine ; **SIGNATURE TRUSTED : NOT_STARTED** |
+| RECOVERY_BOOT | PASS | TCG | `recovery-requise` `R`, `echecs-repetes` `A- A- A- R` |
+| RECOVERY_ROLLBACK | PASS | TCG | `recovery-rollback` `R B=` |
+| POWER_LOSS_HARNESS | PASS | TCG | `run_coupure_persistance.sh` (SIGKILL hôte) |
+| PERSISTENCE_CRASH_CONSISTENCY | PASS (après correctif) | TCG | 12/12 coupures, 0 incohérence, 0 régression ; avant correctif 3/6 régressions |
+| LOGD | PASS | TCG | `serviced logd-qualify` SMP4 + SMP1 |
+| SERVICE_SUPERVISION | PASS | TCG | `serviced qualify` + `serviced system` (états système, contrat de santé v3) |
+| IPC_LATENCY_ATTRIBUTION | PASS | TCG | `ipc-attribution` : SMP1 p50 signal→file 12 µs, **file→élu 1,29 ms**, élu→retour 71 µs |
 
-**Run Ladybird 41530447823 (push `5c3cd43a`) : FAIL non produit.** Seul job rouge : « piège du Compositor (diagnostic) », terminé à 6 min avec l'étape encore `in_progress`, étape `always()` des journaux jamais exécutée, journaux 404 → perte du runner (infrastructure). Même arbre vert en 20 min (run PR 41518023294). Classé **NON_QUALIFIANT**, ni PASS ni défaut produit ; rejoué par la qualification 41592642065.
+Aucun verdict n'est KVM ni PHYSICAL. Tous les TCG ont tourné en local **et** sur les runners hébergés (workflow `native-ipc-runtime`, matrice `ab-rollback` de 11 scénarios : run 41637609167 au SHA `1de19fa3`, vert).
 
-## Ce qui a changé sur la branche de travail (2026-11-03)
+## Défauts réels trouvés et corrigés pendant la mission
 
-- **Défaut sécurité corrigé** : un programme ring 3 non privilégié faisait paniquer le noyau en 2 appels (waitset qui se surveille → `SpinLock recursive acquisition`). Reproduit en TCG, corrigé, test permanent.
-- **Défaut cycle de vie corrigé** : les handles natifs d'un processus mort n'étaient jamais libérés à sa mort (`PEER_CLOSED` dépendant de l'activité du reste de la machine).
-- **ABI native 1.1** ([NATIVE_ABI.md](NATIVE_ABI.md)) : spawn filié et confiné, objet Process, attente bloquante, temps.
-- **Premier service ring 3 supervisé** (`healthd` + `serviced`) : crash réel, hang, budget, arrêt, aucune fuite ; SMP1/2/4/8 TCG + CI.
-- **SDK natif** `userland/libs/bouchaud-sdk` (en-tête unique vérifié contre le noyau).
-- **Mise à jour A/B** prouvée sur hôte ([UPDATE_RECOVERY.md](UPDATE_RECOVERY.md)), non branchée au chargeur.
-- **Image Trigkey traçable** + signature CPUID ; protocole physique exact.
-- **Matrice Ladybird générée** ([../ladybird/PATCH_MATRIX.md](../ladybird/PATCH_MATRIX.md)).
+1. **`fsync` d'un répertoire sans effet** (`src/compat/linux/mod.rs`) : un `rename` acquitté par `fsync(rep)` n'était pas durable — trouvé par le banc de coupure.
+2. **Confirmation de santé refusée pendant une installation** : `begin` réécrit META, l'actif ne pouvait plus se confirmer — trouvé par le banc `mise-a-jour`.
+3. **Session d'installation non liée au processus** : l'appel en vol d'un `updated` tué terminait dans la session de son successeur.
+4. **Relecture monolithique** de 90 Mio dans un seul appel système : battements manqués, `updated` tué — relecture incrémentale.
+5. **Banc IPC** : version ABI codée en dur (`ABI=1.1`).
 
-Ces changements **ne font pas partie du candidat** `c1e55da` : ils seront qualifiés sur leur propre SHA après fusion.
+## Ce qui reste bloqué ou non commencé
+
+- `P13_FINAL_STRICT_OK` : runners `bouchaud-kvm4/kvm8` à enregistrer (`tools/ci/runner/provision_kvm_runner.sh`) — action humaine.
+- SIGNATURE TRUSTED (chaîne clé de version → manifeste signé → empreinte) : NOT_STARTED.
+- Image Trigkey A/B (ramdisk avec `serviced/healthd/updated/logd`) : non intégrée à `build_trigkey_image.sh`.
+- Ladybird §39–40 (scripts OBSOLETE, diagnostics derrière une option) : NOT_STARTED dans cette mission.
+- PHYSICAL : NOT_STARTED.
+
+Prochaine étape exacte : [CLAUDE_NEXT_MISSION.md](CLAUDE_NEXT_MISSION.md).

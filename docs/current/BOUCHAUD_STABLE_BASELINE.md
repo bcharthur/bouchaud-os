@@ -29,7 +29,7 @@
 
 ## Ce qui débloque P13 (action humaine)
 
-Enregistrer deux runners self-hosted Linux x64 avec `/dev/kvm` :
+Enregistrer deux runners self-hosted Linux x64 avec `/dev/kvm` (contrôle et étapes : `sudo tools/ci/runner/provision_kvm_runner.sh kvm4|kvm8` ; sans `--install` il ne modifie rien et refuse un hôte inapte — cœurs physiques, pas de surallocation SMT, quota, KVM, QEMU ≥ 8, disque ≥ 60 Gio, RAM ≥ 16 Gio) :
 
 - label `bouchaud-kvm4` : ≥ 4 cœurs **dédiés** (pas de voisin bruyant), utilisé par `dedicated-three-campaigns` ;
 - label `bouchaud-kvm8` : ≥ 8 cœurs dédiés, utilisé par `dedicated-smp8` (qualification + 30 min).

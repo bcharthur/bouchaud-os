@@ -1,34 +1,30 @@
-# CLAUDE — PROCHAINE SESSION (relevé 2026-11-03)
+# CLAUDE — PROCHAINE SESSION (relevé 2026-11-03, fin de mission ATOMIC PLATFORM)
 
 Refaire `git fetch && git rev-parse HEAD` et relire [STATUS_CURRENT.md](STATUS_CURRENT.md) : ce fichier est daté.
 
-## 1. Lire d'abord les verdicts encore ouverts au relevé (candidat `main@c1e55da`)
+## 1. État de départ
 
-| Run | Quoi | Si rouge |
-|---:|---|---|
-| 41592642065 | Ladybird `palier=qualification` (C22 6×6 strict 1024 Kio, primitives P13 strictes, convergence) | SYMPTÔME → journal → cause ; ne pas relancer à l'aveugle |
-| 41592677703 | Endurance (tranches 90 min) | idem |
-| 41596509318 | C5 KVM (témoin historique rouge attendu, fenêtre verte, image ×24) | un vert du témoin = banc non qualifiant |
-
-Tous verts + Nightly 41592645380 PASS ⇒ seul P13 strict manque à CAP A.
+Branche `claude/atomic-platform-20261103` (non fusionnée, aucune PR ouverte au relevé). Chaîne A/B complète prouvée sous QEMU/OVMF (TCG) : chargeur, passage, commit de santé, rollback, `updated` ring 3, capacités, recovery, échecs répétés, coupures pendant l'écriture atomique, `logd`, attribution IPC. Détail et preuves : [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
 
 ## 2. Bloquants qui exigent l'utilisateur (ne pas les contourner)
 
-1. **Runners self-hosted** `bouchaud-kvm4` et `bouchaud-kvm8` (KVM, cœurs dédiés) → puis `p13-final-candidate.yml` en dispatch. Sans eux, `P13_FINAL_STRICT_OK` est impossible ; ne jamais le simuler avec un runner hébergé.
-2. **Protection de main** : appliquer `tools/github/ruleset-main.json` (Settings → Rules → Rulesets → Import, ou `gh api -X POST repos/bcharthur/bouchaud-os/rulesets --input tools/github/ruleset-main.json`).
-3. **Campagne PHYSICAL** : [TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md), image par `tools/release/build_trigkey_image.sh`.
+1. **Runners self-hosted** `bouchaud-kvm4` / `bouchaud-kvm8` : `sudo tools/ci/runner/provision_kvm_runner.sh kvm8 [--install]` sur l'hôte dédié, puis l'enregistrement imprimé (jeton à usage unique). Sans eux `P13_FINAL_STRICT_OK` reste impossible (`BLOCKED_BY_RUNNER_PROVISIONING`) ; SMP8 reste `PENDING_DEDICATED_KVM8`.
+2. **Protection de main** : `tools/github/ruleset-main.json`.
+3. **PHYSICAL** : [TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md) §2 et §2bis (A/B AB1–AB8).
 
 ## 3. Travail suivant, dans l'ordre
 
-1. Fusionner la branche `claude/cap-stable-platform-20261103` (après CI verte) ; requalifier le nouveau HEAD (mêmes gates que §1 + `native-ipc-runtime`, qui exécute désormais `serviced qualify` SMP4+SMP1).
-2. **P13 latence interactive SMP1** : IPC natif p50 ≈ 4 ms (aller 1,1 ms / retour 2,5 ms) en mode UP. Instrumenter prêt→élu côté noyau pour les réveils par `WaitSource` (les horodatages `reveil_*` ne couvrent que les sommeils à échéance). Attribuer avant de corriger.
-3. **A/B branché** : disposition disque (slot B + bloc), chargeur (`choisit_boot` persisté avant le saut), commit de santé par `serviced` — [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
-4. **Deuxième service** userland (logging/health → session) sur l'ABI 1.1, en réutilisant `serviced`.
-5. Ladybird : retirer les 2 patchs OBSOLETE (décision humaine), puis séparer les DIAGNOSTIC derrière une option avec preuve A/B — [../ladybird/PATCH_MATRIX.md](../ladybird/PATCH_MATRIX.md).
-6. CAP C seulement ensuite : P10+ 2D (mesures input→frame), HDA physique.
+1. Ouvrir la PR de la branche, qualifier son HEAD (CI Fast, Integration, Reliability V3, Native IPC avec la matrice `ab-rollback` + coupures, Ladybird qualification, Nightly) sur le **même SHA** ; fusion sur décision humaine.
+2. **SIGNATURE TRUSTED** : clé de version de confiance → manifeste canonique signé → empreinte d'image, vérifiée par `updated` AVANT `begin` (Ed25519 `no_std` dans `system/update-core`, vecteurs RFC 8032 en test hôte, clé de développement générée par le banc, aucune clé privée commitée). Aujourd'hui : HASH VALID seulement.
+3. **Image Trigkey A/B** : `build_trigkey_image.sh` doit produire le disque A/B avec `serviced/healthd/updated/logd` dans le ramdisk (sinon tout candidat est retiré — voulu).
+4. **Latence SMP1** : l'attribution (`ipc-attribution`) place l'essentiel dans `file→élu` (p50 ≈ 1,3 ms TCG SMP1), pas dans le chemin de réveil (≈ 12 µs). Proposer, mesurer avant/après, une préemption du réveilleur au profit d'un réveillé interactif — sans toucher aux seuils, et seulement avec cette attribution comme référence.
+5. `logd` : faire passer `healthd` et `updated` par lui (canal d'intake par service), persistance optionnelle bornée.
+6. Ladybird (§39–40 de la mission) : retrait des patchs OBSOLETE et diagnostics derrière une option — non fait dans cette mission.
+7. CAP P10+ seulement ensuite.
 
 ## 4. Règles qui ont servi cette session
 
-- Une campagne = un SHA ; ne pas pousser sur la branche pendant qu'une qualification y tourne (chaque push annule les runs en cours).
-- Un banc peut mentir : `grep -q` sous `pipefail` a failli faire un faux vert (attrapé par `verifie-pipefail-sigpipe.py`). Tester les vérificateurs par mutation.
-- Une hypothèse de performance se mesure avant/après : « le quantum de 1 ms cause la latence SMP1 » était fausse.
+- Un banc rouge sur sa propre qualification se lit avant d'être « corrigé » : `logd-qualify` comptait mal (`received = accepted + 3` : les événements du superviseur), le correctif était dans le test, et une tautologie (« producteur jamais bloqué ») a été remplacée par un vrai décompte.
+- Le banc de coupure a trouvé un vrai défaut produit (`fsync` d'un répertoire sans effet) ; le banc A/B en a trouvé trois (confirmation refusée pendant une installation, session d'installation non liée au processus, relecture monolithique qui affame les battements).
+- Ne pas modifier l'arbre pendant qu'un banc construit ; les bancs reconstruisent à chaque scénario.
+- Une coupure peut tronquer la dernière ligne série : ne compter que les lignes complètes.

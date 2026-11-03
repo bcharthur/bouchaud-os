@@ -1,4 +1,4 @@
-# ABI native Bouchaud — v1.1 (référence)
+# ABI native Bouchaud — v1.2 (référence)
 
 **Source de vérité du contrat :** `src/kernel/native/abi/{types,numbers,wire}.rs`.
 **Description C unique :** `userland/libs/bouchaud-sdk/include/bouchaud/abi.h` (+ wrappers `sdk.h`).
@@ -15,6 +15,7 @@ Un programme natif n'inclut que `bouchaud/sdk.h`, définit `int bo_main(const st
 |---|---|
 | 1.0 | handles, canaux (+ envoi atténué), événements, waitsets (poll), régions partagées |
 | 1.1 | `PROCESS_SPAWN/INFO/KILL`, objet Process, signal `TERMINATED`, `WAITSET_WAIT`, `TIME_NOW`, erreur `TimedOut` |
+| 1.2 | objet **Update** (kind 6), droits `UPDATE_HEALTH` (bit 8) et `UPDATE_INSTALL` (bit 9), `UPDATE_STATE`, `UPDATE_COMMIT_HEALTH`, `UPDATE_INSTALL_BEGIN/WRITE/FINISH/VERIFY` (0x70–0x75) |
 
 ## 2. Appels
 
@@ -28,6 +29,14 @@ Espace de noms `0x424F_0000 + n` (disjoint des numéros Linux). Retour : `>= 0` 
 | 0x20–0x23 | `event_create/signal/reset/query` | signal/reset: SIGNAL, query: WAIT | |
 | 0x30–0x33 | `waitset_create/add/remove/poll` | add/remove: WRITE sur le waitset, WAIT sur la cible ; poll: READ | |
 | 0x34 | `waitset_wait(ws, out, cap, timeout_ns)` | READ | bloquant, voir §6 |
+| 0x70 | `update_state(cap, out)` | INSPECT | passage du chargeur + bloc META (`struct bo_update_state`, 40 o) |
+| 0x71 | `update_commit_health(cap)` | UPDATE_HEALTH | 0 : candidat promu (durable) ; 1 : déjà l'actif Bon ; refus : `ACCESS_DENIED` / `NOT_FOUND` |
+| 0x72 | `update_install_begin(cap, slot)` | UPDATE_INSTALL | refuse le slot en cours et l'actif ; le slot passe Vide AVANT toute écriture ; session liée au pid |
+| 0x73 | `update_install_write(cap, off, buf, len)` | UPDATE_INSTALL | aligné bloc, ≤ 1 Mio, borné à la partition du slot cible |
+| 0x75 | `update_install_verify(cap, len)` | UPDATE_INSTALL | relecture DU DISQUE par morceaux (≤ 1 Mio) ; rend les octets restants |
+| 0x74 | `update_install_finish(cap, sha256, len, essais)` | UPDATE_INSTALL | exige la relecture complète ; SHA-256 égal → Candidat{essais} |
+
+**Aucun appel ne crée un objet Update.** Le noyau en donne deux à `/bin/serviced system` au lancement : santé (`INSPECT|UPDATE_HEALTH|DUP|TRANSFER`) et installation (`INSPECT|UPDATE_INSTALL|TRANSFER`), que serviced passe atténuée (`INSPECT|UPDATE_INSTALL`) à `updated` seul. Voir [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
 | 0x40–0x43 | `shm_create/size/read/write` | size: INSPECT, read: READ, write: WRITE | plafond par objet selon profil de sécurité |
 | 0x50 | `process_spawn(path, len, handles, n, masks, out)` | TRANSFER sur chaque handle | voir §5 |
 | 0x51 | `process_info(proc, out)` | INSPECT | `{pid, state, exit_code}` |

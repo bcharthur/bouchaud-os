@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "as_of": "2026-11-03",
-  "observed_main_head": "c1e55da99dcc411f45ee68ebd285d91205f82067",
+  "observed_main_head": "d3b55d17429d49daf4284fedf84e5c904a40a9e3",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
   "main_protected": false,
@@ -124,45 +124,120 @@
     "gpu": "VIRTIO_2D_CODE_PRESENT_PHYSICAL_UNKNOWN"
   },
   "limitations": [
-    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered",
+    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered (tools/ci/runner/provision_kvm_runner.sh prepares the host)",
     "main branch protection not applied (ruleset ready: tools/github/ruleset-main.json)",
-    "PHYSICAL Trigkey campaign not executed",
-    "SMP1 native IPC RTT p50 ~4 ms = one UP quantum, attribution open",
-    "A/B update not wired to the loader"
+    "PHYSICAL Trigkey campaign not executed (A/B steps AB1-AB8 in TRIGKEY_CAMPAIGN.md)",
+    "release signature not verified on device: HASH VALID only",
+    "Trigkey image not yet built as an A/B disk with serviced/healthd/updated/logd in the ramdisk",
+    "SMP1 native IPC latency attributed (file->elu dominates), not corrected"
   ],
   "candidate": {
-    "sha": "c1e55da99dcc411f45ee68ebd285d91205f82067",
+    "sha": "d3b55d17429d49daf4284fedf84e5c904a40a9e3",
     "branch": "main",
-    "runtime_identical_to": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
-    "note": "c1e55da differs from 5c3cd43 only by docs and CI files"
+    "note": "merge of PR #239; the atomic-platform work is on the work branch, not merged"
   },
   "ladybird_sha": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
   "platform": {
-    "native_abi": "1.1",
+    "native_abi": "1.2",
     "native_services_qualify": {
       "tcg_smp": [
         1,
-        2,
-        4,
-        8
+        4
       ],
       "local_status": "PASS",
-      "ci_run": 41596268941,
-      "ci_status": "PASS"
+      "includes": [
+        "serviced qualify",
+        "serviced logd-qualify",
+        "ipc-attribution"
+      ]
     },
-    "update_ab": "HOST_PROVEN_NOT_WIRED",
+    "update_ab": "TCG_PROVEN_WIRED",
+    "atomic_platform_verdicts": {
+      "UPDATE_AB_CORE": {
+        "verdict": "PASS",
+        "level": "HOST"
+      },
+      "LOADER_AB": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "BOOT_ATTEMPT_PERSISTENCE": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "HEALTH_COMMIT": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "AUTO_ROLLBACK": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "UPDATED_RING3": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "UPDATE_CAPABILITIES": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "SIGNED_MANIFEST": {
+        "verdict": "PARTIAL",
+        "level": "TCG",
+        "detail": "HASH_VALID verified on device; SIGNATURE_TRUSTED NOT_STARTED"
+      },
+      "RECOVERY_BOOT": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "RECOVERY_ROLLBACK": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "POWER_LOSS_HARNESS": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "PERSISTENCE_CRASH_CONSISTENCY": {
+        "verdict": "PASS",
+        "level": "TCG",
+        "detail": "after fix: fsync on a directory was a no-op (3/6 regressions before, 0/12 after)"
+      },
+      "LOGD": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "SERVICE_SUPERVISION": {
+        "verdict": "PASS",
+        "level": "TCG"
+      },
+      "IPC_LATENCY_ATTRIBUTION": {
+        "verdict": "PASS",
+        "level": "TCG",
+        "detail": "SMP1 p50: signal->file 12us, file->elu 1.29ms, elu->retour 71us"
+      },
+      "P13_SMP8": {
+        "verdict": "BLOCKED",
+        "level": "NONE",
+        "detail": "PENDING_DEDICATED_KVM8 / BLOCKED_BY_RUNNER_PROVISIONING"
+      },
+      "PHYSICAL": {
+        "verdict": "NOT_STARTED",
+        "level": "NONE"
+      }
+    },
+    "ab_bench": "tools/ci/run_ab_rollback.sh (11 scenarios; workflow native-ipc-runtime, job ab-rollback)",
     "image_traceable": "tools/release/build_trigkey_image.sh"
   },
   "known_blockers": [
-    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered",
+    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered (tools/ci/runner/provision_kvm_runner.sh prepares the host)",
     "main branch protection not applied (ruleset ready: tools/github/ruleset-main.json)",
-    "PHYSICAL Trigkey campaign not executed",
-    "SMP1 native IPC RTT p50 ~4 ms = one UP quantum, attribution open",
-    "A/B update not wired to the loader"
+    "PHYSICAL Trigkey campaign not executed (A/B steps AB1-AB8 in TRIGKEY_CAMPAIGN.md)"
   ],
   "observed_work_branch": {
-    "name": "claude/cap-stable-platform-20261103",
-    "head": "968fea1692a64435a766406758be4eb8a67b628e"
+    "name": "claude/atomic-platform-20261103",
+    "head": "SEE_GIT",
+    "note": "read `git rev-parse origin/claude/atomic-platform-20261103`; this file is a snapshot"
   },
   "updates_automatically": false
 }
