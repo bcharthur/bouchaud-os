@@ -30,6 +30,13 @@ on:
       - 'tools/userland/build-native-ipc-ring3-probe.sh'
       - 'tools/ci/run_native_ipc_probe.sh'
       - 'tools/ci/reliability/**'
+      - 'system/update-core/**'
+      - 'tools/update/**'
+      - 'tools/reference/uefi-preboot-probe/**'
+      - 'tools/reference/uefi-image-builder/**'
+      - 'tools/ci/run_ab_rollback.sh'
+      - 'src/platform/pc/stage2.rs'
+      - 'src/boot/**'
       - '.github/workflows/native-ipc-runtime.yml'
   push:
     branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
@@ -60,6 +67,13 @@ on:
       - 'src/kernel/security/**'
       - 'tools/userland/build-native-ipc-ring3-probe.sh'
       - 'tools/ci/run_native_ipc_probe.sh'
+      - 'system/update-core/**'
+      - 'tools/update/**'
+      - 'tools/reference/uefi-preboot-probe/**'
+      - 'tools/reference/uefi-image-builder/**'
+      - 'tools/ci/run_ab_rollback.sh'
+      - 'src/platform/pc/stage2.rs'
+      - 'src/boot/**'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
 
@@ -170,11 +184,54 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  ab-rollback:
+    # BOUCHAUD_LOADER_AB_V1 : le chargeur A/B sous OVMF, un QEMU par boot sur le
+    # MEME disque, coupure SIGKILL a chaque boot. Candidat qui panique, candidat
+    # qui gele, une copie META corrompue (chacune), les deux corrompues.
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
+    name: ab-rollback (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [panique, gel, meta-0, meta-1, meta-2]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            tools/reference/uefi-preboot-probe/target
+          key: ab-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ab-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: QEMU + OVMF
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-uefi
+      - name: Rollback A/B (${{ matrix.scenario }})
+        run: bash tools/ci/run_ab_rollback.sh "${{ matrix.scenario }}" target/ab-rollback
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ab-rollback-${{ matrix.scenario }}
+          path: target/ab-rollback/boot-*.log
+          if-no-files-found: error
+          retention-days: 14
+
   native-ipc-verdict:
     # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 : le verdict, jamais saute -- execute ici,
     # ou reflete du run push du meme arbre.
     name: native-ipc / verdict
-    needs: [dedoublonne, native-ipc-runtime]
+    needs: [dedoublonne, native-ipc-runtime, ab-rollback]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -200,8 +257,10 @@ jobs:
         if: needs.dedoublonne.outputs.reutilise != 'true'
         env:
           R_RUNTIME: ${{ needs.native-ipc-runtime.result }}
+          R_AB: ${{ needs.ab-rollback.result }}
           R_DEDOUBLONNE: ${{ needs.dedoublonne.result }}
         run: |
-          echo "native-ipc-runtime=$R_RUNTIME dedoublonne=$R_DEDOUBLONNE"
+          echo "native-ipc-runtime=$R_RUNTIME ab-rollback=$R_AB dedoublonne=$R_DEDOUBLONNE"
           [ "$R_RUNTIME" = success ] || { echo "NATIVE_IPC_VERDICT_ECHEC runtime=$R_RUNTIME"; exit 1; }
+          [ "$R_AB" = success ] || { echo "NATIVE_IPC_VERDICT_ECHEC ab-rollback=$R_AB"; exit 1; }
           echo NATIVE_IPC_VERDICT_OK
