@@ -1,21 +1,39 @@
-# Baseline stable — Bouchaud OS (20 octobre 2026)
+# Baseline stable — Bouchaud OS
 
-**NOT_ESTABLISHED.** Voir [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md) puis [P13_CLOSEOUT_2026-10-19.md](P13_CLOSEOUT_2026-10-19.md).
+**NOT_ESTABLISHED (2026-11-03).** Aucun tag de release ne doit être posé.
 
-Les commits `7d6c944b` et `cbbd5ec0` (20/10) modifient le chemin de reveil : **toutes les preuves de `f5692b7` / `2582cde9` ci-dessous sont a refaire sur le nouveau SHA** avant toute qualification.
+## Candidat évalué
 
-| Critere | Etat / preuve |
+| Champ | Valeur |
 |---|---|
-| CI Fast, Reliability, Integration, Native IPC, Ladybird au meme SHA | **PASS** sur `d097281d` (20/10) : CI Fast, Integration, Reliability V3, Native IPC, Security Runtime, SCM_RIGHTS, ladybird-sync verts ; Ladybird push 39423953091 **20/20** (verdict de convergence compris). Precedent : `f5692b7` |
-| Gel global QEMU SMP8 | 4/9 gels >=200ms -> 0/15 apres corrections IRQ/serie; preuve limitee |
-| P13 KVM SMP1/2/4 strict | **PARTIEL** : SMP2 `P13_STRICT_OK` sur `d097281d` et `d02e8294` ; SMP1 2/2 puis 1/2 ; SMP4 0/2 puis 1/2 -- echecs restants : emission serie masquee (decision humaine, closeout §6.4) |
-| Ladybird au meme SHA `ed5602f4` | **Ladybird 2/2 runs verts** (PR 39479638849 et push 39479633757 : 16/16 jobs Ladybird chacun, dont diagnostic memoire -- rouge 2/2 sur `d02e8294`, `f7ecba30` POLLOUT entre les deux) ; convergence du run push rouge par `primitives` seulement (A/B et attribution P13) ; baseline **NOT_ESTABLISHED** (P13 non reproduit) |
-| Ladybird au meme SHA `d02e8294` | **FAIL** (push 39447642999) : jobs Ladybird reels verts, mais diagnostic memoire rouge 2/2 runs (correctif candidat `f7ecba30`, a mesurer) et primitives rouges ; baseline **NOT_ESTABLISHED** |
-| A/B reveil precis KVM SMP1/4 | **NON CONCLUANT** par construction (bras `off` = le defaut corrige ; decision humaine closeout §6.1) ; bras `on` 8/8 `QUALIFIE_OK` sur `d097281d` |
-| SMP8 KVM dedie >=8 CPU | **NON PROUVE** ; runner `bouchaud-kvm8` necessaire |
-| Trois campagnes independantes meme SHA | **NON PROUVEES** |
-| Trigkey PHYSICAL, AMD/RTL8168 | **NON PROUVE** |
-| GPU composition directe KVM (tuiles) | **NON_CONVAINCANT** : direct p50 58us, copie p50 52us |
-| Correction du compteur TSC-deadline strict | `4d279ff` en code, preuve complete same-HEAD a controler |
+| Bouchaud SHA | `c1e55da99dcc411f45ee68ebd285d91205f82067` (runtime = `5c3cd43a`) |
+| Ladybird SHA | `cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6` (`third_party/UPSTREAM.md`) |
+| Toolchain | `nightly-2026-06-01` (rustc 1.98.0-nightly 14210df0e) |
+| Build | bootimage legacy `dev` (CI) ; image Trigkey : UEFI `uefi-boot,reference-bringup,reference-desktop` |
+| Hash kernel / image | produits par `tools/release/build_trigkey_image.sh` au moment de la release (manifest.json) |
 
-Un workflow vert avec porte P13 non stricte ne constitue jamais une baseline produit. Interdiction de modifier les seuils ou les quorums pour attribuer du vert. Les anciens rapports restent archives.
+## Verdicts
+
+| Exigence 0.1 | Verdict | Preuve |
+|---|---|---|
+| FAST / Integration / Reliability | PASS | 41539949788 / 41539949905 / 41539949936 |
+| IPC / Security | PASS | 41592664152 / 41592667159 |
+| Nightly | PASS | 41592645380 |
+| Ladybird qualification + C22 strict 6/6 (plafond 1024 Kio) | EN COURS | 41592642065 |
+| Endurance | EN COURS | 41592677703 |
+| C5 | STATIC_CLOSED ; KVM en cours | revue + 41596509318 |
+| **P13_FINAL_STRICT_OK** | **BLOQUÉ** | runners self-hosted `bouchaud-kvm4`, `bouchaud-kvm8` inexistants |
+| Aucune panique en qualification | à confirmer à la fin des runs | |
+| Image reproductible | outillage prêt (`release.yml` double build ; `build_trigkey_image.sh`) | |
+| PHYSICAL | PHYSICAL_PENDING | [TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md) |
+
+## Ce qui débloque P13 (action humaine)
+
+Enregistrer deux runners self-hosted Linux x64 avec `/dev/kvm` :
+
+- label `bouchaud-kvm4` : ≥ 4 cœurs **dédiés** (pas de voisin bruyant), utilisé par `dedicated-three-campaigns` ;
+- label `bouchaud-kvm8` : ≥ 8 cœurs dédiés, utilisé par `dedicated-smp8` (qualification + 30 min).
+
+Puis : `workflow_dispatch` de `p13-final-candidate.yml` sur le candidat, **après** un Ladybird `palier=qualification` et un Nightly réussis sur ce même SHA. Le gate `tools/ci/p13_final_gate.py` exige les deux en `workflow_dispatch` sur la même branche et le même SHA.
+
+Historique : versions précédentes de ce fichier dans l'historique Git ; preuves d'octobre : [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md).
