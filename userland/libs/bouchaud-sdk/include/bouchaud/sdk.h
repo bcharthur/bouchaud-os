@@ -174,6 +174,23 @@ static inline void bo_puts(const char *s) { bo_write(s, bo_strlen(s)); }
 void bo_put_i64(bo_i64 v);
 void bo_put_u64(bo_u64 v);
 
+/* One console line = ONE write. Lines written piecewise get interleaved with
+ * kernel log lines on the shared serial console, which corrupts markers a
+ * bench must find whole. Build the line, then emit it once. */
+#define BO_LINE_CAP 240
+struct bo_line { bo_usize len; char buf[BO_LINE_CAP]; };
+void bo_line_begin(struct bo_line *l);
+void bo_line_str(struct bo_line *l, const char *s);
+void bo_line_i64(struct bo_line *l, bo_i64 v);
+void bo_line_kv(struct bo_line *l, const char *key, bo_i64 v);   /* " key=v" */
+void bo_line_end(struct bo_line *l);                               /* adds '\n', writes */
+
+/* Line-buffered console for single-threaded programs: text accumulates in a
+ * process-wide line and is written once, at each '\n' (or when full). */
+void bo_say(const char *s);
+void bo_say_i64(bo_i64 v);
+void bo_say_kv(const char *key, bo_i64 v);
+
 __attribute__((noreturn)) void bo_exit(int code);
 
 /* Native sleep built on a private wait set: never busy-waits. */

@@ -134,3 +134,54 @@ void *memcpy(void *dst, const void *src, bo_usize n)
     while (n--) *d++ = *s++;
     return dst;
 }
+
+void bo_line_begin(struct bo_line *l) { l->len = 0; }
+
+void bo_line_str(struct bo_line *l, const char *s)
+{
+    while (*s && l->len < BO_LINE_CAP - 1) l->buf[l->len++] = *s++;
+}
+
+void bo_line_i64(struct bo_line *l, bo_i64 v)
+{
+    char t[24];
+    int i = 24;
+    bo_u64 u = v < 0 ? (bo_u64)(-(v + 1)) + 1 : (bo_u64)v;
+    if (u == 0) t[--i] = '0';
+    while (u) { t[--i] = (char)('0' + u % 10); u /= 10; }
+    if (v < 0) t[--i] = '-';
+    while (i < 24 && l->len < BO_LINE_CAP - 1) l->buf[l->len++] = t[i++];
+}
+
+void bo_line_kv(struct bo_line *l, const char *key, bo_i64 v)
+{
+    bo_line_str(l, " ");
+    bo_line_str(l, key);
+    bo_line_str(l, "=");
+    bo_line_i64(l, v);
+}
+
+void bo_line_end(struct bo_line *l)
+{
+    l->buf[l->len++] = '\n';
+    bo_write(l->buf, l->len);
+    l->len = 0;
+}
+
+static struct bo_line bo__console;
+
+void bo_say(const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '\n') {
+            bo_line_end(&bo__console);
+            continue;
+        }
+        if (bo__console.len >= BO_LINE_CAP - 1) bo_line_end(&bo__console);
+        bo__console.buf[bo__console.len++] = *s;
+    }
+}
+
+void bo_say_i64(bo_i64 v) { bo_line_i64(&bo__console, v); }
+
+void bo_say_kv(const char *key, bo_i64 v) { bo_line_kv(&bo__console, key, v); }

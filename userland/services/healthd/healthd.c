@@ -58,14 +58,14 @@ int bo_main(const struct bo_start *start)
     struct bo_wait_event ev[2];
 
     if (start->bootstrap_count != 1) {
-        bo_puts("[HEALTHD] FAIL bootstrap_count\n");
+        bo_say("[HEALTHD] FAIL bootstrap_count\n");
         return 2;
     }
     control = start->bootstrap[0];
 
     ws = bo_waitset_create();
     if (ws < 0 || bo_waitset_add((bo_handle_t)ws, control, KEY_CONTROL) != 0) {
-        bo_puts("[HEALTHD] FAIL waitset\n");
+        bo_say("[HEALTHD] FAIL waitset\n");
         return 3;
     }
 

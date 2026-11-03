@@ -86,7 +86,7 @@ static bo_handle_t ws;
 
 /* ---- tiny formatting ---------------------------------------------------- */
 
-static void kv(const char *k, bo_i64 v) { bo_puts(" "); bo_puts(k); bo_puts("="); bo_put_i64(v); }
+static void kv(const char *k, bo_i64 v) { bo_say_kv(k, v); }
 
 static bo_u64 now(void) { bo_i64 t = bo_time_now_ns(); return t < 0 ? 0 : (bo_u64)t; }
 
@@ -124,17 +124,17 @@ static bo_usize put_u64(char *d, bo_usize at, bo_usize cap, bo_u64 v)
 
 static void transition(struct service *s, enum state to, const char *why)
 {
-    bo_puts("[SERVICED] svc=");
-    bo_puts(s->name);
-    bo_puts(" ");
-    bo_puts(state_name(s->state));
-    bo_puts("->");
-    bo_puts(state_name(to));
-    bo_puts(" why=");
-    bo_puts(why);
+    bo_say("[SERVICED] svc=");
+    bo_say(s->name);
+    bo_say(" ");
+    bo_say(state_name(s->state));
+    bo_say("->");
+    bo_say(state_name(to));
+    bo_say(" why=");
+    bo_say(why);
     kv("pid", (bo_i64)s->pid);
     kv("t_ms", (bo_i64)(now() / MS));
-    bo_puts("\n");
+    bo_say("\n");
     s->state = to;
 }
 
@@ -179,11 +179,11 @@ static int start(struct service *s)
     bo_handle_close(pair[1]);
     if (rc != 0) {
         bo_handle_close(pair[0]);
-        bo_puts("[SERVICED] svc=");
-        bo_puts(s->name);
-        bo_puts(" spawn_error");
+        bo_say("[SERVICED] svc=");
+        bo_say(s->name);
+        bo_say(" spawn_error");
         kv("rc", rc);
-        bo_puts("\n");
+        bo_say("\n");
         return -1;
     }
     s->chan = pair[0];
@@ -226,17 +226,17 @@ static void on_death(struct service *s)
     /* Platform invariant: when TERMINATED is visible, the dead process'
      * handles are already released, so its channel shows PEER_CLOSED. */
     sig_chan = bo_handle_info(s->chan, &hi);
-    bo_puts("[SERVICED] svc=");
-    bo_puts(s->name);
-    bo_puts(" death");
+    bo_say("[SERVICED] svc=");
+    bo_say(s->name);
+    bo_say(" death");
     kv("pid", (bo_i64)s->pid);
     kv("exit", info.exit_code);
     kv("peer_closed", sig_chan == 0 && (hi.signals & BO_SIGNAL_PEER_CLOSED) ? 1 : 0);
-    bo_puts("\n");
+    bo_say("\n");
     if (!(sig_chan == 0 && (hi.signals & BO_SIGNAL_PEER_CLOSED))) {
-        bo_puts("[SERVICED] INVARIANT_VIOLATION terminated_without_peer_closed svc=");
-        bo_puts(s->name);
-        bo_puts("\n");
+        bo_say("[SERVICED] INVARIANT_VIOLATION terminated_without_peer_closed svc=");
+        bo_say(s->name);
+        bo_say("\n");
     }
     release(s);
 
@@ -269,11 +269,11 @@ static void on_message(struct service *s)
             s->running_at = now();
             s->last_pong_at = s->running_at;
             transition(s, RUNNING, "ready");
-            bo_puts("[SERVICED] svc=");
-            bo_puts(s->name);
-            bo_puts(" start_latency");
+            bo_say("[SERVICED] svc=");
+            bo_say(s->name);
+            bo_say(" start_latency");
             kv("ms", (bo_i64)((s->running_at - s->spawned_at) / MS));
-            bo_puts("\n");
+            bo_say("\n");
             /* A clean start resets the backoff, not the crash budget. */
             s->backoff = 0;
         } else if (prefix(in, (bo_usize)got, "pong ")) {
@@ -383,9 +383,9 @@ static int failures;
 
 static void verdict(const char *what, int ok)
 {
-    bo_puts(ok ? "[SERVICED] ok   " : "[SERVICED] FAIL ");
-    bo_puts(what);
-    bo_puts("\n");
+    bo_say(ok ? "[SERVICED] ok   " : "[SERVICED] FAIL ");
+    bo_say(what);
+    bo_say("\n");
     if (!ok) failures++;
 }
 
@@ -453,13 +453,13 @@ static int measure_ipc(struct service *s)
     s->missed = 0;
     s->last_pong_at = now();
     sort_u64(rtt, RTT_SAMPLES);
-    bo_puts("SERVICED_IPC_RTT_NS");
+    bo_say("SERVICED_IPC_RTT_NS");
     kv("n", RTT_SAMPLES);
     kv("p50", (bo_i64)rtt[RTT_SAMPLES / 2]);
     kv("p95", (bo_i64)rtt[RTT_SAMPLES * 95 / 100]);
     kv("p99", (bo_i64)rtt[RTT_SAMPLES * 99 / 100]);
     kv("max", (bo_i64)rtt[RTT_SAMPLES - 1]);
-    bo_puts("\n");
+    bo_say("\n");
     return 1;
 }
 
@@ -470,7 +470,7 @@ static int qualify(void)
     bo_u64 t0;
     int i;
 
-    bo_puts("[SERVICED] QUALIFY_BEGIN\n");
+    bo_say("[SERVICED] QUALIFY_BEGIN\n");
     baseline = bo_handle_count();
 
     add_service("health", "/bin/healthd", -1);
@@ -495,16 +495,16 @@ static int qualify(void)
             run_until(health, RESTARTING, 10000 * MS));
     verdict("crash exit code is a fault, not a clean exit", health->last_exit != 0);
     verdict("crashed service back to Running", run_until(health, RUNNING, 20000 * MS));
-    bo_puts("SERVICED_RECOVERY_MS");
+    bo_say("SERVICED_RECOVERY_MS");
     kv("crash_to_running", (bo_i64)((health->running_at - t0) / MS));
-    bo_puts("\n");
+    bo_say("\n");
     verdict("dependent service untouched by the crash", echo->state == RUNNING && echo->restarts == 0);
     after = bo_handle_count();
-    bo_puts("SERVICED_HANDLES");
+    bo_say("SERVICED_HANDLES");
     kv("baseline", baseline);
     kv("steady", steady);
     kv("after_restart", after);
-    bo_puts("\n");
+    bo_say("\n");
     verdict("no handle leak across a crash/restart", after == steady);
 
     /* 4. hang: heartbeat misses -> Degraded -> kill -> restart. */
@@ -522,10 +522,10 @@ static int qualify(void)
     }
     if (health->state != FAILED) run_until(health, FAILED, 5000 * MS);
     verdict("crash budget spent -> Failed (no restart storm)", health->state == FAILED);
-    bo_puts("SERVICED_RESTARTS");
+    bo_say("SERVICED_RESTARTS");
     kv("health", (bo_i64)health->restarts);
     kv("budget", BUDGET_RESTARTS);
-    bo_puts("\n");
+    bo_say("\n");
 
     /* 6. orderly shutdown. */
     stop(echo);
@@ -533,19 +533,19 @@ static int qualify(void)
     verdict("echo stopped cleanly", run_until(echo, STOPPED, 10000 * MS) && echo->last_exit == 0);
     verdict("health stopped", health->state == STOPPED);
     after = bo_handle_count();
-    bo_puts("SERVICED_HANDLES");
+    bo_say("SERVICED_HANDLES");
     kv("baseline", baseline);
     kv("final", after);
-    bo_puts("\n");
+    bo_say("\n");
     verdict("every handle released at shutdown", after == baseline);
 
     if (failures) {
-        bo_puts("SERVICED_QUALIFY_FAIL");
+        bo_say("SERVICED_QUALIFY_FAIL");
         kv("failures", failures);
-        bo_puts("\n");
+        bo_say("\n");
         return 1;
     }
-    bo_puts("SERVICED_QUALIFY_OK\n");
+    bo_say("SERVICED_QUALIFY_OK\n");
     return 0;
 }
 
@@ -554,7 +554,7 @@ int bo_main(const struct bo_start *start)
     bo_i64 w;
     bo_i64 v = bo_version();
     if (v < 0 || (v >> 16) != BO_ABI_MAJOR || (v & 0xffff) < BO_ABI_MINOR) {
-        bo_puts("[SERVICED] FAIL abi_version\n");
+        bo_say("[SERVICED] FAIL abi_version\n");
         return 2;
     }
     w = bo_waitset_create();

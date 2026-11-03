@@ -20,13 +20,13 @@ static int failures;
 
 static void expect(const char *what, bo_i64 got, bo_i64 want)
 {
-    bo_puts("[NATIVE-CYCLES] ");
-    bo_puts(what);
-    bo_puts(got == want ? " ok got=" : " FAIL got=");
-    bo_put_i64(got);
-    bo_puts(" want=");
-    bo_put_i64(want);
-    bo_puts("\n");
+    bo_say("[NATIVE-CYCLES] ");
+    bo_say(what);
+    bo_say(got == want ? " ok got=" : " FAIL got=");
+    bo_say_i64(got);
+    bo_say(" want=");
+    bo_say_i64(want);
+    bo_say("\n");
     if (got != want) failures++;
 }
 
@@ -38,24 +38,24 @@ int bo_main(const struct bo_start *start)
     bo_i64 ws1, ws2, r;
     (void)start;
 
-    bo_puts("[NATIVE-CYCLES] BEGIN\n");
+    bo_say("[NATIVE-CYCLES] BEGIN\n");
     ws1 = bo_waitset_create();
     ws2 = bo_waitset_create();
-    if (ws1 < 0 || ws2 < 0) { bo_puts("[NATIVE-CYCLES] FAIL create\n"); return 1; }
+    if (ws1 < 0 || ws2 < 0) { bo_say("[NATIVE-CYCLES] FAIL create\n"); return 1; }
 
     r = bo_waitset_add((bo_handle_t)ws1, (bo_handle_t)ws1, 1);
     expect("waitset_self_add", r, -BO_E_WRONG_TYPE);
     if (r == 0) {
         /* Unfixed kernel: this poll never returns. */
-        bo_puts("[NATIVE-CYCLES] CYCLE_ACCEPTED polling-self\n");
+        bo_say("[NATIVE-CYCLES] CYCLE_ACCEPTED polling-self\n");
         r = bo_waitset_poll((bo_handle_t)ws1, ev, 4);
-        bo_puts("[NATIVE-CYCLES] POLL_RETURNED\n");
+        bo_say("[NATIVE-CYCLES] POLL_RETURNED\n");
     }
 
     r = bo_waitset_add((bo_handle_t)ws2, (bo_handle_t)ws1, 2);
     expect("waitset_nested_add", r, -BO_E_WRONG_TYPE);
 
-    if (bo_channel_create(pair) != 0) { bo_puts("[NATIVE-CYCLES] FAIL channel\n"); return 1; }
+    if (bo_channel_create(pair) != 0) { bo_say("[NATIVE-CYCLES] FAIL channel\n"); return 1; }
     moved[0] = pair[0];
     r = bo_channel_send(pair[0], "x", 1, moved, 1);
     expect("channel_send_self_endpoint", r, -BO_E_INVALID_ARGUMENT);
@@ -73,9 +73,9 @@ int bo_main(const struct bo_start *start)
     bo_handle_close((bo_handle_t)ws2);
 
     if (failures) {
-        bo_puts("[NATIVE-CYCLES] FAIL\n");
+        bo_say("[NATIVE-CYCLES] FAIL\n");
         return 1;
     }
-    bo_puts("[NATIVE-CYCLES] OK\n");
+    bo_say("[NATIVE-CYCLES] OK\n");
     return 0;
 }
