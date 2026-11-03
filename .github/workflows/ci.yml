@@ -156,6 +156,12 @@ jobs:
       # programmes natifs (service, superviseur, sonde de cycles) doivent
       # compiler W^X sans symbole non resolu. L'execution est dans
       # native-ipc-runtime.
+      # BOUCHAUD_UPDATE_AB_V1 : coupure a chaque octet et a chaque etape,
+      # exploration exhaustive ; le module de production est inclus tel quel.
+      - name: Mise a jour A/B (preuve hote)
+        run: |
+          rustc --edition 2021 --test tools/update/test_ab.rs -o target-test-ab
+          ./target-test-ab
       - name: SDK natif et contrat ABI (statique + compilation)
         run: |
           python3 tools/verifie-contrat-abi-v1.py
