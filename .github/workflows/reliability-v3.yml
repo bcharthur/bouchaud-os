@@ -1,14 +1,14 @@
 name: Reliability V3
 
 on:
+  # BOUCHAUD_GATE_TOUJOURS_PRODUIT_V1 : PAS de filtre de chemins sur les PR.
+  # `reliability-gate` est un check REQUIS de `main` ; un workflow filtre ne
+  # produit aucun check sur une PR documentaire, qui resterait bloquee en
+  # attente pour toujours. Le job `changes` classe le diff : une PR strictement
+  # documentaire (tools/ci/classify_changes.py, docs_only) ne lance aucun job
+  # QEMU et le gate le DIT (RELIABILITY_GATE_DOCS_ONLY), au lieu de pretendre
+  # avoir teste quoi que ce soit.
   pull_request:
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/**'
       # Les branches de travail Claude declenchent la meme barriere que `main`.
       #
       # Sans cette ligne, un push sur `claude/**` ne lancait AUCUN workflow :
@@ -42,8 +42,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: reliability / classify-changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENEMENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          else
+            # push/schedule/dispatch : jamais de raccourci documentaire.
+            echo docs_only=false >> "$GITHUB_OUTPUT"
+          fi
+
   host:
     name: reliability / host
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 18
     steps:
@@ -87,6 +112,8 @@ jobs:
 
   property-fuzz:
     name: reliability / property fuzz
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -234,18 +261,28 @@ jobs:
   reliability-gate:
     name: reliability-gate
     if: always()
-    needs: [host, property-fuzz, build, smp, nightly-soak]
+    needs: [changes, host, property-fuzz, build, smp, nightly-soak]
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
         env:
+          CHANGES: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          EVENEMENT: ${{ github.event_name }}
           HOST: ${{ needs.host.result }}
           PROP: ${{ needs.property-fuzz.result }}
           BUILD: ${{ needs.build.result }}
           SMP: ${{ needs.smp.result }}
           SOAK: ${{ needs.nightly-soak.result }}
         run: |
-          printf '%-10s %s\n' host "$HOST" property "$PROP" build "$BUILD" smp "$SMP" soak "$SOAK"
+          printf '%-10s %s\n' changes "$CHANGES" host "$HOST" property "$PROP" build "$BUILD" smp "$SMP" soak "$SOAK"
+          [ "$CHANGES" = success ] || exit 1
+          if [ "$EVENEMENT" = pull_request ] && [ "$DOCS_ONLY" = true ]; then
+            # Aucun fichier executable modifie : rien a qualifier, et le
+            # verdict le dit. Ce n'est pas RELIABILITY_GATE_OK.
+            echo RELIABILITY_GATE_DOCS_ONLY
+            exit 0
+          fi
           for r in "$HOST" "$PROP" "$BUILD" "$SMP"; do
             [ "$r" = success ] || exit 1
           done
