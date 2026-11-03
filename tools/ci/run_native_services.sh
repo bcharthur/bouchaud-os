@@ -101,8 +101,12 @@ for marker in "${required[@]}"; do
   fi
 done
 # Every death the supervisor saw must have had its channel already closed.
-if sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -a '\[SERVICED\] svc=.* death ' | grep -qv 'peer_closed=1'; then
-  echo "NATIVE_SERVICES_FAIL raison=mort_sans_peer_closed" >&2
+# Counted with awk over the whole file: no early-exiting reader under
+# pipefail (grep -q would SIGPIPE the producer and turn a violation green).
+morts=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/\[SERVICED\] svc=.* death / { n++ } END { print n + 0 }')
+violations=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | awk '/\[SERVICED\] svc=.* death / && !/peer_closed=1/ { n++ } END { print n + 0 }')
+if [ "$morts" -lt 5 ] || [ "$violations" -ne 0 ]; then
+  echo "NATIVE_SERVICES_FAIL raison=mort_sans_peer_closed morts=$morts violations=$violations" >&2
   exit 1
 fi
 sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'SERVICED_(IPC_RTT_NS|RECOVERY_MS|HANDLES|RESTARTS).*|svc=[a-z]+ start_latency ms=[0-9]+' | sed 's/^/  /'
