@@ -222,6 +222,20 @@ static void on_death(struct service *s)
     info.exit_code = -1;
     bo_process_info(s->proc, &info);
     s->last_exit = info.exit_code;
+    /* We are the POSIX parent: collect the zombie. The Process handle only
+     * observed the death; it never collects (BOUCHAUD_NATIVE_PROCESS_OBSERVATEUR_V1).
+     * TERMINATED is raised after the child became a zombie, so this returns
+     * at once. */
+    {
+        int st = 0;
+        bo_i64 r = bo_posix_wait4((bo_i64)s->pid, &st, 0);
+        if (r != (bo_i64)s->pid) {
+            bo_say("[SERVICED] INVARIANT_VIOLATION wait4_after_terminated svc=");
+            bo_say(s->name);
+            bo_say_kv("rc", r);
+            bo_say("\n");
+        }
+    }
 
     /* Platform invariant: when TERMINATED is visible, the dead process'
      * handles are already released, so its channel shows PEER_CLOSED. */
@@ -555,6 +569,8 @@ static int qualify(void)
     kv("final", after);
     bo_say("\n");
     verdict("every handle released at shutdown", after == baseline);
+    verdict("no zombie left (wait4(-1) = ECHILD)",
+            bo_posix_wait4(-1, 0, BO_WAIT_NOHANG) == -10);
 
     if (failures) {
         bo_say("SERVICED_QUALIFY_FAIL");

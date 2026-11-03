@@ -59,7 +59,9 @@ Espace de noms `0x424F_0000 + n` (disjoint des numéros Linux). Retour : `>= 0` 
 - jusqu'à 8 handles bootstrap, chacun atténué à son masque, installés avant la première instruction et nommés par `BO_BOOTSTRAP=<id>,<id>` (le runtime SDK les place dans `start->bootstrap[]`, dans l'ordre donné) ;
 - résultat : `{pid, process}`, `process` portant `SIGNAL|DUP|TRANSFER|INSPECT|WAIT`.
 
-**Mort.** À la mort (sortie volontaire ou tuée), dans cet ordre : descripteurs fermés, **table de handles natifs libérée** (les pairs voient `PEER_CLOSED`), `TERMINATED` levé sur les objets Process, parent notifié. Garantie exploitable : *quand `TERMINATED` est visible, les canaux du mort sont déjà fermés.* La dernière fermeture d'un handle Process sur un fils terminé récolte son zombie.
+**Mort.** À la mort (sortie volontaire ou tuée), dans cet ordre : descripteurs fermés, **table de handles natifs libérée** (les pairs voient `PEER_CLOSED`), `TERMINATED` levé sur les objets Process, parent notifié. Garantie exploitable : *quand `TERMINATED` est visible, les canaux du mort sont déjà fermés, et le fils est déjà un zombie.*
+
+**Propriété du zombie (BOUCHAUD_NATIVE_PROCESS_OBSERVATEUR_V1).** Un seul propriétaire : le **parent POSIX**, par `wait4` (SDK : `bo_posix_wait4`), exactement comme pour un fils de `fork`. Le handle Process est un **observateur** : `TERMINATED` + code de sortie copié à la mort ; le fermer, le dupliquer, le transférer ou mourir avec lui ne récolte **jamais** le zombie. Un non-parent qui détient le handle observe mais ne peut pas `wait4` (`ECHILD`). **Pas de reparenting** dans Bouchaud : le zombie d'un fils dont le parent est mort n'est pas adopté (limite POSIX préexistante, identique pour les fils de `fork`). Preuve : `userland/tests/native-process-probe.c` (6 cas, exécuté par `run_native_services.sh`).
 
 ## 6. Attente et concurrence
 

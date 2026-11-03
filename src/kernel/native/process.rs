@@ -14,11 +14,17 @@
 //! death before it is seen by the read. There is no window in which neither
 //! path sees it.
 //!
-//! Reaping. A spawned child is a real child of its launcher (parent pid set),
-//! so `wait4` keeps working. When the LAST handle on a terminated child is
-//! closed -- including when the launcher itself dies and its handle table is
-//! released -- the zombie is collected, so a supervisor that never calls
-//! `wait4` does not accumulate zombies.
+//! Ownership (BOUCHAUD_NATIVE_PROCESS_OBSERVATEUR_V1). There is exactly ONE
+//! owner of a dead child's zombie and exit status: its POSIX parent, through
+//! `wait4`, exactly as for a fork child. A native Process handle is an
+//! OBSERVER: it keeps its own copy of the exit code (taken at death) and
+//! raises TERMINATED; closing it, duplicating it, transferring it or dying
+//! with it never collects the zombie. ABI 1.1 first shipped a `Drop` that
+//! collected a terminated child when its last handle closed: a later `wait4`
+//! by the parent then returned ECHILD and the status was lost
+//! (userland/tests/native-process-probe.c, cases c2 and c5/c6). Bouchaud has
+//! no reparenting: a child whose parent died is not adopted, and a non-parent
+//! holding its handle observes it but cannot wait4 it.
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -105,21 +111,5 @@ impl ProcessRef {
 
     pub fn signals(&self) -> Signals {
         if self.terminated() { Signals::TERMINATED } else { Signals::NONE }
-    }
-}
-
-impl Drop for ProcessRef {
-    fn drop(&mut self) {
-        // Only the object is dropped here, never a lock-holding caller's
-        // state: handle tables release objects outside their own lock.
-        if self.terminated() {
-            let pid = self.state.pid;
-            let zombie = crate::kernel::task::process_by_pid(pid)
-                .map(|p| p.lifecycle.lock().zombie)
-                .unwrap_or(false);
-            if zombie {
-                crate::kernel::task::collect_child(pid);
-            }
-        }
     }
 }

@@ -170,6 +170,7 @@ jobs:
           $B target/sdk/healthd userland/services/healthd/healthd.c
           $B target/sdk/serviced userland/services/serviced/serviced.c
           $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
+          $B target/sdk/native-process-probe userland/tests/native-process-probe.c
 
   browser-engine:
     name: browser / engine tests

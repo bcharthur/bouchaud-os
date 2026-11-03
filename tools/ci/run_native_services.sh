@@ -22,15 +22,18 @@ mkdir -p "$OUT/bin"
 python3 tools/ci/verifie_sdk_abi.py
 python3 tools/verifie-contrat-abi-v1.py
 "$SDK" "$OUT/bin/native-cycles-probe" userland/tests/native-cycles-probe.c
+"$SDK" "$OUT/bin/native-process-probe" userland/tests/native-process-probe.c
 "$SDK" "$OUT/bin/healthd" userland/services/healthd/healthd.c
 "$SDK" "$OUT/bin/serviced" userland/services/serviced/serviced.c
 
 python3 tools/native/make_native_image.py --image "$OUT/native-services.img" \
   --bin native-cycles-probe="$OUT/bin/native-cycles-probe" \
+  --bin native-process-probe="$OUT/bin/native-process-probe" \
   --bin healthd="$OUT/bin/healthd" \
   --bin serviced="$OUT/bin/serviced" \
   --autorun "echo NATIVE_SERVICES_BEGIN" \
   --autorun "/bin/native-cycles-probe" \
+  --autorun "/bin/native-process-probe" \
   --autorun "/bin/serviced qualify" \
   --autorun "echo NATIVE_SERVICES_END"
 
@@ -54,7 +57,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL'
+fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL|\[NATIVE-PROCESS\] FAIL'
 deadline=$((SECONDS + ${BO_SERVICES_DELAI_S:-240}))
 while :; do
   if grep -aEq "$fatal_re" "$LOG"; then
@@ -82,6 +85,8 @@ trap - EXIT
 
 required=(
   '[NATIVE-CYCLES] OK'
+  '[NATIVE-PROCESS] OK'
+  '[SERVICED] ok   no zombie left (wait4(-1) = ECHILD)'
   '[SERVICED] ok   health reaches Running'
   '[SERVICED] ok   echo was not started before health was Running'
   '[SERVICED] ok   ipc rtt measured (200 round trips)'

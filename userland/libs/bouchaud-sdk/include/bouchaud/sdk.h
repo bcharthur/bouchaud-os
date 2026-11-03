@@ -171,6 +171,15 @@ static inline void bo_write(const char *s, bo_usize n)
 
 static inline void bo_puts(const char *s) { bo_write(s, bo_strlen(s)); }
 
+/* The zombie of a spawned child belongs to its POSIX parent, as for a fork
+ * child: a Process handle only OBSERVES (TERMINATED + exit code) and never
+ * collects. A parent collects with wait4 (pid > 0: that child; -1: any).
+ * Returns the pid, 0 with BO_WAIT_NOHANG if none is ready, or -errno
+ * (-10 = ECHILD: not a child of the caller, or already collected). */
+#define BO_WAIT_NOHANG 1
+static inline bo_i64 bo_posix_wait4(bo_i64 pid, int *status, int options)
+{ return bo__sys6(61 /* wait4 */, (bo_u64)pid, (bo_u64)status, (bo_u64)(bo_i64)options, 0, 0, 0); }
+
 void bo_put_i64(bo_i64 v);
 void bo_put_u64(bo_u64 v);
 
