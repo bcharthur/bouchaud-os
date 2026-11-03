@@ -18,6 +18,15 @@ on:
       - 'tools/userland/native-ipc-probe.c'
       - 'tools/userland/native-ipc-ring3-probe.c'
       - 'userland/services/composited/**'
+      - 'userland/services/**'
+      - 'userland/libs/**'
+      - 'userland/tests/**'
+      - 'tools/ci/run_native_services.sh'
+      - 'tools/ci/verifie_sdk_abi.py'
+      - 'tools/native/make_native_image.py'
+      - 'tools/verifie-contrat-abi-v1.py'
+      - 'tools/architecture/abi-v1-contract.json'
+      - 'src/kernel/security/**'
       - 'tools/userland/build-native-ipc-ring3-probe.sh'
       - 'tools/ci/run_native_ipc_probe.sh'
       - 'tools/ci/reliability/**'
@@ -40,6 +49,15 @@ on:
       - 'tools/userland/native-ipc-probe.c'
       - 'tools/userland/native-ipc-ring3-probe.c'
       - 'userland/services/composited/**'
+      - 'userland/services/**'
+      - 'userland/libs/**'
+      - 'userland/tests/**'
+      - 'tools/ci/run_native_services.sh'
+      - 'tools/ci/verifie_sdk_abi.py'
+      - 'tools/native/make_native_image.py'
+      - 'tools/verifie-contrat-abi-v1.py'
+      - 'tools/architecture/abi-v1-contract.json'
+      - 'src/kernel/security/**'
       - 'tools/userland/build-native-ipc-ring3-probe.sh'
       - 'tools/ci/run_native_ipc_probe.sh'
       - '.github/workflows/native-ipc-runtime.yml'
@@ -133,12 +151,22 @@ jobs:
           bash tools/ci/run_native_ipc_probe.sh \
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
 
+      # BOUCHAUD_NATIVE_SERVICES_V1 : service ring 3 supervise (spawn natif,
+      # crash injecte, hang, budget, arret, fuite de handles) et refus des
+      # cycles d'objets natifs. SMP1 et SMP4 sur le MEME noyau.
+      - name: Services natifs supervises (SMP4 puis SMP1)
+        run: |
+          B=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          OUT=target/native-services-ci bash tools/ci/run_native_services.sh "$B" 4
+          OUT=target/native-services-ci bash tools/ci/run_native_services.sh "$B" 1
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-ipc-runtime-proof
           path: |
             target/native-ipc-runtime-ci/native-ipc-runtime.log
+            target/native-services-ci/native-services-smp*.log
           if-no-files-found: error
           retention-days: 14
 

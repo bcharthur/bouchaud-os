@@ -149,6 +149,20 @@ jobs:
       - name: Compositeur ring 3 (compilation freestanding)
         run: bash userland/services/composited/build.sh
 
+      # BOUCHAUD_NATIVE_SERVICES_V1 : l'ABI native a UNE description C (le
+      # SDK) et UN contrat gele ; les deux sont compares au noyau ici, et les
+      # programmes natifs (service, superviseur, sonde de cycles) doivent
+      # compiler W^X sans symbole non resolu. L'execution est dans
+      # native-ipc-runtime.
+      - name: SDK natif et contrat ABI (statique + compilation)
+        run: |
+          python3 tools/verifie-contrat-abi-v1.py
+          python3 tools/ci/verifie_sdk_abi.py
+          B=userland/libs/bouchaud-sdk/build-program.sh
+          $B target/sdk/healthd userland/services/healthd/healthd.c
+          $B target/sdk/serviced userland/services/serviced/serviced.c
+          $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
+
   browser-engine:
     name: browser / engine tests
     needs: changes
