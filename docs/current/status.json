@@ -80,6 +80,48 @@
       "run": 41648148378,
       "verdict": "FAIL_UNATTRIBUTED",
       "detail": "job primitives/probes: SIGCHLD_MULTIFIL_ECHEC n=1 in the TCG pass; the three KVM passes of the same job were 8/8; artifact unreachable from the session (proxy 403 on the blob host)"
+    },
+    "pr241_19dc18ad": {
+      "ci_fast": {
+        "run": 41687464463,
+        "verdict": "PASS"
+      },
+      "integration": {
+        "run": 41687464517,
+        "verdict": "PASS"
+      },
+      "reliability_v3": {
+        "run": 41687464492,
+        "verdict": "PASS"
+      },
+      "native_ipc_runtime": {
+        "run": 41687464571,
+        "verdict": "PASS",
+        "note": "ab-rollback matrix incl. mise-a-jour, mise-a-jour-morts, sans-cle"
+      },
+      "ladybird_native_browser": {
+        "run": 41687464602,
+        "verdict": "PASS",
+        "note": "its 'primitives' job is skipped outside qualification: P13 did NOT run on the PR"
+      },
+      "security_runtime": {
+        "run": 41692366495,
+        "event": "workflow_dispatch",
+        "verdict": "PASS"
+      },
+      "p13_primitives_noyau": {
+        "run": 41692359972,
+        "event": "workflow_dispatch",
+        "verdict": "PASS",
+        "jobs": [
+          "probes",
+          "gpu-tampon",
+          "ordonnanceur-ab",
+          "reveil-precis"
+        ],
+        "note": "still the old 3-attempt C14 witness; the deterministic witness and the PR trigger come after 19dc18ad"
+      },
+      "codex_review": "PASS (no findings)"
     }
   },
   "hardware": {
@@ -150,7 +192,8 @@
       "ANTI_ROLLBACK_POLICY": "NOT_IMPLEMENTED",
       "UPDATE_SESSION_ISOLATION": "PASS",
       "UPDATED_HEARTBEAT": "PASS",
-      "SIGCHLD_MULTITHREAD_STABILITY": "NON_QUALIFYING"
+      "SIGCHLD_MULTITHREAD_STABILITY": "NON_QUALIFYING",
+      "P13_NEGATIVE_CONTROL": "PASS"
     },
     "security_details": {
       "ED25519_ADVERSARIAL_ENCODINGS": "332 constructed cases vs OpenSSL and libsodium: Bouchaud == libsodium on 332, != OpenSSL on 16 (small-order/non-canonical inputs OpenSSL accepts); defect found and fixed (small-order and non-canonical keys accepted, like OpenSSL 3); mutation-tested: each refusal removed is detected except the negative-zero refusal, which is an equivalent mutation (only x=0 points are identity and order 2, already refused)",
@@ -159,7 +202,8 @@
       "ANTI_ROLLBACK_POLICY": "a correctly signed OLD release can be reinstalled; local rollback (candidate -> previous Good) must stay possible",
       "UPDATE_SESSION_ISOLATION": "session bound to pid + all install calls serialized under a sleeping mutex; QEMU mise-a-jour-morts (updated killed during write and during verify)",
       "SIGCHLD_MULTITHREAD_STABILITY": "one unexplained failure on main; 125 targeted reproductions on the exact kernel 21fca026 (isolated, under strace at SMP1/2/4, full primitives context): 0 failures; root cause NOT established",
-      "UPDATED_HEARTBEAT": "contract v3 unchanged (4 x 250 ms). QEMU TCG on the final tree: mise-a-jour max service gap 666 ms, mise-a-jour-morts 170 ms, no updated Running->Degraded; published (UPDATED_MESURE), not thresholded. Two defects found by measurement and fixed: (1) first strict Ed25519 used a 256-bit ladder for [8]P, updated was killed for heartbeat_missed in mise-a-jour-morts (BOUCHAUD_ED25519_PETIT_ORDRE_V2: 3 doublings, no inversion); (2) updated served no heartbeat between manifest parsing, the refusal self-test and the real begin (~1.4 s under TCG; BOUCHAUD_UPDATED_BATTEMENT_ETAPES_V1)"
+      "UPDATED_HEARTBEAT": "contract v3 unchanged (4 x 250 ms). QEMU TCG on the final tree: mise-a-jour max service gap 666 ms, mise-a-jour-morts 170 ms, no updated Running->Degraded; published (UPDATED_MESURE), not thresholded. Two defects found by measurement and fixed: (1) first strict Ed25519 used a 256-bit ladder for [8]P, updated was killed for heartbeat_missed in mise-a-jour-morts (BOUCHAUD_ED25519_PETIT_ORDRE_V2: 3 doublings, no inversion); (2) updated served no heartbeat between manifest parsing, the refusal self-test and the real begin (~1.4 s under TCG; BOUCHAUD_UPDATED_BATTEMENT_ETAPES_V1)",
+      "P13_NEGATIVE_CONTROL": "BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1: faulty condition forced, cause counted; local TCG 5xSMP2+5xSMP4: dechiree defect shown 9/9 judged runs, ancien overlapped 10/10, correctif clean 9/10 (1 unattributed panic, see open_anomalies)"
     },
     "functional_verdicts": {
       "UPDATE_AB_CORE": "PASS(HOST)",
@@ -230,5 +274,17 @@
     "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING"
   },
   "main_protection": "BLOCKED_BY_HUMAN_GITHUB_SETTING",
-  "physical": "NOT_STARTED"
+  "physical": "NOT_STARTED",
+  "open_anomalies": {
+    "SIGCHLD_MULTIFIL_ECHEC": {
+      "seen": "main@992e67e1 run 41648148378 TCG pass, once",
+      "status": "OPEN_NOT_ATTRIBUTED",
+      "evidence_since": "125 targeted local runs on 21fca026: 0 failures; P13 41692359972 (19dc18ad) SIGCHLD steps PASS; diagnostics now print the failing case in the job log"
+    },
+    "COMPTA_CORRECTIF_PANIC_SMP4": {
+      "seen": "local TCG, 2026-11-03, 1 of 41 SMP4 'correctif' boots of run_compta_injection.sh",
+      "status": "OPEN_NOT_ATTRIBUTED",
+      "evidence_since": "log overwritten before reading; 36 isolated SMP4 correctif boots: 0 panic, 0 overlap; the bench now prints a panic's site and message in the job log"
+    }
+  }
 }
