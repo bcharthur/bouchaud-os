@@ -55,6 +55,8 @@ Relever aussi : RAM utilisable, liste PCI (NVMe, RTL8168 `10ec:8168`, xHCI, HDA 
 
 ## 2bis. A/B, rollback et recovery sur la machine (BOUCHAUD_LOADER_AB_V1)
 
+> **Bloquant constaté (QEMU, 03/11)** : sur clé USB, le commit de santé est refusé (`volume_sans_vidange_reelle`) car le pilote USB n'émet pas SYNCHRONIZE CACHE. Plan et premier incrément : [TRIGKEY_PLATFORM_PLAN.md](TRIGKEY_PLATFORM_PLAN.md).
+>
 > **Pas prêt.** L'image Trigkey actuelle (`build_trigkey_image.sh`) n'embarque pas encore `serviced`, `healthd`, `updated`, `logd`. Sans eux, aucun candidat n'est confirmé et AB3, AB4 et AB6 échoueraient par construction. Cette adaptation n'est pas faite ; tant qu'elle ne l'est pas, ces étapes restent `NOT_RUN` et ne sont présentées comme prêtes à personne.
 
 Image : un disque GPT A/B construit par `uefi-image-builder --disque-ab OUT shim.efi meta.img SLOT_A SLOT_B RECOVERY` (même chaîne que `tools/ci/run_ab_rollback.sh`), les ramdisks des slots contenant `serviced`, `healthd`, `updated`, `logd` **en plus** de l'archive Ladybird. Flash sur **clé USB** ; jamais le NVMe interne pour cette campagne.
