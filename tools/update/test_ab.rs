@@ -2,6 +2,8 @@
 //!
 //!   rustc --edition 2021 --test tools/update/test_ab.rs -o /tmp/test_ab && /tmp/test_ab
 //!
+//! Logique de production : system/update-core/src/ab.rs (crate no_std).
+//!
 //! Le module de production est inclus tel quel. Les tests modelisent ce que la
 //! machine physique ne permet pas de rejouer a volonte : une coupure
 //! d'alimentation a CHAQUE octet de l'ecriture du bloc d'amorcage, et a CHAQUE
@@ -10,7 +12,7 @@
 
 #![allow(dead_code)]
 
-#[path = "../../src/kernel/update/ab.rs"]
+#[path = "../../system/update-core/src/ab.rs"]
 mod ab;
 
 use ab::*;
@@ -52,7 +54,7 @@ fn invariants(e: &Enregistrement) {
 #[test]
 fn coupure_a_chaque_octet_rend_ancien_ou_nouveau() {
     let r1 = Enregistrement::initial(Slot::A, V1);
-    let r2 = r1.commence_installation(Slot::B).unwrap();
+    let r2 = r1.commence_installation(Slot::B, Slot::A).unwrap();
     let r3 = r2.marque_candidat(Slot::B, V2, V2, 3).unwrap();
     for (avant, apres) in [(r1, r2), (r2, r3)] {
         let mut base = Disque::neuf(&r1);
@@ -72,7 +74,7 @@ fn coupure_a_chaque_octet_rend_ancien_ou_nouveau() {
 fn octets_quelconques_dans_la_copie_ecrite_ne_creent_pas_d_etat() {
     let r1 = Enregistrement::initial(Slot::A, V1);
     let mut base = Disque::neuf(&r1);
-    let r2 = r1.commence_installation(Slot::B).unwrap();
+    let r2 = r1.commence_installation(Slot::B, Slot::A).unwrap();
     base.ecrit(&r2, None);
     let cible = copie_a_ecrire(&base.c[0], &base.c[1]);
     let mut graine = 0x9e3779b97f4a7c15u64;
@@ -90,7 +92,7 @@ fn octets_quelconques_dans_la_copie_ecrite_ne_creent_pas_d_etat() {
 #[test]
 fn mise_a_jour_complete_puis_commit() {
     let mut d = Disque::neuf(&Enregistrement::initial(Slot::A, V1));
-    let e = d.lit().unwrap().commence_installation(Slot::B).unwrap(); d.ecrit(&e, None);
+    let e = d.lit().unwrap().commence_installation(Slot::B, Slot::A).unwrap(); d.ecrit(&e, None);
     let e = d.lit().unwrap().marque_candidat(Slot::B, V2, V2, 3).unwrap(); d.ecrit(&e, None);
     let (s, e) = d.lit().unwrap().choisit_boot(); d.ecrit(&e, None);
     assert_eq!(s, Slot::B);
@@ -108,7 +110,7 @@ fn mise_a_jour_complete_puis_commit() {
 fn candidat_qui_plante_est_essaye_au_plus_n_fois_puis_rollback() {
     for essais in 1..=5u8 {
         let mut e = Enregistrement::initial(Slot::A, V1)
-            .commence_installation(Slot::B).unwrap()
+            .commence_installation(Slot::B, Slot::A).unwrap()
             .marque_candidat(Slot::B, V2, V2, essais).unwrap();
         let mut boots_candidat = 0;
         for _ in 0..20 {
@@ -126,12 +128,17 @@ fn candidat_qui_plante_est_essaye_au_plus_n_fois_puis_rollback() {
 #[test]
 fn refus_explicites() {
     let e = Enregistrement::initial(Slot::A, V1);
-    assert_eq!(e.commence_installation(Slot::A), Err(Refus::CibleActive));
-    let e = e.commence_installation(Slot::B).unwrap();
+    // I6 avant I5 : depuis A qui tourne, cibler A est refuse comme slot en cours.
+    assert_eq!(e.commence_installation(Slot::A, Slot::A), Err(Refus::CibleEnCoursDExecution));
+    // Depuis un candidat B qui tourne (actif A), cibler B est refuse (I6) et
+    // cibler A aussi (I5) : aucune installation pendant un boot candidat.
+    assert_eq!(e.commence_installation(Slot::B, Slot::B), Err(Refus::CibleEnCoursDExecution));
+    assert_eq!(e.commence_installation(Slot::A, Slot::B), Err(Refus::CibleActive));
+    let e = e.commence_installation(Slot::B, Slot::A).unwrap();
     assert_eq!(e.marque_candidat(Slot::B, V2, V3, 2), Err(Refus::ImageNonVerifiee));
     assert_eq!(e.marque_candidat(Slot::B, V2, V2, 0), Err(Refus::EssaisNuls));
     let e = e.marque_candidat(Slot::B, V2, V2, 2).unwrap();
-    assert_eq!(e.commence_installation(Slot::B), Err(Refus::CandidatEnCours));
+    assert_eq!(e.commence_installation(Slot::B, Slot::A), Err(Refus::CandidatEnCours));
     assert_eq!(e.revient(), Err(Refus::EtatInattendu));
 }
 
@@ -141,7 +148,7 @@ fn coupure_a_chaque_etape_et_chaque_octet_laisse_une_machine_amorcable() {
     // a n'importe quel octet, puis redemarrer : l'enregistrement lu satisfait
     // les invariants, et le slot boote est Bon ou un candidat verifie.
     let etapes = |e: Enregistrement| -> Vec<Enregistrement> {
-        let a = e.commence_installation(Slot::B).unwrap();
+        let a = e.commence_installation(Slot::B, Slot::A).unwrap();
         let b = a.marque_candidat(Slot::B, V2, V2, 2).unwrap();
         let (_, c) = b.choisit_boot();
         let d = c.sante_ok(Slot::B);
@@ -180,7 +187,14 @@ fn exploration_exhaustive_des_sequences() {
         invariants(&e);
         let mut suivants = Vec::new();
         for s in [Slot::A, Slot::B] {
-            if let Ok(n) = e.commence_installation(s) { suivants.push(n); }
+            // Depuis chaque slot qui peut tourner (actif, ou candidat boote) :
+            // aucune transition atteinte n'ecrit le slot qui tourne (I6).
+            for en_cours in [Slot::A, Slot::B] {
+                if let Ok(n) = e.commence_installation(s, en_cours) {
+                    assert_ne!(s, en_cours, "I6 viole");
+                    suivants.push(n);
+                }
+            }
             for img in images {
                 for essais in 1..=2 {
                     if let Ok(n) = e.marque_candidat(s, img, img, essais) { suivants.push(n); }

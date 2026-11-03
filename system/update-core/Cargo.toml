@@ -1,0 +1,11 @@
+[package]
+name = "bouchaud-update-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Bouchaud A/B boot/update state machine: no_std, no allocation, no kernel dependency"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

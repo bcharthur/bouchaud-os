@@ -9,7 +9,7 @@
 | Installation ESP + partition système sur NVMe | `src/platform/pc/installation.rs` (+ `disposition.rs` pur) | `tools/platform/test_installation.rs`, `tools/verifie-installation.py` (hôte, fsck.fat) |
 | Image traçable (commit, Ladybird, toolchain, ELF) | `tools/release/build_trigkey_image.sh` | build + boot OVMF/TCG |
 | Release reproductible + attestations | `.github/workflows/release.yml` | double build bit-à-bit, Sigstore |
-| **Machine d'état A/B + bloc d'amorçage** | `src/kernel/update/ab.rs` (pur, compilé dans le noyau) | `tools/update/test_ab.rs` (CI Fast), tests de mutation |
+| **Machine d'état A/B + bloc d'amorçage** | `system/update-core` (crate `no_std`, sans allocation, sans dépendance noyau) | `tools/update/test_ab.rs`, `tools/update/test_durabilite.rs` (CI Fast), tests de mutation |
 | Boîte noire extractible | `tools/reference/extract-blackbox.py`, `symbolise-blackbox.py` | bancs `run_blackbox_*` |
 
 ## Contrat A/B (`ab.rs`)
