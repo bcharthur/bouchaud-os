@@ -192,7 +192,9 @@ jobs:
     # qui gele, une copie META corrompue (chacune), les deux corrompues ; puis
     # le commit de sante par serviced (sante) et son refus quand un service
     # critique du candidat echoue (sante-ko) ; enfin la mise a jour de bout en
-    # bout par `updated` en ring 3, refus de capacite compris (mise-a-jour).
+    # bout par `updated` en ring 3, refus de capacite compris (mise-a-jour) ;
+    # la recovery : META illisible, touche R + rollback manuel, echecs repetes
+    # du slot actif.
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: ab-rollback (${{ matrix.scenario }})
@@ -201,7 +203,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour]
+        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, recovery-requise, recovery-rollback, echecs-repetes]
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo

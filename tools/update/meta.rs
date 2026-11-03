@@ -21,10 +21,16 @@ const MIO: usize = 1024 * 1024;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 { eprintln!("usage: meta SPEC OUT"); std::process::exit(2); }
+    if args.len() != 3 && args.len() != 5 { eprintln!("usage: meta SPEC OUT [SHA256_A SHA256_B]"); std::process::exit(2); }
     let (spec, out) = (&args[1], &args[2]);
-    let img_a = [0xA1u8; 32];
-    let img_b = [0xB2u8; 32];
+    // Optional: the REAL digests of the slot images (recovery `verifie`).
+    let hex = |h: &str| -> [u8; 32] {
+        let mut o = [0u8; 32];
+        for i in 0..32 { o[i] = u8::from_str_radix(&h[2 * i..2 * i + 2], 16).expect("sha256 hex"); }
+        o
+    };
+    let img_a = if args.len() == 5 { hex(&args[3]) } else { [0xA1u8; 32] };
+    let img_b = if args.len() == 5 { hex(&args[4]) } else { [0xB2u8; 32] };
     let base = Enregistrement::initial(Slot::A, img_a);
     let candidat = |n: u8| base.commence_installation(Slot::B, Slot::A).unwrap()
         .marque_candidat(Slot::B, img_b, img_b, n).unwrap();
