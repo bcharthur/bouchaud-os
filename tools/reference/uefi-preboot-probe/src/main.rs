@@ -2,6 +2,8 @@
 #![no_std]
 extern crate alloc;
 
+mod ab;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -117,9 +119,57 @@ fn run() -> uefi::Result {
         dims: (cw, ch),
     });
 
+    // BOUCHAUD_LOADER_AB_V1 : decider AVANT d'ecrire le rapport, pour qu'il
+    // porte la decision. Sans partition META sur ce disque : Legacy, le
+    // chemin d'avant, inchange.
+    let decision = ab::decide(&mut report);
+    match &decision {
+        ab::Decision::Legacy => { let _ = writeln!(report, "ab.mode=legacy"); }
+        ab::Decision::Boot { slot, raison, .. } => {
+            let _ = writeln!(report, "ab.boot slot={:?} raison={}", slot, raison);
+            uefi::println!("BOUCHAUD_AB_BOOT slot={:?} raison={}", slot, raison);
+        }
+        ab::Decision::RecoveryRequired(raison) => {
+            let _ = writeln!(report, "ab.recovery_required raison={}", raison);
+            uefi::println!("BOUCHAUD_AB_RECOVERY_REQUIRED raison={}", raison);
+        }
+    }
+
     let fs_proto = boot::get_image_file_system(boot::image_handle())?;
     let mut fs = FileSystem::new(fs_proto);
     let _ = fs.write(cstr16!("\\BOUCHAUD-PREBOOT.TXT"), report.as_bytes());
+
+    match decision {
+        ab::Decision::Legacy => {}
+        ab::Decision::RecoveryRequired(_) => {
+            // Fail closed: never boot a guessed system. A recovery slot will
+            // be chosen here; until then the machine stops, visibly.
+            drop(fs);
+            drop(gop);
+            loop { boot::stall(core::time::Duration::from_secs(60)); }
+        }
+        ab::Decision::Boot { partition, .. } => {
+            drop(fs);
+            drop(gop);
+            // The second stage is loaded FROM THE SLOT'S PARTITION: its
+            // LoadedImage device is that partition, so bootloader 0.11 reads
+            // kernel-x86_64, boot.json and ramdisk from the same slot.
+            let slot_fs = boot::open_protocol_exclusive::<uefi::proto::media::fs::SimpleFileSystem>(partition)?;
+            let mut slot_fs = FileSystem::new(slot_fs);
+            let loader = match slot_fs.read(cstr16!("\\EFI\\BOOT\\BOUCHAUD-LOADER.EFI")) {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(Status::NOT_FOUND.into()),
+            };
+            drop(slot_fs);
+            let slot_path = boot::open_protocol_exclusive::<uefi::proto::device_path::DevicePath>(partition)?;
+            let child = boot::load_image(
+                boot::image_handle(),
+                LoadImageSource::FromBuffer { buffer: &loader, file_path: Some(&*slot_path) },
+            )?;
+            drop(slot_path);
+            return boot::start_image(child);
+        }
+    }
 
     let loader = match fs.read(cstr16!("\\EFI\\BOOT\\BOUCHAUD-LOADER.EFI")) {
         Ok(bytes) => bytes,
