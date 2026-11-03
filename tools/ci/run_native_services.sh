@@ -109,5 +109,5 @@ if [ "$morts" -lt 5 ] || [ "$violations" -ne 0 ]; then
   echo "NATIVE_SERVICES_FAIL raison=mort_sans_peer_closed morts=$morts violations=$violations" >&2
   exit 1
 fi
-sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'SERVICED_(IPC_RTT_NS|RECOVERY_MS|HANDLES|RESTARTS).*|svc=[a-z]+ start_latency ms=[0-9]+' | sed 's/^/  /'
+sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'SERVICED_(IPC_RTT_NS|IPC_ALLER_NS|IPC_RETOUR_NS|RECOVERY_MS|HANDLES|RESTARTS).*|svc=[a-z]+ start_latency ms=[0-9]+' | sed 's/^/  /'
 echo "NATIVE_SERVICES_OK smp=$SMP accel=$([ "${BO_QEMU_KVM:-0}" = 1 ] && echo kvm || echo tcg)"

@@ -10,7 +10,7 @@
  *
  *   supervisor -> healthd           healthd -> supervisor
  *   "hello <name>"                  "ready <name> <pid-agnostic>"
- *   "ping <seq>"                    "pong <seq> <handles>"
+ *   "ping <seq>"                    "pong <seq> <handles> <t_rx_ns>"
  *   "crash"                         (null dereference: fault injection)
  *   "hang"                          (stops answering: heartbeat test)
  *   "stop"                          "bye", then exit(0)
@@ -88,6 +88,10 @@ int bo_main(const struct bo_start *start)
             len = append(out, len, sizeof(out), in + 5, (bo_usize)got - 5);
             len = append(out, len, sizeof(out), " ", 1);
             len = append_u64(out, len, sizeof(out), (bo_u64)bo_handle_count());
+            /* Reception time: lets the supervisor split a round trip into
+             * its forward (healthd woken) and return (supervisor woken) legs. */
+            len = append(out, len, sizeof(out), " ", 1);
+            len = append_u64(out, len, sizeof(out), (bo_u64)bo_time_now_ns());
         } else if (prefix(in, (bo_usize)got, "hello ")) {
             len = append(out, len, sizeof(out), "ready ", 6);
             len = append(out, len, sizeof(out), in + 6, (bo_usize)got - 6);

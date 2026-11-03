@@ -416,6 +416,20 @@ static void sort_u64(bo_u64 *a, int n)
 
 #define RTT_SAMPLES 200
 static bo_u64 rtt[RTT_SAMPLES];
+static bo_u64 aller[RTT_SAMPLES];
+static bo_u64 retour[RTT_SAMPLES];
+
+static void publie_distribution(const char *nom, bo_u64 *v)
+{
+    sort_u64(v, RTT_SAMPLES);
+    bo_say(nom);
+    kv("n", RTT_SAMPLES);
+    kv("p50", (bo_i64)v[RTT_SAMPLES / 2]);
+    kv("p95", (bo_i64)v[RTT_SAMPLES * 95 / 100]);
+    kv("p99", (bo_i64)v[RTT_SAMPLES * 99 / 100]);
+    kv("max", (bo_i64)v[RTT_SAMPLES - 1]);
+    bo_say("\n");
+}
 
 static int measure_ipc(struct service *s)
 {
@@ -442,24 +456,27 @@ static int measure_ipc(struct service *s)
             if (got > 0 && prefix(in, (bo_usize)got, "pong ")) {
                 bo_usize at = 5;
                 /* A late heartbeat pong is not this round trip. */
-                if (parse_u64(in, (bo_usize)got, &at) == 1000000 + (bo_u64)i) break;
+                if (parse_u64(in, (bo_usize)got, &at) == 1000000 + (bo_u64)i) {
+                    bo_u64 t1 = now();
+                    bo_u64 rx;
+                    (void)parse_u64(in, (bo_usize)got, &at);      /* handles */
+                    rx = parse_u64(in, (bo_usize)got, &at);       /* t_rx    */
+                    rtt[i] = t1 - t0;
+                    aller[i] = rx > t0 ? rx - t0 : 0;
+                    retour[i] = t1 > rx ? t1 - rx : 0;
+                    break;
+                }
             }
             if (got == -BO_E_PEER_CLOSED) return 0;
         }
-        rtt[i] = now() - t0;
     }
     bo_handle_close((bo_handle_t)single);
     s->ping_sent_at = 0;
     s->missed = 0;
     s->last_pong_at = now();
-    sort_u64(rtt, RTT_SAMPLES);
-    bo_say("SERVICED_IPC_RTT_NS");
-    kv("n", RTT_SAMPLES);
-    kv("p50", (bo_i64)rtt[RTT_SAMPLES / 2]);
-    kv("p95", (bo_i64)rtt[RTT_SAMPLES * 95 / 100]);
-    kv("p99", (bo_i64)rtt[RTT_SAMPLES * 99 / 100]);
-    kv("max", (bo_i64)rtt[RTT_SAMPLES - 1]);
-    bo_say("\n");
+    publie_distribution("SERVICED_IPC_RTT_NS", rtt);
+    publie_distribution("SERVICED_IPC_ALLER_NS", aller);
+    publie_distribution("SERVICED_IPC_RETOUR_NS", retour);
     return 1;
 }
 
