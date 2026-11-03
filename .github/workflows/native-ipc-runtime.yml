@@ -38,6 +38,10 @@ on:
       - 'tools/ci/run_ab_rollback.sh'
       - 'src/platform/pc/stage2.rs'
       - 'src/boot/**'
+      - 'src/fs/persistance/**'
+      - 'src/compat/linux/mod.rs'
+      - 'tools/userland/persist-coupure-probe.c'
+      - 'tools/ci/run_coupure_persistance.sh'
       - '.github/workflows/native-ipc-runtime.yml'
   push:
     branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
@@ -76,6 +80,10 @@ on:
       - 'tools/ci/run_ab_rollback.sh'
       - 'src/platform/pc/stage2.rs'
       - 'src/boot/**'
+      - 'src/fs/persistance/**'
+      - 'src/compat/linux/mod.rs'
+      - 'tools/userland/persist-coupure-probe.c'
+      - 'tools/ci/run_coupure_persistance.sh'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
 
@@ -133,7 +141,7 @@ jobs:
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: native-ipc-runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -176,6 +184,14 @@ jobs:
           OUT=target/native-services-ci bash tools/ci/run_native_services.sh "$B" 4
           OUT=target/native-services-ci bash tools/ci/run_native_services.sh "$B" 1
 
+      # BOUCHAUD_PERSIST_COUPURE_V1 : coupures SIGKILL pendant ecrire/fsync/
+      # rename/fsync(rep) ; ancienne OU nouvelle version, jamais un melange,
+      # jamais plus ancienne que la derniere version acquittee.
+      - name: Coupures d'alimentation pendant l'ecriture atomique (8 cycles)
+        run: |
+          B=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          COUPURE_SORTIE=target/coupure-persistance bash tools/ci/run_coupure_persistance.sh "$B" 8
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -183,6 +199,7 @@ jobs:
           path: |
             target/native-ipc-runtime-ci/native-ipc-runtime.log
             target/native-services-ci/native-services-smp*.log
+            target/coupure-persistance/boot-*.log
           if-no-files-found: error
           retention-days: 14
 
