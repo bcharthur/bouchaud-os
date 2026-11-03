@@ -21,6 +21,21 @@ python3 tools/ci/check_pipeline_policy.py         # CI_POLICY_OK
 python3 tools/mesure-chantiers.py --ecris         # si un garde-fou le demande
 ```
 
+## Assets (incrément 2)
+
+```bash
+python3 -m venv /tmp/va && /tmp/va/bin/pip install resvg-py pillow      # développement seulement
+/tmp/va/bin/python tools/assets/fabrique-atelier.py                      # refait PNG + MANIFEST
+python3 tools/verifie-assets-atelier.py                                  # ce que la CI vérifie
+```
+
+Pour ajouter une icône :
+1. copier son SVG depuis `lucide-static` (npm) dans `assets/atelier/sources/lucide/` ;
+2. ajouter une ligne `APPS` ou `SYMBOLES` dans la fabrique, puis relancer celle-ci ;
+3. l'embarquer : `tuile!` dans `icones.rs`, ou une constante dans `atelier/assets.rs`.
+
+Le fond se change dans la liste `FONDS` de la fabrique. Ajouter une variante 2560×1600 donnerait un fond net en UEFI, au prix d'environ +3 Mo d'image.
+
 ## Où est quoi
 
 | Besoin | Fichier |
@@ -28,7 +43,8 @@ python3 tools/mesure-chantiers.py --ecris         # si un garde-fou le demande
 | Valeurs (couleurs, rayons, durées) | `src/gui/atelier/jetons.rs` |
 | Courbes et interpolations | `src/gui/atelier/mouvement.rs` |
 | Géométrie du dock | `src/gui/atelier/dock.rs`, consommée par `window::start_btn(n)` / `taskbar_btn(i, n)` |
-| Fond | `src/gui/atelier/fond.rs` (cache unique ; marqueur `BOUCHAUD_ATELIER_FOND_CALCULE`) |
+| Fond | `src/gui/atelier/fond.rs` (photographie, décodée une fois ; marqueur `BOUCHAUD_ATELIER_FOND`) ; recadrage pur dans `atelier/echelle.rs` |
+| Assets embarqués | `src/gui/atelier/assets.rs` (logo, symboles, fond) ; tuiles dans `src/gui/icones.rs` |
 | Verre, ombre, corps de fenêtre | `src/gui/atelier/matiere.rs` |
 | Peintres branchés | `src/gui/widgets.rs` : `draw_wallpaper`, `draw_filigrane`, `draw_topbar`, `draw_taskbar` (dock), `draw_window`, `draw_window_controls` |
 | Calques translucides | `src/gui/window_manager.rs` `plan_de_scene` : `BarreHaute` et `BarreTaches` sont `Calque::transparent` |

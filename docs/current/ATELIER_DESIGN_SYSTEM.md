@@ -83,9 +83,71 @@ Preuves :
 - garde-fous d'architecture : 209/209 ;
 - `CI_POLICY_OK`.
 
+## 3 bis. Incrément 2 livré : vrais assets (BOUCHAUD_ATELIER_ASSETS_V1)
+
+**Bibliothèque d'icônes retenue : Lucide** (ISC, `lucide-static` 1.67.0, 2 296 icônes, grille 24 px, trait 2 px).
+
+| Bibliothèque | Licence | Cohérence | Intégration | Choix |
+|---|---|---|---|---|
+| **Lucide** | ISC | une seule grille, un seul trait, très homogène ; bibliothèque par défaut de shadcn/ui | SVG simples (`path`, `rect`, `circle`) que resvg rend parfaitement | **retenue** |
+| Tabler | MIT | homogène, plus de 5 000 icônes, un peu plus « technique » | idem | alternative valable |
+| Phosphor | MIT | six graisses, très riche | plus lourde à sous-ensembler | non retenue |
+| Papirus / Tela | GPL-3.0 | icônes applicatives colorées, mais d'un autre langage visuel | licence plus contraignante pour des assets embarqués | **écartée** |
+
+Les icônes applicatives sont des **tuiles Atelier** : carré arrondi (23 %), dégradé vertical, reflet doux et glyphe Lucide. On garde ainsi un seul langage iconographique, sans mélange de styles.
+
+**Pipeline** : `tools/assets/fabrique-atelier.py` (dépendances de développement : `resvg-py`, `pillow`).
+- **Sources** : `assets/atelier/sources/` contient 14 glyphes Lucide (pas la bibliothèque), le SVG des tuiles, le logo SVG et la photo source.
+- **Sorties** : dans `src/assets/atelier/`. Chaque taille (18, 40, 56) est rendue depuis le vecteur, jamais réduite depuis une grande image.
+- **Format** : PNG RGBA 8 bits, que décode le décodeur PNG du noyau, déjà en place et testé. Je n'ai pas introduit de nouveau format.
+- **Manifeste** : `MANIFEST.json` donne l'empreinte, la taille et la licence de chaque fichier.
+- **Garde** : `tools/verifie-assets-atelier.py` (empreintes, licences, logo provisoire, sous-ensemble Lucide, `include_bytes` couverts), avec 8 mutations détectées.
+- **Attributions** : `assets/atelier/ATTRIBUTIONS.md`.
+
+**Fond** : photographie « summer 1am » de **Risto Saukonpää** (KDE, LGPL-3.0, texte de licence joint), recadrée « cover » en 1280×720 et en 1920×1080.
+- À l'exécution, la variante exacte est décodée une fois. Sinon, la plus grande est décodée puis recadrée « cover » par interpolation bilinéaire, en virgule fixe.
+- Si le décodage échoue, un dégradé de repli prend le relais.
+- Le marqueur `BOUCHAUD_ATELIER_FOND` publie la source, le mode, la durée et la RAM. Le fond procédural de l'incrément 1 est supprimé.
+
+**Logo** : `bouchaud-os-provisoire.svg`, en 18 px dans la barre et en 72 px au-dessus de la marque. Il est **PROVISOIRE**, car le dépôt n'avait aucun logo officiel.
+
+**Dock** : tuiles de 40 px et glyphe `layout-grid` teinté (masque). Le comportement, le test d'impact et les dégâts sont inchangés.
+
+**Icônes** : `gui::icones` charge les tuiles (cache par icône et par taille), et Moniteur et Journal en ont désormais une. Les anciennes icônes et `fabrique-icones.py` sont retirés.
+
+Captures réelles :
+- [comparaison-avant-apres.png](atelier/comparaison-avant-apres.png) ;
+- [capture-atelier2-bureau-1280x720.png](atelier/capture-atelier2-bureau-1280x720.png) ;
+- [capture-atelier2-quatre-fenetres-1280x720.png](atelier/capture-atelier2-quatre-fenetres-1280x720.png) ;
+- [capture-atelier2-uefi-2560x1600.png](atelier/capture-atelier2-uefi-2560x1600.png). OVMF a retenu son plus grand mode GOP, 2560×1600, et non 1920×1080 ; le fond y passe en mode « cover ».
+
+Mesures (QEMU TCG) :
+
+| | `main` | incrément 1 | incrément 2 |
+|---|---|---|---|
+| `bureau-premiere-trame`, BIOS 1280×720 | 4 829 / 4 836 ms | 4 885 / 5 047 / 5 069 ms | 5 178 / 5 308 / 5 405 ms |
+| Préparation du fond | — | 65–73 ms (calcul) | 324–359 ms (décodage PNG), `exact` |
+| Fond UEFI 2560×1600 (`cover`) | — | — | 1 095 ms, 16 000 Kio |
+| RAM du fond, 1280×720 | — | 3 600 Kio | 3 600 Kio |
+| Tuiles décodées (toutes tailles) | — | — | 217 Kio au plus (mesuré, plafond testé à 256 Kio) |
+| Image de démarrage (bootimage BIOS) | 26 600 448 o | — | 28 915 712 o (+2,3 Mo) |
+| Coût par trame | — | recopie de lignes | identique (recopie de lignes ; tuiles en `blit_argb_span`) |
+
+Le surcoût est payé **une seule fois**, à la première trame, et vient du décodage PNG en TCG. Si besoin, deux pistes : un format à décodage plus rapide, comme QOI, ou un décodage après la première trame.
+
+Preuves :
+- `test_assets_atelier` : 7 tests (décodage, tailles, alpha, budgets, entrée corrompue sans panique, recadrage « cover ») ;
+- `test_png` mis à jour sur les tuiles ;
+- 22 suites GUI vertes ;
+- garde-fous d'architecture : 210/210 ;
+- `CI_POLICY_OK`.
+
 ## 4. Limites connues de l'incrément 1 (assumées)
 
-- **Contenu des applications encore sombre** : terminal, fichiers, notes et autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (incrément 3).
+- **Contenu des applications encore sombre** : Fichiers, Notes, Calculatrice et les autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (prochain incrément). Le Terminal reste sombre volontairement.
+- **Pas de mise à l'échelle HiDPI** : en 2560×1600, l'interface garde ses tailles en pixels et paraît minuscule.
+- **Icône du navigateur provisoire** (tuile « boussole ») : l'identité de Bouchaud Navigateur et son chrome restent à faire, sans toucher au moteur Ladybird.
+- **Le verre n'est pas flouté** : c'est une matière translucide légère. Aucun flou d'arrière-plan n'est implémenté, et rien ne le prétend.
 - **Pas encore de transitions animées** : `mouvement.rs` est prêt et testé, mais il n'est pas branché sur la boucle du compositeur (incrément 2).
 - **Pas de survol sur le dock** : un déplacement de souris n'invalide que l'empreinte du curseur, donc un voile de survol resterait sur la cellule quittée. Il viendra avec l'incrément 2, qui invalide la cellule quittée et la cellule atteinte.
 - **Menu Démarrer encore sombre** : il est repositionné au-dessus du dock, mais pas restylé.
