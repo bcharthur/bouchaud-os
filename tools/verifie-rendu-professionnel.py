@@ -51,9 +51,17 @@ checkpoint = stage2[stage2.index("fn point_de_controle"):stage2.index("\n}", sta
 if "boot_step" in checkpoint:
     erreurs.append("stage2.rs: un point critique dessine encore dans le framebuffer")
 
+# BOUCHAUD_ATELIER_ASSETS_V1 : l'icone Services n'est plus un dessin vectoriel
+# sur-echantillonne au runtime. Comme toutes les icones applicatives, c'est une
+# tuile RENDUE depuis le vecteur (resvg) a chaque taille posee : l'exigence
+# « pas d'icone pixelisee » se verifie donc sur les assets, taille par taille,
+# et `verifie-assets-atelier.py` en garde les empreintes.
 icones = (ROOT / "src/gui/icones.rs").read_text(encoding="utf-8")
-if "couverture_services" not in icones or "blend_rgb" not in icones:
-    erreurs.append("icones.rs: icone Services sans anticrenelage vectoriel")
+for taille in ("18", "40", "56"):
+    if not (ROOT / f"src/assets/atelier/apps/services-{taille}.png").is_file():
+        erreurs.append(f"assets: tuile Services {taille} px absente")
+if 'tuile!("services")' not in icones or "fn reduit" not in icones:
+    erreurs.append("icones.rs: Services n'est plus une tuile rendue, ou plus de repli par reduction")
 explorateur = (ROOT / "src/gui/apps/file_explorer.rs").read_text(encoding="utf-8")
 if "couverture_icone" not in explorateur or "blend_rgb" not in explorateur:
     erreurs.append("file_explorer.rs: icones fichier/dossier encore pixelisees")

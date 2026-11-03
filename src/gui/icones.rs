@@ -1,98 +1,114 @@
-//! Les icones du bureau : de vraies images, decodees une fois.
+//! Les icones applicatives : des ASSETS Atelier, decodes une fois.
 //!
-//! # Ce qu'elles etaient
+//! # D'ou elles viennent (BOUCHAUD_ATELIER_ASSETS_V1)
 //!
-//! Des disques et des rectangles empiles dans `widgets.rs`, un peintre par
-//! application, redessines a chaque trame. La premiere capture d'ecran venue
-//! le montrait : cinq dessins sans famille, qui ne ressemblaient pas a des
-//! icones.
+//! Chaque icone est une tuile Atelier -- carre arrondi en degrade, glyphe
+//! Lucide (ISC) -- ecrite en SVG dans `assets/atelier/sources/apps/` par
+//! `tools/assets/fabrique-atelier.py`, puis RENDUE par resvg a chaque taille
+//! posee (18, 40, 56 px). Rien n'est dessine ici : ce module choisit le PNG de
+//! la bonne taille, le decode une fois, et le recopie.
 //!
-//! # Ce qu'elles sont
+//! Les anciennes icones (disques et rectangles, puis PNG reduits a la volee,
+//! icone Services en sur-echantillonnage) n'existent plus. Une taille rendue
+//! depuis le vecteur est plus nette qu'une grande image reduite.
 //!
-//! Quatre PNG fabriques par `tools/assets/fabrique-icones.py` -- du code
-//! lisible, revu comme le reste, et qui les refait a l'octet pres -- plus le
-//! vrai logo de Ladybird, pris a son depot. L'icone Services est une forme
-//! vectorielle rendue par surechantillonnage 4x4 : ses arrondis restent nets
-//! a 18 comme a 56 pixels.
+//! # Le cache
 //!
-//! # Pourquoi un cache
+//! Une entree par (icone, taille), creee a la premiere demande. Une taille non
+//! fabriquee est reduite depuis la plus grande (moyenne de blocs sur l'alpha
+//! premultiplie), pour ne jamais montrer un trou -- mais aucun appelant du
+//! bureau ne la demande : dock 40, bureau 56, barres et menu 18.
 //!
-//! Decoder un PNG, c'est un `inflate` et un defiltrage : quelques centaines de
-//! micro-secondes. Le compositeur redessine une icone a chaque rectangle de
-//! degat qui la touche. Les images sont donc decodees et reduites UNE fois, a
-//! la premiere demande, dans la taille exacte ou elles seront posees -- pas de
-//! mise a l'echelle par trame, et un `blit_argb_span` par ligne.
-//!
-//! La reduction se fait par moyenne de blocs sur l'alpha PREMULTIPLIE. Moyenner
-//! des couleurs non premultipliees ferait entrer la couleur des pixels
-//! transparents -- indefinie -- dans le bord de l'icone : une frange claire
-//! tout autour, le defaut le plus courant du redimensionnement d'images a
-//! transparence.
+//! `static mut` sur le meme regime que le reste du bureau : le gestionnaire de
+//! fenetres est un fil unique, et c'est lui seul qui dessine.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 /// Cote d'une icone du bureau, en pixels.
 pub const TAILLE_BUREAU: usize = 56;
-
 /// Cote d'une icone dans une barre ou un menu.
 pub const TAILLE_PETITE: usize = 18;
 /// Cote d'une icone dans le dock Atelier (`atelier::dock::ICONE`).
 pub const TAILLE_DOCK: usize = 40;
 
-/// Les images, dans l'ordre de `window::ICONS`.
-const SOURCES: [&[u8]; 5] = [
-    include_bytes!("../assets/icons/ladybird.png"),
-    include_bytes!("../assets/icons/calculatrice.png"),
-    include_bytes!("../assets/icons/terminal.png"),
-    include_bytes!("../assets/icons/fichiers.png"),
-    include_bytes!("../assets/icons/rustpad.png"),
+/// Tailles fabriquees, dans l'ordre des colonnes de `SOURCES`.
+const TAILLES: [usize; 3] = [TAILLE_PETITE, TAILLE_DOCK, TAILLE_BUREAU];
+
+macro_rules! tuile {
+    ($nom:literal) => {
+        [
+            include_bytes!(concat!("../assets/atelier/apps/", $nom, "-18.png")).as_slice(),
+            include_bytes!(concat!("../assets/atelier/apps/", $nom, "-40.png")).as_slice(),
+            include_bytes!(concat!("../assets/atelier/apps/", $nom, "-56.png")).as_slice(),
+        ]
+    };
+}
+
+/// Les tuiles. Les huit premieres sont dans l'ordre de `window::ICONS`.
+const SOURCES: [[&[u8]; 3]; 11] = [
+    tuile!("navigateur"),
+    tuile!("calculatrice"),
+    tuile!("terminal"),
+    tuile!("fichiers"),
+    tuile!("edition"),
+    tuile!("services"),
+    tuile!("notes"),
+    tuile!("insights"),
+    tuile!("moniteur"),
+    tuile!("journal"),
+    tuile!("parametres"),
 ];
 
 pub const NOMBRE: usize = SOURCES.len();
 
-/// Une icone prete a poser : `TAILLE x TAILLE` pixels `0xAARRGGBB`.
+/// Indice de la tuile Parametres (pas encore d'application).
+pub const PARAMETRES: usize = 10;
+
+/// Une icone prete a poser : `cote x cote` pixels `0xAARRGGBB`.
 struct Prete {
+    index: usize,
     cote: usize,
     pixels: Vec<u32>,
 }
 
-/// Cache par (image, taille) : le bureau, les barres et le dock.
-///
-/// `static mut` sur le meme regime que le reste du bureau (`window::ICON_POSITIONS`,
-/// `ramfs::fs`) : le gestionnaire de fenetres est un fil unique, et c'est lui
-/// seul qui dessine. Aucun chemin d'interruption ne passe ici.
-static mut CACHE: [[Option<Prete>; 3]; NOMBRE] = [const { [None, None, None] }; NOMBRE];
+static mut CACHE: Vec<Prete> = Vec::new();
 
-fn rang(cote: usize) -> usize {
-    // Un emplacement PAR TAILLE posee : partager un emplacement entre deux
-    // tailles rendrait l'image de la premiere demandee aux deux.
-    if cote == TAILLE_PETITE { 1 } else if cote == TAILLE_DOCK { 2 } else { 0 }
+/// Octets d'une icone a la taille exacte, si elle est fabriquee.
+pub fn octets(index: usize, cote: usize) -> Option<&'static [u8]> {
+    let colonne = TAILLES.iter().position(|&t| t == cote)?;
+    SOURCES.get(index).map(|ligne| ligne[colonne])
 }
 
-/// Decode, reduit et retient l'icone `index` a la taille `cote`.
 fn prepare(index: usize, cote: usize) -> Option<&'static Prete> {
     if index >= NOMBRE || cote == 0 {
         return None;
     }
-    let emplacement = rang(cote);
-    // SAFETY : fil unique du gestionnaire de fenetres, voir le commentaire de
-    // `CACHE`. La reference rendue est immuable et vit aussi longtemps que le
-    // cache, qui n'est jamais vide.
+    // SAFETY : fil unique du gestionnaire de fenetres (voir l'en-tete).
     unsafe {
         let cache = &mut *core::ptr::addr_of_mut!(CACHE);
-        if cache[index][emplacement].is_none() {
-            let image = crate::gui::png::decode(SOURCES[index])?;
-            cache[index][emplacement] = Some(Prete {
-                cote,
-                pixels: reduit(&image, cote),
-            });
+        if let Some(i) = cache.iter().position(|p| p.index == index && p.cote == cote) {
+            return cache.get(i);
         }
-        cache[index][emplacement].as_ref()
+        let pixels = match octets(index, cote) {
+            Some(png) => {
+                let image = crate::gui::png::decode(png)?;
+                if image.largeur != cote || image.hauteur != cote {
+                    return None;
+                }
+                image.pixels
+            }
+            None => {
+                let grande = crate::gui::png::decode(SOURCES[index][TAILLES.len() - 1])?;
+                reduit(&grande, cote)
+            }
+        };
+        cache.push(Prete { index, cote, pixels });
+        cache.last()
     }
 }
 
-/// Moyenne par blocs, sur l'alpha premultiplie.
+/// Moyenne par blocs, sur l'alpha premultiplie (taille non fabriquee).
 fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
     let mut sortie = vec![0u32; cote * cote];
     for y in 0..cote {
@@ -101,7 +117,6 @@ fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
         for x in 0..cote {
             let x0 = x * image.largeur / cote;
             let x1 = (((x + 1) * image.largeur) / cote).max(x0 + 1).min(image.largeur);
-
             let (mut sr, mut sv, mut sb, mut sa, mut compte) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for yy in y0..y1 {
                 for xx in x0..x1 {
@@ -128,114 +143,17 @@ fn reduit(image: &crate::gui::png::Image, cote: usize) -> Vec<u32> {
     sortie
 }
 
-// TROISIEME COPIE DE LA MEME PRIMITIVE, RETIREE ELLE AUSSI.
-//
-// Ses constantes ne paniquaient pas -- rayon 54 sur une boite de 180, rayon 18
-// sur une boite de 42 -- mais elle portait le meme
-// `clamp(x0 + rayon, x1 - rayon - 1)` qui a tue le gestionnaire de fichiers le
-// 16 septembre 2026. Une forme dont on change un chiffre, et la panique
-// revient dans un fichier ou personne ne la cherche.
-//
-// Le rayon effectif est identique ici : 54 et 18 tiennent tous deux dans leur
-// boite, donc le rendu ne change pas d'un pixel.
-use crate::gui::geometrie::dans_arrondi as dans_rectangle_arrondi;
-
-#[inline]
-fn couverture_services(px: usize, py: usize, cote: usize, forme: u8) -> u8 {
-    let mut touches = 0u16;
-    // Seize echantillons donnent des bords reguliers sans conserver de
-    // bitmap ni faire dependre l'icone de sa taille finale.
-    for sy in 0..4 {
-        for sx in 0..4 {
-            let nx = ((px * 4 + sx) * 1024 / (cote * 4).max(1)) as i32;
-            let ny = ((py * 4 + sy) * 1024 / (cote * 4).max(1)) as i32;
-            let dedans = match forme {
-                0 => (0..3).any(|rangee| {
-                    let haut = 170 + rangee * 245;
-                    dans_rectangle_arrondi(nx, ny, 120, haut, 904, haut + 180, 54)
-                }),
-                1 => (0..3).any(|rangee| {
-                    let haut = 170 + rangee * 245;
-                    dans_rectangle_arrondi(nx, ny, 330, haut + 69, 745, haut + 111, 18)
-                }),
-                _ => (0..3).any(|rangee| {
-                    let haut = 170 + rangee * 245;
-                    let dx = nx - 220;
-                    let dy = ny - (haut + 90);
-                    dx * dx + dy * dy <= 34 * 34
-                }),
-            };
-            if dedans { touches += 1; }
-        }
-    }
-    (touches * 255 / 16) as u8
-}
-
-fn dessine_services_vectoriel(x: usize, y: usize, cote: usize) {
-    if cote == 0 { return; }
-    for py in 0..cote {
-        for px in 0..cote {
-            let corps = couverture_services(px, py, cote, 0);
-            if corps != 0 {
-                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0x2563eb, corps);
-            }
-            let fente = couverture_services(px, py, cote, 1);
-            if fente != 0 {
-                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0xdbeafe, fente);
-            }
-            let voyant = couverture_services(px, py, cote, 2);
-            if voyant != 0 {
-                crate::gui::framebuffer::blend_rgb(x + px, y + py, 0x5bda8b, voyant);
-            }
-        }
-    }
-}
-
-
-// Product M1 : deux icones vectorielles natives, aucun asset PNG ajoute.
-fn dessine_product_vectoriel(index: usize, x: usize, y: usize, cote: usize) {
-    if cote == 0 || !crate::gui::framebuffer::decoupe_touche(x, y, cote, cote) { return; }
-    for py in 0..cote {
-        for px in 0..cote {
-            let nx = px * 1000 / cote;
-            let ny = py * 1000 / cote;
-            let (couleur, dedans) = if index == 6 {
-                if nx > 160 && nx < 840 && ny > 90 && ny < 940 {
-                    let ligne = nx > 290 && nx < 740 && (250..830).contains(&ny)
-                        && ((ny - 250) % 145) < 38;
-                    (if ligne { 0x2a5795 } else { 0xf5f8ff }, true)
-                } else { (0, false) }
-            } else {
-                let bar = (nx > 140 && nx < 310 && ny > 530 && ny < 875)
-                    || (nx > 330 && nx < 500 && ny > 350 && ny < 875)
-                    || (nx > 520 && nx < 690 && ny > 215 && ny < 875)
-                    || (nx > 710 && nx < 870 && ny > 435 && ny < 875);
-                (0x55d6bb, bar)
-            };
-            if dedans { crate::gui::framebuffer::blend_rgb(x + px, y + py, couleur, 255); }
-        }
-    }
-}
-
 /// Pose l'icone `index`, coin superieur gauche en `(x, y)`.
 ///
 /// Ne dessine rien si l'image manque : une icone absente vaut mieux qu'un
 /// carre gris, et le fond du bureau est deja peint dessous.
 pub fn dessine(index: usize, x: usize, y: usize, cote: usize) {
-    if index == 6 || index == 7 {
-        dessine_product_vectoriel(index, x, y, cote);
-        return;
-    }
-    if index == 5 {
-        dessine_services_vectoriel(x, y, cote);
+    // BOUCHAUD_GFX_CULLING_AMONT_V1 : rien a composer si la trame ne presente
+    // pas un pixel de l'icone -- verifie AVANT un eventuel decodage.
+    if !crate::gui::framebuffer::decoupe_touche(x, y, cote, cote) {
         return;
     }
     let Some(prete) = prepare(index, cote) else { return };
-    // BOUCHAUD_GFX_CULLING_AMONT_V1 : rien a composer si la trame ne presente
-    // pas un pixel de l'icone.
-    if !crate::gui::framebuffer::decoupe_touche(x, y, prete.cote, prete.cote) {
-        return;
-    }
     for ligne in 0..prete.cote {
         let debut = ligne * prete.cote;
         crate::gui::framebuffer::blit_argb_span(
@@ -262,6 +180,8 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
         crate::gui::window::KIND_SERVICES => Some(5),
         crate::gui::window::KIND_NOTES => Some(6),
         crate::gui::window::KIND_INSIGHTS => Some(7),
+        3 => Some(8), // Moniteur
+        crate::gui::window::KIND_JOURNAL => Some(9),
         _ => None,
     }
 }
@@ -282,6 +202,7 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Services => 5,
         App::Notes { .. } => 6,
         App::Insights => 7,
-        App::Monitor | App::Journal { .. } => return None,
+        App::Monitor => 8,
+        App::Journal { .. } => 9,
     })
 }

@@ -13,7 +13,8 @@
 //!   * [`jetons`]    valeurs pures (couleurs, rayons, espaces, corps, duree) ;
 //!   * [`mouvement`] courbes d'acceleration et interpolation, pures ;
 //!   * [`dock`]      geometrie pure du dock flottant ;
-//!   * [`fond`]      fond d'ecran calcule une fois, puis recopie ;
+//!   * [`fond`]      fond d'ecran (photographie), decode une fois puis recopie ;
+//!   * [`assets`]    logo, symboles et fond embarques (manifeste verifie) ;
 //!   * [`matiere`]   peintres de matieres (verre, ombre douce, fenetre).
 //!
 //! Les trois premiers ne connaissent ni le framebuffer ni l'allocateur : les
@@ -31,3 +32,5 @@ pub mod mouvement;
 pub mod dock;
 pub mod fond;
 pub mod matiere;
+pub mod assets;
+pub mod echelle;

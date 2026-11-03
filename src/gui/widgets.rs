@@ -101,8 +101,13 @@ fn filigrane_origine() -> (usize, usize) {
     )
 }
 
+/// Cote du logo au-dessus de la marque.
+const LOGO_MARQUE: usize = 72;
+
 pub(crate) fn draw_filigrane() {
     let (x, y) = filigrane_origine();
+    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_72,
+        (fb::width() / 2).saturating_sub(LOGO_MARQUE / 2), y.saturating_sub(LOGO_MARQUE + 14));
     let blanc = crate::gui::atelier::jetons::ENCRE_SUR_FOND;
     // Une ombre d'un pixel, tres diffuse, detache le blanc du ciel clair.
     fb::draw_text_prop(x + 1, y + 2, FILIGRANE, 0x8a87b8, FILIGRANE_CORPS, true);
@@ -122,7 +127,9 @@ pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
     let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, true);
     // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
     // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
-    (x.saturating_sub(4), y, largeur + 8, FILIGRANE_HAUTEUR)
+    // Le logo est au-dessus du titre : le calque l'inclut.
+    let haut = y.saturating_sub(LOGO_MARQUE + 14);
+    (x.saturating_sub(4), haut, largeur + 8, FILIGRANE_HAUTEUR + (y - haut))
 }
 
 /// Fond d'ecran seul.
@@ -291,14 +298,6 @@ fn jour_semaine(annee: u16, mois: u8, jour: u8) -> usize {
     (a + a / 4 - a / 100 + a / 400 + T[mois - 1] as usize + jour as usize) % 7
 }
 
-/// Pastille de la marque : un disque d'accent, un anneau clair.
-fn pastille_marque(cx: i32, cy: i32) {
-    let cadre = crate::gui::windowing::Rect::new(cx - 7, cy - 7, 14, 14);
-    crate::gui::atelier::matiere::pave(cadre, 7, crate::gui::atelier::jetons::ACCENT, 255);
-    let coeur = crate::gui::windowing::Rect::new(cx - 3, cy - 3, 6, 6);
-    crate::gui::atelier::matiere::pave(coeur, 3, 0xffffff, 230);
-}
-
 fn draw_topbar() {
     use crate::gui::atelier::jetons as j;
     crate::gui::atelier::matiere::bande_verre(0, 0, fb::width(), BAR_H, j::VERRE_BARRE);
@@ -306,9 +305,12 @@ fn draw_topbar() {
     let ligne = ligne_texte_barre(0);
 
     // Marque et menus, a gauche.
+    // La marque est un ASSET (logo provisoire, BOUCHAUD_ATELIER_LOGO_PROVISOIRE_V1),
+    // plus une forme assemblee ici.
     let mut x = j::ESPACE_4 as usize;
-    pastille_marque(x as i32 + 7, BAR_H as i32 / 2);
-    x += 14 + j::ESPACE_2 as usize;
+    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_18, x,
+        (BAR_H - 18) / 2);
+    x += 18 + j::ESPACE_2 as usize;
     fb::draw_text_prop(x, ligne, "Bouchaud OS", j::ENCRE, corps, true);
     x += fb::text_width("Bouchaud OS", corps, true) + j::ESPACE_6 as usize;
     for menu in MENUS_BARRE {
@@ -587,17 +589,10 @@ fn draw_wallpaper() {
 
 // ─── Icônes ────────────────────────────────────────────────────────────────
 //
-// BOUCHAUD_GUI_ICONES_IMAGES_V1
-//
-// Les cinq icones etaient DESSINEES ici : plus de deux cents lignes de disques,
-// de rectangles et de degrades, un peintre par application, rejoues a chaque
-// rectangle de degat. Elles ne ressemblaient pas a des icones, et elles ne
-// pouvaient pas : ce compositeur n'a ni courbes ni antialiassage.
-//
-// Ce sont maintenant de vraies images -- quatre PNG fabriques par
-// `tools/assets/fabrique-icones.py`, plus le VRAI logo de Ladybird, pris a son
-// depot. `gui::icones` les decode et les reduit UNE fois, dans la taille exacte
-// ou elles seront posees.
+// BOUCHAUD_ATELIER_ASSETS_V1 : les icones sont des ASSETS -- tuiles Atelier
+// (degrade + glyphe Lucide) rendues par `tools/assets/fabrique-atelier.py` a
+// chaque taille posee. `gui::icones` choisit le PNG, le decode une fois et le
+// recopie ; rien n'est dessine ici.
 
 /// Corps du libelle d'une icone de bureau.
 const CORPS_LIBELLE: f32 = 12.0;
@@ -1026,20 +1021,14 @@ fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
 // d'accent sous son icone, une fenetre rangee un point tenu, et la cellule
 // survolee un voile.
 
-/// Pictogramme Applications : quatre pastilles arrondies en grille.
+/// Pictogramme Applications : le glyphe Lucide `layout-grid`, teinte.
 fn pictogramme_applications(cellule: crate::gui::atelier::dock::Boite, actif: bool) {
-    use crate::gui::atelier::jetons as j;
-    let cote = 11;
-    let ecart = 5;
-    let total = 2 * cote + ecart;
-    let x0 = cellule.x + (cellule.w - total) / 2;
-    let y0 = cellule.y + (cellule.h - total) / 2;
-    let couleur = if actif { j::ACCENT } else { j::ENCRE_DOUCE };
-    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        let r = crate::gui::windowing::Rect::new(x0 + dx * (cote + ecart),
-            y0 + dy * (cote + ecart), cote as u32, cote as u32);
-        crate::gui::atelier::matiere::pave(r, 3, couleur, 255);
-    }
+    use crate::gui::atelier::{assets, jetons as j};
+    let cote = 22;
+    let x = cellule.x + (cellule.w - cote) / 2;
+    let y = cellule.y + (cellule.h - cote) / 2;
+    assets::pose_masque(assets::SYMBOLE_GRILLE_22, x.max(0) as usize, y.max(0) as usize,
+        if actif { j::ACCENT } else { j::ENCRE_DOUCE }, 255);
 }
 
 fn voile_cellule(cellule: crate::gui::atelier::dock::Boite, opacite: u8) {

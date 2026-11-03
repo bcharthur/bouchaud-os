@@ -233,23 +233,28 @@ fn une_variante_non_geree_est_refusee() {
 
 // ─── Les vraies icones ─────────────────────────────────────────────────────
 
-/// Les cinq images que le noyau embarque doivent se decoder, faire la taille
-/// annoncee, et porter de la transparence : une icone sans alpha aurait un
-/// carre de fond sur le bureau.
+/// Les tuiles Atelier que le noyau embarque (BOUCHAUD_ATELIER_ASSETS_V1) se
+/// decodent, ont la taille de leur nom, et portent de la transparence : une
+/// icone sans alpha aurait un carre de fond sur le bureau.
 #[test]
 fn les_icones_du_bureau_se_decodent() {
-    let icones: [(&str, &[u8]); 5] = [
-        ("ladybird", include_bytes!("../../src/assets/icons/ladybird.png")),
-        ("calculatrice", include_bytes!("../../src/assets/icons/calculatrice.png")),
-        ("terminal", include_bytes!("../../src/assets/icons/terminal.png")),
-        ("fichiers", include_bytes!("../../src/assets/icons/fichiers.png")),
-        ("rustpad", include_bytes!("../../src/assets/icons/rustpad.png")),
+    macro_rules! tuile {
+        ($nom:literal, $t:literal) => {
+            ($nom, $t, include_bytes!(concat!("../../src/assets/atelier/apps/", $nom, "-", $t, ".png")).as_slice())
+        };
+    }
+    let icones = [
+        tuile!("navigateur", "56"), tuile!("calculatrice", "56"), tuile!("terminal", "56"),
+        tuile!("fichiers", "56"), tuile!("edition", "56"), tuile!("services", "56"),
+        tuile!("notes", "56"), tuile!("insights", "56"), tuile!("moniteur", "40"),
+        tuile!("journal", "40"), tuile!("parametres", "18"),
     ];
-    for (nom, octets) in icones {
+    for (nom, taille, octets) in icones {
+        let cote: usize = taille.parse().unwrap();
         let image = png::decode(octets)
             .unwrap_or_else(|| panic!("{nom} : le noyau ne saurait pas la decoder"));
-        assert_eq!((image.largeur, image.hauteur), (128, 128), "{nom}");
-        assert_eq!(image.pixels.len(), 128 * 128, "{nom}");
+        assert_eq!((image.largeur, image.hauteur), (cote, cote), "{nom}");
+        assert_eq!(image.pixels.len(), cote * cote, "{nom}");
         assert!(
             image.pixels.iter().any(|p| p >> 24 == 0),
             "{nom} : aucun pixel transparent, l'icone aurait un fond carre"
