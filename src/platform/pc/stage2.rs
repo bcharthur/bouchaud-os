@@ -550,6 +550,11 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // pas le bureau, pas Ladybird -- qui declare le boot sain ; sans lui, un
     // candidat n'est jamais confirme et le chargeur le retire.
     crate::kernel::update::journalise_boot();
+    // BOUCHAUD_RECOVERY_V1 : le chargeur a choisi RECOVERY -> console texte,
+    // ni superviseur, ni bureau, ni Ladybird. Ne revient jamais.
+    if crate::kernel::update::en_recovery() {
+        crate::kernel::update::recovery::run();
+    }
     crate::kernel::update::lance_superviseur();
 
     // LE MODE DE SECOURS EST CONSULTE ICI, ET NULLE PART AILLEURS.

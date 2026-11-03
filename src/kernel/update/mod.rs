@@ -25,6 +25,12 @@ use crate::drivers::bloc::{self, Volume};
 use crate::fs::gpt::{self, Guid, Support};
 use crate::kernel::sync::SpinLock;
 
+/// The recovery console (BOUCHAUD_RECOVERY_V1).
+pub mod recovery;
+
+/// Did the loader boot RECOVERY rather than a system slot?
+pub fn en_recovery() -> bool { passage().map(|p| p.raison.est_recovery()).unwrap_or(false) }
+
 static PASSAGE: SpinLock<Option<Passage>> = SpinLock::new(None);
 static COMMITTE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static BRUT_INVALIDE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -138,6 +144,87 @@ fn persiste(m: &mut Meta, e: &Enregistrement) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// META block 2: unconfirmed boots of the active slot (update-core echecs).
+/// A confirmed boot resets it -- durably: write, real flush.
+fn ecrit_compteur(m: &mut Meta, n: u32) -> Result<(), &'static str> {
+    let mut b = vec![0u8; m.support.taille_bloc];
+    b[..uc::echecs::OCTETS].copy_from_slice(&uc::echecs::encode(n));
+    if !m.support.ecrit(m.premier + uc::echecs::BLOC, &b) { return Err("compteur_ecriture"); }
+    if !m.support.vidange() { return Err("compteur_vidange"); }
+    Ok(())
+}
+
+fn lit_compteur(m: &mut Meta) -> u32 {
+    let mut b = vec![0u8; m.support.taille_bloc];
+    if !m.support.lit(m.premier + uc::echecs::BLOC, &mut b) { return 0; }
+    uc::echecs::decode(&b)
+}
+
+// ---- for the recovery console ----------------------------------------------
+
+pub fn meta_lecture() -> Result<(Enregistrement, u32), &'static str> {
+    let p = passage().ok_or("sans_passage")?;
+    let mut m = trouve_meta(&p)?;
+    let e = lit(&mut m)?;
+    Ok((e, lit_compteur(&mut m)))
+}
+
+/// Manual rollback (recovery, named and confirmed): the previous version,
+/// if it is Good, becomes active. The failure counter restarts at 0.
+pub fn rollback_manuel() -> Result<Slot, &'static str> {
+    let p = passage().ok_or("sans_passage")?;
+    let mut m = trouve_meta(&p)?;
+    let e = lit(&mut m)?;
+    let n = e.revient().map_err(|_| "version_precedente_pas_bonne")?;
+    persiste(&mut m, &n)?;
+    ecrit_compteur(&mut m, 0)?;
+    Ok(n.actif)
+}
+
+pub fn remet_compteur() -> Result<(), &'static str> {
+    let p = passage().ok_or("sans_passage")?;
+    let mut m = trouve_meta(&p)?;
+    ecrit_compteur(&mut m, 0)
+}
+
+/// SHA-256 of a slot as written: the FAT volume's own size (BPB), so a
+/// partition rounded up past the image still verifies. Returns (digest,
+/// bytes hashed, digest META records for that slot if it is Good/Candidate).
+pub fn empreinte_slot(slot: Slot) -> Result<([u8; 32], u64, Option<[u8; 32]>), &'static str> {
+    let p = passage().ok_or("sans_passage")?;
+    let mut m = trouve_meta(&p)?;
+    let attendu = lit(&mut m).ok().and_then(|e| match e.slot(slot).etat {
+        Etat::Bon | Etat::Candidat { .. } => Some(e.slot(slot).image),
+        _ => None,
+    });
+    let type_slot = guid_type(disque::type_du_slot(slot));
+    let (parts, _) = gpt::lit_table(&mut m.support).map_err(|_| "gpt")?;
+    let part = parts.iter().find(|x| x.type_guid == type_slot).ok_or("slot_introuvable")?;
+    let t = m.support.taille_bloc;
+    let mut b = vec![0u8; t];
+    if !m.support.lit(part.premier, &mut b) { return Err("lecture"); }
+    let octets_secteur = u16::from_le_bytes([b[11], b[12]]) as u64;
+    let total16 = u16::from_le_bytes([b[19], b[20]]) as u64;
+    let total32 = u32::from_le_bytes([b[32], b[33], b[34], b[35]]) as u64;
+    let partition = part.blocs() * t as u64;
+    let mut longueur = octets_secteur * if total16 != 0 { total16 } else { total32 };
+    if longueur == 0 || longueur > partition { longueur = partition; }
+    let mut h = crate::net::security::tls::sha256::Sha256::new();
+    let par_lot = 1024 * 1024 / t;
+    let mut tampon = vec![0u8; par_lot * t];
+    let mut fait = 0u64;
+    while fait < longueur {
+        let reste = longueur - fait;
+        let blocs = ((reste + t as u64 - 1) / t as u64).min(par_lot as u64) as usize;
+        let lu = &mut tampon[..blocs * t];
+        if !m.support.lit(part.premier + fait / t as u64, lu) { return Err("lecture"); }
+        let utile = (lu.len() as u64).min(reste) as usize;
+        h.update(&lu[..utile]);
+        fait += utile as u64;
+    }
+    Ok((h.finalize(), longueur, attendu))
+}
+
 /// What the update capability's READ_STATE returns.
 #[derive(Clone, Copy)]
 pub struct EtatBoot {
@@ -166,8 +253,8 @@ pub fn commit_sante() -> Result<Commit, &'static str> {
     let mut m = trouve_meta(&p)?;
     let e = lit(&mut m)?;
     let r = match passage::commit_sante(&p, &e) {
-        Ok(None) => Ok(Commit::DejaSain),
-        Ok(Some(n)) => persiste(&mut m, &n).map(|_| {
+        Ok(None) => ecrit_compteur(&mut m, 0).map(|_| Commit::DejaSain),
+        Ok(Some(n)) => persiste(&mut m, &n).and_then(|_| ecrit_compteur(&mut m, 0)).map(|_| {
             COMMITTE.store(true, core::sync::atomic::Ordering::Release);
             Commit::Committe
         }),
