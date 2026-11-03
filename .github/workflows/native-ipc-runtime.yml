@@ -31,6 +31,7 @@ on:
       - 'tools/ci/run_native_ipc_probe.sh'
       - 'tools/ci/reliability/**'
       - 'system/update-core/**'
+      - 'src/kernel/update/**'
       - 'tools/update/**'
       - 'tools/reference/uefi-preboot-probe/**'
       - 'tools/reference/uefi-image-builder/**'
@@ -68,6 +69,7 @@ on:
       - 'tools/userland/build-native-ipc-ring3-probe.sh'
       - 'tools/ci/run_native_ipc_probe.sh'
       - 'system/update-core/**'
+      - 'src/kernel/update/**'
       - 'tools/update/**'
       - 'tools/reference/uefi-preboot-probe/**'
       - 'tools/reference/uefi-image-builder/**'
@@ -187,7 +189,9 @@ jobs:
   ab-rollback:
     # BOUCHAUD_LOADER_AB_V1 : le chargeur A/B sous OVMF, un QEMU par boot sur le
     # MEME disque, coupure SIGKILL a chaque boot. Candidat qui panique, candidat
-    # qui gele, une copie META corrompue (chacune), les deux corrompues.
+    # qui gele, une copie META corrompue (chacune), les deux corrompues ; puis
+    # le commit de sante par serviced (sante) et son refus quand un service
+    # critique du candidat echoue (sante-ko).
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: ab-rollback (${{ matrix.scenario }})
@@ -196,7 +200,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [panique, gel, meta-0, meta-1, meta-2]
+        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko]
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo

@@ -9,6 +9,10 @@
 #   meta-0     copy 0 of the metadata corrupted -> copy 1 used
 #   meta-1     copy 1 corrupted -> copy 0 used
 #   meta-2     both copies corrupted -> RECOVERY_REQUIRED, nothing booted
+#   sante      slot B = good system (serviced + healthd in its ramdisk):
+#              serviced declares health -> the candidate is COMMITTED
+#   sante-ko   slot B = good kernel, but its critical service never becomes
+#              ready: serviced -> RecoveryRequired, never commits -> rollback
 #
 # Each "boot" is a fresh QEMU process on the SAME disk image (state persists
 # between boots exactly as it would on a disk). A candidate failure ends by
@@ -18,11 +22,16 @@
 #   panique / gel : B B B A A   (3 attempts, then automatic rollback)
 #   meta-0/meta-1 : B B B A     (the surviving copy carries the candidate)
 #   meta-2        : RECOVERY_REQUIRED, no kernel ever starts
+#   sante         : B+ B=        (committed, then B is the good active slot)
+#   sante-ko      : B- B- B- A= A=
+# (B+ commit done, B=/A= already the good slot, B- RecoveryRequired.)
+# The disk is an NVMe namespace: the kernel finds META there by the unique
+# GUID the loader handed over.
 # Fail-closed: a missing marker, an unexpected slot, a good kernel that does
 # not start, or a kernel started under RECOVERY_REQUIRED is red.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2 [OUT]}
+SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko [OUT]}
 OUT=${2:-target/ab-rollback-$SCENARIO}
 TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 FEATURES=uefi-boot,reference-bringup,reference-desktop
@@ -35,6 +44,8 @@ case "$SCENARIO" in
   meta-0) MAUVAIS=panique; META_SPEC=corrompu:0; ATTENDU="B B B A" ;;
   meta-1) MAUVAIS=panique; META_SPEC=corrompu:1; ATTENDU="B B B A" ;;
   meta-2) MAUVAIS=panique; META_SPEC=corrompu:2; ATTENDU="RECOVERY" ;;
+  sante) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
+  sante-ko) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B- B- B- A= A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   *) echo "scenario inconnu: $SCENARIO" >&2; exit 2 ;;
 esac
 
@@ -42,7 +53,7 @@ esac
 cargo +"$TOOLCHAIN" build --release --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml \
   --target x86_64-unknown-uefi
 SHIM=tools/reference/uefi-preboot-probe/target/x86_64-unknown-uefi/release/bouchaud-uefi-preboot-probe.efi
-for k in bon "$MAUVAIS"; do
+for k in $(printf '%s\n' bon "$MAUVAIS" | sort -u); do
   f=$FEATURES; [ "$k" != bon ] && f="$FEATURES,banc-ab-$k"
   cargo +"$TOOLCHAIN" build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features "$f"
   cp target/x86_64-bouchaud_os_uefi/debug/bouchaud-os "$OUT/kernel-$k.elf"
@@ -53,6 +64,34 @@ cp -r tools/reference/uefi-image-builder "$TRAVAIL/builder"
 BUILDER=$TRAVAIL/builder/target/release/bouchaud-reference-uefi-image-builder
 "$BUILDER" --charge-installation "$OUT/kernel-bon.elf" "$OUT/slot-a"
 "$BUILDER" --charge-installation "$OUT/kernel-$MAUVAIS.elf" "$OUT/slot-b"
+case "$SCENARIO" in sante|sante-ko)
+  # The system userland of each slot: serviced (system supervisor) and its
+  # critical service. In sante-ko the CANDIDATE's critical service fails.
+  SDK=userland/libs/bouchaud-sdk/build-program.sh
+  "$SDK" "$TRAVAIL/serviced" userland/services/serviced/serviced.c
+  "$SDK" "$TRAVAIL/healthd" userland/services/healthd/healthd.c
+  "$SDK" "$TRAVAIL/healthd-defaillant" userland/tests/healthd-defaillant.c
+  critique_b=$TRAVAIL/healthd; [ "$SCENARIO" = sante-ko ] && critique_b=$TRAVAIL/healthd-defaillant
+  python3 - "$OUT/slot-a/ramdisk" "$TRAVAIL/serviced" "$TRAVAIL/healthd" <<'PY'
+import io, sys, tarfile
+out, serviced, healthd = sys.argv[1:4]
+with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
+    for name, src in (("bin/serviced", serviced), ("bin/healthd", healthd)):
+        data = open(src, "rb").read()
+        i = tarfile.TarInfo(name); i.size = len(data); i.mode = 0o755; i.mtime = 0
+        t.addfile(i, io.BytesIO(data))
+PY
+  python3 - "$OUT/slot-b/ramdisk" "$TRAVAIL/serviced" "$critique_b" <<'PY'
+import io, sys, tarfile
+out, serviced, healthd = sys.argv[1:4]
+with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
+    for name, src in (("bin/serviced", serviced), ("bin/healthd", healthd)):
+        data = open(src, "rb").read()
+        i = tarfile.TarInfo(name); i.size = len(data); i.mode = 0o755; i.mtime = 0
+        t.addfile(i, io.BytesIO(data))
+PY
+  ;;
+esac
 rustc +"$TOOLCHAIN" --edition 2021 -O tools/update/meta.rs -o "$TRAVAIL/meta"
 "$TRAVAIL/meta" "$META_SPEC" "$OUT/meta.img"
 "$BUILDER" --disque-ab "$OUT/disque-ab.img" "$SHIM" "$OUT/meta.img" "$OUT/slot-a" "$OUT/slot-b"
@@ -67,7 +106,8 @@ for i in $(seq 1 "$nb"); do
   qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max \
     -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,unit=1,file="$OUT/vars.fd" \
-    -drive format=raw,file="$OUT/disque-ab.img" \
+    -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
+    -device nvme,drive=disque,serial=bouchaud-ab \
     -display none -no-reboot -serial file:"$log" >/dev/null 2>&1 &
   pid=$!
   verdict=""
@@ -82,6 +122,15 @@ for i in $(seq 1 "$nb"); do
       break
     fi
     slot=$(grep -aoE "BOUCHAUD_AB_BOOT slot=[AB]" <<< "$propre" | tail -1 | sed 's/.*slot=//' || true)
+    case "$SCENARIO" in sante|sante-ko)
+      if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then verdict="$slot+"; break; fi
+      if [ -n "$slot" ] && grep -aq "result=already_good" <<< "$propre"; then verdict="$slot="; break; fi
+      if [ -n "$slot" ] && grep -aqE "result=refused|\[SERVICED\] system [A-Za-z]+->RecoveryRequired" <<< "$propre"; then
+        verdict="$slot-"; break
+      fi
+      if ! kill -0 "$pid" 2>/dev/null; then break; fi
+      sleep 1; continue ;;
+    esac
     if [ "$slot" = B ] && grep -aqE "BOUCHAUD_AB_CANDIDAT_(PANIQUE|GEL)_VOLONTAIRE" <<< "$propre"; then
       verdict=B; break
     fi
@@ -100,6 +149,13 @@ done
 
 obtenu="${sequence[*]}"
 echo "AB_SEQUENCE scenario=$SCENARIO attendu=\"$ATTENDU\" obtenu=\"$obtenu\""
+# The commit must be durable AND visible: right after it, serviced re-reads
+# the state through the capability; B must be the active, Good slot.
+if [ "$SCENARIO" = sante ] && ! sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | tr -d '\r' \
+     | grep -aE "SERVICED_UPDATE_STATE.*active_slot=1.*state_b=2" >/dev/null; then
+  echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=etat_apres_commit" >&2
+  exit 1
+fi
 if [ "$obtenu" != "$ATTENDU" ]; then
   echo "AB_ROLLBACK_FAIL scenario=$SCENARIO" >&2
   exit 1

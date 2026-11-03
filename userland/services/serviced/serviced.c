@@ -22,6 +22,23 @@
  * Usage:
  *   serviced            supervise the built-in graph forever
  *   serviced qualify    run the qualification scenario and exit 0/1
+ *   serviced system     THE system supervisor (BOUCHAUD_SERVICED_SYSTEM_V1),
+ *                       started by the kernel with one bootstrap handle: the
+ *                       update capability (INSPECT | UPDATE_HEALTH).
+ *
+ * System state machine (one line per transition, "[SERVICED] system A->B"):
+ *
+ *   Booting --capability checked--> StartingServices
+ *   StartingServices --every critical service Running for HEALTH_WINDOW--> Healthy
+ *   Healthy --critical service leaves Running--> Degraded --back--> Healthy
+ *   StartingServices/Degraded --critical service Failed, or no health
+ *       within HEALTH_DEADLINE--> RecoveryRequired
+ *
+ * Entering Healthy for the first time declares the boot healthy through the
+ * capability (bo_update_commit_health): a candidate slot becomes the active,
+ * Good slot. RecoveryRequired never commits: the loader keeps counting the
+ * candidate's attempts and rolls it back. The critical list is versioned
+ * (CRITICAL_PROFILE); changing it is a change of the health contract.
  */
 #include "bouchaud/sdk.h"
 
@@ -78,6 +95,7 @@ struct service {
     bo_u64       spawned_at;
     bo_u64       running_at;
     int          want_running;
+    int          critical;            /* part of the system health contract */
 };
 
 static struct service svc[MAX_SERVICES];
@@ -582,6 +600,120 @@ static int qualify(void)
     return 0;
 }
 
+/* ---- system mode -------------------------------------------------------- */
+
+/* Health contract v1: these services must all be Running, without a death,
+ * for HEALTH_WINDOW before the boot is declared healthy. updated and logd
+ * join this list when they exist; the version moves with it. */
+#define CRITICAL_PROFILE  1
+#define HEALTH_WINDOW     (3000 * MS)
+#define HEALTH_DEADLINE   (90000 * MS)
+
+enum sys_state { SYS_BOOTING, SYS_STARTING, SYS_HEALTHY, SYS_DEGRADED, SYS_RECOVERY, SYS_SHUTDOWN };
+
+static const char *sys_name(enum sys_state s)
+{
+    switch (s) {
+    case SYS_BOOTING:  return "Booting";
+    case SYS_STARTING: return "StartingServices";
+    case SYS_HEALTHY:  return "Healthy";
+    case SYS_DEGRADED: return "Degraded";
+    case SYS_RECOVERY: return "RecoveryRequired";
+    case SYS_SHUTDOWN: return "ShuttingDown";
+    }
+    return "?";
+}
+
+static enum sys_state sys = SYS_BOOTING;
+
+static void sys_to(enum sys_state to, const char *why)
+{
+    bo_say("[SERVICED] system ");
+    bo_say(sys_name(sys));
+    bo_say("->");
+    bo_say(sys_name(to));
+    bo_say(" why=");
+    bo_say(why);
+    kv("t_ms", (bo_i64)(now() / MS));
+    bo_say("\n");
+    sys = to;
+}
+
+static void say_update_state(bo_handle_t cap)
+{
+    struct bo_update_state st;
+    bo_i64 rc = bo_update_state(cap, &st);
+    bo_say("SERVICED_UPDATE_STATE");
+    kv("rc", rc);
+    if (rc == 0) {
+        kv("booted_slot", st.booted_slot);
+        kv("boot_reason", st.boot_reason);
+        kv("attempts_left", st.attempts_left);
+        kv("active_slot", st.active_slot);
+        kv("state_a", st.state_a);
+        kv("state_b", st.state_b);
+        kv("meta_sequence", (bo_i64)st.meta_sequence);
+    }
+    bo_say("\n");
+}
+
+static int system_mode(const struct bo_start *start)
+{
+    struct bo_handle_info info;
+    bo_handle_t cap = 0;
+    bo_u64 t0, healthy_since = 0;
+    int committed = 0, k;
+
+    if (start->bootstrap_count == 1 && bo_handle_info(start->bootstrap[0], &info) == 0
+        && info.kind == BO_KIND_UPDATE)
+        cap = start->bootstrap[0];
+    bo_say("SERVICED_SYSTEM_BEGIN");
+    kv("profile", CRITICAL_PROFILE);
+    kv("capability", cap ? 1 : 0);
+    kv("rights", cap ? (bo_i64)info.rights : 0);
+    bo_say("\n");
+    if (cap) say_update_state(cap);
+
+    add_service("health", "/bin/healthd", -1);
+    svc[0].critical = 1;
+    t0 = now();
+    sys_to(SYS_STARTING, cap ? "capability_ok" : "no_update_capability");
+
+    for (;;) {
+        int all_running = 1, any_failed = 0;
+        bo_u64 t;
+        step(100 * MS);
+        t = now();
+        for (k = 0; k < svc_count; k++) {
+            if (!svc[k].critical) continue;
+            if (svc[k].state != RUNNING) all_running = 0;
+            if (svc[k].state == FAILED) any_failed = 1;
+        }
+        if (sys == SYS_RECOVERY) continue;     /* terminal for this boot */
+        if (any_failed) { sys_to(SYS_RECOVERY, "critical_service_failed"); continue; }
+        if (!all_running) {
+            healthy_since = 0;
+            if (sys == SYS_HEALTHY) sys_to(SYS_DEGRADED, "critical_service_not_running");
+            if (!committed && sys != SYS_DEGRADED && t - t0 > HEALTH_DEADLINE)
+                sys_to(SYS_RECOVERY, "health_deadline");
+            continue;
+        }
+        if (!healthy_since) healthy_since = t;
+        if (t - healthy_since < HEALTH_WINDOW || sys == SYS_HEALTHY) continue;
+        sys_to(SYS_HEALTHY, committed ? "critical_services_back" : "critical_services_running_window");
+        if (!committed) {
+            bo_i64 rc = cap ? bo_update_commit_health(cap) : -BO_E_BAD_HANDLE;
+            committed = 1;
+            bo_say("SERVICED_HEALTH_COMMIT");
+            kv("rc", rc);
+            kv("window_ms", (bo_i64)(HEALTH_WINDOW / MS));
+            bo_say(rc == 0 ? " result=committed\n" : rc == 1 ? " result=already_good\n" : " result=refused\n");
+            if (cap) say_update_state(cap);
+        }
+    }
+    return 0;   /* not reached: the system supervisor never exits */
+}
+
 int bo_main(const struct bo_start *start)
 {
     bo_i64 w;
@@ -596,6 +728,8 @@ int bo_main(const struct bo_start *start)
 
     if (start->argc > 1 && prefix(start->argv[1], bo_strlen(start->argv[1]), "qualify"))
         return qualify();
+    if (start->argc > 1 && prefix(start->argv[1], bo_strlen(start->argv[1]), "system"))
+        return system_mode(start);
 
     add_service("health", "/bin/healthd", -1);
     for (;;) step(HEARTBEAT_PERIOD);
