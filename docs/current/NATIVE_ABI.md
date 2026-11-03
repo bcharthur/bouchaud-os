@@ -31,10 +31,10 @@ Espace de noms `0x424F_0000 + n` (disjoint des numéros Linux). Retour : `>= 0` 
 | 0x34 | `waitset_wait(ws, out, cap, timeout_ns)` | READ | bloquant, voir §6 |
 | 0x70 | `update_state(cap, out)` | INSPECT | passage du chargeur + bloc META (`struct bo_update_state`, 40 o) |
 | 0x71 | `update_commit_health(cap)` | UPDATE_HEALTH | 0 : candidat promu (durable) ; 1 : déjà l'actif Bon ; refus : `ACCESS_DENIED` / `NOT_FOUND` |
-| 0x72 | `update_install_begin(cap, slot)` | UPDATE_INSTALL | refuse le slot en cours et l'actif ; le slot passe Vide AVANT toute écriture ; session liée au pid |
+| 0x72 | `update_install_begin(cap, slot, manifeste, len, sig64)` | UPDATE_INSTALL | SIGNATURE TRUSTED d'abord (clé de confiance compilée dans le noyau, manifeste canonique ≤ 1 Kio) ; refuse le slot en cours et l'actif ; le slot passe Vide AVANT toute écriture ; session liée au pid |
 | 0x73 | `update_install_write(cap, off, buf, len)` | UPDATE_INSTALL | aligné bloc, ≤ 1 Mio, borné à la partition du slot cible |
 | 0x75 | `update_install_verify(cap, len)` | UPDATE_INSTALL | relecture DU DISQUE par morceaux (≤ 1 Mio) ; rend les octets restants |
-| 0x74 | `update_install_finish(cap, sha256, len, essais)` | UPDATE_INSTALL | exige la relecture complète ; SHA-256 égal → Candidat{essais} |
+| 0x74 | `update_install_finish(cap, sha256, len, essais)` | UPDATE_INSTALL | doit égaler le manifeste signé ; exige la relecture complète ; SHA-256 relu égal → Candidat{essais} |
 
 **Aucun appel ne crée un objet Update.** Le noyau en donne deux à `/bin/serviced system` au lancement : santé (`INSPECT|UPDATE_HEALTH|DUP|TRANSFER`) et installation (`INSPECT|UPDATE_INSTALL|TRANSFER`), que serviced passe atténuée (`INSPECT|UPDATE_INSTALL`) à `updated` seul. Voir [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
 | 0x40–0x43 | `shm_create/size/read/write` | size: INSPECT, read: READ, write: WRITE | plafond par objet selon profil de sécurité |

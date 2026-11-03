@@ -1,6 +1,6 @@
 # Mise à jour atomique, santé, rollback et recovery
 
-**État (2026-11-03, branche `claude/atomic-platform-20261103`) : chaîne A/B complète prouvée sous QEMU/OVMF (TCG, NVMe), en local ET sur les runners hébergés (matrice `ab-rollback`, 11 scénarios). Signature des versions : NON vérifiée sur la machine. PHYSICAL : non démontré.**
+**État (2026-11-03, branche `claude/atomic-platform-20261103`) : chaîne A/B complète prouvée sous QEMU/OVMF (TCG, NVMe), en local ET sur les runners hébergés (matrice `ab-rollback`, 11 scénarios). Chaîne de confiance clé → manifeste signé → empreinte vérifiée par le noyau, avec une clé de DÉVELOPPEMENT générée par le banc ; aucune clé de version de production n'existe encore. PHYSICAL : non démontré.**
 
 ## Architecture
 
@@ -36,6 +36,8 @@ La **politique** (candidat, bon, mauvais, essais, rollback, échecs répétés, 
 | BOUCHAUD-RECOVERY (option) | `…-0005-` | FAT : système minimal (même format qu'un slot) |
 | STATE | `…-0001-` | persistance utilisateur (`fs::persistance`) |
 
+Manifeste canonique (`system/update-core/src/manifeste.rs`, signé Ed25519, vérifié par le noyau à `begin`) : `bouchaud-manifeste-v1`, `version=`, `image_sha256=`, `image_octets=`, `essais=` — exactement ces cinq lignes. Deux verdicts séparés : SIGNATURE TRUSTED (au `begin`, avant toute E/S) puis HASH VALID (au `finish`, relu du disque).
+
 Taille d'un slot : charge utile + `ESP_MARGE_MIO`, plancher `ESP_MINIMUM_MIO`. STATE ≥ 4 × la zone de persistance. Le chargeur et le noyau trouvent les partitions **par type GPT sur le disque de démarrage**, jamais par numéro.
 
 ## Contrats et invariants
@@ -59,7 +61,7 @@ Taille d'un slot : charge utile + `ESP_MARGE_MIO`, plancher `ESP_MINIMUM_MIO`. S
 | AUTO_ROLLBACK | TCG | `panique`, `gel`, `sante-ko` (`B- B- B- A= A=`) |
 | UPDATED_RING3 | TCG | `mise-a-jour` : `A* B+ B=` — B mis à zéro, écrit par `updated`, relu, Candidat{3}, booté, confirmé |
 | UPDATE_CAPABILITIES | TCG | 16 refus/contrôles observés en ring 3 (écriture avant begin, slot en cours, santé via capacité d'installation, dup, handles étrangers, table = 3 handles, `/dev/nvme0n1`/`/dev/sda` absents, hors slot, non aligné, finish avant relecture, empreinte fausse) |
-| SIGNED_MANIFEST | **HASH VALID seulement** | le noyau recalcule le SHA-256 sur le disque ; **SIGNATURE TRUSTED : NOT_STARTED** sur la machine (les attestations Sigstore de `release.yml` restent une provenance vérifiée hors machine) |
+| SIGNED_MANIFEST | HOST + TCG (clé de dev) | `test_signature.rs` (Ed25519/SHA-512 `no_std` contre RFC 8032 et OpenSSL, 768 inversions de bits par message, S ≥ L, manifeste canonique strict) ; `mise-a-jour` : `begin` refusé pour une signature altérée ou un manifeste modifié (`signature_non_fiable`), `finish` refusé si l'empreinte diffère du manifeste signé, puis `signature=fiable hash=valide`. **Clé de production : aucune** (une version réelle serait refusée : `aucune_cle_de_confiance`) |
 | RECOVERY_BOOT | TCG | `recovery-requise` (`R`), `echecs-repetes` (`A- A- A- R`) ; aucun superviseur ni bureau |
 | RECOVERY_ROLLBACK | TCG | `recovery-rollback` (`R B=`) : touche R, `verifie A/B` conformes, rollback refusé sans `--confirme`, puis fait |
 
@@ -82,7 +84,7 @@ Console texte (framebuffer + COM1), entrée clavier ou série. Lecture seule par
 
 ## Limites connues
 
-- Signature des versions non vérifiée sur la machine (seule l'empreinte l'est) ; clés de développement : aucune n'est commitée.
+- Aucune clé de version de production : elle doit être créée hors dépôt (moitié privée jamais commitée), et sa moitié publique ajoutée à `kernel::update` (`cles_de_confiance`). La clé de dev n'existe que si la construction pose `BOUCHAUD_CLE_VERSION_DEV`, et chaque usage l'annonce (`developpement=1`).
 - `verifie` mesure le volume FAT (taille du BPB), pas un manifeste signé.
 - Le commit exige un volume à vidange réelle : un NVMe sans cache volatil (VWC=0) est refusé (sûr, mais à assouplir en distinguant « pas de cache » de « inconnu »).
 - META et slots doivent être sur un volume que le noyau sait piloter (NVMe interne, USB, ATA) ; prouvé sous QEMU NVMe seulement.

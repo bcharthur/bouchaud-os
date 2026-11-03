@@ -15,7 +15,7 @@ Branche `claude/atomic-platform-20261103` (non fusionnée, aucune PR ouverte au 
 ## 3. Travail suivant, dans l'ordre
 
 1. Ouvrir la PR de la branche, qualifier son HEAD (CI Fast, Integration, Reliability V3, Native IPC avec la matrice `ab-rollback` + coupures, Ladybird qualification, Nightly) sur le **même SHA** ; fusion sur décision humaine.
-2. **SIGNATURE TRUSTED** : clé de version de confiance → manifeste canonique signé → empreinte d'image, vérifiée par `updated` AVANT `begin` (Ed25519 `no_std` dans `system/update-core`, vecteurs RFC 8032 en test hôte, clé de développement générée par le banc, aucune clé privée commitée). Aujourd'hui : HASH VALID seulement.
+2. **Clé de version de production** : la chaîne (Ed25519 `no_std`, manifeste canonique, vérification noyau au `begin`) est en place et prouvée avec une clé de dev de banc. Créer la clé hors dépôt (HSM ou machine hors ligne), commiter sa seule moitié publique dans `cles_de_confiance`, signer les manifestes dans `release.yml` sans que la clé privée touche un runner hébergé (décision humaine).
 3. **Image Trigkey A/B** : `build_trigkey_image.sh` doit produire le disque A/B avec `serviced/healthd/updated/logd` dans le ramdisk (sinon tout candidat est retiré — voulu).
 4. **Latence SMP1** : l'attribution (`ipc-attribution`) place l'essentiel dans `file→élu` (p50 ≈ 1,3 ms TCG SMP1), pas dans le chemin de réveil (≈ 12 µs). Proposer, mesurer avant/après, une préemption du réveilleur au profit d'un réveillé interactif — sans toucher aux seuils, et seulement avec cette attribution comme référence.
 5. `logd` : faire passer `healthd` et `updated` par lui (canal d'intake par service), persistance optionnelle bornée.

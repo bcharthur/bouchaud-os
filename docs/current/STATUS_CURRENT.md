@@ -21,7 +21,7 @@ Source machine : [status.json](status.json) — **instantané, pas mis à jour a
 | AUTO_ROLLBACK | PASS | TCG | `panique`/`gel` `B B B A A`, `sante-ko` `B- B- B- A= A=` |
 | UPDATED_RING3 | PASS | TCG | `mise-a-jour` `A* B+ B=` |
 | UPDATE_CAPABILITIES | PASS | TCG | 16 refus/contrôles observés en ring 3 |
-| SIGNED_MANIFEST | **PARTIAL** | TCG | HASH VALID vérifié sur la machine ; **SIGNATURE TRUSTED : NOT_STARTED** |
+| SIGNED_MANIFEST | PASS (clé de dev) | HOST + TCG | Ed25519 `no_std` (RFC 8032 + OpenSSL) ; noyau : SIGNATURE TRUSTED au `begin`, HASH VALID au `finish` ; **aucune clé de production** |
 | RECOVERY_BOOT | PASS | TCG | `recovery-requise` `R`, `echecs-repetes` `A- A- A- R` |
 | RECOVERY_ROLLBACK | PASS | TCG | `recovery-rollback` `R B=` |
 | POWER_LOSS_HARNESS | PASS | TCG | `run_coupure_persistance.sh` (SIGKILL hôte) |
@@ -37,13 +37,13 @@ Aucun verdict n'est KVM ni PHYSICAL. Tous les TCG ont tourné en local **et** su
 1. **`fsync` d'un répertoire sans effet** (`src/compat/linux/mod.rs`) : un `rename` acquitté par `fsync(rep)` n'était pas durable — trouvé par le banc de coupure.
 2. **Confirmation de santé refusée pendant une installation** : `begin` réécrit META, l'actif ne pouvait plus se confirmer — trouvé par le banc `mise-a-jour`.
 3. **Session d'installation non liée au processus** : l'appel en vol d'un `updated` tué terminait dans la session de son successeur.
-4. **Relecture monolithique** de 90 Mio dans un seul appel système : battements manqués, `updated` tué — relecture incrémentale.
+4. **Relecture monolithique** de 90 Mio dans un seul appel système : battements manqués, `updated` tué — relecture incrémentale ; puis morceaux d'écriture de 256 Kio trop longs à la première lecture du ramdisk — 64 Kio (le banc échoue désormais si `updated` manque un battement).
 5. **Banc IPC** : version ABI codée en dur (`ABI=1.1`).
 
 ## Ce qui reste bloqué ou non commencé
 
 - `P13_FINAL_STRICT_OK` : runners `bouchaud-kvm4/kvm8` à enregistrer (`tools/ci/runner/provision_kvm_runner.sh`) — action humaine.
-- SIGNATURE TRUSTED (chaîne clé de version → manifeste signé → empreinte) : NOT_STARTED.
+- Clé de version de **production** : à créer hors dépôt (la chaîne est en place, seule une clé de dev de banc est vérifiée).
 - Image Trigkey A/B (ramdisk avec `serviced/healthd/updated/logd`) : non intégrée à `build_trigkey_image.sh`.
 - Ladybird §39–40 (scripts OBSOLETE, diagnostics derrière une option) : NOT_STARTED dans cette mission.
 - PHYSICAL : NOT_STARTED.
