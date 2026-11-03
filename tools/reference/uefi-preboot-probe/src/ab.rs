@@ -18,7 +18,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bouchaud_update_core::{self as uc, disque, Slot};
+use bouchaud_update_core::passage::{self, Passage, Raison};
+use bouchaud_update_core::{self as uc, disque, Etat, Slot};
 use uefi::proto::device_path::{DevicePath, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::block::BlockIO;
@@ -28,7 +29,8 @@ use uefi::{boot, Guid, Handle};
 pub enum Decision {
     /// No META partition on this disk: the pre-A/B layout, unchanged.
     Legacy,
-    Boot { slot: Slot, partition: Handle, raison: &'static str },
+    /// `passage` is what the kernel receives (BOUCHAUD_BOOT_HANDOFF_V1).
+    Boot { slot: Slot, partition: Handle, raison: &'static str, passage: Passage },
     RecoveryRequired(&'static str),
 }
 
@@ -48,6 +50,12 @@ fn disque_de(handle: Handle) -> Option<Prefixe> {
 fn type_gpt(handle: Handle) -> Option<Guid> {
     let info = boot::open_protocol_exclusive::<PartitionInfo>(handle).ok()?;
     info.gpt_partition_entry().map(|e| e.partition_type_guid.0)
+}
+
+/// Unique partition GUID, in GPT on-disk byte order.
+fn unique_gpt(handle: Handle) -> [u8; 16] {
+    let Ok(info) = boot::open_protocol_exclusive::<PartitionInfo>(handle) else { return [0; 16] };
+    info.gpt_partition_entry().map(|e| e.unique_partition_guid.to_bytes()).unwrap_or([0; 16])
 }
 
 fn guid(t: disque::TypeGuid) -> Option<Guid> { Guid::try_parse(t.texte).ok() }
@@ -115,21 +123,47 @@ pub fn decide(journal: &mut alloc::string::String) -> Decision {
     let _ = writeln!(journal, "ab.lu sequence={} actif={:?} a={:?} b={:?}",
                      e.sequence, e.actif, e.slot(Slot::A).etat, e.slot(Slot::B).etat);
     let (slot, apres) = e.choisit_boot();
-    let mut raison = if slot == e.actif { "actif" } else { "candidat" };
+    let mut raison = Raison::Actif;
     let mut choisi = slot;
+    let mut sur_disque = e;
     if apres != e {
         if persiste(meta, &apres) {
-            if slot != e.actif { raison = "candidat_essai_consomme"; } else { raison = "rollback_candidat_epuise"; }
+            sur_disque = apres;
+            raison = if slot != e.actif { Raison::CandidatEssaiConsomme } else { Raison::RollbackCandidatEpuise };
         } else if slot != e.actif {
             // Never boot a candidate whose consumed attempt is not durable.
             choisi = e.actif;
-            raison = "persistance_essai_impossible_repli_actif";
+            raison = Raison::PersistanceImpossibleReplieActif;
         } else {
-            raison = "rollback_non_persiste";
+            raison = Raison::RollbackNonPersiste;
         }
     }
+    let essais_restants = match sur_disque.slot(choisi).etat { Etat::Candidat { essais } => essais, _ => 0 };
+    // Per-boot identity, not a secret: TSC mixed with the record sequence.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let boot_id = tsc ^ sur_disque.sequence.rotate_left(32) ^ 0xB0AB_0000_0000_0000;
+    let passage = Passage { slot: choisi, raison, essais_restants, sequence_meta: sur_disque.sequence,
+                            boot_id, meta_unique: unique_gpt(meta) };
     match handle_de(choisi) {
-        Some(h) => Decision::Boot { slot: choisi, partition: h, raison },
+        Some(h) => Decision::Boot { slot: choisi, partition: h, raison: raison.texte(), passage },
         None => Decision::RecoveryRequired("partition_du_slot_absente"),
     }
+}
+
+/// Leaves the handoff in one page of OS-loader memory (passage::TYPE_MEMOIRE).
+/// The page survives ExitBootServices (it is not boot-services memory) and is
+/// reported to the kernel as an unknown UEFI region. Best effort: a kernel
+/// that finds no handoff simply never commits health (fail closed).
+pub fn depose_passage(p: &Passage) -> bool {
+    let Ok(page) = boot::allocate_pages(
+        boot::AllocateType::AnyPages,
+        uefi::boot::MemoryType::custom(passage::TYPE_MEMOIRE),
+        1,
+    ) else { return false };
+    let o = passage::encode(p);
+    unsafe {
+        core::ptr::write_bytes(page.as_ptr(), 0, 4096);
+        core::ptr::copy_nonoverlapping(o.as_ptr(), page.as_ptr(), o.len());
+    }
+    true
 }

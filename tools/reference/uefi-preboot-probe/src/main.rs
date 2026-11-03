@@ -148,9 +148,13 @@ fn run() -> uefi::Result {
             drop(gop);
             loop { boot::stall(core::time::Duration::from_secs(60)); }
         }
-        ab::Decision::Boot { partition, .. } => {
+        ab::Decision::Boot { partition, passage, .. } => {
             drop(fs);
             drop(gop);
+            // BOUCHAUD_BOOT_HANDOFF_V1: which slot, from which record.
+            let depose = ab::depose_passage(&passage);
+            uefi::println!("BOUCHAUD_AB_PASSAGE depose={} boot_id={:#x} sequence={}",
+                           depose, passage.boot_id, passage.sequence_meta);
             // The second stage is loaded FROM THE SLOT'S PARTITION: its
             // LoadedImage device is that partition, so bootloader 0.11 reads
             // kernel-x86_64, boot.json and ramdisk from the same slot.
