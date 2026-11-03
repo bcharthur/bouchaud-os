@@ -312,11 +312,61 @@ fn s_canonique(s: &[u8]) -> bool {
     false
 }
 
+/// RFC 8032 5.1.3: the encoded y (top bit cleared) must be < p. TweetNaCl's
+/// unpack25519 silently reduces y mod p, which accepts e.g. y = 1 + p as the
+/// identity (BOUCHAUD_ED25519_STRICT_V1, found by
+/// tools/update/ed25519_adversarial.py; OpenSSL 3 behaves the same).
+fn y_canonique(b: &[u8; 32]) -> bool {
+    // p = 2^255 - 19 = ed ff .. ff 7f (little endian). y >= p iff the top
+    // byte (sign masked) is 0x7f, the middle bytes are all 0xff, and the low
+    // byte is >= 0xed.
+    !((b[31] & 0x7f) == 0x7f && b[1..31].iter().all(|&x| x == 0xff) && b[0] >= 0xed)
+}
+
+/// RFC 8032 5.1.3: "if x = 0 and x_0 = 1, decoding fails" (negative zero).
+fn pas_zero_negatif(b: &[u8; 32], pt: &Pt) -> bool {
+    // Extended coordinates with Z != 0: x == 0 iff X == 0 (no inversion).
+    b[31] >> 7 == 0 || pack25519(&pt[0]) != [0u8; 32]
+}
+
+/// Strict decoding: canonical y, no negative zero, on the curve. Returns -P.
+fn decode_strict(b: &[u8; 32]) -> Option<Pt> {
+    if !y_canonique(b) { return None; }
+    let p = unpackneg(b)?;
+    if !pas_zero_negatif(b, &p) { return None; }
+    Some(p)
+}
+
+/// [8]P is the identity: P lies in the 8-torsion subgroup (small order,
+/// identity included). Same test on -P. Three doublings, not a 256-bit
+/// ladder, and no inversion: this runs inside the `begin` syscall that the
+/// update agent's heartbeat waits on (BOUCHAUD_ED25519_PETIT_ORDRE_V2).
+fn petit_ordre(p: &Pt) -> bool {
+    let mut r = *p;
+    for _ in 0..3 {
+        let c = r;
+        add(&mut r, &c);
+    }
+    // Identity in extended coordinates: X == 0 and Y == Z (no inversion).
+    pack25519(&r[0]) == [0u8; 32] && pack25519(&fz(&r[1], &r[2])) == [0u8; 32]
+}
+
 /// RFC 8032 Ed25519 verification of `signature` (R || S) over `message`
-/// under the public key `cle`.
+/// under the public key `cle`, with Bouchaud's STRICT policy on top of the
+/// cofactorless equation [S]B = R + [k]A:
+///   * S < L (RFC 8032 5.1.7);
+///   * A and R decode strictly (RFC 8032 5.1.3: y < p, no negative zero);
+///   * A and R are not of small order (libsodium's rule; neither a release
+///     key nor the R of an honest signature ever is). Without it, the
+///     identity key with R = identity, S = 0 verifies ANY message.
 pub fn verifie(cle: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
     if !s_canonique(&signature[32..]) { return false; }
-    let Some(mut q) = unpackneg(cle) else { return false };
+    let Some(mut q) = decode_strict(cle) else { return false };
+    if petit_ordre(&q) { return false; }
+    let mut r_enc = [0u8; 32];
+    r_enc.copy_from_slice(&signature[..32]);
+    let Some(r_pt) = decode_strict(&r_enc) else { return false };
+    if petit_ordre(&r_pt) { return false; }
     let mut h = Sha512::new();
     h.update(&signature[..32]);
     h.update(cle);

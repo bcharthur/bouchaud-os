@@ -175,6 +175,13 @@ jobs:
           # -> empreinte. Cles generees au test, jamais stockees.
           rustc --edition 2021 -O --test tools/update/test_signature.rs -o target-test-signature
           ./target-test-signature
+          # Encodages adverses (petit ordre, non canoniques, y limites, S >= L,
+          # aleatoires) : Bouchaud contre OpenSSL ET libsodium. --strict
+          # echoue si une reference manque : pas de faux vert.
+          python3 -m venv target-venv-crypto
+          target-venv-crypto/bin/pip install -q 'cryptography==46.0.3' 'pynacl==1.6.2'
+          rustc --edition 2021 -O tools/update/ed25519_oracle.rs -o target-ed25519-oracle
+          target-venv-crypto/bin/python tools/update/ed25519_adversarial.py ./target-ed25519-oracle --strict
       - name: SDK natif et contrat ABI (statique + compilation)
         run: |
           python3 tools/verifie-contrat-abi-v1.py

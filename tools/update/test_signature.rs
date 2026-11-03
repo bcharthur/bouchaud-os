@@ -195,3 +195,83 @@ fn chaine_de_confiance_cle_signature_manifeste() {
     std::fs::remove_dir_all(&c.dir).ok();
     std::fs::remove_dir_all(&autre.dir).ok();
 }
+
+#[test]
+fn encodages_pathologiques_refuses() {
+    // BOUCHAUD_ED25519_STRICT_V1 regressions (tools/update/ed25519_adversarial.py
+    // found them accepted, as OpenSSL 3 does; libsodium refuses them).
+    let mut identite = [0u8; 32];
+    identite[0] = 1;
+    let mut sig_triviale = [0u8; 64];
+    sig_triviale[..32].copy_from_slice(&identite); // R = identity, S = 0
+    // identity key: before the fix, verified ANY message.
+    assert!(!ed25519::verifie(&identite, b"", &sig_triviale));
+    assert!(!ed25519::verifie(&identite, b"n'importe quel manifeste", &sig_triviale));
+    // The real forgery under the identity key: R = [r]B for any r, S = r,
+    // for ANY message ([S]B = R + [k]*identity). R = B, S = 1. Only the
+    // small-order KEY check refuses it (R = B is a full-order point).
+    let mut sig_b = [0x66u8; 64];
+    sig_b[0] = 0x58;                          // B = 5866..66
+    sig_b[32..].copy_from_slice(&[0u8; 32]);
+    sig_b[32] = 1;                            // S = 1
+    assert!(!ed25519::verifie(&identite, b"manifeste choisi par l'attaquant", &sig_b));
+    // y = 1 + p: non-canonical identity (RFC 8032 5.1.3: y >= p fails).
+    let mut y_plus_p = [0xffu8; 32];
+    y_plus_p[0] = 0xee;
+    y_plus_p[31] = 0x7f;
+    assert!(!ed25519::verifie(&y_plus_p, b"", &sig_triviale));
+    // negative zero: identity with the sign bit set.
+    let mut zero_negatif = identite;
+    zero_negatif[31] |= 0x80;
+    assert!(!ed25519::verifie(&zero_negatif, b"", &sig_triviale));
+    // order-2 point (0, -1): y = p - 1.
+    let mut ordre2 = [0xffu8; 32];
+    ordre2[0] = 0xec;
+    ordre2[31] = 0x7f;
+    let mut sig2 = [0u8; 64];
+    sig2[..32].copy_from_slice(&identite);
+    assert!(!ed25519::verifie(&ordre2, b"", &sig2));
+}
+
+#[test]
+fn manifeste_revue_entrees_hostiles() {
+    // Consolidation review of manifeste.rs: ONE byte string per manifest.
+    let base = CANONIQUE;
+    let refuses: Vec<String> = vec![
+        String::new(),
+        "bouchaud-manifeste-v1\n".into(),
+        // duplicate field
+        base.replace("essais=3\n", "essais=3\nessais=3\n"),
+        base.replace("version=bench-1.2_a+b\n", "version=bench-1.2_a+b\nversion=x\n"),
+        // reordered fields
+        base.replace("image_octets=94371840\nessais=3\n", "essais=3\nimage_octets=94371840\n"),
+        // Unicode / control bytes in a field
+        base.replace("version=bench-1.2_a+b", "version=bench-é"),
+        base.replace("version=bench-1.2_a+b", "version=bench\u{0}"),
+        base.replace("version=bench-1.2_a+b", "version=bench\t1"),
+        // CR before LF on one line, trailing space
+        base.replace("essais=3\n", "essais=3\r\n"),
+        base.replace("essais=3\n", "essais=3 \n"),
+        // length bounds
+        base.replace("version=bench-1.2_a+b", &format!("version={}", "v".repeat(65))),
+        base.replace("image_octets=94371840", "image_octets=18446744073709551616"), // 2^64: 20 digits
+        base.replace("image_octets=94371840", "image_octets=99999999999999999999"),
+        base.replace("image_octets=94371840", "image_octets=+94371840"),
+        base.replace("image_octets=94371840", "image_octets=-1"),
+        base.replace("essais=3", "essais=a"),
+        base.replace("image_sha256=00", "image_sha256=g0"),
+        format!("{base}\0"),
+    ];
+    for v in &refuses {
+        assert_eq!(analyse(v.as_bytes()), Err(RefusManifeste::Format), "accepted: {v:?}");
+    }
+    // Upper bounds that ARE canonical parse exactly, with no overflow.
+    let max19 = base.replace("image_octets=94371840", "image_octets=9999999999999999999");
+    assert_eq!(analyse(max19.as_bytes()).unwrap().octets, 9_999_999_999_999_999_999);
+    let v64 = base.replace("version=bench-1.2_a+b", &format!("version={}", "v".repeat(64)));
+    assert_eq!(analyse(v64.as_bytes()).unwrap().version_len, 64);
+    for e in 1..=9u8 {
+        let m = base.replace("essais=3", &format!("essais={e}"));
+        assert_eq!(analyse(m.as_bytes()).unwrap().essais, e);
+    }
+}
