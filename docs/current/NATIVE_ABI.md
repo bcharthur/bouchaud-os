@@ -84,10 +84,11 @@ Espace de noms `0x424F_0000 + n` (disjoint des numéros Linux). Retour : `>= 0` 
 `InvalidCall 1, InvalidArgument 2, BadHandle 3, WrongType 4, AccessDenied 5, WouldBlock 6, BufferTooSmall 7, QueueFull 8, PeerClosed 9, NoSpace 10, Fault 11, TooLarge 12, NotFound 13, TimedOut 14`.
 Un appel en erreur ne laisse **aucun effet partiel** : ni handle installé, ni message consommé, ni processus lancé (les arguments sont lus et validés avant toute mutation ; les échecs tardifs sont annulés).
 
-## 8. Limites connues (v1.1)
+## 8. Limites connues (v1.2)
 
 - Pas de `mmap` des régions partagées (lecture/écriture par appel ; le droit MAP est réservé).
 - Réveil global (tous les attendants natifs re-pollent) ; latence SMP1 non attribuée (§6).
 - `argv` du fils = `[path]` seulement ; la configuration passe par le canal bootstrap.
 - Console et sortie passent encore par `write(1)` / `exit_group` (isolés dans le runtime SDK).
-- Preuves : TCG et KVM hébergés (CI) ; **PHYSICAL non démontré**.
+- Preuves : appels 1.0/1.1 en TCG et KVM hébergés (CI) ; objet Update (0x70–0x75) en **HOST + TCG seulement** (bancs A/B sous OVMF), ni KVM ni PHYSICAL ; **PHYSICAL non démontré** pour l'ensemble.
+- Update : `begin`/`write`/`verify`/`finish` sont sérialisés dans le noyau (`BOUCHAUD_INSTALL_SERIALISE_V1`) ; aucune clé de production n'est configurée (installation refusée hors banc) ; pas d'anti-rollback ([UPDATE_RECOVERY.md](UPDATE_RECOVERY.md)).

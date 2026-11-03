@@ -1,30 +1,30 @@
-# CLAUDE — PROCHAINE SESSION (relevé 2026-11-03, fin de mission ATOMIC PLATFORM)
+# CLAUDE — PROCHAINE SESSION
 
-Refaire `git fetch && git rev-parse HEAD` et relire [STATUS_CURRENT.md](STATUS_CURRENT.md) : ce fichier est daté.
+Refaire `git fetch && git rev-parse HEAD origin/main` et lire [status.json](status.json) (source de vérité) puis [STATUS_CURRENT.md](STATUS_CURRENT.md).
 
-## 1. État de départ
+## 1. Avant tout nouveau chantier
 
-Branche `claude/atomic-platform-20261103` (non fusionnée, aucune PR ouverte au relevé). Chaîne A/B complète prouvée sous QEMU/OVMF (TCG) : chargeur, passage, commit de santé, rollback, `updated` ring 3, capacités, recovery, échecs répétés, coupures pendant l'écriture atomique, `logd`, attribution IPC. Détail et preuves : [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
+- Si la PR Atomic Platform n'est pas fusionnée : lire ses checks sur le **merge synthétique**. Tout rouge est lu dans le job puis le journal avant d'agir.
+- Si `SIGCHLD_MULTIFIL_ECHEC` réapparaît sur un `p13-primitives-noyau` : le journal du job contient désormais le cas fautif et les sorties des fils (`BOUCHAUD_SIGCHLD_ECHEC_LISIBLE_V1`). Classer **avant** toute autre chose ; banc ciblé : `tools/ci/run_sigchld_repetition.sh BOOT N SMP` (avec `SIGCHLD_STRACE=1`).
 
-## 2. Bloquants qui exigent l'utilisateur (ne pas les contourner)
+## 2. Bloquants humains (ne pas contourner)
 
-1. **Runners self-hosted** `bouchaud-kvm4` / `bouchaud-kvm8` : `sudo tools/ci/runner/provision_kvm_runner.sh kvm8 [--install]` sur l'hôte dédié, puis l'enregistrement imprimé (jeton à usage unique). Sans eux `P13_FINAL_STRICT_OK` reste impossible (`BLOCKED_BY_RUNNER_PROVISIONING`) ; SMP8 reste `PENDING_DEDICATED_KVM8`.
-2. **Protection de main** : `tools/github/ruleset-main.json`.
-3. **PHYSICAL** : [TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md) §2 et §2bis (A/B AB1–AB8).
+1. Runners `bouchaud-kvm4` / `bouchaud-kvm8` ([BOUCHAUD_STABLE_BASELINE.md](BOUCHAUD_STABLE_BASELINE.md)).
+2. Protection de `main` : ruleset prêt, application par un administrateur.
+3. Clé de version de production : hors ligne / HSM, rotation, sauvegarde, révocation. Ne **jamais** en générer une pour passer un test.
+4. Campagne PHYSICAL ([TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md)).
 
-## 3. Travail suivant, dans l'ordre
+## 3. Candidats de chantier, à choisir après la fusion (pas avant)
 
-1. Ouvrir la PR de la branche, qualifier son HEAD (CI Fast, Integration, Reliability V3, Native IPC avec la matrice `ab-rollback` + coupures, Ladybird qualification, Nightly) sur le **même SHA** ; fusion sur décision humaine.
-2. **Clé de version de production** : la chaîne (Ed25519 `no_std`, manifeste canonique, vérification noyau au `begin`) est en place et prouvée avec une clé de dev de banc. Créer la clé hors dépôt (HSM ou machine hors ligne), commiter sa seule moitié publique dans `cles_de_confiance`, signer les manifestes dans `release.yml` sans que la clé privée touche un runner hébergé (décision humaine).
-3. **Image Trigkey A/B** : `build_trigkey_image.sh` doit produire le disque A/B avec `serviced/healthd/updated/logd` dans le ramdisk (sinon tout candidat est retiré — voulu).
-4. **Latence SMP1** : l'attribution (`ipc-attribution`) place l'essentiel dans `file→élu` (p50 ≈ 1,3 ms TCG SMP1), pas dans le chemin de réveil (≈ 12 µs). Proposer, mesurer avant/après, une préemption du réveilleur au profit d'un réveillé interactif — sans toucher aux seuils, et seulement avec cette attribution comme référence.
-5. `logd` : faire passer `healthd` et `updated` par lui (canal d'intake par service), persistance optionnelle bornée.
-6. Ladybird (§39–40 de la mission) : retrait des patchs OBSOLETE et diagnostics derrière une option — non fait dans cette mission.
-7. CAP P10+ seulement ensuite.
+- Image Trigkey complète avec les services natifs (`serviced`, `healthd`, `updated`, `logd` dans le ramdisk) : prérequis de toute étape physique A/B.
+- Campagne Trigkey physique.
+- Runners P13 dédiés.
+- Anti-downgrade : version monotone signée, plancher persisté après commit de santé, sans casser le rollback local ([UPDATE_RECOVERY.md](UPDATE_RECOVERY.md) §Authenticité ≠ anti-rollback).
+- P10+ / fluidité ; latence SMP1 (`file→élu` attribuée, non corrigée).
 
-## 4. Règles qui ont servi cette session
+## 4. Règles qui ont servi
 
-- Un banc rouge sur sa propre qualification se lit avant d'être « corrigé » : `logd-qualify` comptait mal (`received = accepted + 3` : les événements du superviseur), le correctif était dans le test, et une tautologie (« producteur jamais bloqué ») a été remplacée par un vrai décompte.
-- Le banc de coupure a trouvé un vrai défaut produit (`fsync` d'un répertoire sans effet) ; le banc A/B en a trouvé trois (confirmation refusée pendant une installation, session d'installation non liée au processus, relecture monolithique qui affame les battements).
-- Ne pas modifier l'arbre pendant qu'un banc construit ; les bancs reconstruisent à chaque scénario.
-- Une coupure peut tronquer la dernière ligne série : ne compter que les lignes complètes.
+- Une campagne = un SHA ; ne rien pousser pendant qu'une qualification tourne.
+- Un test qui passe après mutation du code qu'il protège ne protège rien : la mutation du refus de clé de petit ordre a révélé un test insuffisant.
+- Comparer une implémentation de confiance à **deux** références reconnues ; « comme OpenSSL » n'est pas « correct » (OpenSSL 3 accepte la contrefaçon universelle sur clé de petit ordre).
+- Ne pas modifier l'arbre pendant qu'un banc construit ; une charge parallèle sur l'hôte peut faire échouer les sondes **côté hôte** (`compta-stress-probe`) : ce n'est pas un échec Bouchaud.

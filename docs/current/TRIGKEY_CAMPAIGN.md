@@ -1,6 +1,6 @@
 # Campagne PHYSICAL Trigkey Speed S5 — protocole exact
 
-**Statut : PHYSICAL_PENDING** — aucune étape ci-dessous n'a été exécutée physiquement dans la session du 2026-11-03. Ce document n'affirme rien sur le matériel ; il dit comment le prouver.
+**Statut : PHYSICAL = NOT_STARTED** (voir [status.json](status.json)) — aucune étape ci-dessous n'a été exécutée physiquement. Ce document n'affirme rien sur le matériel ; il dit comment le prouver.
 
 ## 0. Image et provenance (obligatoire avant de brancher la clé)
 
@@ -54,6 +54,8 @@ Relever aussi : RAM utilisable, liste PCI (NVMe, RTL8168 `10ec:8168`, xHCI, HDA 
 **Machine figée sans panique = FAIL.** Une étape non exécutée = `NOT_RUN`, jamais `PASS`.
 
 ## 2bis. A/B, rollback et recovery sur la machine (BOUCHAUD_LOADER_AB_V1)
+
+> **Pas prêt.** L'image Trigkey actuelle (`build_trigkey_image.sh`) n'embarque pas encore `serviced`, `healthd`, `updated`, `logd`. Sans eux, aucun candidat n'est confirmé et AB3, AB4 et AB6 échoueraient par construction. Cette adaptation n'est pas faite ; tant qu'elle ne l'est pas, ces étapes restent `NOT_RUN` et ne sont présentées comme prêtes à personne.
 
 Image : un disque GPT A/B construit par `uefi-image-builder --disque-ab OUT shim.efi meta.img SLOT_A SLOT_B RECOVERY` (même chaîne que `tools/ci/run_ab_rollback.sh`), les ramdisks des slots contenant `serviced`, `healthd`, `updated`, `logd` **en plus** de l'archive Ladybird. Flash sur **clé USB** ; jamais le NVMe interne pour cette campagne.
 

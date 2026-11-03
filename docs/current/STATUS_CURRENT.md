@@ -1,51 +1,35 @@
-# État courant — relevé du 2026-11-03 (fin de mission ATOMIC PLATFORM)
+# État courant
 
-```text
-MAIN_HEAD=d3b55d17429d49daf4284fedf84e5c904a40a9e3   (fusion PR #239)
-BRANCHE_TRAVAIL=claude/atomic-platform-20261103      (non fusionnée ; HEAD : git rev-parse origin/claude/atomic-platform-20261103)
-MAIN_PROTECTED=false   (ruleset prêt : tools/github/ruleset-main.json)
-P13=SMP1/2/4 endurance PASS ; SMP8 PENDING_DEDICATED_KVM8 — BLOCKED_BY_RUNNER_PROVISIONING
-PHYSICAL=NOT_STARTED (protocole : TRIGKEY_CAMPAIGN.md §2 et §2bis A/B)
-```
+**Source de vérité : [status.json](status.json).** Ce fichier ne recopie ni SHA ni verdict ; il dit où les lire et ce qu'ils signifient.
 
-Source machine : [status.json](status.json) — **instantané, pas mis à jour automatiquement.**
+| Question | Où |
+|---|---|
+| Quel candidat, sur quelle base `main` ? | `status.json` → `candidate`, `observed_main_head` |
+| Les workflows du dernier SHA poussé qualifié | `status.json` → `ci.push_*` ; le SHA final et ses checks : la PR |
+| Verdicts sécurité de la chaîne de mise à jour | `status.json` → `atomic_platform.security_verdicts` (+ `security_details`) |
+| Verdicts fonctionnels A/B, recovery, persistance, services | `status.json` → `atomic_platform.functional_verdicts` |
+| Niveau de preuve | `status.json` → `atomic_platform.proof_levels` : **HOST + TCG ; ni KVM ni PHYSICAL** |
+| P13 | `status.json` → `p13` : SMP1/2/4 PASS ; SMP8 `PENDING_DEDICATED_KVM8` ; final `BLOCKED_BY_RUNNER_PROVISIONING` |
+| Protection de `main` | `status.json` → `main_protection` = `BLOCKED_BY_HUMAN_GITHUB_SETTING` |
+| PHYSICAL | `status.json` → `physical` = `NOT_STARTED` ([TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md)) |
+| Limites et bloquants | `status.json` → `limitations`, `known_blockers` |
 
-## Verdicts de la mission ATOMIC PLATFORM (§49–50)
+## Lire un verdict
 
-| Verdict | Résultat | Niveau | Preuve |
-|---|---|---|---|
-| UPDATE_AB_CORE | PASS | HOST | `tools/update/test_{ab,durabilite,passage}.rs` (CI Fast) |
-| LOADER_AB | PASS | TCG | `run_ab_rollback.sh` `panique` `gel` `meta-0` `meta-1` `meta-2` |
-| BOOT_ATTEMPT_PERSISTENCE | PASS | HOST + TCG | mutation « boot avant flush » détectée ; SIGKILL à chaque boot |
-| HEALTH_COMMIT | PASS | TCG | `sante` `B+ B=` |
-| AUTO_ROLLBACK | PASS | TCG | `panique`/`gel` `B B B A A`, `sante-ko` `B- B- B- A= A=` |
-| UPDATED_RING3 | PASS | TCG | `mise-a-jour` `A* B+ B=` |
-| UPDATE_CAPABILITIES | PASS | TCG | 16 refus/contrôles observés en ring 3 |
-| SIGNED_MANIFEST | PASS (clé de dev) | HOST + TCG | Ed25519 `no_std` (RFC 8032 + OpenSSL) ; noyau : SIGNATURE TRUSTED au `begin`, HASH VALID au `finish` ; **aucune clé de production** |
-| RECOVERY_BOOT | PASS | TCG | `recovery-requise` `R`, `echecs-repetes` `A- A- A- R` |
-| RECOVERY_ROLLBACK | PASS | TCG | `recovery-rollback` `R B=` |
-| POWER_LOSS_HARNESS | PASS | TCG | `run_coupure_persistance.sh` (SIGKILL hôte) |
-| PERSISTENCE_CRASH_CONSISTENCY | PASS (après correctif) | TCG | 12/12 coupures, 0 incohérence, 0 régression ; avant correctif 3/6 régressions |
-| LOGD | PASS | TCG | `serviced logd-qualify` SMP4 + SMP1 |
-| SERVICE_SUPERVISION | PASS | TCG | `serviced qualify` + `serviced system` (états système, contrat de santé v3) |
-| IPC_LATENCY_ATTRIBUTION | PASS | TCG | `ipc-attribution` : SMP1 p50 signal→file 12 µs, **file→élu 1,29 ms**, élu→retour 71 µs |
+- `PASS` : la preuve nommée a tourné et est verte, au niveau indiqué (HOST = tests hôte, TCG = QEMU émulé). Jamais extrapolé à KVM ni au matériel.
+- `NOT_IMPLEMENTED` : le mécanisme n'existe pas (clé de production, anti-rollback) ; c'est voulu et documenté dans [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
+- `NON_QUALIFYING` : un échec existe et sa cause n'est pas établie ; il n'est ni effacé ni requalifié en infra sans preuve (SIGCHLD multi-fils, voir ci-dessous).
+- `BLOCKED_*` : action humaine requise.
 
-Aucun verdict n'est KVM ni PHYSICAL. Tous les TCG ont tourné en local **et** sur les runners hébergés (workflow `native-ipc-runtime`, matrice `ab-rollback` de 11 scénarios : run 41637609167 au SHA `1de19fa3`, vert).
+## SIGCHLD multi-fils (run 41648148378, `main@992e67e1`)
 
-## Défauts réels trouvés et corrigés pendant la mission
+`p13-primitives-noyau / primitives / probes` : `SIGCHLD_MULTIFIL_ECHEC n=1` dans la passe TCG ; les trois passes KVM du même job sont 8/8.
 
-1. **`fsync` d'un répertoire sans effet** (`src/compat/linux/mod.rs`) : un `rename` acquitté par `fsync(rep)` n'était pas durable — trouvé par le banc de coupure.
-2. **Confirmation de santé refusée pendant une installation** : `begin` réécrit META, l'actif ne pouvait plus se confirmer — trouvé par le banc `mise-a-jour`.
-3. **Session d'installation non liée au processus** : l'appel en vol d'un `updated` tué terminait dans la session de son successeur.
-4. **Relecture monolithique** de 90 Mio dans un seul appel système : battements manqués, `updated` tué — relecture incrémentale ; puis morceaux d'écriture de 256 Kio trop longs à la première lecture du ramdisk — 64 Kio (le banc échoue désormais si `updated` manque un battement).
-5. **Banc IPC** : version ABI codée en dur (`ABI=1.1`).
+- **Signature temporelle** : environ 14 s entre la sonde précédente et l'échec, contre environ 4 s pour une passe saine. Un cas a donc atteint sa borne de 10 s : un réveil SIGCHLD sans fils récoltable, ou aucun zombie publié.
+- **Artefact** du run : illisible depuis la session (proxy 403 sur l'hôte de blobs).
+- **Reproductions ciblées** sur le noyau exact `21fca026` : `tools/ci/run_sigchld_repetition.sh`. 30 exécutions isolées en SMP4, 30 sous `strace echecs` à chacun de SMP1, SMP2 et SMP4, et 5 rejeux du banc `run_os_primitives.sh` complet, soit **125 exécutions, 0 échec**.
+- **Code relu** : zombie posé avant SIGCHLD sur les deux chemins (`exit_current`, `tue_processus`), récolte unique sous `PROCESS_TABLE`.
+- **Hypothèse non réfutée** : un fil condamné qui mourrait sans décrémenter `threads`, et le processus ne deviendrait jamais zombie.
+- **Diagnostic ajouté** : `run_os_primitives.sh` publie désormais dans le journal du job le cas fautif, son réveil, et les sorties et morts des fils de la racine en échec. Une prochaine occurrence sera attribuable sans l'artefact.
 
-## Ce qui reste bloqué ou non commencé
-
-- `P13_FINAL_STRICT_OK` : runners `bouchaud-kvm4/kvm8` à enregistrer (`tools/ci/runner/provision_kvm_runner.sh`) — action humaine.
-- Clé de version de **production** : à créer hors dépôt (la chaîne est en place, seule une clé de dev de banc est vérifiée).
-- Image Trigkey A/B (ramdisk avec `serviced/healthd/updated/logd`) : non intégrée à `build_trigkey_image.sh`.
-- Ladybird §39–40 (scripts OBSOLETE, diagnostics derrière une option) : NOT_STARTED dans cette mission.
-- PHYSICAL : NOT_STARTED.
-
-Prochaine étape exacte : [CLAUDE_NEXT_MISSION.md](CLAUDE_NEXT_MISSION.md).
+Si ce même échec réapparaît sur la PR : **non prêt à fusionner** tant qu'il n'est pas classé.
