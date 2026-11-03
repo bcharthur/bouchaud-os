@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 1
+#define BO_ABI_MINOR 2
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -49,6 +49,8 @@ typedef unsigned long      bo_usize;
 #define BO_NR_PROCESS_INFO        (BO_NATIVE_BASE + 0x51)
 #define BO_NR_PROCESS_KILL        (BO_NATIVE_BASE + 0x52)
 #define BO_NR_TIME_NOW            (BO_NATIVE_BASE + 0x60)
+#define BO_NR_UPDATE_STATE        (BO_NATIVE_BASE + 0x70)
+#define BO_NR_UPDATE_COMMIT_HEALTH (BO_NATIVE_BASE + 0x71)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1
@@ -72,6 +74,7 @@ typedef unsigned long      bo_usize;
 #define BO_KIND_WAITSET        3
 #define BO_KIND_SHARED_REGION  4
 #define BO_KIND_PROCESS        5
+#define BO_KIND_UPDATE         6
 
 /* Rights. */
 #define BO_RIGHT_READ          (1u << 0)
@@ -82,7 +85,9 @@ typedef unsigned long      bo_usize;
 #define BO_RIGHT_TRANSFER      (1u << 5)
 #define BO_RIGHT_INSPECT       (1u << 6)
 #define BO_RIGHT_WAIT          (1u << 7)
-#define BO_RIGHTS_ALL          0xffu
+#define BO_RIGHT_UPDATE_HEALTH (1u << 8)
+#define BO_RIGHT_UPDATE_INSTALL (1u << 9)
+#define BO_RIGHTS_ALL          0x3ffu
 
 /* Signals. */
 #define BO_SIGNAL_READABLE     (1u << 0)
@@ -106,5 +111,10 @@ struct bo_handle_info   { bo_u32 kind; bo_u32 rights; bo_u32 signals; bo_u32 res
 struct bo_wait_event    { bo_u64 key; bo_u32 signals; bo_u32 reserved; };
 struct bo_spawn_result  { bo_u64 pid; bo_u64 process; };
 struct bo_process_info  { bo_u64 pid; bo_u32 state; bo_i32 exit_code; };
+/* bo_update_state (ABI 1.2). Slots 0 = A, 1 = B; states 0 empty, 1 candidate,
+ * 2 good, 3 bad; boot_reason as in system/update-core/src/passage.rs. */
+struct bo_update_state  { bo_u32 booted_slot; bo_u32 boot_reason; bo_u32 attempts_left;
+                          bo_u32 active_slot; bo_u32 state_a; bo_u32 state_b;
+                          bo_u64 meta_sequence; bo_u64 boot_id; };
 
 #endif

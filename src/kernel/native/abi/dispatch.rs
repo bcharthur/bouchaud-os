@@ -7,7 +7,7 @@ use super::numbers;
 use super::types::{
     Error, HandleId, ObjectKind, Result, Rights, ABI_VERSION_PACKED,
 };
-use super::wire::{HandleInfo, ProcessInfo, RecvMeta, SpawnResult, WaitEvent,
+use super::wire::{HandleInfo, ProcessInfo, RecvMeta, SpawnResult, UpdateState, WaitEvent,
                   PROCESS_RUNNING, PROCESS_TERMINATED};
 use crate::kernel::native::event::Event;
 use crate::kernel::native::handle::{self, Entry};
@@ -438,6 +438,47 @@ fn process_info(args: [u64; 6]) -> Result<u64> {
     Ok(0)
 }
 
+// BOUCHAUD_UPDATE_MECANISME_V1 (ABI 1.2). Le droit est verifie AVANT toute
+// entree-sortie : un handle sans le droit ne touche jamais le disque.
+fn update_state(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::INSPECT, ObjectKind::Update)?;
+    super::usercopy::validate_write(args[1], UpdateState::BYTE_LEN)?;
+    let e = crate::kernel::update::etat().map_err(|_| Error::NotFound)?;
+    let etat = |s| match e.enregistrement.slot(s).etat {
+        bouchaud_update_core::Etat::Vide => 0,
+        bouchaud_update_core::Etat::Candidat { .. } => 1,
+        bouchaud_update_core::Etat::Bon => 2,
+        bouchaud_update_core::Etat::Mauvais => 3,
+    };
+    use bouchaud_update_core::Slot;
+    let info = UpdateState {
+        booted_slot: e.passage.slot as u32,
+        boot_reason: e.passage.raison as u32,
+        attempts_left: e.passage.essais_restants as u32,
+        active_slot: e.enregistrement.actif as u32,
+        state_a: etat(Slot::A),
+        state_b: etat(Slot::B),
+        meta_sequence: e.enregistrement.sequence,
+        boot_id: e.passage.boot_id,
+    };
+    super::usercopy::write(args[1], &info.bytes_le())?;
+    Ok(0)
+}
+
+/// 0 = the booted candidate is committed (durable), 1 = already the good
+/// active slot. A refusal (no handoff, record changed, no real flush, ...)
+/// is ACCESS_DENIED for the policy cases and NOT_FOUND when there is no A/B
+/// layout at all.
+fn update_commit_health(args: [u64; 6]) -> Result<u64> {
+    handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_HEALTH, ObjectKind::Update)?;
+    match crate::kernel::update::commit_sante() {
+        Ok(crate::kernel::update::Commit::Committe) => Ok(0),
+        Ok(crate::kernel::update::Commit::DejaSain) => Ok(1),
+        Err("sans_passage") | Err("meta_introuvable") | Err("meta_sans_identite") => Err(Error::NotFound),
+        Err(_) => Err(Error::AccessDenied),
+    }
+}
+
 fn process_kill(args: [u64; 6]) -> Result<u64> {
     let entry = handle::current_table().lookup_kind(
         HandleId::from_raw(args[0]), Rights::SIGNAL, ObjectKind::Process
@@ -580,6 +621,9 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
         numbers::PROCESS_KILL => process_kill(args),
 
         numbers::TIME_NOW => Ok(crate::kernel::native::time::monotonic_ns() & (i64::MAX as u64)),
+
+        numbers::UPDATE_STATE => update_state(args),
+        numbers::UPDATE_COMMIT_HEALTH => update_commit_health(args),
 
         _ => Err(Error::InvalidCall),
     }

@@ -161,6 +161,14 @@ static inline bo_i64 bo_process_info(bo_handle_t proc, struct bo_process_info *o
 static inline bo_i64 bo_process_kill(bo_handle_t proc)
 { return bo__sys6(BO_NR_PROCESS_KILL, proc, 0, 0, 0, 0, 0); }
 
+/* ---- update capability (ABI 1.2) ---------------------------------------- */
+/* Only the system supervisor receives one, from the kernel, at spawn. */
+static inline bo_i64 bo_update_state(bo_handle_t cap, struct bo_update_state *out)
+{ return bo__sys6(BO_NR_UPDATE_STATE, cap, (bo_u64)out, 0, 0, 0, 0); }
+/* 0: booted candidate committed (durable); 1: already the good active slot. */
+static inline bo_i64 bo_update_commit_health(bo_handle_t cap)
+{ return bo__sys6(BO_NR_UPDATE_COMMIT_HEALTH, cap, 0, 0, 0, 0, 0); }
+
 /* ---- console / exit (isolated Linux-compatible edge) ------------------- */
 
 static inline bo_usize bo_strlen(const char *s)

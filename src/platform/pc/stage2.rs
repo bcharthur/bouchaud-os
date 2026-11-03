@@ -545,6 +545,13 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Voir la note d'amorcage equivalente dans `main.rs`.
     crate::platform::pc::installation::lance_le_montage_differe();
 
+    // BOUCHAUD_UPDATE_MECANISME_V1 : le superviseur systeme (ring 3) part
+    // AVANT le bureau, avec la seule capacite de mise a jour. C'est lui -- et
+    // pas le bureau, pas Ladybird -- qui declare le boot sain ; sans lui, un
+    // candidat n'est jamais confirme et le chargeur le retire.
+    crate::kernel::update::journalise_boot();
+    crate::kernel::update::lance_superviseur();
+
     // LE MODE DE SECOURS EST CONSULTE ICI, ET NULLE PART AILLEURS.
     //
     // Un bureau qui ne demarre pas laisse une machine sans aucun moyen de dire

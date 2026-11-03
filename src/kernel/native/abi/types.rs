@@ -4,7 +4,7 @@ pub const ABI_MAJOR: u16 = 1;
 /// 1.1 (BOUCHAUD_NATIVE_ABI_1_1) : PROCESS_SPAWN/INFO/KILL, WAITSET_WAIT,
 /// TIME_NOW, objet Process, signal TERMINATED, erreur TimedOut. Purement
 /// additif : un programme 1.0 ne voit aucune difference.
-pub const ABI_MINOR: u16 = 1;
+pub const ABI_MINOR: u16 = 2;
 pub const ABI_VERSION_PACKED: u64 = ((ABI_MAJOR as u64) << 16) | ABI_MINOR as u64;
 
 /// Native syscall namespace. Linux x86-64 syscalls currently used by the
@@ -47,6 +47,9 @@ pub enum ObjectKind {
     WaitSet = 3,
     SharedRegion = 4,
     Process = 5,
+    /// BOUCHAUD_UPDATE_MECANISME_V1 : capacite de mise a jour (ABI 1.2).
+    /// Jamais creee par un appel : le noyau la donne au superviseur systeme.
+    Update = 6,
     LegacyFile = 0x100,
     LegacyWindow = 0x101,
     LegacySocket = 0x102,
@@ -99,6 +102,11 @@ impl Rights {
     pub const TRANSFER: Self = Self(1 << 5);
     pub const INSPECT: Self = Self(1 << 6);
     pub const WAIT: Self = Self(1 << 7);
+    /// Capacite Update : declarer le boot courant sain (ABI 1.2).
+    pub const UPDATE_HEALTH: Self = Self(1 << 8);
+    /// Capacite Update : ecrire le slot INACTIF et y poser un candidat
+    /// (ABI 1.2 ; reserve a `updated`, aucune operation ne l'accepte encore).
+    pub const UPDATE_INSTALL: Self = Self(1 << 9);
 
     /// Tous les droits definis.
     ///
@@ -107,7 +115,8 @@ impl Rights {
     /// celle qu'un appelant non migre doit pouvoir passer sans y penser.
     pub const TOUS: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::SIGNAL.0 | Self::MAP.0 |
-        Self::DUP.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::WAIT.0
+        Self::DUP.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::WAIT.0 |
+        Self::UPDATE_HEALTH.0 | Self::UPDATE_INSTALL.0
     );
 
     pub const CHANNEL_DEFAULT: Self = Self(
