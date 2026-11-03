@@ -20,3 +20,5 @@ pub use ab::*;
 pub mod disque;
 pub mod passage;
 pub mod echecs;
+pub mod ed25519;
+pub mod manifeste;

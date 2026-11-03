@@ -1628,9 +1628,12 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
             }
             let (fenetres, cessions) = crate::kernel::task::compteurs_injection_compta();
             let inv = crate::kernel::task::invariants_compta();
+            // BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1 : les trois derniers
+            // champs ne bougent que sous le bras `dechiree`.
+            let (etrangeres, naturelles, forcees) = crate::kernel::task::compteurs_temoin_dechire();
             crate::serial_println!(
-                "COMPTA_INJECTION_ETAT fenetres={} cessions={} chevauchements={} pire_chevauchement_us={} rearmes_deja_armes={}",
-                fenetres, cessions, inv[2], inv[3] / 1000, inv[6],
+                "COMPTA_INJECTION_ETAT fenetres={} cessions={} chevauchements={} pire_chevauchement_us={} rearmes_deja_armes={} lectures_etrangeres={} migrations_naturelles={} migrations_forcees={}",
+                fenetres, cessions, inv[2], inv[3] / 1000, inv[6], etrangeres, naturelles, forcees,
             );
             0
         }

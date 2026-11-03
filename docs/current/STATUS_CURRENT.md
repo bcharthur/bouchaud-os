@@ -1,44 +1,35 @@
-# État courant — relevé du 2026-11-03
+# État courant
 
-```text
-MAIN_HEAD=c1e55da99dcc411f45ee68ebd285d91205f82067   (runtime identique à 5c3cd43a ; diff = docs + CI)
-CANDIDAT_CAP_A=c1e55da (main, figé pendant les campagnes)
-BRANCHE_TRAVAIL=claude/cap-stable-platform-20261103
-MAIN_PROTECTED=false   (ruleset prêt : tools/github/ruleset-main.json, non appliqué : pas d'API d'administration dans la session)
-BASELINE=NOT_ESTABLISHED
-P13=PARTIAL — BLOQUÉ : aucun runner self-hosted bouchaud-kvm4 / bouchaud-kvm8
-PHYSICAL=PHYSICAL_PENDING (protocole : TRIGKEY_CAMPAIGN.md)
-```
+**Source de vérité : [status.json](status.json).** Ce fichier ne recopie ni SHA ni verdict ; il dit où les lire et ce qu'ils signifient.
 
-Source machine : [status.json](status.json) — **instantané, pas mis à jour automatiquement.**
+| Question | Où |
+|---|---|
+| Quel candidat, sur quelle base `main` ? | `status.json` → `candidate`, `observed_main_head` |
+| Les workflows du dernier SHA poussé qualifié | `status.json` → `ci.push_*` ; le SHA final et ses checks : la PR |
+| Verdicts sécurité de la chaîne de mise à jour | `status.json` → `atomic_platform.security_verdicts` (+ `security_details`) |
+| Verdicts fonctionnels A/B, recovery, persistance, services | `status.json` → `atomic_platform.functional_verdicts` |
+| Niveau de preuve | `status.json` → `atomic_platform.proof_levels` : **HOST + TCG ; ni KVM ni PHYSICAL** |
+| P13 | `status.json` → `p13` : SMP1/2/4 PASS ; SMP8 `PENDING_DEDICATED_KVM8` ; final `BLOCKED_BY_RUNNER_PROVISIONING` |
+| Protection de `main` | `status.json` → `main_protection` = `BLOCKED_BY_HUMAN_GITHUB_SETTING` |
+| PHYSICAL | `status.json` → `physical` = `NOT_STARTED` ([TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md)) |
+| Limites et bloquants | `status.json` → `limitations`, `known_blockers` |
 
-## Candidat `main@c1e55da` — preuves same-SHA
+## Lire un verdict
 
-| Gate | Run | Résultat | Remarque |
-|---|---:|---|---|
-| CI Fast | 41539949788 | PASS | push main |
-| Integration | 41539949905 | PASS | push main |
-| Reliability V3 | 41539949936 | PASS | push main |
-| Native IPC | 41592664152 | PASS | dispatch same-SHA |
-| Security Runtime | 41592667159 | PASS | dispatch same-SHA |
-| Nightly Full | 41592645380 | PASS | 9/9 jobs exécutés, smoke Ladybird produit + provenance artefact (run 41530447823, empreinte d'entrées) |
-| Ladybird qualification (C22 6×6, primitives P13 strictes, convergence) | 41592642065 | EN COURS au relevé | |
-| Endurance (tranches 90 min) | 41592677703 | EN COURS au relevé | |
-| C5 KVM (témoin rouge / fenêtre / image ×24) | 41596509318 | EN COURS au relevé | revue statique : [C5_REVIEW_2026-11-03.md](C5_REVIEW_2026-11-03.md) |
-| P13 final (KVM4 ×3 campagnes + KVM8 30 min) | — | **NON EXÉCUTABLE** | 4 runs antérieurs annulés après 24 h en file : runners absents |
-| PHYSICAL Trigkey | — | PENDING | intervention humaine |
+- `PASS` : la preuve nommée a tourné et est verte, au niveau indiqué (HOST = tests hôte, TCG = QEMU émulé). Jamais extrapolé à KVM ni au matériel.
+- `NOT_IMPLEMENTED` : le mécanisme n'existe pas (clé de production, anti-rollback) ; c'est voulu et documenté dans [UPDATE_RECOVERY.md](UPDATE_RECOVERY.md).
+- `NON_QUALIFYING` : un échec existe et sa cause n'est pas établie ; il n'est ni effacé ni requalifié en infra sans preuve (SIGCHLD multi-fils, voir ci-dessous).
+- `BLOCKED_*` : action humaine requise.
 
-**Run Ladybird 41530447823 (push `5c3cd43a`) : FAIL non produit.** Seul job rouge : « piège du Compositor (diagnostic) », terminé à 6 min avec l'étape encore `in_progress`, étape `always()` des journaux jamais exécutée, journaux 404 → perte du runner (infrastructure). Même arbre vert en 20 min (run PR 41518023294). Classé **NON_QUALIFIANT**, ni PASS ni défaut produit ; rejoué par la qualification 41592642065.
+## SIGCHLD multi-fils (run 41648148378, `main@992e67e1`)
 
-## Ce qui a changé sur la branche de travail (2026-11-03)
+`p13-primitives-noyau / primitives / probes` : `SIGCHLD_MULTIFIL_ECHEC n=1` dans la passe TCG ; les trois passes KVM du même job sont 8/8.
 
-- **Défaut sécurité corrigé** : un programme ring 3 non privilégié faisait paniquer le noyau en 2 appels (waitset qui se surveille → `SpinLock recursive acquisition`). Reproduit en TCG, corrigé, test permanent.
-- **Défaut cycle de vie corrigé** : les handles natifs d'un processus mort n'étaient jamais libérés à sa mort (`PEER_CLOSED` dépendant de l'activité du reste de la machine).
-- **ABI native 1.1** ([NATIVE_ABI.md](NATIVE_ABI.md)) : spawn filié et confiné, objet Process, attente bloquante, temps.
-- **Premier service ring 3 supervisé** (`healthd` + `serviced`) : crash réel, hang, budget, arrêt, aucune fuite ; SMP1/2/4/8 TCG + CI.
-- **SDK natif** `userland/libs/bouchaud-sdk` (en-tête unique vérifié contre le noyau).
-- **Mise à jour A/B** prouvée sur hôte ([UPDATE_RECOVERY.md](UPDATE_RECOVERY.md)), non branchée au chargeur.
-- **Image Trigkey traçable** + signature CPUID ; protocole physique exact.
-- **Matrice Ladybird générée** ([../ladybird/PATCH_MATRIX.md](../ladybird/PATCH_MATRIX.md)).
+- **Signature temporelle** : environ 14 s entre la sonde précédente et l'échec, contre environ 4 s pour une passe saine. Un cas a donc atteint sa borne de 10 s : un réveil SIGCHLD sans fils récoltable, ou aucun zombie publié.
+- **Artefact** du run : illisible depuis la session (proxy 403 sur l'hôte de blobs).
+- **Reproductions ciblées** sur le noyau exact `21fca026` : `tools/ci/run_sigchld_repetition.sh`. 30 exécutions isolées en SMP4, 30 sous `strace echecs` à chacun de SMP1, SMP2 et SMP4, et 5 rejeux du banc `run_os_primitives.sh` complet, soit **125 exécutions, 0 échec**.
+- **Code relu** : zombie posé avant SIGCHLD sur les deux chemins (`exit_current`, `tue_processus`), récolte unique sous `PROCESS_TABLE`.
+- **Hypothèse non réfutée** : un fil condamné qui mourrait sans décrémenter `threads`, et le processus ne deviendrait jamais zombie.
+- **Diagnostic ajouté** : `run_os_primitives.sh` publie désormais dans le journal du job le cas fautif, son réveil, et les sorties et morts des fils de la racine en échec. Une prochaine occurrence sera attribuable sans l'artefact.
 
-Ces changements **ne font pas partie du candidat** `c1e55da` : ils seront qualifiés sur leur propre SHA après fusion.
+Si ce même échec réapparaît sur la PR : **non prêt à fusionner** tant qu'il n'est pas classé.

@@ -1,10 +1,9 @@
 {
   "schema_version": 2,
   "as_of": "2026-11-03",
-  "observed_main_head": "c1e55da99dcc411f45ee68ebd285d91205f82067",
+  "observed_main_head": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
-  "main_protected": false,
   "baseline_status": "NOT_ESTABLISHED",
   "ladybird_upstream": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
   "p_lots": {
@@ -50,69 +49,79 @@
     }
   },
   "ci": {
-    "last_fast": {
-      "sha": "c1e55da9",
-      "run_id": 41539949788,
-      "status": "PASS"
+    "push_21fca026": {
+      "ci_fast": {
+        "run": 41677714357,
+        "verdict": "PASS"
+      },
+      "integration": {
+        "run": 41677714450,
+        "verdict": "PASS"
+      },
+      "reliability_v3": {
+        "run": 41677714397,
+        "verdict": "PASS"
+      },
+      "native_ipc_runtime": {
+        "run": 41677713915,
+        "verdict": "PASS"
+      },
+      "ladybird_native_browser": {
+        "run": 41677714322,
+        "verdict": "PASS"
+      },
+      "p13_primitives_noyau": {
+        "run": 41677714402,
+        "verdict": "FAIL_TESTBENCH",
+        "detail": "job primitives/probes, step 'Comptabilite -- rearmement apres idle, fenetre injectee' (run_compta_injection.sh) at SMP2: the deliberately broken witness build 'dechiree' (BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1 read in two steps) stayed silent in its 3 attempts (COMPTA_INJECTION_ECHEC temoin muet). The product build 'correctif' passed (0 overlaps, sonde OK) and 'ancien' showed its defect (3 overlaps); at SMP4 all three arms behaved as required (witness panicked). The SIGCHLD probes passed (TCG and 3 KVM passes). 21fca026 changes nothing under src/kernel/process, scheduler, time or src/arch. Bench attempts not changed."
+      }
     },
-    "last_integration": {
-      "sha": "c1e55da9",
-      "run_id": 41539949905,
-      "status": "PASS"
+    "main_992e67e1_p13_primitives": {
+      "run": 41648148378,
+      "verdict": "FAIL_UNATTRIBUTED",
+      "detail": "job primitives/probes: SIGCHLD_MULTIFIL_ECHEC n=1 in the TCG pass; the three KVM passes of the same job were 8/8; artifact unreachable from the session (proxy 403 on the blob host)"
     },
-    "last_reliability": {
-      "sha": "c1e55da9",
-      "run_id": 41539949936,
-      "status": "PASS"
-    },
-    "last_ipc": {
-      "sha": "c1e55da9",
-      "run_id": 41592664152,
-      "status": "PASS",
-      "event": "workflow_dispatch"
-    },
-    "last_security": {
-      "sha": "c1e55da9",
-      "run_id": 41592667159,
-      "status": "PASS",
-      "event": "workflow_dispatch"
-    },
-    "last_nightly": {
-      "sha": "c1e55da9",
-      "run_id": 41592645380,
-      "status": "PASS",
-      "jobs_executed": "9/9",
-      "ladybird_artifact_run": 41530447823
-    },
-    "last_ladybird_qualification": {
-      "sha": "c1e55da9",
-      "run_id": 41592642065,
-      "status": "IN_PROGRESS_AT_SNAPSHOT"
-    },
-    "last_ladybird_development": {
-      "sha": "5c3cd43a",
-      "run_id": 41530447823,
-      "status": "FAIL_INFRA_RUNNER_LOST",
-      "failed_job": "piege du Compositor (diagnostic)",
-      "analysis": "step in_progress at job end, always() log step never ran, logs 404; same tree PASS in 20 min on run 41518023294; NOT a product PASS"
-    },
-    "last_endurance": {
-      "sha": "c1e55da9",
-      "run_id": 41592677703,
-      "status": "IN_PROGRESS_AT_SNAPSHOT"
-    },
-    "last_c5_kvm": {
-      "sha": "c1e55da9",
-      "run_id": 41596509318,
-      "status": "IN_PROGRESS_AT_SNAPSHOT"
-    },
-    "last_p13": {
-      "status": "NOT_RUNNABLE",
-      "reason": "self-hosted runners bouchaud-kvm4/bouchaud-kvm8 absent; p13-final-candidate runs 41130015899..41144884686 all cancelled after 24h in queue"
-    },
-    "last_physical": {
-      "status": "PHYSICAL_PENDING",
-      "protocol": "docs/current/TRIGKEY_CAMPAIGN.md"
+    "pr241_19dc18ad": {
+      "ci_fast": {
+        "run": 41687464463,
+        "verdict": "PASS"
+      },
+      "integration": {
+        "run": 41687464517,
+        "verdict": "PASS"
+      },
+      "reliability_v3": {
+        "run": 41687464492,
+        "verdict": "PASS"
+      },
+      "native_ipc_runtime": {
+        "run": 41687464571,
+        "verdict": "PASS",
+        "note": "ab-rollback matrix incl. mise-a-jour, mise-a-jour-morts, sans-cle"
+      },
+      "ladybird_native_browser": {
+        "run": 41687464602,
+        "verdict": "PASS",
+        "note": "its 'primitives' job is skipped outside qualification: P13 did NOT run on the PR"
+      },
+      "security_runtime": {
+        "run": 41692366495,
+        "event": "workflow_dispatch",
+        "verdict": "PASS"
+      },
+      "p13_primitives_noyau": {
+        "run": 41692359972,
+        "event": "workflow_dispatch",
+        "verdict": "PASS",
+        "jobs": [
+          "probes",
+          "gpu-tampon",
+          "ordonnanceur-ab",
+          "reveil-precis"
+        ],
+        "note": "still the old 3-attempt C14 witness; the deterministic witness and the PR trigger come after 19dc18ad"
+      },
+      "codex_review": "PASS (no findings)"
     }
   },
   "hardware": {
@@ -124,45 +133,158 @@
     "gpu": "VIRTIO_2D_CODE_PRESENT_PHYSICAL_UNKNOWN"
   },
   "limitations": [
-    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered",
-    "main branch protection not applied (ruleset ready: tools/github/ruleset-main.json)",
-    "PHYSICAL Trigkey campaign not executed",
-    "SMP1 native IPC RTT p50 ~4 ms = one UP quantum, attribution open",
-    "A/B update not wired to the loader"
+    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered (tools/ci/runner/provision_kvm_runner.sh prepares the host)",
+    "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
+    "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd",
+    "no production release key; anti-rollback (downgrade) policy not implemented",
+    "SIGCHLD multithread probe: one unexplained failure on main, not reproduced in 125 targeted runs",
+    "SMP1 native IPC latency attributed (file->elu dominates), not corrected"
   ],
   "candidate": {
-    "sha": "c1e55da99dcc411f45ee68ebd285d91205f82067",
-    "branch": "main",
-    "runtime_identical_to": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
-    "note": "c1e55da differs from 5c3cd43 only by docs and CI files"
+    "branch": "claude/atomic-platform-20261103",
+    "base_main": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
+    "note": "the final head SHA and its PR checks are reported in the PR, not in this file (a file cannot carry the CI result of its own commit)"
   },
   "ladybird_sha": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
   "platform": {
-    "native_abi": "1.1",
+    "native_abi": "1.2",
     "native_services_qualify": {
       "tcg_smp": [
         1,
-        2,
-        4,
-        8
+        4
       ],
       "local_status": "PASS",
-      "ci_run": 41596268941,
-      "ci_status": "PASS"
+      "includes": [
+        "serviced qualify",
+        "serviced logd-qualify",
+        "ipc-attribution"
+      ]
     },
-    "update_ab": "HOST_PROVEN_NOT_WIRED",
+    "update_ab": "TCG_PROVEN_WIRED",
+    "ab_bench": "tools/ci/run_ab_rollback.sh (11 scenarios; workflow native-ipc-runtime, job ab-rollback)",
     "image_traceable": "tools/release/build_trigkey_image.sh"
   },
   "known_blockers": [
-    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered",
-    "main branch protection not applied (ruleset ready: tools/github/ruleset-main.json)",
-    "PHYSICAL Trigkey campaign not executed",
-    "SMP1 native IPC RTT p50 ~4 ms = one UP quantum, attribution open",
-    "A/B update not wired to the loader"
+    "P13 strict: no dedicated KVM4/KVM8 self-hosted runner registered (tools/ci/runner/provision_kvm_runner.sh prepares the host)",
+    "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
+    "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd"
   ],
   "observed_work_branch": {
-    "name": "claude/cap-stable-platform-20261103",
-    "head": "968fea1692a64435a766406758be4eb8a67b628e"
+    "name": "claude/atomic-platform-20261103",
+    "qualified_push_sha": "21fca026ea9306938817dc3617983655ef2b7c16"
   },
-  "updates_automatically": false
+  "updates_automatically": false,
+  "atomic_platform": {
+    "proof_levels": {
+      "HOST": "yes",
+      "TCG": "yes",
+      "KVM": "no",
+      "PHYSICAL": "no"
+    },
+    "security_verdicts": {
+      "ED25519_RFC_VECTORS": "PASS",
+      "ED25519_CROSS_IMPLEMENTATION": "PASS",
+      "ED25519_ADVERSARIAL_ENCODINGS": "PASS",
+      "SIGNED_MANIFEST_AUTHENTICITY": "PASS",
+      "HASH_AFTER_DISK_READBACK": "PASS",
+      "DEV_KEY_ISOLATION": "PASS",
+      "PRODUCTION_RELEASE_KEY": "NOT_IMPLEMENTED",
+      "ANTI_ROLLBACK_POLICY": "NOT_IMPLEMENTED",
+      "UPDATE_SESSION_ISOLATION": "PASS",
+      "UPDATED_HEARTBEAT": "PASS",
+      "SIGCHLD_MULTITHREAD_STABILITY": "NON_QUALIFYING",
+      "P13_NEGATIVE_CONTROL": "PASS"
+    },
+    "security_details": {
+      "ED25519_ADVERSARIAL_ENCODINGS": "332 constructed cases vs OpenSSL and libsodium: Bouchaud == libsodium on 332, != OpenSSL on 16 (small-order/non-canonical inputs OpenSSL accepts); defect found and fixed (small-order and non-canonical keys accepted, like OpenSSL 3); mutation-tested: each refusal removed is detected except the negative-zero refusal, which is an equivalent mutation (only x=0 points are identity and order 2, already refused)",
+      "DEV_KEY_ISOLATION": "feature banc-cle-dev AND BOUCHAUD_CLE_VERSION_DEV both required; the variable alone fails the build; QEMU sans-cle: trusted keys 0, begin refused, bench key absent from kernel ELF",
+      "PRODUCTION_RELEASE_KEY": "NOT_CONFIGURED on purpose: production update = REFUSED until a human decision (offline/HSM, rotation, backup, revocation)",
+      "ANTI_ROLLBACK_POLICY": "a correctly signed OLD release can be reinstalled; local rollback (candidate -> previous Good) must stay possible",
+      "UPDATE_SESSION_ISOLATION": "session bound to pid + all install calls serialized under a sleeping mutex; QEMU mise-a-jour-morts (updated killed during write and during verify)",
+      "SIGCHLD_MULTITHREAD_STABILITY": "one unexplained failure on main; 125 targeted reproductions on the exact kernel 21fca026 (isolated, under strace at SMP1/2/4, full primitives context): 0 failures; root cause NOT established",
+      "UPDATED_HEARTBEAT": "contract v3 unchanged (4 x 250 ms). QEMU TCG on the final tree: mise-a-jour max service gap 666 ms, mise-a-jour-morts 170 ms, no updated Running->Degraded; published (UPDATED_MESURE), not thresholded. Two defects found by measurement and fixed: (1) first strict Ed25519 used a 256-bit ladder for [8]P, updated was killed for heartbeat_missed in mise-a-jour-morts (BOUCHAUD_ED25519_PETIT_ORDRE_V2: 3 doublings, no inversion); (2) updated served no heartbeat between manifest parsing, the refusal self-test and the real begin (~1.4 s under TCG; BOUCHAUD_UPDATED_BATTEMENT_ETAPES_V1)",
+      "P13_NEGATIVE_CONTROL": "BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1: faulty condition forced, cause counted; local TCG 5xSMP2+5xSMP4: dechiree defect shown 9/9 judged runs, ancien overlapped 10/10, correctif clean 9/10 (1 unattributed panic, see open_anomalies)"
+    },
+    "functional_verdicts": {
+      "UPDATE_AB_CORE": "PASS(HOST)",
+      "LOADER_AB": "PASS(TCG)",
+      "BOOT_ATTEMPT_PERSISTENCE": "PASS(HOST+TCG)",
+      "HEALTH_COMMIT": "PASS(TCG)",
+      "AUTO_ROLLBACK": "PASS(TCG)",
+      "UPDATED_RING3": "PASS(TCG)",
+      "UPDATE_CAPABILITIES": "PASS(TCG)",
+      "RECOVERY_BOOT": "PASS(TCG)",
+      "RECOVERY_ROLLBACK": "PASS(TCG)",
+      "POWER_LOSS_HARNESS": "PASS(TCG)",
+      "PERSISTENCE_CRASH_CONSISTENCY": "PASS(TCG)",
+      "LOGD": "PASS(TCG)",
+      "SERVICE_SUPERVISION": "PASS(TCG)",
+      "IPC_LATENCY_ATTRIBUTION": "PASS(TCG)"
+    },
+    "ab_bench": "tools/ci/run_ab_rollback.sh: panique gel meta-0 meta-1 meta-2 sante sante-ko mise-a-jour mise-a-jour-morts sans-cle recovery-requise recovery-rollback echecs-repetes",
+    "update_measurements_tcg": {
+      "mise-a-jour": {
+        "lecture_image_us": {
+          "n": 1440,
+          "p50": 128,
+          "p95": 222,
+          "max": 2898
+        },
+        "ecriture_slot_us": {
+          "n": 1440,
+          "p50": 1787,
+          "p95": 5293,
+          "max": 25427
+        },
+        "relecture_disque_us": {
+          "n": 90,
+          "p50": 57039,
+          "p95": 67900,
+          "max": 95102
+        },
+        "heartbeat_max_gap_us": 665991
+      },
+      "mise-a-jour-morts": {
+        "lecture_image_us": {
+          "n": 1440,
+          "p50": 164,
+          "p95": 293,
+          "max": 3025
+        },
+        "ecriture_slot_us": {
+          "n": 1440,
+          "p50": 1414,
+          "p95": 1989,
+          "max": 68302
+        },
+        "relecture_disque_us": {
+          "n": 90,
+          "p50": 44483,
+          "p95": 58746,
+          "max": 105424
+        },
+        "heartbeat_max_gap_us": 169971
+      },
+      "note": "local QEMU TCG, OVMF, NVMe, 2026-11-03, final tree before push; the PR's native-ipc ab-rollback jobs publish the same lines"
+    }
+  },
+  "p13": {
+    "smp124_endurance": "PASS",
+    "smp8": "PENDING_DEDICATED_KVM8",
+    "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING"
+  },
+  "main_protection": "BLOCKED_BY_HUMAN_GITHUB_SETTING",
+  "physical": "NOT_STARTED",
+  "open_anomalies": {
+    "SIGCHLD_MULTIFIL_ECHEC": {
+      "seen": "main@992e67e1 run 41648148378 TCG pass, once",
+      "status": "OPEN_NOT_ATTRIBUTED",
+      "evidence_since": "125 targeted local runs on 21fca026: 0 failures; P13 41692359972 (19dc18ad) SIGCHLD steps PASS; diagnostics now print the failing case in the job log"
+    },
+    "COMPTA_CORRECTIF_PANIC_SMP4": {
+      "seen": "local TCG, 2026-11-03, 1 of 41 SMP4 'correctif' boots of run_compta_injection.sh",
+      "status": "OPEN_NOT_ATTRIBUTED",
+      "evidence_since": "log overwritten before reading; 36 isolated SMP4 correctif boots: 0 panic, 0 overlap; the bench now prints a panic's site and message in the job log"
+    }
+  }
 }

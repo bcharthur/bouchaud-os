@@ -495,7 +495,15 @@ fn update_install_begin(args: [u64; 6]) -> Result<u64> {
     handle::current_table().lookup_kind(HandleId::from_raw(args[0]), Rights::UPDATE_INSTALL, ObjectKind::Update)?;
     let cible = match args[1] { 0 => bouchaud_update_core::Slot::A, 1 => bouchaud_update_core::Slot::B,
                                 _ => return Err(Error::InvalidArgument) };
-    crate::kernel::update::installation_commence(cible).map_err(refus_install)?;
+    // args[2..4]: the signed manifest (canonical bytes, <= 1 KiB) and its
+    // 64-byte Ed25519 signature.
+    let len = args[3] as usize;
+    if len == 0 || len > 1024 { return Err(Error::InvalidArgument); }
+    let texte = super::usercopy::read(args[2], len)?;
+    let brut = super::usercopy::read(args[4], 64)?;
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&brut);
+    crate::kernel::update::installation_commence(cible, &texte, &signature).map_err(refus_install)?;
     Ok(0)
 }
 

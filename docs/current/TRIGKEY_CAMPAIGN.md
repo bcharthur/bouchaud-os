@@ -1,6 +1,6 @@
 # Campagne PHYSICAL Trigkey Speed S5 — protocole exact
 
-**Statut : PHYSICAL_PENDING** — aucune étape ci-dessous n'a été exécutée physiquement dans la session du 2026-11-03. Ce document n'affirme rien sur le matériel ; il dit comment le prouver.
+**Statut : PHYSICAL = NOT_STARTED** (voir [status.json](status.json)) — aucune étape ci-dessous n'a été exécutée physiquement. Ce document n'affirme rien sur le matériel ; il dit comment le prouver.
 
 ## 0. Image et provenance (obligatoire avant de brancher la clé)
 
@@ -52,6 +52,25 @@ Relever aussi : RAM utilisable, liste PCI (NVMe, RTL8168 `10ec:8168`, xHCI, HDA 
 | 30 | Blackbox recovery | extraire la boîte noire de la clé et la symboliser avec `kernel.elf` | illisible / non symbolisable |
 
 **Machine figée sans panique = FAIL.** Une étape non exécutée = `NOT_RUN`, jamais `PASS`.
+
+## 2bis. A/B, rollback et recovery sur la machine (BOUCHAUD_LOADER_AB_V1)
+
+> **Pas prêt.** L'image Trigkey actuelle (`build_trigkey_image.sh`) n'embarque pas encore `serviced`, `healthd`, `updated`, `logd`. Sans eux, aucun candidat n'est confirmé et AB3, AB4 et AB6 échoueraient par construction. Cette adaptation n'est pas faite ; tant qu'elle ne l'est pas, ces étapes restent `NOT_RUN` et ne sont présentées comme prêtes à personne.
+
+Image : un disque GPT A/B construit par `uefi-image-builder --disque-ab OUT shim.efi meta.img SLOT_A SLOT_B RECOVERY` (même chaîne que `tools/ci/run_ab_rollback.sh`), les ramdisks des slots contenant `serviced`, `healthd`, `updated`, `logd` **en plus** de l'archive Ladybird. Flash sur **clé USB** ; jamais le NVMe interne pour cette campagne.
+
+| # | Étape | Preuve exigée | Échec si |
+|---|---|---|---|
+| AB1 | Boot A (META `a-bon`) | `BOUCHAUD_AB_BOOT slot=A raison=actif`, `SERVICED_HEALTH_COMMIT … already_good` | autre slot, pas de santé |
+| AB2 | Candidat B qui panique (`banc-ab-panique`, META `b-candidat:3`) : couper le courant à chaque panique | 3 × `slot=B raison=candidat_essai_consomme`, puis `slot=A raison=rollback_candidat_epuise` | un 4e boot de B |
+| AB3 | Candidat B sain | `result=committed`, puis `slot=B raison=actif` au boot suivant | B jamais confirmé |
+| AB4 | Mise à jour par `updated` (slot inactif vide, manifeste dans le ramdisk actif) | `UPDATED_INSTALL_OK`, `UPDATED_REFUSALS_OK`, puis AB3 | refus manquant, B non bootable |
+| AB5 | Touche **R** maintenue au boot | `BOUCHAUD_AB_RECOVERY_BOOT raison=demandee`, console `recovery>` à l'écran, `etat` lisible | bureau lancé |
+| AB6 | `verifie A`, `verifie B`, `rollback` puis `rollback --confirme` | `conforme`, refus sans `--confirme`, `BOUCHAUD_RECOVERY_ROLLBACK_OK` | écriture sans confirmation |
+| AB7 | META corrompu (deux copies) | `BOUCHAUD_RECOVERY_PRET raison=recovery_requise`, aucun slot booté | boot deviné |
+| AB8 | Coupure secteur pendant AB4 (écriture du slot) | au boot suivant : A boote, B `vide` ou `candidat` cohérent, jamais un B à moitié écrit booté | B partiel booté |
+
+Ces étapes ne sont **jamais** déclarées PASS sur la foi des preuves QEMU : `NOT_RUN` tant qu'elles n'ont pas été jouées sur la Trigkey avec le manifeste de l'image.
 
 ## 3. Rapport
 

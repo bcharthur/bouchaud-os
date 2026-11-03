@@ -45,6 +45,11 @@ banc-c5-fenetre-corrigee = []
 # notion de sante, a chaque boot.
 banc-ab-panique = []
 banc-ab-gel = []
+# BOUCHAUD_CLE_DEV_GARDE_V1 : fait confiance a la cle de DEVELOPPEMENT que le
+# banc genere (BOUCHAUD_CLE_VERSION_DEV). Les deux sont exiges ; la variable
+# seule fait echouer la construction. Jamais dans `default`, jamais livree :
+# tools/verifie-cle-dev.py le verifie.
+banc-cle-dev = []
 # BANC TEMOIN CONSOLE (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1).
 #
 # Retire la contre-pression des lignes differees : anneau du coeur plein, la

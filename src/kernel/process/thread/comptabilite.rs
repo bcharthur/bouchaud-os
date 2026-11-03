@@ -495,13 +495,63 @@ fn rearme_ancien_pour_banc() {
     });
 }
 
+/// BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1 -- compteurs du temoin C14.
+///
+/// Le temoin ne montrait le defaut que par hasard (p13-primitives-noyau
+/// 41677714402, TCG SMP2 : trois demarrages muets). Deux conditions devaient
+/// coincider sans que le banc les commande :
+///   1. la tache devait MIGRER pendant la fenetre -- or le vol est soumis a
+///      l'equilibrage, a 20 ms de residence et a une temporisation, et
+///      `sched_setaffinity` est sans effet : reelue sur son coeur, elle relit
+///      SA case, et rien n'est faux ;
+///   2. la victime lue devait avoir sa tranche REPLIEE -- ouverte,
+///      `arme_tranche_comptable` sort sans bruit (`rearmes_deja_armes`).
+/// La condition fautive est desormais FORCEE et l'observable est sa CAUSE :
+/// a la relecture, si la tache est revenue sur le coeur lu avant la fenetre,
+/// la case relue est celle d'un AUTRE coeur en ligne -- exactement ce qu'une
+/// migration faisait lire a l'ancien code. Chaque relecture compare la case
+/// relue a la case du coeur ou la tache s'execute, lues ensemble
+/// interruptions masquees : differentes, c'est une lecture etrangere.
+static TEMOIN_LECTURES_ETRANGERES: AtomicU64 = AtomicU64::new(0);
+static TEMOIN_MIGRATIONS_NATURELLES: AtomicU64 = AtomicU64::new(0);
+static TEMOIN_MIGRATIONS_FORCEES: AtomicU64 = AtomicU64::new(0);
+
+/// `(lectures etrangeres, migrations naturelles, migrations forcees)` du
+/// temoin C14 ; nuls hors du bras `dechiree`.
+pub fn compteurs_temoin_dechire() -> (u64, u64, u64) {
+    (
+        TEMOIN_LECTURES_ETRANGERES.load(Ordering::Relaxed),
+        TEMOIN_MIGRATIONS_NATURELLES.load(Ordering::Relaxed),
+        TEMOIN_MIGRATIONS_FORCEES.load(Ordering::Relaxed),
+    )
+}
+
 /// La lecture d'avant BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1, pour la
 /// reproduction negative seulement : le coeur, la fenetre (qui cede), puis la
-/// case de ce coeur -- peut-etre plus le sien.
+/// case d'un coeur qui n'est plus le sien (BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1).
 fn rearme_dechire_pour_banc() {
     let cpu = local_cpu();
     fenetre_injectee();
-    let index = CURRENT[cpu].load(Ordering::Acquire);
+    let en_ligne = smp::schedulable_cpus().min(MAX_CPUS);
+    let Some((index, propre)) = interrupts::without_interrupts(|| {
+        let ici = local_cpu();
+        let lu = if ici != cpu {
+            TEMOIN_MIGRATIONS_NATURELLES.fetch_add(1, Ordering::Relaxed);
+            cpu
+        } else if en_ligne > 1 {
+            TEMOIN_MIGRATIONS_FORCEES.fetch_add(1, Ordering::Relaxed);
+            (ici + 1) % en_ligne
+        } else {
+            // Un seul coeur : la condition n'existe pas, rien n'est compte.
+            return None;
+        };
+        Some((CURRENT[lu].load(Ordering::Acquire), CURRENT[ici].load(Ordering::Acquire)))
+    }) else {
+        return;
+    };
+    if index != propre {
+        TEMOIN_LECTURES_ETRANGERES.fetch_add(1, Ordering::Relaxed);
+    }
     if index == NO_TASK {
         return;
     }

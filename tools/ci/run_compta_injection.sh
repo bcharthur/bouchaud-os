@@ -14,8 +14,12 @@
 #   * `correctif` -- le code livre : 0 chevauchement exige ;
 #   * `dechiree`  -- BOUCHAUD_INDICE_COURANT_ATOMIQUE_V1 (C14) : l'indice de la
 #     tache courante lu en deux temps, la fenetre entre le coeur et sa case.
-#     Il DOIT montrer le defaut : une panique `compta:` (ecrivain concurrent,
-#     ouverture ou fermeture par un autre coeur) ou un chevauchement.
+#     Il DOIT montrer le defaut. BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1 : la
+#     condition fautive (la case relue n'est pas celle du coeur ou la tache
+#     s'execute) est FORCEE a chaque fenetre, et sa cause est comptee
+#     (`lectures_etrangeres`). Un demarrage, pas de nouvel essai : une fenetre
+#     ouverte suffit a le faire echouer ; aucune fenetre = NON_QUALIFIANT.
+#     Panique `compta:` ou chevauchement restent des preuves du defaut.
 # Une fenetre qui n'a jamais cede ne prouve rien : NON_QUALIFIANT (code 2).
 #
 # BO_SMP : coeurs (2 par defaut). BO_QEMU_KVM=1 : sous KVM.
@@ -65,21 +69,21 @@ bras() { # ordre -> journal compta-injection-ORDRE.log
 echo "COMPTA_INJECTION smp=${SMP} accel=${ACCEL} fenetre_us=${FENETRE} duree_s=${DUREE}"
 bras ancien
 bras correctif
-# Le temoin depend d'une migration PENDANT la fenetre : jusqu'a trois
-# demarrages, arret au premier qui montre le defaut (local : 5 sur 6 du premier
-# coup). Trois temoins muets : ECHEC.
-for t in 1 2 3; do
-  bras dechiree
-  echo "COMPTA_INJECTION_DECHIREE_TENTATIVE t=$t/3 $(grep -aoE -m1 'compta: [a-z ]+' compta-injection-dechiree.log || true)"
-  grep -aqE 'compta: ' compta-injection-dechiree.log && break
-done
+# Le temoin ne depend plus d'une migration PENDANT la fenetre (il en
+# dependait : trois demarrages muets en TCG SMP2, 41677714402). Un seul
+# demarrage, verdict deterministe.
+bras dechiree
 
 python3 - compta-injection-ancien.log compta-injection-correctif.log compta-injection-dechiree.log <<'EOF'
 import re, sys
 def etat(chemin):
     t = re.sub(r"\x1b\[[0-9;]*m", "", open(chemin, encoding="utf-8", errors="replace").read())
     if re.search(r"KERNEL PANIC|panicked at", t):
-        return None, "panique"
+        # La panique d'un bras se lit dans le journal du JOB (l'artefact peut
+        # etre inaccessible) : site et message, pas seulement le mot.
+        lignes = [l.strip() for l in t.splitlines() if re.search(r"panicked at|KERNEL PANIC", l)]
+        suite = t[t.find(lignes[0]) + len(lignes[0]):].strip().splitlines()[:2] if lignes else []
+        return None, "panique : " + " / ".join(lignes[:2] + [x.strip() for x in suite])[:400]
     m = re.findall(r"COMPTA_INJECTION_ETAT fenetres=(\d+) cessions=(\d+) chevauchements=(\d+) "
                    r"pire_chevauchement_us=(\d+) rearmes_deja_armes=(\d+)", t)
     if not m:
@@ -113,16 +117,28 @@ if fautes:
 # C14 : le temoin de la lecture dechiree. Une panique `compta:` EST le defaut.
 td = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[3], encoding="utf-8", errors="replace").read())
 pd = re.search(r"compta: [a-z ]+", td)
-ed = re.findall(r"COMPTA_INJECTION_ETAT fenetres=(\d+) cessions=(\d+) chevauchements=(\d+)", td)
+ed = re.findall(r"COMPTA_INJECTION_ETAT fenetres=(\d+) cessions=(\d+) chevauchements=(\d+) "
+                r"pire_chevauchement_us=\d+ rearmes_deja_armes=\d+ lectures_etrangeres=(\d+) "
+                r"migrations_naturelles=(\d+) migrations_forcees=(\d+)", td)
+# Le correctif ne lit jamais la case d'un autre coeur : ses compteurs de
+# temoin sont nuls, sinon le bras n'a pas ete isole.
+ec = re.findall(r"COMPTA_INJECTION_ETAT .* lectures_etrangeres=(\d+) migrations_naturelles=(\d+) migrations_forcees=(\d+)",
+                re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[2], encoding="utf-8", errors="replace").read()))
+if not ec or ec[-1] != ("0", "0", "0"):
+    print(f"COMPTA_INJECTION_ECHEC correctif : compteurs du temoin non nuls ou absents ({ec[-1] if ec else 'absents'})")
+    sys.exit(1)
 if pd:
     temoin = f"panique « {pd.group(0).strip()} »"
+elif ed and int(ed[-1][0]) == 0:
+    print("COMPTA_INJECTION_NON_QUALIFIANT dechiree : aucune fenetre ouverte")
+    sys.exit(2)
+elif ed and int(ed[-1][3]) > 0:
+    temoin = (f"lectures_etrangeres={ed[-1][3]} (naturelles={ed[-1][4]} forcees={ed[-1][5]})"
+              + (f" chevauchements={ed[-1][2]}" if int(ed[-1][2]) > 0 else ""))
 elif ed and int(ed[-1][2]) > 0:
     temoin = f"chevauchements={ed[-1][2]}"
-elif ed and int(ed[-1][1]) == 0:
-    print("COMPTA_INJECTION_NON_QUALIFIANT dechiree : la fenetre n'a jamais cede")
-    sys.exit(2)
 else:
-    print("COMPTA_INJECTION_ECHEC dechiree : la lecture en deux temps n'a pas montre le defaut (temoin muet)")
+    print("COMPTA_INJECTION_ECHEC dechiree : fenetres ouvertes sans lecture etrangere (temoin muet)")
     sys.exit(1)
 print(f"  dechiree  : {temoin}")
 print(f"COMPTA_INJECTION_OK dechiree={temoin} ancien={av[2]} chevauchement(s) (sonde {av[5]}) correctif=0 cessions={ap[1]} rearmes_evites={ap[4]} sonde=OK")

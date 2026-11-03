@@ -29,6 +29,11 @@
 #   sante         : B+ B=        (committed, then B is the good active slot)
 #   sante-ko      : B- B- B- A= A=
 #   mise-a-jour   : A* B+ B=     (A*: install + every refusal observed)
+#   sans-cle      : A0 A=        a RELEASE build (no feature banc-cle-dev, no
+#                                key): the kernel trusts 0 keys, begin is
+#                                refused aucune_cle_de_confiance even for a
+#                                validly signed manifest; B stays Empty; the
+#                                bench key is absent from the kernel ELF
 #   recovery-requise  : R        both copies invalid, RECOVERY partition present:
 #                                recovery boots (no supervisor, no desktop),
 #                                says META is unreadable, refuses a rollback
@@ -46,8 +51,12 @@
 # not start, or a kernel started under RECOVERY_REQUIRED is red.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|mise-a-jour|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
+SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|mise-a-jour|mise-a-jour-morts|sans-cle|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
 RECOVERY=0
+# mise-a-jour-morts = mise-a-jour + updated dies on purpose twice (during the
+# writes, during the read-back); the third instance must inherit nothing.
+VARIANTE=""
+if [ "$SCENARIO" = mise-a-jour-morts ]; then SCENARIO=mise-a-jour; VARIANTE=morts; fi
 OUT=${2:-target/ab-rollback-$SCENARIO}
 TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 FEATURES=uefi-boot,reference-bringup,reference-desktop
@@ -63,11 +72,26 @@ case "$SCENARIO" in
   sante) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   sante-ko) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B- B- B- A= A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   mise-a-jour) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A* B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
+  sans-cle) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A0 A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
   recovery-requise) MAUVAIS=bon; META_SPEC=corrompu:2; ATTENDU="R"; RECOVERY=1 ;;
   recovery-rollback) MAUVAIS=bon; META_SPEC=b-bon; ATTENDU="R B="; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   echecs-repetes) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A- A- A- R"; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   *) echo "scenario inconnu: $SCENARIO" >&2; exit 2 ;;
 esac
+
+# --- release key (mise-a-jour only): generated HERE, deleted at exit -------
+# A development key: its public half is compiled into the kernel built below
+# (BOUCHAUD_CLE_VERSION_DEV), its private half signs the manifest, then the
+# whole directory goes. No key is ever stored in the repository.
+CLES=$(mktemp -d); trap 'rm -rf "$CLES"' EXIT
+if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
+  openssl genpkey -algorithm ed25519 -out "$CLES/version.pem"
+  CLE_PUBLIQUE=$(openssl pkey -in "$CLES/version.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+  echo "AB_CLE_DEV publique=$CLE_PUBLIQUE (generee pour ce banc, detruite a la fin)"
+  # sans-cle: the manifest IS signed with it, but the kernel is a normal
+  # build that does not trust it.
+  if [ "$SCENARIO" = mise-a-jour ]; then export BOUCHAUD_CLE_VERSION_DEV=$CLE_PUBLIQUE; fi
+fi
 
 # --- build: shim, kernels, payloads, metadata, disk ------------------------
 cargo +"$TOOLCHAIN" build --release --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml \
@@ -75,12 +99,14 @@ cargo +"$TOOLCHAIN" build --release --manifest-path tools/reference/uefi-preboot
 SHIM=tools/reference/uefi-preboot-probe/target/x86_64-unknown-uefi/release/bouchaud-uefi-preboot-probe.efi
 for k in $(printf '%s\n' bon "$MAUVAIS" | sort -u); do
   f=$FEATURES; [ "$k" != bon ] && f="$FEATURES,banc-ab-$k"
+  # The bench key needs BOTH the variable and this feature (BOUCHAUD_CLE_DEV_GARDE_V1).
+  if [ -n "${BOUCHAUD_CLE_VERSION_DEV:-}" ]; then f="$f,banc-cle-dev"; fi
   cargo +"$TOOLCHAIN" build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features "$f"
   # Debug info is for the host (symbolisation), not for the slot: stripping it
   # keeps a slot image small enough to be shipped and written by updated.
   strip --strip-debug -o "$OUT/kernel-$k.elf" target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
 done
-TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL"' EXIT
+TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL" "$CLES"' EXIT
 cp -r tools/reference/uefi-image-builder "$TRAVAIL/builder"
 ( cd "$TRAVAIL/builder" && cargo +"$TOOLCHAIN" build --release -q )
 BUILDER=$TRAVAIL/builder/target/release/bouchaud-reference-uefi-image-builder
@@ -100,7 +126,7 @@ with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
         t.addfile(i, io.BytesIO(data))
 PY
 }
-case "$SCENARIO" in sante|sante-ko|mise-a-jour|recovery-rollback|echecs-repetes)
+case "$SCENARIO" in sante|sante-ko|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
   # The system userland of each slot: serviced (system supervisor) and its
   # critical services (health contract v3: healthd, updated, logd). In sante-ko the
   # CANDIDATE's critical service fails.
@@ -112,17 +138,22 @@ case "$SCENARIO" in sante|sante-ko|mise-a-jour|recovery-rollback|echecs-repetes)
   critique_b=$TRAVAIL/healthd; [ "$SCENARIO" = sante-ko ] && critique_b=$TRAVAIL/healthd-defaillant
   critique_a=$TRAVAIL/healthd; [ "$SCENARIO" = echecs-repetes ] && critique_a=$TRAVAIL/healthd-defaillant
   ramdisk "$OUT/slot-b/ramdisk" $systeme "bin/healthd=$critique_b"
-  if [ "$SCENARIO" = mise-a-jour ]; then
+  if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
     # The release: slot B's image, built exactly as --disque-ab would lay it,
     # and its manifest. Shipped INSIDE the running system A; B on disk is
     # zeroed below, so only updated can make it bootable.
     "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
     octets=$(stat -c %s "$OUT/system-b.img")
     empreinte=$(sha256sum "$OUT/system-b.img" | cut -d' ' -f1)
-    printf 'version=bench-%s\nimage=/update/system.img\nbytes=%s\nsha256=%s\nattempts=3\nselftest_refusals=1\n' \
-      "$(git rev-parse --short HEAD)" "$octets" "$empreinte" > "$OUT/manifest"
+    # The canonical manifest (system/update-core/src/manifeste.rs), signed.
+    printf 'bouchaud-manifeste-v1\nversion=bench-%s\nimage_sha256=%s\nimage_octets=%s\nessais=3\n' \
+      "$(git rev-parse --short HEAD)" "$empreinte" "$octets" > "$OUT/manifest"
+    openssl pkeyutl -sign -rawin -inkey "$CLES/version.pem" -in "$OUT/manifest" -out "$OUT/manifest.sig"
+    : > "$OUT/selftest"
+    morts=(); [ "$VARIANTE" = morts ] && morts=("update/selftest-mort=$OUT/selftest")
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" \
-      "update/manifest=$OUT/manifest" "update/system.img=$OUT/system-b.img"
+      "update/manifest=$OUT/manifest" "update/manifest.sig=$OUT/manifest.sig" \
+      "update/selftest=$OUT/selftest" "update/system.img=$OUT/system-b.img" "${morts[@]}"
   else
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$critique_a"
   fi
@@ -145,7 +176,7 @@ if [ "$SCENARIO" = recovery-rollback ]; then
   read -r l o < <(partition BOUCHAUD-META)
   dd if="$OUT/meta.img" of="$OUT/disque-ab.img" bs=512 seek="$l" conv=notrunc status=none
 fi
-if [ "$SCENARIO" = mise-a-jour ]; then
+if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
   # Slot B starts EMPTY (zeroes) and META says so (a-bon): nothing bootable
   # there until updated writes it.
   read -r lba oct < <(partition BOUCHAUD-SYS-B)
@@ -232,13 +263,24 @@ for i in $(seq 1 "$nb"); do
       if grep -aq "UPDATED_INSTALL_OK" <<< "$propre" && grep -aq "UPDATED_REFUSALS_OK" <<< "$propre"; then verdict="A*"; else verdict="A!"; fi
       break
     fi
+    # sans-cle: A0 = the release kernel refused the signed manifest because it
+    # trusts no key, and nothing was installed.
+    if [ "$SCENARIO" = sans-cle ] && [ "$slot" = A ] && [ "$i" = 1 ] && grep -aqE "UPDATED_REFUSALS_(OK|FAIL)" <<< "$propre"; then
+      if grep -aq "BOUCHAUD_UPDATE_INSTALL_REFUS etape=begin raison=aucune_cle_de_confiance" <<< "$propre" \
+         && ! grep -aqE "BOUCHAUD_UPDATE_INSTALL_CANDIDAT|BOUCHAUD_UPDATE_MANIFESTE signature=fiable|UPDATED_INSTALL_OK" <<< "$propre"; then
+        verdict="A0"
+      else
+        verdict="A!"
+      fi
+      break
+    fi
     # Boot 1 of mise-a-jour is judged on updated alone: its own health line
     # can come before the install ends, and must not cut the install short.
-    if [ "$SCENARIO" = mise-a-jour ] && [ "$slot" = A ]; then
+    if { [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; } && [ "$slot" = A ] && [ "$i" = 1 ]; then
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 1; continue
     fi
-    case "$SCENARIO" in sante|sante-ko|mise-a-jour|recovery-rollback|echecs-repetes)
+    case "$SCENARIO" in sante|sante-ko|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
       if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then verdict="$slot+"; break; fi
       if [ -n "$slot" ] && grep -aq "result=already_good" <<< "$propre"; then verdict="$slot="; break; fi
       if [ -n "$slot" ] && grep -aqE "result=refused|\[SERVICED\] system [A-Za-z]+->RecoveryRequired" <<< "$propre"; then
@@ -273,11 +315,56 @@ if [ "$SCENARIO" = sante ] && ! sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | tr
   exit 1
 fi
 if [ "$SCENARIO" = mise-a-jour ]; then
-  for m in "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" "UPDATED_INSTALL_OK" "UPDATED_REFUSALS_OK"; do
+  for m in "BOUCHAUD_UPDATE_MANIFESTE signature=fiable cle=dev-banc developpement=1" \
+           "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" "signature=fiable hash=valide" \
+           "UPDATED_INSTALL_OK" "signature=trusted hash=valid" "UPDATED_REFUSALS_OK"; do
     sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aF "$m" >/dev/null \
       || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
   done
-  sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE '\[UPDATED\] (ok|FAIL)' | sed 's/^/  /'
+  # The agent must not be killed by its own supervisor mid-install.
+  if sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE 'svc=updated Running->Degraded' >/dev/null; then
+    echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=updated_battements_manques" >&2; exit 1
+  fi
+  sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE '\[UPDATED\] (ok|FAIL)' | awk '!s[$0]++' | sed 's/^/  /'
+  # BOUCHAUD_UPDATED_MESURES_V1: published, not thresholded.
+  sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aoE 'UPDATED_MESURE .*' | sed 's/^/  /'
+  if [ "$VARIANTE" = morts ]; then
+    propre1=$(sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | tr -d '\r')
+    for m in "UPDATED_MORT_VOLONTAIRE pendant=write" "UPDATED_MORT_VOLONTAIRE pendant=verify" \
+             "BOUCHAUD_UPDATE_INSTALL_REFUS etape=write raison=session_d_un_autre_processus" \
+             "UPDATED_SUCCESSEUR_APRES_DEUX_MORTS"; do
+      grep -aF "$m" <<< "$propre1" >/dev/null || { echo "AB_ROLLBACK_FAIL variante=morts marqueur_absent=$m" >&2; exit 1; }
+    done
+    for m in "successor: the dead owner's session is not usable" "successor: no premature Candidate in META"; do
+      n=$(grep -aF "[UPDATED] ok   $m" <<< "$propre1" | awk '!s[$0]++' | wc -l)
+      [ "$n" -ge 1 ] && ! grep -aF "[UPDATED] FAIL $m" <<< "$propre1" >/dev/null \
+        || { echo "AB_ROLLBACK_FAIL variante=morts controle=$m" >&2; exit 1; }
+    done
+    echo "AB_VARIANTE_MORTS_OK deux morts volontaires (write, verify), successeur sans heritage"
+  fi
+fi
+if [ "$SCENARIO" = sans-cle ]; then
+  sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aF "BOUCHAUD_UPDATE_CLES confiance=0 production=0 developpement=0" >/dev/null \
+    || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=cles_de_confiance_non_nulles" >&2; exit 1; }
+  # The bench public key must not be inside the release kernel, stripped
+  # (what the slot carries) or not (what the build produced).
+  python3 - "$CLE_PUBLIQUE" "$OUT/kernel-bon.elf" target/x86_64-bouchaud_os_uefi/debug/bouchaud-os <<'PY' \
+    || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=cle_de_banc_dans_le_noyau" >&2; exit 1; }
+import sys
+cle = bytes.fromhex(sys.argv[1])
+for f in sys.argv[2:]:
+    if cle in open(f, "rb").read():
+        print("cle de banc trouvee dans", f); sys.exit(1)
+print("AB_CLE_ABSENTE_DU_NOYAU", " ".join(sys.argv[2:]))
+PY
+fi
+if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
+  # No private key in anything this bench leaves behind (images, ramdisks,
+  # logs, manifests).
+  if grep -rlaE -- "-----BEGIN [A-Z ]*PRIVATE KEY-----" "$OUT" >/dev/null 2>&1; then
+    echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=cle_privee_dans_les_sorties" >&2; exit 1
+  fi
+  echo "AB_AUCUNE_CLE_PRIVEE_DANS_LES_SORTIES"
 fi
 if [ "$obtenu" != "$ATTENDU" ]; then
   echo "AB_ROLLBACK_FAIL scenario=$SCENARIO" >&2

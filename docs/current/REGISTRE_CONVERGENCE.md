@@ -448,6 +448,24 @@ rouge sur l'image d'avant le correctif, pas une injection.
   9 négatifs. Banc ajouté à os-primitives (TCG SMP2 et SMP4 ; code 2 =
   `NON_QUALIFIANT`, rouge).
 - **Limites** : pas encore mesuré sous KVM ; SMP1 non qualifiable par ce banc.
+- **Témoin C14 rendu déterministe** (`BOUCHAUD_TEMOIN_DECHIRE_DETERMINISTE_V1`, 03/11).
+  - *Constat* : le bras `dechiree` (lecture en deux temps du cœur puis de sa case) est resté muet trois démarrages de suite (p13-primitives-noyau 41677714402, TCG SMP2).
+  - *Cause* : deux conditions non commandées.
+    1. Il fallait une **migration** dans la fenêtre. Or le vol est soumis à l'équilibrage, à 20 ms de résidence et à une temporisation, et `sched_setaffinity` est sans effet dans la compat. Réélue sur son cœur, la tâche relit **sa** case.
+    2. Il fallait une victime à tranche **repliée**. Si sa tranche est ouverte, l'armement sort sans bruit.
+  - *Correction* : la condition fautive est forcée. Revenue sur le cœur lu, la tâche relit la case d'un **autre** cœur. La **cause** est comptée : `lectures_etrangeres`, mesurée en comparant la case relue à celle du cœur d'exécution, lues ensemble interruptions masquées.
+  - *Banc* : un seul démarrage, sans nouvel essai. Aucune fenêtre → `NON_QUALIFIANT`. Les compteurs du témoin doivent être nuls pour `correctif`. La panique d'un bras est imprimée dans le journal du job.
+
+  Mesures locales (TCG, même image, fenêtre 2 ms, 8 s) :
+
+  | Banc | `dechiree` | `ancien` | `correctif` |
+  |---|---|---|---|
+  | SMP2 ×5 | 5/5 défaut (4 paniques `ouverture par un autre coeur`, 1 × `lectures_etrangeres=7` dont 6 forcées) | 5/5 chevauchement (2 à 7) | 5/5 : 0 chevauchement, `COMPTA_STRESS_OK` |
+  | SMP4 ×5 | 4/4 jugés : défaut (paniques) ; non jugé dans le passage où `correctif` a paniqué (le banc s’arrête au démarrage incomplet) | 5/5 chevauchement (17 à 56) | 4/5 ; **1 panique non attribuée**, journal écrasé avant lecture |
+  | SMP4, `correctif` seul ×36 | — | — | 36/36 : 0 chevauchement, 0 panique, `COMPTA_STRESS_OK` |
+
+  La panique du `correctif` (1 sur 41 démarrages SMP4 locaux) reste **ouverte, non reproduite**. Son prochain cas sera lisible dans le journal du job.
+
 
 ### C7 à C12
 

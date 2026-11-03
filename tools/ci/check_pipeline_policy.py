@@ -199,6 +199,26 @@ for required in (
     if not required.is_file():
         errors.append(f"{required}: composant reliability absent")
 
+# BOUCHAUD_P13_COUVERTURE_PR_V1 : une PR qui modifie le banc P13 ne peut pas
+# etre verte sans executer P13. p13-primitives-noyau.yml se declenche en
+# pull_request ET en push sur les MEMES chemins, et ces chemins couvrent chaque
+# outil que joue os-primitives.yml, plus le banc SIGCHLD cible et sa sonde.
+_p13 = need(root / "p13-primitives-noyau.yml", ("p13-primitives / verdict", "dedoublonne_pr.py attend"))
+def _chemins(texte, evenement):
+    m = re.search(rf"\n  {evenement}:\n(?:    branches:[^\n]*\n)?    paths:\n((?:      - '[^']+'\n)+)", texte)
+    return re.findall(r"      - '([^']+)'", m.group(1)) if m else None
+_pr, _push = _chemins(_p13, "pull_request"), _chemins(_p13, "push")
+if _pr is None:
+    errors.append("p13-primitives-noyau.yml: pas de declencheur pull_request filtre")
+elif _push is None or sorted(_pr) != sorted(_push):
+    errors.append("p13-primitives-noyau.yml: chemins pull_request et push differents")
+else:
+    _attendus = set(re.findall(r"tools/[A-Za-z0-9_./-]+", (root / "os-primitives.yml").read_text(encoding="utf-8")))
+    _attendus |= {"tools/ci/run_os_primitives.sh", "tools/ci/run_sigchld_repetition.sh",
+                  "tools/userland/sigchld-multifil-probe.c", ".github/workflows/os-primitives.yml"}
+    for _c in sorted(_attendus - set(_pr)):
+        errors.append(f"p13-primitives-noyau.yml: {_c} ne declenche pas P13")
+
 if errors:
     print("\n".join("ECHEC: " + e for e in errors), file=sys.stderr)
     raise SystemExit(1)

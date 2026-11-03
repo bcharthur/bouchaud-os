@@ -14,6 +14,70 @@ name: p13-primitives-noyau
 # reste celle de ladybird-native-browser.yml palier=qualification (et de la
 # branche d'audit, qui ne passe donc pas ici : pas de double execution).
 on:
+  # BOUCHAUD_P13_COUVERTURE_PR_V1 : une PR qui touche le noyau OU le banc P13
+  # lui-meme (tout script que joue os-primitives.yml, ses sondes) execute P13.
+  # Avant, seul `push` declenchait, sans les scripts du banc : une PR pouvait
+  # changer run_os_primitives.sh sans qualification P13 (PR #241).
+  # Memes chemins pour push et pull_request, garde par check_pipeline_policy.py.
+  pull_request:
+    paths:
+      - '.github/workflows/os-primitives.yml'
+      - '.github/workflows/p13-primitives-noyau.yml'
+      - 'src/kernel/process/**'
+      - 'src/kernel/memory/**'
+      - 'src/kernel/scheduler/**'
+      - 'src/kernel/time/**'
+      - 'src/kernel/sync/**'
+      - 'src/arch/x86_64/idt/**'
+      - 'src/arch/x86_64/idt.rs'
+      - 'src/arch/x86_64/smp.rs'
+      - 'src/arch/x86_64/cpu_local.rs'
+      - 'src/arch/x86_64/irq_context.rs'
+      - 'tools/ci/analyse_ab_reveil_precis.py'
+      - 'tools/ci/qualifie_p13.py'
+      - 'src/compat/linux/**'
+      - 'src/kernel/navigateur/**'
+      - 'src/gui/services.rs'
+      - 'src/kernel/services/**'
+      - 'src/drivers/api/gpu.rs'
+      - 'src/drivers/block/**'
+      - 'src/kernel/native/**'
+      - 'tools/ci/apt-installe.sh'
+      - 'tools/ci/build_kernel.sh'
+      - 'tools/ci/publie_p13_reveil.py'
+      - 'tools/ci/run_ab_cession.sh'
+      - 'tools/ci/run_ab_reveil_ipi.sh'
+      - 'tools/ci/run_ab_reveil_precis.sh'
+      - 'tools/ci/run_ata_integrite.sh'
+      - 'tools/ci/run_banc_dechirure.sh'
+      - 'tools/ci/run_banc_irq_gpu.sh'
+      - 'tools/ci/run_banc_presentation.sh'
+      - 'tools/ci/run_banc_tampon.sh'
+      - 'tools/ci/run_banc_trame.sh'
+      - 'tools/ci/run_compta_injection.sh'
+      - 'tools/ci/run_compta_utilisateur.sh'
+      - 'tools/ci/run_console_panique.sh'
+      - 'tools/ci/run_extinction_contention.sh'
+      - 'tools/ci/run_faute_multifil.sh'
+      - 'tools/ci/run_horloge.sh'
+      - 'tools/ci/run_matrice_roles.sh'
+      - 'tools/ci/run_ordonnanceur_attribution.sh'
+      - 'tools/ci/run_os_primitives.sh'
+      - 'tools/ci/run_oss_horloge.sh'
+      - 'tools/ci/run_persist_cache.sh'
+      - 'tools/ci/run_reveil_coeur_muet.sh'
+      - 'tools/ci/run_serie_entrelacement.sh'
+      - 'tools/ci/run_virtio_gpu.sh'
+      - 'tools/ci/run_virtio_gpu_dma_panne.sh'
+      - 'tools/ci/run_virtio_gpu_irq_pannes.sh'
+      - 'tools/ci/run_virtio_gpu_reponse_etrangere.sh'
+      - 'tools/ci/run_virtio_gpu_scanout.sh'
+      - 'tools/ci/run_sigchld_repetition.sh'
+      - 'tools/userland/sigchld-multifil-probe.c'
+      - 'tools/userland/*-probe.c'
+      - 'tools/userland/build.sh'
+      - 'tools/userland/mkdisk.sh'
+      - 'tools/ci/dedoublonne_pr.py'
   push:
     branches: [main, 'claude/**', 'feat/**']
     paths:
@@ -38,13 +102,122 @@ on:
       - 'src/drivers/api/gpu.rs'
       - 'src/drivers/block/**'
       - 'src/kernel/native/**'
+      - 'tools/ci/apt-installe.sh'
+      - 'tools/ci/build_kernel.sh'
+      - 'tools/ci/publie_p13_reveil.py'
+      - 'tools/ci/run_ab_cession.sh'
+      - 'tools/ci/run_ab_reveil_ipi.sh'
+      - 'tools/ci/run_ab_reveil_precis.sh'
+      - 'tools/ci/run_ata_integrite.sh'
+      - 'tools/ci/run_banc_dechirure.sh'
+      - 'tools/ci/run_banc_irq_gpu.sh'
+      - 'tools/ci/run_banc_presentation.sh'
+      - 'tools/ci/run_banc_tampon.sh'
+      - 'tools/ci/run_banc_trame.sh'
+      - 'tools/ci/run_compta_injection.sh'
+      - 'tools/ci/run_compta_utilisateur.sh'
+      - 'tools/ci/run_console_panique.sh'
+      - 'tools/ci/run_extinction_contention.sh'
+      - 'tools/ci/run_faute_multifil.sh'
+      - 'tools/ci/run_horloge.sh'
+      - 'tools/ci/run_matrice_roles.sh'
+      - 'tools/ci/run_ordonnanceur_attribution.sh'
+      - 'tools/ci/run_os_primitives.sh'
+      - 'tools/ci/run_oss_horloge.sh'
+      - 'tools/ci/run_persist_cache.sh'
+      - 'tools/ci/run_reveil_coeur_muet.sh'
+      - 'tools/ci/run_serie_entrelacement.sh'
+      - 'tools/ci/run_virtio_gpu.sh'
+      - 'tools/ci/run_virtio_gpu_dma_panne.sh'
+      - 'tools/ci/run_virtio_gpu_irq_pannes.sh'
+      - 'tools/ci/run_virtio_gpu_reponse_etrangere.sh'
+      - 'tools/ci/run_virtio_gpu_scanout.sh'
+      - 'tools/ci/run_sigchld_repetition.sh'
+      - 'tools/userland/sigchld-multifil-probe.c'
+      - 'tools/userland/*-probe.c'
+      - 'tools/userland/build.sh'
+      - 'tools/userland/mkdisk.sh'
+      - 'tools/ci/dedoublonne_pr.py'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  dedoublonne:
+    # BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2 (tools/ci/dedoublonne_pr.py) : le run PR
+    # d'une branche de ce depot reflete le run push du MEME arbre au lieu de
+    # rejouer ~45 min de sondes ; sinon il les execute. Le verdict n'est jamais
+    # saute : il exige le succes final du run push et de son verdict nomme.
+    name: dedoublonne push/PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reutilise: ${{ steps.decision.outputs.reutilise }}
+      source_run: ${{ steps.decision.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - id: decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENEMENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          DEPOT: ${{ github.repository }}
+          DEPOT_TETE: ${{ github.event.pull_request.head.repo.full_name }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          FUSION: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          if [ "$EVENEMENT" = pull_request ]; then
+            python3 tools/ci/dedoublonne_pr.py
+          else
+            echo "DEDOUBLONNE reutilise=false raison=evenement $EVENEMENT"
+            echo reutilise=false >> "$GITHUB_OUTPUT"
+          fi
+
   primitives:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     uses: ./.github/workflows/os-primitives.yml
     with:
       p13_strict: false
+
+  verdict:
+    name: p13-primitives / verdict
+    needs: [dedoublonne, primitives]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.dedoublonne.outputs.reutilise == 'true'
+        with:
+          sparse-checkout: tools/ci/dedoublonne_pr.py
+          sparse-checkout-cone-mode: false
+      - name: Verdict reflete du run push du meme arbre
+        if: needs.dedoublonne.outputs.reutilise == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          TETE: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          SOURCE: ${{ needs.dedoublonne.outputs.source_run }}
+        run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "p13-primitives / verdict" --delai 6600 --pas 60
+      - name: Verdict execute
+        if: needs.dedoublonne.outputs.reutilise != 'true'
+        env:
+          R_PRIMITIVES: ${{ needs.primitives.result }}
+        run: |
+          echo "primitives=$R_PRIMITIVES"
+          [ "$R_PRIMITIVES" = success ] || { echo "P13_PRIMITIVES_VERDICT_ECHEC primitives=$R_PRIMITIVES"; exit 1; }
+          echo P13_PRIMITIVES_VERDICT_OK

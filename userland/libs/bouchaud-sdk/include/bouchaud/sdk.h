@@ -171,8 +171,12 @@ static inline bo_i64 bo_update_commit_health(bo_handle_t cap)
 /* Install into the INACTIVE slot (right UPDATE_INSTALL, updated only).
  * write: offset and len block-aligned (4096 is always safe), len <= 1 MiB.
  * finish: every byte must have been read back by verify; SHA-256 compared. */
-static inline bo_i64 bo_update_install_begin(bo_handle_t cap, bo_u32 target_slot)
-{ return bo__sys6(BO_NR_UPDATE_INSTALL_BEGIN, cap, target_slot, 0, 0, 0, 0); }
+/* begin: the SIGNED manifest (canonical bytes, <= 1 KiB) and its 64-byte
+ * Ed25519 signature. The kernel refuses unless a trusted release key
+ * verifies it; finish must then match what the manifest names. */
+static inline bo_i64 bo_update_install_begin(bo_handle_t cap, bo_u32 target_slot,
+                                             const void *manifest, bo_u64 len, const bo_u8 sig[64])
+{ return bo__sys6(BO_NR_UPDATE_INSTALL_BEGIN, cap, target_slot, (bo_u64)manifest, len, (bo_u64)sig, 0); }
 static inline bo_i64 bo_update_install_write(bo_handle_t cap, bo_u64 off, const void *buf, bo_u64 len)
 { return bo__sys6(BO_NR_UPDATE_INSTALL_WRITE, cap, off, (bo_u64)buf, len, 0, 0); }
 /* Read back the next chunk (<= 1 MiB) of the first `len` bytes into the
@@ -207,6 +211,8 @@ static inline bo_i64 bo_posix_open(const char *path, int flags)
 { return bo__sys6(2 /* open */, (bo_u64)path, (bo_u64)(bo_i64)flags, 0, 0, 0, 0); }
 static inline bo_i64 bo_posix_read(bo_i64 fd, void *buf, bo_u64 len)
 { return bo__sys6(0 /* read */, (bo_u64)fd, (bo_u64)buf, len, 0, 0, 0); }
+static inline bo_i64 bo_posix_write(bo_i64 fd, const void *buf, bo_u64 len)
+{ return bo__sys6(1 /* write */, (bo_u64)fd, (bo_u64)buf, len, 0, 0, 0); }
 static inline bo_i64 bo_posix_close(bo_i64 fd)
 { return bo__sys6(3 /* close */, (bo_u64)fd, 0, 0, 0, 0, 0); }
 
