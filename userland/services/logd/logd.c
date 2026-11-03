@@ -83,7 +83,14 @@ static void ingest(const char *s, bo_usize n)
     bo_line_begin(&l);
     bo_line_str(&l, "LOGD");
     bo_line_kv(&l, "ts_ns", bo_time_now_ns());
-    bo_line_kv(&l, "boot", (bo_i64)boot_id);
+    {
+        /* The boot id is a u64 (top bit set): hex, never a signed print. */
+        char h[25] = " boot=0x";
+        int k;
+        for (k = 0; k < 16; k++) h[8 + k] = "0123456789abcdef"[(boot_id >> (60 - 4 * k)) & 15];
+        h[24] = 0;
+        bo_line_str(&l, h);
+    }
     bo_line_str(&l, " ");
     bo_line_str(&l, slot);
     bo_line_end(&l);
@@ -101,8 +108,34 @@ int bo_main(const struct bo_start *start)
     control = start->bootstrap[0];
     intake = start->bootstrap[1];
     ws = bo_waitset_create();
-    if (ws < 0 || bo_waitset_add((bo_handle_t)ws, control, KEY_CONTROL) != 0
-        || bo_waitset_add((bo_handle_t)ws, intake, KEY_INTAKE) != 0) return 3;
+    if (ws < 0 || bo_waitset_add((bo_handle_t)ws, control, KEY_CONTROL) != 0) return 3;
+    /* The supervisor's hello comes first and may carry the boot id: read it
+     * BEFORE any event, so even the events queued during startup are
+     * stamped with the right boot. Bounded: 2 s, then go on without. */
+    {
+        bo_u64 end = (bo_u64)bo_time_now_ns() + 2000000000UL;
+        for (;;) {
+            bo_i64 n = bo_waitset_wait((bo_handle_t)ws, ev, 1, 100000000UL);
+            bo_i64 got = n > 0 ? bo_channel_recv(control, in, sizeof(in), 0, 0, &meta) : -1;
+            if (got > 0 && prefix(in, (bo_usize)got, "hello ")) {
+                bo_usize at, len, k;
+                for (at = 6; at + 5 < (bo_usize)got; at++) {
+                    if (prefix(in + at, (bo_usize)got - at, " boot=")) {
+                        bo_u64 v = 0;
+                        for (k = at + 6; k < (bo_usize)got && in[k] >= '0' && in[k] <= '9'; k++) v = v * 10 + (bo_u64)(in[k] - '0');
+                        boot_id = v;
+                        break;
+                    }
+                }
+                len = put(out, 0, sizeof(out), "ready ", 6);
+                len = put(out, len, sizeof(out), in + 6, (bo_usize)got - 6);
+                bo_channel_send(control, out, len, 0, 0);
+                break;
+            }
+            if ((bo_u64)bo_time_now_ns() >= end) break;
+        }
+    }
+    if (bo_waitset_add((bo_handle_t)ws, intake, KEY_INTAKE) != 0) return 3;
 
     for (;;) {
         bo_i64 n = bo_waitset_wait((bo_handle_t)ws, ev, 2, 5000000000UL), i;

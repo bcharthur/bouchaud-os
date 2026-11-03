@@ -109,6 +109,7 @@ static bo_handle_t ws;
 /* Never blocks: a full intake queue is counted here and reported in the next
  * accepted event as dropped=<n>. No logd (yet, or dead): counted the same. */
 static bo_handle_t logd_intake;
+static bo_u64 logd_boot_id;          /* handed to logd in its hello */
 static bo_u64 log_sent, log_dropped, log_dropped_pending, log_calls;
 
 static bo_i64 log_event(int sev, const char *svc_name, bo_u64 pid, const char *type, const char *fields)
@@ -272,6 +273,10 @@ static int start(struct service *s)
     transition(s, STARTING, "spawn");
     n = put_str(hello, 0, sizeof(hello), "hello ");
     n = put_str(hello, n, sizeof(hello), s->name);
+    if (s->intake && logd_boot_id) {
+        n = put_str(hello, n, sizeof(hello), " boot=");
+        n = put_u64(hello, n, sizeof(hello), logd_boot_id);
+    }
     bo_channel_send(s->chan, hello, n, 0, 0);
     return 0;
 }
@@ -685,6 +690,7 @@ static const char *sys_name(enum sys_state s)
 }
 
 static enum sys_state sys = SYS_BOOTING;
+static bo_u64 logd_boot_pid;
 
 static void sys_to(enum sys_state to, const char *why)
 {
@@ -739,7 +745,11 @@ static int system_mode(const struct bo_start *start)
     kv("capability", cap ? 1 : 0);
     kv("rights", cap ? (bo_i64)info.rights : 0);
     bo_say("\n");
-    if (cap) say_update_state(cap);
+    if (cap) {
+        struct bo_update_state st;
+        say_update_state(cap);
+        if (bo_update_state(cap, &st) == 0) logd_boot_id = st.boot_id;
+    }
 
     add_service("health", "/bin/healthd", -1);
     svc[0].critical = 1;
@@ -763,6 +773,16 @@ static int system_mode(const struct bo_start *start)
         bo_u64 t;
         step(100 * MS);
         t = now();
+        /* logd learns the boot id as soon as it runs (and again after a
+         * restart): every event it stamps then carries the right boot. */
+        if (cap && svc[2].state == RUNNING && svc[2].pid != logd_boot_pid) {
+            struct bo_update_state st;
+            if (bo_update_state(cap, &st) == 0) {
+                char b[32]; bo_usize n = put_str(b, 0, sizeof(b), "boot ");
+                n = put_u64(b, n, sizeof(b), st.boot_id);
+                if (bo_channel_send(svc[2].chan, b, n, 0, 0) >= 0) logd_boot_pid = svc[2].pid;
+            }
+        }
         for (k = 0; k < svc_count; k++) {
             if (!svc[k].critical) continue;
             if (svc[k].state != RUNNING) all_running = 0;
@@ -782,14 +802,6 @@ static int system_mode(const struct bo_start *start)
         sys_to(SYS_HEALTHY, committed ? "critical_services_back" : "critical_services_running_window");
         if (!committed) {
             bo_i64 rc;
-            if (cap) {
-                struct bo_update_state st;
-                if (bo_update_state(cap, &st) == 0) {
-                    char b[32]; bo_usize n = put_str(b, 0, sizeof(b), "boot ");
-                    n = put_u64(b, n, sizeof(b), st.boot_id);
-                    bo_channel_send(svc[2].chan, b, n, 0, 0);
-                }
-            }
             rc = cap ? bo_update_commit_health(cap) : -BO_E_BAD_HANDLE;
             log_event(rc >= 0 ? 6 : 2, "serviced", 0, "health_commit", rc == 0 ? "result=committed" : rc == 1 ? "result=already_good" : "result=refused");
             committed = 1;
