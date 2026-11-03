@@ -59,3 +59,42 @@ impl WaitEvent {
         out
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SpawnResult {
+    pub pid: u64,
+    pub process: u64,
+}
+
+impl SpawnResult {
+    pub const BYTE_LEN: usize = 16;
+    pub fn bytes_le(self) -> [u8; Self::BYTE_LEN] {
+        let mut out = [0u8; Self::BYTE_LEN];
+        out[..8].copy_from_slice(&self.pid.to_le_bytes());
+        out[8..].copy_from_slice(&self.process.to_le_bytes());
+        out
+    }
+}
+
+pub const PROCESS_RUNNING: u32 = 1;
+pub const PROCESS_TERMINATED: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct ProcessInfo {
+    pub pid: u64,
+    pub state: u32,
+    pub exit_code: i32,
+}
+
+impl ProcessInfo {
+    pub const BYTE_LEN: usize = 16;
+    pub fn bytes_le(self) -> [u8; Self::BYTE_LEN] {
+        let mut out = [0u8; Self::BYTE_LEN];
+        out[..8].copy_from_slice(&self.pid.to_le_bytes());
+        out[8..12].copy_from_slice(&self.state.to_le_bytes());
+        out[12..16].copy_from_slice(&self.exit_code.to_le_bytes());
+        out
+    }
+}

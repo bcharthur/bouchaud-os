@@ -163,8 +163,12 @@ static void probe_main(void)
 
     version = sc6(BO_VERSION, 0, 0, 0, 0, 0, 0);
     need_nonneg("version", version);
-    if (version != 0x00010000) fail("version-mismatch", version);
-    write_text("[NATIVE-IPC-RING3] ABI=1.0\n");
+    /* Semantic versioning: same MAJOR is compatible; MINOR only adds. The
+     * runner checks the exact minor this kernel claims. */
+    if ((version >> 16) != 1) fail("version-major-mismatch", version);
+    write_text("[NATIVE-IPC-RING3] ABI=1.");
+    write_num(version & 0xffff);
+    write_text("\n");
 
     if (sc6(BO_CHANNEL_CREATE, (i64)pair, 0, 0, 0, 0, 0) != 0)
         fail("channel-create", -1);

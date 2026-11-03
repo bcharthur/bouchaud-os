@@ -1062,7 +1062,7 @@ fn releve_global_du() -> bool {
 /// TERMINATED voit donc deja les canaux du mort fermes.
 fn libere_natif_a_la_mort(pid: u32, code: i32) {
     crate::kernel::native::handle::registry::release_process(pid);
-    let _ = code;
+    crate::kernel::native::process::note_exit(pid, code);
 }
 
 pub fn ferme_descripteurs(process: &Arc<Process>) {

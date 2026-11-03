@@ -117,6 +117,58 @@ pub fn exec(path: &str, argv: &[String], envp: &[String], cwd: usize) -> Result<
     exec_source(path, ImageSource::Node(node), argv, envp, cwd)
 }
 
+/// Parent et identite d'un processus lance comme FILS d'un processus ring 3.
+#[derive(Clone, Copy)]
+pub struct Filiation {
+    pub parent: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Lance `path` comme FILS du processus ring 3 courant, sans attendre sa fin.
+///
+/// BOUCHAUD_NATIVE_SPAWN_FILIATION_V1 -- le chemin de `bo_process_spawn`.
+///
+/// Differences avec [`lance_detache`], toutes de securite :
+///
+///  * le fils a pour parent l'appelant et en prend l'uid/gid (pas ceux de la
+///    session) ;
+///  * la porte d'execution est celle de l'appelant (`authorize_node` voit une
+///    tache ring 3 courante : un role sandboxe ne lance rien) ;
+///  * `security::policy::inherit` est applique DANS `prepare`, c'est-a-dire
+///    avant que la premiere tache du fils ne soit enregistree : le fils n'est
+///    jamais ordonnancable avec un contexte de securite non confine.
+pub fn lance_enfant(
+    path: &str,
+    argv: &[String],
+    envp: &[String],
+    cwd: usize,
+    filiation: Filiation,
+    prepare: &mut dyn FnMut(&task::Process) -> Vec<String>,
+) -> Result<u32, String> {
+    if !crate::arch::x86_64::usermode::ready() {
+        return Err("user-mode non initialise (ring 3 indisponible)".to_string());
+    }
+    let node = resolve_file_node(path, cwd)?;
+    let parent = filiation.parent;
+    let mut prepare_confine = |process: &task::Process| -> Vec<String> {
+        crate::kernel::security::policy::inherit(parent, process.pid);
+        prepare(process)
+    };
+    let (process, task) = construit_tache(
+        path,
+        ImageSource::Node(node),
+        argv,
+        envp,
+        cwd,
+        Some(&mut prepare_confine),
+        Some(filiation),
+    )?;
+    let pid = process.pid;
+    task::register(task);
+    Ok(pid)
+}
+
 /// Charge un programme et lance sa premiere tache **sans attendre sa fin**.
 ///
 /// Rend le pid. C'est ce que `lance_navigateur` emploie : le gestionnaire de
@@ -146,6 +198,7 @@ pub fn lance_detache(
         envp,
         cwd,
         Some(prepare),
+        None,
     )?;
     let pid = process.pid;
     task::register(task);
@@ -269,7 +322,7 @@ fn exec_source(
             name
         ));
     }
-    let (process, first) = construit_tache(name, source, argv, envp, cwd, None)?;
+    let (process, first) = construit_tache(name, source, argv, envp, cwd, None, None)?;
     let _ = &process;
 
     // Un programme qui ouvre /dev/fb0 fait basculer la carte en mode graphique ;
@@ -297,6 +350,7 @@ fn construit_tache(
     envp: &[String],
     cwd: usize,
     prepare: Option<&mut dyn FnMut(&task::Process) -> Vec<String>>,
+    filiation: Option<Filiation>,
 ) -> Result<
     (
         alloc::sync::Arc<task::Process>,
@@ -314,7 +368,11 @@ fn construit_tache(
     // les binaires Ladybird sont des static-pie de plusieurs dizaines de
     // mebioctets.
     let debut_exec_ns = crate::kernel::timer::monotonic_ns();
-    let process = match task::new_process(name, cwd) {
+    let cree = match filiation {
+        Some(f) => task::new_process_avec(name, cwd, f.parent, f.uid, f.gid),
+        None => task::new_process(name, cwd),
+    };
+    let process = match cree {
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
     };

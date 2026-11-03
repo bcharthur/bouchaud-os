@@ -1,7 +1,10 @@
 use core::ops::{BitAnd, BitOr, BitOrAssign};
 
 pub const ABI_MAJOR: u16 = 1;
-pub const ABI_MINOR: u16 = 0;
+/// 1.1 (BOUCHAUD_NATIVE_ABI_1_1) : PROCESS_SPAWN/INFO/KILL, WAITSET_WAIT,
+/// TIME_NOW, objet Process, signal TERMINATED, erreur TimedOut. Purement
+/// additif : un programme 1.0 ne voit aucune difference.
+pub const ABI_MINOR: u16 = 1;
 pub const ABI_VERSION_PACKED: u64 = ((ABI_MAJOR as u64) << 16) | ABI_MINOR as u64;
 
 /// Native syscall namespace. Linux x86-64 syscalls currently used by the
@@ -26,6 +29,7 @@ pub enum Error {
     Fault = 11,
     TooLarge = 12,
     NotFound = 13,
+    TimedOut = 14,
 }
 
 impl Error {
@@ -42,6 +46,7 @@ pub enum ObjectKind {
     Event = 2,
     WaitSet = 3,
     SharedRegion = 4,
+    Process = 5,
     LegacyFile = 0x100,
     LegacyWindow = 0x101,
     LegacySocket = 0x102,
@@ -117,6 +122,12 @@ impl Rights {
         Self::READ.0 | Self::WRITE.0 | Self::DUP.0 |
         Self::TRANSFER.0 | Self::INSPECT.0 | Self::WAIT.0
     );
+    /// Un handle de processus : attendre sa mort, l'inspecter, le tuer. Pas
+    /// de WRITE/READ : un processus n'est pas un flux.
+    pub const PROCESS_DEFAULT: Self = Self(
+        Self::SIGNAL.0 | Self::DUP.0 | Self::TRANSFER.0 |
+        Self::INSPECT.0 | Self::WAIT.0
+    );
     pub const SHM_DEFAULT: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::MAP.0 | Self::DUP.0 |
         Self::TRANSFER.0 | Self::INSPECT.0
@@ -159,6 +170,7 @@ impl Signals {
     pub const WRITABLE: Self = Self(1 << 1);
     pub const SIGNALED: Self = Self(1 << 2);
     pub const PEER_CLOSED: Self = Self(1 << 3);
+    pub const TERMINATED: Self = Self(1 << 4);
 
     #[inline]
     pub const fn is_empty(self) -> bool { self.0 == 0 }

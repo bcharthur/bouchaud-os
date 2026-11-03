@@ -17,6 +17,7 @@ pub mod ipc;
 pub mod memory;
 pub mod network;
 pub mod object;
+pub mod process;
 pub mod scheduler;
 pub mod shm;
 pub mod sync;

@@ -1,6 +1,7 @@
 use super::abi::types::{ObjectKind, Signals};
 use super::event::Event;
 use super::ipc::ChannelEndpoint;
+use super::process::ProcessRef;
 use super::shm::SharedRegion;
 use super::waitset::WaitSet;
 
@@ -9,6 +10,7 @@ pub enum Object {
     Event(Event),
     WaitSet(WaitSet),
     SharedRegion(SharedRegion),
+    Process(ProcessRef),
     Legacy(ObjectKind),
 }
 
@@ -19,6 +21,7 @@ impl Object {
             Self::Event(_) => ObjectKind::Event,
             Self::WaitSet(_) => ObjectKind::WaitSet,
             Self::SharedRegion(_) => ObjectKind::SharedRegion,
+            Self::Process(_) => ObjectKind::Process,
             Self::Legacy(kind) => *kind,
         }
     }
@@ -29,6 +32,7 @@ impl Object {
             Self::Event(event) => event.signals(),
             Self::WaitSet(waitset) => waitset.signals(),
             Self::SharedRegion(region) => region.signals(),
+            Self::Process(process) => process.signals(),
             Self::Legacy(_) => Signals::NONE,
         }
     }

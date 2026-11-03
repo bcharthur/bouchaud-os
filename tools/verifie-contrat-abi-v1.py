@@ -32,11 +32,11 @@ def collect(root):
     rights = {n: int(bit) for n, bit in re.findall(
         r'pub const\s+(\w+):\s*Self\s*=\s*Self\(1\s*<<\s*(\d+)\)\s*;', ty)}
     wire = {}
-    for name in ('RecvMeta', 'HandleInfo', 'WaitEvent'):
+    for name in ('RecvMeta', 'HandleInfo', 'WaitEvent', 'SpawnResult', 'ProcessInfo'):
         m = re.search(r'pub struct\s+' + name + r'\s*\{([^}]*)\}', wi, re.S)
         if not m:
             raise ValueError(f'wire {name} absent')
-        fields = re.findall(r'pub\s+(\w+):\s*(u\d+)', m.group(1))
+        fields = re.findall(r'pub\s+(\w+):\s*([ui]\d+)', m.group(1))
         wire[name] = [f'{field}:{kind}' for field, kind in fields]
     return dict(version=ver, syscalls=nums, errors=get_enum(ty, 'Error'),
                 object_kinds=get_enum(ty, 'ObjectKind'), rights_bits=rights, wire=wire)
