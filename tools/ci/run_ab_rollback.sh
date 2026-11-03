@@ -102,13 +102,13 @@ PY
 }
 case "$SCENARIO" in sante|sante-ko|mise-a-jour|recovery-rollback|echecs-repetes)
   # The system userland of each slot: serviced (system supervisor) and its
-  # critical services (health contract v2: healthd, updated). In sante-ko the
+  # critical services (health contract v3: healthd, updated, logd). In sante-ko the
   # CANDIDATE's critical service fails.
   SDK=userland/libs/bouchaud-sdk/build-program.sh
-  for prog in services/serviced/serviced services/healthd/healthd services/updated/updated tests/healthd-defaillant; do
+  for prog in services/serviced/serviced services/healthd/healthd services/updated/updated services/logd/logd tests/healthd-defaillant; do
     "$SDK" "$TRAVAIL/$(basename $prog)" "userland/$prog.c"
   done
-  systeme="bin/serviced=$TRAVAIL/serviced bin/updated=$TRAVAIL/updated"
+  systeme="bin/serviced=$TRAVAIL/serviced bin/updated=$TRAVAIL/updated bin/logd=$TRAVAIL/logd"
   critique_b=$TRAVAIL/healthd; [ "$SCENARIO" = sante-ko ] && critique_b=$TRAVAIL/healthd-defaillant
   critique_a=$TRAVAIL/healthd; [ "$SCENARIO" = echecs-repetes ] && critique_a=$TRAVAIL/healthd-defaillant
   ramdisk "$OUT/slot-b/ramdisk" $systeme "bin/healthd=$critique_b"

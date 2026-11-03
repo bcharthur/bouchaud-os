@@ -98,11 +98,44 @@ struct service {
     int          critical;            /* part of the system health contract */
     bo_handle_t  extra;               /* second bootstrap handle, or 0 */
     bo_u32       extra_mask;          /* rights it crosses the spawn with */
+    int          intake;              /* logd: a fresh intake channel per start */
 };
 
 static struct service svc[MAX_SERVICES];
 static int svc_count;
 static bo_handle_t ws;
+
+/* ---- structured events to logd (BOUCHAUD_LOGD_V1) ------------------------ */
+/* Never blocks: a full intake queue is counted here and reported in the next
+ * accepted event as dropped=<n>. No logd (yet, or dead): counted the same. */
+static bo_handle_t logd_intake;
+static bo_u64 log_sent, log_dropped, log_dropped_pending, log_calls;
+
+static bo_i64 log_event(int sev, const char *svc_name, bo_u64 pid, const char *type, const char *fields)
+{
+    char m[200];
+    bo_usize n = 0;
+    bo_i64 rc;
+    const char *p;
+    #define PUT(str) for (p = (str); *p && n < sizeof(m); ) m[n++] = *p++
+    PUT("sev="); if (n < sizeof(m)) m[n++] = (char)('0' + (sev & 7));
+    PUT(" svc="); PUT(svc_name);
+    PUT(" pid="); { char t[24]; int i = 24; bo_u64 v = pid; t[--i] = 0; if (!v) t[--i] = '0';
+                    while (v) { t[--i] = (char)('0' + v % 10); v /= 10; } PUT(t + i); }
+    PUT(" type="); PUT(type);
+    if (fields && *fields) { PUT(" "); PUT(fields); }
+    if (log_dropped_pending) {
+        char t[24]; int i = 24; bo_u64 v = log_dropped_pending;
+        while (v) { t[--i] = (char)('0' + v % 10); v /= 10; }
+        PUT(" dropped="); { int k; for (k = i; k < 24 && n < sizeof(m); k++) m[n++] = t[k]; }
+    }
+    #undef PUT
+    log_calls++;
+    rc = logd_intake ? bo_channel_send(logd_intake, m, n, 0, 0) : -BO_E_BAD_HANDLE;
+    if (rc >= 0) { log_sent++; log_dropped_pending = 0; }
+    else { log_dropped++; log_dropped_pending++; }
+    return rc;
+}
 
 /* ---- tiny formatting ---------------------------------------------------- */
 
@@ -155,6 +188,15 @@ static void transition(struct service *s, enum state to, const char *why)
     kv("pid", (bo_i64)s->pid);
     kv("t_ms", (bo_i64)(now() / MS));
     bo_say("\n");
+    {
+        char f[96];
+        bo_usize n = 0;
+        const char *parts[6] = { "from=", state_name(s->state), " to=", state_name(to), " why=", why };
+        int k;
+        for (k = 0; k < 6; k++) { const char *p = parts[k]; while (*p && n + 1 < sizeof(f)) f[n++] = *p++; }
+        f[n] = 0;
+        log_event(to == FAILED || to == DEGRADED ? 3 : 6, s->name, s->pid, "transition", f);
+    }
     s->state = to;
 }
 
@@ -189,6 +231,16 @@ static int start(struct service *s)
 
     if (bo_channel_create(pair) != 0) return -1;
     give[0] = pair[1];
+    if (s->intake) {
+        /* logd: a new intake channel per start. Its end crosses READ|WAIT
+         * only; ours replaces the previous one (closed with the old logd). */
+        bo_handle_t ip[2];
+        if (bo_channel_create(ip) != 0) { bo_handle_close(pair[0]); bo_handle_close(pair[1]); return -1; }
+        if (logd_intake) bo_handle_close(logd_intake);
+        logd_intake = ip[0];
+        s->extra = ip[1];
+        s->extra_mask = BO_RIGHT_READ | BO_RIGHT_WAIT;
+    }
     /* DENY by default: the service may read, write and wait on its control
      * channel. It may not duplicate or pass it on. */
     mask[0] = BO_RIGHT_READ | BO_RIGHT_WRITE | BO_RIGHT_WAIT;
@@ -199,6 +251,7 @@ static int start(struct service *s)
     /* Our copy of the child's end must go, or the channel would outlive the
      * child and PEER_CLOSED would never rise. */
     bo_handle_close(pair[1]);
+    if (s->intake && s->extra) { bo_handle_close(s->extra); s->extra = 0; }
     if (rc != 0) {
         bo_handle_close(pair[0]);
         bo_say("[SERVICED] svc=");
@@ -606,12 +659,13 @@ static int qualify(void)
 
 /* ---- system mode -------------------------------------------------------- */
 
-/* Health contract v2: these services must all be Running, without a death,
+/* Health contract v3: these services must all be Running, without a death,
  * for HEALTH_WINDOW before the boot is declared healthy:
  *   health   (/bin/healthd)  liveness of the native platform itself
  *   updated  (/bin/updated)  a system that cannot update is not healthy
- * logd joins this list when it exists; the version moves with it. */
-#define CRITICAL_PROFILE  2
+ *   logd     (/bin/logd)     a system that cannot report is not healthy
+ * Changing this list is changing the health contract: bump the version. */
+#define CRITICAL_PROFILE  3
 #define HEALTH_WINDOW     (3000 * MS)
 #define HEALTH_DEADLINE   (90000 * MS)
 
@@ -695,6 +749,9 @@ static int system_mode(const struct bo_start *start)
      * (no TRANSFER) nor duplicate it, and it never gets UPDATE_HEALTH. */
     svc[1].extra = install;
     svc[1].extra_mask = BO_RIGHT_INSPECT | BO_RIGHT_UPDATE_INSTALL;
+    add_service("logd", "/bin/logd", -1);
+    svc[2].critical = 1;
+    svc[2].intake = 1;
     bo_say("SERVICED_INSTALL_CAPABILITY");
     kv("present", install ? 1 : 0);
     bo_say("\n");
@@ -724,7 +781,17 @@ static int system_mode(const struct bo_start *start)
         if (t - healthy_since < HEALTH_WINDOW || sys == SYS_HEALTHY) continue;
         sys_to(SYS_HEALTHY, committed ? "critical_services_back" : "critical_services_running_window");
         if (!committed) {
-            bo_i64 rc = cap ? bo_update_commit_health(cap) : -BO_E_BAD_HANDLE;
+            bo_i64 rc;
+            if (cap) {
+                struct bo_update_state st;
+                if (bo_update_state(cap, &st) == 0) {
+                    char b[32]; bo_usize n = put_str(b, 0, sizeof(b), "boot ");
+                    n = put_u64(b, n, sizeof(b), st.boot_id);
+                    bo_channel_send(svc[2].chan, b, n, 0, 0);
+                }
+            }
+            rc = cap ? bo_update_commit_health(cap) : -BO_E_BAD_HANDLE;
+            log_event(rc >= 0 ? 6 : 2, "serviced", 0, "health_commit", rc == 0 ? "result=committed" : rc == 1 ? "result=already_good" : "result=refused");
             committed = 1;
             bo_say("SERVICED_HEALTH_COMMIT");
             kv("rc", rc);
@@ -734,6 +801,99 @@ static int system_mode(const struct bo_start *start)
         }
     }
     return 0;   /* not reached: the system supervisor never exits */
+}
+
+/* ---- logd qualification (BOUCHAUD_LOGD_V1) -------------------------------- */
+
+#define FLOOD 5000
+
+static int logd_stats(struct service *s, bo_u64 *received, bo_u64 *overwritten, bo_u64 *malformed)
+{
+    char in[160];
+    struct bo_recv_meta meta;
+    bo_u64 end = now() + 10000 * MS;
+    send_line(s, "stats");
+    while (now() < end) {
+        bo_i64 got = bo_channel_recv(s->chan, in, sizeof(in), 0, 0, &meta);
+        if (got > 0 && prefix(in, (bo_usize)got, "stats ")) {
+            bo_usize at = 15;
+            *received = parse_u64(in, (bo_usize)got, &at);
+            at += 13; *overwritten = parse_u64(in, (bo_usize)got, &at);
+            at += 11; *malformed = parse_u64(in, (bo_usize)got, &at);
+            return 1;
+        }
+        if (got < 0) bo_sleep_ns(5 * MS);
+    }
+    return 0;
+}
+
+static int logd_qualify(void)
+{
+    struct service *logd;
+    bo_u64 rec = 0, ov = 0, mal = 0, sent0, drop0, calls0, accepted, refused, burst_refused, t_burst;
+    bo_i64 baseline, after, rc;
+    int i, b, malformed_sent = 0;
+    static const char *bad[3] = { "no fields", "sev=9 svc=x type=y", "sev=1 svc=x" };
+
+    bo_say("[SERVICED] LOGD_QUALIFY_BEGIN\n");
+    /* bo_sleep_ns keeps ONE private wait set for the process lifetime (SDK
+     * design): create it before the baseline, so the leak check measures
+     * logd's handles only (first run: final = baseline + 1, that set). */
+    bo_sleep_ns(1000);
+    baseline = bo_handle_count();
+    sent0 = log_sent; drop0 = log_dropped; calls0 = log_calls;   /* every event from here on counts */
+    add_service("logd", "/bin/logd", -1);
+    logd = &svc[0];
+    logd->intake = 1;
+    verdict("logd reaches Running", run_until(logd, RUNNING, 20000 * MS));
+    send_line(logd, "boot 4242");
+    /* 1. One burst far beyond the intake queue: the producer never blocks,
+     *    the queue is bounded, every refusal is counted. */
+    t_burst = now();
+    for (i = 0; i < FLOOD; i++) log_event(6, "flood", (bo_u64)i, "test", "k=v");
+    t_burst = now() - t_burst;
+    burst_refused = log_dropped - drop0;
+    verdict("backpressure observed (intake queue is bounded)", burst_refused > 0);
+    /* 2. Paced bursts that logd can drain: more accepted events than its
+     *    ring holds, so the ring MUST overwrite (and count) its oldest. */
+    for (b = 0; b < 12; b++) {
+        bo_sleep_ns(40 * MS);
+        for (i = 0; i < 100; i++) log_event(6, "rythme", (bo_u64)i, "test", "k=v");
+    }
+    bo_sleep_ns(100 * MS);
+    /* 3. Malformed lines are counted by logd, never stored. */
+    for (i = 0; i < 3; i++) {
+        rc = bo_channel_send(logd_intake, bad[i], bo_strlen(bad[i]), 0, 0);
+        if (rc >= 0) malformed_sent++;
+    }
+    log_event(6, "flood", 0, "after", "");   /* carries dropped=<pending> */
+    accepted = log_sent - sent0;
+    refused = log_dropped - drop0;
+    verdict("logd answers stats after the floods", logd_stats(logd, &rec, &ov, &mal));
+    bo_say("LOGD_QUALIFY_COUNTS");
+    kv("attempted", (bo_i64)(accepted + refused)); kv("accepted", (bo_i64)accepted);
+    kv("refused", (bo_i64)refused); kv("received", (bo_i64)rec);
+    kv("overwritten", (bo_i64)ov); kv("malformed", (bo_i64)mal); kv("malformed_sent", malformed_sent);
+    kv("burst_us", (bo_i64)(t_burst / 1000));
+    bo_say("\n");
+    /* Each call returned (no wait in log_event) and is accounted exactly once. */
+    verdict("producer never blocked: every send accepted or refused",
+            accepted + refused == log_calls - calls0 && log_calls - calls0 >= (bo_u64)FLOOD + 1201);
+    verdict("no silent loss: logd received exactly what was accepted", rec == accepted);
+    verdict("malformed lines are counted, not stored", malformed_sent == 3 && mal == 3);
+    verdict("ring bounded and overwriting: overwritten = received - 256", rec > 256 && ov == rec - 256);
+    verdict("logd still Running after the floods", logd->state == RUNNING);
+    stop(logd);
+    verdict("logd stopped cleanly", run_until(logd, STOPPED, 10000 * MS) && logd->last_exit == 0);
+    if (logd_intake) { bo_handle_close(logd_intake); logd_intake = 0; }
+    after = bo_handle_count();
+    bo_say("LOGD_QUALIFY_HANDLES");
+    kv("baseline", baseline); kv("final", after);
+    bo_say("\n");
+    verdict("every handle released", after == baseline);
+    if (failures) { bo_say("LOGD_QUALIFY_FAIL"); kv("failures", failures); bo_say("\n"); return 1; }
+    bo_say("LOGD_QUALIFY_OK\n");
+    return 0;
 }
 
 int bo_main(const struct bo_start *start)
@@ -752,6 +912,8 @@ int bo_main(const struct bo_start *start)
         return qualify();
     if (start->argc > 1 && prefix(start->argv[1], bo_strlen(start->argv[1]), "system"))
         return system_mode(start);
+    if (start->argc > 1 && prefix(start->argv[1], bo_strlen(start->argv[1]), "logd-qualify"))
+        return logd_qualify();
 
     add_service("health", "/bin/healthd", -1);
     for (;;) step(HEARTBEAT_PERIOD);

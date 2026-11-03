@@ -181,6 +181,7 @@ jobs:
           $B target/sdk/native-process-probe userland/tests/native-process-probe.c
           $B target/sdk/healthd-defaillant userland/tests/healthd-defaillant.c
           $B target/sdk/updated userland/services/updated/updated.c
+          $B target/sdk/logd userland/services/logd/logd.c
 
   browser-engine:
     name: browser / engine tests

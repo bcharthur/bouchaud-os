@@ -25,16 +25,20 @@ python3 tools/verifie-contrat-abi-v1.py
 "$SDK" "$OUT/bin/native-process-probe" userland/tests/native-process-probe.c
 "$SDK" "$OUT/bin/healthd" userland/services/healthd/healthd.c
 "$SDK" "$OUT/bin/serviced" userland/services/serviced/serviced.c
+"$SDK" "$OUT/bin/logd" userland/services/logd/logd.c
 
 python3 tools/native/make_native_image.py --image "$OUT/native-services.img" \
   --bin native-cycles-probe="$OUT/bin/native-cycles-probe" \
   --bin native-process-probe="$OUT/bin/native-process-probe" \
   --bin healthd="$OUT/bin/healthd" \
   --bin serviced="$OUT/bin/serviced" \
+  --bin logd="$OUT/bin/logd" \
   --autorun "echo NATIVE_SERVICES_BEGIN" \
   --autorun "/bin/native-cycles-probe" \
   --autorun "/bin/native-process-probe" \
   --autorun "/bin/serviced qualify" \
+  --autorun "/bin/serviced logd-qualify" \
+  --autorun "ipc-attribution" \
   --autorun "echo NATIVE_SERVICES_END"
 
 ACCEL=()
@@ -57,7 +61,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL|\[NATIVE-PROCESS\] FAIL'
+fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|LOGD_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL|\[NATIVE-PROCESS\] FAIL'
 deadline=$((SECONDS + ${BO_SERVICES_DELAI_S:-240}))
 while :; do
   if grep -aEq "$fatal_re" "$LOG"; then
@@ -98,6 +102,12 @@ required=(
   '[SERVICED] ok   crash budget spent -> Failed (no restart storm)'
   '[SERVICED] ok   every handle released at shutdown'
   'SERVICED_QUALIFY_OK'
+  '[SERVICED] ok   producer never blocked: every send accepted or refused'
+  '[SERVICED] ok   backpressure observed (intake queue is bounded)'
+  '[SERVICED] ok   no silent loss: logd received exactly what was accepted'
+  '[SERVICED] ok   malformed lines are counted, not stored'
+  '[SERVICED] ok   ring bounded and overwriting: overwritten = received - 256'
+  'LOGD_QUALIFY_OK'
 )
 for marker in "${required[@]}"; do
   if ! grep -aFq "$marker" "$LOG"; then
@@ -114,5 +124,14 @@ if [ "$morts" -lt 5 ] || [ "$violations" -ne 0 ]; then
   echo "NATIVE_SERVICES_FAIL raison=mort_sans_peer_closed morts=$morts violations=$violations" >&2
   exit 1
 fi
-sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'SERVICED_(IPC_RTT_NS|IPC_ALLER_NS|IPC_RETOUR_NS|RECOVERY_MS|HANDLES|RESTARTS).*|svc=[a-z]+ start_latency ms=[0-9]+' | sed 's/^/  /'
+sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'SERVICED_(IPC_RTT_NS|IPC_ALLER_NS|IPC_RETOUR_NS|RECOVERY_MS|HANDLES|RESTARTS).*|LOGD_QUALIFY_(COUNTS|HANDLES).*|svc=[a-z]+ start_latency ms=[0-9]+' | sed 's/^/  /'
+# BOUCHAUD_IPC_ATTRIBUTION_V1 : where each native wakeup spent its time
+# (signal -> run queue -> election -> back in the syscall). Published, not
+# thresholded; the attribution must exist before any scheduler change.
+attribution=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -aoE 'NATIVE_IPC_ATTRIBUTION(_COMPTES)? .*' || true)
+if ! grep -q 'etape=total' <<< "$attribution"; then
+  echo "NATIVE_SERVICES_FAIL raison=attribution_ipc_absente" >&2
+  exit 1
+fi
+sed 's/^/  /' <<< "$attribution"
 echo "NATIVE_SERVICES_OK smp=$SMP accel=$([ "${BO_QEMU_KVM:-0}" = 1 ] && echo kvm || echo tcg)"
