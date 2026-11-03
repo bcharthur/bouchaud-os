@@ -69,6 +69,18 @@ case "$SCENARIO" in
   *) echo "scenario inconnu: $SCENARIO" >&2; exit 2 ;;
 esac
 
+# --- release key (mise-a-jour only): generated HERE, deleted at exit -------
+# A development key: its public half is compiled into the kernel built below
+# (BOUCHAUD_CLE_VERSION_DEV), its private half signs the manifest, then the
+# whole directory goes. No key is ever stored in the repository.
+CLES=$(mktemp -d); trap 'rm -rf "$CLES"' EXIT
+if [ "$SCENARIO" = mise-a-jour ]; then
+  openssl genpkey -algorithm ed25519 -out "$CLES/version.pem"
+  BOUCHAUD_CLE_VERSION_DEV=$(openssl pkey -in "$CLES/version.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+  export BOUCHAUD_CLE_VERSION_DEV
+  echo "AB_CLE_DEV publique=$BOUCHAUD_CLE_VERSION_DEV (generee pour ce banc, detruite a la fin)"
+fi
+
 # --- build: shim, kernels, payloads, metadata, disk ------------------------
 cargo +"$TOOLCHAIN" build --release --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml \
   --target x86_64-unknown-uefi
@@ -80,7 +92,7 @@ for k in $(printf '%s\n' bon "$MAUVAIS" | sort -u); do
   # keeps a slot image small enough to be shipped and written by updated.
   strip --strip-debug -o "$OUT/kernel-$k.elf" target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
 done
-TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL"' EXIT
+TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL" "$CLES"' EXIT
 cp -r tools/reference/uefi-image-builder "$TRAVAIL/builder"
 ( cd "$TRAVAIL/builder" && cargo +"$TOOLCHAIN" build --release -q )
 BUILDER=$TRAVAIL/builder/target/release/bouchaud-reference-uefi-image-builder
@@ -119,10 +131,14 @@ case "$SCENARIO" in sante|sante-ko|mise-a-jour|recovery-rollback|echecs-repetes)
     "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
     octets=$(stat -c %s "$OUT/system-b.img")
     empreinte=$(sha256sum "$OUT/system-b.img" | cut -d' ' -f1)
-    printf 'version=bench-%s\nimage=/update/system.img\nbytes=%s\nsha256=%s\nattempts=3\nselftest_refusals=1\n' \
-      "$(git rev-parse --short HEAD)" "$octets" "$empreinte" > "$OUT/manifest"
+    # The canonical manifest (system/update-core/src/manifeste.rs), signed.
+    printf 'bouchaud-manifeste-v1\nversion=bench-%s\nimage_sha256=%s\nimage_octets=%s\nessais=3\n' \
+      "$(git rev-parse --short HEAD)" "$empreinte" "$octets" > "$OUT/manifest"
+    openssl pkeyutl -sign -rawin -inkey "$CLES/version.pem" -in "$OUT/manifest" -out "$OUT/manifest.sig"
+    : > "$OUT/selftest"
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" \
-      "update/manifest=$OUT/manifest" "update/system.img=$OUT/system-b.img"
+      "update/manifest=$OUT/manifest" "update/manifest.sig=$OUT/manifest.sig" \
+      "update/selftest=$OUT/selftest" "update/system.img=$OUT/system-b.img"
   else
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$critique_a"
   fi
@@ -273,10 +289,16 @@ if [ "$SCENARIO" = sante ] && ! sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | tr
   exit 1
 fi
 if [ "$SCENARIO" = mise-a-jour ]; then
-  for m in "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" "UPDATED_INSTALL_OK" "UPDATED_REFUSALS_OK"; do
+  for m in "BOUCHAUD_UPDATE_MANIFESTE signature=fiable cle=dev-banc developpement=1" \
+           "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" "signature=fiable hash=valide" \
+           "UPDATED_INSTALL_OK" "signature=trusted hash=valid" "UPDATED_REFUSALS_OK"; do
     sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aF "$m" >/dev/null \
       || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
   done
+  # The agent must not be killed by its own supervisor mid-install.
+  if sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE 'svc=updated Running->Degraded' >/dev/null; then
+    echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=updated_battements_manques" >&2; exit 1
+  fi
   sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE '\[UPDATED\] (ok|FAIL)' | sed 's/^/  /'
 fi
 if [ "$obtenu" != "$ATTENDU" ]; then

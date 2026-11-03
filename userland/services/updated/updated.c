@@ -15,18 +15,31 @@
  *   write(off,buf)  only inside the target slot's partition
  *   finish(sha,len) flush, read back, SHA-256 must match -> Candidate{N}
  *
- * Pending update: /update/manifest (written by the release pipeline into the
- * running system), one key=value per line:
- *   version=<text>  image=/update/system.img  bytes=<n>  sha256=<hex64>
- *   attempts=<n>    [selftest_refusals=1]
- * This agent checks HASH VALID only (the kernel recomputes it after the
- * write). SIGNATURE TRUSTED is a separate verdict, not claimed here.
+ * Pending update, shipped inside the running system by the release pipeline:
+ *   /update/manifest      the CANONICAL signed manifest (system/update-core
+ *                         src/manifeste.rs): version, image_sha256,
+ *                         image_octets, essais
+ *   /update/manifest.sig  its 64-byte Ed25519 signature
+ *   /update/system.img    the slot image the manifest names
+ *   /update/selftest      (bench only) also exercise every refusal
+ * Two verdicts, both decided by the KERNEL, never by this agent:
+ *   SIGNATURE TRUSTED  at begin (a compiled-in release key verifies the
+ *                      manifest bytes), and
+ *   HASH VALID         at finish (the slot read back from disk matches what
+ *                      the signed manifest names).
  */
 #include "bouchaud/sdk.h"
 
 #define KEY_CONTROL 1
-#define CHUNK       (256 * 1024)
+/* 64 KiB: the first reads of a lazily materialised ramdisk file are slow
+ * under TCG; at 256 KiB one read+write exceeded the supervisor's heartbeat
+ * tolerance (4 x 250 ms) and updated was killed twice before converging
+ * (QEMU bench mise-a-jour). The tolerance is not changed: the step is. */
+#define CHUNK       (64 * 1024)
 #define MANIFEST    "/update/manifest"
+#define SIGNATURE   "/update/manifest.sig"
+#define IMAGE       "/update/system.img"
+#define SELFTEST    "/update/selftest"
 
 static bo_handle_t control, cap;
 static bo_handle_t ws;
@@ -108,6 +121,9 @@ struct manifest {
     bo_u64 attempts;
     int    selftest;
     int    has_sha;
+    char   raw[1024];          /* the exact signed bytes */
+    bo_usize raw_len;
+    bo_u8  sig[64];
 };
 
 static int hexval(char c)
@@ -119,52 +135,71 @@ static int hexval(char c)
 
 static int parse_manifest(struct manifest *m)
 {
-    static char text[4096];
     bo_i64 fd = bo_posix_open(MANIFEST, 0), n;
-    bo_usize i = 0;
+    bo_usize i = 0, k;
+    const char *img = IMAGE;
     if (fd < 0) return 0;
-    n = bo_posix_read(fd, text, sizeof(text) - 1);
+    n = bo_posix_read(fd, m->raw, sizeof(m->raw));
     bo_posix_close(fd);
-    if (n <= 0) return -1;
-    text[n] = 0;
+    if (n <= 0 || n >= (bo_i64)sizeof(m->raw)) return -1;
+    m->raw_len = (bo_usize)n;
+    fd = bo_posix_open(SIGNATURE, 0);
+    if (fd < 0 || bo_posix_read(fd, m->sig, 64) != 64) { if (fd >= 0) bo_posix_close(fd); return -1; }
+    bo_posix_close(fd);
+    fd = bo_posix_open(SELFTEST, 0);
+    if (fd >= 0) { m->selftest = 1; bo_posix_close(fd); }
+    for (k = 0; img[k] && k + 1 < sizeof(m->image); k++) m->image[k] = img[k];
+    m->image[k] = 0;
+    /* Read what the manifest names, for this agent's own I/O. The KERNEL
+     * parses the same bytes canonically and decides; nothing here is
+     * trusted by it. */
     while (i < (bo_usize)n) {
-        bo_usize s = i, e, k;
+        bo_usize s0 = i, e;
+        const char *text = m->raw;
         while (i < (bo_usize)n && text[i] != '\n') i++;
         e = i++;
-        if (prefix(text + s, e - s, "image=")) {
-            for (k = 0; s + 6 + k < e && k + 1 < sizeof(m->image); k++) m->image[k] = text[s + 6 + k];
-            m->image[k] = 0;
-        } else if (prefix(text + s, e - s, "bytes=") || prefix(text + s, e - s, "attempts=")) {
-            bo_usize at = s; bo_u64 v = 0; int is_bytes = text[s] == 'b';
+        if (prefix(text + s0, e - s0, "image_octets=") || prefix(text + s0, e - s0, "essais=")) {
+            bo_usize at = s0; bo_u64 v = 0; int is_bytes = text[s0] == 'i';
             while (at < e && text[at] != '=') at++;
             for (at++; at < e && text[at] >= '0' && text[at] <= '9'; at++) v = v * 10 + (bo_u64)(text[at] - '0');
             if (is_bytes) m->bytes = v; else m->attempts = v;
-        } else if (prefix(text + s, e - s, "sha256=") && e - s == 7 + 64) {
+        } else if (prefix(text + s0, e - s0, "image_sha256=") && e - s0 == 13 + 64) {
             for (k = 0; k < 32; k++) {
-                int h = hexval(text[s + 7 + 2 * k]), l = hexval(text[s + 8 + 2 * k]);
+                int h = hexval(text[s0 + 13 + 2 * k]), l = hexval(text[s0 + 14 + 2 * k]);
                 if (h < 0 || l < 0) return -1;
                 m->sha256[k] = (bo_u8)(h << 4 | l);
             }
             m->has_sha = 1;
-        } else if (prefix(text + s, e - s, "selftest_refusals=1")) {
-            m->selftest = 1;
         }
     }
-    return (m->image[0] && m->bytes && m->has_sha && m->attempts) ? 1 : -1;
+    return (m->bytes && m->has_sha && m->attempts) ? 1 : -1;
 }
 
 /* ---- refusals (DENY by default, each one observed) ------------------------ */
 
-static void selftest_refusals(int running_slot, int target)
+static void selftest_refusals(const struct manifest *m, int running_slot, int target)
 {
     bo_i64 rc, i;
     int all_bad = 1;
     static char probe[4096];
+    static char altered[1024];
+    bo_u8 badsig[64];
 
     rc = bo_update_install_write(cap, 0, probe, sizeof(probe));
     check("write before begin is refused", rc == -BO_E_ACCESS_DENIED, rc);
-    rc = bo_update_install_begin(cap, (bo_u32)running_slot);
+    rc = bo_update_install_begin(cap, (bo_u32)running_slot, m->raw, m->raw_len, m->sig);
     check("begin on the RUNNING slot is refused (I6)", rc == -BO_E_ACCESS_DENIED, rc);
+    /* SIGNATURE TRUSTED is the kernel's call: one flipped bit of the
+     * signature, or one changed byte of the manifest, and begin is refused
+     * before anything is read or written. */
+    for (i = 0; i < 64; i++) badsig[i] = m->sig[i];
+    badsig[5] ^= 0x10;
+    rc = bo_update_install_begin(cap, (bo_u32)target, m->raw, m->raw_len, badsig);
+    check("begin with a flipped signature bit is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    for (i = 0; i < (bo_i64)m->raw_len; i++) altered[i] = m->raw[i];
+    altered[m->raw_len - 2] = altered[m->raw_len - 2] == '9' ? '8' : '9';   /* essais=N -> other N */
+    rc = bo_update_install_begin(cap, (bo_u32)target, altered, m->raw_len, m->sig);
+    check("begin with an altered manifest (more attempts) is refused", rc == -BO_E_ACCESS_DENIED, rc);
     rc = bo_update_commit_health(cap);
     check("install capability cannot declare health", rc == -BO_E_ACCESS_DENIED, rc);
     rc = bo_handle_dup(cap, BO_RIGHT_INSPECT);
@@ -213,8 +248,8 @@ static int install(const struct manifest *m, int target)
     bo_i64 fd, rc;
     struct bo_line l;
 
-    rc = bo_update_install_begin(cap, (bo_u32)target);
-    check("begin on the inactive slot", rc == 0, rc);
+    rc = bo_update_install_begin(cap, (bo_u32)target, m->raw, m->raw_len, m->sig);
+    check("begin on the inactive slot: signed manifest trusted by the kernel", rc == 0, rc);
     if (rc != 0) return 0;
     if (m->selftest) selftest_after_begin();
     fd = bo_posix_open(m->image, 0);
@@ -222,6 +257,7 @@ static int install(const struct manifest *m, int target)
     if (fd < 0) return 0;
     while (off < m->bytes) {
         bo_u64 want = m->bytes - off < CHUNK ? m->bytes - off : CHUNK;
+        if (!serve_control(0)) { bo_posix_close(fd); return 0; }   /* before the read, too */
         bo_i64 got = bo_posix_read(fd, chunk, want), pad;
         if (got <= 0) { check("image shorter than its manifest", 0, (bo_i64)off); bo_posix_close(fd); return 0; }
         /* Block-aligned writes: the tail is zero-padded; the hash covers
@@ -256,7 +292,7 @@ static int install(const struct manifest *m, int target)
         for (k = 0; k < 32; k++) faux[k] = m->sha256[k];
         faux[31] ^= 1;
         rc = bo_update_install_finish(cap, faux, m->bytes, (bo_u32)m->attempts);
-        check("a digest that does not match the disk is refused", rc == -BO_E_ACCESS_DENIED, rc);
+        check("a digest other than the signed one is refused", rc == -BO_E_ACCESS_DENIED, rc);
     }
     rc = bo_update_install_finish(cap, m->sha256, m->bytes, (bo_u32)m->attempts);
     check("finish: read back, SHA-256 matches, candidate declared", rc == 0, rc);
@@ -265,7 +301,7 @@ static int install(const struct manifest *m, int target)
     bo_line_kv(&l, "target", target);
     bo_line_kv(&l, "bytes", (bo_i64)m->bytes);
     bo_line_kv(&l, "attempts", (bo_i64)m->attempts);
-    bo_line_str(&l, " hash=valid signature=not_verified");
+    bo_line_str(&l, rc == 0 ? " signature=trusted hash=valid" : " signature=? hash=?");
     bo_line_end(&l);
     return rc == 0;
 }
@@ -304,7 +340,7 @@ int bo_main(const struct bo_start *start)
     }
     if (rc == 1 && bo_update_state(cap, &st) == 0) {
         int running = (int)st.booted_slot, target = 1 - running;
-        if (m.selftest) selftest_refusals(running, target);
+        if (m.selftest) selftest_refusals(&m, running, target);
         if (st.state_a == 1 || st.state_b == 1) {
             bo_say("UPDATED_SKIP candidate_already_pending\n");
         } else if (st.active_slot != st.booted_slot) {

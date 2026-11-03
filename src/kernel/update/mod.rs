@@ -386,9 +386,35 @@ pub enum RefusInstall {
     Io(&'static str),
 }
 
+// ---- trusted release keys (BOUCHAUD_MANIFESTE_V1) --------------------------
+//
+// PRODUCTION: none yet -- no release key exists. A key is a PUBLIC value;
+// it goes here, committed, when one is created (its private half never
+// enters the repository).
+// DEVELOPMENT: only if the build sets BOUCHAUD_CLE_VERSION_DEV (64 hex
+// chars), as the QEMU bench does with a key it generates and then deletes.
+// Reported as `developpement=1` on every use.
+const CLE_DEV: Option<[u8; 32]> = match option_env!("BOUCHAUD_CLE_VERSION_DEV") {
+    Some(h) => uc::manifeste::cle_hex(h),
+    None => None,
+};
+static CLES_DEV: [uc::manifeste::CleDeConfiance; 1] = [uc::manifeste::CleDeConfiance {
+    nom: "dev-banc",
+    publique: match CLE_DEV { Some(k) => k, None => [0; 32] },
+    developpement: true,
+}];
+
+pub fn cles_de_confiance() -> &'static [uc::manifeste::CleDeConfiance] {
+    if CLE_DEV.is_some() { &CLES_DEV } else { &[] }
+}
+
 #[derive(Clone, Copy)]
 struct Installation {
     proprietaire: u32,
+    /// From the SIGNED manifest: what finish must find on the disk.
+    attendu: [u8; 32],
+    attendu_octets: u64,
+    attendu_essais: u8,
     /// Bytes already read back into VERIFICATION (0: not started).
     verifie: u64,
     cible: Slot,
@@ -416,8 +442,21 @@ fn note_refus(etape: &str, r: RefusInstall) -> RefusInstall {
     r
 }
 
-pub fn installation_commence(cible: Slot) -> Result<(), RefusInstall> {
+pub fn installation_commence(cible: Slot, texte: &[u8], signature: &[u8; 64]) -> Result<(), RefusInstall> {
     let r = (|| {
+        // SIGNATURE TRUSTED first: nothing is read or written for an
+        // untrusted manifest.
+        let (signe, cle) = uc::manifeste::verifie_signe(texte, signature, cles_de_confiance())
+            .map_err(|e| RefusInstall::Refuse(match e {
+                uc::manifeste::RefusManifeste::AucuneCleDeConfiance => "aucune_cle_de_confiance",
+                uc::manifeste::RefusManifeste::SignatureNonFiable => "signature_non_fiable",
+                uc::manifeste::RefusManifeste::Format => "manifeste_non_canonique",
+            }))?;
+        crate::serial_println!(
+            "BOUCHAUD_UPDATE_MANIFESTE signature=fiable cle={} developpement={} version={} octets={} essais={} empreinte={:02x}{:02x}{:02x}{:02x}",
+            cle.nom, cle.developpement as u8, signe.version(), signe.octets, signe.essais,
+            signe.empreinte[0], signe.empreinte[1], signe.empreinte[2], signe.empreinte[3]
+        );
         let p = passage().ok_or(RefusInstall::Refuse("sans_passage"))?;
         let mut m = trouve_meta(&p).map_err(RefusInstall::Refuse)?;
         let e = lit(&mut m).map_err(RefusInstall::Io)?;
@@ -431,8 +470,10 @@ pub fn installation_commence(cible: Slot) -> Result<(), RefusInstall> {
         let type_cible = guid_type(disque::type_du_slot(cible));
         let (parts, _) = gpt::lit_table(&mut m.support).map_err(|_| RefusInstall::Io("gpt"))?;
         let part = parts.iter().find(|x| x.type_guid == type_cible).ok_or(RefusInstall::Refuse("slot_introuvable"))?;
+        if signe.octets > part.blocs() * m.support.taille_bloc as u64 { return Err(RefusInstall::Refuse("image_plus_grande_que_le_slot")); }
         let inst = Installation {
             proprietaire: appelant(), verifie: 0,
+            attendu: signe.empreinte, attendu_octets: signe.octets, attendu_essais: signe.essais,
             cible, volume: m.support.volume, taille_bloc: m.support.taille_bloc,
             premier: part.premier, octets: part.blocs() * m.support.taille_bloc as u64,
         };
@@ -503,6 +544,10 @@ pub fn installation_verifie(longueur: u64) -> Result<u64, RefusInstall> {
 pub fn installation_termine(empreinte: [u8; 32], longueur: u64, essais: u8) -> Result<(), RefusInstall> {
     let r = (|| {
         let inst = session()?;
+        // The caller may not change what was signed.
+        if empreinte != inst.attendu || longueur != inst.attendu_octets || essais != inst.attendu_essais {
+            return Err(RefusInstall::Refuse("differe_du_manifeste_signe"));
+        }
         // Only what the DISK holds counts: every byte must have been read back.
         if longueur == 0 || inst.verifie != longueur { return Err(RefusInstall::Refuse("relecture_incomplete")); }
         // A refused finish (wrong digest) leaves the readback intact.
@@ -520,7 +565,7 @@ pub fn installation_termine(empreinte: [u8; 32], longueur: u64, essais: u8) -> R
         *INSTALLATION.lock() = None;
         *VERIFICATION.lock() = None;
         crate::serial_println!(
-            "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible={} octets={} essais={} empreinte={:02x}{:02x}{:02x}{:02x}",
+            "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible={} octets={} essais={} empreinte={:02x}{:02x}{:02x}{:02x} signature=fiable hash=valide",
             slot_texte(inst.cible), longueur, essais, relue[0], relue[1], relue[2], relue[3]
         );
         Ok(())
