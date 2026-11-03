@@ -300,7 +300,10 @@ fn waitset_wait(args: [u64; 6]) -> Result<u64> {
             return Err(Error::TimedOut);
         }
         let echeance = deadline.min(now.saturating_add(TRANCHE_NS));
-        let _ = crate::kernel::native::activite::attend(ticket, echeance);
+        let reveil = crate::kernel::native::activite::attend(ticket, echeance);
+        // BOUCHAUD_IPC_ATTRIBUTION_V1 : mesure seule.
+        crate::kernel::native::activite::note_reprise(
+            matches!(reveil, crate::kernel::sync::WaitSourceWake::Signaled));
         if crate::kernel::task::signal_interrompt_attente() {
             return Ok(0);
         }

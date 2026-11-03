@@ -206,6 +206,10 @@ fn finalise_task_running(task: &mut Task, cpu_id: usize) {
             cpu_id,
             now,
         );
+        // BOUCHAUD_IPC_ATTRIBUTION_V1 : copie pour l'attente native qui
+        // reprend (lecture seule plus loin, jamais ici).
+        task.ipc_file_ns.range(task.ready_since_ns.charge());
+        task.ipc_elu_ns.range(now);
         task.ready_since_ns.range(0);
     }
     // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : pret -> elu.
