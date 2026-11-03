@@ -125,9 +125,13 @@ fn run() -> uefi::Result {
     let decision = ab::decide(&mut report);
     match &decision {
         ab::Decision::Legacy => { let _ = writeln!(report, "ab.mode=legacy"); }
-        ab::Decision::Boot { slot, raison, .. } => {
+        ab::Decision::Boot { slot, raison, recovery: false, .. } => {
             let _ = writeln!(report, "ab.boot slot={:?} raison={}", slot, raison);
             uefi::println!("BOUCHAUD_AB_BOOT slot={:?} raison={}", slot, raison);
+        }
+        ab::Decision::Boot { raison, recovery: true, .. } => {
+            let _ = writeln!(report, "ab.recovery_boot raison={}", raison);
+            uefi::println!("BOUCHAUD_AB_RECOVERY_BOOT raison={}", raison);
         }
         ab::Decision::RecoveryRequired(raison) => {
             let _ = writeln!(report, "ab.recovery_required raison={}", raison);
