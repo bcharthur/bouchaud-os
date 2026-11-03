@@ -66,6 +66,8 @@ impl ChannelEndpoint {
 
         state.queued_bytes[target] += bytes;
         state.queues[target].push_back(message);
+        drop(state);
+        crate::kernel::native::activite::publie();
         Ok(bytes)
     }
 
@@ -92,10 +94,13 @@ impl ChannelEndpoint {
     }
 
     pub fn requeue_front(&self, message: Message) {
-        let mut state = self.state.inner.lock();
-        state.queued_bytes[self.side] =
-            state.queued_bytes[self.side].saturating_add(message.bytes.len());
-        state.queues[self.side].push_front(message);
+        {
+            let mut state = self.state.inner.lock();
+            state.queued_bytes[self.side] =
+                state.queued_bytes[self.side].saturating_add(message.bytes.len());
+            state.queues[self.side].push_front(message);
+        }
+        crate::kernel::native::activite::publie();
     }
 
     pub fn signals(&self) -> Signals {
@@ -115,7 +120,11 @@ impl ChannelEndpoint {
 
 impl Drop for ChannelEndpoint {
     fn drop(&mut self) {
-        let mut state = self.state.inner.lock();
-        state.closed[self.side] = true;
+        {
+            let mut state = self.state.inner.lock();
+            state.closed[self.side] = true;
+        }
+        // Le pair voit PEER_CLOSED : c'est une montee de signal.
+        crate::kernel::native::activite::publie();
     }
 }

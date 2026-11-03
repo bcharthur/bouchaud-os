@@ -10,6 +10,7 @@
 //! namespace here before the Linux compatibility dispatcher.
 
 pub mod abi;
+pub mod activite;
 pub mod event;
 pub mod handle;
 pub mod io;

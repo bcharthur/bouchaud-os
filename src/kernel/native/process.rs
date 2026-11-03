@@ -91,7 +91,9 @@ pub fn note_exit(pid: u32, code: i32) {
             None => false,
         });
     }
+    let any = !hits.is_empty();
     for state in hits { state.mark(code); }
+    if any { super::activite::publie(); }
 }
 
 impl ProcessRef {

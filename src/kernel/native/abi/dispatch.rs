@@ -263,14 +263,14 @@ fn waitset_write(out: u64, ready: Vec<(u64, super::types::Signals)>) -> Result<u
 /// interrompu l'attente (l'appelant reboucle). `timeout_ns == 0` equivaut a
 /// `WAITSET_POLL`.
 ///
-/// Implementation v1 : re-verification de l'ETAT apres chaque sommeil borne
-/// (au plus `QUANTUM_NS`). Aucun reveil ne peut etre perdu -- l'etat est relu,
-/// pas un evenement consomme -- et aucun verrou n'est tenu pendant le
-/// sommeil. Le cout est une latence de detection <= QUANTUM_NS, mesuree par
-/// le banc healthd (`ipc_rtt`). Une file d'attente par objet pourra remplacer
-/// le quantum sans changer l'ABI.
+/// Reveil (BOUCHAUD_NATIVE_ACTIVITE_V1) : le ticket de la source d'activite
+/// native est pris AVANT le poll. Toute montee de signal posterieure fait
+/// avancer sa generation : l'attente rend aussitot au lieu de dormir. Aucun
+/// verrou n'est tenu pendant l'attente. La tranche `TRANCHE_NS` ne sert plus
+/// qu'a relire les signaux POSIX et l'etat zombie ; elle n'intervient pas
+/// dans la latence d'un evenement natif.
 fn waitset_wait(args: [u64; 6]) -> Result<u64> {
-    const QUANTUM_NS: u64 = 1_000_000;
+    const TRANCHE_NS: u64 = 20_000_000;
     let cap = args[2] as usize;
     if cap == 0 { return Err(Error::InvalidArgument); }
     if cap > 4096 { return Err(Error::TooLarge); }
@@ -287,20 +287,21 @@ fn waitset_wait(args: [u64; 6]) -> Result<u64> {
     let timeout = args[3];
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(timeout);
     loop {
+        let ticket = crate::kernel::native::activite::ticket();
         let ready = waitset.poll(cap);
         if !ready.is_empty() {
             return waitset_write(args[1], ready);
         }
-        let now = crate::kernel::timer::monotonic_ns();
         if timeout == 0 {
             return Ok(0);
         }
+        let now = crate::kernel::timer::monotonic_ns();
         if now >= deadline {
             return Err(Error::TimedOut);
         }
-        let slice = (deadline - now).min(QUANTUM_NS);
-        if crate::kernel::task::sleep_ns_signalable(slice).is_some() {
-            // Interrompu par un signal pour ce fil : rendre la main.
+        let echeance = deadline.min(now.saturating_add(TRANCHE_NS));
+        let _ = crate::kernel::native::activite::attend(ticket, echeance);
+        if crate::kernel::task::signal_interrompt_attente() {
             return Ok(0);
         }
         if crate::kernel::task::try_current()
