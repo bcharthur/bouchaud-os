@@ -211,6 +211,8 @@ static inline bo_i64 bo_posix_open(const char *path, int flags)
 { return bo__sys6(2 /* open */, (bo_u64)path, (bo_u64)(bo_i64)flags, 0, 0, 0, 0); }
 static inline bo_i64 bo_posix_read(bo_i64 fd, void *buf, bo_u64 len)
 { return bo__sys6(0 /* read */, (bo_u64)fd, (bo_u64)buf, len, 0, 0, 0); }
+static inline bo_i64 bo_posix_write(bo_i64 fd, const void *buf, bo_u64 len)
+{ return bo__sys6(1 /* write */, (bo_u64)fd, (bo_u64)buf, len, 0, 0, 0); }
 static inline bo_i64 bo_posix_close(bo_i64 fd)
 { return bo__sys6(3 /* close */, (bo_u64)fd, 0, 0, 0, 0, 0); }
 

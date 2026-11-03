@@ -40,8 +40,67 @@
 #define SIGNATURE   "/update/manifest.sig"
 #define IMAGE       "/update/system.img"
 #define SELFTEST    "/update/selftest"
+/* Bench only (BOUCHAUD_UPDATED_MORTS_V1): die on purpose, once in the middle
+ * of the writes, once in the middle of the read-back; the third instance
+ * checks it inherited nothing. The count lives in /tmp (RAM, this boot). */
+#define SELFTEST_MORT "/update/selftest-mort"
+#define MORTS         "/tmp/updated-morts"
 
 static bo_handle_t control, cap;
+static int morts;              /* deliberate deaths so far (bench only) */
+static int mort_voulue;
+
+/* ---- measurements (published, never thresholded) ------------------------ */
+#define MESURES 2048
+static bo_u32 m_lecture[MESURES], m_ecriture[MESURES], m_verif[MESURES];
+static int n_lecture, n_ecriture, n_verif;
+static bo_u64 dernier_service, ecart_service_max;
+
+static void note(bo_u32 *t, int *n, bo_u64 ns) { if (*n < MESURES) t[(*n)++] = (bo_u32)(ns / 1000); }
+
+static void trie(bo_u32 *t, int n)
+{
+    int i, j;
+    for (i = 1; i < n; i++) { bo_u32 v = t[i]; for (j = i; j > 0 && t[j - 1] > v; j--) t[j] = t[j - 1]; t[j] = v; }
+}
+
+static void publie(const char *nom, bo_u32 *t, int n)
+{
+    struct bo_line l;
+    trie(t, n);
+    bo_line_begin(&l);
+    bo_line_str(&l, "UPDATED_MESURE");
+    bo_line_str(&l, " etape="); bo_line_str(&l, nom);
+    bo_line_kv(&l, "n", n);
+    bo_line_kv(&l, "p50_us", n ? t[(n - 1) / 2] : 0);
+    bo_line_kv(&l, "p95_us", n ? t[(n - 1) * 95 / 100] : 0);
+    bo_line_kv(&l, "max_us", n ? t[n - 1] : 0);
+    bo_line_end(&l);
+}
+
+static int lit_morts(void)
+{
+    char c = '0';
+    bo_i64 fd = bo_posix_open(MORTS, 0);
+    if (fd < 0) return 0;
+    if (bo_posix_read(fd, &c, 1) != 1) c = '0';
+    bo_posix_close(fd);
+    return c - '0';
+}
+
+static void meurt_volontairement(const char *ou)
+{
+    char c = (char)('0' + morts + 1);
+    bo_i64 fd = bo_posix_open(MORTS, 0x241 /* O_WRONLY|O_CREAT|O_TRUNC */);
+    struct bo_line l;
+    if (fd >= 0) { bo_posix_write(fd, &c, 1); bo_posix_close(fd); }
+    bo_line_begin(&l);
+    bo_line_str(&l, "UPDATED_MORT_VOLONTAIRE pendant=");
+    bo_line_str(&l, ou);
+    bo_line_kv(&l, "instance", morts + 1);
+    bo_line_end(&l);
+    *(volatile int *)0 = 0x0b0b;   /* a real fault, killed by the kernel */
+}
 static bo_handle_t ws;
 static int failures;
 static char chunk[CHUNK];
@@ -70,16 +129,24 @@ static bo_usize put_u64(char *d, bo_usize at, bo_usize cap_, bo_u64 v)
 
 /* Answer the supervisor without blocking: called between every chunk, so a
  * long install never looks like a hang. Returns 0 when asked to stop. */
+static int arret_demande;   /* sticky: a stop seen anywhere ends the work */
+
 static int serve_control(bo_u64 timeout_ns)
 {
     struct bo_wait_event ev[1];
+    if (arret_demande) return 0;
+    {
+        bo_u64 t = (bo_u64)bo_time_now_ns();
+        if (dernier_service && t - dernier_service > ecart_service_max) ecart_service_max = t - dernier_service;
+        dernier_service = t;
+    }
     struct bo_recv_meta meta;
     char in[128], out[160];
     bo_i64 n = bo_waitset_wait(ws, ev, 1, timeout_ns), got;
     bo_usize len = 0;
     if (n <= 0) return 1;
     got = bo_channel_recv(control, in, sizeof(in), 0, 0, &meta);
-    if (got == -BO_E_PEER_CLOSED) return 0;
+    if (got == -BO_E_PEER_CLOSED) { arret_demande = 1; return 0; }
     if (got < 0) return 1;
     if (prefix(in, (bo_usize)got, "ping ")) {
         len = put(out, 0, sizeof(out), "pong ", 5);
@@ -93,6 +160,7 @@ static int serve_control(bo_u64 timeout_ns)
         len = put(out, len, sizeof(out), in + 6, (bo_usize)got - 6);
     } else if (prefix(in, (bo_usize)got, "stop")) {
         (void)bo_channel_send(control, "bye", 3, 0, 0);
+        arret_demande = 1;
         return 0;
     } else {
         len = put(out, 0, sizeof(out), "error", 5);
@@ -177,6 +245,13 @@ static int parse_manifest(struct manifest *m)
 
 /* ---- refusals (DENY by default, each one observed) ------------------------ */
 
+/* BOUCHAUD_UPDATED_BATTEMENT_ETAPES_V1: answer the supervisor between every
+ * step that may take long under emulation (each begin verifies Ed25519 in
+ * the kernel). Measured: without it, manifest parsing + the refusal suite +
+ * the real begin ran ~1.4 s without serving control under TCG, against a
+ * tolerance of 4 x 250 ms. A stop seen here is sticky (arret_demande). */
+#define BATTEMENT() ((void)serve_control(0))
+
 static void selftest_refusals(const struct manifest *m, int running_slot, int target)
 {
     bo_i64 rc, i;
@@ -189,6 +264,7 @@ static void selftest_refusals(const struct manifest *m, int running_slot, int ta
     check("write before begin is refused", rc == -BO_E_ACCESS_DENIED, rc);
     rc = bo_update_install_begin(cap, (bo_u32)running_slot, m->raw, m->raw_len, m->sig);
     check("begin on the RUNNING slot is refused (I6)", rc == -BO_E_ACCESS_DENIED, rc);
+    BATTEMENT();
     /* SIGNATURE TRUSTED is the kernel's call: one flipped bit of the
      * signature, or one changed byte of the manifest, and begin is refused
      * before anything is read or written. */
@@ -196,10 +272,12 @@ static void selftest_refusals(const struct manifest *m, int running_slot, int ta
     badsig[5] ^= 0x10;
     rc = bo_update_install_begin(cap, (bo_u32)target, m->raw, m->raw_len, badsig);
     check("begin with a flipped signature bit is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    BATTEMENT();
     for (i = 0; i < (bo_i64)m->raw_len; i++) altered[i] = m->raw[i];
     altered[m->raw_len - 2] = altered[m->raw_len - 2] == '9' ? '8' : '9';   /* essais=N -> other N */
     rc = bo_update_install_begin(cap, (bo_u32)target, altered, m->raw_len, m->sig);
     check("begin with an altered manifest (more attempts) is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    BATTEMENT();
     rc = bo_update_commit_health(cap);
     check("install capability cannot declare health", rc == -BO_E_ACCESS_DENIED, rc);
     rc = bo_handle_dup(cap, BO_RIGHT_INSPECT);
@@ -213,6 +291,7 @@ static void selftest_refusals(const struct manifest *m, int running_slot, int ta
         if (rc != -BO_E_BAD_HANDLE && rc != -BO_E_WRONG_TYPE) all_bad = 0;
     }
     check("no handle reaches another service (kill on 64 foreign ids)", all_bad, 0);
+    BATTEMENT();
     /* Its whole authority: control channel, capability, its own wait set. */
     rc = bo_handle_count();
     check("handle table is exactly control + capability + waitset", rc == 3, rc);
@@ -248,24 +327,31 @@ static int install(const struct manifest *m, int target)
     bo_i64 fd, rc;
     struct bo_line l;
 
+    if (arret_demande) return 0;
     rc = bo_update_install_begin(cap, (bo_u32)target, m->raw, m->raw_len, m->sig);
     check("begin on the inactive slot: signed manifest trusted by the kernel", rc == 0, rc);
+    BATTEMENT();
     if (rc != 0) return 0;
-    if (m->selftest) selftest_after_begin();
+    if (m->selftest) { selftest_after_begin(); BATTEMENT(); }
     fd = bo_posix_open(m->image, 0);
     check("image readable", fd >= 0, fd);
     if (fd < 0) return 0;
     while (off < m->bytes) {
         bo_u64 want = m->bytes - off < CHUNK ? m->bytes - off : CHUNK;
         if (!serve_control(0)) { bo_posix_close(fd); return 0; }   /* before the read, too */
+        bo_u64 t0 = (bo_u64)bo_time_now_ns();
         bo_i64 got = bo_posix_read(fd, chunk, want), pad;
+        note(m_lecture, &n_lecture, (bo_u64)bo_time_now_ns() - t0);
         if (got <= 0) { check("image shorter than its manifest", 0, (bo_i64)off); bo_posix_close(fd); return 0; }
         /* Block-aligned writes: the tail is zero-padded; the hash covers
          * exactly `bytes`. */
         for (pad = got; pad % 4096; pad++) chunk[pad] = 0;
+        t0 = (bo_u64)bo_time_now_ns();
         rc = bo_update_install_write(cap, off, chunk, (bo_u64)pad);
+        note(m_ecriture, &n_ecriture, (bo_u64)bo_time_now_ns() - t0);
         if (rc != 0) { check("write into the inactive slot", 0, rc); bo_posix_close(fd); return 0; }
         off += (bo_u64)got;
+        if (mort_voulue && morts == 0 && off >= (1u << 20)) meurt_volontairement("write");
         if (off % (16u << 20) < (bo_u64)got) {
             struct bo_line l;
             bo_line_begin(&l);
@@ -279,9 +365,22 @@ static int install(const struct manifest *m, int target)
     bo_posix_close(fd);
     /* Read back from the DISK, chunk by chunk, still answering heartbeats. */
     do {
+        bo_u64 t0 = (bo_u64)bo_time_now_ns();
         rc = bo_update_install_verify(cap, m->bytes);
+        note(m_verif, &n_verif, (bo_u64)bo_time_now_ns() - t0);
+        if (mort_voulue && morts == 1 && rc > 0 && rc < (bo_i64)m->bytes - (4 << 20)) meurt_volontairement("verify");
         if (!serve_control(0)) return 0;
     } while (rc > 0);
+    publie("lecture_image", m_lecture, n_lecture);
+    publie("ecriture_slot", m_ecriture, n_ecriture);
+    publie("relecture_disque", m_verif, n_verif);
+    {
+        struct bo_line l;
+        bo_line_begin(&l);
+        bo_line_str(&l, "UPDATED_MESURE etape=battement");
+        bo_line_kv(&l, "ecart_service_max_us", (bo_i64)(ecart_service_max / 1000));
+        bo_line_end(&l);
+    }
     check("read back from the disk", rc == 0, rc);
     if (rc != 0) return 0;
     if (m->selftest) {
@@ -330,6 +429,7 @@ int bo_main(const struct bo_start *start)
     for (i = 0; i < 32; i++) m.image[i] = 0;
     m.bytes = m.attempts = 0; m.selftest = m.has_sha = 0;
     rc = parse_manifest(&m);
+    BATTEMENT();
     {
         struct bo_line l;
         bo_line_begin(&l);
@@ -340,7 +440,21 @@ int bo_main(const struct bo_start *start)
     }
     if (rc == 1 && bo_update_state(cap, &st) == 0) {
         int running = (int)st.booted_slot, target = 1 - running;
-        if (m.selftest) selftest_refusals(&m, running, target);
+        if (m.selftest) {
+            bo_i64 fdm = bo_posix_open(SELFTEST_MORT, 0);
+            if (fdm >= 0) { mort_voulue = 1; bo_posix_close(fdm); }
+            morts = lit_morts();
+        }
+        if (mort_voulue && morts > 0) {
+            /* A successor: it must inherit no authority from the dead owner,
+             * and the dead owner must not have produced a Candidate. */
+            static char probe[4096];
+            bo_i64 w = bo_update_install_write(cap, 0, probe, sizeof(probe));
+            check("successor: the dead owner's session is not usable", w == -BO_E_ACCESS_DENIED, w);
+            check("successor: no premature Candidate in META", st.state_b == 0 && st.state_a == 2, (bo_i64)st.state_b);
+            if (morts >= 2) bo_say("UPDATED_SUCCESSEUR_APRES_DEUX_MORTS\n");
+        }
+        if (m.selftest) { selftest_refusals(&m, running, target); BATTEMENT(); }
         if (st.state_a == 1 || st.state_b == 1) {
             bo_say("UPDATED_SKIP candidate_already_pending\n");
         } else if (st.active_slot != st.booted_slot) {

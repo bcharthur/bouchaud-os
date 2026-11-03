@@ -220,7 +220,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, recovery-requise, recovery-rollback, echecs-repetes]
+        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, mise-a-jour-morts, sans-cle, recovery-requise, recovery-rollback, echecs-repetes]
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo
