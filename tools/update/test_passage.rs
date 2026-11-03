@@ -11,6 +11,8 @@
 mod ab;
 #[path = "../../system/update-core/src/passage.rs"]
 mod passage;
+#[path = "../../system/update-core/src/echecs.rs"]
+mod echecs;
 
 pub use ab::*;
 use passage::{commit_sante, Passage, Raison, RefusCommit};
@@ -46,7 +48,8 @@ fn candidat_b(essais: u8) -> Enregistrement {
 fn encodage_bijectif_et_chaque_bit_compte() {
     for slot in [Slot::A, Slot::B] {
         for raison in [Raison::Actif, Raison::CandidatEssaiConsomme, Raison::RollbackCandidatEpuise,
-                       Raison::RollbackNonPersiste, Raison::PersistanceImpossibleReplieActif] {
+                       Raison::RollbackNonPersiste, Raison::PersistanceImpossibleReplieActif,
+                       Raison::RecoveryRequise, Raison::RecoveryDemandee, Raison::RecoveryEchecsRepetes] {
             let p = Passage { slot, raison, essais_restants: 2, sequence_meta: 0x0102_0304_0506_0708, boot_id: 0xdead_beef, meta_unique: [0xa5; 16] };
             let o = passage::encode(&p);
             assert_eq!(passage::decode(&o), Some(p));
@@ -189,3 +192,41 @@ fn exploration_le_commit_ne_produit_jamais_un_actif_non_bon() {
     println!("etats={} commits={commits}", vus.len());
 }
 
+#[test]
+fn recovery_ne_confirme_jamais_rien() {
+    let e = candidat_b(3);
+    for raison in [Raison::RecoveryRequise, Raison::RecoveryDemandee, Raison::RecoveryEchecsRepetes] {
+        for slot in [Slot::A, Slot::B] {
+            let p = Passage { slot, raison, essais_restants: 3, sequence_meta: e.sequence, boot_id: 1, meta_unique: [1; 16] };
+            assert!(commit_sante(&p, &e).is_err(), "{raison:?} {slot:?}");
+        }
+    }
+}
+
+#[test]
+fn compteur_d_echecs_encodage_et_politique() {
+    use echecs::{avant_boot, decode, encode, Avant, SEUIL};
+    for n in [0u32, 1, 2, 3, 77, u32::MAX] { assert_eq!(decode(&encode(n)), n); }
+    // Unreadable or forged -> 0: never recovery by corruption alone.
+    assert_eq!(decode(&[0u8; 16]), 0);
+    for bit in 0..128 {
+        let mut o = encode(SEUIL);
+        o[bit / 8] ^= 1 << (bit % 8);
+        assert_ne!(decode(&o), SEUIL, "bit {bit}");
+    }
+    // Active boots never confirmed: SEUIL boots, then recovery.
+    let mut c = 0;
+    let mut boots = 0;
+    loop {
+        match avant_boot(c, true, false) {
+            Avant::Ecrire(n) => { c = n; boots += 1; }
+            Avant::Recovery => break,
+        }
+        assert!(boots <= SEUIL);
+    }
+    assert_eq!(boots, SEUIL);
+    // A candidate boot leaves it alone; a rollback resets it, so a candidate
+    // that used its attempts never sends the OLD system to recovery.
+    assert_eq!(avant_boot(2, false, false), Avant::Ecrire(2));
+    assert_eq!(avant_boot(SEUIL, false, true), Avant::Ecrire(0));
+}

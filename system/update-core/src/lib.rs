@@ -19,3 +19,4 @@ mod ab;
 pub use ab::*;
 pub mod disque;
 pub mod passage;
+pub mod echecs;

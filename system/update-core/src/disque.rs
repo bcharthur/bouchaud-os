@@ -26,6 +26,9 @@ pub const TYPE_META: TypeGuid = bouchaud(0x0002, "B0DC8A5D-0002-4B0D-9E21-424F55
 /// System slots: FAT, each a complete bootable system.
 pub const TYPE_SLOT_A: TypeGuid = bouchaud(0x0003, "B0DC8A5D-0003-4B0D-9E21-424F55434844");
 pub const TYPE_SLOT_B: TypeGuid = bouchaud(0x0004, "B0DC8A5D-0004-4B0D-9E21-424F55434844");
+/// Optional RECOVERY partition: FAT, a minimal system (same layout as a
+/// slot). Booted only by the loader's recovery paths, never as a slot.
+pub const TYPE_RECOVERY: TypeGuid = bouchaud(0x0005, "B0DC8A5D-0005-4B0D-9E21-424F55434844");
 
 /// The second-stage loader, inside each slot partition.
 pub const CHARGEUR_DANS_SLOT: &str = "\\EFI\\BOOT\\BOUCHAUD-LOADER.EFI";

@@ -45,6 +45,14 @@ pub enum Raison {
     RollbackNonPersiste = 4,
     /// A candidate was due but its attempt could not be made durable: active.
     PersistanceImpossibleReplieActif = 5,
+    /// RECOVERY booted: no valid metadata (both copies invalid, or a slot
+    /// partition missing). `slot` is meaningless.
+    RecoveryRequise = 6,
+    /// RECOVERY booted: the operator asked for it at the boot prompt.
+    RecoveryDemandee = 7,
+    /// RECOVERY booted: the active slot failed to confirm health
+    /// `echecs::SEUIL` boots in a row.
+    RecoveryEchecsRepetes = 8,
 }
 
 impl Raison {
@@ -55,7 +63,13 @@ impl Raison {
             Raison::RollbackCandidatEpuise => "rollback_candidat_epuise",
             Raison::RollbackNonPersiste => "rollback_non_persiste",
             Raison::PersistanceImpossibleReplieActif => "persistance_essai_impossible_repli_actif",
+            Raison::RecoveryRequise => "recovery_requise",
+            Raison::RecoveryDemandee => "recovery_demandee",
+            Raison::RecoveryEchecsRepetes => "recovery_echecs_repetes",
         }
+    }
+    pub const fn est_recovery(self) -> bool {
+        matches!(self, Raison::RecoveryRequise | Raison::RecoveryDemandee | Raison::RecoveryEchecsRepetes)
     }
     const fn depuis(c: u8) -> Option<Raison> {
         Some(match c {
@@ -64,6 +78,9 @@ impl Raison {
             3 => Raison::RollbackCandidatEpuise,
             4 => Raison::RollbackNonPersiste,
             5 => Raison::PersistanceImpossibleReplieActif,
+            6 => Raison::RecoveryRequise,
+            7 => Raison::RecoveryDemandee,
+            8 => Raison::RecoveryEchecsRepetes,
             _ => return None,
         })
     }
@@ -130,6 +147,8 @@ pub enum RefusCommit {
 ///                 and an install into the other slot started meanwhile).
 ///   Err(_)      : refuse, write nothing.
 pub fn commit_sante(p: &Passage, e: &Enregistrement) -> Result<Option<Enregistrement>, RefusCommit> {
+    // Recovery is not a system: nothing it runs may confirm a slot.
+    if p.raison.est_recovery() { return Err(RefusCommit::SlotNiCandidatNiActif); }
     // Already the good active slot: confirming it writes nothing, whatever
     // changed in the record since the boot (an install into the OTHER slot
     // rewrites META while this system runs -- found by the QEMU update bench).
