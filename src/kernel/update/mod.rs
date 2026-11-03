@@ -56,18 +56,41 @@ fn etat_texte(e: Etat) -> &'static str {
     }
 }
 
-/// Boot record for the blackbox (§28): one line, printed once at boot.
+/// Boot record for the blackbox (§28): one line, printed once at boot,
+/// after the storage drivers are up (META is read for the version).
+///
+/// `system_version`: the first 8 bytes of the SHA-256 META records for the
+/// booted slot (what was installed and verified there). `previous_boot_result`
+/// is only what the records PROVE:
+///   candidat_epuise      the loader just rolled a candidate back
+///   candidat_en_essai    this is a candidate attempt (the previous one, if
+///                        any, did not confirm -- otherwise it would be active)
+///   non_confirme         the active slot's previous boot never confirmed
+///                        health (failure counter > 1 after this boot's +1)
+///   confirme             the active slot's previous boot confirmed health
+///   inconnu              nothing in the records says
 pub fn journalise_boot() {
-    match passage() {
-        Some(p) => crate::serial_println!(
-            "BOUCHAUD_BOOT_RECORD boot_id={:#018x} system_slot={} boot_reason={} candidate_attempts_left={} meta_sequence={}",
-            p.boot_id, slot_texte(p.slot), p.raison.texte(), p.essais_restants, p.sequence_meta
-        ),
-        None => crate::serial_println!(
+    let Some(p) = passage() else {
+        crate::serial_println!(
             "BOUCHAUD_BOOT_RECORD boot_id=none system_slot=none boot_reason={}",
             if BRUT_INVALIDE.load(core::sync::atomic::Ordering::Relaxed) { "passage_invalide" } else { "sans_chargeur_ab" }
-        ),
-    }
+        );
+        return;
+    };
+    let lu = meta_lecture().ok();
+    let mut version = [0u8; 8];
+    if let Some((e, _)) = lu { version.copy_from_slice(&e.slot(p.slot).image[..8]); }
+    let precedent = match p.raison {
+        passage::Raison::RollbackCandidatEpuise => "candidat_epuise",
+        passage::Raison::CandidatEssaiConsomme => "candidat_en_essai",
+        passage::Raison::Actif => match lu { Some((_, c)) if c > 1 => "non_confirme", Some(_) => "confirme", None => "inconnu" },
+        _ => "inconnu",
+    };
+    crate::serial_println!(
+        "BOUCHAUD_BOOT_RECORD boot_id={:#018x} system_slot={} system_version={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} boot_reason={} candidate_attempts_left={} previous_boot_result={} meta_sequence={}",
+        p.boot_id, slot_texte(p.slot), version[0], version[1], version[2], version[3], version[4], version[5],
+        version[6], version[7], p.raison.texte(), p.essais_restants, precedent, p.sequence_meta
+    );
 }
 
 // ---------------------------------------------------------------------------
