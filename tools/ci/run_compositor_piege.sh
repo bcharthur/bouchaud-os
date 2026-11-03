@@ -53,7 +53,16 @@ for essai in $(seq 1 "$N"); do
     autres=$(grep -ac "^FAUTE_SYMBOLE " "$sortie")
     autres=$((autres - faute))
     profil_vu=$(grep -aoE "PERF-RIP-RESUME\] t=[0-9]+ actif=[01]" "$journal" 2>/dev/null | tail -1 | grep -oE "actif=[01]")
-    ligne="PIEGE_ESSAI bras=$bras essai=$essai profil=$profil ${profil_vu:-actif=?} smoke=$smoke rc=$rc faute_compositor=$faute autres_fautes=$autres"
+    # BOUCHAUD_PIEGE_DISQUE_PAR_ESSAI_V1 : l'image de CET essai (charge
+    # Ladybird complete, jusqu'a 2 Gio, plus 128 Mio de zone ecrite) n'est
+    # plus utile une fois l'essai juge ; les preuves sont le journal serie et
+    # la sortie, conserves et publies. Les 16 images s'accumulaient : run
+    # 41599565347 (cd55f20a), runner tue par `No space left on device`
+    # pendant cette etape. L'espace libre est publie pour attribuer un
+    # prochain echec sans deviner.
+    rm -f "ladybird-browser-host-piege-$bras-$essai.img"
+    libre=$(df -Pk . | awk 'NR == 2 { print int($4 / 1024) }')
+    ligne="PIEGE_ESSAI bras=$bras essai=$essai profil=$profil ${profil_vu:-actif=?} smoke=$smoke rc=$rc faute_compositor=$faute autres_fautes=$autres disque_libre_mio=$libre"
     echo "$ligne"
     resume+=("$ligne")
     if [ "$faute" = 1 ]; then
