@@ -29,8 +29,12 @@
 // d'inclure ce fichier tel quel via `#[path]`, sans le noyau autour.
 use super::protocole::Rect;
 
-/// Hauteur des barres haut et bas. Doit rester egale a `window::BAR_H`.
+/// Hauteur de la barre du haut. Doit rester egale a `window::BAR_H`.
 pub const HAUTEUR_BARRE: u32 = 30;
+
+/// Hauteur de la BANDE du bas : le dock flottant Atelier, sa marge et son
+/// ombre (`atelier::dock::HAUTEUR_ZONE`). Doit rester egale a `window::DOCK_H`.
+pub const HAUTEUR_ZONE_DOCK: u32 = 84;
 
 /// Debord de l'ombre portee, en pixels.
 ///
@@ -64,16 +68,18 @@ pub const fn barre_haute(largeur: u32) -> Rect {
     Rect::neuf(0, 0, largeur, HAUTEUR_BARRE)
 }
 
-/// Barre du BAS : bouton Demarrer et boutons de fenetres.
+/// Bande du BAS : le dock (cellule Applications et cellules de fenetres).
 ///
 /// Rien n'y change avec le temps : elle ne depend que de la liste des fenetres
-/// et de l'ouverture du menu.
+/// et de l'ouverture du menu. Pleine largeur : le dock est centre et sa
+/// largeur suit le nombre de fenetres, donc un dock qui retrecit est repeint
+/// en entier par un seul degat.
 pub const fn barre_taches(largeur: u32, hauteur: u32) -> Rect {
     Rect::neuf(
         0,
-        hauteur.saturating_sub(HAUTEUR_BARRE) as i32,
+        hauteur.saturating_sub(HAUTEUR_ZONE_DOCK) as i32,
         largeur,
-        HAUTEUR_BARRE,
+        HAUTEUR_ZONE_DOCK,
     )
 }
 

@@ -35,7 +35,7 @@ const H: u32 = 720;
 fn menu() -> Rect {
     let lignes = 7i32;
     let h = lignes * HAUTEUR_LIGNE_MENU + ENTETE_MENU + 8;
-    Rect::neuf(2, H as i32 - HAUTEUR_BARRE as i32 - h, 178, h as u32)
+    Rect::neuf(2, H as i32 - HAUTEUR_ZONE_DOCK as i32 - h, 178, h as u32)
 }
 
 fn se_touchent(a: Rect, b: Rect) -> bool {
@@ -56,7 +56,9 @@ fn la_barre_haute_est_en_haut() {
 fn la_barre_des_taches_est_en_bas() {
     let basse = barre_taches(L, H);
     assert_eq!(basse.bas(), H as i64, "la barre du bas finit au dernier pixel");
-    assert_eq!(basse.hauteur, HAUTEUR_BARRE);
+    // BOUCHAUD_ATELIER_DOCK_V1 : la bande du bas est celle du dock flottant
+    // (dock, marge, ombre), plus haute que la barre du haut.
+    assert_eq!(basse.hauteur, HAUTEUR_ZONE_DOCK);
 }
 
 /// LE test qui aurait echoue.
@@ -111,7 +113,9 @@ fn une_barre_reste_dans_l_ecran() {
         // ecrire `11` en dur figeait une valeur qui a change avec le style de
         // la coquille, alors que la propriete testee -- une barre reste dans
         // l'ecran -- n'en depend pas.
-        for hauteur in [HAUTEUR_BARRE, 200, 720] {
+        // La bande du dock est la plus haute des deux : c'est elle qui fixe
+        // le plus petit ecran ou les deux barres tiennent.
+        for hauteur in [HAUTEUR_ZONE_DOCK, 200, 720] {
             let ecran = Rect::neuf(0, 0, largeur, hauteur);
             let haute = barre_haute(largeur);
             let basse = barre_taches(largeur, hauteur);

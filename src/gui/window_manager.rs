@@ -37,7 +37,7 @@ use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn,
-    zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MIN_H, MIN_W,
+    zone_utile, App, Drag, Win, BAR_H, DOCK_H, ICONS, MENU, MIN_H, MIN_W,
     NAV_HAUTEUR, NAV_LARGEUR, TITLE_H,
 };
 use crate::drivers::keyboard;
@@ -193,7 +193,11 @@ fn plan_de_scene(
         ));
     }
 
-    calques.push(Calque::plein(Element::BarreHaute, barre_haute_rect()));
+    // BOUCHAUD_ATELIER_VERRE_V1 : la barre du haut et le dock sont du VERRE.
+    // Declares opaques, ils masqueraient le fond que leur translucidite montre :
+    // le culling sauterait le fond sous eux et le verre se melangerait a la
+    // trame precedente.
+    calques.push(Calque::transparent(Element::BarreHaute, barre_haute_rect()));
 
     for (index, w) in wins.iter().enumerate() {
         if w.min {
@@ -218,7 +222,7 @@ fn plan_de_scene(
         ));
     }
 
-    calques.push(Calque::plein(Element::BarreTaches, barre_taches_rect()));
+    calques.push(Calque::transparent(Element::BarreTaches, barre_taches_rect()));
     calques.push(Calque::transparent(
         Element::Curseur,
         degat_curseur(souris.0, souris.1),
@@ -547,6 +551,10 @@ fn boucle() {
         #[cfg(not(feature = "reference-desktop"))]
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
+    for kind in window::fenetres_demandees_au_demarrage() {
+        let fenetre = make_app(kind, home, &mut spawn_n);
+        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+    }
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
     // plus bas. `services_initialises` dit que la session supervisee PEUT
     // demarrer : la premiere trame est posee et le reseau a eu sa chance. Le
@@ -818,7 +826,7 @@ fn boucle() {
                             }
                             if matches!(edge, Bottom | SouthWest | SouthEast) { w.h = (my - w.y).max(MIN_H); }
                             if w.x + w.w > fb::width() as i32 { w.w = fb::width() as i32 - w.x; }
-                            if w.y + w.h > fb::height() as i32 - BAR_H as i32 { w.h = fb::height() as i32 - BAR_H as i32 - w.y; }
+                            if w.y + w.h > fb::height() as i32 - DOCK_H as i32 { w.h = fb::height() as i32 - DOCK_H as i32 - w.y; }
                         }
                     }
                     clamp_win(w);
@@ -2199,7 +2207,7 @@ fn handle_click(
         }
         return;
     }
-    if start_btn().hit(mx, my) {
+    if start_btn(wins.len()).hit(mx, my) {
         *menu_open = true;
         for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
             degats.ajoute(origine_de(cible), rect);
@@ -2209,7 +2217,7 @@ fn handle_click(
 
     // Barre des taches : restaure (si minimisee) et donne le focus.
     for i in 0..wins.len() {
-        if taskbar_btn(i).hit(mx, my) {
+        if taskbar_btn(i, wins.len()).hit(mx, my) {
             // BOUCHAUD_GUI_FOCUS_DAMAGE_V1 : meme raison qu'a la remontee par
             // clic. Le bouton de la barre des taches donne aussi le focus, donc
             // il le retire aussi a quelqu'un.
