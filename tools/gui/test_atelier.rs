@@ -19,6 +19,8 @@ mod dock;
 mod centre;
 #[path = "../../src/gui/atelier/animations.rs"]
 mod animations;
+#[path = "../../src/gui/atelier/fichiers.rs"]
+mod fichiers;
 #[path = "../../src/gui/protocole.rs"]
 mod protocole;
 #[path = "../../src/gui/disposition.rs"]
@@ -548,4 +550,249 @@ fn le_budget_des_instantanes_borne_la_memoire_retenue() {
     assert!(admis >= 1 && admis < 8, "{admis} admis");
     assert!(!animations::admet_instantane(0, animations::BUDGET_INSTANTANES_OCTETS + 1));
     assert!(!animations::admet_instantane(usize::MAX, 1), "pas de depassement arithmetique");
+}
+
+// ─── Fichiers Atelier ─────────────────────────────────────────────────────
+
+use fichiers::{Cible as CibleF, Entree, Genre, Geometrie, Vue};
+
+const FENETRES_FICHIERS: [(i32, i32); 4] = [(574, 358), (760, 520), (1274, 680), (420, 300)];
+
+#[test]
+fn les_zones_de_fichiers_pavent_la_fenetre_sans_se_chevaucher() {
+    for (l, h) in FENETRES_FICHIERS {
+        let g = Geometrie::new(l, h);
+        let (b, lat, c, e) = (g.barre(), g.laterale(), g.contenu(), g.etat());
+        assert_eq!(b.h + c.h + e.h, h, "{l}x{h}");
+        assert_eq!(lat.w + c.w, l);
+        assert_eq!(c.y, b.y + b.h);
+        assert_eq!(e.y, c.y + c.h);
+        assert_eq!(lat.h, c.h);
+        if l < fichiers::LARGEUR_MIN_LATERALE {
+            assert_eq!(lat.w, 0, "barre laterale repliee sur fenetre etroite");
+        }
+    }
+}
+
+#[test]
+fn les_boutons_et_le_fil_d_ariane_ne_se_chevauchent_pas() {
+    for (l, h) in FENETRES_FICHIERS {
+        let g = Geometrie::new(l, h);
+        let mut boites: Vec<dock::Boite> = [CibleF::Retour, CibleF::Avance, CibleF::Parent,
+            CibleF::VueGrille, CibleF::VueListe].iter().map(|c| g.bouton(*c)).collect();
+        boites.push(g.zone_ariane());
+        for (i, a) in boites.iter().enumerate() {
+            assert!(dans(*a, g.barre()), "{l}x{h} #{i}");
+            for b in boites.iter().skip(i + 1) {
+                let chevauche = a.w > 0 && b.w > 0 && a.x < b.x + b.w && b.x < a.x + a.w
+                    && a.y < b.y + b.h && b.y < a.y + a.h;
+                assert!(!chevauche, "{l}x{h}");
+            }
+        }
+    }
+}
+
+#[test]
+fn chaque_pixel_designe_la_cible_que_le_peintre_dessine() {
+    // Le contrat du survol : element_sous(x, y) == i  <=>  element(i) contient (x, y).
+    for vue in [Vue::Grille, Vue::Liste] {
+        for (l, h) in FENETRES_FICHIERS {
+            let g = Geometrie::new(l, h);
+            for n in [0usize, 1, 7, 40] {
+                for defil in [0usize, 1, 3] {
+                    for y in (0..h).step_by(3) {
+                        for x in (0..l).step_by(3) {
+                            let attendu = (0..n).find(|&i| g.element(i, vue, defil).contient(x, y));
+                            assert_eq!(g.element_sous(x, y, n, vue, defil), attendu,
+                                "{vue:?} {l}x{h} n={n} defil={defil} ({x},{y})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn les_elements_visibles_sont_dans_le_contenu_et_disjoints() {
+    for vue in [Vue::Grille, Vue::Liste] {
+        let g = Geometrie::new(760, 520);
+        let visibles: Vec<dock::Boite> = (0..60).map(|i| g.element(i, vue, 2))
+            .filter(|b| b.w > 0).collect();
+        assert!(!visibles.is_empty());
+        for (i, a) in visibles.iter().enumerate() {
+            assert!(dans(*a, g.contenu()), "{vue:?}");
+            for b in visibles.iter().skip(i + 1) {
+                let chevauche = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+                assert!(!chevauche, "{vue:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn le_defilement_est_borne_et_garde_la_selection_visible() {
+    let g = Geometrie::new(760, 520);
+    for vue in [Vue::Grille, Vue::Liste] {
+        assert_eq!(g.defilement_max(0, vue), 0);
+        assert_eq!(g.defilement_max(3, vue), 0, "peu d'elements : pas de defilement");
+        let n = 200;
+        let max = g.defilement_max(n, vue);
+        assert!(max > 0);
+        // Au defilement max, le dernier element est visible.
+        assert!(g.element(n - 1, vue, max).w > 0, "{vue:?}");
+        for sel in [0usize, 57, n - 1] {
+            for defil in [0usize, 5, max] {
+                let d = fichiers::defilement_pour(sel, defil, &g, vue);
+                assert!(g.element(sel, vue, d).w > 0, "{vue:?} sel={sel} defil={defil}");
+            }
+        }
+    }
+}
+
+#[test]
+fn la_cible_suit_l_ordre_boutons_ariane_raccourcis_elements_fond() {
+    let g = Geometrie::new(760, 520);
+    let r = g.bouton(CibleF::Parent);
+    assert_eq!(g.cible(r.x + 1, r.y + 1, 5, Vue::Grille, 0, &[]), CibleF::Parent);
+    let a = g.zone_ariane();
+    let seg = [(0usize, dock::Boite { x: a.x, y: a.y, w: 30, h: a.h })];
+    assert_eq!(g.cible(a.x + 5, a.y + 5, 5, Vue::Grille, 0, &seg), CibleF::Segment(0));
+    let rc = g.raccourci(4);
+    assert_eq!(g.cible(rc.x + 3, rc.y + 3, 5, Vue::Grille, 0, &[]), CibleF::Raccourci(4));
+    let e = g.element(2, Vue::Grille, 0);
+    assert_eq!(g.cible(e.x + 5, e.y + 5, 5, Vue::Grille, 0, &[]), CibleF::Element(2));
+    let c = g.contenu();
+    assert_eq!(g.cible(c.x + c.w - 3, c.y + c.h - 3, 5, Vue::Grille, 0, &[]), CibleF::Fond);
+    assert_eq!(g.cible(-5, -5, 5, Vue::Grille, 0, &[]), CibleF::Rien);
+}
+
+#[test]
+fn les_raccourcis_sont_dans_la_barre_laterale_et_disjoints() {
+    let g = Geometrie::new(760, 520);
+    let mut prec: Option<dock::Boite> = None;
+    for i in 0..fichiers::RACCOURCIS.len() {
+        let b = g.raccourci(i);
+        assert!(dans(b, g.laterale()), "{i}");
+        if let Some(p) = prec {
+            assert!(b.y >= p.y + p.h, "{i}");
+        }
+        prec = Some(b);
+    }
+    assert!(g.titre_section(1) > g.raccourci(3).y, "section Emplacements sous Favoris");
+    assert_eq!(Geometrie::new(400, 300).raccourci(0).w, 0, "repliee : aucun raccourci touchable");
+}
+
+#[test]
+fn le_fil_d_ariane_tient_et_s_abrege_par_le_milieu() {
+    let zone = dock::Boite { x: 100, y: 8, w: 300, h: 28 };
+    let (tout, ell) = fichiers::segments(zone, &[40, 60, 50]);
+    assert!(ell.is_none());
+    assert_eq!(tout.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1, 2]);
+    let (abrege, ell) = fichiers::segments(zone, &[40, 120, 120, 120, 90]);
+    let idx: Vec<usize> = abrege.iter().map(|(i, _)| *i).collect();
+    assert_eq!(idx[0], 0, "la racine reste");
+    assert_eq!(*idx.last().unwrap(), 4, "le dossier courant reste");
+    assert!(ell.is_some(), "une ellipse marque ce qui manque");
+    for (_, b) in &abrege {
+        assert!(b.x >= zone.x && b.x + b.w <= zone.x + zone.w);
+    }
+    let (seul, _) = fichiers::segments(zone, &[40, 900]);
+    assert_eq!(seul.last().unwrap().0, 1, "dossier trop long : il reste, rogne");
+}
+
+#[test]
+fn le_genre_vient_de_l_extension_et_un_dossier_reste_un_dossier() {
+    assert_eq!(fichiers::genre("notes.TXT", false), Genre::Texte);
+    assert_eq!(fichiers::genre("photo.jpeg", false), Genre::Image);
+    assert_eq!(fichiers::genre("main.rs", false), Genre::Code);
+    assert_eq!(fichiers::genre("a.tar", false), Genre::Archive);
+    assert_eq!(fichiers::genre("init.elf", false), Genre::Executable);
+    assert_eq!(fichiers::genre("README", false), Genre::Fichier);
+    assert_eq!(fichiers::genre(".profile", false), Genre::Fichier, "point initial : pas d'extension");
+    assert_eq!(fichiers::genre("fin.", false), Genre::Fichier);
+    assert_eq!(fichiers::genre("img.png", true), Genre::Dossier);
+}
+
+#[test]
+fn le_tri_met_les_dossiers_d_abord_puis_l_ordre_alphabetique() {
+    let e = |nom: &str, dossier: bool, noeud: usize| Entree { nom: nom.into(), dossier, octets: 0, noeud };
+    let mut v = vec![e("zeta.txt", false, 1), e("Beta", true, 2), e("alpha", true, 3),
+        e("Alpha.txt", false, 4), e("beta.txt", false, 5)];
+    fichiers::trie(&mut v);
+    let noms: Vec<&str> = v.iter().map(|x| x.nom.as_str()).collect();
+    assert_eq!(noms, vec!["alpha", "Beta", "Alpha.txt", "beta.txt", "zeta.txt"]);
+}
+
+#[test]
+fn la_taille_se_lit_en_unites_francaises() {
+    assert_eq!(fichiers::taille_lisible(0), "0 o");
+    assert_eq!(fichiers::taille_lisible(1023), "1023 o");
+    assert_eq!(fichiers::taille_lisible(1024), "1 Ko");
+    assert_eq!(fichiers::taille_lisible(256 * 1024), "256 Ko");
+    assert_eq!(fichiers::taille_lisible(3 * 1024 * 1024 + 512 * 1024), "3,5 Mo");
+}
+
+#[test]
+fn la_selection_au_clavier_reste_bornee() {
+    assert_eq!(fichiers::deplace_selection(None, 0, 1, 4), None);
+    assert_eq!(fichiers::deplace_selection(None, 5, 1, 4), Some(0));
+    assert_eq!(fichiers::deplace_selection(Some(4), 5, 1, 1), Some(4));
+    assert_eq!(fichiers::deplace_selection(Some(0), 5, -1, 1), Some(0));
+    assert_eq!(fichiers::deplace_selection(Some(1), 10, 1, 4), Some(5), "une rangee plus bas");
+    assert_eq!(fichiers::deplace_selection(Some(9), 3, 0, 4), Some(2), "selection perimee ramenee");
+}
+
+#[test]
+fn le_menu_contextuel_reste_dans_la_fenetre_et_designe_son_entree() {
+    for (l, h) in FENETRES_FICHIERS {
+        let g = Geometrie::new(l, h);
+        for (x, y) in [(0, 0), (l - 1, h - 1), (l / 2, h / 2), (l + 50, -20)] {
+            for n in 1..=3usize {
+                let m = g.menu(x, y, n);
+                assert!(m.x >= 0 && m.y >= 0 && m.x + m.w <= l && m.y + m.h <= h, "{l}x{h} ({x},{y})");
+                for yy in m.y..m.y + m.h {
+                    for xx in m.x..m.x + m.w {
+                        let attendu = (0..n).find(|&i| Geometrie::entree_menu(m, i).contient(xx, yy));
+                        assert_eq!(Geometrie::entree_sous(m, n, xx, yy), attendu);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(fichiers::actions(true, true)[0], fichiers::Action::Ouvrir, "un dossier s'ouvre");
+    assert!(!fichiers::actions(true, false).contains(&fichiers::Action::Ouvrir),
+        "aucune application n'ouvre encore un fichier : pas d'entree Ouvrir");
+}
+
+#[test]
+fn l_historique_recule_avance_et_saute_les_dossiers_disparus() {
+    let mut h = fichiers::Historique::new();
+    assert!(!h.peut_reculer() && !h.peut_avancer());
+    h.visit(1, 2);
+    h.visit(2, 3);
+    h.visit(3, 3); // meme dossier : rien
+    assert_eq!(h.back(3, |_| true), Some(2));
+    assert!(h.peut_avancer());
+    assert_eq!(h.forward(2, |_| true), Some(3));
+    // Un dossier disparu (2) est saute au retour.
+    assert_eq!(h.back(3, |n| n != 2), Some(1));
+    // Une nouvelle visite efface l'avenir.
+    h.visit(1, 9);
+    assert!(!h.peut_avancer());
+}
+
+#[test]
+fn l_historique_reste_borne() {
+    let mut h = fichiers::Historique::new();
+    for i in 0..1000 {
+        h.visit(i, i + 1);
+    }
+    let mut n = 0;
+    let mut cur = 1000;
+    while let Some(p) = h.back(cur, |_| true) {
+        cur = p;
+        n += 1;
+    }
+    assert_eq!(n, 32, "32 retours au plus");
 }

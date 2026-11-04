@@ -55,7 +55,24 @@ SYMBOLES = [
     ("sliders-horizontal", (16,)),
     ("power", (18,)), ("rotate-ccw", (18,)), ("log-out", (18,)),
     ("activity", (18,)), ("monitor", (18,)),
+    # Fichiers Atelier (increment D) : barre laterale, navigation, menu.
+    ("house", (16,)), ("file-text", (16,)), ("image", (16,)), ("download", (16,)),
+    ("hard-drive", (16,)), ("folder", (16,)), ("layout-grid", (16,)), ("list", (16,)),
+    ("chevron-left", (16,)), ("chevron-right", (16,)), ("arrow-up", (16,)),
+    ("copy", (16,)),
 ]
+
+# Icones de types de fichiers (increment D) : (identifiant, glyphe Lucide du
+# badge, teinte du badge). Le dossier a sa propre forme.
+TYPES_FICHIERS = [
+    ("fichier",    "file",      "#8b90a3"),
+    ("texte",      "file-text", "#4b7bec"),
+    ("image",      "image",     "#22a06b"),
+    ("code",       "code",      "#7c5cff"),
+    ("archive",    "archive",   "#e08a12"),
+    ("executable", "binary",    "#3c425d"),
+]
+TAILLES_FICHIERS = (20, 48)
 TAILLES_LOGO = (18, 72)
 FONDS = [("summer_1am", "summer_1am-2560x1600.jpg", ((1280, 720), (1920, 1080)))]
 
@@ -94,6 +111,47 @@ def tuile(nom_glyphe: str, haut: str, bas: str, encre: str) -> str:
 def symbole(nom: str) -> str:
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
   stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  {glyphe(nom)}
+</svg>"""
+
+
+def dossier() -> str:
+    # Grille 256 : languette arriere plus sombre, corps avant en degrade, un
+    # liseré clair en haut du corps. Meme bleu que la tuile Fichiers.
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="c" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7cc0ff"/><stop offset="1" stop-color="#3d86f4"/>
+    </linearGradient>
+  </defs>
+  <path d="M20 58 a18 18 0 0 1 18 -18 h56 a18 18 0 0 1 13 5.5 l15 15.5 h96 a18 18 0 0 1 18 18 v28 h-216 z"
+        fill="#2c6fd8"/>
+  <rect x="20" y="78" width="216" height="146" rx="20" fill="url(#c)"/>
+  <rect x="20" y="78" width="216" height="146" rx="20" fill="none" stroke="#1d2130"
+        stroke-opacity="0.10" stroke-width="2"/>
+  <path d="M40 80 h176" stroke="#ffffff" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round"/>
+</svg>"""
+
+
+def document(nom_glyphe: str, teinte: str) -> str:
+    # Page blanche a coin replie, filet discret, badge de type en bas a
+    # gauche portant le glyphe Lucide en blanc.
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <path d="M58 16 h100 l58 58 v148 a18 18 0 0 1 -18 18 h-140 a18 18 0 0 1 -18 -18 v-188 a18 18 0 0 1 18 -18 z"
+        fill="#ffffff" stroke="#1d2130" stroke-opacity="0.16" stroke-width="4"/>
+  <path d="M158 16 v40 a18 18 0 0 0 18 18 h40" fill="#eef0f6" stroke="#1d2130"
+        stroke-opacity="0.16" stroke-width="4" stroke-linejoin="round"/>
+  <rect x="62" y="122" width="112" height="112" rx="26" fill="{teinte}"/>
+  <g transform="translate(78 138) scale(3.3333)" fill="none" stroke="#ffffff"
+     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    {glyphe(nom_glyphe)}
+  </g>
+</svg>"""
+
+
+def glyphe_colore(nom: str, teinte: str) -> str:
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+  stroke="{teinte}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   {glyphe(nom)}
 </svg>"""
 
@@ -146,6 +204,7 @@ def main() -> int:
             "logo-bouchaud-os": {"licence": "projet Bouchaud OS", "statut": "PROVISOIRE",
                                  "source": "assets/atelier/sources/logo/bouchaud-os-provisoire.svg"},
             "tuiles-apps": {"licence": "projet Bouchaud OS (tuiles) + ISC (glyphes Lucide)"},
+            "icones-fichiers": {"licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"},
         },
         "fichiers": {},
     }
@@ -156,6 +215,18 @@ def main() -> int:
         for t in TAILLES_APPS:
             ecrit(SORTIE / "apps" / f"{ident}-{t}.png", rend(svg, t), manifeste,
                   largeur=t, hauteur=t, alpha=True, licence="tuiles-apps", glyphe=nom)
+    (SOURCES / "fichiers").mkdir(parents=True, exist_ok=True)
+    # En 48 px : page + badge. En 20 px, un badge serait illisible : c'est le
+    # glyphe Lucide du type, trace dans sa teinte, qui porte l'information.
+    formes = [("dossier", dossier(), dossier(), "folder")] + [
+        (ident, document(nom, teinte), glyphe_colore(nom, teinte), nom)
+        for ident, nom, teinte in TYPES_FICHIERS]
+    for ident, grand, petit, nom in formes:
+        (SOURCES / "fichiers" / f"{ident}.svg").write_text(grand + "\n", encoding="utf-8")
+        for t in TAILLES_FICHIERS:
+            svg = grand if t >= 32 else petit
+            ecrit(SORTIE / "fichiers" / f"{ident}-{t}.png", rend(svg, t), manifeste,
+                  largeur=t, hauteur=t, alpha=True, licence="icones-fichiers", glyphe=nom)
     for nom, tailles in SYMBOLES:
         for t in tailles:
             ecrit(SORTIE / "symboles" / f"{nom}-{t}.png", rend(symbole(nom), t), manifeste,

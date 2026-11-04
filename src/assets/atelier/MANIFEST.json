@@ -19,6 +19,9 @@
     },
     "tuiles-apps": {
       "licence": "projet Bouchaud OS (tuiles) + ISC (glyphes Lucide)"
+    },
+    "icones-fichiers": {
+      "licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"
     }
   },
   "fichiers": {
@@ -319,6 +322,132 @@
       "licence": "tuiles-apps",
       "glyphe": "settings"
     },
+    "src/assets/atelier/fichiers/dossier-20.png": {
+      "sha256": "7a75218690d230122f3f74689eee918aac56e9466c0be7c3e9bfaf95a10a147e",
+      "octets": 365,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "folder"
+    },
+    "src/assets/atelier/fichiers/dossier-48.png": {
+      "sha256": "428ddaa04b0cd96641c078438437c76a6cb2b703e96aa444d5e137bebb8f313b",
+      "octets": 681,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "folder"
+    },
+    "src/assets/atelier/fichiers/fichier-20.png": {
+      "sha256": "ec294712eb70e844eb17715acdda9a6d788e4e91bc12888f4cdb8e4465781a0e",
+      "octets": 364,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "file"
+    },
+    "src/assets/atelier/fichiers/fichier-48.png": {
+      "sha256": "6dabd29d7849f2a40f2817302a8bf366b1fc4291645bb159439e1b329a7fa428",
+      "octets": 901,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "file"
+    },
+    "src/assets/atelier/fichiers/texte-20.png": {
+      "sha256": "6b00be91ec447f44cf749ed1865c8cdf4ced61b51e13931c9008a8bec37b0499",
+      "octets": 502,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "file-text"
+    },
+    "src/assets/atelier/fichiers/texte-48.png": {
+      "sha256": "2d885cc81fa71f570675bd1368f5cc8a1ec4083dbd3d1b7c50de32085edc9d51",
+      "octets": 971,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "file-text"
+    },
+    "src/assets/atelier/fichiers/image-20.png": {
+      "sha256": "85a350b43319c86adfd0baef155a387ee52cd6e787f66807b3031387e1750103",
+      "octets": 430,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "image"
+    },
+    "src/assets/atelier/fichiers/image-48.png": {
+      "sha256": "d7e82797c5699c9d5af1fb20909d90d4b8a30c10b1838f724c317407fe06f9ec",
+      "octets": 985,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "image"
+    },
+    "src/assets/atelier/fichiers/code-20.png": {
+      "sha256": "42b587e2c8541e8e0d8a598b5580a172465df6b2a494bb545af72d917e166e44",
+      "octets": 285,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "code"
+    },
+    "src/assets/atelier/fichiers/code-48.png": {
+      "sha256": "1872355333c5d68011b0d432409cab0340efbb53fa8e9a9891d87c681b8082b5",
+      "octets": 820,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "code"
+    },
+    "src/assets/atelier/fichiers/archive-20.png": {
+      "sha256": "08ef67c4a225c427f7146adde510209053b069844da3761abd8a54e6dc7a180a",
+      "octets": 370,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "archive"
+    },
+    "src/assets/atelier/fichiers/archive-48.png": {
+      "sha256": "343a832666b539c9d72ed8b7510668d1a819897a28e2335372497c5476cafd01",
+      "octets": 917,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "archive"
+    },
+    "src/assets/atelier/fichiers/executable-20.png": {
+      "sha256": "03b173c302ef56d4e61d38953c640a13b6d384d6c85a5d67b1049e52e4234c0e",
+      "octets": 528,
+      "largeur": 20,
+      "hauteur": 20,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "binary"
+    },
+    "src/assets/atelier/fichiers/executable-48.png": {
+      "sha256": "7a82031c6613f363477e6e640c962962e53e936887a4f29e98b48d4276a32d42",
+      "octets": 1012,
+      "largeur": 48,
+      "hauteur": 48,
+      "alpha": true,
+      "licence": "icones-fichiers",
+      "glyphe": "binary"
+    },
     "src/assets/atelier/symboles/layout-grid-22.png": {
       "sha256": "f06a6042d9988a5ea6ee37ff29c90abda9847f0440de5d4ca83b41b9d2efa185",
       "octets": 279,
@@ -420,6 +549,102 @@
       "octets": 210,
       "largeur": 18,
       "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/house-16.png": {
+      "sha256": "dab59f80cbea1919a157b7988bf461d4014f984118af07572256b0e10e1782b6",
+      "octets": 263,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/file-text-16.png": {
+      "sha256": "67cf87e8f5e9eaa38f20fd62b027b0fdd72840107cd6a85e61276f8feefabe8c",
+      "octets": 270,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/image-16.png": {
+      "sha256": "562e0fd13e1d3d56643d9bd39b3a3f6f8b7b80715a009651bc3462bb70050d3a",
+      "octets": 294,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/download-16.png": {
+      "sha256": "25d210babd2eee8b5a0b7e4e352642c725a8434be74ede91d831d0443c453b36",
+      "octets": 204,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/hard-drive-16.png": {
+      "sha256": "b36ddcce7d57ce9dcbd27636c35aefda3d307b8158e7dcaee9a723f8e5382c9a",
+      "octets": 248,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/folder-16.png": {
+      "sha256": "900767d47c925d9f4d38b50050c60f9153a68d06a0a64de116e9feae62b4fb43",
+      "octets": 207,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/layout-grid-16.png": {
+      "sha256": "f60df908a51f8dbfed89ad02a98738f7f95585c4bd05df66553a9587ca2777d0",
+      "octets": 273,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/list-16.png": {
+      "sha256": "4dc32fa961022a85ecca472f20a353a4617dcff59eb762e1fad4681df7db4a0c",
+      "octets": 164,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/chevron-left-16.png": {
+      "sha256": "8f4af7157f5ad6507a38936853bc970c64d0e0a2e24c3363ef5a2c98764d3901",
+      "octets": 119,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/chevron-right-16.png": {
+      "sha256": "6e8ac3cbfbfab95fd7c030d4c9964d6aabc82530b42899e16ab55313b0ee1dc7",
+      "octets": 113,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/arrow-up-16.png": {
+      "sha256": "b357603fcc08df4e66f741925669e86dccab97c7c2eb842fd38e04129e44dacd",
+      "octets": 205,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/copy-16.png": {
+      "sha256": "e027908752be632936dfa90527f49e274ee261fc5d2cd593e2c745f81d0df3b2",
+      "octets": 219,
+      "largeur": 16,
+      "hauteur": 16,
       "alpha": true,
       "licence": "lucide"
     },

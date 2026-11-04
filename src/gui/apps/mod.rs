@@ -22,7 +22,6 @@ use crate::fs::ramfs;
 use crate::users;
 use alloc::format;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 fn first_word(s: &str) -> &str {
     s.split(' ').next().unwrap_or(s)
@@ -48,6 +47,7 @@ fn journal_gui_special(cmd: &str, cwd: usize, status: i32, sortie: Option<&str>)
 /// Retourne `true` si l'application demande sa fermeture.
 pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
     let new_title: Option<alloc::string::String> = None;
+    let (files_l, files_h) = zone_files(w.w, w.h);
 
     let close = match &mut w.app {
         App::Terminal { sb, input, cwd } => match k {
@@ -92,6 +92,10 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             }
             _ => false,
         },
+        App::Files { cur, scroll, selected, history, ui } => {
+            file_explorer::touche_clavier(cur, scroll, selected, history, ui, files_l, files_h, k);
+            false
+        }
         App::Rustpad { state } => rustpad::on_key(state, k),
         App::Notes { state } => notes::on_key(state, k),
         App::Journal { state } => journal::on_key(state, k),
@@ -131,81 +135,62 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
 
     let window_x = w.window.x;
     let window_y = w.window.y;
-    if let App::Files { cur, scroll, selected, history } = &mut w.app {
-        let bx  = (window_x + 3).max(0) as usize;
-        let by  = (window_y + TITLE_H + 2).max(0) as usize;
-        let bw  = (win_w - 6).max(1) as usize;
-        let tbh = file_explorer::TOOLBAR_H;
-
-        // Clic sur la barre d'outils
-        let tb_action = file_explorer::toolbar_hit(bx, by, mx, my);
-        match tb_action {
-            file_explorer::ToolbarAction::Up => {
-                let fs = ramfs::fs();
-                if *cur != 0 {
-                    let parent = fs.nodes[*cur].parent;
-                    if fs.can(parent, ramfs::PERM_X) {
-                        history.visit(*cur, parent);
-                        *cur = parent; *scroll = 0; *selected = None;
-                    }
-                }
-                return;
-            }
-            file_explorer::ToolbarAction::Back => {
-                let fs = ramfs::fs();
-                if let Some(prev) = history.back(*cur, |idx| idx < ramfs::MAX_NODES &&
-                    fs.nodes[idx].used && fs.nodes[idx].kind == ramfs::NodeKind::Dir &&
-                    fs.can(idx, ramfs::PERM_X)) {
-                    *cur = prev; *scroll = 0; *selected = None;
-                }
-                return;
-            }
-            file_explorer::ToolbarAction::Forward => {
-                let fs = ramfs::fs();
-                if let Some(next) = history.forward(*cur, |idx| idx < ramfs::MAX_NODES &&
-                    fs.nodes[idx].used && fs.nodes[idx].kind == ramfs::NodeKind::Dir &&
-                    fs.can(idx, ramfs::PERM_X)) {
-                    *cur = next; *scroll = 0; *selected = None;
-                }
-                return;
-            }
-            file_explorer::ToolbarAction::None => {}
-        }
-
-        // Clic dans la grille
-        let grid_y = by + tbh + 1;
-        if (my as usize) < grid_y { return; }
-        let grid_rel_my = my - grid_y as i32;
-        if grid_rel_my < 0 { return; }
-        let hit_idx = file_explorer::grid_hit(*cur, *scroll, bx, grid_y, bw, mx, my);
-        if let Some(idx) = hit_idx {
-            let fs = ramfs::fs();
-            let mut entries: Vec<(usize, bool)> = Vec::new();
-            if *cur != 0 { entries.push((usize::MAX, true)); }
-            for i in 0..ramfs::MAX_NODES {
-                if fs.nodes[i].used && i != *cur && fs.nodes[i].parent == *cur {
-                    entries.push((i, fs.nodes[i].kind == ramfs::NodeKind::Dir));
-                }
-            }
-            if idx >= entries.len() { *selected = None; return; }
-            let (node, is_dir) = entries[idx];
-            if node == usize::MAX {
-                let parent = fs.nodes[*cur].parent; history.visit(*cur, parent); *cur = parent; *scroll = 0; *selected = None;
-            } else if is_dir {
-                if fs.can(node, ramfs::PERM_X) { history.visit(*cur, node); *cur = node; *scroll = 0; *selected = None; }
-            } else {
-                *selected = Some(idx);
-            }
-        }
+    if let App::Files { cur, scroll, selected, history, ui } = &mut w.app {
+        let (bw, bh) = zone_files(win_w, win_h);
+        let bx = window_x + 3;
+        let by = window_y + TITLE_H + 2;
+        file_explorer::clic(cur, scroll, selected, history, ui, bw, bh, mx - bx, my - by);
     }
+}
+
+/// Taille de la zone utile d'une fenetre Fichiers (celle que `draw_app` passe
+/// au peintre).
+fn zone_files(win_w: i32, win_h: i32) -> (i32, i32) {
+    ((win_w - 6).max(1), (win_h - TITLE_H - 4).max(1))
+}
+
+/// Clic droit dans une application native. Seul Fichiers a un menu
+/// contextuel ; les autres l'ignorent.
+pub(crate) fn app_clic_droit(w: &mut Win, mx: i32, my: i32) {
+    let (win_w, win_h, x0, y0) = (w.w, w.h, w.window.x + 3, w.window.y + TITLE_H + 2);
+    if let App::Files { cur, scroll, selected, ui, .. } = &mut w.app {
+        let (bw, bh) = zone_files(win_w, win_h);
+        file_explorer::clic_droit(*cur, *scroll, selected, ui, bw, bh, mx - x0, my - y0);
+    }
+}
+
+/// Echap dans une application native : rend `true` si l'application l'a pris
+/// (un menu contextuel s'est ferme). Sinon le bureau ferme la fenetre, comme
+/// avant.
+pub(crate) fn app_echap(w: &mut Win) -> bool {
+    if let App::Files { ui, .. } = &mut w.app {
+        return file_explorer::echap(ui);
+    }
+    false
+}
+
+/// Survol dans une application native : rend les rectangles ECRAN a
+/// recomposer (ancienne et nouvelle cible) quand la cible survolee change.
+pub(crate) fn app_survol(w: &mut Win, mx: i32, my: i32) -> Option<(crate::gui::protocole::Rect, crate::gui::protocole::Rect)> {
+    let (win_w, win_h, x0, y0) = (w.w, w.h, w.window.x + 3, w.window.y + TITLE_H + 2);
+    if let App::Files { cur, scroll, ui, .. } = &mut w.app {
+        let (bw, bh) = zone_files(win_w, win_h);
+        let (a, b) = file_explorer::survol(*cur, *scroll, ui, bw, bh, mx - x0, my - y0)?;
+        let ecran = |r: crate::gui::atelier::dock::Boite| crate::gui::protocole::Rect::neuf(
+            r.x + x0 - 1, r.y + y0 - 1, (r.w.max(0) + 2) as u32, (r.h.max(0) + 2) as u32);
+        return Some((ecran(a), ecran(b)));
+    }
+    None
 }
 
 // ── Souris : molette ──────────────────────────────────────────────────────────
 
 pub(crate) fn wheel_to_app(w: &mut Win, _mx: i32, _my: i32, delta: i32) {
     if delta == 0 { return; }
-    if let App::Files { scroll, .. } = &mut w.app {
-        *scroll = (*scroll - delta).max(0);
+    let (win_w, win_h) = (w.w, w.h);
+    if let App::Files { cur, scroll, ui, .. } = &mut w.app {
+        let (bw, bh) = zone_files(win_w, win_h);
+        file_explorer::molette(*cur, scroll, ui, bw, bh, delta);
         return;
     }
     if let App::Journal { state } = &mut w.app {
@@ -250,7 +235,8 @@ pub(crate) fn draw_app(w: &Win) {
     }
     match &w.app {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
-        App::Files { cur, scroll, selected, .. } => file_explorer::draw(*cur, *scroll, *selected, bx, by, bw, bh),
+        App::Files { cur, scroll, selected, history, ui } =>
+            file_explorer::draw(*cur, *scroll, *selected, history, ui, bx, by, bw, bh),
         App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Services                       => services::draw(bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),

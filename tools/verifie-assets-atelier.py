@@ -7,8 +7,8 @@ Regles :
   2. chaque entree du manifeste designe une licence declaree, dont le texte
      ou la provenance est present dans `assets/atelier/sources/` ;
   3. le logo est marque PROVISOIRE tant qu'aucune identite n'est validee ;
-  4. chaque `include_bytes!` du noyau vers `assets/atelier/` vise un fichier du
-     manifeste ;
+  4. chaque `include_bytes!` du noyau vers `assets/atelier/` (et chaque
+     `tuile!` / `type_fichier!`) vise un fichier du manifeste ;
   5. seul un SOUS-ENSEMBLE de Lucide est versionne (pas la bibliotheque), et
      chaque glyphe porte son en-tete de licence ;
   6. `assets/atelier/ATTRIBUTIONS.md` cite chaque auteur et chaque licence.
@@ -83,6 +83,12 @@ def verifie(t: dict) -> list:
         for taille in ("18", "40", "56"):
             if f"src/assets/atelier/apps/{nom}-{taille}.png" not in entrees:
                 f.append(f"tuile {nom}-{taille} : hors manifeste")
+    # Les icones de types de fichiers passent par une macro (`type_fichier!`),
+    # que l'expression `include_bytes!("...")` ci-dessus ne voit pas.
+    for nom in re.findall(r'type_fichier!\("([a-z_]+)"\)', t["code"]):
+        for taille in ("20", "48"):
+            if f"src/assets/atelier/fichiers/{nom}-{taille}.png" not in entrees:
+                f.append(f"icone de fichier {nom}-{taille} : hors manifeste")
     # 5
     if len(t["lucide"]) > LUCIDE_MAX:
         f.append(f"Lucide : {len(t['lucide'])} glyphes versionnes (> {LUCIDE_MAX}) -- seulement le sous-ensemble utilise")
@@ -111,6 +117,7 @@ def main() -> int:
         ("bibliotheque entiere", lambda x: x["lucide"].update({f"g{i}.svg": "<!-- @license lucide-static -->" for i in range(64)})),
         ("attribution du fond retiree", lambda x: x.__setitem__("attributions", x["attributions"].replace("Risto Saukonp", "X"))),
         ("include hors manifeste", lambda x: x.__setitem__("code", x["code"] + '\ninclude_bytes!("../../assets/atelier/fond/autre.png")')),
+        ("icone de fichier hors manifeste", lambda x: x.__setitem__("code", x["code"] + '\ntype_fichier!("inconnu")')),
     ]
     for nom, muter in mutations:
         m = json.loads(json.dumps({k: v for k, v in t.items() if k != "fichiers"}))

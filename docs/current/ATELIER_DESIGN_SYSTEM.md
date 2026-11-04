@@ -373,6 +373,92 @@ Sous TCG, l'ouverture plafonne à environ 15–25 images/s, parce que sa premiè
 - apparition et disparition animées des cellules ;
 - menu contextuel du dock.
 
+## 3 sexies. Incrément D1 livré : Fichiers Atelier (BOUCHAUD_ATELIER_FICHIERS_V1)
+
+Branche `claude/atelier-fichiers-20261104`, issue de la tête de la PR #243.
+
+**Ce qui change à l'écran.** Thème Atelier clair, organisé en cinq zones :
+
+| Zone | Contenu |
+|---|---|
+| Barre de navigation | Précédent, Suivant et Parent (glyphes Lucide, grisés quand inactifs) ; fil d'Ariane cliquable (« Racine › home › … », qui s'abrège par le milieu avec une ellipse) ; bascule Grille / Liste. |
+| Barre latérale | **Favoris** : Accueil, Documents, Images, Téléchargements. **Emplacements** : Racine, Applications, Temporaire. Le dossier courant est surligné. |
+| Contenu | Grille (cellules de 104×100, icônes de 48 px) ou liste (Nom, Type, Taille ; icônes de 20 px). Survol, sélection et état vide. |
+| Barre d'état | Nombre d'éléments, élément sélectionné (type, taille) ou résultat de la dernière action ; à droite, « RAMFS · non persistant ». |
+| Menu contextuel | Au clic droit. Sur un dossier : Ouvrir, Copier le chemin, Propriétés. Sur un fichier : Copier le chemin, Propriétés. Sur le fond : Afficher en grille, Afficher en liste, Copier le chemin du dossier. |
+
+**Icônes.** Fabriquées par `fabrique-atelier.py` :
+- un dossier dessiné en vecteur, dans le bleu de la tuile Fichiers ;
+- 6 types de fichiers (fichier, texte, image, code, archive, exécutable) : page et badge en 48 px, glyphe Lucide coloré en 20 px ;
+- 12 nouveaux symboles de 16 px.
+
+Sous-ensemble Lucide : 34 glyphes sur 40 autorisés. Le type vient de l'extension (`fichiers::genre`).
+
+**Actions réelles uniquement.**
+
+| Action | Effet |
+|---|---|
+| Naviguer | Mêmes vérifications qu'avant (`can(.., PERM_X)`) ; historique revalidé. |
+| Copier le chemin | Écrit dans `presse_papiers`. |
+| Propriétés | Type, taille, droits et propriétaire, lus dans le RAMFS. |
+| Ouvrir un dossier | Ouvre le dossier. |
+| Ouvrir un fichier | Aucune application ne sait encore le faire, et la barre d'état le dit. |
+
+**Saisie.**
+- Clavier : flèches (sélection bornée, défilement qui suit), Entrée (ouvrir), Retour arrière (parent).
+- Double-clic : 500 ms sur le même nœud.
+- Échap ferme le menu contextuel sans fermer la fenêtre.
+
+**Ce qui n'a PAS changé : le stockage.** Aucune écriture dans le RAMFS, et aucune vérification de droits n'est modifiée. Documents, Images et Téléchargements n'existent pas dans l'accueil de la session : ils s'affichent **absents** et ne sont pas créés ici. Leur création à l'ouverture de session serait une modification de stockage, à faire dans un commit séparé.
+
+**Gestionnaire de fenêtres** (petits ajouts, sans toucher aux dégâts existants) :
+- front montant du **bouton droit**, servi aux seules applications natives (un client ring 3 reçoit déjà l'état des boutons) ;
+- **Échap** est proposé à l'application native avant de fermer la fenêtre ;
+- **survol** dans l'application active : l'ancienne et la nouvelle cible sont recomposées, rien d'autre.
+
+**Géométrie pure** : `atelier::fichiers`, avec `Geometrie`, `Cible`, `segments`, `actions`, `Historique`, `trie`, `genre` et `taille_lisible`.
+
+**Preuves.**
+- `test_atelier` : **88 tests** (+15) :
+  - zones qui pavent la fenêtre ;
+  - boutons et fil d'Ariane disjoints ;
+  - **chaque pixel désigne la cible que le peintre dessine**, en grille et en liste, sur 4 tailles et plusieurs défilements ;
+  - défilement borné qui garde la sélection visible ;
+  - ordre de priorité des cibles ;
+  - raccourcis ;
+  - fil d'Ariane abrégé ;
+  - genre et tri ;
+  - tailles ;
+  - sélection au clavier ;
+  - menu contextuel (pixel par pixel, dans la fenêtre) ;
+  - historique (sauts, bornes).
+- 22/22 suites, gardes 210/210, `CI_POLICY_OK`.
+- `verifie-rendu-professionnel.py` adapté de façon transparente : « pas d'icône pixelisée » se vérifie maintenant sur les assets rendus.
+- `verifie-assets-atelier.py` couvre la macro `type_fichier!`, avec une mutation de plus.
+
+**Captures QEMU réelles.**
+
+| Fichier | Ce qu'il montre |
+|---|---|
+| `atelier/comparaison-incD-fichiers.png` | Avant (`cefad34a`) et après, mêmes fenêtres ouvertes |
+| `atelier/capture-incD-bureau-fichiers.png` | Fichiers sur le bureau Atelier, avec Terminal, Calculatrice et Notes |
+| `atelier/sequence-incD-fichiers-interactions.png` | Sélection, menu contextuel au clic droit, vue liste, double-clic dans `bin` (fil d'Ariane, dossier vide) |
+
+**Coût de rendu** (TCG, peinture complète de la fenêtre, 24 mesures, même hôte, même scénario) :
+
+| | Zone | Moyenne | Max | Par pixel |
+|---|---|---|---|---|
+| Avant (`cefad34a`) | 414×284 | 15,5 ms | 26,4 ms | 0,13 µs |
+| Après | 774×434 | **9,4 ms** | 25,5 ms | **0,028 µs** |
+
+La fenêtre est 2,9 fois plus grande pour un coût moindre. Les icônes sont des PNG pré-rendus, posés en blit, au lieu d'une couverture calculée pixel par pixel. La mesure reste dans le noyau : `BOUCHAUD_ATELIER_FICHIERS_PEINTURE`, toutes les 8 peintures complètes.
+
+**Limites.**
+- Pas de recherche : aucun index n'existe, donc aucun champ factice.
+- Pas de glisser-déposer.
+- Pas de création, de renommage ni de suppression : ce seraient des écritures, à faire dans un incrément séparé.
+- Pas d'aperçu d'image.
+
 ## 4. Limites connues de l'incrément 1 (assumées)
 
 - **Contenu des applications encore sombre** : Fichiers, Notes, Calculatrice et les autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (prochain incrément). Le Terminal reste sombre volontairement.
