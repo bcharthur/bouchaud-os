@@ -113,3 +113,55 @@ pub const fn cellule_fenetre(largeur: u32, hauteur: u32, fenetres: usize, index:
         h: CELLULE,
     }
 }
+
+// ─── Survol (BOUCHAUD_ATELIER_DOCK_SURVOL_V1) ──────────────────────────────
+//
+// Ce que le pointeur designe dans le dock. LA definition, pour le peintre
+// (voile, levee de l'icone), l'infobulle, l'invalidation et le clic : elle ne
+// lit que `cellule_applications` et `cellule_fenetre`, les memes boites que
+// `window::start_btn` et `window::taskbar_btn`.
+
+/// Une cellule du dock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cible {
+    Applications,
+    Fenetre(usize),
+}
+
+/// Levee de l'icone survolee, en pixels, au terme du fondu. Elle reste DANS
+/// la cellule : la zone de clic ne bouge pas avec l'image.
+pub const LEVEE: i32 = 3;
+/// Hauteur de l'infobulle.
+pub const INFOBULLE_H: i32 = 24;
+/// Ecart entre l'infobulle et le haut du dock.
+pub const INFOBULLE_ECART: i32 = 8;
+/// Rembourrage horizontal du texte de l'infobulle.
+pub const INFOBULLE_REMBOURRAGE: i32 = 10;
+
+/// La cellule sous `(x, y)`, ou `None`.
+pub fn cible_sous(largeur: u32, hauteur: u32, fenetres: usize, x: i32, y: i32) -> Option<Cible> {
+    if cellule_applications(largeur, hauteur, fenetres).contient(x, y) {
+        return Some(Cible::Applications);
+    }
+    (0..visibles(largeur, fenetres))
+        .find(|&i| cellule_fenetre(largeur, hauteur, fenetres, i).contient(x, y))
+        .map(Cible::Fenetre)
+}
+
+/// La boite d'une cible.
+pub fn boite_cible(largeur: u32, hauteur: u32, fenetres: usize, cible: Cible) -> Boite {
+    match cible {
+        Cible::Applications => cellule_applications(largeur, hauteur, fenetres),
+        Cible::Fenetre(i) => cellule_fenetre(largeur, hauteur, fenetres, i),
+    }
+}
+
+/// L'infobulle d'une cible dont le libelle mesure `texte` pixels : centree
+/// au-dessus de la cellule, gardee dans l'ecran.
+pub fn infobulle(largeur: u32, hauteur: u32, fenetres: usize, cible: Cible, texte: i32) -> Boite {
+    let c = boite_cible(largeur, hauteur, fenetres, cible);
+    let d = cadre(largeur, hauteur, fenetres);
+    let w = texte.max(0) + 2 * INFOBULLE_REMBOURRAGE;
+    let x = (c.x + c.w / 2 - w / 2).clamp(4, (largeur as i32 - 4 - w).max(4));
+    Boite { x, y: d.y - INFOBULLE_ECART - INFOBULLE_H, w, h: INFOBULLE_H }
+}

@@ -67,8 +67,15 @@ pub enum Element {
     Fenetre(usize),
     /// Menu deroulant.
     Menu,
+    /// Centre de controle Atelier (verre, jamais opaque).
+    Centre,
+    /// Instantane d'une fenetre qui se ferme, par rang (jamais opaque : il
+    /// s'efface).
+    Fantome(usize),
     /// Barre des taches.
     BarreTaches,
+    /// Infobulle du dock (au-dessus de lui, jamais opaque).
+    Infobulle,
     /// Curseur logiciel. Jamais opaque : il a des bords transparents.
     Curseur,
 }

@@ -142,16 +142,247 @@ Preuves :
 - garde-fous d'architecture : 210/210 ;
 - `CI_POLICY_OK`.
 
+## 3 ter. Incrément A livré : barre haute réelle et centre de contrôle
+
+Branche `claude/atelier-increment-a-20261104`, issue de `f2cbb068` (tête de la PR #242).
+
+**Barre haute (BOUCHAUD_ATELIER_BARRE_HAUTE_V2).**
+- **Gauche** : logo PROVISOIRE et nom. Les menus « Fichiers, Édition, Affichage, Aller, Aide » de l'incrément 1 sont retirés : ils étaient inertes, et une commande visuelle qui ne fait rien n'a pas sa place.
+- **Centre** : date et heure en français, inchangées.
+- **Droite** : un seul bouton, qui ouvre le centre de contrôle. Il porte l'état du lien et le glyphe Lucide `sliders-horizontal`, avec un voile au survol et la teinte d'accent quand le centre est ouvert.
+
+**État réseau.** Le dessin de prise en rectangles (avec sa barre oblique) est supprimé. L'état se lit par la **forme**, grâce à trois glyphes Lucide distincts rendus par la fabrique :
+
+| État | Glyphe | Teinte |
+|---|---|---|
+| Connecté, lien sain | `ethernet-port` | encre |
+| Connecté, lien dégradé | `ethernet-port` | avertissement |
+| Sans adresse | `circle-alert` | avertissement |
+| Déconnecté | `unplug` | danger |
+| Sans carte | `unplug` | encre tenue |
+
+**Absent de la barre, car rien ne le pilote :**
+- **Wi-Fi** : aucun pilote ;
+- **son** : `ac97.rs` n'a ni volume ni sourdine au runtime ;
+- **notifications** : aucun service ;
+- **recherche** : aucun index.
+
+Aucune icône factice ne les représente. Le centre écrit « Non pris en charge pour l'instant : Wi-Fi, son, thème sombre ». Le glyphe `search`, réservé à l'incrément 2, est retiré du sous-ensemble Lucide.
+
+**FPS.** Le compteur ne s'affiche qu'en **mode diagnostic** (`atelier::reglages`). On le bascule depuis le centre, ou au démarrage avec `export BO_ATELIER_DIAGNOSTIC=1`. Il reste dans la mise en page unique de droite à gauche, et dans chaque ligne du journal (`[FPS:…]`).
+
+**Centre de contrôle (BOUCHAUD_ATELIER_CENTRE_V1).** Le panneau de verre de 320 px est ancré sous la barre, à droite. Sa géométrie est pure (`atelier::centre`) : le peintre, le clic et le survol lisent les mêmes boîtes.
+
+| Bloc | Source | Interaction |
+|---|---|---|
+| Réseau | `etat_reseau()`, `libelle_reseau()`, `net::our_ip()`, `net::gateway()` | lecture seule |
+| Affichage | `fb::width()/height()`, « rendu logiciel » (aucun GPU n'est prétendu) | lecture seule |
+| Compteur de trames (FPS) | `atelier::reglages::diagnostic()` | interrupteur réel |
+| Non pris en charge | texte | aucune |
+| Redémarrer / Éteindre / Quitter | `power::reboot`, `power::shutdown_avec_raison(…, "centre_eteindre")`, `quit` | mêmes chemins que le menu Applications |
+
+**Fermeture et clics.**
+- Un clic hors du panneau ferme le centre ; le clic s'arrête là et ne traverse pas.
+- Échap ferme le centre en priorité, même si un client a le focus.
+- Le centre et le menu Applications s'excluent.
+
+**Dégâts.**
+- L'ouverture ou la fermeture invalide `centre::empreinte`, c'est-à-dire le cadre et l'ombre sur les quatre côtés, plus la barre haute.
+- Le survol invalide l'ancienne et la nouvelle boîte d'action, rien d'autre.
+- Le calque `Element::Centre` est `transparent` (du verre).
+
+**Preuves.**
+- 6 tests hôte dans `test_atelier`, soit 55 au total, sur 3 résolutions :
+  - le panneau tient entre la barre et le dock ;
+  - l'empreinte contient le panneau et son ombre ;
+  - les actions sont dans le panneau et ne se chevauchent pas ;
+  - le survol et le clic désignent, pixel par pixel, la boîte peinte ;
+  - les blocs se suivent ;
+  - le bouton reste dans la barre.
+- `verifie-lien-reseau.py` est **durci** (8 mutations vérifiées à la main, dont 3 nouvelles) :
+  - l'état se lit par la forme (`glyphe_reseau`) ;
+  - les trois glyphes sont trois fichiers distincts ;
+  - aucun `fill_rect_rgb` dans `dessine_reseau` ;
+  - le FPS est soumis au mode diagnostic et reste dans la mise en page.
+
+**Captures QEMU réelles** : clic et Échap sont injectés par le moniteur, avec `BUREAU_GESTES` dans `run_bureau_capture.sh`.
+
+| Fichier | Ce qu'il montre |
+|---|---|
+| `atelier/comparaison-incA-barre-haute.png` | Barre avant (incrément 2) et après |
+| `atelier/capture-incA-bureau-1280x720.png` | Bureau, état connecté |
+| `atelier/capture-incA-centre-ouvert.png` | Centre ouvert après un vrai clic, survol de l'interrupteur |
+| `atelier/capture-incA-centre-diagnostic-actif.png` | Après un clic sur l'interrupteur : FPS dans la barre |
+| `atelier/capture-incA-apres-echap.png` | Après Échap : centre fermé, aucun résidu |
+| `atelier/capture-incA-sans-carte-reseau.png` | `BUREAU_QEMU="-nic none"` : glyphe `unplug`, « Pas de carte » |
+
+**Mesures** : QEMU TCG, BIOS 1280×720, même scénario de 62 s au repos, images construites l'une après l'autre.
+
+| | Base `f2cbb068` | Incrément A |
+|---|---|---|
+| Première trame | 5364 ms | 5301 ms (5348 et 5418 sur deux autres boots ; 4513 ms sans carte réseau) |
+| `desktop cpu_pct` à t = 30 s / 60 s | 3 / 0 | 2 / 0 |
+| Trames utiles en 55 s de repos | 1 | 1 |
+| Bootimage | 28 915 712 octets | 28 931 584 octets (+15,9 Ko : 12 glyphes) |
+
+Le centre n'est peint que lorsqu'il est ouvert. Au repos, la barre n'est recomposée qu'au tic de l'horloge, comme avant.
+
+## 3 quater. Incrément B livré : ouverture et fermeture animées (BOUCHAUD_ATELIER_EFFETS_V1)
+
+**Architecture.** Le compositeur peint chaque calque directement dans le tampon arrière : une fenêtre n'a pas de surface à elle. Plutôt que de faire semblant, on lui en fabrique une, le temps d'une découpe :
+1. garder le dessous (les calques inférieurs déjà peints) ;
+2. peindre la fenêtre ;
+3. copier ce qu'elle a peint, puis remettre le dessous ;
+4. mélanger la copie, décalée de `dy` et à l'opacité de l'instant.
+
+Tout ce qui est touché hors de la découpe est remis à l'identique avant la présentation.
+
+**Fermeture.** Elle lit un **instantané**, c'est-à-dire une copie de pixels :
+- il est pris dans `ferme_fenetre` *avant* le `remove` et avant la fin du client ;
+- aucune surface n'est lue après sa libération ;
+- un client mort disparaît sans animation.
+
+| Module | Rôle |
+|---|---|
+| `atelier::animations` | **Pur** : registre borné (8 animations), datation, courbes, modes, union des zones. Inclus dans `test_atelier`. |
+| `atelier::effets` | Noyau : `ouvre`, `ferme` (instantané), `tour` (zones à recomposer), `compose_ouverture`, `dessine_instantane`, mesure du coût par trame. |
+| `atelier::reglages` | `animations()` : `normales`, `reduites` (fondu seul, plus court), `aucune`. Réglable dans le centre ou par `BO_ATELIER_ANIMATIONS=`. |
+
+**Paramètres** (horloge monotone, courbes entières) :
+
+| | Normal | Réduit | Aucun |
+|---|---|---|---|
+| Ouverture | 200 ms, sortie cubique, opacité 0→1, montée de 10 px | 110 ms, opacité seule | — |
+| Fermeture | 150 ms, entrée-sortie cubique, opacité →0, réduction à 96 % (virgule fixe, plus proche voisin), ombre qui s'efface | 90 ms, opacité seule | — |
+
+**Règles qui protègent le reste.**
+- **Registre vide ⇒ boucle identique à avant.** `tour` ne salit rien ; l'échéance de veille ne devient « trame due » que si `effets::actif()`. Test hôte : une minute sans geste, zéro trame.
+- **Datation à la première trame composée** (`EN_ATTENTE`), et non au lancement. Sous TCG, la première trame après une ouverture coûte environ 90 ms : datée de la création, l'animation n'en montrait qu'une image.
+- **Rien ne s'anime avant la première trame du bureau** : les fenêtres du démarrage apparaissent avec lui, sans alourdir la trame la plus chère.
+- **Calques.**
+  - Une fenêtre qui s'ouvre est déclarée `transparent` sur l'union de sa position finale et de sa position décalée. Opaque, elle masquerait le fond qu'elle laisse voir ; bornée à la position finale, la découpe l'écarterait.
+  - L'instantané forme un calque `Element::Fantome`, transparent, au-dessus des fenêtres.
+- **Dégâts.**
+  - Chaque trame recompose l'ancienne **et** la nouvelle zone (`Registre::recouvre`) : une fenêtre déplacée pendant son ouverture ne laisse pas de bande.
+  - Une animation finie, évincée ou annulée rend sa dernière zone pour une ultime trame propre.
+- **Interruption.**
+  - Fermer pendant l'ouverture annule l'ouverture ; la fermeture part de l'opacité atteinte.
+  - Réduire la fenêtre arrête l'animation.
+  - Sur un registre plein, la plus ancienne animation est évincée, et son instantané libéré.
+  - Les tampons de travail rendent leur mémoire dès que le registre est vide.
+- **Garde-fous.**
+  - Pas d'instantané en composition directe dans le scanout virtio : peindre hors trame y serait un accès pendant transfert.
+  - Au-delà de 1920×1080 px, pas d'instantané non plus.
+  - Allocations en `try_reserve_exact`.
+
+**Preuves.**
+- `test_atelier` : 67 tests (+12), dont :
+  - bureau immobile = 0 trame ;
+  - trames demandées seulement pendant la durée ;
+  - animation rendue une seule fois à sa fin ;
+  - registre plein qui évince sans dépasser la capacité (1000 lancements) ;
+  - relance sans doublon ;
+  - ancienne et nouvelle zone recouvertes ;
+  - annulation ;
+  - bornes exactes des courbes ;
+  - mode réduit sans déplacement, mode aucun sans lancement ;
+  - durées dans les fourchettes de la mission (ouverture 160–220 ms, fermeture 120–180 ms) ;
+  - datation à la première trame.
+- 22/22 suites, gardes 210/210, `CI_POLICY_OK`.
+
+**Captures QEMU réelles** :
+- l'exécuteur `tools/ci/qemu_gestes.py` garde une seule connexion au moniteur ;
+- la VM est figée (`stop`/`cont`) le temps de chaque `screendump` ;
+- clics et touches sont réellement injectés.
+
+| Fichier | Ce qu'il montre |
+|---|---|
+| `atelier/sequence-incB-ouverture.png` | Double-clic sur Fichiers : fenêtre translucide, puis opaque |
+| `atelier/sequence-incB-fermeture.png` | Clic sur la croix du Terminal : l'instantané s'efface et se réduit ; aucun résidu |
+| `atelier/sequence-incB-interruption.png` | Échap pendant l'ouverture, puis rafale de trois ouvertures et deux Échap : aucun fantôme résiduel |
+| `atelier/capture-incB-centre-animations.png` | Réglage Normales / Réduites / Aucune dans le centre |
+
+**Mesures** (QEMU TCG, BIOS 1280×720, rendu **logiciel**) : ligne `BOUCHAUD_ATELIER_ANIMATION`, coût d'une trame composée qui anime.
+
+| Scénario | Trames | Coût moyen | Coût max |
+|---|---|---|---|
+| Fermeture Terminal (380×280), Normal | 6 | 14,5–16,3 ms | 32–51 ms |
+| Ouverture Fichiers (première trame plein écran comprise), Normal | 3–4 | 42–62 ms | 75–114 ms |
+| Fermeture, Réduit | 3 | 19,3 ms | 36,6 ms |
+| Ouverture, Réduit | 2 | 56,4 ms | 77,5 ms |
+| Mode Aucun | 0 (aucune ligne émise) | — | — |
+
+Sous TCG, l'ouverture plafonne à environ 15–25 images/s, parce que sa première trame est plein écran (fond, icônes, fenêtre neuve). La fermeture tourne à environ 60 images/s. Ce sont des chiffres d'émulation logicielle, sans accélération GPU.
+
+**Repos** (scénario de 62 s) :
+- `desktop cpu_pct` : 3 à t = 30 s, 0 à t = 60 s, identique à la base ;
+- 2 trames utiles en 54 s.
+
+**Première trame** : 5480 / 5481 / 5576 ms. L'incrément A mesurait 5301–5418 ms ; la plage historique va de 5178 à 5405 ms.
+
+**Bootimage** : 28 963 840 octets.
+
+**Non fait dans cet incrément** (prévu, à faire proprement) :
+- réduction vers l'icône du dock et restauration inverse ;
+- interpolation de la maximisation ;
+- transition de focus ;
+- fondu du centre et du menu.
+
+## 3 quinquies. Incrément C livré : dock interactif (BOUCHAUD_ATELIER_DOCK_SURVOL_V1)
+
+**Géométrie unique.** `atelier::dock::cible_sous(l, h, n, x, y)` ne lit que `cellule_applications` et `cellule_fenetre`, les mêmes boîtes que `window::start_btn` et `taskbar_btn`. Le peintre, l'infobulle, l'invalidation et le clic désignent donc la même cellule. Un test hôte le vérifie pixel par pixel, sur 3 résolutions et de 0 à 6 fenêtres.
+
+**Ce qui est livré.**
+- **Voile de survol** sur la cellule, en fondu de 120 ms (80 ms en mode réduit, instantané en mode aucun), par le registre de l'incrément B (`Nature::Survol`).
+- **Levée de l'icône** de 3 px au terme du fondu. Elle reste dans la cellule : la zone de clic ne bouge pas avec l'image. Pas de levée en mode réduit.
+- **Infobulle** au-dessus du dock :
+  - texte « Applications » ou titre de la fenêtre, avec « (réduite) » si besoin ;
+  - calque propre `Element::Infobulle`, transparent ;
+  - boîte `dock::infobulle`, gardée dans l'écran.
+- **Clic sur la cellule de la fenêtre active** : elle se réduit, par le même chemin que le bouton de la barre de titre. Un clic sur une cellule réduite la restaure.
+- **Invalidation** :
+  - le survol n'est mesuré que près du bas de l'écran ;
+  - un changement de cible invalide l'ancienne cellule et sa bulle, puis la nouvelle ;
+  - aucun survol avec le menu ou le centre ouvert.
+
+**Preuves.**
+- `test_atelier` : 72 tests (+5) :
+  - cible au pixel près ;
+  - rien hors du dock ;
+  - infobulle collée au-dessus du dock et dans l'écran ;
+  - levée dans la cellule ;
+  - durées.
+- 22/22 suites, gardes 210/210, `CI_POLICY_OK`.
+
+**Captures QEMU réelles.**
+- `atelier/sequence-incC-survol-dock.png` :
+  - survol d'Applications ;
+  - survol du Terminal (icône levée) ;
+  - sortie du dock, sans résidu.
+- `atelier/sequence-incC-reduire-restaurer.png` : clic sur la cellule active (réduite, infobulle « Terminal (réduite) »), puis nouveau clic (restaurée, indicateur d'accent).
+
+**Mesures** (TCG) :
+- un fondu de survol produit 10 à 11 trames, à 2,7–4,2 ms par trame en moyenne et 6,1 ms au pire ;
+- au repos (62 s), `desktop cpu_pct` vaut 3 à 30 s puis 0 à 60 s, avec 1 trame utile en 54 s ;
+- première trame : 5456 / 5502 ms ;
+- bootimage : 28 971 008 octets.
+
+**Non fait** :
+- grossissement au-delà de la levée (pas de taille d'icône intermédiaire en assets) ;
+- animation de lancement ;
+- apparition et disparition animées des cellules ;
+- menu contextuel du dock.
+
 ## 4. Limites connues de l'incrément 1 (assumées)
 
 - **Contenu des applications encore sombre** : Fichiers, Notes, Calculatrice et les autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (prochain incrément). Le Terminal reste sombre volontairement.
 - **Pas de mise à l'échelle HiDPI** : en 2560×1600, l'interface garde ses tailles en pixels et paraît minuscule.
 - **Icône du navigateur provisoire** (tuile « boussole ») : l'identité de Bouchaud Navigateur et son chrome restent à faire, sans toucher au moteur Ladybird.
 - **Le verre n'est pas flouté** : c'est une matière translucide légère. Aucun flou d'arrière-plan n'est implémenté, et rien ne le prétend.
-- **Pas encore de transitions animées** : `mouvement.rs` est prêt et testé, mais il n'est pas branché sur la boucle du compositeur (incrément 2).
-- **Pas de survol sur le dock** : un déplacement de souris n'invalide que l'empreinte du curseur, donc un voile de survol resterait sur la cellule quittée. Il viendra avec l'incrément 2, qui invalide la cellule quittée et la cellule atteinte.
+- ~~Pas encore de transitions animées~~ : ouverture et fermeture animées depuis l'incrément B ; la réduction vers le dock et la maximisation restent à faire.
+- ~~Pas de survol sur le dock~~ : livré par l'incrément C (voile, levée, infobulle, invalidation de l'ancienne et de la nouvelle cellule).
 - **Menu Démarrer encore sombre** : il est repositionné au-dessus du dock, mais pas restylé.
-- **Menus de la barre inertes.**
+- ~~Menus de la barre inertes~~ : retirés par l'incrément A.
 - **Icônes du bureau** : celles d'avant, libellés blancs ombrés.
 - **`test_transitions`** modélise encore les anciens boutons de barre alignés à gauche. Ses dégâts sont vérifiés contre la nouvelle bande du dock, et le modèle de position reste à aligner.
 

@@ -1,6 +1,10 @@
 # Atelier — handoff (reprise de session)
 
-**Branche** : `claude/atelier-experience-20261103`, issue de `main@69e179a4`. Le design est décrit dans [ATELIER_DESIGN_SYSTEM.md](ATELIER_DESIGN_SYSTEM.md). Aucune PR n'est ouverte.
+**Branches** :
+- `claude/atelier-experience-20261103`, issue de `main@69e179a4`, porte la PR #242 (incréments 1 et 2) ;
+- `claude/atelier-increment-a-20261104` en est issue (incréments A et suivants).
+
+Le design est décrit dans [ATELIER_DESIGN_SYSTEM.md](ATELIER_DESIGN_SYSTEM.md).
 
 ## Reprendre en 3 commandes
 
@@ -8,6 +12,9 @@
 tools/ci/build_kernel.sh                                    # bootimage BIOS
 tools/ci/run_bureau_capture.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin /tmp/cap
 BUREAU_EXPORTS="export BO_ATELIER_OUVRE=1,4,9" tools/ci/run_bureau_capture.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin /tmp/cap4
+# interaction réelle : ouvrir le centre de contrôle puis capturer
+BUREAU_GESTES=$'coin\nmouse_move -23 15\nmouse_button 1\nmouse_button 0\nattente 2\ncapture centre' \
+  tools/ci/run_bureau_capture.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin /tmp/capc
 ```
 
 La capture est dans `/tmp/cap/bureau.png`. Pour la voir, ouvrir le PNG. `kind` : 0 Terminal, 1 Fichiers, 3 Moniteur, 4 Calculatrice, 5 Rustpad, 7 Journal, 8 Services, 9 Notes, 10 Insights (le navigateur 6 est exclu).
@@ -55,11 +62,21 @@ Le fond se change dans la liste `FONDS` de la fabrique. Ajouter une variante 256
 2. **Flottant par pixel sous TCG** : +2,3 s à la première trame. Par pixel : entier seulement (`fond::mix`).
 3. **Cache d'icônes** : un emplacement par taille posée (`icones::rang`). Une nouvelle taille exige un emplacement neuf, sinon les icônes du bureau prennent la taille du dock.
 4. **Survol** : un déplacement de souris n'invalide que le curseur. Tout effet de survol doit invalider l'ancien et le nouvel élément (c'est ce que fait déjà `hovered_button_rect` pour les boutons de fenêtre).
-5. **Garde-fous de la barre haute** : `verifie-lien-reseau.py` exige une mise en page droite-gauche (`let mut droite`, ≥ 2 `droite = droite.saturating_sub`), `dessine_reseau`, la barre oblique de l'état déconnecté et `frame_clock::snapshot()` dans `draw_topbar`. `tools/dev/verifie-v15.py` exige `FPS:{:3}`. Le FPS reste donc visible, discret.
+5. **Garde-fous de la barre haute** : `verifie-lien-reseau.py` exige :
+   - une mise en page de droite à gauche (`let mut droite`, au moins 2 `droite = droite.saturating_sub`) ;
+   - `dessine_reseau` qui appelle `glyphe_reseau` ;
+   - trois glyphes distincts (connecté, débranché, alerte) ;
+   - aucun dessin à la main ;
+   - `frame_clock::snapshot()` dans `draw_topbar`, sous `reglages::diagnostic()`.
+
+   `tools/dev/verifie-v15.py` exige `FPS:{:3}`.
 6. **`verifie-chargement-unique.py`** exige `dessine_duree_chargement` dans `draw_window`.
 7. **Socket moniteur QEMU** : 108 octets maximum. Le banc utilise `/tmp/bo-moniteur.*`.
 8. **`socat` est absent du conteneur** : utiliser `tools/ci/qemu_moniteur.py SOCKET "commande"`.
 9. **Applications natives** : elles peignent pour une surface sombre. Un corps de fenêtre clair rend le terminal illisible, d'où le corps sombre jusqu'à l'incrément 3.
+10. **Souris QEMU** : un grand `mouse_move` laisse un reliquat qui absorbe les gestes suivants. Utiliser l'instruction `coin` de `BUREAU_GESTES` (pas de 120), puis des déplacements relatifs. La souris n'a pas d'accélération et est bornée à l'écran.
+12. **Animations** : rien ne s'anime avant la première trame du bureau, et une animation est datée à sa première trame composée. Pour capturer une animation en cours, utiliser `capture` dans `BUREAU_GESTES`, qui fige la VM. Le timing de l'hôte varie : prévoir des captures serrées (`attente 0.02`).
+11. **Centre de contrôle** : toute nouvelle commande doit être réelle, ou affichée comme non prise en charge. La géométrie va dans `atelier::centre`, sinon le clic et le survol divergent du dessin.
 
 ## Prochain incrément (2 — mouvement), plan précis
 

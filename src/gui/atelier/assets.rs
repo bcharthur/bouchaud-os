@@ -22,6 +22,37 @@ pub const LOGO_72: &[u8] = include_bytes!("../../assets/atelier/logo/bouchaud-os
 pub const SYMBOLE_GRILLE_22: &[u8] =
     include_bytes!("../../assets/atelier/symboles/layout-grid-22.png");
 
+/// Glyphes Lucide de la barre du haut (16 px) et du centre de controle (18 px).
+///
+/// L'etat du reseau se lit par la FORME : prise Ethernet quand le lien porte
+/// une adresse, prise debranchee quand il n'y a rien au bout, cercle d'alerte
+/// quand le cable porte mais qu'aucune adresse n'a ete obtenue.
+pub const SYMBOLE_ETHERNET_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/ethernet-port-16.png");
+pub const SYMBOLE_ETHERNET_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/ethernet-port-18.png");
+pub const SYMBOLE_DEBRANCHE_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/unplug-16.png");
+pub const SYMBOLE_DEBRANCHE_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/unplug-18.png");
+pub const SYMBOLE_ALERTE_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/circle-alert-16.png");
+pub const SYMBOLE_ALERTE_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/circle-alert-18.png");
+/// Ouvre le centre de controle.
+pub const SYMBOLE_REGLAGES_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/sliders-horizontal-16.png");
+pub const SYMBOLE_ETEINDRE_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/power-18.png");
+pub const SYMBOLE_REDEMARRER_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/rotate-ccw-18.png");
+pub const SYMBOLE_QUITTER_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/log-out-18.png");
+pub const SYMBOLE_DIAGNOSTIC_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/activity-18.png");
+pub const SYMBOLE_ECRAN_18: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/monitor-18.png");
+
 /// Fond « summer 1am » (Risto Saukonpää, LGPLv3, KDE), recadre « cover ».
 pub const FOND_1280X720: &[u8] =
     include_bytes!("../../assets/atelier/fond/summer_1am-1280x720.png");

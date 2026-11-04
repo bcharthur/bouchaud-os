@@ -327,6 +327,102 @@
       "alpha": true,
       "licence": "lucide"
     },
+    "src/assets/atelier/symboles/ethernet-port-16.png": {
+      "sha256": "12fcad95f84c14f81dac9c2b6ddbc8c9b28232d1f9b28fd269fd248661d381b0",
+      "octets": 251,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/ethernet-port-18.png": {
+      "sha256": "0d07a42390ecd77e5963381cbc6a7ce0805e6cdefcd090e85ff42c4875c03713",
+      "octets": 274,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/unplug-16.png": {
+      "sha256": "09d9f990e1eb1fbccbb27da0fad41cf98890e7bb90fff9c93eaa9fa823b399c1",
+      "octets": 248,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/unplug-18.png": {
+      "sha256": "3ca799245cf8b4d3aedb62f90c77c983065ea90c4191f82e0d8a39068ab1980a",
+      "octets": 304,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/circle-alert-16.png": {
+      "sha256": "0b4f4194f8f4170e8583aefc35ff26c00e41a0a91fd937eaeb762b240b5441f6",
+      "octets": 254,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/circle-alert-18.png": {
+      "sha256": "50489e6d4f2095d0a776ef311495b1abb89ec414df0280df2498e4de9a57f9c2",
+      "octets": 301,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/sliders-horizontal-16.png": {
+      "sha256": "ebfa180e1f2de6a489cad2ece5febeb59de2a8e62150414d31e7512ee8ea0746",
+      "octets": 223,
+      "largeur": 16,
+      "hauteur": 16,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/power-18.png": {
+      "sha256": "60d5c42bfb8e1f946e431f7ed6e5223a74d69b2885c50446e94792b0fbe8e35b",
+      "octets": 272,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/rotate-ccw-18.png": {
+      "sha256": "280fde6cac340d92b670dda32469b58595ccd9d625033dafe3c563642d164c9d",
+      "octets": 299,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/log-out-18.png": {
+      "sha256": "fba1b522caa68a880718ee7175af142c5bc94525b9791b81d083a0fe67a5976d",
+      "octets": 253,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/activity-18.png": {
+      "sha256": "c275d4b4f3b3e4ddc102b1209721634e6a0b31d27f3fb19cda4d40dc3cb4f855",
+      "octets": 270,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/symboles/monitor-18.png": {
+      "sha256": "920c9583ee0701f03193c85ddd9a6f0d348b0cd5c1c74f2e6c362e1f6fb36c3b",
+      "octets": 210,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "lucide"
+    },
     "src/assets/atelier/logo/bouchaud-os-18.png": {
       "sha256": "ec24d4db5a3c4a79f33280797ed7c1232aa38017d07fadb92dcf06ee42823077",
       "octets": 802,

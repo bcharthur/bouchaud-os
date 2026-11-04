@@ -47,7 +47,15 @@ APPS = [
     ("parametres",   "settings",               "#bcc2d0", "#666d82", "#ffffff"),
 ]
 TAILLES_APPS = (18, 40, 56)
-SYMBOLES = [("layout-grid", (22,))]
+SYMBOLES = [
+    ("layout-grid", (22,)),
+    # Barre haute (16 px) et centre de controle (18 px). L'etat du reseau se
+    # lit par la FORME du glyphe, pas seulement par sa teinte.
+    ("ethernet-port", (16, 18)), ("unplug", (16, 18)), ("circle-alert", (16, 18)),
+    ("sliders-horizontal", (16,)),
+    ("power", (18,)), ("rotate-ccw", (18,)), ("log-out", (18,)),
+    ("activity", (18,)), ("monitor", (18,)),
+]
 TAILLES_LOGO = (18, 72)
 FONDS = [("summer_1am", "summer_1am-2560x1600.jpg", ((1280, 720), (1920, 1080)))]
 
