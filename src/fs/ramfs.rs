@@ -30,6 +30,16 @@ pub const MAX_NODES: usize = 4096;
 /// 1 Mio pour les 4096 inodes : sans commune mesure avec les centaines de Mio
 /// du tas noyau.
 pub const NAME_LEN: usize = 255;
+
+/// Noeud de `/persist` une fois la zone montee (`usize::MAX` avant, ou sans
+/// zone). BOUCHAUD_ECRITURE_DIFFEREE_V1.
+static RACINE_PERSISTANTE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// La zone de persistance est montee sur le noeud `idx`.
+pub fn note_racine_persistante(idx: usize) {
+    RACINE_PERSISTANTE.store(idx, core::sync::atomic::Ordering::Relaxed);
+}
 /// Taille maximale d'un fichier (garde-fou du tas noyau).
 ///
 /// L'ancienne limite de 4 Mio suffisait aux scripts Python mais rendait
@@ -308,7 +318,32 @@ impl FileSystem {
     pub fn touche(&mut self, idx: usize) {
         if idx < MAX_NODES {
             self.nodes[idx].mtime = crate::kernel::abi::unix_time();
+            // BOUCHAUD_ECRITURE_DIFFEREE_V1 : toute modification sous
+            // `/persist` passe par ici (ecritures, troncatures, creations dans
+            // un dossier). L'ecriture differee la rendra durable.
+            if self.sous_persistant(idx) {
+                crate::fs::ecriture_differee::note_modification();
+            }
         }
+    }
+
+    /// Le noeud est-il sous la racine persistante (elle comprise) ? Borne :
+    /// un cycle dans les parents ne fait pas boucler le noyau.
+    pub fn sous_persistant(&self, mut idx: usize) -> bool {
+        let racine = RACINE_PERSISTANTE.load(Ordering::Relaxed);
+        if racine == usize::MAX {
+            return false;
+        }
+        for _ in 0..64 {
+            if idx == racine {
+                return true;
+            }
+            if idx == 0 || idx >= MAX_NODES {
+                return false;
+            }
+            idx = self.nodes[idx].parent;
+        }
+        false
     }
 
     pub fn find_child(&self, parent: usize, name: &str) -> Option<usize> {
@@ -412,6 +447,10 @@ impl FileSystem {
     pub fn libere_noeud(&mut self, idx: usize) {
         if idx == 0 || idx >= MAX_NODES || !self.nodes[idx].used {
             return;
+        }
+        // Une suppression sous `/persist` est une modification a ecrire.
+        if self.sous_persistant(idx) {
+            crate::fs::ecriture_differee::note_modification();
         }
         self.nodes[idx].used = false;
         self.nodes[idx].content = Vec::new();

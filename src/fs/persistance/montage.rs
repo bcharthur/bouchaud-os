@@ -24,6 +24,12 @@ pub fn monte() -> usize {
             return 0;
         }
     };
+    // BOUCHAUD_ECRITURE_DIFFEREE_V1 : la zone existe -- vierge ou non --, et
+    // toute modification sous cette racine est desormais comptee. Le montage
+    // lui-meme est exclu : sa generation devient la reference du fil
+    // (`note_fin_montage`), y compris quand il s'arrete sur une zone vierge.
+    crate::fs::ramfs::note_racine_persistante(racine);
+    crate::fs::ecriture_differee::note_fin_montage();
 
     // Le format V2 d'abord : deux superblocs, la generation la plus haute
     // parmi les VALIDES. Un superbloc dechire par une coupure pendant le commit
@@ -100,16 +106,29 @@ pub fn monte() -> usize {
         let taille = lit_u64(&brut[CHEMIN_MAX..CHEMIN_MAX + 8]) as usize;
         let chemin = chaine(&brut[..CHEMIN_MAX]);
         let secteurs = ((taille + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
+        // BOUCHAUD_PERSIST_META_V1 : genre, droits et proprietaire. Absents
+        // (disque d'avant), l'entree est un fichier aux droits par defaut.
+        let meta = Meta::decode(&brut[DEBUT_META..TAILLE_ENTREE]);
 
-        if !chemin.is_empty() && taille > 0 {
-            let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
-            if volume_lit(secteur, secteurs as usize, &mut tampon)
-                == secteurs as usize
-            {
-                tampon.truncate(taille);
-                if depose_sous_garde(&mut systeme, racine, &chemin, &tampon) {
-                    restaures += 1;
+        if a_restaurer(&chemin, taille, meta) {
+            let noeud = if meta.map_or(false, |m| m.dossier) {
+                dossier_sous_garde(&mut systeme, racine, &chemin)
+            } else {
+                let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
+                if volume_lit(secteur, secteurs as usize, &mut tampon) == secteurs as usize {
+                    tampon.truncate(taille);
+                    depose_noeud_sous_garde(&mut systeme, racine, &chemin, &tampon)
+                } else {
+                    None
                 }
+            };
+            if let Some(idx) = noeud {
+                if let Some(m) = meta {
+                    systeme.nodes[idx].mode = m.mode;
+                    systeme.nodes[idx].uid = m.uid;
+                    systeme.nodes[idx].gid = m.gid;
+                }
+                restaures += 1;
             }
         }
         secteur += secteurs;
@@ -126,5 +145,6 @@ pub fn monte() -> usize {
         "persistance: {} fichier(s) restaure(s) depuis le disque",
         restaures
     ));
+    crate::fs::ecriture_differee::note_fin_montage();
     restaures
 }

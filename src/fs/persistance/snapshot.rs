@@ -3,6 +3,7 @@
 struct SnapshotEntree {
     chemin: String,
     contenu: Vec<u8>,
+    meta: Meta,
 }
 
 /// Synchronisations qui ont du ecarter un cache pour tenir dans la zone.
@@ -69,12 +70,12 @@ fn rassemble_snapshot() -> Vec<SnapshotEntree> {
     // interroge le volume, pas le RAMFS.
     let zone = debut().is_some();
     let systeme = fs();
-    let meta = ecarte_les_caches_qui_debordent(rassemble_sous(&systeme), zone);
-    let mut out = Vec::with_capacity(meta.len());
-    for entree in meta {
+    let retenues = ecarte_les_caches_qui_debordent(rassemble_sous(&systeme), zone);
+    let mut out = Vec::with_capacity(retenues.len());
+    for entree in retenues {
         let mut contenu = vec![0u8; entree.longueur];
         contenu.copy_from_slice(&systeme.nodes[entree.noeud].content[..entree.longueur]);
-        out.push(SnapshotEntree { chemin: entree.chemin, contenu });
+        out.push(SnapshotEntree { chemin: entree.chemin, contenu, meta: entree.meta });
     }
     out
 }

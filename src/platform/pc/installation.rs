@@ -797,6 +797,7 @@ pub fn execute_le_montage_differe() -> bool {
         restaures
     );
     crate::kernel::dmesg::log("nvme: persistance montee apres l'arrivee au bureau");
+    crate::fs::ecriture_differee::demarre();
     true
 }
 
