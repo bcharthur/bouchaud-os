@@ -1,5 +1,13 @@
 # Userland de Bouchaud OS
 
+> **Statut.** Ce dossier construit le **userland historique** : sondes ABI, musl,
+> CPython, Qt, QuickJS, FFmpeg et l'ancien navigateur (Qt + CPython + QuickJS),
+> que `run.ps1 -Legacy` réactive. Il reste exercé par `tools/test.sh` et le
+> workflow `userland-legacy`. Le navigateur actuel est Bouchaud Navigateur
+> (Ladybird) ; les services natifs ring 3 sont dans [`userland/`](../../userland/README.md).
+> Les chemins du noyau cités plus bas ont été mis à jour ; le reste du document
+> décrit l'état de ce userland à sa rédaction.
+
 Le noyau expose désormais l'ABI Linux x86-64 : un binaire compilé pour Linux
 s'exécute en ring 3 sans recompilation du noyau. Ce dossier contient la chaîne
 de construction côté utilisateur.
@@ -127,7 +135,7 @@ complète de l'OS à chaque itération.
 
 Détails d'implémentation :
 
-* **Pilote ATA en PIO** (`src/drivers/ata.rs`), pas virtio-blk. Un virtio
+* **Pilote ATA en PIO** (`src/drivers/block/ata.rs`), pas virtio-blk. Un virtio
   serait plus rapide mais réclame une file de descripteurs, des tampons DMA et
   une négociation de fonctionnalités — beaucoup de surface pour « lire une
   archive au démarrage ». Le transfert utilise `rep insw`, qui déplace un
@@ -168,16 +176,16 @@ Deux façons de s'y conformer :
 
 | Couche | État | Où |
 |---|---|---|
-| 1. Mémoire virtuelle | frames physiques + espace d'adressage par processus | `src/kernel/vmm.rs` |
+| 1. Mémoire virtuelle | frames physiques + espace d'adressage par processus | `src/kernel/memory/` |
 | 2. Ring 3 / TSS / syscall | GDT complète, TSS RSP0, `syscall`/`sysretq`, `iretq` | `src/arch/x86_64/{gdt,usermode}.rs` |
-| 3. Chargeur ELF64 | `PT_LOAD`, `PT_INTERP`, `PT_TLS`, auxv | `src/kernel/elf.rs` |
-| 4. Appels POSIX | 107 appels, numéros et structures Linux | `src/kernel/abi/` |
+| 3. Chargeur ELF64 | `PT_LOAD`, `PT_INTERP`, `PT_TLS`, auxv | `src/kernel/process/elf.rs` |
+| 4. Appels POSIX | 107 appels, numéros et structures Linux | `src/compat/linux/` |
 | 5. Processus / threads | `fork`, `execve`, `wait4`, `clone`, futex, signaux | `src/kernel/{task,signal}.rs` |
 | 6. libc musl | **côté utilisateur** — voir ci-dessous | ce dossier |
-| 7. `ld.so` | chargé par le noyau, résout en ring 3 | `src/kernel/exec.rs` |
+| 7. `ld.so` | chargé par le noyau, résout en ring 3 | `src/kernel/process/exec.rs` |
 | 8. Runtime C++ | **côté utilisateur** — voir ci-dessous | ce dossier |
 | 9. Serveur graphique | `/dev/fb0` mmap + ioctls fbdev + evdev | `src/kernel/{fd,input}.rs` |
-| 10. Réseau | sockets TCP/UDP POSIX sur la pile du noyau | `src/kernel/abi/net.rs` |
+| 10. Réseau | sockets TCP/UDP POSIX sur la pile du noyau | `src/compat/linux/net.rs` |
 
 Les couches 6 et 8 ne sont pas du code noyau : ce sont des bibliothèques à
 compiler avec la chaîne ci-dessus. Le noyau n'a rien à savoir de leur contenu,

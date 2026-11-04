@@ -14,5 +14,9 @@ Un patch par sujet, numerote, applique dans l'ordre par `../fetch.sh`.
 4. Un patch qui cesse de s'appliquer est le signal d'une divergence a examiner.
    `fetch.sh` s'arrete alors : il ne force jamais.
 
-Ce repertoire est vide tant que le portage n'a pas besoin de diverger. C'est
-l'etat souhaitable.
+Aujourd'hui, un seul patch : `0001-intrinsics-embed-clang18.patch` (la chaine
+Bouchaud utilise Clang 18, qui ne connait pas `#embed`). L'essentiel de
+l'adaptation de Ladybird a Bouchaud passe par les scripts
+`tools/ladybird/prepare-*.py`, appliques sur l'arbre amont epingle ; leur dette
+est decrite dans `docs/current/ARCHITECTURE_CURRENT.md` (« Dette du port
+Ladybird »).

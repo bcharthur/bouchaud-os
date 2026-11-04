@@ -14,7 +14,7 @@ insuffisante, maintien long terme des ABI et qualité du processus de revue.
 **Correction d'un contresens :** `src/kernel/syscall/legacy.rs` n'est PAS la
 liste réelle des syscalls Bouchaud OS. L'entrée ring3 existe dans
 `src/arch/x86_64/usermode.rs`, le dispatch de compatibilité dans
-`src/kernel/abi/` et l'ABI native 1.0 dans `src/kernel/native/abi/`.
+`src/compat/linux/` et l'ABI native 1.0 dans `src/kernel/native/abi/`.
 Un code présent n'est pas un run : la preuve négative CPL3/SMEP, la gestion
 des fautes et l'isolation de WebContent restent à qualifier sur les images.
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "as_of": "2026-11-03",
-  "observed_main_head": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
+  "as_of": "2026-11-04",
+  "observed_main_head": "e0257c6006f965985d7b3af39a0ddc5790984526",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
   "baseline_status": "NOT_ESTABLISHED",
@@ -122,6 +122,33 @@
         "note": "still the old 3-attempt C14 witness; the deterministic witness and the PR trigger come after 19dc18ad"
       },
       "codex_review": "PASS (no findings)"
+    },
+    "push_main_69e179a4": {
+      "ci_fast": {
+        "run": 41709822155,
+        "verdict": "PASS"
+      },
+      "integration": {
+        "run": 41709822019,
+        "verdict": "PASS"
+      },
+      "reliability_v3": {
+        "run": 41709822270,
+        "verdict": "PASS"
+      },
+      "native_ipc_runtime": {
+        "run": 41709822133,
+        "verdict": "PASS"
+      },
+      "ladybird_native_browser": {
+        "run": 41709822165,
+        "verdict": "PASS"
+      },
+      "p13_primitives_noyau": {
+        "run": 41709822286,
+        "verdict": "PASS"
+      },
+      "note": "push of the PR #241 merge commit (runs listed by the GitHub API on 2026-11-04). No Security Runtime run was found for this push; it was dispatched on the PR head 5fbc5068 (run 41701349221, PASS)."
     }
   },
   "hardware": {
@@ -138,12 +165,14 @@
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd",
     "no production release key; anti-rollback (downgrade) policy not implemented",
     "SIGCHLD multithread probe: one unexplained failure on main, not reproduced in 125 targeted runs",
-    "SMP1 native IPC latency attributed (file->elu dominates), not corrected"
+    "SMP1 native IPC latency attributed (file->elu dominates), not corrected",
+    "no general-purpose on-disk VFS: RAMFS is the live filesystem, /persist rewrites its whole table per transaction, no unified page cache, no file-backed writable mmap",
+    "desktop, window manager, native apps, network stack and TLS still run in ring 0",
+    "rendering is CPU only: virtio-gpu 2D presents frames, no GPU acceleration, no 3D, no AMD driver"
   ],
   "candidate": {
-    "branch": "claude/atomic-platform-20261103",
-    "base_main": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
-    "note": "the final head SHA and its PR checks are reported in the PR, not in this file (a file cannot carry the CI result of its own commit)"
+    "branch": null,
+    "note": "PR #241 (Atomic Platform) merged into main as 69e179a4 on 2026-11-03; no qualification candidate at this snapshot. A PR's final head SHA and its checks are reported in the PR, not here."
   },
   "ladybird_sha": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
   "platform": {
@@ -169,10 +198,7 @@
     "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd"
   ],
-  "observed_work_branch": {
-    "name": "claude/atomic-platform-20261103",
-    "qualified_push_sha": "21fca026ea9306938817dc3617983655ef2b7c16"
-  },
+  "observed_work_branch": null,
   "updates_automatically": false,
   "atomic_platform": {
     "proof_levels": {
@@ -285,6 +311,74 @@
       "seen": "local TCG, 2026-11-03, 1 of 41 SMP4 'correctif' boots of run_compta_injection.sh",
       "status": "OPEN_NOT_ATTRIBUTED",
       "evidence_since": "log overwritten before reading; 36 isolated SMP4 correctif boots: 0 panic, 0 overlap; the bench now prints a panic's site and message in the job log"
+    },
+    "USB_AB_COMMIT_REFUSE_HOTE_LENT": {
+      "seen": "CI ab-rollback (sante|sans-vidange|seconde-cle, usb): main@170c8074 run 41852382131 (attempts 1 and 2), #242 fa8dc1d5 run 41886700151 attempt 1, #244 c0c0cfed run 41888093677 attempt 1; never on NVMe scenarios",
+      "status": "ATTRIBUTED_FIX_PENDING_DECISION",
+      "cause": "two consecutive BOT CSW deadlines (bot-csw-echeance, BUDGET_RUNTIME_BOT_NS=60 ms, predates #246) despite recovery and the single replay; META read or post-write re-read fails; the kernel refuses the health commit (SERVICED_UPDATE_STATE rc=-13, BOUCHAUD_UPDATE_SANTE_REFUS raison=relecture)",
+      "evidence": "same tree as main (6e447ab0 == 170c8074 tree): local TCG 0/3 failures unloaded, 2/3 under 4 CPU hogs, CI signature B- B+ reproduced",
+      "safety": "safe: no false commit, next boot commits",
+      "decision_needed": "BOT runtime budget under emulation, or serviced retrying the commit after an I/O fault (Atomic A/B): human decision"
+    },
+    "COMPTA_NON_QUALIFIANT_PR247": {
+      "seen": "#247 66b4c508 P13 run 41809544156 step 11; local SMP2 every run",
+      "status": "ATTRIBUTED_TO_PR247",
+      "cause": "lack of injected windows, not an accounting violation: correctif arm 0,1,1,0,3 windows with precharge-police vs 13,16,18 with the preload call neutralised (same kernel) and 8..27 on main; 0 overlaps everywhere",
+      "open": "exact mechanism (the preload ends near t=3.3 s)"
+    },
+    "CONSOLE_SERIE_PR247": {
+      "seen": "#247 66b4c508 P13 run 41809544156 step 21",
+      "status": "OPEN_NOT_ATTRIBUTED",
+      "evidence_since": "both TCG variants pass locally on the same kernel; KVM variants cannot run in the session"
     }
+  },
+  "open_prs": {
+    "as_of": "2026-11-04",
+    "base": "main@e0257c60",
+    "note": "#242, #243, #244 (Atelier) and #246 (USB flush) are MERGED. #247 is stacked on #245. Neither is mergeable: both must first merge main (scanout bench fix) and re-run P13.",
+    "merged": [
+      {
+        "number": 246,
+        "head": "6e447ab03616f49e9fec5ef09613ce12dc8fac1c",
+        "merge_commit": "170c80748c5a4f7cf052f8eac0c1c52e61b35ee0"
+      },
+      {
+        "number": 242,
+        "head": "fa8dc1d5eb19942ad470abb88d9841b81397a838",
+        "merge_commit": "c7e75145df81b3854db5370336ba3ef8428de982"
+      },
+      {
+        "number": 243,
+        "head": "175041cfdbe5354d39a4b03be5e1335811a42bfc",
+        "merge_commit": "ed68b11a986137da9710ea4e6f357a0547aed666"
+      },
+      {
+        "number": 244,
+        "head": "c0c0cfed1af326d1af84386488b0783e8876d2ec",
+        "merge_commit": "e0257c6006f965985d7b3af39a0ddc5790984526"
+      }
+    ],
+    "items": [
+      {
+        "number": 245,
+        "scope": "Storage S1: persistent home folders, delayed writeback, table metadata",
+        "head": "8db53f92ae4b84c18e17af8048cf94823be1ca6a",
+        "stacked_on": null,
+        "blocked_by": "P13 scanout red (bench obsolete, fixed on main by #242): must merge main and re-run P13"
+      },
+      {
+        "number": 247,
+        "scope": "Perf P1: desktop first frame -1.9 s (font subset loaded in parallel)",
+        "head": "66b4c508b5e4e96dac4f5e484658537c1f2d98b5",
+        "stacked_on": 245,
+        "blocked_by": "P13 accounting SMP2 NON_QUALIFYING, attributed to the font preload (lack of windows, no overlap); console step 21 not attributed; scanout fixed on main"
+      },
+      {
+        "number": 248,
+        "scope": "Documentation consolidation: README, sources of truth, licences",
+        "head": "this PR",
+        "stacked_on": null
+      }
+    ]
   }
 }
