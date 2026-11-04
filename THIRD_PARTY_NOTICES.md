@@ -34,15 +34,20 @@ par `Cargo.lock`.
 | QuickJS | MIT | JavaScript de l'ancien navigateur (userland historique) |
 | FFmpeg 6.1.1 | LGPL-2.1+ | media (userland) |
 
-## Dans les PR Atelier ouvertes (#242 et suivantes), pas encore sur `main`
+## Assets du bureau Atelier (sur `main` depuis les PR #242 à #244)
 
 | Composant | Licence | Usage |
 |---|---|---|
-| Lucide (icones) | ISC | glyphes des icones du bureau |
-| « summer 1am », Risto Saukonpaa (KDE plasma-workspace-wallpapers) | LGPL-3.0 | fond d'ecran, recadre par la fabrique d'assets |
-| Sous-ensemble de DejaVu Sans | Bitstream Vera / licence DejaVu | police du bureau (PR #247) |
+| Lucide (icones) | ISC, texte dans [`assets/atelier/sources/lucide/LICENSE`](assets/atelier/sources/lucide/LICENSE) | glyphes des icones du bureau |
+| « summer 1am », Risto Saukonpaa (KDE plasma-workspace-wallpapers) | LGPL-3.0, texte dans [`assets/atelier/sources/fond/LICENSE-LGPL-3.0.txt`](assets/atelier/sources/fond/LICENSE-LGPL-3.0.txt) (GPL-3.0 jointe) | fond d'ecran, recadre par la fabrique d'assets |
 
-Ces PR apportent leurs textes de licence et `assets/atelier/ATTRIBUTIONS.md`.
+Provenance et manifeste : [`assets/atelier/ATTRIBUTIONS.md`](assets/atelier/ATTRIBUTIONS.md). Le logo Bouchaud OS est provisoire.
+
+## Dans une PR ouverte, pas encore sur `main`
+
+| Composant | Licence | Usage |
+|---|---|---|
+| Sous-ensemble de DejaVu Sans | Bitstream Vera / licence DejaVu | police du bureau prechargee (PR #247) |
 
 ## Dependances de Ladybird
 
