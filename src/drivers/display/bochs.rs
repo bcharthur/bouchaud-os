@@ -94,6 +94,39 @@ fn rgb(index: u8) -> u32 {
 }
 
 static mut BACK: Option<Vec<u32>> = None;
+
+// BOUCHAUD_GFX_TAMPON_DECALE_V1
+//
+// LE TAMPON ARRIERE NE DOIT PAS ETRE ALIGNE COMME LES CACHES QU'ON Y RECOPIE.
+//
+// Le compagnon du tas rend les grandes allocations dans des blocs de 4 Mio
+// alignes : le tampon arriere (1280x720x4 = 3,5 Mio), le cache du fond d'ecran,
+// toute image plein ecran tombent tous au MEME decalage modulo 4 Mio. Une copie
+// ligne a ligne du cache du fond vers le tampon lit donc, a chaque instant, une
+// page source et ecrit une page destination dont les adresses ne different que
+// par un multiple de 4 Mio.
+//
+// Sous QEMU TCG, le TLB logiciel est a correspondance directe (index = numero
+// de page modulo sa taille, une puissance de deux) : ces deux pages prennent la
+// MEME entree, et chaque acces chasse l'autre. Mesure (`BOUCHAUD_PERF_TRAMES`,
+// deplacement de fenetre) : 24 ns par pixel pour recopier le fond, contre 3 ns
+// pour la meme copie depuis un tampon non aligne -- 6 a 9 ms par trame perdus.
+// Sur le materiel, le meme alignement met source et destination dans les memes
+// ensembles de cache et provoque le faux recouvrement « 4K aliasing » des
+// chargements derriere les ecritures.
+//
+// Le tampon commence donc `DECALAGE_BACK` pixels apres le debut de son
+// allocation : 37 pages et demie. Un nombre impair de pages, eloigne de 0 et de
+// +-1 modulo toute puissance de deux a partir de 256 entrees : quelle que soit
+// la taille que QEMU donne a son TLB, la page lue et la page ecrite d'une meme
+// ligne ne partagent plus d'entree. La demi-page separe aussi les 12 bits bas.
+// Cout : 150 Kio.
+const DECALAGE_BACK: usize = (37 * 4096 + 2048) / 4;
+
+/// Un tampon arriere de `n` pixels, decale (voir `DECALAGE_BACK`).
+fn tampon_arriere(n: usize) -> Vec<u32> {
+    vec![0u32; n + DECALAGE_BACK]
+}
 static mut LFB: *mut u32 = core::ptr::null_mut();
 // BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 (P10+.2b) : composer DIRECTEMENT dans la
 // memoire DMA du scanout virtio-gpu, sans tampon arriere ni copie. Pris a
@@ -726,7 +759,7 @@ fn enter_verrouille() {
         let canvas_width = width();
         let canvas_height = height();
         unsafe {
-            BACK = Some(vec![0u32; canvas_width * canvas_height]);
+            BACK = Some(tampon_arriere(canvas_width * canvas_height));
             LFB = core::ptr::null_mut();
             LFB_PHYS.store(0, Ordering::Release);
             USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
@@ -746,7 +779,7 @@ fn enter_verrouille() {
     let id = dispi_read(DISPI_INDEX_ID);
     let lfb = locate_lfb();
     unsafe {
-        BACK = Some(vec![0u32; width() * height()]);
+        BACK = Some(tampon_arriere(width() * height()));
         USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
         match (id >= 0xB0C0 && id <= 0xB0C5, lfb) {
             (true, Some(p)) => {
@@ -1154,7 +1187,11 @@ fn back() -> &'static mut [u32] {
         // (`active_scanout` l'a allouee pour cette geometrie).
         return unsafe { core::slice::from_raw_parts_mut(lfb, width() * height()) };
     }
-    unsafe { BACK.as_mut().map(|v| v.as_mut_slice()).unwrap_or(&mut []) }
+    unsafe {
+        BACK.as_mut()
+            .and_then(|v| v.get_mut(DECALAGE_BACK..))
+            .unwrap_or(&mut [])
+    }
 }
 
 /// `gpu-tampon direct|copie` : la politique, prise au prochain `enter()`.
@@ -1183,8 +1220,8 @@ fn quitte_memoire_scanout() {
     unsafe {
         if TAMPON_DIRECT.swap(false, Ordering::AcqRel) && !LFB.is_null() {
             let n = width() * height();
-            let mut v = vec![0u32; n];
-            core::ptr::copy_nonoverlapping(LFB, v.as_mut_ptr(), n);
+            let mut v = tampon_arriere(n);
+            core::ptr::copy_nonoverlapping(LFB, v.as_mut_ptr().add(DECALAGE_BACK), n);
             BACK = Some(v);
         }
         LFB = core::ptr::null_mut();
@@ -1497,6 +1534,43 @@ pub fn text_width(s: &str, px: f32, _bold: bool) -> usize {
 }
 
 pub mod font;
+pub mod pixels;
+
+/// Remplit une ligne du tampon (BOUCHAUD_GFX_REMPLISSAGE_STOS_V1).
+///
+/// Au-dela de quelques pixels, `rep stosq` ecrit le motif `rgb:rgb` par mots
+/// de 64 bits : deux pixels par iteration sous QEMU TCG, des lignes de cache
+/// entieres sur le materiel. En dessous, son cout de demarrage domine et la
+/// boucle ordinaire reste meilleure. Voir `pixels.rs`.
+#[inline]
+fn remplit(ligne: &mut [u32], rgb: u32) {
+    const SEUIL_STOS: usize = 16;
+    let n = ligne.len();
+    if n < SEUIL_STOS {
+        ligne.fill(rgb);
+        return;
+    }
+    let mut debut = 0usize;
+    if (ligne.as_ptr() as usize) & 7 != 0 {
+        ligne[0] = rgb;
+        debut = 1;
+    }
+    let paires = (n - debut) / 2;
+    let motif = ((rgb as u64) << 32) | rgb as u64;
+    // SAFETY : `debut + 2 * paires <= n` ; la destination est alignee sur 8
+    // et entierement dans `ligne`. L'ABI garantit DF = 0 a l'entree d'un bloc
+    // `asm!` : `rep stosq` avance.
+    unsafe {
+        core::arch::asm!("rep stosq",
+            inout("rcx") paires => _,
+            inout("rdi") ligne.as_mut_ptr().add(debut) => _,
+            in("rax") motif,
+            options(nostack, preserves_flags));
+    }
+    if debut + 2 * paires < n {
+        ligne[n - 1] = rgb;
+    }
+}
 
 // --- Primitives truecolor (RGB direct, 0x00RRGGBB) --------------------------
 // Utilisees par le moteur de rendu web (couleurs CSS + images) ; le framebuffer
@@ -1695,16 +1769,7 @@ pub fn blend_rgb(x: usize, y: usize, rgb: u32, alpha: u8) {
     // `alpha` est un u8 : `>= 255` ne peut valoir que `== 255`. Clippy le
     // refuse a juste titre -- une comparaison dont un cote est toujours faux
     // se lit comme une borne, alors que c'est une egalite.
-    if alpha == 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
-    let a = alpha as u32;
-    let inv = 255 - a;
-    let dst = buf[idx];
-    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
-    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
-    let r = (sr * a + dr * inv) / 255;
-    let g = (sg * a + dg * inv) / 255;
-    let b = (sb * a + db * inv) / 255;
-    buf[idx] = (r << 16) | (g << 8) | b;
+    melange_pixel(buf, idx, rgb, alpha);
 }
 
 // BOUCHAUD_GFX_TEXTE_SEGMENT_V1
@@ -1740,6 +1805,33 @@ pub fn blend_span(x: usize, y: usize, rgb: u32, couverture: &[u8], gras: bool) {
     if ecrits != 0 { PIXELS_TEXTE.fetch_add(ecrits, Ordering::Relaxed); }
 }
 
+/// Melange une couleur uniforme sur une suite de pixels, chacun a SA
+/// couverture (`alphas[i]` pour `x + i` ; 0 ne touche rien, 255 remplace).
+///
+/// BOUCHAUD_GFX_OMBRE_PAR_LIGNE_V1 : c'est la rampe d'une ombre douce sur les
+/// bords verticaux d'une fenetre -- huit pixels voisins, huit opacites. Huit
+/// appels a `blend_rect_rgb` d'un pixel relisaient chacun la decoupe et le
+/// tampon ; ici une fois par ligne. Compte dans `pixels_dessines`, comme
+/// `blend_rect_rgb` qu'il remplace.
+pub fn melange_rampe(x: usize, y: usize, rgb: u32, alphas: &[u8]) {
+    if alphas.is_empty() { return; }
+    let buf = back();
+    if buf.is_empty() { return; }
+    let (cx0, cy0, cx1, cy1) = clip();
+    if y < cy0 || y >= cy1 { return; }
+    let debut = cx0.saturating_sub(x).min(alphas.len());
+    let fin = cx1.saturating_sub(x).min(alphas.len());
+    if fin <= debut { return; }
+    let row = y * width() + x;
+    let mut ecrits = 0u64;
+    for (i, &alpha) in alphas[debut..fin].iter().enumerate() {
+        if alpha == 0 { continue; }
+        melange_pixel(buf, row + debut + i, rgb, alpha);
+        ecrits += 1;
+    }
+    if ecrits != 0 { PIXELS_DESSINES.fetch_add(ecrits, Ordering::Relaxed); }
+}
+
 /// Melange source sur destination a l'index deja verifie.
 #[inline]
 fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
@@ -1747,15 +1839,8 @@ fn melange_pixel(buf: &mut [u32], idx: usize, rgb: u32, alpha: u8) {
     // refuse a juste titre -- une comparaison dont un cote est toujours faux
     // se lit comme une borne, alors que c'est une egalite.
     if alpha == 255 { buf[idx] = rgb & 0x00ff_ffff; return; }
-    let a = alpha as u32;
-    let inv = 255 - a;
-    let dst = buf[idx];
-    let dr = (dst >> 16) & 0xff; let dg = (dst >> 8) & 0xff; let db = dst & 0xff;
-    let sr = (rgb >> 16) & 0xff; let sg = (rgb >> 8) & 0xff; let sb = rgb & 0xff;
-    let r = (sr * a + dr * inv) / 255;
-    let g = (sg * a + dg * inv) / 255;
-    let b = (sb * a + db * inv) / 255;
-    buf[idx] = (r << 16) | (g << 8) | b;
+    // Meme resultat au bit pres que la formule a trois canaux : `pixels.rs`.
+    buf[idx] = pixels::melange(buf[idx], rgb, alpha as u32);
 }
 
 // BOUCHAUD_GFX_IMAGE_SEGMENT_V1
@@ -1814,9 +1899,9 @@ pub fn blend_rect_rgb(x: usize, y: usize, w: usize, rgb: u32, alpha: u8) {
     let x1 = (x + w).min(cx1);
     if x1 <= x0 { return; }
     let row = y * width();
-    for px in x0..x1 {
-        melange_pixel(buf, row + px, rgb, alpha);
-    }
+    // Une tranche, une verification de bornes, et la part de la source
+    // calculee une fois : `pixels::melange_ligne`.
+    pixels::melange_ligne(&mut buf[row + x0..row + x1], rgb & 0x00ff_ffff, alpha as u32);
     note_pixels_dessines((x1 - x0) as u64);
 }
 
@@ -1847,7 +1932,7 @@ pub fn fill_rect_rgb(x: usize, y: usize, w: usize, h: usize, rgb: u32) {
     let mut yy = y0;
     while yy < y1 {
         let row = yy * width();
-        buf[row + x0..row + x1].fill(rgb);
+        remplit(&mut buf[row + x0..row + x1], rgb);
         yy += 1;
     }
     PIXELS_DESSINES.fetch_add(((x1 - x0) * (y1 - y0)) as u64, Ordering::Relaxed);

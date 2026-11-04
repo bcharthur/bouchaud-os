@@ -108,17 +108,33 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
     else { Some(Rect::new(x, y, (right - x) as u32, (bottom - y) as u32)) }
 }
 
-/// Racine carree entiere, par recherche dichotomique. Aucun flottant : ce code
-/// tourne dans le noyau, ou la FPU appartient a la tache interrompue.
-fn racine(valeur: i32) -> i32 {
+/// Racine carree entiere : le plus grand `r` tel que `r * r <= valeur`. Aucun
+/// flottant : ce code tourne dans le noyau, ou la FPU appartient a la tache
+/// interrompue.
+///
+/// BOUCHAUD_GFX_RACINE_CHIFFRES_V1 : chiffre par chiffre (base 4), sans
+/// multiplication. La recherche dichotomique d'avant faisait seize tours avec
+/// une multiplication saturante chacun ; les coins anti-crenelees et les
+/// anneaux d'ombre l'appellent a chaque ligne de coin, et c'etait la fonction
+/// de rendu la plus echantillonnee apres le remplissage et la copie
+/// (deplacement de fenetre, QEMU TCG). Meme resultat pour toute valeur :
+/// `tools/gui/test_anticrenelage.rs` compare les deux.
+pub(crate) fn racine(valeur: i32) -> i32 {
     if valeur <= 0 { return 0 }
-    let mut bas = 0i32;
-    let mut haut = 46_341i32.min(valeur + 1);
-    while bas < haut {
-        let milieu = bas + (haut - bas + 1) / 2;
-        if milieu.saturating_mul(milieu) <= valeur { bas = milieu } else { haut = milieu - 1 }
+    let mut reste = valeur as u32;
+    let mut resultat = 0u32;
+    // La plus grande puissance de 4 qui ne depasse pas la valeur.
+    let mut bit = 1u32 << ((31 - reste.leading_zeros()) & !1);
+    while bit != 0 {
+        if reste >= resultat + bit {
+            reste -= resultat + bit;
+            resultat = (resultat >> 1) + bit;
+        } else {
+            resultat >>= 1;
+        }
+        bit >>= 2;
     }
-    bas
+    resultat as i32
 }
 
 /// LA definition de la forme. `bornes_ligne` en est la resolution analytique,
@@ -140,7 +156,7 @@ fn inside_rounded(x: i32, y: i32, width: i32, height: i32, radius: i32) -> bool 
 /// `None` si la ligne ne contient aucun pixel. C'est l'inverse analytique de
 /// [`inside_rounded`] : au lieu de tester chaque abscisse, on calcule les deux
 /// seules qui comptent.
-fn bornes_ligne(largeur: i32, hauteur: i32, radius: i32, y: i32) -> Option<(i32, i32)> {
+pub(crate) fn bornes_ligne(largeur: i32, hauteur: i32, radius: i32, y: i32) -> Option<(i32, i32)> {
     if largeur <= 0 || hauteur <= 0 || y < 0 || y >= hauteur { return None }
     let radius = radius.max(0).min(largeur.min(hauteur) / 2);
     if radius == 0 { return Some((0, largeur)) }
@@ -463,22 +479,49 @@ pub fn spans_rounded_rect_aa_sauf<F: FnMut(i32, i32, u32, u8)>(rect: Rect, radiu
         let x0 = (rect.x + debut - 1).max(area.x);
         let x1 = (rect.x + fin + 1).min(area.right());
 
+        // BOUCHAUD_GFX_COINS_SANS_MILIEU_V1 : entre les deux arcs, la
+        // couverture vaut 255 sur toute la ligne (`couverture_pixel` sort par
+        // `return 255` des que x n'est dans aucun coin). On la pose d'un bloc
+        // au lieu de la recalculer pixel par pixel -- c'etait toute la
+        // largeur de la fenetre, sur chaque ligne des bandes de coin. Les
+        // courses emises sont EXACTEMENT celles de la boucle pixel par pixel
+        // (`tools/gui/test_anticrenelage.rs` les compare). Une ligne coupee par
+        // l'exclusion garde le chemin pixel par pixel.
+        let coupe_ligne = exclusion.width > 0 && exclusion.height > 0
+            && y >= exclusion.y && y < exclusion.bottom();
+        let (milieu_debut, milieu_fin) = (rect.x + radius, rect.x + largeur - radius);
         let mut course_debut = x0;
         let mut course_valeur = 0u8;
         let mut course_active = false;
-        for x in x0..x1 {
+        let mut x = x0;
+        while x < x1 {
+            if !coupe_ligne && x >= milieu_debut && x < milieu_fin {
+                if !(course_active && course_valeur == 255) {
+                    if course_active && course_valeur != 0 {
+                        touches += (x - course_debut) as usize;
+                        segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+                    }
+                    course_debut = x;
+                    course_valeur = 255;
+                    course_active = true;
+                }
+                x = milieu_fin.min(x1);
+                continue;
+            }
             // Un pixel exclu se comporte comme un pixel de couverture nulle :
             // il interrompt la course en cours et n'en ouvre aucune.
             let c = if exclue(x, y) { 0 }
                 else { couverture_pixel(x - rect.x, ly, largeur, hauteur, radius) };
-            if course_active && c == course_valeur { continue }
-            if course_active && course_valeur != 0 {
-                touches += (x - course_debut) as usize;
-                segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+            if !(course_active && c == course_valeur) {
+                if course_active && course_valeur != 0 {
+                    touches += (x - course_debut) as usize;
+                    segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+                }
+                course_debut = x;
+                course_valeur = c;
+                course_active = true;
             }
-            course_debut = x;
-            course_valeur = c;
-            course_active = true;
+            x += 1;
         }
         if course_active && course_valeur != 0 && x1 > course_debut {
             touches += (x1 - course_debut) as usize;
@@ -564,19 +607,38 @@ pub fn spans_stroke_rounded_rect_aa<F: FnMut(i32, i32, u32, u8)>(rect: Rect, rad
         let x0 = (rect.x + debut - 1).max(area.x);
         let x1 = (rect.x + fin + 1).min(area.right());
 
+        // BOUCHAUD_GFX_COINS_SANS_MILIEU_V1 : entre les deux arcs, la forme
+        // exterieure couvre a 255 et l'interieure a une valeur qui ne depend
+        // que de la ligne -- tant que l'epaisseur ne depasse pas le rayon (sinon
+        // le milieu interieur ne recouvre plus le milieu exterieur, et on
+        // garde le chemin pixel par pixel). Une seule evaluation pour tout le
+        // milieu, memes courses emises.
+        let (milieu_debut, milieu_fin) = if radius >= epaisseur {
+            (rect.x + radius, rect.x + largeur - radius)
+        } else { (0, 0) };
+        let c_milieu = if milieu_fin > milieu_debut {
+            couverture_contour(radius, ly, largeur, hauteur, radius, epaisseur)
+        } else { 0 };
         let mut course_debut = x0;
         let mut course_valeur = 0u8;
         let mut course_active = false;
-        for x in x0..x1 {
-            let c = couverture_contour(x - rect.x, ly, largeur, hauteur, radius, epaisseur);
-            if course_active && c == course_valeur { continue }
-            if course_active && course_valeur != 0 {
-                touches += (x - course_debut) as usize;
-                segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+        let mut x = x0;
+        while x < x1 {
+            let (c, suivant) = if x >= milieu_debut && x < milieu_fin {
+                (c_milieu, milieu_fin.min(x1))
+            } else {
+                (couverture_contour(x - rect.x, ly, largeur, hauteur, radius, epaisseur), x + 1)
+            };
+            if !(course_active && c == course_valeur) {
+                if course_active && course_valeur != 0 {
+                    touches += (x - course_debut) as usize;
+                    segment(course_debut, y, (x - course_debut) as u32, course_valeur);
+                }
+                course_debut = x;
+                course_valeur = c;
+                course_active = true;
             }
-            course_debut = x;
-            course_valeur = c;
-            course_active = true;
+            x = suivant;
         }
         if course_active && course_valeur != 0 && x1 > course_debut {
             touches += (x1 - course_debut) as usize;

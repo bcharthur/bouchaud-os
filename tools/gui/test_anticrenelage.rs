@@ -433,3 +433,203 @@ fn un_contour_degenere_ne_panique_pas() {
         |_, _, largeur, _| vu += largeur as usize);
     assert!(vu > 0, "une forme entierement pleine doit tout de meme se peindre");
 }
+
+// BOUCHAUD_GFX_COINS_SANS_MILIEU_V1
+//
+// Les rasteriseurs sautent le milieu des bandes de coin, ou la couverture est
+// constante. Ce qu'ils emettent doit rester EXACTEMENT ce qu'emettait la boucle
+// pixel par pixel. Les deux references ci-dessous sont ces boucles, recopiees
+// telles qu'elles etaient avant l'optimisation, sur les fonctions de
+// couverture de production.
+
+type Segments = alloc::vec::Vec<(i32, i32, u32, u8)>;
+
+fn intersection(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x); let y0 = a.y.max(b.y);
+    let x1 = a.right().min(b.right()); let y1 = a.bottom().min(b.bottom());
+    (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
+/// Une ligne de bande de coin, pixel par pixel : courses de couverture egale.
+fn courses_pixel_par_pixel(sortie: &mut Segments, y: i32, x0: i32, x1: i32,
+    couverture: impl Fn(i32) -> u8) {
+    let mut course_debut = x0;
+    let mut course_valeur = 0u8;
+    let mut course_active = false;
+    for x in x0..x1 {
+        let c = couverture(x);
+        if course_active && c == course_valeur { continue }
+        if course_active && course_valeur != 0 {
+            sortie.push((course_debut, y, (x - course_debut) as u32, course_valeur));
+        }
+        course_debut = x;
+        course_valeur = c;
+        course_active = true;
+    }
+    if course_active && course_valeur != 0 && x1 > course_debut {
+        sortie.push((course_debut, y, (x1 - course_debut) as u32, course_valeur));
+    }
+}
+
+fn remplissage_de_reference(rect: Rect, radius: u32, clip: Rect, exclusion: Rect) -> Segments {
+    let mut sortie = Segments::new();
+    let Some(area) = intersection(rect, clip) else { return sortie };
+    let exclue = |x: i32, y: i32| exclusion.width > 0 && exclusion.height > 0
+        && x >= exclusion.x && x < exclusion.right() && y >= exclusion.y && y < exclusion.bottom();
+    let (largeur, hauteur) = (rect.width as i32, rect.height as i32);
+    let radius = (radius as i32).max(0).min(largeur.min(hauteur) / 2);
+    for y in area.y..area.bottom() {
+        let ly = y - rect.y;
+        if radius == 0 || (ly >= radius && ly < hauteur - radius) {
+            let (x0, x1) = (area.x, area.right());
+            let coupe = exclusion.width > 0 && exclusion.height > 0
+                && y >= exclusion.y && y < exclusion.bottom();
+            if !coupe { sortie.push((x0, y, (x1 - x0) as u32, 255)); continue; }
+            let mut pose = |a: i32, b: i32| if b > a { sortie.push((a, y, (b - a) as u32, 255)) };
+            pose(x0, x1.min(exclusion.x));
+            pose(x0.max(exclusion.right()), x1);
+            continue;
+        }
+        let Some((debut, fin)) = graphics::bornes_ligne(largeur, hauteur, radius, ly) else { continue };
+        let x0 = (rect.x + debut - 1).max(area.x);
+        let x1 = (rect.x + fin + 1).min(area.right());
+        courses_pixel_par_pixel(&mut sortie, y, x0, x1, |x| if exclue(x, y) { 0 }
+            else { couverture_pixel(x - rect.x, ly, largeur, hauteur, radius) });
+    }
+    sortie
+}
+
+fn contour_de_reference(rect: Rect, radius: u32, thickness: u32, clip: Rect) -> Segments {
+    let mut sortie = Segments::new();
+    let Some(area) = intersection(rect, clip) else { return sortie };
+    let (largeur, hauteur) = (rect.width as i32, rect.height as i32);
+    let epaisseur = thickness as i32;
+    let radius = (radius as i32).max(0).min(largeur.min(hauteur) / 2);
+    for y in area.y..area.bottom() {
+        let ly = y - rect.y;
+        if radius == 0 || (ly >= radius && ly < hauteur - radius) {
+            let mut pose = |a: i32, b: i32| {
+                let x0 = (rect.x + a).max(area.x);
+                let x1 = (rect.x + b).min(area.right());
+                if x1 > x0 { sortie.push((x0, y, (x1 - x0) as u32, 255)); }
+            };
+            if epaisseur * 2 >= largeur { pose(0, largeur); }
+            else { pose(0, epaisseur); pose(largeur - epaisseur, largeur); }
+            continue;
+        }
+        let Some((debut, fin)) = graphics::bornes_ligne(largeur, hauteur, radius, ly) else { continue };
+        let x0 = (rect.x + debut - 1).max(area.x);
+        let x1 = (rect.x + fin + 1).min(area.right());
+        courses_pixel_par_pixel(&mut sortie, y, x0, x1,
+            |x| couverture_contour(x - rect.x, ly, largeur, hauteur, radius, epaisseur));
+    }
+    sortie
+}
+
+const DECOUPES: [Rect; 5] = [
+    Rect::new(-50, -50, 2000, 2000),
+    Rect::new(3, 2, 40, 9),
+    Rect::new(7, 0, 5, 200),
+    Rect::new(0, 5, 300, 3),
+    Rect::new(20, 11, 70, 60),
+];
+const TAILLES: [(i32, i32); 8] = [(1, 1), (2, 3), (9, 9), (40, 17), (64, 64), (93, 31), (300, 41), (780, 470)];
+const RAYONS: [u32; 10] = [0, 1, 2, 3, 5, 8, 12, 14, 20, 40];
+
+#[test]
+fn le_remplissage_emet_les_memes_courses_que_la_boucle_pixel_par_pixel() {
+    for (l, h) in TAILLES {
+        for r in RAYONS {
+            let forme = Rect::new(4, 3, l as u32, h as u32);
+            for decoupe in DECOUPES {
+                let mut obtenu = Segments::new();
+                spans_rounded_rect_aa(forme, r, decoupe,
+                    |x, y, largeur, c| obtenu.push((x, y, largeur, c)));
+                assert_eq!(obtenu, remplissage_de_reference(forme, r, decoupe, Rect::new(0, 0, 0, 0)),
+                    "l={} h={} r={} decoupe={:?}", l, h, r,
+                    (decoupe.x, decoupe.y, decoupe.width, decoupe.height));
+            }
+        }
+    }
+}
+
+#[test]
+fn le_remplissage_prive_d_une_exclusion_emet_les_memes_courses() {
+    use graphics::spans_rounded_rect_aa_sauf;
+    for (l, h) in [(90, 50), (780, 470), (40, 17)] {
+        for r in [0u32, 3, 12, 14] {
+            let forme = Rect::new(2, 1, l as u32, h as u32);
+            for exclusion in [Rect::new(5, 2, 60, 30), Rect::new(0, 0, 90, 4), Rect::new(30, 40, 10, 20),
+                Rect::new(-5, 8, 200, 3), Rect::new(0, 0, 0, 0), Rect::new(3, 1, 776, 466)] {
+                for decoupe in DECOUPES {
+                    let mut obtenu = Segments::new();
+                    spans_rounded_rect_aa_sauf(forme, r, decoupe, exclusion,
+                        |x, y, largeur, c| obtenu.push((x, y, largeur, c)));
+                    assert_eq!(obtenu, remplissage_de_reference(forme, r, decoupe, exclusion),
+                        "l={} h={} r={} exclusion={:?}", l, h, r,
+                        (exclusion.x, exclusion.y, exclusion.width, exclusion.height));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn le_contour_emet_les_memes_courses_que_la_boucle_pixel_par_pixel() {
+    for (l, h) in TAILLES {
+        for r in RAYONS {
+            for e in [0u32, 1, 2, 3, 6, 13] {
+                let forme = Rect::new(4, 3, l as u32, h as u32);
+                for decoupe in DECOUPES {
+                    let mut obtenu = Segments::new();
+                    spans_stroke_rounded_rect_aa(forme, r, e, decoupe,
+                        |x, y, largeur, c| obtenu.push((x, y, largeur, c)));
+                    assert_eq!(obtenu, contour_de_reference(forme, r, e, decoupe),
+                        "l={} h={} r={} e={} decoupe={:?}", l, h, r, e,
+                        (decoupe.x, decoupe.y, decoupe.width, decoupe.height));
+                }
+            }
+        }
+    }
+}
+
+// BOUCHAUD_GFX_RACINE_CHIFFRES_V1 : la racine chiffre par chiffre rend ce que
+// rendait la recherche dichotomique, recopiee ici telle qu'elle etait.
+fn racine_dichotomique(valeur: i32) -> i32 {
+    if valeur <= 0 { return 0 }
+    let mut bas = 0i32;
+    let mut haut = 46_341i32.min(valeur + 1);
+    while bas < haut {
+        let milieu = bas + (haut - bas + 1) / 2;
+        if milieu.saturating_mul(milieu) <= valeur { bas = milieu } else { haut = milieu - 1 }
+    }
+    bas
+}
+
+#[test]
+fn la_racine_chiffre_par_chiffre_egale_la_dichotomie() {
+    use graphics::racine;
+    // Tout l'intervalle que les coins atteignent (rayons jusqu'a 1024 pixels,
+    // distances mises a l'echelle de 16), puis les carres et leurs voisins, les
+    // negatifs et les extremes.
+    for v in -16..=(1 << 22) {
+        assert_eq!(racine(v), racine_dichotomique(v), "v = {}", v);
+    }
+    for r in 0..=46_340i64 {
+        for v in [r * r - 1, r * r, r * r + 1] {
+            if v >= 0 && v < i32::MAX as i64 {
+                assert_eq!(racine(v as i32), racine_dichotomique(v as i32), "v = {}", v);
+            }
+        }
+    }
+    let mut graine = 0x9e37_79b9u32;
+    for _ in 0..200_000 {
+        graine ^= graine << 13; graine ^= graine >> 17; graine ^= graine << 5;
+        let v = ((graine >> 1) as i32).min(i32::MAX - 1);
+        assert_eq!(racine(v), racine_dichotomique(v), "v = {}", v);
+    }
+    // La dichotomie debordait sur `valeur + 1` a `i32::MAX` (aucun coin n'y
+    // arrive) ; la nouvelle racine y rend la bonne valeur.
+    assert_eq!(racine(i32::MAX), 46_340);
+    assert_eq!(racine(i32::MIN), 0);
+}
