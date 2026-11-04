@@ -587,6 +587,38 @@ jobs:
           path: target/usb-stockage-ci/usb-stockage.log
           if-no-files-found: warn
 
+  # BOUCHAUD_USB_LIAISON_SUPPORT_V1 / BOUCHAUD_USB_REFUS_SCSI_V1 : le volume USB
+  # designe UN support, et un refus de vidange se traite selon le protocole.
+  # Six demarrages, image par defaut : une cle qui vide ; une sonde refusee ;
+  # deux cles aux capacites differentes, dans les deux ordres ; un refus SCSI
+  # REEL en cours d'usage (QEMU `blkdebug`), suivi d'E/S ordinaires ; un
+  # debranchement puis un rebranchement. 3,5 min mesurees en local.
+  usb-liaison:
+    name: qemu / liaison volume usb
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Liaison volume/support, refus SCSI, rebranchement
+        run: tools/ci/run_usb_liaison.sh image/bootimage-bouchaud-os.bin target/usb-liaison-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-usb-liaison
+          path: |
+            target/usb-liaison-ci/*/serie.log
+            target/usb-liaison-ci/*/releve.txt
+          if-no-files-found: warn
+
   brdp-qemu-e2e:
     name: qemu / BRDP + telemetry e2e
     needs: gate
@@ -623,7 +655,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, brdp-qemu-e2e]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -641,6 +673,7 @@ jobs:
           USB: ${{ needs.usb-arbre.result }}
           PLUG: ${{ needs.usb-branchement.result }}
           STOCK: ${{ needs.usb-stockage.result }}
+          LIAISON: ${{ needs.usb-liaison.result }}
           BRDP: ${{ needs.brdp-qemu-e2e.result }}
         run: |
           if [ "$ENABLED" != true ]; then
@@ -648,7 +681,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" brdp "$BRDP"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -658,7 +691,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -667,7 +700,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

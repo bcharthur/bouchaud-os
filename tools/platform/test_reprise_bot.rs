@@ -188,3 +188,32 @@ fn chaque_etat_phase_et_incident_a_un_code_et_un_nom_stables() {
     assert_eq!(Etat::depuis_code(99), Etat::Pret);
     assert_eq!(Phase::depuis_code(99), Phase::Repos);
 }
+
+// BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1 : l'etat du transport est unique, mais
+// une reprise en attente appartient au support qui a eu l'incident.
+
+#[test]
+fn une_reprise_en_attente_n_appartient_qu_au_support_fautif() {
+    let t = Transport::neuf();
+    assert!(t.concerne(1) && t.concerne(2), "transport sain : tout support peut emettre");
+    t.incident(Incident::Echeance, 1, 3, 10);
+    assert!(t.concerne(1));
+    assert!(!t.concerne(2), "le support 2 ne doit pas reprendre a la place du support 1");
+}
+
+#[test]
+fn la_mise_en_service_d_un_second_support_n_efface_pas_la_reprise_du_premier() {
+    let t = Transport::neuf();
+    t.incident(Incident::Echeance, 1, 3, 10);
+    assert!(!t.remet_a_neuf_pour(2));
+    assert_eq!(t.etat(), Etat::Reprise, "le TD abandonne du support 1 est toujours la");
+    assert!(t.remet_a_neuf_pour(1), "le support fautif, lui, repart de zero");
+    assert_eq!(t.etat(), Etat::Pret);
+}
+
+#[test]
+fn remettre_a_neuf_un_transport_sain_reste_permis() {
+    let t = Transport::neuf();
+    assert!(t.remet_a_neuf_pour(9));
+    assert_eq!(t.etat(), Etat::Pret);
+}

@@ -285,6 +285,9 @@ mod concentrateur;
 // diverger sans que rien ne le dise.
 #[path = "stockage/decodage.rs"]
 mod stockage;
+/// Liaison du volume a un support et refus de vidange : pur, voir le fichier.
+#[path = "stockage/liaison.rs"]
+mod liaison;
 
 include!("blackbox_storage.rs"); // BOUCHAUD_TRIGKEY_BLACKBOX_V2
 
@@ -752,6 +755,9 @@ pub const INJECTE_ECHEANCE_DONNEES: u32 = 1 << 0;
 pub const INJECTE_ECHEANCE_STATUT: u32 = 1 << 1;
 /// Prochaine prise du verrou : refusee comme si un autre le tenait.
 pub const INJECTE_VERROU_TENU: u32 = 1 << 2;
+/// Prochain `SYNCHRONIZE CACHE` : refuse, comme par un support qui ne la
+/// connait pas (BOUCHAUD_USB_VIDANGE_REELLE_V1, temoin negatif).
+pub const INJECTE_REFUS_VIDANGE: u32 = 1 << 3;
 
 static INJECTIONS: AtomicU32 = AtomicU32::new(0);
 static INJECTIONS_CONSOMMEES: AtomicU64 = AtomicU64::new(0);
@@ -1109,6 +1115,12 @@ const POINT_BULK_VIDE: PointBulk = PointBulk { dci: 0, adresse: 0, ring: EMPTY_R
 #[derive(Clone, Copy)]
 struct Stockage {
     actif: bool,
+    /// BOUCHAUD_USB_LIAISON_SUPPORT_V1 : identite du support depuis le
+    /// demarrage, jamais reutilisee. Le `slot_id`, lui, est recycle par le
+    /// controleur ; l'indice dans `stockages`, par le compactage.
+    numero: liaison::Numero,
+    /// `SYNCHRONIZE CACHE` termine par CE support a la sonde de montage.
+    vidange_sondee: bool,
     slot_id: u8,
     interface: u8,
     entree: PointBulk,
@@ -1131,6 +1143,8 @@ struct Stockage {
 
 const STOCKAGE_VIDE: Stockage = Stockage {
     actif: false,
+    numero: 0,
+    vidange_sondee: false,
     slot_id: 0,
     interface: 0,
     entree: POINT_BULK_VIDE,
@@ -3438,6 +3452,12 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
     while index < controller.stockage_count {
         if controller.stockages[index].slot_id == slot {
             let st = controller.stockages[index];
+            // BOUCHAUD_USB_LIAISON_SUPPORT_V1 : si c'etait le support du
+            // volume, le volume devient orphelin AVANT que l'entree ne quitte
+            // la table -- aucune entree-sortie ne peut plus le designer.
+            note_support_retire(st.numero);
+            // Une reprise en attente sur CE support meurt avec son anneau.
+            TRANSPORT_BOT.remet_a_neuf_pour(st.slot_id);
             memory::free_dma(st.entree.ring.phys, RING_BYTES);
             memory::free_dma(st.sortie.ring.phys, RING_BYTES);
             memory::free_dma(st.donnees_phys, TAMPON_STOCKAGE);
@@ -3447,7 +3467,7 @@ fn retire_slot(controller: &mut Controller, slot: u8) -> usize {
             controller.stockages[dernier] = STOCKAGE_VIDE;
             controller.stockage_count = dernier;
             retires += 1;
-            crate::serial_println!("BOUCHAUD_USB_STOCKAGE_RETIRE slot={}", slot);
+            crate::serial_println!("BOUCHAUD_USB_STOCKAGE_RETIRE slot={} numero={}", slot, st.numero);
             continue;
         }
         index += 1;
@@ -4905,6 +4925,8 @@ fn configure_stockage(
     let index = controller.stockage_count;
     controller.stockages[index] = Stockage {
         actif: true,
+        numero: PROCHAIN_NUMERO_SUPPORT.fetch_add(1, Ordering::Relaxed),
+        vidange_sondee: false,
         slot_id: device.slot_id,
         interface: iface.interface,
         entree: PointBulk { dci: dci_in, adresse: iface.entree, ring: ring_in },
@@ -4921,9 +4943,9 @@ fn configure_stockage(
     controller.stockage_count = index + 1;
     STOCKAGES_TROUVES.fetch_add(1, Ordering::Relaxed);
     crate::serial_println!(
-        "BOUCHAUD_USB_STOCKAGE_TROUVE slot={} if={} in={:#04x}/dci{} out={:#04x}/dci{} mps={}",
+        "BOUCHAUD_USB_STOCKAGE_TROUVE slot={} if={} in={:#04x}/dci{} out={:#04x}/dci{} mps={} numero={}",
         device.slot_id, iface.interface, iface.entree, dci_in, iface.sortie, dci_out,
-        iface.entree_mps,
+        iface.entree_mps, controller.stockages[index].numero,
     );
     Ok(index)
 }
@@ -5188,6 +5210,12 @@ fn reprise_bot_complete(
     if TRANSPORT_BOT.etat() == Etat::HorsService {
         return false;
     }
+    // BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1 : la reprise en attente appartient
+    // a un AUTRE support. Reinitialiser celui-ci remettrait l'etat a `Pret`
+    // sans jeter le TD abandonne sur l'anneau de l'autre.
+    if !TRANSPORT_BOT.concerne(controller.stockages[index].slot_id) {
+        return false;
+    }
     if !TRANSPORT_BOT.commence_reprise() {
         return TRANSPORT_BOT.etat() == Etat::Pret;
     }
@@ -5413,17 +5441,64 @@ fn demarre_stockage(
     // Le support vient de repondre a `INQUIRY` et `READ CAPACITY` : le
     // transport est coherent, quoi qu'il ait fallu traverser pour en arriver
     // la. Les compteurs d'histoire, eux, survivent.
-    TRANSPORT_BOT.remet_a_neuf();
+    // BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1 : seulement si l'etat en cours
+    // est le sien. Une reprise que doit encore faire le support du volume ne
+    // s'efface pas parce qu'une seconde cle vient de repondre.
+    TRANSPORT_BOT.remet_a_neuf_pour(slot_id);
     crate::serial_println!(
         "BOUCHAUD_USB_STOCKAGE_PRET slot={} blocs={} taille_bloc={} octets={} amovible={}",
         slot_id, blocs, taille_bloc, capacite.octets(), amovible as u8,
     );
+    // BOUCHAUD_USB_VIDANGE_REELLE_V1 : la barriere est PROUVEE au montage,
+    // jamais supposee. Un refus laisse `vidange_reelle` a faux et le volume
+    // utilisable en lecture et en ecriture, sans promesse de durabilite.
+    #[cfg(feature = "banc-ab-sans-vidange")]
+    arme_injection(INJECTE_REFUS_VIDANGE);
+    // Le scenario de la revue : la cle de demarrage vide, une seconde cle
+    // refuse. La seconde ne doit rien changer au volume de la premiere.
+    #[cfg(feature = "banc-ab-seconde-cle-sans-vidange")]
+    if controller.stockages[index].numero >= 2 {
+        arme_injection(INJECTE_REFUS_VIDANGE);
+    }
+    let sonde = stockage_vidange(controller, device, index);
+    let sens = match sonde {
+        Ok(()) => None,
+        Err(motif) => traite_refus_vidange(controller, device, index, motif),
+    };
+    let numero = controller.stockages[index].numero;
+    controller.stockages[index].vidange_sondee = sonde.is_ok();
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_VIDANGE numero={} slot={} sonde={} vidange_reelle={} sens={}",
+        numero, slot_id,
+        match sonde { Ok(()) => "ok", Err(raison) => raison },
+        sonde.is_ok() as u8,
+        FormatSens(sens),
+    );
+    // BOUCHAUD_USB_LIAISON_SUPPORT_V1
+    //
     // LE VOLUME EST PUBLIE ICI, ET C'EST CE QUI FAIT DE CE PILOTE UN PILOTE.
     //
     // Sans enregistrement, la pile BOT n'aurait pour appelant que le test qui
     // la prouve. Enregistree, la cle devient lisible par FAT32, par le
     // decoupage GPT et par la persistance sans qu'aucun des trois ne change.
-    publie_le_volume_usb(taille_bloc, blocs);
+    //
+    // Mais un seul support porte le volume : le premier pret. Un second
+    // support ne republie ni sa geometrie ni sa capacite de vidange -- c'est
+    // exactement ce qui laissait une cle decider pour l'autre.
+    let (apres, decision) = liaison_courante().support_pret(numero, sonde.is_ok());
+    publie_liaison(apres);
+    match decision {
+        liaison::Decision::Lie => publie_le_volume_usb(numero, taille_bloc, blocs),
+        liaison::Decision::DejaLie(lie) => crate::serial_println!(
+            "BOUCHAUD_USB_STOCKAGE_NON_PUBLIE numero={} raison=volume-deja-lie lie={}",
+            numero, lie,
+        ),
+        liaison::Decision::VolumeOrphelin => crate::serial_println!(
+            "BOUCHAUD_USB_STOCKAGE_NON_PUBLIE numero={} raison=volume-orphelin \
+             (support d'origine retire : identite incertaine jusqu'au redemarrage)",
+            numero,
+        ),
+    }
     Ok(())
 }
 
@@ -5557,6 +5632,165 @@ pub const VOLUME_USB: Volume = Volume(3);
 /// Capacite publiee, pour que `descripteur()` ne prenne aucun verrou.
 static USB_BLOCS: AtomicU64 = AtomicU64::new(0);
 static USB_TAILLE_BLOC: AtomicUsize = AtomicUsize::new(0);
+
+// BOUCHAUD_USB_VIDANGE_REELLE_V1
+//
+// # Le verrou qui bloquait l'A/B sur cle
+//
+// Le volume USB declarait `vidange_reelle: false` et rendait `Fait(0)` sur
+// une vidange sans rien emettre. C'etait honnete -- une cle avec un cache
+// d'ecriture peut accepter une ecriture sans l'avoir posee --, et cela
+// interdisait tout commit A/B sur une cle (`volume_sans_vidange_reelle`) :
+// le slot B demarrait, son commit de sante etait refuse.
+//
+// # Ce qui change
+//
+// * Au montage, apres `READ CAPACITY`, une sonde `SYNCHRONIZE CACHE (10)`
+//   (opcode 0x35, sans donnees). `vidange_reelle` ne devient vrai QUE si le
+//   support la termine (CSW statut 0).
+// * Une vidange emet reellement la commande et attend son CSW.
+// * Un support qui la refuse PLUS TARD perd la confiance : `vidange_reelle`
+//   repasse a faux, la vidange echoue, et un commit A/B est refuse -- jamais
+//   annonce durable sur un support qui ne l'a pas garanti.
+//
+// # Et a quel support elle appartient (BOUCHAUD_USB_LIAISON_SUPPORT_V1)
+//
+// La capacite etait une atomique globale que chaque sonde reecrivait. Elle est
+// desormais portee par le support (`Stockage::vidange_sondee`) et publiee pour
+// le volume par la LIAISON : un mot qui dit quel support le volume designe, si
+// ce support a prouve la vidange, et s'il est encore la. Voir
+// `stockage/liaison.rs`. Toutes les ecritures du mot se font sous le verrou du
+// pilote ; `descripteur()` le lit sans verrou.
+static LIAISON_VOLUME: AtomicU64 = AtomicU64::new(0);
+static PROCHAIN_NUMERO_SUPPORT: AtomicU32 = AtomicU32::new(1);
+static USB_VIDANGES: AtomicU64 = AtomicU64::new(0);
+static USB_VIDANGES_REFUSEES: AtomicU64 = AtomicU64::new(0);
+
+fn liaison_courante() -> liaison::Liaison {
+    liaison::Liaison::depaquete(LIAISON_VOLUME.load(Ordering::Acquire))
+}
+
+fn publie_liaison(etat: liaison::Liaison) {
+    LIAISON_VOLUME.store(etat.empaquete(), Ordering::Release);
+}
+
+/// Retire la promesse de vidange du support lie, SANS le verrou du pilote.
+///
+/// Le seul ecrivain hors verrou, et il ne fait que retirer : un echange
+/// compare, pour ne jamais ecraser un etat publie entre-temps sous le verrou
+/// (un volume devenu orphelin le resterait). Rend le numero concerne.
+fn retire_la_promesse_sans_verrou() -> liaison::Numero {
+    let mut lie = 0;
+    let _ = LIAISON_VOLUME.fetch_update(Ordering::AcqRel, Ordering::Acquire, |mot| {
+        let l = liaison::Liaison::depaquete(mot);
+        lie = l.lie;
+        Some(l.vidange_refusee(l.lie).empaquete())
+    });
+    lie
+}
+
+/// Le support `numero` quitte la table. A n'appeler que sous le verrou.
+fn note_support_retire(numero: liaison::Numero) {
+    let avant = liaison_courante();
+    let apres = avant.support_retire(numero);
+    if apres != avant {
+        publie_liaison(apres);
+        // Plus de geometrie : `stockage_pret()` et les couches au-dessus voient
+        // un volume vide, et `trouve_meta` ne le retient plus.
+        USB_BLOCS.store(0, Ordering::Release);
+        crate::serial_println!(
+            "BOUCHAUD_USB_VOLUME_ORPHELIN numero={} vidange_reelle=0 \
+             (support retire : aucune entree-sortie ni promesse jusqu'au redemarrage)",
+            numero,
+        );
+    }
+}
+
+/// `(vidange_reelle, vidanges reussies, vidanges refusees)` du volume USB.
+pub fn vidange_stats() -> (bool, u64, u64) {
+    (
+        liaison_courante().promet_la_vidange(),
+        USB_VIDANGES.load(Ordering::Relaxed),
+        USB_VIDANGES_REFUSEES.load(Ordering::Relaxed),
+    )
+}
+
+/// Etat de la liaison du volume USB : `(numero lie, vidange promise, orphelin)`.
+pub fn liaison_volume() -> (u32, bool, bool) {
+    let l = liaison_courante();
+    (l.lie, l.promet_la_vidange(), l.orphelin)
+}
+
+/// Emet `SYNCHRONIZE CACHE (10)` sur le support `index` et attend son CSW.
+fn stockage_vidange(controller: &mut Controller, device: &mut Device, index: usize) -> Result<(), &'static str> {
+    if injecte(INJECTE_REFUS_VIDANGE) {
+        return Err("vidange-refus-injecte");
+    }
+    // LBA 0, nombre de blocs 0 : « tout le support » (SBC-3, 5.24).
+    let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    bot_commande(controller, device, index, &cdb, false, 0).map(|_| ())
+}
+
+/// Affichage d'un sens eventuel, pour le journal.
+struct FormatSens(Option<liaison::Sens>);
+
+impl core::fmt::Display for FormatSens {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(s) => write!(f, "{}/{:#04x}/{:#04x}({})", s.cle, s.asc, s.ascq, s.nom_cle()),
+            None => f.write_str("-"),
+        }
+    }
+}
+
+// BOUCHAUD_USB_REFUS_SCSI_V1
+//
+// # Un refus n'est pas seulement une promesse retiree
+//
+// Un support qui refuse `SYNCHRONIZE CACHE` rend un CSW « Command Failed » et
+// garde une condition de sens en ATTENTE. Certaines cles refusent alors toute
+// commande suivante tant que ce sens n'a pas ete lu -- lectures et ecritures
+// comprises. La sonde de montage le lisait deja ; le refus en cours
+// d'utilisation, non : perdre la vidange cassait aussi l'acces ordinaire.
+//
+// Ici, SOUS LE MEME VERROU que la commande refusee (aucune autre commande ne
+// peut s'intercaler, et aucun second verrou n'est pris) :
+//   * un transport qui a failli est d'abord repris (reinitialisation Bulk-Only,
+//     deblocage des deux points) -- jamais sur un autre support que le sien ;
+//   * puis `REQUEST SENSE` lit et efface la condition, et le sens est rendu
+//     pour le journal.
+// La promesse de durabilite est retiree par l'appelant, dans tous les cas.
+
+/// Traite un refus de `SYNCHRONIZE CACHE`. A n'appeler que sous le verrou du
+/// pilote, avec le peripherique sorti de la table.
+fn traite_refus_vidange(
+    controller: &mut Controller,
+    device: &mut Device,
+    index: usize,
+    motif: &'static str,
+) -> Option<liaison::Sens> {
+    let traitement = liaison::traitement(liaison::classe_refus(motif));
+    if traitement.reprise
+        && !TRANSPORT_BOT.autorise_es()
+        && !reprise_bot_complete(controller, device, index)
+    {
+        crate::serial_println!(
+            "BOUCHAUD_USB_REFUS_VIDANGE_TRANSPORT numero={} motif={} reprise=echec",
+            controller.stockages[index].numero, motif,
+        );
+        return None;
+    }
+    if !traitement.demande_sens {
+        return None;
+    }
+    let cdb = stockage::cdb_demande_sens(18);
+    let lu = bot_commande(controller, device, index, &cdb, true, 18).ok()?;
+    let brut = unsafe {
+        core::slice::from_raw_parts(controller.stockages[index].donnees_virt as *const u8, lu.min(18))
+    };
+    liaison::decode_sens(brut)
+}
+
 /// Requetes refusees parce que le pilote USB etait occupe.
 static USB_OCCUPE: AtomicUsize = AtomicUsize::new(0);
 
@@ -5615,27 +5849,34 @@ fn avec_le_pilote_usb<R>(action: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
     }
 }
 
-/// Le premier support pret, s'il y en a un.
-fn premier_support(runtime: &mut Runtime) -> Option<(usize, usize)> {
+/// Le support que le volume designe, s'il est encore la.
+///
+/// BOUCHAUD_USB_LIAISON_SUPPORT_V1 : par son NUMERO, jamais « le premier pret ».
+/// Avec deux cles, le premier pret n'est pas forcement celui dont le volume a
+/// publie la geometrie ; apres un debranchement, c'est une autre cle.
+fn support_lie(runtime: &mut Runtime) -> Option<(usize, usize, liaison::Numero)> {
+    let numero = liaison_courante().cible()?;
     for (ic, controleur) in runtime.controllers.iter().enumerate() {
         for index in 0..controleur.stockage_count {
             let st = &controleur.stockages[index];
-            if st.actif && st.taille_bloc != 0 && st.blocs != 0 {
-                return Some((ic, index));
+            if st.actif && st.numero == numero && st.taille_bloc != 0 && st.blocs != 0 {
+                return Some((ic, index, numero));
             }
         }
     }
     None
 }
 
-/// Publie la capacite du premier support pret, et enregistre le volume.
-fn publie_le_volume_usb(taille_bloc: u32, blocs: u64) {
+/// Publie la geometrie du support LIE, et enregistre le volume.
+fn publie_le_volume_usb(numero: liaison::Numero, taille_bloc: u32, blocs: u64) {
     USB_TAILLE_BLOC.store(taille_bloc as usize, Ordering::Release);
     USB_BLOCS.store(blocs, Ordering::Release);
     crate::drivers::bloc::enregistre(VOLUME_USB, &PILOTE_USB);
     crate::serial_println!(
-        "BOUCHAUD_USB_STOCKAGE_VOLUME volume={} blocs={} taille_bloc={} mio={}",
+        "BOUCHAUD_USB_STOCKAGE_VOLUME volume={} numero={} vidange_reelle={} blocs={} taille_bloc={} mio={}",
         VOLUME_USB.indice(),
+        numero,
+        liaison_courante().promet_la_vidange() as u8,
         blocs,
         taille_bloc,
         blocs.saturating_mul(taille_bloc as u64) / (1024 * 1024),
@@ -5662,7 +5903,7 @@ impl PiloteUsbStockage {
         source: Option<&[u8]>,
     ) -> Achevement {
         let resultat = avec_le_pilote_usb(|runtime| {
-            let Some((ic, index)) = premier_support(runtime) else {
+            let Some((ic, index, _numero)) = support_lie(runtime) else {
                 return Achevement::Absent;
             };
             let controleur = &mut runtime.controllers[ic];
@@ -5687,6 +5928,76 @@ impl PiloteUsbStockage {
     }
 }
 
+impl PiloteUsbStockage {
+    /// Une vidange : `SYNCHRONIZE CACHE` si le support LIE l'a prouvee au
+    /// montage. Sinon `Fait(0)` comme avant -- et `bloc::vidange` rend faux,
+    /// puisque le descripteur ne promet aucune barriere.
+    fn vidange(&self) -> Achevement {
+        if !liaison_courante().promet_la_vidange() {
+            return Achevement::Fait(0);
+        }
+        // Tout -- choix du support, commande, traitement du refus, retrait de
+        // la promesse -- sous UN verrou : aucune autre commande ne s'intercale
+        // entre le refus et la lecture du sens, et la liaison ne peut pas
+        // changer de support entre la commande et la decision.
+        let resultat = avec_le_pilote_usb(|runtime| {
+            let Some((ic, index, numero)) = support_lie(runtime) else {
+                // Le support lie a disparu : `note_support_retire` a deja
+                // retire la promesse ; on ne pretend pas avoir vide.
+                return Err(("absent", None, 0));
+            };
+            let controleur = &mut runtime.controllers[ic];
+            let slot = controleur.stockages[index].slot_id as usize;
+            if slot >= controleur.devices.len() {
+                return Err(("slot", None, numero));
+            }
+            let Some(mut device) = controleur.devices[slot].take() else {
+                return Err(("peripherique", None, numero));
+            };
+            let r = stockage_vidange(controleur, &mut device, index);
+            let sens = match r {
+                Ok(()) => None,
+                Err(motif) => traite_refus_vidange(controleur, &mut device, index, motif),
+            };
+            controleur.devices[slot] = Some(device);
+            match r {
+                // Une reussite ne vaut que pour le support encore lie et qui
+                // avait prouve la vidange.
+                Ok(()) if liaison_courante().vidange_valide(numero) => Ok(()),
+                Ok(()) => Err(("liaison-changee", None, numero)),
+                Err(motif) => {
+                    publie_liaison(liaison_courante().vidange_refusee(numero));
+                    controleur.stockages[index].vidange_sondee = false;
+                    Err((motif, sens, numero))
+                }
+            }
+        });
+        match resultat {
+            Some(Ok(())) => {
+                USB_VIDANGES.fetch_add(1, Ordering::Relaxed);
+                Achevement::Fait(0)
+            }
+            other => {
+                let (motif, sens, numero) = match other {
+                    Some(Err(e)) => e,
+                    // Pilote occupe au-dela du budget : la vidange n'a pas eu
+                    // lieu. La promesse est retiree aussi -- une barriere qui
+                    // n'a pas ete posee n'est pas une barriere --, et c'est le
+                    // seul retrait fait hors verrou : il ne fait que retirer.
+                    _ => ("pilote-occupe", None, retire_la_promesse_sans_verrou()),
+                };
+                let n = USB_VIDANGES_REFUSEES.fetch_add(1, Ordering::Relaxed) + 1;
+                crate::serial_println!(
+                    "BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE n={} numero={} raison={} sens={} vidange_reelle={}",
+                    n, numero, motif, FormatSens(sens),
+                    liaison_courante().promet_la_vidange() as u8,
+                );
+                Achevement::Erreur
+            }
+        }
+    }
+}
+
 impl PiloteBloc for PiloteUsbStockage {
     fn descripteur(&self) -> Descripteur {
         Descripteur {
@@ -5696,10 +6007,13 @@ impl PiloteBloc for PiloteUsbStockage {
             // reponse, puis la suivante. Declarer plus laisserait croire a un
             // parallelisme que le protocole interdit.
             profondeur_file: 1,
-            // Le pilote n'emet pas `SYNCHRONIZE CACHE`. Le declarer faux est le
-            // seul choix honnete : une cle avec un cache d'ecriture peut avoir
-            // accepte une ecriture sans l'avoir posee.
-            vidange_reelle: false,
+            // BOUCHAUD_USB_VIDANGE_REELLE_V1 : vrai seulement si le support a
+            // termine `SYNCHRONIZE CACHE` au montage, et ne l'a pas refuse
+            // depuis. Sinon faux : une cle avec un cache d'ecriture peut
+            // avoir accepte une ecriture sans l'avoir posee.
+            // BOUCHAUD_USB_LIAISON_SUPPORT_V1 : la capacite du support LIE,
+            // jamais celle du dernier sonde, et rien pour un volume orphelin.
+            vidange_reelle: liaison_courante().promet_la_vidange(),
             nom: "usb-bot",
         }
     }
@@ -5710,7 +6024,7 @@ impl PiloteBloc for PiloteUsbStockage {
             // Une ecriture par ce chemin n'a pas de donnees a poser : c'est une
             // erreur d'appelant, pas une panne du support.
             Genre::Ecriture => Achevement::Erreur,
-            Genre::Vidange => Achevement::Fait(0),
+            Genre::Vidange => self.vidange(),
         }
     }
 
@@ -5721,7 +6035,7 @@ impl PiloteBloc for PiloteUsbStockage {
                 self.transfere(true, requete.lba, requete.blocs, &mut vide, Some(donnees))
             }
             Genre::Lecture => Achevement::Erreur,
-            Genre::Vidange => Achevement::Fait(0),
+            Genre::Vidange => self.vidange(),
         }
     }
 }
@@ -6927,4 +7241,51 @@ pub fn bring_up() -> ActiveSummary {
         hid_mice: mouse_total,
         error: if active { None } else { Some("all-xhci-init-failed") },
     }
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_USB_LIAISON_SUPPORT_V1 : diagnostic du volume (`usbvolume`)
+// ---------------------------------------------------------------------------
+
+/// Publie l'etat de la liaison et, si `io`, exerce le volume SANS rien
+/// changer a son contenu : lecture du dernier bloc, reecriture A L'IDENTIQUE,
+/// relecture comparee, puis vidange. C'est ce qui prouve, apres un refus de
+/// vidange, que lectures et ecritures ordinaires passent encore.
+pub fn diagnostic_volume(io: bool) {
+    use crate::drivers::bloc;
+    let (lie, vidange, orphelin) = liaison_volume();
+    let d = bloc::descripteur(VOLUME_USB);
+    let present = bloc::present(VOLUME_USB);
+    crate::println!("volume usb : lie={} vidange_reelle={} orphelin={} blocs={} taille_bloc={}",
+        lie, vidange as u8, orphelin as u8, d.blocs, d.taille_bloc);
+    crate::serial_println!(
+        "BOUCHAUD_USB_VOLUME_ETAT present={} lie={} vidange_reelle={} orphelin={} blocs={} taille_bloc={} descripteur_vidange={}",
+        present as u8, lie, vidange as u8, orphelin as u8, d.blocs, d.taille_bloc, d.vidange_reelle as u8,
+    );
+    if !io {
+        return;
+    }
+    let taille = d.taille_bloc;
+    if !present || d.blocs == 0 || taille == 0 || taille > 4096 {
+        crate::serial_println!("BOUCHAUD_USB_VOLUME_IO lecture=absent ecriture=absent relecture=absent vidange={}",
+            bloc::vidange(VOLUME_USB) as u8);
+        return;
+    }
+    let lba = d.blocs - 1;
+    let mut a = alloc::vec![0u8; taille];
+    let lecture = matches!(bloc::lit(VOLUME_USB, lba, 1, &mut a), Achevement::Fait(1));
+    let ecriture = lecture && matches!(bloc::ecrit(VOLUME_USB, lba, 1, &a), Achevement::Fait(1));
+    let mut b = alloc::vec![0u8; taille];
+    let relecture = ecriture
+        && matches!(bloc::lit(VOLUME_USB, lba, 1, &mut b), Achevement::Fait(1))
+        && a == b;
+    let vidange = bloc::vidange(VOLUME_USB);
+    crate::serial_println!(
+        "BOUCHAUD_USB_VOLUME_IO lba={} lecture={} ecriture={} relecture={} vidange={}",
+        lba,
+        if lecture { "ok" } else { "echec" },
+        if ecriture { "ok" } else { "echec" },
+        if relecture { "ok" } else { "echec" },
+        vidange as u8,
+    );
 }
