@@ -34,7 +34,7 @@ désormais à V12.
 `KERNEL_CTX[cpu]` est l'idle du coeur, et rien d'autre : `secondary_cpu_loop`
 sur un AP, une boucle dédiée amorcée par `assure_idle_coeur_zero` sur le BSP.
 `run` / `run_noyau` garent la pile d'amorçage dans `CONTINUATION`, que seule la
-fin de leur racine rend reprenable (`scheduler/continuation.rs`). Voir
+fin de leur racine rend reprenable (`src/kernel/scheduler/continuation.rs`). Voir
 `docs/CONTINUATION_SYNCHRONE.md`.
 
 ## Cycle de vie d'une tâche (BOUCHAUD_CYCLE_DE_VIE_V1)
@@ -46,4 +46,4 @@ Une mort imposée à une autre tâche passe par `marque_zombie` → `condamne`
 interruptible, réveillée si elle est bloquée sur son cœur, sinon elle meurt à
 sa prochaine frontière (retour d'appel système ou de faute, préemption depuis
 l'espace utilisateur, premier passage en espace utilisateur). Règle pure :
-`scheduler/cycle_vie.rs`. Voir `docs/CYCLE_DE_VIE_TACHE.md`.
+`src/kernel/scheduler/cycle_vie.rs`. Voir `docs/CYCLE_DE_VIE_TACHE.md`.

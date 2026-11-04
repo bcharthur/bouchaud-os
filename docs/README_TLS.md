@@ -19,7 +19,7 @@ depuis le shell ou le navigateur intégré.
 | RSA | `bignum.rs`, `rsa.rs` | grands entiers + PKCS#1 v1.5 + PSS | OpenSSL |
 | ASN.1 / DER | `asn1.rs` | parseur TLV | — |
 | X.509 | `x509.rs` | clé publique, validité, SAN, basicConstraints | vrais certs |
-| Magasin de CA | `roots.rs`, `ca/` | 6 racines Mozilla (DER embarqués) | — |
+| Magasin de CA | `src/net/security/tls/roots.rs`, `src/net/security/tls/ca/` | 6 racines Mozilla (DER embarqués) | — |
 | Validation chaîne | `validate.rs` | signatures + ancre + hostname + dates | vrais certs |
 | CSPRNG | `rng.rs` | RDRAND + TSC → HASH-DRBG | — |
 | AES-GCM + ChaCha20-Poly1305 | `gcm.rs`, `chacha.rs` | 3 suites TLS 1.3 | NIST SP 800-38D, RFC 8439 |

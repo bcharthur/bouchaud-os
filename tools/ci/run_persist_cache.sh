@@ -66,7 +66,11 @@ lignes serie-persist-cache-2.log
 
 grep -aq MKDIR_VISIBLE_OK serie-persist-cache-1.log || { echo "mkdir confine : ordre EEXIST/EACCES faux" >&2; exit 1; }
 grep -aq CACHE_PERSIST_PASSAGE1_OK serie-persist-cache-1.log || { echo "passage 1 en echec" >&2; exit 1; }
-grep -aq 'BOUCHAUD_PERSIST_CACHE_ECARTE arbres=1 fichiers=2101' serie-persist-cache-1.log \
+# 2103 ENTREES : les 2101 fichiers du gros cache (2100 + son CACHEDIR.TAG) et
+# ses 2 dossiers. Depuis BOUCHAUD_PERSIST_META_V1, un dossier est une entree de
+# la table (il survit vide, avec ses droits) : l'arbre ecarte en compte donc
+# 2 de plus. Le compte reste EXACT -- un arbre ecarte a moitie se verrait.
+grep -aq 'BOUCHAUD_PERSIST_CACHE_ECARTE arbres=1 fichiers=2103' serie-persist-cache-1.log \
   || { echo "le noyau n'a pas annonce l'ecart du gros cache" >&2; exit 1; }
 grep -aq CACHE_PERSIST_OK serie-persist-cache-2.log || { echo "passage 2 en echec" >&2; exit 1; }
 if grep -aq 'panicked at' serie-persist-cache-1.log serie-persist-cache-2.log; then

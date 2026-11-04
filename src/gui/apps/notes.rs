@@ -18,6 +18,9 @@ const HAUTEUR_LIGNE: usize = 20;
 
 pub(crate) struct NotesState {
     home: usize,
+    /// Fichier ouvert depuis Fichiers (BOUCHAUD_NOTES_OUVRIR_V1). `None` : le
+    /// carnet historique (`bouchaud-notes.txt`, sous `/persist` ou l'accueil).
+    chemin: Option<String>,
     texte: String,
     curseur: usize, // offset UTF-8, toujours sur une frontiere de caractere
     defilement: usize,
@@ -28,24 +31,65 @@ pub(crate) struct NotesState {
 impl NotesState {
     pub(crate) fn new(home: usize) -> Self {
         let mut state = Self {
-            home, texte: String::new(), curseur: 0, defilement: 0,
+            home, chemin: None, texte: String::new(), curseur: 0, defilement: 0,
             dirty: false, statut: "RAMFS : non persistant apres redemarrage".to_string(),
         };
         state.reload();
         state
     }
 
+    /// Ouvre `chemin` (un fichier existant, ou a creer a l'enregistrement).
+    pub(crate) fn ouvre(home: usize, chemin: &str) -> Self {
+        let mut state = Self {
+            home, chemin: Some(String::from(chemin)), texte: String::new(), curseur: 0,
+            defilement: 0, dirty: false, statut: String::new(),
+        };
+        state.reload();
+        state
+    }
+
+    /// Nom du fichier edite, pour le titre de la fenetre.
+    pub(crate) fn nom(&self) -> String {
+        match &self.chemin {
+            Some(c) => String::from(c.rsplit('/').next().unwrap_or(c)),
+            None => String::from(FICHIER),
+        }
+    }
+
+    /// `(dossier, nom, durable)` du fichier edite. `durable` : il est sous
+    /// `/persist`, et un enregistrement est une transaction disque.
+    fn emplacement(&self, fs: &ramfs::FileSystem) -> Result<(usize, String, bool), &'static str> {
+        match &self.chemin {
+            Some(c) => {
+                let (parent, nom) = fs.resolve_parent_name(c, 0).ok_or("chemin invalide")?;
+                Ok((parent, String::from(nom), fs.sous_persistant(parent)))
+            }
+            None => {
+                let durable = persistance::zone_disponible();
+                let dossier = if durable {
+                    fs.resolve(persistance::RACINE, 0).ok_or("/persist absent")?
+                } else { self.home };
+                Ok((dossier, String::from(FICHIER), durable))
+            }
+        }
+    }
+
+    /// Le fichier edite est-il persistant ?
+    pub(crate) fn durable(&self) -> bool {
+        let fs = ramfs::fs();
+        self.emplacement(&fs).map_or(false, |(_, _, d)| d)
+    }
+
     fn reload(&mut self) {
+        let mut durable = false;
         let loaded: Result<Option<String>, &'static str> = (|| {
-            let durable = persistance::zone_disponible();
             let fs = ramfs::fs();
-            let dossier = if durable {
-                fs.resolve(persistance::RACINE, 0).ok_or("/persist absent")?
-            } else { self.home };
+            let (dossier, nom, d) = self.emplacement(&fs)?;
+            durable = d;
             if dossier >= ramfs::MAX_NODES || !fs.nodes[dossier].used
                 || fs.nodes[dossier].kind != NodeKind::Dir { return Err("dossier invalide"); }
             if !fs.can(dossier, PERM_X) { return Err("traversee interdite"); }
-            let Some(idx) = fs.find_child(dossier, FICHIER) else { return Ok(None); };
+            let Some(idx) = fs.find_child(dossier, &nom) else { return Ok(None); };
             if fs.nodes[idx].kind != NodeKind::File || !fs.can(idx, PERM_R) {
                 return Err("lecture interdite ou type invalide");
             }
@@ -60,12 +104,14 @@ impl NotesState {
                 self.curseur = self.texte.len();
                 self.defilement = 0;
                 self.dirty = false;
-                self.statut = if persistance::zone_disponible() { "Fichier /persist charge" } else { "Fichier RAMFS charge (volatile)" }.to_string();
+                self.statut = if durable { format!("{} ouvert (persistant)", self.nom()) }
+                    else { format!("{} ouvert (RAMFS, volatile)", self.nom()) };
             }
             Ok(None) => {
                 self.texte.clear(); self.curseur = 0; self.defilement = 0;
                 self.dirty = false;
-                self.statut = if persistance::zone_disponible() { "Nouveau document /persist" } else { "Nouveau document RAMFS (volatile)" }.to_string();
+                self.statut = if durable { format!("Nouveau document {} (persistant)", self.nom()) }
+                    else { format!("Nouveau document {} (RAMFS, volatile)", self.nom()) };
             }
             Err(err) => self.statut = format!("Ouverture refusee : {}", err),
         }
@@ -78,22 +124,21 @@ impl NotesState {
         }
         // Never hold the RAMFS lock while calling synchronise() (it snapshots
         // RAMFS internally). This lock ordering prevents a GUI deadlock.
-        let durable = persistance::zone_disponible();
+        let mut durable = false;
         let result: Result<usize, &'static str> = (|| {
             let mut fs = ramfs::fs();
-            let dossier = if durable {
-                fs.resolve(persistance::RACINE, 0).ok_or("/persist absent")?
-            } else { self.home };
+            let (dossier, nom, d) = self.emplacement(&fs)?;
+            durable = d;
             if dossier >= ramfs::MAX_NODES || !fs.nodes[dossier].used
                 || fs.nodes[dossier].kind != NodeKind::Dir { return Err("dossier invalide"); }
             if !fs.can(dossier, PERM_W | PERM_X) { return Err("ecriture repertoire interdite"); }
-            let idx = match fs.find_child(dossier, FICHIER) {
+            let idx = match fs.find_child(dossier, &nom) {
                 Some(idx) => {
                     if fs.nodes[idx].kind != NodeKind::File { return Err("la cible n'est pas un fichier"); }
                     if !fs.can(idx, PERM_W) { return Err("ecriture fichier interdite"); }
                     idx
                 }
-                None => fs.touch_at(dossier, FICHIER)?,
+                None => fs.touch_at(dossier, &nom)?,
             };
             if !fs.write_node_bytes(idx, self.texte.as_bytes()) { return Err("RAMFS refuse l'ecriture"); }
             Ok(idx)
@@ -107,7 +152,7 @@ impl NotesState {
                 let persisted = durable && sync_result >= 0;
                 self.dirty = !persisted && durable;
                 self.statut = if persisted {
-                    format!("Sauve sur /persist : {} octets", self.texte.len())
+                    format!("{} enregistre sur le disque : {} octets", self.nom(), self.texte.len())
                 } else if durable {
                     "ECHEC sync disque : modifications non durables".to_string()
                 } else {
@@ -244,7 +289,7 @@ pub(crate) fn draw(state: &NotesState, bx: usize, by: usize, bw: usize, bh: usiz
     fb::fill_rect_rgb(bx + 120, by + 8, 125, 30, 0x33465e);
     fb::draw_text_prop(bx + 18, by + 15, "F2  Sauver", 0xffffff, 13.0, true);
     fb::draw_text_prop(bx + 130, by + 15, "F3  Recharger", 0xffffff, 13.0, true);
-    let marque = if state.dirty { "NON SAUVE" } else if persistance::zone_disponible() { "PERSIST" } else { "RAMFS" };
+    let marque = if state.dirty { "NON SAUVE" } else if state.durable() { "PERSIST" } else { "RAMFS" };
     fb::draw_text_prop(bx + 255, by + 16, marque, 0xf7c569, 12.0, true);
     let zone_haut = by + 53;
     let max = ((bh.saturating_sub(92)) / HAUTEUR_LIGNE).min(LIGNES_VISIBLES);

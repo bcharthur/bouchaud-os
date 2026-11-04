@@ -1,8 +1,12 @@
-# CI et preuves — audit horodaté 2026-11-02
+# CI et preuves
+
+Les familles de workflows, et ce que chacune établit : [README principal](../../README.md#tests-et-ci). Les runs d'un SHA donné : [status.json](status.json) → `ci`. Le tableau de runs ci-dessous est un **relevé historique du 2026-11-02** ; il ne décrit pas `main` aujourd'hui.
 
 ## Contrat de preuve
 
 STATIC → HOST → TCG → KVM → PHYSICAL. Pas d'inférence entre niveaux. `NON_QUALIFIANT`, `INCONCLUSIF`, `cancelled`, `skipped` et une preuve absente **ne sont pas PASS**. Une CI de développement Ladybird n'est pas le palier `qualification` du workflow.
+
+Relevé historique du 2026-11-02 :
 
 | Workflow | Run | SHA | Event | Résultat au relevé | Qualification réelle / limites |
 |---|---:|---|---|---|---|

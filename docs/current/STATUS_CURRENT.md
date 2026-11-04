@@ -4,15 +4,19 @@
 
 | Question | Où |
 |---|---|
-| Quel candidat, sur quelle base `main` ? | `status.json` → `candidate`, `observed_main_head` |
-| Les workflows du dernier SHA poussé qualifié | `status.json` → `ci.push_*` ; le SHA final et ses checks : la PR |
+| Quel `main`, à quelle date ? | `status.json` → `observed_main_head`, `as_of` |
+| Y a-t-il un candidat de qualification ? | `status.json` → `candidate` (aucun depuis la fusion de la PR #241) |
+| Quelles PR sont ouvertes, empilées ou non ? | `status.json` → `open_prs` ; **rien de ce qu'elles contiennent n'est sur `main`** |
+| Les workflows du push de `main` | `status.json` → `ci.push_main_*` |
+| Les workflows d'un SHA de branche qualifié | `status.json` → `ci.push_<sha>`, `ci.pr*` ; le SHA final d'une PR et ses checks : la PR elle-même |
 | Verdicts sécurité de la chaîne de mise à jour | `status.json` → `atomic_platform.security_verdicts` (+ `security_details`) |
 | Verdicts fonctionnels A/B, recovery, persistance, services | `status.json` → `atomic_platform.functional_verdicts` |
 | Niveau de preuve | `status.json` → `atomic_platform.proof_levels` : **HOST + TCG ; ni KVM ni PHYSICAL** |
 | P13 | `status.json` → `p13` : SMP1/2/4 PASS ; SMP8 `PENDING_DEDICATED_KVM8` ; final `BLOCKED_BY_RUNNER_PROVISIONING` |
 | Protection de `main` | `status.json` → `main_protection` = `BLOCKED_BY_HUMAN_GITHUB_SETTING` |
 | PHYSICAL | `status.json` → `physical` = `NOT_STARTED` ([TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md)) |
-| Limites et bloquants | `status.json` → `limitations`, `known_blockers` |
+| Limites et bloquants | `status.json` → `limitations`, `known_blockers` ; détail et priorités : [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) |
+| Anomalies ouvertes | `status.json` → `open_anomalies` |
 
 ## Lire un verdict
 

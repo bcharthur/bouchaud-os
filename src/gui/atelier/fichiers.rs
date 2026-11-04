@@ -468,6 +468,8 @@ pub const MENU_REMBOURRAGE: i32 = 6;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Ouvrir,
+    /// Ouvre un fichier texte dans Notes (BOUCHAUD_NOTES_OUVRIR_V1).
+    OuvrirNotes,
     CopierChemin,
     Proprietes,
     VueGrille,
@@ -475,12 +477,24 @@ pub enum Action {
 }
 
 /// Les entrees du menu, selon ce qui est sous le pointeur.
-pub fn actions(sur_element: bool, dossier: bool) -> &'static [Action] {
-    match (sur_element, dossier) {
-        (true, true) => &[Action::Ouvrir, Action::CopierChemin, Action::Proprietes],
-        (true, false) => &[Action::CopierChemin, Action::Proprietes],
-        (false, _) => &[Action::VueGrille, Action::VueListe, Action::CopierChemin],
+/// Les entrees du menu, selon ce qui est sous le pointeur. `texte` : le
+/// fichier vise s'edite dans Notes ([`editable_dans_notes`]).
+pub fn actions(sur_element: bool, dossier: bool, texte: bool) -> &'static [Action] {
+    match (sur_element, dossier, texte) {
+        (true, true, _) => &[Action::Ouvrir, Action::CopierChemin, Action::Proprietes],
+        (true, false, true) => &[Action::OuvrirNotes, Action::CopierChemin, Action::Proprietes],
+        (true, false, false) => &[Action::CopierChemin, Action::Proprietes],
+        (false, _, _) => &[Action::VueGrille, Action::VueListe, Action::CopierChemin],
     }
+}
+
+/// Taille maximale d'un fichier que Notes accepte d'ouvrir (sa limite).
+pub const NOTES_MAX_OCTETS: usize = 256 * 1024;
+
+/// Un fichier s'edite-t-il dans Notes ? Texte, code, ou sans extension, et
+/// dans la limite de Notes. Notes verifie aussi l'UTF-8 a l'ouverture.
+pub fn editable_dans_notes(g: Genre, octets: usize) -> bool {
+    matches!(g, Genre::Texte | Genre::Code | Genre::Fichier) && octets <= NOTES_MAX_OCTETS
 }
 
 /// Libelle d'une action. `sur_element` distingue « Copier le chemin » de
@@ -488,6 +502,7 @@ pub fn actions(sur_element: bool, dossier: bool) -> &'static [Action] {
 pub const fn libelle_action(a: Action, sur_element: bool) -> &'static str {
     match a {
         Action::Ouvrir => "Ouvrir",
+        Action::OuvrirNotes => "Ouvrir dans Notes",
         Action::CopierChemin => if sur_element { "Copier le chemin" } else { "Copier le chemin du dossier" },
         Action::Proprietes => "Propri\u{e9}t\u{e9}s",
         Action::VueGrille => "Afficher en grille",

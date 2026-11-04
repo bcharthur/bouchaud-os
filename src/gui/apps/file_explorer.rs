@@ -52,6 +52,7 @@ pub(crate) struct Menu {
     pub y: i32,
     pub element: Option<usize>,
     pub dossier: bool,
+    pub texte: bool,
     pub survol: Option<usize>,
 }
 
@@ -110,7 +111,9 @@ fn ancetres(cur: usize) -> Vec<(usize, String)> {
 /// Le dossier que designe le raccourci `i`, s'il existe et se traverse.
 fn dossier_raccourci(i: usize) -> Option<usize> {
     let (_, chemin, _) = f::RACCOURCIS[i];
-    let accueil = crate::users::session().home();
+    // BOUCHAUD_DOSSIERS_PERSONNELS_V1 : `~` est le dossier personnel
+    // (persistant quand la machine a une zone), plus l'accueil du compte.
+    let accueil = crate::fs::dossiers::dossier_personnel();
     let absolu: String = if let Some(reste) = chemin.strip_prefix('~') {
         format!("{}{}", accueil.trim_end_matches('/'), reste)
     } else {
@@ -320,15 +323,18 @@ pub(crate) fn draw(cur: usize, scroll: i32, selected: Option<usize>, history: &H
         };
         texte(etat.x + 14, etat.y + 6, &tient(&gauche, etat.w - 160, CORPS_PETIT, false),
             j::ENCRE_DOUCE, CORPS_PETIT, false);
-        // Le stockage dit ce qu'il est : le RAMFS ne survit pas au redemarrage.
-        let droite = "RAMFS \u{b7} non persistant";
+        // Le stockage dit ce qu'il est, dossier par dossier : sous `/persist`,
+        // le disque (ecriture differee, BOUCHAUD_ECRITURE_DIFFEREE_V1) ;
+        // ailleurs, le RAMFS, qui ne survit pas au redemarrage.
+        let persistant = ramfs::fs().sous_persistant(cur);
+        let droite = if persistant { "Sur le disque \u{b7} persistant" } else { "RAMFS \u{b7} non persistant" };
         let w = fb::text_width(droite, CORPS_PETIT, false) as i32;
         texte(etat.x + etat.w - w - 14, etat.y + 6, droite, j::ENCRE_TENUE, CORPS_PETIT, false);
     }
 
     // ── Menu contextuel, par-dessus le reste ──
     if let Some(m) = &ui.menu {
-        let actions = f::actions(m.element.is_some(), m.dossier);
+        let actions = f::actions(m.element.is_some(), m.dossier, m.texte);
         let boite = abs(g.menu(m.x, m.y, actions.len()), bx, by);
         if { let (x, y, l, h) = u(Boite { x: boite.x - 6, y: boite.y - 6, w: boite.w + 12, h: boite.h + 12 }); fb::decoupe_touche(x, y, l, h) } {
             matiere::ombre_douce(rect(boite), 10, 6, j::OMBRE_FLOTTANT);
@@ -342,6 +348,7 @@ pub(crate) fn draw(cur: usize, scroll: i32, selected: Option<usize>, history: &H
                 let encre = if m.survol == Some(k) { 0xffffff } else { j::ENCRE };
                 let glyphe = match act {
                     f::Action::Ouvrir => a::SYMBOLE_DOSSIER_16,
+                    f::Action::OuvrirNotes => a::SYMBOLE_DOCUMENTS_16,
                     f::Action::CopierChemin => a::SYMBOLE_COPIER_16,
                     f::Action::Proprietes => a::SYMBOLE_DOCUMENTS_16,
                     f::Action::VueGrille => a::SYMBOLE_GRILLE_16,
@@ -460,6 +467,12 @@ fn ouvre(cur: &mut usize, scroll: &mut i32, selected: &mut Option<usize>, histor
     if entree.dossier {
         let dest = entree.noeud;
         va(cur, scroll, selected, history, ui, dest, true);
+    } else if f::editable_dans_notes(f::genre(&entree.nom, false), entree.octets) {
+        // BOUCHAUD_NOTES_OUVRIR_V1 : le bureau ouvre une fenetre Notes sur ce
+        // fichier au prochain tour.
+        let p = chemin(entree.noeud);
+        crate::gui::apps::demande_notes(p.clone());
+        ui.message = Some(format!("\u{ab} {} \u{bb} ouvert dans Notes", entree.nom));
     } else {
         ui.message = Some(format!("\u{ab} {} \u{bb} : aucune application ne l'ouvre encore", entree.nom));
     }
@@ -468,7 +481,7 @@ fn ouvre(cur: &mut usize, scroll: &mut i32, selected: &mut Option<usize>, histor
 fn agit(cur: &mut usize, scroll: &mut i32, selected: &mut Option<usize>, history: &mut History,
         ui: &mut Ui, e: &[f::Entree], menu: Menu, action: f::Action) {
     match action {
-        f::Action::Ouvrir => {
+        f::Action::Ouvrir | f::Action::OuvrirNotes => {
             if let Some(i) = menu.element { ouvre(cur, scroll, selected, history, ui, e, i); }
         }
         f::Action::CopierChemin => {
@@ -502,7 +515,7 @@ pub(crate) fn clic(cur: &mut usize, scroll: &mut i32, selected: &mut Option<usiz
     let e = liste(*cur);
     // Un menu ouvert prend le clic : une entree s'execute, ailleurs il se ferme.
     if let Some(m) = ui.menu.take() {
-        let actions = f::actions(m.element.is_some(), m.dossier);
+        let actions = f::actions(m.element.is_some(), m.dossier, m.texte);
         let boite = g.menu(m.x, m.y, actions.len());
         if let Some(k) = f::Geometrie::entree_sous(boite, actions.len(), x, y) {
             agit(cur, scroll, selected, history, ui, &e, m, actions[k]);
@@ -579,7 +592,9 @@ pub(crate) fn clic_droit(cur: usize, scroll: i32, selected: &mut Option<usize>, 
         *selected = element;
     }
     let dossier = element.and_then(|i| e.get(i)).map_or(false, |x| x.dossier);
-    ui.menu = Some(Menu { x, y, element, dossier, survol: None });
+    let texte = element.and_then(|i| e.get(i))
+        .map_or(false, |x| !x.dossier && f::editable_dans_notes(f::genre(&x.nom, false), x.octets));
+    ui.menu = Some(Menu { x, y, element, dossier, texte, survol: None });
     ui.message = None;
 }
 
@@ -645,7 +660,7 @@ pub(crate) fn survol(cur: usize, scroll: i32, ui: &mut Ui, bw: i32, bh: i32, x: 
 {
     let g = f::Geometrie::new(bw, bh);
     if let Some(m) = ui.menu.as_mut() {
-        let n = f::actions(m.element.is_some(), m.dossier).len();
+        let n = f::actions(m.element.is_some(), m.dossier, m.texte).len();
         let boite = g.menu(m.x, m.y, n);
         let nouveau = f::Geometrie::entree_sous(boite, n, x, y);
         if nouveau == m.survol {

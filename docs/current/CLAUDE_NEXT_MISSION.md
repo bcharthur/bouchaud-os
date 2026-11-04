@@ -4,7 +4,8 @@ Refaire `git fetch && git rev-parse HEAD origin/main` et lire [status.json](stat
 
 ## 1. Avant tout nouveau chantier
 
-- Si la PR Atomic Platform n'est pas fusionnée : lire ses checks sur le **merge synthétique**. Tout rouge est lu dans le job puis le journal avant d'agir.
+- Atelier (#242 à #244) et la vidange USB (#246) sont fusionnés (`main@e0257c60`). Les PR ouvertes sont listées dans `status.json` → `open_prs` : #245 puis #247 (empilée sur #245). Chacune doit d'abord **intégrer `main`** (correctif du banc scanout), puis refaire son P13. Lire les checks sur le **merge synthétique**. Tout rouge est lu dans le job puis dans le journal avant d'agir.
+- `ab-rollback (…, usb)` rouge avec `B- B+` (ou `A-` au 4e démarrage de `sans-vidange`) : anomalie **attribuée** `USB_AB_COMMIT_REFUSE_HOTE_LENT` (`status.json` → `open_anomalies`). Une relance unique est la règle actuelle ; le correctif attend une décision (seuil BOT ou politique de commit, voir KNOWN_LIMITATIONS).
 - Si `SIGCHLD_MULTIFIL_ECHEC` réapparaît sur un `p13-primitives-noyau` : le journal du job contient désormais le cas fautif et les sorties des fils (`BOUCHAUD_SIGCHLD_ECHEC_LISIBLE_V1`). Classer **avant** toute autre chose ; banc ciblé : `tools/ci/run_sigchld_repetition.sh BOOT N SMP` (avec `SIGCHLD_STRACE=1`).
 
 ## 2. Bloquants humains (ne pas contourner)
@@ -14,7 +15,9 @@ Refaire `git fetch && git rev-parse HEAD origin/main` et lire [status.json](stat
 3. Clé de version de production : hors ligne / HSM, rotation, sauvegarde, révocation. Ne **jamais** en générer une pour passer un test.
 4. Campagne PHYSICAL ([TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md)).
 
-## 3. Candidats de chantier, à choisir après la fusion (pas avant)
+## 3. Candidats de chantier, à choisir après la fusion des PR ouvertes (pas avant)
+
+Ordre et détail : [ROADMAP_CURRENT.md](ROADMAP_CURRENT.md).
 
 - Image Trigkey complète avec les services natifs (`serviced`, `healthd`, `updated`, `logd` dans le ramdisk) : prérequis de toute étape physique A/B.
 - Campagne Trigkey physique.

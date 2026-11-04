@@ -57,6 +57,7 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
         let debut_entree = index * TAILLE_ENTREE;
         table[debut_entree..debut_entree + octets.len()].copy_from_slice(octets);
         ecrit_u64(&mut table[debut_entree + CHEMIN_MAX..debut_entree + CHEMIN_MAX + 8], longueur as u64);
+        entree.meta.encode(&mut table[debut_entree + DEBUT_META..debut_entree + TAILLE_ENTREE]);
 
         let secteurs = ((longueur + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
         if secteur + secteurs > fin_zone { oublie_le_disque(); return -1; }

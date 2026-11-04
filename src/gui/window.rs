@@ -404,6 +404,16 @@ pub(crate) fn fenetres_demandees_au_demarrage() -> Vec<usize> {
     kinds
 }
 
+/// Une fenetre Notes sur le fichier `chemin` (BOUCHAUD_NOTES_OUVRIR_V1).
+pub(crate) fn fenetre_notes(home: usize, chemin: &str, spawn_n: &mut i32) -> Win {
+    let n = *spawn_n;
+    *spawn_n += 1;
+    let state = crate::gui::apps::notes::NotesState::ouvre(home, chemin);
+    let titre = alloc::format!("Notes \u{2014} {}", state.nom());
+    Win::new(titre, 60 + (n % 6) * 22, 40 + (n % 6) * 18, 680, 520,
+        crate::gui::windowing::WindowFlags::STANDARD, App::Notes { state })
+}
+
 /// Cree une fenetre d'application a partir d'un index de menu.
 pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
     let n = *spawn_n;
@@ -461,7 +471,15 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         // (`fichiers::LARGEUR_MIN_LATERALE`) et quatre colonnes de grille.
         1 => Win::new("Fichiers".to_string(), x, y, 780, 470,
             crate::gui::windowing::WindowFlags::STANDARD,
-            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new(),
+            // BOUCHAUD_DOSSIERS_PERSONNELS_V1 : Fichiers s'ouvre sur le dossier
+            // personnel (persistant), a defaut sur l'accueil du compte.
+            App::Files { cur: {
+                    // Le chemin d'abord, le verrou ensuite : `dossier_personnel`
+                    // interroge la zone, jamais sous le garde du RAMFS.
+                    let perso = crate::fs::dossiers::dossier_personnel();
+                    crate::fs::ramfs::fs().resolve(&perso, 0).unwrap_or(home)
+                },
+                scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new(),
                 ui: crate::gui::apps::file_explorer::Ui::new() }),
         4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
             crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
