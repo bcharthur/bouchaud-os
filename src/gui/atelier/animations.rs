@@ -56,6 +56,8 @@ pub enum Nature {
     /// Une fenetre disparait : son INSTANTANE (copie de pixels, jamais sa
     /// surface) s'efface et se reduit legerement.
     Fermeture,
+    /// Une cellule du dock prend le survol : voile et levee de l'icone.
+    Survol,
 }
 
 /// Une animation en cours.
@@ -104,6 +106,7 @@ pub const fn courbe(nature: Nature) -> Courbe {
     match nature {
         Nature::Ouverture => Courbe::SortieCubique,
         Nature::Fermeture => Courbe::EntreeSortieCubique,
+        Nature::Survol => Courbe::SortieCubique,
     }
 }
 
@@ -114,6 +117,8 @@ pub const fn duree_ms(mode: Mode, nature: Nature) -> u32 {
         (Mode::Normal, Nature::Fermeture) => 150,
         (Mode::Reduit, Nature::Ouverture) => 110,
         (Mode::Reduit, Nature::Fermeture) => 90,
+        (Mode::Normal, Nature::Survol) => 120,
+        (Mode::Reduit, Nature::Survol) => 80,
         (Mode::Aucun, _) => 0,
     }
 }
@@ -151,6 +156,7 @@ pub const fn opacite(nature: Nature, depart: u8, p: u32) -> u8 {
     match nature {
         Nature::Ouverture => (255 * p / PLEIN) as u8,
         Nature::Fermeture => (depart as u32 * (PLEIN - p) / PLEIN) as u8,
+        Nature::Survol => (255 * p / PLEIN) as u8,
     }
 }
 

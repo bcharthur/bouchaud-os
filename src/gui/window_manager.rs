@@ -245,6 +245,9 @@ fn plan_de_scene(
     }
 
     calques.push(Calque::transparent(Element::BarreTaches, barre_taches_rect()));
+    if let Some((_, b)) = widgets::infobulle_dock(wins, souris.0 as i32, souris.1 as i32) {
+        calques.push(Calque::transparent(Element::Infobulle, depuis_boite(b)));
+    }
     calques.push(Calque::transparent(
         Element::Curseur,
         degat_curseur(souris.0, souris.1),
@@ -280,7 +283,8 @@ fn dessine_calque(
         Element::Fantome(rang) => crate::gui::atelier::effets::dessine_instantane(rang),
         Element::Menu => widgets::draw_menu(mx, my),
         Element::Centre => widgets::draw_centre(mx, my),
-        Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
+        Element::BarreTaches => widgets::draw_taskbar(wins, menu_open, mx, my),
+        Element::Infobulle => widgets::draw_infobulle(wins, mx, my),
         Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
     }
 }
@@ -588,6 +592,9 @@ fn boucle() {
     let mut centre_ouvert = false;
     let mut survol_centre: Option<crate::gui::atelier::centre::Action> = None;
     let mut survol_bouton_centre = false;
+    // BOUCHAUD_ATELIER_DOCK_SURVOL_V1 : la cellule du dock survolee, et ce
+    // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
+    let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
     crate::gui::atelier::reglages::charge();
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
@@ -1060,6 +1067,33 @@ fn boucle() {
                 degats.ajoute(Origine::BarreHaute, barre_haute_rect());
                 sale = true;
             }
+        }
+        // Survol du dock. Mesure seulement pres du bas de l'ecran (ou si une
+        // cellule etait survolee) : ailleurs, aucune cellule ne peut l'etre.
+        let pres_dock = my >= fb::height() as i32 - DOCK_H as i32;
+        if pres_dock || survol_dock.is_some() {
+            let (l, h) = (fb::width() as u32, fb::height() as u32);
+            let n = wins.len();
+            let nouveau = if pres_dock && !menu_open && !centre_ouvert {
+                widgets::infobulle_dock(&wins, mx, my).map(|(cible, bulle)| {
+                    let cellule = depuis_boite(crate::gui::atelier::dock::boite_cible(l, h, n, cible));
+                    (cible, cellule.union(&depuis_boite(bulle)))
+                })
+            } else {
+                None
+            };
+            if nouveau.map(|x| x.0) != survol_dock.map(|x| x.0) {
+                if let Some((cible, zone)) = survol_dock {
+                    crate::gui::atelier::effets::quitte(cible);
+                    degats.ajoute(Origine::BarreTaches, zone);
+                }
+                if let Some((cible, zone)) = nouveau {
+                    crate::gui::atelier::effets::survole(cible, vers_boite(zone));
+                    degats.ajoute(Origine::BarreTaches, zone);
+                }
+                sale = true;
+            }
+            survol_dock = nouveau;
         }
         let nouveau_centre = if centre_ouvert {
             crate::gui::atelier::centre::action_sous(fb::width() as u32, BAR_H as u32, mx, my)
@@ -2409,8 +2443,20 @@ fn handle_click(
         return;
     }
 
-    // Barre des taches : restaure (si minimisee) et donne le focus.
+    // Barre des taches : restaure (si minimisee) et donne le focus. La
+    // cellule de la fenetre ACTIVE la reduit (BOUCHAUD_ATELIER_DOCK_SURVOL_V1) :
+    // meme chemin que le bouton de la barre de titre.
     for i in 0..wins.len() {
+        if taskbar_btn(i, wins.len()).hit(mx, my)
+            && widgets::indice_focus(wins) == Some(i) && !wins[i].min && wins[i].flags.minimizable
+        {
+            let id = wins[i].id;
+            route_window_command(&mut wins[i], crate::gui::windowing::WindowCommand::Minimize(id));
+            let m = wins.remove(i);
+            wins.insert(0, m);
+            degats.tout();
+            return;
+        }
         if taskbar_btn(i, wins.len()).hit(mx, my) {
             // BOUCHAUD_GUI_FOCUS_DAMAGE_V1 : meme raison qu'a la remontee par
             // clic. Le bouton de la barre des taches donne aussi le focus, donc

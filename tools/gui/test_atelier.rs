@@ -465,3 +465,68 @@ fn une_animation_commence_a_sa_premiere_trame_et_non_a_son_lancement() {
     r.termine(500, |_| finies += 1);
     assert_eq!(finies, 1);
 }
+
+// ─── Survol du dock ───────────────────────────────────────────────────────
+
+#[test]
+fn le_survol_du_dock_designe_au_pixel_pres_la_cellule_du_clic() {
+    for (l, h) in [(1280u32, 720u32), (1920, 1080), (640, 480)] {
+        for n in 0..7usize {
+            let d = dock::cadre(l, h, n);
+            for y in d.y - 3..d.y + d.h + 3 {
+                for x in d.x - 3..d.x + d.w + 3 {
+                    let attendu = if dock::cellule_applications(l, h, n).contient(x, y) {
+                        Some(dock::Cible::Applications)
+                    } else {
+                        (0..n).find(|&i| dock::cellule_fenetre(l, h, n, i).contient(x, y))
+                            .map(dock::Cible::Fenetre)
+                    };
+                    assert_eq!(dock::cible_sous(l, h, n, x, y), attendu, "{l}x{h} n={n} ({x},{y})");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hors_du_dock_rien_n_est_survole() {
+    let (l, h) = (1280, 720);
+    for n in 0..4 {
+        assert_eq!(dock::cible_sous(l, h, n, 5, 5), None);
+        assert_eq!(dock::cible_sous(l, h, n, l as i32 / 2, h as i32 / 2), None);
+    }
+}
+
+#[test]
+fn l_infobulle_est_au_dessus_du_dock_et_dans_l_ecran() {
+    for (l, h) in ECRANS_CENTRE {
+        for n in 0..6usize {
+            let d = dock::cadre(l, h, n);
+            let mut cibles = vec![dock::Cible::Applications];
+            cibles.extend((0..n).map(dock::Cible::Fenetre));
+            for c in cibles {
+                for texte in [10, 120, 400] {
+                    let b = dock::infobulle(l, h, n, c, texte);
+                    assert!(b.x >= 4 && b.x + b.w <= l as i32 - 4 || b.w > l as i32 - 8, "{c:?}");
+                    assert!(b.y + b.h + dock::INFOBULLE_ECART == d.y, "colle au-dessus du dock");
+                    assert!(b.y >= 0);
+                    assert_eq!(b.w, texte + 2 * dock::INFOBULLE_REMBOURRAGE);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn la_levee_de_l_icone_reste_dans_la_cellule() {
+    let c = dock::cellule_fenetre(1280, 720, 3, 1);
+    let haut_icone = c.y + (c.h - dock::ICONE) / 2 - 2 - dock::LEVEE;
+    assert!(haut_icone >= c.y, "l'image levee ne sort pas de la zone de clic");
+}
+
+#[test]
+fn le_survol_a_une_duree_et_rien_en_mode_aucun() {
+    assert_eq!(animations::duree_ms(Mode::Aucun, Nature::Survol), 0);
+    assert!((80..=160).contains(&animations::duree_ms(Mode::Normal, Nature::Survol)));
+    assert_eq!(animations::opacite(Nature::Survol, 0, PLEIN), 255);
+}

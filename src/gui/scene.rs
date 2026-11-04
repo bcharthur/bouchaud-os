@@ -74,6 +74,8 @@ pub enum Element {
     Fantome(usize),
     /// Barre des taches.
     BarreTaches,
+    /// Infobulle du dock (au-dessus de lui, jamais opaque).
+    Infobulle,
     /// Curseur logiciel. Jamais opaque : il a des bords transparents.
     Curseur,
 }

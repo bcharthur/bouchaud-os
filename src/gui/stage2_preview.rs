@@ -7,7 +7,7 @@ fn paint(mouse_pos: (usize, usize)) {
     use crate::gui::widgets;
 
     widgets::draw_desktop(&[]);
-    widgets::draw_taskbar(&[], false);
+    widgets::draw_taskbar(&[], false, -1, -1);
     widgets::draw_cursor(mouse_pos.0, mouse_pos.1);
     crate::drivers::gfx::present();
 }

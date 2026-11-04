@@ -507,6 +507,7 @@ fn peins_calque(toile: &mut Toile, calque: &Calque, etat: &Etat) {
         // son survol sont verifies par `test_atelier` (BOUCHAUD_ATELIER_CENTRE_V1).
         Element::Centre => {}
         Element::Fantome(_) => {}
+        Element::Infobulle => {}
         Element::BarreTaches => peins_barre_taches(toile, etat),
         Element::Curseur => peins_curseur(toile, etat),
     }

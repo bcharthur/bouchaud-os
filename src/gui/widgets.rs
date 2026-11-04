@@ -1171,10 +1171,69 @@ fn voile_cellule(cellule: crate::gui::atelier::dock::Boite, opacite: u8) {
         crate::gui::atelier::jetons::SURVOL, opacite);
 }
 
-pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
+/// Survol du dock a l'instant de la trame : la cible sous le pointeur, son
+/// avancement (0..=PLEIN), la levee de son icone.
+fn survol_dock(n: usize, mx: i32, my: i32) -> Option<(crate::gui::atelier::dock::Cible, u32, i32)> {
+    use crate::gui::atelier::{dock, effets, mouvement::PLEIN};
+    let cible = dock::cible_sous(fb::width() as u32, fb::height() as u32, n, mx, my)?;
+    let p = effets::survol(cible);
+    let levee = if effets::deplacement_permis() { dock::LEVEE * p as i32 / PLEIN as i32 } else { 0 };
+    Some((cible, p, levee))
+}
+
+/// Libelle de l'infobulle d'une cible.
+fn libelle_cible(wins: &[Win], cible: crate::gui::atelier::dock::Cible) -> String {
+    match cible {
+        crate::gui::atelier::dock::Cible::Applications => String::from("Applications"),
+        crate::gui::atelier::dock::Cible::Fenetre(i) => match wins.get(i) {
+            Some(w) => {
+                let titre: String = w.title.chars().take(40).collect();
+                if w.min { format!("{} (r\u{e9}duite)", titre) } else { titre }
+            }
+            None => String::new(),
+        },
+    }
+}
+
+/// L'infobulle du dock sous le pointeur : sa cible et sa boite. Une seule
+/// definition pour le plan de scene, l'invalidation et le peintre.
+pub(crate) fn infobulle_dock(wins: &[Win], mx: i32, my: i32)
+    -> Option<(crate::gui::atelier::dock::Cible, crate::gui::atelier::dock::Boite)>
+{
+    use crate::gui::atelier::dock;
+    let (l, h) = (fb::width() as u32, fb::height() as u32);
+    let cible = dock::cible_sous(l, h, wins.len(), mx, my)?;
+    let texte = fb::text_width(&libelle_cible(wins, cible), CORPS_INFOBULLE, false) as i32;
+    Some((cible, dock::infobulle(l, h, wins.len(), cible, texte)))
+}
+
+const CORPS_INFOBULLE: f32 = 12.0;
+
+/// Peint l'infobulle du dock (calque `Element::Infobulle`).
+pub(crate) fn draw_infobulle(wins: &[Win], mx: i32, my: i32) {
+    use crate::gui::atelier::{jetons as j, matiere, mouvement::PLEIN};
+    let Some((cible, b)) = infobulle_dock(wins, mx, my) else { return };
+    let p = crate::gui::atelier::effets::survol(cible);
+    let fond = (0xe6 * p / PLEIN) as u8;
+    if fond == 0 {
+        return;
+    }
+    let r = crate::gui::windowing::Rect::new(b.x, b.y, b.w as u32, b.h as u32);
+    matiere::pave(r, 8, j::ENCRE, fond);
+    let texte = libelle_cible(wins, cible);
+    // Texte opaque : la police n'a pas d'opacite propre. Il n'apparait qu'a
+    // mi-fondu, quand le fond est assez dense pour le porter.
+    if p * 2 >= PLEIN {
+        fb::draw_text_prop((b.x + crate::gui::atelier::dock::INFOBULLE_REMBOURRAGE) as usize,
+            (b.y + 5) as usize, &texte, 0xffffff, CORPS_INFOBULLE, false);
+    }
+}
+
+pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool, mx: i32, my: i32) {
     use crate::gui::atelier::{dock, jetons as j, matiere};
     let (l, h) = (fb::width() as u32, fb::height() as u32);
     let n = wins.len();
+    let survol = survol_dock(n, mx, my);
     let cadre = dock::cadre(l, h, n);
     // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat dans la bande qui ne touche pas
     // le dock (ses cotes) n'a rien a peindre ici -- le fond l'a deja fait.
@@ -1186,15 +1245,27 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
     matiere::plaque_verre(crate::gui::windowing::Rect::new(cadre.x, cadre.y,
         cadre.w as u32, cadre.h as u32), j::RAYON_DOCK, j::VERRE_DOCK);
 
-    // Applications. Pas de voile de SURVOL dans cet increment : un deplacement
-    // de souris n'invalide que l'empreinte du curseur, et le voile resterait
-    // sur la cellule quittee. Il viendra avec les transitions (increment 2),
-    // qui invalident la cellule quittee ET la cellule atteinte.
+    // BOUCHAUD_ATELIER_DOCK_SURVOL_V1 : voile et levee de la cellule survolee.
+    // Le gestionnaire invalide la cellule quittee ET la cellule atteinte ; la
+    // cible vient de `dock::cible_sous`, la meme que le clic.
+    let voile = |cible: dock::Cible| -> i32 {
+        match survol {
+            Some((c, p, levee)) if c == cible => {
+                let o = (0x1e * p / crate::gui::atelier::mouvement::PLEIN) as u8;
+                if o > 0 {
+                    voile_cellule(dock::boite_cible(l, h, n, cible), o);
+                }
+                levee
+            }
+            _ => 0,
+        }
+    };
     let apps = dock::cellule_applications(l, h, n);
     if menu_open {
         voile_cellule(apps, 0x24);
     }
-    pictogramme_applications(apps, menu_open);
+    let levee = voile(dock::Cible::Applications);
+    pictogramme_applications(dock::Boite { y: apps.y - levee, ..apps }, menu_open);
 
     if dock::visibles(l, n) == 0 {
         return;
@@ -1212,8 +1283,9 @@ pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
         if c.w == 0 { break; }
         if !fb::decoupe_touche(c.x.max(0) as usize, c.y.max(0) as usize,
             c.w as usize, (c.h + dock::REMBOURRAGE) as usize) { continue }
+        let levee = voile(dock::Cible::Fenetre(i));
         let ix = c.x + (c.w - dock::ICONE) / 2;
-        let iy = c.y + (c.h - dock::ICONE) / 2 - 2;
+        let iy = c.y + (c.h - dock::ICONE) / 2 - 2 - levee;
         match crate::gui::icones::pour_app(&w.app) {
             Some(icone) => crate::gui::icones::dessine(icone, ix.max(0) as usize,
                 iy.max(0) as usize, crate::gui::icones::TAILLE_DOCK),

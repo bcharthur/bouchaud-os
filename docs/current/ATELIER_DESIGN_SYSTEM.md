@@ -328,6 +328,51 @@ Sous TCG, l'ouverture plafonne à environ 15–25 images/s, parce que sa premiè
 - transition de focus ;
 - fondu du centre et du menu.
 
+## 3 quinquies. Incrément C livré : dock interactif (BOUCHAUD_ATELIER_DOCK_SURVOL_V1)
+
+**Géométrie unique.** `atelier::dock::cible_sous(l, h, n, x, y)` ne lit que `cellule_applications` et `cellule_fenetre`, les mêmes boîtes que `window::start_btn` et `taskbar_btn`. Le peintre, l'infobulle, l'invalidation et le clic désignent donc la même cellule. Un test hôte le vérifie pixel par pixel, sur 3 résolutions et de 0 à 6 fenêtres.
+
+**Ce qui est livré.**
+- **Voile de survol** sur la cellule, en fondu de 120 ms (80 ms en mode réduit, instantané en mode aucun), par le registre de l'incrément B (`Nature::Survol`).
+- **Levée de l'icône** de 3 px au terme du fondu. Elle reste dans la cellule : la zone de clic ne bouge pas avec l'image. Pas de levée en mode réduit.
+- **Infobulle** au-dessus du dock :
+  - texte « Applications » ou titre de la fenêtre, avec « (réduite) » si besoin ;
+  - calque propre `Element::Infobulle`, transparent ;
+  - boîte `dock::infobulle`, gardée dans l'écran.
+- **Clic sur la cellule de la fenêtre active** : elle se réduit, par le même chemin que le bouton de la barre de titre. Un clic sur une cellule réduite la restaure.
+- **Invalidation** :
+  - le survol n'est mesuré que près du bas de l'écran ;
+  - un changement de cible invalide l'ancienne cellule et sa bulle, puis la nouvelle ;
+  - aucun survol avec le menu ou le centre ouvert.
+
+**Preuves.**
+- `test_atelier` : 72 tests (+5) :
+  - cible au pixel près ;
+  - rien hors du dock ;
+  - infobulle collée au-dessus du dock et dans l'écran ;
+  - levée dans la cellule ;
+  - durées.
+- 22/22 suites, gardes 210/210, `CI_POLICY_OK`.
+
+**Captures QEMU réelles.**
+- `atelier/sequence-incC-survol-dock.png` :
+  - survol d'Applications ;
+  - survol du Terminal (icône levée) ;
+  - sortie du dock, sans résidu.
+- `atelier/sequence-incC-reduire-restaurer.png` : clic sur la cellule active (réduite, infobulle « Terminal (réduite) »), puis nouveau clic (restaurée, indicateur d'accent).
+
+**Mesures** (TCG) :
+- un fondu de survol produit 10 à 11 trames, à 2,7–4,2 ms par trame en moyenne et 6,1 ms au pire ;
+- au repos (62 s), `desktop cpu_pct` vaut 3 à 30 s puis 0 à 60 s, avec 1 trame utile en 54 s ;
+- première trame : 5456 / 5502 ms ;
+- bootimage : 28 971 008 octets.
+
+**Non fait** :
+- grossissement au-delà de la levée (pas de taille d'icône intermédiaire en assets) ;
+- animation de lancement ;
+- apparition et disparition animées des cellules ;
+- menu contextuel du dock.
+
 ## 4. Limites connues de l'incrément 1 (assumées)
 
 - **Contenu des applications encore sombre** : Fichiers, Notes, Calculatrice et les autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (prochain incrément). Le Terminal reste sombre volontairement.
@@ -335,7 +380,7 @@ Sous TCG, l'ouverture plafonne à environ 15–25 images/s, parce que sa premiè
 - **Icône du navigateur provisoire** (tuile « boussole ») : l'identité de Bouchaud Navigateur et son chrome restent à faire, sans toucher au moteur Ladybird.
 - **Le verre n'est pas flouté** : c'est une matière translucide légère. Aucun flou d'arrière-plan n'est implémenté, et rien ne le prétend.
 - ~~Pas encore de transitions animées~~ : ouverture et fermeture animées depuis l'incrément B ; la réduction vers le dock et la maximisation restent à faire.
-- **Pas de survol sur le dock** : un déplacement de souris n'invalide que l'empreinte du curseur, donc un voile de survol resterait sur la cellule quittée. Il viendra avec l'incrément 2, qui invalide la cellule quittée et la cellule atteinte.
+- ~~Pas de survol sur le dock~~ : livré par l'incrément C (voile, levée, infobulle, invalidation de l'ancienne et de la nouvelle cellule).
 - **Menu Démarrer encore sombre** : il est repositionné au-dessus du dock, mais pas restylé.
 - ~~Menus de la barre inertes~~ : retirés par l'incrément A.
 - **Icônes du bureau** : celles d'avant, libellés blancs ombrés.

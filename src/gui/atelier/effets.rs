@@ -219,7 +219,7 @@ pub fn tour(maintenant: u64, peinte: impl Fn(u64) -> Option<Boite>, mut ajoute_z
                     n += 1;
                 }
             },
-            Nature::Fermeture => {
+            Nature::Fermeture | Nature::Survol => {
                 if let Some(a) = registre().cherche(cle, nature) {
                     ajoute(a.bornes);
                 }
@@ -296,6 +296,54 @@ fn mesure_et_oublie() {
         NS_ANIMES = 0;
         NS_PIRE = 0;
     }
+}
+
+/// Cle du survol d'une cellule du dock : jamais un `WindowId` ni un
+/// instantane.
+pub fn cle_survol(cible: super::dock::Cible) -> u64 {
+    (1 << 62) | match cible {
+        super::dock::Cible::Applications => 0,
+        super::dock::Cible::Fenetre(i) => i as u64 + 1,
+    }
+}
+
+/// Une cellule prend le survol : fondu de `zone` (cellule et infobulle).
+/// En mode `Aucun`, rien n'est lance : le survol s'affiche plein d'emblee.
+pub fn survole(cible: super::dock::Cible, zone: Boite) {
+    let duree = an::duree_ms(mode(), Nature::Survol);
+    if duree == 0 {
+        return;
+    }
+    if let Some(e) = registre().lance(Animation {
+        cle: cle_survol(cible), nature: Nature::Survol, debut_ms: an::EN_ATTENTE,
+        duree_ms: duree, depart: 0, bornes: zone,
+    }) {
+        retire(e);
+    }
+}
+
+/// Le survol quitte une cellule : son fondu, s'il courait, s'arrete.
+pub fn quitte(cible: super::dock::Cible) {
+    if let Some(a) = registre().annule(cle_survol(cible), Nature::Survol) {
+        retire(a);
+    }
+}
+
+/// Avancement du survol de `cible` a l'instant de la trame (PLEIN s'il n'y a
+/// pas de fondu en cours : le survol est etabli).
+pub fn survol(cible: super::dock::Cible) -> u32 {
+    match registre().cherche(cle_survol(cible), Nature::Survol) {
+        Some(a) => {
+            unsafe { ANIME_CETTE_TRAME = true; }
+            a.progression(unsafe { HORLOGE_TRAME })
+        }
+        None => super::mouvement::PLEIN,
+    }
+}
+
+/// Le mouvement autorise-t-il de deplacer quelque chose (levee, translation) ?
+pub fn deplacement_permis() -> bool {
+    mode() == an::Mode::Normal
 }
 
 /// L'ouverture en cours de la fenetre `cle`, a l'instant de la trame :
