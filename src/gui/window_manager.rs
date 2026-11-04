@@ -596,6 +596,9 @@ fn boucle() {
     // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
     let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
     crate::gui::atelier::reglages::charge();
+    // BOUCHAUD_DOSSIERS_PERSONNELS_V1 : le dossier personnel de la session et
+    // ses sous-dossiers existent avant la premiere fenetre.
+    let _ = crate::fs::dossiers::prepare_session();
     // BOUCHAUD_ATELIER_EFFETS_V1 : ce fil est le seul a toucher l'etat des
     // effets (voir `effets::fil_ok`).
     crate::gui::atelier::effets::adopte_fil();
@@ -1376,6 +1379,14 @@ fn boucle() {
                 "navigateur-echec"
             });
             crate::platform::pc::ecran_faute::amorcage_clos();
+            sale = true;
+        }
+
+        // BOUCHAUD_NOTES_OUVRIR_V1 : une application a demande d'ouvrir un
+        // fichier dans Notes.
+        if let Some(chemin) = apps::prends_demande_notes() {
+            let fenetre = window::fenetre_notes(home, &chemin, &mut spawn_n);
+            ouvre_fenetre(&mut wins, fenetre, &mut degats);
             sale = true;
         }
 

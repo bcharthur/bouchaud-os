@@ -132,3 +132,4 @@ include!("persistance/sync.rs");
 include!("persistance/diagnostic.rs");
 include!("persistance/collecte.rs");
 include!("persistance/codec.rs");
+include!("persistance/meta.rs");

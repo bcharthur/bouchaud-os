@@ -512,6 +512,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // apres le cablage SMP, afin de ne pas publier/reveiller `net-lien` pendant
     // la fenetre INIT/SIPI qui a declenche la double faute Trigkey.
     crate::net::demarre_le_veilleur_de_lien();
+    // BOUCHAUD_ECRITURE_DIFFEREE_V1 : /persist n'attend plus un `sync`.
+    crate::fs::ecriture_differee::demarre();
     crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
     // L'AUDITEUR PART ICI, ET APRES LE VEILLEUR.
     //

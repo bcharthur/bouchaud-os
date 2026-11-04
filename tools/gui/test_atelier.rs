@@ -760,9 +760,15 @@ fn le_menu_contextuel_reste_dans_la_fenetre_et_designe_son_entree() {
             }
         }
     }
-    assert_eq!(fichiers::actions(true, true)[0], fichiers::Action::Ouvrir, "un dossier s'ouvre");
-    assert!(!fichiers::actions(true, false).contains(&fichiers::Action::Ouvrir),
-        "aucune application n'ouvre encore un fichier : pas d'entree Ouvrir");
+    assert_eq!(fichiers::actions(true, true, false)[0], fichiers::Action::Ouvrir, "un dossier s'ouvre");
+    assert_eq!(fichiers::actions(true, false, true)[0], fichiers::Action::OuvrirNotes,
+        "un fichier texte s'ouvre dans Notes");
+    assert!(!fichiers::actions(true, false, false).iter()
+        .any(|a| matches!(a, fichiers::Action::Ouvrir | fichiers::Action::OuvrirNotes)),
+        "un fichier qu'aucune application n'ouvre n'a pas d'entree Ouvrir");
+    assert!(fichiers::editable_dans_notes(Genre::Texte, 10));
+    assert!(!fichiers::editable_dans_notes(Genre::Image, 10));
+    assert!(!fichiers::editable_dans_notes(Genre::Texte, fichiers::NOTES_MAX_OCTETS + 1));
 }
 
 #[test]

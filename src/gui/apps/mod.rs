@@ -41,6 +41,23 @@ fn journal_gui_special(cmd: &str, cwd: usize, status: i32, sortie: Option<&str>)
     crate::kernel::blackbox::terminal_resultat("gui", status);
 }
 
+// ── Demandes d'ouverture ──────────────────────────────────────────────────────
+//
+// BOUCHAUD_NOTES_OUVRIR_V1 : Fichiers demande qu'un fichier s'ouvre dans Notes.
+// Une application n'a pas acces a la liste des fenetres : elle depose la
+// demande, le bureau la prend a son prochain tour et ouvre la fenetre.
+
+static DEMANDE_NOTES: crate::kernel::sync::SpinLock<Option<alloc::string::String>> =
+    crate::kernel::sync::SpinLock::new(None);
+
+pub(crate) fn demande_notes(chemin: alloc::string::String) {
+    *DEMANDE_NOTES.lock() = Some(chemin);
+}
+
+pub(crate) fn prends_demande_notes() -> Option<alloc::string::String> {
+    DEMANDE_NOTES.lock().take()
+}
+
 // ── Clavier ───────────────────────────────────────────────────────────────────
 
 /// Transmet une touche à l'application de la fenêtre active.

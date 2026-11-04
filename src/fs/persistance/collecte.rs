@@ -76,6 +76,13 @@ fn collecte_sous_garde(
             format!("{}/{}", prefixe, nom)
         };
 
+        let n = &systeme.nodes[index];
+        let meta = Meta {
+            dossier: n.kind == NodeKind::Dir,
+            mode: n.mode,
+            uid: n.uid,
+            gid: n.gid,
+        };
         match systeme.nodes[index].kind {
             NodeKind::Dir => {
                 // Un arbre etiquete devient un groupe jetable ; le plus externe
@@ -89,11 +96,19 @@ fn collecte_sous_garde(
                     }
                     None => None,
                 };
+                // BOUCHAUD_PERSIST_META_V1 : le dossier lui-meme est retenu,
+                // AVANT son contenu -- un dossier vide survit, et le montage
+                // le recree avant d'y deposer quoi que ce soit.
+                if chemin.len() < CHEMIN_MAX {
+                    entrees.push(Entree { chemin: chemin.clone(), noeud: index, longueur: 0, meta, groupe });
+                }
                 collecte_sous_garde(systeme, index, &chemin, groupe, groupes, entrees);
             }
             NodeKind::File => {
+                // Un fichier VIDE est retenu aussi : il existe, il a un nom et
+                // des droits (BOUCHAUD_PERSIST_META_V1).
                 let longueur = systeme.nodes[index].content_len();
-                if longueur == 0 || chemin.len() >= CHEMIN_MAX {
+                if chemin.len() >= CHEMIN_MAX {
                     continue;
                 }
 
@@ -104,6 +119,7 @@ fn collecte_sous_garde(
                     chemin,
                     noeud: index,
                     longueur,
+                    meta,
                     groupe,
                 });
             }
@@ -143,6 +159,16 @@ fn depose_sous_garde(
     chemin: &str,
     contenu: &[u8],
 ) -> bool {
+    depose_noeud_sous_garde(systeme, racine, chemin, contenu).is_some()
+}
+
+/// Comme [`depose_sous_garde`], et rend le noeud du fichier.
+fn depose_noeud_sous_garde(
+    systeme: &mut crate::fs::ramfs::FileSystem,
+    racine: usize,
+    chemin: &str,
+    contenu: &[u8],
+) -> Option<usize> {
     let mut parent = racine;
     let mut morceaux = chemin.split('/').filter(|m| !m.is_empty()).peekable();
 
@@ -152,20 +178,38 @@ fn depose_sous_garde(
                 Some(idx) => idx,
                 None => match systeme.touch_at(parent, morceau) {
                     Ok(idx) => idx,
-                    Err(_) => return false,
+                    Err(_) => return None,
                 },
             };
-            return systeme.write_node_bytes(noeud, contenu);
+            return systeme.write_node_bytes(noeud, contenu).then_some(noeud);
         }
 
         parent = match systeme.find_child(parent, morceau) {
             Some(idx) => idx,
             None => match systeme.mkdir_at(parent, morceau) {
                 Ok(idx) => idx,
-                Err(_) => return false,
+                Err(_) => return None,
             },
         };
     }
 
-    false
+    None
+}
+
+/// Recree (parents compris) le dossier `chemin` sous `/persist`, et rend son
+/// noeud. Un fichier du meme nom l'en empeche : rien n'est ecrase.
+fn dossier_sous_garde(
+    systeme: &mut crate::fs::ramfs::FileSystem,
+    racine: usize,
+    chemin: &str,
+) -> Option<usize> {
+    let mut parent = racine;
+    for morceau in chemin.split('/').filter(|m| !m.is_empty()) {
+        parent = match systeme.find_child(parent, morceau) {
+            Some(idx) if systeme.nodes[idx].kind == NodeKind::Dir => idx,
+            Some(_) => return None,
+            None => systeme.mkdir_at(parent, morceau).ok()?,
+        };
+    }
+    (parent != racine).then_some(parent)
 }

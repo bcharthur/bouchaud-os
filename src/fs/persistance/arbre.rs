@@ -35,6 +35,8 @@ struct Entree {
     chemin: String,
     noeud: usize,
     longueur: usize,
+    /// Genre, droits et proprietaire (BOUCHAUD_PERSIST_META_V1).
+    meta: Meta,
     /// L'arbre `CACHEDIR.TAG` qui le contient : jetable si `/persist` ne tient
     /// plus (`fs/cache_jetable.rs`).
     groupe: Option<u32>,

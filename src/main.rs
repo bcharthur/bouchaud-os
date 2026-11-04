@@ -282,6 +282,8 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // etait definitif, et le navigateur repondait « Unable to resolve host »
     // pour le reste de la session.
     net::demarre_le_veilleur_de_lien();
+    // BOUCHAUD_ECRITURE_DIFFEREE_V1 : /persist n'attend plus un `sync`.
+    crate::fs::ecriture_differee::demarre();
     // L'auditeur LAB : il lit ce que les pilotes publient, et n'ecrit que
     // dans l'anneau. Voir `kernel/debug/lab/auditd.rs`.
     kernel::lab::auditd::demarre();
