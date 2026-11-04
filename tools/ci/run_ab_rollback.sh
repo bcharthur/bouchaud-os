@@ -252,6 +252,22 @@ case "${BO_AB_SUPPORT:-nvme}" in
       -device usb-storage,bus=xhci.0,port=2,drive=seconde,removable=on) ;;
   *) echo "BO_AB_SUPPORT inconnu : ${BO_AB_SUPPORT}" >&2; exit 2 ;;
 esac
+# BOUCHAUD_AB_ETAT_APRES_COMMIT_ATTENDU_V1 : après `result=committed`,
+# serviced relit l'état par la capacité et écrit `SERVICED_UPDATE_STATE`.
+# Cette seconde ligne est la preuve « état visible après commit » que
+# l'assertion `etat_apres_commit` exige ; on l'attend (borné) avant de couper.
+attend_etat_apres_commit() {
+  local borne=$((SECONDS + ${BO_AB_ETAT_APRES_COMMIT_S:-20}))
+  while (( SECONDS < borne )); do
+    if sed 's/\x1b\[[0-9;]*m//g' "$log" | tr -d '\r' \
+         | awk '/result=committed/ { c = 1; next } c && /SERVICED_UPDATE_STATE/ { t = 1 } END { exit !t }'; then
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.2
+  done
+  return 1
+}
 sequence=()
 nb=$(wc -w <<< "$ATTENDU")
 for i in $(seq 1 "$nb"); do
@@ -311,7 +327,13 @@ for i in $(seq 1 "$nb"); do
       sleep 1; continue
     fi
     case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
-      if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then verdict="$slot+"; break; fi
+      if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then
+        # Couper à la première ligne détruisait la seconde (run 41898808040,
+        # #248 : `B+ B=` puis etat_apres_commit en échec). Si elle ne vient
+        # pas dans la borne, l'assertion échoue comme avant : rien n'est relâché.
+        attend_etat_apres_commit || true
+        verdict="$slot+"; break
+      fi
       if [ -n "$slot" ] && grep -aq "result=already_good" <<< "$propre"; then verdict="$slot="; break; fi
       if [ -n "$slot" ] && grep -aqE "result=refused|\[SERVICED\] system [A-Za-z]+->RecoveryRequired" <<< "$propre"; then
         verdict="$slot-"; break
