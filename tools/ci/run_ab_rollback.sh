@@ -11,12 +11,19 @@
 #   meta-2     both copies corrupted -> RECOVERY_REQUIRED, nothing booted
 #   sante      slot B = good system (serviced + healthd in its ramdisk):
 #              serviced declares health -> the candidate is COMMITTED
+#   sans-vidange  with BO_AB_SUPPORT=usb: slot B = good system whose USB
+#              key refuses SYNCHRONIZE CACHE -> no commit ever, rollback to A
+#   seconde-cle   with BO_AB_SUPPORT=usb-deux: the A/B key flushes, a second
+#              key refuses -> the second key changes nothing, B commits
 #   sante-ko   slot B = good kernel, but its critical service never becomes
 #              ready: serviced -> RecoveryRequired, never commits -> rollback
 #   mise-a-jour  A runs, B is zeroed and Empty. updated (ring 3, install
 #              capability only) checks its refusals, writes B from the image
 #              in A's ramdisk, the kernel re-reads it and marks it Candidate;
 #              then B boots, is confirmed by serviced, and stays.
+#
+# BO_AB_SUPPORT=nvme|usb|usb-deux selects the disk transport (default nvme);
+# usb-deux adds a second, blank USB key on port 2.
 #
 # Each "boot" is a fresh QEMU process on the SAME disk image (state persists
 # between boots exactly as it would on a disk). A candidate failure ends by
@@ -51,7 +58,7 @@
 # not start, or a kernel started under RECOVERY_REQUIRED is red.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|mise-a-jour|mise-a-jour-morts|sans-cle|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
+SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|mise-a-jour-morts|sans-cle|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
 RECOVERY=0
 # mise-a-jour-morts = mise-a-jour + updated dies on purpose twice (during the
 # writes, during the read-back); the third instance must inherit nothing.
@@ -71,6 +78,14 @@ case "$SCENARIO" in
   meta-2) MAUVAIS=panique; META_SPEC=corrompu:2; ATTENDU="RECOVERY" ;;
   sante) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   sante-ko) MAUVAIS=bon; META_SPEC=b-candidat:3; ATTENDU="B- B- B- A= A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
+  # Temoin negatif de BOUCHAUD_USB_VIDANGE_REELLE_V1 (a jouer avec
+  # BO_AB_SUPPORT=usb) : B est un bon systeme, mais son support refuse
+  # SYNCHRONIZE CACHE. Aucun commit ne doit avoir lieu : B- trois fois, puis A.
+  sans-vidange) MAUVAIS=sans-vidange; META_SPEC=b-candidat:3; ATTENDU="B- B- B- A= A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
+  # BOUCHAUD_USB_LIAISON_SUPPORT_V1 (a jouer avec BO_AB_SUPPORT=usb-deux) : la
+  # cle de demarrage vide, une SECONDE cle refuse SYNCHRONIZE CACHE. La sonde
+  # de la seconde ne doit pas retirer la promesse de la premiere : B commit.
+  seconde-cle) MAUVAIS=seconde-cle-sans-vidange; META_SPEC=b-candidat:3; ATTENDU="B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   mise-a-jour) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A* B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
   sans-cle) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A0 A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
   recovery-requise) MAUVAIS=bon; META_SPEC=corrompu:2; ATTENDU="R"; RECOVERY=1 ;;
@@ -126,7 +141,7 @@ with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
         t.addfile(i, io.BytesIO(data))
 PY
 }
-case "$SCENARIO" in sante|sante-ko|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
+case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
   # The system userland of each slot: serviced (system supervisor) and its
   # critical services (health contract v3: healthd, updated, logd). In sante-ko the
   # CANDIDATE's critical service fails.
@@ -222,6 +237,21 @@ dialogue() {
 }
 
 # --- boot loop --------------------------------------------------------------
+# BO_AB_SUPPORT : le disque A/B est un NVMe (defaut) ou une CLE USB (xHCI +
+# usb-storage, BOUCHAUD_USB_VIDANGE_REELLE_V1). Sur cle, le commit de sante
+# n'est accepte que si le support a prouve SYNCHRONIZE CACHE au montage.
+case "${BO_AB_SUPPORT:-nvme}" in
+  nvme) SUPPORT=(-device nvme,drive=disque,serial=bouchaud-ab) ;;
+  usb)  SUPPORT=(-device qemu-xhci,id=xhci -device usb-storage,bus=xhci.0,drive=disque,removable=on,bootindex=0) ;;
+  # La cle A/B sur le port 1, une seconde cle (GPT vierge) sur le port 2.
+  usb-deux)
+    python3 tools/ci/fabrique-disque-gpt.py "$OUT/seconde-cle.img" --mio 32 >/dev/null || exit 1
+    SUPPORT=(-device qemu-xhci,id=xhci
+      -device usb-storage,bus=xhci.0,port=1,drive=disque,removable=on,bootindex=0
+      -drive if=none,id=seconde,format=raw,file="$OUT/seconde-cle.img"
+      -device usb-storage,bus=xhci.0,port=2,drive=seconde,removable=on) ;;
+  *) echo "BO_AB_SUPPORT inconnu : ${BO_AB_SUPPORT}" >&2; exit 2 ;;
+esac
 sequence=()
 nb=$(wc -w <<< "$ATTENDU")
 for i in $(seq 1 "$nb"); do
@@ -238,7 +268,7 @@ for i in $(seq 1 "$nb"); do
     -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,unit=1,file="$OUT/vars.fd" \
     -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
-    -device nvme,drive=disque,serial=bouchaud-ab \
+    "${SUPPORT[@]}" \
     -display none -no-reboot "${SERIE[@]}" >/dev/null 2>&1 &
   pid=$!
   verdict=""
@@ -280,7 +310,7 @@ for i in $(seq 1 "$nb"); do
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 1; continue
     fi
-    case "$SCENARIO" in sante|sante-ko|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
+    case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
       if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then verdict="$slot+"; break; fi
       if [ -n "$slot" ] && grep -aq "result=already_good" <<< "$propre"; then verdict="$slot="; break; fi
       if [ -n "$slot" ] && grep -aqE "result=refused|\[SERVICED\] system [A-Za-z]+->RecoveryRequired" <<< "$propre"; then

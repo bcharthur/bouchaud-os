@@ -16,7 +16,10 @@ use alloc::vec::Vec;
 // vingt-deux et huit pixels de marge. Toutes les geometries en descendent, y
 // compris celles du menu et des boutons : rien ici n'est un nombre pose a la
 // main deux fois.
-pub(crate) const BAR_H: usize = 30;        // hauteur des barres haut/bas
+pub(crate) const BAR_H: usize = 30;        // hauteur de la barre du haut
+
+/// Bande du bas reservee au dock Atelier : dock, marge et ombre.
+pub(crate) const DOCK_H: usize = crate::gui::atelier::dock::HAUTEUR_ZONE as usize;
 
 /// Marge verticale d'un bouton dans une barre, en haut comme en bas.
 pub(crate) const MARGE_BARRE: i32 = 4;
@@ -36,6 +39,9 @@ pub(crate) const MENU_W: i32 = 226;        // largeur du menu Démarrer
 // diverger sans casser la compilation.
 const _: () = {
     assert!(BAR_H as u32 == crate::gui::disposition::HAUTEUR_BARRE);
+    assert!(DOCK_H as u32 == crate::gui::disposition::HAUTEUR_ZONE_DOCK);
+    assert!(crate::gui::atelier::dock::ICONE as usize == crate::gui::icones::TAILLE_DOCK);
+    assert!(crate::gui::atelier::dock::OMBRE as u32 == crate::gui::disposition::DEBORD_OMBRE);
     assert!(MENU_ITEM_H == crate::gui::disposition::HAUTEUR_LIGNE_MENU);
     assert!(MENU_HEADER_H == crate::gui::disposition::ENTETE_MENU);
     // Le debord d'ombre pilote DEUX choses qui doivent coincider : ce que
@@ -87,7 +93,7 @@ pub(crate) const TITRE_NAVIGATEUR: &str = "Ladybird";
 /// aurait ete cherchee dans le compositeur.
 pub(crate) fn rect_maximise() -> crate::gui::windowing::Rect {
     crate::gui::windowing::Rect::new(0, BAR_H as i32, width() as u32,
-        (height() - 2 * BAR_H) as u32)
+        (height() - BAR_H - DOCK_H) as u32)
 }
 
 /// Plus grande zone utile que le bureau puisse donner : celle d'une fenetre
@@ -156,7 +162,8 @@ pub(crate) const KIND_INSIGHTS: usize = 10;
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
-    Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History },
+    Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History,
+        ui: crate::gui::apps::file_explorer::Ui },
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
@@ -220,30 +227,26 @@ pub(crate) fn clip(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
-/// Largeur du bouton Demarrer.
-pub(crate) const DEMARRER_W: i32 = 74;
+/// BOUCHAUD_ATELIER_DOCK_V1 : la cellule Applications du dock. Le dock est
+/// centre et sa largeur suit le nombre de fenetres `n` : le test d'impact et le
+/// peintre lisent la meme geometrie, `atelier::dock`.
+pub(crate) fn start_btn(n: usize) -> Rect {
+    depuis_boite(crate::gui::atelier::dock::cellule_applications(width() as u32,
+        height() as u32, n))
+}
 
-/// Largeur d'un bouton de fenetre dans la barre des taches.
-pub(crate) const TACHE_W: i32 = 148;
-
-/// Pas entre deux boutons de la barre des taches.
-pub(crate) const TACHE_PAS: i32 = TACHE_W + 6;
-
-/// Abscisse du premier bouton de fenetre : apres le bouton Demarrer.
-pub(crate) const TACHE_X0: i32 = MARGE_BARRE + DEMARRER_W + 10;
-
-pub(crate) fn start_btn() -> Rect {
-    Rect {
-        x: MARGE_BARRE,
-        y: height() as i32 - BAR_H as i32 + MARGE_BARRE,
-        w: DEMARRER_W,
-        h: BOUTON_BARRE_H,
-    }
+fn depuis_boite(b: crate::gui::atelier::dock::Boite) -> Rect {
+    Rect { x: b.x, y: b.y, w: b.w, h: b.h }
 }
 
 pub(crate) fn menu_rect() -> Rect {
     let h = MENU.len() as i32 * MENU_ITEM_H + MENU_HEADER_H + 8;
-    Rect { x: 2, y: height() as i32 - BAR_H as i32 - h, w: MENU_W, h }
+    // Au-dessus du dock, aligne sur sa cellule Applications. Le menu ne
+    // depend pas du nombre de fenetres : il s'ancre a gauche du dock le plus
+    // large qu'on puisse avoir sans fenetre, pour ne pas sauter quand une
+    // fenetre s'ouvre pendant qu'il est ouvert.
+    let ancre = crate::gui::atelier::dock::cadre(width() as u32, height() as u32, 0);
+    Rect { x: (ancre.x).max(2), y: height() as i32 - DOCK_H as i32 - h, w: MENU_W, h }
 }
 
 /// Le menu, dans le systeme de coordonnees du compositeur.
@@ -275,13 +278,11 @@ pub(crate) fn rect_ligne_menu(index: usize) -> crate::gui::protocole::Rect {
     crate::gui::disposition::rect_ligne_menu(menu_proto(), index)
 }
 
-pub(crate) fn taskbar_btn(i: usize) -> Rect {
-    Rect {
-        x: TACHE_X0 + i as i32 * TACHE_PAS,
-        y: height() as i32 - BAR_H as i32 + MARGE_BARRE,
-        w: TACHE_W,
-        h: BOUTON_BARRE_H,
-    }
+/// Cellule du dock de la fenetre `i` parmi `n`. Rectangle vide (jamais
+/// touche) si le dock n'a pas de place pour elle.
+pub(crate) fn taskbar_btn(i: usize, n: usize) -> Rect {
+    depuis_boite(crate::gui::atelier::dock::cellule_fenetre(width() as u32,
+        height() as u32, n, i))
 }
 
 /// Rectangle de l'icone de bureau `i`. Position pilotee par ICON_POSITIONS (drag).
@@ -367,7 +368,7 @@ pub(crate) fn clamp_win(w: &mut Win) {
     if w.x < 0 { w.x = 0; }
     if w.y < BAR_H as i32 { w.y = BAR_H as i32; }
     if w.x + w.w > width() as i32 { w.x = width() as i32 - w.w; }
-    if w.y + w.h > height() as i32 - BAR_H as i32 { w.y = height() as i32 - BAR_H as i32 - w.h; }
+    if w.y + w.h > height() as i32 - DOCK_H as i32 { w.y = height() as i32 - DOCK_H as i32 - w.h; }
 }
 
 /// Le scenario automatise M8 demande au bureau d'ouvrir directement le
@@ -379,6 +380,28 @@ fn autostart_browser_requested(first_window: bool) -> bool {
         && crate::shell::exported()
             .iter()
             .any(|entry| entry == "BO_AUTOSTART_BROWSER=1")
+}
+
+/// BOUCHAUD_ATELIER_CAPTURE_V1 : applications a ouvrir au demarrage du bureau,
+/// pour les captures et les bancs (`export BO_ATELIER_OUVRE=1,4,5` dans
+/// l'autorun). Inerte sans la variable. Les fenetres passent par `make_app`,
+/// le chemin exact du clic sur une icone : la capture montre le vrai bureau.
+pub(crate) fn fenetres_demandees_au_demarrage() -> Vec<usize> {
+    let mut kinds = Vec::new();
+    for entree in crate::shell::exported().iter() {
+        if let Some(liste) = entree.strip_prefix("BO_ATELIER_OUVRE=") {
+            for morceau in liste.split(',') {
+                if let Ok(kind) = morceau.trim().parse::<usize>() {
+                    // Le navigateur et les entrees d'alimentation ne s'ouvrent
+                    // pas par ce chemin : seules les applications natives.
+                    if kind < 64 && kind != KIND_NAVIGATEUR && kinds.len() < 8 {
+                        kinds.push(kind);
+                    }
+                }
+            }
+        }
+    }
+    kinds
 }
 
 /// Cree une fenetre d'application a partir d'un index de menu.
@@ -434,9 +457,12 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         0 => Win::new("Terminal".to_string(), x, y, 380, 280,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home }),
-        1 => Win::new("Fichiers".to_string(), x, y, 420, 320,
+        // BOUCHAUD_ATELIER_FICHIERS_V1 : assez large pour la barre laterale
+        // (`fichiers::LARGEUR_MIN_LATERALE`) et quatre colonnes de grille.
+        1 => Win::new("Fichiers".to_string(), x, y, 780, 470,
             crate::gui::windowing::WindowFlags::STANDARD,
-            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new() }),
+            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new(),
+                ui: crate::gui::apps::file_explorer::Ui::new() }),
         4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
             crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,

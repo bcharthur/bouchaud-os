@@ -45,6 +45,14 @@ banc-c5-fenetre-corrigee = []
 # notion de sante, a chaque boot.
 banc-ab-panique = []
 banc-ab-gel = []
+# BOUCHAUD_USB_VIDANGE_REELLE_V1, temoin negatif : le support USB refuse
+# `SYNCHRONIZE CACHE` des le montage. Le commit A/B sur cle doit alors etre
+# refuse (`volume_sans_vidange_reelle`) et le slot retombe sur A. Banc
+# seulement, jamais dans `default`.
+banc-ab-sans-vidange = []
+# Banc A/B a deux cles (BOUCHAUD_USB_LIAISON_SUPPORT_V1) : seule la sonde de
+# vidange du support numero 2 est refusee. Jamais dans `default`.
+banc-ab-seconde-cle-sans-vidange = []
 # BOUCHAUD_CLE_DEV_GARDE_V1 : fait confiance a la cle de DEVELOPPEMENT que le
 # banc genere (BOUCHAUD_CLE_VERSION_DEV). Les deux sont exiges ; la variable
 # seule fait echouer la construction. Jamais dans `default`, jamais livree :

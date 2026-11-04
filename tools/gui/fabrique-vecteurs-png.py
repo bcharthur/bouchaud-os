@@ -6,7 +6,7 @@ decodeur du noyau doit savoir lire : les cinq filtres de ligne, un fichier qui
 les melange comme le fait un vrai encodeur, et les cinq types de couleur.
 
 Un decodeur qui ne gere que le filtre « None » lit parfaitement les fichiers
-que `fabrique-icones.py` produit et rate tous les autres. Ces vecteurs sont la
+que la fabrique d'icones produisait et rate tous les autres. Ces vecteurs sont la
 pour que le premier PNG venu d'ailleurs -- une icone changee, une image
 telechargee -- ne soit pas la premiere occasion de s'en apercevoir.
 

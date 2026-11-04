@@ -3,10 +3,10 @@
 use crate::gui::apps;
 use crate::gui::framebuffer as fb;
 use crate::gui::window::{
-    self, icon_rect, menu_rect, start_btn, taskbar_btn, App, Win,
+    self, icon_rect, menu_rect, App, Win,
     BAR_H, ICONS, MENU, MENU_HEADER_H, MENU_ITEM_H, TITLE_H,
 };
-use crate::arch::x86_64::{cpu, rtc, smp};
+use crate::arch::x86_64::{rtc, smp};
 use crate::kernel::timer;
 use crate::fs::ramfs;
 use alloc::format;
@@ -71,11 +71,15 @@ fn draw_circle_highlight(cx: usize, cy: usize, r: i32, base: u32) {
 /// Texte du filigrane du bureau.
 const FILIGRANE: &str = "Bouchaud OS";
 
-/// Corps du filigrane, en pixels.
-const FILIGRANE_CORPS: f32 = 34.0;
+/// Corps du filigrane, en pixels (BOUCHAUD_ATELIER_MARQUE_V1).
+const FILIGRANE_CORPS: f32 = crate::gui::atelier::jetons::CORPS_MARQUE;
 
-/// Interligne reserve au filigrane : jambages et debord d'antialiassage.
-const FILIGRANE_HAUTEUR: usize = 44;
+/// Sous-titre de la marque : le nom de l'edition.
+const SOUS_MARQUE: &str = "Atelier";
+
+/// Hauteur reservee a la marque : titre, sous-titre, jambages et debord
+/// d'antialiassage.
+const FILIGRANE_HAUTEUR: usize = 84;
 
 // BOUCHAUD_GUI_FILIGRANE_VECTORIEL_V1
 //
@@ -88,26 +92,44 @@ const FILIGRANE_HAUTEUR: usize = 44;
 // en police proportionnelle ne se devine pas. Il est MESURE, avec une marge
 // pour l'antialiassage, et `draw_filigrane` part exactement du meme point.
 fn filigrane_origine() -> (usize, usize) {
-    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, true);
     (
         (fb::width() / 2).saturating_sub(largeur / 2),
-        fb::height().saturating_sub(FILIGRANE_HAUTEUR + 22),
+        // Au tiers haut du ciel, comme la maquette Atelier : la marque se pose
+        // sur le paysage, elle ne flotte pas au-dessus du dock.
+        fb::height() * 30 / 100,
     )
 }
 
+/// Cote du logo au-dessus de la marque.
+const LOGO_MARQUE: usize = 72;
+
 pub(crate) fn draw_filigrane() {
     let (x, y) = filigrane_origine();
-    fb::draw_text_prop(x, y, FILIGRANE, 0x2f4468, FILIGRANE_CORPS, false);
+    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_72,
+        (fb::width() / 2).saturating_sub(LOGO_MARQUE / 2), y.saturating_sub(LOGO_MARQUE + 14));
+    let blanc = crate::gui::atelier::jetons::ENCRE_SUR_FOND;
+    // Une ombre d'un pixel, tres diffuse, detache le blanc du ciel clair.
+    fb::draw_text_prop(x + 1, y + 2, FILIGRANE, 0x8a87b8, FILIGRANE_CORPS, true);
+    fb::draw_text_prop(x, y, FILIGRANE, blanc, FILIGRANE_CORPS, true);
+    let corps = crate::gui::atelier::jetons::CORPS_SOUS_MARQUE;
+    let largeur = fb::text_width(SOUS_MARQUE, corps, false);
+    let sx = (fb::width() / 2).saturating_sub(largeur / 2);
+    let sy = y + FILIGRANE_CORPS as usize + 10;
+    fb::draw_text_prop(sx + 1, sy + 1, SOUS_MARQUE, 0x8a87b8, corps, false);
+    fb::draw_text_prop(sx, sy, SOUS_MARQUE, blanc, corps, false);
 }
 
 /// Bornes du filigrane. Volontairement large : un calque qui deborde ses
 /// bornes laisserait des trainees, l'inverse ne coute qu'un peu de travail.
 pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
     let (x, y) = filigrane_origine();
-    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, false);
+    let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, true);
     // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
     // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
-    (x.saturating_sub(4), y, largeur + 8, FILIGRANE_HAUTEUR)
+    // Le logo est au-dessus du titre : le calque l'inclut.
+    let haut = y.saturating_sub(LOGO_MARQUE + 14);
+    (x.saturating_sub(4), haut, largeur + 8, FILIGRANE_HAUTEUR + (y - haut))
 }
 
 /// Fond d'ecran seul.
@@ -115,9 +137,10 @@ pub(crate) fn draw_fond() {
     draw_wallpaper();
 }
 
-/// Barre superieure seule.
-pub(crate) fn draw_barre_haute() {
-    draw_topbar();
+/// Barre superieure seule. `centre_ouvert` et le pointeur decident du voile
+/// pose sur le bouton du centre de controle.
+pub(crate) fn draw_barre_haute(centre_ouvert: bool, mx: i32, my: i32) {
+    draw_topbar(centre_ouvert, bouton_centre().hit(mx, my));
 }
 
 /// Une icone du bureau.
@@ -181,7 +204,7 @@ pub(crate) fn draw_desktop(wins: &[Win]) {
     draw_fond();
     draw_filigrane();
     draw_icons();
-    draw_topbar();
+    draw_topbar(false, false);
 
     let focus = indice_focus(wins);
     for (i, w) in wins.iter().enumerate() {
@@ -251,67 +274,118 @@ fn pave_arrondi(rect: crate::gui::windowing::Rect, rayon: u32, couleur: u32) {
         });
 }
 
-fn draw_topbar() {
-    fond_de_barre(0, true);
+// BOUCHAUD_ATELIER_BARRE_HAUTE_V2
+//
+// Une barre de verre, pas un tableau de bord. A gauche la marque, au centre la
+// date et l'heure, a droite UN bouton : l'etat du lien et le glyphe du centre
+// de controle, qui l'ouvre.
+//
+// Ce qui n'y est plus, et pourquoi :
+//   * les menus « Fichiers, Edition, Affichage, Aller, Aide » de l'increment 1
+//     etaient INERTES -- aucune commande derriere. Une commande visuelle qui
+//     ne fait rien est retiree, pas decoree ;
+//   * le compteur de trames ne s'affiche qu'en mode diagnostic
+//     (`atelier::reglages`, bascule dans le centre ou `BO_ATELIER_DIAGNOSTIC=1`).
+//     Il reste dans la mise en page unique, et dans chaque ligne du journal ;
+//   * Wi-Fi, son, notifications et recherche n'ont ni pilote ni service : la
+//     barre ne montre pas d'icone pour eux. Le centre le dit en toutes lettres.
+
+const JOURS: [&str; 7] = ["Dim.", "Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam."];
+const MOIS: [&str; 12] = ["janv.", "f\u{e9}vr.", "mars", "avr.", "mai", "juin", "juil.",
+    "ao\u{fb}t", "sept.", "oct.", "nov.", "d\u{e9}c."];
+
+/// Jour de la semaine (0 = dimanche), algorithme de Sakamoto.
+fn jour_semaine(annee: u16, mois: u8, jour: u8) -> usize {
+    const T: [u16; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let mois = mois.clamp(1, 12) as usize;
+    let a = if mois < 3 { annee.saturating_sub(1) } else { annee } as usize;
+    (a + a / 4 - a / 100 + a / 400 + T[mois - 1] as usize + jour as usize) % 7
+}
+
+fn draw_topbar(centre_ouvert: bool, survol_bouton: bool) {
+    use crate::gui::atelier::jetons as j;
+    crate::gui::atelier::matiere::bande_verre(0, 0, fb::width(), BAR_H, j::VERRE_BARRE);
+    let corps = j::CORPS_BARRE;
     let ligne = ligne_texte_barre(0);
 
-    // Marque du systeme, a gauche.
-    fb::draw_text_prop(window::MARGE_BARRE as usize * 2 + 2, ligne, "Bouchaud OS",
-        crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+    // La marque, a gauche : un ASSET (logo provisoire,
+    // BOUCHAUD_ATELIER_LOGO_PROVISOIRE_V1) et le nom.
+    let x = j::ESPACE_4 as usize;
+    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_18, x,
+        (BAR_H - 18) / 2);
+    fb::draw_text_prop(x + 18 + j::ESPACE_2 as usize, ligne, "Bouchaud OS", j::ENCRE, corps, true);
 
-    // Statistiques CPU/RAM/Disque, au centre.
-    let stats = sys_stats_str();
-    let largeur = fb::text_width(&stats, CORPS_BARRE - 1.0, false);
-    let x = (fb::width() / 2).saturating_sub(largeur / 2);
-    fb::draw_text_prop(x, ligne, &stats,
-        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
-
-    // BOUCHAUD_GUI_BARRE_HAUTE_UNE_SEULE_MISE_EN_PAGE_V1
-    //
-    // CE QUI SE CHEVAUCHAIT
-    //
-    // La barre etait peinte a DEUX endroits : ici, puis `widgets_v15` qui
-    // reposait un rectangle de fond et le compteur de trames par-dessus, a une
-    // marge droite ECRITE EN DUR (104 px). Chaque element ajoute a droite
-    // tombait dessous, et l'indicateur reseau y a fini decoupe -- la photo du
-    // 12 septembre montre « FPS: 0 necte 17:58:53 », c'est-a-dire la fin de
-    // « Deconnecte » sous le compteur.
-    //
-    // Il n'y a plus qu'une mise en page, et elle avance de la DROITE vers la
-    // gauche : chaque element prend la largeur qu'il occupe reellement, et le
-    // suivant commence ou celui-ci s'arrete. Rien ne peut plus se recouvrir,
-    // quelle que soit la longueur d'un nom de reseau.
-    let mut droite = fb::width().saturating_sub(window::MARGE_BARRE as usize * 2 + 2);
-
+    // Date et heure, au centre.
     let dt = rtc::now();
-    let heure = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
-    let largeur = fb::text_width(&heure, CORPS_BARRE, true);
-    droite = droite.saturating_sub(largeur);
-    fb::draw_text_prop(droite, ligne, &heure,
-        crate::gui::theme::COLOR_TEXT_PRIMARY, CORPS_BARRE, true);
+    let horloge = format!("{} {} {}   {:02}:{:02}",
+        JOURS[jour_semaine(dt.year, dt.month, dt.day)], dt.day,
+        MOIS[(dt.month.clamp(1, 12) - 1) as usize], dt.hour, dt.minute);
+    let largeur = fb::text_width(&horloge, corps, true);
+    fb::draw_text_prop((fb::width() / 2).saturating_sub(largeur / 2), ligne, &horloge,
+        j::ENCRE, corps, true);
 
-    // Trames utiles du compositeur.
-    let snapshot = crate::gui::frame_clock::snapshot();
-    let fps = if snapshot.active {
-        format!("FPS:{:3}", snapshot.fps_arrondi())
-    } else {
-        format!("FPS: --")
-    };
-    let largeur = fb::text_width(&fps, CORPS_BARRE - 1.0, false);
-    droite = droite.saturating_sub(largeur + ECART_ELEMENTS);
-    fb::draw_text_prop(droite, ligne, &fps,
-        crate::gui::theme::COLOR_TEXT_SECONDARY, CORPS_BARRE - 1.0, false);
+    // Le bouton du centre de controle : voile au survol, accent quand il est
+    // ouvert. Sa boite est `bouton_centre()`, la meme que le test de clic.
+    let bouton = bouton_centre();
+    if centre_ouvert || survol_bouton {
+        let (teinte, opacite) = if centre_ouvert {
+            (j::ACCENT, 0x2e)
+        } else {
+            (j::SURVOL, j::SURVOL_OPACITE)
+        };
+        crate::gui::atelier::matiere::pave(
+            crate::gui::windowing::Rect::new(bouton.x, bouton.y, bouton.w as u32, bouton.h as u32),
+            j::RAYON_PASTILLE, teinte, opacite);
+    }
 
-    // Reseau.
-    dessine_reseau(droite.saturating_sub(ECART_ELEMENTS), ligne);
+    // Zone d'etat, remplie de la DROITE vers la gauche
+    // (BOUCHAUD_GUI_BARRE_HAUTE_UNE_SEULE_MISE_EN_PAGE_V1) : chaque element
+    // prend sa largeur reelle et le suivant commence ou il s'arrete.
+    let mut droite = (bouton.x + bouton.w) as usize - crate::gui::atelier::centre::BOUTON_REMBOURRAGE as usize;
+    droite = droite.saturating_sub(GLYPHE_BARRE);
+    crate::gui::atelier::assets::pose_masque(crate::gui::atelier::assets::SYMBOLE_REGLAGES_16,
+        droite, (BAR_H - GLYPHE_BARRE) / 2, j::ENCRE, 0xff);
+    droite = droite.saturating_sub(ECART_GLYPHE);
+    dessine_reseau(droite, ligne);
+    droite = droite.saturating_sub(largeur_reseau() + ECART_ELEMENTS);
+
+    // Le compteur de trames : une MESURE, montree a qui la demande (mode
+    // diagnostic). Toujours dans la meme mise en page, jamais par-dessus.
+    if crate::gui::atelier::reglages::diagnostic() {
+        let snapshot = crate::gui::frame_clock::snapshot();
+        let fps = if snapshot.active {
+            format!("FPS:{:3}", snapshot.fps_arrondi())
+        } else {
+            format!("FPS: --")
+        };
+        let corps_fps = corps - 1.0;
+        let largeur = fb::text_width(&fps, corps_fps, false);
+        droite = droite.saturating_sub(largeur);
+        fb::draw_text_prop(droite, ligne + 1, &fps, j::ENCRE_TENUE, corps_fps, false);
+    }
 }
 
 /// Ecart entre deux elements de la partie droite de la barre, en pixels.
 const ECART_ELEMENTS: usize = 14;
-/// Largeur de la prise dessinee.
-const LARGEUR_PRISE: usize = 13;
-/// Hauteur de la prise dessinee.
-const HAUTEUR_PRISE: usize = 9;
+/// Cote des glyphes Lucide de la barre.
+const GLYPHE_BARRE: usize = 16;
+/// Ecart entre le libelle reseau et le glyphe du centre de controle.
+const ECART_GLYPHE: usize = 10;
+/// Ecart entre un glyphe et son libelle.
+const ECART_LIBELLE: usize = 5;
+
+/// Largeur de la grappe d'etat : indicateur reseau, ecart, glyphe du centre.
+fn largeur_grappe() -> usize {
+    largeur_reseau() + ECART_GLYPHE + GLYPHE_BARRE
+}
+
+/// Le bouton de la barre qui ouvre le centre de controle. Peintre ET test de
+/// clic : une seule definition (`atelier::centre::bouton_barre`).
+pub(crate) fn bouton_centre() -> window::Rect {
+    let b = crate::gui::atelier::centre::bouton_barre(fb::width() as u32, BAR_H as u32,
+        largeur_grappe() as u32);
+    window::Rect { x: b.x, y: b.y, w: b.w as i32, h: b.h as i32 }
+}
 
 /// Ce que l'indicateur reseau doit montrer, a cet instant.
 ///
@@ -404,7 +478,53 @@ fn debit_lisible(mbps: u32) -> String {
     }
 }
 
-/// Dessine la prise et son libelle, le libelle se terminant en `droite`.
+/// Couleur du glyphe et du libelle de l'indicateur, pour un etat donne.
+///
+/// UN LIEN MONTE N'EST PAS FORCEMENT UN LIEN SAIN. L'alternat, ou dix
+/// megabits sur un port gigabit, sont des liens qui fonctionnent mal. Les
+/// peindre comme un gigabit duplex integral ferait chercher la lenteur
+/// ailleurs.
+fn teintes_reseau(etat: EtatReseau) -> (u32, u32) {
+    use crate::gui::atelier::jetons as j;
+    let degrade = matches!(etat, EtatReseau::Connecte) && {
+        let q = crate::net::qualite_lien();
+        !q.duplex_complet || (q.vitesse_mbps != 0 && q.vitesse_mbps < 100)
+    };
+    match etat {
+        EtatReseau::Connecte if degrade => (crate::gui::theme::COLOR_WARNING, j::ENCRE),
+        // Sain : l'encre de la barre. Rien a signaler ne se colore pas.
+        EtatReseau::Connecte => (j::ENCRE, j::ENCRE),
+        EtatReseau::Deconnecte => (j::DANGER, j::ENCRE_DOUCE),
+        // Le lien porte : ce n'est pas une panne, c'est une configuration
+        // qui manque. L'orange appelle un serveur DHCP, le rouge un cable.
+        EtatReseau::SansAdresse => (crate::gui::theme::COLOR_WARNING, j::ENCRE),
+        EtatReseau::SansCarte => (j::ENCRE_TENUE, j::ENCRE_DOUCE),
+    }
+}
+
+/// Le glyphe Lucide de l'etat, a la taille demandee (16 barre, 18 centre).
+///
+/// L'ETAT SE LIT PAR LA FORME, PAS SEULEMENT PAR LA COULEUR : un ecran mal
+/// regle, ou un daltonien, doivent voir la difference. L'increment 1 dessinait
+/// une prise en rectangles et une barre oblique ; ce sont maintenant trois
+/// glyphes distincts, rendus depuis Lucide (ISC) par la fabrique d'assets.
+fn glyphe_reseau(etat: EtatReseau, grand: bool) -> &'static [u8] {
+    use crate::gui::atelier::assets as a;
+    if etat != EtatReseau::Connecte {
+        match (etat, grand) {
+            (EtatReseau::SansAdresse, false) => a::SYMBOLE_ALERTE_16,
+            (EtatReseau::SansAdresse, true) => a::SYMBOLE_ALERTE_18,
+            (_, false) => a::SYMBOLE_DEBRANCHE_16,
+            (_, true) => a::SYMBOLE_DEBRANCHE_18,
+        }
+    } else if grand {
+        a::SYMBOLE_ETHERNET_18
+    } else {
+        a::SYMBOLE_ETHERNET_16
+    }
+}
+
+/// Dessine le glyphe d'etat et son libelle, le libelle se terminant en `droite`.
 ///
 /// # Pourquoi une prise et non des barres de signal
 ///
@@ -414,81 +534,12 @@ fn debit_lisible(mbps: u32) -> String {
 fn dessine_reseau(droite: usize, ligne: usize) {
     let etat = etat_reseau();
     let libelle = libelle_reseau(etat);
-    // UN LIEN MONTE N'EST PAS FORCEMENT UN LIEN SAIN.
-    //
-    // L'alternat, ou dix megabits sur un port gigabit, sont des liens qui
-    // fonctionnent mal. Les peindre en vert comme un gigabit duplex integral
-    // ferait chercher la lenteur ailleurs.
-    let degrade = matches!(etat, EtatReseau::Connecte) && {
-        let q = crate::net::qualite_lien();
-        !q.duplex_complet || (q.vitesse_mbps != 0 && q.vitesse_mbps < 100)
-    };
-    let (couleur, couleur_texte) = match etat {
-        EtatReseau::Connecte if degrade => (
-            crate::gui::theme::COLOR_WARNING,
-            crate::gui::theme::COLOR_TEXT_PRIMARY,
-        ),
-        EtatReseau::Connecte => (
-            crate::gui::theme::COLOR_SUCCESS,
-            crate::gui::theme::COLOR_TEXT_PRIMARY,
-        ),
-        EtatReseau::Deconnecte => (
-            crate::gui::theme::COLOR_DANGER,
-            crate::gui::theme::COLOR_TEXT_SECONDARY,
-        ),
-        // Le lien porte : ce n'est pas une panne, c'est une configuration
-        // qui manque. L'orange appelle un serveur DHCP, le rouge appellerait
-        // un cable.
-        EtatReseau::SansAdresse => (
-            crate::gui::theme::COLOR_WARNING,
-            crate::gui::theme::COLOR_TEXT_PRIMARY,
-        ),
-        EtatReseau::SansCarte => (
-            crate::gui::theme::COLOR_BORDER,
-            crate::gui::theme::COLOR_TEXT_SECONDARY,
-        ),
-    };
-
+    let (couleur, couleur_texte) = teintes_reseau(etat);
     let largeur_texte = fb::text_width(&libelle, CORPS_BARRE - 1.0, false);
     let x_texte = droite.saturating_sub(largeur_texte);
-    let x_prise = x_texte.saturating_sub(LARGEUR_PRISE + 5);
-    // Centrer la prise sur la hauteur de la ligne de texte.
-    let y = ligne + (CORPS_BARRE as usize).saturating_sub(HAUTEUR_PRISE) / 2 + 1;
-
-    // Le corps de la prise : un rectangle plein, puis deux ergots en haut,
-    // comme un connecteur RJ45 vu de face.
-    fb::fill_rect_rgb(x_prise, y + 2, LARGEUR_PRISE, HAUTEUR_PRISE - 2, couleur);
-    fb::fill_rect_rgb(x_prise + 3, y, LARGEUR_PRISE - 6, 2, couleur);
-    // Les quatre contacts, creuses dans le corps.
-    let mut contact = 0usize;
-    while contact < 4 {
-        fb::fill_rect_rgb(
-            x_prise + 2 + contact * 3,
-            y + 4,
-            1,
-            HAUTEUR_PRISE - 6,
-            crate::gui::theme::COLOR_BACKGROUND,
-        );
-        contact += 1;
-    }
-    // Deconnecte : une barre oblique sur la prise, pour que l'etat se lise
-    // sans dependre de la couleur -- un ecran mal regle, ou un daltonien,
-    // doivent voir la difference.
-    if etat != EtatReseau::Connecte {
-        let mut pas = 0usize;
-        while pas < LARGEUR_PRISE {
-            let py = y + (pas * HAUTEUR_PRISE) / LARGEUR_PRISE;
-            fb::fill_rect_rgb(
-                x_prise + LARGEUR_PRISE - 1 - pas,
-                py,
-                2,
-                2,
-                crate::gui::theme::COLOR_TEXT_PRIMARY,
-            );
-            pas += 1;
-        }
-    }
-
+    let x_glyphe = x_texte.saturating_sub(GLYPHE_BARRE + ECART_LIBELLE);
+    crate::gui::atelier::assets::pose_masque(glyphe_reseau(etat, false), x_glyphe,
+        (BAR_H - GLYPHE_BARRE) / 2, couleur, 0xff);
     fb::draw_text_prop(x_texte, ligne, &libelle, couleur_texte, CORPS_BARRE - 1.0, false);
 }
 
@@ -499,9 +550,134 @@ fn dessine_reseau(droite: usize, ligne: usize) {
 /// largeur courante laisserait la trainee de l'ancien nom a l'ecran.
 pub fn largeur_reseau() -> usize {
     let libelle = libelle_reseau(etat_reseau());
-    fb::text_width(&libelle, CORPS_BARRE - 1.0, false) + LARGEUR_PRISE + 5
+    fb::text_width(&libelle, CORPS_BARRE - 1.0, false) + GLYPHE_BARRE + ECART_LIBELLE
 }
 
+// ─── Centre de controle ────────────────────────────────────────────────────
+//
+// BOUCHAUD_ATELIER_CENTRE_V1. Geometrie : `atelier::centre`. Tout ce qui est
+// peint ici est soit LU au runtime (reseau, affichage, reglage), soit une
+// action qui existe deja (alimentation). Rien n'est simule.
+
+fn rect_de(b: crate::gui::atelier::dock::Boite) -> crate::gui::windowing::Rect {
+    crate::gui::windowing::Rect::new(b.x, b.y, b.w.max(0) as u32, b.h.max(0) as u32)
+}
+
+fn ipv4_lisible(a: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+}
+
+/// Peint le centre de controle. Le survol vient de `centre::action_sous`, la
+/// meme fonction que le clic et l'invalidation.
+pub(crate) fn draw_centre(mx: i32, my: i32) {
+    use crate::gui::atelier::{assets as a, centre as c, jetons as j, matiere};
+    let l = fb::width() as u32;
+    let b = BAR_H as u32;
+    let survol = c::action_sous(l, b, mx, my);
+    matiere::plaque_verre(rect_de(c::cadre(l, b)), c::RAYON, 0xe8);
+    let corps = j::CORPS_BARRE;
+    let petit = CORPS_BARRE - 1.0;
+
+    // Titre.
+    let t = c::bloc(l, b, c::Bloc::Titre);
+    fb::draw_text_prop(t.x as usize + 2, t.y as usize + 4, "Centre Atelier", j::ENCRE, corps, true);
+
+    let carte = |bloc: c::Bloc, survole: bool| {
+        let boite = c::bloc(l, b, bloc);
+        matiere::pave(rect_de(boite), c::RAYON_BLOC, 0xffffff, 0xb8);
+        if survole {
+            matiere::pave(rect_de(boite), c::RAYON_BLOC, j::SURVOL, j::SURVOL_OPACITE);
+        }
+        boite
+    };
+
+    // Reseau : l'etat courant, lu comme la barre le lit.
+    let r = carte(c::Bloc::Reseau, false);
+    let etat = etat_reseau();
+    let (teinte, _) = teintes_reseau(etat);
+    a::pose_masque(glyphe_reseau(etat, true), r.x as usize + 12, r.y as usize + 12, teinte, 0xff);
+    fb::draw_text_prop(r.x as usize + 40, r.y as usize + 10, &libelle_reseau(etat), j::ENCRE, corps, true);
+    let detail = match etat {
+        EtatReseau::Connecte => format!("IPv4 {}  \u{b7}  passerelle {}",
+            ipv4_lisible(crate::net::our_ip()), ipv4_lisible(crate::net::gateway())),
+        EtatReseau::SansAdresse => String::from("Le lien porte, aucun serveur DHCP n'a r\u{e9}pondu"),
+        EtatReseau::Deconnecte => String::from("Aucun c\u{e2}ble ou aucun lien en face"),
+        EtatReseau::SansCarte => String::from("Aucune carte r\u{e9}seau pilot\u{e9}e"),
+    };
+    fb::draw_text_prop(r.x as usize + 40, r.y as usize + 32, &detail, j::ENCRE_DOUCE, petit, false);
+
+    // Affichage : ce que le pilote a negocie. Le rendu est LOGICIEL et le dit.
+    let d = carte(c::Bloc::Affichage, false);
+    a::pose_masque(a::SYMBOLE_ECRAN_18, d.x as usize + 12, d.y as usize + 13, j::ENCRE_DOUCE, 0xff);
+    let ecran = format!("{} \u{d7} {}  \u{b7}  rendu logiciel", fb::width(), fb::height());
+    fb::draw_text_prop(d.x as usize + 40, d.y as usize + 14, &ecran, j::ENCRE, petit, false);
+
+    // Mode diagnostic : un vrai reglage, un vrai interrupteur.
+    let actif = crate::gui::atelier::reglages::diagnostic();
+    let g = carte(c::Bloc::Diagnostic, survol == Some(c::Action::Diagnostic));
+    a::pose_masque(a::SYMBOLE_DIAGNOSTIC_18, g.x as usize + 12, g.y as usize + 13, j::ENCRE_DOUCE, 0xff);
+    fb::draw_text_prop(g.x as usize + 40, g.y as usize + 14, "Compteur de trames (FPS)",
+        j::ENCRE, petit, false);
+    let interrupteur = crate::gui::windowing::Rect::new(g.x + g.w as i32 - 48, g.y + 12, 36, 20);
+    matiere::pave(interrupteur, 10, if actif { j::ACCENT } else { j::ENCRE_TENUE }, 0xff);
+    let bouton_x = if actif { interrupteur.x + 18 } else { interrupteur.x + 2 };
+    matiere::pave(crate::gui::windowing::Rect::new(bouton_x, interrupteur.y + 2, 16, 16), 8,
+        0xffffff, 0xff);
+
+    // Mouvement des fenetres : trois segments, un reglage reel
+    // (`atelier::reglages::animations`, lu par `atelier::effets`).
+    let m = carte(c::Bloc::Animations, false);
+    fb::draw_text_prop(m.x as usize + 12, m.y as usize + 14, "Animations", j::ENCRE, petit, false);
+    let courant = crate::gui::atelier::reglages::animations();
+    for (action, libelle, mode) in [
+        (c::Action::AnimationsNormales, "Normales", crate::gui::atelier::animations::Mode::Normal),
+        (c::Action::AnimationsReduites, "R\u{e9}duites", crate::gui::atelier::animations::Mode::Reduit),
+        (c::Action::AnimationsAucune, "Aucune", crate::gui::atelier::animations::Mode::Aucun),
+    ] {
+        let s = c::boite_action(l, b, action);
+        let choisi = courant == mode;
+        if choisi {
+            matiere::pave(rect_de(s), 8, j::ACCENT, 0xff);
+        } else if survol == Some(action) {
+            matiere::pave(rect_de(s), 8, j::SURVOL, j::SURVOL_OPACITE);
+        }
+        let lw = fb::text_width(libelle, petit, false) as i32;
+        fb::draw_text_prop((s.x + (s.w - lw) / 2).max(0) as usize, s.y as usize + 6, libelle,
+            if choisi { 0xffffff } else { j::ENCRE_DOUCE }, petit, false);
+    }
+
+    // Ce qui n'existe pas : dit, pas simule.
+    let n = c::bloc(l, b, c::Bloc::Indisponibles);
+    fb::draw_text_prop(n.x as usize + 4, n.y as usize + 4,
+        "Non pris en charge pour l'instant :", j::ENCRE_TENUE, petit, false);
+    fb::draw_text_prop(n.x as usize + 4, n.y as usize + 19,
+        "Wi-Fi, son, th\u{e8}me sombre.", j::ENCRE_TENUE, petit, false);
+
+    // Alimentation : les memes chemins que le menu Applications.
+    for action in c::ALIMENTATION {
+        let boite = c::boite_action(l, b, action);
+        let survole = survol == Some(action);
+        matiere::pave(rect_de(boite), c::RAYON_BLOC, 0xffffff, 0xb8);
+        if survole {
+            let teinte = if action == c::Action::Eteindre { j::DANGER } else { j::SURVOL };
+            matiere::pave(rect_de(boite), c::RAYON_BLOC, teinte,
+                if action == c::Action::Eteindre { 0x2a } else { j::SURVOL_OPACITE });
+        }
+        let (glyphe, libelle) = match action {
+            c::Action::Redemarrer => (a::SYMBOLE_REDEMARRER_18, "Red\u{e9}marrer"),
+            c::Action::Eteindre => (a::SYMBOLE_ETEINDRE_18, "\u{c9}teindre"),
+            _ => (a::SYMBOLE_QUITTER_18, "Quitter"),
+        };
+        let teinte = if survole && action == c::Action::Eteindre { j::DANGER } else { j::ENCRE };
+        a::pose_masque(glyphe, (boite.x + boite.w as i32 / 2 - 9) as usize, boite.y as usize + 10,
+            teinte, 0xff);
+        let lw = fb::text_width(libelle, petit, false) as i32;
+        fb::draw_text_prop((boite.x + (boite.w as i32 - lw) / 2).max(0) as usize,
+            boite.y as usize + 36, libelle, j::ENCRE, petit, false);
+    }
+}
+
+#[allow(dead_code)]
 fn sys_stats_str() -> String {
     let total_cpu = timer::cpu_load_pct();
     let online = smp::schedulable_cpus().max(1).min(smp::MAX_CPUS);
@@ -530,6 +706,7 @@ fn sys_stats_str() -> String {
     )
 }
 
+#[allow(dead_code)]
 fn human_bytes(n: usize) -> String {
     if n >= 1_073_741_824 { format!("{}Go", n / 1_073_741_824) }
     else if n >= 1_048_576 { format!("{}Mo", n / 1_048_576) }
@@ -538,45 +715,17 @@ fn human_bytes(n: usize) -> String {
 }
 
 fn draw_wallpaper() {
-    // Gradient bleu nuit du haut (profond) vers le bas (moins foncé)
-    //
-    // BOUCHAUD_GFX_CULLING_AMONT_V1 : la couleur d'une ligne est une fonction
-    // PURE de son ordonnee, donc ne parcourir que les lignes presentees rend
-    // exactement la meme image. Sans ce bornage, un degat de curseur de 22
-    // lignes faisait quand meme 720 tours de boucle -- et 720 lectures de la
-    // decoupe, une par appel a `fill_rect_rgb`, pour 698 lignes jetees.
-    let h = fb::height().max(1);
-    let (_, cy0, _, cy1) = fb::clip_rect();
-    for y in cy0..cy1.min(fb::height()) {
-        let c = lerp_color(0x080e1c, 0x1a2f50, y, h);
-        fb::fill_rect_rgb(0, y, fb::width(), 1, c);
-    }
-    // Subtiles étoiles (pixels clairs fixes, déterministes)
-    let stars: &[(usize, usize)] = &[
-        (120, 80), (340, 45), (600, 130), (780, 60), (1000, 90),
-        (200, 200), (500, 180), (850, 220), (1100, 150), (1200, 300),
-        (50, 350), (420, 400), (700, 380), (950, 420), (1150, 500),
-    ];
-    for &(sx, sy) in stars {
-        if sx < fb::width() && sy < fb::height() {
-            fb::pixel_rgb(sx, sy, 0x4a6fa5);
-        }
-    }
+    // BOUCHAUD_ATELIER_FOND_V1 : le paysage d'aube Atelier, calcule une fois
+    // a la resolution courante puis recopie sous la decoupe.
+    crate::gui::atelier::fond::dessine();
 }
 
 // ─── Icônes ────────────────────────────────────────────────────────────────
 //
-// BOUCHAUD_GUI_ICONES_IMAGES_V1
-//
-// Les cinq icones etaient DESSINEES ici : plus de deux cents lignes de disques,
-// de rectangles et de degrades, un peintre par application, rejoues a chaque
-// rectangle de degat. Elles ne ressemblaient pas a des icones, et elles ne
-// pouvaient pas : ce compositeur n'a ni courbes ni antialiassage.
-//
-// Ce sont maintenant de vraies images -- quatre PNG fabriques par
-// `tools/assets/fabrique-icones.py`, plus le VRAI logo de Ladybird, pris a son
-// depot. `gui::icones` les decode et les reduit UNE fois, dans la taille exacte
-// ou elles seront posees.
+// BOUCHAUD_ATELIER_ASSETS_V1 : les icones sont des ASSETS -- tuiles Atelier
+// (degrade + glyphe Lucide) rendues par `tools/assets/fabrique-atelier.py` a
+// chaque taille posee. `gui::icones` choisit le PNG, le decode une fois et le
+// recopie ; rien n'est dessine ici.
 
 /// Corps du libelle d'une icone de bureau.
 const CORPS_LIBELLE: f32 = 12.0;
@@ -653,7 +802,6 @@ fn draw_window(w: &Win, focused: bool) {
     let geometry = crate::gui::windowing::window_render_geometry(outer,
         TITLE_H as u32, crate::gui::theme::RADIUS_WINDOW,
         crate::gui::windowing::manager::SHADOW_EXTENT);
-    let border = if focused { 0x454c58 } else { crate::gui::theme::COLOR_BORDER };
     // BOUCHAUD_GUI_RASTER_SEGMENTS_V1 : par SEGMENTS, pas par pixels. Une
     // fenetre maximisee coutait huit millions d'iterations et autant de
     // `fetch_add` atomiques par trame ; elle en coute maintenant ~700.
@@ -683,21 +831,16 @@ fn draw_window(w: &Win, focused: bool) {
         }
         _ => None,
     };
-    crate::gui::graphics::paint_window_shape_spans(geometry,
-        crate::gui::theme::RADIUS_WINDOW,
-        crate::gui::windowing::manager::SHADOW_EXTENT, damage,
-        crate::gui::theme::COLOR_SURFACE, border, opaque,
-        |px, py, largeur, color, couverture| {
-            // `blend_rect_rgb` court-circuite vers `fill_rect_rgb` a 255 : les
-            // anneaux d'ombre et les bandes centrales ne paient rien de plus
-            // qu'avant, seules les bandes de coins melangent.
-            fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, color, couverture)
-        });
+    // BOUCHAUD_ATELIER_FENETRE_V1 : ombre douce melangee (plus de cadre gris
+    // opaque), surface claire, filet de bordure. Memes bornes que
+    // `paint_window_shape_spans` : le plan de scene n'a rien a apprendre.
+    crate::gui::atelier::matiere::fenetre(geometry.outer, crate::gui::theme::RADIUS_WINDOW,
+        crate::gui::windowing::manager::SHADOW_EXTENT, focused,
+        crate::gui::theme::COLOR_SURFACE, opaque);
 
     let title_h = TITLE_H as usize;
-    let title_color = if focused { crate::gui::theme::COLOR_SURFACE_ELEVATED }
-        else { crate::gui::theme::COLOR_SURFACE };
+    let title_color = if focused { crate::gui::atelier::jetons::TITRE_ACTIF }
+        else { crate::gui::atelier::jetons::TITRE_INACTIF };
     let title = crate::gui::windowing::titlebar_rect(outer,
         crate::gui::windowing::WINDOW_CHROME);
     // Les coins HAUTS de la barre de titre sont le bord le plus regarde d'une
@@ -708,7 +851,7 @@ fn draw_window(w: &Win, focused: bool) {
                 largeur as usize, title_color, couverture)
         });
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
-        crate::gui::theme::COLOR_BORDER);
+        crate::gui::atelier::jetons::SEPARATEUR);
 
     // L'icone de l'application dans sa barre de titre, comme dans la barre des
     // taches : c'est ce qui permet de reconnaitre une fenetre au coin de
@@ -729,8 +872,10 @@ fn draw_window(w: &Win, focused: bool) {
         crate::gui::windowing::WINDOW_CHROME).x.max(0) as usize;
     let place = premier_bouton.saturating_sub(origine_titre + 6);
     let title_clipped = tronque_a_largeur(&w.title, place, 12.0);
+    let encre_titre = if focused { crate::gui::atelier::jetons::ENCRE }
+        else { crate::gui::atelier::jetons::ENCRE_DOUCE };
     fb::draw_text_prop(origine_titre, y + (title_h - 12) / 2, title_clipped,
-        crate::gui::theme::COLOR_TEXT_PRIMARY, 12.0, false);
+        encre_titre, crate::gui::atelier::jetons::CORPS_TITRE, focused);
     // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
     // La duree noyau reste dans la barre de titre PENDANT le demarrage
     // uniquement. La navigation appartient exclusivement au chrome Ladybird.
@@ -753,29 +898,35 @@ fn draw_window(w: &Win, focused: bool) {
 
 fn draw_window_controls(outer: crate::gui::windowing::Rect,
     hover: crate::gui::windowing::HitRegion, focused: bool) {
+    use crate::gui::atelier::jetons as j;
     use crate::gui::windowing::{close_button_rect, maximize_button_rect,
         minimize_button_rect, HitRegion, WINDOW_CHROME};
     let buttons = [(minimize_button_rect(outer, WINDOW_CHROME), HitRegion::Minimize),
         (maximize_button_rect(outer, WINDOW_CHROME), HitRegion::Maximize),
         (close_button_rect(outer, WINDOW_CHROME), HitRegion::Close)];
     for (rect, region) in buttons {
-        if hover == region {
-            let color = if region == HitRegion::Close { crate::gui::theme::COLOR_DANGER }
-                else { 0x303640 };
-            fb::fill_rect_rgb(rect.x.max(0) as usize, rect.y.max(0) as usize,
-                rect.width as usize, rect.height as usize, color);
+        let survole = hover == region;
+        // BOUCHAUD_ATELIER_BOUTONS_V1 : une pastille arrondie au survol, en
+        // retrait du rectangle d'impact -- le bouton reste aussi grand a viser,
+        // il parait juste plus calme.
+        if survole {
+            let pastille = crate::gui::windowing::Rect::new(rect.x + 8, rect.y + 5,
+                rect.width.saturating_sub(16), rect.height.saturating_sub(10));
+            if region == HitRegion::Close {
+                crate::gui::atelier::matiere::pave(pastille, j::RAYON_PASTILLE, j::DANGER, 255);
+            } else {
+                crate::gui::atelier::matiere::pave(pastille, j::RAYON_PASTILLE, j::SURVOL, 0x1c);
+            }
         }
-        let color = if focused { crate::gui::theme::COLOR_TEXT_PRIMARY }
-            else { crate::gui::theme::COLOR_TEXT_SECONDARY };
+        let color = if survole && region == HitRegion::Close { 0xffffff }
+            else if focused { j::ENCRE_DOUCE } else { j::ENCRE_TENUE };
         let cx = rect.x + rect.width as i32 / 2;
         let cy = rect.y + rect.height as i32 / 2;
         match region {
             HitRegion::Minimize => fb::fill_rect_rgb((cx - 5) as usize, cy as usize, 10, 1, color),
             HitRegion::Maximize => {
-                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 10, 1, color);
-                fb::fill_rect_rgb((cx - 5) as usize, (cy + 4) as usize, 10, 1, color);
-                fb::fill_rect_rgb((cx - 5) as usize, (cy - 4) as usize, 1, 9, color);
-                fb::fill_rect_rgb((cx + 4) as usize, (cy - 4) as usize, 1, 9, color);
+                let carre = crate::gui::windowing::Rect::new(cx - 5, cy - 5, 10, 10);
+                crate::gui::atelier::matiere::filet(carre, 2, color, 255);
             }
             HitRegion::Close => for offset in -4..=4 {
                 fb::pixel_rgb((cx + offset) as usize, (cy + offset) as usize, color);
@@ -991,82 +1142,172 @@ fn tronque_a_largeur(s: &str, largeur: usize, px: f32) -> &str {
     &s[..fin]
 }
 
-pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool) {
-    let sommet = fb::height() - BAR_H;
-    fond_de_barre(sommet, false);
+// BOUCHAUD_ATELIER_DOCK_V1
+//
+// La barre des taches devient un DOCK : une pastille de verre centree, qui
+// flotte au-dessus du fond avec sa propre ombre. A gauche, la cellule
+// Applications (le menu) ; apres le separateur, une cellule par fenetre, dans
+// l'ordre de la pile -- la meme liste que l'ancienne barre, donc le meme test
+// d'impact (`window::start_btn`, `window::taskbar_btn`) et les memes degats.
+//
+// Les etats se lisent sans texte : la fenetre au premier plan porte un point
+// d'accent sous son icone, une fenetre rangee un point tenu, et la cellule
+// survolee un voile.
+
+/// Pictogramme Applications : le glyphe Lucide `layout-grid`, teinte.
+fn pictogramme_applications(cellule: crate::gui::atelier::dock::Boite, actif: bool) {
+    use crate::gui::atelier::{assets, jetons as j};
+    let cote = 22;
+    let x = cellule.x + (cellule.w - cote) / 2;
+    let y = cellule.y + (cellule.h - cote) / 2;
+    assets::pose_masque(assets::SYMBOLE_GRILLE_22, x.max(0) as usize, y.max(0) as usize,
+        if actif { j::ACCENT } else { j::ENCRE_DOUCE }, 255);
+}
+
+fn voile_cellule(cellule: crate::gui::atelier::dock::Boite, opacite: u8) {
+    let r = crate::gui::windowing::Rect::new(cellule.x, cellule.y, cellule.w as u32,
+        cellule.h as u32);
+    crate::gui::atelier::matiere::pave(r, crate::gui::atelier::jetons::RAYON_CELLULE,
+        crate::gui::atelier::jetons::SURVOL, opacite);
+}
+
+/// Survol du dock a l'instant de la trame : la cible sous le pointeur, son
+/// avancement (0..=PLEIN), la levee de son icone.
+fn survol_dock(n: usize, mx: i32, my: i32) -> Option<(crate::gui::atelier::dock::Cible, u32, i32)> {
+    use crate::gui::atelier::{dock, effets, mouvement::PLEIN};
+    let cible = dock::cible_sous(fb::width() as u32, fb::height() as u32, n, mx, my)?;
+    let p = effets::survol(cible);
+    let levee = if effets::deplacement_permis() { dock::LEVEE * p as i32 / PLEIN as i32 } else { 0 };
+    Some((cible, p, levee))
+}
+
+/// Libelle de l'infobulle d'une cible.
+fn libelle_cible(wins: &[Win], cible: crate::gui::atelier::dock::Cible) -> String {
+    match cible {
+        crate::gui::atelier::dock::Cible::Applications => String::from("Applications"),
+        crate::gui::atelier::dock::Cible::Fenetre(i) => match wins.get(i) {
+            Some(w) => {
+                let titre: String = w.title.chars().take(40).collect();
+                if w.min { format!("{} (r\u{e9}duite)", titre) } else { titre }
+            }
+            None => String::new(),
+        },
+    }
+}
+
+/// L'infobulle du dock sous le pointeur : sa cible et sa boite. Une seule
+/// definition pour le plan de scene, l'invalidation et le peintre.
+pub(crate) fn infobulle_dock(wins: &[Win], mx: i32, my: i32)
+    -> Option<(crate::gui::atelier::dock::Cible, crate::gui::atelier::dock::Boite)>
+{
+    use crate::gui::atelier::dock;
+    let (l, h) = (fb::width() as u32, fb::height() as u32);
+    let cible = dock::cible_sous(l, h, wins.len(), mx, my)?;
+    let texte = fb::text_width(&libelle_cible(wins, cible), CORPS_INFOBULLE, false) as i32;
+    Some((cible, dock::infobulle(l, h, wins.len(), cible, texte)))
+}
+
+const CORPS_INFOBULLE: f32 = 12.0;
+
+/// Peint l'infobulle du dock (calque `Element::Infobulle`).
+pub(crate) fn draw_infobulle(wins: &[Win], mx: i32, my: i32) {
+    use crate::gui::atelier::{jetons as j, matiere, mouvement::PLEIN};
+    let Some((cible, b)) = infobulle_dock(wins, mx, my) else { return };
+    let p = crate::gui::atelier::effets::survol(cible);
+    let fond = (0xe6 * p / PLEIN) as u8;
+    if fond == 0 {
+        return;
+    }
+    let r = crate::gui::windowing::Rect::new(b.x, b.y, b.w as u32, b.h as u32);
+    matiere::pave(r, 8, j::ENCRE, fond);
+    let texte = libelle_cible(wins, cible);
+    // Texte opaque : la police n'a pas d'opacite propre. Il n'apparait qu'a
+    // mi-fondu, quand le fond est assez dense pour le porter.
+    if p * 2 >= PLEIN {
+        fb::draw_text_prop((b.x + crate::gui::atelier::dock::INFOBULLE_REMBOURRAGE) as usize,
+            (b.y + 5) as usize, &texte, 0xffffff, CORPS_INFOBULLE, false);
+    }
+}
+
+pub(crate) fn draw_taskbar(wins: &[Win], menu_open: bool, mx: i32, my: i32) {
+    use crate::gui::atelier::{dock, jetons as j, matiere};
+    let (l, h) = (fb::width() as u32, fb::height() as u32);
+    let n = wins.len();
+    let survol = survol_dock(n, mx, my);
+    let cadre = dock::cadre(l, h, n);
+    // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat dans la bande qui ne touche pas
+    // le dock (ses cotes) n'a rien a peindre ici -- le fond l'a deja fait.
+    if !fb::decoupe_touche((cadre.x - dock::OMBRE).max(0) as usize,
+        (cadre.y - dock::OMBRE).max(0) as usize,
+        (cadre.w + 2 * dock::OMBRE) as usize, (cadre.h + 2 * dock::OMBRE) as usize) {
+        return;
+    }
+    matiere::plaque_verre(crate::gui::windowing::Rect::new(cadre.x, cadre.y,
+        cadre.w as u32, cadre.h as u32), j::RAYON_DOCK, j::VERRE_DOCK);
+
+    // BOUCHAUD_ATELIER_DOCK_SURVOL_V1 : voile et levee de la cellule survolee.
+    // Le gestionnaire invalide la cellule quittee ET la cellule atteinte ; la
+    // cible vient de `dock::cible_sous`, la meme que le clic.
+    let voile = |cible: dock::Cible| -> i32 {
+        match survol {
+            Some((c, p, levee)) if c == cible => {
+                let o = (0x1e * p / crate::gui::atelier::mouvement::PLEIN) as u8;
+                if o > 0 {
+                    voile_cellule(dock::boite_cible(l, h, n, cible), o);
+                }
+                levee
+            }
+            _ => 0,
+        }
+    };
+    let apps = dock::cellule_applications(l, h, n);
+    if menu_open {
+        voile_cellule(apps, 0x24);
+    }
+    let levee = voile(dock::Cible::Applications);
+    pictogramme_applications(dock::Boite { y: apps.y - levee, ..apps }, menu_open);
+
+    if dock::visibles(l, n) == 0 {
+        return;
+    }
+    // Separateur : un filet vertical court, centre.
+    let sx = dock::x_separateur(l, h, n);
+    let marge = dock::CELLULE / 4;
+    for y in (apps.y + marge)..(apps.y + apps.h - marge) {
+        fb::blend_rect_rgb(sx.max(0) as usize, y.max(0) as usize, 1, j::FILET, 0x30);
+    }
 
     let focus = indice_focus(wins);
-    let rayon = crate::gui::theme::RADIUS_SM;
-
-    // Bouton Demarrer : accentue quand le menu est ouvert, sourd sinon. Meme
-    // forme arrondie que le chrome des fenetres.
-    let sb = start_btn();
-    let cadre = crate::gui::windowing::Rect::new(sb.x, sb.y, sb.w as u32, sb.h as u32);
-    let fond = if menu_open { crate::gui::theme::COLOR_ACCENT }
-        else { crate::gui::theme::COLOR_SURFACE_ELEVATED };
-    pave_arrondi(cadre, rayon, fond);
-    let corps = CORPS_BARRE - 1.0;
-    let etiquette = "Demarrer";
-    let largeur = fb::text_width(etiquette, corps, true);
-    fb::draw_text_prop(
-        (sb.x as usize) + (sb.w as usize).saturating_sub(largeur) / 2,
-        ligne_texte_barre(sommet),
-        etiquette,
-        crate::gui::theme::COLOR_TEXT_PRIMARY,
-        corps,
-        true,
-    );
-
-    // Boutons des fenetres.
     for (i, w) in wins.iter().enumerate() {
-        let b = taskbar_btn(i);
-        if b.x + b.w > fb::width() as i32 { break; }
-        let bx = b.x as usize; let by = b.y as usize;
-        let bw = b.w as usize; let bh = b.h as usize;
-        // BOUCHAUD_GFX_CULLING_AMONT_V1 : un degat sur un bouton n'a aucune
-        // raison de faire dessiner les autres. `continue`, et non `break` : la
-        // barre est parcourue de gauche a droite, mais rien ne garantit que le
-        // degat soit d'un seul tenant.
-        //
-        // Ce test n'est CORRECT que parce que le bouton ne peint rien hors de
-        // son rectangle -- d'ou la troncature du libelle a la largeur reelle,
-        // juste en dessous. Un libelle qui debordait chez le voisin aurait ete
-        // emporte par le culling.
-        if !fb::decoupe_touche(bx, by, bw, bh) { continue }
-
+        let c = dock::cellule_fenetre(l, h, n, i);
+        if c.w == 0 { break; }
+        if !fb::decoupe_touche(c.x.max(0) as usize, c.y.max(0) as usize,
+            c.w as usize, (c.h + dock::REMBOURRAGE) as usize) { continue }
+        let levee = voile(dock::Cible::Fenetre(i));
+        let ix = c.x + (c.w - dock::ICONE) / 2;
+        let iy = c.y + (c.h - dock::ICONE) / 2 - 2 - levee;
+        match crate::gui::icones::pour_app(&w.app) {
+            Some(icone) => crate::gui::icones::dessine(icone, ix.max(0) as usize,
+                iy.max(0) as usize, crate::gui::icones::TAILLE_DOCK),
+            None => {
+                // Une application sans image garde une pastille a son initiale :
+                // une cellule vide ne se distinguerait pas d'un trou.
+                let r = crate::gui::windowing::Rect::new(ix, iy, dock::ICONE as u32,
+                    dock::ICONE as u32);
+                matiere::pave(r, j::RAYON_CELLULE, j::ACCENT, 255);
+                let initiale: String = w.title.chars().take(1).collect();
+                let lw = fb::text_width(&initiale, 18.0, true);
+                fb::draw_text_prop((ix + (dock::ICONE - lw as i32) / 2).max(0) as usize,
+                    (iy + 10).max(0) as usize, &initiale, 0xffffff, 18.0, true);
+            }
+        }
+        // Indicateur sous l'icone.
         let actif = focus == Some(i) && !w.min;
-        let cadre = crate::gui::windowing::Rect::new(b.x, b.y, bw as u32, bh as u32);
-        let fond = if actif { crate::gui::theme::COLOR_SURFACE_ELEVATED }
-            else { crate::gui::theme::COLOR_SURFACE };
-        pave_arrondi(cadre, rayon, fond);
-
-        // La fenetre au premier plan porte un liset d'accent en bas, comme un
-        // onglet actif. Une fenetre minimisee n'en a pas : c'est le seul signe
-        // qui distingue « au-dessus » de « rangee », et il manquait.
-        if actif {
-            fb::fill_rect_rgb(bx + 3, by + bh - 2, bw.saturating_sub(6), 2,
-                crate::gui::theme::COLOR_ACCENT);
-        }
-
-        // L'icone de l'application, la meme que sur le bureau. Une barre des
-        // taches sans icones oblige a lire pour reconnaitre une fenetre.
-        let petite = crate::gui::icones::TAILLE_PETITE;
-        let mut texte_x = bx + 10;
-        if let Some(icone) = crate::gui::icones::pour_app(&w.app) {
-            crate::gui::icones::dessine(icone, bx + 8,
-                by + (bh - petite) / 2, petite);
-            texte_x = bx + 8 + petite + 8;
-        }
-
-        let couleur = if w.min { crate::gui::theme::COLOR_TEXT_SECONDARY }
-            else { crate::gui::theme::COLOR_TEXT_PRIMARY };
-        // Label, tronque a la LARGEUR du bouton et non a un nombre de
-        // caracteres : « Navigateur » et « Fichiers » n'ont pas la meme largeur
-        // a sept caracteres, et le premier debordait sur le bouton suivant.
-        let reste = (bx + bw).saturating_sub(texte_x + 8);
-        let lbl = tronque_a_largeur(&w.title, reste, corps);
-        fb::draw_text_prop(texte_x, ligne_texte_barre(sommet), lbl, couleur,
-            corps, false);
+        let (largeur, couleur, opacite) = if actif { (14, j::ACCENT, 255) }
+            else if w.min { (4, j::ENCRE_TENUE, 160) } else { (4, j::ENCRE_DOUCE, 220) };
+        let point = crate::gui::windowing::Rect::new(c.x + (c.w - largeur) / 2,
+            c.y + c.h + 1, largeur as u32, 4);
+        matiere::pave(point, 2, couleur, opacite);
     }
 }
 

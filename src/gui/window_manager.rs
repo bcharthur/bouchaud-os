@@ -37,7 +37,7 @@ use crate::gui::widgets;
 use crate::gui::window::{
     self as window,
     clamp_win, icon_rect, make_app, menu_rect, start_btn, taskbar_btn,
-    zone_utile, App, Drag, Win, BAR_H, ICONS, MENU, MIN_H, MIN_W,
+    zone_utile, App, Drag, Win, BAR_H, DOCK_H, ICONS, MENU, MIN_H, MIN_W,
     NAV_HAUTEUR, NAV_LARGEUR, TITLE_H,
 };
 use crate::drivers::keyboard;
@@ -171,6 +171,7 @@ fn ajoute_transition(degats: &mut Degats, transition: &crate::gui::windowing::Tr
 fn plan_de_scene(
     wins: &[Win],
     menu_open: bool,
+    centre_ouvert: bool,
     souris: (usize, usize),
     calques: &mut Vec<Calque>,
 ) {
@@ -193,7 +194,11 @@ fn plan_de_scene(
         ));
     }
 
-    calques.push(Calque::plein(Element::BarreHaute, barre_haute_rect()));
+    // BOUCHAUD_ATELIER_VERRE_V1 : la barre du haut et le dock sont du VERRE.
+    // Declares opaques, ils masqueraient le fond que leur translucidite montre :
+    // le culling sauterait le fond sous eux et le verre se melangerait a la
+    // trame precedente.
+    calques.push(Calque::transparent(Element::BarreHaute, barre_haute_rect()));
 
     for (index, w) in wins.iter().enumerate() {
         if w.min {
@@ -202,11 +207,27 @@ fn plan_de_scene(
         // One canonical contract: painted bounds include the full eight-pixel
         // shadow; opacity is only the rounded shape's guaranteed central strip.
         let geometry = render_geometry(w);
+        // BOUCHAUD_ATELIER_EFFETS_V1 : une fenetre qui s'ouvre est
+        // TRANSLUCIDE et DECALEE. Declaree opaque, elle ferait sauter le fond
+        // qu'elle laisse voir ; bornee a sa position finale, la decoupe
+        // ecarterait la bande ou elle se trouve encore.
+        if let Some((dy, _)) = crate::gui::atelier::effets::ouverture(w.id.get()) {
+            let zone = crate::gui::atelier::effets::zone_ouverture_courante(
+                vers_boite(proto_from_window_rect(geometry.painted_bounds)), dy);
+            calques.push(Calque::transparent(Element::Fenetre(index), depuis_boite(zone)));
+            continue;
+        }
         calques.push(Calque::avec_ombre(
             Element::Fenetre(index),
             proto_from_window_rect(geometry.painted_bounds),
             proto_from_window_rect(geometry.opaque),
         ));
+    }
+    // Les fenetres qui se ferment : au-dessus des autres, le temps de s'effacer.
+    for rang in 0..crate::gui::atelier::effets::nombre_instantanes() {
+        if let Some(b) = crate::gui::atelier::effets::bornes_instantane(rang) {
+            calques.push(Calque::transparent(Element::Fantome(rang), depuis_boite(b)));
+        }
     }
 
     if menu_open {
@@ -218,7 +239,15 @@ fn plan_de_scene(
         ));
     }
 
-    calques.push(Calque::plein(Element::BarreTaches, barre_taches_rect()));
+    if centre_ouvert {
+        // Du VERRE : jamais opaque, pour la meme raison que les barres.
+        calques.push(Calque::transparent(Element::Centre, empreinte_centre()));
+    }
+
+    calques.push(Calque::transparent(Element::BarreTaches, barre_taches_rect()));
+    if let Some((_, b)) = widgets::infobulle_dock(wins, souris.0 as i32, souris.1 as i32) {
+        calques.push(Calque::transparent(Element::Infobulle, depuis_boite(b)));
+    }
     calques.push(Calque::transparent(
         Element::Curseur,
         degat_curseur(souris.0, souris.1),
@@ -230,6 +259,7 @@ fn dessine_calque(
     calque: &Calque,
     wins: &[Win],
     menu_open: bool,
+    centre_ouvert: bool,
     souris: (usize, usize),
     mx: i32,
     my: i32,
@@ -238,14 +268,23 @@ fn dessine_calque(
         Element::Fond => widgets::draw_fond(),
         Element::Filigrane => widgets::draw_filigrane(),
         Element::Icone(index) => widgets::draw_icone(index),
-        Element::BarreHaute => widgets::draw_barre_haute(),
+        Element::BarreHaute => widgets::draw_barre_haute(centre_ouvert, mx, my),
         Element::Fenetre(index) => {
             if let Some(w) = wins.get(index) {
-                widgets::draw_fenetre(w, widgets::indice_focus(wins) == Some(index));
+                let actif = widgets::indice_focus(wins) == Some(index);
+                match crate::gui::atelier::effets::ouverture(w.id.get()) {
+                    Some((dy, alpha)) => crate::gui::atelier::effets::compose_ouverture(
+                        vers_boite(empreinte_fenetre(w)), dy, alpha,
+                        || widgets::draw_fenetre(w, actif)),
+                    None => widgets::draw_fenetre(w, actif),
+                }
             }
         }
+        Element::Fantome(rang) => crate::gui::atelier::effets::dessine_instantane(rang),
         Element::Menu => widgets::draw_menu(mx, my),
-        Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
+        Element::Centre => widgets::draw_centre(mx, my),
+        Element::BarreTaches => widgets::draw_taskbar(wins, menu_open, mx, my),
+        Element::Infobulle => widgets::draw_infobulle(wins, mx, my),
         Element::Curseur => widgets::draw_cursor(souris.0, souris.1),
     }
 }
@@ -368,6 +407,36 @@ fn render_geometry(w: &Win) -> crate::gui::windowing::WindowRenderGeometry {
 
 fn proto_from_window_rect(rect: crate::gui::windowing::Rect) -> Rect {
     Rect::neuf(rect.x, rect.y, rect.width, rect.height)
+}
+
+/// Ce que le centre de controle peut peindre, ombre comprise.
+/// (BOUCHAUD_ATELIER_CENTRE_V1 : bornes du calque ET de chaque degat.)
+fn empreinte_centre() -> Rect {
+    depuis_boite(crate::gui::atelier::centre::empreinte(fb::width() as u32, BAR_H as u32))
+}
+
+/// Une action du centre, telle que la peint `widgets::draw_centre`.
+fn rect_action_centre(action: crate::gui::atelier::centre::Action) -> Rect {
+    depuis_boite(crate::gui::atelier::centre::boite_action(fb::width() as u32, BAR_H as u32, action))
+}
+
+fn depuis_boite(b: crate::gui::atelier::dock::Boite) -> Rect {
+    Rect::neuf(b.x, b.y, b.w.max(0) as u32, b.h.max(0) as u32)
+}
+
+fn vers_boite(r: Rect) -> crate::gui::atelier::dock::Boite {
+    crate::gui::atelier::dock::Boite { x: r.x, y: r.y, w: r.largeur as i32, h: r.hauteur as i32 }
+}
+
+/// Ouvre ou ferme le centre. Ce qu'il couvrait redevient bureau (ombre
+/// comprise), et le bouton de la barre change de voile.
+fn bascule_centre(centre_ouvert: &mut bool, ouvert: bool, degats: &mut Degats) {
+    if *centre_ouvert == ouvert {
+        return;
+    }
+    *centre_ouvert = ouvert;
+    degats.ajoute(Origine::Menu, empreinte_centre());
+    degats.ajoute(Origine::BarreHaute, barre_haute_rect());
 }
 
 /// Idem pour le menu deroulant.
@@ -518,7 +587,21 @@ fn boucle() {
     let home = ramfs::fs().resolve(users::session().home(), 0).unwrap_or(0);
     let mut wins: Vec<Win> = Vec::new();
     let mut menu_open = false;
+    // BOUCHAUD_ATELIER_CENTRE_V1 : le centre de controle, ouvert depuis la
+    // barre du haut. Exclusif avec le menu Applications.
+    let mut centre_ouvert = false;
+    let mut survol_centre: Option<crate::gui::atelier::centre::Action> = None;
+    let mut survol_bouton_centre = false;
+    // BOUCHAUD_ATELIER_DOCK_SURVOL_V1 : la cellule du dock survolee, et ce
+    // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
+    let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
+    crate::gui::atelier::reglages::charge();
+    // BOUCHAUD_ATELIER_EFFETS_V1 : ce fil est le seul a toucher l'etat des
+    // effets (voir `effets::fil_ok`).
+    crate::gui::atelier::effets::adopte_fil();
     let mut prev_left = false;
+    // Bouton DROIT : menu contextuel des applications natives (Fichiers).
+    let mut prev_droit = false;
     let mut drag: Option<Drag> = None;
     // Position du pointeur a l'appui qui a ouvert le glissement en cours.
     let mut depart_glissement = (0i32, 0i32);
@@ -545,6 +628,10 @@ fn boucle() {
         #[cfg(not(feature = "reference-desktop"))]
         let fenetre = make_app(0, home, &mut spawn_n);
         #[cfg(not(feature = "reference-desktop"))]
+        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+    }
+    for kind in window::fenetres_demandees_au_demarrage() {
+        let fenetre = make_app(kind, home, &mut spawn_n);
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
@@ -660,7 +747,7 @@ fn boucle() {
             // que sur l'appui. Fermer une fenetre sur le relachement d'Echap la
             // fermerait une seconde fois, et une application du noyau
             // insererait chaque caractere en double.
-            if !evenement.appui && client_actif && !menu_open {
+            if !evenement.appui && client_actif && !menu_open && !centre_ouvert {
                 if let Some(index) = actif {
                     if let App::Navigateur { client } = &mut wins[index].app {
                         envoie_touche(client, evenement);
@@ -682,13 +769,26 @@ fn boucle() {
             if !evenement.appui {
                 continue;
             }
+            if k == Key::Other && centre_ouvert {
+                // Echap ferme d'abord le centre de controle, et rien d'autre.
+                bascule_centre(&mut centre_ouvert, false, &mut degats);
+                sale = true;
+                TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             if k == Key::Other && (menu_open || !client_actif) {
                 // Un menu ou une fenetre disparait : ce qu'elle couvrait
                 // redevient fond, et personne d'autre ne le sait.
                 sale = true;
                 degats.tout();
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
+                // Une application native peut prendre Echap pour elle (un menu
+                // contextuel ouvert se ferme) : la fenetre ne se ferme pas.
+                let prise = !menu_open && actif.map_or(false, |i| {
+                    !window::est_client(&wins[i]) && apps::app_echap(&mut wins[i])
+                });
                 if menu_open { menu_open = false; }
+                else if prise {}
                 else if !ferme_fenetre_du_dessus(&mut wins) {
                     // POURQUOI LA SESSION S'ARRETE, ECRIT AU MOMENT OU ELLE
                     // S'ARRETE.
@@ -752,6 +852,33 @@ fn boucle() {
         // le plein ecran au lieu de deplacer la fenetre.
         let glissement_en_cours = drag.is_some() || icon_drag.is_some();
         let click = left && !prev_left && !glissement_en_cours;
+        // BOUCHAUD_ATELIER_FICHIERS_V1 : front montant du bouton droit. Un
+        // client ring 3 recoit deja l'etat des boutons (`transmet_position`) ;
+        // seules les applications natives sont servies ici.
+        let droit = crate::drivers::mouse::buttons() & 0x2 != 0;
+        let clic_droit = droit && !prev_droit && !glissement_en_cours && !menu_open && !centre_ouvert;
+        prev_droit = droit;
+        if clic_droit {
+            if let Some(i) = (0..wins.len()).rev().find(|&i| {
+                let w = &wins[i];
+                !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h
+            }) {
+                if !window::est_client(&wins[i]) {
+                    let index = if i + 1 == wins.len() { i } else {
+                        let cadre_perdu = widgets::indice_focus(&wins).map(|p| cadre_fenetre(&wins[p]));
+                        let index = remonte_fenetre(&mut wins, i);
+                        for (rect, cible) in transition::focus_transfere(
+                            cadre_perdu, cadre_fenetre(&wins[index]), barre_taches_rect()).iter() {
+                            degats.ajoute(origine_de(cible), rect);
+                        }
+                        index
+                    };
+                    apps::app_clic_droit(&mut wins[index], mx, my);
+                    degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
+                    sale = true;
+                }
+            }
+        }
         let release = !left && prev_left;
         prev_left = left;
         // La position part au client quand le curseur bouge **ou** quand un
@@ -818,7 +945,7 @@ fn boucle() {
                             }
                             if matches!(edge, Bottom | SouthWest | SouthEast) { w.h = (my - w.y).max(MIN_H); }
                             if w.x + w.w > fb::width() as i32 { w.w = fb::width() as i32 - w.x; }
-                            if w.y + w.h > fb::height() as i32 - BAR_H as i32 { w.h = fb::height() as i32 - BAR_H as i32 - w.y; }
+                            if w.y + w.h > fb::height() as i32 - DOCK_H as i32 { w.h = fb::height() as i32 - DOCK_H as i32 - w.y; }
                         }
                     }
                     clamp_win(w);
@@ -911,6 +1038,7 @@ fn boucle() {
             );
             let sans_glissement = drag.is_none();
             handle_click(mx, my, maintenant, &mut title_clicks, &mut wins, &mut menu_open,
+                &mut centre_ouvert,
                 &mut drag, &mut quit, home, &mut spawn_n, &mut icon_drag, &mut degats);
             if sans_glissement && drag.is_some() {
                 depart_glissement = (mx, my);
@@ -961,6 +1089,72 @@ fn boucle() {
                 degats.ajoute(origine_de(cible), rect);
             }
             survol_menu = nouveau_survol;
+            sale = true;
+        }
+
+        // Survol du centre de controle et de son bouton : meme contrat
+        // (BOUCHAUD_GUI_HOVER_CONTRAT_V1). Les boites viennent de
+        // `atelier::centre`, celles que peint `draw_centre` et que lit le clic.
+        // Le bouton n'est mesure que pres de la barre : sa largeur depend du
+        // libelle reseau, qu'on ne recalcule pas a chaque tour pour rien.
+        let pres_barre = my < BAR_H as i32;
+        if pres_barre || survol_bouton_centre {
+            let survole = pres_barre && widgets::bouton_centre().hit(mx, my);
+            if survole != survol_bouton_centre {
+                survol_bouton_centre = survole;
+                degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+                sale = true;
+            }
+        }
+        // Survol du dock. Mesure seulement pres du bas de l'ecran (ou si une
+        // cellule etait survolee) : ailleurs, aucune cellule ne peut l'etre.
+        let pres_dock = my >= fb::height() as i32 - DOCK_H as i32;
+        if pres_dock || survol_dock.is_some() {
+            let (l, h) = (fb::width() as u32, fb::height() as u32);
+            let n = wins.len();
+            let nouveau = if pres_dock && !menu_open && !centre_ouvert {
+                widgets::infobulle_dock(&wins, mx, my).map(|(cible, bulle)| {
+                    let cellule = depuis_boite(crate::gui::atelier::dock::boite_cible(l, h, n, cible));
+                    (cible, cellule.union(&depuis_boite(bulle)))
+                })
+            } else {
+                None
+            };
+            if nouveau.map(|x| x.0) != survol_dock.map(|x| x.0) {
+                if let Some((cible, zone)) = survol_dock {
+                    crate::gui::atelier::effets::quitte(cible);
+                    degats.ajoute(Origine::BarreTaches, zone);
+                }
+                if let Some((cible, zone)) = nouveau {
+                    crate::gui::atelier::effets::survole(cible, vers_boite(zone));
+                    degats.ajoute(Origine::BarreTaches, zone);
+                }
+                sale = true;
+            }
+            survol_dock = nouveau;
+        }
+        // Survol dans l'application native active (BOUCHAUD_ATELIER_FICHIERS_V1).
+        // Meme contrat que le menu : l'ancienne et la nouvelle cible sont
+        // recomposees, rien d'autre.
+        if let Some(i) = widgets::indice_focus(&wins) {
+            if !window::est_client(&wins[i]) && !menu_open && !centre_ouvert {
+                if let Some((avant, apres)) = apps::app_survol(&mut wins[i], mx, my) {
+                    degats.ajoute(Origine::Fenetre, avant);
+                    degats.ajoute(Origine::Fenetre, apres);
+                    sale = true;
+                }
+            }
+        }
+        let nouveau_centre = if centre_ouvert {
+            crate::gui::atelier::centre::action_sous(fb::width() as u32, BAR_H as u32, mx, my)
+        } else {
+            None
+        };
+        if nouveau_centre != survol_centre {
+            for action in [survol_centre, nouveau_centre].into_iter().flatten() {
+                degats.ajoute(Origine::Menu, rect_action_centre(action));
+            }
+            survol_centre = nouveau_centre;
             sale = true;
         }
 
@@ -1185,6 +1379,19 @@ fn boucle() {
             sale = true;
         }
 
+        // ---- Animations (BOUCHAUD_ATELIER_EFFETS_V1) ----
+        // Registre vide : rien n'est ajoute, la cadence est celle d'avant. Une
+        // animation en cours salit sa zone (ancienne et nouvelle position) ; la
+        // trame reste soumise a `PERIODE_TRAME_MS` comme toute autre.
+        if crate::gui::atelier::effets::tour(
+            maintenant,
+            |cle| wins.iter().find(|w| w.id.get() == cle && !w.min)
+                .map(|w| vers_boite(empreinte_fenetre(w))),
+            |b| degats.ajoute(Origine::Fenetre, depuis_boite(b)),
+        ) {
+            sale = true;
+        }
+
         // ---- Rendu ----
         // L'horloge est la SEULE animation permanente du bureau : elle change
         // sans que rien puisse l'annoncer. Voir `politique::PERIODE_HORLOGE_MS`.
@@ -1235,7 +1442,8 @@ fn boucle() {
                 //
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
-                plan_de_scene(&wins, menu_open, (mxu, myu), &mut calques);
+                crate::gui::atelier::effets::debut_trame(maintenant);
+                plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
                 // les regions de la trame partent d'un bloc a `fin_trame`.
@@ -1263,7 +1471,7 @@ fn boucle() {
                         if !scene::doit_dessiner(calque, &present) {
                             continue;
                         }
-                        dessine_calque(calque, &wins, menu_open, (mxu, myu), mx, my);
+                        dessine_calque(calque, &wins, menu_open, centre_ouvert, (mxu, myu), mx, my);
                         dessines += 1;
                     }
                     reveil::note_culling(calques.len(), debut, dessines);
@@ -1276,6 +1484,7 @@ fn boucle() {
                     crate::gui::degats::note_presentation(present);
                 }
                 fb::fin_trame();
+                crate::gui::atelier::effets::fin_trame();
 
                 crate::kernel::timer::mark_frame();
                 reveil::note_trame(horloge_seule);
@@ -1376,7 +1585,11 @@ fn boucle() {
         // jamais totalement la trace d'un bureau endormi.
         let etat = politique::Etat {
             maintenant_ms: maintenant,
-            sale,
+            // BOUCHAUD_ATELIER_EFFETS_V1 : une animation en cours EST une trame
+            // due, meme si celle-ci vient d'etre composee. Sans cela, le bureau
+            // dormait jusqu'au prochain evenement et une ouverture ne montrait
+            // qu'une image. Registre vide : `sale` seul, comme avant.
+            sale: sale || crate::gui::atelier::effets::actif(),
             client_muet_visible,
             horloge_visible: true,
             derniere_trame_ms: derniere_trame,
@@ -1432,6 +1645,7 @@ fn boucle() {
     }
 
     ferme_tous_les_clients(&mut wins);
+    crate::gui::atelier::effets::oublie_tout();
     fb::leave();
     crate::serial_println!("[gui] window manager ferme");
 }
@@ -1888,6 +2102,20 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
     if index >= wins.len() {
         return;
     }
+    // BOUCHAUD_ATELIER_EFFETS_V1 : l'instantane de fermeture est pris ICI,
+    // fenetre encore dans la liste et client encore vivant. Apres `remove`,
+    // plus rien ne lit sa surface. Un client mort disparait sans animation :
+    // ce n'est pas un geste de l'utilisateur.
+    let vivant = match &mut wins[index].app {
+        App::Navigateur { client } => client.vivant(),
+        _ => true,
+    };
+    if vivant && !wins[index].min {
+        let actif = widgets::indice_focus(wins) == Some(index);
+        let w = &wins[index];
+        crate::gui::atelier::effets::ferme(w.id.get(), vers_boite(cadre_fenetre(w)),
+            crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
+    }
     let mut w = wins.remove(index);
     if let App::Navigateur { client } = &mut w.app {
         client.termine();
@@ -1945,6 +2173,9 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 
 /// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
 fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
+    // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
+    // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
+    crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
     wins.push(fenetre);
     degats.tout();
 }
@@ -2128,6 +2359,7 @@ fn handle_click(
     title_clicks: &mut crate::gui::windowing::DoubleClickDetector,
     wins: &mut Vec<Win>,
     menu_open: &mut bool,
+    centre_ouvert: &mut bool,
     drag: &mut Option<Drag>,
     quit: &mut bool,
     home: usize,
@@ -2141,6 +2373,60 @@ fn handle_click(
     // choix par defaut : il reste reserve a ce qui change vraiment la majorite
     // de l'image -- une fenetre qui apparait ou disparait, parce que le fond
     // qu'elle decouvre n'est connu de personne d'autre.
+    // BOUCHAUD_ATELIER_CENTRE_V1
+    //
+    // Centre ouvert : un clic sur une action la declenche ; un clic dans le
+    // panneau hors action ne fait rien ; un clic AILLEURS ferme le centre et
+    // s'arrete la -- comme le menu, il ne traverse pas vers ce qui est dessous.
+    if *centre_ouvert {
+        use crate::gui::atelier::centre as c;
+        let (l, b) = (fb::width() as u32, BAR_H as u32);
+        match c::action_sous(l, b, mx, my) {
+            Some(c::Action::Diagnostic) => {
+                crate::gui::atelier::reglages::bascule_diagnostic();
+                degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+                degats.ajoute(Origine::Menu, rect_action_centre(c::Action::Diagnostic));
+                return;
+            }
+            Some(segment @ (c::Action::AnimationsNormales | c::Action::AnimationsReduites
+                | c::Action::AnimationsAucune)) => {
+                use crate::gui::atelier::animations::Mode;
+                crate::gui::atelier::reglages::regle_animations(match segment {
+                    c::Action::AnimationsReduites => Mode::Reduit,
+                    c::Action::AnimationsAucune => Mode::Aucun,
+                    _ => Mode::Normal,
+                });
+                for s in c::SEGMENTS_ANIMATIONS {
+                    degats.ajoute(Origine::Menu, rect_action_centre(s));
+                }
+                return;
+            }
+            // Les memes chemins que le menu Applications : ecrire ce que la
+            // session a produit, puis couper. Ils ne reviennent jamais.
+            Some(c::Action::Eteindre) => {
+                crate::gui::power_screen::begin();
+                crate::kernel::power::shutdown_avec_raison(crate::kernel::power::EXIT_OK, "centre_eteindre");
+            }
+            Some(c::Action::Redemarrer) => {
+                crate::gui::power_screen::begin();
+                crate::kernel::power::reboot();
+            }
+            Some(c::Action::QuitterBureau) => {
+                crate::serial_println!("BOUCHAUD_BUREAU_FIN raison=centre_quitter");
+                *quit = true;
+                return;
+            }
+            None => {}
+        }
+        if !c::dans_panneau(l, b, mx, my) {
+            bascule_centre(centre_ouvert, false, degats);
+        }
+        return;
+    }
+    if widgets::bouton_centre().hit(mx, my) && !*menu_open {
+        bascule_centre(centre_ouvert, true, degats);
+        return;
+    }
     if *menu_open {
         let mut fenetre_ouverte = false;
         // BOUCHAUD_GUI_HOVER_CONTRAT_V1
@@ -2199,7 +2485,7 @@ fn handle_click(
         }
         return;
     }
-    if start_btn().hit(mx, my) {
+    if start_btn(wins.len()).hit(mx, my) {
         *menu_open = true;
         for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
             degats.ajoute(origine_de(cible), rect);
@@ -2207,9 +2493,21 @@ fn handle_click(
         return;
     }
 
-    // Barre des taches : restaure (si minimisee) et donne le focus.
+    // Barre des taches : restaure (si minimisee) et donne le focus. La
+    // cellule de la fenetre ACTIVE la reduit (BOUCHAUD_ATELIER_DOCK_SURVOL_V1) :
+    // meme chemin que le bouton de la barre de titre.
     for i in 0..wins.len() {
-        if taskbar_btn(i).hit(mx, my) {
+        if taskbar_btn(i, wins.len()).hit(mx, my)
+            && widgets::indice_focus(wins) == Some(i) && !wins[i].min && wins[i].flags.minimizable
+        {
+            let id = wins[i].id;
+            route_window_command(&mut wins[i], crate::gui::windowing::WindowCommand::Minimize(id));
+            let m = wins.remove(i);
+            wins.insert(0, m);
+            degats.tout();
+            return;
+        }
+        if taskbar_btn(i, wins.len()).hit(mx, my) {
             // BOUCHAUD_GUI_FOCUS_DAMAGE_V1 : meme raison qu'a la remontee par
             // clic. Le bouton de la barre des taches donne aussi le focus, donc
             // il le retire aussi a quelqu'un.

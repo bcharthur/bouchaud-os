@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Bouchaud OS : marque PROVISOIRE (BOUCHAUD_ATELIER_LOGO_PROVISOIRE_V1).
+       Le depot ne contient aucun logo officiel. Cette marque reprend la forme
+       visible dans la maquette Atelier (disque bleu-violet, croissant clair) en
+       attendant une identite validee. Elle ne doit pas etre presentee comme
+       definitive. -->
+  <defs>
+    <linearGradient id="fond" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#63a4ff"/>
+      <stop offset="0.55" stop-color="#6a6ef0"/>
+      <stop offset="1" stop-color="#6a45d8"/>
+    </linearGradient>
+    <linearGradient id="reflet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="croissant">
+      <rect width="256" height="256" fill="#fff"/>
+      <circle cx="150" cy="108" r="60" fill="#000"/>
+    </mask>
+  </defs>
+  <circle cx="128" cy="128" r="118" fill="url(#fond)"/>
+  <circle cx="128" cy="128" r="118" fill="url(#reflet)"/>
+  <circle cx="124" cy="132" r="80" fill="#ffffff" mask="url(#croissant)"/>
+  <circle cx="154" cy="104" r="17" fill="#ffffff"/>
+</svg>
