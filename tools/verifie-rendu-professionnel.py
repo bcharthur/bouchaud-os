@@ -62,9 +62,23 @@ for taille in ("18", "40", "56"):
         erreurs.append(f"assets: tuile Services {taille} px absente")
 if 'tuile!("services")' not in icones or "fn reduit" not in icones:
     erreurs.append("icones.rs: Services n'est plus une tuile rendue, ou plus de repli par reduction")
+# Icones de l'explorateur (BOUCHAUD_ATELIER_FICHIERS_V1) : elles etaient
+# dessinees au runtime avec une couverture sur-echantillonnee
+# (`couverture_icone` + `blend_rgb`). Ce sont maintenant des ASSETS rendus
+# depuis le vecteur (resvg) a chaque taille posee -- 20 px pour la liste,
+# 48 px pour la grille -- et poses alpha compris. L'exigence « pas d'icone
+# pixelisee » se verifie donc sur les assets, et `verifie-assets-atelier.py`
+# en garde les empreintes.
 explorateur = (ROOT / "src/gui/apps/file_explorer.rs").read_text(encoding="utf-8")
-if "couverture_icone" not in explorateur or "blend_rgb" not in explorateur:
-    erreurs.append("file_explorer.rs: icones fichier/dossier encore pixelisees")
+assets_rs = (ROOT / "src/gui/atelier/assets.rs").read_text(encoding="utf-8")
+for genre in ("dossier", "fichier", "texte", "image", "code", "archive", "executable"):
+    for taille in ("20", "48"):
+        if not (ROOT / f"src/assets/atelier/fichiers/{genre}-{taille}.png").is_file():
+            erreurs.append(f"assets: icone de fichier {genre}-{taille} absente")
+    if f'type_fichier!("{genre}")' not in assets_rs:
+        erreurs.append(f"assets.rs: icone de fichier {genre} non embarquee")
+if "TYPES_FICHIERS" not in explorateur or "a::pose(" not in explorateur:
+    erreurs.append("file_explorer.rs: icones fichier/dossier qui ne sont plus des assets rendus")
 
 creation = (ROOT / "src/kernel/process/thread/creation.rs").read_text(encoding="utf-8")
 if "adresse de retour fictive" not in creation or "(task.ctx.rsp + 8 * 8) & 0xF" not in creation:

@@ -19,9 +19,10 @@
 //!   * [`centre`]    geometrie pure du centre de controle ;
 //!   * [`reglages`]  reglages reels du bureau (diagnostic, mouvement) ;
 //!   * [`animations`] registre borne d'animations datees, pur ;
-//!   * [`effets`]    composition de l'ouverture et de la fermeture des fenetres.
+//!   * [`effets`]    composition de l'ouverture et de la fermeture des fenetres ;
+//!   * [`fichiers`]  geometrie, cibles et modele purs de l'application Fichiers.
 //!
-//! `jetons`, `mouvement`, `dock`, `centre` et `animations` ne connaissent ni le framebuffer ni l'allocateur : les
+//! `jetons`, `mouvement`, `dock`, `centre`, `animations` et `fichiers` ne connaissent ni le framebuffer ni l'allocateur : les
 //! tests d'hote les incluent tels quels (`tools/gui/test_atelier.rs`).
 //!
 //! # Ce qu'il ne fait pas
@@ -42,3 +43,4 @@ pub mod centre;
 pub mod reglages;
 pub mod animations;
 pub mod effets;
+pub mod fichiers;

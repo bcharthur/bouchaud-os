@@ -53,6 +53,51 @@ pub const SYMBOLE_DIAGNOSTIC_18: &[u8] =
 pub const SYMBOLE_ECRAN_18: &[u8] =
     include_bytes!("../../assets/atelier/symboles/monitor-18.png");
 
+/// Fichiers Atelier (increment D) : glyphes 16 px de la barre laterale, de la
+/// navigation et du menu contextuel (masques teintables).
+pub const SYMBOLE_ACCUEIL_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/house-16.png");
+pub const SYMBOLE_DOCUMENTS_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/file-text-16.png");
+pub const SYMBOLE_IMAGES_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/image-16.png");
+pub const SYMBOLE_TELECHARGEMENTS_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/download-16.png");
+pub const SYMBOLE_RACINE_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/hard-drive-16.png");
+pub const SYMBOLE_DOSSIER_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/folder-16.png");
+pub const SYMBOLE_GRILLE_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/layout-grid-16.png");
+pub const SYMBOLE_LISTE_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/list-16.png");
+pub const SYMBOLE_PRECEDENT_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/chevron-left-16.png");
+pub const SYMBOLE_SUIVANT_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/chevron-right-16.png");
+pub const SYMBOLE_PARENT_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/arrow-up-16.png");
+pub const SYMBOLE_COPIER_16: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/copy-16.png");
+
+/// Icones de types de fichiers : 48 px (grille, page + badge) et 20 px (liste,
+/// glyphe colore). Index : `fichiers::Genre as usize`.
+macro_rules! type_fichier {
+    ($nom:literal) => {
+        [include_bytes!(concat!("../../assets/atelier/fichiers/", $nom, "-20.png")) as &[u8],
+         include_bytes!(concat!("../../assets/atelier/fichiers/", $nom, "-48.png")) as &[u8]]
+    };
+}
+pub const TYPES_FICHIERS: [[&[u8]; 2]; 7] = [
+    type_fichier!("dossier"),
+    type_fichier!("fichier"),
+    type_fichier!("texte"),
+    type_fichier!("image"),
+    type_fichier!("code"),
+    type_fichier!("archive"),
+    type_fichier!("executable"),
+];
+
 /// Fond « summer 1am » (Risto Saukonpää, LGPLv3, KDE), recadre « cover ».
 pub const FOND_1280X720: &[u8] =
     include_bytes!("../../assets/atelier/fond/summer_1am-1280x720.png");

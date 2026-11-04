@@ -162,7 +162,8 @@ pub(crate) const KIND_INSIGHTS: usize = 10;
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
-    Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History },
+    Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History,
+        ui: crate::gui::apps::file_explorer::Ui },
     Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
@@ -456,9 +457,12 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         0 => Win::new("Terminal".to_string(), x, y, 380, 280,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Terminal { sb: { let mut v = Vec::new(); v.push("Bouchaud OS terminal".to_string()); v }, input: String::new(), cwd: home }),
-        1 => Win::new("Fichiers".to_string(), x, y, 420, 320,
+        // BOUCHAUD_ATELIER_FICHIERS_V1 : assez large pour la barre laterale
+        // (`fichiers::LARGEUR_MIN_LATERALE`) et quatre colonnes de grille.
+        1 => Win::new("Fichiers".to_string(), x, y, 780, 470,
             crate::gui::windowing::WindowFlags::STANDARD,
-            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new() }),
+            App::Files { cur: home, scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new(),
+                ui: crate::gui::apps::file_explorer::Ui::new() }),
         4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
             crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,

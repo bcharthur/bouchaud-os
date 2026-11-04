@@ -4,9 +4,10 @@ Fabriqués par `tools/assets/fabrique-atelier.py`. Empreintes dans `src/assets/a
 
 | Asset | Auteur / source | Licence | Fichiers |
 |---|---|---|---|
-| Glyphes **Lucide** (sous-ensemble de 20 icônes : tuiles, barre haute, centre de contrôle ; liste dans `sources/lucide/`) | Lucide Icons et contributeurs, `lucide-static` 1.67.0 (npm) | **ISC** — texte dans `sources/lucide/LICENSE` ; chaque SVG garde son en-tête `@license` | `sources/lucide/*.svg`, glyphes des tuiles, `symboles/*` |
+| Glyphes **Lucide** (sous-ensemble de 34 icônes : tuiles, barre haute, centre de contrôle, Fichiers ; liste dans `sources/lucide/`) | Lucide Icons et contributeurs, `lucide-static` 1.67.0 (npm) | **ISC** — texte dans `sources/lucide/LICENSE` ; chaque SVG garde son en-tête `@license` | `sources/lucide/*.svg`, glyphes des tuiles, `symboles/*` |
 | Fond **« summer 1am »** | **Risto Saukonpää**, dépôt KDE `plasma-workspace-wallpapers` (`summer_1am`, image 2560×1600) | **LGPL-3.0** (déclarée dans `sources/fond/metadata.json`) — texte dans `sources/fond/LICENSE-LGPL-3.0.txt` (+ GPL-3.0 référencée) | `sources/fond/summer_1am-2560x1600.jpg` (source), `fond/summer_1am-*.png` (recadrages « cover ») |
 | Tuiles applicatives | Projet Bouchaud OS (dégradé, forme) + glyphe Lucide (ISC) | projet + ISC | `sources/apps/*.svg`, `apps/*.png` |
+| Icônes de types de fichiers | Projet Bouchaud OS (dossier, page, badge) + glyphe Lucide (ISC) | projet + ISC | `sources/fichiers/*.svg`, `fichiers/*.png` |
 | Marque **Bouchaud OS** | Projet Bouchaud OS, d'après la maquette Atelier | projet — **PROVISOIRE** | `sources/logo/bouchaud-os-provisoire.svg`, `logo/*.png` |
 
 Le logo est **PROVISOIRE** : le dépôt ne contenait aucun logo officiel de Bouchaud OS, et l'ancien logo nautile du navigateur, dessiné en code, avait été retiré. Il ne doit pas être présenté comme l'identité définitive avant validation.

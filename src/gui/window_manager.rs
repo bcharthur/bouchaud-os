@@ -600,6 +600,8 @@ fn boucle() {
     // effets (voir `effets::fil_ok`).
     crate::gui::atelier::effets::adopte_fil();
     let mut prev_left = false;
+    // Bouton DROIT : menu contextuel des applications natives (Fichiers).
+    let mut prev_droit = false;
     let mut drag: Option<Drag> = None;
     // Position du pointeur a l'appui qui a ouvert le glissement en cours.
     let mut depart_glissement = (0i32, 0i32);
@@ -780,7 +782,13 @@ fn boucle() {
                 sale = true;
                 degats.tout();
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
+                // Une application native peut prendre Echap pour elle (un menu
+                // contextuel ouvert se ferme) : la fenetre ne se ferme pas.
+                let prise = !menu_open && actif.map_or(false, |i| {
+                    !window::est_client(&wins[i]) && apps::app_echap(&mut wins[i])
+                });
                 if menu_open { menu_open = false; }
+                else if prise {}
                 else if !ferme_fenetre_du_dessus(&mut wins) {
                     // POURQUOI LA SESSION S'ARRETE, ECRIT AU MOMENT OU ELLE
                     // S'ARRETE.
@@ -844,6 +852,33 @@ fn boucle() {
         // le plein ecran au lieu de deplacer la fenetre.
         let glissement_en_cours = drag.is_some() || icon_drag.is_some();
         let click = left && !prev_left && !glissement_en_cours;
+        // BOUCHAUD_ATELIER_FICHIERS_V1 : front montant du bouton droit. Un
+        // client ring 3 recoit deja l'etat des boutons (`transmet_position`) ;
+        // seules les applications natives sont servies ici.
+        let droit = crate::drivers::mouse::buttons() & 0x2 != 0;
+        let clic_droit = droit && !prev_droit && !glissement_en_cours && !menu_open && !centre_ouvert;
+        prev_droit = droit;
+        if clic_droit {
+            if let Some(i) = (0..wins.len()).rev().find(|&i| {
+                let w = &wins[i];
+                !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h
+            }) {
+                if !window::est_client(&wins[i]) {
+                    let index = if i + 1 == wins.len() { i } else {
+                        let cadre_perdu = widgets::indice_focus(&wins).map(|p| cadre_fenetre(&wins[p]));
+                        let index = remonte_fenetre(&mut wins, i);
+                        for (rect, cible) in transition::focus_transfere(
+                            cadre_perdu, cadre_fenetre(&wins[index]), barre_taches_rect()).iter() {
+                            degats.ajoute(origine_de(cible), rect);
+                        }
+                        index
+                    };
+                    apps::app_clic_droit(&mut wins[index], mx, my);
+                    degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
+                    sale = true;
+                }
+            }
+        }
         let release = !left && prev_left;
         prev_left = left;
         // La position part au client quand le curseur bouge **ou** quand un
@@ -1097,6 +1132,18 @@ fn boucle() {
                 sale = true;
             }
             survol_dock = nouveau;
+        }
+        // Survol dans l'application native active (BOUCHAUD_ATELIER_FICHIERS_V1).
+        // Meme contrat que le menu : l'ancienne et la nouvelle cible sont
+        // recomposees, rien d'autre.
+        if let Some(i) = widgets::indice_focus(&wins) {
+            if !window::est_client(&wins[i]) && !menu_open && !centre_ouvert {
+                if let Some((avant, apres)) = apps::app_survol(&mut wins[i], mx, my) {
+                    degats.ajoute(Origine::Fenetre, avant);
+                    degats.ajoute(Origine::Fenetre, apres);
+                    sale = true;
+                }
+            }
         }
         let nouveau_centre = if centre_ouvert {
             crate::gui::atelier::centre::action_sous(fb::width() as u32, BAR_H as u32, mx, my)
