@@ -848,13 +848,17 @@ fn configure_blackbox_storage(
                 storage.partition_first,
                 storage.partition_blocks,
             );
+            let slot_du_support = storage.slot_id;
             controller.blackbox_storage = Some(storage);
             // UN SUPPORT NEUF REPART D'UN TRANSPORT NEUF.
             //
             // Sans cela, un support retire puis rebranche resterait hors
             // service pour le reste de la session -- et un debranchement
             // accidentel couterait l'enregistreur jusqu'au redemarrage.
-            TRANSPORT_BOT.remet_a_neuf();
+            // BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1 : seulement si l'etat en
+            // cours est le sien -- sinon c'est la reprise d'un AUTRE support
+            // qu'on effacerait.
+            TRANSPORT_BOT.remet_a_neuf_pour(slot_du_support);
             BLACKBOX_STORAGE_READY.store(true, Ordering::Release);
             Ok(true)
         }
@@ -1103,6 +1107,11 @@ fn blackbox_reprend_le_transport(
 ) -> bool {
     use crate::drivers::reprise_bot::Etat;
     if TRANSPORT_BOT.etat() == Etat::HorsService {
+        return false;
+    }
+    // BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1 : la reprise en attente est celle
+    // d'un autre support ; reinitialiser celui-ci ne jetterait pas son TD.
+    if !TRANSPORT_BOT.concerne(storage.slot_id) {
         return false;
     }
     if !TRANSPORT_BOT.commence_reprise() {

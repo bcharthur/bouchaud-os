@@ -284,6 +284,32 @@ impl Transport {
         Etat::Reprise
     }
 
+    /// BOUCHAUD_USB_TRANSPORT_PAR_SUPPORT_V1
+    ///
+    /// L'etat du transport est UNIQUE alors que plusieurs supports peuvent
+    /// etre branches. Une reprise en attente appartient au support qui a eu
+    /// l'incident : c'est SON anneau qui porte le TD abandonne. La reprendre
+    /// sur un autre support remettrait l'etat a `Pret` sans avoir jete ce TD,
+    /// et la commande suivante du support fautif prendrait l'achevement tardif
+    /// pour le sien -- un secteur d'avant, rendu sans erreur.
+    ///
+    /// Rend vrai si une reprise en attente (ou l'absence de reprise) concerne
+    /// le support `slot`.
+    pub fn concerne(&self, slot: u8) -> bool {
+        self.etat() == Etat::Pret || self.dernier_slot.load(Ordering::Relaxed) == slot
+    }
+
+    /// Remet a neuf SEULEMENT si l'etat en cours appartient a `slot` : la
+    /// mise en service d'un second support ne doit pas effacer la reprise que
+    /// le premier doit encore faire. Rend vrai si la remise a eu lieu.
+    pub fn remet_a_neuf_pour(&self, slot: u8) -> bool {
+        if !self.concerne(slot) {
+            return false;
+        }
+        self.remet_a_neuf();
+        true
+    }
+
     /// Le support vient d'etre (re)configure : on repart de zero.
     pub fn remet_a_neuf(&self) {
         self.tentatives.store(0, Ordering::Relaxed);

@@ -16,8 +16,9 @@ le peripherique PRESENTE, pas de ce que le noyau croit avoir ecrit.
         le curseur bougent entre deux demarrages).
 
     analyse_scanout.py vivant AVANT.ppm APRES.ppm
-        Deux captures du meme ecran a quelques secondes : l'horloge a change,
-        donc les presentations partielles atteignent l'ecran.
+        Deux captures du meme ecran, avant et apres un deplacement du pointeur :
+        au moins un pixel a change, donc les presentations partielles atteignent
+        l'ecran. Un ecran fige (0 pixel change) echoue.
 
     analyse_scanout.py taille CAPTURE.ppm LARGEUR HAUTEUR
 
@@ -98,12 +99,16 @@ def compare(virtio, reference, minimum):
 
 
 def vivant(avant, apres):
-    """Deux captures de l'ecran virtio a quelques secondes d'intervalle.
+    """Deux captures de l'ecran virtio, avant et apres un deplacement du pointeur.
 
-    L'horloge de la barre du haut (secondes affichees) DOIT avoir change : la
-    seule facon qu'un pixel change a l'ecran virtio est un TRANSFER_TO_HOST_2D
-    suivi d'un RESOURCE_FLUSH. Une premiere trame figee, puis plus rien,
-    echoue ici.
+    BOUCHAUD_SCANOUT_VIVANT_POINTEUR_V1. Au moins un pixel DOIT avoir change :
+    la seule facon qu'un pixel change a l'ecran virtio est un
+    TRANSFER_TO_HOST_2D suivi d'un RESOURCE_FLUSH. Une premiere trame figee,
+    puis plus rien, echoue ici. Le banc deplace le pointeur entre les deux
+    captures : le bureau Atelier n'affiche plus les secondes, et un bureau au
+    repos est legitimement immobile. La part dans la zone de l'ancienne
+    horloge (coin haut droit) et la boite englobante des changements sont
+    publiees pour le diagnostic ; elles ne decident pas.
     """
     la, ha, pa = lit_ppm(avant)
     lb, hb, pb = lit_ppm(apres)
@@ -111,15 +116,18 @@ def vivant(avant, apres):
         print(f"SCANOUT_VIVANT_ECHEC tailles {la}x{ha} {lb}x{hb}")
         return 1
     horloge = differents = 0
+    x0, y0, x1, y1 = la, ha, -1, -1
     for y in range(ha):
         for x in range(la):
             o = 3 * (y * la + x)
             if pa[o:o + 3] != pb[o:o + 3]:
                 differents += 1
+                x0, y0, x1, y1 = min(x0, x), min(y0, y), max(x1, x), max(y1, y)
                 if y < 30 and x >= la - 120:
                     horloge += 1
-    verdict = "OK" if horloge > 0 else "ECHEC"
-    print(f"SCANOUT_VIVANT_{verdict} pixels_changes={differents} dont_horloge={horloge}")
+    boite = f"{x0},{y0}-{x1},{y1}" if differents else "-"
+    verdict = "OK" if differents > 0 else "ECHEC"
+    print(f"SCANOUT_VIVANT_{verdict} pixels_changes={differents} dont_horloge={horloge} boite={boite}")
     return 0 if verdict == "OK" else 1
 
 
