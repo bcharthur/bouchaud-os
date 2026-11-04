@@ -36,6 +36,8 @@ on:
       - 'tools/reference/uefi-preboot-probe/**'
       - 'tools/reference/uefi-image-builder/**'
       - 'tools/ci/run_ab_rollback.sh'
+      - 'src/drivers/usb/**'
+      - 'src/drivers/api/bloc.rs'
       - 'src/platform/pc/stage2.rs'
       - 'src/boot/**'
       - 'src/fs/persistance/**'
@@ -78,6 +80,8 @@ on:
       - 'tools/reference/uefi-preboot-probe/**'
       - 'tools/reference/uefi-image-builder/**'
       - 'tools/ci/run_ab_rollback.sh'
+      - 'src/drivers/usb/**'
+      - 'src/drivers/api/bloc.rs'
       - 'src/platform/pc/stage2.rs'
       - 'src/boot/**'
       - 'src/fs/persistance/**'
@@ -214,13 +218,25 @@ jobs:
     # du slot actif.
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
-    name: ab-rollback (${{ matrix.scenario }})
+    name: ab-rollback (${{ matrix.scenario }}, ${{ matrix.support }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, mise-a-jour-morts, sans-cle, recovery-requise, recovery-rollback, echecs-repetes]
+        support: [nvme]
+        # BOUCHAUD_USB_VIDANGE_REELLE_V1 / BOUCHAUD_USB_LIAISON_SUPPORT_V1 : le
+        # disque A/B sur une cle USB. sante : commit accepte (vidange prouvee) ;
+        # sans-vidange : temoin negatif, aucun commit ; seconde-cle : une
+        # seconde cle qui refuse la vidange ne retire rien a la cle A/B.
+        include:
+          - scenario: sante
+            support: usb
+          - scenario: sans-vidange
+            support: usb
+          - scenario: seconde-cle
+            support: usb-deux
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo
@@ -241,12 +257,14 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add x86_64-unknown-uefi
-      - name: Rollback A/B (${{ matrix.scenario }})
+      - name: Rollback A/B (${{ matrix.scenario }}, ${{ matrix.support }})
+        env:
+          BO_AB_SUPPORT: ${{ matrix.support }}
         run: bash tools/ci/run_ab_rollback.sh "${{ matrix.scenario }}" target/ab-rollback
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ab-rollback-${{ matrix.scenario }}
+          name: ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}
           path: target/ab-rollback/boot-*.log
           if-no-files-found: error
           retention-days: 14

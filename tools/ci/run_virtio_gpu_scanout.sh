@@ -71,6 +71,8 @@ capture() {
 
 # demarre NOM ATTENTE_REGEX DELAI_APRES CAPTURE_DEVICE ARGS_QEMU...
 #   SECONDE=N   : seconde capture N secondes apres la premiere (capture-NOM-2)
+#   ENTRE=CMD   : commande du moniteur jouee 3 fois juste apres la premiere
+#                 capture (BOUCHAUD_SCANOUT_VIVANT_POINTEUR_V1, voir plus bas)
 #   FINAL=REGEX : apres les captures, attendre encore cette ligne, ENTIEREMENT
 #                 ecrite (<= 90 s) -- P10_TELEMETRIE_COMPLETE_V1 : QEMU etait tue
 #                 des le debut de la ligne ; run 40715886448 (77665751, direct
@@ -98,8 +100,30 @@ demarre() {
     sleep "$apres"
     capture "$mon" "$SORTIE/capture-$nom.ppm" "$tete"
     if [ -n "${SECONDE:-}" ]; then
+      if [ -n "${ENTRE:-}" ]; then
+        for _ in 1 2 3; do
+          python3 tools/ci/qemu_moniteur.py "$mon" "$ENTRE" >/dev/null || true
+          sleep 0.3
+        done
+      fi
       sleep "$SECONDE"
       capture "$mon" "$SORTIE/capture-$nom-2.ppm" "$tete"
+      # Temoin negatif : la VM ARRETEE, les memes mouvements ne peuvent plus
+      # atteindre l'ecran. L'analyse doit alors conclure a un ecran fige --
+      # sinon elle ne prouve plus rien. La VM repart ensuite (`cont`).
+      # Les DEUX captures du temoin sont prises VM arretee : ce qui avait ete
+      # presente avant l'arret (l'horloge de l'ancien bureau) ne compte pas.
+      if [ -n "${ENTRE:-}" ]; then
+        python3 tools/ci/qemu_moniteur.py "$mon" "stop" >/dev/null || true
+        capture "$mon" "$SORTIE/capture-$nom-fige-a.ppm" "$tete"
+        for _ in 1 2 3; do
+          python3 tools/ci/qemu_moniteur.py "$mon" "$ENTRE" >/dev/null || true
+          sleep 0.3
+        done
+        sleep "$SECONDE"
+        capture "$mon" "$SORTIE/capture-$nom-fige-b.ppm" "$tete"
+        python3 tools/ci/qemu_moniteur.py "$mon" "cont" >/dev/null || true
+      fi
     fi
     if [ -n "${FINAL:-}" ]; then
       local fin=$((SECONDS + 90))
@@ -120,7 +144,15 @@ demarre mire 'BOUCHAUD_VIRTIO_GPU_2D_AUTOTEST_OK|VIRTIO_GPU_2D_AUTOTEST_ECHEC|VI
 # La ligne de telemetrie du compositeur, ENTIERE : son dernier champ, puis
 # la fin de ligne (`ligne_complete.py` ne retient que les lignes terminees).
 TELEMETRIE='\[GUI-VIRTIO-GPU\] presents_ok=.* regions_differees=[0-9]+$'
-SECONDE=3 FINAL="$TELEMETRIE" demarre virtio '\[gui\] window manager demarre' 8 vgpu \
+# BOUCHAUD_SCANOUT_VIVANT_POINTEUR_V1 : entre les deux captures, le pointeur
+# bouge (PS/2, par le moniteur). Le bureau Atelier n'affiche plus les secondes :
+# au repos, il est legitimement immobile pendant 3 s, et l'horloge ne suffit
+# plus a prouver que les presentations partielles atteignent l'ecran. Le curseur,
+# dessine par le compositeur, ne peut changer a l'ecran virtio que par
+# TRANSFER_TO_HOST_2D + RESOURCE_FLUSH. Un ecran fige echoue toujours : la VM
+# arretee (`stop`) avant les mouvements rend 0 pixel change : c'est le temoin
+# negatif joue a chaque passage (captures fige-a et fige-b, VM arretee).
+ENTRE="mouse_move 40 30" SECONDE=3 FINAL="$TELEMETRIE" demarre virtio '\[gui\] window manager demarre' 8 vgpu \
   -vga none -device virtio-gpu-pci,id=vgpu -drive format=raw,file="$SORTIE/bureau.img"
 demarre bga '\[gui\] window manager demarre' 8 - \
   -drive format=raw,file="$SORTIE/bureau.img"
@@ -140,7 +172,8 @@ exige "avec BGA present, le bureau reste sur BGA" bash -c "grep -aq '\[gfx\] BGA
 exige "sans BGA, le bureau prend le scanout virtio-gpu 2D" grep -aq 'BOUCHAUD_VIRTIO_GPU_SCANOUT_ACTIF 1280x720' "$SORTIE/serie-virtio.log"
 exige "bureau virtio : capture 1280x720" python3 tools/ci/analyse_scanout.py taille "$SORTIE/capture-virtio.ppm" 1280 720
 exige "bureau virtio = bureau BGA (pixels)" python3 tools/ci/analyse_scanout.py compare "$SORTIE/capture-virtio.ppm" "$SORTIE/capture-bga.ppm"
-exige "bureau virtio vivant : l'horloge avance a l'ecran (presentations partielles)" python3 tools/ci/analyse_scanout.py vivant "$SORTIE/capture-virtio.ppm" "$SORTIE/capture-virtio-2.ppm"
+exige "bureau virtio vivant : le pointeur deplace atteint l'ecran (presentations partielles)" python3 tools/ci/analyse_scanout.py vivant "$SORTIE/capture-virtio.ppm" "$SORTIE/capture-virtio-2.ppm"
+exige "temoin : VM arretee, pointeur deplace, l'analyse conclut a un ecran fige" bash -c "test -s '$SORTIE/capture-virtio-fige-a.ppm' && test -s '$SORTIE/capture-virtio-fige-b.ppm' && ! python3 tools/ci/analyse_scanout.py vivant '$SORTIE/capture-virtio-fige-a.ppm' '$SORTIE/capture-virtio-fige-b.ppm'"
 exige "aucune attente non cedable DANS une tache (verrou tournant tenu par un appelant)" bash -c "! grep -aq 'VIRTIO_GPU_ATTENTE non_cedable_en_tache' '$SORTIE'/serie-*.log"
 # P10_TELEMETRIE_COMPLETE_V1 : la derniere ligne ENTIERE, jamais un fragment.
 MESURE=$(python3 tools/ci/ligne_complete.py "$SORTIE/serie-virtio.log" "$TELEMETRIE" --derniere \
