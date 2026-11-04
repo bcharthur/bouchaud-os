@@ -752,6 +752,9 @@ pub const INJECTE_ECHEANCE_DONNEES: u32 = 1 << 0;
 pub const INJECTE_ECHEANCE_STATUT: u32 = 1 << 1;
 /// Prochaine prise du verrou : refusee comme si un autre le tenait.
 pub const INJECTE_VERROU_TENU: u32 = 1 << 2;
+/// Prochain `SYNCHRONIZE CACHE` : refuse, comme par un support qui ne la
+/// connait pas (BOUCHAUD_USB_VIDANGE_REELLE_V1, temoin negatif).
+pub const INJECTE_REFUS_VIDANGE: u32 = 1 << 3;
 
 static INJECTIONS: AtomicU32 = AtomicU32::new(0);
 static INJECTIONS_CONSOMMEES: AtomicU64 = AtomicU64::new(0);
@@ -5418,6 +5421,24 @@ fn demarre_stockage(
         "BOUCHAUD_USB_STOCKAGE_PRET slot={} blocs={} taille_bloc={} octets={} amovible={}",
         slot_id, blocs, taille_bloc, capacite.octets(), amovible as u8,
     );
+    // BOUCHAUD_USB_VIDANGE_REELLE_V1 : la barriere est PROUVEE au montage,
+    // jamais supposee. Un refus laisse `vidange_reelle` a faux et le volume
+    // utilisable en lecture et en ecriture, sans promesse de durabilite.
+    #[cfg(feature = "banc-ab-sans-vidange")]
+    arme_injection(INJECTE_REFUS_VIDANGE);
+    let sonde = stockage_vidange(controller, device, index);
+    if sonde.is_err() {
+        // Un refus laisse une condition de sens en attente : la lire l'efface,
+        // sans quoi certaines cles repondent en erreur a la commande suivante.
+        let sens = stockage::cdb_demande_sens(18);
+        let _ = bot_commande(controller, device, index, &sens, true, 18);
+    }
+    USB_VIDANGE_REELLE.store(sonde.is_ok(), Ordering::Release);
+    crate::serial_println!(
+        "BOUCHAUD_USB_STOCKAGE_VIDANGE sonde={} vidange_reelle={}",
+        match sonde { Ok(()) => "ok", Err(raison) => raison },
+        sonde.is_ok() as u8,
+    );
     // LE VOLUME EST PUBLIE ICI, ET C'EST CE QUI FAIT DE CE PILOTE UN PILOTE.
     //
     // Sans enregistrement, la pile BOT n'aurait pour appelant que le test qui
@@ -5557,6 +5578,48 @@ pub const VOLUME_USB: Volume = Volume(3);
 /// Capacite publiee, pour que `descripteur()` ne prenne aucun verrou.
 static USB_BLOCS: AtomicU64 = AtomicU64::new(0);
 static USB_TAILLE_BLOC: AtomicUsize = AtomicUsize::new(0);
+
+// BOUCHAUD_USB_VIDANGE_REELLE_V1
+//
+// # Le verrou qui bloquait l'A/B sur cle
+//
+// Le volume USB declarait `vidange_reelle: false` et rendait `Fait(0)` sur
+// une vidange sans rien emettre. C'etait honnete -- une cle avec un cache
+// d'ecriture peut accepter une ecriture sans l'avoir posee --, et cela
+// interdisait tout commit A/B sur une cle (`volume_sans_vidange_reelle`) :
+// le slot B demarrait, son commit de sante etait refuse.
+//
+// # Ce qui change
+//
+// * Au montage, apres `READ CAPACITY`, une sonde `SYNCHRONIZE CACHE (10)`
+//   (opcode 0x35, sans donnees). `vidange_reelle` ne devient vrai QUE si le
+//   support la termine (CSW statut 0).
+// * Une vidange emet reellement la commande et attend son CSW.
+// * Un support qui la refuse PLUS TARD perd la confiance : `vidange_reelle`
+//   repasse a faux, la vidange echoue, et un commit A/B est refuse -- jamais
+//   annonce durable sur un support qui ne l'a pas garanti.
+static USB_VIDANGE_REELLE: AtomicBool = AtomicBool::new(false);
+static USB_VIDANGES: AtomicU64 = AtomicU64::new(0);
+static USB_VIDANGES_REFUSEES: AtomicU64 = AtomicU64::new(0);
+
+/// `(vidange_reelle, vidanges reussies, vidanges refusees)` du volume USB.
+pub fn vidange_stats() -> (bool, u64, u64) {
+    (
+        USB_VIDANGE_REELLE.load(Ordering::Acquire),
+        USB_VIDANGES.load(Ordering::Relaxed),
+        USB_VIDANGES_REFUSEES.load(Ordering::Relaxed),
+    )
+}
+
+/// Emet `SYNCHRONIZE CACHE (10)` sur le support `index` et attend son CSW.
+fn stockage_vidange(controller: &mut Controller, device: &mut Device, index: usize) -> Result<(), &'static str> {
+    if injecte(INJECTE_REFUS_VIDANGE) {
+        return Err("vidange-refus-injecte");
+    }
+    // LBA 0, nombre de blocs 0 : « tout le support » (SBC-3, 5.24).
+    let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    bot_commande(controller, device, index, &cdb, false, 0).map(|_| ())
+}
 /// Requetes refusees parce que le pilote USB etait occupe.
 static USB_OCCUPE: AtomicUsize = AtomicUsize::new(0);
 
@@ -5687,6 +5750,50 @@ impl PiloteUsbStockage {
     }
 }
 
+impl PiloteUsbStockage {
+    /// Une vidange : `SYNCHRONIZE CACHE` si le support l'a prouvee au
+    /// montage. Sinon `Fait(0)` comme avant -- et `bloc::vidange` rend faux,
+    /// puisque le descripteur ne promet aucune barriere.
+    fn vidange(&self) -> Achevement {
+        if !USB_VIDANGE_REELLE.load(Ordering::Acquire) {
+            return Achevement::Fait(0);
+        }
+        let resultat = avec_le_pilote_usb(|runtime| {
+            let Some((ic, index)) = premier_support(runtime) else {
+                return Err("absent");
+            };
+            let controleur = &mut runtime.controllers[ic];
+            let slot = controleur.stockages[index].slot_id as usize;
+            if slot >= controleur.devices.len() {
+                return Err("slot");
+            }
+            let Some(mut device) = controleur.devices[slot].take() else {
+                return Err("peripherique");
+            };
+            let r = stockage_vidange(controleur, &mut device, index);
+            controleur.devices[slot] = Some(device);
+            r
+        });
+        match resultat {
+            Some(Ok(())) => {
+                USB_VIDANGES.fetch_add(1, Ordering::Relaxed);
+                Achevement::Fait(0)
+            }
+            other => {
+                // Refus ou transport indisponible : plus aucune promesse.
+                USB_VIDANGE_REELLE.store(false, Ordering::Release);
+                let n = USB_VIDANGES_REFUSEES.fetch_add(1, Ordering::Relaxed) + 1;
+                crate::serial_println!(
+                    "BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE n={} raison={} vidange_reelle=0",
+                    n,
+                    match other { Some(Err(r)) => r, _ => "pilote-occupe" },
+                );
+                Achevement::Erreur
+            }
+        }
+    }
+}
+
 impl PiloteBloc for PiloteUsbStockage {
     fn descripteur(&self) -> Descripteur {
         Descripteur {
@@ -5696,10 +5803,11 @@ impl PiloteBloc for PiloteUsbStockage {
             // reponse, puis la suivante. Declarer plus laisserait croire a un
             // parallelisme que le protocole interdit.
             profondeur_file: 1,
-            // Le pilote n'emet pas `SYNCHRONIZE CACHE`. Le declarer faux est le
-            // seul choix honnete : une cle avec un cache d'ecriture peut avoir
-            // accepte une ecriture sans l'avoir posee.
-            vidange_reelle: false,
+            // BOUCHAUD_USB_VIDANGE_REELLE_V1 : vrai seulement si le support a
+            // termine `SYNCHRONIZE CACHE` au montage, et ne l'a pas refuse
+            // depuis. Sinon faux : une cle avec un cache d'ecriture peut
+            // avoir accepte une ecriture sans l'avoir posee.
+            vidange_reelle: USB_VIDANGE_REELLE.load(Ordering::Acquire),
             nom: "usb-bot",
         }
     }
@@ -5710,7 +5818,7 @@ impl PiloteBloc for PiloteUsbStockage {
             // Une ecriture par ce chemin n'a pas de donnees a poser : c'est une
             // erreur d'appelant, pas une panne du support.
             Genre::Ecriture => Achevement::Erreur,
-            Genre::Vidange => Achevement::Fait(0),
+            Genre::Vidange => self.vidange(),
         }
     }
 
@@ -5721,7 +5829,7 @@ impl PiloteBloc for PiloteUsbStockage {
                 self.transfere(true, requete.lba, requete.blocs, &mut vide, Some(donnees))
             }
             Genre::Lecture => Achevement::Erreur,
-            Genre::Vidange => Achevement::Fait(0),
+            Genre::Vidange => self.vidange(),
         }
     }
 }

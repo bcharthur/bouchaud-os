@@ -1909,10 +1909,11 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // reprise.
         "usbfault" => {
             if argc < 2 {
-                crate::println!("usbfault <donnees|statut|verrou|tout>");
+                crate::println!("usbfault <donnees|statut|verrou|vidange|tout>");
                 crate::println!("  donnees : la prochaine phase de donnees BOT expire");
                 crate::println!("  statut  : le prochain CSW n'arrive pas");
                 crate::println!("  verrou  : la prochaine prise du pilote est refusee");
+                crate::println!("  vidange : le prochain SYNCHRONIZE CACHE est refuse");
                 return 1;
             }
             use crate::drivers::xhci_active as usb;
@@ -1920,6 +1921,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 "donnees" => usb::INJECTE_ECHEANCE_DONNEES,
                 "statut" => usb::INJECTE_ECHEANCE_STATUT,
                 "verrou" => usb::INJECTE_VERROU_TENU,
+                "vidange" => usb::INJECTE_REFUS_VIDANGE,
                 "tout" => {
                     usb::INJECTE_ECHEANCE_DONNEES
                         | usb::INJECTE_ECHEANCE_STATUT
