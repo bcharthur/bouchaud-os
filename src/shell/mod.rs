@@ -208,7 +208,7 @@ pub const COMMANDS: &[&str] = &[
     "serial-test", "panic-test", "roadmap", "whoami", "id", "users", "useradd",
     "userdel", "passwd", "su", "pwd", "ls", "tree", "cd", "mkdir", "touch", "cat",
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
-    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "usbetat", "usbfault", "ping", "ifconfig",
+    "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "usbetat", "usbfault", "usbvolume", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
@@ -1907,12 +1907,20 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Chaque bit est consomme a la premiere occasion : une injection
         // permanente ne prouverait rien de plus et empecherait de verifier la
         // reprise.
+        // BOUCHAUD_USB_LIAISON_SUPPORT_V1 : quel support porte le volume USB,
+        // ce qu'il promet, et -- avec `io` -- une lecture, une reecriture a
+        // l'identique et une vidange du dernier bloc.
+        "usbvolume" => {
+            crate::drivers::xhci_active::diagnostic_volume(argc >= 2 && argv[1] == "io");
+            0
+        }
         "usbfault" => {
             if argc < 2 {
-                crate::println!("usbfault <donnees|statut|verrou|tout>");
+                crate::println!("usbfault <donnees|statut|verrou|vidange|tout>");
                 crate::println!("  donnees : la prochaine phase de donnees BOT expire");
                 crate::println!("  statut  : le prochain CSW n'arrive pas");
                 crate::println!("  verrou  : la prochaine prise du pilote est refusee");
+                crate::println!("  vidange : le prochain SYNCHRONIZE CACHE est refuse");
                 return 1;
             }
             use crate::drivers::xhci_active as usb;
@@ -1920,6 +1928,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
                 "donnees" => usb::INJECTE_ECHEANCE_DONNEES,
                 "statut" => usb::INJECTE_ECHEANCE_STATUT,
                 "verrou" => usb::INJECTE_VERROU_TENU,
+                "vidange" => usb::INJECTE_REFUS_VIDANGE,
                 "tout" => {
                     usb::INJECTE_ECHEANCE_DONNEES
                         | usb::INJECTE_ECHEANCE_STATUT
