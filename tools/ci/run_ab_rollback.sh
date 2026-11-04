@@ -121,7 +121,29 @@ for k in $(printf '%s\n' bon "$MAUVAIS" | sort -u); do
   # keeps a slot image small enough to be shipped and written by updated.
   strip --strip-debug -o "$OUT/kernel-$k.elf" target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
 done
-TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL" "$CLES"' EXIT
+# BOUCHAUD_AB_DIAGNOSTIC_ECHEC_V1 : en échec, les lignes décisives de chaque
+# démarrage vont dans le journal du job. Les artefacts boot-*.log ne sont pas
+# toujours lisibles (rétention, accès), et un `B-` doit pouvoir s'attribuer
+# sans eux : E/S et reprises USB, vidange, état et commit de serviced, refus
+# du noyau, services. Diagnostic seulement : aucun verdict n'en dépend.
+diagnostic_echec() {
+  local f n propre
+  for f in "$OUT"/boot-*.log; do
+    [ -s "$f" ] || continue
+    n=$(basename "$f" .log)
+    propre=$(sed 's/\x1b\[[0-9;]*m//g' "$f" | tr -d '\r' \
+      | sed -E 's/^(\[[0-9:]+\])\[[^]]*\](\[FPS:[^]]*\])? ?/\1 /' | awk '!vu[$0]++')
+    echo "AB_DIAG ---- $n"
+    # 1. Verdict : démarrage, sonde de vidange, état et commit, refus, services.
+    grep -aE "BOUCHAUD_AB_(BOOT|PASSAGE)|BOUCHAUD_USB_STOCKAGE_VIDANGE|BOUCHAUD_USB_(REFUS_VIDANGE|VOLUME_ORPHELIN)|BOUCHAUD_UPDATE_SANTE|SERVICED_(UPDATE_STATE|HEALTH_COMMIT)|\[SERVICED\] (system|svc=[a-z]+ [A-Za-z]+->(Failed|Stopped))|KERNEL PANIC|panicked at" \
+      <<< "$propre" | head -40 | sed "s/^/AB_DIAG $n /"
+    # 2. Transport USB : décompte, puis les premiers échecs d'E/S.
+    echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre") reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre") reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre") vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre")"
+    grep -a "BOUCHAUD_USB_STOCKAGE_IO_ECHEC" <<< "$propre" | head -8 | sed "s/^/AB_DIAG $n /"
+  done
+}
+TRAVAIL=$(mktemp -d)
+trap 'rc=$?; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
 cp -r tools/reference/uefi-image-builder "$TRAVAIL/builder"
 ( cd "$TRAVAIL/builder" && cargo +"$TOOLCHAIN" build --release -q )
 BUILDER=$TRAVAIL/builder/target/release/bouchaud-reference-uefi-image-builder
