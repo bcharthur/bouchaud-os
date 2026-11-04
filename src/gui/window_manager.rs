@@ -1442,6 +1442,7 @@ fn boucle() {
                 //
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
+                let t_trame = crate::kernel::timer::monotonic_ns();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
 
@@ -1471,22 +1472,38 @@ fn boucle() {
                         if !scene::doit_dessiner(calque, &present) {
                             continue;
                         }
+                        let t_calque = crate::kernel::timer::monotonic_ns();
+                        let px_calque = fb::pixels_dessines();
                         dessine_calque(calque, &wins, menu_open, centre_ouvert, (mxu, myu), mx, my);
+                        if derniere_trame != 0 {
+                            profil_trames::note(calque.element,
+                                crate::kernel::timer::monotonic_ns().saturating_sub(t_calque),
+                                fb::pixels_dessines().saturating_sub(px_calque));
+                        }
                         dessines += 1;
                     }
                     reveil::note_culling(calques.len(), debut, dessines);
                     fb::reset_clip();
 
+                    let t_present = crate::kernel::timer::monotonic_ns();
                     fb::present_rect(
                         present.x as usize, present.y as usize,
                         present.largeur as usize, present.hauteur as usize,
                     );
+                    if derniere_trame != 0 {
+                        profil_trames::note_presentation(
+                            crate::kernel::timer::monotonic_ns().saturating_sub(t_present),
+                            present.largeur as u64 * present.hauteur as u64);
+                    }
                     crate::gui::degats::note_presentation(present);
                 }
                 fb::fin_trame();
                 crate::gui::atelier::effets::fin_trame();
 
                 crate::kernel::timer::mark_frame();
+                if derniere_trame != 0 {
+                    profil_trames::fin_trame(crate::kernel::timer::monotonic_ns().saturating_sub(t_trame));
+                }
                 reveil::note_trame(horloge_seule);
                 if wins.iter().any(|w| matches!(&w.app, App::Navigateur { .. })) {
                     temoin_composition(pompe_t_ms);
@@ -2725,5 +2742,60 @@ fn route_window_command(window: &mut Win, command: crate::gui::windowing::Window
             true
         }
         _ => false,
+    }
+}
+
+/// BOUCHAUD_PERF_TRAMES_V1 : cout des trames composees en regime, par genre
+/// de calque, publie toutes les 64 trames. Une trame immobile n'existe pas
+/// (le bureau ne compose que ce qui change) : ce sont des trames d'interaction.
+mod profil_trames {
+    use crate::gui::scene::Element;
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static NS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+    static PX: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+    static PIXELS: AtomicU64 = AtomicU64::new(0);
+    static TRAMES: AtomicU64 = AtomicU64::new(0);
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    static PIRE: AtomicU64 = AtomicU64::new(0);
+    const NOMS: [&str; 10] = ["fond", "filigrane", "icones", "barre", "fenetres", "menu", "centre",
+        "dock", "curseur", "presentation"];
+    fn rang(e: Element) -> usize {
+        match e {
+            Element::Fond => 0,
+            Element::Filigrane => 1,
+            Element::Icone(_) => 2,
+            Element::BarreHaute => 3,
+            Element::Fenetre(_) | Element::Fantome(_) => 4,
+            Element::Menu => 5,
+            Element::Centre => 6,
+            Element::BarreTaches | Element::Infobulle => 7,
+            Element::Curseur => 8,
+        }
+    }
+    pub fn note(e: Element, ns: u64, pixels: u64) {
+        NS[rang(e)].fetch_add(ns, Relaxed);
+        PX[rang(e)].fetch_add(pixels, Relaxed);
+    }
+    pub fn note_presentation(ns: u64, pixels: u64) {
+        NS[9].fetch_add(ns, Relaxed);
+        PIXELS.fetch_add(pixels, Relaxed);
+    }
+    pub fn fin_trame(ns: u64) {
+        TOTAL.fetch_add(ns, Relaxed);
+        PIRE.fetch_max(ns, Relaxed);
+        let n = TRAMES.fetch_add(1, Relaxed) + 1;
+        if n % 64 != 0 {
+            return;
+        }
+        let total = TOTAL.swap(0, Relaxed);
+        let mut ligne = alloc::format!("BOUCHAUD_PERF_TRAMES n=64 moy_us={} pire_us={} kpix_presentes={}",
+            total / 64 / 1000, PIRE.swap(0, Relaxed) / 1000, PIXELS.swap(0, Relaxed) / 1000);
+        for (i, nom) in NOMS.iter().enumerate() {
+            ligne.push_str(&alloc::format!(" {}_us={}", nom, NS[i].swap(0, Relaxed) / 64 / 1000));
+            if i < 9 {
+                ligne.push_str(&alloc::format!("/{}kpx", PX[i].swap(0, Relaxed) / 64 / 1000));
+            }
+        }
+        crate::serial_println!("{}", ligne);
     }
 }
