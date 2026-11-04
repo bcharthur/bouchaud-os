@@ -98,6 +98,20 @@ pub fn adopte_fil() {
     }
 }
 
+/// Une trame du fil proprietaire est-elle en cours de composition ?
+///
+/// Les LECTEURS (plan de scene, peintres) ne sont appeles que pendant la
+/// composition, entre `debut_trame` et `fin_trame`, que seul le proprietaire
+/// verifie peut ouvrir. Ils testent ce drapeau plutot que d'interroger le
+/// registre des taches a chaque calque : cet appel, des dizaines de fois par
+/// trame, coutait ~400 ms a la premiere trame sous TCG.
+static EN_TRAME: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn lecture_ok() -> bool {
+    use core::sync::atomic::Ordering;
+    PROPRIETAIRE.load(Ordering::Acquire) == u32::MAX || EN_TRAME.load(Ordering::Acquire)
+}
+
 /// L'appelant est-il le fil proprietaire ? Avant toute adoption (apercu de
 /// demarrage), seul le registre vide est visible : rien a proteger.
 fn fil_ok() -> bool {
@@ -342,6 +356,7 @@ pub fn debut_trame(maintenant: u64) {
     // Les animations lancees depuis la trame precedente commencent ICI : la
     // premiere image qu'on en voit est leur instant zero.
     registre().demarre(maintenant);
+    EN_TRAME.store(true, core::sync::atomic::Ordering::Release);
     unsafe {
         HORLOGE_TRAME = maintenant;
         NS_TRAME = crate::kernel::timer::monotonic_ns();
@@ -354,6 +369,7 @@ pub fn fin_trame() {
     if !fil_ok() {
         return;
     }
+    EN_TRAME.store(false, core::sync::atomic::Ordering::Release);
     unsafe {
         BUREAU_POSE = true;
         if MESURE_OUVERTURE {
@@ -429,7 +445,7 @@ pub fn quitte(cible: super::dock::Cible) {
 /// Avancement du survol de `cible` a l'instant de la trame (PLEIN s'il n'y a
 /// pas de fondu en cours : le survol est etabli).
 pub fn survol(cible: super::dock::Cible) -> u32 {
-    if !fil_ok() {
+    if !lecture_ok() {
         return super::mouvement::PLEIN;
     }
     match registre().cherche(cle_survol(cible), Nature::Survol) {
@@ -449,7 +465,7 @@ pub fn deplacement_permis() -> bool {
 /// L'ouverture en cours de la fenetre `cle`, a l'instant de la trame :
 /// `(decalage vers le bas, opacite)`. `None` : la fenetre se peint normalement.
 pub fn ouverture(cle: u64) -> Option<(i32, u8)> {
-    if !fil_ok() {
+    if !lecture_ok() {
         return None;
     }
     let a = registre().cherche(cle, Nature::Ouverture)?;
@@ -469,7 +485,7 @@ pub fn zone_ouverture_courante(peinte: Boite, dy: i32) -> Boite {
 
 /// Nombre d'instantanes en cours de fermeture.
 pub fn nombre_instantanes() -> usize {
-    if !fil_ok() {
+    if !lecture_ok() {
         return 0;
     }
     instantanes().len()
@@ -477,7 +493,7 @@ pub fn nombre_instantanes() -> usize {
 
 /// Bornes du calque de l'instantane `rang` (ombre comprise).
 pub fn bornes_instantane(rang: usize) -> Option<Boite> {
-    if !fil_ok() {
+    if !lecture_ok() {
         return None;
     }
     let i = instantanes().get(rang)?;
@@ -546,7 +562,7 @@ fn inter(a: Boite, b: Boite) -> Option<Boite> {
 /// Compose une fenetre en cours d'ouverture dans la decoupe courante :
 /// `peinte` ses bornes finales, `dy` son decalage, `alpha` son opacite.
 pub fn compose_ouverture(peinte: Boite, dy: i32, alpha: u8, dessine: impl FnOnce()) {
-    if !fil_ok() {
+    if !lecture_ok() {
         dessine();
         return;
     }
@@ -608,7 +624,7 @@ fn dans_arrondi(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
 
 /// Peint l'instantane `rang` a l'instant de la trame, dans la decoupe.
 pub fn dessine_instantane(rang: usize) {
-    if !fil_ok() {
+    if !lecture_ok() {
         return;
     }
     let Some(i) = instantanes().get(rang) else { return };

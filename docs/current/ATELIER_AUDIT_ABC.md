@@ -103,4 +103,15 @@ Le chemin existe sur `main`, puisque le Moniteur s'ouvre depuis le menu. Le corr
 
 ## 10. Première trame : comparaison sur le même hôte
 
-Voir le tableau ajouté après la mesure (§ 10 bis).
+Après le redémarrage du worker, l'hôte a changé (noyau hôte `fc-v233`). Les chiffres absolus ne sont donc pas comparables aux mesures de l'incrément C prises sur l'ancien hôte. Pour comparer, l'image `2d15b2a9` (incrément C) et l'image de l'audit ont été construites et démarrées **en alternance sur ce même hôte**.
+
+| Image | 7 boots (ms) | Moyenne |
+|---|---|---|
+| Incrément C `2d15b2a9` | 5402, 5681, 5991, 6501, 5751, 5525, 5737 | 5798 |
+| Audit | 6025, 5776, 6572, 6014, 6285, 5682, 5487 | 5977 |
+
+- L'écart de +179 ms est inférieur au bruit d'un boot à l'autre pour une même image (±400 ms) : **pas de régression mesurable**.
+- Sur les 4 dernières paires, les moyennes sont identiques (5867 contre 5879 ms).
+- Le décodage du fond varie à lui seul de 333 à 473 ms selon le boot.
+
+Au passage, une première version de la vérification du fil interrogeait le registre des tâches à chaque calque peint. Les lecteurs (plan de scène et peintres) ne testent plus qu'un drapeau de trame, `EN_TRAME`, posé par le propriétaire vérifié dans `debut_trame`. Seuls les points d'entrée qui modifient l'état font la vérification complète.
