@@ -136,10 +136,13 @@ diagnostic_echec() {
     echo "AB_DIAG ---- $n"
     # 1. Verdict : démarrage, sonde de vidange, état et commit, refus, services.
     grep -aE "BOUCHAUD_AB_(BOOT|PASSAGE)|BOUCHAUD_USB_STOCKAGE_VIDANGE|BOUCHAUD_USB_(REFUS_VIDANGE|VOLUME_ORPHELIN)|BOUCHAUD_UPDATE_SANTE|SERVICED_(UPDATE_STATE|HEALTH_COMMIT)|\[SERVICED\] (system|svc=[a-z]+ [A-Za-z]+->(Failed|Stopped))|KERNEL PANIC|panicked at" \
-      <<< "$propre" | head -40 | sed "s/^/AB_DIAG $n /"
+      <<< "$propre" | awk -v n="$n" 'c < 40 { print "AB_DIAG " n " " $0; c++ }' || true
     # 2. Transport USB : décompte, puis les premiers échecs d'E/S.
-    echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre") reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre") reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre") vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre")"
-    grep -a "BOUCHAUD_USB_STOCKAGE_IO_ECHEC" <<< "$propre" | head -8 | sed "s/^/AB_DIAG $n /"
+    echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre" || true) reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre" || true) reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre" || true) vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre" || true)"
+    # awk lit tout (pas de `head`) : sous pipefail, aucun SIGPIPE du producteur.
+    # `|| true` : un grep sans correspondance (code 1) ne doit pas, sous set -e,
+    # interrompre le diagnostic des démarrages suivants (run 41916742669).
+    grep -a "BOUCHAUD_USB_STOCKAGE_IO_ECHEC" <<< "$propre" | awk -v n="$n" 'c < 8 { print "AB_DIAG " n " " $0; c++ }' || true
   done
 }
 TRAVAIL=$(mktemp -d)
