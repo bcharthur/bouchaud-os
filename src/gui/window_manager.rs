@@ -1482,16 +1482,26 @@ fn boucle() {
                         if !scene::doit_dessiner(calque, &present) {
                             continue;
                         }
+                        let t_calque = crate::kernel::timer::monotonic_ns();
                         dessine_calque(calque, &wins, menu_open, centre_ouvert, (mxu, myu), mx, my);
+                        if derniere_trame == 0 {
+                            profil_premiere_trame::note(calque.element,
+                                crate::kernel::timer::monotonic_ns().saturating_sub(t_calque));
+                        }
                         dessines += 1;
                     }
                     reveil::note_culling(calques.len(), debut, dessines);
                     fb::reset_clip();
 
+                    let t_present = crate::kernel::timer::monotonic_ns();
                     fb::present_rect(
                         present.x as usize, present.y as usize,
                         present.largeur as usize, present.hauteur as usize,
                     );
+                    if derniere_trame == 0 {
+                        profil_premiere_trame::note_presentation(
+                            crate::kernel::timer::monotonic_ns().saturating_sub(t_present));
+                    }
                     crate::gui::degats::note_presentation(present);
                 }
                 fb::fin_trame();
@@ -1517,6 +1527,7 @@ fn boucle() {
             // fait que poser la ligne `BOUCHAUD_BOOT_POINT` avec son
             // `delta_ms`. La chronologie va donc jusqu'au navigateur.
             if derniere_trame == 0 {
+                profil_premiere_trame::publie();
                 crate::platform::pc::ecran_faute::point("bureau-premiere-trame");
             }
             derniere_trame = maintenant;
@@ -2736,5 +2747,41 @@ fn route_window_command(window: &mut Win, command: crate::gui::windowing::Window
             true
         }
         _ => false,
+    }
+}
+
+
+/// BOUCHAUD_PERF_PREMIERE_TRAME_V1 : ou passe la premiere trame du bureau,
+/// calque par calque. Mesure seulement, une fois par demarrage.
+mod profil_premiere_trame {
+    use crate::gui::scene::Element;
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static NS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+    const NOMS: [&str; 10] = ["fond", "filigrane", "icones", "barre", "fenetres", "menu", "centre",
+        "dock", "curseur", "presentation"];
+    fn rang(e: Element) -> usize {
+        match e {
+            Element::Fond => 0,
+            Element::Filigrane => 1,
+            Element::Icone(_) => 2,
+            Element::BarreHaute => 3,
+            Element::Fenetre(_) | Element::Fantome(_) => 4,
+            Element::Menu => 5,
+            Element::Centre => 6,
+            Element::BarreTaches | Element::Infobulle => 7,
+            Element::Curseur => 8,
+        }
+    }
+    pub fn note(e: Element, ns: u64) { NS[rang(e)].fetch_add(ns, Relaxed); }
+    pub fn note_presentation(ns: u64) { NS[9].fetch_add(ns, Relaxed); }
+    pub fn publie() {
+        let mut ligne = alloc::string::String::from("BOUCHAUD_PERF_PREMIERE_TRAME");
+        let mut total = 0u64;
+        for (i, n) in NOMS.iter().enumerate() {
+            let ms = NS[i].load(Relaxed) / 1_000_000;
+            total += ms;
+            ligne.push_str(&alloc::format!(" {}={}", n, ms));
+        }
+        crate::serial_println!("{} total_ms={}", ligne, total);
     }
 }

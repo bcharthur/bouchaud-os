@@ -73,6 +73,16 @@ TYPES_FICHIERS = [
     ("executable", "binary",    "#3c425d"),
 ]
 TAILLES_FICHIERS = (20, 48)
+
+# Police du bureau (BOUCHAUD_PERF_POLICE_SOUS_ENSEMBLE_V1) : DejaVu Sans reduite
+# aux ecritures et symboles qu'affiche le bureau. fontdue analyse tous les
+# glyphes au chargement ; 1938 au lieu de 6253, c'est ~2 s de moins avant la
+# premiere trame sous TCG. Le fichier complet reste installe pour Ladybird.
+POLICE_SOURCE = RACINE / "src/assets/fonts/DejaVuSans.ttf"
+POLICE_PLAGES = [(0x20, 0x7E), (0xA0, 0x24F), (0x300, 0x36F), (0x370, 0x3FF),
+                 (0x400, 0x4FF), (0x2000, 0x206F), (0x20A0, 0x20CF), (0x2100, 0x214F),
+                 (0x2190, 0x21FF), (0x2200, 0x22FF), (0x2500, 0x259F), (0x25A0, 0x25FF),
+                 (0xFB00, 0xFB06), (0xFFFD, 0xFFFD)]
 TAILLES_LOGO = (18, 72)
 FONDS = [("summer_1am", "summer_1am-2560x1600.jpg", ((1280, 720), (1920, 1080)))]
 
@@ -156,6 +166,27 @@ def glyphe_colore(nom: str, teinte: str) -> str:
 </svg>"""
 
 
+def police_bureau() -> bytes:
+    # Dependance de DEVELOPPEMENT : `pip install fonttools`. Deterministe : la
+    # date du fichier n'est pas recalculee.
+    from fontTools import subset
+    from fontTools.ttLib import TTFont
+    opts = subset.Options()
+    opts.hinting = False          # fontdue ne lit pas le hinting
+    opts.layout_features = []     # ni GSUB ni GPOS
+    opts.glyph_names = True
+    opts.notdef_outline = True
+    opts.name_IDs = ["*"]
+    opts.name_languages = ["*"]
+    f = TTFont(str(POLICE_SOURCE), recalcTimestamp=False)
+    s = subset.Subsetter(opts)
+    s.populate(unicodes=[u for a, b in POLICE_PLAGES for u in range(a, b + 1)])
+    s.subset(f)
+    sortie = io.BytesIO()
+    f.save(sortie)
+    return sortie.getvalue()
+
+
 def rend(svg: str, taille: int) -> bytes:
     import resvg_py
     from PIL import Image
@@ -205,6 +236,8 @@ def main() -> int:
                                  "source": "assets/atelier/sources/logo/bouchaud-os-provisoire.svg"},
             "tuiles-apps": {"licence": "projet Bouchaud OS (tuiles) + ISC (glyphes Lucide)"},
             "icones-fichiers": {"licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"},
+            "police-dejavu": {"licence": "Bitstream Vera / DejaVu (modification permise, nom sans Bitstream ni Vera)",
+                              "source": "src/assets/fonts/DejaVuSans.ttf (sous-ensemble pyftsubset)"},
         },
         "fichiers": {},
     }
@@ -227,6 +260,8 @@ def main() -> int:
             svg = grand if t >= 32 else petit
             ecrit(SORTIE / "fichiers" / f"{ident}-{t}.png", rend(svg, t), manifeste,
                   largeur=t, hauteur=t, alpha=True, licence="icones-fichiers", glyphe=nom)
+    ecrit(SORTIE / "polices" / "DejaVuSans-Bureau.ttf", police_bureau(), manifeste,
+          licence="police-dejavu", glyphes="latin, grec, cyrillique, ponctuation, symboles")
     for nom, tailles in SYMBOLES:
         for t in tailles:
             ecrit(SORTIE / "symboles" / f"{nom}-{t}.png", rend(symbole(nom), t), manifeste,

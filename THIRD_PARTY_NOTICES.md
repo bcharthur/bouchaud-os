@@ -14,6 +14,7 @@ Les textes integraux sont dans `THIRD_PARTY_LICENSES/`.
 | QuickJS | MIT | JavaScript du navigateur actuel (userland) |
 | FFmpeg 6.1.1 | LGPL-2.1+ | media (userland) |
 | DejaVu Fonts | Bitstream Vera / licence DejaVu | polices systeme |
+| DejaVu Sans, sous-ensemble du bureau (`src/assets/atelier/polices/DejaVuSans-Bureau.ttf`, fabrique d'assets, fontTools : latin, grec, cyrillique, ponctuation, symboles ; sans hinting) | Bitstream Vera / licence DejaVu (modification permise ; le nom ne contient ni « Bitstream » ni « Vera ») | police du bureau noyau ; le fichier complet reste installe pour Ladybird |
 | musl | MIT | libc du userland |
 
 ## Prevu — portage Ladybird

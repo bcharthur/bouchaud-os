@@ -22,6 +22,10 @@
     },
     "icones-fichiers": {
       "licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"
+    },
+    "police-dejavu": {
+      "licence": "Bitstream Vera / DejaVu (modification permise, nom sans Bitstream ni Vera)",
+      "source": "src/assets/fonts/DejaVuSans.ttf (sous-ensemble pyftsubset)"
     }
   },
   "fichiers": {
@@ -447,6 +451,12 @@
       "alpha": true,
       "licence": "icones-fichiers",
       "glyphe": "binary"
+    },
+    "src/assets/atelier/polices/DejaVuSans-Bureau.ttf": {
+      "sha256": "1b3c1a0c2a2585c6c2cc1a65b7a986f96c34c46ed4c285df099e9e28d500b65f",
+      "octets": 166804,
+      "licence": "police-dejavu",
+      "glyphes": "latin, grec, cyrillique, ponctuation, symboles"
     },
     "src/assets/atelier/symboles/layout-grid-22.png": {
       "sha256": "f06a6042d9988a5ea6ee37ff29c90abda9847f0440de5d4ca83b41b9d2efa185",

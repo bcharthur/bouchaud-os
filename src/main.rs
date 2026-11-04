@@ -257,6 +257,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // qui devait l'expliquer.
     kernel::journal::demarre();
     kernel::process::init();
+    // BOUCHAUD_PERF_POLICE_PARALLELE_V1 : la police se charge sur un autre
+    // coeur pendant le reste du demarrage.
+    crate::gui::font::lance_precharge();
     kernel::dmesg::log("process: table initialisee (init, desktop, shell)");
     kernel::dmesg::log("abi: appels systeme POSIX/Linux x86-64 disponibles (ring 3)");
     // Le reseau est mis en service ici, pas laisse a une commande. Le driver

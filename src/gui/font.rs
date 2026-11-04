@@ -25,6 +25,21 @@ use alloc::vec::Vec;
 // pour les programmes utilisateur, plutot que de l'embarquer une seconde fois.
 pub static FONT_DATA: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 
+/// La police du BUREAU (BOUCHAUD_PERF_POLICE_SOUS_ENSEMBLE_V1) : DejaVu Sans
+/// reduite par la fabrique d'assets (`tools/assets/fabrique-atelier.py`,
+/// fontTools) au latin (diacritiques combinants compris), au
+/// grec, au cyrillique, a la ponctuation, aux symboles monetaires, aux fleches,
+/// aux mathematiques, aux filets et aux formes geometriques -- 1938 glyphes au
+/// lieu de 6253, sans hinting (fontdue n'en lit pas : les contours, donc le
+/// rendu, sont les memes).
+///
+/// `fontdue::Font::from_bytes` analyse TOUS les glyphes au chargement : c'etait
+/// 2,4 a 2,8 s sous TCG avant la premiere trame. `FONT_DATA`, le fichier
+/// complet, reste celui qu'on installe pour Ladybird, et sert de REPLI au
+/// bureau : un caractere absent du sous-ensemble charge la police complete a
+/// la demande, la couverture ne regresse pas.
+static FONT_BUREAU: &[u8] = include_bytes!("../assets/atelier/polices/DejaVuSans-Bureau.ttf");
+
 // ----------------------------------------------------------------------------
 // Lecture big-endian
 // ----------------------------------------------------------------------------
@@ -421,7 +436,6 @@ fn font() -> Option<&'static Font> {
 // Chemin primaire : fontdue
 // ----------------------------------------------------------------------------
 static mut FD_FONT: Option<fontdue::Font> = None;
-static mut FD_TRIED: bool = false;
 static mut FD_CACHE: Option<hashbrown::HashMap<(char, i32), Glyph>> = None;
 // Cache des avances : fontdue::Font::metrics() EVALUE LE CONTOUR du glyphe a
 // chaque appel (pas une simple lecture de table comme le rasterizer maison),
@@ -431,30 +445,133 @@ static mut FD_ADV: Option<hashbrown::HashMap<(char, i32), i32>> = None;
 // Idem pour l'ascent par taille de police (une entree par px utilise).
 static mut FD_ASCENT: Option<hashbrown::HashMap<i32, i32>> = None;
 
+// BOUCHAUD_PERF_POLICE_PARALLELE_V1
+//
+// # Ce que la mesure a montre
+//
+// `fontdue::Font::from_bytes` analyse d'emblee les 6253 glyphes de DejaVu
+// Sans : 2,4 a 2,8 s sous TCG, payes par le fil du bureau a son premier texte
+// -- soit l'essentiel de l'attente avant la premiere trame
+// (`BOUCHAUD_PERF_PREMIERE_TRAME` : tout le reste de la trame tient en moins
+// de 70 ms).
+//
+// # Ce qui change
+//
+// Le chargement est lance des que l'ordonnanceur existe, sur un fil noyau a
+// part (`precharge`) : il se fait PENDANT le reste du demarrage, sur un autre
+// coeur. Le bureau trouve la police prete, ou attend le reliquat. Le
+// chargement n'a lieu qu'une fois : un etat atomique (rien, en cours, prete)
+// le garde, et la police n'est publiee qu'entiere, avec Release.
+//
+// Les caches (`FD_CACHE`, `FD_ADV`, `FD_ASCENT`) sont crees par le chargeur
+// AVANT la publication, puis touches seulement par les dessinateurs, comme
+// avant.
+static ETAT_POLICE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+const POLICE_RIEN: u8 = 0;
+const POLICE_EN_COURS: u8 = 1;
+const POLICE_PRETE: u8 = 2;
+
+fn charge_police() {
+    let debut = crate::kernel::timer::monotonic_ns();
+    let fil = crate::kernel::task::try_current().map(|t| t.tid);
+    match fontdue::Font::from_bytes(FONT_BUREAU, fontdue::FontSettings::default()) {
+        Ok(f) => unsafe {
+            crate::serial_println!("[font_ttf] fontdue: DejaVuSans (bureau) charge ({} glyphes) ms={} fil={:?}",
+                f.glyph_count(), crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1_000_000, fil);
+            FD_CACHE = Some(hashbrown::HashMap::new());
+            FD_ADV = Some(hashbrown::HashMap::new());
+            FD_ASCENT = Some(hashbrown::HashMap::new());
+            FD_FONT = Some(f);
+        },
+        Err(e) => {
+            crate::serial_println!("[font_ttf] fontdue: echec ({}), repli rasterizer maison", e);
+        }
+    }
+}
+
+/// Charge la police maintenant, si personne ne l'a fait. Appele par le fil
+/// de prechargement ; sans effet si elle est deja chargee ou en cours.
+pub fn precharge() {
+    use core::sync::atomic::Ordering;
+    if ETAT_POLICE.compare_exchange(POLICE_RIEN, POLICE_EN_COURS, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        charge_police();
+        ETAT_POLICE.store(POLICE_PRETE, Ordering::Release);
+    }
+}
+
+/// Lance le prechargement sur un fil noyau a part.
+pub fn lance_precharge() {
+    fn fil() -> ! {
+        precharge();
+        // Le fond d'ecran n'est PAS precharge ici : mesure faite, sous TCG le
+        // second decodage dispute les vCPU au bureau et, quand le bureau
+        // arrive avant la fin, le fond est decode deux fois -- premiere trame
+        // 3,9 a 4,5 s contre 3,7 a 4,0 s sans lui.
+        crate::kernel::task::exit_current(0)
+    }
+    let ok = crate::kernel::task::spawn_noyau_priorite(fil, "precharge-police",
+        crate::kernel::task::Priorite::Normale);
+    crate::serial_println!("BOUCHAUD_PERF_POLICE_PRECHARGE lance={}", ok as u8);
+}
+
 fn fd_font() -> Option<&'static fontdue::Font> {
-    unsafe {
-        if !FD_TRIED {
-            FD_TRIED = true;
-            match fontdue::Font::from_bytes(FONT_DATA, fontdue::FontSettings::default()) {
-                Ok(f) => {
-                    crate::serial_println!("[font_ttf] fontdue: DejaVuSans charge ({} glyphes)", f.glyph_count());
-                    FD_FONT = Some(f);
-                    FD_CACHE = Some(hashbrown::HashMap::new());
-                    FD_ADV = Some(hashbrown::HashMap::new());
-                    FD_ASCENT = Some(hashbrown::HashMap::new());
-                }
-                Err(e) => {
-                    crate::serial_println!("[font_ttf] fontdue: echec ({}), repli rasterizer maison", e);
+    use core::sync::atomic::Ordering;
+    match ETAT_POLICE.load(Ordering::Acquire) {
+        POLICE_PRETE => {}
+        _ => {
+            // Personne ne l'a lancee : on la charge ici, comme avant. Elle est
+            // en cours sur l'autre fil : on attend sa publication.
+            precharge();
+            let debut = crate::kernel::timer::monotonic_ns();
+            let mut attendu = false;
+            while ETAT_POLICE.load(Ordering::Acquire) != POLICE_PRETE {
+                attendu = true;
+                if crate::kernel::task::try_current().is_some() {
+                    crate::kernel::task::yield_now();
+                } else {
+                    core::hint::spin_loop();
                 }
             }
+            if attendu {
+                crate::serial_println!("BOUCHAUD_PERF_POLICE_ATTENTE ms={}",
+                    crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1_000_000);
+            }
         }
-        FD_FONT.as_ref()
+    }
+    unsafe { FD_FONT.as_ref() }
+}
+
+/// La police complete, chargee seulement si un caractere manque au
+/// sous-ensemble du bureau.
+static mut FD_COMPLETE: Option<fontdue::Font> = None;
+static mut FD_COMPLETE_ESSAYEE: bool = false;
+
+/// La police qui porte `c` : le sous-ensemble du bureau s'il a le glyphe,
+/// sinon la police complete (chargee une fois, ici), sinon le sous-ensemble
+/// (glyphe de remplacement).
+fn police_pour(f: &'static fontdue::Font, c: char) -> &'static fontdue::Font {
+    if c.is_control() || f.lookup_glyph_index(c) != 0 {
+        return f;
+    }
+    unsafe {
+        if !FD_COMPLETE_ESSAYEE {
+            FD_COMPLETE_ESSAYEE = true;
+            let debut = crate::kernel::timer::monotonic_ns();
+            FD_COMPLETE = fontdue::Font::from_bytes(FONT_DATA, fontdue::FontSettings::default()).ok();
+            crate::serial_println!("[font_ttf] repli : police complete chargee pour U+{:04X} ms={}",
+                c as u32, crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1_000_000);
+        }
+        match FD_COMPLETE.as_ref() {
+            Some(complete) if complete.lookup_glyph_index(c) != 0 => complete,
+            _ => f,
+        }
     }
 }
 
 // Avance d'un caractere via fontdue, avec le MEME arrondi partout (voir doc de
 // tete) : metrics() et rasterize() renvoient la meme advance_width.
-fn fd_advance(f: &fontdue::Font, c: char, px: i32) -> i32 {
+fn fd_advance(f: &'static fontdue::Font, c: char, px: i32) -> i32 {
+    let f = police_pour(f, c);
     unsafe {
         let cache = FD_ADV.as_mut().unwrap();
         *cache.entry((c, px)).or_insert_with(|| (f.metrics(c, px as f32).advance_width + 0.5) as i32)
@@ -475,6 +592,7 @@ fn fd_ascent(f: &fontdue::Font, px: i32) -> i32 {
 // Rasterise (ou ressort du cache) un glyphe fontdue au format `Glyph` commun.
 // top = hauteur du sommet du bitmap au-dessus de la ligne de base.
 fn fd_glyph(f: &'static fontdue::Font, c: char, px: i32) -> &'static Glyph {
+    let f = police_pour(f, c);
     unsafe {
         let cache = FD_CACHE.as_mut().unwrap();
         cache.entry((c, px)).or_insert_with(|| {

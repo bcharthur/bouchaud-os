@@ -226,6 +226,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     crate::kernel::journal::demarre();
     point_de_controle("journal");
     crate::kernel::process::init();
+    // BOUCHAUD_PERF_POLICE_PARALLELE_V1 : la police se charge sur un autre
+    // coeur pendant le reste du demarrage.
+    crate::gui::font::lance_precharge();
 
     // PCI est maintenant autorise au Stage 2 FINAL V2 pour une seule raison :
     // rendre le navigateur vraiment utilisable. `net::demarre` ne charge le
