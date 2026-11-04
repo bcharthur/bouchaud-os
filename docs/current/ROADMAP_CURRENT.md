@@ -4,8 +4,8 @@ Des **projets**, par ordre de priorité. Ce qui est déjà fait est sur `main` o
 
 ## 1. Clore l'existant (avant tout nouveau chantier)
 
-1. Revue et fusion des PR ouvertes, dans l'ordre de leur empilement : #242 → #243 → #244 → #245 → #247. La PR #246 est indépendante.
-2. Classer les deux anomalies ouvertes si elles réapparaissent.
+1. Atelier (#242 à #244) et la vidange USB (#246) sont fusionnés. Restent #245 puis #247 : chacune doit intégrer `main` (banc scanout corrigé) et refaire son P13 ; #247 a en plus un défaut attribué à corriger (précharge de police, voir [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)).
+2. Décider du traitement du refus de commit A/B sur clé USB en CI (anomalie attribuée, [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)) ; classer les anomalies non attribuées si elles réapparaissent.
 3. Actions humaines : runners KVM4 et KVM8, protection de `main` ([BOUCHAUD_STABLE_BASELINE.md](BOUCHAUD_STABLE_BASELINE.md)).
 
 ## 2. Grands chantiers

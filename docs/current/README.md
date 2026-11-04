@@ -27,10 +27,10 @@
 9. [BOUCHAUD_NAVIGATEUR.md](BOUCHAUD_NAVIGATEUR.md), [P10_PLUS_ROADMAP.md](P10_PLUS_ROADMAP.md) : navigateur, et présentation graphique ou accélération.
 10. [DEPENDENCIES_AND_LICENSES.md](DEPENDENCIES_AND_LICENSES.md) : renvoie aux notices tierces de la racine.
 
+**Documents fusionnés depuis la consolidation** : `ATELIER_HANDOFF.md`, `ATELIER_DESIGN_SYSTEM.md`, `ATELIER_AUDIT_ABC.md` et les captures `atelier/` (PR #242 à #244) ; `TRIGKEY_T1_VIDANGE_USB.md` (PR #246).
+
 **Documents qui n'existent que dans des PR ouvertes**, et ne doivent pas être cherchés sur `main` :
-- `ATELIER_HANDOFF.md`, `ATELIER_DESIGN_SYSTEM.md` et les captures `atelier/` : PR #242 à #244.
 - `STOCKAGE_S1.md` : PR #245.
-- `TRIGKEY_T1_VIDANGE_USB.md` : PR #246.
 - `PERF_P1_PREMIERE_TRAME.md` : PR #247.
 - `TRIGKEY_PLATFORM_PLAN.md` : branche `claude/trigkey-physical-20261103`, sans PR.
 

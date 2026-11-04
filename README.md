@@ -53,7 +53,7 @@ Bouchaud OS est un système d'exploitation **bare-metal** : il démarre directem
 
 **Atelier Experience 2.0** est le nouveau bureau de Bouchaud OS. Il apporte un design system et de vrais assets : icônes [Lucide](https://lucide.dev), photographie de fond, logo provisoire. On y trouve une barre haute, un dock, un centre de contrôle et des fenêtres animées.
 
-> **Statut : développé dans des PR ouvertes, pas encore sur `main`.** Toutes les images ci-dessous sont des **captures réelles du framebuffer sous QEMU**. Elles sont prises avec la commande `screendump` du moniteur, en 1280×720 et en rendu logiciel, par le banc `tools/ci/run_bureau_capture.sh` de ces PR. Ce ne sont pas des maquettes, et chaque image est liée au commit qui l'a produite.
+> **Statut : sur `main` depuis la fusion des PR #242 à #244 (`main@e0257c60`).** Toutes les images ci-dessous sont des **captures réelles du framebuffer sous QEMU**. Elles sont prises avec la commande `screendump` du moniteur, en 1280×720 et en rendu logiciel, par le banc `tools/ci/run_bureau_capture.sh`. Ce ne sont pas des maquettes, et chaque image est liée au commit qui l'a produite.
 
 <table>
 <tr>
@@ -70,7 +70,7 @@ Bouchaud OS est un système d'exploitation **bare-metal** : il démarre directem
 </tr>
 <tr>
 <td><sub><b>Bureau Atelier 2.0</b> : design system, fond photographique, dock. PR #242, commit <code>f2cbb068</code>.</sub></td>
-<td><sub><b>Le bureau disponible aujourd'hui sur <code>main</code></b> (<code>69e179a4</code>), pour comparaison.</sub></td>
+<td><sub><b>Le bureau d'avant Atelier</b> (<code>main@69e179a4</code>), pour comparaison.</sub></td>
 </tr>
 </table>
 
@@ -98,14 +98,14 @@ La colonne « Physique » désigne un essai sur la machine de référence **avec
 | Pilotes du matériel de référence : RTL8111/8168, GOP UEFI, NVMe et xHCI réels | ✅ | — | — | — | — | code présent, **non revalidé physiquement** |
 | Réseau : IPv4, ARP, DHCP, DNS, TCP/UDP, TLS, HTTP/1.1 et HTTP/2 | ✅ | ◐ | ✅ | ✅ | — | |
 | Bureau et gestionnaire de fenêtres (dans le noyau), rendu logiciel | ✅ | ✅ | ✅ | — | — | damage tracking, culling de scène |
-| Atelier Experience 2.0 (design system, dock, centre de contrôle, Fichiers) | 🔀 | ✅ | ✅ | — | — | PR #242 à #244 |
+| Atelier Experience 2.0 (design system, dock, centre de contrôle, Fichiers) | ✅ | ✅ | ✅ | — | — | fusionné par les PR #242 à #244 ; rendu logiciel |
 | Applications natives : Terminal, Fichiers, Notes, Calculatrice, Rustpad, Journal, Services, Insights, Infos système | ✅ | ◐ | ✅ | — | — | applications du noyau, pas des processus isolés |
 | Bouchaud Navigateur (Ladybird, multiprocessus en ring 3) | ✅ | — | ✅ | ✅ | — | WebContent, RequestServer, ImageDecoder, WebWorker, Compositor |
 | Services natifs ring 3 : `serviced`, `healthd`, `updated`, `logd` | ✅ | ◐ | ✅ SMP1/4 | — | — | supervision, santé, mise à jour, journal |
 | Atomic Platform A/B : chargeur UEFI, essai, commit de santé, retour arrière, recovery | ✅ | ✅ | ✅ | — | — | manifeste Ed25519 ; **pas de clé de production ni d'anti-rollback** |
 | Stockage : RAMFS, `/persist` transactionnel, GPT, FAT32 | ✅ | ✅ | ✅ | — | — | coupure de courant simulée sous TCG ; **pas de VFS disque généraliste** |
 | Dossiers personnels persistants, écriture différée, métadonnées | 🔀 | ✅ | ✅ | — | — | PR #245 |
-| Vidange réelle USB (commit A/B sur clé), liaison volume ↔ support | 🔀 | ✅ | ✅ | — | — | PR #246 |
+| Vidange réelle USB (commit A/B sur clé), liaison volume ↔ support | ✅ | ✅ | ◐ | — | — | PR #246 ; en CI, le commit sur clé est parfois refusé quand l'hôte est lent (voir limites) |
 | Diagnostic : boîte noire, profil RIP, BRDP, journal série, console de recovery | ✅ | ◐ | ✅ | ◐ | — | |
 
 Le détail des verdicts (Atomic Platform, P13, anomalies ouvertes) est dans [`status.json`](docs/current/status.json) et [`STATUS_CURRENT.md`](docs/current/STATUS_CURRENT.md).
@@ -283,16 +283,13 @@ Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIO
 
 ## Travaux en cours et feuille de route
 
-**Pull requests ouvertes**, état au 2026-11-04, à revérifier sur GitHub. Les PR #242 à #247, sauf #246, sont empilées : chacune contient la précédente.
+**Pull requests ouvertes**, état au 2026-11-04, à revérifier sur GitHub. Les PR #242 à #244 (Atelier) et #246 (vidange USB) sont fusionnées.
 
-| PR | Sujet |
-|---|---|
-| [#242](https://github.com/bcharthur/bouchaud-os/pull/242) | Atelier Experience 2.0 : design system, assets réels, dock, fenêtres |
-| [#243](https://github.com/bcharthur/bouchaud-os/pull/243) | Atelier A/B/C : barre haute réelle, centre de contrôle, animations, dock interactif |
-| [#244](https://github.com/bcharthur/bouchaud-os/pull/244) | Atelier D1 : application Fichiers |
-| [#245](https://github.com/bcharthur/bouchaud-os/pull/245) | Stockage S1 : dossiers personnels persistants, écriture différée, métadonnées |
-| [#246](https://github.com/bcharthur/bouchaud-os/pull/246) | Trigkey T1 : vidange réelle USB et commit A/B sur clé (indépendante) |
-| [#247](https://github.com/bcharthur/bouchaud-os/pull/247) | Performance P1 : première trame du bureau −1,9 s |
+| PR | Sujet | État |
+|---|---|---|
+| [#245](https://github.com/bcharthur/bouchaud-os/pull/245) | Stockage S1 : dossiers personnels persistants, écriture différée, métadonnées | bloquée : doit intégrer `main` (banc scanout), puis P13 à refaire |
+| [#247](https://github.com/bcharthur/bouchaud-os/pull/247) | Performance P1 : première trame du bureau −1,9 s | bloquée : banc de comptabilité NON_QUALIFIANT, attribué à la précharge de police |
+| [#248](https://github.com/bcharthur/bouchaud-os/pull/248) | Documentation : README, sources de vérité, licences | cette mise à jour |
 
 **Chantiers ouverts**, par ordre de priorité. Ce sont des projets, pas des fonctionnalités livrées.
 
@@ -347,9 +344,9 @@ Le code de Bouchaud OS est publié sous **double licence MIT ou Apache-2.0**, au
 - **Ladybird** (BSD 2-Clause), épinglé et patché, ainsi que ses dépendances (ICU, OpenSSL, Skia, HarfBuzz, FreeType…) : voir [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) et [`THIRD_PARTY_LICENSES/`](THIRD_PARTY_LICENSES/).
 - **Crates Rust** du noyau (fontdue, smoltcp, wasmi, hashbrown, x86_64…) : licences permissives, recensées dans les notices.
 - **Polices DejaVu** : licence Bitstream Vera / DejaVu.
-- **Atelier**, dans les PR #242 et suivantes :
+- **Atelier** :
   - icônes [Lucide](https://lucide.dev) (ISC) ;
   - photographie de fond « summer 1am » de Risto Saukonpää (LGPL-3.0, KDE plasma-workspace-wallpapers) ;
   - sous-ensemble de DejaVu Sans.
 
-  Leurs attributions et le manifeste des assets arrivent avec ces PR (`assets/atelier/ATTRIBUTIONS.md`). Le logo Bouchaud OS est **provisoire**.
+  Leurs attributions et le manifeste des assets sont dans [`assets/atelier/ATTRIBUTIONS.md`](assets/atelier/ATTRIBUTIONS.md). Le logo Bouchaud OS est **provisoire**.

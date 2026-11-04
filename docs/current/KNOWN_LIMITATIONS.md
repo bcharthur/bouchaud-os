@@ -1,4 +1,4 @@
-# Limites connues et chantiers ouverts — relevé 2026-11-04 (`main@69e179a4`)
+# Limites connues et chantiers ouverts — relevé 2026-11-04 (`main@e0257c60`)
 
 Chaque statut se rapporte aux preuves disponibles, et non à une impossibilité architecturale. Ce tableau n'invalide pas les implémentations existantes. Il interdit seulement de les présenter comme utilisables au quotidien sans protocole mesuré.
 
@@ -8,12 +8,12 @@ Les colonnes distinguent ce qui est **sur `main`**, ce qui est **dans une PR ouv
 |---|---|---|---|---|
 | P0 | Qualification P13 stricte | SMP1/2/4 PASS (TCG et KVM hébergés) | — | runners dédiés `bouchaud-kvm4` et `bouchaud-kvm8` (action humaine), SMP8, endurance de 30 min sur un SHA unique |
 | P0 | Protection de `main` | ruleset prêt (`tools/github/ruleset-main.json`) | — | application par un administrateur |
-| P0 | Matériel physique (Trigkey) | pilotes RTL8168, NVMe, xHCI et GOP présents ; image traçable `tools/release/build_trigkey_image.sh` | #246 : vidange USB réelle, commit A/B sur clé | campagne PHYSICAL (`NOT_STARTED`), image A/B physique avec les services natifs, paquet de mise à jour hors image |
+| P0 | Matériel physique (Trigkey) | pilotes RTL8168, NVMe, xHCI et GOP présents ; image traçable `tools/release/build_trigkey_image.sh` ; vidange USB réelle et commit A/B sur clé (TCG) | — | campagne PHYSICAL (`NOT_STARTED`), image A/B physique avec les services natifs, paquet de mise à jour hors image |
 | P0 | Stockage généraliste | RAMFS vivant, `/persist` transactionnel A/B résistant aux coupures (TCG), GPT, FAT32 | #245 : dossiers personnels, écriture différée, métadonnées | VFS disque (inodes, montages), cache de pages unifié, `mmap` en écriture sur fichier, journal, volumes externes ; `/persist` réécrit encore toute sa table à chaque transaction |
-| P0 | Stockage USB | un volume USB exposé | #246 : capacité de vidange par support, volume orphelin au débranchement | plusieurs volumes USB, remontage à chaud dans le VFS |
+| P0 | Stockage USB | un volume USB exposé ; capacité de vidange liée au support, volume orphelin au débranchement | — | plusieurs volumes USB, remontage à chaud dans le VFS ; commit sur clé fiable quand l'hôte est lent (anomalie attribuée ci-dessous) |
 | P1 | Mises à jour | A/B de bout en bout sous TCG (chargeur, essai, commit de santé, retour arrière, recovery) ; manifeste Ed25519 | — | clé de version de production (décision humaine : hors ligne, HSM, rotation, révocation), politique anti-retour arrière, preuve KVM et PHYSICAL |
 | P1 | Isolation | 4 services natifs en ring 3 (`serviced`, `healthd`, `updated`, `logd`), navigateur en ring 3 | — | bureau, gestionnaire de fenêtres, applications natives, réseau et TLS encore en ring 0 ; pilotes à privilèges minimaux, isolation DMA |
-| P1 | Graphique | composition logicielle par régions, présentation GOP, BGA ou virtio-gpu 2D | #242 à #244 : Atelier ; #247 : première trame −1,9 s | accélération GPU 2D, 3D, pilote AMD, multi-écran, HiDPI |
+| P1 | Graphique | composition logicielle par régions, présentation GOP, BGA ou virtio-gpu 2D ; bureau Atelier (design system, dock, centre de contrôle, Fichiers) | #247 : première trame −1,9 s (bloquée) | accélération GPU 2D, 3D, pilote AMD, multi-écran, HiDPI |
 | P1 | Latence IPC native SMP1 | mesurée et attribuée (`file→élu`) | — | correction |
 | P1 | Audio, énergie | AC'97 sous QEMU | — | HDA, batterie, suspend et reprise, thermique : non pris en charge |
 | P1 | Périphériques | xHCI (HID, stockage), PS/2 | — | Wi-Fi, Bluetooth, touchpad : non pris en charge |
@@ -28,3 +28,13 @@ Les colonnes distinguent ce qui est **sur `main`**, ce qui est **dans une PR ouv
 | Panique SMP4 « correctif » du banc de comptabilité | une fois sur 41 démarrages locaux | 36 démarrages isolés sans panique ; le banc publie désormais le site et le message |
 
 Une anomalie non attribuée n'est ni effacée ni requalifiée en problème d'infrastructure sans preuve. Si elle réapparaît sur une PR, celle-ci n'est pas prête à fusionner tant que l'anomalie n'est pas classée ([STATUS_CURRENT.md](STATUS_CURRENT.md)).
+
+## Anomalies attribuées (cause établie, correctif à décider)
+
+| Anomalie | Vue | Cause établie | État |
+|---|---|---|---|
+| `USB_AB_COMMIT_REFUSE_HOTE_LENT` : `ab-rollback (sante \| sans-vidange \| seconde-cle, usb)` rend `B- B+` (ou `A-`) au lieu de `B+ B=` | CI, depuis l'ajout des scénarios sur clé (#246) : environ 5 passages USB sur 11 le 2026-11-04 ; jamais sur NVMe | Sur la clé émulée, deux échéances CSW consécutives (`bot-csw-echeance`, budget runtime BOT de 60 ms, antérieur à #246) malgré la reprise et le rejeu unique : la lecture de la META ou la relecture après écriture échoue, et le noyau **refuse le commit** (`SERVICED_UPDATE_STATE rc=-13`, `UPDATE_SANTE_REFUS raison=relecture`). Reproduit en local 2 fois sur 3 sous contention CPU de l'hôte, 0 sur 3 sans, même arbre que `main`. | Comportement **sûr** : aucun faux commit, le démarrage suivant committe. Le correctif touche soit le seuil BOT, soit la politique de commit de `serviced` (Atomic A/B) : décision humaine. En attendant, une relance unique, et toute autre signature reste rouge. |
+| `#247` comptabilité SMP2 `COMPTA_INJECTION_NON_QUALIFIANT` | P13 de #247 (run 41809544156), reproduit en local à chaque passage | **Manque de fenêtres**, pas une violation : bras correctif 0 à 3 fenêtres avec la précharge de police, 13, 16 et 18 sans (même noyau, appel neutralisé), `main` 8 à 27 ; zéro chevauchement partout. Le mécanisme exact (la précharge se termine vers 3,3 s) reste à établir. | #247 non fusionnable ; le banc n'est pas modifié. |
+| `#245` et `#247` scanout virtio `SCANOUT_VIVANT_ECHEC pixels_changes=0` | P13 de #245 et #247 | Le banc regardait les secondes de l'ancienne horloge ; la barre Atelier n'en affiche plus. Le framebuffer n'est pas figé. | **Corrigé sur `main`** par #242 (`BOUCHAUD_SCANOUT_VIVANT_POINTEUR_V1`, avec témoin négatif VM arrêtée). #245 et #247 l'obtiendront en intégrant `main`. |
+| `#247` console série (étape 21) | P13 de #247 (run 41809544156) | Non reproduit : les deux variantes TCG passent en local sur le même noyau ; les variantes KVM ne peuvent pas tourner ici. | Non attribué ; à relire au prochain P13 de #247. |
+
