@@ -28,6 +28,20 @@ use super::mouvement::{applique, Courbe, PLEIN};
 /// Nombre d'animations simultanees au plus.
 pub const CAPACITE: usize = 8;
 
+/// Memoire que les instantanes de fermeture peuvent retenir ENSEMBLE, en
+/// octets. Une fenetre plein ecran 1920x1080 pese 8,3 Mo : sans plafond, huit
+/// fermetures rapprochees retiendraient 66 Mo le temps d'un fondu. Au-dela du
+/// budget, la fenetre se ferme sans animation -- c'est l'animation qui cede,
+/// jamais la memoire.
+pub const BUDGET_INSTANTANES_OCTETS: usize = 16 << 20;
+
+/// Un instantane de `nouveau` octets peut-il etre retenu quand `retenus`
+/// octets le sont deja ?
+pub const fn admet_instantane(retenus: usize, nouveau: usize) -> bool {
+    nouveau <= BUDGET_INSTANTANES_OCTETS
+        && retenus.saturating_add(nouveau) <= BUDGET_INSTANTANES_OCTETS
+}
+
 /// `debut_ms` d'une animation lancee mais pas encore montree.
 ///
 /// Une animation ne commence pas quand on la LANCE, mais a la premiere trame

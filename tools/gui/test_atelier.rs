@@ -530,3 +530,22 @@ fn le_survol_a_une_duree_et_rien_en_mode_aucun() {
     assert!((80..=160).contains(&animations::duree_ms(Mode::Normal, Nature::Survol)));
     assert_eq!(animations::opacite(Nature::Survol, 0, PLEIN), 255);
 }
+
+#[test]
+fn le_budget_des_instantanes_borne_la_memoire_retenue() {
+    let plein_ecran = 1920 * 1080 * 4;
+    assert!(animations::admet_instantane(0, plein_ecran));
+    // Huit fermetures plein ecran rapprochees : au plus le budget est retenu.
+    let mut retenus = 0usize;
+    let mut admis = 0;
+    for _ in 0..8 {
+        if animations::admet_instantane(retenus, plein_ecran) {
+            retenus += plein_ecran;
+            admis += 1;
+        }
+    }
+    assert!(retenus <= animations::BUDGET_INSTANTANES_OCTETS);
+    assert!(admis >= 1 && admis < 8, "{admis} admis");
+    assert!(!animations::admet_instantane(0, animations::BUDGET_INSTANTANES_OCTETS + 1));
+    assert!(!animations::admet_instantane(usize::MAX, 1), "pas de depassement arithmetique");
+}

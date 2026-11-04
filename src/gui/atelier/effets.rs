@@ -70,6 +70,51 @@ static mut NS_PIRE: u64 = 0;
 /// s'anime : les fenetres ouvertes au demarrage apparaissent avec le bureau,
 /// et animer la plus lourde des trames ne ferait que la retarder.
 static mut BUREAU_POSE: bool = false;
+/// Octets retenus par les instantanes, et leur pic depuis le dernier releve.
+static mut INSTANTANES_OCTETS: usize = 0;
+static mut INSTANTANES_PIC: usize = 0;
+/// Une fenetre vient de s'ouvrir : la prochaine trame mesure sa latence,
+/// animation ou pas (mode `Aucun` compris), pour comparer les modes.
+static mut MESURE_OUVERTURE: bool = false;
+
+// LE FIL UNIQUE, VERIFIE ET NON SUPPOSE.
+//
+// Tout l'etat de ce module est `static mut` : il n'est sain que si un seul fil
+// y touche. C'est le fil du bureau (`window_manager::boucle`), qui s'en declare
+// proprietaire au demarrage. Un appel depuis un autre fil est REFUSE (et dit
+// une fois) au lieu de courir le risque d'une course : l'animation cede, la
+// memoire reste coherente.
+static PROPRIETAIRE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+static ETRANGER_SIGNALE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn tid_courant() -> Option<u32> {
+    crate::kernel::task::try_current().map(|t| t.tid)
+}
+
+/// Le fil du bureau se declare proprietaire de l'etat des effets.
+pub fn adopte_fil() {
+    if let Some(tid) = tid_courant() {
+        PROPRIETAIRE.store(tid, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// L'appelant est-il le fil proprietaire ? Avant toute adoption (apercu de
+/// demarrage), seul le registre vide est visible : rien a proteger.
+fn fil_ok() -> bool {
+    use core::sync::atomic::Ordering;
+    let p = PROPRIETAIRE.load(Ordering::Acquire);
+    if p == u32::MAX {
+        return true;
+    }
+    if tid_courant() == Some(p) {
+        return true;
+    }
+    if !ETRANGER_SIGNALE.swap(true, Ordering::Relaxed) {
+        crate::serial_println!("BOUCHAUD_ATELIER_EFFETS_FIL_ETRANGER proprietaire={} appelant={:?}",
+            p, tid_courant());
+    }
+    false
+}
 
 // SAFETY (tout le module) : fil unique du gestionnaire de fenetres.
 fn registre() -> &'static mut Registre {
@@ -95,7 +140,10 @@ fn composition_directe() -> bool {
 fn retire(a: Animation) {
     a_recomposer().push(a.bornes);
     if a.nature == Nature::Fermeture {
+        let liberes: usize = instantanes().iter().filter(|i| i.cle == a.cle)
+            .map(|i| i.pixels.capacity() * 4).sum();
         instantanes().retain(|i| i.cle != a.cle);
+        unsafe { INSTANTANES_OCTETS = INSTANTANES_OCTETS.saturating_sub(liberes); }
     }
 }
 
@@ -115,6 +163,10 @@ fn agrandit(b: Boite, n: i32) -> Boite {
 
 /// Une fenetre apparait. `peinte` : ses bornes peintes (ombre comprise).
 pub fn ouvre(cle: u64, peinte: Boite) {
+    if !fil_ok() {
+        return;
+    }
+    unsafe { MESURE_OUVERTURE = BUREAU_POSE; }
     let duree = an::duree_ms(mode(), Nature::Ouverture);
     if duree == 0 || !unsafe { BUREAU_POSE } {
         return;
@@ -131,6 +183,9 @@ pub fn ouvre(cle: u64, peinte: Boite) {
 /// Une fenetre disparait. `cadre` : son rectangle exterieur ; `dessine` la
 /// peint telle qu'elle est (appele une fois, ici, avant toute liberation).
 pub fn ferme(cle_fenetre: u64, cadre: Boite, rayon: u32, dessine: impl FnOnce()) {
+    if !fil_ok() {
+        return;
+    }
     // Une ouverture en cours s'arrete ici ; la fermeture part de son opacite.
     let mut depart = 255u8;
     if let Some(o) = registre().annule(cle_fenetre, Nature::Ouverture) {
@@ -151,21 +206,28 @@ pub fn ferme(cle_fenetre: u64, cadre: Boite, rayon: u32, dessine: impl FnOnce())
         return;
     }
     let visible = Boite { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    let n = (visible.w * visible.h) as usize;
+    if !an::admet_instantane(unsafe { INSTANTANES_OCTETS }, n * 4) {
+        crate::serial_println!("BOUCHAUD_ATELIER_INSTANTANE refuse octets={} retenus={} budget={}",
+            n * 4, unsafe { INSTANTANES_OCTETS }, an::BUDGET_INSTANTANES_OCTETS);
+        return;
+    }
     let mut pixels = Vec::new();
-    if pixels.try_reserve_exact((visible.w * visible.h) as usize).is_err() {
+    if pixels.try_reserve_exact(n).is_err() {
         return;
     }
-    // Peindre, copier, remettre : le tampon ressort identique.
+    // Peindre, copier, remettre : le tampon ressort identique. Le dessous
+    // passe par le tampon de travail partage, pas par une seconde allocation.
     let clip = fb::clip_rect();
-    let mut dessous = Vec::new();
-    if dessous.try_reserve_exact((visible.w * visible.h) as usize).is_err() {
+    let dessous = unsafe { &mut *core::ptr::addr_of_mut!(DESSOUS) };
+    if dessous.try_reserve(n.saturating_sub(dessous.capacity())).is_err() {
         return;
     }
-    copie(visible, &mut dessous);
+    copie(visible, dessous);
     fb::set_clip(x0 as usize, y0 as usize, visible.w as usize, visible.h as usize);
     dessine();
     copie(visible, &mut pixels);
-    pose(visible, &dessous);
+    pose(visible, dessous);
     fb::set_clip(clip.0, clip.1, clip.2.saturating_sub(clip.0), clip.3.saturating_sub(clip.1));
 
     let cle = unsafe {
@@ -173,6 +235,10 @@ pub fn ferme(cle_fenetre: u64, cadre: Boite, rayon: u32, dessine: impl FnOnce())
         PROCHAINE_CLE = PROCHAINE_CLE.wrapping_add(1) | CLE_INSTANTANE;
         c
     };
+    unsafe {
+        INSTANTANES_OCTETS += pixels.capacity() * 4;
+        INSTANTANES_PIC = INSTANTANES_PIC.max(INSTANTANES_OCTETS);
+    }
     instantanes().push(Instantane { cle, cadre: visible, rayon, pixels });
     let bornes = agrandit(visible, crate::gui::disposition::DEBORD_OMBRE as i32);
     if let Some(e) = registre().lance(Animation {
@@ -190,6 +256,9 @@ pub fn ferme(cle_fenetre: u64, cadre: Boite, rayon: u32, dessine: impl FnOnce())
 /// `None` si elle n'est plus visible (fermee, reduite) : son ouverture
 /// s'arrete alors, et sa derniere zone est recomposee.
 pub fn tour(maintenant: u64, peinte: impl Fn(u64) -> Option<Boite>, mut ajoute_zone: impl FnMut(Boite)) -> bool {
+    if !fil_ok() {
+        return false;
+    }
     let mut finies = 0u32;
     let mut zones = 0u32;
     let mut ajoute = |b: Boite| {
@@ -248,7 +317,13 @@ pub fn tour(maintenant: u64, peinte: impl Fn(u64) -> Option<Boite>, mut ajoute_z
                 *s = Vec::new();
             }
         }
-        debug_assert!(instantanes().is_empty());
+        // Registre vide : aucun instantane ne peut survivre a son animation.
+        if !instantanes().is_empty() || unsafe { INSTANTANES_OCTETS } != 0 {
+            crate::serial_println!("BOUCHAUD_ATELIER_INSTANTANE orphelins={} octets={}",
+                instantanes().len(), unsafe { INSTANTANES_OCTETS });
+            *instantanes() = Vec::new();
+            unsafe { INSTANTANES_OCTETS = 0; }
+        }
     }
     actif || zones > 0
 }
@@ -256,11 +331,14 @@ pub fn tour(maintenant: u64, peinte: impl Fn(u64) -> Option<Boite>, mut ajoute_z
 /// Reste-t-il une animation a montrer ? (La boucle du bureau en fait une
 /// echeance de trame.)
 pub fn actif() -> bool {
-    registre().actif()
+    fil_ok() && registre().actif()
 }
 
 /// Debut d'une trame composee : fige l'instant de toutes les progressions.
 pub fn debut_trame(maintenant: u64) {
+    if !fil_ok() {
+        return;
+    }
     // Les animations lancees depuis la trame precedente commencent ICI : la
     // premiere image qu'on en voit est leur instant zero.
     registre().demarre(maintenant);
@@ -273,8 +351,17 @@ pub fn debut_trame(maintenant: u64) {
 
 /// Fin d'une trame composee : si elle a anime quelque chose, son cout compte.
 pub fn fin_trame() {
+    if !fil_ok() {
+        return;
+    }
     unsafe {
         BUREAU_POSE = true;
+        if MESURE_OUVERTURE {
+            MESURE_OUVERTURE = false;
+            let ns = crate::kernel::timer::monotonic_ns().saturating_sub(NS_TRAME);
+            crate::serial_println!("BOUCHAUD_ATELIER_TRAME_OUVERTURE mode={:?} cout_us={}",
+                mode(), ns / 1000);
+        }
         if ANIME_CETTE_TRAME {
             let ns = crate::kernel::timer::monotonic_ns().saturating_sub(NS_TRAME);
             TRAMES_ANIMEES += 1;
@@ -287,11 +374,15 @@ pub fn fin_trame() {
 fn mesure_et_oublie() {
     unsafe {
         if TRAMES_ANIMEES > 0 {
+            let (tas, _, _) = crate::kernel::heap::stats();
             crate::serial_println!(
-                "BOUCHAUD_ATELIER_ANIMATION mode={:?} trames={} cout_moyen_us={} cout_max_us={}",
+                "BOUCHAUD_ATELIER_ANIMATION mode={:?} trames={} cout_moyen_us={} cout_max_us={} \
+                 instantanes_pic_kio={} instantanes_kio={} tas_kio={}",
                 mode(), TRAMES_ANIMEES, NS_ANIMES / TRAMES_ANIMEES as u64 / 1000, NS_PIRE / 1000,
+                INSTANTANES_PIC / 1024, INSTANTANES_OCTETS / 1024, tas / 1024,
             );
         }
+        INSTANTANES_PIC = INSTANTANES_OCTETS;
         TRAMES_ANIMEES = 0;
         NS_ANIMES = 0;
         NS_PIRE = 0;
@@ -310,6 +401,9 @@ pub fn cle_survol(cible: super::dock::Cible) -> u64 {
 /// Une cellule prend le survol : fondu de `zone` (cellule et infobulle).
 /// En mode `Aucun`, rien n'est lance : le survol s'affiche plein d'emblee.
 pub fn survole(cible: super::dock::Cible, zone: Boite) {
+    if !fil_ok() {
+        return;
+    }
     let duree = an::duree_ms(mode(), Nature::Survol);
     if duree == 0 {
         return;
@@ -324,6 +418,9 @@ pub fn survole(cible: super::dock::Cible, zone: Boite) {
 
 /// Le survol quitte une cellule : son fondu, s'il courait, s'arrete.
 pub fn quitte(cible: super::dock::Cible) {
+    if !fil_ok() {
+        return;
+    }
     if let Some(a) = registre().annule(cle_survol(cible), Nature::Survol) {
         retire(a);
     }
@@ -332,6 +429,9 @@ pub fn quitte(cible: super::dock::Cible) {
 /// Avancement du survol de `cible` a l'instant de la trame (PLEIN s'il n'y a
 /// pas de fondu en cours : le survol est etabli).
 pub fn survol(cible: super::dock::Cible) -> u32 {
+    if !fil_ok() {
+        return super::mouvement::PLEIN;
+    }
     match registre().cherche(cle_survol(cible), Nature::Survol) {
         Some(a) => {
             unsafe { ANIME_CETTE_TRAME = true; }
@@ -349,6 +449,9 @@ pub fn deplacement_permis() -> bool {
 /// L'ouverture en cours de la fenetre `cle`, a l'instant de la trame :
 /// `(decalage vers le bas, opacite)`. `None` : la fenetre se peint normalement.
 pub fn ouverture(cle: u64) -> Option<(i32, u8)> {
+    if !fil_ok() {
+        return None;
+    }
     let a = registre().cherche(cle, Nature::Ouverture)?;
     let t = unsafe { HORLOGE_TRAME };
     if t >= a.fin_ms() {
@@ -366,17 +469,31 @@ pub fn zone_ouverture_courante(peinte: Boite, dy: i32) -> Boite {
 
 /// Nombre d'instantanes en cours de fermeture.
 pub fn nombre_instantanes() -> usize {
+    if !fil_ok() {
+        return 0;
+    }
     instantanes().len()
 }
 
 /// Bornes du calque de l'instantane `rang` (ombre comprise).
 pub fn bornes_instantane(rang: usize) -> Option<Boite> {
+    if !fil_ok() {
+        return None;
+    }
     let i = instantanes().get(rang)?;
     Some(agrandit(i.cadre, crate::gui::disposition::DEBORD_OMBRE as i32))
 }
 
 /// Libere tout (le bureau s'en va).
 pub fn oublie_tout() {
+    if !fil_ok() {
+        return;
+    }
+    unsafe {
+        INSTANTANES_OCTETS = 0;
+        *core::ptr::addr_of_mut!(DESSOUS) = Vec::new();
+        *core::ptr::addr_of_mut!(DESSUS) = Vec::new();
+    }
     *registre() = Registre::neuf();
     *instantanes() = Vec::new();
     *a_recomposer() = Vec::new();
@@ -429,6 +546,16 @@ fn inter(a: Boite, b: Boite) -> Option<Boite> {
 /// Compose une fenetre en cours d'ouverture dans la decoupe courante :
 /// `peinte` ses bornes finales, `dy` son decalage, `alpha` son opacite.
 pub fn compose_ouverture(peinte: Boite, dy: i32, alpha: u8, dessine: impl FnOnce()) {
+    if !fil_ok() {
+        dessine();
+        return;
+    }
+    // Opacite nulle : la fenetre n'est pas encore visible. La peindre puis la
+    // melanger a zero ne changerait aucun pixel -- c'etait +11 ms sous TCG sur
+    // la premiere trame, deja la plus chere d'une ouverture.
+    if alpha == 0 {
+        return;
+    }
     let c = decoupe();
     let ecran = Boite { x: 0, y: 0, w: fb::width() as i32, h: fb::height() as i32 };
     // Pixels de destination : decoupe ∩ fenetre decalee. Pixels sources :
@@ -481,6 +608,9 @@ fn dans_arrondi(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
 
 /// Peint l'instantane `rang` a l'instant de la trame, dans la decoupe.
 pub fn dessine_instantane(rang: usize) {
+    if !fil_ok() {
+        return;
+    }
     let Some(i) = instantanes().get(rang) else { return };
     let Some(a) = registre().cherche(i.cle, Nature::Fermeture) else { return };
     let t = unsafe { HORLOGE_TRAME };

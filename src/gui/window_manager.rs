@@ -596,6 +596,9 @@ fn boucle() {
     // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
     let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
     crate::gui::atelier::reglages::charge();
+    // BOUCHAUD_ATELIER_EFFETS_V1 : ce fil est le seul a toucher l'etat des
+    // effets (voir `effets::fil_ok`).
+    crate::gui::atelier::effets::adopte_fil();
     let mut prev_left = false;
     let mut drag: Option<Drag> = None;
     // Position du pointeur a l'appui qui a ouvert le glissement en cours.
