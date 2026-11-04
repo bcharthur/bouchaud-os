@@ -1,0 +1,91 @@
+//! Assets graphiques Atelier embarques (BOUCHAUD_ATELIER_ASSETS_V1).
+//!
+//! Les fichiers viennent de `tools/assets/fabrique-atelier.py` ; leur
+//! provenance, leur licence et leur empreinte sont dans
+//! `src/assets/atelier/MANIFEST.json`, verifie par
+//! `tools/verifie-assets-atelier.py`. Le noyau n'embarque QUE ce qu'il pose :
+//! pas la bibliotheque Lucide, une poignee de glyphes deja rendus.
+//!
+//! Deux natures d'images :
+//!   * les IMAGES (logo) se posent telles quelles, alpha compris ;
+//!   * les SYMBOLES (glyphes Lucide blancs) sont des MASQUES : leur alpha est
+//!     une couverture, teintee a la pose -- le meme glyphe sert sur verre
+//!     clair et sur surface sombre.
+
+use alloc::vec::Vec;
+use crate::gui::framebuffer as fb;
+
+/// Marque Bouchaud OS (PROVISOIRE, voir `assets/atelier/sources/logo/`).
+pub const LOGO_18: &[u8] = include_bytes!("../../assets/atelier/logo/bouchaud-os-18.png");
+pub const LOGO_72: &[u8] = include_bytes!("../../assets/atelier/logo/bouchaud-os-72.png");
+/// Glyphe Lucide `layout-grid`, 22 px : la cellule Applications du dock.
+pub const SYMBOLE_GRILLE_22: &[u8] =
+    include_bytes!("../../assets/atelier/symboles/layout-grid-22.png");
+
+/// Fond « summer 1am » (Risto Saukonpää, LGPLv3, KDE), recadre « cover ».
+pub const FOND_1280X720: &[u8] =
+    include_bytes!("../../assets/atelier/fond/summer_1am-1280x720.png");
+pub const FOND_1920X1080: &[u8] =
+    include_bytes!("../../assets/atelier/fond/summer_1am-1920x1080.png");
+
+/// Une image decodee, retenue.
+struct Retenue {
+    cle: usize,
+    largeur: usize,
+    hauteur: usize,
+    pixels: Vec<u32>,
+}
+
+static mut RETENUES: Vec<Retenue> = Vec::new();
+
+/// Decode (une fois) et rend l'image `octets`. `None` si elle est abimee.
+fn retenue(octets: &'static [u8]) -> Option<&'static Retenue> {
+    let cle = octets.as_ptr() as usize;
+    // SAFETY : fil unique du gestionnaire de fenetres.
+    unsafe {
+        let r = &mut *core::ptr::addr_of_mut!(RETENUES);
+        if let Some(i) = r.iter().position(|x| x.cle == cle) {
+            return r.get(i);
+        }
+        let image = crate::gui::png::decode(octets)?;
+        r.push(Retenue { cle, largeur: image.largeur, hauteur: image.hauteur,
+            pixels: image.pixels });
+        r.last()
+    }
+}
+
+/// Dimensions d'une image embarquee.
+pub fn dimensions(octets: &'static [u8]) -> Option<(usize, usize)> {
+    retenue(octets).map(|r| (r.largeur, r.hauteur))
+}
+
+/// Pose une image, alpha compris, coin superieur gauche en `(x, y)`.
+pub fn pose(octets: &'static [u8], x: usize, y: usize) {
+    let Some((l, h)) = dimensions(octets) else { return };
+    if !fb::decoupe_touche(x, y, l, h) {
+        return;
+    }
+    let Some(r) = retenue(octets) else { return };
+    for ligne in 0..r.hauteur {
+        let debut = ligne * r.largeur;
+        fb::blit_argb_span(x, y + ligne, &r.pixels[debut..debut + r.largeur]);
+    }
+}
+
+/// Pose un MASQUE teinte de `couleur` : l'alpha du symbole devient la
+/// couverture, multipliee par `opacite`.
+pub fn pose_masque(octets: &'static [u8], x: usize, y: usize, couleur: u32, opacite: u8) {
+    let Some((l, h)) = dimensions(octets) else { return };
+    if !fb::decoupe_touche(x, y, l, h) {
+        return;
+    }
+    let Some(r) = retenue(octets) else { return };
+    for ligne in 0..r.hauteur {
+        for colonne in 0..r.largeur {
+            let a = (r.pixels[ligne * r.largeur + colonne] >> 24) * opacite as u32 / 255;
+            if a != 0 {
+                fb::blend_rgb(x + colonne, y + ligne, couleur, a as u8);
+            }
+        }
+    }
+}

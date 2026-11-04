@@ -1,0 +1,363 @@
+{
+  "schema": "bouchaud-atelier-assets/1",
+  "licences": {
+    "lucide": {
+      "licence": "ISC",
+      "source": "lucide-static 1.67.0 (npm)",
+      "texte": "assets/atelier/sources/lucide/LICENSE"
+    },
+    "fond-summer_1am": {
+      "licence": "LGPL-3.0",
+      "auteur": "Risto Saukonpää",
+      "source": "KDE/plasma-workspace-wallpapers summer_1am",
+      "metadata": "assets/atelier/sources/fond/metadata.json"
+    },
+    "logo-bouchaud-os": {
+      "licence": "projet Bouchaud OS",
+      "statut": "PROVISOIRE",
+      "source": "assets/atelier/sources/logo/bouchaud-os-provisoire.svg"
+    },
+    "tuiles-apps": {
+      "licence": "projet Bouchaud OS (tuiles) + ISC (glyphes Lucide)"
+    }
+  },
+  "fichiers": {
+    "src/assets/atelier/apps/navigateur-18.png": {
+      "sha256": "2cd689d6d8d1c3af5c3843bacaf7216c86e87e957e904df0cd4a686c8ba245ad",
+      "octets": 666,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "compass"
+    },
+    "src/assets/atelier/apps/navigateur-40.png": {
+      "sha256": "db8246af08c218beed794a5448a0cd3ac1dd8c821fb92a079879437c731c10a2",
+      "octets": 1479,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "compass"
+    },
+    "src/assets/atelier/apps/navigateur-56.png": {
+      "sha256": "1113c7b21fd0052a00f445c5c7515bc64c185031808eaf5f38f9435cd484e4f2",
+      "octets": 2210,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "compass"
+    },
+    "src/assets/atelier/apps/calculatrice-18.png": {
+      "sha256": "2d66861ea953afa6bcbf9e6a3ced069eea48da9017099828ecaf302c12dcfe59",
+      "octets": 637,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "calculator"
+    },
+    "src/assets/atelier/apps/calculatrice-40.png": {
+      "sha256": "6464b2b35362dfd407b18b0c59219f04c7dc2b4f75e119b842c27c7ed6ce2062",
+      "octets": 1266,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "calculator"
+    },
+    "src/assets/atelier/apps/calculatrice-56.png": {
+      "sha256": "016e65fd048be482d20a3c8e09b19d58382abbf96c3425ad32a6279439f73789",
+      "octets": 1796,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "calculator"
+    },
+    "src/assets/atelier/apps/terminal-18.png": {
+      "sha256": "09178fa8707c77dd42b4a2101dfe3fd36038a429f6703928d8a98b347bc25ebd",
+      "octets": 513,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "terminal"
+    },
+    "src/assets/atelier/apps/terminal-40.png": {
+      "sha256": "66370c15c9dc26f5dc690ec7b7dbfafd49ac04532c25dd7377a02a5624a4d831",
+      "octets": 1012,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "terminal"
+    },
+    "src/assets/atelier/apps/terminal-56.png": {
+      "sha256": "226423559f9404e1a4071864ac9ad46035bcc197938a08c13382a3d823c652c2",
+      "octets": 1484,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "terminal"
+    },
+    "src/assets/atelier/apps/fichiers-18.png": {
+      "sha256": "0f595ab68dc136f2ab7eea98f03cbfd99afb6c2b5488fdf859a67737d1a06496",
+      "octets": 569,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "folder"
+    },
+    "src/assets/atelier/apps/fichiers-40.png": {
+      "sha256": "c2f6b724831334540197a81f88936e4f24084e87689bcb3b58df30d23e7c60a0",
+      "octets": 1038,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "folder"
+    },
+    "src/assets/atelier/apps/fichiers-56.png": {
+      "sha256": "4524d3650d16359c60fb2a2a002009fbf36771d4851a1b2d200047cf37f7d9f5",
+      "octets": 1491,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "folder"
+    },
+    "src/assets/atelier/apps/edition-18.png": {
+      "sha256": "21618baaffb8ca7384de069e4666cdbfb2145d73818b4da23e7643960efb1e20",
+      "octets": 624,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "file-pen-line"
+    },
+    "src/assets/atelier/apps/edition-40.png": {
+      "sha256": "0cc44295a468483ee0b47270c46cd2981a354f01f6802545234633ec8ebe382c",
+      "octets": 1221,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "file-pen-line"
+    },
+    "src/assets/atelier/apps/edition-56.png": {
+      "sha256": "7ae7b448a57081a9aa3a9fcaf91d1b28582b14358deba54dad87dcd229c3619f",
+      "octets": 1764,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "file-pen-line"
+    },
+    "src/assets/atelier/apps/services-18.png": {
+      "sha256": "22138add858f3ff59bb9ccb9f77235704955b928e57af0a0ef15d1251cb57c8a",
+      "octets": 683,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "server-cog"
+    },
+    "src/assets/atelier/apps/services-40.png": {
+      "sha256": "54c3c12c602c19e44df30fbd363dcc01f07018bb072e912ba77caf218d399357",
+      "octets": 1365,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "server-cog"
+    },
+    "src/assets/atelier/apps/services-56.png": {
+      "sha256": "bfabf8098a3efb5209f2a3f05f708f131349e28b6d5b114760854655a0cdb782",
+      "octets": 2235,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "server-cog"
+    },
+    "src/assets/atelier/apps/notes-18.png": {
+      "sha256": "0a08dadc00579b872ac13ee22842b26c7d10b004c8fdb1ca60f754075af07e37",
+      "octets": 697,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "notebook-pen"
+    },
+    "src/assets/atelier/apps/notes-40.png": {
+      "sha256": "ce3dd0483d0a7ef5663325709698b8910216795dee14d1308606a27b4764572d",
+      "octets": 1434,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "notebook-pen"
+    },
+    "src/assets/atelier/apps/notes-56.png": {
+      "sha256": "2f3b1f93d20b405ee6f54612129b021fc81abdeb1324bb85b18a77a3a421c8bb",
+      "octets": 2073,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "notebook-pen"
+    },
+    "src/assets/atelier/apps/insights-18.png": {
+      "sha256": "7e9b165a55ef6629b365a43d6419138a054bd458b90ed2abae1766e4d2bda830",
+      "octets": 582,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "chart-no-axes-combined"
+    },
+    "src/assets/atelier/apps/insights-40.png": {
+      "sha256": "1ac97514143390f0f808b44fc9e5e1119e079a6dab9be7726335630e1608f7cf",
+      "octets": 1263,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "chart-no-axes-combined"
+    },
+    "src/assets/atelier/apps/insights-56.png": {
+      "sha256": "3852fb4cdcad981bd69d92a08f8d139b2c26b0f79a59cb6b3be3872652d8a083",
+      "octets": 1873,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "chart-no-axes-combined"
+    },
+    "src/assets/atelier/apps/moniteur-18.png": {
+      "sha256": "d6cb326e071ba5d60f9dd868b6270ceb42520349d3a9c04e1c5533683464d0ce",
+      "octets": 573,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "activity"
+    },
+    "src/assets/atelier/apps/moniteur-40.png": {
+      "sha256": "85a4a5dbfb71f00ba3815003e946d92b565b4c4c9fa7dcae71d9ce728b971f64",
+      "octets": 1138,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "activity"
+    },
+    "src/assets/atelier/apps/moniteur-56.png": {
+      "sha256": "61708ffc19dec6e3993d259113ab1b17d8f3a5457d6a88825566277f766be1bf",
+      "octets": 1717,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "activity"
+    },
+    "src/assets/atelier/apps/journal-18.png": {
+      "sha256": "f4be0fd8d17cbd5ab5973605ce81f0154c3db9f06e5e9f631ac66e4de1dc9cf5",
+      "octets": 617,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "scroll-text"
+    },
+    "src/assets/atelier/apps/journal-40.png": {
+      "sha256": "f6b11daad82f803c618fd41fb61443005b89821c8598a792bb900e450f66209d",
+      "octets": 1218,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "scroll-text"
+    },
+    "src/assets/atelier/apps/journal-56.png": {
+      "sha256": "9e0ee8714eba38a44231423cacac7d59e04ab5d54c484fee48ee5929db7dc589",
+      "octets": 1783,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "scroll-text"
+    },
+    "src/assets/atelier/apps/parametres-18.png": {
+      "sha256": "72f90545e612e0f257d52a060efdfe7679a2f18ca2471decd7d3e70d6762164f",
+      "octets": 630,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "settings"
+    },
+    "src/assets/atelier/apps/parametres-40.png": {
+      "sha256": "d33d7b074e7282dd7419e7843149eda165d7eb1b9b30f26374356c09a25a17ae",
+      "octets": 1533,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "settings"
+    },
+    "src/assets/atelier/apps/parametres-56.png": {
+      "sha256": "5e774b50e5b749e73c02a7147dc1b4c323e8ef85de2f96bd8dc53239404cde03",
+      "octets": 2323,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "settings"
+    },
+    "src/assets/atelier/symboles/layout-grid-22.png": {
+      "sha256": "f06a6042d9988a5ea6ee37ff29c90abda9847f0440de5d4ca83b41b9d2efa185",
+      "octets": 279,
+      "largeur": 22,
+      "hauteur": 22,
+      "alpha": true,
+      "licence": "lucide"
+    },
+    "src/assets/atelier/logo/bouchaud-os-18.png": {
+      "sha256": "ec24d4db5a3c4a79f33280797ed7c1232aa38017d07fadb92dcf06ee42823077",
+      "octets": 802,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "logo-bouchaud-os"
+    },
+    "src/assets/atelier/logo/bouchaud-os-72.png": {
+      "sha256": "262575c8562d2a1dc8dfb16d2d741d7bac3a1022d23660f5ea01670cae675ad1",
+      "octets": 3480,
+      "largeur": 72,
+      "hauteur": 72,
+      "alpha": true,
+      "licence": "logo-bouchaud-os"
+    },
+    "src/assets/atelier/fond/summer_1am-1280x720.png": {
+      "sha256": "67dfeb0bb0f1a83acf31f343eb70902801b6c84e1618dbd8627664702f359e81",
+      "octets": 758370,
+      "largeur": 1280,
+      "hauteur": 720,
+      "alpha": false,
+      "licence": "fond-summer_1am"
+    },
+    "src/assets/atelier/fond/summer_1am-1920x1080.png": {
+      "sha256": "bbaf044d553a0b34792bf7472108ab4581aca9c2e3f83cbb87e311cf7bb2c144",
+      "octets": 1509422,
+      "largeur": 1920,
+      "hauteur": 1080,
+      "alpha": false,
+      "licence": "fond-summer_1am"
+    }
+  }
+}
