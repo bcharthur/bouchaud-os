@@ -43,16 +43,18 @@ pub enum Bloc {
     Reseau,
     Affichage,
     Diagnostic,
+    Animations,
     Indisponibles,
     Alimentation,
 }
 
 /// Hauteur de chaque bloc, dans l'ordre d'affichage.
-pub const BLOCS: [(Bloc, u32); 6] = [
+pub const BLOCS: [(Bloc, u32); 7] = [
     (Bloc::Titre, 24),
     (Bloc::Reseau, 58),
     (Bloc::Affichage, 44),
     (Bloc::Diagnostic, 44),
+    (Bloc::Animations, 44),
     (Bloc::Indisponibles, 34),
     (Bloc::Alimentation, 62),
 ];
@@ -62,14 +64,30 @@ pub const BLOCS: [(Bloc, u32); 6] = [
 pub enum Action {
     /// Affiche ou masque le compteur de trames dans la barre du haut.
     Diagnostic,
+    /// Mouvement des fenetres : normal, reduit (fondu seul), aucun.
+    AnimationsNormales,
+    AnimationsReduites,
+    AnimationsAucune,
     Redemarrer,
     Eteindre,
     /// Rend la main au shell (meme chemin que « Quitter » du menu).
     QuitterBureau,
 }
 
-pub const ACTIONS: [Action; 4] =
-    [Action::Diagnostic, Action::Redemarrer, Action::Eteindre, Action::QuitterBureau];
+pub const ACTIONS: [Action; 7] = [
+    Action::Diagnostic,
+    Action::AnimationsNormales, Action::AnimationsReduites, Action::AnimationsAucune,
+    Action::Redemarrer, Action::Eteindre, Action::QuitterBureau,
+];
+
+/// Les trois segments du reglage de mouvement, de gauche a droite.
+pub const SEGMENTS_ANIMATIONS: [Action; 3] =
+    [Action::AnimationsNormales, Action::AnimationsReduites, Action::AnimationsAucune];
+
+/// Largeur d'un segment du reglage de mouvement.
+pub const SEGMENT_L: i32 = 64;
+/// Hauteur des segments.
+pub const SEGMENT_H: i32 = 26;
 
 /// Les trois boutons d'alimentation, de gauche a droite.
 pub const ALIMENTATION: [Action; 3] =
@@ -128,6 +146,13 @@ pub fn bloc(l: u32, barre: u32, quel: Bloc) -> Boite {
 pub fn boite_action(l: u32, barre: u32, action: Action) -> Boite {
     match action {
         Action::Diagnostic => bloc(l, barre, Bloc::Diagnostic),
+        Action::AnimationsNormales | Action::AnimationsReduites | Action::AnimationsAucune => {
+            let a = bloc(l, barre, Bloc::Animations);
+            let rang = SEGMENTS_ANIMATIONS.iter().position(|x| *x == action).unwrap_or(0) as i32;
+            let n = SEGMENTS_ANIMATIONS.len() as i32;
+            let x0 = a.x + a.w - 8 - n * SEGMENT_L;
+            Boite { x: x0 + rang * SEGMENT_L, y: a.y + (a.h - SEGMENT_H) / 2, w: SEGMENT_L, h: SEGMENT_H }
+        }
         _ => {
             let a = bloc(l, barre, Bloc::Alimentation);
             let rang = ALIMENTATION.iter().position(|x| *x == action).unwrap_or(0) as i32;

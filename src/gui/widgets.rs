@@ -624,6 +624,28 @@ pub(crate) fn draw_centre(mx: i32, my: i32) {
     matiere::pave(crate::gui::windowing::Rect::new(bouton_x, interrupteur.y + 2, 16, 16), 8,
         0xffffff, 0xff);
 
+    // Mouvement des fenetres : trois segments, un reglage reel
+    // (`atelier::reglages::animations`, lu par `atelier::effets`).
+    let m = carte(c::Bloc::Animations, false);
+    fb::draw_text_prop(m.x as usize + 12, m.y as usize + 14, "Animations", j::ENCRE, petit, false);
+    let courant = crate::gui::atelier::reglages::animations();
+    for (action, libelle, mode) in [
+        (c::Action::AnimationsNormales, "Normales", crate::gui::atelier::animations::Mode::Normal),
+        (c::Action::AnimationsReduites, "R\u{e9}duites", crate::gui::atelier::animations::Mode::Reduit),
+        (c::Action::AnimationsAucune, "Aucune", crate::gui::atelier::animations::Mode::Aucun),
+    ] {
+        let s = c::boite_action(l, b, action);
+        let choisi = courant == mode;
+        if choisi {
+            matiere::pave(rect_de(s), 8, j::ACCENT, 0xff);
+        } else if survol == Some(action) {
+            matiere::pave(rect_de(s), 8, j::SURVOL, j::SURVOL_OPACITE);
+        }
+        let lw = fb::text_width(libelle, petit, false) as i32;
+        fb::draw_text_prop((s.x + (s.w - lw) / 2).max(0) as usize, s.y as usize + 6, libelle,
+            if choisi { 0xffffff } else { j::ENCRE_DOUCE }, petit, false);
+    }
+
     // Ce qui n'existe pas : dit, pas simule.
     let n = c::bloc(l, b, c::Bloc::Indisponibles);
     fb::draw_text_prop(n.x as usize + 4, n.y as usize + 4,

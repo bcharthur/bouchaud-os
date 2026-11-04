@@ -17,9 +17,11 @@
 //!   * [`assets`]    logo, symboles et fond embarques (manifeste verifie) ;
 //!   * [`matiere`]   peintres de matieres (verre, ombre douce, fenetre) ;
 //!   * [`centre`]    geometrie pure du centre de controle ;
-//!   * [`reglages`]  reglages reels du bureau (mode diagnostic).
+//!   * [`reglages`]  reglages reels du bureau (diagnostic, mouvement) ;
+//!   * [`animations`] registre borne d'animations datees, pur ;
+//!   * [`effets`]    composition de l'ouverture et de la fermeture des fenetres.
 //!
-//! `jetons`, `mouvement`, `dock` et `centre` ne connaissent ni le framebuffer ni l'allocateur : les
+//! `jetons`, `mouvement`, `dock`, `centre` et `animations` ne connaissent ni le framebuffer ni l'allocateur : les
 //! tests d'hote les incluent tels quels (`tools/gui/test_atelier.rs`).
 //!
 //! # Ce qu'il ne fait pas
@@ -38,3 +40,5 @@ pub mod assets;
 pub mod echelle;
 pub mod centre;
 pub mod reglages;
+pub mod animations;
+pub mod effets;

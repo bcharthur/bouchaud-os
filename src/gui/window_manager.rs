@@ -207,11 +207,27 @@ fn plan_de_scene(
         // One canonical contract: painted bounds include the full eight-pixel
         // shadow; opacity is only the rounded shape's guaranteed central strip.
         let geometry = render_geometry(w);
+        // BOUCHAUD_ATELIER_EFFETS_V1 : une fenetre qui s'ouvre est
+        // TRANSLUCIDE et DECALEE. Declaree opaque, elle ferait sauter le fond
+        // qu'elle laisse voir ; bornee a sa position finale, la decoupe
+        // ecarterait la bande ou elle se trouve encore.
+        if let Some((dy, _)) = crate::gui::atelier::effets::ouverture(w.id.get()) {
+            let zone = crate::gui::atelier::effets::zone_ouverture_courante(
+                vers_boite(proto_from_window_rect(geometry.painted_bounds)), dy);
+            calques.push(Calque::transparent(Element::Fenetre(index), depuis_boite(zone)));
+            continue;
+        }
         calques.push(Calque::avec_ombre(
             Element::Fenetre(index),
             proto_from_window_rect(geometry.painted_bounds),
             proto_from_window_rect(geometry.opaque),
         ));
+    }
+    // Les fenetres qui se ferment : au-dessus des autres, le temps de s'effacer.
+    for rang in 0..crate::gui::atelier::effets::nombre_instantanes() {
+        if let Some(b) = crate::gui::atelier::effets::bornes_instantane(rang) {
+            calques.push(Calque::transparent(Element::Fantome(rang), depuis_boite(b)));
+        }
     }
 
     if menu_open {
@@ -252,9 +268,16 @@ fn dessine_calque(
         Element::BarreHaute => widgets::draw_barre_haute(centre_ouvert, mx, my),
         Element::Fenetre(index) => {
             if let Some(w) = wins.get(index) {
-                widgets::draw_fenetre(w, widgets::indice_focus(wins) == Some(index));
+                let actif = widgets::indice_focus(wins) == Some(index);
+                match crate::gui::atelier::effets::ouverture(w.id.get()) {
+                    Some((dy, alpha)) => crate::gui::atelier::effets::compose_ouverture(
+                        vers_boite(empreinte_fenetre(w)), dy, alpha,
+                        || widgets::draw_fenetre(w, actif)),
+                    None => widgets::draw_fenetre(w, actif),
+                }
             }
         }
+        Element::Fantome(rang) => crate::gui::atelier::effets::dessine_instantane(rang),
         Element::Menu => widgets::draw_menu(mx, my),
         Element::Centre => widgets::draw_centre(mx, my),
         Element::BarreTaches => widgets::draw_taskbar(wins, menu_open),
@@ -395,6 +418,10 @@ fn rect_action_centre(action: crate::gui::atelier::centre::Action) -> Rect {
 
 fn depuis_boite(b: crate::gui::atelier::dock::Boite) -> Rect {
     Rect::neuf(b.x, b.y, b.w.max(0) as u32, b.h.max(0) as u32)
+}
+
+fn vers_boite(r: Rect) -> crate::gui::atelier::dock::Boite {
+    crate::gui::atelier::dock::Boite { x: r.x, y: r.y, w: r.largeur as i32, h: r.hauteur as i32 }
 }
 
 /// Ouvre ou ferme le centre. Ce qu'il couvrait redevient bureau (ombre
@@ -1268,6 +1295,19 @@ fn boucle() {
             sale = true;
         }
 
+        // ---- Animations (BOUCHAUD_ATELIER_EFFETS_V1) ----
+        // Registre vide : rien n'est ajoute, la cadence est celle d'avant. Une
+        // animation en cours salit sa zone (ancienne et nouvelle position) ; la
+        // trame reste soumise a `PERIODE_TRAME_MS` comme toute autre.
+        if crate::gui::atelier::effets::tour(
+            maintenant,
+            |cle| wins.iter().find(|w| w.id.get() == cle && !w.min)
+                .map(|w| vers_boite(empreinte_fenetre(w))),
+            |b| degats.ajoute(Origine::Fenetre, depuis_boite(b)),
+        ) {
+            sale = true;
+        }
+
         // ---- Rendu ----
         // L'horloge est la SEULE animation permanente du bureau : elle change
         // sans que rien puisse l'annoncer. Voir `politique::PERIODE_HORLOGE_MS`.
@@ -1318,6 +1358,7 @@ fn boucle() {
                 //
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
+                crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
@@ -1359,6 +1400,7 @@ fn boucle() {
                     crate::gui::degats::note_presentation(present);
                 }
                 fb::fin_trame();
+                crate::gui::atelier::effets::fin_trame();
 
                 crate::kernel::timer::mark_frame();
                 reveil::note_trame(horloge_seule);
@@ -1459,7 +1501,11 @@ fn boucle() {
         // jamais totalement la trace d'un bureau endormi.
         let etat = politique::Etat {
             maintenant_ms: maintenant,
-            sale,
+            // BOUCHAUD_ATELIER_EFFETS_V1 : une animation en cours EST une trame
+            // due, meme si celle-ci vient d'etre composee. Sans cela, le bureau
+            // dormait jusqu'au prochain evenement et une ouverture ne montrait
+            // qu'une image. Registre vide : `sale` seul, comme avant.
+            sale: sale || crate::gui::atelier::effets::actif(),
             client_muet_visible,
             horloge_visible: true,
             derniere_trame_ms: derniere_trame,
@@ -1515,6 +1561,7 @@ fn boucle() {
     }
 
     ferme_tous_les_clients(&mut wins);
+    crate::gui::atelier::effets::oublie_tout();
     fb::leave();
     crate::serial_println!("[gui] window manager ferme");
 }
@@ -1971,6 +2018,20 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
     if index >= wins.len() {
         return;
     }
+    // BOUCHAUD_ATELIER_EFFETS_V1 : l'instantane de fermeture est pris ICI,
+    // fenetre encore dans la liste et client encore vivant. Apres `remove`,
+    // plus rien ne lit sa surface. Un client mort disparait sans animation :
+    // ce n'est pas un geste de l'utilisateur.
+    let vivant = match &mut wins[index].app {
+        App::Navigateur { client } => client.vivant(),
+        _ => true,
+    };
+    if vivant && !wins[index].min {
+        let actif = widgets::indice_focus(wins) == Some(index);
+        let w = &wins[index];
+        crate::gui::atelier::effets::ferme(w.id.get(), vers_boite(cadre_fenetre(w)),
+            crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
+    }
     let mut w = wins.remove(index);
     if let App::Navigateur { client } = &mut w.app {
         client.termine();
@@ -2028,6 +2089,9 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 
 /// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
 fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
+    // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
+    // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
+    crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
     wins.push(fenetre);
     degats.tout();
 }
@@ -2238,6 +2302,19 @@ fn handle_click(
                 crate::gui::atelier::reglages::bascule_diagnostic();
                 degats.ajoute(Origine::BarreHaute, barre_haute_rect());
                 degats.ajoute(Origine::Menu, rect_action_centre(c::Action::Diagnostic));
+                return;
+            }
+            Some(segment @ (c::Action::AnimationsNormales | c::Action::AnimationsReduites
+                | c::Action::AnimationsAucune)) => {
+                use crate::gui::atelier::animations::Mode;
+                crate::gui::atelier::reglages::regle_animations(match segment {
+                    c::Action::AnimationsReduites => Mode::Reduit,
+                    c::Action::AnimationsAucune => Mode::Aucun,
+                    _ => Mode::Normal,
+                });
+                for s in c::SEGMENTS_ANIMATIONS {
+                    degats.ajoute(Origine::Menu, rect_action_centre(s));
+                }
                 return;
             }
             // Les memes chemins que le menu Applications : ecrire ce que la

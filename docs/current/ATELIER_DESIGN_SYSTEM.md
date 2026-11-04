@@ -227,13 +227,114 @@ Aucune icône factice ne les représente. Le centre écrit « Non pris en charge
 
 Le centre n'est peint que lorsqu'il est ouvert. Au repos, la barre n'est recomposée qu'au tic de l'horloge, comme avant.
 
+## 3 quater. Incrément B livré : ouverture et fermeture animées (BOUCHAUD_ATELIER_EFFETS_V1)
+
+**Architecture.** Le compositeur peint chaque calque directement dans le tampon arrière : une fenêtre n'a pas de surface à elle. Plutôt que de faire semblant, on lui en fabrique une, le temps d'une découpe :
+1. garder le dessous (les calques inférieurs déjà peints) ;
+2. peindre la fenêtre ;
+3. copier ce qu'elle a peint, puis remettre le dessous ;
+4. mélanger la copie, décalée de `dy` et à l'opacité de l'instant.
+
+Tout ce qui est touché hors de la découpe est remis à l'identique avant la présentation.
+
+**Fermeture.** Elle lit un **instantané**, c'est-à-dire une copie de pixels :
+- il est pris dans `ferme_fenetre` *avant* le `remove` et avant la fin du client ;
+- aucune surface n'est lue après sa libération ;
+- un client mort disparaît sans animation.
+
+| Module | Rôle |
+|---|---|
+| `atelier::animations` | **Pur** : registre borné (8 animations), datation, courbes, modes, union des zones. Inclus dans `test_atelier`. |
+| `atelier::effets` | Noyau : `ouvre`, `ferme` (instantané), `tour` (zones à recomposer), `compose_ouverture`, `dessine_instantane`, mesure du coût par trame. |
+| `atelier::reglages` | `animations()` : `normales`, `reduites` (fondu seul, plus court), `aucune`. Réglable dans le centre ou par `BO_ATELIER_ANIMATIONS=`. |
+
+**Paramètres** (horloge monotone, courbes entières) :
+
+| | Normal | Réduit | Aucun |
+|---|---|---|---|
+| Ouverture | 200 ms, sortie cubique, opacité 0→1, montée de 10 px | 110 ms, opacité seule | — |
+| Fermeture | 150 ms, entrée-sortie cubique, opacité →0, réduction à 96 % (virgule fixe, plus proche voisin), ombre qui s'efface | 90 ms, opacité seule | — |
+
+**Règles qui protègent le reste.**
+- **Registre vide ⇒ boucle identique à avant.** `tour` ne salit rien ; l'échéance de veille ne devient « trame due » que si `effets::actif()`. Test hôte : une minute sans geste, zéro trame.
+- **Datation à la première trame composée** (`EN_ATTENTE`), et non au lancement. Sous TCG, la première trame après une ouverture coûte environ 90 ms : datée de la création, l'animation n'en montrait qu'une image.
+- **Rien ne s'anime avant la première trame du bureau** : les fenêtres du démarrage apparaissent avec lui, sans alourdir la trame la plus chère.
+- **Calques.**
+  - Une fenêtre qui s'ouvre est déclarée `transparent` sur l'union de sa position finale et de sa position décalée. Opaque, elle masquerait le fond qu'elle laisse voir ; bornée à la position finale, la découpe l'écarterait.
+  - L'instantané forme un calque `Element::Fantome`, transparent, au-dessus des fenêtres.
+- **Dégâts.**
+  - Chaque trame recompose l'ancienne **et** la nouvelle zone (`Registre::recouvre`) : une fenêtre déplacée pendant son ouverture ne laisse pas de bande.
+  - Une animation finie, évincée ou annulée rend sa dernière zone pour une ultime trame propre.
+- **Interruption.**
+  - Fermer pendant l'ouverture annule l'ouverture ; la fermeture part de l'opacité atteinte.
+  - Réduire la fenêtre arrête l'animation.
+  - Sur un registre plein, la plus ancienne animation est évincée, et son instantané libéré.
+  - Les tampons de travail rendent leur mémoire dès que le registre est vide.
+- **Garde-fous.**
+  - Pas d'instantané en composition directe dans le scanout virtio : peindre hors trame y serait un accès pendant transfert.
+  - Au-delà de 1920×1080 px, pas d'instantané non plus.
+  - Allocations en `try_reserve_exact`.
+
+**Preuves.**
+- `test_atelier` : 67 tests (+12), dont :
+  - bureau immobile = 0 trame ;
+  - trames demandées seulement pendant la durée ;
+  - animation rendue une seule fois à sa fin ;
+  - registre plein qui évince sans dépasser la capacité (1000 lancements) ;
+  - relance sans doublon ;
+  - ancienne et nouvelle zone recouvertes ;
+  - annulation ;
+  - bornes exactes des courbes ;
+  - mode réduit sans déplacement, mode aucun sans lancement ;
+  - durées dans les fourchettes de la mission (ouverture 160–220 ms, fermeture 120–180 ms) ;
+  - datation à la première trame.
+- 22/22 suites, gardes 210/210, `CI_POLICY_OK`.
+
+**Captures QEMU réelles** :
+- l'exécuteur `tools/ci/qemu_gestes.py` garde une seule connexion au moniteur ;
+- la VM est figée (`stop`/`cont`) le temps de chaque `screendump` ;
+- clics et touches sont réellement injectés.
+
+| Fichier | Ce qu'il montre |
+|---|---|
+| `atelier/sequence-incB-ouverture.png` | Double-clic sur Fichiers : fenêtre translucide, puis opaque |
+| `atelier/sequence-incB-fermeture.png` | Clic sur la croix du Terminal : l'instantané s'efface et se réduit ; aucun résidu |
+| `atelier/sequence-incB-interruption.png` | Échap pendant l'ouverture, puis rafale de trois ouvertures et deux Échap : aucun fantôme résiduel |
+| `atelier/capture-incB-centre-animations.png` | Réglage Normales / Réduites / Aucune dans le centre |
+
+**Mesures** (QEMU TCG, BIOS 1280×720, rendu **logiciel**) : ligne `BOUCHAUD_ATELIER_ANIMATION`, coût d'une trame composée qui anime.
+
+| Scénario | Trames | Coût moyen | Coût max |
+|---|---|---|---|
+| Fermeture Terminal (380×280), Normal | 6 | 14,5–16,3 ms | 32–51 ms |
+| Ouverture Fichiers (première trame plein écran comprise), Normal | 3–4 | 42–62 ms | 75–114 ms |
+| Fermeture, Réduit | 3 | 19,3 ms | 36,6 ms |
+| Ouverture, Réduit | 2 | 56,4 ms | 77,5 ms |
+| Mode Aucun | 0 (aucune ligne émise) | — | — |
+
+Sous TCG, l'ouverture plafonne à environ 15–25 images/s, parce que sa première trame est plein écran (fond, icônes, fenêtre neuve). La fermeture tourne à environ 60 images/s. Ce sont des chiffres d'émulation logicielle, sans accélération GPU.
+
+**Repos** (scénario de 62 s) :
+- `desktop cpu_pct` : 3 à t = 30 s, 0 à t = 60 s, identique à la base ;
+- 2 trames utiles en 54 s.
+
+**Première trame** : 5480 / 5481 / 5576 ms. L'incrément A mesurait 5301–5418 ms ; la plage historique va de 5178 à 5405 ms.
+
+**Bootimage** : 28 963 840 octets.
+
+**Non fait dans cet incrément** (prévu, à faire proprement) :
+- réduction vers l'icône du dock et restauration inverse ;
+- interpolation de la maximisation ;
+- transition de focus ;
+- fondu du centre et du menu.
+
 ## 4. Limites connues de l'incrément 1 (assumées)
 
 - **Contenu des applications encore sombre** : Fichiers, Notes, Calculatrice et les autres peignent pour `theme::COLOR_SURFACE`. Le chrome est Atelier, le contenu ne l'est pas encore (prochain incrément). Le Terminal reste sombre volontairement.
 - **Pas de mise à l'échelle HiDPI** : en 2560×1600, l'interface garde ses tailles en pixels et paraît minuscule.
 - **Icône du navigateur provisoire** (tuile « boussole ») : l'identité de Bouchaud Navigateur et son chrome restent à faire, sans toucher au moteur Ladybird.
 - **Le verre n'est pas flouté** : c'est une matière translucide légère. Aucun flou d'arrière-plan n'est implémenté, et rien ne le prétend.
-- **Pas encore de transitions animées** : `mouvement.rs` est prêt et testé, mais il n'est pas branché sur la boucle du compositeur (incrément 2).
+- ~~Pas encore de transitions animées~~ : ouverture et fermeture animées depuis l'incrément B ; la réduction vers le dock et la maximisation restent à faire.
 - **Pas de survol sur le dock** : un déplacement de souris n'invalide que l'empreinte du curseur, donc un voile de survol resterait sur la cellule quittée. Il viendra avec l'incrément 2, qui invalide la cellule quittée et la cellule atteinte.
 - **Menu Démarrer encore sombre** : il est repositionné au-dessus du dock, mais pas restylé.
 - ~~Menus de la barre inertes~~ : retirés par l'incrément A.

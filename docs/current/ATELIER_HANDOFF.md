@@ -75,6 +75,7 @@ Le fond se change dans la liste `FONDS` de la fabrique. Ajouter une variante 256
 8. **`socat` est absent du conteneur** : utiliser `tools/ci/qemu_moniteur.py SOCKET "commande"`.
 9. **Applications natives** : elles peignent pour une surface sombre. Un corps de fenêtre clair rend le terminal illisible, d'où le corps sombre jusqu'à l'incrément 3.
 10. **Souris QEMU** : un grand `mouse_move` laisse un reliquat qui absorbe les gestes suivants. Utiliser l'instruction `coin` de `BUREAU_GESTES` (pas de 120), puis des déplacements relatifs. La souris n'a pas d'accélération et est bornée à l'écran.
+12. **Animations** : rien ne s'anime avant la première trame du bureau, et une animation est datée à sa première trame composée. Pour capturer une animation en cours, utiliser `capture` dans `BUREAU_GESTES`, qui fige la VM. Le timing de l'hôte varie : prévoir des captures serrées (`attente 0.02`).
 11. **Centre de contrôle** : toute nouvelle commande doit être réelle, ou affichée comme non prise en charge. La géométrie va dans `atelier::centre`, sinon le clic et le survol divergent du dessin.
 
 ## Prochain incrément (2 — mouvement), plan précis
