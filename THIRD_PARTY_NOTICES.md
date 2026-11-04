@@ -1,26 +1,53 @@
 # Composants tiers
 
-Bouchaud OS est publie sous licence MIT OR Apache-2.0. Il incorpore ou prevoit
-d'incorporer les composants ci-dessous, sous leurs licences respectives.
+Le code de Bouchaud OS est publie sous licence MIT OR Apache-2.0 (`LICENSE`,
+`LICENSE-MIT`, `LICENSE-APACHE`). Il incorpore les composants ci-dessous, sous
+leurs licences respectives, que la licence du depot ne remplace pas.
 
 Les textes integraux sont dans `THIRD_PARTY_LICENSES/`.
+
+## Crates Rust du noyau (`Cargo.toml`)
+
+Licences relevees dans le `Cargo.toml` de chaque crate, aux versions resolues
+par `Cargo.lock`.
+
+| Crate | Licence | Usage |
+|---|---|---|
+| fontdue 0.9 (et ttf-parser) | MIT OR Apache-2.0 OR Zlib | rasterisation des polices |
+| smoltcp 0.12 | 0BSD | pile TCP/IP |
+| wasmi 0.31 | MIT / Apache-2.0 | interpreteur WebAssembly |
+| hashbrown 0.15 | MIT OR Apache-2.0 | tables de hachage `no_std` |
+| linked_list_allocator 0.10 | Apache-2.0 / MIT | tas d'amorcage |
+| x86_64 0.14 | MIT / Apache-2.0 | structures du processeur |
+| pic8259 0.10 | Apache-2.0 / MIT | controleur d'interruptions historique |
+| bootloader 0.9, bootloader_api 0.11 | MIT / Apache-2.0 | chargeurs BIOS et UEFI |
 
 ## Incorpore aujourd'hui
 
 | Composant | Licence | Usage |
 |---|---|---|
-| Qt 5.15.13 | LGPL-3.0 | rasterisation du navigateur actuel (userland) |
-| CPython 3.12.3 | PSF-2.0 | moteur du navigateur actuel (userland) |
-| QuickJS | MIT | JavaScript du navigateur actuel (userland) |
-| FFmpeg 6.1.1 | LGPL-2.1+ | media (userland) |
+| **Ladybird** (SHA epingle dans `third_party/UPSTREAM.md`) | **BSD 2-Clause** | moteur de Bouchaud Navigateur (userland) ; texte dans `THIRD_PARTY_LICENSES/ladybird-BSD-2-Clause.txt` |
 | DejaVu Fonts | Bitstream Vera / licence DejaVu | polices systeme |
 | musl | MIT | libc du userland |
+| Qt 5.15.13 | LGPL-3.0 | ancien navigateur (userland historique, `run.ps1 -Legacy`) |
+| CPython 3.12.3 | PSF-2.0 | ancien navigateur et environnement Python (userland historique) |
+| QuickJS | MIT | JavaScript de l'ancien navigateur (userland historique) |
+| FFmpeg 6.1.1 | LGPL-2.1+ | media (userland) |
 
-## Prevu — portage Ladybird
+## Dans les PR Atelier ouvertes (#242 et suivantes), pas encore sur `main`
+
+| Composant | Licence | Usage |
+|---|---|---|
+| Lucide (icones) | ISC | glyphes des icones du bureau |
+| « summer 1am », Risto Saukonpaa (KDE plasma-workspace-wallpapers) | LGPL-3.0 | fond d'ecran, recadre par la fabrique d'assets |
+| Sous-ensemble de DejaVu Sans | Bitstream Vera / licence DejaVu | police du bureau (PR #247) |
+
+Ces PR apportent leurs textes de licence et `assets/atelier/ATTRIBUTIONS.md`.
+
+## Dependances de Ladybird
 
 | Composant | Licence | Statut |
 |---|---|---|
-| **Ladybird** | **BSD 2-Clause** | texte copie dans `THIRD_PARTY_LICENSES/ladybird-BSD-2-Clause.txt` |
 | ICU 78.3 | Unicode-3.0 | requis par LibUnicode (donc par LibJS) |
 | OpenSSL 3.6.3 | Apache-2.0 | requis par LibCrypto (liaison publique) |
 | libtommath 1.3.0 | Unlicense / dual | BigInt |
@@ -56,7 +83,6 @@ synchronisation, pas une formalite.
 1. **LGPL et image statique.** La compatibilite LGPL de l'image userland
    statique (Qt, FFmpeg) n'est pas tranchee. Elle ne bloque pas le developpement
    mais doit l'etre avant toute distribution binaire.
-2. **`LICENSE-APACHE` manquant.** `LICENSE` et `LICENSE-MIT` sont en place. Le
-   texte integral d'Apache-2.0 n'a **pas** ete ajoute : un texte juridique
-   reproduit de memoire peut differer de l'original sur un detail qui compte. Il
-   doit etre copie tel quel depuis <https://www.apache.org/licenses/LICENSE-2.0.txt>.
+2. **`LICENSE-APACHE`** est le texte officiel, copie tel quel depuis
+   <https://www.apache.org/licenses/LICENSE-2.0.txt> (SHA-256
+   `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`).

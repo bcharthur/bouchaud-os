@@ -13,9 +13,9 @@ proposee sous ces deux licences, sans condition supplementaire.
 
 Composants tiers
 
-Bouchaud OS incorpore des composants tiers publies sous d'autres licences (Qt,
-CPython, QuickJS, FFmpeg, musl, DejaVu, et -- a mesure du portage -- Ladybird et
-ses dependances).
+Bouchaud OS incorpore des composants tiers publies sous d'autres licences
+(Ladybird et ses dependances, crates Rust, DejaVu, musl, et dans le userland
+historique Qt, CPython, QuickJS et FFmpeg).
 
 Ces licences ne sont pas remplacees par celle-ci : chaque composant reste soumis
 a la sienne, et ses notices de copyright sont conservees.

@@ -4,7 +4,8 @@
 The snapshot records the main HEAD that was audited before the documentation
 preparation PR. After that docs-only PR is merged, HEAD necessarily changes.
 Accept that audited commit itself, or a descendant whose changes since the
-snapshot are restricted to docs/current/** plus this checker. Any runtime,
+snapshot are restricted to documentation (docs/**, READMEs, licences and
+notices) plus this checker. Any runtime,
 workflow, source or other repository change makes the snapshot stale.
 """
 import json
@@ -48,12 +49,28 @@ changed = subprocess.check_output(
     text=True,
 ).splitlines()
 
-allowed_exact = {"tools/ci/check_status_snapshot.py"}
-unexpected = [
-    path
-    for path in changed
-    if not path.startswith("docs/current/") and path not in allowed_exact
-]
+allowed_exact = {
+    "tools/ci/check_status_snapshot.py",
+    # Documentation-only files outside docs/: they describe the code, they do
+    # not change it.
+    "README.md",
+    "STATUS.md",
+    "BOUCHAUD_AI_CONTEXT.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+}
+
+
+def documentation_only(path: str) -> bool:
+    if path.startswith("docs/") or path in allowed_exact:
+        return True
+    # A README anywhere describes its directory; it is never built or run.
+    return Path(path).name.upper().startswith("README")
+
+
+unexpected = [path for path in changed if not documentation_only(path)]
 
 if unexpected:
     print("STATUS_SNAPSHOT_STALE actual=" + actual + " snapshot=" + expected)

@@ -30,6 +30,8 @@ Pour l'etat reel, voir le `README.md` a la racine et les documents de `docs/`.
 | `BROWSER_COMPATIBILITY_AUDIT.md` | l'ecart mesure avec les navigateurs reels, avant les chantiers CSS et JS |
 | `BROWSER_WORKERS_AUDIT.md` | l'audit qui a motive les Web Workers et le clonage structure |
 | `PORTAGE_WEBKIT.md` | l'etude de portage de WebKit, et pourquoi elle n'a pas ete suivie |
+| `BOUCHAUD_AI_CONTEXT_2026-10.md` | l'ancien point d'entree de reprise (HEAD `3658af04`, octobre 2026) |
+| `STATUS_2026-10-07.md` | l'ancien statut de la racine, au 7 octobre 2026 |
 
 ## La regle
 

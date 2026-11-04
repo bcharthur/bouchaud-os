@@ -17,5 +17,6 @@ En resume :
 | `docs/historique/` | pieces de travail, notes, lots | rarement, par un commit    |
 | `docs/history/`    | anciennes documentations       | oui, depuis docs/ et src/ |
 
-Aucun des deux ne decrit l'etat actuel du projet. Pour cela : `docs/ARCHITECTURE.md`,
-`docs/ETAT_DES_LIEUX.md`, `docs/ROADMAP.md`.
+Aucun des deux ne decrit l'etat actuel du projet. Pour cela :
+[`docs/current/README.md`](../current/README.md) et
+[`docs/current/status.json`](../current/status.json).

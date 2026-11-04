@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "as_of": "2026-11-03",
-  "observed_main_head": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
+  "as_of": "2026-11-04",
+  "observed_main_head": "69e179a4ee3842797ca000f1c3b85d87d7ddeac1",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
   "baseline_status": "NOT_ESTABLISHED",
@@ -122,6 +122,33 @@
         "note": "still the old 3-attempt C14 witness; the deterministic witness and the PR trigger come after 19dc18ad"
       },
       "codex_review": "PASS (no findings)"
+    },
+    "push_main_69e179a4": {
+      "ci_fast": {
+        "run": 41709822155,
+        "verdict": "PASS"
+      },
+      "integration": {
+        "run": 41709822019,
+        "verdict": "PASS"
+      },
+      "reliability_v3": {
+        "run": 41709822270,
+        "verdict": "PASS"
+      },
+      "native_ipc_runtime": {
+        "run": 41709822133,
+        "verdict": "PASS"
+      },
+      "ladybird_native_browser": {
+        "run": 41709822165,
+        "verdict": "PASS"
+      },
+      "p13_primitives_noyau": {
+        "run": 41709822286,
+        "verdict": "PASS"
+      },
+      "note": "push of the PR #241 merge commit (runs listed by the GitHub API on 2026-11-04). No Security Runtime run was found for this push; it was dispatched on the PR head 5fbc5068 (run 41701349221, PASS)."
     }
   },
   "hardware": {
@@ -138,12 +165,14 @@
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd",
     "no production release key; anti-rollback (downgrade) policy not implemented",
     "SIGCHLD multithread probe: one unexplained failure on main, not reproduced in 125 targeted runs",
-    "SMP1 native IPC latency attributed (file->elu dominates), not corrected"
+    "SMP1 native IPC latency attributed (file->elu dominates), not corrected",
+    "no general-purpose on-disk VFS: RAMFS is the live filesystem, /persist rewrites its whole table per transaction, no unified page cache, no file-backed writable mmap",
+    "desktop, window manager, native apps, network stack and TLS still run in ring 0",
+    "rendering is CPU only: virtio-gpu 2D presents frames, no GPU acceleration, no 3D, no AMD driver"
   ],
   "candidate": {
-    "branch": "claude/atomic-platform-20261103",
-    "base_main": "992e67e14465dfe5d7bd612cdc24e0a1a7d35ba5",
-    "note": "the final head SHA and its PR checks are reported in the PR, not in this file (a file cannot carry the CI result of its own commit)"
+    "branch": null,
+    "note": "PR #241 (Atomic Platform) merged into main as 69e179a4 on 2026-11-03; no qualification candidate at this snapshot. A PR's final head SHA and its checks are reported in the PR, not here."
   },
   "ladybird_sha": "cdfe5f858eb5fc64a8d9d3fcc247d71b03fbd1f6",
   "platform": {
@@ -169,10 +198,7 @@
     "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd"
   ],
-  "observed_work_branch": {
-    "name": "claude/atomic-platform-20261103",
-    "qualified_push_sha": "21fca026ea9306938817dc3617983655ef2b7c16"
-  },
+  "observed_work_branch": null,
   "updates_automatically": false,
   "atomic_platform": {
     "proof_levels": {
@@ -286,5 +312,48 @@
       "status": "OPEN_NOT_ATTRIBUTED",
       "evidence_since": "log overwritten before reading; 36 isolated SMP4 correctif boots: 0 panic, 0 overlap; the bench now prints a panic's site and message in the job log"
     }
+  },
+  "open_prs": {
+    "as_of": "2026-11-04",
+    "base": "main@69e179a4",
+    "note": "#242 -> #243 -> #244 -> #245 -> #247 are STACKED: each branch contains the previous one; #246 is independent. Nothing listed here is available on main.",
+    "items": [
+      {
+        "number": 242,
+        "scope": "Atelier Experience 2.0: design system, real assets (Lucide, photo wallpaper, provisional logo), dock, windows",
+        "head": "f2cbb06819ea899765f1f629016e121df9ca7a36",
+        "stacked_on": null
+      },
+      {
+        "number": 243,
+        "scope": "Atelier A/B/C: real top bar, control centre, window animations, interactive dock",
+        "head": "cefad34a256dc802c764255a234fa33da0bb189d",
+        "stacked_on": 242
+      },
+      {
+        "number": 244,
+        "scope": "Atelier D1: Files application",
+        "head": "07f1a5ffa3b0f3fa309e6413f60b0022d38fd0e6",
+        "stacked_on": 243
+      },
+      {
+        "number": 245,
+        "scope": "Storage S1: persistent home folders, delayed writeback, table metadata",
+        "head": "8db53f92ae4b84c18e17af8048cf94823be1ca6a",
+        "stacked_on": 244
+      },
+      {
+        "number": 246,
+        "scope": "Trigkey T1: real USB flush (SYNCHRONIZE CACHE), A/B commit on a USB key, volume-to-support binding",
+        "head": "see the PR (fixes in progress at snapshot)",
+        "stacked_on": null
+      },
+      {
+        "number": 247,
+        "scope": "Perf P1: desktop first frame -1.9 s (font subset loaded in parallel)",
+        "head": "66b4c508b5e4e96dac4f5e484658537c1f2d98b5",
+        "stacked_on": 245
+      }
+    ]
   }
 }

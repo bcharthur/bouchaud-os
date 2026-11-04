@@ -1,5 +1,12 @@
 # Nautile — service de rendu déporté
 
+> **HISTORIQUE.** Ce service servait l'ancien navigateur du userland historique
+> (Nautile). Le navigateur de Bouchaud OS est aujourd'hui Bouchaud Navigateur,
+> dérivé de Ladybird, qui rend les pages lui-même
+> ([BOUCHAUD_NAVIGATEUR](../../docs/current/BOUCHAUD_NAVIGATEUR.md)). Aucun banc ni
+> workflow ne l'utilise plus, et `src/browser/loader.rs` cité plus bas n'existe
+> plus. Conservé pour mémoire.
+
 Nautile (le navigateur de Bouchaud OS) ne peut pas exécuter les sites modernes
 (applications JavaScript type Google/YouTube, CSS complet, SVG, polices web…).
 Ce petit service les rend avec un **vrai Chromium headless** et renvoie une
