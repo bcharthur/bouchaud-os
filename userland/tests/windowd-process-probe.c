@@ -37,7 +37,9 @@ int bo_main(const struct bo_start *start)
     struct wd_reply rep;
     struct bo_process_info info;
     struct bo_wait_event events[1];
-    bo_u32 mask=BO_RIGHT_READ|BO_RIGHT_WRITE|BO_RIGHT_WAIT;
+    /* INSPECT est nécessaire à la validation de droits dans windowd :
+     * le canal reste sans DUP ni TRANSFER après atténuation. */
+    bo_u32 mask=BO_RIGHT_READ|BO_RIGHT_WRITE|BO_RIGHT_WAIT|BO_RIGHT_INSPECT;
     bo_i64 ws;
     bo_i64 rc;
     wd_u32 first, second;
