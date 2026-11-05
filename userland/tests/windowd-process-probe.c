@@ -22,20 +22,20 @@ static int roundtrip(bo_handle_t ctrl, bo_handle_t ws,
     bo_i64 len;
     bo_i64 result=bo_channel_send(ctrl,&q,sizeof(q),0,0);
     if (result!=(bo_i64)sizeof(q)) {
-        bo_say("[WINDOWD_TRACE] send=");
+        bo_say("WINDOWD_PROBE_FAIL_TRACE send=");
         bo_say_i64(result); bo_say("\n");
         return 0;
     }
     result=bo_waitset_wait(ws,e,1,10000000000UL);
     if (result!=1) {
-        bo_say("[WINDOWD_TRACE] wait=");
+        bo_say("WINDOWD_PROBE_FAIL_TRACE wait=");
         bo_say_i64(result); bo_say("\n");
         return 0;
     }
     len=bo_channel_recv(ctrl,reply,sizeof(*reply),0,0,&meta);
     if (len!=(bo_i64)sizeof(*reply) || meta.handles!=0 ||
         reply->version!=WD_VERSION) {
-        bo_say("[WINDOWD_TRACE] recv=");
+        bo_say("WINDOWD_PROBE_FAIL_TRACE recv=");
         bo_say_i64(len);
         bo_say(" handles="); bo_say_i64((bo_i64)meta.handles);
         bo_say(" signal="); bo_say_i64((bo_i64)e[0].signals);
