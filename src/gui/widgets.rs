@@ -817,7 +817,7 @@ fn draw_window(w: &Win, focused: bool) {
     // si un jour la surface est plus petite que la fenetre, la difference doit
     // continuer de recevoir un fond, sinon elle montrerait le bureau.
     let opaque = match &w.app {
-        App::Navigateur { client } => {
+        App::Navigateur { client } | App::Doom { client } => {
             let zone = crate::gui::window::zone_utile(w);
             // `composable`, et non la surface allouee : depuis que celle-ci est
             // dimensionnee pour une fenetre MAXIMISEE, elle est plus grande que
