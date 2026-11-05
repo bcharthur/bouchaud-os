@@ -24,6 +24,7 @@
 //!   - `surface` : memoire de pixels partagee avec un client ring 3 ;
 //!   - `client` : session (processus, surface, canal) d'un client.
 
+pub mod applications_externes;
 pub mod apps;
 /// Geometrie de dessin partagee, pure et totale : voir `geometrie.rs`.
 pub mod geometrie;
