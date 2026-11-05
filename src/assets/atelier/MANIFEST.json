@@ -679,6 +679,33 @@
       "hauteur": 1080,
       "alpha": false,
       "licence": "fond-summer_1am"
+    },
+    "src/assets/atelier/apps/doom-18.png": {
+      "sha256": "90f252351433e1e87a15eae97ce6ec8d521541b6a1a8e17941e1459fe0792580",
+      "octets": 1382,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "monogramme D original"
+    },
+    "src/assets/atelier/apps/doom-40.png": {
+      "sha256": "aa68f8047c37063cf70dbbfd6db8d06bbc1325491b91d23466a6c8d727a509d7",
+      "octets": 6508,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "monogramme D original"
+    },
+    "src/assets/atelier/apps/doom-56.png": {
+      "sha256": "21a30c642081b4c38194afe527f7476f14fb6552f1a93c908d8ed83123a57e1d",
+      "octets": 12668,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "tuiles-apps",
+      "glyphe": "monogramme D original"
     }
   }
 }
