@@ -121,7 +121,32 @@ for k in $(printf '%s\n' bon "$MAUVAIS" | sort -u); do
   # keeps a slot image small enough to be shipped and written by updated.
   strip --strip-debug -o "$OUT/kernel-$k.elf" target/x86_64-bouchaud_os_uefi/debug/bouchaud-os
 done
-TRAVAIL=$(mktemp -d); trap 'rm -rf "$TRAVAIL" "$CLES"' EXIT
+# BOUCHAUD_AB_DIAGNOSTIC_ECHEC_V1 : en échec, les lignes décisives de chaque
+# démarrage vont dans le journal du job. Les artefacts boot-*.log ne sont pas
+# toujours lisibles (rétention, accès), et un `B-` doit pouvoir s'attribuer
+# sans eux : E/S et reprises USB, vidange, état et commit de serviced, refus
+# du noyau, services. Diagnostic seulement : aucun verdict n'en dépend.
+diagnostic_echec() {
+  local f n propre
+  for f in "$OUT"/boot-*.log; do
+    [ -s "$f" ] || continue
+    n=$(basename "$f" .log)
+    propre=$(sed 's/\x1b\[[0-9;]*m//g' "$f" | tr -d '\r' \
+      | sed -E 's/^(\[[0-9:]+\])\[[^]]*\](\[FPS:[^]]*\])? ?/\1 /' | awk '!vu[$0]++')
+    echo "AB_DIAG ---- $n"
+    # 1. Verdict : démarrage, sonde de vidange, état et commit, refus, services.
+    grep -aE "BOUCHAUD_AB_(BOOT|PASSAGE)|BOUCHAUD_USB_STOCKAGE_VIDANGE|BOUCHAUD_USB_(REFUS_VIDANGE|VOLUME_ORPHELIN)|BOUCHAUD_UPDATE_SANTE|SERVICED_(UPDATE_STATE|HEALTH_COMMIT)|\[SERVICED\] (system|svc=[a-z]+ [A-Za-z]+->(Failed|Stopped))|KERNEL PANIC|panicked at" \
+      <<< "$propre" | awk -v n="$n" 'c < 40 { print "AB_DIAG " n " " $0; c++ }' || true
+    # 2. Transport USB : décompte, puis les premiers échecs d'E/S.
+    echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre" || true) reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre" || true) reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre" || true) vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre" || true)"
+    # awk lit tout (pas de `head`) : sous pipefail, aucun SIGPIPE du producteur.
+    # `|| true` : un grep sans correspondance (code 1) ne doit pas, sous set -e,
+    # interrompre le diagnostic des démarrages suivants (run 41916742669).
+    grep -a "BOUCHAUD_USB_STOCKAGE_IO_ECHEC" <<< "$propre" | awk -v n="$n" 'c < 8 { print "AB_DIAG " n " " $0; c++ }' || true
+  done
+}
+TRAVAIL=$(mktemp -d)
+trap 'rc=$?; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
 cp -r tools/reference/uefi-image-builder "$TRAVAIL/builder"
 ( cd "$TRAVAIL/builder" && cargo +"$TOOLCHAIN" build --release -q )
 BUILDER=$TRAVAIL/builder/target/release/bouchaud-reference-uefi-image-builder
@@ -252,6 +277,22 @@ case "${BO_AB_SUPPORT:-nvme}" in
       -device usb-storage,bus=xhci.0,port=2,drive=seconde,removable=on) ;;
   *) echo "BO_AB_SUPPORT inconnu : ${BO_AB_SUPPORT}" >&2; exit 2 ;;
 esac
+# BOUCHAUD_AB_ETAT_APRES_COMMIT_ATTENDU_V1 : après `result=committed`,
+# serviced relit l'état par la capacité et écrit `SERVICED_UPDATE_STATE`.
+# Cette seconde ligne est la preuve « état visible après commit » que
+# l'assertion `etat_apres_commit` exige ; on l'attend (borné) avant de couper.
+attend_etat_apres_commit() {
+  local borne=$((SECONDS + ${BO_AB_ETAT_APRES_COMMIT_S:-20}))
+  while (( SECONDS < borne )); do
+    if sed 's/\x1b\[[0-9;]*m//g' "$log" | tr -d '\r' \
+         | awk '/result=committed/ { c = 1; next } c && /SERVICED_UPDATE_STATE/ { t = 1 } END { exit !t }'; then
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.2
+  done
+  return 1
+}
 sequence=()
 nb=$(wc -w <<< "$ATTENDU")
 for i in $(seq 1 "$nb"); do
@@ -311,7 +352,13 @@ for i in $(seq 1 "$nb"); do
       sleep 1; continue
     fi
     case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
-      if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then verdict="$slot+"; break; fi
+      if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then
+        # Couper à la première ligne détruisait la seconde (run 41898808040,
+        # #248 : `B+ B=` puis etat_apres_commit en échec). Si elle ne vient
+        # pas dans la borne, l'assertion échoue comme avant : rien n'est relâché.
+        attend_etat_apres_commit || true
+        verdict="$slot+"; break
+      fi
       if [ -n "$slot" ] && grep -aq "result=already_good" <<< "$propre"; then verdict="$slot="; break; fi
       if [ -n "$slot" ] && grep -aqE "result=refused|\[SERVICED\] system [A-Za-z]+->RecoveryRequired" <<< "$propre"; then
         verdict="$slot-"; break
