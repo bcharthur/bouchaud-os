@@ -45,7 +45,9 @@ macro_rules! tuile {
     };
 }
 
-/// Les tuiles. Les huit premieres sont dans l'ordre de `window::ICONS`.
+/// Les tuiles dans leur ordre propre (INDEPENDANT de `window::ICONS`).
+/// Le bureau comme le dock doivent utiliser `pour_kind` / `pour_app`, jamais
+/// le rang d'une icone de bureau : l'index 8 est Moniteur, 11 est DOOM.
 const SOURCES: [[&[u8]; 3]; 12] = [
     tuile!("navigateur"),
     tuile!("calculatrice"),
