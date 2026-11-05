@@ -2258,6 +2258,9 @@ fn lance_application_externe(
         Err(error) => {
             if application.identite == Identite::Ladybird {
                 crate::gui::services::echec();
+            } else if application.identite == Identite::Doom {
+                // Compatibilite avec les journaux et scripts de DOOM.
+                crate::serial_println!("BOUCHAUD_DOOM_LAUNCH_ERROR {}", error);
             }
             crate::kernel::dmesg::log_fmt(format_args!(
                 "gui: application {}: {}", application.executable, error
