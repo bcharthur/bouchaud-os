@@ -54,11 +54,14 @@ pub fn pour_chemin(chemin: &str) -> Option<&'static Application> {
 
 /// Nom visible au chargement : jamais un autre programme par defaut.
 /// Un programme inconnu reste identificable par le nom de son executable.
-pub fn titre_pour_chemin(chemin: &str) -> &str {
-    pour_chemin(chemin).map(|application| application.titre).unwrap_or_else(|| {
-        let nom = chemin.rsplit('/').next().unwrap_or(chemin);
-        if nom.is_empty() { "Application" } else { nom }
-    })
+pub fn titre_pour_chemin<'a>(chemin: &'a str) -> &'a str {
+    match pour_chemin(chemin) {
+        Some(application) => application.titre,
+        None => {
+            let nom = chemin.rsplit('/').next().unwrap_or(chemin);
+            if nom.is_empty() { "Application" } else { nom }
+        }
+    }
 }
 
 /// Arguments passés au processus, indépendants des fenêtres et du navigateur.
