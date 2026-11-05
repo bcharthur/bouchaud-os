@@ -20,7 +20,7 @@ use crate::kernel::fd::{Canal, FdKind, FileDesc, CAPACITE_CANAL};
 use crate::kernel::sync::SpinLock;
 use crate::kernel::task::{self, EcranVirtuel, Priorite};
 
-pub const CHEMIN_NAVIGATEUR: &str = "/bo-navigateur";
+pub const CHEMIN_NAVIGATEUR: &str = crate::gui::applications_externes::LADYBIRD.executable;
 
 // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3c) -- le contrat a deux tampons
 // est OFFERT au lancement d'un client seulement sous cette politique (OFF par
@@ -140,7 +140,7 @@ impl Client {
         let (largeur, hauteur) = (allocation.0.max(zone.0), allocation.1.max(zone.1));
         if crate::fs::ramfs::fs().resolve_checked(chemin, cwd).is_err() {
             return Err(alloc::format!(
-                "{} absent — voir tools/userland/build-navigateur.sh",
+                "{} absent de l'image userland — verifier son installation",
                 chemin
             ));
         }
@@ -160,14 +160,9 @@ impl Client {
             pas: surface.pas as u32,
         };
 
-        // BOUCHAUD_DOOM_ATELIER_V2: le WAD vit sur le disque userland
-        // alongside /doom. Le navigateur conserve ses propres arguments.
-        let argv = if chemin == "/doom" {
-            alloc::vec![chemin.to_string(), "-iwad".to_string(),
-                "/freedoom1.wad".to_string(), "-nosound".to_string()]
-        } else {
-            alloc::vec![chemin.to_string()]
-        };
+        // Les arguments appartiennent au manifeste applicatif, pas au protocole
+        // des surfaces. Aucun chemin special DOOM ou Ladybird dans le WM.
+        let argv = crate::gui::applications_externes::argv(chemin);
         // NE PRESENTER COMME BAIL QUE CE QUI EST UN BAIL.
         //
         // `dns_server()` et `gateway()` rendent les constantes compilees tant
@@ -261,7 +256,9 @@ impl Client {
         let pid =
             crate::kernel::exec::lance_detache(chemin, &argv, &base, cwd, &mut prepare)?;
         task::pose_priorite_de(pid, Priorite::Interactive);
-        crate::kernel::perf::browser_client_start(pid);
+        if chemin == CHEMIN_NAVIGATEUR {
+            crate::kernel::perf::browser_client_start(pid);
+        }
 
         crate::kernel::dmesg::log_fmt(format_args!(
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
@@ -327,7 +324,7 @@ impl Client {
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
-            titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
+            titre: crate::gui::applications_externes::titre_pour_chemin(chemin).to_string(),
             surface,
             geometrie,
             vers_client,
