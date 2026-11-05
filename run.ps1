@@ -508,12 +508,16 @@ if ($LadybirdMode) {
         Ensure-GitHubCli
 
 
+        # Ce nom doit aussi etre defini quand -LadybirdRunId est fourni :
+        # le telechargement a toujours besoin de -n, meme sans decouverte.
+        $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
         $EffectiveLadybirdRunId = $LadybirdRunId
 
         if ($EffectiveLadybirdRunId -eq 0) {
-            $CurrentBranch = (& git branch --show-current).Trim()
+            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
+            $CurrentBranch = Get-BrancheArtefact
             if (-not $CurrentBranch) {
-                Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
+                Fail "HEAD detache hors origin/main : fournir -LadybirdRunId ou basculer sur une branche distante qualifiee."
             }
 
             # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
@@ -529,10 +533,6 @@ if ($LadybirdMode) {
             # defauts d'EXECUTION sont passes par ce trou, tous dans ce
             # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
             # maintenant avec un `gh` simule.
-            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-
-            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
-
             $selection = Get-RunAvecArtefact `
                 -Branche $CurrentBranch `
                 -Artefact $ArtefactNavigateur
