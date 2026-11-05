@@ -1374,7 +1374,7 @@ fn boucle() {
             // du systeme. Sans cette fermeture, chaque clic reposait un point
             // d'amorcage, ecrasait le `delta_ms` du suivant et faisait accuser
             // « navigateur-lance » par l'ecran de faute des heures plus tard.
-            let demarre = wins.iter().any(window::est_client);
+            let demarre = wins.iter().any(|w| matches!(&w.app, App::Navigateur { .. }));
             crate::platform::pc::ecran_faute::point(if demarre {
                 "navigateur-lance"
             } else {
