@@ -14,6 +14,25 @@ static int check(int ok, const char *reason)
     return 0;
 }
 
+/* Les canaux sont niveau-declenches : WRITABLE peut etre present en
+ * permanence avant le message de reponse. Ne jamais lire suite a un simple
+ * reveil writable. Attendre READABLE ou fermeture sous echeance reelle.
+ * L'attente courte hors canal evite une boucle active sur WRITABLE. */
+static bo_i64 attend_lecture(bo_handle_t ws, struct bo_wait_event *event)
+{
+    bo_i64 borne=bo_time_now_ns()+10000000000L;
+    for (;;) {
+        bo_i64 maintenant=bo_time_now_ns();
+        bo_i64 n;
+        if (maintenant >= borne) return -BO_E_TIMED_OUT;
+        n=bo_waitset_wait(ws,event,1,(bo_u64)(borne-maintenant));
+        if (n < 0 && n != -BO_E_TIMED_OUT) return n;
+        if (n == 1 && (event->signals & BO_SIGNAL_READABLE)) return 1;
+        if (n == 1 && (event->signals & BO_SIGNAL_PEER_CLOSED)) return -BO_E_PEER_CLOSED;
+        if (bo_sleep_ns(1000000UL)<0) return -BO_E_FAULT;
+    }
+}
+
 static int roundtrip(bo_handle_t ctrl, bo_handle_t ws,
                      struct wd_request q, struct wd_reply *reply)
 {
@@ -26,7 +45,7 @@ static int roundtrip(bo_handle_t ctrl, bo_handle_t ws,
         bo_say_i64(result); bo_say("\n");
         return 0;
     }
-    result=bo_waitset_wait(ws,e,1,10000000000UL);
+    result=attend_lecture(ws,e);
     if (result!=1) {
         bo_say("WINDOWD_PROBE_FAIL_TRACE wait=");
         bo_say_i64(result); bo_say("\n");
@@ -94,7 +113,7 @@ int bo_main(const struct bo_start *start)
     /* Verifie aussi que la fermeture du processus laisse le parent vivant. */
     req=(struct wd_request){WD_VERSION,WD_SHUTDOWN,0,0,0,0,0};
     if (bo_channel_send(pair[0],&req,sizeof(req),0,0)!=(bo_i64)sizeof(req)) ok=0;
-    rc=bo_waitset_wait((bo_handle_t)ws,events,1,10000000000UL);
+    rc=attend_lecture((bo_handle_t)ws,events);
     if (rc==1) {
         char bye[8];
         struct bo_recv_meta meta;
