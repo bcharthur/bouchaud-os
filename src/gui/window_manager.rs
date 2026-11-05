@@ -752,7 +752,7 @@ fn boucle() {
             // insererait chaque caractere en double.
             if !evenement.appui && client_actif && !menu_open && !centre_ouvert {
                 if let Some(index) = actif {
-                    if let App::Navigateur { client } = &mut wins[index].app {
+                    if let Some(client) = wins[index].app.client_mut() {
                         envoie_touche(client, evenement);
                         TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                         derniere_entree = maintenant;
@@ -817,7 +817,7 @@ fn boucle() {
                 continue;
             }
             if let Some(index) = actif {
-                if let App::Navigateur { client } = &mut wins[index].app {
+                if let Some(client) = wins[index].app.client_mut() {
                     envoie_touche(client, evenement);
                     TOUCHES_VERS_CLIENT.fetch_add(1, Ordering::Relaxed);
                     derniere_entree = maintenant;
@@ -1017,6 +1017,8 @@ fn boucle() {
                             let kind = ICONS[idx].1;
                             if kind == window::KIND_NAVIGATEUR {
                                 lance_navigateur(&mut wins, home, &mut degats);
+                            } else if kind == window::KIND_DOOM {
+                                lance_doom(&mut wins, home, &mut degats);
                             } else {
                                 let fenetre = make_app(kind, home, &mut spawn_n);
                                 ouvre_fenetre(&mut wins, fenetre, &mut degats);
@@ -1168,7 +1170,7 @@ fn boucle() {
         // tour, mais a une cadence qui suit ce qui peut faire bouger l'image —
         // pleine cadence juste apres une entree, cadence de veille sinon.
         let client_muet_visible = wins.iter().any(|w| {
-            !w.min && matches!(&w.app, App::Navigateur { client } if client.recompose_a_l_aveugle())
+            !w.min && w.app.client().map_or(false, |client| client.recompose_a_l_aveugle())
         });
         let etat_aveugle = politique::Etat {
             maintenant_ms: maintenant,
@@ -1204,7 +1206,7 @@ fn boucle() {
                     continue;
                 }
                 let zone = window::zone_jauge(w);
-                let App::Navigateur { client } = &mut w.app else { continue };
+                let Some(client) = w.app.client_mut() else { continue };
                 // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
                 // On continue de mesurer les rafales de trames sans generer de
                 // repaint OS pour la navigation : seul le demarrage a une jauge.
@@ -1317,7 +1319,7 @@ fn boucle() {
         // P18_CHILD_RECOVERY_V1. Une commande STOP/RESTART explicite est
         // prioritaire. Le bureau ne repart qu'apres le delai de grace du
         // courtier et seulement si une fenetre Ladybird est encore ouverte.
-        if service_action == 0 && wins.iter().any(window::est_client)
+        if service_action == 0 && wins.iter().any(|w| matches!(&w.app, App::Navigateur { .. }))
             && crate::gui::services::relance_enfant_si_necessaire(
                 crate::kernel::timer::monotonic_ns())
         {
@@ -1334,7 +1336,7 @@ fn boucle() {
             for w in wins.iter_mut() {
                 if let App::Navigateur { client } = &mut w.app { client.termine(); }
             }
-            wins.retain(|w| !window::est_client(w));
+            wins.retain(|w| !matches!(&w.app, App::Navigateur { .. }));
             crate::gui::services::arrete();
             degats.tout();
             sale = true;
@@ -1347,11 +1349,11 @@ fn boucle() {
             for w in wins.iter_mut() {
                 if let App::Navigateur { client } = &mut w.app { client.termine(); }
             }
-            wins.retain(|w| !window::est_client(w));
+            wins.retain(|w| !matches!(&w.app, App::Navigateur { .. }));
             crate::gui::services::arrete();
             degats.tout(); sale = true;
         } else if service_action == crate::gui::services::DEMARRER
-            && !wins.iter().any(window::est_client) {
+            && !wins.iter().any(|w| matches!(&w.app, App::Navigateur { .. })) {
             lance_navigateur(&mut wins, home, &mut degats);
             if let Some(w) = wins.last_mut() {
                 if let App::Navigateur { client } = &mut w.app {
@@ -1983,7 +1985,7 @@ polling={} scrutations_par_s={} replis_en_quarantaine={} repli_tours={} repli_se
     }
 
     for w in wins.iter_mut() {
-        if let App::Navigateur { client } = &mut w.app {
+        if let Some(client) = w.app.client_mut() {
             crate::serial_println!("[gui] client {}", client.etat_journal(periode_ms));
             client.remet_compteurs();
         }
@@ -2063,7 +2065,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
         let zone_fenetre = zone_utile(w);
         let visible = !w.window.min;
         let a_le_focus = focus == Some(index);
-        if let App::Navigateur { client } = &mut w.app {
+        if let Some(client) = w.app.client_mut() {
             // Le presse-papiers suit le FOYER, et le foyer est connu ici et
             // nulle part ailleurs. C'est aussi le seul endroit qui voit tous
             // les clients a chaque tour : le brancher plus pres du clavier
@@ -2135,7 +2137,7 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
     // plus rien ne lit sa surface. Un client mort disparait sans animation :
     // ce n'est pas un geste de l'utilisateur.
     let vivant = match &mut wins[index].app {
-        App::Navigateur { client } => client.vivant(),
+        App::Navigateur { client } | App::Doom { client } => client.vivant(),
         _ => true,
     };
     if vivant && !wins[index].min {
@@ -2145,7 +2147,7 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
             crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
     }
     let mut w = wins.remove(index);
-    if let App::Navigateur { client } = &mut w.app {
+    if let Some(client) = w.app.client_mut() {
         client.termine();
     }
 }
@@ -2167,7 +2169,7 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
     // le fil noyau du bureau de se terminer, puisqu'il attend que plus aucune
     // tache ne soit executable.
     for w in wins.iter_mut() {
-        if let App::Navigateur { client } = &mut w.app {
+        if let Some(client) = w.app.client_mut() {
             client.termine();
         }
     }
@@ -2224,7 +2226,7 @@ fn remonte_fenetre(wins: &mut Vec<Win>, index: usize) -> usize {
 fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     // Une seule instance : deux navigateurs, ce sont deux surfaces de 2,6 Mio et
     // deux Qt qui demarrent en meme temps sur un cœur unique.
-    if let Some(index) = wins.iter().position(|w| window::est_client(w)) {
+    if let Some(index) = wins.iter().position(|w| matches!(&w.app, App::Navigateur { .. })) {
         let w = wins.remove(index);
         // Une instance existante remonte et se demasque : meme raison qu'une
         // apparition, ce qu'elle recouvre n'a pas ete dessine sous elle.
@@ -2272,6 +2274,41 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     }
 }
 
+/// DOOM: autre application ring3, independante du navigateur et du service.
+fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
+    if let Some(index) = wins.iter().position(|w| matches!(&w.app, App::Doom { .. })) {
+        let w = wins.remove(index);
+        ouvre_fenetre(wins, w, degats);
+        if let Some(w) = wins.last_mut() {
+            let id = w.id;
+            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+        }
+        return;
+    }
+    let (largeur, hauteur) = (640i32, 400i32);
+    let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
+    let client = match Client::lance("/doom", cwd,
+        (largeur as usize, hauteur as usize), window::zone_maximale()) {
+        Ok(client) => client,
+        Err(error) => {
+            crate::serial_println!("BOUCHAUD_DOOM_LAUNCH_ERROR {}", error);
+            return;
+        }
+    };
+    crate::serial_println!("BOUCHAUD_DOOM_ATELIER_LAUNCH pid={}", client.pid);
+    let mut win = Win::new(String::from("DOOM - Freedoom"),
+        (fb::width() as i32 - w) / 2, BAR_H as i32 + 8,
+        w, h, crate::gui::windowing::WindowFlags::STANDARD,
+        App::Doom { client: alloc::boxed::Box::new(client) });
+    clamp_win(&mut win);
+    ouvre_fenetre(wins, win, degats);
+    if let Some(last) = wins.last_mut() {
+        if let Some(client) = last.app.client_mut() {
+            client.envoie_configuration(true);
+        }
+    }
+}
+
 /// Transmet la position du curseur au client survole, s'il a le focus.
 ///
 /// Seule la fenetre active recoit les mouvements : un client qui suivrait la
@@ -2282,7 +2319,7 @@ fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32, boutons: u32) {
         None => return,
     };
     let zone = zone_utile(&wins[index]);
-    if let App::Navigateur { client } = &mut wins[index].app {
+    if let Some(client) = wins[index].app.client_mut() {
         if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
             client.envoie_pointeur(x, y, boutons);
         }
@@ -2338,7 +2375,7 @@ fn handle_wheel(
         let w = &wins[i];
         if !w.min && mx >= w.x && mx < w.x + w.w && my >= w.y && my < w.y + w.h {
             let zone = zone_utile(w);
-            if let App::Navigateur { client } = &mut wins[i].app {
+            if let Some(client) = wins[i].app.client_mut() {
                 if let Some((client_x, client_y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
                     // Le journal part APRES l'envoi, et porte son resultat : le
                     // canal est borne, et un client qui ne lit pas voit ses
@@ -2492,6 +2529,9 @@ fn handle_click(
                 else if kind == window::KIND_NAVIGATEUR {
                     lance_navigateur(wins, home, degats);
                     fenetre_ouverte = true;
+                } else if kind == window::KIND_DOOM {
+                    lance_doom(wins, home, degats);
+                    fenetre_ouverte = true;
                 } else {
                     let fenetre = make_app(kind, home, spawn_n);
                     ouvre_fenetre(wins, fenetre, degats);
@@ -2550,7 +2590,7 @@ fn handle_click(
             // redemander cette recopie, sinon la fenetre reapparait vide
             // jusqu'a la prochaine trame du client — qui peut ne jamais venir
             // si la page est statique.
-            if let App::Navigateur { client } = &mut wins[i].app {
+            if let Some(client) = wins[i].app.client_mut() {
                 client.abime_tout();
             }
             // Remonter n'est pas apparaitre : on reordonne, on ne cree rien.
@@ -2632,7 +2672,7 @@ fn handle_click(
             // Fermeture : un client a le droit d'etre prevenu et de refuser
             // (une page qui demande confirmation). Il est termine de force si
             // sa fenetre disparait de toute facon a l'iteration suivante.
-            if let App::Navigateur { client } = &mut wins[index].app {
+            if let Some(client) = wins[index].app.client_mut() {
                 client.demande_fermeture();
             } else {
                 ferme_fenetre(wins, index);
@@ -2685,7 +2725,7 @@ fn handle_click(
         } else {
             let zone = zone_utile(top);
             match &mut wins[index].app {
-                App::Navigateur { client } => {
+                App::Navigateur { client } | App::Doom { client } => {
                     if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
                         client.envoie_pointeur(x, y, 1);
                     }
