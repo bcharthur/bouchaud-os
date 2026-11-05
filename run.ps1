@@ -7,6 +7,9 @@ param(
     # ne pas casser les habitudes et les documents qui le mentionnent.
     [switch]$Ladybird,
 
+    # Add /doom and /freedoom1.wad to Ladybird userland disk; start from desktop.
+    [switch]$Doom,
+
     # Revient au userland historique (Qt + CPython + QuickJS). Le navigateur du
     # bureau est alors l'ancien moteur, pas Ladybird.
     [switch]$Legacy,
@@ -508,10 +511,11 @@ if ($LadybirdMode) {
         Ensure-GitHubCli
 
 
+        $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
         $EffectiveLadybirdRunId = $LadybirdRunId
 
         if ($EffectiveLadybirdRunId -eq 0) {
-            $CurrentBranch = (& git branch --show-current).Trim()
+            $CurrentBranch = ((& git branch --show-current) -join "`n").Trim()
             if (-not $CurrentBranch) {
                 Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
             }
@@ -530,8 +534,6 @@ if ($LadybirdMode) {
             # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
             # maintenant avec un `gh` simule.
             . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-
-            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
 
             $selection = Get-RunAvecArtefact `
                 -Branche $CurrentBranch `
@@ -1011,6 +1013,22 @@ if ($LadybirdMode) {
         [System.Text.UTF8Encoding]::new($false)
     )
 
+    # BOUCHAUD_DOOM_ATELIER_V2 : opt-in only. The existing boot/userland
+    # image and launch mode remain unchanged without -Doom.
+    if ($Doom) {
+        $DoomElf = Join-Path $RepoRoot "target\doom-bouchaud\doom-bouchaud"
+        $DoomWad = Join-Path $RepoRoot "tools\doom\wads\freedoom1.wad"
+        if (-not (Test-Path -LiteralPath $DoomElf -PathType Leaf)) {
+            Fail "DOOM: ELF missing ($DoomElf). Build with tools\doom\build-doom.sh under WSL."
+        }
+        if (-not (Test-Path -LiteralPath $DoomWad -PathType Leaf)) {
+            Fail "DOOM: Freedoom WAD missing ($DoomWad). Run tools\doom\prepare-image.py."
+        }
+        Copy-Item -LiteralPath $DoomElf -Destination (Join-Path $ScenarioDir "doom") -Force
+        Copy-Item -LiteralPath $DoomWad -Destination (Join-Path $ScenarioDir "freedoom1.wad") -Force
+        Write-Host "DOOM: added ring3 game and Freedoom IWAD to Atelier disk" -ForegroundColor Green
+    }
+
 
     # =========================================================================
     # Fabrication USTAR native Windows
@@ -1070,6 +1088,7 @@ if not root.is_dir():
 # ne doit pas dependre du fait que son unique utilisateur soit root.
 executables = {
     "bo-navigateur",
+    "doom",
     "usr/libexec/ladybird/BouchaudBrowserHost",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",
