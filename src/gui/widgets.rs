@@ -884,8 +884,8 @@ fn draw_window(w: &Win, focused: bool) {
     // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
     // La duree noyau reste dans la barre de titre PENDANT le demarrage
     // uniquement. La navigation appartient exclusivement au chrome Ladybird.
-    if matches!(&w.app, App::Navigateur { client }
-        if client.etat == crate::gui::client::Etat::Demarrage) {
+    if w.app.client().map_or(false, |client|
+        client.etat == crate::gui::client::Etat::Demarrage) {
         dessine_duree_chargement(w, origine_titre, fb::text_width(title_clipped, 12.0, false),
             premier_bouton, y + (title_h - 11) / 2);
     }
@@ -1042,7 +1042,7 @@ pub(crate) const JAUGE_H: usize = 3;
 /// fonctionnalite.
 fn dessine_duree_chargement(w: &Win, origine: usize, apres_titre: usize,
     premier_bouton: usize, ligne: usize) {
-    let App::Navigateur { client } = &w.app else { return };
+    let Some(client) = w.app.client() else { return };
     if !client.jauge.visible() {
         return;
     }
@@ -1089,7 +1089,7 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
     fb::draw_text_prop(
         x + 34,
         y + 86,
-        "Demarrage de Qt, Python et du renderer...",
+        crate::gui::applications_externes::TEXTE_DEMARRAGE,
         0x00B8_C4D9,
         16.0,
         false,
