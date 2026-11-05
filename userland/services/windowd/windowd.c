@@ -42,6 +42,13 @@ int bo_main(const struct bo_start *start)
         bo_i64 count=bo_waitset_wait((bo_handle_t)waitset,ev,1,5000000000UL);
         if (count==0 || count==-BO_E_TIMED_OUT) continue;
         if (count<0) return 5;
+        /* WRITABLE est niveau-declenche et vaut souvent vrai meme en
+         * l'absence d'un message. Seul READABLE autorise recv. */
+        if (!(ev[0].signals & BO_SIGNAL_READABLE)) {
+            if (ev[0].signals & BO_SIGNAL_PEER_CLOSED) return 0;
+            if (bo_sleep_ns(1000000UL)<0) return 10;
+            continue;
+        }
         count=bo_channel_recv(control,&req,sizeof(req),0,0,&meta);
         if (count==-BO_E_PEER_CLOSED) return 0;
         if (count==-BO_E_WOULD_BLOCK) continue;
