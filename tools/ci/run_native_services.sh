@@ -26,6 +26,8 @@ python3 tools/verifie-contrat-abi-v1.py
 "$SDK" "$OUT/bin/healthd" userland/services/healthd/healthd.c
 "$SDK" "$OUT/bin/serviced" userland/services/serviced/serviced.c
 "$SDK" "$OUT/bin/logd" userland/services/logd/logd.c
+"$SDK" "$OUT/bin/windowd" userland/services/windowd/windowd.c
+"$SDK" "$OUT/bin/windowd-process-probe" userland/tests/windowd-process-probe.c
 
 python3 tools/native/make_native_image.py --image "$OUT/native-services.img" \
   --bin native-cycles-probe="$OUT/bin/native-cycles-probe" \
@@ -33,7 +35,10 @@ python3 tools/native/make_native_image.py --image "$OUT/native-services.img" \
   --bin healthd="$OUT/bin/healthd" \
   --bin serviced="$OUT/bin/serviced" \
   --bin logd="$OUT/bin/logd" \
+  --bin windowd="$OUT/bin/windowd" \
+  --bin windowd-process-probe="$OUT/bin/windowd-process-probe" \
   --autorun "echo NATIVE_SERVICES_BEGIN" \
+  --autorun "/bin/windowd-process-probe" \
   --autorun "/bin/native-cycles-probe" \
   --autorun "/bin/native-process-probe" \
   --autorun "/bin/serviced qualify" \
@@ -61,7 +66,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|LOGD_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL|\[NATIVE-PROCESS\] FAIL'
+fatal_re='\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|TRIPLE FAULT|SpinLock recursive acquisition|INVARIANT_VIOLATION|SERVICED_QUALIFY_FAIL|LOGD_QUALIFY_FAIL|\[NATIVE-CYCLES\] FAIL|\[NATIVE-PROCESS\] FAIL|WINDOWD_PROBE_FAIL|WINDOWD_RING3_FAIL'
 deadline=$((SECONDS + ${BO_SERVICES_DELAI_S:-240}))
 while :; do
   if grep -aEq "$fatal_re" "$LOG"; then
@@ -89,6 +94,8 @@ trap - EXIT
 
 required=(
   '[NATIVE-CYCLES] OK'
+  'WINDOWD_RING3_READY'
+  'WINDOWD_RING3_IPC_OK'
   '[NATIVE-PROCESS] OK'
   '[SERVICED] ok   no zombie left (wait4(-1) = ECHILD)'
   '[SERVICED] ok   health reaches Running'
