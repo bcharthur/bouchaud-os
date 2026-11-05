@@ -203,6 +203,7 @@ impl Client {
         let canal_client = vers_client.clone();
         let canal_wm = vers_wm.clone();
 
+        let est_navigateur = chemin == CHEMIN_NAVIGATEUR;
         let mut prepare = move |processus: &task::Process| -> Vec<String> {
             processus.metadata.lock().ecran = Some(ecran);
             let mut files = processus.files.lock();
@@ -212,7 +213,7 @@ impl Client {
                 canal_client.clone(),
                 canal_wm.clone(),
             )));
-            alloc::vec![
+            let mut environnement = alloc::vec![
                 alloc::format!("BO_SURFACE_FD={}", fd_surface),
                 alloc::format!("BO_SURFACE_WIDTH={}", largeur_px),
                 alloc::format!("BO_SURFACE_HEIGHT={}", hauteur_px),
@@ -221,11 +222,16 @@ impl Client {
                 // client V1 ignore la variable et n'ecrit que le premier.
                 alloc::format!("BO_SURFACE_TAMPONS={}", tampons_offerts),
                 alloc::format!("BO_GUI_FD={}", fd_gui),
-                alloc::format!(
+            ];
+            // Ces variables sont propres au navigateur Qt. Un jeu comme DOOM
+            // recoit le framebuffer virtuel et le canal GUI, pas une couche Qt
+            // ni la politique de resolution DNS du navigateur.
+            if est_navigateur {
+                environnement.push(alloc::format!(
                     "QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}",
                     largeur_px, hauteur_px
-                ),
-                "QT_QPA_FB_DISABLE_INPUT=1".to_string(),
+                ));
+                environnement.push("QT_QPA_FB_DISABLE_INPUT=1".to_string());
                 // BOUCHAUD_NAVIGATEUR_RESOLVEUR_REEL_V1
                 //
                 // LE NAVIGATEUR INTERROGEAIT UN RESOLVEUR QUI N'EXISTE PAS
@@ -246,11 +252,12 @@ impl Client {
                 // de QEMU --, juste sous QEMU et fausse partout ailleurs. La
                 // passerelle, elle, existe reellement sur ce reseau-ci et
                 // resout sur a peu pres toutes les box. Voir `net::resolveur`.
-                alloc::format!(
+                environnement.push(alloc::format!(
                     "BOUCHAUD_DNS_SERVER={}",
                     crate::net::ipv4::format_addr(&resolveur_choisi),
-                ),
-            ]
+                ));
+            }
+            environnement
         };
 
         let pid =
