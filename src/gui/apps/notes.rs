@@ -61,7 +61,12 @@ impl NotesState {
     fn emplacement(&self, fs: &ramfs::FileSystem) -> Result<(usize, String, bool), &'static str> {
         match &self.chemin {
             Some(c) => {
-                let (parent, nom) = fs.resolve_parent_name(c, 0).ok_or("chemin invalide")?;
+                // Chemin canonique avant resolution : le client ne peut pas
+                // ouvrir un fichier via un chemin ambigu ou echappant a '/'.
+                let absolu = crate::fs::vfs_chemins::normalise_absolu(c)
+                    .map_err(|_| "chemin absolu invalide")?;
+                let (parent, nom) = fs.resolve_parent_name(&absolu, 0)
+                    .ok_or("chemin invalide")?;
                 Ok((parent, String::from(nom), fs.sous_persistant(parent)))
             }
             None => {
