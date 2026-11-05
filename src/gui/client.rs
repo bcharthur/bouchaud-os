@@ -264,54 +264,59 @@ impl Client {
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
             chemin, pid, largeur_px, hauteur_px
         ));
-        // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
-        //
-        // Le releve du 13 septembre montre les deux instants :
-        //
-        //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
-        //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
-        //
-        // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
-        // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
-        // sa vie, et a repondu « Unable to resolve host » sur une machine dont
-        // le reseau marchait.
-        //
-        // La cadence de reprise DHCP a ete resserree pour que ce creneau se
-        // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
-        // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
-        // resolveur non configure, au lieu de laisser chercher la panne dans
-        // le navigateur.
-        let pret = matches!(
-            crate::net::etat_demarrage(),
-            crate::net::Demarrage::Pret,
-        );
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
-            pid,
-            crate::net::ipv4::format_addr(&resolveur_choisi),
-            crate::net::nom_verdict(),
-            crate::net::connecte() as u8,
-            if pret { "configure" } else { "NON-CONFIGURE" },
-        );
-        // D'OU vient l'adresse, et pas seulement laquelle. « dns=10.0.2.3 »
-        // ne disait pas si le bail l'avait donnee ou si c'etait le repli
-        // compile -- or c'est toute la difference entre un reseau qui repond
-        // et un reseau qu'on n'a pas attendu.
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_RESOLVEUR pid={} adresse={} source={} bail={} passerelle={}",
-            pid,
-            crate::net::ipv4::format_addr(&resolveur_choisi),
-            resolveur_source.nom(),
-            crate::net::ipv4::format_addr(&crate::net::dns_server()),
-            crate::net::ipv4::format_addr(&crate::net::gateway()),
-        );
-        // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
-        // sont identiques avec et sans DHCP.
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_BAIL obtenu={} etat={}",
-            bail as u8,
-            crate::net::nom_verdict(),
-        );
+        // Les marqueurs de navigation sont des evenements SPECIFIQUES a
+        // Ladybird. Lancer DOOM ne doit pas les emettre dans les bancs P13/C22.
+        if chemin == CHEMIN_NAVIGATEUR {
+            // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
+            //
+            // Le releve du 13 septembre montre les deux instants :
+            //
+            //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
+            //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
+            //
+            // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
+            // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
+            // sa vie, et a repondu « Unable to resolve host » sur une machine dont
+            // le reseau marchait.
+            //
+            // La cadence de reprise DHCP a ete resserree pour que ce creneau se
+            // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
+            // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
+            // resolveur non configure, au lieu de laisser chercher la panne dans
+            // le navigateur.
+            let pret = matches!(
+                crate::net::etat_demarrage(),
+                crate::net::Demarrage::Pret,
+            );
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
+                pid,
+                crate::net::ipv4::format_addr(&resolveur_choisi),
+                crate::net::nom_verdict(),
+                crate::net::connecte() as u8,
+                if pret { "configure" } else { "NON-CONFIGURE" },
+            );
+            // D'OU vient l'adresse, et pas seulement laquelle. « dns=10.0.2.3 »
+            // ne disait pas si le bail l'avait donnee ou si c'etait le repli
+            // compile -- or c'est toute la difference entre un reseau qui repond
+            // et un reseau qu'on n'a pas attendu.
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_RESOLVEUR pid={} adresse={} source={} bail={} passerelle={}",
+                pid,
+                crate::net::ipv4::format_addr(&resolveur_choisi),
+                resolveur_source.nom(),
+                crate::net::ipv4::format_addr(&crate::net::dns_server()),
+                crate::net::ipv4::format_addr(&crate::net::gateway()),
+            );
+            // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
+            // sont identiques avec et sans DHCP.
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_BAIL obtenu={} etat={}",
+                bail as u8,
+                crate::net::nom_verdict(),
+            );
+
+        }
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le
         // lancement du MEME instant, sinon les deux durees de demarrage
