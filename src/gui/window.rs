@@ -161,6 +161,12 @@ pub(crate) const KIND_INSIGHTS: usize = 10;
 /// DOOM est un client graphique ring 3, independant de Ladybird.
 pub(crate) const KIND_DOOM: usize = 11;
 
+// Conserver la correspondance menu -> registre des applications externes.
+const _: () = {
+    assert!(KIND_NAVIGATEUR == crate::gui::applications_externes::LADYBIRD.kind);
+    assert!(KIND_DOOM == crate::gui::applications_externes::DOOM.kind);
+};
+
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
