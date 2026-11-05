@@ -41,7 +41,7 @@ pub const DOOM: Application = Application {
     arguments: &["-iwad", "/freedoom1.wad", "-nosound"],
 };
 
-pub const APPLICATIONS: [Application; 2] = [LADYBIRD, DOOM];
+pub static APPLICATIONS: [Application; 2] = [LADYBIRD, DOOM];
 
 /// Les indices des menus ne sont JAMAIS des indices de ce tableau.
 pub fn pour_kind(kind: usize) -> Option<&'static Application> {
