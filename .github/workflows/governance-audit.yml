@@ -1,0 +1,24 @@
+name: Governance audit (manuel, jamais une preuve P13)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit live main / snapshot (fail closed)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/github/audit_repository_state.py --strict --output governance-report.json
+      - name: Conserver le rapport même en cas de refus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-report
+          path: governance-report.json
+          if-no-files-found: warn
