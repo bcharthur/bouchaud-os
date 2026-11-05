@@ -22,6 +22,13 @@
     },
     "icones-fichiers": {
       "licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"
+    },
+    "logo-doom": {
+      "licence": "PD-textlogo (Wikimedia Commons), marque deposee",
+      "auteur": "id Software / Bethesda Softworks",
+      "source": "https://commons.wikimedia.org/wiki/File:Doom_%E2%80%93_Game%E2%80%99s_logo.svg",
+      "original": "assets/atelier/sources/apps/doom-logo-officiel.svg",
+      "tuile": "assets/atelier/sources/apps/doom.svg"
     }
   },
   "fichiers": {
@@ -681,31 +688,31 @@
       "licence": "fond-summer_1am"
     },
     "src/assets/atelier/apps/doom-18.png": {
-      "sha256": "90f252351433e1e87a15eae97ce6ec8d521541b6a1a8e17941e1459fe0792580",
-      "octets": 1382,
+      "sha256": "8fb1d710d809c40e6e5b02fd48097470396aaa6ab0c824a482774aa9d44d7753",
+      "octets": 730,
       "largeur": 18,
       "hauteur": 18,
       "alpha": true,
-      "licence": "tuiles-apps",
-      "glyphe": "monogramme D original"
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
     },
     "src/assets/atelier/apps/doom-40.png": {
-      "sha256": "aa68f8047c37063cf70dbbfd6db8d06bbc1325491b91d23466a6c8d727a509d7",
-      "octets": 6508,
+      "sha256": "8b79014c79c017670431911719e11bee91605d6e4fa602574dfea305e472f5d1",
+      "octets": 1702,
       "largeur": 40,
       "hauteur": 40,
       "alpha": true,
-      "licence": "tuiles-apps",
-      "glyphe": "monogramme D original"
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
     },
     "src/assets/atelier/apps/doom-56.png": {
-      "sha256": "21a30c642081b4c38194afe527f7476f14fb6552f1a93c908d8ed83123a57e1d",
-      "octets": 12668,
+      "sha256": "4dcd49b039a67dff8dcee7dfe0993c8b3e1023f0d9ebcef63ef3da87c735668d",
+      "octets": 2493,
       "largeur": 56,
       "hauteur": 56,
       "alpha": true,
-      "licence": "tuiles-apps",
-      "glyphe": "monogramme D original"
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
     }
   }
 }
