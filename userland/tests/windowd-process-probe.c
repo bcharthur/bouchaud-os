@@ -3,7 +3,7 @@
  * Le navigateur et le jeu ne sont ni charges ni requis pour le test.
  */
 #include "bouchaud/sdk.h"
-#include "../../services/windowd/window_policy.h"
+#include "../services/windowd/window_policy.h"
 
 static int check(int ok, const char *reason)
 {
