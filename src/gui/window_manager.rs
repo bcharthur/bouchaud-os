@@ -2302,12 +2302,12 @@ fn lance_application_externe(
 /// pendant la migration du gestionnaire de fenetres hors du noyau.
 fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     lance_application_externe(wins, cwd, degats,
-        &crate::gui::applications_externes::APPLICATIONS[0]);
+        &crate::gui::applications_externes::LADYBIRD);
 }
 
 fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     lance_application_externe(wins, cwd, degats,
-        &crate::gui::applications_externes::APPLICATIONS[1]);
+        &crate::gui::applications_externes::DOOM);
 }
 
 /// Transmet la position du curseur au client survole, s'il a le focus.
