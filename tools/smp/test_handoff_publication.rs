@@ -16,7 +16,7 @@ fn flags_before_pending_release() {
     let s = source();
     let f = section(&s, "fn prepare_switch_handoff(", "/// Publie la tache sortante");
     let flag = f.find("task.switching_out.range(true)").unwrap();
-    let remise = f.find("SWITCH_REMISE[cpu].store(remise").unwrap();
+    let remise = f.find("SWITCH_REMISE[cpu].store(task.state == TaskState::Ready, Ordering::Relaxed)").unwrap();
     let ptr = f.find("SWITCH_PENDING[cpu].compare_exchange(").unwrap();
     assert!(remise < flag && flag < ptr, "pending publie avant drapeau");
     assert!(f[ptr..].contains("Ordering::AcqRel"));
