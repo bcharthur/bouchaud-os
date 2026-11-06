@@ -134,7 +134,11 @@ def decode_boot_directory(folder: Path, max_events: int = 20000) -> dict:
             "events_truncated": report["events_truncated"],
             "logd_declared_losses": report["logd_declared_losses"],
             "event_counts": report["event_counts"],
-            "critical_observed": bool(critical),
+            # Event counts include records omitted from the bounded JSON.
+            # Never report 'no critical event' merely because its line
+            # fell beyond max_events (the summary remains fail-closed).
+            "critical_observed": any(report["event_counts"].get(kind, 0)
+                                     for kind in CRITICAL_KINDS),
             "first_critical_line": critical[0]["line"] if critical else None,
             "events": report["events"],
         })

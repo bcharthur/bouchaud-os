@@ -87,6 +87,20 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(out["event_counts"]["scheduler_panic"], 5)
         self.assertEqual(out["boots"][0]["events_kept"], 2)
 
+    def test_truncated_critical_event_still_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p / "boot-1.log").write_text(
+                "BOUCHAUD_AB_BOOT slot=A\n" * 2 +
+                "BOUCHAUD_USB_STOCKAGE_IO_ECHEC slot=2\n",
+                encoding="utf-8")
+            out = timeline.decode_boot_directory(p, max_events=2)
+        self.assertTrue(out["evidence_truncated"])
+        self.assertTrue(out["any_critical_observed"])
+        self.assertTrue(out["boots"][0]["critical_observed"])
+        self.assertIsNone(out["boots"][0]["first_critical_line"])
+        self.assertEqual(out["event_counts"]["usb_io_failure"], 1)
+
 
 
 if __name__ == "__main__":
