@@ -646,6 +646,30 @@ pub(crate) fn draw_centre(mx: i32, my: i32) {
             if choisi { 0xffffff } else { j::ENCRE_DOUCE }, petit, false);
     }
 
+    // M12 : les modes agissent vraiment sur animations et indicateur FPS,
+    // pas encore sur scheduler, reseau, energie ou services.
+    let mode_usage = crate::gui::atelier::reglages::usage_courant();
+    let u = carte(c::Bloc::Usage, false);
+    fb::draw_text_prop(u.x as usize + 8, u.y as usize + 13,
+        "Mode", j::ENCRE, petit, false);
+    for (action, libelle, mode) in [
+        (c::Action::UsageStandard, "Std.", crate::gui::atelier::usage::Usage::Standard),
+        (c::Action::UsageTravail, "Trav.", crate::gui::atelier::usage::Usage::Travail),
+        (c::Action::UsageFocus, "Focus", crate::gui::atelier::usage::Usage::Focus),
+        (c::Action::UsageJeu, "Jeu", crate::gui::atelier::usage::Usage::Jeu),
+    ] {
+        let s = c::boite_action(l, b, action);
+        let choisi = mode_usage == mode;
+        if choisi {
+            matiere::pave(rect_de(s), 8, j::ACCENT, 0xff);
+        } else if survol == Some(action) {
+            matiere::pave(rect_de(s), 8, j::SURVOL, j::SURVOL_OPACITE);
+        }
+        let lw = fb::text_width(libelle, petit, false) as i32;
+        fb::draw_text_prop((s.x + (s.w - lw) / 2).max(0) as usize, s.y as usize + 6,
+            libelle, if choisi { 0xffffff } else { j::ENCRE_DOUCE }, petit, false);
+    }
+
     // Ce qui n'existe pas : dit, pas simule.
     let n = c::bloc(l, b, c::Bloc::Indisponibles);
     fb::draw_text_prop(n.x as usize + 4, n.y as usize + 4,

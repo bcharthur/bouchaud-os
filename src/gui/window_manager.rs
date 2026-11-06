@@ -2458,6 +2458,25 @@ fn handle_click(
                 }
                 return;
             }
+            Some(segment @ (c::Action::UsageStandard | c::Action::UsageTravail
+                | c::Action::UsageFocus | c::Action::UsageJeu)) => {
+                use crate::gui::atelier::usage::Usage;
+                crate::gui::atelier::reglages::regle_usage(match segment {
+                    c::Action::UsageTravail => Usage::Travail,
+                    c::Action::UsageFocus => Usage::Focus,
+                    c::Action::UsageJeu => Usage::Jeu,
+                    _ => Usage::Standard,
+                });
+                for s in c::SEGMENTS_USAGE {
+                    degats.ajoute(Origine::Menu, rect_action_centre(s));
+                }
+                for s in c::SEGMENTS_ANIMATIONS {
+                    degats.ajoute(Origine::Menu, rect_action_centre(s));
+                }
+                degats.ajoute(Origine::Menu, rect_action_centre(c::Action::Diagnostic));
+                degats.ajoute(Origine::BarreHaute, barre_haute_rect());
+                return;
+            }
             // Les memes chemins que le menu Applications : ecrire ce que la
             // session a produit, puis couper. Ils ne reviennent jamais.
             Some(c::Action::Eteindre) => {

@@ -42,6 +42,7 @@ pub mod echelle;
 pub mod centre;
 pub mod reglages;
 pub mod animations;
+pub mod usage;
 pub mod effets;
 pub mod fichiers;
 pub mod session;

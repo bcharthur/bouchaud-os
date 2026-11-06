@@ -19,6 +19,8 @@ mod dock;
 mod centre;
 #[path = "../../src/gui/atelier/animations.rs"]
 mod animations;
+#[path = "../../src/gui/atelier/usage.rs"]
+mod usage;
 #[path = "../../src/gui/atelier/fichiers.rs"]
 mod fichiers;
 #[path = "../../src/gui/protocole.rs"]
@@ -801,4 +803,44 @@ fn l_historique_reste_borne() {
         n += 1;
     }
     assert_eq!(n, 32, "32 retours au plus");
+}
+
+#[test]
+fn profils_usage_purs_sont_visuels_et_distincts() {
+    use usage::{profil, Usage};
+    let a = profil(Usage::Standard).unwrap();
+    let b = profil(Usage::Travail).unwrap();
+    let c = profil(Usage::Focus).unwrap();
+    let d = profil(Usage::Jeu).unwrap();
+    assert_eq!((a.animations, a.diagnostic), (Mode::Normal, false));
+    assert_eq!((b.animations, b.diagnostic), (Mode::Reduit, false));
+    assert_eq!((c.animations, c.diagnostic), (Mode::Aucun, false));
+    assert_eq!((d.animations, d.diagnostic), (Mode::Normal, true));
+    assert!(profil(Usage::Personnalise).is_none());
+}
+#[test]
+fn modes_usage_export_stricts_sans_automatisation_implicite() {
+    use usage::Usage;
+    for mode in ["standard", "travail", "work", "focus", "jeu", "gaming"] {
+        assert!(usage::profil(usage::depuis_env(mode).unwrap()).is_some());
+    }
+    assert_eq!(usage::depuis_env("jeu"), Some(Usage::Jeu));
+    assert_eq!(usage::depuis_env("auto"), None);
+    assert_eq!(usage::depuis_env(""), None);
+}
+#[test]
+fn modes_usage_restent_cliquables_avec_le_meme_contrat_visuel() {
+    for largeur in [640u32, 1280, 1920] {
+        let panel = centre::cadre(largeur, 30);
+        let bounds = centre::empreinte(largeur, 30);
+        assert!(bounds.y + bounds.h <= 480, "panneau depasse 480px");
+        let mut precedent = panel.x;
+        for action in centre::SEGMENTS_USAGE {
+            let b = centre::boite_action(largeur, 30, action);
+            assert!(dans(b, panel));
+            assert!(b.x >= precedent);
+            assert_eq!(centre::action_sous(largeur, 30, b.x + b.w / 2, b.y + b.h / 2), Some(action));
+            precedent = b.x + b.w;
+        }
+    }
 }
