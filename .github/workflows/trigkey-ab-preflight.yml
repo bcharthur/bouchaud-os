@@ -1,0 +1,47 @@
+# Prove a REAL QEMU boot of the exact generated A/B image, not physical qualification.
+name: Trigkey A/B image preflight
+on:
+  pull_request:
+    paths:
+      - 'tools/release/build_trigkey_ab_image.sh'
+      - 'tools/release/verify_trigkey_ab_image.py'
+      - 'tools/release/smoke_trigkey_ab_qemu.sh'
+      - 'tools/release/verify_trigkey_ab_boot.py'
+      - 'tools/ci/reliability/test_trigkey_ab_*.py'
+      - '.github/workflows/trigkey-ab-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qemu-ab-proof:
+    name: trigkey / QEMU image A/B boot, non physique
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OVMF + QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+      - name: Rust UEFI toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-uefi
+      - name: Refuse false-positive fixtures
+        run: python3 -m unittest discover -s tools/ci/reliability -p 'test_trigkey_ab_*.py' -v
+      - name: Build A/B image without writing to any physical device
+        run: bash tools/release/build_trigkey_ab_image.sh target/trigkey-ab-preflight
+      - name: Boot SAME image under QEMU/OVMF, require real health signal
+        run: bash tools/release/smoke_trigkey_ab_qemu.sh target/trigkey-ab-preflight
+      - name: Collect reproducible proof without uploading the large disk image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigkey-ab-qemu-preflight
+          path: |
+            target/trigkey-ab-preflight/manifest-ab.json
+            target/trigkey-ab-preflight/disque-ab.img.sha256
+            target/trigkey-ab-preflight/qemu-boot-evidence.json
+            target/trigkey-ab-preflight/boot-qemu.log
+          if-no-files-found: warn
+          retention-days: 14
