@@ -7,6 +7,7 @@ Sources (versionnees) -> ressources pretes pour le noyau (versionnees aussi) :
   assets/atelier/sources/logo/*.svg     marque Bouchaud OS (provisoire)
   assets/atelier/sources/fond/*.jpg     photographie du fond (LGPLv3, KDE)
   APPS (ci-dessous)                     tuiles applicatives : degrade + glyphe Lucide
+  sources/apps/doom.svg                 logo officiel DOOM + tuile Atelier
 
   src/assets/atelier/apps/<id>-<taille>.png       tuiles, RGBA
   src/assets/atelier/symboles/<nom>-<taille>.png  glyphes blancs + alpha (masques teintables)
@@ -204,6 +205,13 @@ def main() -> int:
             "logo-bouchaud-os": {"licence": "projet Bouchaud OS", "statut": "PROVISOIRE",
                                  "source": "assets/atelier/sources/logo/bouchaud-os-provisoire.svg"},
             "tuiles-apps": {"licence": "projet Bouchaud OS (tuiles) + ISC (glyphes Lucide)"},
+            "logo-doom": {
+                "licence": "PD-textlogo (Wikimedia Commons), marque deposee",
+                "auteur": "id Software / Bethesda Softworks",
+                "source": "https://commons.wikimedia.org/wiki/File:Doom_%E2%80%93_Game%E2%80%99s_logo.svg",
+                "original": "assets/atelier/sources/apps/doom-logo-officiel.svg",
+                "tuile": "assets/atelier/sources/apps/doom.svg"
+            },
             "icones-fichiers": {"licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"},
         },
         "fichiers": {},
@@ -215,6 +223,13 @@ def main() -> int:
         for t in TAILLES_APPS:
             ecrit(SORTIE / "apps" / f"{ident}-{t}.png", rend(svg, t), manifeste,
                   largeur=t, hauteur=t, alpha=True, licence="tuiles-apps", glyphe=nom)
+    # DOOM : veritable silhouette du logo officiel, pas un glyphe de substitution.
+    # La tuile vectorielle a une source accompagnee de son attribution.
+    doom_svg = (SOURCES / "apps" / "doom.svg").read_text(encoding="utf-8")
+    for taille in TAILLES_APPS:
+        ecrit(SORTIE / "apps" / f"doom-{taille}.png", rend(doom_svg, taille), manifeste,
+              largeur=taille, hauteur=taille, alpha=True,
+              licence="logo-doom", glyphe="lettrage officiel DOOM")
     (SOURCES / "fichiers").mkdir(parents=True, exist_ok=True)
     # En 48 px : page + badge. En 20 px, un badge serait illisible : c'est le
     # glyphe Lucide du type, trace dans sa teinte, qui porte l'information.
