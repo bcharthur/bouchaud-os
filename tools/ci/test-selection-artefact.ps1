@@ -176,6 +176,70 @@ Verifie -Cas "aucun run sur la branche" `
     -Runs @() -Vivants @() -Expires @() `
     -RunAttendu $null -ExaminesAttendus 0
 
+# Regression Windows : HEAD detache et branches locales ont fait echouer
+# run.ps1 lors d'un checkout d'un SHA de main pourtant entierement qualifie.
+# Mocker git permet de tester la decision sans reseau ni compilation du noyau.
+$script:GitBranche = ""
+$script:GitHead = ""
+$script:GitMain = ""
+
+function git {
+    $commande = $args -join " "
+    $global:LASTEXITCODE = 0
+    switch ($commande) {
+        "branch --show-current" { return $script:GitBranche }
+        "rev-parse HEAD" { return $script:GitHead }
+        "rev-parse --verify refs/remotes/origin/main" {
+            if (-not $script:GitMain) {
+                $global:LASTEXITCODE = 1
+                return ""
+            }
+            return $script:GitMain
+        }
+        default { throw "git simule : appel inattendu : $commande" }
+    }
+}
+
+function VerifieBranche {
+    param([string]$Cas, [string]$Branche, [string]$Head, [string]$Main, [string]$Attendu)
+    $script:GitBranche = $Branche
+    $script:GitHead = $Head
+    $script:GitMain = $Main
+    $obtenu = Get-BrancheArtefact
+    if ($obtenu -ne $Attendu) {
+        Write-Host ("  ECHEC  {0} : branche={1}, attendu={2}" -f $Cas, $obtenu, $Attendu) -ForegroundColor Red
+        $script:echecs += 1
+    }
+    else {
+        Write-Host ("  ok     {0}" -f $Cas) -ForegroundColor Green
+    }
+}
+
+VerifieBranche -Cas "HEAD detache identique au main distant" `
+    -Branche "" -Head "aaaa" -Main "aaaa" -Attendu "main"
+VerifieBranche -Cas "branche locale identique au main distant" `
+    -Branche "test-atelier-qemu" -Head "aaaa" -Main "aaaa" -Attendu "main"
+VerifieBranche -Cas "branche de developpement differente" `
+    -Branche "feature-demo" -Head "bbbb" -Main "aaaa" -Attendu "feature-demo"
+VerifieBranche -Cas "HEAD detache different de main" `
+    -Branche "" -Head "bbbb" -Main "aaaa" -Attendu ""
+VerifieBranche -Cas "pas de remote main mais branche nommee" `
+    -Branche "feature-demo" -Head "bbbb" -Main "" -Attendu "feature-demo"
+
+# Une option -LadybirdRunId explicite saute la decouverte, pas le besoin du
+# nom d'artefact pour gh run download -n. L'initialisation doit donc preceder
+# le test de cette option dans run.ps1, sinon -n recoit une valeur vide.
+$sourceLanceur = [System.IO.File]::ReadAllText((Join-Path $Racine "run.ps1"))
+$initialiseNom = $sourceLanceur.IndexOf('$ArtefactNavigateur = "bouchaud-ladybird-native-browser"')
+$conditionId = $sourceLanceur.IndexOf('if ($EffectiveLadybirdRunId -eq 0)')
+if ($initialiseNom -lt 0 -or $conditionId -lt 0 -or $initialiseNom -gt $conditionId) {
+    Write-Host "  ECHEC  -LadybirdRunId : nom d'artefact non initialise avant la decouverte" -ForegroundColor Red
+    $echecs += 1
+}
+else {
+    Write-Host "  ok     -LadybirdRunId : nom d'artefact initialise avant la decouverte" -ForegroundColor Green
+}
+
 Write-Host ""
 
 if ($echecs -gt 0) {

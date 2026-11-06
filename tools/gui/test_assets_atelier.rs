@@ -39,14 +39,14 @@ macro_rules! tuiles {
     };
 }
 
-fn tuiles() -> [(&'static str, usize, &'static [u8]); 33] {
+fn tuiles() -> [(&'static str, usize, &'static [u8]); 36] {
     tuiles!("navigateur", "calculatrice", "terminal", "fichiers", "edition", "services",
-        "notes", "insights", "moniteur", "journal", "parametres")
+        "notes", "insights", "moniteur", "journal", "parametres", "doom")
 }
 
 /// Budgets : ce que le bureau garde en memoire une fois les images decodees.
 const BUDGET_FOND_1080_OCTETS: usize = 1920 * 1080 * 4;
-/// Mesure : 11 tuiles x (18^2 + 40^2 + 56^2) x 4 = 222 640 octets si TOUTES
+/// Mesure : 12 tuiles x (18^2 + 40^2 + 56^2) x 4 = 242 880 octets si TOUTES
 /// les tailles sont decodees (le bureau ne decode que celles qu'il pose).
 const BUDGET_TUILES_OCTETS: usize = 256 * 1024;
 
@@ -77,6 +77,23 @@ fn chaque_tuile_a_sa_taille_de_l_alpha_et_tient_le_budget() {
         total += i.pixels.len() * 4;
     }
     assert!(total <= BUDGET_TUILES_OCTETS, "tuiles decodees : {total} octets");
+}
+
+/// La position de l'icone sur le bureau ne determine jamais le PNG.
+#[test]
+fn le_bureau_choisit_son_icone_par_kind_comme_le_menu_et_le_dock() {
+    let widgets = include_str!("../../src/gui/widgets.rs");
+    let start = widgets.find("fn draw_icon_at(i: usize)").expect("peintre du bureau introuvable");
+    let fin = widgets[start..].find("// ─── Fenêtres")
+        .expect("fin du peintre du bureau introuvable") + start;
+    let bureau = &widgets[start..fin];
+    assert!(bureau.contains("icones::pour_kind(kind)"),
+        "le bureau doit traduire le type d'application en indice de PNG");
+    assert!(!bureau.contains("icones::dessine(i,"),
+        "la position du bureau ne doit jamais etre un indice de PNG");
+    let mapping = include_str!("../../src/gui/icones.rs");
+    assert!(mapping.contains("crate::gui::window::KIND_DOOM => Some(11)"),
+        "DOOM doit rester associe a sa tuile 11");
 }
 
 #[test]
