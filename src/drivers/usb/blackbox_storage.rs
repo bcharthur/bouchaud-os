@@ -283,7 +283,10 @@ fn blackbox_bulk_transfer(
         (storage.dci_out, &mut storage.ring_out)
     };
 
-    ring_push(
+    // BOUCHAUD_USB_BLACKBOX_TRB_MATCH_V1: never accept a late completion
+    // from an abandoned CBW/data/CSW as the status of this new transfer.
+    // Mirror the normal BOT path: bind the event to this exact submitted TRB.
+    let trb_phys = ring_push(
         ring,
         Trb {
             parameter: storage.buffer_phys + offset as u64,
@@ -291,6 +294,7 @@ fn blackbox_bulk_transfer(
             control: (TRB_NORMAL << 10) | TRB_IOC | if input { TRB_ISP } else { 0 },
         },
     );
+    fence(Ordering::SeqCst);
     ring_doorbell(controller, storage.slot_id, dci);
 
     // LE BUDGET DU RUNTIME, PAS CELUI DE L'ENUMERATION.
@@ -298,12 +302,13 @@ fn blackbox_bulk_transfer(
     // Ce transfert tient le verrou du pilote. Lui laisser une demi-seconde,
     // c'est faire sauter au clavier cinq cents tours de scrutation pour une
     // cle qui ne repond pas. Voir `budget_bot`.
-    let event = wait_event_budget_unfiltered(
+    let event = wait_event_budget(
         controller,
         EVT_TRANSFER,
         Some(storage.slot_id),
         Some(dci),
         budget_bot(),
+        Some(trb_phys),
     )
     .ok_or("blackbox-bulk-timeout")?;
     let cc = completion_code(event.status);
