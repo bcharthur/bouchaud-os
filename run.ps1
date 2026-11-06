@@ -106,6 +106,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = $PSScriptRoot
+# The default Windows DirectSound capture driver is unavailable on some hosts.
+# Unless explicitly overridden, -Doom opts into QEMU's safe silent backend.
+if ($Doom -and -not $PSBoundParameters.ContainsKey('Audio')) { $Audio = 'none' }
 
 Set-Location $RepoRoot
 
@@ -1018,11 +1021,33 @@ if ($LadybirdMode) {
     if ($Doom) {
         $DoomElf = Join-Path $RepoRoot "target\doom-bouchaud\doom-bouchaud"
         $DoomWad = Join-Path $RepoRoot "tools\doom\wads\freedoom1.wad"
-        if (-not (Test-Path -LiteralPath $DoomElf -PathType Leaf)) {
-            Fail "DOOM: ELF missing ($DoomElf). Build with tools\doom\build-doom.sh under WSL."
+        # New clone or obsolete ET_EXEC: rebuild with portable Zig on Windows.
+        $DoomNeedsBuild = -not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)
+        if (-not $DoomNeedsBuild) {
+            $elfStream = [IO.File]::OpenRead($DoomElf)
+            try {
+                if ($elfStream.Length -lt 64) {
+                    $DoomNeedsBuild = $true
+                } else {
+                    $elfStream.Position = 16
+                    $elfType = @($elfStream.ReadByte(), $elfStream.ReadByte())
+                    $DoomNeedsBuild = ($elfType[0] -ne 3 -or $elfType[1] -ne 0)
+                }
+            } finally { $elfStream.Close() }
         }
-        if (-not (Test-Path -LiteralPath $DoomWad -PathType Leaf)) {
-            Fail "DOOM: Freedoom WAD missing ($DoomWad). Run tools\doom\prepare-image.py."
+        if ($DoomNeedsBuild) {
+            $DoomBuilder = Join-Path $RepoRoot 'tools\doom\build-windows.ps1'
+            if ($env:OS -ne 'Windows_NT' -or -not (Test-Path -LiteralPath $DoomBuilder -PathType Leaf)) {
+                Fail 'DOOM: sources absentes. Build Windows: tools\doom\build-windows.ps1 -NoLaunch; aucun WSL requis.'
+            }
+            Write-Host 'DOOM: preparation automatique via Zig portable (sans WSL)' -ForegroundColor Cyan
+            & $DoomBuilder -Repo $RepoRoot -NoLaunch
+            if (-not $?) { Fail 'DOOM: compilation Windows echouee.' }
+        }
+        if (-not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)) {
+            Fail 'DOOM: executable ou Freedoom manquant apres compilation.'
         }
         Copy-Item -LiteralPath $DoomElf -Destination (Join-Path $ScenarioDir "doom") -Force
         Copy-Item -LiteralPath $DoomWad -Destination (Join-Path $ScenarioDir "freedoom1.wad") -Force
