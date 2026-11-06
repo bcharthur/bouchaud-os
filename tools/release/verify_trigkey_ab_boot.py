@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-ANSI = re.compile(r"\\x1b\\[[0-9;]*m")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 REQUIRED = (
     "BOUCHAUD_AB_BOOT slot=A",
     "BOUCHAUD_HWPROBE_BEGIN",
@@ -26,7 +26,7 @@ def inspect(log_text: str, manifest: dict) -> dict:
         raise ValueError("the build manifest must remain BUILD_ONLY / NOT_RUN")
     if not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("commit", ""))):
         raise ValueError("missing exact build commit")
-    clean = ANSI.sub("", log_text).replace("\\r", "")
+    clean = ANSI.sub("", log_text).replace("\r", "")
     missing = [marker for marker in REQUIRED if marker not in clean]
     bad = [marker for marker in FORBIDDEN if marker in clean]
     if missing or bad:
@@ -51,7 +51,7 @@ def verify(out: Path) -> dict:
     manifest = json.loads((out / "manifest-ab.json").read_text(encoding="utf-8"))
     result = inspect(log.read_text(encoding="utf-8", errors="replace"), manifest)
     (out / "qemu-boot-evidence.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
+        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return result
 
 
