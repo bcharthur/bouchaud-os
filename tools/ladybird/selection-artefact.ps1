@@ -34,6 +34,22 @@
 
 Set-StrictMode -Version Latest
 
+# BOUCHAUD_WINDOWS_LANCEMENT_SHA_MAIN_V1
+# Un checkout exact de main peut etre detache ou porte par une branche locale.
+# Dans ces deux cas, le workflow producteur est celui de main, et non celui
+# de la branche locale. Ne jamais emprunter un artefact de main pour un SHA
+# different : la compatibilite ne serait alors pas prouvee.
+function Get-BrancheArtefact {
+    $courante = ((& git branch --show-current) -join "`n").Trim()
+    $head = ((& git rev-parse HEAD) -join "`n").Trim()
+    $originMain = ((& git rev-parse --verify refs/remotes/origin/main 2>$null) -join "`n").Trim()
+
+    if ($LASTEXITCODE -eq 0 -and $head -and $head -eq $originMain) {
+        return "main"
+    }
+    return $courante
+}
+
 function Get-RunAvecArtefact {
 
     [CmdletBinding()]
