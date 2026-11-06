@@ -54,11 +54,11 @@ class TimelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
             (p / "boot-10.log").write_text(
-                "BOUCHAUD_AB_BOOT slot=B\\nSERVICED_UPDATE_STATE rc=0 token=SECRET\\n",
+                "BOUCHAUD_AB_BOOT slot=B\nSERVICED_UPDATE_STATE rc=0 token=SECRET\n",
                 encoding="utf-8")
             (p / "boot-2.log").write_text(
-                "BOUCHAUD_USB_STOCKAGE_IO_ECHEC slot=2 erreur=bot-csw-echeance\\n"
-                "SERVICED_UPDATE_STATE rc=-13 secret=SECRET\\n", encoding="utf-8")
+                "BOUCHAUD_USB_STOCKAGE_IO_ECHEC slot=2 erreur=bot-csw-echeance\n"
+                "SERVICED_UPDATE_STATE rc=-13 secret=SECRET\n", encoding="utf-8")
             out = timeline.decode_boot_directory(p)
         self.assertEqual(out["boot_numbers"], [2, 10])
         self.assertEqual(out["boot_count"], 2)
@@ -73,7 +73,7 @@ class TimelineTests(unittest.TestCase):
             p = Path(tmp)
             with self.assertRaises(ValueError):
                 timeline.decode_boot_directory(p)
-            (p / "boot-1.log").write_text("BOUCHAUD_AB_BOOT slot=A\\n")
+            (p / "boot-1.log").write_text("BOUCHAUD_AB_BOOT slot=A\n")
             (p / "boot-2.log").symlink_to(p / "boot-1.log")
             with self.assertRaises(ValueError):
                 timeline.decode_boot_directory(p)
@@ -81,7 +81,7 @@ class TimelineTests(unittest.TestCase):
     def test_directory_reports_truncation_without_green_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
-            (p / "boot-1.log").write_text("*** KERNEL PANIC *** cpu=1\\n" * 5)
+            (p / "boot-1.log").write_text("*** KERNEL PANIC *** cpu=1\n" * 5)
             out = timeline.decode_boot_directory(p, max_events=2)
         self.assertTrue(out["evidence_truncated"])
         self.assertEqual(out["event_counts"]["scheduler_panic"], 5)

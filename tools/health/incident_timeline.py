@@ -93,7 +93,7 @@ def decode_lines(lines, max_events: int = 20000) -> dict:
 
 # Per-boot grouping is deliberate: two QEMU boots on the same A/B disk
 # MUST NOT be collapsed into a single inferred causal chain.
-BOOT_LOG_NAME = re.compile(r"boot-([0-9]+)\\.log\\Z")
+BOOT_LOG_NAME = re.compile(r"boot-([0-9]+)\.log\Z")
 MAX_BOOT_LOGS = 64
 CRITICAL_KINDS = frozenset({
     "scheduler_panic", "scheduler_handoff_fault", "usb_io_failure",
