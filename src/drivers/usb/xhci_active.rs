@@ -5068,18 +5068,39 @@ fn recupere_point_bulk(
                 return false;
             }
         }
-        _ => {}
+        EP_ETAT_STOPPED | EP_ETAT_ERROR => {}
+        // Un endpoint desactive n'a pas de file recuperable. Refuser plutot
+        // que publier un nouveau pointeur sans avoir arrete le controleur.
+        _ => return false,
     }
 
-    // L'anneau repart de son debut. Le controleur reprendra a l'adresse qu'on
-    // lui donne avec DCS a un ; les TRB deja consommes portent l'ancien cycle
-    // et ne seront pas repris.
+    // Une commande Stop/Reset terminee doit laisser le point dans un etat
+    // autorisant Set TR Dequeue. Sans cette preuve, ne JAMAIS toucher aux TRB.
+    if !matches!(
+        etat_du_point(controller, device, dci),
+        EP_ETAT_STOPPED | EP_ETAT_ERROR
+    ) {
+        return false;
+    }
+
+    // BOUCHAUD_USB_BOT_PURGE_ANNEAU_V1
+    //
+    // Mettre seulement l'index a zero ne suffit PAS : les anciens TRB du
+    // cycle 1 sont toujours valides en memoire. Apres Set TR Dequeue, xHCI
+    // peut donc executer un ancien TD derriere le CBW neuf, puis attendre
+    // un CSW qui n'appartient plus a la commande courante.
+    //
+    // Le point est arrete (preuve ci-dessus) ; purger TOUT l'anneau avant de
+    // remettre son pointeur a zero. Les TRB seront republies par ring_push,
+    // avec leur bit de cycle pose en dernier, apres la barriere Release.
     let phys = {
         let st = &mut controller.stockages[index];
         let point = if entree { &mut st.entree } else { &mut st.sortie };
+        unsafe { write_bytes(point.ring.virt as *mut u8, 0, RING_BYTES) };
         point.ring.index = 0;
         point.ring.cycle = 1;
         unsafe { prepare_link(&point.ring, 1) };
+        fence(Ordering::Release);
         point.ring.phys
     };
     let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
