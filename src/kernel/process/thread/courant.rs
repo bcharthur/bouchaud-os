@@ -355,20 +355,26 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         task.tid
     );
 
-    match SWITCH_PENDING[cpu].compare_exchange(
+    // P0_SMP_HANDOFF_PUBLICATION_V1: publish the task metadata BEFORE the
+    // handoff pointer becomes visible to the incoming continuation/IRQ.
+    // AcqRel on SWITCH_PENDING orders these prior writes for its Acquire reader.
+    // Publishing the pointer first exposed pending=N while switching_out=false
+    // and panicked in complete_switch_handoff() during SMP4 soak (#264).
+    let remise = task.state == TaskState::Ready;
+    task.switching_out.range(true);
+    SWITCH_REMISE[cpu].store(remise, Ordering::Relaxed);
+    if let Err(previous) = SWITCH_PENDING[cpu].compare_exchange(
         NO_TASK,
         index,
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
-        Ok(_) => {
-            SWITCH_REMISE[cpu].store(task.state == TaskState::Ready, Ordering::Relaxed);
-            task.switching_out.range(true)
-        }
-        Err(previous) => panic!(
+        // Fail closed, but do not leave this task marked as switching out.
+        task.switching_out.range(false);
+        panic!(
             "task: passation precedente non terminee cpu={} pending={} nouveau={}",
             cpu, previous, index
-        ),
+        );
     }
 }
 
@@ -379,14 +385,17 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
 /// `publish_ready()` refuse encore la tache tant que `on_cpu >= 0`. Ici, apres
 /// abandon physique de l'ancienne pile, on republie exactement une fois.
 fn complete_switch_handoff() {
-    let cpu = local_cpu();
-    let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
-    if outgoing == NO_TASK {
-        // Une transition noyau -> tache n'a pas de sortante dans le registre,
-        // mais elle doit tout de meme rendre la porte depuis la pile entrante.
-        termine_transition_ordonnanceur();
-        return;
-    }
+    // A completion entered from an IRQ must not reenter itself while the
+    // outgoing task is being unpublished. Keep the Acquire of SWITCH_PENDING,
+    // the task flags and the clearing of SWITCH_PENDING in one CPU-local
+    // interrupt-disabled critical section. Do NOT disable interrupts around
+    // publie_pret (it can wake other CPUs and acquire scheduler state).
+    let completion = interrupts::without_interrupts(|| {
+        let cpu = local_cpu();
+        let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
+        if outgoing == NO_TASK {
+            return None;
+        }
 
     debug_assert!(
         TRANSITION_ORDONNANCEUR[cpu].load(Ordering::Acquire),
@@ -449,10 +458,15 @@ fn complete_switch_handoff() {
     // la reecrit.
     let remise = SWITCH_REMISE[cpu].load(Ordering::Relaxed);
     SWITCH_PENDING[cpu].store(NO_TASK, Ordering::Release);
+    Some((outgoing, publish, remise))
+    });
 
-    if publish {
-        publie_pret(outgoing, if remise { ReveilPublication::Remise } else { ReveilPublication::Reveil });
+    if let Some((outgoing, publish, remise)) = completion {
+        if publish {
+            publie_pret(outgoing, if remise { ReveilPublication::Remise } else { ReveilPublication::Reveil });
+        }
     }
+    // In the no-pending case this is the historical kernel -> task exit.
     termine_transition_ordonnanceur();
 }
 
