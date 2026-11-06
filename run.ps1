@@ -7,6 +7,9 @@ param(
     # ne pas casser les habitudes et les documents qui le mentionnent.
     [switch]$Ladybird,
 
+    # Add /doom and /freedoom1.wad to Ladybird userland disk; start from desktop.
+    [switch]$Doom,
+
     # Revient au userland historique (Qt + CPython + QuickJS). Le navigateur du
     # bureau est alors l'ancien moteur, pas Ladybird.
     [switch]$Legacy,
@@ -103,6 +106,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = $PSScriptRoot
+# The default Windows DirectSound capture driver is unavailable on some hosts.
+# Unless explicitly overridden, -Doom opts into QEMU's safe silent backend.
+if ($Doom -and -not $PSBoundParameters.ContainsKey('Audio')) { $Audio = 'none' }
 
 Set-Location $RepoRoot
 
@@ -508,12 +514,14 @@ if ($LadybirdMode) {
         Ensure-GitHubCli
 
 
+        $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
         $EffectiveLadybirdRunId = $LadybirdRunId
 
         if ($EffectiveLadybirdRunId -eq 0) {
-            $CurrentBranch = (& git branch --show-current).Trim()
+            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
+            $CurrentBranch = Get-BrancheArtefact
             if (-not $CurrentBranch) {
-                Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
+                Fail "HEAD detache hors origin/main : fournir -LadybirdRunId ou basculer sur une branche distante qualifiee."
             }
 
             # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
@@ -529,10 +537,6 @@ if ($LadybirdMode) {
             # defauts d'EXECUTION sont passes par ce trou, tous dans ce
             # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
             # maintenant avec un `gh` simule.
-            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-
-            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
-
             $selection = Get-RunAvecArtefact `
                 -Branche $CurrentBranch `
                 -Artefact $ArtefactNavigateur
@@ -1011,6 +1015,44 @@ if ($LadybirdMode) {
         [System.Text.UTF8Encoding]::new($false)
     )
 
+    # BOUCHAUD_DOOM_ATELIER_V2 : opt-in only. The existing boot/userland
+    # image and launch mode remain unchanged without -Doom.
+    if ($Doom) {
+        $DoomElf = Join-Path $RepoRoot "target\doom-bouchaud\doom-bouchaud"
+        $DoomWad = Join-Path $RepoRoot "tools\doom\wads\freedoom1.wad"
+        # New clone or obsolete ET_EXEC: rebuild with portable Zig on Windows.
+        $DoomNeedsBuild = -not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)
+        if (-not $DoomNeedsBuild) {
+            $elfStream = [IO.File]::OpenRead($DoomElf)
+            try {
+                if ($elfStream.Length -lt 64) {
+                    $DoomNeedsBuild = $true
+                } else {
+                    $elfStream.Position = 16
+                    $elfType = @($elfStream.ReadByte(), $elfStream.ReadByte())
+                    $DoomNeedsBuild = ($elfType[0] -ne 3 -or $elfType[1] -ne 0)
+                }
+            } finally { $elfStream.Close() }
+        }
+        if ($DoomNeedsBuild) {
+            $DoomBuilder = Join-Path $RepoRoot 'tools\doom\build-windows.ps1'
+            if ($env:OS -ne 'Windows_NT' -or -not (Test-Path -LiteralPath $DoomBuilder -PathType Leaf)) {
+                Fail 'DOOM: sources absentes. Build Windows: tools\doom\build-windows.ps1 -NoLaunch; aucun WSL requis.'
+            }
+            Write-Host 'DOOM: preparation automatique via Zig portable (sans WSL)' -ForegroundColor Cyan
+            & $DoomBuilder -Repo $RepoRoot -NoLaunch
+            if (-not $?) { Fail 'DOOM: compilation Windows echouee.' }
+        }
+        if (-not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)) {
+            Fail 'DOOM: executable ou Freedoom manquant apres compilation.'
+        }
+        Copy-Item -LiteralPath $DoomElf -Destination (Join-Path $ScenarioDir "doom") -Force
+        Copy-Item -LiteralPath $DoomWad -Destination (Join-Path $ScenarioDir "freedoom1.wad") -Force
+        Write-Host "DOOM: added ring3 game and Freedoom IWAD to Atelier disk" -ForegroundColor Green
+    }
+
 
     # =========================================================================
     # Fabrication USTAR native Windows
@@ -1070,6 +1112,7 @@ if not root.is_dir():
 # ne doit pas dependre du fait que son unique utilisateur soit root.
 executables = {
     "bo-navigateur",
+    "doom",
     "usr/libexec/ladybird/BouchaudBrowserHost",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",

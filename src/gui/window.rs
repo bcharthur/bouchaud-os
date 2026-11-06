@@ -114,8 +114,8 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 ///
 /// Le `kind` est explicite et non deduit de la position : retirer une entree ne
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
-pub(crate) const MENU: [(&str, usize); 13] = [
-    ("Ladybird", KIND_NAVIGATEUR),
+pub(crate) const MENU: [(&str, usize); 14] = [
+    ("Ladybird", KIND_NAVIGATEUR), ("DOOM", KIND_DOOM),
     ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3), ("Services", KIND_SERVICES),
     ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
     ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS),
@@ -141,16 +141,16 @@ pub(crate) const KIND_REDEMARRER: usize = usize::MAX - 1;
 pub(crate) const KIND_ETEINDRE: usize = usize::MAX - 2;
 
 /// Icones du bureau : (libelle, kind). Cliquables pour lancer l'application.
-pub(crate) const ICONS: [(&str, usize); 8] = [
+pub(crate) const ICONS: [(&str, usize); 9] = [
     ("Ladybird", KIND_NAVIGATEUR),
     ("Calculatrice", 4), ("Terminal", 0), ("Fichiers", 1), ("Rustpad", 5), ("Services", KIND_SERVICES),
-    ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS),
+    ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS), ("DOOM", KIND_DOOM),
 ];
 
 /// Positions des icones de bureau (x, y). Modifiables par drag-and-drop.
-pub(crate) static mut ICON_POSITIONS: [(i32, i32); 8] = [
+pub(crate) static mut ICON_POSITIONS: [(i32, i32); 9] = [
     (16, 42), (16, 132), (16, 222), (16, 312), (16, 402), (106, 42),
-    (106, 132), (106, 222),
+    (106, 132), (106, 222), (196, 42),
 ];
 
 /// Etat applicatif porte par une fenetre.
@@ -158,6 +158,8 @@ pub(crate) static mut ICON_POSITIONS: [(i32, i32); 8] = [
 pub(crate) const KIND_SERVICES: usize = 8;
 pub(crate) const KIND_NOTES: usize = 9;
 pub(crate) const KIND_INSIGHTS: usize = 10;
+/// DOOM est un client graphique ring 3, independant de Ladybird.
+pub(crate) const KIND_DOOM: usize = 11;
 
 pub(crate) enum App {
     Services,
@@ -173,6 +175,17 @@ pub(crate) enum App {
     Journal { state: crate::gui::apps::journal::JournalState },
     /// Fenetre d'un client ring 3 : le contenu vient de sa surface partagee.
     Navigateur { client: alloc::boxed::Box<crate::gui::client::Client> },
+    /// Jeu video externe : meme protocole GUI isole que Ladybird.
+    Doom { client: alloc::boxed::Box<crate::gui::client::Client> },
+}
+
+impl App {
+    pub(crate) fn client_mut(&mut self) -> Option<&mut crate::gui::client::Client> {
+        match self { Self::Navigateur { client } | Self::Doom { client } => Some(client), _ => None }
+    }
+    pub(crate) fn client(&self) -> Option<&crate::gui::client::Client> {
+        match self { Self::Navigateur { client } | Self::Doom { client } => Some(client), _ => None }
+    }
 }
 
 pub(crate) struct Win {
@@ -340,7 +353,7 @@ pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
 
 /// La fenetre porte-t-elle un client ring 3 ?
 pub(crate) fn est_client(w: &Win) -> bool {
-    matches!(w.app, App::Navigateur { .. })
+    matches!(w.app, App::Navigateur { .. } | App::Doom { .. })
 }
 
 /// Bascule maximiser / restaurer une fenetre.
@@ -394,7 +407,7 @@ pub(crate) fn fenetres_demandees_au_demarrage() -> Vec<usize> {
                 if let Ok(kind) = morceau.trim().parse::<usize>() {
                     // Le navigateur et les entrees d'alimentation ne s'ouvrent
                     // pas par ce chemin : seules les applications natives.
-                    if kind < 64 && kind != KIND_NAVIGATEUR && kinds.len() < 8 {
+                    if kind < 64 && kind != KIND_NAVIGATEUR && kind != KIND_DOOM && kinds.len() < 8 {
                         kinds.push(kind);
                     }
                 }
