@@ -56,5 +56,30 @@ int main()
     q=request(WD_QUERY,other);
     q.version=99;
     assert(wd_apply(&state,2,&q).verdict==WD_INVALID);
+    // Protection multi-principaux : un handle ne confere jamais les fenetres
+    // d'autrui et une fenetre fermee ne peut pas etre reutilisee par ID.
+    q=request(WD_QUERY,other);
+    assert(wd_apply(&state,0,&q).verdict==WD_INVALID);
+    assert(wd_apply(&state,1,&q).verdict==WD_DENIED);
+    q=request(WD_RESIZE,other,0,0,1,1);
+    assert(wd_apply(&state,1,&q).verdict==WD_DENIED);
+    q=request(WD_CLOSE,other);
+    assert(wd_apply(&state,2,&q).verdict==WD_OK);
+    assert(wd_apply(&state,2,&q).verdict==WD_NOT_FOUND);
+    q=request(WD_OPEN,0,0,0,20,20);
+    assert(wd_apply(&state,3,&q).verdict==WD_OK);
+    wd_u32 fresh=state.focus_id;
+    assert(fresh!=first && fresh!=other);
+    q=request(WD_MOVE,fresh,42,42);
+    assert(wd_apply(&state,2,&q).verdict==WD_DENIED);
+    // Une requete de taille invalide ne mute rien.
+    q=request(WD_QUERY,fresh);
+    wd_reply before=wd_apply(&state,3,&q);
+    q=request(WD_RESIZE,fresh,0,0,0,10);
+    assert(wd_apply(&state,3,&q).verdict==WD_INVALID);
+    q=request(WD_QUERY,fresh);
+    wd_reply after=wd_apply(&state,3,&q);
+    assert(after.x==before.x && after.y==before.y &&
+           after.width==before.width && after.height==before.height);
     return 0;
 }
