@@ -16,6 +16,7 @@ concurrency:
 jobs:
   non-regression:
     name: non-regression-gate
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
