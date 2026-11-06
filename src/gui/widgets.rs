@@ -758,10 +758,15 @@ fn libelle_icone(index: usize) -> (i32, i32, i32) {
 /// Une seule icone. Extrait de `draw_icons` pour que `gui::scene` puisse en
 /// ecarter une qui ne touche pas le rectangle en cours.
 fn draw_icon_at(i: usize) {
-    let (label, _kind) = ICONS[i];
+    let (label, kind) = ICONS[i];
     let (vx, vy) = image_icone(i);
-    crate::gui::icones::dessine(i, vx.max(0) as usize, vy.max(0) as usize,
-        crate::gui::icones::TAILLE_BUREAU);
+    // i est la position de la cellule sur le bureau, PAS l'indice du PNG.
+    // DOOM est a la position 8 mais sa tuile Atelier est a l'indice 11.
+    // Utiliser la meme correspondance kind -> tuile que le dock et le menu.
+    if let Some(icone) = crate::gui::icones::pour_kind(kind) {
+        crate::gui::icones::dessine(icone, vx.max(0) as usize, vy.max(0) as usize,
+            crate::gui::icones::TAILLE_BUREAU);
+    }
 
     // Libelle : une ombre portee d'un pixel le detache du fond d'ecran, dont la
     // clarte varie du haut au bas de l'ecran.
@@ -817,7 +822,7 @@ fn draw_window(w: &Win, focused: bool) {
     // si un jour la surface est plus petite que la fenetre, la difference doit
     // continuer de recevoir un fond, sinon elle montrerait le bureau.
     let opaque = match &w.app {
-        App::Navigateur { client } => {
+        App::Navigateur { client } | App::Doom { client } => {
             let zone = crate::gui::window::zone_utile(w);
             // `composable`, et non la surface allouee : depuis que celle-ci est
             // dimensionnee pour une fenetre MAXIMISEE, elle est plus grande que

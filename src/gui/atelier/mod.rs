@@ -44,4 +44,3 @@ pub mod reglages;
 pub mod animations;
 pub mod effets;
 pub mod fichiers;
-pub mod session;

@@ -1,0 +1,46 @@
+name: DOOM Windows reproducible port
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tools/doom/**'
+      - 'src/gui/widgets.rs'
+      - 'src/gui/icones.rs'
+      - 'src/assets/atelier/apps/doom-*.png'
+      - 'run.ps1'
+      - '.gitignore'
+      - '.github/workflows/doom-port-windows.yml'
+
+jobs:
+  doom-windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Build Linux static PIE on native Windows (no WSL)
+        shell: powershell
+        run: |
+          & .\tools\doom\build-windows.ps1 -NoLaunch
+          if ($LASTEXITCODE -ne 0) { throw "DOOM build failed" }
+      - name: Verify DOOM GUI icon contract and ELF/WAD
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content 'src/gui/widgets.rs' -Raw
+          if (-not $source.Contains('icones::pour_kind(kind)')) { throw 'DOOM desktop icon incorrectly indexed' }
+          $mapping = Get-Content 'src/gui/icones.rs' -Raw
+          if (-not $mapping.Contains('crate::gui::window::KIND_DOOM => Some(11)')) { throw 'DOOM app icon mapping absent' }
+          $icons = @{
+            '18' = '8fb1d710d809c40e6e5b02fd48097470396aaa6ab0c824a482774aa9d44d7753'
+            '40' = '8b79014c79c017670431911719e11bee91605d6e4fa602574dfea305e472f5d1'
+            '56' = '4dcd49b039a67dff8dcee7dfe0993c8b3e1023f0d9ebcef63ef3da87c735668d'
+          }
+          foreach ($n in $icons.Keys) {
+            $hash = (Get-FileHash "src/assets/atelier/apps/doom-$n.png" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $icons[$n]) { throw "DOOM icon $n hash mismatch" }
+          }
+          if (-not (Test-Path 'target/doom-bouchaud/doom-bouchaud')) { throw 'No DOOM ELF produced' }
+          if ((Get-Item 'tools/doom/wads/freedoom1.wad').Length -lt 10000000) { throw 'Freedoom WAD missing or truncated' }
+          Write-Host 'DOOM: ET_DYN validated by build-windows.ps1, GUI icons and Freedoom confirmed'

@@ -22,6 +22,13 @@
     },
     "icones-fichiers": {
       "licence": "projet Bouchaud OS (formes) + ISC (glyphes Lucide)"
+    },
+    "logo-doom": {
+      "licence": "PD-textlogo (Wikimedia Commons), marque deposee",
+      "auteur": "id Software / Bethesda Softworks",
+      "source": "https://commons.wikimedia.org/wiki/File:Doom_%E2%80%93_Game%E2%80%99s_logo.svg",
+      "original": "assets/atelier/sources/apps/doom-logo-officiel.svg",
+      "tuile": "assets/atelier/sources/apps/doom.svg"
     }
   },
   "fichiers": {
@@ -679,6 +686,33 @@
       "hauteur": 1080,
       "alpha": false,
       "licence": "fond-summer_1am"
+    },
+    "src/assets/atelier/apps/doom-18.png": {
+      "sha256": "8fb1d710d809c40e6e5b02fd48097470396aaa6ab0c824a482774aa9d44d7753",
+      "octets": 730,
+      "largeur": 18,
+      "hauteur": 18,
+      "alpha": true,
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
+    },
+    "src/assets/atelier/apps/doom-40.png": {
+      "sha256": "8b79014c79c017670431911719e11bee91605d6e4fa602574dfea305e472f5d1",
+      "octets": 1702,
+      "largeur": 40,
+      "hauteur": 40,
+      "alpha": true,
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
+    },
+    "src/assets/atelier/apps/doom-56.png": {
+      "sha256": "4dcd49b039a67dff8dcee7dfe0993c8b3e1023f0d9ebcef63ef3da87c735668d",
+      "octets": 2493,
+      "largeur": 56,
+      "hauteur": 56,
+      "alpha": true,
+      "licence": "logo-doom",
+      "glyphe": "lettrage officiel DOOM"
     }
   }
 }

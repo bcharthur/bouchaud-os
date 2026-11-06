@@ -8,6 +8,7 @@ Fabriqués par `tools/assets/fabrique-atelier.py`. Empreintes dans `src/assets/a
 | Fond **« summer 1am »** | **Risto Saukonpää**, dépôt KDE `plasma-workspace-wallpapers` (`summer_1am`, image 2560×1600) | **LGPL-3.0** (déclarée dans `sources/fond/metadata.json`) — texte dans `sources/fond/LICENSE-LGPL-3.0.txt` (+ GPL-3.0 référencée) | `sources/fond/summer_1am-2560x1600.jpg` (source), `fond/summer_1am-*.png` (recadrages « cover ») |
 | Tuiles applicatives | Projet Bouchaud OS (dégradé, forme) + glyphe Lucide (ISC) | projet + ISC | `sources/apps/*.svg`, `apps/*.png` |
 | Icônes de types de fichiers | Projet Bouchaud OS (dossier, page, badge) + glyphe Lucide (ISC) | projet + ISC | `sources/fichiers/*.svg`, `fichiers/*.png` |
+| Lettrage **DOOM** officiel (version 2016), intégré dans une tuile Atelier | id Software / Bethesda Softworks ; [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Doom_%E2%80%93_Game%E2%80%99s_logo.svg) | **PD-textlogo** selon Commons ; **marque déposée**, aucune affiliation ou validation officielle du projet Bouchaud OS | `sources/apps/doom-logo-officiel.svg` (vecteur), `sources/apps/doom.svg` (tuile), `apps/doom-{18,40,56}.png` |
 | Marque **Bouchaud OS** | Projet Bouchaud OS, d'après la maquette Atelier | projet — **PROVISOIRE** | `sources/logo/bouchaud-os-provisoire.svg`, `logo/*.png` |
 
 Le logo est **PROVISOIRE** : le dépôt ne contenait aucun logo officiel de Bouchaud OS, et l'ancien logo nautile du navigateur, dessiné en code, avait été retiré. Il ne doit pas être présenté comme l'identité définitive avant validation.
