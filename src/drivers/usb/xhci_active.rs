@@ -1626,7 +1626,7 @@ fn traite_differes(controller: &mut Controller) {
 }
 
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
-    wait_event_budget(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
+    wait_event_budget_unfiltered(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
 }
 
 /// Attend un evenement, au plus `budget_ns`.
@@ -1634,21 +1634,21 @@ fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, d
 /// Le budget est un ARGUMENT et non une constante : le chemin de scrutation
 /// n'a pas la meme patience que l'enumeration, et confondre les deux est
 /// exactement ce qui rendait la machine de reference inutilisable.
-fn wait_event_budget(
+fn wait_event_budget_unfiltered(
     controller: &mut Controller,
     wanted_type: u32,
     slot: Option<u8>,
     dci: Option<u8>,
     budget_ns: u64,
 ) -> Option<Trb> {
-    wait_event_budget_trb(controller, wanted_type, slot, dci, budget_ns, None)
+    wait_event_budget(controller, wanted_type, slot, dci, budget_ns, None)
 }
 
 /// Pour les transferts BULK, associer l'evenement au TRB soumis, pas seulement
 /// au couple slot/DCI. Un achevement tardif d'un TD abandonne peut utiliser
 /// le meme endpoint apres la reprise BOT. Il ne doit jamais valider le CBW,
 /// les donnees ou le CSW d'une commande plus recente.
-fn wait_event_budget_trb(
+fn wait_event_budget(
     controller: &mut Controller,
     wanted_type: u32,
     slot: Option<u8>,
@@ -1766,7 +1766,7 @@ fn command_raw_budget(
         Trb { parameter, status: 0, control },
     );
     ring_doorbell(controller, 0, 0);
-    let event = wait_event_budget(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
+    let event = wait_event_budget_unfiltered(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
         .ok_or("command-timeout")?;
     if event.parameter & !0xf != pointer & !0xf {
         // Command completions are ordered. A mismatched pointer means the event
@@ -2069,7 +2069,7 @@ fn control_transfer_interne(
     );
     ring_doorbell(controller, device.slot_id, 1);
 
-    let event = wait_event_budget(
+    let event = wait_event_budget_unfiltered(
         controller,
         EVT_TRANSFER,
         Some(device.slot_id),
@@ -5018,7 +5018,7 @@ fn bulk_transfert(
     // l'entree pendant une seconde et demie -- « la souris met trop de temps a
     // se deplacer », « FPS 2 » avec le processeur a 22 %. La machine n'etait
     // pas saturee, elle ATTENDAIT.
-    let event = wait_event_budget_trb(
+    let event = wait_event_budget(
         controller,
         EVT_TRANSFER,
         Some(slot),
