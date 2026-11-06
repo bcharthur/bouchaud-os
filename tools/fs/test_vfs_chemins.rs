@@ -30,3 +30,18 @@ fn utf8_conserve_et_composants_255_octets() {
     assert!(n(&format!("/{}", "é".repeat(128))).is_err());
     assert!(n(&format!("/{}", "a".repeat(255))).is_ok());
 }
+
+#[test]
+fn idempotence_chemins_de_fichiers_et_notes() {
+    for p in ["/", "/persist/home/notes.md", "/persist/./home//notes.md",
+              "/tmp/../home/a.txt", "/Téléchargements/été.txt"] {
+        let normalized = n(p).unwrap();
+        assert_eq!(n(&normalized).unwrap(), normalized, "chemin instable: {p}");
+    }
+}
+#[test]
+fn refuse_contournements_en_bord_de_racine() {
+    for p in ["/../../persist", "/a/../../../etc", "/./../etc", "/a/../../"] {
+        assert_eq!(n(p).unwrap_err(), E::SortieRacine);
+    }
+}

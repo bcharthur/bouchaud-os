@@ -1626,7 +1626,7 @@ fn traite_differes(controller: &mut Controller) {
 }
 
 fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, dci: Option<u8>) -> Option<Trb> {
-    wait_event_budget(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
+    wait_event_budget_unfiltered(controller, wanted_type, slot, dci, BUDGET_ATTENTE_NS)
 }
 
 /// Attend un evenement, au plus `budget_ns`.
@@ -1634,12 +1634,27 @@ fn wait_event(controller: &mut Controller, wanted_type: u32, slot: Option<u8>, d
 /// Le budget est un ARGUMENT et non une constante : le chemin de scrutation
 /// n'a pas la meme patience que l'enumeration, et confondre les deux est
 /// exactement ce qui rendait la machine de reference inutilisable.
+fn wait_event_budget_unfiltered(
+    controller: &mut Controller,
+    wanted_type: u32,
+    slot: Option<u8>,
+    dci: Option<u8>,
+    budget_ns: u64,
+) -> Option<Trb> {
+    wait_event_budget(controller, wanted_type, slot, dci, budget_ns, None)
+}
+
+/// Pour les transferts BULK, associer l'evenement au TRB soumis, pas seulement
+/// au couple slot/DCI. Un achevement tardif d'un TD abandonne peut utiliser
+/// le meme endpoint apres la reprise BOT. Il ne doit jamais valider le CBW,
+/// les donnees ou le CSW d'une commande plus recente.
 fn wait_event_budget(
     controller: &mut Controller,
     wanted_type: u32,
     slot: Option<u8>,
     dci: Option<u8>,
     budget_ns: u64,
+    trb_attendu: Option<u64>,
 ) -> Option<Trb> {
     let debut = crate::kernel::timer::monotonic_ns();
     let mut tours = 0u32;
@@ -1657,7 +1672,17 @@ fn wait_event_budget(
                 && slot.map_or(true, |s| event_slot(event) == s)
                 && dci.map_or(true, |e| event_dci(event) == e)
             {
-                return Some(event);
+                if trb_attendu.map_or(true, |p| event.parameter & !0xf == p & !0xf) {
+                    return Some(event);
+                }
+                // Meme endpoint, mais ancien TD : le reenfiler pour HID
+                // serait incorrect et accepter son statut serait dangereux.
+                crate::serial_println!(
+                    "BOUCHAUD_USB_BULK_TRB_PERIME slot={} dci={} recu={:#x} attendu={:#x}",
+                    event_slot(event), event_dci(event), event.parameter,
+                    trb_attendu.unwrap_or(0),
+                );
+                continue;
             }
             // CE QUI NE NOUS ETAIT PAS DESTINE N'EST PAS A JETER.
             //
@@ -1741,7 +1766,7 @@ fn command_raw_budget(
         Trb { parameter, status: 0, control },
     );
     ring_doorbell(controller, 0, 0);
-    let event = wait_event_budget(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
+    let event = wait_event_budget_unfiltered(controller, EVT_COMMAND_COMPLETION, None, None, budget_ns)
         .ok_or("command-timeout")?;
     if event.parameter & !0xf != pointer & !0xf {
         // Command completions are ordered. A mismatched pointer means the event
@@ -2044,7 +2069,7 @@ fn control_transfer_interne(
     );
     ring_doorbell(controller, device.slot_id, 1);
 
-    let event = wait_event_budget(
+    let event = wait_event_budget_unfiltered(
         controller,
         EVT_TRANSFER,
         Some(device.slot_id),
@@ -4966,10 +4991,10 @@ fn bulk_transfert(
     if octets == 0 || octets > TAMPON_STOCKAGE {
         return Err("bulk-longueur");
     }
-    let (slot, dci) = {
+    let (slot, dci, trb_phys) = {
         let st = &mut controller.stockages[index];
         let point = if entree { &mut st.entree } else { &mut st.sortie };
-        ring_push(
+        let trb_phys = ring_push(
             &mut point.ring,
             Trb {
                 parameter: phys,
@@ -4981,7 +5006,7 @@ fn bulk_transfert(
                 control: (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP,
             },
         );
-        (st.slot_id, point.dci)
+        (st.slot_id, point.dci, trb_phys)
     };
     fence(Ordering::SeqCst);
     ring_doorbell(controller, slot, dci);
@@ -4999,6 +5024,7 @@ fn bulk_transfert(
         Some(slot),
         Some(dci),
         budget_bot(),
+        Some(trb_phys),
     )
     .ok_or("bulk-echeance")?;
     let cc = completion_code(event.status);
@@ -5068,18 +5094,39 @@ fn recupere_point_bulk(
                 return false;
             }
         }
-        _ => {}
+        EP_ETAT_STOPPED | EP_ETAT_ERROR => {}
+        // Un endpoint desactive n'a pas de file recuperable. Refuser plutot
+        // que publier un nouveau pointeur sans avoir arrete le controleur.
+        _ => return false,
     }
 
-    // L'anneau repart de son debut. Le controleur reprendra a l'adresse qu'on
-    // lui donne avec DCS a un ; les TRB deja consommes portent l'ancien cycle
-    // et ne seront pas repris.
+    // Une commande Stop/Reset terminee doit laisser le point dans un etat
+    // autorisant Set TR Dequeue. Sans cette preuve, ne JAMAIS toucher aux TRB.
+    if !matches!(
+        etat_du_point(controller, device, dci),
+        EP_ETAT_STOPPED | EP_ETAT_ERROR
+    ) {
+        return false;
+    }
+
+    // BOUCHAUD_USB_BOT_PURGE_ANNEAU_V1
+    //
+    // Mettre seulement l'index a zero ne suffit PAS : les anciens TRB du
+    // cycle 1 sont toujours valides en memoire. Apres Set TR Dequeue, xHCI
+    // peut donc executer un ancien TD derriere le CBW neuf, puis attendre
+    // un CSW qui n'appartient plus a la commande courante.
+    //
+    // Le point est arrete (preuve ci-dessus) ; purger TOUT l'anneau avant de
+    // remettre son pointeur a zero. Les TRB seront republies par ring_push,
+    // avec leur bit de cycle pose en dernier, apres la barriere Release.
     let phys = {
         let st = &mut controller.stockages[index];
         let point = if entree { &mut st.entree } else { &mut st.sortie };
+        unsafe { write_bytes(point.ring.virt as *mut u8, 0, RING_BYTES) };
         point.ring.index = 0;
         point.ring.cycle = 1;
         unsafe { prepare_link(&point.ring, 1) };
+        fence(Ordering::Release);
         point.ring.phys
     };
     let controle = (CMD_SET_TR_DEQUEUE << 10) | ((dci as u32) << 16) | ((slot as u32) << 24);
