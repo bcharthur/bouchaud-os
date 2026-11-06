@@ -32,6 +32,15 @@ def inspect(log_text: str, manifest: dict) -> dict:
     if missing or bad:
         raise ValueError("QEMU boot incomplete or unsafe: missing="
                          + ",".join(missing) + " forbidden=" + ",".join(bad))
+    lines = clean.splitlines()
+    state_lines = [line for line in lines if "SERVICED_UPDATE_STATE" in line]
+    if not any(re.search(r"\brc=0(?:\s|$)", line) for line in state_lines):
+        raise ValueError("service state was not read back successfully")
+    if any(re.search(r"\brc=(?!0(?:\s|$))\S+", line) for line in state_lines):
+        raise ValueError("a service state readback failed")
+    health_lines = [line for line in lines if "SERVICED_HEALTH_COMMIT" in line]
+    if not any("result=already_good" in line for line in health_lines):
+        raise ValueError("healthy slot confirmation must come from serviced")
     return {
         "schema": "trigkey-ab-qemu-smoke/1",
         "build_sha": manifest["commit"],

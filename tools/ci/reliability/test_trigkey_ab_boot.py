@@ -35,6 +35,12 @@ class TrigkeyBootProof(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.inspect(GOOD + "BOUCHAUD_AB_BOOT slot=B\n", MANIFEST)
 
+    def test_state_error_and_unrelated_healthy_message_do_not_pass(self):
+        with self.assertRaises(ValueError):
+            mod.inspect(GOOD.replace("rc=0", "rc=7"), MANIFEST)
+        with self.assertRaises(ValueError):
+            mod.inspect(GOOD.replace("SERVICED_HEALTH_COMMIT ", "OTHER_MODULE "), MANIFEST)
+
     def test_unverified_image_cannot_be_promoted(self):
         with self.assertRaises(ValueError):
             mod.inspect(GOOD, {**MANIFEST, "physical": "PASS"})
