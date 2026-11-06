@@ -298,7 +298,7 @@ fn blackbox_bulk_transfer(
     // Ce transfert tient le verrou du pilote. Lui laisser une demi-seconde,
     // c'est faire sauter au clavier cinq cents tours de scrutation pour une
     // cle qui ne repond pas. Voir `budget_bot`.
-    let event = wait_event_budget(
+    let event = wait_event_budget_unfiltered(
         controller,
         EVT_TRANSFER,
         Some(storage.slot_id),
