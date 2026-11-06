@@ -1641,6 +1641,21 @@ fn wait_event_budget(
     dci: Option<u8>,
     budget_ns: u64,
 ) -> Option<Trb> {
+    wait_event_budget_trb(controller, wanted_type, slot, dci, budget_ns, None)
+}
+
+/// Pour les transferts BULK, associer l'evenement au TRB soumis, pas seulement
+/// au couple slot/DCI. Un achevement tardif d'un TD abandonne peut utiliser
+/// le meme endpoint apres la reprise BOT. Il ne doit jamais valider le CBW,
+/// les donnees ou le CSW d'une commande plus recente.
+fn wait_event_budget_trb(
+    controller: &mut Controller,
+    wanted_type: u32,
+    slot: Option<u8>,
+    dci: Option<u8>,
+    budget_ns: u64,
+    trb_attendu: Option<u64>,
+) -> Option<Trb> {
     let debut = crate::kernel::timer::monotonic_ns();
     let mut tours = 0u32;
     loop {
@@ -1657,7 +1672,17 @@ fn wait_event_budget(
                 && slot.map_or(true, |s| event_slot(event) == s)
                 && dci.map_or(true, |e| event_dci(event) == e)
             {
-                return Some(event);
+                if trb_attendu.map_or(true, |p| event.parameter & !0xf == p & !0xf) {
+                    return Some(event);
+                }
+                // Meme endpoint, mais ancien TD : le reenfiler pour HID
+                // serait incorrect et accepter son statut serait dangereux.
+                crate::serial_println!(
+                    "BOUCHAUD_USB_BULK_TRB_PERIME slot={} dci={} recu={:#x} attendu={:#x}",
+                    event_slot(event), event_dci(event), event.parameter,
+                    trb_attendu.unwrap_or(0),
+                );
+                continue;
             }
             // CE QUI NE NOUS ETAIT PAS DESTINE N'EST PAS A JETER.
             //
@@ -4966,10 +4991,10 @@ fn bulk_transfert(
     if octets == 0 || octets > TAMPON_STOCKAGE {
         return Err("bulk-longueur");
     }
-    let (slot, dci) = {
+    let (slot, dci, trb_phys) = {
         let st = &mut controller.stockages[index];
         let point = if entree { &mut st.entree } else { &mut st.sortie };
-        ring_push(
+        let trb_phys = ring_push(
             &mut point.ring,
             Trb {
                 parameter: phys,
@@ -4981,7 +5006,7 @@ fn bulk_transfert(
                 control: (TRB_NORMAL << 10) | TRB_IOC | TRB_ISP,
             },
         );
-        (st.slot_id, point.dci)
+        (st.slot_id, point.dci, trb_phys)
     };
     fence(Ordering::SeqCst);
     ring_doorbell(controller, slot, dci);
@@ -4993,12 +5018,13 @@ fn bulk_transfert(
     // l'entree pendant une seconde et demie -- « la souris met trop de temps a
     // se deplacer », « FPS 2 » avec le processeur a 22 %. La machine n'etait
     // pas saturee, elle ATTENDAIT.
-    let event = wait_event_budget(
+    let event = wait_event_budget_trb(
         controller,
         EVT_TRANSFER,
         Some(slot),
         Some(dci),
         budget_bot(),
+        Some(trb_phys),
     )
     .ok_or("bulk-echeance")?;
     let cc = completion_code(event.status);
