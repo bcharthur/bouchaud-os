@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  non-regression:
+  non-regression-gate:
     name: non-regression-gate
     if: always()
     runs-on: ubuntu-latest
