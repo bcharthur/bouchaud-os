@@ -219,6 +219,18 @@ else:
     for _c in sorted(_attendus - set(_pr)):
         errors.append(f"p13-primitives-noyau.yml: {_c} ne declenche pas P13")
 
+# Automatic non-regression check: always triggered, never a docs-only skip.
+regression = need(root / "non-regression.yml",
+                  ("name: Non-regression Gate", "non-regression-gate",
+                   "pull_request:", "push:", "test_non_regression.py"))
+if not (Path("tools/ci/non_regression.py").is_file() and
+        Path("tools/ci/reliability/test_non_regression.py").is_file()):
+    errors.append("non-regression: script ou tests de mutation absents")
+if "non-regression-gate" not in protection.read_text(encoding="utf-8"):
+    errors.append("protection main: non-regression-gate non requis")
+if "continue-on-error: true" in regression:
+    errors.append("non-regression: echec ignore par le workflow")
+
 if errors:
     print("\n".join("ECHEC: " + e for e in errors), file=sys.stderr)
     raise SystemExit(1)

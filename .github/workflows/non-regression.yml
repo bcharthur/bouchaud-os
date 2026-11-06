@@ -1,0 +1,46 @@
+# Fail-closed, always-on structural regression gate; NOT a release/physical verdict.
+name: Non-regression Gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: non-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  non-regression:
+    name: non-regression-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Eprouver les controles contre des mutations volontaires
+        run: python3 -m unittest discover -s tools/ci/reliability -p 'test_non_regression.py' -v
+      - name: Invariants critiques sur HEAD et diff avec la base exacte
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            python3 tools/ci/non_regression.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          else
+            python3 tools/ci/non_regression.py
+          fi
+      - name: Archiver les preuves (ne jamais transformer un echec en succes)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-regression-report
+          path: target/non-regression.json
+          if-no-files-found: warn
+          retention-days: 30
