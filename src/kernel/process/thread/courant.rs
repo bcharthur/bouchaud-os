@@ -360,9 +360,10 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
     // AcqRel on SWITCH_PENDING orders these prior writes for its Acquire reader.
     // Publishing the pointer first exposed pending=N while switching_out=false
     // and panicked in complete_switch_handoff() during SMP4 soak (#264).
-    let remise = task.state == TaskState::Ready;
+    // Keep the exact readiness snapshot guarded by
+    // verifie-remise-sans-demande.py; BOTH fields precede the Release pointer.
+    SWITCH_REMISE[cpu].store(task.state == TaskState::Ready, Ordering::Relaxed);
     task.switching_out.range(true);
-    SWITCH_REMISE[cpu].store(remise, Ordering::Relaxed);
     if let Err(previous) = SWITCH_PENDING[cpu].compare_exchange(
         NO_TASK,
         index,

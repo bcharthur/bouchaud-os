@@ -18,7 +18,7 @@ fn flags_before_pending_release() {
     let flag = f.find("task.switching_out.range(true)").unwrap();
     let remise = f.find("SWITCH_REMISE[cpu].store(remise").unwrap();
     let ptr = f.find("SWITCH_PENDING[cpu].compare_exchange(").unwrap();
-    assert!(flag < remise && remise < ptr, "pending publie avant drapeau");
+    assert!(remise < flag && flag < ptr, "pending publie avant drapeau");
     assert!(f[ptr..].contains("Ordering::AcqRel"));
     assert!(f.contains("task.switching_out.range(false)"), "rollback du drapeau manquant");
 }
