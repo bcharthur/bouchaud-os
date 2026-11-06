@@ -1,0 +1,54 @@
+# This workflow REPORTS release truth. A successful report job is not GO.
+# Never change existing CI verdicts or declare QEMU runs as PHYSICAL evidence.
+name: Release evidence (report-only)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '13 6 * * *'
+  pull_request:
+    paths:
+      - 'tools/health/release_truth.py'
+      - 'tools/ci/reliability/test_release_evidence.py'
+      - '.github/workflows/release-evidence.yml'
+      - 'docs/current/RELEASE_EVIDENCE_LIVE.md'
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+
+jobs:
+  gather-evidence:
+    name: release-evidence / report (not a release gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline regression, including false-green checks
+        run: python3 -m unittest discover -s tools/ci/reliability -p 'test_release_evidence.py' -v
+      - name: Collect current exact-main-sha GitHub evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/health/release_truth.py --output target/release-evidence.json
+      - name: Summarize no-go reasons
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = json.loads(Path('target/release-evidence.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write('# Release evidence (report only)\n\n')
+              out.write('**Report job success is NOT OS stability.**\n\n')
+              out.write(f"SHA: \`{p['exact_main_sha']}\`\n\n")
+              out.write(f"**Verdict: {p['release_verdict']}**\n\n")
+              for reason in p['blockers']:
+                  out.write(f"- {reason}\n")
+          PY
+      - name: Preserve machine-readable provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-live
+          path: target/release-evidence.json
+          if-no-files-found: warn
+          retention-days: 30
