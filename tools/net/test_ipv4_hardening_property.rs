@@ -12,6 +12,8 @@ pub mod ipv4;
 pub mod icmp;
 #[path = "../../src/net/stack.rs"]
 pub mod stack;
+#[path = "../../src/net/transport/udp.rs"]
+pub mod udp;
 pub mod net {
     pub use crate::{icmp, ipv4};
 }
@@ -124,4 +126,23 @@ fn randomized_untrusted_packets_never_panic_or_escape_bounds() {
         }
         let _ = stack::handle_ipv4(&buf, &mut [0u8; 256]);
     }
+}
+
+#[test]
+fn udp_build_refuses_unrepresentable_length() {
+    let mut target = vec![0u8; 70_100];
+    let data = vec![7u8; 70_000];
+    assert!(udp::build(&mut target, 5353, 53, &data).is_none());
+}
+#[test]
+fn udp_absent_checksum_does_not_mask_invalid_length() {
+    let src = [127, 0, 0, 1];
+    let mut pkt = [0u8; 16];
+    // longueur zero, somme nulle : jamais un datagramme valide.
+    assert_eq!(udp::somme_verdict(&src, &src, &pkt), (false, false));
+    pkt[4..6].copy_from_slice(&8u16.to_be_bytes());
+    assert_eq!(udp::somme_verdict(&src, &src, &pkt), (true, true));
+    assert_eq!(udp::parse(&pkt).unwrap().payload_len, 0);
+    pkt[4..6].copy_from_slice(&32u16.to_be_bytes());
+    assert_eq!(udp::somme_verdict(&src, &src, &pkt), (false, false));
 }
