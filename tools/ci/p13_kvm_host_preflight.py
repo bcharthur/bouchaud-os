@@ -30,6 +30,22 @@ def quota_cpus(text: str) -> float | None:
         return 0.0
 
 
+
+def compte_coeurs_physiques(affinite: list[int], racine: Path = Path("/sys/devices/system/cpu")) -> int | None:
+    """Compte les (package, core), pas les freres SMT; None si topologie absente."""
+    coeurs: set[tuple[int, int]] = set()
+    for cpu in affinite:
+        topo = racine / f"cpu{cpu}" / "topology"
+        try:
+            package = int((topo / "physical_package_id").read_text().strip())
+            core = int((topo / "core_id").read_text().strip())
+        except (OSError, ValueError):
+            return None  # Ne jamais declarer SMP8 sur 4 coeurs + SMT.
+        coeurs.add((package, core))
+    return len(coeurs)
+
+
+
 def controle(allowed: int, quota: float | None, min_cpus: int, kvm: bool, tools: list[str], dedicated: bool, load: float, max_load_ratio: float = 1.5) -> list[str]:
     errors = []
     if not dedicated:
@@ -56,6 +72,7 @@ def main() -> int:
     if ns.min_cpus < 1:
         ap.error("--min-cpus doit être positif")
     affinity = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else []
+    coeurs_physiques = compte_coeurs_physiques(affinity)
     p = Path("/sys/fs/cgroup/cpu.max")
     quota = quota_cpus(p.read_text()) if p.exists() else None
     required = ["qemu-system-x86_64", "python3", "bash", "gcc", "git"]
@@ -75,19 +92,23 @@ def main() -> int:
         kvm_error = str(error)
     load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     dedicated = os.environ.get("BOUCHAUD_DEDICATED_HOST") == "YES"
-    errors = controle(len(affinity), quota, ns.min_cpus, kvm, missing, dedicated, load)
+    # La preuve SMP exige des COEURS, pas seulement un nombre de threads SMT.
+    errors = controle(coeurs_physiques or 0, quota, ns.min_cpus, kvm, missing, dedicated, load)
+    if coeurs_physiques is None:
+        errors.append("topologie CPU physique illisible : preuve KVM refusee")
     try:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
         sha = None
         errors.append("Git HEAD absent, impossible de relier les preuves à un SHA")
     info = {"sha": sha, "uname": platform.uname()._asdict(), "allowed_cpu_ids": affinity,
-            "allowed_count": len(affinity), "cpu_quota": quota, "host_load_1m": load,
+            "allowed_count": len(affinity), "physical_core_count": coeurs_physiques,
+            "cpu_quota": quota, "host_load_1m": load,
             "kvm_accessible": kvm, "kvm_error": kvm_error, "dedicated_confirmed_by_operator": dedicated,
             "minimum_cpu": ns.min_cpus, "errors": errors, "status": "PRECHECK_OK" if not errors else "PRECHECK_REFUSED"}
     ns.output.parent.mkdir(parents=True, exist_ok=True)
     ns.output.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(info["status"] + " sha=" + str(sha) + " allowed_cpus=" + str(len(affinity)) + " quota=" + str(quota))
+    print(info["status"] + " sha=" + str(sha) + " logical_cpus=" + str(len(affinity)) + " physical_cores=" + str(coeurs_physiques) + " quota=" + str(quota))
     for error in errors:
         print("  - " + error)
     return 0 if not errors else 2
