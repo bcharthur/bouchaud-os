@@ -14,15 +14,46 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use super::animations::Mode;
+use super::usage::{self, Usage};
 
 static DIAGNOSTIC: AtomicBool = AtomicBool::new(false);
 static ANIMATIONS: AtomicU8 = AtomicU8::new(0);
+static MODE_USAGE: AtomicU8 = AtomicU8::new(0);
 
 const fn code(mode: Mode) -> u8 {
     match mode {
         Mode::Normal => 0,
         Mode::Reduit => 1,
         Mode::Aucun => 2,
+    }
+}
+
+/// Mode d'usage courant. Personnalise indique un ajustement manuel.
+pub fn usage_courant() -> Usage {
+    match MODE_USAGE.load(Ordering::Relaxed) {
+        1 => Usage::Travail,
+        2 => Usage::Focus,
+        3 => Usage::Jeu,
+        4 => Usage::Personnalise,
+        _ => Usage::Standard,
+    }
+}
+const fn code_usage(mode: Usage) -> u8 {
+    match mode {
+        Usage::Standard => 0, Usage::Travail => 1, Usage::Focus => 2,
+        Usage::Jeu => 3, Usage::Personnalise => 4,
+    }
+}
+/// Change de vraies preferences visuelles, pas de politique scheduler.
+pub fn regle_usage(mode: Usage) {
+    if let Some(profil) = usage::profil(mode) {
+        ANIMATIONS.store(code(profil.animations), Ordering::Relaxed);
+        DIAGNOSTIC.store(profil.diagnostic, Ordering::Relaxed);
+        MODE_USAGE.store(code_usage(mode), Ordering::Relaxed);
+        crate::serial_println!(
+            "BOUCHAUD_ATELIER_USAGE mode={:?} scope=VISUEL animations={:?} diagnostic={}",
+            mode, profil.animations, profil.diagnostic as u8
+        );
     }
 }
 
@@ -39,23 +70,51 @@ pub fn animations() -> Mode {
 pub fn regle_animations(mode: Mode) {
     if animations() != mode {
         ANIMATIONS.store(code(mode), Ordering::Relaxed);
+        MODE_USAGE.store(code_usage(Usage::Personnalise), Ordering::Relaxed);
         crate::serial_println!("BOUCHAUD_ATELIER_REGLAGE animations={:?}", mode);
     }
 }
 
 /// Lit les reglages exportes. Appele une fois, au demarrage du bureau.
 pub fn charge() {
+    // Les reglages exportes explicitement priment, quel que soit leur ordre.
+    let mut choix_usage = None;
+    let mut choix_diagnostic = None;
+    let mut choix_animations = None;
     for entree in crate::shell::exported().iter() {
+        if let Some(v) = entree.strip_prefix("BO_ATELIER_USAGE=") {
+            choix_usage = usage::depuis_env(v);
+        }
         if let Some(v) = entree.strip_prefix("BO_ATELIER_DIAGNOSTIC=") {
-            DIAGNOSTIC.store(matches!(v.trim(), "1" | "oui" | "on"), Ordering::Relaxed);
+            choix_diagnostic = Some(matches!(v.trim(), "1" | "oui" | "on"));
         }
         if let Some(v) = entree.strip_prefix("BO_ATELIER_ANIMATIONS=") {
-            let mode = match v.trim() {
+            choix_animations = Some(match v.trim() {
                 "reduites" | "reduit" => Mode::Reduit,
                 "aucune" | "0" | "non" => Mode::Aucun,
                 _ => Mode::Normal,
-            };
+            });
+        }
+    }
+    if let Some(mode) = choix_usage {
+        if let Some(p) = usage::profil(mode) {
+            ANIMATIONS.store(code(p.animations), Ordering::Relaxed);
+            DIAGNOSTIC.store(p.diagnostic, Ordering::Relaxed);
+            MODE_USAGE.store(code_usage(mode), Ordering::Relaxed);
+        }
+    } else {
+        MODE_USAGE.store(code_usage(Usage::Standard), Ordering::Relaxed);
+    }
+    if let Some(mode) = choix_animations {
+        if animations() != mode {
             ANIMATIONS.store(code(mode), Ordering::Relaxed);
+            MODE_USAGE.store(code_usage(Usage::Personnalise), Ordering::Relaxed);
+        }
+    }
+    if let Some(value) = choix_diagnostic {
+        if diagnostic() != value {
+            DIAGNOSTIC.store(value, Ordering::Relaxed);
+            MODE_USAGE.store(code_usage(Usage::Personnalise), Ordering::Relaxed);
         }
     }
 }
@@ -69,6 +128,7 @@ pub fn diagnostic() -> bool {
 pub fn bascule_diagnostic() -> bool {
     let nouveau = !diagnostic();
     DIAGNOSTIC.store(nouveau, Ordering::Relaxed);
+    MODE_USAGE.store(code_usage(Usage::Personnalise), Ordering::Relaxed);
     crate::serial_println!("BOUCHAUD_ATELIER_REGLAGE diagnostic={}", nouveau as u8);
     nouveau
 }
