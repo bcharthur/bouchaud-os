@@ -790,31 +790,23 @@ fn boucle() {
                 let prise = !menu_open && actif.map_or(false, |i| {
                     !window::est_client(&wins[i]) && apps::app_echap(&mut wins[i])
                 });
-                if menu_open { menu_open = false; }
-                else if prise {}
-                else if !ferme_fenetre_du_dessus(&mut wins) {
-                    // POURQUOI LA SESSION S'ARRETE, ECRIT AU MOMENT OU ELLE
-                    // S'ARRETE.
-                    //
-                    // BOUCHAUD_C36_FIN_DE_SESSION_EXPLIQUEE
-                    //
-                    // Le run 35830736815 s'est eteint a T+342 s, en plein
-                    // milieu de la matrice de workers : le journal montre
-                    // `AUTORUN FIN statut=0` juste apres le lancement du
-                    // deuxieme agent. Rien ne disait POURQUOI, et il n'y a que
-                    // deux chemins qui posent `quit` -- un clic sur « Quitter »
-                    // et celui-ci. Sans cette ligne, on ne peut pas les
-                    // distinguer, et un banc qui perd ses trois dernieres
-                    // minutes sans explication ne se repare pas.
-                    crate::serial_println!(
-                        "BOUCHAUD_BUREAU_FIN raison=touche_sans_fenetre fenetres={} client_actif={} menu={}",
-                        wins.len(),
-                        client_actif,
-                        menu_open,
-                    );
-                    quit = true;
-                }
-                continue;
+                if menu_open {
+                    menu_open = false;
+                } else {
+                    use crate::gui::atelier::session::{action_echap, EchapSansMenu};
+                    match action_echap(prise, !wins.is_empty()) {
+                        EchapSansMenu::PrisParApplication => {}
+                        EchapSansMenu::FermerFenetre => {
+                            if !ferme_fenetre_du_dessus(&mut wins) {
+                                crate::serial_println!("BOUCHAUD_ATELIER_ECHAP_IGNOREE raison=aucune_fenetre_fermable");
+                            }
+                        }
+                        EchapSansMenu::Ignorer => {
+                            // Aucun arrêt implicite du bureau sur Echap.
+                            crate::serial_println!("BOUCHAUD_ATELIER_ECHAP_IGNOREE raison=bureau_vide");
+                        }
+                    }
+                }                continue;
             }
             if let Some(index) = actif {
                 if let Some(client) = wins[index].app.client_mut() {
