@@ -100,6 +100,26 @@ class TestNonRegression(unittest.TestCase):
         self.assertIn("p13-primitives-noyau", risks["smp"])
         self.assertIn("native_ipc", risks)
 
+    def test_all_twelve_chantiers_are_classified(self):
+        examples = {
+            "memory": "src/kernel/memory/heap.rs",
+            "network": "src/net/internet/ipv4.rs",
+            "product": "src/gui/atelier/mouvement.rs",
+            "governance": ".github/workflows/ci.yml",
+            "security": "src/kernel/security/wx.rs",
+            "browser": "tools/ladybird/prepare-browser-runtime-link.py",
+            "physical": "tools/release/build_trigkey_image.sh",
+            "native_ipc": "src/kernel/native/time.rs",
+            "storage": "src/fs/ramfs.rs",
+            "gui": "src/gui/window_manager.rs",
+            "smp": "src/kernel/process/thread/courant.rs",
+            "usb_ab": "src/drivers/usb/xhci_active.rs",
+        }
+        for name, file in examples.items():
+            with self.subTest(domain=name):
+                self.assertIn(name, gate.required_evidence([file]))
+
+
 
 if __name__ == "__main__":
     unittest.main()

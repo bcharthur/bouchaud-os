@@ -59,6 +59,14 @@ RISK_DOMAINS = (
      ("CI Fast", "Reliability V3")),
     ("browser", ("tools/ladybird/", "tools/userland/navigateur/", "third_party/"),
      ("CI Fast", "ladybird-native-browser")),
+    ("memory", ("src/kernel/memory/", "tools/mm/", "tools/memory/"),
+     ("CI Fast", "Reliability V3", "Integration")),
+    ("network", ("src/net/", "tools/net/", "src/drivers/net/"),
+     ("CI Fast", "Integration")),
+    ("product", ("src/gui/atelier/", "tools/product/", "userland/apps/"),
+     ("CI Fast", "Integration")),
+    ("governance", (".github/workflows/", "tools/ci/configure", "tools/ci/non_regression.py"),
+     ("Non-regression Gate", "CI Fast")),
 )
 
 
