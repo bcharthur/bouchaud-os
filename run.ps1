@@ -518,9 +518,10 @@ if ($LadybirdMode) {
         $EffectiveLadybirdRunId = $LadybirdRunId
 
         if ($EffectiveLadybirdRunId -eq 0) {
-            $CurrentBranch = ((& git branch --show-current) -join "`n").Trim()
+            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
+            $CurrentBranch = Get-BrancheArtefact
             if (-not $CurrentBranch) {
-                Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
+                Fail "HEAD detache hors origin/main : fournir -LadybirdRunId ou basculer sur une branche distante qualifiee."
             }
 
             # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
@@ -536,8 +537,6 @@ if ($LadybirdMode) {
             # defauts d'EXECUTION sont passes par ce trou, tous dans ce
             # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
             # maintenant avec un `gh` simule.
-            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-
             $selection = Get-RunAvecArtefact `
                 -Branche $CurrentBranch `
                 -Artefact $ArtefactNavigateur
