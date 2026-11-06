@@ -8,6 +8,8 @@ on:
   pull_request:
     paths:
       - 'tools/health/release_truth.py'
+      - 'tools/health/incident_timeline.py'
+      - 'tools/ci/reliability/test_incident_timeline.py'
       - 'tools/ci/reliability/test_release_evidence.py'
       - '.github/workflows/release-evidence.yml'
       - 'docs/current/RELEASE_EVIDENCE_LIVE.md'
@@ -25,7 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Offline regression, including false-green checks
-        run: python3 -m unittest discover -s tools/ci/reliability -p 'test_release_evidence.py' -v
+        run: |
+          python3 -m unittest discover -s tools/ci/reliability -p 'test_release_evidence.py' -v
+          python3 -m unittest discover -s tools/ci/reliability -p 'test_incident_timeline.py' -v
       - name: Collect current exact-main-sha GitHub evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}

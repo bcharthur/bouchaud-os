@@ -91,6 +91,65 @@ def decode_lines(lines, max_events: int = 20000) -> dict:
     }
 
 
+# Per-boot grouping is deliberate: two QEMU boots on the same A/B disk
+# MUST NOT be collapsed into a single inferred causal chain.
+BOOT_LOG_NAME = re.compile(r"boot-([0-9]+)\\.log\\Z")
+MAX_BOOT_LOGS = 64
+CRITICAL_KINDS = frozenset({
+    "scheduler_panic", "scheduler_handoff_fault", "usb_io_failure",
+    "usb_bot_recovery_failed", "update_state_error", "health_commit_refused",
+})
+
+
+def decode_boot_directory(folder: Path, max_events: int = 20000) -> dict:
+    """Aggregate each boot-N.log independently, never concatenate raw input."""
+    if not folder.is_dir():
+        raise ValueError("not a boot log directory")
+    matched = []
+    for candidate in folder.iterdir():
+        name = BOOT_LOG_NAME.fullmatch(candidate.name)
+        if name:
+            if candidate.is_symlink() or not candidate.is_file():
+                raise ValueError("boot log must be a regular file")
+            matched.append((int(name.group(1)), candidate))
+    if not matched or len(matched) > MAX_BOOT_LOGS:
+        raise ValueError("expected 1..64 regular boot-N.log files")
+    matched.sort(key=lambda entry: (entry[0], entry[1].name))
+    if len({number for number, _ in matched}) != len(matched):
+        raise ValueError("ambiguous boot sequence numbering")
+    aggregate: Counter[str] = Counter()
+    boots = []
+    for number, path in matched:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            report = decode_lines(stream, max_events=max_events)
+        aggregate.update(report["event_counts"])
+        critical = [event for event in report["events"]
+                    if event["kind"] in CRITICAL_KINDS]
+        boots.append({
+            "boot_number": number,
+            "source": path.name,
+            "boot_id": report["boot_id_last_seen"],
+            "lines_scanned": report["lines_scanned"],
+            "events_kept": report["events_kept"],
+            "events_truncated": report["events_truncated"],
+            "logd_declared_losses": report["logd_declared_losses"],
+            "event_counts": report["event_counts"],
+            "critical_observed": bool(critical),
+            "first_critical_line": critical[0]["line"] if critical else None,
+            "events": report["events"],
+        })
+    return {
+        "schema": "bouchaud-ab-boot-timeline/v1",
+        "boot_count": len(boots),
+        "boot_numbers": [b["boot_number"] for b in boots],
+        "event_counts": dict(sorted(aggregate.items())),
+        "any_critical_observed": any(b["critical_observed"] for b in boots),
+        "evidence_truncated": any(b["events_truncated"] for b in boots),
+        "boots": boots,
+        "causality": "not-inferred: per-boot chronology only; no cross-boot causal edge",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path)
@@ -99,14 +158,21 @@ def main() -> int:
     args = parser.parse_args()
     if not (1 <= args.max_events <= 100000):
         parser.error("--max-events must be between 1 and 100000")
-    with args.log.open("r", encoding="utf-8", errors="replace") as file:
-        report = decode_lines(file, args.max_events)
+    if args.log.is_dir():
+        report = decode_boot_directory(args.log, args.max_events)
+        summary = (f"BOUCHAUD_AB_TIMELINE boots={report['boot_count']} "
+                   f"critical={int(report['any_critical_observed'])} "
+                   f"truncated={int(report['evidence_truncated'])}")
+    else:
+        with args.log.open("r", encoding="utf-8", errors="replace") as file:
+            report = decode_lines(file, args.max_events)
+        summary = (f"BOUCHAUD_TIMELINE events={report['events_kept']} "
+                   f"truncated={int(report['events_truncated'])} "
+                   f"logd_dropped={report['logd_declared_losses']}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n",
                            encoding="utf-8")
-    print(f"BOUCHAUD_TIMELINE events={report['events_kept']} "
-          f"truncated={int(report['events_truncated'])} "
-          f"logd_dropped={report['logd_declared_losses']}")
+    print(summary)
     return 0
 
 

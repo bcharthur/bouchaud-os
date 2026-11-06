@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 
 PATH = Path(__file__).resolve().parents[2] / "health" / "incident_timeline.py"
 SPEC = importlib.util.spec_from_file_location("incident_timeline", PATH)
@@ -48,6 +49,44 @@ class TimelineTests(unittest.TestCase):
         report = timeline.decode_lines(["arbitrary terminal: secret text\n"])
         self.assertEqual(report["events_kept"], 0)
         self.assertNotIn("secret", str(report))
+
+    def test_ab_boot_directory_is_separated_and_ordered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p / "boot-10.log").write_text(
+                "BOUCHAUD_AB_BOOT slot=B\\nSERVICED_UPDATE_STATE rc=0 token=SECRET\\n",
+                encoding="utf-8")
+            (p / "boot-2.log").write_text(
+                "BOUCHAUD_USB_STOCKAGE_IO_ECHEC slot=2 erreur=bot-csw-echeance\\n"
+                "SERVICED_UPDATE_STATE rc=-13 secret=SECRET\\n", encoding="utf-8")
+            out = timeline.decode_boot_directory(p)
+        self.assertEqual(out["boot_numbers"], [2, 10])
+        self.assertEqual(out["boot_count"], 2)
+        self.assertTrue(out["boots"][0]["critical_observed"])
+        self.assertFalse(out["boots"][1]["critical_observed"])
+        self.assertEqual(out["boots"][0]["first_critical_line"], 1)
+        self.assertIn("not-inferred", out["causality"])
+        self.assertNotIn("SECRET", str(out))
+
+    def test_directory_rejects_missing_and_symlinked_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            with self.assertRaises(ValueError):
+                timeline.decode_boot_directory(p)
+            (p / "boot-1.log").write_text("BOUCHAUD_AB_BOOT slot=A\\n")
+            (p / "boot-2.log").symlink_to(p / "boot-1.log")
+            with self.assertRaises(ValueError):
+                timeline.decode_boot_directory(p)
+
+    def test_directory_reports_truncation_without_green_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            (p / "boot-1.log").write_text("*** KERNEL PANIC *** cpu=1\\n" * 5)
+            out = timeline.decode_boot_directory(p, max_events=2)
+        self.assertTrue(out["evidence_truncated"])
+        self.assertEqual(out["event_counts"]["scheduler_panic"], 5)
+        self.assertEqual(out["boots"][0]["events_kept"], 2)
+
 
 
 if __name__ == "__main__":

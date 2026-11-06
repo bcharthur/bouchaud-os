@@ -39,3 +39,20 @@ python3 -m unittest discover -s tools/ci/reliability -p 'test_incident_timeline.
 ```
 
 Le JSON ordonne les incidents USB/BOT, l'état A/B, les refus de commit, les paniques SMP et les messages `LOGD` par ligne, session boot et service. Il compte les pertes déclarées par logd et signale toute troncature. Il **ne déduit pas une causalité** d'une simple succession temporelle : il faut une vraie corrélation dans les événements noyau/service pour établir la chaîne complète. Les commandes de terminal et champs non reconnus ne sont pas recopiés.
+
+## Diagnostic A/B sur tous les boots (sans fausse causalité)
+
+Le parseur accepte également le répertoire `boot-*.log` produit par
+`tools/ci/run_ab_rollback.sh` :
+
+```bash
+python3 tools/health/incident_timeline.py target/ab-rollback-sante \\
+  --output target/ab-incident-timeline.json
+```
+
+Il conserve **une chronologie par boot** numérotée, la première ligne critique,
+les compteurs par domaine (USB, commit, scheduler), les pertes logd et les
+troncatures. Le regroupement inter-boot est un index de preuves, **pas** une
+affirmation qu'une erreur USB a causé un refus de commit. Maximum 64 fichiers
+`boot-N.log` réguliers ; les liens symboliques et les suites ambiguës sont
+refusés. Aucun contenu terminal inconnu n'est réexporté.
