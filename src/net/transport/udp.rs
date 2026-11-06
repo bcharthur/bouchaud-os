@@ -3,8 +3,9 @@
 
 /// Construit un datagramme UDP (en-tete 8 octets + charge utile).
 pub fn build(buf: &mut [u8], src_port: u16, dst_port: u16, payload: &[u8]) -> Option<usize> {
-    let total = 8 + payload.len();
-    if buf.len() < total { return None; }
+    let total = 8usize.checked_add(payload.len())?;
+    // The IPv4 UDP length field is 16 bits: never truncate on the wire.
+    if total > u16::MAX as usize || buf.len() < total { return None; }
     buf[0] = (src_port >> 8) as u8;
     buf[1] = src_port as u8;
     buf[2] = (dst_port >> 8) as u8;
@@ -33,14 +34,15 @@ pub fn somme_verdict(src: &[u8; 4], dst: &[u8; 4], datagramme: &[u8]) -> (bool, 
     if datagramme.len() < 8 {
         return (false, false);
     }
-    let portee = ((datagramme[6] as u16) << 8) | datagramme[7] as u16;
-    if portee == 0 {
-        // Zero : l'emetteur n'en a pas calcule. C'est legal.
-        return (true, true);
-    }
+    // Un checksum absent est permis, mais PAS une longueur incoherente.
+    // L'ancien ordre acceptait comme valide une trame de longueur 0.
     let longueur = ((datagramme[4] as usize) << 8) | datagramme[5] as usize;
     if longueur < 8 || longueur > datagramme.len() {
         return (false, false);
+    }
+    let portee = ((datagramme[6] as u16) << 8) | datagramme[7] as u16;
+    if portee == 0 {
+        return (true, true);
     }
     let mut somme: u32 = 0;
     // Le pseudo-en-tete.
