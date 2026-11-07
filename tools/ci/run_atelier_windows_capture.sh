@@ -15,10 +15,8 @@ OUT=$(cd "$OUT" && pwd)
 # universel, meme si les executables tiers ne sont pas dans cette image.
 GESTES="$(cat <<'SCENARIO'
 origine
-va 130 45
-mouse_button 1
-bouge 560 115
-mouse_button 0
+va 389 45
+clic
 attente 2
 capture atelier-terminal
 origine

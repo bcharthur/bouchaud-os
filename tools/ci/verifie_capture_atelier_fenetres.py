@@ -38,7 +38,7 @@ def pixels_differents(a: Path, b: Path) -> int:
 def verifie(dossier: Path) -> None:
     # Comparer AVANT/APRES sur trois interactions ou une fenetre DOIT changer.
     checks = (
-        ("Terminal deplace", "bureau.ppm", "atelier-terminal.ppm"),
+        ("Terminal ferme", "bureau.ppm", "atelier-terminal.ppm"),
         ("Notes ouverte", "atelier-doom.ppm", "atelier-notes.ppm"),
         ("Fichiers ouverte", "atelier-notes.ppm", "atelier-fichiers.ppm"),
     )
