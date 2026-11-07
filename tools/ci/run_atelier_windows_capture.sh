@@ -34,6 +34,12 @@ va 137 165
 double
 attente 3
 capture atelier-notes
+# Fermer Notes via sa hitbox de fermeture dans le banc 1280x720 :
+# elle couvre autrement l'icone Fichiers et creerait un faux screen.
+origine
+va 712 64
+clic
+attente 2
 origine
 va 54 349
 double
