@@ -10,6 +10,7 @@ on:
       - .github/workflows/ladybird-run-selector-v7.yml
 permissions:
   contents: read
+  actions: read
 jobs:
   windows-powershell-51:
     runs-on: windows-latest
@@ -40,3 +41,25 @@ jobs:
         run: |
           python tools/verifie-artefact-navigateur.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  live-github-selection:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Query genuine first-party artifact runs without downloading
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\tools\run\ladybird-artifact.ps1
+          $fp = Get-BoFingerprint -Root $PWD.Path -Revision 'HEAD'
+          if (-not $fp) { throw 'Cannot derive current Ladybird build fingerprint' }
+          Write-Host ('BUILD_FINGERPRINT='+$fp)
+          $matched = @(Get-BoCompatibleRuns -Root $PWD.Path -Fingerprint $fp -ArtifactName 'bouchaud-ladybird-native-browser')
+          Write-Host ('REAL_MATCH_COUNT='+$matched.Count)
+          foreach ($m in $matched) { Write-Host ('REAL_MATCH run='+$m.RunId+' sha='+$m.HeadSha) }
+          Write-Host 'REAL_API_QUERY_OK'
