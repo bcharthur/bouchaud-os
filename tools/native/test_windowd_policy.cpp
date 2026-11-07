@@ -98,5 +98,29 @@ int main()
     assert(wd_apply(&focus,1,&q).focus_id==c);
     q=request(WD_CLOSE,c);
     assert(wd_apply(&focus,1,&q).focus_id==0);
+    // Focus suivant: rotation entre les seules fenetres du principal.
+    wd_state cycle;
+    wd_init(&cycle,800,600);
+    q=request(WD_FOCUS_NEXT,0);
+    assert(wd_apply(&cycle,1,&q).verdict==WD_NOT_FOUND);
+    q=request(WD_OPEN,0,0,0,80,80);
+    wd_u32 own_a=wd_apply(&cycle,1,&q).id;
+    wd_u32 foreign=wd_apply(&cycle,2,&q).id;
+    wd_u32 own_b=wd_apply(&cycle,1,&q).id;
+    q=request(WD_FOCUS_NEXT,0);
+    r=wd_apply(&cycle,1,&q);
+    assert(r.verdict==WD_OK && r.id==own_a && r.focus_id==own_a);
+    r=wd_apply(&cycle,1,&q);
+    assert(r.verdict==WD_OK && r.id==own_b);
+    r=wd_apply(&cycle,2,&q);
+    assert(r.verdict==WD_OK && r.id==foreign);
+    q=request(WD_CLOSE,own_a);
+    assert(wd_apply(&cycle,1,&q).verdict==WD_OK);
+    q=request(WD_FOCUS_NEXT,0);
+    assert(wd_apply(&cycle,1,&q).id==own_b);
+    q=request(WD_CLOSE,own_b);
+    assert(wd_apply(&cycle,1,&q).verdict==WD_OK);
+    q=request(WD_FOCUS_NEXT,0);
+    assert(wd_apply(&cycle,1,&q).verdict==WD_NOT_FOUND);
     return 0;
 }
