@@ -14,33 +14,47 @@ OUT=$(cd "$OUT" && pwd)
 # Ouvre d'abord Fichiers, Notes puis tente Ladybird et DOOM : meme cadre
 # universel, meme si les executables tiers ne sont pas dans cette image.
 GESTES="$(cat <<'SCENARIO'
+# Le bureau lance un Terminal x=30..410 qui MASQUE les icones !
+# D'abord le deplacer reellement vers la droite, pour liberer la grille.
 origine
-va 47 250
+va 130 45
+mouse_button 1
+bouge 560 115
+mouse_button 0
+attente 2
+capture atelier-terminal
+# Les deux clients tiers sont optionnels dans l'image de base.
+origine
+va 55 75
 double
-attente 3
-capture atelier-fichiers
+attente 2
+capture atelier-ladybird
 origine
-va 138 250
+va 225 75
+double
+attente 2
+capture atelier-doom
+# Notes et Fichiers, eux, sont embarques : leur ouverture est OBLIGATOIRE.
+origine
+va 137 165
 double
 attente 3
 capture atelier-notes
 origine
-va 47 72
+va 54 349
 double
 attente 3
-capture atelier-ladybird
-origine
-va 226 72
-double
-attente 3
-capture atelier-doom
+capture atelier-fichiers
 SCENARIO
 )"
 BUREAU_ATTENTE_S=${BUREAU_ATTENTE_S:-5} \
 BUREAU_GESTES="$GESTES" \
 bash tools/ci/run_bureau_capture.sh "$BOOT" "$OUT"
 # No false GO: a capture alone does not prove 3rd-party binary availability.
-for name in atelier-fichiers atelier-notes atelier-ladybird atelier-doom; do
+for name in atelier-terminal atelier-fichiers atelier-notes atelier-ladybird atelier-doom; do
   test -s "$OUT/$name.png" || { echo "ATELIER_WINDOWS_CAPTURE_FAIL missing=$name" >&2; exit 1; }
 done
-echo "ATELIER_WINDOWS_CAPTURE_OK files=4"
+# Les screenshots avec simplement un pointeur deplace ne sont pas des preuves
+# d'ouverture de fenetre : comparaison des PPM bruts hors barre haute.
+python3 tools/ci/verifie_capture_atelier_fenetres.py "$OUT"
+echo "ATELIER_WINDOWS_CAPTURE_OK files=5 preuves=fenetres_reelles"
