@@ -11,7 +11,10 @@
 typedef unsigned int wd_u32;
 typedef int wd_i32;
 
-enum { WD_VERSION=1, WD_MAX_WINDOWS=16, WD_SUPERVISOR=0xffffffffU };
+/* Keep capacity constants signed for ordinary loop bounds; the privileged
+ * principal is explicitly a 32-bit unsigned identity, not an enum member. */
+enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
+#define WD_SUPERVISOR ((wd_u32)0xffffffffU)
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
     WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17
