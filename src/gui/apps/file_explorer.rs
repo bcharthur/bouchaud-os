@@ -119,8 +119,11 @@ fn dossier_raccourci(i: usize) -> Option<usize> {
     } else {
         String::from(chemin)
     };
+    // Notes et Fichiers partagent exactement la meme politique de chemins.
+    // Un raccourci mal forme ne peut pas contourner les controles du VFS.
+    let canon = crate::fs::vfs_chemins::normalise_absolu(&absolu).ok()?;
     let fs = ramfs::fs();
-    let idx = fs.resolve(if absolu.is_empty() { "/" } else { &absolu }, 0)?;
+    let idx = fs.resolve(&canon, 0)?;
     dossier_ouvrable(&fs, idx).then_some(idx)
 }
 
