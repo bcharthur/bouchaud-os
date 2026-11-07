@@ -81,5 +81,22 @@ int main()
     wd_reply after=wd_apply(&state,3,&q);
     assert(after.x==before.x && after.y==before.y &&
            after.width==before.width && after.height==before.height);
+    // La fermeture restaure le dernier focus, pas le dernier ID cree.
+    wd_state focus;
+    wd_init(&focus,1280,720);
+    q=request(WD_OPEN,0,0,0,100,100);
+    wd_u32 a=wd_apply(&focus,1,&q).id;
+    wd_u32 b=wd_apply(&focus,1,&q).id;
+    wd_u32 c=wd_apply(&focus,1,&q).id;
+    q=request(WD_FOCUS,a);
+    assert(wd_apply(&focus,1,&q).focus_id==a);
+    q=request(WD_FOCUS,b);
+    assert(wd_apply(&focus,1,&q).focus_id==b);
+    q=request(WD_CLOSE,b);
+    assert(wd_apply(&focus,1,&q).focus_id==a);
+    q=request(WD_CLOSE,a);
+    assert(wd_apply(&focus,1,&q).focus_id==c);
+    q=request(WD_CLOSE,c);
+    assert(wd_apply(&focus,1,&q).focus_id==0);
     return 0;
 }
