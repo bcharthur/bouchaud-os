@@ -69,7 +69,7 @@ class TestNonRegression(unittest.TestCase):
         bad = self.contents[path].replace(
             "python3 tools/ci/non_regression.py --base", "echo python3 tools/ci/non_regression.py --base"
         ).replace(
-            "python3 tools/ci/non_regression.py\\n", "echo python3 tools/ci/non_regression.py\\n"
+            "python3 tools/ci/non_regression.py\n", "echo python3 tools/ci/non_regression.py\n"
         )
         self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
 
@@ -77,7 +77,7 @@ class TestNonRegression(unittest.TestCase):
         path = ".github/workflows/non-regression.yml"
         bad = self.contents[path].replace(
             "      - name: Invariants critiques sur HEAD et diff avec la base exacte",
-            "      - name: Invariants critiques sur HEAD et diff avec la base exacte\\n        if: false",
+            "      - name: Invariants critiques sur HEAD et diff avec la base exacte\n        if: false",
         )
         self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
 
@@ -85,7 +85,7 @@ class TestNonRegression(unittest.TestCase):
         path = ".github/workflows/non-regression.yml"
         bad = self.contents[path].replace(
             "      - name: Eprouver les controles contre des mutations volontaires",
-            "      - name: Eprouver les controles contre des mutations volontaires\\n        if: false",
+            "      - name: Eprouver les controles contre des mutations volontaires\n        if: false",
         )
         self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:unittest", self.check({path: bad}))
 
