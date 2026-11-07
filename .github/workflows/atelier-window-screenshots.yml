@@ -1,0 +1,60 @@
+# Capture VISUELLE du vrai framebuffer Bouchaud OS sous QEMU, jamais une maquette.
+# Le screenshot seul n'est pas une preuve d'execution des binaires tiers.
+name: Atelier window screenshots (QEMU)
+on:
+  pull_request:
+    paths:
+      - 'src/gui/widgets.rs'
+      - 'src/gui/atelier/fenetre_style.rs'
+      - 'src/gui/atelier/mod.rs'
+      - 'tools/ci/run_atelier_windows_capture.sh'
+      - '.github/workflows/atelier-window-screenshots.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atelier-window-screenshots-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    name: atelier / vrai framebuffer QEMU
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (borne)
+        run: tools/ci/apt-installe.sh qemu-system-x86
+      - name: Cache bootimage
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: atelier-screenshot-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            atelier-screenshot-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Build exact HEAD bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Capture 4 real screenshots from QEMU monitor
+        env:
+          BUREAU_ATTENTE_S: '7'
+        run: |
+          bash tools/ci/run_atelier_windows_capture.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            target/atelier-windows-proof
+      - name: Preserve screenshots + serial evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atelier-windows-real-qemu-screenshots
+          path: |
+            target/atelier-windows-proof/*.png
+            target/atelier-windows-proof/serie.log
+          if-no-files-found: warn
+          retention-days: 14
