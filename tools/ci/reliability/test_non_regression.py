@@ -73,6 +73,17 @@ class TestNonRegression(unittest.TestCase):
         )
         self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
 
+    def test_guard_failure_must_not_be_swallowed(self):
+        path = ".github/workflows/non-regression.yml"
+        bad = self.contents[path].replace(
+            'python3 tools/ci/non_regression.py --base "$BASE_SHA" --head "$HEAD_SHA"',
+            'python3 tools/ci/non_regression.py --base "$BASE_SHA" --head "$HEAD_SHA" || true',
+        ).replace(
+            "python3 tools/ci/non_regression.py\n",
+            "python3 tools/ci/non_regression.py || true\n",
+        )
+        self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
+
     def test_disabled_guard_step_is_rejected(self):
         path = ".github/workflows/non-regression.yml"
         bad = self.contents[path].replace(
