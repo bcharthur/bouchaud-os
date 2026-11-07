@@ -14,7 +14,7 @@ typedef int wd_i32;
 enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -112,6 +112,35 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     struct wd_window *w=0;
     wd_u32 i;
     if (principal==0 || q->version!=WD_VERSION) return r;
+    if (q->operation==WD_SCREEN_RESIZE) {
+        /* The service supervisor reconfigures the display on the trusted
+         * bootstrap channel. Geometry is reconciled without dropping windows. */
+        if (q->id || !q->width || !q->height ||
+            q->width>32767 || q->height>32767) return r;
+        s->screen_width=q->width; s->screen_height=q->height;
+        for (i=0; i<WD_MAX_WINDOWS; ++i) {
+            struct wd_window *item=&s->windows[i];
+            if (!item->alive) continue;
+            if (item->maximized) {
+                item->x=0; item->y=0;
+                item->width=q->width; item->height=q->height;
+            } else {
+                if (item->width>q->width) item->width=q->width;
+                if (item->height>q->height) item->height=q->height;
+                item->x=wd_clamp(item->x,item->width,q->width);
+                item->y=wd_clamp(item->y,item->height,q->height);
+            }
+            if (item->saved_width>q->width) item->saved_width=q->width;
+            if (item->saved_height>q->height) item->saved_height=q->height;
+            if (item->saved_width && item->saved_height) {
+                item->saved_x=wd_clamp(item->saved_x,item->saved_width,q->width);
+                item->saved_y=wd_clamp(item->saved_y,item->saved_height,q->height);
+            }
+        }
+        r.verdict=WD_OK;
+        wd_report(&r,s,0);
+        return r;
+    }
     if (q->operation==WD_OPEN) {
         if (q->id || q->width==0 || q->height==0 ||
             q->width > s->screen_width || q->height > s->screen_height)
