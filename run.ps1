@@ -460,152 +460,21 @@ if ($LadybirdMode) {
     # Validation / recuperation artefact Ladybird
     # =========================================================================
 
-    $artifactMissing = $false
-
-
-    if (-not (Test-Path $NativeBrowserDir)) {
-
-        $artifactMissing = $true
+    # BOUCHAUD_LADYBIRD_ARTIFACT_V7
+    # This may be an unpushed local integration branch. Select by the exact
+    # Ladybird BUILD RECIPE, not by Git branch or arbitrary latest artifact.
+    $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
+    $EffectiveLadybirdRunId = [long]$LadybirdRunId
+    if ($EffectiveLadybirdRunId -eq 0) {
+        Write-Host "Ladybird : selection par empreinte du build (toutes branches)" -ForegroundColor DarkGray
     }
-    else {
-
-        foreach ($file in $RequiredLadybirdFiles) {
-
-            $candidate = Join-Path `
-                $NativeBrowserDir `
-                $file
-
-            if (-not (Test-Path $candidate)) {
-
-                $artifactMissing = $true
-
-                if ($file -eq $CapaciteUi) {
-                    Write-Host (
-                        ("Ladybird : artefact anterieur au chrome V16 ({0} absent) " -f $file) +
-                        "-> retelechargement"
-                    ) -ForegroundColor Yellow
-                }
-                else {
-                    Write-Host (
-                        "Ladybird : artefact incomplet ({0} absent) -> retelechargement" -f `
-                            $file
-                    ) -ForegroundColor Yellow
-                }
-
-                break
-            }
-        }
-
-
-        $resourcesCandidate = Join-Path `
-            $NativeBrowserDir `
-            "resources"
-
-
-        if (-not (Test-Path $resourcesCandidate)) {
-
-            $artifactMissing = $true
-        }
-    }
-
-
-    if ($RefreshLadybird -or $artifactMissing) {
-
-        Ensure-GitHubCli
-
-
-        $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
-        $EffectiveLadybirdRunId = $LadybirdRunId
-
-        if ($EffectiveLadybirdRunId -eq 0) {
-            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-            $CurrentBranch = Get-BrancheArtefact
-            if (-not $CurrentBranch) {
-                Fail "HEAD detache hors origin/main : fournir -LadybirdRunId ou basculer sur une branche distante qualifiee."
-            }
-
-            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
-            #
-            # Le critere de selection -- l'ARTEFACT lui-meme, jamais la
-            # conclusion du run -- est explique la ou il s'applique, dans
-            # `tools/ladybird/selection-artefact.ps1`.
-            #
-            # Il vit dans un fichier separe pour une raison precise :
-            # `run.ps1` s'execute de bout en bout des qu'on le charge --
-            # noyau, disque, QEMU --, donc aucun test ne peut en appeler une
-            # partie. La CI ne faisait qu'ANALYSER ce fichier, et trois
-            # defauts d'EXECUTION sont passes par ce trou, tous dans ce
-            # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
-            # maintenant avec un `gh` simule.
-            $selection = Get-RunAvecArtefact `
-                -Branche $CurrentBranch `
-                -Artefact $ArtefactNavigateur
-
-            $latest = $selection.RunId
-            $examines = $selection.Examines
-
-            if ($examines -eq 0) {
-                Fail (
-                    ("aucun run de ladybird-native-browser pour '{0}'. " -f $CurrentBranch) +
-                    "Pousse la branche et attends le workflow."
-                )
-            }
-
-            if (-not $latest) {
-                Fail (
-                    ("aucun artefact Ladybird telechargeable sur les {0} derniers " -f $examines) +
-                    ("runs de '{0}'. Le job 'ladybird / build once' a-t-il abouti, " -f $CurrentBranch) +
-                    "ou les artefacts ont-ils expire (retention 14 jours) ?"
-                )
-            }
-
-            Write-Host (
-                "Ladybird : run {0} retenu (artefact publie par build once)" -f `
-                    $latest
-            ) -ForegroundColor DarkGray
-
-            $EffectiveLadybirdRunId = [long]$latest
-        }
-
-        Write-Host (
-            "Ladybird : telechargement artefact du run {0}" -f `
-                $EffectiveLadybirdRunId
-        ) -ForegroundColor Yellow
-
-
-        if (Test-Path $NativeBrowserDir) {
-
-            Remove-Item `
-                -Recurse `
-                -Force `
-                $NativeBrowserDir
-        }
-
-
-        New-Item `
-            -ItemType Directory `
-            -Path $NativeBrowserDir `
-            -Force | Out-Null
-
-
-        gh run download $EffectiveLadybirdRunId `
-            -n $ArtefactNavigateur `
-            -D $NativeBrowserDir
-
-
-        if ($LASTEXITCODE -ne 0) {
-
-            Fail "impossible de telecharger l'artefact Ladybird du run $EffectiveLadybirdRunId"
-        }
-    }
-    else {
-
-        Write-Host (
-            "Ladybird : artefact local deja present dans {0}" -f `
-                $NativeBrowserDir
-        ) -ForegroundColor Green
-    }
-
+    . (Join-Path $RepoRoot "tools/run/ladybird-artifact.ps1")
+    Use-BoLadybirdArtifact -RepoRoot $RepoRoot `
+        -TargetDir $NativeBrowserDir `
+        -RequiredFiles $RequiredLadybirdFiles `
+        -ArtifactName $ArtefactNavigateur `
+        -RunId $EffectiveLadybirdRunId `
+        -Refresh:$RefreshLadybird
 
     # =========================================================================
     # Validation minimale M8
