@@ -14,7 +14,7 @@ typedef int wd_i32;
 enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -112,6 +112,27 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     struct wd_window *w=0;
     wd_u32 i;
     if (principal==0 || q->version!=WD_VERSION) return r;
+    if (q->operation==WD_NEXT_VISIBLE) {
+        /* Compositor bridge: a trusted supervisor can enumerate the current
+         * visible windows without guessing identifiers or owning app state.
+         * q->id is an exclusive cursor (0 starts enumeration). This wire
+         * reply contains only geometry and window id, never a raw surface. */
+        wd_u32 candidate=0;
+        if (principal!=1) { r.verdict=WD_DENIED; return r; }
+        for (i=0; i<WD_MAX_WINDOWS; ++i) {
+            struct wd_window *item=&s->windows[i];
+            if (!item->alive || item->minimized || item->id<=q->id) continue;
+            if (!candidate || item->id<candidate) {
+                candidate=item->id;
+                w=item;
+            }
+        }
+        if (!w) { r.verdict=WD_NOT_FOUND; return r; }
+        r.verdict=WD_OK;
+        r.id=w->id;
+        wd_report(&r,s,w);
+        return r;
+    }
     if (q->operation==WD_SCREEN_RESIZE) {
         /* The service supervisor reconfigures the display on the trusted
          * bootstrap channel. Geometry is reconciled without dropping windows. */
