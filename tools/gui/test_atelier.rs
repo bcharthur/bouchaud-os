@@ -11,6 +11,8 @@ extern crate alloc;
 
 #[path = "../../src/gui/atelier/jetons.rs"]
 mod jetons;
+#[path = "../../src/gui/atelier/fenetre_style.rs"]
+mod fenetre_style;
 #[path = "../../src/gui/atelier/mouvement.rs"]
 mod mouvement;
 #[path = "../../src/gui/atelier/dock.rs"]
@@ -801,4 +803,42 @@ fn l_historique_reste_borne() {
         n += 1;
     }
     assert_eq!(n, 32, "32 retours au plus");
+}
+
+
+// BOUCHAUD_ATELIER_FENETRES_UNIVERSELLES_V2 : preuve hote des jetons
+// de toutes les fenetres, independamment du type d'application.
+#[test]
+fn chrome_atelier_actif_inactif_sans_bascule_application() {
+    let actif = fenetre_style::bande(true);
+    let inactif = fenetre_style::bande(false);
+    assert_eq!(actif.indicateur, jetons::ACCENT);
+    assert!(actif.indicateur_alpha > 0);
+    assert_eq!(inactif.indicateur_alpha, 0);
+    assert_ne!(actif.fond, inactif.fond);
+    assert_eq!(actif.titre, jetons::ENCRE);
+    assert_eq!(inactif.titre, jetons::ENCRE_DOUCE);
+}
+#[test]
+fn chrome_atelier_controles_conservateurs_et_fermeture_dangereuse_seulement_au_survol() {
+    let normal = fenetre_style::bouton(true, false, true);
+    let close = fenetre_style::bouton(true, true, true);
+    let hover = fenetre_style::bouton(true, true, false);
+    assert_ne!(normal.fond, jetons::DANGER);
+    assert_eq!(close.fond, jetons::DANGER);
+    assert_eq!(close.fond_alpha, 255);
+    assert_eq!(close.symbole, jetons::VERRE);
+    assert_eq!(hover.fond, jetons::ACCENT);
+    assert!(hover.fond_alpha < 255);
+    assert_eq!(fenetre_style::CAPSULE_LARGEUR, 22);
+    assert_eq!(fenetre_style::CAPSULE_HAUTEUR, 20);
+    assert!(fenetre_style::CAPSULE_RAYON * 2 <= fenetre_style::CAPSULE_HAUTEUR);
+}
+#[test]
+fn chrome_atelier_accent_toujours_borne_meme_fenetre_tres_etroite() {
+    assert_eq!(fenetre_style::indicateur_largeur(0), 0);
+    assert_eq!(fenetre_style::indicateur_largeur(16), 0);
+    assert_eq!(fenetre_style::indicateur_largeur(50), 18);
+    assert_eq!(fenetre_style::indicateur_largeur(90), 44);
+    assert_eq!(fenetre_style::indicateur_largeur(1200), 44);
 }

@@ -843,20 +843,38 @@ fn draw_window(w: &Win, focused: bool) {
         crate::gui::windowing::manager::SHADOW_EXTENT, focused,
         crate::gui::theme::COLOR_SURFACE, opaque);
 
+    // BOUCHAUD_ATELIER_FENETRES_UNIVERSELLES_V2
+    // Un chrome Atelier pour TOUTE fenetre : Ladybird, DOOM ou application
+    // native. Le contenu du client, ses degats et les hitboxes ne bougent PAS.
+    use crate::gui::atelier::fenetre_style as chrome;
     let title_h = TITLE_H as usize;
-    let title_color = if focused { crate::gui::atelier::jetons::TITRE_ACTIF }
-        else { crate::gui::atelier::jetons::TITRE_INACTIF };
+    let teint = chrome::bande(focused);
     let title = crate::gui::windowing::titlebar_rect(outer,
         crate::gui::windowing::WINDOW_CHROME);
-    // Les coins HAUTS de la barre de titre sont le bord le plus regarde d'une
-    // fenetre : c'est la que la marche d'escalier se voyait le mieux.
+    // Coins superieurs AA, memes pixels qu'avant : ne jamais peindre
+    // au-dela du rectangle qui sert aux degats du compositeur.
     crate::gui::graphics::spans_rounded_rect_aa(title, crate::gui::theme::RADIUS_WINDOW,
         damage, |px, py, largeur, couverture| {
             fb::blend_rect_rgb(px.max(0) as usize, py.max(0) as usize,
-                largeur as usize, title_color, couverture)
+                largeur as usize, teint.fond, couverture)
         });
+    // Lumiere du verre : un filet horizontal interieur, qui ne deborde
+    // jamais des angles et ne surpeint pas la surface du client.
+    let bord = crate::gui::theme::RADIUS_WINDOW as usize;
+    let eclat_l = ww.saturating_sub(2 * bord);
+    if eclat_l > 0 {
+        fb::blend_rect_rgb(x + bord, y + 1, eclat_l,
+            teint.liseret, teint.liseret_alpha);
+    }
     fb::fill_rect_rgb(x + 1, y + title_h - 1, ww.saturating_sub(2), 1,
-        crate::gui::atelier::jetons::SEPARATEUR);
+        teint.separateur);
+    // Petite signature indigo, visible UNIQUEMENT sur la fenetre active.
+    // L'indicateur reste dans le bandeau et ne modifie aucun clic.
+    if teint.indicateur_alpha > 0 {
+        let taille = chrome::indicateur_largeur(outer.width) as usize;
+        fb::blend_rect_rgb(x + 16, y + title_h - 2, taille,
+            teint.indicateur, teint.indicateur_alpha);
+    }
 
     // L'icone de l'application dans sa barre de titre, comme dans la barre des
     // taches : c'est ce qui permet de reconnaitre une fenetre au coin de
@@ -877,8 +895,7 @@ fn draw_window(w: &Win, focused: bool) {
         crate::gui::windowing::WINDOW_CHROME).x.max(0) as usize;
     let place = premier_bouton.saturating_sub(origine_titre + 6);
     let title_clipped = tronque_a_largeur(&w.title, place, 12.0);
-    let encre_titre = if focused { crate::gui::atelier::jetons::ENCRE }
-        else { crate::gui::atelier::jetons::ENCRE_DOUCE };
+    let encre_titre = teint.titre;
     fb::draw_text_prop(origine_titre, y + (title_h - 12) / 2, title_clipped,
         encre_titre, crate::gui::atelier::jetons::CORPS_TITRE, focused);
     // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
@@ -903,7 +920,6 @@ fn draw_window(w: &Win, focused: bool) {
 
 fn draw_window_controls(outer: crate::gui::windowing::Rect,
     hover: crate::gui::windowing::HitRegion, focused: bool) {
-    use crate::gui::atelier::jetons as j;
     use crate::gui::windowing::{close_button_rect, maximize_button_rect,
         minimize_button_rect, HitRegion, WINDOW_CHROME};
     let buttons = [(minimize_button_rect(outer, WINDOW_CHROME), HitRegion::Minimize),
@@ -911,20 +927,19 @@ fn draw_window_controls(outer: crate::gui::windowing::Rect,
         (close_button_rect(outer, WINDOW_CHROME), HitRegion::Close)];
     for (rect, region) in buttons {
         let survole = hover == region;
-        // BOUCHAUD_ATELIER_BOUTONS_V1 : une pastille arrondie au survol, en
-        // retrait du rectangle d'impact -- le bouton reste aussi grand a viser,
-        // il parait juste plus calme.
-        if survole {
-            let pastille = crate::gui::windowing::Rect::new(rect.x + 8, rect.y + 5,
-                rect.width.saturating_sub(16), rect.height.saturating_sub(10));
-            if region == HitRegion::Close {
-                crate::gui::atelier::matiere::pave(pastille, j::RAYON_PASTILLE, j::DANGER, 255);
-            } else {
-                crate::gui::atelier::matiere::pave(pastille, j::RAYON_PASTILLE, j::SURVOL, 0x1c);
-            }
-        }
-        let color = if survole && region == HitRegion::Close { 0xffffff }
-            else if focused { j::ENCRE_DOUCE } else { j::ENCRE_TENUE };
+        // Capsules calmes avec un etat de survol immediat, sur la meme
+        // geometrie d'impact WINDOW_CHROME : aucune regression souris.
+        let rendu = crate::gui::atelier::fenetre_style::bouton(
+            focused, survole, region == HitRegion::Close);
+        let pastille = crate::gui::windowing::Rect::new(
+            rect.x + (rect.width - crate::gui::atelier::fenetre_style::CAPSULE_LARGEUR) as i32 / 2,
+            rect.y + (rect.height - crate::gui::atelier::fenetre_style::CAPSULE_HAUTEUR) as i32 / 2,
+            crate::gui::atelier::fenetre_style::CAPSULE_LARGEUR,
+            crate::gui::atelier::fenetre_style::CAPSULE_HAUTEUR);
+        crate::gui::atelier::matiere::pave(pastille,
+            crate::gui::atelier::fenetre_style::CAPSULE_RAYON,
+            rendu.fond, rendu.fond_alpha);
+        let color = rendu.symbole;
         let cx = rect.x + rect.width as i32 / 2;
         let cy = rect.y + rect.height as i32 / 2;
         match region {
