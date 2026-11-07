@@ -150,29 +150,29 @@ def validate_contracts(read: Callable[[str], str | None]) -> list[str]:
             errors.append("REGRESSION_JOB_MISSING")
         else:
             job = jobs[1]
-            if re.search(r"(?m)^    if:\\s*(?:false|\\$\\{\\{\\s*false\\s*\\}\\})\\s*$", job):
+            if re.search(r"(?m)^    if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$", job):
                 errors.append("REGRESSION_JOB_DISABLED")
-            if re.search(r"(?m)^    continue-on-error:\\s*true\\s*$", job):
+            if re.search(r"(?m)^    continue-on-error:\s*true\s*$", job):
                 errors.append("REGRESSION_JOB_PERMISSIVE")
             steps = re.split(r"(?m)^      - (?:name:|uses:)", job)
             required = (
-                ("unittest", r"python3\\s+-m\\s+unittest\\s+discover\\s+-s\\s+tools/ci/reliability"),
-                ("guard", r"python3\\s+tools/ci/non_regression\\.py"),
+                ("unittest", r"python3\s+-m\s+unittest\s+discover\s+-s\s+tools/ci/reliability"),
+                ("guard", r"python3\s+tools/ci/non_regression\.py"),
             )
             for name, command in required:
                 executable = False
                 for step in steps[1:]:
-                    if re.search(r"(?m)^        if:\\s*(?:false|\\$\\{\\{\\s*false\\s*\\}\\})\\s*$", step):
+                    if re.search(r"(?m)^        if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$", step):
                         continue
-                    if re.search(r"(?m)^        continue-on-error:\\s*true\\s*$", step):
+                    if re.search(r"(?m)^        continue-on-error:\s*true\s*$", step):
                         continue
-                    match = re.search(r"(?m)^        run:\\s*(.*)$", step)
+                    match = re.search(r"(?m)^        run:\s*(.*)$", step)
                     if not match:
                         continue
-                    run = match.group(1) + "\\n" + step[match.end():]
+                    run = match.group(1) + "\n" + step[match.end():]
                     commands = [line.strip() for line in run.splitlines()
                                 if line.strip() and not line.lstrip().startswith("#")]
-                    if any(re.match(command + r"(?:\\s|$)", line) for line in commands):
+                    if any(re.match(command + r"(?:\s|$)", line) for line in commands):
                         executable = True
                 if not executable:
                     errors.append(f"REGRESSION_EXECUTABLE_STEP_MISSING:{name}")
