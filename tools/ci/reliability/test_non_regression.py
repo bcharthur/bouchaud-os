@@ -58,6 +58,37 @@ class TestNonRegression(unittest.TestCase):
         bad = self.contents[path].replace("Some(trb_phys)", "None")
         self.assertTrue(any("Some(trb_phys)" in e for e in self.check({path: bad})))
 
+    def test_disabled_regression_job_is_rejected(self):
+        path = ".github/workflows/non-regression.yml"
+        bad = self.contents[path].replace(
+            "    if: always()", "    if: false", 1)
+        self.assertIn("REGRESSION_JOB_DISABLED", self.check({path: bad}))
+
+    def test_echoed_guard_is_not_execution(self):
+        path = ".github/workflows/non-regression.yml"
+        bad = self.contents[path].replace(
+            "python3 tools/ci/non_regression.py --base", "echo python3 tools/ci/non_regression.py --base"
+        ).replace(
+            "python3 tools/ci/non_regression.py\\n", "echo python3 tools/ci/non_regression.py\\n"
+        )
+        self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
+
+    def test_disabled_guard_step_is_rejected(self):
+        path = ".github/workflows/non-regression.yml"
+        bad = self.contents[path].replace(
+            "      - name: Invariants critiques sur HEAD et diff avec la base exacte",
+            "      - name: Invariants critiques sur HEAD et diff avec la base exacte\\n        if: false",
+        )
+        self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:guard", self.check({path: bad}))
+
+    def test_disabled_mutation_suite_is_rejected(self):
+        path = ".github/workflows/non-regression.yml"
+        bad = self.contents[path].replace(
+            "      - name: Eprouver les controles contre des mutations volontaires",
+            "      - name: Eprouver les controles contre des mutations volontaires\\n        if: false",
+        )
+        self.assertIn("REGRESSION_EXECUTABLE_STEP_MISSING:unittest", self.check({path: bad}))
+
     def test_no_workflow_cannot_pass(self):
         self.assertIn("CRITICAL_MISSING:.github/workflows/non-regression.yml",
                       self.check({".github/workflows/non-regression.yml": None}))
