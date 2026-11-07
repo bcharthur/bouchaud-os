@@ -110,6 +110,18 @@ int bo_main(const struct bo_start *start)
     req=(struct wd_request){WD_VERSION,WD_QUERY,first,0,0,0,0};
     ok &= check(roundtrip(pair[0],(bo_handle_t)ws,req,&rep),"query closed ipc");
     ok &= check(rep.verdict==WD_NOT_FOUND,"closed window invalid");
+    /* Teardown d'application via IPC reel: les fenetres restantes du canal
+     * sont liberees et aucune identite fermee n'est reutilisable. */
+    req=(struct wd_request){WD_VERSION,WD_CLOSE_OWNED,0,0,0,0,0};
+    ok &= check(roundtrip(pair[0],(bo_handle_t)ws,req,&rep),"teardown ipc");
+    ok &= check(rep.verdict==WD_OK && rep.focus_id==0,"teardown focus cleared");
+    req=(struct wd_request){WD_VERSION,WD_QUERY,second,0,0,0,0};
+    ok &= check(roundtrip(pair[0],(bo_handle_t)ws,req,&rep),"teardown query ipc");
+    ok &= check(rep.verdict==WD_NOT_FOUND,"teardown removed owned window");
+    req=(struct wd_request){WD_VERSION,WD_OPEN,0,10,10,120,90};
+    ok &= check(roundtrip(pair[0],(bo_handle_t)ws,req,&rep),"reopen after teardown ipc");
+    ok &= check(rep.verdict==WD_OK && rep.id!=first && rep.id!=second,
+                "teardown keeps ids monotonic");
     /* Verifie aussi que la fermeture du processus laisse le parent vivant. */
     req=(struct wd_request){WD_VERSION,WD_SHUTDOWN,0,0,0,0,0};
     if (bo_channel_send(pair[0],&req,sizeof(req),0,0)!=(bo_i64)sizeof(req)) ok=0;
