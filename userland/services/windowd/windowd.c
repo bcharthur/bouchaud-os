@@ -90,8 +90,15 @@ int bo_main(const struct bo_start *start)
             }
             if (received==-BO_E_WOULD_BLOCK) continue;
             if (received!=(bo_i64)sizeof(req) || meta.handles!=0) {
-                bo_say("WINDOWD_RING3_FAIL protocole\n");
-                return 7;
+                /* A malformed client must not terminate the shared broker or
+                 * invalidate windows belonging to other applications. */
+                bo_say("WINDOWD_RING3_CLIENT_PROTOCOL_REVOKED\n");
+                if (!revoke(&state,principal)) return 7;
+                bo_waitset_remove((bo_handle_t)waitset,slot+1);
+                bo_handle_close(controls[slot]);
+                controls[slot]=0;
+                --active;
+                continue;
             }
             if (req.version==WD_VERSION && req.operation==WD_SHUTDOWN) {
                 /* Only the supervisor may terminate the broker. */
@@ -106,7 +113,15 @@ int bo_main(const struct bo_start *start)
                 reply=wd_apply(&state,principal,&req);
             }
             if (bo_channel_send(controls[slot],&reply,sizeof(reply),0,0)
-                !=(bo_i64)sizeof(reply)) return 9;
+                !=(bo_i64)sizeof(reply)) {
+                /* Peer disconnect or backpressure failure is scoped to the
+                 * channel; other application sessions remain operational. */
+                if (!revoke(&state,principal)) return 9;
+                bo_waitset_remove((bo_handle_t)waitset,slot+1);
+                bo_handle_close(controls[slot]);
+                controls[slot]=0;
+                --active;
+            }
         }
     }
     return 0;
