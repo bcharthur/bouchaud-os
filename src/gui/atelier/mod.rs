@@ -37,6 +37,7 @@ pub mod mouvement;
 pub mod dock;
 pub mod fond;
 pub mod matiere;
+pub mod fenetre_style;
 pub mod assets;
 pub mod echelle;
 pub mod centre;
