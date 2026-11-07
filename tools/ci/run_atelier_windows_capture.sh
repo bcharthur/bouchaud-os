@@ -6,6 +6,10 @@ cd "$(dirname "$0")/../.."
 BOOT=${1:?Usage: run_atelier_windows_capture.sh BOOTIMAGE [SORTIE]}
 OUT=${2:-target/atelier-windows-proof}
 mkdir -p "$OUT"
+# run_bureau_capture change de repertoire pour mkdisk.sh : le chemin IMAGE
+# doit donc etre absolu, sinon l'image scenario.img est cherchee sous
+# tools/userland/target au lieu de la sortie voulue.
+OUT=$(cd "$OUT" && pwd)
 # Les icones de bureau sont les memes que celles de src/gui/window.rs.
 # Ouvre d'abord Fichiers, Notes puis tente Ladybird et DOOM : meme cadre
 # universel, meme si les executables tiers ne sont pas dans cette image.
