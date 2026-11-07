@@ -246,16 +246,16 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     } else if (q->operation==WD_FOCUS_NEXT) {
         /* The trusted compositor cycles all visible windows. Applications
          * remain confined to windows owned by their own principal. */
-        wd_u32 start=WD_MAX_WINDOWS;
-        for (i=0; i<WD_MAX_WINDOWS; ++i)
-            if (s->windows[i].alive && s->windows[i].id==s->focus_id) {
-                start=i; break;
-            }
-        for (i=1; i<=WD_MAX_WINDOWS; ++i) {
-            wd_u32 slot=(start==WD_MAX_WINDOWS ? i-1 : start+i)%WD_MAX_WINDOWS;
-            if (s->windows[slot].alive && !s->windows[slot].minimized &&
-                (principal==WD_SUPERVISOR || s->windows[slot].owner==principal)) {
-                w=&s->windows[slot]; break;
+        /* Cycle the actual stacking order, not the allocation slots.
+         * Select the oldest eligible visible window and bring it to front.
+         * Repeated requests rotate the stack deterministically, including
+         * when windows were closed and their slots subsequently reused. */
+        for (i=0; i<s->focus_count; ++i) {
+            struct wd_window *candidate=wd_find(s,s->focus_history[i]);
+            if (candidate && !candidate->minimized &&
+                (principal==WD_SUPERVISOR || candidate->owner==principal)) {
+                w=candidate;
+                break;
             }
         }
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
