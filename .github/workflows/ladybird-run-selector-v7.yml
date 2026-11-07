@@ -63,3 +63,28 @@ jobs:
           Write-Host ('REAL_MATCH_COUNT='+$matched.Count)
           foreach ($m in $matched) { Write-Host ('REAL_MATCH run='+$m.RunId+' sha='+$m.HeadSha) }
           Write-Host 'REAL_API_QUERY_OK'
+
+  windows-real-download:
+    needs: [windows-powershell-51, live-github-selection]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download, unpack and verify genuine Ladybird build
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\tools\run\ladybird-artifact.ps1
+          $target = Join-Path $env:RUNNER_TEMP 'bouchaud-ladybird-v7-verified'
+          $required = @('BouchaudBrowserHost','WebContent','RequestServer','ImageDecoder',
+                        'Compositor','WebWorker','WebDriver','webcontent-bootstrap',
+                        'M9_CAPABLE','V16_UI_CAPABLE','V19_UI_CAPABLE')
+          Use-BoLadybirdArtifact -RepoRoot $PWD.Path -TargetDir $target -RequiredFiles $required -ArtifactName 'bouchaud-ladybird-native-browser'
+          if (-not (Test-BoArtifact -Root $PWD.Path -Directory $target -RequiredFiles $required)) {
+            throw 'Downloaded artifact did not pass hash, ELF and fingerprint verification'
+          }
+          Write-Host 'LADYBIRD_REAL_DOWNLOAD_VERIFIED_OK'
