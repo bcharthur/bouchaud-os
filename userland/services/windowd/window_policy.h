@@ -14,7 +14,7 @@ typedef int wd_i32;
 enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -31,7 +31,9 @@ struct wd_reply {
     wd_u32 width, height;
 };
 struct wd_window {
-    wd_u32 id, owner, alive, minimized;
+    wd_u32 id, owner, alive, minimized, maximized;
+    wd_i32 saved_x, saved_y;
+    wd_u32 saved_width, saved_height;
     wd_i32 x, y;
     wd_u32 width, height;
 };
@@ -53,7 +55,8 @@ static inline void wd_init(struct wd_state *state, wd_u32 width, wd_u32 height)
     for (i=0; i<WD_MAX_WINDOWS; ++i) state->focus_history[i]=0;
     for (i=0; i<WD_MAX_WINDOWS; ++i) {
         struct wd_window *w=&state->windows[i];
-        w->alive=0; w->minimized=0; w->id=0; w->owner=0; w->x=0; w->y=0; w->width=0; w->height=0;
+        w->alive=0; w->minimized=0; w->maximized=0;
+        w->saved_x=0; w->saved_y=0; w->saved_width=0; w->saved_height=0; w->id=0; w->owner=0; w->x=0; w->y=0; w->width=0; w->height=0;
     }
 }
 
@@ -119,7 +122,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
             r.verdict=WD_NO_SLOTS;
             return r;
         }
-        w->alive=1; w->minimized=0; w->owner=principal; w->id=s->next_id++;
+        w->alive=1; w->minimized=0; w->maximized=0; w->owner=principal; w->id=s->next_id++;
         w->width=q->width; w->height=q->height;
         w->x=wd_clamp(q->x, w->width, s->screen_width);
         w->y=wd_clamp(q->y, w->height, s->screen_height);
@@ -159,14 +162,17 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     } else if (q->operation==WD_MOVE || q->operation==WD_RESIZE ||
                q->operation==WD_FOCUS || q->operation==WD_CLOSE ||
                q->operation==WD_QUERY || q->operation==WD_MINIMIZE ||
-               q->operation==WD_RESTORE) {
+               q->operation==WD_RESTORE || q->operation==WD_MAXIMIZE ||
+               q->operation==WD_UNMAXIMIZE) {
         w=wd_find(s,q->id);
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
         if (w->owner!=principal) { r.verdict=WD_DENIED; return r; }
         if (q->operation==WD_MOVE) {
+            if (w->maximized) return r;
             w->x=wd_clamp(q->x,w->width,s->screen_width);
             w->y=wd_clamp(q->y,w->height,s->screen_height);
         } else if (q->operation==WD_RESIZE) {
+            if (w->maximized) return r;
             if (!q->width || !q->height ||
                 q->width>s->screen_width || q->height>s->screen_height) return r;
             w->width=q->width; w->height=q->height;
@@ -183,6 +189,24 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
                     s->focus_id=s->focus_count ? s->focus_history[s->focus_count-1] : 0;
             }
         } else if (q->operation==WD_RESTORE) {
+            w->minimized=0;
+            wd_set_focus(s,w->id);
+        } else if (q->operation==WD_MAXIMIZE) {
+            if (!w->maximized) {
+                w->saved_x=w->x; w->saved_y=w->y;
+                w->saved_width=w->width; w->saved_height=w->height;
+                w->maximized=1;
+            }
+            w->x=0; w->y=0;
+            w->width=s->screen_width; w->height=s->screen_height;
+            w->minimized=0;
+            wd_set_focus(s,w->id);
+        } else if (q->operation==WD_UNMAXIMIZE) {
+            if (w->maximized) {
+                w->x=w->saved_x; w->y=w->saved_y;
+                w->width=w->saved_width; w->height=w->saved_height;
+                w->maximized=0;
+            }
             w->minimized=0;
             wd_set_focus(s,w->id);
         } else if (q->operation==WD_CLOSE) {
