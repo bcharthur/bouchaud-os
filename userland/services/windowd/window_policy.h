@@ -221,8 +221,8 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         wd_report(&r,s,0);
         return r;
     } else if (q->operation==WD_FOCUS_NEXT) {
-        /* Parcours circulaire par emplacement, limite aux fenetres du canal.
-         * Ne jamais donner le focus a une fenetre d'un autre principal. */
+        /* The trusted compositor cycles all visible windows. Applications
+         * remain confined to windows owned by their own principal. */
         wd_u32 start=WD_MAX_WINDOWS;
         for (i=0; i<WD_MAX_WINDOWS; ++i)
             if (s->windows[i].alive && s->windows[i].id==s->focus_id) {
@@ -231,7 +231,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         for (i=1; i<=WD_MAX_WINDOWS; ++i) {
             wd_u32 slot=(start==WD_MAX_WINDOWS ? i-1 : start+i)%WD_MAX_WINDOWS;
             if (s->windows[slot].alive && !s->windows[slot].minimized &&
-                s->windows[slot].owner==principal) {
+                (principal==1 || s->windows[slot].owner==principal)) {
                 w=&s->windows[slot]; break;
             }
         }
@@ -244,7 +244,11 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
                q->operation==WD_UNMAXIMIZE) {
         w=wd_find(s,q->id);
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
-        if (w->owner!=principal) { r.verdict=WD_DENIED; return r; }
+        /* The compositor must move, resize, focus and close application
+         * windows. Untrusted channels remain strictly owner-scoped. */
+        if (principal!=1 && w->owner!=principal) {
+            r.verdict=WD_DENIED; return r;
+        }
         if (q->operation==WD_MOVE) {
             if (w->maximized) return r;
             w->x=wd_clamp(q->x,w->width,s->screen_width);
