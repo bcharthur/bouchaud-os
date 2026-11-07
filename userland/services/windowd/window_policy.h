@@ -37,6 +37,7 @@ struct wd_window {
 };
 struct wd_state {
     wd_u32 next_id, focus_id, screen_width, screen_height;
+    wd_u32 focus_history[WD_MAX_WINDOWS], focus_count;
     struct wd_window windows[WD_MAX_WINDOWS];
 };
 
@@ -48,6 +49,8 @@ static inline void wd_init(struct wd_state *state, wd_u32 width, wd_u32 height)
     wd_u32 i;
     state->next_id=1; state->focus_id=0;
     state->screen_width=width; state->screen_height=height;
+    state->focus_count=0;
+    for (i=0; i<WD_MAX_WINDOWS; ++i) state->focus_history[i]=0;
     for (i=0; i<WD_MAX_WINDOWS; ++i) {
         struct wd_window *w=&state->windows[i];
         w->alive=0; w->id=0; w->owner=0; w->x=0; w->y=0; w->width=0; w->height=0;
@@ -60,6 +63,21 @@ static inline struct wd_window *wd_find(struct wd_state *s, wd_u32 id)
     for (i=0; i<WD_MAX_WINDOWS; ++i)
         if (s->windows[i].alive && s->windows[i].id==id) return &s->windows[i];
     return 0;
+}
+
+/* Historique MRU borne : restaurer le dernier focus reel. */
+static inline void wd_forget_focus(struct wd_state *s, wd_u32 id)
+{
+    wd_u32 i, j=0;
+    for (i=0; i<s->focus_count; ++i)
+        if (s->focus_history[i]!=id) s->focus_history[j++]=s->focus_history[i];
+    s->focus_count=j;
+}
+static inline void wd_set_focus(struct wd_state *s, wd_u32 id)
+{
+    wd_forget_focus(s,id);
+    s->focus_history[s->focus_count++]=id;
+    s->focus_id=id;
 }
 
 static inline wd_i32 wd_clamp(wd_i32 coord, wd_u32 dim, wd_u32 screen)
@@ -99,7 +117,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         w->width=q->width; w->height=q->height;
         w->x=wd_clamp(q->x, w->width, s->screen_width);
         w->y=wd_clamp(q->y, w->height, s->screen_height);
-        s->focus_id=w->id;
+        wd_set_focus(s,w->id);
     } else if (q->operation==WD_MOVE || q->operation==WD_RESIZE ||
                q->operation==WD_FOCUS || q->operation==WD_CLOSE ||
                q->operation==WD_QUERY) {
@@ -116,16 +134,13 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
             w->x=wd_clamp(w->x,w->width,s->screen_width);
             w->y=wd_clamp(w->y,w->height,s->screen_height);
         } else if (q->operation==WD_FOCUS) {
-            s->focus_id=w->id;
+            wd_set_focus(s,w->id);
         } else if (q->operation==WD_CLOSE) {
-            wd_u32 latest=0;
+            wd_u32 was_focused=(s->focus_id==w->id);
             w->alive=0;
-            if (s->focus_id==w->id) {
-                for (i=0;i<WD_MAX_WINDOWS;++i)
-                    if (s->windows[i].alive && s->windows[i].id>latest)
-                        latest=s->windows[i].id;
-                s->focus_id=latest;
-            }
+            wd_forget_focus(s,w->id);
+            if (was_focused)
+                s->focus_id=s->focus_count ? s->focus_history[s->focus_count-1] : 0;
             w=0;
         }
     } else {
