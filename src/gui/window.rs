@@ -81,7 +81,7 @@ pub(crate) const KIND_JOURNAL: usize = 7;
 /// sur son icone et « Bouchaud Browser » sur sa fenetre n'est pas un produit,
 /// c'est deux moities de produit. C'est aussi le nom du moteur qu'on execute
 /// reellement, ce qui evite de faire croire a un moteur maison.
-pub(crate) const TITRE_NAVIGATEUR: &str = "Ladybird";
+pub(crate) const TITRE_NAVIGATEUR: &str = crate::gui::applications_externes::LADYBIRD.titre;
 
 /// Le rectangle d'une fenetre maximisee : tout l'ecran entre les deux barres.
 ///
@@ -107,8 +107,8 @@ pub(crate) fn zone_maximale() -> (usize, usize) {
     (rect.width as usize, rect.height as usize)
 }
 
-pub(crate) const NAV_LARGEUR: i32 = 1100;
-pub(crate) const NAV_HAUTEUR: i32 = 604;
+pub(crate) const NAV_LARGEUR: i32 = crate::gui::applications_externes::LADYBIRD.zone.0;
+pub(crate) const NAV_HAUTEUR: i32 = crate::gui::applications_externes::LADYBIRD.zone.1;
 
 /// Entrees du menu Demarrer : (libelle, `kind` passe a `make_app`).
 ///
@@ -161,6 +161,12 @@ pub(crate) const KIND_INSIGHTS: usize = 10;
 /// DOOM est un client graphique ring 3, independant de Ladybird.
 pub(crate) const KIND_DOOM: usize = 11;
 
+// Conserver la correspondance menu -> registre des applications externes.
+const _: () = {
+    assert!(KIND_NAVIGATEUR == crate::gui::applications_externes::LADYBIRD.kind);
+    assert!(KIND_DOOM == crate::gui::applications_externes::DOOM.kind);
+};
+
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
@@ -185,6 +191,27 @@ impl App {
     }
     pub(crate) fn client(&self) -> Option<&crate::gui::client::Client> {
         match self { Self::Navigateur { client } | Self::Doom { client } => Some(client), _ => None }
+    }
+    /// L'identite sert au routage ; jamais au rendu d'une fenetre.
+    pub(crate) fn identite_externe(&self) -> Option<crate::gui::applications_externes::Identite> {
+        use crate::gui::applications_externes::Identite;
+        match self {
+            Self::Navigateur { .. } => Some(Identite::Ladybird),
+            Self::Doom { .. } => Some(Identite::Doom),
+            _ => None,
+        }
+    }
+    /// La fenetre est creee par le shell, les pixels appartiennent au processus.
+    pub(crate) fn depuis_client(
+        identite: crate::gui::applications_externes::Identite,
+        client: crate::gui::client::Client,
+    ) -> Self {
+        match identite {
+            crate::gui::applications_externes::Identite::Ladybird =>
+                Self::Navigateur { client: alloc::boxed::Box::new(client) },
+            crate::gui::applications_externes::Identite::Doom =>
+                Self::Doom { client: alloc::boxed::Box::new(client) },
+        }
     }
 }
 
@@ -331,8 +358,8 @@ pub(crate) fn zone_utile(w: &Win) -> crate::gui::protocole::Rect {
 /// BOUCHAUD_C13_JAUGE_DE_CHARGEMENT_V1
 pub(crate) fn zone_jauge(w: &Win) -> crate::gui::protocole::Rect {
     let zone = zone_utile(w);
-    let demarre = matches!(&w.app,
-        App::Navigateur { client } if client.etat == crate::gui::client::Etat::Demarrage);
+    let demarre = w.app.client().map_or(false, |client|
+        client.etat == crate::gui::client::Etat::Demarrage);
     if demarre {
         return zone;
     }
@@ -353,7 +380,7 @@ pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
 
 /// La fenetre porte-t-elle un client ring 3 ?
 pub(crate) fn est_client(w: &Win) -> bool {
-    matches!(w.app, App::Navigateur { .. } | App::Doom { .. })
+    w.app.client().is_some()
 }
 
 /// Bascule maximiser / restaurer une fenetre.

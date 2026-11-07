@@ -120,8 +120,9 @@ def main() -> int:
          "    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);\n"
          "    dessine_jauge(&zone, &client.jauge, maintenant);\n"),
         # 2. La duree du titre sans condition de demarrage.
-        (WIDGETS, "if client.etat == crate::gui::client::Etat::Demarrage) {\n        dessine_duree_chargement(",
-         "if true) {\n        dessine_duree_chargement("),
+        (WIDGETS,
+         "if w.app.client().map_or(false, |client|\n        client.etat == crate::gui::client::Etat::Demarrage) {\n        dessine_duree_chargement(",
+         "if w.app.client().is_some() {\n        dessine_duree_chargement("),
         # 3. Le bureau salit la zone de la jauge a chaque changement.
         (WM, "if jauge_change && demarrage {", "if jauge_change {"),
         # 4. La jauge dite visible hors demarrage.

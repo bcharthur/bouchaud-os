@@ -1212,8 +1212,8 @@ fn boucle() {
             }
         } else {
             jauge_visible = wins.iter().any(|w| !w.min
-                && matches!(&w.app, App::Navigateur { client }
-                    if client.etat == crate::gui::client::Etat::Demarrage && client.jauge.visible()));
+                && w.app.client().map_or(false, |client|
+                    client.etat == crate::gui::client::Etat::Demarrage && client.jauge.visible()));
         }
 
         // L'instant ou ce tour commence a lire les clients : tout `FrameReady`
@@ -2215,90 +2215,109 @@ fn remonte_fenetre(wins: &mut Vec<Win>, index: usize) -> usize {
     wins.len() - 1
 }
 
-fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
-    // Une seule instance : deux navigateurs, ce sont deux surfaces de 2,6 Mio et
-    // deux Qt qui demarrent en meme temps sur un cœur unique.
-    if let Some(index) = wins.iter().position(|w| matches!(&w.app, App::Navigateur { .. })) {
-        let w = wins.remove(index);
-        // Une instance existante remonte et se demasque : meme raison qu'une
-        // apparition, ce qu'elle recouvre n'a pas ete dessine sous elle.
-        ouvre_fenetre(wins, w, degats);
-        if let Some(w) = wins.last_mut() {
-            let id = w.id;
-            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+/// Unique contrat d'ouverture pour toute application graphique ring 3.
+/// Atelier gere la fenetre et sa surface ; chaque programme gere son rendu
+/// et sa navigation. Le manifeste ne contient aucun code du navigateur/jeu.
+fn lance_application_externe(
+    wins: &mut Vec<Win>,
+    cwd: usize,
+    degats: &mut Degats,
+    application: &'static crate::gui::applications_externes::Application,
+) {
+    use crate::gui::applications_externes::Identite;
+    // Une instance par application pour ce jalon. Remonter une fenetre ne
+    // redemarre jamais le processus, ne recree pas sa surface ni son navigateur.
+    if let Some(index) = wins.iter().position(|w|
+        w.app.identite_externe() == Some(application.identite)) {
+        // Une activation depuis le dock n'est pas une nouvelle ouverture :
+        // conserver le processus, sa surface et son etat de navigation/jeu.
+        // Ne pas rejouer l'animation d'apparition ni effacer le bureau entier.
+        let cadre_focus_perdu = widgets::indice_focus(wins)
+            .filter(|&precedent| precedent != index)
+            .map(|precedent| cadre_fenetre(&wins[precedent]));
+        let index = remonte_fenetre(wins, index);
+        let cadre_nouveau = cadre_fenetre(&wins[index]);
+        for (rect, cible) in transition::focus_transfere(
+            cadre_focus_perdu, cadre_nouveau, barre_taches_rect(),
+        ).iter() {
+            degats.ajoute(origine_de(cible), rect);
+        }
+        let w = &mut wins[index];
+        let id = w.id;
+        let etait_minimisee = w.min;
+        route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+        if etait_minimisee {
+            // Une surface cachee redevient visible : restaurer son empreinte.
+            degats.tout();
         }
         return;
     }
 
-    let (largeur_fenetre, hauteur_fenetre) = window::fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
+    let (largeur, hauteur) = application.zone;
+    let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
     let client = match Client::lance(
-        client::CHEMIN_NAVIGATEUR,
+        application.executable,
         cwd,
-        (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
+        (largeur as usize, hauteur as usize),
         window::zone_maximale(),
     ) {
         Ok(client) => client,
-        Err(message) => {
-            crate::gui::services::echec();
-            crate::kernel::dmesg::log_fmt(format_args!("gui: navigateur : {}", message));
+        Err(error) => {
+            if application.identite == Identite::Ladybird {
+                crate::gui::services::echec();
+            } else if application.identite == Identite::Doom {
+                // Compatibilite avec les journaux et scripts de DOOM.
+                crate::serial_println!("BOUCHAUD_DOOM_LAUNCH_ERROR {}", error);
+            }
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "gui: application {}: {}", application.executable, error
+            ));
+            crate::serial_println!(
+                "BOUCHAUD_APP_EXTERNE_ECHEC chemin={} erreur={}",
+                application.executable, error
+            );
             return;
         }
     };
 
-    crate::gui::services::enregistre(client.pid);
-    #[cfg(feature = "reference-desktop")]
+    // Télémétrie de services du navigateur seulement. Le moteur DOOM n'est
+    // ni un service du navigateur, ni un sous-processus de Ladybird.
+    if application.identite == Identite::Ladybird {
+        crate::gui::services::enregistre(client.pid);
+        #[cfg(feature = "reference-desktop")]
+        crate::serial_println!(
+            "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
+            client.pid, largeur, hauteur
+        );
+    } else if application.identite == Identite::Doom {
+        crate::serial_println!("BOUCHAUD_DOOM_ATELIER_LAUNCH pid={}", client.pid);
+    }
     crate::serial_println!(
-        "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
-        client.pid,
-        NAV_LARGEUR,
-        NAV_HAUTEUR,
+        "BOUCHAUD_APP_EXTERNE_LAUNCHED chemin={} titre={} pid={}",
+        application.executable, application.titre, client.pid
     );
 
-    let mut w = Win::new(String::from(window::TITRE_NAVIGATEUR),
-        (fb::width() as i32 - largeur_fenetre) / 2, BAR_H as i32 + 8,
-        largeur_fenetre, hauteur_fenetre,
-        crate::gui::windowing::WindowFlags::STANDARD,
-        App::Navigateur { client: alloc::boxed::Box::new(client) });
-    clamp_win(&mut w);
-    ouvre_fenetre(wins, w, degats);
-    if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
+    let mut win = Win::new(alloc::string::String::from(application.titre),
+        (fb::width() as i32 - w) / 2, BAR_H as i32 + 8,
+        w, h, crate::gui::windowing::WindowFlags::STANDARD,
+        App::depuis_client(application.identite, client));
+    clamp_win(&mut win);
+    ouvre_fenetre(wins, win, degats);
+    if let Some(client) = wins.last_mut().and_then(|w| w.app.client_mut()) {
         client.envoie_configuration(true);
     }
 }
 
-/// DOOM: autre application ring3, independante du navigateur et du service.
+/// Ces petits adaptateurs assurent la compatibilite des appels/sondes P13
+/// pendant la migration du gestionnaire de fenetres hors du noyau.
+fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
+    lance_application_externe(wins, cwd, degats,
+        &crate::gui::applications_externes::LADYBIRD);
+}
+
 fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
-    if let Some(index) = wins.iter().position(|w| matches!(&w.app, App::Doom { .. })) {
-        let w = wins.remove(index);
-        ouvre_fenetre(wins, w, degats);
-        if let Some(w) = wins.last_mut() {
-            let id = w.id;
-            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
-        }
-        return;
-    }
-    let (largeur, hauteur) = (640i32, 400i32);
-    let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
-    let client = match Client::lance("/doom", cwd,
-        (largeur as usize, hauteur as usize), window::zone_maximale()) {
-        Ok(client) => client,
-        Err(error) => {
-            crate::serial_println!("BOUCHAUD_DOOM_LAUNCH_ERROR {}", error);
-            return;
-        }
-    };
-    crate::serial_println!("BOUCHAUD_DOOM_ATELIER_LAUNCH pid={}", client.pid);
-    let mut win = Win::new(String::from("DOOM - Freedoom"),
-        (fb::width() as i32 - w) / 2, BAR_H as i32 + 8,
-        w, h, crate::gui::windowing::WindowFlags::STANDARD,
-        App::Doom { client: alloc::boxed::Box::new(client) });
-    clamp_win(&mut win);
-    ouvre_fenetre(wins, win, degats);
-    if let Some(last) = wins.last_mut() {
-        if let Some(client) = last.app.client_mut() {
-            client.envoie_configuration(true);
-        }
-    }
+    lance_application_externe(wins, cwd, degats,
+        &crate::gui::applications_externes::DOOM);
 }
 
 /// Transmet la position du curseur au client survole, s'il a le focus.

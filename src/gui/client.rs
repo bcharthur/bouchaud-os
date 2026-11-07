@@ -20,7 +20,7 @@ use crate::kernel::fd::{Canal, FdKind, FileDesc, CAPACITE_CANAL};
 use crate::kernel::sync::SpinLock;
 use crate::kernel::task::{self, EcranVirtuel, Priorite};
 
-pub const CHEMIN_NAVIGATEUR: &str = "/bo-navigateur";
+pub const CHEMIN_NAVIGATEUR: &str = crate::gui::applications_externes::LADYBIRD.executable;
 
 // BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1 (P10+.3c) -- le contrat a deux tampons
 // est OFFERT au lancement d'un client seulement sous cette politique (OFF par
@@ -140,7 +140,7 @@ impl Client {
         let (largeur, hauteur) = (allocation.0.max(zone.0), allocation.1.max(zone.1));
         if crate::fs::ramfs::fs().resolve_checked(chemin, cwd).is_err() {
             return Err(alloc::format!(
-                "{} absent — voir tools/userland/build-navigateur.sh",
+                "{} absent de l'image userland — verifier son installation",
                 chemin
             ));
         }
@@ -160,14 +160,9 @@ impl Client {
             pas: surface.pas as u32,
         };
 
-        // BOUCHAUD_DOOM_ATELIER_V2: le WAD vit sur le disque userland
-        // alongside /doom. Le navigateur conserve ses propres arguments.
-        let argv = if chemin == "/doom" {
-            alloc::vec![chemin.to_string(), "-iwad".to_string(),
-                "/freedoom1.wad".to_string(), "-nosound".to_string()]
-        } else {
-            alloc::vec![chemin.to_string()]
-        };
+        // Les arguments appartiennent au manifeste applicatif, pas au protocole
+        // des surfaces. Aucun chemin special DOOM ou Ladybird dans le WM.
+        let argv = crate::gui::applications_externes::argv(chemin);
         // NE PRESENTER COMME BAIL QUE CE QUI EST UN BAIL.
         //
         // `dns_server()` et `gateway()` rendent les constantes compilees tant
@@ -208,6 +203,7 @@ impl Client {
         let canal_client = vers_client.clone();
         let canal_wm = vers_wm.clone();
 
+        let est_navigateur = chemin == CHEMIN_NAVIGATEUR;
         let mut prepare = move |processus: &task::Process| -> Vec<String> {
             processus.metadata.lock().ecran = Some(ecran);
             let mut files = processus.files.lock();
@@ -217,7 +213,7 @@ impl Client {
                 canal_client.clone(),
                 canal_wm.clone(),
             )));
-            alloc::vec![
+            let mut environnement = alloc::vec![
                 alloc::format!("BO_SURFACE_FD={}", fd_surface),
                 alloc::format!("BO_SURFACE_WIDTH={}", largeur_px),
                 alloc::format!("BO_SURFACE_HEIGHT={}", hauteur_px),
@@ -226,11 +222,16 @@ impl Client {
                 // client V1 ignore la variable et n'ecrit que le premier.
                 alloc::format!("BO_SURFACE_TAMPONS={}", tampons_offerts),
                 alloc::format!("BO_GUI_FD={}", fd_gui),
-                alloc::format!(
+            ];
+            // Ces variables sont propres au navigateur Qt. Un jeu comme DOOM
+            // recoit le framebuffer virtuel et le canal GUI, pas une couche Qt
+            // ni la politique de resolution DNS du navigateur.
+            if est_navigateur {
+                environnement.push(alloc::format!(
                     "QT_QPA_PLATFORM_PLUGIN_ARGS=fb=/dev/fb0:size={}x{}",
                     largeur_px, hauteur_px
-                ),
-                "QT_QPA_FB_DISABLE_INPUT=1".to_string(),
+                ));
+                environnement.push("QT_QPA_FB_DISABLE_INPUT=1".to_string());
                 // BOUCHAUD_NAVIGATEUR_RESOLVEUR_REEL_V1
                 //
                 // LE NAVIGATEUR INTERROGEAIT UN RESOLVEUR QUI N'EXISTE PAS
@@ -251,70 +252,78 @@ impl Client {
                 // de QEMU --, juste sous QEMU et fausse partout ailleurs. La
                 // passerelle, elle, existe reellement sur ce reseau-ci et
                 // resout sur a peu pres toutes les box. Voir `net::resolveur`.
-                alloc::format!(
+                environnement.push(alloc::format!(
                     "BOUCHAUD_DNS_SERVER={}",
                     crate::net::ipv4::format_addr(&resolveur_choisi),
-                ),
-            ]
+                ));
+            }
+            environnement
         };
 
         let pid =
             crate::kernel::exec::lance_detache(chemin, &argv, &base, cwd, &mut prepare)?;
         task::pose_priorite_de(pid, Priorite::Interactive);
-        crate::kernel::perf::browser_client_start(pid);
+        if chemin == CHEMIN_NAVIGATEUR {
+            crate::kernel::perf::browser_client_start(pid);
+        }
 
         crate::kernel::dmesg::log_fmt(format_args!(
             "gui: client {} pid={} surface {}x{} (ecran virtuel, /dev/fb0 redirige)",
             chemin, pid, largeur_px, hauteur_px
         ));
-        // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
-        //
-        // Le releve du 13 septembre montre les deux instants :
-        //
-        //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
-        //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
-        //
-        // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
-        // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
-        // sa vie, et a repondu « Unable to resolve host » sur une machine dont
-        // le reseau marchait.
-        //
-        // La cadence de reprise DHCP a ete resserree pour que ce creneau se
-        // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
-        // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
-        // resolveur non configure, au lieu de laisser chercher la panne dans
-        // le navigateur.
-        let pret = matches!(
-            crate::net::etat_demarrage(),
-            crate::net::Demarrage::Pret,
-        );
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
-            pid,
-            crate::net::ipv4::format_addr(&resolveur_choisi),
-            crate::net::nom_verdict(),
-            crate::net::connecte() as u8,
-            if pret { "configure" } else { "NON-CONFIGURE" },
-        );
-        // D'OU vient l'adresse, et pas seulement laquelle. « dns=10.0.2.3 »
-        // ne disait pas si le bail l'avait donnee ou si c'etait le repli
-        // compile -- or c'est toute la difference entre un reseau qui repond
-        // et un reseau qu'on n'a pas attendu.
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_RESOLVEUR pid={} adresse={} source={} bail={} passerelle={}",
-            pid,
-            crate::net::ipv4::format_addr(&resolveur_choisi),
-            resolveur_source.nom(),
-            crate::net::ipv4::format_addr(&crate::net::dns_server()),
-            crate::net::ipv4::format_addr(&crate::net::gateway()),
-        );
-        // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
-        // sont identiques avec et sans DHCP.
-        crate::serial_println!(
-            "BOUCHAUD_NAVIGATEUR_BAIL obtenu={} etat={}",
-            bail as u8,
-            crate::net::nom_verdict(),
-        );
+        // Les marqueurs de navigation sont des evenements SPECIFIQUES a
+        // Ladybird. Lancer DOOM ne doit pas les emettre dans les bancs P13/C22.
+        if chemin == CHEMIN_NAVIGATEUR {
+            // LE RESOLVEUR EST LU UNE FOIS, A L'EXEC. QU'IL SOIT BON OU NON.
+            //
+            // Le releve du 13 septembre montre les deux instants :
+            //
+            //   23:59:42  navigateur lance, dns=10.0.2.3, verdict=sans-configuration
+            //   00:00:05  eth0 192.168.1.97 ... dns 192.168.1.254 -- pret
+            //
+            // Vingt-trois secondes trop tot. Le navigateur a garde 10.0.2.3 -- le
+            // resolveur du NAT de QEMU, qui ne mene nulle part ici -- pour toute
+            // sa vie, et a repondu « Unable to resolve host » sur une machine dont
+            // le reseau marchait.
+            //
+            // La cadence de reprise DHCP a ete resserree pour que ce creneau se
+            // referme (voir `PERIODE_DHCP_MS`). Cette ligne reste pour le cas ou
+            // il s'ouvrirait quand meme : elle DIT que le navigateur part avec un
+            // resolveur non configure, au lieu de laisser chercher la panne dans
+            // le navigateur.
+            let pret = matches!(
+                crate::net::etat_demarrage(),
+                crate::net::Demarrage::Pret,
+            );
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_RESEAU pid={} dns={} verdict={} lien={} resolveur={}",
+                pid,
+                crate::net::ipv4::format_addr(&resolveur_choisi),
+                crate::net::nom_verdict(),
+                crate::net::connecte() as u8,
+                if pret { "configure" } else { "NON-CONFIGURE" },
+            );
+            // D'OU vient l'adresse, et pas seulement laquelle. « dns=10.0.2.3 »
+            // ne disait pas si le bail l'avait donnee ou si c'etait le repli
+            // compile -- or c'est toute la difference entre un reseau qui repond
+            // et un reseau qu'on n'a pas attendu.
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_RESOLVEUR pid={} adresse={} source={} bail={} passerelle={}",
+                pid,
+                crate::net::ipv4::format_addr(&resolveur_choisi),
+                resolveur_source.nom(),
+                crate::net::ipv4::format_addr(&crate::net::dns_server()),
+                crate::net::ipv4::format_addr(&crate::net::gateway()),
+            );
+            // `bail=` sans `bail_obtenu=` ne voulait rien dire : les deux valeurs
+            // sont identiques avec et sans DHCP.
+            crate::serial_println!(
+                "BOUCHAUD_NAVIGATEUR_BAIL obtenu={} etat={}",
+                bail as u8,
+                crate::net::nom_verdict(),
+            );
+
+        }
 
         // Une seule lecture d'horloge : le journal et la jauge doivent dater le
         // lancement du MEME instant, sinon les deux durees de demarrage
@@ -327,7 +336,7 @@ impl Client {
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
-            titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
+            titre: crate::gui::applications_externes::titre_pour_chemin(chemin).to_string(),
             surface,
             geometrie,
             vers_client,
