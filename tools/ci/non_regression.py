@@ -172,7 +172,9 @@ def validate_contracts(read: Callable[[str], str | None]) -> list[str]:
                     run = match.group(1) + "\n" + step[match.end():]
                     commands = [line.strip() for line in run.splitlines()
                                 if line.strip() and not line.lstrip().startswith("#")]
-                    if any(re.match(command + r"(?:\s|$)", line) for line in commands):
+                    if any(re.match(command + r"(?:\s|$)", line)
+                           and not re.search(r"(?:\|\|\s*(?:true|:)|;\s*(?:true|:)(?:\s|$))", line)
+                           for line in commands):
                         executable = True
                 if not executable:
                     errors.append(f"REGRESSION_EXECUTABLE_STEP_MISSING:{name}")
