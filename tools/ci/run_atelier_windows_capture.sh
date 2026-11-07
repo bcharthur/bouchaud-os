@@ -14,8 +14,6 @@ OUT=$(cd "$OUT" && pwd)
 # Ouvre d'abord Fichiers, Notes puis tente Ladybird et DOOM : meme cadre
 # universel, meme si les executables tiers ne sont pas dans cette image.
 GESTES="$(cat <<'SCENARIO'
-# Le bureau lance un Terminal x=30..410 qui MASQUE les icones !
-# D'abord le deplacer reellement vers la droite, pour liberer la grille.
 origine
 va 130 45
 mouse_button 1
@@ -23,7 +21,6 @@ bouge 560 115
 mouse_button 0
 attente 2
 capture atelier-terminal
-# Les deux clients tiers sont optionnels dans l'image de base.
 origine
 va 55 75
 double
@@ -34,7 +31,6 @@ va 225 75
 double
 attente 2
 capture atelier-doom
-# Notes et Fichiers, eux, sont embarques : leur ouverture est OBLIGATOIRE.
 origine
 va 137 165
 double
