@@ -142,17 +142,24 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     if (q->operation==WD_NEXT_VISIBLE) {
         /* Compositor bridge: a trusted supervisor can enumerate the current
          * visible windows without guessing identifiers or owning app state.
-         * q->id is an exclusive cursor (0 starts enumeration). This wire
+         * q->id is a stacking-order cursor (0 starts enumeration). This wire
          * reply contains only geometry and window id, never a raw surface. */
-        wd_u32 candidate=0;
+        /* Enumeration follows stacking order (back to front), not creation
+         * order. The cursor is the previous window id in that snapshot.
+         * A compositor should restart from zero after focus mutations. */
+        wd_u32 start=0;
         if (principal!=1) { r.verdict=WD_DENIED; return r; }
-        for (i=0; i<WD_MAX_WINDOWS; ++i) {
-            struct wd_window *item=&s->windows[i];
-            if (!item->alive || item->minimized || item->id<=q->id) continue;
-            if (!candidate || item->id<candidate) {
-                candidate=item->id;
-                w=item;
+        if (q->id) {
+            for (i=0; i<s->focus_count; ++i)
+                if (s->focus_history[i]==q->id) { start=i+1; break; }
+            if (i==s->focus_count) {
+                r.verdict=WD_NOT_FOUND;
+                return r;
             }
+        }
+        for (i=start; i<s->focus_count; ++i) {
+            struct wd_window *item=wd_find(s,s->focus_history[i]);
+            if (item && !item->minimized) { w=item; break; }
         }
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
         r.verdict=WD_OK;
