@@ -82,3 +82,5 @@ finally {
     if (Test-Path -LiteralPath $dummy) { Remove-Item -LiteralPath $dummy -Recurse -Force }
 }
 Write-Host 'LADYBIRD_V7_TEST_PASS 7 offline scenarios on exact PowerShell engine' -ForegroundColor Green
+
+exit 0
