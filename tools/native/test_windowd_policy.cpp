@@ -122,5 +122,29 @@ int main()
     assert(wd_apply(&cycle,1,&q).verdict==WD_OK);
     q=request(WD_FOCUS_NEXT,0);
     assert(wd_apply(&cycle,1,&q).verdict==WD_NOT_FOUND);
+    // Teardown applicatif: fermer toutes les fenetres du principal sans
+    // detruire celles des autres applications, puis restaurer leur focus.
+    wd_state teardown;
+    wd_init(&teardown,800,600);
+    q=request(WD_OPEN,0,0,0,80,80);
+    wd_u32 owned1=wd_apply(&teardown,1,&q).id;
+    wd_u32 survivor=wd_apply(&teardown,2,&q).id;
+    wd_u32 owned2=wd_apply(&teardown,1,&q).id;
+    q=request(WD_CLOSE_OWNED,1);
+    assert(wd_apply(&teardown,1,&q).verdict==WD_INVALID);
+    q=request(WD_QUERY,owned1);
+    assert(wd_apply(&teardown,1,&q).verdict==WD_OK);
+    q=request(WD_CLOSE_OWNED,0);
+    r=wd_apply(&teardown,1,&q);
+    assert(r.verdict==WD_OK && r.focus_id==survivor);
+    q=request(WD_QUERY,owned1);
+    assert(wd_apply(&teardown,1,&q).verdict==WD_NOT_FOUND);
+    q=request(WD_QUERY,owned2);
+    assert(wd_apply(&teardown,1,&q).verdict==WD_NOT_FOUND);
+    q=request(WD_QUERY,survivor);
+    assert(wd_apply(&teardown,2,&q).verdict==WD_OK);
+    q=request(WD_CLOSE_OWNED,0);
+    assert(wd_apply(&teardown,1,&q).verdict==WD_OK);
+    assert(wd_apply(&teardown,2,&q).focus_id==0);
     return 0;
 }
