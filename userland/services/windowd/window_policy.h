@@ -11,7 +11,7 @@
 typedef unsigned int wd_u32;
 typedef int wd_i32;
 
-enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
+enum { WD_VERSION=1, WD_MAX_WINDOWS=16, WD_SUPERVISOR=0xffffffffU };
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
     WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17
@@ -117,7 +117,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
          * A client cannot inspect the location of another application's UI.
          * The request carries a screen coordinate in x/y, not a window id. */
         wd_u32 n;
-        if (principal!=1) { r.verdict=WD_DENIED; return r; }
+        if (principal!=WD_SUPERVISOR) { r.verdict=WD_DENIED; return r; }
         if (q->id || q->x<0 || q->y<0 ||
             (wd_u32)q->x>=s->screen_width ||
             (wd_u32)q->y>=s->screen_height) return r;
@@ -148,7 +148,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
          * order. The cursor is the previous window id in that snapshot.
          * A compositor should restart from zero after focus mutations. */
         wd_u32 start=0;
-        if (principal!=1) { r.verdict=WD_DENIED; return r; }
+        if (principal!=WD_SUPERVISOR) { r.verdict=WD_DENIED; return r; }
         if (q->id) {
             for (i=0; i<s->focus_count; ++i)
                 if (s->focus_history[i]==q->id) { start=i+1; break; }
@@ -170,7 +170,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     if (q->operation==WD_SCREEN_RESIZE) {
         /* The service supervisor reconfigures the display on the trusted
          * bootstrap channel. Geometry is reconciled without dropping windows. */
-        if (principal!=1) { r.verdict=WD_DENIED; return r; }
+        if (principal!=WD_SUPERVISOR) { r.verdict=WD_DENIED; return r; }
         if (q->id || !q->width || !q->height ||
             q->width>32767 || q->height>32767) return r;
         s->screen_width=q->width; s->screen_height=q->height;
@@ -238,7 +238,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         for (i=1; i<=WD_MAX_WINDOWS; ++i) {
             wd_u32 slot=(start==WD_MAX_WINDOWS ? i-1 : start+i)%WD_MAX_WINDOWS;
             if (s->windows[slot].alive && !s->windows[slot].minimized &&
-                (principal==1 || s->windows[slot].owner==principal)) {
+                (principal==WD_SUPERVISOR || s->windows[slot].owner==principal)) {
                 w=&s->windows[slot]; break;
             }
         }
@@ -253,7 +253,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
         /* The compositor must move, resize, focus and close application
          * windows. Untrusted channels remain strictly owner-scoped. */
-        if (principal!=1 && w->owner!=principal) {
+        if (principal!=WD_SUPERVISOR && w->owner!=principal) {
             r.verdict=WD_DENIED; return r;
         }
         if (q->operation==WD_MOVE) {
