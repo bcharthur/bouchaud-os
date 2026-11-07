@@ -805,7 +805,8 @@ fn l_historique_reste_borne() {
     assert_eq!(n, 32, "32 retours au plus");
 }
 
-\n// BOUCHAUD_ATELIER_FENETRES_UNIVERSELLES_V2 : preuve hote des jetons
+
+// BOUCHAUD_ATELIER_FENETRES_UNIVERSELLES_V2 : preuve hote des jetons
 // de toutes les fenetres, independamment du type d'application.
 #[test]
 fn chrome_atelier_actif_inactif_sans_bascule_application() {
