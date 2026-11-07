@@ -15,7 +15,8 @@ $payload = @{
         contexts = @(
             "fast-gate",
             "integration-gate",
-            "reliability-gate"
+            "reliability-gate",
+            "non-regression-gate"
         )
     }
     enforce_admins = $false
@@ -44,4 +45,4 @@ $payload | gh api `
     --input -
 
 Write-Host ""
-Write-Host "Protection appliquee. Checks requis : fast-gate, integration-gate, reliability-gate"
+Write-Host "Protection appliquee. Checks requis : fast-gate, integration-gate, reliability-gate, non-regression-gate"
