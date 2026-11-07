@@ -67,7 +67,7 @@ int bo_main(const struct bo_start *start)
             if (ev[e].key<1 || ev[e].key>count) return 6;
             slot=(wd_u32)ev[e].key-1;
             if (!controls[slot]) continue;
-            principal=slot+1; /* 1 is the trusted supervisor. */
+            principal=slot==0 ? WD_SUPERVISOR : slot; /* supervisor has a reserved identity */
             if (!(ev[e].signals & BO_SIGNAL_READABLE)) {
                 if (ev[e].signals & BO_SIGNAL_PEER_CLOSED) {
                     if (!revoke(&state,principal)) return 7;
@@ -102,7 +102,7 @@ int bo_main(const struct bo_start *start)
             }
             if (req.version==WD_VERSION && req.operation==WD_SHUTDOWN) {
                 /* Only the supervisor may terminate the broker. */
-                if (principal==1) {
+                if (principal==WD_SUPERVISOR) {
                     if (bo_channel_send(controls[slot],"BYE",3,0,0)!=3)
                         return 8;
                     return 0;
