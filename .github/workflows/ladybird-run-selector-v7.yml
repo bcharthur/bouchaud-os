@@ -1,0 +1,42 @@
+name: Ladybird launcher selector V7
+on:
+  push:
+    branches: [fix/ladybird-run-artifact-validated-20261108]
+  pull_request:
+    paths:
+      - run.ps1
+      - tools/run/ladybird-artifact.ps1
+      - tools/ci/test-ladybird-selector-v7.ps1
+      - .github/workflows/ladybird-run-selector-v7.yml
+permissions:
+  contents: read
+jobs:
+  windows-powershell-51:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('run.ps1','tools/run/ladybird-artifact.ps1','tools/ci/test-ladybird-selector-v7.ps1')) {
+            $tok = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tok,[ref]$errors)
+            if (@($errors).Count) { throw "PowerShell parser $path : $errors" }
+          }
+      - name: Offline selectors Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          & .\tools\ci\test-ladybird-selector-v7.ps1 -RepoRoot $PWD.Path
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Existing selector regression tests
+        shell: powershell
+        run: |
+          & .\tools\ci\test-selection-artefact.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Existing static artifact contract
+        shell: powershell
+        run: |
+          python tools/verifie-artefact-navigateur.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
