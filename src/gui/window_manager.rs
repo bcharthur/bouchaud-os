@@ -2229,11 +2229,26 @@ fn lance_application_externe(
     // redemarre jamais le processus, ne recree pas sa surface ni son navigateur.
     if let Some(index) = wins.iter().position(|w|
         w.app.identite_externe() == Some(application.identite)) {
-        let w = wins.remove(index);
-        ouvre_fenetre(wins, w, degats);
-        if let Some(w) = wins.last_mut() {
-            let id = w.id;
-            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+        // Une activation depuis le dock n'est pas une nouvelle ouverture :
+        // conserver le processus, sa surface et son etat de navigation/jeu.
+        // Ne pas rejouer l'animation d'apparition ni effacer le bureau entier.
+        let cadre_focus_perdu = widgets::indice_focus(wins)
+            .filter(|&precedent| precedent != index)
+            .map(|precedent| cadre_fenetre(&wins[precedent]));
+        let index = remonte_fenetre(wins, index);
+        let cadre_nouveau = cadre_fenetre(&wins[index]);
+        for (rect, cible) in transition::focus_transfere(
+            cadre_focus_perdu, cadre_nouveau, barre_taches_rect(),
+        ).iter() {
+            degats.ajoute(origine_de(cible), rect);
+        }
+        let w = &mut wins[index];
+        let id = w.id;
+        let etait_minimisee = w.min;
+        route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+        if etait_minimisee {
+            // Une surface cachee redevient visible : restaurer son empreinte.
+            degats.tout();
         }
         return;
     }
