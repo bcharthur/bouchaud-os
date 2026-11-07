@@ -202,12 +202,9 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
                 item->x=wd_clamp(item->x,item->width,q->width);
                 item->y=wd_clamp(item->y,item->height,q->height);
             }
-            if (item->saved_width>q->width) item->saved_width=q->width;
-            if (item->saved_height>q->height) item->saved_height=q->height;
-            if (item->saved_width && item->saved_height) {
-                item->saved_x=wd_clamp(item->saved_x,item->saved_width,q->width);
-                item->saved_y=wd_clamp(item->saved_y,item->saved_height,q->height);
-            }
+            /* Preserve the pre-maximize rectangle across temporary smaller
+             * displays. Clamping it here permanently loses the user's size
+             * when the original monitor returns. Clamp only on restore. */
         }
         r.verdict=WD_OK;
         wd_report(&r,s,0);
@@ -308,8 +305,15 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
             wd_set_focus(s,w->id);
         } else if (q->operation==WD_UNMAXIMIZE) {
             if (w->maximized) {
-                w->x=w->saved_x; w->y=w->saved_y;
-                w->width=w->saved_width; w->height=w->saved_height;
+                /* A maximized window can outlive a display resize. Restore
+                 * its saved geometry within the current screen bounds without
+                 * destroying the original rectangle for future maximizes. */
+                w->width=w->saved_width>s->screen_width ?
+                         s->screen_width : w->saved_width;
+                w->height=w->saved_height>s->screen_height ?
+                          s->screen_height : w->saved_height;
+                w->x=wd_clamp(w->saved_x,w->width,s->screen_width);
+                w->y=wd_clamp(w->saved_y,w->height,s->screen_height);
                 w->maximized=0;
             }
             w->minimized=0;
