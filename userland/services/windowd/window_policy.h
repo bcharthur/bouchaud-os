@@ -115,6 +115,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
     if (q->operation==WD_SCREEN_RESIZE) {
         /* The service supervisor reconfigures the display on the trusted
          * bootstrap channel. Geometry is reconciled without dropping windows. */
+        if (principal!=1) { r.verdict=WD_DENIED; return r; }
         if (q->id || !q->width || !q->height ||
             q->width>32767 || q->height>32767) return r;
         s->screen_width=q->width; s->screen_height=q->height;
