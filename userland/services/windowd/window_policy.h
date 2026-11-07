@@ -14,7 +14,7 @@ typedef int wd_i32;
 enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -118,6 +118,21 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         w->x=wd_clamp(q->x, w->width, s->screen_width);
         w->y=wd_clamp(q->y, w->height, s->screen_height);
         wd_set_focus(s,w->id);
+    } else if (q->operation==WD_CLOSE_OWNED) {
+        /* Application teardown: remove only windows belonging to this
+         * authenticated principal; never close another application's UI. */
+        if (q->id) return r;
+        for (i=0; i<WD_MAX_WINDOWS; ++i) {
+            if (s->windows[i].alive && s->windows[i].owner==principal) {
+                wd_forget_focus(s,s->windows[i].id);
+                s->windows[i].alive=0;
+            }
+        }
+        if (!wd_find(s,s->focus_id))
+            s->focus_id=s->focus_count ? s->focus_history[s->focus_count-1] : 0;
+        r.verdict=WD_OK;
+        wd_report(&r,s,0);
+        return r;
     } else if (q->operation==WD_FOCUS_NEXT) {
         /* Parcours circulaire par emplacement, limite aux fenetres du canal.
          * Ne jamais donner le focus a une fenetre d'un autre principal. */
