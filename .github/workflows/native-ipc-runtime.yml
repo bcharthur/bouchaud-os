@@ -261,11 +261,25 @@ jobs:
         env:
           BO_AB_SUPPORT: ${{ matrix.support }}
         run: bash tools/ci/run_ab_rollback.sh "${{ matrix.scenario }}" target/ab-rollback
+      # Diagnostic best-effort: ne modifie aucun verdict A/B ni aucune
+      # assertion. L'analyse par boot ne fabrique jamais un lien causal.
+      - name: Chronologie USB/SMP/A-B par boot (rapport facultatif)
+        if: always()
+        continue-on-error: true
+        run: |
+          if compgen -G 'target/ab-rollback/boot-*.log' >/dev/null; then
+            python3 tools/health/incident_timeline.py target/ab-rollback \
+              --output target/ab-rollback/incident-timeline.json
+          else
+            echo "AB_DIAG_NOTE aucun_log_disponible"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}
-          path: target/ab-rollback/boot-*.log
+          path: |
+            target/ab-rollback/boot-*.log
+            target/ab-rollback/incident-timeline.json
           if-no-files-found: error
           retention-days: 14
 
