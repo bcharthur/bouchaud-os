@@ -45,8 +45,10 @@ macro_rules! tuile {
     };
 }
 
-/// Les tuiles. Les huit premieres sont dans l'ordre de `window::ICONS`.
-const SOURCES: [[&[u8]; 3]; 11] = [
+/// Les tuiles dans leur ordre propre (INDEPENDANT de `window::ICONS`).
+/// Le bureau comme le dock doivent utiliser `pour_kind` / `pour_app`, jamais
+/// le rang d'une icone de bureau : l'index 8 est Moniteur, 11 est DOOM.
+const SOURCES: [[&[u8]; 3]; 12] = [
     tuile!("navigateur"),
     tuile!("calculatrice"),
     tuile!("terminal"),
@@ -58,6 +60,7 @@ const SOURCES: [[&[u8]; 3]; 11] = [
     tuile!("moniteur"),
     tuile!("journal"),
     tuile!("parametres"),
+    tuile!("doom"),
 ];
 
 pub const NOMBRE: usize = SOURCES.len();
@@ -173,6 +176,7 @@ pub fn dessine(index: usize, x: usize, y: usize, cote: usize) {
 pub fn pour_kind(kind: usize) -> Option<usize> {
     match kind {
         crate::gui::window::KIND_NAVIGATEUR => Some(0),
+        crate::gui::window::KIND_DOOM => Some(11),
         4 => Some(1), // Calculatrice
         0 => Some(2), // Terminal
         1 => Some(3), // Fichiers
@@ -195,6 +199,7 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
     use crate::gui::window::App;
     Some(match app {
         App::Navigateur { .. } => 0,
+        App::Doom { .. } => 11,
         App::Calc { .. } => 1,
         App::Terminal { .. } => 2,
         App::Files { .. } => 3,

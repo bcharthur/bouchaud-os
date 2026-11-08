@@ -160,7 +160,14 @@ impl Client {
             pas: surface.pas as u32,
         };
 
-        let argv = alloc::vec![chemin.to_string()];
+        // BOUCHAUD_DOOM_ATELIER_V2: le WAD vit sur le disque userland
+        // alongside /doom. Le navigateur conserve ses propres arguments.
+        let argv = if chemin == "/doom" {
+            alloc::vec![chemin.to_string(), "-iwad".to_string(),
+                "/freedoom1.wad".to_string(), "-nosound".to_string()]
+        } else {
+            alloc::vec![chemin.to_string()]
+        };
         // NE PRESENTER COMME BAIL QUE CE QUI EST UN BAIL.
         //
         // `dns_server()` et `gateway()` rendent les constantes compilees tant

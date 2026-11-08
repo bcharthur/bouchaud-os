@@ -80,8 +80,9 @@ pub fn is_loopback(addr: &Ipv4Addr) -> bool {
 /// Construit un en-tete IPv4 + place la charge utile a la suite.
 /// Renvoie la longueur totale du paquet ecrit dans `buf`.
 pub fn build_packet(buf: &mut [u8], src: Ipv4Addr, dst: Ipv4Addr, proto: u8, ident: u16, payload: &[u8]) -> Option<usize> {
-    let total = HEADER_LEN + payload.len();
-    if buf.len() < total { return None; }
+    let total = HEADER_LEN.checked_add(payload.len())?;
+    // IPv4 total_length is only 16 bits: never truncate a packet on the wire.
+    if total > u16::MAX as usize || buf.len() < total { return None; }
 
     for b in buf[..HEADER_LEN].iter_mut() { *b = 0; }
     buf[0] = 0x45; // version 4, IHL 5 (20 octets)
@@ -137,6 +138,11 @@ pub fn parse_header(buf: &[u8]) -> Option<Header> {
     let ihl = (buf[0] & 0x0F) as usize * 4;
     if ihl < HEADER_LEN || buf.len() < ihl { return None; }
     let total_len = ((buf[2] as usize) << 8) | buf[3] as usize;
+    // A packet shorter than its own header previously reached handle_ipv4:
+    // slicing packet[ihl..total_len] panicked on untrusted network bytes.
+    if total_len < ihl || total_len > buf.len() { return None; }
+    // Validate the header with options included, not just the first 20 bytes.
+    if !somme_juste(&buf[..ihl]) { return None; }
     let mut src = [0u8; 4];
     let mut dst = [0u8; 4];
     src.copy_from_slice(&buf[12..16]);

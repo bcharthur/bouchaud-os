@@ -304,3 +304,13 @@ scenario-reveil-coeur-muet/
 reveil-coeur-muet.img
 reveil-coeur-muet.log
 /target-temoin
+
+# DOOM port (pinned source/toolchain rebuilt on any Windows PC, no WSL)
+# The C adapter and build-windows.ps1 ARE tracked; downloaded inputs are not.
+/tools/doom/upstream/
+/tools/doom/wads/
+/scenario-m9/doom
+/scenario-m9/freedoom1.wad
+/BOUCHAUD-DOOM-CORRECTIF-V*/
+/BOUCHAUD-DOOM-SANS-WSL/
+/BOUCHAUD-DOOM-REBUILD/

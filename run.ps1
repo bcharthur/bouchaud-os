@@ -7,6 +7,9 @@ param(
     # ne pas casser les habitudes et les documents qui le mentionnent.
     [switch]$Ladybird,
 
+    # Add /doom and /freedoom1.wad to Ladybird userland disk; start from desktop.
+    [switch]$Doom,
+
     # Revient au userland historique (Qt + CPython + QuickJS). Le navigateur du
     # bureau est alors l'ancien moteur, pas Ladybird.
     [switch]$Legacy,
@@ -103,6 +106,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = $PSScriptRoot
+# The default Windows DirectSound capture driver is unavailable on some hosts.
+# Unless explicitly overridden, -Doom opts into QEMU's safe silent backend.
+if ($Doom -and -not $PSBoundParameters.ContainsKey('Audio')) { $Audio = 'none' }
 
 Set-Location $RepoRoot
 
@@ -454,154 +460,21 @@ if ($LadybirdMode) {
     # Validation / recuperation artefact Ladybird
     # =========================================================================
 
-    $artifactMissing = $false
-
-
-    if (-not (Test-Path $NativeBrowserDir)) {
-
-        $artifactMissing = $true
+    # BOUCHAUD_LADYBIRD_ARTIFACT_V7
+    # This may be an unpushed local integration branch. Select by the exact
+    # Ladybird BUILD RECIPE, not by Git branch or arbitrary latest artifact.
+    $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
+    $EffectiveLadybirdRunId = [long]$LadybirdRunId
+    if ($EffectiveLadybirdRunId -eq 0) {
+        Write-Host "Ladybird : selection par empreinte du build (toutes branches)" -ForegroundColor DarkGray
     }
-    else {
-
-        foreach ($file in $RequiredLadybirdFiles) {
-
-            $candidate = Join-Path `
-                $NativeBrowserDir `
-                $file
-
-            if (-not (Test-Path $candidate)) {
-
-                $artifactMissing = $true
-
-                if ($file -eq $CapaciteUi) {
-                    Write-Host (
-                        ("Ladybird : artefact anterieur au chrome V16 ({0} absent) " -f $file) +
-                        "-> retelechargement"
-                    ) -ForegroundColor Yellow
-                }
-                else {
-                    Write-Host (
-                        "Ladybird : artefact incomplet ({0} absent) -> retelechargement" -f `
-                            $file
-                    ) -ForegroundColor Yellow
-                }
-
-                break
-            }
-        }
-
-
-        $resourcesCandidate = Join-Path `
-            $NativeBrowserDir `
-            "resources"
-
-
-        if (-not (Test-Path $resourcesCandidate)) {
-
-            $artifactMissing = $true
-        }
-    }
-
-
-    if ($RefreshLadybird -or $artifactMissing) {
-
-        Ensure-GitHubCli
-
-
-        $EffectiveLadybirdRunId = $LadybirdRunId
-
-        if ($EffectiveLadybirdRunId -eq 0) {
-            $CurrentBranch = (& git branch --show-current).Trim()
-            if (-not $CurrentBranch) {
-                Fail "impossible de determiner la branche pour trouver l'artefact Ladybird"
-            }
-
-            # BOUCHAUD_ARTEFACT_PRODUCTEUR_V1 / BOUCHAUD_SANS_JQ_V1
-            #
-            # Le critere de selection -- l'ARTEFACT lui-meme, jamais la
-            # conclusion du run -- est explique la ou il s'applique, dans
-            # `tools/ladybird/selection-artefact.ps1`.
-            #
-            # Il vit dans un fichier separe pour une raison precise :
-            # `run.ps1` s'execute de bout en bout des qu'on le charge --
-            # noyau, disque, QEMU --, donc aucun test ne peut en appeler une
-            # partie. La CI ne faisait qu'ANALYSER ce fichier, et trois
-            # defauts d'EXECUTION sont passes par ce trou, tous dans ce
-            # bloc-ci. `tools/ci/test-selection-artefact.ps1` l'execute
-            # maintenant avec un `gh` simule.
-            . (Join-Path $RepoRoot "tools/ladybird/selection-artefact.ps1")
-
-            $ArtefactNavigateur = "bouchaud-ladybird-native-browser"
-
-            $selection = Get-RunAvecArtefact `
-                -Branche $CurrentBranch `
-                -Artefact $ArtefactNavigateur
-
-            $latest = $selection.RunId
-            $examines = $selection.Examines
-
-            if ($examines -eq 0) {
-                Fail (
-                    ("aucun run de ladybird-native-browser pour '{0}'. " -f $CurrentBranch) +
-                    "Pousse la branche et attends le workflow."
-                )
-            }
-
-            if (-not $latest) {
-                Fail (
-                    ("aucun artefact Ladybird telechargeable sur les {0} derniers " -f $examines) +
-                    ("runs de '{0}'. Le job 'ladybird / build once' a-t-il abouti, " -f $CurrentBranch) +
-                    "ou les artefacts ont-ils expire (retention 14 jours) ?"
-                )
-            }
-
-            Write-Host (
-                "Ladybird : run {0} retenu (artefact publie par build once)" -f `
-                    $latest
-            ) -ForegroundColor DarkGray
-
-            $EffectiveLadybirdRunId = [long]$latest
-        }
-
-        Write-Host (
-            "Ladybird : telechargement artefact du run {0}" -f `
-                $EffectiveLadybirdRunId
-        ) -ForegroundColor Yellow
-
-
-        if (Test-Path $NativeBrowserDir) {
-
-            Remove-Item `
-                -Recurse `
-                -Force `
-                $NativeBrowserDir
-        }
-
-
-        New-Item `
-            -ItemType Directory `
-            -Path $NativeBrowserDir `
-            -Force | Out-Null
-
-
-        gh run download $EffectiveLadybirdRunId `
-            -n $ArtefactNavigateur `
-            -D $NativeBrowserDir
-
-
-        if ($LASTEXITCODE -ne 0) {
-
-            Fail "impossible de telecharger l'artefact Ladybird du run $EffectiveLadybirdRunId"
-        }
-    }
-    else {
-
-        Write-Host (
-            "Ladybird : artefact local deja present dans {0}" -f `
-                $NativeBrowserDir
-        ) -ForegroundColor Green
-    }
-
+    . (Join-Path $RepoRoot "tools/run/ladybird-artifact.ps1")
+    Use-BoLadybirdArtifact -RepoRoot $RepoRoot `
+        -TargetDir $NativeBrowserDir `
+        -RequiredFiles $RequiredLadybirdFiles `
+        -ArtifactName $ArtefactNavigateur `
+        -RunId $EffectiveLadybirdRunId `
+        -Refresh:$RefreshLadybird
 
     # =========================================================================
     # Validation minimale M8
@@ -1011,6 +884,44 @@ if ($LadybirdMode) {
         [System.Text.UTF8Encoding]::new($false)
     )
 
+    # BOUCHAUD_DOOM_ATELIER_V2 : opt-in only. The existing boot/userland
+    # image and launch mode remain unchanged without -Doom.
+    if ($Doom) {
+        $DoomElf = Join-Path $RepoRoot "target\doom-bouchaud\doom-bouchaud"
+        $DoomWad = Join-Path $RepoRoot "tools\doom\wads\freedoom1.wad"
+        # New clone or obsolete ET_EXEC: rebuild with portable Zig on Windows.
+        $DoomNeedsBuild = -not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)
+        if (-not $DoomNeedsBuild) {
+            $elfStream = [IO.File]::OpenRead($DoomElf)
+            try {
+                if ($elfStream.Length -lt 64) {
+                    $DoomNeedsBuild = $true
+                } else {
+                    $elfStream.Position = 16
+                    $elfType = @($elfStream.ReadByte(), $elfStream.ReadByte())
+                    $DoomNeedsBuild = ($elfType[0] -ne 3 -or $elfType[1] -ne 0)
+                }
+            } finally { $elfStream.Close() }
+        }
+        if ($DoomNeedsBuild) {
+            $DoomBuilder = Join-Path $RepoRoot 'tools\doom\build-windows.ps1'
+            if ($env:OS -ne 'Windows_NT' -or -not (Test-Path -LiteralPath $DoomBuilder -PathType Leaf)) {
+                Fail 'DOOM: sources absentes. Build Windows: tools\doom\build-windows.ps1 -NoLaunch; aucun WSL requis.'
+            }
+            Write-Host 'DOOM: preparation automatique via Zig portable (sans WSL)' -ForegroundColor Cyan
+            & $DoomBuilder -Repo $RepoRoot -NoLaunch
+            if (-not $?) { Fail 'DOOM: compilation Windows echouee.' }
+        }
+        if (-not (Test-Path -LiteralPath $DoomElf -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $DoomWad -PathType Leaf)) {
+            Fail 'DOOM: executable ou Freedoom manquant apres compilation.'
+        }
+        Copy-Item -LiteralPath $DoomElf -Destination (Join-Path $ScenarioDir "doom") -Force
+        Copy-Item -LiteralPath $DoomWad -Destination (Join-Path $ScenarioDir "freedoom1.wad") -Force
+        Write-Host "DOOM: added ring3 game and Freedoom IWAD to Atelier disk" -ForegroundColor Green
+    }
+
 
     # =========================================================================
     # Fabrication USTAR native Windows
@@ -1070,6 +981,7 @@ if not root.is_dir():
 # ne doit pas dependre du fait que son unique utilisateur soit root.
 executables = {
     "bo-navigateur",
+    "doom",
     "usr/libexec/ladybird/BouchaudBrowserHost",
     "usr/libexec/ladybird/WebContent",
     "usr/libexec/ladybird/RequestServer",

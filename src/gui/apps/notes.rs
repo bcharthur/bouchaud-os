@@ -61,7 +61,12 @@ impl NotesState {
     fn emplacement(&self, fs: &ramfs::FileSystem) -> Result<(usize, String, bool), &'static str> {
         match &self.chemin {
             Some(c) => {
-                let (parent, nom) = fs.resolve_parent_name(c, 0).ok_or("chemin invalide")?;
+                // Chemin canonique avant resolution : le client ne peut pas
+                // ouvrir un fichier via un chemin ambigu ou echappant a '/'.
+                let absolu = crate::fs::vfs_chemins::normalise_absolu(c)
+                    .map_err(|_| "chemin absolu invalide")?;
+                let (parent, nom) = fs.resolve_parent_name(&absolu, 0)
+                    .ok_or("chemin invalide")?;
                 Ok((parent, String::from(nom), fs.sous_persistant(parent)))
             }
             None => {
@@ -131,14 +136,19 @@ impl NotesState {
             durable = d;
             if dossier >= ramfs::MAX_NODES || !fs.nodes[dossier].used
                 || fs.nodes[dossier].kind != NodeKind::Dir { return Err("dossier invalide"); }
-            if !fs.can(dossier, PERM_W | PERM_X) { return Err("ecriture repertoire interdite"); }
+            if !fs.can(dossier, PERM_X) { return Err("traversee interdite"); }
             let idx = match fs.find_child(dossier, &nom) {
                 Some(idx) => {
                     if fs.nodes[idx].kind != NodeKind::File { return Err("la cible n'est pas un fichier"); }
                     if !fs.can(idx, PERM_W) { return Err("ecriture fichier interdite"); }
                     idx
                 }
-                None => fs.touch_at(dossier, &nom)?,
+                None => {
+                    if !fs.can(dossier, PERM_W) {
+                        return Err("creation interdite dans ce repertoire");
+                    }
+                    fs.touch_at(dossier, &nom)?
+                },
             };
             if !fs.write_node_bytes(idx, self.texte.as_bytes()) { return Err("RAMFS refuse l'ecriture"); }
             Ok(idx)
@@ -150,7 +160,10 @@ impl NotesState {
                 let sync_result = if durable { persistance::synchronise() }
                     else { persistance::SANS_ZONE };
                 let persisted = durable && sync_result >= 0;
-                self.dirty = !persisted && durable;
+                // Un fichier volatile est bien sauvegarde dans le RAMFS :
+                // le garder marque modifie bloquerait F3 sans raison.
+                // En revanche, un echec de synchronisation disque reste dirty.
+                self.dirty = durable && !persisted;
                 self.statut = if persisted {
                     format!("{} enregistre sur le disque : {} octets", self.nom(), self.texte.len())
                 } else if durable {
