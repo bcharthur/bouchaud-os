@@ -10,11 +10,17 @@ use crate::net::{icmp, ipv4};
 /// Renvoie la longueur de la reponse, ou `None` si aucune reponse.
 pub fn handle_ipv4(packet: &[u8], out: &mut [u8]) -> Option<usize> {
     let hdr = ipv4::parse_header(packet)?;
-    if hdr.total_len > packet.len() { return None; }
+    // No IPv4 reassembly in this stack: a partial fragment is not an ICMP
+    // packet, even if its payload happens to resemble an Echo Request.
+    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+    if fragment & 0x3fff != 0 { return None; } // MF or fragment offset
     let payload = &packet[hdr.header_len..hdr.total_len];
 
     match hdr.proto {
         ipv4::PROTO_ICMP => {
+            // ICMP checksum is mandatory. A malformed packet must never
+            // trigger a reply or be treated as a valid ping.
+            if ipv4::checksum(payload) != 0 { return None; }
             let msg = icmp::parse(payload)?;
             if msg.msg_type != icmp::ECHO_REQUEST {
                 return None;
