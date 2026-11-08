@@ -23,6 +23,8 @@ class TestNonRegression(unittest.TestCase):
             "src/gui/window_manager.rs", "src/drivers/usb/xhci_active.rs",
             "tools/platform/test_usb_bulk_trb_correlation.rs",
             "tools/ci/run_native_services.sh",
+            "userland/services/windowd/windowd.c",
+            "userland/tests/windowd-process-probe.c",
             *gate.CHECKED_WORKFLOWS,
         ):
             cls.contents[path] = reader(path)
@@ -34,6 +36,37 @@ class TestNonRegression(unittest.TestCase):
 
     def test_live_tree_has_no_missing_guards(self):
         self.assertEqual(self.check(), [])
+
+    def test_windowd_fixture_contains_real_service_and_probe(self):
+        # A conditional contract must be tested against the *complete* tree.
+        self.assertIn("WINDOWD_RING3_IPC_OK",
+                      self.contents["tools/ci/run_native_services.sh"])
+        self.assertIn("wd_apply(",
+                      self.contents["userland/services/windowd/windowd.c"])
+        self.assertIn("WINDOWD_RING3_IPC_OK",
+                      self.contents["userland/tests/windowd-process-probe.c"])
+        self.assertEqual(self.check(), [])
+
+    def test_windowd_service_deleted_is_blocked(self):
+        errors = self.check({"userland/services/windowd/windowd.c": None})
+        self.assertIn("CRITICAL_MISSING:userland/services/windowd/windowd.c", errors)
+
+    def test_windowd_probe_deleted_is_blocked(self):
+        errors = self.check({"userland/tests/windowd-process-probe.c": None})
+        self.assertIn("CRITICAL_MISSING:userland/tests/windowd-process-probe.c", errors)
+
+    def test_windowd_service_contract_removed_is_blocked(self):
+        service = self.contents["userland/services/windowd/windowd.c"]
+        errors = self.check({"userland/services/windowd/windowd.c":
+                             service.replace("wd_apply(", "wd_applied(")})
+        self.assertIn("CONTRACT_REMOVED:userland/services/windowd/windowd.c:wd_apply(", errors)
+
+    def test_windowd_probe_contract_removed_is_blocked(self):
+        probe = self.contents["userland/tests/windowd-process-probe.c"]
+        errors = self.check({"userland/tests/windowd-process-probe.c":
+                             probe.replace("WINDOWD_RING3_IPC_OK", "WINDOWD_RING3_IPC_BROKEN")})
+        self.assertIn("CONTRACT_REMOVED:userland/tests/windowd-process-probe.c:WINDOWD_RING3_IPC_OK",
+                      errors)
 
     def test_removing_postcommit_readback_fails(self):
         path = "tools/ci/run_ab_rollback.sh"
