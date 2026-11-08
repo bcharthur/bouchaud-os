@@ -21,7 +21,8 @@ FEATURES=uefi-boot,reference-bringup,reference-desktop
 TARGET=targets/x86_64-bouchaud_os_uefi.json
 
 COMMIT=$(git rev-parse HEAD)
-SALE=$(git status --porcelain --untracked-files=no | wc -l)
+# Un fichier non suivi peut etre une source oubliee : refuser l'image.
+SALE=$(git status --porcelain --untracked-files=normal | wc -l)
 if [ "$SALE" != 0 ] && [ "${BO_IMAGE_ACCEPTE_SALE:-0}" != 1 ]; then
   echo "IMAGE_REFUSEE arbre_sale fichiers=$SALE (BO_IMAGE_ACCEPTE_SALE=1 pour forcer)" >&2
   exit 2
