@@ -624,13 +624,17 @@ fn boucle() {
     let mut calques: Vec<Calque> = Vec::new();
     degats.tout(); // premier tour : rien n'est encore a l'ecran
 
-    // Un terminal pour commencer. Le premier tour est deja plein ecran, mais on
-    // passe par le meme chemin que tout le monde : c'est ce qui rend la regle
-    // verifiable au lieu d'etre une habitude.
-    {
-        #[cfg(not(feature = "reference-desktop"))]
+    // BOUCHAUD_ATELIER_TERMINAL_BOOT_V15: session normale sans Terminal impose.
+    // Les bancs explicitement armes gardent leur chemin historique make_app(0).
+    let lancement_explicite = crate::shell::exported().iter().any(|entree| {
+        entree == "BO_AUTOSTART_BROWSER=1" || entree == "BO_AUTOSTART_SERVICES=1"
+    });
+    crate::serial_println!(
+        "BOUCHAUD_ATELIER_TERMINAL_BOOT_V15 terminal_auto=0 lancement_explicite={}",
+        lancement_explicite as u8
+    );
+    if lancement_explicite {
         let fenetre = make_app(0, home, &mut spawn_n);
-        #[cfg(not(feature = "reference-desktop"))]
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
     for kind in window::fenetres_demandees_au_demarrage() {
