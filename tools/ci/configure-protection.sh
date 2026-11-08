@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Pose la protection de `main` : les trois verdicts de barriere deviennent
+# Pose la protection de `main` : les quatre verdicts de barriere deviennent
 # obligatoires, et l'historique cesse d'etre reecrivable.
 #
 # POURQUOI CE FICHIER EXISTE A COTE DU .ps1
@@ -12,7 +12,7 @@
 #
 # CE QUE LA PROTECTION FAIT, ET CE QU'ELLE NE FAIT PAS
 #
-# Elle exige `fast-gate`, `integration-gate` et `reliability-gate` -- les trois
+# Elle exige `fast-gate`, `integration-gate`, `reliability-gate` et `non-regression-gate` -- les trois
 # verdicts UNIQUES que les workflows produisent exprès pour elle, avec
 # `if: always()`, afin qu'ils rapportent meme quand tout le reste est saute.
 # Exiger les jobs individuels bloquerait pour toujours une PR qui n'en
@@ -45,7 +45,7 @@ CHARGE="$(cat <<'JSON'
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["fast-gate", "integration-gate", "reliability-gate"]
+    "contexts": ["fast-gate", "integration-gate", "reliability-gate", "non-regression-gate"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -84,7 +84,7 @@ if [ "$CODE" != "200" ]; then
 fi
 rm -f "$REPONSE"
 
-echo "BOUCHAUD_PROTECTION_MAIN_OK checks=fast-gate,integration-gate,reliability-gate"
+echo "BOUCHAUD_PROTECTION_MAIN_OK checks=fast-gate,integration-gate,reliability-gate,non-regression-gate"
 echo
 echo "Verification :"
 curl -sS \
