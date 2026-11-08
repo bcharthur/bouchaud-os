@@ -2,6 +2,8 @@
 
 **Source de vérité active.** Commencez toujours par `git fetch && git rev-parse HEAD origin/main`, puis lisez [status.json](status.json). C'est un instantané daté, pas un statut qui se met à jour seul : un SHA ou un verdict n'est écrit qu'à un seul endroit, et c'est là.
 
+> **Passation la plus récente :** [consolidation du 8 novembre 2026](CONSOLIDATION_2026-11-08.md), distinguant `main`, PR et correctifs locaux non qualifiés. Les verdicts restent attachés à leurs SHA et runs exacts.
+
 ## Comprendre le projet en cinq minutes
 
 | Question | Où lire |
