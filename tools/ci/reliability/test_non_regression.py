@@ -18,7 +18,7 @@ class TestNonRegression(unittest.TestCase):
         cls.contents = {}
         # Utiliser l'arbre reel comme source : les gardes conditionnels peuvent
         # exiger de nouveaux fichiers sans mise a jour manuelle du fixture.
-        cls.reader = gate.read_tree(ROOT)
+        cls.reader = staticmethod(gate.read_tree(ROOT))
         for path in (
             "tools/ci/run_ab_rollback.sh", "src/gui/atelier/mod.rs",
             "src/gui/atelier/session.rs", "tools/gui/test_session.rs",
