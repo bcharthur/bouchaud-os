@@ -16,24 +16,65 @@ class TestNonRegression(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contents = {}
-        reader = gate.read_tree(ROOT)
+        # Utiliser l'arbre reel comme source : les gardes conditionnels peuvent
+        # exiger de nouveaux fichiers sans mise a jour manuelle du fixture.
+        cls.reader = staticmethod(gate.read_tree(ROOT))
         for path in (
             "tools/ci/run_ab_rollback.sh", "src/gui/atelier/mod.rs",
             "src/gui/atelier/session.rs", "tools/gui/test_session.rs",
             "src/gui/window_manager.rs", "src/drivers/usb/xhci_active.rs",
             "tools/platform/test_usb_bulk_trb_correlation.rs",
             "tools/ci/run_native_services.sh",
+            "userland/services/windowd/windowd.c",
+            "userland/tests/windowd-process-probe.c",
             *gate.CHECKED_WORKFLOWS,
         ):
-            cls.contents[path] = reader(path)
+            cls.contents[path] = cls.reader(path)
 
     def check(self, changed=None):
-        files = self.contents.copy()
-        files.update(changed or {})
-        return gate.validate_contracts(files.get)
+        # Les mutations explicites (y compris None = fichier supprime) priment
+        # sur l'arbre reel. Pour les autres fichiers, ne jamais simuler
+        # artificiellement leur absence a cause d'un fixture incomplet.
+        changed = changed or {}
+        def read(path):
+            if path in changed:
+                return changed[path]
+            return self.reader(path)
+        return gate.validate_contracts(read)
 
     def test_live_tree_has_no_missing_guards(self):
         self.assertEqual(self.check(), [])
+
+    def test_windowd_fixture_contains_real_service_and_probe(self):
+        # A conditional contract must be tested against the *complete* tree.
+        self.assertIn("WINDOWD_RING3_IPC_OK",
+                      self.contents["tools/ci/run_native_services.sh"])
+        self.assertIn("wd_apply(",
+                      self.contents["userland/services/windowd/windowd.c"])
+        self.assertIn("WINDOWD_RING3_IPC_OK",
+                      self.contents["userland/tests/windowd-process-probe.c"])
+        self.assertEqual(self.check(), [])
+
+    def test_windowd_service_deleted_is_blocked(self):
+        errors = self.check({"userland/services/windowd/windowd.c": None})
+        self.assertIn("CRITICAL_MISSING:userland/services/windowd/windowd.c", errors)
+
+    def test_windowd_probe_deleted_is_blocked(self):
+        errors = self.check({"userland/tests/windowd-process-probe.c": None})
+        self.assertIn("CRITICAL_MISSING:userland/tests/windowd-process-probe.c", errors)
+
+    def test_windowd_service_contract_removed_is_blocked(self):
+        service = self.contents["userland/services/windowd/windowd.c"]
+        errors = self.check({"userland/services/windowd/windowd.c":
+                             service.replace("wd_apply(", "wd_applied(")})
+        self.assertIn("CONTRACT_REMOVED:userland/services/windowd/windowd.c:wd_apply(", errors)
+
+    def test_windowd_probe_contract_removed_is_blocked(self):
+        probe = self.contents["userland/tests/windowd-process-probe.c"]
+        errors = self.check({"userland/tests/windowd-process-probe.c":
+                             probe.replace("WINDOWD_RING3_IPC_OK", "WINDOWD_RING3_IPC_BROKEN")})
+        self.assertIn("CONTRACT_REMOVED:userland/tests/windowd-process-probe.c:WINDOWD_RING3_IPC_OK",
+                      errors)
 
     def test_removing_postcommit_readback_fails(self):
         path = "tools/ci/run_ab_rollback.sh"
