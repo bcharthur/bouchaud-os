@@ -17,7 +17,7 @@ enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 #define WD_SUPERVISOR ((wd_u32)0xffffffffU)
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17, WD_QUERY_FOCUSED=18, WD_CONFIGURE=19
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17, WD_QUERY_FOCUSED=18, WD_CONFIGURE=19, WD_CLOSE_PRINCIPAL=20
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -181,6 +181,25 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         r.verdict=WD_OK;
         r.id=w->id;
         wd_report(&r,s,w);
+        return r;
+    }
+    if (q->operation==WD_CLOSE_PRINCIPAL) {
+        /* The trusted supervisor can reap windows after an application crash.
+         * q->id is the authenticated principal assigned to that app's channel,
+         * never a window id. Ordinary clients cannot revoke other owners. */
+        if (principal!=WD_SUPERVISOR) { r.verdict=WD_DENIED; return r; }
+        if (q->id==0 || q->id==WD_SUPERVISOR ||
+            q->x || q->y || q->width || q->height) return r;
+        for (i=0; i<WD_MAX_WINDOWS; ++i) {
+            if (s->windows[i].alive && s->windows[i].owner==q->id) {
+                wd_forget_focus(s,s->windows[i].id);
+                s->windows[i].alive=0;
+            }
+        }
+        if (!wd_find(s,s->focus_id))
+            s->focus_id=s->focus_count ? s->focus_history[s->focus_count-1] : 0;
+        r.verdict=WD_OK;
+        wd_report(&r,s,0);
         return r;
     }
     if (q->operation==WD_SCREEN_RESIZE) {
