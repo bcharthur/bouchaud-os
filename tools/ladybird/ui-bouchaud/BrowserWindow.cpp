@@ -85,6 +85,14 @@ void BrowserWindow::demarre(URL::URL const& url_initiale)
         m_viewport = Web::DevicePixelSize { BouchaudChrome::state().surface_width, BouchaudChrome::viewport_height() };
     }
     branche_chrome();
+    // BOUCHAUD_ATELIER_LADYBIRD_V10: chrome-first, without faking page load.
+    // The browser shell may appear before DNS/font/renderer initialization.
+    // A failed first composition does not block the normal event loop.
+    if (BouchaudChrome::enabled()) {
+        BouchaudChrome::request_chrome_frame();
+        BouchaudChrome::compose_full();
+        warnln("BOUCHAUD_LADYBIRD_V10_EARLY_CHROME t_ms={}", MonotonicTime::now().milliseconds());
+    }
 
     if (getenv("BOUCHAUD_LB_MEMORY_PROOF") || getenv("BOUCHAUD_LB_LIFECYCLE_PROOF")) {
         m_preuves_tic = Core::Timer::create_repeating(1000, [this] {
@@ -114,31 +122,33 @@ void BrowserWindow::demarre(URL::URL const& url_initiale)
         m_preuves_tic->start();
     }
 
+    // BOUCHAUD_ATELIER_LADYBIRD_V11 : connecter le chrome AVANT d'engager
+    // la navigation et les creations de services. Aucun chargement n'est
+    // simule : on rend l'interface interactive le plus tot possible.
+    if (BouchaudChrome::enabled()) {
+        auto const fd = BouchaudChrome::state().gui_fd;
+        if (fd >= 0) {
+            m_notificateur_gui = Core::Notifier::construct(fd, Core::Notifier::Type::Read);
+            m_notificateur_gui->on_activation = [] {
+                BouchaudChrome::drain();
+            };
+        }
+        // Cadence des transitions du chrome seulement, jamais un repaint Web.
+        m_tic = Core::Timer::create_repeating(16, [] {
+            BouchaudChrome::tick();
+        });
+        m_tic->start();
+        warnln("[LB:UI] canal_gui=notifier tic_ms=16");
+    }
+
     auto const premier = ouvre_onglet(url_initiale, true, true);
     warnln("[LB:UI] premier_onglet={} viewport={}x{} url={}", premier,
         m_viewport.width().value(), m_viewport.height().value(), url_initiale);
-
+    warnln("BOUCHAUD_ATELIER_LADYBIRD_V11 browser_launch_async=1");
     if (!BouchaudChrome::enabled()) {
         warnln("[LB:UI] sans_fenetre=1 raison=BO_GUI_FD/BO_SURFACE_FD absents");
         return;
     }
-
-    auto const fd = BouchaudChrome::state().gui_fd;
-    if (fd >= 0) {
-        m_notificateur_gui = Core::Notifier::construct(fd, Core::Notifier::Type::Read);
-        m_notificateur_gui->on_activation = [] {
-            BouchaudChrome::drain();
-        };
-    }
-
-    // 16 ms : la cadence du bureau (`docs/GUI_USERLAND_PROTOCOL.md` §7). Ce
-    // minuteur lit les entrees en retard et recompose le CHROME quand il a
-    // change ; il ne demande jamais de trame de page.
-    m_tic = Core::Timer::create_repeating(16, [] {
-        BouchaudChrome::tick();
-    });
-    m_tic->start();
-    warnln("[LB:UI] canal_gui=notifier tic_ms=16");
 }
 
 u64 BrowserWindow::ouvre_onglet(URL::URL const& url, bool activer, bool annonce_au_chrome)

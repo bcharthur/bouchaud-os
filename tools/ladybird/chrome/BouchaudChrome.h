@@ -132,10 +132,11 @@ namespace BouchaudChrome {
 /// valeurs se lisent au meme endroit pour qu'un clic tombe la ou la page a ete
 /// peinte : `page_origin_y()` est la seule conversion, et elle est utilisee
 /// aussi bien par la composition que par le routage des entrees.
-inline constexpr int toolbar_height = 36;
+// BOUCHAUD_ATELIER_LADYBIRD_V10: chrome natif sur la palette Atelier.
+inline constexpr int toolbar_height = 42;
 
 inline constexpr int button_width = 30;
-inline constexpr int button_height = 24;
+inline constexpr int button_height = 30;
 inline constexpr int button_top = 6;
 inline constexpr int button_gap = 4;
 inline constexpr int margin = 6;
@@ -151,7 +152,7 @@ inline constexpr int margin = 6;
 // continue de trouver ses ancres au mot pres. Au-dessus, il aurait fallu
 // decaler chaque `button_top`, chaque `fill_rect`, et la modernisation aurait
 // echoue au milieu de la construction, vingt minutes plus tard.
-inline constexpr int onglets_hauteur = 30;
+inline constexpr int onglets_hauteur = 34;
 /// Largeurs d'un onglet : il retrecit quand il y en a beaucoup, jusqu'a un
 /// point ou il ne montrerait plus rien de lisible.
 inline constexpr int onglet_largeur_max = 200;
@@ -165,19 +166,19 @@ inline constexpr size_t onglets_max = 12;
 inline constexpr int page_origin_y() { return toolbar_height + onglets_hauteur; }
 
 // Couleurs XRGB8888 (l'octet de poids fort est ignore par le compositeur).
-inline constexpr u32 color_toolbar = 0x00'23'27'2b;
-inline constexpr u32 color_toolbar_edge = 0x00'11'13'15;
-inline constexpr u32 color_button = 0x00'3a'40'46;
-inline constexpr u32 color_button_off = 0x00'2b'2f'34;
+inline constexpr u32 color_toolbar = 0x00'ec'ec'f9;
+inline constexpr u32 color_toolbar_edge = 0x00'ce'd0'e9;
+inline constexpr u32 color_button = 0x00'fa'fa'ff;
+inline constexpr u32 color_button_off = 0x00'dc'df'f1;
 inline constexpr u32 color_field = 0x00'ff'ff'ff;
-inline constexpr u32 color_field_idle = 0x00'e3'e6'ea;
-inline constexpr u32 color_field_text = 0x00'16'1a'1e;
+inline constexpr u32 color_field_idle = 0x00'f6'f7'fd;
+inline constexpr u32 color_field_text = 0x00'2d'35'53;
 // Selection du champ d'adresse : bleu pale, texte inchange. C'est la convention
 // des champs clairs, et cela evite de dependre de la couleur du texte -- que
 // `tools/ladybird/chrome/modernise-v15.py` reecrit pour passer au rendu Skia.
-inline constexpr u32 color_field_selection = 0x00'ac'ce'f7;
-inline constexpr u32 color_glyph = 0x00'e8'ea'ed;
-inline constexpr u32 color_glyph_off = 0x00'6b'71'78;
+inline constexpr u32 color_field_selection = 0x00'cc'd5'ff;
+inline constexpr u32 color_glyph = 0x00'33'3c'64;
+inline constexpr u32 color_glyph_off = 0x00'88'90'b2;
 inline constexpr u32 color_secure = 0x00'1e'8e'3e;
 inline constexpr u32 color_insecure = 0x00'c5'39'29;
 inline constexpr u32 color_page_backdrop = 0x00'ff'ff'ff;
@@ -185,9 +186,30 @@ inline constexpr u32 color_page_backdrop = 0x00'ff'ff'ff;
 inline constexpr u32 color_favori = 0x00'f5'a6'23;
 
 // BOUCHAUD_CHROME_V19_CALQUES : les surfaces flottantes.
-inline constexpr u32 color_calque_fond = 0x00'23'27'2b;
-inline constexpr u32 color_calque_bord = 0x00'11'13'15;
-inline constexpr u32 color_calque_texte = 0x00'e8'ea'ed;
+inline constexpr u32 color_calque_fond = 0x00'ec'ec'f9;
+inline constexpr u32 color_calque_bord = 0x00'ce'd0'e9;
+inline constexpr u32 color_calque_texte = 0x00'33'3c'64;
+
+// BOUCHAUD_ATELIER_LADYBIRD_V12_DRAW: chrome natif, meme langage visuel qu'Atelier.
+// Tons de verre clair composes sur la surface XRGB; pas de faux flou du WebContent.
+inline constexpr u32 ui_atelier_base         = 0x00f2f2fd;
+inline constexpr u32 ui_atelier_lumiere      = 0x00faf9ff;
+inline constexpr u32 ui_atelier_separation   = 0x00c9cce8;
+inline constexpr u32 ui_atelier_strip        = 0x00e1e3f5;
+inline constexpr u32 ui_atelier_strip_line   = 0x00cdd0e8;
+inline constexpr u32 ui_atelier_accent       = 0x00776cf1;
+inline constexpr u32 ui_atelier_accent_doux  = 0x00bdb6ff;
+inline constexpr u32 ui_field_border         = 0x00cacde5;
+inline constexpr u32 ui_field_border_focus   = 0x008780f4;
+inline constexpr u32 ui_field_surface        = 0x00fbfbff;
+inline constexpr u32 ui_tab_active           = 0x00ffffff;
+inline constexpr u32 ui_tab_inactive         = 0x00e7e9f7;
+inline constexpr u32 ui_tab_border           = 0x00c7c9e5;
+inline constexpr u32 ui_tab_text             = 0x002b3153;
+inline constexpr u32 ui_tab_text_inactive    = 0x006f789b;
+inline constexpr u32 ui_icon_tile            = 0x00d9d7fa;
+inline constexpr u32 ui_action_hover         = 0x00e1ddfe;
+
 
 /// Hauteur d'une ligne de texte d'interface, celle que Skia recoit en V15.
 inline constexpr int ui_text_height = 22;
@@ -735,6 +757,13 @@ struct State {
     unsigned last_buttons { 0 };
     int last_x { 0 };
     int last_y { -1 };
+    // V10: six-step animation, only the native chrome needs repainting.
+    int hover_luminance[3] { 0, 0, 0 };
+    // V12 : seulement le chrome change pendant les transitions (six tics).
+    int tab_hover_luminance[onglets_max] {};
+    int hover_plus_luminance { 0 };
+    int hover_favori_luminance { 0 };
+    int hover_close_rang { -1 };
     bool pointer_in_page { false };
 
     // Cadrage du flux entrant : un message n'est analyse qu'entier.
@@ -1321,6 +1350,23 @@ inline void fill_rect(Canvas const& canvas, int x, int y, int w, int h, u32 colo
     }
 }
 
+// A light, clipped, allocation-free rounded card. Colors follow the Atelier palette.
+inline void fill_round_rect(Canvas const& canvas, int x, int y, int w, int h, int radius, u32 color)
+{
+    if (w <= 0 || h <= 0) return;
+    int const r = min(radius, min(w / 2, h / 2));
+    if (r <= 0) { fill_rect(canvas, x, y, w, h, color); return; }
+    for (int dy = 0; dy < h; ++dy) {
+        int corner_y = dy < r ? r - dy - 1 : (dy >= h - r ? dy - (h - r) : -1);
+        int cut = 0;
+        if (corner_y >= 0) {
+            while (cut < r && (r - cut - 1) * (r - cut - 1) + corner_y * corner_y >= r * r)
+                ++cut;
+        }
+        fill_rect(canvas, x + cut, y + dy, w - cut * 2, 1, color);
+    }
+}
+
 // BOUCHAUD_CHROME_ATLAS_V1
 //
 // # Ce que le texte du chrome etait
@@ -1560,7 +1606,7 @@ inline BouchaudDegat::Rect boite_favori()
         return {};
     // A gauche de la pastille d'etat que la modernisation V15 pose au bout du
     // champ : deux marqueurs au meme endroit se recouvriraient.
-    return { address_field_x() + largeur - 30, button_top + 7, 9, 9 };
+    return { address_field_x() + largeur - 32, button_top + 3, 24, 24 };
 }
 
 /// Declaree ici, definie avec le reste du magasin.
@@ -1576,11 +1622,14 @@ inline void draw_favori(Canvas const& canvas)
     auto const boite = boite_favori();
     if (boite.vide())
         return;
-    auto const couleur = est_favori(state().committed_url) ? color_favori : color_glyph_off;
+    auto& s = state();
+    if (s.hover_favori_luminance > 0)
+        fill_round_rect(canvas, boite.x, boite.y, boite.w, boite.h, 9, ui_action_hover);
+    auto const couleur = est_favori(s.committed_url) ? color_favori : color_glyph_off;
     for (int ligne = 0; ligne < 9; ++ligne) {
         for (int colonne = 0; colonne < 9; ++colonne) {
             if ((masque_etoile[ligne] >> (8 - colonne)) & 1u)
-                fill_rect(canvas, boite.x + colonne, boite.y + ligne, 1, 1, couleur);
+                fill_rect(canvas, boite.x + 7 + colonne, boite.y + 7 + ligne, 1, 1, couleur);
         }
     }
 }
@@ -1739,7 +1788,7 @@ inline BouchaudDegat::Rect boite_fermeture_onglet(int rang)
     // et il reste Ctrl+W -- et le clic du milieu, que ce chrome n'a pas encore.
     if (onglet.vide() || onglet.w < onglet_largeur_min + 24)
         return {};
-    return { onglet.x + onglet.w - 22, onglet.y + (onglets_hauteur - 12) / 2, 12, 12 };
+    return { onglet.x + onglet.w - 26, onglet.y + (onglets_hauteur - 20) / 2, 20, 20 };
 }
 
 inline BouchaudDegat::Rect boite_nouvel_onglet()
@@ -1766,10 +1815,11 @@ inline void draw_croix(Canvas const& canvas, BouchaudDegat::Rect boite, u32 coul
 {
     if (boite.vide())
         return;
-    auto const cote = min(boite.w, boite.h);
-    for (int index = 3; index < cote - 3; ++index) {
-        fill_rect(canvas, boite.x + index, boite.y + index, 1, 1, couleur);
-        fill_rect(canvas, boite.x + cote - 1 - index, boite.y + index, 1, 1, couleur);
+    auto const cx = boite.x + boite.w / 2;
+    auto const cy = boite.y + boite.h / 2;
+    for (int dx = -4; dx <= 4; ++dx) {
+        fill_rect(canvas, cx + dx, cy + dx, 1, 1, couleur);
+        fill_rect(canvas, cx + dx, cy - dx, 1, 1, couleur);
     }
 }
 
@@ -1777,8 +1827,10 @@ inline void draw_onglets(Canvas const& canvas)
 {
     auto& s = state();
     auto const haut = toolbar_height;
-    fill_rect(canvas, 0, haut, canvas.width, onglets_hauteur, color_toolbar);
-    fill_rect(canvas, 0, haut + onglets_hauteur - 1, canvas.width, 1, color_toolbar_edge);
+    // Bande de verre satine : les onglets sont des cartes flottantes.
+    fill_rect(canvas, 0, haut, canvas.width, onglets_hauteur, ui_atelier_strip);
+    fill_rect(canvas, 0, haut, canvas.width, 1, ui_atelier_lumiere);
+    fill_rect(canvas, 0, haut + onglets_hauteur - 1, canvas.width, 1, ui_atelier_strip_line);
 
     auto const actif = rang_actif();
     for (size_t rang = 0; rang < s.onglets.size(); ++rang) {
@@ -1787,18 +1839,23 @@ inline void draw_onglets(Canvas const& canvas)
             continue;
 
         auto const est_actif = rang == actif;
-        fill_rect(canvas, boite.x, boite.y + 2, boite.w - 2, boite.h - 2,
-            est_actif ? color_button : color_button_off);
-        if (est_actif) {
-            // Un trait clair sur l'arete haute : c'est ce qui distingue
-            // l'onglet actif au premier coup d'oeil, meme en vision
-            // peripherique, la ou deux gris proches ne se distinguent pas.
-            fill_rect(canvas, boite.x + 1, boite.y + 7, 2, boite.h - 12, color_glyph); // onglet actif, PAS une seconde barre de chargement
-        }
+        // Le survol change progressivement la teinte, jamais le titre ni le rang.
+        static constexpr u32 tab_hover[7] = {
+            ui_tab_inactive, 0x00eaeafa, 0x00edecfc, 0x00f0effd,
+            0x00f3f2ff, 0x00f6f5ff, 0x00f9f8ff
+        };
+        auto const niveau = clamp(s.tab_hover_luminance[rang], 0, 6);
+        auto const face = est_actif ? ui_tab_active : tab_hover[niveau];
+        fill_round_rect(canvas, boite.x + 2, boite.y + 3, boite.w - 4, boite.h - 5,
+            11, est_actif ? ui_tab_border : ui_atelier_strip_line);
+        fill_round_rect(canvas, boite.x + 3, boite.y + 4, boite.w - 6, boite.h - 7,
+            10, face);
+        if (est_actif)
+            fill_rect(canvas, boite.x + 14, boite.y + 4, max(0, boite.w - 28), 2, ui_atelier_accent_doux);
 
         auto const fermeture = boite_fermeture_onglet(static_cast<int>(rang));
         auto const reserve = fermeture.vide() ? calque_marge : (fermeture.w + 2 * calque_marge);
-        auto const largeur_texte = boite.w - calque_marge - reserve - 12;
+        auto const largeur_texte = boite.w - calque_marge - reserve - 28;
         if (largeur_texte > 0) {
             auto const& onglet = s.onglets[rang];
             // Le TITRE si le document en a un, l'adresse sinon : une page qui
@@ -1813,23 +1870,31 @@ inline void draw_onglets(Canvas const& canvas)
             auto const titre = est_actif ? s.title : onglet.titre;
             auto const adresse = est_actif ? s.committed_url : onglet.url;
             auto const libelle = titre.is_empty() ? adresse : titre;
-            // Un petit point remplace la deuxieme barre : un signal par onglet.
+            // Identite legere de l'onglet, sans fausse favicon de site.
+            fill_round_rect(canvas, boite.x + 10, boite.y + 10, 15, 15, 6, ui_icon_tile);
             if (onglet.chargement.actif()) {
                 auto const couleur = (onglet.chargement.signale_rafale(s.chargement_horloge)
-                    || onglet.chargement.lent(s.chargement_horloge)) ? 0x00f59e0bu : 0x003b82f6u;
+                    || onglet.chargement.lent(s.chargement_horloge)) ? 0x00e8a03au : ui_atelier_accent;
                 if ((s.chargement_horloge / 16) % 2 == 0)
-                    fill_rect(canvas, boite.x + 7, boite.y + 13, 5, 5, couleur);
+                    fill_round_rect(canvas, boite.x + 15, boite.y + 15, 5, 5, 2, couleur);
+            } else {
+                fill_round_rect(canvas, boite.x + 15, boite.y + 15, 5, 5, 2,
+                    est_actif ? ui_atelier_accent : ui_tab_text_inactive);
             }
-            draw_ui_text(canvas, boite.x + calque_marge + 12,
+            draw_ui_text(canvas, boite.x + calque_marge + 28,
                 boite.y + (onglets_hauteur - ui_text_height) / 2 + 1,
-                libelle.view(), est_actif ? color_glyph : color_glyph_off, largeur_texte);
+                libelle.view(), est_actif ? ui_tab_text : ui_tab_text_inactive, largeur_texte);
         }
-        draw_croix(canvas, fermeture, est_actif ? color_glyph : color_glyph_off);
+        if (!fermeture.vide() && s.hover_close_rang == static_cast<int>(rang))
+            fill_round_rect(canvas, fermeture.x, fermeture.y, fermeture.w,
+                fermeture.h, 8, ui_action_hover);
+        draw_croix(canvas, fermeture, est_actif ? ui_tab_text : ui_tab_text_inactive);
     }
 
     auto const plus = boite_nouvel_onglet();
     if (!plus.vide()) {
-        fill_rect(canvas, plus.x, plus.y + 2, plus.w, plus.h - 2, color_button_off);
+        fill_round_rect(canvas, plus.x, plus.y + 3, plus.w, plus.h - 5, 9,
+            s.hover_plus_luminance > 0 ? ui_action_hover : ui_tab_inactive);
         auto const centre_x = plus.x + plus.w / 2;
         auto const centre_y = plus.y + onglets_hauteur / 2;
         fill_rect(canvas, centre_x - 5, centre_y, 11, 1, color_glyph);
@@ -1841,12 +1906,21 @@ inline void draw_toolbar(Canvas const& canvas)
 {
     auto& s = state();
 
-    fill_rect(canvas, 0, 0, canvas.width, toolbar_height, color_toolbar);
-    fill_rect(canvas, 0, toolbar_height - 1, canvas.width, 1, color_toolbar_edge);
+    // Verre clair Atelier, sans composition ni allocation hors de la barre.
+    fill_rect(canvas, 0, 0, canvas.width, toolbar_height, ui_atelier_base);
+    fill_rect(canvas, 0, 0, canvas.width, toolbar_height / 2, ui_atelier_lumiere);
+    fill_rect(canvas, 0, 0, canvas.width, 1, 0x00ffffffu);
+    fill_rect(canvas, 0, toolbar_height - 1, canvas.width, 1, ui_atelier_separation);
 
     auto draw_button = [&](Button const& button, bool active) {
-        fill_rect(canvas, button.x, button_top, button.width, button_height,
-            active ? color_button : color_button_off);
+        auto const rang = button.x == back_button().x ? 0 : (button.x == forward_button().x ? 1 : 2);
+        auto const eclat = s.hover_luminance[rang];
+        static constexpr u32 couleurs[7] = {
+            ui_atelier_base, 0x00eeedff, 0x00e9e7ff, 0x00e4e0ff,
+            0x00ded9ff, 0x00d8d1ff, ui_action_hover,
+        };
+        fill_round_rect(canvas, button.x, button_top, button.width, button_height,
+            10, active ? couleurs[clamp(eclat, 0, 6)] : ui_atelier_base);
         auto icon_x = button.x + (button.width - BouchaudChromeV15Assets::ICON_SIZE) / 2;
         auto icon_y = button_top + (button_height - BouchaudChromeV15Assets::ICON_SIZE) / 2;
         auto const* icon = BouchaudChromeV15Assets::BACK;
@@ -1866,17 +1940,25 @@ inline void draw_toolbar(Canvas const& canvas)
 
     auto field_x = address_field_x();
     auto field_w = address_field_width();
-    fill_rect(canvas, field_x, button_top, field_w, button_height,
-        s.address_focused ? color_field : color_field_idle);
+    // Anneau de focus lilas : la saisie reste distincte du simple survol.
+    fill_round_rect(canvas, field_x, button_top, field_w, button_height,
+        12, s.address_focused ? ui_field_border_focus : ui_field_border);
+    fill_round_rect(canvas, field_x + 1, button_top + 1, field_w - 2, button_height - 2,
+        11, ui_field_surface);
+    fill_rect(canvas, field_x + 13, button_top + 1, max(0, field_w - 26), 1,
+        0x00ffffffu);
 
     // Pastille de securite : verte pour https, rouge sinon. Elle ne prouve rien
     // de plus que le schema — la chaine, elle, est verifiee par RequestServer.
-    fill_rect(canvas, field_x + 4, button_top + 6, 4, button_height - 12,
+    // Ce point renseigne seulement le schema de l'URL (https/http),
+    // PAS la validite d'un certificat : elle appartient a RequestServer.
+    fill_round_rect(canvas, field_x + 9, button_top + 11, 8, 8, 4,
         s.secure ? color_secure : color_insecure);
 
-    auto text_x = field_x + 14;
+    auto text_x = field_x + 25;
     auto text_y = button_top + 3;
-    auto available = field_w - 20;
+    // Reserve une cible de favori de 24 px et sa marge a droite.
+    auto available = max(0, field_w - 65);
 
     StringBuilder builder;
     for (auto byte : s.address.texte)
@@ -1936,8 +2018,8 @@ inline void draw_toolbar(Canvas const& canvas)
     // suivante sans que rien ne le signale.
     if (s.address_focused && s.address.tout_selectionne && !visible.is_empty()) {
         auto largeur = min(text_width(visible.view(), 2), available);
-        fill_rect(canvas, text_x - 1, button_top + 3, largeur + 2, button_height - 6,
-            color_field_selection);
+        fill_round_rect(canvas, text_x - 1, button_top + 3, largeur + 2,
+            button_height - 6, 5, color_field_selection);
     }
 
     draw_ui_text(canvas, text_x, text_y, visible.view(), color_field_text, available);
@@ -1967,7 +2049,7 @@ inline void draw_toolbar(Canvas const& canvas)
             fill_rect(canvas, field_x + gauche, toolbar_height - 3,
                 droite - gauche, 2,
                 suivi.signale_rafale(s.chargement_horloge) || suivi.lent(s.chargement_horloge)
-                    ? 0x00f59e0bu : 0x003b82f6u);
+                    ? 0x00f59e0bu : ui_atelier_accent);
     } else if (field_w > 30 && suivi.affiche_fin(s.chargement_horloge)) {
         fill_rect(canvas, field_x, toolbar_height - 3, field_w, 2, 0x0022c55eu);
     }
@@ -4689,6 +4771,43 @@ inline void tick()
         s.degat_differe = {};
         compose_page(degat);
     }
+    // Native Atelier controls: 96 ms hover transitions, zero repaint when idle.
+    for (int index = 0; index < 3; ++index) {
+        int const px = index == 0 ? back_button().x :
+            (index == 1 ? forward_button().x : reload_button().x);
+        bool const in = s.last_y >= button_top && s.last_y < button_top + button_height
+            && s.last_x >= px && s.last_x < px + button_width;
+        int const destination = in ? 6 : 0;
+        if (s.hover_luminance[index] != destination) {
+            s.hover_luminance[index] += in ? 1 : -1;
+            request_chrome_frame();
+        }
+    }
+    // V12 : interactions d'onglets, croix, plus et favori, uniquement chrome.
+    int close_now = -1;
+    for (size_t rang = 0; rang < s.onglets.size() && rang < onglets_max; ++rang) {
+        auto const boite = boite_onglet(static_cast<int>(rang));
+        bool const in = BouchaudCalques::contient(boite, s.last_x, s.last_y);
+        int const cible = in ? 6 : 0;
+        int& niveau = s.tab_hover_luminance[rang];
+        if (niveau < cible) { ++niveau; request_chrome_frame(); }
+        else if (niveau > cible) { --niveau; request_chrome_frame(); }
+        if (BouchaudCalques::contient(boite_fermeture_onglet(static_cast<int>(rang)),
+                s.last_x, s.last_y))
+            close_now = static_cast<int>(rang);
+    }
+    if (close_now != s.hover_close_rang) {
+        s.hover_close_rang = close_now;
+        request_chrome_frame();
+    }
+    bool const over_plus = BouchaudCalques::contient(boite_nouvel_onglet(), s.last_x, s.last_y);
+    int const plus_target = over_plus ? 6 : 0;
+    if (s.hover_plus_luminance < plus_target) { ++s.hover_plus_luminance; request_chrome_frame(); }
+    else if (s.hover_plus_luminance > plus_target) { --s.hover_plus_luminance; request_chrome_frame(); }
+    bool const over_star = BouchaudCalques::contient(boite_favori(), s.last_x, s.last_y);
+    int const star_target = over_star ? 6 : 0;
+    if (s.hover_favori_luminance < star_target) { ++s.hover_favori_luminance; request_chrome_frame(); }
+    else if (s.hover_favori_luminance > star_target) { --s.hover_favori_luminance; request_chrome_frame(); }
     ++s.chargement_horloge; // horloge GUI, aucun repaint de page force
     auto const* actif = onglet_de_la_page(page_active());
     auto const& suivi = actif ? actif->chargement : s.chargement_initial;

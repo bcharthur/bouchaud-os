@@ -192,7 +192,8 @@ ErrorOr<int> ladybird_main(Main::Arguments)
 
     auto const largeur = env_dimension("BO_SURFACE_WIDTH", 1100);
     auto const hauteur = env_dimension("BO_SURFACE_HEIGHT", 604);
-    char const* url = env_ou("BOUCHAUD_M9_URL", "https://example.com/");
+    // BOUCHAUD_ATELIER_LADYBIRD_V11: page de depart Google, URL modifiable.
+    char const* url = env_ou("BOUCHAUD_M9_URL", "https://www.google.com/");
     char const* dns = env_ou("BOUCHAUD_DNS_SERVER", "10.0.2.3");
     // Le chrome vit dans ce processus : aucun WebContent ne touche la
     // fenetre, et un echange de processus a la navigation inter-sites est
