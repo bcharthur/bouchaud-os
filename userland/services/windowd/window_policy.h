@@ -17,7 +17,7 @@ enum { WD_VERSION=1, WD_MAX_WINDOWS=16 };
 #define WD_SUPERVISOR ((wd_u32)0xffffffffU)
 enum wd_operation {
     WD_OPEN=1, WD_MOVE=2, WD_RESIZE=3, WD_FOCUS=4, WD_CLOSE=5,
-    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17, WD_QUERY_FOCUSED=18
+    WD_QUERY=6, WD_SHUTDOWN=7, WD_FOCUS_NEXT=8, WD_CLOSE_OWNED=9, WD_MINIMIZE=10, WD_RESTORE=11, WD_MAXIMIZE=12, WD_UNMAXIMIZE=13, WD_SCREEN_RESIZE=14, WD_NEXT_VISIBLE=15, WD_HIT_TEST=16, WD_ACTIVATE_AT=17, WD_QUERY_FOCUSED=18, WD_CONFIGURE=19
 };
 enum wd_verdict {
     WD_OK=0, WD_INVALID=1, WD_NOT_FOUND=2, WD_DENIED=3, WD_NO_SLOTS=4
@@ -258,6 +258,7 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         if (!w) { r.verdict=WD_NOT_FOUND; return r; }
         wd_set_focus(s,w->id);
     } else if (q->operation==WD_MOVE || q->operation==WD_RESIZE ||
+               q->operation==WD_CONFIGURE ||
                q->operation==WD_FOCUS || q->operation==WD_CLOSE ||
                q->operation==WD_QUERY || q->operation==WD_MINIMIZE ||
                q->operation==WD_RESTORE || q->operation==WD_MAXIMIZE ||
@@ -269,7 +270,15 @@ static inline struct wd_reply wd_apply(struct wd_state *s, wd_u32 principal,
         if (principal!=WD_SUPERVISOR && w->owner!=principal) {
             r.verdict=WD_DENIED; return r;
         }
-        if (q->operation==WD_MOVE) {
+        if (q->operation==WD_CONFIGURE) {
+            /* Atomic geometry update for a compositor drag/resize: validate
+             * the whole rectangle before changing any window state. */
+            if (w->maximized || !q->width || !q->height ||
+                q->width>s->screen_width || q->height>s->screen_height) return r;
+            w->width=q->width; w->height=q->height;
+            w->x=wd_clamp(q->x,w->width,s->screen_width);
+            w->y=wd_clamp(q->y,w->height,s->screen_height);
+        } else if (q->operation==WD_MOVE) {
             if (w->maximized) return r;
             w->x=wd_clamp(q->x,w->width,s->screen_width);
             w->y=wd_clamp(q->y,w->height,s->screen_height);
