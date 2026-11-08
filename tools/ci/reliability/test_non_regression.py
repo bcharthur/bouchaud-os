@@ -16,7 +16,9 @@ class TestNonRegression(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contents = {}
-        reader = gate.read_tree(ROOT)
+        # Utiliser l'arbre reel comme source : les gardes conditionnels peuvent
+        # exiger de nouveaux fichiers sans mise a jour manuelle du fixture.
+        cls.reader = gate.read_tree(ROOT)
         for path in (
             "tools/ci/run_ab_rollback.sh", "src/gui/atelier/mod.rs",
             "src/gui/atelier/session.rs", "tools/gui/test_session.rs",
@@ -27,12 +29,18 @@ class TestNonRegression(unittest.TestCase):
             "userland/tests/windowd-process-probe.c",
             *gate.CHECKED_WORKFLOWS,
         ):
-            cls.contents[path] = reader(path)
+            cls.contents[path] = cls.reader(path)
 
     def check(self, changed=None):
-        files = self.contents.copy()
-        files.update(changed or {})
-        return gate.validate_contracts(files.get)
+        # Les mutations explicites (y compris None = fichier supprime) priment
+        # sur l'arbre reel. Pour les autres fichiers, ne jamais simuler
+        # artificiellement leur absence a cause d'un fixture incomplet.
+        changed = changed or {}
+        def read(path):
+            if path in changed:
+                return changed[path]
+            return self.reader(path)
+        return gate.validate_contracts(read)
 
     def test_live_tree_has_no_missing_guards(self):
         self.assertEqual(self.check(), [])
