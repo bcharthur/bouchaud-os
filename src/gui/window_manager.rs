@@ -625,7 +625,7 @@ fn boucle() {
     degats.tout(); // premier tour : rien n'est encore a l'ecran
 
     // BOUCHAUD_ATELIER_TERMINAL_BOOT_V15: session normale sans Terminal impose.
-    // Les bancs explicitement armes gardent leur chemin historique make_app(0).
+    // Les bancs M8 explicitement armes gardent leur point de lancement initial.
     let lancement_explicite = crate::shell::exported().iter().any(|entree| {
         entree == "BO_AUTOSTART_BROWSER=1" || entree == "BO_AUTOSTART_SERVICES=1"
     });
@@ -633,6 +633,7 @@ fn boucle() {
         "BOUCHAUD_ATELIER_TERMINAL_BOOT_V15 terminal_auto=0 lancement_explicite={}",
         lancement_explicite as u8
     );
+    #[cfg(not(feature = "reference-desktop"))]
     if lancement_explicite {
         let fenetre = make_app(0, home, &mut spawn_n);
         ouvre_fenetre(&mut wins, fenetre, &mut degats);

@@ -1,0 +1,90 @@
+name: Ladybird launcher selector V7
+on:
+  push:
+    branches: [fix/ladybird-run-artifact-validated-20261108]
+  pull_request:
+    paths:
+      - run.ps1
+      - tools/run/ladybird-artifact.ps1
+      - tools/ci/test-ladybird-selector-v7.ps1
+      - .github/workflows/ladybird-run-selector-v7.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  windows-powershell-51:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('run.ps1','tools/run/ladybird-artifact.ps1','tools/ci/test-ladybird-selector-v7.ps1')) {
+            $tok = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tok,[ref]$errors)
+            if (@($errors).Count) { throw "PowerShell parser $path : $errors" }
+          }
+      - name: Offline selectors Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          & .\tools\ci\test-ladybird-selector-v7.ps1 -RepoRoot $PWD.Path
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Existing selector regression tests
+        shell: powershell
+        run: |
+          & .\tools\ci\test-selection-artefact.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Existing static artifact contract
+        shell: powershell
+        run: |
+          python tools/verifie-artefact-navigateur.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  live-github-selection:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Query genuine first-party artifact runs without downloading
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\tools\run\ladybird-artifact.ps1
+          $fp = Get-BoFingerprint -Root $PWD.Path -Revision 'HEAD'
+          if (-not $fp) { throw 'Cannot derive current Ladybird build fingerprint' }
+          Write-Host ('BUILD_FINGERPRINT='+$fp)
+          $matched = @(Get-BoCompatibleRuns -Root $PWD.Path -Fingerprint $fp -ArtifactName 'bouchaud-ladybird-native-browser')
+          Write-Host ('REAL_MATCH_COUNT='+$matched.Count)
+          foreach ($m in $matched) { Write-Host ('REAL_MATCH run='+$m.RunId+' sha='+$m.HeadSha) }
+          Write-Host 'REAL_API_QUERY_OK'
+
+  windows-real-download:
+    needs: [windows-powershell-51, live-github-selection]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download, unpack and verify genuine Ladybird build
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\tools\run\ladybird-artifact.ps1
+          $target = Join-Path $env:RUNNER_TEMP 'bouchaud-ladybird-v7-verified'
+          $required = @('BouchaudBrowserHost','WebContent','RequestServer','ImageDecoder',
+                        'Compositor','WebWorker','WebDriver','webcontent-bootstrap',
+                        'M9_CAPABLE','V16_UI_CAPABLE','V19_UI_CAPABLE')
+          Use-BoLadybirdArtifact -RepoRoot $PWD.Path -TargetDir $target -RequiredFiles $required -ArtifactName 'bouchaud-ladybird-native-browser'
+          if (-not (Test-BoArtifact -Root $PWD.Path -Directory $target -RequiredFiles $required)) {
+            throw 'Downloaded artifact did not pass hash, ELF and fingerprint verification'
+          }
+          Write-Host 'LADYBIRD_REAL_DOWNLOAD_VERIFIED_OK'
