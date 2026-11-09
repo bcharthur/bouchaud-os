@@ -155,6 +155,24 @@ mod tests {
         assert_eq!(get(&bytes[88..176],13),11);
         assert_eq!(get(&bytes[176..264],13),12);
     }
+    #[test] fn quatre_fenetres_composables_en_un_paquet() {
+        let calques = [
+            Calque { source: r(0xB120), cible: r(40), alpha_premultiplie: false },
+            Calque { source: r(0xB121), cible: r(40), alpha_premultiplie: false },
+            Calque { source: r(0xB122), cible: r(40), alpha_premultiplie: false },
+            Calque { source: r(0xB123), cible: r(40), alpha_premultiplie: false },
+        ];
+        let mut bytes = [0xCCu8; MAX_COMMAND_BYTES];
+        let n = encode_scene(&calques, &mut bytes).unwrap();
+        assert_eq!(n, 4 * VIRGL_BLIT_BYTES);
+        for (i, c) in calques.iter().enumerate() {
+            let paquet = &bytes[i * VIRGL_BLIT_BYTES..(i + 1) * VIRGL_BLIT_BYTES];
+            assert_eq!(get(paquet, 0), VIRGL_CCMD_BLIT | (21 << 16));
+            assert_eq!(get(paquet, 13), c.source.ressource);
+            assert_eq!(get(paquet, 4), c.cible.ressource);
+        }
+        assert_eq!(bytes[n], 0xCC);
+    }
     #[test] fn aucune_ecriture_sur_scene_invalide() {
         let mut buf=[0xAB;MAX_COMMAND_BYTES];
         let bad=[Calque{source:r(1),cible:r(2),alpha_premultiplie:false},

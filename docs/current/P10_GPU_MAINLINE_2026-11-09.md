@@ -28,3 +28,11 @@ cd "C:\Users\Arthur\RustroverProjects\bouchaud-os-p10-mainline"
 ```
 
 `-P10GPU` construit le noyau avec `p10-universal-present,p10-virgl-experimental` puis exige un QEMU avec `virtio-gpu-gl-pci` et sortie OpenGL. Le lancement sans `-P10GPU` ne modifie pas le comportement 2D. Vérifier les logs `P10_GPU_3D_OK`, `P10_GPU_CLIENT_BLIT_OK couches=2..`, les pixels, la fluidité et les refus du GPU avant qualification.
+
+## P10 — soumission groupée de quatre textures (9 novembre 2026)
+
+Les sources de `p10_window_gpu.rs` exposent un pool borné de quatre identifiants de ressources VIRGL privés. Chaque emplacement de fenêtre possède un backing DMA 3D réutilisable. Le pilote transfère chaque surface sur **sa texture distincte**, encode ensuite la scène ordonnée et n'émet qu'**un seul `SUBMIT_3D`** pour les BLIT des fenêtres, puis un seul flush. L'ancien chemin réutilisait la même texture et imposait un `SUBMIT_3D` par fenêtre afin d'éviter les lectures écrasées.
+
+Tests hôte : allocation et bornage des quatre identifiants, paquet 4 BLIT correctement ordonné, rejet complet d'une scène invalide. CI Fast compile le noyau avec `p10-universal-present,p10-virgl-experimental` ; les tests de transport DMA P10+.2 sont conservés. Les gains de temps et la visibilité des pixels attendent des mesures QEMU sur ce commit.
+
+**Consommation mémoire** : jusqu'à 4 backings DMA de la taille du scanout peuvent rester alloués pendant la session graphique, contre un backing auparavant. C'est un compromis explicite entre mémoire GPU et nombre de soumissions 3D ; ce pool n'est pas exposé aux processus ring 3.
