@@ -584,7 +584,10 @@ pub fn p10_clients_gpu_compose(
         // Fond CPU dans la ressource hote sans flush intermediaire.
         let tout = Rect { x: 0, y: 0, largeur: ecran_l as u32, hauteur: ecran_h as u32 };
         let en_vol = tampons::soumet(etat_tampon()).ok_or("scanout-tampon-occupe")?;
-        pose_etat_tampon(en_vol);
+        // Etat explicite de cette transaction GPU hors chemin presente().
+        // Le banc P10+.2 conserve sa mutation negative sur la transition 2D.
+        let etat_3d = en_vol;
+        pose_etat_tampon(etat_3d);
         let base = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, tout, 0) };
         let fin = if dma::issue(base) == dma::Issue::SansReponse {
             tampons::Fin::SansReponse

@@ -951,6 +951,18 @@ fn draw_window_controls(outer: crate::gui::windowing::Rect,
 /// decide s'il faut recomposer, et la decoupe decide de combien. Sans elle, une
 /// fenetre de navigateur coutait 664 400 pixels a chaque trame, y compris quand
 /// seul le curseur avait bouge.
+// P10 et P10+.3c : un SEUL site de lecture de la face.
+// Le rendu CPU et le staging GPU utilisent le meme controle de tampon.
+fn copie_face_client(
+    client: &crate::gui::client::Client, y: usize, zy: usize,
+    colonne: usize, destination: &mut [u32],
+) {
+    let surface = &client.surface;
+    let pris = destination.len();
+    surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);
+    client.note_lecture(destination);
+}
+
 pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     use crate::gui::client::Etat;
     let zone = crate::gui::window::zone_utile(w);
@@ -999,8 +1011,7 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
             let gpu = crate::drivers::p10_gpu_queue::prepare_client(
                 largeur, hauteur, zx, zy,
                 |yy, ligne| {
-                    surface.copie_ligne_de(client.face(), yy, 0, ligne.len(), ligne);
-                    client.note_lecture(ligne);
+                    copie_face_client(client, yy + zy, zy, 0, ligne);
                 },
             );
             if gpu == Some(true) { return; }
@@ -1015,11 +1026,8 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
         if destination.is_empty() {
             continue;
         }
-        let pris = destination.len();
-        // La FACE : avec deux tampons (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1),
-        // jamais celui dans lequel le client peut ecrire.
-        surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);
-        client.note_lecture(destination);
+        // La FACE uniquement, y compris pour le chemin GPU.
+        copie_face_client(client, y, zy, colonne, destination);
     }
     fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
 
