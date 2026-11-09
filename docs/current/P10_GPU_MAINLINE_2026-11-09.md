@@ -36,3 +36,9 @@ Les sources de `p10_window_gpu.rs` exposent un pool borné de quatre identifiant
 Tests hôte : allocation et bornage des quatre identifiants, paquet 4 BLIT correctement ordonné, rejet complet d'une scène invalide. CI Fast compile le noyau avec `p10-universal-present,p10-virgl-experimental` ; les tests de transport DMA P10+.2 sont conservés. Les gains de temps et la visibilité des pixels attendent des mesures QEMU sur ce commit.
 
 **Consommation mémoire** : jusqu'à 4 backings DMA de la taille du scanout peuvent rester alloués pendant la session graphique, contre un backing auparavant. C'est un compromis explicite entre mémoire GPU et nombre de soumissions 3D ; ce pool n'est pas exposé aux processus ring 3.
+
+## Cohérence des surfaces entre deux trames
+
+Lorsqu'un dommage ne touche que l'horloge ou le dock, une surface client GPU doit malgré tout être ajoutée à la scène présentée; sinon le backbuffer CPU, incomplet parce que la fenêtre a été dessinée par VIRGL, pourrait effacer la page. Le WM capture maintenant toutes les surfaces clientes éligibles sur chaque trame. En cas de menu, de pointeur sur la page, d'occlusion ou de refus GPU, la capture partielle est rejetée et le bureau est redessiné intégralement sur CPU lors de la transition.
+
+Test QEMU à exécuter : page statique + horloge, déplacement du curseur intérieur/extérieur, activation du menu, deux fenêtres disjointes et perte du périphérique; comparer les pixels et les latences avant merge.

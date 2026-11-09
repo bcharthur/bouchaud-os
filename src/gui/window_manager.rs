@@ -1455,14 +1455,23 @@ fn boucle() {
                 let t_trame = crate::kernel::timer::monotonic_ns();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
+                // Toutes les surfaces client GPU sont capturees meme si
+                // la trame ne redessine que l'horloge: sinon le backbuffer CPU
+                // pourrait effacer la derniere surface compoee par VIRGL.
                 #[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
                 {
-                    let mut ok = !menu_open && !centre_ouvert;
+                    let mut ok = !menu_open && !centre_ouvert
+                        && crate::drivers::virtio_gpu::p10_client_gpu_possible();
+                    let (mx, my) = crate::gui::mouse::pos();
                     let mut visibles = 0usize;
+                    let mut clients = 0usize;
                     for (i, a) in wins.iter().enumerate() {
                         if a.min { continue; }
                         visibles += 1;
-                        if visibles > crate::drivers::p10_gpu_queue::MAX_COUCHES { ok = false; break; }
+                        if visibles > crate::drivers::p10_gpu_queue::MAX_COUCHES {
+                            ok = false;
+                            break;
+                        }
                         let ra = crate::drivers::p10_surface_contract::Fenetre {
                             x: a.x, y: a.y, w: a.w, h: a.h,
                         };
@@ -1474,8 +1483,50 @@ fn boucle() {
                                 ok = false;
                             }
                         }
+                        if let Some(client) = a.app.client() {
+                            clients += 1;
+                            if client.etat != crate::gui::client::Etat::Actif {
+                                ok = false;
+                                continue;
+                            }
+                            let z = crate::gui::window::zone_utile(a);
+                            let (pl, ph) = client.composable();
+                            let l = (z.largeur as usize).min(pl);
+                            let h = (z.hauteur as usize).min(ph);
+                            if z.x < 0 || z.y < 0 || l == 0 || h == 0
+                                || (z.x as usize).checked_add(l).is_none_or(|v| v > fb::width())
+                                || (z.y as usize).checked_add(h).is_none_or(|v| v > fb::height()) {
+                                ok = false;
+                            } else {
+                                let (x, y) = (z.x as usize, z.y as usize);
+                                if (mx as usize) >= x && (mx as usize) < x + l
+                                    && (my as usize) >= y && (my as usize) < y + h {
+                                    ok = false;
+                                }
+                            }
+                        }
                     }
-                    crate::drivers::p10_gpu_queue::autorise_client(ok && visibles > 0);
+                    ok &= clients > 0;
+                    let auparavant = crate::drivers::p10_gpu_queue::autorise_client(ok);
+                    if ok {
+                        for w in &wins {
+                            if w.min { continue; }
+                            if let Some(client) = w.app.client() {
+                                if !widgets::prepare_client_gpu(w, client) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !ok {
+                        crate::drivers::p10_gpu_queue::autorise_client(false);
+                    }
+                    if auparavant != ok {
+                        // Une transition de backend doit reconstruire tous
+                        // les pixels CPU et la scene GPU, curseur inclus.
+                        degats.tout();
+                    }
                 }
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,

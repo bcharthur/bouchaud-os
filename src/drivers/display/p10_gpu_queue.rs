@@ -66,8 +66,18 @@ static CLIENTS_AUTORISES: AtomicBool = AtomicBool::new(false);
 
 // Rend l'optimisation GPU admissible seulement pour une fenetre non masquee.
 #[cfg(feature = "p10-virgl-experimental")]
-pub fn autorise_client(autorise: bool) {
-    CLIENTS_AUTORISES.store(autorise, Ordering::Release);
+pub fn autorise_client(autorise: bool) -> bool {
+    let etait_autorise = CLIENTS_AUTORISES.swap(autorise, Ordering::AcqRel);
+    if !autorise {
+        // Une capture partielle ne doit pas etre interpretee comme une scene
+        // complete lors d'un retour CPU (menu/occlusion/cursor/erreur GPU).
+        if let Some(e) = ETAT.lock().as_mut() {
+            while let Some(c) = e.couches_en_cours.pop() {
+                e.couches_libres.push(c.pixels);
+            }
+        }
+    }
+    etait_autorise
 }
 
 // 'Some(true)' signifie: texture capturee ET backend GPU deja valide lors

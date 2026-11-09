@@ -963,6 +963,24 @@ fn copie_face_client(
     client.note_lecture(destination);
 }
 
+/// Snapshot GPU hors du damage clip: chaque trame P10 retient TOUS
+/// les contenus clients visibles, pas seulement les fenetres redessinees.
+#[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
+pub(crate) fn prepare_client_gpu(w: &Win, client: &crate::gui::client::Client) -> bool {
+    if client.etat != crate::gui::client::Etat::Actif { return false; }
+    let zone = crate::gui::window::zone_utile(w);
+    if zone.x < 0 || zone.y < 0 { return false; }
+    let (pl, ph) = client.composable();
+    let largeur = (zone.largeur as usize).min(pl);
+    let hauteur = (zone.hauteur as usize).min(ph);
+    if largeur == 0 || hauteur == 0 { return false; }
+    let (zx, zy) = (zone.x as usize, zone.y as usize);
+    crate::drivers::p10_gpu_queue::prepare_client(
+        largeur, hauteur, zx, zy,
+        |yy, destination| copie_face_client(client, yy + zy, zy, 0, destination),
+    ).is_some()
+}
+
 pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     use crate::gui::client::Etat;
     let zone = crate::gui::window::zone_utile(w);
