@@ -27,6 +27,7 @@
 7. [BOUCHAUD_STABLE_BASELINE.md](BOUCHAUD_STABLE_BASELINE.md) : ce qu'exige une baseline, et ce qui la bloque.
 8. [TRIGKEY_CAMPAIGN.md](TRIGKEY_CAMPAIGN.md), [TRIGKEY_REFERENCE.md](TRIGKEY_REFERENCE.md), [RELEASE_TRIGKEY_CHECKLIST.md](RELEASE_TRIGKEY_CHECKLIST.md) : machine physique de référence.
 9. [BOUCHAUD_NAVIGATEUR.md](BOUCHAUD_NAVIGATEUR.md), [P10_PLUS_ROADMAP.md](P10_PLUS_ROADMAP.md) : navigateur, et présentation graphique ou accélération.
+   - [P10_GPU_PROGRESS_2026-11-09.md](P10_GPU_PROGRESS_2026-11-09.md) : preuve locale VIRGL, incident orientation, état actuel, protocole de commit et critères de qualification.
 10. [DEPENDENCIES_AND_LICENSES.md](DEPENDENCIES_AND_LICENSES.md) : renvoie aux notices tierces de la racine.
 
 **Documents fusionnés depuis la consolidation** : `ATELIER_HANDOFF.md`, `ATELIER_DESIGN_SYSTEM.md`, `ATELIER_AUDIT_ABC.md` et les captures `atelier/` (PR #242 à #244) ; `TRIGKEY_T1_VIDANGE_USB.md` (PR #246).
