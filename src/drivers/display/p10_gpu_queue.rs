@@ -100,7 +100,7 @@ pub fn prepare_client(
     let mut pixels = {
         let mut garde = ETAT.lock();
         let e = garde.as_mut()?;
-        if !e.actif || e.couches_en_cours.len() >= MAX_COUCHES
+        if !e.actif
             || x.checked_add(largeur).is_none_or(|v| v > e.largeur)
             || y.checked_add(hauteur).is_none_or(|v| v > e.hauteur) {
             return None;
@@ -117,6 +117,9 @@ pub fn prepare_client(
                 return None; // pas d'occlusion GPU sur cette premiere version
             }
         }
+        // La 4e fenetre peut etre lue plusieurs fois par le rendu damage.
+        // Detecter d'abord le doublon, puis seulement le pool plein.
+        if e.couches_en_cours.len() >= MAX_COUCHES { return None; }
         e.couches_libres.pop().unwrap_or_default()
     };
     if pixels.capacity() < n {
