@@ -3,6 +3,17 @@
 //! La mise en file, le DMA et l'isolation sont faits par virtio_gpu.rs.
 
 pub const RESOURCE_ID: u32 = 0xB120;
+/// Maximum de textures indépendantes pour une trame Atelier P10.
+/// Les identifiants restent privés au contexte 3D du pilote.
+pub const MAX_TEXTURES: usize = 4;
+
+pub fn resource_id(slot: usize) -> Option<u32> {
+    (slot < MAX_TEXTURES).then_some(RESOURCE_ID + slot as u32)
+}
+
+fn ressource_valide(id: u32) -> bool {
+    id >= RESOURCE_ID && id < RESOURCE_ID + MAX_TEXTURES as u32
+}
 pub const TARGET_TEXTURE_2D: u32 = 2;
 pub const FORMAT_B8G8R8X8: u32 = 2;
 pub const BIND_SAMPLER_VIEW: u32 = 1 << 3;
@@ -21,10 +32,18 @@ fn put64(b: &mut [u8], offset: usize, value: u64) {
 
 /// QEMU include/standard-headers/linux/virtio_gpu.h: 72 bytes.
 pub fn create_source(w: u32, h: u32) -> Option<[u8; 72]> {
-    if w == 0 || h == 0 || w > 4096 || h > 2160 { return None; }
+    create_source_id(RESOURCE_ID, w, h)
+}
+
+/// Une ressource 3D par calque, pour pouvoir grouper les BLIT dans
+/// une seule commande SUBMIT_3D au lieu de soumettre chaque fenetre.
+pub fn create_source_id(id: u32, w: u32, h: u32) -> Option<[u8; 72]> {
+    if !ressource_valide(id) || w == 0 || h == 0 || w > 4096 || h > 2160 {
+        return None;
+    }
     let mut q = [0u8; 72];
     put32(&mut q, 0, CMD_RESOURCE_CREATE_3D);
-    put32(&mut q, 24, RESOURCE_ID);
+    put32(&mut q, 24, id);
     put32(&mut q, 28, TARGET_TEXTURE_2D);
     put32(&mut q, 32, FORMAT_B8G8R8X8);
     put32(&mut q, 36, BIND_SAMPLER_VIEW);
@@ -44,11 +63,15 @@ pub fn attach_context(resource: u32) -> [u8; 32] {
 }
 
 pub fn attach_backing(physique: u64, octets: usize) -> Option<[u8; 48]> {
+    attach_backing_id(RESOURCE_ID, physique, octets)
+}
+
+pub fn attach_backing_id(id: u32, physique: u64, octets: usize) -> Option<[u8; 48]> {
     let n = u32::try_from(octets).ok()?;
-    if n == 0 || physique == 0 { return None; }
+    if !ressource_valide(id) || n == 0 || physique == 0 { return None; }
     let mut q = [0u8; 48];
     put32(&mut q, 0, CMD_RESOURCE_ATTACH_BACKING);
-    put32(&mut q, 24, RESOURCE_ID);
+    put32(&mut q, 24, id);
     put32(&mut q, 28, 1);
     put64(&mut q, 32, physique);
     put32(&mut q, 40, n);
@@ -58,7 +81,12 @@ pub fn attach_backing(physique: u64, octets: usize) -> Option<[u8; 48]> {
 /// Code QEMU: header 24 + box 24 + offset 8 + res id 4 + level 4
 /// + stride 4 + layer_stride 4 = 72.
 pub fn transfer_to_gpu(w: u32, h: u32, stride: u32) -> Option<[u8; 72]> {
-    if w == 0 || h == 0 || w > 4096 || h > 2160 || stride < w.checked_mul(4)? {
+    transfer_to_gpu_id(RESOURCE_ID, w, h, stride)
+}
+
+pub fn transfer_to_gpu_id(id: u32, w: u32, h: u32, stride: u32) -> Option<[u8; 72]> {
+    if !ressource_valide(id) || w == 0 || h == 0 || w > 4096 || h > 2160
+        || stride < w.checked_mul(4)? {
         return None;
     }
     let layer_stride = stride.checked_mul(h)?;
@@ -69,7 +97,7 @@ pub fn transfer_to_gpu(w: u32, h: u32, stride: u32) -> Option<[u8; 72]> {
     put32(&mut q, 40, h);
     put32(&mut q, 44, 1);
     // offset u64 at 48: zero
-    put32(&mut q, 56, RESOURCE_ID);
+    put32(&mut q, 56, id);
     // level 60: zero
     put32(&mut q, 64, stride);
     put32(&mut q, 68, layer_stride);
@@ -89,6 +117,19 @@ pub fn ligne_source_gpu(ligne: usize, hauteur: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pool_de_quatre_textures_distinctes() {
+        for slot in 0..MAX_TEXTURES {
+            let id = resource_id(slot).unwrap();
+            assert_eq!(get(&create_source_id(id, 1280, 720).unwrap(), 24), id);
+            assert_eq!(get(&attach_backing_id(id, 0x1000, 4096).unwrap(), 24), id);
+            assert_eq!(get(&transfer_to_gpu_id(id, 100, 100, 512).unwrap(), 56), id);
+        }
+        assert!(resource_id(MAX_TEXTURES).is_none());
+        assert!(create_source_id(RESOURCE_ID - 1, 10, 10).is_none());
+        assert!(attach_backing_id(RESOURCE_ID + 4, 0x1000, 4096).is_none());
+        assert!(transfer_to_gpu_id(RESOURCE_ID + 4, 10, 10, 40).is_none());
+    }
     #[test]
     fn inversion_des_lignes_gpu_sans_perte() {
         let source = [11u32, 12, 21, 22, 31, 32];
