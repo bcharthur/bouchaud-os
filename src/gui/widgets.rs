@@ -989,6 +989,23 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     if x_fin <= x_debut || y_fin <= y_debut {
         return;
     }
+    // P10 application surface -> GPU staging -> VIRGL BLIT.
+    #[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
+    if client.etat == Etat::Actif {
+        let (mx, my) = crate::gui::mouse::pos();
+        let pointeur_dans_client = (mx as usize) >= zx && (mx as usize) < zx + largeur
+            && (my as usize) >= zy && (my as usize) < zy + hauteur;
+        if !pointeur_dans_client {
+            let gpu = crate::drivers::p10_gpu_queue::prepare_client(
+                largeur, hauteur, zx, zy,
+                |yy, ligne| {
+                    surface.copie_ligne_de(client.face(), yy, 0, ligne.len(), ligne);
+                    client.note_lecture(ligne);
+                },
+            );
+            if gpu == Some(true) { return; }
+        }
+    }
     // Colonne de depart DANS la surface : la decoupe peut couper a gauche.
     let colonne = x_debut - zx;
     let compte = x_fin - x_debut;

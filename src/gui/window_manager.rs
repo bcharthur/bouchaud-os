@@ -1455,6 +1455,11 @@ fn boucle() {
                 let t_trame = crate::kernel::timer::monotonic_ns();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
+                #[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
+                crate::drivers::p10_gpu_queue::autorise_client(
+                    wins.iter().filter(|w| !w.min).count() == 1
+                    && !menu_open && !centre_ouvert,
+                );
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
                 // les regions de la trame partent d'un bloc a `fin_trame`.
