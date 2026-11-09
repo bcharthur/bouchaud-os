@@ -85,6 +85,23 @@ jobs:
           cargo build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features uefi-boot,reference-desktop
           cargo build --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml --target x86_64-unknown-uefi
 
+      # P10 : ne jamais laisser un code GPU optionnel passer uniquement
+      # les tests du chemin CPU par defaut.
+      # Meme toolchain, meme cible noyau et criteres de build.
+      - name: P10 GPU - compilation des voies experimentales
+        run: |
+          cargo build --features p10-universal-present
+          cargo build --features p10-universal-present,p10-virgl-experimental
+          for source in \
+              src/drivers/display/virtio_gpu_3d.rs \
+              src/drivers/display/p10_virgl_composition.rs \
+              src/drivers/display/p10_window_gpu.rs \
+              src/drivers/display/p10_surface_contract.rs; do
+            fichier="target/$(basename "$source" .rs)-tests"
+            rustc --edition 2021 --test "$source" -o "$fichier"
+            "$fichier"
+          done
+
       # Clippy n'est PAS un controle de style ici : les 220 avertissements de
       # confort ne font rien echouer. Ce qui echoue, ce sont ses lints
       # « deny par defaut » -- les fautes de correction, comme une comparaison
