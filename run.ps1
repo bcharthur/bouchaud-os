@@ -90,6 +90,10 @@ param(
     #   pas d'acceleration explicite.
     [string]$Accel = "auto",
 
+    # P10 GPU : construit les fonctions VIRGL et choisit QEMU OpenGL.
+    # Strictement opt-in : le lancement normal reste identique.
+    [switch]$P10GPU,
+
     # Met a jour la branche courante avant construction.
     [switch]$Sync,
 
@@ -299,7 +303,13 @@ Write-Section "Construction du noyau"
 
 Ensure-Cargo
 
-& "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
+if ($P10GPU) {
+    Write-Host "P10 GPU : compilation noyau avec composition VIRGL" -ForegroundColor Cyan
+    & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd" "--features" "p10-universal-present,p10-virgl-experimental"
+}
+else {
+    & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
+}
 
 if ($LASTEXITCODE -ne 0) {
 
@@ -1446,6 +1456,27 @@ if (-not (Test-Path $QemuExe)) {
     Fail "QEMU introuvable : $QemuExe"
 }
 
+if ($P10GPU) {
+    if (-not $LadybirdMode) {
+        Fail "P10 GPU exige le mode bureau avec Ladybird."
+    }
+    $gpuDevices = (& $QemuExe -device help 2>&1 | Out-String)
+    if ($gpuDevices -notmatch 'virtio-gpu-gl-pci') {
+        Fail "P10 GPU : ce QEMU ne fournit pas virtio-gpu-gl-pci / virglrenderer."
+    }
+    $gpuDisplays = (& $QemuExe -display help 2>&1 | Out-String)
+    $displayGL = if ($gpuDisplays -match '(?m)^\s*sdl\b') { 'sdl,gl=on' }
+                 elseif ($gpuDisplays -match '(?m)^\s*gtk\b') { 'gtk,gl=on' }
+                 else { $null }
+    if (-not $displayGL) {
+        Fail "P10 GPU : aucune sortie SDL/GTK OpenGL disponible."
+    }
+    if (@($qemuArgs | Where-Object { $_ -eq '-display' -or $_ -eq '-vga' }).Count -gt 0) {
+        Fail "P10 GPU : la configuration graphique QEMU est deja definie."
+    }
+    $qemuArgs += @('-vga','none','-device','virtio-gpu-gl-pci','-display',$displayGL)
+    Write-Host "P10 GPU : $displayGL avec virtio-gpu-gl-pci" -ForegroundColor Cyan
+}
 
 if ($LadybirdMode) {
 
