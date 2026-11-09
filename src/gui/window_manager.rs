@@ -1456,10 +1456,27 @@ fn boucle() {
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
                 #[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
-                crate::drivers::p10_gpu_queue::autorise_client(
-                    wins.iter().filter(|w| !w.min).count() == 1
-                    && !menu_open && !centre_ouvert,
-                );
+                {
+                    let mut ok = !menu_open && !centre_ouvert;
+                    let mut visibles = 0usize;
+                    for (i, a) in wins.iter().enumerate() {
+                        if a.min { continue; }
+                        visibles += 1;
+                        if visibles > crate::drivers::p10_gpu_queue::MAX_COUCHES { ok = false; break; }
+                        let ra = crate::drivers::p10_surface_contract::Fenetre {
+                            x: a.x, y: a.y, w: a.w, h: a.h,
+                        };
+                        for b in wins.iter().skip(i + 1).filter(|w| !w.min) {
+                            let rb = crate::drivers::p10_surface_contract::Fenetre {
+                                x: b.x, y: b.y, w: b.w, h: b.h,
+                            };
+                            if !crate::drivers::p10_surface_contract::sans_recouvrement(ra, rb) {
+                                ok = false;
+                            }
+                        }
+                    }
+                    crate::drivers::p10_gpu_queue::autorise_client(ok && visibles > 0);
+                }
 
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
                 // les regions de la trame partent d'un bloc a `fin_trame`.

@@ -1556,34 +1556,38 @@ pub fn p10_publie_physiquement(image: &[u32], largeur: usize, hauteur: usize) ->
 // ne recoit pas le flush du fond avant le blit de la fenetre.
 // BASCULE couvre toute la transaction; aucun enter/leave durant le transfert.
 #[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
-pub fn p10_publie_avec_client(
+pub fn p10_publie_avec_clients(
     image: &[u32], largeur: usize, hauteur: usize,
-    client: &[u32], cl: usize, ch: usize, x: usize, y: usize,
+    clients: &[crate::drivers::p10_gpu_queue::Couche],
 ) -> bool {
     let _bascule = BASCULE.lock();
-    if !crate::drivers::p10_gpu_queue::actif()
+    if clients.is_empty() || clients.len() > crate::drivers::p10_gpu_queue::MAX_COUCHES
+        || !crate::drivers::p10_gpu_queue::actif()
         || !VIRTIO_SCANOUT.load(Ordering::Acquire)
         || !crate::drivers::virtio_gpu::actif()
         || !crate::drivers::virtio_gpu::tampon_ecrivable()
         || largeur != width() || hauteur != height()
-        || image.len() != largeur.saturating_mul(hauteur)
-        || cl.checked_mul(ch) != Some(client.len())
-        || x.checked_add(cl).is_none_or(|v| v > largeur)
-        || y.checked_add(ch).is_none_or(|v| v > hauteur) {
+        || image.len() != largeur.saturating_mul(hauteur) {
         return false;
+    }
+    for c in clients {
+        if c.largeur == 0 || c.hauteur == 0
+            || c.largeur.checked_mul(c.hauteur) != Some(c.pixels.len())
+            || c.x.checked_add(c.largeur).is_none_or(|v| v > largeur)
+            || c.y.checked_add(c.hauteur).is_none_or(|v| v > hauteur) {
+            return false;
+        }
     }
     let lfb = unsafe { LFB };
     if lfb.is_null() { return false; }
-    // L'hote ne peut lire le backing DMA avant la fin de cette copie.
     unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), lfb, image.len()); }
     core::sync::atomic::fence(Ordering::Release);
     unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
-    // Cette operation serie fond 2D / texture 3D / BLIT / flush complet.
-    let ok = crate::drivers::virtio_gpu::p10_client_gpu_compose(client, cl, ch, x, y);
+    let ok = crate::drivers::virtio_gpu::p10_clients_gpu_compose(clients);
     if ok {
         PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
         PIXELS_COPIES_LFB.fetch_add(image.len() as u64, Ordering::Relaxed);
-        OCTETS_COPIES.fetch_add((image.len() * 4) as u64, Ordering::Relaxed);
+        OCTETS_COPIES.fetch_add(image.len().saturating_mul(4) as u64, Ordering::Relaxed);
         DERNIER_PRESENT_RECT.store(empaquete_rect(0, 0, largeur, hauteur), Ordering::Relaxed);
         DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
         crate::drivers::gpu::note_present(image.len() * 4);

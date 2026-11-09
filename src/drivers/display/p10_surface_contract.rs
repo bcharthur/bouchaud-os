@@ -47,9 +47,30 @@ impl Surface {
     }
 }
 
+/// Geometrie des fenetres du WM; le premier compositor GPU ne gere
+/// pas encore l'occlusion entre fenetres. Les contacts de bord sont admis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fenetre {
+    pub x: i32, pub y: i32, pub w: i32, pub h: i32,
+}
+pub fn sans_recouvrement(a: Fenetre, b: Fenetre) -> bool {
+    if a.w <= 0 || a.h <= 0 || b.w <= 0 || b.h <= 0 { return false; }
+    let (ax0, ay0, bx0, by0) = (a.x as i64, a.y as i64, b.x as i64, b.y as i64);
+    ax0 + a.w as i64 <= bx0 || bx0 + b.w as i64 <= ax0
+        || ay0 + a.h as i64 <= by0 || by0 + b.h as i64 <= ay0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fenetres_gpu_non_recouvrantes() {
+        let a = Fenetre { x: 0, y: 0, w: 200, h: 200 };
+        assert!(sans_recouvrement(a, Fenetre { x: 200, y: 0, w: 80, h: 100 }));
+        assert!(sans_recouvrement(a, Fenetre { x: 0, y: 200, w: 80, h: 100 }));
+        assert!(!sans_recouvrement(a, Fenetre { x: 199, y: 100, w: 50, h: 100 }));
+        assert!(!sans_recouvrement(a, Fenetre { x: 0, y: 0, w: 0, h: 20 }));
+    }
     fn image() -> Surface {
         Surface { pid: 22, identifiant: 17, generation: 1,
                   largeur: 1280, hauteur: 720,

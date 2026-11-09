@@ -10,3 +10,9 @@ Base: `6bdcb36f3432d202d37b4562f43dee7363d0852f`; branche `feat/p10-mainline-gpu
 - Compilation optionnelle des dépendances Vulkan pour Ladybird ; **aucun GPU Skia Vulkan ring3 encore prouvé**.
 
 Limites: seulement une fenêtre sans occlusion, QEMU VIRGL expérimental, ni pilote AMD physique ni performance démontrée. Ne pas fusionner sans CI et QEMU pixels/latence.
+
+## P10 multi-fenêtres sans recouvrement — étape 2
+
+Le compositeur GPU accepte désormais jusqu'à **4 surfaces clients disjointes** dans une trame. Le WM interdit le chemin si deux fenêtres se recouvrent ; la file conserve leur ordre, le pilote réalise une séquence DMA / BLIT par surface, puis effectue **un seul flush plein écran**. Le repli CPU reconstruit tous les clients d'une trame rejetée.
+
+Il s'agit d'une composition GPU réelle mais expérimentale : les surfaces chevauchées et le blending transparent restent sur le chemin CPU. La rasterisation Skia dans Ladybird n'est pas transférée sur Vulkan tant que le pilote invité n'existe pas.
