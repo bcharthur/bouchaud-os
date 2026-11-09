@@ -11,6 +11,13 @@
 > `9a8b1dcb`, avec **99 fichiers non committés** au lancement de 21:39.
 > La branche documentaire ne contient **aucun code P10 local récupéré**.
 
+## Mise à jour GitHub du 9 novembre, 20:09 UTC
+
+- Le prototype P10 a été sauvegardé depuis la machine Windows dans le commit **`816969a274da35826536e6d28c970b718eef6352`** sur **`feat/p10-gpu-preparation-20261109`**. La **[PR #280](https://github.com/bcharthur/bouchaud-os/pull/280)** est **en brouillon, non fusionnable en l'état**. Ne pas confondre la sauvegarde Git et la qualification de P10.
+- Le commit contient **9 fichiers** : cœur VirtIO-GPU, file de présentation et modules P10, et préparation facultative Vulkan côté vcpkg. Il ne contient **ni `Cargo.toml` (flags `p10-virgl-experimental`, `p10-universal-present`), ni raccordement P10 de `src/gui/widgets.rs`, ni mise à jour de `run.ps1`**, qui demeurent localement modifiés.
+- La branche issue de l'ancien snapshot contient aussi des changements DOOM historiques et se situe à **59 commits derrière `main`**, contre 3 commits propres au moment de la comparaison. Une extraction des seuls changements P10 sur base récente sera nécessaire avant merge.
+- Les expériences QEMU précédentes provenaient d'un **arbre local non committé** ; elles ne prouvent pas que la PR #280 est auto-suffisante ou déployable en CI.
+
 ## Bilan technique au 9 novembre
 
 | Sous-système | État de preuve | Réalisation / limite |
