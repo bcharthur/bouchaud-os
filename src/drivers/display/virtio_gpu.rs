@@ -417,7 +417,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     #[cfg(feature = "p10-virgl-experimental")]
                     p10_virgl,
                     #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
-                    p10_client_texture: None,
+                    p10_client_textures: [None; crate::drivers::p10_window_gpu::MAX_TEXTURES],
                     #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
                     p10_desktop_attache: false,
                 });
@@ -522,6 +522,7 @@ pub fn p10_virgl_blit_ressources(
 // Les images viennent de la surface ring3 deja validee par le gestionnaire de
 // fenetres; aucun processus ne fournit de commandes GPU brutes.
 #[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+#[derive(Clone, Copy)]
 struct P10ClientTexture {
     physique: u64,
     virt: usize,
@@ -554,6 +555,9 @@ pub fn p10_client_gpu_possible() -> bool {
 pub fn p10_clients_gpu_compose(
     clients: &[crate::drivers::p10_gpu_queue::Couche],
 ) -> bool {
+    use crate::drivers::p10_virgl_composition as composition;
+    use crate::drivers::p10_window_gpu as fenetre_gpu;
+
     if P10_CLIENT_GPU_INVALIDE.load(Ordering::Acquire) { return false; }
     let resultat = (|| -> Result<(), &'static str> {
         let mut garde = verrou().ok_or("gpu-verrou")?;
@@ -563,10 +567,11 @@ pub fn p10_clients_gpu_compose(
         }
         let scanout = p.scanout.ok_or("scanout-absent")?;
         let (ecran_l, ecran_h) = (scanout.largeur as usize, scanout.hauteur as usize);
-        if clients.is_empty() || clients.len() > crate::drivers::p10_gpu_queue::MAX_COUCHES {
+        if clients.is_empty() || clients.len() > fenetre_gpu::MAX_TEXTURES {
             return Err("nombre-de-fenetres-invalide");
         }
-        // Preflight global, aucun transfert sur une scene invalide.
+
+        // Aucune soumission avant le controle de TOUTE la scene.
         for (i, c) in clients.iter().enumerate() {
             if c.largeur == 0 || c.hauteur == 0 || c.largeur > ecran_l
                 || c.hauteur > ecran_h || c.largeur.checked_mul(c.hauteur) != Some(c.pixels.len())
@@ -581,11 +586,11 @@ pub fn p10_clients_gpu_compose(
                 }
             }
         }
-        // Fond CPU dans la ressource hote sans flush intermediaire.
+
+        // Transfert CPU du fond, sans FLUSH intermediaire.
+        // P10+.2 garde son etat DMA explicite meme lorsque VIRGL est actif.
         let tout = Rect { x: 0, y: 0, largeur: ecran_l as u32, hauteur: ecran_h as u32 };
         let en_vol = tampons::soumet(etat_tampon()).ok_or("scanout-tampon-occupe")?;
-        // Etat explicite de cette transaction GPU hors chemin presente().
-        // Le banc P10+.2 conserve sa mutation negative sur la transition 2D.
         let etat_3d = en_vol;
         pose_etat_tampon(etat_3d);
         let base = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, tout, 0) };
@@ -595,50 +600,62 @@ pub fn p10_clients_gpu_compose(
         pose_etat_tampon(tampons::acheve(en_vol, fin));
         if base != Ok(RESP_OK_NODATA) { return Err("base-transfert-refuse"); }
 
-        // Texture source et DMA reutilises entre toutes les fenetres.
-        // Chaque SUBMIT_3D est une commande fencee : aucun alias du DMA
-        // tant que la GPU n'a pas accuse reception des commandes precedentes.
-        if p.p10_client_texture.is_none() {
-            let octets = ecran_l.checked_mul(ecran_h)
-                .and_then(|n| n.checked_mul(4)).ok_or("taille-dma")?;
-            let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-gpu")?;
-            let fmt = crate::drivers::p10_window_gpu::create_source(ecran_l as u32, ecran_h as u32)
-                .ok_or("resource-create-invalide")?;
-            let attach = crate::drivers::p10_window_gpu::attach_backing(phys, octets)
-                .ok_or("attach-backing-invalide")?;
-            let ok = unsafe {
-                p.file.commande(&fmt, ENTETE) == Ok(RESP_OK_NODATA)
-                    && p.file.commande(&attach, ENTETE) == Ok(RESP_OK_NODATA)
-                    && p.file.commande(&crate::drivers::p10_window_gpu::attach_context(
-                        crate::drivers::p10_window_gpu::RESOURCE_ID), ENTETE) == Ok(RESP_OK_NODATA)
-            };
-            if !ok { return Err("initialisation-texture-refusee"); }
-            p.p10_client_texture = Some(P10ClientTexture {
-                physique: phys, virt: virt as usize,
-                largeur: ecran_l as u32, hauteur: ecran_h as u32,
-            });
-        }
         if !p.p10_desktop_attache {
-            let q = crate::drivers::p10_window_gpu::attach_context(RESSOURCE_BUREAU);
+            let q = fenetre_gpu::attach_context(RESSOURCE_BUREAU);
             if unsafe { p.file.commande(&q, ENTETE) } != Ok(RESP_OK_NODATA) {
                 return Err("desktop-ctx-attach-refuse");
             }
             p.p10_desktop_attache = true;
         }
-        let texture = p.p10_client_texture.as_ref().ok_or("texture-absente")?;
-        if texture.largeur as usize != ecran_l || texture.hauteur as usize != ecran_h {
-            return Err("texture-geometrie-modifiee");
-        }
-        let destination = texture.virt as *mut u32;
-        // Les BLIT sont executes dans l'ordre de fenetres. Un seul
-        // RESOURCE_FLUSH est emis apres la derniere surface.
-        for c in clients {
+
+        // UNE texture persiste par emplacement de fenetre (max 4).
+        // Ainsi, les quatre transferts sont termines avant la seule
+        // SUBMIT_3D de la scene. Les BLIT ne peuvent pas relire une
+        // texture modifiee par le transfert de la fenetre suivante.
+        let zero = composition::ImageRegion {
+            ressource: 1, largeur: 1, hauteur: 1, x: 0, y: 0, w: 1, h: 1,
+        };
+        let mut calques = [composition::Calque {
+            source: zero, cible: zero, alpha_premultiplie: false,
+        }; fenetre_gpu::MAX_TEXTURES];
+
+        for (slot, c) in clients.iter().enumerate() {
+            let rid = fenetre_gpu::resource_id(slot).ok_or("pool-texture-plein")?;
+            if p.p10_client_textures[slot].is_none() {
+                let octets = ecran_l.checked_mul(ecran_h)
+                    .and_then(|n| n.checked_mul(4)).ok_or("taille-dma")?;
+                let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-gpu")?;
+                let fmt = fenetre_gpu::create_source_id(rid, ecran_l as u32, ecran_h as u32)
+                    .ok_or("resource-create-invalide")?;
+                let attache = fenetre_gpu::attach_backing_id(rid, phys, octets)
+                    .ok_or("attach-backing-invalide")?;
+                let ok = unsafe {
+                    p.file.commande(&fmt, ENTETE) == Ok(RESP_OK_NODATA)
+                        && p.file.commande(&attache, ENTETE) == Ok(RESP_OK_NODATA)
+                        && p.file.commande(&fenetre_gpu::attach_context(rid), ENTETE)
+                            == Ok(RESP_OK_NODATA)
+                };
+                if !ok {
+                    // En cas de perte de fence, le device peut conserver
+                    // le pointeur DMA : jamais de free/reuse hasardeux.
+                    return Err("initialisation-texture-refusee");
+                }
+                p.p10_client_textures[slot] = Some(P10ClientTexture {
+                    physique: phys, virt: virt as usize,
+                    largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                });
+            }
+
+            let t = p.p10_client_textures[slot].ok_or("texture-absente")?;
+            if t.largeur as usize != ecran_l || t.hauteur as usize != ecran_h {
+                return Err("texture-geometrie-modifiee");
+            }
+            let destination = t.virt as *mut u32;
             for ligne in 0..c.hauteur {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         c.pixels.as_ptr().add(
-                            crate::drivers::p10_window_gpu::ligne_source_gpu(ligne, c.hauteur)
-                                * c.largeur
+                            fenetre_gpu::ligne_source_gpu(ligne, c.hauteur) * c.largeur
                         ),
                         destination.add(ligne * ecran_l), c.largeur,
                     );
@@ -646,31 +663,43 @@ pub fn p10_clients_gpu_compose(
             }
             core::sync::atomic::fence(Ordering::Release);
             unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
-            let tr = crate::drivers::p10_window_gpu::transfer_to_gpu(
-                c.largeur as u32, c.hauteur as u32, (ecran_l * 4) as u32,
+            let tr = fenetre_gpu::transfer_to_gpu_id(
+                rid, c.largeur as u32, c.hauteur as u32, (ecran_l * 4) as u32,
             ).ok_or("transfer-dimensions")?;
             if unsafe { p.file.commande(&tr, ENTETE) } != Ok(RESP_OK_NODATA) {
                 return Err("transfer-to-host-3d-refuse");
             }
-            let src = crate::drivers::p10_virgl_composition::ImageRegion {
-                ressource: crate::drivers::p10_window_gpu::RESOURCE_ID,
-                largeur: ecran_l as u32, hauteur: ecran_h as u32,
-                x: 0, y: 0, w: c.largeur as i32, h: c.hauteur as i32,
+            calques[slot] = composition::Calque {
+                source: composition::ImageRegion {
+                    ressource: rid, largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                    x: 0, y: 0, w: c.largeur as i32, h: c.hauteur as i32,
+                },
+                cible: composition::ImageRegion {
+                    ressource: RESSOURCE_BUREAU,
+                    largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                    x: c.x as i32, y: c.y as i32,
+                    w: c.largeur as i32, h: c.hauteur as i32,
+                },
+                alpha_premultiplie: false,
             };
-            let dst = crate::drivers::p10_virgl_composition::ImageRegion {
-                ressource: RESSOURCE_BUREAU, largeur: ecran_l as u32, hauteur: ecran_h as u32,
-                x: c.x as i32, y: c.y as i32, w: c.largeur as i32, h: c.hauteur as i32,
-            };
-            let blit = crate::drivers::p10_virgl_composition::blit(src, dst, false)
-                .map_err(|_| "virgl-blit-borne")?;
-            let hdr = gpu3d::submit_header(blit.len()).ok_or("virgl-submit-header")?;
-            let mut commande = [0u8; 120];
-            commande[..32].copy_from_slice(&hdr);
-            commande[32..].copy_from_slice(&blit);
-            if unsafe { p.file.commande(&commande, ENTETE) } != Ok(RESP_OK_NODATA) {
-                return Err("virgl-blit-refuse");
-            }
         }
+
+        // Les ressources sont DISTINCTES : les commandes de dessin peuvent
+        // etre groupees dans un SEUL SUBMIT_3D apres tous les uploads.
+        const COMMANDES_MAX: usize =
+            fenetre_gpu::MAX_TEXTURES * composition::VIRGL_BLIT_BYTES;
+        let mut commandes = [0u8; COMMANDES_MAX];
+        let longueur = composition::encode_scene(&calques[..clients.len()], &mut commandes)
+            .map_err(|_| "scene-blit-invalide")?;
+        let hdr = gpu3d::submit_header(longueur).ok_or("virgl-submit-header")?;
+        let mut paquet = [0u8; 32 + COMMANDES_MAX];
+        paquet[..32].copy_from_slice(&hdr);
+        paquet[32..32 + longueur].copy_from_slice(&commandes[..longueur]);
+        if unsafe { p.file.commande(&paquet[..32 + longueur], ENTETE) }
+            != Ok(RESP_OK_NODATA) {
+            return Err("virgl-scene-refusee");
+        }
+        // Un seul flush, une seule image visible pour toute la scene.
         if unsafe { vide(&mut p.file, RESSOURCE_BUREAU, tout) } != Ok(RESP_OK_NODATA) {
             return Err("flush-scene-refuse");
         }
@@ -682,7 +711,7 @@ pub fn p10_clients_gpu_compose(
             let n = P10_CLIENT_GPU_TRAMES.fetch_add(1, Ordering::Relaxed) + 1;
             if n == 1 || n % 64 == 0 {
                 crate::serial_println!(
-                    "P10_GPU_CLIENT_BLIT_OK trames={} couches={} chemin=DMA-3D-BLIT-FLUSH present=atomique-1-flush",
+                    "P10_GPU_CLIENT_BLIT_OK trames={} couches={} commandes_3d=1 flush=1 textures=persistantes",
                     n, clients.len(),
                 );
             }
@@ -690,7 +719,9 @@ pub fn p10_clients_gpu_compose(
         }
         Err(cause) => {
             P10_CLIENT_GPU_INVALIDE.store(true, Ordering::Release);
-            crate::serial_println!("P10_GPU_CLIENT_BLIT_ECHEC raison={} repli=composition-cpu", cause);
+            crate::serial_println!(
+                "P10_GPU_CLIENT_BLIT_ECHEC raison={} repli=composition-cpu", cause
+            );
             false
         }
     }
@@ -1145,7 +1176,7 @@ struct Peripherique {
     p10_virgl: Option<gpu3d::CapsetInfo>,
     // BOUCHAUD_P10_GPU_APP_LAYERS_20261109
     #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
-    p10_client_texture: Option<P10ClientTexture>,
+    p10_client_textures: [Option<P10ClientTexture>; crate::drivers::p10_window_gpu::MAX_TEXTURES],
     #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
     p10_desktop_attache: bool,
 }
