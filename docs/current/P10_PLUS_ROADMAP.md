@@ -1,5 +1,8 @@
 # SUPER P10+ — de la présentation virtio-gpu 2D vers une pipeline accélérable
 
+> **Actualisation locale, 9 novembre 2026** : [qualification P10 GPU expérimentale](P10_GPU_PROGRESS_2026-11-09.md). Les étapes VIRGL et les BLIT de fenêtres ont été observés sous QEMU-TCG sur une arborescence Windows non commitée, et **ne changent pas les verdicts historiques ci-dessous** (campagne octobre 2026). La peinture Skia GPU n'est pas démontrée ; la version compilée de Ladybird reste préexistante. Ce document est un état historique et ne doit pas faire croire que ces patchs locaux sont dans `main`.
+
+
 > Ce document distingue **présentation** (copier des pixels rendus par le
 > processeur vers un écran) et **accélération** (faire calculer les pixels par
 > un GPU). À ce jour, Bouchaud OS ne fait QUE de la présentation : aucun
