@@ -193,6 +193,23 @@ pub fn debut_trame() {
 
 /// Ferme la trame : soumet le plan de ses regions. Sans trame ouverte, rien.
 pub fn fin_trame() {
+    // BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109 : la GUI livre un snapshot
+    // immuable ; aucune attente RESOURCE_FLUSH sur son fil d'interface.
+    #[cfg(feature = "p10-universal-present")]
+    if crate::drivers::p10_gpu_queue::actif() {
+        let n = {
+            let mut trame = TRAME.lock();
+            if !trame.ouverte { return; }
+            trame.ouverte = false;
+            trame.n
+        };
+        TRAMES_FERMEES.fetch_add(1, Ordering::Relaxed);
+        REGIONS_DIFFEREES.fetch_add(n as u64, Ordering::Relaxed);
+        if n > 0 {
+            let _ = crate::drivers::p10_gpu_queue::publie(back(), width(), height());
+        }
+        return;
+    }
     let (plan, n) = {
         let mut trame = TRAME.lock();
         if !trame.ouverte {
@@ -754,6 +771,11 @@ pub fn enter() {
 }
 
 fn enter_verrouille() {
+    // BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109 : deux propriete distinctes.
+    // Le GUI compose dans une image CPU, seule la file GPU ecrit le DMA.
+    // Ne JAMAIS laisser le GUI dessiner dans une ressource en transfert.
+    #[cfg(feature = "p10-universal-present")]
+    TAMPON_DIRECT_VOULU.store(false, Ordering::Release);
     TAMPON_DIRECT.store(false, Ordering::Release);
     if firmware_backend_installed() {
         let canvas_width = width();
@@ -824,6 +846,15 @@ fn enter_verrouille() {
                         }
                         VIRTIO_SCANOUT.store(true, Ordering::Release);
                         HD_ACTIVE.store(true, Ordering::Release);
+                        // P10 unifie : meme file de presentation pour
+                        // Ladybird, DOOM et toute fenetre cliente.
+                        #[cfg(feature = "p10-universal-present")]
+                        {
+                            let ok = crate::drivers::p10_gpu_queue::initialise(width(), height());
+                            crate::serial_println!(
+                                "P10_GPU_UNIVERSAL actif={} plan=cpu-backbuffer->snapshot->gpu-worker->virtio-scanout mode=experimental",
+                                ok as u8);
+                        }
                         crate::drivers::gpu::activate_virtio_2d(width(), height(), 32, physique);
                         crate::serial_println!(
                             "[gfx] BGA indisponible (id={:#x}) : scanout virtio-gpu 2D actif ({}x{}x32, aucune acceleration)",
@@ -873,6 +904,12 @@ fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) {
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
 /// avoir desactive BGA et recharge la police texte (detruite par le graphique).
 pub fn leave() {
+    // BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109 : bloquer la bascule
+    // jusqu'a la fin d'un transfert GPU deja lance par le worker.
+    #[cfg(feature = "p10-universal-present")]
+    let _bascule_p10 = BASCULE.lock();
+    #[cfg(feature = "p10-universal-present")]
+    crate::drivers::p10_gpu_queue::arrete();
     if firmware_backend_installed() {
         unsafe {
             BACK = None;
@@ -1272,6 +1309,11 @@ pub fn rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
 /// Copie le double-buffer vers le framebuffer lineaire (sans effet si BGA off).
 pub fn present() {
     if userland_owns_display() { return; }
+    #[cfg(feature = "p10-universal-present")]
+    if crate::drivers::p10_gpu_queue::actif() {
+        let _ = crate::drivers::p10_gpu_queue::publie(back(), width(), height());
+        return;
+    }
     if firmware_backend_installed() {
         present_firmware_full();
         return;
@@ -1401,6 +1443,16 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
         return;
     }
     let count = x1 - x;
+    // BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109 : seul le worker GPU
+    // touche la memoire du scanout. Le GUI enregistre le damage puis
+    // reprend le dessin sans attendre le peripherique.
+    #[cfg(feature = "p10-universal-present")]
+    if crate::drivers::p10_gpu_queue::actif() {
+        if !differe_dans_la_trame(x, y, count, y1 - y) {
+            let _ = crate::drivers::p10_gpu_queue::publie(buf, width(), height());
+        }
+        return;
+    }
     // BOUCHAUD_GFX_PRESENT_BLOC_V1
     //
     // Un rectangle qui prend toute la largeur est CONTIGU des deux cotes : ses
@@ -1460,6 +1512,86 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     DERNIER_PRESENT_RECT.store(empaquete_rect(x, y, count, y1 - y), Ordering::Relaxed);
     DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     crate::drivers::gpu::note_present(count * (y1 - y) * core::mem::size_of::<u32>());
+}
+
+// BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109
+// Le fil GPU livre une image complete deja figee; il n'accede jamais a BACK.
+// Lock BASCULE garde le LFB et l'existence du scanout contre enter/leave.
+#[cfg(feature = "p10-universal-present")]
+pub fn p10_publie_physiquement(image: &[u32], largeur: usize, hauteur: usize) -> bool {
+    let _bascule = BASCULE.lock();
+    if !crate::drivers::p10_gpu_queue::actif()
+        || !VIRTIO_SCANOUT.load(Ordering::Acquire)
+        || !crate::drivers::virtio_gpu::actif()
+        || !crate::drivers::virtio_gpu::tampon_ecrivable()
+        || largeur != width() || hauteur != height()
+        || image.len() != largeur.saturating_mul(hauteur) {
+        return false;
+    }
+    let lfb = unsafe { LFB };
+    if lfb.is_null() { return false; }
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), lfb, image.len()); }
+    core::sync::atomic::fence(Ordering::Release);
+    unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+    let ok = crate::drivers::virtio_gpu::presente(0, 0, largeur, hauteur);
+    if ok {
+        PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
+        PIXELS_COPIES_LFB.fetch_add(image.len() as u64, Ordering::Relaxed);
+        let pixels = largeur.saturating_mul(hauteur);
+        OCTETS_COPIES.fetch_add((pixels * 4) as u64, Ordering::Relaxed);
+        DERNIER_PRESENT_RECT.store(empaquete_rect(0, 0, largeur, hauteur), Ordering::Relaxed);
+        DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
+        crate::drivers::gpu::note_present(pixels * 4);
+    } else if !crate::drivers::virtio_gpu::actif() {
+        // Le pilote a abandonne le scanout : pas de reutilisation de DMA
+        // potentiellement retenu par l'hote.
+        crate::drivers::p10_gpu_queue::arrete();
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+    }
+    ok
+}
+
+// BOUCHAUD_P10_ORIENTATION_ATOMIC_20261109
+// PRESENT UNIQUE du fond 2D et d'une surface acceleree : l'hote
+// ne recoit pas le flush du fond avant le blit de la fenetre.
+// BASCULE couvre toute la transaction; aucun enter/leave durant le transfert.
+#[cfg(all(feature = "p10-universal-present", feature = "p10-virgl-experimental"))]
+pub fn p10_publie_avec_client(
+    image: &[u32], largeur: usize, hauteur: usize,
+    client: &[u32], cl: usize, ch: usize, x: usize, y: usize,
+) -> bool {
+    let _bascule = BASCULE.lock();
+    if !crate::drivers::p10_gpu_queue::actif()
+        || !VIRTIO_SCANOUT.load(Ordering::Acquire)
+        || !crate::drivers::virtio_gpu::actif()
+        || !crate::drivers::virtio_gpu::tampon_ecrivable()
+        || largeur != width() || hauteur != height()
+        || image.len() != largeur.saturating_mul(hauteur)
+        || cl.checked_mul(ch) != Some(client.len())
+        || x.checked_add(cl).is_none_or(|v| v > largeur)
+        || y.checked_add(ch).is_none_or(|v| v > hauteur) {
+        return false;
+    }
+    let lfb = unsafe { LFB };
+    if lfb.is_null() { return false; }
+    // L'hote ne peut lire le backing DMA avant la fin de cette copie.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), lfb, image.len()); }
+    core::sync::atomic::fence(Ordering::Release);
+    unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+    // Cette operation serie fond 2D / texture 3D / BLIT / flush complet.
+    let ok = crate::drivers::virtio_gpu::p10_client_gpu_compose(client, cl, ch, x, y);
+    if ok {
+        PRESENTS_COPIES.fetch_add(1, Ordering::Relaxed);
+        PIXELS_COPIES_LFB.fetch_add(image.len() as u64, Ordering::Relaxed);
+        OCTETS_COPIES.fetch_add((image.len() * 4) as u64, Ordering::Relaxed);
+        DERNIER_PRESENT_RECT.store(empaquete_rect(0, 0, largeur, hauteur), Ordering::Relaxed);
+        DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
+        crate::drivers::gpu::note_present(image.len() * 4);
+    } else if !crate::drivers::virtio_gpu::actif() {
+        crate::drivers::p10_gpu_queue::arrete();
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+    }
+    ok
 }
 
 // --- Texte bitmap 8×8 (zéro allocation, zéro tas) ---------------------------
