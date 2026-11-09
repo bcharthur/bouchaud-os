@@ -14,6 +14,13 @@ reference-bringup = []
 reference-desktop = ["reference-bringup"]
 # P19 experimental QEMU TCG profile, opt-in; the physical default is unchanged.
 p19-tcg-low-latency = []
+# BOUCHAUD_P10_VIRGL_3D_20261109: QEMU virgl only, OFF by default.
+# No userland DRM/Vulkan and no GPU rendering until a subsequent P10 milestone.
+p10-virgl-experimental = []
+# BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109: option de composition
+# CPU et livraison GPU asynchrone commune a toutes les fenetres.
+# Experimental, ne remplace PAS Skia CPU par une implementation 3D.
+p10-universal-present = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #
 # Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la
