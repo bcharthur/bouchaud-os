@@ -8,7 +8,10 @@ pub const RESOURCE_ID: u32 = 0xB120;
 pub const MAX_TEXTURES: usize = 4;
 
 pub fn resource_id(slot: usize) -> Option<u32> {
-    (slot < MAX_TEXTURES).then_some(RESOURCE_ID + slot as u32)
+    // then_some() evalue son argument meme lorsque la condition est fausse.
+    // Un slot hostile (usize::MAX) ne doit jamais deborder en debug.
+    if slot >= MAX_TEXTURES { return None; }
+    Some(RESOURCE_ID + slot as u32)
 }
 
 fn ressource_valide(id: u32) -> bool {
@@ -126,6 +129,7 @@ mod tests {
             assert_eq!(get(&transfer_to_gpu_id(id, 100, 100, 512).unwrap(), 56), id);
         }
         assert!(resource_id(MAX_TEXTURES).is_none());
+        assert!(resource_id(usize::MAX).is_none());
         assert!(create_source_id(RESOURCE_ID - 1, 10, 10).is_none());
         assert!(attach_backing_id(RESOURCE_ID + 4, 0x1000, 4096).is_none());
         assert!(transfer_to_gpu_id(RESOURCE_ID + 4, 10, 10, 40).is_none());
