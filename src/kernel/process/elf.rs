@@ -1,3 +1,4 @@
+// BOUCHAUD_LADYBIRD_PRODUCTION_V1 -- preuve CI : commit purement noyau (branche jetable, jamais fusionnee).
 //! Chargeur ELF64 (System V, x86-64) et construction de la pile initiale.
 //!
 //! Charge un executable Linux x86-64 dans un [`AddressSpace`] : segments
