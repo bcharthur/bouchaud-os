@@ -1108,10 +1108,12 @@ fn dessine_duree_chargement(w: &Win, origine: usize, apres_titre: usize,
 
 /// Ecran d'attente dessine **dans la fenetre** du client.
 ///
-/// C'est le meme visuel que la carte de lancement d'avant, a un detail pres qui
-/// change tout : il ne recouvre plus le bureau. La fenetre existe des le double
-/// clic, la barre des taches et l'horloge continuent, et le contenu Web viendra
-/// remplacer ce dessin sans qu'aucune transition ne soit visible ailleurs.
+/// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : le MEME ecran pour toute application
+/// ring 3 (Ladybird, DOOM, tout client futur) : le nom de l'application et un
+/// chronometre, rien d'autre. Il ne parle plus « de Qt, Python et du
+/// renderer » : c'etait l'ecran du navigateur, et DOOM l'affichait. La
+/// fenetre existe des le double clic, la barre des taches et l'horloge
+/// continuent, et la premiere trame du client remplace ce dessin.
 fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
     jauge: &crate::gui::jauge::Jauge, maintenant: u64) {
     let zx = zone.x.max(0) as usize;
@@ -1121,49 +1123,23 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
 
     fb::fill_rect_rgb(zx, zy, zl, zh, 0x000B_1220);
 
-    let largeur = 540usize.min(zl);
-    let hauteur = 190usize.min(zh);
+    let largeur = 420usize.min(zl);
+    let hauteur = 120usize.min(zh);
     let x = zx + (zl - largeur) / 2;
     let y = zy + (zh - hauteur) / 2;
 
-    fb::fill_rect_rgb(x, y, largeur, hauteur, 0x0011_1B2E);
-    fb::fill_rect_rgb(x, y, largeur, 4, 0x003D_8BFF);
-    fb::draw_text_prop(x + 34, y + 34, titre, 0x00F3_F6FC, 30.0, true);
-    fb::draw_text_prop(
-        x + 34,
-        y + 86,
-        "Demarrage de Qt, Python et du renderer...",
-        0x00B8_C4D9,
-        16.0,
-        false,
-    );
+    fb::draw_text_prop(x, y, titre, 0x00F3_F6FC, 24.0, true);
 
-    // Le chronometre du demarrage.
-    //
-    // Il ne cache pas la lenteur, il la CHIFFRE. Un ecran d'attente qui ne
-    // montre rien laisse croire que la machine est bloquee ; le meme ecran
-    // avec « 8,40 s » qui defile dit qu'elle travaille, et donne d'un coup
-    // d'oeil le nombre qu'une optimisation devra faire baisser.
-    if largeur > 80 && hauteur > 150 {
-        let rail_l = largeur - 68;
-        let rail_x = x + 34;
-        let rail_y = y + 118;
-        fb::fill_rect_rgb(rail_x, rail_y, rail_l, 4, 0x001E_2E4A);
-        let remplie = (rail_l * jauge.progression(maintenant) as usize / 100).max(2);
-        fb::fill_rect_rgb(rail_x, rail_y, remplie.min(rail_l), 4, 0x003D_8BFF);
-
+    // Le chronometre du demarrage : il CHIFFRE la lenteur au lieu de la
+    // cacher, et donne le nombre qu'une optimisation devra faire baisser.
+    if largeur > 80 && hauteur > 70 {
+        let rail_y = y + 48;
+        fb::fill_rect_rgb(x, rail_y, largeur, 3, 0x001E_2E4A);
+        let remplie = (largeur * jauge.progression(maintenant) as usize / 100).max(2);
+        fb::fill_rect_rgb(x, rail_y, remplie.min(largeur), 3, 0x003D_8BFF);
         let ecoule = crate::gui::jauge::formate_duree(jauge.duree_affichee_ms(maintenant));
-        fb::draw_text_prop(rail_x, y + 140, ecoule.as_str(), 0x00B8_C4D9, 14.0, false);
+        fb::draw_text_prop(x, y + 64, ecoule.as_str(), 0x00B8_C4D9, 14.0, false);
     }
-
-    fb::draw_text_prop(
-        x + 34,
-        y + 164,
-        "Le bureau reste actif pendant le chargement.",
-        0x007F_93B8,
-        14.0,
-        false,
-    );
 }
 
 // ─── Barre des tâches ──────────────────────────────────────────────────────

@@ -642,6 +642,13 @@ fn boucle() {
         let fenetre = make_app(kind, home, &mut spawn_n);
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
+    // BOUCHAUD_DOOM_AUTOSTART_BANC_V1 : les bancs QEMU n'ont pas de souris
+    // pour double-cliquer ; `BO_AUTOSTART_DOOM=1` ouvre DOOM comme le ferait
+    // l'icone (meme chemin `lance_doom`). Une session normale ne l'exporte pas.
+    #[cfg(not(feature = "reference-desktop"))]
+    if crate::shell::exported().iter().any(|e| e == "BO_AUTOSTART_DOOM=1") {
+        lance_doom(&mut wins, home, &mut degats);
+    }
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
     // plus bas. `services_initialises` dit que la session supervisee PEUT
     // demarrer : la premiere trame est posee et le reseau a eu sa chance. Le
@@ -2311,6 +2318,7 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     let (largeur_fenetre, hauteur_fenetre) = window::fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
     let client = match Client::lance(
         client::CHEMIN_NAVIGATEUR,
+        window::TITRE_NAVIGATEUR,
         cwd,
         (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
         window::zone_maximale(),
@@ -2357,7 +2365,7 @@ fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     }
     let (largeur, hauteur) = (640i32, 400i32);
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
-    let client = match Client::lance("/doom", cwd,
+    let client = match Client::lance("/doom", "DOOM", cwd,
         (largeur as usize, hauteur as usize), window::zone_maximale()) {
         Ok(client) => client,
         Err(error) => {

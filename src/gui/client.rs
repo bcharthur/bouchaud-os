@@ -133,6 +133,7 @@ impl Client {
     /// client projette `allocation` et n'en peint que `zone`.
     pub fn lance(
         chemin: &str,
+        titre: &str,
         cwd: usize,
         zone: (usize, usize),
         allocation: (usize, usize),
@@ -327,7 +328,10 @@ impl Client {
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
-            titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
+            // BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : le titre est celui de
+            // l'application lancee. Un client n'est pas « Ladybird » par
+            // defaut : DOOM affichait l'ecran d'attente du navigateur.
+            titre: titre.to_string(),
             surface,
             geometrie,
             vers_client,

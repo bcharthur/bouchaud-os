@@ -459,6 +459,7 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
         crate::kernel::perf::browser_click();
         match crate::gui::client::Client::lance(
             crate::gui::client::CHEMIN_NAVIGATEUR,
+            TITRE_NAVIGATEUR,
             home,
             (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
             zone_maximale(),

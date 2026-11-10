@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "as_of": "2026-11-04",
-  "observed_main_head": "e0257c6006f965985d7b3af39a0ddc5790984526",
+  "as_of": "2026-11-10",
+  "observed_main_head": "6bdcb36f3432d202d37b4562f43dee7363d0852f",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
   "baseline_status": "NOT_ESTABLISHED",
@@ -16,7 +16,7 @@
     "P7": "UNKNOWN",
     "P8": "UNKNOWN",
     "P9": "UNKNOWN",
-    "P10": "UNKNOWN",
+    "P10": "EXPERIMENTAL_VIRGL_OPT_IN",
     "P11": "UNKNOWN",
     "P12": "UNKNOWN",
     "P13": "PARTIAL_BLOCKED_NO_DEDICATED_RUNNER",
@@ -168,7 +168,7 @@
     "SMP1 native IPC latency attributed (file->elu dominates), not corrected",
     "no general-purpose on-disk VFS: RAMFS is the live filesystem, /persist rewrites its whole table per transaction, no unified page cache, no file-backed writable mmap",
     "desktop, window manager, native apps, network stack and TLS still run in ring 0",
-    "rendering is CPU only: virtio-gpu 2D presents frames, no GPU acceleration, no 3D, no AMD driver"
+    "rendering: Ladybird/Skia and native apps rasterise on the CPU; virtio-gpu 2D presents frames by default. Opt-in VIRGL build (p10-*) composes client windows on the host GPU via virglrenderer (QEMU only); no AMD driver, no guest Vulkan"
   ],
   "candidate": {
     "branch": null,
@@ -198,7 +198,12 @@
     "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd"
   ],
-  "observed_work_branch": null,
+  "observed_work_branch": {
+    "branch": "claude/c22-p13-p10-gpu-kernel-0y2ucg",
+    "base": "main@6bdcb36",
+    "scope": "P10 GPU compositor (from PR #281), generic client launch (DOOM no longer shows the Ladybird splash), C22/P13 closure campaigns",
+    "note": "Work in progress; see docs/current/P10_GPU_COMPOSITEUR.md for the exact proof level of each claim."
+  },
   "updates_automatically": false,
   "atomic_platform": {
     "proof_levels": {
@@ -333,52 +338,53 @@
     }
   },
   "open_prs": {
-    "as_of": "2026-11-04",
-    "base": "main@e0257c60",
-    "note": "#242, #243, #244 (Atelier) and #246 (USB flush) are MERGED. #247 is stacked on #245. Neither is mergeable: both must first merge main (scanout bench fix) and re-run P13.",
-    "merged": [
-      {
-        "number": 246,
-        "head": "6e447ab03616f49e9fec5ef09613ce12dc8fac1c",
-        "merge_commit": "170c80748c5a4f7cf052f8eac0c1c52e61b35ee0"
-      },
-      {
-        "number": 242,
-        "head": "fa8dc1d5eb19942ad470abb88d9841b81397a838",
-        "merge_commit": "c7e75145df81b3854db5370336ba3ef8428de982"
-      },
-      {
-        "number": 243,
-        "head": "175041cfdbe5354d39a4b03be5e1335811a42bfc",
-        "merge_commit": "ed68b11a986137da9710ea4e6f357a0547aed666"
-      },
-      {
-        "number": 244,
-        "head": "c0c0cfed1af326d1af84386488b0783e8876d2ec",
-        "merge_commit": "e0257c6006f965985d7b3af39a0ddc5790984526"
-      }
+    "as_of": "2026-11-10",
+    "base": "main@6bdcb36",
+    "note": "PR #245/#247/#248 listed on 2026-11-04 are no longer open. All open PRs are drafts.",
+    "merged_since_2026_11_04": [
+      "#252",
+      "#253",
+      "#256",
+      "#257",
+      "#261",
+      "#263",
+      "#265",
+      "#266",
+      "#268",
+      "#269",
+      "#270",
+      "#271",
+      "#274",
+      "#276",
+      "#277",
+      "#278"
     ],
     "items": [
       {
-        "number": 245,
-        "scope": "Storage S1: persistent home folders, delayed writeback, table metadata",
-        "head": "8db53f92ae4b84c18e17af8048cf94823be1ca6a",
-        "stacked_on": null,
-        "blocked_by": "P13 scanout red (bench obsolete, fixed on main by #242): must merge main and re-run P13"
+        "number": 281,
+        "scope": "P10 VIRGL window composition (up to 4 windows), opt-in features p10-universal-present + p10-virgl-experimental",
+        "head": "100af4040ec42fae156f5aa4d6b8a745d7e1a164",
+        "ci": "CI Fast, Integration, Reliability V3, Non-regression, ladybird-native-browser (PR) green; Ladybird launcher selector V7 red",
+        "integrated_in": "claude/c22-p13-p10-gpu-kernel-0y2ucg"
       },
       {
-        "number": 247,
-        "scope": "Perf P1: desktop first frame -1.9 s (font subset loaded in parallel)",
-        "head": "66b4c508b5e4e96dac4f5e484658537c1f2d98b5",
-        "stacked_on": 245,
-        "blocked_by": "P13 accounting SMP2 NON_QUALIFYING, attributed to the font preload (lack of windows, no overlap); console step 21 not attributed; scanout fixed on main"
+        "number": 280,
+        "scope": "older local snapshot of the same P10 prototype, 59 commits behind main",
+        "head": "c188155af37a6648603c7b394391cbed27a2e82a",
+        "status": "superseded by #281"
       },
       {
-        "number": 248,
-        "scope": "Documentation consolidation: README, sources of truth, licences",
-        "head": "this PR",
-        "stacked_on": null
+        "number": 279,
+        "scope": "docs: P10 local VIRGL evidence of 2026-11-09",
+        "head": "35fdf7c891ce7dba6f2257229fbae657cd6fa3d7"
       }
     ]
-  }
+  },
+  "open_issues": [
+    {
+      "number": 264,
+      "title": "P13: intermittent SMP4 panic on scheduler hand-off during 20 min soak",
+      "status": "OPEN"
+    }
+  ]
 }
