@@ -14,6 +14,8 @@ on:
       - 'src/drivers/display/**'
       - 'src/gui/**'
       - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/analyse_gpu_composition.py'
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
@@ -26,6 +28,8 @@ on:
       - 'src/drivers/display/**'
       - 'src/gui/**'
       - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/analyse_gpu_composition.py'
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
@@ -128,30 +132,46 @@ jobs:
   # sur `virtio-gpu-gl-pci` : la fenetre du navigateur doit etre composee par
   # le GPU (`fenetres_gpu>=1`, pixels poses par le GPU) et le smoke produit
   # (mire de la page, verdict terminal) doit rester vert.
+  # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : selection STRICTE de l'artefact. Le
+  # dernier artefact du depot n'est pas celui de ce SHA (run 42895079434 :
+  # empreinte ebc2d030 au lieu de 6199f460, refuse a juste titre par la
+  # verification). On retient le run d'un build reel dont l'empreinte,
+  # recalculee depuis git, est celle de ce SHA ; si une production de cette
+  # empreinte est en cours (declenchee par ladybird-native-browser), on
+  # l'attend. Jamais de declenchement ici, jamais de verification sautee.
+  ladybird-artefact:
+    name: gpu-composition / artefact Ladybird (selection stricte)
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run_id: ${{ steps.lb.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: lb
+        name: Artefact de l'empreinte de ce SHA (build reel, attente de la production en cours)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GRACE_ATTENTE: '900'
+          DELAI_ATTENTE: '14400'
+        run: python3 tools/ci/ladybird_provenance.py attends
+
   ladybird-gpu:
     name: gpu-composition / Ladybird
+    needs: ladybird-artefact
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Trouver l'artefact Ladybird canonique
-        id: lb
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Filtre par NOM cote API : les 100 derniers artefacts du depot ne
-          # contiennent pas toujours le navigateur (run 42796553984).
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=bouchaud-ladybird-native-browser&per_page=100" \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty')
-          [ -n "$run" ] || { echo "::error::aucun artefact Ladybird disponible"; exit 1; }
-          echo "run_id=$run" >> "$GITHUB_OUTPUT"
-          echo "Ladybird run=$run"
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
-          run-id: ${{ steps.lb.outputs.run_id }}
+          run-id: ${{ needs.ladybird-artefact.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Verifier la provenance de l'artefact et les entrees du SHA
         run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
