@@ -319,7 +319,13 @@
     "run": 42784700689,
     "evidence": "P13_STRICT_OK attribution smp=1,2,4",
     "smp8": "PENDING_DEDICATED_KVM8",
-    "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING"
+    "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING",
+    "soak_smp4_20m": {
+      "sha": "8e3c777a1b6e73a1dc13abb6dd32aab3c40bb207",
+      "run": 42815448566,
+      "result": "PASS 9/9",
+      "level": "TCG hosted"
+    }
   },
   "main_protection": "BLOCKED_BY_HUMAN_GITHUB_SETTING",
   "physical": "NOT_STARTED",
@@ -401,7 +407,17 @@
     {
       "number": 264,
       "title": "P13: intermittent SMP4 panic on scheduler hand-off during 20 min soak",
-      "status": "OPEN"
+      "status": "FIXED_PENDING_CLOSE",
+      "cause": "switch_to published the hand-off (SWITCH_PENDING) with IF=1; a timer IRQ before switching_out completed a half-published hand-off",
+      "fix": "4311be8 (hand-off published and completed with IF=0, fail-closed assert, structural test + 4 mutations)",
+      "evidence": {
+        "sha": "8e3c777a1b6e73a1dc13abb6dd32aab3c40bb207",
+        "run": 42815448566,
+        "job": 129834446721,
+        "level": "hosted QEMU TCG -cpu max SMP4",
+        "result": "soak 9/9 cycles of 120 s in 1080 s, 0 NON_QUALIFIANT, verdict OK; reliability-gate success"
+      },
+      "close_decision": "human (issue left open on GitHub)"
     }
   ],
   "P10": {
