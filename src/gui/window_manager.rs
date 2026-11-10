@@ -633,10 +633,19 @@ fn boucle() {
         "BOUCHAUD_ATELIER_TERMINAL_BOOT_V15 terminal_auto=0 lancement_explicite={}",
         lancement_explicite as u8
     );
+    // BOUCHAUD_ATELIER_TERMINAL_BOOT_V16 (10/11) : AUCUN Terminal au
+    // demarrage, meme dans un lancement explicite. `make_app(0)` retombait sur
+    // un Terminal quand le navigateur demande ne pouvait pas partir (disque
+    // sans Ladybird, lancement DOOM...) : c'est le Terminal « deja ouvert »
+    // vu au demarrage. Le Terminal ne s'ouvre plus qu'a la demande.
     #[cfg(not(feature = "reference-desktop"))]
     if lancement_explicite {
         let fenetre = make_app(0, home, &mut spawn_n);
-        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        if matches!(fenetre.app, App::Terminal { .. }) {
+            crate::serial_println!("BOUCHAUD_ATELIER_TERMINAL_BOOT_V16 repli_terminal_refuse=1");
+        } else {
+            ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        }
     }
     for kind in window::fenetres_demandees_au_demarrage() {
         let fenetre = make_app(kind, home, &mut spawn_n);

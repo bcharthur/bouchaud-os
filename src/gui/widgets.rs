@@ -101,13 +101,10 @@ fn filigrane_origine() -> (usize, usize) {
     )
 }
 
-/// Cote du logo au-dessus de la marque.
-const LOGO_MARQUE: usize = 72;
-
+// BOUCHAUD_ATELIER_SANS_CROISSANT_V1 (10/11) : la marque est le NOM seul,
+// sans le croissant -- ni au centre du bureau, ni dans la barre du haut.
 pub(crate) fn draw_filigrane() {
     let (x, y) = filigrane_origine();
-    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_72,
-        (fb::width() / 2).saturating_sub(LOGO_MARQUE / 2), y.saturating_sub(LOGO_MARQUE + 14));
     let blanc = crate::gui::atelier::jetons::ENCRE_SUR_FOND;
     // Une ombre d'un pixel, tres diffuse, detache le blanc du ciel clair.
     fb::draw_text_prop(x + 1, y + 2, FILIGRANE, 0x8a87b8, FILIGRANE_CORPS, true);
@@ -127,9 +124,7 @@ pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
     let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, true);
     // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
     // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
-    // Le logo est au-dessus du titre : le calque l'inclut.
-    let haut = y.saturating_sub(LOGO_MARQUE + 14);
-    (x.saturating_sub(4), haut, largeur + 8, FILIGRANE_HAUTEUR + (y - haut))
+    (x.saturating_sub(4), y.saturating_sub(4), largeur + 8, FILIGRANE_HAUTEUR + 4)
 }
 
 /// Fond d'ecran seul.
@@ -308,12 +303,9 @@ fn draw_topbar(centre_ouvert: bool, survol_bouton: bool) {
     let corps = j::CORPS_BARRE;
     let ligne = ligne_texte_barre(0);
 
-    // La marque, a gauche : un ASSET (logo provisoire,
-    // BOUCHAUD_ATELIER_LOGO_PROVISOIRE_V1) et le nom.
+    // La marque, a gauche : le nom seul (BOUCHAUD_ATELIER_SANS_CROISSANT_V1).
     let x = j::ESPACE_4 as usize;
-    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_18, x,
-        (BAR_H - 18) / 2);
-    fb::draw_text_prop(x + 18 + j::ESPACE_2 as usize, ligne, "Bouchaud OS", j::ENCRE, corps, true);
+    fb::draw_text_prop(x, ligne, "Bouchaud OS", j::ENCRE, corps, true);
 
     // Date et heure, au centre.
     let dt = rtc::now();
