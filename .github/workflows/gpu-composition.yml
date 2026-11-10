@@ -1,0 +1,100 @@
+# P10 -- compositeur GPU des fenetres (BOUCHAUD_GPU_COMPOSITION_V2).
+#
+# QEMU `virtio-gpu-gl-pci` + virglrenderer : le BLIT des fenetres s'execute sur
+# le GL de l'hote. Les runners GitHub n'ont pas de GPU : le GL de l'hote y est
+# llvmpipe (Mesa, logiciel). La preuve porte donc sur le DELESTAGE du
+# processeur INVITE (dessin du bureau, pixels clients recopies) et sur
+# l'exactitude au pixel ; le gain absolu d'un vrai GPU hote se mesure sur un
+# poste avec GPU (`run.ps1 -P10GPU`), pas ici.
+name: GPU composition
+
+on:
+  pull_request:
+    paths:
+      - 'src/drivers/display/**'
+      - 'src/gui/**'
+      - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/analyse_gpu_composition.py'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/doom/**'
+      - '.github/workflows/gpu-composition.yml'
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'src/drivers/display/**'
+      - 'src/gui/**'
+      - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/analyse_gpu_composition.py'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/doom/**'
+      - '.github/workflows/gpu-composition.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-composition-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  banc:
+    name: gpu-composition / ${{ matrix.accel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        accel: [tcg, kvm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU (VIRGL), Xvfb, Mesa, musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+            xvfb imagemagick musl-tools libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil build-essential
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -device help 2>&1 | grep virtio-gpu || true
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            gpu-composition-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: DOOM (Doomgeneric epingle, Freedoom verifie)
+        run: tools/doom/build-linux.sh
+      - name: Acces a /dev/kvm
+        if: matrix.accel == 'kvm'
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)
+        env:
+          BO_QEMU_KVM: ${{ matrix.accel == 'kvm' && '1' || '0' }}
+        run: |
+          tools/ci/run_gpu_composition.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | tee gpu-composition.log
+          grep -q GPU_COMPOSITION_BANC_OK gpu-composition.log
+      - name: Extraits du journal
+        if: always()
+        run: |
+          for f in gpu-composition/*/serie.log; do
+            echo "== $f"
+            sed 's/\x1b\[[0-9;]*m//g' "$f" | grep -aE 'AUTOTEST|GPU_COMPOSITION|GPU-COMPOSITION|GPU_COUCHE|DOOM_ATELIER|APP_LAUNCH|MIRE_GPU|panic|PANIC' | head -40 || true
+          done
+      - name: Preuves
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-composition-${{ matrix.accel }}
+          path: |
+            gpu-composition.log
+            gpu-composition/*/serie.log
+            gpu-composition/*/capture.png
+          if-no-files-found: warn

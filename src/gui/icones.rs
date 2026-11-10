@@ -198,6 +198,7 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
 pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
     use crate::gui::window::App;
     Some(match app {
+        App::Application { .. } => return None,
         App::Navigateur { .. } => 0,
         App::Doom { .. } => 11,
         App::Calc { .. } => 1,

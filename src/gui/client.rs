@@ -74,6 +74,9 @@ pub struct Client {
     tampon: Vec<u8>,
     touches_attente: crate::gui::key_queue::KeyQueue,
     degat: Rect,
+    /// BOUCHAUD_GPU_COMPOSITION_V2 : ce que le client a peint et que la
+    /// texture GPU de sa fenetre n'a pas encore recu (coordonnees surface).
+    pub degat_gpu: Rect,
     serie: u32,
     verdict: VerdictProtocole,
     pub fermeture_demandee: bool,
@@ -339,6 +342,7 @@ impl Client {
             tampon: Vec::new(),
             touches_attente: crate::gui::key_queue::KeyQueue::new(),
             degat: Rect::default(),
+            degat_gpu: Rect::default(),
             serie: 0,
             verdict: VerdictProtocole::neuf(),
             fermeture_demandee: false,

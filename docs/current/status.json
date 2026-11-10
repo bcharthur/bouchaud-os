@@ -16,7 +16,7 @@
     "P7": "UNKNOWN",
     "P8": "UNKNOWN",
     "P9": "UNKNOWN",
-    "P10": "EXPERIMENTAL_VIRGL_OPT_IN",
+    "P10": "GPU_WINDOW_COMPOSITION_VERIFIED_AT_TCG_LOCAL",
     "P11": "UNKNOWN",
     "P12": "UNKNOWN",
     "P13": "PARTIAL_BLOCKED_NO_DEDICATED_RUNNER",
@@ -386,5 +386,16 @@
       "title": "P13: intermittent SMP4 panic on scheduler hand-off during 20 min soak",
       "status": "OPEN"
     }
-  ]
+  ],
+  "P10": {
+    "scope": "GPU window composition on QEMU VIRGL (BOUCHAUD_GPU_COMPOSITION_V2)",
+    "status": "VERIFIED_AT_TCG_LOCAL",
+    "ci": "workflow gpu-composition.yml (TCG+KVM) pending at snapshot",
+    "not_done": [
+      "Skia/Ladybird raster on GPU (needs guest Vulkan/Venus)",
+      "AMD/Trigkey driver",
+      "compositor still a kernel thread"
+    ],
+    "doc": "docs/current/P10_GPU_COMPOSITEUR.md"
+  }
 }

@@ -177,14 +177,18 @@ pub(crate) enum App {
     Navigateur { client: alloc::boxed::Box<crate::gui::client::Client> },
     /// Jeu video externe : meme protocole GUI isole que Ladybird.
     Doom { client: alloc::boxed::Box<crate::gui::client::Client> },
+    /// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : tout autre programme ring 3 qui
+    /// parle le protocole GUI -- meme fenetre, meme composition, sans aucun
+    /// traitement propre a un navigateur ou a un jeu.
+    Application { client: alloc::boxed::Box<crate::gui::client::Client> },
 }
 
 impl App {
     pub(crate) fn client_mut(&mut self) -> Option<&mut crate::gui::client::Client> {
-        match self { Self::Navigateur { client } | Self::Doom { client } => Some(client), _ => None }
+        match self { Self::Navigateur { client } | Self::Doom { client } | Self::Application { client } => Some(client), _ => None }
     }
     pub(crate) fn client(&self) -> Option<&crate::gui::client::Client> {
-        match self { Self::Navigateur { client } | Self::Doom { client } => Some(client), _ => None }
+        match self { Self::Navigateur { client } | Self::Doom { client } | Self::Application { client } => Some(client), _ => None }
     }
 }
 
@@ -353,7 +357,7 @@ pub(crate) fn fenetre_pour_zone(largeur: i32, hauteur: i32) -> (i32, i32) {
 
 /// La fenetre porte-t-elle un client ring 3 ?
 pub(crate) fn est_client(w: &Win) -> bool {
-    matches!(w.app, App::Navigateur { .. } | App::Doom { .. })
+    matches!(w.app, App::Navigateur { .. } | App::Doom { .. } | App::Application { .. })
 }
 
 /// Bascule maximiser / restaurer une fenetre.

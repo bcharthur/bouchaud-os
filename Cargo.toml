@@ -14,12 +14,16 @@ reference-bringup = []
 reference-desktop = ["reference-bringup"]
 # P19 experimental QEMU TCG profile, opt-in; the physical default is unchanged.
 p19-tcg-low-latency = []
-# BOUCHAUD_P10_VIRGL_3D_20261109: QEMU virgl only, OFF by default.
-# No userland DRM/Vulkan and no GPU rendering until a subsequent P10 milestone.
+# BOUCHAUD_GPU_COMPOSITION_V2 (P10) : la negociation VIRGL et le compositeur
+# GPU des fenetres sont TOUJOURS compiles ; ils ne s'enclenchent que si l'hote
+# PROPOSE VIRGL (QEMU `virtio-gpu-gl-pci`), que la sonde 3D et l'autotest de
+# BLIT reussissent. Sinon le bureau reste en virtio-gpu 2D, BGA ou GOP,
+# exactement comme avant. Option conservee SANS EFFET pour les scripts
+# existants (`run.ps1 -P10GPU`).
 p10-virgl-experimental = []
-# BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109: option de composition
-# CPU et livraison GPU asynchrone commune a toutes les fenetres.
-# Experimental, ne remplace PAS Skia CPU par une implementation 3D.
+# Ancien chemin « present universel » de la PR #281 (copies plein ecran par
+# trame), remplace par le compositeur V2. Option conservee sans effet pour
+# ne casser aucune ligne de commande.
 p10-universal-present = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #

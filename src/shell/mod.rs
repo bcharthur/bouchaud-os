@@ -212,7 +212,7 @@ pub const COMMANDS: &[&str] = &[
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
     "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
-    "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
+    "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "gpu-composition", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
@@ -1310,6 +1310,26 @@ fn gpu_irq(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// BOUCHAUD_GPU_COMPOSITION_V2 : `gpu-composition on|off` (A/B du
+/// compositeur GPU des fenetres ; sans effet sans VIRGL).
+fn gpu_composition(argc: usize, argv: &[&str; 12]) -> i32 {
+    {
+        if argc >= 2 {
+            match argv[1] {
+                "on" => { crate::drivers::virtio_gpu::veut_composition_gpu(true); }
+                "off" => { crate::drivers::virtio_gpu::veut_composition_gpu(false); }
+                autre => {
+                    crate::println!("gpu-composition : {} inconnu (on | off)", autre);
+                    return 1;
+                }
+            }
+        }
+        let (trames, blits, _, _, textures, _, dispo) = crate::drivers::virtio_gpu::compteurs_composition_gpu();
+        crate::serial_println!("GPU_COMPOSITION disponible={} trames={} blits={} textures={}", dispo as u8, trames, blits, textures);
+        0
+    }
+}
+
 fn gpu_trame(argc: usize, argv: &[&str; 12]) -> i32 {
     if argc >= 2 {
         match argv[1] {
@@ -1578,6 +1598,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // (on) ou deux commandes par region (off, defaut) ; sans argument,
         // les compteurs. `banc-trame` : la trame type, chronometree.
         "gpu-trame" => gpu_trame(argc, &argv),
+        "gpu-composition" => gpu_composition(argc, &argv),
         "banc-trame" => {
             crate::drivers::gfx::banc_trame();
             vga::clear();

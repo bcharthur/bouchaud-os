@@ -88,15 +88,16 @@ jobs:
       # P10 : ne jamais laisser un code GPU optionnel passer uniquement
       # les tests du chemin CPU par defaut.
       # Meme toolchain, meme cible noyau et criteres de build.
-      - name: P10 GPU - compilation des voies experimentales
+      # BOUCHAUD_GPU_COMPOSITION_V2 : le compositeur GPU est dans `default` ;
+      # on verifie aussi le noyau SANS lui (aucun code GPU ne doit etre requis).
+      - name: P10 GPU - compilation avec et sans compositeur VIRGL
         run: |
-          cargo build --features p10-universal-present
+          cargo build --no-default-features --features legacy-boot
           cargo build --features p10-universal-present,p10-virgl-experimental
           for source in \
               src/drivers/display/virtio_gpu_3d.rs \
               src/drivers/display/p10_virgl_composition.rs \
-              src/drivers/display/p10_window_gpu.rs \
-              src/drivers/display/p10_surface_contract.rs; do
+              src/drivers/display/composition_gpu.rs; do
             fichier="target/$(basename "$source" .rs)-tests"
             rustc --edition 2021 --test "$source" -o "$fichier"
             "$fichier"

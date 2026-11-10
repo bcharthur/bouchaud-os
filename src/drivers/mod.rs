@@ -33,13 +33,11 @@ pub mod virtio_gpu;
 #[path = "display/virtio_gpu_3d.rs"]
 pub mod virtio_gpu_3d;
 // BOUCHAUD_P10_VIRGL_VULKAN_BRIDGE_20261109: vrai paquet BLIT Gallium.
-#[cfg(feature = "p10-virgl-experimental")]
 #[path = "display/p10_virgl_composition.rs"]
 pub mod p10_virgl_composition;
-// BOUCHAUD_P10_GPU_APP_LAYERS_20261109
-#[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
-#[path = "display/p10_window_gpu.rs"]
-pub mod p10_window_gpu;
+/// BOUCHAUD_GPU_COMPOSITION_V2 (P10) : decoupe et commandes du compositeur GPU (pur, teste sur l'hote).
+#[path = "display/composition_gpu.rs"]
+pub mod composition_gpu;
 /// BOUCHAUD_VIRTIO_GPU_2D_V1 : qui presente le bureau (GOP > BGA > virtio-gpu 2D), pur et teste sur l'hote.
 #[path = "display/virtio_gpu_dma.rs"]
 pub mod virtio_gpu_dma;
@@ -55,12 +53,6 @@ pub mod virtio_gpu_tampons;
 /// BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3a) : une trame, une soumission (pur, teste sur l'hote).
 #[path = "display/virtio_gpu_trame.rs"]
 pub mod virtio_gpu_trame;
-// BOUCHAUD_P10_UNIVERSAL_PRESENT_20261109
-#[path = "display/p10_surface_contract.rs"]
-pub mod p10_surface_contract;
-#[cfg(feature = "p10-universal-present")]
-#[path = "display/p10_gpu_queue.rs"]
-pub mod p10_gpu_queue;
 #[path = "display/politique_scanout.rs"]
 pub mod politique_scanout;
 /// Discipline de l'anneau de reception RTL8168, PURE : voir
