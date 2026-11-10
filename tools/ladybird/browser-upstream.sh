@@ -1,5 +1,6 @@
 #!/bin/bash
 # Build the real pinned Ladybird libraries and Services/WebContent in a disposable
+# BOUCHAUD_LADYBIRD_PRODUCTION_V1 -- preuve CI : ce commentaire change l'empreinte (branche jetable, jamais fusionnee).
 # worktree. Only the runtime services are linked static-pie for Bouchaud's
 # Linux-ABI userland; build-time generators remain normal Ubuntu executables.
 set -euo pipefail
