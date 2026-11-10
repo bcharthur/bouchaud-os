@@ -19,7 +19,7 @@
     "P10": "GPU_WINDOW_COMPOSITION_VERIFIED_AT_KVM",
     "P11": "UNKNOWN",
     "P12": "UNKNOWN",
-    "P13": "PARTIAL_BLOCKED_NO_DEDICATED_RUNNER",
+    "P13": "STRICT_SMP124_PASS_KVM_SMP8_BLOCKED_NO_DEDICATED_RUNNER",
     "P14": "UNKNOWN",
     "P15": "UNKNOWN",
     "P16": "UNKNOWN",
@@ -43,9 +43,9 @@
     "execution_checkout_sha": "84105df8bf1ca1cf31cb8da6eaab50e43a96383d",
     "run_event": "pull_request",
     "candidate_replay": {
-      "run_id": 41592642065,
-      "sha": "c1e55da99dcc411f45ee68ebd285d91205f82067",
-      "status": "IN_PROGRESS_AT_SNAPSHOT"
+      "run_id": 42784700689,
+      "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
+      "status": "IN_PROGRESS_AT_SNAPSHOT (memoire-onglets after full Ladybird build)"
     }
   },
   "ci": {
@@ -300,7 +300,10 @@
     }
   },
   "p13": {
-    "smp124_endurance": "PASS",
+    "strict_smp124_kvm": "PASS",
+    "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
+    "run": 42784700689,
+    "evidence": "P13_STRICT_OK attribution smp=1,2,4",
     "smp8": "PENDING_DEDICATED_KVM8",
     "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING"
   },
