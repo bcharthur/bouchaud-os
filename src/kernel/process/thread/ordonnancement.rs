@@ -560,6 +560,18 @@ pub fn schedule() -> bool {
 
 fn switch_to(from: usize, to: usize) {
     debug_assert!(TRANSITION_ORDONNANCEUR[local_cpu()].load(Ordering::Acquire));
+    // P13_PASSATION_SOUS_IF_COUPE_V1 (#264) : de la publication de la
+    // passation (`prepare_switch_handoff`) jusqu'a sa completion par la
+    // continuation entrante, AUCUNE interruption de ce coeur. `schedule()`
+    // arrive ici IF=1 : une IRQ timer tombant apres le `compare_exchange` de
+    // `SWITCH_PENDING` entrait dans `preempt_from_irq`, qui terminait une
+    // passation a moitie publiee (`pending` sans `switching_out` : la panique
+    // du soak SMP4, cpu=3, courant.rs) -- ou, un peu plus tard, publiait la
+    // tache sortante (`on_cpu = -1`) alors qu'on tournait encore sur SA pile.
+    // `switch_context` coupait deja les IRQ, mais seulement a son entree.
+    // L'etat IF est rendu par CETTE pile, apres sa propre completion.
+    let if_avant = interrupts::are_enabled();
+    interrupts::disable();
     let cpu_id = local_cpu();
     let (from_ptr, to_ptr) = unsafe {
         let list = tasks();
@@ -585,7 +597,7 @@ fn switch_to(from: usize, to: usize) {
     // ce coeur ne concerne pas la tache entrante. Une commutation faite DEPUIS
     // un gestionnaire a IF baisse (les gestionnaires ne le relevent jamais :
     // `verifie-preemption-noyau.py`) ; un `schedule()` volontaire, IF leve.
-    if cpu::interrupts_enabled() {
+    if if_avant {
         crate::kernel::attribution_reveil::commutation_hors_irq(cpu_id);
     }
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, (*to_ptr).ctx.rsp); }
@@ -600,6 +612,11 @@ fn switch_to(from: usize, to: usize) {
     complete_switch_handoff();
     if reprend {
         unsafe { (*from_ptr).reveil_passe_ns.range(crate::kernel::timer::monotonic_ns()); }
+    }
+    // P13_PASSATION_SOUS_IF_COUPE_V1 : la passation est terminee, l'etat IF
+    // de CETTE tache revient (celui d'avant sa commutation).
+    if if_avant {
+        interrupts::enable();
     }
 }
 
@@ -645,6 +662,9 @@ fn switch_to_kernel(raison: &'static str) -> ! {
         raison
     );
     temoin_switch_to_kernel(cpu_id, cur, raison);
+    // P13_PASSATION_SOUS_IF_COUPE_V1 : aucune IRQ entre la publication de la
+    // passation et l'abandon de la pile (cette pile ne reprend jamais).
+    interrupts::disable();
     let from_ptr = abandonne_la_tache_courante(cpu_id, cur);
     let target_rsp = kernel_ctx().rsp;
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
@@ -659,6 +679,8 @@ fn reprend_continuation(raison: &'static str) -> ! {
     let cpu_id = local_cpu();
     let cur = current_index_raw();
     let target_rsp = consomme_continuation(cpu_id, raison);
+    // P13_PASSATION_SOUS_IF_COUPE_V1 : idem `switch_to_kernel`.
+    interrupts::disable();
     let from_ptr = abandonne_la_tache_courante(cpu_id, cur);
     unsafe { switch_context(&mut (*from_ptr).ctx.rsp, target_rsp); }
     unreachable!("task: reprise d'une tache terminee")

@@ -486,7 +486,19 @@ user_ms={} sys_ms={}",
                             static DERNIER_INVENTAIRE_MS: AtomicU64 = AtomicU64::new(0);
                             let now = crate::kernel::timer::monotonic_ms();
                             let last = DERNIER_INVENTAIRE_MS.load(Ordering::Relaxed);
+                            // BOUCHAUD_C22_INVENTAIRE_VMA_SUR_DEMANDE_V1 :
+                            // l'inventaire emet UNE ligne serie par VMA
+                            // anonyme (des centaines pour WebContent), toutes
+                            // les 5 s, dans TOUTE session -- du temps console
+                            // pris au navigateur pour un diagnostic que seuls
+                            // les scripts forensiques C22 lisent (le verdict lit
+                            // `[C22:RSS]`, garde ci-dessus sans condition). Il
+                            // reste emis, a l'identique, des que le banc
+                            // memoire (`BOUCHAUD_LB_MEMORY_PROOF=1`) ou un
+                            // diagnostic explicite (`BOUCHAUD_C22_DIAG_VMA=1`)
+                            // le demande.
                             if now.saturating_sub(last) >= 5_000
+                                && inventaire_vma_demande()
                                 && DERNIER_INVENTAIRE_MS.compare_exchange(
                                     last, now, Ordering::AcqRel, Ordering::Relaxed
                                 ).is_ok()
@@ -943,4 +955,12 @@ pub fn demarre_fil_mesures_processus() -> bool {
 pub fn usage() -> (u64, u64, u64) {
     let sample = SAMPLE_MS.load(Ordering::Acquire);
     (CPU.load(Ordering::Relaxed), RSS.load(Ordering::Relaxed), sample)
+}
+
+/// BOUCHAUD_C22_INVENTAIRE_VMA_SUR_DEMANDE_V1 : l'inventaire `[C22:VMA]` est-il
+/// demande (banc memoire C22 ou diagnostic explicite) ?
+fn inventaire_vma_demande() -> bool {
+    crate::shell::exported().iter().any(|e| {
+        e == "BOUCHAUD_LB_MEMORY_PROOF=1" || e == "BOUCHAUD_C22_DIAG_VMA=1"
+    })
 }
