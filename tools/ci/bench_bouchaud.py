@@ -76,6 +76,23 @@ def main():
         ("Présentation par trame — virtio-gpu 2D sans VIRGL", f(champ(rr, "us_presentation_par_trame"), " µs"), "repli"),
         ("Fenêtre cachée : pixels clients CPU", f(champ(ro, "px_client_copies_cpu"), " /s", 30), "DOOM sous une autre fenêtre"),
     ]
+    # BOUCHAUD_GPU_ATTRIBUTION_V1 : centiles par trame et par commande
+    # (bornes hautes de classes de puissance de deux, dernier releve).
+    def dernier(t, balise):
+        lignes_b = [l for l in t.splitlines() if balise in l]
+        return lignes_b[-1].split(balise, 1)[1] if lignes_b else ""
+    for nom_bras, t in (("GPU", g), ("CPU", c), ("2D sans VIRGL", r)):
+        m = re.search(r"presentation_us_p50=(\d+) p95=(\d+) p99=(\d+) max=(\d+)", dernier(t, "[GPU-TRAMES]"))
+        if m:
+            lignes.append((f"Présentation par trame p50/p95/p99 — {nom_bras}",
+                           f"≤ {m[1]}/{m[2]}/{m[3]} µs", f"max {m[4]} µs depuis le démarrage ; bornes hautes de classes"))
+        m = re.search(r"dessin_cpu_us_p50=(\d+) p95=(\d+) p99=(\d+) max=(\d+)", dernier(t, "[GPU-TRAMES]"))
+        if m:
+            lignes.append((f"Dessin CPU par trame p50/p95/p99 — {nom_bras}",
+                           f"≤ {m[1]}/{m[2]}/{m[3]} µs", f"max {m[4]} µs depuis le démarrage"))
+        cmd = re.findall(r"(\w+)=(\d+):(\d+)/(\d+)/(\d+)/(\d+)", dernier(t, "[GPU-COMMANDES]"))
+        for nom_c, n, p50, p95, p99, mx in cmd:
+            lignes.append((f"Commande {nom_c} p50/p95/p99 — {nom_bras}", f"≤ {p50}/{p95}/{p99} µs", f"{n} commandes sur 30 s, max {mx} µs depuis le démarrage"))
     print("| Mesure | Valeur | Conditions |")
     print("|---|---:|---|")
     for nom, val, cond in lignes:

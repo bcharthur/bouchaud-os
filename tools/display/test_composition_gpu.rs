@@ -189,3 +189,25 @@ fn autotest_de_convention_juge_au_pixel() {
     let q = relecture(TEXTURE_BASE, R::neuf(0, 0, 8, 8), 32, 8, 8).unwrap();
     assert_eq!(mot(&q, 0), CMD_TRANSFER_FROM_HOST_3D);
 }
+
+#[test]
+fn centiles_bornes_hautes_et_classes() {
+    assert_eq!(classe(0), 0);
+    assert_eq!(classe(1_999), 0);
+    assert_eq!(classe(2_000), 1);
+    assert_eq!(classe(3_000_000), 11); // 3 ms -> [2048, 4096) us
+    assert_eq!(classe(4_100_000), 12); // 4,1 ms -> [4096, 8192) us
+    let h = Histo::neuf();
+    for _ in 0..90 { h.note(100_000); }   // 100 us -> classe 6 [64,128)
+    for _ in 0..9 { h.note(3_000_000); }  // 3 ms  -> classe 11
+    h.note(20_000_000);                   // 20 ms -> classe 14
+    let v = h.instantane();
+    assert_eq!(centile_us(&v, 50), Some(128));
+    assert_eq!(centile_us(&v, 95), Some(4096));
+    assert_eq!(centile_us(&v, 99), Some(4096));
+    assert_eq!(centile_us(&v, 100), Some(32768));
+    assert_eq!(h.max_ns.load(core::sync::atomic::Ordering::Relaxed), 20_000_000);
+    assert_eq!(centile_us(&[0; CLASSES], 50), None);
+    let d = delta(&v, &v);
+    assert_eq!(d.iter().sum::<u64>(), 0);
+}

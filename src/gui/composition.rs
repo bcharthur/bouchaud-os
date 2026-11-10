@@ -68,7 +68,12 @@ static NS_DESSIN: AtomicU64 = AtomicU64::new(0);
 static NS_PRESENTATION: AtomicU64 = AtomicU64::new(0);
 static TRAMES_BUREAU: AtomicU64 = AtomicU64::new(0);
 
+static HISTO_DESSIN: cg::Histo = cg::Histo::neuf();
+static HISTO_PRESENTATION: cg::Histo = cg::Histo::neuf();
+
 pub fn note_trame(dessin_ns: u64, presentation_ns: u64) {
+    HISTO_DESSIN.note(dessin_ns);
+    HISTO_PRESENTATION.note(presentation_ns);
     NS_DESSIN.fetch_add(dessin_ns, Ordering::Relaxed);
     NS_PRESENTATION.fetch_add(presentation_ns, Ordering::Relaxed);
     TRAMES_BUREAU.fetch_add(1, Ordering::Relaxed);
@@ -194,6 +199,22 @@ pub fn releve(periode_ms: u64, trames_clients: u64) {
     let maintenant = [trames, blits, poses, montes, cpu, NS_DESSIN.load(Ordering::Relaxed),
         NS_PRESENTATION.load(Ordering::Relaxed), TRAMES_BUREAU.load(Ordering::Relaxed), trames_clients];
     let avant = core::mem::replace(&mut *PRECEDENT.lock(), maintenant);
+    // BOUCHAUD_GPU_ATTRIBUTION_V1 : centiles de la periode (bornes hautes).
+    static HISTO_PRECEDENT: SpinLock<([u64; cg::CLASSES], [u64; cg::CLASSES])> =
+        SpinLock::new(([0; cg::CLASSES], [0; cg::CLASSES]));
+    let (hd, hp) = {
+        let (d1, p1) = (HISTO_DESSIN.instantane(), HISTO_PRESENTATION.instantane());
+        let mut g = HISTO_PRECEDENT.lock();
+        let r = (cg::delta(&d1, &g.0), cg::delta(&p1, &g.1));
+        *g = (d1, p1);
+        r
+    };
+    let c = |h: &[u64; cg::CLASSES], q| cg::centile_us(h, q).unwrap_or(0);
+    crate::serial_println!(
+        "[GPU-TRAMES] dessin_cpu_us_p50={} p95={} p99={} max={} presentation_us_p50={} p95={} p99={} max={}",
+        c(&hd, 50), c(&hd, 95), c(&hd, 99), HISTO_DESSIN.max_ns.load(Ordering::Relaxed) / 1000,
+        c(&hp, 50), c(&hp, 95), c(&hp, 99), HISTO_PRESENTATION.max_ns.load(Ordering::Relaxed) / 1000);
+    crate::drivers::virtio_gpu::releve_commandes();
     let d = |i: usize| maintenant[i].saturating_sub(avant[i]);
     let tb = d(7).max(1);
     {

@@ -78,9 +78,18 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
+      - name: Image de banc -- panne GPU injectee (non livrable)
+        run: |
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livre.bin
+          cargo bootimage --features banc-gpu-composition-panne
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-panne.bin
+          cp boot-livre.bin target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if grep -aq GPU_COMPOSITION_INJECTION boot-livre.bin; then echo "INJECTION_DANS_L_IMAGE_LIVREE" >&2; exit 1; fi
+          grep -aq GPU_COMPOSITION_INJECTION boot-panne.bin
       - name: Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)
         env:
           BO_QEMU_KVM: ${{ matrix.accel == 'kvm' && '1' || '0' }}
+          GPU_COMPOSITION_BOOT_PANNE: boot-panne.bin
         run: |
           tools/ci/run_gpu_composition.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | tee gpu-composition.log
           grep -q GPU_COMPOSITION_BANC_OK gpu-composition.log

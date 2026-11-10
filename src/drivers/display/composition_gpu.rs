@@ -424,3 +424,78 @@ pub fn juge_autotest(cible: &[u32], largeur: u32, hauteur: u32, sy: u32, dy: u32
     }
     true
 }
+
+// ---- Histogrammes de durees (p50 / p95 / p99), BOUCHAUD_GPU_ATTRIBUTION_V1 --
+//
+// Classes de puissance de deux en microsecondes : la classe k couvre
+// [2^k, 2^(k+1)) us (k = 0 couvre [0, 2)). Une valeur rendue est la BORNE
+// HAUTE de sa classe : un p95 annonce « <= 4 096 us » ne ment jamais par
+// defaut. Sans allocation, sans verrou.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+pub const CLASSES: usize = 24;
+
+pub struct Histo {
+    pub classes: [AtomicU64; CLASSES],
+    pub somme_ns: AtomicU64,
+    pub max_ns: AtomicU64,
+}
+
+impl Histo {
+    pub const fn neuf() -> Histo {
+        Histo {
+            classes: [const { AtomicU64::new(0) }; CLASSES],
+            somme_ns: AtomicU64::new(0),
+            max_ns: AtomicU64::new(0),
+        }
+    }
+    pub fn note(&self, ns: u64) {
+        self.classes[classe(ns)].fetch_add(1, Ordering::Relaxed);
+        self.somme_ns.fetch_add(ns, Ordering::Relaxed);
+        self.max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+    pub fn instantane(&self) -> [u64; CLASSES] {
+        let mut v = [0u64; CLASSES];
+        for (i, c) in self.classes.iter().enumerate() {
+            v[i] = c.load(Ordering::Relaxed);
+        }
+        v
+    }
+}
+
+/// La classe d'une duree en nanosecondes.
+pub fn classe(ns: u64) -> usize {
+    let us = ns / 1000;
+    if us < 2 {
+        0
+    } else {
+        ((63 - us.leading_zeros()) as usize).min(CLASSES - 1)
+    }
+}
+
+/// Borne haute (us) du centile `p` (0..=100) d'un histogramme de classes.
+pub fn centile_us(classes: &[u64; CLASSES], p: u64) -> Option<u64> {
+    let total: u64 = classes.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let rang = (total * p).div_ceil(100).max(1);
+    let mut cumul = 0u64;
+    for (k, n) in classes.iter().enumerate() {
+        cumul += n;
+        if cumul >= rang {
+            return Some(1u64 << (k + 1));
+        }
+    }
+    Some(1u64 << CLASSES)
+}
+
+/// Difference de deux instantanes (periode de releve).
+pub fn delta(apres: &[u64; CLASSES], avant: &[u64; CLASSES]) -> [u64; CLASSES] {
+    let mut d = [0u64; CLASSES];
+    for i in 0..CLASSES {
+        d[i] = apres[i].saturating_sub(avant[i]);
+    }
+    d
+}

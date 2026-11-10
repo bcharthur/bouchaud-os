@@ -619,6 +619,7 @@ impl FileControle {
             return Err("commande-trop-courte");
         }
         { self.derniere_reponse_len = 0; }
+        let t_commande = crate::kernel::timer::monotonic_ns();
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
         self.barriere = self.barriere.wrapping_add(1);
@@ -707,6 +708,9 @@ impl FileControle {
         }
         { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
+        // BOUCHAUD_GPU_ATTRIBUTION_V1 : duree de l'aller-retour, par genre.
+        HISTO_COMMANDES[indice_commande(lit_genre(requete))]
+            .note(crate::kernel::timer::monotonic_ns().saturating_sub(t_commande));
         Ok(genre)
     }
 
@@ -1849,10 +1853,42 @@ pub fn veut_composition_gpu(oui: bool) -> bool {
 /// Le compositeur GPU peut-il servir cette trame ? VIRGL negocie, scanout
 /// virtio actif, politique voulue, aucun echec anterieur.
 pub fn composition_gpu_disponible() -> bool {
+    if COMPOSITION_INVALIDE.load(Ordering::Acquire) && !reprise_due() {
+        return false;
+    }
     COMPOSITION_VOULUE.load(Ordering::Acquire)
-        && !COMPOSITION_INVALIDE.load(Ordering::Acquire)
         && ACTIF.load(Ordering::Acquire)
         && P10_VIRGL_PRET.load(Ordering::Acquire)
+}
+
+// BOUCHAUD_GPU_COMPOSITION_REPRISE_V1 : un echec du compositeur GPU dont la
+// file de controle est INTACTE (le peripherique a repondu, il a refuse) n'est
+// plus definitif. Les textures sont rendues, le bureau repeint tout par le
+// processeur ; au bout de `REPRISE_DELAI_NS`, le GPU est retente -- au plus
+// `REPRISE_MAX` fois par demarrage. Une commande SANS reponse (file cassee),
+// une texture dont la memoire n'a pas pu etre rendue : definitif, comme avant
+// (le peripherique peut encore tenir des pages).
+const REPRISE_DELAI_NS: u64 = 5_000_000_000;
+const REPRISE_MAX: u32 = 3;
+static REPRISE_APRES_NS: AtomicU64 = AtomicU64::new(0);
+static ECHEC_DEFINITIF: AtomicBool = AtomicBool::new(false);
+static REPRISES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn reprise_due() -> bool {
+    if ECHEC_DEFINITIF.load(Ordering::Acquire) {
+        return false;
+    }
+    let echeance = REPRISE_APRES_NS.load(Ordering::Acquire);
+    if echeance == 0 || crate::kernel::timer::monotonic_ns() < echeance {
+        return false;
+    }
+    if REPRISE_APRES_NS.compare_exchange(echeance, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        let n = REPRISES.fetch_add(1, Ordering::AcqRel) + 1;
+        COMPOSITION_INVALIDE.store(false, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_REPRISE tentative={} (file intacte, textures recreees)", n);
+        return true;
+    }
+    false
 }
 
 
@@ -1898,6 +1934,7 @@ unsafe fn rend_texture(p: &mut Peripherique, i: usize) {
         crate::kernel::partage::ferme(t.noeud);
     } else {
         COMPOSITION_INVALIDE.store(true, Ordering::Release);
+        ECHEC_DEFINITIF.store(true, Ordering::Release);
         crate::serial_println!("GPU_COMPOSITION_TEXTURE_RETENUE id={:#x} noeud={} (sans reponse : surface jamais rendue)", t.id, t.noeud);
     }
 }
@@ -2065,6 +2102,17 @@ pub fn presente_trame_gpu(plan: &trame::Plan, couches: &[CoucheGpu]) -> bool {
     let trame_n = GPU_TRAMES.load(Ordering::Relaxed) + 1;
     let resultat = (|| -> Result<(u64, u64, u64, u64), &'static str> {
         let conv = convention().ok_or("convention-inconnue")?;
+        // BANC (option `banc-gpu-composition-panne`, jamais dans `default`) :
+        // a la 300e trame GPU, la trame est refusee une fois, file intacte --
+        // le repli processeur puis la reprise du GPU doivent suivre.
+        #[cfg(feature = "banc-gpu-composition-panne")]
+        {
+            static INJECTEE: AtomicBool = AtomicBool::new(false);
+            if trame_n == 300 && !INJECTEE.swap(true, Ordering::AcqRel) {
+                crate::serial_println!("GPU_COMPOSITION_INJECTION refus_trame=300 (file intacte)");
+                return Err("injection-banc");
+            }
+        }
         let mut commandes = 0u64;
         let mut flush = cg::R::default();
         // 1. Le bureau.
@@ -2191,12 +2239,77 @@ pub fn presente_trame_gpu(plan: &trame::Plan, couches: &[CoucheGpu]) -> bool {
         Err(cause) => {
             COMPOSITION_INVALIDE.store(true, Ordering::Release);
             PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);
-            crate::serial_println!("GPU_COMPOSITION_ECHEC raison={} file_cassee={} repli=composition-processeur", cause, p.file.cassee as u8);
+            // BOUCHAUD_GPU_COMPOSITION_REPRISE_V1 : file intacte -> textures
+            // rendues (leurs surfaces aussi), reprise programmee ; sinon
+            // definitif.
+            if !p.file.cassee {
+                for i in 0..cg::TEXTURES_MAX {
+                    unsafe { rend_texture(p, i) };
+                }
+            }
+            let definitif = p.file.cassee || ECHEC_DEFINITIF.load(Ordering::Acquire)
+                || REPRISES.load(Ordering::Acquire) >= REPRISE_MAX;
+            if definitif {
+                ECHEC_DEFINITIF.store(true, Ordering::Release);
+            } else {
+                REPRISE_APRES_NS.store(crate::kernel::timer::monotonic_ns() + REPRISE_DELAI_NS, Ordering::Release);
+            }
+            crate::serial_println!("GPU_COMPOSITION_ECHEC raison={} file_cassee={} repli=composition-processeur reprise={}",
+                cause, p.file.cassee as u8, if definitif { "non" } else { "dans-5s" });
             if p.file.cassee {
                 ACTIF.store(false, Ordering::Release);
                 crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse");
             }
             false
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_GPU_ATTRIBUTION_V1 -- ou passe le temps d'une presentation
+// ---------------------------------------------------------------------------
+//
+// Chaque commande de la file de controle est chronometree de la sonnette a la
+// reponse JUGEE (barriere comprise : le traitement hote est FINI). Le releve
+// donne, par genre, nombre, p50 / p95 / p99 (bornes hautes de classes) et max.
+
+use crate::drivers::composition_gpu as cg_attr;
+
+const NOMS_COMMANDES: [&str; 6] = ["transfert_2d", "flush", "transfert_3d", "soumission_3d", "ressources", "autres"];
+static HISTO_COMMANDES: [cg_attr::Histo; 6] = [const { cg_attr::Histo::neuf() }; 6];
+
+fn indice_commande(genre: u32) -> usize {
+    match genre {
+        CMD_TRANSFER_TO_HOST_2D => 0,
+        CMD_RESOURCE_FLUSH => 1,
+        0x0205 | 0x0206 => 2,
+        0x0207 => 3,
+        0x0101 | 0x0102 | 0x0103 | 0x0106 | 0x0107 | 0x0202 | 0x0203 | 0x0204 => 4,
+        _ => 5,
+    }
+}
+
+/// Une ligne `[GPU-COMMANDES]` : la periode depuis le releve precedent.
+pub fn releve_commandes() {
+    static PRECEDENT: crate::kernel::sync::SpinLock<[[u64; cg_attr::CLASSES]; 6]> =
+        crate::kernel::sync::SpinLock::new([[0; cg_attr::CLASSES]; 6]);
+    let mut ligne = alloc::string::String::new();
+    let mut p = PRECEDENT.lock();
+    for i in 0..6 {
+        let maintenant = HISTO_COMMANDES[i].instantane();
+        let d = cg_attr::delta(&maintenant, &p[i]);
+        p[i] = maintenant;
+        let n: u64 = d.iter().sum();
+        if n == 0 {
+            continue;
+        }
+        let c = |q| cg_attr::centile_us(&d, q).unwrap_or(0);
+        ligne.push_str(&alloc::format!(" {}={}:{}/{}/{}/{}", NOMS_COMMANDES[i], n, c(50), c(95), c(99),
+            HISTO_COMMANDES[i].max_ns.load(Ordering::Relaxed) / 1000));
+    }
+    drop(p);
+    if !ligne.is_empty() {
+        crate::serial_println!("[GPU-COMMANDES] format=nombre:p50/p95/p99/max_us_depuis_demarrage{}", ligne);
     }
 }

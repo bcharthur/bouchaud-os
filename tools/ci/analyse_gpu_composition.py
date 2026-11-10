@@ -5,6 +5,7 @@
   analyse_gpu_composition.py ab     SERIE_GPU SERIE_CPU
   analyse_gpu_composition.py repli  SERIE_2D
   analyse_gpu_composition.py occlusion SERIE_SUPERPOSEES SERIE_CPU
+  analyse_gpu_composition.py panne  SERIE CAPTURE.png
 
 Contre le faux vert : chaque verdict exige ses lignes, une capture absente ou
 un releve manquant est un ECHEC, jamais un succes par defaut.
@@ -156,7 +157,42 @@ def occlusion(serie, serie_cpu):
     return 0 if ok else 1
 
 
+def panne(serie, capture):
+    """Une trame GPU refusee (file intacte) : repli processeur, reprise du
+    GPU apres 5 s, et la mire de nouveau EXACTE apres la reprise."""
+    texte = "".join(lignes(serie))
+    exige = {
+        "injection": "GPU_COMPOSITION_INJECTION refus_trame=300",
+        "repli": "GPU_COMPOSITION_ECHEC raison=injection-banc file_cassee=0 repli=composition-processeur reprise=dans-5s",
+        "reprise": "BOUCHAUD_GPU_COMPOSITION_REPRISE tentative=1",
+    }
+    manque = [k for k, m in exige.items() if m not in texte]
+    if manque or "panic" in texte.lower() or "VIRTIO_GPU_SCANOUT_ABANDON" in texte:
+        print(f"PANNE_ECHEC manque={manque} panique={'panic' in texte.lower()}")
+        return 1
+    apres = texte.split(exige["reprise"], 1)[1]
+    rs = [r for r in releves_texte(apres) if r.get("trames_gpu", 0) > 0]
+    if not rs:
+        print("PANNE_ECHEC aucun releve avec trames GPU apres la reprise")
+        return 1
+    if mire(serie, capture) != 0:
+        print("PANNE_ECHEC mire inexacte apres la reprise")
+        return 1
+    print(f"PANNE_OK repli puis reprise ; trames_gpu_apres={rs[-1]['trames_gpu']}")
+    return 0
+
+
+def releves_texte(t):
+    out = []
+    for l in t.splitlines():
+        if "[GPU-COMPOSITION]" in l:
+            out.append({k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", l.split("[GPU-COMPOSITION]", 1)[1])})
+    return out
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "panne":
+        sys.exit(panne(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "occlusion":
         sys.exit(occlusion(sys.argv[2], sys.argv[3]))
     mode = sys.argv[1]

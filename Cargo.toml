@@ -25,6 +25,11 @@ p10-virgl-experimental = []
 # trame), remplace par le compositeur V2. Option conservee sans effet pour
 # ne casser aucune ligne de commande.
 p10-universal-present = []
+# BANC DE PANNE DU COMPOSITEUR GPU (BOUCHAUD_GPU_COMPOSITION_REPRISE_V1).
+# A la 300e trame GPU, une trame est refusee, file intacte : le bureau doit
+# repasser en composition processeur sans pixel perime, puis le GPU reprendre
+# 5 s plus tard. Jamais dans `default` : voir tools/ci/run_gpu_composition.sh.
+banc-gpu-composition-panne = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #
 # Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la

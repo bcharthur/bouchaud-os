@@ -17,6 +17,8 @@
 #          < 1 % des pixels clients, cadence >= 90 %.
 #   occlusion  DOOM sous la mire : les pixels caches ne sont plus recopies
 #          par le processeur (< 10 % du bras processeur de l'A/B).
+#   panne  (si GPU_COMPOSITION_BOOT_PANNE) une trame GPU refusee : repli
+#          processeur, reprise du GPU, mire exacte apres la reprise.
 #   repli  `virtio-gpu-pci` (sans VIRGL) : le compositeur reste eteint, DOOM
 #          tourne en composition processeur, aucun echec.
 #
@@ -86,6 +88,17 @@ python3 tools/ci/analyse_gpu_composition.py occlusion "$SORTIE/occlusion/serie.l
 
 demarre repli 80 virtio-gpu-pci 'export BO_AUTOSTART_DOOM=1'
 python3 tools/ci/analyse_gpu_composition.py repli "$SORTIE/repli/serie.log" || echec=1
+
+# BOUCHAUD_GPU_COMPOSITION_REPRISE_V1 : image de banc (option
+# `banc-gpu-composition-panne`) -- une trame GPU refusee a la 300e, file
+# intacte : repli processeur, reprise du GPU 5 s plus tard, mire exacte apres.
+if [ -n "${GPU_COMPOSITION_BOOT_PANNE:-}" ]; then
+  BOOT_NORMAL=$BOOT
+  BOOT=$GPU_COMPOSITION_BOOT_PANNE
+  CAPTURE_A=50 demarre panne 70 virtio-gpu-gl-pci 'export BO_AUTOSTART_APP=/mire-gpu'
+  BOOT=$BOOT_NORMAL
+  python3 tools/ci/analyse_gpu_composition.py panne "$SORTIE/panne/serie.log" "$SORTIE/panne/capture.png" || echec=1
+fi
 
 if [ "$echec" = 0 ]; then
   echo "GPU_COMPOSITION_BANC_OK"
