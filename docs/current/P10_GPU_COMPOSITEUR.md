@@ -1,6 +1,7 @@
 # P10 — compositeur GPU des fenêtres (`BOUCHAUD_GPU_COMPOSITION_V2`)
 
-> Mis à jour le 10 novembre 2026, branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`.
+> Mis à jour le 10 novembre 2026, branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`, SHA `540fdfb`.
+> **État : VERIFIED_AT_KVM (QEMU VIRGL, CI hébergée), Ladybird réel compris.**
 > Ce document distingue ce qui est **prouvé** (avec son niveau : HOST, TCG,
 > KVM) de ce qui ne l'est pas. Il remplace, pour la composition, le chemin
 > « présent universel » de la PR #281.
@@ -81,11 +82,15 @@ TCG) mesure surtout le GL logiciel de l'hôte (llvmpipe) et les allers-retours
 de commandes ; le fil du bureau y dort (interruption). Sur un hôte avec un vrai
 GPU, cette part revient au GPU ; elle n'est pas mesurée ici.
 
-### 5.2 CI
+### 5.2 CI, SHA `540fdfb` — run [42784689821](https://github.com/bcharthur/bouchaud-os/actions/runs/42784689821) : **3/3 jobs verts**
 
-Workflow `GPU composition` (`.github/workflows/gpu-composition.yml`), matrice
-TCG + KVM sur runner hébergé : voir [SESSION_2026-11-10.md](SESSION_2026-11-10.md)
-pour les runs et verdicts au SHA exact.
+| Job | Verdicts |
+|---|---|
+| `gpu-composition / kvm` (KVM, llvmpipe hôte) | `MIRE_OK exacts=254934 faux=0` ; `AB_CONVAINCANT` dessin CPU **25,5 µs/trame contre 467,5 µs (÷18,3)**, pixels clients CPU 0,65 M contre 537 M / 30 s, cadence 2 100 contre 2 101 ; `OCCLUSION_OK` 12,2 M contre 537 M ; `REPLI_OK` |
+| `gpu-composition / tcg` | `GPU_COMPOSITION_BANC_OK` (mêmes cinq verdicts) |
+| `gpu-composition / Ladybird` (artefact canonique, provenance vérifiée) | `LADYBIRD_BROWSER_HOST_OK`, `LADYBIRD_CONVERGENCE_OK … surface=1` (mire de la page vérifiée sur l'écran X de l'hôte), autotest de convention OK, `BOUCHAUD_GPU_COMPOSITION_OK` ; sur 30 s : 110 trames GPU, **69,3 M pixels posés par le GPU**, 12,2 M montés par l'hôte, **0,34 M** seulement recopiés par le CPU |
+
+Sous KVM, l'invité **dort** pendant la présentation (≈ 4,5 ms/trame d'attente par interruption, GL logiciel llvmpipe côté hôte) : c'est le cœur invité rendu aux applications. Avec un vrai GPU côté hôte, cette part descend avec lui.
 
 ## 6. Ce qui n'est PAS fait (et ne doit pas être annoncé)
 

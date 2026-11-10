@@ -16,7 +16,7 @@
     "P7": "UNKNOWN",
     "P8": "UNKNOWN",
     "P9": "UNKNOWN",
-    "P10": "GPU_WINDOW_COMPOSITION_VERIFIED_AT_TCG_LOCAL",
+    "P10": "GPU_WINDOW_COMPOSITION_VERIFIED_AT_KVM",
     "P11": "UNKNOWN",
     "P12": "UNKNOWN",
     "P13": "PARTIAL_BLOCKED_NO_DEDICATED_RUNNER",
@@ -389,8 +389,14 @@
   ],
   "P10": {
     "scope": "GPU window composition on QEMU VIRGL (BOUCHAUD_GPU_COMPOSITION_V2)",
-    "status": "VERIFIED_AT_TCG_LOCAL",
-    "ci": "workflow gpu-composition.yml (TCG+KVM) pending at snapshot",
+    "status": "VERIFIED_AT_KVM",
+    "ci": {
+      "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
+      "run": 42784689821,
+      "verdict": "PASS 3/3 (tcg, kvm, Ladybird)",
+      "kvm_ab": "draw CPU 25.5 us/frame vs 467.5 us (x18.3); client px copied by CPU -99.9%; cadence unchanged",
+      "ladybird": "LADYBIRD_BROWSER_HOST_OK, CONVERGENCE_OK surface=1, 69.3 Mpx posed by GPU / 30 s, 0.34 Mpx CPU"
+    },
     "not_done": [
       "Skia/Ladybird raster on GPU (needs guest Vulkan/Venus)",
       "AMD/Trigkey driver",
