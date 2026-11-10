@@ -31,7 +31,17 @@ Regles :
      ET en pull_request (BOUCHAUD_P13_COUVERTURE_PR_V1) ;
   9. SIMULATION (tools/ci/simule_paliers.py) : pour chaque palier, toutes les
      epreuves requises sont jouees et le verdict est vert ; pour chaque panne
-     injectee, le verdict est rouge.
+     injectee, le verdict est rouge ; le palier `artefact` ne joue que la
+     provenance et le build ;
+ 10. PRODUCTION (BOUCHAUD_LADYBIRD_PRODUCTION_V1) : une qualification peut
+     jouer un artefact reutilise ou attendu d'une production, JAMAIS sans le
+     reverifier (le contrat exige `reutilise` dans les deux cas, et `attente`
+     pour une production attendue ; `existe` n'est permis a aucun palier
+     consommateur) ; la production est groupee par empreinte et jamais
+     annulee ; elle ne joue ni epreuve, ni rendez-vous, ni verdict ; le build
+     ne tourne pas pendant qu'une production est attendue ; la provenance peut
+     declencher la production (actions: write) et l'audit `reconstruire`
+     reste disponible.
 
 Fail-closed ; tests negatifs par mutation.
 """
@@ -59,7 +69,7 @@ REQUISES_PARTOUT = {
     "endurance-kvm", "sites", "crash-rendu",
 }
 HORS_RUN_DEV = {"primitives"}
-Q = ("(github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') "
+Q = ("(github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') "
      "|| github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024'")
 LIAISON = 'tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser'
 ARTEFACT = "name: bouchaud-ladybird-native-browser"
@@ -134,8 +144,8 @@ def verifie(t: dict) -> list:
         f.append("provenance : garde d'empreinte ou palier absent")
     # 3
     build = j.get("build", "")
-    if "needs.provenance.outputs.mode != 'reutilise'" not in entete(build):
-        f.append("build : ne suit pas la decision de provenance (repli build exige)")
+    if "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe'" not in entete(build):
+        f.append("build : ne suit pas la decision de provenance (repli build exige, aucun build pendant une production)")
     m_job = re.search(r"^    timeout-minutes: (\d+)$", entete(build), re.M)
     e = etapes(build)
     i_construit = index(e, lambda x: x[0] == "Construire Ladybird")
@@ -154,15 +164,17 @@ def verifie(t: dict) -> list:
     # 4
     reu = j.get("reutilise", "")
     er = etapes(reu)
-    i_dl = index(er, lambda x: ARTEFACT in x[1] and "run-id: ${{ needs.provenance.outputs.source_run }}" in x[1])
+    i_dl = index(er, lambda x: ARTEFACT in x[1]
+                 and "run-id: ${{ needs.attente.outputs.source_run || needs.provenance.outputs.source_run }}" in x[1])
     i_ver = index(er, lambda x: "tools/ci/verifie_artefact_ladybird.sh entrees native-browser" in x[1])
     i_rep = index(er, lambda x: x[0] == "Republier Ladybird natif")
-    if "needs.provenance.outputs.mode == 'reutilise'" not in entete(reu) or not (0 <= i_dl < i_ver < i_rep):
+    if "(needs.provenance.outputs.mode == 'reutilise' || (needs.provenance.outputs.mode == 'attendu' && needs.attente.result == 'success'))" not in entete(reu) \
+            or not re.search(r"^    needs: \[dedoublonne, provenance, attente\]$", entete(reu), re.M) or not (0 <= i_dl < i_ver < i_rep):
         f.append("reutilisation : republiee sans reverification des entrees")
     # 5
     art = j.get("artefact", "")
     for attendu in ('if [ "$R_BUILD" = success ] && [ "$R_REUTILISE" = skipped ]; then',
-                    'elif [ "$R_REUTILISE" = success ] && [ "$R_BUILD" = skipped ] && [ "$MODE" = reutilise ]; then',
+                    'elif [ "$R_REUTILISE" = success ] && [ "$R_BUILD" = skipped ] && { [ "$MODE" = reutilise ] || [ "$MODE" = attendu ]; }; then',
                     "echo liaison=tete", "echo liaison=entrees", "exit 1"):
         if attendu not in art:
             f.append("artefact : producteur unique non exige")
@@ -182,11 +194,11 @@ def verifie(t: dict) -> list:
             f.append(f"{nom} : joue l'artefact sans l'attendre explicitement ou sans le verifier")
     # 7
     conv = j.get("convergence", "")
-    if f"name: ${{{{ ({Q}) && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}}}" not in conv:
+    if f"name: ${{{{ inputs.palier == 'artefact' && 'ladybird / verdict de production' || (({Q}) && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement') }}}}" not in conv:
         f.append("verdict : meme nom en developpement qu'en qualification")
     besoins = re.search(r"^    needs: \[(.*)\]$", conv, re.M)
     attendus = {b.strip() for b in besoins.group(1).split(",")} if besoins else set()
-    paires = [(e.cle, e.job) for e in c.EPREUVES] + list(c.PRODUCTEURS.values())
+    paires = [(e.cle, e.job) for e in c.EPREUVES] + list(c.PRODUCTEURS)
     for attendu in (f"BOUCHAUD_PALIER: ${{{{ ({Q}) && 'qualification' || 'developpement' }}}}",
                     "PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}"):
         if attendu not in conv:
@@ -206,8 +218,36 @@ def verifie(t: dict) -> list:
     for job in hors:
         if f"&& ({Q})" not in entete(j.get(job, "")):
             f.append(f"{job} : hors-run en developpement selon le contrat, mais pas exclu par sa condition")
-    if c.MODES_PERMIS.get(c.QUALIFICATION) != ("construit",):
-        f.append("contrat : qualification acceptee sans build canonique")
+    # 10 (contrat) : un artefact non construit dans le run est TOUJOURS reverifie.
+    if any("existe" in modes for modes in c.MODES_PERMIS.values()) \
+            or set(c.MODES_PERMIS.get(c.QUALIFICATION, ())) != {"construit", "reutilise", "attendu"}:
+        f.append("contrat : qualification acceptee sans artefact produit ou reverifie dans le run")
+    if c.PAR_MODE.get("reutilise") != ("reutilise",) or c.PAR_MODE.get("attendu") != ("attente", "reutilise") \
+            or c.PAR_MODE.get("construit") != ("build",):
+        f.append("contrat : un mode de provenance n'exige plus la reverification (reutilise) ou l'attente")
+    # 10 (workflow) : production separee, groupee par empreinte, jamais annulee.
+    if "group: ${{ inputs.palier == 'artefact' && format('ladybird-artefact-{0}', inputs.empreinte) || " not in lb \
+            or "cancel-in-progress: ${{ inputs.palier != 'artefact' && " not in lb:
+        f.append("production : non groupee par empreinte, ou annulable par un push")
+    if not re.search(r"options: \[qualification, developpement, artefact\]\n", lb) \
+            or not re.search(r"      reconstruire:\n(?:        .*\n)*?        type: boolean\n", lb):
+        f.append("production : palier artefact ou audit `reconstruire` absent du dispatch")
+    if "inputs.palier != 'artefact' && (needs.build.result == 'success' || needs.reutilise.result == 'success')" not in entete(art) \
+            or not re.search(r"^    if: always\(\)$", entete(conv), re.M):
+        f.append("production : joue des epreuves, ou le verdict peut etre saute")
+    ev = etapes(conv)
+    i_prod = index(ev, lambda x: x[0] == "Verdict de production")
+    i_verdict = index(ev, lambda x: x[0] == "Verdict")
+    if i_prod < 0 or "inputs.palier == 'artefact'" not in ev[i_prod][1] \
+            or "ladybird_provenance.py verdict-production" not in ev[i_prod][1] \
+            or i_verdict < 0 or "&& inputs.palier != 'artefact'" not in ev[i_verdict][1]:
+        f.append("production : verdict de production absent, ou verdict de convergence rendu en production")
+    att = j.get("attente", "")
+    if "needs.provenance.outputs.mode == 'attendu'" not in entete(att) or "ladybird_provenance.py attends" not in att:
+        f.append("attente : job absent ou detache de la decision")
+    if not re.search(r"^      actions: write$", entete(prov), re.M) or "REF_PRODUCTION: " not in prov \
+            or "RECONSTRUIRE: " not in prov or "EMPREINTE_DEMANDEE: " not in prov:
+        f.append("provenance : ne peut pas declencher ni verifier la production")
     if c.NOM_VERDICT.get(c.QUALIFICATION) != "ladybird / verdict de convergence" \
             or c.NOM_VERDICT.get(c.DEVELOPPEMENT) == c.NOM_VERDICT.get(c.QUALIFICATION):
         f.append("contrat : noms de verdict confondus")
@@ -245,7 +285,7 @@ def negatifs(t: dict) -> list:
         ("qualification non stricte", "lb", f"p13_strict: ${{{{ {Q} }}}}",
          "p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}"),
         ("garde d'empreinte retiree", "lb", garde_ligne, "        run: true\n"),
-        ("build ignore la decision", "lb", "needs.provenance.outputs.mode != 'reutilise' }}", "true }}"),
+        ("build ignore la decision", "lb", "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe' }}", "true }}"),
         ("delai d'etape retire", "lb", "        timeout-minutes: 150\n        run: |", "        run: |"),
         ("cache seulement sur succes", "lb", "if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}",
          "if: ${{ success() && steps.ccache.outcome == 'success' }}"),
@@ -275,16 +315,42 @@ def negatifs(t: dict) -> list:
          'Epreuve("R_WPT", "wpt", "WPT", {QUALIFICATION: REQUIS, DEVELOPPEMENT: HORS_RUN}),'),
         ("contrat : primitives hors-run en qualification", "contrat",
          "{QUALIFICATION: REQUIS, DEVELOPPEMENT: HORS_RUN}),", "{QUALIFICATION: HORS_RUN, DEVELOPPEMENT: HORS_RUN}),"),
-        ("contrat : qualification sur artefact reutilise", "contrat",
-         'MODES_PERMIS = {QUALIFICATION: ("construit",),', 'MODES_PERMIS = {QUALIFICATION: ("construit", "reutilise"),'),
+        ("contrat : qualification sur decision `existe`", "contrat",
+         'MODES_PERMIS = {QUALIFICATION: ("construit", "reutilise", "attendu"),',
+         'MODES_PERMIS = {QUALIFICATION: ("construit", "reutilise", "attendu", "existe"),'),
+        ("contrat : production attendue sans reverification", "contrat",
+         '    "attendu": ("attente", "reutilise"),', '    "attendu": ("attente",),'),
+        ("production annulee par un push", "lb", "cancel-in-progress: ${{ inputs.palier != 'artefact' && ",
+         "cancel-in-progress: ${{ "),
+        ("production groupee par ref", "lb", "format('ladybird-artefact-{0}', inputs.empreinte)",
+         "format('ladybird-artefact-{0}', github.ref)"),
+        ("epreuves jouees en production", "lb",
+         "inputs.palier != 'artefact' && (needs.build.result == 'success' || needs.reutilise.result == 'success')",
+         "(needs.build.result == 'success' || needs.reutilise.result == 'success')"),
+        ("verdict de convergence rendu en production", "lb",
+         "        if: needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact'\n",
+         "        if: needs.dedoublonne.outputs.reutilise != 'true'\n"),
+        ("verdict de production retire", "lb", "        run: python3 tools/ci/ladybird_provenance.py verdict-production\n",
+         "        run: true\n"),
+        ("verdict sautable en production", "lb", "    if: always()\n    runs-on: ubuntu-24.04\n    # Reflet",
+         "    if: ${{ always() && inputs.palier != 'artefact' }}\n    runs-on: ubuntu-24.04\n    # Reflet"),
+        ("reutilisation sans attente reussie", "lb", "(needs.provenance.outputs.mode == 'attendu' && needs.attente.result == 'success')",
+         "(needs.provenance.outputs.mode == 'attendu')"),
+        ("build pendant une production attendue", "lb",
+         "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe'",
+         "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'existe'"),
+        ("audit reconstruire retire", "lb", "      reconstruire:\n", "      reconstruire_x:\n"),
+        ("attente non transmise au verdict", "lb", "          R_ATTENTE: ${{ needs.attente.result }}\n", ""),
+        ("provenance sans droit de declencher", "lb", "      actions: write\n    outputs:\n      mode:",
+         "      actions: read\n    outputs:\n      mode:"),
         ("contrat : skipped accepte pour un requis", "contrat",
          '        attendu = "success" if exigence == REQUIS else "skipped"\n        ok = resultat == attendu\n',
          '        attendu = "success" if exigence == REQUIS else "skipped"\n        ok = resultat in (attendu, "skipped")\n'),
-        ("verdict au nom unique", "lb", "'ladybird / verdict integration developpement' }}\n    needs:",
-         "'ladybird / verdict de convergence' }}\n    needs:"),
+        ("verdict au nom unique", "lb", "'ladybird / verdict integration developpement') }}\n    needs:",
+         "'ladybird / verdict de convergence') }}\n    needs:"),
         ("palier non transmis", "lb", "          BOUCHAUD_PALIER: ", "          BOUCHAUD_PALIER_X: "),
-        ("reutilisation non transmise", "lb", "          R_REUTILISE: ${{ needs.reutilise.result }}\n          R_PRIMITIVES",
-         "          R_PRIMITIVES"),
+        ("reutilisation non transmise", "lb", "          R_REUTILISE: ${{ needs.reutilise.result }}\n          R_ATTENTE",
+         "          R_ATTENTE"),
         ("convergence en developpement", "verdict", 'if os.environ.get("BOUCHAUD_PALIER") == contrat.QUALIFICATION:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")',
          'if True:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")'),
         ("chemin noyau oublie (push)", "p13", "    branches: [main, 'claude/**', 'feat/**']\n    paths:\n"

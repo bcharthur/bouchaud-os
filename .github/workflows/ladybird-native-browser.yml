@@ -14,6 +14,17 @@ name: ladybird-native-browser
 #                  (tools/ci/ladybird_provenance.py), les primitives P13 sont
 #                  jouees par p13-primitives-noyau.yml. Job « verdict
 #                  integration developpement », jamais CONVERGENCE_OK.
+#   artefact       BOUCHAUD_LADYBIRD_PRODUCTION_V1 -- PRODUCTION seule, declenchee
+#                  par un run consommateur (workflow_dispatch palier=artefact,
+#                  empreinte=...) quand aucun artefact de son empreinte n'existe :
+#                  provenance + build, rien d'autre. Groupe de concurrence PAR
+#                  EMPREINTE et sans annulation : un push noyau n'annule jamais
+#                  un build Ladybird encore utile, et deux productions de la meme
+#                  empreinte se succedent (la seconde trouve l'artefact, `existe`).
+# Une qualification REUTILISE desormais l'artefact d'un build reel de meme
+# empreinte, reverifie (manifeste + liaison par les entrees) : la qualification
+# du noyau ne recompile plus le navigateur. `reconstruire: true` exige un build
+# neuf (audit), produit hors du run et posterieur a son debut.
 # Un push sur une branche avec PR declenche AUSSI pull_request : le run PR reflete
 # alors le run push du meme arbre (BOUCHAUD_CI_UN_BUILD_PAR_SHA_V2, job dedoublonne).
 on:
@@ -146,10 +157,20 @@ on:
   workflow_dispatch:
     inputs:
       palier:
-        description: 'qualification (build complet + primitives P13 + verdict de convergence) ou developpement (artefact reutilisable, sans P13)'
+        description: 'qualification (artefact verifie + primitives P13 + verdict de convergence), developpement (sans P13) ou artefact (production Ladybird seule, declenchee par la CI)'
         type: choice
-        options: [qualification, developpement]
+        options: [qualification, developpement, artefact]
         default: qualification
+      empreinte:
+        description: 'palier artefact : empreinte des entrees a produire (la CI la fournit)'
+        type: string
+        default: ''
+      reconstruire:
+        description: 'audit : exiger un build Ladybird neuf, posterieur au debut du run'
+        type: boolean
+        default: false
+
+run-name: ${{ inputs.palier == 'artefact' && format('ladybird-artefact {0}', inputs.empreinte) || '' }}
 
 permissions:
   contents: read
@@ -157,8 +178,11 @@ permissions:
 concurrency:
   # L'audit conserve les preuves de chaque SHA, y compris un build Ladybird
   # encore en cours quand le candidat suivant est pousse.
-  group: ladybird-native-${{ github.event.pull_request.number || github.ref }}${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' && format('-{0}', github.sha) || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/audit/p13-console-sync-ci-20261024' }}
+  # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : une production est groupee par EMPREINTE,
+  # jamais annulee ; les runs consommateurs restent groupes par ref et annules
+  # par le push suivant (ils ne compilent plus le navigateur).
+  group: ${{ inputs.palier == 'artefact' && format('ladybird-artefact-{0}', inputs.empreinte) || format('ladybird-native-{0}{1}', github.event.pull_request.number || github.ref, github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' && format('-{0}', github.sha) || '') }}
+  cancel-in-progress: ${{ inputs.palier != 'artefact' && github.ref != 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
 jobs:
   dedoublonne:
@@ -207,7 +231,7 @@ jobs:
     # developpement elles tournent via p13-primitives-noyau.yml, sur les seuls
     # chemins noyau. Ici : qualification uniquement.
     needs: dedoublonne
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') }}
     uses: ./.github/workflows/os-primitives.yml
     with:
       # P13_QUALIFICATION_STRICTE_V1 : une qualification est STRICTE, ou elle
@@ -215,7 +239,7 @@ jobs:
       # P13_STRICT_OK sous KVM a chaque campagne ; la sonde n'etait stricte que
       # sur la branche d'audit, si bien qu'aucun candidat ne pouvait satisfaire
       # le critere (dispatch qualification = sondes non strictes).
-      p13_strict: ${{ (github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
+      p13_strict: ${{ (github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}
 
   provenance:
     # BOUCHAUD_LADYBIRD_PROVENANCE_V1 : construire, ou reutiliser l'artefact
@@ -229,7 +253,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read
+      # write : declencher la production (palier artefact) si aucun artefact
+      # de l'empreinte n'existe. Refuse (fork) => repli build dans le run.
+      actions: write
     outputs:
       mode: ${{ steps.decision.outputs.mode }}
       source_run: ${{ steps.decision.outputs.source_run }}
@@ -244,13 +270,43 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEPOT: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
-        run: python3 tools/ci/ladybird_provenance.py
+          PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
+          PALIER_PRODUCTION: ${{ inputs.palier == 'artefact' && 'artefact' || '' }}
+          RECONSTRUIRE: ${{ inputs.reconstruire == true && 'true' || 'false' }}
+          EMPREINTE_DEMANDEE: ${{ inputs.empreinte }}
+          REF_PRODUCTION: ${{ github.head_ref || github.ref_name }}
+        run: PALIER="${PALIER_PRODUCTION:-$PALIER}" python3 tools/ci/ladybird_provenance.py
+
+  attente:
+    # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : la production de l'empreinte tourne dans
+    # un AUTRE run (palier artefact). On l'attend ici ; si ce run-ci est annule
+    # par un push, la production, elle, continue et servira le run suivant.
+    needs: [dedoublonne, provenance]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode == 'attendu' }}
+    name: ladybird / attente de la production de l'artefact
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      source_run: ${{ steps.attente.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: attente
+        name: Attendre un artefact eligible de cette empreinte
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RECONSTRUIRE: ${{ inputs.reconstruire == true && 'true' || 'false' }}
+          DELAI_ATTENTE: '14400'
+        run: python3 tools/ci/ladybird_provenance.py attends
 
   build:
     needs: [dedoublonne, provenance]
     # Repli sur build si la decision manque : couteux, jamais faux.
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode != 'reutilise' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe' }}
     name: ladybird / build once
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -515,8 +571,8 @@ jobs:
     # empreinte recalculee depuis git), puis republie dans CE run sous le meme
     # nom : les jobs consommateurs, run.ps1 et les workflows qui le
     # telechargent restent inchanges.
-    needs: [dedoublonne, provenance]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode == 'reutilise' }}
+    needs: [dedoublonne, provenance, attente]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && (needs.provenance.outputs.mode == 'reutilise' || (needs.provenance.outputs.mode == 'attendu' && needs.attente.result == 'success')) }}
     name: ladybird / artefact reutilise (entrees identiques)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -530,14 +586,14 @@ jobs:
         with:
           name: bouchaud-ladybird-native-browser
           path: native-browser
-          run-id: ${{ needs.provenance.outputs.source_run }}
+          run-id: ${{ needs.attente.outputs.source_run || needs.provenance.outputs.source_run }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v4
         timeout-minutes: 5
         with:
           name: bouchaud-wpt-corpus
           path: wpt-corpus
-          run-id: ${{ needs.provenance.outputs.source_run }}
+          run-id: ${{ needs.attente.outputs.source_run || needs.provenance.outputs.source_run }}
           github-token: ${{ github.token }}
       - name: Verifier l'artefact reutilise (manifeste + entrees identiques)
         run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
@@ -573,7 +629,8 @@ jobs:
     # Point de rendez-vous : exactement UN producteur a reussi, et la liaison
     # que chaque consommateur exigera en decoule (tete ou entrees).
     needs: [dedoublonne, provenance, build, reutilise]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && (needs.build.result == 'success' || needs.reutilise.result == 'success') }}
+    # Palier artefact : la production s'arrete au build, aucune epreuve.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact' && (needs.build.result == 'success' || needs.reutilise.result == 'success') }}
     name: ladybird / artefact disponible
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -589,7 +646,7 @@ jobs:
           echo "build=$R_BUILD reutilise=$R_REUTILISE decision=$MODE"
           if [ "$R_BUILD" = success ] && [ "$R_REUTILISE" = skipped ]; then
             echo liaison=tete >> "$GITHUB_OUTPUT"
-          elif [ "$R_REUTILISE" = success ] && [ "$R_BUILD" = skipped ] && [ "$MODE" = reutilise ]; then
+          elif [ "$R_REUTILISE" = success ] && [ "$R_BUILD" = skipped ] && { [ "$MODE" = reutilise ] || [ "$MODE" = attendu ]; }; then
             echo liaison=entrees >> "$GITHUB_OUTPUT"
           else
             echo "LADYBIRD_PROVENANCE_INCOHERENTE" >&2
@@ -944,8 +1001,8 @@ jobs:
     # BOUCHAUD_CONVERGENCE_VERDICT_V1 : un verdict, le meme HEAD partout.
     # Le NOM depend du palier : un vert de developpement ne peut pas etre lu
     # comme une convergence (run-bouchaud-ladybird-ci.ps1 cherche ce nom).
-    name: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}
-    needs: [dedoublonne, provenance, build, reutilise, artefact, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
+    name: ${{ inputs.palier == 'artefact' && 'ladybird / verdict de production' || (((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement') }}
+    needs: [dedoublonne, provenance, attente, build, reutilise, artefact, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
     if: always()
     runs-on: ubuntu-24.04
     # Reflet : le run push du meme arbre peut durer des heures (build froid).
@@ -966,14 +1023,26 @@ jobs:
           # Le run push reflete porte le nom de SON palier (audit : qualification).
           JOB_VERDICT: ${{ github.head_ref == 'audit/p13-console-sync-ci-20261024' && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement' }}
         run: python3 tools/ci/dedoublonne_pr.py attend --run "$SOURCE" --job "$JOB_VERDICT" --delai 19200 --pas 60
-      - name: Verdict
-        if: needs.dedoublonne.outputs.reutilise != 'true'
+      - name: Verdict de production
+        # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : palier artefact. Provenance jouee,
+        # puis build reussi -- ou `existe` (artefact deja present, build saute).
+        # Aucune epreuve, aucun CONVERGENCE_OK : ce run ne qualifie rien.
+        if: needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier == 'artefact'
         env:
-          BOUCHAUD_PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier != 'developpement') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
+          P_PROVENANCE: ${{ needs.provenance.result }}
+          P_BUILD: ${{ needs.build.result }}
+          P_ARTEFACT: ${{ needs.artefact.result }}
+          P_MODE: ${{ needs.provenance.outputs.mode }}
+        run: python3 tools/ci/ladybird_provenance.py verdict-production
+      - name: Verdict
+        if: needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact'
+        env:
+          BOUCHAUD_PALIER: ${{ ((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'qualification' || 'developpement' }}
           PROVENANCE_MODE: ${{ needs.provenance.outputs.mode }}
           R_PROVENANCE: ${{ needs.provenance.result }}
           R_ARTEFACT: ${{ needs.artefact.result }}
           R_REUTILISE: ${{ needs.reutilise.result }}
+          R_ATTENTE: ${{ needs.attente.result }}
           R_PRIMITIVES: ${{ needs.primitives.result }}
           R_PERFORMANCE: ${{ needs.performance.result }}
           R_MEMOIRE: ${{ needs.memoire-onglets.result }}

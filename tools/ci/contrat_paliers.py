@@ -14,9 +14,13 @@ Exigences :
             signale un cablage qui ne correspond plus au contrat.
 
 Paliers :
-  qualification  workflow_dispatch (defaut), branche d'audit. Build canonique
-                 dans le run, primitives P13 (os-primitives), les 13 epreuves
-                 Ladybird. Seul palier qui imprime CONVERGENCE_OK.
+  qualification  workflow_dispatch (defaut), branche d'audit. Artefact
+                 Ladybird d'un BUILD REEL de meme empreinte -- construit dans
+                 le run, reutilise, ou attendu d'une production (palier
+                 artefact) -- toujours reverifie ; primitives P13
+                 (os-primitives), les 13 epreuves Ladybird. Seul palier qui
+                 imprime CONVERGENCE_OK. (BOUCHAUD_LADYBIRD_PRODUCTION_V1 : la
+                 qualification du noyau ne recompile plus le navigateur.)
   developpement  push / pull_request / dispatch palier=developpement. Les
                  MEMES 13 epreuves Ladybird, memes scripts, memes seuils, sur
                  un artefact construit OU reutilise (entrees identiques,
@@ -79,9 +83,17 @@ EPREUVES = (
              "robustesse : crash d'un WebContent (reprise), isolation des cadres, cycle de vie des workers"),
 )
 
-# Producteurs de l'artefact : exactement un, celui que la decision annonce.
-PRODUCTEURS = {"construit": ("R_BUILD", "build"), "reutilise": ("R_REUTILISE", "reutilise")}
-MODES_PERMIS = {QUALIFICATION: ("construit",), DEVELOPPEMENT: ("construit", "reutilise")}
+# Jobs producteurs de l'artefact dans un run consommateur, et ceux que chaque
+# decision de provenance exige : les autres doivent etre `skipped`.
+PRODUCTEURS = (("R_BUILD", "build"), ("R_REUTILISE", "reutilise"), ("R_ATTENTE", "attente"))
+PAR_MODE = {
+    "construit": ("build",),
+    "reutilise": ("reutilise",),
+    "attendu": ("attente", "reutilise"),
+}
+# `existe` (palier artefact) n'apporte AUCUN artefact au run : jamais permis ici.
+MODES_PERMIS = {QUALIFICATION: ("construit", "reutilise", "attendu"),
+                DEVELOPPEMENT: ("construit", "reutilise", "attendu")}
 
 
 def juge(env) -> tuple[list[str], list[str]]:
@@ -92,13 +104,13 @@ def juge(env) -> tuple[list[str], list[str]]:
     lignes.append(f"BOUCHAUD_PALIER={palier} provenance={mode}")
     if palier not in PALIERS:
         return lignes, [f"palier={palier}"]
-    if mode not in PRODUCTEURS:
+    if mode not in PAR_MODE:
         causes.append(f"provenance={mode}")
     elif mode not in MODES_PERMIS[palier]:
         causes.append(f"provenance={mode} interdite en {palier}")
-    for m, (cle, job) in PRODUCTEURS.items():
+    for cle, job in PRODUCTEURS:
         resultat = env.get(cle) or "absent"
-        attendu = "success" if m == mode else "skipped"
+        attendu = "success" if job in PAR_MODE.get(mode, ()) else "skipped"
         ok = resultat == attendu
         lignes.append(f"  {'ok     ' if ok else 'ECHEC  '} producteur {job} : {resultat} (attendu {attendu})")
         if not ok:

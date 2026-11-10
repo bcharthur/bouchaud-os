@@ -20,7 +20,8 @@ def env(palier, mode, **kw):
         e[ep.cle] = "success" if ep.exigence[palier] == contrat.REQUIS else "skipped"
     e.update(BOUCHAUD_PALIER=palier, PROVENANCE_MODE=mode,
              R_BUILD="success" if mode == "construit" else "skipped",
-             R_REUTILISE="success" if mode == "reutilise" else "skipped")
+             R_REUTILISE="success" if mode in ("reutilise", "attendu") else "skipped",
+             R_ATTENTE="success" if mode == "attendu" else "skipped")
     e.update(kw)
     return e
 
@@ -38,8 +39,17 @@ class PaliersTests(unittest.TestCase):
         self.assertEqual(code, 0, sortie)
         self.assertIn("BOUCHAUD_LADYBIRD_CONVERGENCE_OK", sortie)
 
+    def test_qualification_sur_artefact_reverifie(self):
+        # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : reutilise ou attendu d'une
+        # production, l'artefact est REVERIFIE dans le run : qualification valide.
+        for mode in ("reutilise", "attendu"):
+            with self.subTest(mode=mode):
+                code, sortie = lance(env("qualification", mode))
+                self.assertEqual(code, 0, sortie)
+                self.assertIn("BOUCHAUD_LADYBIRD_CONVERGENCE_OK", sortie)
+
     def test_developpement_vert_sans_convergence(self):
-        for mode in ("reutilise", "construit"):
+        for mode in ("reutilise", "construit", "attendu"):
             with self.subTest(mode=mode):
                 code, sortie = lance(env("developpement", mode))
                 self.assertEqual(code, 0, sortie)
@@ -94,7 +104,12 @@ class PaliersTests(unittest.TestCase):
             "provenance absente": env("developpement", "reutilise", PROVENANCE_MODE=""),
             "provenance inconnue": env("developpement", "reutilise", PROVENANCE_MODE="telecharge"),
             "provenance en echec": env("developpement", "reutilise", R_PROVENANCE="failure"),
-            "qualification sur artefact reutilise": env("qualification", "reutilise"),
+            "qualification sur decision existe": env("qualification", "existe"),
+            "qualification reutilisee sans reverification": env("qualification", "reutilise", R_REUTILISE="skipped"),
+            "production attendue, attente echouee": env("qualification", "attendu", R_ATTENTE="failure"),
+            "production attendue, attente sautee": env("developpement", "attendu", R_ATTENTE="skipped"),
+            "production attendue sans reverification": env("qualification", "attendu", R_REUTILISE="skipped"),
+            "attente jouee hors decision": env("developpement", "reutilise", R_ATTENTE="success"),
             "deux producteurs": env("developpement", "reutilise", R_BUILD="success"),
             "decision contredite": env("developpement", "reutilise", R_BUILD="success", R_REUTILISE="skipped"),
             # build absent
@@ -141,7 +156,8 @@ class SimulationTests(unittest.TestCase):
         r = self.sp.simule(casse, sc)
         sautes = sorted(j for j, res in r["resultats"].items() if res == "skipped")
         self.assertEqual(r["resultats"]["artefact"], "success")
-        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance")]), 14, sautes)
+        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance", "attente")]), 14,
+                         sautes)
         self.assertFalse(r["verdict_ok"])
         self.assertTrue(self.sp.controle(casse))
 
