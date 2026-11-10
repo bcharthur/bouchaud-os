@@ -122,6 +122,35 @@ environ 39 min de dépendances vcpkg et environ 103 min de compilation.
 | Runner persistant (`tools/ci/runner/provision_kvm_runner.sh`) | garderait ccache, vcpkg et Ninja chauds sur disque ; supprime l'éviction | **BLOCKED_EXTERNAL** : aucun matériel provisionné. Pertinent seulement si les empreintes changent plus souvent qu'une fois par jour |
 | Réduire les caches par SHA des autres workflows (33 clés) | libérerait la limite de 10 Go | à traiter séparément : change le temps de build Cargo de 10 workflows |
 
-## 5. Matrice avant / après
+## 5. Matrice avant / après (runs réels du 10/11)
 
-Remplie avec les runs réels de la PR, voir la section suivante.
+| Scénario | Avant | Après | Preuves |
+|---|---|---|---|
+| **Qualification du noyau**, recette Ladybird inchangée | 166,9 et 171,4 min ; build 143,3 et 143,6 min (runs 42784700689 à 540fdfb, 42815443584 à 8e3c777, même empreinte `6199f460`) | **55,0 min, 0 build** : provenance 25 s, réutilisation revérifiée 49 s, artefact disponible à +1 min 29. Épreuves Ladybird terminées à +24 min 21. Chemin critique : `primitives / probes` (P13 strict, 54 min 43 s), inchangé | 42895151951 (aafe24e) : `PROVENANCE_DECISION mode=reutilise source_run=42209695755`, `LADYBIRD_EMPREINTE_LIEE empreinte=4e3f2384… producteur=f212bd0`, `BOUCHAUD_PALIER=qualification provenance=reutilise`, `BOUCHAUD_LADYBIRD_CONVERGENCE_OK`, `P13_STRICT_OK` SMP1/2/4, `C22_CONTRACTUEL_6X6_OK` (g2 120, 148, 36, 136, 140, 148 Kio) |
+| **Intégration navigateur**, artefact valide existant | provenance puis réutilisation déjà possibles en développement, mais candidat de `main` hors limite (12) | artefact disponible à +1 min 25 ; épreuves en 23 à 26 min hors incident | 42875324047 (bf7db3d) : 15ᵉ candidat retenu ; run de 43 min, **rouge** : piège du Compositor et robustesse, voir « Incidents » |
+| **Changement de recette Ladybird** | build dans le run (143 min), annulé par le push suivant | production séparée : build 80 min (runner plus rapide, caches toujours froids : 0/5 restaurés, ccache 0/2 710) ; **un push noyau annule le consommateur, pas la production** ; le run suivant la **rejoint** sans relancer de build, réutilise en 47 s, 16 épreuves vertes | 42875682665 (production, `verdict de production` vert), 42875546372 (consommateur annulé), 42876943129 (`production run=42875682665 … SUIVIE`, `mode=attendu`, intégration verte) |
+| **Builds identiques** | `6199f460` : 3 builds complets + 1 en cours + 116 min partiels ; `4e3f2384` : 2 builds parallèles | 0 sur les 4 runs consommateurs de cette PR (3 réutilisations, 1 production rejointe) | ci-dessus |
+| **CI Fast** | — | 9,1 min (commit de code), 2,7 min (doc seule) | 42875324110, run sur aafe24e |
+| **Volumes** | artefact 58 fichiers, 1 090 575 475 octets bruts (≈ 434 Mo compressés) | identique, republié dans chaque run consommateur | `ARTEFACT_VOLUME` du job de réutilisation |
+
+Cibles demandées, mesurées : CI Fast 9,1 min sur un commit de code (pas
+« quelques minutes » : non traité dans cette PR) ; intégration navigateur
+moins de 30 min avec un artefact valide (23 à 26 min hors incident) ;
+compilation Ladybird uniquement sur changement d'empreinte.
+
+### Incidents observés (non causés par la refonte)
+
+- **Piège du Compositor, 1 démarrage froid sur 16 :** `LADYBIRD_FUNCTIONAL_SMOKE
+  fail raison=jalons manquants=7`, système figé environ 20 min (FPS 0,
+  `fault_resolved` constant), 0 faute Compositor. Vu sur le noyau de `main`
+  (42875324047) ET sur la branche c22/p13/p10 avec l'ancienne CI (42851644175).
+  C'est un blocage intermittent du produit, antérieur à cette PR. La même
+  épreuve est verte dans 42876943129 et 42895151951.
+- **Robustesse, cycle des workers (42875324047) :** aucun WebWorker créé
+  (`webworkers_crees=0`), 11 assertions en cascade. Verte dans 42876943129 et
+  42895151951 sur le même noyau. Intermittent, cause non établie.
+- **Build tué par le runner hébergé** (42851644175 tentative 1, exit 143, à
+  51 min sur une limite d'étape de 150) : une production séparée, non
+  annulable par un push, n'empêche pas ce genre d'arrêt ; le consommateur
+  qui l'attend échoue alors (`LADYBIRD_ATTENTE_ECHEC`) et le suivant relance
+  la production.
