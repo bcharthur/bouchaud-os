@@ -210,8 +210,29 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(dec.appels, 0)
 
 
+class ApiProduction(Api):
+    """Une production (id 7) qui se termine apres `tours_restants` lectures de son etat."""
+
+    def __init__(self, tours, conclusion="success", pannes_transitoires=0, **kw):
+        prod = production(7)
+        super().__init__({7: prod}, en_cours=[prod], **kw)
+        self.prod, self.tours, self.conclusion = prod, tours, conclusion
+        self.pannes_transitoires = pannes_transitoires
+
+    def __call__(self, chemin):
+        if self.pannes_transitoires and chemin == "actions/runs/7":
+            self.pannes_transitoires -= 1
+            self.appels.append(chemin)
+            raise RuntimeError("HTTP 403 rate limit")
+        if chemin == "actions/runs/7" and self.prod["status"] != "completed":
+            self.tours -= 1
+            if self.tours <= 0:
+                self.prod.update(status="completed", conclusion=self.conclusion)
+        return super().__call__(chemin)
+
+
 class AttenteTests(unittest.TestCase):
-    def horloge(self, pas=60):
+    def horloge(self):
         t = [0]
 
         def h():
@@ -221,45 +242,61 @@ class AttenteTests(unittest.TestCase):
             t[0] += s
         return h, dort
 
-    def test_retourne_des_que_la_production_publie(self):
-        api = Api({7: run(7, event="workflow_dispatch")}, en_cours=[production(7)])
-        listes = [[], [], [artefact(7, 70)]]
+    def attends(self, api, liste=lambda: [], **kw):
         h, dort = self.horloge()
-        rid, _ = lp.attends(999, E, api, lambda: listes.pop(0), lambda s: E, DEPOT,
-                            horloge=h, dort=dort, sortie=lambda *_: None)
-        self.assertEqual(rid, 7)
+        return lp.attends(999, E, api, liste, lambda s: E, DEPOT, horloge=h, dort=dort,
+                          sortie=lambda *_: None, **kw)
 
-    def test_echoue_si_plus_aucune_production(self):
-        h, dort = self.horloge()
-        with self.assertRaises(RuntimeError):
-            lp.attends(999, E, Api({}), lambda: [], lambda s: E, DEPOT, grace=120,
-                       horloge=h, dort=dort, sortie=lambda *_: None)
+    def test_artefact_deja_present_retourne_sans_attendre(self):
+        api = Api({1: run(1)})
+        self.assertEqual(self.attends(api, lambda: [artefact(1, 10)])[0], 1)
 
-    def test_echoue_si_la_production_echoue(self):
-        # Production terminee en echec : plus en cours, aucun artefact eligible.
-        api = Api({7: run(7)}, jobs={7: {"jobs": [{"name": lp.JOB_BUILD, "conclusion": "failure"}]}})
-        h, dort = self.horloge()
-        with self.assertRaises(RuntimeError):
-            lp.attends(999, E, api, lambda: [artefact(7, 70)], lambda s: E, DEPOT, grace=0,
-                       horloge=h, dort=dort, sortie=lambda *_: None)
+    def test_retourne_quand_la_production_suivie_publie(self):
+        api = ApiProduction(tours=5)
+        rid, raison = self.attends(api)
+        self.assertEqual(rid, 7, raison)
 
-    def test_reconstruire_refuse_un_build_anterieur_au_run(self):
-        api = Api({1: run(1, created_at="2026-11-10T09:00:00Z"),
-                   2: run(2, created_at="2026-11-10T12:00:00Z")})
-        h, dort = self.horloge()
-        rid, _ = lp.attends(999, E, api, lambda: [artefact(1, 10), artefact(2, 20)], lambda s: E, DEPOT,
-                            depuis="2026-11-10T11:00:00Z", horloge=h, dort=dort, sortie=lambda *_: None)
-        self.assertEqual(rid, 2)
+    def test_budget_d_api_borne_pendant_un_build_long(self):
+        # Revue de la PR #282 : 46 requetes par tour epuisaient 1 000 req/h.
+        # Build de 150 min, un tour par minute : ~1 requete par tour, la liste
+        # des productions relue un tour sur dix (5 requetes).
+        api = ApiProduction(tours=150)
+        self.assertEqual(self.attends(api)[0], 7)
+        par_heure = len(api.appels) / 2.5
+        self.assertLess(par_heure, 200, f"{len(api.appels)} appels en 150 min")
+
+    def test_production_echouee_puis_plus_rien_echoue(self):
+        api = ApiProduction(tours=3, conclusion="failure")
         with self.assertRaises(RuntimeError):
-            lp.attends(999, E, api, lambda: [artefact(1, 10)], lambda s: E, DEPOT, grace=0,
-                       depuis="2026-11-10T11:00:00Z", horloge=h, dort=dort, sortie=lambda *_: None)
+            self.attends(api, grace=0)
+
+    def test_panne_d_api_transitoire_toleree(self):
+        api = ApiProduction(tours=5, pannes_transitoires=4)
+        self.assertEqual(self.attends(api)[0], 7)
+
+    def test_production_reussie_mais_ineligible_ecartee(self):
+        # Termine en succes, mais sans artefacts publies : jamais retenue.
+        api = ApiProduction(tours=2, artefacts={7: {"artifacts": []}})
+        with self.assertRaises(RuntimeError):
+            self.attends(api, grace=0)
+
+    def test_aucune_production_echoue_apres_la_grace(self):
+        with self.assertRaises(RuntimeError):
+            self.attends(Api({}), grace=120)
+
+    def test_reconstruire_refuse_une_production_anterieure_au_run(self):
+        api = ApiProduction(tours=2)
+        api.prod["created_at"] = "2026-11-10T09:00:00Z"
+        with self.assertRaises(RuntimeError):
+            self.attends(api, depuis="2026-11-10T11:00:00Z", grace=0)
+        api2 = ApiProduction(tours=2)
+        api2.prod["created_at"] = "2026-11-10T12:00:00Z"
+        self.assertEqual(self.attends(api2, depuis="2026-11-10T11:00:00Z")[0], 7)
 
     def test_delai_borne(self):
-        api = Api({}, en_cours=[production(7)])
-        h, dort = self.horloge()
+        api = ApiProduction(tours=10 ** 6)
         with self.assertRaises(RuntimeError):
-            lp.attends(999, E, api, lambda: [], lambda s: E, DEPOT, delai=600, pas=60,
-                       horloge=h, dort=dort, sortie=lambda *_: None)
+            self.attends(api, delai=600, pas=60)
 
 
 class VerdictProductionTests(unittest.TestCase):

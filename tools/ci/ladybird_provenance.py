@@ -142,18 +142,7 @@ def cherche_artefact(courant_id, empreinte_courante, liste_artefacts, api, empre
             break
         examines += 1
         try:
-            run = api(f"actions/runs/{rid}")
-            ok, raison = run_sur(run, depot)
-            if ok and depuis and str(run.get("created_at") or "") < depuis:
-                ok, raison = False, f"anterieur a {depuis} (reconstruction exigee)"
-            if ok:
-                empreinte = empreinte_de(run["head_sha"])
-                ok = empreinte == empreinte_courante
-                raison = "empreinte identique" if ok else f"empreinte {empreinte[:16]}"
-            if ok:
-                ok, raison = run_eligible(run, api(f"actions/runs/{rid}/jobs?filter=latest&per_page=100"),
-                                          api(f"actions/runs/{rid}/artifacts?per_page=100"), depot)
-                raison = "empreinte identique, build reel, artefacts presents" if ok else raison
+            ok, raison = examine(rid, empreinte_courante, api, empreinte_de, depot, depuis)
         except Exception as exc:  # API, git : ce candidat ne prouve rien
             ok, raison = False, f"erreur {type(exc).__name__}: {exc}"
         sortie(f"PROVENANCE candidat run={rid} {'RETENU' if ok else 'ecarte'} ({raison})")
@@ -215,26 +204,81 @@ def decide(palier, courant_id, empreinte_courante, liste_artefacts, api, emprein
     return {"mode": "construit", "source_run": "", "raison": f"{raison} : repli build dans le run"}
 
 
+class AttenteEchec(RuntimeError):
+    """Fin d'attente sans artefact : plus de production, ou delai depasse."""
+
+
+def examine(rid, empreinte_courante, api, empreinte_de, depot, depuis=None):
+    """(eligible, raison) d'un run source precis : regles completes, empreinte comprise."""
+    run = api(f"actions/runs/{rid}")
+    ok, raison = run_sur(run, depot)
+    if ok and depuis and str(run.get("created_at") or "") < depuis:
+        return False, f"anterieur a {depuis} (reconstruction exigee)"
+    if ok:
+        empreinte = empreinte_de(run["head_sha"])
+        if empreinte != empreinte_courante:
+            return False, f"empreinte {empreinte[:16]}"
+        ok, raison = run_eligible(run, api(f"actions/runs/{rid}/jobs?filter=latest&per_page=100"),
+                                  api(f"actions/runs/{rid}/artifacts?per_page=100"), depot)
+        raison = "empreinte identique, build reel, artefacts presents" if ok else raison
+    return ok, raison
+
+
 def attends(courant_id, empreinte_courante, api, liste, empreinte_de, depot, depuis=None,
-            delai=14400, pas=60, grace=300, horloge=time.monotonic, dort=time.sleep, sortie=print):
+            delai=14400, pas=60, grace=300, rafraichit=10, horloge=time.monotonic, dort=time.sleep,
+            sortie=print):
     """Attend un artefact eligible de cette empreinte ; (run_id, raison) ou exception.
 
-    Echoue si plus aucune production de l'empreinte n'est en cours (apres une
-    courte grace : un run declenche met quelques secondes a apparaitre).
+    Budget d'API borne (revue de la PR #282 : le jeton du job est limite a
+    1 000 requetes/heure/depot) : UNE recherche complete au depart ; ensuite,
+    a chaque tour, une requete d'etat par production suivie, et la liste des
+    productions en cours n'est relue que tant qu'aucune n'est suivie, ou un
+    tour sur `rafraichit`. Une production terminee en succes est revérifiee
+    en entier (`examine`) ; terminee autrement, elle cesse d'etre suivie.
+    Une erreur d'API (limite de debit comprise) fait patienter, pas echouer ;
+    seul le delai borne l'attente. Plus aucune production suivie apres la
+    grace : une derniere recherche complete, puis echec.
     """
     empreinte_de = Empreintes(empreinte_de)
     debut = horloge()
+    rid, raison = cherche_artefact(courant_id, empreinte_courante, liste(), api, empreinte_de, depot,
+                                   depuis=depuis, sortie=sortie)
+    if rid is not None:
+        return rid, raison
+    suivies, tour = [], 0
     while True:
-        rid, raison = cherche_artefact(courant_id, empreinte_courante, liste(), api, empreinte_de, depot,
-                                       depuis=depuis, sortie=sortie)
-        if rid is not None:
-            return rid, raison
         ecoule = horloge() - debut
-        if not productions_en_cours(courant_id, empreinte_courante, api, empreinte_de, depot, sortie) \
-                and ecoule >= grace:
-            raise RuntimeError(f"aucune production en cours et aucun artefact ({raison})")
+        try:
+            if not suivies or tour % rafraichit == 0:
+                for pid in productions_en_cours(courant_id, empreinte_courante, api, empreinte_de, depot,
+                                                sortie):
+                    if pid not in suivies:
+                        suivies.append(pid)
+            for pid in list(suivies):
+                run = api(f"actions/runs/{pid}")
+                if run.get("status") != "completed":
+                    continue
+                suivies.remove(pid)
+                if run.get("conclusion") != "success":
+                    sortie(f"PROVENANCE production run={pid} terminee : {run.get('conclusion')}")
+                    continue
+                ok, raison = examine(pid, empreinte_courante, api, empreinte_de, depot, depuis)
+                sortie(f"PROVENANCE production run={pid} terminee : {'RETENUE' if ok else 'ecartee'} ({raison})")
+                if ok:
+                    return pid, raison
+            if not suivies and ecoule >= grace:
+                rid, raison = cherche_artefact(courant_id, empreinte_courante, liste(), api, empreinte_de,
+                                               depot, depuis=depuis, sortie=sortie)
+                if rid is not None:
+                    return rid, raison
+                raise AttenteEchec(f"aucune production en cours et aucun artefact ({raison})")
+        except AttenteEchec:
+            raise
+        except Exception as exc:  # API momentanement indisponible ou limite de debit
+            sortie(f"PROVENANCE attente : erreur d'API ({type(exc).__name__}: {exc}), nouvel essai")
         if ecoule >= delai:
-            raise RuntimeError(f"delai {delai} s depasse ({raison})")
+            raise AttenteEchec(f"delai {delai} s depasse ({raison})")
+        tour += 1
         dort(pas)
 
 

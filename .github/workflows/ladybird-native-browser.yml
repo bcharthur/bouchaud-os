@@ -231,7 +231,8 @@ jobs:
     # developpement elles tournent via p13-primitives-noyau.yml, sur les seuls
     # chemins noyau. Ici : qualification uniquement.
     needs: dedoublonne
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') }}
+    # Jamais en production (palier artefact), y compris sur la branche d'audit.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && ((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && inputs.palier != 'artefact' }}
     uses: ./.github/workflows/os-primitives.yml
     with:
       # P13_QUALIFICATION_STRICTE_V1 : une qualification est STRICTE, ou elle

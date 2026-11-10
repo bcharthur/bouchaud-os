@@ -131,8 +131,8 @@ def verifie(t: dict) -> list:
     if not re.search(r"workflow_dispatch:\n    inputs:\n      palier:\n(?:        .*\n)*?        default: qualification\n", lb):
         f.append("dispatch : la qualification n'est plus le palier par defaut")
     prim = entete(j.get("primitives", ""))
-    if "uses: ./.github/workflows/os-primitives.yml" not in prim or f"&& ({Q})" not in prim:
-        f.append("primitives P13 appelees hors qualification")
+    if "uses: ./.github/workflows/os-primitives.yml" not in prim or f"&& ({Q}) && inputs.palier != 'artefact' }}}}" not in prim:
+        f.append("primitives P13 appelees hors qualification, ou par une production")
     # P13_QUALIFICATION_STRICTE_V1 : en qualification, les sondes P13 sont
     # strictes -- la meme condition Q que le palier, pas la seule branche d'audit.
     if f"p13_strict: ${{{{ {Q} }}}}" not in j.get("primitives", ""):
@@ -280,8 +280,10 @@ def negatifs(t: dict) -> list:
     garde_ligne = "        run: python3 tools/ci/ladybird_empreinte.py garde\n"
     mutations = [
         ("dispatch en developpement par defaut", "lb", "        default: qualification\n", "        default: developpement\n"),
-        ("primitives toujours", "lb", f"needs.dedoublonne.outputs.reutilise != 'true' && ({Q}) }}}}\n    uses:",
-         "needs.dedoublonne.outputs.reutilise != 'true' }}\n    uses:"),
+        ("primitives toujours", "lb", f"needs.dedoublonne.outputs.reutilise != 'true' && ({Q}) && inputs.palier != 'artefact' }}}}\n    uses:",
+         "needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact' }}\n    uses:"),
+        ("primitives jouees par une production de la branche d'audit", "lb",
+         f"&& ({Q}) && inputs.palier != 'artefact' }}}}\n    uses:", f"&& ({Q}) }}}}\n    uses:"),
         ("qualification non stricte", "lb", f"p13_strict: ${{{{ {Q} }}}}",
          "p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}"),
         ("garde d'empreinte retiree", "lb", garde_ligne, "        run: true\n"),
@@ -308,8 +310,8 @@ def negatifs(t: dict) -> list:
         ("epreuve transmise sous un autre job", "lb", "          R_WPT: ${{ needs.wpt.result }}",
          "          R_WPT: ${{ needs.cache.result }}"),
         ("primitives jouees en developpement", "lb",
-         "needs.dedoublonne.outputs.reutilise != 'true' && (" + Q + ") }}\n    uses:",
-         "needs.dedoublonne.outputs.reutilise != 'true' && (true) }}\n    uses:"),
+         "needs.dedoublonne.outputs.reutilise != 'true' && (" + Q + ") && inputs.palier != 'artefact' }}\n    uses:",
+         "needs.dedoublonne.outputs.reutilise != 'true' && (true) && inputs.palier != 'artefact' }}\n    uses:"),
         ("contrat : WPT hors-run en developpement", "contrat",
          '_partout("R_WPT", "wpt", "WPT smoke (50 fichiers, compares a Linux)"),',
          'Epreuve("R_WPT", "wpt", "WPT", {QUALIFICATION: REQUIS, DEVELOPPEMENT: HORS_RUN}),'),

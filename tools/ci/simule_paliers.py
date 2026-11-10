@@ -383,6 +383,10 @@ PANNES = (
 PRODUCTIONS = (
     (Scenario("production : artefact a construire", "workflow_dispatch", "artefact", mode="construit"), True),
     (Scenario("production : artefact deja present", "workflow_dispatch", "artefact", mode="existe"), False),
+    # Revue de la PR #282 : sur la branche d'audit, la condition de palier
+    # restait vraie et la production rejouait os-primitives (P13 strict).
+    (Scenario("production sur la branche d'audit", "workflow_dispatch", "artefact",
+              ref="refs/heads/audit/p13-console-sync-ci-20261024", mode="construit"), True),
 )
 HORS_PRODUCTION = ("artefact", "reutilise", "attente", "primitives")
 
