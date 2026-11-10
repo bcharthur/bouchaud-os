@@ -17,6 +17,7 @@ on:
       - 'tools/ci/analyse_gpu_composition.py'
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
+      - 'tools/ci/run_ladybird_browser_host.sh'
       - '.github/workflows/gpu-composition.yml'
   push:
     branches: [main, 'claude/**']
@@ -27,11 +28,13 @@ on:
       - 'tools/ci/analyse_gpu_composition.py'
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
+      - 'tools/ci/run_ladybird_browser_host.sh'
       - '.github/workflows/gpu-composition.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: gpu-composition-${{ github.ref }}
@@ -97,4 +100,85 @@ jobs:
             gpu-composition.log
             gpu-composition/*/serie.log
             gpu-composition/*/capture.png
+          if-no-files-found: warn
+
+  # Ladybird REEL (artefact canonique, provenance verifiee contre ce SHA)
+  # sur `virtio-gpu-gl-pci` : la fenetre du navigateur doit etre composee par
+  # le GPU (`fenetres_gpu>=1`, pixels poses par le GPU) et le smoke produit
+  # (mire de la page, verdict terminal) doit rester vert.
+  ladybird-gpu:
+    name: gpu-composition / Ladybird
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trouver l'artefact Ladybird canonique
+        id: lb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidats=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false) | .workflow_run.id] | unique | reverse | .[]')
+          run=$(echo "$candidats" | head -n1)
+          [ -n "$run" ] || { echo "::error::aucun artefact Ladybird disponible"; exit 1; }
+          echo "run_id=$run" >> "$GITHUB_OUTPUT"
+          echo "Ladybird run=$run"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ steps.lb.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verifier la provenance de l'artefact et les entrees du SHA
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: QEMU (VIRGL), Xvfb, Mesa, outils du smoke
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+            xvfb imagemagick libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil file socat netcat-openbsd
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            gpu-composition-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Ladybird compose par le GPU (smoke produit sous virtio-gpu-gl)
+        run: |
+          Xvfb :70 -screen 0 1920x1200x24 -nolisten tcp &
+          sleep 1
+          DISPLAY=:70 BO_SMOKE_AFFICHAGE=virgl tools/ci/run_ladybird_browser_host.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Verdict de composition GPU du navigateur
+        if: always()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' serie-browser-host.log > serie-propre.log || true
+          grep -aE 'AUTOTEST|BOUCHAUD_GPU_COMPOSITION_OK|GPU-COMPOSITION|GPU_COMPOSITION_ECHEC' serie-propre.log | head -30 || true
+          grep -q 'BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK' serie-propre.log
+          grep -q 'BOUCHAUD_GPU_COMPOSITION_OK' serie-propre.log
+          if grep -q 'GPU_COMPOSITION_ECHEC' serie-propre.log; then echo 'GPU_COMPOSITION_ECHEC vu'; exit 1; fi
+          python3 - <<'PY'
+          import re
+          lignes = [l for l in open("serie-propre.log", errors="replace") if "[GPU-COMPOSITION]" in l]
+          poses = sum(int(m) for l in lignes for m in re.findall(r"px_poses_gpu=(\d+)", l))
+          fen = max((int(m) for l in lignes for m in re.findall(r"fenetres_gpu=(\d+)", l)), default=0)
+          print(f"LADYBIRD_GPU releves={len(lignes)} px_poses_gpu={poses} fenetres_gpu_max={fen}")
+          assert lignes and poses > 0 and fen >= 1, "navigateur non compose par le GPU"
+          print("LADYBIRD_GPU_COMPOSITION_OK")
+          PY
+      - name: Preuves
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-composition-ladybird
+          path: |
+            serie-browser-host.log
+            surface-browser-host*.ppm
           if-no-files-found: warn
