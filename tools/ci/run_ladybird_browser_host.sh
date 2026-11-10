@@ -147,6 +147,17 @@ case "${BO_SMOKE_SURFACE:-}" in
 esac
 echo "BO_SMOKE_SURFACE valeur=${BO_SMOKE_SURFACE:-defaut}"
 
+# BOUCHAUD_LADYBIRD_BENCH_V1 : `BO_SMOKE_GPU_COMPOSITION=on|off` (avec
+# `BO_SMOKE_AFFICHAGE=virgl`) fixe le compositeur GPU des l'autorun : A/B du
+# navigateur reel, meme peripherique, meme page. Absent : rien n'est ecrit.
+LIGNE_GPU=""
+case "${BO_SMOKE_GPU_COMPOSITION:-}" in
+  on|off) LIGNE_GPU="gpu-composition ${BO_SMOKE_GPU_COMPOSITION}" ;;
+  "") ;;
+  *) echo "BO_SMOKE_GPU_COMPOSITION=${BO_SMOKE_GPU_COMPOSITION} : on ou off" >&2; exit 2 ;;
+esac
+echo "BO_SMOKE_GPU_COMPOSITION valeur=${BO_SMOKE_GPU_COMPOSITION:-defaut}"
+
 cat > "$SCENARIO/autorun" <<AUTORUN
 uname
 df
@@ -170,6 +181,9 @@ if [ -n "$LIGNE_PROFIL" ]; then
 fi
 if [ -n "$LIGNE_SURFACE" ]; then
   sed -i "1i $LIGNE_SURFACE" "$SCENARIO/autorun"
+fi
+if [ -n "$LIGNE_GPU" ]; then
+  sed -i "1i $LIGNE_GPU" "$SCENARIO/autorun"
 fi
 (cd tools/userland && IMAGE="$PWD/../../ladybird-browser-host${SUFFIXE}.img" ./mkdisk.sh "$PWD/../../$SCENARIO")
 

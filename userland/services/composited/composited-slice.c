@@ -56,6 +56,7 @@ typedef long i64;
 #define BO_SHM_SIZE       (BO_BASE + 0x41)
 #define BO_SHM_READ       (BO_BASE + 0x42)
 #define BO_SHM_WRITE      (BO_BASE + 0x43)
+#define BO_DISPLAY_PRESENT (BO_BASE + 0x80)
 
 #define BO_RIGHT_READ     (1u << 0)
 #define BO_RIGHT_WRITE    (1u << 1)
@@ -63,6 +64,8 @@ typedef long i64;
 #define BO_RIGHT_DUP      (1u << 4)
 #define BO_RIGHT_TRANSFER (1u << 5)
 #define BO_RIGHT_INSPECT  (1u << 6)
+#define BO_E_INVALID_ARGUMENT 2
+#define BO_E_ACCESS_DENIED    5
 
 #define BO_SIGNAL_SIGNALED (1u << 2)
 
@@ -90,6 +93,20 @@ static void ecris(const char *texte)
     sys6(1, 1, (u64)texte, n, 0, 0, 0);
 }
 
+/* Une ligne = UNE ecriture : le compositeur lance par le noyau ecrit sur la
+ * meme console que les sondes de l'autorun, en meme temps qu'elles. */
+static char ligne_sortie[192];
+
+static void ecris_ligne(const char *a, const char *b)
+{
+    unsigned long n = 0;
+    for (; *a && n < sizeof(ligne_sortie) - 2; a++) ligne_sortie[n++] = *a;
+    for (; *b && n < sizeof(ligne_sortie) - 2; b++) ligne_sortie[n++] = *b;
+    ligne_sortie[n++] = '\n';
+    ligne_sortie[n] = 0;
+    ecris(ligne_sortie);
+}
+
 static void ecris_nombre(const char *etiquette, i64 valeur)
 {
     char tampon[32];
@@ -100,23 +117,15 @@ static void ecris_nombre(const char *etiquette, i64 valeur)
     if (reste == 0) tampon[i--] = '0';
     while (reste) { tampon[i--] = (char)('0' + (reste % 10)); reste /= 10; }
     if (negatif) tampon[i--] = '-';
-    ecris(etiquette);
-    ecris(&tampon[i + 1]);
-    ecris("\n");
+    ecris_ligne(etiquette, &tampon[i + 1]);
 }
 
 static int echecs = 0;
 
 static void exige(int condition, const char *nom)
 {
-    if (condition) {
-        ecris("[COMPOSITED] ok   ");
-    } else {
-        ecris("[COMPOSITED] ECHEC ");
-        echecs++;
-    }
-    ecris(nom);
-    ecris("\n");
+    if (!condition) echecs++;
+    ecris_ligne(condition ? "[COMPOSITED] ok   " : "[COMPOSITED] ECHEC ", nom);
 }
 
 /* --- Geometrie du tranchant ------------------------------------------------ */
@@ -157,6 +166,134 @@ static void accumule_degat(struct surface *s, u32 x, u32 y, u32 w, u32 h)
     u32 x1 = (s->degat_x + s->degat_w) > (x + w) ? (s->degat_x + s->degat_w) : (x + w);
     u32 y1 = (s->degat_y + s->degat_h) > (y + h) ? (s->degat_y + s->degat_h) : (y + h);
     s->degat_x = x0; s->degat_y = y0; s->degat_w = x1 - x0; s->degat_h = y1 - y0;
+}
+
+
+/* --- BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : poser une surface a l'ecran ----
+ *
+ * Lance par le NOYAU sous le nom `/bin/composited` (seule origine de la
+ * capacite d'affichage), le service recoit `BO_DISPLAY=<handle>` dans son
+ * environnement. Il remplit une surface 320x200 avec une MIRE (chaque pixel
+ * encode sa position, la meme que `tools/userland/mire-gpu.c`), la fait
+ * poser en (100,100) par `bo_display_present`, et compare l'empreinte des
+ * pixels RELUS a l'ecran par le noyau avec la sienne. Le banc capture ensuite
+ * l'ecran de QEMU et decode la mire au pixel.
+ *
+ * Sans capacite (lance par l'autorun), seul le refus est verifie.
+ */
+
+#define MIRE_L 320u
+#define MIRE_H 200u
+#define MIRE_X 100u
+#define MIRE_Y 100u
+
+static u32 pixel_mire(u32 x, u32 y)
+{
+    u32 r = y & 0xffu, g = x & 0xffu, b = 0x80u | ((y >> 8) << 3) | (x >> 8);
+    return (r << 16) | (g << 8) | b;
+}
+
+/* FNV-1a 64 bits sur les trois octets RVB, tronquee a 62 bits : la meme que
+ * `affichage_contrat::empreinte` (test hote `test_affichage_contrat.rs`). */
+static u64 empreinte_fnv(u32 l, u32 h)
+{
+    u64 e = 0xcbf29ce484222325UL;
+    for (u32 y = 0; y < h; y++)
+        for (u32 x = 0; x < l; x++) {
+            u32 v = pixel_mire(x, y) & 0xffffffu;
+            for (u32 k = 0; k < 4; k++) {
+                e ^= (v >> (8 * k)) & 0xffu;
+                e *= 0x100000001b3UL;
+            }
+        }
+    return e & 0x3fffffffffffffffUL;
+}
+
+struct demande_presentation {
+    u32 largeur, hauteur, x, y, l, h, dest_x, dest_y;
+};
+
+static i64 presente(i64 affichage, i64 region, u32 x, u32 y, u32 l, u32 h, u32 dx, u32 dy)
+{
+    struct demande_presentation d = { MIRE_L, MIRE_H, x, y, l, h, dx, dy };
+    return sys6(BO_DISPLAY_PRESENT, (u64)affichage, (u64)region, (u64)&d, 0, 0, 0);
+}
+
+static u32 ligne_mire[MIRE_L];
+
+static i64 region_mire(void)
+{
+    i64 region = sys6(BO_SHM_CREATE, MIRE_L * MIRE_H * 4u, 0, 0, 0, 0, 0);
+    if (region < 0) return region;
+    for (u32 y = 0; y < MIRE_H; y++) {
+        for (u32 x = 0; x < MIRE_L; x++) ligne_mire[x] = pixel_mire(x, y);
+        if (sys6(BO_SHM_WRITE, (u64)region, (u64)y * MIRE_L * 4u, (u64)ligne_mire, MIRE_L * 4u, 0, 0) < 0)
+            return -1;
+    }
+    return region;
+}
+
+static int presentation(i64 affichage)
+{
+    i64 region = region_mire();
+    exige(region > 0, "presentation : region de la mire creee et remplie");
+    if (region <= 0) return 1;
+
+    if (affichage < 0) {
+        /* Sans capacite : une region n'est pas une capacite d'affichage. */
+        i64 r = presente(region, region, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
+        ecris_nombre("[COMPOSITED] present_sans_capacite=", r);
+        exige(r == -BO_E_ACCESS_DENIED, "presentation refusee sans capacite d'affichage");
+        sys6(BO_HANDLE_CLOSE, (u64)region, 0, 0, 0, 0, 0);
+        return 0;
+    }
+
+    /* Refus AVEC la capacite : bornes et droits. */
+    i64 r = presente(affichage, region, 1, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
+    exige(r == -BO_E_INVALID_ARGUMENT, "rectangle hors de la surface refuse");
+    r = presente(affichage, region, 0, 0, MIRE_L, MIRE_H, 0xfffffff0u, MIRE_Y);
+    exige(r == -BO_E_INVALID_ARGUMENT, "destination hors ecran (debordement u32) refusee");
+    i64 ecriture_seule = sys6(BO_HANDLE_DUP, (u64)region, BO_RIGHT_WRITE, 0, 0, 0, 0);
+    exige(ecriture_seule > 0, "region dupliquee en ecriture seule");
+    r = presente(affichage, ecriture_seule, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
+    exige(r == -BO_E_ACCESS_DENIED, "region sans droit de lecture refusee");
+    r = presente(affichage, affichage, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
+    exige(r == -BO_E_ACCESS_DENIED, "la capacite n'est pas une region");
+    i64 copie = sys6(BO_HANDLE_DUP, (u64)affichage, BO_RIGHT_INSPECT, 0, 0, 0, 0);
+    exige(copie < 0, "la capacite d'affichage ne se duplique pas");
+
+    /* La presentation reelle, verifiee par relecture. */
+    u64 attendue = empreinte_fnv(MIRE_L, MIRE_H);
+    r = presente(affichage, region, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
+    ecris_nombre("[COMPOSITED] empreinte_attendue=", (i64)attendue);
+    ecris_nombre("[COMPOSITED] empreinte_relue=", r);
+    exige(r >= 0 && (u64)r == attendue, "mire posee a l'ecran, relue au pixel par le noyau");
+
+    sys6(BO_HANDLE_CLOSE, (u64)ecriture_seule, 0, 0, 0, 0, 0);
+    sys6(BO_HANDLE_CLOSE, (u64)region, 0, 0, 0, 0, 0);
+    if (echecs == 0) {
+        ecris("COMPOSITED_PRESENTATION_OK rect=320x200@100,100\n");
+        return 0;
+    }
+    ecris("COMPOSITED_PRESENTATION_FAIL\n");
+    return 1;
+}
+
+/* `BO_DISPLAY=<n>` dans l'environnement, -1 sinon. */
+static i64 capacite_affichage(u64 *pile)
+{
+    u64 argc = pile[0];
+    char **envp = (char **)(pile + 1 + argc + 1);
+    for (; *envp; envp++) {
+        const char *e = *envp, *c = "BO_DISPLAY=";
+        while (*c && *e == *c) { e++; c++; }
+        if (*c) continue;
+        i64 v = 0;
+        if (!*e) return -1;
+        while (*e >= '0' && *e <= '9') v = v * 10 + (*e++ - '0');
+        return *e ? -1 : v;
+    }
+    return -1;
 }
 
 int principal(void)
@@ -411,6 +548,7 @@ int principal(void)
 void _start(void)
 {
     __asm__ volatile(
+        "movq %rsp, %rdi\n\t"
         "andq $-16, %rsp\n\t"
         "call demarre\n\t"
         "ud2\n\t"
@@ -418,10 +556,18 @@ void _start(void)
 }
 
 /* Appelee par `_start` avec une pile conforme a l'ABI. */
-void demarre(void);
-void demarre(void)
+void demarre(u64 *pile);
+void demarre(u64 *pile)
 {
-    int code = principal();
+    i64 affichage = capacite_affichage(pile);
+    int code;
+    if (affichage >= 0) {
+        /* `/bin/composited presentation`, lance par le noyau. */
+        code = presentation(affichage);
+    } else {
+        code = principal();
+        if (presentation(-1) != 0) code = 1;
+    }
     sys6(231, (u64)code, 0, 0, 0, 0, 0); /* exit_group */
     __builtin_unreachable();
 }

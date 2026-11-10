@@ -18,6 +18,7 @@ on:
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/bench_ladybird.py'
       - '.github/workflows/gpu-composition.yml'
   push:
     branches: [main, 'claude/**']
@@ -29,6 +30,7 @@ on:
       - 'tools/userland/mire-gpu.c'
       - 'tools/doom/**'
       - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/bench_ladybird.py'
       - '.github/workflows/gpu-composition.yml'
   workflow_dispatch:
 
@@ -188,6 +190,22 @@ jobs:
           assert lignes and poses > 0 and fen >= 1, "navigateur non compose par le GPU"
           print("LADYBIRD_GPU_COMPOSITION_OK")
           PY
+      # BOUCHAUD_LADYBIRD_BENCH_V1 : second demarrage a froid, meme artefact,
+      # meme page, meme peripherique, `gpu-composition off` ; puis le tableau
+      # A/B tire des deux journaux (tools/ci/bench_ladybird.py).
+      - name: Ladybird, bras composition CPU (A/B)
+        if: success()
+        run: |
+          Xvfb :71 -screen 0 1920x1200x24 -nolisten tcp &
+          sleep 1
+          DISPLAY=:71 BO_SMOKE_AFFICHAGE=virgl BO_SMOKE_GPU_COMPOSITION=off BO_SMOKE_SUFFIXE=-cpu \
+            tools/ci/run_ladybird_browser_host.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Benchmark Ladybird (GPU on / off)
+        if: success()
+        run: |
+          echo "### Ladybird, composition GPU on/off ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/ci/bench_ladybird.py serie-browser-host.log serie-browser-host-cpu.log | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Preuves
         if: always()
         uses: actions/upload-artifact@v4
@@ -195,5 +213,6 @@ jobs:
           name: gpu-composition-ladybird
           path: |
             serie-browser-host.log
+            serie-browser-host-cpu.log
             surface-browser-host*.ppm
           if-no-files-found: warn

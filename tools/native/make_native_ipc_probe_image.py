@@ -83,6 +83,14 @@ def main() -> int:
                 args.composited.read_bytes(),
                 0o755,
             )
+            # BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : le meme binaire sous le
+            # nom que le NOYAU lance lui-meme avec la capacite d'affichage.
+            add_bytes(
+                tar,
+                "bin/composited",
+                args.composited.read_bytes(),
+                0o755,
+            )
         add_bytes(tar, "autorun", autorun_data, 0o644)
 
     archive_size = args.image.stat().st_size

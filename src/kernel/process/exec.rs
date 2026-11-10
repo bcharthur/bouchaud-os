@@ -332,7 +332,12 @@ fn exec_source(
 
     let code = task::run(first);
 
-    if !graphics_before && crate::drivers::gfx::is_active() {
+    // BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : si c'est le compositeur ring 3
+    // qui a pris l'ecran pendant ce programme, ce n'est pas a ce programme de
+    // le lui reprendre.
+    if !graphics_before && crate::drivers::gfx::is_active()
+        && !crate::kernel::native::affichage::ecran_au_compositeur()
+    {
         crate::drivers::gfx::leave();
     }
     Ok(code)

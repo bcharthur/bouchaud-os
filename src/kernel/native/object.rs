@@ -13,6 +13,8 @@ pub enum Object {
     Process(ProcessRef),
     /// Capacite de mise a jour : aucun etat, tout est dans le droit porte.
     Update,
+    /// Capacite d'affichage (`affichage.rs`) : aucun etat, tout est dans le droit.
+    Display,
     Legacy(ObjectKind),
 }
 
@@ -25,6 +27,7 @@ impl Object {
             Self::SharedRegion(_) => ObjectKind::SharedRegion,
             Self::Process(_) => ObjectKind::Process,
             Self::Update => ObjectKind::Update,
+            Self::Display => ObjectKind::Display,
             Self::Legacy(kind) => *kind,
         }
     }
@@ -37,6 +40,7 @@ impl Object {
             Self::SharedRegion(region) => region.signals(),
             Self::Process(process) => process.signals(),
             Self::Update => Signals::NONE,
+            Self::Display => Signals::NONE,
             Self::Legacy(_) => Signals::NONE,
         }
     }

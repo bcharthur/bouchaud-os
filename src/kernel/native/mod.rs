@@ -11,6 +11,7 @@
 
 pub mod abi;
 pub mod activite;
+pub mod affichage;
 pub mod event;
 pub mod handle;
 pub mod io;

@@ -30,11 +30,23 @@ serveur ne manipulerait que des **identifiants de surface** et des
 
 ## 3. Tranches, dans l'ordre, chacune avec sa preuve
 
-1. **Appel système de présentation** `bo_display_present(surface_ids, rects)`
-   réservé à un processus détenant la capacité « affichage » (accordée au
-   démarrage, comme `windowd`). Le noyau valide les surfaces (appartenance,
-   bornes) et appelle `presente_trame_gpu`. Preuve : mire au pixel identique au
-   banc actuel, refus d'une surface d'un autre principal.
+1. **Appel système de présentation** — **fait le 10/11, preuve TCG locale
+   (`BOUCHAUD_COMPOSITORD_PRESENTATION_V1`, ABI native 1.3)**.
+   `bo_display_present(affichage, région, demande*)` : capacité `Display`
+   (droit `DISPLAY_PRESENT`) que **seul le noyau** crée, pour le seul
+   programme `/bin/composited` qu'il lance lui-même (ni DUP ni TRANSFER) ;
+   région lue avec le droit READ de l'appelant ; bornes (surface dans la
+   région, rectangle dans la surface, destination dans l'écran, calculs en
+   u64) jugées par un contrat pur (`affichage_contrat.rs`, 8 tests hôte) avant
+   toute lecture ; refus tant que le bureau noyau tient l'écran. Retour :
+   empreinte des pixels **relus à l'écran**.
+   Preuve QEMU (`tools/ci/run_native_ipc_probe.sh`, CI `Native IPC Runtime`) :
+   `composited` ring 3 pose une mire 320×200 en (100,100) ; la capture de
+   l'écran QEMU est décodée au pixel : **64 000 exacts, 0 faux** ; refus vérifiés
+   sans capacité, hors surface, hors écran (débordement u32), région sans
+   lecture, capacité non duplicable. Garde : `tools/verifie-capacite-affichage.py`
+   (6 témoins négatifs). Reste : présenter via `presente_trame_gpu` (VIRGL) et
+   plusieurs surfaces par appel.
 2. **`compositord` ring 3** : reçoit les surfaces des clients (déjà partagées par
    nœud), possède le fond, le chrome, le dock et le curseur dans **sa** surface,
    et présente par l'appel 1. Le fil noyau du bureau ne fait plus que relayer.
