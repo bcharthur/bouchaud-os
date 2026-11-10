@@ -690,6 +690,8 @@ fn boucle() {
     // BOUCHAUD_GPU_COMPOSITION_V2 : une fenetre composee par le GPU a peint
     // sans que le bureau ait rien a repeindre -- la trame est due quand meme.
     let mut trame_gpu_due = false;
+    // Degats des clients deja routes (processeur), plusieurs rectangles.
+    let mut degats_routes: Vec<Rect> = Vec::new();
     // Sur le TAS : la pile du bureau est comptee (verifie-pile-noyau-profondeur).
     let mut plan_gpu_precedent = alloc::boxed::Box::new(crate::gui::composition::Plan::vide());
 
@@ -1245,10 +1247,17 @@ fn boucle() {
         // ecrit AVANT est lu par ce tour ou par un precedent. Voir
         // `temoin_composition` plus bas.
         let pompe_t_ms = crate::kernel::timer::monotonic_ms();
-        let (degat_clients, perte_fenetre, gpu_sale) = pompe_clients(&mut wins, recompose_aveugle);
+        degats_routes.clear();
+        let (degat_clients, perte_fenetre, gpu_sale) = pompe_clients(&mut wins, recompose_aveugle, &mut degats_routes);
         if !degat_clients.vide() {
             sale = true;
             degats.ajoute(Origine::Client, degat_clients);
+        }
+        for r in degats_routes.iter().copied() {
+            if !r.vide() {
+                sale = true;
+                degats.ajoute(Origine::Client, r);
+            }
         }
         if gpu_sale {
             sale = true;
@@ -2146,7 +2155,8 @@ fn ferme_trame(
     }
 }
 
-fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool, bool) {
+fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
+    degats_routes: &mut Vec<Rect>) -> (Rect, bool, bool) {
     let mut degat_ecran = Rect::default();
     let mut gpu_sale = false;
     let mut morts: Vec<usize> = Vec::new();
@@ -2213,9 +2223,9 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool, b
                     // BOUCHAUD_GPU_COMPOSITION_V2 : fenetre composee par le
                     // GPU -- le processeur ne repeint que ce qui est SOUS un
                     // calque superieur ; le reste part en texture.
-                    let (cpu, gpu) = crate::gui::composition::route_degat(w.window.id.get(), ecran);
-                    degat_ecran = degat_ecran.union(&cpu);
-                    gpu_sale |= gpu;
+                    // BOUCHAUD_GPU_COMPOSITION_V2 : la part du processeur
+                    // (hors GPU, hors calques opaques superieurs).
+                    gpu_sale |= crate::gui::composition::route_degat(w.window.id.get(), ecran, degats_routes);
                 }
             }
             if client.fermeture_demandee || !client.vivant() {

@@ -15,6 +15,8 @@
 #          processeur de dessin du bureau par trame, pixels clients recopies
 #          par le processeur, cadence. CONVAINCANT : dessin /2 au moins,
 #          < 1 % des pixels clients, cadence >= 90 %.
+#   occlusion  DOOM sous la mire : les pixels caches ne sont plus recopies
+#          par le processeur (< 10 % du bras processeur de l'A/B).
 #   repli  `virtio-gpu-pci` (sans VIRGL) : le compositeur reste eteint, DOOM
 #          tourne en composition processeur, aucun echec.
 #
@@ -77,6 +79,10 @@ python3 tools/ci/analyse_gpu_composition.py mire "$SORTIE/mire/serie.log" "$SORT
 CAPTURE_A=60 demarre ab-gpu "$DUREE_AB" virtio-gpu-gl-pci 'gpu-composition on' 'export BO_AUTOSTART_DOOM=1'
 demarre ab-cpu "$DUREE_AB" virtio-gpu-gl-pci 'gpu-composition off' 'export BO_AUTOSTART_DOOM=1'
 python3 tools/ci/analyse_gpu_composition.py ab "$SORTIE/ab-gpu/serie.log" "$SORTIE/ab-cpu/serie.log" || echec=1
+
+# Deux fenetres superposees : DOOM cache sous la mire (composee par le GPU).
+demarre occlusion 80 virtio-gpu-gl-pci 'export BO_AUTOSTART_DOOM=1' 'export BO_AUTOSTART_APP=/mire-gpu'
+python3 tools/ci/analyse_gpu_composition.py occlusion "$SORTIE/occlusion/serie.log" "$SORTIE/ab-cpu/serie.log" || echec=1
 
 demarre repli 80 virtio-gpu-pci 'export BO_AUTOSTART_DOOM=1'
 python3 tools/ci/analyse_gpu_composition.py repli "$SORTIE/repli/serie.log" || echec=1

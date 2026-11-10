@@ -71,8 +71,10 @@ compositeur ne s'active que si l'une donne exactement la mire.
 |---|---|
 | Autotest de convention | `BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK convention=Brut blit_gpu=8x3 relu_au_pixel=64/64` |
 | Mire, capture de l'écran **de l'hôte** décodée | `MIRE_OK zone=640x400 exacts=254934 faux=0 blancs=1066` (carré mobile et curseur) — écran 71..470 ← surface 0..399 |
-| A/B DOOM, même périphérique, `gpu-composition on/off` | `AB_CONVAINCANT` : temps CPU de dessin du bureau **213 µs/trame contre 3 336 µs (÷15,7)** ; pixels clients recopiés par le CPU **0,64 M contre 524 M par 30 s (−99,9 %)** ; cadence 2 081 contre 2 055 trames/30 s |
+| A/B DOOM, même périphérique, `gpu-composition on/off` | `AB_CONVAINCANT` (trois passes : ÷15,7, ÷14,3, ÷15,2) : temps CPU de dessin du bureau **≈ 190 µs/trame contre ≈ 2 800 µs** ; pixels clients recopiés par le CPU **0,64 M contre ≈ 530 M par 30 s (−99,9 %)** ; cadence identique (≈ 2 095 trames/30 s) |
+| Fenêtre cachée (DOOM sous la mire) | `OCCLUSION_OK` : pixels clients recopiés par le CPU **14 M contre 533 M / 30 s** ; les dommages d'un client sont filtrés par la zone OPAQUE des calques supérieurs (`route_degat`, plusieurs rectangles, jamais leur englobant) |
 | Repli sans VIRGL (`virtio-gpu-pci`) | `REPLI_OK` : compositeur éteint, DOOM en composition CPU, aucun échec |
+| Endurance locale, 2 fenêtres, SMP4, 200 s | aucun `GPU_COMPOSITION_ECHEC`, aucune panique, une texture, cadence stable |
 
 Le temps de **présentation** par trame (≈ 5,8 ms GPU contre ≈ 5,0 ms CPU sous
 TCG) mesure surtout le GL logiciel de l'hôte (llvmpipe) et les allers-retours

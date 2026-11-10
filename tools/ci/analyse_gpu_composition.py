@@ -4,6 +4,7 @@
   analyse_gpu_composition.py mire   SERIE CAPTURE.png
   analyse_gpu_composition.py ab     SERIE_GPU SERIE_CPU
   analyse_gpu_composition.py repli  SERIE_2D
+  analyse_gpu_composition.py occlusion SERIE_SUPERPOSEES SERIE_CPU
 
 Contre le faux vert : chaque verdict exige ses lignes, une capture absente ou
 un releve manquant est un ECHEC, jamais un succes par defaut.
@@ -139,7 +140,25 @@ def repli(serie):
     return 0 if ok else 1
 
 
+def occlusion(serie, serie_cpu):
+    """DOOM CACHE sous la mire : ses pixels ne se voient (presque) pas ; le
+    processeur ne doit pas les recopier. Borne : 10 % de ce que recopie le
+    bras processeur de l'A/B (DOOM seul, visible)."""
+    o = releves(serie)[1:]
+    c = releves(serie_cpu)[1:]
+    if len(o) < 1 or len(c) < 1:
+        print(f"OCCLUSION_ECHEC releves insuffisants occlusion={len(o)} cpu={len(c)}")
+        return 1
+    po, pc = mediane(o, "px_client_copies_cpu"), mediane(c, "px_client_copies_cpu")
+    gpu = all(r.get("fenetres_gpu", 0) >= 1 for r in o)
+    ok = gpu and po <= 0.1 * pc
+    print(f"OCCLUSION_{'OK' if ok else 'ECHEC'} px_client_copies_cpu_30s superposees={po} doom_seul_cpu={pc} fenetre_du_dessus_gpu={int(gpu)}")
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "occlusion":
+        sys.exit(occlusion(sys.argv[2], sys.argv[3]))
     mode = sys.argv[1]
     if mode == "mire":
         sys.exit(mire(sys.argv[2], sys.argv[3]))
