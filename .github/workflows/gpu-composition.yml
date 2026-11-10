@@ -92,12 +92,18 @@ jobs:
         env:
           BO_QEMU_KVM: ${{ matrix.accel == 'kvm' && '1' || '0' }}
           GPU_COMPOSITION_BOOT_PANNE: boot-panne.bin
+        # pipefail : sans lui, `| tee` rend le statut de tee, pas celui du banc
+        # (BOUCHAUD_CI_VERDICTS_NEGATIFS_V1).
+        shell: bash
         run: |
+          set -o pipefail
           tools/ci/run_gpu_composition.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | tee gpu-composition.log
           grep -q GPU_COMPOSITION_BANC_OK gpu-composition.log
       - name: Benchmark (medianes des releves, conditions de la mesure)
         if: always()
+        shell: bash
         run: |
+          set -o pipefail
           echo "### Benchmark ${{ matrix.accel }} ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
           python3 tools/ci/bench_bouchaud.py gpu-composition | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Extraits du journal

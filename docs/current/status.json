@@ -60,6 +60,39 @@
         144
       ],
       "level": "KVM (GitHub-hosted)"
+    },
+    "final_sha_campaigns": {
+      "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+      "threshold_kio": 1024,
+      "runs": [
+        {
+          "run": 42842860845,
+          "event": "push",
+          "g2_kio": [
+            156,
+            156,
+            200,
+            132,
+            172,
+            120
+          ],
+          "verdict": "C22_CONTRACTUEL_6X6_OK"
+        },
+        {
+          "run": 42851644175,
+          "event": "workflow_dispatch qualification (tentative 2)",
+          "g2_kio": [
+            140,
+            136,
+            156,
+            108,
+            224,
+            136
+          ],
+          "verdict": "C22_CONTRACTUEL_6X6_OK"
+        }
+      ],
+      "status": "PASS"
     }
   },
   "ci": {
@@ -315,15 +348,15 @@
   },
   "p13": {
     "strict_smp124_kvm": "PASS",
-    "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
-    "run": 42784700689,
-    "evidence": "P13_STRICT_OK attribution smp=1,2,4",
-    "smp8": "PENDING_DEDICATED_KVM8",
-    "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING",
+    "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+    "run": 42842861068,
+    "evidence": "P13_STRICT_OK attribution smp=1,2,4 (runs 42842861068 et 42851644175 job primitives/probes), ORDONNANCEUR_ATTRIBUTION_OK qualifie_ok=2 non_qualifiant=0 qualifie_echec=0",
+    "smp8": "BLOCKED_EXTERNAL (runner KVM dedie 8 vCPU non provisionne)",
+    "final_strict": "BLOCKED_EXTERNAL (meme cause)",
     "soak_smp4_20m": {
-      "sha": "8e3c777a1b6e73a1dc13abb6dd32aab3c40bb207",
-      "run": 42815448566,
-      "result": "PASS 9/9",
+      "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+      "run": 42851638554,
+      "result": "PASS 9/9, 0 NON_QUALIFIANT",
       "level": "TCG hosted"
     }
   },
@@ -436,5 +469,11 @@
       "compositor still a kernel thread"
     ],
     "doc": "docs/current/P10_GPU_COMPOSITEUR.md"
+  },
+  "ladybird_convergence_93d9421": {
+    "run": 42851644175,
+    "result": "FAIL",
+    "cause": "piege du Compositor : 1 demarrage froid sur 16 inconclusif (LADYBIRD_FUNCTIONAL_SMOKE jalons manquants=7, systeme fige ~20 min, 0 faute Compositor). Meme signature sur le noyau de main (run 42875324047) : defaut intermittent preexistant, non attribue a cette branche ; non relance pour obtenir du vert.",
+    "attempt_1": "build tue par signal d'arret du runner heberge (exit 143), relance au meme SHA"
   }
 }
