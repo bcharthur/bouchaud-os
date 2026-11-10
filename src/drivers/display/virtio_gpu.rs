@@ -33,6 +33,8 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, Atom
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
+#[cfg(feature = "p10-virgl-experimental")]
+use crate::drivers::virtio_gpu_3d as gpu3d;
 use crate::drivers::virtio_gpu_file as file;
 use crate::drivers::virtio_gpu_irq::{self as irq, Reveil, Strategie};
 use crate::drivers::virtio_gpu_tampons as tampons;
@@ -129,7 +131,7 @@ struct Capacites {
     commune: Option<usize>,
     notification: Option<(usize, u32)>,
     isr: bool,
-    peripherique: bool,
+    peripherique: Option<usize>,
     /// BOUCHAUD_VIRTIO_GPU_IRQ_V1 : decalage de la capacite MSI-X.
     msix: Option<u8>,
 }
@@ -148,7 +150,7 @@ fn adresse(dev: &PciDevice, bar: u8, decalage: u32) -> Option<usize> {
 }
 
 fn capacites(dev: &PciDevice) -> Capacites {
-    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: false, msix: None };
+    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: None, msix: None };
     let mut liste = [pci::Capacite { identifiant: 0, decalage: 0 }; 16];
     let n = pci::capacites_de(dev, &mut liste);
     for cap in &liste[..n] {
@@ -171,7 +173,7 @@ fn capacites(dev: &PciDevice) -> Capacites {
                 c.notification = adresse(dev, bar, decalage).map(|a| (a, multiplicateur));
             }
             CFG_ISR => c.isr = true,
-            CFG_PERIPHERIQUE => c.peripherique = true,
+            CFG_PERIPHERIQUE => c.peripherique = adresse(dev, bar, decalage),
             _ => {}
         }
     }
@@ -203,7 +205,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
     crate::serial_println!(
         "VIRTIO_PCI peripherique={:04x}:{:04x} bus={:02x}:{:02x}.{} commune={} notification={} isr={} config={}",
         dev.vendor, dev.device, dev.bus, dev.slot, dev.func,
-        c.commune.is_some() as u8, c.notification.is_some() as u8, c.isr as u8, c.peripherique as u8,
+        c.commune.is_some() as u8, c.notification.is_some() as u8, c.isr as u8, c.peripherique.is_some() as u8,
     );
     let commune = Region { base: c.commune.ok_or("capacite-commune-absente")? };
     let (notification, multiplicateur) = c.notification.ok_or("capacite-notification-absente")?;
@@ -230,6 +232,11 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             commune.e8(DEVICE_STATUS, ECHEC);
             return Err("version-1-non-proposee");
         }
+        // BOUCHAUD_P10_VIRGL_3D_20261109 : genuine VIRGL negotiation is
+        // feature-gated and always conditional on host advertisement.
+        #[cfg(feature = "p10-virgl-experimental")]
+        let retenues = gpu3d::negotiated_features(proposees, true);
+        #[cfg(not(feature = "p10-virgl-experimental"))]
         let retenues = VERSION_1;
         commune.e32(DRIVER_FEATURE_SELECT, 0);
         commune.e32(DRIVER_FEATURE, retenues as u32);
@@ -307,6 +314,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             dernier_util: 0,
             cassee: false,
             barriere: 0,
+            #[cfg(feature = "p10-virgl-experimental")]
+            derniere_reponse_len: 0,
         };
         let _ = (desc_p, dispo_p, util_p);
 
@@ -351,8 +360,18 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         // sa memoire, le scanout, un transfert, une presentation, puis les
         // refus attendus. Il tourne que BGA soit la ou non : il n'ecrit que
         // sur l'ecran virtio-gpu, jamais sur BGA.
-        let autotest = autotest_2d(&mut file);
-        let autotest_ok = autotest.is_ok();
+        // BOUCHAUD_P10_VIRGL_SCANOUT_FIX_20261109
+        // VIRGL GL peut accepter un format 2D invalide que virtio-gpu 2D
+        // classique refuse. Ne pas utiliser ce test negatif comme prealable
+        // a un scanout 2D deja valide positivement par transfert + flush.
+        // Seul le VIRGL effectivement negocie beneficie de cette exception.
+        #[cfg(feature = "p10-virgl-experimental")]
+        let compat_virgl = retenues & gpu3d::F_VIRGL != 0;
+        #[cfg(not(feature = "p10-virgl-experimental"))]
+        let compat_virgl = false;
+        let autotest = autotest_2d(&mut file, compat_virgl);
+        #[allow(unused_mut)]
+        let mut autotest_ok = autotest.is_ok();
         let mire = match autotest {
             Ok(m) => {
                 crate::serial_println!("BOUCHAUD_VIRTIO_GPU_2D_AUTOTEST_OK");
@@ -363,6 +382,30 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 None
             }
         };
+        // P10+.4: probe the 3D backend *after* the existing 2D autotest.
+        // No raw shader/command bytes from userland. A lost fence breaks the
+        // queue; 2D is then disabled, never reused with a stale response.
+        #[cfg(feature = "p10-virgl-experimental")]
+        let p10_virgl = if retenues & gpu3d::F_VIRGL == 0 {
+            crate::serial_println!("P10_GPU_3D etat=absent raison=host-sans-virgl");
+            None
+        } else {
+            let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
+            match p10_probe_3d(&mut file, capsets) {
+                Ok(info) => {
+                    crate::serial_println!("P10_GPU_3D_OK capset={} version={} taille={} contexte={} ressource={} taille_px={}x{}",
+                        info.id, info.version, info.size, gpu3d::CONTEXT_ID,
+                        gpu3d::RESOURCE_ID, gpu3d::RESOURCE_DIM, gpu3d::RESOURCE_DIM);
+                    Some(info)
+                }
+                Err(cause) => {
+                    crate::serial_println!("P10_GPU_3D etat=non-valide cause={} file_cassee={}", cause, file.cassee as u8);
+                    None
+                }
+            }
+        };
+        #[cfg(feature = "p10-virgl-experimental")]
+        if file.cassee { autotest_ok = false; }
         match verrou() {
             Some(mut garde) => {
                 *garde = Some(Peripherique {
@@ -371,6 +414,12 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     autotest_ok,
                     scanout: None,
                     mire,
+                    #[cfg(feature = "p10-virgl-experimental")]
+                    p10_virgl,
+                    #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
+                    p10_client_textures: [None; crate::drivers::p10_window_gpu::MAX_TEXTURES],
+                    #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
+                    p10_desktop_attache: false,
                 });
             }
             // Impossible au demarrage (personne d'autre ne le tient) ; si
@@ -396,6 +445,340 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 // interruptions (tout est scrute et borne). virtio-gpu (QEMU) n'est pas le GPU
 // de la Trigkey.
 
+// BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
+// The display path is still software raster + virtio-gpu 2D.
+#[cfg(feature = "p10-virgl-experimental")]
+unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
+    if count == 0 { return Err("aucun-capset"); }
+    let mut selected: Option<gpu3d::CapsetInfo> = None;
+    for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
+        let req = gpu3d::get_capset_info(idx);
+        if f.commande(&req, 40)? != gpu3d::RESP_OK_CAPSET_INFO {
+            return Err("capset-info-refuse");
+        }
+        if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
+        let raw = core::slice::from_raw_parts(f.reponse(), 40);
+        let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
+        if gpu3d::supported(info) {
+            if info.id == gpu3d::CAPSET_VIRGL2 {
+                selected = Some(info);
+                break;
+            }
+            if selected.is_none() { selected = Some(info); }
+        }
+    }
+    let info = selected.ok_or("virgl-capset-absent")?;
+    let mut ctx_created = false;
+    let mut resource_created = false;
+    let mut attached = false;
+    // Each command is fenced; all dependencies are strictly sequential.
+    let result = (|| -> Result<(), &'static str> {
+        if f.commande(&gpu3d::ctx_create(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("ctx-create-refuse");
+        }
+        ctx_created = true;
+        if f.commande(&gpu3d::resource_create(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("resource-create-3d-refuse");
+        }
+        resource_created = true;
+        if f.commande(&gpu3d::resource_attach(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("ctx-attach-refuse");
+        }
+        attached = true;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        // Never issue another command after a missing/invalid response.
+        if !f.cassee {
+            if attached { let _ = f.commande(&gpu3d::resource_detach(), ENTETE); }
+            if resource_created && !f.cassee { let _ = f.commande(&gpu3d::resource_unref(), ENTETE); }
+            if ctx_created && !f.cassee { let _ = f.commande(&gpu3d::ctx_destroy(), ENTETE); }
+        }
+        return Err(e);
+    }
+    Ok(info)
+}
+
+/// A real kernel-only VIRGL command submission entry point. No ring3 uAPI.
+/// The context and 3D texture remain owned by the GPU driver.
+// BOUCHAUD_P10_VIRGL_VULKAN_BRIDGE_20261109
+// Compose deux ressources GPU deja CREEES et ATTACHEES au contexte.
+// C'est un vrai submit_3d VIRGL, pas un memcpy CPU.
+// Le pilote doit gerer leur cycle de vie et le scanout avant usage.
+#[cfg(feature = "p10-virgl-experimental")]
+pub fn p10_virgl_blit_ressources(
+    source: crate::drivers::p10_virgl_composition::ImageRegion,
+    cible: crate::drivers::p10_virgl_composition::ImageRegion,
+    alpha: bool,
+) -> Result<(), &'static str> {
+    if !p10_virgl_pret() { return Err("gpu-3d-absent"); }
+    let commande = crate::drivers::p10_virgl_composition::blit(source, cible, alpha)
+        .map_err(|_| "rectangle-invalide")?;
+    p10_soumet_virgl_noyau(&commande)
+}
+
+// BOUCHAUD_P10_GPU_APP_LAYERS_20261109
+// Texture VIRGL DMA reutilisable pour le contenu opaque de la fenetre visible.
+// Les images viennent de la surface ring3 deja validee par le gestionnaire de
+// fenetres; aucun processus ne fournit de commandes GPU brutes.
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+#[derive(Clone, Copy)]
+struct P10ClientTexture {
+    physique: u64,
+    virt: usize,
+    largeur: u32,
+    hauteur: u32,
+}
+
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+static P10_CLIENT_GPU_VERIFIE: AtomicBool = AtomicBool::new(false);
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+static P10_CLIENT_GPU_INVALIDE: AtomicBool = AtomicBool::new(false);
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+static P10_CLIENT_GPU_TRAMES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+pub fn p10_client_gpu_verifie() -> bool {
+    P10_CLIENT_GPU_VERIFIE.load(Ordering::Acquire)
+        && !P10_CLIENT_GPU_INVALIDE.load(Ordering::Acquire)
+}
+
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+pub fn p10_client_gpu_possible() -> bool {
+    !P10_CLIENT_GPU_INVALIDE.load(Ordering::Acquire) && p10_virgl_pret()
+}
+
+/// Un transfert de surface CPU vers une texture GPU, puis un BLIT GPU vers la
+/// ressource de scanout. Cette fonction est appelee par le travailleur GPU,
+/// JAMAIS par le thread Atelier. La derniere presentation 2D est deja finie.
+#[cfg(all(feature="p10-virgl-experimental", feature="p10-universal-present"))]
+pub fn p10_clients_gpu_compose(
+    clients: &[crate::drivers::p10_gpu_queue::Couche],
+) -> bool {
+    use crate::drivers::p10_virgl_composition as composition;
+    use crate::drivers::p10_window_gpu as fenetre_gpu;
+
+    if P10_CLIENT_GPU_INVALIDE.load(Ordering::Acquire) { return false; }
+    let resultat = (|| -> Result<(), &'static str> {
+        let mut garde = verrou().ok_or("gpu-verrou")?;
+        let p = garde.as_mut().ok_or("gpu-absent")?;
+        if p.file.cassee || p.p10_virgl.is_none() || !ACTIF.load(Ordering::Acquire) {
+            return Err("virgl-inactif");
+        }
+        let scanout = p.scanout.ok_or("scanout-absent")?;
+        let (ecran_l, ecran_h) = (scanout.largeur as usize, scanout.hauteur as usize);
+        if clients.is_empty() || clients.len() > fenetre_gpu::MAX_TEXTURES {
+            return Err("nombre-de-fenetres-invalide");
+        }
+
+        // Aucune soumission avant le controle de TOUTE la scene.
+        for (i, c) in clients.iter().enumerate() {
+            if c.largeur == 0 || c.hauteur == 0 || c.largeur > ecran_l
+                || c.hauteur > ecran_h || c.largeur.checked_mul(c.hauteur) != Some(c.pixels.len())
+                || c.x.checked_add(c.largeur).is_none_or(|v| v > ecran_l)
+                || c.y.checked_add(c.hauteur).is_none_or(|v| v > ecran_h) {
+                return Err("dimensions-client");
+            }
+            for o in clients.iter().skip(i + 1) {
+                if c.x < o.x.saturating_add(o.largeur) && o.x < c.x + c.largeur
+                    && c.y < o.y.saturating_add(o.hauteur) && o.y < c.y + c.hauteur {
+                    return Err("recouvrement-non-autorise");
+                }
+            }
+        }
+
+        // Transfert CPU du fond, sans FLUSH intermediaire.
+        // P10+.2 garde son etat DMA explicite meme lorsque VIRGL est actif.
+        let tout = Rect { x: 0, y: 0, largeur: ecran_l as u32, hauteur: ecran_h as u32 };
+        let en_vol = tampons::soumet(etat_tampon()).ok_or("scanout-tampon-occupe")?;
+        let etat_3d = en_vol;
+        pose_etat_tampon(etat_3d);
+        let base = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, tout, 0) };
+        let fin = if dma::issue(base) == dma::Issue::SansReponse {
+            tampons::Fin::SansReponse
+        } else { tampons::Fin::Achevee };
+        pose_etat_tampon(tampons::acheve(en_vol, fin));
+        if base != Ok(RESP_OK_NODATA) { return Err("base-transfert-refuse"); }
+
+        if !p.p10_desktop_attache {
+            let q = fenetre_gpu::attach_context(RESSOURCE_BUREAU);
+            if unsafe { p.file.commande(&q, ENTETE) } != Ok(RESP_OK_NODATA) {
+                return Err("desktop-ctx-attach-refuse");
+            }
+            p.p10_desktop_attache = true;
+        }
+
+        // UNE texture persiste par emplacement de fenetre (max 4).
+        // Ainsi, les quatre transferts sont termines avant la seule
+        // SUBMIT_3D de la scene. Les BLIT ne peuvent pas relire une
+        // texture modifiee par le transfert de la fenetre suivante.
+        let zero = composition::ImageRegion {
+            ressource: 1, largeur: 1, hauteur: 1, x: 0, y: 0, w: 1, h: 1,
+        };
+        let mut calques = [composition::Calque {
+            source: zero, cible: zero, alpha_premultiplie: false,
+        }; fenetre_gpu::MAX_TEXTURES];
+
+        for (slot, c) in clients.iter().enumerate() {
+            let rid = fenetre_gpu::resource_id(slot).ok_or("pool-texture-plein")?;
+            if p.p10_client_textures[slot].is_none() {
+                let octets = ecran_l.checked_mul(ecran_h)
+                    .and_then(|n| n.checked_mul(4)).ok_or("taille-dma")?;
+                let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-gpu")?;
+                let fmt = fenetre_gpu::create_source_id(rid, ecran_l as u32, ecran_h as u32)
+                    .ok_or("resource-create-invalide")?;
+                let attache = fenetre_gpu::attach_backing_id(rid, phys, octets)
+                    .ok_or("attach-backing-invalide")?;
+                let ok = unsafe {
+                    p.file.commande(&fmt, ENTETE) == Ok(RESP_OK_NODATA)
+                        && p.file.commande(&attache, ENTETE) == Ok(RESP_OK_NODATA)
+                        && p.file.commande(&fenetre_gpu::attach_context(rid), ENTETE)
+                            == Ok(RESP_OK_NODATA)
+                };
+                if !ok {
+                    // En cas de perte de fence, le device peut conserver
+                    // le pointeur DMA : jamais de free/reuse hasardeux.
+                    return Err("initialisation-texture-refusee");
+                }
+                p.p10_client_textures[slot] = Some(P10ClientTexture {
+                    physique: phys, virt: virt as usize,
+                    largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                });
+            }
+
+            let t = p.p10_client_textures[slot].ok_or("texture-absente")?;
+            if t.largeur as usize != ecran_l || t.hauteur as usize != ecran_h {
+                return Err("texture-geometrie-modifiee");
+            }
+            let destination = t.virt as *mut u32;
+            for ligne in 0..c.hauteur {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        c.pixels.as_ptr().add(
+                            fenetre_gpu::ligne_source_gpu(ligne, c.hauteur) * c.largeur
+                        ),
+                        destination.add(ligne * ecran_l), c.largeur,
+                    );
+                }
+            }
+            core::sync::atomic::fence(Ordering::Release);
+            unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
+            let tr = fenetre_gpu::transfer_to_gpu_id(
+                rid, c.largeur as u32, c.hauteur as u32, (ecran_l * 4) as u32,
+            ).ok_or("transfer-dimensions")?;
+            if unsafe { p.file.commande(&tr, ENTETE) } != Ok(RESP_OK_NODATA) {
+                return Err("transfer-to-host-3d-refuse");
+            }
+            calques[slot] = composition::Calque {
+                source: composition::ImageRegion {
+                    ressource: rid, largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                    x: 0, y: 0, w: c.largeur as i32, h: c.hauteur as i32,
+                },
+                cible: composition::ImageRegion {
+                    ressource: RESSOURCE_BUREAU,
+                    largeur: ecran_l as u32, hauteur: ecran_h as u32,
+                    x: c.x as i32, y: c.y as i32,
+                    w: c.largeur as i32, h: c.hauteur as i32,
+                },
+                alpha_premultiplie: false,
+            };
+        }
+
+        // Les ressources sont DISTINCTES : les commandes de dessin peuvent
+        // etre groupees dans un SEUL SUBMIT_3D apres tous les uploads.
+        const COMMANDES_MAX: usize =
+            fenetre_gpu::MAX_TEXTURES * composition::VIRGL_BLIT_BYTES;
+        let mut commandes = [0u8; COMMANDES_MAX];
+        let longueur = composition::encode_scene(&calques[..clients.len()], &mut commandes)
+            .map_err(|_| "scene-blit-invalide")?;
+        let hdr = gpu3d::submit_header(longueur).ok_or("virgl-submit-header")?;
+        let mut paquet = [0u8; 32 + COMMANDES_MAX];
+        paquet[..32].copy_from_slice(&hdr);
+        paquet[32..32 + longueur].copy_from_slice(&commandes[..longueur]);
+        if unsafe { p.file.commande(&paquet[..32 + longueur], ENTETE) }
+            != Ok(RESP_OK_NODATA) {
+            return Err("virgl-scene-refusee");
+        }
+        // Un seul flush, une seule image visible pour toute la scene.
+        if unsafe { vide(&mut p.file, RESSOURCE_BUREAU, tout) } != Ok(RESP_OK_NODATA) {
+            return Err("flush-scene-refuse");
+        }
+        Ok(())
+    })();
+    match resultat {
+        Ok(()) => {
+            P10_CLIENT_GPU_VERIFIE.store(true, Ordering::Release);
+            let n = P10_CLIENT_GPU_TRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 64 == 0 {
+                crate::serial_println!(
+                    "P10_GPU_CLIENT_BLIT_OK trames={} couches={} commandes_3d=1 flush=1 textures=persistantes",
+                    n, clients.len(),
+                );
+            }
+            true
+        }
+        Err(cause) => {
+            P10_CLIENT_GPU_INVALIDE.store(true, Ordering::Release);
+            crate::serial_println!(
+                "P10_GPU_CLIENT_BLIT_ECHEC raison={} repli=composition-cpu", cause
+            );
+            false
+        }
+    }
+}
+
+// BOUCHAUD_P10_SCENE_BLIT_V2_20261109
+// Vraie commande GPU: encode la scene puis soumet des lots VIRGL ordonnes.
+// Les ressources ont ete creees, attachees au contexte P10 et verifiees par
+// le gestionnaire. Cette primitive n'expose AUCUN acces GPU brut au ring3.
+// IMPORTANT: ceci NE cree pas encore les textures des fenetres Atelier.
+#[cfg(feature = "p10-virgl-experimental")]
+pub fn p10_virgl_compose_scene(
+    calques: &[crate::drivers::p10_virgl_composition::Calque],
+) -> Result<(), &'static str> {
+    use crate::drivers::p10_virgl_composition as gpu;
+    if calques.is_empty() || calques.len() > gpu::MAX_LAYERS {
+        return Err("scene-vide-ou-trop-grande");
+    }
+    if !p10_virgl_pret() { return Err("gpu-3d-absent"); }
+    // Valide l'integralite avant le premier lot (aucune composition partielle
+    // sur des rectangles invalides).
+    for calque in calques {
+        gpu::valide_calque(*calque).map_err(|_| "calque-invalide")?;
+    }
+    // REQUETE_MAX = 2048 et SUBMIT_3D utilise un header de 32 octets.
+    // 20 BLIT par lot = 1760 octets, pas d'ecrasement du tampon DMA.
+    for lot in calques.chunks(20) {
+        let mut commandes = [0u8; 20 * gpu::VIRGL_BLIT_BYTES];
+        let taille = gpu::encode_scene(lot, &mut commandes).map_err(|_| "scene-invalide")?;
+        p10_soumet_virgl_noyau(&commandes[..taille])?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "p10-virgl-experimental")]
+pub fn p10_soumet_virgl_noyau(commands: &[u8]) -> Result<(), &'static str> {
+    let hdr = gpu3d::submit_header(commands.len()).ok_or("commandes-virgl-invalides")?;
+    let mut q = [0u8; REQUETE_MAX];
+    q[..32].copy_from_slice(&hdr);
+    q[32..32 + commands.len()].copy_from_slice(commands);
+    let mut guard = verrou().ok_or("gpu-verrou-occupe")?;
+    let p = guard.as_mut().ok_or("gpu-absent")?;
+    if p.p10_virgl.is_none() || p.file.cassee { return Err("gpu-3d-indisponible"); }
+    let result = unsafe { p.file.commande(&q[..32 + commands.len()], ENTETE) };
+    if result != Ok(gpu3d::RESP_OK_NODATA) {
+        p.p10_virgl = None;
+        return Err("submit-3d-refuse");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "p10-virgl-experimental")]
+pub fn p10_virgl_pret() -> bool {
+    let Some(guard) = verrou() else { return false };
+    guard.as_ref().map(|p| p.p10_virgl.is_some() && !p.file.cassee).unwrap_or(false)
+}
+
 /// La file de controle, une commande a la fois.
 struct FileControle {
     sonnette: usize,
@@ -420,6 +803,9 @@ struct FileControle {
     /// BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : le dernier `fence_id` envoye. Chaque
     /// commande en porte un nouveau ; sa reponse doit le rendre.
     barriere: u64,
+    /// Actual virtq used.len; required for safe decoding of 3D replies.
+    #[cfg(feature = "p10-virgl-experimental")]
+    derniere_reponse_len: u32,
 }
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
@@ -446,6 +832,8 @@ impl FileControle {
         if requete.len() < file::ENTETE as usize || longueur_reponse < file::ENTETE as usize {
             return Err("commande-trop-courte");
         }
+        #[cfg(feature = "p10-virgl-experimental")]
+        { self.derniere_reponse_len = 0; }
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
         self.barriere = self.barriere.wrapping_add(1);
@@ -520,6 +908,8 @@ impl FileControle {
             );
             return Err(dma::REPONSE_INVALIDE);
         }
+        #[cfg(feature = "p10-virgl-experimental")]
+        { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
         Ok(genre)
     }
@@ -651,13 +1041,13 @@ const MIRE_COTE: u32 = 64;
 /// presenter, puis detacher et detruire. Negatif : chaque refus attendu doit
 /// revenir avec SON code -- un peripherique qui accepterait tout ne prouverait
 /// rien, et un pilote qui confondrait les erreurs non plus.
-unsafe fn autotest_2d(f: &mut FileControle) -> Result<MireTenue, &'static str> {
+unsafe fn autotest_2d(f: &mut FileControle, compat_virgl: bool) -> Result<MireTenue, &'static str> {
     let cote = MIRE_COTE;
     let octets = (cote * cote * 4) as usize;
     let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-mire")?;
     // BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : qui peut encore toucher cette memoire.
     let mut memoire = Memoire::NonAttachee;
-    match autotest_2d_etapes(f, phys, virt, octets, &mut memoire) {
+    match autotest_2d_etapes(f, phys, virt, octets, &mut memoire, compat_virgl) {
         Ok(()) => Ok(MireTenue { physique: phys, octets, memoire }),
         Err(e) => {
             rend_si_sur(f, RESSOURCE_ESSAI, phys, octets, &mut memoire, "mire");
@@ -697,6 +1087,7 @@ unsafe fn autotest_2d_etapes(
     virt: *mut u8,
     octets: usize,
     m: &mut Memoire,
+    compat_virgl: bool,
 ) -> Result<(), &'static str> {
     let cote = MIRE_COTE;
     let px = virt as *mut u32;
@@ -716,6 +1107,12 @@ unsafe fn autotest_2d_etapes(
     exige("flush", suivie(m, vide(f, RESSOURCE_ESSAI, tout)), RESP_OK_NODATA)?;
     crate::serial_println!("VIRTIO_GPU_2D positif creation+attache+scanout+transfert+flush ok ressource={} {}x{}", RESSOURCE_ESSAI, cote, cote);
 
+    // Le mode 2D classique conserve EXACTEMENT les sept epreuves
+    // negatives. Sur le transport VIRGL/GL, QEMU peut accepter un format
+    // invalide (0x1100 au lieu de 0x1205), ce qui avait desactive le scanout
+    // et laisse la mire R/V/B/Blanche bloquee. Ne pas envoyer de commandes
+    // intentionnellement invalides sur un hote GL deja verifie positivement.
+    if !compat_virgl {
     // Les refus : chacun avec son code.
     let mut negatifs = 0;
     exige("negatif-format", suivie(m, cree_2d(f, 0x0BAD, 0, 8, 8)), RESP_ERR_INVALID_PARAMETER)?;
@@ -734,6 +1131,11 @@ unsafe fn autotest_2d_etapes(
     exige("negatif-rect-hors-limites", suivie(m, transfert(f, RESSOURCE_ESSAI, debordant, 0)), RESP_ERR_INVALID_PARAMETER)?;
     negatifs += 1;
     crate::serial_println!("VIRTIO_GPU_2D negatifs refuses_avec_le_bon_code={}", negatifs);
+    } else {
+        crate::serial_println!(
+            "P10_GPU_2D_VIRGL_COMPAT positif=5/5 controles_negatifs=non-executes mode=virgl-experimental"
+        );
+    }
 
     // La mire RESTE a l'ecran : c'est elle que le banc capture (screendump
     // de la tete virtio-gpu) et compare pixel a pixel. Retirer le scanout ici
@@ -770,6 +1172,13 @@ struct Peripherique {
     scanout: Option<ScanoutBureau>,
     /// La mire de l'autotest, a l'ecran tant que le bureau ne l'a pas pris.
     mire: Option<MireTenue>,
+    #[cfg(feature = "p10-virgl-experimental")]
+    p10_virgl: Option<gpu3d::CapsetInfo>,
+    // BOUCHAUD_P10_GPU_APP_LAYERS_20261109
+    #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
+    p10_client_textures: [Option<P10ClientTexture>; crate::drivers::p10_window_gpu::MAX_TEXTURES],
+    #[cfg(all(feature = "p10-virgl-experimental", feature = "p10-universal-present"))]
+    p10_desktop_attache: bool,
 }
 
 #[derive(Clone, Copy)]

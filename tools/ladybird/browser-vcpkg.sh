@@ -49,13 +49,14 @@ src, dst = sys.argv[1:]
 with open(src, encoding="utf-8") as f:
     data = json.load(f)
 
-# Bouchaud n'expose aucun GPU et ne fournit ni bus de session D-Bus ni service
-# de decouverte de proxy du bureau Linux. Ces dependances d'integration desktop
-# ne font pas partie du WebContent natif Bouchaud.
-remove = {
-    "vulkan", "vulkan-headers", "vulkan-memory-allocator",
-    "dbus", "libproxy",
-}
+# BOUCHAUD_P10_VIRGL_VULKAN_BRIDGE_20261109
+# Un mode opt-in restaure les dependances Vulkan et Skia/Vulkan.
+# ATTENTION: compiler n'implique pas un pilote DRM/Venus en ring3.
+import os
+vulkan_requested = os.environ.get("BOUCHAUD_P10_GPU_VULKAN") == "1"
+remove = {"dbus", "libproxy"}
+if not vulkan_requested:
+    remove.update(("vulkan", "vulkan-headers", "vulkan-memory-allocator"))
 out = []
 for dep in data.get("dependencies", []):
     name = dep if isinstance(dep, str) else dep.get("name")
@@ -63,7 +64,10 @@ for dep in data.get("dependencies", []):
         continue
     if isinstance(dep, dict) and name == "skia":
         dep = dict(dep)
-        dep["features"] = [x for x in dep.get("features", []) if x != "vulkan"]
+        features = [x for x in dep.get("features", []) if x != "vulkan"]
+        if vulkan_requested:
+            features.append("vulkan")
+        dep["features"] = features
     out.append(dep)
 data["dependencies"] = out
 
@@ -135,10 +139,17 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
 names = {d if isinstance(d, str) else d.get("name") for d in data.get("dependencies", [])}
-for forbidden in ("dbus", "libproxy", "vulkan", "vulkan-headers", "vulkan-memory-allocator"):
+import os
+vulkan_requested = os.environ.get("BOUCHAUD_P10_GPU_VULKAN") == "1"
+for forbidden in ("dbus", "libproxy") + (() if vulkan_requested else ("vulkan", "vulkan-headers", "vulkan-memory-allocator")):
     if forbidden in names:
         raise SystemExit(f"dependance interdite encore presente dans le manifeste: {forbidden}")
-print("  manifeste Bouchaud propre : dbus/libproxy/vulkan absents")
+if vulkan_requested:
+    if "vulkan" not in names:
+        raise SystemExit("P10_VULKAN_FAIL: manifest Vulkan absent; ne pas pretendre GPU actif")
+    print("P10_VULKAN_DEPS_REQUESTED: compilation native Vulkan opt-in; pilote GPU ring3 NON qualifie")
+else:
+    print("  manifeste Bouchaud propre : dbus/libproxy/vulkan absents")
 PYCHECK
 
 say "== vcpkg navigateur Ladybird =="
