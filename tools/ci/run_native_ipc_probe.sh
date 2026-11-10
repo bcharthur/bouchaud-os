@@ -161,14 +161,14 @@ required=(
   '[COMPOSITED] echecs=0'
   'COMPOSITED_SLICE_OK'
   # BOUCHAUD_COMPOSITORD_PRESENTATION_V1
-  '[COMPOSITED] ok   presentation refusee sans capacite d'"'"'affichage'
+  '[COMPOSITED] ok   presentation refusee sans capacite affichage'
   'BOUCHAUD_COMPOSITEUR_LANCE'
   '[COMPOSITED] ok   rectangle hors de la surface refuse'
   '[COMPOSITED] ok   destination hors ecran (debordement u32) refusee'
   '[COMPOSITED] ok   region sans droit de lecture refusee'
-  '[COMPOSITED] ok   la capacite n'"'"'est pas une region'
-  '[COMPOSITED] ok   la capacite d'"'"'affichage ne se duplique pas'
-  '[COMPOSITED] ok   mire posee a l'"'"'ecran, relue au pixel par le noyau'
+  '[COMPOSITED] ok   la capacite ne sert pas de region'
+  '[COMPOSITED] ok   la capacite affichage ne se duplique pas'
+  '[COMPOSITED] ok   mire posee sur ecran, relue au pixel par le noyau'
   'COMPOSITED_PRESENTATION_OK'
 )
 if grep -aFq 'COMPOSITED_PRESENTATION_FAIL' "$LOG"; then
