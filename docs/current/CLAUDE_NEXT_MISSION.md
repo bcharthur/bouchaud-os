@@ -2,6 +2,15 @@
 
 Refaire `git fetch && git rev-parse HEAD origin/main` et lire [status.json](status.json) (source de vérité) puis [STATUS_CURRENT.md](STATUS_CURRENT.md).
 
+## 0. Reprise de la session du 10/11 (branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`)
+
+Journal et matrice de qualification : [SESSION_2026-11-10.md](SESSION_2026-11-10.md).
+
+- Lire le résultat de la **qualification au SHA final** (ladybird-native-browser `palier=qualification`, `p13-primitives-noyau`, `reliability-v3` avec soak SMP4 de 20 min, `GPU composition`) ; ne rien pousser pendant qu'elle tourne.
+- #264 : correctif poussé (passation sous IF coupé). Fermer l'issue **seulement** avec le soak de 20 min vert au SHA final ; sinon, lire la panique publiée et rouvrir l'analyse.
+- Ensuite : tranche 1 du compositeur ring 3 (appel de présentation sous capacité, [FENETRES_RING3_PLAN.md](FENETRES_RING3_PLAN.md)) et banc de performance Ladybird multi-pages.
+- PR #281 et #280 : remplacées par la branche ; à fermer par une décision humaine une fois la branche fusionnée (pas de nettoyage destructif). #279 (preuves locales VIRGL du 9/11) : historique utile, décrit un chemin remplacé par le compositeur V2 ; fusion ou fermeture par décision humaine.
+
 ## 1. Avant tout nouveau chantier
 
 - Atelier (#242 à #244) et la vidange USB (#246) sont fusionnés (`main@e0257c60`). Les PR ouvertes sont listées dans `status.json` → `open_prs` : #245 puis #247 (empilée sur #245). Chacune doit d'abord **intégrer `main`** (correctif du banc scanout), puis refaire son P13. Lire les checks sur le **merge synthétique**. Tout rouge est lu dans le job puis dans le journal avant d'agir.

@@ -28,7 +28,7 @@
     "P19": "UNKNOWN"
   },
   "C22": {
-    "status": "CLOSED_AT_KVM",
+    "status": "CLOSED_AT_KVM (6/6 replayed on 540fdfb; final-SHA replay pending)",
     "tested_sha": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
     "run_id": 41518023294,
     "passes": 6,
@@ -44,8 +44,22 @@
     "run_event": "pull_request",
     "candidate_replay": {
       "run_id": 42784700689,
+      "job_id": 129790751019,
       "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
-      "status": "IN_PROGRESS_AT_SNAPSHOT (memoire-onglets after full Ladybird build)"
+      "event": "workflow_dispatch (palier=qualification, full Ladybird rebuild)",
+      "status": "C22_CONTRACTUEL_6X6_OK",
+      "passes": 6,
+      "total": 6,
+      "threshold_kib": 1024,
+      "observed_growth_g2_kib": [
+        128,
+        152,
+        144,
+        132,
+        140,
+        144
+      ],
+      "level": "KVM (GitHub-hosted)"
     }
   },
   "ci": {
