@@ -203,7 +203,11 @@ jobs:
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
       - name: Benchmark Ladybird (GPU on / off)
         if: success()
+        # pipefail : sans lui, `| tee` rendait vert un LADYBIRD_BENCH_ECHEC
+        # (constate au run 42842860256, SHA 93d9421).
+        shell: bash
         run: |
+          set -o pipefail
           echo "### Ladybird, composition GPU on/off ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
           python3 tools/ci/bench_ladybird.py serie-browser-host.log serie-browser-host-cpu.log | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Preuves

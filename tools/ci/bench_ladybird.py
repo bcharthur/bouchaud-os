@@ -44,7 +44,11 @@ def releves(t, balise):
     for l in t.splitlines():
         if balise in l:
             out.append({k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", l.split(balise, 1)[1])})
-    return out[1:]  # le premier releve contient le demarrage
+    # Le premier releve couvre le demarrage : on l'ecarte S'IL Y EN A D'AUTRES.
+    # Un smoke court n'en produit qu'un par bras ; l'ecarter vidait le banc
+    # (tout `n/m`) et faisait conclure a tort que le bras GPU n'avait rien
+    # pose. Le nombre de releves retenus est imprime (`releves_gpu_composition`).
+    return out[1:] if len(out) > 1 else out
 
 
 def mesures(t):
@@ -68,6 +72,7 @@ def mesures(t):
     cache = re.findall(r"PAGE_CACHE_GLOBAL scope=global hits=(\d+) miss=(\d+)", t)
     m["cache_pages_miss"] = int(cache[-1][1]) if cache else None
     rg = releves(t, "[GPU-COMPOSITION]")
+    m["releves_gpu_composition"] = len(rg)
     m["dessin_cpu_us_par_trame"] = med([r.get("us_dessin_cpu_par_trame") for r in rg])
     m["px_client_copies_cpu_30s"] = med([r.get("px_client_copies_cpu") for r in rg])
     m["px_poses_gpu_30s"] = med([r.get("px_poses_gpu") for r in rg])
@@ -101,6 +106,7 @@ LIBELLES = [
     ("px_client_copies_cpu_30s", "Pixels du navigateur recopiés par le CPU / 30 s", "px"),
     ("px_poses_gpu_30s", "Pixels posés par le GPU / 30 s", "px"),
     ("trames_bureau_30s", "Trames du bureau / 30 s", ""),
+    ("releves_gpu_composition", "Relevés [GPU-COMPOSITION] retenus (1 = inclut le démarrage)", ""),
     ("presentation_us_par_trame", "Présentation par trame (attente, le fil dort)", "µs"),
     ("presentation_p50_p95_p99_max_us", "Présentation p50/p95/p99/max", "µs"),
     ("dessin_p50_p95_p99_max_us", "Dessin CPU p50/p95/p99/max", "µs"),
