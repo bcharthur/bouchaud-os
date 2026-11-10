@@ -246,11 +246,13 @@ def simule(texte: str, sc: Scenario, c=contrat) -> dict:
             return {"reutilise": "false", "source_run": ""}
         if nom == "provenance":
             return {"mode": sc.mode, "source_run": "1" if sc.mode == "reutilise" else "", "empreinte": "e"}
+        if nom == "attente":
+            return {"source_run": "2"}
         if nom == "artefact":
             if resultats.get("build") == "success" and resultats.get("reutilise") == "skipped":
                 return {"liaison": "tete"}
             if resultats.get("reutilise") == "success" and resultats.get("build") == "skipped" \
-                    and sorties.get("provenance", {}).get("mode") == "reutilise":
+                    and sorties.get("provenance", {}).get("mode") in ("reutilise", "attendu"):
                 return {"liaison": "entrees"}
             return {}
         return {}
@@ -337,6 +339,13 @@ NOMINAUX = (
     (Scenario("developpement, artefact construit", "push", mode="construit"), contrat.DEVELOPPEMENT),
     (Scenario("developpement par dispatch", "workflow_dispatch", "developpement", mode="reutilise"),
      contrat.DEVELOPPEMENT),
+    # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : la qualification joue un artefact
+    # reutilise ou attendu d'une production, reverifie dans les deux cas.
+    (Scenario("qualification, artefact reutilise", "workflow_dispatch", "qualification", mode="reutilise"),
+     contrat.QUALIFICATION),
+    (Scenario("qualification, production attendue", "workflow_dispatch", "qualification", mode="attendu"),
+     contrat.QUALIFICATION),
+    (Scenario("developpement, production attendue", "push", mode="attendu"), contrat.DEVELOPPEMENT),
     (Scenario("developpement, pull_request", "pull_request", mode="reutilise"), contrat.DEVELOPPEMENT),
 )
 
@@ -356,15 +365,55 @@ PANNES = (
              pannes=("build",)),
     Scenario("primitives en echec (qualification)", "workflow_dispatch", "qualification", mode="construit",
              pannes=("primitives",)),
-    Scenario("qualification sur decision de reutilisation", "workflow_dispatch", "qualification", mode="reutilise"),
+    Scenario("qualification sur decision `existe` (aucun artefact dans le run)", "workflow_dispatch",
+             "qualification", mode="existe"),
+    Scenario("production attendue, attente en echec (qualification)", "workflow_dispatch", "qualification",
+             mode="attendu", pannes=("attente",)),
+    Scenario("production attendue, reverification en echec (dev)", "push", mode="attendu", pannes=("reutilise",)),
+    Scenario("production attendue, attente sautee (dev)", "push", mode="attendu", pannes={"attente": "skipped"}),
+    Scenario("reutilisation sans reverification jouee (qualification)", "workflow_dispatch", "qualification",
+             mode="reutilise", pannes={"reutilise": "skipped"}),
     Scenario("artefact en echec (qualification)", "workflow_dispatch", "qualification", mode="construit",
              pannes=("artefact",)),
 )
 
 
+# Palier artefact (production seule) : le build tourne si la provenance dit
+# `construit`, et RIEN d'autre ne tourne -- ni epreuve, ni rendez-vous, ni verdict.
+PRODUCTIONS = (
+    (Scenario("production : artefact a construire", "workflow_dispatch", "artefact", mode="construit"), True),
+    (Scenario("production : artefact deja present", "workflow_dispatch", "artefact", mode="existe"), False),
+    # Revue de la PR #282 : sur la branche d'audit, la condition de palier
+    # restait vraie et la production rejouait os-primitives (P13 strict).
+    (Scenario("production sur la branche d'audit", "workflow_dispatch", "artefact",
+              ref="refs/heads/audit/p13-console-sync-ci-20261024", mode="construit"), True),
+)
+HORS_PRODUCTION = ("artefact", "reutilise", "attente", "primitives")
+
+
+def controle_production(texte: str, c=contrat) -> list[str]:
+    erreurs = []
+    for sc, construit in PRODUCTIONS:
+        try:
+            r = simule(texte, sc, c)
+        except SimulationErreur as exc:
+            erreurs.append(f"{sc.nom} : {exc}")
+            continue
+        res = r["resultats"]
+        if res.get("build") != ("success" if construit else "skipped"):
+            erreurs.append(f"{sc.nom} : build {res.get('build')}")
+        joues = sorted(j for j in list(HORS_PRODUCTION) + [e.job for e in c.EPREUVES if e.job != "provenance"]
+                       if res.get(j) not in ("skipped", None))
+        if joues:
+            erreurs.append(f"{sc.nom} : jobs joues hors production {joues}")
+        if res.get("convergence") != "success" or r["nom_verdict"] != "ladybird / verdict de production":
+            erreurs.append(f"{sc.nom} : verdict de production non rendu ({res.get('convergence')}, {r['nom_verdict']!r})")
+    return erreurs
+
+
 def controle(texte: str, c=contrat) -> list[str]:
     """Erreurs : scenario nominal non vert, ou scenario de panne non rouge."""
-    erreurs = []
+    erreurs = controle_production(texte, c)
     for sc, palier in NOMINAUX:
         try:
             r = simule(texte, sc, c)
@@ -401,6 +450,10 @@ def main() -> int:
     for sc in PANNES:
         r = simule(texte, sc)
         print(f"SIMULATION panne {sc.nom} : verdict={'VERT' if r['verdict_ok'] else 'rouge'} causes={r['causes']}")
+    for sc, _ in PRODUCTIONS:
+        r = simule(texte, sc)
+        print(f"SIMULATION {sc.nom} : build={r['resultats'].get('build')} "
+              f"joues={sorted(j for j, v in r['resultats'].items() if v != 'skipped')}")
     erreurs = controle(texte)
     for e in erreurs:
         print(f"SIMULATION_ECHEC {e}")
