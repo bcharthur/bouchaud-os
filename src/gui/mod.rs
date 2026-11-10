@@ -100,6 +100,8 @@ pub mod politique;
 pub mod reveil;
 
 pub mod scene;
+/// BOUCHAUD_GPU_COMPOSITION_V2 : quelles fenetres le GPU compose (P10).
+pub mod composition;
 pub mod silence;
 
 // V15 superpose les FPS au rendu historique sans remplacer le gros widgets.rs.

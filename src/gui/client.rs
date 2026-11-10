@@ -74,6 +74,9 @@ pub struct Client {
     tampon: Vec<u8>,
     touches_attente: crate::gui::key_queue::KeyQueue,
     degat: Rect,
+    /// BOUCHAUD_GPU_COMPOSITION_V2 : ce que le client a peint et que la
+    /// texture GPU de sa fenetre n'a pas encore recu (coordonnees surface).
+    pub degat_gpu: Rect,
     serie: u32,
     verdict: VerdictProtocole,
     pub fermeture_demandee: bool,
@@ -133,6 +136,7 @@ impl Client {
     /// client projette `allocation` et n'en peint que `zone`.
     pub fn lance(
         chemin: &str,
+        titre: &str,
         cwd: usize,
         zone: (usize, usize),
         allocation: (usize, usize),
@@ -327,7 +331,10 @@ impl Client {
         let mut client = Client {
             pid,
             etat: Etat::Demarrage,
-            titre: crate::gui::window::TITRE_NAVIGATEUR.to_string(),
+            // BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : le titre est celui de
+            // l'application lancee. Un client n'est pas « Ladybird » par
+            // defaut : DOOM affichait l'ecran d'attente du navigateur.
+            titre: titre.to_string(),
             surface,
             geometrie,
             vers_client,
@@ -335,6 +342,7 @@ impl Client {
             tampon: Vec::new(),
             touches_attente: crate::gui::key_queue::KeyQueue::new(),
             degat: Rect::default(),
+            degat_gpu: Rect::default(),
             serie: 0,
             verdict: VerdictProtocole::neuf(),
             fermeture_demandee: false,

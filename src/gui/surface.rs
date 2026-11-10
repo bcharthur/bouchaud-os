@@ -99,6 +99,12 @@ impl Surface {
         Some(surface)
     }
 
+    /// Les pages physiques, dans l'ordre (texture GPU adossee a la surface,
+    /// BOUCHAUD_GPU_COMPOSITION_V2).
+    pub fn frames(&self) -> &[u64] {
+        &self.frames
+    }
+
     /// Taille d'UN tampon en octets.
     pub fn octets(&self) -> usize {
         self.pas * self.hauteur

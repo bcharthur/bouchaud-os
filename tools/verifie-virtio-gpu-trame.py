@@ -45,7 +45,12 @@ TENUE = ("        pose_etat_tampon(en_vol);\n"
 RELACHE = ("        (crate::drivers::virtio_gpu_trame::planifie(&trame.regions[..n], COUT_COMMANDE_PX), n)\n    };")
 PLEINE = "        trame.regions[TRAME_REGIONS_MAX - 1] = trame.regions[TRAME_REGIONS_MAX - 1].union(r);"
 WM = ("                fb::debut_trame();\n                for region in degats.regions().iter().copied() {",
-      "                }\n                fb::fin_trame();")
+      # BOUCHAUD_GPU_COMPOSITION_V2 : la trame se ferme par `ferme_trame`, qui
+      # rend la main a `fb::fin_trame` ou, avec des fenetres GPU, a
+      # `fb::fin_trame_gpu` (meme plan de regions, puis les fenetres).
+      "                ferme_trame(&mut wins, plan_gpu, &mut plan_gpu_precedent, &mut degats, &mut trame_gpu_due);",
+      "        fb::fin_trame();\n        return;",
+      "    if fb::fin_trame_gpu(&couches) {")
 CI = ("SCANOUT_TRAME=on BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh", "BO_QEMU_KVM=1 tools/ci/run_banc_trame.sh")
 TESTS = ("chaque_pixel_endommage_est_transfere_quelle_que_soit_l_entree", "deux_regions_eloignees_restent_separees_mais_un_seul_flush",
          "au_plus_huit_transferts_et_rien_d_oublie")
