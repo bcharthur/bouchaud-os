@@ -56,6 +56,11 @@ pub const UPDATE_INSTALL_FINISH: u64 = NATIVE_BASE + 0x74;
 /// Relecture incrementale (au plus 1 Mio par appel) ; rend les octets restants.
 pub const UPDATE_INSTALL_VERIFY: u64 = NATIVE_BASE + 0x75;
 
+/// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 (ABI 1.3) : sur une capacite Display
+/// (droit DISPLAY_PRESENT), poser un rectangle d'une region partagee (droit
+/// READ) a l'ecran. (affichage, region, demande*) -> empreinte relue.
+pub const DISPLAY_PRESENT: u64 = NATIVE_BASE + 0x80;
+
 #[inline]
 pub const fn is_native(number: u64) -> bool {
     number >= NATIVE_BASE && number <= NATIVE_LAST
@@ -95,6 +100,7 @@ pub const fn name(number: u64) -> &'static str {
         UPDATE_INSTALL_WRITE => "bo_update_install_write",
         UPDATE_INSTALL_FINISH => "bo_update_install_finish",
         UPDATE_INSTALL_VERIFY => "bo_update_install_verify",
+        DISPLAY_PRESENT => "bo_display_present",
         _ => "bo_unknown",
     }
 }

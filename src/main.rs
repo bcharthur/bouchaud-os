@@ -374,6 +374,11 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // remplit une fois, trois secondes apres le bureau, et se tait.
     kernel::prechauffage::demarre();
 
+    // BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : `/bin/composited`, s'il est sur
+    // le disque, part avec la capacite d'affichage (seule origine de cette
+    // capacite). Aucune image livree ne le contient encore.
+    kernel::native::affichage::lance_compositeur();
+
     // 6. Mode non interactif : si le disque de donnees a depose un `/autorun`,
     //    on le joue et la machine s'eteint. Ne rend la main que sans script.
     kernel::autorun::run_if_present();

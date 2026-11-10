@@ -56,8 +56,11 @@ qemu-system-x86_64 \
   -device e1000,netdev=net0 \
   -audiodev none,id=muet \
   -device AC97,audiodev=muet \
+  -monitor unix:"$OUT/moniteur.sock",server,nowait \
+  -no-shutdown \
   -serial file:"$LOG" &
 QEMU_PID=$!
+CAPTURE="$OUT/ecran-composited.ppm"
 
 cleanup() {
   kill -TERM "$QEMU_PID" 2>/dev/null || true
@@ -83,9 +86,24 @@ while :; do
     exit 1
   fi
 
+  # BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : l'ecran est capture par QEMU
+  # des que le compositeur ring 3 a presente, avant l'extinction.
+  if [ ! -s "$CAPTURE" ] && grep -aFq 'COMPOSITED_PRESENTATION_OK' "$LOG"; then
+    python3 - "$OUT/moniteur.sock" "$CAPTURE" <<'PYMON' || true
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(f"screendump {sys.argv[2]}\n".encode())
+time.sleep(0.8)
+s.close()
+PYMON
+  fi
+
   if grep -aFq '[NATIVE-IPC-RING3] OK' "$LOG" \
      && grep -aFq '[NATIVE-IPC] OK' "$LOG" \
-     && grep -aFq 'COMPOSITED_SLICE_OK' "$LOG"; then
+     && grep -aFq 'COMPOSITED_SLICE_OK' "$LOG" \
+     && grep -aFq 'COMPOSITED_PRESENTATION_' "$LOG" \
+     && [ -s "$CAPTURE" ]; then
     break
   fi
 
@@ -142,7 +160,22 @@ required=(
   '[COMPOSITED] ok   un tampon est rendu au client apres la presentation'
   '[COMPOSITED] echecs=0'
   'COMPOSITED_SLICE_OK'
+  # BOUCHAUD_COMPOSITORD_PRESENTATION_V1
+  '[COMPOSITED] ok   presentation refusee sans capacite d'"'"'affichage'
+  'BOUCHAUD_COMPOSITEUR_LANCE'
+  '[COMPOSITED] ok   rectangle hors de la surface refuse'
+  '[COMPOSITED] ok   destination hors ecran (debordement u32) refusee'
+  '[COMPOSITED] ok   region sans droit de lecture refusee'
+  '[COMPOSITED] ok   la capacite n'"'"'est pas une region'
+  '[COMPOSITED] ok   la capacite d'"'"'affichage ne se duplique pas'
+  '[COMPOSITED] ok   mire posee a l'"'"'ecran, relue au pixel par le noyau'
+  'COMPOSITED_PRESENTATION_OK'
 )
+if grep -aFq 'COMPOSITED_PRESENTATION_FAIL' "$LOG"; then
+  echo "presentation composited en echec" >&2
+  grep -aF '[COMPOSITED]' "$LOG" >&2 || true
+  exit 1
+fi
 
 for marker in "${required[@]}"; do
   if ! grep -aFq "$marker" "$LOG"; then
@@ -151,5 +184,7 @@ for marker in "${required[@]}"; do
   fi
 done
 
-grep -aE 'NATIVE_IPC_AUTORUN|\[NATIVE-IPC|\[COMPOSITED\]|COMPOSITED_SLICE' "$LOG" | tail -n 120
+grep -aE 'NATIVE_IPC_AUTORUN|\[NATIVE-IPC|\[COMPOSITED\]|COMPOSITED_|BOUCHAUD_COMPOSITEUR|BOUCHAUD_DISPLAY_PRESENT' "$LOG" | tail -n 120
+# La mire, decodee au pixel sur l'ecran que QEMU a capture.
+python3 tools/ci/verifie_capture_composited.py "$CAPTURE" 100 100 320 200
 echo "NATIVE_IPC_RUNTIME_OK"

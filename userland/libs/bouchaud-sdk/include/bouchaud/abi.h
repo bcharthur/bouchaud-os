@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 2
+#define BO_ABI_MINOR 3
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -55,6 +55,7 @@ typedef unsigned long      bo_usize;
 #define BO_NR_UPDATE_INSTALL_WRITE (BO_NATIVE_BASE + 0x73)
 #define BO_NR_UPDATE_INSTALL_FINISH (BO_NATIVE_BASE + 0x74)
 #define BO_NR_UPDATE_INSTALL_VERIFY (BO_NATIVE_BASE + 0x75)
+#define BO_NR_DISPLAY_PRESENT     (BO_NATIVE_BASE + 0x80)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1
@@ -79,6 +80,7 @@ typedef unsigned long      bo_usize;
 #define BO_KIND_SHARED_REGION  4
 #define BO_KIND_PROCESS        5
 #define BO_KIND_UPDATE         6
+#define BO_KIND_DISPLAY        7
 
 /* Rights. */
 #define BO_RIGHT_READ          (1u << 0)
@@ -91,7 +93,8 @@ typedef unsigned long      bo_usize;
 #define BO_RIGHT_WAIT          (1u << 7)
 #define BO_RIGHT_UPDATE_HEALTH (1u << 8)
 #define BO_RIGHT_UPDATE_INSTALL (1u << 9)
-#define BO_RIGHTS_ALL          0x3ffu
+#define BO_RIGHT_DISPLAY_PRESENT (1u << 10)
+#define BO_RIGHTS_ALL          0x7ffu
 
 /* Signals. */
 #define BO_SIGNAL_READABLE     (1u << 0)

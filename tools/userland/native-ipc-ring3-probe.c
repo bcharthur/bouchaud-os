@@ -166,9 +166,25 @@ static void probe_main(void)
     /* Semantic versioning: same MAJOR is compatible; MINOR only adds. The
      * runner checks the exact minor this kernel claims. */
     if ((version >> 16) != 1) fail("version-major-mismatch", version);
-    write_text("[NATIVE-IPC-RING3] ABI=1.");
-    write_num(version & 0xffff);
-    write_text("\n");
+    {
+        /* UNE seule ecriture : un autre processus qui ecrit sur la console en
+         * meme temps (le compositeur lance par le noyau) ne peut pas couper
+         * la ligne en deux. */
+        /* Sur la pile : un `.data` ferait fusionner un segment RW et X
+         * par l'edition de liens de cette sonde (refuse par W^X). */
+        const char *debut = "[NATIVE-IPC-RING3] ABI=1.";
+        char ligne[40];
+        char *p = ligne;
+        while (*debut) *p++ = *debut++;
+        i64 m = version & 0xffff, d = 10000;
+        int vu = 0;
+        for (; d; d /= 10) {
+            if (m / d || vu || d == 1) { *p++ = (char)('0' + (m / d) % 10); vu = 1; }
+        }
+        *p++ = '\n';
+        *p = 0;
+        write_text(ligne);
+    }
 
     if (sc6(BO_CHANNEL_CREATE, (i64)pair, 0, 0, 0, 0, 0) != 0)
         fail("channel-create", -1);
