@@ -243,7 +243,7 @@ static int presentation(i64 affichage)
         /* Sans capacite : une region n'est pas une capacite d'affichage. */
         i64 r = presente(region, region, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
         ecris_nombre("[COMPOSITED] present_sans_capacite=", r);
-        exige(r == -BO_E_ACCESS_DENIED, "presentation refusee sans capacite d'affichage");
+        exige(r == -BO_E_ACCESS_DENIED, "presentation refusee sans capacite affichage");
         sys6(BO_HANDLE_CLOSE, (u64)region, 0, 0, 0, 0, 0);
         return 0;
     }
@@ -258,16 +258,16 @@ static int presentation(i64 affichage)
     r = presente(affichage, ecriture_seule, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
     exige(r == -BO_E_ACCESS_DENIED, "region sans droit de lecture refusee");
     r = presente(affichage, affichage, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
-    exige(r == -BO_E_ACCESS_DENIED, "la capacite n'est pas une region");
+    exige(r == -BO_E_ACCESS_DENIED, "la capacite ne sert pas de region");
     i64 copie = sys6(BO_HANDLE_DUP, (u64)affichage, BO_RIGHT_INSPECT, 0, 0, 0, 0);
-    exige(copie < 0, "la capacite d'affichage ne se duplique pas");
+    exige(copie < 0, "la capacite affichage ne se duplique pas");
 
     /* La presentation reelle, verifiee par relecture. */
     u64 attendue = empreinte_fnv(MIRE_L, MIRE_H);
     r = presente(affichage, region, 0, 0, MIRE_L, MIRE_H, MIRE_X, MIRE_Y);
     ecris_nombre("[COMPOSITED] empreinte_attendue=", (i64)attendue);
     ecris_nombre("[COMPOSITED] empreinte_relue=", r);
-    exige(r >= 0 && (u64)r == attendue, "mire posee a l'ecran, relue au pixel par le noyau");
+    exige(r >= 0 && (u64)r == attendue, "mire posee sur ecran, relue au pixel par le noyau");
 
     sys6(BO_HANDLE_CLOSE, (u64)ecriture_seule, 0, 0, 0, 0, 0);
     sys6(BO_HANDLE_CLOSE, (u64)region, 0, 0, 0, 0, 0);
