@@ -14,13 +14,19 @@
 # `mirror+file`) met le miroir Azure en tete, et le DNS du runner ne le
 # resolvait plus ; trois essais rejouaient le meme miroir mort.
 #
-# Ce script DIT ce qu'il voit (liste des miroirs, resolution DNS de chacun),
-# puis retire de la liste les seuls miroirs dont le nom ne se resout pas,
-# en gardant les miroirs officiels Ubuntu que l'image y place deja. Il ne
+# Sur d'autres runners du meme run, le nom se resolvait mais le miroir ne
+# repondait pas (21 a 42 `Ign:` en delai d'attente, aucune erreur DNS).
+#
+# Ce script DIT ce qu'il voit (liste des miroirs, resolution DNS et reponse
+# de chacun), puis retire de la liste les seuls miroirs INJOIGNABLES -- nom
+# non resolu, ou `dists/<version>/InRelease` sans reponse en 15 s --, en
+# gardant les miroirs officiels Ubuntu que l'image y place deja. Il ne
 # touche a aucun paquet, n'installe rien, et n'invente aucun succes : si plus
 # aucun miroir ne se resout, il le dit et apt-installe.sh echouera.
 set -uo pipefail
 LISTE=${APT_LISTE_MIROIRS:-/etc/apt/apt-mirrors.txt}
+VERSION=${APT_VERSION_UBUNTU:-$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release 2>/dev/null)}
+VERSION=${VERSION:-noble}
 echo "APT_DIAGNOSTIC liste=$LISTE" >&2
 if [ ! -f "$LISTE" ]; then
   echo "APT_DIAGNOSTIC liste_absente (image sans methode mirror+file) : aucun repli" >&2
@@ -37,19 +43,25 @@ while IFS= read -r ligne || [ -n "$ligne" ]; do
     printf '%s\n' "$ligne" >> "$garde"
     continue
   fi
-  if getent hosts "$hote" >/dev/null 2>&1; then
-    echo "APT_DIAGNOSTIC dns hote=$hote resolu=1" >&2
+  if ! getent hosts "$hote" >/dev/null 2>&1; then
+    echo "APT_DIAGNOSTIC dns hote=$hote resolu=0" >&2
+    retires=$((retires + 1))
+    continue
+  fi
+  sonde="${url%/}/dists/$VERSION/InRelease"
+  if curl -fsS -o /dev/null --max-time 15 "$sonde" 2>/dev/null; then
+    echo "APT_DIAGNOSTIC dns hote=$hote resolu=1 repond=1" >&2
     printf '%s\n' "$ligne" >> "$garde"
     gardes=$((gardes + 1))
   else
-    echo "APT_DIAGNOSTIC dns hote=$hote resolu=0" >&2
+    echo "APT_DIAGNOSTIC dns hote=$hote resolu=1 repond=0 sonde=$sonde" >&2
     retires=$((retires + 1))
   fi
 done < "$LISTE"
 if (( retires == 0 )); then
-  echo "APT_REPLI_MIROIR aucun (tous les miroirs se resolvent : la panne est ailleurs)" >&2
+  echo "APT_REPLI_MIROIR aucun (tous les miroirs repondent : la panne est ailleurs)" >&2
 elif (( gardes == 0 )); then
-  echo "APT_REPLI_MIROIR impossible (aucun miroir ne se resout)" >&2
+  echo "APT_REPLI_MIROIR impossible (aucun miroir ne repond)" >&2
 else
   if [ -w "$LISTE" ]; then cp "$garde" "$LISTE"; else sudo cp "$garde" "$LISTE"; fi
   echo "APT_REPLI_MIROIR retires=$retires gardes=$gardes" >&2
