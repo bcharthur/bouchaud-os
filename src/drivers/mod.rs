@@ -97,6 +97,8 @@ pub mod gfx;
 pub mod gpu;
 #[path = "input/ps2_keyboard.rs"]
 pub mod keyboard;
+#[path = "input/sysrq.rs"]
+pub mod sysrq;
 #[path = "input/ps2_mouse.rs"]
 pub mod mouse;
 #[path = "api/network.rs"]

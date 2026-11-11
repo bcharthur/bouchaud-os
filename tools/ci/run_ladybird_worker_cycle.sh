@@ -27,6 +27,7 @@ OUT=${2:?usage: run_ladybird_worker_cycle.sh BOOTIMAGE NATIVE_DIR}
 SCENARIO=scenario-worker-cycle
 IMAGE=ladybird-worker-cycle.img
 LOG=serie-worker-cycle.log
+MONITEUR=$PWD/moniteur-worker-cycle.sock
 rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-worker-cycle.log
 
 python3 tools/health/browser_host_fixture.py > fixture-worker-cycle.log 2>&1 &
@@ -67,12 +68,14 @@ AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 : > "$LOG"
+rm -f "$MONITEUR"
 qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$IMAGE" \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
+  -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
 PID=$!
 # BOUCHAUD_P13_WCYCLE_POST_EXIT_PROOF_V1: collecte bornée de sorties REELLES, depuis le journal noyau.
@@ -93,7 +96,13 @@ PY_WCYCLE_PROCESS_EXIT
 }
 LIMITE=$((SECONDS + 1000))
 while kill -0 "$PID" 2>/dev/null; do
-  if (( SECONDS >= LIMITE )); then echo "ECHEANCE atteinte" >&2; break; fi
+  if (( SECONDS >= LIMITE )); then
+    echo "ECHEANCE atteinte" >&2
+    # BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) : une VM encore vivante sans verdict
+    # terminal est figee ; avant de la tuer, on lui demande qui attend quoi.
+    tools/ci/releve_fils_qemu.sh "$MONITEUR" "$LOG" 30 >&2
+    break
+  fi
   if grep -aq 'KERNEL PANIC' "$LOG"; then break; fi
   if grep -aq 'WCYCLE_BANC_FIN' "$LOG"; then
     grace_s=${BO_WCYCLE_GRACE_S:-5}
