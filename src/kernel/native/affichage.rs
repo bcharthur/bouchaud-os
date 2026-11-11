@@ -165,7 +165,12 @@ pub fn lance_compositeur() -> Option<u32> {
             Some(pid)
         }
         Err(e) => {
-            crate::serial_println!("BOUCHAUD_COMPOSITEUR_ECHEC raison={}", e);
+            // Revue de la PR #295 : sans compositeur, l'ecran n'est reserve a
+            // personne -- le bureau noyau doit pouvoir le reprendre. Le client
+            // deja lance meurt avec sa `Fenetre`, rendue ici.
+            BUREAU_RING3.store(false, Ordering::SeqCst);
+            drop(fenetre.take());
+            crate::serial_println!("BOUCHAUD_COMPOSITEUR_ECHEC raison={} reservation_ecran=levee", e);
             None
         }
     }

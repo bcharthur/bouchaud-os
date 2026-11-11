@@ -81,6 +81,11 @@ def verifie(racine: Path) -> list:
     pose = pres.find("region.read(")
     if prise < 0 or relit < 0 or not (prise < relit < pose):
         fautes.append(f"{AFF} : present ne relit plus la prise du bureau noyau apres avoir publie la sienne")
+    lance = aff[aff.find("pub fn lance_compositeur("):]
+    lance = lance[:lance.find("\n}\n")]
+    echec = lance[lance.find("BOUCHAUD_COMPOSITEUR_ECHEC") - 400:lance.find("BOUCHAUD_COMPOSITEUR_ECHEC")]
+    if "BUREAU_RING3.store(false" not in echec:
+        fautes.append(f"{AFF} : un compositeur qui ne demarre pas laisse l'ecran reserve (revue #295)")
     info = aff[aff.find("pub fn info("):]
     info = info[:info.find("\n}\n")]
     if "Rights::DISPLAY_PRESENT, ObjectKind::Display)" not in info:
@@ -109,6 +114,7 @@ def temoins():
          "    if false {"),
         (AFF, "    if BUREAU_NOYAU.load(Ordering::SeqCst) {\n        return Err(refuse(Error::WouldBlock, \"bureau-noyau\"));\n    }\n    // 5.",
          "    // 5."),
+        (AFF, "            BUREAU_RING3.store(false, Ordering::SeqCst);\n            drop(fenetre.take());", "            drop(fenetre.take());"),
         (FEN, "pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WAIT.0 | Rights::INSPECT.0);",
          "pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WAIT.0 | Rights::TRANSFER.0);"),
         ("src/kernel/native/abi/dispatch.rs", "        numbers::FENETRE_LIT =>",
@@ -142,7 +148,7 @@ def main():
     if t:
         print("capacite d'affichage :", t)
         return 1
-    print("CAPACITE_AFFICHAGE_OK negatifs=12")
+    print("CAPACITE_AFFICHAGE_OK negatifs=13")
     return 0
 
 
