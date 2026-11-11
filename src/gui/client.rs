@@ -923,8 +923,14 @@ impl Client {
     }
 
     pub fn abime_tout(&mut self) {
+        self.degat = self.surface_entiere();
+    }
+
+    /// Toute la zone logique du client, en coordonnees surface : ce qu'il faut
+    /// remonter en texture quand on ne sait pas ce qu'il a peint.
+    pub fn surface_entiere(&self) -> Rect {
         let (largeur, hauteur) = self.geometrie.logique();
-        self.degat = Rect::neuf(0, 0, largeur, hauteur);
+        Rect::neuf(0, 0, largeur, hauteur)
     }
 
     /// Ce que le compositeur a le droit de recopier de la surface.

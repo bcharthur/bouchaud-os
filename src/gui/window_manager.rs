@@ -699,6 +699,9 @@ fn boucle() {
     // BOUCHAUD_GPU_COMPOSITION_V2 : une fenetre composee par le GPU a peint
     // sans que le bureau ait rien a repeindre -- la trame est due quand meme.
     let mut trame_gpu_due = false;
+    // BOUCHAUD_GPU_REPLI_SURVIT_A_LA_TRAME_V1 : le GPU a refuse la trame ; la
+    // repeinture CPU complete qu'il impose doit survivre a `degats.efface()`.
+    let mut repli_cpu_du = false;
     // Degats des clients deja routes (processeur), plusieurs rectangles.
     let mut degats_routes: Vec<Rect> = Vec::new();
     // Sur le TAS : la pile du bureau est comptee (verifie-pile-noyau-profondeur).
@@ -1563,7 +1566,8 @@ fn boucle() {
                     crate::gui::degats::note_presentation(present);
                 }
                 let t_presentation = crate::kernel::timer::monotonic_ns();
-                ferme_trame(&mut wins, plan_gpu, &mut plan_gpu_precedent, &mut degats, &mut trame_gpu_due);
+                repli_cpu_du = ferme_trame(&mut wins, plan_gpu, &mut plan_gpu_precedent, &mut degats,
+                    &mut trame_gpu_due);
                 crate::gui::atelier::effets::fin_trame();
                 {
                     let fin = crate::kernel::timer::monotonic_ns();
@@ -1599,6 +1603,13 @@ fn boucle() {
             derniere_trame = maintenant;
             sale = false;
             degats.efface();
+            if core::mem::take(&mut repli_cpu_du) {
+                // Revue de la PR #287 : sans cela, l'ecran entier promis au
+                // CPU apres le refus du GPU etait efface ici, avant d'etre
+                // peint ; un client immobile restait perime.
+                degats.tout();
+                sale = true;
+            }
         }
 
         if maintenant.wrapping_sub(dernier_releve) >= PERIODE_RELEVE_MS {
@@ -2118,11 +2129,11 @@ fn ferme_trame(
     plan_gpu_precedent: &mut alloc::boxed::Box<crate::gui::composition::Plan>,
     degats: &mut Degats,
     trame_gpu_due: &mut bool,
-) {
+) -> bool {
     if plan_gpu.nombre() == 0 {
         *plan_gpu_precedent = plan_gpu;
         fb::fin_trame();
-        return;
+        return false;
     }
     let mut couches: Vec<crate::drivers::virtio_gpu::CoucheGpu> = Vec::new();
     for f in plan_gpu.fenetres.iter().flatten() {
@@ -2151,17 +2162,21 @@ fn ferme_trame(
             visibles: &f.visibles[..f.n],
         });
     }
-    if fb::fin_trame_gpu(&couches) {
-        *plan_gpu_precedent = plan_gpu;
-    } else {
+    let repli = !fb::fin_trame_gpu(&couches);
+    if repli {
         crate::gui::composition::publie(&crate::gui::composition::Plan::vide());
         **plan_gpu_precedent = crate::gui::composition::Plan::vide();
         degats.tout();
         *trame_gpu_due = true;
+    } else {
+        *plan_gpu_precedent = plan_gpu;
     }
     for w in wins.iter_mut() {
         if let Some(c) = w.app.client_mut() { c.degat_gpu = Rect::default(); }
     }
+    // BOUCHAUD_GPU_REPLI_SURVIT_A_LA_TRAME_V1 : l'appelant doit garder ce
+    // repli au-dela de son nettoyage de fin de trame (revue de la PR #287).
+    repli
 }
 
 fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
@@ -2205,6 +2220,9 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
             }
             if client.verifie_silence() {
                 degat_ecran = degat_ecran.union(&zone_fenetre);
+                // BOUCHAUD_GPU_TEXTURE_SUIT_L_AVEUGLE_V1 (revue de la PR #287)
+                client.degat_gpu = client.surface_entiere();
+                gpu_sale = true;
             }
             // Un client qui n'annonce pas ses trames est recompose « a
             // l'aveugle » : on ne sait pas quand il peint, seulement qu'il
@@ -2215,6 +2233,11 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
             if recompose_aveugle && client.recompose_a_l_aveugle() && visible {
                 client.abime_tout();
                 degat_ecran = degat_ecran.union(&zone_fenetre);
+                // BOUCHAUD_GPU_TEXTURE_SUIT_L_AVEUGLE_V1 : un client qui
+                // n'annonce pas ses trames peint quand meme ; sa texture GPU
+                // doit etre remontee, sinon le GPU recopie une image figee.
+                client.degat_gpu = client.surface_entiere();
+                gpu_sale = true;
             }
             if client.pompe() {
                 // Le degat est consomme meme si la fenetre est minimisee :
