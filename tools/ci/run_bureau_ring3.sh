@@ -4,7 +4,7 @@
 #
 #   tools/ci/run_bureau_ring3.sh BOOTIMAGE [SORTIE]
 #
-# Bras B (ring 3) : l'image configure le bureau ring 3 (`/bureau-ring3`) ; le
+# Bras B1 (ring 3, tranche 2A) : l'image configure le bureau ring 3 (`/bureau-ring3`) ; le
 # noyau lance `mire-gpu` -- un client BOGU ORDINAIRE, inchange, dans son propre
 # processus -- puis `/bin/composited bureau`, autre processus ring 3, avec la
 # capacite d'affichage et la capacite `Fenetre` sur ce client. Exige :
@@ -17,6 +17,12 @@
 #     compositeur survit, la fenetre disparait (capture : tout l'ecran = fond),
 #     aucune panique ;
 #   - les mesures du pont (copie et presentation par trame, cadence).
+# Bras B2 (ring 3, tranche 2B) : DEUX applications, chacune son processus,
+# composees par le meme `composited` : capture des deux fenetres empilees,
+# puis scenario `deplace-empile` (la fenetre du fond glisse en 20 pas, puis
+# monte au premier plan) et capture decodee au pixel contre le nouvel ordre ;
+# l'une meurt (faute de page), l'autre continue d'etre composee ; puis
+# l'autre, et l'ecran redevient le fond.
 # Bras A (reference) : le MEME client sous le bureau noyau actuel, meme QEMU,
 # memes durees ; ses releves `[GPU-COMPOSITION]` donnent la cadence et le cout
 # par trame du chemin existant. Le bras A n'a pas de seuil ici : c'est la
@@ -83,36 +89,65 @@ ok() { echo "  ok      $1"; }
 # --------------------------------------------------------------------------
 # Bras B : composited ring 3.
 # --------------------------------------------------------------------------
-B="$SORTIE/ring3"; mkdir -p "$B/scen/bin"
-cp "$SORTIE/bin/composited-slice" "$B/scen/bin/composited"
-cp "$SORTIE/bin/attends" "$B/scen/bin/attends"
-cp "$SORTIE/bin/mire-gpu" "$B/scen/mire-gpu"
-chmod +x "$B/scen/bin/"* "$B/scen/mire-gpu"
-echo "/mire-gpu BO_MIRE_FAUTE_APRES=$FAUTE_APRES" > "$B/scen/bureau-ring3"
-: > "$B/scen/garde-vm-vivante"
-printf '%s\n' 'echo BUREAU_RING3_AUTORUN_BEGIN' 'desktop' 'echo BUREAU_RING3_APRES_DESKTOP' \
-  '/bin/attends 300' 'echo BUREAU_RING3_AUTORUN_END' > "$B/scen/autorun"
-echo "=== bras B : bureau ring 3 (client en faute apres $FAUTE_APRES trames) ==="
-demarre ring3
-vivant=0; LIMITE=$((SECONDS + 240))
-while kill -0 "$QEMU_PID" 2>/dev/null; do
-  if grep -aqE "$fatal_re" "$B/serie.log"; then break; fi
-  if [ "$vivant" = 0 ] && grep -aq 'COMPOSITED_BUREAU_MESURE trames=240' "$B/serie.log"; then
-    capture "$MONITEUR" "$B/vivant.ppm"; vivant=1
-  fi
-  if grep -aqE 'COMPOSITED_BUREAU_(OK|FAIL)' "$B/serie.log"; then
-    sleep 2; capture "$MONITEUR" "$B/mort.ppm"; break
-  fi
-  if (( SECONDS >= LIMITE )); then echo "ECHEANCE bras B" >&2; break; fi
-  sleep 1
-done
-arrete
-P="$B/serie.propre"; propre "$B/serie.log" > "$P"
-grep -aE 'BUREAU_RING3|COMPOSITED|MIRE_GPU|PROCESS_(FAULT|EXIT|DEATH).*mire|BUREAU_NOYAU' "$P" \
-  | grep -v 'BOUCHAUD_DISPLAY_PRESENT n=' | cut -c1-220 | tail -n 80 || true
+# prepare_ring3 NOM LIGNE... : image avec composited, mire-gpu et la
+# configuration du bureau ring 3 (une ligne par client, `@scenario` permis).
+prepare_ring3() {
+  local d="$SORTIE/$1"; shift
+  mkdir -p "$d/scen/bin"
+  cp "$SORTIE/bin/composited-slice" "$d/scen/bin/composited"
+  cp "$SORTIE/bin/attends" "$d/scen/bin/attends"
+  cp "$SORTIE/bin/mire-gpu" "$d/scen/mire-gpu"
+  chmod +x "$d/scen/bin/"* "$d/scen/mire-gpu"
+  printf '%s\n' "$@" > "$d/scen/bureau-ring3"
+  : > "$d/scen/garde-vm-vivante"
+  printf '%s\n' 'echo BUREAU_RING3_AUTORUN_BEGIN' 'desktop' 'echo BUREAU_RING3_APRES_DESKTOP' \
+    '/bin/attends 300' 'echo BUREAU_RING3_AUTORUN_END' > "$d/scen/autorun"
+}
 
+# juge_capture FICHIER JOURNAL MARQUEUR LIBELLE : la capture prise juste apres
+# MARQUEUR, decodee au pixel contre l'etat des fenetres publie a cet instant.
+juge_capture() {
+  local fenetres
+  if [ ! -s "$1" ]; then echec "$4 : capture absente"; return; fi
+  fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$2" --jusqua "$3")
+  # shellcheck disable=SC2086
+  python3 tools/ci/verifie_capture_bureau_ring3.py "$1" $fenetres && ok "$4 ($fenetres)" || echec "$4 ($fenetres)"
+}
+
+# attend_et_capture NOM "MARQUEUR=FICHIER"... FIN : capture a chaque marqueur,
+# s'arrete apres FIN (ou a l'echeance).
+attend_et_capture() {
+  local d="$SORTIE/$1" fin=$2; shift 2
+  local -A fait=()
+  local LIMITE=$((SECONDS + 300)) paire m f
+  while kill -0 "$QEMU_PID" 2>/dev/null; do
+    if grep -aqE "$fatal_re" "$d/serie.log"; then break; fi
+    for paire in "$@"; do
+      m=${paire%=*}; f=${paire##*=}
+      if [ -z "${fait[$f]:-}" ] && grep -aqF "$m" "$d/serie.log"; then
+        sleep 1; capture "$MONITEUR" "$d/$f"; fait[$f]=1
+      fi
+    done
+    if grep -aqE "$fin" "$d/serie.log"; then sleep 2; [ -z "${fait[fin.ppm]:-}" ] && capture "$MONITEUR" "$d/fin.ppm"; break; fi
+    if (( SECONDS >= LIMITE )); then echo "ECHEANCE $1" >&2; break; fi
+    sleep 0.5
+  done
+  arrete
+  propre "$d/serie.log" > "$d/serie.propre"
+  grep -aE 'BUREAU_RING3|COMPOSITED_BUREAU|MIRE_GPU|PROCESS_(FAULT|EXIT|DEATH).*mire|BUREAU_NOYAU' "$d/serie.propre" \
+    | grep -v 'BOUCHAUD_DISPLAY_PRESENT n=' | cut -c1-200 | tail -n 40 || true
+}
+
+pids_clients() { grep -aoE 'BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+' "$1" | grep -oE '[0-9]+$' || true; }
+
+# B1 -- une application (tranche 2A).
+echo "=== bras B1 : une application ring 3 (faute apres $FAUTE_APRES trames) ==="
+prepare_ring3 ring3 "/mire-gpu BO_MIRE_FAUTE_APRES=$FAUTE_APRES"
+demarre ring3
+attend_et_capture ring3 'COMPOSITED_BUREAU_(OK|FAIL)' 'COMPOSITED_BUREAU_MESURE trames=240=vivant.ppm'
+B="$SORTIE/ring3"; P="$B/serie.propre"
 grep -aqE "$fatal_re" "$P" && echec "panique noyau" || ok "aucune panique noyau"
-pid_client=$(grep -aoE 'BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+' "$P" | grep -oE '[0-9]+$' | sed -n 1p || true)
+pid_client=$(pids_clients "$P" | sed -n 1p)
 pid_compo=$(grep -aoE 'BOUCHAUD_COMPOSITEUR_LANCE pid=[0-9]+' "$P" | grep -oE '[0-9]+$' | sed -n 1p || true)
 if [ -n "$pid_client" ] && [ -n "$pid_compo" ] && [ "$pid_client" != "$pid_compo" ]; then
   ok "deux processus ring 3 : client pid=$pid_client, compositeur pid=$pid_compo"
@@ -129,21 +164,9 @@ grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${pid_client:-x}" "$P" && ok "le com
   || echec "mort du client non vue"
 grep -aq 'COMPOSITED_BUREAU_OK' "$P" && ok "le compositeur a survecu (COMPOSITED_BUREAU_OK)" \
   || echec "COMPOSITED_BUREAU_OK absent"
-fx=$(grep -aoE '\[COMPOSITED\] fenetre_x=[0-9]+' "$P" | grep -oE '[0-9]+$' | sed -n 1p || true)
-fy=$(grep -aoE '\[COMPOSITED\] fenetre_y=[0-9]+' "$P" | grep -oE '[0-9]+$' | sed -n 1p || true)
-if [ -n "$fx" ] && [ -s "$B/vivant.ppm" ]; then
-  python3 tools/ci/verifie_capture_bureau_ring3.py "$B/vivant.ppm" "$fx" "$fy" 640 400 vivant \
-    && ok "capture du client vivant decodee au pixel" || echec "capture du client vivant"
-else
-  echec "capture du client vivant absente"
-fi
-if [ -n "$fx" ] && [ -s "$B/mort.ppm" ]; then
-  python3 tools/ci/verifie_capture_bureau_ring3.py "$B/mort.ppm" "$fx" "$fy" 640 400 mort \
-    && ok "capture apres la mort : fenetre effacee, bureau intact" || echec "capture apres la mort"
-else
-  echec "capture apres la mort absente"
-fi
-mesure=$(awk '/COMPOSITED_BUREAU_MESURE trames=240/ { n = 7 } n > 0 { print; n-- }' "$P" | tr '\n' ' ')
+juge_capture "$B/vivant.ppm" "$P" 'COMPOSITED_BUREAU_MESURE trames=240' "capture du client vivant decodee au pixel"
+juge_capture "$B/fin.ppm" "$P" 'COMPOSITED_BUREAU_OK' "capture apres la mort : fenetre effacee, bureau intact"
+mesure=$(awk '/COMPOSITED_BUREAU_MESURE trames=240/ { n = 9 } n > 0 { print; n-- }' "$P" | tr '\n' ' ')
 val() { echo "$mesure" | grep -oE "$1=[0-9]+" | sed -n '1s/.*=//p' || true; }
 b_trames=240; b_duree=$(val duree_ms); b_lit=$(val lit_us_moy); b_pres=$(val presente_us_moy)
 b_px=$(val pixels_copies)
@@ -152,6 +175,41 @@ if [ -n "$b_duree" ] && [ -n "$b_lit" ] && [ -n "$b_pres" ]; then
 else
   echec "mesures du pont absentes"
 fi
+
+# B2 -- deux applications, deplacement, empilement, morts successives (2B).
+echo "=== bras B2 : deux applications ring 3, deplacement, empilement, une meurt puis l'autre ==="
+prepare_ring3 deux '@scenario deplace-empile' \
+  "/mire-gpu BO_MIRE_FAUTE_APRES=$((FAUTE_APRES * 2))" "/mire-gpu BO_MIRE_FAUTE_APRES=$((FAUTE_APRES * 3))"
+demarre deux
+attend_et_capture deux 'COMPOSITED_BUREAU_(OK|FAIL)' \
+  'COMPOSITED_BUREAU_FENETRE indice=1=deux-avant.ppm' \
+  'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1=deux-apres.ppm'
+D="$SORTIE/deux"; Q="$D/serie.propre"
+grep -aqE "$fatal_re" "$Q" && echec "B2 : panique noyau" || ok "B2 : aucune panique noyau"
+mapfile -t pids < <(pids_clients "$Q")
+compo2=$(grep -aoE 'BOUCHAUD_COMPOSITEUR_LANCE pid=[0-9]+' "$Q" | grep -oE '[0-9]+$' | sed -n 1p || true)
+if [ "${#pids[@]}" = 2 ] && [ "${pids[0]}" != "${pids[1]}" ] && [ -n "$compo2" ] \
+   && [ "$compo2" != "${pids[0]}" ] && [ "$compo2" != "${pids[1]}" ]; then
+  ok "B2 : trois processus ring 3 (applications ${pids[0]}, ${pids[1]} ; compositeur $compo2)"
+else
+  echec "B2 : processus distincts (${pids[*]:-?} / ${compo2:-?})"
+fi
+grep -aq 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "$Q" && ok "B2 : deplacement puis passage au premier plan joues" \
+  || echec "B2 : scenario non joue"
+juge_capture "$D/deux-avant.ppm" "$Q" 'COMPOSITED_BUREAU_FENETRE indice=1' "B2 : deux fenetres empilees, decodees au pixel"
+juge_capture "$D/deux-apres.ppm" "$Q" 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "B2 : fenetre deplacee et remontee, decodee au pixel"
+premier_mort=$(grep -aoE 'COMPOSITED_BUREAU_CLIENT_MORT pid=[0-9]+' "$Q" | sed -n 1p || true)
+if [ -n "$premier_mort" ]; then
+  # Le survivant continue d'etre compose apres la mort de l'autre.
+  apres=$(awk -v m="$premier_mort" 'index($0, m) { vu = 1 } vu && /COMPOSITED_BUREAU_MESURE trames=/ { n++ } END { print n + 0 }' "$Q")
+  [ "$apres" -ge 1 ] && ok "B2 : le survivant est encore compose apres la mort de l'autre ($apres releves)" \
+    || echec "B2 : rien n'est compose apres la premiere mort"
+else
+  echec "B2 : aucune mort de client"
+fi
+[ "$(grep -ac 'COMPOSITED_BUREAU_CLIENT_MORT pid=' "$Q")" = 2 ] && ok "B2 : les deux morts vues" || echec "B2 : morts non vues"
+grep -aq 'COMPOSITED_BUREAU_OK' "$Q" && ok "B2 : le compositeur a survecu" || echec "B2 : COMPOSITED_BUREAU_OK absent"
+juge_capture "$D/fin.ppm" "$Q" 'COMPOSITED_BUREAU_OK' "B2 : bureau vide apres les deux morts"
 
 # --------------------------------------------------------------------------
 # Bras A : le meme client sous le bureau noyau actuel (reference).
