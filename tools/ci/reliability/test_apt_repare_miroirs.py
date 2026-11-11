@@ -46,11 +46,12 @@ class Miroir:
         self.dossier.cleanup()
 
 
-def lance(lignes):
+def lance(lignes, secours="http://secours-mort.invalid/ubuntu/"):
     with tempfile.TemporaryDirectory() as d:
         liste = Path(d, "apt-mirrors.txt")
         liste.write_text("\n".join(lignes) + "\n")
         env = {"APT_LISTE_MIROIRS": str(liste), "APT_VERSION_UBUNTU": "noble", "PATH": "/usr/bin:/bin",
+               "APT_MIROIRS_SECOURS": secours,
                "NO_PROXY": "localhost,127.0.0.1", "no_proxy": "localhost,127.0.0.1"}
         r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=120)
         return r.returncode, r.stderr, liste.read_text().splitlines()
@@ -78,6 +79,15 @@ class ReplieMiroirTests(unittest.TestCase):
         self.assertEqual(code, 0, journal)
         self.assertEqual(apres, [MORT])
         self.assertIn("APT_REPLI_MIROIR impossible", journal)
+
+    def test_aucun_miroir_ubuntu_le_secours_le_remplace(self):
+        # Run 43054921395 : aucun nom *.ubuntu.com ne se resolvait.
+        with Miroir() as m:
+            url = m.ligne.split("\t")[0]
+            code, journal, apres = lance([MORT], secours=f"http://secours-mort.invalid/ubuntu/ {url}")
+        self.assertEqual(code, 0, journal)
+        self.assertEqual(apres, [f"{url}\tpriority:1"], journal)
+        self.assertIn("APT_REPLI_MIROIR secours=1", journal)
 
     def test_rien_n_est_retire_si_tout_repond(self):
         with Miroir() as m:
