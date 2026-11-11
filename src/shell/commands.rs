@@ -667,6 +667,7 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     let taille = crate::fs::backing::logical_len(idx);
     let mut position = 0usize;
     let mut tranche = alloc::vec![0u8; 64 * 1024];
+    let mut dernier = b'\n';
     while position < taille {
         let voulu = core::cmp::min(tranche.len(), taille - position);
         let lus = crate::fs::backing::read_at(idx, position, &mut tranche[..voulu]);
@@ -675,9 +676,15 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
             return 1;
         }
         print!("{}", String::from_utf8_lossy(&tranche[..lus]));
+        dernier = tranche[lus - 1];
         position += lus;
     }
-    println!("");
+    // Comme la branche de l'entree standard : un saut de ligne seulement si
+    // le fichier n'en finit pas deja par un (le banc Unix voyait une ligne vide
+    // de trop apres chaque fichier texte).
+    if dernier != b'\n' {
+        println!("");
+    }
     0
 }
 
