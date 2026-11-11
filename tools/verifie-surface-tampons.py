@@ -47,6 +47,7 @@ FICHIERS = {
     "pur_chrome": RACINE / "tools/ladybird/chrome/BouchaudTampons.h",
     "test_chrome": RACINE / "tools/ladybird/chrome/test_tampons.cpp",
     "flux_lb": RACINE / ".github/workflows/ladybird-native-browser.yml",
+    "pont": RACINE / "src/kernel/native/fenetre.rs",
 }
 OFFRE = "static SURFACE_DOUBLE_OFFERTE: AtomicBool = AtomicBool::new(false);"
 MESURE = "static MESURE_DECHIRURE: AtomicBool = AtomicBool::new(false);"
@@ -59,6 +60,10 @@ ENVOI = ("            if !self.envoie(Genre::Liberation, &charge) {\n"
          "            self.tampons.liberation_envoyee(t);")
 APRES = "        self.envoie_liberations();\n        trame_prete\n    }"
 FACE = "surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);"
+# BOUCHAUD_BUREAU_RING3_2A : le pont vers le compositeur ring 3 lit, lui aussi,
+# la FACE -- et seulement elle.
+FACE_PONT = "    let face = c.face();"
+LECTURE_PONT = "c.surface.copie_ligne_de_octets(face, (d.y + r) as usize, d.x as usize, d.l as usize, ligne);"
 CI = ("tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin",
       "BO_QEMU_KVM=1 tools/ci/run_banc_dechirure.sh")
 PREPARE = ("    if (!prepare_arriere()) {", "    auto canvas_or_error = mapped_surface();")
@@ -115,13 +120,17 @@ def verifie(t: dict, src: str) -> list:
         fautes.append("client.rs : les liberations ne partent plus apres le traitement des messages.")
     if t["widgets"].count(FACE) != 1:
         fautes.append("widgets.rs : la composition ne lit plus la face de la surface.")
-    lectures = [l for l in src.splitlines() if ".copie_ligne(" in l or ".copie_ligne_de(" in l]
+    lectures = [l for l in src.splitlines()
+                if ".copie_ligne(" in l or ".copie_ligne_de(" in l or ".copie_ligne_de_octets(" in l]
     lectures = [l for l in lectures if "pub fn " not in l and "self.copie_ligne_de(0," not in l]
-    if len(lectures) != 1:
-        fautes.append(f"la surface est lue ailleurs que par la composition de la face ({len(lectures)} sites).")
+    if len(lectures) != 2 or not any(FACE in l for l in lectures) or not any(LECTURE_PONT in l for l in lectures):
+        fautes.append(f"la surface est lue ailleurs que par la composition de la face et le pont ring 3 ({len(lectures)} sites).")
+    if t["pont"].count(FACE_PONT) != 1 or t["pont"].count(LECTURE_PONT) != 1 \
+            or t["pont"].find(FACE_PONT) > t["pont"].find(LECTURE_PONT):
+        fautes.append("fenetre.rs : le pont ring 3 ne lit plus la face de la surface.")
     if any(m in t["pur"] for m in ("unsafe", "static mut", "asm!")):
         fautes.append("surface_tampons.rs : la regle n'est plus pure.")
-    if "tampon >= self.tampons" not in corps(t["surface"], "pub fn copie_ligne_de("):
+    if "tampon >= self.tampons" not in corps(t["surface"], "unsafe fn copie_ligne_brute("):
         fautes.append("surface.rs : une lecture hors des tampons n'est plus refusee.")
     for nom in TESTS:
         if f"fn {nom}()" not in t["test"]:
@@ -175,6 +184,7 @@ def negatifs(t: dict, src: str) -> list:
          "                self.bilan.liberations_retardees += 1;\n"),
         ("liberations jamais envoyees", "client", "        self.envoie_liberations();\n        trame_prete", "        trame_prete"),
         ("composition hors face", "widgets", FACE, "surface.copie_ligne_de(0, y - zy, colonne, pris, destination);"),
+        ("pont ring 3 hors face", "pont", FACE_PONT, "    let face = 0usize;"),
         ("regle impure", "pur", "pub fn trame_prete(", "pub unsafe fn trame_prete("),
         ("lecture hors tampons", "surface", "tampon >= self.tampons || ", ""),
         ("test de surete retire", "test", "fn un_client_conforme_n_ecrit_jamais_dans_la_face()", "fn x()"),
@@ -199,7 +209,7 @@ def negatifs(t: dict, src: str) -> list:
             continue
         m = dict(t)
         m[cle] = t[cle].replace(avant, apres, 1)
-        s = src.replace(t[cle], m[cle]) if cle in ("client", "widgets", "surface", "shell", "pur") else src
+        s = src.replace(t[cle], m[cle]) if cle in ("client", "widgets", "surface", "shell", "pur", "pont") else src
         if not verifie(m, s):
             echecs.append(f"mutation non detectee : {nom}")
     s = src + "\nfn x() { crate::gui::client::offre_surface_double(true); }\n"
@@ -208,6 +218,9 @@ def negatifs(t: dict, src: str) -> list:
     s = src + "\nfn y(s: &Surface, d: &mut [u32]) { s.copie_ligne(0, 0, 1, d); }\n"
     if not verifie(t, s):
         echecs.append("mutation non detectee : surface lue hors de la composition")
+    s = src + "\nfn z(s: &Surface, d: &mut [u8]) { s.copie_ligne_de_octets(1, 0, 0, 1, d); }\n"
+    if not verifie(t, s):
+        echecs.append("mutation non detectee : surface lue en octets hors du pont")
     return echecs
 
 
@@ -221,7 +234,7 @@ def main() -> int:
         return 1
     print("verifie-surface-tampons: OK (offre et mesure off par defaut, contrat negocie a la poignee de main, "
           "hors surface refuse, liberations jamais perdues, composition sur la face, regle pure, banc TCG+KVM, "
-          "chrome Ladybird a deux tampons ; 24 negatifs)")
+          "chrome Ladybird a deux tampons, pont ring 3 sur la face ; 26 negatifs)")
     return 0
 
 

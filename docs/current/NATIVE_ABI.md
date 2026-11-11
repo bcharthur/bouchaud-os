@@ -1,4 +1,4 @@
-# ABI native Bouchaud — v1.2 (référence)
+# ABI native Bouchaud — v1.4 (référence)
 
 **Source de vérité du contrat :** `src/kernel/native/abi/{types,numbers,wire}.rs`.
 **Description C unique :** `userland/libs/bouchaud-sdk/include/bouchaud/abi.h` (+ wrappers `sdk.h`).
@@ -16,6 +16,8 @@ Un programme natif n'inclut que `bouchaud/sdk.h`, définit `int bo_main(const st
 | 1.0 | handles, canaux (+ envoi atténué), événements, waitsets (poll), régions partagées |
 | 1.1 | `PROCESS_SPAWN/INFO/KILL`, objet Process, signal `TERMINATED`, `WAITSET_WAIT`, `TIME_NOW`, erreur `TimedOut` |
 | 1.2 | objet **Update** (kind 6), droits `UPDATE_HEALTH` (bit 8) et `UPDATE_INSTALL` (bit 9), `UPDATE_STATE`, `UPDATE_COMMIT_HEALTH`, `UPDATE_INSTALL_BEGIN/WRITE/FINISH/VERIFY` (0x70–0x75) |
+| 1.3 | objet **Display** (kind 7), droit `DISPLAY_PRESENT` (bit 10), `DISPLAY_PRESENT` (0x80), erreur `DeviceError` (15) |
+| 1.4 | objet **Fenetre** (kind 8), `DISPLAY_INFO` (0x81), `FENETRE_POMPE` (0x90), `FENETRE_LIT` (0x91) |
 
 ## 2. Appels
 
@@ -42,6 +44,12 @@ Espace de noms `0x424F_0000 + n` (disjoint des numéros Linux). Retour : `>= 0` 
 | 0x51 | `process_info(proc, out)` | INSPECT | `{pid, state, exit_code}` |
 | 0x52 | `process_kill(proc)` | SIGNAL | idempotent |
 | 0x60 | `time_now()` | — | ns monotones depuis le boot |
+| 0x80 | `display_present(cap, region, demande*)` | DISPLAY_PRESENT ; région : READ | pose un rectangle d'une région à l'écran ; bornes jugées avant lecture (`affichage_contrat.rs`) ; refus `WOULD_BLOCK` si le bureau noyau tient l'écran ; rend l'empreinte des pixels relus |
+| 0x81 | `display_info(cap)` | DISPLAY_PRESENT | `largeur << 32 \| hauteur` de l'écran |
+| 0x90 | `fenetre_pompe(fen, etat*)` | READ | le noyau valide les messages BOGU du client ; écrit dix `u32` (vivant, pid, taille peinte, dommage repris, trames, face) ; rend 1 vivant / 0 mort |
+| 0x91 | `fenetre_lit(fen, region, lecture*)` | READ ; région : WRITE | recopie un rectangle de la face livrée dans la région de l'appelant ; bornes jugées avant toute copie (`fenetre_contrat.rs`) : jamais hors de ce que le client a peint, jamais hors de la région |
+
+**Aucun appel ne crée un objet Display ni un objet Fenetre.** Le noyau les donne au seul `/bin/composited` qu'il lance lui-même (ni DUP ni TRANSFER). Une `Fenetre` signale READABLE quand le client a écrit, PEER_CLOSED quand il est mort ; la fermer met fin au client. Voir [FENETRES_RING3_PLAN.md](FENETRES_RING3_PLAN.md).
 
 ## 3. Objets, handles, droits
 

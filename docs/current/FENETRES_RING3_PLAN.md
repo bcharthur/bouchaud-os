@@ -51,6 +51,21 @@ serveur ne manipulerait que des **identifiants de surface** et des
    nœud), possède le fond, le chrome, le dock et le curseur dans **sa** surface,
    et présente par l'appel 1. Le fil noyau du bureau ne fait plus que relayer.
    Preuve : A/B de captures contre le bureau noyau, DOOM + Ladybird.
+   - **2A — une vraie fenêtre (`BOUCHAUD_BUREAU_RING3_2A`, ABI 1.4), preuve TCG
+     locale.** Une image qui porte `/bureau-ring3` fait lancer par le noyau un
+     client BOGU **inchangé** (`mire-gpu`, son propre processus), puis
+     `/bin/composited bureau` avec la capacité `Fenetre` sur ce client. Le noyau
+     garde le côté client (validation des messages, contrat de tampons, récolte) ;
+     `composited` compose fond, cadre et contenu dans sa région et présente les
+     seuls rectangles abîmés. Le bureau noyau refuse alors de démarrer
+     (exclusion publiée/relue des deux côtés). Banc `tools/ci/run_bureau_ring3.sh`
+     (CI Native IPC Runtime) : capture décodée au pixel (254 976 exacts, carré
+     mobile 1 024, 0 autre), 12 refus de sécurité, client tué par faute de page →
+     fenêtre effacée, compositeur vivant ; A/B même client, TCG SMP4 : ring 3
+     59 trames/s, copie 81 µs + présentation 599 µs par trame ; bureau noyau
+     58 trames/s, dessin 202 µs + présentation 16 µs. Coût mesuré à résorber :
+     la relecture d'empreinte de chaque présentation. Pas encore : DOOM et
+     Ladybird, plusieurs fenêtres, déplacement, entrées.
 3. **Entrées** : un service d'entrées ring 3 reçoit les événements HID et les
    route selon `windowd` (focus, z-order). Preuve : un client qui plante ne gèle
    ni les entrées ni le bureau.

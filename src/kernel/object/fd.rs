@@ -284,6 +284,11 @@ pub struct Canal {
     /// trafic qui ne le concerne pas. Un reveil inutile coute une composition
     /// complete ; le drapeau coute un booleen.
     pub reveille_compositeur: bool,
+    /// BOUCHAUD_BUREAU_RING3_2A : une ecriture dans ce canal publie aussi
+    /// l'activite NATIVE -- le compositeur ring 3 attend sur un waitset, pas
+    /// sur l'interface du bureau noyau. Pose sur le seul canal client ->
+    /// compositeur d'un client confie a `composited`.
+    pub reveille_natif: bool,
 }
 
 /// Capacite d'un canal ou d'un tube, en octets.

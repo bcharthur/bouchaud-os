@@ -682,6 +682,9 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
         numbers::UPDATE_INSTALL_FINISH => update_install_finish(args),
         numbers::UPDATE_INSTALL_VERIFY => update_install_verify(args),
         numbers::DISPLAY_PRESENT => crate::kernel::native::affichage::present(args),
+        numbers::DISPLAY_INFO => crate::kernel::native::affichage::info(args),
+        numbers::FENETRE_POMPE => crate::kernel::native::fenetre::pompe(args),
+        numbers::FENETRE_LIT => crate::kernel::native::fenetre::lit(args),
 
         _ => Err(Error::InvalidCall),
     }

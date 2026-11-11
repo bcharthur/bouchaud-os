@@ -1,0 +1,108 @@
+"""BOUCHAUD_BUREAU_RING3_2A : le juge de l'ecran compose par `composited`.
+
+Le banc ne vaut que si le juge REFUSE ce qui doit l'etre : contenu non recopie
+(la premiere version du compositeur perdait la trame complete du demarrage),
+pixel decale d'une case, trace d'un autre compositeur, fenetre restee apres la
+mort du client.
+"""
+import importlib.util
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+RACINE = Path(__file__).resolve().parents[3]
+SCRIPT = RACINE / "tools/ci/verifie_capture_bureau_ring3.py"
+spec = importlib.util.spec_from_file_location("vcb", SCRIPT)
+vcb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(vcb)
+
+ECRAN = (50, 50)
+FEN = (4, 28, 10, 8)  # contenu ; cadre de (2, 2) a (16, 38)
+
+
+def bureau(x, y, contenu):
+    x0, y0, l, h = FEN
+    if x0 <= x < x0 + l and y0 <= y < y0 + h:
+        return contenu(x - x0, y - y0)
+    if x0 - 2 <= x < x0 + l + 2 and y0 - 26 <= y < y0 + h + 2:
+        return vcb.BARRE if (y0 - 24 <= y < y0 and x0 <= x < x0 + l) else vcb.BORD
+    return vcb.FOND
+
+
+def ppm(pixel):
+    w, h = ECRAN
+    corps = bytearray()
+    for y in range(h):
+        for x in range(w):
+            v = pixel(x, y)
+            corps += bytes(((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF))
+    return f"P6\n# capture\n{w} {h}\n255\n".encode() + bytes(corps)
+
+
+def lance(contenu, etat):
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d, "c.ppm")
+        f.write_bytes(contenu)
+        r = subprocess.run([sys.executable, str(SCRIPT), str(f), *map(str, FEN), etat],
+                           capture_output=True, text=True, timeout=20)
+        return r.returncode, r.stdout
+
+
+class CaptureBureauTests(unittest.TestCase):
+    def test_fenetre_exacte_acceptee(self):
+        code, sortie = lance(ppm(lambda x, y: bureau(x, y, vcb.motif)), "vivant")
+        self.assertEqual(code, 0, sortie)
+        self.assertIn("BUREAU_RING3_CAPTURE_OK", sortie)
+
+    def test_carre_mobile_admis(self):
+        def avec_carre(cx, cy):
+            return vcb.BLANC if cx < 3 and cy < 3 else vcb.motif(cx, cy)
+        code, sortie = lance(ppm(lambda x, y: bureau(x, y, avec_carre)), "vivant")
+        self.assertEqual(code, 0, sortie)
+        self.assertIn("carre=9", sortie)
+
+    def test_contenu_non_recopie_refuse(self):
+        # La premiere version perdait la trame complete : zone vide du cadre.
+        def vide(cx, cy):
+            return 0x202020 if cy >= 4 else vcb.motif(cx, cy)
+        code, sortie = lance(ppm(lambda x, y: bureau(x, y, vide)), "vivant")
+        self.assertEqual(code, 1, sortie)
+        self.assertIn("BUREAU_RING3_CAPTURE_ECHEC", sortie)
+
+    def test_pixel_decale_refuse(self):
+        code, sortie = lance(ppm(lambda x, y: bureau(x, y, lambda cx, cy: vcb.motif(cx + 1, cy))), "vivant")
+        self.assertEqual(code, 1, sortie)
+
+    def test_trace_hors_fenetre_refusee(self):
+        def trace(x, y):
+            return 0x123456 if (x, y) == (45, 45) else bureau(x, y, vcb.motif)
+        code, sortie = lance(ppm(trace), "vivant")
+        self.assertEqual(code, 1, sortie)
+        self.assertIn("(45,45)", sortie)
+
+    def test_cadre_absent_refuse(self):
+        def sans_cadre(x, y):
+            x0, y0, l, h = FEN
+            if x0 <= x < x0 + l and y0 <= y < y0 + h:
+                return vcb.motif(x - x0, y - y0)
+            return vcb.FOND
+        code, sortie = lance(ppm(sans_cadre), "vivant")
+        self.assertEqual(code, 1, sortie)
+
+    def test_mort_exige_l_ecran_vide(self):
+        code, sortie = lance(ppm(lambda x, y: vcb.FOND), "mort")
+        self.assertEqual(code, 0, sortie)
+        code, sortie = lance(ppm(lambda x, y: bureau(x, y, vcb.motif)), "mort")
+        self.assertEqual(code, 1, sortie)
+
+    def test_ppm_tronque_echoue_sans_boucler(self):
+        for brut in (b"", b"P6", b"P6\n# rien", b"P6 50 50 255\n\x00"):
+            with self.subTest(brut=brut):
+                code, _ = lance(brut, "mort")
+                self.assertNotEqual(code, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

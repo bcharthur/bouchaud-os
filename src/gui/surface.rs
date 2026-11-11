@@ -158,26 +158,42 @@ impl Surface {
 
     /// `copie_ligne`, lue dans le tampon `tampon` (rien hors des tampons).
     pub fn copie_ligne_de(&self, tampon: usize, y: usize, x: usize, compte: usize, dst: &mut [u32]) {
+        let compte = compte.min(dst.len());
+        // SAFETY : `dst` porte au moins `compte * 4` octets inscriptibles.
+        unsafe { self.copie_ligne_brute(tampon, y, x, compte, dst.as_mut_ptr() as *mut u8) }
+    }
+
+    /// `copie_ligne_de` vers des OCTETS (BOUCHAUD_BUREAU_RING3_2A) : la region
+    /// partagee d'un compositeur ring 3 n'est pas alignee sur des pixels.
+    /// Copie au plus `dst.len() / 4` pixels.
+    pub fn copie_ligne_de_octets(&self, tampon: usize, y: usize, x: usize, compte: usize, dst: &mut [u8]) {
+        let compte = compte.min(dst.len() / 4);
+        // SAFETY : `dst` porte au moins `compte * 4` octets inscriptibles.
+        unsafe { self.copie_ligne_brute(tampon, y, x, compte, dst.as_mut_ptr()) }
+    }
+
+    /// # Safety
+    /// `destination` doit pointer `compte * 4` octets inscriptibles.
+    unsafe fn copie_ligne_brute(&self, tampon: usize, y: usize, x: usize, compte: usize, destination: *mut u8) {
         if tampon >= self.tampons || y >= self.hauteur || x >= self.largeur {
             return;
         }
-        let compte = compte.min(self.largeur - x).min(dst.len());
+        let compte = compte.min(self.largeur - x);
         let mut restant = compte * 4;
         let mut octet = tampon * self.octets() + y * self.pas + x * 4;
         let mut ecrit = 0usize; // octets deja copies
-        let destination = dst.as_mut_ptr() as *mut u8;
         while restant > 0 {
             let numero = octet / PAGE_SIZE as usize;
             let dans_page = octet % PAGE_SIZE as usize;
             let tranche = core::cmp::min(restant, PAGE_SIZE as usize - dans_page);
             match self.page(numero) {
-                Some(base) => unsafe {
+                Some(base) => {
                     core::ptr::copy_nonoverlapping(
                         base.add(dans_page),
                         destination.add(ecrit),
                         tranche,
                     );
-                },
+                }
                 // Hors des frames connues : on laisse la destination telle
                 // quelle plutot que de lire une page qui ne nous appartient pas.
                 None => return,

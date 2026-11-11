@@ -60,6 +60,15 @@ pub const UPDATE_INSTALL_VERIFY: u64 = NATIVE_BASE + 0x75;
 /// (droit DISPLAY_PRESENT), poser un rectangle d'une region partagee (droit
 /// READ) a l'ecran. (affichage, region, demande*) -> empreinte relue.
 pub const DISPLAY_PRESENT: u64 = NATIVE_BASE + 0x80;
+/// BOUCHAUD_BUREAU_RING3_2A (ABI 1.4) : taille de l'ecran (largeur << 32 |
+/// hauteur), sur la capacite Display (droit DISPLAY_PRESENT).
+pub const DISPLAY_INFO: u64 = NATIVE_BASE + 0x81;
+/// Sur une capacite Fenetre (droit READ) : valider les messages du client et
+/// ecrire son etat (fenetre, etat*) -> 1 vivant / 0 mort.
+pub const FENETRE_POMPE: u64 = NATIVE_BASE + 0x90;
+/// Sur une capacite Fenetre (READ) et une region (WRITE) : recopier un
+/// rectangle de la face livree (fenetre, region, lecture*) -> pixels copies.
+pub const FENETRE_LIT: u64 = NATIVE_BASE + 0x91;
 
 #[inline]
 pub const fn is_native(number: u64) -> bool {
@@ -101,6 +110,9 @@ pub const fn name(number: u64) -> &'static str {
         UPDATE_INSTALL_FINISH => "bo_update_install_finish",
         UPDATE_INSTALL_VERIFY => "bo_update_install_verify",
         DISPLAY_PRESENT => "bo_display_present",
+        DISPLAY_INFO => "bo_display_info",
+        FENETRE_POMPE => "bo_fenetre_pompe",
+        FENETRE_LIT => "bo_fenetre_lit",
         _ => "bo_unknown",
     }
 }

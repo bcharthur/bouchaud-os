@@ -742,8 +742,14 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 Ok(ecrits) => ecrits,
                 Err(erreur) => return erreur,
             };
-            let reveille = ecrits != 0 && outbox.lock().reveille_compositeur;
+            let (reveille, natif) = {
+                let canal = outbox.lock();
+                (ecrits != 0 && canal.reveille_compositeur, ecrits != 0 && canal.reveille_natif)
+            };
             crate::kernel::fd::notify_readiness();
+            if natif {
+                crate::kernel::native::activite::publie();
+            }
             // BOUCHAUD_GUI_EVENT_DRIVEN_V1 : seul le canal client -> WM porte
             // ce drapeau. Un `write` de zero octet n'annonce rien.
             if reveille && ecrits != 0 {
