@@ -1180,6 +1180,15 @@ fn fil_dormeur_masqueur() -> ! {
     let en_ligne = crate::arch::x86_64::smp::schedulable_cpus().min(64);
     let mut vus_au_repos = 0u64;
     let epingle_avant = EPINGLE_TOURS.load(Ordering::Acquire);
+    let dormeur = DORMEUR_TACHE.load(Ordering::Acquire);
+    // P13_REVEIL_SILENCE_OBSERVE_V1 : un ECHEC du banc (KVM SMP2, 1413 ms,
+    // run 42999617722) ne disait que l'ecart maximal -- ni quand, ni ou etait
+    // le dormeur. Le masqueur, seul a tourner sur ce coeur, photographie le
+    // dormeur et chaque coeur au premier silence de plus de 100 ms puis tous
+    // les 250 ms tant qu'il dure ; le pire episode est publie APRES le
+    // masquage. Lectures seules, sans allocation : le verdict n'en depend pas.
+    let mut observe = ObservationSilence::default();
+    let debut_masque = crate::kernel::timer::monotonic_ns();
     x86_64::instructions::interrupts::without_interrupts(|| {
         DORMEUR_MASQUE.store(true, Ordering::Release);
         let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree.saturating_mul(1_000_000));
@@ -1190,6 +1199,7 @@ fn fil_dormeur_masqueur() -> ! {
                     vus_au_repos |= 1u64 << c;
                 }
             }
+            observe.examine(dormeur, debut_masque, en_ligne);
             core::hint::spin_loop();
         }
         DORMEUR_MASQUE.store(false, Ordering::Release);
@@ -1213,9 +1223,103 @@ fn fil_dormeur_masqueur() -> ! {
         EPINGLE_TOURS_MASQUE.load(Ordering::Acquire), EPINGLE_HORS_COEUR.load(Ordering::Acquire),
         EPINGLE_TOURS.load(Ordering::Acquire).saturating_sub(epingle_avant)
     );
+    observe.publie();
     DORMEUR_RESULTAT.store(1, Ordering::Release);
     loop {
         crate::kernel::task::sleep_ticks(1000);
+    }
+}
+
+/// P13_REVEIL_SILENCE_OBSERVE_V1 -- une photographie du dormeur muet.
+#[derive(Clone, Copy, Default)]
+struct PhotoSilence {
+    abs_ns: u64,
+    t_ns: u64,
+    silence_ns: u64,
+    dormeur: crate::kernel::task::InstantaneReveil,
+    coeurs: [(usize, bool, bool, usize); 8],
+    n_coeurs: usize,
+}
+
+/// Le pire episode de silence du dormeur pendant le masquage : sa premiere
+/// photographie (franchissement de 100 ms) et sa derniere.
+#[derive(Default)]
+struct ObservationSilence {
+    episode: u64,
+    prochain_ns: u64,
+    debut: Option<PhotoSilence>,
+    pire: (Option<PhotoSilence>, Option<PhotoSilence>),
+    pire_silence_ns: u64,
+}
+
+const SILENCE_SEUIL_OBSERVE_NS: u64 = 100_000_000;
+const SILENCE_PAS_OBSERVE_NS: u64 = 250_000_000;
+
+impl ObservationSilence {
+    fn examine(&mut self, dormeur: usize, debut_masque: u64, en_ligne: usize) {
+        use core::sync::atomic::Ordering;
+        let dernier = DORMEUR_DERNIER_NS.load(Ordering::Acquire);
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        let silence = maintenant.saturating_sub(dernier.max(debut_masque));
+        if dernier == 0 || silence < SILENCE_SEUIL_OBSERVE_NS {
+            return;
+        }
+        if self.episode != dernier {
+            self.episode = dernier;
+            self.prochain_ns = SILENCE_SEUIL_OBSERVE_NS;
+            self.debut = None;
+        }
+        if silence < self.prochain_ns {
+            return;
+        }
+        self.prochain_ns = silence.saturating_add(SILENCE_PAS_OBSERVE_NS);
+        let mut photo = PhotoSilence {
+            abs_ns: maintenant,
+            t_ns: maintenant.saturating_sub(debut_masque),
+            silence_ns: silence,
+            dormeur: crate::kernel::task::instantane_reveil(dormeur),
+            n_coeurs: en_ligne.min(8),
+            ..Default::default()
+        };
+        for c in 0..photo.n_coeurs {
+            photo.coeurs[c] = crate::kernel::task::instantane_coeur(c);
+        }
+        if self.debut.is_none() {
+            self.debut = Some(photo);
+        }
+        if silence >= self.pire_silence_ns {
+            self.pire_silence_ns = silence;
+            self.pire = (self.debut, Some(photo));
+        }
+    }
+
+    fn publie(&self) {
+        let (Some(debut), Some(fin)) = self.pire else {
+            crate::serial_println!("SERIE_DORMEUR_SILENCE aucun seuil_ms={}", SILENCE_SEUIL_OBSERVE_NS / 1_000_000);
+            return;
+        };
+        for (phase, photo) in [("debut", debut), ("fin", fin)] {
+            let d = photo.dormeur;
+            let mut coeurs = String::new();
+            for c in 0..photo.n_coeurs {
+                let (occupant, repos, electeur, longueur) = photo.coeurs[c];
+                coeurs.push_str(&alloc::format!(
+                    "{}{}:{}/repos={}/electeur={}/file={}",
+                    if c == 0 { "" } else { "," },
+                    c, crate::kernel::task::decrit_tache(occupant).replace(' ', "_"),
+                    repos as u8, electeur as u8, longueur,
+                ));
+            }
+            crate::serial_println!(
+                "SERIE_DORMEUR_SILENCE phase={} t_ms={} silence_ms={} etat={} on_cpu={} file={} en_file={} commute={} \
+                 attente={} file_au_pret={} echeance_dans_ms={} pret_depuis_ms={} coeurs=[{}]",
+                phase, photo.t_ns / 1_000_000, photo.silence_ns / 1_000_000,
+                d.etat, d.on_cpu, d.file, d.en_file, d.commute, d.attente, d.file_au_pret,
+                if d.echeance_ns == 0 { i64::MIN } else { (d.echeance_ns as i64).wrapping_sub(photo.abs_ns as i64) / 1_000_000 },
+                if d.pret_depuis_ns == 0 { -1 } else { (photo.abs_ns.saturating_sub(d.pret_depuis_ns) / 1_000_000) as i64 },
+                coeurs,
+            );
+        }
     }
 }
 

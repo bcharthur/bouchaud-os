@@ -60,7 +60,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # BOUCHAUD_CI_FAST_DELAI_V1 : ce delai est celui de l'HEBERGEUR, pas un
+    # critere -- aucune etape n'en depend. A 12 min, le job etait coupe avec
+    # TOUTES ses etapes vertes, pendant l'enregistrement du cache : runs push
+    # 43011896758 (e66f66d) et 42999617668 (80dc75e, deux fois), a 12 min 00
+    # pile ; le meme job, sur le meme SHA en PR, prenait 9 min 40. Les etapes
+    # mesurees : compilation 2 min 45, P10 1 min 20, gardes 1 min, tests hote
+    # 4 min 50, BRDP 50 s. 20 min laissent de la marge sans rien masquer.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Cache Cargo

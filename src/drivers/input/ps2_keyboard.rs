@@ -269,12 +269,25 @@ pub fn rearm_after_8042_reconfigure() {
     });
 }
 
+static SYSRQ_ETAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Empile un scancode. Appele depuis le gestionnaire d'interruption clavier.
 
 pub fn push_scancode(sc: u8) {
     let mut range = false;
     IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     LAST_SCANCODE.store(sc, core::sync::atomic::Ordering::Relaxed);
+    // BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) : Alt+SysRq demande l'etat de
+    // chaque fil, AVANT la file -- un consommateur fige ne peut pas le masquer.
+    // Un seul producteur (IRQ1, non reentrante) : charger/ranger suffit.
+    let mut detecteur = crate::drivers::sysrq::DetecteurSysRq(
+        SYSRQ_ETAT.load(core::sync::atomic::Ordering::Relaxed),
+    );
+    let sysrq = detecteur.pousse(sc);
+    SYSRQ_ETAT.store(detecteur.0, core::sync::atomic::Ordering::Relaxed);
+    if sysrq {
+        crate::kernel::task::demande_releve_fils();
+    }
     {
         let mut file = FILE.lock();
         let suivant = (file.queue + 1) % QUEUE_SIZE;

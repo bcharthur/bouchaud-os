@@ -739,6 +739,13 @@ else
     fi
 fi
 
+# BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) : une VM encore vivante sans verdict
+# terminal est figee ; avant de la tuer, on lui demande qui attend quoi.
+case "$verdict" in
+  plafond|muet)
+    if kill -0 "$PID" 2>/dev/null; then tools/ci/releve_fils_qemu.sh "$MONITEUR" "$LOG" 30; fi ;;
+esac
+
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
 kill -KILL "$PID" 2>/dev/null || true
