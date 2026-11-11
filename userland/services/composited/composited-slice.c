@@ -584,7 +584,8 @@ struct fen {
     u32 l, h;             /* taille du contenu (ce que le client a peint) */
     u32 pid;
     int vivante, visible, minimisee;
-    u64 trames;
+    u64 trames;           /* trames NOUVELLES composees (revue #298) */
+    u32 livrees;          /* dernier compte de trames livrees lu par la pompe */
 };
 static struct fen fens[FEN_MAX];
 static int nfen;
@@ -941,6 +942,12 @@ static int bureau(i64 affichage, u64 *pile)
             i64 v = sys6(BO_FENETRE_POMPE, (u64)f->poignee, (u64)etat, 0, 0, 0, 0);
             if (v < 0) { ecris_nombre("COMPOSITED_BUREAU_FAIL pompe=", v); return 1; }
             f->pid = etat[1];
+            /* Revue #298 : une trame n'est comptee que si le client en a
+             * LIVRE une nouvelle (compte du noyau, etat[8]). Un reveil du
+             * waitset cause par un autre client ne fait plus avancer le
+             * compte d'une fenetre figee. */
+            u32 nouvelles = etat[8] - f->livrees;
+            f->livrees = etat[8];
             if (v == 0) {
                 /* Mort : la fenetre disparait, les autres continuent. */
                 f->vivante = 0; vivantes--;
@@ -957,7 +964,7 @@ static int bureau(i64 affichage, u64 *pile)
             u32 dx = etat[4], dy = etat[5], dl = etat[6], dh = etat[7];
             if (!f->visible) {
                 /* Minimisee : ses trames sont pompees (le client avance), pas dessinees. */
-                if (f->minimisee) { f->trames++; trames_total++; continue; }
+                if (f->minimisee) { if (nouvelles) { f->trames++; trames_total++; } continue; }
                 if (etat[2] == 0 || etat[3] == 0) continue;
                 f->l = etat[2]; f->h = etat[3];
                 place(i);
@@ -979,8 +986,13 @@ static int bureau(i64 affichage, u64 *pile)
                 if (dx + dl > f->l) dl = dx < f->l ? f->l - dx : 0;
                 if (dy + dh > f->h) dh = dy < f->h ? f->h - dy : 0;
             }
+            /* Revue #298 : le dommage est coupe a l'ecran, comme dans
+             * `recompose` : une fenetre plus large que l'ecran ne fait plus
+             * demander au noyau une lecture ou une presentation hors bornes
+             * (refusees, contenu visible perime). */
+            struct rect d = { f->x + dx, f->y + dy, dl, dh }, ecran = { 0, 0, ecran_l, ecran_h };
+            if (dl && dh && !intersecte(d, ecran, &d)) dl = 0;
             if (dl && dh) {
-                struct rect d = { f->x + dx, f->y + dy, dl, dh };
                 if (recouverte(i, d)) {
                     recompose(d);
                 } else {
@@ -988,6 +1000,7 @@ static int bureau(i64 affichage, u64 *pile)
                     if (presente_rect(d) < 0) continue;
                 }
             }
+            if (!nouvelles) continue;
             f->trames++; trames_total++;
             if (!premiere) {
                 premiere = 1; debut_ns = maintenant_ns();
@@ -1057,7 +1070,7 @@ static int bureau(i64 affichage, u64 *pile)
                     exige(hors < 0, "bureau : relance hors configuration refusee");
                     if (h > 0) {
                         struct fen *f = &fens[1];
-                        f->poignee = h; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0;
+                        f->poignee = h; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0; f->livrees = 0;
                         sys6(BO_WAITSET_ADD, (u64)attente, (u64)h, 2, 0, 0, 0);
                         vivantes++;
                         ecris("COMPOSITED_BUREAU_ETAPE relance fenetre=1\n");
