@@ -69,6 +69,10 @@ IF_AUTORISES = {
     "src/drivers/serial/uart16550.rs": "restauration d'un IF leve a l'entree",
     "src/kernel/memory/virtual.rs": "attente de quiescence en tache",
     COMMUTATION: "restauration du IF de la pile reprise, apres restauration irq_depth",
+    # P13_PASSATION_SOUS_IF_COUPE_V1 (#264) : switch_to coupe IF avant de
+    # publier la passation et ne le rouvre qu'apres complete_switch_handoff,
+    # et seulement s'il etait leve a l'entree (jamais depuis une IRQ).
+    ORDO: "switch_to : restauration d'un IF leve a l'entree, apres la passation",
     "src/kernel/process/thread/registre.rs": "restauration d'un IF leve a l'entree",
     "src/kernel/sync/spinlock.rs": "restauration d'un IF leve a la prise",
     "src/net/transport/tcp.rs": "attente en tache",
