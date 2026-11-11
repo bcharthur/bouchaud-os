@@ -34,6 +34,7 @@ DUREE=${3:-90}
 SCENARIO=scenario-crash-rendu
 IMAGE=ladybird-crash-rendu.img
 LOG=serie-crash-rendu.log
+MONITEUR=$PWD/moniteur-crash-rendu.sock
 rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$LOG.propre" fixture-crash-rendu.log
 
 python3 tools/health/browser_host_fixture.py > fixture-crash-rendu.log 2>&1 &
@@ -71,12 +72,14 @@ AUTORUN
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 : > "$LOG"
+rm -f "$MONITEUR"
 qemu-system-x86_64 \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$IMAGE" \
   -m 8192 -smp 4 -cpu max -display none -no-reboot \
   -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
+  -monitor "unix:$MONITEUR,server,nowait" \
   -serial file:"$LOG" &
 PID=$!
 DEBUT=$SECONDS
@@ -88,6 +91,11 @@ while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then verdict=echeance; break; fi
   sleep 3
 done
+# BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) : une VM encore vivante sans verdict
+# terminal est figee ; avant de la tuer, on lui demande qui attend quoi.
+if [ "$verdict" = echeance ] && kill -0 "$PID" 2>/dev/null; then
+  tools/ci/releve_fils_qemu.sh "$MONITEUR" "$LOG" 30 >&2
+fi
 sleep 3
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1

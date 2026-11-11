@@ -174,7 +174,8 @@ jobs:
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # 8 min pour le boot minimal, plus ~1 min pour le releve des fils.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - name: QEMU
@@ -186,11 +187,18 @@ jobs:
           path: image
       - name: Boot minimal
         run: tools/ci/run_qemu_smoke.sh image/bootimage-bouchaud-os.bin qemu-smoke.log
+      # BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) : l'outil que les bancs Ladybird
+      # utilisent sur une VM figee doit marcher AVANT d'en avoir besoin.
+      - name: Releve des fils par Alt+SysRq
+        if: always()
+        run: tools/ci/run_releve_fils_e2e.sh image/bootimage-bouchaud-os.bin releve-fils.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-qemu-smoke
-          path: qemu-smoke.log
+          path: |
+            qemu-smoke.log
+            releve-fils.log
           if-no-files-found: warn
 
   nvme-gpt:

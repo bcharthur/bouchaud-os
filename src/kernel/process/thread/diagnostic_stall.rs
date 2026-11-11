@@ -678,6 +678,11 @@ pub fn sert_diagnostic() {
     // d'un seul segment sous KVM SMP1, run 39479633757).
     publie_rapports_veille_avec(&mut || { point_cooperatif(&mut depuis); });
     point_cooperatif(&mut depuis);
+    // Avant le test de la demande de la sonde : le releve des fils ne depend
+    // pas d'elle.
+    if RELEVE_FILS_DEMANDE.swap(false, Ordering::AcqRel) {
+        publie_releve_fils(&mut depuis);
+    }
     let demande = DIAG_DEMANDE.swap(0, Ordering::AcqRel);
     if demande & (1u64 << 63) == 0 {
         return;
@@ -978,6 +983,59 @@ static RAISON_DUMP: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8:
 /// une fois par seconde. Poser un drapeau coute une ecriture atomique.
 pub fn demande_dump_ordonnancement(raison: RaisonDump) {
     RAISON_DUMP.fetch_max(raison as u8, Ordering::AcqRel);
+}
+
+// BOUCHAUD_SYSRQ_RELEVE_FILS_V1 (#283) -- QUI ATTEND QUOI, SUR DEMANDE
+//
+// Un demarrage de Ladybird se fige parfois apres le fork des rendus : le
+// noyau vit, le resume dit `bloquees=N`, et rien ne dit sur quoi. La fiche
+// forensique de chaque fil (attente, futex, syscall en cours, phase de poll)
+// existe deja ; seul le diagnostic distant la publiait, et il exige une image
+// tokenisee. Alt+SysRq (IRQ1, `drivers::sysrq`) pose ce drapeau ; le fil
+// diagnostique imprime l'etat complet a son prochain passage. Les demandes
+// repetees se fusionnent : un seul releve en attente a la fois.
+static RELEVE_FILS_DEMANDE: AtomicBool = AtomicBool::new(false);
+static RELEVES_FILS_PUBLIES: AtomicU64 = AtomicU64::new(0);
+
+/// Demande le releve complet des fils. Sur d'appel depuis une interruption :
+/// une ecriture atomique, rien d'autre.
+pub fn demande_releve_fils() {
+    RELEVE_FILS_DEMANDE.store(true, Ordering::Release);
+}
+
+fn publie_releve_fils(depuis: &mut u64) {
+    let now = crate::kernel::timer::monotonic_ns();
+    let numero = RELEVES_FILS_PUBLIES.fetch_add(1, Ordering::AcqRel) + 1;
+    let total = registre_longueur();
+    crate::serial_println!("[FIL-RELEVE] debut n={} t_ns={} emplacements={}", numero, now, total);
+    resume_ordonnancement();
+    signale_etat_ordonnancement(depuis);
+    let mut fils = 0usize;
+    for emplacement in 0..total {
+        point_cooperatif(depuis);
+        let Some(f) = forensic_thread(emplacement, now) else { continue };
+        if f.state == TaskState::Zombie {
+            continue;
+        }
+        fils += 1;
+        let nom = |nr: u64| if nr == FORENSIC_NO_SYSCALL { "none" } else { crate::kernel::abi::nr::name(nr) };
+        let (etape, indice, fd) = poll_detail_decode(f.poll_detail);
+        crate::serial_println!(
+            "[FIL-FORENSIQUE] pid={} tid={} etat={} on_cpu={} noyau={} attente={} cle={:#x} aux={:#x} \
+attente_ms={} file={:#x} futex={:#x} echeance_ns={} syscall={} syscall_ms={} a0={:#x} a1={:#x} a2={:#x} \
+poll={}/{}/{}/{} dernier={} res={} activite_ms={} pret_ms={} rip={:#x} commutations={}",
+            f.pid, f.tid,
+            forensic_state_name(f.state), f.on_cpu, f.in_kernel as u8,
+            forensic_wait_name(f.wait_kind), f.wait_key, f.wait_aux, f.wait_age_ns / 1_000_000,
+            f.wait_queue_key, f.futex_key, f.wake_deadline_ns,
+            nom(f.syscall_nr), f.syscall_age_ns / 1_000_000, f.arg0, f.arg1, f.arg2,
+            forensic_poll_name(f.poll_phase), etape, indice, fd,
+            nom(f.last_syscall_nr), f.last_syscall_result,
+            f.last_activity_age_ns / 1_000_000, f.ready_age_ns / 1_000_000,
+            f.user_rip, f.context_switches,
+        );
+    }
+    crate::serial_println!("[FIL-RELEVE] fin n={} fils={}", numero, fils);
 }
 
 fn nom_raison(code: u8, bloque: bool) -> &'static str {
