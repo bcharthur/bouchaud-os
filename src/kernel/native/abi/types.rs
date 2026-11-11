@@ -30,6 +30,9 @@ pub enum Error {
     TooLarge = 12,
     NotFound = 13,
     TimedOut = 14,
+    /// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 (ABI 1.3) : le peripherique a
+    /// refuse (presentation non affichee, relecture impossible).
+    DeviceError = 15,
 }
 
 impl Error {

@@ -72,6 +72,7 @@ typedef unsigned long      bo_usize;
 #define BO_E_TOO_LARGE         12
 #define BO_E_NOT_FOUND         13
 #define BO_E_TIMED_OUT         14
+#define BO_E_DEVICE            15
 
 /* Object kinds (bo_handle_info.kind). */
 #define BO_KIND_CHANNEL        1

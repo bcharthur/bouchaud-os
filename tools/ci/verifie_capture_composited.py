@@ -14,17 +14,23 @@ import sys
 
 def lit_ppm(chemin):
     with open(chemin, "rb") as f:
-        donnees = f.read()
+        return lit_ppm_octets(f.read())
+
+
+def lit_ppm_octets(donnees):
     champs, i = [], 0
     while len(champs) < 4:
         while donnees[i:i + 1].isspace():
             i += 1
+        if i >= len(donnees):
+            # Revue de la PR #286 : un en-tete tronque bouclait sans fin.
+            raise ValueError("en-tete PPM incomplet")
         if donnees[i:i + 1] == b"#":
             while donnees[i:i + 1] not in (b"\n", b""):
                 i += 1
             continue
         j = i
-        while not donnees[j:j + 1].isspace():
+        while j < len(donnees) and not donnees[j:j + 1].isspace():
             j += 1
         champs.append(donnees[i:j])
         i = j

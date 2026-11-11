@@ -21,7 +21,8 @@ ERRORS = {'InvalidCall': 'INVALID_CALL', 'InvalidArgument': 'INVALID_ARGUMENT',
           'AccessDenied': 'ACCESS_DENIED', 'WouldBlock': 'WOULD_BLOCK',
           'BufferTooSmall': 'BUFFER_TOO_SMALL', 'QueueFull': 'QUEUE_FULL',
           'PeerClosed': 'PEER_CLOSED', 'NoSpace': 'NO_SPACE', 'Fault': 'FAULT',
-          'TooLarge': 'TOO_LARGE', 'NotFound': 'NOT_FOUND', 'TimedOut': 'TIMED_OUT'}
+          'TooLarge': 'TOO_LARGE', 'NotFound': 'NOT_FOUND', 'TimedOut': 'TIMED_OUT',
+          'DeviceError': 'DEVICE'}
 KINDS = {'Channel': 'CHANNEL', 'Event': 'EVENT', 'WaitSet': 'WAITSET', 'Update': 'UPDATE', 'Display': 'DISPLAY',
          'SharedRegion': 'SHARED_REGION', 'Process': 'PROCESS'}
 

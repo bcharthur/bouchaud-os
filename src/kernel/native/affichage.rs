@@ -107,11 +107,19 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
     if BUREAU_NOYAU.load(Ordering::Acquire) {
         return Err(refuse(Error::WouldBlock, "bureau-noyau"));
     }
+    let deja_graphique = crate::drivers::gfx::is_active();
     crate::drivers::gfx::entre_si_inactif();
     if !crate::drivers::gfx::is_active() {
         return Err(refuse(Error::NotFound, "pas-d-ecran"));
     }
-    ECRAN_AU_COMPOSITEUR.store(true, Ordering::Release);
+    // Revue de la PR #286 : l'ecran n'est au compositeur qu'une fois la
+    // demande ACCEPTEE ; un refus rend le mode texte si cet appel l'avait quitte.
+    let rend = |e| {
+        if !deja_graphique && !ECRAN_AU_COMPOSITEUR.load(Ordering::Acquire) {
+            crate::drivers::gfx::leave();
+        }
+        e
+    };
     let (el, eh) = (crate::drivers::gfx::width() as u32, crate::drivers::gfx::height() as u32);
     contrat::valide(&d, region.len(), el, eh).map_err(|r| {
         let raison = match r {
@@ -121,8 +129,9 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
             contrat::Refus::HorsSurface => "hors-surface",
             contrat::Refus::HorsEcran => "hors-ecran",
         };
-        refuse(Error::InvalidArgument, raison)
+        rend(refuse(Error::InvalidArgument, raison))
     })?;
+    ECRAN_AU_COMPOSITEUR.store(true, Ordering::Release);
     // 5. Pose, ligne a ligne, puis presentation du seul rectangle.
     for r in 0..d.h {
         let ligne = region.read(d.decalage_ligne(r), d.l as usize * 4)?;
@@ -132,11 +141,24 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
             *px = u32::from_le_bytes([ligne[o], ligne[o + 1], ligne[o + 2], ligne[o + 3]]) & 0x00ff_ffff;
         }
     }
-    crate::drivers::gfx::present_rect(d.dest_x as usize, d.dest_y as usize, d.l as usize, d.h as usize);
-    // 6. Relecture de ce qui est a l'ecran : l'empreinte rendue au client.
-    let e = contrat::empreinte((0..d.h).flat_map(|r| {
-        (0..d.l).map(move |c| crate::drivers::gfx::get_pixel_rgb((d.dest_x + c) as usize, (d.dest_y + r) as usize))
+    // Presentation JUGEE : un refus du peripherique (transfert ou flush virtio,
+    // LFB absent...) est rendu au client, jamais une empreinte du tampon arriere.
+    if let Err(raison) = crate::drivers::gfx::present_rect_verifie(
+        d.dest_x as usize, d.dest_y as usize, d.l as usize, d.h as usize) {
+        return Err(refuse(Error::DeviceError, raison));
+    }
+    // 6. Relecture du tampon AFFICHE (pas du tampon arriere) : l'empreinte
+    // rendue au client est celle de ce que l'ecran montre.
+    let mut illisible = false;
+    let e = contrat::empreinte((0..d.h).flat_map(|r| (0..d.l).map(move |c| (c, r))).map(|(c, r)| {
+        crate::drivers::gfx::pixel_affiche((d.dest_x + c) as usize, (d.dest_y + r) as usize).unwrap_or_else(|| {
+            illisible = true;
+            0
+        })
     }));
+    if illisible {
+        return Err(refuse(Error::DeviceError, "relecture"));
+    }
     let n = PRESENTATIONS.fetch_add(1, Ordering::Relaxed) + 1;
     crate::serial_println!(
         "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={}",
