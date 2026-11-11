@@ -81,7 +81,8 @@ for ((c = 1; c <= CYCLES; c++)); do
   verdict=ok
   # Oracle valid only with a synchronous console (#288): the switch must be
   # on record BEFORE the read-back line.
-  if ! propre | sed -n '/COUPURE_RELU/q;p' | grep -aq 'BOUCHAUD_CONSOLE_BILAN active=0'; then
+  # awk lit TOUT le journal (aucun lecteur tronquant sous pipefail).
+  if ! propre | awk '/COUPURE_RELU/ { relu = 1 } !relu && /BOUCHAUD_CONSOLE_BILAN active=0/ { sync = 1 } END { exit !sync }'; then
     asynchrones=$((asynchrones + 1)); verdict=ASYNC
   fi
   if [ "$coh" != 1 ]; then incoherences=$((incoherences + 1)); verdict=INCOHERENT; fi
