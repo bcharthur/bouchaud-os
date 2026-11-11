@@ -29,6 +29,15 @@ pub mod display;
 /// BOUCHAUD_VIRTIO_PCI_V1 : transport virtio-PCI moderne et premier aller-retour virtio-gpu (P10).
 #[path = "display/virtio_gpu.rs"]
 pub mod virtio_gpu;
+/// BOUCHAUD_P10_VIRGL_3D_20261109: real 3D control protocol, opt-in only.
+#[path = "display/virtio_gpu_3d.rs"]
+pub mod virtio_gpu_3d;
+// BOUCHAUD_P10_VIRGL_VULKAN_BRIDGE_20261109: vrai paquet BLIT Gallium.
+#[path = "display/p10_virgl_composition.rs"]
+pub mod p10_virgl_composition;
+/// BOUCHAUD_GPU_COMPOSITION_V2 (P10) : decoupe et commandes du compositeur GPU (pur, teste sur l'hote).
+#[path = "display/composition_gpu.rs"]
+pub mod composition_gpu;
 /// BOUCHAUD_VIRTIO_GPU_2D_V1 : qui presente le bureau (GOP > BGA > virtio-gpu 2D), pur et teste sur l'hote.
 #[path = "display/virtio_gpu_dma.rs"]
 pub mod virtio_gpu_dma;

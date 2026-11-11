@@ -3,8 +3,11 @@
 
 Premier composant de P10 (docs/ladybird/P10_GPU_AUDIT.md). Regles :
 
-  1. une seule fonctionnalite retenue, VIRTIO_F_VERSION_1 -- accepter VIRGL,
-     BLOB ou EVENT_IDX sans les servir serait mentir au peripherique ;
+  1. les fonctionnalites retenues sont VIRTIO_F_VERSION_1, plus VIRGL
+     SEULEMENT si l'hote le propose (`gpu3d::negotiated_features`), parce que
+     le pilote le SERT (contexte 3D, autotest de BLIT, compositeur GPU,
+     BOUCHAUD_GPU_COMPOSITION_V2) ; accepter BLOB, EDID ou EVENT_IDX sans les
+     servir serait mentir au peripherique ;
   2. FEATURES_OK est RELU apres ecriture (le peripherique peut refuser) ;
   3. chaque attente est bornee : `attente_bornee` (reset) et
      `attente_reponse` (controlq), seule `loop` autorisee, qui porte la borne
@@ -79,10 +82,13 @@ def corps(texte: str, nom: str) -> str:
     return ""
 
 
-def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "") -> list:
+def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "", trois_d: str = "") -> list:
     fautes = []
-    if not re.search(r"let retenues = VERSION_1;", s):
-        fautes.append("virtio_gpu.rs : les fonctionnalites retenues ne sont plus VERSION_1 seule.")
+    if not re.search(r"let retenues = gpu3d::negotiated_features\(proposees, true\);", s) \
+            or len(re.findall(r"let retenues\b", s)) != 1:
+        fautes.append("virtio_gpu.rs : les fonctionnalites retenues ne sont plus VERSION_1 (+ VIRGL propose et servi).")
+    if trois_d and not re.search(r"F_VERSION_1 \| if opt_in && offered & F_VIRGL != 0 \{ F_VIRGL \} else \{ 0 \}", trois_d):
+        fautes.append("virtio_gpu_3d.rs : negotiated_features retient autre chose que VERSION_1 et VIRGL propose.")
     if "l8(DEVICE_STATUS) & FEATURES_OK == 0" not in s:
         fautes.append("virtio_gpu.rs : FEATURES_OK n'est plus relu apres negociation.")
     if "attente_bornee(1000, || commune.l8(DEVICE_STATUS) == 0)" not in s:
@@ -188,13 +194,20 @@ def main() -> int:
     banc = BANC.read_text(encoding="utf-8") if BANC.is_file() else ""
     cargo = CARGO.read_text(encoding="utf-8")
     flux = FLUX.read_text(encoding="utf-8")
-    fautes = verifie(s, readme, banc, cargo, flux)
+    trois_d = (SOURCE.parent / "virtio_gpu_3d.rs").read_text(encoding="utf-8")
+    fautes = verifie(s, readme, banc, cargo, flux, trois_d)
     if fautes:
         print("virtio-PCI : regle violee")
         for f in fautes:
             print("  " + f)
         return 1
     negatifs = [
+        # retenir VIRGL sans condition (meme si l'hote ne le propose pas)
+        ("let retenues = gpu3d::negotiated_features(proposees, true);",
+         "let retenues = VERSION_1 | gpu3d::F_VIRGL;"),
+        # une seconde negociation qui retiendrait autre chose
+        ("let retenues = gpu3d::negotiated_features(proposees, true);",
+         "let retenues = gpu3d::negotiated_features(proposees, true);\n        let retenues = proposees;"),
         # rendre la memoire sur le seul « jamais attachee » (le defaut)
         ("if dma::peut_rendre(*m) {", "if *m != Memoire::Attachee {"),
         # retirer la borne datee de l'attente de reponse
@@ -245,20 +258,23 @@ def main() -> int:
 
     for n, (a, b) in enumerate(negatifs, 1):
         m = mute(a, b)
-        if m is None or not verifie(m, readme, banc, cargo, flux):
+        if m is None or not verifie(m, readme, banc, cargo, flux, trois_d):
             print(f"virtio-PCI : le test negatif {n} ne rougit pas -- garde inoperant")
             return 1
     autres = [
-        ("Cargo.toml", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION + '"]', 1), flux)),
-        ("os-primitives.yml", lambda: verifie(s, readme, banc, cargo, flux.replace("BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh", "true", 1))),
-        ("Cargo.toml (etrangere)", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION_ETRANGERE + '"]', 1), flux)),
-        ("os-primitives.yml (etrangere)", lambda: verifie(s, readme, banc, cargo, flux.replace("BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh", "true", 1))),
+        ("virtio_gpu_3d.rs (BLOB retenu)", lambda: verifie(s, readme, banc, cargo, flux, trois_d.replace(
+            "F_VERSION_1 | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }",
+            "F_VERSION_1 | (offered & (1 << 3)) | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }", 1))),
+        ("Cargo.toml", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION + '"]', 1), flux, trois_d)),
+        ("os-primitives.yml", lambda: verifie(s, readme, banc, cargo, flux.replace("BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh", "true", 1), trois_d)),
+        ("Cargo.toml (etrangere)", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION_ETRANGERE + '"]', 1), flux, trois_d)),
+        ("os-primitives.yml (etrangere)", lambda: verifie(s, readme, banc, cargo, flux.replace("BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh", "true", 1), trois_d)),
     ]
     for nom, f in autres:
         if not f():
             print(f"virtio-PCI : la mutation de {nom} ne rougit pas -- garde inoperant")
             return 1
-    print(f"[OK] virtio-PCI : VERSION_1 seule, FEATURES_OK relu, attentes bornees, DMA rendue seulement si sure, "
+    print(f"[OK] virtio-PCI : VERSION_1 (+ VIRGL propose et servi), FEATURES_OK relu, attentes bornees, DMA rendue seulement si sure, "
           f"verrou dormant, barriere sur chaque commande et reponse jugee, une seule commande en vol, "
           f"injections confinees et passees en CI, P10 non pretendu (negatifs={len(negatifs) + len(autres)})")
     return 0

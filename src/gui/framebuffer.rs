@@ -15,9 +15,11 @@ pub use crate::drivers::gfx::{
     note_pixels_dessines,
     dernier_present_rect, lfb_present_generation, trace_present,
     debit_framebuffer_mio_s,
-    debut_trame, fin_trame,
+    debut_trame, fin_trame, trame_possible,
     height, width,
     HEIGHT, WIDTH,
     C_BLACK, C_BLUE, C_CYAN, C_DKGRAY, C_GRAY, C_GREEN, C_RED, C_TITLE,
     C_WHITE, C_YELLOW,
 };
+
+pub use crate::drivers::gfx::fin_trame_gpu;

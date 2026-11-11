@@ -33,6 +33,7 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, Atom
 
 use crate::arch::x86_64::pci::{self, Bar, PciDevice};
 use crate::drivers::virtio_gpu_dma::{self as dma, Memoire};
+use crate::drivers::virtio_gpu_3d as gpu3d;
 use crate::drivers::virtio_gpu_file as file;
 use crate::drivers::virtio_gpu_irq::{self as irq, Reveil, Strategie};
 use crate::drivers::virtio_gpu_tampons as tampons;
@@ -129,7 +130,7 @@ struct Capacites {
     commune: Option<usize>,
     notification: Option<(usize, u32)>,
     isr: bool,
-    peripherique: bool,
+    peripherique: Option<usize>,
     /// BOUCHAUD_VIRTIO_GPU_IRQ_V1 : decalage de la capacite MSI-X.
     msix: Option<u8>,
 }
@@ -148,7 +149,7 @@ fn adresse(dev: &PciDevice, bar: u8, decalage: u32) -> Option<usize> {
 }
 
 fn capacites(dev: &PciDevice) -> Capacites {
-    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: false, msix: None };
+    let mut c = Capacites { commune: None, notification: None, isr: false, peripherique: None, msix: None };
     let mut liste = [pci::Capacite { identifiant: 0, decalage: 0 }; 16];
     let n = pci::capacites_de(dev, &mut liste);
     for cap in &liste[..n] {
@@ -171,7 +172,7 @@ fn capacites(dev: &PciDevice) -> Capacites {
                 c.notification = adresse(dev, bar, decalage).map(|a| (a, multiplicateur));
             }
             CFG_ISR => c.isr = true,
-            CFG_PERIPHERIQUE => c.peripherique = true,
+            CFG_PERIPHERIQUE => c.peripherique = adresse(dev, bar, decalage),
             _ => {}
         }
     }
@@ -203,7 +204,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
     crate::serial_println!(
         "VIRTIO_PCI peripherique={:04x}:{:04x} bus={:02x}:{:02x}.{} commune={} notification={} isr={} config={}",
         dev.vendor, dev.device, dev.bus, dev.slot, dev.func,
-        c.commune.is_some() as u8, c.notification.is_some() as u8, c.isr as u8, c.peripherique as u8,
+        c.commune.is_some() as u8, c.notification.is_some() as u8, c.isr as u8, c.peripherique.is_some() as u8,
     );
     let commune = Region { base: c.commune.ok_or("capacite-commune-absente")? };
     let (notification, multiplicateur) = c.notification.ok_or("capacite-notification-absente")?;
@@ -230,7 +231,9 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             commune.e8(DEVICE_STATUS, ECHEC);
             return Err("version-1-non-proposee");
         }
-        let retenues = VERSION_1;
+        // BOUCHAUD_P10_VIRGL_3D_20261109 : genuine VIRGL negotiation is
+        // feature-gated and always conditional on host advertisement.
+        let retenues = gpu3d::negotiated_features(proposees, true);
         commune.e32(DRIVER_FEATURE_SELECT, 0);
         commune.e32(DRIVER_FEATURE, retenues as u32);
         commune.e32(DRIVER_FEATURE_SELECT, 1);
@@ -307,6 +310,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             dernier_util: 0,
             cassee: false,
             barriere: 0,
+            derniere_reponse_len: 0,
+            chaine: None,
         };
         let _ = (desc_p, dispo_p, util_p);
 
@@ -351,8 +356,15 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         // sa memoire, le scanout, un transfert, une presentation, puis les
         // refus attendus. Il tourne que BGA soit la ou non : il n'ecrit que
         // sur l'ecran virtio-gpu, jamais sur BGA.
-        let autotest = autotest_2d(&mut file);
-        let autotest_ok = autotest.is_ok();
+        // BOUCHAUD_P10_VIRGL_SCANOUT_FIX_20261109
+        // VIRGL GL peut accepter un format 2D invalide que virtio-gpu 2D
+        // classique refuse. Ne pas utiliser ce test negatif comme prealable
+        // a un scanout 2D deja valide positivement par transfert + flush.
+        // Seul le VIRGL effectivement negocie beneficie de cette exception.
+        let compat_virgl = retenues & gpu3d::F_VIRGL != 0;
+        let autotest = autotest_2d(&mut file, compat_virgl);
+        #[allow(unused_mut)]
+        let mut autotest_ok = autotest.is_ok();
         let mire = match autotest {
             Ok(m) => {
                 crate::serial_println!("BOUCHAUD_VIRTIO_GPU_2D_AUTOTEST_OK");
@@ -363,6 +375,36 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 None
             }
         };
+        // P10+.4: probe the 3D backend *after* the existing 2D autotest.
+        // No raw shader/command bytes from userland. A lost fence breaks the
+        // queue; 2D is then disabled, never reused with a stale response.
+        let p10_virgl = if retenues & gpu3d::F_VIRGL == 0 {
+            crate::serial_println!("P10_GPU_3D etat=absent raison=host-sans-virgl");
+            None
+        } else {
+            let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
+            match p10_probe_3d(&mut file, capsets) {
+                Ok(info) => {
+                    match calibre_convention(&mut file) {
+                        Ok(conv) => {
+                            CONVENTION.store(if conv == cg::Convention::Brut { 1 } else { 2 }, Ordering::Release);
+                            P10_VIRGL_PRET.store(true, Ordering::Release);
+                            crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK convention={:?} blit_gpu=8x3 relu_au_pixel=64/64", conv);
+                        }
+                        Err(cause) => crate::serial_println!("GPU_COMPOSITION_AUTOTEST_ECHEC raison={} file_cassee={} (compositeur GPU desactive)", cause, file.cassee as u8),
+                    }
+                    crate::serial_println!("P10_GPU_3D_OK capset={} version={} taille={} contexte={} ressource={} taille_px={}x{}",
+                        info.id, info.version, info.size, gpu3d::CONTEXT_ID,
+                        gpu3d::RESOURCE_ID, gpu3d::RESOURCE_DIM, gpu3d::RESOURCE_DIM);
+                    Some(info)
+                }
+                Err(cause) => {
+                    crate::serial_println!("P10_GPU_3D etat=non-valide cause={} file_cassee={}", cause, file.cassee as u8);
+                    None
+                }
+            }
+        };
+        if file.cassee { autotest_ok = false; }
         match verrou() {
             Some(mut garde) => {
                 *garde = Some(Peripherique {
@@ -371,6 +413,10 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     autotest_ok,
                     scanout: None,
                     mire,
+                    p10_virgl,
+                    textures: [None; cg::TEXTURES_MAX],
+                    bureau_attache: false,
+                    entrees: None,
                 });
             }
             // Impossible au demarrage (personne d'autre ne le tient) ; si
@@ -396,6 +442,126 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 // interruptions (tout est scrute et borne). virtio-gpu (QEMU) n'est pas le GPU
 // de la Trigkey.
 
+// BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
+// The display path is still software raster + virtio-gpu 2D.
+unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
+    if count == 0 { return Err("aucun-capset"); }
+    let mut selected: Option<gpu3d::CapsetInfo> = None;
+    for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
+        let req = gpu3d::get_capset_info(idx);
+        if f.commande(&req, 40)? != gpu3d::RESP_OK_CAPSET_INFO {
+            return Err("capset-info-refuse");
+        }
+        if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
+        let raw = core::slice::from_raw_parts(f.reponse(), 40);
+        let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
+        if gpu3d::supported(info) {
+            if info.id == gpu3d::CAPSET_VIRGL2 {
+                selected = Some(info);
+                break;
+            }
+            if selected.is_none() { selected = Some(info); }
+        }
+    }
+    let info = selected.ok_or("virgl-capset-absent")?;
+    let mut ctx_created = false;
+    let mut resource_created = false;
+    let mut attached = false;
+    // Each command is fenced; all dependencies are strictly sequential.
+    let result = (|| -> Result<(), &'static str> {
+        if f.commande(&gpu3d::ctx_create(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("ctx-create-refuse");
+        }
+        ctx_created = true;
+        if f.commande(&gpu3d::resource_create(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("resource-create-3d-refuse");
+        }
+        resource_created = true;
+        if f.commande(&gpu3d::resource_attach(), ENTETE)? != gpu3d::RESP_OK_NODATA {
+            return Err("ctx-attach-refuse");
+        }
+        attached = true;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        // Never issue another command after a missing/invalid response.
+        if !f.cassee {
+            if attached { let _ = f.commande(&gpu3d::resource_detach(), ENTETE); }
+            if resource_created && !f.cassee { let _ = f.commande(&gpu3d::resource_unref(), ENTETE); }
+            if ctx_created && !f.cassee { let _ = f.commande(&gpu3d::ctx_destroy(), ENTETE); }
+        }
+        return Err(e);
+    }
+    Ok(info)
+}
+
+/// A real kernel-only VIRGL command submission entry point. No ring3 uAPI.
+/// The context and 3D texture remain owned by the GPU driver.
+// BOUCHAUD_P10_VIRGL_VULKAN_BRIDGE_20261109
+// Compose deux ressources GPU deja CREEES et ATTACHEES au contexte.
+// C'est un vrai submit_3d VIRGL, pas un memcpy CPU.
+// Le pilote doit gerer leur cycle de vie et le scanout avant usage.
+pub fn p10_virgl_blit_ressources(
+    source: crate::drivers::p10_virgl_composition::ImageRegion,
+    cible: crate::drivers::p10_virgl_composition::ImageRegion,
+    alpha: bool,
+) -> Result<(), &'static str> {
+    if !p10_virgl_pret() { return Err("gpu-3d-absent"); }
+    let commande = crate::drivers::p10_virgl_composition::blit(source, cible, alpha)
+        .map_err(|_| "rectangle-invalide")?;
+    p10_soumet_virgl_noyau(&commande)
+}
+
+// BOUCHAUD_P10_SCENE_BLIT_V2_20261109
+// Vraie commande GPU: encode la scene puis soumet des lots VIRGL ordonnes.
+// Les ressources ont ete creees, attachees au contexte P10 et verifiees par
+// le gestionnaire. Cette primitive n'expose AUCUN acces GPU brut au ring3.
+// IMPORTANT: ceci NE cree pas encore les textures des fenetres Atelier.
+pub fn p10_virgl_compose_scene(
+    calques: &[crate::drivers::p10_virgl_composition::Calque],
+) -> Result<(), &'static str> {
+    use crate::drivers::p10_virgl_composition as gpu;
+    if calques.is_empty() || calques.len() > gpu::MAX_LAYERS {
+        return Err("scene-vide-ou-trop-grande");
+    }
+    if !p10_virgl_pret() { return Err("gpu-3d-absent"); }
+    // Valide l'integralite avant le premier lot (aucune composition partielle
+    // sur des rectangles invalides).
+    for calque in calques {
+        gpu::valide_calque(*calque).map_err(|_| "calque-invalide")?;
+    }
+    // REQUETE_MAX = 2048 et SUBMIT_3D utilise un header de 32 octets.
+    // 20 BLIT par lot = 1760 octets, pas d'ecrasement du tampon DMA.
+    for lot in calques.chunks(20) {
+        let mut commandes = [0u8; 20 * gpu::VIRGL_BLIT_BYTES];
+        let taille = gpu::encode_scene(lot, &mut commandes).map_err(|_| "scene-invalide")?;
+        p10_soumet_virgl_noyau(&commandes[..taille])?;
+    }
+    Ok(())
+}
+
+pub fn p10_soumet_virgl_noyau(commands: &[u8]) -> Result<(), &'static str> {
+    let hdr = gpu3d::submit_header(commands.len()).ok_or("commandes-virgl-invalides")?;
+    let mut q = [0u8; REQUETE_MAX];
+    q[..32].copy_from_slice(&hdr);
+    q[32..32 + commands.len()].copy_from_slice(commands);
+    let mut guard = verrou().ok_or("gpu-verrou-occupe")?;
+    let p = guard.as_mut().ok_or("gpu-absent")?;
+    if p.p10_virgl.is_none() || p.file.cassee { return Err("gpu-3d-indisponible"); }
+    let result = unsafe { p.file.commande(&q[..32 + commands.len()], ENTETE) };
+    if result != Ok(gpu3d::RESP_OK_NODATA) {
+        p.p10_virgl = None;
+        P10_VIRGL_PRET.store(false, Ordering::Release);
+        return Err("submit-3d-refuse");
+    }
+    Ok(())
+}
+
+pub fn p10_virgl_pret() -> bool {
+    let Some(guard) = verrou() else { return false };
+    guard.as_ref().map(|p| p.p10_virgl.is_some() && !p.file.cassee).unwrap_or(false)
+}
+
 /// La file de controle, une commande a la fois.
 struct FileControle {
     sonnette: usize,
@@ -420,6 +586,10 @@ struct FileControle {
     /// BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : le dernier `fence_id` envoye. Chaque
     /// commande en porte un nouveau ; sa reponse doit le rendre.
     barriere: u64,
+    /// Actual virtq used.len; required for safe decoding of 3D replies.
+    derniere_reponse_len: u32,
+    /// Descripteur de donnees de la PROCHAINE commande (pris par `commande`).
+    chaine: Option<(u64, u32)>,
 }
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
@@ -438,14 +608,18 @@ impl FileControle {
     /// pour inconnue).
     unsafe fn commande(&mut self, requete: &[u8], longueur_reponse: usize) -> Result<u32, &'static str> {
         if self.cassee {
+            self.chaine = None;
             return Err("file-sans-reponse");
         }
         if requete.len() > REQUETE_MAX || longueur_reponse > PAGE - REPONSE {
+            self.chaine = None;
             return Err("commande-trop-longue");
         }
         if requete.len() < file::ENTETE as usize || longueur_reponse < file::ENTETE as usize {
             return Err("commande-trop-courte");
         }
+        { self.derniere_reponse_len = 0; }
+        let t_commande = crate::kernel::timer::monotonic_ns();
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
         self.barriere = self.barriere.wrapping_add(1);
@@ -459,8 +633,20 @@ impl FileControle {
             write_volatile(d.add(12) as *mut u16, drapeaux);
             write_volatile(d.add(14) as *mut u16, suivant);
         };
-        pose(0, self.tampon_p, requete.len() as u32, DESC_SUIVANT, 1);
-        pose(1, self.tampon_p + REPONSE as u64, longueur_reponse as u32, DESC_ECRIT_PAR_LE_PERIPHERIQUE, 0);
+        // BOUCHAUD_GPU_COMPOSITION_V2 : des donnees deja en memoire DMA (la
+        // liste des pages d'une texture) peuvent suivre l'en-tete dans un
+        // descripteur a part -- toujours UNE commande, une sonnette, jugee.
+        match self.chaine.take() {
+            Some((donnees_p, donnees_len)) => {
+                pose(0, self.tampon_p, requete.len() as u32, DESC_SUIVANT, 1);
+                pose(1, donnees_p, donnees_len, DESC_SUIVANT, 2);
+                pose(2, self.tampon_p + REPONSE as u64, longueur_reponse as u32, DESC_ECRIT_PAR_LE_PERIPHERIQUE, 0);
+            }
+            None => {
+                pose(0, self.tampon_p, requete.len() as u32, DESC_SUIVANT, 1);
+                pose(1, self.tampon_p + REPONSE as u64, longueur_reponse as u32, DESC_ECRIT_PAR_LE_PERIPHERIQUE, 0);
+            }
+        }
         // Anneau disponible : flags u16, idx u16, ring[taille] u16.
         let dispo = self.dispo as *mut u16;
         let case = (self.prochain_dispo % self.taille) as usize;
@@ -520,12 +706,26 @@ impl FileControle {
             );
             return Err(dma::REPONSE_INVALIDE);
         }
+        { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
+        // BOUCHAUD_GPU_ATTRIBUTION_V1 : duree de l'aller-retour, par genre.
+        HISTO_COMMANDES[indice_commande(lit_genre(requete))]
+            .note(crate::kernel::timer::monotonic_ns().saturating_sub(t_commande));
         Ok(genre)
     }
 
     fn reponse(&self) -> *const u8 {
         (self.tampon_v + REPONSE) as *const u8
+    }
+
+    /// BOUCHAUD_GPU_COMPOSITION_V2 : `commande` dont la requete est suivie
+    /// de `donnees_len` octets deja en memoire DMA (descripteur a part).
+    unsafe fn commande_chainee(&mut self, entete: &[u8], donnees_p: u64, donnees_len: u32, longueur_reponse: usize) -> Result<u32, &'static str> {
+        if donnees_len == 0 || donnees_p == 0 {
+            return Err("commande-chainee-invalide");
+        }
+        self.chaine = Some((donnees_p, donnees_len));
+        self.commande(entete, longueur_reponse)
     }
 }
 
@@ -651,13 +851,13 @@ const MIRE_COTE: u32 = 64;
 /// presenter, puis detacher et detruire. Negatif : chaque refus attendu doit
 /// revenir avec SON code -- un peripherique qui accepterait tout ne prouverait
 /// rien, et un pilote qui confondrait les erreurs non plus.
-unsafe fn autotest_2d(f: &mut FileControle) -> Result<MireTenue, &'static str> {
+unsafe fn autotest_2d(f: &mut FileControle, compat_virgl: bool) -> Result<MireTenue, &'static str> {
     let cote = MIRE_COTE;
     let octets = (cote * cote * 4) as usize;
     let (phys, virt) = memory::alloc_dma(octets).ok_or("dma-mire")?;
     // BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : qui peut encore toucher cette memoire.
     let mut memoire = Memoire::NonAttachee;
-    match autotest_2d_etapes(f, phys, virt, octets, &mut memoire) {
+    match autotest_2d_etapes(f, phys, virt, octets, &mut memoire, compat_virgl) {
         Ok(()) => Ok(MireTenue { physique: phys, octets, memoire }),
         Err(e) => {
             rend_si_sur(f, RESSOURCE_ESSAI, phys, octets, &mut memoire, "mire");
@@ -697,6 +897,7 @@ unsafe fn autotest_2d_etapes(
     virt: *mut u8,
     octets: usize,
     m: &mut Memoire,
+    compat_virgl: bool,
 ) -> Result<(), &'static str> {
     let cote = MIRE_COTE;
     let px = virt as *mut u32;
@@ -716,6 +917,12 @@ unsafe fn autotest_2d_etapes(
     exige("flush", suivie(m, vide(f, RESSOURCE_ESSAI, tout)), RESP_OK_NODATA)?;
     crate::serial_println!("VIRTIO_GPU_2D positif creation+attache+scanout+transfert+flush ok ressource={} {}x{}", RESSOURCE_ESSAI, cote, cote);
 
+    // Le mode 2D classique conserve EXACTEMENT les sept epreuves
+    // negatives. Sur le transport VIRGL/GL, QEMU peut accepter un format
+    // invalide (0x1100 au lieu de 0x1205), ce qui avait desactive le scanout
+    // et laisse la mire R/V/B/Blanche bloquee. Ne pas envoyer de commandes
+    // intentionnellement invalides sur un hote GL deja verifie positivement.
+    if !compat_virgl {
     // Les refus : chacun avec son code.
     let mut negatifs = 0;
     exige("negatif-format", suivie(m, cree_2d(f, 0x0BAD, 0, 8, 8)), RESP_ERR_INVALID_PARAMETER)?;
@@ -734,6 +941,11 @@ unsafe fn autotest_2d_etapes(
     exige("negatif-rect-hors-limites", suivie(m, transfert(f, RESSOURCE_ESSAI, debordant, 0)), RESP_ERR_INVALID_PARAMETER)?;
     negatifs += 1;
     crate::serial_println!("VIRTIO_GPU_2D negatifs refuses_avec_le_bon_code={}", negatifs);
+    } else {
+        crate::serial_println!(
+            "P10_GPU_2D_VIRGL_COMPAT positif=5/5 controles_negatifs=non-executes mode=virgl-experimental"
+        );
+    }
 
     // La mire RESTE a l'ecran : c'est elle que le banc capture (screendump
     // de la tete virtio-gpu) et compare pixel a pixel. Retirer le scanout ici
@@ -770,6 +982,12 @@ struct Peripherique {
     scanout: Option<ScanoutBureau>,
     /// La mire de l'autotest, a l'ecran tant que le bureau ne l'a pas pris.
     mire: Option<MireTenue>,
+    p10_virgl: Option<gpu3d::CapsetInfo>,
+    // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
+    // scanout attachee au contexte, liste DMA des pages (une fois).
+    textures: [Option<TextureFenetre>; cg::TEXTURES_MAX],
+    bureau_attache: bool,
+    entrees: Option<(u64, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1563,4 +1781,535 @@ pub fn compteurs() -> (u64, u64, u64, u64) {
         PIXELS_TRANSFERES.load(Ordering::Relaxed),
         NS_PRESENT.load(Ordering::Relaxed),
     )
+}
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_GPU_COMPOSITION_V2 (P10) -- le compositeur GPU des fenetres
+// ---------------------------------------------------------------------------
+//
+// Une TEXTURE VIRGL par surface cliente, adossee aux PROPRES PAGES de la
+// surface (aucune copie dans un tampon intermediaire). Par trame :
+//
+//   1. transferts 2D des rectangles du BUREAU abimes (CPU, composition directe) ;
+//   2. pour chaque fenetre composee par le GPU, TRANSFER_TO_HOST_3D de son
+//      seul rectangle abime -- c'est l'hote qui lit les pages du client ;
+//   3. UN SUBMIT_3D : un BLIT par morceau visible de chaque fenetre, de sa
+//      texture vers la ressource du scanout -- execute par le GPU de l'hote ;
+//   4. UN flush.
+//
+// Le processeur invite ne copie plus aucun pixel client : il ne peint que le
+// bureau, et seulement ce qui change. La surface reste ouverte (reference
+// `partage`) tant que la texture la tient : ses pages ne peuvent pas etre
+// rendues pendant que l'hote peut encore les lire.
+
+use crate::drivers::composition_gpu as cg;
+
+#[derive(Clone, Copy)]
+struct TextureFenetre {
+    id: u32,
+    noeud: usize,
+    largeur: u32,
+    hauteur: u32,
+    /// Trame de derniere utilisation (choix de l'emplacement a reprendre).
+    utilisee: u64,
+}
+
+/// Une fenetre a composer par le GPU dans cette trame.
+pub struct CoucheGpu<'a> {
+    /// Nœud de la surface : l'identite de la texture.
+    pub noeud: usize,
+    /// Pages physiques de la surface, dans l'ordre.
+    pub frames: &'a [u64],
+    pub largeur: u32,
+    pub hauteur: u32,
+    pub pas: u32,
+    /// Octets d'UN tampon ; le tampon `face` commence a `face * octets`.
+    pub octets: u32,
+    pub tampons: u32,
+    pub face: u32,
+    /// Ce que le client a peint depuis la trame precedente (coordonnees de la
+    /// surface). Vide : la texture est a jour.
+    pub sale: cg::R,
+    /// Position a l'ecran du pixel (0, 0) de la surface.
+    pub origine: (i32, i32),
+    /// Morceaux VISIBLES (ecran) : ce que le GPU pose.
+    pub visibles: &'a [cg::R],
+}
+
+static COMPOSITION_INVALIDE: AtomicBool = AtomicBool::new(false);
+static COMPOSITION_VOULUE: AtomicBool = AtomicBool::new(true);
+static GPU_TRAMES: AtomicU64 = AtomicU64::new(0);
+static GPU_BLITS: AtomicU64 = AtomicU64::new(0);
+static GPU_PIXELS_POSES: AtomicU64 = AtomicU64::new(0);
+static GPU_PIXELS_MONTES: AtomicU64 = AtomicU64::new(0);
+static GPU_TEXTURES_CREEES: AtomicU64 = AtomicU64::new(0);
+static GPU_NS: AtomicU64 = AtomicU64::new(0);
+
+/// `gpu-composition on|off` : la politique (A/B) ; rend la precedente.
+pub fn veut_composition_gpu(oui: bool) -> bool {
+    COMPOSITION_VOULUE.swap(oui, Ordering::AcqRel)
+}
+
+/// Le compositeur GPU peut-il servir cette trame ? VIRGL negocie, scanout
+/// virtio actif, politique voulue, aucun echec anterieur.
+pub fn composition_gpu_disponible() -> bool {
+    if COMPOSITION_INVALIDE.load(Ordering::Acquire) && !reprise_due() {
+        return false;
+    }
+    COMPOSITION_VOULUE.load(Ordering::Acquire)
+        && ACTIF.load(Ordering::Acquire)
+        && P10_VIRGL_PRET.load(Ordering::Acquire)
+}
+
+// BOUCHAUD_GPU_COMPOSITION_REPRISE_V1 : un echec du compositeur GPU dont la
+// file de controle est INTACTE (le peripherique a repondu, il a refuse) n'est
+// plus definitif. Les textures sont rendues, le bureau repeint tout par le
+// processeur ; au bout de `REPRISE_DELAI_NS`, le GPU est retente -- au plus
+// `REPRISE_MAX` fois par demarrage. Une commande SANS reponse (file cassee),
+// une texture dont la memoire n'a pas pu etre rendue : definitif, comme avant
+// (le peripherique peut encore tenir des pages).
+const REPRISE_DELAI_NS: u64 = 5_000_000_000;
+const REPRISE_MAX: u32 = 3;
+static REPRISE_APRES_NS: AtomicU64 = AtomicU64::new(0);
+static ECHEC_DEFINITIF: AtomicBool = AtomicBool::new(false);
+static REPRISES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn reprise_due() -> bool {
+    if ECHEC_DEFINITIF.load(Ordering::Acquire) {
+        return false;
+    }
+    let echeance = REPRISE_APRES_NS.load(Ordering::Acquire);
+    if echeance == 0 || crate::kernel::timer::monotonic_ns() < echeance {
+        return false;
+    }
+    if REPRISE_APRES_NS.compare_exchange(echeance, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        let n = REPRISES.fetch_add(1, Ordering::AcqRel) + 1;
+        COMPOSITION_INVALIDE.store(false, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_REPRISE tentative={} (file intacte, textures recreees)", n);
+        return true;
+    }
+    false
+}
+
+
+/// VIRGL negocie et sonde avec succes (lecture sans verrou).
+static P10_VIRGL_PRET: AtomicBool = AtomicBool::new(false);
+
+/// `(trames GPU, blits, pixels poses par le GPU, pixels montes par l'hote,
+/// textures creees, ns passes dans le compositeur GPU, disponible)`.
+pub fn compteurs_composition_gpu() -> (u64, u64, u64, u64, u64, u64, bool) {
+    (
+        GPU_TRAMES.load(Ordering::Relaxed),
+        GPU_BLITS.load(Ordering::Relaxed),
+        GPU_PIXELS_POSES.load(Ordering::Relaxed),
+        GPU_PIXELS_MONTES.load(Ordering::Relaxed),
+        GPU_TEXTURES_CREEES.load(Ordering::Relaxed),
+        GPU_NS.load(Ordering::Relaxed),
+        composition_gpu_disponible(),
+    )
+}
+
+/// Rend la texture d'une surface qui disparait (fenetre fermee). Sans elle,
+/// la surface resterait ouverte jusqu'a ce que son emplacement serve a une
+/// autre fenetre.
+pub fn oublie_surface(noeud: usize) {
+    let Some(mut garde) = verrou() else { return };
+    let Some(p) = garde.as_mut() else { return };
+    for i in 0..cg::TEXTURES_MAX {
+        if p.textures[i].is_some_and(|t| t.noeud == noeud) {
+            unsafe { rend_texture(p, i) };
+        }
+    }
+}
+
+/// Detache et detruit la texture de l'emplacement `i`, puis rend la surface.
+/// Une commande sans reponse : la surface n'est JAMAIS rendue (l'hote peut
+/// encore tenir ses pages) -- fuite bornee plutot que memoire partagee.
+unsafe fn rend_texture(p: &mut Peripherique, i: usize) {
+    let Some(t) = p.textures[i].take() else { return };
+    let ok = p.file.commande(&cg::contexte(false, t.id), ENTETE) == Ok(RESP_OK_NODATA)
+        && p.file.commande(&cg::detache_memoire(t.id), ENTETE) == Ok(RESP_OK_NODATA)
+        && p.file.commande(&cg::libere(t.id), ENTETE) == Ok(RESP_OK_NODATA);
+    if ok {
+        crate::kernel::partage::ferme(t.noeud);
+    } else {
+        COMPOSITION_INVALIDE.store(true, Ordering::Release);
+        ECHEC_DEFINITIF.store(true, Ordering::Release);
+        crate::serial_println!("GPU_COMPOSITION_TEXTURE_RETENUE id={:#x} noeud={} (sans reponse : surface jamais rendue)", t.id, t.noeud);
+    }
+}
+
+/// L'emplacement de la texture de `c`, cree et attache s'il le faut. Rend
+/// `(indice, neuve)`.
+#[inline(never)]
+unsafe fn texture_pour(p: &mut Peripherique, c: &CoucheGpu, trame_n: u64, prises: u32) -> Result<(usize, bool), &'static str> {
+    if let Some(i) = (0..cg::TEXTURES_MAX).find(|&i| p.textures[i].is_some_and(|t|
+        t.noeud == c.noeud && t.largeur == c.largeur && t.hauteur == c.hauteur)) {
+        if let Some(t) = p.textures[i].as_mut() { t.utilisee = trame_n; }
+        return Ok((i, false));
+    }
+    // Un emplacement libre, sinon le moins recemment servi qui n'est pas
+    // deja pris par cette trame.
+    let i = (0..cg::TEXTURES_MAX).find(|&i| p.textures[i].is_none())
+        .or_else(|| (0..cg::TEXTURES_MAX)
+            .filter(|&i| prises & (1 << i) == 0)
+            .min_by_key(|&i| p.textures[i].map(|t| t.utilisee).unwrap_or(0)))
+        .ok_or("aucun-emplacement")?;
+    if p.textures[i].is_some() {
+        rend_texture(p, i);
+        if p.file.cassee { return Err("file-cassee"); }
+    }
+    let octets_total = (c.octets as usize).checked_mul(c.tampons as usize).ok_or("taille")?;
+    // Liste des pages : tampon DMA partage, pris une fois.
+    if p.entrees.is_none() {
+        let (phys, virt) = memory::alloc_dma(ENTREES_OCTETS).ok_or("dma-entrees")?;
+        p.entrees = Some((phys, virt as usize));
+    }
+    let (entrees_p, entrees_v) = p.entrees.ok_or("dma-entrees")?;
+    // Sur le TAS : 32 Kio sur la pile du bureau depasseraient son budget
+    // (verifie-pile-noyau-profondeur.py). Rare : une fois par texture.
+    let mut liste = alloc::vec![cg::Entree::default(); ENTREES_MAX];
+    let n = cg::entrees_memoire(c.frames, octets_total, PAGE, &mut liste).ok_or("pages-surface")?;
+    let octets_liste = cg::encode_entrees(&liste[..n],
+        core::slice::from_raw_parts_mut(entrees_v as *mut u8, ENTREES_OCTETS)).ok_or("liste-pages")?;
+    let id = cg::TEXTURE_BASE + i as u32;
+    let cree = cg::cree_texture(id, c.largeur, c.hauteur).ok_or("texture-invalide")?;
+    if p.file.commande(&cree, ENTETE) != Ok(RESP_OK_NODATA) {
+        return Err("texture-refusee");
+    }
+    // La surface reste ouverte tant que l'hote tient ses pages.
+    crate::kernel::partage::ouvre(c.noeud);
+    let attache = p.file.commande_chainee(&cg::entete_attache(id, n as u32), entrees_p, octets_liste as u32, ENTETE);
+    if attache != Ok(RESP_OK_NODATA) {
+        if !p.file.cassee {
+            let _ = p.file.commande(&cg::libere(id), ENTETE);
+            crate::kernel::partage::ferme(c.noeud);
+        }
+        return Err("memoire-texture-refusee");
+    }
+    if p.file.commande(&cg::contexte(true, id), ENTETE) != Ok(RESP_OK_NODATA) {
+        p.textures[i] = Some(TextureFenetre { id, noeud: c.noeud, largeur: c.largeur, hauteur: c.hauteur, utilisee: trame_n });
+        return Err("contexte-texture-refuse");
+    }
+    p.textures[i] = Some(TextureFenetre { id, noeud: c.noeud, largeur: c.largeur, hauteur: c.hauteur, utilisee: trame_n });
+    let creees = GPU_TEXTURES_CREEES.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::serial_println!(
+        "GPU_COMPOSITION_TEXTURE id={:#x} {}x{} pas={} tampons={} pages_fusionnees={} (adossee a la surface, zero copie) creees={}",
+        id, c.largeur, c.hauteur, c.pas, c.tampons, n, creees);
+    Ok((i, true))
+}
+
+/// Convention de coordonnees du BLIT, mesuree au demarrage (0 = inconnue,
+/// 1 = brute, 2 = traduite par l'hote).
+static CONVENTION: AtomicU8 = AtomicU8::new(0);
+
+fn convention() -> Option<cg::Convention> {
+    match CONVENTION.load(Ordering::Acquire) {
+        1 => Some(cg::Convention::Brut),
+        2 => Some(cg::Convention::Haut),
+        _ => None,
+    }
+}
+
+/// BOUCHAUD_GPU_COMPOSITION_AUTOTEST_V1 : un BLIT GPU reel entre deux
+/// textures 8x8, relu par `TRANSFER_FROM_HOST_3D` et juge au pixel, dans les
+/// deux conventions possibles. Le compositeur n'est autorise que si l'une
+/// d'elles donne EXACTEMENT la mire attendue.
+unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'static str> {
+    const S: u32 = 0xB2F0;
+    const D: u32 = 0xB2F1;
+    const L: u32 = 8;
+    const H: u32 = 8;
+    let octets = (L * H * 4) as usize;
+    let (sp, sv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
+    let (dp, dv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
+    let src = core::slice::from_raw_parts_mut(sv as *mut u32, (L * H) as usize);
+    let dst = core::slice::from_raw_parts_mut(dv as *mut u32, (L * H) as usize);
+    for y in 0..H { for x in 0..L { src[(y * L + x) as usize] = cg::pixel_mire(x, y); } }
+    dst.fill(0);
+    let liaison = cg::LIAISON_CIBLE | (1 << 3);
+    let tout = cg::R::neuf(0, 0, L as i32, H as i32);
+    let mut memoire = [Memoire::NonAttachee; 2];
+    let mut cree = [false; 2];
+    let resultat = (|| -> Result<cg::Convention, &'static str> {
+        for (k, (id, phys)) in [(S, sp), (D, dp)].into_iter().enumerate() {
+            let q = cg::cree_texture_liee(id, L, H, liaison).ok_or("texture")?;
+            if f.commande(&q, ENTETE)? != RESP_OK_NODATA { return Err("creation-refusee"); }
+            cree[k] = true;
+            let rendu = attache(f, id, phys, octets as u32);
+            memoire[k] = dma::apres_attache(memoire[k], dma::issue(rendu));
+            if rendu? != RESP_OK_NODATA { return Err("memoire-refusee"); }
+            if f.commande(&cg::contexte(true, id), ENTETE)? != RESP_OK_NODATA { return Err("contexte-refuse"); }
+        }
+        let monte = cg::transfert(S, tout, 0, L * 4, L, H).ok_or("transfert")?;
+        if f.commande(&monte, ENTETE)? != RESP_OK_NODATA { return Err("transfert-refuse"); }
+        for conv in [cg::Convention::Brut, cg::Convention::Haut] {
+            dst.fill(0);
+            fence(Ordering::SeqCst);
+            let raz = cg::transfert(D, tout, 0, L * 4, L, H).ok_or("transfert")?;
+            if f.commande(&raz, ENTETE)? != RESP_OK_NODATA { return Err("raz-refusee"); }
+            let s_box = cg::vers_hote(conv, cg::R::neuf(0, 2, L as i32, 3), H as i32);
+            let d_box = cg::vers_hote(conv, cg::R::neuf(0, 1, L as i32, 3), H as i32);
+            let mut lot = [0u8; 32 + cg::BLIT_OCTETS];
+            cg::encode_blit(S, s_box, D, d_box, &mut lot[32..]).ok_or("blit")?;
+            lot[..32].copy_from_slice(&cg::entete_soumission(cg::BLIT_OCTETS).ok_or("soumission")?);
+            if f.commande(&lot, ENTETE)? != RESP_OK_NODATA { return Err("blit-refuse"); }
+            let lit = cg::relecture(D, tout, L * 4, L, H).ok_or("relecture")?;
+            if f.commande(&lit, ENTETE)? != RESP_OK_NODATA { return Err("relecture-refusee"); }
+            fence(Ordering::SeqCst);
+            let mut vu = [0u32; 64];
+            for (i, v) in vu.iter_mut().enumerate() { *v = read_volatile(dst.as_ptr().add(i)); }
+            if cg::juge_autotest(&vu, L, H, 2, 1, 3) {
+                return Ok(conv);
+            }
+        }
+        Err("aucune-convention-exacte")
+    })();
+    // Nettoyage par le chemin commun : la memoire n'est rendue que si
+    // l'hote ne peut plus la tenir (`rend_si_sur`).
+    for (k, (id, phys)) in [(S, sp), (D, dp)].into_iter().enumerate() {
+        if cree[k] && !f.cassee {
+            let _ = f.commande(&cg::contexte(false, id), ENTETE);
+        }
+        if cree[k] {
+            rend_si_sur(f, id, phys, PAGE, &mut memoire[k], "autotest-gpu");
+        } else {
+            rend_si_sur(f, id, phys, PAGE, &mut memoire[k], "autotest-gpu-non-cree");
+        }
+    }
+    resultat
+}
+
+const ENTREES_MAX: usize = 2048;
+const ENTREES_OCTETS: usize = ENTREES_MAX * 16;
+
+/// Presente une trame : bureau (transferts 2D du plan), puis fenetres par le
+/// GPU, puis UN flush. `false` : la trame n'a pas pu etre composee par le
+/// GPU ; le compositeur est desactive et le bureau doit tout repeindre par le
+/// processeur.
+pub fn presente_trame_gpu(plan: &trame::Plan, couches: &[CoucheGpu]) -> bool {
+    if !composition_gpu_disponible() {
+        return false;
+    }
+    let debut = crate::kernel::timer::monotonic_ns();
+    let Some(mut garde) = verrou() else {
+        PRESENTS_SAUTES.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let Some(p) = garde.as_mut() else { return false };
+    let Some(s) = p.scanout else { return false };
+    let ecran = cg::R::neuf(0, 0, s.largeur as i32, s.hauteur as i32);
+    let trame_n = GPU_TRAMES.load(Ordering::Relaxed) + 1;
+    let resultat = (|| -> Result<(u64, u64, u64, u64), &'static str> {
+        let conv = convention().ok_or("convention-inconnue")?;
+        // BANC (option `banc-gpu-composition-panne`, jamais dans `default`) :
+        // a la 300e trame GPU, la trame est refusee une fois, file intacte --
+        // le repli processeur puis la reprise du GPU doivent suivre.
+        #[cfg(feature = "banc-gpu-composition-panne")]
+        {
+            static INJECTEE: AtomicBool = AtomicBool::new(false);
+            if trame_n == 300 && !INJECTEE.swap(true, Ordering::AcqRel) {
+                crate::serial_println!("GPU_COMPOSITION_INJECTION refus_trame=300 (file intacte)");
+                return Err("injection-banc");
+            }
+        }
+        let mut commandes = 0u64;
+        let mut flush = cg::R::default();
+        // 1. Le bureau.
+        let mut pixels_bureau = 0u64;
+        for t in plan.transferts() {
+            let r = cg::R::neuf(t.x as i32, t.y as i32, t.largeur as i32, t.hauteur as i32).inter(&ecran);
+            if r.vide() { continue; }
+            let rr = Rect { x: r.x as u32, y: r.y as u32, largeur: r.l as u32, hauteur: r.h as u32 };
+            let decalage = ((rr.y as usize * s.largeur as usize + rr.x as usize) * 4) as u64;
+            let en_vol = tampons::soumet(etat_tampon()).ok_or("scanout-occupe")?;
+            pose_etat_tampon(en_vol);
+            let rendu = unsafe { transfert(&mut p.file, RESSOURCE_BUREAU, rr, decalage) };
+            let fin = if dma::issue(rendu) == dma::Issue::SansReponse { tampons::Fin::SansReponse } else { tampons::Fin::Achevee };
+            pose_etat_tampon(tampons::acheve(en_vol, fin));
+            commandes += 1;
+            if rendu != Ok(RESP_OK_NODATA) { return Err("transfert-bureau"); }
+            pixels_bureau += r.aire();
+            flush = flush.union(&r);
+        }
+        if !p.bureau_attache {
+            if unsafe { p.file.commande(&cg::contexte(true, RESSOURCE_BUREAU), ENTETE) } != Ok(RESP_OK_NODATA) {
+                return Err("contexte-bureau");
+            }
+            p.bureau_attache = true;
+        }
+        // 2. Les textures des fenetres, seulement ce qui a change.
+        let mut ids = [0u32; 16];
+        let mut prises = 0u32;
+        let mut montes = 0u64;
+        for (k, c) in couches.iter().enumerate().take(ids.len()) {
+            let (i, neuve) = unsafe { texture_pour(p, c, trame_n, prises)? };
+            prises |= 1 << i;
+            let id = cg::TEXTURE_BASE + i as u32;
+            ids[k] = id;
+            let surface = cg::R::neuf(0, 0, c.largeur as i32, c.hauteur as i32);
+            let sale = if neuve { surface } else { c.sale.inter(&surface) };
+            if !sale.vide() {
+                let base = c.face as u64 * c.octets as u64;
+                let q = cg::transfert(id, sale, base, c.pas, c.largeur, c.hauteur).ok_or("transfert-texture-invalide")?;
+                if unsafe { p.file.commande(&q, ENTETE) } != Ok(RESP_OK_NODATA) {
+                    return Err("transfert-texture");
+                }
+                commandes += 1;
+                montes += sale.aire();
+                for v in c.visibles {
+                    let ecran_sale = cg::R::neuf(sale.x + c.origine.0, sale.y + c.origine.1, sale.l, sale.h).inter(v);
+                    flush = flush.union(&ecran_sale);
+                }
+            }
+        }
+        // 3. Les BLIT, par lots d'une soumission.
+        let mut lot = [0u8; 32 + cg::SOUMISSION_MAX];
+        let mut n = 0usize;
+        let mut blits = 0u64;
+        let mut poses = 0u64;
+        let mut soumet = |p: &mut Peripherique, lot: &mut [u8; 32 + cg::SOUMISSION_MAX], n: &mut usize| -> Result<(), &'static str> {
+            if *n == 0 { return Ok(()); }
+            let longueur = *n * cg::BLIT_OCTETS;
+            let entete = cg::entete_soumission(longueur).ok_or("soumission-invalide")?;
+            lot[..32].copy_from_slice(&entete);
+            let r = unsafe { p.file.commande(&lot[..32 + longueur], ENTETE) };
+            *n = 0;
+            if r != Ok(RESP_OK_NODATA) { return Err("soumission-refusee"); }
+            Ok(())
+        };
+        for (k, c) in couches.iter().enumerate().take(ids.len()) {
+            let surface = cg::R::neuf(c.origine.0, c.origine.1, c.largeur as i32, c.hauteur as i32);
+            for v in c.visibles {
+                let d = v.inter(&surface).inter(&ecran);
+                if d.vide() { continue; }
+                let src = cg::R::neuf(d.x - c.origine.0, d.y - c.origine.1, d.l, d.h);
+                let o = 32 + n * cg::BLIT_OCTETS;
+                let src_h = cg::vers_hote(conv, src, c.hauteur as i32);
+                let dst_h = cg::vers_hote(conv, d, s.hauteur as i32);
+                cg::encode_blit(ids[k], src_h, RESSOURCE_BUREAU, dst_h, &mut lot[o..o + cg::BLIT_OCTETS]).ok_or("blit-invalide")?;
+                n += 1;
+                blits += 1;
+                poses += d.aire();
+                if n == cg::BLITS_PAR_SOUMISSION {
+                    soumet(p, &mut lot, &mut n)?;
+                    commandes += 1;
+                }
+            }
+        }
+        if n > 0 {
+            soumet(p, &mut lot, &mut n)?;
+            commandes += 1;
+        }
+        // 4. Un flush.
+        if !flush.vide() {
+            let f = Rect { x: flush.x as u32, y: flush.y as u32, largeur: flush.l as u32, hauteur: flush.h as u32 };
+            if unsafe { vide(&mut p.file, RESSOURCE_BUREAU, f) } != Ok(RESP_OK_NODATA) {
+                return Err("flush");
+            }
+            commandes += 1;
+        }
+        let _ = commandes;
+        Ok((pixels_bureau, blits, poses, montes))
+    })();
+    match resultat {
+        Ok((pixels_bureau, blits, poses, montes)) => {
+            let n = GPU_TRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            GPU_BLITS.fetch_add(blits, Ordering::Relaxed);
+            GPU_PIXELS_POSES.fetch_add(poses, Ordering::Relaxed);
+            GPU_PIXELS_MONTES.fetch_add(montes, Ordering::Relaxed);
+            PRESENTS_OK.fetch_add(1, Ordering::Relaxed);
+            PIXELS_TRANSFERES.fetch_add(pixels_bureau, Ordering::Relaxed);
+            ECHECS_CONSECUTIFS.store(0, Ordering::Relaxed);
+            let ns = crate::kernel::timer::monotonic_ns().saturating_sub(debut);
+            GPU_NS.fetch_add(ns, Ordering::Relaxed);
+            NS_PRESENT.fetch_add(ns, Ordering::Relaxed);
+            if n == 1 || n % 512 == 0 {
+                crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_OK trame={} fenetres={} blits={} (texture->scanout par le GPU de l'hote)", n, couches.len(), blits);
+                for c in couches {
+                    crate::serial_println!("  GPU_COUCHE noeud={} surface={}x{} origine={},{} sale={},{},{}x{} morceaux={}",
+                        c.noeud, c.largeur, c.hauteur, c.origine.0, c.origine.1, c.sale.x, c.sale.y, c.sale.l, c.sale.h, c.visibles.len());
+                    for v in c.visibles {
+                        crate::serial_println!("    GPU_MORCEAU {},{} {}x{}", v.x, v.y, v.l, v.h);
+                    }
+                }
+            }
+            true
+        }
+        Err(cause) => {
+            COMPOSITION_INVALIDE.store(true, Ordering::Release);
+            PRESENTS_ECHEC.fetch_add(1, Ordering::Relaxed);
+            // BOUCHAUD_GPU_COMPOSITION_REPRISE_V1 : file intacte -> textures
+            // rendues (leurs surfaces aussi), reprise programmee ; sinon
+            // definitif.
+            if !p.file.cassee {
+                for i in 0..cg::TEXTURES_MAX {
+                    unsafe { rend_texture(p, i) };
+                }
+            }
+            let definitif = p.file.cassee || ECHEC_DEFINITIF.load(Ordering::Acquire)
+                || REPRISES.load(Ordering::Acquire) >= REPRISE_MAX;
+            if definitif {
+                ECHEC_DEFINITIF.store(true, Ordering::Release);
+            } else {
+                REPRISE_APRES_NS.store(crate::kernel::timer::monotonic_ns() + REPRISE_DELAI_NS, Ordering::Release);
+            }
+            crate::serial_println!("GPU_COMPOSITION_ECHEC raison={} file_cassee={} repli=composition-processeur reprise={}",
+                cause, p.file.cassee as u8, if definitif { "non" } else { "dans-5s" });
+            if p.file.cassee {
+                ACTIF.store(false, Ordering::Release);
+                crate::serial_println!("VIRTIO_GPU_SCANOUT_ABANDON raison=file-sans-reponse");
+            }
+            false
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// BOUCHAUD_GPU_ATTRIBUTION_V1 -- ou passe le temps d'une presentation
+// ---------------------------------------------------------------------------
+//
+// Chaque commande de la file de controle est chronometree de la sonnette a la
+// reponse JUGEE (barriere comprise : le traitement hote est FINI). Le releve
+// donne, par genre, nombre, p50 / p95 / p99 (bornes hautes de classes) et max.
+
+use crate::drivers::composition_gpu as cg_attr;
+
+const NOMS_COMMANDES: [&str; 6] = ["transfert_2d", "flush", "transfert_3d", "soumission_3d", "ressources", "autres"];
+static HISTO_COMMANDES: [cg_attr::Histo; 6] = [const { cg_attr::Histo::neuf() }; 6];
+
+fn indice_commande(genre: u32) -> usize {
+    match genre {
+        CMD_TRANSFER_TO_HOST_2D => 0,
+        CMD_RESOURCE_FLUSH => 1,
+        0x0205 | 0x0206 => 2,
+        0x0207 => 3,
+        0x0101 | 0x0102 | 0x0103 | 0x0106 | 0x0107 | 0x0202 | 0x0203 | 0x0204 => 4,
+        _ => 5,
+    }
+}
+
+/// Une ligne `[GPU-COMMANDES]` : la periode depuis le releve precedent.
+pub fn releve_commandes() {
+    static PRECEDENT: crate::kernel::sync::SpinLock<[[u64; cg_attr::CLASSES]; 6]> =
+        crate::kernel::sync::SpinLock::new([[0; cg_attr::CLASSES]; 6]);
+    let mut ligne = alloc::string::String::new();
+    let mut p = PRECEDENT.lock();
+    for i in 0..6 {
+        let maintenant = HISTO_COMMANDES[i].instantane();
+        let d = cg_attr::delta(&maintenant, &p[i]);
+        p[i] = maintenant;
+        let n: u64 = d.iter().sum();
+        if n == 0 {
+            continue;
+        }
+        let c = |q| cg_attr::centile_us(&d, q).unwrap_or(0);
+        ligne.push_str(&alloc::format!(" {}={}:{}/{}/{}/{}", NOMS_COMMANDES[i], n, c(50), c(95), c(99),
+            HISTO_COMMANDES[i].max_ns.load(Ordering::Relaxed) / 1000));
+    }
+    drop(p);
+    if !ligne.is_empty() {
+        crate::serial_println!("[GPU-COMMANDES] format=nombre:p50/p95/p99/max_us_depuis_demarrage{}", ligne);
+    }
 }

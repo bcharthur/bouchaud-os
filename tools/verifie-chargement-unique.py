@@ -116,8 +116,10 @@ def main() -> int:
         return 1
     negatifs = [
         # 1. La jauge noyau reposee sur la surface du client.
-        (WIDGETS, "    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);\n",
-         "    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);\n"
+        #    (BOUCHAUD_GPU_COMPOSITION_V2 : la recopie se termine par le compte
+        #    des seuls pixels recopies par le processeur.)
+        (WIDGETS, "    fb::note_pixels_dessines(copies);\n",
+         "    fb::note_pixels_dessines(copies);\n"
          "    dessine_jauge(&zone, &client.jauge, maintenant);\n"),
         # 2. La duree du titre sans condition de demarrage.
         (WIDGETS, "if client.etat == crate::gui::client::Etat::Demarrage) {\n        dessine_duree_chargement(",

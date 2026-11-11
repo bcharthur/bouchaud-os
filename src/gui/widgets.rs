@@ -101,13 +101,10 @@ fn filigrane_origine() -> (usize, usize) {
     )
 }
 
-/// Cote du logo au-dessus de la marque.
-const LOGO_MARQUE: usize = 72;
-
+// BOUCHAUD_ATELIER_SANS_CROISSANT_V1 (10/11) : la marque est le NOM seul,
+// sans le croissant -- ni au centre du bureau, ni dans la barre du haut.
 pub(crate) fn draw_filigrane() {
     let (x, y) = filigrane_origine();
-    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_72,
-        (fb::width() / 2).saturating_sub(LOGO_MARQUE / 2), y.saturating_sub(LOGO_MARQUE + 14));
     let blanc = crate::gui::atelier::jetons::ENCRE_SUR_FOND;
     // Une ombre d'un pixel, tres diffuse, detache le blanc du ciel clair.
     fb::draw_text_prop(x + 1, y + 2, FILIGRANE, 0x8a87b8, FILIGRANE_CORPS, true);
@@ -127,9 +124,7 @@ pub(crate) fn filigrane_rect() -> (usize, usize, usize, usize) {
     let largeur = fb::text_width(FILIGRANE, FILIGRANE_CORPS, true);
     // Marge : `draw_text_prop` pose les glyphes a partir de `x`, mais un `B`
     // peut deborder d'un pixel a gauche et l'antialiassage d'un autre.
-    // Le logo est au-dessus du titre : le calque l'inclut.
-    let haut = y.saturating_sub(LOGO_MARQUE + 14);
-    (x.saturating_sub(4), haut, largeur + 8, FILIGRANE_HAUTEUR + (y - haut))
+    (x.saturating_sub(4), y.saturating_sub(4), largeur + 8, FILIGRANE_HAUTEUR + 4)
 }
 
 /// Fond d'ecran seul.
@@ -308,12 +303,9 @@ fn draw_topbar(centre_ouvert: bool, survol_bouton: bool) {
     let corps = j::CORPS_BARRE;
     let ligne = ligne_texte_barre(0);
 
-    // La marque, a gauche : un ASSET (logo provisoire,
-    // BOUCHAUD_ATELIER_LOGO_PROVISOIRE_V1) et le nom.
+    // La marque, a gauche : le nom seul (BOUCHAUD_ATELIER_SANS_CROISSANT_V1).
     let x = j::ESPACE_4 as usize;
-    crate::gui::atelier::assets::pose(crate::gui::atelier::assets::LOGO_18, x,
-        (BAR_H - 18) / 2);
-    fb::draw_text_prop(x + 18 + j::ESPACE_2 as usize, ligne, "Bouchaud OS", j::ENCRE, corps, true);
+    fb::draw_text_prop(x, ligne, "Bouchaud OS", j::ENCRE, corps, true);
 
     // Date et heure, au centre.
     let dt = rtc::now();
@@ -822,7 +814,7 @@ fn draw_window(w: &Win, focused: bool) {
     // si un jour la surface est plus petite que la fenetre, la difference doit
     // continuer de recevoir un fond, sinon elle montrerait le bureau.
     let opaque = match &w.app {
-        App::Navigateur { client } | App::Doom { client } => {
+        App::Navigateur { client } | App::Doom { client } | App::Application { client } => {
             let zone = crate::gui::window::zone_utile(w);
             // `composable`, et non la surface allouee : depuis que celle-ci est
             // dimensionnee pour une fenetre MAXIMISEE, elle est plus grande que
@@ -951,6 +943,24 @@ fn draw_window_controls(outer: crate::gui::windowing::Rect,
 /// decide s'il faut recomposer, et la decoupe decide de combien. Sans elle, une
 /// fenetre de navigateur coutait 664 400 pixels a chaque trame, y compris quand
 /// seul le curseur avait bouge.
+/// Pixels de clients recopies par le PROCESSEUR dans le bureau (le chemin
+/// que le compositeur GPU supprime) : la preuve chiffree du delestage.
+static PIXELS_CLIENT_CPU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn pixels_client_copies_par_le_processeur() -> u64 {
+    PIXELS_CLIENT_CPU.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// Un SEUL site de lecture de la face (P10+.3c).
+fn copie_face_client(
+    client: &crate::gui::client::Client, y: usize, zy: usize,
+    colonne: usize, destination: &mut [u32],
+) {
+    let pris = destination.len();
+    client.surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);
+    client.note_lecture(destination);
+}
+
 pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     use crate::gui::client::Etat;
     let zone = crate::gui::window::zone_utile(w);
@@ -963,7 +973,6 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
         return;
     }
 
-    let surface = &client.surface;
     // La meme borne que la promesse d'opacite de `draw_window` : les deux
     // doivent decrire le MEME rectangle, sinon l'un peint un fond que l'autre
     // recouvre, ou pire, laisse a decouvert ce que personne ne peint.
@@ -989,22 +998,37 @@ pub(crate) fn compose_client(w: &Win, client: &crate::gui::client::Client) {
     if x_fin <= x_debut || y_fin <= y_debut {
         return;
     }
-    // Colonne de depart DANS la surface : la decoupe peut couper a gauche.
-    let colonne = x_debut - zx;
-    let compte = x_fin - x_debut;
-
-    for y in y_debut..y_fin {
-        let destination = fb::ligne_mut(x_debut, y, compte);
-        if destination.is_empty() {
-            continue;
+    // BOUCHAUD_GPU_COMPOSITION_V2 : les morceaux que le GPU pose a cette
+    // trame ne sont PAS recopies par le processeur. Il ne reste que ce qui
+    // est sous un calque superieur (ombre, dock, curseur...), au pixel.
+    use crate::drivers::composition_gpu::{soustrait, R, MORCEAUX_MAX};
+    let decoupe = R::neuf(x_debut as i32, y_debut as i32, (x_fin - x_debut) as i32, (y_fin - y_debut) as i32);
+    let mut morceaux = [R::default(); MORCEAUX_MAX * 2];
+    let n = match crate::gui::composition::morceaux_gpu(w.id.get()) {
+        Some((gpu, ng)) => match soustrait(decoupe, &gpu[..ng], &mut morceaux) {
+            Some(n) => n,
+            None => { morceaux[0] = decoupe; 1 }
+        },
+        None => { morceaux[0] = decoupe; 1 }
+    };
+    let mut copies = 0u64;
+    for m in &morceaux[..n] {
+        let (mx0, my0) = (m.x as usize, m.y as usize);
+        let (largeur_m, hauteur_m) = (m.l as usize, m.h as usize);
+        // Colonne de depart DANS la surface : la decoupe peut couper a gauche.
+        let colonne = mx0 - zx;
+        for y in my0..my0 + hauteur_m {
+            let destination = fb::ligne_mut(mx0, y, largeur_m);
+            if destination.is_empty() {
+                continue;
+            }
+            // La FACE uniquement.
+            copie_face_client(client, y, zy, colonne, destination);
         }
-        let pris = destination.len();
-        // La FACE : avec deux tampons (BOUCHAUD_GUI_SURFACE_DEUX_TAMPONS_V1),
-        // jamais celui dans lequel le client peut ecrire.
-        surface.copie_ligne_de(client.face(), y - zy, colonne, pris, destination);
-        client.note_lecture(destination);
+        copies += (largeur_m * hauteur_m) as u64;
     }
-    fb::note_pixels_dessines(((x_fin - x_debut) * (y_fin - y_debut)) as u64);
+    fb::note_pixels_dessines(copies);
+    PIXELS_CLIENT_CPU.fetch_add(copies, core::sync::atomic::Ordering::Relaxed);
 
     // BOUCHAUD_P19_BROWSER_LOADING_SINGLE_OWNER_V1
     // Ne JAMAIS superposer une jauge OS aux pixels de WebContent :
@@ -1065,10 +1089,12 @@ fn dessine_duree_chargement(w: &Win, origine: usize, apres_titre: usize,
 
 /// Ecran d'attente dessine **dans la fenetre** du client.
 ///
-/// C'est le meme visuel que la carte de lancement d'avant, a un detail pres qui
-/// change tout : il ne recouvre plus le bureau. La fenetre existe des le double
-/// clic, la barre des taches et l'horloge continuent, et le contenu Web viendra
-/// remplacer ce dessin sans qu'aucune transition ne soit visible ailleurs.
+/// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : le MEME ecran pour toute application
+/// ring 3 (Ladybird, DOOM, tout client futur) : le nom de l'application et un
+/// chronometre, rien d'autre. Il ne parle plus « de Qt, Python et du
+/// renderer » : c'etait l'ecran du navigateur, et DOOM l'affichait. La
+/// fenetre existe des le double clic, la barre des taches et l'horloge
+/// continuent, et la premiere trame du client remplace ce dessin.
 fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
     jauge: &crate::gui::jauge::Jauge, maintenant: u64) {
     let zx = zone.x.max(0) as usize;
@@ -1078,49 +1104,23 @@ fn dessine_demarrage(zone: &crate::gui::protocole::Rect, titre: &str,
 
     fb::fill_rect_rgb(zx, zy, zl, zh, 0x000B_1220);
 
-    let largeur = 540usize.min(zl);
-    let hauteur = 190usize.min(zh);
+    let largeur = 420usize.min(zl);
+    let hauteur = 120usize.min(zh);
     let x = zx + (zl - largeur) / 2;
     let y = zy + (zh - hauteur) / 2;
 
-    fb::fill_rect_rgb(x, y, largeur, hauteur, 0x0011_1B2E);
-    fb::fill_rect_rgb(x, y, largeur, 4, 0x003D_8BFF);
-    fb::draw_text_prop(x + 34, y + 34, titre, 0x00F3_F6FC, 30.0, true);
-    fb::draw_text_prop(
-        x + 34,
-        y + 86,
-        "Demarrage de Qt, Python et du renderer...",
-        0x00B8_C4D9,
-        16.0,
-        false,
-    );
+    fb::draw_text_prop(x, y, titre, 0x00F3_F6FC, 24.0, true);
 
-    // Le chronometre du demarrage.
-    //
-    // Il ne cache pas la lenteur, il la CHIFFRE. Un ecran d'attente qui ne
-    // montre rien laisse croire que la machine est bloquee ; le meme ecran
-    // avec « 8,40 s » qui defile dit qu'elle travaille, et donne d'un coup
-    // d'oeil le nombre qu'une optimisation devra faire baisser.
-    if largeur > 80 && hauteur > 150 {
-        let rail_l = largeur - 68;
-        let rail_x = x + 34;
-        let rail_y = y + 118;
-        fb::fill_rect_rgb(rail_x, rail_y, rail_l, 4, 0x001E_2E4A);
-        let remplie = (rail_l * jauge.progression(maintenant) as usize / 100).max(2);
-        fb::fill_rect_rgb(rail_x, rail_y, remplie.min(rail_l), 4, 0x003D_8BFF);
-
+    // Le chronometre du demarrage : il CHIFFRE la lenteur au lieu de la
+    // cacher, et donne le nombre qu'une optimisation devra faire baisser.
+    if largeur > 80 && hauteur > 70 {
+        let rail_y = y + 48;
+        fb::fill_rect_rgb(x, rail_y, largeur, 3, 0x001E_2E4A);
+        let remplie = (largeur * jauge.progression(maintenant) as usize / 100).max(2);
+        fb::fill_rect_rgb(x, rail_y, remplie.min(largeur), 3, 0x003D_8BFF);
         let ecoule = crate::gui::jauge::formate_duree(jauge.duree_affichee_ms(maintenant));
-        fb::draw_text_prop(rail_x, y + 140, ecoule.as_str(), 0x00B8_C4D9, 14.0, false);
+        fb::draw_text_prop(x, y + 64, ecoule.as_str(), 0x00B8_C4D9, 14.0, false);
     }
-
-    fb::draw_text_prop(
-        x + 34,
-        y + 164,
-        "Le bureau reste actif pendant le chargement.",
-        0x007F_93B8,
-        14.0,
-        false,
-    );
 }
 
 // ─── Barre des tâches ──────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ pub use legacy::{
     lfb_present_generation,
     debut_trame,
     fin_trame,
+    trame_possible,
     trace_present,
     height,
     width,
@@ -59,6 +60,8 @@ pub use legacy::{
     C_WHITE,
     C_YELLOW,
 };
+
+pub use legacy::fin_trame_gpu;
 
 #[inline]
 pub fn present() {
