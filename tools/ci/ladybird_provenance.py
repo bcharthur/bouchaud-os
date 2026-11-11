@@ -355,7 +355,8 @@ def main(argv=None) -> int:
         try:
             rid, raison = attends(courant_id, courant["empreinte"], api, lambda: liste_artefacts(api),
                                   empreinte_de, depot, depuis=depuis,
-                                  delai=int(env.get("DELAI_ATTENTE") or 14400))
+                                  delai=int(env.get("DELAI_ATTENTE") or 14400),
+                                  grace=int(env.get("GRACE_ATTENTE") or 300))
         except Exception as exc:
             print(f"LADYBIRD_ATTENTE_ECHEC {exc}")
             return 1
