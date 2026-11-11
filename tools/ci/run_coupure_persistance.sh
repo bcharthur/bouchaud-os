@@ -16,6 +16,16 @@
 #       returned is durable;
 #   I3  never newer than last acknowledged + 1 (nothing invented).
 #
+# The ORACLE is the serial line: a version counts as acknowledged when its
+# COUPURE_ACQUITTE line reached the port. That holds only with a SYNCHRONOUS
+# console. With BOUCHAUD_CONSOLE_ASYNCHRONE_V1 a user `write` returns once the
+# line is in the kernel ring, before the UART: two durable versions could
+# still have their acknowledgements in the ring at the cut, and I3 would
+# report an "invention" the disk never made (issue #288, run 42931411983).
+# The scenario therefore runs `console-async off` first, and every cycle
+# REQUIRES `BOUCHAUD_CONSOLE_BILAN active=0` before the read-back; without it
+# the cycle fails (ASYNC) -- the invariants are unchanged, never relaxed.
+#
 # What this does NOT model: a disk that loses its own volatile write cache.
 # QEMU writes the image with the host page cache, so a host-side kill keeps
 # every write QEMU issued. That part is covered on the host by
@@ -33,13 +43,13 @@ rm -rf "$OUT"; mkdir -p "$OUT/scenario/bin"
 musl-gcc -O2 -Wall -fno-stack-protector -fno-asynchronous-unwind-tables \
   -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu \
   -static-pie tools/userland/persist-coupure-probe.c -o "$OUT/scenario/bin/persist-coupure-probe"
-printf '/bin/persist-coupure-probe\n' > "$OUT/scenario/autorun"
+printf 'console-async off\n/bin/persist-coupure-probe\n' > "$OUT/scenario/autorun"
 IMAGE="$PWD/$OUT/disque.img" bash tools/userland/mkdisk.sh "$PWD/$OUT/scenario" >/dev/null
 accel=(-cpu max); nom=tcg
 if [[ ${BO_QEMU_KVM:-0} == 1 ]]; then accel=(-enable-kvm -cpu host); nom=kvm; fi
 
 acquitte=0          # last version acknowledged before the previous cut
-incoherences=0; regressions=0; inventions=0; muets=0
+incoherences=0; regressions=0; inventions=0; muets=0; asynchrones=0
 for ((c = 1; c <= CYCLES; c++)); do
   log="$OUT/boot-$c.log"; : > "$log"
   qemu-system-x86_64 "${accel[@]}" -smp "$SMP" -m 2048 -display none -no-reboot \
@@ -69,6 +79,11 @@ for ((c = 1; c <= CYCLES; c++)); do
   v=$(sed -E 's/.*version=([0-9]+).*/\1/' <<< "$relu")
   coh=$(sed -E 's/.*coherent=([01]).*/\1/' <<< "$relu")
   verdict=ok
+  # Oracle valid only with a synchronous console (#288): the switch must be
+  # on record BEFORE the read-back line.
+  if ! propre | sed -n '/COUPURE_RELU/q;p' | grep -aq 'BOUCHAUD_CONSOLE_BILAN active=0'; then
+    asynchrones=$((asynchrones + 1)); verdict=ASYNC
+  fi
   if [ "$coh" != 1 ]; then incoherences=$((incoherences + 1)); verdict=INCOHERENT; fi
   if (( v < acquitte )); then regressions=$((regressions + 1)); verdict=REGRESSION; fi
   if (( v > acquitte + 1 )); then inventions=$((inventions + 1)); verdict=INVENTION; fi
@@ -80,5 +95,5 @@ for ((c = 1; c <= CYCLES; c++)); do
   [ -n "$echec" ] && { incoherences=$((incoherences + 1)); }
   (( max > v )) && acquitte=$max || acquitte=$v
 done
-echo "COUPURE_BILAN cycles=$CYCLES incoherences=$incoherences regressions=$regressions inventions=$inventions muets=$muets accel=$nom smp=$SMP"
-if (( incoherences + regressions + inventions + muets == 0 )); then echo COUPURE_PERSISTANCE_OK; else echo COUPURE_PERSISTANCE_ECHEC; exit 1; fi
+echo "COUPURE_BILAN cycles=$CYCLES incoherences=$incoherences regressions=$regressions inventions=$inventions muets=$muets asynchrones=$asynchrones accel=$nom smp=$SMP"
+if (( incoherences + regressions + inventions + muets + asynchrones == 0 )); then echo COUPURE_PERSISTANCE_OK; else echo COUPURE_PERSISTANCE_ECHEC; exit 1; fi
