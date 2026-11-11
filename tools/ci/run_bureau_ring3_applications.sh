@@ -92,6 +92,32 @@ s.close()
 PY
 }
 
+# capture_stable FICHIER : la capture est jugee contre l'etat publie AU MOMENT
+# ou elle est prise (run 43114278765 : la mire etait morte pendant le
+# redimensionnement, la capture prise 20 s plus tard montrait deja le Ladybird
+# relance, et le juge la comparait a l'etat de l'instant de la mort). On attend
+# que le compositeur n'ait publie aucun evenement de fenetre depuis 1,5 s, on
+# capture, et on recommence si un evenement est publie PENDANT la capture. La
+# longueur du journal a cet instant est notee dans FICHIER.coupe : le juge ne
+# lit que ce prefixe.
+EVENEMENT_FENETRE='COMPOSITED_BUREAU_(FENETRE|RESTAURE|MINIMISE|CLIENT_MORT|SCENARIO_FIN|ETAPE|SCENARIO_PILE)'
+evenements() { grep -acE "$EVENEMENT_FENETRE" "$LOG" || true; }
+capture_stable() {
+  local essai e0 e1 n
+  for essai in 1 2 3 4 5 6; do
+    e0=$(evenements); sleep 1.5; [ "$(evenements)" = "$e0" ] || continue
+    capture "$1"; sleep 0.5
+    e1=$(evenements)
+    if [ "$e1" = "$e0" ]; then
+      n=$(wc -c < "$LOG"); echo "$n" > "$1.coupe"; return 0
+    fi
+  done
+  # Jamais stable : pas de capture du tout (le juge le dit « capture absente »),
+  # plutot qu'une capture jugee contre un etat qui n'est pas le sien.
+  echo "capture $1 : jamais stable" >&2
+  rm -f "$1" "$1.coupe"
+}
+
 echo "=== DOOM + Ladybird + mire sous composited ==="
 : > "$LOG"
 # shellcheck disable=SC2086
@@ -108,7 +134,7 @@ LIMITE=$((SECONDS + ${BO_BUREAU_PLAFOND_S:-900}))
 while kill -0 "$QEMU_PID" 2>/dev/null; do
   if grep -aqE "$fatal_re" "$LOG"; then break; fi
   if [ "$scenario" = 0 ] && grep -aq 'COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE' "$LOG"; then
-    sleep 2; capture "$SORTIE/scenario.ppm"; scenario=1
+    sleep 2; capture_stable "$SORTIE/scenario.ppm"; scenario=1
   fi
   if [ "$mort" = 0 ] && grep -aq 'COMPOSITED_BUREAU_CLIENT_MORT' "$LOG"; then
     mort=1; apres_mort=$((SECONDS + 20))
@@ -116,11 +142,11 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
   # Vingt secondes apres la mort de la mire : DOOM et Ladybird ont-ils
   # continue d'etre composes ?
   if [ -n "$apres_mort" ] && (( SECONDS >= apres_mort )) && [ ! -s "$SORTIE/apres-mort.ppm" ]; then
-    capture "$SORTIE/apres-mort.ppm"
+    capture_stable "$SORTIE/apres-mort.ppm"
   fi
   # Fin : la mire morte ET le scenario complet joue (Ladybird relance).
   if [ -s "$SORTIE/apres-mort.ppm" ] && grep -aqE 'COMPOSITED_BUREAU_SCENARIO_(COMPLET|ECHEC)' "$LOG"; then
-    sleep 20; capture "$SORTIE/fin.ppm"; break
+    sleep 20; capture_stable "$SORTIE/fin.ppm"; break
   fi
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE bureau ring 3 applications" >&2; break; fi
   sleep 1
@@ -174,8 +200,11 @@ nav2=$(grep -aoE "BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+ chemin=/bo-navigateur 
 juge() {  # FICHIER MARQUEUR LIBELLE
   local fenetres
   if [ ! -s "$1" ]; then echec "$3 : capture absente"; return; fi
-  # MARQUEUR vide : l'etat a la fin du journal.
-  if [ -n "$2" ]; then
+  if [ -s "$1.coupe" ]; then
+    # L'etat publie au moment exact de la capture (capture_stable).
+    head -c "$(cat "$1.coupe")" "$LOG" | sed -E 's/\x1b\[[0-9;]*m//g' | tr -d '\r' > "$1.journal"
+    fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$1.journal" --opaques "$doom,$nav,${nav2:-0}")
+  elif [ -n "$2" ]; then
     fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --jusqua "$2" --opaques "$doom,$nav,${nav2:-0}")
   else
     fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --opaques "$doom,$nav,${nav2:-0}")
