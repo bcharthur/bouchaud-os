@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "as_of": "2026-11-04",
-  "observed_main_head": "e0257c6006f965985d7b3af39a0ddc5790984526",
+  "as_of": "2026-11-11",
+  "observed_main_head": "d37ca9e04d40ae246b213400646d869949c979b4",
   "head_kind": "main_head_at_snapshot",
   "default_branch": "main",
   "baseline_status": "NOT_ESTABLISHED",
@@ -16,10 +16,10 @@
     "P7": "UNKNOWN",
     "P8": "UNKNOWN",
     "P9": "UNKNOWN",
-    "P10": "UNKNOWN",
+    "P10": "GPU_WINDOW_COMPOSITION_VERIFIED_AT_KVM",
     "P11": "UNKNOWN",
     "P12": "UNKNOWN",
-    "P13": "PARTIAL_BLOCKED_NO_DEDICATED_RUNNER",
+    "P13": "STRICT_SMP124_PASS_KVM_SMP8_BLOCKED_NO_DEDICATED_RUNNER",
     "P14": "UNKNOWN",
     "P15": "UNKNOWN",
     "P16": "UNKNOWN",
@@ -28,7 +28,7 @@
     "P19": "UNKNOWN"
   },
   "C22": {
-    "status": "CLOSED_AT_KVM",
+    "status": "CLOSED_AT_KVM (6/6 replayed on 540fdfb; final-SHA replay pending)",
     "tested_sha": "5c3cd43a7a2a1c258388f9a81967abecdce51068",
     "run_id": 41518023294,
     "passes": 6,
@@ -43,9 +43,56 @@
     "execution_checkout_sha": "84105df8bf1ca1cf31cb8da6eaab50e43a96383d",
     "run_event": "pull_request",
     "candidate_replay": {
-      "run_id": 41592642065,
-      "sha": "c1e55da99dcc411f45ee68ebd285d91205f82067",
-      "status": "IN_PROGRESS_AT_SNAPSHOT"
+      "run_id": 42784700689,
+      "job_id": 129790751019,
+      "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
+      "event": "workflow_dispatch (palier=qualification, full Ladybird rebuild)",
+      "status": "C22_CONTRACTUEL_6X6_OK",
+      "passes": 6,
+      "total": 6,
+      "threshold_kib": 1024,
+      "observed_growth_g2_kib": [
+        128,
+        152,
+        144,
+        132,
+        140,
+        144
+      ],
+      "level": "KVM (GitHub-hosted)"
+    },
+    "final_sha_campaigns": {
+      "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+      "threshold_kio": 1024,
+      "runs": [
+        {
+          "run": 42842860845,
+          "event": "push",
+          "g2_kio": [
+            156,
+            156,
+            200,
+            132,
+            172,
+            120
+          ],
+          "verdict": "C22_CONTRACTUEL_6X6_OK"
+        },
+        {
+          "run": 42851644175,
+          "event": "workflow_dispatch qualification (tentative 2)",
+          "g2_kio": [
+            140,
+            136,
+            156,
+            108,
+            224,
+            136
+          ],
+          "verdict": "C22_CONTRACTUEL_6X6_OK"
+        }
+      ],
+      "status": "PASS"
     }
   },
   "ci": {
@@ -168,7 +215,7 @@
     "SMP1 native IPC latency attributed (file->elu dominates), not corrected",
     "no general-purpose on-disk VFS: RAMFS is the live filesystem, /persist rewrites its whole table per transaction, no unified page cache, no file-backed writable mmap",
     "desktop, window manager, native apps, network stack and TLS still run in ring 0",
-    "rendering is CPU only: virtio-gpu 2D presents frames, no GPU acceleration, no 3D, no AMD driver"
+    "rendering: Ladybird/Skia and native apps rasterise on the CPU; virtio-gpu 2D presents frames by default. Opt-in VIRGL build (p10-*) composes client windows on the host GPU via virglrenderer (QEMU only); no AMD driver, no guest Vulkan"
   ],
   "candidate": {
     "branch": null,
@@ -198,7 +245,12 @@
     "main branch not protected: ruleset ready in tools/github/ruleset-main.json, needs a repository admin",
     "PHYSICAL Trigkey campaign not executed; the Trigkey image does not yet carry serviced/healthd/updated/logd"
   ],
-  "observed_work_branch": null,
+  "observed_work_branch": {
+    "branch": "claude/c22-p13-p10-gpu-kernel-0y2ucg",
+    "base": "main@6bdcb36",
+    "scope": "P10 GPU compositor (from PR #281), generic client launch (DOOM no longer shows the Ladybird splash), C22/P13 closure campaigns",
+    "note": "Work in progress; see docs/current/P10_GPU_COMPOSITEUR.md for the exact proof level of each claim."
+  },
   "updates_automatically": false,
   "atomic_platform": {
     "proof_levels": {
@@ -295,9 +347,18 @@
     }
   },
   "p13": {
-    "smp124_endurance": "PASS",
-    "smp8": "PENDING_DEDICATED_KVM8",
-    "final_strict": "BLOCKED_BY_RUNNER_PROVISIONING"
+    "strict_smp124_kvm": "PASS",
+    "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+    "run": 42842861068,
+    "evidence": "P13_STRICT_OK attribution smp=1,2,4 (runs 42842861068 et 42851644175 job primitives/probes), ORDONNANCEUR_ATTRIBUTION_OK qualifie_ok=2 non_qualifiant=0 qualifie_echec=0",
+    "smp8": "BLOCKED_EXTERNAL (runner KVM dedie 8 vCPU non provisionne)",
+    "final_strict": "BLOCKED_EXTERNAL (SMP8 strict sur runner KVM dedie non valide) -- P13 final reste OUVERT",
+    "soak_smp4_20m": {
+      "sha": "93d942144de29c5344db3aeaef80014f4824a0df",
+      "run": 42851638554,
+      "result": "PASS 9/9, 0 NON_QUALIFIANT",
+      "level": "TCG hosted"
+    }
   },
   "main_protection": "BLOCKED_BY_HUMAN_GITHUB_SETTING",
   "physical": "NOT_STARTED",
@@ -333,52 +394,146 @@
     }
   },
   "open_prs": {
-    "as_of": "2026-11-04",
-    "base": "main@e0257c60",
-    "note": "#242, #243, #244 (Atelier) and #246 (USB flush) are MERGED. #247 is stacked on #245. Neither is mergeable: both must first merge main (scanout bench fix) and re-run P13.",
-    "merged": [
-      {
-        "number": 246,
-        "head": "6e447ab03616f49e9fec5ef09613ce12dc8fac1c",
-        "merge_commit": "170c80748c5a4f7cf052f8eac0c1c52e61b35ee0"
-      },
-      {
-        "number": 242,
-        "head": "fa8dc1d5eb19942ad470abb88d9841b81397a838",
-        "merge_commit": "c7e75145df81b3854db5370336ba3ef8428de982"
-      },
-      {
-        "number": 243,
-        "head": "175041cfdbe5354d39a4b03be5e1335811a42bfc",
-        "merge_commit": "ed68b11a986137da9710ea4e6f357a0547aed666"
-      },
-      {
-        "number": 244,
-        "head": "c0c0cfed1af326d1af84386488b0783e8876d2ec",
-        "merge_commit": "e0257c6006f965985d7b3af39a0ddc5790984526"
-      }
+    "as_of": "2026-11-10",
+    "base": "main@6bdcb36",
+    "note": "PR #245/#247/#248 listed on 2026-11-04 are no longer open. All open PRs are drafts.",
+    "merged_since_2026_11_04": [
+      "#252",
+      "#253",
+      "#256",
+      "#257",
+      "#261",
+      "#263",
+      "#265",
+      "#266",
+      "#268",
+      "#269",
+      "#270",
+      "#271",
+      "#274",
+      "#276",
+      "#277",
+      "#278"
     ],
     "items": [
       {
-        "number": 245,
-        "scope": "Storage S1: persistent home folders, delayed writeback, table metadata",
-        "head": "8db53f92ae4b84c18e17af8048cf94823be1ca6a",
-        "stacked_on": null,
-        "blocked_by": "P13 scanout red (bench obsolete, fixed on main by #242): must merge main and re-run P13"
+        "number": 281,
+        "scope": "P10 VIRGL window composition (up to 4 windows), opt-in features p10-universal-present + p10-virgl-experimental",
+        "head": "100af4040ec42fae156f5aa4d6b8a745d7e1a164",
+        "ci": "CI Fast, Integration, Reliability V3, Non-regression, ladybird-native-browser (PR) green; Ladybird launcher selector V7 red",
+        "integrated_in": "claude/c22-p13-p10-gpu-kernel-0y2ucg"
       },
       {
-        "number": 247,
-        "scope": "Perf P1: desktop first frame -1.9 s (font subset loaded in parallel)",
-        "head": "66b4c508b5e4e96dac4f5e484658537c1f2d98b5",
-        "stacked_on": 245,
-        "blocked_by": "P13 accounting SMP2 NON_QUALIFYING, attributed to the font preload (lack of windows, no overlap); console step 21 not attributed; scanout fixed on main"
+        "number": 280,
+        "scope": "older local snapshot of the same P10 prototype, 59 commits behind main",
+        "head": "c188155af37a6648603c7b394391cbed27a2e82a",
+        "status": "superseded by #281"
       },
       {
-        "number": 248,
-        "scope": "Documentation consolidation: README, sources of truth, licences",
-        "head": "this PR",
-        "stacked_on": null
+        "number": 279,
+        "scope": "docs: P10 local VIRGL evidence of 2026-11-09",
+        "head": "35fdf7c891ce7dba6f2257229fbae657cd6fa3d7"
       }
     ]
+  },
+  "open_issues": [
+    {
+      "number": 264,
+      "title": "P13: intermittent SMP4 panic on scheduler hand-off during 20 min soak",
+      "status": "FIXED_MERGED_PENDING_HUMAN_CLOSE",
+      "cause": "switch_to published the hand-off (SWITCH_PENDING) with IF=1; a timer IRQ before switching_out completed a half-published hand-off",
+      "fix": "4311be8 (hand-off published and completed with IF=0, fail-closed assert, structural test + 4 mutations)",
+      "evidence": {
+        "sha": "8e3c777a1b6e73a1dc13abb6dd32aab3c40bb207",
+        "run": 42815448566,
+        "job": 129834446721,
+        "level": "hosted QEMU TCG -cpu max SMP4",
+        "result": "soak 9/9 cycles of 120 s in 1080 s, 0 NON_QUALIFIANT, verdict OK; reliability-gate success"
+      },
+      "close_decision": "human (issue left open on GitHub)",
+      "merged_in": "#285 (376ed88)"
+    },
+    {
+      "number": 283,
+      "title": "Ladybird : demarrage a froid intermittent fige ~20 min apres le fork des rendus",
+      "status": "OPEN",
+      "frequency": "2/96 demarrages (piege du Compositor), main et branche candidate"
+    },
+    {
+      "number": 288,
+      "title": "Banc de coupure : faux INVENTION possible (acquittements dans l'anneau de la console asynchrone)",
+      "status": "OPEN",
+      "frequency": "1 occurrence / ~180 coupures ; seuil non modifie"
+    }
+  ],
+  "P10": {
+    "scope": "GPU window composition on QEMU VIRGL (BOUCHAUD_GPU_COMPOSITION_V2)",
+    "status": "VERIFIED_AT_KVM",
+    "ci": {
+      "sha": "540fdfbdda0bf055bd4ce175e5ac86cd3d7cbe41",
+      "run": 42784689821,
+      "verdict": "PASS 3/3 (tcg, kvm, Ladybird)",
+      "kvm_ab": "draw CPU 25.5 us/frame vs 467.5 us (x18.3); client px copied by CPU -99.9%; cadence unchanged",
+      "ladybird": "LADYBIRD_BROWSER_HOST_OK, CONVERGENCE_OK surface=1, 69.3 Mpx posed by GPU / 30 s, 0.34 Mpx CPU"
+    },
+    "not_done": [
+      "Skia/Ladybird raster on GPU (needs guest Vulkan/Venus)",
+      "AMD/Trigkey driver",
+      "compositor still a kernel thread"
+    ],
+    "doc": "docs/current/P10_GPU_COMPOSITEUR.md",
+    "fermeture": "OUVERT : rasterisation GPU Skia BLOCKED_EXTERNAL (QEMU >= 9.2), materiel physique NOT_TESTED"
+  },
+  "ladybird_convergence_93d9421": {
+    "run": 42851644175,
+    "result": "FAIL",
+    "cause": "piege du Compositor : 1 demarrage froid sur 16 inconclusif (LADYBIRD_FUNCTIONAL_SMOKE jalons manquants=7, systeme fige ~20 min, 0 faute Compositor). Meme signature sur le noyau de main (run 42875324047) : defaut intermittent preexistant, non attribue a cette branche ; non relance pour obtenir du vert.",
+    "attempt_1": "build tue par signal d'arret du runner heberge (exit 143), relance au meme SHA"
+  },
+  "integration_2026_11_11": {
+    "main_after": "d37ca9e04d40ae246b213400646d869949c979b4",
+    "main_ci": "10/10 workflows verts au SHA d37ca9e (CI Fast, Integration, Reliability V3, Native IPC, GPU composition, ladybird-native-browser, p13-primitives-noyau, Security Runtime, Non-regression, userland-legacy)",
+    "merged": [
+      {
+        "pr": 282,
+        "sha": "29316a6",
+        "subject": "CI : production Ladybird separee, reutilisation verifiee en qualification",
+        "head_qualifie": "d21b987",
+        "evidence": "qualification 42895151951 en 55 min sans build Ladybird ; 60 checks verts"
+      },
+      {
+        "pr": 285,
+        "sha": "376ed88",
+        "subject": "P13 #264 passation sous IF coupe ; C22 inventaire VMA sur demande",
+        "head_qualifie": "b3e474d",
+        "evidence": "qualification 42915351551 CONVERGENCE_OK, C22 6/6 KVM g2 108-208 Kio, P13_STRICT_OK SMP1/2/4 ; soak 42915355841 9/9"
+      },
+      {
+        "pr": 284,
+        "sha": "77dacdb",
+        "subject": "selection stricte de l'artefact Ladybird (Nightly)",
+        "head_qualifie": "ca73b2f",
+        "evidence": "Nightly 42930882440 vert, artefact par provenance"
+      },
+      {
+        "pr": 287,
+        "sha": "063a98b",
+        "subject": "P10 composition GPU des fenetres (VIRGL) + selection stricte GPU composition",
+        "head_qualifie": "a56cfdd",
+        "evidence": "GPU composition 42937589528 : LADYBIRD_BENCH_OK, 69,3 M px poses par le GPU / 30 s (VIRGL logiciel)"
+      },
+      {
+        "pr": 286,
+        "sha": "d37ca9e",
+        "subject": "compositord tranche 1 ring 3 experimentale",
+        "head_qualifie": "e27c825",
+        "evidence": "Native IPC : COMPOSITED_CAPTURE_OK exacts=64000 faux=0, empreinte relue dans le tampon affiche"
+      }
+    ],
+    "review_findings_fixed": {
+      "282": 2,
+      "286": 3,
+      "287": 2
+    }
   }
 }
