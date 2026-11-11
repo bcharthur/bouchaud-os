@@ -253,3 +253,42 @@ fn table_gpt_ecrite_par_un_outil_independant() {
     assert_eq!(guid_disque(&disque[512..1024]), Some(attendu));
     assert_eq!(identite(Some(&disque[512..1024]), Some(attendu)), Identite::Autorisee);
 }
+
+// --- Revue #299 : un support est (controleur, emplacement) -------------------
+
+#[test]
+fn meme_emplacement_sur_deux_controleurs_est_ambigu() {
+    // Avant le correctif, seuls les `slot_id` etaient comptes : deux cles
+    // portant le GUID sur deux controleurs xHCI, chacune en emplacement 1,
+    // passaient pour un seul support et les ecritures restaient permises.
+    let mut r = SupportsAutorises::neuf();
+    assert!(!r.note(0xfebf_0000, 1));
+    assert!(r.note(0xfebe_0000, 1), "meme slot, autre controleur : deux supports");
+}
+
+#[test]
+fn le_meme_support_sonde_deux_fois_n_est_pas_ambigu() {
+    // Boite noire puis pilote de volume : meme controleur, meme emplacement.
+    let mut r = SupportsAutorises::neuf();
+    assert!(!r.note(0xfebf_0000, 3));
+    assert!(!r.note(0xfebf_0000, 3));
+    assert!(!r.ambigu());
+    assert!(r.note(0xfebf_0000, 4), "autre emplacement, meme controleur : deux supports");
+}
+
+#[test]
+fn registre_plein_est_ambigu() {
+    let mut r = SupportsAutorises::neuf();
+    for k in 0..SUPPORTS_AUTORISES_MAX as u8 {
+        r.note(0x1000, k);
+    }
+    assert!(r.ambigu());
+    let mut r = SupportsAutorises::neuf();
+    r.note(0x1000, 0);
+    // Un seul support, puis d'autres que le registre ne peut plus retenir :
+    // jamais d'oubli silencieux.
+    for k in 1..=SUPPORTS_AUTORISES_MAX as u8 {
+        assert!(r.note(0x2000 + k as u64, k));
+    }
+    assert!(r.ambigu());
+}

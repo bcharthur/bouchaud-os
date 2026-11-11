@@ -45,11 +45,13 @@ pub const GUID_AUTORISE: Option<[u8; 16]> = regle::guid_autorise(option_env!("BO
 
 static REFUSEES: AtomicU64 = AtomicU64::new(0);
 static REFUSEES_PAR_SUPPORT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-/// Les emplacements xHCI (`slot_id`) qui ont presente le GUID autorise
-/// depuis le demarrage. Par emplacement, et non par sonde : la meme cle est
-/// lue par la boite noire PUIS par le pilote de volume, et ce n'est qu'UN
-/// support.
-static SLOTS_AUTORISES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Les supports (controleur xHCI, emplacement) qui ont presente le GUID
+/// autorise depuis le demarrage. Par support, et non par sonde : la meme cle
+/// est lue par la boite noire PUIS par le pilote de volume, et ce n'est qu'UN
+/// support. Le controleur compte : un `slot_id` est local a son controleur
+/// (revue #299).
+static SUPPORTS_AUTORISES: crate::kernel::sync::SpinLockIrq<regle::SupportsAutorises> =
+    crate::kernel::sync::SpinLockIrq::new(regle::SupportsAutorises::neuf());
 static AMBIGU: AtomicBool = AtomicBool::new(false);
 
 fn indice(support: Support) -> usize {
@@ -95,7 +97,8 @@ pub fn scsi(identite: Identite, cdb: &[u8]) -> bool {
 
 /// L'identite d'un stockage USB d'apres son bloc LBA 1, ETABLIE ET JOURNALISEE.
 ///
-/// Un second emplacement qui presente le GUID autorise rend la situation
+/// Un second support (autre controleur ou autre emplacement) qui presente le
+/// GUID autorise rend la situation
 /// AMBIGUE pour le reste de la session : plus aucune ecriture USB n'est
 /// permise, sur aucun des supports. Une cle autorisee retiree puis rebranchee
 /// sur un autre emplacement compte donc pour deux : le refus est le repli.
@@ -105,19 +108,15 @@ pub fn scsi(identite: Identite, cdb: &[u8]) -> bool {
 /// arrivee, la premiere EST la seule autorisee, et sa sonde de montage lui
 /// envoie `SYNCHRONIZE CACHE` (sans donnees, apres aucune ecriture : rien n'est
 /// modifie). Aucun peripherique ne peut savoir qu'un autre arrivera.
-pub fn etablit_identite(slot: u8, bloc_lba1: Option<&[u8]>) -> Identite {
+pub fn etablit_identite(controleur: u64, slot: u8, bloc_lba1: Option<&[u8]>) -> Identite {
     let id = regle::identite(bloc_lba1, GUID_AUTORISE);
-    if id == Identite::Autorisee {
-        SLOTS_AUTORISES[slot as usize / 64].fetch_or(1 << (slot % 64), Ordering::AcqRel);
-        let n: u32 = SLOTS_AUTORISES.iter().map(|m| m.load(Ordering::Acquire).count_ones()).sum();
-        if n >= 2 {
-            AMBIGU.store(true, Ordering::Release);
-        }
+    if id == Identite::Autorisee && SUPPORTS_AUTORISES.lock().note(controleur, slot) {
+        AMBIGU.store(true, Ordering::Release);
     }
     if LECTURE_SEULE {
         crate::serial_println!(
-            "BOUCHAUD_MEDIA_IDENTITE support=usb slot={} identite={} ambigu={}",
-            slot, id.nom(), AMBIGU.load(Ordering::Acquire) as u8
+            "BOUCHAUD_MEDIA_IDENTITE support=usb controleur={:#x} slot={} identite={} ambigu={}",
+            controleur, slot, id.nom(), AMBIGU.load(Ordering::Acquire) as u8
         );
     }
     id

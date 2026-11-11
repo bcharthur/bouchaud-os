@@ -116,8 +116,13 @@ lance() {
         i=$((i + 1))
         python3 tools/ci/fabrique-disque-gpt.py "$d/cle$i.img" --mio 32 --nom CLE >/dev/null || return 1
         python3 tools/release/pose_guid_disque_gpt.py "$d/cle$i.img" "$guid" >/dev/null || return 1
+        # La cle 1 sur le premier controleur xHCI, les suivantes sur un SECOND
+        # (revue #299 : un slot_id est local a son controleur ; deux cles sur
+        # deux controleurs recoivent le meme emplacement).
+        local bus=xhci.0 port=1
+        [ "$i" -ge 2 ] && { bus=xhci2.0; port=$((i - 1)); }
         usb+=(-drive "if=none,id=cle$i,format=raw,file=$d/cle$i.img"
-              -device "usb-storage,bus=xhci.0,port=$i,drive=cle$i,removable=on")
+              -device "usb-storage,bus=$bus,port=$port,drive=cle$i,removable=on")
     done
     for f in boot scenario nvme $(seq -f 'cle%g' 1 $i); do
         empreinte "$d/$f.img" > "$d/$f.avant"
@@ -128,7 +133,7 @@ lance() {
         -drive format=raw,file="$d/boot.img" \
         -drive format=raw,file="$d/scenario.img" \
         -drive if=none,id=nvm,format=raw,file="$d/nvme.img" -device nvme,serial=cle-usb-test,drive=nvm \
-        -device qemu-xhci,id=xhci "${usb[@]}" \
+        -device qemu-xhci,id=xhci -device qemu-xhci,id=xhci2 "${usb[@]}" \
         -m 2048 -smp 2 -display none -no-reboot \
         -trace events="$EVENEMENTS" -D "$d/qemu-trace.log" \
         -serial file:"$d/serie.log"
@@ -191,7 +196,7 @@ lance autorisee "$BOOT_CLE" "$GUID"
 d="$SORTIE/autorisee"
 commun "$d"
 exige "$d/propre.log" 'BOUCHAUD_DISQUES_INTERNES lecture_seule=1 image=cle-usb-test media_autorise=guid-gpt' 'l image s annonce en lecture seule, GUID grave'
-exige "$d/propre.log" 'BOUCHAUD_MEDIA_IDENTITE support=usb slot=[0-9]+ identite=autorisee ambigu=0' 'la cle est reconnue par son GUID GPT'
+exige "$d/propre.log" 'BOUCHAUD_MEDIA_IDENTITE support=usb controleur=0x[0-9a-f]+ slot=[0-9]+ identite=autorisee ambigu=0' 'la cle est reconnue par son GUID GPT'
 for f in boot scenario nvme; do
     if change "$d/$f"; then plainte "image $f MODIFIEE ($(cat "$d/$f.avant") -> $(cat "$d/$f.apres"))"; else ok "image $f intacte (sha256 $(cut -c1-16 "$d/$f.apres"))"; fi
 done
@@ -232,7 +237,7 @@ AUTRE=$(python3 tools/release/pose_guid_disque_gpt.py --tire)
 lance etrangere "$BOOT_CLE" "$AUTRE"
 d="$SORTIE/etrangere"
 commun "$d"
-exige "$d/propre.log" 'BOUCHAUD_MEDIA_IDENTITE support=usb slot=[0-9]+ identite=etrangere' 'la cle etrangere est reconnue comme telle'
+exige "$d/propre.log" 'BOUCHAUD_MEDIA_IDENTITE support=usb controleur=0x[0-9a-f]+ slot=[0-9]+ identite=etrangere' 'la cle etrangere est reconnue comme telle'
 for f in boot scenario nvme cle1; do
     if change "$d/$f"; then plainte "image $f MODIFIEE"; else ok "image $f intacte"; fi
 done
@@ -246,11 +251,15 @@ exige "$d/propre.log" 'BOUCHAUD_ECRITURE_INTERNE_REFUSEE support=usb .*identite=
 
 # --- 3. Deux cles portant le GUID : AMBIGU ----------------------------------
 echo
-echo "=== [$ACCEL] 3. image cle-usb-test, deux cles portant le meme GUID ==="
+echo "=== [$ACCEL] 3. image cle-usb-test, deux cles portant le meme GUID, sur DEUX controleurs xHCI ==="
 lance ambigu "$BOOT_CLE" "$GUID" "$GUID"
 d="$SORTIE/ambigu"
 commun "$d"
 exige "$d/propre.log" 'BOUCHAUD_MEDIA_IDENTITE support=usb .*ambigu=1' 'l ambiguite est detectee'
+# Les deux cles ont-elles vraiment ete vues sur deux controleurs ? Sinon le
+# scenario ne prouve pas ce qu'il dit.
+nctrl=$(grep -aoE 'BOUCHAUD_MEDIA_IDENTITE support=usb controleur=0x[0-9a-f]+' "$d/propre.log" | sort -u | wc -l)
+[ "$nctrl" -ge 2 ] && ok "les cles autorisees sont vues sur $nctrl controleurs distincts" || plainte "une seule identite de controleur vue ($nctrl)"
 for f in boot scenario nvme cle1 cle2; do
     if change "$d/$f"; then plainte "image $f MODIFIEE"; else ok "image $f intacte"; fi
 done

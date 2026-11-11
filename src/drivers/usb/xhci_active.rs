@@ -5194,6 +5194,7 @@ const REFUS_CLE_USB_TEST: &str = "refus-cle-usb-test";
 fn etablit_identite_stockage(controller: &mut Controller, device: &mut Device, index: usize) {
     let taille = controller.stockages[index].taille_bloc as usize;
     let slot = controller.stockages[index].slot_id;
+    let controleur = controller.base as u64;
     let bloc = if (512..=4096).contains(&taille) && controller.stockages[index].blocs > 1 {
         let cdb = stockage::cdb_transfert_10(false, 1, 1);
         match bot_commande(controller, device, index, &cdb, true, taille as u32) {
@@ -5205,7 +5206,7 @@ fn etablit_identite_stockage(controller: &mut Controller, device: &mut Device, i
     } else {
         None
     };
-    controller.stockages[index].identite = crate::drivers::ecriture_interne::etablit_identite(slot, bloc);
+    controller.stockages[index].identite = crate::drivers::ecriture_interne::etablit_identite(controleur, slot, bloc);
 }
 
 /// Une commande du transport Bulk-Only : CBW, donnees, CSW.

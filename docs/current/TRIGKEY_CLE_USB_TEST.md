@@ -25,7 +25,9 @@ La seule écriture permise vise la clé de démarrage elle-même, reconnue sans 
   - L'identité n'est accordée que si toutes ces conditions sont réunies : signature exacte, somme CRC32 exacte, `MyLBA == 1` et GUID identique.
   - Le moindre écart donne `inconnue` ou `etrangere`.
 - **Le GUID est absent ou invalide dans le noyau ?** Aucun support n'est autorisé, et l'image est entièrement en lecture seule.
-- **Ambiguïté.** Dès qu'un second emplacement xHCI présente le GUID, plus aucune écriture USB n'est permise jusqu'à l'extinction.
+- **Ambiguïté.** Dès qu'un second support présente le GUID, plus aucune écriture USB n'est permise jusqu'à l'extinction.
+  - Un support est identifié par le couple (contrôleur xHCI, emplacement), car un `slot_id` est local à son contrôleur (revue #299).
+  - Le registre retient 16 supports au plus. Plein, il déclare la situation ambiguë, sans oubli silencieux.
   - Une clé retirée puis rebranchée sur un autre emplacement compte pour deux. Le refus est le repli.
 - **Listes blanches, pas listes noires.** Une commande inconnue est refusée.
   - Sur NVMe, `Set Features` n'est permis que pour le nombre de files (FID 7, sans « save »).
@@ -44,7 +46,7 @@ Elle s'applique aux seuls points où une commande quitte la machine. `tools/veri
 
 - Sur NVMe, `admin` est déduit de l'identifiant de la file (`file == 0`), le même qui choisit la sonnette.
   - Une file d'E/S ne peut donc pas être prise pour la file admin, où `0x01` (écriture) serait jugé comme `Create I/O SQ`.
-- La règle elle-même est pure et sans allocation : `src/drivers/api/stockage_regle.rs`. Elle est testée sur l'hôte par `tools/securite/test_stockage_regle.rs` (15 tests).
+- La règle elle-même est pure et sans allocation : `src/drivers/api/stockage_regle.rs`. Elle est testée sur l'hôte par `tools/securite/test_stockage_regle.rs` (18 tests).
   - Ces tests incluent une table GPT écrite par un outil indépendant du noyau.
 
 ### Défaut corrigé au passage
@@ -89,10 +91,10 @@ L'énumération USB est séquentielle. Avec deux clés portant le GUID, la premi
 |---|---|
 | clé autorisée | images boot/scenario/nvme **intactes** ; aucune commande interdite dans la trace ; la clé est écrite et la marque de la sonde est relue ; commandes interdites refusées même sur elle |
 | clé étrangère | toutes les images intactes ; aucune écriture ni vidange USB dans la trace |
-| deux clés, même GUID | ambiguïté détectée ; aucune écriture de données ; au plus une vidange (limite ci-dessus) |
+| deux clés, même GUID, sur **deux contrôleurs xHCI** (même `slot=1`) | ambiguïté détectée ; aucune écriture de données ; au plus une vidange (limite ci-dessus). Témoin : le noyau d'avant la revue #299 ne voit pas l'ambiguïté (`ambigu=0`) et **écrit** la clé (2 × WRITE(10) dans la trace) |
 | **témoin** (sans `cle-usb-test`) | les images **changent**, la trace **voit** les écritures, Format NVM, FORMAT UNIT… Sans ce témoin, un banc aveugle serait vert |
 
-Mesuré localement, TCG : 89 vérifications, `CLE_USB_TEST_OK`. KVM : exécuté en CI uniquement, car la machine de développement n'a pas `/dev/kvm`.
+Mesuré localement, TCG : 90 vérifications, `CLE_USB_TEST_OK`. KVM : exécuté en CI uniquement, car la machine de développement n'a pas `/dev/kvm`.
 
 **L'image UEFI réelle**, essai local unique sous OVMF + TCG, non automatisé en CI :
 - **Configuration** : `bouchaud-trigkey.img`, construite avec `BO_CLE_USB_TEST=1`, démarrée comme clé `usb-storage` (bootindex 0), avec un NVMe GPT interne et 240 s de fonctionnement.

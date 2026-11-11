@@ -683,6 +683,7 @@ fn blackbox_find_partition(
     let mut sector = [0u8; 512];
     blackbox_read_blocks(controller, storage, 1, 1, &mut sector)?;
     storage.identite = crate::drivers::ecriture_interne::etablit_identite(
+        controller.base as u64,
         storage.slot_id,
         Some(&sector),
     );

@@ -343,3 +343,47 @@ pub fn identite(bloc_lba1: Option<&[u8]>, autorise: Option<[u8; 16]>) -> Identit
         _ => Identite::Etrangere,
     }
 }
+
+// --- Les supports qui se presentent comme autorises ---------------------------
+
+/// Combien de supports DISTINCTS retenir. Au-dela, la situation est jugee
+/// ambigue (refus) : un registre plein ne doit jamais devenir un oubli.
+pub const SUPPORTS_AUTORISES_MAX: usize = 16;
+
+/// Les supports qui ont presente le GUID autorise depuis le demarrage, chacun
+/// identifie par (controleur, emplacement).
+///
+/// Revue #299 : un `slot_id` xHCI est LOCAL a son controleur. Deux cles
+/// portant le GUID sur deux controleurs peuvent recevoir le meme emplacement ;
+/// compter les emplacements seuls les confondait, et l'ambiguite n'etait pas
+/// vue. La boite noire puis le pilote de volume sondent la MEME cle : meme
+/// controleur, meme emplacement, un seul support.
+pub struct SupportsAutorises {
+    vus: [(u64, u8); SUPPORTS_AUTORISES_MAX],
+    n: usize,
+    plein: bool,
+}
+
+impl SupportsAutorises {
+    pub const fn neuf() -> Self {
+        Self { vus: [(0, 0); SUPPORTS_AUTORISES_MAX], n: 0, plein: false }
+    }
+
+    /// Note qu'un support a presente le GUID ; rend `true` si la situation est
+    /// desormais ambigue (deux supports distincts, ou registre plein).
+    pub fn note(&mut self, controleur: u64, slot: u8) -> bool {
+        if !self.vus[..self.n].contains(&(controleur, slot)) {
+            if self.n == SUPPORTS_AUTORISES_MAX {
+                self.plein = true;
+            } else {
+                self.vus[self.n] = (controleur, slot);
+                self.n += 1;
+            }
+        }
+        self.ambigu()
+    }
+
+    pub fn ambigu(&self) -> bool {
+        self.n >= 2 || self.plein
+    }
+}
