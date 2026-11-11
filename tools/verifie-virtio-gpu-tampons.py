@@ -91,7 +91,12 @@ def verifie(t: dict, src: str) -> list:
             or ABANDON not in corps(t["gfx"], "fn presente_virtio(") \
             or QUITTE not in corps(t["gfx"], "fn quitte_memoire_scanout("):
         fautes.append("bochs.rs : l'abandon du scanout n'en quitte plus la memoire.")
-    for f in ("pub fn present() {", "pub fn present_rect("):
+    # BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : `present_rect` delegue a
+    # `presente_rect_juge` (qui copie et compte) ; `present_rect_verifie` aussi.
+    if "presente_rect_juge(" not in corps(t["gfx"], "pub fn present_rect(") \
+            or "presente_rect_juge(" not in corps(t["gfx"], "pub fn present_rect_verifie("):
+        fautes.append("bochs.rs : pub fn present_rect ne passe plus par presente_rect_juge.")
+    for f in ("pub fn present() {", "fn presente_rect_juge("):
         c = corps(t["gfx"], f)
         if "OCTETS_COPIES.fetch_add(" not in c or "OCTETS_DIRECTS.fetch_add(" not in c:
             fautes.append(f"bochs.rs : {f.split('(')[0]} ne compte plus ses copies.")
