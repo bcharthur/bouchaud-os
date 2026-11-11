@@ -1620,17 +1620,62 @@ fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// Imbrication maximale de `run` (un script qui en lance un autre). Au-dela,
+/// erreur controlee : un script qui se lance lui-meme epuisait la pile noyau.
+const RUN_PROFONDEUR_MAX: usize = 8;
+static RUN_PROFONDEUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Taille maximale d'un script lu par `run`.
+const RUN_OCTETS_MAX: usize = 256 * 1024;
+
+/// `run <script>` : execute un script ligne a ligne.
+///
+/// BOUCHAUD_RUN_SANS_VERROU_V1. L'ancienne version tenait le garde du RAMFS
+/// pendant TOUTE l'execution du script : la premiere ligne qui touchait au
+/// systeme de fichiers (`ls`, `cat`... et deja la journalisation de la ligne)
+/// le reprenait -> panique lockdep `vfs(50)`, ou blocage sans lockdep. Ici le
+/// verrou n'est tenu que pour resoudre et verifier le chemin ; le contenu est
+/// copie par la couche `backing` (fichier en memoire OU adosse au disque,
+/// comme `cat`), verrou rendu, puis execute.
 fn run_script(argc: usize, argv: &[&str; 12], cwd: &mut usize) -> i32 {
     if argc < 2 { println!("usage: run <script>"); return 1; }
-    let fs = ramfs::fs();
-    let idx = match fs.resolve_checked(argv[1], *cwd) {
-        Ok(i) => i,
-        Err(e) => { println!("run: {}", e); return 1; }
+    let verdict: Result<usize, &'static str> = {
+        let fs = ramfs::fs();
+        match fs.resolve_checked(argv[1], *cwd) {
+            Err(e) => Err(e),
+            Ok(i) if fs.nodes[i].kind != crate::fs::ramfs::NodeKind::File => Err("pas un fichier"),
+            Ok(i) if !fs.can(i, crate::fs::ramfs::PERM_R) => Err("permission denied"),
+            Ok(i) => Ok(i),
+        }
     };
-    if fs.nodes[idx].kind != crate::fs::ramfs::NodeKind::File { println!("run: pas un fichier"); return 1; }
-    if !fs.can(idx, crate::fs::ramfs::PERM_R) { println!("run: permission denied"); return 1; }
-    // Copie le contenu (la suite peut modifier le FS pendant l'execution).
-    let content = fs.nodes[idx].content_str();
+    let idx = match verdict {
+        Ok(i) => i,
+        Err(e) => { println!("run: {}: {}", argv[1], e); return 1; }
+    };
+    let taille = crate::fs::backing::logical_len(idx);
+    if taille > RUN_OCTETS_MAX {
+        println!("run: {}: script trop gros ({} octets, max {})", argv[1], taille, RUN_OCTETS_MAX);
+        return 1;
+    }
+    let mut octets = alloc::vec![0u8; taille];
+    let mut lus = 0;
+    while lus < taille {
+        let n = crate::fs::backing::read_at(idx, lus, &mut octets[lus..]);
+        if n == 0 { println!("run: {}: lecture interrompue a l'octet {}", argv[1], lus); return 1; }
+        lus += n;
+    }
+    let profondeur = RUN_PROFONDEUR.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    struct Sortie;
+    impl Drop for Sortie {
+        fn drop(&mut self) { RUN_PROFONDEUR.fetch_sub(1, core::sync::atomic::Ordering::AcqRel); }
+    }
+    let _sortie = Sortie;
+    if profondeur >= RUN_PROFONDEUR_MAX {
+        println!("run: {}: imbrication trop profonde (max {})", argv[1], RUN_PROFONDEUR_MAX);
+        set_status(1);
+        return 1;
+    }
+    let content = String::from_utf8_lossy(&octets);
     for raw in content.lines() {
         let l = trim(raw);
         if l.is_empty() || l.starts_with('#') { continue; }
