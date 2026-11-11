@@ -154,6 +154,45 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# Bras B0 (temoin, revue #295) : bureau ring 3 configure, compositeur
+# INVALIDE. Le noyau doit lever la reservation de l'ecran, rendre le client
+# deja lance (il meurt), et laisser le bureau noyau demarrer et composer.
+# Sans la levee, `desktop` serait refuse pour toute la session.
+# --------------------------------------------------------------------------
+Z="$SORTIE/sans-compositeur"; mkdir -p "$Z/scen/bin"
+printf 'pas un ELF\n' > "$Z/scen/bin/composited"
+cp "$SORTIE/bin/mire-gpu" "$Z/scen/mire-gpu"
+chmod +x "$Z/scen/bin/composited" "$Z/scen/mire-gpu"
+echo "/mire-gpu" > "$Z/scen/bureau-ring3"
+: > "$Z/scen/garde-vm-vivante"
+printf '%s\n' 'echo BUREAU_RING3_TEMOIN_BEGIN' 'export BO_AUTOSTART_APP=/mire-gpu' 'desktop' > "$Z/scen/autorun"
+echo "=== bras B0 : compositeur invalide -- la reservation de l'ecran doit etre levee ==="
+demarre sans-compositeur
+LIMITE=$((SECONDS + 150))
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+  if grep -aqE "$fatal_re" "$Z/serie.log"; then break; fi
+  if [ "$(propre "$Z/serie.log" | grep -acE '\[GPU-COMPOSITION\] .*trames_clients=[1-9]' || true)" -gt 0 ]; then break; fi
+  if grep -aq 'BOUCHAUD_BUREAU_NOYAU_REFUSE' "$Z/serie.log"; then sleep 2; break; fi
+  if (( SECONDS >= LIMITE )); then echo "ECHEANCE bras B0" >&2; break; fi
+  sleep 1
+done
+arrete
+propre "$Z/serie.log" > "$Z/serie.propre"
+grep -aE 'BUREAU_RING3|BOUCHAUD_COMPOSITEUR|BUREAU_NOYAU|APP_LAUNCH' "$Z/serie.propre" | cut -c1-200 | tail -n 10 || true
+grep -aqE "$fatal_re" "$Z/serie.propre" && echec "B0 : panique noyau" || ok "B0 : aucune panique noyau"
+grep -aq 'BOUCHAUD_COMPOSITEUR_ECHEC .*reservation_ecran=levee' "$Z/serie.propre" \
+  && ok "B0 : compositeur invalide, reservation de l'ecran levee" || echec "B0 : reservation de l'ecran non levee"
+grep -aq 'BOUCHAUD_BUREAU_NOYAU_REFUSE' "$Z/serie.propre" \
+  && echec "B0 : bureau noyau refuse malgre l'absence de compositeur" || ok "B0 : bureau noyau non refuse"
+[ "$(grep -acE '\[GPU-COMPOSITION\] .*trames_clients=[1-9]' "$Z/serie.propre" || true)" -gt 0 ] \
+  && ok "B0 : le bureau noyau a repris l'ecran et compose une application" || echec "B0 : bureau noyau absent"
+z_client=$(grep -aoE 'BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+' "$Z/serie.propre" | grep -oE '[0-9]+$' | sed -n 1p || true)
+grep -aqE "PROCESS_(EXIT|DEATH) t=[0-9]+ pid=${z_client:-x} " "$Z/serie.propre" \
+  && ok "B0 : le client confie au compositeur absent est termine" || echec "B0 : client orphelin (pid ${z_client:-?})"
+grep -aq 'BOUCHAUD_EXEC_AVORTE poignees_liberees' "$Z/serie.propre" \
+  && ok "B0 : poignees du processus avorte rendues" || echec "B0 : poignees du processus avorte non rendues"
+
+# --------------------------------------------------------------------------
 # Bras A : le meme client sous le bureau noyau actuel (reference).
 # --------------------------------------------------------------------------
 A="$SORTIE/noyau"; mkdir -p "$A/scen"

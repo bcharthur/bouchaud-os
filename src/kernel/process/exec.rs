@@ -381,6 +381,14 @@ fn construit_tache(
         Some(process) => process,
         None => return Err("memoire physique insuffisante (espace d'adressage)".to_string()),
     };
+    // BOUCHAUD_EXEC_POIGNEES_AVORTEES_V1 (temoin B0 du banc bureau ring 3,
+    // revue #295) : `prepare` peut installer des poignees natives dans la table
+    // de CE pid (capacite d'affichage, `Fenetre` d'un client...). Si l'image
+    // est ensuite refusee, le processus ne tournera jamais, et la table
+    // restait au registre jusqu'au menage opportuniste -- avec les objets
+    // qu'elle tient : une `Fenetre` y gardait son client vivant, orphelin.
+    // Tout echec apres ce point rend la table ; seul le succes la garde.
+    let mut avortee = TablePoigneesAvortee { pid: process.pid, armee: true };
     let apres_espace_ns = crate::kernel::timer::monotonic_ns();
 
     // Les descripteurs herites sont poses avant la construction de la pile :
@@ -514,7 +522,24 @@ fn construit_tache(
         // (tools/ci/symbolise_fautes.py).
         vmm::user_load_base(),
     ));
+    avortee.armee = false;
     Ok((process, first))
+}
+
+/// Rend la table de poignees natives d'un processus dont la construction a
+/// echoue (BOUCHAUD_EXEC_POIGNEES_AVORTEES_V1).
+struct TablePoigneesAvortee {
+    pid: u32,
+    armee: bool,
+}
+
+impl Drop for TablePoigneesAvortee {
+    fn drop(&mut self) {
+        if self.armee {
+            crate::kernel::native::handle::registry::release_process(self.pid);
+            crate::serial_println!("BOUCHAUD_EXEC_AVORTE poignees_liberees pid={}", self.pid);
+        }
+    }
 }
 
 /// Petit programme ELF64 statique genere a la volee, entierement en langage
