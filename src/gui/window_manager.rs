@@ -467,6 +467,9 @@ fn degat_curseur(x: usize, y: usize) -> Rect {
 pub fn run() {
     // Le desktop est un vrai fil noyau. Le faire tourner directement depuis
     // le fil de boot laisse CURRENT=NO_TASK et rend toute WaitQueue illegale.
+    // BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : l'ecran est au bureau noyau ;
+    // `bo_display_present` le refuse desormais (un seul compositeur ecrit).
+    crate::kernel::native::affichage::bureau_noyau_demarre();
     task::run_noyau(fil_bureau, "desktop");
 }
 

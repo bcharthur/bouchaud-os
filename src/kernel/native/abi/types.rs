@@ -4,7 +4,7 @@ pub const ABI_MAJOR: u16 = 1;
 /// 1.1 (BOUCHAUD_NATIVE_ABI_1_1) : PROCESS_SPAWN/INFO/KILL, WAITSET_WAIT,
 /// TIME_NOW, objet Process, signal TERMINATED, erreur TimedOut. Purement
 /// additif : un programme 1.0 ne voit aucune difference.
-pub const ABI_MINOR: u16 = 2;
+pub const ABI_MINOR: u16 = 3;
 pub const ABI_VERSION_PACKED: u64 = ((ABI_MAJOR as u64) << 16) | ABI_MINOR as u64;
 
 /// Native syscall namespace. Linux x86-64 syscalls currently used by the
@@ -30,6 +30,9 @@ pub enum Error {
     TooLarge = 12,
     NotFound = 13,
     TimedOut = 14,
+    /// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 (ABI 1.3) : le peripherique a
+    /// refuse (presentation non affichee, relecture impossible).
+    DeviceError = 15,
 }
 
 impl Error {
@@ -50,6 +53,9 @@ pub enum ObjectKind {
     /// BOUCHAUD_UPDATE_MECANISME_V1 : capacite de mise a jour (ABI 1.2).
     /// Jamais creee par un appel : le noyau la donne au superviseur systeme.
     Update = 6,
+    /// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : capacite d'affichage (ABI 1.3).
+    /// Jamais creee par un appel : le noyau la donne a `/bin/composited`.
+    Display = 7,
     LegacyFile = 0x100,
     LegacyWindow = 0x101,
     LegacySocket = 0x102,
@@ -107,6 +113,8 @@ impl Rights {
     /// Capacite Update : ecrire le slot INACTIF et y poser un candidat
     /// (ABI 1.2 ; reserve a `updated`, aucune operation ne l'accepte encore).
     pub const UPDATE_INSTALL: Self = Self(1 << 9);
+    /// Capacite Display : poser un rectangle d'une region a l'ecran (ABI 1.3).
+    pub const DISPLAY_PRESENT: Self = Self(1 << 10);
 
     /// Tous les droits definis.
     ///
@@ -116,7 +124,7 @@ impl Rights {
     pub const TOUS: Self = Self(
         Self::READ.0 | Self::WRITE.0 | Self::SIGNAL.0 | Self::MAP.0 |
         Self::DUP.0 | Self::TRANSFER.0 | Self::INSPECT.0 | Self::WAIT.0 |
-        Self::UPDATE_HEALTH.0 | Self::UPDATE_INSTALL.0
+        Self::UPDATE_HEALTH.0 | Self::UPDATE_INSTALL.0 | Self::DISPLAY_PRESENT.0
     );
 
     pub const CHANNEL_DEFAULT: Self = Self(

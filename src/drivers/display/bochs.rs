@@ -894,19 +894,23 @@ static VIRTIO_SCANOUT: AtomicBool = AtomicBool::new(false);
 
 /// Apres une copie dans la memoire du scanout virtio : transfert + flush du
 /// rectangle. Sans effet avec BGA ou le GOP.
+/// Vrai si le rectangle a ete transfere et affiche (ou si l'ecran n'est pas
+/// virtio) ; faux si le peripherique a refuse le transfert ou le flush.
 #[inline]
-fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) {
+fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
     if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
-        return;
+        return true;
     }
-    if !crate::drivers::virtio_gpu::presente(x, y, largeur, hauteur)
-        && !crate::drivers::virtio_gpu::actif()
-    {
+    if crate::drivers::virtio_gpu::presente(x, y, largeur, hauteur) {
+        return true;
+    }
+    if !crate::drivers::virtio_gpu::actif() {
         // Abandon : le peripherique ne repond plus. Le bureau continue de
         // composer, plus rien n'est presente -- et le journal l'a dit.
         VIRTIO_SCANOUT.store(false, Ordering::Release);
         quitte_memoire_scanout();
     }
+    false
 }
 
 /// Restaure le mode texte 80x25 (mode 03h) pour rendre la main au shell, apres
@@ -1413,31 +1417,60 @@ pub fn lfb_present_generation() -> u64 {
 }
 
 pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
+    let _ = presente_rect_juge(x, y, rect_width, rect_height, true);
+}
+
+/// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 (revue de la PR #286) : presente le
+/// rectangle IMMEDIATEMENT (jamais differe a la fin d'une trame) et dit
+/// pourquoi il ne l'a pas ete. Le firmware est refuse : son framebuffer
+/// n'est pas relu par `pixel_affiche`.
+pub fn present_rect_verifie(x: usize, y: usize, l: usize, h: usize) -> Result<(), &'static str> {
+    if firmware_backend_installed() {
+        return Err("firmware");
+    }
+    presente_rect_juge(x, y, l, h, false)
+}
+
+/// Le pixel (x,y) tel qu'il est dans le tampon AFFICHE (LFB : BGA, ou memoire
+/// du scanout virtio transferee a l'hote), pas dans le tampon arriere.
+pub fn pixel_affiche(x: usize, y: usize) -> Option<u32> {
+    if x >= width() || y >= height() || firmware_backend_installed() {
+        return None;
+    }
+    let lfb = unsafe { LFB };
+    if lfb.is_null() {
+        return None;
+    }
+    Some(unsafe { core::ptr::read_volatile(lfb.add(y * width() + x)) } & 0x00ff_ffff)
+}
+
+fn presente_rect_juge(x: usize, y: usize, rect_width: usize, rect_height: usize, differable: bool)
+    -> Result<(), &'static str> {
     PRESENTS_DEMANDES.fetch_add(1, Ordering::Relaxed);
     if firmware_backend_installed() {
         present_firmware_rect(x, y, rect_width, rect_height);
-        return;
+        return Ok(());
     }
     if userland_owns_display() {
         REFUS_USERLAND.fetch_add(1, Ordering::Relaxed);
-        return;
+        return Err("userland");
     }
     let debut_copie = crate::kernel::timer::monotonic_ns();
     let buf = back();
     if buf.is_empty() {
         REFUS_TAMPON.fetch_add(1, Ordering::Relaxed);
-        return;
+        return Err("tampon");
     }
     let lfb = unsafe { LFB };
     if lfb.is_null() {
         REFUS_LFB.fetch_add(1, Ordering::Relaxed);
-        return;
+        return Err("lfb");
     }
     let x1 = x.saturating_add(rect_width).min(width());
     let y1 = y.saturating_add(rect_height).min(height());
     if x >= x1 || y >= y1 {
         REFUS_RECT_VIDE.fetch_add(1, Ordering::Relaxed);
-        return;
+        return Err("rect-vide");
     }
     let count = x1 - x;
     // BOUCHAUD_GFX_PRESENT_BLOC_V1
@@ -1485,8 +1518,10 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     // presentation, contre huit megaoctets qu'il rend visibles.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     unsafe { core::arch::asm!("sfence", options(nomem, nostack, preserves_flags)) };
-    if !differe_dans_la_trame(x, y, count, y1 - y) {
-        presente_virtio(x, y, count, y1 - y);
+    if !(differable && differe_dans_la_trame(x, y, count, y1 - y))
+        && !presente_virtio(x, y, count, y1 - y)
+    {
+        return Err("virtio");
     }
 
     NANOS_DANS_PRESENT.fetch_add(
@@ -1499,6 +1534,7 @@ pub fn present_rect(x: usize, y: usize, rect_width: usize, rect_height: usize) {
     DERNIER_PRESENT_RECT.store(empaquete_rect(x, y, count, y1 - y), Ordering::Relaxed);
     DERNIER_PRESENT_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
     crate::drivers::gpu::note_present(count * (y1 - y) * core::mem::size_of::<u32>());
+    Ok(())
 }
 
 // --- Texte bitmap 8×8 (zéro allocation, zéro tas) ---------------------------
