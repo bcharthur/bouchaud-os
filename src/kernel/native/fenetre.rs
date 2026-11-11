@@ -37,8 +37,7 @@ pub mod contrat;
 
 /// Droits de la capacite donnee au compositeur : pomper/lire, configurer et
 /// fermer (WRITE), attendre, inspecter. Ni DUP ni TRANSFER.
-pub const DROITS_COMPOSITEUR: Rights =
-    Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::WAIT.0 | Rights::INSPECT.0);
+pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::WAIT.0 | Rights::INSPECT.0);
 
 /// Taille du rapport ecrit par `bo_fenetre_pompe` : dix `u32`.
 pub const ETAT_OCTETS: usize = 40;
