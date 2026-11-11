@@ -169,6 +169,10 @@ on:
         description: 'audit : exiger un build Ladybird neuf, posterieur au debut du run'
         type: boolean
         default: false
+      repetitions_piege:
+        description: 'diagnostic (#283) : demarrages froids par bras du piege du Compositor (8 par defaut, jamais moins)'
+        type: string
+        default: '8'
 
 run-name: ${{ inputs.palier == 'artefact' && format('ladybird-artefact {0}', inputs.empreinte) || '' }}
 
@@ -1368,7 +1372,15 @@ jobs:
       - name: Verifier le manifeste de l'artefact telecharge
         run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
       - name: Huit demarrages froids, bras http et blob, profil alterne
-        run: tools/ci/run_compositor_piege.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser 8
+        # BOUCHAUD_LADYBIRD_FORENSIQUE_V1 (#283) : plus de demarrages froids sur
+        # demande, pour attraper un gel rare ; jamais moins de 8.
+        env:
+          REPETITIONS: ${{ inputs.repetitions_piege || '8' }}
+        run: |
+          n=8
+          if [[ "$REPETITIONS" =~ ^[0-9]+$ ]] && (( REPETITIONS > 8 )); then n=$REPETITIONS; fi
+          (( n > 24 )) && n=24  # 48 demarrages ~ 60 min : sous le delai du job (75 min)
+          tools/ci/run_compositor_piege.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser "$n"
       - name: Journaux
         if: always()
         uses: actions/upload-artifact@v4
