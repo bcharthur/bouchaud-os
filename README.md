@@ -223,10 +223,25 @@ Sous Windows, `run.ps1` construit et lance une configuration complète, avec le 
 Il faut un QEMU avec `virtio-gpu-gl-pci` (virglrenderer) et une sortie OpenGL (SDL ou GTK). Le noyau négocie VIRGL tout seul quand l'hôte le propose, vérifie la convention du `BLIT` par un autotest relu au pixel, puis compose les fenêtres par le GPU ; sans VIRGL, rien ne change.
 
 ```bash
-tools/doom/build-linux.sh           # DOOM (Doomgeneric épinglé, Freedoom vérifié), facultatif
 qemu-system-x86_64 -m 2048 -smp 2 -serial stdio -vga none \
   -device virtio-gpu-gl-pci -display sdl,gl=on \
   -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+```
+
+Pour lancer aussi DOOM, qui est facultatif, le système invité doit trouver `/doom` et `/freedoom1.wad` sur un disque de runtime. Ce sont les mêmes étapes que le banc CI `tools/ci/run_gpu_composition.sh` :
+
+```bash
+tools/doom/build-linux.sh                         # Doomgeneric épinglé, Freedoom vérifié
+mkdir -p target/doom-runtime/scen
+cp target/doom-bouchaud/doom-bouchaud target/doom-runtime/scen/doom
+cp tools/doom/wads/freedoom1.wad target/doom-runtime/scen/
+chmod +x target/doom-runtime/scen/doom
+echo desktop > target/doom-runtime/scen/autorun
+IMAGE="$PWD/target/doom-runtime/disque.img" tools/userland/mkdisk.sh "$PWD/target/doom-runtime/scen"
+qemu-system-x86_64 -m 2048 -smp 2 -serial stdio -vga none \
+  -device virtio-gpu-gl-pci -display sdl,gl=on \
+  -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+  -drive format=raw,file=target/doom-runtime/disque.img
 ```
 
 Sous Windows : `.\run.ps1 -P10GPU` (et `-Doom` pour ajouter DOOM). Dans le journal, `BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK` puis `BOUCHAUD_GPU_COMPOSITION_OK` confirment le chemin GPU ; `gpu-composition off` (shell) revient à la composition processeur pour comparer.
