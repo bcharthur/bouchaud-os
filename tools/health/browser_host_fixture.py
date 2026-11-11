@@ -198,6 +198,27 @@ SON_WAV = _son_wav()
 # et anime son fond. Avant le correctif : contexte demande sur une connexion
 # morte, VERIFY, Compositor mort. Apres : reprise du lien pour CE WebContent,
 # trames presentees de nouveau.
+# BOUCHAUD_BUREAU_RING3_2B : une page vivante pour le bureau ring 3 -- des
+# blocs colores et une animation ; la cadence est journalisee (HOST_BUREAU_RAF),
+# ce qui prouve que le navigateur peint encore quand composited le compose.
+BUREAU_HTML = b'''<!doctype html><meta charset="utf-8"><title>Bureau ring 3</title>
+<body style="margin:0;font:28px sans-serif;background:#f4f1e8">
+<div style="display:flex;height:120px"><div style="flex:1;background:#c0392b"></div>
+<div style="flex:1;background:#27ae60"></div><div style="flex:1;background:#2980b9"></div></div>
+<p style="margin:16px">Ladybird, compose par composited (ring 3)</p>
+<div id="b" style="position:absolute;top:220px;left:0;width:80px;height:80px;background:#8e44ad"></div>
+<script>
+  let n = 0;
+  console.log("HOST_BUREAU_PAGE OK");
+  function tour() {
+    n++;
+    document.getElementById("b").style.left = ((n * 4) % 600) + "px";
+    if (n % 60 === 0) console.log(`HOST_BUREAU_RAF n=${n}`);
+    requestAnimationFrame(tour);
+  }
+  requestAnimationFrame(tour);
+</script></body>'''
+
 SITE_B_HTML = b'''<!doctype html><meta charset="utf-8"><title>site B</title>
 <body style="margin:0;font:32px sans-serif">site B<div id="lien">lien</div><script>
   console.log(`HOST_SITE_B OK origine=${location.origin} referent=${document.referrer ? new URL(document.referrer).host : "aucun"}`);
@@ -1897,6 +1918,7 @@ class Handler(BaseHTTPRequestHandler):
             "/worker-data.json": (WORKER_DATA_JSON, "application/json"),
             "/son.wav": (SON_WAV, "audio/wav"),
             "/site-b.html": (SITE_B_HTML, "text/html; charset=utf-8"),
+            "/bureau.html": (BUREAU_HTML, "text/html; charset=utf-8"),
             "/endurance.html": (ENDURANCE_HTML, "text/html; charset=utf-8"),
             "/endurance-relais.html": (ENDURANCE_RELAIS_HTML, "text/html; charset=utf-8"),
             "/memoire.html": (MEMOIRE_HTML, "text/html; charset=utf-8"),

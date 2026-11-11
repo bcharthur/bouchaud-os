@@ -81,6 +81,9 @@ EPREUVES = (
     _partout("R_SITES", "sites", "sites reels HTTPS (Example exige, Wikipedia mesure), pixels du Compositor"),
     _partout("R_CRASH_RENDU", "crash-rendu",
              "robustesse : crash d'un WebContent (reprise), isolation des cadres, cycle de vie des workers"),
+    # BOUCHAUD_BUREAU_RING3_2B
+    _partout("R_BUREAU_RING3", "bureau-ring3",
+             "bureau ring 3 : DOOM et Ladybird composes par composited (pile, deplacement, crash d'un client)"),
 )
 
 # Jobs producteurs de l'artefact dans un run consommateur, et ceux que chaque
