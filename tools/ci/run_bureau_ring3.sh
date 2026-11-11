@@ -109,7 +109,12 @@ prepare_ring3() {
 juge_capture() {
   local fenetres
   if [ ! -s "$1" ]; then echec "$4 : capture absente"; return; fi
-  fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$2" --jusqua "$3")
+  # MARQUEUR vide : l'etat a la fin du journal.
+  if [ -n "$3" ]; then
+    fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$2" --jusqua "$3")
+  else
+    fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$2")
+  fi
   # shellcheck disable=SC2086
   python3 tools/ci/verifie_capture_bureau_ring3.py "$1" $fenetres && ok "$4 ($fenetres)" || echec "$4 ($fenetres)"
 }
@@ -183,7 +188,7 @@ prepare_ring3 deux '@scenario deplace-empile' \
 demarre deux
 attend_et_capture deux 'COMPOSITED_BUREAU_(OK|FAIL)' \
   'COMPOSITED_BUREAU_FENETRE indice=1=deux-avant.ppm' \
-  'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1=deux-apres.ppm'
+  'COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE=deux-apres.ppm'
 D="$SORTIE/deux"; Q="$D/serie.propre"
 grep -aqE "$fatal_re" "$Q" && echec "B2 : panique noyau" || ok "B2 : aucune panique noyau"
 mapfile -t pids < <(pids_clients "$Q")
@@ -197,7 +202,7 @@ fi
 grep -aq 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "$Q" && ok "B2 : deplacement puis passage au premier plan joues" \
   || echec "B2 : scenario non joue"
 juge_capture "$D/deux-avant.ppm" "$Q" 'COMPOSITED_BUREAU_FENETRE indice=1' "B2 : deux fenetres empilees, decodees au pixel"
-juge_capture "$D/deux-apres.ppm" "$Q" 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "B2 : fenetre deplacee et remontee, decodee au pixel"
+juge_capture "$D/deux-apres.ppm" "$Q" 'COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE' "B2 : fenetre deplacee et remontee, decodee au pixel"
 premier_mort=$(grep -aoE 'COMPOSITED_BUREAU_CLIENT_MORT pid=[0-9]+' "$Q" | sed -n 1p || true)
 if [ -n "$premier_mort" ]; then
   # Le survivant continue d'etre compose apres la mort de l'autre.
@@ -238,6 +243,48 @@ grep -aqE 'PROCESS_FAULT' "$K" && echec "B3 : faute d'un processus" || ok "B3 : 
 juge_capture "$C/fin.ppm" "$K" 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "B3 : apres la relance, deux fenetres au pixel"
 juge_capture "$C/c-minimise.ppm" "$K" 'COMPOSITED_BUREAU_MINIMISE fenetre=0' "B3 : fenetre minimisee absente, l'autre redimensionnee 480x300 au pixel"
 juge_capture "$C/c-restaure.ppm" "$K" 'COMPOSITED_BUREAU_RESTAURE fenetre=0' "B3 : fenetre restauree au pixel"
+
+# --------------------------------------------------------------------------
+# Bras B4 (BOUCHAUD_BUREAU_RING3_MORT_ISOLEE_V1) : la mort d'UN client ne tue
+# pas les autres. Le banc applications l'a montre : la mire qui faute
+# emportait Ladybird, parce que la sortie de tout client arretait l'arbre du
+# navigateur enregistre. Ici le « navigateur » est une copie de la mire
+# installee sous /bo-navigateur (le noyau l'enregistre comme racine du
+# navigateur exactement comme Ladybird) : il doit survivre a la mort de
+# l'autre client, et rester compose. Sans le correctif : tue_par_gestionnaire.
+# --------------------------------------------------------------------------
+echo "=== bras B4 : la mort d'un client n'emporte pas le navigateur ==="
+prepare_ring3 isolee "/mire-gpu BO_MIRE_FAUTE_APRES=$FAUTE_APRES" "/bo-navigateur"
+cp "$SORTIE/bin/mire-gpu" "$SORTIE/isolee/scen/bo-navigateur"; chmod +x "$SORTIE/isolee/scen/bo-navigateur"
+demarre isolee
+I="$SORTIE/isolee"
+LIMITE=$((SECONDS + 300)); mort_vue=0
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+  if grep -aqE "$fatal_re" "$I/serie.log"; then break; fi
+  if [ "$mort_vue" = 0 ] && grep -aq 'COMPOSITED_BUREAU_CLIENT_MORT' "$I/serie.log"; then mort_vue=$SECONDS; fi
+  # Quinze secondes apres la mort : le survivant doit encore etre la.
+  if [ "$mort_vue" != 0 ] && (( SECONDS >= mort_vue + 15 )); then capture "$MONITEUR" "$I/fin.ppm"; sleep 1; break; fi
+  if (( SECONDS >= LIMITE )); then echo "ECHEANCE isolee" >&2; break; fi
+  sleep 0.5
+done
+arrete
+propre "$I/serie.log" > "$I/serie.propre"
+J="$I/serie.propre"
+grep -aqE "$fatal_re" "$J" && echec "B4 : panique noyau" || ok "B4 : aucune panique noyau"
+nav=$(grep -aoE 'BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+ chemin=/bo-navigateur' "$J" | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sed -n 1p || true)
+mire=$(grep -aoE 'BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+ chemin=/mire-gpu' "$J" | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sed -n 1p || true)
+grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" "$J" && ok "B4 : la mire est morte et vue morte" || echec "B4 : mort de la mire non vue"
+if grep -aqE "PROCESS_DEATH .*pid=${nav:-x} .*cause=tue_par_gestionnaire" "$J"; then
+  echec "B4 : le navigateur ${nav:-?} a ete TUE par la mort de la mire"
+else
+  ok "B4 : le navigateur ${nav:-?} n'est pas tue par la mort de la mire"
+fi
+grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${nav:-x}" "$J" && echec "B4 : le navigateur est mort" || ok "B4 : le navigateur vit encore"
+apres=$(awk -v m="COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" -v n="pid=${nav:-x} " \
+  'index($0, m) { vu = 1 } vu && /COMPOSITED_BUREAU_TRAMES/ && index($0, n) && /vivante=1/ { k++ } END { print k + 0 }' "$J")
+[ "$apres" -ge 1 ] && ok "B4 : le navigateur est encore compose apres la mort ($apres releves)" \
+  || echec "B4 : le navigateur n'est plus compose apres la mort de la mire"
+juge_capture "$I/fin.ppm" "$J" '' "B4 : capture apres la mort, le navigateur seul au pixel"
 
 # --------------------------------------------------------------------------
 # Bras B0 (temoin, revue #295) : bureau ring 3 configure, compositeur

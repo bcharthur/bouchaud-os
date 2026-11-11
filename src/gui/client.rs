@@ -1038,7 +1038,16 @@ impl Client {
             crate::gui::services::relance_apres_crash(self.pid, code);
             self.etat = Etat::Termine;
             let arbre = task::arbre_de(self.pid);
-            crate::gui::services::arrete();
+            // BOUCHAUD_BUREAU_RING3_MORT_ISOLEE_V1 : la mort d'UN client
+            // n'arrete que SON arbre. Avant, `services::arrete()` tuait ici,
+            // sans condition, l'arbre du navigateur enregistre -- quel que
+            // soit le client mort : la mire qui faute emportait Ladybird
+            // (banc ladybird / bureau ring 3, run 43088438133). Le navigateur
+            // n'est arrete que si c'est LUI qui vient de sortir.
+            crate::gui::services::oublie_racine(self.pid);
+            for pid in &arbre {
+                task::tue_processus(*pid, 0);
+            }
             task::nettoie_zombies();
             for pid in arbre { task::collect_child(pid); }
             return false;

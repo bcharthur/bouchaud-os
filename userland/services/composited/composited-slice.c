@@ -1017,8 +1017,13 @@ static int bureau(i64 affichage, u64 *pile)
                 deplace(0, fens[0].x + 8, fens[0].y + 4);
             } else {
                 remonte(0);
-                publie_fenetre(0, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=");
-                publie_fenetre(1, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=");
+                /* TOUTES les fenetres visibles : `remonte` decale le rang de
+                 * chacune. Ne republier que 0 et 1 laissait a une troisieme
+                 * (la mire du banc applications) un rang perime, egal a celui
+                 * de la fenetre remontee -- et le juge l'empilait au-dessus. */
+                for (int k = 0; k < nfen; k++)
+                    if (fens[k].visible) publie_fenetre(k, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=");
+                ecris("COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE\n");
             }
             etape++;
         }

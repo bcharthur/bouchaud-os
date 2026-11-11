@@ -39,6 +39,30 @@ class EtatFenetresTests(unittest.TestCase):
         self.assertEqual(fbr.etat(JOURNAL, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1"),
                          [(460, 256, 640, 400), (200, 146, 640, 400)])
 
+    def test_trois_fenetres_pile_republiee_entiere(self):
+        # Run 43088438133 : seules 0 et 1 etaient republiees apres `remonte(0)` ;
+        # la troisieme gardait son rang 2 perime, ex aequo avec la fenetre
+        # remontee, et le juge l'empilait au-dessus. Le compositeur republie
+        # desormais TOUTES les fenetres visibles, puis
+        # COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE.
+        j = (bloc("COMPOSITED_BUREAU_FENETRE indice=0", 16, 40, 66, 0)
+             + bloc("COMPOSITED_BUREAU_FENETRE indice=1", 17, 460, 256, 1)
+             + bloc("COMPOSITED_BUREAU_FENETRE indice=2", 18, 638, 318, 2)
+             + bloc("COMPOSITED_BUREAU_SCENARIO_FIN fenetre=0", 16, 200, 146, 2)
+             + bloc("COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1", 17, 460, 256, 0)
+             + bloc("COMPOSITED_BUREAU_SCENARIO_FIN fenetre=2", 18, 638, 318, 1)
+             + ["COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE", "COMPOSITED_BUREAU_CLIENT_MORT pid=18"])
+        self.assertEqual(fbr.etat(j, "COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE"),
+                         [(460, 256, 640, 400), (638, 318, 640, 400), (200, 146, 640, 400)])
+        # Sans la republication de la troisieme, l'ordre etait faux : le temoin.
+        perime = [l for l in j if l != "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=2"]
+        perime = perime[: perime.index("[COMPOSITED] pid=18", perime.index("COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1"))] \
+            + ["COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE"]
+        self.assertNotEqual(fbr.etat(perime, "COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE"),
+                            [(460, 256, 640, 400), (638, 318, 640, 400), (200, 146, 640, 400)])
+        # Fin du journal : la mire morte n'est plus attendue.
+        self.assertEqual(fbr.etat(j, None), [(460, 256, 640, 400), (200, 146, 640, 400)])
+
     def test_mort_retire_la_fenetre(self):
         self.assertEqual(fbr.etat(JOURNAL, "COMPOSITED_BUREAU_CLIENT_MORT pid=16"), [(460, 256, 640, 400)])
         self.assertEqual(fbr.etat(JOURNAL, None), [])

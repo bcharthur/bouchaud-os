@@ -107,7 +107,7 @@ scenario=0; mort=0; apres_mort=""
 LIMITE=$((SECONDS + ${BO_BUREAU_PLAFOND_S:-900}))
 while kill -0 "$QEMU_PID" 2>/dev/null; do
   if grep -aqE "$fatal_re" "$LOG"; then break; fi
-  if [ "$scenario" = 0 ] && grep -aq 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "$LOG"; then
+  if [ "$scenario" = 0 ] && grep -aq 'COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE' "$LOG"; then
     sleep 2; capture "$SORTIE/scenario.ppm"; scenario=1
   fi
   if [ "$mort" = 0 ] && grep -aq 'COMPOSITED_BUREAU_CLIENT_MORT' "$LOG"; then
@@ -174,11 +174,16 @@ nav2=$(grep -aoE "BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+ chemin=/bo-navigateur 
 juge() {  # FICHIER MARQUEUR LIBELLE
   local fenetres
   if [ ! -s "$1" ]; then echec "$3 : capture absente"; return; fi
-  fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --jusqua "$2" --opaques "$doom,$nav,${nav2:-0}")
+  # MARQUEUR vide : l'etat a la fin du journal.
+  if [ -n "$2" ]; then
+    fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --jusqua "$2" --opaques "$doom,$nav,${nav2:-0}")
+  else
+    fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --opaques "$doom,$nav,${nav2:-0}")
+  fi
   # shellcheck disable=SC2086
   python3 tools/ci/verifie_capture_bureau_ring3.py "$1" $fenetres && ok "$3 ($fenetres)" || echec "$3 ($fenetres)"
 }
-juge "$SORTIE/scenario.ppm" 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "capture apres le scenario : pile, cadres, mire au pixel, DOOM et Ladybird peints"
+juge "$SORTIE/scenario.ppm" 'COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE' "capture apres le scenario : pile, cadres, mire au pixel, DOOM et Ladybird peints"
 grep -aqE "PROCESS_FAULT pid=${mire:-x} " "$P" && ok "la mire meurt d'une faute de page" || echec "faute de la mire absente"
 grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" "$P" && ok "le compositeur a vu sa mort" || echec "mort de la mire non vue"
 autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+ ' "$P" | grep -vE "pid=${mire:-x} " | sort -u | tr '\n' ' ' || true)
@@ -187,13 +192,26 @@ autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+ ' "$P" | grep -vE "pid=${mire:-x} "
 avant=$(trames "$doom" "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}"); apres=$(trames "$doom")
 (( ${apres:-0} > ${avant:-0} )) && ok "DOOM encore compose apres la mort de la mire (${avant:-0} -> ${apres:-0})" \
   || echec "DOOM fige apres la mort de la mire (${avant:-0} -> ${apres:-0})"
+# BOUCHAUD_BUREAU_RING3_MORT_ISOLEE_V1 : la mort de la mire ne tue personne
+# d'autre (run 43088438133 : elle emportait le Ladybird relance).
+for p_ in "$doom" "${nav2:-x}"; do
+  if grep -aqE "PROCESS_DEATH .*pid=${p_} .*cause=tue_par_gestionnaire" "$P"; then
+    echec "le client $p_ a ete TUE par la mort d'un autre"
+  else
+    ok "le client $p_ n'est pas tue par la mort de la mire"
+  fi
+done
+grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${nav2:-x}" "$P" && echec "le Ladybird relance est mort" \
+  || ok "le Ladybird relance vit jusqu'a la fin"
 n2=$(trames "${nav2:-x}"); n2=${n2:-0}
 (( n2 >= 50 )) && ok "le Ladybird relance est compose ($n2 trames)" || echec "le Ladybird relance : $n2 trame(s)"
 juge "$SORTIE/apres-mort.ppm" "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" "capture apres la mort de la mire : DOOM et Ladybird intacts"
 
 mesure=$(grep -aA8 'COMPOSITED_BUREAU_MESURE trames=' "$P" | tail -n 9 | tr '\n' ' ' || true)
 val() { echo "$mesure" | grep -oE "$1=[0-9]+" | sed -n '1s/.*=//p' || true; }
-juge "$SORTIE/fin.ppm" 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "capture finale : DOOM et Ladybird relance, peints"
+# La capture finale est prise APRES la mort de la mire : jugee contre l'etat
+# a la fin du journal, pas contre celui de SCENARIO_COMPLET (mire vivante).
+juge "$SORTIE/fin.ppm" '' "capture finale : DOOM et Ladybird relance, peints"
 echo "BUREAU_RING3_APPLICATIONS_MESURE accel=$( [ "${BO_QEMU_KVM:-0}" = 1 ] && echo kvm || echo tcg ) trames=$(val trames)" \
   "duree_ms=$(val duree_ms) copie_us_moy=$(val lit_us_moy) presentation_us_moy=$(val presente_us_moy)" \
   "recompositions=$(val recompositions) doom=$(trames "$doom") ladybird=$(trames "$nav")"
