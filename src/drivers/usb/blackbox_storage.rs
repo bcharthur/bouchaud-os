@@ -178,6 +178,9 @@ struct BlackboxStorage {
     partition_blocks: u64,
     since_sync: u32,
     disabled: bool,
+    /// BOUCHAUD_CLE_USB_TEST_V1 : etablie par `blackbox_find_partition`,
+    /// d'apres l'en-tete GPT, avant la premiere ecriture.
+    identite: crate::drivers::ecriture_interne::Identite,
 }
 
 fn parse_blackbox_storage_descriptor(bytes: &[u8]) -> Option<BlackboxStorageDescriptor> {
@@ -348,6 +351,11 @@ fn blackbox_bot_en_place(
         return Err("blackbox-bot-refuse");
     }
 
+    // BOUCHAUD_CLE_USB_TEST_V1 : avant le SEUL codage d'un CBW de la boite
+    // noire. La boite noire n'ecrit que sur le support autorise.
+    if !crate::drivers::ecriture_interne::scsi(storage.identite, cdb) {
+        return Err(REFUS_CLE_USB_TEST);
+    }
     storage.tag = storage.tag.wrapping_add(1).max(1);
     let tag = storage.tag;
     let mut cbw = [0u8; stockage_blackbox::CBW_OCTETS];
@@ -674,6 +682,10 @@ fn blackbox_find_partition(
 ) -> Result<bool, &'static str> {
     let mut sector = [0u8; 512];
     blackbox_read_blocks(controller, storage, 1, 1, &mut sector)?;
+    storage.identite = crate::drivers::ecriture_interne::etablit_identite(
+        storage.slot_id,
+        Some(&sector),
+    );
     if &sector[0..8] != b"EFI PART" {
         return Ok(false);
     }
@@ -805,6 +817,7 @@ fn configure_blackbox_storage(
         partition_blocks: 0,
         since_sync: 0,
         disabled: false,
+        identite: crate::drivers::ecriture_interne::Identite::Inconnue,
     };
 
     let mut empty = [0u8; 0];

@@ -152,6 +152,11 @@ struct File {
     soumission: AnneauSoumission,
     /// Decalage de la sonnette dans le BAR0.
     sonnette: usize,
+    /// BOUCHAUD_CLE_USB_TEST_V1 : file admin (identifiant 0) ? Deduit du
+    /// MEME identifiant que la sonnette, jamais d'un drapeau a part : une file
+    /// d'entree-sortie prise pour la file admin ferait juger une ecriture
+    /// (0x01) comme un `Create I/O SQ`.
+    admin: bool,
 }
 
 // Les pointeurs sont des adresses de l'arene DMA, jamais partagees ; l'etat
@@ -232,7 +237,8 @@ fn attend(limite_ms: u64, predicat: impl FnMut() -> bool) -> bool {
 // Files
 // ---------------------------------------------------------------------------
 
-fn alloue_file(entrees: u32, taille_entree: usize, sonnette: usize) -> Option<File> {
+fn alloue_file(entrees: u32, taille_entree: usize, file: u16, achevement: bool, foulee_sonnette: usize) -> Option<File> {
+    let sonnette = decalage_sonnette(file, achevement, foulee_sonnette);
     let octets = (entrees as usize * taille_entree).max(PAGE);
     let (phys, virt) = memory::alloc_dma(octets)?;
     Some(File {
@@ -242,6 +248,7 @@ fn alloue_file(entrees: u32, taille_entree: usize, sonnette: usize) -> Option<Fi
         anneau: AnneauAchevement::neuf(entrees),
         soumission: AnneauSoumission::neuf(entrees),
         sonnette,
+        admin: file == 0,
     })
 }
 
@@ -252,13 +259,22 @@ impl File {
     /// ecrire quand meme ecraserait une commande qu'il n'a pas lue. Le cas ne
     /// se presente pas a profondeur un, et c'est precisement pourquoi il faut
     /// le traiter maintenant plutot que le decouvrir plus tard.
-    unsafe fn pose(&mut self, sqe: &Sqe) -> bool {
-        let Some(index) = self.soumission.pose() else { return false };
+    ///
+    /// BOUCHAUD_CLE_USB_TEST_V1 : la SEULE ecriture d'une entree de
+    /// soumission. Dans une image `cle-usb-test`, une commande qui modifierait
+    /// le disque n'y est jamais posee (`Err("refus-cle-usb-test")`), et la
+    /// sonnette n'est pas sonnee. `tools/verifie-ecriture-interne.py` le
+    /// verifie.
+    unsafe fn pose(&mut self, sqe: &Sqe) -> Result<(), &'static str> {
+        if !crate::drivers::ecriture_interne::nvme(self.admin, sqe) {
+            return Err("refus-cle-usb-test");
+        }
+        let Some(index) = self.soumission.pose() else { return Err("soumission-pleine") };
         let emplacement = self.virt.add(index as usize * TAILLE_SQE) as *mut u32;
         for (i, mot) in sqe.iter().enumerate() {
             write_volatile(emplacement.add(i), *mot);
         }
-        true
+        Ok(())
     }
 
     /// La valeur a publier a la sonnette de soumission.
@@ -313,9 +329,7 @@ unsafe fn emet(
     limite_ms: u64,
 ) -> Result<EntreeAchevement, &'static str> {
     let attendu = ((sqe[0] >> 16) & 0xFFFF) as u16;
-    if !sq.pose(sqe) {
-        return Err("soumission-pleine");
-    }
+    sq.pose(sqe)?;
     sonne(base, sq.sonnette, sq.queue_sq());
 
     let mut resultat: Option<EntreeAchevement> = None;
@@ -670,6 +684,14 @@ fn rend_le_jeton(emplacement: usize) {
 /// suffirait a faire vivre ce verrou a travers une decision. La sortir dans
 /// une fonction rend la duree de vie de la garde impossible a rallonger par
 /// accident, et laisse `emet_es` litteralement sans `.lock()`.
+/// BOUCHAUD_NVME_CID_JAMAIS_POSE_V1 : la commande n'a jamais atteint la file ;
+/// l'identifiant revient au pot. Verrou pris le temps d'un appel, hors de
+/// `emet_es` (meme raison que `recolte_es`).
+#[inline]
+fn cid_jamais_pose(cid: u16) {
+    SUIVI.lock().jamais_pose(cid);
+}
+
 #[inline]
 fn recolte_es(cid: u16) -> Option<(u8, u8)> {
     SUIVI.lock().recolte(cid)
@@ -798,10 +820,14 @@ fn soumet_es(sqe: &Sqe) -> Result<(), &'static str> {
     let mut garde = FILES_ES.lock();
     let Some(files) = garde.as_mut() else { return Err("files-absentes") };
     unsafe {
-        if !files.sq.pose(sqe) {
-            // Le controleur n'a pas consomme assez d'entrees : poser quand
-            // meme ecraserait une commande qu'il n'a pas encore lue.
-            return Err("soumission-pleine");
+        // Rien n'est pose et la sonnette ne sonne pas si :
+        match files.sq.pose(sqe) {
+            Ok(()) => {}
+            // le controleur n'a pas consomme assez d'entrees -- poser quand
+            // meme ecraserait une commande qu'il n'a pas encore lue ;
+            Err("soumission-pleine") => return Err("soumission-pleine"),
+            // ou la regle `cle-usb-test` refuse la commande.
+            Err(refus) => return Err(refus),
         }
         if releve_detaille() {
             crate::serial_println!(
@@ -820,7 +846,12 @@ fn soumet_es(sqe: &Sqe) -> Result<(), &'static str> {
 /// L'appelant doit tenir un emplacement.
 fn emet_es(sqe: &Sqe, limite_ms: u64) -> Result<(), &'static str> {
     let cid = ((sqe[0] >> 16) & 0xFFFF) as u16;
-    soumet_es(sqe)?;
+    if let Err(raison) = soumet_es(sqe) {
+        // Jamais posee : l'identifiant revient au pot
+        // (BOUCHAUD_NVME_CID_JAMAIS_POSE_V1).
+        cid_jamais_pose(cid);
+        return Err(raison);
+    }
 
     let mut statut = (0u8, 0u8);
     let obtenu = crate::kernel::timer::attente_bornee(limite_ms, || {
@@ -1051,13 +1082,17 @@ fn initialise(dev: PciDevice) -> Result<(Etat, FilesEs), &'static str> {
     let admin_sq = alloue_file(
         entrees_admin,
         TAILLE_SQE,
-        decalage_sonnette(0, false, caps.foulee_sonnette),
+        0,
+        false,
+        caps.foulee_sonnette,
     )
     .ok_or("dma-admin-sq")?;
     let admin_cq = alloue_file(
         entrees_admin,
         TAILLE_CQE,
-        decalage_sonnette(0, true, caps.foulee_sonnette),
+        0,
+        true,
+        caps.foulee_sonnette,
     )
     .ok_or("dma-admin-cq")?;
 
@@ -1066,13 +1101,17 @@ fn initialise(dev: PciDevice) -> Result<(Etat, FilesEs), &'static str> {
     let es_sq = alloue_file(
         entrees_es,
         TAILLE_SQE,
-        decalage_sonnette(FILE_ES, false, caps.foulee_sonnette),
+        FILE_ES,
+        false,
+        caps.foulee_sonnette,
     )
     .ok_or("dma-es-sq")?;
     let es_cq = alloue_file(
         entrees_es,
         TAILLE_CQE,
-        decalage_sonnette(FILE_ES, true, caps.foulee_sonnette),
+        FILE_ES,
+        true,
+        caps.foulee_sonnette,
     )
     .ok_or("dma-es-cq")?;
 
@@ -1400,6 +1439,57 @@ impl PiloteNvme {
             }
         }
     }
+}
+
+/// BANC `banc-ecriture-interne` (QEMU uniquement, voir
+/// `platform::pc::sonde_ecriture_interne`) : emet une commande NVMe BRUTE --
+/// admin ou d'entree-sortie -- par `File::pose`, la meme porte que toutes les
+/// autres. L'identifiant (et, en entree-sortie, le namespace et le tampon de
+/// rebond, garni de `charge` -- la liste de plages d'un Dataset Management) est
+/// pose ici. `Err("refus-cle-usb-test")` : la regle l'a refusee, rien n'est
+/// parti.
+#[cfg(feature = "banc-ecriture-interne")]
+pub fn sonde_brute(admin: bool, mut sqe: Sqe, charge: &[u8]) -> Result<(), &'static str> {
+    if hors_service() {
+        return Err("hors-service");
+    }
+    if admin {
+        let mut garde = ETAT.lock();
+        let etat = garde.as_mut().ok_or("absent")?;
+        let id = etat.identifiant();
+        sqe[0] = (sqe[0] & 0xFFFF) | ((id as u32) << 16);
+        return unsafe { etat.admin(&sqe, 5_000) }.map(|_| ());
+    }
+    let emplacement = prend_le_jeton(LIMITE_JETON_MS).ok_or("occupe")?;
+    let Some(ctx) = contexte_es(emplacement) else {
+        rend_le_jeton(emplacement);
+        return Err("contexte");
+    };
+    let Some(cid) = cid_es(ctx.emplacement) else {
+        rend_le_jeton(emplacement);
+        return Err("identifiants-epuises");
+    };
+    sqe[0] = (sqe[0] & 0xFFFF) | ((cid as u32) << 16);
+    sqe[1] = ctx.nsid;
+    if !charge.is_empty() {
+        unsafe {
+            core::ptr::write_bytes(ctx.rebond_virt, 0, 4096);
+            core::ptr::copy_nonoverlapping(charge.as_ptr(), ctx.rebond_virt, charge.len().min(4096));
+        }
+        sqe[6] = ctx.rebond_phys as u32;
+        sqe[7] = (ctx.rebond_phys >> 32) as u32;
+    }
+    let r = emet_es(&sqe, LIMITE_ES_MS);
+    if r != Err("delai") {
+        rend_le_jeton(emplacement);
+    }
+    r
+}
+
+/// Le dernier bloc du namespace (pour le banc).
+#[cfg(feature = "banc-ecriture-interne")]
+pub fn sonde_dernier_bloc() -> Option<u64> {
+    geometrie().and_then(|(blocs, _)| blocs.checked_sub(1))
 }
 
 /// La requete tient-elle dans le volume, et le tampon dans la requete ?

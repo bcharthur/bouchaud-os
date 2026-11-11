@@ -18,3 +18,6 @@ pub mod ecran_faute;
 /// Banc de charge d'entree-sortie, derriere son drapeau : voir `banc_io.rs`.
 #[cfg(feature = "banc-io")]
 pub mod banc_io;
+/// BOUCHAUD_CLE_USB_TEST_V1 : sonde d'ecriture du banc, QEMU uniquement.
+#[cfg(feature = "banc-ecriture-interne")]
+pub mod sonde_ecriture_interne;

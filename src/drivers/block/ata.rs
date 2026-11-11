@@ -383,6 +383,49 @@ fn select_lba(drive: Drive, lba: u64) {
 ///
 /// Un pilote qui echoue en silence oblige a deviner. Les deux registres disent
 /// lequel des bits a arrete l'operation.
+/// BOUCHAUD_CLE_USB_TEST_V1 -- la SEULE ecriture du registre de commande.
+///
+/// Dans une image `cle-usb-test`, une commande qui modifierait le disque
+/// (ecriture, vidange, effacement...) n'est jamais emise : rend `false`, et
+/// l'appelant echoue comme sur un disque qui refuse. `lba` sert au journal.
+/// `tools/verifie-ecriture-interne.py` exige que `outb(COMMAND` n'apparaisse
+/// qu'ici.
+#[must_use]
+unsafe fn emet_commande(commande: u8, lba: u64) -> bool {
+    if !crate::drivers::ecriture_interne::ata(commande, lba) {
+        return false;
+    }
+    outb(COMMAND, commande);
+    true
+}
+
+/// BANC `banc-ecriture-interne` (QEMU uniquement, voir
+/// `platform::pc::sonde_ecriture_interne`) : emet une commande ATA SANS
+/// donnees vers `drive`, par la meme porte que toutes les autres. Rend `true`
+/// si elle est partie (le disque peut l'avoir rejetee), `false` si la regle
+/// l'a refusee ou si le disque est absent/occupe.
+#[cfg(feature = "banc-ecriture-interne")]
+pub fn sonde_brute(drive: Drive, commande: u8) -> bool {
+    probe();
+    if !present(drive) {
+        return false;
+    }
+    let _controller = lock_controller();
+    select(drive);
+    if !wait_not_busy() {
+        return false;
+    }
+    let partie = unsafe {
+        outb(ERROR, 0);
+        outb(SECTOR_COUNT, 0);
+        emet_commande(commande, 0)
+    };
+    if partie {
+        let _ = wait_not_busy();
+    }
+    partie
+}
+
 fn etat_controleur() -> (u8, u8) {
     unsafe { (inb(STATUS), inb(ERROR)) }
 }
@@ -428,7 +471,9 @@ fn identify(drive: Drive) -> u64 {
         outb(LBA_LOW, 0);
         outb(LBA_MID, 0);
         outb(LBA_HIGH, 0);
-        outb(COMMAND, CMD_IDENTIFY);
+        if !emet_commande(CMD_IDENTIFY, 0) {
+            return 0;
+        }
 
         // Statut nul : aucun disque sur ce port.
         if inb(STATUS) == 0 {
@@ -879,7 +924,12 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
             outb(LBA_LOW, (lba & 0xFF) as u8);
             outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
             outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
-            outb(COMMAND, if ecriture { CMD_WRITE_DMA } else { CMD_READ_DMA });
+            if !emet_commande(if ecriture { CMD_WRITE_DMA } else { CMD_READ_DMA }, lba) {
+                // Refus de la regle : le bus-master n'a jamais demarre. Ce
+                // n'est pas une panne du DMA (`echec` le desactiverait).
+                outb(bm, 0);
+                return false;
+            }
             outb(bm, sens | BM_CMD_START);
         }
         // Fin du transfert : le bit ACTIF du bus-master retombe. Borne en
@@ -985,7 +1035,9 @@ fn read_batch(drive: Drive, lba: u64, count: usize, out: &mut [u8]) -> bool {
         outb(LBA_LOW, (lba & 0xFF) as u8);
         outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
         outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
-        outb(COMMAND, CMD_READ_SECTORS);
+        if !emet_commande(CMD_READ_SECTORS, lba) {
+            return false;
+        }
     }
 
     for index in 0..count {
@@ -1110,7 +1162,9 @@ fn write_batch(drive: Drive, lba: u64, count: usize, data: &[u8]) -> bool {
         outb(LBA_LOW, (lba & 0xFF) as u8);
         outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
         outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
-        outb(COMMAND, CMD_WRITE_SECTORS);
+        if !emet_commande(CMD_WRITE_SECTORS, lba) {
+            return false;
+        }
     }
 
     for index in 0..count {
@@ -1147,8 +1201,8 @@ fn flush(drive: Drive) -> bool {
     if !wait_not_busy() {
         return false;
     }
-    unsafe {
-        outb(COMMAND, CMD_FLUSH_CACHE);
+    if !unsafe { emet_commande(CMD_FLUSH_CACHE, 0) } {
+        return false;
     }
     if !wait_not_busy() {
         return false;
