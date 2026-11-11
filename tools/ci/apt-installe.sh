@@ -19,6 +19,9 @@ for essai in 1 2 3; do
     exit 0
   fi
   echo "APT_ESSAI_ECHEC essai=$essai paquets=$*" >&2
+  # BOUCHAUD_APT_REPLI_MIROIR_V1 : diagnostic DNS, et retrait des seuls
+  # miroirs injoignables (tools/ci/apt-repare-miroirs.sh, hors empreinte).
+  bash "$(dirname "$0")/apt-repare-miroirs.sh" || true
   sleep $((essai * 15))
 done
 echo "APT_ECHEC paquets=$*" >&2
