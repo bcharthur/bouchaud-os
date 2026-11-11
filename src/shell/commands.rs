@@ -1410,34 +1410,51 @@ pub fn tail(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     0
 }
 
-pub fn find(argc: usize, argv: &[&str; 12], cwd: usize) {
+/// Sortie maximale d'un `find`, en octets de chemins : 4096 noeuds au plus,
+/// de quelques dizaines d'octets en moyenne. Au-dela, le resultat est dit
+/// tronque, jamais coupe en silence.
+const FIND_OCTETS_MAX: usize = 1 << 20;
+
+/// `find [CHEMIN] [MOTIF]` : les descendants de CHEMIN (`.` par defaut) dont
+/// le nom contient MOTIF.
+///
+/// BOUCHAUD_FIND_PARCOURS_V1. L'ancienne version tenait le verrou du RAMFS et
+/// rappelait `find_rec`, qui le REPRENAIT : panique lockdep (`vfs(50)` deja
+/// tenu), ou boucle eternelle sans lockdep. Ici :
+///   1. le verrou est pris UNE fois, le temps de resoudre le chemin et de
+///      relever un instantane des chemins (parcours pur, iteratif, borne :
+///      `fs::parcours`) ;
+///   2. il est RENDU avant toute impression ;
+///   3. on ne descend que dans les repertoires lisibles et traversables ; les
+///      autres sont signales.
+pub fn find(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     let path = if argc >= 2 { argv[1] } else { "." };
     let filter = if argc >= 3 { Some(argv[2]) } else { None };
-    let fs = ramfs::fs();
-    let start = match fs.resolve_checked(path, cwd) {
-        Ok(i) => i,
+    let resultat = {
+        let fs = ramfs::fs();
+        match fs.resolve_checked(path, cwd) {
+            Ok(depart) => Ok(crate::fs::parcours::parcours(&*fs, depart, filter, FIND_OCTETS_MAX)),
+            Err(e) => Err(e),
+        }
+        // Le garde tombe ici : rien n'est imprime sous le verrou.
+    };
+    let r = match resultat {
+        Ok(r) => r,
         Err(e) => {
-            println!("find: {}", e);
-            return;
+            println!("find: {}: {}", path, e);
+            return 1;
         }
     };
-    find_rec(start, filter);
-}
-
-fn find_rec(idx: usize, filter: Option<&str>) {
-    let fs = ramfs::fs();
-    for i in 0..MAX_NODES {
-        if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-            let name = fs.nodes[i].name_str();
-            if filter.map_or(true, |f| name.contains(f)) {
-                ramfs::print_path(&fs, i);
-                println!("");
-            }
-            if fs.nodes[i].kind == NodeKind::Dir {
-                find_rec(i, filter);
-            }
-        }
+    for c in &r.chemins {
+        println!("{}", c);
     }
+    for c in &r.refus {
+        println!("find: {}: permission refusee", c);
+    }
+    if r.tronque {
+        println!("find: sortie tronquee a {} octets", FIND_OCTETS_MAX);
+    }
+    if r.refus.is_empty() && !r.tronque { 0 } else { 1 }
 }
 
 // ---------------------------------------------------------------------------
