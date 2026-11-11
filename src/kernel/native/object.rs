@@ -1,5 +1,6 @@
 use super::abi::types::{ObjectKind, Signals};
 use super::event::Event;
+use super::fenetre::Fenetre;
 use super::ipc::ChannelEndpoint;
 use super::process::ProcessRef;
 use super::shm::SharedRegion;
@@ -15,6 +16,8 @@ pub enum Object {
     Update,
     /// Capacite d'affichage (`affichage.rs`) : aucun etat, tout est dans le droit.
     Display,
+    /// Fenetre d'application confiee au compositeur (`fenetre.rs`).
+    Fenetre(Fenetre),
     Legacy(ObjectKind),
 }
 
@@ -28,6 +31,7 @@ impl Object {
             Self::Process(_) => ObjectKind::Process,
             Self::Update => ObjectKind::Update,
             Self::Display => ObjectKind::Display,
+            Self::Fenetre(_) => ObjectKind::Fenetre,
             Self::Legacy(kind) => *kind,
         }
     }
@@ -41,6 +45,7 @@ impl Object {
             Self::Process(process) => process.signals(),
             Self::Update => Signals::NONE,
             Self::Display => Signals::NONE,
+            Self::Fenetre(fenetre) => fenetre.signals(),
             Self::Legacy(_) => Signals::NONE,
         }
     }

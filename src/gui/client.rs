@@ -141,6 +141,20 @@ impl Client {
         zone: (usize, usize),
         allocation: (usize, usize),
     ) -> Result<Client, String> {
+        Client::lance_avec(chemin, titre, cwd, zone, allocation, &[])
+    }
+
+    /// `lance`, avec des variables d'environnement en plus de celles du shell
+    /// (BOUCHAUD_BUREAU_RING3_2A : client lance au demarrage pour le
+    /// compositeur ring 3, avant que le shell n'ait rien exporte).
+    pub fn lance_avec(
+        chemin: &str,
+        titre: &str,
+        cwd: usize,
+        zone: (usize, usize),
+        allocation: (usize, usize),
+        env_sup: &[String],
+    ) -> Result<Client, String> {
         let (largeur, hauteur) = (allocation.0.max(zone.0), allocation.1.max(zone.1));
         if crate::fs::ramfs::fs().resolve_checked(chemin, cwd).is_err() {
             return Err(alloc::format!(
@@ -195,6 +209,7 @@ impl Client {
         // Le temoin historique est INTACT : son export desactive la purge.
         // Les valeurs exportees explicitement conservent la priorite.
         let mut base = crate::kernel::exec::shell_environment();
+        base.extend(env_sup.iter().cloned());
         if chemin == CHEMIN_NAVIGATEUR
             && !base.iter().any(|entry| entry == "BOUCHAUD_LB_C22_TEMOIN_HISTORIQUE=1")
         {
@@ -982,6 +997,25 @@ impl Client {
             // perime sans que rien ne le rattrape.
             self.generation_presse_papiers = generation;
         }
+    }
+
+    /// BOUCHAUD_BUREAU_RING3_2A : le canal client -> compositeur, pour qu'un
+    /// compositeur ring 3 sache, sans prendre le client, s'il a a lire. Une
+    /// ecriture du client y publie l'activite native (`reveille_natif`).
+    pub fn canal_entrant_natif(&self) -> Arc<SpinLock<Canal>> {
+        self.vers_wm.lock().reveille_natif = true;
+        self.vers_wm.clone()
+    }
+
+    /// Trames livrees (`FrameReady`) depuis le lancement ou la derniere remise.
+    pub fn trames_livrees(&self) -> u64 {
+        self.trames
+    }
+
+    /// Le processus client est-il sorti ? Lecture seule : ne recolte rien,
+    /// ne relance rien (c'est le role de `vivant`).
+    pub fn sorti(&self) -> bool {
+        self.etat == Etat::Termine || task::code_de_sortie(self.pid).is_some()
     }
 
     pub fn vivant(&mut self) -> bool {

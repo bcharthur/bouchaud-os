@@ -13,6 +13,7 @@ pub mod abi;
 pub mod activite;
 pub mod affichage;
 pub mod event;
+pub mod fenetre;
 pub mod handle;
 pub mod io;
 pub mod ipc;

@@ -4,7 +4,7 @@ pub const ABI_MAJOR: u16 = 1;
 /// 1.1 (BOUCHAUD_NATIVE_ABI_1_1) : PROCESS_SPAWN/INFO/KILL, WAITSET_WAIT,
 /// TIME_NOW, objet Process, signal TERMINATED, erreur TimedOut. Purement
 /// additif : un programme 1.0 ne voit aucune difference.
-pub const ABI_MINOR: u16 = 3;
+pub const ABI_MINOR: u16 = 4;
 pub const ABI_VERSION_PACKED: u64 = ((ABI_MAJOR as u64) << 16) | ABI_MINOR as u64;
 
 /// Native syscall namespace. Linux x86-64 syscalls currently used by the
@@ -56,6 +56,10 @@ pub enum ObjectKind {
     /// BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : capacite d'affichage (ABI 1.3).
     /// Jamais creee par un appel : le noyau la donne a `/bin/composited`.
     Display = 7,
+    /// BOUCHAUD_BUREAU_RING3_2A : fenetre d'une application, confiee au
+    /// compositeur (ABI 1.4). Jamais creee par un appel : le noyau la donne a
+    /// `/bin/composited` avec le client qu'il lance pour lui.
+    Fenetre = 8,
     LegacyFile = 0x100,
     LegacyWindow = 0x101,
     LegacySocket = 0x102,

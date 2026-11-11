@@ -44,6 +44,16 @@ on:
       - 'src/compat/linux/mod.rs'
       - 'tools/userland/persist-coupure-probe.c'
       - 'tools/ci/run_coupure_persistance.sh'
+      # BOUCHAUD_BUREAU_RING3_2A : le pont fenetre -> compositeur ring 3.
+      - 'src/gui/client.rs'
+      - 'src/gui/surface.rs'
+      - 'src/gui/window_manager.rs'
+      - 'src/kernel/object/fd.rs'
+      - 'src/compat/linux/file.rs'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/userland/attends.c'
+      - 'tools/ci/run_bureau_ring3.sh'
+      - 'tools/ci/verifie_capture_bureau_ring3.py'
       - '.github/workflows/native-ipc-runtime.yml'
   push:
     branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
@@ -88,6 +98,16 @@ on:
       - 'src/compat/linux/mod.rs'
       - 'tools/userland/persist-coupure-probe.c'
       - 'tools/ci/run_coupure_persistance.sh'
+      # BOUCHAUD_BUREAU_RING3_2A : le pont fenetre -> compositeur ring 3.
+      - 'src/gui/client.rs'
+      - 'src/gui/surface.rs'
+      - 'src/gui/window_manager.rs'
+      - 'src/kernel/object/fd.rs'
+      - 'src/compat/linux/file.rs'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/userland/attends.c'
+      - 'tools/ci/run_bureau_ring3.sh'
+      - 'tools/ci/verifie_capture_bureau_ring3.py'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
 
@@ -145,7 +165,8 @@ jobs:
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: native-ipc-runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 min, plus le bureau ring 3 (deux demarrages QEMU, ~3 min sous TCG).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -179,6 +200,15 @@ jobs:
           bash tools/ci/run_native_ipc_probe.sh \
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
 
+      # BOUCHAUD_BUREAU_RING3_2A : une application BOGU ordinaire (mire-gpu,
+      # son propre processus) composee par `composited` ring 3 ; capture QEMU
+      # decodee au pixel, refus de securite du pont, bureau noyau refuse, client
+      # tue par une faute de page, A/B avec le bureau noyau sur le meme client.
+      - name: Bureau ring 3 -- une vraie fenetre composee par composited (TCG)
+        run: |
+          bash tools/ci/run_bureau_ring3.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/bureau-ring3
+
       # BOUCHAUD_NATIVE_SERVICES_V1 : service ring 3 supervise (spawn natif,
       # crash injecte, hang, budget, arret, fuite de handles) et refus des
       # cycles d'objets natifs. SMP1 et SMP4 sur le MEME noyau.
@@ -204,6 +234,8 @@ jobs:
             target/native-ipc-runtime-ci/native-ipc-runtime.log
             target/native-services-ci/native-services-smp*.log
             target/coupure-persistance/boot-*.log
+            target/bureau-ring3/*/serie.log
+            target/bureau-ring3/*/*.ppm
           if-no-files-found: error
           retention-days: 14
 

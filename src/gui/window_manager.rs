@@ -469,7 +469,11 @@ pub fn run() {
     // le fil de boot laisse CURRENT=NO_TASK et rend toute WaitQueue illegale.
     // BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : l'ecran est au bureau noyau ;
     // `bo_display_present` le refuse desormais (un seul compositeur ecrit).
-    crate::kernel::native::affichage::bureau_noyau_demarre();
+    // BOUCHAUD_BUREAU_RING3_2A : et il ne demarre pas si l'ecran est deja au
+    // compositeur ring 3 -- jamais deux compositeurs sur le meme ecran.
+    if !crate::kernel::native::affichage::bureau_noyau_demarre() {
+        return;
+    }
     task::run_noyau(fil_bureau, "desktop");
 }
 

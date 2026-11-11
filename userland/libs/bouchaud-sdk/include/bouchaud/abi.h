@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 3
+#define BO_ABI_MINOR 4
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -56,6 +56,11 @@ typedef unsigned long      bo_usize;
 #define BO_NR_UPDATE_INSTALL_FINISH (BO_NATIVE_BASE + 0x74)
 #define BO_NR_UPDATE_INSTALL_VERIFY (BO_NATIVE_BASE + 0x75)
 #define BO_NR_DISPLAY_PRESENT     (BO_NATIVE_BASE + 0x80)
+/* ABI 1.4 (BOUCHAUD_BUREAU_RING3_2A) : taille de l'ecran ; fenetre d'une
+ * application confiee au compositeur (pomper/valider, recopier un rectangle). */
+#define BO_NR_DISPLAY_INFO        (BO_NATIVE_BASE + 0x81)
+#define BO_NR_FENETRE_POMPE       (BO_NATIVE_BASE + 0x90)
+#define BO_NR_FENETRE_LIT         (BO_NATIVE_BASE + 0x91)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1
@@ -82,6 +87,7 @@ typedef unsigned long      bo_usize;
 #define BO_KIND_PROCESS        5
 #define BO_KIND_UPDATE         6
 #define BO_KIND_DISPLAY        7
+#define BO_KIND_FENETRE        8
 
 /* Rights. */
 #define BO_RIGHT_READ          (1u << 0)

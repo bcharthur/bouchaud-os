@@ -40,5 +40,13 @@ impl SharedRegion {
         Ok(())
     }
 
+    /// Acces en place, sous le verrou de la region (BOUCHAUD_BUREAU_RING3_2A) :
+    /// le noyau y recopie la surface d'une application sans tampon
+    /// intermediaire. L'appelant borne lui-meme ses ecritures (`fenetre_contrat`).
+    pub fn avec_octets_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> R {
+        let mut bytes = self.bytes.lock();
+        f(&mut bytes)
+    }
+
     pub fn signals(&self) -> Signals { Signals::READABLE | Signals::WRITABLE }
 }

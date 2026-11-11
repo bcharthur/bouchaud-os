@@ -13,7 +13,8 @@
  *   musl-gcc -O2 -static-pie -fPIE -o mire-gpu mire-gpu.c
  *
  * Variables : BO_GUI_FD, BO_SURFACE_FD, BO_SURFACE_WIDTH/HEIGHT/STRIDE (posees
- * par le gestionnaire de fenetres, comme pour tout client).
+ * par le gestionnaire de fenetres, comme pour tout client). BO_MIRE_FAUTE_APRES=N
+ * (banc de crash) : faute de page volontaire apres N trames.
  */
 #define _GNU_SOURCE
 #include <poll.h>
@@ -102,7 +103,7 @@ int main(void) {
     pompe();
     trame(0, 0, vw, vh);
     fprintf(stderr, "MIRE_GPU_PRETE surface=%ux%u vue=%ux%u\n", aw, ah, vw, vh);
-    uint32_t px = 0, py = 0, n = 0;
+    uint32_t px = 0, py = 0, n = 0, faute_apres = env("BO_MIRE_FAUTE_APRES");
     for (;;) {
         pompe();
         /* Restaure l'ancien carre, pose le nouveau : dommage partiel. */
@@ -118,6 +119,13 @@ int main(void) {
         uint32_t x1 = (ax > px ? ax : px) + 32, y1 = (ay > py ? ay : py) + 32;
         trame(x0, y0, x1 - x0, y1 - y0);
         n++;
+        /* BOUCHAUD_BUREAU_RING3_2A : banc de crash. Une VRAIE faute de page
+         * (pas une sortie propre) apres N trames, pour eprouver ce que fait le
+         * compositeur d'une application qui meurt sous lui. */
+        if (faute_apres && n == faute_apres) {
+            fprintf(stderr, "MIRE_GPU_FAUTE_VOLONTAIRE trames=%u\n", n);
+            *(volatile uint32_t *)0 = n;
+        }
         if (n % 600 == 0) fprintf(stderr, "MIRE_GPU trames=%u carre=%u,%u\n", n, px, py);
         struct timespec t = {0, 16 * 1000 * 1000};
         nanosleep(&t, 0);
