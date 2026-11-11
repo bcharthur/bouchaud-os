@@ -60,6 +60,9 @@ typedef long i64;
 #define BO_DISPLAY_INFO    (BO_BASE + 0x81)
 #define BO_FENETRE_POMPE   (BO_BASE + 0x90)
 #define BO_FENETRE_LIT     (BO_BASE + 0x91)
+#define BO_FENETRE_CONFIGURE (BO_BASE + 0x92)
+#define BO_FENETRE_FERME   (BO_BASE + 0x93)
+#define BO_DISPLAY_RELANCE_CLIENT (BO_BASE + 0x82)
 #define BO_WAITSET_REMOVE  (BO_BASE + 0x32)
 #define BO_WAITSET_WAIT    (BO_BASE + 0x34)
 #define BO_TIME_NOW        (BO_BASE + 0x60)
@@ -580,7 +583,7 @@ struct fen {
     u32 x, y;             /* coin du CONTENU, en pixels ecran */
     u32 l, h;             /* taille du contenu (ce que le client a peint) */
     u32 pid;
-    int vivante, visible;
+    int vivante, visible, minimisee;
     u64 trames;
 };
 static struct fen fens[FEN_MAX];
@@ -654,6 +657,15 @@ static i64 recopie_contenu(struct fen *f, struct rect r)
     return n;
 }
 
+/* La fenetre ACTIVE : la plus haute fenetre VISIBLE (une fenetre minimisee
+ * ou morte au sommet de la pile ne garde pas la barre active), -1 si aucune. */
+static int active(void)
+{
+    for (int k = nfen - 1; k >= 0; k--)
+        if (fens[ordre[k]].visible) return ordre[k];
+    return -1;
+}
+
 /* L'algorithme du peintre sur `r`, puis UNE presentation. */
 static i64 recompose(struct rect r)
 {
@@ -667,7 +679,7 @@ static i64 recompose(struct rect r)
         if (!f->visible) continue;
         struct rect c = cadre_de(f), i;
         if (!intersecte(r, c, &i)) continue;
-        int premier_plan = (k == nfen - 1);
+        int premier_plan = (ordre[k] == active());
         /* Cadre : bordure, barre (active au premier plan), en bandes. */
         struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
         struct rect contenu = { f->x, f->y, f->l, f->h };
@@ -716,11 +728,11 @@ static void remonte(int indice)
 {
     int k = rang_de(indice);
     if (k < 0) return;
-    int ancien_haut = ordre[nfen - 1];
+    int ancien_haut = active();   /* la fenetre active AVANT, pas le sommet de pile */
     for (; k < nfen - 1; k++) ordre[k] = ordre[k + 1];
     ordre[nfen - 1] = indice;
     recompose(cadre_de(&fens[indice]));
-    if (ancien_haut != indice && fens[ancien_haut].visible) {
+    if (ancien_haut >= 0 && ancien_haut != indice && fens[ancien_haut].visible) {
         struct rect b = { fens[ancien_haut].x, fens[ancien_haut].y - BUREAU_BARRE_H, fens[ancien_haut].l, BUREAU_BARRE_H };
         recompose(b);   /* sa barre devient inactive */
     }
@@ -839,23 +851,58 @@ static int lit_fenetres(u64 *pile)
     return 0;
 }
 
-static int scenario_deplace_empile(u64 *pile)
+/* 0 : aucun ; 1 : `deplace-empile` ; 2 : `complet` (deplace-empile, puis
+ * redimensionnement, minimisation, restauration, fermeture, relance). */
+static int scenario_de(u64 *pile)
 {
     u64 argc = pile[0];
     char **envp = (char **)(pile + 1 + argc + 1);
     for (; *envp; envp++) {
-        const char *e = *envp, *c = "BO_BUREAU_SCENARIO=deplace-empile";
-        while (*c && *e == *c) { e++; c++; }
-        if (!*c && !*e) return 1;
+        const char *noms[2] = { "BO_BUREAU_SCENARIO=deplace-empile", "BO_BUREAU_SCENARIO=complet" };
+        for (int k = 0; k < 2; k++) {
+            const char *e = *envp, *c = noms[k];
+            while (*c && *e == *c) { e++; c++; }
+            if (!*c && !*e) return k + 1;
+        }
     }
     return 0;
+}
+
+/* La barre de titre de la fenetre `i` (pour un changement de fenetre active). */
+static void recompose_barre(int i)
+{
+    if (i < 0 || !fens[i].visible) return;
+    struct rect b = { fens[i].x, fens[i].y - BUREAU_BARRE_H, fens[i].l, BUREAU_BARRE_H };
+    recompose(b);
+}
+
+static void minimise(int i)
+{
+    struct fen *f = &fens[i];
+    if (!f->visible) return;
+    f->visible = 0; f->minimisee = 1;
+    recompose(cadre_de(f));
+    recompose_barre(active());   /* la fenetre qui devient active */
+    ecris_nombre("COMPOSITED_BUREAU_MINIMISE fenetre=", i);
+}
+
+static void restaure(int i)
+{
+    struct fen *f = &fens[i];
+    if (!f->minimisee) return;
+    int avant = active();
+    f->minimisee = 0; f->visible = 1;
+    recompose(cadre_de(f));
+    if (avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
+    publie_fenetre(i, "COMPOSITED_BUREAU_RESTAURE fenetre=");
 }
 
 static int bureau(i64 affichage, u64 *pile)
 {
     affichage_g = affichage;
     if (lit_fenetres(pile) <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=fenetres\n"); return 1; }
-    int scenario = scenario_deplace_empile(pile);
+    int scenario = scenario_de(pile);
+    u64 attente_etape = 0;   /* instant (ns) de l'etape suivante du scenario complet */
     i64 dims = sys6(BO_DISPLAY_INFO, (u64)affichage, 0, 0, 0, 0, 0);
     exige(dims > 0, "bureau : taille de l'ecran connue");
     if (dims <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=ecran\n"); return 1; }
@@ -903,23 +950,29 @@ static int bureau(i64 affichage, u64 *pile)
                 if (f->visible) {
                     f->visible = 0;
                     exige(recompose(cadre_de(f)) >= 0, "bureau : fenetre du client mort effacee");
+                    recompose_barre(active());   /* la fenetre qui devient active */
                 }
                 continue;
             }
             u32 dx = etat[4], dy = etat[5], dl = etat[6], dh = etat[7];
             if (!f->visible) {
+                /* Minimisee : ses trames sont pompees (le client avance), pas dessinees. */
+                if (f->minimisee) { f->trames++; trames_total++; continue; }
                 if (etat[2] == 0 || etat[3] == 0) continue;
                 f->l = etat[2]; f->h = etat[3];
                 place(i);
+                int avant = active();
                 f->visible = 1;
                 publie_fenetre(i, "COMPOSITED_BUREAU_FENETRE indice=");
                 recompose(cadre_de(f));
+                if (avant >= 0 && avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
                 dl = 0;
             } else if (etat[2] != f->l || etat[3] != f->h) {
                 /* Taille peinte changee : tout le cadre, ancien et nouveau. */
                 struct rect avant = cadre_de(f);
                 f->l = etat[2]; f->h = etat[3];
                 recompose(avant); recompose(cadre_de(f));
+                publie_fenetre(i, "COMPOSITED_BUREAU_FENETRE indice=");
                 dl = 0;
             }
             if (dl && dh) {
@@ -968,6 +1021,47 @@ static int bureau(i64 affichage, u64 *pile)
                 publie_fenetre(1, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=");
             }
             etape++;
+        }
+        /* Scenario complet : une etape toutes les 4 s -- le banc capture
+         * l'ecran entre deux etapes, et chaque capture doit tomber DANS son
+         * etape (une cadence en trames les rapprochait a 1 s sous TCG). */
+        if (scenario == 2 && etape >= 21 && etape < 27) {
+            u64 maintenant = maintenant_ns();
+            if (attente_etape == 0) attente_etape = maintenant + 4000000000UL;
+            if (maintenant >= attente_etape) {
+                attente_etape = 0;
+                if (etape == 21) {
+                    i64 z = sys6(BO_FENETRE_CONFIGURE, (u64)fens[1].poignee, 480, 300, 1, 0, 0);
+                    exige(z == (((i64)480 << 32) | 300), "bureau : redimensionnement 480x300 accepte");
+                    i64 trop = sys6(BO_FENETRE_CONFIGURE, (u64)fens[1].poignee, 0, 300, 1, 0, 0);
+                    exige(trop == -BO_E_INVALID_ARGUMENT, "bureau : zone vide refusee");
+                    ecris("COMPOSITED_BUREAU_ETAPE redimension fenetre=1\n");
+                } else if (etape == 22) {
+                    minimise(0);
+                } else if (etape == 23) {
+                    restaure(0);
+                } else if (etape == 24) {
+                    exige(sys6(BO_FENETRE_FERME, (u64)fens[1].poignee, 0, 0, 0, 0, 0) == 0,
+                          "bureau : fermeture demandee");
+                    ecris("COMPOSITED_BUREAU_ETAPE fermeture fenetre=1\n");
+                } else if (etape == 25) {
+                    if (fens[1].vivante) { attente_etape = maintenant; continue; }  /* attendre la sortie */
+                    i64 h = sys6(BO_DISPLAY_RELANCE_CLIENT, (u64)affichage_g, 1, 0, 0, 0, 0);
+                    exige(h > 0, "bureau : application relancee");
+                    i64 hors = sys6(BO_DISPLAY_RELANCE_CLIENT, (u64)affichage_g, 7, 0, 0, 0, 0);
+                    exige(hors < 0, "bureau : relance hors configuration refusee");
+                    if (h > 0) {
+                        struct fen *f = &fens[1];
+                        f->poignee = h; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0;
+                        sys6(BO_WAITSET_ADD, (u64)attente, (u64)h, 2, 0, 0, 0);
+                        vivantes++;
+                        ecris("COMPOSITED_BUREAU_ETAPE relance fenetre=1\n");
+                    }
+                } else if (etape == 26) {
+                    ecris(echecs == 0 ? "COMPOSITED_BUREAU_SCENARIO_COMPLET\n" : "COMPOSITED_BUREAU_SCENARIO_ECHEC\n");
+                }
+                etape++;
+            }
         }
     }
 

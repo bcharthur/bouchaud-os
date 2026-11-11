@@ -1007,6 +1007,11 @@ impl Client {
         self.vers_wm.clone()
     }
 
+    /// La zone utile courante (ce que le dernier `Configure` a annonce).
+    pub fn zone_utile(&self) -> (u32, u32) {
+        self.geometrie.logique()
+    }
+
     /// Trames livrees (`FrameReady`) depuis le lancement ou la derniere remise.
     pub fn trames_livrees(&self) -> u64 {
         self.trames

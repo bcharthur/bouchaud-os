@@ -69,6 +69,14 @@ pub const FENETRE_POMPE: u64 = NATIVE_BASE + 0x90;
 /// Sur une capacite Fenetre (READ) et une region (WRITE) : recopier un
 /// rectangle de la face livree (fenetre, region, lecture*) -> pixels copies.
 pub const FENETRE_LIT: u64 = NATIVE_BASE + 0x91;
+/// BOUCHAUD_BUREAU_RING3_2B (ABI 1.4) : sur une capacite Fenetre (WRITE),
+/// nouvelle zone utile et foyer (fenetre, largeur, hauteur, focus).
+pub const FENETRE_CONFIGURE: u64 = NATIVE_BASE + 0x92;
+/// Sur une capacite Fenetre (WRITE) : demande de fermeture polie.
+pub const FENETRE_FERME: u64 = NATIVE_BASE + 0x93;
+/// Sur la capacite Display : relancer le client configure de ce rang ; rend
+/// une nouvelle capacite Fenetre (affichage, rang).
+pub const DISPLAY_RELANCE_CLIENT: u64 = NATIVE_BASE + 0x82;
 
 #[inline]
 pub const fn is_native(number: u64) -> bool {
@@ -113,6 +121,9 @@ pub const fn name(number: u64) -> &'static str {
         DISPLAY_INFO => "bo_display_info",
         FENETRE_POMPE => "bo_fenetre_pompe",
         FENETRE_LIT => "bo_fenetre_lit",
+        FENETRE_CONFIGURE => "bo_fenetre_configure",
+        FENETRE_FERME => "bo_fenetre_ferme",
+        DISPLAY_RELANCE_CLIENT => "bo_display_relance_client",
         _ => "bo_unknown",
     }
 }

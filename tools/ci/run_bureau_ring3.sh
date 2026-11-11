@@ -212,6 +212,34 @@ grep -aq 'COMPOSITED_BUREAU_OK' "$Q" && ok "B2 : le compositeur a survecu" || ec
 juge_capture "$D/fin.ppm" "$Q" 'COMPOSITED_BUREAU_OK' "B2 : bureau vide apres les deux morts"
 
 # --------------------------------------------------------------------------
+# Bras B3 (tranche 2B) : cycle de vie complet des fenetres -- deplacement,
+# empilement, redimensionnement (Configure, borne par l'allocation),
+# minimisation, restauration, fermeture polie (CloseRequest), relance par la
+# capacite d'affichage (configuration de l'image seulement). Chaque etape est
+# capturee et jugee au pixel contre l'etat publie par le compositeur.
+# --------------------------------------------------------------------------
+echo "=== bras B3 : cycle de vie complet de deux fenetres ==="
+prepare_ring3 complet '@scenario complet' "/mire-gpu" "/mire-gpu"
+demarre complet
+attend_et_capture complet 'COMPOSITED_BUREAU_SCENARIO_(COMPLET|ECHEC)' \
+  'COMPOSITED_BUREAU_MINIMISE fenetre=0=c-minimise.ppm' \
+  'COMPOSITED_BUREAU_RESTAURE fenetre=0=c-restaure.ppm'
+C="$SORTIE/complet"; K="$C/serie.propre"
+grep -aqE "$fatal_re" "$K" && echec "B3 : panique noyau" || ok "B3 : aucune panique noyau"
+for etape in 'redimensionnement 480x300 accepte' 'zone vide refusee' 'fermeture demandee' \
+             'application relancee' 'relance hors configuration refusee'; do
+  grep -aq "\[COMPOSITED\] ok   bureau : $etape" "$K" && ok "B3 : $etape" || echec "B3 : $etape"
+done
+grep -aq 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "$K" && ok "B3 : scenario complet sans echec" || echec "B3 : scenario incomplet"
+grep -aqE 'PROCESS_FAULT' "$K" && echec "B3 : faute d'un processus" || ok "B3 : aucune faute (fermeture polie)"
+[ "$(grep -ac 'BOUCHAUD_BUREAU_RING3_RELANCE rang=1 n=1' "$K")" = 1 ] && ok "B3 : une relance, comptee par le noyau" \
+  || echec "B3 : relance non comptee"
+# La derniere capture apres la relance : deux fenetres de nouveau.
+juge_capture "$C/fin.ppm" "$K" 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "B3 : apres la relance, deux fenetres au pixel"
+juge_capture "$C/c-minimise.ppm" "$K" 'COMPOSITED_BUREAU_MINIMISE fenetre=0' "B3 : fenetre minimisee absente, l'autre redimensionnee 480x300 au pixel"
+juge_capture "$C/c-restaure.ppm" "$K" 'COMPOSITED_BUREAU_RESTAURE fenetre=0' "B3 : fenetre restauree au pixel"
+
+# --------------------------------------------------------------------------
 # Bras B0 (temoin, revue #295) : bureau ring 3 configure, compositeur
 # INVALIDE. Le noyau doit lever la reservation de l'ecran, rendre le client
 # deja lance (il meurt), et laisser le bureau noyau demarrer et composer.
@@ -285,8 +313,8 @@ echo "BUREAU_RING3_AB accel=$( [ "${BO_QEMU_KVM:-0}" = 1 ] && echo kvm || echo t
   "A_noyau[trames_clients_par_s=$(fps "${a_tc:-}" "${a_periode:-0}") dessin_us_par_trame=${a_dessin:-?} presentation_us_par_trame=${a_pres:-?} cpu_pct=${a_cpu:-?}]"
 
 if (( echecs == 0 )); then
-  echo "BUREAU_RING3_2A_OK client=$pid_client compositeur=$pid_compo"
+  echo "BUREAU_RING3_OK client=$pid_client compositeur=$pid_compo"
   exit 0
 fi
-echo "BUREAU_RING3_2A_ECHEC n=$echecs"
+echo "BUREAU_RING3_ECHEC n=$echecs"
 exit 1

@@ -114,7 +114,7 @@ def temoins():
          "    if false {"),
         (AFF, "    if BUREAU_NOYAU.load(Ordering::SeqCst) {\n        return Err(refuse(Error::WouldBlock, \"bureau-noyau\"));\n    }\n    // 5.",
          "    // 5."),
-        (AFF, "            BUREAU_RING3.store(false, Ordering::SeqCst);\n            drop(fenetre.take());", "            drop(fenetre.take());"),
+        (AFF, "            BUREAU_RING3.store(false, Ordering::SeqCst);\n            drop(fenetres.take());", "            drop(fenetres.take());"),
         (FEN, "pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WAIT.0 | Rights::INSPECT.0);",
          "pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WAIT.0 | Rights::TRANSFER.0);"),
         ("src/kernel/native/abi/dispatch.rs", "        numbers::FENETRE_LIT =>",

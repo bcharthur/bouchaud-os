@@ -154,6 +154,69 @@ fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::strin
 /// de l'affichage, une capacite `Fenetre` par client (`BO_FENETRES=h1,h2,...`,
 /// du fond vers le premier plan ; mode `bureau`). Le bureau noyau, lui, ne
 /// demarre plus : l'ecran a un seul compositeur.
+/// Allocation d'une surface de client : de quoi l'agrandir jusqu'a l'ecran
+/// courant des bancs sans la reallouer (BOUCHAUD_BUREAU_RING3_2B), bornee.
+fn allocation_pour(zone: (usize, usize)) -> (usize, usize) {
+    (zone.0.max(1280).min(1920), zone.1.max(720).min(1200))
+}
+
+/// Les clients de la configuration, gardes pour `relance` : le compositeur ne
+/// peut relancer QUE ce que l'image a configure.
+static CLIENTS_CONFIGURES: crate::kernel::sync::SpinLock<alloc::vec::Vec<ClientBureau>> =
+    crate::kernel::sync::SpinLock::new(alloc::vec::Vec::new());
+/// Relances par client, bornees : une application qui meurt en boucle ne
+/// fait pas lancer des processus sans fin.
+pub const RELANCES_MAX: u32 = 8;
+static RELANCES: [core::sync::atomic::AtomicU32; CLIENTS_MAX] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; CLIENTS_MAX];
+
+/// Lance UN client configure ; le foyer lui est donne si `focus`.
+fn lance_client(c: &ClientBureau, rang: usize, focus: bool) -> Option<super::fenetre::Fenetre> {
+    let titre = c.chemin.rsplit('/').next().unwrap_or("application");
+    match crate::gui::client::Client::lance_avec(&c.chemin, titre, 0, c.zone, allocation_pour(c.zone), &c.vars) {
+        Ok(mut client) => {
+            // Comme le bureau noyau : la zone utile et le foyer, des le depart.
+            client.envoie_configuration(focus);
+            if c.chemin == crate::gui::client::CHEMIN_NAVIGATEUR {
+                crate::gui::services::enregistre(client.pid);
+            }
+            crate::serial_println!(
+                "BOUCHAUD_BUREAU_RING3_CLIENT pid={} chemin={} zone={}x{} variables={} rang={}",
+                client.pid, c.chemin, c.zone.0, c.zone.1, c.vars.len(), rang
+            );
+            Some(super::fenetre::Fenetre::neuve(client))
+        }
+        Err(e) => {
+            crate::serial_println!("BOUCHAUD_BUREAU_RING3_ECHEC raison=client chemin={} detail={}", c.chemin, e);
+            None
+        }
+    }
+}
+
+/// `bo_display_relance_client(affichage, rang)` : relance le client configure
+/// de ce rang et rend une NOUVELLE capacite `Fenetre` (BOUCHAUD_BUREAU_RING3_2B).
+/// Exige la capacite d'affichage ; ne lance jamais que ce que l'image a
+/// configure (`CONFIG_BUREAU`) ; au plus `RELANCES_MAX` fois par client.
+pub fn relance(args: [u64; 6]) -> Result<u64> {
+    handle::current_table()
+        .lookup_kind(HandleId::from_raw(args[0]), Rights::DISPLAY_PRESENT, ObjectKind::Display)
+        .map_err(|e| refuse(e, "capacite"))?;
+    let rang = usize::try_from(args[1]).map_err(|_| Error::InvalidArgument)?;
+    let client = {
+        let clients = CLIENTS_CONFIGURES.lock();
+        let c = clients.get(rang).ok_or_else(|| refuse(Error::InvalidArgument, "relance-rang"))?;
+        ClientBureau { chemin: c.chemin.clone(), zone: c.zone, vars: c.vars.clone() }
+    };
+    if RELANCES[rang].fetch_add(1, Ordering::AcqRel) >= RELANCES_MAX {
+        RELANCES[rang].fetch_sub(1, Ordering::AcqRel);
+        return Err(refuse(Error::NoSpace, "relances-epuisees"));
+    }
+    let fenetre = lance_client(&client, rang, true).ok_or(Error::NotFound)?;
+    let h = handle::install(Object::Fenetre(fenetre), super::fenetre::DROITS_COMPOSITEUR)?;
+    crate::serial_println!("BOUCHAUD_BUREAU_RING3_RELANCE rang={} n={}", rang, RELANCES[rang].load(Ordering::Relaxed));
+    Ok(h.raw())
+}
+
 pub fn lance_compositeur() -> Option<u32> {
     use alloc::string::{String, ToString};
     crate::fs::ramfs::fs().resolve(COMPOSITEUR, 0)?;
@@ -163,26 +226,11 @@ pub fn lance_compositeur() -> Option<u32> {
         scenario = sc;
         let n = clients.len();
         for (i, c) in clients.iter().enumerate() {
-            let titre = c.chemin.rsplit('/').next().unwrap_or("application");
-            match crate::gui::client::Client::lance_avec(&c.chemin, titre, 0, c.zone, c.zone, &c.vars) {
-                Ok(mut client) => {
-                    // Comme le bureau noyau : la zone utile et le foyer, des le
-                    // depart (le dernier client a le foyer).
-                    client.envoie_configuration(i + 1 == n);
-                    if c.chemin == crate::gui::client::CHEMIN_NAVIGATEUR {
-                        crate::gui::services::enregistre(client.pid);
-                    }
-                    crate::serial_println!(
-                        "BOUCHAUD_BUREAU_RING3_CLIENT pid={} chemin={} zone={}x{} variables={} rang={}",
-                        client.pid, c.chemin, c.zone.0, c.zone.1, c.vars.len(), i
-                    );
-                    fenetres.push(super::fenetre::Fenetre::neuve(client));
-                }
-                Err(e) => {
-                    crate::serial_println!("BOUCHAUD_BUREAU_RING3_ECHEC raison=client chemin={} detail={}", c.chemin, e);
-                }
+            if let Some(f) = lance_client(c, i, i + 1 == n) {
+                fenetres.push(f);
             }
         }
+        *CLIENTS_CONFIGURES.lock() = clients;
     }
     let bureau = !fenetres.is_empty();
     let mode = if bureau { "bureau" } else { "presentation" };
@@ -224,7 +272,7 @@ pub fn lance_compositeur() -> Option<u32> {
             // personne -- le bureau noyau doit pouvoir le reprendre. Le client
             // deja lance meurt avec sa `Fenetre`, rendue ici.
             BUREAU_RING3.store(false, Ordering::SeqCst);
-            drop(fenetre.take());
+            drop(fenetres.take());
             crate::serial_println!("BOUCHAUD_COMPOSITEUR_ECHEC raison={} reservation_ecran=levee", e);
             None
         }

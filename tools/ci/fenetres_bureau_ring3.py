@@ -18,7 +18,8 @@ import re
 import sys
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-DEBUT = re.compile(r"COMPOSITED_BUREAU_(?:FENETRE indice|SCENARIO_FIN fenetre)=(\d+)")
+DEBUT = re.compile(r"COMPOSITED_BUREAU_(?:FENETRE indice|SCENARIO_FIN fenetre|RESTAURE fenetre)=(\d+)")
+MINIMISE = re.compile(r"COMPOSITED_BUREAU_MINIMISE fenetre=(\d+)")
 MORT = re.compile(r"COMPOSITED_BUREAU_CLIENT_MORT pid=(\d+)")
 CHAMP = re.compile(r"\[COMPOSITED\] (pid|x|y|l|h|rang)=(-?\d+)$")
 
@@ -43,6 +44,9 @@ def etat(lignes: list[str], jusqua: str | None, opaques: frozenset = frozenset()
         if m:
             courant = fen.setdefault(int(m.group(1)), {})
             courant["visible"] = True
+        m = MINIMISE.search(ligne)
+        if m and int(m.group(1)) in fen:
+            fen[int(m.group(1))]["visible"] = False
         m = MORT.search(ligne)
         if m:
             for f in fen.values():

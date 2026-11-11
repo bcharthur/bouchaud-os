@@ -11,7 +11,9 @@
 #   /doom (640x400), /bo-navigateur (Ladybird, page vivante /bureau.html) et
 #   /mire-gpu (faute de page volontaire : le crash d'une application),
 # puis `/bin/composited bureau` avec une capacite `Fenetre` par client et le
-# scenario `deplace-empile` (DOOM glisse puis monte au premier plan).
+# scenario `complet` : DOOM glisse puis monte au premier plan ; Ladybird est
+# redimensionne, DOOM minimise puis restaure, Ladybird ferme poliment puis
+# RELANCE (redemarrage d'une vraie application), pendant que DOOM tourne.
 #
 # Exige :
 #   - quatre processus ring 3 distincts (trois applications, le compositeur) ;
@@ -61,7 +63,7 @@ cp "$NATIF/BouchaudBrowserHost" "$S/bo-navigateur"
 [ -d "$NATIF/resources" ] && cp -a "$NATIF/resources/." "$S/usr/share/ladybird/"
 cp /etc/ssl/certs/ca-certificates.crt "$S/etc/ssl/certs/ca-certificates.crt"
 chmod 755 "$S/bin/"* "$S/mire-gpu" "$S/doom" "$S/bo-navigateur" "$S/usr/libexec/ladybird/"*
-printf '%s\n' '@scenario deplace-empile' '/doom 640x400' \
+printf '%s\n' '@scenario complet' '/doom 640x400' \
   '/bo-navigateur 720x420 BOUCHAUD_M9=1 BOUCHAUD_BROWSER_HOST=1 BOUCHAUD_M11=1 BOUCHAUD_TIME_ZONE=Europe/Paris BOUCHAUD_M9_URL=http://10.0.2.2:18082/bureau.html' \
   "/mire-gpu BO_MIRE_FAUTE_APRES=${BO_BUREAU_FAUTE_APRES:-2400}" > "$S/bureau-ring3"
 : > "$S/garde-vm-vivante"
@@ -113,8 +115,12 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
   fi
   # Vingt secondes apres la mort de la mire : DOOM et Ladybird ont-ils
   # continue d'etre composes ?
-  if [ -n "$apres_mort" ] && (( SECONDS >= apres_mort )); then
-    capture "$SORTIE/apres-mort.ppm"; break
+  if [ -n "$apres_mort" ] && (( SECONDS >= apres_mort )) && [ ! -s "$SORTIE/apres-mort.ppm" ]; then
+    capture "$SORTIE/apres-mort.ppm"
+  fi
+  # Fin : la mire morte ET le scenario complet joue (Ladybird relance).
+  if [ -s "$SORTIE/apres-mort.ppm" ] && grep -aqE 'COMPOSITED_BUREAU_SCENARIO_(COMPLET|ECHEC)' "$LOG"; then
+    sleep 20; capture "$SORTIE/fin.ppm"; break
   fi
   if (( SECONDS >= LIMITE )); then echo "ECHEANCE bureau ring 3 applications" >&2; break; fi
   sleep 1
@@ -157,10 +163,18 @@ for paire in "DOOM:$doom" "Ladybird:$nav"; do
 done
 grep -aq 'COMPOSITED_BUREAU_SCENARIO_FIN fenetre=1' "$P" && ok "deplacement puis passage au premier plan joues" \
   || echec "scenario non joue"
+grep -aq 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "$P" \
+  && ok "redimensionnement, minimisation, restauration, fermeture et relance joues" || echec "scenario complet non joue"
+[ "$(grep -ac 'BOUCHAUD_BUREAU_RING3_RELANCE rang=1 n=1' "$P")" = 1 ] && ok "Ladybird relance (une fois)" || echec "Ladybird non relance"
+nav2=$(grep -aoE "BOUCHAUD_BUREAU_RING3_CLIENT pid=[0-9]+ chemin=/bo-navigateur " "$P" | grep -oE 'pid=[0-9]+' | sed -n '2s/pid=//p' || true)
+[ -n "$nav2" ] && [ "$nav2" != "$nav" ] && ok "le Ladybird relance est un nouveau processus ($nav -> $nav2)" \
+  || echec "pas de second processus Ladybird"
+[ "$(grep -ac 'HOST_BUREAU_PAGE OK' "$P")" -ge 2 ] && ok "le Ladybird relance charge de nouveau sa page" \
+  || echec "le Ladybird relance n'a pas charge sa page"
 juge() {  # FICHIER MARQUEUR LIBELLE
   local fenetres
   if [ ! -s "$1" ]; then echec "$3 : capture absente"; return; fi
-  fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --jusqua "$2" --opaques "$doom,$nav")
+  fenetres=$(python3 tools/ci/fenetres_bureau_ring3.py "$P" --jusqua "$2" --opaques "$doom,$nav,${nav2:-0}")
   # shellcheck disable=SC2086
   python3 tools/ci/verifie_capture_bureau_ring3.py "$1" $fenetres && ok "$3 ($fenetres)" || echec "$3 ($fenetres)"
 }
@@ -169,16 +183,17 @@ grep -aqE "PROCESS_FAULT pid=${mire:-x} " "$P" && ok "la mire meurt d'une faute 
 grep -aq "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" "$P" && ok "le compositeur a vu sa mort" || echec "mort de la mire non vue"
 autres=$(grep -aoE 'PROCESS_FAULT pid=[0-9]+ ' "$P" | grep -vE "pid=${mire:-x} " | sort -u | tr '\n' ' ' || true)
 [ -z "$autres" ] && ok "aucune autre faute (DOOM, Ladybird, compositeur)" || echec "autres fautes : $autres"
-for paire in "DOOM:$doom" "Ladybird:$nav"; do
-  nom=${paire%%:*}; pid=${paire#*:}
-  avant=$(trames "$pid" "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}"); apres=$(trames "$pid")
-  (( ${apres:-0} > ${avant:-0} )) && ok "$nom encore compose apres la mort de la mire (${avant:-0} -> ${apres:-0})" \
-    || echec "$nom fige apres la mort de la mire (${avant:-0} -> ${apres:-0})"
-done
+# DOOM vit tout du long : il doit etre encore compose apres la mort de la mire.
+avant=$(trames "$doom" "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}"); apres=$(trames "$doom")
+(( ${apres:-0} > ${avant:-0} )) && ok "DOOM encore compose apres la mort de la mire (${avant:-0} -> ${apres:-0})" \
+  || echec "DOOM fige apres la mort de la mire (${avant:-0} -> ${apres:-0})"
+n2=$(trames "${nav2:-x}"); n2=${n2:-0}
+(( n2 >= 50 )) && ok "le Ladybird relance est compose ($n2 trames)" || echec "le Ladybird relance : $n2 trame(s)"
 juge "$SORTIE/apres-mort.ppm" "COMPOSITED_BUREAU_CLIENT_MORT pid=${mire:-x}" "capture apres la mort de la mire : DOOM et Ladybird intacts"
 
 mesure=$(grep -aA8 'COMPOSITED_BUREAU_MESURE trames=' "$P" | tail -n 9 | tr '\n' ' ' || true)
 val() { echo "$mesure" | grep -oE "$1=[0-9]+" | sed -n '1s/.*=//p' || true; }
+juge "$SORTIE/fin.ppm" 'COMPOSITED_BUREAU_SCENARIO_COMPLET' "capture finale : DOOM et Ladybird relance, peints"
 echo "BUREAU_RING3_APPLICATIONS_MESURE accel=$( [ "${BO_QEMU_KVM:-0}" = 1 ] && echo kvm || echo tcg ) trames=$(val trames)" \
   "duree_ms=$(val duree_ms) copie_us_moy=$(val lit_us_moy) presentation_us_moy=$(val presente_us_moy)" \
   "recompositions=$(val recompositions) doom=$(trames "$doom") ladybird=$(trames "$nav")"

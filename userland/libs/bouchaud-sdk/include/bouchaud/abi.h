@@ -61,6 +61,9 @@ typedef unsigned long      bo_usize;
 #define BO_NR_DISPLAY_INFO        (BO_NATIVE_BASE + 0x81)
 #define BO_NR_FENETRE_POMPE       (BO_NATIVE_BASE + 0x90)
 #define BO_NR_FENETRE_LIT         (BO_NATIVE_BASE + 0x91)
+#define BO_NR_FENETRE_CONFIGURE   (BO_NATIVE_BASE + 0x92)
+#define BO_NR_FENETRE_FERME       (BO_NATIVE_BASE + 0x93)
+#define BO_NR_DISPLAY_RELANCE_CLIENT (BO_NATIVE_BASE + 0x82)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1

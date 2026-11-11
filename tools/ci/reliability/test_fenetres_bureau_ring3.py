@@ -43,6 +43,16 @@ class EtatFenetresTests(unittest.TestCase):
         self.assertEqual(fbr.etat(JOURNAL, "COMPOSITED_BUREAU_CLIENT_MORT pid=16"), [(460, 256, 640, 400)])
         self.assertEqual(fbr.etat(JOURNAL, None), [])
 
+    def test_minimise_puis_restaure(self):
+        j = (bloc("COMPOSITED_BUREAU_FENETRE indice=0", 16, 40, 66, 0)
+             + bloc("COMPOSITED_BUREAU_FENETRE indice=1", 17, 460, 256, 1)
+             + ["COMPOSITED_BUREAU_MINIMISE fenetre=0"]
+             + bloc("COMPOSITED_BUREAU_RESTAURE fenetre=0", 16, 40, 66, 0)
+             + ["COMPOSITED_BUREAU_ETAPE fermeture fenetre=1"])
+        self.assertEqual(fbr.etat(j, "COMPOSITED_BUREAU_MINIMISE fenetre=0"), [(460, 256, 640, 400)])
+        self.assertEqual(fbr.etat(j, "COMPOSITED_BUREAU_RESTAURE fenetre=0"),
+                         [(40, 66, 640, 400), (460, 256, 640, 400)])
+
     def test_ligne_du_noyau_intercalee_ne_coupe_pas_le_bloc(self):
         j = list(JOURNAL)
         i = j.index("[COMPOSITED] x=460")
