@@ -132,6 +132,7 @@ done
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_OOPIF_OK"
 else
+  tools/ci/forensique_ladybird.sh "$LOG" "run_ladybird_oopif" >&2
   echo "LADYBIRD_OOPIF_ECHEC n=${#echecs[@]}"
   exit 1
 fi

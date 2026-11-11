@@ -190,6 +190,7 @@ exige "aucune assertion ni panique" bash -c "! grep -aqE 'VERIFICATION FAILED|KE
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_WORKER_CYCLE_OK demarrage_w1_ms=$(champ "$w1" ms)"
 else
+  tools/ci/forensique_ladybird.sh "$LOG" "run_ladybird_worker_cycle" >&2
   echo "LADYBIRD_WORKER_CYCLE_ECHEC n=${#echecs[@]}"
   exit 1
 fi

@@ -797,6 +797,13 @@ for jalon in "${JALONS[@]}"; do
 done
 
 if [ "$manquants" -ne 0 ]; then
+  # BOUCHAUD_LADYBIRD_FORENSIQUE_V1 (#283) : un demarrage fige (1 sur ~50)
+  # ne laissait dans le job que la fin de sortie ; l'etat de l'ordonnanceur,
+  # que le noyau ecrit toutes les 30 s PENDANT le gel, restait dans un
+  # artefact. Le bloc ci-dessous le recopie : taches pretes/bloquees/sur
+  # coeur, tache et appel systeme courants par coeur, verrous tenus, futex.
+  # Lecture seule du journal ; aucun jalon, aucun seuil ne change.
+  tools/ci/forensique_ladybird.sh "$LOG" "verdict=$verdict, ${ECOULE}s" >&2
   case "$verdict" in
     muet)
       echo "l'invite a cesse d'ecrire sur la console serie pendant ${SILENCE_MAX}s :" >&2

@@ -75,6 +75,8 @@ for essai in $(seq 1 "$N"); do
       inconclus=$((inconclus + 1))
       echo "    essai non conclusif (smoke=$smoke) ; fin de sortie :"
       tail -8 "$sortie" | sed 's/^/      /'
+      # BOUCHAUD_LADYBIRD_FORENSIQUE_V1 (#283) : l'etat du noyau pendant le gel.
+      awk '/== FORENSIQUE DEBUT/ { p = 1 } p { print "      " $0 } /== FORENSIQUE FIN ==/ { p = 0 }' "$sortie" || true
       # La batterie de workers (P5) : quels tests ont abouti, lesquels non, et
       # le cycle de vie des WebWorker dans le journal serie.
       echo "      batterie et workers (journal serie) :"
