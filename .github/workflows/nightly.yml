@@ -116,56 +116,46 @@ jobs:
           if-no-files-found: warn
 
   resolve-ladybird:
+    # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : selection STRICTE. Le run le plus
+    # recent portant un artefact n'est pas celui de ce SHA ; on retient le
+    # build reel dont l'empreinte, recalculee depuis git, est celle du HEAD
+    # (tools/ci/ladybird_provenance.py), ou la production en cours de cette
+    # empreinte. Un run demande a la main reste possible : la verification
+    # `entrees` du smoke le juge comme les autres.
     name: nightly / resolve Ladybird
     runs-on: ubuntu-latest
+    timeout-minutes: 250
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      run_id: ${{ steps.resolve.outputs.run_id }}
+      run_id: ${{ steps.resolve.outputs.source_run }}
       found: ${{ steps.resolve.outputs.found }}
     steps:
-      - name: Trouver artefact canonique
+      - uses: actions/checkout@v4
+      - name: Trouver l'artefact de l'empreinte du HEAD
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           REQUESTED: ${{ inputs.ladybird_run_id }}
+          GRACE_ATTENTE: '0'
+          DELAI_ATTENTE: '14400'
         run: |
           set -euo pipefail
-          # Un run SUCCESS peut ne plus posseder d'artefact (retention 14j).
-          # Un telechargement aveugle donnait un Nightly rouge hors produit.
-          # Ne retenir que les runs dont l'archive est encore presente.
-          candidates="$REQUESTED"
-          if [ -z "$candidates" ]; then
-            # Chercher les artefacts reellement disponibles, y compris
-            # ceux d'une validation C22 sur branche candidate. Le smoke
-            # refuse ensuite tout artefact dont les ENTREES ne correspondent
-            # pas au HEAD courant : aucune confiance dans le nom seul.
-            candidates=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
-              --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false) | .workflow_run.id] | unique | reverse | .[]')
-          fi
-          choix=""
-          for run in $candidates; do
-            if ! [[ "$run" =~ ^[0-9]+$ ]]; then
-              echo "Identifiant Ladybird invalide: $run" >&2
+          if [ -n "$REQUESTED" ]; then
+            if ! [[ "$REQUESTED" =~ ^[0-9]+$ ]]; then
+              echo "Identifiant Ladybird invalide: $REQUESTED" >&2
               exit 2
             fi
-            if ! meta=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" \
-              --jq '[.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)] | length'); then
-              echo "Impossible de verifier les artefacts de $run" >&2
-              exit 2
-            fi
-            if [ "$meta" -gt 0 ]; then
-              choix="$run"
-              break
-            fi
-            echo "Ladybird run=$run ignore (artefact absent/expire)"
-          done
-          if [ -z "$choix" ]; then
+            echo "source_run=$REQUESTED" >> "$GITHUB_OUTPUT"
+          elif ! python3 tools/ci/ladybird_provenance.py attends; then
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::error::Aucun artefact Ladybird canonique disponible. Produire le binaire avant le Nightly."
+            echo "::error::Aucun artefact Ladybird de l'empreinte du HEAD. Produire le binaire (ladybird-native-browser) avant le Nightly."
             exit 1
           fi
-          echo "run_id=$choix" >> "$GITHUB_OUTPUT"
           echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "Ladybird run=$choix avec artefact disponible"
 
   ladybird-smoke:
     name: nightly / Ladybird product

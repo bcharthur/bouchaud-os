@@ -213,6 +213,45 @@ pub fn fin_trame() {
     }
 }
 
+/// BOUCHAUD_GPU_COMPOSITION_V2 : ferme la trame en composant aussi les
+/// fenetres `couches` par le GPU (voir `virtio_gpu::presente_trame_gpu`).
+/// Rend `false` si le GPU n'a pas pu composer : le bureau doit alors TOUT
+/// repeindre par le processeur (la memoire du scanout ne contient pas les
+/// fenetres que le GPU posait).
+pub fn fin_trame_gpu(couches: &[crate::drivers::virtio_gpu::CoucheGpu]) -> bool {
+    let (plan, n) = {
+        let mut trame = TRAME.lock();
+        if !trame.ouverte {
+            return false;
+        }
+        trame.ouverte = false;
+        let n = trame.n;
+        (crate::drivers::virtio_gpu_trame::planifie(&trame.regions[..n], COUT_COMMANDE_PX), n)
+    };
+    TRAMES_FERMEES.fetch_add(1, Ordering::Relaxed);
+    REGIONS_DIFFEREES.fetch_add(n as u64, Ordering::Relaxed);
+    if !VIRTIO_SCANOUT.load(Ordering::Acquire) {
+        return false;
+    }
+    if crate::drivers::virtio_gpu::presente_trame_gpu(&plan, couches) {
+        return true;
+    }
+    // Le GPU a renonce : le bureau de cette trame part quand meme (2D).
+    if plan.nb > 0 && !crate::drivers::virtio_gpu::presente_trame(&plan)
+        && !crate::drivers::virtio_gpu::actif() {
+        VIRTIO_SCANOUT.store(false, Ordering::Release);
+        quitte_memoire_scanout();
+    }
+    false
+}
+
+/// Une trame PEUT-elle s'ouvrir (politique `gpu-trame on` et scanout
+/// virtio) ? Le compositeur GPU ne sert qu'une trame : sans elle, les regions
+/// partent une a une, avant que le GPU ait pose les fenetres.
+pub fn trame_possible() -> bool {
+    TRAME_VOULUE.load(Ordering::Acquire) && VIRTIO_SCANOUT.load(Ordering::Acquire)
+}
+
 /// `(voulue, trames fermees, regions differees)`.
 pub fn compteurs_trame() -> (bool, u64, u64) {
     (

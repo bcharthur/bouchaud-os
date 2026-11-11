@@ -636,14 +636,37 @@ fn boucle() {
         "BOUCHAUD_ATELIER_TERMINAL_BOOT_V15 terminal_auto=0 lancement_explicite={}",
         lancement_explicite as u8
     );
+    // BOUCHAUD_ATELIER_TERMINAL_BOOT_V16 (10/11) : AUCUN Terminal au
+    // demarrage, meme dans un lancement explicite. `make_app(0)` retombait sur
+    // un Terminal quand le navigateur demande ne pouvait pas partir (disque
+    // sans Ladybird, lancement DOOM...) : c'est le Terminal « deja ouvert »
+    // vu au demarrage. Le Terminal ne s'ouvre plus qu'a la demande.
     #[cfg(not(feature = "reference-desktop"))]
     if lancement_explicite {
         let fenetre = make_app(0, home, &mut spawn_n);
-        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        if matches!(fenetre.app, App::Terminal { .. }) {
+            crate::serial_println!("BOUCHAUD_ATELIER_TERMINAL_BOOT_V16 repli_terminal_refuse=1");
+        } else {
+            ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        }
     }
     for kind in window::fenetres_demandees_au_demarrage() {
         let fenetre = make_app(kind, home, &mut spawn_n);
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
+    }
+    // BOUCHAUD_DOOM_AUTOSTART_BANC_V1 : les bancs QEMU n'ont pas de souris
+    // pour double-cliquer ; `BO_AUTOSTART_DOOM=1` ouvre DOOM comme le ferait
+    // l'icone (meme chemin `lance_doom`). Une session normale ne l'exporte pas.
+    #[cfg(not(feature = "reference-desktop"))]
+    if crate::shell::exported().iter().any(|e| e == "BO_AUTOSTART_DOOM=1") {
+        lance_doom(&mut wins, home, &mut degats);
+    }
+    #[cfg(not(feature = "reference-desktop"))]
+    for entree in crate::shell::exported().iter() {
+        if let Some(chemin) = entree.strip_prefix("BO_AUTOSTART_APP=") {
+            let chemin = alloc::string::String::from(chemin);
+            lance_application(&mut wins, home, &mut degats, &chemin);
+        }
     }
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
     // plus bas. `services_initialises` dit que la session supervisee PEUT
@@ -675,6 +698,17 @@ fn boucle() {
     // persistance ne doit pas etre tentee avant que l'utilisateur ait vu son
     // bureau -- voir `installation::differe_le_montage`.
     let mut tours: u64 = 0;
+
+    // BOUCHAUD_GPU_COMPOSITION_V2 : une fenetre composee par le GPU a peint
+    // sans que le bureau ait rien a repeindre -- la trame est due quand meme.
+    let mut trame_gpu_due = false;
+    // BOUCHAUD_GPU_REPLI_SURVIT_A_LA_TRAME_V1 : le GPU a refuse la trame ; la
+    // repeinture CPU complete qu'il impose doit survivre a `degats.efface()`.
+    let mut repli_cpu_du = false;
+    // Degats des clients deja routes (processeur), plusieurs rectangles.
+    let mut degats_routes: Vec<Rect> = Vec::new();
+    // Sur le TAS : la pile du bureau est comptee (verifie-pile-noyau-profondeur).
+    let mut plan_gpu_precedent = alloc::boxed::Box::new(crate::gui::composition::Plan::vide());
 
     while !quit {
         tours = tours.saturating_add(1);
@@ -1228,10 +1262,21 @@ fn boucle() {
         // ecrit AVANT est lu par ce tour ou par un precedent. Voir
         // `temoin_composition` plus bas.
         let pompe_t_ms = crate::kernel::timer::monotonic_ms();
-        let (degat_clients, perte_fenetre) = pompe_clients(&mut wins, recompose_aveugle);
+        degats_routes.clear();
+        let (degat_clients, perte_fenetre, gpu_sale) = pompe_clients(&mut wins, recompose_aveugle, &mut degats_routes);
         if !degat_clients.vide() {
             sale = true;
             degats.ajoute(Origine::Client, degat_clients);
+        }
+        for r in degats_routes.iter().copied() {
+            if !r.vide() {
+                sale = true;
+                degats.ajoute(Origine::Client, r);
+            }
+        }
+        if gpu_sale {
+            sale = true;
+            trame_gpu_due = true;
         }
         if perte_fenetre {
             // Une fenetre a disparu : ce qu'elle couvrait redevient fond.
@@ -1447,7 +1492,8 @@ fn boucle() {
             }
 
             if matches!(GUI_RENDER_DIAGNOSTIC_MODE, 1 | 3) { degats.tout(); }
-            if !degats.vide() {
+            if !degats.vide() || trame_gpu_due {
+                trame_gpu_due = false;
                 crate::kernel::timer::frame_start();
                 crate::gui::degats::note_trame(&degats);
 
@@ -1458,7 +1504,19 @@ fn boucle() {
                 let t_trame = crate::kernel::timer::monotonic_ns();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
-
+                // BOUCHAUD_GPU_COMPOSITION_V2 : quelles fenetres le GPU pose.
+                // Une fenetre qui QUITTE le GPU est repeinte par le processeur
+                // (la memoire du scanout ne contient pas son contenu).
+                let plan_gpu = crate::gui::composition::planifie_si(fb::trame_possible(), &wins, &calques,
+                    crate::drivers::composition_gpu::R::neuf(0, 0, fb::width() as i32, fb::height() as i32));
+                for ancienne in plan_gpu_precedent.fenetres.iter().flatten() {
+                    if plan_gpu.de(ancienne.id).is_none() {
+                        if let Some(w) = wins.iter().find(|w| w.id.get() == ancienne.id) {
+                            degats.ajoute(Origine::Client, window::zone_utile(w));
+                        }
+                    }
+                }
+                crate::gui::composition::publie(&plan_gpu);
                 // BOUCHAUD_VIRTIO_GPU_TRAME_V1 (P10+.3b) : sous `gpu-trame on`,
                 // les regions de la trame partent d'un bloc a `fin_trame`.
                 fb::debut_trame();
@@ -1510,8 +1568,15 @@ fn boucle() {
                     }
                     crate::gui::degats::note_presentation(present);
                 }
-                fb::fin_trame();
+                let t_presentation = crate::kernel::timer::monotonic_ns();
+                repli_cpu_du = ferme_trame(&mut wins, plan_gpu, &mut plan_gpu_precedent, &mut degats,
+                    &mut trame_gpu_due);
                 crate::gui::atelier::effets::fin_trame();
+                {
+                    let fin = crate::kernel::timer::monotonic_ns();
+                    crate::gui::composition::note_trame(
+                        t_presentation.saturating_sub(t_trame), fin.saturating_sub(t_presentation));
+                }
 
                 crate::kernel::timer::mark_frame();
                 if derniere_trame != 0 {
@@ -1541,6 +1606,13 @@ fn boucle() {
             derniere_trame = maintenant;
             sale = false;
             degats.efface();
+            if core::mem::take(&mut repli_cpu_du) {
+                // Revue de la PR #287 : sans cela, l'ecran entier promis au
+                // CPU apres le refus du GPU etait efface ici, avant d'etre
+                // peint ; un client immobile restait perime.
+                degats.tout();
+                sale = true;
+            }
         }
 
         if maintenant.wrapping_sub(dernier_releve) >= PERIODE_RELEVE_MS {
@@ -1690,6 +1762,10 @@ fn boucle() {
 fn releve_charge(wins: &mut Vec<Win>, periode_ms: u64) {
     // BOUCHAUD_SMP_NG2_LOAD_LOG_V1
     task::log_smp_load();
+    // BOUCHAUD_GPU_COMPOSITION_V2 : ce que le GPU a compose, ce que le
+    // processeur a encore recopie des clients.
+    let trames_clients: u64 = wins.iter().filter_map(|w| w.app.client()).map(|c| c.trames).sum();
+    crate::gui::composition::releve(periode_ms, trames_clients);
 
     // BOUCHAUD_UX_KEY_DAMAGE_V1 : la preuve que la frappe ne repeint plus le
     // bureau. Taper du texte dans une page doit faire monter `vers_client`
@@ -2045,8 +2121,71 @@ fn temoin_composition(pompe_t_ms: u64) {
     );
 }
 
-fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
+/// BOUCHAUD_GPU_COMPOSITION_V2 : ferme la trame ouverte par `fb::debut_trame`.
+/// Avec des fenetres composees par le GPU, la trame part avec elles
+/// (`fb::fin_trame_gpu`) ; sinon le chemin d'avant (`fb::fin_trame`). Si le GPU
+/// renonce, tout est repeint par le processeur a la trame suivante.
+#[inline(never)]
+fn ferme_trame(
+    wins: &mut [Win],
+    plan_gpu: alloc::boxed::Box<crate::gui::composition::Plan>,
+    plan_gpu_precedent: &mut alloc::boxed::Box<crate::gui::composition::Plan>,
+    degats: &mut Degats,
+    trame_gpu_due: &mut bool,
+) -> bool {
+    if plan_gpu.nombre() == 0 {
+        *plan_gpu_precedent = plan_gpu;
+        fb::fin_trame();
+        return false;
+    }
+    let mut couches: Vec<crate::drivers::virtio_gpu::CoucheGpu> = Vec::new();
+    for f in plan_gpu.fenetres.iter().flatten() {
+        let Some(w) = wins.get(f.index) else { continue };
+        let Some(c) = w.app.client() else { continue };
+        let z = window::zone_utile(w);
+        let neuve = plan_gpu_precedent.de(f.id).is_none();
+        let d = c.degat_gpu;
+        use crate::drivers::composition_gpu::R;
+        couches.push(crate::drivers::virtio_gpu::CoucheGpu {
+            noeud: c.surface.node,
+            frames: c.surface.frames(),
+            largeur: c.surface.largeur as u32,
+            hauteur: c.surface.hauteur as u32,
+            pas: c.surface.pas as u32,
+            octets: c.surface.octets() as u32,
+            tampons: c.surface.tampons as u32,
+            face: c.face() as u32,
+            // Une fenetre qui ENTRE dans le GPU : texture entiere a monter.
+            sale: if neuve {
+                R::neuf(0, 0, c.surface.largeur as i32, c.surface.hauteur as i32)
+            } else {
+                R::neuf(d.x, d.y, d.largeur as i32, d.hauteur as i32)
+            },
+            origine: (z.x, z.y),
+            visibles: &f.visibles[..f.n],
+        });
+    }
+    let repli = !fb::fin_trame_gpu(&couches);
+    if repli {
+        crate::gui::composition::publie(&crate::gui::composition::Plan::vide());
+        **plan_gpu_precedent = crate::gui::composition::Plan::vide();
+        degats.tout();
+        *trame_gpu_due = true;
+    } else {
+        *plan_gpu_precedent = plan_gpu;
+    }
+    for w in wins.iter_mut() {
+        if let Some(c) = w.app.client_mut() { c.degat_gpu = Rect::default(); }
+    }
+    // BOUCHAUD_GPU_REPLI_SURVIT_A_LA_TRAME_V1 : l'appelant doit garder ce
+    // repli au-dela de son nettoyage de fin de trame (revue de la PR #287).
+    repli
+}
+
+fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
+    degats_routes: &mut Vec<Rect>) -> (Rect, bool, bool) {
     let mut degat_ecran = Rect::default();
+    let mut gpu_sale = false;
     let mut morts: Vec<usize> = Vec::new();
     // BOUCHAUD_C14_SURFACE_ALLOUEE_AU_MAXIMUM_V1
     //
@@ -2084,6 +2223,9 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
             }
             if client.verifie_silence() {
                 degat_ecran = degat_ecran.union(&zone_fenetre);
+                // BOUCHAUD_GPU_TEXTURE_SUIT_L_AVEUGLE_V1 (revue de la PR #287)
+                client.degat_gpu = client.surface_entiere();
+                gpu_sale = true;
             }
             // Un client qui n'annonce pas ses trames est recompose « a
             // l'aveugle » : on ne sait pas quand il peint, seulement qu'il
@@ -2094,6 +2236,11 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
             if recompose_aveugle && client.recompose_a_l_aveugle() && visible {
                 client.abime_tout();
                 degat_ecran = degat_ecran.union(&zone_fenetre);
+                // BOUCHAUD_GPU_TEXTURE_SUIT_L_AVEUGLE_V1 : un client qui
+                // n'annonce pas ses trames peint quand meme ; sa texture GPU
+                // doit etre remontee, sinon le GPU recopie une image figee.
+                client.degat_gpu = client.surface_entiere();
+                gpu_sale = true;
             }
             if client.pompe() {
                 // Le degat est consomme meme si la fenetre est minimisee :
@@ -2101,13 +2248,19 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
                 // personne ne lit, et la restauration recompose de toute facon.
                 let degat = client.prend_degat();
                 if visible && !degat.vide() {
+                    client.degat_gpu = client.degat_gpu.union(&degat);
                     let ecran = Rect::neuf(
                         zone_fenetre.x.saturating_add(degat.x),
                         zone_fenetre.y.saturating_add(degat.y),
                         degat.largeur,
                         degat.hauteur,
                     );
-                    degat_ecran = degat_ecran.union(&ecran);
+                    // BOUCHAUD_GPU_COMPOSITION_V2 : fenetre composee par le
+                    // GPU -- le processeur ne repeint que ce qui est SOUS un
+                    // calque superieur ; le reste part en texture.
+                    // BOUCHAUD_GPU_COMPOSITION_V2 : la part du processeur
+                    // (hors GPU, hors calques opaques superieurs).
+                    gpu_sale |= crate::gui::composition::route_degat(w.window.id.get(), ecran, degats_routes);
                 }
             }
             if client.fermeture_demandee || !client.vivant() {
@@ -2120,7 +2273,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool) -> (Rect, bool) {
     for index in morts.into_iter().rev() {
         ferme_fenetre(wins, index);
     }
-    (degat_ecran, perte)
+    (degat_ecran, perte, gpu_sale)
 }
 
 fn proto_rect_ecran(rect: Rect) -> Rect {
@@ -2137,7 +2290,7 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
     // plus rien ne lit sa surface. Un client mort disparait sans animation :
     // ce n'est pas un geste de l'utilisateur.
     let vivant = match &mut wins[index].app {
-        App::Navigateur { client } | App::Doom { client } => client.vivant(),
+        App::Navigateur { client } | App::Doom { client } | App::Application { client } => client.vivant(),
         _ => true,
     };
     if vivant && !wins[index].min {
@@ -2148,6 +2301,9 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
     }
     let mut w = wins.remove(index);
     if let Some(client) = w.app.client_mut() {
+        // BOUCHAUD_GPU_COMPOSITION_V2 : la texture rend la surface AVANT
+        // que le client ne disparaisse.
+        crate::drivers::virtio_gpu::oublie_surface(client.surface.node);
         client.termine();
     }
 }
@@ -2241,6 +2397,7 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     let (largeur_fenetre, hauteur_fenetre) = window::fenetre_pour_zone(NAV_LARGEUR, NAV_HAUTEUR);
     let client = match Client::lance(
         client::CHEMIN_NAVIGATEUR,
+        window::TITRE_NAVIGATEUR,
         cwd,
         (NAV_LARGEUR as usize, NAV_HAUTEUR as usize),
         window::zone_maximale(),
@@ -2274,6 +2431,34 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     }
 }
 
+/// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : lance n'importe quel programme ring 3
+/// du protocole GUI dans une fenetre standard (`BO_AUTOSTART_APP=/chemin`).
+fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str) {
+    let titre = chemin.rsplit('/').next().unwrap_or(chemin);
+    let (largeur, hauteur) = (640i32, 400i32);
+    let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
+    let client = match Client::lance(chemin, titre, cwd,
+        (largeur as usize, hauteur as usize), window::zone_maximale()) {
+        Ok(client) => client,
+        Err(error) => {
+            crate::serial_println!("BOUCHAUD_APP_LAUNCH_ERROR chemin={} {}", chemin, error);
+            return;
+        }
+    };
+    crate::serial_println!("BOUCHAUD_APP_LAUNCH chemin={} pid={}", chemin, client.pid);
+    let mut win = Win::new(String::from(titre),
+        (fb::width() as i32 - w) / 2, BAR_H as i32 + 8,
+        w, h, crate::gui::windowing::WindowFlags::STANDARD,
+        App::Application { client: alloc::boxed::Box::new(client) });
+    clamp_win(&mut win);
+    ouvre_fenetre(wins, win, degats);
+    if let Some(last) = wins.last_mut() {
+        if let Some(client) = last.app.client_mut() {
+            client.envoie_configuration(true);
+        }
+    }
+}
+
 /// DOOM: autre application ring3, independante du navigateur et du service.
 fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     if let Some(index) = wins.iter().position(|w| matches!(&w.app, App::Doom { .. })) {
@@ -2287,7 +2472,7 @@ fn lance_doom(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     }
     let (largeur, hauteur) = (640i32, 400i32);
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
-    let client = match Client::lance("/doom", cwd,
+    let client = match Client::lance("/doom", "DOOM", cwd,
         (largeur as usize, hauteur as usize), window::zone_maximale()) {
         Ok(client) => client,
         Err(error) => {
@@ -2725,7 +2910,7 @@ fn handle_click(
         } else {
             let zone = zone_utile(top);
             match &mut wins[index].app {
-                App::Navigateur { client } | App::Doom { client } => {
+                App::Navigateur { client } | App::Doom { client } | App::Application { client } => {
                     if let Some((x, y)) = crate::gui::protocole::vers_local(&zone, mx, my) {
                         client.envoie_pointeur(x, y, 1);
                     }

@@ -265,5 +265,6 @@ pub(crate) fn draw_app(w: &Win) {
         // Les pixels existent deja, dans la surface partagee.
         App::Navigateur { client }          => crate::gui::widgets::compose_client(w, client),
         App::Doom { client }                => crate::gui::widgets::compose_client(w, client),
+        App::Application { client }         => crate::gui::widgets::compose_client(w, client),
     }
 }

@@ -354,6 +354,15 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
         "task: double preparation de passation tid={}",
         task.tid
     );
+    // P13_PASSATION_SOUS_IF_COUPE_V1 (#264) : une passation n'est publiee
+    // qu'interruptions coupees -- sinon une IRQ de ce coeur peut la terminer a
+    // moitie publiee, ou depuis la pile meme de la tache sortante.
+    assert!(
+        !interrupts::are_enabled(),
+        "task: passation publiee interruptions ouvertes tid={} cpu={}",
+        task.tid,
+        cpu
+    );
 
     match SWITCH_PENDING[cpu].compare_exchange(
         NO_TASK,

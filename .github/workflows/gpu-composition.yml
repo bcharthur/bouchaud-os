@@ -1,0 +1,248 @@
+# P10 -- compositeur GPU des fenetres (BOUCHAUD_GPU_COMPOSITION_V2).
+#
+# QEMU `virtio-gpu-gl-pci` + virglrenderer : le BLIT des fenetres s'execute sur
+# le GL de l'hote. Les runners GitHub n'ont pas de GPU : le GL de l'hote y est
+# llvmpipe (Mesa, logiciel). La preuve porte donc sur le DELESTAGE du
+# processeur INVITE (dessin du bureau, pixels clients recopies) et sur
+# l'exactitude au pixel ; le gain absolu d'un vrai GPU hote se mesure sur un
+# poste avec GPU (`run.ps1 -P10GPU`), pas ici.
+name: GPU composition
+
+on:
+  pull_request:
+    paths:
+      - 'src/drivers/display/**'
+      - 'src/gui/**'
+      - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/ladybird_empreinte.py'
+      - 'tools/ci/analyse_gpu_composition.py'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/doom/**'
+      - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/bench_ladybird.py'
+      - '.github/workflows/gpu-composition.yml'
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'src/drivers/display/**'
+      - 'src/gui/**'
+      - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/ladybird_provenance.py'
+      - 'tools/ci/ladybird_empreinte.py'
+      - 'tools/ci/analyse_gpu_composition.py'
+      - 'tools/userland/mire-gpu.c'
+      - 'tools/doom/**'
+      - 'tools/ci/run_ladybird_browser_host.sh'
+      - 'tools/ci/bench_ladybird.py'
+      - '.github/workflows/gpu-composition.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpu-composition-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  banc:
+    name: gpu-composition / ${{ matrix.accel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        accel: [tcg, kvm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU (VIRGL), Xvfb, Mesa, musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+            xvfb imagemagick musl-tools libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil build-essential
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -device help 2>&1 | grep virtio-gpu || true
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            gpu-composition-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: DOOM (Doomgeneric epingle, Freedoom verifie)
+        run: tools/doom/build-linux.sh
+      - name: Acces a /dev/kvm
+        if: matrix.accel == 'kvm'
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Image de banc -- panne GPU injectee (non livrable)
+        run: |
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livre.bin
+          cargo bootimage --features banc-gpu-composition-panne
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-panne.bin
+          cp boot-livre.bin target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if grep -aq GPU_COMPOSITION_INJECTION boot-livre.bin; then echo "INJECTION_DANS_L_IMAGE_LIVREE" >&2; exit 1; fi
+          grep -aq GPU_COMPOSITION_INJECTION boot-panne.bin
+      - name: Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)
+        env:
+          BO_QEMU_KVM: ${{ matrix.accel == 'kvm' && '1' || '0' }}
+          GPU_COMPOSITION_BOOT_PANNE: boot-panne.bin
+        # pipefail : sans lui, `| tee` rend le statut de tee, pas celui du banc
+        # (BOUCHAUD_CI_VERDICTS_NEGATIFS_V1).
+        shell: bash
+        run: |
+          set -o pipefail
+          tools/ci/run_gpu_composition.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin | tee gpu-composition.log
+          grep -q GPU_COMPOSITION_BANC_OK gpu-composition.log
+      - name: Benchmark (medianes des releves, conditions de la mesure)
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "### Benchmark ${{ matrix.accel }} ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/ci/bench_bouchaud.py gpu-composition | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Extraits du journal
+        if: always()
+        run: |
+          for f in gpu-composition/*/serie.log; do
+            echo "== $f"
+            sed 's/\x1b\[[0-9;]*m//g' "$f" | grep -aE 'AUTOTEST|GPU_COMPOSITION|GPU-COMPOSITION|GPU_COUCHE|DOOM_ATELIER|APP_LAUNCH|MIRE_GPU|panic|PANIC' | head -40 || true
+          done
+      - name: Preuves
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-composition-${{ matrix.accel }}
+          path: |
+            gpu-composition.log
+            gpu-composition/*/serie.log
+            gpu-composition/*/capture.png
+          if-no-files-found: warn
+
+  # Ladybird REEL (artefact canonique, provenance verifiee contre ce SHA)
+  # sur `virtio-gpu-gl-pci` : la fenetre du navigateur doit etre composee par
+  # le GPU (`fenetres_gpu>=1`, pixels poses par le GPU) et le smoke produit
+  # (mire de la page, verdict terminal) doit rester vert.
+  # BOUCHAUD_LADYBIRD_PRODUCTION_V1 : selection STRICTE de l'artefact. Le
+  # dernier artefact du depot n'est pas celui de ce SHA (run 42895079434 :
+  # empreinte ebc2d030 au lieu de 6199f460, refuse a juste titre par la
+  # verification). On retient le run d'un build reel dont l'empreinte,
+  # recalculee depuis git, est celle de ce SHA ; si une production de cette
+  # empreinte est en cours (declenchee par ladybird-native-browser), on
+  # l'attend. Jamais de declenchement ici, jamais de verification sautee.
+  ladybird-artefact:
+    name: gpu-composition / artefact Ladybird (selection stricte)
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run_id: ${{ steps.lb.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: lb
+        name: Artefact de l'empreinte de ce SHA (build reel, attente de la production en cours)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GRACE_ATTENTE: '900'
+          DELAI_ATTENTE: '14400'
+        run: python3 tools/ci/ladybird_provenance.py attends
+
+  ladybird-gpu:
+    name: gpu-composition / Ladybird
+    needs: ladybird-artefact
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ needs.ladybird-artefact.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verifier la provenance de l'artefact et les entrees du SHA
+        run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
+      - name: QEMU (VIRGL), Xvfb, Mesa, outils du smoke
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+            xvfb imagemagick libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil file socat netcat-openbsd
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            gpu-composition-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - name: Ladybird compose par le GPU (smoke produit sous virtio-gpu-gl)
+        run: |
+          Xvfb :70 -screen 0 1920x1200x24 -nolisten tcp &
+          sleep 1
+          DISPLAY=:70 BO_SMOKE_AFFICHAGE=virgl tools/ci/run_ladybird_browser_host.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Verdict de composition GPU du navigateur
+        if: always()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' serie-browser-host.log > serie-propre.log || true
+          grep -aE 'AUTOTEST|BOUCHAUD_GPU_COMPOSITION_OK|GPU-COMPOSITION|GPU_COMPOSITION_ECHEC' serie-propre.log | head -30 || true
+          grep -q 'BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK' serie-propre.log
+          grep -q 'BOUCHAUD_GPU_COMPOSITION_OK' serie-propre.log
+          if grep -q 'GPU_COMPOSITION_ECHEC' serie-propre.log; then echo 'GPU_COMPOSITION_ECHEC vu'; exit 1; fi
+          python3 - <<'PY'
+          import re
+          lignes = [l for l in open("serie-propre.log", errors="replace") if "[GPU-COMPOSITION]" in l]
+          poses = sum(int(m) for l in lignes for m in re.findall(r"px_poses_gpu=(\d+)", l))
+          fen = max((int(m) for l in lignes for m in re.findall(r"fenetres_gpu=(\d+)", l)), default=0)
+          print(f"LADYBIRD_GPU releves={len(lignes)} px_poses_gpu={poses} fenetres_gpu_max={fen}")
+          assert lignes and poses > 0 and fen >= 1, "navigateur non compose par le GPU"
+          print("LADYBIRD_GPU_COMPOSITION_OK")
+          PY
+      # BOUCHAUD_LADYBIRD_BENCH_V1 : second demarrage a froid, meme artefact,
+      # meme page, meme peripherique, `gpu-composition off` ; puis le tableau
+      # A/B tire des deux journaux (tools/ci/bench_ladybird.py).
+      - name: Ladybird, bras composition CPU (A/B)
+        if: success()
+        run: |
+          Xvfb :71 -screen 0 1920x1200x24 -nolisten tcp &
+          sleep 1
+          DISPLAY=:71 BO_SMOKE_AFFICHAGE=virgl BO_SMOKE_GPU_COMPOSITION=off BO_SMOKE_SUFFIXE=-cpu \
+            tools/ci/run_ladybird_browser_host.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Benchmark Ladybird (GPU on / off)
+        if: success()
+        # pipefail : sans lui, `| tee` rendait vert un LADYBIRD_BENCH_ECHEC
+        # (constate au run 42842860256, SHA 93d9421).
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "### Ladybird, composition GPU on/off ($GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/ci/bench_ladybird.py serie-browser-host.log serie-browser-host-cpu.log | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Preuves
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-composition-ladybird
+          path: |
+            serie-browser-host.log
+            serie-browser-host-cpu.log
+            surface-browser-host*.ppm
+          if-no-files-found: warn
