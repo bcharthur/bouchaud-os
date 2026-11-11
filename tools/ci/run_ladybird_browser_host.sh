@@ -803,15 +803,7 @@ if [ "$manquants" -ne 0 ]; then
   # artefact. Le bloc ci-dessous le recopie : taches pretes/bloquees/sur
   # coeur, tache et appel systeme courants par coeur, verrous tenus, futex.
   # Lecture seule du journal ; aucun jalon, aucun seuil ne change.
-  {
-    echo "== FORENSIQUE DEBUT (verdict=$verdict, ${ECOULE}s) =="
-    sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' \
-      | grep -aE '\[(SMP-SNAPSHOT|SMP-SPIN|SMP-TASK|SMP-LOAD|SMP-IPI|SCHED-RESUME|SCHED-TACHE|SCHED-FILE|SCHED-DUMP|SCHED-ORPHELINE|SCHED-NG-ATTENTE-VIVE|SCHED-NG-VEILLE|SCHED-NG-FILE|WAITQ-DETACHED|WAIT-WORD|FUTEX|PERF-PROC)\]' \
-      | tail -n 120 | cut -c1-260 || true
-    echo "-- 60 dernieres lignes du journal, hors releves memoire periodiques --"
-    sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' | grep -av 'MM-NG6' | tail -n 60 | cut -c1-260 || true
-    echo "== FORENSIQUE FIN =="
-  } >&2
+  tools/ci/forensique_ladybird.sh "$LOG" "verdict=$verdict, ${ECOULE}s" >&2
   case "$verdict" in
     muet)
       echo "l'invite a cesse d'ecrire sur la console serie pendant ${SILENCE_MAX}s :" >&2

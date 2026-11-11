@@ -172,6 +172,7 @@ exige "aucun abandon de lien Compositor" bash -c "! grep -aq 'COMPOSITOR_LINK_GI
 if [ ${#echecs[@]} -eq 0 ]; then
   echo "LADYBIRD_CRASH_RENDU_OK pid_b=${pid_b} pid_b_nouveau=${pid_b2} delai_reprise_ms=${delai:-?}"
 else
+  tools/ci/forensique_ladybird.sh "$LOG" "run_ladybird_crash_rendu" >&2
   echo "LADYBIRD_CRASH_RENDU_ECHEC n=${#echecs[@]}"
   exit 1
 fi

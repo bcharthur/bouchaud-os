@@ -1377,8 +1377,9 @@ jobs:
         env:
           REPETITIONS: ${{ inputs.repetitions_piege || '8' }}
         run: |
+          # Base 10 explicite (revue #291 : « 08 » est un octal invalide pour bash).
           n=8
-          if [[ "$REPETITIONS" =~ ^[0-9]+$ ]] && (( REPETITIONS > 8 )); then n=$REPETITIONS; fi
+          if [[ "$REPETITIONS" =~ ^[0-9]{1,4}$ ]]; then r=$((10#$REPETITIONS)); (( r > n )) && n=$r; fi
           (( n > 24 )) && n=24  # 48 demarrages ~ 60 min : sous le delai du job (75 min)
           tools/ci/run_compositor_piege.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser "$n"
       - name: Journaux
