@@ -1,8 +1,8 @@
-# Bouchaud OS — point d'entrée (2026-11-04)
+# Bouchaud OS — point d'entrée (2026-11-10)
 
 **Source de vérité active.** Commencez toujours par `git fetch && git rev-parse HEAD origin/main`, puis lisez [status.json](status.json). C'est un instantané daté, pas un statut qui se met à jour seul : un SHA ou un verdict n'est écrit qu'à un seul endroit, et c'est là.
 
-> **Passation la plus récente :** [consolidation du 8 novembre 2026](CONSOLIDATION_2026-11-08.md), distinguant `main`, PR et correctifs locaux non qualifiés. Les verdicts restent attachés à leurs SHA et runs exacts.
+> **Passation la plus récente :** [session du 10 novembre 2026](SESSION_2026-11-10.md) (C22, P13, P10 GPU, client graphique générique), après la [consolidation du 8 novembre](CONSOLIDATION_2026-11-08.md). Les verdicts restent attachés à leurs SHA et runs exacts.
 
 ## Comprendre le projet en cinq minutes
 
@@ -32,9 +32,8 @@
 **Documents fusionnés depuis la consolidation** : `ATELIER_HANDOFF.md`, `ATELIER_DESIGN_SYSTEM.md`, `ATELIER_AUDIT_ABC.md` et les captures `atelier/` (PR #242 à #244) ; `TRIGKEY_T1_VIDANGE_USB.md` (PR #246).
 
 **Documents qui n'existent que dans des PR ouvertes**, et ne doivent pas être cherchés sur `main` :
-- `STOCKAGE_S1.md` : PR #245.
-- `PERF_P1_PREMIERE_TRAME.md` : PR #247.
-- `TRIGKEY_PLATFORM_PLAN.md` : branche `claude/trigkey-physical-20261103`, sans PR.
+- `P10_GPU_PROGRESS_2026-11-09.md` : PR #279.
+- `P10_GPU_MAINLINE_2026-11-09.md` : PR #281 (repris sur la branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`).
 
 ## Archives
 

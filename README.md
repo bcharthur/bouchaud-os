@@ -25,6 +25,7 @@ Un système d'exploitation natif expérimental, écrit principalement en Rust, a
 - [Le projet](#le-projet)
 - [L'interface Atelier](#linterface-atelier)
 - [Ce qui existe réellement](#ce-qui-existe-réellement)
+- [Performances mesurées](#performances-mesurées)
 - [Architecture](#architecture)
 - [Construire et démarrer](#construire-et-démarrer)
 - [Tests et CI](#tests-et-ci)
@@ -45,44 +46,42 @@ Bouchaud OS est un système d'exploitation **bare-metal** : il démarre directem
 - **Moderne** : Rust `no_std`, SMP dès le départ, une ABI native à base de handles et d'IPC, des mises à jour atomiques A/B, un bureau conçu comme un produit.
 - **Durable** : chaque comportement important a son banc de preuve, rejouable sur le même SHA. Un défaut corrigé laisse un test qui le reproduirait.
 
-**Ambitions, non livrées** : une machine de référence physique pleinement prise en charge (TRIGKEY Speed S5), des services système isolés en espace utilisateur, un stockage généraliste fiable, l'accélération graphique, puis des services d'IA locale isolés. Ce sont des **directions** ; leur état réel est donné plus bas.
+**Ambitions, non livrées** : une machine de référence physique pleinement prise en charge (TRIGKEY Speed S5), des services système isolés en espace utilisateur (dont le gestionnaire de fenêtres), un stockage généraliste fiable, le raster GPU, puis des services d'IA locale isolés. Ce sont des **directions** ; leur état réel est donné plus bas.
 
 ---
 
 ## L'interface Atelier
 
-**Atelier Experience 2.0** est le nouveau bureau de Bouchaud OS. Il apporte un design system et de vrais assets : icônes [Lucide](https://lucide.dev), photographie de fond, logo provisoire. On y trouve une barre haute, un dock, un centre de contrôle et des fenêtres animées.
+**Atelier** est le bureau de Bouchaud OS : barre haute, dock, centre de contrôle, fenêtres animées, icônes [Lucide](https://lucide.dev) et fond photographique. La marque est le nom seul (le croissant provisoire a été retiré le 10 novembre 2026) et **aucune fenêtre ne s'ouvre d'elle-même au démarrage** : ni Terminal, ni navigateur.
 
-> **Statut : sur `main` depuis la fusion des PR #242 à #244 (`main@e0257c60`).** Toutes les images ci-dessous sont des **captures réelles du framebuffer sous QEMU**. Elles sont prises avec la commande `screendump` du moniteur, en 1280×720 et en rendu logiciel, par le banc `tools/ci/run_bureau_capture.sh`. Ce ne sont pas des maquettes, et chaque image est liée au commit qui l'a produite.
+> **Captures du 10 novembre 2026**, branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`. Ce sont des **captures réelles de l'écran de l'hôte** (QEMU 8.2, `virtio-gpu-gl-pci`, sortie SDL sous Xvfb), en 1280×720, sans retouche. Le contenu des fenêtres DOOM et Mire y est **composé par le GPU de l'hôte** (VIRGL) ; le reste du bureau est peint par le processeur.
 
 <table>
 <tr>
-<td width="50%"><img src="https://raw.githubusercontent.com/bcharthur/bouchaud-os/07f1a5ffa3b0f3fa309e6413f60b0022d38fd0e6/docs/current/atelier/capture-incD-bureau-fichiers.png" alt="Bureau Atelier avec l'application Fichiers"></td>
-<td width="50%"><img src="https://raw.githubusercontent.com/bcharthur/bouchaud-os/cefad34a256dc802c764255a234fa33da0bb189d/docs/current/atelier/capture-incA-centre-ouvert.png" alt="Centre de contrôle Atelier ouvert"></td>
+<td width="50%"><img src="docs/current/atelier/2026-11-10/bureau.png" alt="Bureau Atelier au démarrage, sans fenêtre ouverte"></td>
+<td width="50%"><img src="docs/current/atelier/2026-11-10/doom.png" alt="DOOM composé par le GPU"></td>
 </tr>
 <tr>
-<td><sub><b>Fichiers Atelier</b> : barre latérale, fil d'Ariane, grille, état de persistance. PR #244, commit <code>07f1a5ff</code>.</sub></td>
-<td><sub><b>Centre de contrôle</b> : états réels du réseau et de l'affichage, actions d'alimentation. PR #243, commit <code>cefad34a</code>.</sub></td>
+<td><sub><b>Le bureau au démarrage</b> : aucune fenêtre imposée, marque sans croissant.</sub></td>
+<td><sub><b>DOOM</b> (Freedoom, processus ring 3) : sa fenêtre est une texture GPU, posée par un <code>BLIT</code> VIRGL.</sub></td>
 </tr>
 <tr>
-<td><img src="https://raw.githubusercontent.com/bcharthur/bouchaud-os/f2cbb06819ea899765f1f629016e121df9ca7a36/docs/current/atelier/capture-atelier2-bureau-1280x720.png" alt="Bureau Atelier Experience 2.0"></td>
-<td><img src="https://raw.githubusercontent.com/bcharthur/bouchaud-os/f2cbb06819ea899765f1f629016e121df9ca7a36/docs/current/atelier/capture-avant-main-69e179a4.png" alt="Bureau actuel de main, avant Atelier"></td>
+<td><img src="docs/current/atelier/2026-11-10/fichiers-doom.png" alt="Fichiers et DOOM côte à côte"></td>
+<td><img src="docs/current/atelier/2026-11-10/mire.png" alt="Mire de vérification au pixel"></td>
 </tr>
 <tr>
-<td><sub><b>Bureau Atelier 2.0</b> : design system, fond photographique, dock. PR #242, commit <code>f2cbb068</code>.</sub></td>
-<td><sub><b>Le bureau d'avant Atelier</b> (<code>main@69e179a4</code>), pour comparaison.</sub></td>
+<td><sub><b>Fichiers</b> (application native, CPU) sous <b>DOOM</b> (GPU) : la découpe des fenêtres superposées est exacte.</sub></td>
+<td><sub><b>Mire</b> : chaque pixel code sa position ; la capture décodée montre 254 934 pixels exacts, 0 faux (banc <code>run_gpu_composition.sh</code>).</sub></td>
 </tr>
 </table>
 
-<p align="center"><img src="https://raw.githubusercontent.com/bcharthur/bouchaud-os/cefad34a256dc802c764255a234fa33da0bb189d/docs/current/atelier/sequence-incC-survol-dock.png" alt="Séquence de survol du dock" width="85%"><br><sub>Survol du dock, image par image (PR #243, <code>cefad34a</code>).</sub></p>
-
-Le rendu est **logiciel** : le pilote virtio-gpu sait présenter des images, mais aucun pixel n'est calculé par un GPU.
+Captures plus anciennes (Atelier 2.0, PR #242 à #244) : [`docs/current/atelier/`](docs/current/atelier/).
 
 ---
 
 ## Ce qui existe réellement
 
-Légende : ✅ démontré à ce niveau · ◐ partiel · — non démontré · 🔀 seulement dans une PR ouverte.
+Légende : ✅ démontré à ce niveau · ◐ partiel · — non démontré · 🔀 seulement sur une branche ou une PR ouverte.
 
 La colonne « Physique » désigne un essai sur la machine de référence **avec le code actuel**. Des boots physiques plus anciens figurent dans l'historique, mais sur d'autres SHA : ils ne qualifient pas `main`.
 
@@ -94,21 +93,52 @@ La colonne « Physique » désigne un essai sur la machine de référence **avec
 | Ordonnanceur SMP (files par cœur, IPI, préemption) | ✅ | ◐ | ✅ SMP1/2/4 | ✅ SMP1/2/4 | — | SMP8 strict en attente d'un runner dédié |
 | ABI native 1.2 et IPC (handles, canaux, waitsets, mémoire partagée) | ✅ | ✅ | ✅ | — | — | contrat gelé et vérifié ; [NATIVE_ABI](docs/current/NATIVE_ABI.md) |
 | Compatibilité Linux/POSIX (ELF, `ld.so`, appels système) | ✅ | ◐ | ✅ | ✅ | — | sert à porter Ladybird |
-| Pilotes QEMU : NVMe, ATA, xHCI (HID, stockage BOT), e1000, AC'97, BGA, virtio-gpu 2D, PS/2, UART | ✅ | ◐ | ✅ | ◐ | — | |
+| Pilotes QEMU : NVMe, ATA, xHCI (HID, stockage BOT), e1000, AC'97, BGA, virtio-gpu 2D et 3D (VIRGL), PS/2, UART | ✅ | ◐ | ✅ | ◐ | — | |
 | Pilotes du matériel de référence : RTL8111/8168, GOP UEFI, NVMe et xHCI réels | ✅ | — | — | — | — | code présent, **non revalidé physiquement** |
 | Réseau : IPv4, ARP, DHCP, DNS, TCP/UDP, TLS, HTTP/1.1 et HTTP/2 | ✅ | ◐ | ✅ | ✅ | — | |
-| Bureau et gestionnaire de fenêtres (dans le noyau), rendu logiciel | ✅ | ✅ | ✅ | — | — | damage tracking, culling de scène |
-| Atelier Experience 2.0 (design system, dock, centre de contrôle, Fichiers) | ✅ | ✅ | ✅ | — | — | fusionné par les PR #242 à #244 ; rendu logiciel |
+| Bureau et gestionnaire de fenêtres (dans le noyau) | ✅ | ✅ | ✅ | ✅ | — | damage tracking, culling de scène ; fenêtres cachées filtrées par les calques opaques |
+| **Compositeur GPU des fenêtres** (VIRGL : textures adossées aux surfaces, `BLIT` GPU) | 🔀 | ✅ | ✅ | ✅ | — | branche du 10/11 ; Ladybird, DOOM et toute application ring 3 ; [P10_GPU_COMPOSITEUR](docs/current/P10_GPU_COMPOSITEUR.md) |
+| DOOM (Freedoom) en ring 3 | ✅ | — | ✅ | ✅ | — | même protocole de fenêtre que toute application |
+| Atelier Experience 2.0 (design system, dock, centre de contrôle, Fichiers) | ✅ | ✅ | ✅ | — | — | fusionné par les PR #242 à #244 |
 | Applications natives : Terminal, Fichiers, Notes, Calculatrice, Rustpad, Journal, Services, Insights, Infos système | ✅ | ◐ | ✅ | — | — | applications du noyau, pas des processus isolés |
-| Bouchaud Navigateur (Ladybird, multiprocessus en ring 3) | ✅ | — | ✅ | ✅ | — | WebContent, RequestServer, ImageDecoder, WebWorker, Compositor |
+| Bouchaud Navigateur (Ladybird, multiprocessus en ring 3) | ✅ | — | ✅ | ✅ | — | WebContent, RequestServer, ImageDecoder, WebWorker, Compositor ; rastérisation Skia **CPU**, composition de la fenêtre par le GPU sous VIRGL |
 | Services natifs ring 3 : `serviced`, `healthd`, `updated`, `logd` | ✅ | ◐ | ✅ SMP1/4 | — | — | supervision, santé, mise à jour, journal |
 | Atomic Platform A/B : chargeur UEFI, essai, commit de santé, retour arrière, recovery | ✅ | ✅ | ✅ | — | — | manifeste Ed25519 ; **pas de clé de production ni d'anti-rollback** |
 | Stockage : RAMFS, `/persist` transactionnel, GPT, FAT32 | ✅ | ✅ | ✅ | — | — | coupure de courant simulée sous TCG ; **pas de VFS disque généraliste** |
-| Dossiers personnels persistants, écriture différée, métadonnées | 🔀 | ✅ | ✅ | — | — | PR #245 |
 | Vidange réelle USB (commit A/B sur clé), liaison volume ↔ support | ✅ | ✅ | ◐ | — | — | PR #246 ; en CI, le commit sur clé est parfois refusé quand l'hôte est lent (voir limites) |
 | Diagnostic : boîte noire, profil RIP, BRDP, journal série, console de recovery | ✅ | ◐ | ✅ | ◐ | — | |
 
 Le détail des verdicts (Atomic Platform, P13, anomalies ouvertes) est dans [`status.json`](docs/current/status.json) et [`STATUS_CURRENT.md`](docs/current/STATUS_CURRENT.md).
+
+---
+
+## Performances mesurées
+
+> **Benchmark honnête, à lire avec ses conditions.** Mesures **CI, QEMU KVM** sur un runner GitHub hébergé (invité 2 vCPU, 2 Gio), `virtio-gpu-gl-pci` ; le GL de l'hôte est **llvmpipe** (rendu logiciel de Mesa, le runner n'a pas de GPU). Valeurs = **médianes** des relevés de 30 s (le premier, qui contient le démarrage, est écarté), produites par [`tools/ci/bench_bouchaud.py`](tools/ci/bench_bouchaud.py) à partir du banc [`run_gpu_composition.sh`](tools/ci/run_gpu_composition.sh). SHA `21d7945`, run [42796553984](https://github.com/bcharthur/bouchaud-os/actions/runs/42796553984) (job `gpu-composition / kvm`). Rien ici n'est mesuré sur la machine physique.
+
+| Mesure | Valeur | Conditions |
+|---|---:|---|
+| Démarrage : noyau → première trame du bureau | 2 709 ms | 5 démarrages, médiane |
+| DOOM : lancement → première image | 251 ms | |
+| DOOM : trames du bureau par seconde, composition GPU | 70,0 /s | cadence fixée par DOOM, pas par le compositeur |
+| DOOM : trames du bureau par seconde, composition CPU | 70,0 /s | idem |
+| **Temps CPU de dessin du bureau par trame, GPU** | **23 µs** | fil du bureau, invité |
+| **Temps CPU de dessin du bureau par trame, CPU** | **415 µs** | fil du bureau, invité |
+| Pixels clients recopiés par le CPU invité, GPU | 21 524 /s | seulement sous le curseur |
+| Pixels clients recopiés par le CPU invité, CPU | 17 890 133 /s | toute la fenêtre, à chaque trame |
+| Présentation par trame, GPU (VIRGL) | 4 256 µs | attente par interruption : le fil dort, le cœur sert les applications |
+| Présentation par trame, CPU (même périphérique VIRGL, transferts 2D) | 3 978 µs | |
+| Présentation par trame, virtio-gpu 2D sans VIRGL | 1 248 µs | repli, autre périphérique |
+| Fenêtre cachée sous une autre : pixels clients CPU | 406 357 /s | contre 17,9 M/s visible |
+| Ladybird réel sous VIRGL : pixels posés par le GPU | 69,3 M / 30 s | run [42784689821](https://github.com/bcharthur/bouchaud-os/actions/runs/42784689821), 0,34 M seulement recopiés par le CPU |
+
+**Ce que ces chiffres disent.** Le compositeur GPU divise par **18** le temps processeur que le bureau passe à dessiner une trame et supprime **99,9 %** des copies de pixels clients : le processeur invité est rendu aux applications (Ladybird, DOOM).
+
+**Ce qu'ils ne disent pas.**
+- Ce n'est **pas** une hausse d'images par seconde : DOOM tourne à la même cadence dans les deux modes.
+- Sur ce runner, la présentation GPU de bout en bout est **plus lente** que le chemin 2D sans VIRGL (4,3 ms contre 1,2 ms par trame) : le « GPU » de l'hôte est llvmpipe, c'est-à-dire du rendu logiciel. Le gain de présentation d'un vrai GPU hôte n'est **pas mesuré**.
+- Le temps de chargement des pages Ladybird, la latence entrée → affichage et tout comportement sur la Trigkey ne sont **pas** dans ce tableau.
+- Sous TCG (émulation), les mêmes rapports se retrouvent (dessin ÷14 à ÷16) avec des valeurs absolues environ sept fois plus élevées.
 
 ---
 
@@ -127,8 +157,8 @@ flowchart TB
         abi["ABI native 1.2<br/>handles · canaux · waitsets · mémoire partagée"]
         fs["RAMFS · /persist · GPT · FAT32<br/>couche bloc"]
         net["pile réseau · TLS"]
-        drv["pilotes : NVMe · ATA · xHCI · RTL8168 · e1000<br/>AC'97 · virtio-gpu · GOP/BGA"]
-        gui["bureau · gestionnaire de fenêtres<br/>applications natives"]
+        drv["pilotes : NVMe · ATA · xHCI · RTL8168 · e1000<br/>AC'97 · virtio-gpu 2D et VIRGL · GOP/BGA"]
+        gui["bureau · gestionnaire de fenêtres<br/>applications natives · plan de composition GPU"]
         upd["mise à jour A/B (mécanisme)"]
     end
 
@@ -150,7 +180,7 @@ flowchart TB
 - **Noyau.** SMP avec APIC local, files d'exécution par cœur et IPI. Mémoire virtuelle avec pagination à la demande. Processus et threads POSIX, et une ABI native à base de handles pour les nouveaux programmes ([NATIVE_ABI](docs/current/NATIVE_ABI.md)).
 - **Pilotes.** Ils sont exposés derrière des API de bus et de bloc communes. Les pilotes du matériel de référence (RTL8168, NVMe et xHCI réels) existent, mais attendent leur revalidation physique.
 - **Système de fichiers.** Le système de fichiers vivant est en mémoire (RAMFS). `/persist` est une zone de disque écrite par transactions A/B résistantes aux coupures. Il n'y a pas encore de VFS disque généraliste avec cache de pages unifié.
-- **Environnement graphique.** Le bureau compose ses calques en logiciel, région endommagée par région endommagée. Il présente le résultat par copie vers le framebuffer (GOP, BGA ou virtio-gpu 2D).
+- **Environnement graphique.** Le bureau peint ses propres calques (fond, cadres, dock, curseur) par le processeur, région endommagée par région endommagée, et les présente (GOP, BGA, virtio-gpu 2D). Quand l'hôte propose VIRGL, le **contenu des fenêtres** ring 3 est composé par le GPU : texture adossée aux pages du client, transfert du seul rectangle abîmé, `BLIT` GPU, un flush par trame ([P10_GPU_COMPOSITEUR](docs/current/P10_GPU_COMPOSITEUR.md)).
 - **Navigateur.** Ladybird, épinglé et patché, tourne en plusieurs processus ring 3 au-dessus de la compatibilité POSIX. Son Compositor livre des surfaces au gestionnaire de fenêtres ([BOUCHAUD_NAVIGATEUR](docs/current/BOUCHAUD_NAVIGATEUR.md)).
 - **Mises à jour et récupération.**
   - `updated` (ring 3, capacité dédiée) installe un slot à partir d'un manifeste signé.
@@ -187,6 +217,34 @@ Sous Windows, `run.ps1` construit et lance une configuration complète, avec le 
 ```powershell
 .\run.ps1
 ```
+
+### Démarrer avec la composition GPU (VIRGL)
+
+Il faut un QEMU avec `virtio-gpu-gl-pci` (virglrenderer) et une sortie OpenGL (SDL ou GTK). Le noyau négocie VIRGL tout seul quand l'hôte le propose, vérifie la convention du `BLIT` par un autotest relu au pixel, puis compose les fenêtres par le GPU ; sans VIRGL, rien ne change.
+
+```bash
+qemu-system-x86_64 -m 2048 -smp 2 -serial stdio -vga none \
+  -device virtio-gpu-gl-pci -display sdl,gl=on \
+  -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+```
+
+Pour lancer aussi DOOM, qui est facultatif, le système invité doit trouver `/doom` et `/freedoom1.wad` sur un disque de runtime. Ce sont les mêmes étapes que le banc CI `tools/ci/run_gpu_composition.sh` :
+
+```bash
+tools/doom/build-linux.sh                         # Doomgeneric épinglé, Freedoom vérifié
+mkdir -p target/doom-runtime/scen
+cp target/doom-bouchaud/doom-bouchaud target/doom-runtime/scen/doom
+cp tools/doom/wads/freedoom1.wad target/doom-runtime/scen/
+chmod +x target/doom-runtime/scen/doom
+echo desktop > target/doom-runtime/scen/autorun
+IMAGE="$PWD/target/doom-runtime/disque.img" tools/userland/mkdisk.sh "$PWD/target/doom-runtime/scen"
+qemu-system-x86_64 -m 2048 -smp 2 -serial stdio -vga none \
+  -device virtio-gpu-gl-pci -display sdl,gl=on \
+  -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+  -drive format=raw,file=target/doom-runtime/disque.img
+```
+
+Sous Windows : `.\run.ps1 -P10GPU` (et `-Doom` pour ajouter DOOM). Dans le journal, `BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK` puis `BOUCHAUD_GPU_COMPOSITION_OK` confirment le chemin GPU ; `gpu-composition off` (shell) revient à la composition processeur pour comparer.
 
 ### Image UEFI
 
@@ -272,9 +330,9 @@ Le détail est dans [CI_AND_PROOFS](docs/current/CI_AND_PROOFS.md).
 | Matériel physique | campagne Trigkey **non commencée** sur le code actuel ; Wi-Fi, Bluetooth, HDA, gestion d'énergie et suspend non pris en charge |
 | Stockage | pas de VFS disque généraliste, pas de cache de pages unifié, pas de `mmap` en écriture sur un fichier disque ; `/persist` réécrit sa table entière à chaque transaction |
 | Isolation | le bureau, les applications natives, le réseau et TLS tournent encore dans le noyau |
-| Graphique | rendu logiciel uniquement ; aucune accélération GPU, ni 3D, ni pilote AMD |
+| Graphique | composition GPU des fenêtres sous QEMU VIRGL seulement ; le raster (Skia/Ladybird, applications natives) reste CPU ; pas de Vulkan invité, pas de pilote AMD (la Trigkey reste en GOP) |
 | Mises à jour | pas de clé de version de production, pas de politique anti-retour arrière |
-| Qualification | P13 strict bloqué faute de runners KVM4/KVM8 dédiés ; `main` sans protection de branche |
+| Qualification | P13 strict SMP1/2/4 vert sous KVM hébergé ; SMP8 et campagne finale bloqués faute de runners auto-hébergés `bouchaud-kvm4`/`bouchaud-kvm8` ; `main` sans protection de branche |
 | Anomalies ouvertes | `SIGCHLD_MULTIFIL_ECHEC` (une occurrence, non reproduite en 125 essais) ; une panique SMP4 dans un banc de comptabilité |
 
 Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIONS.md).
@@ -283,13 +341,13 @@ Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIO
 
 ## Travaux en cours et feuille de route
 
-**Pull requests ouvertes**, état au 2026-11-04, à revérifier sur GitHub. Les PR #242 à #244 (Atelier) et #246 (vidange USB) sont fusionnées.
+**Pull requests et branches ouvertes**, état au 2026-11-10, à revérifier sur GitHub.
 
-| PR | Sujet | État |
+| PR / branche | Sujet | État |
 |---|---|---|
-| [#245](https://github.com/bcharthur/bouchaud-os/pull/245) | Stockage S1 : dossiers personnels persistants, écriture différée, métadonnées | bloquée : doit intégrer `main` (banc scanout), puis P13 à refaire |
-| [#247](https://github.com/bcharthur/bouchaud-os/pull/247) | Performance P1 : première trame du bureau −1,9 s | bloquée : banc de comptabilité NON_QUALIFIANT, attribué à la précharge de police |
-| [#248](https://github.com/bcharthur/bouchaud-os/pull/248) | Documentation : README, sources de vérité, licences | cette mise à jour |
+| `claude/c22-p13-p10-gpu-kernel-0y2ucg` | compositeur GPU des fenêtres, client graphique générique, bureau sans croissant ni Terminal imposé, qualification C22/P13 | CI verte (TCG, KVM, Ladybird sous VIRGL) ; voir [SESSION_2026-11-10](docs/current/SESSION_2026-11-10.md) |
+| [#281](https://github.com/bcharthur/bouchaud-os/pull/281) | P10 VIRGL, première version | repris et remplacé par la branche ci-dessus |
+| [#280](https://github.com/bcharthur/bouchaud-os/pull/280), [#279](https://github.com/bcharthur/bouchaud-os/pull/279) | instantané local P10, docs du 9/11 | obsolètes |
 
 **Chantiers ouverts**, par ordre de priorité. Ce sont des projets, pas des fonctionnalités livrées.
 
@@ -299,7 +357,7 @@ Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIO
 | Stockage généraliste et VFS | inodes, montages, cache de pages, `read`/`write`/`mmap` cohérents, `fsync`, volumes externes, journalisation |
 | Plateforme Trigkey | démarrage physique, USB, NVMe, réseau, audio, horloges, énergie, endurance, diagnostics reproductibles |
 | Performance mesurée | latence des interactions, coût de l'IPC, copies, allocations, temps de chargement |
-| Moteur graphique | composition CPU optimisée, présentation GPU 2D, puis étude de la 3D et du GPU AMD |
+| Moteur graphique | fait : composition GPU des fenêtres (VIRGL). Ensuite : compositeur ring 3 ([plan](docs/current/FENETRES_RING3_PLAN.md)), raster GPU (Venus/Vulkan invité), GPU AMD |
 | Runtime applicatif isolé | applications et services hors du noyau, contrats IPC, supervision |
 | Pilotes matériels | HDA, Wi-Fi, gestion d'énergie, isolation DMA |
 | Sécurité de production | clé de version hors ligne, anti-retour arrière, protection de `main` |
@@ -349,4 +407,4 @@ Le code de Bouchaud OS est publié sous **double licence MIT ou Apache-2.0**, au
   - photographie de fond « summer 1am » de Risto Saukonpää (LGPL-3.0, KDE plasma-workspace-wallpapers) ;
   - sous-ensemble de DejaVu Sans.
 
-  Leurs attributions et le manifeste des assets sont dans [`assets/atelier/ATTRIBUTIONS.md`](assets/atelier/ATTRIBUTIONS.md). Le logo Bouchaud OS est **provisoire**.
+  Leurs attributions et le manifeste des assets sont dans [`assets/atelier/ATTRIBUTIONS.md`](assets/atelier/ATTRIBUTIONS.md). Le logo provisoire (croissant) n'est plus affiché ; le fichier reste dans les assets.
