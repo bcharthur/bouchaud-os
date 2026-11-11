@@ -323,6 +323,12 @@ jobs:
             cp reveil-coeur-muet.log "temoin-reveil-historique/serie-reveil-coeur-muet-$nom.log"
             for e in reveil-coeur-muet-t*.log; do [ -f "$e" ] && mv "$e" "temoin-reveil-historique/serie-reveil-coeur-muet-$nom-${e#reveil-coeur-muet-}"; done
             if [ "$code" != 1 ]; then echo "TEMOIN_REVEIL_$nom code=$code (ECHEC attendu : 1)" >&2; r=1; fi
+            # P13_REVEIL_SILENCE_OBSERVE_V1 : l'observateur doit VOIR le
+            # dormeur bloque du temoin (pret, en file sur le coeur masque) ;
+            # sinon il ne dirait rien non plus du prochain ECHEC de production.
+            if ! grep -aqE 'SERIE_DORMEUR_SILENCE phase=fin .* etat=0 .* en_file=1 ' "temoin-reveil-historique/serie-reveil-coeur-muet-$nom.log"; then
+              echo "TEMOIN_REVEIL_$nom : observateur du silence muet" >&2; r=1
+            fi
           done
           exit $r
       - name: P10 -- BGA contre virtio-gpu 2D, meme charge (TCG puis KVM)

@@ -1140,6 +1140,63 @@ pub fn etat_tache_brut(index: usize) -> (u8, i8, u8) {
     }
 }
 
+/// P13_REVEIL_SILENCE_OBSERVE_V1 -- ce qu'un observateur voit d'une tache
+/// qui ne tourne plus, sans allocation (pris sous interruptions masquees par
+/// le banc du reveil). `en_file` : 0 absente de la file de `file`, 1
+/// presente, 2 indeterminable.
+#[derive(Clone, Copy, Default)]
+pub struct InstantaneReveil {
+    pub etat: u8,
+    pub on_cpu: i8,
+    pub file: u8,
+    pub en_file: u8,
+    pub commute: u8,
+    pub attente: u8,
+    pub file_au_pret: u8,
+    pub echeance_ns: u64,
+    pub pret_depuis_ns: u64,
+}
+
+pub fn instantane_reveil(index: usize) -> InstantaneReveil {
+    let mut vu = InstantaneReveil { etat: 9, on_cpu: -1, en_file: 2, ..Default::default() };
+    if index == NO_TASK || index >= MAX_TACHES {
+        return vu;
+    }
+    {
+        let table = tasks();
+        let Some(t) = table.get(index) else { return vu };
+        vu.etat = t.state.charge().code();
+        vu.on_cpu = t.on_cpu.charge();
+        vu.file = t.runq_cpu.charge();
+        vu.commute = t.switching_out.charge() as u8;
+        vu.file_au_pret = t.file_au_pret.charge();
+        vu.echeance_ns = t.wake_deadline_ns.charge();
+        vu.pret_depuis_ns = t.ready_since_ns.charge();
+    }
+    vu.attente = FICHES_FORENSIQUES[index].wait_kind.load(Ordering::Acquire);
+    if let (Some(id), Some(coeur)) = (
+        registre_id(index),
+        crate::arch::x86_64::cpu_local::CpuId::from_index(vu.file as usize),
+    ) {
+        vu.en_file = match crate::arch::x86_64::cpu_local::local(coeur).file_contient(id.en_mot()) {
+            Some(true) => 1,
+            Some(false) => 0,
+            None => 2,
+        };
+    }
+    vu
+}
+
+/// Ce qu'un coeur fait, vu de l'exterieur : occupant, au repos, electeur au
+/// repos (dans l'ordonnanceur), longueur de sa file.
+pub fn instantane_coeur(cpu: usize) -> (usize, bool, bool, usize) {
+    let occupant = occupant_coeur(cpu);
+    let longueur = crate::arch::x86_64::cpu_local::CpuId::from_index(cpu)
+        .map(|id| crate::arch::x86_64::cpu_local::local(id).run_queue_len())
+        .unwrap_or(0);
+    (occupant, crate::arch::x86_64::cpu::is_idle(cpu), coeur_electeur_au_repos(cpu), longueur)
+}
+
 pub fn decrit_tache(index: usize) -> String {
     if index == NO_TASK {
         return String::from("-");

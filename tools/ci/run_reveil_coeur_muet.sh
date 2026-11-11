@@ -90,6 +90,10 @@ temoin=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'BOUCHAUD_IMAGE_TEMOIN f
 echo "IMAGE sha256=$(sha256sum "$BOOT" | cut -c1-64) build=$(sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -ao 'BOUCHAUD_BUILD commit=[^ ]*' | sed -n 1p | sed 's/.*commit=//') temoin=${temoin:-aucun}"
 sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' | grep -aoE 'SERIE_DORMEUR_(CIBLE|MASQUE_ECHEC) .*' | sed -n 1p || true
 echo "${ligne:-SERIE_DORMEUR_MASQUE absent}"
+# P13_REVEIL_SILENCE_OBSERVE_V1 : le pire silence du dormeur, photographie par
+# le masqueur (debut et fin de l'episode) -- dans la sortie du banc, donc dans
+# le job, sans l'artefact. N'entre dans aucun critere ci-dessous.
+sed -E 's/\x1b\[[0-9;]*m//g' "$LOG" | tr -d '\r' | grep -aoE 'SERIE_DORMEUR_SILENCE .*' | head -n 2 | cut -c1-900 || true
 
 # 1. Conditions de REPRODUCTION : sans elles le banc ne demontre rien.
 #    NON_QUALIFIANT (code 2), jamais vert.
