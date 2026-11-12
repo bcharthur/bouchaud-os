@@ -469,7 +469,8 @@ for i in $(seq 1 "$nb"); do
     SERIE=(-serial file:"$log")
   fi
   # ota-reseau : un moniteur QEMU par demarrage, pour couper le LIEN (set_link).
-  MONITEUR=(); moniteur="$OUT/moniteur-$i.sock"
+  # (un chemin de socket UNIX tient en 108 octets : un repertoire court)
+  MONITEUR=(); moniteur="$TRAVAIL/m$i.sock"
   [ "$SCENARIO" = ota-reseau ] && MONITEUR=(-monitor "unix:$moniteur,server=on,wait=off")
   lien=actif; t_coupe=0
   qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max \
@@ -477,7 +478,7 @@ for i in $(seq 1 "$nb"); do
     -drive if=pflash,format=raw,unit=1,file="$OUT/vars.fd" \
     -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
     "${SUPPORT[@]}" "${RESEAU[@]}" "${MONITEUR[@]}" \
-    -display none -no-reboot "${SERIE[@]}" >/dev/null 2>&1 &
+    -display none -no-reboot "${SERIE[@]}" >/dev/null 2>"$OUT/qemu-$i.err" &
   pid=$!
   verdict=""
   fin=$((SECONDS + BOOT_DELAI_S))
@@ -597,6 +598,8 @@ for i in $(seq 1 "$nb"); do
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ -n "$verdict" ] || verdict="AUCUN(slot=${slot:-?})"
+  # QEMU qui refuse ses arguments n'ecrit rien sur la serie : sa raison ici.
+  [ -s "$OUT/qemu-$i.err" ] && awk -v n="$i" 'NR <= 5 { print "AB_QEMU_ERR n=" n " " $0 }' "$OUT/qemu-$i.err"
   raison=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | tr -d '\r' | grep -aoE "BOUCHAUD_AB_(BOOT slot=[AB] raison=[a-z_]+|RECOVERY_REQUIRED raison=[a-z_]+)" | tail -1 || true)
   echo "AB_BOOT n=$i verdict=$verdict ${raison}"
   sequence+=("$verdict")
