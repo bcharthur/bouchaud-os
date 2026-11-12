@@ -191,6 +191,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // /sys, /tmp et les polices systeme.
     crate::kernel::sysroot::install();
     point_de_controle("sysroot");
+    // BOUCHAUD_CLE_USB_TEST_V1 : l'image dit si les disques internes sont en
+    // lecture seule AVANT le premier pilote de stockage.
+    crate::drivers::ecriture_interne::annonce();
 
     // Chemin physique TRIGKEY: l'archive Ladybird est dans la MEME image UEFI.
     // Aucun acces au NVMe interne n'est necessaire. L'ancien hdb ATA reste un

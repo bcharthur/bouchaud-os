@@ -238,6 +238,36 @@ fn le_pot_s_epuise_proprement_au_lieu_de_reattribuer() {
     );
 }
 
+// BOUCHAUD_NVME_CID_JAMAIS_POSE_V1 : une commande refusee AVANT la file (file
+// pleine, regle `cle-usb-test`) rend son identifiant. Avant le correctif, il
+// restait en vol : apres CID_MAX - 1 ecritures refusees, plus rien ne partait,
+// lectures comprises.
+#[test]
+fn des_refus_avant_la_file_n_epuisent_pas_le_pot() {
+    let mut s = Suivi::neuf();
+    for _ in 0..(4 * CID_MAX) {
+        let cid = s.alloue(0).expect("le pot ne doit pas s'epuiser sur des refus");
+        assert!(s.jamais_pose(cid));
+    }
+    assert_eq!(s.en_vol(), 0);
+    assert!(s.alloue(0).is_some(), "une lecture part encore");
+}
+
+#[test]
+fn jamais_pose_ne_libere_ni_un_achevement_ni_une_quarantaine() {
+    let mut s = Suivi::neuf();
+    let acheve = s.alloue(0).unwrap();
+    assert_eq!(s.range(acheve, 0, 0), Verdict::Attendu);
+    assert!(!s.jamais_pose(acheve), "un achevement range attend sa recolte");
+    assert_eq!(s.etat_de(acheve), Some(EtatCid::Acheve));
+    let expire = s.alloue(1).unwrap();
+    assert_eq!(s.expire(expire), Some(1));
+    assert!(!s.jamais_pose(expire), "le controleur peut encore ecrire : quarantaine maintenue");
+    assert_eq!(s.quarantaine(), 1);
+    assert!(!s.jamais_pose(0));
+    assert!(!s.jamais_pose(CID_MAX as u16));
+}
+
 // ---------------------------------------------------------------------------
 // Bouclage des anneaux.
 // ---------------------------------------------------------------------------

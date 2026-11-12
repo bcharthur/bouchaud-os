@@ -315,3 +315,7 @@ reveil-coeur-muet.log
 /BOUCHAUD-DOOM-SANS-WSL/
 /BOUCHAUD-DOOM-REBUILD/
 /gpu-composition*/
+
+# BOUCHAUD_CLE_USB_TEST_V1 : repertoires de build du banc (image cle, temoin).
+/target-cle-usb-test
+/target-temoin-ecriture
