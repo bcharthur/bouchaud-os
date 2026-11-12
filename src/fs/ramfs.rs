@@ -697,6 +697,18 @@ impl FileSystem {
     }
 }
 
+/// BOUCHAUD_FIND_PARCOURS_V1 : le RAMFS vu par le parcours pur, sous le verrou
+/// que l'appelant tient deja (jamais repris ici).
+impl crate::fs::parcours::Arbre for FileSystem {
+    fn taille(&self) -> usize { MAX_NODES }
+    fn utilise(&self, i: usize) -> bool { self.nodes[i].used }
+    fn parent(&self, i: usize) -> usize { self.nodes[i].parent }
+    fn dossier(&self, i: usize) -> bool { self.nodes[i].kind == NodeKind::Dir }
+    fn nom(&self, i: usize) -> &str { self.nodes[i].name_str() }
+    /// Lister un repertoire exige la lecture ET la traversee, comme `ls`.
+    fn lisible(&self, i: usize) -> bool { self.can(i, PERM_R | PERM_X) }
+}
+
 /// Affiche le chemin absolu d'un inode.
 pub fn print_path(fs: &FileSystem, idx: usize) {
     if idx == 0 {

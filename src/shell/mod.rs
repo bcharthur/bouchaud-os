@@ -1922,7 +1922,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "wc" => c::wc(argc, &argv, *cwd),
         "head" => c::head(argc, &argv, *cwd),
         "tail" => c::tail(argc, &argv, *cwd),
-        "find" => { c::find(argc, &argv, *cwd); 0 }
+        "find" => c::find(argc, &argv, *cwd),
         "lspci" => { crate::arch::x86_64::pci::print_devices(); 0 }
         // L'arbre USB, concentrateurs compris. « Le clavier ne marche pas »
         // commence par « a-t-il ete vu ? » -- deux enquetes differentes selon

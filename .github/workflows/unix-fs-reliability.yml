@@ -1,0 +1,91 @@
+name: Unix & Filesystem Reliability
+
+# Les manipulations ordinaires d'un utilisateur (explorer, chercher, creer,
+# relire, supprimer) ne doivent jamais immobiliser le noyau. Chaque etape est
+# suivie d'une commande temoin ; le banc classe PASS, FAIL, TIMEOUT,
+# KERNEL_PANIC, DEADLOCK_SUSPECTED, NOT_RUN -- et seul PASS est un succes.
+# Voir tools/ci/unix_fiabilite.py.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/ci/unix_fiabilite.py'
+      - 'tools/ci/reliability/test_unix_fiabilite.py'
+      - 'tools/fs/**'
+      - '.github/workflows/unix-fs-reliability.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/ci/unix_fiabilite.py'
+      - 'tools/ci/reliability/test_unix_fiabilite.py'
+      - 'tools/fs/**'
+      - '.github/workflows/unix-fs-reliability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unix-fs-reliability-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unix-fs:
+    name: unix-fs (TCG + KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Classement du banc (tests)
+        run: python3 -m unittest tools/ci/reliability/test_unix_fiabilite.py
+
+      - name: Parcours de find (tests hote)
+        run: |
+          mkdir -p target-hote
+          rustc --edition 2021 --test tools/fs/test_parcours.rs -o target-hote/parcours
+          target-hote/parcours
+
+      - name: QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: unix-fs-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+
+      - name: Scenario find (TCG)
+        run: python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/tcg
+
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Scenario find (KVM)
+        run: python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/kvm --kvm
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unix-fs-reliability
+          path: |
+            target/unix-fs-ci/**/serie.log
+            target/unix-fs-ci/**/rapport.json
+          if-no-files-found: error
+          retention-days: 14

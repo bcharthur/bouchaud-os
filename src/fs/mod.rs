@@ -19,6 +19,8 @@ pub mod dossiers_politique;
 pub mod ecriture_differee;
 pub mod ecriture_differee_politique;
 pub mod gpt;
+/// BOUCHAUD_FIND_PARCOURS_V1 : parcours pur et borne (find).
+pub mod parcours;
 pub mod persistance;
 pub mod ramfs;
 pub mod renommage;
