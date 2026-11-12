@@ -103,6 +103,30 @@ Détail des lignes marquées « voir ci-dessous » :
   - **Écriture** : en RAMFS sous verrou, sans E/S. C'est l'écriture différée qui synchronise, et avant un redémarrage OTA, une synchronisation explicite.
 - **Canal `testing`** : non automatisé. GitHub n'offre pas d'URL « dernière prerelease », et un canal testing exige une étiquette précise. **BLOCKED** : à concevoir (pointeur de canal signé).
 
+## Campagne D : réseau hostile (`BOUCHAUD_OTA_RESEAU_V1`, banc `ota-reseau`)
+
+Un seul banc, `tools/ci/run_ab_rollback.sh ota-reseau` (QEMU TCG/OVMF, NVMe, e1000), sert la release 1001 depuis un réseau hostile. Le serveur HTTPS de banc est `tools/ci/serveur_ota_banc.py` : chaque défaut est volontaire, unique et journalisé côté serveur. Séquence attendue et obtenue en local : `A~ A* B+`.
+
+| Défaut | Conséquence exigée | Preuve |
+|---|---|---|
+| Source au certificat d'une **CA inconnue** (même nom, même adresse) | Refus **avant toute requête** : `certificat_non_fiable` | `BOUCHAUD_OTA_TLS_REFUS … ancre de confiance inconnue` ; aucun `GET` côté serveur |
+| Source en **HTTP 500** | Refus nommé : `manifeste_http_erreur` | `BOUCHAUD_OTA_HTTP_STATUT statut=500` |
+| **Partie altérée** (bonne taille, un octet changé) | Contenu, pas transport : téléchargement refusé (`partie_empreinte_differente`), **non** repris sur place, relance du cycle à 60 s | historique `telechargement_refuse`, `BOUCHAUD_OTA_RELANCE dans_s=60` |
+| **Partie tronquée** (Content-Length complet, moitié du corps) | Transport : **cette** partie reprise | `REPRISE … part002 essai=1 raison=partie_tronquee`, puis `essai=2 resultat=ok` |
+| **Lien coupé 20 s** (`set_link`) après la partie 3 | Reprise de la partie 4 au retour du lien | `REPRISE … part004 essai=[2-4] resultat=ok` |
+| **Alimentation coupée** après la partie 5 | Démarrage suivant : interruption **vue dans STATE**, rien d'écrit dans un slot ; tout recommence depuis la partie 0, sous signature | `BOUCHAUD_OTA_TELECHARGEMENT_INTERROMPU`, slot A `raison=actif`, puis installation, `B+` |
+
+Changements de comportement apportés par cette campagne :
+
+- **TLS strict pour l'OTA** (`BOUCHAUD_TLS_CONFIANCE_V1`).
+  - Le **premier essai du banc a montré** que le noyau acceptait le certificat d'une CA inconnue et téléchargeait toute la release depuis ce serveur. Le client HTTPS du noyau, conçu pour le navigateur, signalait `[TLS !]` mais continuait.
+  - Désormais, une source `https` exige à chaque redirection une chaîne de confiance, le nom couvert et un certificat non expiré, **avant** d'envoyer la requête. Une session keep-alive non fiable n'est pas réutilisée, et une redirection vers `http` est refusée.
+  - Un miroir déclaré `http` reste permis : la décision repose sur la signature du manifeste.
+  - Le navigateur ne change pas.
+- **Relance bornée** : après un échec récupérable, 60 s, puis 120 s, … sans dépasser 6 h. Une réussite remet le compteur à zéro.
+- **État relu sur STATE** au démarrage : le dernier téléchargement et la dernière vérification traversent les redémarrages, dans des bornes (32 champs, clés `[a-z0-9_]`).
+- **Ce qui n'existe pas encore** : la reprise **d'octets** à travers un redémarrage. Les parties vivent en RAM. Une coupure fait tout recommencer, et rien n'est jamais installé à partir d'un téléchargement incomplet.
+
 ## Incident intermittent `ota-complet` (non résolu, surveillé)
 
 - **L'échec.** `ab-rollback (ota-complet)` a échoué **une fois** en CI, au SHA ec0ea87, au démarrage 1 (verdict `A!`).
