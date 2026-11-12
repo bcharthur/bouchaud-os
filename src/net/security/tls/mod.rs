@@ -134,7 +134,7 @@ pub fn https_get(hostname: &str, port: u16, path: &str) -> Vec<String> {
 /// Utilise par `wget`/`https` et par le navigateur, pour permettre le suivi
 /// des redirections et le decodage `chunked` dans `net::http`.
 pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
-    let first = https_fetch_once(hostname, port, path);
+    let first = https_fetch_once(hostname, port, path, false);
     if !first.raw.is_empty() || hostname.starts_with("www.") || hostname.matches('.').count() != 1 {
         return first;
     }
@@ -144,7 +144,7 @@ pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     // les domaines avec plusieurs labels.
     use alloc::format;
     let www = format!("www.{}", hostname);
-    let retry = https_fetch_once(&www, port, path);
+    let retry = https_fetch_once(&www, port, path, false);
     if !retry.raw.is_empty() { return retry; }
     first
 }
@@ -229,7 +229,21 @@ fn wants_close(raw: &[u8]) -> bool {
     false
 }
 
-fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
+/// BOUCHAUD_TLS_CONFIANCE_V1 -- HTTPS qui EXIGE une chaine de confiance
+/// complete, le nom d'hote couvert et un certificat non expire, AVANT d'envoyer
+/// la moindre requete ; une session du pool keep-alive est soumise a la meme
+/// exigence (elle a pu etre ouverte par le navigateur, qui accepte `[TLS !]`).
+/// Pas de repli `www.` : l'appelant nomme exactement l'hote qu'il veut.
+/// Refus : `raw` vide et une ligne `TLS_REFUS ...` dans `banner`.
+pub fn https_fetch_confiance(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
+    https_fetch_once(hostname, port, path, true)
+}
+
+fn confiance_ok(r: &handshake::CertReport) -> bool {
+    r.trusted && r.hostname_ok && !r.expired
+}
+
+fn https_fetch_once(hostname: &str, port: u16, path: &str, exige_confiance: bool) -> HttpsFetchResult {
     use alloc::format;
     use alloc::string::ToString;
 
@@ -238,18 +252,21 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
     // 1) Reutilisation keep-alive : si une session vivante existe pour cet hote,
     //    on envoie directement la requete sans refaire de handshake TLS.
     if let Some(mut sess) = pool_take(hostname, port) {
-        let req = build_request(hostname, path);
-        if sess.send_app(req.as_bytes()) {
-            let raw = sess.recv_http(8_000_000);
-            if !raw.is_empty() && crate::net::http::is_complete(&raw) {
-                crate::dlog!(crate::diag::Cat::Net, "keep-alive HIT {} ({}o)", hostname, raw.len());
-                if sess.is_alive() && !wants_close(&raw) { pool_put(hostname, port, sess); }
-                else { sess.close(); }
-                banner.push(format!("[keep-alive] {} {}o", hostname, raw.len()));
-                return HttpsFetchResult { banner, raw };
+        // Une session non fiable n'est jamais reutilisee quand la confiance est exigee.
+        if !exige_confiance || confiance_ok(&sess.report) {
+            let req = build_request(hostname, path);
+            if sess.send_app(req.as_bytes()) {
+                let raw = sess.recv_http(8_000_000);
+                if !raw.is_empty() && crate::net::http::is_complete(&raw) {
+                    crate::dlog!(crate::diag::Cat::Net, "keep-alive HIT {} ({}o)", hostname, raw.len());
+                    if sess.is_alive() && !wants_close(&raw) { pool_put(hostname, port, sess); }
+                    else { sess.close(); }
+                    banner.push(format!("[keep-alive] {} {}o", hostname, raw.len()));
+                    return HttpsFetchResult { banner, raw };
+                }
             }
         }
-        // Connexion morte/incomplete : on l'abandonne et on rouvre proprement.
+        // Connexion morte/incomplete (ou non fiable) : on l'abandonne et on rouvre proprement.
         sess.close();
     }
 
@@ -277,8 +294,17 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
         }
     };
 
+    if exige_confiance && !confiance_ok(&sess.report) {
+        let r = &sess.report;
+        banner.push(format!(
+            "TLS_REFUS confiance={} nom={} expire={} ({}, CN={})",
+            r.trusted, r.hostname_ok, r.expired, r.detail, r.subject_cn,
+        ));
+        sess.close();
+        return HttpsFetchResult { banner, raw: Vec::new() };
+    }
     let r = &sess.report;
-    let lock = if r.trusted && r.hostname_ok && !r.expired { "[TLS OK]" } else { "[TLS !]" };
+    let lock = if confiance_ok(r) { "[TLS OK]" } else { "[TLS !]" };
     let alpn = sess.alpn.clone();
     banner.push(format!(
         "{} {} (CN={}, suite={}, groupe={}, alpn={})",

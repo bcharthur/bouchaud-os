@@ -708,7 +708,8 @@ if [ "$OTA_COMPLET" = 1 ]; then
     # BOUCHAUD_OTA_RESEAU_V1 -- demarrage 1 : chaque defaut du reseau a SA
     # consequence, et rien n'est installe ni ecrit dans un slot.
     u="https://10.0.2.2:$PORT_OTA"
-    for m in "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_CA/rel resultat=refuse raison=manifeste_injoignable" \
+    for m in "BOUCHAUD_OTA_TLS_REFUS url=https://10.0.2.2:$PORT_CA/rel/manifest TLS_REFUS confiance=false" \
+             "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_CA/rel resultat=refuse raison=certificat_non_fiable" \
              "BOUCHAUD_OTA_VERIFIE source=$u/erreur resultat=refuse raison=manifeste_injoignable" \
              "BOUCHAUD_OTA_VERIFIE source=$u/rel resultat=disponible" \
              "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source=$u/rel raison=partie_empreinte_differente" \
@@ -734,8 +735,10 @@ if [ "$OTA_COMPLET" = 1 ]; then
       echec "boot=1 raison=installation_pendant_un_telechargement_incomplet"
     fi
     # Le serveur l'atteste (le transport n'est pas simule).
-    for m in "TLS_REFUS" ; do grep -q "$m" "$OUT/https-ca-inconnue.log" || echec "raison=ca_inconnue_sans_refus_tls"; done
+    # Le client refuse AVANT d'envoyer une requete : le serveur a la CA
+    # inconnue n'en recoit aucune (premier essai du banc : il avait tout servi).
     grep -q '"GET ' "$OUT/https-ca-inconnue.log" && echec "raison=ca_inconnue_a_servi_une_requete"
+    grep -q 'PRET port=' "$OUT/https-ca-inconnue.log" || echec "raison=serveur_ca_inconnue_absent"
     for m in "ERREUR_VOLONTAIRE /erreur/manifest 500" "ALTERATION_VOLONTAIRE /rel/system-slot.img.part001" \
              "TRONCATURE_VOLONTAIRE /rel/system-slot.img.part002"; do
       grep -qF "$m" "$OUT/https.log" || echec "raison=temoin_serveur_absent=$m"

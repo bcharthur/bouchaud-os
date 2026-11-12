@@ -289,7 +289,17 @@ fn sources() -> Vec<String> {
 }
 
 fn telecharge(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
-    let d = crate::net::fetch_document(url);
+    // BOUCHAUD_TLS_CONFIANCE_V1 : une source `https` exige une chaine de
+    // confiance (racines du noyau), le nom couvert, un certificat valide, a
+    // chaque redirection ; jamais de repli vers http. Un miroir declare `http`
+    // reste permis : la decision ne repose que sur la signature du manifeste.
+    let d = crate::net::fetch_document_confiance(url);
+    if d.banner.iter().any(|l| l.starts_with("TLS_REFUS")) {
+        if let Some(l) = d.banner.iter().find(|l| l.starts_with("TLS_REFUS")) {
+            crate::serial_println!("BOUCHAUD_OTA_TLS_REFUS url={} {}", url, l);
+        }
+        return Err("certificat_non_fiable");
+    }
     // `ok` means "an HTTP answer was parsed", NOT "200": a 404 page is a
     // body too (found by the ota-verifie bench, source `absent`). Only the
     // final status line counts.
@@ -309,7 +319,11 @@ fn telecharge(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
 pub fn verifie(source: &str) -> Resultat {
     let texte = match telecharge(&format!("{}/manifest", source), MANIFESTE_MAX) {
         Ok(t) => t,
-        Err(e) => return Resultat::Refuse(if e == "injoignable" { "manifeste_injoignable" } else { "manifeste_trop_grand" }),
+        Err(e) => return Resultat::Refuse(match e {
+            "certificat_non_fiable" => "certificat_non_fiable",
+            "injoignable" => "manifeste_injoignable",
+            _ => "manifeste_trop_grand",
+        }),
     };
     let sig = match telecharge(&format!("{}/manifest.sig", source), 64) {
         Ok(s) if s.len() == 64 => s,
@@ -382,7 +396,7 @@ fn telecharge_avec_reprise(url: &str, max: usize) -> Result<Vec<u8>, &'static st
             Err(e) => {
                 derniere = e;
                 crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} raison={}", url, essai, e);
-                if e == "trop_grand" { break; }
+                if e == "trop_grand" || e == "certificat_non_fiable" { break; }
                 dort_s(2u64 << essai);
             }
         }
@@ -407,6 +421,8 @@ fn telecharge_partie(url: &str, taille: usize) -> Result<Vec<u8>, &'static str> 
             Ok(c) if c.len() < taille => { derniere = "partie_tronquee"; format!("partie_tronquee octets={}/{}", c.len(), taille) }
             Ok(_) => return Err("partie_taille_differente"),
             Err("trop_grand") => return Err("partie_taille_differente"),
+            // Pas un incident de transport : ne pas insister sur ce serveur.
+            Err("certificat_non_fiable") => return Err("certificat_non_fiable"),
             Err(e) => { derniere = "partie_injoignable"; String::from(e) }
         };
         crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} raison={}", url, essai, raison);
