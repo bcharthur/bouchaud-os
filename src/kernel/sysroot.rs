@@ -306,7 +306,7 @@ fn install_etc() {
     write_file(etc, "hostname", "bouchaud\n", 0o644);
     write_file(etc, "hosts", "127.0.0.1\tlocalhost bouchaud\n", 0o644);
     refresh_resolver();
-    write_file(etc, "passwd", "root:x:0:0:root:/:/bin/sh\nguest:x:1000:1000:guest:/home/guest:/bin/sh\n", 0o644);
+    write_file(etc, "passwd", crate::fs::ramfs::ETC_PASSWD, 0o644);
     write_file(etc, "group", "root:x:0:\nguest:x:1000:\n", 0o644);
     write_file(etc, "localtime", "", 0o644);
     // Chemins de recherche de `ld.so` pour les binaires dynamiques.

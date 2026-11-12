@@ -71,17 +71,24 @@ const CORPS_PETIT: f32 = 12.0;
 /// Les elements du dossier `cur`, tries. Le verrou du RAMFS n'est tenu que
 /// le temps de la copie : rien d'autre n'est pris dessous (voir le correctif
 /// LOCKDEP du Moniteur).
+///
+/// BOUCHAUD_ARBORESCENCE_COHERENTE_V1 : les MEMES entrees que `ls`, selon la
+/// MEME regle (`enfants_lisibles` : lecture exigee). La taille est celle du
+/// fichier logique (adosse au disque compris, comme `cat` et `ls -l`), lue
+/// verrou rendu : la couche `backing` reprend le RAMFS.
 pub(crate) fn liste(cur: usize) -> Vec<f::Entree> {
     let mut v = Vec::new();
     {
         let fs = ramfs::fs();
-        for i in 0..ramfs::MAX_NODES {
+        let Ok(enfants) = fs.enfants_lisibles(cur) else { return v };
+        for i in enfants {
             let n = &fs.nodes[i];
-            if n.used && i != cur && n.parent == cur {
-                v.push(f::Entree { nom: n.name_str().into(), dossier: n.kind == ramfs::NodeKind::Dir,
-                    octets: n.content.len(), noeud: i });
-            }
+            v.push(f::Entree { nom: n.name_str().into(), dossier: n.kind == ramfs::NodeKind::Dir,
+                octets: 0, noeud: i });
         }
+    }
+    for e in v.iter_mut().filter(|e| !e.dossier) {
+        e.octets = crate::fs::backing::logical_len(e.noeud);
     }
     f::trie(&mut v);
     v

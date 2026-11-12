@@ -467,14 +467,17 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     if fs.nodes[idx].kind == NodeKind::File {
         ramfs::print_node_line(&fs, idx, long);
     } else {
-        // Lister un repertoire demande le droit de lecture sur celui-ci.
-        if !fs.can(idx, PERM_R) {
-            println!("ls: permission denied");
-            return 1;
-        }
-        for i in 0..MAX_NODES {
-            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-                ramfs::print_node_line(&fs, i, long);
+        // Lister un repertoire demande le droit de lecture sur celui-ci ; la
+        // meme regle et les memes entrees que l'application Fichiers.
+        match fs.enfants_lisibles(idx) {
+            Ok(enfants) => {
+                for i in enfants {
+                    ramfs::print_node_line(&fs, i, long);
+                }
+            }
+            Err(e) => {
+                println!("ls: {}", e);
+                return 1;
             }
         }
     }

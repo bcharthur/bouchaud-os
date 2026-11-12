@@ -171,7 +171,41 @@ def scenario_commandes() -> tuple[list[str], list[Etape]]:
     return prelude, e
 
 
-SCENARIOS = {"find": (scenario_find, donnees_find), "commandes": (scenario_commandes, donnees_commandes)}
+# --- Le scenario `arborescence` (/etc, /bin, /usr/bin, type) -----------------
+
+def donnees_arborescence() -> dict[str, bytes | None]:
+    # Un programme REEL a la racine, comme le disque userland en installe
+    # (`/doom`, `/hello`...) : `type` doit le trouver par le PATH par defaut.
+    return {"programme-temoin": b"\x7fELF-temoin\n"}
+
+
+def scenario_arborescence() -> tuple[list[str], list[Etape]]:
+    etc = {"passwd", "hostname", "hosts", "resolv.conf", "group", "localtime", "ld-musl-x86_64.path", "ld.so.conf"}
+    e = [
+        Etape("ls-racine", "ls /", attendus=[rf"^{d}/$" for d in ("bin", "etc", "usr", "tmp", "home", "proc", "sys", "lib")]),
+        Etape("ls-etc", "ls /etc", attendus=[rf"^{re.escape(f)}$" for f in sorted(etc)], lignes=len(etc)),
+        Etape("cat-hosts", "cat /etc/hosts", attendus=[r"^127\.0\.0\.1\tlocalhost bouchaud$"], lignes=1),
+        Etape("cat-hostname", "cat /etc/hostname", attendus=[r"^bouchaud$"], lignes=1),
+        # Une seule source : plus de /bin/bsh d'un cote et /bin/sh de l'autre.
+        Etape("cat-passwd", "cat /etc/passwd", lignes=2,
+              attendus=[r"^root:x:0:0:root:/:/bin/sh$", r"^guest:x:1000:1000:guest:/home/guest:/bin/sh$"]),
+        Etape("cat-group", "cat /etc/group", attendus=[r"^root:x:0:$", r"^guest:x:1000:$"], lignes=2),
+        Etape("cat-resolv", "cat /etc/resolv.conf", attendus=[r"^(nameserver [0-9.]+|# Bouchaud: network not configured)$"], lignes=1),
+        Etape("ls-bin", "ls /bin", lignes=0),
+        Etape("ls-usr-bin", "ls /usr/bin", lignes=0),
+        Etape("find-etc", "find /etc", lignes=len(etc), toutes=r"^/etc/"),
+        Etape("find-bin", "find /bin", lignes=0),
+        Etape("type-interne", "type ls find cat sh",
+              attendus=[rf"^{c} : commande interne du shell \(noyau, sans fichier\)$" for c in ("ls", "find", "cat")]
+              + [r"^sh : "]),
+        Etape("type-programme", "type programme-temoin", attendus=[r"^programme-temoin : //?programme-temoin$"], lignes=1),
+        Etape("type-introuvable", "type aucun-programme", attendus=[r"^aucun-programme : introuvable$"], lignes=1),
+    ]
+    return ["journal off", "cd /", "chmod 755 /programme-temoin"], e
+
+
+SCENARIOS = {"find": (scenario_find, donnees_find), "commandes": (scenario_commandes, donnees_commandes),
+             "arborescence": (scenario_arborescence, donnees_arborescence)}
 
 
 # --- Le classement (pur, teste par tools/ci/reliability/test_unix_fiabilite.py)

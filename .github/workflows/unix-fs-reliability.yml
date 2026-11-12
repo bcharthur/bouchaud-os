@@ -72,7 +72,7 @@ jobs:
       - name: Scenarios find et commandes (TCG)
         run: |
           r=0
-          for s in find commandes; do
+          for s in find commandes arborescence; do
             python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/tcg --scenario "$s" || r=1
           done
           exit "$r"
@@ -85,7 +85,7 @@ jobs:
       - name: Scenarios find et commandes (KVM)
         run: |
           r=0
-          for s in find commandes; do
+          for s in find commandes arborescence; do
             python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/kvm --kvm --scenario "$s" || r=1
           done
           exit "$r"

@@ -215,7 +215,7 @@ pub const COMMANDS: &[&str] = &[
     "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "gpu-composition", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
-    "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
+    "type", "which", "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
     "diag-save",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
@@ -1620,6 +1620,43 @@ fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// `type NOM...` (alias `which`) : ce que designe chaque nom.
+///
+/// BOUCHAUD_ARBORESCENCE_COHERENTE_V1. Les commandes du shell (`ls`, `find`,
+/// `cat`...) vivent DANS le noyau : elles n'ont aucun fichier dans `/bin`, et
+/// `type` le dit plutot que d'y deposer de faux binaires. Un programme reel
+/// est cherche dans `PATH` (fichier executable).
+fn type_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 { println!("usage: type NOM..."); return 1; }
+    let mut code = 0;
+    for nom in argv.iter().take(argc).skip(1) {
+        let reponse = if !nom.contains('/') && COMMANDS.contains(nom) {
+            alloc::format!("{} : commande interne du shell (noyau, sans fichier)", nom)
+        } else {
+            let candidats: Vec<String> = if nom.contains('/') {
+                alloc::vec![String::from(*nom)]
+            } else {
+                path_de_recherche().split(':').filter(|d| !d.is_empty())
+                    .map(|d| alloc::format!("{}/{}", d.trim_end_matches('/'), nom)).collect()
+            };
+            let trouve = {
+                let fs = ramfs::fs();
+                candidats.into_iter().find(|c| match fs.resolve_checked(c, cwd) {
+                    Ok(i) => fs.nodes[i].kind == crate::fs::ramfs::NodeKind::File
+                        && fs.can(i, crate::fs::ramfs::PERM_X),
+                    Err(_) => false,
+                })
+            };
+            match trouve {
+                Some(c) => alloc::format!("{} : {}", nom, c),
+                None => { code = 1; alloc::format!("{} : introuvable", nom) }
+            }
+        };
+        println!("{}", reponse);
+    }
+    code
+}
+
 /// Imbrication maximale de `run` (un script qui en lance un autre). Au-dela,
 /// erreur controlee : un script qui se lance lui-meme epuisait la pile noyau.
 const RUN_PROFONDEUR_MAX: usize = 8;
@@ -1942,6 +1979,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "su" => { c::su(argc, &argv, cwd); 0 }
 
         // Fichiers
+        "type" | "which" => type_cmd(argc, &argv, *cwd),
         "pwd" => { ramfs::print_path(&ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
         "tree" => { c::tree(argc, &argv, *cwd); 0 }
