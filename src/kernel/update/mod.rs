@@ -245,12 +245,28 @@ fn journalise_anti_retour(evenement: &str, l: uc::anti_retour::Lecture) {
 /// BOUCHAUD_OTA_V1: the anti-rollback record and the release of the RUNNING
 /// slot, read-only, for the OTA check. Unknown META (no handoff, no META
 /// partition): `Illisible` -- the check then refuses, it never guesses 0.
-pub fn etat_anti_retour() -> (uc::anti_retour::Lecture, u64) {
-    let Some(p) = passage() else { return (uc::anti_retour::Lecture::Illisible, 0) };
-    let Ok(mut m) = trouve_meta(&p) else { return (uc::anti_retour::Lecture::Illisible, 0) };
+/// Third value: the release sequence recorded for the OTHER slot when META
+/// says that slot is Bad -- a release that failed its health check here.
+pub fn etat_anti_retour() -> (uc::anti_retour::Lecture, u64, u64) {
+    let Some(p) = passage() else { return (uc::anti_retour::Lecture::Illisible, 0, 0) };
+    let Ok(mut m) = trouve_meta(&p) else { return (uc::anti_retour::Lecture::Illisible, 0, 0) };
     let l = anti_retour(&mut m);
-    let courante = match l { uc::anti_retour::Lecture::Valide(r) => r.slots[p.slot as usize], _ => 0 };
-    (l, courante)
+    let autre = if p.slot == Slot::A { Slot::B } else { Slot::A };
+    let (courante, echouee) = match l {
+        uc::anti_retour::Lecture::Valide(r) => {
+            let mauvais = matches!(lit(&mut m).map(|e| e.slot(autre).etat), Ok(Etat::Mauvais));
+            (r.slots[p.slot as usize], if mauvais { r.slots[autre as usize] } else { 0 })
+        }
+        _ => (0, 0),
+    };
+    (l, courante, echouee)
+}
+
+/// BOUCHAUD_OTA_V1: is a candidate now pending in the slot we do not run?
+pub fn candidat_en_attente() -> bool {
+    let Some(p) = passage() else { return false };
+    let autre = if p.slot == Slot::A { Slot::B } else { Slot::A };
+    matches!(meta_lecture().map(|(e, _)| e.slot(autre).etat), Ok(Etat::Candidat { .. }))
 }
 
 /// Health commit of `slot`: the floor rises to its release (idempotent,

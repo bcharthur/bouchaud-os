@@ -38,6 +38,10 @@ pub enum Refus {
     /// Signed, but below the anti-rollback floor: a downgrade attempt.
     Retrograde,
     RegistreIllisible,
+    /// This exact release was installed here and FAILED its health check
+    /// (its slot is Bad): offering it again would loop forever
+    /// download -> install -> fail -> rollback.
+    DejaEchouee,
 }
 
 impl Refus {
@@ -50,19 +54,22 @@ impl Refus {
             Refus::MaterielIncompatible => "materiel_incompatible",
             Refus::Retrograde => "version_retrograde",
             Refus::RegistreIllisible => "anti_retour_illisible",
+            Refus::DejaEchouee => "release_deja_en_echec_ici",
         }
     }
 }
 
 /// `courante`: release sequence of the RUNNING slot (0: unknown, e.g. an
 /// image installed before anti-rollback -- then any trusted release above
-/// the floor is newer).
+/// the floor is newer). `echouee`: release sequence that failed its health
+/// check on this machine (the other slot is Bad), 0 if none.
 pub fn decide(
     texte: &[u8],
     signature: &[u8; 64],
     cles: &[CleDeConfiance],
     lecture: Lecture,
     courante: u64,
+    echouee: u64,
     materiel: &str,
 ) -> Result<Decision, Refus> {
     let (m, _) = manifeste::verifie_signe(texte, signature, cles).map_err(|e| match e {
@@ -84,6 +91,9 @@ pub fn decide(
     let deja = courante.max(r.plancher);
     if m.sequence <= deja {
         return Ok(Decision::AJour { sequence: m.sequence });
+    }
+    if echouee != 0 && m.sequence == echouee {
+        return Err(Refus::DejaEchouee);
     }
     Ok(Decision::Disponible(m))
 }

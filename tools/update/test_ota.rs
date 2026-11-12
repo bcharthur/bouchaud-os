@@ -65,7 +65,7 @@ fn plancher(p: u64) -> Lecture {
 fn release_plus_recente_disponible() {
     let c = cle("a");
     let t = v2(1002, "x86_64-uefi");
-    match decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 1001, "x86_64-uefi") {
+    match decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 1001, 0, "x86_64-uefi") {
         Ok(Decision::Disponible(m)) => {
             assert_eq!(m.sequence, 1002);
             assert_eq!(m.octets, 97517568);
@@ -79,10 +79,10 @@ fn release_plus_recente_disponible() {
 fn meme_release_a_jour() {
     let c = cle("b");
     let t = v2(1001, "x86_64-uefi");
-    assert_eq!(decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 1001, "x86_64-uefi"),
+    assert_eq!(decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 1001, 0, "x86_64-uefi"),
                Ok(Decision::AJour { sequence: 1001 }));
     // Running release unknown (0) but the floor says 1001: still up to date.
-    assert_eq!(decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 0, "x86_64-uefi"),
+    assert_eq!(decide(&t, &signe(&c, &t), &confiance(&c), plancher(1001), 0, 0, "x86_64-uefi"),
                Ok(Decision::AJour { sequence: 1001 }));
 }
 
@@ -90,7 +90,7 @@ fn meme_release_a_jour() {
 fn installation_neuve_sans_plancher() {
     let c = cle("c");
     let t = v2(5, "x86_64-uefi");
-    assert!(matches!(decide(&t, &signe(&c, &t), &confiance(&c), Lecture::Neuf, 0, "x86_64-uefi"),
+    assert!(matches!(decide(&t, &signe(&c, &t), &confiance(&c), Lecture::Neuf, 0, 0, "x86_64-uefi"),
                      Ok(Decision::Disponible(_))));
 }
 
@@ -103,31 +103,45 @@ fn temoins_de_refus() {
     let k = confiance(&c);
     let x = "x86_64-uefi";
     // Fail closed: no trusted key (a production build without a key).
-    assert_eq!(decide(&t, &s, &[], plancher(1001), 1001, x), Err(Refus::AucuneCleDeConfiance));
+    assert_eq!(decide(&t, &s, &[], plancher(1001), 1001, 0, x), Err(Refus::AucuneCleDeConfiance));
     // Signed by someone else.
-    assert_eq!(decide(&t, &signe(&autre, &t), &k, plancher(1001), 1001, x), Err(Refus::SignatureNonFiable));
+    assert_eq!(decide(&t, &signe(&autre, &t), &k, plancher(1001), 1001, 0, x), Err(Refus::SignatureNonFiable));
     // Any altered byte or bit of the signature.
     for i in [0usize, 20, t.len() - 1] {
         let mut u = t.clone();
         u[i] ^= 1;
-        assert_eq!(decide(&u, &s, &k, plancher(1001), 1001, x), Err(Refus::SignatureNonFiable), "octet {i}");
+        assert_eq!(decide(&u, &s, &k, plancher(1001), 1001, 0, x), Err(Refus::SignatureNonFiable), "octet {i}");
     }
     let mut s2 = s;
     s2[63] ^= 0x80;
-    assert_eq!(decide(&t, &s2, &k, plancher(1001), 1001, x), Err(Refus::SignatureNonFiable));
+    assert_eq!(decide(&t, &s2, &k, plancher(1001), 1001, 0, x), Err(Refus::SignatureNonFiable));
     // Signed downgrade (an old, possibly vulnerable release).
     let vieux = v2(999, x);
-    assert_eq!(decide(&vieux, &signe(&c, &vieux), &k, plancher(1001), 1001, x), Err(Refus::Retrograde));
+    assert_eq!(decide(&vieux, &signe(&c, &vieux), &k, plancher(1001), 1001, 0, x), Err(Refus::Retrograde));
     // Signed for another hardware family.
     let arm = v2(1002, "arm64-uefi");
-    assert_eq!(decide(&arm, &signe(&c, &arm), &k, plancher(1001), 1001, x), Err(Refus::MaterielIncompatible));
+    assert_eq!(decide(&arm, &signe(&c, &arm), &k, plancher(1001), 1001, 0, x), Err(Refus::MaterielIncompatible));
     // Signed v1 (no sequence): never offered.
     let v1 = format!("bouchaud-manifeste-v1\nversion=x\nimage_sha256={H}\nimage_octets=1\nessais=3\n").into_bytes();
-    assert_eq!(decide(&v1, &signe(&c, &v1), &k, Lecture::Neuf, 0, x), Err(Refus::SansSequence));
+    assert_eq!(decide(&v1, &signe(&c, &v1), &k, Lecture::Neuf, 0, 0, x), Err(Refus::SansSequence));
     // Signed but not canonical.
     let mut nc = t.clone();
     nc.extend_from_slice(b"x=1\n");
-    assert_eq!(decide(&nc, &signe(&c, &nc), &k, plancher(1001), 1001, x), Err(Refus::ManifesteNonCanonique));
+    assert_eq!(decide(&nc, &signe(&c, &nc), &k, plancher(1001), 1001, 0, x), Err(Refus::ManifesteNonCanonique));
     // Unreadable anti-rollback record.
-    assert_eq!(decide(&t, &s, &k, Lecture::Illisible, 1001, x), Err(Refus::RegistreIllisible));
+    assert_eq!(decide(&t, &s, &k, Lecture::Illisible, 1001, 0, x), Err(Refus::RegistreIllisible));
+}
+
+#[test]
+fn release_deja_en_echec_ici_jamais_reproposee() {
+    let c = cle("f");
+    let t = v2(1002, "x86_64-uefi");
+    let s = signe(&c, &t);
+    let k = confiance(&c);
+    // 1002 a echoue sa sante ici (son slot est Mauvais) : refusee.
+    assert_eq!(decide(&t, &s, &k, plancher(1001), 1001, 1002, "x86_64-uefi"), Err(Refus::DejaEchouee));
+    // Une release PLUS RECENTE (le correctif) est proposee.
+    let t3 = v2(1003, "x86_64-uefi");
+    assert!(matches!(decide(&t3, &signe(&c, &t3), &k, plancher(1001), 1001, 1002, "x86_64-uefi"),
+                     Ok(Decision::Disponible(_))));
 }

@@ -18,12 +18,24 @@
 //! "latest" is the newest release that is NOT a prerelease, which is
 //! exactly a release promoted testing -> stable (release-trigkey.yml).
 //!
-//! # What it does NOT do (yet), on purpose
+//! # Download and install (slice 2) -- only with CONSENT
 //!
-//! It downloads no image and installs nothing: the decision is published,
-//! the user consents, `updated` installs (next slice). Full-auto mode is not
-//! implemented. A production build without a committed production key
-//! refuses every source (`aucune_cle_de_confiance`): fail closed.
+//! `telechargement=consenti` in the configuration: for the first source whose
+//! decision is `disponible`, the agent downloads the image IN PARTS
+//! (`system-slot.parts` index, then `system-slot.img.partNNN`, <= 16 MiB each:
+//! a RAMFS file is capped at 64 MiB and memory stays bounded). Each part is
+//! checked against the index (size, SHA-256) and the WHOLE stream against
+//! the SIGNED manifest (size, SHA-256): a hostile index or mirror can waste
+//! bandwidth, never stage a byte the signature does not cover. Staged in
+//! `/update/` (RAM), `pret` written last; `updated` (ring 3, the only holder
+//! of the install capability) installs into the INACTIVE slot.
+//!
+//! `redemarrage=consenti`: once the candidate is recorded, the agent reboots
+//! into it (health commit or automatic rollback follow). Without it, it
+//! waits and says so (`consentement_requis`). There is no implicit consent.
+//!
+//! A production build without a committed production key refuses every
+//! source (`aucune_cle_de_confiance`): fail closed.
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -45,6 +57,18 @@ pub enum Resultat {
     Disponible { version: String, sequence: u64, octets: u64 },
     AJour { sequence: u64 },
     Refuse(&'static str),
+}
+
+fn config() -> String {
+    let fs = crate::fs::ramfs::fs();
+    match fs.resolve(CONFIG, 0) {
+        Some(i) => String::from(String::from_utf8_lossy(&fs.nodes[i].content)),
+        None => String::new(),
+    }
+}
+
+fn consenti(cle: &str) -> bool {
+    config().lines().any(|l| l.trim() == format!("{}=consenti", cle))
 }
 
 fn sources() -> Vec<String> {
@@ -93,18 +117,126 @@ pub fn verifie(source: &str) -> Resultat {
     };
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&sig);
-    let (lecture, courante) = super::etat_anti_retour();
-    match uc::ota::decide(&texte, &signature, super::cles_de_confiance(), lecture, courante, super::MATERIEL) {
-        Ok(Decision::Disponible(m)) => Resultat::Disponible {
-            version: String::from(m.version()), sequence: m.sequence, octets: m.octets,
-        },
+    let (lecture, courante, echouee) = super::etat_anti_retour();
+    match uc::ota::decide(&texte, &signature, super::cles_de_confiance(), lecture, courante, echouee, super::MATERIEL) {
+        Ok(Decision::Disponible(m)) => {
+            // Every source is still CHECKED (and logged); the first trusted,
+            // newer one is the one downloaded.
+            let mut g = RETENUE.lock();
+            if g.is_none() {
+                *g = Some(Retenue { source: String::from(source), texte, signature, manifeste: m });
+            }
+            drop(g);
+            Resultat::Disponible { version: String::from(m.version()), sequence: m.sequence, octets: m.octets }
+        }
         Ok(Decision::AJour { sequence }) => Resultat::AJour { sequence },
         Err(r) => Resultat::Refuse(Refus::texte(r)),
     }
 }
 
+/// The first trusted, newer release seen in this cycle.
+struct Retenue {
+    source: String,
+    texte: Vec<u8>,
+    signature: [u8; 64],
+    manifeste: uc::manifeste::Manifeste,
+}
+static RETENUE: crate::kernel::sync::SpinLock<Option<Retenue>> = crate::kernel::sync::SpinLock::new(None);
+
+/// Part size published by the release tool (fabrique_release.py --parties-mio 16).
+const PARTIE_MAX: usize = 16 * 1024 * 1024;
+const INDEX_MAX: usize = 64 * 1024;
+
+fn ecrit_ramfs(chemin: &str, donnees: &[u8]) -> Result<(), &'static str> {
+    let mut fs = crate::fs::ramfs::fs();
+    let dossier = match fs.resolve("/update", 0) {
+        Some(d) => d,
+        None => fs.mkdir_at(0, "update")?,
+    };
+    let nom = chemin.rsplit('/').next().ok_or("chemin")?;
+    let f = fs.touch_at(dossier, nom)?;
+    if !fs.write_node_bytes(f, donnees) { return Err("fichier_trop_grand"); }
+    Ok(())
+}
+
+fn hex32(h: &[u8; 32]) -> String {
+    let mut s = String::new();
+    for b in h { s.push_str(&format!("{:02x}", b)); }
+    s
+}
+
+/// Downloads the retained release in parts, checks it against the SIGNED
+/// manifest, stages it for `updated`. Err: nothing usable is staged.
+fn telecharge_et_prepare(r: &Retenue) -> Result<u64, &'static str> {
+    let index = telecharge(&format!("{}/system-slot.parts", r.source), INDEX_MAX).map_err(|_| "index_injoignable")?;
+    let index = String::from(String::from_utf8_lossy(&index));
+    let mut total = crate::net::security::tls::sha256::Sha256::new();
+    let mut octets = 0u64;
+    let mut k = 0usize;
+    for ligne in index.lines().filter(|l| !l.trim().is_empty()) {
+        let champs: Vec<&str> = ligne.split_whitespace().collect();
+        let attendu_nom = format!("system-slot.img.part{:03}", k);
+        if champs.len() != 3 || champs[0] != attendu_nom { return Err("index_mal_forme"); }
+        let taille: usize = champs[1].parse().map_err(|_| "index_mal_forme")?;
+        if taille == 0 || taille > PARTIE_MAX { return Err("partie_hors_bornes"); }
+        let corps = telecharge(&format!("{}/{}", r.source, attendu_nom), PARTIE_MAX).map_err(|_| "partie_injoignable")?;
+        if corps.len() != taille { return Err("partie_taille_differente"); }
+        let h = crate::net::security::tls::sha256::sha256(&corps);
+        if hex32(&h) != champs[2] { return Err("partie_empreinte_differente"); }
+        total.update(&corps);
+        octets += corps.len() as u64;
+        if octets > r.manifeste.octets { return Err("image_plus_longue_que_le_manifeste"); }
+        ecrit_ramfs(&format!("/update/system.img.part{:03}", k), &corps)?;
+        crate::serial_println!("BOUCHAUD_OTA_PARTIE n={} octets={} total={}", k, corps.len(), octets);
+        k += 1;
+    }
+    // The ONLY check that matters: the whole stream is what was signed.
+    if octets != r.manifeste.octets { return Err("image_taille_differente_du_manifeste"); }
+    if total.finalize() != r.manifeste.empreinte { return Err("image_empreinte_differente_du_manifeste"); }
+    ecrit_ramfs("/update/manifest", &r.texte)?;
+    ecrit_ramfs("/update/manifest.sig", &r.signature)?;
+    ecrit_ramfs("/update/pret", b"1\n")?;
+    Ok(octets)
+}
+
+/// After a `disponible`: download (consent), wait for the candidate,
+/// reboot (consent).
+fn installe_si_consenti() {
+    let Some(r) = RETENUE.lock().take() else { return };
+    if !consenti("telechargement") {
+        crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_EN_ATTENTE consentement_requis sequence={}", r.manifeste.sequence);
+        return;
+    }
+    match telecharge_et_prepare(&r) {
+        Ok(octets) => crate::serial_println!(
+            "BOUCHAUD_OTA_TELECHARGE source={} sequence={} octets={} empreinte=signee_verifiee prepare=/update",
+            r.source, r.manifeste.sequence, octets),
+        Err(e) => {
+            crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source={} raison={}", r.source, e);
+            return;
+        }
+    }
+    // `updated` installs into the inactive slot; wait for the candidate.
+    let mut s = 0;
+    while !super::candidat_en_attente() && s < 1800 {
+        dort_s(1);
+        s += 1;
+    }
+    if !super::candidat_en_attente() {
+        crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE attente_s={}", s);
+        return;
+    }
+    crate::serial_println!("BOUCHAUD_OTA_CANDIDAT_PRET sequence={} attente_s={}", r.manifeste.sequence, s);
+    if consenti("redemarrage") {
+        crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=configuration sequence={}", r.manifeste.sequence);
+        crate::kernel::power::reboot();
+    }
+    crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE_EN_ATTENTE consentement_requis sequence={}", r.manifeste.sequence);
+}
+
 /// Checks every configured source, logs one line per source.
 pub fn verifie_tout() -> usize {
+    *RETENUE.lock() = None;
     let s = sources();
     for source in &s {
         match verifie(source) {
@@ -134,6 +266,7 @@ fn fil_ota() -> ! {
         if crate::net::bail_obtenu() {
             let n = verifie_tout();
             crate::serial_println!("BOUCHAUD_OTA_CYCLE sources={} prochain_s={}", n, PERIODE_S);
+            installe_si_consenti();
         } else {
             crate::serial_println!("BOUCHAUD_OTA_CYCLE sources=0 raison=pas_de_reseau prochain_s={}", PERIODE_S);
         }
