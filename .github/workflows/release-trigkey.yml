@@ -142,6 +142,7 @@ jobs:
           (cd entree && sha256sum -c disque-ab.img.sha256)
           python3 tools/release/fabrique_release.py --image entree/system-slot.img --version "$VERSION" \
             --sequence "$SEQUENCE" --canal testing --commit "$GITHUB_SHA" --sortie release "${prec[@]}" --cle "$k" \
+            --parties-mio 4 \
             --joint entree/disque-ab.img --joint entree/disque-ab.img.sha256 \
             --joint entree/manifest-ab.json --joint entree/qemu-boot-evidence.json
           cp entree/system-slot.img release/

@@ -247,7 +247,7 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
     "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
     python3 tools/release/fabrique_release.py --image "$OUT/system-b.img" --version "ota-v2-$(git rev-parse --short HEAD)" \
       --sequence "$RELEASE_SEQ" --canal testing --commit "$(git rev-parse HEAD)" --sortie "$OUT/srv/rel" \
-      --parties-mio 16 --cle-dev "$CLES/version.pem" || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
+      --parties-mio 4 --cle-dev "$CLES/version.pem" || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
     NB_PARTIES=$(wc -l < "$OUT/srv/rel/system-slot.parts")
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" "etc/bouchaud/ota.conf=$OUT/ota.conf"
   elif [ "$SCENARIO" = ota-verifie ]; then
@@ -594,7 +594,10 @@ if [ "$OTA_COMPLET" = 1 ]; then
   echec() { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO $*" >&2; exit 1; }
   b1=$(P 1)
   # Boot 1 (A, release 1000) : HTTPS, parties, empreinte SIGNEE, installation, redemarrage consenti.
-  for m in "BOUCHAUD_BUILD commit=$(git rev-parse --short=12 HEAD)" "BOUCHAUD_AB_BOOT slot=A" \
+  # Deux versions DISTINCTES : le noyau de A n'est pas celui de la release.
+  grep -aq "BOUCHAUD_BUILD commit=" <<< "$b1" || echec "boot=1 raison=identite_de_construction_absente"
+  grep -aqF "BOUCHAUD_BUILD commit=$V2" <<< "$b1" && echec "boot=1 raison=A_porte_deja_la_version_2"
+  for m in "BOUCHAUD_AB_BOOT slot=A" \
            "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_OTA/rel resultat=disponible" \
            "BOUCHAUD_OTA_TELECHARGE source=https://10.0.2.2:$PORT_OTA/rel sequence=$RELEASE_SEQ" "empreinte=signee_verifiee" \
            "UPDATED_OTA_RELEASE_STAGED" "UPDATED_INSTALL_OK" "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" \
@@ -623,7 +626,8 @@ if [ "$OTA_COMPLET" = 1 ]; then
     # ota-rollback : B (release 1001) echoue sa sante, retour a A ; STATE
     # traverse tout ; la release en echec n'est PLUS jamais telechargee.
     dernier=$(P 5)
-    for m in "BOUCHAUD_AB_BOOT slot=A" "BOUCHAUD_BUILD commit=$(git rev-parse --short=12 HEAD)" \
+    grep -aqF "BOUCHAUD_BUILD commit=$V2" <<< "$dernier" && echec "boot=5 raison=toujours_sur_la_version_2"
+    for m in "BOUCHAUD_AB_BOOT slot=A" \
              "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_OTA/rel resultat=refuse raison=release_deja_en_echec_ici"; do
       grep -aF "$m" <<< "$dernier" >/dev/null || echec "boot=5 marqueur_absent=$m"
     done

@@ -22,7 +22,7 @@
 //!
 //! `telechargement=consenti` in the configuration: for the first source whose
 //! decision is `disponible`, the agent downloads the image IN PARTS
-//! (`system-slot.parts` index, then `system-slot.img.partNNN`, <= 16 MiB each:
+//! (`system-slot.parts` index, then `system-slot.img.partNNN`, <= 4 MiB each:
 //! a RAMFS file is capped at 64 MiB and memory stays bounded). Each part is
 //! checked against the index (size, SHA-256) and the WHOLE stream against
 //! the SIGNED manifest (size, SHA-256): a hostile index or mirror can waste
@@ -143,8 +143,11 @@ struct Retenue {
 }
 static RETENUE: crate::kernel::sync::SpinLock<Option<Retenue>> = crate::kernel::sync::SpinLock::new(None);
 
-/// Part size published by the release tool (fabrique_release.py --parties-mio 16).
-const PARTIE_MAX: usize = 16 * 1024 * 1024;
+/// Part size published by the release tool (fabrique_release.py
+/// --parties-mio 4). Bounded by the kernel HTTPS client, which caps ONE
+/// response at 8 000 000 bytes (tls::https_fetch, recv_http): a larger part
+/// would arrive truncated -- and be refused (`partie_taille_differente`).
+const PARTIE_MAX: usize = 4 * 1024 * 1024;
 const INDEX_MAX: usize = 64 * 1024;
 
 fn ecrit_ramfs(chemin: &str, donnees: &[u8]) -> Result<(), &'static str> {
