@@ -52,6 +52,14 @@ def sha(p: Path) -> str:
     return h.hexdigest()
 
 
+TOUCHES = {"-": "minus", " ": "spc", ".": "dot", "/": "slash", "=": "equal", "_": "shift-minus"}
+
+
+def tape(texte: str) -> list[str]:
+    """Le texte en commandes `sendkey` du moniteur QEMU, puis Entree."""
+    return [f"sendkey {TOUCHES.get(c, c)}" for c in texte] + ["sendkey ret"]
+
+
 class Banc:
     def __init__(self, out: Path, travail: Path):
         self.out, self.travail = out, travail
@@ -170,6 +178,10 @@ def main(argv: list[str]) -> int:
                     if b.note(b.attend(r"BOUCHAUD_ATELIER_FENETRE_OUVERTE titre=Terminal", 30) is not None,
                               "Terminal ouvert par le menu Demarrer"):
                         b.gestes("attente 1", "capture 02-terminal")
+                        # La commande de l'etat des mises a jour, TAPEE au clavier.
+                        b.gestes(*tape("bo-update status"), "attente 2", "capture 02b-bo-update")
+                        b.note(b.attend(r"BOUCHAUD_BO_UPDATE_STATUS version=\S+ commit=[0-9a-f]{40} slot_actif=A canal=stable", 60) is not None,
+                               "bo-update status tape dans le Terminal : version, commit, slot A, canal stable")
                 # 2. DOOM
                 if b.ouvre_par_le_menu("DOOM"):
                     m = b.attend(r"BOUCHAUD_DOOM_ATELIER_LAUNCH pid=(\d+)", 60)

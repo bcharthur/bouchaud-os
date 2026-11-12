@@ -1952,7 +1952,12 @@ pub fn strace(argc: usize, argv: &[&str; 12]) {
 pub fn bo_update(argc: usize, argv: &[&str; 12]) -> i32 {
     match if argc >= 2 { argv[1] } else { "status" } {
         "status" => {
-            print!("{}", crate::kernel::update::ota::etat_texte());
+            let etat = crate::kernel::update::ota::etat_texte();
+            print!("{}", etat);
+            // Le meme resume sur la liaison serie : preuve et diagnostic.
+            let champ = |k: &str| etat.lines().find_map(|l| l.strip_prefix(&alloc::format!("{}=", k))).unwrap_or("?");
+            crate::serial_println!("BOUCHAUD_BO_UPDATE_STATUS version={} commit={} slot_actif={} canal={} prochaine_installation={}",
+                champ("version"), champ("commit"), champ("slot_actif"), champ("canal"), champ("prochaine_installation"));
             match crate::kernel::update::meta_lecture() {
                 Ok((e, echecs)) => println!("meta_sequence={} actif={:?} slot_a={:?} slot_b={:?} echecs={}",
                     e.sequence, e.actif, e.slot(bouchaud_update_core::Slot::A).etat,
