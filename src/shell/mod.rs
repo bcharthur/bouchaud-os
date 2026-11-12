@@ -201,6 +201,35 @@ fn env_export(line: &str) {
     }
 }
 
+/// BOUCHAUD_ARBORESCENCE_COHERENTE_V1 -- TOUTES les commandes internes : les
+/// motifs de `dispatch`, ni plus ni moins (`tools/verifie-commandes-internes.py`
+/// le verifie a chaque CI). C'est le registre que consulte `type` ; `COMMANDS`
+/// n'est que la liste de completion (revue #302 : elle en omettait).
+pub const INTERNES: &[&str] = &[
+    "alloctest", "append", "apps", "arp", "arping", "ata-integrite", "banc-present", "banc-trame",
+    "bootlog", "breakpoint", "cargo", "cat", "cd", "chmod", "chown", "clear", "compta-injection",
+    "console-async", "contexte-banc", "continuation-banc", "cp", "cpuinfo", "curl", "date",
+    "desktop", "devices", "df", "dhcp", "diag-save", "disktest", "disques-internes", "dmesg", "dns",
+    "dnsdiag", "echo", "edit", "elfinfo", "env", "ethinfo", "exec", "exit", "export",
+    "expr-selftest", "false", "fautes", "find", "free", "git", "gpu-composition", "gpu-irq",
+    "gpu-tampon", "gpu-trame", "gpuinfo", "grep", "gui", "gui-surface", "halt", "head", "help",
+    "history", "http", "https", "hwinfo", "hwtest", "id", "ifconfig", "ifup", "installer",
+    "interrupts", "ip", "ipc-attribution", "journal", "kill", "launch", "logout", "ls", "lspci",
+    "lsusb", "meminfo", "memtop", "mkdir", "mkfs.bfs", "mount", "mv", "nano", "netbanc-dhcp",
+    "netbanc-rx", "netdiag", "netetat", "nslookup", "nvme-parallele", "nvmetest", "ordo-cession",
+    "ordo-rejet-injecte", "ordo-variante", "panic-test", "passwd", "persist-test", "ping", "pip",
+    "pip3", "poll-selftest", "poweroff", "profil-rip", "ps", "pwd", "pybrowser", "python",
+    "python-selftest", "python3", "resource-selftest", "resstat", "reveil-precis", "rm", "rmdir",
+    "roadmap", "route", "run", "rust-selftest", "rustc", "safe-mode", "sched-latence",
+    "serial-test", "serie-banc-attend", "serie-detenteur-suspendu", "serie-dormeur-masque",
+    "serie-lente", "serie-minuteur-perdu", "serie-rafale-masquee", "serie-verrou-suspendu",
+    "services", "shutdown", "smoltest", "smpstat", "sonde-ecriture-interne", "source", "stat",
+    "strace", "su", "sync", "syscalls", "sysinfo", "tail", "tasks", "ticks", "tls", "tls-selftest",
+    "touch", "tree", "true", "type", "uname", "unset", "uptime", "usbetat", "usbfault", "usbvolume",
+    "useradd", "userdel", "usermode", "users", "version", "vmstat", "wasm", "wasm-selftest", "wc",
+    "wget", "which", "whoami", "write",
+];
+
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
     "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "resstat", "memtop", "gpuinfo", "resource-selftest", "alloctest",
@@ -1631,26 +1660,28 @@ fn type_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     if argc < 2 { println!("usage: type NOM..."); return 1; }
     let mut code = 0;
     for nom in argv.iter().take(argc).skip(1) {
-        let reponse = if !nom.contains('/') && COMMANDS.contains(nom) {
+        // Comme `dispatch` : un nom sans `/` qui a un motif interne est TOUJOURS
+        // la commande interne, meme si un fichier du meme nom est dans PATH.
+        let reponse = if !nom.contains('/') && INTERNES.contains(nom) {
             alloc::format!("{} : commande interne du shell (noyau, sans fichier)", nom)
         } else {
-            let candidats: Vec<String> = if nom.contains('/') {
-                alloc::vec![String::from(*nom)]
-            } else {
-                path_de_recherche().split(':').filter(|d| !d.is_empty())
-                    .map(|d| alloc::format!("{}/{}", d.trim_end_matches('/'), nom)).collect()
-            };
-            let trouve = {
-                let fs = ramfs::fs();
-                candidats.into_iter().find(|c| match fs.resolve_checked(c, cwd) {
-                    Ok(i) => fs.nodes[i].kind == crate::fs::ramfs::NodeKind::File
-                        && fs.can(i, crate::fs::ramfs::PERM_X),
-                    Err(_) => false,
-                })
-            };
-            match trouve {
-                Some(c) => alloc::format!("{} : {}", nom, c),
+            // La MEME resolution que l'execution (revue #302) : le premier
+            // fichier trouve dans PATH, puis le bit d'execution -- un fichier
+            // non executable masque les suivants, comme pour le shell (126).
+            match commands::resout_programme(nom, cwd) {
                 None => { code = 1; alloc::format!("{} : introuvable", nom) }
+                Some(c) => {
+                    let executable = {
+                        let fs = ramfs::fs();
+                        matches!(fs.resolve(&c, cwd), Some(i) if commands::executable(&fs, i))
+                    };
+                    if executable {
+                        alloc::format!("{} : {}", nom, c)
+                    } else {
+                        code = 1;
+                        alloc::format!("{} : {} (non executable : le shell refuse, code 126)", nom, c)
+                    }
+                }
             }
         };
         println!("{}", reponse);

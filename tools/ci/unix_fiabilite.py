@@ -200,6 +200,19 @@ def scenario_arborescence() -> tuple[list[str], list[Etape]]:
               + [r"^sh : "]),
         Etape("type-programme", "type programme-temoin", attendus=[r"^programme-temoin : //?programme-temoin$"], lignes=1),
         Etape("type-introuvable", "type aucun-programme", attendus=[r"^aucun-programme : introuvable$"], lignes=1),
+        # Revue #302 : des commandes internes absentes de la liste de completion.
+        Etape("type-internes-hors-completion", "type smpstat gui-surface",
+              attendus=[rf"^{c} : commande interne du shell \(noyau, sans fichier\)$" for c in ("smpstat", "gui-surface")],
+              lignes=2),
+        # Un fichier du meme nom dans PATH ne masque pas la commande interne.
+        Etape("pose-bin-ls", "cp /programme-temoin /bin/ls && chmod 755 /bin/ls", lignes=0),
+        Etape("type-ls-reste-interne", "type ls", attendus=[r"^ls : commande interne du shell"], lignes=1),
+        # Revue #302 : un fichier NON executable plus tot dans PATH masque le
+        # suivant, a l'execution comme pour `type`.
+        Etape("pose-ombre", "cp /programme-temoin /bin/outil && chmod 644 /bin/outil && cp /programme-temoin /usr/bin/outil && chmod 755 /usr/bin/outil", lignes=0),
+        Etape("type-ombre", "type outil", lignes=1,
+              attendus=[r"^outil : /bin/outil \(non executable : le shell refuse, code 126\)$"]),
+        Etape("execute-ombre", "outil", lignes=1, attendus=[r"^/bin/outil: permission refusee"]),
     ]
     return ["journal off", "cd /", "chmod 755 /programme-temoin"], e
 
