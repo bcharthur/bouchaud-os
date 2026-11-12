@@ -207,7 +207,7 @@ fn env_export(line: &str) {
 /// n'est que la liste de completion (revue #302 : elle en omettait).
 pub const INTERNES: &[&str] = &[
     "alloctest", "append", "apps", "arp", "arping", "ata-integrite", "banc-present", "banc-trame",
-    "bootlog", "breakpoint", "cargo", "cat", "cd", "chmod", "chown", "clear", "compta-injection",
+    "bo-update", "bootlog", "breakpoint", "cargo", "cat", "cd", "chmod", "chown", "clear", "compta-injection",
     "console-async", "contexte-banc", "continuation-banc", "cp", "cpuinfo", "curl", "date",
     "desktop", "devices", "df", "dhcp", "diag-save", "disktest", "disques-internes", "dmesg", "dns",
     "dnsdiag", "echo", "edit", "elfinfo", "env", "ethinfo", "exec", "exit", "export",
@@ -239,7 +239,7 @@ pub const COMMANDS: &[&str] = &[
     "write", "append", "nano", "edit", "rm", "rmdir", "cp", "mv", "stat", "chmod", "chown",
     "echo", "date", "expr-selftest", "wasm", "wasm-selftest", "grep", "wc", "head", "tail", "find", "lspci", "lsusb", "usbetat", "usbfault", "usbvolume", "ping", "ifconfig",
     "ip", "route", "arp", "dhcp", "dns", "wget", "curl", "mount", "df", "sync",
-    "installer", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
+    "installer", "bo-update", "mkfs.bfs", "true", "false", "logout", "exit", "poweroff", "halt", "shutdown",
     "export", "env", "unset", "run",
     "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "gpu-composition", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
@@ -2277,6 +2277,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Disque
         "df" => { crate::drivers::disk::print_df(); 0 }
         "installer" => c::installer(argc, &argv),
+        "bo-update" => c::bo_update(argc, &argv),
         "sync" => c::sync_persistant(),
         "mount" | "mkfs.bfs" => { c::disk_placeholder(argv[0]); 0 }
 

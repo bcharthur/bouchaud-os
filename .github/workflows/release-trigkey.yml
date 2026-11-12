@@ -81,21 +81,44 @@ jobs:
     name: release-trigkey / image + preuve QEMU (sans secret)
     needs: garde
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: OVMF + QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf musl-tools build-essential binutils
       - name: Rust UEFI
         run: |
           rustup show active-toolchain
           rustup target add x86_64-unknown-uefi
-      - name: Image A/B + image de slot (aucune ecriture de peripherique)
-        run: bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
+      # BOUCHAUD_LIVRAISON_V1 : une release est l'image de LIVRAISON complete.
+      # Le navigateur vient de l'artefact natif de MEME empreinte (lecture
+      # seule, aucune production declenchee) ; absent, la release est refusee.
+      - name: Artefact Ladybird de cette empreinte (refus s'il n'existe pas)
+        id: ladybird
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+        run: python3 tools/release/artefact_ladybird_release.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+          run-id: ${{ steps.ladybird.outputs.source_run }}
+          github-token: ${{ github.token }}
+      - name: Image de livraison (version et sequence de CETTE release ; aucune ecriture de peripherique)
+        env:
+          BO_VERSION: ${{ inputs.version }}
+          BO_SEQUENCE: ${{ inputs.sequence }}
+        run: BO_NATIF_LADYBIRD="$PWD/native-browser" bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
       - name: Demarrage de CETTE image sous QEMU/OVMF (signal de sante reel)
         run: bash tools/release/smoke_trigkey_ab_qemu.sh target/release-trigkey
+      - name: CETTE image utilisee comme un humain (Terminal, DOOM, Ladybird) ; livrable exige
+        run: python3 tools/release/test_livraison_qemu.py target/release-trigkey --exige-ladybird
       - uses: actions/upload-artifact@v4
         with:
           name: release-trigkey-non-signee
@@ -105,6 +128,7 @@ jobs:
             target/release-trigkey/disque-ab.img.sha256
             target/release-trigkey/manifest-ab.json
             target/release-trigkey/qemu-boot-evidence.json
+            target/release-trigkey/livraison-evidence.json
           if-no-files-found: error
           retention-days: 7
 

@@ -782,6 +782,7 @@ fn boucle() {
         // « la page se recharge » : ni navigation, ni requete HTTP, ni capture
         // LibWeb supplementaire, seulement le bureau redessine par-dessus.
         while let Some(evenement) = keyboard::try_key_event() {
+            note_activite();
             let k = evenement.logique;
             // Echap ferme le menu, puis la fenetre du dessus, puis le bureau —
             // sauf quand un client a le focus. Un navigateur a besoin d'Echap
@@ -882,6 +883,9 @@ fn boucle() {
         let my = myu as i32;
         let wheel = mouse::take_wheel();
         let left = mouse::left_down();
+        if (mx, my) != DERNIERE_POSITION.swap_pair(mx, my) || wheel != 0 || left {
+            note_activite();
+        }
         // BOUCHAUD_GUI_FRONT_PENDANT_GLISSEMENT_V1
         //
         // Un front montant alors qu'un glissement est DEJA ouvert ne peut pas
@@ -2363,6 +2367,32 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 // de cette fonction. Le contrat ne peut donc plus etre oublie a un appelant.
 
 /// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
+/// BOUCHAUD_OTA_V1 : instant (horloge monotone, ms) de la derniere entree de
+/// l'utilisateur -- clavier, deplacement, molette, bouton. L'agent OTA ne
+/// redemarre JAMAIS pendant une session active : sa fenetre de redemarrage
+/// automatique (option) exige une inactivite minimale.
+static DERNIERE_ACTIVITE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+struct PositionPrecedente(core::sync::atomic::AtomicU64);
+impl PositionPrecedente {
+    fn swap_pair(&self, x: i32, y: i32) -> (i32, i32) {
+        let v = ((x as u32 as u64) << 32) | (y as u32 as u64);
+        let a = self.0.swap(v, core::sync::atomic::Ordering::Relaxed);
+        ((a >> 32) as u32 as i32, a as u32 as i32)
+    }
+}
+static DERNIERE_POSITION: PositionPrecedente = PositionPrecedente(core::sync::atomic::AtomicU64::new(0));
+
+fn note_activite() {
+    DERNIERE_ACTIVITE_MS.store(crate::kernel::timer::monotonic_ns() / 1_000_000, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Millisecondes depuis la derniere entree (depuis le demarrage s'il n'y en a eu aucune).
+pub fn inactif_depuis_ms() -> u64 {
+    let maintenant = crate::kernel::timer::monotonic_ns() / 1_000_000;
+    maintenant.saturating_sub(DERNIERE_ACTIVITE_MS.load(core::sync::atomic::Ordering::Relaxed))
+}
+
 /// BOUCHAUD_LIVRAISON_V1 : la geometrie REELLE du bouton Demarrer (elle
 /// depend du nombre de fenetres) et des lignes du menu, telle que l'Atelier
 /// la calcule. Le test de l'image de livraison clique dessus avec la souris

@@ -80,6 +80,16 @@ rustc +"$TOOLCHAIN" --edition 2021 -O tools/update/meta.rs -o "$WORK/meta"
 "$WORK/meta" a-bon "$OUT/meta.img"
 "$BUILDER" --disque-ab "$OUT/disque-ab.img" "$SHIM" "$OUT/meta.img" \
   "$OUT/slot-a" "$OUT/slot-b" "$OUT/recovery" > "$OUT/disposition.txt"
+# BOUCHAUD_LIVRAISON_V1 : une image de RELEASE (BO_SEQUENCE > 0) porte son
+# registre anti-retour : slot A = release N, plancher = N (META blocs 3-4,
+# encodeur independant d'update-core). Sans lui, un systeme fraichement
+# installe se croirait en release 0 et l'agent OTA lui reproposerait sa
+# propre release. Build de developpement (sequence 0) : registre vierge.
+if [ "${BO_SEQUENCE:-0}" -gt 0 ]; then
+  lba_meta=$(sed -n 's/.*nom=BOUCHAUD-META premier_lba=\([0-9]*\).*/\1/p' "$OUT/disposition.txt")
+  [ -n "$lba_meta" ] || { echo "TRIGKEY_AB_REFUSE meta_introuvable" >&2; exit 2; }
+  python3 tools/update/pose_anti_retour.py "$OUT/disque-ab.img" "$lba_meta" "$BO_SEQUENCE"
+fi
 # BOUCHAUD_RELEASE_V1 : l'image d'UN slot, telle que --disque-ab la pose --
 # la charge utile d'une mise a jour (ce que `updated` ecrit dans le slot
 # inactif et que le manifeste signe nomme).

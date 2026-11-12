@@ -33,6 +33,13 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
+      - 'tools/release/assemble_systeme.sh'
+      - 'tools/release/build_trigkey_ab_image.sh'
+      - 'tools/release/test_livraison_qemu.py'
+      - 'src/gui/window_manager.rs'
+      - 'src/gui/client.rs'
+      - 'src/kernel/update/**'
       # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
@@ -97,6 +104,13 @@ on:
       - 'tools/ladybird/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
+      - 'tools/release/assemble_systeme.sh'
+      - 'tools/release/build_trigkey_ab_image.sh'
+      - 'tools/release/test_livraison_qemu.py'
+      - 'src/gui/window_manager.rs'
+      - 'src/gui/client.rs'
+      - 'src/kernel/update/**'
       # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
@@ -1002,6 +1016,53 @@ jobs:
             target/bureau-ring3-applications/fixture.log
             target/bureau-ring3-applications/*.ppm
           if-no-files-found: warn
+
+  livraison-trigkey:
+    # BOUCHAUD_LIVRAISON_V1 : L'IMAGE DE LIVRAISON du Trigkey (disque A/B :
+    # ESP, META, SYS-A, SYS-B, RECOVERY, STATE ; services, compositeur, DOOM,
+    # Ladybird natif de CET artefact, /etc/bouchaud, OTA stable), construite
+    # une fois, puis demarree TELLE QUELLE (copie jetable, empreinte verifiee)
+    # sous QEMU/OVMF : menu Demarrer, Terminal, DOOM et Ladybird ouverts a la
+    # souris, premieres trames exigees. --exige-ladybird : une image sans
+    # Ladybird n'est pas livrable et ce job echoue. PHYSICAL=NOT_RUN.
+    name: ladybird / image Trigkey de livraison (A/B, STATE, bureau, DOOM, Ladybird)
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + OVMF + outils
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf musl-tools build-essential binutils python3-pil
+      - name: Rust UEFI
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-uefi
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: Construire l'image de livraison (aucune ecriture de peripherique)
+        run: BO_NATIF_LADYBIRD="$PWD/native-browser" bash tools/release/build_trigkey_ab_image.sh target/livraison
+      - name: Demarrer l'image EXACTE et l'utiliser (Terminal, DOOM, Ladybird)
+        run: python3 tools/release/test_livraison_qemu.py target/livraison --exige-ladybird
+      - name: Preuves
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigkey-livraison-preuves
+          path: |
+            target/livraison/livraison-evidence.json
+            target/livraison/livraison-boot.log
+            target/livraison/livraison-captures/*.ppm
+            target/livraison/manifest-ab.json
+            target/livraison/composants.txt
+            target/livraison/systeme.txt
+            target/livraison/disque-ab.img.sha256
+          if-no-files-found: warn
+          retention-days: 14
 
   sites:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)

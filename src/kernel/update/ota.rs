@@ -47,8 +47,156 @@ use uc::ota::{Decision, Refus};
 pub const CONFIG: &str = "/etc/bouchaud/ota.conf";
 /// Six hours between two checks.
 pub const PERIODE_S: u64 = 6 * 3600;
-/// Longest wait for a network lease before a check is skipped.
-const ATTENTE_RESEAU_S: u64 = 180;
+// ---- BOUCHAUD_OTA_V1, etat visible et persistant ---------------------------
+//
+// /persist/.bouchaud/ota-etat (cle=valeur, reecrit a chaque evenement) et
+// /persist/.bouchaud/ota-historique (une ligne par echec, rollback,
+// installation ; les HISTORIQUE_MAX dernieres). Ils vivent dans STATE : ils
+// traversent les redemarrages et les changements de slot. L'ecriture differee
+// les synchronise ; aucune E/S ici.
+const ETAT: &str = ".bouchaud/ota-etat";
+const HISTORIQUE: &str = ".bouchaud/ota-historique";
+const HISTORIQUE_MAX: usize = 50;
+
+static CHAMPS: crate::kernel::sync::SpinLock<Vec<(&'static str, String)>> =
+    crate::kernel::sync::SpinLock::new(Vec::new());
+
+/// Consentement donne pendant CE demarrage (`bo-update consentir`).
+static CONSENTEMENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Verification demandee maintenant (`bo-update verifier`).
+static VERIFIER_MAINTENANT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn horodatage() -> String {
+    let d = crate::arch::x86_64::rtc::now_utc();
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", d.year, d.month, d.day, d.hour, d.minute, d.second)
+}
+
+/// Ecrit `/persist/<rel>` sous le verrou du RAMFS, SANS E/S (l'ecriture
+/// differee synchronise). Silencieux si /persist n'est pas monte.
+fn ecrit_persist(rel: &str, contenu: &[u8]) {
+    let mut fs = crate::fs::ramfs::fs();
+    let Some(racine) = fs.resolve("/persist", 0) else { return };
+    let (dossier, nom) = rel.split_once('/').unwrap_or(("", rel));
+    let d = if dossier.is_empty() { racine } else {
+        match fs.find_child(racine, dossier) {
+            Some(d) => d,
+            None => match fs.mkdir_at(racine, dossier) { Ok(d) => d, Err(_) => return },
+        }
+    };
+    if let Ok(f) = fs.touch_at(d, nom) {
+        let _ = fs.write_node_bytes(f, contenu);
+    }
+}
+
+fn lit_persist(rel: &str) -> Vec<u8> {
+    let fs = crate::fs::ramfs::fs();
+    match fs.resolve(&format!("/persist/{}", rel), 0) {
+        Some(i) => fs.nodes[i].content.clone(),
+        None => Vec::new(),
+    }
+}
+
+/// Met a jour un champ de l'etat et le reecrit.
+fn etat(cle: &'static str, valeur: String) {
+    let texte = {
+        let mut c = CHAMPS.lock();
+        match c.iter_mut().find(|(k, _)| *k == cle) {
+            Some(e) => e.1 = valeur,
+            None => c.push((cle, valeur)),
+        }
+        let mut t = String::new();
+        for (k, v) in c.iter() { t.push_str(&format!("{}={}\n", k, v)); }
+        t
+    };
+    ecrit_persist(ETAT, texte.as_bytes());
+}
+
+/// Ajoute une ligne a l'historique (les HISTORIQUE_MAX dernieres).
+fn historique(ligne: &str) {
+    let ancien = String::from_utf8_lossy(&lit_persist(HISTORIQUE)).into_owned();
+    let mut lignes: Vec<&str> = ancien.lines().collect();
+    let nouvelle = format!("{} {}", horodatage(), ligne);
+    lignes.push(&nouvelle);
+    let debut = lignes.len().saturating_sub(HISTORIQUE_MAX);
+    let mut t = String::new();
+    for l in &lignes[debut..] { t.push_str(l); t.push('\n'); }
+    ecrit_persist(HISTORIQUE, t.as_bytes());
+    crate::serial_println!("BOUCHAUD_OTA_HISTORIQUE {}", ligne);
+}
+
+/// `bo-update consentir` : redemarrer vers la release preparee.
+pub fn consentir() { CONSENTEMENT.store(true, core::sync::atomic::Ordering::Release); }
+/// `bo-update verifier` : verifier les sources sans attendre la periode.
+pub fn verifier_maintenant() { VERIFIER_MAINTENANT.store(true, core::sync::atomic::Ordering::Release); }
+
+/// L'etat courant, tel que `bo-update status` l'affiche.
+pub fn etat_texte() -> String {
+    let mut t = String::new();
+    for (k, v) in CHAMPS.lock().iter() { t.push_str(&format!("{}={}\n", k, v)); }
+    t
+}
+
+pub fn historique_texte() -> String { String::from_utf8_lossy(&lit_persist(HISTORIQUE)).into_owned() }
+
+/// Identite du systeme qui tourne et des slots, au demarrage.
+fn note_identite() {
+    let version = {
+        let fs = crate::fs::ramfs::fs();
+        fs.resolve("/etc/bouchaud/version", 0).map(|i| String::from_utf8_lossy(&fs.nodes[i].content).into_owned())
+    }.unwrap_or_default();
+    let champ = |k: &str| version.lines().find_map(|l| l.strip_prefix(&format!("{}=", k)).map(String::from)).unwrap_or_else(|| String::from("?"));
+    etat("version", champ("version"));
+    etat("commit", champ("commit"));
+    etat("canal", config().lines().find_map(|l| l.trim().strip_prefix("canal=").map(String::from)).unwrap_or_else(|| String::from("stable")));
+    let (lecture, courante, echouee) = super::etat_anti_retour();
+    let slot = super::passage().map(|p| if p.slot == uc::Slot::A { "A" } else { "B" }).unwrap_or("-");
+    etat("slot_actif", String::from(slot));
+    etat("release_slot_actif", format!("{}", courante));
+    if let uc::anti_retour::Lecture::Valide(r) = lecture {
+        let autre = if slot == "A" { 1 } else { 0 };
+        etat("release_slot_inactif", format!("{}", r.slots[autre]));
+        etat("plancher", format!("{}", r.plancher));
+    }
+    if echouee != 0 { etat("release_en_echec", format!("{}", echouee)); }
+    // Un demarrage qui suit un rollback le dit, une fois, dans l'historique.
+    if let Some(p) = super::passage() {
+        let raison = p.raison.texte();
+        if raison.contains("rollback") || raison.contains("recovery") {
+            historique(&format!("rollback raison={} slot={}", raison, slot));
+        }
+        etat("dernier_demarrage", String::from(raison));
+    }
+    etat("prochaine_installation", String::from("aucune"));
+}
+
+/// La politique de redemarrage de la configuration :
+///   redemarrage=demande             (defaut) : jamais sans `bo-update consentir` ;
+///   redemarrage=consenti            : des que le candidat est pret ;
+///   redemarrage=fenetre:HH-HH:MIN   : aussi, automatiquement, entre HH et HH
+///                                     (UTC) apres MIN minutes SANS entree.
+enum Politique { Demande, Consenti, Fenetre { debut: u8, fin: u8, inactif_min: u64 } }
+
+fn politique() -> Politique {
+    let v = config().lines().find_map(|l| l.trim().strip_prefix("redemarrage=").map(String::from)).unwrap_or_default();
+    if v == "consenti" { return Politique::Consenti; }
+    if let Some(f) = v.strip_prefix("fenetre:") {
+        let p: Vec<&str> = f.split([':', '-']).collect();
+        if let [a, b, m] = p[..] {
+            if let (Ok(debut), Ok(fin), Ok(inactif_min)) = (a.parse(), b.parse(), m.parse()) {
+                if debut < 24 && fin < 24 && inactif_min >= 5 {
+                    return Politique::Fenetre { debut, fin, inactif_min };
+                }
+            }
+        }
+        crate::serial_println!("BOUCHAUD_OTA_POLITIQUE_INVALIDE valeur={} repli=demande", v);
+    }
+    Politique::Demande
+}
+
+fn dans_la_fenetre(debut: u8, fin: u8) -> bool {
+    let h = crate::arch::x86_64::rtc::now_utc().hour as u8;
+    if debut <= fin { h >= debut && h < fin } else { h >= debut || h < fin }
+}
 /// The manifest is a few hundred bytes; anything larger is not ours.
 const MANIFESTE_MAX: usize = 4096;
 
@@ -244,10 +392,15 @@ fn installe_si_consenti() {
     // Nothing is offered to `updated` while parts are being written.
     let _ = ecrit_ramfs("/update/pret", b"en_cours\n");
     match telecharge_et_prepare(&r) {
-        Ok(octets) => crate::serial_println!(
-            "BOUCHAUD_OTA_TELECHARGE source={} sequence={} octets={} empreinte=signee_verifiee prepare=/update",
-            r.source, r.manifeste.sequence, octets),
+        Ok(octets) => {
+            crate::serial_println!(
+                "BOUCHAUD_OTA_TELECHARGE source={} sequence={} octets={} empreinte=signee_verifiee prepare=/update",
+                r.source, r.manifeste.sequence, octets);
+            etat("dernier_telechargement", format!("{} ok sequence={} octets={}", horodatage(), r.manifeste.sequence, octets));
+        }
         Err(e) => {
+            etat("dernier_telechargement", format!("{} echec raison={}", horodatage(), e));
+            historique(&format!("telechargement_refuse sequence={} raison={}", r.manifeste.sequence, e));
             crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source={} raison={}", r.source, e);
             return;
         }
@@ -273,6 +426,9 @@ fn installe_si_consenti() {
             s += 1;
         }
         if super::candidat_en_attente() { break; }
+        if super::refus_installation() != refus_avant {
+            historique(&format!("installation_refusee sequence={} essai={}", r.manifeste.sequence, essai));
+        }
         if super::refus_installation() != refus_avant && essai < ESSAIS_INSTALLATION {
             crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ECHOUEE essai={} consequence=nouvel_essai", essai);
             continue;
@@ -281,11 +437,42 @@ fn installe_si_consenti() {
         return;
     }
     crate::serial_println!("BOUCHAUD_OTA_CANDIDAT_PRET sequence={} essai={} attente_s={}", r.manifeste.sequence, essai, s);
-    if consenti("redemarrage") {
-        crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=configuration sequence={}", r.manifeste.sequence);
-        crate::kernel::power::reboot();
+    historique(&format!("candidat_pret sequence={} version={}", r.manifeste.sequence, r.manifeste.version()));
+    etat("prochaine_installation", format!("prete sequence={} version={} redemarrage=en_attente", r.manifeste.sequence, r.manifeste.version()));
+    // Le redemarrage : jamais pendant une session active, jamais sans accord.
+    match politique() {
+        Politique::Consenti => {
+            crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=configuration sequence={}", r.manifeste.sequence);
+            redemarre(r.manifeste.sequence, "configuration");
+        }
+        Politique::Demande => crate::serial_println!(
+            "BOUCHAUD_OTA_REDEMARRAGE_EN_ATTENTE consentement_requis sequence={} commande=\"bo-update consentir\"", r.manifeste.sequence),
+        Politique::Fenetre { debut, fin, inactif_min } => crate::serial_println!(
+            "BOUCHAUD_OTA_REDEMARRAGE_EN_ATTENTE fenetre={:02}-{:02}h inactivite_min={} ou=\"bo-update consentir\" sequence={}",
+            debut, fin, inactif_min, r.manifeste.sequence),
     }
-    crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE_EN_ATTENTE consentement_requis sequence={}", r.manifeste.sequence);
+    loop {
+        if CONSENTEMENT.load(core::sync::atomic::Ordering::Acquire) {
+            crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=utilisateur sequence={}", r.manifeste.sequence);
+            redemarre(r.manifeste.sequence, "utilisateur");
+        }
+        if let Politique::Fenetre { debut, fin, inactif_min } = politique() {
+            let inactif = crate::gui::window_manager::inactif_depuis_ms() / 60_000;
+            if dans_la_fenetre(debut, fin) && inactif >= inactif_min {
+                crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=fenetre inactivite_min={} sequence={}", inactif, r.manifeste.sequence);
+                redemarre(r.manifeste.sequence, "fenetre");
+            }
+        }
+        dort_s(1);
+    }
+}
+
+fn redemarre(sequence: u64, pourquoi: &str) -> ! {
+    historique(&format!("redemarrage sequence={} consentement={}", sequence, pourquoi));
+    // L'etat et l'historique sont dans /persist : les ecrire AVANT de couper.
+    let rc = crate::fs::persistance::synchronise();
+    crate::serial_println!("BOUCHAUD_OTA_SYNC_AVANT_REDEMARRAGE rc={}", rc);
+    crate::kernel::power::reboot();
 }
 
 /// Checks every configured source, logs one line per source.
@@ -293,7 +480,13 @@ pub fn verifie_tout() -> usize {
     *RETENUE.lock() = None;
     let s = sources();
     for source in &s {
-        match verifie(source) {
+        let r = verifie(source);
+        etat("derniere_verification", format!("{} source={} resultat={}", horodatage(), source, match &r {
+            Resultat::Disponible { sequence, .. } => format!("disponible sequence={}", sequence),
+            Resultat::AJour { sequence } => format!("a_jour sequence={}", sequence),
+            Resultat::Refuse(x) => format!("refuse raison={}", x),
+        }));
+        match r {
             Resultat::Disponible { version, sequence, octets } => crate::serial_println!(
                 "BOUCHAUD_OTA_VERIFIE source={} resultat=disponible version={} sequence={} octets={} installation=consentement_requis",
                 source, version, sequence, octets),
@@ -311,20 +504,40 @@ fn dort_s(s: u64) {
 }
 
 fn fil_ota() -> ! {
+    // L'identite d'abord : /persist peut ne pas etre encore monte (montage
+    // differe apres le bureau) -- on attend qu'il le soit, borne.
+    let mut s = 0;
+    while crate::platform::pc::installation::montage_differe_en_attente() && s < 120 {
+        dort_s(1);
+        s += 1;
+    }
+    note_identite();
     loop {
-        let mut attente = 0;
-        while !crate::net::bail_obtenu() && attente < ATTENTE_RESEAU_S {
-            dort_s(1);
-            attente += 1;
+        // Verifier DES que le reseau est la (pas d'abandon apres un delai :
+        // un cable branche plus tard declenche la verification).
+        if !crate::net::bail_obtenu() {
+            etat("reseau", String::from("attente_du_bail"));
+            while !crate::net::bail_obtenu() { dort_s(5); }
+            crate::serial_println!("BOUCHAUD_OTA_RESEAU_DISPONIBLE");
         }
-        if crate::net::bail_obtenu() {
-            let n = verifie_tout();
-            crate::serial_println!("BOUCHAUD_OTA_CYCLE sources={} prochain_s={}", n, PERIODE_S);
-            installe_si_consenti();
-        } else {
-            crate::serial_println!("BOUCHAUD_OTA_CYCLE sources=0 raison=pas_de_reseau prochain_s={}", PERIODE_S);
+        etat("reseau", String::from("bail_obtenu"));
+        VERIFIER_MAINTENANT.store(false, core::sync::atomic::Ordering::Release);
+        let n = verifie_tout();
+        crate::serial_println!("BOUCHAUD_OTA_CYCLE sources={} prochain_s={}", n, PERIODE_S);
+        etat("prochaine_verification_s", format!("{}", PERIODE_S));
+        installe_si_consenti();
+        // Periode, interrompue par une demande (`bo-update verifier`) ou par
+        // la perte puis le retour du reseau.
+        let mut ecoule = 0;
+        let mut perdu = false;
+        while ecoule < PERIODE_S {
+            if VERIFIER_MAINTENANT.load(core::sync::atomic::Ordering::Acquire) { break; }
+            let bail = crate::net::bail_obtenu();
+            if !bail { perdu = true; }
+            if perdu && bail { break; }
+            dort_s(5);
+            ecoule += 5;
         }
-        dort_s(PERIODE_S);
     }
 }
 

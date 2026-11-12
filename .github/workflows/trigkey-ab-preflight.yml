@@ -17,6 +17,14 @@ on:
       - 'tools/ci/reliability/test_state_ab_verdict.py'
       - 'tools/ci/reliability/test_installe_ssd.py'
       - 'tools/install/**'
+      - 'src/shell/**'
+      - 'userland/services/**'
+      - 'src/kernel/update/**'
+      - 'src/gui/client.rs'
+      - 'src/gui/window_manager.rs'
+      - 'tools/ci/qemu_gestes.py'
+      - 'tools/release/test_livraison_qemu.py'
+      - 'tools/release/assemble_systeme.sh'
       - 'tools/update/meta.rs'
       - 'src/fs/persistance/**'
       - 'src/fs/persistance.rs'
@@ -34,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install OVMF + QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf musl-tools build-essential binutils
       - name: Rust UEFI toolchain
         run: |
           rustup show active-toolchain
@@ -45,6 +53,8 @@ jobs:
         run: bash tools/release/build_trigkey_ab_image.sh target/trigkey-ab-preflight
       - name: Boot SAME image under QEMU/OVMF, require real health signal
         run: bash tools/release/smoke_trigkey_ab_qemu.sh target/trigkey-ab-preflight
+      - name: Image de livraison, demarree telle quelle et utilisee (Terminal, DOOM ; Ladybird absent ici -- PARTIEL)
+        run: python3 tools/release/test_livraison_qemu.py target/trigkey-ab-preflight
       - name: STATE survit aux coupures et au changement de slot A -> B (copie de l'image)
         run: |
           python3 -m unittest tools/ci/reliability/test_state_ab_verdict.py -v
@@ -66,5 +76,8 @@ jobs:
             target/trigkey-ab-preflight/state-boot-*.log
             target/trigkey-ab-preflight/ssd-boot-*.log
             target/trigkey-ab-preflight/installe-ssd.log
+            target/trigkey-ab-preflight/livraison-evidence.json
+            target/trigkey-ab-preflight/livraison-boot.log
+            target/trigkey-ab-preflight/livraison-captures/*.ppm
           if-no-files-found: warn
           retention-days: 14
