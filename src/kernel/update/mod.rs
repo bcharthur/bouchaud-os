@@ -624,7 +624,14 @@ fn session() -> Result<Installation, RefusInstall> {
     Ok(inst)
 }
 
+/// BOUCHAUD_OTA_V1: install refusals so far (any step). The OTA agent reads
+/// it to tell "updated tried and the kernel refused" from "still running".
+static REFUS_INSTALLATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn refus_installation() -> u64 { REFUS_INSTALLATION.load(core::sync::atomic::Ordering::Acquire) }
+
 fn note_refus(etape: &str, r: RefusInstall) -> RefusInstall {
+    REFUS_INSTALLATION.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     let raison = match r { RefusInstall::Refuse(x) | RefusInstall::Argument(x) | RefusInstall::Io(x) => x };
     crate::serial_println!("BOUCHAUD_UPDATE_INSTALL_REFUS etape={} raison={}", etape, raison);
     r

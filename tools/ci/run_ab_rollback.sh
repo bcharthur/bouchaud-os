@@ -252,7 +252,11 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
       --sequence "$RELEASE_SEQ" --canal testing --commit "$(git rev-parse HEAD)" --sortie "$OUT/srv/rel" \
       --parties-mio 4 --cle-dev "$CLES/version.pem" || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
     NB_PARTIES=$(wc -l < "$OUT/srv/rel/system-slot.parts")
-    ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" "etc/bouchaud/ota.conf=$OUT/ota.conf"
+    # Temoin (revue #308) : dans ota-complet, la PREMIERE installation echoue
+    # volontairement au finish ; l'agent doit la reproposer, updated doit
+    # encore surveiller.
+    temoin=(); if [ "$SCENARIO" = ota-complet ]; then : > "$OUT/temoin"; temoin=("update/temoin-echec-premier=$OUT/temoin"); fi
+    ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" "etc/bouchaud/ota.conf=$OUT/ota.conf" "${temoin[@]}"
   elif [ "$SCENARIO" = ota-verifie ]; then
     # BOUCHAUD_OTA_V1 : ce que sert l'hote (http.server, 10.0.2.2 vu de QEMU).
     "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
@@ -499,7 +503,9 @@ for i in $(seq 1 "$nb"); do
         if grep -aq "UPDATED_INSTALL_OK" <<< "$propre"; then verdict="A*"; else verdict="A!"; fi
         break
       fi
-      if grep -aqE "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE|BOUCHAUD_OTA_INSTALLATION_ABSENTE|UPDATED_INSTALL_FAIL" <<< "$propre"; then
+      # (l'echec VOLONTAIRE du temoin n'est pas un echec du demarrage)
+      echecs_reels=$(grep -a "UPDATED_INSTALL_FAIL" <<< "$propre" | grep -cv "temoin=echec_voulu" || true)
+      if grep -aqE "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE|BOUCHAUD_OTA_INSTALLATION_ABSENTE" <<< "$propre" || [ "${echecs_reels:-0}" -gt 0 ]; then
         verdict="A!"; break
       fi
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
@@ -630,6 +636,13 @@ if [ "$OTA_COMPLET" = 1 ]; then
     || echec "boot=1 raison=partie_5_non_reprise"
   grep -q "HTTPS TLSv1.3 .*GET /rel/system-slot.img.part000" "$OUT/https.log" || echec "raison=telechargement_non_https"
   if [ "$SCENARIO" = ota-complet ]; then
+    # Revue #308 : premier essai refuse par le noyau, puis REPROPOSE et reussi.
+    for m in "UPDATED_OTA_ECHEC_VOLONTAIRE etape=finish" "BOUCHAUD_UPDATE_INSTALL_REFUS etape=finish raison=differe_du_manifeste_signe" \
+             "BOUCHAUD_OTA_INSTALLATION_ECHOUEE essai=1 consequence=nouvel_essai" \
+             "BOUCHAUD_OTA_CANDIDAT_PRET sequence=$RELEASE_SEQ essai=2"; do
+      grep -aF "$m" <<< "$b1" >/dev/null || echec "boot=1 marqueur_absent=$m"
+    done
+    [ "$(grep -ac 'UPDATED_OTA_RELEASE_STAGED' <<< "$b1")" = 2 ] || echec "boot=1 raison=updated_n_a_pas_traite_deux_generations"
     b2=$(P 2); b3=$(P 3)
     # Boot 2 (B, release 1001, AUTRE noyau) : commit de sante, plancher 1001, STATE intacte.
     for m in "BOUCHAUD_AB_BOOT slot=B" "BOUCHAUD_BUILD commit=$V2" "result=committed" \

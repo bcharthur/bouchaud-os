@@ -45,6 +45,10 @@
  * part001, ... read back to back as ONE stream; the signed manifest's digest
  * still covers the whole image. `pret` is written last, by the agent. */
 #define PRET        "/update/pret"
+/* Bench witness (revue #308): the FIRST OTA install is made to fail at
+ * finish (wrong digest, refused by the kernel); the agent must offer the
+ * release again and updated must still be watching. */
+#define TEMOIN_ECHEC_OTA "/update/temoin-echec-premier"
 #define PARTIE      "/update/system.img.part"
 /* Bench only (BOUCHAUD_UPDATED_MORTS_V1): die on purpose, once in the middle
  * of the writes, once in the middle of the read-back; the third instance
@@ -403,6 +407,8 @@ static bo_i64 image_lit(char *dst, bo_u64 want)
 
 static void image_ferme(void) { if (img_fd >= 0) bo_posix_close(img_fd); img_fd = -1; }
 
+static int echec_voulu_ota;   /* bench: corrupt the digest at THIS finish */
+
 static int install(const struct manifest *m, int target)
 {
     bo_u64 off = 0;
@@ -474,6 +480,21 @@ static int install(const struct manifest *m, int target)
         faux[31] ^= 1;
         rc = bo_update_install_finish(cap, faux, m->bytes, (bo_u32)m->attempts);
         check("a digest other than the signed one is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    }
+    if (echec_voulu_ota) {
+        bo_u8 faux[32];
+        int k;
+        for (k = 0; k < 32; k++) faux[k] = m->sha256[k];
+        faux[0] ^= 0x80;
+        echec_voulu_ota = 0;
+        bo_say("UPDATED_OTA_ECHEC_VOLONTAIRE etape=finish\n");
+        rc = bo_update_install_finish(cap, faux, m->bytes, (bo_u32)m->attempts);
+        bo_line_begin(&l);
+        bo_line_str(&l, rc == 0 ? "UPDATED_INSTALL_OK" : "UPDATED_INSTALL_FAIL");
+        bo_line_kv(&l, "target", target);
+        bo_line_str(&l, " temoin=echec_voulu");
+        bo_line_end(&l);
+        return rc == 0;
     }
     rc = bo_update_install_finish(cap, m->sha256, m->bytes, (bo_u32)m->attempts);
     check("finish: read back, SHA-256 matches, candidate declared", rc == 0, rc);
@@ -556,21 +577,43 @@ int bo_main(const struct bo_start *start)
         /* BOUCHAUD_OTA_V1: a release may be STAGED later by the OTA agent,
          * which writes PRET last. Same checks as at boot; the kernel
          * re-verifies everything (signature, hardware, floor, digest). */
-        for (;;) {
-            bo_i64 fp;
-            if (!serve_control(1000000000UL)) return 0;
-            fp = bo_posix_open(PRET, 0);
-            if (fp < 0) continue;
-            bo_posix_close(fp);
-            rc = parse_manifest(&m);
-            bo_say(rc == 1 ? "UPDATED_OTA_RELEASE_STAGED\n" : "UPDATED_OTA_STAGED_INVALID\n");
-            if (rc == 1 && bo_update_state(cap, &st) == 0) {
-                int running = (int)st.booted_slot;
-                if (st.state_a == 1 || st.state_b == 1) bo_say("UPDATED_SKIP candidate_already_pending\n");
-                else if (st.active_slot != st.booted_slot) bo_say("UPDATED_SKIP not_running_the_active_slot\n");
-                else install(&m, 1 - running);
+        /* Revue #308: NEVER stop watching -- a failed install must not
+         * leave the machine unable to take the next offer. Each generation
+         * written by the agent ("pret generation=N") is handled ONCE;
+         * "en_cours" (parts being written) is never handled. */
+        {
+            static char vu[64], lu[64];
+            int temoin = 0;
+            bo_i64 ft = bo_posix_open(TEMOIN_ECHEC_OTA, 0);
+            if (ft >= 0) { temoin = 1; bo_posix_close(ft); }
+            vu[0] = 0;
+            for (;;) {
+                bo_i64 fp, n;
+                int k, pareil;
+                if (!serve_control(1000000000UL)) return 0;
+                fp = bo_posix_open(PRET, 0);
+                if (fp < 0) continue;
+                n = bo_posix_read(fp, lu, sizeof(lu) - 1);
+                bo_posix_close(fp);
+                if (n <= 0) continue;
+                lu[n] = 0;
+                if (!prefix(lu, (bo_usize)n, "pret ")) continue;
+                pareil = 1;
+                for (k = 0; k <= n; k++) if (lu[k] != vu[k]) { pareil = 0; break; }
+                if (pareil) continue;
+                for (k = 0; k <= n; k++) vu[k] = lu[k];
+                rc = parse_manifest(&m);
+                bo_say(rc == 1 ? "UPDATED_OTA_RELEASE_STAGED\n" : "UPDATED_OTA_STAGED_INVALID\n");
+                if (rc == 1 && bo_update_state(cap, &st) == 0) {
+                    int running = (int)st.booted_slot;
+                    if (st.state_a == 1 || st.state_b == 1) bo_say("UPDATED_SKIP candidate_already_pending\n");
+                    else if (st.active_slot != st.booted_slot) bo_say("UPDATED_SKIP not_running_the_active_slot\n");
+                    else {
+                        if (temoin) { echec_voulu_ota = 1; temoin = 0; }
+                        install(&m, 1 - running);
+                    }
+                }
             }
-            break;
         }
     } else {
         bo_say("UPDATED_IDLE manifest_invalid\n");

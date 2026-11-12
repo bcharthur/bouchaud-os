@@ -225,9 +225,13 @@ fn telecharge_et_prepare(r: &Retenue) -> Result<u64, &'static str> {
     if total.finalize() != r.manifeste.empreinte { return Err("image_empreinte_differente_du_manifeste"); }
     ecrit_ramfs("/update/manifest", &r.texte)?;
     ecrit_ramfs("/update/manifest.sig", &r.signature)?;
-    ecrit_ramfs("/update/pret", b"1\n")?;
     Ok(octets)
 }
+
+/// Generation of `/update/pret` offered to `updated` (one per install attempt).
+static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Install attempts of one staged release (a kernel refusal ends an attempt).
+const ESSAIS_INSTALLATION: u64 = 3;
 
 /// After a `disponible`: download (consent), wait for the candidate,
 /// reboot (consent).
@@ -237,6 +241,8 @@ fn installe_si_consenti() {
         crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_EN_ATTENTE consentement_requis sequence={}", r.manifeste.sequence);
         return;
     }
+    // Nothing is offered to `updated` while parts are being written.
+    let _ = ecrit_ramfs("/update/pret", b"en_cours\n");
     match telecharge_et_prepare(&r) {
         Ok(octets) => crate::serial_println!(
             "BOUCHAUD_OTA_TELECHARGE source={} sequence={} octets={} empreinte=signee_verifiee prepare=/update",
@@ -246,17 +252,35 @@ fn installe_si_consenti() {
             return;
         }
     }
-    // `updated` installs into the inactive slot; wait for the candidate.
+    // Each offer to `updated` is a NEW generation of `pret` (revue #308) :
+    // updated keeps watching after a failed install, and handles each
+    // generation once. A refusal counted by the kernel ends the attempt; the
+    // parts, already verified, are offered again (up to ESSAIS_INSTALLATION).
+    let mut essai = 0u64;
     let mut s = 0;
-    while !super::candidat_en_attente() && s < 1800 {
-        dort_s(1);
-        s += 1;
-    }
-    if !super::candidat_en_attente() {
-        crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE attente_s={}", s);
+    loop {
+        essai += 1;
+        GENERATION.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        let g = GENERATION.load(core::sync::atomic::Ordering::Acquire);
+        let refus_avant = super::refus_installation();
+        if ecrit_ramfs("/update/pret", format!("pret generation={}\n", g).as_bytes()).is_err() {
+            crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE raison=pret_non_ecrit");
+            return;
+        }
+        s = 0;
+        while !super::candidat_en_attente() && super::refus_installation() == refus_avant && s < 1800 {
+            dort_s(1);
+            s += 1;
+        }
+        if super::candidat_en_attente() { break; }
+        if super::refus_installation() != refus_avant && essai < ESSAIS_INSTALLATION {
+            crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ECHOUEE essai={} consequence=nouvel_essai", essai);
+            continue;
+        }
+        crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE essai={} attente_s={}", essai, s);
         return;
     }
-    crate::serial_println!("BOUCHAUD_OTA_CANDIDAT_PRET sequence={} attente_s={}", r.manifeste.sequence, s);
+    crate::serial_println!("BOUCHAUD_OTA_CANDIDAT_PRET sequence={} essai={} attente_s={}", r.manifeste.sequence, essai, s);
     if consenti("redemarrage") {
         crate::serial_println!("BOUCHAUD_OTA_REDEMARRAGE consentement=configuration sequence={}", r.manifeste.sequence);
         crate::kernel::power::reboot();
