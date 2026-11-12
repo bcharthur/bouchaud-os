@@ -417,8 +417,11 @@ if [ "$OTA_COMPLET" = 1 ]; then
   # (notBefore = maintenant) et le noyau VERIFIE sa periode de validite.
   RESEAU=(-nic user,model=e1000 -rtc "base=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S)")
   # Le serveur HTTPS de banc (tools/ci/serveur_ota_banc.py) : coupure
-  # volontaire de la partie 5 ; en ota-reseau, erreur 500, partie alteree,
-  # partie tronquee, et un SECOND serveur au certificat d'une CA inconnue.
+  # volontaire de la partie 5 ; poignee TLS dans le fil de CHAQUE connexion,
+  # avec delai -- une connexion figee ne bloque plus les suivantes (run
+  # 43301393229 : partie 13 « reponse vide » quatre fois, verdict A!) ; en
+  # ota-reseau, erreur 500, partie alteree, partie tronquee, et un SECOND
+  # serveur au certificat d'une CA inconnue.
   modes=(); [ "$SCENARIO" = ota-reseau ] && modes=(--reseau)
   python3 tools/ci/serveur_ota_banc.py "$PORT_OTA" "$OUT/srv" "$CLES/srv.pem" "$CLES/srv.key" "${modes[@]}" > "$OUT/https.log" 2>&1 &
   PID_HTTP=$!

@@ -153,6 +153,17 @@ Changements de comportement apportés par cette campagne :
 - **Cause inconnue.** À ce SHA, la trap du serveur de banc écrasait celle qui lance le diagnostic (corrigé dans d993d63).
 - **Depuis** : succès en CI à d993d63 (×2), 6f44125 et `main@df30caa` ; 5 succès en local.
 - **Statut.** Ce n'est **pas** considéré comme résolu. Tout nouvel échec doit être diagnostiqué : les lignes `AB_DIAG` OTA, `updated` et HTTPS figurent désormais dans le journal du job.
+- **Nouvel indice** : `ota-rollback`, run 43301393229, SHA 260fc0c, même verdict `A!` au démarrage 1.
+  - Ce que montre `AB_DIAG` :
+    - la partie 13 attend 12,8 s puis revient vide ;
+    - les trois essais suivants reviennent vides en 3 s, **sans poignée TLS terminée** ;
+    - le téléchargement est refusé.
+  - **Cause probable**, côté banc :
+    - le serveur HTTPS de banc faisait sa poignée TLS dans sa boucle d'acceptation, sans délai ;
+    - une connexion figée bloquait donc toutes les suivantes ;
+    - le banc `ota-reseau`, avec sa coupure de lien, a reproduit ce blocage de façon déterministe.
+  - **Correction** : `tools/ci/serveur_ota_banc.py` fait la poignée dans le fil de chaque connexion, avec un délai de 60 s.
+  - **Statut inchangé** : ce n'est **pas** déclaré résolu tant que des runs ultérieurs n'ont pas été observés, et la cause du premier gel de connexion, côté invité, reste inconnue.
 
 ## Agent OTA, tranche 2 : de la release signée au slot actif (`BOUCHAUD_OTA_V1`)
 
