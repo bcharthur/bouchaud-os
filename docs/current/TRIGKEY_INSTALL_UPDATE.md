@@ -26,7 +26,8 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 2 | Installateur SSD dédié (hôte Linux) | **FAIT**, jamais lancé sur un vrai disque | HOST (13 tests) + QEMU TCG/OVMF (`run_installe_ssd_qemu.sh`) |
 | 3 | Image physique unifiée | **PARTIEL** | voir ci-dessous |
 | 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (31 tests, dont témoins négatifs) + QEMU TCG (banc A/B) |
-| 5 | Agent de mise à jour réseau | **NON FAIT** | — |
+| 5 | Agent OTA : vérification signée périodique | **TRANCHE 1 FAITE** (vérifie, n'installe pas) | HOST (`test_ota.rs`) + QEMU TCG (`run_ab_rollback.sh ota-verifie`, serveur HTTP hôte) |
+| 5 | Agent OTA : téléchargement de l'image, reprise, consentement, installation | **NON FAIT** | — |
 | 6 | Ed25519, anti-retour, refus sans clé | **FAIT** | HOST + QEMU TCG |
 | 6 | Rotation et révocation de clé | **PROCÉDURE** | aucun banc |
 | 7 | Rollback, recovery | **FAIT** | QEMU TCG (`run_ab_rollback.sh`, 11 scénarios) |
@@ -72,6 +73,22 @@ Détail des lignes marquées « voir ci-dessous » :
 - **Image physique unifiée (phase 3).**
   - Les slots A/B portent le noyau et 4 services : serviced, healthd, updated et logd.
   - Ils ne portent ni Ladybird, ni DOOM, ni le bureau.
+
+## Agent OTA, tranche 1 (`BOUCHAUD_OTA_V1`)
+
+- **Fonctionnement.** Tâche noyau `ota`, lancée au démarrage. Elle attend un bail réseau, puis vérifie à chaque cycle (au démarrage, puis toutes les 6 h) chaque ligne `source=` de `/etc/bouchaud/ota.conf`.
+  - Elle télécharge `<source>/manifest` et `<source>/manifest.sig`, en HTTPS (TLS et racines du noyau) ou en HTTP pour un miroir local.
+  - Seul un statut **200** est accepté.
+  - Elle décide **uniquement sur le manifeste signé**, jamais sur `release.json`, avec `update-core::ota::decide`. C'est la même politique que `begin` : clé de confiance, manifeste v2 canonique, matériel, plancher anti-retour, et release plus récente que le slot courant.
+  - Elle journalise `BOUCHAUD_OTA_VERIFIE source=… resultat=disponible|a_jour|refuse raison=…`.
+- **Canal stable.** La source est `https://github.com/<owner>/<repo>/releases/latest/download`. Le « latest » de GitHub est la dernière release **non** prerelease, c'est-à-dire une release promue par `release-trigkey.yml`.
+- **Fail closed.** Sans clé de production engagée, chaque source est refusée (`aucune_cle_de_confiance`).
+- **Ce que la tranche 1 ne fait pas.** Elle ne télécharge pas l'image, n'installe rien et ne redémarre pas : une installation demandera le consentement (tranche 2). Le mode tout-automatique n'existe pas. L'image de production n'embarque pas encore `ota.conf`, l'agent y est donc inactif (`BOUCHAUD_OTA_INACTIF`).
+- **Preuves.**
+  - HOST : `tools/update/test_ota.rs`. Il couvre les cas « disponible », « à jour » et « installation neuve », plus des témoins de refus : aucune clé, autre clé, octet ou bit altéré, rétrogradation signée, autre matériel, v1, non canonique, registre illisible.
+  - QEMU TCG : `run_ab_rollback.sh ota-verifie`, avec une carte e1000 et le réseau utilisateur de QEMU. L'hôte sert six sources. Le banc exige exactement six verdicts : `ok` disponible (1001), `egal` à jour (1000), `vieux` rétrograde, `arm` matériel incompatible, `autre` signature non fiable, `absent` injoignable. Il exige aussi qu'**aucune** installation ne démarre et que le serveur ait réellement été sollicité.
+  - **Défaut trouvé par ce banc et corrigé** : un 404 était lu comme un corps de manifeste.
+- **Non qualifié** : TLS vers github.com depuis le Trigkey (RTL8168, horloge, racines) reste `BLOCKED_PHYSICAL`.
 
 ## Ce qui est en place
 
