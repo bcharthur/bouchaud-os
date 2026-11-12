@@ -121,7 +121,61 @@ def scenario_find() -> tuple[list[str], list[Etape]]:
     return prelude, e
 
 
-SCENARIOS = {"find": (scenario_find, donnees_find)}
+# --- Le scenario `commandes` (audit des commandes du shell) -----------------
+
+PROFONDEUR_TREE = 1500
+
+
+def donnees_commandes() -> dict[str, bytes | None]:
+    d = donnees_find()
+    # Un script qui se relance lui-meme : l'imbrication doit etre bornee.
+    d["r.sh"] = b"echo tour\nrun /r.sh\n"
+    return d
+
+
+def scenario_commandes() -> tuple[list[str], list[Etape]]:
+    prelude = ["journal off", "cd /", "mkdir /tmp/gouffre", "cd /tmp/gouffre"]
+    prelude += ["mkdir y", "cd y"] * PROFONDEUR_TREE
+    prelude += ["cd /"]
+    e = [
+        # BOUCHAUD_RUN_SANS_VERROU_V1 : `run` tenait le verrou du RAMFS pendant
+        # tout le script ; la premiere ligne qui y touchait le reprenait.
+        Etape("ecrit-script", "echo ls /etc > /tmp/s.sh", lignes=0),
+        Etape("run-script-vfs", "run /tmp/s.sh", attendus=[r"^hosts$", r"^passwd$"]),
+        Etape("run-recursif-borne", "run /r.sh", budget_s=120,
+              attendus=[r"^run: /r\.sh: imbrication trop profonde \(max 8\)$"],
+              toutes=r"^(tour|run: /r\.sh: imbrication trop profonde \(max 8\))$"),
+        Etape("run-inexistant", "run /pas/de/script", attendus=[r"^run: /pas/de/script: introuvable$"], lignes=1),
+        Etape("run-dossier", "run /etc", attendus=[r"^run: /etc: pas un fichier$"], lignes=1),
+        # BOUCHAUD_TREE_ITERATIF_V1 : une ligne par niveau, indentation bornee ;
+        # avant, 1 print! par niveau et une sortie quadratique (TIMEOUT sous KVM).
+        Etape("tree-profond", "tree /tmp/gouffre", budget_s=180, lignes=PROFONDEUR_TREE + 1,
+              attendus=[r"^/tmp/gouffre$", r"^ {64}\[niveau 1499\] \|- y/$"]),
+        Etape("tree-inexistant", "tree /chemin/inexistant", attendus=[r"^tree: /chemin/inexistant: introuvable$"], lignes=1),
+        Etape("ls-large", "ls /arbre/large", lignes=LARGEUR, toutes=r"^f[0-9]{4}"),
+        Etape("ls-inexistant", "ls /chemin/inexistant", attendus=[r"^ls: introuvable$"], lignes=1),
+        Etape("cat-inexistant", "cat /chemin/inexistant", attendus=[r"^cat: introuvable$"], lignes=1),
+        Etape("cat-dossier", "cat /etc", attendus=[r"^cat: dossier$"], lignes=1),
+        Etape("cat-hosts", "cat /etc/hosts", attendus=[r"^127\.0\.0\.1\s+localhost bouchaud$"], lignes=1),
+        Etape("df", "df", attendus=[r"^ramfs /\s+RAMFS\s+[0-9]+/4096"]),
+        Etape("ls-l-etc", "ls -l /etc", attendus=[r"hosts$", r"passwd$"]),
+        Etape("stat-hosts", "stat /etc/hosts", attendus=[r"hosts"]),
+        Etape("wc-hosts", "wc /etc/hosts"),
+        Etape("head-passwd", "head /etc/passwd", attendus=[r"^root:"]),
+        Etape("tail-passwd", "tail /etc/passwd", attendus=[r"^guest:"]),
+        Etape("grep-passwd", "grep root /etc/passwd", attendus=[r"^root:"], toutes=r"root"),
+        Etape("mkdir-rmdir", "mkdir /tmp/vide && rmdir /tmp/vide", lignes=0),
+        Etape("cp-mv-rm", "cp /etc/hosts /tmp/h1 && mv /tmp/h1 /tmp/h2 && cat /tmp/h2 && rm /tmp/h2",
+              attendus=[r"^127\.0\.0\.1"], lignes=1),
+        Etape("rm-inexistant", "rm /tmp/pas-la", lignes=1),
+        Etape("ps", "ps", attendus=[r"PID|pid"]),
+        Etape("free", "free"),
+        Etape("pwd", "pwd", attendus=[r"^/$"], lignes=1),
+    ]
+    return prelude, e
+
+
+SCENARIOS = {"find": (scenario_find, donnees_find), "commandes": (scenario_commandes, donnees_commandes)}
 
 
 # --- Le classement (pur, teste par tools/ci/reliability/test_unix_fiabilite.py)
