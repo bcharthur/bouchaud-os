@@ -603,7 +603,9 @@ int bo_main(const struct bo_start *start)
                 if (pareil) continue;
                 for (k = 0; k <= n; k++) vu[k] = lu[k];
                 rc = parse_manifest(&m);
-                bo_say(rc == 1 ? "UPDATED_OTA_RELEASE_STAGED\n" : "UPDATED_OTA_STAGED_INVALID\n");
+                /* `lu` is "pret generation=N\n": each generation is named. */
+                bo_say(rc == 1 ? "UPDATED_OTA_RELEASE_STAGED " : "UPDATED_OTA_STAGED_INVALID ");
+                bo_say(lu);
                 if (rc == 1 && bo_update_state(cap, &st) == 0) {
                     int running = (int)st.booted_slot;
                     if (st.state_a == 1 || st.state_b == 1) bo_say("UPDATED_SKIP candidate_already_pending\n");

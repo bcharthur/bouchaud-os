@@ -642,7 +642,10 @@ if [ "$OTA_COMPLET" = 1 ]; then
              "BOUCHAUD_OTA_CANDIDAT_PRET sequence=$RELEASE_SEQ essai=2"; do
       grep -aF "$m" <<< "$b1" >/dev/null || echec "boot=1 marqueur_absent=$m"
     done
-    [ "$(grep -ac 'UPDATED_OTA_RELEASE_STAGED' <<< "$b1")" = 2 ] || echec "boot=1 raison=updated_n_a_pas_traite_deux_generations"
+    for g in 1 2; do
+      grep -aF "UPDATED_OTA_RELEASE_STAGED pret generation=$g" <<< "$b1" >/dev/null \
+        || echec "boot=1 raison=generation_${g}_non_traitee_par_updated"
+    done
     b2=$(P 2); b3=$(P 3)
     # Boot 2 (B, release 1001, AUTRE noyau) : commit de sante, plancher 1001, STATE intacte.
     for m in "BOUCHAUD_AB_BOOT slot=B" "BOUCHAUD_BUILD commit=$V2" "result=committed" \
