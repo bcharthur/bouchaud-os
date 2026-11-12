@@ -72,6 +72,10 @@ rustc +"$TOOLCHAIN" --edition 2021 -O tools/update/meta.rs -o "$WORK/meta"
 "$WORK/meta" a-bon "$OUT/meta.img"
 "$BUILDER" --disque-ab "$OUT/disque-ab.img" "$SHIM" "$OUT/meta.img" \
   "$OUT/slot-a" "$OUT/slot-b" "$OUT/recovery" > "$OUT/disposition.txt"
+# BOUCHAUD_RELEASE_V1 : l'image d'UN slot, telle que --disque-ab la pose --
+# la charge utile d'une mise a jour (ce que `updated` ecrit dans le slot
+# inactif et que le manifeste signe nomme).
+"$BUILDER" --image-slot "$OUT/slot-a" "$OUT/system-slot.img"
 python3 tools/release/verify_trigkey_ab_image.py "$OUT" "$COMMIT"
 (cd "$OUT" && sha256sum disque-ab.img > disque-ab.img.sha256)
 echo "TRIGKEY_AB_BUILD_ONLY_OK commit=${COMMIT:0:12} image=$OUT/disque-ab.img PHYSICAL=NOT_RUN"

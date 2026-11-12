@@ -1,0 +1,207 @@
+# BOUCHAUD_RELEASE_V1 -- publication d'une release Trigkey SIGNEE, ou refus.
+#
+# Jamais automatique : ni push (pas meme sur main), ni pull_request, ni
+# planification. Seule une demande MANUELLE publie, et seulement :
+#   - depuis main, sur un SHA dont la qualification est verte (garde_release.py) ;
+#   - si une cle de production est ENGAGEE dans src/kernel/update/cles_production.rs
+#     (aujourd'hui : aucune -> toute publication est refusee, fail closed) ;
+#   - apres approbation de l'environnement protege `trigkey-testing`
+#     (reglage humain : relecteurs requis, branche main seulement) qui seul
+#     detient le secret BOUCHAUD_RELEASE_ED25519_PEM ;
+#   - sous une etiquette jamais vue (versions immuables, sequence monotone).
+# Une publication va TOUJOURS en `testing` (prerelease). `stable` n'est atteint
+# que par une PROMOTION explicite d'une release testing existante (aucune
+# nouvelle signature : les memes octets), approuvee via `trigkey-stable`.
+# Aucune cle de developpement ici (tools/verifie-cle-dev.py le verifie).
+# PHYSICAL=NOT_RUN : une release n'est pas une preuve sur le Trigkey.
+name: Trigkey release (manuelle, signee)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'publier (vers testing) ou promouvoir (testing -> stable)'
+        required: true
+        type: choice
+        options: [publier, promouvoir]
+      version:
+        description: 'publier : version (ex. 2026.11.12-1), jamais reutilisee'
+        required: false
+        type: string
+      sequence:
+        description: 'publier : sequence anti-retour, strictement croissante'
+        required: false
+        type: string
+      etiquette:
+        description: 'promouvoir : etiquette testing existante (trigkey-s<N>-<version>)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-trigkey
+  cancel-in-progress: false
+
+jobs:
+  garde:
+    name: release-trigkey / garde (sans secret)
+    if: inputs.action == 'publier'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      etiquette: ${{ steps.g.outputs.etiquette }}
+      precedente: ${{ steps.g.outputs.precedente }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Garde fail-closed (main, qualification au SHA exact, cle engagee, etiquette neuve)
+        id: g
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          set -euo pipefail
+          python3 tools/verifie-cle-dev.py
+          gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f head_sha="${GITHUB_SHA}" -f per_page=100 > "$RUNNER_TEMP/runs.json"
+          git tag -l 'trigkey-*' > "$RUNNER_TEMP/tags.txt"
+          sortie=$(python3 tools/release/garde_release.py publier --sha "$GITHUB_SHA" --ref "$GITHUB_REF" \
+            --version "$VERSION" --sequence "$SEQUENCE" --runs "$RUNNER_TEMP/runs.json" --tags "$RUNNER_TEMP/tags.txt")
+          echo "$sortie"
+          echo "etiquette=$(sed -n 's/.*etiquette=\([^ ]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
+          echo "precedente=$(sed -n 's/.*sequence_precedente=\([0-9]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
+
+  construit:
+    name: release-trigkey / image + preuve QEMU (sans secret)
+    needs: garde
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: OVMF + QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+      - name: Rust UEFI
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-uefi
+      - name: Image A/B + image de slot (aucune ecriture de peripherique)
+        run: bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
+      - name: Demarrage de CETTE image sous QEMU/OVMF (signal de sante reel)
+        run: bash tools/release/smoke_trigkey_ab_qemu.sh target/release-trigkey
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-trigkey-non-signee
+          path: |
+            target/release-trigkey/system-slot.img
+            target/release-trigkey/disque-ab.img
+            target/release-trigkey/disque-ab.img.sha256
+            target/release-trigkey/manifest-ab.json
+            target/release-trigkey/qemu-boot-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
+  signe:
+    name: release-trigkey / signature (environnement protege)
+    needs: [garde, construit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: trigkey-testing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-trigkey-non-signee
+          path: entree
+      - name: Signer (le secret ne vit que dans ce job, en fichier 0600 efface)
+        env:
+          CLE: ${{ secrets.BOUCHAUD_RELEASE_ED25519_PEM }}
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+          PRECEDENTE: ${{ needs.garde.outputs.precedente }}
+        run: |
+          set -euo pipefail
+          [ -n "$CLE" ] || { echo "RELEASE_REFUSEE raison=secret_absent (environnement trigkey-testing)" >&2; exit 2; }
+          umask 077
+          k="$RUNNER_TEMP/k.pem"
+          trap 'shred -u "$k" 2>/dev/null || rm -f "$k"' EXIT
+          printf '%s\n' "$CLE" > "$k"
+          prec=()
+          [ -z "$PRECEDENTE" ] || prec=(--sequence-precedente "$PRECEDENTE")
+          # Revue #306 : l'image publiee doit etre celle construite, pas une
+          # image modifiee par un essai. Verifiee AVANT de signer...
+          (cd entree && sha256sum -c disque-ab.img.sha256)
+          python3 tools/release/fabrique_release.py --image entree/system-slot.img --version "$VERSION" \
+            --sequence "$SEQUENCE" --canal testing --commit "$GITHUB_SHA" --sortie release "${prec[@]}" --cle "$k" \
+            --joint entree/disque-ab.img --joint entree/disque-ab.img.sha256 \
+            --joint entree/manifest-ab.json --joint entree/qemu-boot-evidence.json
+          cp entree/system-slot.img release/
+          # ... et l'ensemble (SHA256SUMS couvre tout, cle engagee) apres.
+          python3 tools/release/verifie_artefacts_release.py release --production
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-trigkey-signee
+          path: release
+          if-no-files-found: error
+          retention-days: 7
+
+  publie:
+    name: release-trigkey / publication testing (etiquette immuable)
+    needs: [garde, signe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-trigkey-signee
+          path: release
+      - name: Creer l'etiquette et la prerelease (refus si elle existe)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ETIQUETTE: ${{ needs.garde.outputs.etiquette }}
+        run: |
+          set -euo pipefail
+          if gh release view "$ETIQUETTE" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "RELEASE_REFUSEE raison=etiquette_existante $ETIQUETTE" >&2; exit 2
+          fi
+          # Rien n'est publie qui differe de ce qui a ete construit, essaye et signe.
+          python3 tools/release/verifie_artefacts_release.py release --production
+          gh release create "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "$ETIQUETTE (testing)" \
+            --notes "Canal testing. Commit $GITHUB_SHA. Manifeste v2 signe Ed25519 (release.json, SHA256SUMS). Preuve : QEMU/OVMF seulement -- PHYSICAL=NOT_RUN." \
+            release/*
+
+  promeut:
+    name: release-trigkey / promotion testing -> stable (memes octets)
+    if: inputs.action == 'promouvoir'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: trigkey-stable
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Promouvoir (aucune nouvelle signature)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ETIQUETTE: ${{ inputs.etiquette }}
+        run: |
+          set -euo pipefail
+          git tag -l 'trigkey-*' > "$RUNNER_TEMP/tags.txt"
+          pre=$(gh release view "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease 2>/dev/null || echo absente)
+          python3 tools/release/garde_release.py promouvoir --etiquette "$ETIQUETTE" --tags "$RUNNER_TEMP/tags.txt" --prerelease "$pre"
+          gh release edit "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --prerelease=false --latest --title "$ETIQUETTE (stable)"

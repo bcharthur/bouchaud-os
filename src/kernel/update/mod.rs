@@ -506,8 +506,39 @@ static CLES_DEV: [uc::manifeste::CleDeConfiance; 1] = [uc::manifeste::CleDeConfi
     developpement: true,
 }];
 
+#[path = "cles_production.rs"]
+mod cles_production;
+
+/// BOUCHAUD_CLES_PRODUCTION_V1: the production keys, decoded at COMPILE time
+/// (a malformed key fails the build; it never reaches a machine).
+const NB_PRODUCTION: usize = cles_production::CLES_PRODUCTION.len();
+static CLES_PRODUCTION: [uc::manifeste::CleDeConfiance; NB_PRODUCTION] =
+    decode_cles_production(cles_production::CLES_PRODUCTION);
+
+/// Bounded by the SLICE length (not a constant that may be 0: clippy's
+/// absurd_extreme_comparisons denies `i < 0`).
+const fn decode_cles_production<const N: usize>(source: &[(&'static str, &'static str)]) -> [uc::manifeste::CleDeConfiance; N] {
+    let mut t = [uc::manifeste::CleDeConfiance { nom: "", publique: [0; 32], developpement: false }; N];
+    let mut i = 0;
+    while i < source.len() {
+        let (nom, hex) = source[i];
+        t[i] = uc::manifeste::CleDeConfiance {
+            nom,
+            publique: match uc::manifeste::cle_hex(hex) {
+                Some(k) => k,
+                None => panic!("cles_production.rs: 64 lowercase hex chars expected"),
+            },
+            developpement: false,
+        };
+        i += 1;
+    }
+    t
+}
+
+/// The trusted keys: the production keys, and -- in a bench build only -- the
+/// bench key. A bench build never ships (verifie-cle-dev.py).
 pub fn cles_de_confiance() -> &'static [uc::manifeste::CleDeConfiance] {
-    if CLE_DEV.is_some() { &CLES_DEV } else { &[] }
+    if CLE_DEV.is_some() { &CLES_DEV } else { &CLES_PRODUCTION }
 }
 
 /// Printed once at boot: which release keys this system trusts.

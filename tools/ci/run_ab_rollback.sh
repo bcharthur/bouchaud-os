@@ -192,10 +192,15 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
     # The canonical manifest (system/update-core/src/manifeste.rs), signed.
     # BOUCHAUD_ANTI_RETOUR_V1: v2, release sequence RELEASE_SEQ, above the
     # anti-rollback floor seeded in META below (PLANCHER_INITIAL).
+    # BOUCHAUD_RELEASE_V1: produced by the RELEASE tool itself
+    # (tools/release/fabrique_release.py, bench key), so this bench also
+    # proves that what the release pipeline emits is what the kernel installs.
     manifeste_v2() {  # SORTIE SEQUENCE MATERIEL
-      printf 'bouchaud-manifeste-v2\nversion=bench-%s\nsequence=%s\nmateriel=%s\nimage_sha256=%s\nimage_octets=%s\nessais=3\n' \
-        "$(git rev-parse --short HEAD)" "$2" "$3" "$empreinte" "$octets" > "$1"
-      openssl pkeyutl -sign -rawin -inkey "$CLES/version.pem" -in "$1" -out "$1.sig"
+      local r="$OUT/release-$(basename "$1")"
+      python3 tools/release/fabrique_release.py --image "$OUT/system-b.img" --version "bench-$(git rev-parse --short HEAD)" \
+        --sequence "$2" --materiel "$3" --canal testing --commit "$(git rev-parse HEAD)" --sortie "$r" \
+        --cle-dev "$CLES/version.pem" >/dev/null || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
+      cp "$r/manifest" "$1"; cp "$r/manifest.sig" "$1.sig"
     }
     manifeste_v2 "$OUT/manifest" "$RELEASE_SEQ" x86_64-uefi
     # Two CORRECTLY SIGNED manifests the kernel must still refuse.
