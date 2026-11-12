@@ -65,7 +65,13 @@ fn sources() -> Vec<String> {
 
 fn telecharge(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
     let d = crate::net::fetch_document(url);
-    if !d.ok || d.body.is_empty() {
+    // `ok` means "an HTTP answer was parsed", NOT "200": a 404 page is a
+    // body too (found by the ota-verifie bench, source `absent`). Only the
+    // final status line counts.
+    let statut_200 = d.banner.iter().rev()
+        .find(|l| l.starts_with("HTTP/"))
+        .map_or(false, |l| l.split_whitespace().nth(1) == Some("200"));
+    if !d.ok || !statut_200 || d.body.is_empty() {
         return Err("injoignable");
     }
     if d.body.len() > max {
