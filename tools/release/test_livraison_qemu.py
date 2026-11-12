@@ -77,6 +77,40 @@ def tape(texte: str) -> list[str]:
     return [f"sendkey {t}" for t in touches] + ["sendkey ret"]
 
 
+# Les messages d'une VIOLATION de l'ordre des verrous (src/kernel/sync/lockdep.rs).
+# `[LOCKDEP] acquisitions=... violations=N` est la statistique PERIODIQUE : sa
+# presence n'est pas une faute (run 43267295327 : 16 controles OK, dont
+# Ladybird, rouges sur cette seule ligne) ; c'est `violations` qui juge.
+LOCKDEP_FATAL = ("LOCKDEP inversion", "LOCKDEP release without acquisition",
+                 "LOCKDEP non-LIFO release", "LOCKDEP stack overflow")
+LOCKDEP_STATS = re.compile(r"\[LOCKDEP\] acquisitions=\d+ violations=(\d+)")
+
+
+def controle_lockdep(b, texte: str) -> None:
+    """Toute statistique lockdep publiee doit compter ZERO violation."""
+    v = [int(x) for x in LOCKDEP_STATS.findall(texte)]
+    if v:
+        if not b.note(max(v) == 0, f"lockdep : 0 violation ({len(v)} releves, max={max(v)})"):
+            contexte(texte, "violations=" + str(max(v)))
+    else:
+        print("LIVRAISON_INFO lockdep : aucun releve periodique dans ce journal", flush=True)
+
+
+def contexte(texte: str, motif: str, n: int = 3, autour: int = 4) -> None:
+    """Les n premieres occurrences de `motif`, avec `autour` lignes de part et
+    d'autre, dans le journal du job : un controle rouge doit dire POURQUOI
+    sans exiger l'artefact (run 43263711449 : « LOCKDEP » sans panique)."""
+    lignes = texte.splitlines()
+    vus = 0
+    for i, l in enumerate(lignes):
+        if motif in l:
+            for j in range(max(0, i - autour), min(len(lignes), i + autour + 1)):
+                print(f"LIVRAISON_CONTEXTE {motif!r} {j + 1}: {lignes[j][:300]}", flush=True)
+            vus += 1
+            if vus >= n:
+                break
+
+
 class Banc:
     def __init__(self, out: Path, travail: Path):
         self.out, self.travail = out, travail
@@ -222,8 +256,10 @@ def main(argv: list[str]) -> int:
                     print("LIVRAISON_ABSENT Ladybird n'est pas embarque dans cette image (composants.txt)", flush=True)
                 time.sleep(5)
             texte = b.texte()
-            for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT", "LOCKDEP"):
-                b.note(x not in texte, f"aucune ligne « {x} »")
+            for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT") + LOCKDEP_FATAL:
+                if not b.note(x not in texte, f"aucune ligne « {x} »"):
+                    contexte(texte, x)
+            controle_lockdep(b, texte)
         finally:
             b.arrete()
         b.note(sha(out / "disque-ab.img") == attendu, "image de livraison inchangee (essai sur copie)")
