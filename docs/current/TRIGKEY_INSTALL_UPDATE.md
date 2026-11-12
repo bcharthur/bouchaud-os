@@ -24,7 +24,7 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 1 | Disposition ESP / META / SYS-A / SYS-B / RECOVERY | **FAIT** (image) | QEMU TCG/OVMF (`trigkey-ab-preflight`, `run_ab_rollback.sh`) |
 | 1 | Partition STATE | **FAIT** (image) | QEMU TCG/OVMF (`run_state_ab.sh`) |
 | 2 | Installateur SSD dédié (hôte Linux) | **FAIT**, jamais lancé sur un vrai disque | HOST (13 tests) + QEMU TCG/OVMF (`run_installe_ssd_qemu.sh`) |
-| 3 | Image physique unifiée | **PARTIEL** | voir ci-dessous |
+| 3 | Image de livraison unique (A/B + STATE, services, compositeur, DOOM, Ladybird, /etc, OTA stable) | **FAIT** ; Ladybird prouvé seulement dans le job CI qui a l'artefact | QEMU TCG/OVMF, image exacte, gestes réels (`test_livraison_qemu.py`) |
 | 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (31 tests, dont témoins négatifs) + QEMU TCG (banc A/B) |
 | 5 | Agent OTA : vérification signée périodique | **TRANCHE 1 FAITE** (vérifie, n'installe pas) | HOST (`test_ota.rs`) + QEMU TCG (`run_ab_rollback.sh ota-verifie`, serveur HTTP hôte) |
 | 5 | Agent OTA : téléchargement HTTPS, reprise, installation, redémarrage consenti, santé, rollback | **DÉMONTRÉ EN QEMU** (non qualifié en physique) | QEMU TCG (`run_ab_rollback.sh ota-complet` et `ota-rollback`) |
@@ -33,7 +33,7 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 7 | Rollback, recovery | **FAIT** | QEMU TCG (`run_ab_rollback.sh`, 11 scénarios) |
 | 8 | Persistance à travers coupures et changement de slot | **FAIT** | QEMU TCG/OVMF (`run_state_ab.sh` : A, A, B ; compteur 1, 2, 3) |
 | 9 | Réseau RTL8168, DHCP, DNS, TLS, horloge | **BLOCKED_PHYSICAL** | QEMU seulement (autres NIC) |
-| 10 | `bo-update` | **NON FAIT** | — |
+| 10 | `bo-update status|historique|verifier|consentir` (Terminal) | **FAIT** | compile, garde des commandes ; exécution QEMU : voir ci-dessous |
 | 11 | Qualification physique | **BLOCKED_PHYSICAL** | procédures ci-dessous |
 | 12 | Scripts Windows | **NON FAIT** | procédure manuelle ci-dessous |
 
@@ -70,9 +70,56 @@ Détail des lignes marquées « voir ci-dessous » :
     5. **Réparation** : compteur 3, l'état d'avant est intact.
   - La commande noyau historique `installer --go [--ecrase]` (ESP + SYSTEME, sans A/B, sans identité) **ne doit pas servir** pour le Trigkey.
   - **Jamais lancé sur un vrai disque** par cette session.
-- **Image physique unifiée (phase 3).**
-  - Les slots A/B portent le noyau et 4 services : serviced, healthd, updated et logd.
-  - Ils ne portent ni Ladybird, ni DOOM, ni le bureau.
+- **Image de livraison unique (phase 3, `BOUCHAUD_LIVRAISON_V1`).**
+  - **Une seule image** : `build_trigkey_ab_image.sh` (avec `BO_NATIF_LADYBIRD`). Le ramdisk de chaque slot est le système complet assemblé par `assemble_systeme.sh` :
+    - `serviced`, `healthd`, `updated`, `logd` ;
+    - `composited` ;
+    - DOOM (doomgeneric épinglé, Freedoom 0.13.0 vérifié) ;
+    - Ladybird et ses processus (artefact natif de la CI), avec ses certificats, ses polices et sa page d'accueil ;
+    - `/etc/bouchaud/version` (version, commit, séquence, canal) ;
+    - `/etc/bouchaud/ota.conf` : canal **stable**, téléchargement automatique, redémarrage **sur consentement** ;
+    - `/etc/bouchaud/composants` : ce qui est embarqué et ce qui manque. Sans Ladybird, l'image est marquée `livrable=non`.
+  - **Image de release.** Avec `BO_SEQUENCE > 0`, elle porte aussi son registre anti-retour (slot A = N, plancher N) : un système fraîchement installé ne se repropose pas sa propre release.
+  - **Test sur l'image exacte** (`test_livraison_qemu.py`).
+    - Il démarre une copie jetable sous QEMU/OVMF (NVMe, e1000) et utilise la **souris de QEMU**. La géométrie du bouton Démarrer et des lignes du menu est journalisée par l'Atelier lui-même.
+    - Il ouvre le Terminal, DOOM puis Ladybird par le menu Démarrer, et exige pour chacun la fenêtre, le processus ring 3 et la **première trame livrée**. Pour Ladybird, il exige aussi la première trame de son interface.
+    - Il exige enfin la santé des services, STATE montée, l'agent OTA actif, aucune panique, et l'image inchangée.
+    - Verdicts : `LIVRAISON_QEMU_OK` (livrable) ou `PARTIEL` (Ladybird absent, dit).
+    - Le job CI `ladybird / image Trigkey de livraison` le lance avec `--exige-ladybird`. Le workflow de release aussi : **une release sans Ladybird est refusée**.
+  - **Preuve locale** (sans l'artefact Ladybird) : bureau, Terminal (invite `root:/$`), DOOM (écran titre Freedoom), STATE, OTA, aucune panique. Verdict `LIVRAISON_QEMU_PARTIEL` honnête.
+
+## OTA actif sur l'image livrée (`BOUCHAUD_OTA_V1`)
+
+- **Configuration embarquée** : `/etc/bouchaud/ota.conf`.
+  - `canal=stable` ; la source est `releases/latest/download` du dépôt.
+  - `telechargement=consenti` : vérification, téléchargement et préparation du slot inactif sont **automatiques**.
+  - `redemarrage=demande` : **jamais** de redémarrage sans `bo-update consentir`.
+  - Option `redemarrage=fenetre:HH-HH:MIN` : redémarrage automatique entre HH et HH (UTC), seulement après MIN minutes **sans aucune entrée** clavier ou souris (au moins 5). Il n'y a jamais de redémarrage pendant une session active.
+- **Vérification** : au démarrage, **dès que le réseau a un bail** (sans délai d'abandon), quand il revient après une perte, toutes les 6 h, et à la demande (`bo-update verifier`).
+- **État persistant dans STATE.**
+  - `/persist/.bouchaud/ota-etat` contient : `version`, `commit`, `canal`, `slot_actif`, `release_slot_actif`, `release_slot_inactif`, `plancher`, `release_en_echec`, `dernier_demarrage`, `reseau`, `derniere_verification`, `dernier_telechargement`, `prochaine_installation`.
+  - `/persist/.bouchaud/ota-historique` garde les 50 dernières lignes : refus, installations refusées, candidat prêt, redémarrage et son consentement, **rollback** (lu dans la raison du chargeur).
+  - **Lecture** : `bo-update status` et `bo-update historique`, dans le Terminal de l'Atelier.
+  - **Écriture** : en RAMFS sous verrou, sans E/S. C'est l'écriture différée qui synchronise, et avant un redémarrage OTA, une synchronisation explicite.
+- **Canal `testing`** : non automatisé. GitHub n'offre pas d'URL « dernière prerelease », et un canal testing exige une étiquette précise. **BLOCKED** : à concevoir (pointeur de canal signé).
+
+## Incident intermittent `ota-complet` (non résolu, surveillé)
+
+- **L'échec.** `ab-rollback (ota-complet)` a échoué **une fois** en CI, au SHA ec0ea87, au démarrage 1 (verdict `A!`).
+- **Cause inconnue.** À ce SHA, la trap du serveur de banc écrasait celle qui lance le diagnostic (corrigé dans d993d63).
+- **Depuis** : succès en CI à d993d63 (×2), 6f44125 et `main@df30caa` ; 5 succès en local.
+- **Statut.** Ce n'est **pas** considéré comme résolu. Tout nouvel échec doit être diagnostiqué : les lignes `AB_DIAG` OTA, `updated` et HTTPS figurent désormais dans le journal du job.
+- **Nouvel indice** : `ota-rollback`, run 43301393229, SHA 260fc0c, même verdict `A!` au démarrage 1.
+  - Ce que montre `AB_DIAG` :
+    - la partie 13 attend 12,8 s puis revient vide ;
+    - les trois essais suivants reviennent vides en 3 s, **sans poignée TLS terminée** ;
+    - le téléchargement est refusé.
+  - **Cause probable**, côté banc :
+    - le serveur HTTPS de banc faisait sa poignée TLS dans sa boucle d'acceptation, sans délai ;
+    - une connexion figée bloquait donc toutes les suivantes ;
+    - le banc `ota-reseau`, avec sa coupure de lien, a reproduit ce blocage de façon déterministe.
+  - **Correction** : `tools/ci/serveur_ota_banc.py` fait la poignée dans le fil de chaque connexion, avec un délai de 60 s.
+  - **Statut inchangé** : ce n'est **pas** déclaré résolu tant que des runs ultérieurs n'ont pas été observés, et la cause du premier gel de connexion, côté invité, reste inconnue.
 
 ## Agent OTA, tranche 2 : de la release signée au slot actif (`BOUCHAUD_OTA_V1`)
 
@@ -245,17 +292,19 @@ Ces opérations sont à faire par toi, sur place.
    - Pendant `write`, pendant `finish`, et entre le commit A/B et le plancher.
    - Le système attendu est l'ancien ou le nouveau, jamais un état intermédiaire (prouvé en HOST et QEMU, pas en PHYSICAL).
 
-## Procédure Windows → Trigkey (aujourd'hui, manuelle)
+## Procédure Windows → Trigkey
 
-Les scripts `Build-`, `Test-`, `Prepare-TrigkeyUSB.ps1` et `Release-BouchaudOS.ps1` **n'existent pas encore**.
+La procédure complète est dans `TRIGKEY_PREMIERE_UTILISATION.md` : préparation du poste, clé de validation, installation sur SSD dédié, checklist physique, retour arrière, configuration GitHub, mise à jour au quotidien.
 
-1. RustRover : développer, pousser une branche, ouvrir une PR. La CI qualifie au SHA exact.
-2. Fusionner sur `main` quand tout est vert. Rien n'est publié à ce stade.
-3. Actions → « Trigkey release (manuelle, signée) » → `publier`, avec version et séquence.
-   - Tu approuves l'environnement `trigkey-testing`.
-   - Le workflow produit une prérelease `trigkey-s<N>-<version>`.
-4. Après essai : `promouvoir`, avec l'étiquette. Tu approuves l'environnement `trigkey-stable`.
-5. Côté Trigkey, l'agent qui télécharge et installe **n'existe pas encore** (phase 5).
+- **Scripts** (`tools/windows/`) :
+  - `Build-BouchaudOS.ps1`, `Test-BouchaudOS.ps1`, `Prepare-TrigkeyUSB.ps1`, `Release-BouchaudOS.ps1` ;
+  - ils orchestrent dans WSL 2 les mêmes outils Linux que la CI.
+- **Niveau de preuve** : **non qualifiés sur Windows**.
+  - La CI exécute sous `pwsh` les chemins de refus de `Prepare-TrigkeyUSB.ps1`, avec des disques simulés (`tools/ci/test-scripts-windows-trigkey.ps1`).
+  - Aucune écriture physique n'a été faite.
+- **Côté Trigkey** : l'agent OTA de l'image livrée vérifie, télécharge et prépare la release **stable**, puis attend `bo-update consentir`.
+  - Prouvé en QEMU seulement (`ota-complet`, `ota-rollback`, test de livraison).
+  - Rien n'est fait sur le matériel.
 
 ## Risques de perte de données
 

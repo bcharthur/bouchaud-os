@@ -47,34 +47,30 @@ for slot in a b; do
 done
 "$BUILDER" --charge-installation "$OUT/kernel-slot.elf" "$OUT/recovery"
 
-SDK=userland/libs/bouchaud-sdk/build-program.sh
-for name in serviced healthd updated logd; do
-  "$SDK" "$WORK/$name" "userland/services/$name/$name.c"
-done
-
-# Le ramdisk utilise le même tar USTAR déterministe que run_ab_rollback.sh.
-python3 - "$OUT" "$WORK" <<'PY'
-import io
-import sys
-import tarfile
-from pathlib import Path
-out, work = map(Path, sys.argv[1:3])
-for slot in ("a", "b"):
-    with tarfile.open(out / f"slot-{slot}" / "ramdisk", "w", format=tarfile.USTAR_FORMAT) as archive:
-        for name in ("serviced", "healthd", "updated", "logd"):
-            data = (work / name).read_bytes()
-            info = tarfile.TarInfo(f"bin/{name}")
-            info.size = len(data)
-            info.mtime = 0
-            info.mode = 0o755
-            archive.addfile(info, io.BytesIO(data))
-PY
+# BOUCHAUD_LIVRAISON_V1 : le ramdisk de chaque slot est le SYSTEME COMPLET
+# (tools/release/assemble_systeme.sh) : services, compositeur, DOOM, Ladybird
+# (si BO_NATIF_LADYBIRD designe l'artefact natif), /etc/bouchaud (version, OTA
+# stable). Sans Ladybird, l'image est construite mais declaree NON livrable.
+bash tools/release/assemble_systeme.sh "$WORK/systeme" ${BO_NATIF_LADYBIRD:+"$BO_NATIF_LADYBIRD"} | tee "$OUT/systeme.txt"
+# Tar USTAR deterministe (tools/release/tar_systeme.py) : le meme pour A et B.
+python3 tools/release/tar_systeme.py "$WORK/systeme" "$OUT/slot-a/ramdisk" "$OUT/slot-b/ramdisk"
+cp "$WORK/systeme/etc/bouchaud/composants" "$OUT/composants.txt"
 
 # Boot actif A connu bon, B sain mais non candidat ; pas de mise à jour fantôme.
 rustc +"$TOOLCHAIN" --edition 2021 -O tools/update/meta.rs -o "$WORK/meta"
 "$WORK/meta" a-bon "$OUT/meta.img"
 "$BUILDER" --disque-ab "$OUT/disque-ab.img" "$SHIM" "$OUT/meta.img" \
   "$OUT/slot-a" "$OUT/slot-b" "$OUT/recovery" > "$OUT/disposition.txt"
+# BOUCHAUD_LIVRAISON_V1 : une image de RELEASE (BO_SEQUENCE > 0) porte son
+# registre anti-retour : slot A = release N, plancher = N (META blocs 3-4,
+# encodeur independant d'update-core). Sans lui, un systeme fraichement
+# installe se croirait en release 0 et l'agent OTA lui reproposerait sa
+# propre release. Build de developpement (sequence 0) : registre vierge.
+if [ "${BO_SEQUENCE:-0}" -gt 0 ]; then
+  lba_meta=$(sed -n 's/.*nom=BOUCHAUD-META premier_lba=\([0-9]*\).*/\1/p' "$OUT/disposition.txt")
+  [ -n "$lba_meta" ] || { echo "TRIGKEY_AB_REFUSE meta_introuvable" >&2; exit 2; }
+  python3 tools/update/pose_anti_retour.py "$OUT/disque-ab.img" "$lba_meta" "$BO_SEQUENCE"
+fi
 # BOUCHAUD_RELEASE_V1 : l'image d'UN slot, telle que --disque-ab la pose --
 # la charge utile d'une mise a jour (ce que `updated` ecrit dans le slot
 # inactif et que le manifeste signe nomme).

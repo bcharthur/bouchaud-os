@@ -25,9 +25,9 @@ RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def scripts_suivis():
-    """Tous les .ps1 suivis par Git, chemins relatifs normalises."""
+    """Tous les .ps1 et .psm1 suivis par Git, chemins relatifs normalises."""
     sortie = subprocess.run(
-        ["git", "-C", RACINE, "ls-files", "*.ps1"],
+        ["git", "-C", RACINE, "ls-files", "*.ps1", "*.psm1"],
         capture_output=True,
         text=True,
         check=True,

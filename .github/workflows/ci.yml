@@ -296,10 +296,10 @@ jobs:
 
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git diff --name-only --diff-filter=ACMR \
-              "$BASE_SHA...$HEAD_SHA" -- '*.ps1' > .ci-powershell-files
+              "$BASE_SHA...$HEAD_SHA" -- '*.ps1' '*.psm1' > .ci-powershell-files
           else
             # Push main et workflow_dispatch restent des controles globaux.
-            git ls-files '*.ps1' > .ci-powershell-files
+            git ls-files '*.ps1' '*.psm1' > .ci-powershell-files
           fi
 
           echo "Scripts PowerShell a verifier :"
@@ -317,6 +317,13 @@ jobs:
       - name: Selection d'artefact Ladybird (execution)
         shell: pwsh
         run: ./tools/ci/test-selection-artefact.ps1
+
+      # BOUCHAUD_WINDOWS_V1 : les chemins de REFUS de Prepare-TrigkeyUSB.ps1,
+      # executes avec des disques simules (aucune ecriture sans identite exacte,
+      # cle USB, confirmation tapee).
+      - name: Scripts Windows Trigkey (execution des refus)
+        shell: pwsh
+        run: ./tools/ci/test-scripts-windows-trigkey.ps1
 
       - name: ASCII strict
         if: steps.ps1.outputs.count != '0'

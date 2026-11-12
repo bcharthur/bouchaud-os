@@ -77,25 +77,74 @@ jobs:
           echo "etiquette=$(sed -n 's/.*etiquette=\([^ ]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
           echo "precedente=$(sed -n 's/.*sequence_precedente=\([0-9]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
 
-  construit:
-    name: release-trigkey / image + preuve QEMU (sans secret)
+  # BOUCHAUD_LIVRAISON_V1 : le navigateur de la release vient de l'artefact
+  # natif de MEME empreinte que ce SHA -- selection par la provenance
+  # (tools/ci/ladybird_provenance.py attends, comme gpu-composition) : un
+  # artefact existant, ou la production deja en cours ; JAMAIS de
+  # declenchement d'une production ici. Rien dans le delai : release refusee.
+  ladybird-artefact:
+    name: release-trigkey / artefact Ladybird (selection stricte)
     needs: garde
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
+    outputs:
+      run_id: ${{ steps.lb.outputs.source_run }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: lb
+        name: Artefact de l'empreinte de ce SHA (refus s'il n'existe pas)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GRACE_ATTENTE: '300'
+          DELAI_ATTENTE: '1200'
+        run: python3 tools/ci/ladybird_provenance.py attends
+
+  construit:
+    name: release-trigkey / image + preuve QEMU (sans secret)
+    needs: [garde, ladybird-artefact]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: OVMF + QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf musl-tools build-essential binutils
       - name: Rust UEFI
         run: |
           rustup show active-toolchain
           rustup target add x86_64-unknown-uefi
-      - name: Image A/B + image de slot (aucune ecriture de peripherique)
-        run: bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
+      # BOUCHAUD_LIVRAISON_V1 : une release est l'image de LIVRAISON complete.
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          # Hors de l'arbre de travail : le build refuse un arbre sale.
+          path: ${{ runner.temp }}/native-browser
+          run-id: ${{ needs.ladybird-artefact.outputs.run_id }}
+          github-token: ${{ github.token }}
+      # Un artefact d'un AUTRE run : reverifie ici (binaires, ressources,
+      # entrees de build identiques a celles de HEAD), comme dans la CI.
+      - name: Verifier l'artefact Ladybird telecharge (liaison entrees)
+        run: tools/ci/verifie_artefact_ladybird.sh entrees "$RUNNER_TEMP/native-browser"
+      - name: Image de livraison (version et sequence de CETTE release ; aucune ecriture de peripherique)
+        env:
+          BO_VERSION: ${{ inputs.version }}
+          BO_SEQUENCE: ${{ inputs.sequence }}
+        run: BO_NATIF_LADYBIRD="$RUNNER_TEMP/native-browser" bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
       - name: Demarrage de CETTE image sous QEMU/OVMF (signal de sante reel)
         run: bash tools/release/smoke_trigkey_ab_qemu.sh target/release-trigkey
+      - name: CETTE image utilisee comme un humain (Terminal, DOOM, Ladybird) ; livrable exige
+        run: python3 tools/release/test_livraison_qemu.py target/release-trigkey --exige-ladybird
       - uses: actions/upload-artifact@v4
         with:
           name: release-trigkey-non-signee
@@ -105,6 +154,7 @@ jobs:
             target/release-trigkey/disque-ab.img.sha256
             target/release-trigkey/manifest-ab.json
             target/release-trigkey/qemu-boot-evidence.json
+            target/release-trigkey/livraison-evidence.json
           if-no-files-found: error
           retention-days: 7
 

@@ -795,6 +795,13 @@ impl Client {
 
                 self.etat = Etat::Actif;
                 self.trames += 1;
+                // BOUCHAUD_LIVRAISON_V1 : la PREMIERE trame qu'une application
+                // ring 3 livre a l'Atelier -- la preuve qu'elle affiche, pas
+                // seulement qu'elle est lancee.
+                if self.trames == 1 {
+                    crate::serial_println!("BOUCHAUD_ATELIER_CLIENT_PREMIERE_TRAME pid={} titre={} {}x{}",
+                        self.pid, self.titre, degat.largeur, degat.hauteur);
+                }
                 self.derniere_trame = crate::kernel::timer::ticks();
                 // La jauge lit l'horloge MONOTONE, pas le tick PIT. Sous TCG,
                 // IRQ0 est retardee precisement quand un vCPU sature le

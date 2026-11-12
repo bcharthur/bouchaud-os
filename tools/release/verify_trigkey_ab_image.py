@@ -21,11 +21,15 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 def check_tar(path: Path) -> dict[str, str]:
+    """BOUCHAUD_LIVRAISON_V1 : le ramdisk est le systeme complet ; les quatre
+    services critiques y sont EXIGES (le reste est decrit par composants)."""
     with tarfile.open(path, "r:") as archive:
         found = set(archive.getnames())
         expected = {f"bin/{name}" for name in SERVICES}
-        if found != expected or len(archive.getmembers()) != len(SERVICES):
-            raise ValueError(f"{path}: services invalides {sorted(found)}")
+        if not expected <= found:
+            raise ValueError(f"{path}: services critiques manquants {sorted(expected - found)}")
+        if any(n.startswith("/") or ".." in n.split("/") for n in found):
+            raise ValueError(f"{path}: chemin hors de la racine")
         digests: dict[str, str] = {}
         for name in SERVICES:
             member = archive.getmember(f"bin/{name}")
@@ -36,6 +40,13 @@ def check_tar(path: Path) -> dict[str, str]:
                 raise ValueError(f"{path}: {name} illisible")
             digests[name] = hashlib.sha256(source.read()).hexdigest()
         return digests
+
+def composants(out: Path) -> dict[str, str]:
+    p = out / "composants.txt"
+    if not p.is_file():
+        raise ValueError("composants.txt absent (assemble_systeme.sh)")
+    return dict(l.split("=", 1) for l in p.read_text().splitlines() if "=" in l)
+
 
 def verify(out: Path, commit: str) -> dict:
     if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
@@ -58,6 +69,8 @@ def verify(out: Path, commit: str) -> dict:
                   "bytes": (out / "disque-ab.img").stat().st_size},
         "kernel_elf": {"sha256": sha256(out / "kernel.elf")},
         "services_sha256": a,
+        "composants": composants(out),
+        "ramdisk_sha256": sha256(out / "slot-a" / "ramdisk"),
     }
 
 def main() -> int:

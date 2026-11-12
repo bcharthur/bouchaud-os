@@ -1946,6 +1946,44 @@ pub fn strace(argc: usize, argv: &[&str; 12]) {
 /// Sans argument, la commande ne fait que REGARDER. C'est le comportement par
 /// defaut le plus sur : la faute de frappe qui coute cher est celle qui lance
 /// une action destructrice, pas celle qui affiche un etat.
+/// BOUCHAUD_OTA_V1 -- `bo-update` : l'etat des mises a jour, et le
+/// consentement au redemarrage. Aucune autorite disque : l'installation reste
+/// celle d'`updated` (capacite UPDATE_INSTALL), verifiee par le noyau.
+pub fn bo_update(argc: usize, argv: &[&str; 12]) -> i32 {
+    match if argc >= 2 { argv[1] } else { "status" } {
+        "status" => {
+            let etat = crate::kernel::update::ota::etat_texte();
+            print!("{}", etat);
+            // Le meme resume sur la liaison serie : preuve et diagnostic.
+            let champ = |k: &str| etat.lines().find_map(|l| l.strip_prefix(&alloc::format!("{}=", k))).unwrap_or("?");
+            crate::serial_println!("BOUCHAUD_BO_UPDATE_STATUS version={} commit={} slot_actif={} canal={} prochaine_installation={}",
+                champ("version"), champ("commit"), champ("slot_actif"), champ("canal"), champ("prochaine_installation"));
+            match crate::kernel::update::meta_lecture() {
+                Ok((e, echecs)) => println!("meta_sequence={} actif={:?} slot_a={:?} slot_b={:?} echecs={}",
+                    e.sequence, e.actif, e.slot(bouchaud_update_core::Slot::A).etat,
+                    e.slot(bouchaud_update_core::Slot::B).etat, echecs),
+                Err(r) => println!("meta=illisible raison={}", r),
+            }
+            0
+        }
+        "historique" => { print!("{}", crate::kernel::update::ota::historique_texte()); 0 }
+        "verifier" => {
+            crate::kernel::update::ota::verifier_maintenant();
+            println!("bo-update : verification demandee (resultat : bo-update status)");
+            0
+        }
+        "consentir" => {
+            crate::kernel::update::ota::consentir();
+            println!("bo-update : redemarrage autorise vers la release preparee (s'il y en a une).");
+            0
+        }
+        _ => {
+            println!("usage : bo-update [status|historique|verifier|consentir]");
+            1
+        }
+    }
+}
+
 pub fn installer(argc: usize, argv: &[&str; 12]) -> i32 {
     let mut ecrase = false;
     let mut demande = false;
