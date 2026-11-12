@@ -18,7 +18,20 @@ pub fn zone_disponible() -> bool {
     debut().is_some()
 }
 
+/// Rendu par `synchronise` quand le montage de CE demarrage n'a pas restaure
+/// fidelement le disque (BOUCHAUD_MONTAGE_SAIN_V1) : ecrire le RAMFS
+/// remplacerait l'etat committe, intact sur le disque, par un etat vide ou
+/// partiel. Rien n'est ecrit ; le disque est preserve pour une reparation.
+pub const REFUS_MONTAGE_INCOMPLET: i64 = -3;
+
 pub fn synchronise() -> i64 {
+    if montage_refuse() {
+        if !REFUS_SIGNALE.swap(true, Ordering::Relaxed) {
+            crate::serial_println!(
+                "BOUCHAUD_PERSIST_SYNC_REFUSE raison=montage_incomplet consequence=disque_preserve");
+        }
+        return REFUS_MONTAGE_INCOMPLET;
+    }
     TX_CALLS.fetch_add(1, Ordering::Relaxed);
     let total_start = crate::kernel::timer::monotonic_ns();
     let _transaction = TRANSACTION.lock();

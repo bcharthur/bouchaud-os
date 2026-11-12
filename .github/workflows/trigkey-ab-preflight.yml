@@ -10,6 +10,17 @@ on:
       - 'tools/ci/reliability/test_trigkey_ab_*.py'
       - '.github/workflows/trigkey-ab-preflight.yml'
       - 'tools/reference/uefi-image-builder/**'
+      # BOUCHAUD_STATE_AB_V1 / BOUCHAUD_INSTALL_SSD_V1
+      - 'tools/ci/run_state_ab.sh'
+      - 'tools/ci/state_ab_verdict.py'
+      - 'tools/ci/run_installe_ssd_qemu.sh'
+      - 'tools/ci/reliability/test_state_ab_verdict.py'
+      - 'tools/ci/reliability/test_installe_ssd.py'
+      - 'tools/install/**'
+      - 'tools/update/meta.rs'
+      - 'src/fs/persistance/**'
+      - 'src/fs/persistance.rs'
+      - 'src/platform/pc/installation.rs'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +30,7 @@ jobs:
   qemu-ab-proof:
     name: trigkey / QEMU image A/B boot, non physique
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - name: Install OVMF + QEMU
@@ -34,6 +45,14 @@ jobs:
         run: bash tools/release/build_trigkey_ab_image.sh target/trigkey-ab-preflight
       - name: Boot SAME image under QEMU/OVMF, require real health signal
         run: bash tools/release/smoke_trigkey_ab_qemu.sh target/trigkey-ab-preflight
+      - name: STATE survit aux coupures et au changement de slot A -> B (copie de l'image)
+        run: |
+          python3 -m unittest tools/ci/reliability/test_state_ab_verdict.py -v
+          bash tools/ci/run_state_ab.sh target/trigkey-ab-preflight
+      - name: Installateur SSD (fichier, sysfs factice) puis demarrage du SSD installe
+        run: |
+          python3 -m unittest tools/ci/reliability/test_installe_ssd.py -v
+          bash tools/ci/run_installe_ssd_qemu.sh target/trigkey-ab-preflight
       - name: Collect reproducible proof without uploading the large disk image
         if: always()
         uses: actions/upload-artifact@v4
@@ -44,5 +63,8 @@ jobs:
             target/trigkey-ab-preflight/disque-ab.img.sha256
             target/trigkey-ab-preflight/qemu-boot-evidence.json
             target/trigkey-ab-preflight/boot-qemu.log
+            target/trigkey-ab-preflight/state-boot-*.log
+            target/trigkey-ab-preflight/ssd-boot-*.log
+            target/trigkey-ab-preflight/installe-ssd.log
           if-no-files-found: warn
           retention-days: 14

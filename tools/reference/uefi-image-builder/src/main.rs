@@ -220,6 +220,12 @@ const GUID_META: &str = "B0DC8A5D-0002-4B0D-9E21-424F55434844";
 const GUID_SLOT_A: &str = "B0DC8A5D-0003-4B0D-9E21-424F55434844";
 const GUID_SLOT_B: &str = "B0DC8A5D-0004-4B0D-9E21-424F55434844";
 const GUID_RECOVERY: &str = "B0DC8A5D-0005-4B0D-9E21-424F55434844";
+/// BOUCHAUD_STATE_AB_V1 : la partition des donnees utilisateur. MEME type que
+/// la partition systeme de l'installateur historique (src/fs/gpt.rs,
+/// TYPE_SYSTEME_BOUCHAUD) : le noyau la monte comme volume persistant
+/// (`installation::monte_le_systeme_installe`). Une mise a jour reecrit un
+/// slot, jamais elle.
+const GUID_STATE: &str = "B0DC8A5D-0001-4B0D-9E21-424F55434844";
 
 fn fat_depuis(fichiers: &[(&str, &Path)], sortie: &Path) -> Result<u64, Box<dyn Error>> {
     let mut besoin = 0u64;
@@ -284,6 +290,19 @@ fn cree_disque_ab(sortie: &Path, shim: &Path, meta: &Path, charge_a: &Path, char
     if charge_r.is_some() {
         parts.push(("BOUCHAUD-RECOVERY", &sr, gpt::partition_types::Type { guid: GUID_RECOVERY, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }));
     }
+    // BOUCHAUD_STATE_AB_V1 : STATE optionnelle (BO_AB_STATE_MIO), DERNIERE
+    // partition, laissee a ZERO (fichier creux) : un volume tout a zero est
+    // une zone persistante vide que le premier `sync` formate.
+    let st = temp.path().join("state.img");
+    let state_mio: u64 = match env::var("BO_AB_STATE_MIO") {
+        Ok(v) => v.parse().map_err(|_| "BO_AB_STATE_MIO : entier attendu")?,
+        Err(_) => 0,
+    };
+    if state_mio > 0 {
+        if state_mio < 160 { return Err("BO_AB_STATE_MIO >= 160 (zone persistante de 128 Mio + en-tetes)".into()); }
+        File::create(&st)?.set_len(state_mio * MIB)?;
+        parts.push(("BOUCHAUD-STATE", &st, gpt::partition_types::Type { guid: GUID_STATE, os: gpt::partition_types::OperatingSystem::Custom("Bouchaud".into()) }));
+    }
     let mut total = 2 * MIB;
     for (_, f, _) in &parts { total += round_up_mib(fs::metadata(f)?.len()) + MIB; }
     let mut disque = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(sortie)?;
@@ -305,8 +324,11 @@ fn cree_disque_ab(sortie: &Path, shim: &Path, meta: &Path, charge_a: &Path, char
     }
     table.write()?;
     for ((nom, f, _), (lba, debut)) in parts.iter().zip(debuts) {
-        disque.seek(io::SeekFrom::Start(debut))?;
-        io::copy(&mut File::open(f)?, &mut disque)?;
+        // STATE : le disque vient d'etre cree a la bonne taille, donc a zero.
+        if *nom != "BOUCHAUD-STATE" {
+            disque.seek(io::SeekFrom::Start(debut))?;
+            io::copy(&mut File::open(f)?, &mut disque)?;
+        }
         println!("BOUCHAUD_AB_PARTITION nom={nom} premier_lba={lba} octets={}", fs::metadata(f)?.len());
     }
     println!("BOUCHAUD_DISQUE_AB_OK {}", sortie.display());

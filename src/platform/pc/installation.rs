@@ -797,8 +797,75 @@ pub fn execute_le_montage_differe() -> bool {
         restaures
     );
     crate::kernel::dmesg::log("nvme: persistance montee apres l'arrivee au bureau");
+    // BOUCHAUD_MONTAGE_SAIN_V1 : on ne touche a /persist (ni compteur, ni
+    // synchronisation) qu'apres un montage FIDELE -- volume neuf ou
+    // restauration complete. Sinon le disque reste tel quel, en lecture seule
+    // pour ce demarrage (persistance::synchronise le refuse aussi).
+    use crate::fs::persistance::EtatMontage;
+    match crate::fs::persistance::etat_montage() {
+        e @ (EtatMontage::Neuf | EtatMontage::Restaure) => {
+            crate::serial_println!("BOUCHAUD_PERSIST_MONTAGE etat={} fichiers={}",
+                if e == EtatMontage::Neuf { "neuf" } else { "restaure" }, restaures);
+            compte_le_demarrage();
+        }
+        EtatMontage::Echec(raison) => crate::serial_println!(
+            "BOUCHAUD_PERSIST_MONTAGE etat=echec raison={} fichiers={} consequence=lecture_seule compteur=non",
+            raison, restaures),
+        autre => crate::serial_println!("BOUCHAUD_PERSIST_MONTAGE etat={:?} compteur=non", autre),
+    }
     crate::fs::ecriture_differee::demarre();
     true
+}
+
+/// Chemin du compteur de demarrages d'un systeme installe.
+pub const COMPTEUR_DEMARRAGES: &str = "/persist/.bouchaud/demarrages";
+
+/// BOUCHAUD_STATE_AB_V1 : chaque demarrage d'un systeme INSTALLE incremente
+/// un compteur persistant, puis le synchronise.
+///
+/// C'est un historique utile en soi (combien de demarrages ce disque a-t-il
+/// vus, depuis quel slot), et c'est surtout le TEMOIN que la partition des
+/// donnees survit : a l'extinction, a une coupure, et a un changement de slot
+/// A/B -- une mise a jour reecrit un slot, jamais STATE. Un compteur qui
+/// repart a 1 apres une mise a jour est une perte de donnees, et elle se lit
+/// dans le journal (`tools/ci/run_state_ab.sh` l'exige).
+fn compte_le_demarrage() {
+    // Sous le verrou du RAMFS : aucune E/S, aucune sortie console.
+    let lu: Result<(u64, bool), &'static str> = (|| {
+        let mut fs = crate::fs::ramfs::fs();
+        let racine = fs.resolve("/persist", 0).ok_or("persist-absent")?;
+        let dossier = match fs.find_child(racine, ".bouchaud") {
+            Some(d) => d,
+            None => fs.mkdir_at(racine, ".bouchaud")?,
+        };
+        let fichier = fs.touch_at(dossier, "demarrages")?;
+        // Illisible -> 0 et on le DIT : jamais un compteur invente.
+        let lu = core::str::from_utf8(&fs.nodes[fichier].content).ok()
+            .and_then(|t| t.trim().parse::<u64>().ok());
+        let illisible = lu.is_none() && !fs.nodes[fichier].content.is_empty();
+        let n = lu.unwrap_or(0).saturating_add(1);
+        fs.write_node(fichier, &alloc::format!("{}\n", n));
+        Ok((n, illisible))
+    })();
+    let n = match lu {
+        Ok((n, illisible)) => {
+            if illisible {
+                crate::serial_println!("BOUCHAUD_PERSIST_DEMARRAGES avertissement=compteur-illisible");
+            }
+            n
+        }
+        Err(e) => {
+            crate::serial_println!("BOUCHAUD_PERSIST_DEMARRAGES erreur={}", e);
+            return;
+        }
+    };
+    let rc = crate::fs::persistance::synchronise();
+    let slot = match crate::kernel::update::passage().map(|p| p.slot) {
+        Some(bouchaud_update_core::Slot::A) => "A",
+        Some(bouchaud_update_core::Slot::B) => "B",
+        None => "-",
+    };
+    crate::serial_println!("BOUCHAUD_PERSIST_DEMARRAGES n={} slot={} sync={}", n, slot, rc);
 }
 
 /// Le disque interne porte-t-il un GUID de partition ESP a nous ?
