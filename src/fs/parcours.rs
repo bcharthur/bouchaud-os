@@ -177,3 +177,102 @@ pub fn parcours<A: Arbre>(a: &A, depart: usize, filtre: Option<&str>, octets_max
     }
     r
 }
+
+// --- `tree` (BOUCHAUD_TREE_ITERATIF_V1) ---------------------------------------
+
+/// Une ligne de `tree`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ligne {
+    pub profondeur: usize,
+    pub nom: String,
+    pub dossier: bool,
+    /// Ligne « permission refusee » : le contenu d'un repertoire illisible.
+    pub refuse: bool,
+}
+
+/// Indentation affichee au plus : au-dela, la profondeur est ECRITE au lieu
+/// d'etre dessinee. L'ancien `tree` indentait chaque niveau (un `print!` par
+/// niveau !) : 15 Mo de console pour 3 860 niveaux, plus de 180 s sous KVM.
+pub const INDENTATION_MAX: usize = 32;
+
+/// Le debut d'une ligne de `tree` a `profondeur` : lineaire en la profondeur
+/// jusqu'a `INDENTATION_MAX`, borne au-dela.
+pub fn prefixe(profondeur: usize) -> String {
+    let mut s = String::new();
+    for _ in 0..profondeur.min(INDENTATION_MAX) {
+        s.push_str("  ");
+    }
+    if profondeur > INDENTATION_MAX {
+        s.push_str(&alloc::format!("[niveau {}] ", profondeur));
+    }
+    s
+}
+
+/// Les lignes de `tree` sous `depart`, dans l'ordre de l'ancien `tree`
+/// (prefixe, enfants par indice croissant). Iteratif, chaque noeud vu une
+/// fois ; on ne descend que dans les repertoires lisibles et traversables, les
+/// autres donnent une ligne `refuse`. Au plus `lignes_max` lignes (`true` :
+/// tronque).
+pub fn lignes_arbre<A: Arbre>(a: &A, depart: usize, lignes_max: usize) -> (Vec<Ligne>, bool) {
+    let n = a.taille();
+    let mut lignes = Vec::new();
+    if depart >= n || !a.utilise(depart) || !a.dossier(depart) {
+        return (lignes, false);
+    }
+    if !a.lisible(depart) {
+        lignes.push(Ligne { profondeur: 0, nom: String::new(), dossier: false, refuse: true });
+        return (lignes, false);
+    }
+    let mut compte = vec![0u32; n + 1];
+    for i in 1..n {
+        if a.utilise(i) && a.parent(i) < n {
+            compte[a.parent(i) + 1] += 1;
+        }
+    }
+    for p in 0..n {
+        compte[p + 1] += compte[p];
+    }
+    let mut enfants = vec![0u32; compte[n] as usize];
+    let mut pose = compte.clone();
+    for i in 1..n {
+        if a.utilise(i) && a.parent(i) < n {
+            let p = a.parent(i);
+            enfants[pose[p] as usize] = i as u32;
+            pose[p] += 1;
+        }
+    }
+    let mut vu = vec![false; n];
+    vu[depart] = true;
+    // (noeud, prochain enfant, profondeur de ses enfants)
+    let mut pile: Vec<(usize, usize, usize)> = vec![(depart, compte[depart] as usize, 0)];
+    loop {
+        let Some(sommet) = pile.last_mut() else { break };
+        let (p, d) = (sommet.0, sommet.2);
+        if sommet.1 >= compte[p + 1] as usize {
+            pile.pop();
+            continue;
+        }
+        let e = enfants[sommet.1] as usize;
+        sommet.1 += 1;
+        if vu[e] {
+            continue;
+        }
+        vu[e] = true;
+        if lignes.len() >= lignes_max {
+            return (lignes, true);
+        }
+        let dossier = a.dossier(e);
+        lignes.push(Ligne { profondeur: d, nom: String::from(a.nom(e)), dossier, refuse: false });
+        if dossier {
+            if a.lisible(e) {
+                pile.push((e, compte[e] as usize, d + 1));
+            } else {
+                if lignes.len() >= lignes_max {
+                    return (lignes, true);
+                }
+                lignes.push(Ligne { profondeur: d + 1, nom: String::new(), dossier: false, refuse: true });
+            }
+        }
+    }
+    (lignes, false)
+}

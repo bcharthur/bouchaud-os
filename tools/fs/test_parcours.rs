@@ -207,3 +207,52 @@ fn les_refus_comptent_dans_le_budget() {
     let r = parcours(&f, p + 1, None, 10);
     assert!(r.tronque && r.refus.is_empty());
 }
+
+// --- tree (BOUCHAUD_TREE_ITERATIF_V1) -----------------------------------------
+
+fn rendu(f: &Faux, depart: usize) -> Vec<String> {
+    lignes_arbre(f, depart, 1 << 20).0.iter().map(|l| {
+        if l.refuse { format!("{}|- [permission denied]", prefixe(l.profondeur)) }
+        else if l.dossier { format!("{}|- {}/", prefixe(l.profondeur), l.nom) }
+        else { format!("{}|- {}", prefixe(l.profondeur), l.nom) }
+    }).collect()
+}
+
+#[test]
+fn tree_ordre_et_format_de_l_ancien_tree() {
+    let mut f = etc();
+    f.0[7].lisible = false; // /home/arthur
+    assert_eq!(rendu(&f, 0), [
+        "|- etc/", "  |- hosts", "  |- passwd", "  |- ssl/", "    |- certs/",
+        "|- home/", "  |- arthur/", "    |- [permission denied]",
+    ]);
+    assert!(rendu(&f, 2).is_empty(), "un fichier : rien sous lui");
+    assert_eq!(rendu(&f, 7), ["|- [permission denied]"], "depart illisible");
+}
+
+#[test]
+fn tree_profond_sortie_lineaire_sans_recursion() {
+    let mut f = Faux::neuf();
+    let mut p = 0;
+    for _ in 0..100_000 {
+        p = f.ajoute(p, "z", true);
+    }
+    let lignes = rendu(&f, 0);
+    assert_eq!(lignes.len(), 100_000);
+    let octets: usize = lignes.iter().map(|l| l.len() + 1).sum();
+    // Indentation bornee : environ 2*32 + 20 octets par ligne, pas 2*profondeur.
+    assert!(octets < 100_000 * 100, "{octets}");
+    assert_eq!(lignes[40], format!("{}[niveau 40] |- z/", "  ".repeat(INDENTATION_MAX)));
+}
+
+#[test]
+fn tree_borne_et_cycles() {
+    let mut f = Faux::neuf();
+    let d = f.ajoute(0, "d", true);
+    for k in 0..100 { f.ajoute(d, &format!("{k}"), false); }
+    let (l, tronque) = lignes_arbre(&f, 0, 10);
+    assert!(tronque && l.len() == 10);
+    let mut g = etc();
+    g.0[4].parent = 5; g.0[5].parent = 4; // cycle ssl <-> certs
+    assert!(lignes_arbre(&g, 0, 1 << 20).0.len() <= g.taille());
+}

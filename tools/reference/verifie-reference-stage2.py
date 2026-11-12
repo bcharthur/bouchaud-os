@@ -381,17 +381,22 @@ req("PRESENTS_COPIES.fetch_add" in gfx
     "accounting GOP damage incomplet")
 
 # --- Contrat de cloture Stage 2 : shell graphique robuste --------------------
-req("BOUCHAUD_STAGE2_TREE_LOCK_SAFE" in commands,
+req("BOUCHAUD_STAGE2_TREE_LOCK_SAFE" in commands and "BOUCHAUD_TREE_ITERATIF_V1" in commands,
     "correctif tree/VFS absent")
+# BOUCHAUD_TREE_ITERATIF_V1 remplace la recursion par un parcours pur et
+# iteratif ; l'invariant garde est le meme, renforce : le verrou VFS est pris
+# UNE fois, dans un bloc, pour un instantane, et rendu AVANT toute impression.
 tree_body = function_body(commands, "pub fn tree(")
-tree_rec_body = function_body(commands, "fn tree_rec(")
-req(tree_body and tree_rec_body, "tree/tree_rec introuvable")
-req("let idx = {" in tree_body and "tree_rec(idx, 0);" in tree_body,
-    "tree ne relache pas explicitement le VFS avant recursion")
-req("Vec<(usize, bool, String)>" in tree_rec_body,
-    "tree_rec ne snapshotte pas les enfants avant recursion")
-req("tree_rec(child, depth + 1);" in tree_rec_body,
-    "recursion tree absente")
+req(tree_body, "tree introuvable")
+debut = tree_body.find("let resultat = {")
+fin = tree_body.find("\n    };", debut)
+req(debut >= 0 and fin > debut and "lignes_arbre(" in tree_body[debut:fin],
+    "tree ne releve pas son instantane sous un seul verrou")
+req(tree_body.count("ramfs::fs()") == 1 and "ramfs::fs()" in tree_body[debut:fin],
+    "tree reprend le verrou VFS hors du bloc d'instantane")
+req("println!" not in tree_body[debut:fin] and "print!" not in tree_body[debut:fin],
+    "tree imprime sous le verrou VFS")
+req("fn tree_rec(" not in commands, "tree redevenu recursif")
 
 
 # --- Contrat Stage 2 FINAL V2 : image et runner Ladybird ---------------------

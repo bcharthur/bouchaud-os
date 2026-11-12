@@ -147,7 +147,11 @@ def scenario_commandes() -> tuple[list[str], list[Etape]]:
               toutes=r"^(tour|run: /r\.sh: imbrication trop profonde \(max 8\))$"),
         Etape("run-inexistant", "run /pas/de/script", attendus=[r"^run: /pas/de/script: introuvable$"], lignes=1),
         Etape("run-dossier", "run /etc", attendus=[r"^run: /etc: pas un fichier$"], lignes=1),
-        Etape("tree-profond", "tree /tmp/gouffre", budget_s=180, attendus=[r"^/tmp/gouffre$"]),
+        # BOUCHAUD_TREE_ITERATIF_V1 : une ligne par niveau, indentation bornee ;
+        # avant, 1 print! par niveau et une sortie quadratique (TIMEOUT sous KVM).
+        Etape("tree-profond", "tree /tmp/gouffre", budget_s=180, lignes=PROFONDEUR_TREE + 1,
+              attendus=[r"^/tmp/gouffre$", r"^ {64}\[niveau 1499\] \|- y/$"]),
+        Etape("tree-inexistant", "tree /chemin/inexistant", attendus=[r"^tree: /chemin/inexistant: introuvable$"], lignes=1),
         Etape("ls-large", "ls /arbre/large", lignes=LARGEUR, toutes=r"^f[0-9]{4}"),
         Etape("ls-inexistant", "ls /chemin/inexistant", attendus=[r"^ls: introuvable$"], lignes=1),
         Etape("cat-inexistant", "cat /chemin/inexistant", attendus=[r"^cat: introuvable$"], lignes=1),
