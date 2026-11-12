@@ -390,7 +390,18 @@ port, racine, cert, cle = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.minimum_version = ssl.TLSVersion.TLSv1_3
 ctx.load_cert_chain(cert, cle)
+COUPE = {"fait": False}
 class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        # Temoin de REPRISE : la premiere demande de la partie 5 est coupee
+        # sans reponse (une connexion qui meurt en route). L'agent doit
+        # reprendre CETTE partie, et garder les autres.
+        if self.path.endswith("/system-slot.img.part005") and not COUPE["fait"]:
+            COUPE["fait"] = True
+            sys.stderr.write("HTTPS COUPURE_VOLONTAIRE %s\n" % self.path); sys.stderr.flush()
+            self.close_connection = True
+            return
+        return super().do_GET()
     def log_message(self, fmt, *a):
         sys.stderr.write("HTTPS %s %s\n" % (self.request.version(), fmt % a)); sys.stderr.flush()
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(H, directory=racine))
@@ -606,6 +617,10 @@ if [ "$OTA_COMPLET" = 1 ]; then
     grep -aF "$m" <<< "$b1" >/dev/null || echec "boot=1 marqueur_absent=$m"
   done
   [ "$(grep -ac 'BOUCHAUD_OTA_PARTIE n=' <<< "$b1")" = "$NB_PARTIES" ] || echec "boot=1 raison=nombre_de_parties"
+  # La coupure volontaire a eu lieu, et la partie 5 a ete REPRISE.
+  grep -q "COUPURE_VOLONTAIRE /rel/system-slot.img.part005" "$OUT/https.log" || echec "raison=temoin_de_coupure_absent"
+  grep -aE "BOUCHAUD_OTA_REPRISE url=https://10.0.2.2:$PORT_OTA/rel/system-slot.img.part005 essai=[2-4] resultat=ok" <<< "$b1" >/dev/null \
+    || echec "boot=1 raison=partie_5_non_reprise"
   grep -q "HTTPS TLSv1.3 .*GET /rel/system-slot.img.part000" "$OUT/https.log" || echec "raison=telechargement_non_https"
   if [ "$SCENARIO" = ota-complet ]; then
     b2=$(P 2); b3=$(P 3)
