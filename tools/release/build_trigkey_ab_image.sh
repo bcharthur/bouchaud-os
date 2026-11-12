@@ -11,6 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:?usage: build_trigkey_ab_image.sh OUT_DIR}
+# BOUCHAUD_STATE_AB_V1 : partition des donnees utilisateur (Mio). Un disque
+# installe la garde a travers toutes les mises a jour (tools/ci/run_state_ab.sh).
+export BO_AB_STATE_MIO=${BO_AB_STATE_MIO:-256}
 [ -z "$(git status --porcelain --untracked-files=normal)" ] || {
   echo "TRIGKEY_AB_REFUSE arbre_sale : committer les changements d'abord" >&2; exit 2;
 }

@@ -8,13 +8,22 @@ pub fn monte() -> usize {
     // empreinte tiree d'une lecture ne prouverait donc pas ce que le disque
     // porte apres coup.
     oublie_le_disque();
-    let mut systeme = fs();
-    let racine = match systeme.resolve(RACINE, 0) {
-        Some(idx) => idx,
-        None => match systeme.mkdir_at(0, "persist") {
-            Ok(idx) => idx,
-            Err(_) => return 0,
-        },
+    // BOUCHAUD_STATE_AB_V1 : le verrou du RAMFS (rang 50, un verrou TOURNANT)
+    // n'est JAMAIS tenu pendant une entree-sortie. Sur NVMe -- la partition
+    // STATE d'un systeme installe --, une lecture attend en cedant le
+    // processeur : la tenir sous ce verrou est une inversion que LOCKDEP
+    // transforme en panique (banc run_state_ab.sh, premier montage). Le disque
+    // est donc LU d'abord, sans verrou ; le verrou n'est pris qu'ensuite, pour
+    // deposer, sans aucune E/S.
+    let racine = {
+        let mut systeme = fs();
+        match systeme.resolve(RACINE, 0) {
+            Some(idx) => idx,
+            None => match systeme.mkdir_at(0, "persist") {
+                Ok(idx) => idx,
+                Err(_) => return 0,
+            },
+        }
     };
 
     let base = match debut() {
@@ -98,7 +107,9 @@ pub fn monte() -> usize {
         }
     }
 
-    let mut restaures = 0usize;
+    // 1. LIRE, sans verrou : (chemin, meta, contenu ; None = dossier ou
+    //    lecture echouee, comme avant).
+    let mut lus: Vec<(String, Option<Meta>, Option<Vec<u8>>, bool)> = Vec::new();
     let mut secteur = premier_contenu;
     for index in 0..nombre {
         let debut_entree = index * TAILLE_ENTREE;
@@ -111,16 +122,30 @@ pub fn monte() -> usize {
         let meta = Meta::decode(&brut[DEBUT_META..TAILLE_ENTREE]);
 
         if a_restaurer(&chemin, taille, meta) {
-            let noeud = if meta.map_or(false, |m| m.dossier) {
-                dossier_sous_garde(&mut systeme, racine, &chemin)
+            if meta.map_or(false, |m| m.dossier) {
+                lus.push((chemin, meta, None, true));
             } else {
                 let mut tampon = vec![0u8; (secteurs as usize) * SECTOR_SIZE];
                 if volume_lit(secteur, secteurs as usize, &mut tampon) == secteurs as usize {
                     tampon.truncate(taille);
-                    depose_noeud_sous_garde(&mut systeme, racine, &chemin, &tampon)
-                } else {
-                    None
+                    lus.push((chemin, meta, Some(tampon), false));
                 }
+            }
+        }
+        secteur += secteurs;
+    }
+
+    // 2. DEPOSER, sous verrou, sans E/S.
+    let mut restaures = 0usize;
+    {
+        let mut systeme = fs();
+        for (chemin, meta, contenu, dossier) in &lus {
+            let noeud = if *dossier {
+                dossier_sous_garde(&mut systeme, racine, chemin)
+            } else if let Some(tampon) = contenu {
+                depose_noeud_sous_garde(&mut systeme, racine, chemin, tampon)
+            } else {
+                None
             };
             if let Some(idx) = noeud {
                 if let Some(m) = meta {
@@ -131,7 +156,6 @@ pub fn monte() -> usize {
                 restaures += 1;
             }
         }
-        secteur += secteurs;
     }
 
     // L'ETENDUE de l'etat V1, retenue pour que la premiere ecriture V2 ne la

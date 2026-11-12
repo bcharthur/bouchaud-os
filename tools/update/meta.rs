@@ -43,6 +43,13 @@ fn main() {
             let ok = apres.sante_ok(Slot::B);
             ok.revient().unwrap()
         }
+        // BOUCHAUD_STATE_AB_V1 : B installe, demarre et CONFIRME -- l'etat
+        // reel apres une mise a jour reussie (B actif, A ancienne version).
+        "b-actif" => {
+            let c = candidat(1);
+            let (_, apres) = c.choisit_boot();
+            apres.sante_ok(Slot::B)
+        }
         s if s.starts_with("b-candidat:") => candidat(s[11..].parse().expect("N")),
         s if s.starts_with("corrompu:") => {
             match &s[9..] { "0" => corrompre.push(0), "1" => corrompre.push(1),
