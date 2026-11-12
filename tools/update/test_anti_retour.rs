@@ -138,6 +138,19 @@ fn coupure_entre_commit_ab_et_plancher_reparee_au_boot_suivant() {
     assert!(apres.sequence > r.sequence);
 }
 
+#[test]
+fn finish_reverifie_un_plancher_monte_depuis_begin() {
+    // Review #305: A runs release 12, its floor write was lost (floor 10).
+    let r = Registre { sequence: 5, plancher: 10, slots: [12, 10] };
+    // begin of signed release 11 passes against the stale floor...
+    assert_eq!(autorise(Lecture::Valide(r), 11), Ok(r));
+    // ...then the confirmed boot repairs the floor to 12 while B is written...
+    let repare = r.confirme(Slot::A).unwrap();
+    assert_eq!(repare.plancher, 12);
+    // ...so finish, which checks again (kernel::update), refuses release 11.
+    assert_eq!(autorise(Lecture::Valide(repare), 11), Err(Refus::Retrograde));
+}
+
 // --- Manifest v2 -------------------------------------------------------------
 
 const H: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";

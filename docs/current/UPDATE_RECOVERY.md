@@ -177,13 +177,14 @@ Lecture :
 
 Politique :
 - `begin` refuse une release dont la séquence est inférieure au plancher (`version_retrograde`). Il refuse aussi une v1 dès qu'un plancher existe (`manifeste_sans_sequence`). Réinstaller la même release reste permis, pour une réparation.
-- `finish` enregistre la release du slot cible **avant** de le marquer candidat.
+- `finish` **revérifie** le plancher : un commit de santé a pu l'élever depuis `begin` (revue #305). Puis il enregistre la release du slot cible **avant** de le marquer candidat.
+- Le commit de santé prend le **même verrou** (`SERIALISE`) que `begin`, `write`, `verify` et `finish`, pour toute la lecture-modification-écriture de META. Un `finish` en vol ne peut donc pas réécrire un registre lu avant que le plancher monte.
 - Le **commit de santé** élève le plancher à la release du slot qui tourne. Il ne le fait jamais descendre et il est idempotent : une coupure entre le commit A/B et l'écriture du plancher est réparée au prochain démarrage confirmé.
 - Le **rollback local** (A/B ou `rollback --confirme`) n'est pas affecté.
 
 ### Preuves
 
-**HOST** — `tools/update/test_anti_retour.rs`, 11 tests :
+**HOST** — `tools/update/test_anti_retour.rs`, 12 tests :
 - aller-retour du format et refus de chaque octet altéré ;
 - lectures neuf, valide et illisible ;
 - copie la plus récente ;
@@ -191,6 +192,7 @@ Politique :
 - politique ;
 - plancher qui ne descend jamais ;
 - réparation après coupure ;
+- un plancher monté entre `begin` et `finish` fait refuser `finish` ;
 - manifeste v2 canonique et 13 formes non canoniques.
 
 **QEMU TCG** — `run_ab_rollback.sh mise-a-jour` :

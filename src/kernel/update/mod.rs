@@ -220,6 +220,15 @@ fn persiste_anti_retour(m: &mut Meta, r: &uc::anti_retour::Registre) -> Result<(
     Ok(())
 }
 
+/// The anti-rollback policy, as an install refusal.
+fn autorise_installation(l: uc::anti_retour::Lecture, sequence: u64) -> Result<uc::anti_retour::Registre, RefusInstall> {
+    uc::anti_retour::autorise(l, sequence).map_err(|refus| RefusInstall::Refuse(match refus {
+        uc::anti_retour::Refus::Retrograde => "version_retrograde",
+        uc::anti_retour::Refus::SansSequence => "manifeste_sans_sequence",
+        uc::anti_retour::Refus::RegistreIllisible => "anti_retour_illisible",
+    }))
+}
+
 fn journalise_anti_retour(evenement: &str, l: uc::anti_retour::Lecture) {
     match l {
         uc::anti_retour::Lecture::Neuf => crate::serial_println!(
@@ -339,6 +348,13 @@ pub enum Commit {
 pub fn commit_sante() -> Result<Commit, &'static str> {
     let p = passage().ok_or("sans_passage")?;
     if COMMITTE.load(core::sync::atomic::Ordering::Acquire) { return Ok(Commit::DejaSain); }
+    // BOUCHAUD_ANTI_RETOUR_V1 (review #305): the same lock as the install
+    // calls, around the WHOLE read-modify-persist of META (A/B record and
+    // floor). Without it a `finish` in flight could persist a record read
+    // before this commit raised the floor, and the higher floor could be
+    // lost. Called from a syscall only (process context): a waiter sleeps
+    // for at most one install I/O (<= 1 MiB).
+    let _serie = SERIALISE.lock();
     let mut m = trouve_meta(&p)?;
     let e = lit(&mut m)?;
     let r = match passage::commit_sante(&p, &e) {
@@ -581,11 +597,7 @@ pub fn installation_commence(cible: Slot, texte: &[u8], signature: &[u8; 64]) ->
         // correctly signed, is never installed.
         let lecture = anti_retour(&mut m);
         journalise_anti_retour("begin", lecture);
-        uc::anti_retour::autorise(lecture, signe.sequence).map_err(|refus| RefusInstall::Refuse(match refus {
-            uc::anti_retour::Refus::Retrograde => "version_retrograde",
-            uc::anti_retour::Refus::SansSequence => "manifeste_sans_sequence",
-            uc::anti_retour::Refus::RegistreIllisible => "anti_retour_illisible",
-        }))?;
+        autorise_installation(lecture, signe.sequence)?;
         let e = lit(&mut m).map_err(RefusInstall::Io)?;
         // The policy, not this module, says which targets are acceptable.
         let n = e.commence_installation(cible, p.slot).map_err(|refus| RefusInstall::Refuse(match refus {
@@ -695,11 +707,12 @@ pub fn installation_termine(empreinte: [u8; 32], longueur: u64, essais: u8) -> R
         // BOUCHAUD_ANTI_RETOUR_V1: the slot's release is recorded BEFORE the
         // candidate is marked; a cut in between leaves a recorded release for
         // a slot that is not a candidate, which nothing ever confirms.
-        let ar = match anti_retour(&mut m) {
-            uc::anti_retour::Lecture::Neuf => uc::anti_retour::Registre::NEUF,
-            uc::anti_retour::Lecture::Valide(r) => r,
-            uc::anti_retour::Lecture::Illisible => return Err(RefusInstall::Refuse("anti_retour_illisible")),
-        };
+        // The floor is checked AGAIN here (review #305): a health commit may
+        // have raised it since `begin` (a confirmed boot repairing a lost
+        // floor write), and a release that fell below it is never marked
+        // bootable. Health commits take SERIALISE too, so the floor cannot
+        // move between this check and the writes below.
+        let ar = autorise_installation(anti_retour(&mut m), inst.attendu_sequence)?;
         persiste_anti_retour(&mut m, &ar.installe(inst.cible, inst.attendu_sequence)).map_err(RefusInstall::Io)?;
         persiste(&mut m, &n).map_err(RefusInstall::Io)?;
         *INSTALLATION.lock() = None;
