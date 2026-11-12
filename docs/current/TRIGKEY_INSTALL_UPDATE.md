@@ -27,7 +27,7 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 3 | Image physique unifiée | **PARTIEL** | voir ci-dessous |
 | 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (31 tests, dont témoins négatifs) + QEMU TCG (banc A/B) |
 | 5 | Agent OTA : vérification signée périodique | **TRANCHE 1 FAITE** (vérifie, n'installe pas) | HOST (`test_ota.rs`) + QEMU TCG (`run_ab_rollback.sh ota-verifie`, serveur HTTP hôte) |
-| 5 | Agent OTA : téléchargement de l'image, reprise, consentement, installation | **NON FAIT** | — |
+| 5 | Agent OTA : téléchargement HTTPS, reprise, installation, redémarrage consenti, santé, rollback | **DÉMONTRÉ EN QEMU** (non qualifié en physique) | QEMU TCG (`run_ab_rollback.sh ota-complet` et `ota-rollback`) |
 | 6 | Ed25519, anti-retour, refus sans clé | **FAIT** | HOST + QEMU TCG |
 | 6 | Rotation et révocation de clé | **PROCÉDURE** | aucun banc |
 | 7 | Rollback, recovery | **FAIT** | QEMU TCG (`run_ab_rollback.sh`, 11 scénarios) |
@@ -73,6 +73,36 @@ Détail des lignes marquées « voir ci-dessous » :
 - **Image physique unifiée (phase 3).**
   - Les slots A/B portent le noyau et 4 services : serviced, healthd, updated et logd.
   - Ils ne portent ni Ladybird, ni DOOM, ni le bureau.
+
+## Agent OTA, tranche 2 : de la release signée au slot actif (`BOUCHAUD_OTA_V1`)
+
+**Validé sous QEMU TCG/OVMF, sur deux versions système réellement distinctes. Non testé sur le Trigkey.**
+
+- **Consentement explicite**, dans la configuration :
+  - `telechargement=consenti` : sans lui, l'agent signale `consentement_requis` et ne télécharge rien ;
+  - `redemarrage=consenti` : sans lui, il installe puis attend (`BOUCHAUD_OTA_REDEMARRAGE_EN_ATTENTE`).
+  - Il n'existe pas de mode implicite.
+- **Téléchargement.** La première source dont le verdict est `disponible` est retenue, ce verdict reposant sur le manifeste signé seul.
+  - La release est publiée **en parties de 4 Mio** (`fabrique_release.py --parties-mio 4`, ajouté au workflow `release-trigkey.yml`).
+  - Deux bornes l'imposent : le client HTTPS du noyau plafonne une réponse à 8 000 000 octets, et un fichier RAMFS à 64 Mio.
+  - Chaque partie est vérifiée contre l'index (taille, SHA-256), et **le flux entier contre le manifeste signé** (taille, SHA-256). Une partie non conforme est refusée, et rien n'est mis en place.
+- **Reprise.** Une partie qui échoue côté réseau est retentée (4 essais, pause croissante). Les parties déjà vérifiées sont conservées. Une partie reçue mais différente de l'index n'est **pas** retentée.
+- **Installation.** L'agent met la release en place dans `/update/` et pose `pret` en dernier. `updated` (ring 3, seul détenteur de la capacité d'installation) l'installe dans le slot **inactif**. Le noyau revérifie tout à `begin` et à `finish` : signature, matériel, plancher, empreinte relue sur disque.
+- **Après installation.** Redémarrage consenti, puis le chargeur démarre le candidat, puis commit de santé ou rollback automatique.
+- **Release en échec.** Une release qui a échoué sa santé sur cette machine (son slot est Mauvais) n'est **jamais reproposée** (`release_deja_en_echec_ici`). Une release plus récente l'est.
+- **CA de banc.** Feature `banc-ca-dev` plus `BOUCHAUD_CA_BANC_DEV`, pour servir l'HTTPS de l'hôte sous QEMU. La variable seule fait échouer la construction. `tools/verifie-cle-dev.py` refuse la feature dans `default`, toute mention dans un chemin de livraison, et toute pose de la variable hors du banc A/B.
+
+| Banc QEMU TCG | Ce qui est exigé | Résultat local |
+|---|---|---|
+| `ota-complet` | A (release 1000, noyau v1) télécharge en **TLS 1.3** (chaîne vérifiée, CA de banc) la release 1001 : 24 parties. La partie 5 est **coupée une fois** par le serveur et doit être reprise. `updated` installe dans B, puis redémarrage consenti, B démarre (**autre noyau** : `BOUCHAUD_BUILD commit=ota-v2-…`), commit de santé, plancher à 1001. Au 3ᵉ démarrage, l'agent est `a_jour`, sans nouveau téléchargement. STATE : compteur 1, 2, 3 | `A* B+ B=`, `AB_OTA_COMPLET_OK` |
+| `ota-rollback` | Même chaîne, mais la release 1001 a un service critique défaillant : trois démarrages B refusés, puis **retour automatique à A**. STATE : compteur strictement croissant sur les 5 démarrages. Plancher **inchangé**. Au retour sur A : `release_deja_en_echec_ici`, **aucun** retéléchargement | `A* B- B- B- A=`, `AB_OTA_ROLLBACK_OK`, compteur 1 à 5 |
+
+**Limites.**
+- Les parties téléchargées vivent en RAM : la reprise vaut à l'intérieur d'un démarrage, pas à travers un redémarrage.
+- Une source dont l'image ne vérifie pas n'entraîne pas de repli sur une autre source dans le même cycle : le cycle suivant réessaie.
+- Le tout-automatique n'existe pas.
+- L'image de production n'embarque pas encore `ota.conf`.
+- **Physique** : non testé sur le Trigkey (RTL8168, horloge, racines publiques vers github.com, coupure secteur pendant l'écriture).
 
 ## Agent OTA, tranche 1 (`BOUCHAUD_OTA_V1`)
 
