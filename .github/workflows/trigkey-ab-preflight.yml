@@ -9,6 +9,7 @@ on:
       - 'tools/release/verify_trigkey_ab_boot.py'
       - 'tools/ci/reliability/test_trigkey_ab_*.py'
       - '.github/workflows/trigkey-ab-preflight.yml'
+      - 'tools/reference/uefi-image-builder/**'
   workflow_dispatch:
 
 permissions:
