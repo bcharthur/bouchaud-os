@@ -199,6 +199,10 @@ jobs:
           # manifeste v2 (sequence monotone, famille materielle).
           rustc --edition 2021 --test tools/update/test_anti_retour.rs -o target-test-anti-retour
           ./target-test-anti-retour
+          # BOUCHAUD_OTA_V1 : decision de l'agent OTA (manifeste signe seul,
+          # cle de confiance, materiel, plancher) et ses temoins de refus.
+          rustc --edition 2021 --test tools/update/test_ota.rs -o target-test-ota
+          ./target-test-ota
           # Chaine de confiance : Ed25519 + SHA-512 (no_std) contre RFC 8032 et
           # OpenSSL, manifeste canonique strict, cle de confiance -> signature
           # -> empreinte. Cles generees au test, jamais stockees.

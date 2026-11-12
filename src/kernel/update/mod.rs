@@ -27,6 +27,7 @@ use crate::kernel::sync::SpinLock;
 
 /// The recovery console (BOUCHAUD_RECOVERY_V1).
 pub mod recovery;
+pub mod ota;
 
 /// Did the loader boot RECOVERY rather than a system slot?
 pub fn en_recovery() -> bool { passage().map(|p| p.raison.est_recovery()).unwrap_or(false) }
@@ -239,6 +240,17 @@ fn journalise_anti_retour(evenement: &str, l: uc::anti_retour::Lecture) {
         uc::anti_retour::Lecture::Illisible => crate::serial_println!(
             "BOUCHAUD_UPDATE_ANTI_RETOUR evenement={} etat=illisible", evenement),
     }
+}
+
+/// BOUCHAUD_OTA_V1: the anti-rollback record and the release of the RUNNING
+/// slot, read-only, for the OTA check. Unknown META (no handoff, no META
+/// partition): `Illisible` -- the check then refuses, it never guesses 0.
+pub fn etat_anti_retour() -> (uc::anti_retour::Lecture, u64) {
+    let Some(p) = passage() else { return (uc::anti_retour::Lecture::Illisible, 0) };
+    let Ok(mut m) = trouve_meta(&p) else { return (uc::anti_retour::Lecture::Illisible, 0) };
+    let l = anti_retour(&mut m);
+    let courante = match l { uc::anti_retour::Lecture::Valide(r) => r.slots[p.slot as usize], _ => 0 };
+    (l, courante)
 }
 
 /// Health commit of `slot`: the floor rises to its release (idempotent,

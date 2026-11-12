@@ -518,6 +518,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // BOUCHAUD_ECRITURE_DIFFEREE_V1 : /persist n'attend plus un `sync`.
     crate::fs::ecriture_differee::demarre();
     crate::serial_println!("BOUCHAUD_NET_VEILLEUR_APRES_SMP");
+    // BOUCHAUD_OTA_V1 : verification signee au demarrage puis toutes les 6 h
+    // (inerte sans /etc/bouchaud/ota.conf ; n'installe rien).
+    crate::kernel::update::ota::lance();
     // L'AUDITEUR PART ICI, ET APRES LE VEILLEUR.
     //
     // Il lit ce que le pilote publie ; le lancer avant que le pilote existe

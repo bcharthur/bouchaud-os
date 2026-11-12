@@ -58,7 +58,7 @@
 # not start, or a kernel started under RECOVERY_REQUIRED is red.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|mise-a-jour-morts|sans-cle|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
+SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|mise-a-jour-morts|sans-cle|ota-verifie|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
 RECOVERY=0
 # mise-a-jour-morts = mise-a-jour + updated dies on purpose twice (during the
 # writes, during the read-back); the third instance must inherit nothing.
@@ -92,6 +92,10 @@ case "$SCENARIO" in
   seconde-cle) MAUVAIS=seconde-cle-sans-vidange; META_SPEC=b-candidat:3; ATTENDU="B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   mise-a-jour) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A* B+ B="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
   sans-cle) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A0 A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
+  # BOUCHAUD_OTA_V1 : l'agent OTA verifie six sources HTTP servies par l'hote
+  # (une disponible, une a jour, quatre a refuser). A demarre sain et RIEN
+  # n'est installe : la verification ne telecharge pas d'image.
+  ota-verifie) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-600} ;;
   recovery-requise) MAUVAIS=bon; META_SPEC=corrompu:2; ATTENDU="R"; RECOVERY=1 ;;
   recovery-rollback) MAUVAIS=bon; META_SPEC=b-bon; ATTENDU="R B="; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   echecs-repetes) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A- A- A- R"; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
@@ -103,13 +107,15 @@ esac
 # (BOUCHAUD_CLE_VERSION_DEV), its private half signs the manifest, then the
 # whole directory goes. No key is ever stored in the repository.
 CLES=$(mktemp -d); trap 'rm -rf "$CLES"' EXIT
-if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
+if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ] || [ "$SCENARIO" = ota-verifie ]; then
   openssl genpkey -algorithm ed25519 -out "$CLES/version.pem"
   CLE_PUBLIQUE=$(openssl pkey -in "$CLES/version.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
   echo "AB_CLE_DEV publique=$CLE_PUBLIQUE (generee pour ce banc, detruite a la fin)"
   # sans-cle: the manifest IS signed with it, but the kernel is a normal
   # build that does not trust it.
-  if [ "$SCENARIO" = mise-a-jour ]; then export BOUCHAUD_CLE_VERSION_DEV=$CLE_PUBLIQUE; fi
+  if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = ota-verifie ]; then export BOUCHAUD_CLE_VERSION_DEV=$CLE_PUBLIQUE; fi
+  # ota-verifie : une SECONDE cle, que le noyau ne connait pas.
+  [ "$SCENARIO" = ota-verifie ] && openssl genpkey -algorithm ed25519 -out "$CLES/autre.pem"
 fi
 
 # --- build: shim, kernels, payloads, metadata, disk ------------------------
@@ -170,7 +176,7 @@ with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
         t.addfile(i, io.BytesIO(data))
 PY
 }
-case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|recovery-rollback|echecs-repetes)
+case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|ota-verifie|recovery-rollback|echecs-repetes)
   # The system userland of each slot: serviced (system supervisor) and its
   # critical services (health contract v3: healthd, updated, logd). In sante-ko the
   # CANDIDATE's critical service fails.
@@ -182,7 +188,27 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
   critique_b=$TRAVAIL/healthd; [ "$SCENARIO" = sante-ko ] && critique_b=$TRAVAIL/healthd-defaillant
   critique_a=$TRAVAIL/healthd; [ "$SCENARIO" = echecs-repetes ] && critique_a=$TRAVAIL/healthd-defaillant
   ramdisk "$OUT/slot-b/ramdisk" $systeme "bin/healthd=$critique_b"
-  if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
+  manifeste_v2() {  # SORTIE SEQUENCE MATERIEL [CLE]
+    local r="$OUT/release-$(basename "$(dirname "$1")")-$(basename "$1")"
+    python3 tools/release/fabrique_release.py --image "$OUT/system-b.img" --version "bench-$(git rev-parse --short HEAD)" \
+      --sequence "$2" --materiel "$3" --canal testing --commit "$(git rev-parse HEAD)" --sortie "$r" \
+      --cle-dev "${4:-$CLES/version.pem}" >/dev/null || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
+    cp "$r/manifest" "$1"; cp "$r/manifest.sig" "$1.sig"
+  }
+  if [ "$SCENARIO" = ota-verifie ]; then
+    # BOUCHAUD_OTA_V1 : ce que sert l'hote (http.server, 10.0.2.2 vu de QEMU).
+    "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
+    mkdir -p "$OUT/srv"/{ok,egal,vieux,arm,autre}
+    manifeste_v2 "$OUT/srv/ok/manifest" "$RELEASE_SEQ" x86_64-uefi
+    manifeste_v2 "$OUT/srv/egal/manifest" "$PLANCHER_INITIAL" x86_64-uefi
+    manifeste_v2 "$OUT/srv/vieux/manifest" "$((PLANCHER_INITIAL - 1))" x86_64-uefi
+    manifeste_v2 "$OUT/srv/arm/manifest" "$RELEASE_SEQ" arm64-uefi
+    manifeste_v2 "$OUT/srv/autre/manifest" "$RELEASE_SEQ" x86_64-uefi "$CLES/autre.pem"
+    PORT_OTA=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    printf 'source=http://10.0.2.2:%s/%s\n' "$PORT_OTA" ok "$PORT_OTA" egal "$PORT_OTA" vieux \
+      "$PORT_OTA" arm "$PORT_OTA" autre "$PORT_OTA" absent > "$OUT/ota.conf"
+    ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" "etc/bouchaud/ota.conf=$OUT/ota.conf"
+  elif [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
     # The release: slot B's image, built exactly as --disque-ab would lay it,
     # and its manifest. Shipped INSIDE the running system A; B on disk is
     # zeroed below, so only updated can make it bootable.
@@ -195,13 +221,6 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
     # BOUCHAUD_RELEASE_V1: produced by the RELEASE tool itself
     # (tools/release/fabrique_release.py, bench key), so this bench also
     # proves that what the release pipeline emits is what the kernel installs.
-    manifeste_v2() {  # SORTIE SEQUENCE MATERIEL
-      local r="$OUT/release-$(basename "$1")"
-      python3 tools/release/fabrique_release.py --image "$OUT/system-b.img" --version "bench-$(git rev-parse --short HEAD)" \
-        --sequence "$2" --materiel "$3" --canal testing --commit "$(git rev-parse HEAD)" --sortie "$r" \
-        --cle-dev "$CLES/version.pem" >/dev/null || { echo "AB_ROLLBACK_FAIL raison=fabrique_release" >&2; exit 1; }
-      cp "$r/manifest" "$1"; cp "$r/manifest.sig" "$1.sig"
-    }
     manifeste_v2 "$OUT/manifest" "$RELEASE_SEQ" x86_64-uefi
     # Two CORRECTLY SIGNED manifests the kernel must still refuse.
     manifeste_v2 "$OUT/manifest-ancien" "$((PLANCHER_INITIAL - 1))" x86_64-uefi
@@ -235,7 +254,7 @@ if [ "$SCENARIO" = recovery-rollback ]; then
   read -r l o < <(partition BOUCHAUD-META)
   dd if="$OUT/meta.img" of="$OUT/disque-ab.img" bs=512 seek="$l" conv=notrunc status=none
 fi
-if [ "$SCENARIO" = mise-a-jour ]; then
+if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = ota-verifie ]; then
   # BOUCHAUD_ANTI_RETOUR_V1: the installed system A is release
   # PLANCHER_INITIAL and the floor is already there (META blocks 3 and 4),
   # written by an encoder INDEPENDENT of update-core (struct + zlib.crc32).
@@ -303,6 +322,15 @@ case "${BO_AB_SUPPORT:-nvme}" in
       -device usb-storage,bus=xhci.0,port=2,drive=seconde,removable=on) ;;
   *) echo "BO_AB_SUPPORT inconnu : ${BO_AB_SUPPORT}" >&2; exit 2 ;;
 esac
+# BOUCHAUD_OTA_V1 : une carte que le pilote connait (e1000) et le reseau
+# utilisateur de QEMU ; l'hote sert les sources sur 127.0.0.1.
+RESEAU=()
+if [ "$SCENARIO" = ota-verifie ]; then
+  RESEAU=(-nic user,model=e1000)
+  python3 -m http.server "$PORT_OTA" --bind 127.0.0.1 --directory "$OUT/srv" > "$OUT/http.log" 2>&1 &
+  PID_HTTP=$!
+  trap 'kill "$PID_HTTP" 2>/dev/null; rm -rf "$CLES"' EXIT
+fi
 # BOUCHAUD_AB_ETAT_APRES_COMMIT_ATTENDU_V1 : après `result=committed`,
 # serviced relit l'état par la capacité et écrit `SERVICED_UPDATE_STATE`.
 # Cette seconde ligne est la preuve « état visible après commit » que
@@ -335,7 +363,7 @@ for i in $(seq 1 "$nb"); do
     -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,unit=1,file="$OUT/vars.fd" \
     -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
-    "${SUPPORT[@]}" \
+    "${SUPPORT[@]}" "${RESEAU[@]}" \
     -display none -no-reboot "${SERIE[@]}" >/dev/null 2>&1 &
   pid=$!
   verdict=""
@@ -370,6 +398,14 @@ for i in $(seq 1 "$nb"); do
         verdict="A!"
       fi
       break
+    fi
+    # ota-verifie: A healthy AND the agent's first cycle logged.
+    if [ "$SCENARIO" = ota-verifie ] && [ "$slot" = A ]; then
+      if grep -aq "result=already_good" <<< "$propre" && grep -aq "BOUCHAUD_OTA_CYCLE" <<< "$propre"; then
+        verdict="A="; break
+      fi
+      if ! kill -0 "$pid" 2>/dev/null; then break; fi
+      sleep 1; continue
     fi
     # Boot 1 of mise-a-jour is judged on updated alone: its own health line
     # can come before the install ends, and must not cut the install short.
@@ -459,6 +495,28 @@ if [ "$SCENARIO" = mise-a-jour ]; then
     done
     echo "AB_VARIANTE_MORTS_OK deux morts volontaires (write, verify), successeur sans heritage"
   fi
+fi
+if [ "$SCENARIO" = ota-verifie ]; then
+  propre1=$(sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | tr -d '\r')
+  b="http://10.0.2.2:$PORT_OTA"
+  for m in "BOUCHAUD_OTA_VERIFIE source=$b/ok resultat=disponible version=bench-$(git rev-parse --short HEAD) sequence=$RELEASE_SEQ" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/egal resultat=a_jour sequence=$PLANCHER_INITIAL" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/vieux resultat=refuse raison=version_retrograde" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/arm resultat=refuse raison=materiel_incompatible" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/autre resultat=refuse raison=signature_non_fiable" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/absent resultat=refuse raison=manifeste_injoignable" \
+           "BOUCHAUD_OTA_CYCLE sources=6"; do
+    grep -aF "$m" <<< "$propre1" >/dev/null || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
+  done
+  # Exactement une ligne par source, et la verification n'installe RIEN.
+  [ "$(grep -ac "BOUCHAUD_OTA_VERIFIE " <<< "$propre1")" = 6 ] \
+    || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=nombre_de_verdicts" >&2; exit 1; }
+  if grep -aqE "BOUCHAUD_UPDATE_INSTALL_(BEGIN|CANDIDAT)" <<< "$propre1"; then
+    echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=installation_sans_consentement" >&2; exit 1
+  fi
+  # L'hote a bien servi les fichiers demandes (le transport n'est pas simule).
+  grep -q '"GET /ok/manifest.sig HTTP' "$OUT/http.log" || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=serveur_non_sollicite" >&2; exit 1; }
+  grep -aF "BOUCHAUD_OTA_VERIFIE" <<< "$propre1" | sed 's/^.*BOUCHAUD_OTA/  BOUCHAUD_OTA/'
 fi
 if [ "$SCENARIO" = sans-cle ]; then
   sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aF "BOUCHAUD_UPDATE_CLES confiance=0 production=0 developpement=0" >/dev/null \
