@@ -181,3 +181,29 @@ fn chemin_de_la_racine_et_d_un_noeud() {
     assert_eq!(chemin(&f, 0), "/");
     assert_eq!(chemin(&f, 5), "/etc/ssl/certs");
 }
+
+#[test]
+fn les_refus_comptent_dans_le_budget() {
+    // Revue #300 : un filtre qui ecarte les noms de repertoires, et des
+    // repertoires illisibles sous des noms longs -- les refus s'accumulaient
+    // hors budget (5 Mo pour 1 Mo permis), sous le verrou du systeme de fichiers.
+    let mut f = Faux::neuf();
+    let long = "L".repeat(255);
+    let mut p = 0;
+    for _ in 0..200 {
+        p = f.ajoute(p, &long, true);
+    }
+    for k in 0..100 {
+        let d = f.ajoute(p, &format!("ferme{k}"), true);
+        f.0[d].lisible = false;
+    }
+    let budget = 1 << 20;
+    let r = parcours(&f, 0, Some("zzz"), budget);
+    let octets: usize = r.chemins.iter().chain(r.refus.iter()).map(|c| c.len() + 1).sum();
+    assert!(octets <= budget, "{octets} > {budget}");
+    assert!(r.tronque, "le depassement est dit");
+    assert!(!r.refus.is_empty());
+    // Depart illisible plus long que le budget lui-meme.
+    let r = parcours(&f, p + 1, None, 10);
+    assert!(r.tronque && r.refus.is_empty());
+}
