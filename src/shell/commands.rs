@@ -467,14 +467,17 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     if fs.nodes[idx].kind == NodeKind::File {
         ramfs::print_node_line(&fs, idx, long);
     } else {
-        // Lister un repertoire demande le droit de lecture sur celui-ci.
-        if !fs.can(idx, PERM_R) {
-            println!("ls: permission denied");
-            return 1;
-        }
-        for i in 0..MAX_NODES {
-            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-                ramfs::print_node_line(&fs, i, long);
+        // Lister un repertoire demande le droit de lecture sur celui-ci ; la
+        // meme regle et les memes entrees que l'application Fichiers.
+        match fs.enfants_lisibles(idx) {
+            Ok(enfants) => {
+                for i in enfants {
+                    ramfs::print_node_line(&fs, i, long);
+                }
+            }
+            Err(e) => {
+                println!("ls: {}", e);
+                return 1;
             }
         }
     }
@@ -1805,7 +1808,7 @@ pub fn execute_programme(line: &str, argc: usize, argv: &[&str; 12], cwd: usize)
     {
         let fs = ramfs::fs();
         if let Some(idx) = fs.resolve(&chemin, cwd) {
-            if !fs.can(idx, PERM_X) {
+            if !executable(&fs, idx) {
                 vga::set_color(vga::COLOR_RED);
                 println!("{}: permission refusee (bit d'execution absent)", chemin);
                 vga::set_color(COLOR_DEFAULT);
@@ -1835,12 +1838,20 @@ pub fn execute_programme(line: &str, argc: usize, argv: &[&str; 12], cwd: usize)
     }
 }
 
+/// Le shell peut-il lancer ce fichier ? La regle de `exec` dans le noyau
+/// (`security::access::mode_allows`) : le droit d'execution de l'appelant, et
+/// -- root compris -- au moins un bit `x` (POSIX). `fs.can` seul laissait root
+/// passer, puis le noyau refusait : `type` et le shell disaient deux choses.
+pub(crate) fn executable(fs: &ramfs::FileSystem, idx: usize) -> bool {
+    fs.nodes[idx].kind == NodeKind::File && fs.can(idx, PERM_X) && fs.nodes[idx].mode & 0o111 != 0
+}
+
 /// Le chemin d'un programme nomme, ou `None` s'il n'existe nulle part.
 ///
 /// Un token qui contient `/` est un chemin, relatif ou absolu. Sinon on
 /// parcourt `PATH` s'il est defini, et a defaut les repertoires ou Bouchaud
 /// installe ses programmes.
-fn resout_programme(nom: &str, cwd: usize) -> Option<String> {
+pub(crate) fn resout_programme(nom: &str, cwd: usize) -> Option<String> {
     let fs = ramfs::fs();
     let est_fichier = |chemin: &str| -> bool {
         matches!(fs.resolve(chemin, cwd), Some(idx) if fs.nodes[idx].kind == NodeKind::File)

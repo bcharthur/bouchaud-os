@@ -201,6 +201,35 @@ fn env_export(line: &str) {
     }
 }
 
+/// BOUCHAUD_ARBORESCENCE_COHERENTE_V1 -- TOUTES les commandes internes : les
+/// motifs de `dispatch`, ni plus ni moins (`tools/verifie-commandes-internes.py`
+/// le verifie a chaque CI). C'est le registre que consulte `type` ; `COMMANDS`
+/// n'est que la liste de completion (revue #302 : elle en omettait).
+pub const INTERNES: &[&str] = &[
+    "alloctest", "append", "apps", "arp", "arping", "ata-integrite", "banc-present", "banc-trame",
+    "bootlog", "breakpoint", "cargo", "cat", "cd", "chmod", "chown", "clear", "compta-injection",
+    "console-async", "contexte-banc", "continuation-banc", "cp", "cpuinfo", "curl", "date",
+    "desktop", "devices", "df", "dhcp", "diag-save", "disktest", "disques-internes", "dmesg", "dns",
+    "dnsdiag", "echo", "edit", "elfinfo", "env", "ethinfo", "exec", "exit", "export",
+    "expr-selftest", "false", "fautes", "find", "free", "git", "gpu-composition", "gpu-irq",
+    "gpu-tampon", "gpu-trame", "gpuinfo", "grep", "gui", "gui-surface", "halt", "head", "help",
+    "history", "http", "https", "hwinfo", "hwtest", "id", "ifconfig", "ifup", "installer",
+    "interrupts", "ip", "ipc-attribution", "journal", "kill", "launch", "logout", "ls", "lspci",
+    "lsusb", "meminfo", "memtop", "mkdir", "mkfs.bfs", "mount", "mv", "nano", "netbanc-dhcp",
+    "netbanc-rx", "netdiag", "netetat", "nslookup", "nvme-parallele", "nvmetest", "ordo-cession",
+    "ordo-rejet-injecte", "ordo-variante", "panic-test", "passwd", "persist-test", "ping", "pip",
+    "pip3", "poll-selftest", "poweroff", "profil-rip", "ps", "pwd", "pybrowser", "python",
+    "python-selftest", "python3", "resource-selftest", "resstat", "reveil-precis", "rm", "rmdir",
+    "roadmap", "route", "run", "rust-selftest", "rustc", "safe-mode", "sched-latence",
+    "serial-test", "serie-banc-attend", "serie-detenteur-suspendu", "serie-dormeur-masque",
+    "serie-lente", "serie-minuteur-perdu", "serie-rafale-masquee", "serie-verrou-suspendu",
+    "services", "shutdown", "smoltest", "smpstat", "sonde-ecriture-interne", "source", "stat",
+    "strace", "su", "sync", "syscalls", "sysinfo", "tail", "tasks", "ticks", "tls", "tls-selftest",
+    "touch", "tree", "true", "type", "uname", "unset", "uptime", "usbetat", "usbfault", "usbvolume",
+    "useradd", "userdel", "usermode", "users", "version", "vmstat", "wasm", "wasm-selftest", "wc",
+    "wget", "which", "whoami", "write",
+];
+
 /// Liste des commandes connues, pour la tab-completion.
 pub const COMMANDS: &[&str] = &[
     "help", "clear", "version", "uname", "sysinfo", "cpuinfo", "meminfo", "resstat", "memtop", "gpuinfo", "resource-selftest", "alloctest",
@@ -215,7 +244,7 @@ pub const COMMANDS: &[&str] = &[
     "source", "desktop", "gui", "banc-present", "gpu-irq", "gpu-tampon", "gpu-trame", "gpu-composition", "banc-trame", "reveil-precis", "ordo-variante", "ordo-cession", "ps", "fautes", "kill", "free", "syscalls", "apps", "launch",
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
-    "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
+    "type", "which", "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
     "disques-internes", "sonde-ecriture-interne",
     "diag-save",
     "git", "rustc", "cargo", "rust-selftest",
@@ -1621,6 +1650,45 @@ fn ordo_variante(argc: usize, argv: &[&str; 12]) -> i32 {
     0
 }
 
+/// `type NOM...` (alias `which`) : ce que designe chaque nom.
+///
+/// BOUCHAUD_ARBORESCENCE_COHERENTE_V1. Les commandes du shell (`ls`, `find`,
+/// `cat`...) vivent DANS le noyau : elles n'ont aucun fichier dans `/bin`, et
+/// `type` le dit plutot que d'y deposer de faux binaires. Un programme reel
+/// est cherche dans `PATH` (fichier executable).
+fn type_cmd(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
+    if argc < 2 { println!("usage: type NOM..."); return 1; }
+    let mut code = 0;
+    for nom in argv.iter().take(argc).skip(1) {
+        // Comme `dispatch` : un nom sans `/` qui a un motif interne est TOUJOURS
+        // la commande interne, meme si un fichier du meme nom est dans PATH.
+        let reponse = if !nom.contains('/') && INTERNES.contains(nom) {
+            alloc::format!("{} : commande interne du shell (noyau, sans fichier)", nom)
+        } else {
+            // La MEME resolution que l'execution (revue #302) : le premier
+            // fichier trouve dans PATH, puis le bit d'execution -- un fichier
+            // non executable masque les suivants, comme pour le shell (126).
+            match commands::resout_programme(nom, cwd) {
+                None => { code = 1; alloc::format!("{} : introuvable", nom) }
+                Some(c) => {
+                    let executable = {
+                        let fs = ramfs::fs();
+                        matches!(fs.resolve(&c, cwd), Some(i) if commands::executable(&fs, i))
+                    };
+                    if executable {
+                        alloc::format!("{} : {}", nom, c)
+                    } else {
+                        code = 1;
+                        alloc::format!("{} : {} (non executable : le shell refuse, code 126)", nom, c)
+                    }
+                }
+            }
+        };
+        println!("{}", reponse);
+    }
+    code
+}
+
 /// Imbrication maximale de `run` (un script qui en lance un autre). Au-dela,
 /// erreur controlee : un script qui se lance lui-meme epuisait la pile noyau.
 const RUN_PROFONDEUR_MAX: usize = 8;
@@ -1943,6 +2011,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "su" => { c::su(argc, &argv, cwd); 0 }
 
         // Fichiers
+        "type" | "which" => type_cmd(argc, &argv, *cwd),
         "pwd" => { ramfs::print_path(&ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
         "tree" => c::tree(argc, &argv, *cwd),

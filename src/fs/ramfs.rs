@@ -162,6 +162,11 @@ impl Node {
     }
 }
 
+/// `/etc/passwd`, unique source (BOUCHAUD_ARBORESCENCE_COHERENTE_V1). Le champ
+/// shell nomme `/bin/sh` par convention : le shell de Bouchaud est INTERNE au
+/// noyau, et `type sh` le dit (aucun faux binaire n'est depose).
+pub const ETC_PASSWD: &str = "root:x:0:0:root:/:/bin/sh\nguest:x:1000:1000:guest:/home/guest:/bin/sh\n";
+
 pub struct FileSystem {
     pub nodes: [Node; MAX_NODES],
 }
@@ -277,11 +282,10 @@ impl FileSystem {
         let readme = self.touch_at(0, "readme.txt").unwrap_or(0);
         self.write_node(readme, "Bienvenue dans Bouchaud OS. Connecte-toi (guest/guest ou root/root). Tape help, ou desktop pour le bureau graphique.");
 
+        // Le meme contenu que `sysroot::install_etc` (une seule source :
+        // `ETC_PASSWD`) ; avant, deux versions differentes se succedaient.
         let passwd = self.touch_at(etc, "passwd").unwrap_or(0);
-        self.write_node(
-            passwd,
-            "root:x:0:0:root:/:/bin/bsh\nguest:x:1000:1000:guest:/home/guest:/bin/bsh",
-        );
+        self.write_node(passwd, ETC_PASSWD);
 
         // /tmp est ouvert a tous (comme sous Unix).
         if tmp != 0 {
@@ -671,6 +675,23 @@ impl FileSystem {
                 Ok((parent, name))
             }
         }
+    }
+
+    /// BOUCHAUD_ARBORESCENCE_COHERENTE_V1 -- les enfants d'un repertoire que
+    /// l'appelant a le droit de LIRE, dans l'ordre des noeuds. Partage par `ls`
+    /// et par l'application Fichiers : memes entrees, meme regle de droits
+    /// (avant : Fichiers listait un dossier sans le droit de lecture).
+    pub fn enfants_lisibles(&self, idx: usize) -> Result<Vec<usize>, &'static str> {
+        if idx >= MAX_NODES || !self.nodes[idx].used {
+            return Err("introuvable");
+        }
+        if self.nodes[idx].kind != NodeKind::Dir {
+            return Err("pas un repertoire");
+        }
+        if !self.can(idx, PERM_R) {
+            return Err("permission denied");
+        }
+        Ok((0..MAX_NODES).filter(|&i| self.nodes[i].used && i != idx && self.nodes[i].parent == idx).collect())
     }
 
     pub fn is_empty_dir(&self, idx: usize) -> bool {
