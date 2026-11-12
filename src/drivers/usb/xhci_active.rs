@@ -1139,6 +1139,11 @@ struct Stockage {
     taille_bloc: u32,
     blocs: u64,
     amovible: bool,
+    /// BOUCHAUD_CLE_USB_TEST_V1 : ce support est-il le support de demarrage
+    /// autorise ? Etablie au montage, d'apres l'en-tete GPT (LBA 1), AVANT
+    /// toute commande qui modifierait le support. `Inconnue` jusque-la : dans
+    /// une image `cle-usb-test`, aucune ecriture ne part vers lui.
+    identite: crate::drivers::ecriture_interne::Identite,
 }
 
 const STOCKAGE_VIDE: Stockage = Stockage {
@@ -1157,6 +1162,7 @@ const STOCKAGE_VIDE: Stockage = Stockage {
     taille_bloc: 0,
     blocs: 0,
     amovible: false,
+    identite: crate::drivers::ecriture_interne::Identite::Inconnue,
 };
 
 struct Controller {
@@ -4964,6 +4970,7 @@ fn configure_stockage(
         taille_bloc: 0,
         blocs: 0,
         amovible: false,
+        identite: crate::drivers::ecriture_interne::Identite::Inconnue,
     };
     controller.stockage_count = index + 1;
     STOCKAGES_TROUVES.fetch_add(1, Ordering::Relaxed);
@@ -5177,6 +5184,31 @@ fn reinitialisation_bot(controller: &mut Controller, device: &mut Device, index:
     entree && sortie
 }
 
+/// Motif d'une commande refusee par la regle `cle-usb-test`.
+const REFUS_CLE_USB_TEST: &str = "refus-cle-usb-test";
+
+/// BOUCHAUD_CLE_USB_TEST_V1 -- l'identite du support, d'apres son en-tete GPT
+/// primaire (LBA 1). Une LECTURE, permise par la regle quel que soit le
+/// support. Lu une fois au montage, avant la sonde de vidange (la premiere
+/// commande qui pourrait le modifier).
+fn etablit_identite_stockage(controller: &mut Controller, device: &mut Device, index: usize) {
+    let taille = controller.stockages[index].taille_bloc as usize;
+    let slot = controller.stockages[index].slot_id;
+    let controleur = controller.base as u64;
+    let bloc = if (512..=4096).contains(&taille) && controller.stockages[index].blocs > 1 {
+        let cdb = stockage::cdb_transfert_10(false, 1, 1);
+        match bot_commande(controller, device, index, &cdb, true, taille as u32) {
+            Ok(n) if n >= 512 => Some(unsafe {
+                core::slice::from_raw_parts(controller.stockages[index].donnees_virt as *const u8, n.min(taille))
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    controller.stockages[index].identite = crate::drivers::ecriture_interne::etablit_identite(controleur, slot, bloc);
+}
+
 /// Une commande du transport Bulk-Only : CBW, donnees, CSW.
 ///
 /// Rend le nombre d'octets de la phase de donnees reellement transferes.
@@ -5208,6 +5240,11 @@ fn bot_commande(
         TRANSPORT_BOT.sort_de_phase();
         return resultat;
     };
+    // Un refus de la regle n'est pas un incident de transport : rien n'est
+    // parti, rien a reprendre, et la rejouer serait la refuser deux fois.
+    if erreur == REFUS_CLE_USB_TEST {
+        return Err(erreur);
+    }
 
     // UNE ECHEANCE SUIVIE D'UNE REPRISE REUSSIE EST UN TRANSITOIRE.
     //
@@ -5316,6 +5353,11 @@ fn bot_commande_une_fois(
     }
     if octets as usize > TAMPON_STOCKAGE {
         return Err("bot-trop-long");
+    }
+    // BOUCHAUD_CLE_USB_TEST_V1 : avant le SEUL codage d'un CBW de ce
+    // transport. Refusee, la commande ne quitte pas la machine.
+    if !crate::drivers::ecriture_interne::scsi(controller.stockages[index].identite, cdb) {
+        return Err(REFUS_CLE_USB_TEST);
     }
     let (etiquette, enveloppe_virt, enveloppe_phys, donnees_phys) = {
         let st = &mut controller.stockages[index];
@@ -5507,9 +5549,15 @@ fn demarre_stockage(
     if controller.stockages[index].numero >= 2 {
         arme_injection(INJECTE_REFUS_VIDANGE);
     }
+    // BOUCHAUD_CLE_USB_TEST_V1 : l'identite AVANT la premiere commande qui
+    // modifierait le support.
+    etablit_identite_stockage(controller, device, index);
     let sonde = stockage_vidange(controller, device, index);
     let sens = match sonde {
         Ok(()) => None,
+        // Refus de la regle : la commande n'est pas partie, le support n'a
+        // aucune condition de sens a lire.
+        Err(REFUS_CLE_USB_TEST) => None,
         Err(motif) => traite_refus_vidange(controller, device, index, motif),
     };
     let numero = controller.stockages[index].numero;
@@ -6004,6 +6052,7 @@ impl PiloteUsbStockage {
             let r = stockage_vidange(controleur, &mut device, index);
             let sens = match r {
                 Ok(()) => None,
+                Err(REFUS_CLE_USB_TEST) => None,
                 Err(motif) => traite_refus_vidange(controleur, &mut device, index, motif),
             };
             controleur.devices[slot] = Some(device);
@@ -6043,6 +6092,26 @@ impl PiloteUsbStockage {
             }
         }
     }
+}
+
+/// BANC `banc-ecriture-interne` (QEMU uniquement, voir
+/// `platform::pc::sonde_ecriture_interne`) : emet un bloc de commande SCSI
+/// BRUT vers le support lie au volume USB, par `bot_commande`, la meme porte
+/// que toutes les autres. `octets` : la phase de donnees SORTANTE (le contenu
+/// du tampon de donnees, tel quel). Rend l'identite du support et le resultat.
+#[cfg(feature = "banc-ecriture-interne")]
+pub fn sonde_scsi(cdb: &[u8], octets: u32) -> Option<(crate::drivers::ecriture_interne::Identite, Result<usize, &'static str>)> {
+    avec_le_pilote_usb(|runtime| {
+        let (ic, index, _numero) = support_lie(runtime)?;
+        let controleur = &mut runtime.controllers[ic];
+        let slot = controleur.stockages[index].slot_id as usize;
+        let mut device = controleur.devices.get_mut(slot)?.take()?;
+        let identite = controleur.stockages[index].identite;
+        let r = bot_commande(controleur, &mut device, index, cdb, octets == 0, octets);
+        controleur.devices[slot] = Some(device);
+        Some((identite, r))
+    })
+    .flatten()
 }
 
 impl PiloteBloc for PiloteUsbStockage {

@@ -15,6 +15,22 @@ on:
       - 'tools/security/**'
       - 'tools/ci/run_security_runtime.sh'
       - '.github/workflows/security-runtime.yml'
+      # BOUCHAUD_CLE_USB_TEST_V1 : tout chemin qui envoie une commande a un
+      # support, la regle, la sonde, le banc et l'image.
+      - 'src/drivers/block/**'
+      - 'src/drivers/api/**'
+      - 'src/drivers/usb/**'
+      - 'src/drivers/mod.rs'
+      - 'src/platform/pc/**'
+      - 'src/main.rs'
+      - 'src/shell/mod.rs'
+      - 'Cargo.toml'
+      - 'tools/securite/**'
+      - 'tools/release/**'
+      - 'tools/platform/test_nvme_suivi.rs'
+      - 'tools/ci/run_cle_usb_test.sh'
+      - 'tools/ci/fabrique-disque-gpt.py'
+      - 'tools/verifie-ecriture-interne.py'
   push:
     branches: [main]
     paths:
@@ -30,6 +46,22 @@ on:
       - 'tools/security/**'
       - 'tools/ci/run_security_runtime.sh'
       - '.github/workflows/security-runtime.yml'
+      # BOUCHAUD_CLE_USB_TEST_V1 : tout chemin qui envoie une commande a un
+      # support, la regle, la sonde, le banc et l'image.
+      - 'src/drivers/block/**'
+      - 'src/drivers/api/**'
+      - 'src/drivers/usb/**'
+      - 'src/drivers/mod.rs'
+      - 'src/platform/pc/**'
+      - 'src/main.rs'
+      - 'src/shell/mod.rs'
+      - 'Cargo.toml'
+      - 'tools/securite/**'
+      - 'tools/release/**'
+      - 'tools/platform/test_nvme_suivi.rs'
+      - 'tools/ci/run_cle_usb_test.sh'
+      - 'tools/ci/fabrique-disque-gpt.py'
+      - 'tools/verifie-ecriture-interne.py'
   workflow_dispatch:
 
 permissions:
@@ -75,5 +107,93 @@ jobs:
         with:
           name: security-runtime-proof
           path: target/security-runtime-ci/security-ring3.log
+          if-no-files-found: error
+          retention-days: 14
+
+  # BOUCHAUD_CLE_USB_TEST_V1 -- l'image d'essai sur cle USB n'ecrit JAMAIS sur
+  # les disques internes : garde des chemins (mutations comprises), regle
+  # pure, puis le banc QEMU juge DE L'EXTERIEUR (trace des commandes recues par
+  # les peripheriques emules, empreintes des images), avec son temoin. TCG puis
+  # KVM. Niveau de preuve : QEMU ; PHYSICAL n'est pas qualifie ici.
+  cle-usb-test:
+    name: cle-usb-test (TCG + KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Garde des chemins d'ecriture (mutations)
+        run: python3 tools/verifie-ecriture-interne.py
+
+      - name: Regle pure et suivi NVMe (tests hote)
+        run: |
+          set -euo pipefail
+          mkdir -p target-hote
+          python3 tools/ci/fabrique-disque-gpt.py target-hote/gpt.img --mio 8
+          rustc --edition 2021 --test tools/securite/test_stockage_regle.rs -o target-hote/stockage-regle
+          BO_DISQUE_GPT=target-hote/gpt.img target-hote/stockage-regle
+          rustc --edition 2021 --test tools/platform/test_nvme_suivi.rs -o target-hote/nvme-suivi
+          target-hote/nvme-suivi
+
+      - name: QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: cle-usb-test-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Images -- standard, cle-usb-test, temoin
+        run: |
+          set -euo pipefail
+          tools/ci/build_kernel.sh
+          GUID=$(python3 tools/release/pose_guid_disque_gpt.py --tire)
+          echo "GUID=$GUID" >> "$GITHUB_ENV"
+          CARGO_TARGET_DIR=target-temoin-ecriture cargo bootimage --features banc-ecriture-interne
+          BOUCHAUD_MEDIA_AUTORISE="$GUID" CARGO_TARGET_DIR=target-cle-usb-test \
+            cargo bootimage --features cle-usb-test,banc-ecriture-interne
+          STD=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          CLE=target-cle-usb-test/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          TEM=target-temoin-ecriture/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          # L'image livree ne porte pas la sonde ; les images du banc, si.
+          if grep -aq BOUCHAUD_SONDE_ECRITURE_DEBUT "$STD"; then echo "SONDE_DANS_L_IMAGE_STANDARD" >&2; exit 1; fi
+          grep -aq BOUCHAUD_SONDE_ECRITURE_DEBUT "$CLE"
+          grep -aq BOUCHAUD_SONDE_ECRITURE_DEBUT "$TEM"
+          # Le GUID tire est bien grave dans le noyau de l'image cle, et lui seul.
+          python3 -c "import sys; g=bytes.fromhex(sys.argv[1]); sys.exit(0 if g in open(sys.argv[2],'rb').read() and g not in open(sys.argv[3],'rb').read() else 1)" "$GUID" "$CLE" "$TEM"
+          for f in "$STD" "$CLE" "$TEM"; do sha256sum "$f"; done
+
+      - name: Banc QEMU TCG
+        run: |
+          bash tools/ci/run_cle_usb_test.sh \
+            target-cle-usb-test/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            target-temoin-ecriture/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$GUID"
+
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Banc QEMU KVM
+        run: |
+          BO_QEMU_KVM=1 bash tools/ci/run_cle_usb_test.sh \
+            target-cle-usb-test/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            target-temoin-ecriture/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$GUID"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cle-usb-test-proof
+          path: |
+            target/cle-usb-test-ci/**/propre.log
+            target/cle-usb-test-ci/**/commandes-recues.txt
+            target/cle-usb-test-ci/**/*.avant
+            target/cle-usb-test-ci/**/*.apres
           if-no-files-found: error
           retention-days: 14

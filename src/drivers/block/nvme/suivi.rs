@@ -223,6 +223,30 @@ impl Suivi {
         Some((((mot >> 8) & 0x7) as u8, (mot & 0xFF) as u8))
     }
 
+    /// BOUCHAUD_NVME_CID_JAMAIS_POSE_V1 -- la commande n'a JAMAIS ete posee
+    /// dans la file : file de soumission pleine, ou refus de la regle
+    /// `cle-usb-test`. Le controleur ne l'a pas vue ; aucun achevement ne
+    /// viendra pour elle, et l'identifiant revient au pot tout de suite.
+    ///
+    /// Le garder `EnVol` le perdait pour toujours : apres autant d'ecritures
+    /// refusees que le pot compte d'identifiants, plus aucune LECTURE ne
+    /// partait. Rend `false` (et ne change rien) si l'identifiant n'est pas en
+    /// vol -- un achevement deja range, une quarantaine, ne se liberent pas
+    /// ainsi.
+    pub fn jamais_pose(&mut self, cid: u16) -> bool {
+        if cid == 0 || (cid as usize) >= CID_MAX {
+            return false;
+        }
+        let index = cid as usize;
+        if self.etat[index] != EtatCid::EnVol {
+            return false;
+        }
+        self.etat[index] = EtatCid::Libre;
+        self.statut[index] = 0;
+        self.en_vol -= 1;
+        true
+    }
+
     /// L'emetteur abandonne l'attente : l'identifiant passe en quarantaine.
     ///
     /// Rend l'emplacement mis en quarantaine, ou `None` si la commande s'etait

@@ -60,6 +60,9 @@ typedef long i64;
 #define BO_DISPLAY_INFO    (BO_BASE + 0x81)
 #define BO_FENETRE_POMPE   (BO_BASE + 0x90)
 #define BO_FENETRE_LIT     (BO_BASE + 0x91)
+#define BO_FENETRE_CONFIGURE (BO_BASE + 0x92)
+#define BO_FENETRE_FERME   (BO_BASE + 0x93)
+#define BO_DISPLAY_RELANCE_CLIENT (BO_BASE + 0x82)
 #define BO_WAITSET_REMOVE  (BO_BASE + 0x32)
 #define BO_WAITSET_WAIT    (BO_BASE + 0x34)
 #define BO_TIME_NOW        (BO_BASE + 0x60)
@@ -541,59 +544,87 @@ int principal(void)
     return 1;
 }
 
-/* --- BOUCHAUD_BUREAU_RING3_2A : la premiere vraie fenetre ------------------
+/* --- BOUCHAUD_BUREAU_RING3_2A/2B : de vraies fenetres -----------------------
  *
  * Lance par le noyau en mode `bureau` quand l'image configure un bureau ring 3
- * (`/bureau-ring3`). Le service recoit DEUX capacites :
+ * (`/bureau-ring3`). Le service recoit :
  *   - `BO_DISPLAY`  : poser des rectangles a l'ecran ;
- *   - `BO_FENETRE`  : la fenetre d'une application BOGU ordinaire, lancee par
- *                     le noyau dans un AUTRE processus (surface memfd, canal).
- * Il compose le bureau -- fond, cadre de la fenetre, contenu de l'application
- * -- dans SA region (l'image de l'ecran), et ne presente que les rectangles
- * abimes. Il ne voit ni la surface, ni le processus de l'application : le
- * noyau valide les messages du client (`bo_fenetre_pompe`) et recopie, bornes
- * jugees, le rectangle demande (`bo_fenetre_lit`).
+ *   - `BO_FENETRES` : une capacite `Fenetre` par application BOGU ordinaire,
+ *                     lancee par le noyau dans SON processus (du fond vers le
+ *                     premier plan) ;
+ *   - `BO_BUREAU_SCENARIO` (facultatif) : `deplace-empile` deplace la fenetre
+ *     du fond puis la remonte au premier plan (pas d'entrees avant la 2C).
+ * Il compose le bureau dans SA region (l'image de l'ecran) par l'algorithme du
+ * peintre : sur un rectangle abime, le fond, puis chaque fenetre du fond vers
+ * le premier plan -- cadre, puis contenu recopie par le noyau
+ * (`bo_fenetre_lit`, bornes jugees). Il ne presente que les rectangles abimes.
+ * Il ne voit ni les surfaces, ni les processus des applications.
  *
- * Marqueurs : COMPOSITED_BUREAU_PRET, COMPOSITED_BUREAU_PREMIERE_TRAME,
- * COMPOSITED_BUREAU_MESURE, COMPOSITED_BUREAU_REFUS_OK,
- * COMPOSITED_BUREAU_CLIENT_MORT, COMPOSITED_BUREAU_BILAN.
+ * Marqueurs : COMPOSITED_BUREAU_PRET, COMPOSITED_BUREAU_FENETRE,
+ * COMPOSITED_BUREAU_PREMIERE_TRAME, COMPOSITED_BUREAU_MESURE,
+ * COMPOSITED_BUREAU_REFUS_OK, COMPOSITED_BUREAU_SCENARIO(_FIN),
+ * COMPOSITED_BUREAU_CLIENT_MORT, COMPOSITED_BUREAU_BILAN, COMPOSITED_BUREAU_OK.
  */
 
 #define BUREAU_FOND     0x1e3a5fu
 #define BUREAU_BORD     0x0b1a2au
 #define BUREAU_BARRE    0x2f6fb0u
-#define BUREAU_VIDE     0x202020u
+#define BUREAU_BARRE_INACTIVE 0x46607au
 #define BUREAU_BARRE_H  24u
 #define BUREAU_BORD_L   2u
 #define BUREAU_LIGNE_MAX 4096u
+#define FEN_MAX 4
 
 static u32 ecran_l, ecran_h;
-static u32 fen_x, fen_y, fen_l, fen_h;   /* zone de CONTENU, en pixels ecran */
 static u32 ligne_bureau[BUREAU_LIGNE_MAX];
 
-/* Ce que le bureau montre en (x, y), hors contenu de l'application. */
-static u32 pixel_bureau(u32 x, u32 y, int avec_fenetre)
+struct fen {
+    i64 poignee;
+    u32 x, y;             /* coin du CONTENU, en pixels ecran */
+    u32 l, h;             /* taille du contenu (ce que le client a peint) */
+    u32 pid;
+    int vivante, visible, minimisee;
+    u64 trames;           /* trames NOUVELLES composees (revue #298) */
+    u32 livrees;          /* dernier compte de trames livrees lu par la pompe */
+};
+static struct fen fens[FEN_MAX];
+static int nfen;
+static int ordre[FEN_MAX];   /* ordre[0] : fond ... ordre[nfen-1] : premier plan */
+static i64 affichage_g, region_g;
+static u64 lit_ns, lit_max, pres_ns, pres_max, trames_total, pixels_total, recompositions;
+
+struct rect { u32 x, y, l, h; };
+
+static struct rect cadre_de(const struct fen *f)
 {
-    if (!avec_fenetre) return BUREAU_FOND;
-    u32 x0 = fen_x - BUREAU_BORD_L, x1 = fen_x + fen_l + BUREAU_BORD_L;
-    u32 y0 = fen_y - BUREAU_BARRE_H - BUREAU_BORD_L, y1 = fen_y + fen_h + BUREAU_BORD_L;
-    if (x < x0 || x >= x1 || y < y0 || y >= y1) return BUREAU_FOND;
-    if (x >= fen_x && x < fen_x + fen_l && y >= fen_y && y < fen_y + fen_h) return BUREAU_VIDE;
-    if (y >= y0 + BUREAU_BORD_L && y < fen_y && x >= fen_x && x < fen_x + fen_l) return BUREAU_BARRE;
-    return BUREAU_BORD;
+    struct rect r = { f->x - BUREAU_BORD_L, f->y - BUREAU_BARRE_H - BUREAU_BORD_L,
+                      f->l + 2 * BUREAU_BORD_L, f->h + BUREAU_BARRE_H + 2 * BUREAU_BORD_L };
+    return r;
 }
 
-/* Repeint le rectangle (x, y, l, h) du bureau dans la region, puis le presente. */
-static i64 peint_bureau(i64 affichage, i64 region, u32 x, u32 y, u32 l, u32 h, int avec_fenetre)
+static int intersecte(struct rect a, struct rect b, struct rect *out)
 {
-    for (u32 r = 0; r < h; r++) {
-        for (u32 c = 0; c < l; c++) ligne_bureau[c] = pixel_bureau(x + c, y + r, avec_fenetre);
-        i64 e = sys6(BO_SHM_WRITE, (u64)region, ((u64)(y + r) * ecran_l + x) * 4u,
-                     (u64)ligne_bureau, (u64)l * 4u, 0, 0);
+    u32 x0 = a.x > b.x ? a.x : b.x, y0 = a.y > b.y ? a.y : b.y;
+    u32 x1 = (a.x + a.l) < (b.x + b.l) ? (a.x + a.l) : (b.x + b.l);
+    u32 y1 = (a.y + a.h) < (b.y + b.h) ? (a.y + a.h) : (b.y + b.h);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    out->x = x0; out->y = y0; out->l = x1 - x0; out->h = y1 - y0;
+    return 1;
+}
+
+static i64 ecris_segment(u32 x, u32 y, u32 l, u32 couleur)
+{
+    for (u32 c = 0; c < l; c++) ligne_bureau[c] = couleur;
+    return sys6(BO_SHM_WRITE, (u64)region_g, ((u64)y * ecran_l + x) * 4u, (u64)ligne_bureau, (u64)l * 4u, 0, 0);
+}
+
+static i64 remplit(struct rect r, u32 couleur)
+{
+    for (u32 y = r.y; y < r.y + r.h; y++) {
+        i64 e = ecris_segment(r.x, y, r.l, couleur);
         if (e < 0) return e;
     }
-    struct demande_presentation d = { ecran_l, ecran_h, x, y, l, h, x, y };
-    return sys6(BO_DISPLAY_PRESENT, (u64)affichage, (u64)region, (u64)&d, 0, 0, 0);
+    return 0;
 }
 
 struct lecture_fenetre { u32 x, y, l, h, decalage, pas; };
@@ -606,12 +637,124 @@ static i64 lit_fenetre(i64 fenetre, i64 region, u32 x, u32 y, u32 l, u32 h, u32 
 
 static u64 maintenant_ns(void) { return (u64)sys6(BO_TIME_NOW, 0, 0, 0, 0, 0, 0); }
 
-/* Les refus que le noyau doit opposer, une fois la premiere trame connue. */
-static void eprouve_refus(i64 affichage, i64 fenetre, i64 region, u32 peint_l, u32 peint_h)
+static i64 presente_rect(struct rect r)
 {
-    i64 r = lit_fenetre(fenetre, region, 1, 0, peint_l, 1, fen_x, fen_y);
+    struct demande_presentation d = { ecran_l, ecran_h, r.x, r.y, r.l, r.h, r.x, r.y };
+    u64 t0 = maintenant_ns();
+    i64 p = sys6(BO_DISPLAY_PRESENT, (u64)affichage_g, (u64)region_g, (u64)&d, 0, 0, 0);
+    u64 dt = maintenant_ns() - t0;
+    pres_ns += dt; if (dt > pres_max) pres_max = dt;
+    return p;
+}
+
+/* Contenu de la fenetre `f` sur le rectangle ecran `r` (deja dans le contenu). */
+static i64 recopie_contenu(struct fen *f, struct rect r)
+{
+    u64 t0 = maintenant_ns();
+    i64 n = lit_fenetre(f->poignee, region_g, r.x - f->x, r.y - f->y, r.l, r.h, r.x, r.y);
+    u64 dt = maintenant_ns() - t0;
+    lit_ns += dt; if (dt > lit_max) lit_max = dt;
+    if (n > 0) pixels_total += (u64)n;
+    return n;
+}
+
+/* La fenetre ACTIVE : la plus haute fenetre VISIBLE (une fenetre minimisee
+ * ou morte au sommet de la pile ne garde pas la barre active), -1 si aucune. */
+static int active(void)
+{
+    for (int k = nfen - 1; k >= 0; k--)
+        if (fens[ordre[k]].visible) return ordre[k];
+    return -1;
+}
+
+/* L'algorithme du peintre sur `r`, puis UNE presentation. */
+static i64 recompose(struct rect r)
+{
+    struct rect ecran = { 0, 0, ecran_l, ecran_h };
+    if (!intersecte(r, ecran, &r)) return 0;
+    recompositions++;
+    i64 e = remplit(r, BUREAU_FOND);
+    if (e < 0) return e;
+    for (int k = 0; k < nfen; k++) {
+        struct fen *f = &fens[ordre[k]];
+        if (!f->visible) continue;
+        struct rect c = cadre_de(f), i;
+        if (!intersecte(r, c, &i)) continue;
+        int premier_plan = (ordre[k] == active());
+        /* Cadre : bordure, barre (active au premier plan), en bandes. */
+        struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
+        struct rect contenu = { f->x, f->y, f->l, f->h };
+        struct rect morceau;
+        if (intersecte(i, c, &morceau)) {
+            for (u32 y = morceau.y; y < morceau.y + morceau.h; y++) {
+                struct rect ligne = { morceau.x, y, morceau.l, 1 }, sous;
+                if (intersecte(ligne, barre, &sous)) {
+                    /* bordure gauche/droite autour de la barre */
+                    if (sous.x > ligne.x) ecris_segment(ligne.x, y, sous.x - ligne.x, BUREAU_BORD);
+                    ecris_segment(sous.x, y, sous.l, premier_plan ? BUREAU_BARRE : BUREAU_BARRE_INACTIVE);
+                    if (sous.x + sous.l < ligne.x + ligne.l)
+                        ecris_segment(sous.x + sous.l, y, ligne.x + ligne.l - sous.x - sous.l, BUREAU_BORD);
+                } else if (intersecte(ligne, contenu, &sous)) {
+                    if (sous.x > ligne.x) ecris_segment(ligne.x, y, sous.x - ligne.x, BUREAU_BORD);
+                    if (sous.x + sous.l < ligne.x + ligne.l)
+                        ecris_segment(sous.x + sous.l, y, ligne.x + ligne.l - sous.x - sous.l, BUREAU_BORD);
+                } else {
+                    ecris_segment(ligne.x, y, ligne.l, BUREAU_BORD);
+                }
+            }
+        }
+        if (intersecte(i, contenu, &morceau)) recopie_contenu(f, morceau);
+    }
+    return presente_rect(r);
+}
+
+static int rang_de(int indice)
+{
+    for (int k = 0; k < nfen; k++) if (ordre[k] == indice) return k;
+    return -1;
+}
+
+/* Une fenetre au-dessus de `indice` recouvre-t-elle `r` ? */
+static int recouverte(int indice, struct rect r)
+{
+    struct rect i;
+    for (int k = rang_de(indice) + 1; k < nfen; k++) {
+        struct fen *f = &fens[ordre[k]];
+        if (f->visible && intersecte(r, cadre_de(f), &i)) return 1;
+    }
+    return 0;
+}
+
+static void remonte(int indice)
+{
+    int k = rang_de(indice);
+    if (k < 0) return;
+    int ancien_haut = active();   /* la fenetre active AVANT, pas le sommet de pile */
+    for (; k < nfen - 1; k++) ordre[k] = ordre[k + 1];
+    ordre[nfen - 1] = indice;
+    recompose(cadre_de(&fens[indice]));
+    if (ancien_haut >= 0 && ancien_haut != indice && fens[ancien_haut].visible) {
+        struct rect b = { fens[ancien_haut].x, fens[ancien_haut].y - BUREAU_BARRE_H, fens[ancien_haut].l, BUREAU_BARRE_H };
+        recompose(b);   /* sa barre devient inactive */
+    }
+}
+
+static void deplace(int indice, u32 nx, u32 ny)
+{
+    struct fen *f = &fens[indice];
+    struct rect avant = cadre_de(f);
+    f->x = nx; f->y = ny;
+    recompose(avant);
+    recompose(cadre_de(f));
+}
+
+/* Les refus que le noyau doit opposer, une fois une trame connue. */
+static void eprouve_refus(i64 fenetre, u32 peint_l, u32 peint_h, u32 fx, u32 fy)
+{
+    i64 region = region_g, affichage = affichage_g;
+    i64 r = lit_fenetre(fenetre, region, 1, 0, peint_l, 1, fx, fy);
     exige(r == -BO_E_INVALID_ARGUMENT, "bureau : lecture au-dela de ce que le client a peint refusee");
-    r = lit_fenetre(fenetre, region, 0, peint_h, 1, 1, fen_x, fen_y);
+    r = lit_fenetre(fenetre, region, 0, peint_h, 1, 1, fx, fy);
     exige(r == -BO_E_INVALID_ARGUMENT, "bureau : ligne sous la surface peinte refusee");
     struct lecture_fenetre geant = { 0, 0, 1, 1, 0xfffffff0u, 4 };
     r = sys6(BO_FENETRE_LIT, (u64)fenetre, (u64)region, (u64)&geant, 0, 0, 0);
@@ -621,10 +764,10 @@ static void eprouve_refus(i64 affichage, i64 fenetre, i64 region, u32 peint_l, u
     exige(r == -BO_E_INVALID_ARGUMENT, "bureau : pas plus court qu'une ligne refuse");
     i64 lecture_seule = sys6(BO_HANDLE_DUP, (u64)region, BO_RIGHT_READ, 0, 0, 0, 0);
     exige(lecture_seule > 0, "bureau : region dupliquee en lecture seule");
-    r = lit_fenetre(fenetre, lecture_seule, 0, 0, 1, 1, fen_x, fen_y);
+    r = lit_fenetre(fenetre, lecture_seule, 0, 0, 1, 1, fx, fy);
     exige(r == -BO_E_ACCESS_DENIED, "bureau : ecriture dans une region sans droit WRITE refusee");
     sys6(BO_HANDLE_CLOSE, (u64)lecture_seule, 0, 0, 0, 0, 0);
-    r = lit_fenetre(affichage, region, 0, 0, 1, 1, fen_x, fen_y);
+    r = lit_fenetre(affichage, region, 0, 0, 1, 1, fx, fy);
     exige(r == -BO_E_ACCESS_DENIED, "bureau : la capacite d'affichage ne sert pas de fenetre");
     r = sys6(BO_HANDLE_DUP, (u64)fenetre, BO_RIGHT_READ, 0, 0, 0, 0);
     exige(r < 0, "bureau : la capacite fenetre ne se duplique pas");
@@ -636,8 +779,131 @@ static void eprouve_refus(i64 affichage, i64 fenetre, i64 region, u32 peint_l, u
     if (echecs == 0) ecris("COMPOSITED_BUREAU_REFUS_OK\n");
 }
 
-static int bureau(i64 affichage, i64 fenetre)
+/* Place la fenetre `i` (taille connue) : en cascade, dans l'ecran. */
+static void place(int i)
 {
+    struct fen *f = &fens[i];
+    u32 x = 40 + (u32)i * 420, y = 40 + BUREAU_BARRE_H + BUREAU_BORD_L + (u32)i * 190;
+    if (x + f->l + BUREAU_BORD_L > ecran_l) x = ecran_l > f->l + BUREAU_BORD_L ? ecran_l - f->l - BUREAU_BORD_L : BUREAU_BORD_L;
+    if (y + f->h + BUREAU_BORD_L > ecran_h) y = ecran_h > f->h + BUREAU_BORD_L ? ecran_h - f->h - BUREAU_BORD_L : BUREAU_BARRE_H + BUREAU_BORD_L;
+    if (x < BUREAU_BORD_L) x = BUREAU_BORD_L;
+    if (y < BUREAU_BARRE_H + BUREAU_BORD_L) y = BUREAU_BARRE_H + BUREAU_BORD_L;
+    f->x = x; f->y = y;
+}
+
+/* `COMPOSITED_BUREAU_TRAMES fenetre=I pid=P trames=N`, en UNE ecriture. */
+static void ajoute_nombre(char *t, unsigned long *n, u64 v)
+{
+    char c[24]; int k = 0;
+    if (v == 0) c[k++] = '0';
+    while (v) { c[k++] = (char)('0' + v % 10); v /= 10; }
+    while (k && *n < 180) t[(*n)++] = c[--k];
+}
+
+static void ajoute_texte(char *t, unsigned long *n, const char *s)
+{
+    while (*s && *n < 180) t[(*n)++] = *s++;
+}
+
+static void publie_trames(int i)
+{
+    char t[192]; unsigned long n = 0;
+    ajoute_texte(t, &n, "COMPOSITED_BUREAU_TRAMES fenetre=");
+    ajoute_nombre(t, &n, (u64)i);
+    ajoute_texte(t, &n, " pid=");
+    ajoute_nombre(t, &n, fens[i].pid);
+    ajoute_texte(t, &n, " trames=");
+    ajoute_nombre(t, &n, fens[i].trames);
+    ajoute_texte(t, &n, fens[i].vivante ? " vivante=1\n" : " vivante=0\n");
+    t[n] = 0;
+    ecris(t);
+}
+
+static void publie_fenetre(int i, const char *etiquette)
+{
+    struct fen *f = &fens[i];
+    ecris_nombre(etiquette, i);
+    ecris_nombre("[COMPOSITED] pid=", f->pid);
+    ecris_nombre("[COMPOSITED] x=", f->x);
+    ecris_nombre("[COMPOSITED] y=", f->y);
+    ecris_nombre("[COMPOSITED] l=", f->l);
+    ecris_nombre("[COMPOSITED] h=", f->h);
+    ecris_nombre("[COMPOSITED] rang=", rang_de(i));
+}
+
+/* `BO_FENETRES=h1,h2,...` dans l'environnement. */
+static int lit_fenetres(u64 *pile)
+{
+    u64 argc = pile[0];
+    char **envp = (char **)(pile + 1 + argc + 1);
+    for (; *envp; envp++) {
+        const char *e = *envp, *c = "BO_FENETRES=";
+        while (*c && *e == *c) { e++; c++; }
+        if (*c) continue;
+        while (*e && nfen < FEN_MAX) {
+            i64 v = 0; int chiffres = 0;
+            while (*e >= '0' && *e <= '9') { v = v * 10 + (*e++ - '0'); chiffres++; }
+            if (!chiffres) return 0;
+            fens[nfen].poignee = v; ordre[nfen] = nfen; nfen++;
+            if (*e == ',') e++; else if (*e) return 0;
+        }
+        return nfen;
+    }
+    return 0;
+}
+
+/* 0 : aucun ; 1 : `deplace-empile` ; 2 : `complet` (deplace-empile, puis
+ * redimensionnement, minimisation, restauration, fermeture, relance). */
+static int scenario_de(u64 *pile)
+{
+    u64 argc = pile[0];
+    char **envp = (char **)(pile + 1 + argc + 1);
+    for (; *envp; envp++) {
+        const char *noms[2] = { "BO_BUREAU_SCENARIO=deplace-empile", "BO_BUREAU_SCENARIO=complet" };
+        for (int k = 0; k < 2; k++) {
+            const char *e = *envp, *c = noms[k];
+            while (*c && *e == *c) { e++; c++; }
+            if (!*c && !*e) return k + 1;
+        }
+    }
+    return 0;
+}
+
+/* La barre de titre de la fenetre `i` (pour un changement de fenetre active). */
+static void recompose_barre(int i)
+{
+    if (i < 0 || !fens[i].visible) return;
+    struct rect b = { fens[i].x, fens[i].y - BUREAU_BARRE_H, fens[i].l, BUREAU_BARRE_H };
+    recompose(b);
+}
+
+static void minimise(int i)
+{
+    struct fen *f = &fens[i];
+    if (!f->visible) return;
+    f->visible = 0; f->minimisee = 1;
+    recompose(cadre_de(f));
+    recompose_barre(active());   /* la fenetre qui devient active */
+    ecris_nombre("COMPOSITED_BUREAU_MINIMISE fenetre=", i);
+}
+
+static void restaure(int i)
+{
+    struct fen *f = &fens[i];
+    if (!f->minimisee) return;
+    int avant = active();
+    f->minimisee = 0; f->visible = 1;
+    recompose(cadre_de(f));
+    if (avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
+    publie_fenetre(i, "COMPOSITED_BUREAU_RESTAURE fenetre=");
+}
+
+static int bureau(i64 affichage, u64 *pile)
+{
+    affichage_g = affichage;
+    if (lit_fenetres(pile) <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=fenetres\n"); return 1; }
+    int scenario = scenario_de(pile);
+    u64 attente_etape = 0;   /* instant (ns) de l'etape suivante du scenario complet */
     i64 dims = sys6(BO_DISPLAY_INFO, (u64)affichage, 0, 0, 0, 0, 0);
     exige(dims > 0, "bureau : taille de l'ecran connue");
     if (dims <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=ecran\n"); return 1; }
@@ -646,98 +912,186 @@ static int bureau(i64 affichage, i64 fenetre)
         ecris_nombre("COMPOSITED_BUREAU_FAIL raison=ecran-hors-gabarit l=", ecran_l);
         return 1;
     }
-    i64 region = sys6(BO_SHM_CREATE, (u64)ecran_l * ecran_h * 4u, 0, 0, 0, 0, 0);
-    exige(region > 0, "bureau : image de l'ecran creee");
-    if (region <= 0) return 1;
-
-    /* Etat initial : taille de la fenetre, connue avant la premiere trame. */
-    u32 etat[10];
-    i64 vivant = sys6(BO_FENETRE_POMPE, (u64)fenetre, (u64)etat, 0, 0, 0, 0);
-    exige(vivant >= 0, "bureau : premier etat de la fenetre lu");
-    fen_l = 640; fen_h = 400;
-    fen_x = (ecran_l - fen_l) / 2;
-    fen_y = (ecran_h - fen_h) / 2 + BUREAU_BARRE_H / 2;
-    i64 r = peint_bureau(affichage, region, 0, 0, ecran_l, ecran_h, 1);
-    exige(r >= 0, "bureau : fond et cadre presentes");
-    ecris_nombre("COMPOSITED_BUREAU_PRET pid_client=", etat[1]);
-    ecris_nombre("[COMPOSITED] ecran_l=", ecran_l);
-    ecris_nombre("[COMPOSITED] ecran_h=", ecran_h);
-    ecris_nombre("[COMPOSITED] fenetre_x=", fen_x);
-    ecris_nombre("[COMPOSITED] fenetre_y=", fen_y);
+    region_g = sys6(BO_SHM_CREATE, (u64)ecran_l * ecran_h * 4u, 0, 0, 0, 0, 0);
+    exige(region_g > 0, "bureau : image de l'ecran creee");
+    if (region_g <= 0) return 1;
+    struct rect tout = { 0, 0, ecran_l, ecran_h };
+    exige(recompose(tout) >= 0, "bureau : fond presente");
 
     i64 attente = sys6(BO_WAITSET_CREATE, 0, 0, 0, 0, 0, 0);
-    exige(attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)fenetre, 1, 0, 0, 0) == 0,
-          "bureau : fenetre attendue dans un waitset");
+    int ajoutees = 0;
+    for (int i = 0; i < nfen; i++) {
+        fens[i].vivante = 1;
+        if (attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)fens[i].poignee, (u64)i + 1, 0, 0, 0) == 0) ajoutees++;
+    }
+    exige(ajoutees == nfen, "bureau : chaque fenetre attendue dans un waitset");
+    ecris_nombre("COMPOSITED_BUREAU_PRET fenetres=", nfen);
+    ecris_nombre("[COMPOSITED] ecran_l=", ecran_l);
+    ecris_nombre("[COMPOSITED] ecran_h=", ecran_h);
 
-    struct bo_wait_event evenements[4];
-    u64 trames = 0, pixels = 0, lit_ns = 0, lit_max = 0, pres_ns = 0, pres_max = 0, premiere = 0;
-    u64 debut_ns = 0;
-    int refus_eprouves = 0;
-    /* Ce que le client a peint, tel que connu de la derniere composition. Un
-     * changement (dont le premier tour : le pompage initial a deja repris le
-     * dommage de la trame complete) impose de tout recopier. */
-    u32 peint_l = 0, peint_h = 0;
-    for (;;) {
-        i64 n = sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, 4, 1000000000UL, 0, 0);
+    struct bo_wait_event evenements[FEN_MAX];
+    u64 premiere = 0, debut_ns = 0;
+    int refus_eprouves = 0, etape = 0, vivantes = nfen;
+    u32 etat[10];
+    while (vivantes > 0) {
+        i64 n = sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX, 1000000000UL, 0, 0);
         if (n < 0 && n != -BO_E_TIMED_OUT) { ecris_nombre("COMPOSITED_BUREAU_FAIL attente=", n); return 1; }
-        vivant = sys6(BO_FENETRE_POMPE, (u64)fenetre, (u64)etat, 0, 0, 0, 0);
-        if (vivant < 0) { ecris_nombre("COMPOSITED_BUREAU_FAIL pompe=", vivant); return 1; }
-        if (vivant == 0) break;
-        u32 dx = etat[4], dy = etat[5], dl = etat[6], dh = etat[7];
-        if ((etat[2] != peint_l || etat[3] != peint_h) && etat[2] && etat[3]) {
-            peint_l = etat[2]; peint_h = etat[3];
-            dx = 0; dy = 0; dl = peint_l; dh = peint_h;
+        for (int i = 0; i < nfen; i++) {
+            struct fen *f = &fens[i];
+            if (!f->vivante) continue;
+            i64 v = sys6(BO_FENETRE_POMPE, (u64)f->poignee, (u64)etat, 0, 0, 0, 0);
+            if (v < 0) { ecris_nombre("COMPOSITED_BUREAU_FAIL pompe=", v); return 1; }
+            f->pid = etat[1];
+            /* Revue #298 : une trame n'est comptee que si le client en a
+             * LIVRE une nouvelle (compte du noyau, etat[8]). Un reveil du
+             * waitset cause par un autre client ne fait plus avancer le
+             * compte d'une fenetre figee. */
+            u32 nouvelles = etat[8] - f->livrees;
+            f->livrees = etat[8];
+            if (v == 0) {
+                /* Mort : la fenetre disparait, les autres continuent. */
+                f->vivante = 0; vivantes--;
+                ecris_nombre("COMPOSITED_BUREAU_CLIENT_MORT pid=", f->pid);
+                sys6(BO_WAITSET_REMOVE, (u64)attente, (u64)i + 1, 0, 0, 0, 0);
+                sys6(BO_HANDLE_CLOSE, (u64)f->poignee, 0, 0, 0, 0, 0);
+                if (f->visible) {
+                    f->visible = 0;
+                    exige(recompose(cadre_de(f)) >= 0, "bureau : fenetre du client mort effacee");
+                    recompose_barre(active());   /* la fenetre qui devient active */
+                }
+                continue;
+            }
+            u32 dx = etat[4], dy = etat[5], dl = etat[6], dh = etat[7];
+            if (!f->visible) {
+                /* Minimisee : ses trames sont pompees (le client avance), pas dessinees. */
+                if (f->minimisee) { if (nouvelles) { f->trames++; trames_total++; } continue; }
+                if (etat[2] == 0 || etat[3] == 0) continue;
+                f->l = etat[2]; f->h = etat[3];
+                place(i);
+                int avant = active();
+                f->visible = 1;
+                publie_fenetre(i, "COMPOSITED_BUREAU_FENETRE indice=");
+                recompose(cadre_de(f));
+                if (avant >= 0 && avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
+                dl = 0;
+            } else if (etat[2] != f->l || etat[3] != f->h) {
+                /* Taille peinte changee : tout le cadre, ancien et nouveau. */
+                struct rect avant = cadre_de(f);
+                f->l = etat[2]; f->h = etat[3];
+                recompose(avant); recompose(cadre_de(f));
+                publie_fenetre(i, "COMPOSITED_BUREAU_FENETRE indice=");
+                dl = 0;
+            }
+            if (dl && dh) {
+                if (dx + dl > f->l) dl = dx < f->l ? f->l - dx : 0;
+                if (dy + dh > f->h) dh = dy < f->h ? f->h - dy : 0;
+            }
+            /* Revue #298 : le dommage est coupe a l'ecran, comme dans
+             * `recompose` : une fenetre plus large que l'ecran ne fait plus
+             * demander au noyau une lecture ou une presentation hors bornes
+             * (refusees, contenu visible perime). */
+            struct rect d = { f->x + dx, f->y + dy, dl, dh }, ecran = { 0, 0, ecran_l, ecran_h };
+            if (dl && dh && !intersecte(d, ecran, &d)) dl = 0;
+            if (dl && dh) {
+                if (recouverte(i, d)) {
+                    recompose(d);
+                } else {
+                    if (recopie_contenu(f, d) < 0) continue;
+                    if (presente_rect(d) < 0) continue;
+                }
+            }
+            if (!nouvelles) continue;
+            f->trames++; trames_total++;
+            if (!premiere) {
+                premiere = 1; debut_ns = maintenant_ns();
+                ecris_nombre("COMPOSITED_BUREAU_PREMIERE_TRAME fenetre=", i);
+            }
+            if (!refus_eprouves && f->trames >= 3) {
+                refus_eprouves = 1;
+                eprouve_refus(f->poignee, f->l, f->h, f->x, f->y);
+            }
+            if (trames_total % 120 == 0) {
+                ecris_nombre("COMPOSITED_BUREAU_MESURE trames=", (i64)trames_total);
+                ecris_nombre("[COMPOSITED] pixels_copies=", (i64)pixels_total);
+                ecris_nombre("[COMPOSITED] lit_us_moy=", (i64)(lit_ns / trames_total / 1000));
+                ecris_nombre("[COMPOSITED] lit_us_max=", (i64)(lit_max / 1000));
+                ecris_nombre("[COMPOSITED] presente_us_moy=", (i64)(pres_ns / trames_total / 1000));
+                ecris_nombre("[COMPOSITED] presente_us_max=", (i64)(pres_max / 1000));
+                ecris_nombre("[COMPOSITED] recompositions=", (i64)recompositions);
+                ecris_nombre("[COMPOSITED] duree_ms=", (i64)((maintenant_ns() - debut_ns) / 1000000));
+                for (int k = 0; k < nfen; k++) publie_trames(k);
+            }
         }
-        if (dl == 0 || dh == 0) continue;
-        if (dx + dl > fen_l) dl = dx < fen_l ? fen_l - dx : 0;
-        if (dy + dh > fen_h) dh = dy < fen_h ? fen_h - dy : 0;
-        if (dl == 0 || dh == 0) continue;
-        u64 t0 = maintenant_ns();
-        i64 copies = lit_fenetre(fenetre, region, dx, dy, dl, dh, fen_x + dx, fen_y + dy);
-        u64 t1 = maintenant_ns();
-        if (copies < 0) { ecris_nombre("[COMPOSITED] lecture refusee=", copies); continue; }
-        struct demande_presentation d = { ecran_l, ecran_h, fen_x + dx, fen_y + dy, dl, dh, fen_x + dx, fen_y + dy };
-        i64 p = sys6(BO_DISPLAY_PRESENT, (u64)affichage, (u64)region, (u64)&d, 0, 0, 0);
-        u64 t2 = maintenant_ns();
-        if (p < 0) { ecris_nombre("[COMPOSITED] presentation refusee=", p); continue; }
-        trames++; pixels += (u64)copies;
-        lit_ns += t1 - t0; if (t1 - t0 > lit_max) lit_max = t1 - t0;
-        pres_ns += t2 - t1; if (t2 - t1 > pres_max) pres_max = t2 - t1;
-        if (!premiere) {
-            premiere = 1;
-            debut_ns = t0;
-            ecris_nombre("COMPOSITED_BUREAU_PREMIERE_TRAME pixels=", copies);
+        /* Scenario : la fenetre du fond glisse, puis monte au premier plan. */
+        if (scenario && etape < 21 && nfen >= 2 && fens[0].visible && fens[1].visible
+            && fens[0].trames >= 240 && fens[1].trames >= 240) {
+            if (etape == 0) ecris("COMPOSITED_BUREAU_SCENARIO debut deplacement\n");
+            if (etape < 20) {
+                deplace(0, fens[0].x + 8, fens[0].y + 4);
+            } else {
+                remonte(0);
+                /* TOUTES les fenetres visibles : `remonte` decale le rang de
+                 * chacune. Ne republier que 0 et 1 laissait a une troisieme
+                 * (la mire du banc applications) un rang perime, egal a celui
+                 * de la fenetre remontee -- et le juge l'empilait au-dessus. */
+                for (int k = 0; k < nfen; k++)
+                    if (fens[k].visible) publie_fenetre(k, "COMPOSITED_BUREAU_SCENARIO_FIN fenetre=");
+                ecris("COMPOSITED_BUREAU_SCENARIO_PILE_PUBLIEE\n");
+            }
+            etape++;
         }
-        if (!refus_eprouves && trames >= 3) {
-            refus_eprouves = 1;
-            eprouve_refus(affichage, fenetre, region, etat[2], etat[3]);
-        }
-        if (trames % 120 == 0) {
-            ecris_nombre("COMPOSITED_BUREAU_MESURE trames=", (i64)trames);
-            ecris_nombre("[COMPOSITED] pixels_copies=", (i64)pixels);
-            ecris_nombre("[COMPOSITED] lit_us_moy=", (i64)(lit_ns / trames / 1000));
-            ecris_nombre("[COMPOSITED] lit_us_max=", (i64)(lit_max / 1000));
-            ecris_nombre("[COMPOSITED] presente_us_moy=", (i64)(pres_ns / trames / 1000));
-            ecris_nombre("[COMPOSITED] presente_us_max=", (i64)(pres_max / 1000));
-            ecris_nombre("[COMPOSITED] duree_ms=", (i64)((t2 - debut_ns) / 1000000));
+        /* Scenario complet : une etape toutes les 4 s -- le banc capture
+         * l'ecran entre deux etapes, et chaque capture doit tomber DANS son
+         * etape (une cadence en trames les rapprochait a 1 s sous TCG). */
+        if (scenario == 2 && etape >= 21 && etape < 27) {
+            u64 maintenant = maintenant_ns();
+            if (attente_etape == 0) attente_etape = maintenant + 4000000000UL;
+            if (maintenant >= attente_etape) {
+                attente_etape = 0;
+                if (etape == 21) {
+                    i64 z = sys6(BO_FENETRE_CONFIGURE, (u64)fens[1].poignee, 480, 300, 1, 0, 0);
+                    exige(z == (((i64)480 << 32) | 300), "bureau : redimensionnement 480x300 accepte");
+                    i64 trop = sys6(BO_FENETRE_CONFIGURE, (u64)fens[1].poignee, 0, 300, 1, 0, 0);
+                    exige(trop == -BO_E_INVALID_ARGUMENT, "bureau : zone vide refusee");
+                    ecris("COMPOSITED_BUREAU_ETAPE redimension fenetre=1\n");
+                } else if (etape == 22) {
+                    minimise(0);
+                } else if (etape == 23) {
+                    restaure(0);
+                } else if (etape == 24) {
+                    exige(sys6(BO_FENETRE_FERME, (u64)fens[1].poignee, 0, 0, 0, 0, 0) == 0,
+                          "bureau : fermeture demandee");
+                    ecris("COMPOSITED_BUREAU_ETAPE fermeture fenetre=1\n");
+                } else if (etape == 25) {
+                    if (fens[1].vivante) { attente_etape = maintenant; continue; }  /* attendre la sortie */
+                    i64 h = sys6(BO_DISPLAY_RELANCE_CLIENT, (u64)affichage_g, 1, 0, 0, 0, 0);
+                    exige(h > 0, "bureau : application relancee");
+                    i64 hors = sys6(BO_DISPLAY_RELANCE_CLIENT, (u64)affichage_g, 7, 0, 0, 0, 0);
+                    exige(hors < 0, "bureau : relance hors configuration refusee");
+                    if (h > 0) {
+                        struct fen *f = &fens[1];
+                        f->poignee = h; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0; f->livrees = 0;
+                        sys6(BO_WAITSET_ADD, (u64)attente, (u64)h, 2, 0, 0, 0);
+                        vivantes++;
+                        ecris("COMPOSITED_BUREAU_ETAPE relance fenetre=1\n");
+                    }
+                } else if (etape == 26) {
+                    ecris(echecs == 0 ? "COMPOSITED_BUREAU_SCENARIO_COMPLET\n" : "COMPOSITED_BUREAU_SCENARIO_ECHEC\n");
+                }
+                etape++;
+            }
         }
     }
 
-    /* Le client est mort : sa fenetre disparait, le bureau reste. */
-    ecris_nombre("COMPOSITED_BUREAU_CLIENT_MORT pid=", etat[1]);
-    sys6(BO_WAITSET_REMOVE, (u64)attente, 1, 0, 0, 0, 0);
-    sys6(BO_HANDLE_CLOSE, (u64)fenetre, 0, 0, 0, 0, 0);
-    r = peint_bureau(affichage, region, fen_x - BUREAU_BORD_L, fen_y - BUREAU_BARRE_H - BUREAU_BORD_L,
-                     fen_l + 2 * BUREAU_BORD_L, fen_h + BUREAU_BARRE_H + 2 * BUREAU_BORD_L, 0);
-    exige(r >= 0, "bureau : fenetre du client mort effacee");
-    ecris_nombre("COMPOSITED_BUREAU_BILAN trames=", (i64)trames);
-    if (trames) {
-        ecris_nombre("[COMPOSITED] lit_us_moy=", (i64)(lit_ns / trames / 1000));
-        ecris_nombre("[COMPOSITED] presente_us_moy=", (i64)(pres_ns / trames / 1000));
+    ecris_nombre("COMPOSITED_BUREAU_BILAN trames=", (i64)trames_total);
+    for (int k = 0; k < nfen; k++) publie_trames(k);
+    if (trames_total) {
+        ecris_nombre("[COMPOSITED] lit_us_moy=", (i64)(lit_ns / trames_total / 1000));
+        ecris_nombre("[COMPOSITED] presente_us_moy=", (i64)(pres_ns / trames_total / 1000));
     }
-    ecris(echecs == 0 && trames > 0 ? "COMPOSITED_BUREAU_OK\n" : "COMPOSITED_BUREAU_FAIL\n");
+    ecris(echecs == 0 && trames_total > 0 ? "COMPOSITED_BUREAU_OK\n" : "COMPOSITED_BUREAU_FAIL\n");
     /* Le bureau reste affiche : le service vit, sans plus rien a composer. */
-    for (;;) sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, 4, 1000000000UL, 0, 0);
+    for (;;) sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX, 1000000000UL, 0, 0);
     return 0;
 }
 
@@ -776,11 +1130,11 @@ void demarre(u64 *pile);
 void demarre(u64 *pile)
 {
     i64 affichage = capacite_affichage(pile);
-    i64 fenetre = variable_nombre(pile, "BO_FENETRE=");
     int code;
-    if (affichage >= 0 && fenetre >= 0) {
-        /* `/bin/composited bureau` : une vraie application, un autre processus. */
-        code = bureau(affichage, fenetre);
+    if (affichage >= 0 && lit_fenetres(pile) > 0) {
+        /* `/bin/composited bureau` : de vraies applications, d'autres processus. */
+        nfen = 0;
+        code = bureau(affichage, pile);
     } else if (affichage >= 0) {
         /* `/bin/composited presentation`, lance par le noyau. */
         code = presentation(affichage);

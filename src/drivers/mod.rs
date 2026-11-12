@@ -20,6 +20,10 @@ pub mod ata_integrite;
 pub mod block;
 #[path = "api/bloc.rs"]
 pub mod bloc;
+/// BOUCHAUD_CLE_USB_TEST_V1 : aucune commande d'ecriture vers un disque interne
+/// dans une image `cle-usb-test` (regle pure : `api/stockage_regle.rs`).
+#[path = "api/ecriture_interne.rs"]
+pub mod ecriture_interne;
 #[path = "block/disk.rs"]
 pub mod disk;
 #[path = "block/nvme.rs"]
