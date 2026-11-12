@@ -34,6 +34,12 @@ Remarques :
   - Elle est compilée avec `cle-usb-test` : aucune écriture, vidange, formatage ni effacement vers un disque **interne** (ATA, NVMe).
   - Seule la clé elle-même, reconnue par son GUID GPT, est inscriptible.
   - Détails : `TRIGKEY_CLE_USB_TEST.md`.
+  - Construction : `tools/release/build_cle_validation.sh`, le même script pour le script Windows et pour la CI.
+  - **Testée en QEMU** (`tools/release/test_cle_validation_qemu.py`, CI `trigkey-ab-preflight`) :
+    - démarrage comme clé USB, à côté d'un NVMe interne rempli d'octets connus ;
+    - bureau, règle active, clé reconnue comme média autorisé, DHCP, Terminal et DOOM ;
+    - **empreinte du NVMe interne identique avant et après**.
+  - Résultat : `CLE_VALIDATION_QEMU_OK`. Rien n'a été fait sur le matériel.
 
 ## 2. Ce qui exige ta présence physique
 
