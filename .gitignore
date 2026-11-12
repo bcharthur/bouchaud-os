@@ -222,6 +222,10 @@ tools/userland/out-persist-cache/
 /FINALIZE-LADYBIRD-*.ps1
 /.ladybird-local-export*
 /native-browser-m9/
+# Artefact Ladybird de la CI, telecharge a la racine par les jobs qui le jouent
+# (verifie_artefact_ladybird.sh) : jamais versionne, et il ne doit pas rendre
+# l'arbre sale pour la construction de l'image de livraison.
+/native-browser/
 /native-browser-m9.previous-*/
 /scenario-stage2-ladybird/
 

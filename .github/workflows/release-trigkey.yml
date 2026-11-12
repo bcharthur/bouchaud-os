@@ -107,14 +107,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
-          path: native-browser
+          # Hors de l'arbre de travail : le build refuse un arbre sale.
+          path: ${{ runner.temp }}/native-browser
           run-id: ${{ steps.ladybird.outputs.source_run }}
           github-token: ${{ github.token }}
+      # Un artefact d'un AUTRE run : reverifie ici (binaires, ressources,
+      # entrees de build identiques a celles de HEAD), comme dans la CI.
+      - name: Verifier l'artefact Ladybird telecharge (liaison entrees)
+        run: tools/ci/verifie_artefact_ladybird.sh entrees "$RUNNER_TEMP/native-browser"
       - name: Image de livraison (version et sequence de CETTE release ; aucune ecriture de peripherique)
         env:
           BO_VERSION: ${{ inputs.version }}
           BO_SEQUENCE: ${{ inputs.sequence }}
-        run: BO_NATIF_LADYBIRD="$PWD/native-browser" bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
+        run: BO_NATIF_LADYBIRD="$RUNNER_TEMP/native-browser" bash tools/release/build_trigkey_ab_image.sh target/release-trigkey
       - name: Demarrage de CETTE image sous QEMU/OVMF (signal de sante reel)
         run: bash tools/release/smoke_trigkey_ab_qemu.sh target/release-trigkey
       - name: CETTE image utilisee comme un humain (Terminal, DOOM, Ladybird) ; livrable exige
