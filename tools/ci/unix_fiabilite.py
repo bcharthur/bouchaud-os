@@ -221,6 +221,100 @@ def scenario_arborescence() -> tuple[list[str], list[Etape]]:
     return ["journal off", "cd /", "chmod 755 /programme-temoin"], e
 
 
+# --- Le scenario `persistance` : plusieurs demarrages sur le MEME disque -------
+#
+# Disque de mkdisk.sh : l'archive (autorun) au debut, au moins
+# (1025+1)*512 octets, puis la zone persistante de 128 Mio a la fin. Entre deux
+# demarrages, SEULE l'archive est reecrite (un autre autorun) ; la zone --
+# donc /persist -- n'est jamais touchee par le banc.
+
+ARCHIVE_PLANCHER = (1025 + 1) * 512
+ZONE_OCTETS = 262144 * 512
+CONTENU = "persistant-0123456789-ok"
+
+
+def disque_persistant(chemin: Path, autorun: str) -> None:
+    chemin.write_bytes(b"\0" * (ARCHIVE_PLANCHER + ZONE_OCTETS))
+    reecrit_autorun(chemin, autorun)
+
+
+def reecrit_autorun(chemin: Path, autorun: str) -> None:
+    tampon = io.BytesIO()
+    with tarfile.open(fileobj=tampon, mode="w", format=tarfile.USTAR_FORMAT) as t:
+        i = tarfile.TarInfo("./autorun")
+        i.mode, i.uid, i.gid, i.uname, i.gname = 0o644, 0, 0, "root", "root"
+        donnees = autorun.encode()
+        i.size = len(donnees)
+        t.addfile(i, io.BytesIO(donnees))
+    octets = tampon.getvalue()
+    if len(octets) > ARCHIVE_PLANCHER:
+        raise ValueError("autorun trop gros pour la region d'archive")
+    with chemin.open("r+b") as f:
+        f.write(octets + b"\0" * (ARCHIVE_PLANCHER - len(octets)))
+
+
+def demarrages_persistance() -> list[tuple[list[str], list[Etape]]]:
+    d = "/persist/utilisateur"
+    b1 = [
+        Etape("b1-mkdir", f"mkdir {d}", lignes=0),
+        Etape("b1-touch", f"touch {d}/note.txt", lignes=0),
+        Etape("b1-write", f"write {d}/note.txt {CONTENU}", lignes=0),
+        Etape("b1-relit", f"cat {d}/note.txt", attendus=[rf"^{CONTENU}$"], lignes=1),
+        Etape("b1-sync", "sync", attendus=[r"^sync: [0-9]+ fichier\(s\) ecrit\(s\) sous /persist$"], lignes=1),
+    ]
+    b2 = [
+        Etape("b2-relit", f"cat {d}/note.txt", attendus=[rf"^{CONTENU}$"], lignes=1),
+        Etape("b2-find", "find /persist note", attendus=[rf"^{d}/note\.txt$"], lignes=1),
+        Etape("b2-ls", f"ls {d}", attendus=[r"^note\.txt"], lignes=1),
+        Etape("b2-mv", f"mv {d}/note.txt {d}/renomme.txt", lignes=0),
+        Etape("b2-sync", "sync", attendus=[r"^sync: [0-9]+ fichier\(s\) ecrit\(s\) sous /persist$"], lignes=1),
+    ]
+    b3 = [
+        Etape("b3-relit", f"cat {d}/renomme.txt", attendus=[rf"^{CONTENU}$"], lignes=1),
+        Etape("b3-ancien-absent", f"cat {d}/note.txt", attendus=[r"^cat: introuvable$"], lignes=1),
+        Etape("b3-find", "find /persist note", lignes=0),
+        Etape("b3-find-nouveau", "find /persist renomme", attendus=[rf"^{d}/renomme\.txt$"], lignes=1),
+        Etape("b3-ls", f"ls {d}", attendus=[r"^renomme\.txt"], lignes=1),
+    ]
+    return [(["journal off", "cd /"], b) for b in (b1, b2, b3)]
+
+
+DEMARRAGES = {"persistance": demarrages_persistance}
+
+
+# TEMOIN (--temoin-zone-effacee) : la zone persistante est remise a zero entre
+# le premier et le second demarrage. Le banc DOIT alors echouer a la relecture :
+# sans cela, il ne prouverait pas que le contenu relu vient du disque.
+TEMOIN_ZONE_EFFACEE = False
+
+
+def lance_demarrages(boot: Path, sortie: Path, nom: str, kvm: bool) -> tuple[list[dict], str]:
+    """Chaque demarrage sur le MEME disque ; un demarrage qui ne s'eteint pas
+    proprement arrete la serie (les suivants sont NOT_RUN)."""
+    phases = DEMARRAGES[nom]()
+    sortie.mkdir(parents=True, exist_ok=True)
+    disque = sortie / "disque.img"
+    res: list[dict] = []
+    fin = "eteinte"
+    for k, (prelude, etapes) in enumerate(phases, 1):
+        if k == 1:
+            disque_persistant(disque, script(prelude, etapes))
+        else:
+            reecrit_autorun(disque, script(prelude, etapes))
+            if TEMOIN_ZONE_EFFACEE and k == 2:
+                with disque.open("r+b") as f:
+                    f.seek(ARCHIVE_PLANCHER)
+                    f.write(b"\0" * ZONE_OCTETS)
+        if fin != "eteinte" or any(r["statut"] != "PASS" for r in res):
+            res += [{"id": e.id, "commande": e.commande, "statut": "NOT_RUN"} for e in etapes]
+            continue
+        d = sortie / f"demarrage-{k}"
+        d.mkdir(exist_ok=True)
+        r, fin = lance_disque(boot, d, nom, etapes, disque, kvm)
+        res += r
+    return res, fin
+
+
 SCENARIOS = {"find": (scenario_find, donnees_find), "commandes": (scenario_commandes, donnees_commandes),
              "arborescence": (scenario_arborescence, donnees_arborescence)}
 
@@ -362,11 +456,18 @@ def sysrq(moniteur: Path) -> None:
 
 
 def lance(boot: Path, sortie: Path, nom: str, kvm: bool) -> tuple[list[dict], str]:
+    if nom in DEMARRAGES:
+        return lance_demarrages(boot, sortie, nom, kvm)
     prelude, etapes = SCENARIOS[nom][0]()
     donnees = SCENARIOS[nom][1]()
     sortie.mkdir(parents=True, exist_ok=True)
     disque = sortie / "scenario.img"
     archive(disque, script(prelude, etapes), donnees)
+    return lance_disque(boot, sortie, nom, etapes, disque, kvm)
+
+
+def lance_disque(boot: Path, sortie: Path, nom: str, etapes: list[Etape], disque: Path,
+                 kvm: bool) -> tuple[list[dict], str]:
     serie = sortie / "serie.log"
     serie.write_bytes(b"")
     moniteur = Path(f"/tmp/bo-unix-{nom}-{int(time.time())}.sock")
@@ -427,11 +528,13 @@ def lance(boot: Path, sortie: Path, nom: str, kvm: bool) -> tuple[list[dict], st
 def main(argv: list[str]) -> int:
     args = argv[1:]
     kvm = "--kvm" in args
+    global TEMOIN_ZONE_EFFACEE
+    TEMOIN_ZONE_EFFACEE = "--temoin-zone-effacee" in args
     nom = "find"
     if "--scenario" in args:
         nom = args[args.index("--scenario") + 1]
     pos = [a for k, a in enumerate(args) if not a.startswith("--") and (k == 0 or args[k - 1] != "--scenario")]
-    if len(pos) != 2 or nom not in SCENARIOS:
+    if len(pos) != 2 or (nom not in SCENARIOS and nom not in DEMARRAGES):
         print(__doc__, file=sys.stderr)
         return 2
     boot, sortie = Path(pos[0]).resolve(), Path(pos[1]).resolve() / nom
