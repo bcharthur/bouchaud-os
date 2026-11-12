@@ -131,7 +131,8 @@ def main(argv: list[str]) -> int:
                 time.sleep(5)
             texte = b.texte()
             for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT", "LOCKDEP"):
-                b.note(x not in texte, f"aucune ligne « {x} »")
+                if not b.note(x not in texte, f"aucune ligne « {x} »"):
+                    tl.contexte(texte, x)
             refus = re.findall(r"BOUCHAUD_ECRITURE_INTERNE_REFUSEE support=(\w+)", texte)
             print(f"VALIDATION_INFO refus_d_ecriture_interne={len(refus)} supports={sorted(set(refus))}", flush=True)
         finally:
