@@ -137,10 +137,16 @@ jobs:
           printf '%s\n' "$CLE" > "$k"
           prec=()
           [ -z "$PRECEDENTE" ] || prec=(--sequence-precedente "$PRECEDENTE")
+          # Revue #306 : l'image publiee doit etre celle construite, pas une
+          # image modifiee par un essai. Verifiee AVANT de signer...
+          (cd entree && sha256sum -c disque-ab.img.sha256)
           python3 tools/release/fabrique_release.py --image entree/system-slot.img --version "$VERSION" \
-            --sequence "$SEQUENCE" --canal testing --commit "$GITHUB_SHA" --sortie release "${prec[@]}" --cle "$k"
-          cp entree/system-slot.img entree/disque-ab.img entree/disque-ab.img.sha256 \
-             entree/manifest-ab.json entree/qemu-boot-evidence.json release/
+            --sequence "$SEQUENCE" --canal testing --commit "$GITHUB_SHA" --sortie release "${prec[@]}" --cle "$k" \
+            --joint entree/disque-ab.img --joint entree/disque-ab.img.sha256 \
+            --joint entree/manifest-ab.json --joint entree/qemu-boot-evidence.json
+          cp entree/system-slot.img release/
+          # ... et l'ensemble (SHA256SUMS couvre tout, cle engagee) apres.
+          python3 tools/release/verifie_artefacts_release.py release --production
       - uses: actions/upload-artifact@v4
         with:
           name: release-trigkey-signee
@@ -156,6 +162,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: release-trigkey-signee
@@ -169,7 +176,8 @@ jobs:
           if gh release view "$ETIQUETTE" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "RELEASE_REFUSEE raison=etiquette_existante $ETIQUETTE" >&2; exit 2
           fi
-          (cd release && sha256sum -c SHA256SUMS)
+          # Rien n'est publie qui differe de ce qui a ete construit, essaye et signe.
+          python3 tools/release/verifie_artefacts_release.py release --production
           gh release create "$ETIQUETTE" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "$ETIQUETTE (testing)" \
             --notes "Canal testing. Commit $GITHUB_SHA. Manifeste v2 signe Ed25519 (release.json, SHA256SUMS). Preuve : QEMU/OVMF seulement -- PHYSICAL=NOT_RUN." \

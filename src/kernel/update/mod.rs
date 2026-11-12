@@ -512,11 +512,16 @@ mod cles_production;
 /// BOUCHAUD_CLES_PRODUCTION_V1: the production keys, decoded at COMPILE time
 /// (a malformed key fails the build; it never reaches a machine).
 const NB_PRODUCTION: usize = cles_production::CLES_PRODUCTION.len();
-static CLES_PRODUCTION: [uc::manifeste::CleDeConfiance; NB_PRODUCTION] = {
-    let mut t = [uc::manifeste::CleDeConfiance { nom: "", publique: [0; 32], developpement: false }; NB_PRODUCTION];
+static CLES_PRODUCTION: [uc::manifeste::CleDeConfiance; NB_PRODUCTION] =
+    decode_cles_production(cles_production::CLES_PRODUCTION);
+
+/// Bounded by the SLICE length (not a constant that may be 0: clippy's
+/// absurd_extreme_comparisons denies `i < 0`).
+const fn decode_cles_production<const N: usize>(source: &[(&'static str, &'static str)]) -> [uc::manifeste::CleDeConfiance; N] {
+    let mut t = [uc::manifeste::CleDeConfiance { nom: "", publique: [0; 32], developpement: false }; N];
     let mut i = 0;
-    while i < NB_PRODUCTION {
-        let (nom, hex) = cles_production::CLES_PRODUCTION[i];
+    while i < source.len() {
+        let (nom, hex) = source[i];
         t[i] = uc::manifeste::CleDeConfiance {
             nom,
             publique: match uc::manifeste::cle_hex(hex) {
@@ -528,7 +533,7 @@ static CLES_PRODUCTION: [uc::manifeste::CleDeConfiance; NB_PRODUCTION] = {
         i += 1;
     }
     t
-};
+}
 
 /// The trusted keys: the production keys, and -- in a bench build only -- the
 /// bench key. A bench build never ships (verifie-cle-dev.py).

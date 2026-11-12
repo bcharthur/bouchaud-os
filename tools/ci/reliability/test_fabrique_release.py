@@ -32,9 +32,20 @@ class FabriqueReleaseTests(unittest.TestCase):
         self.image = self.d / "system.img"
         self.image.write_bytes(b"\x55" * 8192)
         self.commit = "a" * 40
+        # Revue #306 : AUCUN test ne lit la vraie liste de cles du depot. Elle
+        # sera remplie le jour ou la cle de production est engagee ; les tests
+        # ne doivent pas casser ce jour-la. Fixture vide par defaut.
+        self.reel = fr.CLES_PRODUCTION
+        self.cles = self.d / "cles_production.rs"
+        self.cles.write_text("pub const CLES_PRODUCTION: &[(&str, &str)] = &[\n];\n")
+        fr.CLES_PRODUCTION = self.cles
 
     def tearDown(self):
+        fr.CLES_PRODUCTION = self.reel
         self.t.cleanup()
+
+    def engage(self, nom, cle_pem):
+        self.cles.write_text(f'pub const CLES_PRODUCTION: &[(&str, &str)] = &[\n    ("{nom}", "{fr.publique_de(cle_pem)}"),\n];\n')
 
     def lance(self, *args):
         return fr.main(["x", "--image", str(self.image), "--version", "2026.11.12-1", "--commit", self.commit,
@@ -83,7 +94,7 @@ class FabriqueReleaseTests(unittest.TestCase):
         self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "r")), 2)
 
     def test_production_sans_cle_engagee_refusee(self):
-        # Le depot n'engage aujourd'hui AUCUNE cle de production : refus.
+        # Fixture vide (pas le depot) : refus.
         self.assertEqual(fr.cles_production(fr.CLES_PRODUCTION.read_text()), [])
         k = cle(self.d, "prod")
         self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "r"), "--cle", str(k)), 2)
@@ -92,19 +103,28 @@ class FabriqueReleaseTests(unittest.TestCase):
     def test_production_mauvais_secret_refuse(self):
         engagee = cle(self.d, "engagee")
         autre = cle(self.d, "autre")
-        texte = f'pub const CLES_PRODUCTION: &[(&str, &str)] = &[\n    ("release-test", "{fr.publique_de(engagee)}"),\n];\n'
-        rs = self.d / "cles.rs"
-        rs.write_text(texte)
-        ancien = fr.CLES_PRODUCTION
-        fr.CLES_PRODUCTION = rs
-        try:
-            self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "ko"), "--cle", str(autre)), 2)
-            self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "ok"), "--cle", str(engagee)), 0)
-            d = json.loads((self.d / "ok" / "release.json").read_text())
-            self.assertEqual(d["signature"]["cle"], "release-test")
-            self.assertFalse(d["signature"]["developpement"])
-        finally:
-            fr.CLES_PRODUCTION = ancien
+        self.engage("release-test", engagee)
+        self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "ko"), "--cle", str(autre)), 2)
+        self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "ok"), "--cle", str(engagee)), 0)
+        d = json.loads((self.d / "ok" / "release.json").read_text())
+        self.assertEqual(d["signature"]["cle"], "release-test")
+        self.assertFalse(d["signature"]["developpement"])
+
+    def test_joints_couverts_par_sha256sums(self):
+        k = cle(self.d, "dev")
+        disque = self.d / "disque-ab.img"
+        disque.write_bytes(b"\x01" * 4096)
+        s = self.d / "r"
+        self.assertEqual(self.lance("--sequence", "5", "--sortie", str(s), "--cle-dev", str(k),
+                                    "--joint", str(disque)), 0)
+        self.assertEqual((s / "disque-ab.img").read_bytes(), disque.read_bytes())
+        self.assertIn("  disque-ab.img\n", (s / "SHA256SUMS").read_text())
+        self.assertIn("disque-ab.img", json.loads((s / "release.json").read_text())["joints"])
+        # Un joint qui ecraserait un fichier de la release est refuse.
+        faux = self.d / "manifest"
+        faux.write_bytes(b"x")
+        self.assertEqual(self.lance("--sequence", "5", "--sortie", str(self.d / "r2"), "--cle-dev", str(k),
+                                    "--joint", str(faux)), 2)
 
     def test_cles_commentees_ignorees(self):
         self.assertEqual(fr.cles_production('// ("x", "' + "a" * 64 + '"),\n'), [])

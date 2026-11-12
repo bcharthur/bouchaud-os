@@ -25,7 +25,7 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 1 | Partition STATE | **NON FAIT** | voir ci-dessous |
 | 2 | Installateur texte sûr | **NON FAIT** | voir ci-dessous |
 | 3 | Image physique unifiée | **PARTIEL** | voir ci-dessous |
-| 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (16 tests) + QEMU TCG (banc A/B) |
+| 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (31 tests, dont témoins négatifs) + QEMU TCG (banc A/B) |
 | 5 | Agent de mise à jour réseau | **NON FAIT** | — |
 | 6 | Ed25519, anti-retour, refus sans clé | **FAIT** | HOST + QEMU TCG |
 | 6 | Rotation et révocation de clé | **PROCÉDURE** | aucun banc |
@@ -87,7 +87,8 @@ Voir `UPDATE_RECOVERY.md` § « Authenticité ≠ anti-rollback ».
 | Pièce | Rôle |
 |---|---|
 | `tools/release/build_trigkey_ab_image.sh` | image disque A/B + **image d'un slot** (`system-slot.img`, la charge utile d'une mise à jour) ; refuse un arbre sale |
-| `tools/release/smoke_trigkey_ab_qemu.sh` | démarre **cette** image sous QEMU/OVMF, exige un vrai signal de santé |
+| `tools/release/smoke_trigkey_ab_qemu.sh` | démarre une **copie jetable** de cette image sous QEMU/OVMF et exige un vrai signal de santé ; échoue si l'empreinte de l'original a changé (revue #306, témoin `test_trigkey_ab_smoke.py`) |
+| `tools/release/verifie_artefacts_release.py` | avant signature et avant publication : `SHA256SUMS` couvre **exactement** les fichiers publiés ; disque == empreinte de construction == `manifest-ab.json` ; image de slot == manifeste signé ; preuve QEMU du même commit ; signature par une clé engagée, jamais `developpement` |
 | `tools/release/garde_release.py` | refuse : hors `main` ; qualification non verte **au SHA exact** (CI Fast, Integration, Non-regression Gate, Reliability V3, Unix & Filesystem Reliability) ; aucune clé de production engagée ; étiquette existante ; version réutilisée ; séquence non croissante |
 | `tools/release/fabrique_release.py` | manifeste v2 canonique, signature Ed25519, `release.json`, `SHA256SUMS` ; refuse une signature qui ne vérifie avec aucune clé engagée (mauvais secret), une sortie non vide |
 | `tools/release/cle_publique.py` | extrait la moitié publique d'une clé (hors ligne) |

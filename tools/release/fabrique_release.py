@@ -4,7 +4,7 @@
     fabrique_release.py --image SLOT.img --version V --sequence N --canal stable|testing
                         --commit SHA40 --sortie DIR
                         [--sequence-precedente M] [--cle PRIVEE.pem | --cle-dev PRIVEE.pem]
-                        [--materiel x86_64-uefi] [--essais 3]
+                        [--materiel x86_64-uefi] [--essais 3] [--joint FICHIER ...]
 
 Produit dans DIR (qui doit etre vide ou absent : une release n'est jamais
 reecrite) :
@@ -12,7 +12,9 @@ reecrite) :
   manifest.sig    sa signature Ed25519 (64 octets)
   release.json    descripteur : version, sequence, canal, commit, materiel,
                   empreintes, cle, informations de rollback
-  SHA256SUMS      empreintes de tous les fichiers ci-dessus et de l'image
+  SHA256SUMS      empreintes de tous les fichiers ci-dessus, de l'image et des
+                  pieces jointes (--joint, copiees dans DIR : disque A/B,
+                  preuve QEMU...) -- rien de publie n'echappe a SHA256SUMS
 
 Refus (code 2, `RELEASE_REFUSEE raison=...`) :
   - sequence <= sequence-precedente (monotonie : pas de retrograde, pas de
@@ -31,6 +33,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -143,7 +146,17 @@ def fabrique(a: argparse.Namespace) -> Path:
     else:
         raise Refus("aucune_cle (--cle ou --cle-dev)")
 
+    joints = [Path(j) for j in (a.joint or [])]
+    noms = [j.name for j in joints]
+    if len(set(noms)) != len(noms) or set(noms) & {"manifest", "manifest.sig", "release.json", "SHA256SUMS", image.name}:
+        raise Refus("joint_en_double_ou_reserve")
+    for j in joints:
+        if not j.is_file():
+            raise Refus(f"joint_absent {j.name}")
+
     sortie.mkdir(parents=True, exist_ok=True)
+    for j in joints:
+        shutil.copyfile(j, sortie / j.name)
     (sortie / "manifest").write_bytes(texte)
     (sortie / "manifest.sig").write_bytes(signature)
     descripteur = {
@@ -158,9 +171,10 @@ def fabrique(a: argparse.Namespace) -> Path:
         "signature": {"fichier": "manifest.sig", "algorithme": "ed25519", "cle": nom, "developpement": developpement},
         "rollback": {"essais": a.essais, "sequence_precedente": a.sequence_precedente,
                      "plancher_apres_commit": a.sequence},
+        "joints": {n: sha256_fichier(sortie / n) for n in sorted(noms)},
     }
     (sortie / "release.json").write_text(json.dumps(descripteur, indent=2, sort_keys=True) + "\n")
-    sommes = {f: sha256_fichier(sortie / f) for f in ("manifest", "manifest.sig", "release.json")}
+    sommes = {f: sha256_fichier(sortie / f) for f in ("manifest", "manifest.sig", "release.json", *noms)}
     sommes[image.name] = empreinte
     (sortie / "SHA256SUMS").write_text("".join(f"{h}  {f}\n" for f, h in sorted(sommes.items())))
     return sortie
@@ -177,6 +191,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--sequence-precedente", type=int)
     p.add_argument("--materiel", default="x86_64-uefi")
     p.add_argument("--essais", type=int, default=3)
+    p.add_argument("--joint", action="append", help="fichier publie avec la release (couvert par SHA256SUMS)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--cle")
     g.add_argument("--cle-dev")

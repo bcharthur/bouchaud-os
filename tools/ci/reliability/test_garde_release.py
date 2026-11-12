@@ -43,8 +43,8 @@ class GardeTests(unittest.TestCase):
     def test_depot_sans_cle_de_production_refuse(self):
         self.refuse("aucune_cle_de_production_engagee", cles_texte="")
         self.refuse("aucune_cle_de_production_engagee", cles_texte="//" + CLE)
-        # Le depot reel aujourd'hui : aucune cle -> toute publication refusee.
-        self.refuse("aucune_cle_de_production_engagee", cles_texte=gr.CLES_PRODUCTION.read_text())
+        self.refuse("aucune_cle_de_production_engagee",
+                    cles_texte='pub const CLES_PRODUCTION: &[(&str, &str)] = &[\n    // ("x", "y"),\n];\n')
 
     def test_qualification_exigee_sur_le_sha_exact(self):
         self.refuse("qualification_absente", runs=verts("d" * 40))

@@ -9,18 +9,28 @@ OUT=$(cd "$OUT" && pwd)
   echo "TRIGKEY_QEMU_REFUSE image_ou_manifeste_absent" >&2
   exit 2
 }
-[ -f /usr/share/OVMF/OVMF_CODE_4M.fd ] && [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ] || {
+OVMF=${BO_OVMF_DIR:-/usr/share/OVMF}
+[ -f "$OVMF/OVMF_CODE_4M.fd" ] && [ -f "$OVMF/OVMF_VARS_4M.fd" ] || {
   echo "TRIGKEY_QEMU_REFUSE ovmf_absent" >&2
   exit 2
 }
-(cd "$OUT" && sha256sum -c disque-ab.img.sha256)
-cp /usr/share/OVMF/OVMF_VARS_4M.fd "$OUT/vars-qemu.fd"
+(cd "$OUT" && sha256sum -c --quiet disque-ab.img.sha256) || {
+  echo "TRIGKEY_QEMU_REFUSE empreinte_initiale_differente" >&2
+  exit 2
+}
+# BOUCHAUD_RELEASE_V1 (review #306): the image under test is the image that
+# gets PUBLISHED. The firmware and the shim write to the disk they boot
+# (BOUCHAUD-PREBOOT.TXT on the ESP, META), so QEMU boots a DISPOSABLE COPY,
+# never the original -- and the original's digest is checked again after.
+JETABLE=$(mktemp -d)
+cp "$OUT/disque-ab.img" "$JETABLE/disque-essai.img"
+cp "$OVMF/OVMF_VARS_4M.fd" "$JETABLE/vars-qemu.fd"
 LOG="$OUT/boot-qemu.log"
 : > "$LOG"
 qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max \
-  -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-  -drive if=pflash,format=raw,unit=1,file="$OUT/vars-qemu.fd" \
-  -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF/OVMF_CODE_4M.fd" \
+  -drive if=pflash,format=raw,unit=1,file="$JETABLE/vars-qemu.fd" \
+  -drive if=none,id=disque,format=raw,file="$JETABLE/disque-essai.img" \
   -device nvme,drive=disque,serial=BOUCHAUD_AB_TEST \
   -display none -no-reboot -serial file:"$LOG" >/dev/null 2>&1 &
 pid=$!
@@ -29,13 +39,23 @@ cleanup() {
   sleep 0.2
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  rm -rf -- "$JETABLE"
 }
 trap cleanup EXIT
+originale_intacte() {
+  (cd "$OUT" && sha256sum -c --quiet disque-ab.img.sha256) >/dev/null 2>&1 || {
+    echo "TRIGKEY_QEMU_FAIL image_originale_modifiee (l'image publiable a change pendant l'essai)" >&2
+    return 1
+  }
+}
 end=$((SECONDS + ${BO_TRIGKEY_QEMU_S:-240}))
 while (( SECONDS < end )); do
   if python3 tools/release/verify_trigkey_ab_boot.py "$OUT" >/dev/null 2>&1; then
     # Give a later kernel fault a chance to invalidate the proof.
-    sleep 5
+    sleep "${BO_TRIGKEY_QEMU_GRACE_S:-5}"
+    cleanup
+    trap - EXIT
+    originale_intacte || exit 1
     python3 tools/release/verify_trigkey_ab_boot.py "$OUT"
     echo "TRIGKEY_QEMU_BOOT_OK PHYSICAL=NOT_RUN"
     exit 0
