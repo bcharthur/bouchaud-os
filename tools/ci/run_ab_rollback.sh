@@ -391,30 +391,11 @@ if [ "$OTA_COMPLET" = 1 ]; then
   # L'horloge de l'invite a +1 h : le certificat de banc vient d'etre emis
   # (notBefore = maintenant) et le noyau VERIFIE sa periode de validite.
   RESEAU=(-nic user,model=e1000 -rtc "base=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S)")
-  python3 - "$PORT_OTA" "$OUT/srv" "$CLES/srv.pem" "$CLES/srv.key" > "$OUT/https.log" 2>&1 <<'PY' &
-import functools, http.server, ssl, sys
-port, racine, cert, cle = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-ctx.minimum_version = ssl.TLSVersion.TLSv1_3
-ctx.load_cert_chain(cert, cle)
-COUPE = {"fait": False}
-class H(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        # Temoin de REPRISE : la premiere demande de la partie 5 est coupee
-        # sans reponse (une connexion qui meurt en route). L'agent doit
-        # reprendre CETTE partie, et garder les autres.
-        if self.path.endswith("/system-slot.img.part005") and not COUPE["fait"]:
-            COUPE["fait"] = True
-            sys.stderr.write("HTTPS COUPURE_VOLONTAIRE %s\n" % self.path); sys.stderr.flush()
-            self.close_connection = True
-            return
-        return super().do_GET()
-    def log_message(self, fmt, *a):
-        sys.stderr.write("HTTPS %s %s\n" % (self.request.version(), fmt % a)); sys.stderr.flush()
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(H, directory=racine))
-srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-srv.serve_forever()
-PY
+  # Le serveur HTTPS de banc (tools/ci/serveur_ota_banc.py) : coupure
+  # volontaire de la partie 5 ; poignee TLS dans le fil de CHAQUE connexion,
+  # avec delai -- une connexion figee ne bloque plus les suivantes (run
+  # 43301393229 : partie 13 « reponse vide » quatre fois, verdict A!).
+  python3 tools/ci/serveur_ota_banc.py "$PORT_OTA" "$OUT/srv" "$CLES/srv.pem" "$CLES/srv.key" > "$OUT/https.log" 2>&1 &
   PID_HTTP=$!
   # Ajoute l'arret du serveur a la trap du banc, SANS la remplacer : le
   # diagnostic d'echec et le nettoyage doivent toujours avoir lieu.
