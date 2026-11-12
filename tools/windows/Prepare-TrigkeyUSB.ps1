@@ -140,7 +140,9 @@ try {
         if (Test-Path -LiteralPath (Join-Path $natif 'BouchaudBrowserHost')) { $envLadybird = "'$(ConvertTo-CheminLinux $natif)'" }
         $s = ConvertTo-CheminLinux $sortie
         Write-Etape "construction de la cle de validation (commit $sha, disques internes en LECTURE SEULE)"
-        $code = Invoke-Linux ("rm -rf '$s/systeme' '$s/systeme.tar' && mkdir -p '$s' && bash tools/release/assemble_systeme.sh '$s/systeme' $envLadybird && python3 tools/release/tar_systeme.py '$s/systeme' '$s/systeme.tar' && BO_CLE_USB_TEST=1 bash tools/release/build_trigkey_image.sh '$s/usb' '$s/systeme.tar'")
+        # La MEME commande que la CI (trigkey-ab-preflight), qui demarre la cle
+        # construite (tools/release/test_cle_validation_qemu.py).
+        $code = Invoke-Linux ("bash tools/release/build_cle_validation.sh '$s' $envLadybird")
         if ($code -ne 0) { Stop-Bouchaud "construction de la cle en echec (code $code)" }
         $Image = Join-Path $sortie 'usb/bouchaud-trigkey.img'
     }

@@ -24,6 +24,9 @@ on:
       - 'src/gui/window_manager.rs'
       - 'tools/ci/qemu_gestes.py'
       - 'tools/release/test_livraison_qemu.py'
+      - 'tools/release/test_cle_validation_qemu.py'
+      - 'tools/release/build_cle_validation.sh'
+      - 'tools/release/build_trigkey_image.sh'
       - 'tools/release/assemble_systeme.sh'
       - 'tools/update/meta.rs'
       - 'src/fs/persistance/**'
@@ -63,6 +66,14 @@ jobs:
         run: |
           python3 -m unittest tools/ci/reliability/test_installe_ssd.py -v
           bash tools/ci/run_installe_ssd_qemu.sh target/trigkey-ab-preflight
+      # BOUCHAUD_CLE_VALIDATION_V1 : la cle de validation que construit
+      # Prepare-TrigkeyUSB.ps1 -Mode Validation (meme script), demarree comme
+      # cle USB a cote d'un NVMe interne rempli : bureau, reseau, Terminal,
+      # DOOM, et le NVMe interne a la MEME empreinte apres la session.
+      - name: Cle de validation (cle-usb-test) construite puis demarree comme cle USB, NVMe interne intact
+        run: |
+          bash tools/release/build_cle_validation.sh target/cle-validation
+          python3 tools/release/test_cle_validation_qemu.py target/cle-validation/usb
       - name: Collect reproducible proof without uploading the large disk image
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,5 +90,9 @@ jobs:
             target/trigkey-ab-preflight/livraison-evidence.json
             target/trigkey-ab-preflight/livraison-boot.log
             target/trigkey-ab-preflight/livraison-captures/*.ppm
+            target/cle-validation/usb/manifest.json
+            target/cle-validation/usb/validation-evidence.json
+            target/cle-validation/usb/validation-boot.log
+            target/cle-validation/usb/validation-captures/*.ppm
           if-no-files-found: warn
           retention-days: 14
