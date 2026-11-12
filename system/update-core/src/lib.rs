@@ -22,3 +22,4 @@ pub mod passage;
 pub mod echecs;
 pub mod ed25519;
 pub mod manifeste;
+pub mod anti_retour;

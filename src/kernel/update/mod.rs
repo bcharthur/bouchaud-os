@@ -184,6 +184,71 @@ fn lit_compteur(m: &mut Meta) -> u32 {
     uc::echecs::decode(&b)
 }
 
+// ---- anti-rollback floor (BOUCHAUD_ANTI_RETOUR_V1) ----------------------------
+
+/// Hardware family this kernel installs releases for (v2 manifests).
+pub const MATERIEL: &str = "x86_64-uefi";
+
+fn lit_anti_retour(m: &mut Meta) -> Option<(vec::Vec<u8>, vec::Vec<u8>)> {
+    let t = m.support.taille_bloc;
+    let (mut b0, mut b1) = (vec![0u8; t], vec![0u8; t]);
+    if !m.support.lit(m.premier + uc::anti_retour::BLOCS[0], &mut b0)
+        || !m.support.lit(m.premier + uc::anti_retour::BLOCS[1], &mut b1) {
+        return None;
+    }
+    Some((b0, b1))
+}
+
+/// The record, or `Illisible` when the blocks cannot even be read.
+fn anti_retour(m: &mut Meta) -> uc::anti_retour::Lecture {
+    match lit_anti_retour(m) {
+        Some((b0, b1)) => uc::anti_retour::lit(&b0, &b1),
+        None => uc::anti_retour::Lecture::Illisible,
+    }
+}
+
+/// Older copy <- r, FLUSH, read back: Ok only if the re-read record is r.
+fn persiste_anti_retour(m: &mut Meta, r: &uc::anti_retour::Registre) -> Result<(), &'static str> {
+    let (b0, b1) = lit_anti_retour(m).ok_or("anti_retour_illisible")?;
+    let i = uc::anti_retour::copie_a_ecrire(&b0, &b1);
+    let mut b = if i == 0 { b0 } else { b1 };
+    b[..uc::anti_retour::OCTETS].copy_from_slice(&uc::anti_retour::encode(r));
+    if !m.support.ecrit(m.premier + uc::anti_retour::BLOCS[i], &b) { return Err("anti_retour_ecriture"); }
+    if !m.support.vidange() { return Err("anti_retour_vidange"); }
+    let (r0, r1) = lit_anti_retour(m).ok_or("anti_retour_relecture")?;
+    if uc::anti_retour::lit(&r0, &r1) != uc::anti_retour::Lecture::Valide(*r) { return Err("anti_retour_relecture_differente"); }
+    Ok(())
+}
+
+fn journalise_anti_retour(evenement: &str, l: uc::anti_retour::Lecture) {
+    match l {
+        uc::anti_retour::Lecture::Neuf => crate::serial_println!(
+            "BOUCHAUD_UPDATE_ANTI_RETOUR evenement={} etat=neuf plancher=0", evenement),
+        uc::anti_retour::Lecture::Valide(r) => crate::serial_println!(
+            "BOUCHAUD_UPDATE_ANTI_RETOUR evenement={} etat=valide plancher={} release_a={} release_b={}",
+            evenement, r.plancher, r.slots[0], r.slots[1]),
+        uc::anti_retour::Lecture::Illisible => crate::serial_println!(
+            "BOUCHAUD_UPDATE_ANTI_RETOUR evenement={} etat=illisible", evenement),
+    }
+}
+
+/// Health commit of `slot`: the floor rises to its release (idempotent,
+/// never down). A failure is logged, never turned into a health failure: the
+/// A/B commit already happened, and the next confirmed boot retries.
+fn avance_plancher(m: &mut Meta, slot: Slot) {
+    let l = anti_retour(m);
+    if let uc::anti_retour::Lecture::Valide(r) = l {
+        if let Some(n) = r.confirme(slot) {
+            match persiste_anti_retour(m, &n) {
+                Ok(()) => journalise_anti_retour("plancher_avance", uc::anti_retour::Lecture::Valide(n)),
+                Err(e) => crate::serial_println!("BOUCHAUD_UPDATE_ANTI_RETOUR evenement=plancher_non_avance raison={}", e),
+            }
+            return;
+        }
+    }
+    journalise_anti_retour("confirme", l);
+}
+
 // ---- for the recovery console ----------------------------------------------
 
 pub fn meta_lecture() -> Result<(Enregistrement, u32), &'static str> {
@@ -285,6 +350,11 @@ pub fn commit_sante() -> Result<Commit, &'static str> {
         Err(RefusCommit::MetaChangee) => Err("meta_changee_depuis_le_boot"),
         Err(RefusCommit::SlotNiCandidatNiActif) => Err("slot_ni_candidat_ni_actif"),
     };
+    // BOUCHAUD_ANTI_RETOUR_V1: a confirmed boot raises the floor to the
+    // release of the slot that runs (idempotent; repairs a lost write).
+    if r.is_ok() {
+        avance_plancher(&mut m, p.slot);
+    }
     match r {
         Ok(c) => crate::serial_println!(
             "BOUCHAUD_UPDATE_SANTE_COMMIT resultat={} slot={} etat_avant={}",
@@ -442,6 +512,8 @@ struct Installation {
     attendu: [u8; 32],
     attendu_octets: u64,
     attendu_essais: u8,
+    /// BOUCHAUD_ANTI_RETOUR_V1: the signed release sequence (0: v1 manifest).
+    attendu_sequence: u64,
     /// Bytes already read back into VERIFICATION (0: not started).
     verifie: u64,
     cible: Slot,
@@ -499,8 +571,21 @@ pub fn installation_commence(cible: Slot, texte: &[u8], signature: &[u8; 64]) ->
             cle.nom, cle.developpement as u8, signe.version(), signe.octets, signe.essais,
             signe.empreinte[0], signe.empreinte[1], signe.empreinte[2], signe.empreinte[3]
         );
+        // BOUCHAUD_ANTI_RETOUR_V1: a v2 manifest names its hardware family.
+        if signe.materiel_len > 0 && signe.materiel() != MATERIEL {
+            return Err(RefusInstall::Refuse("materiel_incompatible"));
+        }
         let p = passage().ok_or(RefusInstall::Refuse("sans_passage"))?;
         let mut m = trouve_meta(&p).map_err(RefusInstall::Refuse)?;
+        // Anti-rollback BEFORE anything is written: an older release, even
+        // correctly signed, is never installed.
+        let lecture = anti_retour(&mut m);
+        journalise_anti_retour("begin", lecture);
+        uc::anti_retour::autorise(lecture, signe.sequence).map_err(|refus| RefusInstall::Refuse(match refus {
+            uc::anti_retour::Refus::Retrograde => "version_retrograde",
+            uc::anti_retour::Refus::SansSequence => "manifeste_sans_sequence",
+            uc::anti_retour::Refus::RegistreIllisible => "anti_retour_illisible",
+        }))?;
         let e = lit(&mut m).map_err(RefusInstall::Io)?;
         // The policy, not this module, says which targets are acceptable.
         let n = e.commence_installation(cible, p.slot).map_err(|refus| RefusInstall::Refuse(match refus {
@@ -516,6 +601,7 @@ pub fn installation_commence(cible: Slot, texte: &[u8], signature: &[u8; 64]) ->
         let inst = Installation {
             proprietaire: appelant(), verifie: 0,
             attendu: signe.empreinte, attendu_octets: signe.octets, attendu_essais: signe.essais,
+            attendu_sequence: signe.sequence,
             cible, volume: m.support.volume, taille_bloc: m.support.taille_bloc,
             premier: part.premier, octets: part.blocs() * m.support.taille_bloc as u64,
         };
@@ -606,6 +692,15 @@ pub fn installation_termine(empreinte: [u8; 32], longueur: u64, essais: u8) -> R
             uc::Refus::CibleActive => "cible_active",
             _ => "etat_inattendu",
         }))?;
+        // BOUCHAUD_ANTI_RETOUR_V1: the slot's release is recorded BEFORE the
+        // candidate is marked; a cut in between leaves a recorded release for
+        // a slot that is not a candidate, which nothing ever confirms.
+        let ar = match anti_retour(&mut m) {
+            uc::anti_retour::Lecture::Neuf => uc::anti_retour::Registre::NEUF,
+            uc::anti_retour::Lecture::Valide(r) => r,
+            uc::anti_retour::Lecture::Illisible => return Err(RefusInstall::Refuse("anti_retour_illisible")),
+        };
+        persiste_anti_retour(&mut m, &ar.installe(inst.cible, inst.attendu_sequence)).map_err(RefusInstall::Io)?;
         persiste(&mut m, &n).map_err(RefusInstall::Io)?;
         *INSTALLATION.lock() = None;
         *VERIFICATION.lock() = None;

@@ -137,7 +137,77 @@ Le scénario QEMU `sans-cle` prouve une image normale : `confiance=0`, `begin` r
 
 ## Authenticité ≠ anti-rollback
 
-Le manifeste signé prouve **qui** a publié une image, pas **qu'elle est plus récente** que celle installée. Une ancienne version correctement signée peut aujourd'hui être réinstallée : **`ANTI_ROLLBACK_POLICY = NOT_IMPLEMENTED`**.
+Le manifeste signé prouve **qui** a publié une image, pas **qu'elle est plus récente** que celle installée.
+
+**`ANTI_ROLLBACK_POLICY = IMPLEMENTED (HOST + QEMU TCG)`** — `BOUCHAUD_ANTI_RETOUR_V1`. Rien n'est qualifié en PHYSICAL.
+
+### Manifeste v2
+
+Sept lignes canoniques :
+
+```text
+bouchaud-manifeste-v2
+version=…
+sequence=<u64 > 0>
+materiel=<[a-z0-9_-]{1,32}>
+image_sha256=…
+image_octets=…
+essais=…
+```
+
+- `sequence` est le numéro de release **monotone**, couvert par la signature.
+- `materiel` est la famille matérielle. Le noyau accepte `x86_64-uefi` (`kernel::update::MATERIEL`) ; une autre famille est refusée avec `materiel_incompatible`.
+- Un manifeste v1 reste lu, avec la séquence 0. Il n'est accepté **que tant qu'aucun plancher n'existe**.
+
+### Plancher : META blocs 3 et 4
+
+Le plancher est stocké dans `system/update-core/src/anti_retour.rs` :
+- deux copies, avec séquence et CRC ;
+- **à côté** de l'enregistrement A/B (blocs 0 et 1), dont le format n'a pas changé.
+
+La raison : le chargeur UEFI de l'ESP lit le format A/B, et une mise à jour réécrit les slots, jamais l'ESP. Le chargeur ignore ces deux blocs.
+
+Lecture :
+
+| Contenu des blocs 3 et 4 | Interprétation |
+|---|---|
+| tout à zéro | installation neuve, plancher 0 |
+| au moins une copie valide | la plus récente des copies valides |
+| sinon | **illisible**, et toute installation est refusée (`anti_retour_illisible`) — jamais une remise à 0 silencieuse |
+
+Politique :
+- `begin` refuse une release dont la séquence est inférieure au plancher (`version_retrograde`). Il refuse aussi une v1 dès qu'un plancher existe (`manifeste_sans_sequence`). Réinstaller la même release reste permis, pour une réparation.
+- `finish` enregistre la release du slot cible **avant** de le marquer candidat.
+- Le **commit de santé** élève le plancher à la release du slot qui tourne. Il ne le fait jamais descendre et il est idempotent : une coupure entre le commit A/B et l'écriture du plancher est réparée au prochain démarrage confirmé.
+- Le **rollback local** (A/B ou `rollback --confirme`) n'est pas affecté.
+
+### Preuves
+
+**HOST** — `tools/update/test_anti_retour.rs`, 11 tests :
+- aller-retour du format et refus de chaque octet altéré ;
+- lectures neuf, valide et illisible ;
+- copie la plus récente ;
+- coupure à chaque octet de l'écriture ;
+- politique ;
+- plancher qui ne descend jamais ;
+- réparation après coupure ;
+- manifeste v2 canonique et 13 formes non canoniques.
+
+**QEMU TCG** — `run_ab_rollback.sh mise-a-jour` :
+- **Données initiales** : le plancher 1000 est posé dans META par un encodeur Python **indépendant** (`tools/update/pose_anti_retour.py`).
+- **Au démarrage 1**, `updated` présente deux manifestes **correctement signés** :
+  - la release 999, refusée avec `version_retrograde` ;
+  - une release pour `arm64-uefi`, refusée avec `materiel_incompatible`.
+
+  Il installe ensuite la release 1001.
+- **Au démarrage 2**, le commit de santé de B porte le plancher à 1001. Le banc exige cette ligne et refuse tout plancher sous 1000.
+- `mise-a-jour-morts`, `sans-cle` et `sante` restent verts.
+
+### Reste à faire
+
+- **Révocation** d'une release précise, au-delà du plancher monotone.
+- **Rotation et révocation de clés.**
+- Le plancher initial d'une installation physique doit être posé par l'installateur.
 
 Contrainte pour le futur mécanisme : distinguer
 
