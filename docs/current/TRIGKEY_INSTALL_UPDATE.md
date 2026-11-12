@@ -281,17 +281,19 @@ Ces opérations sont à faire par toi, sur place.
    - Pendant `write`, pendant `finish`, et entre le commit A/B et le plancher.
    - Le système attendu est l'ancien ou le nouveau, jamais un état intermédiaire (prouvé en HOST et QEMU, pas en PHYSICAL).
 
-## Procédure Windows → Trigkey (aujourd'hui, manuelle)
+## Procédure Windows → Trigkey
 
-Les scripts `Build-`, `Test-`, `Prepare-TrigkeyUSB.ps1` et `Release-BouchaudOS.ps1` **n'existent pas encore**.
+La procédure complète est dans `TRIGKEY_PREMIERE_UTILISATION.md` : préparation du poste, clé de validation, installation sur SSD dédié, checklist physique, retour arrière, configuration GitHub, mise à jour au quotidien.
 
-1. RustRover : développer, pousser une branche, ouvrir une PR. La CI qualifie au SHA exact.
-2. Fusionner sur `main` quand tout est vert. Rien n'est publié à ce stade.
-3. Actions → « Trigkey release (manuelle, signée) » → `publier`, avec version et séquence.
-   - Tu approuves l'environnement `trigkey-testing`.
-   - Le workflow produit une prérelease `trigkey-s<N>-<version>`.
-4. Après essai : `promouvoir`, avec l'étiquette. Tu approuves l'environnement `trigkey-stable`.
-5. Côté Trigkey, l'agent qui télécharge et installe **n'existe pas encore** (phase 5).
+- **Scripts** (`tools/windows/`) :
+  - `Build-BouchaudOS.ps1`, `Test-BouchaudOS.ps1`, `Prepare-TrigkeyUSB.ps1`, `Release-BouchaudOS.ps1` ;
+  - ils orchestrent dans WSL 2 les mêmes outils Linux que la CI.
+- **Niveau de preuve** : **non qualifiés sur Windows**.
+  - La CI exécute sous `pwsh` les chemins de refus de `Prepare-TrigkeyUSB.ps1`, avec des disques simulés (`tools/ci/test-scripts-windows-trigkey.ps1`).
+  - Aucune écriture physique n'a été faite.
+- **Côté Trigkey** : l'agent OTA de l'image livrée vérifie, télécharge et prépare la release **stable**, puis attend `bo-update consentir`.
+  - Prouvé en QEMU seulement (`ota-complet`, `ota-rollback`, test de livraison).
+  - Rien n'est fait sur le matériel.
 
 ## Risques de perte de données
 
