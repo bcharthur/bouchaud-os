@@ -42,6 +42,12 @@ Détail des lignes marquées « voir ci-dessous » :
   - `build_trigkey_ab_image.sh` pose une 6e partition `BOUCHAUD-STATE` (256 Mio dans l'image, type `B0DC8A5D-0001`), la dernière du disque, à zéro.
   - Le noyau la monte comme volume persistant (`installation::monte_le_systeme_installe`) : `/persist` vit dessus. Une mise à jour réécrit un slot, jamais STATE.
   - Chaque démarrage d'un système installé incrémente `/persist/.bouchaud/demarrages`, puis synchronise et journalise `BOUCHAUD_PERSIST_DEMARRAGES n=… slot=…`. C'est le témoin du banc.
+  - **Montage sain (`BOUCHAUD_MONTAGE_SAIN_V1`, revue #307).** Le montage distingue :
+    - volume **neuf** : les deux superblocs entièrement nuls ;
+    - **restauration complète** ;
+    - **échec** : zone ou table illisible, table incohérente, superblocs abîmés mais non nuls, ou un seul fichier non relu.
+
+    Après un échec, ni le compteur ni aucune synchronisation n'écrivent : `persistance::synchronise` rend `REFUS_MONTAGE_INCOMPLET` pour tout appelant, et le disque reste intact pour une réparation. Le journal le dit : `BOUCHAUD_PERSIST_MONTAGE etat=echec raison=… consequence=lecture_seule`.
   - **Défaut trouvé par ce banc et corrigé.** `persistance::monte()` tenait le verrou tournant du RAMFS pendant ses lectures disque. Sur NVMe, une lecture cède le processeur, et LOCKDEP paniquait (`held_rank=50 … acquiring=scheduler-transition`) au premier montage. Le disque est désormais lu sans verrou, et le dépôt dans le RAMFS se fait sous verrou, sans E/S. Ce défaut n'apparaissait qu'avec une persistance sur NVMe, que rien n'exerçait jusque-là.
 - **Installateur SSD dédié (phase 2, `BOUCHAUD_INSTALL_SSD_V1`).**
   - `tools/install/installe_ssd.py` s'exécute **sur un hôte Linux** : le SSD dédié y est branché (adaptateur USB-NVMe ou baie) avant d'être monté dans le Trigkey.
@@ -49,12 +55,18 @@ Détail des lignes marquées « voir ci-dessous » :
   - Le mode par défaut est un dry-run. `--execute` demande en plus la phrase tapée `EFFACER <SÉRIE>`.
   - Refus :
     - une partition (et non le disque entier) ;
-    - un disque dont une partition est montée ou sert de swap, notamment le disque système ;
+    - un disque utilisé **directement ou indirectement** (revue #307). Les dépendances de stockage sont remontées dans sysfs (`holders`/`slaves`, récursivement) depuis chaque système monté et chaque swap. Cela couvre LVM, dm-crypt, RAID md, tout device-mapper et les membres btrfs. Une pile ouverte mais non montée suffit à refuser (`detenu_par`). Une source `/dev/…` non résoluble, comme `/dev/root`, est refusée : en cas d'ambiguïté, on refuse ;
     - un numéro de série illisible ;
     - une image altérée ou plus grande que le disque ;
     - une image dont la dernière partition n'est pas STATE.
   - Après écriture : `fsync`, puis **relecture intégrale** comparée à l'empreinte. STATE est ensuite étendue jusqu'à la fin du disque : GPT de secours écrite avant la primaire, CRC recalculés, relecture des deux.
-  - Banc : `run_installe_ssd_qemu.sh` installe l'image réelle sur un fichier de 2 Gio. Un témoin vérifie qu'un refus de confirmation n'écrit rien. Le SSD obtenu est ensuite démarré deux fois sous QEMU : STATE est montée à sa taille étendue, et le compteur vaut 1 puis 2.
+  - Sa **zone persistante finale** (les 128 derniers Mio, là où le noyau la cherche) et son premier Mio sont ensuite **mis à zéro, synchronisés et relus**. Rien d'une installation précédente ne peut réapparaître (revue #307).
+  - Banc `run_installe_ssd_qemu.sh`, sur un fichier de 2 Gio, 6 démarrages QEMU :
+    1. Un témoin vérifie qu'un refus de confirmation n'écrit rien.
+    2. Installation, puis compteur 1 puis 2.
+    3. **Réinstallation sur ce SSD déjà utilisé**, puis compteur 1 (volume neuf) et 2 : rien de l'installation précédente ne réapparaît.
+    4. **Les deux superblocs abîmés** : montage `echec`, aucun compteur, zone **identique octet pour octet** après le démarrage.
+    5. **Réparation** : compteur 3, l'état d'avant est intact.
   - La commande noyau historique `installer --go [--ecrase]` (ESP + SYSTEME, sans A/B, sans identité) **ne doit pas servir** pour le Trigkey.
   - **Jamais lancé sur un vrai disque** par cette session.
 - **Image physique unifiée (phase 3).**

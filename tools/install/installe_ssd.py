@@ -13,14 +13,20 @@ Ce que l'outil ne fait JAMAIS :
   - ecrire sans --execute : par defaut il affiche le plan (dry-run) ;
   - ecrire sans la phrase de confirmation, TAPEE sur l'entree standard :
     `EFFACER <SERIE>` ;
-  - ecrire sur une partition, un disque dont une partition est montee ou sert
-    de swap, ou le disque qui porte / , /boot, /home ;
+  - ecrire sur une partition, ou sur un disque utilise DIRECTEMENT OU NON :
+    les dependances de stockage sont remontees dans sysfs (holders/slaves :
+    LVM, dm-crypt, RAID md, tout device-mapper, membres btrfs), depuis chaque
+    systeme de fichiers monte et chaque swap ; une source de montage /dev/...
+    qu'on ne sait pas resoudre (ex. /dev/root) est un REFUS, pas un oubli ;
   - ecrire une image dont l'empreinte differe de disque-ab.img.sha256.
 
 Apres ecriture : fsync, RELECTURE integrale comparee a l'empreinte, puis la
 derniere partition (BOUCHAUD-STATE) est etendue jusqu'a la fin du disque
-(GPT primaire et secours reecrites, CRC recalcules, relues). Les slots, META
-et RECOVERY ne bougent pas.
+(GPT primaire et secours reecrites, CRC recalculees, relues), et sa zone
+persistante FINALE (les derniers 128 Mio, la ou le noyau la cherche -- voir
+SECTEURS_ZONE dans src/fs/persistance.rs) ainsi que son premier Mio sont mis a
+zero, synchronises et RELUS : rien d'une installation precedente sur ce
+disque ne peut reapparaitre. Les slots, META et RECOVERY ne bougent pas.
 
 Codes : 0 succes, 2 refus (`INSTALL_REFUSEE raison=...`), 1 echec d'E/S.
 Mode test (tests uniquement) : BO_INSTALL_RACINE_TEST=DIR remplace /sys,
@@ -42,6 +48,9 @@ from pathlib import Path
 SECTEUR = 512
 MIB = 1 << 20
 TYPE_STATE = uuid.UUID("B0DC8A5D-0001-4B0D-9E21-424F55434844").bytes_le
+# Miroir de `SECTEURS_ZONE` (src/fs/persistance.rs) : la zone persistante
+# occupe les derniers secteurs du volume STATE. Un test exige l'egalite.
+SECTEURS_ZONE = 262144
 POINTS_SYSTEME = {"/", "/boot", "/boot/efi", "/home", "/usr", "/var"}
 
 
@@ -125,19 +134,96 @@ def disque_de(cible: str) -> dict:
     raise Refus(f"disque_inconnu ({nom})")
 
 
+def noeud(nom: str) -> Path | None:
+    """Le repertoire sysfs d'un disque ou d'une partition."""
+    for c in (chemin_sys(f"/sys/class/block/{nom}"), chemin_sys(f"/sys/block/{nom}")):
+        if c.is_dir():
+            return c
+    base = chemin_sys("/sys/block")
+    for d in base.iterdir() if base.is_dir() else []:
+        if (d / nom / "partition").exists():
+            return d / nom
+    return None
+
+
+def disque_de_noeud(nom: str) -> str:
+    """Le disque qui porte `nom` (lui-meme s'il n'est pas une partition)."""
+    n = noeud(nom)
+    if n is not None and (n / "partition").exists():
+        return n.resolve().parent.name
+    return nom
+
+
+def nom_de_source(dev: str) -> str | None:
+    """/dev/mapper/x, /dev/dm-0, /dev/md0, /dev/sda1 -> nom sysfs ; None : non resolu."""
+    if dev.startswith("/dev/mapper/"):
+        cible = dev[len("/dev/mapper/"):]
+        base = chemin_sys("/sys/block")
+        for d in sorted(base.iterdir()) if base.is_dir() else []:
+            if d.name.startswith("dm-") and lit(d / "dm/name") == cible:
+                return d.name
+        return None
+    if not racine_test() and os.path.exists(dev):
+        dev = os.path.realpath(dev)          # /dev/disk/by-uuid/... -> /dev/sdX
+    if dev.startswith("/dev/") and "/" not in dev[5:]:
+        nom = dev[5:]
+        return nom if noeud(nom) is not None else None
+    return None
+
+
+def descendants(nom: str, vus: set[str] | None = None) -> set[str]:
+    """`nom` et tout ce dont il depend (slaves, recursivement), avec les disques porteurs."""
+    vus = set() if vus is None else vus
+    if nom in vus:
+        return vus
+    vus.add(nom)
+    vus.add(disque_de_noeud(nom))
+    n = noeud(nom)
+    if n is not None and (n / "slaves").is_dir():
+        for e in sorted((n / "slaves").iterdir()):
+            descendants(e.name, vus)
+    return vus
+
+
+def utilisateurs_indirects(d: dict) -> list[str]:
+    """Pourquoi ce disque est utilise (vide : libre). Fail closed sur l'ambigu."""
+    raisons = []
+    sources = [(dev, point) for dev, point in montages() if dev.startswith("/dev/")]
+    sources += [(s, "swap") for s in swaps() if s.startswith("/dev/")]
+    for dev, point in sources:
+        nom = nom_de_source(dev)
+        if nom is None:
+            raisons.append(f"source_non_resolue {dev} ({point}) : ambigu, refuse")
+            continue
+        if d["nom"] in {disque_de_noeud(x) for x in descendants(nom)}:
+            quoi = "swap_actif" if point == "swap" else "partition_montee"
+            raisons.append(f"{quoi} {dev} sur {point}" + (" (disque systeme)" if point in POINTS_SYSTEME else "")
+                           + (f" via {nom}" if nom != d["nom"] and not nom.startswith(d["nom"]) else ""))
+    # Detenu par une pile (LVM, dm-crypt ouvert, membre md) meme non montee.
+    for nom in [d["nom"], *d["partitions"]]:
+        n = noeud(nom)
+        h = n / "holders" if n is not None else None
+        if h is not None and h.is_dir():
+            for e in sorted(h.iterdir()):
+                raisons.append(f"detenu_par {e.name} ({nom})")
+    # Membres btrfs (un seul apparait dans /proc/mounts).
+    fsb = chemin_sys("/sys/fs/btrfs")
+    for fsd in sorted(fsb.iterdir()) if fsb.is_dir() else []:
+        for e in sorted((fsd / "devices").iterdir()) if (fsd / "devices").is_dir() else []:
+            if disque_de_noeud(e.name) == d["nom"]:
+                raisons.append(f"membre_btrfs {e.name}")
+    return raisons
+
+
 def verifie_cible(d: dict, identite: str) -> None:
     attendu = f"{d['modele']}|{d['serie']}|{d['octets']}"
     if identite != attendu:
         raise Refus(f"identite_differente (lue : {attendu!r}, donnee : {identite!r})")
     if d["serie"] == "?":
         raise Refus("numero_de_serie_illisible (identite non etablie)")
-    noms = {f"/dev/{d['nom']}", *(f"/dev/{p}" for p in d["partitions"])}
-    for dev, point in montages():
-        if dev in noms:
-            raise Refus(f"partition_montee {dev} sur {point}" + (" (disque systeme)" if point in POINTS_SYSTEME else ""))
-    for s in swaps():
-        if s in noms:
-            raise Refus(f"swap_actif {s}")
+    raisons = utilisateurs_indirects(d)
+    if raisons:
+        raise Refus("; ".join(raisons))
 
 
 def empreinte(p: Path, octets: int | None = None) -> str:
@@ -211,8 +297,34 @@ def partitions(e: dict, ent: bytes) -> list[tuple[int, bytes, int, int]]:
     return r
 
 
-def etend_state(f, octets_disque: int) -> tuple[int, int]:
-    """STATE (derniere partition) jusqu'a la fin du disque. Rend (avant, apres) en Mio."""
+def initialise_state(f, prem: int, dern: int) -> int:
+    """Zone persistante FINALE + premier Mio de STATE a zero, synchronises, RELUS."""
+    regions = [(prem, min(prem + MIB // SECTEUR, dern + 1)),
+               (max(prem, dern + 1 - SECTEURS_ZONE), dern + 1)]
+    zero = b"\0" * (4 * MIB)
+    for a, b in regions:
+        f.seek(a * SECTEUR)
+        reste = (b - a) * SECTEUR
+        while reste:
+            n = min(reste, len(zero))
+            f.write(zero[:n])
+            reste -= n
+    f.flush(); os.fsync(f.fileno())
+    total = 0
+    for a, b in regions:
+        f.seek(a * SECTEUR)
+        reste = (b - a) * SECTEUR
+        while reste:
+            bloc = f.read(min(reste, 4 * MIB))
+            if not bloc or bloc.count(0) != len(bloc):
+                raise Refus("zone_persistante_non_nulle_apres_initialisation")
+            reste -= len(bloc)
+            total += len(bloc)
+    return total
+
+
+def etend_state(f, octets_disque: int) -> tuple[int, int, int, int]:
+    """STATE (derniere partition) jusqu'a la fin du disque. Rend (avant, apres) en Mio, (premier, dernier) LBA."""
     e, ent = lit_gpt(f)
     parts = partitions(e, ent)
     i, ty, prem, dern = max(parts, key=lambda p: p[3])
@@ -245,7 +357,7 @@ def etend_state(f, octets_disque: int) -> tuple[int, int]:
     f.seek(s2["lba_entrees"] * SECTEUR)
     if zlib.crc32(f.read(s2["n"] * s2["t"])) & 0xFFFFFFFF != s2["crc_entrees"] or ent2 != ent:
         raise Refus("gpt_relue_differente")
-    return (dern - prem + 1) * SECTEUR // MIB, (nouveau - prem + 1) * SECTEUR // MIB
+    return (dern - prem + 1) * SECTEUR // MIB, (nouveau - prem + 1) * SECTEUR // MIB, prem, nouveau
 
 
 # ---------------------------------------------------------------- commandes
@@ -293,8 +405,10 @@ def installe(a: argparse.Namespace) -> int:
         print("INSTALL_ECHEC relecture_differente", file=sys.stderr)
         return 1
     with open(a.cible, "r+b", buffering=0) as f:
-        avant, apres = etend_state(f, d["octets"])
-    print(f"INSTALL_OK cible=/dev/{d['nom']} sha256={h[:16]} relu=ok state_mio={avant}->{apres} PHYSICAL=NOT_RUN")
+        avant, apres, prem, dern = etend_state(f, d["octets"])
+        zero = initialise_state(f, prem, dern)
+    print(f"INSTALL_OK cible=/dev/{d['nom']} sha256={h[:16]} relu=ok state_mio={avant}->{apres} "
+          f"zone_persistante=initialisee octets_nuls_relus={zero} PHYSICAL=NOT_RUN")
     return 0
 
 

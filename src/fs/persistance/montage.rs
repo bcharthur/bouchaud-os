@@ -1,7 +1,58 @@
+/// BOUCHAUD_MONTAGE_SAIN_V1 -- ce que le montage de CE demarrage a constate.
+///
+/// Une synchronisation ecrit l'etat COMPLET du RAMFS comme nouvelle
+/// generation. Apres un montage qui n'a pas tout restaure, elle effacerait
+/// donc du disque ce qui n'a pas ete relu. Trois cas seulement autorisent
+/// l'ecriture : pas de zone du tout (rien a perdre), une zone VIERGE (les deux
+/// secteurs de superbloc entierement nuls), une restauration COMPLETE. Tout le
+/// reste -- zone illisible, superblocs abimes mais non nuls, table illisible
+/// ou incoherente, un seul fichier non relu -- bloque toute synchronisation
+/// jusqu'au prochain demarrage, et le dit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EtatMontage {
+    /// `monte()` n'a pas (encore) ete appele.
+    NonMonte,
+    /// Pas de zone (disque absent ou trop petit).
+    SansZone,
+    /// Zone vierge : un volume neuf.
+    Neuf,
+    /// Restauration complete.
+    Restaure,
+    /// Echec ou restauration partielle : lecture seule.
+    Echec(&'static str),
+}
+
+static ETAT_MONTAGE: SpinLock<EtatMontage> = SpinLock::new(EtatMontage::NonMonte);
+static REFUS_SIGNALE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn etat_montage() -> EtatMontage { *ETAT_MONTAGE.lock() }
+
+fn note_montage(e: EtatMontage) {
+    *ETAT_MONTAGE.lock() = e;
+    REFUS_SIGNALE.store(false, Ordering::Relaxed);
+}
+
+/// Vrai quand le dernier montage interdit d'ecrire.
+pub fn montage_refuse() -> bool { matches!(etat_montage(), EtatMontage::Echec(_)) }
+
+/// Les deux secteurs de superbloc (et donc l'en-tete V1) sont-ils NULS ?
+fn zone_vierge(base: u64) -> Option<bool> {
+    let mut deux = vec![0u8; 2 * SECTOR_SIZE];
+    if volume_lit(base, 2, &mut deux) != 2 { return None; }
+    Some(deux.iter().all(|&b| b == 0))
+}
+
 /// Deplie la zone persistante dans `/persist`. A appeler une fois au demarrage.
 ///
-/// Rend le nombre de fichiers restaures.
+/// Rend le nombre de fichiers restaures ; l'etat du montage se lit avec
+/// [`etat_montage`].
 pub fn monte() -> usize {
+    let (n, e) = monte_avec_etat();
+    note_montage(e);
+    n
+}
+
+fn monte_avec_etat() -> (usize, EtatMontage) {
     // Rien n'est encore connu du disque de ce cote : le premier `sync` ecrira
     // tout. Le contenu lu ici a beau venir du disque, `depose` peut le
     // transformer -- un fichier deja present, un dossier manquant --, et une
@@ -21,7 +72,7 @@ pub fn monte() -> usize {
             Some(idx) => idx,
             None => match systeme.mkdir_at(0, "persist") {
                 Ok(idx) => idx,
-                Err(_) => return 0,
+                Err(_) => return (0, EtatMontage::Echec("racine_persist")),
             },
         }
     };
@@ -30,7 +81,7 @@ pub fn monte() -> usize {
         Some(base) => base,
         None => {
             crate::kernel::dmesg::log("persistance: disque trop petit, zone absente");
-            return 0;
+            return (0, EtatMontage::SansZone);
         }
     };
     // BOUCHAUD_ECRITURE_DIFFEREE_V1 : la zone existe -- vierge ou non --, et
@@ -51,9 +102,14 @@ pub fn monte() -> usize {
                 // preserver.
                 oublie_la_v1();
                 let nombre = superbloc.entrees as usize;
-                if nombre == 0 || nombre > ENTREES_MAX {
+                if nombre > ENTREES_MAX {
+                    crate::kernel::dmesg::log("persistance: superbloc invalide");
+                    return (0, EtatMontage::Echec("superbloc_invalide"));
+                }
+                if nombre == 0 {
+                    // Un etat committe VIDE : fidele, rien a restaurer.
                     crate::kernel::dmesg::log("persistance: superbloc vide");
-                    return 0;
+                    return (0, EtatMontage::Restaure);
                 }
                 (
                     nombre,
@@ -69,16 +125,32 @@ pub fn monte() -> usize {
                 if volume_lit(base, 1, &mut entete) != 1 {
                     crate::kernel::dmesg::log("persistance: zone illisible");
                     oublie_la_v1();
-                    return 0;
+                    return (0, EtatMontage::Echec("zone_illisible"));
                 }
                 if &entete[0..8] != MAGIE {
-                    crate::kernel::dmesg::log("persistance: zone vierge");
                     oublie_la_v1();
-                    return 0;
+                    // VIERGE seulement si les deux superblocs sont NULS. Des
+                    // superblocs abimes mais non nuls ne sont pas un disque
+                    // neuf : c'est un etat qu'on ne sait pas relire, et
+                    // l'ecraser le detruirait.
+                    return match zone_vierge(base) {
+                        Some(true) => {
+                            crate::kernel::dmesg::log("persistance: zone vierge");
+                            (0, EtatMontage::Neuf)
+                        }
+                        Some(false) => {
+                            crate::kernel::dmesg::log("persistance: superblocs illisibles, zone non vierge");
+                            (0, EtatMontage::Echec("superblocs_illisibles"))
+                        }
+                        None => (0, EtatMontage::Echec("zone_illisible")),
+                    };
                 }
                 let nombre = lit_u32(&entete[12..16]) as usize;
-                if nombre == 0 || nombre > ENTREES_MAX {
-                    return 0;
+                if nombre > ENTREES_MAX {
+                    return (0, EtatMontage::Echec("v1_invalide"));
+                }
+                if nombre == 0 {
+                    return (0, EtatMontage::Restaure);
                 }
                 TX_MONTAGES_V1.fetch_add(1, Ordering::Relaxed);
                 crate::kernel::dmesg::log(
@@ -92,7 +164,7 @@ pub fn monte() -> usize {
     if volume_lit(secteur_table, secteurs_table, &mut table)
         != secteurs_table
     {
-        return 0;
+        return (0, EtatMontage::Echec("table_illisible"));
     }
 
     // La table est verifiee AVANT d'etre suivie. Une table dechiree se
@@ -103,13 +175,14 @@ pub fn monte() -> usize {
             TX_SUPERBLOCS_REJETES.fetch_add(1, Ordering::Relaxed);
             crate::kernel::dmesg::log(
                 "persistance: table incoherente avec son superbloc, zone ignoree");
-            return 0;
+            return (0, EtatMontage::Echec("table_incoherente"));
         }
     }
 
     // 1. LIRE, sans verrou : (chemin, meta, contenu ; None = dossier ou
     //    lecture echouee, comme avant).
     let mut lus: Vec<(String, Option<Meta>, Option<Vec<u8>>, bool)> = Vec::new();
+    let mut non_relus = 0usize;
     let mut secteur = premier_contenu;
     for index in 0..nombre {
         let debut_entree = index * TAILLE_ENTREE;
@@ -129,6 +202,8 @@ pub fn monte() -> usize {
                 if volume_lit(secteur, secteurs as usize, &mut tampon) == secteurs as usize {
                     tampon.truncate(taille);
                     lus.push((chemin, meta, Some(tampon), false));
+                } else {
+                    non_relus += 1;
                 }
             }
         }
@@ -170,5 +245,10 @@ pub fn monte() -> usize {
         restaures
     ));
     crate::fs::ecriture_differee::note_fin_montage();
-    restaures
+    if non_relus > 0 {
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "persistance: {} fichier(s) NON relu(s) : lecture seule pour ce demarrage", non_relus));
+        return (restaures, EtatMontage::Echec("restauration_partielle"));
+    }
+    (restaures, EtatMontage::Restaure)
 }

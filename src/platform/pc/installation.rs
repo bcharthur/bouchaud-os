@@ -797,7 +797,22 @@ pub fn execute_le_montage_differe() -> bool {
         restaures
     );
     crate::kernel::dmesg::log("nvme: persistance montee apres l'arrivee au bureau");
-    compte_le_demarrage();
+    // BOUCHAUD_MONTAGE_SAIN_V1 : on ne touche a /persist (ni compteur, ni
+    // synchronisation) qu'apres un montage FIDELE -- volume neuf ou
+    // restauration complete. Sinon le disque reste tel quel, en lecture seule
+    // pour ce demarrage (persistance::synchronise le refuse aussi).
+    use crate::fs::persistance::EtatMontage;
+    match crate::fs::persistance::etat_montage() {
+        e @ (EtatMontage::Neuf | EtatMontage::Restaure) => {
+            crate::serial_println!("BOUCHAUD_PERSIST_MONTAGE etat={} fichiers={}",
+                if e == EtatMontage::Neuf { "neuf" } else { "restaure" }, restaures);
+            compte_le_demarrage();
+        }
+        EtatMontage::Echec(raison) => crate::serial_println!(
+            "BOUCHAUD_PERSIST_MONTAGE etat=echec raison={} fichiers={} consequence=lecture_seule compteur=non",
+            raison, restaures),
+        autre => crate::serial_println!("BOUCHAUD_PERSIST_MONTAGE etat={:?} compteur=non", autre),
+    }
     crate::fs::ecriture_differee::demarre();
     true
 }

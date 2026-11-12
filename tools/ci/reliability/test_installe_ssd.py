@@ -210,6 +210,144 @@ class Installateur(unittest.TestCase):
         image_gpt(self.image, 8, [(ESP, 2048, 4095), (STATE, 4096, 6143), (META, 6144, 12287)])
         self.refuse("derniere_partition_n_est_pas_state")
 
+    # --- P1 revue #307 : dependances de stockage indirectes --------------------
+
+    def partition(self, disque, part):
+        d = self.r / "sys/block" / disque / part
+        (d / "holders").mkdir(parents=True, exist_ok=True)
+        (d / "partition").write_text("1")
+        return d
+
+    def mappe(self, dm, nom, esclaves, prefixe="dm"):
+        d = self.r / "sys/block" / dm
+        (d / "slaves").mkdir(parents=True, exist_ok=True)
+        (d / "holders").mkdir(exist_ok=True)
+        if prefixe == "dm":
+            (d / "dm").mkdir(exist_ok=True)
+            (d / "dm/name").write_text(nom + "\n")
+        (d / "size").write_text("1000")
+        for e in esclaves:
+            (d / "slaves" / e).mkdir()
+            disque = e.rstrip("0123456789") if not e.startswith(("dm-", "md")) else e
+            h = (self.r / "sys/block" / disque / e / "holders") if disque != e else (self.r / "sys/block" / e / "holders")
+            h.mkdir(parents=True, exist_ok=True)
+            (h / dm).mkdir(exist_ok=True)
+
+    def monte(self, *lignes):
+        (self.r / "proc/mounts").write_text("/dev/sda2 / ext4 rw 0 0\n" + "".join(l + "\n" for l in lignes))
+
+    def test_dm_crypt_monte_sur_le_disque_refuse(self):
+        # Le cas de la revue : /dev/mapper/cryptroot (dm-0 sur sdz1) monte sur /.
+        self.partition("sdz", "sdz1")
+        self.mappe("dm-0", "cryptroot", ["sdz1"])
+        self.monte("/dev/mapper/cryptroot /data ext4 rw 0 0")
+        self.refuse("partition_montee /dev/mapper/cryptroot sur /data")
+
+    def test_lvm_sur_dm_crypt_chaine_profonde_refuse(self):
+        self.partition("sdz", "sdz2")
+        self.mappe("dm-0", "luks-x", ["sdz2"])
+        self.mappe("dm-1", "vg-home", ["dm-0"])
+        self.monte("/dev/dm-1 /home ext4 rw 0 0")
+        self.refuse("partition_montee /dev/dm-1 sur /home")
+
+    def test_raid_md_refuse(self):
+        self.partition("sdz", "sdz1")
+        self.mappe("md0", "", ["sdz1"], prefixe="md")
+        self.monte("/dev/md0 /srv ext4 rw 0 0")
+        self.refuse("partition_montee /dev/md0 sur /srv")
+
+    def test_swap_sur_device_mapper_refuse(self):
+        self.partition("sdz", "sdz3")
+        self.mappe("dm-2", "swapcrypt", ["sdz3"])
+        (self.r / "proc/swaps").write_text("Filename Type Size Used Priority\n/dev/mapper/swapcrypt partition 1 0 -2\n")
+        self.refuse("swap_actif /dev/mapper/swapcrypt")
+
+    def test_pile_ouverte_non_montee_refusee(self):
+        # LVM actif ou dm-crypt ouvert, rien de monte : un holder suffit.
+        self.partition("sdz", "sdz1")
+        self.mappe("dm-0", "vg-inactif", ["sdz1"])
+        self.refuse("detenu_par dm-0 (sdz1)")
+
+    def test_source_non_resolue_refusee(self):
+        self.monte("/dev/mapper/inconnu /x ext4 rw 0 0")
+        self.refuse("source_non_resolue /dev/mapper/inconnu")
+        self.monte("/dev/root /y ext4 rw 0 0")
+        self.refuse("source_non_resolue /dev/root")
+
+    def test_membre_btrfs_refuse(self):
+        self.partition("sdz", "sdz1")
+        (self.r / "sys/fs/btrfs/uuid-1/devices/sdz1").mkdir(parents=True)
+        self.refuse("membre_btrfs sdz1")
+
+    def test_piles_sur_un_AUTRE_disque_acceptees(self):
+        # Positif : le systeme (dm-crypt + LVM + swap chiffre) vit sur sda ;
+        # le SSD dedie sdz est libre -> l'installation passe.
+        self.mappe("dm-0", "cryptroot", ["sda2"])
+        self.mappe("dm-1", "vg-root", ["dm-0"])
+        self.mappe("dm-2", "swapcrypt", ["sda1"])
+        self.monte("/dev/mapper/vg-root /home ext4 rw 0 0")
+        (self.r / "proc/swaps").write_text("Filename Type Size Used Priority\n/dev/dm-2 partition 1 0 -2\n")
+        rc, out, err = self.installe()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("INSTALL_OK", out)
+
+    # --- P1 revue #307 : zone persistante finale apres extension --------------
+
+    def test_ancienne_zone_persistante_effacee_apres_extension(self):
+        # Un SSD de 256 Mio qui a deja porte une installation : un en-tete de
+        # persistance et un fichier a l'endroit ou le NOUVEAU STATE etendu aura
+        # sa zone (ses 128 derniers Mio), et des octets au debut de STATE.
+        octets = 256 * MIB
+        with open(self.ssd, "wb") as f:
+            f.truncate(octets)
+        n = octets // S
+        (self.r / "sys/block/sdz/size").write_text(str(n))
+        ident = f"SSD Dedie|S3RIE42|{octets}"
+        ancien = b"BOPERSI1" + b"\x01" * 504
+        with open(self.ssd, "r+b") as f:
+            for lba in range(n - 34 - ins.SECTEURS_ZONE - 4096, n - 34, 7919):
+                f.seek(lba * S)
+                f.write(ancien)
+        rc, out, err = self.installe(identite=ident)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("zone_persistante=initialisee", out)
+        with open(self.ssd, "rb") as f:
+            e, ent = ins.lit_gpt(f)
+            etat = [p for p in ins.partitions(e, ent) if p[1] == STATE][0]
+            prem, dern = etat[2], etat[3]
+            f.seek((dern + 1 - ins.SECTEURS_ZONE) * S)
+            zone = f.read(ins.SECTEURS_ZONE * S)
+            f.seek(prem * S)
+            debut = f.read(MIB)
+        self.assertEqual(zone.count(0), len(zone), "une ancienne zone persistante a survecu")
+        self.assertNotIn(b"BOPERSI1", zone)
+        self.assertEqual(debut.count(0), len(debut))
+
+    def test_sans_initialisation_l_ancienne_zone_survivrait(self):
+        # Temoin du temoin : l'extension SEULE laisse l'ancienne zone en place
+        # -- c'est exactement le defaut de la revue.
+        octets = 256 * MIB
+        with open(self.ssd, "wb") as f:
+            f.truncate(octets)
+        (self.r / "sys/block/sdz/size").write_text(str(octets // S))
+        with open(self.ssd, "r+b") as f:
+            f.write(self.image.read_bytes())
+            f.seek(octets - 64 * MIB)
+            f.write(b"BOPERSI1-ancienne")
+            avant, apres, prem, dern = ins.etend_state(f, octets)
+            f.seek(octets - 64 * MIB)
+            self.assertEqual(f.read(17), b"BOPERSI1-ancienne")
+            ins.initialise_state(f, prem, dern)
+            f.seek(octets - 64 * MIB)
+            self.assertEqual(f.read(17), b"\0" * 17)
+
+    def test_secteurs_zone_identique_au_noyau(self):
+        src = (RACINE / "src/fs/persistance.rs").read_text()
+        import re
+        m = re.search(r"const SECTEURS_ZONE: u64 = (\d+);", src)
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1)), ins.SECTEURS_ZONE)
+
     def test_liste_ne_choisit_rien(self):
         rc, out, _ = self.lance("liste")
         self.assertEqual(rc, 0)

@@ -32,6 +32,11 @@ def verifie(journaux: list[str]) -> list[str]:
         t = ANSI.sub("", texte).replace("\r", "")
         if "BOUCHAUD_STAGE2_PERSIST_NVME" not in t:
             erreurs.append(f"demarrage {k} : STATE non montee")
+        # BOUCHAUD_MONTAGE_SAIN_V1 : volume neuf au premier demarrage, puis
+        # restauration complete -- jamais un echec suivi d'une ecriture.
+        etat = "neuf" if k == 1 else "restaure"
+        if re.findall(r"BOUCHAUD_PERSIST_MONTAGE etat=(\w+)", t) != [etat]:
+            erreurs.append(f"demarrage {k} : montage {re.findall(r'BOUCHAUD_PERSIST_MONTAGE etat=(\w+)', t)}, attendu {etat}")
         lignes = COMPTEUR.findall(t)
         if len(lignes) != 1:
             erreurs.append(f"demarrage {k} : {len(lignes)} compteur(s) au lieu d'un")

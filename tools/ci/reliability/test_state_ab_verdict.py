@@ -11,10 +11,11 @@ sys.modules["sv"] = sv
 spec.loader.exec_module(sv)
 
 
-def journal(n, slot, sync=0, monte=True, boot=None):
+def journal(n, slot, sync=0, monte=True, boot=None, etat=None):
     t = f"BOUCHAUD_AB_BOOT slot={boot or slot} raison=actif\n"
     if monte:
         t += "BOUCHAUD_STAGE2_PERSIST_NVME fichiers=1 (differe)\n"
+        t += f"BOUCHAUD_PERSIST_MONTAGE etat={etat or ('neuf' if n == 1 else 'restaure')} fichiers=1\n"
     return t + f"\x1b[0mBOUCHAUD_PERSIST_DEMARRAGES n={n} slot={slot} sync={sync}\n"
 
 
@@ -46,6 +47,11 @@ class Verdict(unittest.TestCase):
     def test_compteur_absent_ou_double(self):
         self.assertTrue(sv.verifie([BONS[0].replace("PERSIST_DEMARRAGES", "X"), BONS[1], BONS[2]]))
         self.assertTrue(sv.verifie([BONS[0] + BONS[0], BONS[1], BONS[2]]))
+
+    def test_montage_en_echec_ou_neuf_a_tort(self):
+        self.assertTrue(sv.verifie([BONS[0], journal(2, "A", etat="echec"), BONS[2]]))
+        # Un volume « neuf » au 3e demarrage = donnees perdues, meme si le compteur ment.
+        self.assertTrue(sv.verifie([BONS[0], BONS[1], journal(3, "B", etat="neuf")]))
 
     def test_panique(self):
         self.assertTrue(sv.verifie([BONS[0], BONS[1] + "*** KERNEL PANIC ***\n", BONS[2]]))
