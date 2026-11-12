@@ -77,9 +77,38 @@ jobs:
           echo "etiquette=$(sed -n 's/.*etiquette=\([^ ]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
           echo "precedente=$(sed -n 's/.*sequence_precedente=\([0-9]*\).*/\1/p' <<<"$sortie")" >> "$GITHUB_OUTPUT"
 
+  # BOUCHAUD_LIVRAISON_V1 : le navigateur de la release vient de l'artefact
+  # natif de MEME empreinte que ce SHA -- selection par la provenance
+  # (tools/ci/ladybird_provenance.py attends, comme gpu-composition) : un
+  # artefact existant, ou la production deja en cours ; JAMAIS de
+  # declenchement d'une production ici. Rien dans le delai : release refusee.
+  ladybird-artefact:
+    name: release-trigkey / artefact Ladybird (selection stricte)
+    needs: garde
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run_id: ${{ steps.lb.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: lb
+        name: Artefact de l'empreinte de ce SHA (refus s'il n'existe pas)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GRACE_ATTENTE: '300'
+          DELAI_ATTENTE: '1200'
+        run: python3 tools/ci/ladybird_provenance.py attends
+
   construit:
     name: release-trigkey / image + preuve QEMU (sans secret)
-    needs: garde
+    needs: [garde, ladybird-artefact]
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
@@ -96,20 +125,12 @@ jobs:
           rustup show active-toolchain
           rustup target add x86_64-unknown-uefi
       # BOUCHAUD_LIVRAISON_V1 : une release est l'image de LIVRAISON complete.
-      # Le navigateur vient de l'artefact natif de MEME empreinte (lecture
-      # seule, aucune production declenchee) ; absent, la release est refusee.
-      - name: Artefact Ladybird de cette empreinte (refus s'il n'existe pas)
-        id: ladybird
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEPOT: ${{ github.repository }}
-        run: python3 tools/release/artefact_ladybird_release.py
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
           # Hors de l'arbre de travail : le build refuse un arbre sale.
           path: ${{ runner.temp }}/native-browser
-          run-id: ${{ steps.ladybird.outputs.source_run }}
+          run-id: ${{ needs.ladybird-artefact.outputs.run_id }}
           github-token: ${{ github.token }}
       # Un artefact d'un AUTRE run : reverifie ici (binaires, ressources,
       # entrees de build identiques a celles de HEAD), comme dans la CI.

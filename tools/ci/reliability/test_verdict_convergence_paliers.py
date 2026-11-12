@@ -157,8 +157,9 @@ class SimulationTests(unittest.TestCase):
         r = self.sp.simule(casse, sc)
         sautes = sorted(j for j, res in r["resultats"].items() if res == "skipped")
         self.assertEqual(r["resultats"]["artefact"], "success")
-        # 14 au cablage de 14f9bcfa, plus `bureau-ring3`, cable de meme.
-        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance", "attente")]), 15,
+        # 14 au cablage de 14f9bcfa, plus `bureau-ring3` et `livraison-trigkey`
+        # (image de livraison, BOUCHAUD_LIVRAISON_V1), cables de meme.
+        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance", "attente")]), 16,
                          sautes)
         self.assertFalse(r["verdict_ok"])
         self.assertTrue(self.sp.controle(casse))
