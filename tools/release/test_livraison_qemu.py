@@ -77,6 +77,21 @@ def tape(texte: str) -> list[str]:
     return [f"sendkey {t}" for t in touches] + ["sendkey ret"]
 
 
+def contexte(texte: str, motif: str, n: int = 3, autour: int = 4) -> None:
+    """Les n premieres occurrences de `motif`, avec `autour` lignes de part et
+    d'autre, dans le journal du job : un controle rouge doit dire POURQUOI
+    sans exiger l'artefact (run 43263711449 : « LOCKDEP » sans panique)."""
+    lignes = texte.splitlines()
+    vus = 0
+    for i, l in enumerate(lignes):
+        if motif in l:
+            for j in range(max(0, i - autour), min(len(lignes), i + autour + 1)):
+                print(f"LIVRAISON_CONTEXTE {motif!r} {j + 1}: {lignes[j][:300]}", flush=True)
+            vus += 1
+            if vus >= n:
+                break
+
+
 class Banc:
     def __init__(self, out: Path, travail: Path):
         self.out, self.travail = out, travail
@@ -223,7 +238,8 @@ def main(argv: list[str]) -> int:
                 time.sleep(5)
             texte = b.texte()
             for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT", "LOCKDEP"):
-                b.note(x not in texte, f"aucune ligne « {x} »")
+                if not b.note(x not in texte, f"aucune ligne « {x} »"):
+                    contexte(texte, x)
         finally:
             b.arrete()
         b.note(sha(out / "disque-ab.img") == attendu, "image de livraison inchangee (essai sur copie)")
