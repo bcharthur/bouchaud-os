@@ -52,12 +52,29 @@ def sha(p: Path) -> str:
     return h.hexdigest()
 
 
-TOUCHES = {"-": "minus", " ": "spc", ".": "dot", "/": "slash", "=": "equal", "_": "shift-minus"}
+# Bouchaud OS decode le clavier en AZERTY-FR (src/drivers/input/clavier_decodeur.rs) ;
+# `sendkey` nomme des touches PHYSIQUES (positions QWERTY US). Taper `bo-update`
+# avec les noms QWERTY donnait `bo)updqte` (premier essai, capture 02b). Table
+# explicite : caractere -> touche physique qui le produit en AZERTY.
+TOUCHES_AZERTY = {
+    "a": "q", "q": "a", "z": "w", "w": "z", "m": "semicolon",
+    "-": "6", "_": "8", "=": "equal", " ": "spc",
+    ".": "shift-comma", "/": "shift-dot", ":": "dot", ",": "m", ";": "comma",
+    **{str(n): f"shift-{n}" for n in range(10)},
+}
 
 
 def tape(texte: str) -> list[str]:
-    """Le texte en commandes `sendkey` du moniteur QEMU, puis Entree."""
-    return [f"sendkey {TOUCHES.get(c, c)}" for c in texte] + ["sendkey ret"]
+    """Le texte en commandes `sendkey` du moniteur QEMU (AZERTY), puis Entree."""
+    touches = []
+    for c in texte:
+        if c in TOUCHES_AZERTY:
+            touches.append(TOUCHES_AZERTY[c])
+        elif "a" <= c <= "z":
+            touches.append(c)
+        else:
+            raise ValueError(f"caractere sans touche AZERTY connue : {c!r}")
+    return [f"sendkey {t}" for t in touches] + ["sendkey ret"]
 
 
 class Banc:
