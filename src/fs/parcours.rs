@@ -22,7 +22,9 @@
 //!   formeraient un cycle ne font pas boucler) ;
 //! - on ne descend que dans les repertoires que l'appelant peut lire ET
 //!   traverser ; les autres sont signales (`refus`), pas parcourus ;
-//! - la sortie est bornee (`octets_max`) : au-dela, `tronque` ;
+//! - la sortie est bornee (`octets_max`), chemins retenus ET chemins refuses
+//!   compris (revue #300 : des refus hors budget gardaient des megaoctets sous
+//!   le verrou) : au-dela, `tronque` ;
 //! - l'ordre est celui de l'ancien `find` : prefixe, enfants par indice
 //!   croissant.
 //!
@@ -119,16 +121,23 @@ pub fn parcours<A: Arbre>(a: &A, depart: usize, filtre: Option<&str>, octets_max
     }
     let mut vu = vec![false; n];
     vu[depart] = true;
+    // Un seul budget pour tout ce qui est retenu : chemins et refus.
+    let mut octets = 0usize;
     // Pile explicite : (noeud, prochain enfant a examiner).
     let mut pile: Vec<(usize, usize)> = Vec::new();
     if a.dossier(depart) {
         if a.lisible(depart) {
             pile.push((depart, compte[depart] as usize));
         } else {
-            r.refus.push(chemin(a, depart));
+            let c = chemin(a, depart);
+            if c.len() + 1 > octets_max {
+                r.tronque = true;
+                return r;
+            }
+            octets += c.len() + 1;
+            r.refus.push(c);
         }
     }
-    let mut octets = 0usize;
     loop {
         let Some(sommet) = pile.last_mut() else { break };
         let p = sommet.0;
@@ -156,7 +165,13 @@ pub fn parcours<A: Arbre>(a: &A, depart: usize, filtre: Option<&str>, octets_max
             if a.lisible(e) {
                 pile.push((e, compte[e] as usize));
             } else {
-                r.refus.push(chemin(a, e));
+                let c = chemin(a, e);
+                if octets + c.len() + 1 > octets_max {
+                    r.tronque = true;
+                    return r;
+                }
+                octets += c.len() + 1;
+                r.refus.push(c);
             }
         }
     }
