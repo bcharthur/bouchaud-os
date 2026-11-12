@@ -127,6 +127,26 @@ Changements de comportement apportés par cette campagne :
 - **État relu sur STATE** au démarrage : le dernier téléchargement et la dernière vérification traversent les redémarrages, dans des bornes (32 champs, clés `[a-z0-9_]`).
 - **Ce qui n'existe pas encore** : la reprise **d'octets** à travers un redémarrage. Les parties vivent en RAM. Une coupure fait tout recommencer, et rien n'est jamais installé à partir d'un téléchargement incomplet.
 
+## Politique OTA vers l'anneau 3 (P4) : plan et blocage
+
+**Aujourd'hui.**
+- La **politique** tourne dans le noyau (`src/kernel/update/ota.rs`) : périodicité, HTTPS, reprise, consentement, fenêtre, historique.
+- **L'installation** est déjà en anneau 3 : `updated` est le seul détenteur de la capacité d'installation.
+- **L'autorité** reste dans le noyau, qui revérifie au `begin` et au `finish` : signature, matériel, anti-retour, empreinte, écriture du seul slot inactif, META, santé, rollback.
+
+**Cible, par étapes** (les bancs `ota-*` restent la non-régression) :
+1. **Agent anneau 3**, processus Linux-compat statique (musl).
+   - Il a des sockets : `src/compat/linux/net.rs`, déjà utilisé par Ladybird.
+   - Il vérifie les sources, télécharge les parties dans `/update/` et écrit `pret`.
+   - Le noyau n'expose plus `fetch_document_confiance` à l'OTA.
+2. `bo-update` et l'état (`ota-etat`, `ota-historique`) passent à l'agent. Le noyau garde un journal d'autorité : refus, plancher, rollback.
+3. Le fil noyau `ota` est retiré.
+
+**Blocage.** Il faut une pile **TLS en anneau 3** pour l'agent, avec la même exigence de chaîne que `BOUCHAUD_TLS_CONFIANCE_V1`.
+- Le dépôt n'en a pas en dehors de Ladybird, qui embarque la sienne dans un artefact de 2 h de build.
+- Choisir et importer une bibliothèque tierce (licence, provenance, mises à jour de sécurité) est une **décision humaine**.
+- Rien n'a été importé.
+
 ## Incident intermittent `ota-complet` (non résolu, surveillé)
 
 - **L'échec.** `ab-rollback (ota-complet)` a échoué **une fois** en CI, au SHA ec0ea87, au démarrage 1 (verdict `A!`).
