@@ -729,12 +729,29 @@ if [ "$OTA_COMPLET" = 1 ]; then
     [ -n "$tronq" ] || echec "boot=1 raison=troncature_non_vue"
     grep -aE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part002 essai=[2-4] resultat=ok" <<< "$b1" >/dev/null \
       || echec "boot=1 raison=partie_tronquee_non_reprise"
-    # Lien coupe 20 s apres la partie 3 du second telechargement : une
-    # partie suivante echoue PUIS est reprise.
+    # Lien coupe 20 s apres la partie 3 du second telechargement. EXIGENCE :
+    # le telechargement survit -- ni abandon, ni recommencement -- et la
+    # coupure a bien frappe un transfert. Deux preuves possibles, selon
+    # l'instant ou la coupure tombe (non deterministe) :
+    #   - REPRISE applicative : une partie >= 4 echoue puis est reprise
+    #     (local, 12/11) ;
+    #   - reprise TCP : aucune requete n'echoue, mais deux parties
+    #     consecutives apres la coupure sont separees de >= 15 s, la duree
+    #     de la coupure absorbee par les retransmissions (CI, run
+    #     43307643098 : partie 4 a 00:38:34, partie 5 a 00:38:55).
     apres1=$(awk '/BOUCHAUD_OTA_RELANCE/ { f = 1 } f' <<< "$b1")
     apres_coupe=$(awk '/BOUCHAUD_OTA_PARTIE n=3 / { f = 1 } f' <<< "$apres1")
-    grep -aE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part004 essai=[2-4] resultat=ok" <<< "$apres_coupe" >/dev/null \
-      || echec "boot=1 raison=pas_de_reprise_apres_la_perte_du_lien"
+    grep -aqE "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE|BOUCHAUD_OTA_RELANCE" <<< "$apres_coupe" \
+      && echec "boot=1 raison=telechargement_abandonne_apres_la_perte_du_lien"
+    if grep -aqE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part00[4-5] essai=[2-4] resultat=ok" <<< "$apres_coupe"; then
+      perte_lien=reprise_applicative
+    else
+      ecart=$(grep -aE "BOUCHAUD_OTA_PARTIE n=[3-5] " <<< "$apres_coupe" \
+        | sed -nE 's/^\[([0-9]+):([0-9]+):([0-9]+)\].*/\1 \2 \3/p' \
+        | awk '{ t = $1 * 3600 + $2 * 60 + $3; if (NR > 1 && t - p > m) m = t - p; p = t } END { print m + 0 }')
+      [ "${ecart:-0}" -ge 15 ] || echec "boot=1 raison=pas_de_reprise_apres_la_perte_du_lien ecart_max_s=${ecart:-0}"
+      perte_lien="reprise_tcp(ecart_s=$ecart)"
+    fi
     if grep -aqE "UPDATED_INSTALL|BOUCHAUD_UPDATE_INSTALL_(BEGIN|CANDIDAT)|BOUCHAUD_OTA_TELECHARGE " <<< "$b1"; then
       echec "boot=1 raison=installation_pendant_un_telechargement_incomplet"
     fi
@@ -761,7 +778,7 @@ if [ "$OTA_COMPLET" = 1 ]; then
              "BOUCHAUD_PERSIST_MONTAGE etat=restaure" "BOUCHAUD_PERSIST_DEMARRAGES n=3 slot=B"; do
       grep -aF "$m" <<< "$b3" >/dev/null || echec "boot=3 marqueur_absent=$m"
     done
-    echo "AB_OTA_RESEAU_OK ca_inconnue=refusee http500=refusee partie_alteree=refusee+relance_60s troncature=reprise($tronq) lien_coupe=reprise alimentation_coupee=telechargement_repris state=1,2,3 v2=$RELEASE_SEQ build_v2=$V2"
+    echo "AB_OTA_RESEAU_OK ca_inconnue=refusee http500=refusee partie_alteree=refusee+relance_60s troncature=reprise($tronq) lien_coupe=$perte_lien alimentation_coupee=telechargement_repris state=1,2,3 v2=$RELEASE_SEQ build_v2=$V2"
   else
     # ota-rollback : B (release 1001) echoue sa sante, retour a A ; STATE
     # traverse tout ; la release en echec n'est PLUS jamais telechargee.
