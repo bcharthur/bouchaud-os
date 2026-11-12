@@ -53,6 +53,7 @@ Pour chaque ligne, conserve la **preuve** dans `target/physique/<date>/` : photo
 | P9 | Ladybird : page d'accueil, puis un site HTTPS | photo | NOT_RUN |
 | P10 | `bo-update status` (version, commit, canal stable) | photo | NOT_RUN |
 | P11 | Arrêt et redémarrage par le menu | constat | NOT_RUN |
+| P11b | `bo-update verifier`, puis `bo-update status`. Chaîne TLS **réelle** de GitHub en mode strict : `derniere_verification` doit montrer `a_jour`, `disponible` ou `aucune_cle_de_confiance`, **jamais** `certificat_non_fiable`. Jamais vérifié depuis la session : son proxy intercepte TLS. | photo | NOT_RUN |
 | P12 | Disques internes **intacts** après la session (ex. Windows du Trigkey démarre toujours) | constat | NOT_RUN |
 
 | # | Installation sur SSD dédié | Preuve | Résultat |
