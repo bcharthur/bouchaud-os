@@ -252,6 +252,25 @@ static int parse_manifest(struct manifest *m)
  * tolerance of 4 x 250 ms. A stop seen here is sticky (arret_demande). */
 #define BATTEMENT() ((void)serve_control(0))
 
+/* A signed manifest the kernel must refuse. Absent files: the check is not
+ * run, and the bench, which provides them, requires the line. */
+static void refus_signe(const char *texte, const char *signature, int target, const char *quoi)
+{
+    static char raw[1024];
+    bo_u8 sig[64];
+    bo_i64 n, rc, fd = bo_posix_open(texte, 0);
+    if (fd < 0) return;
+    n = bo_posix_read(fd, raw, sizeof(raw));
+    bo_posix_close(fd);
+    fd = bo_posix_open(signature, 0);
+    if (fd < 0) return;
+    rc = bo_posix_read(fd, sig, 64);
+    bo_posix_close(fd);
+    if (n <= 0 || n >= (bo_i64)sizeof(raw) || rc != 64) { check(quoi, 0, n); return; }
+    rc = bo_update_install_begin(cap, (bo_u32)target, raw, (bo_usize)n, sig);
+    check(quoi, rc == -BO_E_ACCESS_DENIED, rc);
+}
+
 static void selftest_refusals(const struct manifest *m, int running_slot, int target)
 {
     bo_i64 rc, i;
@@ -277,6 +296,15 @@ static void selftest_refusals(const struct manifest *m, int running_slot, int ta
     altered[m->raw_len - 2] = altered[m->raw_len - 2] == '9' ? '8' : '9';   /* essais=N -> other N */
     rc = bo_update_install_begin(cap, (bo_u32)target, altered, m->raw_len, m->sig);
     check("begin with an altered manifest (more attempts) is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    BATTEMENT();
+    /* BOUCHAUD_ANTI_RETOUR_V1 (bench only): CORRECTLY SIGNED manifests the
+     * kernel must still refuse -- an older release than the anti-rollback
+     * floor, and one built for other hardware. */
+    refus_signe("/update/manifest-ancien", "/update/manifest-ancien.sig", target,
+                "begin with an OLDER signed release is refused (anti-rollback)");
+    BATTEMENT();
+    refus_signe("/update/manifest-materiel", "/update/manifest-materiel.sig", target,
+                "begin with a signed release for OTHER hardware is refused");
     BATTEMENT();
     rc = bo_update_commit_health(cap);
     check("install capability cannot declare health", rc == -BO_E_ACCESS_DENIED, rc);

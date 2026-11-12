@@ -20,6 +20,21 @@
 //!   image_sha256=<64 lowercase hex>
 //!   image_octets=<decimal, no leading zero, > 0>
 //!   essais=<1..9>
+//!
+//! BOUCHAUD_ANTI_RETOUR_V1 -- version 2 of the canonical form, seven lines:
+//!
+//!   bouchaud-manifeste-v2
+//!   version=<1..64 chars in [A-Za-z0-9._+-]>
+//!   sequence=<decimal u64, no leading zero, > 0>
+//!   materiel=<1..32 chars in [a-z0-9_-]>
+//!   image_sha256=<64 lowercase hex>
+//!   image_octets=<decimal, no leading zero, > 0>
+//!   essais=<1..9>
+//!
+//! `sequence` is the MONOTONIC release number the anti-rollback floor is
+//! compared with (`anti_retour`); `materiel` names the hardware family the
+//! image is built for. Both are covered by the signature. A v1 manifest has
+//! sequence 0 and no hardware family: accepted only while no floor exists.
 
 use crate::ed25519;
 
@@ -35,6 +50,11 @@ pub struct CleDeConfiance {
 pub struct Manifeste {
     pub version: [u8; 64],
     pub version_len: usize,
+    /// v2: monotonic release number (> 0). v1: 0.
+    pub sequence: u64,
+    /// v2: hardware family. v1: empty.
+    pub materiel: [u8; 32],
+    pub materiel_len: usize,
     pub empreinte: [u8; 32],
     pub octets: u64,
     pub essais: u8,
@@ -43,6 +63,9 @@ pub struct Manifeste {
 impl Manifeste {
     pub fn version(&self) -> &str {
         core::str::from_utf8(&self.version[..self.version_len]).unwrap_or("?")
+    }
+    pub fn materiel(&self) -> &str {
+        core::str::from_utf8(&self.materiel[..self.materiel_len]).unwrap_or("?")
     }
 }
 
@@ -70,13 +93,43 @@ fn hexval(c: u8) -> Option<u8> {
 }
 
 /// Parses the canonical form; refuses anything else.
+/// A decimal without leading zero, > 0, that fits a u64.
+fn decimal(o: &[u8]) -> Result<u64, RefusManifeste> {
+    if o.is_empty() || o.len() > 19 || o[0] == b'0' || !o.iter().all(|c| c.is_ascii_digit()) {
+        return Err(RefusManifeste::Format);
+    }
+    Ok(o.iter().fold(0u64, |n, &c| n * 10 + (c - b'0') as u64))
+}
+
 pub fn analyse(t: &[u8]) -> Result<Manifeste, RefusManifeste> {
     let mut pos = 0;
-    if ligne(t, &mut pos, b"bouchaud-manifeste-v1")?.len() != 0 { return Err(RefusManifeste::Format); }
+    // The first line selects the form; nothing else is accepted.
+    let v2 = if t.starts_with(b"bouchaud-manifeste-v2\n") {
+        true
+    } else if t.starts_with(b"bouchaud-manifeste-v1\n") {
+        false
+    } else {
+        return Err(RefusManifeste::Format);
+    };
+    let entete: &[u8] = if v2 { b"bouchaud-manifeste-v2" } else { b"bouchaud-manifeste-v1" };
+    if ligne(t, &mut pos, entete)?.len() != 0 { return Err(RefusManifeste::Format); }
     let v = ligne(t, &mut pos, b"version=")?;
     if v.is_empty() || v.len() > 64
         || !v.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-')) {
         return Err(RefusManifeste::Format);
+    }
+    let mut sequence = 0u64;
+    let mut materiel = [0u8; 32];
+    let mut materiel_len = 0usize;
+    if v2 {
+        sequence = decimal(ligne(t, &mut pos, b"sequence=")?)?;
+        let m = ligne(t, &mut pos, b"materiel=")?;
+        if m.is_empty() || m.len() > 32
+            || !m.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-')) {
+            return Err(RefusManifeste::Format);
+        }
+        materiel[..m.len()].copy_from_slice(m);
+        materiel_len = m.len();
     }
     let h = ligne(t, &mut pos, b"image_sha256=")?;
     if h.len() != 64 { return Err(RefusManifeste::Format); }
@@ -85,17 +138,13 @@ pub fn analyse(t: &[u8]) -> Result<Manifeste, RefusManifeste> {
         let (a, b) = (hexval(h[2 * i]).ok_or(RefusManifeste::Format)?, hexval(h[2 * i + 1]).ok_or(RefusManifeste::Format)?);
         empreinte[i] = a << 4 | b;
     }
-    let o = ligne(t, &mut pos, b"image_octets=")?;
-    if o.is_empty() || o.len() > 19 || o[0] == b'0' || !o.iter().all(|c| c.is_ascii_digit()) {
-        return Err(RefusManifeste::Format);
-    }
-    let octets = o.iter().fold(0u64, |n, &c| n * 10 + (c - b'0') as u64);
+    let octets = decimal(ligne(t, &mut pos, b"image_octets=")?)?;
     let e = ligne(t, &mut pos, b"essais=")?;
     if e.len() != 1 || !(b'1'..=b'9').contains(&e[0]) { return Err(RefusManifeste::Format); }
     if pos != t.len() { return Err(RefusManifeste::Format); }
     let mut version = [0u8; 64];
     version[..v.len()].copy_from_slice(v);
-    Ok(Manifeste { version, version_len: v.len(), empreinte, octets, essais: e[0] - b'0' })
+    Ok(Manifeste { version, version_len: v.len(), sequence, materiel, materiel_len, empreinte, octets, essais: e[0] - b'0' })
 }
 
 /// SIGNATURE TRUSTED: the first trusted key that verifies the signature over

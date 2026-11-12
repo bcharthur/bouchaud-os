@@ -63,6 +63,10 @@ RECOVERY=0
 # mise-a-jour-morts = mise-a-jour + updated dies on purpose twice (during the
 # writes, during the read-back); the third instance must inherit nothing.
 VARIANTE=""
+# BOUCHAUD_ANTI_RETOUR_V1 (mise-a-jour): release of system A = floor at start;
+# the update is release PLANCHER_INITIAL + 1.
+PLANCHER_INITIAL=1000
+RELEASE_SEQ=1001
 if [ "$SCENARIO" = mise-a-jour-morts ]; then SCENARIO=mise-a-jour; VARIANTE=morts; fi
 OUT=${2:-target/ab-rollback-$SCENARIO}
 TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
@@ -186,14 +190,24 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
     octets=$(stat -c %s "$OUT/system-b.img")
     empreinte=$(sha256sum "$OUT/system-b.img" | cut -d' ' -f1)
     # The canonical manifest (system/update-core/src/manifeste.rs), signed.
-    printf 'bouchaud-manifeste-v1\nversion=bench-%s\nimage_sha256=%s\nimage_octets=%s\nessais=3\n' \
-      "$(git rev-parse --short HEAD)" "$empreinte" "$octets" > "$OUT/manifest"
-    openssl pkeyutl -sign -rawin -inkey "$CLES/version.pem" -in "$OUT/manifest" -out "$OUT/manifest.sig"
+    # BOUCHAUD_ANTI_RETOUR_V1: v2, release sequence RELEASE_SEQ, above the
+    # anti-rollback floor seeded in META below (PLANCHER_INITIAL).
+    manifeste_v2() {  # SORTIE SEQUENCE MATERIEL
+      printf 'bouchaud-manifeste-v2\nversion=bench-%s\nsequence=%s\nmateriel=%s\nimage_sha256=%s\nimage_octets=%s\nessais=3\n' \
+        "$(git rev-parse --short HEAD)" "$2" "$3" "$empreinte" "$octets" > "$1"
+      openssl pkeyutl -sign -rawin -inkey "$CLES/version.pem" -in "$1" -out "$1.sig"
+    }
+    manifeste_v2 "$OUT/manifest" "$RELEASE_SEQ" x86_64-uefi
+    # Two CORRECTLY SIGNED manifests the kernel must still refuse.
+    manifeste_v2 "$OUT/manifest-ancien" "$((PLANCHER_INITIAL - 1))" x86_64-uefi
+    manifeste_v2 "$OUT/manifest-materiel" "$RELEASE_SEQ" arm64-uefi
     : > "$OUT/selftest"
     morts=(); [ "$VARIANTE" = morts ] && morts=("update/selftest-mort=$OUT/selftest")
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$TRAVAIL/healthd" \
       "update/manifest=$OUT/manifest" "update/manifest.sig=$OUT/manifest.sig" \
-      "update/selftest=$OUT/selftest" "update/system.img=$OUT/system-b.img" "${morts[@]}"
+      "update/selftest=$OUT/selftest" "update/system.img=$OUT/system-b.img" "${morts[@]}" \
+      "update/manifest-ancien=$OUT/manifest-ancien" "update/manifest-ancien.sig=$OUT/manifest-ancien.sig" \
+      "update/manifest-materiel=$OUT/manifest-materiel" "update/manifest-materiel.sig=$OUT/manifest-materiel.sig"
   else
     ramdisk "$OUT/slot-a/ramdisk" $systeme "bin/healthd=$critique_a"
   fi
@@ -215,6 +229,13 @@ if [ "$SCENARIO" = recovery-rollback ]; then
   "$TRAVAIL/meta" "$META_SPEC" "$OUT/meta.img" "$(empreinte BOUCHAUD-SYS-A)" "$(empreinte BOUCHAUD-SYS-B)"
   read -r l o < <(partition BOUCHAUD-META)
   dd if="$OUT/meta.img" of="$OUT/disque-ab.img" bs=512 seek="$l" conv=notrunc status=none
+fi
+if [ "$SCENARIO" = mise-a-jour ]; then
+  # BOUCHAUD_ANTI_RETOUR_V1: the installed system A is release
+  # PLANCHER_INITIAL and the floor is already there (META blocks 3 and 4),
+  # written by an encoder INDEPENDENT of update-core (struct + zlib.crc32).
+  read -r l o < <(partition BOUCHAUD-META)
+  python3 tools/update/pose_anti_retour.py "$OUT/disque-ab.img" "$l" "$PLANCHER_INITIAL"
 fi
 if [ "$SCENARIO" = mise-a-jour ] || [ "$SCENARIO" = sans-cle ]; then
   # Slot B starts EMPTY (zeroes) and META says so (a-bon): nothing bootable
@@ -394,10 +415,24 @@ fi
 if [ "$SCENARIO" = mise-a-jour ]; then
   for m in "BOUCHAUD_UPDATE_MANIFESTE signature=fiable cle=dev-banc developpement=1" \
            "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" "signature=fiable hash=valide" \
-           "UPDATED_INSTALL_OK" "signature=trusted hash=valid" "UPDATED_REFUSALS_OK"; do
+           "UPDATED_INSTALL_OK" "signature=trusted hash=valid" "UPDATED_REFUSALS_OK" \
+           "BOUCHAUD_UPDATE_ANTI_RETOUR evenement=begin etat=valide plancher=$PLANCHER_INITIAL" \
+           "BOUCHAUD_UPDATE_INSTALL_REFUS etape=begin raison=version_retrograde" \
+           "BOUCHAUD_UPDATE_INSTALL_REFUS etape=begin raison=materiel_incompatible" \
+           "begin with an OLDER signed release is refused (anti-rollback)" \
+           "begin with a signed release for OTHER hardware is refused"; do
     sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aF "$m" >/dev/null \
       || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
   done
+  # BOUCHAUD_ANTI_RETOUR_V1: the health commit of B (boot 2) raises the
+  # floor to B's release; nothing lowers it afterwards.
+  sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-2.log" \
+    | grep -aF "BOUCHAUD_UPDATE_ANTI_RETOUR evenement=plancher_avance etat=valide plancher=$RELEASE_SEQ" >/dev/null \
+    || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=plancher_non_avance_au_commit" >&2; exit 1; }
+  if sed 's/\x1b\[[0-9;]*m//g' "$OUT"/boot-*.log | grep -aE 'BOUCHAUD_UPDATE_ANTI_RETOUR .*plancher=([0-9]+)' -o \
+       | awk -F'plancher=' -v p="$PLANCHER_INITIAL" '$2 + 0 < p { bad = 1 } END { exit !bad }'; then
+    echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=plancher_descendu" >&2; exit 1
+  fi
   # The agent must not be killed by its own supervisor mid-install.
   if sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-1.log" | grep -aE 'svc=updated Running->Degraded' >/dev/null; then
     echo "AB_ROLLBACK_FAIL scenario=$SCENARIO raison=updated_battements_manques" >&2; exit 1

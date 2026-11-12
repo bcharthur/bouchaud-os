@@ -195,6 +195,10 @@ jobs:
           # noyau ne confirme que le slot que le chargeur a REELLEMENT booste.
           rustc --edition 2021 --test tools/update/test_passage.rs -o target-test-passage
           ./target-test-passage
+          # BOUCHAUD_ANTI_RETOUR_V1 : plancher anti-retour (META blocs 3-4) et
+          # manifeste v2 (sequence monotone, famille materielle).
+          rustc --edition 2021 --test tools/update/test_anti_retour.rs -o target-test-anti-retour
+          ./target-test-anti-retour
           # Chaine de confiance : Ed25519 + SHA-512 (no_std) contre RFC 8032 et
           # OpenSSL, manifeste canonique strict, cle de confiance -> signature
           # -> empreinte. Cles generees au test, jamais stockees.
