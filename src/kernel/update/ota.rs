@@ -294,10 +294,8 @@ fn telecharge(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
     // chaque redirection ; jamais de repli vers http. Un miroir declare `http`
     // reste permis : la decision ne repose que sur la signature du manifeste.
     let d = crate::net::fetch_document_confiance(url);
-    if d.banner.iter().any(|l| l.starts_with("TLS_REFUS")) {
-        if let Some(l) = d.banner.iter().find(|l| l.starts_with("TLS_REFUS")) {
-            crate::serial_println!("BOUCHAUD_OTA_TLS_REFUS url={} {}", url, l);
-        }
+    if let Some(l) = d.banner.iter().find(|l| l.starts_with("TLS_REFUS")) {
+        crate::serial_println!("BOUCHAUD_OTA_TLS_REFUS url={} {}", url, l);
         return Err("certificat_non_fiable");
     }
     // `ok` means "an HTTP answer was parsed", NOT "200": a 404 page is a
@@ -481,8 +479,6 @@ static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 /// Install attempts of one staged release (a kernel refusal ends an attempt).
 const ESSAIS_INSTALLATION: u64 = 3;
 
-/// After a `disponible`: download (consent), wait for the candidate,
-/// reboot (consent).
 /// What a cycle's install step ended with.
 enum Issue {
     /// Nothing to retry soon (nothing available, no consent, installed, ...).
@@ -492,6 +488,8 @@ enum Issue {
     EchecRecuperable(&'static str),
 }
 
+/// After a `disponible`: download (consent), wait for the candidate,
+/// reboot (consent).
 fn installe_si_consenti() -> Issue {
     let Some(r) = RETENUE.lock().take() else { return Issue::Rien };
     if !consenti("telechargement") {
