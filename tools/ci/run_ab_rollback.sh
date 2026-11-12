@@ -710,7 +710,8 @@ if [ "$OTA_COMPLET" = 1 ]; then
     u="https://10.0.2.2:$PORT_OTA"
     for m in "BOUCHAUD_OTA_TLS_REFUS url=https://10.0.2.2:$PORT_CA/rel/manifest TLS_REFUS confiance=false" \
              "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_CA/rel resultat=refuse raison=certificat_non_fiable" \
-             "BOUCHAUD_OTA_VERIFIE source=$u/erreur resultat=refuse raison=manifeste_injoignable" \
+             "BOUCHAUD_OTA_HTTP_STATUT url=$u/erreur/manifest statut=500" \
+             "BOUCHAUD_OTA_VERIFIE source=$u/erreur resultat=refuse raison=manifeste_http_erreur" \
              "BOUCHAUD_OTA_VERIFIE source=$u/rel resultat=disponible" \
              "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source=$u/rel raison=partie_empreinte_differente" \
              "BOUCHAUD_OTA_HISTORIQUE telechargement_refuse sequence=$RELEASE_SEQ raison=partie_empreinte_differente" \
@@ -783,7 +784,7 @@ if [ "$SCENARIO" = ota-verifie ]; then
            "BOUCHAUD_OTA_VERIFIE source=$b/vieux resultat=refuse raison=version_retrograde" \
            "BOUCHAUD_OTA_VERIFIE source=$b/arm resultat=refuse raison=materiel_incompatible" \
            "BOUCHAUD_OTA_VERIFIE source=$b/autre resultat=refuse raison=signature_non_fiable" \
-           "BOUCHAUD_OTA_VERIFIE source=$b/absent resultat=refuse raison=manifeste_injoignable" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/absent resultat=refuse raison=manifeste_http_erreur" \
            "BOUCHAUD_OTA_CYCLE sources=6"; do
     grep -aF "$m" <<< "$propre1" >/dev/null || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
   done

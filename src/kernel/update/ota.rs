@@ -303,10 +303,16 @@ fn telecharge(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
     // `ok` means "an HTTP answer was parsed", NOT "200": a 404 page is a
     // body too (found by the ota-verifie bench, source `absent`). Only the
     // final status line counts.
-    let statut_200 = d.banner.iter().rev()
+    let statut = d.banner.iter().rev()
         .find(|l| l.starts_with("HTTP/"))
-        .map_or(false, |l| l.split_whitespace().nth(1) == Some("200"));
-    if !d.ok || !statut_200 || d.body.is_empty() {
+        .and_then(|l| l.split_whitespace().nth(1).map(String::from));
+    // Une reponse HTTP qui n'est pas 200 (404, 500, ...) n'est PAS une panne
+    // de transport : on la nomme (campagne D, BOUCHAUD_OTA_RESEAU_V1).
+    if let Some(code) = statut.as_deref().filter(|c| *c != "200") {
+        crate::serial_println!("BOUCHAUD_OTA_HTTP_STATUT url={} statut={}", url, code);
+        return Err("http_erreur");
+    }
+    if !d.ok || statut.is_none() || d.body.is_empty() {
         return Err("injoignable");
     }
     if d.body.len() > max {
@@ -321,6 +327,7 @@ pub fn verifie(source: &str) -> Resultat {
         Ok(t) => t,
         Err(e) => return Resultat::Refuse(match e {
             "certificat_non_fiable" => "certificat_non_fiable",
+            "http_erreur" => "manifeste_http_erreur",
             "injoignable" => "manifeste_injoignable",
             _ => "manifeste_trop_grand",
         }),

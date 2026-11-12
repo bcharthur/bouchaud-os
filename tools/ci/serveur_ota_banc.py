@@ -90,16 +90,27 @@ class H(http.server.SimpleHTTPRequestHandler):
 
 
 class Serveur(http.server.ThreadingHTTPServer):
-    # La poignee de main par connexion, ICI, pour JOURNALISER un refus : avec
-    # un socket d'ecoute enveloppe, socketserver avale l'erreur sans trace.
+    # La poignee de main se fait dans le FIL de la connexion, jamais dans la
+    # boucle d'acceptation : une connexion figee (lien coupe pendant la
+    # poignee) bloquait sinon TOUTES les suivantes (premier essai ota-reseau).
+    # Chaque connexion a un delai : un client parti ne retient rien.
+    daemon_threads = True
+
     def get_request(self):
         s, a = self.socket.accept()
+        s.settimeout(60)
+        return ctx.wrap_socket(s, server_side=True, do_handshake_on_connect=False), a
+
+    def finish_request(self, request, client_address):
         try:
-            return ctx.wrap_socket(s, server_side=True), a
+            request.do_handshake()
         except (ssl.SSLError, OSError) as e:
-            journal(f"TLS_REFUS client={a[0]} raison={getattr(e, 'reason', None) or e}")
-            s.close()
-            raise OSError("poignee de main refusee") from e
+            journal(f"TLS_REFUS client={client_address[0]} raison={getattr(e, 'reason', None) or e}")
+            return
+        super().finish_request(request, client_address)
+
+    def handle_error(self, request, client_address):
+        journal(f"CONNEXION_ROMPUE client={client_address[0]} raison={sys.exc_info()[1]!r}")
 
 
 os.chdir(racine)
