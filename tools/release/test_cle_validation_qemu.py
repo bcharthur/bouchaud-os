@@ -130,9 +130,10 @@ def main(argv: list[str]) -> int:
                             b.gestes("attente 3", "capture 03-doom")
                 time.sleep(5)
             texte = b.texte()
-            for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT", "LOCKDEP"):
+            for x in ("*** KERNEL PANIC ***", "DOUBLE FAULT", "TRIPLE FAULT") + tl.LOCKDEP_FATAL:
                 if not b.note(x not in texte, f"aucune ligne « {x} »"):
                     tl.contexte(texte, x)
+            tl.controle_lockdep(b, texte)
             refus = re.findall(r"BOUCHAUD_ECRITURE_INTERNE_REFUSEE support=(\w+)", texte)
             print(f"VALIDATION_INFO refus_d_ecriture_interne={len(refus)} supports={sorted(set(refus))}", flush=True)
         finally:
