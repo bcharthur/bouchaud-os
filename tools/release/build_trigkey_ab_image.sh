@@ -52,27 +52,8 @@ done
 # (si BO_NATIF_LADYBIRD designe l'artefact natif), /etc/bouchaud (version, OTA
 # stable). Sans Ladybird, l'image est construite mais declaree NON livrable.
 bash tools/release/assemble_systeme.sh "$WORK/systeme" ${BO_NATIF_LADYBIRD:+"$BO_NATIF_LADYBIRD"} | tee "$OUT/systeme.txt"
-# Tar USTAR deterministe : ordre trie, mtime 0, uid/gid 0, droits conserves.
-python3 - "$OUT" "$WORK/systeme" <<'PY'
-import os
-import sys
-import tarfile
-from pathlib import Path
-out, racine = Path(sys.argv[1]), Path(sys.argv[2])
-chemins = sorted(p for p in racine.rglob("*"))
-for slot in ("a", "b"):
-    with tarfile.open(out / f"slot-{slot}" / "ramdisk", "w", format=tarfile.USTAR_FORMAT) as archive:
-        for p in chemins:
-            info = archive.gettarinfo(str(p), arcname=str(p.relative_to(racine)))
-            info.mtime = 0
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
-            if p.is_file():
-                with p.open("rb") as f:
-                    archive.addfile(info, f)
-            else:
-                archive.addfile(info)
-PY
+# Tar USTAR deterministe (tools/release/tar_systeme.py) : le meme pour A et B.
+python3 tools/release/tar_systeme.py "$WORK/systeme" "$OUT/slot-a/ramdisk" "$OUT/slot-b/ramdisk"
 cp "$WORK/systeme/etc/bouchaud/composants" "$OUT/composants.txt"
 
 # Boot actif A connu bon, B sain mais non candidat ; pas de mise à jour fantôme.

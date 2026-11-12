@@ -71,7 +71,7 @@ def main() -> int:
         paths,
         prefixes=("tools/userland/", "userland/", "assets/", "fonts/"),
     )
-    windows = forced or any_match(paths, suffixes=(".ps1", ".cmd", ".bat"))
+    windows = forced or any_match(paths, suffixes=(".ps1", ".psm1", ".cmd", ".bat"))
     health = forced or any_match(paths, prefixes=("tools/health/",))
     mm = forced or any_match(
         paths,
